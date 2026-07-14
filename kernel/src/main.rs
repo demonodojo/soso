@@ -7,6 +7,7 @@ extern crate alloc;
 mod arch;
 mod drivers;
 mod fs;
+mod vfs;
 mod kshell;
 mod mm;
 mod net;
@@ -53,14 +54,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     x86_64::instructions::interrupts::int3();
 
     drivers::virtio_blk::init();
+    drivers::pci::init();
+    drivers::gpu::init();
     fs::init();
     net::init();
     task::init();
 
     // Si hay un init de usuario, arranca en ring 3; si no, kernel-shell.
-    let hay_init = fs::FS
-        .get()
-        .is_some_and(|fs| fs.lock().resolve("/bin/init").is_ok());
+    let hay_init = crate::vfs::resolve("/bin/init").is_ok();
     if hay_init {
         match task::spawn("/bin/init", "", 0) {
             Ok(pid) => {

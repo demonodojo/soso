@@ -52,10 +52,8 @@ pub fn tx_push(data: &[u8]) {
 
 /// Lee un fichero pequeño del FS montado (claves). None si no existe.
 fn leer_fichero(path: &str) -> Option<alloc::vec::Vec<u8>> {
-    let fs = crate::fs::FS.get()?;
-    let mut fs = fs.lock();
-    let ino = fs.resolve(path).ok()?;
-    fs.read_file(ino).ok()
+    let ino = crate::vfs::resolve(path).ok()?;
+    crate::vfs::read_file(ino).ok()
 }
 
 pub fn init() {

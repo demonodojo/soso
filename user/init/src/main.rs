@@ -139,7 +139,21 @@ fn suite() -> u8 {
     }
     check!(sys::sbrk(0) == base + 8192, "sbrk(0) refleja el brk nuevo");
 
-    // El heap de alloc (arena de libsoso) también funciona.
+    // mmap de fichero grande (lazy open + demand paging).
+    let mut st_big = abi::Stat::default();
+    if sys::stat("/etc/motd", &mut st_big) == 0 {
+        let fd = sys::open("/etc/motd", abi::O_RDONLY);
+        if fd >= 0 {
+            let map = sys::mmap(0, st_big.size, fd as u64, 0);
+            check!(map > 0, "mmap /etc/motd -> {map:#x}");
+            let b = unsafe { core::ptr::read_volatile(map as *const u8) };
+            check!(b == b'#' || b > 0, "primer byte mmap legible ({b})");
+            check!(sys::munmap(map as u64, st_big.size.next_multiple_of(4096) as u64) == 0, "munmap");
+            sys::close(fd as u64);
+        }
+    }
+
+    // El heap de alloc (sbrk) también funciona.
     let v: Vec<u64> = (0..10_000).collect();
     let s = String::from("heap ok: ") + itoa(v.iter().sum::<u64>());
     check!(v.len() == 10_000, "{s}");

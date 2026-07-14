@@ -243,24 +243,51 @@ impl<D: BlockDevice> Sosofs<D> {
     /// Lee un fichero completo, verificando el crc de cada extent.
     pub fn read_file(&mut self, ino: u64) -> Result<Vec<u8>, FsError> {
         let st = self.stat_inode(ino)?;
+        let size = st.size.get() as usize;
+        let mut data = vec![0u8; size];
+        self.read_file_range(ino, 0, size, &mut data)?;
+        Ok(data)
+    }
+
+    /// Lee un rango de bytes sin cargar el fichero entero.
+    pub fn read_file_range(
+        &mut self,
+        ino: u64,
+        offset: usize,
+        len: usize,
+        out: &mut [u8],
+    ) -> Result<(), FsError> {
+        if out.len() < len {
+            return Err(FsError::Corrupt);
+        }
+        let st = self.stat_inode(ino)?;
         if st.file_type != FT_FILE {
             return Err(FsError::NotAFile);
         }
         let size = st.size.get() as usize;
+        if offset > size || offset + len > size {
+            return Err(FsError::Corrupt);
+        }
+        if len == 0 {
+            return Ok(());
+        }
 
         let (min, max) = Key::range(ino, KIND_EXTENT);
         let mut extents = Vec::new();
         self.scan_range(min, max, &mut extents)?;
 
-        let mut data = Vec::with_capacity(size);
+        let mut written = 0usize;
+        let end = offset + len;
         for (key, payload) in &extents {
-            if key.offset != data.len() as u64 {
-                return Err(FsError::Corrupt); // hueco o solape entre extents
-            }
             let (ext, _) = ExtentItem::read_from_prefix(payload).map_err(|_| FsError::Corrupt)?;
             let nblocks = ext.block_count.get() as usize;
             if nblocks == 0 || nblocks as u64 > EXTENT_MAX_BLOCKS {
                 return Err(FsError::Corrupt);
+            }
+            let ext_start = key.offset as usize;
+            let ext_end = ext_start + nblocks * BLOCK_SIZE;
+            if ext_end <= offset || ext_start >= end {
+                continue;
             }
             let mut chunk = vec![0u8; nblocks * BLOCK_SIZE];
             for i in 0..nblocks {
@@ -273,13 +300,19 @@ impl<D: BlockDevice> Sosofs<D> {
             if crate::crc32c(&chunk) != ext.crc.get() {
                 return Err(FsError::BadChecksum { block: ext.start_block.get() });
             }
-            let restante = size - data.len();
-            chunk.truncate(restante.min(chunk.len()));
-            data.extend_from_slice(&chunk);
+            let ext_size = (size - ext_start).min(chunk.len());
+            chunk.truncate(ext_size);
+            let copy_start = offset.saturating_sub(ext_start);
+            let copy_end = (end - ext_start).min(chunk.len());
+            if copy_start < copy_end {
+                let n = copy_end - copy_start;
+                out[written..written + n].copy_from_slice(&chunk[copy_start..copy_end]);
+                written += n;
+            }
         }
-        if data.len() != size {
+        if written != len {
             return Err(FsError::Corrupt);
         }
-        Ok(data)
+        Ok(())
     }
 }

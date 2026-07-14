@@ -20,8 +20,10 @@ extern crate alloc;
 
 pub mod layout;
 
+mod cache;
 mod fs;
 mod write;
+pub use cache::CachedBlockDevice;
 pub use fs::{FsError, Sosofs};
 
 #[cfg(feature = "std")]

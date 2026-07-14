@@ -1,0 +1,8 @@
+[package]
+name = "mkfs-sosomfs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+block-dev = { path = "../../crates/block-dev", features = ["std"] }
+sosomfs = { path = "../../crates/sosomfs", features = ["std"] }

@@ -1,0 +1,18 @@
+[package]
+name = "sosomfs"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+std = ["block-dev/std", "sosomodel/std"]
+
+[dev-dependencies]
+block-dev = { path = "../block-dev", features = ["std"] }
+sosomodel = { path = "../sosomodel", features = ["std"] }
+
+[dependencies]
+block-dev = { path = "../block-dev" }
+sosomodel = { path = "../sosomodel" }
+crc = "3"
+zerocopy = { version = "0.8", features = ["derive"] }

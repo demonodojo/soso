@@ -25,11 +25,22 @@ pub trait BlockDevice {
 #[derive(Clone)]
 pub struct MemBlockDevice {
     data: alloc::vec::Vec<u8>,
+    #[cfg(feature = "std")]
+    reads: std::cell::Cell<u64>,
 }
 
 impl MemBlockDevice {
     pub fn new(blocks: u64) -> Self {
-        Self { data: alloc::vec![0; blocks as usize * BLOCK_SIZE] }
+        Self {
+            data: alloc::vec![0; blocks as usize * BLOCK_SIZE],
+            #[cfg(feature = "std")]
+            reads: std::cell::Cell::new(0),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_count(&self) -> u64 {
+        self.reads.get()
     }
 
     pub fn data(&self) -> &[u8] {
@@ -47,6 +58,8 @@ impl BlockDevice for MemBlockDevice {
     }
 
     fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError> {
+        #[cfg(feature = "std")]
+        self.reads.set(self.reads.get() + 1);
         let off = block as usize * BLOCK_SIZE;
         let src = self.data.get(off..off + BLOCK_SIZE).ok_or(BlockError::OutOfRange)?;
         buf.copy_from_slice(src);
@@ -64,6 +77,60 @@ impl BlockDevice for MemBlockDevice {
         Ok(())
     }
 }
+
+#[cfg(feature = "std")]
+mod sparse_dev {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Dispositivo sparse: `block_count` grande sin reservar toda la RAM.
+    pub struct SparseBlockDevice {
+        blocks: u64,
+        data: HashMap<u64, Block>,
+    }
+
+    impl SparseBlockDevice {
+        pub fn new(blocks: u64) -> Self {
+            Self {
+                blocks,
+                data: HashMap::new(),
+            }
+        }
+    }
+
+    impl BlockDevice for SparseBlockDevice {
+        fn block_count(&self) -> u64 {
+            self.blocks
+        }
+
+        fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError> {
+            if block >= self.blocks {
+                return Err(BlockError::OutOfRange);
+            }
+            if let Some(b) = self.data.get(&block) {
+                buf.copy_from_slice(b);
+            } else {
+                buf.fill(0);
+            }
+            Ok(())
+        }
+
+        fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {
+            if block >= self.blocks {
+                return Err(BlockError::OutOfRange);
+            }
+            self.data.insert(block, *buf);
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), BlockError> {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+pub use sparse_dev::SparseBlockDevice;
 
 #[cfg(feature = "std")]
 mod file_dev {

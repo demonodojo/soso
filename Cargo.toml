@@ -4,8 +4,14 @@ members = [
     "xtask",
     "crates/block-dev",
     "crates/sosofs",
+    "crates/sosomfs",
     "crates/soso-abi",
+    "crates/sosomodel",
+    "crates/soso-llm-core",
+    "crates/soso-gpu",
     "tools/mkfs-soso",
+    "tools/mkfs-sosomfs",
+    "tools/mkmodel-soso",
 ]
 # El kernel y el userspace se compilan para x86_64-unknown-none con su propio
 # árbol de dependencias; los excluimos para que `cargo build` en la raíz no

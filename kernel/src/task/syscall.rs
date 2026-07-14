@@ -139,6 +139,12 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
             crate::println!("halt: apagando soso");
             crate::qemu::exit(crate::qemu::ExitCode::Success);
         }
+        abi::SYS_MMAP => sys_mmap(a1, a2, a3, a4),
+        abi::SYS_MUNMAP => sys_munmap(a1, a2),
+        abi::SYS_GPU_INFO => sys_gpu_info(a1),
+        abi::SYS_GPU_ALLOC => sys_gpu_alloc(a1),
+        abi::SYS_GPU_MAP => sys_gpu_map(a1, a2, a3),
+        abi::SYS_GPU_SUBMIT => sys_gpu_submit(a1, a2),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -195,7 +201,7 @@ fn user_str(ptr: u64, len: u64) -> Result<&'static str, i64> {
     core::str::from_utf8(user_slice(ptr, len)?).map_err(|_| -abi::EINVAL)
 }
 
-// ---- helpers de FS ----
+// ---- helpers de VFS ----
 
 pub fn fs_errno(e: FsError) -> i64 {
     -match e {
@@ -210,11 +216,8 @@ pub fn fs_errno(e: FsError) -> i64 {
     }
 }
 
-fn with_fs<R>(
-    f: impl FnOnce(&mut sosofs::Sosofs<crate::fs::VirtioDev>) -> Result<R, FsError>,
-) -> Result<R, i64> {
-    let fs = crate::fs::FS.get().ok_or(-abi::EIO)?;
-    f(&mut fs.lock()).map_err(fs_errno)
+fn with_vfs<R>(f: impl FnOnce() -> Result<R, FsError>) -> Result<R, i64> {
+    f().map_err(fs_errno)
 }
 
 /// Separa una ruta en (inode del padre, nombre final).
@@ -226,7 +229,7 @@ fn resolve_parent(path: &str) -> Result<(u64, String), i64> {
         return Err(-abi::EINVAL);
     }
     let parent = if i == 0 { "/" } else { &path[..i] };
-    let dir = with_fs(|fs| fs.resolve(parent))?;
+    let dir = with_vfs(|| crate::vfs::resolve(parent))?;
     Ok((dir, String::from(name)))
 }
 
@@ -294,9 +297,18 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
         super::block_current(ctx_from_frame(f), State::WaitingTty { buf, len });
     }
     with_fd(fd, |f| match f {
-        Fd::File { data, pos } => {
+        Fd::File { data, pos, .. } => {
             let n = dst.len().min(data.len().saturating_sub(*pos));
             dst[..n].copy_from_slice(&data[*pos..*pos + n]);
+            *pos += n;
+            Ok(n as u64)
+        }
+        Fd::LazyFile { inode, size, pos } => {
+            let n = dst.len().min(size.saturating_sub(*pos));
+            if n == 0 {
+                return Ok(0);
+            }
+            with_vfs(|| crate::vfs::read_file_range(*inode, *pos, n, &mut dst[..n]))?;
             *pos += n;
             Ok(n as u64)
         }
@@ -310,20 +322,20 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
     let nuevo = if flags & abi::O_WRONLY != 0 {
         let (dir, name) = resolve_parent(path)?;
         // Si existe y es un directorio, no se puede sobreescribir.
-        if let Ok(ino) = with_fs(|fs| fs.lookup(dir, &name))
-            && with_fs(|fs| fs.stat_inode(ino))?.file_type == sosofs::layout::FT_DIR
+        if let Ok(ino) = with_vfs(|| crate::vfs::lookup(dir, &name))
+            && with_vfs(|| crate::vfs::stat_inode(ino))?.file_type == sosofs::layout::FT_DIR
         {
             return Err(-abi::EISDIR);
         }
         Fd::WriteBuf { dir, name, data: Vec::new(), pos: 0 }
     } else {
-        let ino = with_fs(|fs| fs.resolve(path))?;
-        let st = with_fs(|fs| fs.stat_inode(ino))?;
+        let ino = with_vfs(|| crate::vfs::resolve(path))?;
+        let st = with_vfs(|| crate::vfs::stat_inode(ino))?;
         if st.file_type == sosofs::layout::FT_DIR {
-            let entries = with_fs(|fs| fs.read_dir(ino))?
+            let entries = with_vfs(|| crate::vfs::read_dir(ino))?
                 .into_iter()
                 .map(|(name, child)| {
-                    let st = with_fs(|fs| fs.stat_inode(child))?;
+                    let st = with_vfs(|| crate::vfs::stat_inode(child))?;
                     let mut d = abi::Dirent {
                         ino: child,
                         file_type: st.file_type,
@@ -337,8 +349,17 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
                 .collect::<Result<Vec<_>, i64>>()?;
             Fd::Dir { entries, pos: 0 }
         } else {
-            let data = with_fs(|fs| fs.read_file(ino))?;
-            Fd::File { data, pos: 0 }
+            let st = with_vfs(|| crate::vfs::stat_inode(ino))?;
+            if st.size.get() > abi::LAZY_FILE_THRESHOLD {
+                Fd::LazyFile {
+                    inode: ino,
+                    size: st.size.get() as usize,
+                    pos: 0,
+                }
+            } else {
+                let data = with_vfs(|| crate::vfs::read_file(ino))?;
+                Fd::File { inode: ino, data, pos: 0 }
+            }
         }
     };
     super::with_current(|p| {
@@ -366,7 +387,7 @@ fn sys_close(fd: u64) -> Result<u64, i64> {
     // La escritura se publica entera aquí: una transacción CoW.
     if let Fd::WriteBuf { dir, name, data, .. } = cerrado {
         let mtime = crate::arch::pit::uptime_ms() / 1000;
-        with_fs(|fs| fs.create_file(dir, &name, &data, mtime))?;
+        with_vfs(|| crate::vfs::create_file(dir, &name, &data, mtime))?;
     }
     Ok(0)
 }
@@ -374,7 +395,8 @@ fn sys_close(fd: u64) -> Result<u64, i64> {
 fn sys_seek(fd: u64, off: i64, whence: u64) -> Result<u64, i64> {
     with_fd(fd, |f| {
         let (pos, len) = match f {
-            Fd::File { data, pos } => (pos, data.len()),
+            Fd::File { data, pos, .. } => (pos, data.len()),
+            Fd::LazyFile { size, pos, .. } => (pos, *size),
             Fd::WriteBuf { data, pos, .. } => (pos, data.len()),
             _ => return Err(-abi::ESPIPE),
         };
@@ -396,9 +418,9 @@ fn sys_seek(fd: u64, off: i64, whence: u64) -> Result<u64, i64> {
 fn sys_stat(path_ptr: u64, path_len: u64, out: u64) -> Result<u64, i64> {
     let path = user_str(path_ptr, path_len)?;
     let dst = user_slice_mut(out, core::mem::size_of::<abi::Stat>() as u64)?;
-    let (ino, st) = with_fs(|fs| {
-        let ino = fs.resolve(path)?;
-        Ok((ino, fs.stat_inode(ino)?))
+    let (ino, st) = with_vfs(|| {
+        let ino = crate::vfs::resolve(path)?;
+        Ok((ino, crate::vfs::stat_inode(ino)?))
     })?;
     let stat = abi::Stat {
         ino,
@@ -441,14 +463,14 @@ fn sys_mkdir(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
     let path = user_str(path_ptr, path_len)?;
     let (dir, name) = resolve_parent(path)?;
     let mtime = crate::arch::pit::uptime_ms() / 1000;
-    with_fs(|fs| fs.mkdir(dir, &name, mtime))?;
+    with_vfs(|| crate::vfs::mkdir(dir, &name, mtime))?;
     Ok(0)
 }
 
 fn sys_unlink(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
     let path = user_str(path_ptr, path_len)?;
     let (dir, name) = resolve_parent(path)?;
-    with_fs(|fs| fs.unlink(dir, &name))?;
+    with_vfs(|| crate::vfs::unlink(dir, &name))?;
     Ok(0)
 }
 
@@ -501,8 +523,92 @@ fn sys_sbrk(delta: i64) -> Result<u64, i64> {
                 space.ensure_mapped(va).ok_or(-abi::ENOMEM)?;
             }
         }
-        // Al encoger no se desmapea: brk_min impide bajar del inicial.
         p.brk = nuevo;
         Ok(old)
     })
+}
+
+fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
+    if len == 0 {
+        return Err(-abi::EINVAL);
+    }
+    let len_aligned = len.next_multiple_of(4096);
+    let (inode, writable) = if fd == u64::MAX {
+        (0u64, true)
+    } else {
+        let (ino, fsize) = super::with_current(|p| {
+            let slot = p
+                .fds
+                .get(fd as usize)
+                .and_then(|s| s.as_ref())
+                .ok_or(-abi::EBADF)?;
+            match slot {
+                Fd::File { inode, data, .. } => Ok((*inode, data.len() as u64)),
+                Fd::LazyFile { inode, size, .. } => Ok((*inode, *size as u64)),
+                _ => Err(-abi::EBADF),
+            }
+        })?;
+        if offset >= fsize || offset + len > fsize {
+            return Err(-abi::EINVAL);
+        }
+        (ino, false)
+    };
+    super::with_current(|p| {
+        let virt = super::mmap::next_addr(&p.mmaps, addr, len_aligned).ok_or(-abi::ENOMEM)?;
+        p.mmaps.push(super::mmap::MmapRegion {
+            virt_start: virt,
+            len: len_aligned,
+            inode,
+            file_offset: offset,
+            writable,
+        });
+        if virt >= p.mmap_next {
+            p.mmap_next = virt + len_aligned;
+        }
+        Ok(virt)
+    })
+}
+
+fn sys_munmap(addr: u64, len: u64) -> Result<u64, i64> {
+    if len == 0 {
+        return Err(-abi::EINVAL);
+    }
+    let len_aligned = len.next_multiple_of(4096);
+    super::with_current(|p| {
+        if !super::mmap::remove_region(&mut p.mmaps, addr, len_aligned) {
+            return Err(-abi::EINVAL);
+        }
+        if let Some(space) = p.space.as_mut() {
+            space.unmap_range(addr, len_aligned);
+        }
+        Ok(0)
+    })
+}
+
+fn sys_gpu_info(out: u64) -> Result<u64, i64> {
+    let dst = user_slice_mut(out, core::mem::size_of::<abi::GpuInfo>() as u64)?;
+    let info = crate::drivers::gpu::info();
+    dst.copy_from_slice(unsafe {
+        core::slice::from_raw_parts(
+            (&info as *const abi::GpuInfo).cast::<u8>(),
+            core::mem::size_of::<abi::GpuInfo>(),
+        )
+    });
+    Ok(0)
+}
+
+fn sys_gpu_alloc(size: u64) -> Result<u64, i64> {
+    crate::drivers::gpu::alloc(size).map_err(|e| -e)
+}
+
+fn sys_gpu_map(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
+    if !user_range_ok(user_ptr, len, true) {
+        return Err(-abi::EFAULT);
+    }
+    crate::drivers::gpu::map_to_user(gpu_handle, user_ptr, len).map_err(|e| -e)
+}
+
+fn sys_gpu_submit(cmd_ptr: u64, cmd_len: u64) -> Result<u64, i64> {
+    let cmd = user_slice(cmd_ptr, cmd_len)?;
+    crate::drivers::gpu::submit(cmd).map_err(|e| -e)
 }

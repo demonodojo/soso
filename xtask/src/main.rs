@@ -89,7 +89,7 @@ fn build_user() -> bool {
     let bin = root.join("rootfs/bin");
     std::fs::create_dir_all(&bin).expect("no se pudo crear rootfs/bin");
     let mut cambiado = false;
-    for prog in ["init", "sosh", "ls", "cat", "echo", "mkdir", "rm", "hexdump", "halt"] {
+    for prog in ["init", "sosh", "ls", "cat", "echo", "mkdir", "rm", "hexdump", "halt", "soso-llm"] {
         let src = out.join(prog);
         let dst = bin.join(prog);
         let igual = std::fs::read(&src).ok() == std::fs::read(&dst).ok();
@@ -117,10 +117,8 @@ fn newest_mtime(dir: &Path) -> std::time::SystemTime {
     newest
 }
 
-/// Disco de datos persistente (virtio-blk) con sosofs construido desde
-/// rootfs/. Con `force` se regenera aunque exista (cargo xtask mkfs);
-/// también si el contenido de rootfs/ es más nuevo que la imagen.
-fn mkfs(force: bool) -> PathBuf {
+/// Disco de datos persistente (virtio-blk 0) con sosofs desde rootfs/.
+fn mkfs_rootfs(force: bool) -> PathBuf {
     let root = project_root();
     let path = root.join("target/soso-data.img");
     let vieja = path
@@ -145,6 +143,50 @@ fn mkfs(force: bool) -> PathBuf {
         exit(status.code().unwrap_or(1));
     }
     path
+}
+
+/// Disco de modelos (virtio-blk 1) con sosomfs.
+fn mkfs_models(force: bool) -> PathBuf {
+    let root = project_root();
+    let path = root.join("target/soso-models.img");
+    let model_src = root.join("target/tiny-model");
+    if !model_src.join("manifest.som").exists() {
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args(["run", "-q", "-p", "mkmodel-soso", "--"])
+            .arg(&model_src)
+            .status()
+            .expect("mkmodel-soso");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
+    }
+    let vieja = path
+        .metadata()
+        .and_then(|m| m.modified())
+        .map(|img| newest_mtime(&model_src) > img)
+        .unwrap_or(true);
+    if path.exists() && !force && !vieja {
+        return path;
+    }
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args(["run", "-q", "-p", "mkfs-sosomfs", "--"])
+        .arg(&model_src)
+        .arg(&path)
+        .arg("--size")
+        .arg("8G")
+        .status()
+        .expect("mkfs-sosomfs");
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+    path
+}
+
+/// Regenera ambos discos (rootfs + modelos).
+fn mkfs(force: bool) -> (PathBuf, PathBuf) {
+    (mkfs_rootfs(force), mkfs_models(force))
 }
 
 /// Clave pública ed25519 a autorizar en el FS. Usa ~/.ssh/id_ed25519.pub
@@ -176,16 +218,18 @@ fn client_pubkey() -> PathBuf {
 
 fn run_qemu(img: &Path, gdb: bool) {
     build_user();
-    let data = mkfs(false);
+    let (data, models) = mkfs(false);
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args(["-machine", "q35"])
         // -cpu max: expone RDRAND, que la cripto de sunset (getrandom con
         // backend rdrand) necesita; la CPU por defecto de QEMU no lo trae.
         .args(["-cpu", "max"])
-        .args(["-m", "256M"])
+        .args(["-m", "2G"])
         .args(["-drive", &format!("format=raw,file={}", img.display())])
         .args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
         .args(["-device", "virtio-blk-pci,drive=data0"])
+        .args(["-drive", &format!("file={},format=raw,if=none,id=data1", models.display())])
+        .args(["-device", "virtio-blk-pci,drive=data1"])
         // Red de usuario (slirp): 10.0.2.0/24, host 2222→22 (SSH futuro)
         // y 7777→7 (echo).
         .args(["-netdev", "user,id=net0,hostfwd=tcp::7777-:7,hostfwd=tcp::2222-:22"])

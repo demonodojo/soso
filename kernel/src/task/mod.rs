@@ -10,6 +10,7 @@
 
 pub mod addrspace;
 pub mod elf;
+pub mod mmap;
 pub mod syscall;
 
 use crate::arch::gdt;
@@ -20,6 +21,7 @@ use alloc::vec::Vec;
 use core::arch::naked_asm;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
+use x86_64::structures::paging::{FrameAllocator, FrameDeallocator};
 
 /// Ticks de PIT (100 Hz) por rodaja de tiempo: 20 ms.
 const TIMESLICE_TICKS: u32 = 2;
@@ -106,12 +108,13 @@ const _: () = {
     assert!(core::mem::offset_of!(Context, rflags) == 136);
 };
 
-/// Descriptores de fichero. sosofs no tiene escritura parcial, así que
-/// la lectura carga el fichero entero al abrir y la escritura acumula en
-/// memoria y publica el fichero completo en close().
+/// Descriptores de fichero.
 pub enum Fd {
     Tty,
-    File { data: Vec<u8>, pos: usize },
+    /// Fichero pequeño cargado entero al abrir.
+    File { inode: u64, data: Vec<u8>, pos: usize },
+    /// Fichero grande: lectura parcial bajo demanda.
+    LazyFile { inode: u64, size: usize, pos: usize },
     WriteBuf { dir: u64, name: String, data: Vec<u8>, pos: usize },
     Dir { entries: Vec<soso_abi::Dirent>, pos: usize },
 }
@@ -127,6 +130,10 @@ pub struct Process {
     pub fds: Vec<Option<Fd>>,
     pub brk: u64,
     pub brk_min: u64,
+    /// Regiones mmap activas (paginación bajo demanda).
+    pub mmaps: Vec<mmap::MmapRegion>,
+    /// Siguiente puntero de asignación mmap.
+    pub mmap_next: u64,
     /// Consola a la que van fd 0/1/2 (Fd::Tty).
     pub console: Console,
 }
@@ -165,6 +172,51 @@ pub fn with_current<R>(f: impl FnOnce(&mut Process) -> R) -> R {
     f(p)
 }
 
+/// Intenta resolver un page fault de usuario en una región mmap.
+pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
+    if current_pid() == 0 {
+        return false;
+    }
+    with_current(|p| {
+        let region = match mmap::find_region(&p.mmaps, addr) {
+            Some(r) => r.clone(),
+            None => return false,
+        };
+        if is_write && !region.writable {
+            return false;
+        }
+        let page_va = addr & !0xfff;
+        let space = p.space.as_mut().unwrap();
+        if space.is_mapped(page_va) {
+            return true;
+        }
+        let page_off = page_va - region.virt_start;
+        let file_off = (region.file_offset + page_off) as usize;
+        let mut fa = crate::mm::FRAME_ALLOC.get().unwrap().lock();
+        let frame = match fa.allocate_frame() {
+            Some(f) => f,
+            None => return false,
+        };
+        let mut page = [0u8; 4096];
+        if region.inode != 0 {
+            if crate::fs::load_file_page(region.inode, file_off, &mut page).is_err() {
+                unsafe { fa.deallocate_frame(frame) };
+                return false;
+            }
+        }
+        unsafe {
+            crate::mm::phys_to_virt(frame.start_address().as_u64())
+                .as_mut_ptr::<[u8; 4096]>()
+                .write(page);
+        }
+        if space.map_page(page_va, frame, region.writable).is_none() {
+            unsafe { fa.deallocate_frame(frame) };
+            return false;
+        }
+        true
+    })
+}
+
 pub fn init() {
     syscall::init_msrs();
 }
@@ -188,10 +240,8 @@ pub fn spawn_console(
         return Err(-abi::EINVAL);
     }
     let data = {
-        let fs = crate::fs::FS.get().ok_or(-abi::EIO)?;
-        let mut fs = fs.lock();
-        let ino = fs.resolve(path).map_err(syscall::fs_errno)?;
-        fs.read_file(ino).map_err(syscall::fs_errno)?
+        let ino = crate::vfs::resolve(path).map_err(crate::task::syscall::fs_errno)?;
+        crate::vfs::read_file(ino).map_err(crate::task::syscall::fs_errno)?
     };
     let mut space = AddrSpace::new().ok_or(-abi::ENOMEM)?;
     match spawn_into(&mut space, &data, args) {
@@ -207,6 +257,8 @@ pub fn spawn_console(
                 fds: vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)],
                 brk,
                 brk_min: brk,
+                mmaps: Vec::new(),
+                mmap_next: soso_abi::MMAP_BASE,
                 console,
             });
             Ok(pid)

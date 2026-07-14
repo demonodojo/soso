@@ -95,7 +95,8 @@ nc localhost 7777
 ```
 
 Todo lo que escribas se devuelve tal cual (eco). Útil para comprobar que la red
-funciona; no es una shell interactiva.
+funciona; no es una shell interactiva. La IP se obtiene por DHCP al arrancar; en
+QEMU, si no hay servidor DHCP, se usa `10.0.2.15` como respaldo.
 
 ---
 
@@ -304,7 +305,7 @@ soso es un sistema de aprendizaje con un alcance deliberadamente reducido:
 | Usuarios | Monousuario; una sesión SSH simultánea |
 | Shell | Sin pipes, redirecciones, variables ni historial |
 | Procesos | `spawn`, no `fork`; scheduler round-robin preemptivo |
-| Red | IP fija `10.0.2.15`; sin DHCP ni IPv6 |
+| Red | DHCP automático al arrancar; fallback a `10.0.2.15` en QEMU; sin IPv6 |
 | SSH | Sin SFTP, port forwarding ni múltiples sesiones |
 | Ficheros | Sin permisos Unix, hardlinks ni snapshots |
 | Comandos | Conjunto mínimo de coreutils |

@@ -20,6 +20,16 @@ pub fn run() {
     let root = super::project_root();
     let mut fallos = 0;
 
+    // --- 1b) tests sosomfs en el host ---
+    let _ = paso("sosomfs (host)", &mut fallos, || {
+        let st = Command::new("cargo")
+            .current_dir(&root)
+            .args(["test", "-q", "-p", "sosomfs", "--features", "std"])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if st.success() { Ok(()) } else { Err("los tests de sosomfs fallaron".into()) }
+    });
+
     // --- 1) crash-safety del FS en el host ---
     let _ = paso("crash-safety de sosofs (host)", &mut fallos, || {
         let st = Command::new("cargo")
@@ -33,12 +43,12 @@ pub fn run() {
     // --- construir e ir a QEMU ---
     super::build_user();
     let img = super::build_image();
-    let data = super::mkfs(false);
+    let (data, models) = super::mkfs(false);
     let key = root.join("target/soso_test_key");
     let serial = root.join("target/test-serial.log");
     let _ = std::fs::remove_file(&serial);
 
-    let mut qemu = match lanzar_qemu(&img, &data, &serial) {
+    let mut qemu = match lanzar_qemu(&img, &data, &models, &serial) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("FALLO  lanzar QEMU: {e}");
@@ -117,13 +127,16 @@ fn marca(nombre: &str, ok: bool) {
 fn lanzar_qemu(
     img: &std::path::Path,
     data: &std::path::Path,
+    models: &std::path::Path,
     serial: &std::path::Path,
 ) -> std::io::Result<Child> {
     Command::new("qemu-system-x86_64")
-        .args(["-machine", "q35", "-cpu", "max", "-m", "256M"])
+        .args(["-machine", "q35", "-cpu", "max", "-m", "2G"])
         .args(["-drive", &format!("format=raw,file={}", img.display())])
         .args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
         .args(["-device", "virtio-blk-pci,drive=data0"])
+        .args(["-drive", &format!("file={},format=raw,if=none,id=data1", models.display())])
+        .args(["-device", "virtio-blk-pci,drive=data1"])
         .args(["-netdev", "user,id=net0,hostfwd=tcp::7777-:7,hostfwd=tcp::2222-:22"])
         .args(["-device", "virtio-net-pci,netdev=net0"])
         .args(["-serial", &format!("file:{}", serial.display())])

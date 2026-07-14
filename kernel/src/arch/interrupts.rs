@@ -87,6 +87,10 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     let addr = x86_64::registers::control::Cr2::read_raw();
     if desde_usuario(&stack_frame) {
+        let is_write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
+        if crate::task::handle_mmap_fault(addr, is_write) {
+            return;
+        }
         crate::println!(
             "task: page fault de usuario en {addr:#x} (rip {:#x}, {error_code:?})",
             stack_frame.instruction_pointer.as_u64()

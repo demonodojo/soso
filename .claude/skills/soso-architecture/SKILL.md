@@ -48,7 +48,7 @@ No pipes, signals, mmap, or Unix permissions.
 | `arch/` | GDT/TSS, IDT, PIC+PIT 100 Hz, paging |
 | `drivers/` | serial, virtio-blk, virtio-net (PCI ECAM) |
 | `fs/` | sosofs mounted on virtio-blk |
-| `net/` | smoltcp, static IP 10.0.2.15, polled from scheduler |
+| `net/` | smoltcp, DHCPv4 al arrancar (fallback 10.0.2.15), polled from scheduler |
 | `ssh/` | sunset SSH-2 server, one session, launches `/bin/sosh` |
 | `kshell.rs` | Emergency kernel-shell on serial (`soso>`) |
 | `task/` | Processes, scheduler, syscall dispatch |
@@ -73,7 +73,8 @@ No pipes, signals, mmap, or Unix permissions.
 
 ## Network & SSH
 
-- smoltcp TCP/IPv4 only; NIC polled (no IRQ-driven RX)
+- smoltcp TCP/IPv4 + cliente DHCPv4 en kernel; fallback estático 10.0.2.15/24 si no hay lease en 8 s
+- NIC polled (no IRQ-driven RX)
 - sunset: curve25519 + ed25519 + chacha20-poly1305
 - Auth: ed25519 public key only (`/etc/authorized_key`, 32 raw bytes)
 - Host key: `/etc/ssh_host_key` (32-byte seed, persistent across mkfs)
@@ -97,4 +98,4 @@ No pipes, signals, mmap, or Unix permissions.
 
 ## Out of scope (by design)
 
-Multi-user, permissions, pipes, SFTP, DHCP/IPv6, fork, signals, snapshots/compression in sosofs.
+Multi-user, permissions, pipes, SFTP, IPv6, fork, signals, snapshots/compression in sosofs.

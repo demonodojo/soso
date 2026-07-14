@@ -13,6 +13,7 @@ spin = { version = "0.9", features = ["lock_api"] }
 pic8259 = "0.11"
 virtio-drivers = "0.13"
 sosofs = { path = "../crates/sosofs" }
+sosomfs = { path = "../crates/sosomfs" }
 block-dev = { path = "../crates/block-dev" }
 soso-abi = { path = "../crates/soso-abi" }
 xmas-elf = "0.10"
@@ -20,6 +21,7 @@ smoltcp = { version = "0.13.1", default-features = false, features = [
     "medium-ethernet",
     "proto-ipv4",
     "socket-tcp",
+    "socket-dhcpv4",
     "alloc",
 ] }
 talc = { version = "4", default-features = false, features = ["lock_api"] }

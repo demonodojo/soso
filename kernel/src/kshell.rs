@@ -68,11 +68,11 @@ fn exec(line: &str) {
             Some(ruta) => {
                 let texto = args[1..].join(" ");
                 match split_path(ruta) {
-                    Some((padre, nombre)) => with_fs(|fs| {
-                        let dir = fs.resolve(padre)?;
+                    Some((padre, nombre)) => with_vfs(|| {
+                        let dir = crate::vfs::resolve(padre)?;
                         let mtime = crate::arch::pit::uptime_ms() / 1000;
-                        fs.create_file(dir, nombre, texto.as_bytes(), mtime)?;
-                        println!("{} bytes -> {ruta} (generación {})", texto.len(), fs.generation());
+                        crate::vfs::create_file(dir, nombre, texto.as_bytes(), mtime)?;
+                        println!("{} bytes -> {ruta}", texto.len());
                         Ok(())
                     }),
                     None => println!("ruta inválida"),
@@ -81,37 +81,41 @@ fn exec(line: &str) {
             None => println!("uso: write <ruta> <texto>"),
         },
         "mkdir" => match args.first().and_then(|r| split_path(r)) {
-            Some((padre, nombre)) => with_fs(|fs| {
-                let dir = fs.resolve(padre)?;
-                fs.mkdir(dir, nombre, crate::arch::pit::uptime_ms() / 1000)?;
+            Some((padre, nombre)) => with_vfs(|| {
+                let dir = crate::vfs::resolve(padre)?;
+                crate::vfs::mkdir(dir, nombre, crate::arch::pit::uptime_ms() / 1000)?;
                 Ok(())
             }),
             None => println!("uso: mkdir <ruta>"),
         },
         "rm" => match args.first().and_then(|r| split_path(r)) {
-            Some((padre, nombre)) => with_fs(|fs| {
-                let dir = fs.resolve(padre)?;
-                fs.unlink(dir, nombre)
+            Some((padre, nombre)) => with_vfs(|| {
+                let dir = crate::vfs::resolve(padre)?;
+                crate::vfs::unlink(dir, nombre)
             }),
             None => println!("uso: rm <ruta>"),
         },
-        "df" => with_fs(|fs| {
-            let libres = fs.free_blocks();
-            println!(
-                "{}/{} bloques libres ({} MiB), generación {}",
-                libres,
-                fs.block_count(),
-                libres * 4096 / (1024 * 1024),
-                fs.generation()
-            );
-            Ok(())
-        }),
+        "df" => {
+            if let Some(fs) = crate::fs::FS.get() {
+                let fs = fs.lock();
+                let libres = fs.free_blocks();
+                println!(
+                    "{}/{} bloques libres ({} MiB), generación {}",
+                    libres,
+                    fs.block_count(),
+                    libres * 4096 / (1024 * 1024),
+                    fs.generation()
+                );
+            } else {
+                println!("fs: no montado");
+            }
+        }
         "ls" => {
             let ruta = args.first().copied().unwrap_or("/");
-            with_fs(|fs| {
-                let ino = fs.resolve(ruta)?;
-                for (nombre, child) in fs.read_dir(ino)? {
-                    let st = fs.stat_inode(child)?;
+            with_vfs(|| {
+                let ino = crate::vfs::resolve(ruta)?;
+                for (nombre, child) in crate::vfs::read_dir(ino)? {
+                    let st = crate::vfs::stat_inode(child)?;
                     let tipo = if st.file_type == sosofs::layout::FT_DIR { "d" } else { "-" };
                     println!("{tipo} {:>8}  {nombre}", st.size.get());
                 }
@@ -119,18 +123,18 @@ fn exec(line: &str) {
             });
         }
         "cat" => match args.first() {
-            Some(ruta) => with_fs(|fs| {
-                let ino = fs.resolve(ruta)?;
-                let data = fs.read_file(ino)?;
+            Some(ruta) => with_vfs(|| {
+                let ino = crate::vfs::resolve(ruta)?;
+                let data = crate::vfs::read_file(ino)?;
                 print!("{}", alloc::string::String::from_utf8_lossy(&data));
                 Ok(())
             }),
             None => println!("uso: cat <ruta>"),
         },
         "stat" => match args.first() {
-            Some(ruta) => with_fs(|fs| {
-                let ino = fs.resolve(ruta)?;
-                let st = fs.stat_inode(ino)?;
+            Some(ruta) => with_vfs(|| {
+                let ino = crate::vfs::resolve(ruta)?;
+                let st = crate::vfs::stat_inode(ino)?;
                 let tipo = if st.file_type == sosofs::layout::FT_DIR { "directorio" } else { "fichero" };
                 println!("inode {ino}: {tipo}, {} bytes, mtime {}", st.size.get(), st.mtime.get());
                 Ok(())
@@ -200,15 +204,10 @@ fn split_path(ruta: &str) -> Option<(&str, &str)> {
     Some((if i == 0 { "/" } else { &ruta[..i] }, nombre))
 }
 
-/// Ejecuta una operación sobre el FS montado, imprimiendo el error si lo hay.
-fn with_fs(f: impl FnOnce(&mut sosofs::Sosofs<crate::fs::VirtioDev>) -> Result<(), sosofs::FsError>) {
-    match crate::fs::FS.get() {
-        Some(fs) => {
-            if let Err(e) = f(&mut fs.lock()) {
-                println!("fs: {e:?}");
-            }
-        }
-        None => println!("fs: no montado"),
+/// Ejecuta una operación VFS, imprimiendo el error si lo hay.
+fn with_vfs(f: impl FnOnce() -> Result<(), sosofs::FsError>) {
+    if let Err(e) = f() {
+        println!("fs: {e:?}");
     }
 }
 

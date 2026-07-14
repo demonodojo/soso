@@ -1,0 +1,10 @@
+[package]
+name = "soso-llm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libsoso = { workspace = true }
+soso-abi = { workspace = true }
+sosomodel = { path = "../../crates/sosomodel" }
+soso-llm-core = { path = "../../crates/soso-llm-core" }

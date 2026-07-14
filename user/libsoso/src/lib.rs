@@ -1,12 +1,5 @@
 //! Mini-libstd de soso: crt0, wrappers de syscall, print!, panic handler
-//! y un allocator global. Los programas hacen:
-//!
-//! ```ignore
-//! #![no_std]
-//! #![no_main]
-//! libsoso::entry!(main);
-//! fn main(args: &str) -> u8 { 0 }
-//! ```
+//! y un allocator global basado en sbrk.
 
 #![no_std]
 
@@ -20,8 +13,6 @@ use core::fmt;
 
 // ---- crt0 ----
 
-/// El kernel entra con rdi = puntero a los args y rsi = longitud, y la
-/// pila recién estrenada. _start solo alinea el marco y delega.
 #[macro_export]
 macro_rules! entry {
     ($main:ident) => {
@@ -42,7 +33,6 @@ extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
         "xor rbp, rbp",
         "call __soso_main",
-        // exit(código que devolvió main)
         "mov rdi, rax",
         "mov rax, {nr_exit}",
         "syscall",
@@ -79,7 +69,6 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
-/// Mensaje corto para un errno devuelto por el kernel (valor negativo).
 pub fn errno_str(e: i64) -> &'static str {
     match -e {
         x if x == abi::ENOENT => "no existe",
@@ -101,27 +90,44 @@ pub fn errno_str(e: i64) -> &'static str {
     }
 }
 
-// ---- panic ----
-
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     println!("panic de usuario: {info}");
     sys::exit(101);
 }
 
-// ---- allocator: arena estática en .bss gestionada por talc ----
+// ---- allocator dinámico vía sbrk ----
 
-const HEAP_SIZE: usize = 256 * 1024;
+struct SbrkAllocator;
 
-#[repr(align(16))]
-struct Arena([u8; HEAP_SIZE]);
+unsafe impl core::alloc::GlobalAlloc for SbrkAllocator {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let align = layout.align().max(16);
+        let size = layout.size();
+        let cur = sys::sbrk(0);
+        if cur < 0 {
+            return core::ptr::null_mut();
+        }
+        let mut start = cur as usize;
+        let rem = start % align;
+        if rem != 0 {
+            let pad = align - rem;
+            if sys::sbrk(pad as i64) < 0 {
+                return core::ptr::null_mut();
+            }
+            start += pad;
+        }
+        let end = sys::sbrk(size as i64);
+        if end < 0 {
+            return core::ptr::null_mut();
+        }
+        start as *mut u8
+    }
 
-static mut ARENA: Arena = Arena([0; HEAP_SIZE]);
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
+        // sbrk no permite liberar; el heap solo crece (como en fases anteriores).
+    }
+}
 
 #[global_allocator]
-static ALLOCATOR: talc::Talck<spin::Mutex<()>, talc::ClaimOnOom> = talc::Talc::new(unsafe {
-    talc::ClaimOnOom::new(talc::Span::from_array(
-        core::ptr::addr_of!(ARENA.0) as *mut [u8; HEAP_SIZE],
-    ))
-})
-.lock();
+static ALLOCATOR: SbrkAllocator = SbrkAllocator;

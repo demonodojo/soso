@@ -28,6 +28,9 @@ const USER_FLAGS: PageTableFlags = PageTableFlags::PRESENT
     .union(PageTableFlags::WRITABLE)
     .union(PageTableFlags::USER_ACCESSIBLE);
 
+const USER_RDONLY: PageTableFlags = PageTableFlags::PRESENT
+    .union(PageTableFlags::USER_ACCESSIBLE);
+
 pub struct AddrSpace {
     pml4: PhysFrame,
 }
@@ -104,7 +107,53 @@ impl AddrSpace {
         Some(())
     }
 
-    /// Traduce una dirección de usuario a (frame, flags de la PTE).
+    /// Mapea una página de usuario con el frame dado.
+    pub fn map_page(&mut self, va: u64, frame: PhysFrame, writable: bool) -> Option<()> {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+        let mut mapper = self.mapper();
+        let flags = if writable { USER_FLAGS } else { USER_RDONLY };
+        let mut fa = mm::FRAME_ALLOC.get()?.lock();
+        unsafe {
+            if mapper.translate_page(page).is_ok() {
+                if let Ok((frame, flush)) = mapper.unmap(page) {
+                    flush.flush();
+                    fa.deallocate_frame(frame);
+                }
+            }
+            mapper
+                .map_to_with_table_flags(page, frame, flags, USER_FLAGS, &mut *fa)
+                .ok()?
+                .ignore();
+        }
+        Some(())
+    }
+
+    /// Desmapea un rango de páginas y libera sus frames.
+    pub fn unmap_range(&mut self, start: u64, len: u64) {
+        let mut mapper = self.mapper();
+        let mut fa = mm::FRAME_ALLOC.get().unwrap().lock();
+        let end = start + len;
+        let mut va = start & !0xfff;
+        while va < end {
+            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+            if let Ok((frame, flush)) = mapper.unmap(page) {
+                flush.flush();
+                unsafe { fa.deallocate_frame(frame) };
+            }
+            va += 4096;
+        }
+    }
+
+    /// ¿Está mapeada la página que contiene `va`?
+    pub fn is_mapped(&self, va: u64) -> bool {
+        use x86_64::structures::paging::mapper::TranslateResult;
+        matches!(
+            self.mapper().translate(VirtAddr::new(va & !0xfff)),
+            TranslateResult::Mapped { .. }
+        )
+    }
+
+    /// Traduce una dirección de usuario a flags de la PTE.
     pub fn translate_flags(&self, va: u64) -> Option<PageTableFlags> {
         use x86_64::structures::paging::mapper::TranslateResult;
         match self.mapper().translate(VirtAddr::new(va)) {

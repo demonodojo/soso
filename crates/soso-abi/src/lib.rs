@@ -24,8 +24,41 @@ pub const SYS_SPAWN: u64 = 10;
 pub const SYS_WAIT: u64 = 11;
 pub const SYS_SBRK: u64 = 12;
 pub const SYS_SLEEP_MS: u64 = 13;
-/// Apaga la máquina (privilegio de administración; monousuario).
 pub const SYS_HALT: u64 = 14;
+pub const SYS_MMAP: u64 = 15;
+pub const SYS_MUNMAP: u64 = 16;
+pub const SYS_GPU_INFO: u64 = 17;
+pub const SYS_GPU_ALLOC: u64 = 18;
+pub const SYS_GPU_MAP: u64 = 19;
+pub const SYS_GPU_SUBMIT: u64 = 20;
+
+// ---- mmap ----
+
+pub const PROT_READ: u64 = 1;
+pub const PROT_WRITE: u64 = 2;
+pub const MAP_PRIVATE: u64 = 1;
+pub const MAP_SHARED: u64 = 2;
+pub const MAP_ANONYMOUS: u64 = 4;
+
+/// Región reservada para mmap de ficheros (por encima del brk habitual).
+pub const MMAP_BASE: u64 = 0x2000_0000;
+pub const MMAP_LIMIT: u64 = 0x5f00_0000;
+
+// ---- GPU ----
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct GpuInfo {
+    pub present: u8,
+    pub vendor: u8,
+    pub _pad: [u8; 6],
+    pub vram_total: u64,
+    pub vram_free: u64,
+    pub name: [u8; 32],
+}
+
+/// Umbral: ficheros mayores se abren en modo lazy (sin cargar todo).
+pub const LAZY_FILE_THRESHOLD: u64 = 64 * 1024;
 
 // ---- errnos (el kernel devuelve -errno) ----
 

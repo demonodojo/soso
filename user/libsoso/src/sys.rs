@@ -1,7 +1,4 @@
 //! Wrappers finos sobre la instrucción `syscall`.
-//!
-//! El kernel preserva rsp y los callee-saved; todo lo demás se declara
-//! clobber. rcx y r11 los pisa la propia instrucción.
 
 use core::arch::asm;
 use soso_abi as abi;
@@ -28,8 +25,6 @@ fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
 fn syscall1(nr: u64, a1: u64) -> i64 {
     syscall4(nr, a1, 0, 0, 0)
 }
-
-// ---- las 14 ----
 
 pub fn exit(code: u8) -> ! {
     syscall1(abi::SYS_EXIT, code as u64);
@@ -94,7 +89,6 @@ pub fn spawn(path: &str, args: &str) -> i64 {
     )
 }
 
-/// Espera a cualquier hijo. Devuelve (pid, código) o el errno negativo.
 pub fn wait() -> Result<(u64, u8), i64> {
     let v = syscall1(abi::SYS_WAIT, 0);
     if v < 0 { Err(v) } else { Ok(abi::wait_decode(v)) }
@@ -108,7 +102,31 @@ pub fn sleep_ms(ms: u64) -> i64 {
     syscall1(abi::SYS_SLEEP_MS, ms)
 }
 
-/// Apaga la máquina. No retorna si tiene éxito.
 pub fn halt() -> i64 {
     syscall1(abi::SYS_HALT, 0)
+}
+
+/// Mapea un fichero o región anónima. `fd == u64::MAX` para anónimo.
+pub fn mmap(addr: u64, len: u64, fd: u64, offset: u64) -> i64 {
+    syscall4(abi::SYS_MMAP, addr, len, fd, offset)
+}
+
+pub fn munmap(addr: u64, len: u64) -> i64 {
+    syscall4(abi::SYS_MUNMAP, addr, len, 0, 0)
+}
+
+pub fn gpu_info(out: &mut abi::GpuInfo) -> i64 {
+    syscall4(abi::SYS_GPU_INFO, out as *mut abi::GpuInfo as u64, 0, 0, 0)
+}
+
+pub fn gpu_alloc(size: u64) -> i64 {
+    syscall1(abi::SYS_GPU_ALLOC, size)
+}
+
+pub fn gpu_map(handle: u64, ptr: u64, len: u64) -> i64 {
+    syscall4(abi::SYS_GPU_MAP, handle, ptr, len, 0)
+}
+
+pub fn gpu_submit(cmd: &[u8]) -> i64 {
+    syscall4(abi::SYS_GPU_SUBMIT, cmd.as_ptr() as u64, cmd.len() as u64, 0, 0)
 }

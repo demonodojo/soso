@@ -346,6 +346,7 @@ dependencies = [
  "smoltcp",
  "soso-abi",
  "sosofs",
+ "sosomfs",
  "spin",
  "sunset",
  "talc",
@@ -550,6 +551,24 @@ name = "sosofs"
 version = "0.1.0"
 dependencies = [
  "block-dev",
+ "crc",
+ "zerocopy",
+]
+
+[[package]]
+name = "sosomfs"
+version = "0.1.0"
+dependencies = [
+ "block-dev",
+ "crc",
+ "sosomodel",
+ "zerocopy",
+]
+
+[[package]]
+name = "sosomodel"
+version = "0.1.0"
+dependencies = [
  "crc",
  "zerocopy",
 ]

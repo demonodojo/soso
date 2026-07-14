@@ -1,0 +1,7 @@
+[package]
+name = "mkmodel-soso"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sosomodel = { path = "../../crates/sosomodel", features = ["std"] }
