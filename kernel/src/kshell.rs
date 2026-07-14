@@ -1,0 +1,228 @@
+//! Kernel-shell por el puerto serie. Es la consola de emergencia y el
+//! banco de pruebas hasta que exista la shell de usuario (fase 7).
+
+use crate::drivers::virtio_blk;
+use crate::{drivers::serial, print, println, qemu};
+use alloc::string::String;
+use alloc::vec::Vec;
+
+pub fn run() -> ! {
+    println!("kernel-shell lista; escribe 'help'");
+    let mut line = String::new();
+    print!("soso> ");
+    loop {
+        let Some(byte) = serial::read_byte() else {
+            crate::net::poll();
+            x86_64::instructions::hlt();
+            continue;
+        };
+        match byte {
+            b'\r' | b'\n' => {
+                println!();
+                exec(line.trim());
+                line.clear();
+                print!("soso> ");
+            }
+            0x08 | 0x7f => {
+                if line.pop().is_some() {
+                    print!("\x08 \x08");
+                }
+            }
+            0x20..=0x7e => {
+                line.push(byte as char);
+                print!("{}", byte as char);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn exec(line: &str) {
+    let mut partes = line.split_whitespace();
+    let Some(cmd) = partes.next() else { return };
+    let args: Vec<&str> = partes.collect();
+
+    match cmd {
+        "help" => {
+            println!("comandos: help spawn <elf> [args] ps ls cat stat write <ruta> <texto> mkdir <ruta> rm <ruta> df uptime mem blk blkread blkwrite pf panic halt");
+        }
+        "spawn" => match args.first() {
+            Some(ruta) => {
+                let argumentos = args[1..].join(" ");
+                match crate::task::spawn(ruta, &argumentos, 0) {
+                    Ok(pid) => {
+                        println!("pid {pid}");
+                        crate::task::schedule(); // no vuelve hasta vaciarse la tabla
+                    }
+                    Err(e) => println!("spawn: errno {e}"),
+                }
+            }
+            None => println!("uso: spawn <elf> [args]"),
+        },
+        "ps" => {
+            for p in crate::task::PROCS.lock().iter() {
+                println!("{:>3}  padre {:>3}  {:?}  {}", p.pid, p.parent, p.state, p.name);
+            }
+        }
+        "write" => match args.first() {
+            Some(ruta) => {
+                let texto = args[1..].join(" ");
+                match split_path(ruta) {
+                    Some((padre, nombre)) => with_fs(|fs| {
+                        let dir = fs.resolve(padre)?;
+                        let mtime = crate::arch::pit::uptime_ms() / 1000;
+                        fs.create_file(dir, nombre, texto.as_bytes(), mtime)?;
+                        println!("{} bytes -> {ruta} (generación {})", texto.len(), fs.generation());
+                        Ok(())
+                    }),
+                    None => println!("ruta inválida"),
+                }
+            }
+            None => println!("uso: write <ruta> <texto>"),
+        },
+        "mkdir" => match args.first().and_then(|r| split_path(r)) {
+            Some((padre, nombre)) => with_fs(|fs| {
+                let dir = fs.resolve(padre)?;
+                fs.mkdir(dir, nombre, crate::arch::pit::uptime_ms() / 1000)?;
+                Ok(())
+            }),
+            None => println!("uso: mkdir <ruta>"),
+        },
+        "rm" => match args.first().and_then(|r| split_path(r)) {
+            Some((padre, nombre)) => with_fs(|fs| {
+                let dir = fs.resolve(padre)?;
+                fs.unlink(dir, nombre)
+            }),
+            None => println!("uso: rm <ruta>"),
+        },
+        "df" => with_fs(|fs| {
+            let libres = fs.free_blocks();
+            println!(
+                "{}/{} bloques libres ({} MiB), generación {}",
+                libres,
+                fs.block_count(),
+                libres * 4096 / (1024 * 1024),
+                fs.generation()
+            );
+            Ok(())
+        }),
+        "ls" => {
+            let ruta = args.first().copied().unwrap_or("/");
+            with_fs(|fs| {
+                let ino = fs.resolve(ruta)?;
+                for (nombre, child) in fs.read_dir(ino)? {
+                    let st = fs.stat_inode(child)?;
+                    let tipo = if st.file_type == sosofs::layout::FT_DIR { "d" } else { "-" };
+                    println!("{tipo} {:>8}  {nombre}", st.size.get());
+                }
+                Ok(())
+            });
+        }
+        "cat" => match args.first() {
+            Some(ruta) => with_fs(|fs| {
+                let ino = fs.resolve(ruta)?;
+                let data = fs.read_file(ino)?;
+                print!("{}", alloc::string::String::from_utf8_lossy(&data));
+                Ok(())
+            }),
+            None => println!("uso: cat <ruta>"),
+        },
+        "stat" => match args.first() {
+            Some(ruta) => with_fs(|fs| {
+                let ino = fs.resolve(ruta)?;
+                let st = fs.stat_inode(ino)?;
+                let tipo = if st.file_type == sosofs::layout::FT_DIR { "directorio" } else { "fichero" };
+                println!("inode {ino}: {tipo}, {} bytes, mtime {}", st.size.get(), st.mtime.get());
+                Ok(())
+            }),
+            None => println!("uso: stat <ruta>"),
+        },
+        "uptime" => {
+            let ms = crate::arch::pit::uptime_ms();
+            println!("{}.{:02} s ({} ticks)", ms / 1000, (ms % 1000) / 10, crate::arch::pit::ticks());
+        }
+        "mem" => {
+            let libres = crate::mm::FRAME_ALLOC.get().unwrap().lock().free_frames();
+            println!("{} frames libres ({} MiB)", libres, libres * 4096 / (1024 * 1024));
+        }
+        "blk" => match virtio_blk::capacity_sectors() {
+            Some(cap) => println!("{} sectores ({} MiB)", cap, cap * 512 / (1024 * 1024)),
+            None => println!("no hay disco"),
+        },
+        "blkread" => match args.first().and_then(|s| s.parse().ok()) {
+            Some(sector) => {
+                let mut buf = [0u8; 512];
+                match virtio_blk::read_sector(sector, &mut buf) {
+                    Ok(()) => hexdump(sector * 512, &buf[..64]),
+                    Err(e) => println!("blkread: {e}"),
+                }
+            }
+            None => println!("uso: blkread <sector>"),
+        },
+        "blkwrite" => match args.first().and_then(|s| s.parse::<u64>().ok()) {
+            Some(sector) => {
+                let texto = args[1..].join(" ");
+                let mut buf = [0u8; 512];
+                let n = texto.len().min(512);
+                buf[..n].copy_from_slice(&texto.as_bytes()[..n]);
+                match virtio_blk::write_sector(sector, &buf) {
+                    Ok(()) => println!("{n} bytes escritos en el sector {sector}"),
+                    Err(e) => println!("blkwrite: {e}"),
+                }
+            }
+            None => println!("uso: blkwrite <sector> <texto>"),
+        },
+        "pf" => {
+            // Demostración del diagnóstico de page fault.
+            unsafe { core::ptr::read_volatile(0xdead_beef as *const u8) };
+        }
+        "panic" => {
+            panic!("panic solicitado desde la shell");
+        }
+        "halt" => {
+            println!("apagando");
+            qemu::exit(qemu::ExitCode::Success);
+        }
+        otro => {
+            println!("¿{otro}? escribe 'help'");
+        }
+    }
+}
+
+/// Separa una ruta en (directorio padre, nombre): "/a/b/c" -> ("/a/b", "c").
+fn split_path(ruta: &str) -> Option<(&str, &str)> {
+    let ruta = ruta.trim_end_matches('/');
+    let i = ruta.rfind('/')?;
+    let nombre = &ruta[i + 1..];
+    if nombre.is_empty() {
+        return None;
+    }
+    Some((if i == 0 { "/" } else { &ruta[..i] }, nombre))
+}
+
+/// Ejecuta una operación sobre el FS montado, imprimiendo el error si lo hay.
+fn with_fs(f: impl FnOnce(&mut sosofs::Sosofs<crate::fs::VirtioDev>) -> Result<(), sosofs::FsError>) {
+    match crate::fs::FS.get() {
+        Some(fs) => {
+            if let Err(e) = f(&mut fs.lock()) {
+                println!("fs: {e:?}");
+            }
+        }
+        None => println!("fs: no montado"),
+    }
+}
+
+fn hexdump(base: u64, datos: &[u8]) {
+    for fila in datos.chunks(16) {
+        print!("{:08x} ", base + (fila.as_ptr() as usize - datos.as_ptr() as usize) as u64);
+        for b in fila {
+            print!(" {b:02x}");
+        }
+        print!("  |");
+        for b in fila {
+            let c = if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' };
+            print!("{c}");
+        }
+        println!("|");
+    }
+}

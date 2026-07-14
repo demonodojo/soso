@@ -1,0 +1,15 @@
+# Target personalizado x86_64-soso.json: igual que x86_64-unknown-none pero con
+# +sse,+sse2,+rdrand en el spec (sin soft-float). Rust ya no permite togglear
+# soft-float vía -Ctarget-feature (rust-lang/rust#116344).
+#
+# El kernel activa SSE por hardware al arrancar (arch::sse::enable) y usa
+# CR4.OSFXSR para fxsave/fxrstor. +rdrand: getrandom salta la detección por
+# CPUID (falla bajo TCG) y usa la instrucción directamente (QEMU -cpu max).
+# La alineación de pila que exige SSE la garantizan los entrypoints en asm.
+[build]
+target = "x86_64-soso.json"
+
+[unstable]
+json-target-spec = true
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]

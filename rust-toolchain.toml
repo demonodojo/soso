@@ -1,0 +1,8 @@
+# Nightly obligatorio: el build.rs de `bootloader` 0.11 compila sus etapas
+# BIOS/UEFI con -Zbuild-std sobre targets tier-3 de 16 bits.
+# Fijado a 2026-07-01: rust-lang/rust#157151 (5 jul 2026) eliminó el alias
+# "x86-softfloat" que usan los target JSON de bootloader 0.11.15.
+[toolchain]
+channel = "nightly-2026-07-01"
+components = ["rust-src", "llvm-tools-preview"]
+targets = ["x86_64-unknown-none"]

@@ -1,0 +1,205 @@
+//! Herramienta de construcción y ejecución de soso.
+//!
+//! Uso: `cargo xtask <build|run|gdb>`
+//!
+//! - `build`: compila el kernel y genera la imagen de disco BIOS.
+//! - `run`:   build + lanza QEMU (q35, consola por serie en stdio).
+//! - `gdb`:   como `run` pero congelado en el arranque con stub GDB en :1234.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, exit};
+
+fn main() {
+    let cmd = std::env::args().nth(1).unwrap_or_else(|| "run".into());
+    match cmd.as_str() {
+        "build" => {
+            build_image();
+        }
+        "run" => {
+            let img = build_image();
+            run_qemu(&img, false);
+        }
+        "gdb" => {
+            let img = build_image();
+            run_qemu(&img, true);
+        }
+        "mkfs" => {
+            build_user();
+            mkfs(true);
+        }
+        "test" => {
+            test::run();
+        }
+        other => {
+            eprintln!("comando desconocido: {other} (usa build | run | gdb | mkfs | test)");
+            exit(2);
+        }
+    }
+}
+
+mod test;
+
+fn project_root() -> PathBuf {
+    // xtask vive en <root>/xtask
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+}
+
+/// Compila el kernel para x86_64-soso y devuelve la ruta de la imagen.
+fn build_image() -> PathBuf {
+    let root = project_root();
+    let target = root.join("kernel/x86_64-soso.json");
+    let status = Command::new("cargo")
+        .current_dir(root.join("kernel"))
+        .args([
+            "build",
+            "--target",
+            target.to_str().unwrap(),
+            "--target-dir",
+            root.join("target/kernel").to_str().unwrap(),
+        ])
+        .status()
+        .expect("no se pudo ejecutar cargo");
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+
+    let kernel_elf = root.join("target/kernel/x86_64-soso/debug/kernel");
+    let img = root.join("target/soso-bios.img");
+    bootloader::DiskImageBuilder::new(kernel_elf)
+        .create_bios_image(&img)
+        .expect("fallo creando la imagen de disco");
+    println!("imagen: {}", img.display());
+    img
+}
+
+/// Compila el workspace user/ (release) y copia los ELF a rootfs/bin.
+/// Devuelve true si algún binario cambió.
+fn build_user() -> bool {
+    let root = project_root();
+    let status = Command::new("cargo")
+        .current_dir(root.join("user"))
+        .args(["build", "--release", "--target-dir"])
+        .arg(root.join("target/user"))
+        .status()
+        .expect("no se pudo compilar user/");
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+    let out = root.join("target/user/x86_64-unknown-none/release");
+    let bin = root.join("rootfs/bin");
+    std::fs::create_dir_all(&bin).expect("no se pudo crear rootfs/bin");
+    let mut cambiado = false;
+    for prog in ["init", "sosh", "ls", "cat", "echo", "mkdir", "rm", "hexdump", "halt"] {
+        let src = out.join(prog);
+        let dst = bin.join(prog);
+        let igual = std::fs::read(&src).ok() == std::fs::read(&dst).ok();
+        if !igual {
+            std::fs::copy(&src, &dst).expect("no se pudo copiar el binario");
+            cambiado = true;
+        }
+    }
+    cambiado
+}
+
+/// mtime más reciente de un árbol de directorios.
+fn newest_mtime(dir: &Path) -> std::time::SystemTime {
+    let mut newest = std::time::SystemTime::UNIX_EPOCH;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let t = if e.path().is_dir() {
+                newest_mtime(&e.path())
+            } else {
+                e.metadata().and_then(|m| m.modified()).unwrap_or(newest)
+            };
+            newest = newest.max(t);
+        }
+    }
+    newest
+}
+
+/// Disco de datos persistente (virtio-blk) con sosofs construido desde
+/// rootfs/. Con `force` se regenera aunque exista (cargo xtask mkfs);
+/// también si el contenido de rootfs/ es más nuevo que la imagen.
+fn mkfs(force: bool) -> PathBuf {
+    let root = project_root();
+    let path = root.join("target/soso-data.img");
+    let vieja = path
+        .metadata()
+        .and_then(|m| m.modified())
+        .map(|img| newest_mtime(&root.join("rootfs")) > img)
+        .unwrap_or(true);
+    if path.exists() && !force && !vieja {
+        return path;
+    }
+    let pubkey = client_pubkey();
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args(["run", "-q", "-p", "mkfs-soso", "--"])
+        .arg(root.join("rootfs"))
+        .arg(&path)
+        .arg("64")
+        .arg(&pubkey)
+        .status()
+        .expect("no se pudo ejecutar mkfs-soso");
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+    path
+}
+
+/// Clave pública ed25519 a autorizar en el FS. Usa ~/.ssh/id_ed25519.pub
+/// si existe; si no, genera un par de test dedicado en target/ con
+/// ssh-keygen (para que `cargo xtask test` pueda conectar).
+fn client_pubkey() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        let user = PathBuf::from(&home).join(".ssh/id_ed25519.pub");
+        if user.exists() {
+            return user;
+        }
+    }
+    let key = project_root().join("target/soso_test_key");
+    let pubk = project_root().join("target/soso_test_key.pub");
+    if !pubk.exists() {
+        let _ = std::fs::remove_file(&key);
+        let status = Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-C", "soso-test", "-f"])
+            .arg(&key)
+            .status()
+            .expect("no se pudo ejecutar ssh-keygen para la clave de test");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
+        println!("xtask: clave de test generada en {}", key.display());
+    }
+    pubk
+}
+
+fn run_qemu(img: &Path, gdb: bool) {
+    build_user();
+    let data = mkfs(false);
+    let mut qemu = Command::new("qemu-system-x86_64");
+    qemu.args(["-machine", "q35"])
+        // -cpu max: expone RDRAND, que la cripto de sunset (getrandom con
+        // backend rdrand) necesita; la CPU por defecto de QEMU no lo trae.
+        .args(["-cpu", "max"])
+        .args(["-m", "256M"])
+        .args(["-drive", &format!("format=raw,file={}", img.display())])
+        .args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
+        .args(["-device", "virtio-blk-pci,drive=data0"])
+        // Red de usuario (slirp): 10.0.2.0/24, host 2222→22 (SSH futuro)
+        // y 7777→7 (echo).
+        .args(["-netdev", "user,id=net0,hostfwd=tcp::7777-:7,hostfwd=tcp::2222-:22"])
+        .args(["-device", "virtio-net-pci,netdev=net0"])
+        // mon:stdio multiplexa monitor y serie: Ctrl-A X sale, Ctrl-A C monitor
+        .args(["-serial", "mon:stdio"])
+        .args(["-display", "none"])
+        // Dispositivo de salida para tests: out 0xf4 -> exit((valor << 1) | 1)
+        .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+        .arg("-no-reboot");
+    if gdb {
+        // Congelado en arranque; conectar con: gdb -ex 'target remote :1234'
+        qemu.args(["-s", "-S"]);
+    }
+    let status = qemu.status().expect("no se pudo ejecutar qemu-system-x86_64 (¿está instalado?)");
+    exit(status.code().unwrap_or(0));
+}

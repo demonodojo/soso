@@ -1,0 +1,14 @@
+[package]
+name = "sosofs"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# Habilita el builder de imágenes (mkfs) y los tests de host.
+std = ["block-dev/std"]
+
+[dependencies]
+block-dev = { path = "../block-dev" }
+crc = "3"
+zerocopy = { version = "0.8", features = ["derive"] }

@@ -1,0 +1,19 @@
+# Workspace de userspace: se compila para x86_64-unknown-none con el
+# linker script link.ld (binarios ET_EXEC a 0x400000). Excluido del
+# workspace raíz; xtask lo compila y copia los ELF a rootfs/bin.
+[workspace]
+resolver = "2"
+members = ["libsoso", "init", "sosh", "coreutils"]
+
+[workspace.dependencies]
+soso-abi = { path = "../crates/soso-abi" }
+libsoso = { path = "libsoso" }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+# Sin debug info: cada spawn lee el ELF entero del FS (checksums incluidos).
+strip = "debuginfo"
+
+[profile.dev]
+panic = "abort"

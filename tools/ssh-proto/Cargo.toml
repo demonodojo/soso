@@ -1,0 +1,14 @@
+# Prototipo host de fase 9 (aislado del workspace raíz): valida el uso de
+# la API event-driven de sunset antes de integrarla en el kernel. El
+# pegamento con el transporte (aquí un TcpStream de std; en el kernel un
+# socket smoltcp) es idéntico: mover bytes entre el socket y runner.
+[package]
+name = "ssh-proto"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sunset = { version = "0.5", features = ["std", "alloc"] }
+env_logger = "0.11"
+
+[workspace]

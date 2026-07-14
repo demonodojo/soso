@@ -1,0 +1,23 @@
+# Rust / Cargo
+/target/
+**/target/
+
+# Imágenes de disco (bootloader BIOS y datos sosofs)
+*.img
+
+# Userspace: binarios ELF copiados por `cargo xtask` desde user/
+/rootfs/bin/
+
+# Claves SSH generadas o inyectadas por mkfs-soso / xtask
+/rootfs/etc/authorized_key
+/rootfs/etc/ssh_host_key
+
+# Configuración local de Claude Code
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Editor / OS
+.DS_Store
+*~
+*.swp
+*.swo

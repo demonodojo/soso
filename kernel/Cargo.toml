@@ -1,0 +1,43 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bootloader_api = "0.11.15"
+# Sin default features: "default" arrastra "nightly" -> "step_trait", que
+# implementa métodos del trait unstable Step que cambian entre nightlies.
+x86_64 = { version = "0.15.5", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
+uart_16550 = "0.3"
+spin = { version = "0.9", features = ["lock_api"] }
+pic8259 = "0.11"
+virtio-drivers = "0.13"
+sosofs = { path = "../crates/sosofs" }
+block-dev = { path = "../crates/block-dev" }
+soso-abi = { path = "../crates/soso-abi" }
+xmas-elf = "0.10"
+smoltcp = { version = "0.13.1", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "alloc",
+] }
+talc = { version = "4", default-features = false, features = ["lock_api"] }
+sunset = { version = "0.5", default-features = false, features = ["alloc"] }
+# Misma versión que usa sunset: Cargo unifica la instancia, así podemos
+# construir una sunset::SignKey::Ed25519 desde una semilla de 32 bytes
+# (la host key persistente de /etc/ssh_host_key) sin la feature openssh-key.
+ed25519-dalek = { version = "2.1", default-features = false }
+# Aleatoriedad en bare-metal: backend RDRAND (instrucción del x86, QEMU la
+# soporta). Sin esto getrandom no compila para el target del kernel.
+getrandom = { version = "0.2", features = ["rdrand"] }
+
+# Crate independiente del workspace raíz: se compila solo para
+# x86_64-soso (target JSON) a través de xtask.
+[workspace]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

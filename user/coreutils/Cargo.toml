@@ -1,0 +1,8 @@
+# Los coreutils de soso: un binario por fichero de src/bin/.
+[package]
+name = "coreutils"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libsoso = { workspace = true }

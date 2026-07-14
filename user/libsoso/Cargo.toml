@@ -1,0 +1,9 @@
+[package]
+name = "libsoso"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+soso-abi = { workspace = true }
+talc = { version = "4", default-features = false, features = ["lock_api"] }
+spin = { version = "0.9", features = ["lock_api"] }
