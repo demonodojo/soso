@@ -33,15 +33,19 @@ pub fn kstack_top() -> VirtAddr {
     VirtAddr::from_ptr(&raw const KSTACK) + KSTACK_SIZE as u64
 }
 
-/// RSP0 de los APs (CPU 1..MAX_CPUS-1): hoy solo atienden el timer LAPIC (sin
-/// anidar), no necesitan el fondo de la pila de la BSP.
-const AP_KSTACK_SIZE: usize = 16 * 1024;
+/// RSP0 de los APs (CPU 1..MAX_CPUS-1): igual que la de la BSP, porque
+/// ahora también ejecutan el scheduler y el despacho de syscalls completos
+/// (vfs → sosofs/sosomfs → caché de bloques → virtio → Hal, spawn de ELF...
+/// la misma profundidad que la BSP, no solo un timer ligero).
+const AP_KSTACK_SIZE: usize = KSTACK_SIZE;
 #[repr(C, align(16))]
 struct ApKStack([u8; AP_KSTACK_SIZE]);
 static mut AP_KSTACKS: [ApKStack; MAX_CPUS - 1] =
     [const { ApKStack([0; AP_KSTACK_SIZE]) }; MAX_CPUS - 1];
 
-fn rsp0_for(cpu: usize) -> VirtAddr {
+/// RSP0/TSS de una CPU dada (0 = BSP). También la usa `arch::percpu` para
+/// saber a qué pila resetear el scheduler/syscall de ese core.
+pub fn kstack_top_for(cpu: usize) -> VirtAddr {
     if cpu == 0 {
         kstack_top()
     } else {
@@ -65,7 +69,7 @@ static TSS: Lazy<[TaskStateSegment; MAX_CPUS]> = Lazy::new(|| {
         // La pila crece hacia abajo: se apunta al final.
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = ist_top_for(cpu);
         // RSP0: adónde salta la CPU en una interrupción llegando de ring 3.
-        tss.privilege_stack_table[0] = rsp0_for(cpu);
+        tss.privilege_stack_table[0] = kstack_top_for(cpu);
         tss
     })
 });

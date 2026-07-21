@@ -31,6 +31,21 @@ pub fn init_msrs() {
     }
 }
 
+/// Como `init_msrs` pero para un AP: STAR/SFMASK son iguales (mismo GDT
+/// compartido), solo cambia LSTAR — apunta a `ap_syscall_entry`, que usa la
+/// pila/scratch de ESTE core vía GS en vez de los símbolos fijos de la BSP
+/// (`gdt::KSTACK`/`USER_RSP_SCRATCH`, que reventarían si dos cores
+/// syscalleasen a la vez).
+pub fn init_msrs_ap() {
+    let s = gdt::selectors();
+    unsafe {
+        Efer::update(|f| f.insert(EferFlags::SYSTEM_CALL_EXTENSIONS));
+        Star::write(s.ucode, s.udata, s.kcode, s.kdata).expect("layout GDT inválido para STAR");
+        LStar::write(VirtAddr::new(ap_syscall_entry as *const () as u64));
+        SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::TRAP_FLAG | RFlags::DIRECTION_FLAG);
+    }
+}
+
 /// Marco que syscall_entry deja en la pila (campos en orden de memoria
 /// ascendente = push inverso).
 #[repr(C)]
@@ -95,6 +110,51 @@ extern "C" fn syscall_entry() {
         scratch = sym USER_RSP_SCRATCH,
         kstack = sym gdt::KSTACK,
         size = const gdt::KSTACK_SIZE,
+        dispatch = sym dispatch,
+    )
+}
+
+/// Como `syscall_entry` pero para un AP: el rsp de usuario y la pila de
+/// kernel se leen de los campos por-CPU (GS), no de `USER_RSP_SCRATCH`/
+/// `gdt::KSTACK` — dos cores en syscall a la vez no pueden pisarse. El
+/// cuerpo (`dispatch`) es el mismo: `SyscallFrame` tiene idéntico layout.
+#[unsafe(naked)]
+extern "C" fn ap_syscall_entry() {
+    naked_asm!(
+        "mov gs:[{scratch}], rsp",
+        "mov rsp, gs:[{kstack}]",
+        "push rcx",
+        "push r11",
+        "push gs:[{scratch}]",
+        "push rbx",
+        "push rbp",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        "push rax",
+        "push rdi",
+        "push rsi",
+        "push rdx",
+        "push r10",
+        "mov rdi, rsp",
+        "sti",
+        "call {dispatch}",
+        "cli",
+        "add rsp, 5 * 8",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbp",
+        "pop rbx",
+        "pop rdx",
+        "pop r11",
+        "pop rcx",
+        "mov rsp, rdx",
+        "sysretq",
+        scratch = const crate::arch::percpu::OFF_SYSCALL_SCRATCH,
+        kstack = const crate::arch::percpu::OFF_KSTACK_TOP,
         dispatch = sym dispatch,
     )
 }

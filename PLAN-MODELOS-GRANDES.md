@@ -142,48 +142,101 @@ regresión en el caso por defecto (`SOSO_QEMU_SMP=1`).
   realmente probado — cada pieza nueva necesita un `cargo xtask test` con
   `SOSO_QEMU_SMP>1` antes de darla por buena.
 
-**🟡 L3b (parcial, 2026-07-21) — estado per-CPU real y timer LAPIC:**
+**🟡 L3b (parcial, avanzado 2026-07-21) — estado per-CPU real, timer LAPIC,
+scheduler/syscall multicore ESCRITOS pero con una carrera sin resolver:**
+
 GDT/TSS propia por core (`arch::gdt`, `GlobalDescriptorTable<GDT_CAP>` con
 una TSS por CPU: `RSP0` + pila IST de double-fault dedicadas; la CPU 0/BSP
-sigue usando el `KSTACK` de siempre para no tocar el asm desnudo del
-scheduler/syscall existente). Cada AP, tras anunciarse, ejecuta
-`gdt::init_cpu(cpu)` (índice parcheado en la página del trampolín,
-`CPUIDX_OFF`), calibra su LAPIC con `apic::timer_periodico` y hace `sti`; el
-vector (`apic::TIMER_VECTOR`) tiene un handler mínimo (solo EOI) en la IDT
-compartida. Verificado con `cargo xtask test` completo (arranque + LLM +
-SSH + apagado, minuto largo de duración) en `SOSO_QEMU_SMP=1/4/8`: cada AP
-recibe su timer periódico sin fallos ni interferencia entre cores.
-- **Hallazgo:** al dimensionar la GDT para N TSS (`GlobalDescriptorTable<GDT_CAP>`,
-  descriptores de sistema de 2 slots) hay que contar también el descriptor
-  nulo implícito del slot 0 (`GDT_CAP = 1 + planos + 2×MAX_CPUS`) — olvidarlo
-  da `"GDT requires two free spaces to hold a SystemSegment"` en tiempo de
-  arranque, no en compilación (el build limpio no lo detecta).
-- Este timer de los APs todavía **no hace nada útil** (solo EOI): es
-  scaffolding para el paso siguiente, no scheduling real.
+sigue usando el `KSTACK` de siempre). Datos por-CPU vía GS base
+(`arch::percpu`, `IA32_GS_BASE`): `current_pid`/`cpu_index`/puntero al área
+xsave/scratch de syscall, uno por core; `CURRENT_PID` y el contador de
+timeslice (`REMAINING`) dejaron de ser globales (`task/mod.rs`). Nuevo
+`State::Running` (además de `Runnable`): con un solo core era implícito que
+nadie más miraba `PROCS` mientras un proceso corría; con SMP dos cores
+podían adquirir el lock de `PROCS` en momentos distintos y elegir el MISMO
+proceso dos veces — se marca `Running` al elegir, para que el round-robin
+lo excluya hasta que se guarde su contexto. Rutas de AP paralelas a las de
+la BSP (mismo diseño, direcciones por GS en vez de símbolos fijos, para no
+tocar el ensamblador ya probado de la BSP): `ap_syscall_entry`
+(`task/syscall.rs`, MSR LSTAR propia vía `init_msrs_ap`), `ap_timer_isr` +
+`ap_schedule_landing` (`task/mod.rs`, vector LAPIC de cada AP). Todo esto
+**compila y se verificó por separado con éxito** (desensamblado a mano de
+las tres rutinas nuevas para confirmar que los operandos `gs:[offset]`
+generados son los esperados) y, cuando se conectó de verdad (un AP
+recogiendo y ejecutando procesos reales), **el sistema llegó a arrancar
+hasta una sosh interactiva funcionando con el proceso corriendo
+probablemente en un AP** — la prueba de que la mecánica básica es correcta.
 
-*Restante (L3b), estimación 3-5 semanas:*
+**Dos bugs de concurrencia reales encontrados y arreglados por el camino**
+(ninguno de los dos existía en el diseño original del plan; aparecieron al
+ejecutar de verdad, no por inspección):
+1. `drivers/virtio_hal.rs::alloc_dma_pages` adquiría el mismo lock DOS
+   veces por separado (una para buscar un bloque DMA libre, otra para
+   extraerlo) — con un solo core, inofensivo; con dos, el índice quedaba
+   obsoleto si otro core mutaba la lista en la ventana entre ambas
+   adquisiciones. Arreglado manteniendo un único lock para las dos
+   operaciones.
+2. La pila de kernel de los APs (`AP_KSTACK_SIZE`) se dimensionó en la
+   sesión anterior en 16 KiB, razonando que solo atendían un timer ligero;
+   al pasar a ejecutar el despacho de syscalls completo (vfs → sosofs →
+   caché de bloques → virtio → Hal, spawn de ELF) se desbordaba y
+   corrompía silenciosamente memoria del kernel adyacente, con síntomas
+   dispersos y sin relación aparente. Igualada a los 64 KiB de la BSP
+   (`gdt::KSTACK_SIZE`).
 
-1. **Per-CPU vía GS base:** `CURRENT_PID` (`task/mod.rs`) y `TIMER_FPU`
-   (`arch/fpu.rs`, hoy `static mut` "porque soso es monocore") de global a
-   array por-CPU. Más delicado: el scheduler y la entrada de syscall
-   (`task/mod.rs`, `task/syscall.rs`) referencian `KSTACK` por símbolo desde
-   ensamblador desnudo (`sym gdt::KSTACK`) — llevar esto a otros cores exige
-   leer la pila/estado del core actual desde ese mismo ensamblador (típico:
-   `IA32_GS_BASE` apuntando a una struct `PerCpu` propia de cada core,
-   `mov rax, gs:0`) antes de poder generalizar `schedule_inner`/
-   `syscall_entry` más allá de la BSP.
-2. **Auditoría de concurrencia:** hoy los spinlocks (`PROCS`, `FRAME_ALLOC`,
-   caches de FS, `net::poll`, colas SSH) asumían que un core no se
-   interrumpe a sí mismo; con varios cores ejecutando de verdad hay que
-   revisar cada sección crítica y las suposiciones "el kernel no se
-   preempta".
-3. **Scheduler multicore:** con (1) resuelto, cada AP sustituye su
-   idle-loop por una variante de `schedule_inner` que compite por el mismo
-   lock global de `PROCS` (suficiente para pocas decenas de cores) + IPIs
-   (`apic::icr`, ya usado para SIPI) para despertar cores ociosos.
-4. **Threads de usuario mínimos:** syscall `thread_spawn` (mismo PML4, pila
+**Con esos dos arreglos el arranque pasó de "nunca llega a la shell con
+SMP>1" a "llega y funciona la mayoría de las veces" — pero queda al menos
+una carrera más, intermitente y no identificada del todo**: en repeticiones
+sucesivas de `cargo xtask test` con `SOSO_QEMU_SMP=4` aparecieron fallos
+distintos cada vez (page fault en dirección `0x8`, `assert_ne!(buffer.len(),
+0)` de virtio-drivers, `indirect_list.len()` corrupto, "non-IP response
+packet" de smoltcp, y un `#GP` dentro de `curve25519-dalek::read_volatile`
+desreferenciando un puntero no canónico) — el patrón (síntoma distinto cada
+vez, en subsistemas distintos) es el sello de un dato compartido sin
+proteger en algún punto del camino de un proceso real corriendo en un AP
+concurrente con la BSP (red, SSH/cripto o el propio virtio), no un fallo
+determinista de lógica. **No se identificó la causa exacta.**
+
+**Decisión tomada (2026-07-21):** dado el riesgo de dejar un sistema que
+falla de forma intermitente, se revirtió SOLO el último paso — `ap_entry`
+(`arch/smp.rs`) ya NO llama a `task::ap_enter_scheduler()`; el AP monta
+toda la infraestructura (GDT/TSS/GS/IDT/MSRs de syscall/timer LAPIC
+calibrado y activo) pero se queda aparcado en `hlt` sin recoger procesos,
+exactamente como al cierre de la sesión anterior. Verificado estable
+(`cargo xtask test` en verde, varias repeticiones seguidas) en
+`SOSO_QEMU_SMP=1/4/8`. La función `task::ap_enter_scheduler` queda escrita,
+desensamblada y verificada, pero sin llamar desde ningún sitio (warning de
+`dead_code` esperado y aceptado, como otros ya existentes en el árbol).
+
+*Restante de L3b, estimación 2-4 semanas (bajó porque el grueso de la
+infraestructura ya está escrita y probada; lo que falta es sobre todo caza
+de la carrera residual):*
+
+1. **Encontrar la carrera residual.** Pistas para la próxima sesión: activar
+   `ap_entry`'s llamada a `task::ap_enter_scheduler()` (comentada, no
+   borrada) y reproducir con `SOSO_QEMU_SMP=4`; sospechosos por orden de
+   probabilidad: (a) algo en `net::poll`/SSH que asuma en algún punto que
+   solo la BSP puede estar "en medio de" algo relacionado con criptografía
+   o con el socket, aunque `schedule_inner` ya solo llama a `net::poll` si
+   `cpu_index()==0`; (b) el propio `virtio-drivers`/`PciTransport`
+   compartiendo más estado del que cubre `virtio_hal::DMA_FREE` entre
+   dispositivos (blk0/blk1/net) sin un lock común — considerar un lock
+   global único envolviendo TODO acceso a virtio (blk y net), sacrificando
+   paralelismo de E/S (aceptable: el objetivo de L3 es paralelizar cómputo,
+   no E/S) a cambio de simplicidad/seguridad; (c) revisar si algo distinto
+   de `TIMER_FPU`/el área per-CPU nueva necesita protección de FPU que no
+   tiene. Sugerencia: reproducir con `-d int` de QEMU o un log más grueso
+   por core para ver qué corre exactamente en qué CPU en el momento del
+   fallo, en vez de seguir cazando síntoma a síntoma.
+2. **Auditoría de concurrencia más amplia** de lo previsto originalmente:
+   no basta con revisar los locks del scheduler — cualquier driver/FS que
+   un proceso real alcance por syscall desde un AP entra en juego (ya se
+   encontraron 2 bugs fuera de `task/`, en `drivers/virtio_hal.rs` y en el
+   dimensionado de una pila). Repasar `net/`, `fs.rs`/`vfs.rs`, y
+   `drivers/` con la misma sospecha.
+3. **Threads de usuario mínimos:** syscall `thread_spawn` (mismo PML4, pila
    nueva) + futex-lite (`wait`/`wake` sobre una dirección) para barreras.
-5. **GEMM paralelo:** repartir filas del matvec entre N worker threads con
+4. **GEMM paralelo:** repartir filas del matvec entre N worker threads con
    barrera por token. El decode es memory-bound: escala bien hasta saturar
    canales de memoria.
 

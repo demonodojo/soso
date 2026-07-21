@@ -38,11 +38,14 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_handler_addr(x86_64::VirtAddr::new(
                 crate::task::timer_isr as *const () as u64,
             ));
+        // Timer LAPIC de los APs (la BSP sigue con PIC+PIT/`InterruptIndex::Timer`):
+        // ISR en asm desnudo, como el de arriba, pero con la pila/área xsave
+        // de cada core vía GS en vez de un símbolo fijo (`task::ap_timer_isr`).
+        idt[apic::TIMER_VECTOR].set_handler_addr(x86_64::VirtAddr::new(
+            crate::task::ap_timer_isr as *const () as u64,
+        ));
     }
     idt[InterruptIndex::Com1 as u8].set_handler_fn(com1_handler);
-    // Timer LAPIC de los APs (la BSP sigue con PIC+PIT/`InterruptIndex::Timer`).
-    // Sin scheduler multicore todavía (L3b): solo confirma el vector end-to-end.
-    idt[apic::TIMER_VECTOR].set_handler_fn(ap_timer_handler);
     idt
 });
 
@@ -187,10 +190,4 @@ extern "x86-interrupt" fn com1_handler(_stack_frame: InterruptStackFrame) {
     unsafe {
         PICS.lock().notify_end_of_interrupt(InterruptIndex::Com1 as u8);
     }
-}
-
-/// Timer LAPIC de un AP: cada CPU tiene su propia TSS/RSP0 (`gdt::init_cpu`),
-/// así que esto ya corre en una pila propia sin pisar a otro core.
-extern "x86-interrupt" fn ap_timer_handler(_stack_frame: InterruptStackFrame) {
-    apic::eoi();
 }

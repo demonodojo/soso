@@ -103,8 +103,8 @@ unsafe extern "C" {
     static ap_tramp_end: u8;
 }
 
-/// Frecuencia del timer LAPIC de los APs mientras no hay scheduler
-/// multicore (L3b): solo sirve para probar el vector end-to-end.
+/// Frecuencia del timer LAPIC de los APs: es su único mecanismo de
+/// preempción (no hay PIC/PIT por core), así que fija el timeslice real.
 const AP_TIMER_HZ: u32 = 100;
 
 /// Punto de entrada Rust de cada AP (pila propia, paginación del kernel).
@@ -114,20 +114,33 @@ extern "C" fn ap_entry() -> ! {
     let cpu = unsafe {
         core::ptr::read_volatile((TRAMP_PHYS as usize + CPUIDX_OFF) as *const u64) as usize
     };
-    // SSE/AVX, GDT/TSS propia y el LAPIC son estado por-CPU.
+    // SSE/AVX, GDT/TSS y GS (datos per-CPU) propios son estado por-CPU.
     sse::enable();
     crate::arch::gdt::init_cpu(cpu);
+    crate::arch::percpu::init(cpu, crate::arch::gdt::kstack_top_for(cpu).as_u64());
     apic::enable_cpu();
     interrupts::load_idt_ap();
+    // MSRs de syscall propias (LSTAR → ap_syscall_entry, no el de la BSP):
+    // sin esto, un proceso ejecutando `syscall` en este core saltaría a la
+    // pila de la BSP (o a lo que hubiera en LSTAR, sin inicializar = #GP).
+    crate::task::syscall::init_msrs_ap();
     let id = apic::id();
     crate::println!("smp: cpu apic {id} en línea");
     CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
     AP_APIC_ID.store(id as u64 | (1 << 63), Ordering::SeqCst);
-    // Con GDT/TSS/IDT propias ya es seguro tomar interrupciones en este
-    // core: calibrar y habilitar el timer LAPIC (hoy solo confirma el
-    // vector end-to-end; el scheduler multicore lo adoptará en L3b).
     apic::timer_periodico(AP_TIMER_HZ);
     x86_64::instructions::interrupts::enable();
+    // Toda la infraestructura por-core (GDT/TSS/GS/IDT/MSRs de syscall/timer)
+    // ya está lista y probada individualmente, PERO `task::ap_enter_scheduler`
+    // (que haría que este core recogiera y ejecutara procesos de verdad) se
+    // deja sin llamar todavía: al activarlo aparece una carrera de
+    // concurrencia intermitente sin identificar del todo (síntomas
+    // observados: GPF dentro de curve25519-dalek, corrupción de virtqueue de
+    // smoltcp/virtio con mensajes distintos en cada repetición — clásico de
+    // un dato compartido sin proteger, no de un bug determinista). Hasta que
+    // se aísle, el AP se queda aparcado: recibe su timer (por eso sigue
+    // habilitado arriba) pero nunca ejecuta un proceso real. Ver
+    // PLAN-MODELOS-GRANDES.md.
     loop {
         x86_64::instructions::hlt();
     }

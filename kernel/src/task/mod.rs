@@ -34,6 +34,12 @@ pub const MAX_FDS: usize = 16;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
     Runnable,
+    /// Elegido y en ejecución en algún core (a diferencia de `Runnable`, no
+    /// se puede volver a elegir): con un solo core esto era implícito
+    /// (nadie más miraba `PROCS` mientras corría), pero con SMP dos cores
+    /// podrían adquirir el lock de `PROCS` en momentos distintos y ver el
+    /// mismo proceso como `Runnable` mientras ya se ejecuta en otro core.
+    Running,
     /// Hasta uptime_ms >= t.
     Sleeping(u64),
     WaitingChild,
@@ -156,13 +162,23 @@ pub struct Process {
 }
 
 pub static PROCS: Mutex<Vec<Process>> = Mutex::new(Vec::new());
-static CURRENT_PID: AtomicU64 = AtomicU64::new(0);
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+/// Protegido por `PROCS` (solo se toca con el lock tomado): el reparto
+/// round-robin es global, compartido entre todos los cores.
 static RR_NEXT: AtomicUsize = AtomicUsize::new(0);
-static REMAINING: AtomicU32 = AtomicU32::new(0);
+/// Cuenta atrás del timeslice, una por CPU: cada core desaloja al proceso
+/// que él mismo está ejecutando, no el de otro.
+static REMAINING: [AtomicU32; crate::arch::smp::MAX_CPUS] =
+    [const { AtomicU32::new(0) }; crate::arch::smp::MAX_CPUS];
 
+fn remaining() -> &'static AtomicU32 {
+    &REMAINING[crate::arch::percpu::cpu_index()]
+}
+
+/// PID que ejecuta la CPU actual (0 = ninguno). Vía GS: cada core tiene su
+/// propio valor, no hay un único "proceso actual" del sistema.
 pub fn current_pid() -> u64 {
-    CURRENT_PID.load(Ordering::Relaxed)
+    crate::arch::percpu::current_pid()
 }
 
 /// ¿Existe un proceso vivo (no zombie) con este pid?
@@ -437,7 +453,7 @@ pub fn exit_current(code: u8) -> ! {
             // Huérfano: nadie lo va a reclamar.
             space = procs.remove(idx).space;
         }
-        CURRENT_PID.store(0, Ordering::Relaxed);
+        crate::arch::percpu::set_current_pid(0);
     }
     if let Some(s) = space {
         s.free();
@@ -461,7 +477,7 @@ pub fn block_current(ctx: Context, state: State) -> ! {
         p.ctx = ctx;
         p.state = state;
     });
-    CURRENT_PID.store(0, Ordering::Relaxed);
+    crate::arch::percpu::set_current_pid(0);
     schedule();
 }
 
@@ -490,9 +506,38 @@ unsafe extern "C" fn schedule_landing() -> ! {
     )
 }
 
+/// Punto de entrada del scheduler para un AP: como `schedule_landing` pero
+/// con la pila de ESTE core (vía GS, no un símbolo fijo — cada AP tiene la
+/// suya, `gdt::kstack_top_for`/`arch::percpu`). Reutiliza `schedule_inner`
+/// tal cual: el reparto de procesos ya es multicore-seguro (lock de
+/// `PROCS`, `State::Running`, `CURRENT_PID`/timeslice per-CPU).
+#[unsafe(naked)]
+unsafe extern "C" fn ap_schedule_landing() -> ! {
+    naked_asm!(
+        "cli",
+        "mov rsp, gs:[{kstack}]",
+        "sub rsp, 8",
+        "jmp {inner}",
+        kstack = const crate::arch::percpu::OFF_KSTACK_TOP,
+        inner = sym schedule_inner,
+    )
+}
+
+/// Llamada una vez por un AP tras terminar su arranque: entra en el
+/// scheduler multicore y no vuelve jamás.
+pub fn ap_enter_scheduler() -> ! {
+    unsafe { ap_schedule_landing() }
+}
+
 extern "C" fn schedule_inner() -> ! {
     loop {
-        crate::net::poll();
+        // Solo la BSP atiende la red y cae al kernel-shell si no quedan
+        // procesos: es la consola local, y net::poll ya usa try_lock (un
+        // AP que también llamara aquí solo desperdiciaría ciclos).
+        let es_bsp = crate::arch::percpu::cpu_index() == 0;
+        if es_bsp {
+            crate::net::poll();
+        }
         x86_64::instructions::interrupts::disable();
         let now = crate::arch::pit::uptime_ms();
         let mut procs = PROCS.lock();
@@ -516,11 +561,16 @@ extern "C" fn schedule_inner() -> ! {
 
         if procs.is_empty() {
             drop(procs);
-            CURRENT_PID.store(0, Ordering::Relaxed);
+            crate::arch::percpu::set_current_pid(0);
             addrspace::activate_kernel();
-            x86_64::instructions::interrupts::enable();
-            crate::println!("task: no quedan procesos");
-            crate::kshell::run();
+            if es_bsp {
+                x86_64::instructions::interrupts::enable();
+                crate::println!("task: no quedan procesos");
+                crate::kshell::run();
+            }
+            // Un AP sin procesos que repartir: igual que "nada listo todavía".
+            x86_64::instructions::interrupts::enable_and_hlt();
+            continue;
         }
 
         // Despertares: temporizadores vencidos y lectores de tty con datos.
@@ -578,8 +628,11 @@ extern "C" fn schedule_inner() -> ! {
         match pick {
             Some(i) => {
                 RR_NEXT.store((i + 1) % n, Ordering::Relaxed);
-                CURRENT_PID.store(procs[i].pid, Ordering::Relaxed);
-                REMAINING.store(TIMESLICE_TICKS, Ordering::Relaxed);
+                // Marca "en ejecución": ningún otro core puede volver a
+                // elegir este pid mientras esté así (ver doc de `Running`).
+                procs[i].state = State::Running;
+                crate::arch::percpu::set_current_pid(procs[i].pid);
+                remaining().store(TIMESLICE_TICKS, Ordering::Relaxed);
                 let ctx = procs[i].ctx.clone();
                 procs[i].space.as_ref().expect("runnable sin espacio").activate();
                 // Restaurar el estado FPU del proceso justo antes de saltar
@@ -590,7 +643,7 @@ extern "C" fn schedule_inner() -> ! {
             }
             None => {
                 drop(procs);
-                CURRENT_PID.store(0, Ordering::Relaxed);
+                crate::arch::percpu::set_current_pid(0);
                 // Nada listo: dormir hasta la próxima interrupción.
                 x86_64::instructions::interrupts::enable_and_hlt();
             }
@@ -760,6 +813,72 @@ pub extern "C" fn timer_isr() {
     )
 }
 
+/// Timer LAPIC de un AP: mismo esquema que `timer_isr`, pero el área xsave
+/// y la pila de reentrada al scheduler son las de ESTE core (vía GS, no un
+/// símbolo fijo) — dos APs preemptando a la vez no pueden pisarse.
+#[unsafe(naked)]
+pub extern "C" fn ap_timer_isr() {
+    naked_asm!(
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rbx",
+        "push rbp",
+        "push rsi",
+        "push rdi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        // r11 libre (ya salvado arriba): puntero al FpuArea de este core.
+        "mov r11, gs:[{fpu_off}]",
+        "mov eax, 7",
+        "xor edx, edx",
+        "xsave64 [r11]",
+        "mov rdi, rsp",
+        "test rsp, 8",
+        "jz 1f",
+        "sub rsp, 8",
+        "call {rust}",
+        "add rsp, 8",
+        "jmp 3f",
+        "1:",
+        "call {rust}",
+        "3:",
+        "test al, al",
+        "jnz 2f",
+        "mov r11, gs:[{fpu_off}]",
+        "mov eax, 7",
+        "xor edx, edx",
+        "xrstor64 [r11]",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rbp",
+        "pop rbx",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "iretq",
+        "2:",
+        "jmp {sched}",
+        rust = sym ap_timer_tick,
+        sched = sym ap_schedule_landing,
+        fpu_off = const crate::arch::percpu::OFF_FPU_SCRATCH,
+    )
+}
+
 /// Devuelve 1 si hay que replanificar (el contexto ya quedó guardado).
 extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
     crate::arch::pit::tick();
@@ -775,18 +894,18 @@ extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
     // Venimos de usuario: el kernel no sostiene ningún lock, se puede
     // atender la red aquí (si no, un proceso cpu-bound la mataría de hambre).
     crate::net::poll();
-    let cur = CURRENT_PID.load(Ordering::Relaxed);
+    let cur = crate::arch::percpu::current_pid();
     if cur == 0 {
         return 0;
     }
-    if REMAINING.fetch_sub(1, Ordering::Relaxed) > 1 {
+    if remaining().fetch_sub(1, Ordering::Relaxed) > 1 {
         return 0;
     }
     let mut procs = PROCS.lock();
     let hay_otro =
         procs.iter().any(|p| p.pid != cur && p.state == State::Runnable);
     if !hay_otro {
-        REMAINING.store(TIMESLICE_TICKS, Ordering::Relaxed);
+        remaining().store(TIMESLICE_TICKS, Ordering::Relaxed);
         return 0;
     }
     if let Some(p) = procs.iter_mut().find(|p| p.pid == cur) {
@@ -815,6 +934,60 @@ extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
         p.fpu = unsafe { (*(&raw const crate::arch::fpu::TIMER_FPU)).clone() };
         p.state = State::Runnable;
     }
-    CURRENT_PID.store(0, Ordering::Relaxed);
+    crate::arch::percpu::set_current_pid(0);
+    1
+}
+
+/// Igual que `timer_tick` pero para el timer LAPIC de un AP: EOI del LAPIC
+/// en vez del PIC, sin `pit::tick()` (el reloj global lo lleva solo la BSP,
+/// que es la única con el PIT/PIC) y sin `net::poll()` (solo la BSP la
+/// atiende, ver `schedule_inner`).
+extern "C" fn ap_timer_tick(f: &mut TrapFrame) -> u64 {
+    crate::arch::apic::eoi();
+    if f.cs & 3 != 3 {
+        return 0;
+    }
+    let cur = crate::arch::percpu::current_pid();
+    if cur == 0 {
+        return 0;
+    }
+    if remaining().fetch_sub(1, Ordering::Relaxed) > 1 {
+        return 0;
+    }
+    let mut procs = PROCS.lock();
+    let hay_otro = procs.iter().any(|p| p.pid != cur && p.state == State::Runnable);
+    if !hay_otro {
+        remaining().store(TIMESLICE_TICKS, Ordering::Relaxed);
+        return 0;
+    }
+    if let Some(p) = procs.iter_mut().find(|p| p.pid == cur) {
+        p.ctx = Context {
+            r15: f.r15,
+            r14: f.r14,
+            r13: f.r13,
+            r12: f.r12,
+            r11: f.r11,
+            r10: f.r10,
+            r9: f.r9,
+            r8: f.r8,
+            rdi: f.rdi,
+            rsi: f.rsi,
+            rbp: f.rbp,
+            rbx: f.rbx,
+            rdx: f.rdx,
+            rcx: f.rcx,
+            rax: f.rax,
+            rip: f.rip,
+            rsp: f.rsp,
+            rflags: f.rflags,
+        };
+        // El estado FPU/SSE lo capturó ap_timer_isr en el área de este core
+        // antes de la posible replanificación.
+        p.fpu = unsafe {
+            (*(crate::arch::percpu::fpu_scratch_ptr() as *const crate::arch::fpu::FpuArea)).clone()
+        };
+        p.state = State::Runnable;
+    }
+    crate::arch::percpu::set_current_pid(0);
     1
 }

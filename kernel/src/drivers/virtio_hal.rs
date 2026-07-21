@@ -14,12 +14,15 @@ use virtio_drivers::{BufferDirection, Hal, PAGE_SIZE, PhysAddr};
 static DMA_FREE: Mutex<Vec<(PhysAddr, usize)>> = Mutex::new(Vec::new());
 
 fn alloc_dma_pages(pages: usize) -> PhysAddr {
-    if let Some(i) = {
-        let free = DMA_FREE.lock();
-        free.iter().position(|&(_, p)| p == pages)
-    } {
-        return DMA_FREE.lock().swap_remove(i).0;
+    // Un único lock para buscar Y extraer: con dos cores, soltarlo entre
+    // ambas operaciones (como antes) deja una ventana en la que otro core
+    // puede alterar el vector y `swap_remove(i)` saca la entrada equivocada
+    // (o entra en pánico si ya quedó vacío).
+    let mut free = DMA_FREE.lock();
+    if let Some(i) = free.iter().position(|&(_, p)| p == pages) {
+        return free.swap_remove(i).0;
     }
+    drop(free);
     let frame = crate::mm::FRAME_ALLOC
         .get()
         .unwrap()
