@@ -1,6 +1,6 @@
 //! IDT, PIC 8259 remapeado y handlers de excepciones e IRQs.
 
-use crate::arch::{gdt, pit};
+use crate::arch::{apic, gdt, pit};
 use crate::println;
 use pic8259::ChainedPics;
 use spin::{Lazy, Mutex};
@@ -40,6 +40,9 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             ));
     }
     idt[InterruptIndex::Com1 as u8].set_handler_fn(com1_handler);
+    // Timer LAPIC de los APs (la BSP sigue con PIC+PIT/`InterruptIndex::Timer`).
+    // Sin scheduler multicore todavía (L3b): solo confirma el vector end-to-end.
+    idt[apic::TIMER_VECTOR].set_handler_fn(ap_timer_handler);
     idt
 });
 
@@ -184,4 +187,10 @@ extern "x86-interrupt" fn com1_handler(_stack_frame: InterruptStackFrame) {
     unsafe {
         PICS.lock().notify_end_of_interrupt(InterruptIndex::Com1 as u8);
     }
+}
+
+/// Timer LAPIC de un AP: cada CPU tiene su propia TSS/RSP0 (`gdt::init_cpu`),
+/// así que esto ya corre en una pila propia sin pisar a otro core.
+extern "x86-interrupt" fn ap_timer_handler(_stack_frame: InterruptStackFrame) {
+    apic::eoi();
 }

@@ -26,6 +26,7 @@ static AP_APIC_ID: AtomicU64 = AtomicU64::new(0);
 // código usa estas constantes y Rust escribe ahí GDT y datos parcheados).
 const GDT_OFF: usize = 0xF80; // 4 descriptores
 const GDTR_OFF: usize = 0xFE0; // limit u16 + base u32
+const CPUIDX_OFF: usize = 0xFB8; // índice de CPU (1..MAX_CPUS-1) de este AP
 const CR3_OFF: usize = 0xFC0;
 const STACK_OFF: usize = 0xFC8;
 const ENTRY_OFF: usize = 0xFD0;
@@ -102,17 +103,31 @@ unsafe extern "C" {
     static ap_tramp_end: u8;
 }
 
+/// Frecuencia del timer LAPIC de los APs mientras no hay scheduler
+/// multicore (L3b): solo sirve para probar el vector end-to-end.
+const AP_TIMER_HZ: u32 = 100;
+
 /// Punto de entrada Rust de cada AP (pila propia, paginación del kernel).
 extern "C" fn ap_entry() -> ! {
-    // SSE/AVX y el LAPIC son estado por-CPU
+    // Índice de CPU que la BSP parcheó en la página del trampolín antes del
+    // SIPI (1..MAX_CPUS-1; 0 es la BSP). Selecciona la TSS/RSP0 de este AP.
+    let cpu = unsafe {
+        core::ptr::read_volatile((TRAMP_PHYS as usize + CPUIDX_OFF) as *const u64) as usize
+    };
+    // SSE/AVX, GDT/TSS propia y el LAPIC son estado por-CPU.
     sse::enable();
+    crate::arch::gdt::init_cpu(cpu);
     apic::enable_cpu();
     interrupts::load_idt_ap();
     let id = apic::id();
     crate::println!("smp: cpu apic {id} en línea");
     CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
     AP_APIC_ID.store(id as u64 | (1 << 63), Ordering::SeqCst);
-    // L3a: idle. El scheduler multicore (L3b) los pondrá a trabajar.
+    // Con GDT/TSS/IDT propias ya es seguro tomar interrupciones en este
+    // core: calibrar y habilitar el timer LAPIC (hoy solo confirma el
+    // vector end-to-end; el scheduler multicore lo adoptará en L3b).
+    apic::timer_periodico(AP_TIMER_HZ);
+    x86_64::instructions::interrupts::enable();
     loop {
         x86_64::instructions::hlt();
     }
@@ -161,12 +176,13 @@ pub fn init(rsdp_phys: u64) {
             break;
         }
         unsafe {
-            // parchear cr3 / pila / entry para ESTE AP
+            // parchear cr3 / pila / entry / índice de CPU para ESTE AP
             let stack_top = (&raw const AP_STACKS[i]) as u64 + AP_STACK_SIZE as u64;
             (dst.add(CR3_OFF) as *mut u64).write_unaligned(cr3);
             // convención post-call (rsp%16==8)
             (dst.add(STACK_OFF) as *mut u64).write_unaligned(stack_top - 8);
             (dst.add(ENTRY_OFF) as *mut u64).write_unaligned(ap_entry as usize as u64);
+            (dst.add(CPUIDX_OFF) as *mut u64).write_unaligned((i + 1) as u64);
         }
         let antes = CPUS_ONLINE.load(Ordering::SeqCst);
         crate::println!("smp: arrancando apic {apic_id}…");
