@@ -483,9 +483,20 @@ pub fn block_current(ctx: Context, state: State) -> ! {
 
 // ---- scheduler ----
 
-/// Punto de entrada del scheduler: resetea la pila y no vuelve jamás.
+/// Punto de entrada del scheduler: resetea la pila (la de ESTE core) y no
+/// vuelve jamás. `block_current`/`exit_current`/etc. llaman aquí desde
+/// cualquier core (p. ej. un proceso bloqueándose en un AP) — despachar al
+/// landing equivocado saltaría a la pila de la BSP mientras esta puede
+/// estar en uso a la vez: corrupción garantizada, no solo posible. Este era
+/// el bug real detrás de las caídas intermitentes al activar el scheduler
+/// multicore: todo lo demás (percpu, TSS, timer/syscall de los APs) estaba
+/// bien, pero `schedule()` seguía yendo siempre al landing de la BSP.
 pub fn schedule() -> ! {
-    unsafe { schedule_landing() }
+    if crate::arch::percpu::cpu_index() == 0 {
+        unsafe { schedule_landing() }
+    } else {
+        unsafe { ap_schedule_landing() }
+    }
 }
 
 #[unsafe(naked)]

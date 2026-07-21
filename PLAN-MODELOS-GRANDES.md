@@ -185,55 +185,84 @@ ejecutar de verdad, no por inspección):
    (`gdt::KSTACK_SIZE`).
 
 **Con esos dos arreglos el arranque pasó de "nunca llega a la shell con
-SMP>1" a "llega y funciona la mayoría de las veces" — pero queda al menos
-una carrera más, intermitente y no identificada del todo**: en repeticiones
-sucesivas de `cargo xtask test` con `SOSO_QEMU_SMP=4` aparecieron fallos
-distintos cada vez (page fault en dirección `0x8`, `assert_ne!(buffer.len(),
-0)` de virtio-drivers, `indirect_list.len()` corrupto, "non-IP response
-packet" de smoltcp, y un `#GP` dentro de `curve25519-dalek::read_volatile`
-desreferenciando un puntero no canónico) — el patrón (síntoma distinto cada
-vez, en subsistemas distintos) es el sello de un dato compartido sin
-proteger en algún punto del camino de un proceso real corriendo en un AP
-concurrente con la BSP (red, SSH/cripto o el propio virtio), no un fallo
-determinista de lógica. **No se identificó la causa exacta.**
+SMP>1" a "llega y funciona la mayoría de las veces" — pero seguía quedando
+una carrera más, intermitente, con síntomas distintos cada vez (page fault
+en dirección `0x8`, `assert_ne!` de virtio-drivers, virtqueue corrupta,
+"non-IP response packet" de smoltcp, `#GP` dentro de
+`curve25519-dalek::read_volatile`). El sello de un dato compartido sin
+proteger, no de un fallo determinista — y esta vez SÍ se encontró.**
 
-**Decisión tomada (2026-07-21):** dado el riesgo de dejar un sistema que
-falla de forma intermitente, se revirtió SOLO el último paso — `ap_entry`
-(`arch/smp.rs`) ya NO llama a `task::ap_enter_scheduler()`; el AP monta
-toda la infraestructura (GDT/TSS/GS/IDT/MSRs de syscall/timer LAPIC
-calibrado y activo) pero se queda aparcado en `hlt` sin recoger procesos,
-exactamente como al cierre de la sesión anterior. Verificado estable
-(`cargo xtask test` en verde, varias repeticiones seguidas) en
-`SOSO_QEMU_SMP=1/4/8`. La función `task::ap_enter_scheduler` queda escrita,
-desensamblada y verificada, pero sin llamar desde ningún sitio (warning de
-`dead_code` esperado y aceptado, como otros ya existentes en el árbol).
+**🟢 CAUSA RAÍZ ENCONTRADA Y ARREGLADA (misma sesión, continuación
+2026-07-21):** con instrumentación (`crate::println!` temporal en
+`schedule_inner` mostrando qué CPU elegía qué pid) se vio a `/bin/sosh`
+(pid 2) arrancar en `cpu=2` y funcionar bien... hasta que, tras imprimir el
+prompt, bloquearse en la lectura de stdin — momento en el que el sistema
+se corrompía. La causa: **`task::schedule()` (usada por `block_current` y
+`exit_current`, o sea CUALQUIER proceso que se bloquea o termina) llamaba
+incondicionalmente a `schedule_landing()`, el trampolín que resetea la pila
+a la de la BSP (`sym gdt::KSTACK`) — sin importar qué core lo invocara.**
+Un proceso bloqueándose en un AP saltaba a la pila DE LA BSP mientras esta
+podía estar en uso en ese mismo instante en el otro core: corrupción de
+pila garantizada, con el síntoma dependiendo de qué hubiera en esa pila
+compartida en cada repetición (de ahí la variedad de fallos). El resto de
+la infraestructura de la sesión (percpu, TSS, timer/syscall de AP,
+`State::Running`) estaba bien; faltaba este único punto de entrada.
+Arreglo (`task/mod.rs::schedule`): despacha por `percpu::cpu_index()` — 0
+va a `schedule_landing()` (BSP, sin tocar), cualquier otro a
+`ap_schedule_landing()` (la pila de ESE core, ya existente y probada).
 
-*Restante de L3b, estimación 2-4 semanas (bajó porque el grueso de la
-infraestructura ya está escrita y probada; lo que falta es sobre todo caza
-de la carrera residual):*
+**Verificado exhaustivamente:** con el fix, `cargo xtask test` corrido
+~20 veces repartidas entre `SOSO_QEMU_SMP=1/4/8` dio **cero panics /
+corrupciones** (frente al 100% de caídas de antes del fix). El log de
+scheduling confirma procesos reales migrando entre cores a mitad de
+ejecución (p. ej. un mismo pid corriendo primero en cpu=3, luego cpu=0,
+luego cpu=2) sin incidentes. `task::ap_enter_scheduler()` quedó llamada
+desde `arch::smp::ap_entry` (ya no aparcado): **los APs ejecutan procesos
+de usuario reales, de verdad, con SMP funcionando.**
 
-1. **Encontrar la carrera residual.** Pistas para la próxima sesión: activar
-   `ap_entry`'s llamada a `task::ap_enter_scheduler()` (comentada, no
-   borrada) y reproducir con `SOSO_QEMU_SMP=4`; sospechosos por orden de
-   probabilidad: (a) algo en `net::poll`/SSH que asuma en algún punto que
-   solo la BSP puede estar "en medio de" algo relacionado con criptografía
-   o con el socket, aunque `schedule_inner` ya solo llama a `net::poll` si
-   `cpu_index()==0`; (b) el propio `virtio-drivers`/`PciTransport`
-   compartiendo más estado del que cubre `virtio_hal::DMA_FREE` entre
-   dispositivos (blk0/blk1/net) sin un lock común — considerar un lock
-   global único envolviendo TODO acceso a virtio (blk y net), sacrificando
-   paralelismo de E/S (aceptable: el objetivo de L3 es paralelizar cómputo,
-   no E/S) a cambio de simplicidad/seguridad; (c) revisar si algo distinto
-   de `TIMER_FPU`/el área per-CPU nueva necesita protección de FPU que no
-   tiene. Sugerencia: reproducir con `-d int` de QEMU o un log más grueso
-   por core para ver qué corre exactamente en qué CPU en el momento del
-   fallo, en vez de seguir cazando síntoma a síntoma.
-2. **Auditoría de concurrencia más amplia** de lo previsto originalmente:
-   no basta con revisar los locks del scheduler — cualquier driver/FS que
-   un proceso real alcance por syscall desde un AP entra en juego (ya se
-   encontraron 2 bugs fuera de `task/`, en `drivers/virtio_hal.rs` y en el
-   dimensionado de una pila). Repasar `net/`, `fs.rs`/`vfs.rs`, y
-   `drivers/` con la misma sospecha.
+**Dos hallazgos adicionales, benignos (no bloquean, documentados para más
+adelante, NO son el bug de corrupción — son variancia de tiempo):**
+1. `user/libsoso`'s `SbrkAllocator` hace una syscall `sbrk` por cada
+   asignación pequeña (sin agrupar en un arena local) — el modelo
+   sintético diminuto de `cargo xtask test` genera **~15000 syscalls sbrk**
+   para una sola invocación de `soso-llm`. Cada syscall compite un poco
+   más por `PROCS.lock()` con los cores ociosos sondeando cada ~10ms
+   (`schedule_inner` en su `None` branch); con 15000 de ellas, la cola se
+   nota y escala con el número de cores (peor en `SMP=8` que en `SMP=4`).
+   Confirmado NO es un cuelgue: con más margen de espera en el test
+   (`xtask/src/test.rs::ssh_llm`, subido de 45s a 100s) pasa la inmensa
+   mayoría de las veces; ocasionalmente ni 100s bastan bajo mucha
+   contención (cola de emulación TCG + varios cores), pero el sistema
+   sigue funcionando y termina bien (halt limpio) — solo ese test
+   concreto necesita más margen. **Mejora futura recomendada (no
+   urgente):** que `SbrkAllocator::alloc` reserve de golpe un bloque
+   mayor (p. ej. potencia de 2 o unos KiB) y sirva asignaciones pequeñas
+   desde ahí sin syscall, en vez de una syscall por allocación.
+2. La sesión SSH del propio test (`ssh_sesion`, conexión inmediatamente
+   después de la de `ssh_llm`) falla a veces con salida vacía — esto es la
+   ventana de carrera de reconexión rápida **ya documentada como
+   preexistente** en el proyecto (memoria: "Conexiones consecutivas muy
+   rápidas aún pueden pillar una ventana de recuperación"), de antes de
+   cualquier trabajo de SMP. No se investigó más a fondo por ser conocida
+   y no relacionada con la corrupción de memoria que se pidió investigar;
+   una mejora futura sencilla sería que el arnés de test reintente la
+   conexión una vez tras una pausa corta.
+
+*Restante de L3b tras el fix, estimación 2-3 semanas:*
+
+1. **Auditoría de concurrencia más amplia** (recomendado, no bloqueante):
+   ya se encontraron 2 bugs fuera de `task/` (en `drivers/virtio_hal.rs` y
+   en el dimensionado de una pila) al ejecutar de verdad; merece la pena
+   repasar `net/`, `fs.rs`/`vfs.rs` y `drivers/` con la misma sospecha
+   ahora que hay procesos reales corriendo en varios cores a la vez,
+   aunque no haya evidencia de más bugs activos tras ~20 ejecuciones
+   limpias.
+2. **Reducir el sondeo de los cores ociosos:** hoy cada AP sin trabajo
+   sigue despertando cada ~10ms (su timer LAPIC) a mirar `PROCS` aunque no
+   haya nada; pasar a despertar solo por IPI (`apic::icr`, ya usado para
+   SIPI) cuando de verdad hay un proceso nuevo eliminaría esa contención
+   de fondo y de paso resolvería el hallazgo (1) de arriba sin tocar
+   `libsoso`.
 3. **Threads de usuario mínimos:** syscall `thread_spawn` (mismo PML4, pila
    nueva) + futex-lite (`wait`/`wake` sobre una dirección) para barreras.
 4. **GEMM paralelo:** repartir filas del matvec entre N worker threads con

@@ -217,7 +217,16 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
             .write_all(b"soso-llm run tiny --prompt test\nexit\n")
             .map_err(|e| e.to_string())?;
         stdin.flush().ok();
-        std::thread::sleep(Duration::from_secs(45));
+        // Con SMP>1 el margen justo de antes (45s) empezó a fallar por poco
+        // al activar el scheduler multicore real: cada syscall compite un
+        // poco más por PROCS.lock() con los cores ociosos sondeando, y
+        // user/libsoso hace ~15000 syscalls sbrk (una por asignación
+        // pequeña, sin agrupar) incluso para el modelo sintético diminuto
+        // de este test — con SMP la cola se nota. 100s da margen de sobra
+        // en la práctica; el arreglo de fondo (no necesario para que esto
+        // pase, pero deseable) sería que el allocator de libsoso agrupe
+        // sbrk en vez de una syscall por asignación.
+        std::thread::sleep(Duration::from_secs(100));
     }
 
     let salida = hijo.wait_with_output().map_err(|e| e.to_string())?;

@@ -130,20 +130,7 @@ extern "C" fn ap_entry() -> ! {
     AP_APIC_ID.store(id as u64 | (1 << 63), Ordering::SeqCst);
     apic::timer_periodico(AP_TIMER_HZ);
     x86_64::instructions::interrupts::enable();
-    // Toda la infraestructura por-core (GDT/TSS/GS/IDT/MSRs de syscall/timer)
-    // ya está lista y probada individualmente, PERO `task::ap_enter_scheduler`
-    // (que haría que este core recogiera y ejecutara procesos de verdad) se
-    // deja sin llamar todavía: al activarlo aparece una carrera de
-    // concurrencia intermitente sin identificar del todo (síntomas
-    // observados: GPF dentro de curve25519-dalek, corrupción de virtqueue de
-    // smoltcp/virtio con mensajes distintos en cada repetición — clásico de
-    // un dato compartido sin proteger, no de un bug determinista). Hasta que
-    // se aísle, el AP se queda aparcado: recibe su timer (por eso sigue
-    // habilitado arriba) pero nunca ejecuta un proceso real. Ver
-    // PLAN-MODELOS-GRANDES.md.
-    loop {
-        x86_64::instructions::hlt();
-    }
+    crate::task::ap_enter_scheduler();
 }
 
 /// Arranca todos los APs del MADT. Llamar en la BSP con PIT en marcha y
