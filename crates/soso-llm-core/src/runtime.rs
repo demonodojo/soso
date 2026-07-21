@@ -1,7 +1,8 @@
 //! Runtime de inferencia: bucle de generación de tokens.
 
 use crate::gemm::rmsnorm;
-use crate::layer::{matvec_view, LayerExecutor, LayerKv, LayerScratch, TensorSource, TensorView};
+use crate::layer::{matvec_view_par, LayerExecutor, LayerKv, LayerScratch, TensorSource, TensorView};
+use crate::parallel::{RowParallel, Sequential};
 use crate::tier::TierManager;
 use alloc::string::String;
 use alloc::vec;
@@ -152,12 +153,21 @@ impl Runtime {
     }
 
     pub fn forward_step(&mut self, source: &mut impl TensorSource) -> Result<(), ()> {
+        self.forward_step_par(source, None)
+    }
+
+    pub fn forward_step_par(
+        &mut self,
+        source: &mut impl TensorSource,
+        parallel: Option<&dyn RowParallel>,
+    ) -> Result<(), ()> {
         if self.pos >= self.manifest.max_seq as usize {
             return Err(());
         }
         let exec = LayerExecutor {
             manifest: &self.manifest,
             has_gate: self.has_gate,
+            parallel,
         };
         for layer in 0..self.manifest.num_layers {
             if let Some(pf) = self.manifest.prefetch.get(layer as usize) {
@@ -191,7 +201,41 @@ impl Runtime {
         }
 
         let view = source.tensor_view(name)?;
-        matvec_view(&view, vocab, h, &self.scratch.attn_out, &mut self.logits_buf)?;
+        matvec_view_par(
+            &view,
+            vocab,
+            h,
+            &self.scratch.attn_out,
+            &mut self.logits_buf,
+            &Sequential,
+        )?;
+        Ok(&self.logits_buf)
+    }
+
+    pub fn logits_par(
+        &mut self,
+        source: &mut impl TensorSource,
+        parallel: Option<&dyn RowParallel>,
+    ) -> Result<&[f32], ()> {
+        let h = self.manifest.hidden_dim as usize;
+        let vocab = self.manifest.vocab_size as usize;
+        let name = if self.has_lm_head { "lm_head" } else { "embed" };
+        self.scratch.attn_out.copy_from_slice(&self.hidden);
+        if self.has_output_norm {
+            source.load_f32("output_norm", &mut self.scratch.norm_w)?;
+            rmsnorm(&mut self.scratch.attn_out, &self.scratch.norm_w, self.manifest.rms_eps);
+        }
+        let view = source.tensor_view(name)?;
+        let seq = Sequential;
+        let par: &dyn RowParallel = parallel.unwrap_or(&seq);
+        matvec_view_par(
+            &view,
+            vocab,
+            h,
+            &self.scratch.attn_out,
+            &mut self.logits_buf,
+            par,
+        )?;
         Ok(&self.logits_buf)
     }
 
@@ -214,7 +258,21 @@ impl Runtime {
         max_new: usize,
         eos: Option<u32>,
         sampler: &mut crate::sample::Sampler,
+        on_token: impl FnMut(u32),
+    ) -> Result<Vec<u32>, ()> {
+        self.generate_stream_par(source, prompt, max_new, eos, sampler, on_token, None)
+    }
+
+    /// Como `generate_stream` con matvec paralelo opcional.
+    pub fn generate_stream_par(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        max_new: usize,
+        eos: Option<u32>,
+        sampler: &mut crate::sample::Sampler,
         mut on_token: impl FnMut(u32),
+        parallel: Option<&dyn RowParallel>,
     ) -> Result<Vec<u32>, ()> {
         if prompt.is_empty() {
             return Err(());
@@ -223,13 +281,13 @@ impl Runtime {
         let mut tokens: Vec<u32> = prompt.to_vec();
         for &tok in prompt {
             self.embed_token(tok, source)?;
-            self.forward_step(source)?;
+            self.forward_step_par(source, parallel)?;
         }
         for _ in 0..max_new {
             if self.pos >= self.manifest.max_seq as usize {
                 break;
             }
-            let logits = self.logits(source)?;
+            let logits = self.logits_par(source, parallel)?;
             let next = sampler.sample(logits);
             if eos == Some(next) {
                 break;
@@ -237,7 +295,7 @@ impl Runtime {
             tokens.push(next);
             on_token(next);
             self.embed_token(next, source)?;
-            self.forward_step(source)?;
+            self.forward_step_par(source, parallel)?;
         }
         Ok(tokens)
     }

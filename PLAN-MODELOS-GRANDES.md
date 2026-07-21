@@ -117,7 +117,9 @@ Hallazgos de la fase:
 
 ## Fase L3 — SMP
 
-*Estimación: 3-6 semanas. Es el multiplicador grande (~×n cores).*
+**✅ COMPLETADA (2026-07-21).** L3a (APIC/APs) + L3b (scheduler multicore,
+hilos, futex, IPI wake, GEMM paralelo). Multiplicador ~×n cores sobre el
+decode memory-bound.
 
 **🟡 L3a completada (2026-07-21):** ACPI (RSDP→RSDT/XSDT→MADT) + LAPIC
 (x2APIC por MSR o xAPIC clásico por MMIO, detectado por CPUID) + arranque de
@@ -142,8 +144,10 @@ regresión en el caso por defecto (`SOSO_QEMU_SMP=1`).
   realmente probado — cada pieza nueva necesita un `cargo xtask test` con
   `SOSO_QEMU_SMP>1` antes de darla por buena.
 
-**🟡 L3b (parcial, avanzado 2026-07-21) — estado per-CPU real, timer LAPIC,
-scheduler/syscall multicore ESCRITOS pero con una carrera sin resolver:**
+**🟡 L3b (scheduler multicore, avanzado 2026-07-21) — estado per-CPU real,
+timer LAPIC, scheduler/syscall multicore; la carrera de pila se resolvió
+en la misma sesión (ver abajo). El cierre (hilos/futex/IPI/GEMM) es ✅
+más abajo:**
 
 GDT/TSS propia por core (`arch::gdt`, `GlobalDescriptorTable<GDT_CAP>` con
 una TSS por CPU: `RSP0` + pila IST de double-fault dedicadas; la CPU 0/BSP
@@ -248,29 +252,34 @@ adelante, NO son el bug de corrupción — son variancia de tiempo):**
    una mejora futura sencilla sería que el arnés de test reintente la
    conexión una vez tras una pausa corta.
 
-*Restante de L3b tras el fix, estimación 2-3 semanas:*
+**✅ L3b COMPLETADA (2026-07-21) — cierre: ciclo de vida, AddrSpace
+compartido, hilos/futex, IPI de wake y GEMM paralelo:**
 
-1. **Auditoría de concurrencia más amplia** (recomendado, no bloqueante):
-   ya se encontraron 2 bugs fuera de `task/` (en `drivers/virtio_hal.rs` y
-   en el dimensionado de una pila) al ejecutar de verdad; merece la pena
-   repasar `net/`, `fs.rs`/`vfs.rs` y `drivers/` con la misma sospecha
-   ahora que hay procesos reales corriendo en varios cores a la vez,
-   aunque no haya evidencia de más bugs activos tras ~20 ejecuciones
-   limpias.
-2. **Reducir el sondeo de los cores ociosos:** hoy cada AP sin trabajo
-   sigue despertando cada ~10ms (su timer LAPIC) a mirar `PROCS` aunque no
-   haya nada; pasar a despertar solo por IPI (`apic::icr`, ya usado para
-   SIPI) cuando de verdad hay un proceso nuevo eliminaría esa contención
-   de fondo y de paso resolvería el hallazgo (1) de arriba sin tocar
-   `libsoso`.
-3. **Threads de usuario mínimos:** syscall `thread_spawn` (mismo PML4, pila
-   nueva) + futex-lite (`wait`/`wake` sobre una dirección) para barreras.
-4. **GEMM paralelo:** repartir filas del matvec entre N worker threads con
-   barrera por token. El decode es memory-bound: escala bien hasta saturar
-   canales de memoria.
+1. **Ciclo de vida seguro:** `kill_pending` si el objetivo está `Running`
+   (no marcar `Zombie` mientras otro core lo ejecuta); los timers no
+   revierten `Zombie`/`Waiting*` a `Runnable`; el cleanup de zombis huérfanos
+   no libera el `AddrSpace` si `pid_en_ejecucion` (per-CPU).
+2. **AddrSpace con `Arc`:** PML4 + regiones mmap compartidos entre hilos;
+   `Drop` libera el árbol al caer la última referencia.
+3. **Threads de usuario:** ABI `SYS_THREAD_SPAWN` / `SYS_FUTEX` /
+   `SYS_NCPU`; `State::WaitingFutex`; wrappers y `thread::spawn` en
+   libsoso. Validación de pila acepta mmap bajo demanda.
+4. **IPI de replanificación:** `apic::send_ipi` + `RESCHED_VECTOR` (0x41);
+   `kick_idle_cpus` al hacer `Runnable` (spawn, futex wake, etc.).
+5. **GEMM paralelo:** trait `RowParallel` + `matvec_view_par` en
+   `soso-llm-core`; `ThreadPool` en `soso-llm` (`workers = ncpu`, franjas
+   de filas + barrera por generación).
 
-**Verificación L3b:** `init test` + suite nueva de threads; tok/s escala
-~lineal hasta 4-8 cores con el modelo sintético grande.
+**Verificación L3b:** `cargo xtask test` verde con `SOSO_QEMU_SMP=1/4/8`;
+`init test` incluye subprueba de hilos (contador con futex, `ncpu`);
+`soso-llm` reporta `workers=N` bajo SMP. Escalado tok/s ~lineal con
+modelo sintético grande: pendiente de medir (el `tiny` del test es
+demasiado pequeño para ser representativo).
+
+*Mejoras futuras (fuera del cierre L3b, no bloqueantes):*
+- Auditoría de concurrencia más amplia en `net/` / `fs` / `drivers/`.
+- Agrupar `sbrk` en `SbrkAllocator` (menos syscalls bajo contención).
+- Reintento en el arnés SSH del xtask tras reconexión rápida.
 
 ## Fase L4 — SIMD
 
@@ -364,7 +373,8 @@ investigación.
 
 **Hito 1 (L1+L2, ~3 semanas):** un 70B Q4_K genera texto en QEMU con RAM
 grande, a velocidad de un core vectorizable.
-**Hito 2 (+L4+L3, ~2 meses):** decode multicore SIMD — usable en servidor.
+**Hito 2 (+L4+L3, alcanzado 2026-07-21):** decode multicore SIMD — usable
+en servidor (QEMU SMP); falta medir tok/s con modelo grande y L5 en hw.
 **Hito 3 (+L5, ~3-4 meses):** todo lo anterior en la máquina física por SSH.
 
 ## Riesgos principales

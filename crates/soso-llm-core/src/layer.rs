@@ -6,6 +6,7 @@
 
 use crate::f16::{f16_to_f32, f32_to_f16};
 use crate::gemm::{matvec_f32, matvec_q4_k, matvec_q8_0, rmsnorm, rope_inplace, silu, softmax_inplace};
+use crate::parallel::{RowParallel, Sequential};
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -46,18 +47,89 @@ pub trait TensorSource {
 
 /// matvec despachado por dtype directamente sobre la vista (sin copiar pesos).
 pub fn matvec_view(v: &TensorView, rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ()> {
-    if v.elems != rows * cols {
+    matvec_view_par(v, rows, cols, x, out, &Sequential)
+}
+
+/// Como `matvec_view` pero reparte filas con `par` (barrera al final del trait).
+pub fn matvec_view_par(
+    v: &TensorView,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    out: &mut [f32],
+    par: &dyn RowParallel,
+) -> Result<(), ()> {
+    if v.elems != rows * cols || x.len() != cols || out.len() != rows {
         return Err(());
     }
-    match v.dtype {
-        DTYPE_F32 => {
-            let w = v.f32().ok_or(())?;
-            matvec_f32(w, rows, cols, x, out);
-            Ok(())
+    let dtype = v.dtype;
+    let bytes = v.bytes;
+    // raw parts para compartir entre workers sin lifetimes cruzadas
+    let x_ptr = x.as_ptr() as usize;
+    let out_ptr = out.as_mut_ptr() as usize;
+    let bytes_ptr = bytes.as_ptr() as usize;
+    let bytes_len = bytes.len();
+    let err = core::sync::atomic::AtomicBool::new(false);
+    let err_ptr = &err as *const _ as usize;
+    par.for_rows(rows, &move |r0, r1| {
+        if r0 >= r1 {
+            return;
         }
-        DTYPE_Q8_0 => matvec_q8_0(v.bytes, rows, cols, x, out),
-        DTYPE_Q4_K => matvec_q4_k(v.bytes, rows, cols, x, out),
-        _ => Err(()),
+        let x = unsafe { core::slice::from_raw_parts(x_ptr as *const f32, cols) };
+        let out = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut f32, rows) };
+        let bytes = unsafe { core::slice::from_raw_parts(bytes_ptr as *const u8, bytes_len) };
+        let ok = match dtype {
+            DTYPE_F32 => {
+                let w = unsafe {
+                    core::slice::from_raw_parts(bytes.as_ptr() as *const f32, rows * cols)
+                };
+                let sub_rows = r1 - r0;
+                matvec_f32(
+                    &w[r0 * cols..r1 * cols],
+                    sub_rows,
+                    cols,
+                    x,
+                    &mut out[r0..r1],
+                );
+                true
+            }
+            DTYPE_Q8_0 => {
+                use sosomodel::layout::{Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS};
+                let row_bytes = (cols / Q8_0_BLOCK_ELEMS) * Q8_0_BLOCK_BYTES;
+                matvec_q8_0(
+                    &bytes[r0 * row_bytes..r1 * row_bytes],
+                    r1 - r0,
+                    cols,
+                    x,
+                    &mut out[r0..r1],
+                )
+                .is_ok()
+            }
+            DTYPE_Q4_K => {
+                use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
+                let row_bytes = (cols / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES;
+                matvec_q4_k(
+                    &bytes[r0 * row_bytes..r1 * row_bytes],
+                    r1 - r0,
+                    cols,
+                    x,
+                    &mut out[r0..r1],
+                )
+                .is_ok()
+            }
+            _ => false,
+        };
+        if !ok {
+            unsafe {
+                (*(err_ptr as *const core::sync::atomic::AtomicBool))
+                    .store(true, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+    if err.load(core::sync::atomic::Ordering::Relaxed) {
+        Err(())
+    } else {
+        Ok(())
     }
 }
 
@@ -122,6 +194,8 @@ pub struct LayerExecutor<'a> {
     pub manifest: &'a Manifest,
     /// El modelo trae proyección ffn_gate (SwiGLU completo).
     pub has_gate: bool,
+    /// Paralelismo de matvec (None = secuencial).
+    pub parallel: Option<&'a dyn RowParallel>,
 }
 
 impl<'a> LayerExecutor<'a> {
@@ -144,15 +218,20 @@ impl<'a> LayerExecutor<'a> {
         let eps = self.manifest.rms_eps;
         let theta = self.manifest.rope_theta;
         let prefix = format!("L{layer:02}");
+        let seq = Sequential;
+        let par: &dyn RowParallel = self.parallel.unwrap_or(&seq);
+        let mv = |v: TensorView<'_>, rows: usize, cols: usize, x: &[f32], out: &mut [f32]| {
+            matvec_view_par(&v, rows, cols, x, out, par)
+        };
 
         // --- atención ---
         s.residual.copy_from_slice(hidden);
         source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w)?;
         rmsnorm(hidden, &s.norm_w, eps);
 
-        matvec_view(&source.tensor_view(&format!("{prefix}.attn_q"))?, h, h, hidden, &mut s.q)?;
-        matvec_view(&source.tensor_view(&format!("{prefix}.attn_k"))?, kv_dim, h, hidden, &mut s.k)?;
-        matvec_view(&source.tensor_view(&format!("{prefix}.attn_v"))?, kv_dim, h, hidden, &mut s.v)?;
+        mv(source.tensor_view(&format!("{prefix}.attn_q"))?, h, h, hidden, &mut s.q)?;
+        mv(source.tensor_view(&format!("{prefix}.attn_k"))?, kv_dim, h, hidden, &mut s.k)?;
+        mv(source.tensor_view(&format!("{prefix}.attn_v"))?, kv_dim, h, hidden, &mut s.v)?;
 
         for head in 0..heads {
             rope_inplace(&mut s.q[head * head_dim..(head + 1) * head_dim], pos, theta);
@@ -196,7 +275,7 @@ impl<'a> LayerExecutor<'a> {
         }
 
         // proyección de salida de la atención (Wo) y residual
-        matvec_view(&source.tensor_view(&format!("{prefix}.attn_output"))?, h, h, &s.attn_out, &mut s.q)?;
+        mv(source.tensor_view(&format!("{prefix}.attn_output"))?, h, h, &s.attn_out, &mut s.q)?;
         for i in 0..h {
             hidden[i] = s.residual[i] + s.q[i];
         }
@@ -206,9 +285,9 @@ impl<'a> LayerExecutor<'a> {
         source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w)?;
         rmsnorm(hidden, &s.norm_w, eps);
 
-        matvec_view(&source.tensor_view(&format!("{prefix}.ffn_up"))?, ffn, h, hidden, &mut s.up)?;
+        mv(source.tensor_view(&format!("{prefix}.ffn_up"))?, ffn, h, hidden, &mut s.up)?;
         if self.has_gate {
-            matvec_view(&source.tensor_view(&format!("{prefix}.ffn_gate"))?, ffn, h, hidden, &mut s.gate)?;
+            mv(source.tensor_view(&format!("{prefix}.ffn_gate"))?, ffn, h, hidden, &mut s.gate)?;
             for i in 0..ffn {
                 s.up[i] = silu(s.gate[i]) * s.up[i];
             }
@@ -217,7 +296,7 @@ impl<'a> LayerExecutor<'a> {
                 *x = silu(*x);
             }
         }
-        matvec_view(&source.tensor_view(&format!("{prefix}.ffn_down"))?, h, ffn, &s.up, hidden)?;
+        mv(source.tensor_view(&format!("{prefix}.ffn_down"))?, h, ffn, &s.up, hidden)?;
 
         for i in 0..h {
             hidden[i] += s.residual[i];

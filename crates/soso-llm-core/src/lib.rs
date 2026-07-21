@@ -7,6 +7,7 @@ extern crate alloc;
 pub mod f16;
 pub mod gemm;
 pub mod layer;
+pub mod parallel;
 pub mod quant;
 pub mod optim;
 pub mod runtime;

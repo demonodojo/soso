@@ -5,14 +5,18 @@
 
 extern crate alloc;
 
+mod pool;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use libsoso::{println, sys};
+use pool::ThreadPool;
 use soso_abi::{self as abi, O_RDONLY};
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
+use soso_llm_core::parallel::RowParallel;
 use soso_llm_core::runtime::Runtime;
 use soso_llm_core::sample::Sampler;
 use soso_llm_core::source::{FileMapper, MappedShard, MmapTensorSource};
@@ -174,11 +178,21 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
     let shards_base = format!("{base}/shards");
     let mut source = MmapTensorSource::new(shards_base, index, SyscallMapper);
 
+    // Pool de hilos (NCPU). Con 1 CPU o si el spawn falla → secuencial.
+    let pool = ThreadPool::new();
+    println!("soso-llm: workers={}", pool.workers());
+    // Matvec paralelo por filas cuando hay workers.
+    let par: Option<&dyn RowParallel> = if pool.workers() > 1 {
+        Some(&pool)
+    } else {
+        None
+    };
+
     let text = if prompt.is_empty() { "hola" } else { prompt };
     let prompt_tokens = tokenizer.encode(text);
     // streaming: cada token se imprime según se genera
     let mut decoder = StreamDecoder::new();
-    let result = rt.generate_stream(
+    let result = rt.generate_stream_par(
         &mut source,
         &prompt_tokens,
         max_new,
@@ -190,6 +204,7 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
                 libsoso::print!("{s}");
             }
         },
+        par,
     );
     match result {
         Ok(tokens) => {

@@ -178,3 +178,26 @@ pub fn gpu_map(handle: u64, ptr: u64, len: u64) -> i64 {
 pub fn gpu_submit(cmd: &[u8]) -> i64 {
     syscall4(abi::SYS_GPU_SUBMIT, cmd.as_ptr() as u64, cmd.len() as u64, 0, 0)
 }
+
+/// Crea un hilo: `entry(arg)` con pila en `stack_top` (tope, alineado).
+pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64) -> i64 {
+    syscall4(abi::SYS_THREAD_SPAWN, entry, arg, stack_top, 0)
+}
+
+pub fn futex_wait(addr: *const u32, expected: u32) -> i64 {
+    syscall4(
+        abi::SYS_FUTEX,
+        abi::FUTEX_WAIT,
+        addr as u64,
+        expected as u64,
+        0,
+    )
+}
+
+pub fn futex_wake(addr: *const u32, n: u64) -> i64 {
+    syscall4(abi::SYS_FUTEX, abi::FUTEX_WAKE, addr as u64, 0, n)
+}
+
+pub fn ncpu() -> i64 {
+    syscall1(abi::SYS_NCPU, 0)
+}

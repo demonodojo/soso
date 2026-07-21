@@ -5,8 +5,15 @@
 //! entradas L4 del kernel apuntan a las MISMAS tablas L3: cualquier cambio
 //! posterior en mapeos del kernel dentro de esas tablas se ve en todos.
 //! (Los mapeos del kernel no crean entradas L4 nuevas tras el arranque.)
+//!
+//! El PML4 se comparte entre hilos del mismo proceso vía `Arc`: el árbol
+//! solo se libera cuando cae la última referencia.
 
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use crate::mm;
+use spin::Mutex;
+use super::mmap::{self, MmapRegion};
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
@@ -32,20 +39,66 @@ const USER_FLAGS: PageTableFlags = PageTableFlags::PRESENT
 const USER_RDONLY: PageTableFlags = PageTableFlags::PRESENT
     .union(PageTableFlags::USER_ACCESSIBLE);
 
-pub struct AddrSpace {
+/// Regiones mmap compartidas entre hilos del mismo AddrSpace.
+pub struct MmapBook {
+    pub regions: Vec<MmapRegion>,
+    pub next: u64,
+}
+
+struct AddrSpaceInner {
     pml4: PhysFrame,
+    mmap: Mutex<MmapBook>,
+}
+
+impl Drop for AddrSpaceInner {
+    fn drop(&mut self) {
+        // El CR3 activo NO debe ser este espacio.
+        free_user_tree(self.pml4);
+    }
+}
+
+/// Espacio de direcciones clonable (hilos del mismo proceso).
+#[derive(Clone)]
+pub struct AddrSpace {
+    inner: Arc<AddrSpaceInner>,
 }
 
 fn table_mut(frame: PhysFrame) -> &'static mut PageTable {
     unsafe { &mut *mm::phys_to_virt(frame.start_address().as_u64()).as_mut_ptr() }
 }
 
+fn free_user_tree(pml4: PhysFrame) {
+    let mut fa = mm::FRAME_ALLOC.get().unwrap().lock();
+    let l4 = table_mut(pml4);
+    for l4e in l4.iter().take(1).filter(|e| !e.is_unused()) {
+        let l3 = table_mut(PhysFrame::containing_address(l4e.addr()));
+        for l3e in l3.iter().filter(|e| !e.is_unused()) {
+            let l2 = table_mut(PhysFrame::containing_address(l3e.addr()));
+            for l2e in l2.iter().filter(|e| !e.is_unused()) {
+                if l2e.flags().contains(PageTableFlags::HUGE_PAGE) {
+                    unsafe {
+                        fa.deallocate_2m(PhysFrame::containing_address(l2e.addr()));
+                    }
+                    continue;
+                }
+                let l1 = table_mut(PhysFrame::containing_address(l2e.addr()));
+                for l1e in l1.iter().filter(|e| !e.is_unused()) {
+                    unsafe {
+                        fa.deallocate_frame(PhysFrame::containing_address(l1e.addr()));
+                    }
+                }
+                unsafe { fa.deallocate_frame(PhysFrame::containing_address(l2e.addr())) };
+            }
+            unsafe { fa.deallocate_frame(PhysFrame::containing_address(l3e.addr())) };
+        }
+        unsafe { fa.deallocate_frame(PhysFrame::containing_address(l4e.addr())) };
+    }
+    unsafe { fa.deallocate_frame(pml4) };
+}
+
 impl AddrSpace {
     /// PML4 nuevo con las entradas del kernel copiadas, EXCEPTO la 0: ahí
-    /// vive el usuario (todo < 512 GiB). En el PML4 del kernel esa entrada
-    /// solo contiene los mapeos de identidad que dejó el bootloader para
-    /// el salto inicial; el kernel ya no los usa (GDT/IDT/estáticos viven
-    /// en las direcciones altas del resto de entradas).
+    /// vive el usuario (todo < 512 GiB).
     pub fn new() -> Option<Self> {
         let frame = mm::FRAME_ALLOC.get()?.lock().allocate_frame()?;
         let dst = table_mut(frame);
@@ -56,17 +109,43 @@ impl AddrSpace {
                 dst[i] = src[i].clone();
             }
         }
-        Some(Self { pml4: frame })
+        Some(Self {
+            inner: Arc::new(AddrSpaceInner {
+                pml4: frame,
+                mmap: Mutex::new(MmapBook {
+                    regions: Vec::new(),
+                    next: soso_abi::MMAP_BASE,
+                }),
+            }),
+        })
+    }
+
+    pub fn with_mmap_mut<R>(&self, f: impl FnOnce(&mut MmapBook) -> R) -> R {
+        f(&mut self.inner.mmap.lock())
+    }
+
+    pub fn find_mmap_region(&self, addr: u64) -> Option<MmapRegion> {
+        let book = self.inner.mmap.lock();
+        mmap::find_region(&book.regions, addr).cloned()
+    }
+
+    fn pml4(&self) -> PhysFrame {
+        self.inner.pml4
+    }
+
+    /// Dirección física del PML4 (clave para futex compartidos entre hilos).
+    pub fn pml4_phys(&self) -> u64 {
+        self.inner.pml4.start_address().as_u64()
     }
 
     pub fn mapper(&self) -> OffsetPageTable<'static> {
         let phys_offset = mm::phys_to_virt(0);
-        unsafe { OffsetPageTable::new(table_mut(self.pml4), phys_offset) }
+        unsafe { OffsetPageTable::new(table_mut(self.pml4()), phys_offset) }
     }
 
     /// Mapea (si no lo está ya) la página de `va` con un frame nuevo a
     /// cero. Devuelve el frame que la respalda.
-    pub fn ensure_mapped(&mut self, va: u64) -> Option<PhysFrame> {
+    pub fn ensure_mapped(&self, va: u64) -> Option<PhysFrame> {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
         let mut mapper = self.mapper();
         if let Some(frame) = mapper.translate_page(page).ok() {
@@ -81,13 +160,12 @@ impl AddrSpace {
             mapper
                 .map_to_with_table_flags(page, frame, USER_FLAGS, USER_FLAGS, &mut *fa)
                 .ok()?
-                .ignore(); // CR3 de otro proceso: no hace falta flush aquí
+                .ignore();
         }
         Some(frame)
     }
 
-    /// Escribe `data` en `va` del espacio (sin necesidad de activarlo),
-    /// resolviendo página a página. Las páginas deben estar mapeadas.
+    /// Escribe `data` en `va` del espacio (sin necesidad de activarlo).
     pub fn write(&self, va: u64, data: &[u8]) -> Option<()> {
         let mapper = self.mapper();
         let mut off = 0usize;
@@ -109,7 +187,7 @@ impl AddrSpace {
     }
 
     /// Mapea una página de usuario con el frame dado.
-    pub fn map_page(&mut self, va: u64, frame: PhysFrame, writable: bool) -> Option<()> {
+    pub fn map_page(&self, va: u64, frame: PhysFrame, writable: bool) -> Option<()> {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
         let mut mapper = self.mapper();
         let flags = if writable { USER_FLAGS } else { USER_RDONLY };
@@ -129,9 +207,8 @@ impl AddrSpace {
         Some(())
     }
 
-    /// Mapea una página de usuario de 2 MiB con el bloque físico dado
-    /// (alineado a 2 MiB, de `allocate_2m`).
-    pub fn map_page_2m(&mut self, va: u64, frame: PhysFrame, writable: bool) -> Option<()> {
+    /// Mapea una página de usuario de 2 MiB con el bloque físico dado.
+    pub fn map_page_2m(&self, va: u64, frame: PhysFrame, writable: bool) -> Option<()> {
         let page = Page::<Size2MiB>::containing_address(VirtAddr::new(va));
         let frame2m = PhysFrame::<Size2MiB>::containing_address(frame.start_address());
         let mut mapper = self.mapper();
@@ -147,7 +224,7 @@ impl AddrSpace {
     }
 
     /// Desmapea un rango de páginas (4 KiB o 2 MiB) y libera sus frames.
-    pub fn unmap_range(&mut self, start: u64, len: u64) {
+    pub fn unmap_range(&self, start: u64, len: u64) {
         const HUGE: u64 = 2 * 1024 * 1024;
         let mut mapper = self.mapper();
         let mut fa = mm::FRAME_ALLOC.get().unwrap().lock();
@@ -191,43 +268,7 @@ impl AddrSpace {
     }
 
     pub fn activate(&self) {
-        unsafe { Cr3::write(self.pml4, Cr3Flags::empty()) };
-    }
-
-    /// Libera todo el árbol de usuario (frames de datos y tablas) y el
-    /// propio PML4. SOLO la entrada L4 0 es de usuario: el resto son
-    /// tablas compartidas con el kernel (que este bootloader también
-    /// coloca en direcciones "bajas": kernel en la entrada 2, heap en la
-    /// 136...). El CR3 activo NO debe ser este espacio.
-    pub fn free(self) {
-        let mut fa = mm::FRAME_ALLOC.get().unwrap().lock();
-        let l4 = table_mut(self.pml4);
-        for l4e in l4.iter().take(1).filter(|e| !e.is_unused()) {
-            let l3 = table_mut(PhysFrame::containing_address(l4e.addr()));
-            for l3e in l3.iter().filter(|e| !e.is_unused()) {
-                let l2 = table_mut(PhysFrame::containing_address(l3e.addr()));
-                for l2e in l2.iter().filter(|e| !e.is_unused()) {
-                    // entrada huge: apunta a un bloque de datos de 2 MiB,
-                    // no a una tabla L1
-                    if l2e.flags().contains(PageTableFlags::HUGE_PAGE) {
-                        unsafe {
-                            fa.deallocate_2m(PhysFrame::containing_address(l2e.addr()));
-                        }
-                        continue;
-                    }
-                    let l1 = table_mut(PhysFrame::containing_address(l2e.addr()));
-                    for l1e in l1.iter().filter(|e| !e.is_unused()) {
-                        unsafe {
-                            fa.deallocate_frame(PhysFrame::containing_address(l1e.addr()));
-                        }
-                    }
-                    unsafe { fa.deallocate_frame(PhysFrame::containing_address(l2e.addr())) };
-                }
-                unsafe { fa.deallocate_frame(PhysFrame::containing_address(l3e.addr())) };
-            }
-            unsafe { fa.deallocate_frame(PhysFrame::containing_address(l4e.addr())) };
-        }
-        unsafe { fa.deallocate_frame(self.pml4) };
+        unsafe { Cr3::write(self.pml4(), Cr3Flags::empty()) };
     }
 }
 

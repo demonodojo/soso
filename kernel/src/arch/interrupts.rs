@@ -45,9 +45,16 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             crate::task::ap_timer_isr as *const () as u64,
         ));
     }
+    idt[apic::RESCHED_VECTOR].set_handler_fn(resched_handler);
     idt[InterruptIndex::Com1 as u8].set_handler_fn(com1_handler);
     idt
 });
+
+/// IPI de replanificación: solo EOI. Despierta al core del `hlt` para que
+/// el bucle del scheduler vuelva a mirar `PROCS`.
+extern "x86-interrupt" fn resched_handler(_stack_frame: InterruptStackFrame) {
+    apic::eoi();
+}
 
 /// Carga la IDT compartida en un AP (sin tocar el PIC, que es de la BSP).
 pub fn load_idt_ap() {

@@ -6,6 +6,7 @@
 extern crate alloc;
 
 pub mod sys;
+pub mod thread;
 
 pub use soso_abi as abi;
 

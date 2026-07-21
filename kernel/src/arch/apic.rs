@@ -20,6 +20,8 @@ const R_TIMER_DIV: u32 = 0x3E0;
 
 /// Vector del timer LAPIC (los APs; la BSP sigue con PIC+PIT).
 pub const TIMER_VECTOR: u8 = 0x40;
+/// IPI de replanificación: despierta un core en `hlt` para que mire PROCS.
+pub const RESCHED_VECTOR: u8 = 0x41;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 static MODO_X2: AtomicBool = AtomicBool::new(false);
@@ -108,6 +110,26 @@ fn icr(dest_apic: u32, flags: u32) {
         mmio_write(R_ICR_LO, flags);
         while mmio_read(R_ICR_LO) & (1 << 12) != 0 {
             core::hint::spin_loop();
+        }
+    }
+}
+
+/// IPI de entrega fija (`Fixed`) con el vector indicado.
+pub fn send_ipi(dest_apic: u32, vector: u8) {
+    icr(dest_apic, vector as u32);
+}
+
+/// Despierta al resto de CPUs en línea (p. ej. tras hacer Runnable un
+/// proceso) para que salgan del `hlt` y miren `PROCS`.
+pub fn kick_idle_cpus() {
+    let me = crate::arch::percpu::cpu_index();
+    let n = crate::arch::smp::CPUS_ONLINE.load(Ordering::Relaxed) as usize;
+    for cpu in 0..n.min(crate::arch::smp::MAX_CPUS) {
+        if cpu == me {
+            continue;
+        }
+        if let Some(apic_id) = crate::arch::smp::apic_id_of(cpu) {
+            send_ipi(apic_id, RESCHED_VECTOR);
         }
     }
 }

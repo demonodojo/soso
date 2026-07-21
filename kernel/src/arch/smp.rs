@@ -20,6 +20,26 @@ static mut AP_STACKS: [ApStack; MAX_CPUS - 1] =
 /// CPUs en línea (incluida la BSP).
 pub static CPUS_ONLINE: AtomicU32 = AtomicU32::new(1);
 static AP_APIC_ID: AtomicU64 = AtomicU64::new(0);
+/// APIC id por índice de CPU (`u32::MAX` = desconocido).
+static APIC_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(u32::MAX) }; MAX_CPUS];
+
+pub fn set_apic_id(cpu: usize, id: u32) {
+    if cpu < MAX_CPUS {
+        APIC_IDS[cpu].store(id, Ordering::Relaxed);
+    }
+}
+
+pub fn apic_id_of(cpu: usize) -> Option<u32> {
+    if cpu >= MAX_CPUS {
+        return None;
+    }
+    let v = APIC_IDS[cpu].load(Ordering::Relaxed);
+    if v == u32::MAX {
+        None
+    } else {
+        Some(v)
+    }
+}
 
 // Direcciones fijas DENTRO de la página del trampolín (los operandos de
 // memoria del ensamblador no admiten aritmética de símbolos, así que el
@@ -125,6 +145,7 @@ extern "C" fn ap_entry() -> ! {
     // pila de la BSP (o a lo que hubiera en LSTAR, sin inicializar = #GP).
     crate::task::syscall::init_msrs_ap();
     let id = apic::id();
+    set_apic_id(cpu, id);
     crate::println!("smp: cpu apic {id} en línea");
     CPUS_ONLINE.fetch_add(1, Ordering::SeqCst);
     AP_APIC_ID.store(id as u64 | (1 << 63), Ordering::SeqCst);
@@ -138,6 +159,7 @@ extern "C" fn ap_entry() -> ! {
 pub fn init(rsdp_phys: u64) {
     apic::init_bsp();
     let bsp = apic::id();
+    set_apic_id(0, bsp);
     let ids = crate::arch::acpi::apic_ids(rsdp_phys);
     crate::println!("smp: MADT con {} CPUs (bsp apic {bsp})", ids.len());
     if ids.len() <= 1 {

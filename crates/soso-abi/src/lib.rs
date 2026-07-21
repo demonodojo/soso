@@ -35,6 +35,13 @@ pub const SYS_PIPE: u64 = 21;
 pub const SYS_SPAWN_IO: u64 = 22;
 pub const SYS_CHDIR: u64 = 23;
 pub const SYS_GETCWD: u64 = 24;
+pub const SYS_THREAD_SPAWN: u64 = 25;
+pub const SYS_FUTEX: u64 = 26;
+pub const SYS_NCPU: u64 = 27;
+
+/// Operaciones de `SYS_FUTEX` (arg `op`).
+pub const FUTEX_WAIT: u64 = 0;
+pub const FUTEX_WAKE: u64 = 1;
 
 // ---- mmap ----
 

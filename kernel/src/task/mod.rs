@@ -10,6 +10,7 @@
 
 pub mod addrspace;
 pub mod elf;
+pub mod futex;
 pub mod mmap;
 pub mod path;
 pub mod pipe;
@@ -52,6 +53,8 @@ pub enum State {
         len: u64,
         write: bool,
     },
+    /// `futex_wait` sobre (pml4, uaddr).
+    WaitingFutex { pml4: u64, uaddr: u64 },
     Zombie(u8),
 }
 
@@ -142,23 +145,23 @@ pub struct Process {
     pub name: String,
     pub state: State,
     pub ctx: Context,
-    /// None solo en zombies (el espacio se libera al morir).
+    /// None solo en zombies (el espacio se libera al morir / al caer el
+    /// último Arc si está compartido entre hilos).
     pub space: Option<AddrSpace>,
     pub fds: Vec<Option<Fd>>,
     pub brk: u64,
     pub brk_min: u64,
-    /// Regiones mmap activas (paginación bajo demanda).
-    pub mmaps: Vec<mmap::MmapRegion>,
-    /// Siguiente puntero de asignación mmap.
-    pub mmap_next: u64,
     /// Consola a la que van fd 0/1/2 (Fd::Tty).
     pub console: Console,
     /// Directorio de trabajo (ruta absoluta normalizada).
     pub cwd: String,
-    /// Estado FPU/SSE (fxsave64) capturado al desalojar por timer; se
-    /// restaura en cada reanudación. Las mitades altas YMM no necesitan
-    /// guardarse: el kernel compila sin AVX y no las toca.
+    /// Estado FPU/SSE (xsave) capturado al desalojar por timer; se
+    /// restaura en cada reanudación.
     pub fpu: crate::arch::fpu::FpuArea,
+    /// `kill_pid` mientras el proceso está `Running` en otro core: no se
+    /// marca Zombie todavía (evitar UAF del AddrSpace); el timer del
+    /// owner_cpu lo convierte en Zombie al desalojar.
+    pub kill_pending: bool,
 }
 
 pub static PROCS: Mutex<Vec<Process>> = Mutex::new(Vec::new());
@@ -187,13 +190,23 @@ pub fn exists(pid: u64) -> bool {
 }
 
 /// Marca un proceso para morir (cliente SSH desconectado). No libera su
-/// espacio aquí: si es el proceso actual no se puede; el scheduler recoge
-/// los zombis huérfanos que no estén corriendo.
+/// espacio aquí. Si está `Running` en un core, solo pone `kill_pending`
+/// para que ese core lo convierta en Zombie al desalojar (marcar Zombie
+/// mientras sigue en ring 3 permitiría liberar el AddrSpace desde otro
+/// core → UAF).
 pub fn kill_pid(pid: u64) {
     let mut procs = PROCS.lock();
     if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
-        p.state = State::Zombie(255);
         p.parent = 0;
+        if matches!(p.state, State::Zombie(_)) {
+            return;
+        }
+        if p.state == State::Running {
+            p.kill_pending = true;
+        } else {
+            p.state = State::Zombie(255);
+            p.kill_pending = false;
+        }
     }
 }
 
@@ -217,14 +230,14 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
         return false;
     }
     with_current(|p| {
-        let region = match mmap::find_region(&p.mmaps, addr) {
-            Some(r) => r.clone(),
+        let space = p.space.as_ref().unwrap().clone();
+        let region = match space.find_mmap_region(addr) {
+            Some(r) => r,
             None => return false,
         };
         if is_write && !region.writable {
             return false;
         }
-        let space = p.space.as_mut().unwrap();
         if space.is_mapped(addr & !0xfff) {
             return true;
         }
@@ -353,8 +366,8 @@ pub fn spawn_console_io(
         let ino = crate::vfs::resolve(path).map_err(crate::task::syscall::fs_errno)?;
         crate::vfs::read_file(ino).map_err(crate::task::syscall::fs_errno)?
     };
-    let mut space = AddrSpace::new().ok_or(-abi::ENOMEM)?;
-    match spawn_into(&mut space, &data, args) {
+    let space = AddrSpace::new().ok_or(-abi::ENOMEM)?;
+    match spawn_into(&space, &data, args) {
         Ok((ctx, brk)) => {
             let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
             let mut fds = vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)];
@@ -373,22 +386,75 @@ pub fn spawn_console_io(
                 fds,
                 brk,
                 brk_min: brk,
-                mmaps: Vec::new(),
-                mmap_next: soso_abi::MMAP_BASE,
                 console,
                 cwd,
                 fpu: crate::arch::fpu::FpuArea::inicial(),
+                kill_pending: false,
             });
+            crate::arch::apic::kick_idle_cpus();
             Ok(pid)
         }
         Err(e) => {
-            space.free();
+            drop(space);
             Err(e)
         }
     }
 }
 
-fn spawn_into(space: &mut AddrSpace, data: &[u8], args: &str) -> Result<(Context, u64), i64> {
+/// Crea un hilo: mismo AddrSpace (Arc), pila y entry proporcionados por
+/// el usuario. Devuelve el tid (= pid).
+pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64) -> Result<u64, i64> {
+    use soso_abi as abi;
+    if entry == 0 || stack_top == 0 || stack_top > addrspace::USER_MAX {
+        return Err(-abi::EINVAL);
+    }
+    let parent = current_pid();
+    if parent == 0 {
+        return Err(-abi::EINVAL);
+    }
+    let (space, console, cwd, brk, brk_min, name) = with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::ENOMEM)?.clone();
+        Ok::<_, i64>((
+            space,
+            p.console,
+            p.cwd.clone(),
+            p.brk,
+            p.brk_min,
+            p.name.clone(),
+        ))
+    })?;
+    let tid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    // ABI SysV: en la entrada de una función (como tras un `call`)
+    // `rsp % 16 == 8`. El iretq no hace `call`, así que dejamos la pila
+    // 8 bytes por debajo del alineado a 16.
+    let rsp = (stack_top & !0xFu64).wrapping_sub(8);
+    let ctx = Context {
+        rip: entry,
+        rsp,
+        rflags: 0x202,
+        rdi: arg,
+        ..Context::default()
+    };
+    PROCS.lock().push(Process {
+        pid: tid,
+        parent,
+        name,
+        state: State::Runnable,
+        ctx,
+        space: Some(space),
+        fds: vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)],
+        brk,
+        brk_min,
+        console,
+        cwd,
+        fpu: crate::arch::fpu::FpuArea::inicial(),
+        kill_pending: false,
+    });
+    crate::arch::apic::kick_idle_cpus();
+    Ok(tid)
+}
+
+fn spawn_into(space: &AddrSpace, data: &[u8], args: &str) -> Result<(Context, u64), i64> {
     use soso_abi as abi;
     let (entry, brk) = elf::load(space, data).map_err(|e| {
         crate::println!("spawn: elf inválido: {e}");
@@ -435,6 +501,7 @@ pub fn exit_current(code: u8) -> ! {
             }
         }
         let idx = procs.iter().position(|p| p.pid == pid).expect("exit sin proceso");
+        futex::forget_pid(pid);
         syscall::close_all_fds(&mut procs[idx].fds);
         let parent = procs[idx].parent;
         let padre_esperando = procs
@@ -455,9 +522,7 @@ pub fn exit_current(code: u8) -> ! {
         }
         crate::arch::percpu::set_current_pid(0);
     }
-    if let Some(s) = space {
-        s.free();
-    }
+    drop(space);
     schedule();
 }
 
@@ -554,16 +619,17 @@ extern "C" fn schedule_inner() -> ! {
         let mut procs = PROCS.lock();
 
         // Recoger zombis huérfanos (p. ej. shell de una sesión SSH que el
-        // cliente cerró). Aquí no hay proceso corriendo (CURRENT=0), pero
-        // el CR3 activo puede apuntar a un espacio que vamos a liberar.
+        // cliente cerró). No liberar el AddrSpace si el pid sigue en
+        // ejecución en algún core (race kill_pid → UAF).
         if procs.iter().any(|p| p.parent == 0 && matches!(p.state, State::Zombie(_))) {
             addrspace::activate_kernel();
             let mut i = 0;
             while i < procs.len() {
-                if procs[i].parent == 0 && matches!(procs[i].state, State::Zombie(_)) {
-                    if let Some(s) = procs.remove(i).space {
-                        s.free();
-                    }
+                if procs[i].parent == 0
+                    && matches!(procs[i].state, State::Zombie(_))
+                    && !crate::arch::percpu::pid_en_ejecucion(procs[i].pid)
+                {
+                    drop(procs.remove(i).space);
                 } else {
                     i += 1;
                 }
@@ -909,44 +975,7 @@ extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
     if cur == 0 {
         return 0;
     }
-    if remaining().fetch_sub(1, Ordering::Relaxed) > 1 {
-        return 0;
-    }
-    let mut procs = PROCS.lock();
-    let hay_otro =
-        procs.iter().any(|p| p.pid != cur && p.state == State::Runnable);
-    if !hay_otro {
-        remaining().store(TIMESLICE_TICKS, Ordering::Relaxed);
-        return 0;
-    }
-    if let Some(p) = procs.iter_mut().find(|p| p.pid == cur) {
-        p.ctx = Context {
-            r15: f.r15,
-            r14: f.r14,
-            r13: f.r13,
-            r12: f.r12,
-            r11: f.r11,
-            r10: f.r10,
-            r9: f.r9,
-            r8: f.r8,
-            rdi: f.rdi,
-            rsi: f.rsi,
-            rbp: f.rbp,
-            rbx: f.rbx,
-            rdx: f.rdx,
-            rcx: f.rcx,
-            rax: f.rax,
-            rip: f.rip,
-            rsp: f.rsp,
-            rflags: f.rflags,
-        };
-        // El estado FPU/SSE lo capturó timer_isr en TIMER_FPU antes de
-        // net::poll; pertenece a este proceso desalojado.
-        p.fpu = unsafe { (*(&raw const crate::arch::fpu::TIMER_FPU)).clone() };
-        p.state = State::Runnable;
-    }
-    crate::arch::percpu::set_current_pid(0);
-    1
+    desalojar_si_toca(f, cur, /*bsp_fpu*/ true)
 }
 
 /// Igual que `timer_tick` pero para el timer LAPIC de un AP: EOI del LAPIC
@@ -962,12 +991,24 @@ extern "C" fn ap_timer_tick(f: &mut TrapFrame) -> u64 {
     if cur == 0 {
         return 0;
     }
-    if remaining().fetch_sub(1, Ordering::Relaxed) > 1 {
+    desalojar_si_toca(f, cur, /*bsp_fpu*/ false)
+}
+
+/// Lógica común de preempción: respeta `kill_pending`/`Zombie` (nunca
+/// Zombie→Runnable) y fuerza el desalojo si hay kill aunque no haya otro
+/// Runnable.
+fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
+    let mut procs = PROCS.lock();
+    let force_kill = procs
+        .iter()
+        .any(|p| p.pid == cur && (p.kill_pending || matches!(p.state, State::Zombie(_))));
+    if !force_kill && remaining().fetch_sub(1, Ordering::Relaxed) > 1 {
         return 0;
     }
-    let mut procs = PROCS.lock();
-    let hay_otro = procs.iter().any(|p| p.pid != cur && p.state == State::Runnable);
-    if !hay_otro {
+    let hay_otro = procs
+        .iter()
+        .any(|p| p.pid != cur && p.state == State::Runnable);
+    if !force_kill && !hay_otro {
         remaining().store(TIMESLICE_TICKS, Ordering::Relaxed);
         return 0;
     }
@@ -992,12 +1033,22 @@ extern "C" fn ap_timer_tick(f: &mut TrapFrame) -> u64 {
             rsp: f.rsp,
             rflags: f.rflags,
         };
-        // El estado FPU/SSE lo capturó ap_timer_isr en el área de este core
-        // antes de la posible replanificación.
-        p.fpu = unsafe {
-            (*(crate::arch::percpu::fpu_scratch_ptr() as *const crate::arch::fpu::FpuArea)).clone()
-        };
-        p.state = State::Runnable;
+        if bsp_fpu {
+            p.fpu = unsafe { (*(&raw const crate::arch::fpu::TIMER_FPU)).clone() };
+        } else {
+            p.fpu = unsafe {
+                (*(crate::arch::percpu::fpu_scratch_ptr() as *const crate::arch::fpu::FpuArea))
+                    .clone()
+            };
+        }
+        if p.kill_pending || matches!(p.state, State::Zombie(_)) {
+            p.kill_pending = false;
+            p.parent = 0;
+            p.state = State::Zombie(255);
+        } else {
+            // Solo Running → Runnable; no tocar Waiting*/Sleeping.
+            p.state = State::Runnable;
+        }
     }
     crate::arch::percpu::set_current_pid(0);
     1

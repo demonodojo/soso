@@ -118,3 +118,21 @@ pub fn cpu_index() -> usize {
     }
     v as usize
 }
+
+/// PID que ejecuta la CPU `cpu` (0 = ninguna). Lectura directa de la tabla
+/// estática (no GS): sirve para saber si un pid sigue en ring 3 en otro
+/// core antes de liberar su AddrSpace.
+pub fn pid_of_cpu(cpu: usize) -> u64 {
+    if cpu >= MAX_CPUS {
+        return 0;
+    }
+    unsafe { (&raw const PERCPU[cpu]).read().current_pid }
+}
+
+/// ¿Algún core tiene este pid como `current_pid`?
+pub fn pid_en_ejecucion(pid: u64) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    (0..MAX_CPUS).any(|c| pid_of_cpu(c) == pid)
+}

@@ -282,7 +282,58 @@ fn suite() -> u8 {
     );
     sys::unlink("/tmp/spawn_io.txt");
 
-    println!("init: TODO OK — syscalls desde ring 3 (incl. pipe y spawn_io)");
+    // Hilos + futex: N workers incrementan un contador compartido.
+    {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        use libsoso::thread;
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        static DONE: AtomicU32 = AtomicU32::new(0);
+        const N: u32 = 4;
+        const PER: u32 = 1000;
+
+        extern "C" fn thr_entry(_arg: u64) -> ! {
+            for _ in 0..PER {
+                COUNTER.fetch_add(1, Ordering::Relaxed);
+            }
+            DONE.fetch_add(1, Ordering::Release);
+            let _ = sys::futex_wake(&DONE as *const AtomicU32 as *const u32, u64::MAX);
+            sys::exit(0);
+        }
+
+        COUNTER.store(0, Ordering::Relaxed);
+        DONE.store(0, Ordering::Relaxed);
+        let mut tids = [0u64; N as usize];
+        let mut spawn_err: i64 = 0;
+        for i in 0..N as usize {
+            match thread::spawn(thr_entry, i as u64) {
+                Ok(t) => tids[i] = t,
+                Err(e) => {
+                    spawn_err = e;
+                    break;
+                }
+            }
+        }
+        check!(spawn_err == 0, "thread_spawn ×{N} (errno {spawn_err})");
+        while DONE.load(Ordering::Acquire) < N {
+            let d = DONE.load(Ordering::Acquire);
+            let _ = sys::futex_wait(&DONE as *const AtomicU32 as *const u32, d);
+        }
+        // Reclamar zombis de los hilos.
+        for _ in 0..N {
+            let _ = sys::wait();
+        }
+        check!(
+            COUNTER.load(Ordering::Relaxed) == N * PER,
+            "hilos: contador={} (esperado {})",
+            COUNTER.load(Ordering::Relaxed),
+            N * PER
+        );
+        check!(sys::ncpu() >= 1, "ncpu={}", sys::ncpu());
+        let _ = tids;
+    }
+
+    println!("init: TODO OK — syscalls desde ring 3 (incl. pipe, spawn_io e hilos)");
     0
 }
 

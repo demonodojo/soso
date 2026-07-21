@@ -210,6 +210,11 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_SPAWN_IO => sys_spawn_io(a1),
         abi::SYS_CHDIR => sys_chdir(a1, a2),
         abi::SYS_GETCWD => sys_getcwd(a1, a2),
+        abi::SYS_THREAD_SPAWN => sys_thread_spawn(a1, a2, a3),
+        abi::SYS_FUTEX => sys_futex(f, a1, a2, a3, a4),
+        abi::SYS_NCPU => Ok(crate::arch::smp::CPUS_ONLINE.load(
+            core::sync::atomic::Ordering::Relaxed,
+        ) as u64),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -776,7 +781,7 @@ fn sys_sbrk(delta: i64) -> Result<u64, i64> {
             .filter(|&b| b >= p.brk_min && b <= BRK_MAX)
             .ok_or(-abi::ENOMEM)?;
         if nuevo > old {
-            let space = p.space.as_mut().unwrap();
+            let space = p.space.as_ref().unwrap().clone();
             for va in (old.next_multiple_of(4096)..nuevo.next_multiple_of(4096)).step_by(4096)
             {
                 space.ensure_mapped(va).ok_or(-abi::ENOMEM)?;
@@ -814,18 +819,22 @@ fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
         (ino, fsize, false)
     };
     super::with_current(|p| {
-        let virt = super::mmap::next_addr(&p.mmaps, addr, len_aligned).ok_or(-abi::ENOMEM)?;
-        p.mmaps.push(super::mmap::MmapRegion {
-            virt_start: virt,
-            len: len_aligned,
-            inode,
-            file_offset: offset,
-            file_len,
-            writable,
-        });
-        if virt >= p.mmap_next {
-            p.mmap_next = virt + len_aligned;
-        }
+        let space = p.space.as_ref().ok_or(-abi::ENOMEM)?;
+        let virt = space.with_mmap_mut(|book| {
+            let virt = super::mmap::next_addr(&book.regions, addr, len_aligned).ok_or(-abi::ENOMEM)?;
+            book.regions.push(super::mmap::MmapRegion {
+                virt_start: virt,
+                len: len_aligned,
+                inode,
+                file_offset: offset,
+                file_len,
+                writable,
+            });
+            if virt >= book.next {
+                book.next = virt + len_aligned;
+            }
+            Ok::<u64, i64>(virt)
+        })?;
         Ok(virt)
     })
 }
@@ -836,12 +845,14 @@ fn sys_munmap(addr: u64, len: u64) -> Result<u64, i64> {
     }
     let len_aligned = len.next_multiple_of(4096);
     super::with_current(|p| {
-        if !super::mmap::remove_region(&mut p.mmaps, addr, len_aligned) {
+        let space = p.space.as_ref().ok_or(-abi::ENOMEM)?;
+        let ok = space.with_mmap_mut(|book| {
+            super::mmap::remove_region(&mut book.regions, addr, len_aligned)
+        });
+        if !ok {
             return Err(-abi::EINVAL);
         }
-        if let Some(space) = p.space.as_mut() {
-            space.unmap_range(addr, len_aligned);
-        }
+        space.unmap_range(addr, len_aligned);
         Ok(0)
     })
 }
@@ -872,4 +883,68 @@ fn sys_gpu_map(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
 fn sys_gpu_submit(cmd_ptr: u64, cmd_len: u64) -> Result<u64, i64> {
     let cmd = user_slice(cmd_ptr, cmd_len)?;
     crate::drivers::gpu::submit(cmd).map_err(|e| -e)
+}
+
+fn sys_thread_spawn(entry: u64, arg: u64, stack_top: u64) -> Result<u64, i64> {
+    // La pila suele ser mmap anónimo (fault bajo demanda): no exigir PTE
+    // presente, solo región mmap escribible o páginas ya mapeadas.
+    let stack_lo = stack_top.saturating_sub(16);
+    if stack_lo == 0 || stack_top > USER_MAX || entry == 0 || entry >= USER_MAX {
+        return Err(-abi::EFAULT);
+    }
+    let stack_ok = super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::ENOMEM)?;
+        if let Some(r) = space.find_mmap_region(stack_lo) {
+            if r.writable
+                && stack_lo >= r.virt_start
+                && stack_top <= r.virt_start.saturating_add(r.len)
+            {
+                return Ok(());
+            }
+            return Err(-abi::EFAULT);
+        }
+        // Sin región mmap: exigir PTE presente y escribible (sin reentrar
+        // en with_current: ya tenemos el space).
+        use x86_64::structures::paging::PageTableFlags;
+        match space.translate_flags(stack_lo) {
+            Some(fl)
+                if fl.contains(PageTableFlags::USER_ACCESSIBLE)
+                    && fl.contains(PageTableFlags::WRITABLE) =>
+            {
+                Ok(())
+            }
+            _ => Err(-abi::EFAULT),
+        }
+    });
+    stack_ok?;
+    if !user_range_ok(entry, 1, false) {
+        return Err(-abi::EFAULT);
+    }
+    super::thread_spawn(entry, arg, stack_top)
+}
+
+fn sys_futex(
+    f: &mut SyscallFrame,
+    op: u64,
+    uaddr: u64,
+    val: u64,
+    nwake: u64,
+) -> Result<u64, i64> {
+    if !user_range_ok(uaddr, 4, true) {
+        return Err(-abi::EFAULT);
+    }
+    let pml4 = super::with_current(|p| {
+        p.space
+            .as_ref()
+            .map(|s| s.pml4_phys())
+            .ok_or(-abi::ENOMEM)
+    })?;
+    match op {
+        abi::FUTEX_WAIT => {
+            // No vuelve: wait_or_resume bloquea o replanifica.
+            super::futex::wait_or_resume(pml4, uaddr, val as u32, ctx_from_frame(f));
+        }
+        abi::FUTEX_WAKE => Ok(super::futex::wake(pml4, uaddr, nwake)),
+        _ => Err(-abi::EINVAL),
+    }
 }

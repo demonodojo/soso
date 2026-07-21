@@ -8,7 +8,7 @@ use xmas_elf::header;
 use xmas_elf::program::Type;
 
 /// Carga los segmentos PT_LOAD. Devuelve (entry point, brk inicial).
-pub fn load(space: &mut AddrSpace, data: &[u8]) -> Result<(u64, u64), &'static str> {
+pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64), &'static str> {
     let elf = ElfFile::new(data)?;
     header::sanity_check(&elf)?;
     if elf.header.pt2.type_().as_type() != header::Type::Executable {
