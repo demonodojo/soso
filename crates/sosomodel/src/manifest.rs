@@ -1,7 +1,6 @@
 //! manifest.som: arquitectura del transformer y grafo de prefetch.
 
-use crate::layout::{MAGIC, SOM_HEADER_SIZE};
-use crate::{align_up, crc32c, CACHE_ALIGN};
+use crate::{pack_som, parse_som, Reader, CACHE_ALIGN};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -19,8 +18,14 @@ pub struct Manifest {
     pub hidden_dim: u32,
     pub num_layers: u32,
     pub num_heads: u32,
+    /// Cabezas K/V (GQA). En MHA clásico coincide con `num_heads`.
+    pub num_kv_heads: u32,
     pub ffn_dim: u32,
     pub max_seq: u32,
+    /// Base de frecuencias RoPE (10000.0 en llama clásico).
+    pub rope_theta: f32,
+    /// Épsilon del RMSNorm.
+    pub rms_eps: f32,
     pub prefetch: Vec<LayerPrefetch>,
 }
 
@@ -31,9 +36,12 @@ impl Manifest {
             prefetch.push(LayerPrefetch {
                 layer,
                 shards: alloc::vec![
+                    format!("L{layer:02}.attn_norm.tensor"),
                     format!("L{layer:02}.attn_q.tensor"),
                     format!("L{layer:02}.attn_k.tensor"),
                     format!("L{layer:02}.attn_v.tensor"),
+                    format!("L{layer:02}.attn_output.tensor"),
+                    format!("L{layer:02}.ffn_norm.tensor"),
                     format!("L{layer:02}.ffn_up.tensor"),
                     format!("L{layer:02}.ffn_down.tensor"),
                 ],
@@ -45,8 +53,11 @@ impl Manifest {
             hidden_dim: 128,
             num_layers: 4,
             num_heads: 4,
+            num_kv_heads: 4,
             ffn_dim: 256,
             max_seq: 128,
+            rope_theta: 10000.0,
+            rms_eps: 1e-5,
             prefetch,
         }
     }
@@ -61,6 +72,10 @@ impl Manifest {
         body.extend_from_slice(&self.num_heads.to_le_bytes());
         body.extend_from_slice(&self.ffn_dim.to_le_bytes());
         body.extend_from_slice(&self.max_seq.to_le_bytes());
+        // v2: GQA + RoPE + eps
+        body.extend_from_slice(&self.num_kv_heads.to_le_bytes());
+        body.extend_from_slice(&self.rope_theta.to_le_bytes());
+        body.extend_from_slice(&self.rms_eps.to_le_bytes());
         body.extend_from_slice(&(self.prefetch.len() as u32).to_le_bytes());
         for pf in &self.prefetch {
             body.extend_from_slice(&pf.layer.to_le_bytes());
@@ -70,69 +85,53 @@ impl Manifest {
                 body.push(0);
             }
         }
-        let crc = crc32c(&body);
-        let mut out = Vec::with_capacity(SOM_HEADER_SIZE + body.len());
-        out.extend_from_slice(&MAGIC);
-        out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&1u32.to_le_bytes());
-        out.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        out.extend_from_slice(&body);
-        let pad = align_up(out.len(), CACHE_ALIGN) - out.len();
-        out.resize(out.len() + pad, 0);
-        out
+        pack_som(&body, 2, CACHE_ALIGN)
     }
 
     pub fn parse(data: &[u8]) -> Result<Self, ()> {
-        if data.len() < SOM_HEADER_SIZE || data[..8] != MAGIC {
+        let (version, body) = parse_som(data)?;
+        let mut r = Reader::new(body);
+        let name = String::from(r.cstr()?);
+        let vocab_size = r.u32()?;
+        let hidden_dim = r.u32()?;
+        let num_layers = r.u32()?;
+        let num_heads = r.u32()?;
+        let ffn_dim = r.u32()?;
+        let max_seq = r.u32()?;
+        let (num_kv_heads, rope_theta, rms_eps) = if version >= 2 {
+            (r.u32()?, r.f32()?, r.f32()?)
+        } else {
+            (num_heads, 10000.0, 1e-5)
+        };
+        if num_heads == 0
+            || num_kv_heads == 0
+            || hidden_dim as usize % num_heads as usize != 0
+            || num_heads % num_kv_heads != 0
+        {
             return Err(());
         }
-        let payload_len = u64::from_le_bytes(data[16..24].try_into().unwrap()) as usize;
-        let body = &data[SOM_HEADER_SIZE..SOM_HEADER_SIZE + payload_len];
-        if crc32c(body) != u32::from_le_bytes(data[8..12].try_into().unwrap()) {
-            return Err(());
-        }
-        let mut off = 0usize;
-        let nul = body[off..].iter().position(|&b| b == 0).ok_or(())?;
-        let name = core::str::from_utf8(&body[off..off + nul]).map_err(|_| ())?;
-        off += nul + 1;
-        let read_u32 = |b: &[u8]| u32::from_le_bytes(b.try_into().unwrap());
-        let vocab_size = read_u32(&body[off..off + 4]);
-        off += 4;
-        let hidden_dim = read_u32(&body[off..off + 4]);
-        off += 4;
-        let num_layers = read_u32(&body[off..off + 4]);
-        off += 4;
-        let num_heads = read_u32(&body[off..off + 4]);
-        off += 4;
-        let ffn_dim = read_u32(&body[off..off + 4]);
-        off += 4;
-        let max_seq = read_u32(&body[off..off + 4]);
-        off += 4;
-        let n_pf = read_u32(&body[off..off + 4]) as usize;
-        off += 4;
-        let mut prefetch = Vec::with_capacity(n_pf);
+        let n_pf = r.u32()? as usize;
+        let mut prefetch = Vec::new();
         for _ in 0..n_pf {
-            let layer = read_u32(&body[off..off + 4]);
-            off += 4;
-            let n_shards = read_u32(&body[off..off + 4]) as usize;
-            off += 4;
-            let mut shards = Vec::with_capacity(n_shards);
+            let layer = r.u32()?;
+            let n_shards = r.u32()? as usize;
+            let mut shards = Vec::new();
             for _ in 0..n_shards {
-                let nul = body[off..].iter().position(|&b| b == 0).ok_or(())?;
-                let s = core::str::from_utf8(&body[off..off + nul]).map_err(|_| ())?;
-                shards.push(String::from(s));
-                off += nul + 1;
+                shards.push(String::from(r.cstr()?));
             }
             prefetch.push(LayerPrefetch { layer, shards });
         }
         Ok(Self {
-            name: String::from(name),
+            name,
             vocab_size,
             hidden_dim,
             num_layers,
             num_heads,
+            num_kv_heads,
             ffn_dim,
             max_seq,
+            rope_theta,
+            rms_eps,
             prefetch,
         })
     }

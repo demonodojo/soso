@@ -1,7 +1,10 @@
 //! index.som: tabla tensor_id → shard, offset, shape, dtype.
 
-use crate::layout::{DTYPE_F32, MAGIC, QUANT_NONE, SOM_HEADER_SIZE};
-use crate::{align_up, crc32c, CACHE_ALIGN};
+use crate::layout::{
+    DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0, Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES,
+    Q8_0_BLOCK_ELEMS, QUANT_NONE, QUANT_Q4_K, QUANT_Q8_0,
+};
+use crate::{pack_som, parse_som, Reader, BLOCK_ALIGN, CACHE_ALIGN};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -15,6 +18,13 @@ pub struct TensorEntry {
     pub shape: Vec<u32>,
     pub dtype: u8,
     pub quant: u8,
+}
+
+impl TensorEntry {
+    /// Número de elementos f32 lógicos del tensor.
+    pub fn elems(&self) -> usize {
+        self.shape.iter().map(|&d| d as usize).product()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -43,57 +53,32 @@ impl TensorIndex {
             body.push(0);
             body.push(0);
         }
-        let crc = crc32c(&body);
-        let mut out = Vec::with_capacity(SOM_HEADER_SIZE + body.len());
-        out.extend_from_slice(&MAGIC);
-        out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&1u32.to_le_bytes());
-        out.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        out.extend_from_slice(&body);
-        let pad = align_up(out.len(), CACHE_ALIGN) - out.len();
-        out.resize(out.len() + pad, 0);
-        out
+        pack_som(&body, 1, CACHE_ALIGN)
     }
 
     pub fn parse(data: &[u8]) -> Result<Self, ()> {
-        if data.len() < SOM_HEADER_SIZE || data[..8] != MAGIC {
-            return Err(());
-        }
-        let payload_len = u64::from_le_bytes(data[16..24].try_into().unwrap()) as usize;
-        let body = &data[SOM_HEADER_SIZE..SOM_HEADER_SIZE + payload_len];
-        if crc32c(body) != u32::from_le_bytes(data[8..12].try_into().unwrap()) {
-            return Err(());
-        }
-        let n = u32::from_le_bytes(body[0..4].try_into().unwrap()) as usize;
-        let mut off = 4usize;
-        let mut entries = Vec::with_capacity(n);
+        let (_version, body) = parse_som(data)?;
+        let mut r = Reader::new(body);
+        let n = r.u32()? as usize;
+        let mut entries = Vec::new();
         for _ in 0..n {
-            let id = u32::from_le_bytes(body[off..off + 4].try_into().unwrap());
-            off += 4;
-            let nul = body[off..].iter().position(|&b| b == 0).ok_or(())?;
-            let name = core::str::from_utf8(&body[off..off + nul]).map_err(|_| ())?;
-            off += nul + 1;
-            let nul2 = body[off..].iter().position(|&b| b == 0).ok_or(())?;
-            let shard = core::str::from_utf8(&body[off..off + nul2]).map_err(|_| ())?;
-            off += nul2 + 1;
-            let offset = u64::from_le_bytes(body[off..off + 8].try_into().unwrap());
-            off += 8;
-            let byte_len = u64::from_le_bytes(body[off..off + 8].try_into().unwrap());
-            off += 8;
-            let ndim = u32::from_le_bytes(body[off..off + 4].try_into().unwrap()) as usize;
-            off += 4;
-            let mut shape = Vec::with_capacity(ndim);
+            let id = r.u32()?;
+            let name = String::from(r.cstr()?);
+            let shard = String::from(r.cstr()?);
+            let offset = r.u64()?;
+            let byte_len = r.u64()?;
+            let ndim = r.u32()? as usize;
+            let mut shape = Vec::new();
             for _ in 0..ndim {
-                shape.push(u32::from_le_bytes(body[off..off + 4].try_into().unwrap()));
-                off += 4;
+                shape.push(r.u32()?);
             }
-            let dtype = body[off];
-            let quant = body[off + 1];
-            off += 4;
+            let dtype = r.u8()?;
+            let quant = r.u8()?;
+            r.take(2)?;
             entries.push(TensorEntry {
                 id,
-                name: String::from(name),
-                shard: String::from(shard),
+                name,
+                shard,
                 offset,
                 byte_len,
                 shape,
@@ -109,23 +94,43 @@ impl TensorIndex {
     }
 }
 
+/// Offset del payload en un shard v2: el payload queda alineado a 64 B
+/// dentro del fichero (y por tanto en el mmap, que es page-aligned), para
+/// poder leer los pesos como vistas `&[f32]`/SIMD sin copiar.
+pub const SHARD_PAYLOAD_OFF: usize = crate::CACHE_ALIGN;
+
+/// Empaqueta el payload de un shard: cabecera SomHeader (CRC + longitud
+/// explícita) + relleno hasta 64 B + payload + relleno hasta BLOCK_ALIGN.
 pub fn pack_shard(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::from(data);
-    let crc = crc32c(data);
+    use crate::layout::MAGIC;
+    let crc = crate::crc32c(data);
+    let mut out = Vec::with_capacity(SHARD_PAYLOAD_OFF + data.len());
+    out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&crc.to_le_bytes());
-    let aligned = crate::align_up(out.len(), crate::BLOCK_ALIGN);
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    out.resize(SHARD_PAYLOAD_OFF, 0);
+    out.extend_from_slice(data);
+    let aligned = crate::align_up(out.len(), BLOCK_ALIGN);
     out.resize(aligned, 0);
     out
 }
 
+/// Verifica cabecera y CRC de un shard y devuelve el payload delimitado por
+/// `payload_len`. v1: payload tras la cabecera (24 B); v2: en el offset 64.
 pub fn verify_shard(data: &[u8]) -> Result<&[u8], ()> {
-    if data.len() < 8 {
+    use crate::layout::{MAGIC, SOM_HEADER_SIZE};
+    if data.len() < SOM_HEADER_SIZE || data[..8] != MAGIC {
         return Err(());
     }
-    let payload_end = data.len() - 4;
-    let stored_crc = u32::from_le_bytes(data[payload_end..].try_into().unwrap());
-    let payload = &data[..payload_end];
-    if crc32c(payload) != stored_crc {
+    let crc = u32::from_le_bytes(data[8..12].try_into().map_err(|_| ())?);
+    let version = u32::from_le_bytes(data[12..16].try_into().map_err(|_| ())?);
+    let payload_len = u64::from_le_bytes(data[16..24].try_into().map_err(|_| ())?);
+    let payload_len = usize::try_from(payload_len).map_err(|_| ())?;
+    let off = if version >= 2 { SHARD_PAYLOAD_OFF } else { SOM_HEADER_SIZE };
+    let end = off.checked_add(payload_len).ok_or(())?;
+    let payload = data.get(off..end).ok_or(())?;
+    if crate::crc32c(payload) != crc {
         return Err(());
     }
     Ok(payload)
@@ -142,5 +147,51 @@ pub fn make_f32_entry(id: u32, name: &str, shard: &str, offset: u64, shape: &[u3
         shape: shape.to_vec(),
         dtype: DTYPE_F32,
         quant: QUANT_NONE,
+    }
+}
+
+/// Entrada Q4_K: superbloques GGML de 256 elementos (144 bytes). El número
+/// de elementos debe ser múltiplo del superbloque.
+pub fn make_q4_k_entry(
+    id: u32,
+    name: &str,
+    shard: &str,
+    offset: u64,
+    shape: &[u32],
+) -> TensorEntry {
+    let elems: u64 = shape.iter().map(|&d| d as u64).product();
+    let blocks = elems.div_ceil(Q4_K_BLOCK_ELEMS as u64);
+    TensorEntry {
+        id,
+        name: String::from(name),
+        shard: String::from(shard),
+        offset,
+        byte_len: blocks * Q4_K_BLOCK_BYTES as u64,
+        shape: shape.to_vec(),
+        dtype: DTYPE_Q4_K,
+        quant: QUANT_Q4_K,
+    }
+}
+
+/// Entrada Q8_0: bloques de 32 elementos (escala f32 + 32 i8 = 36 bytes).
+/// El número de elementos debe ser múltiplo del tamaño de bloque.
+pub fn make_q8_0_entry(
+    id: u32,
+    name: &str,
+    shard: &str,
+    offset: u64,
+    shape: &[u32],
+) -> TensorEntry {
+    let elems: u64 = shape.iter().map(|&d| d as u64).product();
+    let blocks = elems.div_ceil(Q8_0_BLOCK_ELEMS as u64);
+    TensorEntry {
+        id,
+        name: String::from(name),
+        shard: String::from(shard),
+        offset,
+        byte_len: blocks * Q8_0_BLOCK_BYTES as u64,
+        shape: shape.to_vec(),
+        dtype: DTYPE_Q8_0,
+        quant: QUANT_Q8_0,
     }
 }

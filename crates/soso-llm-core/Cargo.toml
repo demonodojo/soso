@@ -7,6 +7,9 @@ edition = "2024"
 default = []
 std = []
 
+[dev-dependencies]
+# std feature activada en tests host
+
 [dependencies]
 sosomodel = { path = "../sosomodel" }
 libm = "0.2"

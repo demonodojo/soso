@@ -43,6 +43,11 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt
 });
 
+/// Carga la IDT compartida en un AP (sin tocar el PIC, que es de la BSP).
+pub fn load_idt_ap() {
+    IDT.load();
+}
+
 pub fn init() {
     IDT.load();
     unsafe {
@@ -69,16 +74,71 @@ fn desde_usuario(stack_frame: &InterruptStackFrame) -> bool {
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     if desde_usuario(&stack_frame) {
-        crate::task::kill_current("invalid opcode");
+        con_rsp_alineado(kill_shim, 2, 0);
     }
     panic!("EXCEPCIÓN: invalid opcode\n{stack_frame:#?}");
 }
 
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
     if desde_usuario(&stack_frame) {
-        crate::task::kill_current("general protection fault");
+        con_rsp_alineado(kill_shim, 1, 0);
     }
-    panic!("EXCEPCIÓN: general protection fault (error {error_code:#x})\n{stack_frame:#?}");
+    // rip/rsp como escalares primero: el Debug del frame puede fallar si el
+    // contexto está corrupto y perderíamos el dato clave.
+    panic!(
+        "EXCEPCIÓN: general protection fault (error {error_code:#x}) rip={:#x} rsp={:#x}\n{stack_frame:#?}",
+        stack_frame.instruction_pointer.as_u64(),
+        stack_frame.stack_pointer.as_u64()
+    );
+}
+
+/// La convención `x86-interrupt` con código de error deja `rsp % 16 == 8`
+/// en los `call` del handler (LLVM); la ABI SysV exige `% 16 == 0`. Todo
+/// código profundo llamado desde estos handlers (SSE: `movaps` sobre la
+/// pila en memcpy/fmt/iteradores) debe entrar por este trampolín que
+/// normaliza la alineación — mismo problema que `timer_isr` con la cripto
+/// de net::poll. Sin esto: GPF esporádicos y panics truncados.
+#[unsafe(naked)]
+pub extern "sysv64" fn con_rsp_alineado(
+    _f: extern "sysv64" fn(u64, u64) -> u64,
+    _a: u64,
+    _b: u64,
+) -> u64 {
+    core::arch::naked_asm!(
+        "push rbp",
+        "mov rbp, rsp",
+        "and rsp, -16",
+        "mov rax, rdi",
+        "mov rdi, rsi",
+        "mov rsi, rdx",
+        "call rax",
+        "mov rsp, rbp",
+        "pop rbp",
+        "ret",
+    )
+}
+
+extern "sysv64" fn mmap_fault_shim(addr: u64, is_write: u64) -> u64 {
+    // El fault interrumpe al usuario en una instrucción arbitraria: sus
+    // XMM están vivos y el camino del kernel (memcpy/fs) los clobbea.
+    let mut fpu = crate::arch::fpu::FpuArea::empty();
+    unsafe { crate::arch::fpu::save(&mut fpu) };
+    let r = crate::task::handle_mmap_fault(addr, is_write != 0) as u64;
+    unsafe { crate::arch::fpu::restore(&fpu) };
+    r
+}
+
+/// Mata el proceso actual con el mensaje indexado (no retorna).
+extern "sysv64" fn kill_shim(motivo: u64, dato: u64) -> u64 {
+    match motivo {
+        0 => {
+            crate::println!("task: page fault de usuario en {dato:#x}");
+            crate::task::kill_current("page fault")
+        }
+        1 => crate::task::kill_current("general protection fault"),
+        2 => crate::task::kill_current("invalid opcode"),
+        _ => crate::task::kill_current("excepción"),
+    }
 }
 
 extern "x86-interrupt" fn page_fault_handler(
@@ -88,17 +148,23 @@ extern "x86-interrupt" fn page_fault_handler(
     let addr = x86_64::registers::control::Cr2::read_raw();
     if desde_usuario(&stack_frame) {
         let is_write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
-        if crate::task::handle_mmap_fault(addr, is_write) {
+        if con_rsp_alineado(mmap_fault_shim, addr, is_write as u64) != 0 {
             return;
         }
-        crate::println!(
-            "task: page fault de usuario en {addr:#x} (rip {:#x}, {error_code:?})",
-            stack_frame.instruction_pointer.as_u64()
-        );
-        crate::task::kill_current("page fault");
+        con_rsp_alineado(kill_shim, 0, addr);
     }
+    // Escalares primero: el Debug del frame puede volver a fallar y perder
+    // el diagnóstico. [rsp] delata quién hizo `call` a una dirección mala.
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let rsp = stack_frame.stack_pointer.as_u64();
+    let ret = if rsp % 8 == 0 && rsp != 0 {
+        unsafe { core::ptr::read_volatile(rsp as *const u64) }
+    } else {
+        0
+    };
     panic!(
-        "EXCEPCIÓN: page fault accediendo a {addr:#x} ({error_code:?})\n{stack_frame:#?}"
+        "EXCEPCIÓN: page fault accediendo a {addr:#x} ({error_code:?}) rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x} cs={:#x}\n{stack_frame:#?}",
+        stack_frame.code_segment.0
     );
 }
 

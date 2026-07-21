@@ -16,7 +16,8 @@ fn is_sosomfs(ino: u64) -> bool {
 }
 
 fn decode(ino: u64) -> (u32, u32) {
-    ((ino >> 32) as u32, ino as u32)
+    let raw = ino & !SOSOMFS_BIT;
+    ((raw >> 32) as u32, raw as u32)
 }
 
 fn encode(model_idx: u32, entry: u32) -> u64 {
@@ -63,17 +64,16 @@ pub fn resolve(path: &str) -> Result<u64, SosoFsError> {
         if sub == "shards" || sub == "shards/" {
             return Ok(encode(model_idx, ENTRY_SHARDS_DIR));
         }
-        let rel = if sub.starts_with("shards/") {
-            sub.to_string()
-        } else {
-            sub.to_string()
-        };
-        let shard_idx = mfs
+        let rel = sub.to_string();
+        let Some(shard_idx) = mfs
             .catalog
             .models
             .get(model_idx as usize)
             .and_then(|m| m.shards.iter().position(|s| s.rel_path == rel))
-            .ok_or(SosoFsError::NotFound)? as u32;
+        else {
+            return Err(SosoFsError::NotFound);
+        };
+        let shard_idx = shard_idx as u32;
         Ok(encode(model_idx, shard_idx))
     } else {
         let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
@@ -130,7 +130,13 @@ pub fn stat_inode(ino: u64) -> Result<InodeItem, SosoFsError> {
 pub fn read_dir(ino: u64) -> Result<Vec<(String, u64)>, SosoFsError> {
     if !is_sosomfs(ino) {
         let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
-        return fs.lock().read_dir(ino);
+        let mut entries = fs.lock().read_dir(ino)?;
+        if ino == sosofs::layout::ROOT_INODE && models_ready() {
+            if !entries.iter().any(|(n, _)| n == "models") {
+                entries.push((String::from("models"), encode(0, ENTRY_MODELS_ROOT)));
+            }
+        }
+        return Ok(entries);
     }
     let mfs = crate::fs::MODELS.get().ok_or(SosoFsError::Io)?;
     let mfs = mfs.lock();
@@ -207,16 +213,50 @@ pub fn read_file_range(ino: u64, offset: usize, len: usize, out: &mut [u8]) -> R
         .map_err(som_errno)
 }
 
-pub fn create_file(_dir: u64, _name: &str, _data: &[u8], _mtime: u64) -> Result<u64, SosoFsError> {
-    Err(SosoFsError::Io)
+/// Lectura directa (sin caché de bloques) para rangos grandes de modelos;
+/// el resto de inodos van por la ruta normal con caché.
+pub fn read_file_range_direct(ino: u64, offset: usize, out: &mut [u8]) -> Result<(), SosoFsError> {
+    if !is_sosomfs(ino) {
+        let len = out.len();
+        return read_file_range(ino, offset, len, out);
+    }
+    let mfs = crate::fs::MODELS.get().ok_or(SosoFsError::Io)?;
+    let mut mfs = mfs.lock();
+    let (model_idx, entry) = decode(ino);
+    let shard = mfs
+        .catalog
+        .models
+        .get(model_idx as usize)
+        .and_then(|m| m.shards.get(entry as usize))
+        .cloned()
+        .ok_or(SosoFsError::NotFound)?;
+    let len = out.len();
+    mfs.read_range_direct(&shard, offset, len, out)
+        .map_err(som_errno)
 }
 
-pub fn mkdir(_dir: u64, _name: &str, _mtime: u64) -> Result<u64, SosoFsError> {
-    Err(SosoFsError::Io)
+pub fn create_file(dir: u64, name: &str, data: &[u8], mtime: u64) -> Result<u64, SosoFsError> {
+    if is_sosomfs(dir) {
+        return Err(SosoFsError::Io);
+    }
+    let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
+    fs.lock().create_file(dir, name, data, mtime)
 }
 
-pub fn unlink(_dir: u64, _name: &str) -> Result<(), SosoFsError> {
-    Err(SosoFsError::Io)
+pub fn mkdir(dir: u64, name: &str, mtime: u64) -> Result<u64, SosoFsError> {
+    if is_sosomfs(dir) {
+        return Err(SosoFsError::Io);
+    }
+    let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
+    fs.lock().mkdir(dir, name, mtime)
+}
+
+pub fn unlink(dir: u64, name: &str) -> Result<(), SosoFsError> {
+    if is_sosomfs(dir) {
+        return Err(SosoFsError::Io);
+    }
+    let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
+    fs.lock().unlink(dir, name)
 }
 
 pub fn lookup(dir: u64, name: &str) -> Result<u64, SosoFsError> {

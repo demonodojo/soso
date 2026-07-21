@@ -17,6 +17,10 @@ fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
             lateout("r11") _,
             lateout("r8") _,
             lateout("r9") _,
+            // El kernel usa SSE (cripto, memcpy): los registros vectoriales
+            // NO sobreviven a una syscall. Sin esto, con el userspace
+            // compilado con AVX2 el compilador asumiría que sí.
+            clobber_abi("C"),
         );
     }
     ret
@@ -79,6 +83,20 @@ pub fn unlink(path: &str) -> i64 {
     syscall4(abi::SYS_UNLINK, path.as_ptr() as u64, path.len() as u64, 0, 0)
 }
 
+pub fn chdir(path: &str) -> i64 {
+    syscall4(abi::SYS_CHDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
+}
+
+pub fn getcwd(buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_GETCWD,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+        0,
+    )
+}
+
 pub fn spawn(path: &str, args: &str) -> i64 {
     syscall4(
         abi::SYS_SPAWN,
@@ -87,6 +105,36 @@ pub fn spawn(path: &str, args: &str) -> i64 {
         args.as_ptr() as u64,
         args.len() as u64,
     )
+}
+
+pub fn spawn_io(path: &str, args: &str, stdin: u64, stdout: u64, stderr: u64) -> i64 {
+    let opts = abi::SpawnIo {
+        path_ptr: path.as_ptr() as u64,
+        path_len: path.len() as u64,
+        args_ptr: args.as_ptr() as u64,
+        args_len: args.len() as u64,
+        stdin_fd: stdin,
+        stdout_fd: stdout,
+        stderr_fd: stderr,
+    };
+    syscall4(
+        abi::SYS_SPAWN_IO,
+        &opts as *const abi::SpawnIo as u64,
+        0,
+        0,
+        0,
+    )
+}
+
+pub fn pipe() -> Result<(u64, u64), i64> {
+    let v = syscall1(abi::SYS_PIPE, 0);
+    if v < 0 {
+        Err(v)
+    } else {
+        let read_fd = v as u64 & 0xffff_ffff;
+        let write_fd = (v as u64) >> 32;
+        Ok((read_fd, write_fd))
+    }
 }
 
 pub fn wait() -> Result<(u64, u8), i64> {

@@ -11,6 +11,8 @@
 pub mod addrspace;
 pub mod elf;
 pub mod mmap;
+pub mod path;
+pub mod pipe;
 pub mod syscall;
 
 use crate::arch::gdt;
@@ -37,6 +39,13 @@ pub enum State {
     WaitingChild,
     /// read() de la tty sin datos: (puntero, longitud) del buffer usuario.
     WaitingTty { buf: u64, len: u64 },
+    /// read()/write() de un pipe sin datos o sin espacio.
+    WaitingPipe {
+        pipe_id: pipe::PipeId,
+        buf: u64,
+        len: u64,
+        write: bool,
+    },
     Zombie(u8),
 }
 
@@ -117,6 +126,8 @@ pub enum Fd {
     LazyFile { inode: u64, size: usize, pos: usize },
     WriteBuf { dir: u64, name: String, data: Vec<u8>, pos: usize },
     Dir { entries: Vec<soso_abi::Dirent>, pos: usize },
+    PipeRead(pipe::PipeId),
+    PipeWrite(pipe::PipeId),
 }
 
 pub struct Process {
@@ -136,6 +147,12 @@ pub struct Process {
     pub mmap_next: u64,
     /// Consola a la que van fd 0/1/2 (Fd::Tty).
     pub console: Console,
+    /// Directorio de trabajo (ruta absoluta normalizada).
+    pub cwd: String,
+    /// Estado FPU/SSE (fxsave64) capturado al desalojar por timer; se
+    /// restaura en cada reanudación. Las mitades altas YMM no necesitan
+    /// guardarse: el kernel compila sin AVX y no las toca.
+    pub fpu: crate::arch::fpu::FpuArea,
 }
 
 pub static PROCS: Mutex<Vec<Process>> = Mutex::new(Vec::new());
@@ -173,7 +190,13 @@ pub fn with_current<R>(f: impl FnOnce(&mut Process) -> R) -> R {
 }
 
 /// Intenta resolver un page fault de usuario en una región mmap.
+///
+/// Si la región respalda un fichero y el fault cae en un tramo de 2 MiB
+/// completo y alineado (VA y offset de fichero), se sirve con una página
+/// grande: un bloque físico contiguo rellenado con una lectura directa del
+/// FS (sin caché de bloques). Si no, página de 4 KiB.
 pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
+    const HUGE: u64 = 2 * 1024 * 1024;
     if current_pid() == 0 {
         return false;
     }
@@ -185,32 +208,77 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
         if is_write && !region.writable {
             return false;
         }
-        let page_va = addr & !0xfff;
         let space = p.space.as_mut().unwrap();
-        if space.is_mapped(page_va) {
+        if space.is_mapped(addr & !0xfff) {
             return true;
         }
+        // Los guards de FRAME_ALLOC no pueden seguir vivos al llamar a
+        // map_page*, que toma el mismo spinlock para los frames de tablas.
+        let free_frame = |frame| unsafe {
+            crate::mm::FRAME_ALLOC.get().unwrap().lock().deallocate_frame(frame);
+        };
+
+        // --- camino de página grande (2 MiB) ---
+        let va_2m = addr & !(HUGE - 1);
+        let off_2m = region.file_offset + va_2m.saturating_sub(region.virt_start);
+        let huge_ok = region.inode != 0
+            && va_2m >= region.virt_start
+            && va_2m + HUGE <= region.virt_start + region.len
+            && off_2m % HUGE == 0
+            && off_2m + HUGE <= region.file_len;
+        if huge_ok {
+            let frame2m = crate::mm::FRAME_ALLOC.get().unwrap().lock().allocate_2m();
+            if let Some(frame) = frame2m {
+                let dst = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        crate::mm::phys_to_virt(frame.start_address().as_u64()).as_mut_ptr::<u8>(),
+                        HUGE as usize,
+                    )
+                };
+                if crate::fs::load_file_range(region.inode, off_2m as usize, dst).is_ok()
+                    && space.map_page_2m(va_2m, frame, region.writable).is_some()
+                {
+                    return true;
+                }
+                unsafe {
+                    crate::mm::FRAME_ALLOC.get().unwrap().lock().deallocate_2m(frame);
+                }
+                return false;
+            }
+            // sin bloque contiguo libre: se sirve con páginas de 4 KiB
+        }
+
+        // --- camino de página de 4 KiB ---
+        let page_va = addr & !0xfff;
         let page_off = page_va - region.virt_start;
         let file_off = (region.file_offset + page_off) as usize;
-        let mut fa = crate::mm::FRAME_ALLOC.get().unwrap().lock();
-        let frame = match fa.allocate_frame() {
-            Some(f) => f,
-            None => return false,
+        let frame = {
+            let mut fa = crate::mm::FRAME_ALLOC.get().unwrap().lock();
+            match fa.allocate_frame() {
+                Some(f) => f,
+                None => return false,
+            }
         };
-        let mut page = [0u8; 4096];
+        // rellenar el frame directamente (sin buffer de 4 KiB en la pila);
+        // la lectura se recorta al tamaño del fichero (última página
+        // parcial → resto a cero)
+        let dst = unsafe {
+            &mut *crate::mm::phys_to_virt(frame.start_address().as_u64())
+                .as_mut_ptr::<[u8; 4096]>()
+        };
+        dst.fill(0);
         if region.inode != 0 {
-            if crate::fs::load_file_page(region.inode, file_off, &mut page).is_err() {
-                unsafe { fa.deallocate_frame(frame) };
+            let avail = (region.file_len as usize).saturating_sub(file_off).min(4096);
+            if avail == 0
+                || crate::vfs::read_file_range(region.inode, file_off, avail, &mut dst[..avail])
+                    .is_err()
+            {
+                free_frame(frame);
                 return false;
             }
         }
-        unsafe {
-            crate::mm::phys_to_virt(frame.start_address().as_u64())
-                .as_mut_ptr::<[u8; 4096]>()
-                .write(page);
-        }
         if space.map_page(page_va, frame, region.writable).is_none() {
-            unsafe { fa.deallocate_frame(frame) };
+            free_frame(frame);
             return false;
         }
         true
@@ -235,10 +303,36 @@ pub fn spawn_console(
     parent: u64,
     console: Console,
 ) -> Result<u64, i64> {
+    spawn_console_io(path, args, parent, console, [soso_abi::FD_INHERIT_TTY; 3])
+}
+
+/// Como `spawn_console` pero con stdio opcional (u64::MAX = tty).
+pub fn spawn_console_io(
+    path: &str,
+    args: &str,
+    parent: u64,
+    console: Console,
+    stdio: [u64; 3],
+) -> Result<u64, i64> {
     use soso_abi as abi;
     if args.len() > 3000 {
         return Err(-abi::EINVAL);
     }
+    let stdio_fds = if stdio.iter().all(|&f| f == abi::FD_INHERIT_TTY) {
+        [None, None, None]
+    } else if current_pid() == 0 {
+        return Err(-abi::EINVAL);
+    } else {
+        syscall::take_stdio_fds(stdio)?
+    };
+    let cwd = {
+        let procs = PROCS.lock();
+        procs
+            .iter()
+            .find(|p| p.pid == parent)
+            .map(|p| p.cwd.clone())
+            .unwrap_or_else(|| String::from("/"))
+    };
     let data = {
         let ino = crate::vfs::resolve(path).map_err(crate::task::syscall::fs_errno)?;
         crate::vfs::read_file(ino).map_err(crate::task::syscall::fs_errno)?
@@ -247,6 +341,12 @@ pub fn spawn_console(
     match spawn_into(&mut space, &data, args) {
         Ok((ctx, brk)) => {
             let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+            let mut fds = vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)];
+            for (slot, fd) in stdio_fds.into_iter().enumerate() {
+                if let Some(f) = fd {
+                    fds[slot] = Some(f);
+                }
+            }
             PROCS.lock().push(Process {
                 pid,
                 parent,
@@ -254,12 +354,14 @@ pub fn spawn_console(
                 state: State::Runnable,
                 ctx,
                 space: Some(space),
-                fds: vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)],
+                fds,
                 brk,
                 brk_min: brk,
                 mmaps: Vec::new(),
                 mmap_next: soso_abi::MMAP_BASE,
                 console,
+                cwd,
+                fpu: crate::arch::fpu::FpuArea::inicial(),
             });
             Ok(pid)
         }
@@ -317,6 +419,7 @@ pub fn exit_current(code: u8) -> ! {
             }
         }
         let idx = procs.iter().position(|p| p.pid == pid).expect("exit sin proceso");
+        syscall::close_all_fds(&mut procs[idx].fds);
         let parent = procs[idx].parent;
         let padre_esperando = procs
             .iter()
@@ -441,6 +544,31 @@ extern "C" fn schedule_inner() -> ! {
                 procs[i].state = State::Runnable;
             }
         }
+        // Despertar lectores/escritores de pipe cuando haya datos, espacio o EOF.
+        for i in 0..procs.len() {
+            if let State::WaitingPipe { pipe_id, buf, len, write } = procs[i].state {
+                procs[i].space.as_ref().unwrap().activate();
+                if write {
+                    match pipe_wake_write(pipe_id, buf, len) {
+                        Ok(n) if n > 0 => {
+                            procs[i].ctx.rax = n;
+                            procs[i].state = State::Runnable;
+                        }
+                        Err(e) => {
+                            procs[i].ctx.rax = e as u64;
+                            procs[i].state = State::Runnable;
+                        }
+                        _ => {}
+                    }
+                } else {
+                    let n = pipe_wake_read(pipe_id, buf, len);
+                    if n > 0 || pipe::write_closed(pipe_id) {
+                        procs[i].ctx.rax = n;
+                        procs[i].state = State::Runnable;
+                    }
+                }
+            }
+        }
 
         // Round-robin desde el último elegido.
         let n = procs.len();
@@ -454,6 +582,9 @@ extern "C" fn schedule_inner() -> ! {
                 REMAINING.store(TIMESLICE_TICKS, Ordering::Relaxed);
                 let ctx = procs[i].ctx.clone();
                 procs[i].space.as_ref().expect("runnable sin espacio").activate();
+                // Restaurar el estado FPU del proceso justo antes de saltar
+                // a usuario (después de esto, nada de SSE en este camino).
+                unsafe { crate::arch::fpu::restore(&procs[i].fpu) };
                 drop(procs);
                 unsafe { resume_user(&ctx) }
             }
@@ -464,6 +595,25 @@ extern "C" fn schedule_inner() -> ! {
                 x86_64::instructions::interrupts::enable_and_hlt();
             }
         }
+    }
+}
+
+fn pipe_wake_read(pipe_id: pipe::PipeId, buf: u64, len: u64) -> u64 {
+    if pipe::has_data(pipe_id) || pipe::write_closed(pipe_id) {
+        pipe::try_read(pipe_id, buf, len)
+    } else {
+        0
+    }
+}
+
+fn pipe_wake_write(pipe_id: pipe::PipeId, buf: u64, len: u64) -> Result<u64, i64> {
+    if pipe::no_readers(pipe_id) {
+        return Err(-soso_abi::EPIPE);
+    }
+    if pipe::has_space(pipe_id) {
+        pipe::try_write(pipe_id, buf, len)
+    } else {
+        Ok(0)
     }
 }
 
@@ -561,13 +711,31 @@ pub extern "C" fn timer_isr() {
         "push r13",
         "push r14",
         "push r15",
+        // Preservar el estado FPU/SSE/AVX del contexto interrumpido ANTES
+        // de net::poll (la cripto clobbea XMM). Si timer_tick desaloja,
+        // copia TIMER_FPU al Process; si no, se restaura aquí al salir.
+        // (rax/rdx ya están salvados en los push de arriba.)
+        "mov eax, 7",
+        "xor edx, edx",
+        "xsave64 [rip + {fpu}]",
+        // rdi = marco para timer_tick. rsp%16 tras los 15 pushes depende
+        // del alineamiento del usuario; net::poll (cripto) exige rsp%16==8
+        // al entrar en timer_tick (rsp%16==0 justo antes del call).
         "mov rdi, rsp",
-        // Marco de la CPU (rsp%16==8) + 15 pushes (120 B) => rsp%16==0
-        // antes del call, que es justo lo que la ABI pide (el call empuja
-        // 8 y timer_tick entra con rsp%16==8).
+        "test rsp, 8",
+        "jz 1f",
+        "sub rsp, 8",
         "call {rust}",
+        "add rsp, 8",
+        "jmp 3f",
+        "1:",
+        "call {rust}",
+        "3:",
         "test al, al",
         "jnz 2f",
+        "mov eax, 7",
+        "xor edx, edx",
+        "xrstor64 [rip + {fpu}]",
         "pop r15",
         "pop r14",
         "pop r13",
@@ -588,6 +756,7 @@ pub extern "C" fn timer_isr() {
         "jmp {sched}",
         rust = sym timer_tick,
         sched = sym schedule_landing,
+        fpu = sym crate::arch::fpu::TIMER_FPU,
     )
 }
 
@@ -641,6 +810,9 @@ extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
             rsp: f.rsp,
             rflags: f.rflags,
         };
+        // El estado FPU/SSE lo capturó timer_isr en TIMER_FPU antes de
+        // net::poll; pertenece a este proceso desalojado.
+        p.fpu = unsafe { (*(&raw const crate::arch::fpu::TIMER_FPU)).clone() };
         p.state = State::Runnable;
     }
     CURRENT_PID.store(0, Ordering::Relaxed);

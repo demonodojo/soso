@@ -24,7 +24,8 @@ Actualiza `MANUAL-USUARIO.md` en la **misma tarea** que cambia la funcionalidad 
 | Nuevo comando en `/bin` o builtin de sosh | Documentar con sintaxis y ejemplos |
 | Cambio de puertos, SSH o auth | Actualizar sección de acceso |
 | Nuevo fichero en rootfs visible al usuario | Actualizar estructura del disco |
-| Cambio de comportamiento de init/sosh | Actualizar flujo de arranque o salida |
+| Cambio de cwd, rutas relativas o redirecciones | Actualizar sosh y ejemplos |
+| Modelos LLM o `soso-llm` | Sección `/models` y conversión GGUF |
 | Solo refactor interno sin cambio de UX | No tocar el manual |
 | Cambio solo de kernel-shell de depuración | Solo si afecta comandos que el usuario final usa |
 
@@ -41,17 +42,20 @@ Actualiza `MANUAL-USUARIO.md` en la **misma tarea** que cambia la funcionalidad 
 - Tablas para comandos, puertos y opciones de `cargo xtask`.
 - Bloques de código con comandos completos (sin `...`).
 - Sin jerga de desarrollo (CoW, ring 3, sunset, etc.) salvo en la introducción breve.
-- Mencionar limitaciones conocidas cuando afecten al usuario (sin pipes, monousuario, etc.).
+- Mencionar limitaciones conocidas cuando afecten al usuario (monousuario, etc.).
 
 ## Comandos documentados hoy
 
 Referencia rápida — ampliar el manual si cambian:
 
-- **Arranque:** `cargo xtask run`, salida `Ctrl-A X`
-- **SSH:** `ssh -i target/soso_test_key -p 2222 soso@localhost`
-- **Shell:** sosh (`help`, `exit`), coreutils (`ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `halt`)
+- **Arranque:** `cargo xtask run`, salida `Ctrl-A X`, `pkill qemu-system-x86` si puerto 2222 ocupado
+- **SSH:** `ssh -tt -i target/soso_test_key -p 2222 soso@localhost` (reconexión tras Ctrl-C)
+- **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, pipes `|`, redirecciones `>`, `>>`, `<`)
+- **Rutas:** relativas al cwd (por defecto `/`); absolutas con `/`
+- **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `halt`
+- **LLM:** `soso-llm run tiny --prompt …`; modelos en `/models/`
 - **Red:** `nc localhost 7777` (echo TCP)
 
 ## Skills compartidas
 
-Las skills viven en `.claude/skills/`. Cursor las descubre vía `.cursor/skills` → symlink. No editar skills dentro de `.cursor/skills/`.
+Las skills viven en `.claude/skills/`. Cursor las descubre vía `.cursor/skills`. Editar bajo `.claude/skills/`.

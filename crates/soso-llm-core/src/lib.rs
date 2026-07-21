@@ -4,12 +4,17 @@
 
 extern crate alloc;
 
+pub mod f16;
 pub mod gemm;
 pub mod layer;
 pub mod quant;
 pub mod optim;
 pub mod runtime;
+pub mod sample;
 pub mod tier;
 pub mod attn;
+pub mod source;
+pub mod tokenizer;
 
 pub use runtime::Runtime;
+pub use source::{FileMapper, MappedShard, MmapTensorSource};

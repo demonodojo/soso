@@ -25,7 +25,8 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask run` | Build + launch QEMU (serial on stdio) |
 | `cargo xtask gdb` | Frozen at boot; `gdb -ex 'target remote :1234'` |
 | `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
-| `cargo xtask test` | Full integration: sosofs crash tests, boot, TCP echo, SSH, halt |
+| `cargo xtask test` | Full integration: sosofs, boot, TCP, SSH, soso-llm, halt |
+| `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (host tool) |
 
 **Exit QEMU:** `Ctrl-A X` (not Ctrl-C).
 
@@ -33,18 +34,20 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 
 1. Compiles userspace (`user/`) and copies ELFs to `rootfs/bin/`
 2. Runs `mkfs-soso` on `rootfs/` → data disk image (64 MiB default)
-3. Injects SSH keys into the image:
-   - Authorized key: `~/.ssh/id_ed25519.pub` if present, else generates `target/soso_test_key`
+3. Generates models disk (`target/soso-models.img`) with synthetic **tiny** model
+4. Injects SSH keys into the image:
+   - Authorized key: `~/.ssh/id_ed25519.pub` if present, else `target/soso_test_key`
    - Host key: persistent seed in `rootfs/etc/ssh_host_key`
-4. Launches QEMU: q35, `-cpu max` (RDRAND for sunset crypto), 256M RAM, virtio-blk + virtio-net
+5. Launches QEMU: q35, `-cpu max` (RDRAND for sunset crypto), **2 GiB RAM**,
+   virtio-blk×2 + virtio-net
 
 ## Access while running
 
 ```sh
 # Serial console: same terminal as cargo xtask run (sosh prompt $)
 
-# SSH (another terminal)
-ssh -i target/soso_test_key -p 2222 soso@localhost
+# SSH (another terminal) — -tt for tty interactiva
+ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 
 # TCP echo test
 nc localhost 7777
@@ -52,7 +55,7 @@ nc localhost 7777
 
 Port forwards (host → guest): **2222→22** (SSH), **7777→7** (echo).
 
-Guest IP: **10.0.2.15** (static, slirp).
+Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp).
 
 ## Testing
 
@@ -60,7 +63,10 @@ Guest IP: **10.0.2.15** (static, slirp).
 # Host-only sosofs crash-safety
 cargo test -q -p sosofs --features std
 
-# End-to-end (builds, QEMU, serial log, TCP, SSH session, halt)
+# Host: soso-llm-core, sosomodel, convert-gguf
+cargo test -q -p soso-llm-core -p sosomodel -p convert-gguf
+
+# End-to-end (builds, QEMU, serial log, TCP, SSH, soso-llm via SSH, halt)
 cargo xtask test
 ```
 
@@ -75,13 +81,18 @@ User rule for this project: **mock HTTP and Celery calls in tests** (soso has no
 
 ## Skills layout
 
-Skills live in `.claude/skills/`. `.cursor/skills` symlinks there — edit skills only under `.claude/skills/`.
+Skills live in `.claude/skills/`. `.cursor/skills` mirrors them — edit under `.claude/skills/`.
 
 ## Common issues
 
 | Symptom | Fix |
 |---------|-----|
 | SSH permission denied | Use `-i target/soso_test_key` or ensure `~/.ssh/id_ed25519.pub` existed before build |
-| Connection refused :2222 | Wait for `sosh — escribe 'help'` in serial log |
+| Connection refused :2222 | Wait for `sosh — escribe 'help'`; or prior QEMU still running → `pkill qemu-system-x86` |
+| `Could not set up host forwarding rule tcp::2222` | Puerto ocupado; `pkill qemu-system-x86` y relanzar |
+| SSH output desalineada | Kernel debe enviar CRLF en `ssh::tx_push` (tty cruda) |
+| SSH no reconecta tras Ctrl-C | Kernel debe hacer `reset_socket` en CloseWait/TimeWait |
+| Kernel GPF al conectar SSH | Revisar alineación de pila en `timer_isr` antes de `net::poll` |
+| Redirección `> file` no crea fichero | `vfs::create_file` debe delegar a sosofs (no stub) |
 | RDRAND / crypto errors | QEMU must use `-cpu max` (xtask sets this) |
 | Stale disk content | `cargo xtask mkfs` then re-run |

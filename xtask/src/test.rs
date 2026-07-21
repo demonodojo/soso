@@ -43,7 +43,8 @@ pub fn run() {
     // --- construir e ir a QEMU ---
     super::build_user();
     let img = super::build_image();
-    let (data, models) = super::mkfs(false);
+    let data = super::mkfs_rootfs(true);
+    let models = super::mkfs_models(true);
     let key = root.join("target/soso_test_key");
     let serial = root.join("target/test-serial.log");
     let _ = std::fs::remove_file(&serial);
@@ -66,7 +67,10 @@ pub fn run() {
         // --- 3) echo TCP ---
         let _ = paso("echo TCP en :7777", &mut fallos, echo_tcp);
 
-        // --- 4) sesión SSH autenticada + halt ---
+        // --- 4) inferencia LLM (modelo tiny en disco 1) ---
+        let _ = paso("soso-llm run tiny --prompt test", &mut fallos, || ssh_llm(&key));
+
+        // --- 5) sesión SSH autenticada + halt ---
         let _ = paso("SSH por clave pública + comando + halt", &mut fallos, || {
             ssh_sesion(&key)
         });
@@ -131,7 +135,9 @@ fn lanzar_qemu(
     serial: &std::path::Path,
 ) -> std::io::Result<Child> {
     Command::new("qemu-system-x86_64")
-        .args(["-machine", "q35", "-cpu", "max", "-m", "2G"])
+        .args(["-machine", "q35", "-cpu", "max"])
+        .args(["-m", &super::qemu_mem()])
+        .args(["-smp", &super::qemu_smp()])
         .args(["-drive", &format!("format=raw,file={}", img.display())])
         .args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
         .args(["-device", "virtio-blk-pci,drive=data0"])
@@ -189,6 +195,42 @@ fn conectar_reintentando(puerto: u16, limite: Duration) -> Result<TcpStream, Str
     }
 }
 
+fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
+    let mut hijo = Command::new("ssh")
+        .args(["-tt", "-i"])
+        .arg(key)
+        .args(["-p", "2222"])
+        .args(["-o", "StrictHostKeyChecking=no"])
+        .args(["-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "LogLevel=ERROR"])
+        .args(["-o", "ConnectTimeout=10"])
+        .arg("soso@localhost")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
+
+    {
+        let mut stdin = hijo.stdin.take().unwrap();
+        stdin
+            .write_all(b"soso-llm run tiny --prompt test\nexit\n")
+            .map_err(|e| e.to_string())?;
+        stdin.flush().ok();
+        std::thread::sleep(Duration::from_secs(45));
+    }
+
+    let salida = hijo.wait_with_output().map_err(|e| e.to_string())?;
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    if texto.contains("soso-llm: generado") {
+        Ok(())
+    } else {
+        Err(format!(
+            "soso-llm no generó salida esperada; stdout: {texto:?}"
+        ))
+    }
+}
+
 fn ssh_sesion(key: &std::path::Path) -> Result<(), String> {
     let token = "soso_ssh_ok_42";
     let mut hijo = Command::new("ssh")
@@ -209,7 +251,7 @@ fn ssh_sesion(key: &std::path::Path) -> Result<(), String> {
     // Enviar el comando y halt.
     {
         let mut stdin = hijo.stdin.take().unwrap();
-        let guion = format!("echo {token}\nhalt\n");
+        let guion = format!("echo {token} > /tmp/xtask.txt\ncat /tmp/xtask.txt\nhalt\n");
         // Dar tiempo entre comandos escribiendo con pausa.
         stdin.write_all(guion.as_bytes()).map_err(|e| e.to_string())?;
         stdin.flush().ok();

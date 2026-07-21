@@ -10,7 +10,7 @@ use crate::mm;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
-    PhysFrame, Size4KiB, Translate,
+    PhysFrame, Size2MiB, Size4KiB, Translate,
 };
 use x86_64::VirtAddr;
 
@@ -21,8 +21,9 @@ pub const BRK_MAX: u64 = 0x6000_0000;
 /// La pila del usuario: [STACK_TOP - STACK_SIZE, STACK_TOP).
 pub const STACK_TOP: u64 = 0x7000_0000;
 pub const STACK_SIZE: u64 = 64 * 1024;
-/// Límite superior de cualquier dirección de usuario válida.
-pub const USER_MAX: u64 = 0x7000_0000;
+/// Límite superior de cualquier dirección de usuario válida: toda la
+/// entrada L4[0] (la ventana mmap de modelos llega hasta MMAP_LIMIT).
+pub const USER_MAX: u64 = 0x80_0000_0000;
 
 const USER_FLAGS: PageTableFlags = PageTableFlags::PRESENT
     .union(PageTableFlags::WRITABLE)
@@ -128,13 +129,40 @@ impl AddrSpace {
         Some(())
     }
 
-    /// Desmapea un rango de páginas y libera sus frames.
+    /// Mapea una página de usuario de 2 MiB con el bloque físico dado
+    /// (alineado a 2 MiB, de `allocate_2m`).
+    pub fn map_page_2m(&mut self, va: u64, frame: PhysFrame, writable: bool) -> Option<()> {
+        let page = Page::<Size2MiB>::containing_address(VirtAddr::new(va));
+        let frame2m = PhysFrame::<Size2MiB>::containing_address(frame.start_address());
+        let mut mapper = self.mapper();
+        let flags = if writable { USER_FLAGS } else { USER_RDONLY };
+        let mut fa = mm::FRAME_ALLOC.get()?.lock();
+        unsafe {
+            mapper
+                .map_to_with_table_flags(page, frame2m, flags, USER_FLAGS, &mut *fa)
+                .ok()?
+                .ignore();
+        }
+        Some(())
+    }
+
+    /// Desmapea un rango de páginas (4 KiB o 2 MiB) y libera sus frames.
     pub fn unmap_range(&mut self, start: u64, len: u64) {
+        const HUGE: u64 = 2 * 1024 * 1024;
         let mut mapper = self.mapper();
         let mut fa = mm::FRAME_ALLOC.get().unwrap().lock();
         let end = start + len;
         let mut va = start & !0xfff;
         while va < end {
+            if va % HUGE == 0 && va + HUGE <= end {
+                let page2m = Page::<Size2MiB>::containing_address(VirtAddr::new(va));
+                if let Ok((frame, flush)) = mapper.unmap(page2m) {
+                    flush.flush();
+                    unsafe { fa.deallocate_2m(PhysFrame::containing_address(frame.start_address())) };
+                    va += HUGE;
+                    continue;
+                }
+            }
             let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
             if let Ok((frame, flush)) = mapper.unmap(page) {
                 flush.flush();
@@ -179,6 +207,14 @@ impl AddrSpace {
             for l3e in l3.iter().filter(|e| !e.is_unused()) {
                 let l2 = table_mut(PhysFrame::containing_address(l3e.addr()));
                 for l2e in l2.iter().filter(|e| !e.is_unused()) {
+                    // entrada huge: apunta a un bloque de datos de 2 MiB,
+                    // no a una tabla L1
+                    if l2e.flags().contains(PageTableFlags::HUGE_PAGE) {
+                        unsafe {
+                            fa.deallocate_2m(PhysFrame::containing_address(l2e.addr()));
+                        }
+                        continue;
+                    }
                     let l1 = table_mut(PhysFrame::containing_address(l2e.addr()));
                     for l1e in l1.iter().filter(|e| !e.is_unused()) {
                         unsafe {

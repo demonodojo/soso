@@ -96,14 +96,26 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     sys::exit(101);
 }
 
-// ---- allocator dinámico vía sbrk ----
+// ---- allocator dinámico: sbrk para pequeño, mmap anónimo para grande ----
+
+/// Umbral a partir del cual una reserva va a mmap anónimo (liberable con
+/// munmap). Por debajo, bump por sbrk sin liberación — el KV cache y los
+/// buffers de inferencia de GBs no caben en la región brk.
+const MMAP_ALLOC_MIN: usize = 1024 * 1024;
 
 struct SbrkAllocator;
 
 unsafe impl core::alloc::GlobalAlloc for SbrkAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align().max(16);
         let size = layout.size();
+        if size >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
+            let p = sys::mmap(0, size as u64, u64::MAX, 0);
+            if p > 0 {
+                return p as *mut u8;
+            }
+            // si el mmap falla, se intenta por sbrk
+        }
+        let align = layout.align().max(16);
         let cur = sys::sbrk(0);
         if cur < 0 {
             return core::ptr::null_mut();
@@ -124,8 +136,13 @@ unsafe impl core::alloc::GlobalAlloc for SbrkAllocator {
         start as *mut u8
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
-        // sbrk no permite liberar; el heap solo crece (como en fases anteriores).
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        // Solo se liberan los bloques mmap. Si el alloc grande cayó a sbrk
+        // por fallo de mmap, munmap devuelve EINVAL y se ignora (fuga, como
+        // siempre fue en sbrk).
+        if layout.size() >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
+            let _ = sys::munmap(ptr as u64, (layout.size() as u64).next_multiple_of(4096));
+        }
     }
 }
 

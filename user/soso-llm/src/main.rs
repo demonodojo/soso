@@ -13,21 +13,94 @@ use libsoso::{println, sys};
 use soso_abi::{self as abi, O_RDONLY};
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
-use soso_llm_core::runtime::{MemoryTensorSource, Runtime};
+use soso_llm_core::runtime::Runtime;
+use soso_llm_core::sample::Sampler;
+use soso_llm_core::source::{FileMapper, MappedShard, MmapTensorSource};
+use soso_llm_core::tokenizer::{StreamDecoder, Tokenizer};
 
 libsoso::entry!(main);
+
+struct SyscallMapper;
+
+impl FileMapper for SyscallMapper {
+    fn map_file(&mut self, path: &str) -> Result<MappedShard, ()> {
+        let fd = sys::open(path, O_RDONLY);
+        if fd < 0 {
+            return Err(());
+        }
+        let mut st = abi::Stat::default();
+        if sys::stat(path, &mut st) < 0 {
+            sys::close(fd as u64);
+            return Err(());
+        }
+        let size = st.size as usize;
+        let map = sys::mmap(0, size as u64, fd as u64, 0);
+        sys::close(fd as u64);
+        if map < 0 {
+            return Err(());
+        }
+        let ptr = map as *const u8;
+        let _ = unsafe { core::ptr::read_volatile(ptr) };
+        Ok(MappedShard {
+            addr: map as u64,
+            len: size,
+        })
+    }
+
+    fn unmap_file(&mut self, shard: &MappedShard) {
+        let aligned = shard.len.next_multiple_of(4096);
+        let _ = sys::munmap(shard.addr, aligned as u64);
+    }
+}
 
 fn main(args: &str) -> u8 {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.first() == Some(&"run") {
         let name = parts.get(1).copied().unwrap_or("tiny");
-        return run_model(name, parts.get(3).copied().unwrap_or(""));
+        let prompt = parse_prompt(&parts).unwrap_or_default();
+        let max_new = parse_flag(&parts, "--max")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16);
+        let temp: f32 = parse_flag(&parts, "--temp")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let top_p: f32 = parse_flag(&parts, "--top-p")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.9);
+        let seed: u64 = parse_flag(&parts, "--seed")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(42);
+        return run_model(name, &prompt, max_new, Sampler::new(temp, top_p, seed));
     }
-    println!("uso: soso-llm run <modelo> --prompt <texto>");
+    println!("uso: soso-llm run <modelo> --prompt <texto> [--max <n>] [--temp <t>] [--top-p <p>] [--seed <s>]");
     1
 }
 
-fn run_model(name: &str, _prompt: &str) -> u8 {
+fn parse_flag(parts: &[&str], flag: &str) -> Option<String> {
+    parts
+        .iter()
+        .position(|&p| p == flag)
+        .and_then(|i| parts.get(i + 1))
+        .map(|&v| v.into())
+}
+
+/// El prompt toma todas las palabras hasta el siguiente flag (sosh no
+/// interpreta comillas).
+fn parse_prompt(parts: &[&str]) -> Option<String> {
+    let i = parts.iter().position(|&p| p == "--prompt")?;
+    let words: Vec<&str> = parts[i + 1..]
+        .iter()
+        .take_while(|p| !p.starts_with("--"))
+        .copied()
+        .collect();
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> u8 {
     let base = format!("/models/{name}");
     let manifest_path = format!("{base}/manifest.som");
     let index_path = format!("{base}/index.som");
@@ -81,45 +154,58 @@ fn run_model(name: &str, _prompt: &str) -> u8 {
     } else {
         0
     };
-    let mut rt = Runtime::new(manifest, index, ram_budget, vram_budget);
+    let mut rt = Runtime::new(manifest, index.clone(), ram_budget, vram_budget);
+    if rt.validate_shapes().is_err() {
+        println!("soso-llm: shapes del index no casan con el manifest");
+        return 1;
+    }
 
-    let fd = sys::open(&format!("{base}/shards/embed.tensor"), O_RDONLY);
-    if fd < 0 {
-        println!("soso-llm: no embed.tensor (errno {fd})");
-        return 1;
-    }
-    let mut st = abi::Stat::default();
-    if sys::stat(&format!("{base}/shards/embed.tensor"), &mut st) < 0 {
-        return 1;
-    }
-    let size = st.size as usize;
-    let map = sys::mmap(0, size as u64, fd as u64, 0);
-    sys::close(fd as u64);
-    if map < 0 {
-        println!("soso-llm: mmap falló (errno {map})");
-        return 1;
-    }
-    let ptr = map as *const u8;
-    let _ = unsafe { core::ptr::read_volatile(ptr) };
-
-    let mut source = MemoryTensorSource {
-        tensors: alloc::collections::BTreeMap::new(),
+    let tokenizer = match read_file(&format!("{base}/tokenizer.som")) {
+        Ok(data) => match Tokenizer::parse(&data) {
+            Ok(t) => t,
+            Err(()) => {
+                println!("soso-llm: tokenizer.som inválido");
+                return 1;
+            }
+        },
+        Err(_) => Tokenizer::byte_level(),
     };
-    let h = rt.manifest.hidden_dim as usize;
-    let vocab = rt.manifest.vocab_size as usize;
-    source.tensors.insert(String::from("embed"), vec![0.0f32; vocab * h]);
 
-    rt.embed_token(1, source.tensors.get("embed").unwrap());
-    match rt.forward(&source) {
-        Ok(()) => println!("soso-llm: forward OK (1 token)"),
+    let shards_base = format!("{base}/shards");
+    let mut source = MmapTensorSource::new(shards_base, index, SyscallMapper);
+
+    let text = if prompt.is_empty() { "hola" } else { prompt };
+    let prompt_tokens = tokenizer.encode(text);
+    // streaming: cada token se imprime según se genera
+    let mut decoder = StreamDecoder::new();
+    let result = rt.generate_stream(
+        &mut source,
+        &prompt_tokens,
+        max_new,
+        tokenizer.eos(),
+        &mut sampler,
+        |t| {
+            let s = decoder.push(&tokenizer, t);
+            if !s.is_empty() {
+                libsoso::print!("{s}");
+            }
+        },
+    );
+    match result {
+        Ok(tokens) => {
+            let resto = decoder.finish();
+            if !resto.is_empty() {
+                libsoso::print!("{resto}");
+            }
+            println!();
+            println!("soso-llm: generado ({} tokens)", tokens.len());
+            0
+        }
         Err(()) => {
-            println!("soso-llm: forward falló");
-            return 1;
+            println!("soso-llm: inferencia falló");
+            1
         }
     }
-
-    sys::munmap(map as u64, size.next_multiple_of(4096) as u64);
-    0
 }
 
 fn read_file(path: &str) -> Result<Vec<u8>, i64> {

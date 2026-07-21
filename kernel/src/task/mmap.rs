@@ -10,28 +10,48 @@ pub struct MmapRegion {
     pub len: u64,
     pub inode: u64,
     pub file_offset: u64,
+    /// Tamaño del fichero respaldo (0 en regiones anónimas): delimita hasta
+    /// dónde puede servirse un fault con página de 2 MiB completa.
+    pub file_len: u64,
     pub writable: bool,
 }
 
-/// Siguiente dirección libre para mmap en este proceso.
+/// Alineación de mapeos grandes: permite servir faults con páginas de 2 MiB
+/// (el offset de fichero 0 queda 2 MiB-alineado en VA).
+const HUGE_ALIGN: u64 = 2 * 1024 * 1024;
+
+/// Siguiente dirección libre para mmap en este proceso. First-fit saltando
+/// al final de la región que colisiona (no de 4 KiB en 4 KiB: la ventana es
+/// de cientos de GiB).
 pub fn next_addr(regions: &[MmapRegion], hint: u64, len: u64) -> Option<u64> {
     let len = len.next_multiple_of(4096);
-    let mut addr = if hint == 0 { MMAP_BASE } else { hint.next_multiple_of(4096) };
-    while addr + len <= MMAP_LIMIT {
-        if !overlaps(regions, addr, len) {
-            return Some(addr);
+    let align = if len >= HUGE_ALIGN { HUGE_ALIGN } else { 4096 };
+    let start = if hint == 0 { MMAP_BASE } else { hint };
+    let mut addr = start.next_multiple_of(align);
+    loop {
+        if addr + len > MMAP_LIMIT {
+            return None;
         }
-        addr += 4096;
+        match first_overlap(regions, addr, len) {
+            None => return Some(addr),
+            Some(region_end) => {
+                addr = region_end.next_multiple_of(align);
+            }
+        }
     }
-    None
 }
 
-fn overlaps(regions: &[MmapRegion], start: u64, len: u64) -> bool {
+/// Devuelve el final de alguna región que se solape con [start, start+len).
+fn first_overlap(regions: &[MmapRegion], start: u64, len: u64) -> Option<u64> {
     let end = start + len;
-    regions.iter().any(|r| {
-        let rend = r.virt_start + r.len;
-        start < rend && r.virt_start < end
-    })
+    regions
+        .iter()
+        .filter(|r| {
+            let rend = r.virt_start + r.len;
+            start < rend && r.virt_start < end
+        })
+        .map(|r| r.virt_start + r.len)
+        .max()
 }
 
 pub fn find_region(regions: &[MmapRegion], addr: u64) -> Option<&MmapRegion> {

@@ -89,6 +89,9 @@ pub fn init() {
                     mfs.generation(),
                     mfs.total_blocks()
                 );
+                for m in &mfs.catalog.models {
+                    println!("fs:   modelo {} ({} shards)", m.name, m.shards.len());
+                }
                 MODELS.call_once(|| Mutex::new(mfs));
             }
             Err(e) => println!("fs: sin sosomfs en disco 1 ({e:?})"),
@@ -99,4 +102,10 @@ pub fn init() {
 /// Carga una página de 4 KiB (delega en el VFS unificado).
 pub fn load_file_page(inode: u64, file_off: usize, page: &mut [u8; 4096]) -> Result<(), ()> {
     crate::vfs::read_file_range(inode, file_off, 4096, page).map_err(|_| ())
+}
+
+/// Rellena `out` (múltiplo de bloque) desde `file_off` con lectura directa,
+/// sin caché de bloques: el camino de los faults de 2 MiB del mmap.
+pub fn load_file_range(inode: u64, file_off: usize, out: &mut [u8]) -> Result<(), ()> {
+    crate::vfs::read_file_range_direct(inode, file_off, out).map_err(|_| ())
 }

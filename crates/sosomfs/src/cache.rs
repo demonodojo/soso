@@ -20,6 +20,9 @@ pub struct BlockCache<V: VolumeSet> {
     capacity: usize,
     tick: u32,
     pin_count: usize,
+    /// Último start_lba prefetcheado: evita repetir el prefetch completo en
+    /// cada lectura de 4 KiB (p. ej. la tormenta de page faults de mmap).
+    last_prefetch: u64,
 }
 
 impl<V: VolumeSet> BlockCache<V> {
@@ -30,6 +33,7 @@ impl<V: VolumeSet> BlockCache<V> {
             capacity: capacity.max(8),
             tick: 0,
             pin_count: 0,
+            last_prefetch: u64::MAX,
         }
     }
 
@@ -100,6 +104,10 @@ impl<V: VolumeSet> BlockCache<V> {
     }
 
     pub fn prefetch(&mut self, start_lba: u64, bytes: u32, policy: u8) {
+        if start_lba == self.last_prefetch {
+            return;
+        }
+        self.last_prefetch = start_lba;
         let blocks = (bytes as u64 + 4095) / 4096;
         let end = start_lba.saturating_add(blocks).min(self.vol.total_blocks());
         let mut lba = start_lba;

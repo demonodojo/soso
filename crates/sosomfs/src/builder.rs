@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use block_dev::{BlockDevice, BlockError, BLOCK_SIZE};
 use crc::{CRC_32_ISCSI, Crc};
 use sosomodel::index::TensorIndex;
-use sosomodel::layout::{INDEX_FILE, MANIFEST_FILE, SHARDS_DIR};
+use sosomodel::layout::{INDEX_FILE, MANIFEST_FILE, SHARDS_DIR, TOKENIZER_FILE};
 use sosomodel::manifest::Manifest;
 use std::collections::BTreeMap;
 use std::fs;
@@ -31,9 +31,17 @@ fn align_bytes(len: usize, align: u8) -> usize {
     (len + a - 1) & !(a - 1)
 }
 
+/// Fuente del contenido de un fichero del plan: en disco (se lee en
+/// streaming al escribir, nunca entero en RAM) o inline (manifest/index).
+enum PlanSource {
+    File(std::path::PathBuf),
+    Inline(Vec<u8>),
+}
+
 struct WritePlan {
     rel_path: String,
-    data: Vec<u8>,
+    src: PlanSource,
+    len: usize,
     cache_policy: u8,
     align_requirement: u8,
     flags: u16,
@@ -62,6 +70,9 @@ pub fn build_from_dir<D: BlockDevice>(
     let mut order: Vec<String> = Vec::new();
     order.push(MANIFEST_FILE.to_string());
     order.push(INDEX_FILE.to_string());
+    if model_root.join(TOKENIZER_FILE).is_file() {
+        order.push(TOKENIZER_FILE.to_string());
+    }
     for pf in &manifest.prefetch {
         for s in &pf.shards {
             order.push(format!("{SHARDS_DIR}/{s}"));
@@ -94,12 +105,15 @@ pub fn build_from_dir<D: BlockDevice>(
     let mut plans: Vec<WritePlan> = Vec::new();
     for rel in &order {
         let path = model_root.join(rel);
-        let data = if path.exists() {
-            fs::read(&path).map_err(|e| format!("leer {}: {e}", path.display()))?
+        let (src, len) = if path.exists() {
+            let len = fs::metadata(&path)
+                .map_err(|e| format!("stat {}: {e}", path.display()))?
+                .len() as usize;
+            (PlanSource::File(path.clone()), len)
         } else if *rel == MANIFEST_FILE {
-            manifest_data.clone()
+            (PlanSource::Inline(manifest_data.clone()), manifest_data.len())
         } else if *rel == INDEX_FILE {
-            index_data.clone()
+            (PlanSource::Inline(index_data.clone()), index_data.len())
         } else {
             continue;
         };
@@ -110,7 +124,7 @@ pub fn build_from_dir<D: BlockDevice>(
         } else {
             CACHE_NORMAL
         };
-        let align_requirement = if data.len() >= 2 * 1024 * 1024 {
+        let align_requirement = if len >= 2 * 1024 * 1024 {
             ALIGN_HUGE_2M
         } else if cache_policy == CACHE_STREAM {
             ALIGN_GPU_DMA_64K
@@ -132,7 +146,8 @@ pub fn build_from_dir<D: BlockDevice>(
             .unwrap_or((None, 0));
         plans.push(WritePlan {
             rel_path: rel.clone(),
-            data,
+            src,
+            len,
             cache_policy,
             align_requirement,
             flags,
@@ -146,42 +161,65 @@ pub fn build_from_dir<D: BlockDevice>(
     let mut shard_entries: Vec<ShardEntry> = Vec::new();
     let mut lba_by_path: BTreeMap<String, u64> = BTreeMap::new();
 
+    // Escritura en streaming: un segmento (8 MiB) en RAM cada vez, con CRC
+    // de segmento y de shard incrementales. Nunca se carga un fichero entero.
+    let mut seg_buf = vec![0u8; SEGMENT_SIZE];
     for plan in &plans {
-        let padded_len = align_bytes(plan.data.len(), plan.align_requirement);
-        let mut padded = plan.data.clone();
-        padded.resize(padded_len, 0);
+        use std::io::Read;
+        let padded_len = align_bytes(plan.len, plan.align_requirement);
         let blocks = (padded_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
         let start_lba = next_lba;
-        write_payload(dev, start_lba, &padded).map_err(|_| "escribir shard".to_string())?;
         lba_by_path.insert(plan.rel_path.clone(), start_lba);
 
+        let mut file = match &plan.src {
+            PlanSource::File(p) => {
+                Some(fs::File::open(p).map_err(|e| format!("abrir {}: {e}", p.display()))?)
+            }
+            PlanSource::Inline(_) => None,
+        };
+        let mut shard_crc = sosomodel::Crc32cDigest::new();
         let mut extents = Vec::new();
         let mut off = 0usize;
         while off < padded_len {
             let seg_len = SEGMENT_SIZE.min(padded_len - off);
-            let seg_blocks = (seg_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            let seg_crc = crc32c(&padded[off..off + seg_len]);
+            let buf = &mut seg_buf[..seg_len];
+            buf.fill(0);
+            let avail = plan.len.saturating_sub(off).min(seg_len);
+            if avail > 0 {
+                match &plan.src {
+                    PlanSource::File(_) => {
+                        file.as_mut()
+                            .unwrap()
+                            .read_exact(&mut buf[..avail])
+                            .map_err(|e| format!("leer {}: {e}", plan.rel_path))?;
+                    }
+                    PlanSource::Inline(d) => buf[..avail].copy_from_slice(&d[off..off + avail]),
+                }
+            }
+            let seg_crc = crc32c(buf);
+            shard_crc.update(buf);
+            write_payload(dev, start_lba + (off / BLOCK_SIZE) as u64, buf)
+                .map_err(|_| "escribir shard".to_string())?;
             extents.push(Extent {
                 volume_id: 0,
                 start_lba: start_lba + (off / BLOCK_SIZE) as u64,
-                block_count: seg_blocks as u64,
+                block_count: ((seg_len + BLOCK_SIZE - 1) / BLOCK_SIZE) as u64,
                 segment_crc32c: seg_crc,
                 stripe_width: 0,
                 stripe_index: 0,
             });
             off += seg_len;
         }
-        let prefetch_next_lba = 0u64;
         shard_entries.push(ShardEntry {
             rel_path: plan.rel_path.clone(),
             byte_len: padded_len as u64,
             extents,
-            prefetch_next_lba,
+            prefetch_next_lba: 0,
             prefetch_bytes: plan.prefetch_bytes,
             cache_policy: plan.cache_policy,
             align_requirement: plan.align_requirement,
             flags: plan.flags,
-            shard_crc32c: crc32c(&padded),
+            shard_crc32c: shard_crc.finalize(),
         });
         next_lba += blocks as u64;
     }

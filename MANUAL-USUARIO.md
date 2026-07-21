@@ -63,7 +63,7 @@ la misma terminal donde corre QEMU.
 Con soso en marcha, abre **otra terminal** en el anfitrión:
 
 ```sh
-ssh -i target/soso_test_key -p 2222 soso@localhost
+ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 ```
 
 - **Puerto:** 2222 (redirigido al puerto 22 interno de soso).
@@ -71,7 +71,8 @@ ssh -i target/soso_test_key -p 2222 soso@localhost
 - **Cifrado:** SSH-2 con curve25519, ed25519 y chacha20-poly1305.
 
 Al conectar verás el mensaje del día (`/etc/motd`) y luego la misma shell **sosh**
-que en la consola serie.
+que en la consola serie. Puedes desconectar con Ctrl-C o `exit` y volver a conectar;
+solo hay **una sesión SSH a la vez**.
 
 **Clave de acceso:** al construir la imagen, se inyecta una clave pública ed25519 en
 `/etc/authorized_key` del disco:
@@ -113,24 +114,57 @@ $
 
 ### Comportamiento
 
-- **Una línea = un comando.** No hay pipes (`|`), redirecciones (`>`, `<`) ni
-  variables de entorno.
+- **Una línea = un comando o un pipeline.** Puedes encadenar comandos con `|`
+  y redirigir la entrada o salida con `<`, `>` y `>>`.
+- **Directorio de trabajo (cwd):** cada shell tiene un cwd (inicialmente `/`).
+  Las rutas sin `/` inicial son relativas al cwd (p. ej. `echo x > f.txt` en
+  `/tmp` crea `/tmp/f.txt` tras `cd /tmp`).
+- No hay variables de entorno ni historial de comandos.
 - Los comandos sin ruta se buscan en `/bin/`.
 - También puedes invocar un ELF por ruta absoluta (por ejemplo `/bin/init test`).
 - **Backspace** funciona para corregir la línea.
 - Si un comando falla, sosh muestra el código de salida.
+
+### Pipes y redirecciones
+
+| Operador | Significado |
+|---|---|
+| `cmd1 \| cmd2` | La salida de `cmd1` es la entrada de `cmd2` |
+| `cmd > fichero` | Redirige la salida a `fichero` (lo crea o trunca) |
+| `cmd >> fichero` | Añade la salida al final de `fichero` |
+| `cmd < fichero` | Lee la entrada desde `fichero` |
+
+Ejemplos:
+
+```sh
+cd /tmp
+pwd                         # /tmp
+echo hola > saludo.txt      # crea /tmp/saludo.txt
+cat saludo.txt
+echo linea >> saludo.txt
+cd ..
+ls /tmp
+cat /etc/motd | hexdump
+ls | cat
+cat < /etc/motd
+```
 
 ### Comandos integrados (builtins)
 
 | Comando | Descripción |
 |---|---|
 | `help` | Muestra la ayuda |
+| `cd <dir>` | Cambia el directorio de trabajo |
+| `pwd` | Imprime el directorio de trabajo actual |
 | `exit` | Cierra la shell (código de salida opcional, por defecto 0) |
 
 Ejemplos:
 
 ```sh
 help
+pwd
+cd /tmp
+cd ..                       # sube al directorio padre
 exit
 exit 1
 ```
@@ -204,6 +238,15 @@ Muestra offset, bytes en hex y representación ASCII.
 halt
 ```
 
+### soso-llm — inferencia de modelos
+
+```sh
+soso-llm run tiny --prompt hola
+```
+
+Ejecuta inferencia greedy sobre el modelo en `/models/tiny/`. Ver sección
+[Modelos LLM](#modelos-llm-soso-llm) para importar modelos y más detalle.
+
 ---
 
 ## Estructura del disco
@@ -212,19 +255,21 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 
 ```
 /
-├── bin/          # Programas de userspace (init, sosh, ls, cat, …)
+├── bin/          # Programas (init, sosh, ls, cat, soso-llm, …)
 ├── etc/
 │   ├── motd              # Mensaje de bienvenida
 │   ├── authorized_key    # Clave pública ed25519 autorizada (32 bytes)
 │   └── ssh_host_key      # Semilla de la host key del servidor SSH
+├── models/       # Modelos LLM (disco sosomfs, solo lectura)
+│   └── tiny/             # Modelo sintético de prueba
 └── hola.txt      # Fichero de ejemplo
 ```
 
 El mensaje de bienvenida (`/etc/motd`) se muestra al conectar por SSH.
 
-Los cambios que hagas con `mkdir`, escritura de ficheros (desde userspace o desde
-la kernel-shell) se persisten en el disco virtual entre arranques, gracias al
-filesystem copy-on-write con commits atómicos.
+Los cambios que hagas con `mkdir`, redirecciones (`>`, `>>`) o escritura desde
+userspace se persisten en el disco virtual entre arranques (sosofs copy-on-write).
+Los ficheros bajo `/models/` viven en un disco aparte y no se modifican desde sosh.
 
 ---
 
@@ -291,7 +336,7 @@ Para autorizar tu clave:
 Con la clave de test generada automáticamente:
 
 ```sh
-ssh -i target/soso_test_key -p 2222 soso@localhost
+ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 ```
 
 ---
@@ -303,7 +348,7 @@ soso es un sistema de aprendizaje con un alcance deliberadamente reducido:
 | Área | Limitación |
 |---|---|
 | Usuarios | Monousuario; una sesión SSH simultánea |
-| Shell | Sin pipes, redirecciones, variables ni historial |
+| Shell | Sin variables ni historial; cwd, pipes y redirecciones |
 | Procesos | `spawn`, no `fork`; scheduler round-robin preemptivo |
 | Red | DHCP automático al arrancar; fallback a `10.0.2.15` en QEMU; sin IPv6 |
 | SSH | Sin SFTP, port forwarding ni múltiples sesiones |
@@ -323,10 +368,13 @@ error, `init` la relanza automáticamente.
 - Regenera la imagen si cambiaste de clave: `cargo xtask mkfs` y vuelve a arrancar.
 - Verifica en la consola serie que aparezca `ssh: auth por clave pública ed25519`.
 
-### «Connection refused» en el puerto 2222
+### «Connection refused» o «Connection reset» en el puerto 2222
 
 - soso debe estar en marcha (`cargo xtask run`).
 - Espera a ver el mensaje `sosh — escribe 'help' para la ayuda` antes de conectar.
+- Si falló un arranque anterior, el puerto puede quedar ocupado: `pkill qemu-system-x86`
+  y vuelve a lanzar `cargo xtask run`.
+- Tras desconectar con Ctrl-C puedes reconectar; si falla, espera un segundo o reinicia QEMU.
 
 ### La consola no responde
 
@@ -335,8 +383,15 @@ error, `init` la relanza automáticamente.
 
 ### «no existe» al acceder a un fichero
 
-- Usa rutas absolutas (`/etc/motd`, no `etc/motd`).
-- Lista el contenido con `ls /` para ver qué hay en el disco.
+- Comprueba el cwd con `pwd`; las rutas sin `/` son relativas a ese directorio.
+- Usa rutas absolutas si dudas (`/etc/motd`).
+- Lista el contenido con `ls` o `ls /` para ver qué hay en el disco.
+
+### Redirección `> fichero` no crea el fichero
+
+- Comprueba que el directorio padre exista (`mkdir /tmp` si hace falta).
+- El fichero se escribe al terminar el comando hijo (p. ej. cuando `echo` sale).
+- Verifica con `cat fichero` o `ls`.
 
 ### Verificar el sistema de extremo a extremo
 
@@ -344,7 +399,100 @@ error, `init` la relanza automáticamente.
 cargo xtask test
 ```
 
-Ejecuta pruebas de integridad del FS, arranque, echo TCP, sesión SSH y apagado limpio.
+Ejecuta pruebas de integridad del FS, arranque, echo TCP, inferencia LLM (`soso-llm`), sesión SSH y apagado limpio.
+
+---
+
+## Modelos LLM (`soso-llm`)
+
+soso incluye un segundo disco virtual (`virtio-blk1`) con el filesystem de modelos **sosomfs**. Los modelos aparecen bajo `/models/<nombre>/` con esta estructura:
+
+```
+/models/tiny/manifest.som    # arquitectura (capas, hidden, vocab, GQA, RoPE…)
+/models/tiny/index.som       # tabla tensor → shard + offset + shape + dtype
+/models/tiny/tokenizer.som   # vocabulario (solo modelos importados de GGUF)
+/models/tiny/shards/*.tensor # pesos empaquetados (F32 o Q8_0, con CRC32C)
+```
+
+### Modelo de prueba incluido
+
+Al arrancar con `cargo xtask run`, se genera automáticamente el modelo sintético **tiny** (4 capas, hidden 128). Puedes ejecutar inferencia desde **sosh**:
+
+```sh
+soso-llm run tiny --prompt hola
+```
+
+La salida muestra el texto generado con decode greedy. El modelo tiny usa un
+tokenizer byte-level; los modelos importados de GGUF usan su propio
+vocabulario (`tokenizer.som`).
+
+### Importar un modelo GGUF
+
+En la máquina anfitriona, convierte un fichero GGUF de arquitectura llama al
+layout `.som`. Se soportan tensores **F32, F16, Q8_0 y Q4_K** (los Q4_K_M
+descargables funcionan tal cual; sus tensores Q6_K se convierten a Q8_0),
+GQA, SwiGLU con `ffn_gate` y el vocabulario del tokenizer. Verificado con
+TinyLlama-1.1B-Chat Q4_K_M:
+
+```sh
+cargo xtask convert-gguf ruta/al/modelo.gguf target/mi-modelo --name mi-modelo
+```
+
+Después arranca con la variable `SOSO_MODELS_DIR` apuntando al modelo
+convertido (la imagen de modelos se reconstruye automáticamente):
+
+```sh
+SOSO_MODELS_DIR=target/mi-modelo cargo xtask run
+```
+
+El modelo estará en `/models/mi-modelo/`:
+
+```sh
+soso-llm run mi-modelo --prompt "hola"
+```
+
+Sin la variable, `cargo xtask run` vuelve a empaquetar el modelo tiny.
+
+### Memoria, CPU y modelos grandes
+
+QEMU arranca por defecto con 2 GiB y 1 CPU; ambos son configurables:
+
+```sh
+SOSO_QEMU_MEM=16G SOSO_QEMU_SMP=4 cargo xtask run
+```
+
+Los pesos se leen **sin copia** directamente del mmap del modelo (páginas de
+2 MiB bajo demanda) y el KV cache va en f16: el límite de tamaño de modelo es
+la RAM que le des a QEMU (ventana de mapeo de ~416 GiB). La imagen de modelos
+se dimensiona con `SOSO_MODELS_SIZE` (por defecto 8G) si el modelo no cabe.
+
+`soso-llm run` genera en **streaming** (imprime cada token según sale) y
+acepta muestreo además del greedy por defecto:
+
+```sh
+soso-llm run tinyllama --prompt Once upon a time --max 32 --temp 0.8 --top-p 0.9 --seed 7
+```
+
+| Flag | Efecto |
+|---|---|
+| `--max <n>` | Tokens nuevos como máximo (16 por defecto) |
+| `--temp <t>` | Temperatura; 0 = greedy (por defecto) |
+| `--top-p <p>` | Muestreo nucleus (0.9 por defecto) |
+| `--seed <s>` | Semilla determinista del muestreo |
+
+El prompt admite varias palabras (hasta el siguiente flag); sosh no
+interpreta comillas.
+
+Para generar modelos sintéticos de prueba de cualquier tamaño:
+
+```sh
+cargo run --release -p mkmodel-soso -- target/big-model \
+  --hidden 2048 --ffn 5632 --layers 10 --vocab 32000 --heads 32 --kv-heads 8
+```
+
+Cuantizaciones GGUF distintas de F32/F16/Q8_0 (Q4_K…) aún no están
+soportadas. Nota: dentro de QEMU sin KVM la velocidad la limita la emulación
+TCG, no soso.
 
 ---
 
@@ -358,10 +506,15 @@ cargo xtask run
 ssh -i target/soso_test_key -p 2222 soso@localhost
 
 # Dentro de sosh
+pwd
+cd /tmp
+echo hola > nota.txt
+cat nota.txt
 ls /
+ls /models
+soso-llm run tiny --prompt hola
 cat /etc/motd
-echo hola
-mkdir /tmp/prueba
+mkdir prueba
 halt
 
 # Salir de QEMU

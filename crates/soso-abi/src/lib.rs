@@ -31,6 +31,10 @@ pub const SYS_GPU_INFO: u64 = 17;
 pub const SYS_GPU_ALLOC: u64 = 18;
 pub const SYS_GPU_MAP: u64 = 19;
 pub const SYS_GPU_SUBMIT: u64 = 20;
+pub const SYS_PIPE: u64 = 21;
+pub const SYS_SPAWN_IO: u64 = 22;
+pub const SYS_CHDIR: u64 = 23;
+pub const SYS_GETCWD: u64 = 24;
 
 // ---- mmap ----
 
@@ -40,9 +44,11 @@ pub const MAP_PRIVATE: u64 = 1;
 pub const MAP_SHARED: u64 = 2;
 pub const MAP_ANONYMOUS: u64 = 4;
 
-/// Región reservada para mmap de ficheros (por encima del brk habitual).
-pub const MMAP_BASE: u64 = 0x2000_0000;
-pub const MMAP_LIMIT: u64 = 0x5f00_0000;
+/// Región reservada para mmap (ficheros y anónimo), por encima de la pila y
+/// dentro de la entrada L4[0] del usuario (< 512 GiB): ventana de ~416 GiB
+/// para mapear modelos grandes completos.
+pub const MMAP_BASE: u64 = 0x10_0000_0000; // 64 GiB
+pub const MMAP_LIMIT: u64 = 0x78_0000_0000; // 480 GiB
 
 // ---- GPU ----
 
@@ -78,12 +84,18 @@ pub const ESPIPE: i64 = 29;
 pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
+pub const EPIPE: i64 = 32;
 
 // ---- open ----
 
 pub const O_RDONLY: u64 = 0;
 /// Escritura: crea (o trunca) el fichero; el contenido se publica en close().
 pub const O_WRONLY: u64 = 1;
+/// Con `O_WRONLY`: conserva el contenido existente y escribe al final.
+pub const O_APPEND: u64 = 2;
+
+/// Valor de stdio en `SpawnIo` para usar la tty del proceso (fd 0/1/2).
+pub const FD_INHERIT_TTY: u64 = u64::MAX;
 
 // ---- seek ----
 
@@ -133,6 +145,19 @@ impl Default for Dirent {
 }
 
 pub const DIRENT_SIZE: usize = core::mem::size_of::<Dirent>();
+
+/// Argumentos de `SYS_SPAWN_IO`: igual que spawn, más stdio opcional.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct SpawnIo {
+    pub path_ptr: u64,
+    pub path_len: u64,
+    pub args_ptr: u64,
+    pub args_len: u64,
+    pub stdin_fd: u64,
+    pub stdout_fd: u64,
+    pub stderr_fd: u64,
+}
 
 /// wait() devuelve (pid << 8) | (código de salida & 0xff).
 pub fn wait_decode(v: i64) -> (u64, u8) {

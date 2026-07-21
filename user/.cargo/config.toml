@@ -1,7 +1,16 @@
+# Target personalizado x86_64-soso-user.json: como x86_64-unknown-none pero
+# con SSE..AVX2+FMA (sin soft-float) para los kernels SIMD de inferencia.
+# El kernel preserva XMM en desalojos/faults (arch::fpu) y habilita AVX en
+# XCR0 al arrancar; las mitades altas YMM no las toca (compila sin AVX).
 [build]
-target = "x86_64-unknown-none"
+target = "x86_64-soso-user.json"
 
-[target.x86_64-unknown-none]
+[unstable]
+json-target-spec = true
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+
+[target.x86_64-soso-user]
 rustflags = [
     "-C", "link-arg=-Tlink.ld",
     "-C", "relocation-model=static",

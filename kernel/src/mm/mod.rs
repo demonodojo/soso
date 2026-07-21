@@ -79,3 +79,32 @@ pub fn ensure_mmio_mapped(phys: u64, size: u64) {
         }
     }
 }
+
+/// Mapea identidad (VA == PA) una región de RAM baja. La usa el trampolín de
+/// arranque de APs (`arch::smp`): el AP activa CR3+paginación mientras el
+/// puntero de instrucción sigue en la página física baja donde se copió el
+/// trampolín, y el mapeo del bootloader solo cubre esa RAM vía
+/// `phys_to_virt` (con offset) — sin una entrada VA==PA aquí, el primer
+/// fetch tras `mov cr0` (activar PG) hace page fault y el AP triple-faultea
+/// (se observa como "AB" en el puerto serie sin la "C" del modo largo).
+pub fn ensure_identity_mapped(phys: u64, size: u64) {
+    let mut mapper = MAPPER.get().unwrap().lock();
+    let mut fa = FRAME_ALLOC.get().unwrap().lock();
+    let start = phys & !0xfff;
+    let end = (phys + size).next_multiple_of(4096);
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    for p in (start..end).step_by(4096) {
+        let virt = VirtAddr::new(p);
+        if mapper.translate_addr(virt).is_some() {
+            continue;
+        }
+        let page = Page::<Size4KiB>::containing_address(virt);
+        let frame = PhysFrame::containing_address(PhysAddr::new(p));
+        unsafe {
+            mapper
+                .map_to(page, frame, flags, &mut *fa)
+                .expect("fallo mapeando identidad")
+                .flush();
+        }
+    }
+}

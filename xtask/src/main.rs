@@ -30,8 +30,12 @@ fn main() {
         "test" => {
             test::run();
         }
+        "convert-gguf" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            convert_gguf(&args);
+        }
         other => {
-            eprintln!("comando desconocido: {other} (usa build | run | gdb | mkfs | test)");
+            eprintln!("comando desconocido: {other} (usa build | run | gdb | mkfs | test | convert-gguf)");
             exit(2);
         }
     }
@@ -39,13 +43,27 @@ fn main() {
 
 mod test;
 
+fn convert_gguf(args: &[String]) {
+    let root = project_root();
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(&root)
+        .args(["run", "-q", "-p", "convert-gguf", "--"]);
+    for a in args {
+        cmd.arg(a);
+    }
+    let status = cmd.status().expect("convert-gguf");
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+}
+
 fn project_root() -> PathBuf {
     // xtask vive en <root>/xtask
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
 /// Compila el kernel para x86_64-soso y devuelve la ruta de la imagen.
-fn build_image() -> PathBuf {
+pub(crate) fn build_image() -> PathBuf {
     let root = project_root();
     let target = root.join("kernel/x86_64-soso.json");
     let status = Command::new("cargo")
@@ -73,8 +91,7 @@ fn build_image() -> PathBuf {
 }
 
 /// Compila el workspace user/ (release) y copia los ELF a rootfs/bin.
-/// Devuelve true si algún binario cambió.
-fn build_user() -> bool {
+pub(crate) fn build_user() -> bool {
     let root = project_root();
     let status = Command::new("cargo")
         .current_dir(root.join("user"))
@@ -85,7 +102,7 @@ fn build_user() -> bool {
     if !status.success() {
         exit(status.code().unwrap_or(1));
     }
-    let out = root.join("target/user/x86_64-unknown-none/release");
+    let out = root.join("target/user/x86_64-soso-user/release");
     let bin = root.join("rootfs/bin");
     std::fs::create_dir_all(&bin).expect("no se pudo crear rootfs/bin");
     let mut cambiado = false;
@@ -118,7 +135,7 @@ fn newest_mtime(dir: &Path) -> std::time::SystemTime {
 }
 
 /// Disco de datos persistente (virtio-blk 0) con sosofs desde rootfs/.
-fn mkfs_rootfs(force: bool) -> PathBuf {
+pub(crate) fn mkfs_rootfs(force: bool) -> PathBuf {
     let root = project_root();
     let path = root.join("target/soso-data.img");
     let vieja = path
@@ -145,15 +162,30 @@ fn mkfs_rootfs(force: bool) -> PathBuf {
     path
 }
 
-/// Disco de modelos (virtio-blk 1) con sosomfs.
-fn mkfs_models(force: bool) -> PathBuf {
+/// Disco de modelos (virtio-blk 1) con sosomfs. Por defecto empaqueta el
+/// modelo sintético tiny; `SOSO_MODELS_DIR=<dir>` usa un modelo propio
+/// (p. ej. el resultado de `cargo xtask convert-gguf`).
+pub(crate) fn mkfs_models(force: bool) -> PathBuf {
     let root = project_root();
     let path = root.join("target/soso-models.img");
-    let model_src = root.join("target/tiny-model");
-    if !model_src.join("manifest.som").exists() {
+    let custom = std::env::var_os("SOSO_MODELS_DIR").map(PathBuf::from);
+    let model_src = custom
+        .clone()
+        .unwrap_or_else(|| root.join("target/tiny-model"));
+    if custom.is_some() {
+        if !model_src.join("manifest.som").exists() {
+            eprintln!(
+                "xtask: SOSO_MODELS_DIR={} no contiene manifest.som",
+                model_src.display()
+            );
+            exit(1);
+        }
+    } else {
+        // regenerar siempre: un tiny-model viejo puede tener un formato
+        // .som anterior y es barato de reconstruir
         let status = Command::new("cargo")
             .current_dir(&root)
-            .args(["run", "-q", "-p", "mkmodel-soso", "--"])
+            .args(["run", "-q", "--release", "-p", "mkmodel-soso", "--"])
             .arg(&model_src)
             .status()
             .expect("mkmodel-soso");
@@ -166,16 +198,18 @@ fn mkfs_models(force: bool) -> PathBuf {
         .and_then(|m| m.modified())
         .map(|img| newest_mtime(&model_src) > img)
         .unwrap_or(true);
-    if path.exists() && !force && !vieja {
+    // con modelo propio se reconstruye siempre: la imagen puede venir de otro dir
+    if path.exists() && !force && !vieja && custom.is_none() {
         return path;
     }
+    let size = std::env::var("SOSO_MODELS_SIZE").unwrap_or_else(|_| "8G".into());
     let status = Command::new("cargo")
         .current_dir(&root)
-        .args(["run", "-q", "-p", "mkfs-sosomfs", "--"])
+        .args(["run", "-q", "--release", "-p", "mkfs-sosomfs", "--"])
         .arg(&model_src)
         .arg(&path)
         .arg("--size")
-        .arg("8G")
+        .arg(&size)
         .status()
         .expect("mkfs-sosomfs");
     if !status.success() {
@@ -216,6 +250,16 @@ fn client_pubkey() -> PathBuf {
     pubk
 }
 
+/// Memoria y nº de CPUs de QEMU, configurables por entorno:
+/// `SOSO_QEMU_MEM=64G SOSO_QEMU_SMP=8 cargo xtask run`.
+pub(crate) fn qemu_mem() -> String {
+    std::env::var("SOSO_QEMU_MEM").unwrap_or_else(|_| "2G".into())
+}
+
+pub(crate) fn qemu_smp() -> String {
+    std::env::var("SOSO_QEMU_SMP").unwrap_or_else(|_| "1".into())
+}
+
 fn run_qemu(img: &Path, gdb: bool) {
     build_user();
     let (data, models) = mkfs(false);
@@ -224,7 +268,8 @@ fn run_qemu(img: &Path, gdb: bool) {
         // -cpu max: expone RDRAND, que la cripto de sunset (getrandom con
         // backend rdrand) necesita; la CPU por defecto de QEMU no lo trae.
         .args(["-cpu", "max"])
-        .args(["-m", "2G"])
+        .args(["-m", &qemu_mem()])
+        .args(["-smp", &qemu_smp()])
         .args(["-drive", &format!("format=raw,file={}", img.display())])
         .args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
         .args(["-device", "virtio-blk-pci,drive=data0"])

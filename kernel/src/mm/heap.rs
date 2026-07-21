@@ -10,7 +10,10 @@ use x86_64::structures::paging::{
 };
 
 pub const HEAP_START: u64 = 0x_4444_4444_0000;
-pub const HEAP_SIZE: u64 = 8 * 1024 * 1024; // sosofs verifica extents de hasta 128 KiB en memoria
+// La caché de sosomfs puede crecer hasta 8 MiB (2048 bloques) y la
+// verificación de segmento reserva hasta 8 MiB más; 8 MiB de heap se
+// agotaban con la inferencia LLM.
+pub const HEAP_SIZE: u64 = 32 * 1024 * 1024;
 
 #[global_allocator]
 static ALLOCATOR: Talck<Mutex<()>, ClaimOnOom> =

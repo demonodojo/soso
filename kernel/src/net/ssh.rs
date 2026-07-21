@@ -42,11 +42,17 @@ pub fn rx_has_data() -> bool {
 pub fn rx_pop() -> Option<u8> {
     RX.lock().pop_front()
 }
-/// Empujar stdout de la shell hacia el canal.
+/// Empujar stdout de la shell hacia el canal. La tty SSH es cruda: sin
+/// `\r` antes de `\n` el cursor no vuelve al inicio de línea.
 pub fn tx_push(data: &[u8]) {
     let mut tx = TX.lock();
+    let mut prev = tx.back().copied();
     for &b in data {
+        if b == b'\n' && prev != Some(b'\r') {
+            tx.push_back(b'\r');
+        }
         tx.push_back(b);
+        prev = Some(b);
     }
 }
 
@@ -131,6 +137,13 @@ impl SshSession {
 
 static SESSION: Mutex<Option<SshSession>> = Mutex::new(None);
 
+/// Mata la shell, limpia colas y deja el socket escuchando de nuevo.
+fn reset_socket(socket: &mut tcp::Socket, guard: &mut Option<SshSession>) {
+    teardown(guard);
+    socket.abort();
+    let _ = socket.listen(SSH_PORT);
+}
+
 /// Avanza la sesión SSH usando `socket` como transporte. Llamada desde
 /// `net::poll` con el socket TCP del puerto 22 ya poll-eado por la iface.
 pub fn poll(socket: &mut tcp::Socket) {
@@ -154,6 +167,12 @@ pub fn poll(socket: &mut tcp::Socket) {
             }
             return;
         }
+        // Cliente desconectado (p. ej. Ctrl-C) o socket en TIME-WAIT: no
+        // puede aceptar otra conexión hasta abortar y volver a LISTEN.
+        State::CloseWait | State::TimeWait => {
+            reset_socket(socket, &mut guard);
+            return;
+        }
         _ => {}
     }
 
@@ -163,23 +182,29 @@ pub fn poll(socket: &mut tcp::Socket) {
         TX.lock().clear();
         *guard = Some(SshSession::new());
     }
-    let sess = guard.as_mut().unwrap();
-
-    if let Err(e) = drive(sess, socket) {
+    let drive_err = {
+        let sess = guard.as_mut().unwrap();
+        drive(sess, socket).err()
+    };
+    if let Some(e) = drive_err {
         crate::println!("ssh: sesión terminada ({e:?})");
-        socket.close();
-        teardown(&mut guard);
+        reset_socket(socket, &mut guard);
         return;
     }
 
-    // El cliente cerró su lado (CLOSE_WAIT) y ya no queda salida: cerrar el
-    // nuestro para que el socket vuelva a Closed y admita otra conexión.
-    if socket.state() == State::CloseWait
-        && sess.runner.output_buf().is_empty()
-        && TX.lock().is_empty()
-    {
-        socket.close();
-        teardown(&mut guard);
+    // Cierre iniciado por nosotros (shell terminada): cuando no quede
+    // salida pendiente, abortar y volver a escuchar otra conexión.
+    let should_reset = {
+        let s = guard.as_mut().unwrap();
+        matches!(
+            socket.state(),
+            State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck
+        ) && s.shell_pid.is_none()
+            && s.runner.output_buf().is_empty()
+            && TX.lock().is_empty()
+    };
+    if should_reset {
+        reset_socket(socket, &mut guard);
     }
 }
 
@@ -369,14 +394,7 @@ fn lanzar_shell(sess: &mut SshSession) {
         return; // ya hay shell
     }
     if let Some(motd) = leer_fichero("/etc/motd") {
-        // CRLF para terminales: la tty SSH es cruda.
-        let mut tx = TX.lock();
-        for &b in &motd {
-            if b == b'\n' {
-                tx.push_back(b'\r');
-            }
-            tx.push_back(b);
-        }
+        tx_push(&motd);
     }
     match task::spawn_console("/bin/sosh", "", 0, Console::Ssh) {
         Ok(pid) => {

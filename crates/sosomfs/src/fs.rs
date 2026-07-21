@@ -207,6 +207,9 @@ impl<V: VolumeSet> Sosomfs<V> {
             let mut entries = Vec::new();
             entries.push((String::from("manifest.som"), 1));
             entries.push((String::from("index.som"), 1));
+            if self.catalog.find_shard(model, "tokenizer.som").is_some() {
+                entries.push((String::from("tokenizer.som"), 1));
+            }
             entries.push((String::from("shards"), 2));
             return Ok(entries);
         }
@@ -287,6 +290,46 @@ impl<V: VolumeSet> Sosomfs<V> {
                 return Ok(());
             }
             file_pos += ext_bytes;
+        }
+        Err(FsError::Corrupt)
+    }
+
+    /// Lectura directa del volumen, sin pasar por la caché de bloques: para
+    /// rangos grandes alineados a bloque (los faults de 2 MiB del kernel).
+    /// No verifica el CRC de segmento — la integridad del payload la valida
+    /// `verify_shard` en el consumidor.
+    pub fn read_range_direct(
+        &mut self,
+        shard: &ShardEntry,
+        offset: usize,
+        len: usize,
+        out: &mut [u8],
+    ) -> Result<(), FsError> {
+        if offset % BLOCK_SIZE != 0 || len % BLOCK_SIZE != 0 || out.len() < len {
+            return Err(FsError::Corrupt);
+        }
+        let end = offset + len;
+        let mut cur = offset;
+        let mut out_off = 0usize;
+        let mut file_pos = 0usize;
+        for ext in &shard.extents {
+            let ext_end = file_pos + (ext.block_count as usize) * BLOCK_SIZE;
+            while cur < end && cur >= file_pos && cur < ext_end {
+                let lba = ext.start_lba + ((cur - file_pos) / BLOCK_SIZE) as u64;
+                let dst: &mut [u8; BLOCK_SIZE] = (&mut out[out_off..out_off + BLOCK_SIZE])
+                    .try_into()
+                    .map_err(|_| FsError::Io)?;
+                self.cache
+                    .volume_mut()
+                    .read_lba(lba, dst)
+                    .map_err(|_| FsError::Io)?;
+                cur += BLOCK_SIZE;
+                out_off += BLOCK_SIZE;
+            }
+            file_pos = ext_end;
+            if cur >= end {
+                return Ok(());
+            }
         }
         Err(FsError::Corrupt)
     }

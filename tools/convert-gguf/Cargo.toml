@@ -1,0 +1,8 @@
+[package]
+name = "convert-gguf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sosomodel = { path = "../../crates/sosomodel", features = ["std"] }
+soso-llm-core = { path = "../../crates/soso-llm-core", features = ["std"] }

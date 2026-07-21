@@ -6,6 +6,7 @@
 //! rsp y los callee-saved; el resto quedan clobber.
 
 use super::addrspace::{BRK_MAX, USER_MAX};
+use super::pipe;
 use super::{Context, Fd, MAX_FDS, State};
 use crate::arch::gdt;
 use alloc::string::String;
@@ -120,7 +121,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
     let r = match f.nr {
         abi::SYS_EXIT => super::exit_current(a1 as u8),
         abi::SYS_READ => sys_read(f, a1, a2, a3),
-        abi::SYS_WRITE => sys_write(a1, a2, a3),
+        abi::SYS_WRITE => sys_write(f, a1, a2, a3),
         abi::SYS_OPEN => sys_open(a1, a2, a3),
         abi::SYS_CLOSE => sys_close(a1),
         abi::SYS_SEEK => sys_seek(a1, a2 as i64, a3),
@@ -145,6 +146,10 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_GPU_ALLOC => sys_gpu_alloc(a1),
         abi::SYS_GPU_MAP => sys_gpu_map(a1, a2, a3),
         abi::SYS_GPU_SUBMIT => sys_gpu_submit(a1, a2),
+        abi::SYS_PIPE => sys_pipe(),
+        abi::SYS_SPAWN_IO => sys_spawn_io(a1),
+        abi::SYS_CHDIR => sys_chdir(a1, a2),
+        abi::SYS_GETCWD => sys_getcwd(a1, a2),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -220,15 +225,27 @@ fn with_vfs<R>(f: impl FnOnce() -> Result<R, FsError>) -> Result<R, i64> {
     f().map_err(fs_errno)
 }
 
-/// Separa una ruta en (inode del padre, nombre final).
-fn resolve_parent(path: &str) -> Result<(u64, String), i64> {
-    let path = path.trim_end_matches('/');
-    let i = path.rfind('/').ok_or(-abi::EINVAL)?;
-    let name = &path[i + 1..];
+/// Ruta de usuario resuelta contra el cwd del proceso actual.
+fn resolve_user_path(path_ptr: u64, path_len: u64) -> Result<String, i64> {
+    let raw = user_str(path_ptr, path_len)?;
+    let cwd = super::with_current(|p| p.cwd.clone());
+    super::path::abs_path(&cwd, raw)
+}
+
+/// Separa una ruta absoluta en (inode del padre, nombre final).
+fn resolve_parent(abs: &str) -> Result<(u64, String), i64> {
+    let path = abs.trim_end_matches('/');
+    if path.is_empty() || path == "." {
+        return Err(-abi::EINVAL);
+    }
+    let (parent, name) = match path.rfind('/') {
+        Some(0) => ("/", &path[1..]),
+        Some(i) => (&path[..i], &path[i + 1..]),
+        None => return Err(-abi::EINVAL),
+    };
     if name.is_empty() || name == "." {
         return Err(-abi::EINVAL);
     }
-    let parent = if i == 0 { "/" } else { &path[..i] };
     let dir = with_vfs(|| crate::vfs::resolve(parent))?;
     Ok((dir, String::from(name)))
 }
@@ -244,9 +261,119 @@ fn with_fd<R>(fd: u64, f: impl FnOnce(&mut Fd) -> Result<R, i64>) -> Result<R, i
     })
 }
 
+fn alloc_fd(p: &mut super::Process, fd: Fd) -> Result<u64, i64> {
+    match p.fds.iter().position(|s| s.is_none()) {
+        Some(i) => {
+            p.fds[i] = Some(fd);
+            Ok(i as u64)
+        }
+        None if p.fds.len() < MAX_FDS => {
+            p.fds.push(Some(fd));
+            Ok((p.fds.len() - 1) as u64)
+        }
+        None => Err(-abi::EMFILE),
+    }
+}
+
+fn fd_ok_for_stdin(fd: &Fd) -> bool {
+    matches!(
+        fd,
+        Fd::Tty | Fd::File { .. } | Fd::LazyFile { .. } | Fd::PipeRead(_)
+    )
+}
+
+fn fd_ok_for_stdout(fd: &Fd) -> bool {
+    matches!(fd, Fd::Tty | Fd::WriteBuf { .. } | Fd::PipeWrite(_))
+}
+
+/// Transfiere fds del padre al hijo según `stdio` (FD_INHERIT_TTY = tty).
+pub fn take_stdio_fds(stdio: [u64; 3]) -> Result<[Option<Fd>; 3], i64> {
+    super::with_current(|p| {
+        for (slot, &spec) in stdio.iter().enumerate() {
+            if spec == abi::FD_INHERIT_TTY {
+                continue;
+            }
+            let fd = p
+                .fds
+                .get(spec as usize)
+                .and_then(|s| s.as_ref())
+                .ok_or(-abi::EBADF)?;
+            let ok = if slot == 0 {
+                fd_ok_for_stdin(fd)
+            } else {
+                fd_ok_for_stdout(fd)
+            };
+            if !ok {
+                return Err(-abi::EBADF);
+            }
+        }
+        let mut out: [Option<Fd>; 3] = [None, None, None];
+        for (slot, spec) in stdio.into_iter().enumerate() {
+            if spec == abi::FD_INHERIT_TTY {
+                continue;
+            }
+            out[slot] = p.fds.get_mut(spec as usize).and_then(|s| s.take());
+        }
+        Ok(out)
+    })
+}
+
+/// Cierra un fd y aplica efectos secundarios (commit, pipes).
+pub fn drop_fd(fd: Fd) -> Result<(), i64> {
+    match fd {
+        Fd::WriteBuf { dir, name, data, .. } => {
+            let mtime = crate::arch::pit::uptime_ms() / 1000;
+            with_vfs(|| crate::vfs::create_file(dir, &name, &data, mtime))?;
+        }
+        Fd::PipeRead(id) => pipe::close_reader(id),
+        Fd::PipeWrite(id) => pipe::close_writer(id),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Cierra todos los fds abiertos de un proceso (p. ej. al hacer exit).
+pub fn close_all_fds(fds: &mut Vec<Option<Fd>>) {
+    for slot in fds.iter_mut() {
+        if let Some(fd) = slot.take() {
+            let _ = drop_fd(fd);
+        }
+    }
+}
+
 // ---- las syscalls ----
 
-fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
+fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
+    let pipe_id = with_fd(fd, |slot| {
+        Ok(match slot {
+            Fd::PipeWrite(id) => Some(*id),
+            _ => None,
+        })
+    })?;
+    if let Some(id) = pipe_id {
+        if len == 0 {
+            return Ok(0);
+        }
+        if pipe::no_readers(id) {
+            return Err(-abi::EPIPE);
+        }
+        let n = pipe::try_write(id, buf, len)?;
+        if n > 0 {
+            return Ok(n);
+        }
+        if pipe::no_readers(id) {
+            return Err(-abi::EPIPE);
+        }
+        super::block_current(
+            ctx_from_frame(f),
+            State::WaitingPipe {
+                pipe_id: id,
+                buf,
+                len,
+                write: true,
+            },
+        );
+    }
     let data = user_slice(buf, len)?;
     // La consola se lee fuera de with_fd (que ya tiene tomado PROCS).
     let console = super::with_current(|p| p.console);
@@ -272,6 +399,33 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
 
 fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
     let dst = user_slice_mut(buf, len)?;
+    let pipe_id = with_fd(fd, |slot| {
+        Ok(match slot {
+            Fd::PipeRead(id) => Some(*id),
+            _ => None,
+        })
+    })?;
+    if let Some(id) = pipe_id {
+        if len == 0 {
+            return Ok(0);
+        }
+        let n = pipe::try_read(id, buf, len);
+        if n > 0 {
+            return Ok(n);
+        }
+        if pipe::write_closed(id) {
+            return Ok(0);
+        }
+        super::block_current(
+            ctx_from_frame(f),
+            State::WaitingPipe {
+                pipe_id: id,
+                buf,
+                len,
+                write: false,
+            },
+        );
+    }
     // ¿Es la tty? El caso bloqueante no puede resolverse dentro de with_fd
     // (block_current no retorna), así que se distingue antes.
     let es_tty = with_fd(fd, |f| Ok(matches!(f, Fd::Tty)))?;
@@ -318,18 +472,26 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
 }
 
 fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
-    let path = user_str(path_ptr, path_len)?;
+    let path = resolve_user_path(path_ptr, path_len)?;
     let nuevo = if flags & abi::O_WRONLY != 0 {
-        let (dir, name) = resolve_parent(path)?;
+        let (dir, name) = resolve_parent(&path)?;
         // Si existe y es un directorio, no se puede sobreescribir.
         if let Ok(ino) = with_vfs(|| crate::vfs::lookup(dir, &name))
             && with_vfs(|| crate::vfs::stat_inode(ino))?.file_type == sosofs::layout::FT_DIR
         {
             return Err(-abi::EISDIR);
         }
-        Fd::WriteBuf { dir, name, data: Vec::new(), pos: 0 }
+        let mut data = Vec::new();
+        if flags & abi::O_APPEND != 0
+            && let Ok(ino) = with_vfs(|| crate::vfs::lookup(dir, &name))
+            && with_vfs(|| crate::vfs::stat_inode(ino))?.file_type == sosofs::layout::FT_FILE
+        {
+            data = with_vfs(|| crate::vfs::read_file(ino))?;
+        }
+        let pos = data.len();
+        Fd::WriteBuf { dir, name, data, pos }
     } else {
-        let ino = with_vfs(|| crate::vfs::resolve(path))?;
+        let ino = with_vfs(|| crate::vfs::resolve(&path))?;
         let st = with_vfs(|| crate::vfs::stat_inode(ino))?;
         if st.file_type == sosofs::layout::FT_DIR {
             let entries = with_vfs(|| crate::vfs::read_dir(ino))?
@@ -362,19 +524,7 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
             }
         }
     };
-    super::with_current(|p| {
-        match p.fds.iter().position(|s| s.is_none()) {
-            Some(i) => {
-                p.fds[i] = Some(nuevo);
-                Ok(i as u64)
-            }
-            None if p.fds.len() < MAX_FDS => {
-                p.fds.push(Some(nuevo));
-                Ok((p.fds.len() - 1) as u64)
-            }
-            None => Err(-abi::EMFILE),
-        }
-    })
+    super::with_current(|p| alloc_fd(p, nuevo))
 }
 
 fn sys_close(fd: u64) -> Result<u64, i64> {
@@ -384,11 +534,7 @@ fn sys_close(fd: u64) -> Result<u64, i64> {
             .and_then(|s| s.take())
             .ok_or(-abi::EBADF)
     })?;
-    // La escritura se publica entera aquí: una transacción CoW.
-    if let Fd::WriteBuf { dir, name, data, .. } = cerrado {
-        let mtime = crate::arch::pit::uptime_ms() / 1000;
-        with_vfs(|| crate::vfs::create_file(dir, &name, &data, mtime))?;
-    }
+    drop_fd(cerrado)?;
     Ok(0)
 }
 
@@ -416,10 +562,10 @@ fn sys_seek(fd: u64, off: i64, whence: u64) -> Result<u64, i64> {
 }
 
 fn sys_stat(path_ptr: u64, path_len: u64, out: u64) -> Result<u64, i64> {
-    let path = user_str(path_ptr, path_len)?;
+    let path = resolve_user_path(path_ptr, path_len)?;
     let dst = user_slice_mut(out, core::mem::size_of::<abi::Stat>() as u64)?;
     let (ino, st) = with_vfs(|| {
-        let ino = crate::vfs::resolve(path)?;
+        let ino = crate::vfs::resolve(&path)?;
         Ok((ino, crate::vfs::stat_inode(ino)?))
     })?;
     let stat = abi::Stat {
@@ -460,18 +606,41 @@ fn sys_getdents(fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
 }
 
 fn sys_mkdir(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
-    let path = user_str(path_ptr, path_len)?;
-    let (dir, name) = resolve_parent(path)?;
+    let path = resolve_user_path(path_ptr, path_len)?;
+    let (dir, name) = resolve_parent(&path)?;
     let mtime = crate::arch::pit::uptime_ms() / 1000;
     with_vfs(|| crate::vfs::mkdir(dir, &name, mtime))?;
     Ok(0)
 }
 
 fn sys_unlink(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
-    let path = user_str(path_ptr, path_len)?;
-    let (dir, name) = resolve_parent(path)?;
+    let path = resolve_user_path(path_ptr, path_len)?;
+    let (dir, name) = resolve_parent(&path)?;
     with_vfs(|| crate::vfs::unlink(dir, &name))?;
     Ok(0)
+}
+
+fn sys_chdir(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
+    let path = resolve_user_path(path_ptr, path_len)?;
+    let ino = with_vfs(|| crate::vfs::resolve(&path))?;
+    let st = with_vfs(|| crate::vfs::stat_inode(ino))?;
+    if st.file_type != sosofs::layout::FT_DIR {
+        return Err(-abi::ENOTDIR);
+    }
+    super::with_current(|p| p.cwd = path);
+    Ok(0)
+}
+
+fn sys_getcwd(buf_ptr: u64, len: u64) -> Result<u64, i64> {
+    let cwd = super::with_current(|p| p.cwd.clone());
+    let bytes = cwd.as_bytes();
+    if len < bytes.len() as u64 + 1 {
+        return Err(-abi::EINVAL);
+    }
+    let buf = user_slice_mut(buf_ptr, len)?;
+    buf[..bytes.len()].copy_from_slice(bytes);
+    buf[bytes.len()] = 0;
+    Ok(buf_ptr)
 }
 
 fn sys_spawn(path_ptr: u64, path_len: u64, args_ptr: u64, args_len: u64) -> Result<u64, i64> {
@@ -481,6 +650,36 @@ fn sys_spawn(path_ptr: u64, path_len: u64, args_ptr: u64, args_len: u64) -> Resu
     // coreutils deben escribir al canal SSH, no al puerto serie.
     let console = super::with_current(|p| p.console);
     super::spawn_console(path, args, super::current_pid(), console)
+}
+
+fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
+    let opts = user_slice(opts_ptr, core::mem::size_of::<abi::SpawnIo>() as u64)?;
+    let opts = unsafe { *(opts.as_ptr() as *const abi::SpawnIo) };
+    let path = user_str(opts.path_ptr, opts.path_len)?;
+    let args = if opts.args_len == 0 {
+        ""
+    } else {
+        user_str(opts.args_ptr, opts.args_len)?
+    };
+    let console = super::with_current(|p| p.console);
+    super::spawn_console_io(
+        path,
+        args,
+        super::current_pid(),
+        console,
+        [opts.stdin_fd, opts.stdout_fd, opts.stderr_fd],
+    )
+}
+
+fn sys_pipe() -> Result<u64, i64> {
+    let id = pipe::alloc_pipe();
+    pipe::add_reader(id);
+    pipe::add_writer(id);
+    super::with_current(|p| {
+        let read_fd = alloc_fd(p, Fd::PipeRead(id))?;
+        let write_fd = alloc_fd(p, Fd::PipeWrite(id))?;
+        Ok((write_fd << 32) | read_fd)
+    })
 }
 
 fn sys_wait(f: &mut SyscallFrame) -> Result<u64, i64> {
@@ -532,9 +731,9 @@ fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
     if len == 0 {
         return Err(-abi::EINVAL);
     }
-    let len_aligned = len.next_multiple_of(4096);
-    let (inode, writable) = if fd == u64::MAX {
-        (0u64, true)
+    let len_aligned = len.checked_next_multiple_of(4096).ok_or(-abi::EINVAL)?;
+    let (inode, file_len, writable) = if fd == u64::MAX {
+        (0u64, 0u64, true)
     } else {
         let (ino, fsize) = super::with_current(|p| {
             let slot = p
@@ -548,10 +747,11 @@ fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
                 _ => Err(-abi::EBADF),
             }
         })?;
-        if offset >= fsize || offset + len > fsize {
+        let end = offset.checked_add(len).ok_or(-abi::EINVAL)?;
+        if offset >= fsize || end > fsize {
             return Err(-abi::EINVAL);
         }
-        (ino, false)
+        (ino, fsize, false)
     };
     super::with_current(|p| {
         let virt = super::mmap::next_addr(&p.mmaps, addr, len_aligned).ok_or(-abi::ENOMEM)?;
@@ -560,6 +760,7 @@ fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
             len: len_aligned,
             inode,
             file_offset: offset,
+            file_len,
             writable,
         });
         if virt >= p.mmap_next {

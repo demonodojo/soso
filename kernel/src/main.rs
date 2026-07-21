@@ -40,6 +40,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     println!("soso 0.1");
 
+    // Copiar el RSDP antes de que mm::init tome prestado boot_info 'static.
+    let rsdp = match boot_info.rsdp_addr {
+        bootloader_api::info::Optional::Some(r) => Some(r),
+        _ => None,
+    };
+
     arch::init();
     mm::init(boot_info);
 
@@ -52,6 +58,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let cuadrados: Vec<u64> = (1..=10).map(|n| n * n).collect();
     assert_eq!(cuadrados.last(), Some(&100));
     x86_64::instructions::interrupts::int3();
+
+    // Arrancar los demás cores (quedan en idle hasta el scheduler SMP).
+    match rsdp {
+        Some(r) => arch::smp::init(r),
+        None => println!("smp: sin RSDP del bootloader; monocore"),
+    }
 
     drivers::virtio_blk::init();
     drivers::pci::init();
@@ -74,9 +86,30 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kshell::run();
 }
 
+extern "sysv64" fn panic_print_shim(info: u64, _b: u64) -> u64 {
+    let info = unsafe { &*(info as *const PanicInfo<'_>) };
+    println!("\n!!! panic: {info}");
+    0
+}
+
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static EN_PANICO: AtomicBool = AtomicBool::new(false);
     x86_64::instructions::interrupts::disable();
-    println!("\n!!! panic: {info}");
+    // Panic anidado (p. ej. fallo formateando el mensaje): salir sin imprimir
+    // para no girar sobre un lock ya tomado.
+    if EN_PANICO.swap(true, Ordering::SeqCst) {
+        qemu::exit(qemu::ExitCode::Failed);
+    }
+    // El lock de la serie puede estar tomado por el contexto interrumpido.
+    unsafe { drivers::serial::SERIAL1.force_unlock() };
+    // Imprimir con rsp realineado: un panic desde un handler x86-interrupt
+    // con código de error llega con rsp%16==8 y el fmt puede hacer movaps.
+    arch::interrupts::con_rsp_alineado(
+        panic_print_shim,
+        info as *const PanicInfo<'_> as u64,
+        0,
+    );
     qemu::exit(qemu::ExitCode::Failed);
 }
