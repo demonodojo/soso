@@ -319,19 +319,52 @@ parcial de un mmap (lectura recortada a `file_len`, resto a cero) — rompía
 
 *Estimación: 4-8 semanas, muy dependiente de la placa concreta.*
 
-1. **Boot UEFI:** el crate `bootloader` ya genera imagen UEFI
-   (`create_uefi_image`); xtask produce ambas. ACPI completo (MADT ya de L3,
-   MCFG para ECAM real).
-2. **NVMe:** driver propio (admin queue + I/O queues, MSI-X). Es el disco de
-   modelos real; sosomfs no cambia (habla `BlockDevice`).
-3. **NIC física:** un driver concreto según la máquina (Intel igb/e1000e es
-   lo más documentado); smoltcp no cambia.
-4. **Consola:** serie si la placa la tiene; si no, framebuffer UEFI GOP para
+**🟡 Cimientos completados (2026-07-21), verificados en QEMU** (BIOS y
+UEFI/OVMF × `SOSO_QEMU_SMP=1/4`). Pendiente: drivers NVMe + NIC física y
+bring-up en la máquina objetivo.
+
+**✅ L5a — boot UEFI + ECAM dinámico + MSI-X/IOAPIC (2026-07-21):**
+
+1. **Boot UEFI:** xtask genera `target/soso-bios.img` y
+   `target/soso-uefi.img` (`create_bios_image` + `create_uefi_image`).
+   `SOSO_FIRMWARE=uefi` arranca con OVMF por pflash (rutas típicas o
+   `SOSO_OVMF_CODE`/`SOSO_OVMF_VARS`); BIOS sigue siendo el default. El
+   kernel no cambia de entry point.
+2. **ACPI MCFG + MADT ampliado:** `arch/acpi.rs` parsea MCFG (base ECAM +
+   buses) y de MADT también IOAPIC (tipo 1) e Interrupt Source Override
+   (tipo 2). En QEMU BIOS el ECAM es `0xb0000000`; bajo OVMF es
+   `0xe0000000` — prueba de que el hardcode de q35 ya no manda.
+3. **PCI multi-bus / multi-función** con ECAM dinámico
+   (`drivers/pci.rs::init_ecam`); virtio-blk/net dejan de asumir
+   `0xB000_0000`.
+4. **IRQ registry** (`arch/irq.rs`): vectores `0x42..=0x61`, stubs en la
+   IDT, EOI de LAPIC tras el handler.
+5. **IOAPIC** (`arch/ioapic.rs`): MMIO + RTE + ISO (listo para INTx
+   legacy; MSI-X no lo necesita).
+6. **MSI-X** en `pci.rs` (capability 0x11, programar entrada, enable +
+   INTx disable). **virtio-net** lo usa de verdad: arma vector, escribe
+   `queue_msix_vector`/`msix_config` en el common cfg, y el handler hace
+   `ack_interrupt` + `net::poll`. El polling del timer sigue como
+   fallback. Log verificado: `net: MSI-X armado…` y
+   `net: primera IRQ MSI-X recibida` con SSH/echo en verde.
+
+**Pendiente L5b (drivers + hw real):**
+
+1. **NVMe:** driver propio (admin queue + I/O queues, MSI-X). Es el disco de
+   modelos real; sosomfs no cambia (habla `BlockDevice`). Validable antes
+   en QEMU con `-device nvme`.
+2. **NIC física:** un driver concreto según la máquina (Intel igb/e1000e es
+   lo más documentado); smoltcp no cambia. Validable con `-device e1000e`.
+3. **Consola:** serie si la placa la tiene; si no, framebuffer UEFI GOP para
    diagnóstico de arranque y todo lo demás por SSH.
-5. **Realidad a asumir:** sin USB no hay teclado local (fuera de alcance);
+4. **Realidad a asumir:** sin USB no hay teclado local (fuera de alcance);
    máquina headless administrada por red. Memtest propio ligero al arrancar.
 
-**Verificación L5:** arranque en la máquina objetivo, `ssh` entra,
+**Verificación L5a (hecha):** `cargo xtask test` verde en
+`{bios,uefi}×{SMP=1,4}`; bajo OVMF el ECAM sale de MCFG; MSI-X de
+virtio-net dispara IRQs reales.
+
+**Verificación L5 (final):** arranque en la máquina objetivo, `ssh` entra,
 `soso-llm run` con el modelo grande desde NVMe.
 
 ## Fase L6 — GPU NVIDIA: spike de investigación con go/no-go
@@ -375,7 +408,10 @@ investigación.
 grande, a velocidad de un core vectorizable.
 **Hito 2 (+L4+L3, alcanzado 2026-07-21):** decode multicore SIMD — usable
 en servidor (QEMU SMP); falta medir tok/s con modelo grande y L5 en hw.
-**Hito 3 (+L5, ~3-4 meses):** todo lo anterior en la máquina física por SSH.
+**Hito 2.5 (+L5a, alcanzado 2026-07-21):** cimientos hw real en QEMU —
+UEFI/OVMF, MCFG/ECAM dinámico, IOAPIC + MSI-X (virtio-net con IRQs reales).
+**Hito 3 (+L5b, ~3-4 meses):** NVMe + NIC física y bring-up en la máquina
+objetivo por SSH.
 
 ## Riesgos principales
 

@@ -134,11 +134,12 @@ fn lanzar_qemu(
     models: &std::path::Path,
     serial: &std::path::Path,
 ) -> std::io::Result<Child> {
-    Command::new("qemu-system-x86_64")
-        .args(["-machine", "q35", "-cpu", "max"])
+    let mut qemu = Command::new("qemu-system-x86_64");
+    qemu.args(["-machine", "q35", "-cpu", "max"])
         .args(["-m", &super::qemu_mem()])
-        .args(["-smp", &super::qemu_smp()])
-        .args(["-drive", &format!("format=raw,file={}", img.display())])
+        .args(["-smp", &super::qemu_smp()]);
+    super::apply_firmware(&mut qemu, img);
+    qemu.args(["-drive", &format!("format=raw,file={}", img.display())])
         .args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
         .args(["-device", "virtio-blk-pci,drive=data0"])
         .args(["-drive", &format!("file={},format=raw,if=none,id=data1", models.display())])

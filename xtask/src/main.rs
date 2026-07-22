@@ -62,7 +62,73 @@ fn project_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
-/// Compila el kernel para x86_64-soso y devuelve la ruta de la imagen.
+/// Firmware de arranque: `SOSO_FIRMWARE=bios|uefi` (default bios).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Firmware {
+    Bios,
+    Uefi,
+}
+
+pub(crate) fn firmware() -> Firmware {
+    match std::env::var("SOSO_FIRMWARE").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "uefi" => Firmware::Uefi,
+        _ => Firmware::Bios,
+    }
+}
+
+/// Rutas típicas de OVMF; override con `SOSO_OVMF_CODE` / `SOSO_OVMF_VARS`.
+fn ovmf_paths() -> Option<(PathBuf, PathBuf)> {
+    if let (Some(code), Some(vars)) = (
+        std::env::var_os("SOSO_OVMF_CODE"),
+        std::env::var_os("SOSO_OVMF_VARS"),
+    ) {
+        let code = PathBuf::from(code);
+        let vars = PathBuf::from(vars);
+        if code.exists() && vars.exists() {
+            return Some((code, vars));
+        }
+    }
+    const CANDIDATES: &[(&str, &str)] = &[
+        (
+            "/usr/share/OVMF/OVMF_CODE_4M.fd",
+            "/usr/share/OVMF/OVMF_VARS_4M.fd",
+        ),
+        (
+            "/usr/share/OVMF/OVMF_CODE.fd",
+            "/usr/share/OVMF/OVMF_VARS.fd",
+        ),
+        (
+            "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+            "/usr/share/edk2/ovmf/OVMF_VARS.fd",
+        ),
+        (
+            "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+            "/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
+        ),
+    ];
+    for &(code, vars) in CANDIDATES {
+        let code = PathBuf::from(code);
+        let vars = PathBuf::from(vars);
+        if code.exists() && vars.exists() {
+            return Some((code, vars));
+        }
+    }
+    None
+}
+
+/// Copia escribible de OVMF_VARS (QEMU la muta).
+fn ovmf_vars_writable(src: &Path) -> PathBuf {
+    let dst = project_root().join("target/OVMF_VARS.fd");
+    if let Some(parent) = dst.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::copy(src, &dst).expect("no se pudo copiar OVMF_VARS");
+    dst
+}
+
+/// Compila el kernel y genera imágenes BIOS + UEFI. Devuelve la que
+/// corresponda a `SOSO_FIRMWARE` (BIOS por defecto; si se pide UEFI y no
+/// hay OVMF, avisa y cae a BIOS).
 pub(crate) fn build_image() -> PathBuf {
     let root = project_root();
     let target = root.join("kernel/x86_64-soso.json");
@@ -82,12 +148,57 @@ pub(crate) fn build_image() -> PathBuf {
     }
 
     let kernel_elf = root.join("target/kernel/x86_64-soso/debug/kernel");
-    let img = root.join("target/soso-bios.img");
-    bootloader::DiskImageBuilder::new(kernel_elf)
-        .create_bios_image(&img)
-        .expect("fallo creando la imagen de disco");
-    println!("imagen: {}", img.display());
-    img
+    let builder = bootloader::DiskImageBuilder::new(kernel_elf);
+
+    let bios = root.join("target/soso-bios.img");
+    builder
+        .create_bios_image(&bios)
+        .expect("fallo creando la imagen BIOS");
+    println!("imagen BIOS: {}", bios.display());
+
+    let uefi = root.join("target/soso-uefi.img");
+    builder
+        .create_uefi_image(&uefi)
+        .expect("fallo creando la imagen UEFI");
+    println!("imagen UEFI: {}", uefi.display());
+
+    match firmware() {
+        Firmware::Uefi => {
+            if ovmf_paths().is_none() {
+                eprintln!(
+                    "xtask: SOSO_FIRMWARE=uefi pero no se encontró OVMF \
+                     (instala ovmf o define SOSO_OVMF_CODE/SOSO_OVMF_VARS); \
+                     usando BIOS"
+                );
+                bios
+            } else {
+                uefi
+            }
+        }
+        Firmware::Bios => bios,
+    }
+}
+
+/// Añade a `qemu` los drives de firmware (pflash OVMF) si la imagen es UEFI.
+pub(crate) fn apply_firmware(qemu: &mut Command, img: &Path) {
+    let is_uefi = img
+        .file_name()
+        .and_then(|n| n.to_str())
+        == Some("soso-uefi.img");
+    if !is_uefi {
+        return;
+    }
+    let Some((code, vars_src)) = ovmf_paths() else {
+        return;
+    };
+    let vars = ovmf_vars_writable(&vars_src);
+    let code_arg = format!(
+        "if=pflash,format=raw,readonly=on,file={}",
+        code.display()
+    );
+    let vars_arg = format!("if=pflash,format=raw,file={}", vars.display());
+    qemu.args(["-drive", &code_arg]);
+    qemu.args(["-drive", &vars_arg]);
 }
 
 /// Compila el workspace user/ (release) y copia los ELF a rootfs/bin.
@@ -269,8 +380,9 @@ fn run_qemu(img: &Path, gdb: bool) {
         // backend rdrand) necesita; la CPU por defecto de QEMU no lo trae.
         .args(["-cpu", "max"])
         .args(["-m", &qemu_mem()])
-        .args(["-smp", &qemu_smp()])
-        .args(["-drive", &format!("format=raw,file={}", img.display())])
+        .args(["-smp", &qemu_smp()]);
+    apply_firmware(&mut qemu, img);
+    qemu.args(["-drive", &format!("format=raw,file={}", img.display())])
         .args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
         .args(["-device", "virtio-blk-pci,drive=data0"])
         .args(["-drive", &format!("file={},format=raw,if=none,id=data1", models.display())])

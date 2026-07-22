@@ -3,6 +3,8 @@ pub mod apic;
 pub mod fpu;
 pub mod gdt;
 pub mod interrupts;
+pub mod ioapic;
+pub mod irq;
 pub mod percpu;
 pub mod pit;
 pub mod smp;

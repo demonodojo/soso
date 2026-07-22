@@ -9,20 +9,22 @@ use virtio_drivers::transport::DeviceType;
 use virtio_drivers::transport::pci::bus::{Cam, Command, MmioCam, PciRoot};
 use virtio_drivers::transport::pci::{PciTransport, virtio_device_type};
 
-const ECAM_BASE: u64 = 0xB000_0000;
-const ECAM_BUS0_SIZE: u64 = 256 * 4096;
-
 type BlkDev = VirtIOBlk<HalImpl, PciTransport>;
 
 pub static BLK0: Once<Mutex<BlkDev>> = Once::new();
 pub static BLK1: Once<Mutex<BlkDev>> = Once::new();
 
 pub fn init() {
-    crate::mm::ensure_mmio_mapped(ECAM_BASE, ECAM_BUS0_SIZE);
-    let ecam_ptr = crate::mm::phys_to_virt(ECAM_BASE).as_mut_ptr();
+    let (ecam_base, ecam_size) = crate::drivers::pci::ecam_mmio();
+    crate::mm::ensure_mmio_mapped(ecam_base, ecam_size);
+    let ecam_ptr = crate::mm::phys_to_virt(ecam_base).as_mut_ptr();
     let mut root = PciRoot::new(unsafe { MmioCam::new(ecam_ptr, Cam::Ecam) });
 
-    let dispositivos: Vec<_> = root.enumerate_bus(0).collect();
+    let ecam = crate::drivers::pci::ecam();
+    let mut dispositivos = Vec::new();
+    for bus in ecam.bus_start..=ecam.bus_end {
+        dispositivos.extend(root.enumerate_bus(bus));
+    }
     let mut slot = 0u32;
     for (df, info) in dispositivos {
         if virtio_device_type(&info) != Some(DeviceType::Block) {

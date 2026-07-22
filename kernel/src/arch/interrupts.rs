@@ -47,6 +47,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     }
     idt[apic::RESCHED_VECTOR].set_handler_fn(resched_handler);
     idt[InterruptIndex::Com1 as u8].set_handler_fn(com1_handler);
+    crate::arch::irq::install_stubs(&mut idt);
     idt
 });
 

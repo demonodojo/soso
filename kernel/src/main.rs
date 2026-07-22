@@ -59,12 +59,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     assert_eq!(cuadrados.last(), Some(&100));
     x86_64::instructions::interrupts::int3();
 
-    // Arrancar los demás cores (quedan en idle hasta el scheduler SMP).
+    // ACPI (MADT/MCFG) → IOAPIC → APs. Sin RSDP: monocore + ECAM fallback.
     match rsdp {
-        Some(r) => arch::smp::init(r),
+        Some(r) => {
+            arch::acpi::init(r);
+            arch::ioapic::init();
+            arch::smp::init(r);
+        }
         None => println!("smp: sin RSDP del bootloader; monocore"),
     }
 
+    drivers::pci::init_ecam();
     drivers::virtio_blk::init();
     drivers::pci::init();
     drivers::gpu::init();
