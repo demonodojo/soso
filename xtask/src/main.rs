@@ -53,10 +53,20 @@ fn main() {
         "bench-llm" => {
             bench::run();
         }
+        "g1-check" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            g1_check::run(&args);
+        }
+        "test-distributed-llm" => {
+            test_distributed::run();
+        }
+        "test-distributed-llm-3" => {
+            test_distributed::run_3();
+        }
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | convert-gguf | package-usb | package-usb-live | lx-build | bench-llm)"
+                 (usa build | run | gdb | mkfs | test | test-distributed-llm | test-distributed-llm-3 | convert-gguf | package-usb | package-usb-live | lx-build | bench-llm | g1-check)"
             );
             exit(2);
         }
@@ -64,9 +74,11 @@ fn main() {
 }
 
 mod bench;
+mod g1_check;
 mod lx_build;
 mod package_live;
 mod test;
+mod test_distributed;
 
 fn convert_gguf(args: &[String]) {
     let root = project_root();
@@ -519,16 +531,20 @@ pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
 }
 
 pub(crate) fn apply_qemu_nic(qemu: &mut Command) {
-    qemu.args(["-netdev", "user,id=net0,hostfwd=tcp::7777-:7,hostfwd=tcp::2222-:22"]);
+    qemu.args([
+        "-netdev",
+        "user,id=net0,hostfwd=tcp::7777-:7,hostfwd=tcp::2222-:22",
+    ]);
+    let mac = std::env::var("SOSO_QEMU_MAC").unwrap_or_else(|_| "52:54:00:12:34:15".into());
     match qemu_nic().to_ascii_lowercase().as_str() {
         "e1000e" | "e1000" => {
-            qemu.args(["-device", "e1000e,netdev=net0"]);
+            qemu.args(["-device", &format!("e1000e,netdev=net0,mac={mac}")]);
         }
         "lx-e1000e" | "lx_e1000e" => {
-            qemu.args(["-device", "e1000e,netdev=net0"]);
+            qemu.args(["-device", &format!("e1000e,netdev=net0,mac={mac}")]);
         }
         _ => {
-            qemu.args(["-device", "virtio-net-pci,netdev=net0"]);
+            qemu.args(["-device", &format!("virtio-net-pci,netdev=net0,mac={mac}")]);
         }
     }
 }

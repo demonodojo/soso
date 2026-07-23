@@ -7,6 +7,7 @@ use crate::tier::TierManager;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use crate::pipeline::PipelineRole;
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
 
@@ -97,6 +98,16 @@ impl Runtime {
     /// Comprueba que las shapes del index casan con lo que espera el ejecutor
     /// (convención row-major `[filas, columnas]` = `[out_dim, in_dim]`).
     pub fn validate_shapes(&self) -> Result<(), ()> {
+        self.validate_shapes_for_role(PipelineRole::Full, 0, self.manifest.num_layers)
+    }
+
+    /// Valida solo los tensores necesarios para un rol/rango de capas.
+    pub fn validate_shapes_for_role(
+        &self,
+        role: PipelineRole,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> Result<(), ()> {
         let h = self.manifest.hidden_dim;
         let vocab = self.manifest.vocab_size;
         let ffn = self.manifest.ffn_dim;
@@ -118,10 +129,12 @@ impl Runtime {
             }
         };
 
-        check("embed", &[vocab, h], true)?;
+        let needs_embed = matches!(role, PipelineRole::Head | PipelineRole::Full);
+        let needs_logits = matches!(role, PipelineRole::Tail | PipelineRole::Full);
+        check("embed", &[vocab, h], needs_embed)?;
         check("lm_head", &[vocab, h], false)?;
-        check("output_norm", &[h], false)?;
-        for layer in 0..self.manifest.num_layers {
+        check("output_norm", &[h], needs_logits && self.has_output_norm)?;
+        for layer in layer_start..layer_end {
             let p = alloc::format!("L{layer:02}");
             check(&alloc::format!("{p}.attn_norm"), &[h], true)?;
             check(&alloc::format!("{p}.attn_q"), &[h, h], true)?;
@@ -131,7 +144,6 @@ impl Runtime {
             check(&alloc::format!("{p}.ffn_norm"), &[h], true)?;
             check(&alloc::format!("{p}.ffn_up"), &[ffn, h], true)?;
             check(&alloc::format!("{p}.ffn_down"), &[h, ffn], true)?;
-            // Si hay gate en la capa 0, debe estar en todas.
             check(&alloc::format!("{p}.ffn_gate"), &[ffn, h], self.has_gate)?;
         }
         Ok(())
@@ -161,7 +173,23 @@ impl Runtime {
         source: &mut impl TensorSource,
         parallel: Option<&dyn RowParallel>,
     ) -> Result<(), ()> {
+        self.forward_layers_range(0, self.manifest.num_layers, source, parallel)?;
+        self.advance_pos();
+        Ok(())
+    }
+
+    /// Ejecuta un rango de capas en la posición actual sin avanzar `pos`.
+    pub fn forward_layers_range(
+        &mut self,
+        layer_start: u32,
+        layer_end: u32,
+        source: &mut impl TensorSource,
+        parallel: Option<&dyn RowParallel>,
+    ) -> Result<(), ()> {
         if self.pos >= self.manifest.max_seq as usize {
+            return Err(());
+        }
+        if layer_start > layer_end || layer_end > self.manifest.num_layers {
             return Err(());
         }
         let exec = LayerExecutor {
@@ -169,7 +197,7 @@ impl Runtime {
             has_gate: self.has_gate,
             parallel,
         };
-        for layer in 0..self.manifest.num_layers {
+        for layer in layer_start..layer_end {
             if let Some(pf) = self.manifest.prefetch.get(layer as usize) {
                 self.tiers.schedule_prefetch(&pf.shards);
             }
@@ -182,8 +210,23 @@ impl Runtime {
                 source,
             )?;
         }
-        self.pos += 1;
         Ok(())
+    }
+
+    pub fn advance_pos(&mut self) {
+        self.pos += 1;
+    }
+
+    pub fn set_hidden(&mut self, hidden: &[f32]) -> Result<(), ()> {
+        if hidden.len() != self.hidden.len() {
+            return Err(());
+        }
+        self.hidden.copy_from_slice(hidden);
+        Ok(())
+    }
+
+    pub fn hidden_slice(&self) -> &[f32] {
+        &self.hidden
     }
 
     /// Calcula los logits directamente sobre la vista zero-copy de lm_head

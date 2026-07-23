@@ -55,6 +55,18 @@ pub enum State {
     },
     /// `futex_wait` sobre (pml4, uaddr).
     WaitingFutex { pml4: u64, uaddr: u64 },
+    /// read/write/accept/connect TCP bloqueante.
+    WaitingSocket {
+        slot: usize,
+        buf: u64,
+        len: u64,
+        write: bool,
+        accept: bool,
+        connect: bool,
+        result_fd: u64,
+        /// 0 = sin límite; si no, uptime_ms al que expira con -EAGAIN.
+        deadline_ms: u64,
+    },
     Zombie(u8),
 }
 
@@ -137,6 +149,7 @@ pub enum Fd {
     Dir { entries: Vec<soso_abi::Dirent>, pos: usize },
     PipeRead(pipe::PipeId),
     PipeWrite(pipe::PipeId),
+    Tcp { slot: usize },
 }
 
 pub struct Process {
@@ -694,6 +707,63 @@ extern "C" fn schedule_inner() -> ! {
                     if n > 0 || pipe::write_closed(pipe_id) {
                         procs[i].ctx.rax = n;
                         procs[i].state = State::Runnable;
+                    }
+                }
+            }
+        }
+        // Despertar operaciones TCP bloqueantes.
+        for i in 0..procs.len() {
+            if let State::WaitingSocket {
+                slot,
+                buf,
+                len,
+                write,
+                accept,
+                connect,
+                result_fd,
+                deadline_ms,
+            } = procs[i].state
+            {
+                procs[i].space.as_ref().unwrap().activate();
+                let now = crate::arch::pit::uptime_ms();
+                if deadline_ms != 0 && now >= deadline_ms {
+                    procs[i].ctx.rax = (-soso_abi::EAGAIN) as u64;
+                    procs[i].state = State::Runnable;
+                    continue;
+                }
+                if accept {
+                    if crate::net::tcp_listener_ready(slot) {
+                        let _ = crate::net::tcp_accept(slot);
+                        procs[i].ctx.rax = result_fd;
+                        procs[i].state = State::Runnable;
+                    }
+                } else if connect {
+                    if crate::net::tcp_is_connected(slot) {
+                        procs[i].ctx.rax = result_fd;
+                        procs[i].state = State::Runnable;
+                    } else if crate::net::tcp_connect_failed(slot) {
+                        procs[i].ctx.rax = (-soso_abi::ECONNREFUSED) as u64;
+                        procs[i].state = State::Runnable;
+                    }
+                } else if write {
+                    match crate::net::tcp_try_write(slot, buf, len) {
+                        Ok(n) if n > 0 => {
+                            procs[i].ctx.rax = n;
+                            procs[i].state = State::Runnable;
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match crate::net::tcp_try_read(slot, buf, len) {
+                        Ok(n) if n > 0 => {
+                            procs[i].ctx.rax = n;
+                            procs[i].state = State::Runnable;
+                        }
+                        Ok(0) if !crate::net::tcp_is_connected(slot) => {
+                            procs[i].ctx.rax = 0;
+                            procs[i].state = State::Runnable;
+                        }
+                        _ => {}
                     }
                 }
             }

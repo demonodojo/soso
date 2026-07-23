@@ -13,3 +13,6 @@ std = []
 [dependencies]
 sosomodel = { path = "../sosomodel" }
 libm = "0.2"
+
+[lib]
+doctest = false

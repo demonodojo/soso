@@ -453,6 +453,80 @@ soso-llm run mi-modelo --prompt "hola"
 
 Sin la variable, `cargo xtask run` vuelve a empaquetar el modelo tiny.
 
+### Inferencia distribuida (pipeline por capas)
+
+Puedes repartir un modelo **por capas** entre varias máquinas soso enlazadas por
+red. El **head** orquesta la inferencia en topología **en estrella**: se conecta
+por TCP a todos los nodos remotos, ejecuta embedding y sus capas locales, y
+reenvía activaciones entre etapas. Cada nodo mantiene su KV cache y solo pagina
+en RAM los pesos de su rango.
+
+**Limitaciones:** configuración estática (IP/puerto/splits manual), sin
+descubrimiento automático. Con protocolo **v3** hay tolerancia básica a fallos
+(timeouts, nodos persistentes, failover manual del head).
+
+#### Dos nodos (compat v1)
+
+En el **nodo remoto** (tail):
+
+```sh
+soso-llm node tiny --listen 9900 --layers 2:4
+# alias: soso-llm worker tiny --listen 9900 --split 2
+```
+
+En el **head**:
+
+```sh
+soso-llm run tiny --remote 10.0.2.15:9900 --split 2 --prompt test --max 8 --seed 42
+```
+
+#### Tres o más nodos (estrella)
+
+Arranca los nodos remotos **de tail a head** (todos en `--listen` antes del
+`run`). Ejemplo con tiny (4 capas, reparto 2+1+1):
+
+```sh
+# Tail (capas 3..4, logits)
+soso-llm node tiny --listen 9902 --layers 3:4
+
+# Intermedio (capas 2..3)
+soso-llm node tiny --listen 9901 --layers 2:3
+
+# Head (capas 0..2 local + orquestación)
+soso-llm run tiny --pipeline 10.0.2.16:9901,10.0.2.15:9902 --splits 2,3 \
+  --prompt test --max 8 --seed 42
+```
+
+| Flag | Efecto |
+|---|---|
+| `--pipeline <ip:puerto>,...` | Nodos remotos en orden de pipeline (solo en `run`) |
+| `--splits <n1,n2,...>` | Fronteras de capa; head ejecuta `[0,n1)`, remotos los tramos siguientes |
+| `--remote` / `--split` | Atajo de 2 nodos (equivale a `--pipeline` con un solo remoto) |
+| `--listen <puerto>` | Puerto TCP del nodo (en `node`/`worker`) |
+| `--layers <start>:<end>` | Rango de capas del nodo |
+| `--step-timeout-ms <ms>` | Timeout por paso de inferencia (default 120000) |
+| `--handshake-timeout-ms <ms>` | Timeout de conexión/handshake (default 60000) |
+| `--accept-timeout-ms <ms>` | Timeout de `accept` en nodos (default 60000) |
+
+#### Tolerancia a fallos (v3)
+
+- **Nodos colgados:** el head aborta la sesión si un remoto no responde dentro
+  de `--step-timeout-ms` y envía error al resto.
+- **Nodos persistentes:** tras caída del head, timeout o error de sesión, cada
+  `soso-llm node` vuelve a `listen` automáticamente (resetea KV cache).
+- **Failover del head:** no hay elección automática; arranca otro host con el
+  mismo `soso-llm run --pipeline ... --splits ...`. Los nodos aceptan la nueva
+  conexión (nuevo `session_id` en `Begin`).
+- **Keepalive:** mensajes `PING`/`PONG` en el protocolo; los nodos responden
+  automáticamente.
+
+Gates de prueba en QEMU:
+
+```sh
+cargo xtask test-distributed-llm      # 2 nodos
+cargo xtask test-distributed-llm-3    # 3 nodos en estrella
+```
+
 ### Memoria, CPU y modelos grandes
 
 QEMU arranca por defecto con 2 GiB y 1 CPU; ambos son configurables:

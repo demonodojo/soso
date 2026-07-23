@@ -39,6 +39,11 @@ pub const SYS_THREAD_SPAWN: u64 = 25;
 pub const SYS_FUTEX: u64 = 26;
 pub const SYS_NCPU: u64 = 27;
 pub const SYS_UPTIME_MS: u64 = 28;
+pub const SYS_TCP_CONNECT: u64 = 29;
+pub const SYS_TCP_LISTEN: u64 = 30;
+pub const SYS_TCP_ACCEPT: u64 = 31;
+/// `read(fd, buf, len)` con límite de espera en ms (0 = bloqueante indefinido).
+pub const SYS_READ_TIMEOUT: u64 = 32;
 
 /// Operaciones de `SYS_FUTEX` (arg `op`).
 pub const FUTEX_WAIT: u64 = 0;
@@ -93,6 +98,19 @@ pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
 pub const EPIPE: i64 = 32;
+pub const EAGAIN: i64 = 11;
+pub const ECONNREFUSED: i64 = 61;
+pub const ENOTCONN: i64 = 107;
+
+/// Dirección IPv4 + puerto para syscalls TCP.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct SockAddr {
+    /// IPv4 en orden de bytes de red (p. ej. 10.0.2.15 → [10,0,2,15]).
+    pub addr: [u8; 4],
+    pub port: u16,
+    pub _pad: u16,
+}
 
 // ---- open ----
 

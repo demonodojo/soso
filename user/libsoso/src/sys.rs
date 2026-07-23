@@ -39,6 +39,17 @@ pub fn read(fd: u64, buf: &mut [u8]) -> i64 {
     syscall4(abi::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
 }
 
+/// Lee hasta `len` bytes con límite de espera (`timeout_ms`; 0 = bloqueante).
+pub fn read_timeout(fd: u64, buf: &mut [u8], timeout_ms: u64) -> i64 {
+    syscall4(
+        abi::SYS_READ_TIMEOUT,
+        fd,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        timeout_ms,
+    )
+}
+
 pub fn write(fd: u64, buf: &[u8]) -> i64 {
     syscall4(abi::SYS_WRITE, fd, buf.as_ptr() as u64, buf.len() as u64, 0)
 }
@@ -204,4 +215,63 @@ pub fn ncpu() -> i64 {
 
 pub fn uptime_ms() -> i64 {
     syscall1(abi::SYS_UPTIME_MS, 0)
+}
+
+pub fn tcp_connect(addr: &abi::SockAddr, timeout_ms: u64) -> i64 {
+    syscall4(
+        abi::SYS_TCP_CONNECT,
+        addr as *const abi::SockAddr as u64,
+        timeout_ms,
+        0,
+        0,
+    )
+}
+
+pub fn tcp_listen(port: u16) -> i64 {
+    syscall4(abi::SYS_TCP_LISTEN, port as u64, 0, 0, 0)
+}
+
+pub fn tcp_accept(listener_fd: u64, timeout_ms: u64) -> i64 {
+    syscall4(abi::SYS_TCP_ACCEPT, listener_fd, timeout_ms, 0, 0)
+}
+
+/// Lee exactamente `buf.len()` bytes o falla.
+pub fn read_exact(fd: u64, buf: &mut [u8]) -> Result<(), i64> {
+    let mut off = 0usize;
+    while off < buf.len() {
+        let n = read(fd, &mut buf[off..]);
+        if n < 0 {
+            return Err(n);
+        }
+        if n == 0 {
+            return Err(-abi::EIO);
+        }
+        off += n as usize;
+    }
+    Ok(())
+}
+
+/// Escribe exactamente `buf` o falla.
+pub fn write_all(fd: u64, buf: &[u8]) -> Result<(), i64> {
+    let mut off = 0usize;
+    while off < buf.len() {
+        let n = write(fd, &buf[off..]);
+        if n < 0 {
+            return Err(n);
+        }
+        if n == 0 {
+            return Err(-abi::EIO);
+        }
+        off += n as usize;
+    }
+    Ok(())
+}
+
+/// IPv4 + puerto en formato de red.
+pub fn sock_addr(a: u8, b: u8, c: u8, d: u8, port: u16) -> abi::SockAddr {
+    abi::SockAddr {
+        addr: [a, b, c, d],
+        port,
+        _pad: 0,
+    }
 }

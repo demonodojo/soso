@@ -7,6 +7,7 @@
 
 mod device;
 pub mod ssh;
+mod tcp_user;
 
 use crate::arch::pit;
 use crate::drivers::{e1000e, virtio_net};
@@ -29,8 +30,7 @@ const ECHO_SOCKETS: usize = 4;
 /// Tiempo máximo de espera de DHCP antes del fallback estático.
 const DHCP_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// IP y pasarela del fallback QEMU slirp.
-const FALLBACK_ADDR: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
+/// IP y pasarela del fallback QEMU slirp (último octeto derivado de MAC).
 const FALLBACK_GW: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
 
 struct NetStack {
@@ -42,6 +42,8 @@ struct NetStack {
     configured: bool,
     dhcp_started: Instant,
     dev: NicDev,
+    mac: [u8; 6],
+    user_tcp: tcp_user::TcpTable,
 }
 
 static NET: Once<Mutex<NetStack>> = Once::new();
@@ -85,8 +87,9 @@ fn set_ipv4_addr(iface: &mut Interface, cidr: Ipv4Cidr) {
     });
 }
 
-fn apply_static_fallback(iface: &mut Interface) {
-    set_ipv4_addr(iface, Ipv4Cidr::new(FALLBACK_ADDR, 24));
+fn apply_static_fallback(iface: &mut Interface, mac: [u8; 6]) {
+    let addr = tcp_user::fallback_addr_from_mac(mac);
+    set_ipv4_addr(iface, Ipv4Cidr::new(addr, 24));
     iface.routes_mut().remove_default_ipv4_route();
     iface
         .routes_mut()
@@ -154,6 +157,8 @@ pub fn init() {
             configured: false,
             dhcp_started,
             dev,
+            mac,
+            user_tcp: tcp_user::TcpTable::new(),
         })
     });
 }
@@ -203,13 +208,19 @@ fn poll_dhcp(
     }
 }
 
-fn try_static_fallback(iface: &mut Interface, dhcp_started: Instant, configured: &mut bool) {
+fn try_static_fallback(
+    iface: &mut Interface,
+    mac: [u8; 6],
+    dhcp_started: Instant,
+    configured: &mut bool,
+) {
     if *configured || now() < dhcp_started + DHCP_TIMEOUT {
         return;
     }
-    apply_static_fallback(iface);
+    apply_static_fallback(iface, mac);
     *configured = true;
-    println!("net: sin dhcp, ip estática {FALLBACK_ADDR}/24");
+    let addr = tcp_user::fallback_addr_from_mac(mac);
+    println!("net: sin dhcp, ip estática {addr}/24");
 }
 
 fn poll_tcp_services(
@@ -262,11 +273,178 @@ pub fn poll() {
         configured,
         dhcp_started,
         dev,
+        mac,
+        user_tcp,
     } = &mut *n;
 
     iface.poll(now(), dev, sockets);
     poll_dhcp(iface, sockets, echo, *ssh, *dhcp, configured);
-    try_static_fallback(iface, *dhcp_started, configured);
+    try_static_fallback(iface, *mac, *dhcp_started, configured);
     poll_tcp_services(sockets, echo, *ssh, *configured);
+    poll_user_tcp(iface, sockets, user_tcp, *configured);
     iface.poll(now(), dev, sockets);
+}
+
+fn poll_user_tcp(
+    iface: &mut Interface,
+    sockets: &mut SocketSet<'static>,
+    user_tcp: &mut tcp_user::TcpTable,
+    configured: bool,
+) {
+    for slot in 0..user_tcp.entries.len() {
+        if let Some(entry) = user_tcp.entries[slot].as_mut() {
+            tcp_user::poll_entry(iface, sockets, slot, entry, configured);
+        }
+    }
+}
+
+/// Reserva un socket TCP en la pila de red (llamar con NET tomado).
+pub fn tcp_listen(port: u16) -> Result<usize, i64> {
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let mut n = net.lock();
+    let NetStack {
+        sockets,
+        user_tcp,
+        ..
+    } = &mut *n;
+    let slot = user_tcp
+        .alloc(sockets, tcp_user::TcpRole::Listening, port, None)
+        .map_err(|_| -soso_abi::EMFILE)?;
+    if let Some(entry) = user_tcp.entries[slot].as_mut() {
+        tcp_user::listen_start(sockets, entry).map_err(|_| -soso_abi::EIO)?;
+    }
+    Ok(slot)
+}
+
+pub fn tcp_connect(remote: soso_abi::SockAddr) -> Result<usize, i64> {
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let mut n = net.lock();
+    let NetStack {
+        sockets,
+        user_tcp,
+        ..
+    } = &mut *n;
+    let ep = tcp_user::endpoint_from_abi(&remote);
+    let slot = user_tcp
+        .alloc(
+            sockets,
+            tcp_user::TcpRole::Connecting,
+            0,
+            Some(ep),
+        )
+        .map_err(|_| -soso_abi::EMFILE)?;
+    Ok(slot)
+}
+
+pub fn tcp_accept(listener_slot: usize) -> Result<usize, i64> {
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let n = net.lock();
+    let entry = n
+        .user_tcp
+        .entries
+        .get(listener_slot)
+        .and_then(|e| e.as_ref())
+        .ok_or(-soso_abi::EBADF)?;
+    if entry.role != tcp_user::TcpRole::Listening && entry.role != tcp_user::TcpRole::Connected {
+        return Err(-soso_abi::EINVAL);
+    }
+    if tcp_user::is_established(&n.sockets, entry.handle) {
+        drop(n);
+        let net = NET.get().unwrap();
+        let mut n = net.lock();
+        if let Some(e) = n
+            .user_tcp
+            .entries
+            .get_mut(listener_slot)
+            .and_then(|x| x.as_mut())
+        {
+            e.role = tcp_user::TcpRole::Connected;
+        }
+        return Ok(listener_slot);
+    }
+    Err(-soso_abi::EAGAIN)
+}
+
+pub fn tcp_try_read(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let mut n = net.lock();
+    let (handle, role, closed) = {
+        let entry = n
+            .user_tcp
+            .entries
+            .get(slot)
+            .and_then(|e| e.as_ref())
+            .ok_or(-soso_abi::EBADF)?;
+        (entry.handle, entry.role, entry.closed)
+    };
+    if closed {
+        return Ok(0);
+    }
+    tcp_user::try_read(&mut n.sockets, handle, role, buf, len)
+}
+
+pub fn tcp_try_write(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let mut n = net.lock();
+    let (handle, role, closed) = {
+        let entry = n
+            .user_tcp
+            .entries
+            .get(slot)
+            .and_then(|e| e.as_ref())
+            .ok_or(-soso_abi::EBADF)?;
+        (entry.handle, entry.role, entry.closed)
+    };
+    if closed {
+        return Err(-soso_abi::EPIPE);
+    }
+    tcp_user::try_write(&mut n.sockets, handle, role, buf, len)
+}
+
+pub fn tcp_close(slot: usize) {
+    if let Some(net) = NET.get() {
+        let mut n = net.lock();
+        let NetStack {
+            sockets,
+            user_tcp,
+            ..
+        } = &mut *n;
+        user_tcp.free(sockets, slot);
+    }
+}
+
+pub fn tcp_is_connected(slot: usize) -> bool {
+    let Some(net) = NET.get() else { return false };
+    let n = net.lock();
+    let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
+        return false;
+    };
+    entry.role == tcp_user::TcpRole::Connected && !entry.closed
+}
+
+pub fn tcp_is_connecting(slot: usize) -> bool {
+    let Some(net) = NET.get() else { return false };
+    let n = net.lock();
+    let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
+        return false;
+    };
+    entry.role == tcp_user::TcpRole::Connecting && !entry.closed
+}
+
+pub fn tcp_connect_failed(slot: usize) -> bool {
+    let Some(net) = NET.get() else { return false };
+    let n = net.lock();
+    let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
+        return false;
+    };
+    entry.role == tcp_user::TcpRole::Connecting && entry.closed
+}
+
+pub fn tcp_listener_ready(slot: usize) -> bool {
+    let Some(net) = NET.get() else { return false };
+    let n = net.lock();
+    let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
+        return false;
+    };
+    tcp_user::is_established(&n.sockets, entry.handle)
 }

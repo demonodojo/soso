@@ -448,8 +448,13 @@ Con eso, decisión:
 
 **🟡 Infraestructura L6 (2026-07-23):** capa `lxdde` (lx_emul + ports
 spike/testdrv/e1000e/nouveau), `nvidia_probe` (NV_PMC_BOOT_0), stub G4
-saxpy, `docs/L6-G1-gate.md`, `SOSO_QEMU_GPU=vfio:…`, `cargo xtask lx-build`.
-Pendiente G1 en placa: checklist VFIO + firmware GSP en host Linux.
+saxpy, `docs/L6-G1-gate.md`, `SOSO_QEMU_GPU=vfio:…`, `cargo xtask lx-build`,
+`cargo xtask g1-check`.
+
+**🟡 G1 en placa (2026-07-23, parcial):** GPU `10de:2f18` (RTX 5070 Ti
+Mobile / GB205). Firmware GSP **go**. Veredicto global **no-go G3–G5** (hardware
++ portátil). Scripts: `scripts/l6-g1-enable-iommu.sh`, `scripts/l6-g1-vfio-test.sh`.
+Pendiente: reinicio + prueba `NV_PMC_BOOT_0` para cierre formal del gate.
 
 - **Go:** roadmap GPU propio (6-12+ meses, alto riesgo).
 - **No-go (probable):** el motor de 70B en soso es CPU SMP+SIMD (fases

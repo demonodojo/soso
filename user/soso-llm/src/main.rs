@@ -5,22 +5,26 @@
 
 extern crate alloc;
 
+mod distributed;
+mod net;
 mod pool;
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use distributed::{crc_bytes, default_timeouts, DistributedConfig};
 use libsoso::{println, sys};
 use pool::ThreadPool;
 use soso_abi::{self as abi, O_RDONLY};
-use sosomodel::index::TensorIndex;
-use sosomodel::manifest::Manifest;
 use soso_llm_core::parallel::RowParallel;
+use soso_llm_core::pipeline::{PipelinePlan, PipelineRole};
 use soso_llm_core::runtime::Runtime;
 use soso_llm_core::sample::Sampler;
 use soso_llm_core::source::{FileMapper, MappedShard, MmapTensorSource};
 use soso_llm_core::tokenizer::{StreamDecoder, Tokenizer};
+use sosomodel::index::TensorIndex;
+use sosomodel::manifest::Manifest;
 
 libsoso::entry!(main);
 
@@ -57,8 +61,19 @@ impl FileMapper for SyscallMapper {
     }
 }
 
+struct ModelBundle {
+    rt: Runtime,
+    source: MmapTensorSource<SyscallMapper>,
+    tokenizer: Tokenizer,
+    manifest_crc: u32,
+    index_crc: u32,
+}
+
 fn main(args: &str) -> u8 {
     let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.first() == Some(&"node") || parts.first() == Some(&"worker") {
+        return run_node_cmd(&parts);
+    }
     if parts.first() == Some(&"run") {
         let name = parts.get(1).copied().unwrap_or("tiny");
         let prompt = parse_prompt(&parts).unwrap_or_default();
@@ -74,10 +89,87 @@ fn main(args: &str) -> u8 {
         let seed: u64 = parse_flag(&parts, "--seed")
             .and_then(|v| v.parse().ok())
             .unwrap_or(42);
+        if let Some(pipeline) = parse_flag(&parts, "--pipeline") {
+            let splits = parse_splits(&parts).unwrap_or_default();
+            let (step_to, hs_to, _) = parse_timeouts(&parts);
+            return run_distributed_head(
+                name,
+                &prompt,
+                max_new,
+                Sampler::new(temp, top_p, seed),
+                seed,
+                &pipeline,
+                &splits,
+                step_to,
+                hs_to,
+            );
+        }
+        if let Some(remote) = parse_flag(&parts, "--remote") {
+            let split: u32 = parse_flag(&parts, "--split")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2);
+            let splits = format!("{split}");
+            let (step_to, hs_to, _) = parse_timeouts(&parts);
+            return run_distributed_head(
+                name,
+                &prompt,
+                max_new,
+                Sampler::new(temp, top_p, seed),
+                seed,
+                &remote,
+                &splits,
+                step_to,
+                hs_to,
+            );
+        }
         return run_model(name, &prompt, max_new, Sampler::new(temp, top_p, seed));
     }
-    println!("uso: soso-llm run <modelo> --prompt <texto> [--max <n>] [--temp <t>] [--top-p <p>] [--seed <s>]");
+    println!("uso:");
+    println!("  soso-llm run <modelo> --prompt <texto> [--max <n>]");
+    println!("    [--pipeline <ip:puerto>,...] [--splits <n1,n2,...>]");
+    println!("    [--step-timeout-ms <ms>] [--handshake-timeout-ms <ms>]");
+    println!("    [--remote <ip:puerto> --split <n>]  (compat v1)");
+    println!("  soso-llm node <modelo> --listen <puerto> --layers <start>:<end>");
+    println!("  soso-llm worker ...  (alias de node)");
     1
+}
+
+fn run_node_cmd(parts: &[&str]) -> u8 {
+    let name = parts.get(1).copied().unwrap_or("tiny");
+    let listen: u16 = parse_flag(parts, "--listen")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9900);
+    let (layer_start, layer_end) = match parse_layers(parts) {
+        Some(v) => v,
+        None => {
+            let split: u32 = parse_flag(parts, "--split")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2);
+            let num_layers = read_num_layers(name).unwrap_or(4);
+            (split, num_layers)
+        }
+    };
+    run_node(name, layer_start, layer_end, listen, &parts)
+}
+
+fn parse_timeouts(parts: &[&str]) -> (u64, u64, u64) {
+    let (def_step, def_hs, def_accept) = default_timeouts();
+    let step = parse_flag(parts, "--step-timeout-ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(def_step);
+    let hs = parse_flag(parts, "--handshake-timeout-ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(def_hs);
+    let accept = parse_flag(parts, "--accept-timeout-ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(def_accept);
+    (step, hs, accept)
+}
+
+fn read_num_layers(name: &str) -> Option<u32> {
+    let path = format!("/models/{name}/manifest.som");
+    let data = read_file(&path).ok()?;
+    Manifest::parse(&data).ok().map(|m| m.num_layers)
 }
 
 fn parse_flag(parts: &[&str], flag: &str) -> Option<String> {
@@ -88,8 +180,6 @@ fn parse_flag(parts: &[&str], flag: &str) -> Option<String> {
         .map(|&v| v.into())
 }
 
-/// El prompt toma todas las palabras hasta el siguiente flag (sosh no
-/// interpreta comillas).
 fn parse_prompt(parts: &[&str]) -> Option<String> {
     let i = parts.iter().position(|&p| p == "--prompt")?;
     let words: Vec<&str> = parts[i + 1..]
@@ -104,44 +194,223 @@ fn parse_prompt(parts: &[&str]) -> Option<String> {
     }
 }
 
-fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> u8 {
+fn parse_layers(parts: &[&str]) -> Option<(u32, u32)> {
+    let s = parse_flag(parts, "--layers")?;
+    let (a, b) = s.split_once(':')?;
+    Some((a.parse().ok()?, b.parse().ok()?))
+}
+
+fn parse_splits(parts: &[&str]) -> Option<String> {
+    parse_flag(parts, "--splits")
+}
+
+fn parse_split_list(splits: &str) -> Vec<u32> {
+    splits
+        .split(',')
+        .filter_map(|p| p.trim().parse().ok())
+        .collect()
+}
+
+fn parse_pipeline_list(pipeline: &str) -> Vec<String> {
+    pipeline
+        .split(',')
+        .map(|s| String::from(s.trim()))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn load_model(
+    name: &str,
+    role: PipelineRole,
+    layer_start: u32,
+    layer_end: u32,
+) -> Result<ModelBundle, u8> {
     let base = format!("/models/{name}");
     let manifest_path = format!("{base}/manifest.som");
     let index_path = format!("{base}/index.som");
 
-    let manifest_data = match read_file(&manifest_path) {
-        Ok(d) => d,
-        Err(e) => {
-            println!("soso-llm: no puedo leer {manifest_path} (errno {e})");
-            return 1;
-        }
-    };
-    let manifest = match Manifest::parse(&manifest_data) {
-        Ok(m) => m,
-        Err(()) => {
-            println!("soso-llm: manifest inválido");
-            return 1;
-        }
+    let manifest_data = read_file(&manifest_path).map_err(|e| {
+        println!("soso-llm: no puedo leer {manifest_path} (errno {e})");
+        1u8
+    })?;
+    let manifest = Manifest::parse(&manifest_data).map_err(|_| {
+        println!("soso-llm: manifest inválido");
+        1u8
+    })?;
+    let manifest_crc = crc_bytes(&manifest_data);
+
+    let index_data = read_file(&index_path).map_err(|e| {
+        println!("soso-llm: no puedo leer {index_path} (errno {e})");
+        1u8
+    })?;
+    let index = TensorIndex::parse(&index_data).map_err(|_| {
+        println!("soso-llm: index inválido");
+        1u8
+    })?;
+    let index_crc = crc_bytes(&index_data);
+
+    let mut rt = Runtime::new(manifest, index.clone(), 32 * 1024 * 1024, 0);
+    if rt
+        .validate_shapes_for_role(role, layer_start, layer_end)
+        .is_err()
+    {
+        println!("soso-llm: shapes del index no casan con el rol");
+        return Err(1);
+    }
+
+    let tokenizer = match read_file(&format!("{base}/tokenizer.som")) {
+        Ok(data) => Tokenizer::parse(&data).map_err(|_| {
+            println!("soso-llm: tokenizer.som inválido");
+            1u8
+        })?,
+        Err(_) => Tokenizer::byte_level(),
     };
 
-    let index_data = match read_file(&index_path) {
-        Ok(d) => d,
-        Err(e) => {
-            println!("soso-llm: no puedo leer {index_path} (errno {e})");
-            return 1;
-        }
-    };
-    let index = match TensorIndex::parse(&index_data) {
-        Ok(i) => i,
-        Err(()) => {
-            println!("soso-llm: index inválido");
-            return 1;
-        }
-    };
+    let source = MmapTensorSource::new(format!("{base}/shards"), index, SyscallMapper);
+    Ok(ModelBundle {
+        rt,
+        source,
+        tokenizer,
+        manifest_crc,
+        index_crc,
+    })
+}
 
+fn run_distributed_head(
+    name: &str,
+    prompt: &str,
+    max_new: usize,
+    sampler: Sampler,
+    seed: u64,
+    pipeline: &str,
+    splits: &str,
+    step_timeout_ms: u64,
+    handshake_timeout_ms: u64,
+) -> u8 {
+    let remotes = parse_pipeline_list(pipeline);
+    let split_vals = parse_split_list(splits);
+    let num_layers = match read_num_layers(name) {
+        Some(n) => n,
+        None => {
+            println!("soso-llm: no puedo leer manifest");
+            return 1;
+        }
+    };
+    let plan = match PipelinePlan::from_splits(&split_vals, num_layers) {
+        Ok(p) => p,
+        Err(()) => {
+            println!("soso-llm: splits inválidos");
+            return 1;
+        }
+    };
+    if remotes.len() != plan.remote_count() {
+        println!(
+            "soso-llm: pipeline tiene {} nodos pero splits implican {}",
+            remotes.len(),
+            plan.remote_count()
+        );
+        return 1;
+    }
+    let head = plan.head_segment();
+    let mut bundle = match load_model(name, PipelineRole::Head, head.layer_start, head.layer_end) {
+        Ok(b) => b,
+        Err(c) => return c,
+    };
+    let pool = ThreadPool::new();
+    println!("soso-llm: workers={}", pool.workers());
+    let par: Option<&dyn RowParallel> = if pool.workers() > 1 {
+        Some(&pool)
+    } else {
+        None
+    };
+    let (_, _, accept_to) = default_timeouts();
+    let cfg = DistributedConfig {
+        plan,
+        remotes,
+        listen_port: 0,
+        layer_start: head.layer_start,
+        layer_end: head.layer_end,
+        model_name: String::from(name),
+        manifest_crc: bundle.manifest_crc,
+        index_crc: bundle.index_crc,
+        step_timeout_ms,
+        handshake_timeout_ms,
+        accept_timeout_ms: accept_to,
+    };
+    let text = if prompt.is_empty() { "test" } else { prompt };
+    match distributed::run_head(
+        &mut bundle.rt,
+        &mut bundle.source,
+        &bundle.tokenizer,
+        &cfg,
+        text,
+        max_new,
+        sampler,
+        seed,
+        par,
+    ) {
+        Ok(()) => 0,
+        Err(()) => {
+            println!("soso-llm: inferencia distribuida falló");
+            1
+        }
+    }
+}
+
+fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[&str]) -> u8 {
+    let num_layers = match read_num_layers(name) {
+        Some(n) => n,
+        None => {
+            println!("soso-llm: no puedo leer manifest");
+            return 1;
+        }
+    };
+    let role = PipelineRole::from_layer_range(layer_start, layer_end, num_layers);
+    let mut bundle = match load_model(name, role, layer_start, layer_end) {
+        Ok(b) => b,
+        Err(c) => return c,
+    };
+    let pool = ThreadPool::new();
+    println!("soso-llm: workers={}", pool.workers());
+    let par: Option<&dyn RowParallel> = if pool.workers() > 1 {
+        Some(&pool)
+    } else {
+        None
+    };
+    let (step_to, hs_to, accept_to) = parse_timeouts(parts);
+    let cfg = DistributedConfig {
+        plan: PipelinePlan {
+            segments: Vec::new(),
+        },
+        remotes: Vec::new(),
+        listen_port: listen,
+        layer_start,
+        layer_end,
+        model_name: String::from(name),
+        manifest_crc: bundle.manifest_crc,
+        index_crc: bundle.index_crc,
+        step_timeout_ms: step_to,
+        handshake_timeout_ms: hs_to,
+        accept_timeout_ms: accept_to,
+    };
+    match distributed::run_node(&mut bundle.rt, &mut bundle.source, &cfg, par) {
+        Ok(()) => 0,
+        Err(()) => {
+            println!("soso-llm: nodo terminó con error");
+            1
+        }
+    }
+}
+
+fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> u8 {
+    let num_layers = read_num_layers(name).unwrap_or(4);
+    let mut bundle = match load_model(name, PipelineRole::Full, 0, num_layers) {
+        Ok(b) => b,
+        Err(c) => return c,
+    };
     println!(
         "soso-llm: modelo {} ({} capas, hidden={})",
-        manifest.name, manifest.num_layers, manifest.hidden_dim
+        bundle.rt.manifest.name, bundle.rt.manifest.num_layers, bundle.rt.manifest.hidden_dim
     );
 
     let mut gpu = abi::GpuInfo::default();
@@ -152,55 +421,25 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
         println!("soso-llm: backend CPU");
     }
 
-    let ram_budget = 32 * 1024 * 1024;
-    let vram_budget = if gpu.present != 0 {
-        gpu.vram_free.min(64 * 1024 * 1024) as usize
-    } else {
-        0
-    };
-    let mut rt = Runtime::new(manifest, index.clone(), ram_budget, vram_budget);
-    if rt.validate_shapes().is_err() {
-        println!("soso-llm: shapes del index no casan con el manifest");
-        return 1;
-    }
-
-    let tokenizer = match read_file(&format!("{base}/tokenizer.som")) {
-        Ok(data) => match Tokenizer::parse(&data) {
-            Ok(t) => t,
-            Err(()) => {
-                println!("soso-llm: tokenizer.som inválido");
-                return 1;
-            }
-        },
-        Err(_) => Tokenizer::byte_level(),
-    };
-
-    let shards_base = format!("{base}/shards");
-    let mut source = MmapTensorSource::new(shards_base, index, SyscallMapper);
-
-    // Pool de hilos (NCPU). Con 1 CPU o si el spawn falla → secuencial.
     let pool = ThreadPool::new();
     println!("soso-llm: workers={}", pool.workers());
-    // Matvec paralelo por filas cuando hay workers.
     let par: Option<&dyn RowParallel> = if pool.workers() > 1 {
         Some(&pool)
     } else {
         None
     };
-
     let text = if prompt.is_empty() { "hola" } else { prompt };
-    let prompt_tokens = tokenizer.encode(text);
-    // streaming: cada token se imprime según se genera
+    let prompt_tokens = bundle.tokenizer.encode(text);
     let mut decoder = StreamDecoder::new();
     let t0 = sys::uptime_ms();
-    let result = rt.generate_stream_par(
-        &mut source,
+    let result = bundle.rt.generate_stream_par(
+        &mut bundle.source,
         &prompt_tokens,
         max_new,
-        tokenizer.eos(),
+        bundle.tokenizer.eos(),
         &mut sampler,
         |t| {
-            let s = decoder.push(&tokenizer, t);
+            let s = decoder.push(&bundle.tokenizer, t);
             if !s.is_empty() {
                 libsoso::print!("{s}");
             }

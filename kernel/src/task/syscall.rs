@@ -216,6 +216,10 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
             core::sync::atomic::Ordering::Relaxed,
         ) as u64),
         abi::SYS_UPTIME_MS => Ok(crate::arch::pit::uptime_ms()),
+        abi::SYS_TCP_CONNECT => sys_tcp_connect(f, a1, a2),
+        abi::SYS_TCP_LISTEN => sys_tcp_listen(a1),
+        abi::SYS_TCP_ACCEPT => sys_tcp_accept(f, a1, a2),
+        abi::SYS_READ_TIMEOUT => sys_read_timeout(f, a1, a2, a3, a4),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -344,12 +348,12 @@ fn alloc_fd(p: &mut super::Process, fd: Fd) -> Result<u64, i64> {
 fn fd_ok_for_stdin(fd: &Fd) -> bool {
     matches!(
         fd,
-        Fd::Tty | Fd::File { .. } | Fd::LazyFile { .. } | Fd::PipeRead(_)
+        Fd::Tty | Fd::File { .. } | Fd::LazyFile { .. } | Fd::PipeRead(_) | Fd::Tcp { .. }
     )
 }
 
 fn fd_ok_for_stdout(fd: &Fd) -> bool {
-    matches!(fd, Fd::Tty | Fd::WriteBuf { .. } | Fd::PipeWrite(_))
+    matches!(fd, Fd::Tty | Fd::WriteBuf { .. } | Fd::PipeWrite(_) | Fd::Tcp { .. })
 }
 
 /// Transfiere fds del padre al hijo según `stdio` (FD_INHERIT_TTY = tty).
@@ -393,6 +397,7 @@ pub fn drop_fd(fd: Fd) -> Result<(), i64> {
         }
         Fd::PipeRead(id) => pipe::close_reader(id),
         Fd::PipeWrite(id) => pipe::close_writer(id),
+        Fd::Tcp { slot } => crate::net::tcp_close(slot),
         _ => {}
     }
     Ok(())
@@ -437,6 +442,34 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
                 buf,
                 len,
                 write: true,
+            },
+        );
+    }
+    let tcp_slot = with_fd(fd, |slot| {
+        Ok(match slot {
+            Fd::Tcp { slot } => Some(*slot),
+            _ => None,
+        })
+    })?;
+    if let Some(slot) = tcp_slot {
+        if len == 0 {
+            return Ok(0);
+        }
+        let n = crate::net::tcp_try_write(slot, buf, len)?;
+        if n > 0 {
+            return Ok(n);
+        }
+        super::block_current(
+            ctx_from_frame(f),
+            State::WaitingSocket {
+                slot,
+                buf,
+                len,
+                write: true,
+                accept: false,
+                connect: false,
+                result_fd: 0,
+                deadline_ms: 0,
             },
         );
     }
@@ -489,6 +522,37 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
                 buf,
                 len,
                 write: false,
+            },
+        );
+    }
+    let tcp_slot = with_fd(fd, |slot| {
+        Ok(match slot {
+            Fd::Tcp { slot } => Some(*slot),
+            _ => None,
+        })
+    })?;
+    if let Some(slot) = tcp_slot {
+        if len == 0 {
+            return Ok(0);
+        }
+        let n = crate::net::tcp_try_read(slot, buf, len)?;
+        if n > 0 {
+            return Ok(n);
+        }
+        if !crate::net::tcp_is_connected(slot) {
+            return Ok(0);
+        }
+        super::block_current(
+            ctx_from_frame(f),
+            State::WaitingSocket {
+                slot,
+                buf,
+                len,
+                write: false,
+                accept: false,
+                connect: false,
+                result_fd: 0,
+                deadline_ms: 0,
             },
         );
     }
@@ -948,4 +1012,110 @@ fn sys_futex(
         abi::FUTEX_WAKE => Ok(super::futex::wake(pml4, uaddr, nwake)),
         _ => Err(-abi::EINVAL),
     }
+}
+
+fn sys_tcp_listen(port: u64) -> Result<u64, i64> {
+    if port == 0 || port > u16::MAX as u64 {
+        return Err(-abi::EINVAL);
+    }
+    let slot = crate::net::tcp_listen(port as u16)?;
+    super::with_current(|p| alloc_fd(p, Fd::Tcp { slot }))
+}
+
+fn socket_deadline(timeout_ms: u64) -> u64 {
+    if timeout_ms == 0 {
+        0
+    } else {
+        crate::arch::pit::uptime_ms().saturating_add(timeout_ms)
+    }
+}
+
+fn sys_read_timeout(
+    f: &mut SyscallFrame,
+    fd: u64,
+    buf: u64,
+    len: u64,
+    timeout_ms: u64,
+) -> Result<u64, i64> {
+    let tcp_slot = with_fd(fd, |slot| {
+        Ok(match slot {
+            Fd::Tcp { slot } => Some(*slot),
+            _ => None,
+        })
+    })?;
+    if let Some(slot) = tcp_slot {
+        if len == 0 {
+            return Ok(0);
+        }
+        let n = crate::net::tcp_try_read(slot, buf, len)?;
+        if n > 0 {
+            return Ok(n);
+        }
+        if !crate::net::tcp_is_connected(slot) {
+            return Ok(0);
+        }
+        super::block_current(
+            ctx_from_frame(f),
+            State::WaitingSocket {
+                slot,
+                buf,
+                len,
+                write: false,
+                accept: false,
+                connect: false,
+                result_fd: 0,
+                deadline_ms: socket_deadline(timeout_ms),
+            },
+        );
+    }
+    sys_read(f, fd, buf, len)
+}
+
+fn sys_tcp_connect(f: &mut SyscallFrame, addr_ptr: u64, timeout_ms: u64) -> Result<u64, i64> {
+    let addr = user_slice(addr_ptr, core::mem::size_of::<abi::SockAddr>() as u64)?;
+    let remote = unsafe { *(addr.as_ptr() as *const abi::SockAddr) };
+    let slot = crate::net::tcp_connect(remote)?;
+    let fd = super::with_current(|p| alloc_fd(p, Fd::Tcp { slot }))?;
+    if crate::net::tcp_is_connected(slot) {
+        return Ok(fd);
+    }
+    super::block_current(
+        ctx_from_frame(f),
+        State::WaitingSocket {
+            slot,
+            buf: 0,
+            len: 0,
+            write: false,
+            accept: false,
+            connect: true,
+            result_fd: fd,
+            deadline_ms: socket_deadline(timeout_ms),
+        },
+    );
+}
+
+fn sys_tcp_accept(f: &mut SyscallFrame, listener_fd: u64, timeout_ms: u64) -> Result<u64, i64> {
+    let slot = with_fd(listener_fd, |fd| {
+        Ok(match fd {
+            Fd::Tcp { slot } => *slot,
+            _ => return Err(-abi::EBADF),
+        })
+    })?;
+    if crate::net::tcp_listener_ready(slot) {
+        let _ = crate::net::tcp_accept(slot)?;
+        return Ok(listener_fd);
+    }
+    super::block_current(
+        ctx_from_frame(f),
+        State::WaitingSocket {
+            slot,
+            buf: 0,
+            len: 0,
+            write: false,
+            accept: true,
+            connect: false,
+            result_fd: listener_fd,
+            deadline_ms: socket_deadline(timeout_ms),
+        },
+    );
 }

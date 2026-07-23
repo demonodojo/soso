@@ -10,6 +10,7 @@ pub mod layer;
 pub mod parallel;
 pub mod quant;
 pub mod optim;
+pub mod pipeline;
 pub mod runtime;
 pub mod sample;
 pub mod tier;
