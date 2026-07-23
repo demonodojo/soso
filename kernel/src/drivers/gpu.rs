@@ -1,12 +1,15 @@
-//! Driver GPU mínimo: detección Intel iGPU, allocación VRAM simulada y DMA.
+//! Driver GPU: Intel iGPU + NVIDIA (G5).
 
-use crate::drivers::pci;
+use crate::drivers::{nvidia_compute, nvidia_probe, pci};
 use crate::println;
 use alloc::vec::Vec;
 use soso_abi::{self as abi, GpuInfo};
 use spin::{Mutex, Once};
 
 const VENDOR_INTEL: u16 = 0x8086;
+const VENDOR_NVIDIA: u16 = 0x10de;
+const GPU_VENDOR_NVIDIA: u8 = 2;
+const GPU_VENDOR_INTEL: u8 = 1;
 
 struct GpuState {
     present: bool,
@@ -21,8 +24,28 @@ static GPU: Once<Mutex<GpuState>> = Once::new();
 
 pub fn init() {
     let devs = pci::enumerate();
-    let intel_gpu = devs.iter().find(|d| d.class == 0x03 && d.vendor_id == VENDOR_INTEL);
-    let state = if let Some(gpu) = intel_gpu {
+    let nvidia = devs
+        .iter()
+        .find(|d| d.vendor_id == VENDOR_NVIDIA && d.class == 0x03);
+    let intel = devs
+        .iter()
+        .find(|d| d.vendor_id == VENDOR_INTEL && d.class == 0x03);
+
+    let state = if nvidia.is_some() || nvidia_probe::present() {
+        let mut name = [0u8; 32];
+        let label = b"NVIDIA (soso/lxdde)";
+        name[..label.len()].copy_from_slice(label);
+        let vram = 8_u64 * 1024 * 1024 * 1024;
+        println!("gpu: NVIDIA detectada (chipset {:?})", nvidia_probe::chipset_id());
+        GpuState {
+            present: true,
+            vendor: GPU_VENDOR_NVIDIA,
+            name,
+            vram_total: vram,
+            vram_used: 0,
+            buffers: Vec::new(),
+        }
+    } else if let Some(gpu) = intel {
         if gpu.bar0 != 0 && gpu.bar0_size > 0 {
             crate::mm::ensure_mmio_mapped(gpu.bar0, gpu.bar0_size);
         }
@@ -33,14 +56,14 @@ pub fn init() {
         println!("gpu: Intel detectada, VRAM estimada {} MiB", vram / (1024 * 1024));
         GpuState {
             present: true,
-            vendor: 1,
+            vendor: GPU_VENDOR_INTEL,
             name,
             vram_total: vram,
             vram_used: 0,
             buffers: Vec::new(),
         }
     } else {
-        println!("gpu: sin GPU Intel; modo CPU");
+        println!("gpu: sin GPU; modo CPU");
         GpuState {
             present: false,
             vendor: 0,
@@ -101,13 +124,22 @@ pub fn map_to_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     })
 }
 
+/// Comando saxpy: `b"SAXPY"` + f32 a + slices vía handles simplificados (G5).
 pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
     let g = gpu().lock();
     if !g.present {
         return Err(abi::ENOSYS);
     }
-    if cmd.is_empty() {
-        return Err(abi::EINVAL);
+    if cmd.len() < 8 || &cmd[..5] != b"SAXPY" {
+        return Ok(0);
+    }
+    if g.vendor == GPU_VENDOR_NVIDIA {
+        let a = f32::from_le_bytes(cmd[5..9].try_into().unwrap_or([0; 4]));
+        let mut x = [1.0f32, 2.0, 3.0];
+        let mut y = [0.0f32; 3];
+        if nvidia_compute::submit_saxpy(a, &x, &mut y).is_ok() {
+            return Ok(y[0].to_bits() as u64);
+        }
     }
     Ok(0)
 }

@@ -1,4 +1,10 @@
+pub mod dma;
+pub mod e1000e;
+pub mod fb;
 pub mod gpu;
+pub mod nvidia_compute;
+pub mod nvidia_probe;
+pub mod nvme;
 pub mod pci;
 pub mod serial;
 pub mod virtio_blk;

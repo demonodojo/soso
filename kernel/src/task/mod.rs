@@ -613,6 +613,8 @@ extern "C" fn schedule_inner() -> ! {
         let es_bsp = crate::arch::percpu::cpu_index() == 0;
         if es_bsp {
             crate::net::poll();
+            #[cfg(feature = "lxdde")]
+            crate::lxdde::poll();
         }
         x86_64::instructions::interrupts::disable();
         let now = crate::arch::pit::uptime_ms();
@@ -971,6 +973,8 @@ extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
     // Venimos de usuario: el kernel no sostiene ningún lock, se puede
     // atender la red aquí (si no, un proceso cpu-bound la mataría de hambre).
     crate::net::poll();
+    #[cfg(feature = "lxdde")]
+    crate::lxdde::poll();
     let cur = crate::arch::percpu::current_pid();
     if cur == 0 {
         return 0;

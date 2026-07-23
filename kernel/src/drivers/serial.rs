@@ -97,6 +97,20 @@ pub fn write_bytes(data: &[u8]) {
             port.send_raw(b);
         }
     });
+    crate::drivers::fb::write_bytes(data);
+}
+
+struct DualConsole;
+
+impl core::fmt::Write for DualConsole {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        {
+            let mut port = SERIAL1.lock();
+            port.write_str(s)?;
+        }
+        crate::drivers::fb::write_bytes(s.as_bytes());
+        Ok(())
+    }
 }
 
 #[doc(hidden)]
@@ -105,7 +119,9 @@ pub fn _print(args: core::fmt::Arguments) {
     // Sin interrupciones mientras se sostiene el lock: el handler de IRQ4
     // también lo toma, y en monocore eso sería un interbloqueo.
     without_interrupts(|| {
-        SERIAL1.lock().write_fmt(args).expect("fallo escribiendo en serie");
+        DualConsole
+            .write_fmt(args)
+            .expect("fallo escribiendo en consola");
     });
 }
 

@@ -1,74 +1,45 @@
 //! Implementación del trait `Hal` de virtio-drivers.
 //!
-//! - DMA: frames físicamente contiguos, accedidos vía el mapeo físico.
-//! - share/unshare: buffers de rebote (bounce). Los buffers del llamante
-//!   viven en el heap y pueden cruzar páginas no contiguas físicamente;
-//!   copiar a páginas DMA propias evita esa clase de corrupción.
+//! - DMA: vía `drivers::dma` (frames contiguos).
+//! - share/unshare: buffers de rebote (bounce).
 
-use alloc::vec::Vec;
 use core::ptr::NonNull;
-use spin::Mutex;
 use virtio_drivers::{BufferDirection, Hal, PAGE_SIZE, PhysAddr};
 
-/// Free-list de bloques DMA (phys, nº de páginas) para reutilizar bounces.
-static DMA_FREE: Mutex<Vec<(PhysAddr, usize)>> = Mutex::new(Vec::new());
-
-fn alloc_dma_pages(pages: usize) -> PhysAddr {
-    // Un único lock para buscar Y extraer: con dos cores, soltarlo entre
-    // ambas operaciones (como antes) deja una ventana en la que otro core
-    // puede alterar el vector y `swap_remove(i)` saca la entrada equivocada
-    // (o entra en pánico si ya quedó vacío).
-    let mut free = DMA_FREE.lock();
-    if let Some(i) = free.iter().position(|&(_, p)| p == pages) {
-        return free.swap_remove(i).0;
-    }
-    drop(free);
-    let frame = crate::mm::FRAME_ALLOC
-        .get()
-        .unwrap()
-        .lock()
-        .allocate_contiguous(pages)
-        .expect("sin memoria contigua para DMA");
-    frame.start_address().as_u64() as PhysAddr
-}
-
-fn dma_virt(paddr: PhysAddr) -> NonNull<u8> {
-    NonNull::new(crate::mm::phys_to_virt(paddr as u64).as_mut_ptr()).unwrap()
-}
+use crate::drivers::dma;
 
 pub struct HalImpl;
 
 unsafe impl Hal for HalImpl {
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
-        let paddr = alloc_dma_pages(pages);
-        let vptr = dma_virt(paddr);
-        unsafe { core::ptr::write_bytes(vptr.as_ptr(), 0, pages * PAGE_SIZE) };
-        (paddr, vptr)
+        let (paddr, vptr) = dma::alloc_zeroed(pages);
+        (paddr as PhysAddr, vptr)
     }
 
     unsafe fn dma_dealloc(paddr: PhysAddr, _vaddr: NonNull<u8>, pages: usize) -> i32 {
-        DMA_FREE.lock().push((paddr, pages));
+        dma::free_pages(paddr as dma::PhysAddr, pages);
         0
     }
 
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
         crate::mm::ensure_mmio_mapped(paddr as u64, size as u64);
-        dma_virt(paddr)
+        dma::virt(paddr as dma::PhysAddr)
     }
 
     unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection) -> PhysAddr {
         let len = buffer.len();
-        let paddr = alloc_dma_pages(len.div_ceil(PAGE_SIZE).max(1));
+        let pages = len.div_ceil(PAGE_SIZE).max(1);
+        let paddr = dma::alloc_pages(pages);
         if direction != BufferDirection::DeviceToDriver {
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     buffer.as_ptr().cast::<u8>(),
-                    dma_virt(paddr).as_ptr(),
+                    dma::virt(paddr).as_ptr(),
                     len,
                 );
             }
         }
-        paddr
+        paddr as PhysAddr
     }
 
     unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection) {
@@ -76,12 +47,12 @@ unsafe impl Hal for HalImpl {
         if direction != BufferDirection::DriverToDevice {
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    dma_virt(paddr).as_ptr(),
+                    dma::virt(paddr as dma::PhysAddr).as_ptr(),
                     buffer.as_ptr().cast::<u8>(),
                     len,
                 );
             }
         }
-        DMA_FREE.lock().push((paddr, len.div_ceil(PAGE_SIZE).max(1)));
+        dma::free_pages(paddr as dma::PhysAddr, len.div_ceil(PAGE_SIZE).max(1));
     }
 }

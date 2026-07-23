@@ -29,19 +29,36 @@ fn main() {
         }
         "test" => {
             test::run();
+            if matches!(
+                std::env::var("SOSO_LXDDE_TEST").as_deref(),
+                Ok("1") | Ok("true")
+            ) {
+                test::run_lx_e1000e_smoke();
+            }
         }
         "convert-gguf" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             convert_gguf(&args);
         }
+        "package-usb" => {
+            package_usb();
+        }
+        "lx-build" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            lx_build::run(&args);
+        }
         other => {
-            eprintln!("comando desconocido: {other} (usa build | run | gdb | mkfs | test | convert-gguf)");
+            eprintln!(
+                "comando desconocido: {other} \
+                 (usa build | run | gdb | mkfs | test | convert-gguf | package-usb | lx-build)"
+            );
             exit(2);
         }
     }
 }
 
 mod test;
+mod lx_build;
 
 fn convert_gguf(args: &[String]) {
     let root = project_root();
@@ -131,18 +148,26 @@ fn ovmf_vars_writable(src: &Path) -> PathBuf {
 /// hay OVMF, avisa y cae a BIOS).
 pub(crate) fn build_image() -> PathBuf {
     let root = project_root();
+    if lxdde_enabled() {
+        lx_build::run(&["all".into()]);
+    }
     let target = root.join("kernel/x86_64-soso.json");
-    let status = Command::new("cargo")
-        .current_dir(root.join("kernel"))
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(root.join("kernel"))
         .args([
             "build",
             "--target",
             target.to_str().unwrap(),
             "--target-dir",
             root.join("target/kernel").to_str().unwrap(),
-        ])
-        .status()
-        .expect("no se pudo ejecutar cargo");
+        ]);
+    if lxdde_enabled() {
+        cmd.arg("--features").arg("lxdde");
+        if let Some(mode) = lxdde_mode_env() {
+            cmd.env("SOSO_LXDDE_MODE", mode);
+        }
+    }
+    let status = cmd.status().expect("no se pudo ejecutar cargo");
     if !status.success() {
         exit(status.code().unwrap_or(1));
     }
@@ -371,6 +396,189 @@ pub(crate) fn qemu_smp() -> String {
     std::env::var("SOSO_QEMU_SMP").unwrap_or_else(|_| "1".into())
 }
 
+/// `SOSO_QEMU_NVME=1`: añade un NVMe con la imagen de modelos (además de virtio).
+pub(crate) fn qemu_nvme() -> bool {
+    matches!(
+        std::env::var("SOSO_QEMU_NVME").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+/// `SOSO_QEMU_NVME_ROOT=1`: rootfs en NVMe ctrl 0; omite virtio-blk0; models en NVMe ctrl 1.
+pub(crate) fn qemu_nvme_root() -> bool {
+    matches!(
+        std::env::var("SOSO_QEMU_NVME_ROOT").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+/// `SOSO_QEMU_NIC=e1000e|lx-e1000e` sustituye virtio-net; default virtio.
+pub(crate) fn qemu_nic() -> String {
+    std::env::var("SOSO_QEMU_NIC").unwrap_or_else(|_| "virtio".into())
+}
+
+fn lxdde_enabled() -> bool {
+    matches!(
+        std::env::var("SOSO_LXDDE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    ) || matches!(
+        qemu_nic().to_ascii_lowercase().as_str(),
+        "lx-e1000e" | "lx_e1000e"
+    )
+}
+
+fn lxdde_mode_env() -> Option<String> {
+    if let Ok(m) = std::env::var("SOSO_LXDDE_MODE") {
+        return Some(m);
+    }
+    match qemu_nic().to_ascii_lowercase().as_str() {
+        "lx-e1000e" | "lx_e1000e" => Some("e1000e".into()),
+        _ => None,
+    }
+}
+
+fn nvme_copy(src: &Path, dst_name: &str) -> PathBuf {
+    let dst = project_root().join("target").join(dst_name);
+    std::fs::copy(src, &dst).unwrap_or_else(|e| panic!("copiar {} → {}: {e}", src.display(), dst.display()));
+    dst
+}
+
+/// Discos de QEMU: virtio (default), NVMe extra para modelos, o solo NVMe para root+models.
+pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
+    if qemu_nvme_root() {
+        let nvme_root = nvme_copy(data, "soso-data-nvme.img");
+        let nvme_models = nvme_copy(models, "soso-models-nvme.img");
+        qemu.args([
+            "-drive",
+            &format!("file={},format=raw,if=none,id=nvme0", nvme_root.display()),
+        ]);
+        qemu.args(["-device", "nvme,serial=soso-root,drive=nvme0"]);
+        qemu.args([
+            "-drive",
+            &format!("file={},format=raw,if=none,id=nvme1", nvme_models.display()),
+        ]);
+        qemu.args(["-device", "nvme,serial=soso-models,drive=nvme1"]);
+        return;
+    }
+
+    qemu.args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
+        .args(["-device", "virtio-blk-pci,drive=data0"])
+        .args(["-drive", &format!("file={},format=raw,if=none,id=data1", models.display())])
+        .args(["-device", "virtio-blk-pci,drive=data1"]);
+
+    if qemu_nvme() {
+        let nvme_img = nvme_copy(models, "soso-models-nvme.img");
+        qemu.args([
+            "-drive",
+            &format!("file={},format=raw,if=none,id=nvme0", nvme_img.display()),
+        ]);
+        qemu.args(["-device", "nvme,serial=soso,drive=nvme0"]);
+    }
+}
+
+pub(crate) fn apply_qemu_nic(qemu: &mut Command) {
+    qemu.args(["-netdev", "user,id=net0,hostfwd=tcp::7777-:7,hostfwd=tcp::2222-:22"]);
+    match qemu_nic().to_ascii_lowercase().as_str() {
+        "e1000e" | "e1000" => {
+            qemu.args(["-device", "e1000e,netdev=net0"]);
+        }
+        "lx-e1000e" | "lx_e1000e" => {
+            qemu.args(["-device", "e1000e,netdev=net0"]);
+        }
+        _ => {
+            qemu.args(["-device", "virtio-net-pci,netdev=net0"]);
+        }
+    }
+}
+
+/// `SOSO_QEMU_GPU=vfio:BB:DD.F` — passthrough VFIO de GPU NVIDIA (G1).
+pub(crate) fn apply_qemu_gpu(qemu: &mut Command) {
+    let Ok(spec) = std::env::var("SOSO_QEMU_GPU") else {
+        return;
+    };
+    let Some(bdf) = spec.strip_prefix("vfio:") else {
+        eprintln!("xtask: SOSO_QEMU_GPU debe ser vfio:BB:DD.F (got {spec})");
+        return;
+    };
+    let arg = format!("vfio-pci,host={bdf}");
+    qemu.args(["-device", &arg]);
+    println!("xtask: GPU VFIO {arg}");
+}
+
+fn package_usb() {
+    build_user();
+    let root = project_root();
+    let _ = build_image();
+    let uefi = root.join("target/soso-uefi.img");
+    if !uefi.exists() {
+        eprintln!("xtask: falta {}", uefi.display());
+        exit(1);
+    }
+    let data = mkfs_rootfs(true);
+    let models = mkfs_models(true);
+    let out = root.join("target/usb-package");
+    std::fs::create_dir_all(&out).expect("crear target/usb-package");
+    for (src, name) in [
+        (&uefi, "soso-uefi.img"),
+        (&data, "soso-data.img"),
+        (&models, "soso-models.img"),
+    ] {
+        let dst = out.join(name);
+        std::fs::copy(src, &dst).unwrap_or_else(|e| {
+            panic!("copiar {} → {}: {e}", src.display(), dst.display());
+        });
+        println!("package-usb: {}", dst.display());
+    }
+
+    let flash = out.join("FLASH.txt");
+    let flash_body = format!(
+        r#"soso — paquete UEFI + discos para bring-up en placa (L5c)
+
+Artefactos en este directorio:
+  soso-uefi.img   — imagen de arranque UEFI (kernel en ESP)
+  soso-data.img   — rootfs sosofs (virtio-blk o NVMe según hw)
+  soso-models.img — modelos sosomfs (segundo NVMe o virtio-blk1)
+
+1) USB de arranque (ESP)
+   Identifica el stick (ej. /dev/sdX). ¡DESTRUYE el contenido del dispositivo!
+
+   sudo dd if=soso-uefi.img of=/dev/sdX bs=4M status=progress conv=fsync
+
+   Arranca la placa con UEFI desde USB.
+
+2) Rootfs en NVMe del host (cuando no hay virtio-blk)
+   sudo dd if=soso-data.img of=/dev/nvme0n1 bs=4M status=progress conv=fsync
+
+3) Modelos en segundo NVMe (o disco dedicado)
+   sudo dd if=soso-models.img of=/dev/nvme1n1 bs=4M status=progress conv=fsync
+
+   Si solo hay un NVMe: copia rootfs y models en particiones distintas
+   (mkfs/parted manual) o usa un SSD USB para modelos.
+
+4) Verificación en la placa
+   - Consola serie o GOP: log MCFG, nvme[0]/nvme[1], NIC PCI ID
+   - DHCP, ssh root@<ip>, soso-llm run <modelo>
+
+Generado: {gen}
+"#,
+        gen = chrono_lite_now()
+    );
+    std::fs::write(&flash, flash_body).expect("escribir FLASH.txt");
+    println!("package-usb: {}", flash.display());
+    println!("\n✅ Paquete listo en {}", out.display());
+}
+
+fn chrono_lite_now() -> String {
+    use std::process::Command;
+    Command::new("date")
+        .arg("-Iseconds")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 fn run_qemu(img: &Path, gdb: bool) {
     build_user();
     let (data, models) = mkfs(false);
@@ -382,17 +590,12 @@ fn run_qemu(img: &Path, gdb: bool) {
         .args(["-m", &qemu_mem()])
         .args(["-smp", &qemu_smp()]);
     apply_firmware(&mut qemu, img);
-    qemu.args(["-drive", &format!("format=raw,file={}", img.display())])
-        .args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
-        .args(["-device", "virtio-blk-pci,drive=data0"])
-        .args(["-drive", &format!("file={},format=raw,if=none,id=data1", models.display())])
-        .args(["-device", "virtio-blk-pci,drive=data1"])
-        // Red de usuario (slirp): 10.0.2.0/24, host 2222→22 (SSH futuro)
-        // y 7777→7 (echo).
-        .args(["-netdev", "user,id=net0,hostfwd=tcp::7777-:7,hostfwd=tcp::2222-:22"])
-        .args(["-device", "virtio-net-pci,netdev=net0"])
-        // mon:stdio multiplexa monitor y serie: Ctrl-A X sale, Ctrl-A C monitor
-        .args(["-serial", "mon:stdio"])
+    qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
+    apply_qemu_disks(&mut qemu, &data, &models);
+    apply_qemu_nic(&mut qemu);
+    apply_qemu_gpu(&mut qemu);
+    // mon:stdio multiplexa monitor y serie: Ctrl-A X sale, Ctrl-A C monitor
+    qemu.args(["-serial", "mon:stdio"])
         .args(["-display", "none"])
         // Dispositivo de salida para tests: out 0xf4 -> exit((valor << 1) | 1)
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])

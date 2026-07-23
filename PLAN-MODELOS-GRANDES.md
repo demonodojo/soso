@@ -348,21 +348,71 @@ bring-up en la máquina objetivo.
    fallback. Log verificado: `net: MSI-X armado…` y
    `net: primera IRQ MSI-X recibida` con SSH/echo en verde.
 
-**Pendiente L5b (drivers + hw real):**
+**✅ L5b — NVMe + e1000e + GOP/memtest en QEMU (2026-07-22):**
 
-1. **NVMe:** driver propio (admin queue + I/O queues, MSI-X). Es el disco de
-   modelos real; sosomfs no cambia (habla `BlockDevice`). Validable antes
-   en QEMU con `-device nvme`.
-2. **NIC física:** un driver concreto según la máquina (Intel igb/e1000e es
-   lo más documentado); smoltcp no cambia. Validable con `-device e1000e`.
-3. **Consola:** serie si la placa la tiene; si no, framebuffer UEFI GOP para
-   diagnóstico de arranque y todo lo demás por SSH.
-4. **Realidad a asumir:** sin USB no hay teclado local (fuera de alcance);
-   máquina headless administrada por red. Memtest propio ligero al arrancar.
+1. **DMA compartido** (`drivers/dma.rs`): alloc contiguo +
+   `alloc_zeroed_uc` con VA dedicado sin caché (`mm::map_dma_uc`). Hallazgo:
+   las CQEs NVMe en el mapeo WB del bootloader (a menudo 2 MiB) no se ven
+   bien; hace falta VA UC. El phase bit del CQE está en el halfword de
+   *status* (bit 16 de DW3), no en el bit 0 de DW3.
+2. **NVMe** (`drivers/nvme.rs`): admin + 1 I/O queue, Identify, R/W
+   síncrono, MSI-X. `fs::ModelsDev` monta sosomfs en NVMe si `present()`,
+   si no virtio-blk 1. Rootfs sigue en virtio. xtask:
+   `SOSO_QEMU_NVME=1` (copia de models → `-device nvme`).
+3. **e1000e** (`drivers/e1000e.rs`): rings DMA, MSI-X, DHCP/echo OK.
+   `net::NicDev` prefiere e1000e si está presente. xtask:
+   `SOSO_QEMU_NIC=e1000e`. Default de tests: virtio-net.
+4. **Framebuffer** (`drivers/fb.rs`): captura `BootInfo.framebuffer`,
+   espejo de `println!` (BIOS VESA / GOP). **Memtest** ligero 4 MiB
+   post-`mm::init` (`mm/memtest.rs`).
+
+**✅ L5c — Preparación sin placa (2026-07-22):**
+
+1. **e1000e endurecido** (`drivers/e1000e.rs`): TX espera DD antes de
+   reutilizar descriptor; RX exige DD+EOP y descarta errores; burst RX
+   16 en smoltcp. `SOSO_QEMU_NIC=e1000e cargo xtask test` verde (SSH +
+   echo + halt).
+2. **Rootfs sin virtio** (`fs::RootDev`): si no hay virtio-blk0 y hay
+   NVMe ctrl 0 → sosofs en NVMe; sosomfs en NVMe ctrl 1 (o ctrl 0 si
+   root sigue en virtio). `SOSO_QEMU_NVME_ROOT=1` en xtask omite
+   virtio-blk0 y adjunta data+models como dos NVMe.
+3. **NVMe multi-controlador** (`drivers/nvme.rs`): hasta 2 slots
+   (`present_slot`, `read_block4k_slot`, …).
+4. **`cargo xtask package-usb`**: escribe `target/usb-package/` con
+   `soso-uefi.img`, `soso-data.img`, `soso-models.img` y `FLASH.txt`
+   (instrucciones `dd` para USB ESP y NVMe host; no flashea dispositivos).
+
+**Checklist L5c — bring-up en placa (cuando llegue el hardware):**
+
+| Paso | Acción |
+|------|--------|
+| Host | `cargo xtask package-usb` |
+| Host | Flashear USB: `dd if=soso-uefi.img of=/dev/sdX …` (ver `FLASH.txt`) |
+| Host | `dd` de `soso-data.img` al NVMe root; `soso-models.img` al segundo NVMe |
+| Placa | Arranque UEFI desde USB; consola serie o GOP |
+| Placa | Log: MCFG/ECAM, `nvme[0]`/`nvme[1]`, PCI ID de la NIC |
+| Placa | DHCP, **SSH** headless, `soso-llm run <modelo>` desde NVMe |
+| Gaps | Ampliar IDs e1000e/igb según chipset real; USB/teclado fuera de alcance |
+
+**Verificación L5c prep (QEMU, hecha):**
+
+| Prueba | Comando / criterio |
+|--------|-------------------|
+| Regresión | `cargo xtask test` |
+| SSH e1000e | `SOSO_QEMU_NIC=e1000e cargo xtask test` |
+| Solo NVMe | `SOSO_QEMU_NVME_ROOT=1` → `fs: sosofs en NVMe` + sosh |
+| Paquete | `cargo xtask package-usb` → artefactos + `FLASH.txt` |
+
+**Pendiente L5c-on-box (bring-up máquina física):** ejecutar el checklist
+de la tabla anterior en la placa real.
 
 **Verificación L5a (hecha):** `cargo xtask test` verde en
 `{bios,uefi}×{SMP=1,4}`; bajo OVMF el ECAM sale de MCFG; MSI-X de
 virtio-net dispara IRQs reales.
+
+**Verificación L5b (hecha):** `cargo xtask test` verde (virtio default);
+`SOSO_QEMU_NVME=1` → `fs: sosomfs en NVMe` + modelo listado;
+`SOSO_QEMU_NIC=e1000e` → DHCP + echo TCP.
 
 **Verificación L5 (final):** arranque en la máquina objetivo, `ssh` entra,
 `soso-llm run` con el modelo grande desde NVMe.
@@ -410,8 +460,12 @@ grande, a velocidad de un core vectorizable.
 en servidor (QEMU SMP); falta medir tok/s con modelo grande y L5 en hw.
 **Hito 2.5 (+L5a, alcanzado 2026-07-21):** cimientos hw real en QEMU —
 UEFI/OVMF, MCFG/ECAM dinámico, IOAPIC + MSI-X (virtio-net con IRQs reales).
-**Hito 3 (+L5b, ~3-4 meses):** NVMe + NIC física y bring-up en la máquina
-objetivo por SSH.
+**Hito 2.6 (+L5b, alcanzado 2026-07-22):** NVMe + e1000e + fb/memtest
+validados en QEMU; default virtio intacto.
+**Hito 2.7 (+L5c prep, alcanzado 2026-07-22):** e1000e SSH en QEMU, rootfs
+NVMe, `package-usb` — listo para copiar a USB/NVMe en la placa.
+**Hito 3 (+L5c-on-box, bring-up físico):** SSH + `soso-llm` en la máquina objetivo
+desde NVMe.
 
 ## Riesgos principales
 

@@ -139,14 +139,11 @@ fn lanzar_qemu(
         .args(["-m", &super::qemu_mem()])
         .args(["-smp", &super::qemu_smp()]);
     super::apply_firmware(&mut qemu, img);
-    qemu.args(["-drive", &format!("format=raw,file={}", img.display())])
-        .args(["-drive", &format!("file={},format=raw,if=none,id=data0", data.display())])
-        .args(["-device", "virtio-blk-pci,drive=data0"])
-        .args(["-drive", &format!("file={},format=raw,if=none,id=data1", models.display())])
-        .args(["-device", "virtio-blk-pci,drive=data1"])
-        .args(["-netdev", "user,id=net0,hostfwd=tcp::7777-:7,hostfwd=tcp::2222-:22"])
-        .args(["-device", "virtio-net-pci,netdev=net0"])
-        .args(["-serial", &format!("file:{}", serial.display())])
+    qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
+    super::apply_qemu_disks(&mut qemu, data, models);
+    super::apply_qemu_nic(&mut qemu);
+    super::apply_qemu_gpu(&mut qemu);
+    qemu.args(["-serial", &format!("file:{}", serial.display())])
         .args(["-display", "none"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .arg("-no-reboot")
@@ -289,4 +286,27 @@ fn espera_salida(qemu: &mut Child, limite: Duration) -> Option<i32> {
         }
     }
     None
+}
+
+/// Smoke test lx-e1000e (`SOSO_LXDDE_TEST=1` tras `cargo xtask test`).
+pub fn run_lx_e1000e_smoke() {
+    let root = super::project_root();
+    unsafe {
+        std::env::set_var("SOSO_QEMU_NIC", "lx-e1000e");
+    }
+    let img = super::build_image();
+    let data = super::mkfs_rootfs(true);
+    let models = super::mkfs_models(true);
+    let serial = root.join("target/test-lx-serial.log");
+    let _ = std::fs::remove_file(&serial);
+    let mut qemu = lanzar_qemu(&img, &data, &models, &serial).expect("QEMU lx-e1000e");
+    let ok = esperar_en_fichero(&serial, "sosh —", Duration::from_secs(120)).is_ok();
+    let _ = qemu.kill();
+    let _ = qemu.wait();
+    if ok {
+        println!("OK    lx-e1000e smoke: arranque hasta sosh");
+    } else {
+        eprintln!("FALLO  lx-e1000e smoke (ver {})", serial.display());
+        std::process::exit(1);
+    }
 }

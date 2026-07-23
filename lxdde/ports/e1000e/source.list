@@ -1,0 +1,5 @@
+# G0: código Linux original + driver e1000e vía lx_emul
+# Fuentes del árbol pinneado 6.6.32 (lib + hw en progreso; netdev.c pendiente headers)
+lib/crc8.c
+lxdde/ports/e1000e/e1000e_lx.c
+lxdde/shim/src/linux_net_shim.c

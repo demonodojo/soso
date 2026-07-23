@@ -5,6 +5,7 @@
 
 pub mod frame;
 pub mod heap;
+pub mod memtest;
 pub mod paging;
 
 use bootloader_api::BootInfo;
@@ -52,6 +53,13 @@ pub fn phys_to_virt(phys: u64) -> VirtAddr {
     *PHYS_OFFSET.get().expect("mm sin inicializar") + phys
 }
 
+/// Traduce VA → PA si está mapeada (RAM vía offset o identidad/MMIO).
+pub fn virt_to_phys(virt: u64) -> Option<u64> {
+    let va = VirtAddr::new(virt);
+    let mapper = MAPPER.get()?.lock();
+    mapper.translate_addr(va).map(|a| a.as_u64())
+}
+
 /// Garantiza que una región MMIO (ECAM, BARs...) es accesible vía
 /// `phys_to_virt`. El mapeo del bootloader solo cubre la RAM, así que las
 /// regiones de dispositivos por encima hay que mapearlas aquí, sin caché.
@@ -78,6 +86,57 @@ pub fn ensure_mmio_mapped(phys: u64, size: u64) {
                 .flush();
         }
     }
+}
+
+/// Mapea frames físicos en un VA dedicado sin caché (no toca el mapeo
+/// phys_to_virt del bootloader, que puede ser de 2 MiB).
+/// Devuelve el VA del primer byte.
+pub fn map_dma_uc(phys: u64, size: u64) -> VirtAddr {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    use x86_64::structures::paging::PageTableFlags as F;
+    /// Ventana VA alta para buffers DMA UC (fuera del identity phys map).
+    static DMA_UC_NEXT: AtomicU64 = AtomicU64::new(0xFFFF_FE00_0000_0000);
+
+    let size = size.next_multiple_of(4096);
+    let virt_base = DMA_UC_NEXT.fetch_add(size, Ordering::SeqCst);
+    let mut mapper = MAPPER.get().unwrap().lock();
+    let mut fa = FRAME_ALLOC.get().unwrap().lock();
+    let flags = F::PRESENT | F::WRITABLE | F::NO_CACHE | F::WRITE_THROUGH;
+    for off in (0..size).step_by(4096) {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_base + off));
+        let frame = PhysFrame::containing_address(PhysAddr::new((phys & !0xfff) + off));
+        unsafe {
+            mapper
+                .map_to(page, frame, flags, &mut *fa)
+                .expect("map_dma_uc")
+                .flush();
+        }
+    }
+    VirtAddr::new(virt_base + (phys & 0xfff))
+}
+
+/// Mapeo write-combining para BARs de GPU (G2).
+pub fn map_dma_wc(phys: u64, size: u64) -> VirtAddr {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    use x86_64::structures::paging::PageTableFlags as F;
+    static DMA_WC_NEXT: AtomicU64 = AtomicU64::new(0xFFFF_FD00_0000_0000);
+
+    let size = size.next_multiple_of(4096);
+    let virt_base = DMA_WC_NEXT.fetch_add(size, Ordering::SeqCst);
+    let mut mapper = MAPPER.get().unwrap().lock();
+    let mut fa = FRAME_ALLOC.get().unwrap().lock();
+    let flags = F::PRESENT | F::WRITABLE | F::NO_CACHE;
+    for off in (0..size).step_by(4096) {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_base + off));
+        let frame = PhysFrame::containing_address(PhysAddr::new((phys & !0xfff) + off));
+        unsafe {
+            mapper
+                .map_to(page, frame, flags, &mut *fa)
+                .expect("map_dma_wc")
+                .flush();
+        }
+    }
+    VirtAddr::new(virt_base + (phys & 0xfff))
 }
 
 /// Mapea identidad (VA == PA) una región de RAM baja. La usa el trampolín de

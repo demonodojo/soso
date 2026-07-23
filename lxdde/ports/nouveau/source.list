@@ -1,0 +1,3 @@
+# nouveau/nvkm — bring-up GSP (G3); fuentes Linux pinneadas bajo demanda
+# Spike: stub mínimo hasta iterar stubs con el árbol completo
+lxdde/ports/nouveau/nouveau_stub.c

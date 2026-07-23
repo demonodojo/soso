@@ -1,20 +1,19 @@
-//! Pila de red: smoltcp sobre virtio-net. DHCP al arrancar; si no hay lease
-//! en unos segundos, fallback a IP estática 10.0.2.15/24 (QEMU slirp).
+//! Pila de red: smoltcp sobre e1000e o virtio-net. DHCP al arrancar; si no
+//! hay lease en unos segundos, fallback a IP estática 10.0.2.15/24 (QEMU
+//! slirp).
 //!
-//! Sin interrupciones de red: `poll()` se llama desde el bucle del
-//! scheduler, el de la kernel-shell y el tick de timer cuando interrumpe
-//! a un proceso de usuario (~10 ms de latencia máxima). Usa try_lock:
-//! si la pila está ocupada, la próxima pasada lo recoge.
+//! `poll()` se llama desde el scheduler / timer / IRQ de la NIC. Usa
+//! try_lock: si la pila está ocupada, la próxima pasada lo recoge.
 
 mod device;
 pub mod ssh;
 
 use crate::arch::pit;
-use crate::drivers::virtio_net;
+use crate::drivers::{e1000e, virtio_net};
 use crate::println;
 use alloc::vec;
 use alloc::vec::Vec;
-use device::SmolDev;
+use device::{E1000Dev, NicDev, SmolDev};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::{dhcpv4, tcp};
 use smoltcp::time::{Duration, Instant};
@@ -42,13 +41,32 @@ struct NetStack {
     dhcp: SocketHandle,
     configured: bool,
     dhcp_started: Instant,
-    dev: SmolDev,
+    dev: NicDev,
 }
 
 static NET: Once<Mutex<NetStack>> = Once::new();
 
 fn now() -> Instant {
     Instant::from_millis(pit::uptime_ms() as i64)
+}
+
+fn net_backend() -> Option<([u8; 6], NicDev)> {
+    #[cfg(feature = "lxdde")]
+    if crate::lxdde::e1000e_present() {
+        let mac = crate::lxdde::e1000e_mac()?;
+        println!("net: backend lx-e1000e");
+        return Some((mac, NicDev::LxE1000e(device::LxE1000Dev)));
+    }
+    if e1000e::present() {
+        let mac = e1000e::mac()?;
+        println!("net: backend e1000e");
+        Some((mac, NicDev::E1000e(E1000Dev)))
+    } else if let Some(mac) = virtio_net::init() {
+        println!("net: backend virtio-net");
+        Some((mac, NicDev::Virtio(SmolDev)))
+    } else {
+        None
+    }
 }
 
 fn random_seed() -> u64 {
@@ -95,9 +113,12 @@ fn close_tcp_services(sockets: &mut SocketSet<'static>, echo: &[SocketHandle], s
 }
 
 pub fn init() {
-    let Some(mac) = virtio_net::init() else { return };
+    // Preferir lx-e1000e (driver Linux vía lxdde), luego e1000e nativo, luego virtio.
+    let Some((mac, mut dev)) = net_backend() else {
+        println!("net: sin NIC");
+        return;
+    };
 
-    let mut dev = SmolDev;
     let mut config = Config::new(EthernetAddress(mac).into());
     config.random_seed = random_seed();
     let iface = Interface::new(config, &mut dev, now());
@@ -112,8 +133,6 @@ pub fn init() {
             ))
         })
         .collect();
-    // Socket del servidor SSH (puerto 22): buffers grandes para paquetes
-    // SSH y ráfagas de salida de la shell.
     let ssh = sockets.add(tcp::Socket::new(
         tcp::SocketBuffer::new(vec![0; 16384]),
         tcp::SocketBuffer::new(vec![0; 16384]),

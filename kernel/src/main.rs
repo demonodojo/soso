@@ -14,8 +14,12 @@ mod net;
 mod qemu;
 mod task;
 
+#[cfg(feature = "lxdde")]
+mod lxdde;
+
 use alloc::vec::Vec;
 use bootloader_api::config::{BootloaderConfig, Mapping};
+use bootloader_api::info::FrameBufferInfo;
 use bootloader_api::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 
@@ -40,19 +44,36 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     println!("soso 0.1");
 
-    // Copiar el RSDP antes de que mm::init tome prestado boot_info 'static.
+    // Copiar RSDP y framebuffer antes de que mm::init tome boot_info.
     let rsdp = match boot_info.rsdp_addr {
         bootloader_api::info::Optional::Some(r) => Some(r),
+        _ => None,
+    };
+    let fb: Option<(u64, FrameBufferInfo)> = match &mut boot_info.framebuffer {
+        bootloader_api::info::Optional::Some(fb) => {
+            let info = fb.info();
+            let start = fb.buffer_mut().as_mut_ptr() as u64;
+            Some((start, info))
+        }
         _ => None,
     };
 
     arch::init();
     mm::init(boot_info);
 
+    if let Some((start, info)) = fb {
+        drivers::fb::init(start, info);
+        if let Some((w, h, stride, bpp)) = drivers::fb::info_log() {
+            println!("fb: {w}x{h} stride={stride} bpp={bpp}");
+        }
+    }
+
     println!(
         "memoria: {} MiB libres tras el heap",
         mm::FRAME_ALLOC.get().unwrap().lock().free_frames() * 4096 / (1024 * 1024)
     );
+
+    mm::memtest::run();
 
     // Autotests rápidos de arranque: heap e IDT.
     let cuadrados: Vec<u64> = (1..=10).map(|n| n * n).collect();
@@ -70,9 +91,24 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     drivers::pci::init_ecam();
-    drivers::virtio_blk::init();
     drivers::pci::init();
+    drivers::nvme::init();
+    drivers::virtio_blk::init();
+    #[cfg(feature = "lxdde")]
+    {
+        let mode = lxdde_mode();
+        if mode != lxdde::LxddeMode::Off {
+            lxdde::init(mode);
+        }
+        if mode != lxdde::LxddeMode::E1000e {
+            let _ = drivers::e1000e::init();
+        }
+    }
+    #[cfg(not(feature = "lxdde"))]
+    let _ = drivers::e1000e::init();
     drivers::gpu::init();
+    drivers::nvidia_probe::init();
+    drivers::nvidia_compute::init();
     fs::init();
     net::init();
     task::init();
@@ -89,6 +125,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
     kshell::run();
+}
+
+#[cfg(feature = "lxdde")]
+fn lxdde_mode() -> lxdde::LxddeMode {
+    match option_env!("SOSO_LXDDE_MODE").unwrap_or("") {
+        "spike" => lxdde::LxddeMode::Spike,
+        "testdrv" => lxdde::LxddeMode::TestDrv,
+        "e1000e" => lxdde::LxddeMode::E1000e,
+        _ => lxdde::LxddeMode::Off,
+    }
 }
 
 extern "sysv64" fn panic_print_shim(info: u64, _b: u64) -> u64 {

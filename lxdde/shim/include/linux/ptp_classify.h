@@ -1,0 +1,3 @@
+#ifndef _LINUX_PTP_CLASSIFY_H
+#define _LINUX_PTP_CLASSIFY_H
+#endif

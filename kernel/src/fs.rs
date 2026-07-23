@@ -1,5 +1,6 @@
-//! Montaje de sosofs (disco 0) y sosomfs (disco 1).
+//! Montaje de sosofs (virtio-blk 0 o NVMe 0) y sosomfs (NVMe 1 / NVMe 0 / virtio-blk 1).
 
+use crate::drivers::nvme;
 use crate::println;
 use block_dev::{Block, BlockDevice, BlockError, BLOCK_SIZE};
 use sosofs::{CachedBlockDevice, Sosofs};
@@ -61,14 +62,99 @@ impl BlockDevice for VirtioDev1 {
     }
 }
 
-pub type Fs = Sosofs<CachedBlockDevice<VirtioDev0>>;
-pub type ModelsFs = Sosomfs<sosomfs::SingleDev<VirtioDev1>>;
+/// Backend del rootfs: virtio-blk 0 si existe, si no NVMe controlador 0.
+pub enum RootDev {
+    Virtio(VirtioDev0),
+    Nvme,
+}
+
+impl BlockDevice for RootDev {
+    fn block_count(&self) -> u64 {
+        match self {
+            RootDev::Virtio(v) => v.block_count(),
+            RootDev::Nvme => nvme::block_count_4k_slot(0).unwrap_or(0),
+        }
+    }
+
+    fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError> {
+        match self {
+            RootDev::Virtio(v) => v.read_block(block, buf),
+            RootDev::Nvme => nvme::read_block4k_slot(0, block, buf).map_err(|_| BlockError::Io),
+        }
+    }
+
+    fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {
+        match self {
+            RootDev::Virtio(v) => v.write_block(block, buf),
+            RootDev::Nvme => nvme::write_block4k_slot(0, block, buf).map_err(|_| BlockError::Io),
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        match self {
+            RootDev::Virtio(v) => v.flush(),
+            RootDev::Nvme => Ok(()),
+        }
+    }
+}
+
+/// Backend del disco de modelos: NVMe (slot 1 preferido) o virtio-blk 1.
+pub enum ModelsDev {
+    Nvme(usize),
+    Virtio(VirtioDev1),
+}
+
+impl BlockDevice for ModelsDev {
+    fn block_count(&self) -> u64 {
+        match self {
+            ModelsDev::Nvme(slot) => nvme::block_count_4k_slot(*slot).unwrap_or(0),
+            ModelsDev::Virtio(v) => v.block_count(),
+        }
+    }
+
+    fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError> {
+        match self {
+            ModelsDev::Nvme(slot) => {
+                nvme::read_block4k_slot(*slot, block, buf).map_err(|_| BlockError::Io)
+            }
+            ModelsDev::Virtio(v) => v.read_block(block, buf),
+        }
+    }
+
+    fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {
+        match self {
+            ModelsDev::Nvme(slot) => {
+                nvme::write_block4k_slot(*slot, block, buf).map_err(|_| BlockError::Io)
+            }
+            ModelsDev::Virtio(v) => v.write_block(block, buf),
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        match self {
+            ModelsDev::Nvme(_) => Ok(()),
+            ModelsDev::Virtio(v) => v.flush(),
+        }
+    }
+}
+
+pub type Fs = Sosofs<CachedBlockDevice<RootDev>>;
+pub type ModelsFs = Sosomfs<sosomfs::SingleDev<ModelsDev>>;
 
 pub static FS: Once<Mutex<Fs>> = Once::new();
 pub static MODELS: Once<Mutex<ModelsFs>> = Once::new();
 
 pub fn init() {
-    let cached = CachedBlockDevice::with_capacity(VirtioDev0, 512);
+    let root_backend = if crate::drivers::virtio_blk::BLK0.get().is_some() {
+        RootDev::Virtio(VirtioDev0)
+    } else if nvme::present_slot(0) {
+        println!("fs: sosofs en NVMe");
+        RootDev::Nvme
+    } else {
+        RootDev::Virtio(VirtioDev0)
+    };
+
+    let cached = CachedBlockDevice::with_capacity(root_backend, 512);
     match Sosofs::mount(cached) {
         Ok(fs) => {
             println!(
@@ -81,8 +167,22 @@ pub fn init() {
         Err(e) => println!("fs: sin sosofs en disco 0 ({e:?})"),
     }
 
-    if crate::drivers::virtio_blk::BLK1.get().is_some() {
-        match Sosomfs::mount_with_cache(sosomfs::SingleDev::new(VirtioDev1), 2048) {
+    let root_on_virtio = crate::drivers::virtio_blk::BLK0.get().is_some();
+    let models_backend = if nvme::present_slot(1) {
+        println!("fs: sosomfs en NVMe (ctrl 1)");
+        Some(ModelsDev::Nvme(1))
+    } else if nvme::present_slot(0) && root_on_virtio {
+        println!("fs: sosomfs en NVMe");
+        Some(ModelsDev::Nvme(0))
+    } else if crate::drivers::virtio_blk::BLK1.get().is_some() {
+        println!("fs: sosomfs en virtio-blk 1");
+        Some(ModelsDev::Virtio(VirtioDev1))
+    } else {
+        None
+    };
+
+    if let Some(dev) = models_backend {
+        match Sosomfs::mount_with_cache(sosomfs::SingleDev::new(dev), 2048) {
             Ok(mfs) => {
                 println!(
                     "fs: sosomfs montado (generación {}, {} bloques, caché 2048)",
@@ -94,7 +194,7 @@ pub fn init() {
                 }
                 MODELS.call_once(|| Mutex::new(mfs));
             }
-            Err(e) => println!("fs: sin sosomfs en disco 1 ({e:?})"),
+            Err(e) => println!("fs: sin sosomfs ({e:?})"),
         }
     }
 }

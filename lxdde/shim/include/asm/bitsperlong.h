@@ -1,0 +1,4 @@
+#ifndef _ASM_X86_BITSPERLONG_H
+#define _ASM_X86_BITSPERLONG_H
+#define __BITS_PER_LONG 64
+#endif
