@@ -420,10 +420,18 @@ pub(crate) fn qemu_nvme_root() -> bool {
     )
 }
 
-/// `SOSO_QEMU_LIVE=1`: un solo virtio-blk con `soso-live.img` (GPT part2/3).
+/// `SOSO_QEMU_LIVE=1`: un solo disco con `soso-live.img` (GPT part2/3).
+/// `SOSO_QEMU_LIVE_USB=1`: mismo disco vía qemu-xhci + usb-storage (prueba BOT).
 pub(crate) fn qemu_live() -> bool {
     matches!(
         std::env::var("SOSO_QEMU_LIVE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    ) || qemu_live_usb()
+}
+
+pub(crate) fn qemu_live_usb() -> bool {
+    matches!(
+        std::env::var("SOSO_QEMU_LIVE_USB").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     )
 }
@@ -468,8 +476,14 @@ pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
             "-drive",
             &format!("file={},format=raw,if=none,id=live0", live.display()),
         ]);
-        qemu.args(["-device", "virtio-blk-pci,drive=live0"]);
-        println!("xtask: modo live → {}", live.display());
+        if qemu_live_usb() {
+            qemu.args(["-device", "qemu-xhci,id=xhci"]);
+            qemu.args(["-device", "usb-storage,bus=xhci.0,drive=live0"]);
+            println!("xtask: modo live USB → {}", live.display());
+        } else {
+            qemu.args(["-device", "virtio-blk-pci,drive=live0"]);
+            println!("xtask: modo live virtio → {}", live.display());
+        }
         return;
     }
 

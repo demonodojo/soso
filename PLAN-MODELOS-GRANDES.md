@@ -404,7 +404,7 @@ Ver guía completa: [`docs/L5c-on-box.md`](docs/L5c-on-box.md).
 | Placa | Log: `live: GPT`, `fs: sosofs live`, `fs: sosomfs live`, DHCP, SSH |
 | Placa | `soso-llm run …`; apagar y arrancar Linux habitual → intacto |
 | QEMU | `SOSO_QEMU_LIVE=1 cargo xtask run` valida la imagen sin placa |
-| Gap | USB BOT read en placa (xHCI detectado; lectura pendiente) |
+| Gap | ~~USB BOT read en placa~~ — implementado (`SOSO_QEMU_LIVE_USB=1` valida BOT) |
 
 **Verificación L5c prep (QEMU, hecha):**
 

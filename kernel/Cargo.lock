@@ -342,6 +342,7 @@ dependencies = [
  "bootloader_api",
  "ed25519-dalek",
  "getrandom",
+ "log",
  "pic8259",
  "smoltcp",
  "soso-abi",
@@ -353,6 +354,7 @@ dependencies = [
  "uart_16550",
  "virtio-drivers",
  "x86_64",
+ "xhci-nostd",
  "xmas-elf",
 ]
 
@@ -813,6 +815,13 @@ dependencies = [
  "const_fn",
  "rustversion",
  "volatile",
+]
+
+[[package]]
+name = "xhci-nostd"
+version = "0.1.0"
+dependencies = [
+ "log",
 ]
 
 [[package]]

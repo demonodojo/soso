@@ -31,6 +31,8 @@ smoltcp = { version = "0.13.1", default-features = false, features = [
 ] }
 talc = { version = "4", default-features = false, features = ["lock_api"] }
 sunset = { version = "0.5", default-features = false, features = ["alloc"] }
+xhci-nostd = { path = "../crates/xhci-nostd" }
+log = { version = "0.4", default-features = false }
 # Misma versión que usa sunset: Cargo unifica la instancia, así podemos
 # construir una sunset::SignKey::Ed25519 desde una semilla de 32 bytes
 # (la host key persistente de /etc/ssh_host_key) sin la feature openssh-key.

@@ -9,7 +9,7 @@ Arranque **live desde USB** sin modificar el Linux del disco interno.
 | Imagen live GPT (`soso-live.img`) | `cargo xtask package-usb-live` |
 | Montaje part2/3 vía GPT | `live_disk` en kernel |
 | Validación QEMU | `SOSO_QEMU_LIVE=1 cargo xtask run` |
-| USB BOT (mismo stick en placa) | Pendiente — xHCI detectado, lectura WIP |
+| USB BOT (mismo stick en placa) | Implementado — `live: GPT backend=Usb` |
 | NVMe interno | **No usar** en modo live |
 
 ## Modo live (recomendado)
