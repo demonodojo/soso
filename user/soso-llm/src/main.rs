@@ -192,6 +192,7 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
     let prompt_tokens = tokenizer.encode(text);
     // streaming: cada token se imprime según se genera
     let mut decoder = StreamDecoder::new();
+    let t0 = sys::uptime_ms();
     let result = rt.generate_stream_par(
         &mut source,
         &prompt_tokens,
@@ -208,12 +209,18 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
     );
     match result {
         Ok(tokens) => {
+            let elapsed_ms = (sys::uptime_ms() - t0).max(1) as u64;
             let resto = decoder.finish();
             if !resto.is_empty() {
                 libsoso::print!("{resto}");
             }
             println!();
-            println!("soso-llm: generado ({} tokens)", tokens.len());
+            let n = tokens.len();
+            let tok_s = n as f64 * 1000.0 / elapsed_ms as f64;
+            println!(
+                "soso-llm: generado ({} tokens, {} ms, {:.2} tok/s)",
+                n, elapsed_ms, tok_s
+            );
             0
         }
         Err(()) => {

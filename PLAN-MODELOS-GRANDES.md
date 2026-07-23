@@ -272,9 +272,19 @@ compartido, hilos/futex, IPI de wake y GEMM paralelo:**
 
 **Verificación L3b:** `cargo xtask test` verde con `SOSO_QEMU_SMP=1/4/8`;
 `init test` incluye subprueba de hilos (contador con futex, `ncpu`);
-`soso-llm` reporta `workers=N` bajo SMP. Escalado tok/s ~lineal con
-modelo sintético grande: pendiente de medir (el `tiny` del test es
-demasiado pequeño para ser representativo).
+`soso-llm` reporta `workers=N` bajo SMP.
+
+**Medición tok/s (2026-07-23, QEMU TCG sin KVM):** `cargo xtask bench-llm`
+con modelo sintético `bench` (~128 MiB, 4 capas, hidden 1024) y `--max 4`:
+
+| SMP | workers | tok/s | vs SMP=1 |
+|-----|---------|-------|----------|
+| 1   | 1       | 0.18  | 1.00×    |
+| 4   | 4       | 0.27  | 1.50×    |
+
+El escalado es sub-lineal bajo emulación TCG (overhead del host); en hardware
+real con KVM se espera acercarse al ×n cores sobre decode memory-bound.
+`soso-llm` imprime tok/s in-guest vía `SYS_UPTIME_MS`.
 
 *Mejoras futuras (fuera del cierre L3b, no bloqueantes):*
 - Auditoría de concurrencia más amplia en `net/` / `fs` / `drivers/`.
@@ -384,15 +394,17 @@ bring-up en la máquina objetivo.
 
 **Checklist L5c — bring-up en placa (cuando llegue el hardware):**
 
+Ver guía completa: [`docs/L5c-on-box.md`](docs/L5c-on-box.md).
+
 | Paso | Acción |
 |------|--------|
-| Host | `cargo xtask package-usb` |
-| Host | Flashear USB: `dd if=soso-uefi.img of=/dev/sdX …` (ver `FLASH.txt`) |
-| Host | `dd` de `soso-data.img` al NVMe root; `soso-models.img` al segundo NVMe |
-| Placa | Arranque UEFI desde USB; consola serie o GOP |
-| Placa | Log: MCFG/ECAM, `nvme[0]`/`nvme[1]`, PCI ID de la NIC |
-| Placa | DHCP, **SSH** headless, `soso-llm run <modelo>` desde NVMe |
-| Gaps | Ampliar IDs e1000e/igb según chipset real; USB/teclado fuera de alcance |
+| Host | `cargo xtask package-usb-live` → `target/usb-live/soso-live.img` |
+| Host | `sudo dd if=soso-live.img of=/dev/sdX …` (solo el pendrive; ver `FLASH-LIVE.txt`) |
+| Placa | UEFI boot once desde USB — **no toca el NVMe con Linux** |
+| Placa | Log: `live: GPT`, `fs: sosofs live`, `fs: sosomfs live`, DHCP, SSH |
+| Placa | `soso-llm run …`; apagar y arrancar Linux habitual → intacto |
+| QEMU | `SOSO_QEMU_LIVE=1 cargo xtask run` valida la imagen sin placa |
+| Gap | USB BOT read en placa (xHCI detectado; lectura pendiente) |
 
 **Verificación L5c prep (QEMU, hecha):**
 
@@ -434,6 +446,11 @@ cuánto de nouveau/NVK es portable a un kernel no-Linux, (c) si un kernel
 SASS precompilado (un saxpy) puede lanzarse con inicialización mínima.
 Con eso, decisión:
 
+**🟡 Infraestructura L6 (2026-07-23):** capa `lxdde` (lx_emul + ports
+spike/testdrv/e1000e/nouveau), `nvidia_probe` (NV_PMC_BOOT_0), stub G4
+saxpy, `docs/L6-G1-gate.md`, `SOSO_QEMU_GPU=vfio:…`, `cargo xtask lx-build`.
+Pendiente G1 en placa: checklist VFIO + firmware GSP en host Linux.
+
 - **Go:** roadmap GPU propio (6-12+ meses, alto riesgo).
 - **No-go (probable):** el motor de 70B en soso es CPU SMP+SIMD (fases
   L1-L4), que en un servidor multicanal da 4-10 tok/s reales. Si la GPU es
@@ -457,7 +474,8 @@ investigación.
 **Hito 1 (L1+L2, ~3 semanas):** un 70B Q4_K genera texto en QEMU con RAM
 grande, a velocidad de un core vectorizable.
 **Hito 2 (+L4+L3, alcanzado 2026-07-21):** decode multicore SIMD — usable
-en servidor (QEMU SMP); falta medir tok/s con modelo grande y L5 en hw.
+en servidor (QEMU SMP); medición tok/s con modelo `bench` hecha (2026-07-23,
+TCG); falta repetir en hw/KVM y L5 en placa.
 **Hito 2.5 (+L5a, alcanzado 2026-07-21):** cimientos hw real en QEMU —
 UEFI/OVMF, MCFG/ECAM dinámico, IOAPIC + MSI-X (virtio-net con IRQs reales).
 **Hito 2.6 (+L5b, alcanzado 2026-07-22):** NVMe + e1000e + fb/memtest

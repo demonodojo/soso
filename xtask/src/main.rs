@@ -43,22 +43,30 @@ fn main() {
         "package-usb" => {
             package_usb();
         }
+        "package-usb-live" => {
+            package_live::run();
+        }
         "lx-build" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             lx_build::run(&args);
         }
+        "bench-llm" => {
+            bench::run();
+        }
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | convert-gguf | package-usb | lx-build)"
+                 (usa build | run | gdb | mkfs | test | convert-gguf | package-usb | package-usb-live | lx-build | bench-llm)"
             );
             exit(2);
         }
     }
 }
 
-mod test;
+mod bench;
 mod lx_build;
+mod package_live;
+mod test;
 
 fn convert_gguf(args: &[String]) {
     let root = project_root();
@@ -412,6 +420,14 @@ pub(crate) fn qemu_nvme_root() -> bool {
     )
 }
 
+/// `SOSO_QEMU_LIVE=1`: un solo virtio-blk con `soso-live.img` (GPT part2/3).
+pub(crate) fn qemu_live() -> bool {
+    matches!(
+        std::env::var("SOSO_QEMU_LIVE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 /// `SOSO_QEMU_NIC=e1000e|lx-e1000e` sustituye virtio-net; default virtio.
 pub(crate) fn qemu_nic() -> String {
     std::env::var("SOSO_QEMU_NIC").unwrap_or_else(|_| "virtio".into())
@@ -445,6 +461,18 @@ fn nvme_copy(src: &Path, dst_name: &str) -> PathBuf {
 
 /// Discos de QEMU: virtio (default), NVMe extra para modelos, o solo NVMe para root+models.
 pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
+    if qemu_live() {
+        package_live::ensure_live_image();
+        let live = package_live::live_image_path();
+        qemu.args([
+            "-drive",
+            &format!("file={},format=raw,if=none,id=live0", live.display()),
+        ]);
+        qemu.args(["-device", "virtio-blk-pci,drive=live0"]);
+        println!("xtask: modo live → {}", live.display());
+        return;
+    }
+
     if qemu_nvme_root() {
         let nvme_root = nvme_copy(data, "soso-data-nvme.img");
         let nvme_models = nvme_copy(models, "soso-models-nvme.img");

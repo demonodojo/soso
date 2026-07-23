@@ -153,7 +153,7 @@ fn lanzar_qemu(
 }
 
 /// Espera a que aparezca `patron` en el fichero de serie.
-fn esperar_en_fichero(
+pub(crate) fn esperar_en_fichero(
     path: &std::path::Path,
     patron: &str,
     limite: Duration,
@@ -276,7 +276,7 @@ fn ssh_sesion(key: &std::path::Path) -> Result<(), String> {
 }
 
 /// Espera a que QEMU salga; devuelve su código si sale a tiempo.
-fn espera_salida(qemu: &mut Child, limite: Duration) -> Option<i32> {
+pub(crate) fn espera_salida(qemu: &mut Child, limite: Duration) -> Option<i32> {
     let fin = Instant::now() + limite;
     while Instant::now() < fin {
         match qemu.try_wait() {

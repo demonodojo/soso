@@ -38,6 +38,7 @@ pub const SYS_GETCWD: u64 = 24;
 pub const SYS_THREAD_SPAWN: u64 = 25;
 pub const SYS_FUTEX: u64 = 26;
 pub const SYS_NCPU: u64 = 27;
+pub const SYS_UPTIME_MS: u64 = 28;
 
 /// Operaciones de `SYS_FUTEX` (arg `op`).
 pub const FUTEX_WAIT: u64 = 0;

@@ -201,3 +201,7 @@ pub fn futex_wake(addr: *const u32, n: u64) -> i64 {
 pub fn ncpu() -> i64 {
     syscall1(abi::SYS_NCPU, 0)
 }
+
+pub fn uptime_ms() -> i64 {
+    syscall1(abi::SYS_UPTIME_MS, 0)
+}

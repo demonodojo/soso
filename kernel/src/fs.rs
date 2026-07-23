@@ -62,10 +62,11 @@ impl BlockDevice for VirtioDev1 {
     }
 }
 
-/// Backend del rootfs: virtio-blk 0 si existe, si no NVMe controlador 0.
+/// Backend del rootfs: virtio-blk 0, NVMe 0, o partición GPT live.
 pub enum RootDev {
     Virtio(VirtioDev0),
     Nvme,
+    Live(crate::drivers::live_disk::LiveRootDev),
 }
 
 impl BlockDevice for RootDev {
@@ -73,6 +74,7 @@ impl BlockDevice for RootDev {
         match self {
             RootDev::Virtio(v) => v.block_count(),
             RootDev::Nvme => nvme::block_count_4k_slot(0).unwrap_or(0),
+            RootDev::Live(l) => l.block_count(),
         }
     }
 
@@ -80,6 +82,7 @@ impl BlockDevice for RootDev {
         match self {
             RootDev::Virtio(v) => v.read_block(block, buf),
             RootDev::Nvme => nvme::read_block4k_slot(0, block, buf).map_err(|_| BlockError::Io),
+            RootDev::Live(l) => l.read_block(block, buf),
         }
     }
 
@@ -87,6 +90,7 @@ impl BlockDevice for RootDev {
         match self {
             RootDev::Virtio(v) => v.write_block(block, buf),
             RootDev::Nvme => nvme::write_block4k_slot(0, block, buf).map_err(|_| BlockError::Io),
+            RootDev::Live(l) => l.write_block(block, buf),
         }
     }
 
@@ -94,6 +98,7 @@ impl BlockDevice for RootDev {
         match self {
             RootDev::Virtio(v) => v.flush(),
             RootDev::Nvme => Ok(()),
+            RootDev::Live(l) => l.flush(),
         }
     }
 }
@@ -102,6 +107,7 @@ impl BlockDevice for RootDev {
 pub enum ModelsDev {
     Nvme(usize),
     Virtio(VirtioDev1),
+    Live(crate::drivers::live_disk::LiveModelsDev),
 }
 
 impl BlockDevice for ModelsDev {
@@ -109,6 +115,7 @@ impl BlockDevice for ModelsDev {
         match self {
             ModelsDev::Nvme(slot) => nvme::block_count_4k_slot(*slot).unwrap_or(0),
             ModelsDev::Virtio(v) => v.block_count(),
+            ModelsDev::Live(l) => l.block_count(),
         }
     }
 
@@ -118,6 +125,7 @@ impl BlockDevice for ModelsDev {
                 nvme::read_block4k_slot(*slot, block, buf).map_err(|_| BlockError::Io)
             }
             ModelsDev::Virtio(v) => v.read_block(block, buf),
+            ModelsDev::Live(l) => l.read_block(block, buf),
         }
     }
 
@@ -127,6 +135,7 @@ impl BlockDevice for ModelsDev {
                 nvme::write_block4k_slot(*slot, block, buf).map_err(|_| BlockError::Io)
             }
             ModelsDev::Virtio(v) => v.write_block(block, buf),
+            ModelsDev::Live(l) => l.write_block(block, buf),
         }
     }
 
@@ -134,6 +143,7 @@ impl BlockDevice for ModelsDev {
         match self {
             ModelsDev::Nvme(_) => Ok(()),
             ModelsDev::Virtio(v) => v.flush(),
+            ModelsDev::Live(l) => l.flush(),
         }
     }
 }
@@ -144,7 +154,48 @@ pub type ModelsFs = Sosomfs<sosomfs::SingleDev<ModelsDev>>;
 pub static FS: Once<Mutex<Fs>> = Once::new();
 pub static MODELS: Once<Mutex<ModelsFs>> = Once::new();
 
+fn mount_live() {
+    let Some(root) = crate::drivers::live_disk::root_dev() else {
+        println!("fs: live sin partición root");
+        return;
+    };
+    let cached = CachedBlockDevice::with_capacity(RootDev::Live(root), 512);
+    match Sosofs::mount(cached) {
+        Ok(fs) => {
+            println!(
+                "fs: sosofs live (generación {}, {} bloques)",
+                fs.generation(),
+                fs.block_count()
+            );
+            FS.call_once(|| Mutex::new(fs));
+        }
+        Err(e) => println!("fs: live sosofs falló ({e:?})"),
+    }
+
+    if let Some(models) = crate::drivers::live_disk::models_dev() {
+        match Sosomfs::mount_with_cache(sosomfs::SingleDev::new(ModelsDev::Live(models)), 2048) {
+            Ok(mfs) => {
+                println!(
+                    "fs: sosomfs live (generación {}, {} bloques)",
+                    mfs.generation(),
+                    mfs.total_blocks()
+                );
+                for m in &mfs.catalog.models {
+                    println!("fs:   modelo {} ({} shards)", m.name, m.shards.len());
+                }
+                MODELS.call_once(|| Mutex::new(mfs));
+            }
+            Err(e) => println!("fs: live sosomfs falló ({e:?})"),
+        }
+    }
+}
+
 pub fn init() {
+    if crate::drivers::live_disk::active() {
+        mount_live();
+        return;
+    }
+
     let root_backend = if crate::drivers::virtio_blk::BLK0.get().is_some() {
         RootDev::Virtio(VirtioDev0)
     } else if nvme::present_slot(0) {

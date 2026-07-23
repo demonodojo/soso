@@ -2,6 +2,8 @@ pub mod dma;
 pub mod e1000e;
 pub mod fb;
 pub mod gpu;
+pub mod live_disk;
+pub mod usb_storage;
 pub mod nvidia_compute;
 pub mod nvidia_probe;
 pub mod nvme;

@@ -67,6 +67,7 @@ pub struct PciDevice {
     pub device_id: u16,
     pub class: u8,
     pub subclass: u8,
+    pub prog_if: u8,
     pub bar0: u64,
     pub bar0_size: u64,
 }
@@ -170,6 +171,7 @@ pub fn enumerate() -> Vec<PciDevice> {
                     device_id: read16(bus, dev, func, 2),
                     class: ((class_rev >> 24) & 0xff) as u8,
                     subclass: ((class_rev >> 16) & 0xff) as u8,
+                    prog_if: ((class_rev >> 8) & 0xff) as u8,
                     bar0,
                     bar0_size,
                 });

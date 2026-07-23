@@ -59,6 +59,14 @@ fn arg_u32(args: &[String], flag: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+fn arg_string(args: &[String], flag: &str, default: &str) -> String {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| default.into())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // posicional = dir de salida; el resto son parejas --flag valor
@@ -77,6 +85,7 @@ fn main() {
     let out = PathBuf::from(out.unwrap_or_else(|| "target/tiny-model".into()));
 
     let tiny = Manifest::tiny("tiny");
+    let name = arg_string(&args, "--name", "tiny");
     let hidden = arg_u32(&args, "--hidden", tiny.hidden_dim);
     let ffn = arg_u32(&args, "--ffn", tiny.ffn_dim);
     let num_layers = arg_u32(&args, "--layers", tiny.num_layers);
@@ -101,7 +110,7 @@ fn main() {
         });
     }
     let manifest = Manifest {
-        name: String::from("tiny"),
+        name,
         vocab_size: vocab,
         hidden_dim: hidden,
         num_layers,

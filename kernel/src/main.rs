@@ -94,6 +94,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     drivers::pci::init();
     drivers::nvme::init();
     drivers::virtio_blk::init();
+    drivers::usb_storage::init();
+    drivers::live_disk::init();
     #[cfg(feature = "lxdde")]
     {
         let mode = lxdde_mode();

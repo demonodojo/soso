@@ -26,7 +26,11 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask gdb` | Frozen at boot; `gdb -ex 'target remote :1234'` |
 | `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
 | `cargo xtask test` | Full integration: sosofs, boot, TCP, SSH, soso-llm, halt |
+| `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
+| `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
+| `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
 | `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (host tool) |
+| `cargo xtask lx-build` | Compilar `liblxdde.a` (drivers Linux portados) |
 
 **Exit QEMU:** `Ctrl-A X` (not Ctrl-C).
 
@@ -68,6 +72,10 @@ cargo test -q -p soso-llm-core -p sosomodel -p convert-gguf
 
 # End-to-end (builds, QEMU, serial log, TCP, SSH, soso-llm via SSH, halt)
 cargo xtask test
+
+# Decode tok/s con modelo sintético bench (default SMP=1,4 mem=8G)
+cargo xtask bench-llm
+SOSO_BENCH_SMP=1,8 SOSO_BENCH_MAX=8 cargo xtask bench-llm
 ```
 
 User rule for this project: **mock HTTP and Celery calls in tests** (soso has no Celery; applies if adding HTTP client tests).

@@ -215,6 +215,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_NCPU => Ok(crate::arch::smp::CPUS_ONLINE.load(
             core::sync::atomic::Ordering::Relaxed,
         ) as u64),
+        abi::SYS_UPTIME_MS => Ok(crate::arch::pit::uptime_ms()),
         _ => Err(-abi::ENOSYS),
     };
     match r {
