@@ -72,7 +72,31 @@ SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 
 ## Procedimiento de cierre G1 (esta máquina)
 
-**Placa:** MSI Vector 16 HX AI (`10de:2f18` en `01:00.0`).
+**Placa:** MSI Vector 16 HX AI A2XWHG.
+
+### Hardware confirmado (preflight 2026-07-24)
+
+| Item | Detalle |
+|------|---------|
+| iGPU (panel) | **Intel Arrow Lake** `00:02.0` [8086:7d67], driver `i915` — **pinta el panel** |
+| dGPU (render) | **NVIDIA GB205** `01:00.0` [10de:2f18] + audio HDMI `01:00.1` [10de:2f80], driver `nvidia` |
+| Topología | **Híbrida** — la dGPU NO alimenta la pantalla |
+| VT-d / DMAR | **BLOCK** — sin tabla DMAR (VT-d desactivado en BIOS) |
+| IOMMU | 0 grupos; `intel_iommu=on` ausente; GRUB = `"quiet splash"` |
+| Firmware host | **38 blobs GSP** en linux-firmware incl. `ga102/gsp/*` (Ampere/3060), `ad102`, `ga100`, `tu10x` |
+| 3060 | **No presente** en esta máquina (solo la GB205) |
+
+> **Híbrido ⇒ no pierdes pantalla.** Como el panel va por la iGPU Intel (`i915`),
+> pasar la dGPU NVIDIA a VFIO **no apaga el display**. Basta con que ninguna app
+> use la NVIDIA (`nvidia-smi`, CUDA, PRIME offload) al hacer el unbind; si falla,
+> usa un TTY (Ctrl+Alt+F3).
+>
+> **Grupo IOMMU:** la dGPU y su audio HDMI (`01:00.0` + `01:00.1`) comparten grupo;
+> VFIO exige **ambas** en `vfio-pci` ("group not viable" si no). `l6-g1-vfio-test.sh`
+> ya bindea todas las funciones del slot `01:00.*` automáticamente.
+>
+> **Riesgo GB205:** aunque G1 lea `NV_PMC_BOOT_0`, el boot GSP completo de Blackwell
+> puede fallar (nouveau 6.6 no conoce GB205). Ruta madura = Ampere/**3060**.
 
 Diagnóstico rápido:
 
@@ -95,16 +119,22 @@ sudo reboot
 cargo xtask g1-check    # IOMMU > 0, DMAR GO
 ```
 
-### Paso C — VFIO + soso (desde TTY, no desde la sesión gráfica)
+### Paso C — VFIO + soso
 
-Ctrl+Alt+F3, login, luego:
+En esta máquina (híbrida, panel en Intel) puedes lanzarlo desde el escritorio,
+cerrando antes cualquier app que use la NVIDIA. Si el unbind de `nvidia` falla,
+usa un TTY (Ctrl+Alt+F3):
 
 ```bash
 cd ~/Trabajo/demonodojo/soso   # ajusta ruta
-sudo ./scripts/l6-g1-vfio-test.sh
+sudo ./scripts/l6-g1-vfio-test.sh   # bindea 01:00.0 + 01:00.1 (audio) → vfio-pci
 ```
 
 Criterio **GO:** log `nvidia: GPU 10de:2f18 NV_PMC_BOOT_0=0x........`
+
+Con una **RTX 3060** en otro equipo (objetivo recomendado): asegúrate de tener
+`linux-firmware` con `nvidia/ga102/gsp/*`, empaqueta (`./scripts/l6-pack-firmware.sh`)
+y pasa su BDF: `SOSO_G1_BDF=<bdf-3060> sudo ./scripts/l6-g1-vfio-test.sh`.
 
 ### Fallback (solo BAR0, no cierra G1 oficial)
 
@@ -124,13 +154,14 @@ Anotar abajo `NV_PMC_BOOT_0` y chipset id tras el test.
 
 | Item | Resultado |
 |------|-----------|
-| GPU | `01:00.0` **10de:2f18** — GeForce RTX 5070 Ti Mobile (GB205, Blackwell) |
-| Driver host | `nvidia` (propietario) |
+| dGPU | `01:00.0` **10de:2f18** — RTX 5070 Ti Mobile (GB205, Blackwell) + audio HDMI `01:00.1` [10de:2f80] |
+| iGPU (panel) | `00:02.0` **Intel Arrow Lake** [8086:7d67] `i915` — híbrido, la dGPU no pinta pantalla |
+| Driver host dGPU | `nvidia` (propietario) |
 | IOMMU | **BLOCK** — sin tabla DMAR (VT-d desactivado en BIOS MSI Vector 16 HX) |
-| Firmware GSP | **34 blobs** en `/lib/firmware/nvidia/` incl. `gb205/gsp/` + set `ga102/gsp/` (3060) |
-| NV_PMC_BOOT_0 en soso | Pendiente — requiere IOMMU + bind VFIO |
-| GSP en soso (G3) | **Grafo nvkm real construido en runtime**; boot HW efectivo pendiente de G1 |
-| GPU secundaria | **RTX 3060 (Ampere GA106)** — objetivo de validación recomendado (GSP maduro en nouveau) |
+| Firmware GSP | **38 blobs** en linux-firmware incl. `gb205/gsp/`, `ga102/gsp/` (3060), `ad102`, `ga100`, `tu10x` |
+| NV_PMC_BOOT_0 en soso | Pendiente — requiere IOMMU + bind VFIO (todas las funciones del slot) |
+| GSP en soso (G3) | **Grafo nvkm real construido en runtime** (62 fuentes); boot HW efectivo pendiente de G1 |
+| GPU secundaria (3060) | **No presente en esta máquina**; objetivo de validación recomendado si se instala (GSP Ampere maduro) |
 
 ### Estado por criterio
 

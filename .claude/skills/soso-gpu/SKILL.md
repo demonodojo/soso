@@ -37,8 +37,21 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 **Bloqueador actual = G1**, y requiere acción física del usuario (no automatizable):
 activar Intel VT-d en la BIOS MSI (Advanced → Integrated Peripherals → VT-d), luego
 `sudo ./scripts/l6-g1-enable-iommu.sh` + reboot, `cargo xtask g1-check` (grupos IOMMU
-> 0), y desde TTY `sudo ./scripts/l6-g1-vfio-test.sh`. Fallback sin IOMMU (solo BAR0,
+> 0), y `sudo ./scripts/l6-g1-vfio-test.sh`. Fallback sin IOMMU (solo BAR0,
 PARTIAL): `l6-g1-vfio-noiommu.sh`.
+
+**Máquina del usuario (MSI Vector 16 HX AI, confirmado 2026-07-24):**
+- **Híbrida**: iGPU Intel Arrow Lake (`00:02.0`, `i915`) pinta el panel; la dGPU
+  NVIDIA GB205 (`01:00.0`) es de render. **Pasar la dGPU a VFIO NO apaga la pantalla**
+  (mi aviso genérico de "pierdes pantalla" NO aplica aquí). Basta con que ninguna app
+  use la NVIDIA al hacer unbind; si falla, TTY.
+- La dGPU comparte grupo IOMMU con su **audio HDMI `01:00.1`**; VFIO exige ambas en
+  `vfio-pci` ("group not viable" si no). `l6-g1-vfio-test.sh` bindea todas las
+  funciones del slot `01:00.*` automáticamente.
+- **No hay 3060** en esta máquina (solo GB205). El firmware `ga102/gsp/*` (3060) sí
+  está en su linux-firmware. **Riesgo GB205**: nouveau 6.6 puede no bootear GSP
+  Blackwell aunque G1 lea `NV_PMC_BOOT_0`; ruta madura = Ampere/3060.
+- Estado preflight: sin DMAR (VT-d off), 0 grupos IOMMU, GRUB `"quiet splash"`.
 
 ## Capa lxdde
 
