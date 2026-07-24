@@ -441,19 +441,27 @@ es lxdde + subconjunto nvkm (sin display) + offload híbrido por VRAM (~12 GiB).
 **🟡 Infraestructura L6 (2026-07-23):** capa `lxdde`, `nvidia_probe`,
 `SOSO_QEMU_GPU=vfio:…`, `docs/L6-G1-gate.md`, scripts IOMMU/VFIO.
 
-**🟢 Reapertura L6 (2026-07-24):** roadmap G1→G5 activo sobre GB205 Blackwell.
+**🟢 Reapertura L6 (2026-07-24):** roadmap G1→G5 activo. GPUs soportadas
+(bring-up chip-aware): **GB205 Blackwell** (`10de:2f18`) y **Ampere GA10x**
+(RTX **3060**, objetivo de validación recomendado por su GSP maduro en nouveau).
 CPU L1–L4 sigue como fallback; inferencia 70B usa offload híbrido GPU+RAM.
+
+**🟢 Port nvkm nativo (2026-07-24):** **62 fuentes nvkm/lib de Linux 6.6.32**
+integradas sobre lxdde (core, falcon, nvfw, ACR AHESASC→ASB, mmu, fb, instmem,
+engine gr/fifo/dma base) con shims lx_emul mínimos. El **grafo de objetos nvkm
+real se construye en runtime** dentro de soso (`nvkm device graph OK`). Solo 4
+dummies restantes, todos dependientes de HW/ROM. Detalle: `docs/L6-G3-nvkm-scope.md`.
 
 | Fase | Entregable | Estado |
 |------|------------|--------|
-| G1 | NV_PMC_BOOT_0 bajo VFIO | Pendiente IOMMU en placa |
-| G2 | Firmware gb205 en rootfs + `SOSO_LXDDE_MODE=nouveau` | En curso |
-| G3 | GSP boot nvkm (sin KMS) | En curso |
-| G4 | Saxpy SASS real (`SYS_GPU_SUBMIT`) | Pendiente G3 |
+| G1 | NV_PMC_BOOT_0 bajo VFIO | **Pendiente IOMMU en placa** (VT-d en BIOS; acción del usuario) |
+| G2 | Firmware gb205 + set ga102 (3060) en rootfs | **Go** |
+| G3 | GSP boot nvkm (sin KMS) | **Go (software)** — grafo nvkm real en runtime; boot HW pendiente de G1 |
+| G4 | Saxpy SASS real (`SYS_GPU_SUBMIT`) | Infra base integrada; compute real tras G1 |
 | G5 | matvec híbrido soso-llm | Pendiente G4 |
 
 Scripts: `scripts/l6-pack-firmware.sh`, `scripts/l6-g1-enable-iommu.sh`,
-`scripts/l6-g1-vfio-test.sh`.
+`scripts/l6-g1-vfio-test.sh`. Checks: `cargo xtask g1-check`, `cargo xtask g3-check`.
 
 ---
 

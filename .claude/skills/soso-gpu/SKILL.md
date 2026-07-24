@@ -9,9 +9,15 @@ description: >-
 
 # soso — GPU nativa NVIDIA (fase L6)
 
-Objetivo: soso controla la **RTX 5070 Ti Mobile (`10de:2f18`, GB205 Blackwell)**
-sin depender de Linux ni CUDA en el host. Inferencia acelerada vía lxdde + nvkm +
-kernels SASS. Motor CPU (L1–L4) queda como fallback.
+Objetivo: soso controla la GPU NVIDIA sin depender de Linux ni CUDA en el host.
+Inferencia acelerada vía lxdde + nvkm + kernels SASS. Motor CPU (L1–L4) = fallback.
+
+**GPUs soportadas (bring-up chip-aware en `gsp_bringup.c`):**
+- **GB205 Blackwell** (`10de:2f18`, RTX 5070 Ti Mobile) — hardware primario, pero
+  Blackwell es reciente y nouveau va por detrás.
+- **Ampere GA10x** (RTX **3060**, GA106) — **objetivo de validación recomendado**:
+  la ruta nvkm real (`ga102_gsp_new`) es Ampere y está **madura en nouveau 6.6**.
+- Familia detectada por `NV_PMC_BOOT_0` (arch `>>20`) con fallback por device-id.
 
 Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 `docs/L6-G3-nvkm-scope.md`, `docs/L6-H-cuda-hybrid.md`, y `PLAN-MODELOS-GRANDES.md`.
@@ -22,10 +28,11 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 |------|-----------|-------------|--------|
 | G1 | BAR0 bajo VFIO | log `NV_PMC_BOOT_0=0x…` | **BLOCK**: VT-d off en BIOS MSI → 0 grupos IOMMU |
 | G2 | firmware gb205 en rootfs | `lxdde-fw: cargado …/gsp/…` | **Go** (blobs .zst→.bin) |
+| G2 | firmware gb205 + set ga102 (3060) | `lxdde-fw: cargado …/gsp/…` | **Go** |
 | G3a | firmware ELF + GEM staging + fases | `N blobs GSP validados` | **Go** (soft boot) |
-| G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | **En curso** (Ola 1 nvkm compila+integra) |
-| G4 | saxpy SASS en VRAM | `SYS_GPU_SUBMIT` correcto en GPU | Pendiente |
-| G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente |
+| G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | **Go software** — 62 fuentes nvkm; grafo real en runtime; boot HW pendiente de G1 |
+| G4 | saxpy SASS en VRAM | `SYS_GPU_SUBMIT` correcto en GPU | Infra `engine/{gr,fifo,dma}` base; compute real tras G1 |
+| G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
 
 **Bloqueador actual = G1**, y requiere acción física del usuario (no automatizable):
 activar Intel VT-d en la BIOS MSI (Advanced → Integrated Peripherals → VT-d), luego

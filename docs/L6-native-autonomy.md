@@ -19,12 +19,17 @@ G5  LLM híbrido          ──►  matvec offload en soso-llm (VRAM ~12 GiB)
 
 | Fase | Entregable | Estado |
 |------|------------|--------|
-| G1 | IOMMU + VFIO + log `NV_PMC_BOOT_0=0x…` | **BLOCK** — 0 grupos IOMMU en placa |
-| G2 | `./scripts/l6-pack-firmware.sh` → ELF en rootfs | **Go** (con `zstd`) |
+| G1 | IOMMU + VFIO + log `NV_PMC_BOOT_0=0x…` | **BLOCK** — 0 grupos IOMMU en placa (VT-d off en BIOS; acción del usuario) |
+| G2 | `./scripts/l6-pack-firmware.sh` → ELF en rootfs | **Go** (gb205 + set ga102 del 3060, con `zstd`) |
 | G3a | Validación ELF + GEM staging + fases | **Go** (soft boot si poll falla) |
-| G3b | Port nvkm ACR (`tu102_acr_init`) | **En curso** — Ola 1 (`subdev/gsp/*`) compila+integra vía shims lx_emul; sigue `subdev/{pci,bar,mmu,instmem}` |
-| G4 | Saxpy SASS en GPU | Pendiente G3b |
+| G3b | Port nvkm real | **Go (software)** — **62 fuentes nvkm/lib** integradas (core, falcon, nvfw, ACR, mmu, fb, instmem, engine gr/fifo/dma base). El **grafo de objetos nvkm real se construye en runtime** (`nvkm device graph OK — subdev='gsp0'`). Solo 4 dummies, todos HW/ROM. Falta el boot GSP efectivo (MMIO real ↔ `gsp_mmio.c`) → requiere G1 |
+| G4 | Saxpy SASS en GPU | Infra base integrada (`engine/{gr,fifo,dma}`); el gr por chip + compute real requieren GSP arrancado (G1) |
 | G5 | tok/s GPU > CPU | Pendiente G4 |
+
+**GPUs soportadas (bring-up chip-aware):** **GB205 Blackwell** (`10de:2f18`, RTX
+5070 Ti Mobile) y **Ampere GA10x** (RTX **3060**, GA106). La ruta nvkm real
+(`ga102_gsp_new`) es la de Ampere, **madura en nouveau 6.6** — el **3060 es el
+objetivo de validación recomendado** frente a la GB205 (Blackwell, más reciente).
 
 ## Tu siguiente paso (G1 en placa)
 
@@ -45,6 +50,11 @@ sudo ./scripts/l6-g1-vfio-test.sh
 SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build
 SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 ```
+
+**Con una RTX 3060 (recomendado para validar):** instala `linux-firmware` con
+`nvidia/ga102/gsp/*`, empaqueta (`./scripts/l6-pack-firmware.sh` avisa si falta el
+set), y pasa la 3060 por VFIO. `nouveau_probe` reconoce vendor `0x10de`, detecta la
+familia Ampere y ejercita el nvkm portado (GSP maduro) contra BAR0 real.
 
 Log serie esperado en G1:
 

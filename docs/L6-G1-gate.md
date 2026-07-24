@@ -127,26 +127,30 @@ Anotar abajo `NV_PMC_BOOT_0` y chipset id tras el test.
 | GPU | `01:00.0` **10de:2f18** — GeForce RTX 5070 Ti Mobile (GB205, Blackwell) |
 | Driver host | `nvidia` (propietario) |
 | IOMMU | **BLOCK** — sin tabla DMAR (VT-d desactivado en BIOS MSI Vector 16 HX) |
-| Firmware GSP | **34 blobs** en `/lib/firmware/nvidia/` incl. `gb205/gsp/` |
+| Firmware GSP | **34 blobs** en `/lib/firmware/nvidia/` incl. `gb205/gsp/` + set `ga102/gsp/` (3060) |
 | NV_PMC_BOOT_0 en soso | Pendiente — requiere IOMMU + bind VFIO |
-| GSP en soso (G3) | Pendiente — `SOSO_LXDDE_MODE=nouveau` + nvkm bring-up |
+| GSP en soso (G3) | **Grafo nvkm real construido en runtime**; boot HW efectivo pendiente de G1 |
+| GPU secundaria | **RTX 3060 (Ampere GA106)** — objetivo de validación recomendado (GSP maduro en nouveau) |
 
 ### Estado por criterio
 
 | Criterio | Estado |
 |----------|--------|
-| Firmware GSP redistribuible | **Go** (linux-firmware) |
-| IOMMU + VFIO | **Pendiente** — `scripts/l6-g1-enable-iommu.sh` + reinicio |
+| Firmware GSP redistribuible | **Go** (linux-firmware; gb205 + set ga102 del 3060) |
+| IOMMU + VFIO | **Pendiente** — `scripts/l6-g1-enable-iommu.sh` + reinicio (acción del usuario) |
 | NV_PMC_BOOT_0 legible | **Pendiente** — `scripts/l6-g1-vfio-test.sh` tras IOMMU |
-| Subconjunto nvkm acotado | **Go** (estimación ~120k LOC sin display) |
-| GSP boot (G3) | **En curso** — bring-up gb205 vía lxdde/nouveau |
-| Saxpy SASS (G4) | **Pendiente** — tras G3 |
+| Subconjunto nvkm acotado | **Go** — **62 fuentes nvkm/lib integradas** (Linux 6.6.32) |
+| GSP boot (G3) | **Go (software)** — grafo nvkm real en runtime (`nvkm device graph OK`); solo 4 dummies HW/ROM |
+| Saxpy SASS (G4) | **Pendiente** — infra `engine/{gr,fifo,dma}` base integrada; compute real tras G1 |
 | matvec híbrido (G5) | **Pendiente** — tras G4 |
 
 ### Veredicto (2026-07-24)
 
-**Roadmap L6 reabierto** con GB205 Blackwell móvil como hardware primario.
-Motor CPU L1–L4 sigue como fallback. Completar G1 (IOMMU/VFIO) desbloquea
-validación BAR0; G2–G5 avanzan en paralelo sobre lxdde.
+**Roadmap L6 reabierto** con dos GPUs soportadas en software (bring-up chip-aware):
+GB205 Blackwell móvil (primario) y **RTX 3060 Ampere (validación recomendada** por su
+GSP maduro en nouveau). El port nvkm nativo (62 fuentes) compila, enlaza y construye
+su grafo de objetos en runtime; el motor CPU L1–L4 sigue como fallback. El único
+bloqueador para el boot GSP efectivo es **G1 (IOMMU/VFIO)** — acción del usuario en la
+BIOS. Detalle del port: `docs/L6-G3-nvkm-scope.md`; skill `soso-gpu`.
 
 Generado como parte del roadmap L6 (lxdde).

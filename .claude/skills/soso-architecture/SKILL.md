@@ -110,12 +110,13 @@ soso/
   `spike`, `testdrv`, `e1000e`, `nouveau`. Build: `cargo xtask lx-build <port>`
   lee `source.list`, compila con clang freestanding, y autogenera dummies
   (`lx_emul_trace_and_stop`) para símbolos undefined no provistos.
-- **Port nouveau/nvkm** (`lxdde/ports/nouveau/`): bring-up de la GPU NVIDIA GB205
-  (GSP). Estado: firmware + staging GEM + secuencia ACR/falcon lx-native, con
-  **soft boot** (compute aún en CPU); Ola 1 del port nvkm real de Linux 6.6.32
-  (`nvkm/subdev/gsp/*`) ya **compila e integra** vía shims mínimos en
-  `lxdde/shim/include/` (slab/pci/mutex/... que cortan la avalancha de cabeceras
-  arch del kernel).
+- **Port nouveau/nvkm** (`lxdde/ports/nouveau/`): bring-up de la GPU NVIDIA (GB205
+  Blackwell y Ampere GA10x/**RTX 3060**, chip-aware). **62 fuentes nvkm/lib reales**
+  de Linux 6.6.32 integradas (core, falcon, nvfw, ACR, mmu, fb, instmem, engine
+  gr/fifo/dma base) vía shims mínimos en `lxdde/shim/include/` (slab/pci/mutex/... que
+  cortan la avalancha de cabeceras arch del kernel). El **grafo de objetos nvkm real
+  se construye en runtime** (`nvkm_bringup_lx.c` → `ga102_gsp_new`). El boot GSP
+  efectivo y el compute siguen **soft/CPU** hasta cablear MMIO real (requiere G1/HW).
 - **Syscalls GPU** (`soso-abi`): `SYS_GPU_INFO=17`, `SYS_GPU_ALLOC=18`,
   `SYS_GPU_MAP=19`, `SYS_GPU_SUBMIT=20`, `SYS_GPU_READ=33` (en `task/syscall.rs`).
 - **Puente Rust↔C**: `kernel/src/lxdde/gpu.rs` (`lx_nouveau_*`), drivers en
