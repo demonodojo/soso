@@ -462,8 +462,8 @@ reenvía activaciones entre etapas. Cada nodo mantiene su KV cache y solo pagina
 en RAM los pesos de su rango.
 
 **Limitaciones:** configuración estática (IP/puerto/splits manual), sin
-descubrimiento automático. Con protocolo **v3** hay tolerancia básica a fallos
-(timeouts, nodos persistentes, failover manual del head).
+descubrimiento automático. Con protocolo **v3** hay tolerancia a fallos
+(timeouts, keepalive, nodos persistentes, head standby).
 
 #### Dos nodos (compat v1)
 
@@ -495,6 +495,10 @@ soso-llm node tiny --listen 9901 --layers 2:3
 # Head (capas 0..2 local + orquestación)
 soso-llm run tiny --pipeline 10.0.2.16:9901,10.0.2.15:9902 --splits 2,3 \
   --prompt test --max 8 --seed 42
+
+# Head de reserva (failover automático)
+soso-llm run tiny --pipeline 10.0.2.16:9901,10.0.2.15:9902 --splits 2,3 \
+  --standby --prompt test --max 8 --seed 42
 ```
 
 | Flag | Efecto |
@@ -507,18 +511,25 @@ soso-llm run tiny --pipeline 10.0.2.16:9901,10.0.2.15:9902 --splits 2,3 \
 | `--step-timeout-ms <ms>` | Timeout por paso de inferencia (default 120000) |
 | `--handshake-timeout-ms <ms>` | Timeout de conexión/handshake (default 60000) |
 | `--accept-timeout-ms <ms>` | Timeout de `accept` en nodos (default 60000) |
+| `--ping-interval-ms <ms>` | Intervalo de `PING` keepalive (default 5000) |
+| `--ping-idle-ms <ms>` | Máx. silencio del peer antes de abortar (default 15000) |
+| `--standby` | Head en espera: toma el cluster cuando los nodos quedan libres |
+| `--standby-retry-ms <ms>` | Pausa entre intentos de takeover (default 3000) |
 
 #### Tolerancia a fallos (v3)
 
 - **Nodos colgados:** el head aborta la sesión si un remoto no responde dentro
   de `--step-timeout-ms` y envía error al resto.
+- **Keepalive activo:** durante esperas idle (handshake, nodo esperando `Step`),
+  ambos lados envían `PING` cada `--ping-interval-ms`; si no hay respuesta en
+  `--ping-idle-ms`, la sesión se aborta (p. ej. head caído detectado en ~15 s).
 - **Nodos persistentes:** tras caída del head, timeout o error de sesión, cada
   `soso-llm node` vuelve a `listen` automáticamente (resetea KV cache).
-- **Failover del head:** no hay elección automática; arranca otro host con el
-  mismo `soso-llm run --pipeline ... --splits ...`. Los nodos aceptan la nueva
-  conexión (nuevo `session_id` en `Begin`).
-- **Keepalive:** mensajes `PING`/`PONG` en el protocolo; los nodos responden
-  automáticamente.
+- **Failover automático del head:** arranca un head de reserva con `--standby`;
+  reintenta conectar y orquestar cuando los nodos quedan libres. Varios hosts
+  con `--standby` compiten: el primero en completar handshake gana la sesión.
+- **Failover manual:** también puedes lanzar de nuevo `soso-llm run --pipeline ...`
+  sin `--standby` cuando los nodos ya re-escuchan.
 
 Gates de prueba en QEMU:
 

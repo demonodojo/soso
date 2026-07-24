@@ -32,6 +32,9 @@ pub const ERR_NODE_DOWN: u16 = 5;
 
 pub const DEFAULT_STEP_TIMEOUT_MS: u64 = 120_000;
 pub const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 60_000;
+pub const DEFAULT_PING_INTERVAL_MS: u64 = 5_000;
+pub const DEFAULT_PING_IDLE_MS: u64 = 15_000;
+pub const DEFAULT_STANDBY_RETRY_MS: u64 = 3_000;
 
 pub const MAX_NAME: usize = 32;
 pub const MAX_ERROR: usize = 128;
@@ -554,20 +557,51 @@ impl<T: Transport> FramedTransport<T> {
 
     /// Espera un mensaje de aplicación; responde `PONG` a `PING` automáticamente.
     pub fn recv_timeout(&mut self, timeout_ms: u64, now_ms: NowMs) -> Result<Message, RecvError> {
-        let deadline = now_ms().saturating_add(timeout_ms);
+        self.recv_timeout_keepalive(timeout_ms, 0, 0, now_ms)
+    }
+
+    /// Igual que `recv_timeout`, pero envía `PING` cada `ping_interval_ms` y falla si
+    /// no hay tráfico entrante (incl. `PONG`) en `peer_idle_ms`. Útil con el peer en espera.
+    pub fn recv_timeout_keepalive(
+        &mut self,
+        total_timeout_ms: u64,
+        ping_interval_ms: u64,
+        peer_idle_ms: u64,
+        now_ms: NowMs,
+    ) -> Result<Message, RecvError> {
+        let deadline = if total_timeout_ms == u64::MAX {
+            u64::MAX
+        } else {
+            now_ms().saturating_add(total_timeout_ms)
+        };
+        let mut last_inbound = now_ms();
+        let mut last_ping = now_ms();
+
         loop {
             if let Some(msg) = self.try_take_message()? {
                 match msg {
                     Message::Ping => {
                         self.send(&Message::Pong).map_err(|_| RecvError::Protocol)?;
+                        last_inbound = now_ms();
                         continue;
                     }
-                    Message::Pong => continue,
+                    Message::Pong => {
+                        last_inbound = now_ms();
+                        continue;
+                    }
                     other => return Ok(other),
                 }
             }
-            if timeout_ms != u64::MAX && now_ms() >= deadline {
+            let now = now_ms();
+            if total_timeout_ms != u64::MAX && now >= deadline {
                 return Err(RecvError::Timeout);
+            }
+            if peer_idle_ms != 0 && now.saturating_sub(last_inbound) >= peer_idle_ms {
+                return Err(RecvError::Timeout);
+            }
+            if ping_interval_ms != 0 && now.saturating_sub(last_ping) >= ping_interval_ms {
+                self.send_ping().map_err(|_| RecvError::Protocol)?;
+                last_ping = now;
             }
             let mut tmp = [0u8; 4096];
             match self.inner.recv_some(&mut tmp) {

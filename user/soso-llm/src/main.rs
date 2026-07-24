@@ -13,7 +13,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use distributed::{crc_bytes, default_timeouts, DistributedConfig};
+use distributed::{crc_bytes, default_keepalive, default_timeouts, DistributedConfig};
 use libsoso::{println, sys};
 use pool::ThreadPool;
 use soso_abi::{self as abi, O_RDONLY};
@@ -92,6 +92,8 @@ fn main(args: &str) -> u8 {
         if let Some(pipeline) = parse_flag(&parts, "--pipeline") {
             let splits = parse_splits(&parts).unwrap_or_default();
             let (step_to, hs_to, _) = parse_timeouts(&parts);
+            let (ping_int, ping_idle, standby_retry) = parse_keepalive(&parts);
+            let standby = parts.iter().any(|&p| p == "--standby");
             return run_distributed_head(
                 name,
                 &prompt,
@@ -102,6 +104,10 @@ fn main(args: &str) -> u8 {
                 &splits,
                 step_to,
                 hs_to,
+                ping_int,
+                ping_idle,
+                standby,
+                standby_retry,
             );
         }
         if let Some(remote) = parse_flag(&parts, "--remote") {
@@ -110,6 +116,8 @@ fn main(args: &str) -> u8 {
                 .unwrap_or(2);
             let splits = format!("{split}");
             let (step_to, hs_to, _) = parse_timeouts(&parts);
+            let (ping_int, ping_idle, standby_retry) = parse_keepalive(&parts);
+            let standby = parts.iter().any(|&p| p == "--standby");
             return run_distributed_head(
                 name,
                 &prompt,
@@ -120,6 +128,10 @@ fn main(args: &str) -> u8 {
                 &splits,
                 step_to,
                 hs_to,
+                ping_int,
+                ping_idle,
+                standby,
+                standby_retry,
             );
         }
         return run_model(name, &prompt, max_new, Sampler::new(temp, top_p, seed));
@@ -128,6 +140,8 @@ fn main(args: &str) -> u8 {
     println!("  soso-llm run <modelo> --prompt <texto> [--max <n>]");
     println!("    [--pipeline <ip:puerto>,...] [--splits <n1,n2,...>]");
     println!("    [--step-timeout-ms <ms>] [--handshake-timeout-ms <ms>]");
+    println!("    [--ping-interval-ms <ms>] [--ping-idle-ms <ms>]");
+    println!("    [--standby] [--standby-retry-ms <ms>]");
     println!("    [--remote <ip:puerto> --split <n>]  (compat v1)");
     println!("  soso-llm node <modelo> --listen <puerto> --layers <start>:<end>");
     println!("  soso-llm worker ...  (alias de node)");
@@ -150,6 +164,20 @@ fn run_node_cmd(parts: &[&str]) -> u8 {
         }
     };
     run_node(name, layer_start, layer_end, listen, &parts)
+}
+
+fn parse_keepalive(parts: &[&str]) -> (u64, u64, u64) {
+    let (def_ping, def_idle, def_retry) = default_keepalive();
+    let ping = parse_flag(parts, "--ping-interval-ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(def_ping);
+    let idle = parse_flag(parts, "--ping-idle-ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(def_idle);
+    let retry = parse_flag(parts, "--standby-retry-ms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(def_retry);
+    (ping, idle, retry)
 }
 
 fn parse_timeouts(parts: &[&str]) -> (u64, u64, u64) {
@@ -286,6 +314,10 @@ fn run_distributed_head(
     splits: &str,
     step_timeout_ms: u64,
     handshake_timeout_ms: u64,
+    ping_interval_ms: u64,
+    ping_idle_ms: u64,
+    standby: bool,
+    standby_retry_ms: u64,
 ) -> u8 {
     let remotes = parse_pipeline_list(pipeline);
     let split_vals = parse_split_list(splits);
@@ -336,19 +368,38 @@ fn run_distributed_head(
         step_timeout_ms,
         handshake_timeout_ms,
         accept_timeout_ms: accept_to,
+        ping_interval_ms,
+        ping_idle_ms,
+        standby,
+        standby_retry_ms,
     };
     let text = if prompt.is_empty() { "test" } else { prompt };
-    match distributed::run_head(
-        &mut bundle.rt,
-        &mut bundle.source,
-        &bundle.tokenizer,
-        &cfg,
-        text,
-        max_new,
-        sampler,
-        seed,
-        par,
-    ) {
+    let run = if standby {
+        distributed::run_head_standby(
+            &mut bundle.rt,
+            &mut bundle.source,
+            &bundle.tokenizer,
+            &cfg,
+            text,
+            max_new,
+            sampler,
+            seed,
+            par,
+        )
+    } else {
+        distributed::run_head(
+            &mut bundle.rt,
+            &mut bundle.source,
+            &bundle.tokenizer,
+            &cfg,
+            text,
+            max_new,
+            sampler,
+            seed,
+            par,
+        )
+    };
+    match run {
         Ok(()) => 0,
         Err(()) => {
             println!("soso-llm: inferencia distribuida falló");
@@ -378,6 +429,7 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
         None
     };
     let (step_to, hs_to, accept_to) = parse_timeouts(parts);
+    let (ping_int, ping_idle, standby_retry) = parse_keepalive(parts);
     let cfg = DistributedConfig {
         plan: PipelinePlan {
             segments: Vec::new(),
@@ -392,6 +444,10 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
         step_timeout_ms: step_to,
         handshake_timeout_ms: hs_to,
         accept_timeout_ms: accept_to,
+        ping_interval_ms: ping_int,
+        ping_idle_ms: ping_idle,
+        standby: false,
+        standby_retry_ms: standby_retry,
     };
     match distributed::run_node(&mut bundle.rt, &mut bundle.source, &cfg, par) {
         Ok(()) => 0,

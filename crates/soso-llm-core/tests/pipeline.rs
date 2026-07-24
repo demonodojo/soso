@@ -321,6 +321,19 @@ fn begin_payload_session_id() {
 }
 
 #[test]
+fn keepalive_detecta_peer_caido() {
+    fn tick() -> u64 {
+        static C: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        C.fetch_add(5, std::sync::atomic::Ordering::Relaxed)
+    }
+    let mut t = FramedTransport::new(MockTransport::default());
+    assert_eq!(
+        t.recv_timeout_keepalive(u64::MAX, 10, 20, tick),
+        Err(RecvError::Timeout)
+    );
+}
+
+#[test]
 fn mensaje_invalido_falla() {
     assert!(decode_message(&[0u8; 4]).is_err());
 }

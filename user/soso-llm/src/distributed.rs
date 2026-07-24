@@ -9,6 +9,7 @@ use soso_llm_core::parallel::RowParallel;
 use soso_llm_core::pipeline::{
     self, AckPayload, BeginPayload, FramedTransport, HelloPayload, Message, PipelinePlan,
     RecvError, StepPayload, StepReplyPayload, DEFAULT_HANDSHAKE_TIMEOUT_MS,
+    DEFAULT_PING_IDLE_MS, DEFAULT_PING_INTERVAL_MS, DEFAULT_STANDBY_RETRY_MS,
     DEFAULT_STEP_TIMEOUT_MS, ERR_NODE_DOWN, ROLE_HEAD, ROLE_NODE,
 };
 use soso_llm_core::runtime::Runtime;
@@ -28,6 +29,10 @@ pub struct DistributedConfig {
     pub step_timeout_ms: u64,
     pub handshake_timeout_ms: u64,
     pub accept_timeout_ms: u64,
+    pub ping_interval_ms: u64,
+    pub ping_idle_ms: u64,
+    pub standby: bool,
+    pub standby_retry_ms: u64,
 }
 
 struct RemoteLink {
@@ -54,15 +59,54 @@ fn log_recv_err(context: &str, e: RecvError) {
     }
 }
 
-fn recv_app(
+fn recv_msg(
     tx: &mut FramedTransport<TcpFd>,
     timeout_ms: u64,
+    keepalive: bool,
+    cfg: &DistributedConfig,
     context: &str,
 ) -> Result<Message, ()> {
-    tx.recv_timeout(timeout_ms, now_ms).map_err(|e| {
+    let result = if keepalive && cfg.ping_interval_ms != 0 {
+        tx.recv_timeout_keepalive(
+            timeout_ms,
+            cfg.ping_interval_ms,
+            cfg.ping_idle_ms,
+            now_ms,
+        )
+    } else {
+        tx.recv_timeout(timeout_ms, now_ms)
+    };
+    result.map_err(|e| {
         log_recv_err(context, e);
         ()
     })
+}
+
+/// Head en modo standby: reintenta hasta tomar el control del cluster tras failover.
+pub fn run_head_standby(
+    rt: &mut Runtime,
+    source: &mut MmapTensorSource<impl soso_llm_core::source::FileMapper>,
+    tok: &Tokenizer,
+    cfg: &DistributedConfig,
+    prompt: &str,
+    max_new: usize,
+    sampler: Sampler,
+    seed: u64,
+    par: Option<&dyn RowParallel>,
+) -> Result<(), ()> {
+    println!(
+        "soso-llm: head standby activo (reintento cada {} ms)",
+        cfg.standby_retry_ms
+    );
+    loop {
+        println!("soso-llm: standby buscando nodos libres...");
+        match run_head(rt, source, tok, cfg, prompt, max_new, sampler, seed, par) {
+            Ok(()) => println!("soso-llm: inferencia completada"),
+            Err(()) => println!("soso-llm: nodos ocupados o sesión fallida"),
+        }
+        rt.reset_sequence();
+        sys::sleep_ms(cfg.standby_retry_ms);
+    }
 }
 
 pub fn run_head(
@@ -72,7 +116,7 @@ pub fn run_head(
     cfg: &DistributedConfig,
     prompt: &str,
     max_new: usize,
-    mut sampler: Sampler,
+    sampler: Sampler,
     seed: u64,
     par: Option<&dyn RowParallel>,
 ) -> Result<(), ()> {
@@ -106,7 +150,7 @@ pub fn run_head(
             index_crc: cfg.index_crc,
         };
         tx.send(&Message::Hello(hello.clone()))?;
-        match recv_app(&mut tx, hs_to, "handshake remoto")? {
+        match recv_msg(&mut tx, hs_to, true, cfg, "handshake remoto")? {
             Message::Hello(h) => {
                 if !hello_matches_node(&h, cfg, seg, rt.manifest.num_layers) {
                     println!("soso-llm: handshake incompatible con {remote}");
@@ -137,7 +181,7 @@ pub fn run_head(
         link.tx.send(&Message::Begin(begin))?;
     }
     for link in remotes.iter_mut() {
-        match recv_app(&mut link.tx, hs_to, "ack begin")? {
+        match recv_msg(&mut link.tx, hs_to, true, cfg, "ack begin")? {
             Message::Ack { .. } | Message::Reset => {}
             Message::Error(e) => {
                 println!("soso-llm: error remoto: {}", e.message);
@@ -159,13 +203,15 @@ pub fn run_head(
     for (i, &t) in prompt_tokens.iter().enumerate() {
         let is_last_prompt = i + 1 == prompt_tokens.len();
         let want_token = is_last_prompt && max_new > 0;
-        if run_head_step(rt, source, head_seg, t, want_token, &mut remotes, step_to, par).is_err()
+        if run_head_step(rt, source, head_seg, t, want_token, &mut remotes, step_to, cfg, par)
+            .is_err()
         {
             abort_remotes(&mut remotes, ERR_NODE_DOWN, "nodo no respondió");
             return Err(());
         }
         if want_token {
-            let next = recv_token_from_chain(&mut remotes, rt.pos as u32 - 1, step_to)?.ok_or(())?;
+            let next =
+                recv_token_from_chain(&mut remotes, rt.pos as u32 - 1, step_to, cfg)?.ok_or(())?;
             if tok.eos() == Some(next) {
                 break;
             }
@@ -182,11 +228,13 @@ pub fn run_head(
             break;
         }
         let last = *tokens.last().ok_or(())?;
-        if run_head_step(rt, source, head_seg, last, true, &mut remotes, step_to, par).is_err() {
+        if run_head_step(rt, source, head_seg, last, true, &mut remotes, step_to, cfg, par)
+            .is_err()
+        {
             abort_remotes(&mut remotes, ERR_NODE_DOWN, "nodo no respondió");
             return Err(());
         }
-        let next = recv_token_from_chain(&mut remotes, rt.pos as u32 - 1, step_to)?.ok_or(())?;
+        let next = recv_token_from_chain(&mut remotes, rt.pos as u32 - 1, step_to, cfg)?.ok_or(())?;
         if tok.eos() == Some(next) {
             break;
         }
@@ -238,6 +286,7 @@ fn run_head_step(
     want_token: bool,
     remotes: &mut [RemoteLink],
     step_timeout_ms: u64,
+    cfg: &DistributedConfig,
     par: Option<&dyn RowParallel>,
 ) -> Result<(), ()> {
     rt.embed_token(token, source)?;
@@ -258,9 +307,12 @@ fn run_head_step(
         if is_tail && want_token {
             break;
         }
-        match recv_app(
+        // El nodo está calculando: solo timeout total, sin keepalive idle.
+        match recv_msg(
             &mut link.tx,
             step_timeout_ms,
+            false,
+            cfg,
             &format!("step pos {pos} en {}", link.addr),
         )? {
             Message::StepReply(r) => {
@@ -285,11 +337,14 @@ fn recv_token_from_chain(
     remotes: &mut [RemoteLink],
     pos: u32,
     step_timeout_ms: u64,
+    cfg: &DistributedConfig,
 ) -> Result<Option<u32>, ()> {
     let tail = remotes.last_mut().ok_or(())?;
-    match recv_app(
+    match recv_msg(
         &mut tail.tx,
         step_timeout_ms,
+        false,
+        cfg,
         &format!("token pos {pos} en {}", tail.addr),
     )? {
         Message::Token(t) => {
@@ -349,7 +404,7 @@ fn run_node_session(
     let is_tail = cfg.layer_end == rt.manifest.num_layers;
     let mut rx = FramedTransport::new(stream);
 
-    let hello = match recv_app(&mut rx, hs_to, "handshake head")? {
+    let hello = match recv_msg(&mut rx, hs_to, true, cfg, "handshake head")? {
         Message::Hello(h) => h,
         _ => return Err(()),
     };
@@ -381,7 +436,7 @@ fn run_node_session(
         index_crc: cfg.index_crc,
     }))?;
 
-    let begin = match recv_app(&mut rx, hs_to, "begin")? {
+    let begin = match recv_msg(&mut rx, hs_to, true, cfg, "begin")? {
         Message::Begin(b) => b,
         Message::Error(_) => return Err(()),
         _ => return Err(()),
@@ -398,7 +453,8 @@ fn run_node_session(
     let layer_end = cfg.layer_end;
 
     loop {
-        match recv_app(&mut rx, step_to, "step")? {
+        // Head en espera: keepalive detecta caída del head antes que step_timeout.
+        match recv_msg(&mut rx, step_to, true, cfg, "step")? {
             Message::Step(step) => {
                 if step.pos as usize != rt.pos {
                     let _ = rx.send(&Message::Error(pipeline::ErrorPayload {
@@ -432,9 +488,6 @@ fn run_node_session(
                 println!("soso-llm: head abortó sesión: {}", e.message);
                 return Err(());
             }
-            Message::Ping => {
-                rx.send(&Message::Pong)?;
-            }
             _ => return Err(()),
         }
     }
@@ -449,5 +502,13 @@ pub fn default_timeouts() -> (u64, u64, u64) {
         DEFAULT_STEP_TIMEOUT_MS,
         DEFAULT_HANDSHAKE_TIMEOUT_MS,
         DEFAULT_HANDSHAKE_TIMEOUT_MS,
+    )
+}
+
+pub fn default_keepalive() -> (u64, u64, u64) {
+    (
+        DEFAULT_PING_INTERVAL_MS,
+        DEFAULT_PING_IDLE_MS,
+        DEFAULT_STANDBY_RETRY_MS,
     )
 }
