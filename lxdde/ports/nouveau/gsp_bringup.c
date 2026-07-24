@@ -1,12 +1,44 @@
-/* G3: GSP bring-up gb205 — firmware + ACR ola2 + poll MMIO. */
+/* G3: GSP bring-up gb205 (Blackwell) + ga10x (Ampere, RTX 3060) —
+ * firmware + ACR ola2 + poll MMIO. La ruta nvkm real usa ga102_gsp_new, que
+ * cubre Ampere GA10x de forma madura en nouveau 6.6; GB205 es más reciente. */
 #include "acr_lx.h"
 #include "gsp_fw.h"
 #include "gsp_mmio.h"
 #include "lx_emul.h"
 
 #define NV_PMC_BOOT_0_OFF 0x0000u
-#define GB205_DEVICE_ID   0x2f18u
+#define GB205_DEVICE_ID   0x2f18u  /* RTX 5070 Ti Mobile (Blackwell) */
 #define GSP_POLL_MS         2000u
+
+/* Familia de chip para bring-up chip-aware. */
+enum nv_family { NV_FAM_UNKNOWN = 0, NV_FAM_AMPERE, NV_FAM_ADA, NV_FAM_BLACKWELL };
+
+/* NV_PMC_BOOT_0: bits 20-28 = arquitectura (>>20 & 0x1ff). Ampere=0x170,
+ * Ada=0x190, Blackwell(GB20x)=0x1a0+. Fallback por device_id si boot0=0. */
+static enum nv_family nv_family_of(uint32_t boot0, uint16_t dev_id)
+{
+    unsigned arch = (boot0 >> 20) & 0x1ffu;
+    if (boot0) {
+        if (arch >= 0x1a0u) return NV_FAM_BLACKWELL;
+        if (arch >= 0x190u) return NV_FAM_ADA;
+        if (arch >= 0x170u) return NV_FAM_AMPERE;
+    }
+    if (dev_id == GB205_DEVICE_ID) return NV_FAM_BLACKWELL;
+    /* Ampere consumer: GA102/104/106/107 = 0x22xx..0x25xx (incl. RTX 3060). */
+    if ((dev_id & 0xff00u) >= 0x2200u && (dev_id & 0xff00u) <= 0x2500u)
+        return NV_FAM_AMPERE;
+    return NV_FAM_UNKNOWN;
+}
+
+static const char *nv_family_name(enum nv_family f)
+{
+    switch (f) {
+    case NV_FAM_AMPERE:    return "Ampere (ga10x)";
+    case NV_FAM_ADA:       return "Ada (ad10x)";
+    case NV_FAM_BLACKWELL: return "Blackwell (gb20x)";
+    default:               return "desconocida";
+    }
+}
 
 /* Ola 3: construye el grafo de objetos nvkm real con BAR0 (nvkm_bringup_lx.c).
  * Best-effort: no altera la secuencia soft si falla. */
@@ -41,10 +73,18 @@ void lx_nouveau_set_boot0(unsigned boot0, unsigned device_id)
     }
 }
 
+/* VRAM heurística por SKU (en HW real la da nvkm_ram del fb). El RTX 3060 tiene
+ * 12 GiB (GA106) o 8 GiB (3060 Ti/GA104); default Ampere = 12 GiB. */
 static unsigned vram_for_device(uint16_t dev_id)
 {
+    enum nv_family fam = nv_family_of(g_boot0, dev_id);
     if (dev_id == GB205_DEVICE_ID) {
-        return 12u * 1024u * 1024u * 1024u;
+        return 12u * 1024u * 1024u * 1024u;   /* 5070 Ti Mobile */
+    }
+    if (fam == NV_FAM_AMPERE) {
+        if (dev_id == 0x2486u || dev_id == 0x2489u) /* 3060 Ti (GA104) */
+            return 8u * 1024u * 1024u * 1024u;
+        return 12u * 1024u * 1024u * 1024u;   /* 3060 (GA106) 12 GiB */
     }
     return 8u * 1024u * 1024u * 1024u;
 }
@@ -79,7 +119,6 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     lx_pci_set_master(pdev);
 
     g_device_id = (uint16_t)lx_pci_device_id(pdev);
-    g_vram_bytes = vram_for_device(g_device_id);
 
     bar = lx_pci_iomap(pdev, 0, 16u * 1024u * 1024u);
     if (!bar) {
@@ -89,8 +128,11 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     gsp_mmio_set_bar(bar, 16u * 1024u * 1024u);
     boot0 = gsp_mmio_rd32(NV_PMC_BOOT_0_OFF);
     g_boot0 = boot0;
+    g_vram_bytes = vram_for_device(g_device_id);  /* usa boot0 para la familia */
     g_phase = GSP_BAR0;
-    lx_printk("nouveau-lx: BAR0 boot0=0x%08x dev=0x%04x\n", boot0, g_device_id);
+    lx_printk("nouveau-lx: BAR0 boot0=0x%08x dev=0x%04x familia=%s vram=%uMiB\n",
+              boot0, g_device_id, nv_family_name(nv_family_of(boot0, g_device_id)),
+              g_vram_bytes / (1024u * 1024u));
 
     /* Ola 3: ejercita el grafo nvkm real (device+subdev GSP+falcon) con BAR0.
      * Best-effort — la construcción no toca MMIO; el boot HW real llega tras G1. */
