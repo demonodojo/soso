@@ -110,8 +110,17 @@ for f in "${GB205[@]}"; do
   copy_one "$f" || true
 done
 
+# --- Set GSP ga102 (Ampere) — objetivo RTX 3060: GSP maduro en nouveau ---
 # gsp-570 suele ser symlink → ga102/gsp/gsp-570.144.bin.zst
-copy_one "ga102/gsp/gsp-570.144.bin.zst" || true
+GA102_GSP=(
+  ga102/gsp/bootloader-570.144.bin.zst
+  ga102/gsp/booter_load-570.144.bin.zst
+  ga102/gsp/booter_unload-570.144.bin.zst
+  ga102/gsp/gsp-570.144.bin.zst
+)
+for f in "${GA102_GSP[@]}"; do
+  copy_one "$f" || true
+done
 
 GA102_ACR=(
   ga102/acr/ucode_ahesasc.bin.zst
@@ -130,6 +139,21 @@ if [[ ! -e "$DST/gb205/gsp/gsp-570.144.bin" && -f "$DST/ga102/gsp/gsp-570.144.bi
 fi
 
 verify_gb205
+
+# Estado del set GSP ga102 (RTX 3060). Informativo: si está completo, soso puede
+# gestionar la 3060 (GSP Ampere maduro en nouveau); si no, solo avisa.
+verify_ga102_gsp() {
+  local n=0
+  for f in bootloader booter_load booter_unload gsp; do
+    [[ -s "$DST/ga102/gsp/${f}-570.144.bin" ]] && n=$((n+1))
+  done
+  if [[ $n -ge 3 ]]; then
+    echo "OK: set GSP ga102 (RTX 3060) presente ($n/4 blobs)"
+  else
+    echo "WARN: set GSP ga102 incompleto ($n/4) — para la 3060 instala linux-firmware con nvidia/ga102/gsp/{bootloader,booter_load,booter_unload,gsp}-570.144.bin"
+  fi
+}
+verify_ga102_gsp
 
 count=$(find "$DST" -type f 2>/dev/null | wc -l)
 du_human=$(du -sh "$DST" | cut -f1)
