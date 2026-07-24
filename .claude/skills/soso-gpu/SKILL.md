@@ -73,13 +73,16 @@ panic). Pero el "boot" GSP efectivo y el compute siguen **soft/CPU** — falta c
 `device->pri` con reads/writes MMIO reales (`nvkm_rd32/wr32` ↔ `gsp_mmio.c`) y ejecutar
 la secuencia falcon/ACR real, que requiere HW (tras G1). G3b/G4 lo completan.
 
-**Estado (2026-07-24): 46 fuentes nvkm/lib integradas, solo 4 dummies restantes**
+**Estado (2026-07-24): 62 fuentes nvkm/lib integradas, solo 4 dummies restantes**
 (`target/g3-nvkm-undefined.txt`), **todos dependientes de HW/ROM:**
 `nvbios_image`/`nvbios_shadow`/`bit_entry` (lectura VBIOS por PCI ROM/MMIO) y
 `nvkm_pci_msi_rearm` (necesita `struct pci_dev` real). Se resuelven integrando la capa
-MMIO/PCI real (tras G1), no con más port de ficheros. `nvkm_device_subdev` se provee
-como accesor mínimo en `nvkm_device_lx.c` (evita la tabla de 3268 LOC de
+MMIO/PCI real (tras G1), no con más port de ficheros. `nvkm_device_subdev`/`_engine` se
+proveen como accesores mínimos en `nvkm_device_lx.c` (evita la tabla de 3268 LOC de
 `engine/device/base.c` que arrastraría cientos de constructores de todos los chips).
+Integrado: core completo, falcon, nvfw, ACR, mmu, fb, instmem, y la **base del motor
+de cómputo** (`engine/{gr,fifo,dma,falcon}` base + canales/runlist). El `engine/gr` por
+chip (contexto/métodos/fw) y el compute real llegan con HW (G4, tras G1).
 
 Primitivas ya reales en `lxdde/shim/src/shims.c`: `snprintf`/`scnprintf`/`vsnprintf`
 (formateador a buffer), `alloc_page`/`page_address`/`__free_page` (página real),

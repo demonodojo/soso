@@ -85,9 +85,19 @@ Sin panic, sin dummy; el SO arranca hasta la shell. La construcción no toca MMI
 Self-test en `lx_nouveau_init_module` (`nouveau_stub.c`), puente gated en
 `gsp_bringup.c` (`lx_nvkm_build_gsp`).
 
+**Ola 4 (G4) infraestructura base — HECHO (2026-07-24):** integrada la base del
+motor de cómputo y del fifo/canales: `engine/{falcon,dma/{base,user}}.c`,
+`engine/gr/base.c`, `engine/fifo/{base,chid,runl,runq,cgrp,chan,ucgrp,uchan}.c`,
+y core object-model `core/{event,oproxy,ramht,uevent}.c`. Accesor
+`nvkm_device_engine` añadido a `nvkm_device_lx.c`. **62 fuentes nvkm/lib integradas**;
+solo **4 dummies restantes, TODOS HW/ROM** (`nvbios_image`/`nvbios_shadow`/`bit_entry`
+= VBIOS por PCI ROM, `nvkm_pci_msi_rearm` = PCI MSI). Shims nuevos: bitmap ops
+(`find_first_zero_bit`, `__set_bit`), `atomic_inc_return`.
+
 Siguiente (requiere G1/HW): cablear `device->pri` con reads/writes reales
 (`nvkm_rd32/wr32` ↔ `gsp_mmio.c`), ejecutar la secuencia falcon/ACR real (reset,
-WPR, RPC) → boot GSP no-soft, y luego `engine/gr` (G4).
+WPR, RPC) → boot GSP no-soft; luego el `engine/gr` por chip (contexto gráfico,
+métodos, firmware gr) para el canal de cómputo real (G4 completo).
 
 ### Ola 2 — ACR + falcon (lx-native, antes del port nvkm completo)
 

@@ -8,6 +8,7 @@
  */
 #include <core/device.h>
 #include <core/subdev.h>
+#include <core/engine.h>
 
 struct nvkm_subdev *
 nvkm_device_subdev(struct nvkm_device *device, int type, int inst)
@@ -18,6 +19,17 @@ nvkm_device_subdev(struct nvkm_device *device, int type, int inst)
 		if (subdev->type == type && subdev->inst == inst)
 			return subdev;
 	}
+
+	return NULL;
+}
+
+struct nvkm_engine *
+nvkm_device_engine(struct nvkm_device *device, int type, int inst)
+{
+	struct nvkm_subdev *subdev = nvkm_device_subdev(device, type, inst);
+
+	if (subdev && subdev->func == &nvkm_engine)
+		return container_of(subdev, struct nvkm_engine, subdev);
 
 	return NULL;
 }

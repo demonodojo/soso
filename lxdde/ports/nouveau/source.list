@@ -20,6 +20,9 @@ drivers/gpu/drm/nouveau/nvkm/subdev/gsp/ga102.c
 lib/rbtree.c
 drivers/gpu/drm/nouveau/nvkm/core/intr.c
 drivers/gpu/drm/nouveau/nvkm/core/object.c
+drivers/gpu/drm/nouveau/nvkm/core/oproxy.c
+drivers/gpu/drm/nouveau/nvkm/core/ramht.c
+drivers/gpu/drm/nouveau/nvkm/core/uevent.c
 drivers/gpu/drm/nouveau/nvkm/core/option.c
 drivers/gpu/drm/nouveau/nvkm/core/subdev.c
 drivers/gpu/drm/nouveau/nvkm/core/engine.c
@@ -67,6 +70,21 @@ drivers/gpu/drm/nouveau/nvkm/subdev/mmu/mem.c
 drivers/gpu/drm/nouveau/nvkm/subdev/fb/ram.c
 drivers/gpu/drm/nouveau/nvkm/subdev/bios/base.c
 drivers/gpu/drm/nouveau/nvkm/subdev/bios/M0203.c
+
+# --- Ola 4 (G4): infraestructura base del motor de cómputo + fifo/canales ---
+drivers/gpu/drm/nouveau/nvkm/core/event.c
+drivers/gpu/drm/nouveau/nvkm/engine/falcon.c
+drivers/gpu/drm/nouveau/nvkm/engine/dma/base.c
+drivers/gpu/drm/nouveau/nvkm/engine/dma/user.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/base.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/chid.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/runl.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/runq.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/cgrp.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/chan.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/ucgrp.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/uchan.c
+drivers/gpu/drm/nouveau/nvkm/engine/gr/base.c
 
 # Ola 2/3 nvkm (descomentar incrementalmente; ver nvkm_ola2.list + l6-g3-nvkm-inventory.sh):
 # subdev/pci/base.c requiere struct pci_dev real (usa lx_pci_* de momento)

@@ -10,6 +10,14 @@ static inline void set_bit(long nr, volatile unsigned long *addr)
 { addr[nr / BITS_PER_LONG] |= 1UL << (nr % BITS_PER_LONG); }
 static inline void clear_bit(long nr, volatile unsigned long *addr)
 { addr[nr / BITS_PER_LONG] &= ~(1UL << (nr % BITS_PER_LONG)); }
+#define __set_bit(nr, addr) set_bit((nr), (addr))
+#define __clear_bit(nr, addr) clear_bit((nr), (addr))
+static inline unsigned long find_first_zero_bit(const unsigned long *addr, unsigned long size)
+{ unsigned long i; for (i = 0; i < size; i++) if (!test_bit(i, addr)) return i; return size; }
+static inline unsigned long find_first_bit(const unsigned long *addr, unsigned long size)
+{ unsigned long i; for (i = 0; i < size; i++) if (test_bit(i, addr)) return i; return size; }
+static inline unsigned long find_next_bit(const unsigned long *addr, unsigned long size, unsigned long start)
+{ unsigned long i; for (i = start; i < size; i++) if (test_bit(i, addr)) return i; return size; }
 #define for_each_set_bit(bit, addr, size) \
 	for ((bit) = 0; (bit) < (size); (bit)++) if (test_bit((bit), (addr)))
 #endif

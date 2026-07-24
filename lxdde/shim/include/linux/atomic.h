@@ -10,4 +10,7 @@ static inline int atomic_add_return(int i, atomic_t *v) { v->counter += i; retur
 static inline int atomic_dec_and_test(atomic_t *v) { return --v->counter == 0; }
 static inline int atomic_xchg(atomic_t *v, int n) { int o = v->counter; v->counter = n; return o; }
 static inline int atomic_cmpxchg(atomic_t *v, int o, int n) { int c = v->counter; if (c == o) v->counter = n; return c; }
+static inline int atomic_inc_return(atomic_t *v) { return ++v->counter; }
+static inline int atomic_dec_return(atomic_t *v) { return --v->counter; }
+static inline int atomic_fetch_inc(atomic_t *v) { return v->counter++; }
 #endif
