@@ -30,7 +30,20 @@ Referencia upstream: Linux 6.6.x `drivers/gpu/drm/nouveau/nvkm/` (pinneado en
 compilan contra las cabeceras privadas de nouveau + shims lx_emul mínimos en
 `lxdde/shim/include/` (que cortan la avalancha de cabeceras arch del kernel), y
 enlazan vía dummies `trace_and_stop` autogenerados. Ver skill `soso-gpu`.
-Siguiente: `subdev/{pci,bar,mmu,instmem,fb}.c` → probe sin panic + instmem alloc.
+
+**Ola 1 fase 2 — HECHO (2026-07-24):** portado el **núcleo nvkm** con
+implementaciones reales (ya no dummies): `core/{option,subdev,engine,memory,mm,`
+`gpuobj,firmware}.c`, `falcon/{base,fw}.c`, y subdevs base
+`subdev/{timer,mc,top,bar,instmem,fb,mmu}/{base,vmm}.c`. El kernel enlaza en
+todos los modos sin regresión (E2E verde). Símbolos reales clave:
+`nvkm_subdev_ctor`, `nvkm_falcon_ctor/dtor`, `nvkm_longopt`, `nvkm_firmware_load*`.
+Dummies restantes (~28, ver `target/g3-nvkm-undefined.txt`): falcon por chip
+(`ga102_flcn_*`,`gm200_*`,`gp102_*` → Ola 2), parsers `nvfw_*`, `core/{device,intr}.c`,
+`lib/rbtree.c` (`rb_*`), y primitivas `snprintf`/`strncasecmp`/`alloc_page`.
+`subdev/pci/base.c` queda fuera (requiere `struct pci_dev` real; se usa `lx_pci_*`).
+
+Siguiente: falcon `ga102/gm200/gp102`, `nvfw/*`, `core/device.c`+`intr.c`, y una
+snprintf/rbtree reales → probe sin panic + instmem alloc en HW (tras G1).
 
 ### Ola 2 — ACR + falcon (lx-native, antes del port nvkm completo)
 

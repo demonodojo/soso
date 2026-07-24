@@ -7,4 +7,6 @@ int lx_request_firmware(const struct firmware **fw, const char *name, void *dev)
 void lx_release_firmware(const struct firmware *fw);
 #define request_firmware(fw, name, dev) lx_request_firmware((fw), (name), (dev))
 #define release_firmware(fw) lx_release_firmware(fw)
+#define firmware_request_nowarn(fw, name, dev) lx_request_firmware((fw), (name), (dev))
+#define request_firmware_direct(fw, name, dev) lx_request_firmware((fw), (name), (dev))
 #endif

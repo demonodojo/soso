@@ -26,5 +26,7 @@
 #define CONFIG_BASE_SMALL 0
 /* Paginación x86_64 de 4 niveles (evita el fallback pgtable-nopmd que choca). */
 #define CONFIG_PGTABLE_LEVELS 4
+#define CONFIG_NOUVEAU_DEBUG 5
+#define CONFIG_NOUVEAU_DEBUG_DEFAULT 3
 
 #endif /* AUTOCONF_H */

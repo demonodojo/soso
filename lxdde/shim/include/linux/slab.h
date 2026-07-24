@@ -18,6 +18,14 @@
 #include <linux/bug.h>
 #include <linux/notifier.h>
 #include <linux/scatterlist.h>
+#include <linux/list.h>
+#include <linux/rbtree.h>
+#include <linux/ktime.h>
+#include <linux/kernel.h>
+#include <linux/atomic.h>
+#include <linux/ctype.h>
+#include <linux/dma-mapping.h>
+#include <linux/mm.h>
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
@@ -53,4 +61,30 @@ void lx_vfree(void *ptr);
 #define kvmalloc(size, flags)       lx_vmalloc((unsigned long)(size))
 #define kvzalloc(size, flags)       lx_kzalloc((size), (flags) | __GFP_ZERO)
 
+static inline char *kstrndup(const char *s, size_t max, unsigned flags)
+{
+	size_t len = 0;
+	char *out;
+	while (len < max && s[len])
+		len++;
+	out = (char *)lx_kmalloc(len + 1, flags);
+	if (out) {
+		size_t i;
+		for (i = 0; i < len; i++)
+			out[i] = s[i];
+		out[len] = '\0';
+	}
+	return out;
+}
+
+static inline char *kstrdup(const char *s, unsigned flags)
+{
+	size_t len = 0;
+	while (s[len])
+		len++;
+	return kstrndup(s, len, flags);
+}
+
+static inline void *kmemdup(const void *src, size_t len, unsigned flags)
+{ void *p = lx_kmalloc(len, flags); if (p) { size_t i; const char *s = src; char *d = p; for (i = 0; i < len; i++) d[i] = s[i]; } return p; }
 #endif /* _LX_LINUX_SLAB_H */

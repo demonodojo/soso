@@ -14,5 +14,27 @@ lxdde/ports/nouveau/nouveau_stub.c
 drivers/gpu/drm/nouveau/nvkm/subdev/gsp/base.c
 drivers/gpu/drm/nouveau/nvkm/subdev/gsp/ga102.c
 
+# --- Ola 1 fase 2: núcleo nvkm (ctors reales, sustituyen dummies) ---
+drivers/gpu/drm/nouveau/nvkm/core/option.c
+drivers/gpu/drm/nouveau/nvkm/core/subdev.c
+drivers/gpu/drm/nouveau/nvkm/core/engine.c
+drivers/gpu/drm/nouveau/nvkm/core/memory.c
+drivers/gpu/drm/nouveau/nvkm/core/mm.c
+drivers/gpu/drm/nouveau/nvkm/core/gpuobj.c
+drivers/gpu/drm/nouveau/nvkm/core/firmware.c
+drivers/gpu/drm/nouveau/nvkm/falcon/base.c
+drivers/gpu/drm/nouveau/nvkm/falcon/fw.c
+
+# --- Ola 1 fase 2: subdev base (timer/mc/top/bar/instmem/fb/mmu) ---
+drivers/gpu/drm/nouveau/nvkm/subdev/timer/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mc/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/top/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bar/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/instmem/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/fb/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mmu/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmm.c
+
 # Ola 2/3 nvkm (descomentar incrementalmente; ver nvkm_ola2.list + l6-g3-nvkm-inventory.sh):
+# subdev/pci/base.c requiere struct pci_dev real (usa lx_pci_* de momento)
 # drivers/gpu/drm/nouveau/nvkm/subdev/acr/base.c

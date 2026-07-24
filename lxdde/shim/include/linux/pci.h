@@ -24,4 +24,7 @@ struct pci_device_id {
 	.vendor = (vend), .device = (dev), \
 	.subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID
 
+static inline int pci_enable_msi(struct pci_dev *d) { (void)d; return -1; }
+static inline void pci_disable_msi(struct pci_dev *d) { (void)d; }
+static inline int pci_is_pcie(struct pci_dev *d) { (void)d; return 1; }
 #endif /* _LX_LINUX_PCI_H */

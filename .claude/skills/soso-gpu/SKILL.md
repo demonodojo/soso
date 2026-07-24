@@ -58,10 +58,20 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick | `kick_boot` NO arranca HW real (solo traza) |
 | `acr_fw.c`,`falcon_lx.c`,`acr_lx.c` | ACR ola2 lx-native (AHESASC→ASB) | best-effort/soft-fail |
 | `nouveau_stub.c` | pci_driver + exports C | probe vendor 0x10de |
-| `nvkm/subdev/gsp/{base,ga102}.c` | **nvkm real (Ola 1)** | compila+integra; símbolos nvkm = dummies |
+| `nvkm/subdev/gsp/{base,ga102}.c` | **nvkm real (Ola 1)** | compila+integra |
+| `nvkm/core/{option,subdev,engine,memory,mm,gpuobj,firmware}.c` | **núcleo nvkm real (Ola 1 f2)** | ctors reales, no dummies |
+| `nvkm/falcon/{base,fw}.c` | **falcon base real** | `nvkm_falcon_ctor/dtor` |
+| `nvkm/subdev/{timer,mc,top,bar,instmem,fb,mmu}/{base,vmm}.c` | **subdev base real (Ola 1 f2)** | infra genérica |
 
-**Distinción clave:** hoy el "boot" y el compute son **simulados** (soft/CPU). G3b
-sustituye eso por el código nvkm real de Linux, ola a ola.
+**Distinción clave:** el núcleo nvkm ya está portado (compila+enlaza), pero el "boot"
+y el compute siguen **simulados** (soft/CPU) — falta la ruta HW (falcon por chip,
+nvfw parsers, intr/device, y la integración con MMIO real). G3b lo completa ola a ola.
+
+**Dummies restantes (~28, `target/g3-nvkm-undefined.txt`):** falcon por chip
+(`ga102_flcn_*`,`gm200_*`,`gp102_*` → Ola 2), `nvfw_*`, `core/{device,intr}.c`,
+`lib/rbtree.c` (`rb_*`), `subdev/pci/base.c` (necesita `struct pci_dev` real; se usa
+`lx_pci_*`), y primitivas `snprintf`/`strncasecmp`/`alloc_page` (shims declarados sin
+impl → implementar antes del probe HW real).
 
 ## Port nvkm real — workflow de integración
 
