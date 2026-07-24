@@ -58,20 +58,39 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick | `kick_boot` NO arranca HW real (solo traza) |
 | `acr_fw.c`,`falcon_lx.c`,`acr_lx.c` | ACR ola2 lx-native (AHESASC→ASB) | best-effort/soft-fail |
 | `nouveau_stub.c` | pci_driver + exports C | probe vendor 0x10de |
+| `nvkm_bringup_lx.c` | **puente Ola 3** | construye `nvkm_device` real + `ga102_gsp_new` |
+| `nvkm_device_lx.c` | accesor `nvkm_device_subdev` | evita la tabla de chips de engine/device |
 | `nvkm/subdev/gsp/{base,ga102}.c` | **nvkm real (Ola 1)** | compila+integra |
 | `nvkm/core/{option,subdev,engine,memory,mm,gpuobj,firmware}.c` | **núcleo nvkm real (Ola 1 f2)** | ctors reales, no dummies |
-| `nvkm/falcon/{base,fw}.c` | **falcon base real** | `nvkm_falcon_ctor/dtor` |
+| `nvkm/falcon/{base,fw,ga102,gm200,gp102}.c` | **falcon real (Ola 1 f2 + Ola 2)** | ctor + funcs por chip |
+| `nvkm/nvfw/{fw,hs,ls,acr,flcn}.c` | **parsers firmware (Ola 2)** | `nvfw_*` |
+| `nvkm/subdev/acr/{base,lsfw,tu102,ga102,ga100,gp102,gm200}.c` | **ACR real (Ola 2)** | secuencia AHESASC→ASB |
 | `nvkm/subdev/{timer,mc,top,bar,instmem,fb,mmu}/{base,vmm}.c` | **subdev base real (Ola 1 f2)** | infra genérica |
 
-**Distinción clave:** el núcleo nvkm ya está portado (compila+enlaza), pero el "boot"
-y el compute siguen **simulados** (soft/CPU) — falta la ruta HW (falcon por chip,
-nvfw parsers, intr/device, y la integración con MMIO real). G3b lo completa ola a ola.
+**Distinción clave:** el grafo de objetos nvkm real **se construye en runtime**
+(validado: `nvkm device graph OK — subdev='gsp0'` en arranque QEMU nouveau, sin
+panic). Pero el "boot" GSP efectivo y el compute siguen **soft/CPU** — falta cablear
+`device->pri` con reads/writes MMIO reales (`nvkm_rd32/wr32` ↔ `gsp_mmio.c`) y ejecutar
+la secuencia falcon/ACR real, que requiere HW (tras G1). G3b/G4 lo completan.
 
-**Dummies restantes (~28, `target/g3-nvkm-undefined.txt`):** falcon por chip
-(`ga102_flcn_*`,`gm200_*`,`gp102_*` → Ola 2), `nvfw_*`, `core/{device,intr}.c`,
-`lib/rbtree.c` (`rb_*`), `subdev/pci/base.c` (necesita `struct pci_dev` real; se usa
-`lx_pci_*`), y primitivas `snprintf`/`strncasecmp`/`alloc_page` (shims declarados sin
-impl → implementar antes del probe HW real).
+**Estado (2026-07-24): 46 fuentes nvkm/lib integradas, solo 4 dummies restantes**
+(`target/g3-nvkm-undefined.txt`), **todos dependientes de HW/ROM:**
+`nvbios_image`/`nvbios_shadow`/`bit_entry` (lectura VBIOS por PCI ROM/MMIO) y
+`nvkm_pci_msi_rearm` (necesita `struct pci_dev` real). Se resuelven integrando la capa
+MMIO/PCI real (tras G1), no con más port de ficheros. `nvkm_device_subdev` se provee
+como accesor mínimo en `nvkm_device_lx.c` (evita la tabla de 3268 LOC de
+`engine/device/base.c` que arrastraría cientos de constructores de todos los chips).
+
+Primitivas ya reales en `lxdde/shim/src/shims.c`: `snprintf`/`scnprintf`/`vsnprintf`
+(formateador a buffer), `alloc_page`/`page_address`/`__free_page` (página real),
+`rb_*` (vía `lib/rbtree.c`), `strncasecmp`. Force-include de `<linux/types.h>` en
+`compat.h` da `bool` a toda TU (p.ej. `lib/rbtree.c`); shims `export.h`/`rcupdate.h`
+para código de `lib/`.
+
+**Gotcha de build (resuelto):** `lx_build.rs` cacheaba objetos solo por mtime del
+`.c`, ignorando cambios en las cabeceras del shim → objetos obsoletos. Ahora invalida
+si cualquier header bajo `lxdde/shim/include/` es más nuevo (`newest_mtime`). Si dudas
+del estado, `rm target/lxdde/*.o` fuerza recompilación limpia.
 
 ## Port nvkm real — workflow de integración
 

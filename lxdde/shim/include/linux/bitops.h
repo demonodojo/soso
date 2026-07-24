@@ -4,6 +4,14 @@
 #include <asm/bitsperlong.h>
 #ifndef BIT
 #define BIT(nr) (1UL << (nr))
+static inline int test_bit(long nr, const volatile unsigned long *addr)
+{ return (addr[nr / BITS_PER_LONG] >> (nr % BITS_PER_LONG)) & 1UL; }
+static inline void set_bit(long nr, volatile unsigned long *addr)
+{ addr[nr / BITS_PER_LONG] |= 1UL << (nr % BITS_PER_LONG); }
+static inline void clear_bit(long nr, volatile unsigned long *addr)
+{ addr[nr / BITS_PER_LONG] &= ~(1UL << (nr % BITS_PER_LONG)); }
+#define for_each_set_bit(bit, addr, size) \
+	for ((bit) = 0; (bit) < (size); (bit)++) if (test_bit((bit), (addr)))
 #endif
 #define BIT_ULL(nr) (1ULL << (nr))
 #define BITS_PER_BYTE 8

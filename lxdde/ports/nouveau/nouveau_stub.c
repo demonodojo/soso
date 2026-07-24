@@ -32,9 +32,17 @@ static const struct lx_pci_device_id nouveau_ids[] = {
     { 0, 0, 0, 0, 0, 0, 0 },
 };
 
+extern int lx_nvkm_build_gsp(void *bar0);
+
 int lx_nouveau_init_module(void)
 {
-    return lx_pci_register_driver("nouveau", nouveau_ids, nouveau_probe, nouveau_remove);
+    int rc = lx_pci_register_driver("nouveau", nouveau_ids, nouveau_probe, nouveau_remove);
+    /* Ola 3 self-test: valida que el grafo de objetos nvkm real (device +
+     * subdev GSP + falcon) se construye. Sin HW: la construcción no toca MMIO.
+     * En placa con GPU, nouveau_probe hará el bring-up completo con BAR0 real. */
+    lx_printk("nouveau-lx: self-test grafo nvkm (sin HW)\n");
+    lx_nvkm_build_gsp((void *)0);
+    return rc;
 }
 
 int lx_nouveau_gsp_is_ready(void)

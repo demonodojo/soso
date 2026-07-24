@@ -42,8 +42,52 @@ Dummies restantes (~28, ver `target/g3-nvkm-undefined.txt`): falcon por chip
 `lib/rbtree.c` (`rb_*`), y primitivas `snprintf`/`strncasecmp`/`alloc_page`.
 `subdev/pci/base.c` queda fuera (requiere `struct pci_dev` real; se usa `lx_pci_*`).
 
-Siguiente: falcon `ga102/gm200/gp102`, `nvfw/*`, `core/device.c`+`intr.c`, y una
-snprintf/rbtree reales → probe sin panic + instmem alloc en HW (tras G1).
+**Ola 2 — HECHO (2026-07-24):** falcon por chip `falcon/{ga102,gm200,gp102}.c`,
+parsers `nvfw/{fw,hs,ls,acr,flcn}.c`, y subdev **ACR** `subdev/acr/{base,lsfw,tu102,`
+`ga102,ga100,gp102,gm200}.c` (secuencia `tu102_acr_init`: AHESASC→ASB real). 34
+fuentes nvkm integradas; kernel enlaza en todos los modos; E2E verde. Shims nuevos:
+`completion/workqueue/wait/rbtree/ctype/atomic/ktime/mm/gfp/dma-mapping` + impls
+reales (`strcspn`,`kstrto*`,`kstrndup`,`strscpy`,`strncasecmp`,`memcpy_toio`,
+`for_each_set_bit`). Fix de build: `lx_build.rs` ahora invalida objetos si cambian
+las cabeceras del shim (antes cacheaba solo por mtime del `.c`).
+
+**Ola 2b — HECHO (2026-07-24):** `core/intr.c` (`nvkm_intr_*` reales), `lib/rbtree.c`
+(`rb_*` reales), y primitivas reales en `shims.c`: `snprintf`/`scnprintf`/`vsnprintf`
+(formateador a buffer), `strncasecmp`/`strcasecmp`, `alloc_page`/`page_address`/
+`__free_page` (página real). 36 fuentes integradas; kernel enlaza en todos los modos;
+E2E verde. Fix build extra: force-include de `<linux/types.h>` en `compat.h` (bool en
+toda TU) y shim `export.h`/`rcupdate.h` para `lib/rbtree.c`.
+
+**Ola 2c — HECHO (2026-07-24):** `nvkm_device_subdev` (accesor mínimo en
+`nvkm_device_lx.c`, sin la tabla de 3268 LOC de `engine/device/base.c`),
+`core/object.c`, `falcon/ga100.c`, `acr/gp108.c`, `fb/ram.c`, `mmu/{ummu,umem,uvmm,mem}.c`,
+`bios/{base,M0203}.c`. **46 fuentes nvkm/lib integradas**; kernel enlaza en todos los
+modos; E2E verde. Shims nuevos: `vmap/vunmap`, flags `GFP_USER/HIGHUSER/DMA32`.
+
+**Dummies restantes (4, `target/g3-nvkm-undefined.txt`) — TODOS dependientes de HW/ROM:**
+`nvbios_image`/`nvbios_shadow`/`bit_entry` (lectura del VBIOS por PCI ROM/MMIO,
+`subdev/bios/{shadow,bit}.c`) y `nvkm_pci_msi_rearm` (`subdev/pci`, necesita `struct
+pci_dev` real). Se resuelven al integrar la capa MMIO/PCI real (tras G1), no con más
+port de ficheros.
+
+**Ola 3 — HECHO (2026-07-24): grafo nvkm real construyéndose en runtime.**
+`nvkm_bringup_lx.c` construye un `struct nvkm_device` real (lista subdev init,
+`device->pri` = BAR0) y llama `ga102_gsp_new()` → crea el subdev GSP vía
+`nvkm_subdev_ctor` + `nvkm_firmware_load` (ruta `nofw`) + `nvkm_falcon_ctor`
+**reales**. Validado en arranque QEMU (modo nouveau):
+
+```
+nouveau-lx: nvkm device graph OK — subdev='gsp0' falcon.func=0x… pri=0x0
+```
+
+Sin panic, sin dummy; el SO arranca hasta la shell. La construcción no toca MMIO
+(por eso funciona sin HW); en placa con GPU, `nouveau_probe` pasa el BAR0 real.
+Self-test en `lx_nouveau_init_module` (`nouveau_stub.c`), puente gated en
+`gsp_bringup.c` (`lx_nvkm_build_gsp`).
+
+Siguiente (requiere G1/HW): cablear `device->pri` con reads/writes reales
+(`nvkm_rd32/wr32` ↔ `gsp_mmio.c`), ejecutar la secuencia falcon/ACR real (reset,
+WPR, RPC) → boot GSP no-soft, y luego `engine/gr` (G4).
 
 ### Ola 2 — ACR + falcon (lx-native, antes del port nvkm completo)
 

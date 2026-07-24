@@ -8,8 +8,11 @@ int memcmp(const void *, const void *, size_t);
 size_t strlen(const char *);
 int strcmp(const char *, const char *);
 int strncmp(const char *, const char *, size_t);
-int strcasecmp(const char *, const char *);
-int strncasecmp(const char *, const char *, size_t);
+static inline int __lx_lc(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+static inline int strcasecmp(const char *a, const char *b)
+{ for (; *a && __lx_lc(*a) == __lx_lc(*b); a++, b++) ; return __lx_lc((unsigned char)*a) - __lx_lc((unsigned char)*b); }
+static inline int strncasecmp(const char *a, const char *b, size_t n)
+{ for (; n && *a && __lx_lc(*a) == __lx_lc(*b); a++, b++, n--) ; return n ? __lx_lc((unsigned char)*a) - __lx_lc((unsigned char)*b) : 0; }
 char *strcpy(char *, const char *);
 char *strncpy(char *, const char *, size_t);
 int snprintf(char *, size_t, const char *, ...);

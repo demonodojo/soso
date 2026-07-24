@@ -2,7 +2,7 @@
 #define _LX_LINUX_MM_H
 #include <linux/types.h>
 #include <linux/slab.h>
-struct page;
+struct page { void *virt; };
 struct page *alloc_page(unsigned gfp);
 void __free_page(struct page *p);
 void *page_address(const struct page *p);

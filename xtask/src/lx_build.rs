@@ -35,18 +35,21 @@ pub fn run(args: &[String]) {
         ensure_linux(&root);
     }
 
+    // mtime de las cabeceras del shim: invalida objetos si cambian.
+    let dep_mtime = newest_mtime(&root.join("lxdde/shim/include"));
+
     let mut objects = Vec::new();
     for p in &ports {
-        objects.extend(compile_port(&root, p, &out_dir));
+        objects.extend(compile_port(&root, p, &out_dir, dep_mtime));
     }
 
     // Shim común + stubs generados
-    let shim_obj = compile_c(&root, &out_dir, &root.join("lxdde/shim/src/shims.c"), &cc_flags(&root));
+    let shim_obj = compile_c(&root, &out_dir, &root.join("lxdde/shim/src/shims.c"), &cc_flags(&root), dep_mtime);
     objects.push(shim_obj);
 
     let stubs = generate_stubs(&root, &out_dir, &objects);
     if stubs.exists() {
-        objects.push(compile_c(&root, &out_dir, &stubs, &cc_flags(&root)));
+        objects.push(compile_c(&root, &out_dir, &stubs, &cc_flags(&root), dep_mtime));
     }
 
     let archive = out_dir.join("liblxdde.a");
@@ -187,7 +190,7 @@ fn cc_flags(root: &Path) -> Vec<String> {
     flags
 }
 
-fn compile_port(root: &Path, port: &str, out_dir: &Path) -> Vec<PathBuf> {
+fn compile_port(root: &Path, port: &str, out_dir: &Path, dep_mtime: std::time::SystemTime) -> Vec<PathBuf> {
     let list_path = root.join("lxdde/ports").join(port).join("source.list");
     let list = fs::read_to_string(&list_path).unwrap_or_else(|e| {
         panic!("{}: {e}", list_path.display());
@@ -208,12 +211,33 @@ fn compile_port(root: &Path, port: &str, out_dir: &Path) -> Vec<PathBuf> {
             eprintln!("lx-build: omitiendo (no existe): {}", src.display());
             continue;
         }
-        objs.push(compile_c(root, out_dir, &src, &flags));
+        objs.push(compile_c(root, out_dir, &src, &flags, dep_mtime));
     }
     objs
 }
 
-fn compile_c(root: &Path, out_dir: &Path, src: &Path, flags: &[String]) -> PathBuf {
+/// mtime más reciente bajo un directorio (recursivo). Sirve para invalidar la
+/// caché de objetos cuando cambia cualquier cabecera del shim (los `.c` no
+/// cambian pero sí los headers de los que dependen).
+fn newest_mtime(dir: &Path) -> std::time::SystemTime {
+    let mut newest = std::time::SystemTime::UNIX_EPOCH;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let path = e.path();
+            let m = if path.is_dir() {
+                newest_mtime(&path)
+            } else {
+                fs::metadata(&path).and_then(|md| md.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            };
+            if m > newest {
+                newest = m;
+            }
+        }
+    }
+    newest
+}
+
+fn compile_c(root: &Path, out_dir: &Path, src: &Path, flags: &[String], dep_mtime: std::time::SystemTime) -> PathBuf {
     let stem = src.file_stem().unwrap().to_str().unwrap();
     let hash = format!("{:x}", md5_simple(src));
     let obj = out_dir.join(format!("{stem}-{hash}.o"));
@@ -221,7 +245,9 @@ fn compile_c(root: &Path, out_dir: &Path, src: &Path, flags: &[String]) -> PathB
         if let Ok(meta_src) = fs::metadata(src) {
             if let Ok(meta_obj) = fs::metadata(&obj) {
                 if let (Ok(t_src), Ok(t_obj)) = (meta_src.modified(), meta_obj.modified()) {
-                    if t_obj >= t_src {
+                    // Recompilar si el objeto es más viejo que el .c o que
+                    // cualquier cabecera del shim (dependencia implícita).
+                    if t_obj >= t_src && t_obj >= dep_mtime {
                         return obj;
                     }
                 }
@@ -278,6 +304,8 @@ fn provided_symbols() -> HashSet<&'static str> {
         "lx_nouveau_compute_saxpy", "lx_nouveau_compute_matvec_f32", "lx_nouveau_vram_total",
         "lx_nouveau_set_boot0",
         "memcpy", "memset", "memmove", "strlen", "strcmp", "strncmp", "strncpy", "strnlen",
+        "snprintf", "scnprintf", "vsnprintf",
+        "alloc_page", "__free_page", "page_address", "page_to_pfn",
     ]
     .into_iter()
     .collect()

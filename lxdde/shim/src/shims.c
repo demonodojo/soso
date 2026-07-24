@@ -139,3 +139,177 @@ void *memset(void *dst, int c, unsigned long n)
         d[i] = (unsigned char)c;
     return dst;
 }
+
+/* --- Página física para nvkm (flush_page de fb): memoria real de PAGE_SIZE. --- */
+extern void *lx_kzalloc(unsigned long size, unsigned flags);
+extern void lx_kfree(void *ptr);
+struct page { void *virt; };
+
+struct page *alloc_page(unsigned gfp)
+{
+    struct page *p = (struct page *)lx_kzalloc(sizeof(*p), gfp);
+    if (!p)
+        return 0;
+    p->virt = lx_kzalloc(4096, gfp);
+    if (!p->virt) {
+        lx_kfree(p);
+        return 0;
+    }
+    return p;
+}
+
+void __free_page(struct page *p)
+{
+    if (p) {
+        lx_kfree(p->virt);
+        lx_kfree(p);
+    }
+}
+
+void *page_address(const struct page *p)
+{
+    return p ? p->virt : 0;
+}
+
+unsigned long page_to_pfn(const struct page *p)
+{
+    return p ? ((unsigned long)p->virt >> 12) : 0;
+}
+
+/* --- snprintf mínimo (buffer) para nvkm: %s %d/%i %u %x/%X %p %c %%,
+ *     con ancho, relleno con cero y modificadores de longitud l/ll/z. --- */
+struct lx_sbuf {
+    char *buf;
+    unsigned long pos;
+    unsigned long cap; /* incluye hueco para NUL */
+};
+
+static void sb_putc(struct lx_sbuf *s, char c)
+{
+    if (s->pos + 1 < s->cap)
+        s->buf[s->pos] = c;
+    s->pos++;
+}
+
+static void sb_puts(struct lx_sbuf *s, const char *str)
+{
+    if (!str)
+        str = "(null)";
+    while (*str)
+        sb_putc(s, *str++);
+}
+
+static void sb_num(struct lx_sbuf *s, unsigned long long v, unsigned base,
+                   int upper, int width, int zero, int neg)
+{
+    char tmp[24];
+    const char *digs = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    int i = 0;
+    if (v == 0)
+        tmp[i++] = '0';
+    while (v) {
+        tmp[i++] = digs[v % base];
+        v /= base;
+    }
+    int len = i + (neg ? 1 : 0);
+    char pad = zero ? '0' : ' ';
+    if (!zero && neg)
+        sb_putc(s, '-');
+    for (; len < width; len++)
+        sb_putc(s, pad);
+    if (zero && neg)
+        sb_putc(s, '-');
+    while (i > 0)
+        sb_putc(s, tmp[--i]);
+}
+
+int vsnprintf(char *buf, unsigned long size, const char *fmt, va_list ap)
+{
+    struct lx_sbuf s = { buf, 0, size };
+    for (const char *p = fmt; p && *p; p++) {
+        if (*p != '%') {
+            sb_putc(&s, *p);
+            continue;
+        }
+        p++;
+        int zero = 0, width = 0, longs = 0;
+        while (*p == '0' || *p == '-' || *p == '+' || *p == ' ' || *p == '#') {
+            if (*p == '0')
+                zero = 1;
+            p++;
+        }
+        while (*p >= '0' && *p <= '9') {
+            width = width * 10 + (*p - '0');
+            p++;
+        }
+        while (*p == 'l' || *p == 'z' || *p == 'h') {
+            if (*p == 'l')
+                longs++;
+            p++;
+        }
+        switch (*p) {
+        case 's':
+            sb_puts(&s, va_arg(ap, const char *));
+            break;
+        case 'c':
+            sb_putc(&s, (char)va_arg(ap, int));
+            break;
+        case 'd':
+        case 'i': {
+            long long v = longs ? va_arg(ap, long long) : va_arg(ap, int);
+            int neg = v < 0;
+            unsigned long long uv = neg ? (unsigned long long)(-v) : (unsigned long long)v;
+            sb_num(&s, uv, 10, 0, width, zero, neg);
+            break;
+        }
+        case 'u': {
+            unsigned long long v = longs ? va_arg(ap, unsigned long long) : va_arg(ap, unsigned);
+            sb_num(&s, v, 10, 0, width, zero, 0);
+            break;
+        }
+        case 'x':
+        case 'X': {
+            unsigned long long v = longs ? va_arg(ap, unsigned long long) : va_arg(ap, unsigned);
+            sb_num(&s, v, 16, *p == 'X', width, zero, 0);
+            break;
+        }
+        case 'p':
+            sb_puts(&s, "0x");
+            sb_num(&s, (unsigned long long)(unsigned long)va_arg(ap, void *), 16, 0, width, zero, 0);
+            break;
+        case '%':
+            sb_putc(&s, '%');
+            break;
+        default:
+            sb_putc(&s, '%');
+            if (*p)
+                sb_putc(&s, *p);
+            break;
+        }
+        if (!*p)
+            break;
+    }
+    if (s.cap)
+        s.buf[s.pos < s.cap ? s.pos : s.cap - 1] = '\0';
+    return (int)s.pos;
+}
+
+int snprintf(char *buf, unsigned long size, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(buf, size, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+int scnprintf(char *buf, unsigned long size, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(buf, size, fmt, ap);
+    va_end(ap);
+    if (size == 0)
+        return 0;
+    return (unsigned long)r < size ? r : (int)size - 1;
+}

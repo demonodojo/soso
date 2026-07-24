@@ -8,6 +8,10 @@
 #define GB205_DEVICE_ID   0x2f18u
 #define GSP_POLL_MS         2000u
 
+/* Ola 3: construye el grafo de objetos nvkm real con BAR0 (nvkm_bringup_lx.c).
+ * Best-effort: no altera la secuencia soft si falla. */
+int lx_nvkm_build_gsp(void *bar0);
+
 enum gsp_phase {
     GSP_NONE = 0,
     GSP_BAR0,
@@ -87,6 +91,10 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     g_boot0 = boot0;
     g_phase = GSP_BAR0;
     lx_printk("nouveau-lx: BAR0 boot0=0x%08x dev=0x%04x\n", boot0, g_device_id);
+
+    /* Ola 3: ejercita el grafo nvkm real (device+subdev GSP+falcon) con BAR0.
+     * Best-effort — la construcción no toca MMIO; el boot HW real llega tras G1. */
+    (void)lx_nvkm_build_gsp(bar);
 
     g_phase = GSP_FW_LOADING;
     if (gsp_fw_load_all() != 0) {

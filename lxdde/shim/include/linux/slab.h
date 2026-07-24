@@ -26,6 +26,9 @@
 #include <linux/ctype.h>
 #include <linux/dma-mapping.h>
 #include <linux/mm.h>
+#include <linux/completion.h>
+#include <linux/workqueue.h>
+#include <linux/wait.h>
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
@@ -46,6 +49,13 @@ void lx_vfree(void *ptr);
 #endif
 #ifndef GFP_NOWAIT
 #define GFP_NOWAIT 0u
+#endif
+#ifndef GFP_USER
+#define GFP_USER 0x100u
+#define GFP_HIGHUSER 0x110u
+#define GFP_DMA32 0x04u
+#define __GFP_HIGH 0x20u
+#define __GFP_NOWARN 0x200u
 #endif
 
 #define kmalloc(size, flags)        lx_kmalloc((size), (flags))
