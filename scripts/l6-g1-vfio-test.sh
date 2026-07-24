@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Post-reinicio: bind VFIO de la dGPU NVIDIA y prueba NV_PMC_BOOT_0 en soso.
-# Ejecutar desde TTY (Ctrl+Alt+F3), no desde sesión gráfica — pierdes la pantalla.
+# En portátiles híbridos (iGPU Intel i915 pinta el panel) NO pierdes pantalla al
+# pasar la dGPU. Aun así, hazlo sin apps usando la NVIDIA (nvidia-smi, CUDA, PRIME
+# render offload); si el unbind de nvidia falla, usa un TTY (Ctrl+Alt+F3).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,29 +30,37 @@ echo "OK: ${groups} grupos IOMMU"
 
 modprobe vfio-pci
 
-ids=$(lspci -n -s "$BDF" | awk '{print $3}')
-ven="${ids%%:*}"
-dev="${ids##*:}"
-echo "PCI ${BDF}: ${ven}:${dev}"
-
-drv_link="/sys/bus/pci/devices/${FULL}/driver"
-if [[ -L "$drv_link" ]]; then
-  cur=$(basename "$(readlink "$drv_link")")
-  if [[ "$cur" != "vfio-pci" ]]; then
-    echo "Unbind ${cur}..."
-    echo "$FULL" >"/sys/bus/pci/drivers/${cur}/unbind" 2>/dev/null || {
-      echo "FAIL: no se pudo unbind ${cur}. Cierra sesión gráfica / usa TTY." >&2
-      exit 1
-    }
+# VFIO exige que TODAS las funciones del dispositivo (y su grupo IOMMU) estén en
+# vfio-pci o el grupo no es "viable". En una dGPU eso incluye la función de audio
+# HDMI (p.ej. GPU 01:00.0 + audio 01:00.1). Bindeamos todas las funciones del slot.
+slot="${BDF%.*}"   # 01:00.0 → 01:00
+bound=0
+for path in /sys/bus/pci/devices/0000:${slot}.*; do
+  [[ -e "$path" ]] || continue
+  fn=$(basename "$path")        # 0000:01:00.x
+  fbdf="${fn#0000:}"            # 01:00.x
+  fids=$(lspci -n -s "$fbdf" | awk '{print $3}')
+  fven="${fids%%:*}"
+  fdev="${fids##*:}"
+  echo "Función ${fbdf}: ${fven}:${fdev}"
+  drv_link="${path}/driver"
+  if [[ -L "$drv_link" ]]; then
+    cur=$(basename "$(readlink "$drv_link")")
+    if [[ "$cur" != "vfio-pci" ]]; then
+      echo "  unbind ${cur}..."
+      echo "$fn" >"/sys/bus/pci/drivers/${cur}/unbind" 2>/dev/null || {
+        echo "FAIL: no se pudo unbind ${cur} de ${fbdf}. Cierra apps que usen la GPU (nvidia-smi, CUDA) o usa un TTY." >&2
+        exit 1
+      }
+    fi
   fi
-fi
-
-if ! grep -q "${ven} ${dev}" /sys/bus/pci/drivers/vfio-pci/new_id 2>/dev/null; then
-  echo "${ven} ${dev}" >/sys/bus/pci/drivers/vfio-pci/new_id
-fi
-echo "$FULL" >/sys/bus/pci/drivers/vfio-pci/bind
-
-echo "OK: ${FULL} → vfio-pci"
+  if ! grep -q "${fven} ${fdev}" /sys/bus/pci/drivers/vfio-pci/new_id 2>/dev/null; then
+    echo "${fven} ${fdev}" >/sys/bus/pci/drivers/vfio-pci/new_id 2>/dev/null || true
+  fi
+  echo "$fn" >/sys/bus/pci/drivers/vfio-pci/bind 2>/dev/null || true
+  bound=$((bound + 1))
+done
+echo "OK: ${bound} función(es) del slot ${slot} → vfio-pci"
 
 # Permisos para el usuario que invocó sudo
 if [[ -n "${SUDO_USER:-}" ]]; then
