@@ -8,6 +8,7 @@ const VENDOR_NVIDIA: u16 = 0x10de;
 const NV_PMC_BOOT_0: u64 = 0x0000;
 
 static NVIDIA_CHIPSET: Once<Option<u32>> = Once::new();
+static NVIDIA_DEVICE: Once<Option<u16>> = Once::new();
 
 pub fn init() {
     let devs = pci::enumerate();
@@ -15,6 +16,7 @@ pub fn init() {
     else {
         crate::println!("nvidia: sin GPU NVIDIA en PCI");
         NVIDIA_CHIPSET.call_once(|| None);
+        NVIDIA_DEVICE.call_once(|| None);
         return;
     };
     if gpu.bar0 == 0 || gpu.bar0_size == 0 {
@@ -27,6 +29,7 @@ pub fn init() {
             gpu.function
         );
         NVIDIA_CHIPSET.call_once(|| None);
+        NVIDIA_DEVICE.call_once(|| None);
         return;
     }
     mm::ensure_mmio_mapped(gpu.bar0, gpu.bar0_size.min(16 * 1024 * 1024));
@@ -37,11 +40,18 @@ pub fn init() {
         gpu.device_id,
         boot0
     );
+    #[cfg(feature = "lxdde")]
+    crate::lxdde::notify_boot0(boot0, gpu.device_id);
     NVIDIA_CHIPSET.call_once(|| Some(boot0));
+    NVIDIA_DEVICE.call_once(|| Some(gpu.device_id));
 }
 
 pub fn chipset_id() -> Option<u32> {
     *NVIDIA_CHIPSET.get().unwrap_or(&None)
+}
+
+pub fn device_id() -> Option<u16> {
+    *NVIDIA_DEVICE.get().unwrap_or(&None)
 }
 
 pub fn present() -> bool {

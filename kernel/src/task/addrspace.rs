@@ -165,6 +165,27 @@ impl AddrSpace {
         Some(frame)
     }
 
+    /// Lee `out.len()` bytes desde `va` del espacio.
+    pub fn read(&self, va: u64, out: &mut [u8]) -> Option<()> {
+        let mapper = self.mapper();
+        let mut off = 0usize;
+        while off < out.len() {
+            let src = va + off as u64;
+            let phys = mapper.translate_addr(VirtAddr::new(src))?;
+            let in_page = (4096 - (src % 4096)) as usize;
+            let n = in_page.min(out.len() - off);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    mm::phys_to_virt(phys.as_u64()).as_ptr(),
+                    out[off..].as_mut_ptr(),
+                    n,
+                );
+            }
+            off += n;
+        }
+        Some(())
+    }
+
     /// Escribe `data` en `va` del espacio (sin necesidad de activarlo).
     pub fn write(&self, va: u64, data: &[u8]) -> Option<()> {
         let mapper = self.mapper();

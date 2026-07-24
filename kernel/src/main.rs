@@ -105,6 +105,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         if mode != lxdde::LxddeMode::E1000e {
             let _ = drivers::e1000e::init();
         }
+        if mode == lxdde::LxddeMode::Nouveau {
+            drivers::nvidia_probe::init();
+        }
     }
     #[cfg(not(feature = "lxdde"))]
     let _ = drivers::e1000e::init();
@@ -135,6 +138,7 @@ fn lxdde_mode() -> lxdde::LxddeMode {
         "spike" => lxdde::LxddeMode::Spike,
         "testdrv" => lxdde::LxddeMode::TestDrv,
         "e1000e" => lxdde::LxddeMode::E1000e,
+        "nouveau" => lxdde::LxddeMode::Nouveau,
         _ => lxdde::LxddeMode::Off,
     }
 }

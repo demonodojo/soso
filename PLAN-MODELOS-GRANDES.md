@@ -429,39 +429,31 @@ virtio-net dispara IRQs reales.
 **Verificación L5 (final):** arranque en la máquina objetivo, `ssh` entra,
 `soso-llm run` con el modelo grande desde NVMe.
 
-## Fase L6 — GPU NVIDIA: spike de investigación con go/no-go
+## Fase L6 — GPU NVIDIA nativa (reabierta 2026-07-24)
 
-*Estimación del spike: 2 semanas. La implementación, si es "go": 6-12+ meses.*
+*Estimación: 6–12+ meses. Hardware primario: RTX 5070 Ti Mobile / GB205
+(`10de:2f18`).*
 
-Ser claros: **no existe camino corto para cómputo NVIDIA en un kernel
-propio.** Las GPUs modernas (Turing+) requieren cargar el firmware GSP
-propietario, negociar con él la inicialización (lo que hace nouveau en
-Linux), construir canales de comando, gestionar VRAM/page tables de GPU, y
-generar código SASS para los kernels (no hay compilador utilizable fuera del
-stack de NVIDIA/mesa-NAK). Cada pieza es un proyecto.
+**No existe camino corto para CUDA userspace en soso.** Las GPUs Turing+
+requieren firmware GSP, nvkm, canales de comando y kernels SASS. El camino
+es lxdde + subconjunto nvkm (sin display) + offload híbrido por VRAM (~12 GiB).
 
-**Spike (2 semanas):** sobre la GPU concreta de la máquina objetivo,
-evaluar: (a) qué generación es y si GSP/OpenRM documenta lo mínimo, (b)
-cuánto de nouveau/NVK es portable a un kernel no-Linux, (c) si un kernel
-SASS precompilado (un saxpy) puede lanzarse con inicialización mínima.
-Con eso, decisión:
+**🟡 Infraestructura L6 (2026-07-23):** capa `lxdde`, `nvidia_probe`,
+`SOSO_QEMU_GPU=vfio:…`, `docs/L6-G1-gate.md`, scripts IOMMU/VFIO.
 
-**🟡 Infraestructura L6 (2026-07-23):** capa `lxdde` (lx_emul + ports
-spike/testdrv/e1000e/nouveau), `nvidia_probe` (NV_PMC_BOOT_0), stub G4
-saxpy, `docs/L6-G1-gate.md`, `SOSO_QEMU_GPU=vfio:…`, `cargo xtask lx-build`,
-`cargo xtask g1-check`.
+**🟢 Reapertura L6 (2026-07-24):** roadmap G1→G5 activo sobre GB205 Blackwell.
+CPU L1–L4 sigue como fallback; inferencia 70B usa offload híbrido GPU+RAM.
 
-**🟡 G1 en placa (2026-07-23, parcial):** GPU `10de:2f18` (RTX 5070 Ti
-Mobile / GB205). Firmware GSP **go**. Veredicto global **no-go G3–G5** (hardware
-+ portátil). Scripts: `scripts/l6-g1-enable-iommu.sh`, `scripts/l6-g1-vfio-test.sh`.
-Pendiente: reinicio + prueba `NV_PMC_BOOT_0` para cierre formal del gate.
+| Fase | Entregable | Estado |
+|------|------------|--------|
+| G1 | NV_PMC_BOOT_0 bajo VFIO | Pendiente IOMMU en placa |
+| G2 | Firmware gb205 en rootfs + `SOSO_LXDDE_MODE=nouveau` | En curso |
+| G3 | GSP boot nvkm (sin KMS) | En curso |
+| G4 | Saxpy SASS real (`SYS_GPU_SUBMIT`) | Pendiente G3 |
+| G5 | matvec híbrido soso-llm | Pendiente G4 |
 
-- **Go:** roadmap GPU propio (6-12+ meses, alto riesgo).
-- **No-go (probable):** el motor de 70B en soso es CPU SMP+SIMD (fases
-  L1-L4), que en un servidor multicanal da 4-10 tok/s reales. Si la GPU es
-  irrenunciable, las alternativas honestas son cambiar el hardware objetivo
-  a Intel/AMD (ISA y firmware documentados — sigue siendo un proyecto de
-  meses) o replantear el nicho de soso.
+Scripts: `scripts/l6-pack-firmware.sh`, `scripts/l6-g1-enable-iommu.sh`,
+`scripts/l6-g1-vfio-test.sh`.
 
 ---
 
@@ -492,7 +484,8 @@ desde NVMe.
 
 ## Riesgos principales
 
-1. **GPU NVIDIA**: riesgo alto de no-go; el plan no depende de ella para 70B.
+1. **GPU NVIDIA**: alto riesgo técnico (GB205/nouveau inmaduro); offload híbrido
+   mitiga VRAM limitada; CPU L1–L4 sigue como fallback.
 2. **SMP**: la auditoría de concurrencia del kernel monocore es el trabajo
    traicionero (los bugs son heisenbugs); mitigación: hacerlo después de L1/L2/L4
    con el sistema ya medible, y activar cores gradualmente.

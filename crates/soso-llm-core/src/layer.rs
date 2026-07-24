@@ -190,6 +190,27 @@ impl LayerScratch {
     }
 }
 
+/// matvec con offload GPU opcional (G5).
+fn matvec_step(
+    use_gpu: bool,
+    gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+    v: TensorView<'_>,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    out: &mut [f32],
+    par: &dyn RowParallel,
+) -> Result<(), ()> {
+    if use_gpu {
+        if let Some(g) = gpu.as_deref_mut() {
+            if crate::gpu::try_gpu_matvec(g, &v, rows, cols, x, out)? {
+                return Ok(());
+            }
+        }
+    }
+    matvec_view_par(&v, rows, cols, x, out, par)
+}
+
 pub struct LayerExecutor<'a> {
     pub manifest: &'a Manifest,
     /// El modelo trae proyección ffn_gate (SwiGLU completo).
@@ -207,6 +228,8 @@ impl<'a> LayerExecutor<'a> {
         s: &mut LayerScratch,
         kv: &mut LayerKv,
         source: &mut S,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        use_gpu: bool,
     ) -> Result<(), ()> {
         let h = self.manifest.hidden_dim as usize;
         let heads = self.manifest.num_heads as usize;
@@ -220,18 +243,42 @@ impl<'a> LayerExecutor<'a> {
         let prefix = format!("L{layer:02}");
         let seq = Sequential;
         let par: &dyn RowParallel = self.parallel.unwrap_or(&seq);
-        let mv = |v: TensorView<'_>, rows: usize, cols: usize, x: &[f32], out: &mut [f32]| {
-            matvec_view_par(&v, rows, cols, x, out, par)
-        };
 
         // --- atención ---
         s.residual.copy_from_slice(hidden);
         source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w)?;
         rmsnorm(hidden, &s.norm_w, eps);
 
-        mv(source.tensor_view(&format!("{prefix}.attn_q"))?, h, h, hidden, &mut s.q)?;
-        mv(source.tensor_view(&format!("{prefix}.attn_k"))?, kv_dim, h, hidden, &mut s.k)?;
-        mv(source.tensor_view(&format!("{prefix}.attn_v"))?, kv_dim, h, hidden, &mut s.v)?;
+        matvec_step(
+            use_gpu,
+            gpu,
+            source.tensor_view(&format!("{prefix}.attn_q"))?,
+            h,
+            h,
+            hidden,
+            &mut s.q,
+            par,
+        )?;
+        matvec_step(
+            use_gpu,
+            gpu,
+            source.tensor_view(&format!("{prefix}.attn_k"))?,
+            kv_dim,
+            h,
+            hidden,
+            &mut s.k,
+            par,
+        )?;
+        matvec_step(
+            use_gpu,
+            gpu,
+            source.tensor_view(&format!("{prefix}.attn_v"))?,
+            kv_dim,
+            h,
+            hidden,
+            &mut s.v,
+            par,
+        )?;
 
         for head in 0..heads {
             rope_inplace(&mut s.q[head * head_dim..(head + 1) * head_dim], pos, theta);
@@ -275,7 +322,16 @@ impl<'a> LayerExecutor<'a> {
         }
 
         // proyección de salida de la atención (Wo) y residual
-        mv(source.tensor_view(&format!("{prefix}.attn_output"))?, h, h, &s.attn_out, &mut s.q)?;
+        matvec_step(
+            use_gpu,
+            gpu,
+            source.tensor_view(&format!("{prefix}.attn_output"))?,
+            h,
+            h,
+            &s.attn_out,
+            &mut s.q,
+            par,
+        )?;
         for i in 0..h {
             hidden[i] = s.residual[i] + s.q[i];
         }
@@ -285,9 +341,27 @@ impl<'a> LayerExecutor<'a> {
         source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w)?;
         rmsnorm(hidden, &s.norm_w, eps);
 
-        mv(source.tensor_view(&format!("{prefix}.ffn_up"))?, ffn, h, hidden, &mut s.up)?;
+        matvec_step(
+            use_gpu,
+            gpu,
+            source.tensor_view(&format!("{prefix}.ffn_up"))?,
+            ffn,
+            h,
+            hidden,
+            &mut s.up,
+            par,
+        )?;
         if self.has_gate {
-            mv(source.tensor_view(&format!("{prefix}.ffn_gate"))?, ffn, h, hidden, &mut s.gate)?;
+            matvec_step(
+                use_gpu,
+                gpu,
+                source.tensor_view(&format!("{prefix}.ffn_gate"))?,
+                ffn,
+                h,
+                hidden,
+                &mut s.gate,
+                par,
+            )?;
             for i in 0..ffn {
                 s.up[i] = silu(s.gate[i]) * s.up[i];
             }
@@ -296,7 +370,16 @@ impl<'a> LayerExecutor<'a> {
                 *x = silu(*x);
             }
         }
-        mv(source.tensor_view(&format!("{prefix}.ffn_down"))?, h, ffn, &s.up, hidden)?;
+        matvec_step(
+            use_gpu,
+            gpu,
+            source.tensor_view(&format!("{prefix}.ffn_down"))?,
+            h,
+            ffn,
+            &s.up,
+            hidden,
+            par,
+        )?;
 
         for i in 0..h {
             hidden[i] += s.residual[i];

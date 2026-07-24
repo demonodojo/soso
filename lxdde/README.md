@@ -27,6 +27,7 @@ SOSO_QEMU_NIC=lx-e1000e cargo xtask build
 | `spike` | D0: C↔Rust (`lx_spike_run` → `lx_printk`) |
 | `testdrv` | D2: kmalloc + workqueue + completion + PCI |
 | `e1000e` | D3: driver e1000e estilo Linux (`pci_driver` + `net_device`) |
+| `nouveau` | G3: probe NVIDIA + GSP bring-up gb205 |
 
 Cada port vive en `lxdde/ports/<nombre>/source.list` (lista de `.c`).
 
@@ -43,22 +44,39 @@ Cada port vive en `lxdde/ports/<nombre>/source.list` (lista de `.c`).
 ## Integración en soso
 
 - Feature del kernel: `lxdde` (desactivada por defecto — `cargo xtask test` intacto).
-- Modo compile-time: `SOSO_LXDDE_MODE=spike|testdrv|e1000e`.
+- Modo compile-time: `SOSO_LXDDE_MODE=spike|testdrv|e1000e|nouveau`.
 - NIC QEMU: `SOSO_QEMU_NIC=lx-e1000e` (dispositivo `e1000e` + backend lxdde).
 - Bomba cooperativa: `lxdde::poll()` desde el timer BSP (junto a `net::poll()`).
 
 ## Licencia
 
-Enlazar código derivado del kernel Linux (GPLv2) obliga a licenciar el binario
-del kernel bajo GPLv2. Los shims propios de soso siguen la licencia del repo.
+El código first-party de soso en `lxdde/` (shims, ports y glue Rust) está bajo
+**GPL-2.0-only**, igual que el resto del proyecto. Ver [`COPYING`](../COPYING).
 
-## Anexo GPU (fase L6)
+El árbol `lxdde/linux/` (descargado por xtask, no versionado) es upstream Linux
+6.6.x bajo GPLv2. Enlazar código derivado de ese kernel obliga a licenciar el
+binario del kernel con feature `lxdde` bajo GPLv2.
 
-Sobre esta base, un driver DRM/NVIDIA necesitaría además:
+## Anexo GPU (fase L6 — reabierta)
 
-- Subsistema DRM (`drm_device`, `drm_gem`, IOCTL shimeados).
-- `request_firmware` leyendo blobs desde sosofs.
-- Mucha más superficie lx_emul (IOMMU, dma-buf, prime, …).
+Port `nouveau` activo para GB205 Blackwell móvil (`10de:2f18`):
 
-La infraestructura D1–D2 (fibras, timers, PCI, DMA, IRQ diferida, stubs) es
-prerrequisito directo del spike L6.
+```bash
+./scripts/l6-pack-firmware.sh          # gb205/gsp → rootfs/lib/firmware/
+cargo xtask lx-build nouveau
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build
+SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run   # tras IOMMU + bind VFIO
+```
+
+Componentes:
+
+| Componente | Ubicación |
+|------------|-----------|
+| Probe BAR0 | `kernel/src/drivers/nvidia_probe.rs` |
+| GSP bring-up | `lxdde/ports/nouveau/gsp_bringup.c` |
+| Firmware shim | `kernel/src/lxdde/firmware.rs` |
+| mini-DRM/GEM | `kernel/src/lxdde/drm.rs` |
+| Compute G4 | `kernel/src/drivers/nvidia_compute.rs` |
+
+Roadmap G1→G5: ver [`docs/L6-G1-gate.md`](../docs/L6-G1-gate.md).
+La infraestructura D1–D2 (fibras, timers, PCI, DMA, IRQ, stubs) es base del port nvkm.

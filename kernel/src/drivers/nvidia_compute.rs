@@ -7,6 +7,7 @@ const SAXPY_SASS: &[u8] = include_bytes!("../../../lxdde/ports/nouveau/saxpy.sas
 
 struct ComputeState {
     channel_ready: bool,
+    gpu_path: bool,
     last_result: f32,
 }
 
@@ -16,36 +17,86 @@ pub fn init() {
     if !nvidia_probe::present() {
         return;
     }
+    let channel_ready = gsp_ready();
     *COMPUTE.lock() = Some(ComputeState {
-        channel_ready: false,
+        channel_ready,
+        gpu_path: false,
         last_result: 0.0,
     });
     crate::println!(
-        "nvidia-compute: stub canal GSP (saxpy blob {} bytes)",
+        "nvidia-compute: GSP={} saxpy blob {} bytes",
+        gsp_status(),
         SAXPY_SASS.len()
     );
 }
 
-pub fn submit_saxpy(a: f32, x: &[f32], y: &mut [f32]) -> Result<(), ()> {
+fn gsp_ready() -> bool {
+    #[cfg(feature = "lxdde")]
+    {
+        if crate::lxdde::gsp_ready() {
+            return true;
+        }
+    }
+    false
+}
+
+fn gsp_status() -> &'static str {
+    #[cfg(feature = "lxdde")]
+    {
+        return crate::lxdde::gsp_phase();
+    }
+    #[cfg(not(feature = "lxdde"))]
+    "off"
+}
+
+pub fn submit_saxpy(a: f32, x: &[f32], y: &mut [f32]) -> Result<bool, ()> {
     let mut st = COMPUTE.lock();
     let Some(s) = st.as_mut() else {
         return Err(());
     };
-    if SAXPY_SASS.is_empty() {
-        for i in 0..x.len().min(y.len()) {
-            y[i] = a * x[i] + y[i];
+    #[cfg(feature = "lxdde")]
+    {
+        if let Ok(on_gpu) = crate::lxdde::submit_saxpy(a, x, y) {
+            s.channel_ready = crate::lxdde::gsp_ready();
+            s.gpu_path = on_gpu;
+            s.last_result = y.first().copied().unwrap_or(0.0);
+            return Ok(on_gpu);
         }
-        s.last_result = y.first().copied().unwrap_or(0.0);
-        return Ok(());
     }
     for i in 0..x.len().min(y.len()) {
         y[i] = a * x[i] + y[i];
     }
-    s.channel_ready = true;
-    s.last_result = y[0];
-    Ok(())
+    s.last_result = y.first().copied().unwrap_or(0.0);
+    Ok(false)
+}
+
+pub fn submit_matvec_f32(w: &[f32], rows: usize, cols: usize, x: &[f32], y: &mut [f32]) -> Result<bool, ()> {
+    let mut st = COMPUTE.lock();
+    let Some(s) = st.as_mut() else {
+        return Err(());
+    };
+    #[cfg(feature = "lxdde")]
+    {
+        if let Ok(on_gpu) = crate::lxdde::submit_matvec_f32(w, rows, cols, x, y) {
+            s.gpu_path = on_gpu;
+            s.channel_ready = crate::lxdde::gsp_ready();
+            return Ok(on_gpu);
+        }
+    }
+    for r in 0..rows {
+        let mut sum = 0.0f32;
+        for c in 0..cols {
+            sum += w[r * cols + c] * x[c];
+        }
+        y[r] = sum;
+    }
+    Ok(false)
 }
 
 pub fn channel_ready() -> bool {
     COMPUTE.lock().as_ref().is_some_and(|s| s.channel_ready)
+}
+
+pub fn last_gpu_path() -> bool {
+    COMPUTE.lock().as_ref().is_some_and(|s| s.gpu_path)
 }

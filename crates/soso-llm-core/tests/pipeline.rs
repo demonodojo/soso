@@ -175,7 +175,7 @@ fn forward_por_rangos_paridad() {
 
     for &tok in &prompt {
         full.embed_token(tok, &mut src_full).unwrap();
-        full.forward_step_par(&mut src_full, None).unwrap();
+        full.forward_step_par(&mut src_full, None, &mut None).unwrap();
     }
     let logits_full = full.logits(&mut src_full).unwrap().to_vec();
 
@@ -193,9 +193,9 @@ fn forward_por_rangos_paridad() {
 
     for &tok in &prompt {
         head.embed_token(tok, &mut src_head).unwrap();
-        head.forward_layers_range(0, split, &mut src_head, None).unwrap();
+        head.forward_layers_range(0, split, &mut src_head, None, &mut None).unwrap();
         tail.set_hidden(head.hidden_slice()).unwrap();
-        tail.forward_layers_range(split, 4, &mut src_tail, None).unwrap();
+        tail.forward_layers_range(split, 4, &mut src_tail, None, &mut None).unwrap();
         head.advance_pos();
         tail.advance_pos();
     }
@@ -216,7 +216,7 @@ fn forward_estrella_tres_segmentos() {
     let mut full = Runtime::new(m1, i1, 0, 0);
     let mut src_full = MmapTensorSource::new(String::from(BASE), full.index.clone(), map1);
     full.embed_token(prompt[0], &mut src_full).unwrap();
-    full.forward_step_par(&mut src_full, None).unwrap();
+    full.forward_step_par(&mut src_full, None, &mut None).unwrap();
     let logits_full = full.logits(&mut src_full).unwrap().to_vec();
 
     let run_seg =
@@ -226,7 +226,7 @@ fn forward_estrella_tres_segmentos() {
             rt.validate_shapes_for_role(role, start, end).unwrap();
             let mut src = MmapTensorSource::new(String::from(BASE), rt.index.clone(), map);
             rt.set_hidden(hidden).unwrap();
-            rt.forward_layers_range(start, end, &mut src, None).unwrap();
+            rt.forward_layers_range(start, end, &mut src, None, &mut None).unwrap();
             rt.hidden_slice().to_vec()
         };
 
@@ -235,7 +235,7 @@ fn forward_estrella_tres_segmentos() {
     head.validate_shapes_for_role(PipelineRole::Head, 0, 1).unwrap();
     let mut src_head = MmapTensorSource::new(String::from(BASE), head.index.clone(), map2);
     head.embed_token(prompt[0], &mut src_head).unwrap();
-    head.forward_layers_range(0, 1, &mut src_head, None).unwrap();
+    head.forward_layers_range(0, 1, &mut src_head, None, &mut None).unwrap();
     let mut h = head.hidden_slice().to_vec();
 
     let seg1 = plan.remote_segment(0).unwrap();

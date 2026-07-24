@@ -205,6 +205,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_GPU_INFO => sys_gpu_info(a1),
         abi::SYS_GPU_ALLOC => sys_gpu_alloc(a1),
         abi::SYS_GPU_MAP => sys_gpu_map(a1, a2, a3),
+        abi::SYS_GPU_READ => sys_gpu_read(a1, a2, a3),
         abi::SYS_GPU_SUBMIT => sys_gpu_submit(a1, a2),
         abi::SYS_PIPE => sys_pipe(),
         abi::SYS_SPAWN_IO => sys_spawn_io(a1),
@@ -940,6 +941,13 @@ fn sys_gpu_alloc(size: u64) -> Result<u64, i64> {
 
 fn sys_gpu_map(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     if !user_range_ok(user_ptr, len, true) {
+        return Err(-abi::EFAULT);
+    }
+    crate::drivers::gpu::upload_from_user(gpu_handle, user_ptr, len).map_err(|e| -e)
+}
+
+fn sys_gpu_read(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
+    if !user_range_ok(user_ptr, len, false) {
         return Err(-abi::EFAULT);
     }
     crate::drivers::gpu::map_to_user(gpu_handle, user_ptr, len).map_err(|e| -e)

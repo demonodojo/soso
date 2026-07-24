@@ -1,0 +1,14 @@
+[package]
+name = "cuda-proxy"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "Proxy TCP soso → llama-server HTTP (L6-H CUDA en host)"
+
+[[bin]]
+name = "cuda-proxy"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]

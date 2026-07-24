@@ -70,3 +70,13 @@ Salir de QEMU: `Ctrl-A X` (no `Ctrl-C`). Si el puerto 2222 está ocupado:
 de extremo a extremo; `cargo xtask run` arranca soso en QEMU (2 GiB RAM).
 
 Documentación de usuario: [`MANUAL-USUARIO.md`](MANUAL-USUARIO.md).
+
+## Licencia
+
+Copyright (C) 2026 Jose Miguel Díez de la Lastra Jimeno.
+
+El código first-party de soso (kernel, crates, userspace, tools y xtask) se
+distribuye bajo **GNU General Public License v2.0 only** (GPL-2.0-only). Ver
+[`COPYING`](COPYING) para el texto completo.
+
+Componentes de terceros con licencias propias: [`THIRD_PARTY.md`](THIRD_PARTY.md).

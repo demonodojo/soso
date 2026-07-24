@@ -137,11 +137,15 @@ pub fn run(args: &[String]) {
     let fw_ok = fw_root.is_dir() && !collect_gsp_blobs(fw_root).is_empty();
     print_criterion("Firmware GSP redistribuible (linux-firmware)", fw_ok);
     print_criterion("IOMMU activo (prerrequisito VFIO)", iommu_groups > 0);
+    let boot0_ok = check_nv_pmc_boot0_log();
     print_criterion(
-        "NV_PMC_BOOT_0 desde soso (requiere SOSO_QEMU_GPU=vfio:BDF cargo xtask run)",
-        false,
+        "NV_PMC_BOOT_0 desde soso (SOSO_QEMU_GPU=vfio:BDF cargo xtask run)",
+        boot0_ok,
     );
-    println!("       ↑ pendiente manual tras bind VFIO — ver docs/L6-G1-gate.md");
+    if !boot0_ok {
+        println!("       ↑ pendiente tras bind VFIO — ver docs/L6-G1-gate.md");
+        println!("       sudo ./scripts/l6-g1-vfio-test.sh");
+    }
 
     if show_hint {
         println!("\n=== Bind VFIO (manual, requiere root; apaga la sesión gráfica) ===");
@@ -178,6 +182,21 @@ SOSO_QEMU_GPU=vfio:{bdf} cargo xtask run
     if fail > 0 {
         exit(1);
     }
+}
+
+fn check_nv_pmc_boot0_log() -> bool {
+    let log = super::project_root().join("target/g1-vfio-serial.log");
+    let Ok(text) = fs::read_to_string(&log) else {
+        return false;
+    };
+    if !text.contains("NV_PMC_BOOT_0=0x") {
+        return false;
+    }
+    println!("\n   NV_PMC_BOOT_0 (desde {})", log.display());
+    for line in text.lines().filter(|l| l.contains("nvidia:")) {
+        println!("   OK    {line}");
+    }
+    true
 }
 
 fn print_criterion(label: &str, pass: bool) {

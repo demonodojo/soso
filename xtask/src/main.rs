@@ -293,6 +293,7 @@ fn newest_mtime(dir: &Path) -> std::time::SystemTime {
 /// Disco de datos persistente (virtio-blk 0) con sosofs desde rootfs/.
 pub(crate) fn mkfs_rootfs(force: bool) -> PathBuf {
     let root = project_root();
+    pack_nvidia_firmware(&root);
     let path = root.join("target/soso-data.img");
     let vieja = path
         .metadata()
@@ -460,16 +461,41 @@ fn lxdde_enabled() -> bool {
     ) || matches!(
         qemu_nic().to_ascii_lowercase().as_str(),
         "lx-e1000e" | "lx_e1000e"
-    )
+    ) || matches!(
+        std::env::var("SOSO_LXDDE_MODE").as_deref(),
+        Ok("nouveau")
+    ) || std::env::var("SOSO_QEMU_GPU").is_ok()
 }
 
 fn lxdde_mode_env() -> Option<String> {
     if let Ok(m) = std::env::var("SOSO_LXDDE_MODE") {
         return Some(m);
     }
+    if std::env::var("SOSO_QEMU_GPU").is_ok() {
+        return Some("nouveau".into());
+    }
     match qemu_nic().to_ascii_lowercase().as_str() {
         "lx-e1000e" | "lx_e1000e" => Some("e1000e".into()),
         _ => None,
+    }
+}
+
+fn pack_nvidia_firmware(root: &Path) {
+    let script = root.join("scripts/l6-pack-firmware.sh");
+    if !script.exists() {
+        return;
+    }
+    let fw_dst = root.join("rootfs/lib/firmware/nvidia");
+    if fw_dst.exists() && fw_dst.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
+        return;
+    }
+    let status = Command::new("bash")
+        .arg(&script)
+        .current_dir(root)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        _ => println!("xtask: aviso — ejecutar ./scripts/l6-pack-firmware.sh para GSP gb205"),
     }
 }
 

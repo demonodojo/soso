@@ -263,7 +263,9 @@ fn provided_symbols() -> HashSet<&'static str> {
         "lx_skb_len", "lx_skb_data", "lx_set_netdev_ops", "lx_set_netdev_mac", "lx_tx_head",
         "lx_request_firmware", "lx_release_firmware",
         "lx_drm_dev_alloc", "lx_drm_gem_create", "lx_drm_gem_vmap", "lx_map_wc",
-        "lx_nouveau_init_module",
+        "lx_nouveau_init_module", "lx_nouveau_gsp_is_ready", "lx_nouveau_gsp_phase",
+        "lx_nouveau_compute_saxpy", "lx_nouveau_compute_matvec_f32", "lx_nouveau_vram_total",
+        "lx_nouveau_set_boot0",
         "memcpy", "memset", "memmove", "strlen", "strcmp", "strncmp", "strncpy", "strnlen",
     ]
     .into_iter()

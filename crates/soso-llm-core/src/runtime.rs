@@ -149,6 +149,14 @@ impl Runtime {
         Ok(())
     }
 
+    pub fn set_backend(&mut self, backend: Backend) {
+        self.backend = backend;
+    }
+
+    pub fn backend(&self) -> Backend {
+        self.backend
+    }
+
     pub fn reset_sequence(&mut self) {
         self.pos = 0;
         for layer in &mut self.kv {
@@ -165,15 +173,16 @@ impl Runtime {
     }
 
     pub fn forward_step(&mut self, source: &mut impl TensorSource) -> Result<(), ()> {
-        self.forward_step_par(source, None)
+        self.forward_step_par(source, None, &mut None)
     }
 
     pub fn forward_step_par(
         &mut self,
         source: &mut impl TensorSource,
         parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     ) -> Result<(), ()> {
-        self.forward_layers_range(0, self.manifest.num_layers, source, parallel)?;
+        self.forward_layers_range(0, self.manifest.num_layers, source, parallel, gpu)?;
         self.advance_pos();
         Ok(())
     }
@@ -185,6 +194,7 @@ impl Runtime {
         layer_end: u32,
         source: &mut impl TensorSource,
         parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     ) -> Result<(), ()> {
         if self.pos >= self.manifest.max_seq as usize {
             return Err(());
@@ -192,6 +202,8 @@ impl Runtime {
         if layer_start > layer_end || layer_end > self.manifest.num_layers {
             return Err(());
         }
+        let use_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
+            && gpu.as_ref().is_some_and(|g| g.available());
         let exec = LayerExecutor {
             manifest: &self.manifest,
             has_gate: self.has_gate,
@@ -208,6 +220,8 @@ impl Runtime {
                 &mut self.scratch,
                 &mut self.kv[layer as usize],
                 source,
+                gpu,
+                use_gpu,
             )?;
         }
         Ok(())
@@ -303,7 +317,7 @@ impl Runtime {
         sampler: &mut crate::sample::Sampler,
         on_token: impl FnMut(u32),
     ) -> Result<Vec<u32>, ()> {
-        self.generate_stream_par(source, prompt, max_new, eos, sampler, on_token, None)
+        self.generate_stream_par(source, prompt, max_new, eos, sampler, on_token, None, &mut None)
     }
 
     /// Como `generate_stream` con matvec paralelo opcional.
@@ -316,6 +330,7 @@ impl Runtime {
         sampler: &mut crate::sample::Sampler,
         mut on_token: impl FnMut(u32),
         parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     ) -> Result<Vec<u32>, ()> {
         if prompt.is_empty() {
             return Err(());
@@ -324,7 +339,7 @@ impl Runtime {
         let mut tokens: Vec<u32> = prompt.to_vec();
         for &tok in prompt {
             self.embed_token(tok, source)?;
-            self.forward_step_par(source, parallel)?;
+            self.forward_step_par(source, parallel, gpu)?;
         }
         for _ in 0..max_new {
             if self.pos >= self.manifest.max_seq as usize {
@@ -338,7 +353,7 @@ impl Runtime {
             tokens.push(next);
             on_token(next);
             self.embed_token(next, source)?;
-            self.forward_step_par(source, parallel)?;
+            self.forward_step_par(source, parallel, gpu)?;
         }
         Ok(tokens)
     }

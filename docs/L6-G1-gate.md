@@ -1,13 +1,28 @@
-# L6 G1 — Spike GPU NVIDIA: gate go/no-go
+# L6 G1 — GPU NVIDIA: checklist de progreso
 
 ## Objetivo
 
-Evaluar viabilidad de cómputo NVIDIA en soso antes de invertir 6–12 meses en G3–G5.
+Verificar acceso BAR0 y firmware GSP en la GPU objetivo antes de invertir en G3–G5
+(nvkm + compute). El gate es **checklist de avance**, no cierre del roadmap.
 
-## Hardware recomendado
+## Hardware objetivo (primario)
 
-- **GPU:** RTX 3060/3050 (Ampere) — GSP maduro en nouveau, firmware en linux-firmware.
-- **Host:** Linux con IOMMU + VFIO (`SOSO_QEMU_GPU=vfio:BB:DD.F`).
+- **GPU:** `01:00.0` / `10de:2f18` — GeForce RTX 5070 Ti Mobile (GB205, Blackwell)
+- **Host:** Linux con IOMMU + VFIO (`SOSO_QEMU_GPU=vfio:01:00.0`)
+- **Referencia secundaria:** RTX 3060/3050 (Ampere) — GSP más maduro en nouveau
+
+## Roadmap L6 (reabierto 2026-07-24)
+
+| Fase | Objetivo | Criterio go |
+|------|----------|-------------|
+| G1 | BAR0 + NV_PMC_BOOT_0 bajo VFIO | Log `nvidia: … NV_PMC_BOOT_0=0x…` |
+| G2 | Firmware gb205 en sosofs + `SOSO_LXDDE_MODE=nouveau` | `lxdde-fw: cargado …/gb205/gsp/…` |
+| G3 | GSP boot vía nvkm (sin display) | Log `nouveau-lx: GSP booted` |
+| G4 | Saxpy SASS en GPU | `SYS_GPU_SUBMIT` SAXPY correcto |
+| G5 | matvec híbrido en soso-llm | tok/s GPU > CPU en mismo modelo |
+| **L6-H** | **CUDA en host Linux** | `soso-llm --cuda-host` + `cuda-proxy` + llama-server |
+
+Ver [`L6-H-cuda-hybrid.md`](L6-H-cuda-hybrid.md) para inferencia CUDA **ya** (no requiere G3).
 
 ## Checklist G1 (host)
 
@@ -27,23 +42,18 @@ Estimación sobre Linux 6.6.32 (`drivers/gpu/drm/nouveau/`):
 | engine/gr (compute) | ~40k | Sí (G4) |
 | engine/disp, DRM KMS | ~120k | No (omitir) |
 
-## Criterios go/no-go
-
-| Criterio | Go | No-go |
-|----------|-----|-------|
-| Firmware GSP redistribuible | Sí (linux-firmware) | Solo blob propietario sin licencia clara |
-| NV_PMC_BOOT_0 legible desde soso | Sí | BAR0 no mapeable / IOMMU roto |
-| Subconjunto nvkm acotado | < 150k LOC | Dependencia circular con DRM display |
-| Saxpy SASS (G4) | Lanza en < 6 sem post-G3 | GSP no arranca en 6 sem |
-
-## Salida no-go
-
-- Motor 70B en CPU SMP+SIMD (L1–L4): 4–10 tok/s en servidor multichannel.
-- Alternativa: GPU Intel/AMD con firmware documentado.
-
 ## Comandos soso
 
 ```bash
+# Empaquetar firmware GSP gb205 en rootfs (desde linux-firmware del host)
+./scripts/l6-pack-firmware.sh
+
+# Build capa lxdde + nouveau
+cargo xtask lx-build nouveau
+
+# Kernel con driver nouveau-lx
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build
+
 # 1) Activar IOMMU en GRUB (root, luego reiniciar)
 sudo ./scripts/l6-g1-enable-iommu.sh
 
@@ -53,58 +63,49 @@ cargo xtask g1-check
 # 3) Prueba VFIO desde TTY (Ctrl+Alt+F3; pierdes pantalla gráfica)
 sudo ./scripts/l6-g1-vfio-test.sh
 
-# Checklist host manual
-cargo xtask g1-check
-cargo xtask g1-check --vfio-hint
-
-# Spike PCI (sin VFIO, solo enum QEMU)
-cargo xtask run
-
 # VFIO passthrough manual
 SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 
-# Build capa lxdde + nouveau stub
-cargo xtask lx-build nouveau
+# L6-H: CUDA en host (llama-server + proxy; ver L6-H-cuda-hybrid.md)
+./scripts/l6-h-start-cuda.sh /path/to/model.gguf
+# en soso: soso-llm run <modelo> --cuda-host 10.0.2.2:11400 --prompt "..."
 ```
 
-## Procedimiento de cierre (esta máquina)
+## Procedimiento de cierre G1 (esta máquina)
 
 1. **BIOS:** VT-d / Intel Virtualization Technology → Enabled.
 2. **GRUB:** `sudo ./scripts/l6-g1-enable-iommu.sh` → `sudo reboot`.
 3. **Verificar:** `cargo xtask g1-check` (IOMMU > 0).
 4. **TTY:** Ctrl+Alt+F3, login, `sudo ./scripts/l6-g1-vfio-test.sh`.
-5. **Veredicto:** anotar abajo si sale `NV_PMC_BOOT_0` o falla BAR0/VFIO.
+5. **Registrar:** anotar abajo `NV_PMC_BOOT_0` y chipset id.
 
-Tras el paso 4, aunque `NV_PMC_BOOT_0` sea **go**, el veredicto global para G3–G5 sigue siendo **no-go probable** (GB205 móvil, nouveau inmaduro). El gate cierra con evidencia, no abre el roadmap GPU.
-
-## Resultados en esta máquina (2026-07-23)
+## Resultados en esta máquina
 
 | Item | Resultado |
 |------|-----------|
 | GPU | `01:00.0` **10de:2f18** — GeForce RTX 5070 Ti Mobile (GB205, Blackwell) |
 | Driver host | `nvidia` (propietario) |
-| IOMMU | **0 grupos** — VT-d no activo en BIOS/cmdline; bloquea VFIO |
-| Firmware GSP | **34 blobs** en `/lib/firmware/nvidia/` incl. `gb205/gsp/` (symlink → ga102) |
-| NV_PMC_BOOT_0 en soso | **Pendiente** — requiere IOMMU + bind VFIO + `SOSO_QEMU_GPU=vfio:01:00.0` |
-| GSP en dmesg (nouveau) | Sin cargar nouveau en esta sesión (driver nvidia activo) |
+| IOMMU | Pendiente — VT-d + `intel_iommu=on iommu=pt` (ver pasos arriba) |
+| Firmware GSP | **34 blobs** en `/lib/firmware/nvidia/` incl. `gb205/gsp/` |
+| NV_PMC_BOOT_0 en soso | Pendiente — requiere IOMMU + bind VFIO |
+| GSP en soso (G3) | Pendiente — `SOSO_LXDDE_MODE=nouveau` + nvkm bring-up |
 
-**Nota hardware:** el gate recomienda Ampere (RTX 3060/3050); esta placa lleva Blackwell móvil — nouveau/GSP menos maduro que GA10x.
-
-### Veredicto parcial
+### Estado por criterio
 
 | Criterio | Estado |
 |----------|--------|
 | Firmware GSP redistribuible | **Go** (linux-firmware) |
-| IOMMU + VFIO | **Pendiente** — ejecutar `scripts/l6-g1-enable-iommu.sh` + reinicio |
+| IOMMU + VFIO | **Pendiente** — `scripts/l6-g1-enable-iommu.sh` + reinicio |
 | NV_PMC_BOOT_0 legible | **Pendiente** — `scripts/l6-g1-vfio-test.sh` tras IOMMU |
 | Subconjunto nvkm acotado | **Go** (estimación ~120k LOC sin display) |
-| Saxpy SASS (G4) | **No-go** (no invertir; spike cerrado sin G3) |
+| GSP boot (G3) | **En curso** — bring-up gb205 vía lxdde/nouveau |
+| Saxpy SASS (G4) | **Pendiente** — tras G3 |
+| matvec híbrido (G5) | **Pendiente** — tras G4 |
 
-### Veredicto global (pre-reboot)
+### Veredicto (2026-07-24)
 
-**No-go para G3–G5 en este hardware** (RTX 5070 Ti Mobile / GB205, portátil,
-IOMMU/VFIO frágil, nouveau Blackwell inmaduro). **Go** para motor 70B en CPU
-(L1–L4). Completar pasos 1–4 arriba solo para documentar `NV_PMC_BOOT_0` y
-cerrar el gate formalmente.
+**Roadmap L6 reabierto** con GB205 Blackwell móvil como hardware primario.
+Motor CPU L1–L4 sigue como fallback. Completar G1 (IOMMU/VFIO) desbloquea
+validación BAR0; G2–G5 avanzan en paralelo sobre lxdde.
 
 Generado como parte del roadmap L6 (lxdde).

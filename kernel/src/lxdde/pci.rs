@@ -170,6 +170,11 @@ pub extern "C" fn lx_pci_iomap(dev: *mut LxPciDev, bar: i32, _max_len: u64) -> *
     unsafe {
         let d = &mut *dev;
         let size = d.bar0_size.max(0x20000);
+        if d.vendor_id == 0x10de {
+            let va = mm::map_dma_wc(d.bar0, size);
+            d.mmio = d.bar0;
+            return va.as_mut_ptr::<u8>() as *mut c_void;
+        }
         mm::ensure_mmio_mapped(d.bar0, size);
         d.mmio = d.bar0;
         mm::phys_to_virt(d.bar0).as_mut_ptr::<u8>() as *mut c_void

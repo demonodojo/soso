@@ -186,6 +186,10 @@ pub fn gpu_map(handle: u64, ptr: u64, len: u64) -> i64 {
     syscall4(abi::SYS_GPU_MAP, handle, ptr, len, 0)
 }
 
+pub fn gpu_read(handle: u64, ptr: u64, len: u64) -> i64 {
+    syscall4(abi::SYS_GPU_READ, handle, ptr, len, 0)
+}
+
 pub fn gpu_submit(cmd: &[u8]) -> i64 {
     syscall4(abi::SYS_GPU_SUBMIT, cmd.as_ptr() as u64, cmd.len() as u64, 0, 0)
 }

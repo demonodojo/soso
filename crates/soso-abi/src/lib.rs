@@ -31,6 +31,7 @@ pub const SYS_GPU_INFO: u64 = 17;
 pub const SYS_GPU_ALLOC: u64 = 18;
 pub const SYS_GPU_MAP: u64 = 19;
 pub const SYS_GPU_SUBMIT: u64 = 20;
+pub const SYS_GPU_READ: u64 = 33;
 pub const SYS_PIPE: u64 = 21;
 pub const SYS_SPAWN_IO: u64 = 22;
 pub const SYS_CHDIR: u64 = 23;

@@ -5,7 +5,9 @@
 
 extern crate alloc;
 
+mod cuda_host;
 mod distributed;
+mod gpu;
 mod net;
 mod pool;
 
@@ -19,7 +21,7 @@ use pool::ThreadPool;
 use soso_abi::{self as abi, O_RDONLY};
 use soso_llm_core::parallel::RowParallel;
 use soso_llm_core::pipeline::{PipelinePlan, PipelineRole};
-use soso_llm_core::runtime::Runtime;
+use soso_llm_core::runtime::{Backend, Runtime};
 use soso_llm_core::sample::Sampler;
 use soso_llm_core::source::{FileMapper, MappedShard, MmapTensorSource};
 use soso_llm_core::tokenizer::{StreamDecoder, Tokenizer};
@@ -82,13 +84,20 @@ fn main(args: &str) -> u8 {
             .unwrap_or(16);
         let temp: f32 = parse_flag(&parts, "--temp")
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
+            .unwrap_or(0.7);
         let top_p: f32 = parse_flag(&parts, "--top-p")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.9);
         let seed: u64 = parse_flag(&parts, "--seed")
             .and_then(|v| v.parse().ok())
             .unwrap_or(42);
+        if let Some(cuda_host) = parse_flag(&parts, "--cuda-host") {
+            let text = if prompt.is_empty() { "hola" } else { &prompt };
+            let cfg = cuda_host::config_from_run(
+                &cuda_host, name, text, max_new, temp, top_p, seed,
+            );
+            return cuda_host::run(&cfg);
+        }
         if let Some(pipeline) = parse_flag(&parts, "--pipeline") {
             let splits = parse_splits(&parts).unwrap_or_default();
             let (step_to, hs_to, _) = parse_timeouts(&parts);
@@ -138,6 +147,7 @@ fn main(args: &str) -> u8 {
     }
     println!("uso:");
     println!("  soso-llm run <modelo> --prompt <texto> [--max <n>]");
+    println!("    [--cuda-host <ip:puerto>]  (inferencia CUDA en host Linux, L6-H)");
     println!("    [--pipeline <ip:puerto>,...] [--splits <n1,n2,...>]");
     println!("    [--step-timeout-ms <ms>] [--handshake-timeout-ms <ms>]");
     println!("    [--ping-interval-ms <ms>] [--ping-idle-ms <ms>]");
@@ -308,7 +318,7 @@ fn run_distributed_head(
     name: &str,
     prompt: &str,
     max_new: usize,
-    sampler: Sampler,
+    mut sampler: Sampler,
     seed: u64,
     pipeline: &str,
     splits: &str,
@@ -394,7 +404,7 @@ fn run_distributed_head(
             &cfg,
             text,
             max_new,
-            sampler,
+            &mut sampler,
             seed,
             par,
         )
@@ -471,11 +481,24 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
 
     let mut gpu = abi::GpuInfo::default();
     let _ = sys::gpu_info(&mut gpu);
+    let mut sys_gpu = gpu::SysGpu::new();
     if gpu.present != 0 {
-        println!("soso-llm: GPU detectada, VRAM libre {} bytes", gpu.vram_free);
+        println!(
+            "soso-llm: GPU detectada, VRAM libre {} bytes (GSP offload)",
+            gpu.vram_free
+        );
+        bundle.rt.set_backend(Backend::Auto);
+        if let Some(ref mut g) = sys_gpu {
+            bundle.rt.tiers.vram_budget = gpu.vram_free as usize;
+        }
     } else {
         println!("soso-llm: backend CPU");
+        bundle.rt.set_backend(Backend::Cpu);
     }
+
+    let mut gpu_ref: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = sys_gpu
+        .as_mut()
+        .map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
 
     let pool = ThreadPool::new();
     println!("soso-llm: workers={}", pool.workers());
@@ -501,6 +524,7 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
             }
         },
         par,
+        &mut gpu_ref,
     );
     match result {
         Ok(tokens) => {

@@ -90,7 +90,7 @@ pub fn run_head_standby(
     cfg: &DistributedConfig,
     prompt: &str,
     max_new: usize,
-    sampler: Sampler,
+    mut sampler: Sampler,
     seed: u64,
     par: Option<&dyn RowParallel>,
 ) -> Result<(), ()> {
@@ -100,7 +100,7 @@ pub fn run_head_standby(
     );
     loop {
         println!("soso-llm: standby buscando nodos libres...");
-        match run_head(rt, source, tok, cfg, prompt, max_new, sampler, seed, par) {
+        match run_head(rt, source, tok, cfg, prompt, max_new, &mut sampler, seed, par) {
             Ok(()) => println!("soso-llm: inferencia completada"),
             Err(()) => println!("soso-llm: nodos ocupados o sesión fallida"),
         }
@@ -116,7 +116,7 @@ pub fn run_head(
     cfg: &DistributedConfig,
     prompt: &str,
     max_new: usize,
-    sampler: Sampler,
+    sampler: &mut Sampler,
     seed: u64,
     par: Option<&dyn RowParallel>,
 ) -> Result<(), ()> {
@@ -291,7 +291,7 @@ fn run_head_step(
 ) -> Result<(), ()> {
     rt.embed_token(token, source)?;
     if head_seg.layer_end > head_seg.layer_start {
-        rt.forward_layers_range(head_seg.layer_start, head_seg.layer_end, source, par)?;
+        rt.forward_layers_range(head_seg.layer_start, head_seg.layer_end, source, par, &mut None)?;
     }
     let mut hidden = rt.hidden_slice().to_vec();
     let pos = rt.pos as u32;
@@ -464,7 +464,7 @@ fn run_node_session(
                     return Err(());
                 }
                 rt.set_hidden(&step.hidden)?;
-                rt.forward_layers_range(layer_start, layer_end, source, par)?;
+                rt.forward_layers_range(layer_start, layer_end, source, par, &mut None)?;
                 if is_tail && step.want_token != 0 {
                     let logits = rt.logits_par(source, par)?;
                     let token = sampler.sample(logits);
