@@ -31,8 +31,28 @@ pub fn run(args: &[String]) {
         }
     }
 
-    // 2) IOMMU + VFIO readiness
-    println!("\n2) IOMMU / VFIO");
+    // 2) VT-d / DMAR + IOMMU + VFIO
+    println!("\n2) VT-d / IOMMU / VFIO");
+    let dmar = Path::new("/sys/firmware/acpi/tables/DMAR").exists();
+    if dmar {
+        ok += 1;
+        println!("   OK    tabla DMAR presente (VT-d en firmware)");
+    } else {
+        fail += 1;
+        println!("   FAIL  sin tabla DMAR — activar VT-d en BIOS antes de IOMMU");
+        println!("         MSI Vector 16 HX: Advanced → Integrated Peripherals → VT-d → Enabled");
+    }
+
+    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let iommu_cmd = cmdline.contains("intel_iommu=on") || cmdline.contains("amd_iommu=on");
+    if iommu_cmd {
+        ok += 1;
+        println!("   OK    IOMMU en cmdline del kernel");
+    } else {
+        warn += 1;
+        println!("   WARN  falta intel_iommu=on — sudo ./scripts/l6-g1-enable-iommu.sh && reboot");
+    }
+
     let iommu_groups = fs::read_dir("/sys/kernel/iommu_groups")
         .map(|d| d.count())
         .unwrap_or(0);
@@ -101,6 +121,27 @@ pub fn run(args: &[String]) {
         }
     }
 
+    // 3b) Firmware descomprimido en rootfs (G2)
+    println!("\n3b) Firmware GSP en rootfs (soso)");
+    let rootfs_fw = super::project_root().join("rootfs/lib/firmware/nvidia/gb205/gsp");
+    let bins = [
+        "bootloader-570.144.bin",
+        "fmc-570.144.bin",
+        "gsp-570.144.bin",
+    ];
+    let mut rootfs_ok = 0u32;
+    for name in &bins {
+        let p = rootfs_fw.join(name);
+        if p.is_file() {
+            ok += 1;
+            rootfs_ok += 1;
+            println!("   OK    rootfs/.../gb205/gsp/{name}");
+        } else {
+            warn += 1;
+            println!("   WARN  falta rootfs/.../gb205/gsp/{name} — ./scripts/l6-pack-firmware.sh");
+        }
+    }
+
     // 4) nouveau / GSP en dmesg (solo informativo)
     println!("\n4) GSP en dmesg (nouveau, informativo)");
     let dmesg = run_capture("dmesg", &[]);
@@ -135,7 +176,9 @@ pub fn run(args: &[String]) {
     // Resumen go/no-go
     println!("\n=== Criterios go/no-go (automático parcial) ===");
     let fw_ok = fw_root.is_dir() && !collect_gsp_blobs(fw_root).is_empty();
+    print_criterion("Tabla DMAR / VT-d en BIOS", dmar);
     print_criterion("Firmware GSP redistribuible (linux-firmware)", fw_ok);
+    print_criterion("Firmware gb205 en rootfs (G2: boot + 2×ELF)", rootfs_ok == 3);
     print_criterion("IOMMU activo (prerrequisito VFIO)", iommu_groups > 0);
     let boot0_ok = check_nv_pmc_boot0_log();
     print_criterion(
@@ -173,9 +216,13 @@ SOSO_QEMU_GPU=vfio:{bdf} cargo xtask run
             );
         }
     } else {
-        println!("\nTip: cargo xtask g1-check --vfio-hint  → comandos bind VFIO");
+        println!("\nTip: ./scripts/l6-g1-preflight.sh  → diagnóstico BIOS + GRUB");
+        println!("     cargo xtask g1-check --vfio-hint  → comandos bind VFIO");
         println!("     sudo ./scripts/l6-g1-enable-iommu.sh  → GRUB + update-grub");
         println!("     sudo ./scripts/l6-g1-vfio-test.sh   → bind VFIO + prueba soso (TTY)");
+        if !dmar {
+            println!("     sudo ./scripts/l6-g1-vfio-noiommu.sh → BAR0 sin IOMMU (no cierra G1)");
+        }
     }
 
     println!("\n=== Resumen: {ok} OK, {warn} WARN, {fail} FAIL ===");

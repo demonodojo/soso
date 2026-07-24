@@ -140,12 +140,20 @@ fn ensure_linux(root: &Path) {
 fn cc_flags(root: &Path) -> Vec<String> {
     let linux = linux_root(root);
     let shim = root.join("lxdde/shim/include");
+    let nouveau = linux.join("drivers/gpu/drm/nouveau");
     let mut inc = vec![
         format!("-I{}", shim.display()),
         format!("-I{}", linux.join("arch/x86/include").display()),
         format!("-I{}", linux.join("arch/x86/include/uapi").display()),
         format!("-I{}", linux.join("include").display()),
         format!("-I{}", linux.join("include/uapi").display()),
+        // Include dirs privados de nouveau (equivalentes al Kbuild del driver):
+        // resuelven "priv.h" relativo, <core/*.h>, <subdev/*.h> de nvkm.
+        // Solo son rutas -I: inocuos para los demás ports.
+        format!("-I{}", nouveau.join("include").display()),
+        format!("-I{}", nouveau.join("include/nvkm").display()),
+        format!("-I{}", nouveau.join("nvkm").display()),
+        format!("-I{}", nouveau.display()),
     ];
     let mut flags = vec![
         "-target".into(),
@@ -171,6 +179,9 @@ fn cc_flags(root: &Path) -> Vec<String> {
         format!("{}/autoconf.h", shim.display()),
         "-include".into(),
         format!("{}/linux/compat.h", shim.display()),
+        // El build real del kernel fuerza kconfig.h globalmente (IS_ENABLED, etc.).
+        "-include".into(),
+        format!("{}/linux/kconfig.h", shim.display()),
     ];
     flags.extend(inc);
     flags
@@ -275,7 +286,12 @@ fn provided_symbols() -> HashSet<&'static str> {
 fn generate_stubs(root: &Path, out_dir: &Path, objects: &[PathBuf]) -> PathBuf {
     let stubs_path = root.join("lxdde/shim/src/generated_dummies.c");
     let provided = provided_symbols();
+    // Recolectar por separado símbolos definidos y no definidos en TODO el
+    // conjunto de objetos: un dummy solo hace falta para lo undefined que
+    // ningún objeto define (evita definiciones duplicadas, p.ej. nvkm_gsp_new_
+    // definido en base.o pero U en ga102.o).
     let mut undefined = HashSet::new();
+    let mut defined = HashSet::new();
 
     for obj in objects {
         let output = Command::new("nm")
@@ -291,17 +307,30 @@ fn generate_stubs(root: &Path, out_dir: &Path, objects: &[PathBuf]) -> PathBuf {
             if line.is_empty() || line.starts_with("nm:") {
                 continue;
             }
+            // Formato nm: "<addr> <T> <name>" (definido) o "<U> <name>" (no def).
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 3 {
+            if parts.len() < 2 {
                 continue;
             }
-            let sym_type = parts.get(1).copied().unwrap_or("");
             let name = parts.last().copied().unwrap_or("");
-            if sym_type == "U" && !provided.contains(name) && !name.starts_with("__") {
-                undefined.insert(name.to_string());
+            // El tipo es el token anterior al nombre (U para undefined).
+            let sym_type = parts[parts.len() - 2];
+            if sym_type == "U" {
+                // Los `__`-prefijados suelen ser builtins del compilador (no
+                // stub), salvo la API interna de nvkm (`__nvkm_*`).
+                let skip_underscore = name.starts_with("__") && !name.starts_with("__nvkm");
+                if !provided.contains(name) && !skip_underscore {
+                    undefined.insert(name.to_string());
+                }
+            } else if sym_type != "w" && sym_type != "v" {
+                // Cualquier definición real (T/t/D/B/R/…) satisface el símbolo.
+                defined.insert(name.to_string());
             }
         }
     }
+
+    // Solo dummy para lo que nadie define.
+    undefined.retain(|n| !defined.contains(n));
 
     if undefined.is_empty() {
         let _ = fs::write(&stubs_path, "/* sin stubs */\n");

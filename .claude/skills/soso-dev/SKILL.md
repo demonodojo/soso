@@ -31,8 +31,17 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
 | `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (host tool) |
 | `cargo xtask lx-build` | Compilar `liblxdde.a` (drivers Linux portados) |
+| `cargo xtask lx-build nouveau` | Compilar solo el port nouveau/nvkm (GPU, L6/G3) |
+| `cargo xtask g1-check` | Checklist host G1 (IOMMU/VFIO, firmware, BAR0) |
+| `cargo xtask g3-check` | Checklist bring-up GSP (firmware, módulos, fases) |
+| `./scripts/l6-pack-firmware.sh` | Empaquetar firmware GSP gb205 (.zst→.bin) en rootfs |
+| `./scripts/l6-g3-nvkm-inventory.sh <lista>` | Inventariar símbolos nvkm undefined |
 
 **Exit QEMU:** `Ctrl-A X` (not Ctrl-C).
+
+> **GPU / L6 (NVIDIA nouveau/GSP):** para todo lo relativo a la GPU nativa —
+> roadmap G1→G5, capa lxdde/nvkm, firmware GSP, VFIO/IOMMU, shims de cabecera —
+> usa la skill **`soso-gpu`**.
 
 ## What `run` does
 

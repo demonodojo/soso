@@ -1,0 +1,4 @@
+# Ola 1 — prueba de compilación nvkm GSP (Linux 6.6.32)
+# Añadir líneas de a una; medir stubs con scripts/l6-g3-nvkm-inventory.sh
+drivers/gpu/drm/nouveau/nvkm/subdev/gsp/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/gsp/ga102.c

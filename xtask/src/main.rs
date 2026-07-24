@@ -57,6 +57,10 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             g1_check::run(&args);
         }
+        "g3-check" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            g3_check::run(&args);
+        }
         "test-distributed-llm" => {
             test_distributed::run();
         }
@@ -66,7 +70,7 @@ fn main() {
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-distributed-llm | test-distributed-llm-3 | convert-gguf | package-usb | package-usb-live | lx-build | bench-llm | g1-check)"
+                 (usa build | run | gdb | mkfs | test | test-distributed-llm | test-distributed-llm-3 | convert-gguf | package-usb | package-usb-live | lx-build | bench-llm | g1-check | g3-check)"
             );
             exit(2);
         }
@@ -75,6 +79,7 @@ fn main() {
 
 mod bench;
 mod g1_check;
+mod g3_check;
 mod lx_build;
 mod package_live;
 mod test;
@@ -304,12 +309,14 @@ pub(crate) fn mkfs_rootfs(force: bool) -> PathBuf {
         return path;
     }
     let pubkey = client_pubkey();
+    let fw = root.join("rootfs/lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin");
+    let disk_mib: u64 = if fw.exists() { 128 } else { 64 };
     let status = Command::new("cargo")
         .current_dir(&root)
         .args(["run", "-q", "-p", "mkfs-soso", "--"])
         .arg(root.join("rootfs"))
         .arg(&path)
-        .arg("64")
+        .arg(disk_mib.to_string())
         .arg(&pubkey)
         .status()
         .expect("no se pudo ejecutar mkfs-soso");
@@ -485,8 +492,8 @@ fn pack_nvidia_firmware(root: &Path) {
     if !script.exists() {
         return;
     }
-    let fw_dst = root.join("rootfs/lib/firmware/nvidia");
-    if fw_dst.exists() && fw_dst.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
+    let fw_dst = root.join("rootfs/lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin");
+    if fw_dst.exists() {
         return;
     }
     let status = Command::new("bash")

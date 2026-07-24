@@ -1,5 +1,8 @@
 # L6 G1 — GPU NVIDIA: checklist de progreso
 
+**Camino principal:** GPU autónoma en soso (G1→G5). Ver
+[`L6-native-autonomy.md`](L6-native-autonomy.md).
+
 ## Objetivo
 
 Verificar acceso BAR0 y firmware GSP en la GPU objetivo antes de invertir en G3–G5
@@ -20,9 +23,8 @@ Verificar acceso BAR0 y firmware GSP en la GPU objetivo antes de invertir en G3�
 | G3 | GSP boot vía nvkm (sin display) | Log `nouveau-lx: GSP booted` |
 | G4 | Saxpy SASS en GPU | `SYS_GPU_SUBMIT` SAXPY correcto |
 | G5 | matvec híbrido en soso-llm | tok/s GPU > CPU en mismo modelo |
-| **L6-H** | **CUDA en host Linux** | `soso-llm --cuda-host` + `cuda-proxy` + llama-server |
 
-Ver [`L6-H-cuda-hybrid.md`](L6-H-cuda-hybrid.md) para inferencia CUDA **ya** (no requiere G3).
+L6-H (CUDA en host) es **opcional** — [`L6-H-cuda-hybrid.md`](L6-H-cuda-hybrid.md).
 
 ## Checklist G1 (host)
 
@@ -55,6 +57,7 @@ cargo xtask lx-build nouveau
 SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build
 
 # 1) Activar IOMMU en GRUB (root, luego reiniciar)
+./scripts/l6-g1-preflight.sh
 sudo ./scripts/l6-g1-enable-iommu.sh
 
 # 2) Tras reinicio: checklist (debe mostrar grupos IOMMU > 0)
@@ -65,19 +68,57 @@ sudo ./scripts/l6-g1-vfio-test.sh
 
 # VFIO passthrough manual
 SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
-
-# L6-H: CUDA en host (llama-server + proxy; ver L6-H-cuda-hybrid.md)
-./scripts/l6-h-start-cuda.sh /path/to/model.gguf
-# en soso: soso-llm run <modelo> --cuda-host 10.0.2.2:11400 --prompt "..."
 ```
 
 ## Procedimiento de cierre G1 (esta máquina)
 
-1. **BIOS:** VT-d / Intel Virtualization Technology → Enabled.
-2. **GRUB:** `sudo ./scripts/l6-g1-enable-iommu.sh` → `sudo reboot`.
-3. **Verificar:** `cargo xtask g1-check` (IOMMU > 0).
-4. **TTY:** Ctrl+Alt+F3, login, `sudo ./scripts/l6-g1-vfio-test.sh`.
-5. **Registrar:** anotar abajo `NV_PMC_BOOT_0` y chipset id.
+**Placa:** MSI Vector 16 HX AI (`10de:2f18` en `01:00.0`).
+
+Diagnóstico rápido:
+
+```bash
+./scripts/l6-g1-preflight.sh
+```
+
+### Paso A — BIOS (bloqueador actual: sin tabla DMAR)
+
+1. Reiniciar → **Del** / **F2** → BIOS MSI.
+2. **Advanced** → **Integrated Peripherals** → **Intel VT-d** (o *Virtualization Technology*) → **Enabled**.
+3. Guardar (**F10**) y reiniciar.
+4. Verificar: `test -r /sys/firmware/acpi/tables/DMAR && echo DMAR OK`
+
+### Paso B — GRUB
+
+```bash
+sudo ./scripts/l6-g1-enable-iommu.sh
+sudo reboot
+cargo xtask g1-check    # IOMMU > 0, DMAR GO
+```
+
+### Paso C — VFIO + soso (desde TTY, no desde la sesión gráfica)
+
+Ctrl+Alt+F3, login, luego:
+
+```bash
+cd ~/Trabajo/demonodojo/soso   # ajusta ruta
+sudo ./scripts/l6-g1-vfio-test.sh
+```
+
+Criterio **GO:** log `nvidia: GPU 10de:2f18 NV_PMC_BOOT_0=0x........`
+
+### Fallback (solo BAR0, no cierra G1 oficial)
+
+Si VT-d no está disponible aún:
+
+```bash
+sudo ./scripts/l6-g1-vfio-noiommu.sh
+```
+
+Marca **PARTIAL** — valida lectura BAR0 pero sin aislamiento IOMMU.
+
+### Registrar
+
+Anotar abajo `NV_PMC_BOOT_0` y chipset id tras el test.
 
 ## Resultados en esta máquina
 
@@ -85,7 +126,7 @@ SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 |------|-----------|
 | GPU | `01:00.0` **10de:2f18** — GeForce RTX 5070 Ti Mobile (GB205, Blackwell) |
 | Driver host | `nvidia` (propietario) |
-| IOMMU | Pendiente — VT-d + `intel_iommu=on iommu=pt` (ver pasos arriba) |
+| IOMMU | **BLOCK** — sin tabla DMAR (VT-d desactivado en BIOS MSI Vector 16 HX) |
 | Firmware GSP | **34 blobs** en `/lib/firmware/nvidia/` incl. `gb205/gsp/` |
 | NV_PMC_BOOT_0 en soso | Pendiente — requiere IOMMU + bind VFIO |
 | GSP en soso (G3) | Pendiente — `SOSO_LXDDE_MODE=nouveau` + nvkm bring-up |

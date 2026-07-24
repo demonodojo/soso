@@ -78,5 +78,5 @@ Componentes:
 | mini-DRM/GEM | `kernel/src/lxdde/drm.rs` |
 | Compute G4 | `kernel/src/drivers/nvidia_compute.rs` |
 
-Roadmap G1→G5: ver [`docs/L6-G1-gate.md`](../docs/L6-G1-gate.md).
+Roadmap G1→G5 (autonomía): [`docs/L6-native-autonomy.md`](../docs/L6-native-autonomy.md).
 La infraestructura D1–D2 (fibras, timers, PCI, DMA, IRQ, stubs) es base del port nvkm.

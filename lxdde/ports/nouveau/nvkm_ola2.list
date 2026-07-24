@@ -1,0 +1,11 @@
+# G3 ola 2 — port nvkm ACR (referencia Linux 6.6; enlazar vía source.list incremental)
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/tu102.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/ga102.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/ga100.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/gp102.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/gm200.c
+drivers/gpu/drm/nouveau/nvkm/falcon/ga102.c
+drivers/gpu/drm/nouveau/nvkm/falcon/gm200.c
+drivers/gpu/drm/nouveau/nvkm/falcon/fw.c
+drivers/gpu/drm/nouveau/nvkm/falcon/base.c

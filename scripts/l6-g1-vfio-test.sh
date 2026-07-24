@@ -17,6 +17,11 @@ echo "=== L6 G1 — prueba VFIO (${FULL}) ==="
 groups=$(find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
 if [[ "$groups" -eq 0 ]]; then
   echo "FAIL: 0 grupos IOMMU. ¿Reiniciaste tras l6-g1-enable-iommu.sh y VT-d en BIOS?" >&2
+  if [[ ! -r /sys/firmware/acpi/tables/DMAR ]]; then
+    echo "      Sin tabla DMAR — activa VT-d en BIOS (MSI: Advanced → Integrated Peripherals → VT-d)" >&2
+  fi
+  echo "      Preflight: ./scripts/l6-g1-preflight.sh" >&2
+  echo "      Fallback BAR0 (no oficial): sudo ./scripts/l6-g1-vfio-noiommu.sh" >&2
   exit 1
 fi
 echo "OK: ${groups} grupos IOMMU"
@@ -61,9 +66,11 @@ log="${ROOT}/target/g1-vfio-serial.log"
 mkdir -p "${ROOT}/target"
 rm -f "$log"
 
-echo "Lanzando soso (timeout 60s, log → ${log})..."
+echo "Lanzando soso (timeout 90s, log → ${log})..."
 cd "$ROOT"
-timeout 60 env SOSO_QEMU_GPU="vfio:${BDF}" cargo xtask run >"$log" 2>&1 || true
+run_user="${SUDO_USER:-$USER}"
+sudo -u "$run_user" -- env SOSO_QEMU_GPU="vfio:${BDF}" \
+  timeout 90 cargo xtask run >"$log" 2>&1 || true
 
 if grep -q 'NV_PMC_BOOT_0=' "$log"; then
   grep 'nvidia:' "$log" || true

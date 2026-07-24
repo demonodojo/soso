@@ -103,6 +103,27 @@ soso/
 - `SOSO_MODELS_DIR=<dir> cargo xtask run` empaqueta un modelo propio en vez de tiny
 - Userspace: `soso-llm run <modelo> --prompt <texto>` vía mmap + greedy decode; mmap pagina bajo demanda (`handle_mmap_fault` — ojo: `map_page` toma `FRAME_ALLOC`, no llamarla con ese lock tomado)
 
+## Capa lxdde + GPU (L6, en curso)
+
+- **lxdde** (`lxdde/`): capa DDE estilo `lx_emul` que compila C (drivers Linux
+  portados o first-party) a `liblxdde.a` y lo enlaza al kernel Rust. Ports:
+  `spike`, `testdrv`, `e1000e`, `nouveau`. Build: `cargo xtask lx-build <port>`
+  lee `source.list`, compila con clang freestanding, y autogenera dummies
+  (`lx_emul_trace_and_stop`) para símbolos undefined no provistos.
+- **Port nouveau/nvkm** (`lxdde/ports/nouveau/`): bring-up de la GPU NVIDIA GB205
+  (GSP). Estado: firmware + staging GEM + secuencia ACR/falcon lx-native, con
+  **soft boot** (compute aún en CPU); Ola 1 del port nvkm real de Linux 6.6.32
+  (`nvkm/subdev/gsp/*`) ya **compila e integra** vía shims mínimos en
+  `lxdde/shim/include/` (slab/pci/mutex/... que cortan la avalancha de cabeceras
+  arch del kernel).
+- **Syscalls GPU** (`soso-abi`): `SYS_GPU_INFO=17`, `SYS_GPU_ALLOC=18`,
+  `SYS_GPU_MAP=19`, `SYS_GPU_SUBMIT=20`, `SYS_GPU_READ=33` (en `task/syscall.rs`).
+- **Puente Rust↔C**: `kernel/src/lxdde/gpu.rs` (`lx_nouveau_*`), drivers en
+  `kernel/src/drivers/{gpu,nvidia_probe,nvidia_compute}.rs`. Modo por
+  `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau`.
+- Detalle completo (roadmap G1→G5, VFIO/IOMMU, firmware, workflow de port nvkm):
+  skill **`soso-gpu`**.
+
 ## Coding constraints
 
 1. **Minimize scope** — smallest correct diff; match existing style

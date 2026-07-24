@@ -1,54 +1,32 @@
-/* G3: GSP bring-up gb205 — carga firmware + estado nvkm mínimo. */
+/* G3: GSP bring-up gb205 — firmware + ACR ola2 + poll MMIO. */
+#include "acr_lx.h"
+#include "gsp_fw.h"
+#include "gsp_mmio.h"
 #include "lx_emul.h"
 
 #define NV_PMC_BOOT_0_OFF 0x0000u
 #define GB205_DEVICE_ID   0x2f18u
+#define GSP_POLL_MS         2000u
 
 enum gsp_phase {
     GSP_NONE = 0,
     GSP_BAR0,
     GSP_FW_LOADING,
     GSP_FW_READY,
+    GSP_FW_STAGED,
+    GSP_ACR_LOAD,
+    GSP_ACR_AHESASC,
+    GSP_ACR_ASB,
+    GSP_KICK,
+    GSP_POLL,
     GSP_BOOTED,
+    GSP_BOOTED_SOFT,
 };
 
 static enum gsp_phase g_phase = GSP_NONE;
 static uint16_t g_device_id;
 static uint32_t g_boot0;
-static int g_fw_loaded;
-static void *g_bar0;
 static unsigned g_vram_bytes;
-
-static const char *const g_fw_gb205[] = {
-    "nvidia/gb205/gsp/bootloader-570.144.bin.zst",
-    "nvidia/gb205/gsp/fmc-570.144.bin.zst",
-    "nvidia/gb205/gsp/gsp-570.144.bin.zst",
-    "nvidia/ga102/gsp/gsp-570.144.bin.zst",
-    NULL,
-};
-
-static int load_fw_chain(void)
-{
-    const char *const *p;
-    g_fw_loaded = 0;
-    g_phase = GSP_FW_LOADING;
-    for (p = g_fw_gb205; *p; p++) {
-        const unsigned char *data = NULL;
-        unsigned long len = 0;
-        if (lx_request_firmware(*p, &data, &len) == 0 && data && len > 0) {
-            g_fw_loaded++;
-            lx_printk("nouveau-lx: fw %s (%lu bytes)\n", *p, len);
-            lx_release_firmware(data);
-        }
-    }
-    if (g_fw_loaded == 0) {
-        lx_printk("nouveau-lx: sin firmware GSP en /lib/firmware/\n");
-        return -1;
-    }
-    g_phase = GSP_FW_READY;
-    lx_printk("nouveau-lx: %d blobs GSP cargados\n", g_fw_loaded);
-    return 0;
-}
 
 void lx_nouveau_set_boot0(unsigned boot0, unsigned device_id)
 {
@@ -65,6 +43,21 @@ static unsigned vram_for_device(uint16_t dev_id)
         return 12u * 1024u * 1024u * 1024u;
     }
     return 8u * 1024u * 1024u * 1024u;
+}
+
+static int try_hw_boot(void)
+{
+    g_phase = GSP_KICK;
+    if (gsp_mmio_kick_boot() != 0) {
+        return -1;
+    }
+    g_phase = GSP_POLL;
+    if (gsp_mmio_poll_ready(GSP_POLL_MS) == 0) {
+        g_phase = GSP_BOOTED;
+        lx_printk("nouveau-lx: GSP booted (hw poll ok, gb205)\n");
+        return 0;
+    }
+    return -1;
 }
 
 int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
@@ -89,30 +82,52 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
         lx_printk("nouveau-lx: BAR0 no mapeable\n");
         return -1;
     }
-    g_bar0 = bar;
-    boot0 = *(volatile uint32_t *)((unsigned char *)bar + NV_PMC_BOOT_0_OFF);
+    gsp_mmio_set_bar(bar, 16u * 1024u * 1024u);
+    boot0 = gsp_mmio_rd32(NV_PMC_BOOT_0_OFF);
     g_boot0 = boot0;
     g_phase = GSP_BAR0;
     lx_printk("nouveau-lx: BAR0 boot0=0x%08x dev=0x%04x\n", boot0, g_device_id);
 
-    if (load_fw_chain() != 0) {
+    g_phase = GSP_FW_LOADING;
+    if (gsp_fw_load_all() != 0) {
         return -1;
     }
+    g_phase = GSP_FW_READY;
 
-    if (g_device_id == GB205_DEVICE_ID) {
-        lx_printk("nouveau-lx: GB205 Blackwell — secuencia GSP\n");
+    if (gsp_fw_stage_all() != 0) {
+        lx_printk("nouveau-lx: GEM staging falló\n");
+        return -1;
+    }
+    g_phase = GSP_FW_STAGED;
+
+    g_phase = GSP_ACR_LOAD;
+    if (acr_lx_load() != 0) {
+        lx_printk("nouveau-lx: ACR firmware no cargado — sigue kick/poll\n");
+    } else {
+        g_phase = GSP_ACR_AHESASC;
+        if (acr_lx_boot_ahesasc() == 0) {
+            g_phase = GSP_ACR_ASB;
+            if (acr_lx_boot_asb() != 0) {
+                lx_printk("nouveau-lx: ACR ASB soft-fail — sigue kick/poll\n");
+            }
+        } else {
+            lx_printk("nouveau-lx: ACR AHESASC soft-fail — sigue kick/poll\n");
+        }
     }
 
-    /* Milestone G3: firmware + BAR0 + chipset id → GSP booted (soft).
-     * El port nvkm completo sustituirá esta transición por negociación GSP real. */
-    g_phase = GSP_BOOTED;
-    lx_printk("nouveau-lx: GSP booted (gb205, %u MiB VRAM)\n", g_vram_bytes / (1024u * 1024u));
+    if (try_hw_boot() == 0) {
+        return 0;
+    }
+
+    g_phase = GSP_BOOTED_SOFT;
+    lx_printk("nouveau-lx: GSP booted (soft, %u MiB VRAM)\n",
+              g_vram_bytes / (1024u * 1024u));
     return 0;
 }
 
 int lx_nouveau_gsp_ready(void)
 {
-    return g_phase == GSP_BOOTED ? 1 : 0;
+    return g_phase == GSP_BOOTED || g_phase == GSP_BOOTED_SOFT ? 1 : 0;
 }
 
 const char *lx_nouveau_gsp_status(void)
@@ -126,8 +141,22 @@ const char *lx_nouveau_gsp_status(void)
         return "fw_loading";
     case GSP_FW_READY:
         return "fw_ready";
+    case GSP_FW_STAGED:
+        return "fw_staged";
+    case GSP_ACR_LOAD:
+        return "acr_load";
+    case GSP_ACR_AHESASC:
+        return "acr_ahesasc";
+    case GSP_ACR_ASB:
+        return "acr_asb";
+    case GSP_KICK:
+        return "kick";
+    case GSP_POLL:
+        return "poll";
     case GSP_BOOTED:
         return "booted";
+    case GSP_BOOTED_SOFT:
+        return "booted_soft";
     default:
         return "?";
     }
@@ -150,12 +179,11 @@ int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n)
         }
         return 0;
     }
-    /* G4: staging en GEM + saxpy (canal compute cuando nvkm/gr esté enlazado). */
     for (i = 0; i < n; i++) {
         y[i] = a * x[i] + y[i];
     }
     lx_printk("nouveau-lx: saxpy n=%u a=%g (GSP channel)\n", n, (double)a);
-    return 1;
+    return g_phase == GSP_BOOTED ? 1 : 0;
 }
 
 int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned cols,
@@ -172,5 +200,5 @@ int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned cols,
         }
         y[r] = sum;
     }
-    return lx_nouveau_gsp_ready() ? 1 : 0;
+    return g_phase == GSP_BOOTED ? 1 : 0;
 }

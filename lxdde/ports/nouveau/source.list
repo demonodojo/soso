@@ -1,3 +1,18 @@
 # nouveau/nvkm — bring-up GSP gb205 (G3)
+lxdde/ports/nouveau/gsp_fw.c
+lxdde/ports/nouveau/gsp_mmio.c
 lxdde/ports/nouveau/gsp_bringup.c
+lxdde/ports/nouveau/acr_fw.c
+lxdde/ports/nouveau/falcon_lx.c
+lxdde/ports/nouveau/acr_lx.c
 lxdde/ports/nouveau/nouveau_stub.c
+
+# --- Ola 1: nvkm GSP subdev (Linux 6.6.32) ---
+# Compilan contra las cabeceras privadas de nouveau + shims lx_emul en
+# lxdde/shim/include (slab/pci/mutex/... mínimos que cortan la avalancha arch).
+# Los símbolos nvkm/kernel no resueltos se autogeneran como trace_and_stop.
+drivers/gpu/drm/nouveau/nvkm/subdev/gsp/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/gsp/ga102.c
+
+# Ola 2/3 nvkm (descomentar incrementalmente; ver nvkm_ola2.list + l6-g3-nvkm-inventory.sh):
+# drivers/gpu/drm/nouveau/nvkm/subdev/acr/base.c

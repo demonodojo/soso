@@ -1,40 +1,138 @@
 #!/usr/bin/env bash
-# Copia blobs GSP gb205 (y deps) desde linux-firmware del host a rootfs/.
-# Uso: ./scripts/l6-pack-firmware.sh
+# Copia solo blobs GSP gb205 (+ ga102 gsp si hay symlink) a rootfs/.
+# Descomprime .zst → .bin (G3; soso no tiene zstd en kernel).
+# Uso: ./scripts/l6-pack-firmware.sh [--repack]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${SOSO_FIRMWARE_SRC:-/lib/firmware/nvidia}"
 DST="${ROOT}/rootfs/lib/firmware/nvidia"
+REPACK=0
+[[ "${1:-}" == "--repack" ]] && REPACK=1
 
 if [[ ! -d "$SRC" ]]; then
   echo "FAIL: no existe $SRC (instala linux-firmware)" >&2
   exit 1
 fi
 
+if [[ "$REPACK" -eq 1 && -d "$DST" ]]; then
+  rm -rf "$DST"
+fi
+
 mkdir -p "$DST"
 
-copy_tree() {
+copy_one() {
   local rel="$1"
-  if [[ -d "$SRC/$rel" ]]; then
-    mkdir -p "$DST/$rel"
-    cp -rL "$SRC/$rel/." "$DST/$rel/" 2>/dev/null || cp -r "$SRC/$rel/." "$DST/$rel/"
-    echo "OK: $rel"
-  elif [[ -L "$SRC/$rel" ]]; then
-    mkdir -p "$(dirname "$DST/$rel")"
+  local dir
+  dir="$(dirname "$rel")"
+  mkdir -p "$DST/$dir"
+  if [[ -L "$SRC/$rel" ]]; then
     cp -rL "$SRC/$rel" "$DST/$rel" 2>/dev/null || cp -r "$SRC/$rel" "$DST/$rel"
     echo "OK: $rel (symlink)"
+  elif [[ -f "$SRC/$rel" ]]; then
+    cp "$SRC/$rel" "$DST/$rel"
+    echo "OK: $rel"
   else
-    echo "WARN: falta $rel en $SRC"
+    echo "WARN: falta $rel en $SRC" >&2
+    return 1
   fi
 }
 
-echo "=== L6 pack firmware → rootfs/lib/firmware/nvidia ==="
-copy_tree "gb205/gsp"
-copy_tree "ga102/gsp"
-copy_tree "tu102/gsp"
+decompress_zst_in() {
+  local dir="$1"
+  if ! command -v zstd >/dev/null 2>&1; then
+    echo "FAIL: zstd no instalado (apt install zstd)" >&2
+    exit 1
+  fi
+  local n=0
+  while IFS= read -r -d '' zst; do
+    local out="${zst%.zst}"
+    zstd -d -f -q "$zst" -o "$out"
+    rm -f "$zst"
+    n=$((n + 1))
+  done < <(find "$dir" -name '*.zst' -print0 2>/dev/null)
+  echo "Descomprimidos $n blobs (solo .bin en rootfs)"
+}
+
+resolve_symlink_target() {
+  local link="$1"
+  if [[ -L "$DST/$link" ]]; then
+    local target
+    target=$(readlink "$DST/$link")
+    if [[ "$target" == ../* ]]; then
+      local base
+      base=$(dirname "$link")
+      target="${base}/${target#../}"
+    fi
+    echo "$target"
+  fi
+}
+
+verify_gb205() {
+  local bl=0 elf=0 acr=0
+  local bl_path="$DST/gb205/gsp/bootloader-570.144.bin"
+  local fmc="$DST/gb205/gsp/fmc-570.144.bin"
+  local gsp="$DST/gb205/gsp/gsp-570.144.bin"
+
+  if [[ -f "$bl_path" ]] && [[ $(stat -c%s "$bl_path") -gt 4096 ]]; then
+    echo "OK: gb205/gsp/bootloader-570.144.bin ($(stat -c%s "$bl_path") bytes)"
+    bl=1
+  fi
+  for f in "$fmc" "$gsp"; do
+    if [[ -f "$f" ]] && head -c 4 "$f" | grep -q $'^\x7fELF'; then
+      echo "OK: ${f#$DST/} (ELF)"
+      elf=$((elf + 1))
+    fi
+  done
+  for f in ga102/acr/ucode_ahesasc.bin ga102/acr/ucode_asb.bin; do
+    if [[ -f "$DST/$f" ]] && [[ $(stat -c%s "$DST/$f") -gt 4096 ]]; then
+      echo "OK: $f ($(stat -c%s "$DST/$f") bytes)"
+      acr=$((acr + 1))
+    fi
+  done
+  if [[ "$bl" -eq 0 || "$elf" -lt 2 ]]; then
+    echo "FAIL: gb205 GSP incompleto (bootloader=$bl ELF=$elf/2)" >&2
+    exit 1
+  fi
+  if [[ "$acr" -lt 2 ]]; then
+    echo "WARN: ACR ga102 incompleto ($acr/2) — G3 ola2 soft-fail" >&2
+  fi
+}
+
+echo "=== L6 pack firmware (mínimo gb205) → rootfs/lib/firmware/nvidia ==="
+
+GB205=(
+  gb205/gsp/bootloader-570.144.bin.zst
+  gb205/gsp/fmc-570.144.bin.zst
+  gb205/gsp/gsp-570.144.bin.zst
+)
+for f in "${GB205[@]}"; do
+  copy_one "$f" || true
+done
+
+# gsp-570 suele ser symlink → ga102/gsp/gsp-570.144.bin.zst
+copy_one "ga102/gsp/gsp-570.144.bin.zst" || true
+
+GA102_ACR=(
+  ga102/acr/ucode_ahesasc.bin.zst
+  ga102/acr/ucode_asb.bin.zst
+)
+for f in "${GA102_ACR[@]}"; do
+  copy_one "$f" || true
+done
+
+decompress_zst_in "$DST"
+
+# Enlace gb205/gsp/gsp-570.144.bin → ga102 descomprimido (si aplica)
+if [[ ! -e "$DST/gb205/gsp/gsp-570.144.bin" && -f "$DST/ga102/gsp/gsp-570.144.bin" ]]; then
+  ln -sf "../../ga102/gsp/gsp-570.144.bin" "$DST/gb205/gsp/gsp-570.144.bin"
+  echo "OK: gb205/gsp/gsp-570.144.bin → ga102/gsp/gsp-570.144.bin"
+fi
+
+verify_gb205
 
 count=$(find "$DST" -type f 2>/dev/null | wc -l)
+du_human=$(du -sh "$DST" | cut -f1)
 echo ""
-echo "Empaquetados $count ficheros bajo rootfs/lib/firmware/nvidia"
-echo "Regenera imagen: cargo xtask build  (o mkfs rootfs)"
+echo "Empaquetados $count ficheros ($du_human) bajo rootfs/lib/firmware/nvidia"
+echo "Regenera imagen: cargo xtask build"

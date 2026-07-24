@@ -18,4 +18,13 @@
 #define CONFIG_DRM 1
 #define CONFIG_DRM_NOUVEAU 1
 
+/* nvkm (nouveau) arrastra la cadena real de cabeceras del kernel: define las
+ * macros de .config que esas cabeceras esperan. Valores x86_64 estándar. */
+#define CONFIG_X86_L1_CACHE_SHIFT 6
+#define CONFIG_X86_INTERNODE_CACHE_SHIFT 6
+#define CONFIG_NR_CPUS 1
+#define CONFIG_BASE_SMALL 0
+/* Paginación x86_64 de 4 niveles (evita el fallback pgtable-nopmd que choca). */
+#define CONFIG_PGTABLE_LEVELS 4
+
 #endif /* AUTOCONF_H */
