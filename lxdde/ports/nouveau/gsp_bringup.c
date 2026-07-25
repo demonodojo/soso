@@ -119,7 +119,22 @@ static uint64_t vram_for_device(uint16_t dev_id)
     return 8ull * 1024ull * 1024ull * 1024ull;
 }
 
-/* Una BAR de 64 bits: dword bajo sin los bits de tipo, más el alto. */
+/* Mapa de BARs de una GPU NVIDIA en el espacio de configuración:
+ *
+ *   0x10  BAR0  registros, 16 MiB, **32 bits**
+ *   0x14  BAR1  apertura de FB, 64 bits prefetchable  (ocupa 0x14 y 0x18)
+ *   0x1c  BAR3  instancia,      64 bits prefetchable  (ocupa 0x1c y 0x20)
+ *   0x24  BAR5  E/S
+ *
+ * Que BAR0 sea de 32 bits es justo lo que se me pasó la primera vez: al leerla
+ * como si fuera de 64 me llevaba el dword bajo de BAR1 como parte alta, y las
+ * otras dos salían corridas media BAR. Con esas tres direcciones inventadas
+ * dentro del SET_SYSTEM_INFO, GSP-RM tumbó la GPU (2026-07-25). */
+static uint64_t pci_bar32(int off)
+{
+    return (uint64_t)(lx_pci_read_config(g_pdev, off, 4) & ~0xfu);
+}
+
 static uint64_t pci_bar64(int off)
 {
     uint32_t lo = lx_pci_read_config(g_pdev, off, 4);
@@ -136,9 +151,9 @@ static void collect_sysinfo(struct gsp_sysinfo *si)
     uint32_t ids = lx_pci_read_config(g_pdev, 0x00, 4);
     uint32_t sub = lx_pci_read_config(g_pdev, 0x2c, 4);
 
-    si->bar0_phys = pci_bar64(0x10);
-    si->bar1_phys = pci_bar64(0x18);
-    si->bar3_phys = pci_bar64(0x20);
+    si->bar0_phys = pci_bar32(0x10);
+    si->bar1_phys = pci_bar64(0x14);
+    si->bar3_phys = pci_bar64(0x1c);
     si->bdf = lx_pci_bdf(g_pdev);
     /* TASK_SIZE de x86-64: el límite de direcciones de usuario que asume RM. */
     si->max_user_va = 0x00007ffffffff000ull;
@@ -151,6 +166,28 @@ static void collect_sysinfo(struct gsp_sysinfo *si)
     si->subvendor_id = (uint16_t)sub;
     si->subdevice_id = (uint16_t)(sub >> 16);
     si->revision_id = (uint8_t)lx_pci_read_config(g_pdev, 0x08, 1);
+}
+
+/* Una apertura tiene que estar asignada y alineada a página; lo contrario
+ * significa que la hemos leído del sitio equivocado. */
+static int sysinfo_plausible(const struct gsp_sysinfo *si)
+{
+    const uint64_t bars[3] = { si->bar0_phys, si->bar1_phys, si->bar3_phys };
+    unsigned i;
+
+    for (i = 0; i < 3u; i++) {
+        if (bars[i] == 0 || (bars[i] & 0xfffu)) {
+            lx_printk("nouveau-lx: BAR%u = 0x%llx no es una apertura válida\n",
+                      i == 2u ? 3u : i, (unsigned long long)bars[i]);
+            return 0;
+        }
+    }
+    if (si->bar1_phys == si->bar3_phys) {
+        lx_printk("nouveau-lx: BAR1 y BAR3 coinciden (0x%llx)\n",
+                  (unsigned long long)si->bar1_phys);
+        return 0;
+    }
+    return 1;
 }
 
 /* Ruta Blackwell: el GSP lo arranca el FSP con la imagen GSP-FMC, no el ACR de
@@ -208,7 +245,11 @@ static int run_fmc_blackwell(void)
     if (gsp_cmdq_init(&g_libos, &g_cmdq) == 0) {
         struct gsp_sysinfo si;
         collect_sysinfo(&si);
-        if (gsp_cmdq_set_system_info(&g_cmdq, &si) != 0 ||
+        if (!sysinfo_plausible(&si)) {
+            /* Mejor arrancar sin system info que con direcciones falsas: lo
+             * segundo mata la GPU, lo primero solo hace fallar el init. */
+            lx_printk("nouveau-lx: BARs no creíbles — no se manda SET_SYSTEM_INFO\n");
+        } else if (gsp_cmdq_set_system_info(&g_cmdq, &si) != 0 ||
             gsp_cmdq_set_registry(&g_cmdq) != 0) {
             lx_printk("nouveau-lx: no se pudieron encolar SET_SYSTEM_INFO/SET_REGISTRY\n");
         }

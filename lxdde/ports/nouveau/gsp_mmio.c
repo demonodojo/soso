@@ -50,12 +50,13 @@ int gsp_mmio_pci_recover(void)
     }
     id = lx_pci_read_config(g_pdev, 0x00, 4);
     cmd = lx_pci_read_config(g_pdev, 0x04, 4);
+    /* BAR0 de NVIDIA es de 32 bits; 0x14 ya es BAR1. */
     bar0_lo = lx_pci_read_config(g_pdev, 0x10, 4);
     bar0_hi = lx_pci_read_config(g_pdev, 0x14, 4);
 
-    lx_printk("nouveau-lx: PCI cfg id=0x%08x cmd=0x%04x sts=0x%04x bar0=0x%08x%08x "
+    lx_printk("nouveau-lx: PCI cfg id=0x%08x cmd=0x%04x sts=0x%04x bar0=0x%08x bar1lo=0x%08x "
               "(mem=%u bm=%u)\n",
-              id, cmd & 0xffffu, (cmd >> 16) & 0xffffu, bar0_hi, bar0_lo,
+              id, cmd & 0xffffu, (cmd >> 16) & 0xffffu, bar0_lo, bar0_hi,
               (cmd & 0x2u) ? 1u : 0u, (cmd & 0x4u) ? 1u : 0u);
 
     if (id == 0xffffffffu || id == 0u) {
