@@ -120,7 +120,20 @@ pub fn run(_args: &[String]) {
         "G3b COT aceptado por el FSP (log)",
         log_contains(&log, "COT aceptado por el FSP"),
     );
-    print_criterion("G3b hw boot (log: GSP booted sin soft)", gsp_log_ok && log_contains(&log, "GSP booted (hw"));
+    // Con la GPU caída del bus todo el MMIO se lee 0xffffffff, y el poll de tu102
+    // lo tomaba por "listo": el 2026-07-25 esto dio un GO con la tarjeta muerta.
+    // Se detecta por el mensaje nuevo y, además, por la huella en crudo: un
+    // registro leído como 0xffffffff no es un registro, es silencio del bus.
+    let gpu_gone = log_contains(&log, "fuera del bus")
+        || log_contains(&log, "118128=0xffffffff")
+        || log_contains(&log, "boot0=0xffffffff");
+    if gpu_gone {
+        println!("   AVISO la GPU se cayó del bus en esta ejecución — el arranque no cuenta");
+    }
+    print_criterion(
+        "G3b hw boot (log: GSP booted sin soft)",
+        gsp_log_ok && log_contains(&log, "GSP booted (hw") && !gpu_gone,
+    );
     print_criterion(
         "G3b nvkm ACR port (inventario stubs)",
         root.join("lxdde/ports/nouveau/nvkm_ola2.list").exists(),

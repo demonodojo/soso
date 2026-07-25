@@ -76,6 +76,7 @@ enum gsp_phase {
     GSP_POLL,
     GSP_BOOTED,
     GSP_BOOTED_SOFT,
+    GSP_GONE,
 };
 
 static enum gsp_phase g_phase = GSP_NONE;
@@ -291,6 +292,14 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
         run_acr_sec2();
     }
 
+    /* Con la tarjeta fuera del bus no hay nada que sondear: el kick/poll de
+     * tu102 leería 0xffffffff y lo tomaría por "listo". */
+    if (!gsp_mmio_alive()) {
+        g_phase = GSP_GONE;
+        lx_printk("nouveau-lx: GPU fuera del bus — sin GSP\n");
+        return -1;
+    }
+
     if (try_hw_boot() == 0) {
         return 0;
     }
@@ -347,6 +356,8 @@ const char *lx_nouveau_gsp_status(void)
         return "booted";
     case GSP_BOOTED_SOFT:
         return "booted_soft";
+    case GSP_GONE:
+        return "gone";
     default:
         return "?";
     }

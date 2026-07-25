@@ -383,7 +383,41 @@ en 4 s. El mismo fallo afectaba a `gsp_mmio_poll_ready`.
 Arreglado: `sleep_ms` gira sobre `pit::uptime_ms()` cediendo a otras fibras cuando
 las hay, y detecta una sola vez si el PIT está parado (`CLOCK_DEAD`) para no colgar
 el arranque. La espera del lockdown pasa a 8 s y registra `mbox0`/`mbox1`/`HWCFG2`/
-`CPUCTL` cada segundo y al agotarse, que es lo que hará falta si vuelve a fallar.
+`CPUCTL` cada segundo y al agotarse.
+
+### Segunda prueba en hardware (2026-07-25): la GPU se cae del bus
+
+Con la espera ya de verdad, el arranque del FMC **empieza**:
+
+```
+GSP tras el COT  mbox0=0x00000000 hwcfg2=0x8187a7f7 (lockdown=1) cpuctl=0x00000180 (halted=0)
+GSP esperando    (igual)
+GSP-FMC falló (mbox0=0xffffffff)
+```
+
+`halted=0` dice que el core RISC-V del GSP **está corriendo**: el FSP aceptó el COT
+y el FMC arrancó. Pero al cabo de ~1 s **todo el MMIO pasa a leerse `0xffffffff`** —
+`mbox0`, `boot0`, `0x118128`, `0x118234`—, que es la firma de una GPU caída del bus
+(reset, enlace PCIe abajo o desaparición). El `nvidia: sin GPU NVIDIA en PCI` del
+resto del arranque lo confirma. La tarjeta se recupera al salir QEMU (VFIO la
+resetea al cerrar el fd).
+
+**Y produjo un GO falso.** `gsp_mmio_poll_ready` comprobaba `(a & 1) && ((b & 0xff)
+== 0xff)`, condición que `0xffffffff` cumple al pie de la letra: el checklist dio
+`G3b hw boot GO` con la tarjeta muerta. Corregido en tres sitios: `gsp_mmio_alive()`
+trata el all-ones como silencio del bus, el bucle del lockdown aborta con un mensaje
+propio en cuanto lo detecta, y `g3-check` degrada el criterio a PEND con aviso si
+encuentra la huella en el log (`fuera del bus`, `118128=0xffffffff`, `boot0=0xffffffff`).
+
+Qué falta por distinguir, y solo lo dice el `dmesg` del host justo después de una
+ejecución (`DMAR`/`AER`/`link`/`reset` para `0000:01:00.0`):
+
+- **reset del propio FMC** — la secuencia de secure boot resetea parte del chip y
+  VFIO/QEMU no lo sobrevive;
+- **fallo de IOMMU** — el FMC hace DMA a las direcciones que le dimos y la
+  traducción no está (saldría `DMAR: [DMA Read] Request device [01:00.0]`);
+- **error fatal al montar WPR en VRAM** — p. ej. si la tarjeta nunca fue POSTeada
+  (es la GPU secundaria y arranca directamente en `vfio-pci`).
 
 ### Verificación sin GPU
 

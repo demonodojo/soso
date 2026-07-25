@@ -155,6 +155,21 @@ detección única de reloj parado (`CLOCK_DEAD`) para no colgar el arranque si e
 no avanza. Afectaba también a `gsp_mmio_poll_ready`. **Si un poll de este port
 "falla instantáneamente", sospecha del reloj antes que del hardware.**
 
+**Gotcha 2 (2026-07-25): all-ones NO es "listo", es la GPU fuera del bus.**
+`gsp_mmio_poll_ready` daba por bueno `0x118128=0xffffffff` / `0x118234=0xffffffff`
+porque cumplen `(a&1) && ((b&0xff)==0xff)` — y así el checklist dio **`G3b hw boot
+GO` con la tarjeta muerta**. Ahora `gsp_mmio_alive()` trata el all-ones como
+silencio del bus, el bucle del lockdown aborta con mensaje propio, y `g3-check`
+degrada el criterio a PEND si ve la huella (`fuera del bus`, `118128=0xffffffff`,
+`boot0=0xffffffff`). **Antes de creerte un GO, mira que los registros del log no
+sean todo efes.**
+
+**Estado real del paso 6 (2026-07-25):** el FSP **acepta el COT** y el FMC
+**arranca** (`cpuctl halted=0`, lockdown aún 1), pero ~1 s después la GPU se cae
+del bus y todo se lee `0xffffffff`. Se recupera al salir QEMU. Para distinguir
+entre reset del FMC, fallo de IOMMU y error al montar WPR hace falta el `dmesg` del
+host justo después de la ejecución (`sudo dmesg | grep -iE "DMAR|AER|01:00|reset|link"`).
+
 **Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh`.** Compila los módulos
 de los pasos 3–6 en el host con la capa lx y **un FSP simulado detrás del MMIO**
 (`tools/gsp-hostcheck/main.c`) contra los blobs reales: hojas de la radix3 una a

@@ -352,6 +352,14 @@ int fsp_lx_boot_gsp_fmc(const struct fmc_staged *fmc, const struct gsp_libos *li
      * espera 4000 vueltas de `usleep_range(1000,2000)` = 4–8 s; aquí 8 s, que
      * este camino es lento y de una sola vez. */
     for (time = 8000; time > 0; time--) {
+        /* Si la tarjeta se cae del bus a mitad del arranque del FMC, todo el
+         * MMIO pasa a leerse 0xffffffff. Decirlo con estas palabras evita
+         * confundirlo con un código de error del FMC (2026-07-25). */
+        if (!gsp_mmio_alive()) {
+            lx_printk("nouveau-lx: la GPU se ha caído del bus mientras arrancaba el FMC\n");
+            log_gsp_state("fuera del bus");
+            return -1;
+        }
         if (lockdown_released(args_addr, &mbox0)) {
             break;
         }
