@@ -17,101 +17,33 @@ void lx_emul_trace_and_stop(const char *func)
         ;
 }
 
-static void emit_char(char c)
-{
-    lx_putchar((unsigned char)c);
-}
-
 static void emit_str(const char *s)
 {
     if (s)
         lx_puts(s);
 }
 
-static void emit_u32(unsigned v)
-{
-    char buf[16];
-    int i = 15;
-    buf[i--] = 0;
-    if (v == 0) {
-        emit_char('0');
-        return;
-    }
-    while (v && i >= 0) {
-        buf[i--] = (char)('0' + (v % 10));
-        v /= 10;
-    }
-    emit_str(buf + i + 1);
-}
-
-static void emit_hex_byte(unsigned v)
-{
-    static const char hex[] = "0123456789abcdef";
-    emit_char(hex[(v >> 4) & 0xf]);
-    emit_char(hex[v & 0xf]);
-}
-
-static void emit_hex(unsigned long v)
-{
-    emit_str("0x");
-    int started = 0;
-    for (int shift = 60; shift >= 0; shift -= 4) {
-        unsigned n = (unsigned)((v >> shift) & 0xf);
-        if (n || started || shift == 0) {
-            emit_char("0123456789abcdef"[n]);
-            started = 1;
-        }
-    }
-}
-
-static void emit_hex_fixed2(unsigned v)
-{
-    emit_hex_byte(v & 0xff);
-}
+/* printk delega en vsnprintf (más abajo): un único formateador para toda la capa.
+ *
+ * Antes había aquí un formateador propio que NO entendía flags de anchura: con
+ * "%08x" veía el '0', caía en default, emitía '?' y —lo grave— no consumía el
+ * va_arg. Eso desincronizaba los argumentos y el siguiente "%s" sacaba un entero
+ * como puntero: page fault al desreferenciar NV_PMC_BOOT_0 (0x1b5000a1) durante el
+ * bring-up de la GPU, 2026-07-24. */
+int vsnprintf(char *buf, unsigned long size, const char *fmt, va_list ap);
 
 int lx_vprintk(const char *fmt, va_list ap)
 {
+    /* Línea de log típica de nvkm: holgado. Si se truncara, vsnprintf termina en
+     * NUL dentro del buffer, nunca desborda. */
+    char line[1024];
+
     if (!fmt)
         return 0;
     emit_str("lx: ");
-    for (const char *p = fmt; *p; p++) {
-        if (*p != '%' || !p[1]) {
-            emit_char(*p);
-            continue;
-        }
-        p++;
-        switch (*p) {
-        case 's':
-            emit_str(va_arg(ap, const char *));
-            break;
-        case 'd':
-        case 'i':
-            emit_u32((unsigned)va_arg(ap, int));
-            break;
-        case 'u':
-            emit_u32(va_arg(ap, unsigned));
-            break;
-        case 'x':
-        case 'p':
-            emit_hex(va_arg(ap, unsigned long));
-            break;
-        case '2':
-            if (p[1] == 'x' || p[1] == 'X') {
-                p++;
-                emit_hex_fixed2(va_arg(ap, unsigned));
-            } else {
-                emit_char('?');
-            }
-            break;
-        case '%':
-            emit_char('%');
-            break;
-        default:
-            emit_char('?');
-            break;
-        }
-    }
-    return 0;
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    emit_str(line);
+    return n;
 }
 
 int lx_printk(const char *fmt, ...)
@@ -232,25 +164,59 @@ int vsnprintf(char *buf, unsigned long size, const char *fmt, va_list ap)
             continue;
         }
         p++;
-        int zero = 0, width = 0, longs = 0;
+        int zero = 0, width = 0, longs = 0, prec = -1;
         while (*p == '0' || *p == '-' || *p == '+' || *p == ' ' || *p == '#') {
             if (*p == '0')
                 zero = 1;
             p++;
         }
-        while (*p >= '0' && *p <= '9') {
-            width = width * 10 + (*p - '0');
+        /* Anchura: dígitos o '*' (toma un int de la lista). El '*' hay que
+         * consumirlo siempre, aunque no lo usemos: si no, se desincronizan los
+         * argumentos restantes. */
+        if (*p == '*') {
+            width = va_arg(ap, int);
+            if (width < 0)
+                width = -width;
             p++;
+        } else {
+            while (*p >= '0' && *p <= '9') {
+                width = width * 10 + (*p - '0');
+                p++;
+            }
         }
-        while (*p == 'l' || *p == 'z' || *p == 'h') {
+        if (*p == '.') {
+            p++;
+            prec = 0;
+            if (*p == '*') {
+                prec = va_arg(ap, int);
+                p++;
+            } else {
+                while (*p >= '0' && *p <= '9') {
+                    prec = prec * 10 + (*p - '0');
+                    p++;
+                }
+            }
+            if (prec < 0)
+                prec = -1;
+        }
+        while (*p == 'l' || *p == 'z' || *p == 'h' || *p == 't') {
             if (*p == 'l')
                 longs++;
             p++;
         }
         switch (*p) {
-        case 's':
-            sb_puts(&s, va_arg(ap, const char *));
+        case 's': {
+            const char *str = va_arg(ap, const char *);
+            if (prec < 0) {
+                sb_puts(&s, str);
+            } else {
+                if (!str)
+                    str = "(null)";
+                for (int i = 0; i < prec && str[i]; i++)
+                    sb_putc(&s, str[i]);
+            }
             break;
+        }
         case 'c':
             sb_putc(&s, (char)va_arg(ap, int));
             break;
