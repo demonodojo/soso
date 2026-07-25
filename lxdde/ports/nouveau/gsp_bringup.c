@@ -8,6 +8,7 @@
 #include "fsp_lx.h"
 #include "gsp_libos.h"
 #include "gsp_rm.h"
+#include "gsp_rpc.h"
 #include "gsp_wpr.h"
 #include "lx_emul.h"
 
@@ -75,6 +76,7 @@ enum gsp_phase {
     GSP_KICK,
     GSP_POLL,
     GSP_BOOTED,
+    GSP_RM_READY,
     GSP_BOOTED_SOFT,
     GSP_GONE,
 };
@@ -84,6 +86,7 @@ static struct gsp_rm_fw g_rm;   /* imagen GSP-RM + radix3, viva hasta el boot */
 static struct gsp_wpr g_wpr;    /* bootloader + GspFwWprMeta (solo ruta FMC) */
 static struct gsp_libos g_libos;    /* colas, logs, RMARGS y boot params */
 static struct fmc_staged g_fmc;     /* imagen FMC + cadena de firma en sysmem */
+static struct gsp_rpc g_rpc;        /* anillo de mensajes de GSP-RM */
 static uint16_t g_device_id;
 static uint32_t g_boot0;
 static uint64_t g_vram_bytes;
@@ -287,6 +290,17 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
             g_phase = GSP_BOOTED;
             lx_printk("nouveau-lx: GSP booted (hw, GSP-FMC vía FSP, %u MiB VRAM)\n",
                       (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+
+            /* Ya arrancado, GSP-RM habla por las colas. Escuchar su primer
+             * mensaje es best-effort: si no llega, el GSP sigue arrancado. */
+            if (gsp_rpc_init(&g_libos, &g_rpc) == 0 &&
+                gsp_rpc_start(g_wpr.boot.app_version) == 0 &&
+                gsp_rpc_wait_event(&g_rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 4000) == 0) {
+                g_phase = GSP_RM_READY;
+                lx_printk("nouveau-lx: GSP-RM listo (RPC en marcha)\n");
+            } else {
+                lx_printk("nouveau-lx: GSP arrancado pero GSP-RM no responde por RPC\n");
+            }
             return 0;
         }
     } else {
@@ -355,6 +369,8 @@ const char *lx_nouveau_gsp_status(void)
         return "poll";
     case GSP_BOOTED:
         return "booted";
+    case GSP_RM_READY:
+        return "rm_ready";
     case GSP_BOOTED_SOFT:
         return "booted_soft";
     case GSP_GONE:

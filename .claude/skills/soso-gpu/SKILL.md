@@ -178,6 +178,19 @@ una demostración, pero **conviene tenerlo enmascarado mientras se itera en L6**
 (`unmask` al devolver la GPU al host). El daemon no puede funcionar de todos modos:
 no hay GPU que persistir cuando está en `vfio-pci`.
 
+**Pila RPC (`gsp_rpc.c`), primer tramo: recibir.** Con el GSP arrancado, GSP-RM
+habla por las colas del paso 5. Dos cabeceras por elemento: `r535_gsp_msg` (48 B) y
+`nvfw_gsp_rpc` (32 B, con `length`/`function`/`rpc_result`), ambas con assert de
+tamaño. **Lo que se presta a error son los punteros cruzados**: el `writePtr` de la
+cola de mensajes está en su cabecera `tx` (lo escribe el GSP) pero su `readPtr`
+está en la cabecera `rx` de la **cola de comandos** (lo escribimos nosotros); y las
+entradas empiezan **detrás** de la primera página del anillo. Se avanza
+`ceil((length + 48) / 4096)` páginas módulo 63. Antes de escuchar hay que publicar
+`app_version` en `0x110080` y comprobar el bit 7 de `NV_PRISCV_RISCV_CPUCTL`
+(`0x111388`, `ga102_flcn_riscv_active`) — en el arranque que cerró G3b ya valía
+`0x180`. Hito: ver llegar **`GSP_INIT_DONE`** (evento `0x1001`). Falta el envío por
+la cmdq.
+
 **Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh`.** Compila los módulos
 de los pasos 3–6 en el host con la capa lx y **un FSP simulado detrás del MMIO**
 (`tools/gsp-hostcheck/main.c`) contra los blobs reales: hojas de la radix3 una a
@@ -255,7 +268,8 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `gsp_wpr.c` | Bootloader RISC-V en sysmem + **`GspFwWprMeta`** | fase `wpr_meta`, solo lee VRAM |
 | `gsp_libos.c` | Colas, logs, RMARGS, **`GSP_FMC_BOOT_PARAMS`** | fases `libos_args`/`cot_ready`, sin MMIO |
 | `gsp_dma.c` | `gsp_dma_buf` (equivalente de `nvkm_gsp_mem`) | reservas coherentes compartidas |
-| `fsp_lx.c` | **Envío del COT** por EMEM + espera al FMC | fase `cot_sent`; **único módulo que ESCRIBE MMIO** |
+| `fsp_lx.c` | **Envío del COT** por EMEM + espera al FMC | fase `cot_sent`; escribe MMIO |
+| `gsp_rpc.c` | **Recepción de RPCs** de GSP-RM por la cola | fase `rm_ready`; solo escribe el rptr |
 | `fmc_lx.c` | Ruta FSP/GSP-FMC de Blackwell | valida el ELF FMC y **lee** el FSP |
 | `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick | `kick_boot` NO arranca HW real (solo traza) |
 | `acr_fw.c`,`falcon_lx.c`,`acr_lx.c` | ACR ola2 lx-native (AHESASC→ASB) | best-effort/soft-fail |

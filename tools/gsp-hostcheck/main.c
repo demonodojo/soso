@@ -77,6 +77,7 @@ static void lx_kfree(void *p) { free(p); }
 #define R_MBOX0  0x00110040u
 #define R_MBOX1  0x00110044u
 #define R_HWCFG2 0x001100f4u
+#define R_CPUCTL 0x00111388u
 
 static uint32_t fsp_emem[512];
 static unsigned fsp_emem_ptr;
@@ -125,6 +126,7 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
     case R_MBOX0: return fsp_mbox_reads++ < 3 ? 0xbadf4100u : 0u;
     case R_MBOX1: return 0;
     case R_HWCFG2: return 0;                    /* lockdown liberado */
+    case R_CPUCTL: return 0x180u;               /* RISC-V activo (bit 7) */
     default: return 0;
     }
 }
@@ -163,6 +165,7 @@ static const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind k)
 #include "gsp_libos_body.inc"
 #include "fmc_lx_body.inc"
 #include "fsp_lx_body.inc"
+#include "gsp_rpc_body.inc"
 
 static int load_blob(enum gsp_fw_kind kind, const char *path)
 {
@@ -315,6 +318,61 @@ static int check_libos(const struct gsp_wpr *wpr)
     return 0;
 }
 
+/* Deja un mensaje de GSP-RM en la página `idx` del anillo de la cola. */
+static void fake_rpc_post(const struct gsp_libos *lo, unsigned idx, uint32_t fn,
+                          uint32_t result)
+{
+    unsigned char *msgq = (unsigned char *)lo->shm.va + lo->msgq_offset;
+    unsigned char *entry = msgq + 4096 + (unsigned long)idx * 4096;
+    struct gsp_rpc_hdr *hdr = (struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+
+    memset(entry, 0, 4096);
+    hdr->length = sizeof(struct gsp_rpc_hdr);
+    hdr->function = fn;
+    hdr->rpc_result = result;
+}
+
+/* Recepción de RPCs de GSP-RM sobre las colas del paso 5. */
+static int check_rpc(const struct gsp_libos *lo)
+{
+    struct gsp_rpc rpc;
+    struct gsp_msgq_headers *msgq =
+        (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->msgq_offset);
+
+    if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: gsp_rpc_init\n"); return -1; }
+    if (rpc.cnt != 63) { printf("FALLO: cnt=%u\n", rpc.cnt); return -1; }
+    if (gsp_rpc_start(0) != 0) { printf("FALLO: gsp_rpc_start\n"); return -1; }
+
+    /* Un evento cualquiera por delante del que esperamos: debe consumirlo. */
+    fake_rpc_post(lo, 0, NV_VGPU_MSG_EVENT_UCODE_LIBOS_PRINT, 0);
+    fake_rpc_post(lo, 1, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 0);
+    msgq->tx.writePtr = 2;
+
+    if (gsp_rpc_wait_event(&rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 100) != 0) {
+        printf("FALLO: no vio GSP_INIT_DONE\n");
+        return -1;
+    }
+    if (*rpc.rptr != 2) { printf("FALLO: rptr=%u tras consumir 2\n", *rpc.rptr); return -1; }
+    printf("OK: RPC consume el evento previo y ve GSP_INIT_DONE (rptr=%u)\n", *rpc.rptr);
+
+    /* Un rpc_result distinto de cero tiene que salir como error, no colarse. */
+    fake_rpc_post(lo, 2, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 0x55);
+    msgq->tx.writePtr = 3;
+    if (gsp_rpc_wait_event(&rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 100) == 0) {
+        printf("FALLO: un RPC con error se dio por bueno\n");
+        return -1;
+    }
+    printf("OK: un RPC con rpc_result != 0 se detecta\n");
+
+    /* Y sin mensajes, el tiempo se agota en vez de inventarse uno. */
+    if (gsp_rpc_wait_event(&rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 5) == 0) {
+        printf("FALLO: dio por recibido un mensaje que no existe\n");
+        return -1;
+    }
+    printf("OK: sin mensajes, expira\n");
+    return 0;
+}
+
 /* Paso 6: el paquete COT, contra un FSP simulado. */
 static int check_cot(const struct gsp_wpr *wpr)
 {
@@ -389,6 +447,9 @@ static int check_cot(const struct gsp_wpr *wpr)
     }
     fsp_reply_error = 0;
     printf("OK: el rechazo del FSP se detecta\n");
+
+    if (check_rpc(&lo) != 0)
+        return -1;
 
     fmc_lx_stage_release(&staged);
     gsp_libos_release(&lo);

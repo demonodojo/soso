@@ -48,6 +48,7 @@ pub fn run(_args: &[String]) {
         "gsp_rm.c",
         "gsp_wpr.c",
         "gsp_libos.c",
+        "gsp_rpc.c",
         "gsp_mmio.c",
         "gsp_bringup.c",
         "acr_fw.c",
@@ -135,6 +136,10 @@ pub fn run(_args: &[String]) {
         gsp_log_ok && log_contains(&log, "GSP booted (hw") && !gpu_gone,
     );
     print_criterion(
+        "G4a GSP_INIT_DONE por RPC (log)",
+        log_contains(&log, "GSP_INIT_DONE recibido") && !gpu_gone,
+    );
+    print_criterion(
         "G3b nvkm ACR port (inventario stubs)",
         root.join("lxdde/ports/nouveau/nvkm_ola2.list").exists(),
     );
@@ -144,6 +149,7 @@ pub fn run(_args: &[String]) {
     println!("     → [fmc_parse → fmc_ready → wpr_meta → libos_args → cot_ready → cot_sent → booted");
     println!("        | acr_load → acr_ahesasc → acr_asb → kick → poll → booted | booted_soft]");
     println!("   Inventario nvkm ola2: ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list");
+    println!("   Tras booted: rm_ready si GSP-RM manda GSP_INIT_DONE por la cola");
     println!("   Pasos 3-6 sin GPU:    ./scripts/l6-g3-gsp-hostcheck.sh");
 
     println!("\n=== Resumen: {ok} OK, {warn} WARN, {fail} FAIL ===");

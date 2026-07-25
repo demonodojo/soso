@@ -450,11 +450,38 @@ rechazo del FSP se detecta en vez de darse por bueno. El ciclo en hardware pide
 sudo, VFIO y ~90 s; este tarda un segundo, y desde el paso 6 es además la única
 forma de cazar un paquete mal formado sin arriesgar un cuelgue de la GPU.
 
-**G3b siguiente:** probar el paso 6 en hardware. Si el GSP arranca, el log dice
-`GSP booted (hw, GSP-FMC vía FSP)` y G3b queda en GO; a partir de ahí toca la pila
-RPC sobre las colas ya montadas (`r535_gsp_rpc_*`) para hablar con GSP-RM, y luego
-G4. En Ampere, además, port `subdev/acr/*` vía `nvkm_ola2.list` (sustituir
-lx-native).
+## Después de G3b: la pila RPC (`gsp_rpc.c`)
+
+Con el GSP arrancado, GSP-RM habla por las dos colas del paso 5. **Este primer
+tramo solo recibe**: escribe el puntero de lectura (que vive en nuestra propia
+memoria) y, de MMIO, únicamente `app_version` antes de empezar. Enviar RPCs por la
+cmdq es el escalón siguiente.
+
+Referencias: `r535_gsp_msgq_{wait,peek,recv,get_entry}`, `r535_gsp_msg_recv`,
+`r535_gsp_rpc_poll` (`rm/r535/rpc.c`) y `r535_gsp_init` (`rm/r535/gsp.c`).
+
+Dos cabeceras por elemento: la del elemento de cola (`r535_gsp_msg`, 48 B de
+metadatos de encolado) y la del RPC (`nvfw_gsp_rpc`, 32 B, con `length`, `function`
+y `rpc_result`). Ambas con assert de compilación sobre su tamaño.
+
+El detalle que se presta a error son **los punteros cruzados**: el `writePtr` de la
+cola de mensajes vive en su propia cabecera `tx` (lo escribe el GSP), pero su
+`readPtr` vive en la cabecera `rx` de la **cola de comandos** (lo escribimos
+nosotros). Y las entradas empiezan **detrás** de la primera página del anillo, que
+es la cabecera. Se avanza `ceil((length + 48) / 4096)` páginas módulo 63.
+
+Antes de escuchar, `r535_gsp_init` publica `app_version` en el registro `0x080` del
+falcon del GSP y exige que el núcleo RISC-V esté activo — bit 7 de
+`NV_PRISCV_RISCV_CPUCTL` (`ga102_flcn_riscv_active`). En el arranque que cerró G3b
+ese registro ya valía `0x180`, así que la condición se cumple.
+
+El hito es ver llegar **`GSP_INIT_DONE`** (evento `0x1001`): prueba de una vez el
+contrato entero de memoria compartida. Los eventos que lleguen antes —típicamente
+`UCODE_LIBOS_PRINT`— se registran y se descartan. Fase serial: `rm_ready`.
+
+**Siguiente:** el envío por la cmdq (`r535_gsp_cmdq_push`) para poder pedirle cosas
+a GSP-RM, y de ahí a G4. En Ampere, además, port `subdev/acr/*` vía
+`nvkm_ola2.list` (sustituir lx-native).
 
 Log objetivo G3b (hardware real, tras G1):
 
