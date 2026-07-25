@@ -1,43 +1,82 @@
-# soso
+# rootfs — sosofs source tree
 
-Sistema operativo minimalista en Rust: kernel propio bare-metal (x86_64),
-filesystem propio copy-on-write con checksums (sosofs) y acceso por SSH real.
-Monousuario. Proyecto de aprendizaje por fases.
+This directory is the **source tree** for soso's root filesystem. At build time,
+`mkfs-soso` embeds it into a sosofs disk image (`target/soso-data.img`), which
+QEMU attaches as virtio-blk0 (or NVMe, depending on configuration).
 
-El plan completo (stack, diseño de sosofs, fases 0-10) está en el plan del
-proyecto; resumen del objetivo final: arrancar en QEMU, `ssh -p 2222 localhost`
-con clave ed25519 y ejecutar binarios ELF propios sobre sosofs.
+Userspace binaries, SSH keys, and optional NVIDIA firmware are layered on top
+before or during that step. At runtime the guest mounts this image as `/`.
 
-## Requisitos
+## Build pipeline
 
-- rustup (el `rust-toolchain.toml` instala solo el nightly fijado; nightly es
-  obligatorio porque el build.rs de `bootloader` 0.11 usa `-Zbuild-std`)
-- `qemu-system-x86_64` (`sudo apt install qemu-system-x86`)
+`cargo xtask build` / `run` / `test` do the following:
 
-## Uso
+1. **Userspace** — compile `user/` (release) and copy ELFs into `rootfs/bin/`
+   (`init`, `sosh`, coreutils, `soso-llm`, …).
+2. **Firmware (optional)** — if gb205 GSP blobs are missing, xtask tries
+   `./scripts/l6-pack-firmware.sh` automatically.
+3. **mkfs-soso** — walk `rootfs/` and write `target/soso-data.img`:
+   - default **64 MiB** when no gb205 firmware is present;
+   - **128 MiB** when `lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin`
+     exists.
+4. **SSH keys** — `mkfs-soso` injects into `rootfs/etc/` before packing:
+   - `ssh_host_key` — 32-byte ed25519 seed (created once, kept stable across
+     rebuilds);
+   - `authorized_key` — client public key from `~/.ssh/id_ed25519.pub` or
+     `target/soso_test_key`.
+
+Force-regenerate the data disk without a full rebuild:
 
 ```sh
-cargo xtask build   # compila kernel + genera target/soso-bios.img
-cargo xtask run     # build + QEMU q35 con consola serie en stdio
-cargo xtask gdb     # como run, congelado en arranque; gdb -ex 'target remote :1234'
+cargo xtask mkfs
 ```
 
-Salir de QEMU: `Ctrl-A X`.
+## Layout
 
-## Estructura
+| Path | In git | Role |
+|------|--------|------|
+| `bin/` | no (`.gitignore`) | Userspace ELFs copied by xtask |
+| `etc/motd` | yes | Login banner |
+| `etc/ssh_host_key` | no | Persistent SSH host key seed |
+| `etc/authorized_key` | no | Client key allowed for SSH |
+| `lib/firmware/nvidia/` | partial | GSP firmware for L6 GPU bring-up (optional) |
+| `hola.txt` | yes | Sample file on the root filesystem |
 
-- `kernel/` — el kernel (no_std, target x86_64-unknown-none, fuera del workspace raíz)
-- `xtask/` — build de la imagen de disco (crate `bootloader`) y lanzador de QEMU
-- `crates/` — (próximas fases) sosofs, soso-abi, block-dev
-- `tools/` — (próximas fases) mkfs-soso
-- `user/` — (próximas fases) init, shell y coreutils en userspace
+**Note:** LLM models live on a **separate** sosomfs disk (`target/soso-models.img`,
+virtio-blk1) under `/models/`. Anything under `rootfs/models/` in the repo is
+not used at runtime and only increases the data image size if left in place.
 
-## Estado
+## NVIDIA firmware (L6 / GSP)
 
-- [x] Fase 0: boot + consola serie
-- [x] Fase 1: memoria e interrupciones (GDT/TSS, IDT, PIC+PIT 100 Hz, frames, heap talc)
-- [x] Fase 2: kernel-shell por serie (`help uptime mem pf panic halt`)
-- [x] Fase 3: PCI (ECAM) + virtio-blk (`blk blkread blkwrite`, persistente entre arranques)
-- [ ] Fase 4-5: sosofs (lectura, luego escritura CoW)
-- [ ] Fase 6-7: userspace (ring 3, syscalls, ELF, shell)
-- [ ] Fase 8-10: red, SSH y auth
+For native GPU work (nouveau/nvkm port), pack firmware from the host's
+`linux-firmware` tree:
+
+```sh
+./scripts/l6-pack-firmware.sh          # gb205 (+ ga102 reference set)
+./scripts/l6-pack-firmware.sh --repack # clean copy
+```
+
+Expected layout for the primary target (GB205):
+
+```
+lib/firmware/nvidia/gb205/gsp/
+  bootloader-570.144.bin
+  fmc-570.144.bin
+  gsp-570.144.bin
+```
+
+Blobs are stored as decompressed `.bin` files (soso has no zstd in the kernel).
+Ampere (`ga102/`) files are kept for reference hardware and G3 host checks.
+
+**License:** NVIDIA proprietary — see [`THIRD_PARTY.md`](../THIRD_PARTY.md).
+
+## Editing
+
+- Add static files here (configs, samples, extra firmware paths).
+- Rebuild userspace with `cargo xtask build` or run `cargo build --release`
+  in `user/` and copy binaries into `bin/` manually.
+- After changes, run `cargo xtask mkfs` or any xtask command that rebuilds
+  disks so QEMU picks up the new image.
+
+Further build and SSH details: [`MANUAL-USUARIO.md`](../MANUAL-USUARIO.md) and
+the `soso-dev` skill in `.claude/skills/soso-dev/`.

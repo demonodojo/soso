@@ -29,6 +29,9 @@ void *memset(void *dst, int c, unsigned long n);
 #define NV_PFALCON_MAILBOX1   (NV_PGSP_FALCON + 0x044u)
 #define NV_PFALCON_HWCFG2     (NV_PGSP_FALCON + 0x0f4u)
 #define HWCFG2_RISCV_BR_PRIV_LOCKDOWN (1u << 13)
+/* Bloque RISC-V del falcon: `falcon->addr2` = 0x1000 en `ga102_gsp_flcn`. */
+#define NV_PRISCV_RISCV_CPUCTL (NV_PGSP_FALCON + 0x1000u + 0x388u)
+#define CPUCTL_HALTED         (1u << 4)
 
 #define NV_THERM_I2CS_SCRATCH_GB202 0x00ad00bcu
 #define FSP_BOOT_COMPLETE_SUCCESS   0x000000ffu
@@ -238,6 +241,20 @@ static int lockdown_released(uint64_t args_addr, uint32_t *mbox0)
     return (hwcfg2 & HWCFG2_RISCV_BR_PRIV_LOCKDOWN) ? 0 : 1;
 }
 
+static void log_gsp_state(const char *what)
+{
+    uint32_t mbox0 = gsp_mmio_rd32(NV_PFALCON_MAILBOX0);
+    uint32_t mbox1 = gsp_mmio_rd32(NV_PFALCON_MAILBOX1);
+    uint32_t hwcfg2 = gsp_mmio_rd32(NV_PFALCON_HWCFG2);
+    uint32_t cpuctl = gsp_mmio_rd32(NV_PRISCV_RISCV_CPUCTL);
+
+    lx_printk("nouveau-lx: GSP %s mbox0=0x%08x mbox1=0x%08x hwcfg2=0x%08x (lockdown=%u) "
+              "cpuctl=0x%08x (halted=%u)\n",
+              what, mbox0, mbox1, hwcfg2,
+              (hwcfg2 & HWCFG2_RISCV_BR_PRIV_LOCKDOWN) ? 1u : 0u,
+              cpuctl, (cpuctl & CPUCTL_HALTED) ? 1u : 0u);
+}
+
 /* --- Precondiciones --------------------------------------------------------- */
 
 static int fsp_ready_to_send(void)
@@ -329,16 +346,23 @@ int fsp_lx_boot_gsp_fmc(const struct fmc_staged *fmc, const struct gsp_libos *li
         return -1;
     }
     lx_printk("nouveau-lx: COT aceptado por el FSP\n");
+    log_gsp_state("tras el COT");
 
-    /* El FMC arranca y baja el lockdown del bootrom RISC-V del GSP. */
-    for (time = 4000; time > 0; time--) {
+    /* El FMC arranca y baja el lockdown del bootrom RISC-V del GSP. Upstream
+     * espera 4000 vueltas de `usleep_range(1000,2000)` = 4–8 s; aquí 8 s, que
+     * este camino es lento y de una sola vez. */
+    for (time = 8000; time > 0; time--) {
         if (lockdown_released(args_addr, &mbox0)) {
             break;
+        }
+        if ((time % 1000u) == 0u) {
+            log_gsp_state("esperando");
         }
         lx_mdelay(1);
     }
     if (time == 0) {
-        lx_printk("nouveau-lx: GSP-FMC no arrancó a tiempo (mbox0=0x%08x)\n", mbox0);
+        lx_printk("nouveau-lx: GSP-FMC no arrancó a tiempo\n");
+        log_gsp_state("al agotarse la espera");
         return -1;
     }
     if (mbox0) {
@@ -353,5 +377,6 @@ int fsp_lx_boot_gsp_fmc(const struct fmc_staged *fmc, const struct gsp_libos *li
         return -1;
     }
     lx_printk("nouveau-lx: GSP-FMC arrancado, lockdown liberado\n");
+    log_gsp_state("arrancado");
     return 0;
 }

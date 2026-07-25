@@ -367,6 +367,24 @@ bring-up sigue a `booted (soft)` como antes.
 `mbox0` distinto de cero como fallo. Se replica tal cual —no toca inventarse una
 corrección sin poder probarla— pero el log avisa explícitamente si se da ese caso.
 
+### Primera prueba en hardware (2026-07-25)
+
+El FSP **aceptó el COT** a la primera: `COT aceptado por el FSP`, con la respuesta
+NVDM bien formada. Eso valida de golpe el paquete, el transporte por EMEM y la
+cadena de firma contra silicio real.
+
+Lo que falló fue lo siguiente: `GSP-FMC no arrancó a tiempo (mbox0=0x00000000)`. Y
+no era la GPU, era el reloj. `timer::sleep_ms` (en `kernel/src/lxdde/timer.rs`)
+registraba un timer y bloqueaba la fibra actual, pero `fiber::yield_now()`
+**retorna inmediatamente cuando solo hay una fibra** — el caso del bring-up. Los
+4000 `lx_mdelay(1)` de la espera del lockdown se ejecutaron en unos 16 ms en vez de
+en 4 s. El mismo fallo afectaba a `gsp_mmio_poll_ready`.
+
+Arreglado: `sleep_ms` gira sobre `pit::uptime_ms()` cediendo a otras fibras cuando
+las hay, y detecta una sola vez si el PIT está parado (`CLOCK_DEAD`) para no colgar
+el arranque. La espera del lockdown pasa a 8 s y registra `mbox0`/`mbox1`/`HWCFG2`/
+`CPUCTL` cada segundo y al agotarse, que es lo que hará falta si vuelve a fallar.
+
 ### Verificación sin GPU
 
 `./scripts/l6-g3-gsp-hostcheck.sh` compila los módulos de los pasos 3–6 **en el

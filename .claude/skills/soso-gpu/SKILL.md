@@ -143,6 +143,18 @@ ociosas, payload completo, firma 48/97/96. Todas las esperas acotadas (1 s / 1 s
 4 s); cualquier fallo → −1 y sigue a `booted (soft)`. Log de éxito:
 `GSP booted (hw, GSP-FMC vía FSP)`.
 
+**Gotcha que se comió la primera prueba en HW (2026-07-25): `lx_mdelay` no
+esperaba.** `timer::sleep_ms` registraba un timer y llamaba a
+`fiber::block_current()`, pero `yield_now()` **retorna en el acto si solo hay una
+fibra** — que es justo el caso durante el bring-up de la GPU. Resultado: los bucles
+de sondeo daban sus miles de vueltas en microsegundos. El primer COT real fue
+aceptado por el FSP y aun así dio `GSP-FMC no arrancó a tiempo` porque los "4 s" de
+espera del lockdown fueron ~16 ms. Arreglado en `kernel/src/lxdde/timer.rs`:
+`sleep_ms` gira sobre `pit::uptime_ms()` cediendo a otras fibras si las hay, con
+detección única de reloj parado (`CLOCK_DEAD`) para no colgar el arranque si el PIT
+no avanza. Afectaba también a `gsp_mmio_poll_ready`. **Si un poll de este port
+"falla instantáneamente", sospecha del reloj antes que del hardware.**
+
 **Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh`.** Compila los módulos
 de los pasos 3–6 en el host con la capa lx y **un FSP simulado detrás del MMIO**
 (`tools/gsp-hostcheck/main.c`) contra los blobs reales: hojas de la radix3 una a

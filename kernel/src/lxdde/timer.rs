@@ -49,13 +49,39 @@ pub extern "C" fn lx_mdelay(ms: u32) {
     sleep_ms(ms);
 }
 
+/// Espera `ms` de reloj de verdad, haya o no otra fibra a la que ceder.
+///
+/// La versión anterior registraba un timer y llamaba a `block_current()`, pero
+/// `yield_now()` **retorna en el acto cuando solo hay una fibra**: durante el
+/// bring-up de la GPU (fibra única) el retardo se evaporaba y los bucles de
+/// sondeo daban miles de vueltas en microsegundos. Así se comió los 4 s de espera
+/// del lockdown del GSP el 2026-07-25 y también el `gsp_mmio_poll_ready(2000)`.
 pub fn sleep_ms(ms: u32) {
-    let deadline = pit::uptime_ms() + ms as u64;
-    TIMERS.lock().push(TimerEntry {
-        deadline_ms: deadline,
-        fired: false,
-    });
-    super::fiber::block_current();
+    use core::sync::atomic::{AtomicBool, Ordering};
+    /// Si el PIT no avanza (interrupciones cerradas), esperar por reloj colgaría
+    /// el arranque. Se detecta una vez y a partir de ahí los retardos no esperan.
+    static CLOCK_DEAD: AtomicBool = AtomicBool::new(false);
+    const STUCK_SPINS: u64 = 5_000_000;
+
+    if ms == 0 || CLOCK_DEAD.load(Ordering::Relaxed) {
+        return;
+    }
+    let start = pit::uptime_ms();
+    let deadline = start + ms as u64;
+    let mut spins = 0u64;
+    loop {
+        let now = pit::uptime_ms();
+        if now >= deadline {
+            return;
+        }
+        if now == start && spins > STUCK_SPINS {
+            CLOCK_DEAD.store(true, Ordering::Relaxed);
+            return;
+        }
+        super::fiber::yield_now();
+        core::hint::spin_loop();
+        spins += 1;
+    }
 }
 
 pub fn tick() {
