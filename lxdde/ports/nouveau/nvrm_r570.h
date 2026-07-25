@@ -19,6 +19,7 @@ typedef uint32_t NvU32;
 typedef uint64_t NvU64;
 typedef NvU8     NvBool;
 typedef NvU32    NV_STATUS;
+typedef NvU32    NvHandle;
 
 typedef struct
 {
@@ -252,11 +253,211 @@ typedef struct NV2080_ALLOC_PARAMETERS
     NvU32                   subDeviceId;
 } NV2080_ALLOC_PARAMETERS;
 
+/* ---- GspStaticConfigInfo (G4d) ---------------------------------------------
+ *
+ * Lo que RM cuenta de la GPU en cuanto arranca, por RPC (no es un control):
+ * `GET_GSP_STATIC_INFO`. Tres cosas nos interesan de aquí:
+ *
+ *  - `fbRegionInfoParams`: las regiones de VRAM y cuáles son utilizables. Es la
+ *    única forma honesta de saber el techo, porque en la ruta FMC el driver NO
+ *    calcula los offsets del WPR — los pone el FMC y no los devuelve.
+ *  - `hInternalClient/Device/Subdevice`: RM regala un juego de objetos ya hechos,
+ *    aparte de los que pedimos en G4c.
+ *  - `bar1PdeBase`/`bar2PdeBase`: RM **ya construyó** las tablas de páginas de
+ *    BAR1/BAR2.
+ *
+ * Transcrito de `rm/r570/nvrm/gsp.h`. Todo lo anidado va aquí porque los offsets
+ * de los campos que sí usamos dependen del prefijo entero: no hay atajo. */
+#define NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_MAX_ENTRIES 16u
+#define NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_MEM_TYPES   17u
+#define NV0080_CTRL_GR_CAPS_TBL_SIZE                      23
+#define NV2080_GPU_MAX_GID_LENGTH                         0x100u
+#define NV2080_GPU_MAX_NAME_STRING_LENGTH                 0x40u
+#define MAX_GROUP_COUNT                                   2
+/* `RM_ENGINE_TYPE_LAST` de `rm/r570/nvrm/engine.h` — de él sale el tamaño de
+ * `engineCaps[]`, así que si cambia, el struct entero se desplaza. */
+#define RM_ENGINE_TYPE_LAST                               0x54u
+#define NVGPU_ENGINE_CAPS_MASK_BITS                       32
+#define NVGPU_ENGINE_CAPS_MASK_ARRAY_MAX \
+    (((RM_ENGINE_TYPE_LAST - 1) / NVGPU_ENGINE_CAPS_MASK_BITS) + 1)
+
+typedef NvBool
+NV2080_CTRL_CMD_FB_GET_FB_REGION_SURFACE_MEM_TYPE_FLAG[NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_MEM_TYPES];
+
+typedef struct NV2080_CTRL_CMD_FB_GET_FB_REGION_FB_REGION_INFO
+{
+    NvU64                   base;
+    NvU64                   limit;
+    NvU64                   reserved;
+    NvU32                   performance;
+    NvBool                  supportCompressed;
+    NvBool                  supportISO;
+    NvBool                  bProtected;
+    NV2080_CTRL_CMD_FB_GET_FB_REGION_SURFACE_MEM_TYPE_FLAG blackList;
+} NV2080_CTRL_CMD_FB_GET_FB_REGION_FB_REGION_INFO;
+
+typedef struct NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_PARAMS
+{
+    NvU32                   numFBRegions;
+    NV2080_CTRL_CMD_FB_GET_FB_REGION_FB_REGION_INFO
+        fbRegion[NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_MAX_ENTRIES];
+} NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_PARAMS;
+
+typedef struct NV2080_CTRL_GPU_GET_GID_INFO_PARAMS
+{
+    NvU32                   index;
+    NvU32                   flags;
+    NvU32                   length;
+    NvU8                    data[NV2080_GPU_MAX_GID_LENGTH];
+} NV2080_CTRL_GPU_GET_GID_INFO_PARAMS;
+
+typedef struct NV2080_CTRL_BIOS_GET_SKU_INFO_PARAMS
+{
+    NvU32                   BoardID;
+    char                    chipSKU[9];
+    char                    chipSKUMod[5];
+    NvU32                   skuConfigVersion;
+    char                    project[5];
+    char                    projectSKU[5];
+    char                    CDP[6];
+    char                    projectSKUMod[2];
+    NvU32                   businessCycle;
+} NV2080_CTRL_BIOS_GET_SKU_INFO_PARAMS;
+
+typedef struct NV0080_CTRL_GPU_GET_SRIOV_CAPS_PARAMS
+{
+    NvU32                   totalVFs;
+    NvU32                   firstVfOffset;
+    NvU32                   vfFeatureMask;
+    NvU64                   FirstVFBar0Address;
+    NvU64                   FirstVFBar1Address;
+    NvU64                   FirstVFBar2Address;
+    NvU64                   bar0Size;
+    NvU64                   bar1Size;
+    NvU64                   bar2Size;
+    NvBool                  b64bitBar0;
+    NvBool                  b64bitBar1;
+    NvBool                  b64bitBar2;
+    NvBool                  bSriovEnabled;
+    NvBool                  bSriovHeavyEnabled;
+    NvBool                  bEmulateVFBar0TlbInvalidationRegister;
+    NvBool                  bClientRmAllocatedCtxBuffer;
+    NvBool                  bNonPowerOf2ChannelCountSupported;
+    NvBool                  bVfResizableBAR1Supported;
+} NV0080_CTRL_GPU_GET_SRIOV_CAPS_PARAMS;
+
+typedef struct VIRTUAL_DISPLAY_GET_NUM_HEADS_PARAMS
+{
+    NvU32                   numHeads;
+    NvU32                   maxNumHeads;
+} VIRTUAL_DISPLAY_GET_NUM_HEADS_PARAMS;
+
+typedef struct VIRTUAL_DISPLAY_GET_MAX_RESOLUTION_PARAMS
+{
+    NvU32                   headIndex;
+    NvU32                   maxHResolution;
+    NvU32                   maxVResolution;
+} VIRTUAL_DISPLAY_GET_MAX_RESOLUTION_PARAMS;
+
+typedef struct EcidManufacturingInfo
+{
+    NvU32                   ecidLow;
+    NvU32                   ecidHigh;
+    NvU32                   ecidExtended;
+} EcidManufacturingInfo;
+
+typedef struct FW_WPR_LAYOUT_OFFSET
+{
+    NvU64                   nonWprHeapOffset;
+    NvU64                   frtsOffset;
+} FW_WPR_LAYOUT_OFFSET;
+
+typedef struct GspStaticConfigInfo
+{
+    NvU8                    grCapsBits[NV0080_CTRL_GR_CAPS_TBL_SIZE];
+    NV2080_CTRL_GPU_GET_GID_INFO_PARAMS          gidInfo;
+    NV2080_CTRL_BIOS_GET_SKU_INFO_PARAMS         SKUInfo;
+    NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_PARAMS fbRegionInfoParams;
+
+    NV0080_CTRL_GPU_GET_SRIOV_CAPS_PARAMS        sriovCaps;
+    NvU32                   sriovMaxGfid;
+
+    NvU32                   engineCaps[NVGPU_ENGINE_CAPS_MASK_ARRAY_MAX];
+
+    NvBool                  poisonFuseEnabled;
+
+    NvU64                   fb_length;
+    NvU64                   fbio_mask;
+    NvU32                   fb_bus_width;
+    NvU32                   fb_ram_type;
+    NvU64                   fbp_mask;
+    NvU32                   l2_cache_size;
+
+    NvU8                    gpuNameString[NV2080_GPU_MAX_NAME_STRING_LENGTH];
+    NvU8                    gpuShortNameString[NV2080_GPU_MAX_NAME_STRING_LENGTH];
+    NvU16                   gpuNameString_Unicode[NV2080_GPU_MAX_NAME_STRING_LENGTH];
+    NvBool                  bGpuInternalSku;
+    NvBool                  bIsQuadroGeneric;
+    NvBool                  bIsQuadroAd;
+    NvBool                  bIsNvidiaNvs;
+    NvBool                  bIsVgx;
+    NvBool                  bGeforceSmb;
+    NvBool                  bIsTitan;
+    NvBool                  bIsTesla;
+    NvBool                  bIsMobile;
+    NvBool                  bIsGc6Rtd3Allowed;
+    NvBool                  bIsGc8Rtd3Allowed;
+    NvBool                  bIsGcOffRtd3Allowed;
+    NvBool                  bIsGcoffLegacyAllowed;
+    NvBool                  bIsMigSupported;
+
+    NvU16                   RTD3GC6TotalBoardPower;
+    NvU16                   RTD3GC6PerstDelay;
+
+    NvU64                   bar1PdeBase;
+    NvU64                   bar2PdeBase;
+
+    NvBool                  bVbiosValid;
+    NvU32                   vbiosSubVendor;
+    NvU32                   vbiosSubDevice;
+
+    NvBool                  bPageRetirementSupported;
+    NvBool                  bSplitVasBetweenServerClientRm;
+    NvBool                  bClRootportNeedsNosnoopWAR;
+
+    VIRTUAL_DISPLAY_GET_NUM_HEADS_PARAMS       displaylessMaxHeads;
+    VIRTUAL_DISPLAY_GET_MAX_RESOLUTION_PARAMS  displaylessMaxResolution;
+    NvU64                   displaylessMaxPixels;
+
+    NvHandle                hInternalClient;
+    NvHandle                hInternalDevice;
+    NvHandle                hInternalSubdevice;
+
+    NvBool                  bSelfHostedMode;
+    NvBool                  bAtsSupported;
+
+    NvBool                  bIsGpuUefi;
+    NvBool                  bIsEfiInit;
+
+    EcidManufacturingInfo   ecidInfo[MAX_GROUP_COUNT];
+
+    FW_WPR_LAYOUT_OFFSET    fwWprLayoutOffset;
+} GspStaticConfigInfo;
+
+#define NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO 65u
+
 /* Si un tamaño baila, RM lee los campos desplazados y responde cualquier cosa. */
 typedef char rm_alloc_hdr_size_check[sizeof(rpc_gsp_rm_alloc) == 32 ? 1 : -1];
 typedef char rm_ctrl_hdr_size_check[sizeof(rpc_gsp_rm_control) == 24 ? 1 : -1];
 typedef char nv0000_size_check[sizeof(NV0000_ALLOC_PARAMETERS) == 120 ? 1 : -1];
 typedef char nv0080_size_check[sizeof(NV0080_ALLOC_PARAMETERS) == 56 ? 1 : -1];
 typedef char nv2080_size_check[sizeof(NV2080_ALLOC_PARAMETERS) == 4 ? 1 : -1];
+/* 1656 B con alineación natural. No hay verdad externa contra la que comparar
+ * este número —upstream no lo asserta—, así que el assert solo detecta que
+ * ALGUIEN cambie el struct: la validación de verdad es el contraste de
+ * `fb_length` contra la VRAM que ya conocemos por registro. */
+typedef char gsp_static_info_size_check[sizeof(GspStaticConfigInfo) == 1656 ? 1 : -1];
+typedef char fb_region_size_check[
+    sizeof(NV2080_CTRL_CMD_FB_GET_FB_REGION_FB_REGION_INFO) == 48 ? 1 : -1];
 
 #endif

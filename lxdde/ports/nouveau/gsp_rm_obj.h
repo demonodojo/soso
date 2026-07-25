@@ -44,4 +44,35 @@ int gsp_rm_free(struct gsp_rm *rm, uint32_t handle);
 /* La cadena cliente → device → subdevice. Deja los tres handles en `rm`. */
 int gsp_rm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm);
 
+/* Lo que sacamos de `GET_GSP_STATIC_INFO`: el mapa de VRAM utilizable y los
+ * regalos de RM (su juego interno de objetos y las bases de las tablas de
+ * páginas de BAR1/BAR2, que RM ya ha construido). */
+struct gsp_fb_region {
+    uint64_t base;
+    uint64_t size;
+};
+
+#define GSP_FB_REGION_MAX 16u
+
+struct gsp_static_info {
+    uint64_t fb_length;             /* VRAM total según RM */
+    struct gsp_fb_region region[GSP_FB_REGION_MAX];
+    unsigned region_nr;             /* solo las utilizables */
+    uint64_t usable_bytes;          /* suma de las anteriores */
+    uint64_t bar1_pde_base;
+    uint64_t bar2_pde_base;
+    uint32_t internal_client;
+    uint32_t internal_device;
+    uint32_t internal_subdevice;
+    uint32_t l2_cache_size;
+    char name[65];                  /* gpuNameString, con NUL */
+    int ready;
+};
+
+/* Pide la configuración estática. `vram_expected` es la VRAM que ya conocemos
+ * por otra vía (el registro que lee `gsp_wpr`): si no cuadra con `fb_length`, la
+ * transcripción del struct está desplazada y se avisa. Pasar 0 para no contrastar. */
+int gsp_static_info_get(struct gsp_rm *rm, uint64_t vram_expected,
+                        struct gsp_static_info *out);
+
 #endif

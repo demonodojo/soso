@@ -175,6 +175,118 @@ int gsp_rm_free(struct gsp_rm *rm, uint32_t handle)
                          RM_TIMEOUT_MS);
 }
 
+/* ¿Es texto imprimible? El nombre de la GPU es la prueba de que los offsets del
+ * struct caen donde creemos: si están desplazados, aquí sale basura. */
+static int looks_like_text(const unsigned char *s, unsigned n)
+{
+    unsigned i;
+
+    if (!n || s[0] < 0x20u || s[0] > 0x7eu) {
+        return 0;
+    }
+    for (i = 0; i < n && s[i]; i++) {
+        if (s[i] < 0x20u || s[i] > 0x7eu) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int gsp_static_info_get(struct gsp_rm *rm, uint64_t vram_expected,
+                        struct gsp_static_info *out)
+{
+    GspStaticConfigInfo *info;
+    uint32_t got = 0;
+    uint32_t transport = 0;
+    unsigned i;
+    int ret = -1;
+
+    if (!rm || !rm->q || !rm->rpc || !out) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    /* Sin payload de entrada: es una petición pelada, la respuesta es el struct. */
+    info = lx_kzalloc(sizeof(*info), GFP_KERNEL);
+    if (!info) {
+        return -1;
+    }
+    if (gsp_cmdq_call(rm->q, rm->rpc, NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO,
+                      NULL, 0, info, (uint32_t)sizeof(*info), &got, &transport,
+                      RM_TIMEOUT_MS) != 0) {
+        lx_printk("nouveau-lx: GET_GSP_STATIC_INFO sin respuesta (transporte=0x%x)\n",
+                  transport);
+        goto out;
+    }
+    if (got < sizeof(*info)) {
+        lx_printk("nouveau-lx: GSP static info corta: %u B, esperaba %u\n",
+                  got, (unsigned)sizeof(*info));
+        goto out;
+    }
+
+    out->fb_length = info->fb_length;
+    out->bar1_pde_base = info->bar1PdeBase;
+    out->bar2_pde_base = info->bar2PdeBase;
+    out->internal_client = info->hInternalClient;
+    out->internal_device = info->hInternalDevice;
+    out->internal_subdevice = info->hInternalSubdevice;
+    out->l2_cache_size = info->l2_cache_size;
+    for (i = 0; i < sizeof(out->name) - 1; i++) {
+        out->name[i] = (char)info->gpuNameString[i];
+    }
+    out->name[sizeof(out->name) - 1] = 0;
+
+    /* Regiones utilizables: ni reservadas ni protegidas (`r535_gsp_get_static_info_fb`). */
+    for (i = 0; i < info->fbRegionInfoParams.numFBRegions &&
+                i < NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_MAX_ENTRIES; i++) {
+        const NV2080_CTRL_CMD_FB_GET_FB_REGION_FB_REGION_INFO *r =
+            &info->fbRegionInfoParams.fbRegion[i];
+
+        lx_printk("nouveau-lx: región FB %u: 0x%llx-0x%llx rsvd=0x%llx prot=%u\n",
+                  i, (unsigned long long)r->base, (unsigned long long)r->limit,
+                  (unsigned long long)r->reserved, (unsigned)r->bProtected);
+
+        if (!r->reserved && !r->bProtected && r->limit >= r->base &&
+            out->region_nr < GSP_FB_REGION_MAX) {
+            out->region[out->region_nr].base = r->base;
+            out->region[out->region_nr].size = (r->limit + 1u) - r->base;
+            out->usable_bytes += out->region[out->region_nr].size;
+            out->region_nr++;
+        }
+    }
+
+    /* El contraste que hace esto falsable: la VRAM ya la sabemos por registro.
+     * Si `fb_length` no cuadra, el struct está desplazado y todo lo que salga de
+     * él —incluidas las bases de las PDE— es basura con buena pinta. */
+    if (vram_expected && info->fb_length != vram_expected) {
+        lx_printk("nouveau-lx: OJO — fb_length=0x%llx no cuadra con la VRAM "
+                  "conocida 0x%llx: el layout de GspStaticConfigInfo está mal\n",
+                  (unsigned long long)info->fb_length,
+                  (unsigned long long)vram_expected);
+        goto out;
+    }
+    if (!looks_like_text(info->gpuNameString, sizeof(info->gpuNameString))) {
+        lx_printk("nouveau-lx: OJO — gpuNameString no es texto: offsets desplazados\n");
+        goto out;
+    }
+
+    out->ready = 1;
+    ret = 0;
+    lx_printk("nouveau-lx: GSP static info: '%s' VRAM=%llu MiB utilizable=%llu MiB "
+              "en %u región(es) L2=%u KiB\n",
+              out->name, (unsigned long long)(out->fb_length >> 20),
+              (unsigned long long)(out->usable_bytes >> 20), out->region_nr,
+              out->l2_cache_size >> 10);
+    lx_printk("nouveau-lx: RM interno cli=0x%08x dev=0x%08x sub=0x%08x "
+              "bar1Pde=0x%llx bar2Pde=0x%llx\n",
+              out->internal_client, out->internal_device, out->internal_subdevice,
+              (unsigned long long)out->bar1_pde_base,
+              (unsigned long long)out->bar2_pde_base);
+out:
+    lx_kfree(info);
+    return ret;
+}
+
 int gsp_rm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm)
 {
     NV0000_ALLOC_PARAMETERS root;

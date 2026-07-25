@@ -638,6 +638,75 @@ static int check_rm_objects(const struct gsp_libos *lo)
         }
     }
     printf("OK: el NV_STATUS de dentro del wrapper se detecta (0x2b = INVALID_CLASS)\n");
+
+    /* G4d: GET_GSP_STATIC_INFO. Se fabrica una respuesta con VRAM y nombre
+     * conocidos y se comprueba que los campos se leen de donde deben — que es
+     * justo lo que no se puede dar por hecho en una transcripción a mano. */
+    {
+        GspStaticConfigInfo *fake = calloc(1, sizeof(*fake));
+        struct gsp_static_info si;
+        const uint64_t vram = 12227ull * 1024ull * 1024ull;
+
+        if (!fake) { printf("FALLO: sin memoria\n"); return -1; }
+        printf("sizeof(GspStaticConfigInfo) = %zu\n", sizeof(*fake));
+
+        fake->fb_length = vram;
+        fake->l2_cache_size = 32u * 1024u;
+        fake->bar1PdeBase = 0x1234000ull;
+        fake->bar2PdeBase = 0x5678000ull;
+        fake->hInternalClient = 0xc1d00001u;
+        fake->hInternalDevice = 0xde1d0001u;
+        fake->hInternalSubdevice = 0x5d1d0001u;
+        memcpy(fake->gpuNameString, "NVIDIA GeForce RTX 5070", 24);
+        /* Dos regiones: una utilizable y una reservada que debe descartarse. */
+        fake->fbRegionInfoParams.numFBRegions = 2;
+        fake->fbRegionInfoParams.fbRegion[0].base = 0;
+        fake->fbRegionInfoParams.fbRegion[0].limit = (2048ull << 20) - 1;
+        fake->fbRegionInfoParams.fbRegion[1].base = 2048ull << 20;
+        fake->fbRegionInfoParams.fbRegion[1].limit = (2049ull << 20) - 1;
+        fake->fbRegionInfoParams.fbRegion[1].reserved = 1;
+
+        base = *rpc.rptr;
+        fake_rpc_post_payload(lo, base % 63, NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO,
+                              0, (const unsigned char *)fake, (uint32_t)sizeof(*fake));
+        msgq->tx.writePtr = (base + ((sizeof(*fake) + 80 + 4095) / 4096)) % 63;
+
+        if (gsp_static_info_get(&rm, vram, &si) != 0) {
+            printf("FALLO: gsp_static_info_get\n");
+            free(fake);
+            return -1;
+        }
+        if (si.fb_length != vram || si.region_nr != 1 ||
+            si.usable_bytes != (2048ull << 20) ||
+            si.bar1_pde_base != 0x1234000ull || si.bar2_pde_base != 0x5678000ull ||
+            si.internal_client != 0xc1d00001u || si.internal_subdevice != 0x5d1d0001u ||
+            strcmp(si.name, "NVIDIA GeForce RTX 5070") != 0) {
+            printf("FALLO: campos mal leídos — vram=0x%llx regs=%u usable=0x%llx "
+                   "bar1=0x%llx cli=0x%08x name='%s'\n",
+                   (unsigned long long)si.fb_length, si.region_nr,
+                   (unsigned long long)si.usable_bytes,
+                   (unsigned long long)si.bar1_pde_base, si.internal_client, si.name);
+            free(fake);
+            return -1;
+        }
+        printf("OK: static info — '%s' %llu MiB, 1 de 2 regiones utilizable, "
+               "handles y bases de PDE en su offset\n",
+               si.name, (unsigned long long)(si.fb_length >> 20));
+
+        /* Y el contraste: si la VRAM no cuadra, hay que rechazarlo, no seguir. */
+        fake->fb_length = vram + 4096;
+        base = *rpc.rptr;
+        fake_rpc_post_payload(lo, base % 63, NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO,
+                              0, (const unsigned char *)fake, (uint32_t)sizeof(*fake));
+        msgq->tx.writePtr = (base + ((sizeof(*fake) + 80 + 4095) / 4096)) % 63;
+        if (gsp_static_info_get(&rm, vram, &si) == 0) {
+            printf("FALLO: una fb_length que no cuadra se dio por buena\n");
+            free(fake);
+            return -1;
+        }
+        printf("OK: fb_length que no cuadra con la VRAM conocida se rechaza\n");
+        free(fake);
+    }
     return 0;
 }
 

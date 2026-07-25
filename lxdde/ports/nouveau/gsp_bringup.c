@@ -92,6 +92,7 @@ static struct fmc_staged g_fmc;     /* imagen FMC + cadena de firma en sysmem */
 static struct gsp_rpc g_rpc;        /* anillo de mensajes de GSP-RM */
 static struct gsp_cmdq g_cmdq;      /* cola de comandos hacia GSP-RM */
 static struct gsp_rm g_rm_obj;      /* cliente/device/subdevice de RM */
+static struct gsp_static_info g_static;  /* VRAM utilizable y regalos de RM */
 static struct lx_pci_dev *g_pdev;   /* para leer BARs y BDF del espacio de config */
 static uint16_t g_device_id;
 static uint32_t g_boot0;
@@ -406,6 +407,13 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
                  * sigue arrancado y el diagnóstico queda en el log. */
                 if (gsp_rm_init(&g_cmdq, &g_rpc, &g_rm_obj) == 0) {
                     g_phase = GSP_RM_OBJECTS;
+
+                    /* G4d: el mapa de VRAM utilizable sale de aquí, no del WPR
+                     * meta — en la ruta FMC esos offsets los pone el FMC y no
+                     * los devuelve. Se contrasta contra la VRAM que ya leímos
+                     * por registro: si no cuadra, la transcripción del struct
+                     * está desplazada y lo demás no es de fiar. */
+                    gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static);
                 }
             } else {
                 lx_printk("nouveau-lx: GSP arrancado pero GSP-RM no responde por RPC\n");
