@@ -233,6 +233,7 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
         return -1;
     }
     gsp_mmio_set_bar(bar, 16u * 1024u * 1024u);
+    gsp_mmio_set_pci(pdev);   /* para poder mirar la configuración si el MMIO calla */
     boot0 = gsp_mmio_rd32(NV_PMC_BOOT_0_OFF);
     g_boot0 = boot0;
     /* La VRAM de verdad la da el hardware (`ga102_fb_vidmem_size`); la tabla por

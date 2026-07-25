@@ -31,6 +31,44 @@ void gsp_mmio_wr32(unsigned off, uint32_t val)
     *p = val;
 }
 
+static struct lx_pci_dev *g_pdev;
+
+void gsp_mmio_set_pci(struct lx_pci_dev *pdev)
+{
+    g_pdev = pdev;
+}
+
+int gsp_mmio_pci_recover(void)
+{
+    uint32_t id;
+    uint32_t cmd;
+    uint32_t bar0_lo;
+    uint32_t bar0_hi;
+
+    if (!g_pdev) {
+        return -1;
+    }
+    id = lx_pci_read_config(g_pdev, 0x00, 4);
+    cmd = lx_pci_read_config(g_pdev, 0x04, 4);
+    bar0_lo = lx_pci_read_config(g_pdev, 0x10, 4);
+    bar0_hi = lx_pci_read_config(g_pdev, 0x14, 4);
+
+    lx_printk("nouveau-lx: PCI cfg id=0x%08x cmd=0x%04x sts=0x%04x bar0=0x%08x%08x "
+              "(mem=%u bm=%u)\n",
+              id, cmd & 0xffffu, (cmd >> 16) & 0xffffu, bar0_hi, bar0_lo,
+              (cmd & 0x2u) ? 1u : 0u, (cmd & 0x4u) ? 1u : 0u);
+
+    if (id == 0xffffffffu || id == 0u) {
+        return -1;   /* no está: enlace caído o dispositivo retirado */
+    }
+    /* Un reset de función deja memory y bus-master apagados y las BAR a cero. */
+    if ((cmd & 0x6u) != 0x6u) {
+        lx_pci_write_config(g_pdev, 0x04, (cmd & 0xffffu) | 0x6u, 2);
+        lx_printk("nouveau-lx: memory+bus-master estaban apagados — reactivados\n");
+    }
+    return 0;
+}
+
 int gsp_mmio_alive(void)
 {
     /* Todo a unos = la GPU no contesta (reset, enlace PCIe caído, desaparecida).

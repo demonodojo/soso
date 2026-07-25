@@ -356,6 +356,13 @@ int fsp_lx_boot_gsp_fmc(const struct fmc_staged *fmc, const struct gsp_libos *li
          * MMIO pasa a leerse 0xffffffff. Decirlo con estas palabras evita
          * confundirlo con un código de error del FMC (2026-07-25). */
         if (!gsp_mmio_alive()) {
+            /* Puede que la GPU siga en el bus y solo haya perdido el decode de
+             * memoria (lo que deja un reset de función). El espacio de
+             * configuración lo dice; si es eso, se reactiva y se sigue esperando. */
+            if (gsp_mmio_pci_recover() == 0 && gsp_mmio_alive()) {
+                lx_printk("nouveau-lx: el MMIO ha vuelto tras reactivar el decode\n");
+                continue;
+            }
             lx_printk("nouveau-lx: la GPU se ha caído del bus mientras arrancaba el FMC\n");
             log_gsp_state("fuera del bus");
             return -1;

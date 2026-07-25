@@ -129,6 +129,11 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
     }
 }
 
+/* En el banco la GPU nunca se cae del bus: el camino de recuperación por
+ * configuración PCI solo tiene sentido contra hardware. */
+static int gsp_mmio_alive(void) { return 1; }
+static int gsp_mmio_pci_recover(void) { return 0; }
+
 static void gsp_mmio_wr32(uint32_t off, uint32_t val)
 {
     switch (off) {
