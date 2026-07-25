@@ -96,25 +96,35 @@ grub_backup() { cp -a "$GRUB" "${GRUB}.bak.$(date +%Y%m%d%H%M%S)"; }
 
 grub_add() {
   local key line
-  for key in GRUB_CMDLINE_LINUX_DEFAULT GRUB_CMDLINE_LINUX; do
-    line=$(grep "^${key}=" "$GRUB" 2>/dev/null || true)
-    [[ -z "$line" ]] && continue
-    if echo "$line" | grep -q 'modprobe\.blacklist='; then
-      # Reemplazar el valor existente por el nuestro (idempotente).
-      sed -i "s|modprobe\.blacklist=[^ \"]*|${CMD_PARAM}|" "$GRUB"
-      echo "${key}: modprobe.blacklist actualizado"
-    else
-      sed -i "s|^${key}=\"\\(.*\\)\"|${key}=\"\\1 ${CMD_PARAM}\"|" "$GRUB"
-      echo "${key}: añadido ${CMD_PARAM}"
-    fi
-  done
+  # Sólo UNA clave: escribir en las dos deja el parámetro duplicado en
+  # /proc/cmdline (inofensivo, pero confunde al diagnosticar). Preferimos
+  # _DEFAULT y caemos a la otra sólo si no existe.
+  key=GRUB_CMDLINE_LINUX_DEFAULT
+  grep -q "^${key}=" "$GRUB" 2>/dev/null || key=GRUB_CMDLINE_LINUX
+
+  line=$(grep "^${key}=" "$GRUB" 2>/dev/null || true)
+  if [[ -z "$line" ]]; then
+    echo "WARN: ${GRUB} sin GRUB_CMDLINE_LINUX* — añade ${CMD_PARAM} a mano" >&2
+    return
+  fi
+
+  if echo "$line" | grep -q 'modprobe\.blacklist='; then
+    # Reemplazar el valor existente por el nuestro (idempotente).
+    sed -i "/^${key}=/ s|modprobe\.blacklist=[^ \"]*|${CMD_PARAM}|" "$GRUB"
+    echo "${key}: modprobe.blacklist actualizado"
+  else
+    sed -i "s|^${key}=\"\\(.*\\)\"|${key}=\"\\1 ${CMD_PARAM}\"|" "$GRUB"
+    echo "${key}: añadido ${CMD_PARAM}"
+  fi
 }
 
 grub_del() {
   local key
   for key in GRUB_CMDLINE_LINUX_DEFAULT GRUB_CMDLINE_LINUX; do
     grep -q "^${key}=" "$GRUB" 2>/dev/null || continue
-    sed -i "s| *modprobe\.blacklist=${BL_MODS}||" "$GRUB"
+    # Cualquier valor, no sólo ${BL_MODS}: si la lista cambió (o quedó un
+    # duplicado de una versión anterior del script), hay que limpiarlo igual.
+    sed -i "/^${key}=/ s| *modprobe\.blacklist=[^ \"]*||" "$GRUB"
   done
   echo "GRUB: modprobe.blacklist eliminado"
 }
@@ -156,6 +166,19 @@ blacklist nvidia_drm
 blacklist nvidia_modeset
 blacklist nvidia_uvm
 blacklist nouveau
+
+# 'blacklist' sólo actúa al resolver un *alias*: no frena un 'modprobe nvidia_uvm'
+# por nombre, ni el arrastre de 'nvidia' como dependencia. Sin estas líneas se
+# monta un bucle que tumba la máquina: gpu-manager carga nvidia → nvidia registra
+# su driver PCI → udev ve el 'add' de /bus/pci/drivers/nvidia →
+# 71-nvidia.rules lanza modprobe de nvidia_{modeset,drm,uvm} → el probe falla
+# porque la tarjeta es de vfio-pci → nvidia se descarga → y vuelta a empezar,
+# ~5 veces por segundo hasta que el host se cuelga. 'install ... /bin/false' sí
+# corta la carga por nombre y por dependencia, que es lo que rompe el ciclo.
+install nvidia /bin/false
+install nvidia_drm /bin/false
+install nvidia_modeset /bin/false
+install nvidia_uvm /bin/false
 EOF
   echo "Escrito ${MODPROBE_CONF}"
 
@@ -163,8 +186,11 @@ EOF
   printf 'vfio-pci\n' >"$LOAD_CONF"
   echo "Escrito ${LOAD_CONF}"
 
-  # El blacklist de modprobe.d no frena una carga por nombre (initramfs, gpu-manager):
-  # el parámetro de kernel sí la frena en todos los casos.
+  # El parámetro de kernel es un blacklist más, con la misma limitación que el de
+  # modprobe.d: NO frena una carga por nombre ni por dependencia (lo comprobado:
+  # con modprobe.blacklist=nvidia en /proc/cmdline, nvidia salía en lsmod igual).
+  # Quien de verdad lo frena son las líneas 'install' de arriba; esto se queda
+  # porque sí evita la carga automática por alias desde el initramfs.
   grub_backup
   grub_add
   regen
