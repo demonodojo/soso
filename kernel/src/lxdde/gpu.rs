@@ -15,6 +15,7 @@ unsafe extern "C" {
     ) -> i32;
     fn lx_nouveau_vram_total() -> u64;
     fn lx_nouveau_set_boot0(boot0: u32, device_id: u32);
+    fn lx_nouveau_gsp_fini() -> i32;
 }
 
 pub fn notify_boot0(boot0: u32, device_id: u16) {
@@ -43,6 +44,15 @@ pub fn gsp_phase() -> &'static str {
 
 pub fn vram_total() -> u64 {
     unsafe { lx_nouveau_vram_total() }
+}
+
+/// Apaga GSP-RM y deja la GPU sin DMA. **Sin vuelta atrás** en este arranque:
+/// tras esto `gsp_ready()` es falso y el cómputo cae a CPU.
+///
+/// Hay que llamarlo antes de que el host suelte la tarjeta. Un reset de
+/// vfio-pci sobre un GSP vivo colgó el host el 2026-07-25 (ver `gsp_fini.h`).
+pub fn gsp_fini() -> bool {
+    unsafe { lx_nouveau_gsp_fini() == 0 }
 }
 
 pub fn submit_saxpy(a: f32, x: &[f32], y: &mut [f32]) -> Result<bool, ()> {

@@ -116,11 +116,70 @@ if [[ -z "$cargo_bin" ]]; then
 fi
 echo "cargo: ${cargo_bin}"
 
+# La clave con la que xtask autoriza el acceso: la del usuario si la tiene, y
+# si no la de test que genera `client_pubkey()` (xtask/src/main.rs).
+ssh_key="${run_home}/.ssh/id_ed25519"
+[[ -f "$ssh_key" ]] || ssh_key="${ROOT}/target/soso_test_key"
+
+soso_ssh() {
+  sudo -u "$run_user" -- env "HOME=${run_home}" \
+    ssh -i "$ssh_key" -p 2222 \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=10 \
+        soso@localhost "$@" </dev/null >/dev/null 2>&1
+}
+
+# NO se mata QEMU con `timeout`: cerrar el proceso con el GSP vivo hace que
+# vfio-pci resetee una GPU que sigue ejecutando GSP-RM y haciendo DMA, y eso
+# colgó el host entero el 2026-07-25 (sin dejar traza de panic — fue un lockup).
+# En su lugar se espera al prompt, se pide `halt`, y soso apaga el GSP por el
+# camino (SYS_HALT → gpu::shutdown → gsp_fini). El kill solo es el último
+# recurso, y avisa de que se está haciendo lo peligroso.
 sudo -u "$run_user" -- env \
   "PATH=$(dirname "$cargo_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   "HOME=${run_home}" \
   SOSO_QEMU_GPU="vfio:${BDF}" \
-  timeout "$TIMEOUT" "$cargo_bin" xtask run >"$log" 2>&1 || true
+  "$cargo_bin" xtask run >"$log" 2>&1 &
+run_pid=$!
+
+booted=0
+deadline=$((SECONDS + TIMEOUT))
+while [[ "$SECONDS" -lt "$deadline" ]]; do
+  if grep -q 'sosh —' "$log" 2>/dev/null; then
+    booted=1
+    break
+  fi
+  kill -0 "$run_pid" 2>/dev/null || break
+  sleep 1
+done
+
+if [[ "$booted" == 1 ]]; then
+  echo "soso arriba — pidiendo halt por SSH para que apague el GSP"
+  soso_ssh halt || true
+else
+  echo "AVISO: no se vio el prompt en ${TIMEOUT}s; no hay a quién pedirle el halt." >&2
+fi
+
+# Margen para el apagado ordenado: gsp_fini tiene dos esperas de 2 s.
+for _ in $(seq 1 20); do
+  kill -0 "$run_pid" 2>/dev/null || break
+  sleep 1
+done
+
+if kill -0 "$run_pid" 2>/dev/null; then
+  echo "" >&2
+  echo "AVISO: soso no se apagó solo. Matando QEMU con el GSP posiblemente vivo —" >&2
+  echo "       es justo el escenario que colgó el host el 2026-07-25. Si la máquina" >&2
+  echo "       se congela aquí, mira si el log llegó a 'GSP-RM apagado'." >&2
+  kill -TERM "$run_pid" 2>/dev/null || true
+  sleep 3
+  kill -KILL "$run_pid" 2>/dev/null || true
+fi
+wait "$run_pid" 2>/dev/null || true
+
+if grep -q 'GSP-RM apagado' "$log"; then
+  grep 'nouveau-lx: fini —\|GSP-RM apagado' "$log" || true
+fi
 
 if grep -q 'NV_PMC_BOOT_0=' "$log"; then
   grep 'nvidia:' "$log" || true

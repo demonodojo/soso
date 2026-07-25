@@ -116,6 +116,10 @@ pub fn nouveau_vram_total() -> u64 {
     gpu::vram_total()
 }
 
+pub fn gsp_fini() -> bool {
+    gpu::gsp_fini()
+}
+
 pub fn poll_rx() {
     net::poll_rx();
 }

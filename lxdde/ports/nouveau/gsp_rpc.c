@@ -1,6 +1,7 @@
 /* G4 paso 1: recepción por la cola de mensajes de GSP-RM. Ver gsp_rpc.h. */
 #include "gsp_rpc.h"
 #include "gsp_mmio.h"
+#include "nvrm_r570.h"   /* NV_VGPU_MSG_FUNCTION_*, para nombrar lo que mandamos */
 
 /* Definido en el shim (lxdde/shim/src/shims.c). */
 void *memcpy(void *dst, const void *src, unsigned long n);
@@ -130,7 +131,38 @@ static const char *rpc_event_name(uint32_t fn)
     }
 }
 
-/* Unos pocos códigos de NV_STATUS, los que se ven en el arranque. */
+/* Nombres de las funciones que mandamos nosotros. El log solo sabía traducir
+ * los eventos que llegan de GSP-RM, así que las respuestas a nuestras propias
+ * llamadas salían como `fn=0x0041 (?)` — y averiguar que ese 0x41 era
+ * GET_GSP_STATIC_INFO costó más de lo que debería. */
+static const char *rpc_function_name(uint32_t fn)
+{
+    switch (fn) {
+    case NV_VGPU_MSG_FUNCTION_FREE:
+        return "FREE";
+    case NV_VGPU_MSG_FUNCTION_UNLOADING_GUEST_DRIVER:
+        return "UNLOADING_GUEST_DRIVER";
+    case NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO:
+        return "GET_GSP_STATIC_INFO";
+    case NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL:
+        return "GSP_RM_CONTROL";
+    case NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC:
+        return "GSP_RM_ALLOC";
+    default:
+        return rpc_event_name(fn);
+    }
+}
+
+/* Códigos de `rpc_result`. Hay DOS familias y confundirlas cuesta caro:
+ *
+ *  - por debajo de 0xff000000 es un NV_STATUS normal de RM (el 0x59 que salió
+ *    en G4a, por ejemplo);
+ *  - 0xff1000xx es `NV_VGPU_MSG_RESULT__RPC` (`rpc_headers.h` de
+ *    open-gpu-kernel-modules): el mensaje ni llegó a RM, lo rechazó el
+ *    transporte. Es un problema de cómo lo hemos construido nosotros, no de lo
+ *    que hemos pedido.
+ *
+ * El 0xff100002 de G4d era del segundo grupo y el log lo enseñaba como "?". */
 static const char *rpc_status_name(uint32_t status)
 {
     switch (status) {
@@ -140,6 +172,13 @@ static const char *rpc_status_name(uint32_t status)
     case 0x59u: return "OPERATING_SYSTEM";
     case 0x65u: return "TIMEOUT";
     case 0x66u: return "TIMEOUT_RETRY";
+    case 0xff100001u: return "RPC_UNKNOWN_FUNCTION";
+    case 0xff100002u: return "RPC_INVALID_MESSAGE_FORMAT";
+    case 0xff100003u: return "RPC_HANDLE_NOT_FOUND";
+    case 0xff100004u: return "RPC_HANDLE_EXISTS";
+    case 0xff100005u: return "RPC_UNKNOWN_RM_ERROR";
+    case 0xff100006u: return "RPC_UNKNOWN_VMIOP_ERROR";
+    case 0xff100007u: return "RPC_RESERVED_HANDLE";
     default:    return "?";
     }
 }
@@ -203,7 +242,7 @@ int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
             flush_repeats(&repeats);
             last_fn = hdr.function;
             lx_printk("nouveau-lx: RPC fn=0x%04x (%s) len=%u res=0x%x\n",
-                      hdr.function, rpc_event_name(hdr.function), hdr.length,
+                      hdr.function, rpc_function_name(hdr.function), hdr.length,
                       hdr.rpc_result);
         }
 
@@ -238,7 +277,7 @@ int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
             flush_repeats(&repeats);
             lx_printk("nouveau-lx: GSP-RM devuelve %s (0x%x) en fn=0x%04x (%s)\n",
                       rpc_status_name(hdr.rpc_result), hdr.rpc_result, hdr.function,
-                      rpc_event_name(hdr.function));
+                      rpc_function_name(hdr.function));
             if (nocat) {
                 /* `SET_SYSTEM_INFO`/`SET_REGISTRY` ya se encolan antes de
                  * arrancar (G4a). Si aun así llueven NOCAT, el problema está en
@@ -252,7 +291,7 @@ int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
         if (matched) {
             flush_repeats(&repeats);
             lx_printk("nouveau-lx: %s recibido tras %u mensaje(s)\n",
-                      rpc_event_name(fn), seen);
+                      rpc_function_name(fn), seen);
             return 0;
         }
     }

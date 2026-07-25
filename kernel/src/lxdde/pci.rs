@@ -162,6 +162,21 @@ pub extern "C" fn lx_pci_set_master(dev: *mut LxPciDev) {
     }
 }
 
+/// Quita `Bus Master Enable` (bit 2 de COMMAND). Sin él el dispositivo no puede
+/// iniciar transacciones: es lo que deja la GPU incapaz de hacer DMA antes de
+/// que el host le pase un reset por encima (ver `gsp_fini.c`).
+#[unsafe(no_mangle)]
+pub extern "C" fn lx_pci_clear_master(dev: *mut LxPciDev) {
+    if dev.is_null() {
+        return;
+    }
+    unsafe {
+        let d = &*dev;
+        let cmd = pci::read16(d.bus, d.device, d.function, 0x04);
+        pci::write16(d.bus, d.device, d.function, 0x04, cmd & !0x4);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn lx_pci_iomap(dev: *mut LxPciDev, bar: i32, _max_len: u64) -> *mut c_void {
     if dev.is_null() || bar != 0 {

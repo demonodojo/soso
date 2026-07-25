@@ -206,13 +206,29 @@ int gsp_static_info_get(struct gsp_rm *rm, uint64_t vram_expected,
     }
     memset(out, 0, sizeof(*out));
 
-    /* Sin payload de entrada: es una petición pelada, la respuesta es el struct. */
+    /* NO es una petición pelada, y creer que lo era costó G4d.
+     *
+     * Upstream la manda con `nvkm_gsp_rpc_rd(gsp, fn, sizeof(*rpc))`, y ese
+     * tamaño **viaja en la petición**: `r535_gsp_rpc_get` pone
+     * `rpc->length = sizeof(cabecera) + payload_size`. O sea que el mensaje
+     * saliente mide 32 + 1656 = 1688 B, con el payload sin inicializar — RM no
+     * lo lee, lo usa de hueco donde escribir la respuesta.
+     *
+     * Mandándolo pelado (length=32) GSP-RM contestaba `rpc_result=0xff100002`
+     * = `NV_VGPU_MSG_RESULT_RPC_INVALID_MESSAGE_FORMAT`: el mensaje no le cabía
+     * la respuesta y lo rechazó el transporte, sin llegar a RM. Por eso la
+     * respuesta venía con `len=32` y sin payload.
+     *
+     * El búfer va a cero (`lx_kzalloc`) y se usa de ida y de vuelta: la copia
+     * de salida se hace y se libera dentro de `gsp_cmdq_send` antes de que la
+     * respuesta se escriba encima. */
     info = lx_kzalloc(sizeof(*info), GFP_KERNEL);
     if (!info) {
         return -1;
     }
     if (gsp_cmdq_call(rm->q, rm->rpc, NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO,
-                      NULL, 0, info, (uint32_t)sizeof(*info), &got, &transport,
+                      info, (uint32_t)sizeof(*info),
+                      info, (uint32_t)sizeof(*info), &got, &transport,
                       RM_TIMEOUT_MS) != 0) {
         lx_printk("nouveau-lx: GET_GSP_STATIC_INFO sin respuesta (transporte=0x%x)\n",
                   transport);

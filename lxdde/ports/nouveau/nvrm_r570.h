@@ -205,10 +205,34 @@ typedef struct rpc_gsp_rm_control
     /* params[] detrás */
 } rpc_gsp_rm_control;
 
-/* Números de función de `rm/r570/nvrm/rpcfn.h`. */
+/* Números de función de `rm/r570/nvrm/rpcfn.h`.
+ *
+ * `FREE` valía 27 aquí y es **10**. El 27 es `DMA_FILL_PTE_MEM`: liberar un
+ * objeto le pedía a RM que rellenase PTEs interpretando los cuatro handles de
+ * `NVOS00_PARAMETERS` como descriptor. Nunca llegó a dispararse porque el único
+ * `gsp_rm_free` del árbol está en la ruta de error de `gsp_rm_init` y esa rama
+ * no se tomó en el HW (2026-07-25), pero el apagado de G4 lo llama siempre.
+ * Los otros tres números están confirmados contra hardware: RM_ALLOC y
+ * RM_CONTROL respondieron `ok`, y GET_GSP_STATIC_INFO devolvió su propio fn. */
 #define NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL  76u
 #define NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC   103u
-#define NV_VGPU_MSG_FUNCTION_FREE            27u
+#define NV_VGPU_MSG_FUNCTION_FREE            10u
+#define NV_VGPU_MSG_FUNCTION_UNLOADING_GUEST_DRIVER 47u
+
+/* `rpc_unloading_guest_driver_v1F_07` (`rm/r535/nvrm/gsp.h`; r570 la hereda).
+ * El aviso de "me voy" que `r535_gsp_fini` manda antes de soltar la tarjeta.
+ * `NvBool` es `NvU8`, así que la alineación natural mete 2 B de relleno antes
+ * de `newLevel` y el struct sale a 8 B. */
+typedef struct rpc_unloading_guest_driver_v1F_07
+{
+    NvBool                  bInPMTransition;
+    NvBool                  bGc6Entering;
+    NvU32                   newLevel;
+} rpc_unloading_guest_driver_v1F_07;
+
+/* `NV2080_CTRL_GPU_SET_POWER_STATE_GPU_LEVEL_0` — el nivel que pide un unload
+ * que no es suspensión (upstream usa el 3 para la rama `suspend`). */
+#define NV2080_CTRL_GPU_SET_POWER_STATE_GPU_LEVEL_0 0u
 
 /* Handles, de `rm/handles.h`. RM no los inventa: los elegimos nosotros. */
 #define NVKM_RM_CLIENT(id)  (0xc1d00000u | (id))
@@ -459,5 +483,7 @@ typedef char nv2080_size_check[sizeof(NV2080_ALLOC_PARAMETERS) == 4 ? 1 : -1];
 typedef char gsp_static_info_size_check[sizeof(GspStaticConfigInfo) == 1656 ? 1 : -1];
 typedef char fb_region_size_check[
     sizeof(NV2080_CTRL_CMD_FB_GET_FB_REGION_FB_REGION_INFO) == 48 ? 1 : -1];
+typedef char rpc_unload_size_check[
+    sizeof(rpc_unloading_guest_driver_v1F_07) == 8 ? 1 : -1];
 
 #endif

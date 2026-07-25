@@ -3,6 +3,7 @@
  * cubre Ampere GA10x de forma madura en nouveau 6.6; GB205 es más reciente. */
 #include "acr_lx.h"
 #include "fmc_lx.h"
+#include "gsp_fini.h"
 #include "gsp_fw.h"
 #include "gsp_mmio.h"
 #include "fsp_lx.h"
@@ -59,6 +60,10 @@ static enum gsp_fw_chip gsp_fw_chip_of(enum nv_family f)
  * Best-effort: no altera la secuencia soft si falla. */
 int lx_nvkm_build_gsp(void *bar0);
 
+/* Definidas más abajo en este mismo fichero; `lx_nouveau_gsp_fini` las usa. */
+int lx_nouveau_gsp_ready(void);
+const char *lx_nouveau_gsp_status(void);
+
 enum gsp_phase {
     GSP_NONE = 0,
     GSP_BAR0,
@@ -82,6 +87,7 @@ enum gsp_phase {
     GSP_RM_OBJECTS,
     GSP_BOOTED_SOFT,
     GSP_GONE,
+    GSP_FINI,       /* apagado por gsp_fini(): sin DMA, no se puede volver atrás */
 };
 
 static enum gsp_phase g_phase = GSP_NONE;
@@ -442,6 +448,32 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     return 0;
 }
 
+/* Apaga GSP-RM y deja la tarjeta sin DMA (ver gsp_fini.h). Idempotente: una
+ * segunda llamada no hace nada y lo dice.
+ *
+ * `GSP_FINI` NO está en `lx_nouveau_gsp_ready()`: tras esto el GSP no sirve
+ * para nada y el cómputo debe irse a la CPU. Es el mismo cuidado que hubo que
+ * tener con `set_boot0`, pero al revés — allí una fase buena se pisaba con una
+ * peor; aquí hay que asegurarse de que la peor no se lee como buena. */
+int lx_nouveau_gsp_fini(void)
+{
+    int rc;
+
+    if (g_phase == GSP_FINI) {
+        lx_printk("nouveau-lx: GSP ya estaba apagado\n");
+        return 0;
+    }
+    if (!lx_nouveau_gsp_ready()) {
+        lx_printk("nouveau-lx: nada que apagar (fase=%s)\n", lx_nouveau_gsp_status());
+        return -1;
+    }
+    rc = gsp_fini(&g_rm_obj, &g_cmdq, &g_rpc, g_pdev);
+    /* La fase cambia haya salido bien o mal: el bus master está quitado en los
+     * dos casos, así que la tarjeta ya no es utilizable de todas formas. */
+    g_phase = GSP_FINI;
+    return rc;
+}
+
 int lx_nouveau_gsp_ready(void)
 {
     /* `rm_ready` es MEJOR que `booted` (el GSP arrancado *y* GSP-RM hablando por
@@ -498,6 +530,8 @@ const char *lx_nouveau_gsp_status(void)
         return "booted_soft";
     case GSP_GONE:
         return "gone";
+    case GSP_FINI:
+        return "fini";
     default:
         return "?";
     }

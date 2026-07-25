@@ -33,8 +33,8 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | **GO** (2026-07-25): `GSP booted (hw, GSP-FMC vía FSP)` en GB205 real, lockdown liberado, sin un solo all-ones en el log |
 | G4a | RPC con GSP-RM (recibir + `SET_SYSTEM_INFO`/`SET_REGISTRY`) | `GSP_INIT_DONE` con `res=0x0` | **GO** (2026-07-25): llega tras 22 mensajes, `GSP-RM listo (RPC en marcha)` |
 | G4b | RPC síncrono (`gsp_cmdq_call`) | round-trip + anillo que envuelve, en hostcheck | **GO** (2026-07-25), sin HW todavía |
-| G4c | Objetos de RM: cliente → device → subdevice (`GSP_RM_ALLOC`) | un `NV_RM_CONTROL` que responde | pendiente |
-| G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | pendiente |
+| G4c | Objetos de RM: cliente → device → subdevice (`GSP_RM_ALLOC`) | un `NV_RM_CONTROL` que responde | **GO** (2026-07-25): `objetos RM listos cli=0xc1d00000 dev=0xde1d0000 sub=0x5d1d0000` en GB205 real |
+| G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | parcial: `GET_GSP_STATIC_INFO` daba `0xff100002` por mandarse pelada — arreglado y cubierto en hostcheck, **sin reprobar en HW**; faltan VA space y mapeos |
 | G4e | **Canal**: GPFIFO + USERD + timbre | la GPU mueve bytes (copia CE) y se lee de vuelta | pendiente |
 | G4f | QMD + kernel SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real | pendiente, **bloqueado por el toolchain** |
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
@@ -251,13 +251,108 @@ escrita por la GPU ya es prueba falsable.
 `GSP_POST_NOCAT_RECORD`. Con el enum de r535 el diagnóstico apunta a NVLink en una
 portátil sin NVLink. Usar siempre `rm/r570/nvrm/msgfn.h`.
 
+**Gotcha 4 (2026-07-25): `NV_VGPU_MSG_FUNCTION_FREE` valía 27 y es 10.** El 27 es
+`DMA_FILL_PTE_MEM`: liberar un objeto le pedía a GSP-RM que rellenase PTEs
+interpretando los cuatro handles de `NVOS00_PARAMETERS` como descriptor. Nunca
+se disparó —el único `gsp_rm_free` del árbol estaba en la rama de error de
+`gsp_rm_init`, que no se tomó en HW— pero el apagado de G4 lo llama siempre.
+Los otros tres números **sí** estaban bien y los confirmó el hardware
+(`GSP_RM_ALLOC`=103 y `GSP_RM_CONTROL`=76 respondieron `ok`,
+`GET_GSP_STATIC_INFO`=65 devolvió su propio fn). **Moraleja: que tres constantes
+de una tabla estén verificadas no dice nada de la cuarta.** Verificado contra
+`rm/r570/nvrm/rpcfn.h`; `UNLOADING_GUEST_DRIVER` = 47.
+
+**Dónde mirar el `rpcfn.h`: git.kernel.org responde 403 (Anubis).** Los headers
+de `linux-headers-7.0.0-*` traen el árbol de nouveau pero **solo los `Kbuild`**,
+sin un `.h`. La vía que funciona es
+`raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/nouveau/…`.
+
+**Gotcha 5 (2026-07-25): `rpc_result` tiene DOS familias y confundirlas cuesta
+caro.** Por debajo de `0xff000000` es un `NV_STATUS` normal de RM (el `0x59` de
+G4a). `0xff1000xx` es `NV_VGPU_MSG_RESULT__RPC` (`rpc_headers.h` de
+open-gpu-kernel-modules): **el mensaje ni llegó a RM, lo rechazó el transporte**
+— el problema está en cómo lo construimos nosotros, no en lo que pedimos.
+`0xff100001` = `RPC_UNKNOWN_FUNCTION`, **`0xff100002` = `RPC_INVALID_MESSAGE_FORMAT`**.
+Ya están todos en `rpc_status_name` (`gsp_rpc.c`).
+
+**G4d desbloqueado: `GET_GSP_STATIC_INFO` NO es una petición pelada.** Con
+`params=NULL, size=0` GSP-RM devolvía `0xff100002` y la respuesta venía con
+`len=32` (solo cabecera). Upstream la manda con
+`nvkm_gsp_rpc_rd(gsp, fn, sizeof(*rpc))`, y **ese tamaño viaja en la petición**:
+`r535_gsp_rpc_get` hace `rpc->length = sizeof(cabecera) + payload_size`, así que
+el mensaje saliente mide 32 + 1656 = **1688 B** con el payload sin inicializar —
+RM no lo lee, lo usa de **hueco donde escribir la respuesta**. El hostcheck
+afirma ahora esa longitud. La cabecera de soso (`header_version`, `signature`,
+`rpc_result=0xffffffff`, cálculo de `length`) es idéntica a upstream: lo único
+que fallaba era el payload a cero. **Regla general para las RPC de tipo `_rd`:
+manda el struct entero de ida aunque no lleve datos.**
+
+**Gotcha 6 (2026-07-25): soltar la tarjeta con el GSP vivo cuelga el host.**
+Una prueba VFIO congeló la máquina entera. **No fue un panic**: `efi_pstore` está
+registrado en este equipo y capturó el GPF de `drm_framebuffer_cleanup` del día
+24 (17 registros en `/var/lib/systemd/pstore/1784917347/`), pero de este cuelgue
+no quedó **ni un registro** y el journal se corta en seco → lockup, la CPU no
+llegó al handler. soso no petó: su log serie termina en el prompt. Lo que pasó es
+que el `timeout 90` del script mató QEMU, y vfio-pci reseteó una GPU cuyo RISC-V
+seguía ejecutando GSP-RM y haciendo DMA contra un dominio IOMMU que se estaba
+desmontando. **No existía ningún camino de apagado en el port** (`grep` de
+`_fini` no daba nada) y `SYS_HALT` llamaba a `qemu::exit()` en seco, así que el
+`halt` tenía el mismo problema que el SIGTERM.
+
+Lo arregla `gsp_fini.c`, réplica de `r535_gsp_fini` en su rama no-suspend:
+1. `FREE` de los objetos de RM (subdevice → device → cliente),
+2. `UNLOADING_GUEST_DRIVER` con los tres campos a cero,
+3. esperar `MAILBOX0` del falcon GSP (`0x110040`) = `0x80000000`,
+4. **quitar el bus master** (`lx_pci_clear_master`, nuevo en `pci.rs`).
+
+El paso 4 no es de upstream y es el que de verdad protege al host: corre
+**siempre**, fallen o no los tres primeros. Sin DMA da igual en qué estado
+quedara el RISC-V. **No** se resetea el falcon a mano: los bits de reset del
+RISC-V de GB20x no están verificados en este árbol y vfio va a resetear igual;
+lo que aporta el módulo es que ese reset llegue con RM avisado y el DMA parado.
+Se dispara desde `SYS_HALT` (`gpu::shutdown()`, no-op si no hay NVIDIA) y desde
+userspace con el comando `GFINI` de `SYS_GPU_SUBMIT`. `l6-g1-vfio-test.sh` ya
+**no** mata QEMU con `timeout`: espera el prompt, pide `halt` por SSH y solo mata
+como último recurso, avisando.
+
+**Captura de crash del host: `./scripts/l6-kdump-setup.sh`** (`--enable` /
+`--disable` / `--status` / `--selftest`). Montarlo antes de gastar el siguiente
+ciclo de GPU.
+
+**Y el detalle que importa: kdump NO basta, porque kdump captura *panics* y el
+cuelgue del 25 no lo fue.** Lo que lo hace capturable es
+**`kernel.hardlockup_panic=1`**: el detector NMI ya estaba activo
+(`nmi_watchdog=1`) pero solo avisaba; con esto una CPU atascada ≥10 s con las
+interrupciones cerradas —la pinta de un reset de vfio-pci que no completa—
+provoca un panic y entonces sí entra kdump. El script pone también
+`panic_on_io_nmi=1` (un SERR de PCIe llega como NMI de E/S) y
+`softlockup_panic=1`. Deja fuera `unknown_nmi_panic` a propósito: en portátiles
+es la fuente clásica de panics espurios; actívalo a mano si hace falta.
+
+Tras eso hay tres canales y **los tres dicen algo**: kdump (vmcore en
+`/var/crash`), pstore (final del dmesg aunque kexec falle; ya funciona hoy), y
+**que no aparezca nada** — eso descarta el lockup de software y apunta a nivel
+máquina (machine check, error fatal de PCIe), que ningún software captura.
+
+Notas de esta máquina: Secure Boot **desactivado** y lockdown `none`, así que
+kexec no tiene pegas de firma. El `crashkernel=` va por
+`/etc/default/grub.d/soso-l6-kdump.cfg` y **no** editando
+`GRUB_CMDLINE_LINUX_DEFAULT`, que es donde vive el `modprobe.blacklist` del
+passthrough. Precio: ~512 MiB de RAM reservados y un hard lockup ahora reinicia
+en vez de quedarse colgado. **`--selftest` provoca un panic real** (`sysrq-c`):
+hacerlo una vez, porque un kdump sin probar no es una red, es una suposición.
+
 **Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh`.** Compila los módulos
 de los pasos 3–6 en el host con la capa lx y **un FSP simulado detrás del MMIO**
 (`tools/gsp-hostcheck/main.c`) contra los blobs reales: hojas de la radix3 una a
 una, tamaño del WPR meta, heap, offsets del bootloader, PTEs de la memoria
 compartida, `id8` de las regiones, enlace de los boot params, imagen FMC copiada
 idéntica, campos del FMC a cero, **el paquete COT byte a byte** y que un rechazo del
-FSP se detecta. Un segundo, frente a sudo + VFIO + ~90 s del ciclo en hardware.
+FSP se detecta. Cubre además el lado G4: la cadena de objetos de RM, que
+`GET_GSP_STATIC_INFO` se pida con sus 1688 B y no pelada (gotcha 5), y el apagado
+—`FREE` con fn=10, el unload con fn=47, el handshake del mailbox y que **el bus
+master se quite aunque no haya RPC vivo** (gotcha 6).
+Un segundo, frente a sudo + VFIO + ~90 s del ciclo en hardware.
 **Úsalo antes de gastar un ciclo de GPU** — desde el paso 6 es además la única forma
 de cazar un paquete mal formado sin arriesgar un cuelgue.
 
@@ -292,6 +387,11 @@ Detalle y tabla de pasos 1–6 de la cadena FSP/COT en `docs/L6-G3-nvkm-scope.md
   EBUSY y no rompe nada) → luego `l6-g1-vfio-test.sh`, que ahora **rechaza** el unbind
   de drivers DRM. Vuelta atrás: `sudo ./scripts/l6-g1-vfio-restore.sh` (recarga la pila
   nvidia y recuerda arrancar `display-manager`).
+- **Dos formas distintas de colgar esta máquina, no las confundas.** (a) Unbind
+  por sysfs de un driver DRM vivo → GPF en `drm_framebuffer_cleanup`, **con**
+  traza en pstore (2026-07-24). (b) Soltar la tarjeta con el GSP arrancado →
+  lockup **sin** traza ninguna (2026-07-25, gotcha 6). La primera la previene
+  `l6-g1-vfio-test.sh` rechazando el unbind; la segunda, `gsp_fini`.
 - **Para iterar en G1 sin cerrar el escritorio cada vez**: bind persistente en el
   arranque con `sudo ./scripts/l6-g1-vfio-persist.sh --enable` + reboot. Escribe
   `/etc/modprobe.d/soso-l6-vfio.conf` (`options vfio-pci ids=10de:2f18,10de:2f80` +
@@ -333,6 +433,8 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `gsp_dma.c` | `gsp_dma_buf` (equivalente de `nvkm_gsp_mem`) | reservas coherentes compartidas |
 | `fsp_lx.c` | **Envío del COT** por EMEM + espera al FMC | fase `cot_sent`; escribe MMIO |
 | `gsp_rpc.c` | **Recepción de RPCs** de GSP-RM por la cola | fase `rm_ready`; solo escribe el rptr |
+| `gsp_rm_obj.c` | Objetos de RM (cliente/device/subdevice) + static info | fase `rm_objects` |
+| `gsp_fini.c` | **Apagado ordenado** de GSP-RM + corte de DMA | fase `fini`; ver gotcha 6 |
 | `fmc_lx.c` | Ruta FSP/GSP-FMC de Blackwell | valida el ELF FMC y **lee** el FSP |
 | `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick | `kick_boot` NO arranca HW real (solo traza) |
 | `acr_fw.c`,`falcon_lx.c`,`acr_lx.c` | ACR ola2 lx-native (AHESASC→ASB) | best-effort/soft-fail |
@@ -420,10 +522,16 @@ cargo xtask lx-build nouveau      # compila el port (incl. nvkm Ola 1)
 cargo xtask g1-check              # host: IOMMU/VFIO/firmware/BAR0
 cargo xtask g3-check              # bring-up GSP: firmware, módulos, fases
 ./scripts/l6-pack-firmware.sh     # empaqueta firmware GSP
-./scripts/l6-g3-gsp-hostcheck.sh  # pasos 3 y 4 (radix3 + WPR meta) sin GPU ni sudo
+./scripts/l6-g3-gsp-hostcheck.sh  # pasos 3-6 + G4 (objetos RM, static info, fini) sin GPU ni sudo
 ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list   # inventario símbolos
+./scripts/l6-kdump-setup.sh --status   # ¿el host capturaría el próximo cuelgue?
 # Passthrough (tras cerrar G1): SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 ```
+
+**Nunca sueltes la tarjeta con el GSP vivo** (gotcha 6). Si lanzas el
+passthrough a mano en vez de con `l6-g1-vfio-test.sh`, apaga con `halt` desde
+soso —no con Ctrl-C ni matando QEMU—, que es lo que dispara `gsp_fini`. En el
+log tiene que aparecer `GSP-RM apagado (… dma=off)` antes de que QEMU salga.
 
 ## Camino alternativo L6-H (CUDA en host)
 

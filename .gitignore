@@ -25,3 +25,4 @@
 # Capa lxdde (Linux pinneado + artefactos de build)
 lxdde/linux/
 lxdde/shim/src/generated_dummies.c
+board.txt

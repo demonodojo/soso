@@ -197,6 +197,10 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
             State::Sleeping(crate::arch::pit::uptime_ms() + a1),
         ),
         abi::SYS_HALT => {
+            // Antes de que el proceso desaparezca: apagar GSP-RM y cortarle el
+            // DMA. Si la GPU viene por VFIO, el host la resetea en cuanto se
+            // cierra QEMU, y ese reset sobre un GSP vivo cuelga la máquina.
+            crate::drivers::gpu::shutdown();
             crate::println!("halt: apagando soso");
             crate::qemu::exit(crate::qemu::ExitCode::Success);
         }

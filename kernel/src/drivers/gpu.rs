@@ -95,6 +95,42 @@ pub fn init() {
     GPU.call_once(|| Mutex::new(state));
 }
 
+/// Deja la GPU en un estado en el que se la puede quitar de debajo.
+///
+/// Se llama desde `SYS_HALT`, antes de que el proceso desaparezca. Con la
+/// tarjeta por VFIO, el host la resetea en cuanto se cierra QEMU, y hacer eso
+/// sobre un GSP vivo colgó la máquina entera el 2026-07-25 — sin dejar ni traza
+/// de panic, porque fue un lockup, no un `panic()`. Ver `gsp_fini.h`.
+///
+/// Inocuo si no hay GPU NVIDIA o si nunca se llegó a inicializar: en QEMU sin
+/// passthrough no imprime nada ni entra en la capa C.
+pub fn shutdown() {
+    let Some(g) = GPU.get() else {
+        return;
+    };
+    let is_nvidia = {
+        let s = g.lock();
+        s.present && s.vendor == GPU_VENDOR_NVIDIA
+    };
+    if !is_nvidia {
+        return;
+    }
+    if gsp_fini() {
+        crate::println!("gpu: GSP apagado, la tarjeta se puede soltar");
+    }
+}
+
+/// Apagado ordenado de GSP-RM. Sin `lxdde` no hay GSP que apagar, así que la
+/// respuesta honesta es "no se hizo nada" y no un éxito de mentira.
+fn gsp_fini() -> bool {
+    #[cfg(feature = "lxdde")]
+    {
+        return crate::lxdde::gsp_fini();
+    }
+    #[cfg(not(feature = "lxdde"))]
+    false
+}
+
 fn gsp_label() -> &'static str {
     #[cfg(feature = "lxdde")]
     {
@@ -172,6 +208,7 @@ pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64
 /// Comandos GPU (userspace):
 /// - `b"SAXPY"` + f32 a + u64 x_handle + u64 y_handle + u32 n
 /// - `b"MATVF"` + u64 w_handle + u32 rows + u32 cols + u64 x_handle + u64 y_handle
+/// - `b"GFINI"` — apaga GSP-RM y deja la tarjeta sin DMA (irreversible)
 pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
     let g = gpu().lock();
     if !g.present {
@@ -179,6 +216,12 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
     }
     if g.vendor != GPU_VENDOR_NVIDIA {
         return Ok(0);
+    }
+    // Antes que nada: apagar no necesita buffers ni handles, y tiene que poder
+    // ejecutarse aunque el resto del estado esté hecho un desastre.
+    if cmd.len() >= 5 && &cmd[..5] == b"GFINI" {
+        drop(g);
+        return Ok(gsp_fini() as u64);
     }
     if cmd.len() >= 5 && &cmd[..5] == b"SAXPY" && cmd.len() >= 29 {
         let a = f32::from_le_bytes(cmd[5..9].try_into().unwrap_or([0; 4]));

@@ -58,6 +58,10 @@ static void lx_dma_free_coherent(struct lx_pci_dev *d, size_t size, void *va, ui
 { (void)d; (void)dma; lx_free_pages_exact(va, size); }
 
 static void lx_mdelay(unsigned ms) { (void)ms; }
+
+/* El apagado quita el bus master; aquí solo se cuenta que lo pida. */
+static unsigned pci_master_cleared;
+static void lx_pci_clear_master(struct lx_pci_dev *d) { (void)d; pci_master_cleared++; }
 static void *lx_kzalloc(size_t size, unsigned gfp)
 { (void)gfp; void *p = malloc(size); if (p) memset(p, 0, size); return p; }
 static void lx_kfree(void *p) { free(p); }
@@ -86,6 +90,7 @@ static uint32_t fsp_sent[512];
 static unsigned fsp_sent_dwords;
 static unsigned fsp_mbox_reads;
 static uint32_t fsp_reply_error;   /* !=0 para probar el rechazo del FSP */
+static int fake_unload_pending;    /* !=0 → MAILBOX0 acaba dando 0x80000000 */
 
 static void fake_fsp_reset(void)
 {
@@ -122,8 +127,15 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
     case R_MHEAD: return fsp_mhead;
     case R_MTAIL: return fsp_mtail;
     case R_EMEMD: return fsp_emem_ptr < 512 ? fsp_emem[fsp_emem_ptr++] : 0;
-    /* El bootrom tarda unas vueltas en dejar leer el falcon. */
-    case R_MBOX0: return fsp_mbox_reads++ < 3 ? 0xbadf4100u : 0u;
+    /* El bootrom tarda unas vueltas en dejar leer el falcon. Tras el aviso de
+     * descarga, en cambio, MAILBOX0 tiene que acabar valiendo 0x80000000: el
+     * banco lo simula con unas vueltas de retardo para que el sondeo de
+     * `gsp_fini` se ejercite de verdad y no acierte en la primera lectura. */
+    case R_MBOX0:
+        if (fake_unload_pending) {
+            return fsp_mbox_reads++ < 3 ? 0u : 0x80000000u;
+        }
+        return fsp_mbox_reads++ < 3 ? 0xbadf4100u : 0u;
     case R_MBOX1: return 0;
     case R_HWCFG2: return 0;                    /* lockdown liberado */
     case R_CPUCTL: return 0x180u;               /* RISC-V activo (bit 7) */
@@ -170,6 +182,7 @@ static const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind k)
 #include "gsp_rpc_body.inc"
 #include "gsp_cmdq_body.inc"
 #include "gsp_rm_obj_body.inc"
+#include "gsp_fini_body.inc"
 
 static int load_blob(enum gsp_fw_kind kind, const char *path)
 {
@@ -671,10 +684,40 @@ static int check_rm_objects(const struct gsp_libos *lo)
                               0, (const unsigned char *)fake, (uint32_t)sizeof(*fake));
         msgq->tx.writePtr = (base + ((sizeof(*fake) + 80 + 4095) / 4096)) % 63;
 
+        wptr0 = *q.wptr;
         if (gsp_static_info_get(&rm, vram, &si) != 0) {
             printf("FALLO: gsp_static_info_get\n");
             free(fake);
             return -1;
+        }
+
+        /* La petición NO puede ir pelada. Upstream la manda con el struct
+         * entero de payload (`nvkm_gsp_rpc_rd(gsp, fn, sizeof(*rpc))` →
+         * `rpc->length = 32 + 1656`), y RM lo usa de hueco para la respuesta.
+         * Mandándola con length=32 el transporte la rechaza con
+         * `0xff100002 = RPC_INVALID_MESSAGE_FORMAT`, que es lo que pasó en el
+         * HW el 2026-07-25 y dejó G4d bloqueado. */
+        {
+            const unsigned char *entry = cmdq_base + 4096 +
+                                         (unsigned long)(wptr0 % 63) * 4096;
+            const struct gsp_rpc_hdr *hdr =
+                (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+            uint32_t want = (uint32_t)(sizeof(*hdr) + sizeof(*fake));
+
+            if (hdr->function != NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO) {
+                printf("FALLO: static info pedido con function=%u\n", hdr->function);
+                free(fake);
+                return -1;
+            }
+            if (hdr->length != want) {
+                printf("FALLO: static info pedido con length=%u, esperaba %u "
+                       "(pelado = 0xff100002 RPC_INVALID_MESSAGE_FORMAT)\n",
+                       hdr->length, want);
+                free(fake);
+                return -1;
+            }
+            printf("OK: GET_GSP_STATIC_INFO se pide con %u B (cabecera + hueco "
+                   "para la respuesta), no pelado\n", hdr->length);
         }
         if (si.fb_length != vram || si.region_nr != 1 ||
             si.usable_bytes != (2048ull << 20) ||
@@ -711,6 +754,162 @@ static int check_rm_objects(const struct gsp_libos *lo)
 }
 
 /* Envío por la cmdq: las dos RPCs que GSP-RM consume durante su init. */
+/* G4: el apagado (`gsp_fini`).
+ *
+ * Lo que se valida son las **peticiones** que quedan en la cmdq, que es lo que
+ * vería GSP-RM: tres FREE en orden inverso al de la reserva y el aviso de
+ * descarga. Importa especialmente el número de función: `FREE` valía 27 en este
+ * árbol (= `DMA_FILL_PTE_MEM`), y con el 27 esta prueba fallaría en el primer
+ * `hdr->function`. Y el bus master tiene que quedar quitado pase lo que pase,
+ * que es lo único que de verdad protegía al host el día del cuelgue. */
+static int check_fini(const struct gsp_libos *lo)
+{
+    struct gsp_rpc rpc;
+    struct gsp_cmdq q;
+    struct gsp_rm rm;
+    struct gsp_msgq_headers *msgq =
+        (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->msgq_offset);
+    unsigned char *cmdq_base = (unsigned char *)lo->shm.va + lo->cmdq_offset;
+    /* Puntero no-NULL que nunca se desreferencia: el stub de clear_master lo ignora. */
+    struct lx_pci_dev *fake_pdev = (struct lx_pci_dev *)(void *)&rpc;
+    uint32_t base, wptr0;
+    unsigned i;
+    /* Orden inverso al de la reserva: el hijo antes que el padre. */
+    const uint32_t want_free[3] = { NVKM_RM_SUBDEVICE, NVKM_RM_DEVICE, NVKM_RM_CLIENT(0) };
+
+    printf("sizeof rpc_unloading_guest_driver=%zu\n",
+           sizeof(rpc_unloading_guest_driver_v1F_07));
+
+    if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (fini)\n"); return -1; }
+    if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (fini)\n"); return -1; }
+
+    memset(&rm, 0, sizeof(rm));
+    rm.q = &q;
+    rm.rpc = &rpc;
+    rm.client = NVKM_RM_CLIENT(0);
+    rm.device = NVKM_RM_DEVICE;
+    rm.subdevice = NVKM_RM_SUBDEVICE;
+    rm.ready = 1;
+
+    /* Cuatro respuestas OK: tres FREE y el unload, en el orden en que se piden. */
+    base = *rpc.rptr;
+    for (i = 0; i < 3; i++) {
+        fake_rpc_post_payload(lo, (base + i) % 63, NV_VGPU_MSG_FUNCTION_FREE, 0, NULL, 0);
+    }
+    fake_rpc_post_payload(lo, (base + 3) % 63,
+                          NV_VGPU_MSG_FUNCTION_UNLOADING_GUEST_DRIVER, 0, NULL, 0);
+    msgq->tx.writePtr = (base + 4) % 63;
+
+    fake_unload_pending = 1;
+    fsp_mbox_reads = 0;
+    pci_master_cleared = 0;
+    wptr0 = *q.wptr;
+
+    if (gsp_fini(&rm, &q, &rpc, fake_pdev) != 0) {
+        printf("FALLO: gsp_fini con todo respondiendo bien\n");
+        return -1;
+    }
+    fake_unload_pending = 0;
+
+    /* Las tres peticiones de FREE. */
+    for (i = 0; i < 3; i++) {
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + i) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const uint32_t *p = (const uint32_t *)(hdr + 1);
+
+        if (hdr->function != NV_VGPU_MSG_FUNCTION_FREE) {
+            printf("FALLO: free %u con function=%u (esperaba %u; 27 era "
+                   "DMA_FILL_PTE_MEM)\n", i, hdr->function,
+                   NV_VGPU_MSG_FUNCTION_FREE);
+            return -1;
+        }
+        if (hdr->length != sizeof(*hdr) + 16u) {
+            printf("FALLO: free %u length=%u\n", i, hdr->length);
+            return -1;
+        }
+        if (p[0] != NVKM_RM_CLIENT(0) || p[1] != 0 || p[2] != want_free[i] || p[3] != 0) {
+            printf("FALLO: free %u params {0x%08x,0x%08x,0x%08x,0x%08x}, "
+                   "esperaba objeto 0x%08x\n", i, p[0], p[1], p[2], p[3], want_free[i]);
+            return -1;
+        }
+    }
+    printf("OK: FREE (fn=%u) de subdevice, device y cliente, en ese orden\n",
+           NV_VGPU_MSG_FUNCTION_FREE);
+
+    /* Y el aviso de descarga: 8 B a cero, que es el unload que no es suspensión. */
+    {
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 3) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_unloading_guest_driver_v1F_07 *u =
+            (const rpc_unloading_guest_driver_v1F_07 *)(hdr + 1);
+
+        if (hdr->function != NV_VGPU_MSG_FUNCTION_UNLOADING_GUEST_DRIVER) {
+            printf("FALLO: unload con function=%u (esperaba %u)\n",
+                   hdr->function, NV_VGPU_MSG_FUNCTION_UNLOADING_GUEST_DRIVER);
+            return -1;
+        }
+        if (hdr->length != sizeof(*hdr) + sizeof(*u)) {
+            printf("FALLO: unload length=%u (esperaba %zu)\n",
+                   hdr->length, sizeof(*hdr) + sizeof(*u));
+            return -1;
+        }
+        if (u->bInPMTransition != 0 || u->bGc6Entering != 0 || u->newLevel != 0) {
+            printf("FALLO: unload pm=%u gc6=%u level=%u (los tres a cero si no "
+                   "es suspensión)\n", u->bInPMTransition, u->bGc6Entering, u->newLevel);
+            return -1;
+        }
+    }
+    printf("OK: UNLOADING_GUEST_DRIVER (fn=%u) con %zu B a cero\n",
+           NV_VGPU_MSG_FUNCTION_UNLOADING_GUEST_DRIVER,
+           sizeof(rpc_unloading_guest_driver_v1F_07));
+
+    if (pci_master_cleared != 1) {
+        printf("FALLO: bus master quitado %u veces\n", pci_master_cleared);
+        return -1;
+    }
+    if (rm.ready) {
+        printf("FALLO: los objetos de RM siguen marcados como vivos\n");
+        return -1;
+    }
+    printf("OK: bus master quitado y objetos de RM marcados como muertos\n");
+
+    /* El caso que importa para el host: aunque no haya nada vivo con lo que
+     * negociar, el DMA se corta igual. Es exactamente el escenario del cuelgue
+     * del 2026-07-25, donde el apagado ordenado no era posible. */
+    {
+        struct gsp_rm dead;
+        struct gsp_cmdq dead_q;
+        struct gsp_rpc dead_rpc;
+
+        memset(&dead, 0, sizeof(dead));
+        memset(&dead_q, 0, sizeof(dead_q));
+        memset(&dead_rpc, 0, sizeof(dead_rpc));
+        pci_master_cleared = 0;
+        if (gsp_fini(&dead, &dead_q, &dead_rpc, fake_pdev) == 0) {
+            printf("FALLO: un apagado sin RPC vivo se dio por bueno\n");
+            return -1;
+        }
+        if (pci_master_cleared != 1) {
+            printf("FALLO: sin RPC vivo NO se quitó el bus master — "
+                   "es justo cuando más falta hace\n");
+            return -1;
+        }
+        printf("OK: sin RPC vivo el apagado falla pero corta el DMA igual\n");
+    }
+
+    /* Y sin pci_dev no hay forma de cortarlo: tiene que decirlo, no fingir. */
+    if (gsp_fini(&rm, &q, &rpc, NULL) == 0) {
+        printf("FALLO: un apagado sin pci_dev se dio por bueno\n");
+        return -1;
+    }
+    printf("OK: sin pci_dev el apagado se declara fallido\n");
+    return 0;
+}
+
 static int check_cmdq(const struct gsp_libos *lo)
 {
     struct gsp_cmdq q;
@@ -882,6 +1081,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_rpc_sync(&lo) != 0)
         return -1;
     if (check_rm_objects(&lo) != 0)
+        return -1;
+    if (check_fini(&lo) != 0)
         return -1;
 
     fmc_lx_stage_release(&staged);

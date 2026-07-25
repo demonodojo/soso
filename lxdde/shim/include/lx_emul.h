@@ -101,6 +101,10 @@ void lx_pci_iounmap(struct lx_pci_dev *dev, void *addr);
 int lx_pci_enable_device(struct lx_pci_dev *dev);
 void lx_pci_disable_device(struct lx_pci_dev *dev);
 void lx_pci_set_master(struct lx_pci_dev *dev);
+/* Quita el bit de bus master: la GPU deja de poder iniciar DMA. Lo usa el
+ * apagado de GSP (gsp_fini.c) para que un reset de vfio-pci no pille
+ * transacciones en vuelo. */
+void lx_pci_clear_master(struct lx_pci_dev *dev);
 uint32_t lx_pci_read_config(struct lx_pci_dev *dev, int offset, int size);
 void lx_pci_write_config(struct lx_pci_dev *dev, int offset, uint32_t val, int size);
 int lx_pci_alloc_irq_vectors(struct lx_pci_dev *dev, unsigned int min, unsigned int max, unsigned int flags);
