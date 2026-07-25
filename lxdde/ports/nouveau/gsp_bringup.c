@@ -5,6 +5,7 @@
 #include "fmc_lx.h"
 #include "gsp_fw.h"
 #include "gsp_mmio.h"
+#include "gsp_rm.h"
 #include "lx_emul.h"
 
 #define NV_PMC_BOOT_0_OFF 0x0000u
@@ -58,6 +59,7 @@ enum gsp_phase {
     GSP_FW_LOADING,
     GSP_FW_READY,
     GSP_FW_STAGED,
+    GSP_RM_RADIX3,
     GSP_FMC_PARSE,
     GSP_FMC_READY,
     GSP_ACR_LOAD,
@@ -70,6 +72,7 @@ enum gsp_phase {
 };
 
 static enum gsp_phase g_phase = GSP_NONE;
+static struct gsp_rm_fw g_rm;   /* imagen GSP-RM + radix3, viva hasta el boot */
 static uint16_t g_device_id;
 static uint32_t g_boot0;
 static uint64_t g_vram_bytes;
@@ -101,8 +104,8 @@ static uint64_t vram_for_device(uint16_t dev_id)
 
 /* Ruta Blackwell: el GSP lo arranca el FSP con la imagen GSP-FMC, no el ACR de
  * SEC2. De momento validamos el ELF firmado y leemos el estado del FSP; el envío
- * del mensaje COT necesita WPR meta + radix3 + libos boot args, que no existen
- * todavía (ver fmc_lx.c). */
+ * del mensaje COT necesita además WPR meta + libos boot args (la radix3 ya la
+ * construye `gsp_rm.c`). Ver fmc_lx.c. */
 static void run_fmc_blackwell(void)
 {
     const struct gsp_fw_blob *fmc = gsp_fw_get(GSP_FW_FMC);
@@ -205,6 +208,19 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     }
     g_phase = GSP_FW_STAGED;
 
+    /* La imagen GSP-RM y su radix3: las dos familias la necesitan (el FMC de
+     * Blackwell y el ACR de Ampere solo arrancan el cargador; quien lee estos
+     * 60 MiB es el propio GSP, por DMA, siguiendo la tabla). Todo en memoria:
+     * nada de esto escribe un registro. */
+    g_phase = GSP_RM_RADIX3;
+    if (gsp_rm_prepare(gsp_fw_chip_of(nv_family_of(boot0, g_device_id)), &g_rm) == 0) {
+        /* El ucode en bruto ya no hace falta: `g_rm.img` tiene la sección que
+         * importa, alineada a página. Son 60,6 MiB de heap de vuelta. */
+        gsp_fw_release_one(GSP_FW_UCODE);
+    } else {
+        lx_printk("nouveau-lx: GSP-RM/radix3 no preparada — sigue soft\n");
+    }
+
     /* El ACR de `acr_fw.c` es el de Ampere (ucode ga102 en SEC2). En Blackwell el
      * falcon ni ejecutaba — `mbox0=0xbadf4100` — porque GB20x arranca por GSP-FMC/FSP.
      * Cada familia va por lo suyo. */
@@ -242,6 +258,8 @@ const char *lx_nouveau_gsp_status(void)
         return "fw_ready";
     case GSP_FW_STAGED:
         return "fw_staged";
+    case GSP_RM_RADIX3:
+        return "rm_radix3";
     case GSP_FMC_PARSE:
         return "fmc_parse";
     case GSP_FMC_READY:

@@ -279,6 +279,7 @@ fn provided_symbols() -> HashSet<&'static str> {
         "lx_spike_run", "lx_testdrv_run", "lx_e1000e_init_module", "lx_e1000e_exit_module",
         "lx_e1000e_adapter", "lx_e1000_poll",
         "lx_kmalloc", "lx_kzalloc", "lx_krealloc", "lx_kfree", "lx_vmalloc", "lx_vfree",
+        "lx_alloc_pages_exact", "lx_free_pages_exact", "lx_virt_to_phys",
         "lx_puts", "lx_putchar", "lx_vprintk", "lx_printk",
         "lx_emul_trace_and_stop", "lx_emul_trace",
         "lx_jiffies", "lx_msecs_to_jiffies", "lx_jiffies_to_msecs", "lx_udelay", "lx_mdelay",

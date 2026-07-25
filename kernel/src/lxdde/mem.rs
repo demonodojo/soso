@@ -89,5 +89,42 @@ pub extern "C" fn lx_vfree(ptr: *mut c_void) {
     lx_kfree(ptr);
 }
 
+/// Buffer alineado a página (4 KiB), fuera del pool de `lx_kmalloc` (que solo
+/// alinea a 8). Lo necesita la tabla radix3 del GSP: describe la imagen GSP-RM
+/// página a página, así que tiene que empezar justo en un límite de página.
+/// **No** exige contigüidad física — cada página se traduce por separado con
+/// `lx_virt_to_phys`, que es precisamente para lo que existe radix3.
+#[unsafe(no_mangle)]
+pub extern "C" fn lx_alloc_pages_exact(size: usize) -> *mut c_void {
+    use alloc::alloc::{alloc_zeroed, Layout};
+    let size = (size + 4095) & !4095;
+    let Ok(layout) = Layout::from_size_align(size.max(4096), 4096) else {
+        return core::ptr::null_mut();
+    };
+    unsafe { alloc_zeroed(layout) as *mut c_void }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lx_free_pages_exact(ptr: *mut c_void, size: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    use alloc::alloc::{dealloc, Layout};
+    let size = (size + 4095) & !4095;
+    let Ok(layout) = Layout::from_size_align(size.max(4096), 4096) else {
+        return;
+    };
+    unsafe { dealloc(ptr as *mut u8, layout) };
+}
+
+/// Dirección física de una virtual del kernel. 0 si no está mapeada.
+#[unsafe(no_mangle)]
+pub extern "C" fn lx_virt_to_phys(ptr: *const c_void) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    crate::mm::virt_to_phys(ptr as u64).unwrap_or(0)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn lx_register_initcall(_func: extern "C" fn() -> i32, _level: i32) {}

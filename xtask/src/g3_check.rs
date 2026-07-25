@@ -44,11 +44,13 @@ pub fn run(_args: &[String]) {
     println!("\n3) Módulos G3 en source.list");
     for m in [
         "gsp_fw.c",
+        "gsp_rm.c",
         "gsp_mmio.c",
         "gsp_bringup.c",
         "acr_fw.c",
         "falcon_lx.c",
         "acr_lx.c",
+        "fmc_lx.c",
     ] {
         let p = root.join("lxdde/ports/nouveau").join(m);
         if p.exists() {
@@ -98,6 +100,10 @@ pub fn run(_args: &[String]) {
         "G3 ola2 ACR lx (firmware + módulos)",
         acr_ok == 2 && root.join("lxdde/ports/nouveau/acr_lx.c").exists(),
     );
+    print_criterion(
+        "G3b radix3 GSP-RM verificada (log)",
+        log_contains(&log, "radix3 verificada"),
+    );
     print_criterion("G3b hw boot (log: GSP booted sin soft)", gsp_log_ok && log_contains(&log, "GSP booted (hw"));
     print_criterion(
         "G3b nvkm ACR port (inventario stubs)",
@@ -105,7 +111,8 @@ pub fn run(_args: &[String]) {
     );
 
     println!("\n=== Fases GSP esperadas (serial) ===");
-    println!("   fw_ready → fw_staged → acr_load → acr_ahesasc → acr_asb → kick → poll → booted | booted_soft");
+    println!("   fw_ready → fw_staged → rm_radix3 → [fmc_parse → fmc_ready | acr_load → acr_ahesasc → acr_asb]");
+    println!("             → kick → poll → booted | booted_soft");
     println!("   Inventario nvkm ola2: ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list");
 
     println!("\n=== Resumen: {ok} OK, {warn} WARN, {fail} FAIL ===");

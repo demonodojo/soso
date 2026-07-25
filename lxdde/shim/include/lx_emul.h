@@ -18,6 +18,11 @@ void *lx_krealloc(void *ptr, size_t size, unsigned flags);
 void lx_kfree(void *ptr);
 void *lx_vmalloc(unsigned long size);
 void lx_vfree(void *ptr);
+/* Buffer alineado a página (para tablas de páginas del GSP); no garantiza
+ * contigüidad física — traducir página a página con lx_virt_to_phys. */
+void *lx_alloc_pages_exact(size_t size);
+void lx_free_pages_exact(void *ptr, size_t size);
+uint64_t lx_virt_to_phys(const void *ptr);
 
 #define GFP_KERNEL 0x40u
 #define GFP_ATOMIC 0x20u

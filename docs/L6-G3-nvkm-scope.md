@@ -181,10 +181,12 @@ Archivos actuales:
 | Componente | Ubicación |
 |------------|-----------|
 | Carga firmware persistente | `lxdde/ports/nouveau/gsp_fw.c` |
-| Staging GEM | `lx_drm_gem_create` + `gsp_fw_stage_all` |
+| Staging GEM (todo menos el ucode) | `lx_drm_gem_create` + `gsp_fw_stage_all` |
+| Imagen GSP-RM + radix3 | `lxdde/ports/nouveau/gsp_rm.c` |
+| Ruta FMC/FSP (Blackwell) | `lxdde/ports/nouveau/fmc_lx.c` |
 | Poll MMIO tu102 | `gsp_mmio.c` (`0x118128`, `0x118234`) |
-| ACR lx ola2 | `acr_fw.c`, `falcon_lx.c`, `acr_lx.c` |
-| Fases serial | `…→fw_staged→acr_load→acr_ahesasc→acr_asb→kick→poll→booted(_soft)` |
+| ACR lx ola2 (Ampere) | `acr_fw.c`, `falcon_lx.c`, `acr_lx.c` |
+| Fases serial | `…→fw_staged→rm_radix3→[fmc_parse→fmc_ready \| acr_*]→kick→poll→booted(_soft)` |
 | Inventario nvkm ola1 | `./scripts/l6-g3-nvkm-inventory.sh nvkm_ola1.list` |
 | Inventario nvkm ola2 | `./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list` |
 | **nvkm GSP subdev (Ola 1) compilado e integrado** | `source.list` + shims en `lxdde/shim/include/` |
@@ -192,7 +194,56 @@ Archivos actuales:
 | Inventario símbolos undefined | `target/g3-nvkm-undefined.txt` |
 | Checklist | `cargo xtask g3-check` |
 
-**G3b siguiente:** WPR + port `subdev/acr/*` vía `nvkm_ola2.list` (sustituir lx-native).
+## Ruta de arranque de Blackwell (GB20x): FSP + GSP-FMC
+
+GB20x no arranca el GSP con el ACR de SEC2 (eso es Ampere: en GB205 el falcon ni
+ejecuta, `mbox0=0xbadf4100`). Lo arranca el **FSP**, al que se le manda un mensaje
+**COT** por EMEM con la imagen GSP-FMC y su cadena de firma. Referencia upstream
+(no está en el 6.6 pinneado): `nvkm/subdev/fsp/{gh100,gb202}.c`, `nvkm/subdev/gsp/gh100.c`.
+
+Cadena completa y en qué punto está:
+
+| Paso | Qué es | Dónde | Estado |
+|------|--------|-------|--------|
+| 1 | Validar el ELF `fmc-*.bin` (cabecera fija, 6 secciones, CRC en `sh_info`) | `fmc_lx.c` | hecho (48/97/96 = variante gb202, `cot.version=2`) |
+| 2 | Leer el FSP: `NV_THERM_I2CS_SCRATCH` gb202 en **0x00ad00bc** (éxito `0xff`), colas en `0x008f2c00/04/80/84` | `fmc_lx.c` | hecho en HW: `0xff` + colas a 0 |
+| 3 | **radix3** sobre `.fwimage` del ucode GSP-RM | `gsp_rm.c` | hecho, verificada en memoria |
+| 4 | `GspFwWprMeta` (layout de WPR2 en VRAM) | — | pendiente |
+| 5 | libos boot args (`GSP_FMC_BOOT_PARAMS`) | — | pendiente |
+| 6 | Enviar el COT al FSP | — | pendiente (**no antes de 4 y 5**) |
+
+Los pasos 3–5 se construyen y verifican **en memoria, sin escribir un solo
+registro**. El 6 es el primero que toca el hardware: mandar un COT con punteros a
+estructuras sin construir es lo único que hay que no hacer.
+
+### Paso 3: radix3 (`gsp_rm.c`)
+
+El ucode `gsp-570.144.bin` es un ELF64 (REL, RISC-V) con `.fwimage` (0x3c99000 B,
+~60,5 MiB, ya múltiplo de página) y una firma por familia — `.fwsignature_gb20x`
+para Blackwell, `.fwsignature_ga10x` para Ampere, 4 KiB cada una. El GSP no lee
+esa imagen linealmente: recibe la física de la raíz de una tabla de 3 niveles de
+`u64` cuyas hojas listan la física de **cada página** de la imagen, así que el
+firmware no necesita ser físicamente contiguo. Copia exacta de
+`nvkm_gsp_radix3_sg` (`nvkm/subdev/gsp/r535.c`).
+
+Para gb205: 15513 páginas → hoja 126976 B (31 páginas), nivel 1 y raíz 4096 B cada
+uno. `radix3_verify()` releé lo escrito antes de que llegue a manos del GSP
+(alineación de los tres niveles, raíz→nivel 1, nivel 1→hojas entrada a entrada, y
+muestreo de la primera/media/última hoja contra `lx_virt_to_phys`): un puntero mal
+puesto aquí es un DMA a memoria ajena que no se vería hasta el COT.
+
+Dos apoyos nuevos en la capa lx (`kernel/src/lxdde/mem.rs`): `lx_alloc_pages_exact`
+(buffer alineado a página — `lx_kmalloc` solo alinea a 8, y la imagen tiene que
+empezar en un límite de página) y `lx_virt_to_phys`. Los tres niveles sí son
+contiguos y van por `lx_dma_alloc_coherent`.
+
+**Presupuesto de heap:** el ucode ya **no** se copia a un GEM (60,6 MiB que el GSP
+lee por DMA, no un objeto gráfico) y el blob en bruto se suelta
+(`gsp_fw_release_one(GSP_FW_UCODE)`) en cuanto `gsp_rm_prepare` tiene su copia
+alineada. Pico ≈125 MiB en vez de ≈190 MiB, con el heap en 256 MiB.
+
+**G3b siguiente:** `GspFwWprMeta` (paso 4) + libos boot args (paso 5). En Ampere,
+además, port `subdev/acr/*` vía `nvkm_ola2.list` (sustituir lx-native).
 
 Log objetivo G3b (hardware real, tras G1):
 

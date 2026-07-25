@@ -11,7 +11,6 @@ struct gsp_fw_slot {
 
 static struct gsp_fw_blob g_blobs[GSP_FW_COUNT];
 static int g_loaded;
-static unsigned g_need;   /* nº de blobs del juego activo */
 
 /* Blackwell arranca por FMC: bootloader + fmc + ucode. */
 static const struct gsp_fw_slot g_paths_blackwell[] = {
@@ -124,7 +123,6 @@ int gsp_fw_load_all(enum gsp_fw_chip chip)
         gsp_fw_release_all();
         return -1;
     }
-    g_need = count;
     g_loaded = 1;
     return 0;
 }
@@ -144,6 +142,7 @@ int gsp_fw_stage_all(void)
 {
     unsigned i;
     unsigned staged = 0;
+    unsigned expect = 0;
 
     for (i = 0; i < GSP_FW_COUNT; i++) {
         struct gsp_fw_blob *b = &g_blobs[i];
@@ -152,6 +151,13 @@ int gsp_fw_stage_all(void)
         if (!b->valid || !b->data) {
             continue;
         }
+        /* El ucode NO se copia a un GEM: son 60,6 MiB que el GSP lee por DMA
+         * desde la radix3 de `gsp_rm.c`, no desde un objeto gráfico. Duplicarlo
+         * aquí solo servía para dejar el heap al borde. */
+        if (i == GSP_FW_UCODE) {
+            continue;
+        }
+        expect++;
         if (b->gem_handle != 0) {
             staged++;
             continue;
@@ -174,7 +180,23 @@ int gsp_fw_stage_all(void)
         lx_printk("nouveau-lx: staged GEM h=%u %s (%lu bytes)\n",
                   b->gem_handle, b->path, b->len);
     }
-    return staged == g_need ? 0 : -1;
+    return staged == expect && expect > 0 ? 0 : -1;
+}
+
+void gsp_fw_release_one(enum gsp_fw_kind kind)
+{
+    struct gsp_fw_blob *b;
+
+    if (kind >= GSP_FW_COUNT) {
+        return;
+    }
+    b = &g_blobs[kind];
+    if (b->data) {
+        lx_kfree(b->data);
+    }
+    b->data = NULL;
+    b->len = 0;
+    b->valid = 0;
 }
 
 void gsp_fw_release_all(void)
@@ -190,6 +212,5 @@ void gsp_fw_release_all(void)
         g_blobs[i].gem_handle = 0;
         g_blobs[i].valid = 0;
     }
-    g_need = 0;
     g_loaded = 0;
 }

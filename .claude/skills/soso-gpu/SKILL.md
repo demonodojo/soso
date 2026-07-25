@@ -55,11 +55,13 @@ Fallback sin IOMMU (solo BAR0, PARTIAL): `l6-g1-vfio-noiommu.sh`.
 Blackwell = `gb205/{bootloader,fmc,gsp}`, Ampere = `ga102/{bootloader,booter_load,
 booter_unload,gsp}`; `gsp_fw_load_all(chip)` exige todos los blobs de su juego. Antes
 cargaba los dos juegos y el ucode `gsp-570.144.bin` (60,6 MiB) se duplicaba —
-en linux-firmware el de gb205 es un **symlink** al de ga102. Cada blob vive **tres**
-veces mientras se carga (caché de `lx_request_firmware`, copia de `g_blobs`, objeto
-GEM), así que el heap del kernel está en 256 MiB (`kernel/src/mm/heap.rs`); con los dos
-juegos ni 256 ni 512 llegaban. `lx_release_firmware` ya libera de verdad (era no-op).
-La ruta Ampere está escrita pero **sin probar**: no hay 3060 en esta máquina.
+en linux-firmware el de gb205 es un **symlink** al de ga102. El heap del kernel está
+en 256 MiB (`kernel/src/mm/heap.rs`); con los dos juegos ni 256 ni 512 llegaban.
+`lx_release_firmware` ya libera de verdad (era no-op). Desde el paso de radix3 el
+ucode **no** se copia a un GEM y su blob en bruto se suelta con
+`gsp_fw_release_one(GSP_FW_UCODE)` en cuanto `gsp_rm_prepare` tiene su copia: pico
+≈125 MiB en vez de ≈190. La ruta Ampere está escrita pero **sin probar**: no hay
+3060 en esta máquina.
 
 **Ruta por familia en el bring-up.** `gsp_bringup.c` bifurca: Ampere → `run_acr_sec2()`
 (el ACR de siempre); Blackwell → `run_fmc_blackwell()`. El ACR de `acr_fw.c` es de
@@ -89,6 +91,19 @@ Lo que **falta** para arrancar de verdad: el mensaje COT lleva
 construye `r535_gsp_oneinit` — la pila RM entera. Hasta tenerla, `fmc_lx.c` solo
 valida el ELF y **lee** el estado del FSP; no escribe MMIO. Enviar un COT con
 punteros sin construir es lo único que hay que no hacer.
+
+**radix3 (`gsp_rm.c`), hecho.** Primero de los tres bloques que faltaban. El ucode
+`gsp-570.144.bin` es un ELF64 REL de RISC-V: `.fwimage` = 0x3c99000 B (~60,5 MiB, ya
+múltiplo de página) + una firma de 4 KiB por familia (`.fwsignature_gb20x` /
+`.fwsignature_ga10x`). `gsp_rm_prepare()` extrae las dos, copia la imagen a un buffer
+alineado a página y construye la tabla de 3 niveles igual que `nvkm_gsp_radix3_sg`
+(`nvkm/subdev/gsp/r535.c`): hojas = física de cada página de la imagen, así que el
+firmware no tiene que ser contiguo. En gb205 salen 15513 páginas → hoja 126976 B,
+nivel 1 y raíz 4096 B. `radix3_verify()` releé los tres niveles antes de que el GSP
+los vea. Apoyos nuevos en `kernel/src/lxdde/mem.rs`: `lx_alloc_pages_exact`
+(`lx_kmalloc` solo alinea a 8) y `lx_virt_to_phys`. Fase serial: `rm_radix3`, log
+`radix3 verificada raíz=0x…`. **Sigue sin tocar un registro.** Detalle y tabla de
+pasos 1–6 de la cadena FSP/COT en `docs/L6-G3-nvkm-scope.md`.
 
 **Máquina del usuario (MSI Vector 16 HX AI, confirmado 2026-07-24):**
 - **Híbrida**: iGPU Intel Arrow Lake (`00:02.0`, `i915`) pinta el panel; la dGPU
@@ -150,7 +165,9 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | Archivo | Rol | Nota |
 |---------|-----|------|
 | `gsp_bringup.c` | Máquina de fases GSP | **soft boot** (`booted_soft`); saxpy/matvec en CPU; VRAM hardcodeada |
-| `gsp_fw.c` | Carga blobs GSP + staging GEM | valida ELF/magic |
+| `gsp_fw.c` | Carga blobs GSP + staging GEM | valida ELF/magic; el ucode NO va a GEM |
+| `gsp_rm.c` | ELF64 del ucode → `.fwimage`/firma + **radix3** verificada | fase `rm_radix3`, sin MMIO |
+| `fmc_lx.c` | Ruta FSP/GSP-FMC de Blackwell | valida el ELF FMC y **lee** el FSP |
 | `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick | `kick_boot` NO arranca HW real (solo traza) |
 | `acr_fw.c`,`falcon_lx.c`,`acr_lx.c` | ACR ola2 lx-native (AHESASC→ASB) | best-effort/soft-fail |
 | `nouveau_stub.c` | pci_driver + exports C | probe vendor 0x10de |

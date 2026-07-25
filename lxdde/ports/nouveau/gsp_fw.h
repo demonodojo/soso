@@ -27,7 +27,10 @@ struct gsp_fw_blob {
 
 int gsp_fw_load_all(enum gsp_fw_chip chip);
 const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind kind);
+/* Copia a GEM todos los blobs salvo el ucode (ese va por radix3, ver gsp_rm.c). */
 int gsp_fw_stage_all(void);
+/* Suelta un blob concreto — el ucode en cuanto `gsp_rm_prepare` tiene su copia. */
+void gsp_fw_release_one(enum gsp_fw_kind kind);
 void gsp_fw_release_all(void);
 
 #endif
