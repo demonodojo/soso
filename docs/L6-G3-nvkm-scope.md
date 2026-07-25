@@ -215,7 +215,7 @@ Cadena completa y en qué punto está:
 | 3 | **radix3** sobre `.fwimage` del ucode GSP-RM | `gsp_rm.c` | hecho, verificada en memoria |
 | 4 | Bootloader RISC-V en sysmem + `GspFwWprMeta` | `gsp_wpr.c` | hecho, verificado en memoria |
 | 5 | Colas, logs, RMARGS, libos boot args y `GSP_FMC_BOOT_PARAMS` | `gsp_libos.c` + `fmc_lx_stage()` | hecho, verificado en memoria |
-| 6 | Enviar el COT al FSP por EMEM y esperar al FMC | `fsp_lx.c` | escrito; **sin validar en HW** |
+| 6 | Enviar el COT al FSP por EMEM y esperar al FMC | `fsp_lx.c` | **hecho y validado en HW** |
 
 Los pasos 3–5 se construyen y verifican **en memoria**; de registros, solo se
 **leen** (el estado del FSP en el 2, el tamaño de VRAM en el 4). **El 6 es el
@@ -409,15 +409,32 @@ trata el all-ones como silencio del bus, el bucle del lockdown aborta con un men
 propio en cuanto lo detecta, y `g3-check` degrada el criterio a PEND con aviso si
 encuentra la huella en el log (`fuera del bus`, `118128=0xffffffff`, `boot0=0xffffffff`).
 
-Qué falta por distinguir, y solo lo dice el `dmesg` del host justo después de una
-ejecución (`DMAR`/`AER`/`link`/`reset` para `0000:01:00.0`):
+No hubo ni fallos DMAR ni AER ni eventos de enlace en el host. Lo que sí había era
+**`nvidia-persistenced` en bucle de reinicio**, cargando y descargando `nvidia.ko`
+unas 5 veces por segundo mientras la tarjeta estaba en VFIO — pares
+`nvlink: Nvlink Core is being initialized` / `Unregistered` cada ~180 ms en `dmesg`,
+que además tapaban cualquier otro mensaje. El daemon no puede funcionar con la GPU
+en `vfio-pci`: no hay nada que persistir.
 
-- **reset del propio FMC** — la secuencia de secure boot resetea parte del chip y
-  VFIO/QEMU no lo sobrevive;
-- **fallo de IOMMU** — el FMC hace DMA a las direcciones que le dimos y la
-  traducción no está (saldría `DMAR: [DMA Read] Request device [01:00.0]`);
-- **error fatal al montar WPR en VRAM** — p. ej. si la tarjeta nunca fue POSTeada
-  (es la GPU secundaria y arranca directamente en `vfio-pci`).
+### Tercera prueba (2026-07-25): G3b en GO
+
+Con `sudo systemctl mask --now nvidia-persistenced` el arranque salió a la primera:
+
+```
+COT aceptado por el FSP
+GSP tras el COT  hwcfg2=0x8187a7f7 (lockdown=1)
+GSP esperando    hwcfg2=0x8187a7f7 (lockdown=1)
+GSP-FMC arrancado, lockdown liberado
+GSP arrancado    hwcfg2=0x818787f7 (lockdown=0) mbox0=0x00000000
+GSP booted (hw, GSP-FMC vía FSP, 12227 MiB VRAM)
+```
+
+El bit 13 de `HWCFG2` cae, `mbox0` sigue a cero (sin código de error) y no aparece
+un solo `0xffffffff` en todo el log. **G3b cerrado.**
+
+Que la causa de la caída anterior fuera el trasiego de `nvidia.ko` es la hipótesis
+que encaja con todo lo observado, pero es **una sola observación**, no una
+demostración. Mantener el daemon enmascarado mientras se itera en L6.
 
 ### Verificación sin GPU
 

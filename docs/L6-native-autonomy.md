@@ -22,7 +22,7 @@ G5  LLM híbrido          ──►  matvec offload en soso-llm (VRAM ~12 GiB)
 | G1 | IOMMU + VFIO + log `NV_PMC_BOOT_0=0x…` | **BLOCK** — 0 grupos IOMMU en placa (VT-d off en BIOS; acción del usuario) |
 | G2 | `./scripts/l6-pack-firmware.sh` → ELF en rootfs | **Go** (gb205 + set ga102 del 3060, con `zstd`) |
 | G3a | Validación ELF + GEM staging + fases | **Go** (soft boot si poll falla) |
-| G3b | Port nvkm real | **Go (software)** — **62 fuentes nvkm/lib** integradas (core, falcon, nvfw, ACR, mmu, fb, instmem, engine gr/fifo/dma base). El **grafo de objetos nvkm real se construye en runtime** (`nvkm device graph OK — subdev='gsp0'`). Solo 4 dummies, todos HW/ROM. Falta el boot GSP efectivo (MMIO real ↔ `gsp_mmio.c`) → requiere G1 |
+| G3b | Port nvkm real | **GO en hardware (2026-07-25)** — `GSP booted (hw, GSP-FMC vía FSP)` en GB205 real: el FSP acepta el COT y el FMC libera el lockdown del bootrom RISC-V. Cadena completa en `docs/L6-G3-nvkm-scope.md` (radix3 → WPR meta → libos boot args → COT). **62 fuentes nvkm/lib** integradas y grafo de objetos nvkm real en runtime; solo 4 dummies, todos HW/ROM |
 | G4 | Saxpy SASS en GPU | Infra base integrada (`engine/{gr,fifo,dma}`); el gr por chip + compute real requieren GSP arrancado (G1) |
 | G5 | tok/s GPU > CPU | Pendiente G4 |
 

@@ -30,7 +30,7 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G2 | firmware gb205 en rootfs | `lxdde-fw: cargado …/gsp/…` | **Go** (blobs .zst→.bin) |
 | G2 | firmware gb205 + set ga102 (3060) | `lxdde-fw: cargado …/gsp/…` | **Go** |
 | G3a | firmware ELF + GEM staging + fases | `N blobs GSP validados` | **Go** (soft boot) |
-| G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | Cadena FSP/COT completa escrita (pasos 1–6); 3–5 verificados en HW, **paso 6 sin probar en HW** |
+| G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | **GO** (2026-07-25): `GSP booted (hw, GSP-FMC vía FSP)` en GB205 real, lockdown liberado, sin un solo all-ones en el log |
 | G4 | saxpy SASS en VRAM | `SYS_GPU_SUBMIT` correcto en GPU | Infra `engine/{gr,fifo,dma}` base; bloqueado por G3b en HW |
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
 
@@ -164,11 +164,19 @@ degrada el criterio a PEND si ve la huella (`fuera del bus`, `118128=0xffffffff`
 `boot0=0xffffffff`). **Antes de creerte un GO, mira que los registros del log no
 sean todo efes.**
 
-**Estado real del paso 6 (2026-07-25):** el FSP **acepta el COT** y el FMC
-**arranca** (`cpuctl halted=0`, lockdown aún 1), pero ~1 s después la GPU se cae
-del bus y todo se lee `0xffffffff`. Se recupera al salir QEMU. Para distinguir
-entre reset del FMC, fallo de IOMMU y error al montar WPR hace falta el `dmesg` del
-host justo después de la ejecución (`sudo dmesg | grep -iE "DMAR|AER|01:00|reset|link"`).
+**Paso 6 cerrado en HW (2026-07-25): `GSP booted (hw, GSP-FMC vía FSP)`.** El FSP
+acepta el COT, el FMC arranca y baja el lockdown: `HWCFG2` pasa de `0x8187a7f7` a
+`0x818787f7` (cae el bit 13) con `mbox0=0`. Sin un solo `0xffffffff` en el log.
+
+**Antes de eso hubo un intento en el que la GPU se caía del bus** ~1 s después de
+arrancar el FMC. El sospechoso principal: **`nvidia-persistenced` estaba en bucle
+de reinicio** y cargaba/descargaba `nvidia.ko` unas 5 veces por segundo mientras la
+tarjeta estaba en VFIO (se ve en `dmesg` como pares `nvlink: Nvlink Core is being
+initialized` / `Unregistered` cada ~180 ms). Tras `sudo systemctl mask --now
+nvidia-persistenced` el arranque salió a la primera. Es una sola observación, no
+una demostración, pero **conviene tenerlo enmascarado mientras se itera en L6**
+(`unmask` al devolver la GPU al host). El daemon no puede funcionar de todos modos:
+no hay GPU que persistir cuando está en `vfio-pci`.
 
 **Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh`.** Compila los módulos
 de los pasos 3–6 en el host con la capa lx y **un FSP simulado detrás del MMIO**
