@@ -174,7 +174,7 @@ typedef struct PACKED_REGISTRY_TABLE
  * device y un subdevice. Todo va envuelto en estas dos cabeceras, que viajan
  * dentro del payload de un RPC (`rm/r535/nvrm/{alloc,ctrl}.h`).
  *
- * **No existen en r570/nvrm/**: son compartidas con r535, sin divergencia de
+ * **No existen bajo r570/nvrm**: son compartidas con r535, sin divergencia de
  * versión — al contrario que `NV0000_ALLOC_PARAMETERS`, que en r570 añade
  * `pOsPidInfo` al final y en r535 no lo lleva.
  *
@@ -470,6 +470,62 @@ typedef struct GspStaticConfigInfo
 
 #define NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO 65u
 
+/* ---- Espacio de direcciones (G4d 2/2) --------------------------------------
+ *
+ * Transcrito de `rm/r535/nvrm/vmm.h` (r570 lo hereda sin tocar) y usado por
+ * `r535_mmu_vaspace_new`.
+ *
+ * El modelo importa más que los campos: con `IS_EXTERNALLY_OWNED` **las tablas
+ * de páginas son nuestras**. RM no las construye ni las toca; solo se le dice
+ * dónde está la raíz con `SET_PAGE_DIRECTORY`. Es lo que hace nouveau para el
+ * VMM que promociona (`r535_mmu_promote_vmm` pasa `external=true`), y para
+ * nosotros es además el camino más corto: la alternativa —dejar el espacio en
+ * manos de RM— exige igualmente construir un directorio y encima copiarle los
+ * PDE de su región reservada.  */
+#define FERMI_VASPACE_A 0x90f1u
+
+typedef struct NV_VASPACE_ALLOCATION_PARAMETERS
+{
+    NvU32                   index;
+    NvU32                   flags;
+    NvU64                   vaSize;
+    NvU64                   vaStartInternal;
+    NvU64                   vaLimitInternal;
+    NvU32                   bigPageSize;
+    NvU64                   vaBase;
+} NV_VASPACE_ALLOCATION_PARAMETERS;
+
+#define NV_VASPACE_ALLOCATION_INDEX_GPU_NEW               0x00u
+#define NV_VASPACE_ALLOCATION_FLAGS_IS_EXTERNALLY_OWNED   (1u << 3)
+
+/* Controles sobre el device (`NV01_DEVICE_0`), no sobre el vaspace. */
+#define NV0080_CTRL_CMD_DMA_SET_PAGE_DIRECTORY   0x801813u
+#define NV0080_CTRL_CMD_DMA_UNSET_PAGE_DIRECTORY 0x801814u
+
+typedef struct NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS
+{
+    NvU64                   physAddress;
+    NvU32                   numEntries;
+    NvU32                   flags;
+    NvU32                   hVASpace;
+    NvU32                   chId;
+    NvU32                   subDeviceId;    /* ID+1; 0 = broadcast */
+    NvU32                   pasid;
+} NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS;
+
+/* `FLAGS_APERTURE` es 1:0. Upstream pone VIDMEM porque su directorio vive en
+ * VRAM (lo reserva instmem); el nuestro vive en sysmem coherente, que es lo
+ * único que la CPU puede escribir hoy aquí — sin BAR1 no hay ventana a la VRAM. */
+#define NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_FLAGS_APERTURE_VIDMEM       0u
+#define NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_FLAGS_APERTURE_SYSMEM_COH   1u
+#define NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_FLAGS_APERTURE_SYSMEM_NONCOH 2u
+
+typedef struct NV0080_CTRL_DMA_UNSET_PAGE_DIRECTORY_PARAMS
+{
+    NvU32                   hVASpace;
+    NvU32                   subDeviceId;
+} NV0080_CTRL_DMA_UNSET_PAGE_DIRECTORY_PARAMS;
+
 /* Si un tamaño baila, RM lee los campos desplazados y responde cualquier cosa. */
 typedef char rm_alloc_hdr_size_check[sizeof(rpc_gsp_rm_alloc) == 32 ? 1 : -1];
 typedef char rm_ctrl_hdr_size_check[sizeof(rpc_gsp_rm_control) == 24 ? 1 : -1];
@@ -485,5 +541,13 @@ typedef char fb_region_size_check[
     sizeof(NV2080_CTRL_CMD_FB_GET_FB_REGION_FB_REGION_INFO) == 48 ? 1 : -1];
 typedef char rpc_unload_size_check[
     sizeof(rpc_unloading_guest_driver_v1F_07) == 8 ? 1 : -1];
+/* 48 y 32 con alineación natural: los `NV_ALIGN_BYTES(8)` de upstream no añaden
+ * nada sobre x86-64, pero sí explican el hueco de 4 B tras `index`/`flags` y el
+ * de 4 B tras `bigPageSize`. Si estos números bailan, el `index` que RM lee no
+ * es el que mandamos y el vaspace sale con la geometría de otra cosa. */
+typedef char nv_vaspace_size_check[
+    sizeof(NV_VASPACE_ALLOCATION_PARAMETERS) == 48 ? 1 : -1];
+typedef char nv0080_set_pd_size_check[
+    sizeof(NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS) == 32 ? 1 : -1];
 
 #endif

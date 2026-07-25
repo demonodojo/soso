@@ -12,6 +12,8 @@
 #include "gsp_rm.h"
 #include "gsp_rm_obj.h"
 #include "gsp_rpc.h"
+#include "gsp_vmm.h"
+#include "gsp_vram.h"
 #include "gsp_wpr.h"
 #include "lx_emul.h"
 
@@ -85,6 +87,7 @@ enum gsp_phase {
     GSP_BOOTED,
     GSP_RM_READY,
     GSP_RM_OBJECTS,
+    GSP_RM_VMM,     /* + espacio de direcciones con VRAM y sysmem mapeadas */
     GSP_BOOTED_SOFT,
     GSP_GONE,
     GSP_FINI,       /* apagado por gsp_fini(): sin DMA, no se puede volver atrás */
@@ -99,6 +102,10 @@ static struct gsp_rpc g_rpc;        /* anillo de mensajes de GSP-RM */
 static struct gsp_cmdq g_cmdq;      /* cola de comandos hacia GSP-RM */
 static struct gsp_rm g_rm_obj;      /* cliente/device/subdevice de RM */
 static struct gsp_static_info g_static;  /* VRAM utilizable y regalos de RM */
+static struct gsp_vram g_vram_pool;      /* reparto de VRAM sobre esas regiones */
+static struct gsp_vmm g_vmm;             /* vaspace de RM + tablas de páginas */
+static struct gsp_dma_buf g_scratch;     /* página de sysmem visible por la GPU */
+static uint64_t g_vram_block;            /* bloque de VRAM mapeado en G4d */
 static struct lx_pci_dev *g_pdev;   /* para leer BARs y BDF del espacio de config */
 static uint16_t g_device_id;
 static uint32_t g_boot0;
@@ -322,6 +329,91 @@ static int try_hw_boot(void)
     return -1;
 }
 
+/* G4d (2/2): espacio de direcciones, un bloque de VRAM y una página de sysmem
+ * mapeados, y la traducción releída de las tablas.
+ *
+ * La VA base son 1 TiB por dos razones. Está lejísimos de [4 GiB, 4,5 GiB), que
+ * es la franja que RM se reserva para sí en un vaspace de los suyos
+ * (`SPLIT_VAS_SERVER_RM_MANAGED_VA_*`) y que más vale no rozar aunque el
+ * nuestro sea externo; y tiene el bit 40 puesto, así que obliga a crear tabla en
+ * el nivel 3 en vez de dejar el recorrido pegado al índice 0 de todo, que es el
+ * error que no se ve porque funciona igual.
+ *
+ * Lo que se mapea es lo que G4e va a necesitar: un bloque de VRAM para que la
+ * copia del CE tenga destino, y una página de sysmem para leer de vuelta desde
+ * la CPU sin ventana a la VRAM. */
+#define G4D_VA_BASE     0x0000010000000000ull   /* 1 TiB */
+#define G4D_VRAM_BYTES  (2ull * 1024ull * 1024ull)
+#define G4D_SCRATCH_VA  (G4D_VA_BASE + G4D_VRAM_BYTES)
+
+/* Comprueba el mapeo por un camino distinto del que lo construyó: recorre las
+ * tablas como haría la MMU y contrasta contra lo que se pidió. No es la GPU
+ * traduciendo —eso no se sabrá hasta que el CE mueva bytes en G4e— pero sí
+ * descarta el error tonto de haber escrito la entrada en el índice de al lado. */
+static int vmm_selfcheck(void)
+{
+    const struct { uint64_t va; uint64_t want; const char *what; } probe[4] = {
+        { G4D_VA_BASE,                        g_vram_block,                    "primera página de VRAM" },
+        { G4D_VA_BASE + 4096ull,              g_vram_block + 4096ull,          "segunda página de VRAM" },
+        { G4D_VA_BASE + G4D_VRAM_BYTES - 4096ull,
+          g_vram_block + G4D_VRAM_BYTES - 4096ull,                             "última página de VRAM" },
+        { G4D_SCRATCH_VA,                     g_scratch.phys,                  "página de sysmem" },
+    };
+    unsigned i;
+    uint64_t phys = 0;
+    uint64_t pte = 0;
+
+    for (i = 0; i < 4; i++) {
+        if (gsp_vmm_translate(&g_vmm, probe[i].va, &phys, &pte) != 0) {
+            lx_printk("nouveau-lx: VA 0x%llx (%s) no traduce\n",
+                      (unsigned long long)probe[i].va, probe[i].what);
+            return -1;
+        }
+        if (phys != probe[i].want) {
+            lx_printk("nouveau-lx: VA 0x%llx traduce a 0x%llx y esperaba 0x%llx (%s)\n",
+                      (unsigned long long)probe[i].va, (unsigned long long)phys,
+                      (unsigned long long)probe[i].want, probe[i].what);
+            return -1;
+        }
+    }
+
+    /* Y lo que NO está mapeado tiene que fallar. Sin esta comprobación, un
+     * recorrido que devolviese siempre algo pasaría las cuatro de arriba. */
+    if (gsp_vmm_translate(&g_vmm, G4D_SCRATCH_VA + 4096ull, &phys, &pte) == 0) {
+        lx_printk("nouveau-lx: una VA sin mapear traduce a 0x%llx\n",
+                  (unsigned long long)phys);
+        return -1;
+    }
+
+    lx_printk("nouveau-lx: traducción verificada en 4 páginas (y una sin mapear "
+              "falla como debe)\n");
+    return 0;
+}
+
+static int run_vmm_stage(void)
+{
+    if (gsp_vram_init(&g_vram_pool, &g_static) != 0) {
+        return -1;
+    }
+    g_vram_block = gsp_vram_alloc(&g_vram_pool, G4D_VRAM_BYTES, G4D_VRAM_BYTES);
+    if (!g_vram_block) {
+        return -1;
+    }
+    if (gsp_dma_alloc(&g_scratch, 4096, "página de rebote de G4d") != 0) {
+        return -1;
+    }
+    if (gsp_vmm_init(&g_cmdq, &g_rpc, &g_vmm) != 0) {
+        return -1;
+    }
+    if (gsp_vmm_map(&g_vmm, G4D_VA_BASE, g_vram_block, G4D_VRAM_BYTES,
+                    GSP_VMM_VRAM) != 0 ||
+        gsp_vmm_map(&g_vmm, G4D_SCRATCH_VA, g_scratch.phys, 4096,
+                    GSP_VMM_SYSMEM) != 0) {
+        return -1;
+    }
+    return vmm_selfcheck();
+}
+
 int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
 {
     void *bar;
@@ -419,7 +511,13 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
                      * los devuelve. Se contrasta contra la VRAM que ya leímos
                      * por registro: si no cuadra, la transcripción del struct
                      * está desplazada y lo demás no es de fiar. */
-                    gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static);
+                    if (gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static) == 0 &&
+                        run_vmm_stage() == 0) {
+                        /* G4d (2/2). También best-effort: sin espacio de
+                         * direcciones no hay canal, pero el GSP sigue arrancado
+                         * y el diagnóstico queda escrito. */
+                        g_phase = GSP_RM_VMM;
+                    }
                 }
             } else {
                 lx_printk("nouveau-lx: GSP arrancado pero GSP-RM no responde por RPC\n");
@@ -467,6 +565,13 @@ int lx_nouveau_gsp_fini(void)
         lx_printk("nouveau-lx: nada que apagar (fase=%s)\n", lx_nouveau_gsp_status());
         return -1;
     }
+    /* Primero el vaspace: mientras RM tenga apuntado nuestro directorio de
+     * páginas, esas páginas de sysmem no se pueden soltar. Y tiene que ser
+     * antes de `gsp_fini`, que es quien deja a RM sin RPC y a la tarjeta sin
+     * DMA — después ya no habría con quién hablar. */
+    gsp_vmm_fini(&g_vmm);
+    gsp_dma_free(&g_scratch);
+
     rc = gsp_fini(&g_rm_obj, &g_cmdq, &g_rpc, g_pdev);
     /* La fase cambia haya salido bien o mal: el bus master está quitado en los
      * dos casos, así que la tarjeta ya no es utilizable de todas formas. */
@@ -480,7 +585,8 @@ int lx_nouveau_gsp_ready(void)
      * RPC), pero al añadir la fase se quedó fuera de esta lista y el estado más
      * avanzado se reportaba como "no listo". */
     return g_phase == GSP_BOOTED || g_phase == GSP_RM_READY ||
-           g_phase == GSP_RM_OBJECTS || g_phase == GSP_BOOTED_SOFT ? 1 : 0;
+           g_phase == GSP_RM_OBJECTS || g_phase == GSP_RM_VMM ||
+           g_phase == GSP_BOOTED_SOFT ? 1 : 0;
 }
 
 const char *lx_nouveau_gsp_status(void)
@@ -526,6 +632,8 @@ const char *lx_nouveau_gsp_status(void)
         return "rm_ready";
     case GSP_RM_OBJECTS:
         return "rm_objects";
+    case GSP_RM_VMM:
+        return "rm_vmm";
     case GSP_BOOTED_SOFT:
         return "booted_soft";
     case GSP_GONE:

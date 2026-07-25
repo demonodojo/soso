@@ -182,6 +182,8 @@ static const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind k)
 #include "gsp_rpc_body.inc"
 #include "gsp_cmdq_body.inc"
 #include "gsp_rm_obj_body.inc"
+#include "gsp_vram_body.inc"
+#include "gsp_vmm_body.inc"
 #include "gsp_fini_body.inc"
 
 static int load_blob(enum gsp_fw_kind kind, const char *path)
@@ -762,6 +764,341 @@ static int check_rm_objects(const struct gsp_libos *lo)
  * árbol (= `DMA_FILL_PTE_MEM`), y con el 27 esta prueba fallaría en el primer
  * `hdr->function`. Y el bus master tiene que quedar quitado pase lo que pase,
  * que es lo único que de verdad protegía al host el día del cuelgue. */
+/* G4d (2/2): el vaspace, el directorio de páginas y la codificación VER3.
+ *
+ * Lo que aporta este banco sobre el `gsp_vmm_translate` que ya corre en el
+ * arranque: `translate` recorre las tablas con las mismas rutinas que las
+ * escribió, así que un PTE mal codificado —el bit que sobra, la apertura del
+ * PDE puesta con los valores del PTE— le cuadraría igual. Aquí los valores
+ * están escritos a mano, sacados de dev_mmu.h campo a campo. */
+#define VMM_T_VA        0x0000010000000000ull   /* la misma que usa el bring-up */
+#define VMM_T_VRAM_SZ   (2ull * 1024ull * 1024ull)
+#define VMM_T_VRAM_PA   0x0000000240000000ull   /* 9 GiB, alineado a 2 MiB */
+
+/* PTE de 4 KiB: VALID(bit 0) | APERTURE(2:1) | PCF(7:3) | KIND(11:8) | ADDR(51:12).
+ * VRAM   → aper 0, pcf 0x10 (REGULAR_RW_ATOMIC_CACHED_ACD)   → 0x81
+ * sysmem → aper 2, pcf 0x11 (REGULAR_RW_ATOMIC_UNCACHED_ACD) → 0x8d */
+#define VMM_T_PTE_VRAM_LOW   0x81ull
+#define VMM_T_PTE_SYS_LOW    0x8dull
+/* PDE: **bit 0 a cero** (ahí vive IS_PTE, no VALID) | APERTURE(2:1) | PCF(5:3).
+ * sysmem coherente → aper 2, pcf 1 (VALID_UNCACHED_ATS_ALLOWED) → 0xc */
+#define VMM_T_PDE_SYS_LOW    0x0cull
+#define VMM_T_ADDR_MASK      0x000ffffffffff000ull
+
+static int check_vmm(const struct gsp_libos *lo)
+{
+    struct gsp_rpc rpc;
+    struct gsp_cmdq q;
+    struct gsp_vmm v;
+    struct gsp_vram pool;
+    struct gsp_static_info si;
+    struct gsp_dma_buf scratch;
+    struct gsp_msgq_headers *msgq =
+        (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->msgq_offset);
+    unsigned char *cmdq_base = (unsigned char *)lo->shm.va + lo->cmdq_offset;
+    rpc_gsp_rm_alloc alloc_ok;
+    unsigned char ctrl_ok[sizeof(rpc_gsp_rm_control)];
+    uint32_t base, wptr0;
+    uint64_t root_phys, phys = 0, pte = 0;
+    unsigned i;
+
+    printf("sizeof NV_VASPACE_ALLOCATION_PARAMETERS=%zu SET_PAGE_DIRECTORY=%zu\n",
+           sizeof(NV_VASPACE_ALLOCATION_PARAMETERS),
+           sizeof(NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS));
+
+    if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (vmm)\n"); return -1; }
+    if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (vmm)\n"); return -1; }
+
+    /* Cuatro RM_ALLOC (cliente, device, subdevice, vaspace) y un RM_CONTROL. */
+    memset(&alloc_ok, 0, sizeof(alloc_ok));
+    memset(ctrl_ok, 0, sizeof(ctrl_ok));
+    base = *rpc.rptr;
+    for (i = 0; i < 4; i++) {
+        fake_rpc_post_payload(lo, (base + i) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                              0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    }
+    fake_rpc_post_payload(lo, (base + 4) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    msgq->tx.writePtr = (base + 5) % 63;
+
+    wptr0 = *q.wptr;
+    if (gsp_vmm_init(&q, &rpc, &v) != 0) {
+        printf("FALLO: gsp_vmm_init\n");
+        return -1;
+    }
+    if (!v.ready || !v.bound || v.vaspace != NVKM_RM_VASPACE) {
+        printf("FALLO: vmm ready=%d bound=%d vaspace=0x%08x\n",
+               v.ready, v.bound, v.vaspace);
+        return -1;
+    }
+    /* Cliente propio, como en upstream — y el device puede repetir handle
+     * porque los handles se cuentan por cliente. */
+    if (v.rm.client != NVKM_RM_CLIENT(1) || v.rm.device != NVKM_RM_DEVICE) {
+        printf("FALLO: el vaspace no cuelga de un cliente propio "
+               "(cli=0x%08x dev=0x%08x)\n", v.rm.client, v.rm.device);
+        return -1;
+    }
+
+    /* La cuarta petición encolada es la del vaspace. */
+    {
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 3) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
+        const NV_VASPACE_ALLOCATION_PARAMETERS *p =
+            (const NV_VASPACE_ALLOCATION_PARAMETERS *)(a + 1);
+
+        if (a->hClass != FERMI_VASPACE_A || a->hObject != NVKM_RM_VASPACE ||
+            a->hParent != NVKM_RM_DEVICE || a->hClient != NVKM_RM_CLIENT(1)) {
+            printf("FALLO: vaspace cls=0x%x obj=0x%08x padre=0x%08x cli=0x%08x\n",
+                   a->hClass, a->hObject, a->hParent, a->hClient);
+            return -1;
+        }
+        if (a->paramsSize != sizeof(*p)) {
+            printf("FALLO: vaspace paramsSize=%u (esperaba %zu)\n",
+                   a->paramsSize, sizeof(*p));
+            return -1;
+        }
+        if (p->index != NV_VASPACE_ALLOCATION_INDEX_GPU_NEW ||
+            p->flags != NV_VASPACE_ALLOCATION_FLAGS_IS_EXTERNALLY_OWNED) {
+            printf("FALLO: vaspace index=%u flags=0x%x (esperaba 0/%u — sin "
+                   "EXTERNALLY_OWNED las tablas las querría construir RM)\n",
+                   p->index, p->flags,
+                   NV_VASPACE_ALLOCATION_FLAGS_IS_EXTERNALLY_OWNED);
+            return -1;
+        }
+        if (p->vaSize || p->vaBase || p->bigPageSize) {
+            printf("FALLO: vaspace con geometría puesta (vaSize=%llu base=%llu "
+                   "big=%u); upstream los deja a cero\n",
+                   (unsigned long long)p->vaSize, (unsigned long long)p->vaBase,
+                   p->bigPageSize);
+            return -1;
+        }
+    }
+    printf("OK: FERMI_VASPACE_A (0x%04x) externo, cliente propio 0x%08x\n",
+           FERMI_VASPACE_A, NVKM_RM_CLIENT(1));
+
+    /* Y la quinta, el control que entrega el directorio. */
+    root_phys = v.pt[0].mem.phys;
+    {
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 4) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_control *c = (const rpc_gsp_rm_control *)(hdr + 1);
+        const NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS *p =
+            (const NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS *)(c + 1);
+
+        if (hdr->function != NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL ||
+            c->cmd != NV0080_CTRL_CMD_DMA_SET_PAGE_DIRECTORY) {
+            printf("FALLO: SET_PAGE_DIRECTORY fn=%u cmd=0x%08x\n",
+                   hdr->function, c->cmd);
+            return -1;
+        }
+        if (c->hObject != NVKM_RM_DEVICE) {
+            printf("FALLO: SET_PAGE_DIRECTORY sobre 0x%08x (va sobre el device)\n",
+                   c->hObject);
+            return -1;
+        }
+        if (p->physAddress != root_phys) {
+            printf("FALLO: directorio en 0x%llx, la raíz está en 0x%llx\n",
+                   (unsigned long long)p->physAddress,
+                   (unsigned long long)root_phys);
+            return -1;
+        }
+        if (p->numEntries != 2) {
+            printf("FALLO: numEntries=%u; la raíz VER3 indexa con UN bit de la "
+                   "VA, son 2 entradas y no 512\n", p->numEntries);
+            return -1;
+        }
+        if (p->flags != NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_FLAGS_APERTURE_SYSMEM_COH) {
+            printf("FALLO: aperture=%u; nuestro directorio vive en sysmem, no en "
+                   "VRAM como el de upstream\n", p->flags);
+            return -1;
+        }
+        if (p->hVASpace != NVKM_RM_VASPACE) {
+            printf("FALLO: hVASpace=0x%08x\n", p->hVASpace);
+            return -1;
+        }
+    }
+    printf("OK: SET_PAGE_DIRECTORY raíz=0x%llx 2 entradas en sysmem coherente\n",
+           (unsigned long long)root_phys);
+
+    /* Mapear lo mismo que el bring-up y releerlo. */
+    if (gsp_dma_alloc(&scratch, 4096, "scratch") != 0) {
+        printf("FALLO: scratch\n");
+        return -1;
+    }
+    if (gsp_vmm_map(&v, VMM_T_VA, VMM_T_VRAM_PA, VMM_T_VRAM_SZ, GSP_VMM_VRAM) != 0 ||
+        gsp_vmm_map(&v, VMM_T_VA + VMM_T_VRAM_SZ, scratch.phys, 4096,
+                    GSP_VMM_SYSMEM) != 0) {
+        printf("FALLO: gsp_vmm_map\n");
+        return -1;
+    }
+    if (v.pages_mapped != 512 + 1) {
+        printf("FALLO: %u páginas mapeadas (esperaba 513)\n", v.pages_mapped);
+        return -1;
+    }
+    /* Raíz + 4 niveles intermedios + 2 hojas: la segunda hoja aparece porque la
+     * página de sysmem cae justo en el siguiente tramo de 2 MiB. */
+    if (v.pt_nr != 7) {
+        printf("FALLO: %u tablas (esperaba 7: raíz, 4 niveles y 2 hojas)\n", v.pt_nr);
+        return -1;
+    }
+
+    for (i = 0; i < 512; i++) {
+        uint64_t at = VMM_T_VA + (uint64_t)i * 4096ull;
+
+        if (gsp_vmm_translate(&v, at, &phys, &pte) != 0) {
+            printf("FALLO: VA 0x%llx no traduce\n", (unsigned long long)at);
+            return -1;
+        }
+        if (phys != VMM_T_VRAM_PA + (uint64_t)i * 4096ull) {
+            printf("FALLO: VA 0x%llx → 0x%llx\n", (unsigned long long)at,
+                   (unsigned long long)phys);
+            return -1;
+        }
+        if ((pte & ~VMM_T_ADDR_MASK) != VMM_T_PTE_VRAM_LOW) {
+            printf("FALLO: PTE de VRAM con banderas 0x%llx (esperaba 0x%llx)\n",
+                   (unsigned long long)(pte & ~VMM_T_ADDR_MASK),
+                   (unsigned long long)VMM_T_PTE_VRAM_LOW);
+            return -1;
+        }
+    }
+    printf("OK: 512 PTEs de VRAM, banderas 0x%llx (VALID, aper 0, PCF 0x10)\n",
+           (unsigned long long)VMM_T_PTE_VRAM_LOW);
+
+    if (gsp_vmm_translate(&v, VMM_T_VA + VMM_T_VRAM_SZ, &phys, &pte) != 0 ||
+        phys != scratch.phys ||
+        (pte & ~VMM_T_ADDR_MASK) != VMM_T_PTE_SYS_LOW) {
+        printf("FALLO: PTE de sysmem 0x%llx → 0x%llx\n",
+               (unsigned long long)pte, (unsigned long long)phys);
+        return -1;
+    }
+    printf("OK: PTE de sysmem, banderas 0x%llx (aper 2, PCF 0x11)\n",
+           (unsigned long long)VMM_T_PTE_SYS_LOW);
+
+    /* Lo que no está mapeado tiene que fallar; si no, el recorrido no prueba nada. */
+    if (gsp_vmm_translate(&v, VMM_T_VA + VMM_T_VRAM_SZ + 4096ull, &phys, &pte) == 0) {
+        printf("FALLO: una VA sin mapear traduce a 0x%llx\n",
+               (unsigned long long)phys);
+        return -1;
+    }
+    if (gsp_vmm_translate(&v, VMM_T_VA - 4096ull, &phys, &pte) == 0) {
+        printf("FALLO: la VA justo antes del mapeo traduce a 0x%llx\n",
+               (unsigned long long)phys);
+        return -1;
+    }
+    printf("OK: fuera del mapeo no traduce (ni por arriba ni por abajo)\n");
+
+    /* Los PDE, uno a uno y en crudo. El de nivel 1 es doble: la mitad de páginas
+     * grandes tiene que quedarse a cero. */
+    for (i = 0; i < v.pt_nr; i++) {
+        const struct gsp_vmm_pt *pt = &v.pt[i];
+        const uint64_t *raw = (const uint64_t *)pt->mem.va;
+        uint32_t idx;
+        uint64_t e;
+
+        if (pt->level == 0) {
+            continue;
+        }
+        idx = lvl_index(pt->level, VMM_T_VA);
+        if (pt->level == 1) {
+            if (raw[(unsigned long)idx * 2u] != 0) {
+                printf("FALLO: la mitad de páginas grandes de la PDE doble no "
+                       "está a cero (0x%llx)\n",
+                       (unsigned long long)raw[(unsigned long)idx * 2u]);
+                return -1;
+            }
+            e = raw[(unsigned long)idx * 2u + 1u];
+        } else {
+            e = raw[idx];
+        }
+        if (e & 1ull) {
+            printf("FALLO: PDE de nivel %u con el bit 0 puesto — eso es IS_PTE, "
+                   "no VALID: la MMU lo leería como traducción final\n", pt->level);
+            return -1;
+        }
+        if ((e & ~VMM_T_ADDR_MASK) != VMM_T_PDE_SYS_LOW) {
+            printf("FALLO: PDE de nivel %u con banderas 0x%llx (esperaba 0x%llx)\n",
+                   pt->level, (unsigned long long)(e & ~VMM_T_ADDR_MASK),
+                   (unsigned long long)VMM_T_PDE_SYS_LOW);
+            return -1;
+        }
+        if ((e & VMM_T_ADDR_MASK) == 0) {
+            printf("FALLO: PDE de nivel %u sin dirección\n", pt->level);
+            return -1;
+        }
+    }
+    printf("OK: PDEs con bit 0 a cero, aper 2 y PCF 1; la mitad grande vacía\n");
+
+    /* Y el reparto de VRAM: regiones que no valen fuera, y no dar dos veces lo
+     * mismo. Va con una static info a mano porque la de verdad la trae RM. */
+    memset(&si, 0, sizeof(si));
+    si.ready = 1;
+    si.region_nr = 2;
+    si.region[0].base = 0;                      /* base 0: inservible a propósito */
+    si.region[0].size = 0x100000ull;
+    si.region[1].base = 0x200000ull;
+    si.region[1].size = 0x300000ull;            /* 3 MiB */
+    if (gsp_vram_init(&pool, &si) != 0 || pool.region_nr != 1 ||
+        pool.total != 0x300000ull) {
+        printf("FALLO: gsp_vram_init con una región inservible (nr=%u total=%llu)\n",
+               pool.region_nr, (unsigned long long)pool.total);
+        return -1;
+    }
+    {
+        uint64_t a = gsp_vram_alloc(&pool, 0x100000ull, 0x100000ull);
+        uint64_t b = gsp_vram_alloc(&pool, 0x100000ull, 0x100000ull);
+
+        if (a != 0x200000ull || b != 0x300000ull || a == b) {
+            printf("FALLO: reparto de VRAM a=0x%llx b=0x%llx\n",
+                   (unsigned long long)a, (unsigned long long)b);
+            return -1;
+        }
+        if (gsp_vram_alloc(&pool, 0x300000ull, 4096) != 0) {
+            printf("FALLO: se repartió VRAM que no cabía\n");
+            return -1;
+        }
+    }
+    printf("OK: reparto de VRAM (descarta la región base 0 y no repite bloque)\n");
+
+    /* El desmontaje: UNSET_PAGE_DIRECTORY y los cuatro FREE (vaspace, subdevice,
+     * device, cliente). Se le dan respuestas para que no gaste los plazos. */
+    base = *rpc.rptr;
+    fake_rpc_post_payload(lo, base % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL, 0,
+                          ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    for (i = 0; i < 4; i++) {
+        fake_rpc_post_payload(lo, (base + 1 + i) % 63, NV_VGPU_MSG_FUNCTION_FREE,
+                              0, NULL, 0);
+    }
+    msgq->tx.writePtr = (base + 5) % 63;
+
+    wptr0 = *q.wptr;
+    gsp_dma_free(&scratch);
+    gsp_vmm_fini(&v);
+    if (v.ready || v.bound || v.pt_nr != 0) {
+        printf("FALLO: tras el fini quedan ready=%d bound=%d tablas=%u\n",
+               v.ready, v.bound, v.pt_nr);
+        return -1;
+    }
+    {
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)(wptr0 % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_control *c = (const rpc_gsp_rm_control *)(hdr + 1);
+
+        if (c->cmd != NV0080_CTRL_CMD_DMA_UNSET_PAGE_DIRECTORY) {
+            printf("FALLO: el fini no quita el directorio (cmd=0x%08x)\n", c->cmd);
+            return -1;
+        }
+    }
+    printf("OK: el fini quita el directorio antes de soltar las tablas\n");
+    return 0;
+}
+
 static int check_fini(const struct gsp_libos *lo)
 {
     struct gsp_rpc rpc;
@@ -1081,6 +1418,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_rpc_sync(&lo) != 0)
         return -1;
     if (check_rm_objects(&lo) != 0)
+        return -1;
+    if (check_vmm(&lo) != 0)
         return -1;
     if (check_fini(&lo) != 0)
         return -1;

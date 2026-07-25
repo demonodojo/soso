@@ -7,6 +7,8 @@ lxdde/ports/nouveau/gsp_libos.c
 lxdde/ports/nouveau/gsp_rpc.c
 lxdde/ports/nouveau/gsp_cmdq.c
 lxdde/ports/nouveau/gsp_rm_obj.c
+lxdde/ports/nouveau/gsp_vram.c
+lxdde/ports/nouveau/gsp_vmm.c
 lxdde/ports/nouveau/gsp_fini.c
 lxdde/ports/nouveau/gsp_mmio.c
 lxdde/ports/nouveau/gsp_bringup.c

@@ -41,7 +41,14 @@ int gsp_rm_control(struct gsp_rm *rm, uint32_t object, uint32_t cmd,
 /* Libera un objeto (`NV_VGPU_MSG_FUNCTION_FREE`). */
 int gsp_rm_free(struct gsp_rm *rm, uint32_t handle);
 
-/* La cadena cliente → device → subdevice. Deja los tres handles en `rm`. */
+/* La cadena cliente → device → subdevice para el cliente número `client_id`.
+ * Los handles se cuentan **por cliente**, así que dos clientes distintos usan el
+ * mismo 0xde1d0000 de device sin pisarse — es lo que hace upstream, donde cada
+ * VMM promocionado se trae su propio cliente (`r535_mmu_vaspace_new`). */
+int gsp_rm_client_new(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm,
+                      unsigned client_id);
+
+/* El cliente 0, el del bring-up. */
 int gsp_rm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm);
 
 /* Lo que sacamos de `GET_GSP_STATIC_INFO`: el mapa de VRAM utilizable y los

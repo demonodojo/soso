@@ -145,6 +145,26 @@ pub fn run(_args: &[String]) {
         log_contains(&log, "GSP_INIT_DONE recibido") && !gpu_gone,
     );
     print_criterion(
+        "G4c objetos de RM cliente→device→subdevice (log)",
+        log_contains(&log, "objetos RM listos") && !gpu_gone,
+    );
+    print_criterion(
+        "G4d static info: VRAM utilizable de RM (log)",
+        log_contains(&log, "GSP static info:") && !gpu_gone,
+    );
+    // Dos criterios distintos a propósito. Que RM acepte el directorio dice que
+    // la raíz y el vaspace le cuadran; que la traducción se relea de las tablas
+    // dice que las entradas están donde tienen que estar. Ninguno de los dos es
+    // "la GPU traduce" — eso solo lo prueba el CE moviendo bytes, en G4e.
+    print_criterion(
+        "G4d vaspace + directorio aceptado por RM (log)",
+        log_contains(&log, "vaspace 0x") && !gpu_gone,
+    );
+    print_criterion(
+        "G4d traducción releída de las tablas (log)",
+        log_contains(&log, "traducción verificada") && !gpu_gone,
+    );
+    print_criterion(
         "G3b nvkm ACR port (inventario stubs)",
         root.join("lxdde/ports/nouveau/nvkm_ola2.list").exists(),
     );

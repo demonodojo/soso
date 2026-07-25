@@ -34,7 +34,7 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G4a | RPC con GSP-RM (recibir + `SET_SYSTEM_INFO`/`SET_REGISTRY`) | `GSP_INIT_DONE` con `res=0x0` | **GO** (2026-07-25): llega tras 22 mensajes, `GSP-RM listo (RPC en marcha)` |
 | G4b | RPC síncrono (`gsp_cmdq_call`) | round-trip + anillo que envuelve, en hostcheck | **GO** (2026-07-25), sin HW todavía |
 | G4c | Objetos de RM: cliente → device → subdevice (`GSP_RM_ALLOC`) | un `NV_RM_CONTROL` que responde | **GO** (2026-07-25): `objetos RM listos cli=0xc1d00000 dev=0xde1d0000 sub=0x5d1d0000` en GB205 real |
-| G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | parcial: `GET_GSP_STATIC_INFO` daba `0xff100002` por mandarse pelada — arreglado y cubierto en hostcheck, **sin reprobar en HW**; faltan VA space y mapeos |
+| G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | **escrito entero, sin probar en HW**: static info + reparto de VRAM + `FERMI_VASPACE_A` externo + tablas VER3 + `SET_PAGE_DIRECTORY`, todo cubierto en hostcheck; falta un ciclo de HW |
 | G4e | **Canal**: GPFIFO + USERD + timbre | la GPU mueve bytes (copia CE) y se lee de vuelta | pendiente |
 | G4f | QMD + kernel SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real | pendiente, **bloqueado por el toolchain** |
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
@@ -287,6 +287,56 @@ afirma ahora esa longitud. La cabecera de soso (`header_version`, `signature`,
 que fallaba era el payload a cero. **Regla general para las RPC de tipo `_rd`:
 manda el struct entero de ida aunque no lleve datos.**
 
+**G4d (2/2): el espacio de direcciones, y quién construye las tablas.** La VRAM
+**no la reparte RM**: nouveau se la reparte él (`r535_fb_ram_new` monta un
+`nvkm_mm` sobre las regiones de `GET_GSP_STATIC_INFO` y ahí acaba la
+intervención de RM) — por eso G4d 1/2 se quedaba con la lista de regiones
+utilizables. En soso eso es `gsp_vram.c`: un asignador de puntero que avanza
+sobre esas regiones y **no sabe liberar**, a propósito.
+El espacio sí se pide a RM (`FERMI_VASPACE_A`) pero con
+**`IS_EXTERNALLY_OWNED`**: las tablas las construimos nosotros y a RM solo se le
+dice dónde está la raíz, con `NV0080_CTRL_CMD_DMA_SET_PAGE_DIRECTORY`. Es lo que
+hace upstream para el VMM que promociona (`r535_mmu_promote_vmm`, `external=true`)
+y no hay atajo por el otro lado: el camino "que las lleve RM" también exige un
+directorio propio y encima copiarle sus PDE reservados. Dos desviaciones
+deliberadas de upstream: las tablas van en **sysmem coherente** (sin BAR1 la CPU
+no tiene ventana a la VRAM), así que el `FLAGS_APERTURE` del control es
+`SYSMEM_COH` y no `VIDMEM`; y como en upstream, el vaspace cuelga de un
+**cliente propio** (`NVKM_RM_CLIENT(1)`), que puede reutilizar el handle
+`0xde1d0000` de device porque los handles se cuentan por cliente.
+
+**Formato VER3 (`nvhw/ref/gh100/dev_mmu.h`, `vmmgh100.c`), seis niveles para
+páginas de 4 KiB** — 57 bits de VA, y la raíz **tiene 2 entradas**, no 512
+(indexa con un solo bit; el `numEntries` del control es `1 << 1`):
+
+| nivel | bits de la VA | entradas × tamaño |
+|---|---|---|
+| 0 SPT | 20:12 | 512 × 8 B (PTE) |
+| 1 PD0 | 28:21 | 256 × 16 B (PDE **doble**) |
+| 2 PD1 | 37:29 | 512 × 8 B |
+| 3 PD2 | 46:38 | 512 × 8 B |
+| 4 PD3 | 55:47 | 512 × 8 B |
+| 5 PD4 | 56 | 2 × 8 B ← raíz |
+
+**Tres trampas del formato, y las tres callan.** (a) **El bit 0 de un PDE no es
+"válido", es `IS_PTE`**: ponerlo "por analogía con el PTE" convierte el puntero
+a la tabla de abajo en una traducción final. Lo que valida un PDE es que su
+APERTURE no sea 0. (b) **APERTURE se codifica distinto en PTE y en PDE**: VRAM
+es 0 en el PTE y 1 en el PDE (donde el 0 es INVALID); sysmem coherente es 2 en
+los dos, que es justo lo que esconde el error si solo se prueba con tablas en
+sysmem. (c) La mitad *pequeña* de la PDE doble tiene el **mismo reparto de bits**
+que un PDE normal 64 bits más arriba (APERTURE 66:65, PCF 69:67, ADDRESS 115:76),
+así que una sola `pde_encode` sirve para las dos.
+Valores en crudo que fija el hostcheck: PTE de VRAM `…|0x81`, PTE de sysmem
+`…|0x8d`, PDE de sysmem `…|0x0c`.
+
+**Lo que G4d prueba y lo que no.** Prueba (1) que RM acepta el vaspace y el
+directorio, y (2) que la traducción releída de las tablas da lo que se pidió —
+`gsp_vmm_translate` recorre por direcciones escritas, no por índice de array, y
+el bring-up comprueba además que **una VA sin mapear falla**. No prueba que la
+GPU traduzca: eso solo lo dice el CE moviendo bytes, en G4e. `g3-check` tiene
+los dos criterios separados por eso mismo.
+
 **Gotcha 6 (2026-07-25): soltar la tarjeta con el GSP vivo cuelga el host.**
 Una prueba VFIO congeló la máquina entera. **No fue un panic**: `efi_pstore` está
 registrado en este equipo y capturó el GPF de `drm_framebuffer_cleanup` del día
@@ -349,7 +399,11 @@ una, tamaño del WPR meta, heap, offsets del bootloader, PTEs de la memoria
 compartida, `id8` de las regiones, enlace de los boot params, imagen FMC copiada
 idéntica, campos del FMC a cero, **el paquete COT byte a byte** y que un rechazo del
 FSP se detecta. Cubre además el lado G4: la cadena de objetos de RM, que
-`GET_GSP_STATIC_INFO` se pida con sus 1688 B y no pelada (gotcha 5), y el apagado
+`GET_GSP_STATIC_INFO` se pida con sus 1688 B y no pelada (gotcha 5), **todo G4d
+2/2** (el vaspace externo con su cliente propio, el `SET_PAGE_DIRECTORY` con sus
+2 entradas en sysmem, los 512 PTEs y los PDEs bit a bit contra dev_mmu.h, que
+fuera del mapeo no traduzca, el reparto de VRAM y que el fini quite el
+directorio antes de soltar las tablas), y el apagado
 —`FREE` con fn=10, el unload con fn=47, el handshake del mailbox y que **el bus
 master se quite aunque no haya RPC vivo** (gotcha 6).
 Un segundo, frente a sudo + VFIO + ~90 s del ciclo en hardware.
@@ -434,6 +488,8 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `fsp_lx.c` | **Envío del COT** por EMEM + espera al FMC | fase `cot_sent`; escribe MMIO |
 | `gsp_rpc.c` | **Recepción de RPCs** de GSP-RM por la cola | fase `rm_ready`; solo escribe el rptr |
 | `gsp_rm_obj.c` | Objetos de RM (cliente/device/subdevice) + static info | fase `rm_objects` |
+| `gsp_vram.c` | Reparto de VRAM sobre las regiones utilizables | puntero que avanza, sin liberar |
+| `gsp_vmm.c` | **Tablas VER3 + `FERMI_VASPACE_A` externo + directorio** | fase `rm_vmm` |
 | `gsp_fini.c` | **Apagado ordenado** de GSP-RM + corte de DMA | fase `fini`; ver gotcha 6 |
 | `fmc_lx.c` | Ruta FSP/GSP-FMC de Blackwell | valida el ELF FMC y **lee** el FSP |
 | `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick | `kick_boot` NO arranca HW real (solo traza) |

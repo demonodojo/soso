@@ -303,7 +303,8 @@ out:
     return ret;
 }
 
-int gsp_rm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm)
+int gsp_rm_client_new(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm,
+                      unsigned client_id)
 {
     NV0000_ALLOC_PARAMETERS root;
     NV0080_ALLOC_PARAMETERS dev;
@@ -315,7 +316,7 @@ int gsp_rm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm)
     memset(rm, 0, sizeof(*rm));
     rm->q = q;
     rm->rpc = rpc;
-    rm->client = NVKM_RM_CLIENT(0);
+    rm->client = NVKM_RM_CLIENT(client_id);
     rm->device = NVKM_RM_DEVICE;
     rm->subdevice = NVKM_RM_SUBDEVICE;
 
@@ -353,4 +354,9 @@ int gsp_rm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm)
     lx_printk("nouveau-lx: objetos RM listos cli=0x%08x dev=0x%08x sub=0x%08x\n",
               rm->client, rm->device, rm->subdevice);
     return 0;
+}
+
+int gsp_rm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm)
+{
+    return gsp_rm_client_new(q, rpc, rm, 0);
 }
