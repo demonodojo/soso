@@ -5,6 +5,7 @@ lxdde/ports/nouveau/gsp_bringup.c
 lxdde/ports/nouveau/acr_fw.c
 lxdde/ports/nouveau/falcon_lx.c
 lxdde/ports/nouveau/acr_lx.c
+lxdde/ports/nouveau/fmc_lx.c
 lxdde/ports/nouveau/nouveau_stub.c
 lxdde/ports/nouveau/nvkm_device_lx.c
 lxdde/ports/nouveau/nvkm_bringup_lx.c

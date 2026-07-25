@@ -2,6 +2,7 @@
  * firmware + ACR ola2 + poll MMIO. La ruta nvkm real usa ga102_gsp_new, que
  * cubre Ampere GA10x de forma madura en nouveau 6.6; GB205 es más reciente. */
 #include "acr_lx.h"
+#include "fmc_lx.h"
 #include "gsp_fw.h"
 #include "gsp_mmio.h"
 #include "lx_emul.h"
@@ -40,6 +41,13 @@ static const char *nv_family_name(enum nv_family f)
     }
 }
 
+/* Qué juego de firmware pedir. Ada aún no tiene blobs empaquetados (ad10x); cae
+ * en el juego Blackwell, que es el que trae el rootfs. */
+static enum gsp_fw_chip gsp_fw_chip_of(enum nv_family f)
+{
+    return f == NV_FAM_AMPERE ? GSP_FW_CHIP_AMPERE : GSP_FW_CHIP_BLACKWELL;
+}
+
 /* Ola 3: construye el grafo de objetos nvkm real con BAR0 (nvkm_bringup_lx.c).
  * Best-effort: no altera la secuencia soft si falla. */
 int lx_nvkm_build_gsp(void *bar0);
@@ -50,6 +58,8 @@ enum gsp_phase {
     GSP_FW_LOADING,
     GSP_FW_READY,
     GSP_FW_STAGED,
+    GSP_FMC_PARSE,
+    GSP_FMC_READY,
     GSP_ACR_LOAD,
     GSP_ACR_AHESASC,
     GSP_ACR_ASB,
@@ -62,7 +72,7 @@ enum gsp_phase {
 static enum gsp_phase g_phase = GSP_NONE;
 static uint16_t g_device_id;
 static uint32_t g_boot0;
-static unsigned g_vram_bytes;
+static uint64_t g_vram_bytes;
 
 void lx_nouveau_set_boot0(unsigned boot0, unsigned device_id)
 {
@@ -75,18 +85,60 @@ void lx_nouveau_set_boot0(unsigned boot0, unsigned device_id)
 
 /* VRAM heurística por SKU (en HW real la da nvkm_ram del fb). El RTX 3060 tiene
  * 12 GiB (GA106) o 8 GiB (3060 Ti/GA104); default Ampere = 12 GiB. */
-static unsigned vram_for_device(uint16_t dev_id)
+static uint64_t vram_for_device(uint16_t dev_id)
 {
     enum nv_family fam = nv_family_of(g_boot0, dev_id);
     if (dev_id == GB205_DEVICE_ID) {
-        return 12u * 1024u * 1024u * 1024u;   /* 5070 Ti Mobile */
+        return 12ull * 1024ull * 1024ull * 1024ull;   /* 5070 Ti Mobile */
     }
     if (fam == NV_FAM_AMPERE) {
         if (dev_id == 0x2486u || dev_id == 0x2489u) /* 3060 Ti (GA104) */
-            return 8u * 1024u * 1024u * 1024u;
-        return 12u * 1024u * 1024u * 1024u;   /* 3060 (GA106) 12 GiB */
+            return 8ull * 1024ull * 1024ull * 1024ull;
+        return 12ull * 1024ull * 1024ull * 1024ull;   /* 3060 (GA106) 12 GiB */
     }
-    return 8u * 1024u * 1024u * 1024u;
+    return 8ull * 1024ull * 1024ull * 1024ull;
+}
+
+/* Ruta Blackwell: el GSP lo arranca el FSP con la imagen GSP-FMC, no el ACR de
+ * SEC2. De momento validamos el ELF firmado y leemos el estado del FSP; el envío
+ * del mensaje COT necesita WPR meta + radix3 + libos boot args, que no existen
+ * todavía (ver fmc_lx.c). */
+static void run_fmc_blackwell(void)
+{
+    const struct gsp_fw_blob *fmc = gsp_fw_get(GSP_FW_FMC);
+    struct fmc_image img;
+
+    g_phase = GSP_FMC_PARSE;
+    if (!fmc || !fmc->data) {
+        lx_printk("nouveau-lx: FMC sin blob cargado — sigue kick/poll\n");
+        return;
+    }
+    if (fmc_lx_parse(fmc->data, fmc->len, &img) != 0) {
+        return;
+    }
+    (void)fmc_lx_verify_sizes(&img);
+    fmc_lx_fsp_probe();
+    g_phase = GSP_FMC_READY;
+}
+
+/* ACR ola 2 (Ampere): carga los ucode de SEC2 y arranca AHESASC + ASB. Cada
+ * fallo es soft — la secuencia sigue con kick/poll. */
+static void run_acr_sec2(void)
+{
+    g_phase = GSP_ACR_LOAD;
+    if (acr_lx_load() != 0) {
+        lx_printk("nouveau-lx: ACR firmware no cargado — sigue kick/poll\n");
+        return;
+    }
+    g_phase = GSP_ACR_AHESASC;
+    if (acr_lx_boot_ahesasc() != 0) {
+        lx_printk("nouveau-lx: ACR AHESASC soft-fail — sigue kick/poll\n");
+        return;
+    }
+    g_phase = GSP_ACR_ASB;
+    if (acr_lx_boot_asb() != 0) {
+        lx_printk("nouveau-lx: ACR ASB soft-fail — sigue kick/poll\n");
+    }
 }
 
 static int try_hw_boot(void)
@@ -98,7 +150,8 @@ static int try_hw_boot(void)
     g_phase = GSP_POLL;
     if (gsp_mmio_poll_ready(GSP_POLL_MS) == 0) {
         g_phase = GSP_BOOTED;
-        lx_printk("nouveau-lx: GSP booted (hw poll ok, gb205)\n");
+        lx_printk("nouveau-lx: GSP booted (hw poll ok, %s)\n",
+                  nv_family_name(nv_family_of(g_boot0, g_device_id)));
         return 0;
     }
     return -1;
@@ -132,14 +185,16 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     g_phase = GSP_BAR0;
     lx_printk("nouveau-lx: BAR0 boot0=0x%08x dev=0x%04x familia=%s vram=%uMiB\n",
               boot0, g_device_id, nv_family_name(nv_family_of(boot0, g_device_id)),
-              g_vram_bytes / (1024u * 1024u));
+              (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
 
     /* Ola 3: ejercita el grafo nvkm real (device+subdev GSP+falcon) con BAR0.
      * Best-effort — la construcción no toca MMIO; el boot HW real llega tras G1. */
     (void)lx_nvkm_build_gsp(bar);
 
     g_phase = GSP_FW_LOADING;
-    if (gsp_fw_load_all() != 0) {
+    /* Solo el juego de blobs de esta familia: cargar los dos duplicaba 60,6 MiB
+     * de ucode (en linux-firmware el gsp de gb205 es symlink al de ga102). */
+    if (gsp_fw_load_all(gsp_fw_chip_of(nv_family_of(boot0, g_device_id))) != 0) {
         return -1;
     }
     g_phase = GSP_FW_READY;
@@ -150,19 +205,13 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     }
     g_phase = GSP_FW_STAGED;
 
-    g_phase = GSP_ACR_LOAD;
-    if (acr_lx_load() != 0) {
-        lx_printk("nouveau-lx: ACR firmware no cargado — sigue kick/poll\n");
+    /* El ACR de `acr_fw.c` es el de Ampere (ucode ga102 en SEC2). En Blackwell el
+     * falcon ni ejecutaba — `mbox0=0xbadf4100` — porque GB20x arranca por GSP-FMC/FSP.
+     * Cada familia va por lo suyo. */
+    if (nv_family_of(boot0, g_device_id) == NV_FAM_BLACKWELL) {
+        run_fmc_blackwell();
     } else {
-        g_phase = GSP_ACR_AHESASC;
-        if (acr_lx_boot_ahesasc() == 0) {
-            g_phase = GSP_ACR_ASB;
-            if (acr_lx_boot_asb() != 0) {
-                lx_printk("nouveau-lx: ACR ASB soft-fail — sigue kick/poll\n");
-            }
-        } else {
-            lx_printk("nouveau-lx: ACR AHESASC soft-fail — sigue kick/poll\n");
-        }
+        run_acr_sec2();
     }
 
     if (try_hw_boot() == 0) {
@@ -171,7 +220,7 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
 
     g_phase = GSP_BOOTED_SOFT;
     lx_printk("nouveau-lx: GSP booted (soft, %u MiB VRAM)\n",
-              g_vram_bytes / (1024u * 1024u));
+              (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
     return 0;
 }
 
@@ -193,6 +242,10 @@ const char *lx_nouveau_gsp_status(void)
         return "fw_ready";
     case GSP_FW_STAGED:
         return "fw_staged";
+    case GSP_FMC_PARSE:
+        return "fmc_parse";
+    case GSP_FMC_READY:
+        return "fmc_ready";
     case GSP_ACR_LOAD:
         return "acr_load";
     case GSP_ACR_AHESASC:
@@ -212,9 +265,9 @@ const char *lx_nouveau_gsp_status(void)
     }
 }
 
-unsigned lx_nouveau_vram_bytes(void)
+uint64_t lx_nouveau_vram_bytes(void)
 {
-    return g_vram_bytes ? g_vram_bytes : (8u * 1024u * 1024u * 1024u);
+    return g_vram_bytes ? g_vram_bytes : (8ull * 1024ull * 1024ull * 1024ull);
 }
 
 int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n)

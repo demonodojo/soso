@@ -8,7 +8,7 @@ extern const char *lx_nouveau_gsp_status(void);
 extern int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n);
 extern int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned cols,
                                         const float *x, float *y);
-extern unsigned lx_nouveau_vram_bytes(void);
+extern uint64_t lx_nouveau_vram_bytes(void);
 
 static int nouveau_probe(struct lx_pci_dev *pdev, const struct lx_pci_device_id *id)
 {
@@ -66,7 +66,7 @@ int lx_nouveau_compute_matvec_f32(const float *w, unsigned rows, unsigned cols,
     return lx_nouveau_submit_matvec_f32(w, rows, cols, x, y);
 }
 
-unsigned lx_nouveau_vram_total(void)
+uint64_t lx_nouveau_vram_total(void)
 {
     return lx_nouveau_vram_bytes();
 }

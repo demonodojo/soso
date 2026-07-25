@@ -13,7 +13,7 @@ unsafe extern "C" {
         x: *const f32,
         y: *mut f32,
     ) -> i32;
-    fn lx_nouveau_vram_total() -> u32;
+    fn lx_nouveau_vram_total() -> u64;
     fn lx_nouveau_set_boot0(boot0: u32, device_id: u32);
 }
 
@@ -42,7 +42,7 @@ pub fn gsp_phase() -> &'static str {
 }
 
 pub fn vram_total() -> u64 {
-    unsafe { lx_nouveau_vram_total() as u64 }
+    unsafe { lx_nouveau_vram_total() }
 }
 
 pub fn submit_saxpy(a: f32, x: &[f32], y: &mut [f32]) -> Result<bool, ()> {
