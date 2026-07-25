@@ -165,7 +165,10 @@ static void *rpc_prepare(unsigned char *buf, unsigned long buf_len, uint32_t fn,
     rpc->rpc_result = 0xffffffffu;
     rpc->rpc_result_private = 0xffffffffu;
     rpc->length = GSP_RPC_HDR_SIZE + payload_size;
-    rpc->sequence = 0;   /* NOSEQ: estas dos RPCs no esperan respuesta */
+    /* La `sequence` de la cabecera RPC va a cero también upstream: la que se
+     * incrementa por mensaje es la del *elemento* de cola (`cmdq_push`), y una
+     * respuesta se empareja por `function`, no por secuencia. */
+    rpc->sequence = 0;
     return rpc + 1;
 }
 
@@ -198,6 +201,20 @@ int gsp_cmdq_send(struct gsp_cmdq *q, uint32_t fn, const void *payload,
     ret = cmdq_push(q, (struct gsp_msg_elem *)buf, rpc_len);
     lx_kfree(buf);
     return ret;
+}
+
+int gsp_cmdq_call(struct gsp_cmdq *q, struct gsp_rpc *rpc, uint32_t fn,
+                  const void *payload, uint32_t payload_size,
+                  void *reply, uint32_t reply_len, uint32_t *reply_got,
+                  uint32_t *status, unsigned timeout_ms)
+{
+    if (!q || !q->ready || !rpc || !rpc->ready) {
+        return -1;
+    }
+    if (gsp_cmdq_send(q, fn, payload, payload_size) != 0) {
+        return -1;
+    }
+    return gsp_rpc_recv(rpc, fn, reply, reply_len, reply_got, status, timeout_ms);
 }
 
 int gsp_cmdq_set_system_info(struct gsp_cmdq *q, const struct gsp_sysinfo *si)

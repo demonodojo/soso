@@ -2,6 +2,9 @@
 #include "gsp_rpc.h"
 #include "gsp_mmio.h"
 
+/* Definido en el shim (lxdde/shim/src/shims.c). */
+void *memcpy(void *dst, const void *src, unsigned long n);
+
 /* Falcon del GSP: `nvkm_falcon_ctor(..., 0x110000, ...)`, `addr2` = 0x1000. */
 #define NV_PGSP_FALCON         0x00110000u
 #define NV_PFALCON_MAILBOX0    (NV_PGSP_FALCON + 0x040u)
@@ -77,11 +80,30 @@ static uint32_t msgq_used(const struct gsp_rpc *rpc, uint32_t rptr)
     return used;
 }
 
-/* La primera página de la cola es la cabecera; las entradas empiezan detrás. */
-static const struct gsp_msg_elem *msgq_entry(const struct gsp_rpc *rpc, uint32_t rptr)
+/* La primera página de la cola es la cabecera; las entradas empiezan detrás.
+ *
+ * Copia `n` bytes del mensaje que empieza en la entrada `rptr`, desde el offset
+ * `off` contado en el propio mensaje. El área de entradas es un anillo, así que
+ * un mensaje de varias páginas puede continuar en la entrada 0: con un solo
+ * `memcpy` leeríamos fuera del búfer. `GSP_INIT_DONE` (32 B) nunca lo destapó. */
+static void ring_copy(const struct gsp_rpc *rpc, uint32_t rptr, uint32_t off,
+                      void *dst, uint32_t n)
 {
-    return (const struct gsp_msg_elem *)(rpc->msgq + GSP_PAGE_SIZE +
-                                         (unsigned long)rptr * GSP_PAGE_SIZE);
+    unsigned char *d = (unsigned char *)dst;
+    unsigned long ring = (unsigned long)rpc->cnt * GSP_PAGE_SIZE;
+    unsigned long pos = ((unsigned long)rptr * GSP_PAGE_SIZE + off) % ring;
+
+    while (n) {
+        unsigned long chunk = ring - pos;
+
+        if (chunk > n) {
+            chunk = n;
+        }
+        memcpy(d, rpc->msgq + GSP_PAGE_SIZE + pos, chunk);
+        d += chunk;
+        pos = (pos + chunk) % ring;
+        n -= (uint32_t)chunk;
+    }
 }
 
 static const char *rpc_event_name(uint32_t fn)
@@ -130,7 +152,8 @@ static void flush_repeats(unsigned *repeats)
     }
 }
 
-int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms)
+int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
+                 uint32_t *payload_len, uint32_t *status, unsigned timeout_ms)
 {
     unsigned seen = 0;
     unsigned nocat = 0;
@@ -138,12 +161,18 @@ int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms)
      * NOCAT cuando algo le va mal); imprimirlos uno a uno ahoga el serie. */
     uint32_t last_fn = 0xffffffffu;
     unsigned repeats = 0;
+    uint32_t ring_bytes;
 
     if (!rpc || !rpc->ready) {
         return -1;
     }
+    ring_bytes = rpc->cnt * GSP_PAGE_SIZE;
+
     while (timeout_ms--) {
         uint32_t rptr = *rpc->rptr;
+        struct gsp_rpc_hdr hdr;
+        uint32_t pages;
+        int matched;
 
         /* Hace falta al menos la página que lleva las dos cabeceras. */
         if (msgq_used(rpc, rptr) == 0) {
@@ -155,66 +184,85 @@ int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms)
             continue;
         }
 
-        {
-            const struct gsp_msg_elem *elem = msgq_entry(rpc, rptr);
-            const struct gsp_rpc_hdr *hdr = (const struct gsp_rpc_hdr *)(elem + 1);
-            uint32_t length = hdr->length;
-            uint32_t function = hdr->function;
-            uint32_t result = hdr->rpc_result;
-            uint32_t pages;
+        /* La cabecera RPC nunca da la vuelta: el mensaje empieza en una página y
+         * las dos cabeceras suman 80 B. El payload sí puede. */
+        ring_copy(rpc, rptr, GSP_MSG_HDR_SIZE, &hdr, GSP_RPC_HDR_SIZE);
 
-            if (length < GSP_RPC_HDR_SIZE) {
-                lx_printk("nouveau-lx: RPC con longitud imposible (%u)\n", length);
-                return -1;
-            }
-            seen++;
-            if (function == NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD) {
-                nocat++;
-            }
-            if (function == last_fn) {
-                repeats++;
-            } else {
-                flush_repeats(&repeats);
-                last_fn = function;
-                lx_printk("nouveau-lx: RPC fn=0x%04x (%s) len=%u res=0x%x\n",
-                          function, rpc_event_name(function), length, result);
-            }
+        if (hdr.length < GSP_RPC_HDR_SIZE ||
+            hdr.length > ring_bytes - GSP_MSG_HDR_SIZE) {
+            lx_printk("nouveau-lx: RPC con longitud imposible (%u)\n", hdr.length);
+            return -1;
+        }
+        seen++;
+        if (hdr.function == NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD) {
+            nocat++;
+        }
+        if (hdr.function == last_fn) {
+            repeats++;
+        } else {
+            flush_repeats(&repeats);
+            last_fn = hdr.function;
+            lx_printk("nouveau-lx: RPC fn=0x%04x (%s) len=%u res=0x%x\n",
+                      hdr.function, rpc_event_name(hdr.function), hdr.length,
+                      hdr.rpc_result);
+        }
 
-            /* Avanzar el puntero de lectura tantas páginas como ocupe. */
-            pages = (length + GSP_MSG_HDR_SIZE + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
-            rptr = (rptr + pages) % rpc->cnt;
-            gsp_rpc_barrier();
-            *rpc->rptr = rptr;
+        /* Copiar ANTES de mover el puntero: en cuanto lo publicamos, el GSP
+         * puede reutilizar esas páginas. */
+        matched = hdr.function == fn;
+        if (matched) {
+            uint32_t plen = hdr.length - GSP_RPC_HDR_SIZE;
 
-            /* Solo se vacía el contador al salir: si se hiciera aquí en cada
-             * vuelta, cada repetición imprimiría su propia línea y no
-             * agruparíamos nada. */
-            if (result) {
-                flush_repeats(&repeats);
-                lx_printk("nouveau-lx: GSP-RM devuelve %s (0x%x) en fn=0x%04x (%s)\n",
-                          rpc_status_name(result), result, function,
-                          rpc_event_name(function));
-                if (nocat) {
-                    /* Upstream manda GSP_SET_SYSTEM_INFO y SET_REGISTRY por la
-                     * cmdq ANTES de arrancar el GSP (`r535_gsp_oneinit`); sin
-                     * ellos GSP-RM se inicializa a ciegas y va soltando
-                     * registros de crash hasta rendirse. */
-                    lx_printk("nouveau-lx: %u registro(s) NOCAT antes del fallo — "
-                              "falta enviar SET_SYSTEM_INFO/SET_REGISTRY por la cmdq\n",
-                              nocat);
-                }
-                return -1;
+            if (out && out_len) {
+                ring_copy(rpc, rptr, GSP_MSG_HDR_SIZE + GSP_RPC_HDR_SIZE, out,
+                          plen < out_len ? plen : out_len);
             }
-            if (function == fn) {
-                flush_repeats(&repeats);
-                lx_printk("nouveau-lx: %s recibido tras %u mensaje(s)\n",
-                          rpc_event_name(fn), seen);
-                return 0;
+            if (payload_len) {
+                *payload_len = plen;
             }
+            if (status) {
+                *status = hdr.rpc_result;
+            }
+        }
+
+        /* Avanzar el puntero de lectura tantas páginas como ocupe. */
+        pages = (hdr.length + GSP_MSG_HDR_SIZE + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
+        rptr = (rptr + pages) % rpc->cnt;
+        gsp_rpc_barrier();
+        *rpc->rptr = rptr;
+
+        /* Solo se vacía el contador al salir: si se hiciera aquí en cada
+         * vuelta, cada repetición imprimiría su propia línea y no
+         * agruparíamos nada. */
+        if (hdr.rpc_result) {
+            flush_repeats(&repeats);
+            lx_printk("nouveau-lx: GSP-RM devuelve %s (0x%x) en fn=0x%04x (%s)\n",
+                      rpc_status_name(hdr.rpc_result), hdr.rpc_result, hdr.function,
+                      rpc_event_name(hdr.function));
+            if (nocat) {
+                /* `SET_SYSTEM_INFO`/`SET_REGISTRY` ya se encolan antes de
+                 * arrancar (G4a). Si aun así llueven NOCAT, el problema está en
+                 * su *contenido* —una apertura o un id mal puestos—, no en su
+                 * ausencia. */
+                lx_printk("nouveau-lx: %u registro(s) NOCAT antes del fallo — "
+                          "revisa el contenido de SET_SYSTEM_INFO\n", nocat);
+            }
+            return -1;
+        }
+        if (matched) {
+            flush_repeats(&repeats);
+            lx_printk("nouveau-lx: %s recibido tras %u mensaje(s)\n",
+                      rpc_event_name(fn), seen);
+            return 0;
         }
     }
     flush_repeats(&repeats);
     lx_printk("nouveau-lx: no llegó fn=0x%04x (%u mensaje(s) vistos, %u NOCAT)\n",
               fn, seen, nocat);
     return -1;
+}
+
+int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms)
+{
+    return gsp_rpc_recv(rpc, fn, NULL, 0, NULL, NULL, timeout_ms);
 }

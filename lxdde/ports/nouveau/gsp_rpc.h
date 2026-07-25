@@ -73,4 +73,17 @@ int gsp_rpc_start(uint32_t app_version);
  * registran y se descartan. Devuelve 0 si llegó el esperado. */
 int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms);
 
+/* Igual, pero copiando el payload del mensaje esperado a `out` (hasta `out_len`
+ * bytes) — es la mitad receptora de una llamada síncrona a GSP-RM, que empareja
+ * la respuesta **por `function`**, no por secuencia (`r535_gsp_msg_recv`).
+ *
+ * `payload_len` recibe el tamaño real del payload (puede ser mayor que `out_len`:
+ * se copia lo que cabe) y `status` el `rpc_result` del mensaje. Ambos opcionales.
+ * Devuelve 0 solo si llegó `fn` **y** su `rpc_result` es 0.
+ *
+ * A diferencia de `GSP_INIT_DONE` (32 B), las respuestas de RM pueden ocupar
+ * varias páginas y **dar la vuelta al anillo**: la copia lo tiene en cuenta. */
+int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
+                 uint32_t *payload_len, uint32_t *status, unsigned timeout_ms);
+
 #endif

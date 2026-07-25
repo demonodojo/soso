@@ -98,7 +98,13 @@ void lx_nouveau_set_boot0(unsigned boot0, unsigned device_id)
 {
     g_boot0 = (uint32_t)boot0;
     g_device_id = (uint16_t)device_id;
-    if (g_boot0 != 0) {
+    /* NO retroceder la fase. `nvidia_probe::init()` corre en el kernel DESPUÉS
+     * del bring-up (main.rs: lxdde::init → gpu::init → nvidia_probe::init) y
+     * volvía a poner GSP_BAR0 encima de un `rm_ready` ya conseguido: el arranque
+     * del 2026-07-25 llegó a `GSP-RM listo` y aun así el log decía `GSP=bar0`,
+     * `gsp_ready()` daba falso y el compute se iba a la CPU sin avisar. Esta
+     * función solo aporta boot0/device_id; la fase la manda el bring-up. */
+    if (g_boot0 != 0 && g_phase == GSP_NONE) {
         g_phase = GSP_BAR0;
     }
 }
@@ -420,7 +426,11 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
 
 int lx_nouveau_gsp_ready(void)
 {
-    return g_phase == GSP_BOOTED || g_phase == GSP_BOOTED_SOFT ? 1 : 0;
+    /* `rm_ready` es MEJOR que `booted` (el GSP arrancado *y* GSP-RM hablando por
+     * RPC), pero al añadir la fase se quedó fuera de esta lista y el estado más
+     * avanzado se reportaba como "no listo". */
+    return g_phase == GSP_BOOTED || g_phase == GSP_RM_READY ||
+           g_phase == GSP_BOOTED_SOFT ? 1 : 0;
 }
 
 const char *lx_nouveau_gsp_status(void)
@@ -478,23 +488,23 @@ uint64_t lx_nouveau_vram_bytes(void)
     return g_vram_bytes ? g_vram_bytes : (8ull * 1024ull * 1024ull * 1024ull);
 }
 
+/* El valor de retorno es "esto lo ha calculado la GPU" (1) o "la CPU" (0), y es
+ * el criterio GO de G4. Devolver 1 con el GSP arrancado era una mentira: aquí
+ * abajo no hay más que un bucle de CPU, no existe todavía canal ni kernel. Un
+ * criterio que se cumple solo porque el GSP arrancó no mide nada — es el mismo
+ * error que dio `G3b GO` con la tarjeta fuera del bus. Mientras el cómputo sea
+ * de CPU esto devuelve 0; pasará a 1 cuando haya canal y el resultado venga de
+ * VRAM. */
 int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n)
 {
     unsigned i;
     if (!x || !y || n == 0) {
         return -1;
     }
-    if (!lx_nouveau_gsp_ready()) {
-        for (i = 0; i < n; i++) {
-            y[i] = a * x[i] + y[i];
-        }
-        return 0;
-    }
     for (i = 0; i < n; i++) {
         y[i] = a * x[i] + y[i];
     }
-    lx_printk("nouveau-lx: saxpy n=%u a=%g (GSP channel)\n", n, (double)a);
-    return g_phase == GSP_BOOTED ? 1 : 0;
+    return 0;
 }
 
 int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned cols,
@@ -511,5 +521,5 @@ int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned cols,
         }
         y[r] = sum;
     }
-    return g_phase == GSP_BOOTED ? 1 : 0;
+    return 0;   /* CPU — ver la nota de lx_nouveau_submit_saxpy */
 }

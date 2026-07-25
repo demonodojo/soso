@@ -31,7 +31,12 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G2 | firmware gb205 + set ga102 (3060) | `lxdde-fw: cargado …/gsp/…` | **Go** |
 | G3a | firmware ELF + GEM staging + fases | `N blobs GSP validados` | **Go** (soft boot) |
 | G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | **GO** (2026-07-25): `GSP booted (hw, GSP-FMC vía FSP)` en GB205 real, lockdown liberado, sin un solo all-ones en el log |
-| G4 | saxpy SASS en VRAM | `SYS_GPU_SUBMIT` correcto en GPU | Infra `engine/{gr,fifo,dma}` base; bloqueado por G3b en HW |
+| G4a | RPC con GSP-RM (recibir + `SET_SYSTEM_INFO`/`SET_REGISTRY`) | `GSP_INIT_DONE` con `res=0x0` | **GO** (2026-07-25): llega tras 22 mensajes, `GSP-RM listo (RPC en marcha)` |
+| G4b | RPC síncrono (`gsp_cmdq_call`) | round-trip + anillo que envuelve, en hostcheck | **GO** (2026-07-25), sin HW todavía |
+| G4c | Objetos de RM: cliente → device → subdevice (`GSP_RM_ALLOC`) | un `NV_RM_CONTROL` que responde | pendiente |
+| G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | pendiente |
+| G4e | **Canal**: GPFIFO + USERD + timbre | la GPU mueve bytes (copia CE) y se lee de vuelta | pendiente |
+| G4f | QMD + kernel SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real | pendiente, **bloqueado por el toolchain** |
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
 
 **G1 superado (2026-07-25).** Con VT-d activo en la BIOS y el bind persistente puesto
@@ -169,14 +174,23 @@ acepta el COT, el FMC arranca y baja el lockdown: `HWCFG2` pasa de `0x8187a7f7` 
 `0x818787f7` (cae el bit 13) con `mbox0=0`. Sin un solo `0xffffffff` en el log.
 
 **Antes de eso hubo un intento en el que la GPU se caía del bus** ~1 s después de
-arrancar el FMC. El sospechoso principal: **`nvidia-persistenced` estaba en bucle
-de reinicio** y cargaba/descargaba `nvidia.ko` unas 5 veces por segundo mientras la
-tarjeta estaba en VFIO (se ve en `dmesg` como pares `nvlink: Nvlink Core is being
-initialized` / `Unregistered` cada ~180 ms). Tras `sudo systemctl mask --now
-nvidia-persistenced` el arranque salió a la primera. Es una sola observación, no
-una demostración, pero **conviene tenerlo enmascarado mientras se itera en L6**
-(`unmask` al devolver la GPU al host). El daemon no puede funcionar de todos modos:
-no hay GPU que persistir cuando está en `vfio-pci`.
+arrancar el FMC, con `nvidia.ko` cargándose y descargándose ~5 veces por segundo
+mientras la tarjeta estaba en VFIO (pares `nvlink: Nvlink Core is being initialized`
+/ `Unregistered` cada ~180 ms en `dmesg`). Se atribuyó a `nvidia-persistenced` y se
+enmascaró; **la atribución era errónea** (2026-07-25).
+
+**El culpable real: un bucle udev↔modprobe que acaba colgando el host.**
+`/usr/lib/udev/rules.d/71-nvidia.rules` lanza `modprobe nvidia_{modeset,drm,uvm}` al
+ver el `add` de `/bus/pci/drivers/nvidia`. Con la dGPU en vfio-pci el probe falla,
+`nvidia` se descarga, desaparece el directorio, y el siguiente `modprobe` lo recrea
+→ ciclo infinito. Enmascarar `persistenced` quitaba **una** de las cuatro acciones
+`RUN+=`, así que el bucle seguía: acumuló 85 100 ciclos en 4 h, ahogó el journal y
+hubo que resetear a mano a mitad de una prueba. Lo corta `install <mod> /bin/false`
+(ya lo genera `--enable`); en caliente, esas líneas + `udevadm control --reload` +
+`rmmod nvidia`. **Al medir justo después el ritmo se dispara (327/min → 14 000/min):
+es la cola de udev vaciándose porque ahora cada `modprobe` falla al instante, no el
+bucle empeorando.** Espera ~2 min y verás 0. Mantener `persistenced` enmascarado
+sigue siendo buena idea (no puede funcionar sin GPU), pero no es lo que arregla esto.
 
 **Pila RPC (`gsp_rpc.c`), primer tramo: recibir.** Con el GSP arrancado, GSP-RM
 habla por las colas del paso 5. Dos cabeceras por elemento: `r535_gsp_msg` (48 B) y
@@ -197,6 +211,40 @@ y al final `GSP_INIT_DONE` con **`rpc_result=0x59` = `NV_ERR_OPERATING_SYSTEM`**
 **Causa:** `r535_gsp_oneinit` encola `GSP_SET_SYSTEM_INFO` y `SET_REGISTRY` en la
 cmdq **antes de arrancar el GSP**; GSP-RM las consume durante su init. Sin ellas
 arranca a ciegas. Siguiente paso: el envío por la cmdq.
+
+**G4b: llamada síncrona (`gsp_cmdq_call`), hecha.** `send` + `gsp_rpc_recv`, que
+empareja la respuesta **por `function`** — no por secuencia: la `sequence` de la
+cabecera RPC va a 0 también upstream, la que se incrementa por mensaje es la del
+*elemento* de cola. Dos casos que `GSP_INIT_DONE` (32 B, sin payload) no ejercitaba y
+ahora cubre el hostcheck: copiar el payload de la respuesta, y **un mensaje de varias
+páginas que da la vuelta al anillo** — con un solo `memcpy` se leía pasado el final
+del área de entradas (bug latente, nunca disparado). La copia se hace **antes** de
+publicar el puntero de lectura: en cuanto se publica, el GSP puede reutilizar esas
+páginas.
+
+**Gotcha 3 (2026-07-25): `set_boot0` borraba el éxito del bring-up.**
+`lx_nouveau_set_boot0` ponía `g_phase = GSP_BAR0` sin condiciones, y
+`nvidia_probe::init()` corre **después** del bring-up (`main.rs`: `lxdde::init` →
+`gpu::init` → `nvidia_probe::init`). Resultado: el arranque llegaba a `rm_ready` y el
+log decía `GSP=bar0`, `gsp_ready()` daba falso y el cómputo se iba a la CPU sin
+avisar. Ahora solo asciende desde `GSP_NONE`. Además `lx_nouveau_gsp_ready()` no
+incluía `GSP_RM_READY` — el estado *mejor* se reportaba como "no listo".
+
+**El valor de `on_gpu` era una mentira y ahora no.** `lx_nouveau_submit_saxpy`
+devolvía 1 (= "lo calculó la GPU") con solo estar el GSP arrancado, mientras por
+debajo corría un bucle de CPU. Eso hace el criterio GO de G4 incumplible de fallar —
+el mismo vicio que dio `G3b GO` con la tarjeta fuera del bus. Devuelve 0 hasta que
+haya canal y el resultado venga de VRAM.
+
+**G4f está bloqueado por el toolchain, no por el código.**
+`lxdde/ports/nouveau/saxpy.sass.bin` mide **0 bytes** y en esta máquina no hay `nvcc`,
+`ptxas`, `nvdisasm` ni toolkit CUDA. GB205 es `sm_120`, cuyo encoding no está
+documentado: escribir SASS a mano no es viable. Dos salidas: instalar CUDA ≥12.8 solo
+por `ptxas` (compilar no necesita la GPU, funciona con la tarjeta en VFIO), o **probar
+el canal con el motor de copia (CE)** — un DMA en VRAM ejercita VA space, canal,
+pushbuffer, timbre y semáforo sin una instrucción máquina. Recomendado: CE primero en
+cualquier caso, porque G4c–G4e son comunes a las dos ramas y un readback de VRAM
+escrita por la GPU ya es prueba falsable.
 
 **Trampa de numeración: r535 y r570 divergen desde 0x101c.** En r535 ese código es
 `NVLINK_FAULT_UP` y `0x1020` no existe; en r570 son `GSP_LOCKDOWN_NOTICE` y
@@ -247,9 +295,12 @@ Detalle y tabla de pasos 1–6 de la cadena FSP/COT en `docs/L6-G3-nvkm-scope.md
 - **Para iterar en G1 sin cerrar el escritorio cada vez**: bind persistente en el
   arranque con `sudo ./scripts/l6-g1-vfio-persist.sh --enable` + reboot. Escribe
   `/etc/modprobe.d/soso-l6-vfio.conf` (`options vfio-pci ids=10de:2f18,10de:2f80` +
-  blacklist de la pila nvidia), `/etc/modules-load.d/soso-l6-vfio.conf` y
-  `modprobe.blacklist=…` en GRUB (el blacklist de modprobe.d **no** frena una carga por
-  nombre desde initramfs/gpu-manager; el parámetro de kernel sí). Antes de tocar nada
+  blacklist de la pila nvidia **y cuatro líneas `install <mod> /bin/false`**),
+  `/etc/modules-load.d/soso-l6-vfio.conf` y `modprobe.blacklist=…` en GRUB.
+  **Ni el `blacklist` de modprobe.d ni `modprobe.blacklist=` del cmdline frenan una
+  carga por nombre o por dependencia** — solo actúan al resolver un *alias*
+  (comprobado 2026-07-25: con el parámetro puesto, `nvidia` salía en `lsmod` igual).
+  Quien la frena son las líneas `install`; ver el bucle de udev más abajo. Antes de tocar nada
   verifica que hay otra GPU con driver (`00:02.0 i915`) y que PRIME no está en `nvidia`.
   Deshacer: `--disable` + reboot (restaura GRUB exacto, con backup `.bak.<fecha>`).
   Mientras esté activo **no hay CUDA ni nvidia-smi en el host**. `--status` no toca nada.

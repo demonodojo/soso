@@ -321,18 +321,49 @@ static int check_libos(const struct gsp_wpr *wpr)
     return 0;
 }
 
-/* Deja un mensaje de GSP-RM en la página `idx` del anillo de la cola. */
+/* Deja un mensaje de GSP-RM en la página `idx` del anillo, con `plen` bytes de
+ * payload detrás de las cabeceras. Escribe dando la vuelta al anillo igual que
+ * lo haría el firmware, para poder ejercitar ese caso. */
+static void fake_rpc_post_payload(const struct gsp_libos *lo, unsigned idx,
+                                  uint32_t fn, uint32_t result,
+                                  const unsigned char *payload, uint32_t plen)
+{
+    unsigned char *entries = (unsigned char *)lo->shm.va + lo->msgq_offset + 4096;
+    unsigned long ring = 63ul * 4096ul;
+    unsigned long pos = (unsigned long)idx * 4096ul;
+    struct gsp_rpc_hdr hdr;
+    unsigned char zero[4096];
+    uint32_t total = (uint32_t)sizeof(struct gsp_msg_elem) + sizeof(hdr) + plen;
+    uint32_t pages = (total + 4095u) / 4096u;
+    unsigned p;
+    unsigned long w;
+    uint32_t i;
+
+    memset(zero, 0, sizeof(zero));
+    for (p = 0; p < pages; p++) {
+        memcpy(entries + ((pos + (unsigned long)p * 4096ul) % ring), zero, 4096);
+    }
+
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.length = (uint32_t)sizeof(hdr) + plen;
+    hdr.function = fn;
+    hdr.rpc_result = result;
+
+    /* Byte a byte para no tener que partir cada memcpy en el borde del anillo. */
+    w = (pos + sizeof(struct gsp_msg_elem)) % ring;
+    for (i = 0; i < sizeof(hdr); i++) {
+        entries[(w + i) % ring] = ((const unsigned char *)&hdr)[i];
+    }
+    w = (w + sizeof(hdr)) % ring;
+    for (i = 0; i < plen; i++) {
+        entries[(w + i) % ring] = payload ? payload[i] : 0;
+    }
+}
+
 static void fake_rpc_post(const struct gsp_libos *lo, unsigned idx, uint32_t fn,
                           uint32_t result)
 {
-    unsigned char *msgq = (unsigned char *)lo->shm.va + lo->msgq_offset;
-    unsigned char *entry = msgq + 4096 + (unsigned long)idx * 4096;
-    struct gsp_rpc_hdr *hdr = (struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
-
-    memset(entry, 0, 4096);
-    hdr->length = sizeof(struct gsp_rpc_hdr);
-    hdr->function = fn;
-    hdr->rpc_result = result;
+    fake_rpc_post_payload(lo, idx, fn, result, NULL, 0);
 }
 
 /* Recepción de RPCs de GSP-RM sobre las colas del paso 5. */
@@ -373,6 +404,105 @@ static int check_rpc(const struct gsp_libos *lo)
         return -1;
     }
     printf("OK: sin mensajes, expira\n");
+    return 0;
+}
+
+/* Llamada síncrona (G4b): payload de respuesta y anillo circular.
+ *
+ * Estos dos casos no los tocaba nada: `GSP_INIT_DONE` mide 32 B y no lleva
+ * payload, así que ni la copia ni el borde del anillo se ejercitaban. Una
+ * respuesta de RM sí puede ocupar varias páginas y envolver. */
+static int check_rpc_sync(const struct gsp_libos *lo)
+{
+    struct gsp_rpc rpc;
+    struct gsp_cmdq q;
+    struct gsp_msgq_headers *msgq =
+        (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->msgq_offset);
+    unsigned char pattern[6000];
+    unsigned char got[6000];
+    uint32_t plen = 0;
+    uint32_t status = 0xdeadbeefu;
+    uint32_t i;
+
+    if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (sync)\n"); return -1; }
+    if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (sync)\n"); return -1; }
+
+    for (i = 0; i < sizeof(pattern); i++) {
+        pattern[i] = (unsigned char)(i * 7u + 3u);
+    }
+
+    /* 1) Payload corto, sin envolver: tiene que llegar entero. */
+    *rpc.rptr = 10;
+    fake_rpc_post_payload(lo, 10, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 0, pattern, 64);
+    msgq->tx.writePtr = 11;
+    memset(got, 0, sizeof(got));
+    if (gsp_rpc_recv(&rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, got, sizeof(got),
+                     &plen, &status, 100) != 0) {
+        printf("FALLO: recv con payload\n");
+        return -1;
+    }
+    if (plen != 64 || status != 0 || memcmp(got, pattern, 64) != 0) {
+        printf("FALLO: payload corto (len=%u status=0x%x)\n", plen, status);
+        return -1;
+    }
+    printf("OK: recv copia el payload (%u B) y expone el status\n", plen);
+
+    /* 2) El caso que importa: mensaje de 2 páginas que empieza en la última
+     * entrada del anillo y continúa en la primera. */
+    *rpc.rptr = 62;
+    fake_rpc_post_payload(lo, 62, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 0, pattern,
+                          (uint32_t)sizeof(pattern));
+    msgq->tx.writePtr = 1;
+    memset(got, 0, sizeof(got));
+    if (gsp_rpc_recv(&rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, got, sizeof(got),
+                     &plen, &status, 100) != 0) {
+        printf("FALLO: recv de un mensaje que envuelve\n");
+        return -1;
+    }
+    if (plen != sizeof(pattern) || memcmp(got, pattern, sizeof(pattern)) != 0) {
+        printf("FALLO: payload envuelto corrupto (len=%u)\n", plen);
+        for (i = 0; i < sizeof(pattern); i++) {
+            if (got[i] != pattern[i]) {
+                printf("       primer byte mal: %u (0x%02x != 0x%02x)\n",
+                       i, got[i], pattern[i]);
+                break;
+            }
+        }
+        return -1;
+    }
+    if (*rpc.rptr != 1) { printf("FALLO: rptr=%u tras envolver\n", *rpc.rptr); return -1; }
+    printf("OK: mensaje de 2 páginas que envuelve el anillo, %u B intactos (rptr=%u)\n",
+           plen, *rpc.rptr);
+
+    /* 3) La llamada completa: encola y consume su respuesta. */
+    fake_rpc_post_payload(lo, 1, 72u, 0, pattern, 128);
+    msgq->tx.writePtr = 2;
+    memset(got, 0, sizeof(got));
+    if (gsp_cmdq_call(&q, &rpc, 72u, NULL, 0, got, sizeof(got), &plen,
+                      &status, 100) != 0) {
+        printf("FALLO: gsp_cmdq_call\n");
+        return -1;
+    }
+    if (plen != 128 || memcmp(got, pattern, 128) != 0) {
+        printf("FALLO: respuesta de la llamada (len=%u)\n", plen);
+        return -1;
+    }
+    printf("OK: gsp_cmdq_call encola y recoge su respuesta (%u B)\n", plen);
+
+    /* 4) Un NV_STATUS de error tiene que salir como fallo, pero legible. */
+    *rpc.rptr = 5;
+    fake_rpc_post_payload(lo, 5, 72u, 0x56u, NULL, 0);
+    msgq->tx.writePtr = 6;
+    status = 0;
+    if (gsp_cmdq_call(&q, &rpc, 72u, NULL, 0, NULL, 0, NULL, &status, 100) == 0) {
+        printf("FALLO: una respuesta con NV_STATUS != 0 se dio por buena\n");
+        return -1;
+    }
+    if (status != 0x56u) {
+        printf("FALLO: status no propagado (0x%x)\n", status);
+        return -1;
+    }
+    printf("OK: NV_STATUS de error se propaga (0x%x = NOT_SUPPORTED)\n", status);
     return 0;
 }
 
@@ -544,6 +674,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_rpc(&lo) != 0)
         return -1;
     if (check_cmdq(&lo) != 0)
+        return -1;
+    if (check_rpc_sync(&lo) != 0)
         return -1;
 
     fmc_lx_stage_release(&staged);

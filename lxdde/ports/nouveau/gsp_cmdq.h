@@ -37,6 +37,18 @@ int gsp_cmdq_init(const struct gsp_libos *lo, struct gsp_cmdq *out);
 int gsp_cmdq_send(struct gsp_cmdq *q, uint32_t fn, const void *payload,
                   uint32_t payload_size);
 
+/* Llamada síncrona: encola `fn` y espera la respuesta, que GSP-RM devuelve con
+ * el **mismo `function`** (`r535_gsp_rpc_send` con espera). Los eventos que
+ * lleguen mientras se registran y se descartan.
+ *
+ * `reply`/`reply_len` es opcional; `reply_got` recibe el tamaño real del payload
+ * de respuesta y `status` su `NV_STATUS`. Devuelve 0 solo si la respuesta llegó
+ * con `rpc_result == 0`. */
+int gsp_cmdq_call(struct gsp_cmdq *q, struct gsp_rpc *rpc, uint32_t fn,
+                  const void *payload, uint32_t payload_size,
+                  void *reply, uint32_t reply_len, uint32_t *reply_got,
+                  uint32_t *status, unsigned timeout_ms);
+
 /* Las dos RPCs que GSP-RM consume durante su init; hay que encolarlas **antes**
  * de arrancar el GSP. */
 int gsp_cmdq_set_system_info(struct gsp_cmdq *q, const struct gsp_sysinfo *si);
