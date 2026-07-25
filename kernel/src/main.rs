@@ -96,6 +96,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     drivers::virtio_blk::init();
     drivers::usb_storage::init();
     drivers::live_disk::init();
+    // Antes que lxdde: el bring-up GSP pide sus blobs por VFS
+    // (`lx_request_firmware` → `/lib/firmware/…`) y sin montar falla en fw_loading.
+    fs::init();
     #[cfg(feature = "lxdde")]
     {
         let mode = lxdde_mode();
@@ -114,7 +117,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     drivers::gpu::init();
     drivers::nvidia_probe::init();
     drivers::nvidia_compute::init();
-    fs::init();
     net::init();
     task::init();
 

@@ -53,5 +53,16 @@ pub extern "C" fn lx_request_firmware(
     }
 }
 
+/// Libera de verdad el blob: el llamante (`load_one` en `gsp_fw.c`) ya se ha
+/// quedado con su propia copia. Sin esto la caché retenía cada firmware para
+/// siempre — 121 MiB solo entre los dos ucode GSP de 60,6 MiB.
 #[unsafe(no_mangle)]
-pub extern "C" fn lx_release_firmware(_data: *const u8) {}
+pub extern "C" fn lx_release_firmware(data: *const u8) {
+    if data.is_null() {
+        return;
+    }
+    let mut cache = FIRMWARE_CACHE.lock();
+    if let Some(i) = cache.iter().position(|b| b.as_ptr() == data) {
+        cache.swap_remove(i);
+    }
+}

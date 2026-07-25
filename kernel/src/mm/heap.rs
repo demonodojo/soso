@@ -13,7 +13,11 @@ pub const HEAP_START: u64 = 0x_4444_4444_0000;
 // La caché de sosomfs puede crecer hasta 8 MiB (2048 bloques) y la
 // verificación de segmento reserva hasta 8 MiB más; 8 MiB de heap se
 // agotaban con la inferencia LLM.
-pub const HEAP_SIZE: u64 = 32 * 1024 * 1024;
+//
+// 32 MiB tampoco bastan para el bring-up GSP: el ucode `gsp-570.144.bin` son
+// 60,6 MiB y el port mantiene dos copias vivas (el buffer de `g_blobs` y el
+// objeto GEM del staging), ~121 MiB de pico. 256 MiB dejan holgura de sobra.
+pub const HEAP_SIZE: u64 = 256 * 1024 * 1024;
 
 #[global_allocator]
 static ALLOCATOR: Talck<Mutex<()>, ClaimOnOom> =
