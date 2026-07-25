@@ -89,16 +89,55 @@ static const char *rpc_event_name(uint32_t fn)
     switch (fn) {
     case NV_VGPU_MSG_EVENT_GSP_INIT_DONE:
         return "GSP_INIT_DONE";
+    case NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER:
+        return "GSP_RUN_CPU_SEQUENCER";
+    case NV_VGPU_MSG_EVENT_OS_ERROR_LOG:
+        return "OS_ERROR_LOG";
     case NV_VGPU_MSG_EVENT_UCODE_LIBOS_PRINT:
         return "UCODE_LIBOS_PRINT";
+    case NV_VGPU_MSG_EVENT_GSP_LOCKDOWN_NOTICE:
+        return "GSP_LOCKDOWN_NOTICE";
+    case NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD:
+        return "GSP_POST_NOCAT_RECORD";
+    case NV_VGPU_MSG_EVENT_FECS_ERROR:
+        return "FECS_ERROR";
+    case NV_VGPU_MSG_EVENT_RECOVERY_ACTION:
+        return "RECOVERY_ACTION";
     default:
         return "?";
+    }
+}
+
+/* Unos pocos códigos de NV_STATUS, los que se ven en el arranque. */
+static const char *rpc_status_name(uint32_t status)
+{
+    switch (status) {
+    case 0x51u: return "NO_MEMORY";
+    case 0x55u: return "NOT_READY";
+    case 0x56u: return "NOT_SUPPORTED";
+    case 0x59u: return "OPERATING_SYSTEM";
+    case 0x65u: return "TIMEOUT";
+    case 0x66u: return "TIMEOUT_RETRY";
+    default:    return "?";
+    }
+}
+
+static void flush_repeats(unsigned *repeats)
+{
+    if (*repeats) {
+        lx_printk("nouveau-lx: ... y %u más iguales\n", *repeats);
+        *repeats = 0;
     }
 }
 
 int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms)
 {
     unsigned seen = 0;
+    unsigned nocat = 0;
+    /* GSP-RM puede mandar cientos de eventos iguales seguidos (los registros
+     * NOCAT cuando algo le va mal); imprimirlos uno a uno ahoga el serie. */
+    uint32_t last_fn = 0xffffffffu;
+    unsigned repeats = 0;
 
     if (!rpc || !rpc->ready) {
         return -1;
@@ -129,8 +168,17 @@ int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms)
                 return -1;
             }
             seen++;
-            lx_printk("nouveau-lx: RPC fn=0x%04x (%s) len=%u res=0x%x\n",
-                      function, rpc_event_name(function), length, result);
+            if (function == NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD) {
+                nocat++;
+            }
+            if (function == last_fn) {
+                repeats++;
+            } else {
+                flush_repeats(&repeats);
+                last_fn = function;
+                lx_printk("nouveau-lx: RPC fn=0x%04x (%s) len=%u res=0x%x\n",
+                          function, rpc_event_name(function), length, result);
+            }
 
             /* Avanzar el puntero de lectura tantas páginas como ocupe. */
             pages = (length + GSP_MSG_HDR_SIZE + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
@@ -138,18 +186,35 @@ int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms)
             gsp_rpc_barrier();
             *rpc->rptr = rptr;
 
+            /* Solo se vacía el contador al salir: si se hiciera aquí en cada
+             * vuelta, cada repetición imprimiría su propia línea y no
+             * agruparíamos nada. */
             if (result) {
-                lx_printk("nouveau-lx: GSP-RM devuelve error 0x%x en fn=0x%04x\n",
-                          result, function);
+                flush_repeats(&repeats);
+                lx_printk("nouveau-lx: GSP-RM devuelve %s (0x%x) en fn=0x%04x (%s)\n",
+                          rpc_status_name(result), result, function,
+                          rpc_event_name(function));
+                if (nocat) {
+                    /* Upstream manda GSP_SET_SYSTEM_INFO y SET_REGISTRY por la
+                     * cmdq ANTES de arrancar el GSP (`r535_gsp_oneinit`); sin
+                     * ellos GSP-RM se inicializa a ciegas y va soltando
+                     * registros de crash hasta rendirse. */
+                    lx_printk("nouveau-lx: %u registro(s) NOCAT antes del fallo — "
+                              "falta enviar SET_SYSTEM_INFO/SET_REGISTRY por la cmdq\n",
+                              nocat);
+                }
                 return -1;
             }
             if (function == fn) {
+                flush_repeats(&repeats);
                 lx_printk("nouveau-lx: %s recibido tras %u mensaje(s)\n",
                           rpc_event_name(fn), seen);
                 return 0;
             }
         }
     }
-    lx_printk("nouveau-lx: no llegó fn=0x%04x (%u mensaje(s) vistos)\n", fn, seen);
+    flush_repeats(&repeats);
+    lx_printk("nouveau-lx: no llegó fn=0x%04x (%u mensaje(s) vistos, %u NOCAT)\n",
+              fn, seen, nocat);
     return -1;
 }

@@ -42,10 +42,18 @@ struct gsp_rpc_hdr {
     uint32_t spare;
 };
 
-/* Eventos que manda GSP-RM (`nvrm/msgfn.h`). */
-#define NV_VGPU_MSG_EVENT_FIRST_EVENT        0x1000u
-#define NV_VGPU_MSG_EVENT_GSP_INIT_DONE      0x1001u
-#define NV_VGPU_MSG_EVENT_UCODE_LIBOS_PRINT  0x100cu
+/* Eventos que manda GSP-RM. **Ojo: r535 y r570 renumeran a partir de 0x101c**
+ * (en r535 el 0x101c es NVLINK_FAULT_UP; en r570, GSP_LOCKDOWN_NOTICE). Estos son
+ * los de `rm/r570/nvrm/msgfn.h`, que es el que corresponde al firmware 570.144. */
+#define NV_VGPU_MSG_EVENT_FIRST_EVENT           0x1000u
+#define NV_VGPU_MSG_EVENT_GSP_INIT_DONE         0x1001u
+#define NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER 0x1002u
+#define NV_VGPU_MSG_EVENT_OS_ERROR_LOG          0x1006u
+#define NV_VGPU_MSG_EVENT_UCODE_LIBOS_PRINT     0x100cu
+#define NV_VGPU_MSG_EVENT_GSP_LOCKDOWN_NOTICE   0x101cu
+#define NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD 0x1020u
+#define NV_VGPU_MSG_EVENT_FECS_ERROR            0x1021u
+#define NV_VGPU_MSG_EVENT_RECOVERY_ACTION       0x1022u
 
 struct gsp_rpc {
     volatile uint32_t *rptr;   /* lo escribimos nosotros (rx de la cmdq) */

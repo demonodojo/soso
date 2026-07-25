@@ -479,9 +479,31 @@ El hito es ver llegar **`GSP_INIT_DONE`** (evento `0x1001`): prueba de una vez e
 contrato entero de memoria compartida. Los eventos que lleguen antes —típicamente
 `UCODE_LIBOS_PRINT`— se registran y se descartan. Fase serial: `rm_ready`.
 
-**Siguiente:** el envío por la cmdq (`r535_gsp_cmdq_push`) para poder pedirle cosas
-a GSP-RM, y de ahí a G4. En Ampere, además, port `subdev/acr/*` vía
-`nvkm_ola2.list` (sustituir lx-native).
+### Primera prueba en HW de la recepción (2026-07-25)
+
+**El transporte funciona.** GSP-RM manda cientos de RPCs bien formados —`function`
+y `length` coherentes, cabeceras en su sitio—, así que los punteros cruzados, la
+geometría del anillo y el formato de los elementos están bien.
+
+Lo que llega, en orden: una avalancha de `GSP_POST_NOCAT_RECORD` (0x1020, 1244 B
+cada uno), algún `GSP_LOCKDOWN_NOTICE` (0x101c) y `UCODE_LIBOS_PRINT`, y al final
+`GSP_INIT_DONE` con **`rpc_result = 0x59` = `NV_ERR_OPERATING_SYSTEM`**. NOCAT es
+el catálogo de crashes de RM: GSP-RM estaba fallando en bucle y registrándolo.
+
+**Ojo con la numeración de eventos: r535 y r570 divergen a partir de 0x101c.** En
+r535 ese código es `NVLINK_FAULT_UP` y `0x1020` ni existe; en r570 son
+`GSP_LOCKDOWN_NOTICE` y `GSP_POST_NOCAT_RECORD`. Con el enum equivocado el
+diagnóstico apunta a NVLink en una portátil que no tiene NVLink. Los nombres del
+port salen de `rm/r570/nvrm/msgfn.h`.
+
+**Causa:** `r535_gsp_oneinit` envía `GSP_SET_SYSTEM_INFO` y `SET_REGISTRY` por la
+cmdq **antes de arrancar el GSP** (justo después de `libos_init`). Quedan encoladas
+y GSP-RM las consume como parte de su propia inicialización. Nosotros no enviamos
+ninguna de las dos, así que GSP-RM se inicializa a ciegas.
+
+**Siguiente:** el envío por la cmdq (`r535_gsp_cmdq_push`, `r535_gsp_rpc_push`) y
+encolar esas dos RPCs antes del COT. Con eso `GSP_INIT_DONE` debería llegar limpio.
+En Ampere, además, port `subdev/acr/*` vía `nvkm_ola2.list` (sustituir lx-native).
 
 Log objetivo G3b (hardware real, tras G1):
 

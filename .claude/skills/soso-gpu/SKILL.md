@@ -188,8 +188,20 @@ entradas empiezan **detrás** de la primera página del anillo. Se avanza
 `ceil((length + 48) / 4096)` páginas módulo 63. Antes de escuchar hay que publicar
 `app_version` en `0x110080` y comprobar el bit 7 de `NV_PRISCV_RISCV_CPUCTL`
 (`0x111388`, `ga102_flcn_riscv_active`) — en el arranque que cerró G3b ya valía
-`0x180`. Hito: ver llegar **`GSP_INIT_DONE`** (evento `0x1001`). Falta el envío por
-la cmdq.
+`0x180`. Hito: ver llegar **`GSP_INIT_DONE`** (evento `0x1001`).
+
+**Probado en HW (2026-07-25): el transporte funciona, el contenido no.** GSP-RM
+manda cientos de RPCs bien formados; llegan `GSP_POST_NOCAT_RECORD` (0x1020, el
+catálogo de crashes de RM) en avalancha, `GSP_LOCKDOWN_NOTICE`, `UCODE_LIBOS_PRINT`
+y al final `GSP_INIT_DONE` con **`rpc_result=0x59` = `NV_ERR_OPERATING_SYSTEM`**.
+**Causa:** `r535_gsp_oneinit` encola `GSP_SET_SYSTEM_INFO` y `SET_REGISTRY` en la
+cmdq **antes de arrancar el GSP**; GSP-RM las consume durante su init. Sin ellas
+arranca a ciegas. Siguiente paso: el envío por la cmdq.
+
+**Trampa de numeración: r535 y r570 divergen desde 0x101c.** En r535 ese código es
+`NVLINK_FAULT_UP` y `0x1020` no existe; en r570 son `GSP_LOCKDOWN_NOTICE` y
+`GSP_POST_NOCAT_RECORD`. Con el enum de r535 el diagnóstico apunta a NVLink en una
+portátil sin NVLink. Usar siempre `rm/r570/nvrm/msgfn.h`.
 
 **Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh`.** Compila los módulos
 de los pasos 3–6 en el host con la capa lx y **un FSP simulado detrás del MMIO**
