@@ -155,6 +155,7 @@ void lx_set_netdev_ops(struct lx_net_device *dev,
                        int (*xmit)(struct lx_sk_buff *, struct lx_net_device *));
 void lx_set_netdev_mac(struct lx_net_device *dev, const unsigned char *mac);
 uint16_t lx_pci_device_id(struct lx_pci_dev *pdev);
+uint32_t lx_pci_bdf(struct lx_pci_dev *pdev);
 unsigned lx_tx_head(void *adapter);
 
 int lx_request_firmware(const char *name, const unsigned char **data, unsigned long *len);

@@ -34,14 +34,14 @@ strip_module() {
 }
 
 # Orden = orden de dependencias entre módulos.
-for m in gsp_dma gsp_rm gsp_wpr gsp_libos fmc_lx fsp_lx gsp_rpc; do
+for m in gsp_dma gsp_rm gsp_wpr gsp_libos fmc_lx fsp_lx gsp_rpc gsp_cmdq; do
     guard="$(echo "$m" | tr '[:lower:]' '[:upper:]')_H"
     { strip_module "$src/$m.h" "$guard"; strip_module "$src/$m.c" "$guard"; } \
         > "$out/${m}_body.inc"
 done
 
 cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
-   -I"$out" -o "$out/hostcheck" "$root/tools/gsp-hostcheck/main.c"
+   -I"$out" -I"$src" -o "$out/hostcheck" "$root/tools/gsp-hostcheck/main.c"
 
 echo "=== L6 — pasos 3 a 6 de la cadena FSP/COT + recepción de RPC ==="
 "$out/hostcheck" "$ucode" "$boot" "$fmc"

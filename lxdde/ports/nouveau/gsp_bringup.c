@@ -6,6 +6,7 @@
 #include "gsp_fw.h"
 #include "gsp_mmio.h"
 #include "fsp_lx.h"
+#include "gsp_cmdq.h"
 #include "gsp_libos.h"
 #include "gsp_rm.h"
 #include "gsp_rpc.h"
@@ -87,6 +88,8 @@ static struct gsp_wpr g_wpr;    /* bootloader + GspFwWprMeta (solo ruta FMC) */
 static struct gsp_libos g_libos;    /* colas, logs, RMARGS y boot params */
 static struct fmc_staged g_fmc;     /* imagen FMC + cadena de firma en sysmem */
 static struct gsp_rpc g_rpc;        /* anillo de mensajes de GSP-RM */
+static struct gsp_cmdq g_cmdq;      /* cola de comandos hacia GSP-RM */
+static struct lx_pci_dev *g_pdev;   /* para leer BARs y BDF del espacio de config */
 static uint16_t g_device_id;
 static uint32_t g_boot0;
 static uint64_t g_vram_bytes;
@@ -114,6 +117,40 @@ static uint64_t vram_for_device(uint16_t dev_id)
         return 12ull * 1024ull * 1024ull * 1024ull;   /* 3060 (GA106) 12 GiB */
     }
     return 8ull * 1024ull * 1024ull * 1024ull;
+}
+
+/* Una BAR de 64 bits: dword bajo sin los bits de tipo, más el alto. */
+static uint64_t pci_bar64(int off)
+{
+    uint32_t lo = lx_pci_read_config(g_pdev, off, 4);
+    uint32_t hi = lx_pci_read_config(g_pdev, off + 4, 4);
+
+    return ((uint64_t)hi << 32) | (uint64_t)(lo & ~0xfu);
+}
+
+/* Lo que `r570_gsp_set_system_info` saca del `pci_dev`; aquí sale del espacio
+ * de configuración, que es lo que tenemos. BAR0 = registros, BAR1 = FB,
+ * BAR3 = instancia (los índices de `NVKM_BAR{0_PRI,1_FB,2_INST}`). */
+static void collect_sysinfo(struct gsp_sysinfo *si)
+{
+    uint32_t ids = lx_pci_read_config(g_pdev, 0x00, 4);
+    uint32_t sub = lx_pci_read_config(g_pdev, 0x2c, 4);
+
+    si->bar0_phys = pci_bar64(0x10);
+    si->bar1_phys = pci_bar64(0x18);
+    si->bar3_phys = pci_bar64(0x20);
+    si->bdf = lx_pci_bdf(g_pdev);
+    /* TASK_SIZE de x86-64: el límite de direcciones de usuario que asume RM. */
+    si->max_user_va = 0x00007ffffffff000ull;
+    /* Espejo del espacio de configuración dentro de BAR0 en Turing+
+     * (`tu102_pci`: cfg.addr = 0x88000, cfg.size = 0x1000). */
+    si->cfg_mirror_base = 0x88000u;
+    si->cfg_mirror_size = 0x1000u;
+    si->vendor_id = (uint16_t)ids;
+    si->device_id = (uint16_t)(ids >> 16);
+    si->subvendor_id = (uint16_t)sub;
+    si->subdevice_id = (uint16_t)(sub >> 16);
+    si->revision_id = (uint8_t)lx_pci_read_config(g_pdev, 0x08, 1);
 }
 
 /* Ruta Blackwell: el GSP lo arranca el FSP con la imagen GSP-FMC, no el ACR de
@@ -163,6 +200,20 @@ static int run_fmc_blackwell(void)
     if (fmc_lx_stage(&img, &g_fmc) != 0) {
         lx_printk("nouveau-lx: FMC sin stagear — sigue soft\n");
         return -1;
+    }
+
+    /* Las dos RPCs que GSP-RM consume durante su init tienen que estar en la
+     * cmdq ANTES de arrancar el GSP (`r535_gsp_oneinit`). Sin ellas se
+     * inicializa a ciegas: cientos de NOCAT y NV_ERR_OPERATING_SYSTEM. */
+    if (gsp_cmdq_init(&g_libos, &g_cmdq) == 0) {
+        struct gsp_sysinfo si;
+        collect_sysinfo(&si);
+        if (gsp_cmdq_set_system_info(&g_cmdq, &si) != 0 ||
+            gsp_cmdq_set_registry(&g_cmdq) != 0) {
+            lx_printk("nouveau-lx: no se pudieron encolar SET_SYSTEM_INFO/SET_REGISTRY\n");
+        }
+    } else {
+        lx_printk("nouveau-lx: cmdq no inicializable — GSP-RM arrancará a ciegas\n");
     }
 
     /* Todo lo que el COT referencia está construido y verificado en memoria. */
@@ -237,6 +288,7 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     }
     gsp_mmio_set_bar(bar, 16u * 1024u * 1024u);
     gsp_mmio_set_pci(pdev);   /* para poder mirar la configuración si el MMIO calla */
+    g_pdev = pdev;
     boot0 = gsp_mmio_rd32(NV_PMC_BOOT_0_OFF);
     g_boot0 = boot0;
     /* La VRAM de verdad la da el hardware (`ga102_fb_vidmem_size`); la tabla por

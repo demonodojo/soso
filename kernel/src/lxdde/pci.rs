@@ -290,6 +290,18 @@ pub extern "C" fn lx_pci_get_drvdata(dev: *mut LxPciDev) -> *mut c_void {
 }
 
 #[unsafe(no_mangle)]
+/// `pci_dev_id()` de Linux: bus en los bits altos, device/function en los bajos.
+/// GSP-RM lo quiere en `GspSystemInfo.nvDomainBusDeviceFunc`.
+#[unsafe(no_mangle)]
+pub extern "C" fn lx_pci_bdf(dev: *mut LxPciDev) -> u32 {
+    if dev.is_null() {
+        return 0;
+    }
+    let d = unsafe { &*dev };
+    ((d.bus as u32) << 8) | ((d.device as u32) << 3) | (d.function as u32)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn lx_pci_device_id(dev: *mut LxPciDev) -> u16 {
     if dev.is_null() {
         return 0;

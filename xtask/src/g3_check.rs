@@ -49,6 +49,7 @@ pub fn run(_args: &[String]) {
         "gsp_wpr.c",
         "gsp_libos.c",
         "gsp_rpc.c",
+        "gsp_cmdq.c",
         "gsp_mmio.c",
         "gsp_bringup.c",
         "acr_fw.c",
@@ -134,6 +135,10 @@ pub fn run(_args: &[String]) {
     print_criterion(
         "G3b hw boot (log: GSP booted sin soft)",
         gsp_log_ok && log_contains(&log, "GSP booted (hw") && !gpu_gone,
+    );
+    print_criterion(
+        "G4a SET_SYSTEM_INFO/SET_REGISTRY encolados (log)",
+        log_contains(&log, "SET_SYSTEM_INFO") && log_contains(&log, "SET_REGISTRY"),
     );
     print_criterion(
         "G4a GSP_INIT_DONE por RPC (log)",

@@ -159,6 +159,8 @@ static struct gsp_fw_blob g_blobs[GSP_FW_COUNT];
 static const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind k)
 { return k < GSP_FW_COUNT && g_blobs[k].valid ? &g_blobs[k] : NULL; }
 
+#include "nvrm_r570.h"
+
 #include "gsp_dma_body.inc"
 #include "gsp_rm_body.inc"
 #include "gsp_wpr_body.inc"
@@ -166,6 +168,7 @@ static const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind k)
 #include "fmc_lx_body.inc"
 #include "fsp_lx_body.inc"
 #include "gsp_rpc_body.inc"
+#include "gsp_cmdq_body.inc"
 
 static int load_blob(enum gsp_fw_kind kind, const char *path)
 {
@@ -373,6 +376,96 @@ static int check_rpc(const struct gsp_libos *lo)
     return 0;
 }
 
+/* Envío por la cmdq: las dos RPCs que GSP-RM consume durante su init. */
+static int check_cmdq(const struct gsp_libos *lo)
+{
+    struct gsp_cmdq q;
+    struct gsp_sysinfo si;
+    const struct gsp_msg_elem *elem;
+    const struct gsp_rpc_hdr *rpc;
+    unsigned char *cmdq_base = (unsigned char *)lo->shm.va + lo->cmdq_offset;
+
+    /* GspSystemInfo es el contrato con el firmware: si el tamaño baila, RM lee
+     * los campos desplazados. Con el layout de r570 y alineación natural salen
+     * 928 B; se imprime para que un cambio de header se note aquí. */
+    printf("sizeof(GspSystemInfo) = %zu\n", sizeof(GspSystemInfo));
+    if (sizeof(GspSystemInfo) != 928) { printf("FALLO: tamaño de GspSystemInfo\n"); return -1; }
+
+    if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: gsp_cmdq_init\n"); return -1; }
+    if (q.cnt != 63) { printf("FALLO: cnt=%u\n", q.cnt); return -1; }
+    if (*q.wptr != 0) { printf("FALLO: wptr inicial\n"); return -1; }
+
+    memset(&si, 0, sizeof(si));
+    si.bar0_phys = 0xf0000000ull;
+    si.bar1_phys = 0xe0000000ull;
+    si.bar3_phys = 0xd0000000ull;
+    si.bdf = 0x100;
+    si.vendor_id = 0x10de;
+    si.device_id = 0x2f18;
+    si.revision_id = 0xa1;
+
+    if (gsp_cmdq_set_system_info(&q, &si) != 0) { printf("FALLO: set_system_info\n"); return -1; }
+
+    /* El elemento va detrás de la primera página (la cabecera de la cola). */
+    elem = (const struct gsp_msg_elem *)(cmdq_base + 4096);
+    rpc = (const struct gsp_rpc_hdr *)(elem + 1);
+    if (rpc->header_version != 0x03000000u) { printf("FALLO: header_version\n"); return -1; }
+    if (rpc->signature != 0x43505256u) { printf("FALLO: signature 0x%08x\n", rpc->signature); return -1; }
+    if (rpc->function != 72u) { printf("FALLO: function %u\n", rpc->function); return -1; }
+    if (rpc->length != sizeof(struct gsp_rpc_hdr) + sizeof(GspSystemInfo)) {
+        printf("FALLO: length %u\n", rpc->length);
+        return -1;
+    }
+    /* El payload tiene que haber llegado entero. */
+    {
+        const GspSystemInfo *info = (const GspSystemInfo *)(rpc + 1);
+        if (info->gpuPhysAddr != si.bar0_phys || info->gpuPhysFbAddr != si.bar1_phys ||
+            info->PCIDeviceID != (((uint32_t)0x2f18 << 16) | 0x10de)) {
+            printf("FALLO: el payload no cuadra\n");
+            return -1;
+        }
+    }
+    /* Checksum: XOR de todo el elemento en u64, plegado; con el campo ya puesto
+     * el resultado tiene que dar cero. */
+    {
+        uint32_t len = (48u + rpc->length + 4095u) & ~4095u;
+        const uint64_t *p = (const uint64_t *)elem;
+        uint64_t csum = 0;
+        for (uint32_t i = 0; i < len / 8u; i++) csum ^= p[i];
+        if (((uint32_t)(csum >> 32) ^ (uint32_t)csum) != 0) {
+            printf("FALLO: checksum no cierra\n");
+            return -1;
+        }
+    }
+    if (elem->elem_count != 1 || elem->sequence != 0) {
+        printf("FALLO: elem_count=%u sequence=%u\n", elem->elem_count, elem->sequence);
+        return -1;
+    }
+    if (*q.wptr != 1) { printf("FALLO: wptr=%u tras un RPC\n", *q.wptr); return -1; }
+    printf("OK: SET_SYSTEM_INFO encolado (1 página, checksum cierra)\n");
+
+    if (gsp_cmdq_set_registry(&q) != 0) { printf("FALLO: set_registry\n"); return -1; }
+    {
+        const struct gsp_msg_elem *e2 = (const struct gsp_msg_elem *)(cmdq_base + 4096 + 4096);
+        const struct gsp_rpc_hdr *r2 = (const struct gsp_rpc_hdr *)(e2 + 1);
+        const PACKED_REGISTRY_TABLE *t = (const PACKED_REGISTRY_TABLE *)(r2 + 1);
+        const PACKED_REGISTRY_ENTRY *en = (const PACKED_REGISTRY_ENTRY *)(t + 1);
+        const char *name0 = (const char *)t + en[0].nameOffset;
+
+        if (r2->function != 73u) { printf("FALLO: fn registry %u\n", r2->function); return -1; }
+        if (t->numEntries != 3) { printf("FALLO: numEntries %u\n", t->numEntries); return -1; }
+        if (en[0].type != 1 || en[0].data != 1) { printf("FALLO: entrada 0\n"); return -1; }
+        if (strcmp(name0, "RMSecBusResetEnable")) {
+            printf("FALLO: nombre 0 = %s\n", name0);
+            return -1;
+        }
+        if (e2->sequence != 1) { printf("FALLO: sequence no avanza\n"); return -1; }
+        printf("OK: SET_REGISTRY encolado (3 claves, nombres en su offset)\n");
+    }
+    if (*q.wptr != 2) { printf("FALLO: wptr=%u tras dos RPCs\n", *q.wptr); return -1; }
+    return 0;
+}
+
 /* Paso 6: el paquete COT, contra un FSP simulado. */
 static int check_cot(const struct gsp_wpr *wpr)
 {
@@ -449,6 +542,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     printf("OK: el rechazo del FSP se detecta\n");
 
     if (check_rpc(&lo) != 0)
+        return -1;
+    if (check_cmdq(&lo) != 0)
         return -1;
 
     fmc_lx_stage_release(&staged);
