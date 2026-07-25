@@ -29,14 +29,17 @@ fi
 
 echo ""
 echo "4) Parámetros IOMMU en kernel"
+groups=$(find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
 if rg -q 'intel_iommu=on|amd_iommu=on' /proc/cmdline 2>/dev/null; then
   echo "   GO    $(rg -o 'intel_iommu=[^ ]+|amd_iommu=[^ ]+|iommu=[^ ]+' /proc/cmdline)"
+elif [[ "${groups}" -gt 0 ]]; then
+  # Kernels recientes activan intel_iommu solos si hay DMAR: los grupos son la prueba.
+  echo "   GO    IOMMU activo por defecto del kernel (sin intel_iommu=on en cmdline)"
 else
   echo "   BLOCK intel_iommu=on no está en /proc/cmdline"
   echo "         → sudo ./scripts/l6-g1-enable-iommu.sh && sudo reboot"
 fi
 
-groups=$(find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
 echo "   Grupos IOMMU activos: ${groups}"
 
 echo ""

@@ -45,17 +45,22 @@ pub fn run(args: &[String]) {
 
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let iommu_cmd = cmdline.contains("intel_iommu=on") || cmdline.contains("amd_iommu=on");
+    // Los kernels recientes activan intel_iommu por defecto cuando hay DMAR, así que
+    // la ausencia del parámetro no dice nada: lo que manda es que haya grupos IOMMU.
+    let iommu_groups = fs::read_dir("/sys/kernel/iommu_groups")
+        .map(|d| d.count())
+        .unwrap_or(0);
     if iommu_cmd {
         ok += 1;
         println!("   OK    IOMMU en cmdline del kernel");
+    } else if iommu_groups > 0 {
+        ok += 1;
+        println!("   OK    IOMMU activo por defecto del kernel (sin intel_iommu=on en cmdline)");
     } else {
         warn += 1;
         println!("   WARN  falta intel_iommu=on — sudo ./scripts/l6-g1-enable-iommu.sh && reboot");
     }
 
-    let iommu_groups = fs::read_dir("/sys/kernel/iommu_groups")
-        .map(|d| d.count())
-        .unwrap_or(0);
     if iommu_groups == 0 {
         fail += 1;
         println!("   FAIL  0 grupos IOMMU — activar VT-d/AMD-Vi en BIOS y añadir intel_iommu=on iommu=pt (o amd_iommu=on) al kernel");
