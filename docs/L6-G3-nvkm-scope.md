@@ -183,10 +183,12 @@ Archivos actuales:
 | Carga firmware persistente | `lxdde/ports/nouveau/gsp_fw.c` |
 | Staging GEM (todo menos el ucode) | `lx_drm_gem_create` + `gsp_fw_stage_all` |
 | Imagen GSP-RM + radix3 | `lxdde/ports/nouveau/gsp_rm.c` |
+| Bootloader + WPR meta | `lxdde/ports/nouveau/gsp_wpr.c` |
 | Ruta FMC/FSP (Blackwell) | `lxdde/ports/nouveau/fmc_lx.c` |
+| Verificación en host (sin GPU) | `./scripts/l6-g3-gsp-hostcheck.sh` |
 | Poll MMIO tu102 | `gsp_mmio.c` (`0x118128`, `0x118234`) |
 | ACR lx ola2 (Ampere) | `acr_fw.c`, `falcon_lx.c`, `acr_lx.c` |
-| Fases serial | `…→fw_staged→rm_radix3→[fmc_parse→fmc_ready \| acr_*]→kick→poll→booted(_soft)` |
+| Fases serial | `…→fw_staged→rm_radix3→[fmc_parse→fmc_ready→wpr_meta \| acr_*]→kick→poll→booted(_soft)` |
 | Inventario nvkm ola1 | `./scripts/l6-g3-nvkm-inventory.sh nvkm_ola1.list` |
 | Inventario nvkm ola2 | `./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list` |
 | **nvkm GSP subdev (Ola 1) compilado e integrado** | `source.list` + shims en `lxdde/shim/include/` |
@@ -208,13 +210,14 @@ Cadena completa y en qué punto está:
 | 1 | Validar el ELF `fmc-*.bin` (cabecera fija, 6 secciones, CRC en `sh_info`) | `fmc_lx.c` | hecho (48/97/96 = variante gb202, `cot.version=2`) |
 | 2 | Leer el FSP: `NV_THERM_I2CS_SCRATCH` gb202 en **0x00ad00bc** (éxito `0xff`), colas en `0x008f2c00/04/80/84` | `fmc_lx.c` | hecho en HW: `0xff` + colas a 0 |
 | 3 | **radix3** sobre `.fwimage` del ucode GSP-RM | `gsp_rm.c` | hecho, verificada en memoria |
-| 4 | `GspFwWprMeta` (layout de WPR2 en VRAM) | — | pendiente |
+| 4 | Bootloader RISC-V en sysmem + `GspFwWprMeta` | `gsp_wpr.c` | hecho, verificado en memoria |
 | 5 | libos boot args (`GSP_FMC_BOOT_PARAMS`) | — | pendiente |
-| 6 | Enviar el COT al FSP | — | pendiente (**no antes de 4 y 5**) |
+| 6 | Enviar el COT al FSP | — | pendiente (**no antes de 5**) |
 
-Los pasos 3–5 se construyen y verifican **en memoria, sin escribir un solo
-registro**. El 6 es el primero que toca el hardware: mandar un COT con punteros a
-estructuras sin construir es lo único que hay que no hacer.
+Los pasos 3–5 se construyen y verifican **en memoria**; de registros, solo se
+**leen** (el estado del FSP en el 2, el tamaño de VRAM en el 4). El 6 es el
+primero que escribe: mandar un COT con punteros a estructuras sin construir es lo
+único que hay que no hacer.
 
 ### Paso 3: radix3 (`gsp_rm.c`)
 
@@ -242,8 +245,61 @@ lee por DMA, no un objeto gráfico) y el blob en bruto se suelta
 (`gsp_fw_release_one(GSP_FW_UCODE)`) en cuanto `gsp_rm_prepare` tiene su copia
 alineada. Pico ≈125 MiB en vez de ≈190 MiB, con el heap en 256 MiB.
 
-**G3b siguiente:** `GspFwWprMeta` (paso 4) + libos boot args (paso 5). En Ampere,
-además, port `subdev/acr/*` vía `nvkm_ola2.list` (sustituir lx-native).
+### Paso 4: WPR meta (`gsp_wpr.c`)
+
+Referencia: `gh100_gsp_wpr_meta_init` (`nvkm/subdev/gsp/gh100.c`) y la estructura
+de `nvkm/subdev/gsp/rm/r570/nvrm/gsp.h`. La versión de firmware coincide: el
+`nvkm_gsp_fwif` de gh100 es literalmente `"570.144"`, la misma que los blobs de
+esta máquina.
+
+La sorpresa agradable: **en la ruta FMC el driver no calcula direcciones de WPR**.
+El flag `offset_set_by_acr` de `r570_wpr_libos3_gb20x` dice que las pone el propio
+FMC. Nosotros solo rellenamos punteros a sysmem y tamaños; todo lo demás
+(`gspFwWprStart/End`, `gspFwOffset`, `frtsOffset`, `nonWprHeapOffset`, `fbSize`…)
+se queda a cero, y `wpr_meta_verify()` **falla si algo de eso viene escrito** — un
+layout inventado sería peor que ninguno. Nada que ver con la ruta Ampere de
+`tu102_gsp_oneinit`, que sí construye la partición entera y arranca FWSEC-FRTS.
+
+`struct gsp_wpr_meta` mide exactamente 256 B; lo garantizan asserts de compilación
+sobre `sizeof` y sobre los offsets de `fbSize`/`pmuReservedSize`/`verified`. Los
+dos `union` de upstream están puestos con su variante de arranque inicial.
+
+Campos que sí se rellenan, y de dónde salen:
+
+| Campo | Origen |
+|-------|--------|
+| `sysmemAddrOfRadix3Elf` / `sizeOfRadix3Elf` | raíz de la radix3 del paso 3 y tamaño de `.fwimage` |
+| `sysmemAddrOfBootloader` / `sizeOfBootloader` | imagen RISC-V copiada a memoria coherente |
+| `bootloaderCode/Data/ManifestOffset` | `RM_RISCV_UCODE_DESC` dentro del blob |
+| `sysmemAddrOfSignature` / `sizeOfSignature` | firma de la familia, del paso 3 |
+| `gspFwHeapSize` | `tu102_gsp_wpr_heap_size()` con la VRAM real |
+| `nonWprHeapSize` = 0x220000, `pmuReservedSize` = 0x1820000 | constantes de `r570_wpr_libos3_gb20x` |
+| `frtsSize` = 0x100000, `vgaWorkspaceSize` = 128 KiB | fijos en `gh100_gsp_wpr_meta_init` |
+
+El bootloader (`bootloader-570.144.bin`) lleva la cabecera NVIDIA `nvfw_bin_hdr`
+seguida de un `RM_RISCV_UCODE_DESC`. En el blob real: `bin_magic=0x10de`,
+`data_offset=0x6c` + `data_size=0x31000` = el fichero exacto; `version=5` (firma la
+imagen RISC-V entera como código, Hopper+), manifest 0..0xa00, datos 0xa00..0xb200,
+código 0xb200..0x30a00. Los tres offsets se comprueban contra `data_size` antes de
+copiar nada.
+
+**VRAM real.** `gsp_wpr_vidmem_size()` lee `0x1183a4` (MiB), que es lo que hace
+`ga102_fb_vidmem_size` de Ampere a Blackwell. Alimenta el término por GB del heap y
+sustituye a la tabla heurística por SKU de `vram_for_device()`, que queda solo de
+respaldo cuando no hay BAR0. Con 12288 MiB: heap = 22 + 14 + 2 + 96 = **134 MiB**.
+
+### Verificación sin GPU
+
+`./scripts/l6-g3-gsp-hostcheck.sh` compila `gsp_rm.c` y `gsp_wpr.c` **en el host**
+con la capa lx y el MMIO simulados (`tools/gsp-hostcheck/main.c`) y los corre contra
+los blobs de verdad. Comprueba las hojas de la radix3 una a una, el tamaño de la
+estructura, el heap, los offsets del bootloader y que los campos del FMC siguen a
+cero. El ciclo en hardware pide sudo, VFIO y ~90 s; este tarda un segundo.
+
+**G3b siguiente:** libos boot args (paso 5) — `GSP_FMC_BOOT_PARAMS` con
+`gspRmDescOffset` = la física de este meta, `bootArgsOffset` = libos, y el
+`GSP_ARGUMENTS_CACHED` con las colas de mensajes. En Ampere, además, port
+`subdev/acr/*` vía `nvkm_ola2.list` (sustituir lx-native).
 
 Log objetivo G3b (hardware real, tras G1):
 

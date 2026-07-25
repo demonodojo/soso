@@ -5,7 +5,8 @@
  * quien lanza el GSP. Referencia: Linux upstream `nvkm/subdev/fsp/{gh100,gb202}.c`
  * y `nvkm/subdev/gsp/gh100.c` (el árbol pinneado en lxdde/linux es 6.6 y no los
  * tiene). Aquí están los dos primeros escalones: validar el ELF firmado y leer
- * el estado del FSP. El envío del COT necesita antes WPR meta + radix3 + libos.
+ * el estado del FSP. Los pasos 3 y 4 están en `gsp_rm.c` (radix3) y `gsp_wpr.c`
+ * (WPR meta); el envío del COT espera al 5, los libos boot args.
  */
 #include "fmc_lx.h"
 #include "gsp_mmio.h"

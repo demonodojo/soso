@@ -87,10 +87,9 @@ Datos que ya están verificados contra el blob de esta máquina:
 
 Lo que **falta** para arrancar de verdad: el mensaje COT lleva
 `gspFmcSysmemOffset` + `gspBootArgsSysmemOffset`, y esos boot args
-(`GSP_FMC_BOOT_PARAMS`) apuntan a WPR meta + radix3 del ELF de GSP-RM + libos, que
-construye `r535_gsp_oneinit` — la pila RM entera. Hasta tenerla, `fmc_lx.c` solo
-valida el ELF y **lee** el estado del FSP; no escribe MMIO. Enviar un COT con
-punteros sin construir es lo único que hay que no hacer.
+(`GSP_FMC_BOOT_PARAMS`) apuntan al WPR meta (**ya construido**, ver abajo) y a los
+libos boot args, que siguen sin existir. Hasta tenerlos, nada del port escribe
+MMIO. Enviar un COT con punteros sin construir es lo único que hay que no hacer.
 
 **radix3 (`gsp_rm.c`), hecho.** Primero de los tres bloques que faltaban. El ucode
 `gsp-570.144.bin` es un ELF64 REL de RISC-V: `.fwimage` = 0x3c99000 B (~60,5 MiB, ya
@@ -102,8 +101,29 @@ firmware no tiene que ser contiguo. En gb205 salen 15513 páginas → hoja 12697
 nivel 1 y raíz 4096 B. `radix3_verify()` releé los tres niveles antes de que el GSP
 los vea. Apoyos nuevos en `kernel/src/lxdde/mem.rs`: `lx_alloc_pages_exact`
 (`lx_kmalloc` solo alinea a 8) y `lx_virt_to_phys`. Fase serial: `rm_radix3`, log
-`radix3 verificada raíz=0x…`. **Sigue sin tocar un registro.** Detalle y tabla de
-pasos 1–6 de la cadena FSP/COT en `docs/L6-G3-nvkm-scope.md`.
+`radix3 verificada raíz=0x…`. **Sigue sin tocar un registro.**
+
+**WPR meta (`gsp_wpr.c`), hecho.** Paso 4. Referencia `gh100_gsp_wpr_meta_init` +
+`rm/r570/nvrm/gsp.h` (el `nvkm_gsp_fwif` de gh100 dice literalmente `"570.144"`, la
+misma versión que los blobs de aquí). **En la ruta FMC el driver NO calcula
+direcciones de WPR** (`offset_set_by_acr` en `r570_wpr_libos3_gb20x`): solo punteros
+a sysmem y tamaños, y `wpr_meta_verify()` **falla si `gspFwWprStart`/`gspFwOffset`/
+`frtsOffset`/`fbSize`… vienen escritos**. Estructura de 256 B exactos (asserts de
+compilación sobre `sizeof` y offsets). El bootloader es `nvfw_bin_hdr` +
+`RM_RISCV_UCODE_DESC`: en el blob real `data_offset=0x6c`+`data_size=0x31000` = el
+fichero exacto, `version=5`, manifest 0..0xa00, datos 0xa00..0xb200, código
+0xb200..0x30a00. **VRAM real** por `0x1183a4` (MiB, `ga102_fb_vidmem_size`, vale
+hasta Blackwell) — sustituye a la heurística por SKU, que queda de respaldo; con
+12288 MiB el heap sale 22+14+2+96 = **134 MiB**. Fase `wpr_meta`.
+
+**Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh`.** Compila `gsp_rm.c` y
+`gsp_wpr.c` en el host con la capa lx y el MMIO simulados
+(`tools/gsp-hostcheck/main.c`) contra los blobs reales: hojas de la radix3 una a
+una, tamaño de la estructura, heap, offsets del bootloader, campos del FMC a cero.
+Un segundo, frente a sudo + VFIO + ~90 s del ciclo en hardware. **Úsalo antes de
+gastar un ciclo de GPU.**
+
+Detalle y tabla de pasos 1–6 de la cadena FSP/COT en `docs/L6-G3-nvkm-scope.md`.
 
 **Máquina del usuario (MSI Vector 16 HX AI, confirmado 2026-07-24):**
 - **Híbrida**: iGPU Intel Arrow Lake (`00:02.0`, `i915`) pinta el panel; la dGPU
@@ -167,6 +187,7 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `gsp_bringup.c` | Máquina de fases GSP | **soft boot** (`booted_soft`); saxpy/matvec en CPU; VRAM hardcodeada |
 | `gsp_fw.c` | Carga blobs GSP + staging GEM | valida ELF/magic; el ucode NO va a GEM |
 | `gsp_rm.c` | ELF64 del ucode → `.fwimage`/firma + **radix3** verificada | fase `rm_radix3`, sin MMIO |
+| `gsp_wpr.c` | Bootloader RISC-V en sysmem + **`GspFwWprMeta`** | fase `wpr_meta`, solo lee VRAM |
 | `fmc_lx.c` | Ruta FSP/GSP-FMC de Blackwell | valida el ELF FMC y **lee** el FSP |
 | `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick | `kick_boot` NO arranca HW real (solo traza) |
 | `acr_fw.c`,`falcon_lx.c`,`acr_lx.c` | ACR ola2 lx-native (AHESASC→ASB) | best-effort/soft-fail |
@@ -254,6 +275,7 @@ cargo xtask lx-build nouveau      # compila el port (incl. nvkm Ola 1)
 cargo xtask g1-check              # host: IOMMU/VFIO/firmware/BAR0
 cargo xtask g3-check              # bring-up GSP: firmware, módulos, fases
 ./scripts/l6-pack-firmware.sh     # empaqueta firmware GSP
+./scripts/l6-g3-gsp-hostcheck.sh  # pasos 3 y 4 (radix3 + WPR meta) sin GPU ni sudo
 ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list   # inventario símbolos
 # Passthrough (tras cerrar G1): SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 ```

@@ -45,6 +45,7 @@ pub fn run(_args: &[String]) {
     for m in [
         "gsp_fw.c",
         "gsp_rm.c",
+        "gsp_wpr.c",
         "gsp_mmio.c",
         "gsp_bringup.c",
         "acr_fw.c",
@@ -104,6 +105,10 @@ pub fn run(_args: &[String]) {
         "G3b radix3 GSP-RM verificada (log)",
         log_contains(&log, "radix3 verificada"),
     );
+    print_criterion(
+        "G3b WPR meta verificado (log)",
+        log_contains(&log, "WPR meta verificado"),
+    );
     print_criterion("G3b hw boot (log: GSP booted sin soft)", gsp_log_ok && log_contains(&log, "GSP booted (hw"));
     print_criterion(
         "G3b nvkm ACR port (inventario stubs)",
@@ -111,9 +116,11 @@ pub fn run(_args: &[String]) {
     );
 
     println!("\n=== Fases GSP esperadas (serial) ===");
-    println!("   fw_ready → fw_staged → rm_radix3 → [fmc_parse → fmc_ready | acr_load → acr_ahesasc → acr_asb]");
+    println!("   fw_ready → fw_staged → rm_radix3 → [fmc_parse → fmc_ready → wpr_meta");
+    println!("                                       | acr_load → acr_ahesasc → acr_asb]");
     println!("             → kick → poll → booted | booted_soft");
     println!("   Inventario nvkm ola2: ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list");
+    println!("   Pasos 3 y 4 sin GPU:  ./scripts/l6-g3-gsp-hostcheck.sh");
 
     println!("\n=== Resumen: {ok} OK, {warn} WARN, {fail} FAIL ===");
     if fail > 0 {

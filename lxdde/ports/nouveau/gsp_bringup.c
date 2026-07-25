@@ -6,6 +6,7 @@
 #include "gsp_fw.h"
 #include "gsp_mmio.h"
 #include "gsp_rm.h"
+#include "gsp_wpr.h"
 #include "lx_emul.h"
 
 #define NV_PMC_BOOT_0_OFF 0x0000u
@@ -61,6 +62,7 @@ enum gsp_phase {
     GSP_FW_STAGED,
     GSP_RM_RADIX3,
     GSP_FMC_PARSE,
+    GSP_WPR_META,
     GSP_FMC_READY,
     GSP_ACR_LOAD,
     GSP_ACR_AHESASC,
@@ -73,6 +75,7 @@ enum gsp_phase {
 
 static enum gsp_phase g_phase = GSP_NONE;
 static struct gsp_rm_fw g_rm;   /* imagen GSP-RM + radix3, viva hasta el boot */
+static struct gsp_wpr g_wpr;    /* bootloader + GspFwWprMeta (solo ruta FMC) */
 static uint16_t g_device_id;
 static uint32_t g_boot0;
 static uint64_t g_vram_bytes;
@@ -103,9 +106,9 @@ static uint64_t vram_for_device(uint16_t dev_id)
 }
 
 /* Ruta Blackwell: el GSP lo arranca el FSP con la imagen GSP-FMC, no el ACR de
- * SEC2. De momento validamos el ELF firmado y leemos el estado del FSP; el envío
- * del mensaje COT necesita además WPR meta + libos boot args (la radix3 ya la
- * construye `gsp_rm.c`). Ver fmc_lx.c. */
+ * SEC2. Validamos el ELF firmado, leemos el estado del FSP y construimos el WPR
+ * meta (`gsp_wpr.c`) sobre la radix3 de `gsp_rm.c`. Para enviar el COT falta el
+ * último escalón: los libos boot args. Ver fmc_lx.c. */
 static void run_fmc_blackwell(void)
 {
     const struct gsp_fw_blob *fmc = gsp_fw_get(GSP_FW_FMC);
@@ -122,6 +125,20 @@ static void run_fmc_blackwell(void)
     (void)fmc_lx_verify_sizes(&img);
     fmc_lx_fsp_probe();
     g_phase = GSP_FMC_READY;
+
+    /* Paso 4: el descriptor que el FMC leerá para montar WPR2. Necesita la
+     * radix3 ya construida; sin ella no hay nada que describir. */
+    if (!g_rm.ready) {
+        lx_printk("nouveau-lx: WPR meta sin imagen GSP-RM — no se construye\n");
+        return;
+    }
+    g_phase = GSP_WPR_META;
+    if (gsp_wpr_prepare(&g_rm, &g_wpr) != 0) {
+        lx_printk("nouveau-lx: WPR meta no preparado — sigue soft\n");
+        g_phase = GSP_FMC_READY;
+        return;
+    }
+    lx_printk("nouveau-lx: falta el paso 5 (libos boot args) antes del COT\n");
 }
 
 /* ACR ola 2 (Ampere): carga los ucode de SEC2 y arranca AHESASC + ASB. Cada
@@ -184,7 +201,12 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     gsp_mmio_set_bar(bar, 16u * 1024u * 1024u);
     boot0 = gsp_mmio_rd32(NV_PMC_BOOT_0_OFF);
     g_boot0 = boot0;
-    g_vram_bytes = vram_for_device(g_device_id);  /* usa boot0 para la familia */
+    /* La VRAM de verdad la da el hardware (`ga102_fb_vidmem_size`); la tabla por
+     * SKU es solo el respaldo para cuando no hay BAR0 que leer. */
+    g_vram_bytes = gsp_wpr_vidmem_size();
+    if (!g_vram_bytes) {
+        g_vram_bytes = vram_for_device(g_device_id);  /* usa boot0 para la familia */
+    }
     g_phase = GSP_BAR0;
     lx_printk("nouveau-lx: BAR0 boot0=0x%08x dev=0x%04x familia=%s vram=%uMiB\n",
               boot0, g_device_id, nv_family_name(nv_family_of(boot0, g_device_id)),
@@ -260,6 +282,8 @@ const char *lx_nouveau_gsp_status(void)
         return "fw_staged";
     case GSP_RM_RADIX3:
         return "rm_radix3";
+    case GSP_WPR_META:
+        return "wpr_meta";
     case GSP_FMC_PARSE:
         return "fmc_parse";
     case GSP_FMC_READY:

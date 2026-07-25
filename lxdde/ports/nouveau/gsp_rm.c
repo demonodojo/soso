@@ -263,14 +263,24 @@ int gsp_rm_prepare(enum gsp_fw_chip chip, struct gsp_rm_fw *out)
     memcpy(out->img, img, img_len);
     out->img_len = img_len;
 
-    out->sig = lx_dma_alloc_coherent(NULL, sig_len, &out->sig_phys, GFP_KERNEL);
-    if (!out->sig || !out->sig_phys) {
-        lx_printk("nouveau-lx: GSP-RM sin memoria para la firma\n");
-        gsp_rm_release(out);
-        return -1;
+    /* va/phys/len se publican juntos: con `sig` puesto y `sig_len` a cero, el
+     * release liberaría un tamaño que no es el reservado. */
+    {
+        uint64_t phys = 0;
+        void *va = lx_dma_alloc_coherent(NULL, sig_len, &phys, GFP_KERNEL);
+        if (!va || !phys) {
+            if (va) {
+                lx_dma_free_coherent(NULL, sig_len, va, phys);
+            }
+            lx_printk("nouveau-lx: GSP-RM sin memoria para la firma\n");
+            gsp_rm_release(out);
+            return -1;
+        }
+        out->sig = va;
+        out->sig_phys = phys;
+        out->sig_len = sig_len;
     }
     memcpy(out->sig, sig, sig_len);
-    out->sig_len = sig_len;
 
     if (radix3_build(&out->rx3, out->img, out->img_len) != 0 ||
         radix3_verify(&out->rx3, out->img, out->img_len) != 0) {
