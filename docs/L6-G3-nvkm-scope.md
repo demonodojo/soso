@@ -184,11 +184,14 @@ Archivos actuales:
 | Staging GEM (todo menos el ucode) | `lx_drm_gem_create` + `gsp_fw_stage_all` |
 | Imagen GSP-RM + radix3 | `lxdde/ports/nouveau/gsp_rm.c` |
 | Bootloader + WPR meta | `lxdde/ports/nouveau/gsp_wpr.c` |
+| Colas, logs, RMARGS, boot params | `lxdde/ports/nouveau/gsp_libos.c` |
+| Envío del COT (**escribe MMIO**) | `lxdde/ports/nouveau/fsp_lx.c` |
+| Reservas coherentes compartidas | `lxdde/ports/nouveau/gsp_dma.c` |
 | Ruta FMC/FSP (Blackwell) | `lxdde/ports/nouveau/fmc_lx.c` |
 | Verificación en host (sin GPU) | `./scripts/l6-g3-gsp-hostcheck.sh` |
 | Poll MMIO tu102 | `gsp_mmio.c` (`0x118128`, `0x118234`) |
 | ACR lx ola2 (Ampere) | `acr_fw.c`, `falcon_lx.c`, `acr_lx.c` |
-| Fases serial | `…→fw_staged→rm_radix3→[fmc_parse→fmc_ready→wpr_meta \| acr_*]→kick→poll→booted(_soft)` |
+| Fases serial | `…→rm_radix3→[fmc_parse→fmc_ready→wpr_meta→libos_args→cot_ready→cot_sent→booted \| acr_*→kick→poll→booted(_soft)]` |
 | Inventario nvkm ola1 | `./scripts/l6-g3-nvkm-inventory.sh nvkm_ola1.list` |
 | Inventario nvkm ola2 | `./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list` |
 | **nvkm GSP subdev (Ola 1) compilado e integrado** | `source.list` + shims en `lxdde/shim/include/` |
@@ -211,13 +214,12 @@ Cadena completa y en qué punto está:
 | 2 | Leer el FSP: `NV_THERM_I2CS_SCRATCH` gb202 en **0x00ad00bc** (éxito `0xff`), colas en `0x008f2c00/04/80/84` | `fmc_lx.c` | hecho en HW: `0xff` + colas a 0 |
 | 3 | **radix3** sobre `.fwimage` del ucode GSP-RM | `gsp_rm.c` | hecho, verificada en memoria |
 | 4 | Bootloader RISC-V en sysmem + `GspFwWprMeta` | `gsp_wpr.c` | hecho, verificado en memoria |
-| 5 | libos boot args (`GSP_FMC_BOOT_PARAMS`) | — | pendiente |
-| 6 | Enviar el COT al FSP | — | pendiente (**no antes de 5**) |
+| 5 | Colas, logs, RMARGS, libos boot args y `GSP_FMC_BOOT_PARAMS` | `gsp_libos.c` + `fmc_lx_stage()` | hecho, verificado en memoria |
+| 6 | Enviar el COT al FSP por EMEM y esperar al FMC | `fsp_lx.c` | escrito; **sin validar en HW** |
 
 Los pasos 3–5 se construyen y verifican **en memoria**; de registros, solo se
-**leen** (el estado del FSP en el 2, el tamaño de VRAM en el 4). El 6 es el
-primero que escribe: mandar un COT con punteros a estructuras sin construir es lo
-único que hay que no hacer.
+**leen** (el estado del FSP en el 2, el tamaño de VRAM en el 4). **El 6 es el
+primero que escribe en la GPU.**
 
 ### Paso 3: radix3 (`gsp_rm.c`)
 
@@ -288,18 +290,102 @@ copiar nada.
 sustituye a la tabla heurística por SKU de `vram_for_device()`, que queda solo de
 respaldo cuando no hay BAR0. Con 12288 MiB: heap = 22 + 14 + 2 + 96 = **134 MiB**.
 
+### Paso 5: libos boot args (`gsp_libos.c`)
+
+Referencias: `r535_gsp_libos_init`, `r535_gsp_shared_init` y `r570_gsp_set_rmargs`.
+**Cuidado con la versión**: r535 y r570 no comparten el layout de
+`GSP_ARGUMENTS_CACHED` ni de `MESSAGE_QUEUE_INIT_ARGUMENTS` — r570 quita los campos
+`locklessCmdQueueOffset`/`locklessStatQueueOffset` y añade `bDmemStack`. Con el
+firmware 570.144 va el de r570; usar el de r535 desplazaría todos los campos.
+
+Cuatro piezas encadenadas:
+
+1. **Memoria compartida** (`shared_init`): un único bloque contiguo con la tabla
+   de PTEs delante y las dos colas de 256 KiB detrás. Salen 129 PTEs — 128 páginas
+   de colas más la página de la propia tabla, que se describe a sí misma — y 63
+   mensajes de 4 KiB por cola (la primera página es la cabecera). Solo se rellena
+   la cabecera `msgqTxHeader` de la cola de comandos, con `rxHdrOff` apuntando al
+   `readPtr` de la otra; la cola de mensajes la inicializa el GSP.
+2. **Búferes de log** LOGINIT / LOGINTR / LOGRM, 64 KiB cada uno. Aunque son
+   contiguos, GSP-RM espera dentro de cada búfer la lista de físicas de sus
+   páginas, justo detrás del *put pointer* de la primera palabra (`create_pte_array`).
+3. **RMARGS**: `GSP_ARGUMENTS_CACHED` con la física de la memoria compartida, el
+   número de PTEs y los offsets de las dos colas.
+4. **Boot args de libos**: una página con cuatro `LibosMemoryRegionInitArgument`
+   —los tres logs y RMARGS— identificadas por su nombre empaquetado en un `u64`
+   big-endian (`"LOGINIT"` → `0x4c4f47494e4954`).
+
+Encima va el `GSP_FMC_BOOT_PARAMS`, que es lo que el COT entrega al FMC:
+`bootGspRmParams` apunta al WPR meta del paso 4 (target = *coherent system*) y
+`gspRmParams.bootArgsOffset` a la página de regiones (target = *noncoherent
+system*). El `wprCarveout` se queda a cero — lo talla el FMC — y `libos_verify()`
+falla si aparece escrito, por el mismo motivo que en el paso 4.
+
+Los layouts de las siete estructuras de firmware están fijados con asserts de
+compilación (`sizeof` de la región = 32, `msgqTxHeader` = 32, `rxHdrOff` = 32,
+`bDmemStack` en 48, `profilerArgs` en 56, `gspRmParams` en 40, boot params = 80).
+
+**Staging del FMC** (`fmc_lx_stage`): la imagen del ELF `fmc-*.bin` y las tres
+partes de su cadena de firma se copian a memoria coherente, porque el FSP las lee
+él mismo y no valen punteros al heap. Con esto, el paso 6 no tiene que construir
+nada: solo hablar por EMEM.
+
+Reserva total del paso 5: 516 KiB de colas + 192 KiB de logs + 8 KiB de
+libos/RMARGS + 200 KiB del FMC.
+
+### Paso 6: el COT (`fsp_lx.c`)
+
+Referencias: `gh100_fsp_boot_gsp_fmc`, `gh100_fsp_{send,recv,poll,wait,send_sync}`
+(`nvkm/subdev/fsp/gh100.c`), `gb202_fsp` para los tamaños, `gp102_flcn_emem_pio`
+(`nvkm/falcon/gp102.c`) y `gh100_gsp_lockdown_released` (`subdev/gsp/gh100.c`).
+
+El mensaje es MCTP/NVDM: dos DWORD de cabecera (`0xc0000000` = SOM|EOM;
+`0x1410de7e` = tipo vendor-PCI 0x7e, vendor 0x10de, NVDM 0x14 = COT) seguidos de un
+`NVDM_PAYLOAD_COT` **packed de 860 B** → 868 B en total. Los campos de firma miden
+384 B aunque gb20x solo llene 48/97/96: el resto va a cero. `frtsVidmemOffset` es un
+offset **desde el final de la VRAM** y vale `rsvd_size` = `ALIGN(nonWprHeap +
+pmuReserved, 2 MiB)` = 0x1C00000 en gb205.
+
+Transporte: EMEM del falcon del FSP (base `0x8f2000`), puerto/dato en `0xac0`/`0xac4`
+con autoincremento (bit 24 escritura, bit 25 lectura). Se escribe el paquete,
+`QUEUE_TAIL` = tamaño−4 y `QUEUE_HEAD` = 0, que es el timbre. La respuesta llega por
+la cola de mensajes y se valida entera: SOM/EOM, cabecera NVDM de tipo
+`FSP_RESPONSE` (0x15), `commandNvdmType` = COT y `errorCode` = 0.
+
+Después el FMC arranca y baja el lockdown del bootrom RISC-V del GSP: se sondea
+`MAILBOX0` (falcon del GSP en `0x110000`) hasta que deje de valer `0xbadf41xx` y
+`HWCFG2` bit 13 (`RISCV_BR_PRIV_LOCKDOWN`) caiga.
+
+**Guardas antes de escribir nada**: FSP con secure boot `0xff`, las cuatro colas
+ociosas, payload completo y cadena de firma con los tamaños de gb20x. Todas las
+esperas están acotadas (1 s para la cola y la respuesta, 4 s para el lockdown); no
+hay ningún bucle que pueda quedarse girando. Cualquier fallo devuelve −1 y el
+bring-up sigue a `booted (soft)` como antes.
+
+**Caso ambiguo heredado de upstream**: `gh100_gsp_lockdown_released` acepta que
+`MAILBOX0` lleve la dirección de los boot params, pero el llamante trata cualquier
+`mbox0` distinto de cero como fallo. Se replica tal cual —no toca inventarse una
+corrección sin poder probarla— pero el log avisa explícitamente si se da ese caso.
+
 ### Verificación sin GPU
 
-`./scripts/l6-g3-gsp-hostcheck.sh` compila `gsp_rm.c` y `gsp_wpr.c` **en el host**
-con la capa lx y el MMIO simulados (`tools/gsp-hostcheck/main.c`) y los corre contra
-los blobs de verdad. Comprueba las hojas de la radix3 una a una, el tamaño de la
-estructura, el heap, los offsets del bootloader y que los campos del FMC siguen a
-cero. El ciclo en hardware pide sudo, VFIO y ~90 s; este tarda un segundo.
+`./scripts/l6-g3-gsp-hostcheck.sh` compila los módulos de los pasos 3–6 **en el
+host** con la capa lx y **un FSP simulado detrás del MMIO**
+(`tools/gsp-hostcheck/main.c`) y los corre contra los blobs de verdad. Comprueba
+las hojas de la radix3 una a una, el tamaño del WPR meta, el heap, los offsets del
+bootloader, las PTEs de la memoria compartida, el `id8` de las regiones libos, el
+enlace de los boot params, que la imagen FMC copiada es idéntica a la del ELF, y —
+lo que más importa ahora— **el paquete COT byte a byte**: 868 B, las dos cabeceras,
+la firma en sus offsets, el relleno a cero y la FRTS. También comprueba que un
+rechazo del FSP se detecta en vez de darse por bueno. El ciclo en hardware pide
+sudo, VFIO y ~90 s; este tarda un segundo, y desde el paso 6 es además la única
+forma de cazar un paquete mal formado sin arriesgar un cuelgue de la GPU.
 
-**G3b siguiente:** libos boot args (paso 5) — `GSP_FMC_BOOT_PARAMS` con
-`gspRmDescOffset` = la física de este meta, `bootArgsOffset` = libos, y el
-`GSP_ARGUMENTS_CACHED` con las colas de mensajes. En Ampere, además, port
-`subdev/acr/*` vía `nvkm_ola2.list` (sustituir lx-native).
+**G3b siguiente:** probar el paso 6 en hardware. Si el GSP arranca, el log dice
+`GSP booted (hw, GSP-FMC vía FSP)` y G3b queda en GO; a partir de ahí toca la pila
+RPC sobre las colas ya montadas (`r535_gsp_rpc_*`) para hablar con GSP-RM, y luego
+G4. En Ampere, además, port `subdev/acr/*` vía `nvkm_ola2.list` (sustituir
+lx-native).
 
 Log objetivo G3b (hardware real, tras G1):
 

@@ -82,6 +82,9 @@ struct gsp_wpr {
     uint64_t meta_phys;
     uint64_t fb_bytes;      /* VRAM real, leída de 0x1183a4 */
     uint64_t heap_size;
+    /* Lo que el COT reserva al final de la VRAM: heap fuera de WPR + la reserva
+     * del PMU, alineado a 2 MiB (`rsvd_size` en `gh100_gsp_init`). */
+    uint32_t rsvd_size;
     int ready;
 };
 

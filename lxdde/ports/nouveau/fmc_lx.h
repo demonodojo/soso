@@ -2,6 +2,7 @@
 #ifndef FMC_LX_H
 #define FMC_LX_H
 
+#include "gsp_dma.h"
 #include "lx_emul.h"
 
 /* Secciones del ELF `fmc-*.bin` que el FSP necesita para el mensaje COT. */
@@ -27,5 +28,17 @@ int fmc_lx_verify_sizes(const struct fmc_image *img);
 /* Lectura pura de los registros del FSP: ¿ha terminado su secure boot y está
  * el buzón EMEM libre? No escribe nada. */
 void fmc_lx_fsp_probe(void);
+
+/* Las cuatro secciones donde el FSP las va a leer: por DMA, no desde el heap.
+ * El COT lleva la física de la imagen y las tres partes de la cadena de firma. */
+struct fmc_staged {
+    struct gsp_dma_buf img;
+    struct gsp_dma_buf hash;
+    struct gsp_dma_buf pkey;
+    struct gsp_dma_buf sig;
+};
+
+int fmc_lx_stage(const struct fmc_image *img, struct fmc_staged *out);
+void fmc_lx_stage_release(struct fmc_staged *s);
 
 #endif

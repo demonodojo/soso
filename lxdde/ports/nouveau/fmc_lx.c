@@ -231,6 +231,44 @@ int fmc_lx_verify_sizes(const struct fmc_image *img)
     return 0;
 }
 
+/* `gh100_gsp_oneinit` copia imagen y cadena de firma a memoria DMA: el FSP las
+ * lee por sí mismo, no valen punteros al heap del kernel. */
+int fmc_lx_stage(const struct fmc_image *img, struct fmc_staged *out)
+{
+    if (!img || !out || !img->image) {
+        return -1;
+    }
+    out->img.va = NULL;
+    out->hash.va = NULL;
+    out->pkey.va = NULL;
+    out->sig.va = NULL;
+
+    if (gsp_dma_alloc_copy(&out->img, img->image, img->image_len, "imagen FMC") != 0 ||
+        gsp_dma_alloc_copy(&out->hash, img->hash, img->hash_len, "hash FMC") != 0 ||
+        gsp_dma_alloc_copy(&out->pkey, img->pkey, img->pkey_len, "pkey FMC") != 0 ||
+        gsp_dma_alloc_copy(&out->sig, img->sig, img->sig_len, "firma FMC") != 0) {
+        fmc_lx_stage_release(out);
+        return -1;
+    }
+    lx_printk("nouveau-lx: FMC en sysmem imagen=0x%llx (%lu B) hash=0x%llx pkey=0x%llx sig=0x%llx\n",
+              (unsigned long long)out->img.phys, out->img.size,
+              (unsigned long long)out->hash.phys,
+              (unsigned long long)out->pkey.phys,
+              (unsigned long long)out->sig.phys);
+    return 0;
+}
+
+void fmc_lx_stage_release(struct fmc_staged *s)
+{
+    if (!s) {
+        return;
+    }
+    gsp_dma_free(&s->sig);
+    gsp_dma_free(&s->pkey);
+    gsp_dma_free(&s->hash);
+    gsp_dma_free(&s->img);
+}
+
 void fmc_lx_fsp_probe(void)
 {
     uint32_t boot = gsp_mmio_rd32(NV_THERM_I2CS_SCRATCH_GB202);

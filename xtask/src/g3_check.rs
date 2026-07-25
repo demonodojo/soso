@@ -44,14 +44,17 @@ pub fn run(_args: &[String]) {
     println!("\n3) Módulos G3 en source.list");
     for m in [
         "gsp_fw.c",
+        "gsp_dma.c",
         "gsp_rm.c",
         "gsp_wpr.c",
+        "gsp_libos.c",
         "gsp_mmio.c",
         "gsp_bringup.c",
         "acr_fw.c",
         "falcon_lx.c",
         "acr_lx.c",
         "fmc_lx.c",
+        "fsp_lx.c",
     ] {
         let p = root.join("lxdde/ports/nouveau").join(m);
         if p.exists() {
@@ -109,6 +112,14 @@ pub fn run(_args: &[String]) {
         "G3b WPR meta verificado (log)",
         log_contains(&log, "WPR meta verificado"),
     );
+    print_criterion(
+        "G3b libos boot args + COT listo (log)",
+        log_contains(&log, "libos verificado") && log_contains(&log, "COT listo"),
+    );
+    print_criterion(
+        "G3b COT aceptado por el FSP (log)",
+        log_contains(&log, "COT aceptado por el FSP"),
+    );
     print_criterion("G3b hw boot (log: GSP booted sin soft)", gsp_log_ok && log_contains(&log, "GSP booted (hw"));
     print_criterion(
         "G3b nvkm ACR port (inventario stubs)",
@@ -116,11 +127,11 @@ pub fn run(_args: &[String]) {
     );
 
     println!("\n=== Fases GSP esperadas (serial) ===");
-    println!("   fw_ready → fw_staged → rm_radix3 → [fmc_parse → fmc_ready → wpr_meta");
-    println!("                                       | acr_load → acr_ahesasc → acr_asb]");
-    println!("             → kick → poll → booted | booted_soft");
+    println!("   fw_ready → fw_staged → rm_radix3");
+    println!("     → [fmc_parse → fmc_ready → wpr_meta → libos_args → cot_ready → cot_sent → booted");
+    println!("        | acr_load → acr_ahesasc → acr_asb → kick → poll → booted | booted_soft]");
     println!("   Inventario nvkm ola2: ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list");
-    println!("   Pasos 3 y 4 sin GPU:  ./scripts/l6-g3-gsp-hostcheck.sh");
+    println!("   Pasos 3-6 sin GPU:    ./scripts/l6-g3-gsp-hostcheck.sh");
 
     println!("\n=== Resumen: {ok} OK, {warn} WARN, {fail} FAIL ===");
     if fail > 0 {

@@ -5,6 +5,8 @@
 #include "fmc_lx.h"
 #include "gsp_fw.h"
 #include "gsp_mmio.h"
+#include "fsp_lx.h"
+#include "gsp_libos.h"
 #include "gsp_rm.h"
 #include "gsp_wpr.h"
 #include "lx_emul.h"
@@ -63,6 +65,9 @@ enum gsp_phase {
     GSP_RM_RADIX3,
     GSP_FMC_PARSE,
     GSP_WPR_META,
+    GSP_LIBOS_ARGS,
+    GSP_COT_READY,
+    GSP_COT_SENT,
     GSP_FMC_READY,
     GSP_ACR_LOAD,
     GSP_ACR_AHESASC,
@@ -76,6 +81,8 @@ enum gsp_phase {
 static enum gsp_phase g_phase = GSP_NONE;
 static struct gsp_rm_fw g_rm;   /* imagen GSP-RM + radix3, viva hasta el boot */
 static struct gsp_wpr g_wpr;    /* bootloader + GspFwWprMeta (solo ruta FMC) */
+static struct gsp_libos g_libos;    /* colas, logs, RMARGS y boot params */
+static struct fmc_staged g_fmc;     /* imagen FMC + cadena de firma en sysmem */
 static uint16_t g_device_id;
 static uint32_t g_boot0;
 static uint64_t g_vram_bytes;
@@ -109,7 +116,7 @@ static uint64_t vram_for_device(uint16_t dev_id)
  * SEC2. Validamos el ELF firmado, leemos el estado del FSP y construimos el WPR
  * meta (`gsp_wpr.c`) sobre la radix3 de `gsp_rm.c`. Para enviar el COT falta el
  * último escalón: los libos boot args. Ver fmc_lx.c. */
-static void run_fmc_blackwell(void)
+static int run_fmc_blackwell(void)
 {
     const struct gsp_fw_blob *fmc = gsp_fw_get(GSP_FW_FMC);
     struct fmc_image img;
@@ -117,10 +124,10 @@ static void run_fmc_blackwell(void)
     g_phase = GSP_FMC_PARSE;
     if (!fmc || !fmc->data) {
         lx_printk("nouveau-lx: FMC sin blob cargado — sigue kick/poll\n");
-        return;
+        return -1;
     }
     if (fmc_lx_parse(fmc->data, fmc->len, &img) != 0) {
-        return;
+        return -1;
     }
     (void)fmc_lx_verify_sizes(&img);
     fmc_lx_fsp_probe();
@@ -130,15 +137,41 @@ static void run_fmc_blackwell(void)
      * radix3 ya construida; sin ella no hay nada que describir. */
     if (!g_rm.ready) {
         lx_printk("nouveau-lx: WPR meta sin imagen GSP-RM — no se construye\n");
-        return;
+        return -1;
     }
     g_phase = GSP_WPR_META;
     if (gsp_wpr_prepare(&g_rm, &g_wpr) != 0) {
         lx_printk("nouveau-lx: WPR meta no preparado — sigue soft\n");
         g_phase = GSP_FMC_READY;
-        return;
+        return -1;
     }
-    lx_printk("nouveau-lx: falta el paso 5 (libos boot args) antes del COT\n");
+
+    /* Paso 5: colas compartidas, búferes de log, RMARGS y el GSP_FMC_BOOT_PARAMS
+     * que enlaza el WPR meta con los boot args de libos. */
+    g_phase = GSP_LIBOS_ARGS;
+    if (gsp_libos_prepare(&g_wpr, &g_libos) != 0) {
+        lx_printk("nouveau-lx: libos boot args no preparados — sigue soft\n");
+        g_phase = GSP_WPR_META;
+        return -1;
+    }
+
+    /* La imagen del FMC y su cadena de firma, donde el FSP puede leerlas. */
+    if (fmc_lx_stage(&img, &g_fmc) != 0) {
+        lx_printk("nouveau-lx: FMC sin stagear — sigue soft\n");
+        return -1;
+    }
+
+    /* Todo lo que el COT referencia está construido y verificado en memoria. */
+    g_phase = GSP_COT_READY;
+    lx_printk("nouveau-lx: COT listo — enviando al FSP\n");
+
+    /* Paso 6: la primera escritura MMIO del port. `fsp_lx_boot_gsp_fmc` no manda
+     * nada si el FSP no está como debe, y todas sus esperas están acotadas. */
+    g_phase = GSP_COT_SENT;
+    if (fsp_lx_boot_gsp_fmc(&g_fmc, &g_libos, &g_wpr) != 0) {
+        return -1;
+    }
+    return 0;
 }
 
 /* ACR ola 2 (Ampere): carga los ucode de SEC2 y arranca AHESASC + ASB. Cada
@@ -247,7 +280,13 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
      * falcon ni ejecutaba — `mbox0=0xbadf4100` — porque GB20x arranca por GSP-FMC/FSP.
      * Cada familia va por lo suyo. */
     if (nv_family_of(boot0, g_device_id) == NV_FAM_BLACKWELL) {
-        run_fmc_blackwell();
+        if (run_fmc_blackwell() == 0) {
+            /* El GSP lo arrancó el FMC: el kick/poll de tu102 no pinta nada. */
+            g_phase = GSP_BOOTED;
+            lx_printk("nouveau-lx: GSP booted (hw, GSP-FMC vía FSP, %u MiB VRAM)\n",
+                      (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+            return 0;
+        }
     } else {
         run_acr_sec2();
     }
@@ -284,6 +323,12 @@ const char *lx_nouveau_gsp_status(void)
         return "rm_radix3";
     case GSP_WPR_META:
         return "wpr_meta";
+    case GSP_LIBOS_ARGS:
+        return "libos_args";
+    case GSP_COT_READY:
+        return "cot_ready";
+    case GSP_COT_SENT:
+        return "cot_sent";
     case GSP_FMC_PARSE:
         return "fmc_parse";
     case GSP_FMC_READY:

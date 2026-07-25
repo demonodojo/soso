@@ -15,8 +15,9 @@ out="$root/target/gsp-hostcheck"
 fwdir="${1:-$root/rootfs/lib/firmware/nvidia/gb205/gsp}"
 ucode="$fwdir/gsp-570.144.bin"
 boot="$fwdir/bootloader-570.144.bin"
+fmc="$fwdir/fmc-570.144.bin"
 
-for f in "$ucode" "$boot"; do
+for f in "$ucode" "$boot" "$fmc"; do
     if [[ ! -f "$f" ]]; then
         echo "falta $f — ./scripts/l6-pack-firmware.sh" >&2
         exit 1
@@ -32,13 +33,15 @@ strip_module() {
         grep -v '^void \*memcpy' | grep -v '^void \*memset'
 }
 
-{ strip_module "$src/gsp_rm.h" GSP_RM_H; strip_module "$src/gsp_rm.c" GSP_RM_H; } \
-    > "$out/gsp_rm_body.inc"
-{ strip_module "$src/gsp_wpr.h" GSP_WPR_H; strip_module "$src/gsp_wpr.c" GSP_WPR_H; } \
-    > "$out/gsp_wpr_body.inc"
+# Orden = orden de dependencias entre módulos.
+for m in gsp_dma gsp_rm gsp_wpr gsp_libos fmc_lx fsp_lx; do
+    guard="$(echo "$m" | tr '[:lower:]' '[:upper:]')_H"
+    { strip_module "$src/$m.h" "$guard"; strip_module "$src/$m.c" "$guard"; } \
+        > "$out/${m}_body.inc"
+done
 
 cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
    -I"$out" -o "$out/hostcheck" "$root/tools/gsp-hostcheck/main.c"
 
-echo "=== L6 G3b — pasos 3 y 4 sobre el firmware real ==="
-"$out/hostcheck" "$ucode" "$boot"
+echo "=== L6 G3b — pasos 3 a 6 sobre el firmware real ==="
+"$out/hostcheck" "$ucode" "$boot" "$fmc"

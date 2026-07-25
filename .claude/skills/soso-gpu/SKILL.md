@@ -30,7 +30,7 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G2 | firmware gb205 en rootfs | `lxdde-fw: cargado …/gsp/…` | **Go** (blobs .zst→.bin) |
 | G2 | firmware gb205 + set ga102 (3060) | `lxdde-fw: cargado …/gsp/…` | **Go** |
 | G3a | firmware ELF + GEM staging + fases | `N blobs GSP validados` | **Go** (soft boot) |
-| G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | En HW real llega hasta ACR: fw + staging GEM OK, `AHESASC` falla (`mbox0=0xbadf4100`) → `booted (soft)` |
+| G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | Cadena FSP/COT completa escrita (pasos 1–6); 3–5 verificados en HW, **paso 6 sin probar en HW** |
 | G4 | saxpy SASS en VRAM | `SYS_GPU_SUBMIT` correcto en GPU | Infra `engine/{gr,fifo,dma}` base; bloqueado por G3b en HW |
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
 
@@ -85,11 +85,9 @@ Datos que ya están verificados contra el blob de esta máquina:
   ocioso, y la offset gb202 es la buena (con la de gh100 no saldría justo `0xff`).
   El receptor del COT está listo y verificado; falta construir el payload.
 
-Lo que **falta** para arrancar de verdad: el mensaje COT lleva
-`gspFmcSysmemOffset` + `gspBootArgsSysmemOffset`, y esos boot args
-(`GSP_FMC_BOOT_PARAMS`) apuntan al WPR meta (**ya construido**, ver abajo) y a los
-libos boot args, que siguen sin existir. Hasta tenerlos, nada del port escribe
-MMIO. Enviar un COT con punteros sin construir es lo único que hay que no hacer.
+**La cadena entera (pasos 1–6) está escrita.** Falta validar el paso 6 en hardware:
+es el primero que escribe registros de la GPU y hasta ahora solo se ha probado
+contra el FSP simulado del hostcheck.
 
 **radix3 (`gsp_rm.c`), hecho.** Primero de los tres bloques que faltaban. El ucode
 `gsp-570.144.bin` es un ELF64 REL de RISC-V: `.fwimage` = 0x3c99000 B (~60,5 MiB, ya
@@ -116,12 +114,44 @@ fichero exacto, `version=5`, manifest 0..0xa00, datos 0xa00..0xb200, código
 hasta Blackwell) — sustituye a la heurística por SKU, que queda de respaldo; con
 12288 MiB el heap sale 22+14+2+96 = **134 MiB**. Fase `wpr_meta`.
 
-**Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh`.** Compila `gsp_rm.c` y
-`gsp_wpr.c` en el host con la capa lx y el MMIO simulados
+**libos boot args (`gsp_libos.c`), hecho.** Paso 5. Referencias
+`r535_gsp_libos_init`, `r535_gsp_shared_init`, `r570_gsp_set_rmargs`. **Trampa de
+versión: r535 y r570 NO comparten el layout** de `GSP_ARGUMENTS_CACHED` ni de
+`MESSAGE_QUEUE_INIT_ARGUMENTS` — r570 quita `locklessCmd/StatQueueOffset` y añade
+`bDmemStack`; con 570.144 va el de r570. Cuatro piezas: memoria compartida (un
+bloque contiguo, tabla de PTEs + 2 colas de 256 KiB → **129 PTEs**, 63 mensajes de
+4 KiB por cola), tres logs de 64 KiB con su lista de PTEs dentro del propio búfer
+tras el *put pointer*, `RMARGS`, y la página de 4 regiones
+`LibosMemoryRegionInitArgument` con el nombre en `u64` big-endian (`"LOGINIT"` =
+`0x4c4f47494e4954`). Encima, `GSP_FMC_BOOT_PARAMS` enlaza WPR meta (*coherent*) y
+libos (*noncoherent*); `wprCarveout` a cero, lo talla el FMC. Siete asserts de
+compilación fijan los layouts. `fmc_lx_stage()` copia la imagen FMC y su cadena de
+firma a memoria coherente (el FSP las lee él). Fases `libos_args` → `cot_ready`.
+
+**COT (`fsp_lx.c`), escrito — paso 6, el primero que escribe MMIO.** Referencias
+`gh100_fsp_boot_gsp_fmc`, `gh100_fsp_{send,recv,poll,wait}`, `gp102_flcn_emem_pio`,
+`gh100_gsp_lockdown_released`. Mensaje MCTP/NVDM de **868 B**: `0xc0000000`
+(SOM|EOM) + `0x1410de7e` (vendor-PCI 0x7e / 0x10de / NVDM 0x14=COT) + payload packed
+de 860 B. Los campos de firma miden 384 B aunque gb20x llene 48/97/96.
+`frtsVidmemOffset` es offset **desde el final de la VRAM** = `ALIGN(nonWprHeap +
+pmuReserved, 2 MiB)` = 0x1C00000. Transporte: EMEM del falcon FSP (`0x8f2000`,
+puerto/dato `0xac0`/`0xac4`, autoinc bit 24 escritura / 25 lectura); `QUEUE_TAIL` =
+tamaño−4 y `QUEUE_HEAD` = 0 es el timbre. Luego se sondea `MAILBOX0` del falcon GSP
+(`0x110000`+0x40) hasta que deje de valer `0xbadf41xx` y caiga `HWCFG2` bit 13
+(`RISCV_BR_PRIV_LOCKDOWN`). **Guardas antes de escribir**: secure boot `0xff`, colas
+ociosas, payload completo, firma 48/97/96. Todas las esperas acotadas (1 s / 1 s /
+4 s); cualquier fallo → −1 y sigue a `booted (soft)`. Log de éxito:
+`GSP booted (hw, GSP-FMC vía FSP)`.
+
+**Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh`.** Compila los módulos
+de los pasos 3–6 en el host con la capa lx y **un FSP simulado detrás del MMIO**
 (`tools/gsp-hostcheck/main.c`) contra los blobs reales: hojas de la radix3 una a
-una, tamaño de la estructura, heap, offsets del bootloader, campos del FMC a cero.
-Un segundo, frente a sudo + VFIO + ~90 s del ciclo en hardware. **Úsalo antes de
-gastar un ciclo de GPU.**
+una, tamaño del WPR meta, heap, offsets del bootloader, PTEs de la memoria
+compartida, `id8` de las regiones, enlace de los boot params, imagen FMC copiada
+idéntica, campos del FMC a cero, **el paquete COT byte a byte** y que un rechazo del
+FSP se detecta. Un segundo, frente a sudo + VFIO + ~90 s del ciclo en hardware.
+**Úsalo antes de gastar un ciclo de GPU** — desde el paso 6 es además la única forma
+de cazar un paquete mal formado sin arriesgar un cuelgue.
 
 Detalle y tabla de pasos 1–6 de la cadena FSP/COT en `docs/L6-G3-nvkm-scope.md`.
 
@@ -188,6 +218,9 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `gsp_fw.c` | Carga blobs GSP + staging GEM | valida ELF/magic; el ucode NO va a GEM |
 | `gsp_rm.c` | ELF64 del ucode → `.fwimage`/firma + **radix3** verificada | fase `rm_radix3`, sin MMIO |
 | `gsp_wpr.c` | Bootloader RISC-V en sysmem + **`GspFwWprMeta`** | fase `wpr_meta`, solo lee VRAM |
+| `gsp_libos.c` | Colas, logs, RMARGS, **`GSP_FMC_BOOT_PARAMS`** | fases `libos_args`/`cot_ready`, sin MMIO |
+| `gsp_dma.c` | `gsp_dma_buf` (equivalente de `nvkm_gsp_mem`) | reservas coherentes compartidas |
+| `fsp_lx.c` | **Envío del COT** por EMEM + espera al FMC | fase `cot_sent`; **único módulo que ESCRIBE MMIO** |
 | `fmc_lx.c` | Ruta FSP/GSP-FMC de Blackwell | valida el ELF FMC y **lee** el FSP |
 | `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick | `kick_boot` NO arranca HW real (solo traza) |
 | `acr_fw.c`,`falcon_lx.c`,`acr_lx.c` | ACR ola2 lx-native (AHESASC→ASB) | best-effort/soft-fail |

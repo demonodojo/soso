@@ -220,6 +220,9 @@ int gsp_wpr_prepare(const struct gsp_rm_fw *rm, struct gsp_wpr *out)
         return -1;
     }
     out->heap_size = wpr_heap_size(out->fb_bytes);
+    /* `gh100_gsp_init`: rsvd = heap fuera de WPR + reserva del PMU, a 2 MiB. */
+    out->rsvd_size = (uint32_t)align_up_u64((uint64_t)WPR_HEAP_NON_WPR +
+                                            (uint64_t)WPR_RSVD_SIZE_PMU, 0x200000ull);
 
     if (boot_fw_prepare(&out->boot) != 0) {
         gsp_wpr_release(out);
