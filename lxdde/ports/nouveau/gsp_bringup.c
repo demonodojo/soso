@@ -9,6 +9,7 @@
 #include "gsp_cmdq.h"
 #include "gsp_libos.h"
 #include "gsp_rm.h"
+#include "gsp_rm_obj.h"
 #include "gsp_rpc.h"
 #include "gsp_wpr.h"
 #include "lx_emul.h"
@@ -78,6 +79,7 @@ enum gsp_phase {
     GSP_POLL,
     GSP_BOOTED,
     GSP_RM_READY,
+    GSP_RM_OBJECTS,
     GSP_BOOTED_SOFT,
     GSP_GONE,
 };
@@ -89,6 +91,7 @@ static struct gsp_libos g_libos;    /* colas, logs, RMARGS y boot params */
 static struct fmc_staged g_fmc;     /* imagen FMC + cadena de firma en sysmem */
 static struct gsp_rpc g_rpc;        /* anillo de mensajes de GSP-RM */
 static struct gsp_cmdq g_cmdq;      /* cola de comandos hacia GSP-RM */
+static struct gsp_rm g_rm_obj;      /* cliente/device/subdevice de RM */
 static struct lx_pci_dev *g_pdev;   /* para leer BARs y BDF del espacio de config */
 static uint16_t g_device_id;
 static uint32_t g_boot0;
@@ -397,6 +400,13 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
                 gsp_rpc_wait_event(&g_rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 4000) == 0) {
                 g_phase = GSP_RM_READY;
                 lx_printk("nouveau-lx: GSP-RM listo (RPC en marcha)\n");
+
+                /* G4c: con el RPC vivo en las dos direcciones, pedir los objetos
+                 * base de RM. También best-effort: si RM los rechaza, el GSP
+                 * sigue arrancado y el diagnóstico queda en el log. */
+                if (gsp_rm_init(&g_cmdq, &g_rpc, &g_rm_obj) == 0) {
+                    g_phase = GSP_RM_OBJECTS;
+                }
             } else {
                 lx_printk("nouveau-lx: GSP arrancado pero GSP-RM no responde por RPC\n");
             }
@@ -430,7 +440,7 @@ int lx_nouveau_gsp_ready(void)
      * RPC), pero al añadir la fase se quedó fuera de esta lista y el estado más
      * avanzado se reportaba como "no listo". */
     return g_phase == GSP_BOOTED || g_phase == GSP_RM_READY ||
-           g_phase == GSP_BOOTED_SOFT ? 1 : 0;
+           g_phase == GSP_RM_OBJECTS || g_phase == GSP_BOOTED_SOFT ? 1 : 0;
 }
 
 const char *lx_nouveau_gsp_status(void)
@@ -474,6 +484,8 @@ const char *lx_nouveau_gsp_status(void)
         return "booted";
     case GSP_RM_READY:
         return "rm_ready";
+    case GSP_RM_OBJECTS:
+        return "rm_objects";
     case GSP_BOOTED_SOFT:
         return "booted_soft";
     case GSP_GONE:

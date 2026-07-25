@@ -167,4 +167,96 @@ typedef struct PACKED_REGISTRY_TABLE
 
 #define REGISTRY_TABLE_ENTRY_TYPE_DWORD 1u
 
+/* ---- Objetos de RM (G4c) ---------------------------------------------------
+ *
+ * GSP-RM expone un modelo de objetos: se pide un cliente, y colgando de él un
+ * device y un subdevice. Todo va envuelto en estas dos cabeceras, que viajan
+ * dentro del payload de un RPC (`rm/r535/nvrm/{alloc,ctrl}.h`).
+ *
+ * **No existen en r570/nvrm/**: son compartidas con r535, sin divergencia de
+ * versión — al contrario que `NV0000_ALLOC_PARAMETERS`, que en r570 añade
+ * `pOsPidInfo` al final y en r535 no lo lleva.
+ *
+ * Cuidado con los DOS niveles de estado: el `rpc_result` de la cabecera RPC dice
+ * si el transporte fue bien, y el `status` de aquí dentro es lo que responde RM.
+ * Un RPC puede llegar impecable y traer un NV_STATUS de error dentro. */
+typedef struct rpc_gsp_rm_alloc
+{
+    NvU32                   hClient;
+    NvU32                   hParent;
+    NvU32                   hObject;
+    NvU32                   hClass;
+    NvU32                   status;
+    NvU32                   paramsSize;
+    NvU32                   flags;
+    NvU8                    reserved[4];
+    /* params[] detrás */
+} rpc_gsp_rm_alloc;
+
+typedef struct rpc_gsp_rm_control
+{
+    NvU32                   hClient;
+    NvU32                   hObject;
+    NvU32                   cmd;
+    NvU32                   status;
+    NvU32                   paramsSize;
+    NvU32                   flags;
+    /* params[] detrás */
+} rpc_gsp_rm_control;
+
+/* Números de función de `rm/r570/nvrm/rpcfn.h`. */
+#define NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL  76u
+#define NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC   103u
+#define NV_VGPU_MSG_FUNCTION_FREE            27u
+
+/* Handles, de `rm/handles.h`. RM no los inventa: los elegimos nosotros. */
+#define NVKM_RM_CLIENT(id)  (0xc1d00000u | (id))
+#define NVKM_RM_DEVICE       0xde1d0000u
+#define NVKM_RM_SUBDEVICE    0x5d1d0000u
+#define NVKM_RM_VASPACE      0x90f10000u
+#define NVKM_RM_CHAN(chid)  (0xf1f00000u | (chid))
+
+/* Clases y sus parámetros de reserva. */
+#define NV01_ROOT          0x0u
+#define NV01_DEVICE_0      0x80u
+#define NV20_SUBDEVICE_0   0x2080u
+
+#define NV_PROC_NAME_MAX_LENGTH 100u
+
+/* r570 (`rm/r570/nvrm/client.h`) — el `pOsPidInfo` final es lo que la separa de
+ * la versión r535. La alineación natural ya mete los 4 B de relleno tras
+ * `processName`, así que sale a 120 B sin atributos. */
+typedef struct NV0000_ALLOC_PARAMETERS
+{
+    NvU32                   hClient;
+    NvU32                   processID;
+    char                    processName[NV_PROC_NAME_MAX_LENGTH];
+    NvU64                   pOsPidInfo;
+} NV0000_ALLOC_PARAMETERS;
+
+typedef struct NV0080_ALLOC_PARAMETERS
+{
+    NvU32                   deviceId;
+    NvU32                   hClientShare;
+    NvU32                   hTargetClient;
+    NvU32                   hTargetDevice;
+    NvU32                   flags;
+    NvU64                   vaSpaceSize;
+    NvU64                   vaStartInternal;
+    NvU64                   vaLimitInternal;
+    NvU32                   vaMode;
+} NV0080_ALLOC_PARAMETERS;
+
+typedef struct NV2080_ALLOC_PARAMETERS
+{
+    NvU32                   subDeviceId;
+} NV2080_ALLOC_PARAMETERS;
+
+/* Si un tamaño baila, RM lee los campos desplazados y responde cualquier cosa. */
+typedef char rm_alloc_hdr_size_check[sizeof(rpc_gsp_rm_alloc) == 32 ? 1 : -1];
+typedef char rm_ctrl_hdr_size_check[sizeof(rpc_gsp_rm_control) == 24 ? 1 : -1];
+typedef char nv0000_size_check[sizeof(NV0000_ALLOC_PARAMETERS) == 120 ? 1 : -1];
+typedef char nv0080_size_check[sizeof(NV0080_ALLOC_PARAMETERS) == 56 ? 1 : -1];
+typedef char nv2080_size_check[sizeof(NV2080_ALLOC_PARAMETERS) == 4 ? 1 : -1];
+
 #endif

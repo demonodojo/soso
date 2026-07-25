@@ -169,6 +169,7 @@ static const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind k)
 #include "fsp_lx_body.inc"
 #include "gsp_rpc_body.inc"
 #include "gsp_cmdq_body.inc"
+#include "gsp_rm_obj_body.inc"
 
 static int load_blob(enum gsp_fw_kind kind, const char *path)
 {
@@ -506,6 +507,140 @@ static int check_rpc_sync(const struct gsp_libos *lo)
     return 0;
 }
 
+/* G4c: la cadena cliente → device → subdevice.
+ *
+ * El banco es de un solo hilo, así que no puede "reaccionar" a cada push: se
+ * pre-encolan las tres respuestas y las tres llamadas las consumen en orden. Lo
+ * que de verdad se valida son las **peticiones** que quedan en la cmdq, que es
+ * lo que verá RM: clase, padre y tamaño de parámetros de cada una. */
+static int check_rm_objects(const struct gsp_libos *lo)
+{
+    struct gsp_rpc rpc;
+    struct gsp_cmdq q;
+    struct gsp_rm rm;
+    struct gsp_msgq_headers *msgq =
+        (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->msgq_offset);
+    unsigned char *cmdq_base = (unsigned char *)lo->shm.va + lo->cmdq_offset;
+    rpc_gsp_rm_alloc ok;
+    uint32_t base;
+    uint32_t wptr0;
+    unsigned i;
+    /* Lo que debe pedir, en orden: clase, padre y tamaño de params. */
+    const struct { uint32_t cls; uint32_t parent; uint32_t psize; const char *name; } want[3] = {
+        { NV01_ROOT,        NVKM_RM_CLIENT(0), (uint32_t)sizeof(NV0000_ALLOC_PARAMETERS), "cliente" },
+        { NV01_DEVICE_0,    NVKM_RM_CLIENT(0), (uint32_t)sizeof(NV0080_ALLOC_PARAMETERS), "device" },
+        { NV20_SUBDEVICE_0, NVKM_RM_DEVICE,    (uint32_t)sizeof(NV2080_ALLOC_PARAMETERS), "subdevice" },
+    };
+
+    printf("sizeof rpc_gsp_rm_alloc=%zu rm_control=%zu NV0000=%zu NV0080=%zu NV2080=%zu\n",
+           sizeof(rpc_gsp_rm_alloc), sizeof(rpc_gsp_rm_control),
+           sizeof(NV0000_ALLOC_PARAMETERS), sizeof(NV0080_ALLOC_PARAMETERS),
+           sizeof(NV2080_ALLOC_PARAMETERS));
+
+    if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (rm)\n"); return -1; }
+    if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (rm)\n"); return -1; }
+
+    /* Tres respuestas OK seguidas, a partir de donde esté el puntero. */
+    memset(&ok, 0, sizeof(ok));
+    ok.status = 0;
+    base = *rpc.rptr;
+    for (i = 0; i < 3; i++) {
+        fake_rpc_post_payload(lo, (base + i) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                              0, (const unsigned char *)&ok, (uint32_t)sizeof(ok));
+    }
+    msgq->tx.writePtr = (base + 3) % 63;
+
+    wptr0 = *q.wptr;
+    if (gsp_rm_init(&q, &rpc, &rm) != 0) {
+        printf("FALLO: gsp_rm_init\n");
+        return -1;
+    }
+    if (!rm.ready || rm.client != NVKM_RM_CLIENT(0) || rm.device != NVKM_RM_DEVICE ||
+        rm.subdevice != NVKM_RM_SUBDEVICE) {
+        printf("FALLO: handles cli=0x%08x dev=0x%08x sub=0x%08x\n",
+               rm.client, rm.device, rm.subdevice);
+        return -1;
+    }
+
+    /* Releer las tres peticiones encoladas y comprobarlas una a una. */
+    for (i = 0; i < 3; i++) {
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + i) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
+
+        if (hdr->function != NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC) {
+            printf("FALLO: %s con function=%u\n", want[i].name, hdr->function);
+            return -1;
+        }
+        if (a->hClass != want[i].cls) {
+            printf("FALLO: %s hClass=0x%x (esperaba 0x%x)\n",
+                   want[i].name, a->hClass, want[i].cls);
+            return -1;
+        }
+        if (a->hParent != want[i].parent) {
+            printf("FALLO: %s hParent=0x%08x (esperaba 0x%08x)\n",
+                   want[i].name, a->hParent, want[i].parent);
+            return -1;
+        }
+        if (a->paramsSize != want[i].psize) {
+            printf("FALLO: %s paramsSize=%u (esperaba %u)\n",
+                   want[i].name, a->paramsSize, want[i].psize);
+            return -1;
+        }
+        if (a->hClient != NVKM_RM_CLIENT(0)) {
+            printf("FALLO: %s hClient=0x%08x\n", want[i].name, a->hClient);
+            return -1;
+        }
+        if (hdr->length != sizeof(*hdr) + sizeof(*a) + want[i].psize) {
+            printf("FALLO: %s length=%u\n", want[i].name, hdr->length);
+            return -1;
+        }
+    }
+    /* El cliente lleva su propio handle dentro de los parámetros y processID=~0. */
+    {
+        const unsigned char *entry = cmdq_base + 4096 + (unsigned long)(wptr0 % 63) * 4096;
+        const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)
+            (entry + sizeof(struct gsp_msg_elem) + sizeof(struct gsp_rpc_hdr));
+        const NV0000_ALLOC_PARAMETERS *p = (const NV0000_ALLOC_PARAMETERS *)(a + 1);
+
+        if (p->hClient != NVKM_RM_CLIENT(0) || p->processID != 0xffffffffu) {
+            printf("FALLO: params del cliente hClient=0x%08x pid=0x%x\n",
+                   p->hClient, p->processID);
+            return -1;
+        }
+    }
+    printf("OK: cadena RM cliente→device→subdevice (clases 0x0/0x80/0x2080, "
+           "params %u/%u/%u B)\n", want[0].psize, want[1].psize, want[2].psize);
+
+    /* Y un NV_STATUS dentro del wrapper tiene que salir como fallo — es el que
+     * llega con el RPC impecable y un error de RM dentro. */
+    memset(&ok, 0, sizeof(ok));
+    ok.status = 0x2bu;   /* INVALID_CLASS */
+    base = *rpc.rptr;
+    fake_rpc_post_payload(lo, base % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC, 0,
+                          (const unsigned char *)&ok, (uint32_t)sizeof(ok));
+    msgq->tx.writePtr = (base + 1) % 63;
+    {
+        uint32_t st = 0;
+        NV2080_ALLOC_PARAMETERS sub;
+
+        memset(&sub, 0, sizeof(sub));
+        if (gsp_rm_alloc(&rm, rm.device, 0x5d1d0001u, NV20_SUBDEVICE_0, &sub,
+                         (uint32_t)sizeof(sub), &st) == 0) {
+            printf("FALLO: un NV_STATUS de RM se dio por bueno\n");
+            return -1;
+        }
+        if (st != 0x2bu) {
+            printf("FALLO: NV_STATUS del wrapper no propagado (0x%x)\n", st);
+            return -1;
+        }
+    }
+    printf("OK: el NV_STATUS de dentro del wrapper se detecta (0x2b = INVALID_CLASS)\n");
+    return 0;
+}
+
 /* Envío por la cmdq: las dos RPCs que GSP-RM consume durante su init. */
 static int check_cmdq(const struct gsp_libos *lo)
 {
@@ -676,6 +811,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_cmdq(&lo) != 0)
         return -1;
     if (check_rpc_sync(&lo) != 0)
+        return -1;
+    if (check_rm_objects(&lo) != 0)
         return -1;
 
     fmc_lx_stage_release(&staged);
