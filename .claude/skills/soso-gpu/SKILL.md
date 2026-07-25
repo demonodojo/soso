@@ -26,32 +26,108 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 
 | Gate | Entregable | Criterio GO | Estado |
 |------|-----------|-------------|--------|
-| G1 | BAR0 bajo VFIO | log `NV_PMC_BOOT_0=0x…` | **BLOCK**: VT-d off en BIOS MSI → 0 grupos IOMMU |
+| G1 | BAR0 bajo VFIO | log `NV_PMC_BOOT_0=0x…` | **GO** (2026-07-25 01:19): `NV_PMC_BOOT_0=0x1b5000a1` desde soso, GB205 real |
 | G2 | firmware gb205 en rootfs | `lxdde-fw: cargado …/gsp/…` | **Go** (blobs .zst→.bin) |
 | G2 | firmware gb205 + set ga102 (3060) | `lxdde-fw: cargado …/gsp/…` | **Go** |
 | G3a | firmware ELF + GEM staging + fases | `N blobs GSP validados` | **Go** (soft boot) |
-| G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | **Go software** — 62 fuentes nvkm; grafo real en runtime; boot HW pendiente de G1 |
-| G4 | saxpy SASS en VRAM | `SYS_GPU_SUBMIT` correcto en GPU | Infra `engine/{gr,fifo,dma}` base; compute real tras G1 |
+| G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | En HW real llega hasta ACR: fw + staging GEM OK, `AHESASC` falla (`mbox0=0xbadf4100`) → `booted (soft)` |
+| G4 | saxpy SASS en VRAM | `SYS_GPU_SUBMIT` correcto en GPU | Infra `engine/{gr,fifo,dma}` base; bloqueado por G3b en HW |
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
 
-**Bloqueador actual = G1**, y requiere acción física del usuario (no automatizable):
-activar Intel VT-d en la BIOS MSI (Advanced → Integrated Peripherals → VT-d), luego
-`sudo ./scripts/l6-g1-enable-iommu.sh` + reboot, `cargo xtask g1-check` (grupos IOMMU
-> 0), y `sudo ./scripts/l6-g1-vfio-test.sh`. Fallback sin IOMMU (solo BAR0,
-PARTIAL): `l6-g1-vfio-noiommu.sh`.
+**G1 superado (2026-07-25).** Con VT-d activo en la BIOS y el bind persistente puesto
+(`l6-g1-vfio-persist.sh --enable` + reboot), `sudo ./scripts/l6-g1-vfio-test.sh` da GO:
+soso lee `NV_PMC_BOOT_0=0x1b5000a1` de la BAR0 real (`familia=Blackwell (gb20x)`).
+El script no imprime nada durante los ~90s de `cargo xtask run` (todo va a
+`target/g1-vfio-serial.log`): **parece colgado y no lo está**.
+
+**`fw_loading` no era falta de firmware: era orden de arranque.** El primer G1 real dio
+`lxdde-fw: no encontrado /lib/firmware/nvidia/gb205/gsp/…` → `GSP init falló
+(status=fw_loading)` **con los blobs ya dentro de la imagen** (`sosofs: 61 inodes,
+31843/32768 bloques`, 47 ficheros = todo `rootfs/`). La pista está en el orden del log:
+el bring-up GSP imprimía en la línea 492 y `fs: sosofs montado` en la 502 —
+`lx_request_firmware` resuelve por VFS (`kernel/src/lxdde/firmware.rs`) y aún no había
+nada montado. Arreglado subiendo `fs::init()` por encima del bloque `lxdde` en
+`kernel/src/main.rs` (queda tras los drivers de bloque y antes de `net::init()`;
+`nvidia_compute::init` sigue después de lxdde porque consulta `gsp_ready()`).
+Fallback sin IOMMU (solo BAR0, PARTIAL): `l6-g1-vfio-noiommu.sh`.
+
+**Firmware chip-aware (2026-07-25).** `gsp_fw.c` tiene una tabla por familia:
+Blackwell = `gb205/{bootloader,fmc,gsp}`, Ampere = `ga102/{bootloader,booter_load,
+booter_unload,gsp}`; `gsp_fw_load_all(chip)` exige todos los blobs de su juego. Antes
+cargaba los dos juegos y el ucode `gsp-570.144.bin` (60,6 MiB) se duplicaba —
+en linux-firmware el de gb205 es un **symlink** al de ga102. Cada blob vive **tres**
+veces mientras se carga (caché de `lx_request_firmware`, copia de `g_blobs`, objeto
+GEM), así que el heap del kernel está en 256 MiB (`kernel/src/mm/heap.rs`); con los dos
+juegos ni 256 ni 512 llegaban. `lx_release_firmware` ya libera de verdad (era no-op).
+La ruta Ampere está escrita pero **sin probar**: no hay 3060 en esta máquina.
+
+**Ruta por familia en el bring-up.** `gsp_bringup.c` bifurca: Ampere → `run_acr_sec2()`
+(el ACR de siempre); Blackwell → `run_fmc_blackwell()`. El ACR de `acr_fw.c` es de
+Ampere (ucode `ga102` en SEC2) y en GB205 daba `falcon boot mbox0=0xbadf4100` — el
+falcon ni ejecuta — porque GB20x arranca por GSP-FMC/FSP.
+
+**GSP-FMC (`fmc_lx.c`), estado real.** Upstream de referencia (NO está en el árbol
+6.6 pinneado; se consultó en git.kernel.org): `nvkm/subdev/fsp/{gh100,gb202}.c`,
+`nvkm/subdev/gsp/gh100.c`, `include/nvhw/ref/{gh100,gb202}/dev_{fsp_pri,therm}.h`.
+Datos que ya están verificados contra el blob de esta máquina:
+- El ELF `fmc-570.144.bin` cumple la cabecera fija de upstream, 6 secciones, y sus
+  CRC (`sh_info`) cuadran. Secciones: `hash`=48 B, `signature`=96, `publickey`=97,
+  `image`=199240. Esos 48/97/96 son los tamaños COT de **`gb202_fsp`** (gh100 usa
+  384/384) → GB205 va por la variante gb202, `cot.version = 2`.
+- Registros (dentro de los 16 MiB de BAR0 mapeados): `NV_THERM_I2CS_SCRATCH` en
+  **0x00ad00bc** para gb202 (¡no el 0x000200bc de gh100!), éxito = `0xff`;
+  `NV_PFSP_QUEUE_HEAD/TAIL(0)` = 0x008f2c00/0x008f2c04; `MSGQ_HEAD/TAIL(0)` =
+  0x008f2c80/0x008f2c84.
+- **Leído en HW desde soso (2026-07-25)**: `FSP secure boot=0x000000ff (completo)` y
+  las cuatro colas a 0 → el FSP terminó su arranque seguro, el canal EMEM está vivo y
+  ocioso, y la offset gb202 es la buena (con la de gh100 no saldría justo `0xff`).
+  El receptor del COT está listo y verificado; falta construir el payload.
+
+Lo que **falta** para arrancar de verdad: el mensaje COT lleva
+`gspFmcSysmemOffset` + `gspBootArgsSysmemOffset`, y esos boot args
+(`GSP_FMC_BOOT_PARAMS`) apuntan a WPR meta + radix3 del ELF de GSP-RM + libos, que
+construye `r535_gsp_oneinit` — la pila RM entera. Hasta tenerla, `fmc_lx.c` solo
+valida el ELF y **lee** el estado del FSP; no escribe MMIO. Enviar un COT con
+punteros sin construir es lo único que hay que no hacer.
 
 **Máquina del usuario (MSI Vector 16 HX AI, confirmado 2026-07-24):**
 - **Híbrida**: iGPU Intel Arrow Lake (`00:02.0`, `i915`) pinta el panel; la dGPU
-  NVIDIA GB205 (`01:00.0`) es de render. **Pasar la dGPU a VFIO NO apaga la pantalla**
-  (mi aviso genérico de "pierdes pantalla" NO aplica aquí). Basta con que ninguna app
-  use la NVIDIA al hacer unbind; si falla, TTY.
+  NVIDIA GB205 (`01:00.0`, RTX 5070) es de render. **Pasar la dGPU a VFIO NO apaga la
+  pantalla** (mi aviso genérico de "pierdes pantalla" NO aplica aquí). Pero eso **no**
+  significa que la dGPU esté libre: Xorg la tiene abierta por render offload — ver el
+  crash de unbind más abajo.
 - La dGPU comparte grupo IOMMU con su **audio HDMI `01:00.1`**; VFIO exige ambas en
   `vfio-pci` ("group not viable" si no). `l6-g1-vfio-test.sh` bindea todas las
   funciones del slot `01:00.*` automáticamente.
 - **No hay 3060** en esta máquina (solo GB205). El firmware `ga102/gsp/*` (3060) sí
   está en su linux-firmware. **Riesgo GB205**: nouveau 6.6 puede no bootear GSP
   Blackwell aunque G1 lea `NV_PMC_BOOT_0`; ruta madura = Ampere/3060.
-- Estado preflight: sin DMAR (VT-d off), 0 grupos IOMMU, GRUB `"quiet splash"`.
+- Estado preflight (2026-07-24, tras activar VT-d en BIOS): **DMAR presente, 30 grupos
+  IOMMU**, dGPU en **grupo 10** junto a su audio HDMI (solo esas dos funciones → grupo
+  viable). El kernel 7.0 activa `intel_iommu` **por defecto** al ver DMAR: no hace falta
+  `l6-g1-enable-iommu.sh` ni tocar GRUB (`cmdline` sigue siendo `"quiet splash"`). Los
+  checks ya no exigen `intel_iommu=on` si hay grupos > 0.
+- **NO hacer unbind por sysfs de nvidia/nouveau.** PRIME está en `on-demand` (el panel
+  va por la iGPU Intel), pero Xorg mantiene la dGPU abierta y `nvidia_drm` posee `fb0`:
+  `echo … > /sys/bus/pci/drivers/nvidia/unbind` provocó
+  `drm_WARN_ON(!list_empty(&fb->filp_head))` ×3 y un **GPF en
+  `drm_framebuffer_cleanup+0x8f`** (puntero envenenado `dead000000000122`) que colgó la
+  máquina — hubo reset (2026-07-24 20:22, kernel 7.0.0-28, nvidia 595.84).
+  Vía segura, desde un TTY (Ctrl+Alt+F3):
+  `sudo ./scripts/l6-g1-nvidia-release.sh --stop-dm` → descarga
+  `nvidia_uvm/nvidia_drm/nvidia_modeset/nvidia` (si algo usa la GPU, `modprobe -r` da
+  EBUSY y no rompe nada) → luego `l6-g1-vfio-test.sh`, que ahora **rechaza** el unbind
+  de drivers DRM. Vuelta atrás: `sudo ./scripts/l6-g1-vfio-restore.sh` (recarga la pila
+  nvidia y recuerda arrancar `display-manager`).
+- **Para iterar en G1 sin cerrar el escritorio cada vez**: bind persistente en el
+  arranque con `sudo ./scripts/l6-g1-vfio-persist.sh --enable` + reboot. Escribe
+  `/etc/modprobe.d/soso-l6-vfio.conf` (`options vfio-pci ids=10de:2f18,10de:2f80` +
+  blacklist de la pila nvidia), `/etc/modules-load.d/soso-l6-vfio.conf` y
+  `modprobe.blacklist=…` en GRUB (el blacklist de modprobe.d **no** frena una carga por
+  nombre desde initramfs/gpu-manager; el parámetro de kernel sí). Antes de tocar nada
+  verifica que hay otra GPU con driver (`00:02.0 i915`) y que PRIME no está en `nvidia`.
+  Deshacer: `--disable` + reboot (restaura GRUB exacto, con backup `.bak.<fecha>`).
+  Mientras esté activo **no hay CUDA ni nvidia-smi en el host**. `--status` no toca nada.
 
 ## Capa lxdde
 
