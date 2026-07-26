@@ -89,12 +89,16 @@ if [[ -n "${SUDO_USER:-}" ]]; then
 fi
 
 log="${ROOT}/target/g1-vfio-serial.log"
+fifo="${ROOT}/target/.g1-vfio-serial.fifo"
 mkdir -p "${ROOT}/target"
-rm -f "$log"
+rm -f "$log" "$fifo"
 
 # El timeout cubre compilación + arranque. Si el port nouveau se recompila desde cero
-# 90s no bastan: precalienta con `cargo xtask build` o sube SOSO_G1_TIMEOUT.
-TIMEOUT="${SOSO_G1_TIMEOUT:-90}"
+# no basta: precalienta con `cargo xtask build` o sube SOSO_G1_TIMEOUT.
+# 90 s se quedaron cortos el 2026-07-25: el bring-up del GSP carga 63 MB de
+# gsp-570.144.bin desde sosomfs antes de llegar al prompt, y al expirar el plazo
+# el script mataba QEMU con el GSP vivo y colgaba el host.
+TIMEOUT="${SOSO_G1_TIMEOUT:-180}"
 echo "Lanzando soso (timeout ${TIMEOUT}s, log → ${log})..."
 cd "$ROOT"
 run_user="${SUDO_USER:-$USER}"
@@ -133,13 +137,24 @@ soso_ssh() {
 # vfio-pci resetee una GPU que sigue ejecutando GSP-RM y haciendo DMA, y eso
 # colgó el host entero el 2026-07-25 (sin dejar traza de panic — fue un lockup).
 # En su lugar se espera al prompt, se pide `halt`, y soso apaga el GSP por el
-# camino (SYS_HALT → gpu::shutdown → gsp_fini). El kill solo es el último
-# recurso, y avisa de que se está haciendo lo peligroso.
+# camino (SYS_HALT → gpu::shutdown → gsp_fini). Si eso no ocurre, el script se
+# rinde y deja QEMU vivo: matarlo solo pasa con SOSO_G1_FORCE_KILL=1.
+#
+# El log tiene que sobrevivir a un cuelgue del host. Con `>"$log"` la cola se
+# queda en page cache y se pierde: el 2026-07-25 el fichero acabó con 1813 bytes
+# a NUL —justo las ~18 líneas del bring-up que hacían falta para saber dónde se
+# quedó—. Ahora la salida va por un FIFO a `dd oflag=dsync`, que sincroniza cada
+# trozo antes de leer el siguiente. dd tiene que seguir vaciando el FIFO mientras
+# QEMU viva, o el escritor se bloquearía al llenarse la tubería.
+mkfifo -m 666 "$fifo"
+dd of="$log" bs=4096 oflag=dsync status=none <"$fifo" &
+dd_pid=$!
+
 sudo -u "$run_user" -- env \
   "PATH=$(dirname "$cargo_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   "HOME=${run_home}" \
   SOSO_QEMU_GPU="vfio:${BDF}" \
-  "$cargo_bin" xtask run >"$log" 2>&1 &
+  "$cargo_bin" xtask run >"$fifo" 2>&1 &
 run_pid=$!
 
 booted=0
@@ -166,16 +181,38 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 
+qemu_vivo=0
 if kill -0 "$run_pid" 2>/dev/null; then
-  echo "" >&2
-  echo "AVISO: soso no se apagó solo. Matando QEMU con el GSP posiblemente vivo —" >&2
-  echo "       es justo el escenario que colgó el host el 2026-07-25. Si la máquina" >&2
-  echo "       se congela aquí, mira si el log llegó a 'GSP-RM apagado'." >&2
-  kill -TERM "$run_pid" 2>/dev/null || true
-  sleep 3
-  kill -KILL "$run_pid" 2>/dev/null || true
+  if [[ "${SOSO_G1_FORCE_KILL:-0}" == 1 ]]; then
+    echo "" >&2
+    echo "SOSO_G1_FORCE_KILL=1 — matando QEMU con el GSP posiblemente vivo. Es justo" >&2
+    echo "       el escenario que colgó el host dos veces el 2026-07-25. Si la máquina" >&2
+    echo "       se congela aquí, mira si el log llegó a 'GSP-RM apagado'." >&2
+    kill -TERM "$run_pid" 2>/dev/null || true
+    sleep 3
+    kill -KILL "$run_pid" 2>/dev/null || true
+  else
+    qemu_vivo=1
+    echo "" >&2
+    echo "AVISO: soso no se apagó solo, y NO se mata QEMU: resetear por vfio-pci una" >&2
+    echo "       GPU que sigue ejecutando GSP-RM y haciendo DMA congela el host entero" >&2
+    echo "       (2026-07-25, dos veces, sin dejar traza de panic). QEMU sigue vivo en" >&2
+    echo "       pid ${run_pid} y el log sigue creciendo en ${log}." >&2
+    echo "       Salidas, por orden de preferencia:" >&2
+    echo "         1) ssh -p 2222 soso@localhost halt   — si el guest responde, apaga" >&2
+    echo "            el GSP por gsp_fini y es la única salida limpia" >&2
+    echo "         2) si el guest está colgado: 'sudo reboot' del host. Un reinicio" >&2
+    echo "            ordenado es mucho mejor que congelarse y tener que resetear" >&2
+    echo "         3) SOSO_G1_FORCE_KILL=1 sudo $0 — mata, asumiendo el cuelgue" >&2
+  fi
 fi
-wait "$run_pid" 2>/dev/null || true
+
+if [[ "$qemu_vivo" == 0 ]]; then
+  wait "$run_pid" 2>/dev/null || true
+  # dd sale por EOF cuando se cierra el último extremo de escritura del FIFO.
+  wait "$dd_pid" 2>/dev/null || true
+  rm -f "$fifo"
+fi
 
 if grep -q 'GSP-RM apagado' "$log"; then
   grep 'nouveau-lx: fini —\|GSP-RM apagado' "$log" || true
@@ -189,6 +226,9 @@ if grep -q 'NV_PMC_BOOT_0=' "$log"; then
 fi
 
 echo "FAIL o incompleto — revisar ${log}"
+if [[ "$qemu_vivo" == 1 ]]; then
+  echo "      (QEMU sigue vivo en pid ${run_pid}: el log puede crecer todavía)"
+fi
 # Nota: `grep … | tail` siempre sale 0 (estado del último comando del pipe), así que
 # el fallback hay que decidirlo mirando si hubo coincidencias, no por el exit code.
 hits=$(grep -E 'nvidia:|gpu:|VFIO|error|fail|No existe|not found' "$log" | tail -20 || true)
