@@ -10,6 +10,7 @@
 #include "gsp_dma.h"
 #include "gsp_rm_obj.h"
 #include "gsp_vmm.h"
+#include "gsp_vram.h"
 #include "nvrm_r570.h"
 
 #define GSP_CHAN_GPFIFO_ENTRIES  64u
@@ -33,15 +34,20 @@ struct gsp_chan {
     uint64_t userd_va;
     uint64_t pushbuf_va;
     uint64_t notifier_va;
+    /* Bloque de instancia del canal, en VRAM. No lo tocamos nunca desde la CPU
+     * (sin BAR1 no hay ventana): es RM quien lo usa, nosotros solo decimos
+     * dónde está. Por eso es una dirección pelada y no un gsp_dma_buf. */
+    uint64_t inst_addr;
     Nvc56fControl *userd_ctl;
     unsigned gpput;
     unsigned pb_pos;
     int ready;
 };
 
-/* `rm`/`vmm` deben estar listos (G4c/G4d). `vaspace` = handle del vaspace. */
-int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_chan *c,
-                  uint32_t vaspace);
+/* `rm`/`vmm` deben estar listos (G4c/G4d). `vaspace` = handle del vaspace.
+ * `vram` hace falta para el bloque de instancia, que va en VRAM. */
+int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
+                  struct gsp_chan *c, uint32_t vaspace);
 
 /* Reserva espacio en el pushbuffer (alineado a 4 B). Devuelve el offset o -1. */
 int gsp_chan_pb_reserve(struct gsp_chan *c, unsigned bytes);

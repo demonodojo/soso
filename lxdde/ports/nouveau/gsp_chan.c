@@ -17,35 +17,56 @@ static int chan_fill_alloc(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p,
     memset(p, 0, sizeof(*p));
     p->gpFifoOffset = c->gpfifo.phys;
     p->gpFifoEntries = GSP_CHAN_GPFIFO_ENTRIES;
-    p->flags = NVOS04_FLAGS_CHANNEL_TYPE_PHYSICAL |
-               NVOS04_FLAGS_CHANNEL_CLIENT_MAP_FIFO;
+    /* Upstream pone CLIENT_MAP_FIFO explícitamente a FALSE: es para que RM mapee
+     * el FIFO en espacio de usuario, y aquí no hay usuario que valga. */
+    p->flags = NVOS04_FLAGS_CHANNEL_TYPE_PHYSICAL;
     p->hVASpace = vaspace;
     p->engineType = NV2080_ENGINE_TYPE_COPY0;
-    p->subDeviceId = 1u;
-    p->hUserdMemory[0] = 0;
-    p->userdOffset[0] = 0;
+    /* `subDeviceId` se queda a 0 (upstream no lo toca): el 1 que había aquí
+     * apuntaba a un subdevice que no es el nuestro. */
+
+    /* Bloque de instancia y RAMFC, los dos en VRAM y apuntando al mismo sitio;
+     * el RAMFC son los primeros 0x200 B del bloque. Faltaban por completo —a
+     * ceros— y son obligatorios: RM los usa para construir el canal. */
+    p->instanceMem.base = c->inst_addr;
+    p->instanceMem.size = GSP_CHAN_INST_SIZE;
+    p->instanceMem.addressSpace = NV_ADDRESS_SPACE_FBMEM;
+    p->instanceMem.cacheAttrib = NV_CACHE_ATTR_CACHED;
+    p->ramfcMem.base = c->inst_addr;
+    p->ramfcMem.size = GSP_CHAN_RAMFC_SIZE;
+    p->ramfcMem.addressSpace = NV_ADDRESS_SPACE_FBMEM;
+    p->ramfcMem.cacheAttrib = NV_CACHE_ATTR_CACHED;
+
+    /* Desviación deliberada de upstream: allí el USERD vive en VRAM
+     * (addressSpace=2), pero sin BAR1 la CPU no tiene ventana a la VRAM y
+     * `userd_ctl` se lee y escribe desde aquí en cada submit. Se queda en
+     * sysmem, que RM admite, pero con la apertura BIEN puesta. */
     p->userdMem.base = c->userd.phys;
     p->userdMem.size = GSP_CHAN_USERD_SIZE;
-    p->userdMem.addressSpace = NV_ADDRESS_SPACE_SYSMEM_COHERENT;
+    p->userdMem.addressSpace = NV_ADDRESS_SPACE_SYSMEM;
     p->userdMem.cacheAttrib = NV_CACHE_ATTR_DEFAULT;
     p->mthdbufMem.base = c->pushbuf.phys;
     p->mthdbufMem.size = GSP_CHAN_PB_SIZE;
-    p->mthdbufMem.addressSpace = NV_ADDRESS_SPACE_SYSMEM_COHERENT;
+    p->mthdbufMem.addressSpace = NV_ADDRESS_SPACE_SYSMEM;
     p->mthdbufMem.cacheAttrib = NV_CACHE_ATTR_DEFAULT;
-    p->errorNotifierMem.base = c->notifier.phys;
-    p->errorNotifierMem.size = GSP_CHAN_NOTIFIER_SIZE;
-    p->errorNotifierMem.addressSpace = NV_ADDRESS_SPACE_SYSMEM_COHERENT;
-    p->errorNotifierMem.cacheAttrib = NV_CACHE_ATTR_DEFAULT;
+
+    /* `errorNotifierMem` NO se rellena: upstream no lo toca y en su lugar dice
+     * en `internalFlags` que no hay notificador. Rellenarlo mientras el flag
+     * decía UNKNOWN era pedirle a RM dos cosas incompatibles. El búfer del
+     * notificador sigue reservado y mapeado; lo usa el CE por su cuenta. */
+    p->internalFlags = NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS_PRIVILEGE_ADMIN |
+                       NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS_ERROR_NOTIFIER_TYPE_NONE |
+                       NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS_ECC_ERROR_NOTIFIER_TYPE_NONE;
     (void)gpfifo_bytes;
     return 0;
 }
 
-int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_chan *c,
-                  uint32_t vaspace)
+int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
+                  struct gsp_chan *c, uint32_t vaspace)
 {
     NV_CHANNEL_ALLOC_PARAMS params;
 
-    if (!rm || !vmm || !c || !rm->ready || !vmm->ready) {
+    if (!rm || !vmm || !vram || !c || !rm->ready || !vmm->ready || !vram->ready) {
         return -1;
     }
     memset(c, 0, sizeof(*c));
@@ -57,6 +78,15 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_chan *c,
         gsp_dma_alloc(&c->userd, GSP_CHAN_USERD_SIZE, "USERD") != 0 ||
         gsp_dma_alloc(&c->pushbuf, GSP_CHAN_PB_SIZE, "pushbuffer") != 0 ||
         gsp_dma_alloc(&c->notifier, GSP_CHAN_NOTIFIER_SIZE, "notifier CE") != 0) {
+        gsp_chan_fini(c);
+        return -1;
+    }
+
+    /* El bloque de instancia va en VRAM y no se mapea en el vaspace: RM lo
+     * direcciona físicamente. gsp_vram_alloc devuelve 0 cuando no cabe. */
+    c->inst_addr = gsp_vram_alloc(vram, GSP_CHAN_INST_SIZE, GSP_CHAN_INST_SIZE);
+    if (c->inst_addr == 0) {
+        lx_printk("nouveau-lx: sin VRAM para el bloque de instancia del canal\n");
         gsp_chan_fini(c);
         return -1;
     }
@@ -85,9 +115,10 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_chan *c,
     }
 
     c->ready = 1;
-    lx_printk("nouveau-lx: canal GPFIFO listo handle=0x%08x gpfifo=0x%llx userd=0x%llx\n",
+    lx_printk("nouveau-lx: canal GPFIFO listo handle=0x%08x gpfifo=0x%llx userd=0x%llx "
+              "inst=0x%llx (VRAM)\n",
               c->handle, (unsigned long long)c->gpfifo.phys,
-              (unsigned long long)c->userd.phys);
+              (unsigned long long)c->userd.phys, (unsigned long long)c->inst_addr);
     return 0;
 }
 

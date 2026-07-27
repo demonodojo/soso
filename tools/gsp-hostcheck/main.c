@@ -90,6 +90,10 @@ static uint32_t fsp_sent[512];
 static unsigned fsp_sent_dwords;
 static unsigned fsp_mbox_reads;
 static uint32_t fsp_reply_error;   /* !=0 para probar el rechazo del FSP */
+static int fake_gpu_gone;          /* la GPU no contesta: todo el MMIO a unos */
+static int fake_die_after_mtail;   /* 0 = no morir; N = morir tras N lecturas de MSGQ_TAIL */
+static unsigned fake_mtail_reads;
+static unsigned fake_recover_calls;
 static int fake_unload_pending;    /* !=0 → MAILBOX0 acaba dando 0x80000000 */
 
 static void fake_fsp_reset(void)
@@ -98,6 +102,8 @@ static void fake_fsp_reset(void)
     memset(fsp_sent, 0, sizeof(fsp_sent));
     fsp_emem_ptr = fsp_qhead = fsp_qtail = fsp_mhead = fsp_mtail = 0;
     fsp_sent_dwords = fsp_mbox_reads = 0;
+    fake_gpu_gone = fake_die_after_mtail = 0;
+    fake_mtail_reads = fake_recover_calls = 0;
 }
 
 /* Escribir QUEUE_HEAD es el timbre: el FSP lee el mensaje y contesta. */
@@ -115,17 +121,38 @@ static void fake_fsp_consume(void)
     fsp_emem[4] = fsp_reply_error;
     fsp_mhead = 0;
     fsp_mtail = 4u * 4u;                                    /* último DWORD escrito */
+    /* Las lecturas de MSGQ_TAIL se cuentan desde que hay respuesta encolada: las
+     * de fsp_ready_to_send(), anteriores al envío, no deben gastar el contador. */
+    fake_mtail_reads = 0;
 }
 
 static uint32_t gsp_mmio_rd32(uint32_t off)
 {
+    /* Tarjeta fuera del bus: TODO se lee a unos, sin excepciones. */
+    if (fake_gpu_gone) {
+        return 0xffffffffu;
+    }
     switch (off) {
     case R_VRAM:  return FAKE_VRAM_MB;
     case R_THERM: return 0xffu;                 /* secure boot completo */
     case R_QHEAD: return fsp_qhead;
     case R_QTAIL: return fsp_qtail;
     case R_MHEAD: return fsp_mhead;
-    case R_MTAIL: return fsp_mtail;
+    case R_MTAIL:
+        /* La muerte se arma en la lectura N y surte efecto a partir de la N+1:
+         * así el poll de fsp_wait_reply ve la cola con datos y el de fsp_recv,
+         * una vuelta después, se encuentra el all-ones. Ése es el orden exacto
+         * en que ocurrió el 2026-07-27.
+         *
+         * Sólo se cuenta con respuesta ya encolada (mhead != mtail). Si no,
+         * la lectura que fsp_ready_to_send() hace ANTES del envío gastaba el
+         * contador y la tarjeta moría antes de mandar el COT: otro fallo, no el
+         * que se quiere reproducir. */
+        if (fake_die_after_mtail && fsp_mhead != fsp_mtail &&
+            ++fake_mtail_reads >= (unsigned)fake_die_after_mtail) {
+            fake_gpu_gone = 1;
+        }
+        return fsp_mtail;
     case R_EMEMD: return fsp_emem_ptr < 512 ? fsp_emem[fsp_emem_ptr++] : 0;
     /* El bootrom tarda unas vueltas en dejar leer el falcon. Tras el aviso de
      * descarga, en cambio, MAILBOX0 tiene que acabar valiendo 0x80000000: el
@@ -143,10 +170,12 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
     }
 }
 
-/* En el banco la GPU nunca se cae del bus: el camino de recuperación por
- * configuración PCI solo tiene sentido contra hardware. */
-static int gsp_mmio_alive(void) { return 1; }
-static int gsp_mmio_pci_recover(void) { return 0; }
+/* La caída del bus sí se simula: es el fallo del 2026-07-27 y se colaba por el
+ * agujero de que all-ones cumple `head == tail`. `fake_recover_calls` es la señal
+ * observable de que el driver la diagnostica como caída (intenta recuperar por
+ * espacio de configuración) y no como cola vacía. */
+static int gsp_mmio_alive(void) { return !fake_gpu_gone; }
+static int gsp_mmio_pci_recover(void) { fake_recover_calls++; return -1; }
 
 static void gsp_mmio_wr32(uint32_t off, uint32_t val)
 {
@@ -204,6 +233,49 @@ static int load_blob(enum gsp_fw_kind kind, const char *path)
     g_blobs[kind].valid = 1;
     g_blobs[kind].path = path;
     printf("blob %s: %ld bytes\n", path, len);
+    return 0;
+}
+
+/* G4f: el blob SASS que se enlaza al kernel tiene que ser el fichero entero.
+ * El generador se comía la última línea de `xxd -i` (8 B = media instrucción de
+ * 16 B) y el kernel lanzaba un programa cortado; el único síntoma habría sido un
+ * cuelgue de máquina sin traza. Se compara contra el .bin, byte a byte. */
+static int check_sass_embed(void)
+{
+    unsigned char *buf;
+    long len;
+    FILE *f = fopen(SOSO_SASS_BIN, "rb");
+
+    if (!f) { perror(SOSO_SASS_BIN); return -1; }
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = malloc(len > 0 ? len : 1);
+    if (fread(buf, 1, len, f) != (size_t)len) { perror("read sass"); fclose(f); return -1; }
+    fclose(f);
+
+    if (len < 16 || gsp_saxpy_sass_len < 16) {
+        printf("FALLO: SASS vacío (fichero %ld B, embed %u B) — falta "
+               "scripts/l6-g4f-build-sass.sh\n", len, gsp_saxpy_sass_len);
+        return -1;
+    }
+    if ((long)gsp_saxpy_sass_len != len) {
+        printf("FALLO: el embed tiene %u B y saxpy.sass.bin %ld B (truncado)\n",
+               gsp_saxpy_sass_len, len);
+        return -1;
+    }
+    if (gsp_saxpy_sass_len % 16 != 0) {
+        printf("FALLO: %u B no es múltiplo de 16 (instrucción SASS sm_120)\n",
+               gsp_saxpy_sass_len);
+        return -1;
+    }
+    if (memcmp(buf, gsp_saxpy_sass, len) != 0) {
+        printf("FALLO: el embed no coincide con saxpy.sass.bin\n");
+        return -1;
+    }
+    free(buf);
+    printf("OK: saxpy SASS blob %u B (= .bin, %u instrucciones)\n",
+           gsp_saxpy_sass_len, gsp_saxpy_sass_len / 16);
     return 0;
 }
 
@@ -1036,26 +1108,39 @@ static int check_vmm(const struct gsp_libos *lo)
     }
     printf("OK: PDEs con bit 0 a cero, aper 2 y PCF 1; la mitad grande vacía\n");
 
-    /* Y el reparto de VRAM: regiones que no valen fuera, y no dar dos veces lo
-     * mismo. Va con una static info a mano porque la de verdad la trae RM. */
+    /* Y el reparto de VRAM. La región basada en 0 es EL caso de esta tarjeta,
+     * no un caso raro: los offsets de VRAM cuentan desde el inicio del
+     * framebuffer, así que la única región utilizable del GB205 empieza en 0.
+     * Esta prueba afirmaba justo lo contrario ("base 0: inservible a
+     * propósito") y por eso estaba verde mientras el bring-up en hardware se
+     * quedaba sin un solo byte repartible (2026-07-27). */
     memset(&si, 0, sizeof(si));
     si.ready = 1;
-    si.region_nr = 2;
-    si.region[0].base = 0;                      /* base 0: inservible a propósito */
-    si.region[0].size = 0x100000ull;
+    si.region_nr = 3;
+    si.region[0].base = 0;                      /* el caso real: base 0 */
+    si.region[0].size = 0x100000ull;            /* 1 MiB */
     si.region[1].base = 0x200000ull;
     si.region[1].size = 0x300000ull;            /* 3 MiB */
-    if (gsp_vram_init(&pool, &si) != 0 || pool.region_nr != 1 ||
-        pool.total != 0x300000ull) {
-        printf("FALLO: gsp_vram_init con una región inservible (nr=%u total=%llu)\n",
+    si.region[2].base = 0x800000ull;
+    si.region[2].size = 0x800ull;               /* < 1 página: esta sí sobra */
+    if (gsp_vram_init(&pool, &si) != 0 || pool.region_nr != 2 ||
+        pool.total != 0x100000ull - 4096ull + 0x300000ull) {
+        printf("FALLO: gsp_vram_init con región base 0 (nr=%u total=%llu)\n",
                pool.region_nr, (unsigned long long)pool.total);
         return -1;
     }
     {
-        uint64_t a = gsp_vram_alloc(&pool, 0x100000ull, 0x100000ull);
-        uint64_t b = gsp_vram_alloc(&pool, 0x100000ull, 0x100000ull);
+        /* La primera página se reserva para que el 0 siga significando "no hay
+         * sitio" y nada más: un reparto válido nunca puede devolver 0. */
+        uint64_t a = gsp_vram_alloc(&pool, 4096, 4096);
+        uint64_t b = gsp_vram_alloc(&pool, 0x300000ull, 0x100000ull);
 
-        if (a != 0x200000ull || b != 0x300000ull || a == b) {
+        if (a != 4096ull) {
+            printf("FALLO: el primer bloque de la región base 0 salió en 0x%llx\n",
+                   (unsigned long long)a);
+            return -1;
+        }
+        if (b != 0x200000ull || a == b) {
             printf("FALLO: reparto de VRAM a=0x%llx b=0x%llx\n",
                    (unsigned long long)a, (unsigned long long)b);
             return -1;
@@ -1065,7 +1150,7 @@ static int check_vmm(const struct gsp_libos *lo)
             return -1;
         }
     }
-    printf("OK: reparto de VRAM (descarta la región base 0 y no repite bloque)\n");
+    printf("OK: reparto de VRAM (región base 0 utilizable, 1ª página reservada)\n");
 
     /* El desmontaje: UNSET_PAGE_DIRECTORY y los cuatro FREE (vaspace, subdevice,
      * device, cliente). Se le dan respuestas para que no gaste los plazos. */
@@ -1102,11 +1187,125 @@ static int check_vmm(const struct gsp_libos *lo)
     return 0;
 }
 
+/* Lee un campo del QMD por (lo, hi), igual que lo escribe `qmd_set_bits`. */
+static uint64_t qmd_get_bits(const uint32_t *qmd, unsigned lo, unsigned hi)
+{
+    uint64_t v = 0;
+    unsigned i;
+
+    for (i = lo; i <= hi; i++)
+        v |= (uint64_t)((qmd[i / 32u] >> (i % 32u)) & 1u) << (i - lo);
+    return v;
+}
+
+/* G4f: el QMD tal y como lo va a leer el SM. Un campo a cero aquí no da error
+ * en ningún sitio — simplemente lanza mal, y en la GPU eso es un cuelgue sin
+ * traza. Se contrasta contra clcdc0qmd.h campo a campo. */
+static int check_qmd_fields(const struct gsp_compute *cp, const GspQmdV05 *q)
+{
+    const uint32_t *w = q->words;
+    uint64_t prog, cbank, sem;
+
+    if (qmd_get_bits(w, QMDV05_QMD_TYPE) != NVCDC0_QMDV05_00_QMD_TYPE_GRID_CTA ||
+        qmd_get_bits(w, QMDV05_QMD_MAJOR_VERSION) !=
+            NVCDC0_QMDV05_00_QMD_MAJOR_VERSION_V05) {
+        printf("FALLO: QMD type/version\n");
+        return -1;
+    }
+
+    prog = (qmd_get_bits(w, QMDV05_PROGRAM_ADDRESS_UPPER_S4) << 32) |
+           qmd_get_bits(w, QMDV05_PROGRAM_ADDRESS_LOWER_S4);
+    if (prog << 4 != cp->sass_va) {
+        printf("FALLO: PROGRAM_ADDRESS=0x%llx, esperaba 0x%llx\n",
+               (unsigned long long)(prog << 4), (unsigned long long)cp->sass_va);
+        return -1;
+    }
+
+    if (qmd_get_bits(w, QMDV05_REGISTER_COUNT) != gsp_saxpy_regcount) {
+        printf("FALLO: REGISTER_COUNT=%llu, el cubin dice %u\n",
+               (unsigned long long)qmd_get_bits(w, QMDV05_REGISTER_COUNT),
+               gsp_saxpy_regcount);
+        return -1;
+    }
+    if (qmd_get_bits(w, QMDV05_CTA_THREAD_DIMENSION0) != G4F_CTA_THREADS ||
+        qmd_get_bits(w, QMDV05_CTA_THREAD_DIMENSION1) != 1 ||
+        qmd_get_bits(w, QMDV05_CTA_THREAD_DIMENSION2) != 1 ||
+        qmd_get_bits(w, QMDV05_GRID_WIDTH) != 4 ||
+        qmd_get_bits(w, QMDV05_GRID_HEIGHT) != 1 ||
+        qmd_get_bits(w, QMDV05_GRID_DEPTH) != 1) {
+        printf("FALLO: dimensiones de malla/CTA\n");
+        return -1;
+    }
+
+    cbank = (qmd_get_bits(w, QMDV05_CBANK0_ADDR_UPPER_S6) << 32) |
+            qmd_get_bits(w, QMDV05_CBANK0_ADDR_LOWER_S6);
+    if (cbank << 6 != cp->data_va + G4F_CBANK_OFF) {
+        printf("FALLO: CBANK0 addr=0x%llx, esperaba 0x%llx\n",
+               (unsigned long long)(cbank << 6),
+               (unsigned long long)(cp->data_va + G4F_CBANK_OFF));
+        return -1;
+    }
+    if ((qmd_get_bits(w, QMDV05_CBANK0_SIZE_S4) << 4) < gsp_saxpy_cbank_size) {
+        printf("FALLO: CBANK0 size=%llu < %u\n",
+               (unsigned long long)(qmd_get_bits(w, QMDV05_CBANK0_SIZE_S4) << 4),
+               gsp_saxpy_cbank_size);
+        return -1;
+    }
+    if (qmd_get_bits(w, QMDV05_CBANK0_VALID) != 1) {
+        printf("FALLO: CBANK0 no marcado válido\n");
+        return -1;
+    }
+
+    sem = (qmd_get_bits(w, QMDV05_RELEASE_SEM0_ADDR_UPPER) << 32) |
+          qmd_get_bits(w, QMDV05_RELEASE_SEM0_ADDR_LOWER);
+    if (qmd_get_bits(w, QMDV05_RELEASE_ENABLE0) != 1 ||
+        sem != cp->data_va + G4F_SEM_OFF ||
+        qmd_get_bits(w, QMDV05_RELEASE_SEM0_PAYLOAD_LOWER) != G4F_SEM_PAYLOAD) {
+        printf("FALLO: semáforo de fin del QMD (enable=%llu addr=0x%llx)\n",
+               (unsigned long long)qmd_get_bits(w, QMDV05_RELEASE_ENABLE0),
+               (unsigned long long)sem);
+        return -1;
+    }
+
+    printf("OK: QMD v05 — prog, %u regs, CTA %ux1x1, cbank0 y semáforo\n",
+           gsp_saxpy_regcount, G4F_CTA_THREADS);
+    return 0;
+}
+
+/* Los parámetros van donde el cubin dice, no donde nos venga bien. */
+static int check_compute_params(struct gsp_compute *cp)
+{
+    const unsigned char *p;
+    const uint64_t xv = 0x1111222233334444ull, yv = 0x5555666677778888ull;
+
+    gsp_compute_set_params(cp, 2.5f, xv, yv, 77);
+    p = (const unsigned char *)cp->data.va + G4F_CBANK_OFF + gsp_saxpy_param_base;
+
+    if (gsp_saxpy_param_base + gsp_saxpy_param_size != gsp_saxpy_cbank_size) {
+        printf("FALLO: params en %u+%u no acaban en el final del cbank (%u)\n",
+               gsp_saxpy_param_base, gsp_saxpy_param_size, gsp_saxpy_cbank_size);
+        return -1;
+    }
+    if (*(const float *)(p + gsp_saxpy_param_off[0]) != 2.5f ||
+        *(const uint64_t *)(p + gsp_saxpy_param_off[1]) != xv ||
+        *(const uint64_t *)(p + gsp_saxpy_param_off[2]) != yv ||
+        *(const uint32_t *)(p + gsp_saxpy_param_off[3]) != 77u) {
+        printf("FALLO: parámetros mal colocados en el constant bank\n");
+        return -1;
+    }
+    printf("OK: params a/x/y/n en cbank0+0x%x (+%u/+%u/+%u/+%u)\n",
+           gsp_saxpy_param_base, gsp_saxpy_param_off[0], gsp_saxpy_param_off[1],
+           gsp_saxpy_param_off[2], gsp_saxpy_param_off[3]);
+    return 0;
+}
+
 static int check_g4e_chan_ce(const struct gsp_libos *lo)
 {
     struct gsp_rpc rpc;
     struct gsp_cmdq q;
     struct gsp_vmm v;
+    struct gsp_vram pool;
+    struct gsp_static_info vram_si;
     struct gsp_chan chan;
     struct gsp_ce ce;
     struct gsp_msgq_headers *msgq =
@@ -1148,7 +1347,18 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         printf("FALLO: gsp_vmm_init (g4e)\n");
         return -1;
     }
-    if (gsp_chan_init(&v.rm, &v, &chan, v.vaspace) != 0) {
+    /* El canal necesita VRAM para su bloque de instancia. Región base 0, que es
+     * el caso real de esta tarjeta (ver check_vmm). */
+    memset(&vram_si, 0, sizeof(vram_si));
+    vram_si.ready = 1;
+    vram_si.region_nr = 1;
+    vram_si.region[0].base = 0;
+    vram_si.region[0].size = 0x100000ull;
+    if (gsp_vram_init(&pool, &vram_si) != 0) {
+        printf("FALLO: gsp_vram_init (g4e)\n");
+        return -1;
+    }
+    if (gsp_chan_init(&v.rm, &v, &pool, &chan, v.vaspace) != 0) {
         printf("FALLO: gsp_chan_init\n");
         return -1;
     }
@@ -1180,12 +1390,53 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                    p->gpFifoEntries, p->hVASpace, p->engineType);
             return -1;
         }
-        if (p->userdMem.addressSpace != NV_ADDRESS_SPACE_SYSMEM_COHERENT) {
-            printf("FALLO: userdMem aper=%u\n", p->userdMem.addressSpace);
+        /* Estas afirmaciones van contra los valores de upstream escritos a
+         * mano, NO contra nuestras propias constantes: el RM_ALLOC del canal
+         * devolvió 0x3b (INVALID_PARAMETER) en HW el 2026-07-27 con el banco en
+         * verde, porque el banco releía los campos con la misma definición del
+         * struct que los escribía. Un layout mal pero coherente consigo mismo
+         * es invisible desde dentro; los números crudos sí lo delatan. */
+        if (sizeof(*p) != 656u || a->paramsSize != 656u) {
+            printf("FALLO: NV_CHANNEL_ALLOC_PARAMS mide %zu (upstream r570: 656)\n",
+                   sizeof(*p));
+            return -1;
+        }
+        if (p->userdMem.addressSpace != 1u || p->mthdbufMem.addressSpace != 1u) {
+            printf("FALLO: aperturas sysmem userd=%u mthdbuf=%u (upstream: 1)\n",
+                   p->userdMem.addressSpace, p->mthdbufMem.addressSpace);
+            return -1;
+        }
+        /* Bloque de instancia y RAMFC: en VRAM (2), mismo base, y el RAMFC son
+         * los primeros 0x200 B. Estaban a cero y son obligatorios. */
+        if (p->instanceMem.addressSpace != 2u || p->ramfcMem.addressSpace != 2u ||
+            p->instanceMem.base == 0 || p->ramfcMem.base != p->instanceMem.base ||
+            p->instanceMem.size != 0x1000u || p->ramfcMem.size != 0x200u) {
+            printf("FALLO: instanceMem/ramfcMem base=0x%llx/0x%llx size=%llu/%llu aper=%u/%u\n",
+                   (unsigned long long)p->instanceMem.base,
+                   (unsigned long long)p->ramfcMem.base,
+                   (unsigned long long)p->instanceMem.size,
+                   (unsigned long long)p->ramfcMem.size,
+                   p->instanceMem.addressSpace, p->ramfcMem.addressSpace);
+            return -1;
+        }
+        /* errorNotifierMem a cero y los dos tipos de notificador a NONE (1),
+         * que en los bits 3:2 y 5:4 son 0x4|0x10. Cero significaba UNKNOWN. */
+        if (p->errorNotifierMem.base != 0 || p->errorNotifierMem.addressSpace != 0) {
+            printf("FALLO: errorNotifierMem relleno (upstream no lo toca)\n");
+            return -1;
+        }
+        if ((p->internalFlags & 0x3cu) != 0x14u) {
+            printf("FALLO: internalFlags=0x%08x, notificadores no están a NONE\n",
+                   p->internalFlags);
+            return -1;
+        }
+        if (p->subDeviceId != 0 || (p->flags & NVOS04_FLAGS_CHANNEL_CLIENT_MAP_FIFO)) {
+            printf("FALLO: subDeviceId=%u flags=0x%08x (upstream: 0 y CLIENT_MAP_FIFO a FALSE)\n",
+                   p->subDeviceId, p->flags);
             return -1;
         }
     }
-    printf("OK: AMPERE_CHANNEL_GPFIFO_A alloc params\n");
+    printf("OK: AMPERE_CHANNEL_GPFIFO_A alloc params (layout r570, inst+ramfc en VRAM)\n");
 
     if (chan.userd_ctl->GPPut != 0 || chan.gpput != 0) {
         printf("FALLO: USERD/GPPut no arrancan en cero\n");
@@ -1275,11 +1526,8 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
 
-        if (gsp_saxpy_sass_len < 16) {
-            printf("FALLO: gsp_saxpy_sass_len=%u\n", gsp_saxpy_sass_len);
+        if (check_sass_embed() != 0)
             return -1;
-        }
-        printf("OK: saxpy SASS blob %u B\n", gsp_saxpy_sass_len);
 
         if (gsp_compute_init(&v.rm, &chan, &cp) != 0) {
             printf("FALLO: gsp_compute_init\n");
@@ -1293,7 +1541,11 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         }
         printf("OK: BLACKWELL_COMPUTE_A colgado del canal\n");
 
-        gsp_compute_fill_saxpy_qmd(&qmd, G4F_SASS_VA, 4);
+        gsp_compute_fill_saxpy_qmd(&cp, &qmd, G4F_SASS_VA, 4);
+        if (check_qmd_fields(&cp, &qmd) != 0)
+            return -1;
+        if (check_compute_params(&cp) != 0)
+            return -1;
         chan.pb_pos = 0;
         if (gsp_compute_encode_qmd(&cp, &qmd, &qmd_off, &qmd_len) != 0 ||
             qmd_len < 64) {
@@ -1655,6 +1907,29 @@ static int check_cot(const struct gsp_wpr *wpr)
     }
     fsp_reply_error = 0;
     printf("OK: el rechazo del FSP se detecta\n");
+
+    /* Y el cuelgue del 2026-07-27: la tarjeta se cae del bus entre el poll de
+     * fsp_wait_reply (que ve la cola con datos) y el de fsp_recv (que ya lee
+     * all-ones). Como 0xffffffff == 0xffffffff cumple `head == tail`, aquello se
+     * anunciaba por serie como "respuesta del FSP de tamaño raro (0)" —un FSP
+     * que contesta mal— cuando lo que había pasado era que la GPU estaba muerta,
+     * y el host se llevó por delante un panic al cerrar QEMU. Que devuelva error
+     * no basta: antes también lo hacía. Lo que se comprueba es que ahora lo
+     * diagnostica como caída, y la señal es que intenta la recuperación por
+     * espacio de configuración, cosa que el camino de "tamaño raro" nunca hacía. */
+    fake_fsp_reset();
+    fake_die_after_mtail = 1;
+    if (fsp_lx_boot_gsp_fmc(&staged, &lo, wpr) == 0) {
+        printf("FALLO: el COT se dio por bueno con la GPU fuera del bus\n");
+        return -1;
+    }
+    if (fake_recover_calls == 0) {
+        printf("FALLO: all-ones tomado por cola vacía, no por GPU caída del bus\n");
+        return -1;
+    }
+    fake_fsp_reset();
+    printf("OK: GPU caída del bus en la respuesta al COT — se dice, no se disfraza de "
+           "'tamaño raro'\n");
 
     if (check_rpc(&lo) != 0)
         return -1;

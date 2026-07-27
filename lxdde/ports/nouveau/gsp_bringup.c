@@ -114,6 +114,7 @@ static struct gsp_dma_buf g_scratch;     /* página de sysmem visible por la GPU
 static struct gsp_chan g_chan;           /* canal GPFIFO (G4e) */
 static struct gsp_ce g_ce;               /* motor de copia CE (G4e) */
 static struct gsp_compute g_compute;     /* compute + QMD (G4f) */
+static int g_ce_verified;                /* el CE movió bytes de verdad (G4e) */
 static uint64_t g_vram_block;            /* bloque de VRAM mapeado en G4d */
 static struct lx_pci_dev *g_pdev;   /* para leer BARs y BDF del espacio de config */
 static uint16_t g_device_id;
@@ -425,7 +426,7 @@ static int run_vmm_stage(void)
 
 static int run_chan_ce_stage(void)
 {
-    if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_chan, g_vmm.vaspace) != 0) {
+    if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan, g_vmm.vaspace) != 0) {
         return -1;
     }
     g_phase = GSP_RM_CHAN;
@@ -436,11 +437,15 @@ static int run_chan_ce_stage(void)
     }
     g_phase = GSP_RM_CE;
 
-    /* Best-effort: encola la copia pero no afirma éxito GPU hasta readback HW. */
+    /* Criterio GO de G4e: el selftest hace sysmem → VRAM → sysmem esperando el
+     * semáforo en cada tramo y comparando el patrón, con el origen borrado
+     * entre medias. Si esto pasa, la GPU tradujo nuestras tablas y movió bytes;
+     * es la primera prueba de que G4d funciona de verdad y no solo sobre papel. */
     if (gsp_ce_selftest(&g_ce, G4D_SCRATCH_VA, G4D_VA_BASE, g_scratch.va, 4096) == 0) {
-        lx_printk("nouveau-lx: CE readback verificado\n");
+        g_ce_verified = 1;
+        lx_printk("nouveau-lx: CE readback verificado (G4e GO)\n");
     } else {
-        lx_printk("nouveau-lx: CE encolado; readback GPU pendiente de ciclo VFIO\n");
+        lx_printk("nouveau-lx: CE sin readback — canal vivo pero no movió datos\n");
     }
     return 0;
 }
@@ -453,10 +458,13 @@ static int run_compute_stage(void)
     g_phase = GSP_RM_COMPUTE;
 
     if (gsp_compute_stage_sass(&g_compute, &g_ce, G4D_SCRATCH_VA, g_scratch.va) != 0) {
-        lx_printk("nouveau-lx: SASS staging encolado (readback HW pendiente)\n");
+        lx_printk("nouveau-lx: SASS no llegó a VRAM (el CE no señalizó)\n");
     } else {
-        lx_printk("nouveau-lx: SASS en VRAM verificado\n");
+        lx_printk("nouveau-lx: SASS de %u B en VRAM\n", g_compute.sass_size);
     }
+    /* El lanzamiento del QMD NO se hace aquí: el bring-up deja el compute
+     * armado y sale. Un kernel que se lance en el arranque y falle deja la
+     * tarjeta en un estado del que sólo se sale reseteando el equipo. */
     return 0;
 }
 
@@ -722,7 +730,11 @@ int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n)
     if (!x || !y || n == 0) {
         return -1;
     }
-    if (g_compute.ready && g_ce.ready && g_chan.ready &&
+    /* `g_ce_verified` es la puerta: si el CE no demostró en el arranque que
+     * mueve bytes por nuestras tablas, lanzar un QMD es tirar trabajo a un
+     * canal que no funciona, y eso en esta máquina se paga con un cuelgue sin
+     * traza. Sin esa prueba, CPU y a otra cosa. */
+    if (g_ce_verified && g_compute.ready && g_ce.ready && g_chan.ready &&
         g_phase >= GSP_RM_COMPUTE) {
         if (gsp_compute_saxpy(&g_compute, &g_ce, a, x, y, n,
                               G4D_SCRATCH_VA, g_scratch.va) == 0) {

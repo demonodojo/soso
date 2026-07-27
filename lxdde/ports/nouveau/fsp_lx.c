@@ -122,16 +122,50 @@ static void emem_read(uint32_t *data, unsigned dwords)
     }
 }
 
-/* Bytes pendientes en la cola de mensajes. TAIL apunta al último DWORD escrito. */
-static uint32_t fsp_poll(void)
+static void log_gsp_state(const char *what);
+
+/* Estado de la cola de mensajes del FSP. TAIL apunta al último DWORD escrito.
+ *
+ * Devuelve 1 con datos (`*bytes`), 0 vacía y -1 si la GPU no contesta. Esa
+ * tercera respuesta es el motivo de existir de esta función: con la tarjeta
+ * fuera del bus los dos registros se leen 0xffffffff, `head == tail` se cumple
+ * al pie de la letra, y devolver 0 —"cola vacía"— es como el cuelgue del
+ * 2026-07-27 acabó anunciándose por serie como "respuesta del FSP de tamaño
+ * raro (0)" en vez de decir que la tarjeta se había caído del bus. Es la misma
+ * trampa que gsp_mmio_poll_ready() ya documenta: un all-ones no es un registro,
+ * es silencio. */
+static int fsp_poll(uint32_t *bytes)
 {
     uint32_t head = gsp_mmio_rd32(NV_PFSP_MSGQ_HEAD0);
     uint32_t tail = gsp_mmio_rd32(NV_PFSP_MSGQ_TAIL0);
 
+    if (bytes) {
+        *bytes = 0;
+    }
+    if (head == 0xffffffffu && tail == 0xffffffffu) {
+        return -1;
+    }
     if (head == tail) {
         return 0;
     }
-    return (tail - head) + (uint32_t)sizeof(uint32_t);
+    if (bytes) {
+        *bytes = (tail - head) + (uint32_t)sizeof(uint32_t);
+    }
+    return 1;
+}
+
+/* Un -1 de fsp_poll() puede ser un reset de función, que deja la tarjeta en el
+ * bus pero sin decode de memoria y de eso se vuelve. Mismo criterio que el bucle
+ * de arranque del FMC. Devuelve 1 si el MMIO ha vuelto. */
+static int fsp_gone_recovered(const char *cuando)
+{
+    if (gsp_mmio_pci_recover() == 0 && gsp_mmio_alive()) {
+        lx_printk("nouveau-lx: el MMIO ha vuelto tras reactivar el decode (%s)\n", cuando);
+        return 1;
+    }
+    lx_printk("nouveau-lx: la GPU se ha caído del bus %s\n", cuando);
+    log_gsp_state("fuera del bus");
+    return 0;
 }
 
 static int fsp_send(const void *packet, uint32_t packet_size)
@@ -167,8 +201,13 @@ static int fsp_send(const void *packet, uint32_t packet_size)
 static int fsp_wait_reply(unsigned timeout_ms)
 {
     while (timeout_ms--) {
-        if (fsp_poll()) {
+        int st = fsp_poll(NULL);
+
+        if (st > 0) {
             return 0;
+        }
+        if (st < 0 && !fsp_gone_recovered("esperando la respuesta al COT")) {
+            return -1;
         }
         lx_mdelay(1);
     }
@@ -178,9 +217,22 @@ static int fsp_wait_reply(unsigned timeout_ms)
 
 static int fsp_recv(struct fsp_reply *reply)
 {
-    uint32_t packet_size = fsp_poll();
+    uint32_t packet_size = 0;
+    int st = fsp_poll(&packet_size);
 
-    if (!packet_size || (packet_size % 4u) || packet_size > sizeof(*reply)) {
+    if (st < 0) {
+        /* Aquí llegó el cuelgue del 2026-07-27: wait_reply había visto cola (no
+         * imprimió "FSP no contesta"), y una vuelta después head==tail==all-ones.
+         * Es decir, la tarjeta murió entre las dos lecturas, no que el FSP
+         * contestara raro. */
+        (void)fsp_gone_recovered("antes de leer la respuesta al COT");
+        return -1;
+    }
+    if (st == 0) {
+        lx_printk("nouveau-lx: el FSP anunció respuesta y dejó la cola vacía\n");
+        return -1;
+    }
+    if ((packet_size % 4u) || packet_size > sizeof(*reply)) {
         lx_printk("nouveau-lx: respuesta del FSP de tamaño raro (%u)\n", packet_size);
         return -1;
     }
@@ -265,6 +317,13 @@ static int fsp_ready_to_send(void)
     uint32_t mh = gsp_mmio_rd32(NV_PFSP_MSGQ_HEAD0);
     uint32_t mt = gsp_mmio_rd32(NV_PFSP_MSGQ_TAIL0);
 
+    /* Antes que nada: sin esto, una tarjeta muerta se anunciaba como "FSP sin
+     * secure boot (0xffffffff)", y las dos comprobaciones de cola de abajo la
+     * daban por libre (all-ones == all-ones). */
+    if (!gsp_mmio_alive()) {
+        lx_printk("nouveau-lx: la GPU no contesta antes de mandar el COT\n");
+        return -1;
+    }
     if (boot != FSP_BOOT_COMPLETE_SUCCESS) {
         lx_printk("nouveau-lx: FSP sin secure boot (0x%08x) — no se manda el COT\n", boot);
         return -1;
@@ -359,12 +418,9 @@ int fsp_lx_boot_gsp_fmc(const struct fmc_staged *fmc, const struct gsp_libos *li
             /* Puede que la GPU siga en el bus y solo haya perdido el decode de
              * memoria (lo que deja un reset de función). El espacio de
              * configuración lo dice; si es eso, se reactiva y se sigue esperando. */
-            if (gsp_mmio_pci_recover() == 0 && gsp_mmio_alive()) {
-                lx_printk("nouveau-lx: el MMIO ha vuelto tras reactivar el decode\n");
+            if (fsp_gone_recovered("mientras arrancaba el FMC")) {
                 continue;
             }
-            lx_printk("nouveau-lx: la GPU se ha caído del bus mientras arrancaba el FMC\n");
-            log_gsp_state("fuera del bus");
             return -1;
         }
         if (lockdown_released(args_addr, &mbox0)) {

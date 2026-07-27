@@ -42,7 +42,7 @@ for m in gsp_dma gsp_rm gsp_wpr gsp_libos fmc_lx fsp_lx gsp_rpc gsp_cmdq gsp_rm_
 done
 
 cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
-   -I"$out" -I"$src" -o "$out/hostcheck" \
+   -I"$out" -I"$src" -DSOSO_SASS_BIN="\"$src/saxpy.sass.bin\"" -o "$out/hostcheck" \
    "$root/tools/gsp-hostcheck/main.c" \
    "$src/saxpy_sass_embed.c"
 

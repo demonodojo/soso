@@ -565,8 +565,24 @@ typedef char nv0080_set_pd_size_check[
 /* `NV2080_ENGINE_TYPE_COPY(i)` de `ctrl/ctrl2080/ctrl2080internal.h`. */
 #define NV2080_ENGINE_TYPE_COPY0   6u
 
-#define NV_ADDRESS_SPACE_SYSMEM_COHERENT  4u
+/* `addressSpace` de NV_MEMORY_DESC_PARAMS es el enum `NV_ADDRESS_SPACE` de RM,
+ * y NO el `FLAGS_APERTURE` de SET_PAGE_DIRECTORY que hay 50 líneas más arriba
+ * (donde SYSMEM_COH sí es 1 y VIDMEM 0). Confundirlos costó el `4` que había
+ * aquí como "SYSMEM_COHERENT": en `r535_chan_alloc` upstream pone 2 en los tres
+ * descriptores que viven en VRAM (instance, USERD, ramfc) y 1 en el único que
+ * vive en sysmem (mthdbuf), así que 1=sysmem y 2=VRAM. El 4 no es sysmem. */
+#define NV_ADDRESS_SPACE_SYSMEM           1u
+#define NV_ADDRESS_SPACE_FBMEM            2u
 #define NV_CACHE_ATTR_DEFAULT             0u
+#define NV_CACHE_ATTR_CACHED              1u
+
+/* `NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS` (alloc_channel.h). El enum de tipo de
+ * notificador es UNKNOWN=0, NONE=1, CTXDMA=2, MEMORY=3 — o sea que dejar
+ * `internalFlags` a cero NO pide "sin notificador", pide UNKNOWN. */
+#define NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS_PRIVILEGE_USER   0u
+#define NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS_PRIVILEGE_ADMIN  1u
+#define NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS_ERROR_NOTIFIER_TYPE_NONE      (1u << 2)
+#define NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS_ECC_ERROR_NOTIFIER_TYPE_NONE  (1u << 4)
 
 typedef struct NV_MEMORY_DESC_PARAMS {
     NvU64 base;
@@ -601,7 +617,14 @@ typedef struct NV_CHANNEL_ALLOC_PARAMS {
     NvU32    flags;
     NvHandle hContextShare;
     NvHandle hVASpace;
-    NvHandle hHandleVASpace;
+    /* Aquí NO va ningún `hHandleVASpace`: no existe ni en r535 ni en r570
+     * (`rm/r570/nvrm/fifo.h`). El que había metía 4 B de más y desplazaba TODO
+     * lo que viene detrás —engineType, subDeviceId y los cuatro descriptores de
+     * memoria—, así que RM los leía corridos y contestaba
+     * NV_ERR_INVALID_PARAMETER (0x3b) al RM_ALLOC del canal (2026-07-27). El
+     * hostcheck no lo veía porque releía los campos con esta misma definición:
+     * un layout mal pero coherente consigo mismo es invisible desde dentro. De
+     * ahí el assert de tamaño de abajo, que sí lo ancla contra upstream. */
     NvHandle hUserdMemory[NV_MAX_SUBDEVICES];
     NvU64    userdOffset[NV_MAX_SUBDEVICES];
     NvU32    engineType;
@@ -624,8 +647,23 @@ typedef struct NV_CHANNEL_ALLOC_PARAMS {
     NvU32    tpcConfigID;
 } NV_CHANNEL_ALLOC_PARAMS;
 
+/* Ancla contra upstream, no contra nosotros mismos. Con el `hHandleVASpace` de
+ * más salían 664 y este assert es justo lo que faltaba para cazarlo. */
+typedef char nv_channel_alloc_size_check[
+    sizeof(NV_CHANNEL_ALLOC_PARAMS) == 656 ? 1 : -1];
+typedef char nv_channel_alloc_userd_off_check[
+    offsetof(NV_CHANNEL_ALLOC_PARAMS, hUserdMemory) == 32 ? 1 : -1];
+typedef char nv_channel_alloc_instmem_off_check[
+    offsetof(NV_CHANNEL_ALLOC_PARAMS, instanceMem) == 432 ? 1 : -1];
+
 #define NVOS04_FLAGS_CHANNEL_TYPE_PHYSICAL  0x00000000u
 #define NVOS04_FLAGS_CHANNEL_CLIENT_MAP_FIFO  (1u << 24)
+
+/* Bloque de instancia del canal. Upstream (`r535_chan_alloc`) apunta
+ * `instanceMem` al bloque entero y `ramfcMem` a sus primeros 0x200 B, los dos
+ * en VRAM. */
+#define GSP_CHAN_INST_SIZE   0x1000u
+#define GSP_CHAN_RAMFC_SIZE  0x200u
 
 /* Métodos CE (class/clc6b5.h) — copia lineal virtual. */
 #define NVC6B5_SET_OBJECT                    0x00000000u
@@ -680,6 +718,42 @@ typedef char nvc56f_control_size_check[sizeof(Nvc56fControl) == 512 ? 1 : -1];
 #define NVCDC0_SET_INLINE_QMD_ADDRESS_A_INLINE_SIZE_INLINE_384  0x00000001u
 
 #define NVCDC0_QMDV05_00_QMD_TYPE_GRID_CTA   0x00000002u
+
+/* Campos del QMD v05, como pares (lo, hi) para `qmd_set_bits`. Transcritos de
+ * `classes/compute/clcdc0qmd.h` (open-gpu-doc), donde vienen como MW(hi:lo).
+ * OJO con los `_SHIFTED`: la dirección del programa va >>4, la del constant
+ * bank >>6 (⇒ alineada a 64 B) y su tamaño >>4 (⇒ múltiplo de 16 B). */
+#define QMDV05_QMD_TYPE                   151u, 153u
+#define QMDV05_RELEASE_ENABLE0            288u, 288u
+#define QMDV05_RELEASE_STRUCTURE_SIZE0    289u, 290u
+#define QMDV05_RELEASE_MEMBAR_TYPE0       291u, 291u
+#define QMDV05_RELEASE_SEM0_ADDR_LOWER    480u, 511u
+#define QMDV05_RELEASE_SEM0_ADDR_UPPER    512u, 536u
+#define QMDV05_RELEASE_SEM0_PAYLOAD_LOWER 544u, 575u
+#define QMDV05_QMD_MAJOR_VERSION          468u, 471u
+#define QMDV05_PROGRAM_ADDRESS_LOWER_S4   1024u, 1055u
+#define QMDV05_PROGRAM_ADDRESS_UPPER_S4   1056u, 1076u
+#define QMDV05_CTA_THREAD_DIMENSION0      1088u, 1103u
+#define QMDV05_CTA_THREAD_DIMENSION1      1104u, 1119u
+#define QMDV05_CTA_THREAD_DIMENSION2      1120u, 1127u
+#define QMDV05_REGISTER_COUNT             1128u, 1136u
+#define QMDV05_BARRIER_COUNT              1137u, 1141u
+#define QMDV05_SHARED_MEMORY_SIZE_S7      1152u, 1162u
+#define QMDV05_GRID_WIDTH                 1248u, 1279u
+#define QMDV05_GRID_HEIGHT                1280u, 1295u
+#define QMDV05_GRID_DEPTH                 1312u, 1327u
+#define QMDV05_CBANK0_ADDR_LOWER_S6       1344u, 1375u
+#define QMDV05_CBANK0_ADDR_UPPER_S6       1376u, 1394u
+#define QMDV05_CBANK0_SIZE_S4             1395u, 1407u
+#define QMDV05_CBANK0_VALID               1856u, 1856u
+#define QMDV05_CBANK0_INVALIDATE          1859u, 1859u
+
+#define NVCDC0_QMDV05_00_RELEASE_ENABLE_TRUE                        0x00000001u
+#define NVCDC0_QMDV05_00_RELEASE_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD  0x00000001u
+#define NVCDC0_QMDV05_00_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR           0x00000001u
+#define NVCDC0_QMDV05_00_CONSTANT_BUFFER_VALID_TRUE                 0x00000001u
+#define NVCDC0_QMDV05_00_CONSTANT_BUFFER_INVALIDATE_TRUE            0x00000001u
+#define NVCDC0_QMDV05_00_QMD_MAJOR_VERSION_V05                      0x00000005u
 
 typedef struct GspQmdV05 {
     NvU32 words[GSP_QMD_INLINE_WORDS];

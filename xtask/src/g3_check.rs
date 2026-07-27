@@ -164,6 +164,22 @@ pub fn run(_args: &[String]) {
         "G4d traducción releída de las tablas (log)",
         log_contains(&log, "traducción verificada") && !gpu_gone,
     );
+    // G4e es el primer criterio que no se puede satisfacer leyendo registros:
+    // exige que la GPU haya movido bytes por nuestras tablas de páginas. El
+    // "canal armado" va aparte justamente para que no se confunda con el GO.
+    print_criterion(
+        "G4e canal GPFIFO + CE armados (log)",
+        log_contains(&log, "CE listo handle=") && !gpu_gone,
+    );
+    print_criterion(
+        "G4e GO: readback sysmem→VRAM→sysmem (log)",
+        log_contains(&log, "CE readback verificado (G4e GO)") && !gpu_gone,
+    );
+    print_criterion(
+        "G4f SASS en VRAM + compute armado (log)",
+        log_contains(&log, "SASS de ") && log_contains(&log, "compute listo handle=")
+            && !gpu_gone,
+    );
     print_criterion(
         "G3b nvkm ACR port (inventario stubs)",
         root.join("lxdde/ports/nouveau/nvkm_ola2.list").exists(),

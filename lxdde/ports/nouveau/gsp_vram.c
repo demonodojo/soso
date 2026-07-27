@@ -23,10 +23,18 @@ int gsp_vram_init(struct gsp_vram *v, const struct gsp_static_info *info)
         uint64_t base = (info->region[i].base + VRAM_PAGE - 1) & ~(VRAM_PAGE - 1);
         uint64_t end = (info->region[i].base + info->region[i].size) & ~(VRAM_PAGE - 1);
 
-        /* Una región que empieza en 0 haría indistinguible "la primera página"
-         * de "no hay sitio", que es el valor de fallo de gsp_vram_alloc. En esta
-         * tarjeta no pasa, pero más vale enterarse aquí que en un PTE. */
-        if (base == 0 || end <= base) {
+        /* El offset 0 es una dirección de VRAM perfectamente válida: los
+         * offsets van desde el inicio del framebuffer, así que la primera
+         * región utilizable empieza ahí. Lo que no puede devolverse es un 0,
+         * porque `gsp_vram_alloc` lo usa como "no hay sitio". Se reserva la
+         * primera página y en paz — descartar la región entera dejaba la
+         * tarjeta sin un solo byte repartible (GB205, 2026-07-27: 11902 MiB
+         * utilizables en una única región basada en 0, y G4d se quedó sin
+         * VRAM con el GSP ya arrancado). */
+        if (base == 0) {
+            base = VRAM_PAGE;
+        }
+        if (end <= base) {
             lx_printk("nouveau-lx: región de VRAM %u inservible (0x%llx+0x%llx)\n",
                       i, (unsigned long long)info->region[i].base,
                       (unsigned long long)info->region[i].size);

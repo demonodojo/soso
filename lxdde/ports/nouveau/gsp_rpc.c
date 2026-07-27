@@ -166,6 +166,11 @@ static const char *rpc_function_name(uint32_t fn)
 static const char *rpc_status_name(uint32_t status)
 {
     switch (status) {
+    /* El que devuelve el RM_ALLOC del canal GPFIFO (2026-07-27). La numeración
+     * de `nvstatuscodes.h` es correlativa y cuadra con los seis que ya había
+     * aquí (0x51/0x55/0x56/0x59/0x65/0x66), así que 0x3b es INVALID_PARAMETER:
+     * RM entendió la petición y le pareció mal el contenido — cosa nuestra. */
+    case 0x3bu: return "INVALID_PARAMETER";
     case 0x51u: return "NO_MEMORY";
     case 0x55u: return "NOT_READY";
     case 0x56u: return "NOT_SUPPORTED";

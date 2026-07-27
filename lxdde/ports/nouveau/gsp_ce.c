@@ -97,12 +97,13 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
     pb_write(c, &pos, 1);
 
     sem_va = c->notifier_va;
+    ce->pending = ++ce->seq;
     pb_method(c, &pos, 0, NVC6B5_SET_SEMAPHORE_A, 1);
     pb_write(c, &pos, (uint32_t)(sem_va >> 32));
     pb_method(c, &pos, 0, NVC6B5_SET_SEMAPHORE_B, 1);
     pb_write(c, &pos, (uint32_t)sem_va);
     pb_method(c, &pos, 0, NVC6B5_SET_SEMAPHORE_PAYLOAD, 1);
-    pb_write(c, &pos, 1u);
+    pb_write(c, &pos, ce->pending);
 
     launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
              NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
@@ -125,10 +126,45 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
     return 0;
 }
 
+int gsp_ce_wait(struct gsp_ce *ce, unsigned ms)
+{
+    const volatile uint32_t *sem;
+    unsigned waited;
+
+    if (!ce || !ce->ready || !ce->chan || !ce->chan->notifier.va) {
+        return -1;
+    }
+    sem = (const volatile uint32_t *)ce->chan->notifier.va;
+
+    for (waited = 0; waited <= ms; waited++) {
+        __asm__ __volatile__("mfence" ::: "memory");
+        /* Comparación con resta: el payload es monótono y así un envoltorio del
+         * contador de 32 bits no deja la espera colgada para siempre. */
+        if ((int32_t)(*sem - ce->pending) >= 0) {
+            return 0;
+        }
+        lx_mdelay(1);
+    }
+    lx_printk("nouveau-lx: CE — semáforo no llegó a %u en %u ms (vale %u)\n",
+              ce->pending, ms, *sem);
+    return -1;
+}
+
+int gsp_ce_copy_sync(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
+                     uint32_t size, unsigned ms)
+{
+    unsigned pb_off = 0, pb_len = 0;
+
+    if (gsp_ce_encode_copy(ce, dst_va, src_va, size, &pb_off, &pb_len) != 0 ||
+        gsp_chan_submit(ce->chan, pb_off, pb_len) != 0) {
+        return -1;
+    }
+    return gsp_ce_wait(ce, ms);
+}
+
 int gsp_ce_selftest(struct gsp_ce *ce, uint64_t scratch_va, uint64_t vram_va,
                     void *scratch_cpu, uint32_t size)
 {
-    unsigned pb_off = 0, pb_len = 0;
     unsigned i;
     uint32_t *pat;
 
@@ -141,15 +177,34 @@ int gsp_ce_selftest(struct gsp_ce *ce, uint64_t scratch_va, uint64_t vram_va,
         pat[i] = 0xa5c3e1b4u ^ (uint32_t)i;
     }
     memset(ce->chan->notifier.va, 0, ce->chan->notifier.size);
+    ce->seq = 0;
 
-    if (gsp_ce_encode_copy(ce, vram_va, scratch_va, size, &pb_off, &pb_len) != 0 ||
-        gsp_chan_submit(ce->chan, pb_off, pb_len) != 0) {
-        lx_printk("nouveau-lx: CE selftest — fallo al encolar copia → VRAM\n");
+    if (gsp_ce_copy_sync(ce, vram_va, scratch_va, size, GSP_CE_WAIT_MS) != 0) {
+        lx_printk("nouveau-lx: CE selftest — la copia sysmem → VRAM no señalizó\n");
         return -1;
     }
 
-    lx_printk("nouveau-lx: CE selftest encolado (readback HW pendiente)\n");
-    return -1;
+    /* Borrar el origen antes de la vuelta: si no, un readback que no hiciera
+     * nada dejaría el patrón intacto y la comparación pasaría igual. Este
+     * memset es lo que convierte la prueba en falsificable. */
+    memset(scratch_cpu, 0, size);
+    __asm__ __volatile__("mfence" ::: "memory");
+
+    if (gsp_ce_copy_sync(ce, scratch_va, vram_va, size, GSP_CE_WAIT_MS) != 0) {
+        lx_printk("nouveau-lx: CE selftest — la copia VRAM → sysmem no señalizó\n");
+        return -1;
+    }
+
+    for (i = 0; i < size / 4; i++) {
+        if (pat[i] != (0xa5c3e1b4u ^ (uint32_t)i)) {
+            lx_printk("nouveau-lx: CE selftest — dword %u vale 0x%08x, esperaba 0x%08x\n",
+                      i, pat[i], 0xa5c3e1b4u ^ (uint32_t)i);
+            return -1;
+        }
+    }
+
+    lx_printk("nouveau-lx: CE selftest OK — %u B ida y vuelta por VRAM\n", size);
+    return 0;
 }
 
 void gsp_ce_fini(struct gsp_ce *ce)
