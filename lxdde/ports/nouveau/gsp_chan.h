@@ -18,6 +18,8 @@
 #define GSP_CHAN_USERD_SIZE      4096u
 #define GSP_CHAN_PB_SIZE         4096u
 #define GSP_CHAN_NOTIFIER_SIZE   4096u
+/* Tope de cordura para lo que RM conteste como tamaño del method buffer. */
+#define GSP_CHAN_MTHDBUF_MAX     (1u << 20)
 
 /* Sysmem mapeada en el vaspace, justo detrás de la página scratch de G4d. */
 #define GSP_CHAN_VA_BASE         0x0000010020000000ull
@@ -30,6 +32,11 @@ struct gsp_chan {
     struct gsp_dma_buf userd;
     struct gsp_dma_buf pushbuf;
     struct gsp_dma_buf notifier;
+    /* Method buffer del CE. No es el pushbuffer —eso era el error—: es un búfer
+     * aparte que RM usa para reinyectar métodos tras un fallo de página, y su
+     * tamaño lo dicta RM, no nosotros. */
+    struct gsp_dma_buf mthdbuf;
+    uint32_t mthdbuf_size;
     uint64_t gpfifo_va;
     uint64_t userd_va;
     uint64_t pushbuf_va;

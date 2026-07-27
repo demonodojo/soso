@@ -659,11 +659,44 @@ typedef char nv_channel_alloc_instmem_off_check[
 #define NVOS04_FLAGS_CHANNEL_TYPE_PHYSICAL  0x00000000u
 #define NVOS04_FLAGS_CHANNEL_CLIENT_MAP_FIFO  (1u << 24)
 
+/* `flags` de NVOS04 es un campo de bits, y casi todos los subcampos que pone
+ * `r535_chan_alloc` valen FALSE=0 — o sea que un `flags` a cero es *casi*
+ * correcto. Los dos que NO son cero:
+ *
+ * - PRIVILEGED_CHANNEL (5:5), que va emparejado con el PRIVILEGE de
+ *   `internalFlags`: upstream mueve los dos según su `priv`, y pedir ADMIN en
+ *   uno mientras el otro dice FALSE es una combinación que no manda nunca.
+ * - CHANNEL_USERD_INDEX_PAGE_FIXED (21:21), que upstream pone a TRUE siempre,
+ *   con PAGE_VALUE = chid / CHID_PER_USERD e INDEX_VALUE = chid %
+ *   CHID_PER_USERD (CHID_PER_USERD son 8: ocho USERD de 0x200 B por página).
+ *   Con chid=0 los dos valores son 0 y el único bit que queda es este.
+ */
+#define NVOS04_FLAGS_PRIVILEGED_CHANNEL_TRUE            (1u << 5)
+#define NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(i)       (((i) & 0x7u) << 8)
+#define NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_VALUE(p)  (((p) & 0x1ffu) << 12)
+#define NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED_TRUE (1u << 21)
+#define NV_CHID_PER_USERD                               8u
+
+/* El tamaño del method buffer no se inventa: se le pregunta a RM. Upstream lo
+ * hace en `r535_fifo_ctor` con este control sobre el SUBDEVICE, y guarda el
+ * resultado en `fifo->rm.mthdbuf_size` para dárselo a cada canal. */
+#define NV2080_CTRL_CMD_CE_GET_FAULT_METHOD_BUFFER_SIZE  0x20802a08u
+
+typedef struct NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS {
+    NvU32 size;
+} NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS;
+
 /* Bloque de instancia del canal. Upstream (`r535_chan_alloc`) apunta
  * `instanceMem` al bloque entero y `ramfcMem` a sus primeros 0x200 B, los dos
  * en VRAM. */
 #define GSP_CHAN_INST_SIZE   0x1000u
 #define GSP_CHAN_RAMFC_SIZE  0x200u
+
+/* Tamaño del USERD **del chip**, no de la página que lo aloja: `gv100_chan_userd`
+ * (que usan tu102, ga100 y por herencia Blackwell) declara `.size = 0x200`, y
+ * cuadra con CHID_PER_USERD=8. Declararle a RM los 4096 de la página entera era
+ * pedirle un USERD ocho veces el que tiene el chip. */
+#define GSP_CHAN_USERD_HW_SIZE  0x200u
 
 /* Métodos CE (class/clc6b5.h) — copia lineal virtual. */
 #define NVC6B5_SET_OBJECT                    0x00000000u

@@ -1299,6 +1299,11 @@ static int check_compute_params(struct gsp_compute *cp)
     return 0;
 }
 
+/* Lo que el RM de mentira contesta a CE_GET_FAULT_METHOD_BUFFER_SIZE. El valor
+ * concreto da igual —en HW lo dice la tarjeta—; lo que se comprueba es que se
+ * pregunte y que lo contestado llegue tal cual al descriptor. */
+#define FAKE_MTHDBUF_SIZE  0x1000u
+
 static int check_g4e_chan_ce(const struct gsp_libos *lo)
 {
     struct gsp_rpc rpc;
@@ -1313,6 +1318,8 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     unsigned char *cmdq_base = (unsigned char *)lo->shm.va + lo->cmdq_offset;
     rpc_gsp_rm_alloc alloc_ok;
     unsigned char ctrl_ok[sizeof(rpc_gsp_rm_control)];
+    unsigned char ctrl_mthdbuf[sizeof(rpc_gsp_rm_control) +
+                               sizeof(NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS)];
     uint32_t base, wptr0;
     unsigned pb_off = 0, pb_len = 0;
     unsigned i;
@@ -1333,14 +1340,27 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     }
     fake_rpc_post_payload(lo, (base + 4) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                           0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    /* Lo primero que hace ahora el canal es preguntar el tamaño del method
+     * buffer, así que hay que contestarle antes que a su RM_ALLOC. Por eso todos
+     * los índices de aquí abajo van uno más que antes. */
+    {
+        NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS *sz =
+            (NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS *)
+                (ctrl_mthdbuf + sizeof(rpc_gsp_rm_control));
+
+        memset(ctrl_mthdbuf, 0, sizeof(ctrl_mthdbuf));
+        sz->size = FAKE_MTHDBUF_SIZE;
+        fake_rpc_post_payload(lo, (base + 5) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                              0, ctrl_mthdbuf, (uint32_t)sizeof(ctrl_mthdbuf));
+    }
     /* Canal + CE + compute. */
-    fake_rpc_post_payload(lo, (base + 5) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
-                          0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
     fake_rpc_post_payload(lo, (base + 6) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
     fake_rpc_post_payload(lo, (base + 7) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
-    msgq->tx.writePtr = (base + 8) % 63;
+    fake_rpc_post_payload(lo, (base + 8) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                          0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    msgq->tx.writePtr = (base + 9) % 63;
 
     wptr0 = *q.wptr;
     if (gsp_vmm_init(&q, &rpc, &v) != 0) {
@@ -1364,8 +1384,10 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     }
 
     {
+        /* +6 y no +5: el canal manda ahora un RM_CONTROL (tamaño del method
+         * buffer) antes de su RM_ALLOC. */
         const unsigned char *entry = cmdq_base + 4096 +
-                                     (unsigned long)((wptr0 + 5) % 63) * 4096;
+                                     (unsigned long)((wptr0 + 6) % 63) * 4096;
         const struct gsp_rpc_hdr *hdr =
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
@@ -1435,7 +1457,53 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                    p->subDeviceId, p->flags);
             return -1;
         }
+        /* El `flags` que manda upstream con chid=0 y priv=true es exactamente
+         * PRIVILEGED_CHANNEL (bit 5) | USERD_INDEX_PAGE_FIXED (bit 21) = todos
+         * los demás subcampos son FALSE=0. El número crudo es el ancla. */
+        if (p->flags != 0x00200020u) {
+            printf("FALLO: flags=0x%08x, upstream manda 0x00200020 (PRIVILEGED |"
+                   " USERD_INDEX_PAGE_FIXED)\n", p->flags);
+            return -1;
+        }
+        /* Y el privilegio tiene que decir lo mismo en los dos sitios. */
+        if ((p->internalFlags & 0x3u) != 1u) {
+            printf("FALLO: internalFlags privilegio=%u con PRIVILEGED_CHANNEL puesto\n",
+                   p->internalFlags & 0x3u);
+            return -1;
+        }
+        /* La VA del ring, no su dirección física: si esto vuelve a ser `phys`,
+         * RM programa el PBDMA para buscar las entradas donde no están. */
+        if (p->gpFifoOffset != chan.gpfifo_va || p->gpFifoOffset == chan.gpfifo.phys) {
+            printf("FALLO: gpFifoOffset=0x%llx (VA esperada 0x%llx, phys 0x%llx)\n",
+                   (unsigned long long)p->gpFifoOffset,
+                   (unsigned long long)chan.gpfifo_va,
+                   (unsigned long long)chan.gpfifo.phys);
+            return -1;
+        }
+        /* 0x200 = `gv100_chan_userd.size`. La página que lo aloja son 4096, pero
+         * eso no es lo que se le declara a RM. */
+        if (p->userdMem.size != 0x200u) {
+            printf("FALLO: userdMem.size=%llu, el USERD del chip son 0x200\n",
+                   (unsigned long long)p->userdMem.size);
+            return -1;
+        }
+        /* Method buffer: búfer propio (no el pushbuffer) y del tamaño que dijo
+         * RM por CE_GET_FAULT_METHOD_BUFFER_SIZE. */
+        if (p->mthdbufMem.base != chan.mthdbuf.phys ||
+            p->mthdbufMem.base == chan.pushbuf.phys ||
+            p->mthdbufMem.size != FAKE_MTHDBUF_SIZE) {
+            printf("FALLO: mthdbufMem base=0x%llx size=%llu (esperaba 0x%llx/%u, y "
+                   "NO el pushbuffer 0x%llx)\n",
+                   (unsigned long long)p->mthdbufMem.base,
+                   (unsigned long long)p->mthdbufMem.size,
+                   (unsigned long long)chan.mthdbuf.phys, FAKE_MTHDBUF_SIZE,
+                   (unsigned long long)chan.pushbuf.phys);
+            return -1;
+        }
     }
+    printf("OK: canal contra r535_chan_alloc — flags 0x%08x, GPFIFO por VA, "
+           "USERD 0x200, method buffer propio de %u B\n",
+           0x00200020u, chan.mthdbuf_size);
     printf("OK: AMPERE_CHANNEL_GPFIFO_A alloc params (layout r570, inst+ramfc en VRAM)\n");
 
     if (chan.userd_ctl->GPPut != 0 || chan.gpput != 0) {
@@ -1450,7 +1518,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
 
     {
         const unsigned char *entry = cmdq_base + 4096 +
-                                     (unsigned long)((wptr0 + 6) % 63) * 4096;
+                                     (unsigned long)((wptr0 + 7) % 63) * 4096;
         const struct gsp_rpc_hdr *hdr =
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
@@ -1521,7 +1589,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         GspQmdV05 qmd;
         unsigned qmd_off = 0, qmd_len = 0;
         const unsigned char *entry = cmdq_base + 4096 +
-                                     (unsigned long)((wptr0 + 7) % 63) * 4096;
+                                     (unsigned long)((wptr0 + 8) % 63) * 4096;
         const struct gsp_rpc_hdr *hdr =
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
