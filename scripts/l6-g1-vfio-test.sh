@@ -125,12 +125,17 @@ echo "cargo: ${cargo_bin}"
 ssh_key="${run_home}/.ssh/id_ed25519"
 [[ -f "$ssh_key" ]] || ssh_key="${ROOT}/target/soso_test_key"
 
+# El sshd de soso NO atiende peticiones `exec`: sólo abre shell interactiva.
+# Pasar el comando como argv daba `exec request failed on channel 0` y el halt
+# no llegaba a ejecutarse nunca — el script acababa avisando de que el guest no
+# se había apagado con el guest perfectamente vivo en su prompt (2026-07-27).
+# El comando va por stdin, como hace el arnés de `cargo xtask test`.
 soso_ssh() {
-  sudo -u "$run_user" -- env "HOME=${run_home}" \
+  printf '%s\n' "$*" | sudo -u "$run_user" -- env "HOME=${run_home}" \
     ssh -i "$ssh_key" -p 2222 \
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR -o ConnectTimeout=10 \
-        soso@localhost "$@" </dev/null >/dev/null 2>&1
+        soso@localhost >/dev/null 2>&1
 }
 
 # NO se mata QEMU con `timeout`: cerrar el proceso con el GSP vivo hace que
@@ -146,6 +151,106 @@ soso_ssh() {
 # quedó—. Ahora la salida va por un FIFO a `dd oflag=dsync`, que sincroniza cada
 # trozo antes de leer el siguiente. dd tiene que seguir vaciando el FIFO mientras
 # QEMU viva, o el escritor se bloquearía al llenarse la tubería.
+# Red contra el cuelgue de la FLR de cierre (2026-07-27, panic con traza en
+# /var/crash/202607271829): al cerrar QEMU el fd de vfio,
+# vfio_pci_core_disable() fuerza una FLR y pci_dev_wait() sondea el espacio de
+# configuración por port IO CF8/CFC con pci_config_lock tomado e IRQs
+# desactivadas. Si el enlace PCIe ya está muerto —y el COT lo mata: aquel día la
+# tarjeta se cayó del bus a los 36 s de arrancar el guest— esa lectura no
+# completa NUNCA: hard LOCKUP en pci_conf1_read+0xd5 y panic.
+#
+# Esto pasó con un apagado del guest PERFECTAMENTE ordenado (halt por SSH, soso
+# cerró el GSP y salió solo), así que SOSO_G1_FORCE_KILL no protege de nada
+# aquí: no depende de cómo muera QEMU, sino de que la tarjeta ya estuviera caída.
+# Vaciar reset_method desactiva todos los métodos de reset del dispositivo
+# (pci.c reset_method_store: sysfs_streq(buf,"") → reset_methods[0]=0), así que
+# vfio no intenta la FLR al cerrar y el host sobrevive para contarlo.
+#
+# Al devolverlo, el valor exacto que había puede ser IRRECUPERABLE, y eso no es
+# un fallo nuestro: 01:00.0 anuncia 'flr bus', pero escribir 'bus' da EINVAL
+# ("Unsupported reset method 'bus'"). El probe de pci_reset_bus_function() exige
+# que el dispositivo esté SOLO en su bus (pci_parent_bus_reset: cualquier vecino
+# en bus->devices → -ENOTTY) y la función de audio 01:00.1 comparte el bus 01.
+# Que 'bus' figure ahí es un artefacto del orden de enumeración: pci_device_add()
+# llama a pci_init_capabilities() —y con ella a pci_init_reset_methods()— ANTES
+# del list_add_tail() a bus->devices, así que al sondear 01:00.0 el bus estaba
+# vacío y 'bus' pasó. No vuelve a pasar nunca. Por lo mismo 01:00.1 no tiene ni
+# fichero reset_method: sin ningún método el atributo no se crea
+# (pci_dev_reset_method_attr_is_visible → pci_reset_supported).
+# Así que se intenta el valor exacto y, si el kernel lo rechaza, "default"
+# (→ pci_init_reset_methods()), que aquí deja 'flr'. Eso NO es una re-derivación
+# defectuosa: es la respuesta correcta para el bus tal como está ahora.
+declare -A saved_reset=()
+disabled_reset=()
+for path in /sys/bus/pci/devices/0000:${slot}.*; do
+  [[ -w "${path}/reset_method" ]] || continue
+  prev=$(<"${path}/reset_method")
+  # Un write de 0 bytes puede no llegar al store handler; hay que mandar el "\n",
+  # que sysfs_streq() recorta antes de comparar con "".
+  printf '\n' >"${path}/reset_method" 2>/dev/null || true
+  if [[ -z "$(<"${path}/reset_method")" ]]; then
+    disabled_reset+=("$path")
+    [[ -n "$prev" ]] && saved_reset["$path"]="$prev"
+    echo "red: $(basename "$path") reset_method '${prev:-(ya vacío)}' → (ninguno)"
+  else
+    echo "AVISO: no se pudo desactivar reset_method en $(basename "$path");" >&2
+    echo "       si la GPU se cae del bus, la FLR de cierre puede colgar el host." >&2
+  fi
+done
+
+# Devolver reset_method sólo si la tarjeta sigue en el bus. Para decidirlo NO se
+# lee el espacio de configuración desde el host: esa lectura es exactamente la
+# que se cuelga si el enlace está muerto. Las fuentes son el propio guest, que
+# lo registra, y los AER del root port.
+#
+# El AER hay que buscarlo también en el ROOT PORT, no sólo en el BDF de la GPU:
+# el 2026-07-27 la tormenta fue casi toda del puerto (00:06.0, "Data Link Layer",
+# Rollover+Timeout) y sólo UNA línea llevaba el 01:00.0. Aquí conviene pasarse de
+# prudente: un falso positivo cuesta un reboot, un falso negativo cuelga el host.
+restore_reset_method() {
+  local path parent err_pat bdf_pat
+  # Una línea cuenta como daño si lleva firma de ERROR *y* menciona la GPU o su
+  # puerto. Sin la firma, `AER.*<bdf>` daría positivo con el inofensivo
+  # "pcieport 0000:00:06.0: AER: enabled with IRQ 124" de cualquier arranque sano.
+  err_pat='PCIe Bus Error|error message received|AER: (Multiple )?(Corrected|Correctable|Uncorrectable|Fatal|Non-Fatal)'
+  bdf_pat="0000:${BDF}"
+  parent=$(basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/${FULL}")")")
+  [[ "$parent" == 0000:* ]] && bdf_pat="${bdf_pat}|${parent}"
+  if grep -q 'GPU fuera del bus\|status=gone' "$log" 2>/dev/null ||
+     dmesg 2>/dev/null | grep -E "$err_pat" | grep -qE "$bdf_pat"; then
+    echo "" >&2
+    echo "AVISO: la dGPU se cayó del bus durante la prueba (lo dice el log del guest" >&2
+    echo "       o hay AER del root port). reset_method se queda DESACTIVADO: una FLR" >&2
+    echo "       sobre un enlace muerto cuelga el host sin remedio ni traza útil." >&2
+    echo "       La tarjeta no vuelve sana sin un ciclo de alimentación — 'sudo reboot'" >&2
+    echo "       la devuelve a 32 GT/s x8 (comprobado el 2026-07-27)." >&2
+    return
+  fi
+  for path in "${disabled_reset[@]}"; do
+    local want="${saved_reset[$path]:-default}" cand wrote="" now
+    # Escribir reset_method no resetea nada y el probe de 'flr' mira devcap
+    # cacheado, sin tocar el espacio de configuración: es seguro incluso si la
+    # tarjeta estuviera muda (que aquí ya sabemos que no lo está).
+    for cand in "$want" default; do
+      printf '%s\n' "$cand" >"${path}/reset_method" 2>/dev/null || continue
+      wrote="$cand"
+      break
+    done
+    if [[ -z "$wrote" ]]; then
+      echo "AVISO: no se pudo restaurar reset_method en $(basename "$path"): queda" >&2
+      echo "       DESACTIVADO hasta el próximo reinicio, o sea que ni vfio ni el" >&2
+      echo "       driver nvidia podrán resetear la GPU (pci_reset_function → -ENOTTY)." >&2
+      continue
+    fi
+    now=$(<"${path}/reset_method")
+    echo "red: $(basename "$path") reset_method restaurado (${now})"
+    if [[ "$wrote" == "default" && "$want" != "default" ]]; then
+      echo "nota: '${want}' no se pudo reponer tal cual (el kernel rechaza 'bus' con la" >&2
+      echo "      función de audio en el mismo bus); 'default' dejó '${now}'." >&2
+    fi
+  done
+}
+
 mkfifo -m 666 "$fifo"
 dd of="$log" bs=4096 oflag=dsync status=none <"$fifo" &
 dd_pid=$!
@@ -212,6 +317,14 @@ if [[ "$qemu_vivo" == 0 ]]; then
   # dd sale por EOF cuando se cierra el último extremo de escritura del FIFO.
   wait "$dd_pid" 2>/dev/null || true
   rm -f "$fifo"
+  # QEMU ya cerró el fd de vfio: la FLR peligrosa, si tocaba, ya se saltó.
+  if [[ ${#disabled_reset[@]} -gt 0 ]]; then
+    restore_reset_method
+  fi
+else
+  echo "       reset_method sigue desactivado mientras QEMU viva: el peligro está en" >&2
+  echo "       el cierre del fd, no ahora. Para rearmarlo cuando la GPU esté sana:" >&2
+  echo "         echo default | sudo tee /sys/bus/pci/devices/${FULL}/reset_method" >&2
 fi
 
 if grep -q 'GSP-RM apagado' "$log"; then
