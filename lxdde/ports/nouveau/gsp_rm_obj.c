@@ -42,12 +42,22 @@ int gsp_rm_alloc(struct gsp_rm *rm, uint32_t parent, uint32_t handle, uint32_t c
     uint32_t transport = 0;
     int ret = -1;
 
+    /* Estos dos `return -1` eran MUDOS y costaron un ciclo de hardware entero
+     * (2026-07-28): un control rechazado sin una sola línea que dijera por qué
+     * obliga a razonar a ciegas sobre si el RPC se mandó o no. Si falla algo aquí
+     * se dice, que es la norma en el resto del port. */
     if (!rm || !rm->q || !rm->rpc || params_size > RM_PARAMS_MAX) {
+        lx_printk("nouveau-lx: RM_ALLOC cls=0x%x sin poder mandarse "
+                  "(rm=%d q=%d rpc=%d params=%u/%u)\n",
+                  cls, rm ? 1 : 0, (rm && rm->q) ? 1 : 0, (rm && rm->rpc) ? 1 : 0,
+                  params_size, RM_PARAMS_MAX);
         return -1;
     }
     buf = lx_kzalloc(cap, GFP_KERNEL);
     reply = lx_kzalloc(cap, GFP_KERNEL);
     if (!buf || !reply) {
+        lx_printk("nouveau-lx: RM_ALLOC cls=0x%x sin memoria (2 x %lu B)\n",
+                  cls, cap);
         lx_kfree(buf);
         lx_kfree(reply);
         return -1;
@@ -104,12 +114,19 @@ int gsp_rm_control(struct gsp_rm *rm, uint32_t object, uint32_t cmd,
     uint32_t transport = 0;
     int ret = -1;
 
+    /* Igual que en gsp_rm_alloc: nada de `return -1` a oscuras. */
     if (!rm || !rm->q || !rm->rpc || params_size > RM_PARAMS_MAX) {
+        lx_printk("nouveau-lx: RM_CONTROL cmd=0x%08x sin poder mandarse "
+                  "(rm=%d q=%d rpc=%d params=%u/%u)\n",
+                  cmd, rm ? 1 : 0, (rm && rm->q) ? 1 : 0, (rm && rm->rpc) ? 1 : 0,
+                  params_size, RM_PARAMS_MAX);
         return -1;
     }
     buf = lx_kzalloc(cap, GFP_KERNEL);
     reply = lx_kzalloc(cap, GFP_KERNEL);
     if (!buf || !reply) {
+        lx_printk("nouveau-lx: RM_CONTROL cmd=0x%08x sin memoria (2 x %lu B)\n",
+                  cmd, cap);
         lx_kfree(buf);
         lx_kfree(reply);
         return -1;

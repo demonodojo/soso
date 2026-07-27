@@ -19,6 +19,9 @@ static int chan_query_mthdbuf_size(struct gsp_chan *c, uint32_t *size)
     uint32_t status = 0;
 
     memset(&ctrl, 0, sizeof(ctrl));
+    lx_printk("nouveau-lx: preguntando el tamaño del method buffer "
+              "(sub=0x%08x, %u B de params)\n",
+              c->rm->subdevice, (unsigned)sizeof(ctrl));
     if (gsp_rm_control(c->rm, c->rm->subdevice,
                        NV2080_CTRL_CMD_CE_GET_FAULT_METHOD_BUFFER_SIZE,
                        &ctrl, (uint32_t)sizeof(ctrl), &status) != 0) {
