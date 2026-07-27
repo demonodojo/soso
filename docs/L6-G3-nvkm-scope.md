@@ -94,10 +94,9 @@ solo **4 dummies restantes, TODOS HW/ROM** (`nvbios_image`/`nvbios_shadow`/`bit_
 = VBIOS por PCI ROM, `nvkm_pci_msi_rearm` = PCI MSI). Shims nuevos: bitmap ops
 (`find_first_zero_bit`, `__set_bit`), `atomic_inc_return`.
 
-Siguiente (requiere G1/HW): cablear `device->pri` con reads/writes reales
-(`nvkm_rd32/wr32` ↔ `gsp_mmio.c`), ejecutar la secuencia falcon/ACR real (reset,
-WPR, RPC) → boot GSP no-soft; luego el `engine/gr` por chip (contexto gráfico,
-métodos, firmware gr) para el canal de cómputo real (G4 completo).
+**G4e** escrito + hostcheck (`gsp_chan`, `gsp_ce`); GO HW (readback VRAM vía CE)
+pendiente de ciclo VFIO. Siguiente tras GO G4e: **G4f** (SASS). G3b y G4a–c ya
+validados en GB205 (2026-07-25).
 
 ### Ola 2 — ACR + falcon (lx-native, antes del port nvkm completo)
 
@@ -125,12 +124,13 @@ sigue pendiente para boot hw real.
 
 ### Ola 4 — Canal compute (G4)
 
-| Módulo nvkm | Notas |
-|-------------|-------|
-| `engine/gr/*.c` | Colas, channels, kickoff |
-| `engine/falcon.c` (si aplica GB205) | ucode auxiliar |
+| Módulo nvkm / lxdde | Notas |
+|---------------------|-------|
+| `engine/dma/*`, canal GPFIFO | **G4e** — copia CE en VRAM (hostcheck OK; GO HW pendiente) |
+| `engine/gr/*.c` | **G4f** — SAXPY SASS |
 
-**Criterio ola 4:** `lx_nouveau_submit_saxpy` ejecuta en GPU (no loop CPU).
+**Criterio G4e:** readback correcto tras copia CE. **Criterio G4f:**
+`lx_nouveau_submit_saxpy` con `on_gpu=1` real (no loop CPU).
 
 ## Inventario de símbolos (workflow)
 
@@ -446,7 +446,9 @@ bootloader, las PTEs de la memoria compartida, el `id8` de las regiones libos, e
 enlace de los boot params, que la imagen FMC copiada es idéntica a la del ELF, y —
 lo que más importa ahora— **el paquete COT byte a byte**: 868 B, las dos cabeceras,
 la firma en sus offsets, el relleno a cero y la FRTS. También comprueba que un
-rechazo del FSP se detecta en vez de darse por bueno. El ciclo en hardware pide
+rechazo del FSP se detecta en vez de darse por bueno. También cubre **G4e**
+(`gsp_chan`, `gsp_ce`: ALLOC canal/CE, geometría GPFIFO/USERD, encoder pushbuffer,
+fini CE→canal→VMM). El ciclo en hardware pide
 sudo, VFIO y ~90 s; este tarda un segundo, y desde el paso 6 es además la única
 forma de cazar un paquete mal formado sin arriesgar un cuelgue de la GPU.
 
@@ -501,9 +503,9 @@ cmdq **antes de arrancar el GSP** (justo después de `libos_init`). Quedan encol
 y GSP-RM las consume como parte de su propia inicialización. Nosotros no enviamos
 ninguna de las dos, así que GSP-RM se inicializa a ciegas.
 
-**Siguiente:** el envío por la cmdq (`r535_gsp_cmdq_push`, `r535_gsp_rpc_push`) y
-encolar esas dos RPCs antes del COT. Con eso `GSP_INIT_DONE` debería llegar limpio.
-En Ampere, además, port `subdev/acr/*` vía `nvkm_ola2.list` (sustituir lx-native).
+**Siguiente (2026-07-25, hecho):** el envío por la cmdq (`gsp_cmdq.c`) y
+`SET_SYSTEM_INFO`/`SET_REGISTRY` antes del COT. `GSP_INIT_DONE` llega limpio;
+G4a–c cerrados en GB205. Ver sección G4 más abajo.
 
 Log objetivo G3b (hardware real, tras G1):
 
@@ -514,3 +516,31 @@ nouveau-lx: GSP booted
 ```
 
 (sin la palabra `soft`).
+
+## G4 — RPC, RM y compute (2026-07-25 →)
+
+Tras G3b, el bring-up avanza por sub-fases. Estado al **2026-07-27**:
+
+| Sub-fase | Módulos | Criterio | Estado |
+|----------|---------|----------|--------|
+| **G4a** | `gsp_rpc.c` (recv), `SET_SYSTEM_INFO`/`SET_REGISTRY` | `GSP_INIT_DONE`, `GSP-RM listo` | **GO** HW |
+| **G4b** | `gsp_cmdq.c` (`gsp_cmdq_call`) | Round-trip síncrono | **GO** |
+| **G4c** | `gsp_rm_obj.c` | Cliente/device/subdevice + static info | **GO** HW |
+| **G4d** | `gsp_vram.c`, `gsp_vmm.c` | VER3 + `SET_PAGE_DIRECTORY` | Escrito + hostcheck |
+| **G4e** | `gsp_chan.c`, `gsp_ce.c` | ALLOC canal/CE, PB, USERD; readback VRAM | **Escrito + hostcheck** |
+| **G4f** | `engine/gr`, `saxpy.sass.bin` | `SYS_GPU_SUBMIT`, `on_gpu=1` | Bloqueado toolchain |
+
+**GO G4e en HW** (cuando puedas VFIO): el CE ejercita traducción GPU, canal,
+pushbuffer, timbre y semáforo sin necesitar SASS. Los mapeos de G4d/G4e en
+`gsp_bringup.c` (`G4D_VA_BASE`, `GSP_CHAN_VA_BASE`, scratch) están listos para
+readback.
+
+**G4f:** `lxdde/ports/nouveau/saxpy.sass.bin` mide 0 bytes. GB205 = `sm_120`;
+instalar CUDA ≥ 12.8 en el host solo por `ptxas` (funciona con GPU en VFIO), o
+validar en RTX 3060 (Ampere).
+
+**Apagado:** `gsp_fini.c` — `halt` / `SYS_GPU_SUBMIT` GFINI antes de soltar VFIO
+(gotcha 6).
+
+Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh` (cubre G4d, G4e canal/CE
++ fini).

@@ -454,14 +454,20 @@ dummies restantes, todos dependientes de HW/ROM. Detalle: `docs/L6-G3-nvkm-scope
 
 | Fase | Entregable | Estado |
 |------|------------|--------|
-| G1 | NV_PMC_BOOT_0 bajo VFIO | **Pendiente IOMMU en placa** (VT-d en BIOS; acción del usuario) |
+| G1 | NV_PMC_BOOT_0 bajo VFIO | **GO** (2026-07-25, GB205, `0x1b5000a1`) |
 | G2 | Firmware gb205 + set ga102 (3060) en rootfs | **Go** |
-| G3 | GSP boot nvkm (sin KMS) | **Go (software)** — grafo nvkm real en runtime; boot HW pendiente de G1 |
-| G4 | Saxpy SASS real (`SYS_GPU_SUBMIT`) | Infra base integrada; compute real tras G1 |
+| G3 | GSP boot nvkm (sin KMS) | **GO en HW** — `GSP booted (hw, GSP-FMC vía FSP)` |
+| G4a–c | RPC GSP-RM + objetos RM | **GO en HW** (2026-07-25) |
+| G4d | VRAM + VA space externo (VER3) | Escrito + hostcheck; validación HW con CE |
+| G4e | Canal GPFIFO + CE (`gsp_chan`, `gsp_ce`) | **Escrito + hostcheck**; GO HW pendiente VFIO |
+| G4f | Saxpy SASS (`SYS_GPU_SUBMIT`) | Bloqueado por toolchain (`ptxas` sm_120) |
 | G5 | matvec híbrido soso-llm | Pendiente G4 |
+| L6-H | `--cuda-host` + cuda-proxy | **GO** (2026-07-27) |
 
-Scripts: `scripts/l6-pack-firmware.sh`, `scripts/l6-g1-enable-iommu.sh`,
-`scripts/l6-g1-vfio-test.sh`. Checks: `cargo xtask g1-check`, `cargo xtask g3-check`.
+Scripts: `scripts/l6-pack-firmware.sh`, `scripts/l6-g1-vfio-test.sh`,
+`scripts/l6-g1-vfio-persist.sh`, `scripts/l6-g3-gsp-hostcheck.sh`.
+Checks: `cargo xtask g1-check`, `cargo xtask g3-check`.
+Detalle: `docs/L6-native-autonomy.md`.
 
 ---
 

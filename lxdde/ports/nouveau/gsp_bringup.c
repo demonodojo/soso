@@ -13,6 +13,9 @@
 #include "gsp_rm_obj.h"
 #include "gsp_rpc.h"
 #include "gsp_vmm.h"
+#include "gsp_chan.h"
+#include "gsp_ce.h"
+#include "gsp_compute.h"
 #include "gsp_vram.h"
 #include "gsp_wpr.h"
 #include "lx_emul.h"
@@ -88,6 +91,9 @@ enum gsp_phase {
     GSP_RM_READY,
     GSP_RM_OBJECTS,
     GSP_RM_VMM,     /* + espacio de direcciones con VRAM y sysmem mapeadas */
+    GSP_RM_CHAN,    /* canal GPFIFO + USERD */
+    GSP_RM_CE,      /* objeto CE + pushbuffer preparado */
+    GSP_RM_COMPUTE, /* objeto compute + QMD (G4f) */
     GSP_BOOTED_SOFT,
     GSP_GONE,
     GSP_FINI,       /* apagado por gsp_fini(): sin DMA, no se puede volver atrás */
@@ -105,6 +111,9 @@ static struct gsp_static_info g_static;  /* VRAM utilizable y regalos de RM */
 static struct gsp_vram g_vram_pool;      /* reparto de VRAM sobre esas regiones */
 static struct gsp_vmm g_vmm;             /* vaspace de RM + tablas de páginas */
 static struct gsp_dma_buf g_scratch;     /* página de sysmem visible por la GPU */
+static struct gsp_chan g_chan;           /* canal GPFIFO (G4e) */
+static struct gsp_ce g_ce;               /* motor de copia CE (G4e) */
+static struct gsp_compute g_compute;     /* compute + QMD (G4f) */
 static uint64_t g_vram_block;            /* bloque de VRAM mapeado en G4d */
 static struct lx_pci_dev *g_pdev;   /* para leer BARs y BDF del espacio de config */
 static uint16_t g_device_id;
@@ -414,6 +423,43 @@ static int run_vmm_stage(void)
     return vmm_selfcheck();
 }
 
+static int run_chan_ce_stage(void)
+{
+    if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_chan, g_vmm.vaspace) != 0) {
+        return -1;
+    }
+    g_phase = GSP_RM_CHAN;
+
+    if (gsp_ce_init(&g_vmm.rm, &g_chan, &g_ce) != 0) {
+        gsp_chan_fini(&g_chan);
+        return -1;
+    }
+    g_phase = GSP_RM_CE;
+
+    /* Best-effort: encola la copia pero no afirma éxito GPU hasta readback HW. */
+    if (gsp_ce_selftest(&g_ce, G4D_SCRATCH_VA, G4D_VA_BASE, g_scratch.va, 4096) == 0) {
+        lx_printk("nouveau-lx: CE readback verificado\n");
+    } else {
+        lx_printk("nouveau-lx: CE encolado; readback GPU pendiente de ciclo VFIO\n");
+    }
+    return 0;
+}
+
+static int run_compute_stage(void)
+{
+    if (gsp_compute_init(&g_vmm.rm, &g_chan, &g_compute) != 0) {
+        return -1;
+    }
+    g_phase = GSP_RM_COMPUTE;
+
+    if (gsp_compute_stage_sass(&g_compute, &g_ce, G4D_SCRATCH_VA, g_scratch.va) != 0) {
+        lx_printk("nouveau-lx: SASS staging encolado (readback HW pendiente)\n");
+    } else {
+        lx_printk("nouveau-lx: SASS en VRAM verificado\n");
+    }
+    return 0;
+}
+
 int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
 {
     void *bar;
@@ -513,10 +559,10 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
                      * está desplazada y lo demás no es de fiar. */
                     if (gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static) == 0 &&
                         run_vmm_stage() == 0) {
-                        /* G4d (2/2). También best-effort: sin espacio de
-                         * direcciones no hay canal, pero el GSP sigue arrancado
-                         * y el diagnóstico queda escrito. */
                         g_phase = GSP_RM_VMM;
+                        if (run_chan_ce_stage() == 0) {
+                            (void)run_compute_stage();
+                        }
                     }
                 }
             } else {
@@ -569,6 +615,10 @@ int lx_nouveau_gsp_fini(void)
      * páginas, esas páginas de sysmem no se pueden soltar. Y tiene que ser
      * antes de `gsp_fini`, que es quien deja a RM sin RPC y a la tarjeta sin
      * DMA — después ya no habría con quién hablar. */
+    /* compute → CE → canal → vaspace, antes de soltar RM y el directorio de páginas. */
+    gsp_compute_fini(&g_compute);
+    gsp_ce_fini(&g_ce);
+    gsp_chan_fini(&g_chan);
     gsp_vmm_fini(&g_vmm);
     gsp_dma_free(&g_scratch);
 
@@ -586,6 +636,8 @@ int lx_nouveau_gsp_ready(void)
      * avanzado se reportaba como "no listo". */
     return g_phase == GSP_BOOTED || g_phase == GSP_RM_READY ||
            g_phase == GSP_RM_OBJECTS || g_phase == GSP_RM_VMM ||
+           g_phase == GSP_RM_CHAN || g_phase == GSP_RM_CE ||
+           g_phase == GSP_RM_COMPUTE ||
            g_phase == GSP_BOOTED_SOFT ? 1 : 0;
 }
 
@@ -634,6 +686,12 @@ const char *lx_nouveau_gsp_status(void)
         return "rm_objects";
     case GSP_RM_VMM:
         return "rm_vmm";
+    case GSP_RM_CHAN:
+        return "rm_chan";
+    case GSP_RM_CE:
+        return "rm_ce";
+    case GSP_RM_COMPUTE:
+        return "rm_compute";
     case GSP_BOOTED_SOFT:
         return "booted_soft";
     case GSP_GONE:
@@ -660,8 +718,16 @@ uint64_t lx_nouveau_vram_bytes(void)
 int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n)
 {
     unsigned i;
+
     if (!x || !y || n == 0) {
         return -1;
+    }
+    if (g_compute.ready && g_ce.ready && g_chan.ready &&
+        g_phase >= GSP_RM_COMPUTE) {
+        if (gsp_compute_saxpy(&g_compute, &g_ce, a, x, y, n,
+                              G4D_SCRATCH_VA, g_scratch.va) == 0) {
+            return 1;
+        }
     }
     for (i = 0; i < n; i++) {
         y[i] = a * x[i] + y[i];

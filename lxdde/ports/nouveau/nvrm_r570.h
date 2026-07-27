@@ -550,4 +550,141 @@ typedef char nv_vaspace_size_check[
 typedef char nv0080_set_pd_size_check[
     sizeof(NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS) == 32 ? 1 : -1];
 
+/* ---- Canal GPFIFO + CE (G4e) -----------------------------------------------
+ *
+ * Referencias: `class/clc56f.h`, `class/clc6b5.h`, `alloc/alloc_channel.h`
+ * (open-gpu-kernel-modules). Ampere/Blackwell usan AMPERE_CHANNEL_GPFIFO_A
+ * y AMPERE_DMA_COPY_A; GB205 comparte la ruta Ampere en RM 570.144. */
+#define NV_MAX_SUBDEVICES 32u
+
+#define AMPERE_CHANNEL_GPFIFO_A  0x0000c56fu
+#define AMPERE_DMA_COPY_A          0x0000c6b5u
+
+#define NVKM_RM_CE0                0xc6b50000u
+
+/* `NV2080_ENGINE_TYPE_COPY(i)` de `ctrl/ctrl2080/ctrl2080internal.h`. */
+#define NV2080_ENGINE_TYPE_COPY0   6u
+
+#define NV_ADDRESS_SPACE_SYSMEM_COHERENT  4u
+#define NV_CACHE_ATTR_DEFAULT             0u
+
+typedef struct NV_MEMORY_DESC_PARAMS {
+    NvU64 base;
+    NvU64 size;
+    NvU32 addressSpace;
+    NvU32 cacheAttrib;
+} NV_MEMORY_DESC_PARAMS;
+
+typedef struct Nvc56fControl {
+    NvU32 Ignored00[0x010];
+    NvU32 Put;
+    NvU32 Get;
+    NvU32 Reference;
+    NvU32 PutHi;
+    NvU32 Ignored01[0x002];
+    NvU32 TopLevelGet;
+    NvU32 TopLevelGetHi;
+    NvU32 GetHi;
+    NvU32 Ignored02[0x007];
+    NvU32 Ignored03;
+    NvU32 Ignored04[0x001];
+    NvU32 GPGet;
+    NvU32 GPPut;
+    NvU32 Ignored05[0x5c];
+} Nvc56fControl;
+
+typedef struct NV_CHANNEL_ALLOC_PARAMS {
+    NvHandle hObjectError;
+    NvHandle hObjectBuffer;
+    NvU64    gpFifoOffset;
+    NvU32    gpFifoEntries;
+    NvU32    flags;
+    NvHandle hContextShare;
+    NvHandle hVASpace;
+    NvHandle hHandleVASpace;
+    NvHandle hUserdMemory[NV_MAX_SUBDEVICES];
+    NvU64    userdOffset[NV_MAX_SUBDEVICES];
+    NvU32    engineType;
+    NvU32    cid;
+    NvU32    subDeviceId;
+    NvHandle hObjectEccError;
+    NV_MEMORY_DESC_PARAMS instanceMem;
+    NV_MEMORY_DESC_PARAMS userdMem;
+    NV_MEMORY_DESC_PARAMS ramfcMem;
+    NV_MEMORY_DESC_PARAMS mthdbufMem;
+    NvHandle hPhysChannelGroup;
+    NvU32    internalFlags;
+    NV_MEMORY_DESC_PARAMS errorNotifierMem;
+    NV_MEMORY_DESC_PARAMS eccErrorNotifierMem;
+    NvU32    ProcessID;
+    NvU32    SubProcessID;
+    NvU32    encryptIv[3];
+    NvU32    decryptIv[3];
+    NvU32    hmacNonce[8];
+    NvU32    tpcConfigID;
+} NV_CHANNEL_ALLOC_PARAMS;
+
+#define NVOS04_FLAGS_CHANNEL_TYPE_PHYSICAL  0x00000000u
+#define NVOS04_FLAGS_CHANNEL_CLIENT_MAP_FIFO  (1u << 24)
+
+/* Métodos CE (class/clc6b5.h) — copia lineal virtual. */
+#define NVC6B5_SET_OBJECT                    0x00000000u
+#define NVC6B5_OFFSET_IN_UPPER                 0x00000400u
+#define NVC6B5_OFFSET_IN_LOWER                 0x00000404u
+#define NVC6B5_OFFSET_OUT_UPPER                0x00000408u
+#define NVC6B5_OFFSET_OUT_LOWER                0x0000040cu
+#define NVC6B5_PITCH_IN                        0x00000410u
+#define NVC6B5_PITCH_OUT                       0x00000414u
+#define NVC6B5_LINE_LENGTH_IN                  0x00000418u
+#define NVC6B5_LINE_COUNT                      0x0000041cu
+#define NVC6B5_LAUNCH_DMA                      0x00000300u
+#define NVC6B5_SET_SEMAPHORE_A                 0x00000240u
+#define NVC6B5_SET_SEMAPHORE_B                 0x00000244u
+#define NVC6B5_SET_SEMAPHORE_PAYLOAD           0x00000248u
+
+#define NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE           (1u << 2)
+#define NVC6B5_LAUNCH_DMA_SRC_TYPE_VIRTUAL            (0u << 12)
+#define NVC6B5_LAUNCH_DMA_DST_TYPE_VIRTUAL            (0u << 13)
+#define NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH     (1u << 7)
+#define NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH     (1u << 8)
+#define NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED (2u << 0)
+#define NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD  (1u << 3)
+
+/* Métodos de canal (class/clc56f.h). */
+#define NVC56F_SET_OBJECT                    0x00000000u
+#define NVC56F_GP_ENTRY__SIZE                8u
+#define NVC56F_GP_ENTRY0_FETCH_UNCONDITIONAL 0u
+#define NVC56F_GP_ENTRY1_SYNC_PROCEED        0u
+#define NVC56F_GP_ENTRY1_LEVEL_MAIN          0u
+
+#define NVC56F_DMA_INCR_OPCODE_VALUE         1u
+#define NVC56F_DMA_SEC_OP_IMMD_DATA_METHOD   4u
+
+typedef char nv_memory_desc_size_check[sizeof(NV_MEMORY_DESC_PARAMS) == 24 ? 1 : -1];
+typedef char nvc56f_control_size_check[sizeof(Nvc56fControl) == 512 ? 1 : -1];
+
+/* ---- Compute Blackwell + QMD v05 (G4f) ------------------------------------
+ * Referencias: `classes/compute/clcdc0.h`, `clcdc0qmd.h` (open-gpu-doc). */
+#define BLACKWELL_COMPUTE_A       0x0000cdc0u
+#define NVKM_RM_COMPUTE0          0xcdc00000u
+
+#define GSP_QMD_VERSION_CURRENT   5u
+#define GSP_QMD_INLINE_WORDS      96u   /* 384 B inline QMD (Blackwell v05) */
+
+#define NVCDC0_SET_OBJECT                    0x00000000u
+#define NVCDC0_SET_QMD_VERSION               0x00000288u
+#define NVCDC0_SET_INLINE_QMD_ADDRESS_A      0x00000318u
+#define NVCDC0_SET_INLINE_QMD_ADDRESS_B      0x0000031cu
+#define NVCDC0_LOAD_INLINE_QMD_DATA(i)       (0x00000320u + (uint32_t)(i) * 4u)
+
+#define NVCDC0_SET_INLINE_QMD_ADDRESS_A_INLINE_SIZE_INLINE_384  0x00000001u
+
+#define NVCDC0_QMDV05_00_QMD_TYPE_GRID_CTA   0x00000002u
+
+typedef struct GspQmdV05 {
+    NvU32 words[GSP_QMD_INLINE_WORDS];
+} GspQmdV05;
+
+typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 4 ? 1 : -1];
+
 #endif

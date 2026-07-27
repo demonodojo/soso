@@ -9,6 +9,10 @@ lxdde/ports/nouveau/gsp_cmdq.c
 lxdde/ports/nouveau/gsp_rm_obj.c
 lxdde/ports/nouveau/gsp_vram.c
 lxdde/ports/nouveau/gsp_vmm.c
+lxdde/ports/nouveau/gsp_chan.c
+lxdde/ports/nouveau/gsp_ce.c
+lxdde/ports/nouveau/gsp_compute.c
+lxdde/ports/nouveau/saxpy_sass_embed.c
 lxdde/ports/nouveau/gsp_fini.c
 lxdde/ports/nouveau/gsp_mmio.c
 lxdde/ports/nouveau/gsp_bringup.c

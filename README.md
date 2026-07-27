@@ -36,6 +36,7 @@ With soso running (`cargo xtask run`), in another terminal:
 nc localhost 7777                                              # TCP echo
 ssh -tt -i target/soso_test_key -p 2222 soso@localhost         # encrypted shell
 soso-llm run tiny --prompt hola                                # LLM inference
+soso-llm run tinyllama-q4km --cuda-host 10.0.2.2:11400 --prompt hola --max 32   # L6-H (host CUDA)
 ```
 
 **Exit QEMU:** `Ctrl-A X` (not `Ctrl-C`). If port 2222 is busy:
@@ -116,14 +117,28 @@ GPU syscalls: `SYS_GPU_INFO`, `SYS_GPU_ALLOC`, `SYS_GPU_MAP`, `SYS_GPU_SUBMIT`,
 
 | Gate | Deliverable | Status |
 |------|-------------|--------|
-| G1 | VFIO passthrough + BAR0 (`NV_PMC_BOOT_0`) | **Done** on real GB205 hardware |
+| G1 | VFIO passthrough + BAR0 (`NV_PMC_BOOT_0`) | **Done** on real GB205 (`0x1b5000a1`) |
 | G2 | GSP firmware blobs in sosofs | **Done** (gb205 + ga102 reference set) |
-| G3a | ELF validation, GEM staging, soft GSP boot | **Done** |
-| G3b | Real GSP boot via nvkm (no display) | Chain written (FSP/COT, radix3, WPR meta, libos args); final MMIO step pending HW validation |
-| G4 | SAXPY SASS in VRAM | Infrastructure in place; blocked on G3b |
+| G3a | ELF validation, GEM staging | **Done** |
+| G3b | Real GSP boot (FSP/COT, radix3, WPR, libos) | **Done** on GB205 HW |
+| G4a–c | GSP-RM RPC + RM objects | **Done** on GB205 HW |
+| G4d | VRAM + external VA space (VER3 page tables) | Written + hostcheck; HW validation with CE |
+| G4e | GPFIFO channel + CE copy (`gsp_chan`, `gsp_ce`) | **Written + hostcheck**; HW readback pending VFIO |
+| G4f | SAXPY SASS (`SYS_GPU_SUBMIT`) | Blocked on CUDA `ptxas` for `sm_120` |
 | G5 | Hybrid LLM matvec on GPU | Pending G4 |
+| **L6-H** | CUDA inference on host Linux (`--cuda-host`) | **GO** (2026-07-27): ~35 tok/s via cuda-proxy + llama-server |
 
-Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G1-gate.md`](docs/L6-G1-gate.md), [`docs/L6-G3-nvkm-scope.md`](docs/L6-G3-nvkm-scope.md).
+Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G1-gate.md`](docs/L6-G1-gate.md), [`docs/L6-G3-nvkm-scope.md`](docs/L6-G3-nvkm-scope.md), [`docs/L6-H-cuda-hybrid.md`](docs/L6-H-cuda-hybrid.md).
+
+**Daily dev without releasing the GPU** (driver stays on the host):
+
+| Step | Command |
+|------|---------|
+| Hostcheck (~1 s) | `./scripts/l6-g3-gsp-hostcheck.sh` |
+| Build nouveau | `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask lx-build nouveau` |
+| Build soso | `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build` |
+| QEMU (no passthrough) | `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask run` |
+| L6-H host stack | See [`docs/L6-H-cuda-hybrid.md`](docs/L6-H-cuda-hybrid.md) |
 
 ## Build commands
 
@@ -136,6 +151,9 @@ Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G
 | `cargo xtask bench-llm` | Measure decode tok/s under configurable SMP |
 | `cargo xtask test-distributed-llm` | Two-QEMU distributed LLM smoke test |
 | `./scripts/l6-pack-firmware.sh` | Pack NVIDIA GSP firmware (.zst→.bin) into rootfs |
+| `./scripts/l6-g3-gsp-hostcheck.sh` | GSP bring-up hostcheck (steps 3–6 + G4d/G4e, no GPU) |
+| `./scripts/l6-h-start-cuda.sh` | L6-H: llama-server (native) + cuda-proxy (requires `llama-server` in PATH) |
+| `./scripts/l6-g1-vfio-persist.sh` | Persistent VFIO bind for iterative G1–G4 work |
 
 Useful environment variables:
 

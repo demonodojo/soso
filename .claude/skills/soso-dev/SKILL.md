@@ -35,13 +35,27 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask g1-check` | Checklist host G1 (IOMMU/VFIO, firmware, BAR0) |
 | `cargo xtask g3-check` | Checklist bring-up GSP (firmware, módulos, fases) |
 | `./scripts/l6-pack-firmware.sh` | Empaquetar firmware GSP gb205 (.zst→.bin) en rootfs |
-| `./scripts/l6-g3-nvkm-inventory.sh <lista>` | Inventariar símbolos nvkm undefined |
+| `./scripts/l6-g3-gsp-hostcheck.sh` | GSP hostcheck (~1 s, G4d/G4e, sin GPU) |
+| `./scripts/l6-h-start-cuda.sh` | L6-H nativo (requiere `llama-server` en PATH) |
 
 **Exit QEMU:** `Ctrl-A X` (not Ctrl-C).
 
-> **GPU / L6 (NVIDIA nouveau/GSP):** para todo lo relativo a la GPU nativa —
-> roadmap G1→G5, capa lxdde/nvkm, firmware GSP, VFIO/IOMMU, shims de cabecera —
-> usa la skill **`soso-gpu`**.
+> **GPU / L6 (NVIDIA nouveau/GSP):** roadmap G1→G5, VFIO, firmware — skill **`soso-gpu`**.
+> **L6-H (CUDA en host):** `docs/L6-H-cuda-hybrid.md` — `--cuda-host 10.0.2.2:11400`.
+
+## Daily dev (GPU stays on host NVIDIA driver)
+
+No VFIO needed for hostcheck, build, QEMU boot, or L6-H:
+
+```sh
+./scripts/l6-g3-gsp-hostcheck.sh
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask lx-build nouveau
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask run
+# L6-H: see docs/L6-H-cuda-hybrid.md (Docker llama-server + cuda-proxy)
+```
+
+QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
 
 ## What `run` does
 
@@ -85,6 +99,10 @@ cargo xtask test
 # Decode tok/s con modelo sintético bench (default SMP=1,4 mem=8G)
 cargo xtask bench-llm
 SOSO_BENCH_SMP=1,8 SOSO_BENCH_MAX=8 cargo xtask bench-llm
+
+# L6-H: cuda-proxy (host; tests mockean HTTP)
+cargo test -p cuda-proxy
+cargo build -p cuda-proxy --release --target-dir target
 ```
 
 User rule for this project: **mock HTTP and Celery calls in tests** (soso has no Celery; applies if adding HTTP client tests).
@@ -113,3 +131,6 @@ Skills live in `.claude/skills/`. `.cursor/skills` mirrors them — edit under `
 | Redirección `> file` no crea fichero | `vfs::create_file` debe delegar a sosofs (no stub) |
 | RDRAND / crypto errors | QEMU must use `-cpu max` (xtask sets this) |
 | Stale disk content | `cargo xtask mkfs` then re-run |
+| `cuda-proxy`: binary not found | `cargo build -p cuda-proxy --release --target-dir target` |
+| L6-H: connection refused :11400 | Start cuda-proxy; llama-server must answer `/health` on :8080 |
+| L6-H: no tok/s from soso | Host is `10.0.2.2` from QEMU guest; model name must match loaded GGUF |

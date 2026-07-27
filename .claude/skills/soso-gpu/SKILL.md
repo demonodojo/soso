@@ -35,9 +35,10 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G4b | RPC síncrono (`gsp_cmdq_call`) | round-trip + anillo que envuelve, en hostcheck | **GO** (2026-07-25), sin HW todavía |
 | G4c | Objetos de RM: cliente → device → subdevice (`GSP_RM_ALLOC`) | un `NV_RM_CONTROL` que responde | **GO** (2026-07-25): `objetos RM listos cli=0xc1d00000 dev=0xde1d0000 sub=0x5d1d0000` en GB205 real |
 | G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | **escrito entero, sin probar en HW**: static info + reparto de VRAM + `FERMI_VASPACE_A` externo + tablas VER3 + `SET_PAGE_DIRECTORY`, todo cubierto en hostcheck; falta un ciclo de HW |
-| G4e | **Canal**: GPFIFO + USERD + timbre | la GPU mueve bytes (copia CE) y se lee de vuelta | pendiente |
+| G4e | **Canal + CE** (`gsp_chan`, `gsp_ce`) | ALLOC GPFIFO/USERD/PB; copia CE + readback VRAM | **escrito + hostcheck** (2026-07-27); GO HW pendiente VFIO |
 | G4f | QMD + kernel SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real | pendiente, **bloqueado por el toolchain** |
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
+| **L6-H** | `--cuda-host` → cuda-proxy | texto + tok/s desde soso | **GO** (2026-07-27): ~35 tok/s, Docker llama-server |
 
 **G1 superado (2026-07-25).** Con VT-d activo en la BIOS y el bind persistente puesto
 (`l6-g1-vfio-persist.sh --enable` + reboot), `sudo ./scripts/l6-g1-vfio-test.sh` da GO:
@@ -403,7 +404,8 @@ FSP se detecta. Cubre además el lado G4: la cadena de objetos de RM, que
 2/2** (el vaspace externo con su cliente propio, el `SET_PAGE_DIRECTORY` con sus
 2 entradas en sysmem, los 512 PTEs y los PDEs bit a bit contra dev_mmu.h, que
 fuera del mapeo no traduzca, el reparto de VRAM y que el fini quite el
-directorio antes de soltar las tablas), y el apagado
+directorio antes de soltar las tablas), **G4e** (canal GPFIFO + CE: `check_g4e_chan_ce`,
+ALLOC, pushbuffer, fini CE→canal→VMM), y el apagado
 —`FREE` con fn=10, el unload con fn=47, el handshake del mailbox y que **el bus
 master se quite aunque no haya RPC vivo** (gotcha 6).
 Un segundo, frente a sudo + VFIO + ~90 s del ciclo en hardware.
@@ -578,7 +580,7 @@ cargo xtask lx-build nouveau      # compila el port (incl. nvkm Ola 1)
 cargo xtask g1-check              # host: IOMMU/VFIO/firmware/BAR0
 cargo xtask g3-check              # bring-up GSP: firmware, módulos, fases
 ./scripts/l6-pack-firmware.sh     # empaqueta firmware GSP
-./scripts/l6-g3-gsp-hostcheck.sh  # pasos 3-6 + G4 (objetos RM, static info, fini) sin GPU ni sudo
+./scripts/l6-g3-gsp-hostcheck.sh  # pasos 3-6 + G4d/G4e (chan+CE) sin GPU ni sudo
 ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list   # inventario símbolos
 ./scripts/l6-kdump-setup.sh --status   # ¿el host capturaría el próximo cuelgue?
 # Passthrough (tras cerrar G1): SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
@@ -589,11 +591,36 @@ passthrough a mano en vez de con `l6-g1-vfio-test.sh`, apaga con `halt` desde
 soso —no con Ctrl-C ni matando QEMU—, que es lo que dispara `gsp_fini`. En el
 log tiene que aparecer `GSP-RM apagado (… dma=off)` antes de que QEMU salga.
 
-## Camino alternativo L6-H (CUDA en host)
+## Camino alternativo L6-H (CUDA en host) — **GO 2026-07-27**
 
 `docs/L6-H-cuda-hybrid.md`: atajo práctico, **no da autonomía**. La GPU corre en el
 host Linux (llama-server `-ngl`); soso se conecta vía `cuda-proxy` TCP `:11400`.
-`soso-llm run <modelo> --cuda-host 10.0.2.2:11400 --prompt "…"`. Coexiste con G1–G5.
+
+**Arranque (Docker, GPU en driver nvidia):**
+
+```bash
+docker run -d --name soso-llama --device=/dev/nvidia0 --device=/dev/nvidiactl \
+  --device=/dev/nvidia-uvm --device=/dev/nvidia-modeset -p 8080:8080 \
+  -v "$PWD/target:/models" ghcr.io/ggml-org/llama.cpp:server-cuda \
+  -m /models/tinyllama-q4km.gguf -ngl 99 --host 0.0.0.0 --port 8080
+cargo build -p cuda-proxy --release --target-dir target
+target/release/cuda-proxy --listen 0.0.0.0:11400 --llama http://127.0.0.1:8080
+```
+
+Desde soso (QEMU): `soso-llm run tinyllama-q4km --cuda-host 10.0.2.2:11400 --prompt "hola" --max 32`
+
+Coexiste con G1–G5 **solo si VFIO persist está off** (driver `nvidia` en el host).
+
+## Desarrollo sin soltar la GPU (host)
+
+| Paso | Comando |
+|------|---------|
+| Hostcheck | `./scripts/l6-g3-gsp-hostcheck.sh` |
+| lx-build | `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask lx-build nouveau` |
+| build/run | `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build` / `run` |
+| L6-H | Docker + cuda-proxy (arriba) |
+
+QEMU sin passthrough: `nvidia: sin GPU NVIDIA en PCI` — normal. `GSP booted (soft)` solo con GPU en PCI (VFIO).
 
 ## Riesgos
 

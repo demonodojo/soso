@@ -184,6 +184,9 @@ static const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind k)
 #include "gsp_rm_obj_body.inc"
 #include "gsp_vram_body.inc"
 #include "gsp_vmm_body.inc"
+#include "gsp_chan_body.inc"
+#include "gsp_ce_body.inc"
+#include "gsp_compute_body.inc"
 #include "gsp_fini_body.inc"
 
 static int load_blob(enum gsp_fw_kind kind, const char *path)
@@ -1099,6 +1102,248 @@ static int check_vmm(const struct gsp_libos *lo)
     return 0;
 }
 
+static int check_g4e_chan_ce(const struct gsp_libos *lo)
+{
+    struct gsp_rpc rpc;
+    struct gsp_cmdq q;
+    struct gsp_vmm v;
+    struct gsp_chan chan;
+    struct gsp_ce ce;
+    struct gsp_msgq_headers *msgq =
+        (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->msgq_offset);
+    unsigned char *cmdq_base = (unsigned char *)lo->shm.va + lo->cmdq_offset;
+    rpc_gsp_rm_alloc alloc_ok;
+    unsigned char ctrl_ok[sizeof(rpc_gsp_rm_control)];
+    uint32_t base, wptr0;
+    unsigned pb_off = 0, pb_len = 0;
+    unsigned i;
+    const uint32_t test_pat = 0x300u;
+
+    printf("sizeof NV_CHANNEL_ALLOC_PARAMS=%zu Nvc56fControl=%zu\n",
+           sizeof(NV_CHANNEL_ALLOC_PARAMS), sizeof(Nvc56fControl));
+
+    if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (g4e)\n"); return -1; }
+    if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (g4e)\n"); return -1; }
+
+    memset(&alloc_ok, 0, sizeof(alloc_ok));
+    memset(ctrl_ok, 0, sizeof(ctrl_ok));
+    base = *rpc.rptr;
+    for (i = 0; i < 4; i++) {
+        fake_rpc_post_payload(lo, (base + i) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                              0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    }
+    fake_rpc_post_payload(lo, (base + 4) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    /* Canal + CE + compute. */
+    fake_rpc_post_payload(lo, (base + 5) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                          0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    fake_rpc_post_payload(lo, (base + 6) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                          0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    fake_rpc_post_payload(lo, (base + 7) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                          0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    msgq->tx.writePtr = (base + 8) % 63;
+
+    wptr0 = *q.wptr;
+    if (gsp_vmm_init(&q, &rpc, &v) != 0) {
+        printf("FALLO: gsp_vmm_init (g4e)\n");
+        return -1;
+    }
+    if (gsp_chan_init(&v.rm, &v, &chan, v.vaspace) != 0) {
+        printf("FALLO: gsp_chan_init\n");
+        return -1;
+    }
+
+    {
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 5) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
+        const NV_CHANNEL_ALLOC_PARAMS *p =
+            (const NV_CHANNEL_ALLOC_PARAMS *)(a + 1);
+
+        if (a->hClass != AMPERE_CHANNEL_GPFIFO_A ||
+            a->hObject != NVKM_RM_CHAN(0) ||
+            a->hParent != NVKM_RM_DEVICE) {
+            printf("FALLO: canal cls=0x%x obj=0x%08x padre=0x%08x\n",
+                   a->hClass, a->hObject, a->hParent);
+            return -1;
+        }
+        if (a->paramsSize != sizeof(*p)) {
+            printf("FALLO: canal paramsSize=%u\n", a->paramsSize);
+            return -1;
+        }
+        if (p->gpFifoEntries != GSP_CHAN_GPFIFO_ENTRIES ||
+            p->hVASpace != v.vaspace ||
+            p->engineType != NV2080_ENGINE_TYPE_COPY0) {
+            printf("FALLO: canal entries=%u vaspace=0x%08x engine=%u\n",
+                   p->gpFifoEntries, p->hVASpace, p->engineType);
+            return -1;
+        }
+        if (p->userdMem.addressSpace != NV_ADDRESS_SPACE_SYSMEM_COHERENT) {
+            printf("FALLO: userdMem aper=%u\n", p->userdMem.addressSpace);
+            return -1;
+        }
+    }
+    printf("OK: AMPERE_CHANNEL_GPFIFO_A alloc params\n");
+
+    if (chan.userd_ctl->GPPut != 0 || chan.gpput != 0) {
+        printf("FALLO: USERD/GPPut no arrancan en cero\n");
+        return -1;
+    }
+
+    if (gsp_ce_init(&v.rm, &chan, &ce) != 0) {
+        printf("FALLO: gsp_ce_init\n");
+        return -1;
+    }
+
+    {
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 6) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
+
+        if (a->hClass != AMPERE_DMA_COPY_A || a->hObject != NVKM_RM_CE0 ||
+            a->hParent != NVKM_RM_CHAN(0)) {
+            printf("FALLO: CE cls=0x%x obj=0x%08x padre=0x%08x\n",
+                   a->hClass, a->hObject, a->hParent);
+            return -1;
+        }
+    }
+    printf("OK: AMPERE_DMA_COPY_A colgado del canal\n");
+
+    if (gsp_ce_encode_copy(&ce, GSP_CHAN_VA_BASE + 8192ull,
+                           GSP_CHAN_VA_BASE + 12288ull, 4096,
+                           &pb_off, &pb_len) != 0 || pb_len < 32) {
+        printf("FALLO: gsp_ce_encode_copy\n");
+        return -1;
+    }
+    {
+        const uint32_t *pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + pb_off);
+        unsigned found_launch = 0;
+
+        for (i = 0; i < pb_len / 4; i++) {
+            if (pb[i] == (NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+                          NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+                          NVC6B5_LAUNCH_DMA_SRC_TYPE_VIRTUAL |
+                          NVC6B5_LAUNCH_DMA_DST_TYPE_VIRTUAL |
+                          NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+                          NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH |
+                          NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD)) {
+                found_launch = 1;
+                break;
+            }
+        }
+        if (!found_launch) {
+            printf("FALLO: pushbuffer sin LAUNCH_DMA esperado\n");
+            return -1;
+        }
+    }
+    printf("OK: pushbuffer CE (%u B) con LAUNCH_DMA\n", pb_len);
+
+    if (gsp_chan_submit(&chan, pb_off, pb_len) != 0) {
+        printf("FALLO: gsp_chan_submit\n");
+        return -1;
+    }
+    if (chan.gpput != 1 || chan.userd_ctl->GPPut != 1) {
+        printf("FALLO: GPPut=%u gpput=%u\n", chan.userd_ctl->GPPut, chan.gpput);
+        return -1;
+    }
+    {
+        const uint32_t *ring = (const uint32_t *)chan.gpfifo.va;
+
+        if ((ring[0] & 1u) != NVC56F_GP_ENTRY0_FETCH_UNCONDITIONAL) {
+            printf("FALLO: GPFIFO entry0 fetch\n");
+            return -1;
+        }
+        if (((ring[1] >> 10) & 0x1fffffu) != ((pb_len + 3u) / 4u)) {
+            printf("FALLO: GPFIFO length en words\n");
+            return -1;
+        }
+    }
+    printf("OK: GPFIFO entry + USERD GPPut\n");
+
+    /* --- G4f: compute + QMD inline --- */
+    {
+        struct gsp_compute cp;
+        GspQmdV05 qmd;
+        unsigned qmd_off = 0, qmd_len = 0;
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 7) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
+
+        if (gsp_saxpy_sass_len < 16) {
+            printf("FALLO: gsp_saxpy_sass_len=%u\n", gsp_saxpy_sass_len);
+            return -1;
+        }
+        printf("OK: saxpy SASS blob %u B\n", gsp_saxpy_sass_len);
+
+        if (gsp_compute_init(&v.rm, &chan, &cp) != 0) {
+            printf("FALLO: gsp_compute_init\n");
+            return -1;
+        }
+        if (a->hClass != BLACKWELL_COMPUTE_A || a->hObject != NVKM_RM_COMPUTE0 ||
+            a->hParent != NVKM_RM_CHAN(0)) {
+            printf("FALLO: compute cls=0x%x obj=0x%08x padre=0x%08x\n",
+                   a->hClass, a->hObject, a->hParent);
+            return -1;
+        }
+        printf("OK: BLACKWELL_COMPUTE_A colgado del canal\n");
+
+        gsp_compute_fill_saxpy_qmd(&qmd, G4F_SASS_VA, 4);
+        chan.pb_pos = 0;
+        if (gsp_compute_encode_qmd(&cp, &qmd, &qmd_off, &qmd_len) != 0 ||
+            qmd_len < 64) {
+            printf("FALLO: gsp_compute_encode_qmd\n");
+            return -1;
+        }
+        {
+            const uint32_t *pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + qmd_off);
+            unsigned found_qmd_ver = 0;
+            unsigned found_inline = 0;
+            unsigned j;
+
+            for (j = 0; j < qmd_len / 4; j++) {
+                if (pb[j] == (GSP_QMD_VERSION_CURRENT | (GSP_QMD_VERSION_CURRENT << 16))) {
+                    found_qmd_ver = 1;
+                }
+                if (pb[j] == qmd.words[0]) {
+                    found_inline = 1;
+                }
+            }
+            if (!found_qmd_ver || !found_inline) {
+                printf("FALLO: pushbuffer compute sin QMD/version\n");
+                return -1;
+            }
+        }
+        printf("OK: pushbuffer compute QMD inline (%u B)\n", qmd_len);
+        gsp_compute_fini(&cp);
+    }
+
+    /* Teardown G4e/G4f antes del vmm_fini de check_vmm (este test es autónomo). */
+    base = *rpc.rptr;
+    fake_rpc_post_payload(lo, base % 63, NV_VGPU_MSG_FUNCTION_FREE, 0, NULL, 0);
+    fake_rpc_post_payload(lo, (base + 1) % 63, NV_VGPU_MSG_FUNCTION_FREE, 0, NULL, 0);
+    fake_rpc_post_payload(lo, (base + 2) % 63, NV_VGPU_MSG_FUNCTION_FREE, 0, NULL, 0);
+    fake_rpc_post_payload(lo, (base + 3) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    for (i = 0; i < 5; i++) {
+        fake_rpc_post_payload(lo, (base + 4 + i) % 63, NV_VGPU_MSG_FUNCTION_FREE,
+                              0, NULL, 0);
+    }
+    msgq->tx.writePtr = (base + 9) % 63;
+
+    gsp_ce_fini(&ce);
+    gsp_chan_fini(&chan);
+    gsp_vmm_fini(&v);
+    (void)test_pat;
+    printf("OK: fini CE → compute → canal → vaspace\n");
+    return 0;
+}
+
 static int check_fini(const struct gsp_libos *lo)
 {
     struct gsp_rpc rpc;
@@ -1420,6 +1665,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_rm_objects(&lo) != 0)
         return -1;
     if (check_vmm(&lo) != 0)
+        return -1;
+    if (check_g4e_chan_ce(&lo) != 0)
         return -1;
     if (check_fini(&lo) != 0)
         return -1;
