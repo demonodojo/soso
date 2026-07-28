@@ -138,32 +138,42 @@ pub fn no_readers(id: PipeId) -> bool {
         .is_some_and(|p| p.readers == 0)
 }
 
+/// Trozo de tránsito entre memoria de usuario y el buffer del pipe. Es el tamaño
+/// de un temporal en la pila del kernel, NO un límite de la transferencia: antes
+/// era lo segundo y eso convertía cualquier escritura mayor en una pérdida de
+/// datos silenciosa (`cat` de un fichero por SSH entregaba 1435 bytes de 3086,
+/// porque `cat` escribe trozos de 1 KiB y nadie miraba el retorno).
+const CHUNK: usize = 256;
+
 /// Lee hasta `len` bytes al buffer de usuario. Devuelve bytes leídos.
 pub fn read_into_user(id: PipeId, buf: u64, len: u64) -> u64 {
-    let want = len.min(256) as usize;
-    let mut tmp = [0u8; 256];
-    let n = PIPES
-        .lock()
-        .get_mut(id)
-        .and_then(|s| s.as_mut())
-        .map(|p| p.read_into(&mut tmp[..want]))
-        .unwrap_or(0);
-    if n > 0 {
-        unsafe {
-            core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, n);
+    let mut pipes = PIPES.lock();
+    let Some(p) = pipes.get_mut(id).and_then(|s| s.as_mut()) else {
+        return 0;
+    };
+    let mut tmp = [0u8; CHUNK];
+    let mut total = 0u64;
+    while total < len {
+        let want = ((len - total) as usize).min(CHUNK);
+        let n = p.read_into(&mut tmp[..want]);
+        if n == 0 {
+            break;
         }
+        unsafe {
+            core::ptr::copy_nonoverlapping(tmp.as_ptr(), (buf + total) as *mut u8, n);
+        }
+        total += n as u64;
     }
-    n as u64
+    total
 }
 
 /// Escribe desde memoria de usuario. Devuelve bytes escritos o error EPIPE.
+///
+/// Transfiere todo lo que quepa en el pipe (4 KiB), no 256 bytes. Sigue pudiendo
+/// ser una escritura CORTA —si el pipe se llena—, y eso es legítimo: lo que no es
+/// legítimo es que el tope lo pusiera el tamaño de un temporal del kernel.
 pub fn write_from_user(id: PipeId, buf: u64, len: u64) -> Result<u64, i64> {
     use soso_abi as abi;
-    let want = len.min(256) as usize;
-    let mut src = [0u8; 256];
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf as *const u8, src.as_mut_ptr(), want);
-    }
     let mut pipes = PIPES.lock();
     let Some(p) = pipes.get_mut(id).and_then(|s| s.as_mut()) else {
         return Err(-abi::EPIPE);
@@ -171,8 +181,24 @@ pub fn write_from_user(id: PipeId, buf: u64, len: u64) -> Result<u64, i64> {
     if p.readers == 0 {
         return Err(-abi::EPIPE);
     }
-    let written = p.write_from(&src[..want]);
-    Ok(written as u64)
+    let mut src = [0u8; CHUNK];
+    let mut total = 0u64;
+    while total < len {
+        let hueco = p.writable_space();
+        if hueco == 0 {
+            break;
+        }
+        let want = ((len - total) as usize).min(CHUNK).min(hueco);
+        unsafe {
+            core::ptr::copy_nonoverlapping((buf + total) as *const u8, src.as_mut_ptr(), want);
+        }
+        let n = p.write_from(&src[..want]);
+        total += n as u64;
+        if n < want {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 /// Intenta leer todo lo pedido en bucle corto (sin bloquear).
