@@ -108,6 +108,139 @@ static int chan_fill_alloc(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p,
     return 0;
 }
 
+/* ANDAMIO DE BRING-UP (2026-07-28) — quitar en cuanto el canal arranque.
+ *
+ * RM contesta 0x3b (INVALID_PARAMETER) sin decir QUÉ parámetro le disgusta, y
+ * cada hipótesis probada a razón de una por ciclo de hardware son cinco minutos
+ * y un riesgo de cuelgue. Un RM_ALLOC, en cambio, son milisegundos: se prueban
+ * todas las variantes dentro del MISMO arranque y el log dice cuál pasa.
+ *
+ * Las variantes no son adivinanzas al azar: cada una es una decisión concreta
+ * donde upstream y nosotros divergimos, o donde upstream tiene dos ramas y hubo
+ * que elegir una. Se paran en la primera que RM acepta.
+ *
+ * Si ninguna pasa, el dato TAMBIÉN sirve: significa que hay dos cosas mal a la
+ * vez, y por eso las dos últimas son combinaciones. */
+struct chan_variant {
+    const char *name;
+    void (*apply)(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p);
+};
+
+/* Handle del USERD en VRAM para la variante 3; 0 si no se pudo reservar. */
+static uint64_t chan_probe_userd_vram;
+
+static void var_base(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+{
+    (void)c; (void)p;
+}
+
+/* Upstream elige entre priv y no-priv; nosotros pusimos priv (somos el kernel),
+ * pero pedir ADMIN puede ser justo lo que RM no le concede a este cliente. */
+static void var_unpriv(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+{
+    (void)c;
+    p->flags &= ~NVOS04_FLAGS_PRIVILEGED_CHANNEL_TRUE;
+    p->internalFlags &= ~0x3u;   /* PRIVILEGE_USER = 0 */
+}
+
+/* La desviación consciente: upstream pone el USERD en VRAM (apertura 2). Aquí
+ * sólo se comprueba si RM lo EXIGE; si es que sí, la CPU se queda sin poder
+ * escribir GPPut y habrá que ir al doorbell de usermode. */
+static void var_userd_vram(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+{
+    (void)c;
+    if (!chan_probe_userd_vram) {
+        return;
+    }
+    p->userdMem.base = chan_probe_userd_vram;
+    p->userdMem.addressSpace = NV_ADDRESS_SPACE_FBMEM;
+    p->userdMem.cacheAttrib = NV_CACHE_ATTR_CACHED;
+}
+
+/* ¿Y si el ring lo quiere por dirección física, y la incoherencia con las GP
+ * entries es cosa nuestra y no de RM? */
+static void var_gpfifo_phys(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+{
+    p->gpFifoOffset = c->gpfifo.phys;
+}
+
+/* Entradas que caben en la página entera (4096/8), por si RM comprueba que el
+ * número declarado cuadre con la región mapeada. */
+static void var_entries_full(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+{
+    (void)c;
+    p->gpFifoEntries = GSP_CHAN_GPFIFO_SIZE / NVC56F_GP_ENTRY__SIZE;
+}
+
+/* Sin method buffer, por si para un canal de CE sobra y molesta. */
+static void var_no_mthdbuf(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+{
+    (void)c;
+    memset(&p->mthdbufMem, 0, sizeof(p->mthdbufMem));
+}
+
+/* Control: el 6 de antes. Si ESTA pasara y las demás no, el 9 estaría mal. */
+static void var_engine6(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+{
+    (void)c;
+    p->engineType = 6u;
+}
+
+static void var_unpriv_userd_vram(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+{
+    var_unpriv(c, p);
+    var_userd_vram(c, p);
+}
+
+static void var_unpriv_gpfifo_phys(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+{
+    var_unpriv(c, p);
+    var_gpfifo_phys(c, p);
+}
+
+static const struct chan_variant chan_variants[] = {
+    { "base (priv, USERD sysmem, GPFIFO por VA, engine 9)", var_base },
+    { "sin privilegio (flags bit5=0, internalFlags USER)",  var_unpriv },
+    { "USERD en VRAM (apertura 2)",                          var_userd_vram },
+    { "GPFIFO por dirección física",                         var_gpfifo_phys },
+    { "gpFifoEntries = 512 (la página entera)",              var_entries_full },
+    { "sin method buffer",                                   var_no_mthdbuf },
+    { "engineType = 6 (el viejo, de control)",               var_engine6 },
+    { "sin privilegio + USERD en VRAM",                      var_unpriv_userd_vram },
+    { "sin privilegio + GPFIFO físico",                      var_unpriv_gpfifo_phys },
+};
+
+static int chan_alloc_probing(struct gsp_chan *c, struct gsp_vram *vram,
+                              const NV_CHANNEL_ALLOC_PARAMS *base)
+{
+    unsigned i;
+
+    chan_probe_userd_vram = gsp_vram_alloc(vram, GSP_CHAN_INST_SIZE,
+                                           GSP_CHAN_INST_SIZE);
+    if (!chan_probe_userd_vram) {
+        lx_printk("nouveau-lx: sonda — sin VRAM para el USERD de prueba\n");
+    }
+
+    for (i = 0; i < sizeof(chan_variants) / sizeof(chan_variants[0]); i++) {
+        NV_CHANNEL_ALLOC_PARAMS params = *base;
+        uint32_t status = 0;
+
+        chan_variants[i].apply(c, &params);
+        lx_printk("nouveau-lx: sonda %u/%u — %s\n", i + 1,
+                  (unsigned)(sizeof(chan_variants) / sizeof(chan_variants[0])),
+                  chan_variants[i].name);
+        if (gsp_rm_alloc(c->rm, c->rm->device, c->handle, AMPERE_CHANNEL_GPFIFO_A,
+                         &params, (uint32_t)sizeof(params), &status) == 0) {
+            lx_printk("nouveau-lx: sonda %u ACEPTADA — es la buena\n", i + 1);
+            return 0;
+        }
+    }
+    lx_printk("nouveau-lx: sonda — las %u variantes rechazadas; hay más de una "
+              "cosa mal a la vez\n",
+              (unsigned)(sizeof(chan_variants) / sizeof(chan_variants[0])));
+    return -1;
+}
+
 int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
                   struct gsp_chan *c, uint32_t vaspace)
 {
@@ -160,8 +293,7 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
     c->userd_ctl = (Nvc56fControl *)c->userd.va;
     chan_fill_alloc(c, &params, vaspace);
 
-    if (gsp_rm_alloc(rm, rm->device, c->handle, AMPERE_CHANNEL_GPFIFO_A,
-                     &params, (uint32_t)sizeof(params), NULL) != 0) {
+    if (chan_alloc_probing(c, vram, &params) != 0) {
         lx_printk("nouveau-lx: RM_ALLOC canal GPFIFO falló\n");
         gsp_chan_fini(c);
         return -1;
