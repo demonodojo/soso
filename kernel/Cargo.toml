@@ -46,6 +46,12 @@ getrandom = { version = "0.2", features = ["rdrand"] }
 # x86_64-soso (target JSON) a través de xtask.
 [workspace]
 
+# sunset con un parche propio: no espejar el ChannelEof del par (rompía la
+# salida de cualquier sesión cuyo cliente cerrara stdin). Detalle y diff en
+# vendor/README.md.
+[patch.crates-io]
+sunset = { path = "../vendor/sunset-0.5.0" }
+
 [profile.dev]
 panic = "abort"
 
