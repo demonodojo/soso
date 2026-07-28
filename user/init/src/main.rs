@@ -544,8 +544,71 @@ fn suite() -> u8 {
         let soft = sys::gpu_submit(b"SOFTG");
         if soft < 0 {
             // Con GPU real presente el kernel contesta EBUSY y no se toca nada:
-            // esta subprueba no va a tapar un dispositivo de verdad.
+            // esta subprueba no va a tapar un dispositivo de verdad. Pero entonces
+            // hay algo MEJOR que hacer: una sonda de UN solo matvec sobre el
+            // silicio. Acotada a propósito — un lanzamiento, un semáforo, un
+            // timeout— porque en un ciclo de VFIO conviene saber si el camino de
+            // GPU funciona antes de soltarle una inferencia de cientos de matvec.
             println!("init: OK  sin dispositivo software (rc={soft}, hay GPU real o no aplica)");
+            let mut info = abi::GpuInfo::default();
+            if sys::gpu_info(&mut info) == 0 && info.present == 1 && info.compute == 1 {
+                const R: usize = 4;
+                const C: usize = 8;
+                let mut w = [0.0f32; R * C];
+                let mut x = [0.0f32; C];
+                let mut esperado = [0.0f32; R];
+                for c in 0..C {
+                    x[c] = (c as f32) + 1.0;
+                }
+                for r in 0..R {
+                    let mut sum = 0.0f32;
+                    for c in 0..C {
+                        w[r * C + c] = ((r * C + c) as f32) * 0.5 - 3.0;
+                        sum += w[r * C + c] * x[c];
+                    }
+                    esperado[r] = sum;
+                }
+                let wh = sys::gpu_alloc((w.len() * 4) as u64);
+                let xh = sys::gpu_alloc((x.len() * 4) as u64);
+                let yh = sys::gpu_alloc((R * 4) as u64);
+                if wh >= 0 && xh >= 0 && yh >= 0 {
+                    let (wh, xh, yh) = (wh as u64, xh as u64, yh as u64);
+                    let subido = sys::gpu_map(wh, w.as_ptr() as u64, (w.len() * 4) as u64) == 0
+                        && sys::gpu_map(xh, x.as_ptr() as u64, (x.len() * 4) as u64) == 0;
+                    let mut cmd = [0u8; 37];
+                    cmd[0..5].copy_from_slice(b"MATVF");
+                    cmd[5..13].copy_from_slice(&wh.to_le_bytes());
+                    cmd[13..17].copy_from_slice(&(R as u32).to_le_bytes());
+                    cmd[17..21].copy_from_slice(&(C as u32).to_le_bytes());
+                    cmd[21..29].copy_from_slice(&xh.to_le_bytes());
+                    cmd[29..37].copy_from_slice(&yh.to_le_bytes());
+                    let bits = if subido { sys::gpu_submit(&cmd) } else { -1 };
+                    let mut y = [0.0f32; R];
+                    let leido = bits >= 0
+                        && sys::gpu_read(yh, y.as_mut_ptr() as u64, (R * 4) as u64) == 0;
+                    let bien = leido
+                        && (0..R).all(|r| (y[r] - esperado[r]).abs() < 0.01);
+                    let en_gpu = bits >= 0
+                        && (bits as u64) & abi::GPU_SUBMIT_ON_GPU != 0;
+                    // El resultado correcto es obligatorio; que lo haya hecho el
+                    // silicio, no: sin canal el kernel lo calcula en CPU y lo dice.
+                    check!(
+                        bien,
+                        "SONDA GPU: un matvec {R}x{C} da el resultado correcto                          (bits={bits:#x}, on_gpu={})",
+                        en_gpu as u8
+                    );
+                    if en_gpu {
+                        println!("init: >>> G5 EN SILICIO: on_gpu=1 <<<");
+                    } else {
+                        println!(
+                            "init: sonda GPU calculada por la CPU del kernel                              (on_gpu=0) — mira el log de serie para ver dónde paró"
+                        );
+                    }
+                    let _ = sys::gpu_free(wh);
+                    let _ = sys::gpu_free(xh);
+                    let _ = sys::gpu_free(yh);
+                }
+            }
         } else {
             let mut info = abi::GpuInfo::default();
             check!(
