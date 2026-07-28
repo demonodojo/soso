@@ -47,7 +47,10 @@ fn main(_args: &str) -> u8 {
                 0x20..=0x7e if len < line.len() => {
                     line[len] = c;
                     len += 1;
-                    sys::write(1, &[c]);
+                    // El eco de la tecla también por `write_all`: si el pipe está
+                    // lleno, un `write` suelto devuelve 0 y el carácter se pierde
+                    // de la pantalla sin que nada lo diga.
+                    let _ = sys::write_all(1, &[c]);
                 }
                 _ => {}
             }

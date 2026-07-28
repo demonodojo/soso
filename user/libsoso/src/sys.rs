@@ -3,6 +3,13 @@
 use core::arch::asm;
 use soso_abi as abi;
 
+/// Syscall cruda, para poder pasar punteros que un `&[u8]` no permite construir.
+/// La usa la suite de regresión para comprobar que el kernel contesta EFAULT en vez
+/// de tocar una dirección que no es del proceso.
+pub fn raw4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    syscall4(nr, a1, a2, a3, a4)
+}
+
 fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     let ret: i64;
     unsafe {

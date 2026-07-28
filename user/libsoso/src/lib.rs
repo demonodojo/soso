@@ -48,7 +48,13 @@ struct Stdout;
 
 impl fmt::Write for Stdout {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        sys::write(1, s.as_bytes());
+        // `write_all`, no `write`: una escritura puede ser CORTA y aquí nadie
+        // miraba el retorno. Con stdout en un pipe —que es lo que hay en toda
+        // sesión SSH y en `spawn_io`— eso perdía la cola de cualquier línea larga
+        // sin un solo error. Si falla de verdad (pipe cerrado) no hay a quién
+        // avisar desde un `fmt::Write`, así que se ignora el error pero NO el
+        // progreso parcial.
+        let _ = sys::write_all(1, s.as_bytes());
         Ok(())
     }
 }

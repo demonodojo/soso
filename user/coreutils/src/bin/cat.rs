@@ -28,7 +28,13 @@ fn main(args: &str) -> u8 {
                 }
                 break;
             }
-            sys::write(1, &buf[..n as usize]);
+            // `write_all`: el pipe de una sesión SSH acepta lo que le quepa y lo
+            // dice en el retorno. Con `write` a secas, `cat /README.md` entregaba
+            // 1435 bytes de 3086 y salía con éxito.
+            if sys::write_all(1, &buf[..n as usize]).is_err() {
+                fallo = 1;
+                break;
+            }
         }
         sys::close(fd as u64);
     }
