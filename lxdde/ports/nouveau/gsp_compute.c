@@ -97,6 +97,72 @@ static int kernel_check(const struct gsp_kernel *k, unsigned want_params)
     return 0;
 }
 
+/* Sonda de variantes del objeto de compute, para gastar UN ciclo de hardware en vez
+ * de uno por hipótesis.
+ *
+ * Si la combinación que dice el catálogo del chip (clase de compute sobre el canal
+ * de GR0) es rechazada, aquí se prueban las demás y se imprime el status de cada
+ * una. No arregla nada por sí sola: convierte "RM_ALLOC falló" —un bit— en una
+ * tabla que dice QUÉ acepta RM, que es lo que hace falta para el siguiente cambio.
+ * Es el mismo patrón que se usó con las once variantes del canal (2026-07-28), y
+ * por la misma razón: un ciclo de VFIO cuesta un reinicio o cerrar la sesión.
+ *
+ * Cada intento que sale bien se libera acto seguido: la sonda diagnostica, no deja
+ * objetos vivos por ahí. Y usa un handle propio para no pisar el del compute de
+ * verdad si alguna variante llega a existir. */
+static void compute_probe_variantes(struct gsp_rm *rm, struct gsp_chan *chan)
+{
+    static const uint32_t clases[] = {
+        BLACKWELL_COMPUTE_B, BLACKWELL_COMPUTE_A, HOPPER_COMPUTE_A,
+        ADA_COMPUTE_A, AMPERE_COMPUTE_B, AMPERE_COMPUTE_A,
+    };
+    /* Los tres padres plausibles: el canal (lo que hace nouveau), el device y el
+     * subdevice. Si RM acepta la clase sobre el device pero no sobre el canal, el
+     * problema es el canal; si no la acepta sobre ninguno, es la clase o el chip. */
+    struct { const char *nombre; uint32_t handle; } padres[3];
+    unsigned np = 0;
+    unsigned i, j;
+    const uint32_t sonda = NVKM_RM_COMPUTE0 | 0x0f00u;
+
+    padres[np].nombre = "canal";
+    padres[np++].handle = chan->handle;
+    padres[np].nombre = "device";
+    padres[np++].handle = rm->device;
+    padres[np].nombre = "subdevice";
+    padres[np++].handle = rm->subdevice;
+
+    lx_printk("nouveau-lx: --- sonda compute: %u clases x %u padres ---\n",
+              (unsigned)(sizeof(clases) / sizeof(clases[0])), np);
+    for (i = 0; i < sizeof(clases) / sizeof(clases[0]); i++) {
+        /* Sólo las que el chip dice que NO existen se saltan: pedir una clase que
+         * el catálogo no lista contesta INVALID_CLASS por una razón distinta y
+         * ensucia la tabla. `gsp_rm_class_supported` devuelve -1 cuando no hay
+         * catálogo (`GET_CLASSLIST_V2` falló), y entonces se prueban todas — que es
+         * justo cuando más falta hace la sonda. */
+        if (gsp_rm_class_supported(clases[i]) == 0) {
+            lx_printk("nouveau-lx: sonda compute: cls=0x%04x no está en el "
+                      "catálogo del chip — saltada\n", clases[i]);
+            continue;
+        }
+        for (j = 0; j < np; j++) {
+            uint32_t status = 0;
+            int rc = gsp_rm_alloc(rm, padres[j].handle, sonda, clases[i],
+                                  NULL, 0, &status);
+
+            lx_printk("nouveau-lx: sonda compute: cls=0x%04x sobre %s "
+                      "(0x%08x) -> %s (status=0x%x)\n",
+                      clases[i], padres[j].nombre, padres[j].handle,
+                      rc == 0 ? "ACEPTADO" : "rechazado", status);
+            if (rc == 0) {
+                gsp_rm_free(rm, sonda);
+            }
+        }
+    }
+    lx_printk("nouveau-lx: --- fin de la sonda; el motor del canal era %u "
+              "(GR0=%u, COPY0=%u) ---\n",
+              chan->engine, NV2080_ENGINE_TYPE_GR0, NV2080_ENGINE_TYPE_COPY0);
+}
+
 int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
                      struct gsp_compute *cp)
 {
@@ -183,30 +249,39 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
                                     (unsigned)(sizeof(cand) / sizeof(cand[0])));
     }
 
-    if (gsp_rm_alloc(rm, chan->handle, cp->handle, cp->cls,
-                     NULL, 0, NULL) != 0) {
-        /* En HW esto devolvió INVALID_CLASS (0x22) con la clase BIEN: `cand[0]`
-         * es `BLACKWELL_COMPUTE_B`, que es lo que `rm/gb20x.c` pone para este
-         * chip, y el mismo canal aceptó `BLACKWELL_DMA_COPY_B` sin queja
-         * (2026-07-28).
-         *
-         * Lo que no cuadra es el CANAL, no la clase: este cuelga de un canal
-         * atado a `NV2080_ENGINE_TYPE_COPY0`, y un objeto de compute necesita un
-         * canal del motor de gráficos (GR0 = 1). RM no tiene forma de aceptar una
-         * clase de compute sobre un canal de copia, y "clase inválida" es
-         * literalmente lo que contesta. G4f necesita su propio canal sobre GR0;
-         * reciclar el del CE no es una simplificación, es imposible. */
-        lx_printk("nouveau-lx: RM_ALLOC compute falló (cls=0x%04x) sobre el canal "
-                  "0x%08x del motor %u — si es INVALID_CLASS y el motor no es "
-                  "GR0 (%u), el problema es el canal, no la clase\n",
-                  cp->cls, chan->handle, chan->engine, NV2080_ENGINE_TYPE_GR0);
-        if (cp->mv_mapped) {
-            gsp_dma_free(&cp->mv);
-            cp->mv_mapped = 0;
+    {
+        uint32_t status = 0;
+
+        if (gsp_rm_alloc(rm, chan->handle, cp->handle, cp->cls,
+                         NULL, 0, &status) != 0) {
+            lx_printk("nouveau-lx: RM_ALLOC compute rechazado (cls=0x%04x, "
+                      "status=0x%x) — sondeando variantes en ESTE arranque\n",
+                      cp->cls, status);
+            compute_probe_variantes(rm, chan);
+            /* En HW esto devolvió INVALID_CLASS (0x22) con la clase BIEN:
+             * `cand[0]` es `BLACKWELL_COMPUTE_B`, que es lo que `rm/gb20x.c` pone
+             * para este chip, y el mismo canal aceptó `BLACKWELL_DMA_COPY_B` sin
+             * queja (2026-07-28).
+             *
+             * La hipótesis es que lo que no cuadra es el CANAL, no la clase: aquel
+             * colgaba de un canal atado a `NV2080_ENGINE_TYPE_COPY0`, y un objeto
+             * de compute necesita un canal del motor de gráficos (GR0 = 1). Por eso
+             * el bring-up levanta ahora un segundo canal sobre GR0. Si aun así se
+             * llega hasta aquí, la hipótesis era falsa — y la tabla que acaba de
+             * imprimir la sonda dice qué acepta RM de verdad. */
+            lx_printk("nouveau-lx: RM_ALLOC compute falló (cls=0x%04x) sobre el "
+                      "canal 0x%08x del motor %u — si es INVALID_CLASS y el motor "
+                      "no es GR0 (%u), el problema es el canal, no la clase\n",
+                      cp->cls, chan->handle, chan->engine,
+                      NV2080_ENGINE_TYPE_GR0);
+            if (cp->mv_mapped) {
+                gsp_dma_free(&cp->mv);
+                cp->mv_mapped = 0;
+            }
+            gsp_dma_free(&cp->data);
+            cp->mapped = 0;
+            return -1;
         }
-        gsp_dma_free(&cp->data);
-        cp->mapped = 0;
-        return -1;
     }
     cp->ready = 1;
     lx_printk("nouveau-lx: compute listo cls=0x%04x handle=0x%08x sobre canal "
