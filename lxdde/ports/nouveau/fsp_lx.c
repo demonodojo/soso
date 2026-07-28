@@ -293,18 +293,37 @@ static int lockdown_released(uint64_t args_addr, uint32_t *mbox0)
     return (hwcfg2 & HWCFG2_RISCV_BR_PRIV_LOCKDOWN) ? 0 : 1;
 }
 
-static void log_gsp_state(const char *what)
+/* `ms` = milisegundos desde que el FSP aceptó el COT, o LOG_NO_MS fuera de la
+ * espera del FMC. Sin ese número el log solo dice que la tarjeta murió "en algún
+ * momento" del primer segundo, y las tres caídas conocidas (2026-07-27 18:28,
+ * 2026-07-28 02:15 y 02:44) caben enteras ahí dentro. */
+#define LOG_NO_MS 0xffffffffu
+
+static void log_gsp_state_ms(const char *what, uint32_t ms)
 {
     uint32_t mbox0 = gsp_mmio_rd32(NV_PFALCON_MAILBOX0);
     uint32_t mbox1 = gsp_mmio_rd32(NV_PFALCON_MAILBOX1);
     uint32_t hwcfg2 = gsp_mmio_rd32(NV_PFALCON_HWCFG2);
     uint32_t cpuctl = gsp_mmio_rd32(NV_PRISCV_RISCV_CPUCTL);
 
-    lx_printk("nouveau-lx: GSP %s mbox0=0x%08x mbox1=0x%08x hwcfg2=0x%08x (lockdown=%u) "
-              "cpuctl=0x%08x (halted=%u)\n",
-              what, mbox0, mbox1, hwcfg2,
+    if (ms == LOG_NO_MS) {
+        lx_printk("nouveau-lx: GSP %s mbox0=0x%08x mbox1=0x%08x hwcfg2=0x%08x "
+                  "(lockdown=%u) cpuctl=0x%08x (halted=%u)\n",
+                  what, mbox0, mbox1, hwcfg2,
+                  (hwcfg2 & HWCFG2_RISCV_BR_PRIV_LOCKDOWN) ? 1u : 0u,
+                  cpuctl, (cpuctl & CPUCTL_HALTED) ? 1u : 0u);
+        return;
+    }
+    lx_printk("nouveau-lx: GSP %s +%ums mbox0=0x%08x mbox1=0x%08x hwcfg2=0x%08x "
+              "(lockdown=%u) cpuctl=0x%08x (halted=%u)\n",
+              what, ms, mbox0, mbox1, hwcfg2,
               (hwcfg2 & HWCFG2_RISCV_BR_PRIV_LOCKDOWN) ? 1u : 0u,
               cpuctl, (cpuctl & CPUCTL_HALTED) ? 1u : 0u);
+}
+
+static void log_gsp_state(const char *what)
+{
+    log_gsp_state_ms(what, LOG_NO_MS);
 }
 
 /* --- Precondiciones --------------------------------------------------------- */
@@ -414,7 +433,11 @@ int fsp_lx_boot_gsp_fmc(const struct fmc_staged *fmc, const struct gsp_libos *li
         /* Si la tarjeta se cae del bus a mitad del arranque del FMC, todo el
          * MMIO pasa a leerse 0xffffffff. Decirlo con estas palabras evita
          * confundirlo con un código de error del FMC (2026-07-25). */
+        uint32_t elapsed = 8000u - (uint32_t)time;
+
         if (!gsp_mmio_alive()) {
+            lx_printk("nouveau-lx: la GPU dejó de contestar al MMIO **+%u ms** "
+                      "después de que el FSP aceptase el COT\n", elapsed);
             /* Puede que la GPU siga en el bus y solo haya perdido el decode de
              * memoria (lo que deja un reset de función). El espacio de
              * configuración lo dice; si es eso, se reactiva y se sigue esperando. */
@@ -424,10 +447,16 @@ int fsp_lx_boot_gsp_fmc(const struct fmc_staged *fmc, const struct gsp_libos *li
             return -1;
         }
         if (lockdown_released(args_addr, &mbox0)) {
+            lx_printk("nouveau-lx: lockdown liberado a los +%u ms del COT\n", elapsed);
             break;
         }
-        if ((time % 1000u) == 0u) {
-            log_gsp_state("esperando");
+        /* Cada 100 ms el primer segundo, cada segundo después. Una traza por
+         * segundo no distingue "murió nada más arrancar el FMC" de "murió casi
+         * al final", y ahí está toda la diferencia entre culpar al enlace o al
+         * contenido del COT. */
+        if ((elapsed < 1000u && (elapsed % 100u) == 0u) ||
+            (elapsed % 1000u) == 0u) {
+            log_gsp_state_ms("esperando", elapsed);
         }
         lx_mdelay(1);
     }

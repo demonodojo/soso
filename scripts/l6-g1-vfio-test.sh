@@ -251,6 +251,41 @@ restore_reset_method() {
   done
 }
 
+# ---- Muestreo del enlace PCIe durante la prueba ------------------------------
+#
+# Las tres caídas de la tarjeta (2026-07-27 18:28, 2026-07-28 02:15 y 02:44)
+# tienen la misma firma en el host: AER correctables de capa de enlace
+# (Rollover + Timeout) en el root port `00:06.0` y un `Uncorrectable (Non-Fatal)`
+# de `01:00.0`, siempre ~1 s después de que el FMC empiece a ejecutar. Con eso
+# solo no se puede decir si el enlace se cae y por eso la GPU calla, o si la GPU
+# se cuelga y el enlace es la consecuencia — y son diagnósticos opuestos.
+#
+# El root port **no está en passthrough**, así que su lado del enlace se puede
+# leer desde el host mientras corre la prueba sin tocar nada de la GPU. Se
+# muestrea velocidad y anchura cada 200 ms con marca de tiempo, y así el momento
+# exacto del cambio se puede alinear contra el log de serie del guest.
+#
+# La GPU NO se sondea: leer su espacio de configuración con el enlace agonizando
+# es justo lo que colgó el host el 27 (`pci_conf1_read` con las IRQs cerradas).
+linklog="${ROOT}/target/g1-vfio-link.log"
+rm -f "$linklog"
+rp="/sys/bus/pci/devices/0000:00:06.0"
+link_pid=""
+if [[ -r "${rp}/current_link_speed" ]]; then
+  {
+    prev=""
+    while :; do
+      now=$(cat "${rp}/current_link_speed" 2>/dev/null)/$(cat "${rp}/current_link_width" 2>/dev/null)
+      if [[ "$now" != "$prev" ]]; then
+        printf '%s  root port 00:06.0 → %s\n' "$(date +%H:%M:%S.%3N)" "$now"
+        prev="$now"
+      fi
+      sleep 0.2
+    done
+  } >"$linklog" 2>&1 &
+  link_pid=$!
+fi
+
 mkfifo -m 666 "$fifo"
 dd of="$log" bs=4096 oflag=dsync status=none <"$fifo" &
 dd_pid=$!
@@ -327,8 +362,27 @@ else
   echo "         echo default | sudo tee /sys/bus/pci/devices/${FULL}/reset_method" >&2
 fi
 
+if [[ -n "$link_pid" ]]; then
+  kill "$link_pid" 2>/dev/null || true
+  wait "$link_pid" 2>/dev/null || true
+fi
+
 if grep -q 'GSP-RM apagado' "$log"; then
   grep 'nouveau-lx: fini —\|GSP-RM apagado' "$log" || true
+fi
+
+# El enlace, si dijo algo. Una sola línea = nunca cambió de estado: la GPU se
+# calló con el enlace entrenado, y entonces el problema NO es el enlace sino la
+# tarjeta. Varias líneas = el enlace se cayó o renegoció, y el orden respecto al
+# log de serie dice quién arrastró a quién.
+if [[ -s "$linklog" ]]; then
+  n=$(wc -l <"$linklog")
+  if [[ "$n" -le 1 ]]; then
+    echo "enlace: sin cambios durante la prueba ($(tail -1 "$linklog" | sed 's/.*→ //'))"
+  else
+    echo "enlace: ${n} cambios de estado — ${linklog}"
+    cat "$linklog"
+  fi
 fi
 
 # El criterio NO puede ser "aparece la cadena NV_PMC_BOOT_0=": con la tarjeta
