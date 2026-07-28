@@ -761,10 +761,40 @@ uint64_t lx_nouveau_vram_bytes(void)
  * funciona, y eso en esta máquina se paga con un cuelgue sin traza. Sin esa
  * prueba, CPU y a otra cosa. Los dos canales tienen que estar en pie: el de COPY0
  * copia el SASS a VRAM y el de GR0 es el que ejecuta. */
+/* Cortacircuitos del camino de GPU.
+ *
+ * Cada lanzamiento fallido cuesta el timeout del semáforo (2 s). Una inferencia
+ * son cientos de matvec, así que un canal de compute roto convertiría "se cae a
+ * CPU" en seis minutos de esperas que desde fuera parecen un cuelgue — y en un
+ * ciclo de VFIO, que cuesta cerrar la sesión gráfica, eso es el ciclo entero
+ * perdido. Tras `G4F_MAX_FALLOS` fallos seguidos se deja de intentar y se dice una
+ * vez; un éxito lo reinicia. */
+#define G4F_MAX_FALLOS 3
+static unsigned g_compute_fallos;
+static int g_compute_rendido;
+
 static int compute_usable(void)
 {
+    if (g_compute_rendido) {
+        return 0;
+    }
     return g_ce_verified && g_compute.ready && g_ce.ready && g_chan.ready &&
            g_chan_gr.ready && g_phase >= GSP_RM_COMPUTE;
+}
+
+/* Contabilidad del cortacircuitos: `ok` = el dispositivo calculó de verdad. */
+static void compute_resultado(int ok)
+{
+    if (ok) {
+        g_compute_fallos = 0;
+        return;
+    }
+    if (++g_compute_fallos >= G4F_MAX_FALLOS) {
+        g_compute_rendido = 1;
+        lx_printk("nouveau-lx: %u lanzamientos seguidos fallidos — camino de GPU "
+                  "desactivado, todo a CPU (reinicia soso para reintentarlo)\n",
+                  g_compute_fallos);
+    }
 }
 
 /* El valor de retorno es "esto lo ha calculado la GPU" (1) o "la CPU" (0), y es
@@ -782,8 +812,10 @@ int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n)
         return -1;
     }
     if (compute_usable()) {
-        if (gsp_compute_saxpy(&g_compute, &g_ce, a, x, y, n,
-                              G4D_SCRATCH_VA, g_scratch.va) == 0) {
+        int ok = gsp_compute_saxpy(&g_compute, &g_ce, a, x, y, n,
+                                   G4D_SCRATCH_VA, g_scratch.va) == 0;
+        compute_resultado(ok);
+        if (ok) {
             return 1;
         }
     }
@@ -807,8 +839,10 @@ int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned cols,
         return -1;
     }
     if (compute_usable()) {
-        if (gsp_compute_matvec_f32(&g_compute, &g_ce, w, rows, cols, x, y,
-                                   G4D_SCRATCH_VA, g_scratch.va) == 0) {
+        int ok = gsp_compute_matvec_f32(&g_compute, &g_ce, w, rows, cols, x, y,
+                                       G4D_SCRATCH_VA, g_scratch.va) == 0;
+        compute_resultado(ok);
+        if (ok) {
             return 1;
         }
         /* La GPU no lo hizo. `y` puede tener tandas escritas a medias, así que el
