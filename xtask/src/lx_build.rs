@@ -237,17 +237,55 @@ fn newest_mtime(dir: &Path) -> std::time::SystemTime {
     newest
 }
 
+/// Cabeceras de las que depende un objeto, leídas del `.d` que dejó el
+/// compilador. Devuelve None si no hay `.d` (objeto de antes de que existiera
+/// esto): sin lista de dependencias no se puede afirmar que esté al día.
+fn deps_from_makefile(dep_file: &Path) -> Option<Vec<PathBuf>> {
+    let text = fs::read_to_string(dep_file).ok()?;
+    // Formato: "obj: src hdr1 hdr2 \<NL>  hdr3 ...". Se tira todo hasta el
+    // primer ':' y las barras de continuación son un token más al separar.
+    let (_, rhs) = text.split_once(':')?;
+    Some(
+        rhs.split_whitespace()
+            .filter(|t| *t != "\\")
+            .map(PathBuf::from)
+            .collect(),
+    )
+}
+
 fn compile_c(root: &Path, out_dir: &Path, src: &Path, flags: &[String], dep_mtime: std::time::SystemTime) -> PathBuf {
     let stem = src.file_stem().unwrap().to_str().unwrap();
     let hash = format!("{:x}", md5_simple(src));
     let obj = out_dir.join(format!("{stem}-{hash}.o"));
+    let dep_file = obj.with_extension("d");
     if obj.exists() {
         if let Ok(meta_src) = fs::metadata(src) {
             if let Ok(meta_obj) = fs::metadata(&obj) {
                 if let (Ok(t_src), Ok(t_obj)) = (meta_src.modified(), meta_obj.modified()) {
-                    // Recompilar si el objeto es más viejo que el .c o que
-                    // cualquier cabecera del shim (dependencia implícita).
-                    if t_obj >= t_src && t_obj >= dep_mtime {
+                    // Recompilar si el objeto es más viejo que el .c, que
+                    // cualquier cabecera del shim, o que cualquiera de SUS
+                    // cabeceras según el `.d`.
+                    //
+                    // Esto último faltaba y salía carísimo: `dep_mtime` sólo
+                    // cubre `lxdde/shim/include`, así que tocar una cabecera del
+                    // propio port —p.ej. `gsp_chan.h`— no invalidaba nada. El
+                    // 2026-07-28 eso mezcló en un mismo `.a` un `gsp_chan.o`
+                    // recién compilado con el struct nuevo y un `gsp_bringup.o`
+                    // de dos horas antes con el viejo: `g_chan` quedó reservado
+                    // al tamaño pequeño, el `memset(c, 0, sizeof(*c))` del
+                    // grande se salió por detrás y borró el `gsp_rm` de al lado
+                    // (`q=0 rpc=0 sub=0` en pleno bring-up). Un ciclo de GPU
+                    // entero para descubrir que el binario no era coherente.
+                    let deps_ok = match deps_from_makefile(&dep_file) {
+                        None => false,
+                        Some(deps) => deps.iter().all(|d| {
+                            fs::metadata(d)
+                                .and_then(|m| m.modified())
+                                .map(|t| t_obj >= t)
+                                .unwrap_or(false)
+                        }),
+                    };
+                    if t_obj >= t_src && t_obj >= dep_mtime && deps_ok {
                         return obj;
                     }
                 }
@@ -256,7 +294,17 @@ fn compile_c(root: &Path, out_dir: &Path, src: &Path, flags: &[String], dep_mtim
     }
     let compiler = std::env::var("LX_CC").unwrap_or_else(|_| "clang".into());
     let mut cmd = Command::new(&compiler);
-    cmd.args(flags).arg("-c").arg(src).arg("-o").arg(&obj);
+    // `-MMD -MF`: deja al lado del objeto la lista de cabeceras de las que
+    // depende, que es lo que lee `deps_from_makefile` en la pasada siguiente.
+    // `-MMD` (y no `-MD`) omite las del sistema, que aquí no las hay.
+    cmd.args(flags)
+        .arg("-MMD")
+        .arg("-MF")
+        .arg(&dep_file)
+        .arg("-c")
+        .arg(src)
+        .arg("-o")
+        .arg(&obj);
     let st = cmd.status().unwrap_or_else(|e| panic!("{compiler}: {e}"));
     if !st.success() {
         eprintln!("lx-build: fallo compilando {}", src.display());
