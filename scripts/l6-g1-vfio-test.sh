@@ -331,11 +331,31 @@ if grep -q 'GSP-RM apagado' "$log"; then
   grep 'nouveau-lx: fini —\|GSP-RM apagado' "$log" || true
 fi
 
-if grep -q 'NV_PMC_BOOT_0=' "$log"; then
+# El criterio NO puede ser "aparece la cadena NV_PMC_BOOT_0=": con la tarjeta
+# caída del bus el registro se lee 0xffffffff y esto cantaba GO igual
+# (2026-07-28, se cayó arrancando el FMC y el script dio la prueba por buena).
+# Un all-ones no es una lectura, es silencio — la misma trampa que fsp_lx.c ya
+# documenta para el MMIO, aquí sin aplicar.
+boot0=$(grep -oE 'NV_PMC_BOOT_0=0x[0-9a-fA-F]+' "$log" | tail -1 | cut -d= -f2)
+if grep -q 'GPU fuera del bus\|se ha caído del bus' "$log"; then
+  echo ""
+  echo "FAIL: la GPU se cayó del bus durante la prueba (lo dice el log del guest)." >&2
+  echo "      NV_PMC_BOOT_0=${boot0:-(sin lectura)} no cuenta: con el enlace muerto" >&2
+  echo "      todo el espacio de configuración se lee a unos." >&2
+  echo "      La tarjeta no vuelve sana sin ciclo de alimentación: 'sudo reboot'." >&2
+  grep -E 'fuera del bus|caído del bus' "$log" | tail -5 >&2
+  exit 1
+fi
+if [[ -n "$boot0" ]] && (( boot0 != 0xffffffff && boot0 != 0 )); then
   grep 'nvidia:' "$log" || true
   echo ""
-  echo "GO: NV_PMC_BOOT_0 legible desde soso."
+  echo "GO: NV_PMC_BOOT_0 legible desde soso (${boot0})."
   exit 0
+fi
+if [[ -n "$boot0" ]]; then
+  echo ""
+  echo "FAIL: NV_PMC_BOOT_0=${boot0} no es una lectura válida." >&2
+  exit 1
 fi
 
 echo "FAIL o incompleto — revisar ${log}"
