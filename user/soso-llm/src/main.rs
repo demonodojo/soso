@@ -574,13 +574,14 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
             // llamada, y en el log no se veía nada raro. Y `on_gpu` separa "lo
             // calculó el dispositivo" de "lo calculó la GPU".
             if let Some(ref g) = sys_gpu {
-                let (calls, uploads, resident) = g.stats();
+                let (calls, uploads, resident, sin_sitio) = g.stats();
                 println!(
-                    "soso-llm: dispositivo «{}» — {} matvec, {} subidas de pesos,                      {} matrices residentes, último on_gpu={}",
+                    "soso-llm: dispositivo «{}» — {} matvec, {} subidas de pesos, {} matrices residentes, {} sin sitio (a CPU), último on_gpu={}",
                     g.device_name(),
                     calls,
                     uploads,
                     resident,
+                    sin_sitio,
                     g.last_on_gpu() as u8
                 );
             }

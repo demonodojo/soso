@@ -18,6 +18,16 @@
 //! Y una tercera, de rebote: `SysGpu::new` se enganchaba a cualquier dispositivo
 //! con `present=1`. En una caja con iGPU Intel eso son dos copias de la matriz por
 //! matvec para luego calcular en CPU igual. Ahora exige `compute=1`.
+//!
+//! Y una cuarta: cada llamada pedía y soltaba búferes de tránsito por `mmap`
+//! —siete syscalls por matvec, cuatro de ellas puro trámite— para copiar datos que
+//! el kernel podía leer de donde ya estaban. Ver `write_f32`.
+//!
+//! **Pesos cuantizados (Q8_0/Q4_K).** El dispositivo calcula en f32, así que los
+//! pesos se **descuantizan una sola vez, al subirlos**: son residentes, luego el
+//! coste es por tensor y no por token. Lo que sube es F32, así que un Q4_K ocupa
+//! ~8× en el dispositivo; cuando no cabe en `vram_free` el tensor se queda en CPU y
+//! esa capa se calcula ahí. Eso es el offload híbrido, no un fallo.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -25,6 +35,8 @@ use libsoso::sys;
 use soso_abi as abi;
 use soso_llm_core::gpu::GpuDispatch;
 use soso_llm_core::layer::TensorView;
+use soso_llm_core::quant::{dequant_q4_k, dequant_q8_0};
+use sosomodel::layout::{DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0};
 
 /// Pesos ya residentes en el dispositivo, indexados por el nombre del tensor.
 ///
@@ -63,6 +75,10 @@ pub struct SysGpu {
     y: Scratch,
     uploads: usize,
     calls: usize,
+    /// Tensores que no caben en el dispositivo y se quedan en CPU. Es una cifra
+    /// del offload híbrido, no un error: sin verla, "va lento" no se distingue de
+    /// "no está usando la GPU".
+    sin_sitio: usize,
 }
 
 /// Tope de matrices residentes. No es por memoria —eso lo controla `vram_free`—
@@ -90,6 +106,7 @@ impl SysGpu {
             y: Scratch::NONE,
             uploads: 0,
             calls: 0,
+            sin_sitio: 0,
         })
     }
 
@@ -105,8 +122,8 @@ impl SysGpu {
         self.on_gpu
     }
 
-    pub fn stats(&self) -> (usize, usize, usize) {
-        (self.calls, self.uploads, self.resident.len())
+    pub fn stats(&self) -> (usize, usize, usize, usize) {
+        (self.calls, self.uploads, self.resident.len(), self.sin_sitio)
     }
 
     /// Reserva o agranda un búfer de trabajo. Devolver el handle viejo cuando el
@@ -136,8 +153,16 @@ impl SysGpu {
     }
 
     /// Handle de los pesos, subiéndolos sólo la primera vez que se ven.
-    fn resident_weights(&mut self, key: &str, w: &[f32]) -> Result<u64, ()> {
-        let bytes = (w.len() * 4) as u64;
+    ///
+    /// `elems` son los f32 LÓGICOS del tensor: lo que ocupará en el dispositivo,
+    /// que con pesos cuantizados no es lo que ocupa en el modelo.
+    fn resident_weights(
+        &mut self,
+        key: &str,
+        view: &TensorView<'_>,
+        elems: usize,
+    ) -> Result<u64, ()> {
+        let bytes = (elems * 4) as u64;
 
         if let Some(r) = self
             .resident
@@ -151,6 +176,9 @@ impl SysGpu {
         // en volver a hacer falta.
         while self.resident.len() >= MAX_RESIDENT || bytes > self.vram_free {
             let Some(old) = self.resident.first() else {
+                // Ni vaciando el dispositivo cabe este tensor: se queda en CPU. Es
+                // el caso normal de un modelo más grande que la VRAM, no un error.
+                self.sin_sitio += 1;
                 return Err(());
             };
             let freed = sys::gpu_free(old.handle);
@@ -165,7 +193,22 @@ impl SysGpu {
         }
         let handle = h as u64;
         self.vram_free = self.vram_free.saturating_sub(bytes);
-        if write_f32(handle, w).is_err() {
+        // Lo que sube es SIEMPRE f32. Descuantizar aquí es lo que hace que un
+        // modelo Q4_K pueda usar el dispositivo, y se paga una vez por tensor.
+        let subido = match view.dtype {
+            DTYPE_F32 => view.f32().ok_or(()).and_then(|w| write_f32(handle, w)),
+            DTYPE_Q8_0 | DTYPE_Q4_K => {
+                let mut plano = alloc::vec![0f32; elems];
+                let ok = if view.dtype == DTYPE_Q8_0 {
+                    dequant_q8_0(view.bytes, &mut plano)
+                } else {
+                    dequant_q4_k(view.bytes, &mut plano)
+                };
+                ok.and_then(|_| write_f32(handle, &plano))
+            }
+            _ => Err(()),
+        };
+        if subido.is_err() {
             sys::gpu_free(handle);
             self.vram_free = self.vram_free.saturating_add(bytes);
             return Err(());
@@ -195,42 +238,26 @@ impl SysGpu {
     }
 }
 
-/// Copia `data` a un búfer del dispositivo pasando por una página mmap. Es una
-/// función libre porque el préstamo de `self` no da para tenerla como método
-/// mientras se recorre `resident`.
+/// Sube `data` al búfer del dispositivo **desde donde está**.
+///
+/// Antes esto pedía un `mmap`, copiaba los datos ahí, llamaba a `gpu_map` y
+/// soltaba el `mmap`: cuatro syscalls y una copia entera de la matriz por subida,
+/// más una falta de página por cada página nueva del mapeo. Todo eso existía porque
+/// `SYS_GPU_MAP` exigía permiso de escritura en el búfer de origen, y los pesos de
+/// un modelo viven en un mapeo de fichero de sólo lectura. Corregido eso en el
+/// kernel, la dirección del propio tensor sirve tal cual.
 fn write_f32(handle: u64, data: &[f32]) -> Result<(), ()> {
-    let bytes = data.len() * 4;
-    let map = sys::mmap(0, bytes as u64, u64::MAX, 0);
-    if map < 0 {
-        return Err(());
-    }
-    // Copia directa de los f32: el `Vec<u8>` intermedio de antes era otra copia
-    // entera de la matriz en el heap del proceso, y para 16 MiB eso se nota.
-    unsafe {
-        core::ptr::copy_nonoverlapping(data.as_ptr(), map as *mut f32, data.len());
-    }
-    let rc = sys::gpu_map(handle, map as u64, bytes as u64);
-    sys::munmap(map as u64, bytes as u64);
-    if rc < 0 {
+    let bytes = (data.len() * 4) as u64;
+    if sys::gpu_map(handle, data.as_ptr() as u64, bytes) < 0 {
         return Err(());
     }
     Ok(())
 }
 
+/// Lee el resultado **directamente sobre el destino** del llamante.
 fn read_f32_into(handle: u64, out: &mut [f32]) -> Result<(), ()> {
-    let bytes = out.len() * 4;
-    let map = sys::mmap(0, bytes as u64, u64::MAX, 0);
-    if map < 0 {
-        return Err(());
-    }
-    let rc = sys::gpu_read(handle, map as u64, bytes as u64);
-    if rc >= 0 {
-        unsafe {
-            core::ptr::copy_nonoverlapping(map as *const f32, out.as_mut_ptr(), out.len());
-        }
-    }
-    sys::munmap(map as u64, bytes as u64);
-    if rc < 0 {
+    let bytes = (out.len() * 4) as u64;
+    if sys::gpu_read(handle, out.as_mut_ptr() as u64, bytes) < 0 {
         return Err(());
     }
     Ok(())
@@ -245,7 +272,7 @@ impl GpuDispatch for SysGpu {
     /// GPU": eso último es `last_on_gpu()`. Cuando el kernel calcula con su bucle
     /// de CPU (canal no listo, dispositivo software) el vector es igual de bueno y
     /// repetirlo aquí es trabajo tirado — pero decir "GPU" sería falso.
-    fn matvec_f32(
+    fn matvec(
         &mut self,
         key: &str,
         view: &TensorView<'_>,
@@ -254,11 +281,15 @@ impl GpuDispatch for SysGpu {
         x: &[f32],
         out: &mut [f32],
     ) -> Result<bool, ()> {
-        let w = view.f32().ok_or(())?;
-        if w.len() != rows * cols || x.len() != cols || out.len() != rows {
+        if view.elems != rows * cols || x.len() != cols || out.len() != rows {
             return Err(());
         }
-        let w_handle = self.resident_weights(key, w)?;
+        // Que no quepa NO es un error: devolver Err aquí abortaría la inferencia
+        // entera en vez de calcular esa capa en CPU, que es lo que hay que hacer
+        // con un modelo más grande que la VRAM.
+        let Ok(w_handle) = self.resident_weights(key, view, rows * cols) else {
+            return Ok(false);
+        };
         let x_bytes = (cols * 4) as u64;
         let y_bytes = (rows * 4) as u64;
         let mut vram = self.vram_free;

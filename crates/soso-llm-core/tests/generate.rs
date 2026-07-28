@@ -64,10 +64,39 @@ fn tiny_model() -> (Manifest, TensorIndex, MemFileMapper) {
 
 #[test]
 fn generate_con_pesos_q8_0() {
-    use soso_llm_core::quant::quantize_q8_0;
-    use sosomodel::index::make_q8_0_entry;
+    let (manifest, index, mapper) = tiny_model_q8_0();
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    rt.validate_shapes().expect("shapes válidas");
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    let tokens = rt
+        .generate(&mut source, &[5, 10], 3, None)
+        .expect("generate con Q8_0 debe funcionar");
+    assert!(tokens.len() >= 2);
+}
 
-    let manifest = Manifest::tiny("tiny");
+fn tiny_model_q8_0() -> (Manifest, TensorIndex, MemFileMapper) {
+    tiny_model_cuantizado(false)
+}
+
+/// Q4_K necesita filas múltiplo de 256 (un superbloque entero por fila), y el
+/// modelo `tiny` es de 128 de ancho: con él, el matvec fusionado devuelve `Err` y
+/// la inferencia entera se cae. Así que este modelo es más ancho a propósito.
+fn tiny_model_q4_k() -> (Manifest, TensorIndex, MemFileMapper) {
+    tiny_model_cuantizado(true)
+}
+
+/// Modelo tiny con los tensores 2D cuantizados: Q4_K si `q4k`, Q8_0 si no.
+fn tiny_model_cuantizado(q4k: bool) -> (Manifest, TensorIndex, MemFileMapper) {
+    use soso_llm_core::quant::{quantize_q4_k, quantize_q8_0};
+    use sosomodel::index::{make_q4_k_entry, make_q8_0_entry};
+
+    let mut manifest = Manifest::tiny("tiny");
+    if q4k {
+        // 256 de ancho y 512 de FFN: múltiplos del superbloque de Q4_K.
+        manifest.hidden_dim = 256;
+        manifest.ffn_dim = 512;
+    }
+    let manifest = manifest;
     let h = manifest.hidden_dim;
     let ffn = manifest.ffn_dim;
     let vocab = manifest.vocab_size;
@@ -86,7 +115,14 @@ fn generate_con_pesos_q8_0() {
             .map(|i| ((i as u32).wrapping_mul(0x9e37_79b9) ^ *id) as f32 % 100.0 * 1e-3)
             .collect();
         let shard = format!("{name}.tensor");
-        if q8 {
+        if q8 && q4k {
+            mapper
+                .files
+                .insert(format!("{BASE}/{shard}"), pack_shard(&quantize_q4_k(&values)));
+            index
+                .entries
+                .push(make_q4_k_entry(*id, name, &shard, 0, shape));
+        } else if q8 {
             mapper
                 .files
                 .insert(format!("{BASE}/{shard}"), pack_shard(&quantize_q8_0(&values)));
@@ -116,13 +152,7 @@ fn generate_con_pesos_q8_0() {
     }
     add(&mut index, &mut mapper, &mut id, "embed", &[vocab, h], true);
 
-    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
-    rt.validate_shapes().expect("shapes válidas");
-    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
-    let tokens = rt
-        .generate(&mut source, &[5, 10], 3, None)
-        .expect("generate con Q8_0 debe funcionar");
-    assert!(tokens.len() >= 2);
+    (manifest, index, mapper)
 }
 
 #[test]
@@ -186,7 +216,7 @@ impl soso_llm_core::gpu::GpuDispatch for FakeDevice {
         true
     }
 
-    fn matvec_f32(
+    fn matvec(
         &mut self,
         key: &str,
         view: &soso_llm_core::layer::TensorView<'_>,
@@ -195,15 +225,27 @@ impl soso_llm_core::gpu::GpuDispatch for FakeDevice {
         x: &[f32],
         out: &mut [f32],
     ) -> Result<bool, ()> {
-        let w = view.f32().ok_or(())?;
-        if w.len() != rows * cols || x.len() != cols || out.len() != rows {
+        use sosomodel::layout::{DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0};
+
+        if view.elems != rows * cols || x.len() != cols || out.len() != rows {
             return Err(());
+        }
+        // Igual que el dispositivo de verdad: descuantiza al "subir" los pesos,
+        // porque calcula en f32. Si esto no admitiera cuantizados, el test daría
+        // verde sin ejercitar el caso que de verdad importa (los modelos que caben
+        // en una tarjeta están cuantizados).
+        let mut plano = vec![0.0f32; rows * cols];
+        match view.dtype {
+            DTYPE_F32 => plano.copy_from_slice(view.f32().ok_or(())?),
+            DTYPE_Q8_0 => soso_llm_core::quant::dequant_q8_0(view.bytes, &mut plano)?,
+            DTYPE_Q4_K => soso_llm_core::quant::dequant_q4_k(view.bytes, &mut plano)?,
+            _ => return Ok(false),
         }
         *self.llamadas.entry(String::from(key)).or_insert(0) += 1;
         for r in 0..rows {
             let mut sum = 0.0f32;
             for c in 0..cols {
-                sum += w[r * cols + c] * x[c];
+                sum += plano[r * cols + c] * x[c];
             }
             out[r] = sum;
         }
@@ -282,4 +324,130 @@ fn generate_por_dispositivo_igual_que_cpu() {
     // Y se le llamó una vez por token y por proyección: 3 del prompt + 4 nuevos.
     let q0 = dev.llamadas["L00.attn_q"];
     assert_eq!(q0, tokens.len(), "L00.attn_q: {q0} llamadas para {} tokens", tokens.len());
+}
+
+/// Igual que el de Q8_0 pero con **Q4_K**, que es el formato de los modelos que de
+/// verdad se usan (TinyLlama Q4_K_M). No se podía escribir hasta que existió
+/// `quantize_q4_k`: sin cuantizador no había forma de sintetizar un modelo Q4_K y
+/// este camino sólo se habría estrenado con un modelo real de gigabytes.
+#[test]
+fn generate_por_dispositivo_con_pesos_q4_k() {
+    use soso_llm_core::gpu::GpuDispatch;
+
+    let esperado = {
+        let (manifest, index, mapper) = tiny_model_q4_k();
+        let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+        rt.set_backend(soso_llm_core::runtime::Backend::Cpu);
+        let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+        let mut sampler = soso_llm_core::sample::Sampler::greedy();
+        let mut sin_gpu: Option<&mut dyn GpuDispatch> = None;
+        rt.generate_stream_par(
+            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut sin_gpu,
+        )
+        .expect("la ruta de CPU con Q4_K debe funcionar")
+    };
+
+    let (manifest, index, mapper) = tiny_model_q4_k();
+    let num_layers = manifest.num_layers;
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 64 * 1024 * 1024);
+    rt.set_backend(soso_llm_core::runtime::Backend::Auto);
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    let mut sampler = soso_llm_core::sample::Sampler::greedy();
+    let mut dev = FakeDevice {
+        llamadas: std::collections::BTreeMap::new(),
+    };
+    let tokens = {
+        let mut gpu: Option<&mut dyn GpuDispatch> = Some(&mut dev);
+        rt.generate_stream_par(
+            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut gpu,
+        )
+        .expect("la ruta de dispositivo con Q4_K debe funcionar")
+    };
+
+    for layer in 0..num_layers {
+        for t in ["attn_q", "attn_k", "attn_v", "attn_output", "ffn_up", "ffn_down"] {
+            let key = format!("L{layer:02}.{t}");
+            assert!(
+                dev.llamadas.get(&key).copied().unwrap_or(0) > 0,
+                "el dispositivo no recibió {key} en Q4_K (¿se rindió por el dtype?)"
+            );
+        }
+    }
+    assert_eq!(
+        tokens, esperado,
+        "descuantizar Q4_K al subir no da lo mismo que el kernel fusionado de CPU"
+    );
+}
+
+/// Pesos **cuantizados** por el dispositivo (Q8_0), contra la ruta de CPU.
+///
+/// Este es el caso que de verdad importa: los modelos que caben en una tarjeta
+/// están cuantizados, y el despacho sólo admitía F32 — con un Q8_0 o un Q4_K se
+/// iba a CPU en silencio y el offload no existía. El dispositivo calcula en f32,
+/// así que descuantiza al subir; lo que se comprueba aquí es que eso da el mismo
+/// resultado que el kernel fusionado de CPU, tensor a tensor y token a token.
+#[test]
+fn generate_por_dispositivo_con_pesos_cuantizados() {
+    use soso_llm_core::gpu::GpuDispatch;
+
+    let esperado = {
+        let (manifest, index, mapper) = tiny_model_q8_0();
+        let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+        rt.set_backend(soso_llm_core::runtime::Backend::Cpu);
+        let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+        let mut sampler = soso_llm_core::sample::Sampler::greedy();
+        let mut sin_gpu: Option<&mut dyn GpuDispatch> = None;
+        rt.generate_stream_par(
+            &mut source,
+            &[5, 10],
+            4,
+            None,
+            &mut sampler,
+            |_| {},
+            None,
+            &mut sin_gpu,
+        )
+        .expect("la ruta de CPU con Q8_0 debe funcionar")
+    };
+
+    let (manifest, index, mapper) = tiny_model_q8_0();
+    let num_layers = manifest.num_layers;
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 64 * 1024 * 1024);
+    rt.set_backend(soso_llm_core::runtime::Backend::Auto);
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    let mut sampler = soso_llm_core::sample::Sampler::greedy();
+    let mut dev = FakeDevice {
+        llamadas: std::collections::BTreeMap::new(),
+    };
+    let tokens = {
+        let mut gpu: Option<&mut dyn GpuDispatch> = Some(&mut dev);
+        rt.generate_stream_par(
+            &mut source,
+            &[5, 10],
+            4,
+            None,
+            &mut sampler,
+            |_| {},
+            None,
+            &mut gpu,
+        )
+        .expect("la ruta de dispositivo con Q8_0 debe funcionar")
+    };
+
+    // Las proyecciones cuantizadas TIENEN que haber pasado por el dispositivo: si
+    // el despacho se rindiera por el dtype (el bug que esto cierra), el test
+    // seguiría generando tokens correctos y no se notaría nada.
+    for layer in 0..num_layers {
+        for t in ["attn_q", "attn_k", "attn_v", "attn_output", "ffn_up", "ffn_down"] {
+            let key = format!("L{layer:02}.{t}");
+            assert!(
+                dev.llamadas.get(&key).copied().unwrap_or(0) > 0,
+                "el dispositivo no recibió {key} (¿se rindió por el dtype?)"
+            );
+        }
+    }
+    assert_eq!(
+        tokens, esperado,
+        "descuantizar al subir no da lo mismo que el kernel fusionado de CPU"
+    );
 }
