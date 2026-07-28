@@ -17,8 +17,49 @@ const GPU_VENDOR_INTEL: u8 = 1;
 /// indistinguible de un fallo de la GPU. Se enciende a petición (`SOFTG`).
 const GPU_VENDOR_SOFT: u8 = 3;
 
+/// Búfer del dispositivo.
+///
+/// Se reserva como `Vec<u32>` y no como `Vec<u8>` por una razón concreta: un
+/// `Vec<u8>` sólo garantiza alineación 1, así que sus bytes no se pueden releer
+/// como `f32` sin copiarlos a otro sitio. Con la base alineada a 4, un búfer de
+/// pesos se le pasa al motor de cómputo **sin copia**; antes cada `MATVF` construía
+/// un `Vec<f32>` entero de la matriz (y a golpe de `from_le_bytes` de 4 en 4) sólo
+/// para poder mirarla.
 struct GpuBuffer {
-    data: Vec<u8>,
+    words: Vec<u32>,
+    /// Bytes lógicos: lo que pidió el usuario, que no tiene que ser múltiplo de 4.
+    len: usize,
+}
+
+impl GpuBuffer {
+    fn new(bytes: usize) -> Self {
+        Self {
+            words: alloc::vec![0u32; bytes.div_ceil(4)],
+            len: bytes,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // La reserva cubre `len` redondeado hacia arriba, así que `len` bytes
+        // siempre están dentro.
+        unsafe { core::slice::from_raw_parts(self.words.as_ptr().cast::<u8>(), self.len) }
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.words.as_mut_ptr().cast::<u8>(), self.len) }
+    }
+
+    /// Vista `&[f32]` sin copia. `None` si no caben `elems`.
+    fn f32s(&self, elems: usize) -> Option<&[f32]> {
+        if elems * 4 > self.len {
+            return None;
+        }
+        Some(unsafe { core::slice::from_raw_parts(self.words.as_ptr().cast::<f32>(), elems) })
+    }
 }
 
 struct GpuState {
@@ -184,9 +225,7 @@ pub fn alloc(size: u64) -> Result<u64, i64> {
         return Err(abi::ENOMEM);
     }
     let handle = g.buffers.len() as u64;
-    g.buffers.push(Some(GpuBuffer {
-        data: alloc::vec![0u8; size as usize],
-    }));
+    g.buffers.push(Some(GpuBuffer::new(size as usize)));
     g.vram_used += size;
     Ok(handle)
 }
@@ -203,7 +242,7 @@ pub fn free(handle: u64) -> Result<u64, i64> {
         return Err(abi::ENOSYS);
     }
     let slot = g.buffers.get_mut(handle as usize).ok_or(abi::EINVAL)?;
-    let bytes = slot.as_ref().ok_or(abi::EINVAL)?.data.len() as u64;
+    let bytes = slot.as_ref().ok_or(abi::EINVAL)?.len() as u64;
     *slot = None;
     g.vram_used = g.vram_used.saturating_sub(bytes);
     Ok(bytes)
@@ -220,13 +259,13 @@ pub fn map_to_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     // llamante, y contestarle con los bytes que había dejaba al userspace con
     // media matriz y ninguna pista: el `min()` de antes convertía un handle
     // equivocado o un búfer que se quedó pequeño en un resultado creíble.
-    if len > buf.data.len() as u64 {
+    if len > buf.len() as u64 {
         return Err(abi::EINVAL);
     }
     let n = len as usize;
     crate::task::with_current(|p| {
         let space = p.space.as_ref().ok_or(abi::EFAULT)?;
-        space.write(user_ptr, &buf.data[..n]).ok_or(abi::EFAULT)?;
+        space.write(user_ptr, &buf.bytes()[..n]).ok_or(abi::EFAULT)?;
         Ok(0)
     })
 }
@@ -241,13 +280,13 @@ pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64
     // Igual que en la lectura: subir 16 MiB a un búfer de 4 y que la syscall
     // conteste 0 es la peor variante posible. El caso real que esto caza es el de
     // un búfer reservado para la primera capa y reutilizado para una más grande.
-    if len > slot.data.len() as u64 {
+    if len > slot.len() as u64 {
         return Err(abi::EINVAL);
     }
     let n = len as usize;
     crate::task::with_current(|p| {
         let space = p.space.as_ref().ok_or(abi::EFAULT)?;
-        space.read(user_ptr, &mut slot.data[..n]).ok_or(abi::EFAULT)?;
+        space.read(user_ptr, &mut slot.bytes_mut()[..n]).ok_or(abi::EFAULT)?;
         Ok(0)
     })
 }
@@ -337,8 +376,8 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         let x_h = u64::from_le_bytes(cmd[9..17].try_into().unwrap_or([0; 8]));
         let y_h = u64::from_le_bytes(cmd[17..25].try_into().unwrap_or([0; 8]));
         let n = u32::from_le_bytes(cmd[25..29].try_into().unwrap_or([0; 4])) as usize;
-        let x = read_f32_buffer(&g, x_h, n)?;
-        let mut y = read_f32_buffer(&g, y_h, n)?;
+        let x = read_f32_vec(&g, x_h, n)?;
+        let mut y = read_f32_vec(&g, y_h, n)?;
         drop(g);
         let on_gpu = if soft {
             for i in 0..n {
@@ -357,11 +396,18 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         let cols = u32::from_le_bytes(cmd[17..21].try_into().unwrap_or([0; 4])) as usize;
         let x_h = u64::from_le_bytes(cmd[21..29].try_into().unwrap_or([0; 8]));
         let y_h = u64::from_le_bytes(cmd[29..37].try_into().unwrap_or([0; 8]));
-        let w = read_f32_buffer(&g, w_h, rows * cols)?;
-        let x = read_f32_buffer(&g, x_h, cols)?;
-        let mut y = read_f32_buffer(&g, y_h, rows)?;
-        drop(g);
+        // `x` e `y` se copian (son vectores); la MATRIZ no. Antes se copiaba
+        // entera a un `Vec<f32>` en cada llamada —16 MiB por matvec en un modelo
+        // de verdad, y por token—, que es exactamente el coste que el offload
+        // viene a evitar.
+        let x = read_f32_vec(&g, x_h, cols)?;
+        let mut y = read_f32_vec(&g, y_h, rows)?;
+        // El candado del dispositivo se mantiene mientras dura el cálculo: la
+        // matriz se le pasa prestada desde el búfer, y además dos submits a la vez
+        // sobre un solo canal no tendrían sentido. Antes se soltaba porque los
+        // datos ya estaban copiados.
         let on_gpu = if soft {
+            let w = f32_view(&g, w_h, rows * cols)?;
             for r in 0..rows {
                 let mut sum = 0.0f32;
                 for c in 0..cols {
@@ -371,9 +417,11 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
             }
             false
         } else {
-            nvidia_compute::submit_matvec_f32(&w, rows, cols, &x, &mut y)
+            let w = f32_view(&g, w_h, rows * cols)?;
+            nvidia_compute::submit_matvec_f32(w, rows, cols, &x, &mut y)
                 .map_err(|_| abi::EIO)?
         };
+        drop(g);
         write_f32_buffer(&mut gpu().lock(), y_h, &y)?;
         return Ok(submit_bits(on_gpu));
     }
@@ -395,31 +443,31 @@ fn submit_bits(on_gpu: bool) -> u64 {
     abi::GPU_SUBMIT_COMPUTED | if on_gpu { abi::GPU_SUBMIT_ON_GPU } else { 0 }
 }
 
-fn read_f32_buffer(g: &GpuState, handle: u64, elems: usize) -> Result<Vec<f32>, i64> {
-    let bytes = elems * 4;
-    let buf = g
-        .buffers
+/// Vista `&[f32]` de un búfer, sin copia. Es lo que se usa para la matriz.
+fn f32_view(g: &GpuState, handle: u64, elems: usize) -> Result<&[f32], i64> {
+    g.buffers
         .get(handle as usize)
         .and_then(|b| b.as_ref())
-        .ok_or(abi::EINVAL)?;
-    if buf.data.len() < bytes {
-        return Err(abi::EINVAL);
-    }
-    let mut out = alloc::vec![0f32; elems];
-    for (i, chunk) in buf.data[..bytes].chunks_exact(4).enumerate() {
-        out[i] = f32::from_le_bytes(chunk.try_into().unwrap());
-    }
-    Ok(out)
+        .ok_or(abi::EINVAL)?
+        .f32s(elems)
+        .ok_or(abi::EINVAL)
+}
+
+/// Copia de un búfer a un `Vec<f32>`. Sólo para los VECTORES (x, y): son de
+/// `rows`/`cols` elementos, no de `rows*cols`, y el destino tiene que ser
+/// `&mut` mientras la matriz sigue prestada del mismo `Vec` de búferes.
+fn read_f32_vec(g: &GpuState, handle: u64, elems: usize) -> Result<Vec<f32>, i64> {
+    Ok(f32_view(g, handle, elems)?.to_vec())
 }
 
 fn write_f32_buffer(g: &mut GpuState, handle: u64, data: &[f32]) -> Result<(), i64> {
     let slot = g.buffers.get_mut(handle as usize).and_then(|b| b.as_mut()).ok_or(abi::EINVAL)?;
     let bytes = data.len() * 4;
-    if slot.data.len() < bytes {
+    if slot.len() < bytes {
         return Err(abi::EINVAL);
     }
-    for (i, &v) in data.iter().enumerate() {
-        slot.data[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
-    }
+    slot.bytes_mut()[..bytes].copy_from_slice(unsafe {
+        core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), bytes)
+    });
     Ok(())
 }
