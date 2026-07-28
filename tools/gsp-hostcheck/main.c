@@ -1406,10 +1406,18 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             return -1;
         }
         if (p->gpFifoEntries != GSP_CHAN_GPFIFO_ENTRIES ||
-            p->hVASpace != v.vaspace ||
-            p->engineType != NV2080_ENGINE_TYPE_COPY0) {
-            printf("FALLO: canal entries=%u vaspace=0x%08x engine=%u\n",
-                   p->gpFifoEntries, p->hVASpace, p->engineType);
+            p->hVASpace != v.vaspace) {
+            printf("FALLO: canal entries=%u vaspace=0x%08x\n",
+                   p->gpFifoEntries, p->hVASpace);
+            return -1;
+        }
+        /* Contra el 9 literal de `nvrm/engine.h`, NO contra nuestro #define:
+         * comparar con la constante propia daba verde con el 6 (= GR5) que RM
+         * rechazaba en hardware. La tabla reserva GR0..GR7 en 1..8 y el primer
+         * CE cae en el 9. */
+        if (p->engineType != 9u) {
+            printf("FALLO: engineType=%u, NV2080_ENGINE_TYPE_COPY0 es 9 "
+                   "(el 6 es GR5)\n", p->engineType);
             return -1;
         }
         /* Estas afirmaciones van contra los valores de upstream escritos a

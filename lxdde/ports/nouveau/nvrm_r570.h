@@ -562,8 +562,15 @@ typedef char nv0080_set_pd_size_check[
 
 #define NVKM_RM_CE0                0xc6b50000u
 
-/* `NV2080_ENGINE_TYPE_COPY(i)` de `ctrl/ctrl2080/ctrl2080internal.h`. */
-#define NV2080_ENGINE_TYPE_COPY0   6u
+/* `NV2080_ENGINE_TYPE_COPY0` de `rm/r535/nvrm/engine.h`. **9, no 6**: la tabla
+ * empieza en GR0=1 y reserva OCHO huecos para los GR (GR0..GR7 = 1..8), así que
+ * el primer CE cae en el 9. El 6 que había aquí es `NV2080_ENGINE_TYPE_GR5` —un
+ * motor gráfico que esta tarjeta no tiene—, y pedir un canal sobre él es
+ * exactamente lo que RM contesta con NV_ERR_INVALID_PARAMETER (0x3b,
+ * comprobado en HW el 2026-07-28 con el resto de los campos ya correctos).
+ * `RM_ENGINE_TYPE_COPY0` del enum interno vale 9 también, así que aquí las dos
+ * numeraciones coinciden y no hay trampa que valga. */
+#define NV2080_ENGINE_TYPE_COPY0   9u
 
 /* `addressSpace` de NV_MEMORY_DESC_PARAMS es el enum `NV_ADDRESS_SPACE` de RM,
  * y NO el `FLAGS_APERTURE` de SET_PAGE_DIRECTORY que hay 50 líneas más arriba
