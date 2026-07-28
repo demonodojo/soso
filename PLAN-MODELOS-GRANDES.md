@@ -330,6 +330,52 @@ sigue viéndose porque el reintento sale impreso.
 *Mejoras futuras (fuera del cierre L3b, no bloqueantes):*
 - Ninguna pendiente de las apuntadas en el cierre de L3b.
 
+### Barrido de las syscalls (2026-07-28)
+
+Los dos últimos bugs del camino de GPU eran de la misma familia —un `min()` que
+truncaba en silencio y un permiso al revés—, así que se revisaron las 30 syscalls
+buscando el tercero. Salieron dos, y uno es grave:
+
+**1. Tres caminos usaban el puntero del usuario SIN validarlo.** `sys_write` valida
+con `user_slice` **después** de despachar los fd de pipe y socket, y
+`sys_read_timeout` sólo valida si cae al `sys_read` genérico. Resultado:
+`write(pipe_fd, puntero_ajeno, n)` hacía que el kernel copiase de esa dirección —
+**pánico en ring 0 desde un proceso sin privilegios**, comprobado en QEMU:
+`EXCEPCIÓN: page fault accediendo a 0x7f00dead0000 … cs=0x8`. Cualquier programa
+podía tumbar el sistema con una syscall.
+
+Arreglado validando en los tres caminos **antes** de tocar `buf`, con la dirección
+correcta (`write` lee del proceso, `read_timeout` escribe en él). Y también **al
+reanudar** una operación bloqueada: entre la entrada y el desbloqueo otro hilo puede
+haber hecho `munmap` de ese rango, y el planificador copiaba sin red. Para eso hay
+`AddrSpace::range_ok`, que recorre las tablas **sin tomar candados** — se puede
+llamar desde el planificador, que ya tiene `PROCS`, y desde una syscall. Fijado en
+`init test`: puntero ajeno → EFAULT, y el pipe sigue usable después.
+
+**2. El pipe transfería 256 bytes por llamada** porque ése era el tamaño de un
+temporal en la pila del kernel, no la capacidad del pipe (4 KiB). Lo decía en el
+retorno, así que no era una mentira del kernel, pero en userspace **nadie miraba el
+retorno**: `Stdout::write_str`, `cat` y el eco de `sosh` usaban `write` a secas.
+Ahora el kernel transfiere hasta llenar el pipe y esos tres usan `write_all`. Fijado
+en `init test`: 3000 B de una sola llamada, y por encima de la capacidad la
+escritura es corta (4096 de 6000), que es legítimo.
+
+*Nota de honestidad sobre el impacto de este segundo:* al encontrarlo medí `cat
+/README.md` por SSH y creí ver 1435 bytes de 3086 — **el recorte era de mi propio
+script de medida** (un `tail -40`). La consola SSH no pasa por un pipe (`Fd::Tty` →
+`tx_push`, sin tope) y entregaba el fichero completo. El bug del pipe era real y
+está probado, pero su alcance hoy son los pipelines de `sosh` con programas que lean
+stdin (ninguno de los actuales lo hace) y `spawn_io`; era una mina para el primero
+que la pisara, no una pérdida en curso.
+
+**Lo que salió limpio:** la dirección del permiso en las otras 27 syscalls, y los
+`min()` de `sys_read`/`getdents`/pipe (todos con el recuento en el retorno). Queda
+anotado un riesgo que NO se ha tocado: `user_slice`/`user_slice_mut` devuelven un
+`&'static [u8]` tras validar, y otro hilo del mismo proceso puede desmapear ese
+rango mientras la syscall lo usa (TOCTOU). Cerrarlo de verdad pide copiar dentro y
+fuera (`copy_from_user`/`copy_to_user`) en vez de prestar memoria de usuario, y eso
+toca todas las syscalls: es un cambio de diseño, no un parche.
+
 ## Fase L4 — SIMD
 
 **✅ COMPLETADA (2026-07-15).** Userspace con target propio
