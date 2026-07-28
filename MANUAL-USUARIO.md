@@ -144,10 +144,19 @@ cat saludo.txt
 echo linea >> saludo.txt
 cd ..
 ls /tmp
-cat /etc/motd | hexdump
-ls | cat
+cat /etc/motd | hexdump -    # el `-` es lo que lee stdin
+ls | cat -
 cat < /etc/motd
 ```
+
+**Los pipelines necesitan un `-`.** `cat` y `hexdump` leen stdin cuando se les pasa
+`-` como fichero, no cuando se les llama sin argumentos: en la tty de soso nadie
+interpreta Ctrl-D, así que un `cat` sin argumentos leyendo la consola se quedaría
+colgado para siempre en vez de decir cómo se usa. Dentro de un pipeline sí hay EOF
+de verdad (la lectura del pipe devuelve 0 cuando el escritor cierra), pero el
+programa no puede distinguir un caso del otro sin preguntarle al kernel, y eso hoy
+no se puede. Hasta la versión de 2026-07-28 ningún programa leía stdin, así que los
+pipelines de esta sección **no funcionaban** aunque estuvieran documentados.
 
 ### Comandos integrados (builtins)
 
@@ -288,7 +297,7 @@ Comandos principales:
 |---|---|
 | `help` | Lista todos los comandos |
 | `ls [ruta]` | Listar directorio (por defecto `/`) |
-| `cat <ruta>` | Mostrar un fichero |
+| `cat <ruta>` | Mostrar un fichero (`cat -` lee stdin, para pipelines) |
 | `stat <ruta>` | Metadatos de un fichero o directorio |
 | `write <ruta> <texto>` | Crear o sobrescribir un fichero |
 | `mkdir <ruta>` | Crear un directorio |
