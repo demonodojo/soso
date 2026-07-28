@@ -138,6 +138,18 @@ soso_ssh() {
         soso@localhost >/dev/null 2>&1
 }
 
+# Igual que `soso_ssh` pero guardando la salida: la carga de trabajo de G4f/G5 se
+# lanza desde userspace y lo que dice (`on_gpu=1`, tok/s, matvec en el dispositivo)
+# es justo el criterio GO, así que no se puede tirar a /dev/null.
+soso_ssh_log() {
+  local salida="$1"; shift
+  printf '%s\n' "$@" | sudo -u "$run_user" -- env "HOME=${run_home}" \
+    ssh -i "$ssh_key" -p 2222 \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=10 \
+        soso@localhost >"$salida" 2>&1
+}
+
 # NO se mata QEMU con `timeout`: cerrar el proceso con el GSP vivo hace que
 # vfio-pci resetee una GPU que sigue ejecutando GSP-RM y haciendo DMA, y eso
 # colgó el host entero el 2026-07-25 (sin dejar traza de panic — fue un lockup).
@@ -309,7 +321,21 @@ while [[ "$SECONDS" -lt "$deadline" ]]; do
 done
 
 if [[ "$booted" == 1 ]]; then
-  echo "soso arriba — pidiendo halt por SSH para que apague el GSP"
+  # Carga de trabajo ANTES del halt. El bring-up deja el compute armado pero no
+  # lanza ningún kernel a propósito (un QMD que falle en el arranque deja la
+  # tarjeta en un estado del que sólo se sale reseteando el equipo), así que sin
+  # esto el ciclo probaría G4e y el armado de G4f, pero ni saxpy ni matvec. Y un
+  # ciclo de VFIO cuesta cerrar la sesión gráfica: conviene que pruebe todo.
+  if [[ -n "${SOSO_G1_CMD:-}" ]]; then
+    echo "soso arriba — carga de trabajo por SSH:"
+    printf '  %s\n' "${SOSO_G1_CMD}"
+    cmdlog="${log%.log}-cmd.log"
+    soso_ssh_log "$cmdlog" "${SOSO_G1_CMD}" "exit" || true
+    echo "--- salida de la carga (${cmdlog}) ---"
+    sed 's/^/  /' "$cmdlog" || true
+    echo "---"
+  fi
+  echo "pidiendo halt por SSH para que apague el GSP"
   soso_ssh halt || true
 else
   echo "AVISO: no se vio el prompt en ${TIMEOUT}s; no hay a quién pedirle el halt." >&2
