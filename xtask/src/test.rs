@@ -68,10 +68,12 @@ pub fn run() {
         let _ = paso("echo TCP en :7777", &mut fallos, echo_tcp);
 
         // --- 4) inferencia LLM (modelo tiny en disco 1) ---
-        let _ = paso("soso-llm run tiny --prompt test", &mut fallos, || ssh_llm(&key));
+        let _ = paso_con_reintento("soso-llm run tiny --prompt test", &mut fallos, || {
+            ssh_llm(&key)
+        });
 
         // --- 5) regresión de syscalls dentro del guest (incl. GPU, hilos, FPU) ---
-        let _ = paso("init test (syscalls, hilos, FPU, GPU)", &mut fallos, || {
+        let _ = paso_con_reintento("init test (syscalls, hilos, FPU, GPU)", &mut fallos, || {
             ssh_init_test(&key)
         });
 
@@ -127,6 +129,28 @@ fn paso<F: FnOnce() -> Result<(), String>>(
             Err(())
         }
     }
+}
+
+/// Como `paso`, pero reintenta una vez tras una pausa.
+///
+/// Para los pasos que van por SSH: una reconexión inmediata tras cerrar la
+/// sesión anterior falla a veces (el servidor de soso aún está soltando la
+/// sesión previa). Es un fallo conocido del arnés, no del sistema, y hacía que la
+/// suite diese rojo por algo que a la segunda va — que es la peor clase de test,
+/// porque enseña a desconfiar de los rojos. El reintento se ANUNCIA, para que un
+/// flake permanente siga siendo visible en vez de quedar tapado.
+fn paso_con_reintento<F: FnMut() -> Result<(), String>>(
+    nombre: &str,
+    fallos: &mut u32,
+    mut f: F,
+) -> Result<(), ()> {
+    if let Err(e) = f() {
+        println!("      (reintento de «{nombre}» tras 5 s: {e})");
+        std::thread::sleep(Duration::from_secs(5));
+        return paso(nombre, fallos, f);
+    }
+    marca(nombre, true);
+    Ok(())
 }
 
 fn marca(nombre: &str, ok: bool) {

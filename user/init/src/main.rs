@@ -292,9 +292,38 @@ fn suite() -> u8 {
         const N: u32 = 4;
         const PER: u32 = 1000;
 
-        extern "C" fn thr_entry(_arg: u64) -> ! {
+        static ALLOC_MAL: AtomicU32 = AtomicU32::new(0);
+
+        extern "C" fn thr_entry(arg: u64) -> ! {
             for _ in 0..PER {
                 COUNTER.fetch_add(1, Ordering::Relaxed);
+            }
+            // Asignar y liberar DESDE VARIOS HILOS a la vez. El allocator sirve las
+            // reservas pequeñas de un arena propio en userspace, y esa memoria la
+            // comparten los hilos: si su candado estuviera mal, dos hilos se
+            // repartirían el mismo trozo y cada uno vería los bytes del otro. Sin
+            // esto, el arena no tenía ninguna prueba concurrente — antes la
+            // exclusión la daba el kernel de rebote, porque cada reserva era una
+            // syscall `sbrk`.
+            let marca = (arg as u8).wrapping_add(1);
+            for i in 0..200usize {
+                let n = 8 + (i % 96);
+                let mut v: Vec<u8> = Vec::new();
+                for _ in 0..n {
+                    v.push(marca);
+                }
+                if v.len() != n || v.iter().any(|&b| b != marca) {
+                    ALLOC_MAL.fetch_add(1, Ordering::Relaxed);
+                }
+                // Y una cadena, que crece con realloc (el camino de "agrandar en el
+                // sitio" del arena).
+                let mut s = String::new();
+                for _ in 0..n {
+                    s.push('x');
+                }
+                if s.len() != n {
+                    ALLOC_MAL.fetch_add(1, Ordering::Relaxed);
+                }
             }
             DONE.fetch_add(1, Ordering::Release);
             let _ = sys::futex_wake(&DONE as *const AtomicU32 as *const u32, u64::MAX);
@@ -330,7 +359,102 @@ fn suite() -> u8 {
             N * PER
         );
         check!(sys::ncpu() >= 1, "ncpu={}", sys::ncpu());
+        check!(
+            ALLOC_MAL.load(Ordering::Relaxed) == 0,
+            "arena concurrente: {} bloques corruptos en {} hilos × 200 reservas",
+            ALLOC_MAL.load(Ordering::Relaxed),
+            N
+        );
         let _ = tids;
+    }
+
+    // Filesystem desde VARIOS HILOS a la vez.
+    //
+    // La auditoría de concurrencia de `fs` estaba pendiente y no tenía ninguna
+    // prueba: todo lo que había era de un hilo. Esto no demuestra que sosofs sea
+    // correcto bajo SMP, pero sí ejercita el camino que nadie ejercitaba —crear,
+    // escribir, releer y borrar ficheros distintos desde hilos que corren en cores
+    // distintos— y con SMP=4 un candado que falte se manifiesta como contenido
+    // cruzado o un panic, no como un "parece que va".
+    {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        use libsoso::thread;
+
+        static FS_LISTOS: AtomicU32 = AtomicU32::new(0);
+        static FS_MAL: AtomicU32 = AtomicU32::new(0);
+        const FS_HILOS: u32 = 4;
+        const FS_VUELTAS: u32 = 12;
+
+        extern "C" fn fs_entry(arg: u64) -> ! {
+            let id = arg as u32;
+            for vuelta in 0..FS_VUELTAS {
+                // Nombre propio por hilo: lo que se comprueba es el aislamiento
+                // entre ficheros distintos, no la escritura concurrente al mismo
+                // (eso no lo promete nadie).
+                let mut nombre = [0u8; 24];
+                let base = b"/tmp/fs_";
+                nombre[..base.len()].copy_from_slice(base);
+                nombre[base.len()] = b'0' + (id % 10) as u8;
+                nombre[base.len() + 1] = b'_';
+                nombre[base.len() + 2] = b'0' + (vuelta % 10) as u8;
+                let ruta = core::str::from_utf8(&nombre[..base.len() + 3]).unwrap_or("/tmp/x");
+
+                // 4 KiB, no 64 B: cruza el bloque de sosofs, así que ejercita la
+                // asignación de bloques y el CoW, no sólo el inodo. Y va en el heap
+                // (el arena de libsoso), que es otro camino compartido entre hilos.
+                let contenido = alloc::vec![b'a' + (id % 26) as u8; 4096];
+                let fd = sys::open(ruta, abi::O_WRONLY);
+                if fd < 0 {
+                    FS_MAL.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                if sys::write(fd as u64, &contenido) != contenido.len() as i64 {
+                    FS_MAL.fetch_add(1, Ordering::Relaxed);
+                }
+                sys::close(fd as u64);
+
+                let mut leido = alloc::vec![0u8; contenido.len()];
+                let fd = sys::open(ruta, abi::O_RDONLY);
+                if fd < 0 {
+                    FS_MAL.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let n = sys::read(fd as u64, &mut leido);
+                sys::close(fd as u64);
+                if n != contenido.len() as i64 || leido != contenido {
+                    FS_MAL.fetch_add(1, Ordering::Relaxed);
+                }
+                sys::unlink(ruta);
+            }
+            FS_LISTOS.fetch_add(1, Ordering::Release);
+            let _ = sys::futex_wake(&FS_LISTOS as *const AtomicU32 as *const u32, u64::MAX);
+            sys::exit(0);
+        }
+
+        FS_LISTOS.store(0, Ordering::Relaxed);
+        FS_MAL.store(0, Ordering::Relaxed);
+        let mut err: i64 = 0;
+        for i in 0..FS_HILOS as usize {
+            if let Err(e) = thread::spawn(fs_entry, i as u64) {
+                err = e;
+                break;
+            }
+        }
+        check!(err == 0, "thread_spawn para fs ×{FS_HILOS} (errno {err})");
+        while FS_LISTOS.load(Ordering::Acquire) < FS_HILOS {
+            let d = FS_LISTOS.load(Ordering::Acquire);
+            let _ = sys::futex_wait(&FS_LISTOS as *const AtomicU32 as *const u32, d);
+        }
+        for _ in 0..FS_HILOS {
+            let _ = sys::wait();
+        }
+        check!(
+            FS_MAL.load(Ordering::Relaxed) == 0,
+            "fs concurrente: {} errores en {} hilos × {} ficheros",
+            FS_MAL.load(Ordering::Relaxed),
+            FS_HILOS,
+            FS_VUELTAS
+        );
     }
 
     // Camino de syscalls GPU sobre el dispositivo software del kernel.
@@ -447,6 +571,38 @@ fn suite() -> u8 {
                 "MATVF calcula y=W·x ({} {} {} vs {} {} {})",
                 y[0], y[1], y[2], esperado[0], esperado[1], esperado[2]
             );
+
+            // La ASIMETRÍA de permisos entre las dos syscalls, que es lo que
+            // permite subir los pesos sin copiarlos: `gpu_map` LEE del proceso, así
+            // que un mapeo de sólo lectura (como el del modelo) vale; `gpu_read`
+            // ESCRIBE en él, así que el mismo mapeo tiene que ser rechazado. Si
+            // alguien "endurece" el primero, los pesos dejarían de subirse y el
+            // offload se iría a CPU sin decir nada — por eso está fijado aquí.
+            {
+                let mut st_ro = abi::Stat::default();
+                if sys::stat("/etc/motd", &mut st_ro) == 0 && st_ro.size >= 8 {
+                    let fd = sys::open("/etc/motd", abi::O_RDONLY);
+                    if fd >= 0 {
+                        let map = sys::mmap(0, st_ro.size, fd as u64, 0);
+                        check!(map > 0, "mmap de sólo lectura para el dispositivo");
+                        let h = sys::gpu_alloc(8);
+                        check!(h >= 0, "gpu_alloc para la prueba de sólo lectura");
+                        let h = h as u64;
+                        check!(
+                            sys::gpu_map(h, map as u64, 8) == 0,
+                            "gpu_map LEE: acepta un mapeo de sólo lectura (los pesos \
+                             del modelo están así)"
+                        );
+                        check!(
+                            sys::gpu_read(h, map as u64, 8) == -abi::EFAULT,
+                            "gpu_read ESCRIBE: rechaza el mismo mapeo con EFAULT"
+                        );
+                        let _ = sys::gpu_free(h);
+                        sys::munmap(map as u64, st_ro.size.next_multiple_of(4096) as u64);
+                        sys::close(fd as u64);
+                    }
+                }
+            }
 
             // free devuelve los bytes y el handle deja de valer.
             let freed = sys::gpu_free(w_h);
