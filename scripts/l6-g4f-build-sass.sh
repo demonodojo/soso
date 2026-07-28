@@ -1,36 +1,58 @@
 #!/usr/bin/env bash
-# G4f: compila saxpy.cu → saxpy.sass.bin (+ embed C) para sm_120 (GB205).
-# No requiere soltar la GPU. Usa nvcc del host si está en PATH; si no, Docker.
+# G4f/G5: compila los kernels .cu → <name>.sass.bin (+ embed C) para sm_120
+# (GB205). No requiere soltar la GPU: `ptxas` compila sin tarjeta, solo hace
+# falta CUDA ≥ 12.8 para sm_120. Usa nvcc del host si está en PATH; si no, Docker.
+#
+# Cada kernel sale con su propio blob y su propio juego de metadatos
+# (`gsp_<name>_*`): dónde espera sus parámetros y cuántos registros usa. Un
+# kernel nuevo se añade a KERNELS y nada más — cuando esto era un script de un
+# solo kernel, los nombres estaban incrustados en 40 líneas.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CU="$ROOT/lxdde/ports/nouveau/saxpy.cu"
-OUT_BIN="$ROOT/lxdde/ports/nouveau/saxpy.sass.bin"
-OUT_EMB="$ROOT/lxdde/ports/nouveau/saxpy_sass_embed.c"
+SRC="$ROOT/lxdde/ports/nouveau"
 TMP="$ROOT/target/g4f-sass-build"
 ARCH="${SOSO_SASS_ARCH:-sm_120}"
 IMAGE="${SOSO_CUDA_DOCKER:-nvidia/cuda:12.8.0-devel-ubuntu24.04}"
 
+# name:prefijo de símbolo. El fichero es <name>.cu y el kernel de dentro puede
+# llamarse de otra forma (el nombre real se lee del cubin, no de aquí).
+KERNELS=("saxpy:saxpy" "matvec:matvec")
+
 mkdir -p "$TMP"
 
-run_nvcc() {
-    local nvcc="$1"
-    "$nvcc" -O2 -arch="$ARCH" --cubin "$CU" -o "$TMP/saxpy.cubin"
-    "$nvcc" -bin="$nvcc" -ptx "$CU" -o "$TMP/saxpy.ptx" 2>/dev/null || true
+compile_all_host() {
+    local k name
+    for k in "${KERNELS[@]}"; do
+        name="${k%%:*}"
+        nvcc -O2 -arch="$ARCH" --cubin "$SRC/$name.cu" -o "$TMP/$name.cubin"
+    done
 }
 
+compile_all_docker() {
+    local cmds="" k name
+    for k in "${KERNELS[@]}"; do
+        name="${k%%:*}"
+        cmds+="nvcc -O2 -arch=$ARCH --cubin lxdde/ports/nouveau/$name.cu -o target/g4f-sass-build/$name.cubin && "
+    done
+    docker run --rm -v "$ROOT:/w" -w /w "$IMAGE" bash -lc "${cmds}true"
+}
+
+# El .text del cubin: primero con objcopy si hay binutils, y si no a mano. El
+# camino a mano no es un lujo — en Docker la imagen de CUDA no trae binutils.
 extract_sass() {
+    local cubin="$1" out="$2" sec=""
+
     if command -v cuobjdump >/dev/null 2>&1; then
-        cuobjdump --dump-sass "$TMP/saxpy.cubin" > "$TMP/saxpy.sass.txt" || true
+        cuobjdump --dump-sass "$cubin" > "${cubin%.cubin}.sass.txt" 2>/dev/null || true
     fi
-    local sec=""
     if command -v readelf >/dev/null 2>&1; then
-        sec=$(readelf -S "$TMP/saxpy.cubin" 2>/dev/null | awk '/\.text/ {print $2; exit}' | tr -d '[]')
+        sec=$(readelf -S "$cubin" 2>/dev/null | awk '/\.text/ {print $2; exit}' | tr -d '[]')
     fi
     if [[ -n "$sec" ]] && command -v objcopy >/dev/null 2>&1; then
-        objcopy -O binary --only-section="$sec" "$TMP/saxpy.cubin" "$OUT_BIN" 2>/dev/null && return 0
+        objcopy -O binary --only-section="$sec" "$cubin" "$out" 2>/dev/null && return 0
     fi
-    python3 - "$TMP/saxpy.cubin" "$OUT_BIN" <<'PY'
+    python3 - "$cubin" "$out" <<'PY'
 import struct, sys
 path, out = sys.argv[1], sys.argv[2]
 data = open(path, "rb").read()
@@ -62,48 +84,54 @@ PY
 }
 
 if command -v nvcc >/dev/null 2>&1; then
-    echo "=== G4f SASS build (host nvcc) arch=$ARCH ==="
-    run_nvcc nvcc
+    echo "=== SASS build (host nvcc) arch=$ARCH ==="
+    compile_all_host
 elif command -v docker >/dev/null 2>&1; then
-    echo "=== G4f SASS build (Docker $IMAGE) arch=$ARCH ==="
-    docker run --rm -v "$ROOT:/w" -w /w "$IMAGE" bash -lc \
-        "apt-get update -qq && apt-get install -y -qq binutils >/dev/null && \
-         nvcc -O2 -arch=$ARCH --cubin lxdde/ports/nouveau/saxpy.cu -o target/g4f-sass-build/saxpy.cubin"
+    echo "=== SASS build (Docker $IMAGE) arch=$ARCH ==="
+    compile_all_docker
 else
     echo "FAIL: necesitas nvcc en PATH o Docker ($IMAGE)" >&2
     exit 1
 fi
 
-extract_sass
-SZ=$(wc -c < "$OUT_BIN" | tr -d ' ')
-if [[ "$SZ" -lt 16 ]]; then
-    echo "FAIL: saxpy.sass.bin demasiado pequeño ($SZ B)" >&2
-    exit 1
-fi
+for k in "${KERNELS[@]}"; do
+    name="${k%%:*}"
+    prefix="${k##*:}"
+    cubin="$TMP/$name.cubin"
+    out_bin="$SRC/$name.sass.bin"
+    out_emb="$SRC/${name}_sass_embed.c"
 
-{
-    echo "/* Generado por scripts/l6-g4f-build-sass.sh — NO EDITAR */"
-    echo "const unsigned char gsp_saxpy_sass[] = {"
-    # `xxd -i < fichero` emite SOLO las líneas de bytes (sin llaves): aquí no se
-    # recorta nada. Un `head -n -1` se comía la última línea = los 8 bytes finales,
-    # media instrucción de 16 B.
-    xxd -i < "$OUT_BIN"
-    echo "};"
-    echo "const unsigned gsp_saxpy_sass_len = sizeof(gsp_saxpy_sass);"
-} > "$OUT_EMB"
+    extract_sass "$cubin" "$out_bin"
+    sz=$(wc -c < "$out_bin" | tr -d ' ')
+    if [[ "$sz" -lt 16 ]]; then
+        echo "FAIL: $name.sass.bin demasiado pequeño ($sz B)" >&2
+        exit 1
+    fi
 
-# Se cuenta AQUÍ, antes de añadir los metadatos: sus comentarios llevan valores
-# en hex y falsearían el recuento de bytes del array.
-EMB_BYTES=$(grep -o '0x[0-9a-fA-F][0-9a-fA-F]' "$OUT_EMB" | wc -l | tr -d ' ')
+    {
+        echo "/* Generado por scripts/l6-g4f-build-sass.sh — NO EDITAR */"
+        echo "const unsigned char gsp_${prefix}_sass[] = {"
+        # `xxd -i < fichero` emite SOLO las líneas de bytes (sin llaves): aquí no
+        # se recorta nada. Un `head -n -1` se comía la última línea = los 8 bytes
+        # finales, media instrucción de 16 B.
+        xxd -i < "$out_bin"
+        echo "};"
+        echo "const unsigned gsp_${prefix}_sass_len = sizeof(gsp_${prefix}_sass);"
+    } > "$out_emb"
 
-# Los metadatos salen del cubin, no de una constante escrita a mano: dónde
-# espera el kernel sus parámetros (EIATTR_PARAM_CBANK) y cuántos registros usa
-# (EIATTR_REGCOUNT). Si el .cu cambia y esto se queda fijo, el lanzamiento lee
-# basura sin dar un solo error.
-python3 - "$TMP/saxpy.cubin" >> "$OUT_EMB" <<'PY'
+    # Se cuenta AQUÍ, antes de añadir los metadatos: sus comentarios llevan
+    # valores en hex y falsearían el recuento de bytes del array.
+    emb_bytes=$(grep -o '0x[0-9a-fA-F][0-9a-fA-F]' "$out_emb" | wc -l | tr -d ' ')
+
+    # Los metadatos salen del cubin, no de una constante escrita a mano: dónde
+    # espera el kernel sus parámetros (EIATTR_PARAM_CBANK) y cuántos registros
+    # usa (EIATTR_REGCOUNT). Si el .cu cambia y esto se queda fijo, el
+    # lanzamiento lee basura sin dar un solo error.
+    python3 - "$cubin" "$prefix" >> "$out_emb" <<'PY'
 import struct, sys
 
 data = open(sys.argv[1], "rb").read()
+prefix = sys.argv[2]
 shoff, = struct.unpack_from("<Q", data, 0x28)
 shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x3A)
 shstr, = struct.unpack_from("<Q", data, shoff + shstrndx * shentsize + 0x18)
@@ -154,26 +182,31 @@ if [o for o, _ in params] != list(range(len(params))):
     sys.exit(f"ordinales de parámetro no consecutivos: {params}")
 
 print(f"/* de {name}: EIATTR_REGCOUNT / PARAM_CBANK / KPARAM_INFO del cubin */")
-print(f"const unsigned gsp_saxpy_regcount = {regcount};")
-print(f"const unsigned gsp_saxpy_param_base = {pbase}; /* 0x{pbase:x} en cbank0 */")
-print(f"const unsigned gsp_saxpy_param_size = {psize};")
-print(f"const unsigned gsp_saxpy_cbank_size = {cbank};")
-print("const unsigned gsp_saxpy_param_off[%d] = { %s };"
-      % (len(params), ", ".join(str(off) for _, off in params)))
+print(f"const unsigned gsp_{prefix}_regcount = {regcount};")
+print(f"const unsigned gsp_{prefix}_param_base = {pbase}; /* 0x{pbase:x} en cbank0 */")
+print(f"const unsigned gsp_{prefix}_param_size = {psize};")
+print(f"const unsigned gsp_{prefix}_cbank_size = {cbank};")
+print("const unsigned gsp_%s_param_off[%d] = { %s };"
+      % (prefix, len(params), ", ".join(str(off) for _, off in params)))
+# El número de parámetros lo dice el cubin, y el port lo comprueba contra lo que
+# su header declara: un .cu con un parámetro más y un header sin tocar es
+# exactamente el fallo que no da ningún error, solo un kernel leyendo basura.
+print(f"const unsigned gsp_{prefix}_param_count = {len(params)};")
 PY
 
-if [[ "$EMB_BYTES" != "$SZ" ]]; then
-    echo "FAIL: el embed tiene $EMB_BYTES B y el blob $SZ B" >&2
-    exit 1
-fi
-if (( SZ % 16 != 0 )); then
-    echo "FAIL: $SZ B no es múltiplo de 16 (instrucción SASS de $ARCH)" >&2
-    exit 1
-fi
+    if [[ "$emb_bytes" != "$sz" ]]; then
+        echo "FAIL: el embed de $name tiene $emb_bytes B y el blob $sz B" >&2
+        exit 1
+    fi
+    if (( sz % 16 != 0 )); then
+        echo "FAIL: $name — $sz B no es múltiplo de 16 (instrucción SASS de $ARCH)" >&2
+        exit 1
+    fi
 
-echo "OK: $OUT_BIN ($SZ bytes)"
-echo "OK: $OUT_EMB ($EMB_BYTES bytes embebidos)"
-if [[ -f "$TMP/saxpy.sass.txt" ]]; then
-    echo "--- cuobjdump --dump-sass (primeras líneas) ---"
-    head -20 "$TMP/saxpy.sass.txt"
-fi
+    echo "OK: $out_bin ($sz bytes, $((sz / 16)) instrucciones)"
+    echo "OK: $out_emb ($emb_bytes bytes embebidos)"
+    if [[ -f "$TMP/$name.sass.txt" ]]; then
+        echo "--- $name: cuobjdump --dump-sass (primeras líneas) ---"
+        head -12 "$TMP/$name.sass.txt"
+    fi
+done

@@ -459,13 +459,23 @@ dummies restantes, todos dependientes de HW/ROM. Detalle: `docs/L6-G3-nvkm-scope
 | G3 | GSP boot nvkm (sin KMS) | **GO en HW** — `GSP booted (hw, GSP-FMC vía FSP)` |
 | G4a–c | RPC GSP-RM + objetos RM | **GO en HW** (2026-07-25) |
 | G4d | VRAM + VA space externo (VER3) | Escrito + hostcheck; validación HW con CE |
-| G4e | Canal GPFIFO + CE (`gsp_chan`, `gsp_ce`) | **Escrito + hostcheck**; GO HW pendiente VFIO |
-| G4f | Saxpy SASS (`SYS_GPU_SUBMIT`) | Bloqueado por toolchain (`ptxas` sm_120) |
-| G5 | matvec híbrido soso-llm | Pendiente G4 |
+| G4e | Canal GPFIFO COPY0 + CE (`gsp_chan`, `gsp_ce`) | **Escrito + hostcheck**; GO HW pendiente VFIO |
+| G4f | Canal GR0 + saxpy SASS (`SYS_GPU_SUBMIT`) | **Escrito + hostcheck**; GO HW pendiente VFIO |
+| G5 | matvec SASS + `soso-llm` (`MATVF`) | **Escrito + hostcheck** (2026-07-28); GO HW pendiente VFIO |
 | L6-H | `--cuda-host` + cuda-proxy | **GO** (2026-07-27) |
 
+**G4f/G5 (2026-07-28), dos hallazgos:** el SASS **nunca estuvo bloqueado por el
+toolchain** —`ptxas` compila sin GPU y basta CUDA ≥ 12.8, que `l6-g4f-build-sass.sh`
+saca del host o de Docker—, y lo que de verdad faltaba era un **canal de GR0**: RM
+rechaza un objeto de compute sobre un canal de COPY0 con `INVALID_CLASS` aunque la
+clase sea la correcta. El bring-up levanta ahora dos canales. El matvec de G5 va
+por tandas de filas (232 KiB de staging) con un QMD y un semáforo por tanda; si
+una tanda no señaliza se recalcula todo en CPU, porque medio vector bueno es peor
+que ninguno.
+
 Scripts: `scripts/l6-pack-firmware.sh`, `scripts/l6-g1-vfio-test.sh`,
-`scripts/l6-g1-vfio-persist.sh`, `scripts/l6-g3-gsp-hostcheck.sh`.
+`scripts/l6-g1-vfio-persist.sh`, `scripts/l6-g3-gsp-hostcheck.sh`,
+`scripts/l6-g4f-build-sass.sh`.
 Checks: `cargo xtask g1-check`, `cargo xtask g3-check`.
 Detalle: `docs/L6-native-autonomy.md`.
 

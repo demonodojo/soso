@@ -5,55 +5,19 @@
 void *memcpy(void *dst, const void *src, unsigned long n);
 void *memset(void *dst, int c, unsigned long n);
 
-/* Los objetos de G4c piden como mucho 120 B de parámetros; el canal de G4e no
- * llega a 1 KiB. Los búferes van al heap y no a la pila: con wrapper + params y
- * su gemelo de respuesta son ~2 KiB por llamada, y esto corre en una fibra del
- * bring-up. */
-#define RM_PARAMS_MAX 1024u
+/* Los objetos de G4c piden como mucho 120 B de parámetros y el canal de G4e 368,
+ * pero `GET_DEVICE_INFO_TABLE` son 3212 B de una sola pieza —la tabla viene
+ * paginada de 32 entradas y no se puede pedir más corta—, así que el tope sube a
+ * 4 KiB. Cabe de sobra en la cola: los mensajes se parten en páginas y el
+ * `msgCount` que negocia el GSP son 63 (log del bring-up), o sea 252 KiB.
+ *
+ * Los búferes van al heap y no a la pila: con wrapper + params y su gemelo de
+ * respuesta son ~8 KiB por llamada, y esto corre en una fibra del bring-up. */
+#define RM_PARAMS_MAX 4096u
 
 /* Tiempo de espera de una llamada a RM. Generoso: la primera reserva de cliente
  * es lo primero que hace GSP-RM tras arrancar y puede tardar. */
 #define RM_TIMEOUT_MS 2000u
-
-/* Nombres de `NV_STATUS`, verificados uno a uno contra `nvstatuscodes.h` de
- * open-gpu-kernel-modules (2026-07-28). Dos de los siete que había estaban mal:
- * el 0x2b no es INVALID_CLASS sino INVALID_HEAP, y el 0x2f no es
- * INVALID_OBJECT_PARENT sino INVALID_LOCK_STATE. Los de verdad son 0x22 y 0x36,
- * y ninguno de los dos estaba en la tabla. Un nombre inventado en un mensaje de
- * error no es un detalle cosmético: manda el diagnóstico al lado contrario,
- * exactamente como el enum de r535 apuntando a NVLink en un portátil sin NVLink.
- * Los que faltaban y salen en esta ruta van también: el canal es de donde han
- * venido casi todos los rechazos. */
-static const char *rm_status_hint(uint32_t st)
-{
-    switch (st) {
-    case 0x00u: return "OK";
-    case 0x1eu: return "INVALID_ADDRESS";
-    case 0x1fu: return "INVALID_ARGUMENT";
-    case 0x21u: return "INVALID_CHANNEL";
-    case 0x22u: return "INVALID_CLASS";
-    case 0x23u: return "INVALID_CLIENT";
-    case 0x26u: return "INVALID_DEVICE";
-    case 0x29u: return "INVALID_FLAGS";
-    case 0x2bu: return "INVALID_HEAP";
-    case 0x2fu: return "INVALID_LOCK_STATE";
-    case 0x31u: return "INVALID_OBJECT";
-    case 0x33u: return "INVALID_OBJECT_HANDLE";
-    case 0x36u: return "INVALID_OBJECT_PARENT";
-    case 0x37u: return "INVALID_OFFSET";
-    case 0x3au: return "INVALID_PARAM_STRUCT";
-    case 0x3bu: return "INVALID_PARAMETER";
-    case 0x40u: return "INVALID_STATE";
-    case 0x4fu: return "NO_FREE_FIFOS";
-    case 0x51u: return "NO_MEMORY";
-    case 0x55u: return "NOT_READY";
-    case 0x56u: return "NOT_SUPPORTED";
-    case 0x57u: return "OBJECT_NOT_FOUND";
-    case 0x58u: return "OBJECT_TYPE_MISMATCH";
-    case 0x59u: return "OPERATING_SYSTEM";
-    default:    return "?";
-    }
-}
 
 /* ---- Catálogo de clases del chip -------------------------------------------
  *
@@ -85,16 +49,24 @@ int gsp_rm_classes_probe(struct gsp_rm *rm)
     if (!rm || !rm->ready) {
         return -1;
     }
-    /* 804 B no caben en la pila de una fibra del bring-up. */
+    /* 404 B no caben en la pila de una fibra del bring-up. */
     p = lx_kzalloc(sizeof(*p), GFP_KERNEL);
     if (!p) {
         lx_printk("nouveau-lx: sin memoria para el catálogo de clases\n");
         return -1;
     }
+    /* Aquí hubo un `p->numClasses = MAX_SIZE` como hipótesis de por qué RM
+     * rechazaba el control: descartada. El campo está anotado `__OUT__` y la
+     * causa era otra —el array medía 200 entradas en vez de las 100 de 570.144,
+     * o sea 804 B donde RM esperaba 404. */
     if (gsp_rm_control(rm, rm->device, NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2,
                        p, (uint32_t)sizeof(*p), &status) != 0) {
-        lx_printk("nouveau-lx: GET_CLASSLIST_V2 rechazado (status=0x%x) — "
-                  "se tirará de la primera clase candidata\n", status);
+        /* El nombre del status va DENTRO del mensaje: este control salió
+         * rechazado con 0x1f en HW y el log sólo daba el hex, así que hubo que
+         * ir a buscar la tabla a mano para saber que era INVALID_ARGUMENT. */
+        lx_printk("nouveau-lx: GET_CLASSLIST_V2 rechazado (%s, 0x%x) — "
+                  "se cae a la tabla por familia\n",
+                  nv_status_name(status), status);
         lx_kfree(p);
         return -1;
     }
@@ -153,8 +125,14 @@ uint32_t gsp_rm_class_pick(const char *what, const uint32_t *cand, unsigned n)
         return 0;
     }
     if (!rm_class_known) {
-        lx_printk("nouveau-lx: %s sin catálogo — se prueba 0x%04x a ciegas\n",
-                  what, cand[0]);
+        /* "A ciegas" era injusto con el dato y encima despistó: `cand[0]` no es
+         * una adivinanza, es lo que `rm/gb20x.c` de nouveau prescribe para este
+         * chip, y en hardware RM aceptó las tres primeras candidatas del canal y
+         * del CE. Cuando el compute falló, el log decía "a ciegas" y mandó a
+         * buscar una clase mala que estaba bien. Sin catálogo esto es la elección
+         * de upstream, y así se cuenta. */
+        lx_printk("nouveau-lx: %s sin catálogo — 0x%04x, la de upstream para "
+                  "este chip\n", what, cand[0]);
         return cand[0];
     }
     for (i = 0; i < n; i++) {
@@ -171,6 +149,183 @@ uint32_t gsp_rm_class_pick(const char *what, const uint32_t *cand, unsigned n)
               "catálogo; se manda 0x%04x igual para ver qué dice RM\n",
               what, n, cand[0]);
     return cand[0];
+}
+
+/* ---- Motores del chip y topología del FIFO ----------------------------------
+ *
+ * Mismo principio que el catálogo de clases: el `engineType` del canal no se
+ * deduce, se pregunta. Ver el bloque de `NV2080_CTRL_CMD_GPU_GET_ENGINES_V2` en
+ * nvrm_r570.h para el por qué y las referencias.
+ *
+ * Ninguno de los dos controles es obligatorio para arrancar: si fallan se dice y
+ * se sigue. Lo que devuelven es diagnóstico, no configuración — todavía. */
+
+/* El nombre viene de la tarjeta, así que se trata como dato hostil: se corta a
+ * su tamaño, se termina en NUL y lo no imprimible se sustituye. Un array sin NUL
+ * metido en un %s es una lectura fuera de límites dentro del printk. */
+static void engine_name_safe(const char *src, char *dst, unsigned n)
+{
+    unsigned i;
+
+    for (i = 0; i + 1u < n; i++) {
+        unsigned char c = (unsigned char)src[i];
+
+        if (c == 0u) {
+            break;
+        }
+        dst[i] = (c >= 0x20u && c < 0x7fu) ? (char)c : '.';
+    }
+    dst[i] = '\0';
+}
+
+static int engines_list_probe(struct gsp_rm *rm)
+{
+    NV2080_CTRL_GPU_GET_ENGINES_V2_PARAMS *e;
+    uint32_t status = 0;
+    unsigned i;
+    int has_copy0 = 0;
+
+    e = lx_kzalloc(sizeof(*e), GFP_KERNEL);
+    if (!e) {
+        lx_printk("nouveau-lx: sin memoria para la lista de motores\n");
+        return -1;
+    }
+    if (gsp_rm_control(rm, rm->subdevice, NV2080_CTRL_CMD_GPU_GET_ENGINES_V2,
+                       e, (uint32_t)sizeof(*e), &status) != 0) {
+        lx_printk("nouveau-lx: GET_ENGINES_V2 rechazado (%s, 0x%x)\n",
+                  nv_status_name(status), status);
+        lx_kfree(e);
+        return -1;
+    }
+    /* Un `engineCount` imposible no es "el chip no tiene motores": es la struct
+     * desplazada, y entonces la lista de debajo tampoco vale nada. */
+    if (e->engineCount == 0u || e->engineCount > NV2080_GPU_MAX_ENGINES_LIST_SIZE) {
+        lx_printk("nouveau-lx: GET_ENGINES_V2 dice %u motores (fuera de 1..%u) — "
+                  "la transcripción de los params está mal, no el chip\n",
+                  e->engineCount, NV2080_GPU_MAX_ENGINES_LIST_SIZE);
+        lx_kfree(e);
+        return -1;
+    }
+    lx_printk("nouveau-lx: motores según RM: %u\n", e->engineCount);
+    for (i = 0; i < e->engineCount; i += 8u) {
+        unsigned n = e->engineCount - i;
+
+        if (n > 8u) {
+            n = 8u;
+        }
+        lx_printk("nouveau-lx:   [%2u] %3u %3u %3u %3u %3u %3u %3u %3u\n", i,
+                  e->engineList[i], n > 1 ? e->engineList[i + 1] : 0,
+                  n > 2 ? e->engineList[i + 2] : 0, n > 3 ? e->engineList[i + 3] : 0,
+                  n > 4 ? e->engineList[i + 4] : 0, n > 5 ? e->engineList[i + 5] : 0,
+                  n > 6 ? e->engineList[i + 6] : 0, n > 7 ? e->engineList[i + 7] : 0);
+    }
+    for (i = 0; i < e->engineCount; i++) {
+        if (e->engineList[i] == NV2080_ENGINE_TYPE_COPY0) {
+            has_copy0 = 1;
+        }
+    }
+    /* La pregunta concreta que trajo aquí: el canal pide COPY0 y hasta ahora eso
+     * era aritmética sobre una tabla, no un hecho sobre esta tarjeta. */
+    lx_printk("nouveau-lx: COPY0 (%u) %s en la lista — es el engineType que pide "
+              "el canal\n", NV2080_ENGINE_TYPE_COPY0,
+              has_copy0 ? "SÍ está" : "NO está");
+    lx_kfree(e);
+    return 0;
+}
+
+static int engines_fifo_table_probe(struct gsp_rm *rm)
+{
+    NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS *t;
+    uint32_t base = 0;
+    unsigned page;
+    int ret = -1;
+
+    t = lx_kzalloc(sizeof(*t), GFP_KERNEL);
+    if (!t) {
+        lx_printk("nouveau-lx: sin memoria para la tabla de dispositivos del FIFO\n");
+        return -1;
+    }
+    /* Ocho páginas de 32 son las 256 entradas del MAX_DEVICES de upstream: el
+     * tope está aquí para que un `bMore` que nunca baje no cuelgue el bring-up,
+     * no porque se espere llegar. */
+    for (page = 0; page < 8u; page++) {
+        uint32_t status = 0;
+        unsigned i;
+        int more;
+
+        memset(t, 0, sizeof(*t));
+        t->baseIndex = base;
+        if (gsp_rm_control(rm, rm->subdevice,
+                           NV2080_CTRL_CMD_FIFO_GET_DEVICE_INFO_TABLE,
+                           t, (uint32_t)sizeof(*t), &status) != 0) {
+            lx_printk("nouveau-lx: GET_DEVICE_INFO_TABLE(base=%u) rechazado "
+                      "(%s, 0x%x)\n", base, nv_status_name(status), status);
+            goto out;
+        }
+        if (t->numEntries > NV2080_CTRL_FIFO_DEVICE_INFO_MAX_ENTRIES) {
+            lx_printk("nouveau-lx: GET_DEVICE_INFO_TABLE dice %u entradas "
+                      "(máximo %u) — params desplazados\n",
+                      t->numEntries, NV2080_CTRL_FIFO_DEVICE_INFO_MAX_ENTRIES);
+            goto out;
+        }
+        more = t->bMore ? 1 : 0;
+        lx_printk("nouveau-lx: FIFO: %u entradas desde %u%s\n", t->numEntries,
+                  base, more ? " (y quedan más)" : "");
+        for (i = 0; i < t->numEntries; i++) {
+            const NV2080_CTRL_FIFO_DEVICE_ENTRY *d = &t->entries[i];
+            char name[NV2080_CTRL_FIFO_DEVICE_INFO_MAX_NAME_LEN + 1u];
+            unsigned j;
+
+            engine_name_safe(d->engineName, name, sizeof(name));
+            /* `numPbdmas` acotado antes de indexar: el array son 2 y el número
+             * lo pone RM.
+             *
+             * Nada de "%-16s" para cuadrar columnas: el vsnprintf del shim se
+             * come el flag '-' sin aplicarlo y en "%s" ignora la anchura, así que
+             * saldría igual de descuadrado pero mintiendo. El nombre va entre
+             * comillas, que separa igual de bien y no depende del formateador. */
+            lx_printk("nouveau-lx:   %3u '%s' pbdma=%u [%u %u] fault=[%u %u]\n",
+                      base + i, name, d->numPbdmas,
+                      d->numPbdmas > 0u ? d->pbdmaIds[0] : 0u,
+                      d->numPbdmas > 1u ? d->pbdmaIds[1] : 0u,
+                      d->numPbdmas > 0u ? d->pbdmaFaultIds[0] : 0u,
+                      d->numPbdmas > 1u ? d->pbdmaFaultIds[1] : 0u);
+            /* Los 16 words crudos, en dos líneas de ocho. Sin nombres porque el
+             * enum de índices no está en ctrl2080fifo.h y bautizarlos a ojo es
+             * cómo se acaba pidiendo un canal sobre un motor que no existe. */
+            for (j = 0; j < NV2080_CTRL_FIFO_DEVICE_INFO_DATA_TYPES; j += 8u) {
+                lx_printk("nouveau-lx:       data[%2u] %08x %08x %08x %08x "
+                          "%08x %08x %08x %08x\n", j,
+                          d->engineData[j], d->engineData[j + 1],
+                          d->engineData[j + 2], d->engineData[j + 3],
+                          d->engineData[j + 4], d->engineData[j + 5],
+                          d->engineData[j + 6], d->engineData[j + 7]);
+            }
+        }
+        if (!more || t->numEntries == 0u) {
+            ret = 0;
+            goto out;
+        }
+        base += t->numEntries;
+    }
+    lx_printk("nouveau-lx: FIFO: la tabla sigue diciendo 'más' tras 8 páginas; "
+              "se corta aquí\n");
+    ret = 0;
+out:
+    lx_kfree(t);
+    return ret;
+}
+
+int gsp_rm_engines_probe(struct gsp_rm *rm)
+{
+    int a, b;
+
+    if (!rm || !rm->ready) {
+        return -1;
+    }
+    a = engines_list_probe(rm);
+    b = engines_fifo_table_probe(rm);
+    return (a == 0 && b == 0) ? 0 : -1;
 }
 
 int gsp_rm_alloc(struct gsp_rm *rm, uint32_t parent, uint32_t handle, uint32_t cls,
@@ -233,7 +388,7 @@ int gsp_rm_alloc(struct gsp_rm *rm, uint32_t parent, uint32_t handle, uint32_t c
     }
     if (rhdr->status) {
         lx_printk("nouveau-lx: RM_ALLOC cls=0x%x obj=0x%08x → %s (0x%x)\n",
-                  cls, handle, rm_status_hint(rhdr->status), rhdr->status);
+                  cls, handle, nv_status_name(rhdr->status), rhdr->status);
         goto out;
     }
     lx_printk("nouveau-lx: RM_ALLOC cls=0x%04x obj=0x%08x padre=0x%08x ok (%u B)\n",
@@ -301,7 +456,7 @@ int gsp_rm_control(struct gsp_rm *rm, uint32_t object, uint32_t cmd,
     }
     if (rhdr->status) {
         lx_printk("nouveau-lx: RM_CONTROL cmd=0x%08x obj=0x%08x → %s (0x%x)\n",
-                  cmd, object, rm_status_hint(rhdr->status), rhdr->status);
+                  cmd, object, nv_status_name(rhdr->status), rhdr->status);
         goto out;
     }
     /* Devolver lo que RM haya escrito, recortado a lo que quepa. */

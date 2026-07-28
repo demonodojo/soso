@@ -506,9 +506,16 @@ typedef struct NV_VASPACE_ALLOCATION_PARAMETERS
  * (`GET_CLASSLIST`, 0x800201) devuelve la lista por un `NvP64 classList` que
  * apunta a memoria del llamante — un puntero que al otro lado del RPC no
  * significa nada. La V2 lleva el array dentro de los params, que es lo que
- * cabe en un mensaje. 804 B de ida, dentro de RM_PARAMS_MAX. */
+ * cabe en un mensaje. 404 B de ida, dentro de RM_PARAMS_MAX.
+ *
+ * **100 y no 200.** El 200 es el valor de la rama `main` de
+ * open-gpu-kernel-modules; en el tag **570.144**, que es el firmware de esta
+ * tarjeta, son 100. Con 200 los params medían 804 B y RM contestaba
+ * INVALID_ARGUMENT (0x1f) — dos ciclos de hardware con el catálogo caído y las
+ * tres clases eligiéndose sin él (2026-07-27 y 28). Ver la regla del bloque de
+ * NVA06F más abajo: el tag, no main. */
 #define NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2     0x800292u
-#define NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE       200u
+#define NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE       100u
 
 typedef struct NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS
 {
@@ -517,7 +524,7 @@ typedef struct NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS
 } NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS;
 
 typedef char nv0080_classlist_size_check[
-    sizeof(NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS) == 804 ? 1 : -1];
+    sizeof(NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS) == 404 ? 1 : -1];
 
 typedef struct NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS
 {
@@ -581,7 +588,26 @@ typedef char nv0080_set_pd_size_check[
  * lista exacta de clases del chip y `gsp_rm_class_pick` coge la primera de la
  * lista de candidatas que RM reconozca. Una tabla por familia es otra tabla que
  * se queda vieja con el siguiente chip; el catálogo lo dice la tarjeta. */
-#define NV_MAX_SUBDEVICES 32u
+
+/* **8, no 32.** `nvlimits.h` de open-gpu-kernel-modules define los dos macros
+ * pegados uno al otro:
+ *
+ *     #define NV_MAX_DEVICES                32
+ *     #define NV_MAX_SUBDEVICES             8
+ *
+ * y aquí se había copiado el de arriba. `r570/nvrm/fifo.h` de nouveau —el
+ * fichero que esta sección espeja, con su excerpt de 570.144— dice 8 para esta
+ * struct exacta.
+ *
+ * No es un macro decorativo: aparece dos veces en NV_CHANNEL_ALLOC_PARAMS
+ * (`hUserdMemory[]` y `userdOffset[]`), así que el 32 metía 288 B de más y
+ * corría TODO lo que viene detrás —los cuatro descriptores de memoria,
+ * `internalFlags`, `hPhysChannelGroup`— esos mismos 288 B. RM leía instanceMem
+ * donde nosotros ya no escribíamos nada y contestaba INVALID_PARAMETER (0x3b) a
+ * las once variantes de la sonda por igual, que es justo la firma de un layout
+ * mal: si fallan todas las hipótesis de campo, lo que está mal no es un campo.
+ * (2026-07-28, mismo mordisco que el `hHandleVASpace` del día anterior.) */
+#define NV_MAX_SUBDEVICES 8u
 
 #define AMPERE_CHANNEL_GPFIFO_A    0x0000c56fu
 #define AMPERE_CHANNEL_GPFIFO_B    0x0000c76fu
@@ -607,6 +633,13 @@ typedef char nv0080_set_pd_size_check[
  * `RM_ENGINE_TYPE_COPY0` del enum interno vale 9 también, así que aquí las dos
  * numeraciones coinciden y no hay trampa que valga. */
 #define NV2080_ENGINE_TYPE_COPY0   9u
+
+/* Y GR0 es el 1, la primera entrada útil de esa misma tabla (el 0 es NULL). Hace
+ * falta porque un objeto de compute NO se puede colgar de un canal de copia: RM
+ * contesta INVALID_CLASS (0x22) a `BLACKWELL_COMPUTE_B` sobre el canal de COPY0
+ * aunque la clase sea la correcta y el mismo canal acepte `BLACKWELL_DMA_COPY_B`
+ * (HW, 2026-07-28). El compute necesita su propio canal atado a GR0. */
+#define NV2080_ENGINE_TYPE_GR0     1u
 
 /* `addressSpace` de NV_MEMORY_DESC_PARAMS es el enum `NV_ADDRESS_SPACE` de RM,
  * y NO el `FLAGS_APERTURE` de SET_PAGE_DIRECTORY que hay 50 líneas más arriba
@@ -690,14 +723,36 @@ typedef struct NV_CHANNEL_ALLOC_PARAMS {
     NvU32    tpcConfigID;
 } NV_CHANNEL_ALLOC_PARAMS;
 
-/* Ancla contra upstream, no contra nosotros mismos. Con el `hHandleVASpace` de
- * más salían 664 y este assert es justo lo que faltaba para cazarlo. */
+/* Estos asserts decían "ancla contra upstream, no contra nosotros mismos" y era
+ * MENTIRA: el 656 y el 432 se habían calculado con nuestro `NV_MAX_SUBDEVICES`,
+ * o sea que cuadraban con el error y lo bendecían. Un assert derivado de la
+ * misma constante que quieres comprobar no comprueba nada.
+ *
+ * Los de ahora salen de sumar a mano los campos con NV_MAX_SUBDEVICES=8 de
+ * `nvlimits.h`, y el tercero es el que faltaba: `hUserdMemory` está ANTES de los
+ * dos arrays, así que su offset 32 no se movió ni con el 32 ni con el 8 — el
+ * único ancla que había del lado malo era ciego a propósito. `instanceMem` está
+ * después: ahí es donde se ve.
+ *
+ *   hObjectError 0, hObjectBuffer 4, gpFifoOffset 8, gpFifoEntries 16,
+ *   flags 20, hContextShare 24, hVASpace 28, hUserdMemory[8] 32..64,
+ *   userdOffset[8] 64..128, engineType 128, cid 132, subDeviceId 136,
+ *   hObjectEccError 140, instanceMem 144, userdMem 168, ramfcMem 192,
+ *   mthdbufMem 216, hPhysChannelGroup 240, internalFlags 244,
+ *   errorNotifierMem 248, eccErrorNotifierMem 272, ProcessID 296,
+ *   SubProcessID 300, encryptIv 304, decryptIv 316, hmacNonce 328,
+ *   tpcConfigID 360, y el relleno a múltiplo de 8 → 368.
+ */
 typedef char nv_channel_alloc_size_check[
-    sizeof(NV_CHANNEL_ALLOC_PARAMS) == 656 ? 1 : -1];
+    sizeof(NV_CHANNEL_ALLOC_PARAMS) == 368 ? 1 : -1];
 typedef char nv_channel_alloc_userd_off_check[
     offsetof(NV_CHANNEL_ALLOC_PARAMS, hUserdMemory) == 32 ? 1 : -1];
 typedef char nv_channel_alloc_instmem_off_check[
-    offsetof(NV_CHANNEL_ALLOC_PARAMS, instanceMem) == 432 ? 1 : -1];
+    offsetof(NV_CHANNEL_ALLOC_PARAMS, instanceMem) == 144 ? 1 : -1];
+/* El otro multiplicador de la cuenta de arriba: cuatro descriptores entre
+ * `instanceMem` y `hPhysChannelGroup`. Si esto no son 24, el 368 tampoco vale. */
+typedef char nv_memory_desc_size_check[
+    sizeof(NV_MEMORY_DESC_PARAMS) == 24 ? 1 : -1];
 
 #define NVOS04_FLAGS_CHANNEL_TYPE_PHYSICAL  0x00000000u
 #define NVOS04_FLAGS_CHANNEL_CLIENT_MAP_FIFO  (1u << 24)
@@ -728,6 +783,141 @@ typedef char nv_channel_alloc_instmem_off_check[
 typedef struct NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS {
     NvU32 size;
 } NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS;
+
+/* ---- Qué motores tiene el chip, y en qué runlist ----------------------------
+ *
+ * `engineType` del canal sale de aritmética sobre la tabla de `engine.h`
+ * (GR0..GR7 = 1..8, luego COPY0 = 9). La aritmética está bien, pero no dice si
+ * ESTE chip tiene ese motor, ni si está en una runlist a la que un canal físico
+ * pueda engancharse. Eso se pregunta, igual que las clases: `r535_fifo_ctor` de
+ * nouveau usa estos dos controles sobre el subdevice antes de tocar un canal.
+ *
+ * `GET_ENGINES_V2` da la lista de `NV2080_ENGINE_TYPE_*` que RM expone.
+ * `GET_DEVICE_INFO_TABLE` da la topología: por motor, sus PBDMA y —lo que aquí
+ * importa— un `engineName` en texto. Ese nombre es además el autochequeo del
+ * layout: si sale legible ("COPY0", "GR0"), la transcripción de la struct es
+ * buena; si sale basura, está desplazada y no hay que creerse el resto.
+ *
+ * Referencias: `ctrl2080gpu.h` y `ctrl2080fifo.h` de open-gpu-kernel-modules
+ * (leídos el 2026-07-28; el 0x54 de abajo es suyo, NO 0x34). */
+#define NV2080_CTRL_CMD_GPU_GET_ENGINES_V2   0x20800170u
+#define NV2080_GPU_MAX_ENGINES_LIST_SIZE     0x54u    /* 84 */
+
+typedef struct NV2080_CTRL_GPU_GET_ENGINES_V2_PARAMS {
+    NvU32 engineCount;
+    NvU32 engineList[NV2080_GPU_MAX_ENGINES_LIST_SIZE];
+} NV2080_CTRL_GPU_GET_ENGINES_V2_PARAMS;
+
+typedef char nv2080_engines_v2_size_check[
+    sizeof(NV2080_CTRL_GPU_GET_ENGINES_V2_PARAMS) == 340 ? 1 : -1];
+
+#define NV2080_CTRL_CMD_FIFO_GET_DEVICE_INFO_TABLE  0x20801112u
+#define NV2080_CTRL_FIFO_DEVICE_INFO_MAX_ENTRIES    32u
+#define NV2080_CTRL_FIFO_DEVICE_INFO_DATA_TYPES     16u
+#define NV2080_CTRL_FIFO_DEVICE_INFO_MAX_PBDMA      2u
+#define NV2080_CTRL_FIFO_DEVICE_INFO_MAX_NAME_LEN   16u
+
+typedef struct NV2080_CTRL_FIFO_DEVICE_ENTRY {
+    NvU32 engineData[NV2080_CTRL_FIFO_DEVICE_INFO_DATA_TYPES];
+    NvU32 pbdmaIds[NV2080_CTRL_FIFO_DEVICE_INFO_MAX_PBDMA];
+    NvU32 pbdmaFaultIds[NV2080_CTRL_FIFO_DEVICE_INFO_MAX_PBDMA];
+    NvU32 numPbdmas;
+    char  engineName[NV2080_CTRL_FIFO_DEVICE_INFO_MAX_NAME_LEN];
+} NV2080_CTRL_FIFO_DEVICE_ENTRY;
+
+/* La tabla viene paginada: 32 entradas por llamada, `baseIndex` dice por dónde
+ * seguir y `bMore` si queda más. Los índices de `engineData` viven en un enum
+ * aparte que ctrl2080fifo.h no trae, así que aquí NO se nombran: se vuelcan los
+ * 16 words crudos y ya se decodificarán cuando haga falta. Inventar nombres para
+ * los índices es cómo se llega a un GR5 disfrazado de COPY0. */
+typedef struct NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS {
+    NvU32                         baseIndex;
+    NvU32                         numEntries;
+    NvBool                        bMore;
+    NV2080_CTRL_FIFO_DEVICE_ENTRY entries[NV2080_CTRL_FIFO_DEVICE_INFO_MAX_ENTRIES];
+} NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS;
+
+typedef char nv2080_fifo_devinfo_entry_size_check[
+    sizeof(NV2080_CTRL_FIFO_DEVICE_ENTRY) == 100 ? 1 : -1];
+/* `bMore` es NvU8 en el offset 8; `entries` se alinea a 4 y cae en el 12, no en
+ * el 16. Ese hueco de 3 B es el sitio exacto donde un NvBool tomado por NvU32
+ * desplazaría la tabla entera. */
+typedef char nv2080_fifo_devinfo_entries_off_check[
+    offsetof(NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS, entries) == 12 ? 1 : -1];
+typedef char nv2080_fifo_devinfo_size_check[
+    sizeof(NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS) == 3212 ? 1 : -1];
+
+/* ---- Arrancar el canal: BIND + SCHEDULE + doorbell -------------------------
+ *
+ * Reservar el canal NO lo pone a correr, y esto faltaba entero: el RM_ALLOC
+ * pasaba, el CE se colgaba del canal, y la copia sysmem → VRAM no señalizaba
+ * nunca porque nadie había metido el canal en la runlist ni había pateado el
+ * host (2026-07-28). Upstream lo hace en tres pasos, todos sobre el objeto del
+ * CANAL (no sobre el subdevice):
+ *
+ *   1. `NVA06F_CTRL_CMD_BIND` con el engineType — ata el canal a su motor.
+ *   2. `NVA06F_CTRL_CMD_GPFIFO_SCHEDULE` con bEnable=1 (`r535_chan_start`).
+ *   3. El doorbell, que NO es un RPC sino una escritura de registro.
+ *
+ * Referencias: `rm/r535/fifo.c` de nouveau para los dos controles,
+ * `ctrl/ctrla06f/ctrla06fgpfifo.h` y `ctrl/ctrlc36f.h` de
+ * open-gpu-kernel-modules para los valores (leídos el 2026-07-28).
+ *
+ * REGLA, pagada con un ciclo de hardware: las structs se leen del **tag
+ * 570.144** de open-gpu-kernel-modules, no de `main`. El firmware de esta
+ * tarjeta es 570.144 y RM compara el `paramsSize` contra la struct con la que se
+ * compiló ÉL; un campo añadido en una versión posterior no es un detalle
+ * cosmético, es un INVALID_ARGUMENT. Ya cayeron dos así el 2026-07-28: el
+ * `bSkipEnable` de aquí abajo y el CLASSLIST_MAX_SIZE del catálogo (100 en
+ * 570.144, 200 en main). Es la misma razón por la que los headers de nouveau
+ * dicen "Excerpt of RM headers from .../tree/570.144" y no "from main". */
+#define NVA06F_CTRL_CMD_GPFIFO_SCHEDULE  0xa06f0103u
+#define NVA06F_CTRL_CMD_BIND             0xa06f0104u
+
+typedef struct NVA06F_CTRL_BIND_PARAMS {
+    NvU32 engineType;
+} NVA06F_CTRL_BIND_PARAMS;
+
+/* DOS NvBool, o sea dos BYTES. Aquí hubo tres —copiados de la rama `main` de
+ * open-gpu-kernel-modules— y RM contestó INVALID_ARGUMENT (0x1f) al SCHEDULE en
+ * hardware: `bSkipEnable` es un campo POSTERIOR a 570.144, y el GSP de esta
+ * tarjeta valida el paramsSize contra la struct con la que se compiló él.
+ *
+ * De ahí la regla del bloque de arriba: el tag, no `main`. */
+typedef struct NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS {
+    NvBool bEnable;
+    NvBool bSkipSubmit;
+} NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS;
+
+typedef char nva06f_schedule_size_check[
+    sizeof(NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS) == 2 ? 1 : -1];
+typedef char nva06f_bind_size_check[
+    sizeof(NVA06F_CTRL_BIND_PARAMS) == 4 ? 1 : -1];
+
+/* El valor que hay que escribir en el doorbell se le PIDE a RM en vez de
+ * construirlo. Upstream lo compone como `(runl->doorbell << 16) | chid`, donde
+ * `runl->doorbell` sale de leer un registro de la runlist — y para saber en qué
+ * registro habría que decidir a mano qué significa cada word de `engineData` de
+ * la tabla del FIFO. Este control lo da hecho, y es lo que usan de todas formas
+ * UVM y el espacio de usuario en Volta+. */
+#define NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN  0xc36f0108u
+
+typedef struct NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS {
+    NvU32 workSubmitToken;
+} NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS;
+
+/* Registro del doorbell, en BAR0. `nvkm_vfn_new_` monta
+ * `addr.user = addr.priv + func->user.addr`, y el kick de `tu102_chan_start` es
+ * `nvkm_wr32(device, device->vfn->addr.user + 0x0090, token)`.
+ *
+ * Con `ga100_vfn`: priv = 0xb80000, user = +0x030000 → 0xbb0000, doorbell en
+ * 0xbb0090. Que esto valga para GB20x no es una suposición de familia: en el
+ * `nvkm/subdev/vfn/Kbuild` de nouveau **no hay ningún vfn más nuevo que
+ * ga100.c** (base, uvfn, gv100, tu102, ga100, r535), así que Ampere→Blackwell
+ * comparten el mismo. Y el `r535_vfn` del camino GSP, que es el que aplica aquí,
+ * mantiene `user = { 0x030000, 0x010000 }`. */
+#define NV_VFN_USERMODE_BASE     0xbb0000u
+#define NV_VFN_DOORBELL          (NV_VFN_USERMODE_BASE + 0x0090u)
 
 /* Bloque de instancia del canal. Upstream (`r535_chan_alloc`) apunta
  * `instanceMem` al bloque entero y `ramfcMem` a sus primeros 0x200 B, los dos

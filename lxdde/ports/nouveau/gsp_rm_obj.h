@@ -68,6 +68,13 @@ uint32_t gsp_rm_class_pick(const char *what, const uint32_t *cand, unsigned n);
  * sin saber nada. En el kernel no hay nada que lo llame. */
 void gsp_rm_classes_forget(void);
 
+/* Motores del chip (`GPU_GET_ENGINES_V2`) y topología del FIFO
+ * (`FIFO_GET_DEVICE_INFO_TABLE`), los dos sobre el subdevice. Por ahora sólo
+ * vuelca: contesta si el `engineType` que pide el canal existe de verdad en esta
+ * tarjeta, en vez de darlo por bueno por aritmética sobre una tabla. Devuelve 0
+ * si los dos controles pasaron; que fallen no impide arrancar. */
+int gsp_rm_engines_probe(struct gsp_rm *rm);
+
 /* Lo que sacamos de `GET_GSP_STATIC_INFO`: el mapa de VRAM utilizable y los
  * regalos de RM (su juego interno de objetos y las bases de las tablas de
  * páginas de BAR1/BAR2, que RM ya ha construido). */

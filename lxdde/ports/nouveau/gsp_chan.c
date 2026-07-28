@@ -1,8 +1,16 @@
 /* G4e (1/2): canal GPFIFO. Ver gsp_chan.h. */
 #include "gsp_chan.h"
+#include "gsp_mmio.h"
 
 void *memset(void *dst, int c, unsigned long n);
 void *memcpy(void *dst, const void *src, unsigned long n);
+
+/* Mismo patrón que `gsp_rpc_barrier`: lo que se publica en sysmem tiene que
+ * haber salido del core antes de tocar el registro que se lo dice a la GPU. */
+static void gsp_chan_barrier(void)
+{
+    __asm__ __volatile__("mfence" ::: "memory");
+}
 
 static int chan_map_buf(struct gsp_chan *c, struct gsp_dma_buf *b, uint64_t va)
 {
@@ -62,7 +70,7 @@ static int chan_fill_alloc(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p,
                NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_VALUE(0) |
                NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED_TRUE;
     p->hVASpace = vaspace;
-    p->engineType = NV2080_ENGINE_TYPE_COPY0;
+    p->engineType = c->engine;
     /* `subDeviceId` se queda a 0 (upstream no lo toca): el 1 que había aquí
      * apuntaba a un subdevice que no es el nuestro. */
 
@@ -108,172 +116,109 @@ static int chan_fill_alloc(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p,
     return 0;
 }
 
-/* ANDAMIO DE BRING-UP (2026-07-28) — quitar en cuanto el canal arranque.
+/* El andamio de las once variantes vivió aquí un día (2026-07-28) y ya no hace
+ * falta: la variante base pasó en cuanto se arregló `NV_MAX_SUBDEVICES`, que era
+ * lo único que estaba mal. Que las once fallaran idénticas era la pista —cuando
+ * ninguna hipótesis de campo cambia nada, lo que está mal no es un campo—, y
+ * queda contada en el comentario del assert de tamaño de nvrm_r570.h.
  *
- * RM contesta 0x3b (INVALID_PARAMETER) sin decir QUÉ parámetro le disgusta, y
- * cada hipótesis probada a razón de una por ciclo de hardware son cinco minutos
- * y un riesgo de cuelgue. Un RM_ALLOC, en cambio, son milisegundos: se prueban
- * todas las variantes dentro del MISMO arranque y el log dice cuál pasa.
- *
- * Las variantes no son adivinanzas al azar: cada una es una decisión concreta
- * donde upstream y nosotros divergimos, o donde upstream tiene dos ramas y hubo
- * que elegir una. Se paran en la primera que RM acepta.
- *
- * Si ninguna pasa, el dato TAMBIÉN sirve: significa que hay dos cosas mal a la
- * vez, y por eso las dos últimas son combinaciones. */
-struct chan_variant {
-    const char *name;
-    void (*apply)(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p);
-    /* 0 = la clase que eligió el catálogo. Distinto de 0 = probar ESA clase, que
-     * es una hipótesis tan legítima como cualquier campo de los params. */
-    uint32_t cls;
-};
-
-/* Handle del USERD en VRAM para la variante 3; 0 si no se pudo reservar. */
-static uint64_t chan_probe_userd_vram;
-
-static void var_base(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+ * Arrancar el canal, en cambio, son tres pasos que faltaban por completo. Ver el
+ * bloque de `NVA06F_CTRL_CMD_BIND` en nvrm_r570.h. */
+static int chan_bind_engine(struct gsp_chan *c)
 {
-    (void)c; (void)p;
-}
+    NVA06F_CTRL_BIND_PARAMS bind;
+    uint32_t status = 0;
 
-/* Upstream elige entre priv y no-priv; nosotros pusimos priv (somos el kernel),
- * pero pedir ADMIN puede ser justo lo que RM no le concede a este cliente. */
-static void var_unpriv(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
-{
-    (void)c;
-    p->flags &= ~NVOS04_FLAGS_PRIVILEGED_CHANNEL_TRUE;
-    p->internalFlags &= ~0x3u;   /* PRIVILEGE_USER = 0 */
-}
-
-/* La desviación consciente: upstream pone el USERD en VRAM (apertura 2). Aquí
- * sólo se comprueba si RM lo EXIGE; si es que sí, la CPU se queda sin poder
- * escribir GPPut y habrá que ir al doorbell de usermode. */
-static void var_userd_vram(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
-{
-    (void)c;
-    if (!chan_probe_userd_vram) {
-        return;
+    memset(&bind, 0, sizeof(bind));
+    /* El mismo motor que se pidió en el alloc. Que estos dos números pudieran
+     * separarse era una trampa esperando: un canal alojado sobre GR0 y atado a
+     * COPY0 se reserva sin queja y falla después, al colgarle el objeto. */
+    bind.engineType = c->engine;
+    if (gsp_rm_control(c->rm, c->handle, NVA06F_CTRL_CMD_BIND,
+                       &bind, (uint32_t)sizeof(bind), &status) != 0) {
+        lx_printk("nouveau-lx: canal BIND(engine=%u) rechazado (status=0x%x)\n",
+                  bind.engineType, status);
+        return -1;
     }
-    p->userdMem.base = chan_probe_userd_vram;
-    p->userdMem.addressSpace = NV_ADDRESS_SPACE_FBMEM;
-    p->userdMem.cacheAttrib = NV_CACHE_ATTR_CACHED;
+    lx_printk("nouveau-lx: canal atado al motor %u\n", bind.engineType);
+    return 0;
 }
 
-/* ¿Y si el ring lo quiere por dirección física, y la incoherencia con las GP
- * entries es cosa nuestra y no de RM? */
-static void var_gpfifo_phys(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
+static int chan_schedule(struct gsp_chan *c)
 {
-    p->gpFifoOffset = c->gpfifo.phys;
-}
+    NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sched;
+    uint32_t status = 0;
 
-/* Entradas que caben en la página entera (4096/8), por si RM comprueba que el
- * número declarado cuadre con la región mapeada. */
-static void var_entries_full(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
-{
-    (void)c;
-    p->gpFifoEntries = GSP_CHAN_GPFIFO_SIZE / NVC56F_GP_ENTRY__SIZE;
-}
-
-/* Sin method buffer, por si para un canal de CE sobra y molesta. */
-static void var_no_mthdbuf(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
-{
-    (void)c;
-    memset(&p->mthdbufMem, 0, sizeof(p->mthdbufMem));
-}
-
-/* Control: el 6 de antes. Si ESTA pasara y las demás no, el 9 estaría mal. */
-static void var_engine6(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
-{
-    (void)c;
-    p->engineType = 6u;
-}
-
-static void var_unpriv_userd_vram(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
-{
-    var_unpriv(c, p);
-    var_userd_vram(c, p);
-}
-
-static void var_unpriv_gpfifo_phys(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p)
-{
-    var_unpriv(c, p);
-    var_gpfifo_phys(c, p);
-}
-
-static const struct chan_variant chan_variants[] = {
-    { "base (priv, USERD sysmem, GPFIFO por VA, engine 9)", var_base, 0 },
-    { "sin privilegio (flags bit5=0, internalFlags USER)",  var_unpriv, 0 },
-    { "USERD en VRAM (apertura 2)",                          var_userd_vram, 0 },
-    { "GPFIFO por dirección física",                         var_gpfifo_phys, 0 },
-    { "gpFifoEntries = 512 (la página entera)",              var_entries_full, 0 },
-    { "sin method buffer",                                   var_no_mthdbuf, 0 },
-    { "engineType = 6 (el viejo, de control)",               var_engine6, 0 },
-    { "sin privilegio + USERD en VRAM",                      var_unpriv_userd_vram, 0 },
-    { "sin privilegio + GPFIFO físico",                      var_unpriv_gpfifo_phys, 0 },
-    /* Las dos clases que el port pedía antes de mirar el catálogo. Si el
-     * catálogo acierta nunca llegan a correr; si RM resulta aceptar la vieja y
-     * no la nueva, esto lo dice en el mismo arranque en vez de en el siguiente. */
-    { "clase AMPERE_CHANNEL_GPFIFO_A (la de antes)", var_base,
-      AMPERE_CHANNEL_GPFIFO_A },
-    { "clase BLACKWELL_CHANNEL_GPFIFO_A (la otra Blackwell)", var_base,
-      BLACKWELL_CHANNEL_GPFIFO_A },
-};
-
-static int chan_alloc_probing(struct gsp_chan *c, struct gsp_vram *vram,
-                              const NV_CHANNEL_ALLOC_PARAMS *base)
-{
-    unsigned i;
-
-    chan_probe_userd_vram = gsp_vram_alloc(vram, GSP_CHAN_INST_SIZE,
-                                           GSP_CHAN_INST_SIZE);
-    if (!chan_probe_userd_vram) {
-        lx_printk("nouveau-lx: sonda — sin VRAM para el USERD de prueba\n");
+    memset(&sched, 0, sizeof(sched));
+    sched.bEnable = 1;
+    if (gsp_rm_control(c->rm, c->handle, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
+                       &sched, (uint32_t)sizeof(sched), &status) != 0) {
+        lx_printk("nouveau-lx: canal GPFIFO_SCHEDULE rechazado (status=0x%x)\n",
+                  status);
+        return -1;
     }
+    lx_printk("nouveau-lx: canal en la runlist (SCHEDULE bEnable=1)\n");
+    return 0;
+}
 
-    for (i = 0; i < sizeof(chan_variants) / sizeof(chan_variants[0]); i++) {
-        NV_CHANNEL_ALLOC_PARAMS params = *base;
-        uint32_t cls = chan_variants[i].cls ? chan_variants[i].cls : c->cls;
-        uint32_t status = 0;
+/* Sin token no hay forma de patear el canal, así que esto NO es best-effort: si
+ * falla, el canal se queda a medias y es mejor decirlo aquí que dejar que el CE
+ * se coma un timeout de 2 s sin explicación. */
+static int chan_get_doorbell_token(struct gsp_chan *c)
+{
+    NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
+    uint32_t status = 0;
 
-        chan_variants[i].apply(c, &params);
-        lx_printk("nouveau-lx: sonda %u/%u — cls=0x%04x %s\n", i + 1,
-                  (unsigned)(sizeof(chan_variants) / sizeof(chan_variants[0])),
-                  cls, chan_variants[i].name);
-        if (gsp_rm_alloc(c->rm, c->rm->device, c->handle, cls,
-                         &params, (uint32_t)sizeof(params), &status) == 0) {
-            lx_printk("nouveau-lx: sonda %u ACEPTADA — es la buena\n", i + 1);
-            /* La que pasó no tiene por qué ser la base, y a partir de aquí el
-             * canal vive con lo que RM aceptó, no con lo que creíamos. Dejarlo
-             * apuntado evita que el CE de después se coma un misterio: con la
-             * variante del USERD en VRAM, por ejemplo, `userd_ctl` apunta a un
-             * sysmem que la GPU ya no mira, y el CE fallaría sin decir por qué. */
-            c->cls = cls;
-            if (i != 0) {
-                lx_printk("nouveau-lx: sonda — OJO: el canal NO es el base; lo "
-                          "que venga detrás puede fallar por eso\n");
-            }
-            return 0;
-        }
+    memset(&tok, 0, sizeof(tok));
+    if (gsp_rm_control(c->rm, c->handle,
+                       NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
+                       &tok, (uint32_t)sizeof(tok), &status) != 0) {
+        lx_printk("nouveau-lx: canal GET_WORK_SUBMIT_TOKEN rechazado "
+                  "(status=0x%x)\n", status);
+        return -1;
     }
-    lx_printk("nouveau-lx: sonda — las %u variantes rechazadas; hay más de una "
-              "cosa mal a la vez\n",
-              (unsigned)(sizeof(chan_variants) / sizeof(chan_variants[0])));
-    return -1;
+    c->doorbell_token = tok.workSubmitToken;
+    c->doorbell_ok = 1;
+    /* El token de upstream es `(runl->doorbell << 16) | chid`. El chid lo asigna
+     * RM, no nosotros: con un solo canal salía 0, y con el de GR0 detrás ya no
+     * tiene por qué. Se imprime troceado para poder ver DOS tokens distintos —dos
+     * canales que reciben el mismo token es un bug que de otro modo se manifiesta
+     * como "el otro canal no arranca". */
+    lx_printk("nouveau-lx: doorbell token=0x%08x (runlist=%u chid=%u) motor=%u\n",
+              c->doorbell_token, c->doorbell_token >> 16,
+              c->doorbell_token & 0xffffu, c->engine);
+    return 0;
+}
+
+static int chan_start(struct gsp_chan *c)
+{
+    return (chan_bind_engine(c) != 0 || chan_schedule(c) != 0 ||
+            chan_get_doorbell_token(c) != 0) ? -1 : 0;
 }
 
 int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
-                  struct gsp_chan *c, uint32_t vaspace)
+                  struct gsp_chan *c, uint32_t vaspace, unsigned idx,
+                  uint32_t engine)
 {
     NV_CHANNEL_ALLOC_PARAMS params;
+    uint64_t va_base;
 
     if (!rm || !vmm || !vram || !c || !rm->ready || !vmm->ready || !vram->ready) {
+        return -1;
+    }
+    /* El tope no es decorativo: la ventana del canal `idx` empieza en
+     * GSP_CHAN_VA_BASE + idx*stride, y el compute tiene su sysmem en
+     * GSP_VA_BASE + 0x30000000. Con idx grande una ventana se comería la otra y el
+     * síntoma sería un kernel leyendo el GPFIFO como si fueran sus datos. */
+    if (idx >= (0x10000000ull / GSP_CHAN_VA_STRIDE)) {
+        lx_printk("nouveau-lx: canal idx=%u fuera de su ventana de VAs\n", idx);
         return -1;
     }
     memset(c, 0, sizeof(*c));
     c->rm = rm;
     c->vmm = vmm;
-    c->handle = NVKM_RM_CHAN(0);
+    c->handle = NVKM_RM_CHAN(idx);
+    c->engine = engine;
     /* De más nueva a más vieja. `rm/gb20x.c` de nouveau usa la B de Blackwell
      * para este chip; el catálogo del chip decide y esta lista solo ordena. */
     {
@@ -310,10 +255,11 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
         return -1;
     }
 
-    c->gpfifo_va = GSP_CHAN_VA_BASE;
-    c->userd_va = GSP_CHAN_VA_BASE + 4096ull;
-    c->pushbuf_va = GSP_CHAN_VA_BASE + 8192ull;
-    c->notifier_va = GSP_CHAN_VA_BASE + 12288ull;
+    va_base = GSP_CHAN_VA_BASE + (uint64_t)idx * GSP_CHAN_VA_STRIDE;
+    c->gpfifo_va = va_base;
+    c->userd_va = va_base + 4096ull;
+    c->pushbuf_va = va_base + 8192ull;
+    c->notifier_va = va_base + 12288ull;
 
     if (chan_map_buf(c, &c->gpfifo, c->gpfifo_va) != 0 ||
         chan_map_buf(c, &c->userd, c->userd_va) != 0 ||
@@ -326,17 +272,30 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
     c->userd_ctl = (Nvc56fControl *)c->userd.va;
     chan_fill_alloc(c, &params, vaspace);
 
-    if (chan_alloc_probing(c, vram, &params) != 0) {
+    if (gsp_rm_alloc(c->rm, c->rm->device, c->handle, c->cls,
+                     &params, (uint32_t)sizeof(params), 0) != 0) {
         lx_printk("nouveau-lx: RM_ALLOC canal GPFIFO falló\n");
         gsp_chan_fini(c);
         return -1;
     }
 
+    /* `ready` ANTES del arranque porque `gsp_chan_fini` lo mira para saber si hay
+     * que soltar el objeto en RM: si el BIND o el SCHEDULE fallan, el canal ya
+     * existe del lado de RM y dejarlo sin liberar es una fuga que además deja al
+     * GSP con un canal en la runlist cuando descarguemos. */
     c->ready = 1;
-    lx_printk("nouveau-lx: canal GPFIFO listo cls=0x%04x handle=0x%08x "
+    if (chan_start(c) != 0) {
+        lx_printk("nouveau-lx: canal reservado pero sin arrancar — no se encola "
+                  "nada sobre él\n");
+        gsp_chan_fini(c);
+        return -1;
+    }
+
+
+    lx_printk("nouveau-lx: canal GPFIFO listo cls=0x%04x handle=0x%08x motor=%u "
               "gpfifo=0x%llx (VA) "
               "userd=0x%llx+0x%x inst=0x%llx (VRAM) mthdbuf=%u B\n",
-              c->cls, c->handle, (unsigned long long)c->gpfifo_va,
+              c->cls, c->handle, c->engine, (unsigned long long)c->gpfifo_va,
               (unsigned long long)c->userd.phys, GSP_CHAN_USERD_HW_SIZE,
               (unsigned long long)c->inst_addr, c->mthdbuf_size);
     return 0;
@@ -357,6 +316,35 @@ int gsp_chan_pb_reserve(struct gsp_chan *c, unsigned bytes)
     return (int)off;
 }
 
+/* G5 lanza un QMD por tanda de filas y cada QMD inline ocupa ~900 B: en un
+ * pushbuffer de 4 KiB caben cuatro y a la quinta `pb_reserve` falla. Rebobinar es
+ * lo que permite que el bucle de tandas sea tan largo como haga falta, pero solo
+ * cuando el host ya ha consumido lo anterior: `GPGet` es lo que dice eso, y sin
+ * mirarlo se estarían pisando métodos que la GPU aún no ha leído. */
+int gsp_chan_pb_rewind(struct gsp_chan *c)
+{
+    if (!c || !c->ready || !c->userd_ctl) {
+        return -1;
+    }
+    if (c->pb_pos == 0) {
+        return 0;
+    }
+    /* Lectura `volatile`, como en `gsp_chan_dump`: GPGet lo escribe el host por
+     * DMA y quien lo lea con un acceso normal se puede quedar con el valor que el
+     * compilador tenga a mano — y entonces esto rebobinaría sobre trabajo vivo,
+     * que es justo lo que viene a impedir. */
+    gsp_chan_barrier();
+    if (((const volatile Nvc56fControl *)c->userd_ctl)->GPGet != c->gpput) {
+        lx_printk("nouveau-lx: pushbuffer sin rebobinar: GPGet=%u GPPut=%u "
+                  "(el host aún no lo consumió)\n",
+                  ((const volatile Nvc56fControl *)c->userd_ctl)->GPGet,
+                  c->gpput);
+        return -1;
+    }
+    c->pb_pos = 0;
+    return 0;
+}
+
 int gsp_chan_submit(struct gsp_chan *c, unsigned pb_off, unsigned pb_len)
 {
     uint64_t gp_get;
@@ -369,11 +357,31 @@ int gsp_chan_submit(struct gsp_chan *c, unsigned pb_off, unsigned pb_len)
     }
 
     gp_get = (uint64_t)c->pushbuf_va + pb_off;
+    /* `GET_HI` son 8 bits (`clc56f.h`, 7:0), así que una entrada de GPFIFO no
+     * alcanza más allá del bit 39. Antes esto se truncaba con un `& 0xff` mudo y
+     * con la base del mapa en 1 TiB se perdía justo el bit 40: el host iba a
+     * buscar el pushbuffer a otra parte y el semáforo del CE no subía nunca. Un
+     * truncado silencioso aquí es indistinguible de un submit correcto. */
+    if (gp_get > GSP_GPFIFO_VA_MAX) {
+        lx_printk("nouveau-lx: pushbuffer en VA 0x%llx — una entrada de GPFIFO "
+                  "sólo llega a 0x%llx (GET 31:2 + GET_HI 7:0)\n",
+                  (unsigned long long)gp_get,
+                  (unsigned long long)GSP_GPFIFO_VA_MAX);
+        return -1;
+    }
     idx = c->gpput % GSP_CHAN_GPFIFO_ENTRIES;
     ring = (unsigned char *)c->gpfifo.va + idx * NVC56F_GP_ENTRY__SIZE;
 
+    /* `GP_ENTRY0_GET` es el campo 31:2 y **contiene** los bits 31:2 de la
+     * dirección, o sea que la entrada son los 32 bits bajos tal cual — que es lo
+     * que escribe `nv50_dma_push` de nouveau (`lower_32_bits(offset)`). Aquí
+     * había un `(gp_get >> 2)`, que mete la dirección corrida dos bits y manda al
+     * host a un cuarto de donde está el pushbuffer. Los dos bits bajos se
+     * enmascaran porque el 0 es FETCH y el 1 no es del campo. */
     e0 = NVC56F_GP_ENTRY0_FETCH_UNCONDITIONAL |
-         (uint32_t)((gp_get >> 2) & 0x3fffffffu);
+         (uint32_t)(gp_get & 0xfffffffcu);
+    /* LENGTH (30:10) va en dwords. El `length << 8` de nouveau es sobre bytes:
+     * mismo número, distinta unidad. */
     e1 = (uint32_t)((gp_get >> 32) & 0xffu) |
          (NVC56F_GP_ENTRY1_LEVEL_MAIN << 9) |
          (((pb_len + 3u) / 4u) << 10) |
@@ -382,10 +390,75 @@ int gsp_chan_submit(struct gsp_chan *c, unsigned pb_off, unsigned pb_len)
     memcpy(ring, &e0, 4);
     memcpy(ring + 4, &e1, 4);
 
+    /* La entrada tiene que estar ENTERA en memoria antes de publicar GPPut, o el
+     * host puede leer un GPPut nuevo y una entrada a medio escribir. `nv50_dma_push`
+     * hace `mb()` y acto seguido una LECTURA del ring por lo mismo: en memoria
+     * write-combining la barrera ordena pero no vacía, y la lectura sí. */
+    gsp_chan_barrier();
+    (void)*(const volatile uint32_t *)ring;
+
     c->gpput++;
     c->userd_ctl->GPPut = c->gpput;
     c->userd_ctl->Put = pb_off + pb_len;
+
+    /* Y el doorbell, que es lo que faltaba: en Volta+ escribir GPPut en el USERD
+     * no patea nada por sí solo —el host no sondea el USERD—, hay que avisarle
+     * por el registro de usermode. Sin esto el canal se queda con el trabajo
+     * encolado y el semáforo a 0 para siempre, que es exactamente lo que hacía
+     * (2026-07-28).
+     *
+     * El USERD está en sysmem no cacheada y el ring también, así que el orden lo
+     * garantiza el mapeo; lo que hay que asegurar es que las escrituras de arriba
+     * hayan SALIDO del core antes del kick, porque si la GPU lee el ring antes de
+     * ver el GPPut se encuentra una entrada a medio poner. */
+    gsp_chan_barrier();
+    if (c->doorbell_ok) {
+        gsp_mmio_wr32(NV_VFN_DOORBELL, c->doorbell_token);
+    }
     return 0;
+}
+
+void gsp_chan_dump(struct gsp_chan *c, const char *why)
+{
+    const volatile Nvc56fControl *u;
+    const uint32_t *ring;
+    unsigned idx;
+
+    if (!c || !c->ready || !c->userd_ctl || !c->gpfifo.va) {
+        lx_printk("nouveau-lx: canal sin volcar (%s): no está listo\n",
+                  why ? why : "?");
+        return;
+    }
+    u = (const volatile Nvc56fControl *)c->userd_ctl;
+    idx = (c->gpput ? c->gpput - 1u : 0u) % GSP_CHAN_GPFIFO_ENTRIES;
+    ring = (const uint32_t *)((unsigned char *)c->gpfifo.va +
+                              idx * NVC56F_GP_ENTRY__SIZE);
+
+    /* **GPGet es la pregunta.** Lo escribe el host cuando consume una entrada del
+     * GPFIFO, así que parte el problema en dos mitades que no se solapan:
+     *
+     *   GPGet == GPPut  → el host SÍ recogió el trabajo y ejecutó el pushbuffer.
+     *                     Entonces lo que falla es de dentro: los métodos del CE,
+     *                     la VA del semáforo o su apertura.
+     *   GPGet == 0      → el host no llegó a mirar. El problema está antes: el
+     *                     doorbell no surte efecto, el canal no corre de verdad,
+     *                     o el USERD que RM programó no es este.
+     *
+     * Sin este número las dos mitades se ven igual desde fuera —semáforo a 0— y
+     * cualquier arreglo es a ciegas. */
+    lx_printk("nouveau-lx: canal (%s): GPGet=%u GPPut=%u (nuestro gpput=%u) "
+              "Get=%u Put=%u\n", why ? why : "?", u->GPGet, u->GPPut, c->gpput,
+              u->Get, u->Put);
+    lx_printk("nouveau-lx: canal (%s): entrada %u = %08x %08x → pushbuffer "
+              "0x%llx, %u dwords\n", why ? why : "?", idx, ring[0], ring[1],
+              (unsigned long long)(((uint64_t)(ring[1] & 0xffu) << 32) |
+                                   (uint64_t)(ring[0] & 0xfffffffcu)),
+              (ring[1] >> 10) & 0x1fffffu);
+    lx_printk("nouveau-lx: canal (%s): doorbell token=0x%08x ok=%d, "
+              "pushbuf_va=0x%llx notifier_va=0x%llx\n", why ? why : "?",
+              c->doorbell_token, c->doorbell_ok,
+              (unsigned long long)c->pushbuf_va,
+              (unsigned long long)c->notifier_va);
 }
 
 void gsp_chan_fini(struct gsp_chan *c)

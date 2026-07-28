@@ -95,8 +95,9 @@ solo **4 dummies restantes, TODOS HW/ROM** (`nvbios_image`/`nvbios_shadow`/`bit_
 (`find_first_zero_bit`, `__set_bit`), `atomic_inc_return`.
 
 **G4e** escrito + hostcheck (`gsp_chan`, `gsp_ce`); GO HW (readback VRAM vía CE)
-pendiente de ciclo VFIO. Siguiente tras GO G4e: **G4f** (SASS). G3b y G4a–c ya
-validados en GB205 (2026-07-25).
+pendiente de ciclo VFIO. **G4f y G5 también escritos + hostcheck** (2026-07-28):
+canal GR0, saxpy y matvec SASS por tandas de filas. G3b y G4a–c ya validados en
+GB205 (2026-07-25).
 
 #### Las clases no se deducen, se preguntan (2026-07-28)
 
@@ -151,11 +152,13 @@ sigue pendiente para boot hw real.
 
 | Módulo nvkm / lxdde | Notas |
 |---------------------|-------|
-| `engine/dma/*`, canal GPFIFO | **G4e** — copia CE en VRAM (hostcheck OK; GO HW pendiente) |
-| `engine/gr/*.c` | **G4f** — SAXPY SASS |
+| `engine/dma/*`, canal GPFIFO (COPY0) | **G4e** — copia CE en VRAM (hostcheck OK; GO HW pendiente) |
+| `engine/gr/*.c`, canal GPFIFO (GR0) | **G4f/G5** — SAXPY y matvec SASS |
 
 **Criterio G4e:** readback correcto tras copia CE. **Criterio G4f:**
-`lx_nouveau_submit_saxpy` con `on_gpu=1` real (no loop CPU).
+`lx_nouveau_submit_saxpy` con `on_gpu=1` real (no loop CPU). **Criterio G5:**
+`lx_nouveau_submit_matvec_f32` con `on_gpu=1` y el vector releído de la memoria
+que escribió la GPU, en todas las tandas.
 
 ## Inventario de símbolos (workflow)
 
@@ -553,16 +556,24 @@ Tras G3b, el bring-up avanza por sub-fases. Estado al **2026-07-27**:
 | **G4c** | `gsp_rm_obj.c` | Cliente/device/subdevice + static info | **GO** HW |
 | **G4d** | `gsp_vram.c`, `gsp_vmm.c` | VER3 + `SET_PAGE_DIRECTORY` | Escrito + hostcheck |
 | **G4e** | `gsp_chan.c`, `gsp_ce.c` | ALLOC canal/CE, PB, USERD; readback VRAM | **Escrito + hostcheck** |
-| **G4f** | `engine/gr`, `saxpy.sass.bin` | `SYS_GPU_SUBMIT`, `on_gpu=1` | Bloqueado toolchain |
+| **G4f** | canal GR0, `saxpy.sass.bin` | `SYS_GPU_SUBMIT`, `on_gpu=1` | **Escrito + hostcheck** |
+| **G5** | `matvec.sass.bin`, tandas de filas | `MATVF` con `on_gpu=1` | **Escrito + hostcheck** |
 
 **GO G4e en HW** (cuando puedas VFIO): el CE ejercita traducción GPU, canal,
 pushbuffer, timbre y semáforo sin necesitar SASS. Los mapeos de G4d/G4e en
 `gsp_bringup.c` (`G4D_VA_BASE`, `GSP_CHAN_VA_BASE`, scratch) están listos para
 readback.
 
-**G4f:** `lxdde/ports/nouveau/saxpy.sass.bin` mide 0 bytes. GB205 = `sm_120`;
-instalar CUDA ≥ 12.8 en el host solo por `ptxas` (funciona con GPU en VFIO), o
-validar en RTX 3060 (Ampere).
+**G4f/G5 (2026-07-28):** el toolchain ya no bloquea. `l6-g4f-build-sass.sh` compila
+los dos kernels con el `nvcc` del host o, si no hay, con Docker
+(`nvidia/cuda:12.8.0-devel-ubuntu24.04`) — `ptxas` no necesita GPU. Salen
+`saxpy.sass.bin` (512 B, 10 regs) y `matvec.sass.bin` (2944 B, 37 regs), con sus
+metadatos leídos del cubin.
+
+Lo que sí faltaba era el **canal**: un objeto de compute no cuelga de un canal de
+COPY0 (RM: `INVALID_CLASS` con la clase correcta, HW 2026-07-28). El bring-up
+levanta ahora dos canales, `gsp_chan_init(..., idx, engine)` — COPY0 para el CE y
+GR0 para el compute — cada uno con su ventana de VAs y su bloque de instancia.
 
 **Apagado:** `gsp_fini.c` — `halt` / `SYS_GPU_SUBMIT` GFINI antes de soltar VFIO
 (gotcha 6).

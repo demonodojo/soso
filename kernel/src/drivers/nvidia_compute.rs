@@ -1,9 +1,13 @@
-//! G4: canal de cómputo NVIDIA — gpfifo, QMD, saxpy SASS precompilado.
+//! G4/G5: canal de cómputo NVIDIA — gpfifo, QMD y kernels SASS precompilados.
 
 use crate::drivers::nvidia_probe;
 use spin::Mutex;
 
 const SAXPY_SASS: &[u8] = include_bytes!("../../../lxdde/ports/nouveau/saxpy.sass.bin");
+/// El kernel de G5. Se incluye aquí solo para poder decir en el arranque que
+/// existe: quien lo lanza es el port en C, que lo lleva embebido por su lado. Un
+/// blob a cero es el único fallo de `l6-g4f-build-sass.sh` que no da error.
+const MATVEC_SASS: &[u8] = include_bytes!("../../../lxdde/ports/nouveau/matvec.sass.bin");
 
 struct ComputeState {
     channel_ready: bool,
@@ -24,9 +28,10 @@ pub fn init() {
         last_result: 0.0,
     });
     crate::println!(
-        "nvidia-compute: GSP={} saxpy blob {} bytes",
+        "nvidia-compute: GSP={} blobs SASS saxpy {} B / matvec {} B",
         gsp_status(),
-        SAXPY_SASS.len()
+        SAXPY_SASS.len(),
+        MATVEC_SASS.len()
     );
 }
 

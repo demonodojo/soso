@@ -60,6 +60,30 @@
  * en vez de corromper si algún día no bastan. */
 #define GSP_VMM_MAX_PT  24u
 
+/* Base de TODO el mapa de VAs del bring-up (G4d, canal, CE, compute). Estaba
+ * repetida a mano en cinco constantes de tres ficheros, todas empezando por
+ * 0x0000010000000000; ahora se deriva de aquí.
+ *
+ * **512 GiB y no 1 TiB.** El 1 TiB de antes es exactamente 2^40, o sea con el bit
+ * 40 puesto, y una entrada de GPFIFO no puede direccionar tan alto: `clc56f.h`
+ * define `GP_ENTRY0_GET` en 31:2 y `GP_ENTRY1_GET_HI` en **7:0**, ocho bits, así
+ * que el pushbuffer tiene que vivir por debajo de 2^40. Con la base en 1 TiB el
+ * `& 0xff` del encoder tiraba el bit 40 sin decir nada y el host iba a buscar el
+ * pushbuffer a otro sitio: canal en la runlist, doorbell escrito y el semáforo
+ * del CE a 0 para siempre (2026-07-28).
+ *
+ * El límite es SOLO del GPFIFO: los operandos de los métodos del CE
+ * (`OFFSET_IN/OUT`) y el `gpFifoOffset` del alloc son de 64 bits de verdad. Pero
+ * como el mapa es uno, se baja entero en vez de dejar una isla que cabe rodeada
+ * de otras que no.
+ *
+ * 512 GiB (bit 39) sigue estando lejísimos de cualquier cosa real y cabe: sus
+ * bits 39:32 son 0x80, que entra justo en GET_HI. */
+#define GSP_VA_BASE     0x0000008000000000ull
+/* La VA más alta que una entrada de GPFIFO puede expresar, para el guardia del
+ * encoder: GET (31:2) + GET_HI (7:0) llegan al bit 39. */
+#define GSP_GPFIFO_VA_MAX  0x000000ffffffffffull
+
 enum gsp_vmm_target {
     GSP_VMM_VRAM = 0,
     GSP_VMM_SYSMEM = 1,     /* coherente */

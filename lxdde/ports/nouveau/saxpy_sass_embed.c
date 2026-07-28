@@ -51,3 +51,4 @@ const unsigned gsp_saxpy_param_base = 896; /* 0x380 en cbank0 */
 const unsigned gsp_saxpy_param_size = 28;
 const unsigned gsp_saxpy_cbank_size = 924;
 const unsigned gsp_saxpy_param_off[4] = { 0, 8, 16, 24 };
+const unsigned gsp_saxpy_param_count = 4;

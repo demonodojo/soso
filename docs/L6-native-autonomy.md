@@ -25,11 +25,11 @@ El GO de G4e en hardware (readback VRAM vía CE) sigue requiriendo un ciclo VFIO
 G1  VFIO + BAR0          ──►  leer NV_PMC_BOOT_0 desde soso
 G2  Firmware en sosofs    ──►  blobs GSP gb205 descomprimidos (.bin ELF)
 G3  GSP vivo             ──►  nvkm negocia con el microcontrolador GSP
-G4  Compute              ──►  CE en VRAM (G4e) → saxpy SASS (G4f)
-G5  LLM híbrido          ──►  matvec offload en soso-llm (VRAM ~12 GiB)
+G4  Compute              ──►  CE en VRAM (G4e) → canal GR0 + saxpy SASS (G4f)
+G5  LLM híbrido          ──►  matvec SASS por tandas de filas (VRAM ~12 GiB)
 ```
 
-## Estado actual (2026-07-27)
+## Estado actual (2026-07-28)
 
 | Fase | Entregable | Estado |
 |------|------------|--------|
@@ -42,8 +42,8 @@ G5  LLM híbrido          ──►  matvec offload en soso-llm (VRAM ~12 GiB)
 | **G4c** | Objetos RM (cliente → device → subdevice) | **GO** (2026-07-25): handles verificados en GB205 |
 | **G4d** | VRAM + VA space externo + tablas VER3 | **Escrito + hostcheck** — falta validar en HW con el CE |
 | **G4e** | Canal GPFIFO + CE (copia DMA en VRAM) | **Escrito + hostcheck** — GO HW aplazado (VFIO) |
-| **G4f** | QMD + kernel SASS (`SYS_GPU_SUBMIT`) | **Bloqueado por toolchain** — `saxpy.sass.bin` vacío; GB205 = `sm_120`, requiere `ptxas` ≥ 12.8 |
-| **G5** | tok/s GPU > CPU | Pendiente G4 |
+| **G4f** | QMD + kernel SASS (`SYS_GPU_SUBMIT`) | **Escrito + hostcheck** — `saxpy.sass.bin` son 512 B de `sm_120` reales (10 regs, params en cbank0+0x380); GO HW pendiente VFIO |
+| **G5** | matvec SASS + tok/s GPU > CPU | **Escrito + hostcheck** (2026-07-28) — `matvec.sass.bin` 2944 B/37 regs, tandas de filas; GO HW pendiente VFIO |
 | **L6-H** | `--cuda-host` → cuda-proxy → llama-server | **GO** (2026-07-27): ~35 tok/s en QEMU |
 
 **GPUs soportadas (bring-up chip-aware):** **GB205 Blackwell** (`10de:2f18`, RTX
@@ -53,11 +53,29 @@ objetivo de validación recomendado** frente a la GB205 (Blackwell, más recient
 
 Detalle del port G3–G4e: [L6-G3-nvkm-scope.md](L6-G3-nvkm-scope.md).
 
-## Tu siguiente paso (G4e GO en HW o G4f)
+## El toolchain de SASS ya no bloquea nada
 
-G4e ya está cableado (`gsp_chan`, `gsp_ce`) y cubierto por hostcheck. El **GO
-real** (readback VRAM vía CE) requiere pasar la dGPU a VFIO; hasta entonces se
-puede seguir en host sin desactivar la GPU del host.
+La nota de "bloqueado por toolchain" de G4f era cierta un rato y dejó de serlo:
+`ptxas` compila **sin GPU** y basta CUDA ≥ 12.8 para `sm_120`. Si no hay `nvcc` en
+el PATH, `scripts/l6-g4f-build-sass.sh` usa Docker
+(`nvidia/cuda:12.8.0-devel-ubuntu24.04`) y sale igual. Reproducible: el blob de
+saxpy vuelve a salir byte a byte idéntico.
+
+```bash
+./scripts/l6-g4f-build-sass.sh      # saxpy.sass.bin + matvec.sass.bin y sus embeds
+```
+
+Los metadatos (`regcount`, `param_base`, offsets de los parámetros) los genera el
+script **leyéndolos del cubin**; el port los compara con lo que su header declara
+(`param_count`) y falla si no cuadran, porque un `.cu` con un parámetro más y un
+header sin tocar es un lanzamiento que lee basura sin dar ningún error.
+
+## Tu siguiente paso (GO en HW de G4e/G4f/G5)
+
+G4e/G4f/G5 están cableados (`gsp_chan`, `gsp_ce`, `gsp_compute`) y cubiertos por
+hostcheck. El **GO real** (readback VRAM vía CE, semáforo del QMD) requiere pasar
+la dGPU a VFIO; hasta entonces se puede seguir en host sin desactivar la GPU del
+host.
 
 ```bash
 # 1) Verificación sin GPU (≈1 s) — incluye canal GPFIFO + CE
@@ -73,6 +91,14 @@ sudo ./scripts/l6-g1-vfio-test.sh                  # espera halt; busca log CE/r
 
 **Criterio GO G4e:** la GPU escribe un patrón en VRAM vía CE y la CPU lo lee
 correctamente por el espacio de direcciones. Recomendado **antes** de G4f (SASS).
+
+**Dos canales, no uno (2026-07-28).** El objeto de compute NO se puede colgar del
+canal del CE: RM contesta `INVALID_CLASS` (0x22) a `BLACKWELL_COMPUTE_B` sobre un
+canal atado a `NV2080_ENGINE_TYPE_COPY0` (=9) aunque la clase sea la que dice
+`rm/gb20x.c` y el mismo canal acepte `BLACKWELL_DMA_COPY_B`. El compute necesita
+su propio canal sobre **GR0** (=1), y por eso el bring-up levanta dos: el de COPY0
+mueve el SASS a VRAM y el de GR0 ejecuta. En el log se ven los dos, cada uno con
+su motor y su ventana de VAs (+0x10000).
 
 Para iterar sin cerrar el escritorio cada vez:
 
@@ -124,16 +150,44 @@ cargo xtask build                        # embebe rootfs en la imagen
 |----------|--------|----------|
 | **G4a–c** | RPC, objetos RM | `GSP_INIT_DONE`, alloc responde |
 | **G4d** | VRAM + `FERMI_VASPACE_A` externo + VER3 | RM acepta directorio; traducción CPU OK |
-| **G4e** | Canal + CE (`gsp_chan`, `gsp_ce`) | hostcheck OK; readback VRAM en HW (**siguiente**) |
-| **G4f** | SAXPY SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real |
+| **G4e** | Canal COPY0 + CE (`gsp_chan`, `gsp_ce`) | hostcheck OK; readback VRAM en HW (**siguiente**) |
+| **G4f** | Canal GR0 + SAXPY SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real |
 
-G4f requiere CUDA toolkit ≥ 12.8 en el host solo por `ptxas` (compila sin GPU;
-funciona con la tarjeta en VFIO). Alternativa: validar en **RTX 3060** (Ampere).
+El SASS lo compila `scripts/l6-g4f-build-sass.sh` (nvcc del host o Docker, sin
+GPU). Alternativa para el GO: validar en **RTX 3060** (Ampere).
 
 ## G5 — inferencia autónoma
 
 - `soso-llm` offload híbrido: capas que quepan en ~12 GiB → GPU; resto → CPU/RAM
 - Criterio: tok/s medido en placa **superior** al backend CPU del mismo modelo
+
+**Cómo se hace el matvec (escrito 2026-07-28).** `matvec.cu` → un hilo por fila,
+`gsp_compute_matvec_f32` lo lanza por **tandas de filas**: el staging de sysmem son
+512 KiB (320 KiB de matriz + 128 KiB de `x` + 4 KiB de `y`), así que con `cols`
+columnas caben `320 KiB / (cols·4)` filas por tanda, con tope de 1024 por el
+tamaño de `y`. Cada tanda es un QMD con su semáforo, y el pushbuffer se **rebobina**
+entre tandas (`gsp_chan_pb_rewind`, sólo cuando `GPGet == GPPut`): en 4 KiB de
+pushbuffer no caben más de cuatro QMD inline.
+
+Las **filas** se trocean; las **columnas no**, porque el kernel escribe `y[r]` de
+una fila entera y no acumula. Por eso el tamaño de `x` (128 KiB → **32768
+columnas**) es un límite duro: cubre el FFN de un 70B (28672), y por encima de eso
+`rows_per_tile` sale 0 y el matvec se hace en CPU. Con anchuras grandes la tanda es
+de pocas filas (28672 columnas → 2 filas), así que la espera del semáforo sondea
+20000 veces a pelo antes de dormir: con miles de tandas, un `mdelay(1)` por tanda
+sería tiempo de dormir, no de calcular.
+
+Una tanda que no señaliza **aborta el matvec entero** y `lx_nouveau_submit_matvec_f32`
+lo recalcula en CPU de principio a fin. Devolver `on_gpu=1` con la mitad del vector
+hecha sería un modelo escupiendo texto plausible pero mal — el único fallo de esta
+ruta que no se ve venir.
+
+Lo que el hostcheck cubre sin GPU: los dos blobs son kernels distintos, el QMD de
+cada uno con SU regcount y SU programa, los cinco parámetros de matvec (incluido
+que `rows` de 4 B no pise `cols`, que va pegado en +28), la aritmética de las
+tandas contra las dos regiones, y un `stage`/`read` de 40 filas en tandas de 7
+simulando a mano lo que escribiría la GPU — que es lo que caza un `row0` mal
+puesto.
 
 ## Relación con L6-H
 

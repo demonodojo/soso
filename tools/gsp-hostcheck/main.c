@@ -177,6 +177,15 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
 static int gsp_mmio_alive(void) { return !fake_gpu_gone; }
 static int gsp_mmio_pci_recover(void) { fake_recover_calls++; return -1; }
 
+/* Doorbell del canal. El literal es inevitable —este mock está ANTES del
+ * `#include "nvrm_r570.h"`, así que aquí `NV_VFN_DOORBELL` todavía no existe—,
+ * pero abajo hay un assert de compilación que ata los dos números: un mock que
+ * escucha en un registro y un port que escribe en otro darían verde sin que se
+ * pateara nada. */
+#define FAKE_DOORBELL_REG  0xbb0090u
+static unsigned fake_doorbell_writes;
+static uint32_t fake_doorbell_last;
+
 static void gsp_mmio_wr32(uint32_t off, uint32_t val)
 {
     switch (off) {
@@ -186,6 +195,10 @@ static void gsp_mmio_wr32(uint32_t off, uint32_t val)
     case R_QHEAD: fsp_qhead = val; fake_fsp_consume(); break;
     case R_MHEAD: fsp_mhead = val; break;
     case R_MTAIL: fsp_mtail = val; break;
+    case FAKE_DOORBELL_REG:
+        fake_doorbell_writes++;
+        fake_doorbell_last = val;
+        break;
     default: break;
     }
 }
@@ -201,6 +214,11 @@ static const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind k)
 { return k < GSP_FW_COUNT && g_blobs[k].valid ? &g_blobs[k] : NULL; }
 
 #include "nvrm_r570.h"
+
+/* El mock del doorbell escucha en un literal porque se define antes que el
+ * header. Esto es lo que impide que los dos números se separen. */
+typedef char fake_doorbell_reg_check[
+    FAKE_DOORBELL_REG == NV_VFN_DOORBELL ? 1 : -1];
 
 #include "gsp_dma_body.inc"
 #include "gsp_rm_body.inc"
@@ -236,17 +254,20 @@ static int load_blob(enum gsp_fw_kind kind, const char *path)
     return 0;
 }
 
-/* G4f: el blob SASS que se enlaza al kernel tiene que ser el fichero entero.
+/* G4f/G5: el blob SASS que se enlaza al kernel tiene que ser el fichero entero.
  * El generador se comía la última línea de `xxd -i` (8 B = media instrucción de
  * 16 B) y el kernel lanzaba un programa cortado; el único síntoma habría sido un
- * cuelgue de máquina sin traza. Se compara contra el .bin, byte a byte. */
-static int check_sass_embed(void)
+ * cuelgue de máquina sin traza. Se compara contra el .bin, byte a byte, y se
+ * repite por kernel: cuando esto miraba solo saxpy, un matvec sin compilar (blob
+ * a cero) habría pasado el banco entero. */
+static int check_one_sass(const char *path, const char *what,
+                          const unsigned char *embed, unsigned embed_len)
 {
     unsigned char *buf;
     long len;
-    FILE *f = fopen(SOSO_SASS_BIN, "rb");
+    FILE *f = fopen(path, "rb");
 
-    if (!f) { perror(SOSO_SASS_BIN); return -1; }
+    if (!f) { perror(path); return -1; }
     fseek(f, 0, SEEK_END);
     len = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -254,28 +275,55 @@ static int check_sass_embed(void)
     if (fread(buf, 1, len, f) != (size_t)len) { perror("read sass"); fclose(f); return -1; }
     fclose(f);
 
-    if (len < 16 || gsp_saxpy_sass_len < 16) {
-        printf("FALLO: SASS vacío (fichero %ld B, embed %u B) — falta "
-               "scripts/l6-g4f-build-sass.sh\n", len, gsp_saxpy_sass_len);
+    if (len < 16 || embed_len < 16) {
+        printf("FALLO: SASS de %s vacío (fichero %ld B, embed %u B) — falta "
+               "scripts/l6-g4f-build-sass.sh\n", what, len, embed_len);
         return -1;
     }
-    if ((long)gsp_saxpy_sass_len != len) {
-        printf("FALLO: el embed tiene %u B y saxpy.sass.bin %ld B (truncado)\n",
-               gsp_saxpy_sass_len, len);
+    if ((long)embed_len != len) {
+        printf("FALLO: el embed de %s tiene %u B y el .bin %ld B (truncado)\n",
+               what, embed_len, len);
         return -1;
     }
-    if (gsp_saxpy_sass_len % 16 != 0) {
-        printf("FALLO: %u B no es múltiplo de 16 (instrucción SASS sm_120)\n",
-               gsp_saxpy_sass_len);
+    if (embed_len % 16 != 0) {
+        printf("FALLO: %s — %u B no es múltiplo de 16 (instrucción SASS sm_120)\n",
+               what, embed_len);
         return -1;
     }
-    if (memcmp(buf, gsp_saxpy_sass, len) != 0) {
-        printf("FALLO: el embed no coincide con saxpy.sass.bin\n");
+    if (memcmp(buf, embed, len) != 0) {
+        printf("FALLO: el embed de %s no coincide con su .bin\n", what);
         return -1;
     }
     free(buf);
-    printf("OK: saxpy SASS blob %u B (= .bin, %u instrucciones)\n",
-           gsp_saxpy_sass_len, gsp_saxpy_sass_len / 16);
+    printf("OK: %s SASS blob %u B (= .bin, %u instrucciones)\n",
+           what, embed_len, embed_len / 16);
+    return 0;
+}
+
+static int check_sass_embed(void)
+{
+    if (check_one_sass(SOSO_SASS_BIN, "saxpy", gsp_saxpy_sass,
+                       gsp_saxpy_sass_len) != 0 ||
+        check_one_sass(SOSO_MV_SASS_BIN, "matvec", gsp_matvec_sass,
+                       gsp_matvec_sass_len) != 0) {
+        return -1;
+    }
+    /* Los dos blobs son kernels DISTINTOS. Un fallo de copia-pega en el script
+     * (los dos embeds generados desde el mismo cubin) daría verde en todo lo de
+     * arriba y lanzaría saxpy creyendo lanzar matvec. */
+    if (gsp_saxpy_sass_len == gsp_matvec_sass_len &&
+        memcmp(gsp_saxpy_sass, gsp_matvec_sass, gsp_saxpy_sass_len) == 0) {
+        printf("FALLO: saxpy y matvec son el mismo blob\n");
+        return -1;
+    }
+    if (gsp_saxpy_param_count != 4u || gsp_matvec_param_count != 5u) {
+        printf("FALLO: params declarados por el cubin: saxpy %u (esperado 4), "
+               "matvec %u (esperado 5)\n",
+               gsp_saxpy_param_count, gsp_matvec_param_count);
+        return -1;
+    }
+    printf("OK: dos kernels distintos, %u y %u parámetros según el cubin\n",
+           gsp_saxpy_param_count, gsp_matvec_param_count);
     return 0;
 }
 
@@ -851,7 +899,11 @@ static int check_rm_objects(const struct gsp_libos *lo)
  * escribió, así que un PTE mal codificado —el bit que sobra, la apertura del
  * PDE puesta con los valores del PTE— le cuadraría igual. Aquí los valores
  * están escritos a mano, sacados de dev_mmu.h campo a campo. */
-#define VMM_T_VA        0x0000010000000000ull   /* la misma que usa el bring-up */
+/* La misma que usa el bring-up — derivada, no copiada. El comentario decía "la
+ * misma que usa el bring-up" y era verdad sólo mientras nadie la moviera: cuando
+ * `GSP_VA_BASE` bajó a 512 GiB por el techo de 40 bits del GPFIFO, esta se quedó
+ * en 1 TiB y el banco siguió probando la VA que ya no se usa. */
+#define VMM_T_VA        GSP_VA_BASE
 #define VMM_T_VRAM_SZ   (2ull * 1024ull * 1024ull)
 #define VMM_T_VRAM_PA   0x0000000240000000ull   /* 9 GiB, alineado a 2 MiB */
 
@@ -1203,10 +1255,17 @@ static uint64_t qmd_get_bits(const uint32_t *qmd, unsigned lo, unsigned hi)
     return v;
 }
 
-/* G4f: el QMD tal y como lo va a leer el SM. Un campo a cero aquí no da error
+/* G4f/G5: el QMD tal y como lo va a leer el SM. Un campo a cero aquí no da error
  * en ningún sitio — simplemente lanza mal, y en la GPU eso es un cuelgue sin
- * traza. Se contrasta contra clcdc0qmd.h campo a campo. */
-static int check_qmd_fields(const struct gsp_compute *cp, const GspQmdV05 *q)
+ * traza. Se contrasta contra clcdc0qmd.h campo a campo.
+ *
+ * Va parametrizado por kernel y por malla porque los dos números que de verdad
+ * cambian entre saxpy y matvec —el regcount (10 vs 37) y la VA del programa— son
+ * justo los que un banco escrito contra un solo kernel daría por buenos en el
+ * otro. */
+static int check_qmd_fields(const struct gsp_compute *cp,
+                            const struct gsp_kernel *k, unsigned grid,
+                            const GspQmdV05 *q)
 {
     const uint32_t *w = q->words;
     uint64_t prog, cbank, sem;
@@ -1220,22 +1279,23 @@ static int check_qmd_fields(const struct gsp_compute *cp, const GspQmdV05 *q)
 
     prog = (qmd_get_bits(w, QMDV05_PROGRAM_ADDRESS_UPPER_S4) << 32) |
            qmd_get_bits(w, QMDV05_PROGRAM_ADDRESS_LOWER_S4);
-    if (prog << 4 != cp->sass_va) {
-        printf("FALLO: PROGRAM_ADDRESS=0x%llx, esperaba 0x%llx\n",
-               (unsigned long long)(prog << 4), (unsigned long long)cp->sass_va);
+    if (prog << 4 != k->sass_va) {
+        printf("FALLO: PROGRAM_ADDRESS=0x%llx, esperaba 0x%llx (%s)\n",
+               (unsigned long long)(prog << 4), (unsigned long long)k->sass_va,
+               k->name);
         return -1;
     }
 
-    if (qmd_get_bits(w, QMDV05_REGISTER_COUNT) != gsp_saxpy_regcount) {
-        printf("FALLO: REGISTER_COUNT=%llu, el cubin dice %u\n",
+    if (qmd_get_bits(w, QMDV05_REGISTER_COUNT) != k->regcount) {
+        printf("FALLO: REGISTER_COUNT=%llu, el cubin de %s dice %u\n",
                (unsigned long long)qmd_get_bits(w, QMDV05_REGISTER_COUNT),
-               gsp_saxpy_regcount);
+               k->name, k->regcount);
         return -1;
     }
     if (qmd_get_bits(w, QMDV05_CTA_THREAD_DIMENSION0) != G4F_CTA_THREADS ||
         qmd_get_bits(w, QMDV05_CTA_THREAD_DIMENSION1) != 1 ||
         qmd_get_bits(w, QMDV05_CTA_THREAD_DIMENSION2) != 1 ||
-        qmd_get_bits(w, QMDV05_GRID_WIDTH) != 4 ||
+        qmd_get_bits(w, QMDV05_GRID_WIDTH) != grid ||
         qmd_get_bits(w, QMDV05_GRID_HEIGHT) != 1 ||
         qmd_get_bits(w, QMDV05_GRID_DEPTH) != 1) {
         printf("FALLO: dimensiones de malla/CTA\n");
@@ -1250,10 +1310,10 @@ static int check_qmd_fields(const struct gsp_compute *cp, const GspQmdV05 *q)
                (unsigned long long)(cp->data_va + G4F_CBANK_OFF));
         return -1;
     }
-    if ((qmd_get_bits(w, QMDV05_CBANK0_SIZE_S4) << 4) < gsp_saxpy_cbank_size) {
+    if ((qmd_get_bits(w, QMDV05_CBANK0_SIZE_S4) << 4) < k->cbank_size) {
         printf("FALLO: CBANK0 size=%llu < %u\n",
                (unsigned long long)(qmd_get_bits(w, QMDV05_CBANK0_SIZE_S4) << 4),
-               gsp_saxpy_cbank_size);
+               k->cbank_size);
         return -1;
     }
     if (qmd_get_bits(w, QMDV05_CBANK0_VALID) != 1) {
@@ -1272,8 +1332,9 @@ static int check_qmd_fields(const struct gsp_compute *cp, const GspQmdV05 *q)
         return -1;
     }
 
-    printf("OK: QMD v05 — prog, %u regs, CTA %ux1x1, cbank0 y semáforo\n",
-           gsp_saxpy_regcount, G4F_CTA_THREADS);
+    printf("OK: QMD v05 de %s — prog 0x%llx, %u regs, malla %ux1x1 de CTA %ux1x1, "
+           "cbank0 y semáforo\n", k->name, (unsigned long long)k->sass_va,
+           k->regcount, grid, G4F_CTA_THREADS);
     return 0;
 }
 
@@ -1304,10 +1365,186 @@ static int check_compute_params(struct gsp_compute *cp)
     return 0;
 }
 
+/* G5: los cinco parámetros de matvec. `rows` y `cols` son `int` en el .cu y van
+ * pegados (offsets 24 y 28): escribir 8 B en el de `rows` —el error natural
+ * viniendo de los tres punteros de arriba— pisa `cols` con ceros y el kernel
+ * calcula filas de longitud 0 sin quejarse. Por eso se comprueba el vecino. */
+static int check_mv_params(struct gsp_compute *cp)
+{
+    const unsigned char *cb = (const unsigned char *)cp->data.va + G4F_CBANK_OFF;
+    const unsigned char *p = cb + gsp_matvec_param_base;
+    const uint64_t wv = 0xaaaabbbbccccddddull, xv = 0x1111222233334444ull;
+    const uint64_t yv = 0x5555666677778888ull;
+
+    gsp_compute_set_mv_params(cp, wv, xv, yv, 33u, 1024u);
+
+    if (gsp_matvec_param_base + gsp_matvec_param_size != gsp_matvec_cbank_size) {
+        printf("FALLO: params de matvec en %u+%u no acaban en el final del cbank "
+               "(%u)\n", gsp_matvec_param_base, gsp_matvec_param_size,
+               gsp_matvec_cbank_size);
+        return -1;
+    }
+    if (*(const uint64_t *)(p + gsp_matvec_param_off[0]) != wv ||
+        *(const uint64_t *)(p + gsp_matvec_param_off[1]) != xv ||
+        *(const uint64_t *)(p + gsp_matvec_param_off[2]) != yv ||
+        *(const uint32_t *)(p + gsp_matvec_param_off[3]) != 33u ||
+        *(const uint32_t *)(p + gsp_matvec_param_off[4]) != 1024u) {
+        printf("FALLO: parámetros de matvec mal colocados en el constant bank\n");
+        return -1;
+    }
+    /* ntid, que es de dónde saca el kernel su blockDim.x. Si esto se queda a cero
+     * el índice de fila sale siempre 0 y todos los hilos escriben y[0]. */
+    if (*(const uint32_t *)(cb + 0x0) != G4F_CTA_THREADS ||
+        *(const uint32_t *)(cb + 0x4) != 1u ||
+        *(const uint32_t *)(cb + 0x8) != 1u) {
+        printf("FALLO: ntid en el prólogo del cbank0 (%u,%u,%u)\n",
+               *(const uint32_t *)(cb + 0x0), *(const uint32_t *)(cb + 0x4),
+               *(const uint32_t *)(cb + 0x8));
+        return -1;
+    }
+    printf("OK: params w/x/y/rows/cols de matvec en cbank0+0x%x "
+           "(+%u/+%u/+%u/+%u/+%u) y ntid=%u\n",
+           gsp_matvec_param_base, gsp_matvec_param_off[0], gsp_matvec_param_off[1],
+           gsp_matvec_param_off[2], gsp_matvec_param_off[3],
+           gsp_matvec_param_off[4], G4F_CTA_THREADS);
+    return 0;
+}
+
+/* G5: el troceado por tandas. Es aritmética pura y es la parte que en hardware
+ * no dejaría rastro: una tanda mal medida copia filas de otro sitio de la matriz
+ * y el resultado sale plausible. Se comprueba que cada tanda quepa en LAS DOS
+ * regiones (W e Y), que las columnas de más se rechacen, y que el par
+ * stage/read lleve cada fila a su sitio y la devuelva a su sitio. */
+static int check_mv_tiling(struct gsp_compute *cp)
+{
+    /* Las anchuras que importan: 1024/4096 son modelos pequeños, 11008 el FFN de
+     * un 7B y 28672 el de un 70B — que es el caso que hay que poder decir que
+     * cabe, porque es el objetivo de la fase. */
+    static const unsigned cols_probe[] = { 1u, 16u, 512u, 1024u, 4096u, 11008u,
+                                           28672u, G5_MAX_COLS };
+    unsigned i;
+
+    for (i = 0; i < sizeof(cols_probe) / sizeof(cols_probe[0]); i++) {
+        unsigned cols = cols_probe[i];
+        unsigned rows = gsp_compute_mv_rows_per_tile(cols);
+
+        if (rows == 0u) {
+            printf("FALLO: %u columnas deberían caber y dan 0 filas\n", cols);
+            return -1;
+        }
+        if ((unsigned long)rows * cols * 4ul > G5_MV_W_BYTES) {
+            printf("FALLO: cols=%u → %u filas = %lu B, la región W son %u B\n",
+                   cols, rows, (unsigned long)rows * cols * 4ul, G5_MV_W_BYTES);
+            return -1;
+        }
+        if ((unsigned long)rows * 4ul > G5_MV_Y_BYTES) {
+            printf("FALLO: cols=%u → %u filas = %lu B de salida, la región Y son "
+                   "%u B\n", cols, rows, (unsigned long)rows * 4ul, G5_MV_Y_BYTES);
+            return -1;
+        }
+    }
+    if (gsp_compute_mv_rows_per_tile(0u) != 0u ||
+        gsp_compute_mv_rows_per_tile(G5_MAX_COLS + 1u) != 0u) {
+        printf("FALLO: cols=0 o cols>%u tendrían que dar 0 filas\n", G5_MAX_COLS);
+        return -1;
+    }
+    /* Que las regiones no se solapen entre ellas ni se salgan de la reserva: los
+     * cuatro offsets están escritos a mano en el header y un solape sería un
+     * kernel leyendo su propio vector de salida como si fuera la matriz. */
+    if (G5_MV_W_OFF + G5_MV_W_BYTES > G5_MV_X_OFF ||
+        G5_MV_X_OFF + G5_MV_X_BYTES > G5_MV_Y_OFF ||
+        G5_MV_Y_OFF + G5_MV_Y_BYTES > G5_MV_SIZE) {
+        printf("FALLO: las regiones del staging de G5 se solapan\n");
+        return -1;
+    }
+
+    /* stage + read con una matriz de mentira. La GPU se simula a mano: se escribe
+     * en la región Y lo que el kernel habría escrito, y se comprueba que `read`
+     * lo deja en las filas correctas de `y`. Lo que esto caza es el `row0`, que es
+     * el único índice que el kernel no ve. */
+    {
+        const unsigned cols = 8u, rows_total = 40u;
+        unsigned per_tile = gsp_compute_mv_rows_per_tile(cols);
+        float w[40 * 8], x[8], y[40], want[40];
+        unsigned r, c, row0;
+
+        for (c = 0; c < cols; c++) {
+            x[c] = (float)(c + 1u);
+        }
+        for (r = 0; r < rows_total; r++) {
+            float sum = 0.0f;
+            for (c = 0; c < cols; c++) {
+                w[r * cols + c] = (float)(r * cols + c);
+                sum += w[r * cols + c] * x[c];
+            }
+            want[r] = sum;
+            y[r] = -1.0f;
+        }
+        if (per_tile > rows_total) {
+            per_tile = 7u;   /* fuerza varias tandas con un resto corto */
+        }
+        for (row0 = 0; row0 < rows_total; row0 += per_tile) {
+            unsigned n = (rows_total - row0) < per_tile ? (rows_total - row0)
+                                                        : per_tile;
+            const float *gw;
+            float *gy;
+
+            gsp_compute_mv_stage(cp, w, x, n, cols, row0);
+            gw = (const float *)((const unsigned char *)cp->mv.va + G5_MV_W_OFF);
+            gy = (float *)((unsigned char *)cp->mv.va + G5_MV_Y_OFF);
+
+            /* La tanda staged tiene que ser la tanda pedida, fila a fila. */
+            for (r = 0; r < n; r++) {
+                for (c = 0; c < cols; c++) {
+                    if (gw[r * cols + c] != w[(row0 + r) * cols + c]) {
+                        printf("FALLO: staging fila %u col %u: %f, esperaba %f\n",
+                               row0 + r, c, (double)gw[r * cols + c],
+                               (double)w[(row0 + r) * cols + c]);
+                        return -1;
+                    }
+                }
+            }
+            if (*(const uint32_t *)((const unsigned char *)cp->data.va + G4F_SEM_OFF) != 0u) {
+                printf("FALLO: el staging no puso el semáforo a cero\n");
+                return -1;
+            }
+            /* Aquí ejecutaría la GPU. */
+            for (r = 0; r < n; r++) {
+                float sum = 0.0f;
+                const float *gx =
+                    (const float *)((const unsigned char *)cp->mv.va + G5_MV_X_OFF);
+
+                for (c = 0; c < cols; c++) {
+                    sum += gw[r * cols + c] * gx[c];
+                }
+                gy[r] = sum;
+            }
+            gsp_compute_mv_read(cp, y, n, row0);
+        }
+        for (r = 0; r < rows_total; r++) {
+            if (y[r] != want[r]) {
+                printf("FALLO: y[%u]=%f, esperaba %f (tandas de %u)\n",
+                       r, (double)y[r], (double)want[r], per_tile);
+                return -1;
+            }
+        }
+        printf("OK: %u filas × %u cols en tandas de %u — staging, row0 y readback\n",
+               rows_total, cols, per_tile);
+    }
+    return 0;
+}
+
 /* Lo que el RM de mentira contesta a CE_GET_FAULT_METHOD_BUFFER_SIZE. El valor
  * concreto da igual —en HW lo dice la tarjeta—; lo que se comprueba es que se
  * pregunte y que lo contestado llegue tal cual al descriptor. */
 #define FAKE_MTHDBUF_SIZE  0x1000u
+
+/* Token del doorbell que devuelve el RM de mentira. Se elige con la parte alta
+ * distinta de cero para que se vea si el port lo trocea o lo reordena: lo que
+ * hay que escribir en el registro es el valor ENTERO tal cual vino, y un token
+ * bien copiado pero mal escrito es indistinguible de uno mal copiado si el
+ * número es pequeño. */
+#define FAKE_DOORBELL_TOKEN  0x00070000u
 
 /* Catálogo de clases: que se pida bien y que lo contestado mande de verdad.
  *
@@ -1472,6 +1709,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     struct gsp_vram pool;
     struct gsp_static_info vram_si;
     struct gsp_chan chan;
+    struct gsp_chan chan_gr;
     struct gsp_ce ce;
     struct gsp_msgq_headers *msgq =
         (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->msgq_offset);
@@ -1480,6 +1718,8 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     unsigned char ctrl_ok[sizeof(rpc_gsp_rm_control)];
     unsigned char ctrl_mthdbuf[sizeof(rpc_gsp_rm_control) +
                                sizeof(NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS)];
+    unsigned char ctrl_token[sizeof(rpc_gsp_rm_control) +
+                             sizeof(NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS)];
     uint32_t base, wptr0;
     unsigned pb_off = 0, pb_len = 0;
     unsigned i;
@@ -1518,14 +1758,46 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         fake_rpc_post_payload(lo, (base + 5) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                               0, ctrl_mthdbuf, (uint32_t)sizeof(ctrl_mthdbuf));
     }
-    /* Canal + CE + compute. */
+    /* Canal, sus tres controles de arranque, CE y compute.
+     *
+     * Reservar el canal no lo arranca: detrás van BIND, GPFIFO_SCHEDULE y
+     * GET_WORK_SUBMIT_TOKEN, en ese orden. Los dos primeros no devuelven nada y
+     * les basta la cabecera; el tercero SÍ trae payload, y si no se le contesta
+     * con un token el canal se declara sin arrancar y no se encola nada. */
     fake_rpc_post_payload(lo, (base + 6) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
-    fake_rpc_post_payload(lo, (base + 7) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+    fake_rpc_post_payload(lo, (base + 7) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    fake_rpc_post_payload(lo, (base + 8) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    {
+        NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS *tk =
+            (NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS *)
+                (ctrl_token + sizeof(rpc_gsp_rm_control));
+
+        memset(ctrl_token, 0, sizeof(ctrl_token));
+        tk->workSubmitToken = FAKE_DOORBELL_TOKEN;
+        fake_rpc_post_payload(lo, (base + 9) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                              0, ctrl_token, (uint32_t)sizeof(ctrl_token));
+    }
+    fake_rpc_post_payload(lo, (base + 10) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
-    fake_rpc_post_payload(lo, (base + 8) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+    /* Y otra vez todo lo del canal, para el de GR0: tamaño del method buffer,
+     * alloc, BIND, SCHEDULE y token. El compute cuelga de ESE canal, no del del
+     * CE, así que su alloc va detrás de estos cinco. */
+    fake_rpc_post_payload(lo, (base + 11) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_mthdbuf, (uint32_t)sizeof(ctrl_mthdbuf));
+    fake_rpc_post_payload(lo, (base + 12) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
-    msgq->tx.writePtr = (base + 9) % 63;
+    fake_rpc_post_payload(lo, (base + 13) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    fake_rpc_post_payload(lo, (base + 14) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    fake_rpc_post_payload(lo, (base + 15) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_token, (uint32_t)sizeof(ctrl_token));
+    fake_rpc_post_payload(lo, (base + 16) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                          0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    msgq->tx.writePtr = (base + 17) % 63;
 
     wptr0 = *q.wptr;
     if (gsp_vmm_init(&q, &rpc, &v) != 0) {
@@ -1543,8 +1815,9 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         printf("FALLO: gsp_vram_init (g4e)\n");
         return -1;
     }
-    if (gsp_chan_init(&v.rm, &v, &pool, &chan, v.vaspace) != 0) {
-        printf("FALLO: gsp_chan_init\n");
+    if (gsp_chan_init(&v.rm, &v, &pool, &chan, v.vaspace, 0u,
+                      NV2080_ENGINE_TYPE_COPY0) != 0) {
+        printf("FALLO: gsp_chan_init (COPY0)\n");
         return -1;
     }
 
@@ -1591,9 +1864,23 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
          * verde, porque el banco releía los campos con la misma definición del
          * struct que los escribía. Un layout mal pero coherente consigo mismo
          * es invisible desde dentro; los números crudos sí lo delatan. */
-        if (sizeof(*p) != 656u || a->paramsSize != 656u) {
-            printf("FALLO: NV_CHANNEL_ALLOC_PARAMS mide %zu (upstream r570: 656)\n",
-                   sizeof(*p));
+        /* El 656 que había aquí era ese mismo error una capa más arriba: se
+         * escribió "a mano" pero sumando con NV_MAX_SUBDEVICES=32, y el 32 sale
+         * de `NV_MAX_DEVICES` de `nvlimits.h`, no de `NV_MAX_SUBDEVICES`, que es
+         * 8. Con 8 la struct mide 368 y `instanceMem` cae en el 144 (2026-07-28).
+         *
+         * Va también el offset de `instanceMem`, que es el que de verdad delata
+         * el desplazamiento: `hUserdMemory` está antes de los dos arrays y su 32
+         * no se mueve ni con el valor bueno ni con el malo. */
+        if (sizeof(*p) != 368u || a->paramsSize != 368u) {
+            printf("FALLO: NV_CHANNEL_ALLOC_PARAMS mide %zu y paramsSize dice %u "
+                   "(upstream r570 con NV_MAX_SUBDEVICES=8: 368)\n",
+                   sizeof(*p), a->paramsSize);
+            return -1;
+        }
+        if (offsetof(NV_CHANNEL_ALLOC_PARAMS, instanceMem) != 144u) {
+            printf("FALLO: instanceMem en el offset %zu (upstream r570: 144)\n",
+                   offsetof(NV_CHANNEL_ALLOC_PARAMS, instanceMem));
             return -1;
         }
         if (p->userdMem.addressSpace != 1u || p->mthdbufMem.addressSpace != 1u) {
@@ -1679,8 +1966,85 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
            0x00200020u, chan.mthdbuf_size);
     printf("OK: BLACKWELL_CHANNEL_GPFIFO_B alloc params (layout r570, inst+ramfc en VRAM)\n");
 
+    /* Los tres pasos de arranque, en orden y sobre el objeto del CANAL. Faltaban
+     * enteros: el canal se reservaba y se quedaba fuera de la runlist, y el CE se
+     * comía un timeout de 2 s con el semáforo a 0 (HW, 2026-07-28). Que el
+     * `hObject` sea el canal y no el subdevice es la mitad del contrato. */
+    {
+        static const struct { unsigned slot; uint32_t cmd; const char *name; } start[] = {
+            { 7, NVA06F_CTRL_CMD_BIND, "BIND" },
+            { 8, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE, "GPFIFO_SCHEDULE" },
+            { 9, NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN, "GET_WORK_SUBMIT_TOKEN" },
+        };
+
+        for (i = 0; i < sizeof(start) / sizeof(start[0]); i++) {
+            const unsigned char *entry = cmdq_base + 4096 +
+                (unsigned long)((wptr0 + start[i].slot) % 63) * 4096;
+            const struct gsp_rpc_hdr *hdr =
+                (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+            const rpc_gsp_rm_control *ct = (const rpc_gsp_rm_control *)(hdr + 1);
+
+            if (ct->cmd != start[i].cmd || ct->hObject != NVKM_RM_CHAN(0)) {
+                printf("FALLO: arranque paso %u (%s) cmd=0x%08x obj=0x%08x "
+                       "(esperaba 0x%08x sobre el canal 0x%08x)\n",
+                       i + 1, start[i].name, ct->cmd, ct->hObject,
+                       start[i].cmd, NVKM_RM_CHAN(0));
+                return -1;
+            }
+        }
+    }
+    {
+        /* El BIND ata el canal a COPY0, y otra vez contra el 9 literal: es lo que
+         * dice `nvrm/engine.h` y lo que el propio alloc declaró arriba. */
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 7) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_control *ct = (const rpc_gsp_rm_control *)(hdr + 1);
+        const NVA06F_CTRL_BIND_PARAMS *bp =
+            (const NVA06F_CTRL_BIND_PARAMS *)(ct + 1);
+
+        if (ct->paramsSize != 4u || bp->engineType != 9u) {
+            printf("FALLO: BIND paramsSize=%u engineType=%u (esperaba 4 y 9)\n",
+                   ct->paramsSize, bp->engineType);
+            return -1;
+        }
+    }
+    {
+        /* DOS NvBool son DOS bytes. Fueron tres —el `bSkipEnable` de la rama
+         * main— y RM contestó INVALID_ARGUMENT en hardware: en 570.144 ese campo
+         * no existe. El número crudo es el ancla, y va contra el tag. */
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 8) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_control *ct = (const rpc_gsp_rm_control *)(hdr + 1);
+        const NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS *sp =
+            (const NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS *)(ct + 1);
+
+        if (ct->paramsSize != 2u || sp->bEnable != 1 || sp->bSkipSubmit != 0) {
+            printf("FALLO: SCHEDULE paramsSize=%u bEnable=%u bSkipSubmit=%u "
+                   "(esperaba 2 y 1/0)\n", ct->paramsSize, sp->bEnable,
+                   sp->bSkipSubmit);
+            return -1;
+        }
+    }
+    /* Y que el token que contestó RM haya llegado entero al canal. */
+    if (!chan.doorbell_ok || chan.doorbell_token != FAKE_DOORBELL_TOKEN) {
+        printf("FALLO: token del doorbell ok=%d val=0x%08x (esperaba 0x%08x)\n",
+               chan.doorbell_ok, chan.doorbell_token, FAKE_DOORBELL_TOKEN);
+        return -1;
+    }
+    printf("OK: canal arrancado — BIND(9) + SCHEDULE(bEnable=1, 3 B) + token "
+           "0x%08x, los tres sobre el canal\n", chan.doorbell_token);
+
     if (chan.userd_ctl->GPPut != 0 || chan.gpput != 0) {
         printf("FALLO: USERD/GPPut no arrancan en cero\n");
+        return -1;
+    }
+    if (fake_doorbell_writes != 0) {
+        printf("FALLO: %u doorbell(s) antes de encolar nada\n",
+               fake_doorbell_writes);
         return -1;
     }
 
@@ -1690,8 +2054,10 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     }
 
     {
+        /* +10, no +7: entre el alloc del canal y este van los tres controles de
+         * arranque. */
         const unsigned char *entry = cmdq_base + 4096 +
-                                     (unsigned long)((wptr0 + 7) % 63) * 4096;
+                                     (unsigned long)((wptr0 + 10) % 63) * 4096;
         const struct gsp_rpc_hdr *hdr =
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
@@ -1742,8 +2108,22 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         printf("FALLO: GPPut=%u gpput=%u\n", chan.userd_ctl->GPPut, chan.gpput);
         return -1;
     }
+    /* Y el kick, que es la razón de todo este cambio: publicar GPPut en el USERD
+     * no despierta a nadie en Volta+. Un submit sin doorbell es exactamente el
+     * fallo que había —trabajo encolado, semáforo a 0, dos segundos de espera— y
+     * desde dentro se ve idéntico a un submit correcto, así que hay que
+     * comprobarlo aquí: una escritura, en el registro de usermode, con el token
+     * ENTERO que devolvió RM. */
+    if (fake_doorbell_writes != 1 || fake_doorbell_last != FAKE_DOORBELL_TOKEN) {
+        printf("FALLO: doorbell escrituras=%u último=0x%08x (esperaba 1 y 0x%08x "
+               "en 0x%06x)\n", fake_doorbell_writes, fake_doorbell_last,
+               FAKE_DOORBELL_TOKEN, NV_VFN_DOORBELL);
+        return -1;
+    }
     {
         const uint32_t *ring = (const uint32_t *)chan.gpfifo.va;
+        uint64_t want = chan.pushbuf_va + pb_off;
+        uint64_t got;
 
         if ((ring[0] & 1u) != NVC56F_GP_ENTRY0_FETCH_UNCONDITIONAL) {
             printf("FALLO: GPFIFO entry0 fetch\n");
@@ -1753,16 +2133,90 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             printf("FALLO: GPFIFO length en words\n");
             return -1;
         }
+        /* LA DIRECCIÓN. Este banco comprobaba el bit de fetch y la longitud y
+         * nada más, así que dio verde a un encoder que mandaba `addr >> 2` y a
+         * una VA de 41 bits truncada a 40 — el host iba a buscar el pushbuffer a
+         * otro sitio y el CE se quedaba sin señalizar (HW, 2026-07-28). Se
+         * reconstruye la dirección DESDE la entrada, como haría el host, en vez de
+         * releer los campos con la misma fórmula que los escribió. */
+        got = ((uint64_t)(ring[1] & 0xffu) << 32) | (uint64_t)(ring[0] & 0xfffffffcu);
+        if (got != want) {
+            printf("FALLO: GPFIFO apunta a 0x%llx, el pushbuffer está en 0x%llx\n",
+                   (unsigned long long)got, (unsigned long long)want);
+            return -1;
+        }
+        /* Y que la VA quepa de verdad en el campo: si el mapa vuelve a subir por
+         * encima de 2^40, la comparación de arriba seguiría cuadrando —los dos
+         * lados truncarían igual— y esto es lo que lo caza. */
+        if (want > GSP_GPFIFO_VA_MAX) {
+            printf("FALLO: pushbuffer en 0x%llx, por encima del techo 0x%llx del "
+                   "GPFIFO\n", (unsigned long long)want,
+                   (unsigned long long)GSP_GPFIFO_VA_MAX);
+            return -1;
+        }
     }
-    printf("OK: GPFIFO entry + USERD GPPut\n");
+    printf("OK: GPFIFO entry + USERD GPPut + doorbell 0x%08x en 0x%06x\n",
+           fake_doorbell_last, NV_VFN_DOORBELL);
 
-    /* --- G4f: compute + QMD inline --- */
+    /* --- G4f/G5: canal de GR0 + compute + QMD inline --- */
+    if (gsp_chan_init(&v.rm, &v, &pool, &chan_gr, v.vaspace, 1u,
+                      NV2080_ENGINE_TYPE_GR0) != 0) {
+        printf("FALLO: gsp_chan_init (GR0)\n");
+        return -1;
+    }
+    {
+        /* El canal de GR0 va en el índice 12 de las peticiones (el del CE en el 6
+         * y su alloc de CE en el 10). Lo que hay que demostrar aquí es que el
+         * SEGUNDO canal pide de verdad otro motor y no una copia del primero: RM
+         * contesta INVALID_CLASS al objeto de compute sobre un canal de COPY0. */
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 12) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
+        const NV_CHANNEL_ALLOC_PARAMS *p = (const NV_CHANNEL_ALLOC_PARAMS *)(a + 1);
+
+        if (a->hObject != NVKM_RM_CHAN(1) || a->hParent != NVKM_RM_DEVICE) {
+            printf("FALLO: canal GR0 obj=0x%08x padre=0x%08x\n",
+                   a->hObject, a->hParent);
+            return -1;
+        }
+        /* Contra el 1 literal de `nvrm/engine.h`, como el 9 de COPY0. */
+        if (p->engineType != 1u) {
+            printf("FALLO: engineType=%u, NV2080_ENGINE_TYPE_GR0 es 1\n",
+                   p->engineType);
+            return -1;
+        }
+        /* Dos canales, dos ventanas de VAs. Compartir el pushbuffer o el GPFIFO
+         * sería un canal escribiendo métodos dentro del ring del otro. */
+        if (chan_gr.pushbuf_va == chan.pushbuf_va ||
+            chan_gr.gpfifo_va == chan.gpfifo_va ||
+            chan_gr.userd_va == chan.userd_va ||
+            chan_gr.inst_addr == chan.inst_addr) {
+            printf("FALLO: los dos canales comparten búferes (pb 0x%llx/0x%llx "
+                   "inst 0x%llx/0x%llx)\n",
+                   (unsigned long long)chan.pushbuf_va,
+                   (unsigned long long)chan_gr.pushbuf_va,
+                   (unsigned long long)chan.inst_addr,
+                   (unsigned long long)chan_gr.inst_addr);
+            return -1;
+        }
+        if (chan_gr.pushbuf_va > GSP_GPFIFO_VA_MAX) {
+            printf("FALLO: el pushbuffer del canal GR0 (0x%llx) no cabe en una "
+                   "entrada de GPFIFO\n", (unsigned long long)chan_gr.pushbuf_va);
+            return -1;
+        }
+        printf("OK: segundo canal en GR0 (motor %u, VAs +0x%llx)\n",
+               p->engineType,
+               (unsigned long long)(chan_gr.gpfifo_va - chan.gpfifo_va));
+    }
     {
         struct gsp_compute cp;
         GspQmdV05 qmd;
         unsigned qmd_off = 0, qmd_len = 0;
+        /* +16: cinco peticiones más que antes, las del canal de GR0. */
         const unsigned char *entry = cmdq_base + 4096 +
-                                     (unsigned long)((wptr0 + 8) % 63) * 4096;
+                                     (unsigned long)((wptr0 + 16) % 63) * 4096;
         const struct gsp_rpc_hdr *hdr =
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
@@ -1770,31 +2224,47 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         if (check_sass_embed() != 0)
             return -1;
 
-        if (gsp_compute_init(&v.rm, &chan, &cp) != 0) {
+        if (gsp_compute_init(&v.rm, &chan_gr, &cp) != 0) {
             printf("FALLO: gsp_compute_init\n");
             return -1;
         }
         if (a->hClass != BLACKWELL_COMPUTE_B || a->hObject != NVKM_RM_COMPUTE0 ||
-            a->hParent != NVKM_RM_CHAN(0)) {
-            printf("FALLO: compute cls=0x%x obj=0x%08x padre=0x%08x\n",
-                   a->hClass, a->hObject, a->hParent);
+            a->hParent != NVKM_RM_CHAN(1)) {
+            printf("FALLO: compute cls=0x%x obj=0x%08x padre=0x%08x (tiene que "
+                   "colgar del canal de GR0, 0x%08x)\n",
+                   a->hClass, a->hObject, a->hParent, NVKM_RM_CHAN(1));
             return -1;
         }
-        printf("OK: BLACKWELL_COMPUTE_B colgado del canal\n");
+        printf("OK: BLACKWELL_COMPUTE_B colgado del canal de GR0\n");
 
-        gsp_compute_fill_saxpy_qmd(&cp, &qmd, G4F_SASS_VA, 4);
-        if (check_qmd_fields(&cp, &qmd) != 0)
+        gsp_compute_fill_qmd(&cp, &cp.saxpy, &qmd, 4);
+        if (check_qmd_fields(&cp, &cp.saxpy, 4, &qmd) != 0)
             return -1;
         if (check_compute_params(&cp) != 0)
             return -1;
-        chan.pb_pos = 0;
+        /* Y el mismo QMD para matvec: otro programa, otro regcount, otra malla. */
+        gsp_compute_fill_qmd(&cp, &cp.matvec, &qmd, 17);
+        if (check_qmd_fields(&cp, &cp.matvec, 17, &qmd) != 0)
+            return -1;
+        if (check_mv_params(&cp) != 0)
+            return -1;
+        if (!cp.mv_mapped) {
+            printf("FALLO: el staging de matvec no quedó mapeado\n");
+            return -1;
+        }
+        if (check_mv_tiling(&cp) != 0)
+            return -1;
+        /* El pushbuffer del canal de GR0, que es el que usa el compute. Mirar el
+         * del CE aquí daba "pushbuffer sin QMD" con el encoder perfectamente
+         * bien: los métodos estaban, pero en el otro canal. */
+        chan_gr.pb_pos = 0;
         if (gsp_compute_encode_qmd(&cp, &qmd, &qmd_off, &qmd_len) != 0 ||
             qmd_len < 64) {
             printf("FALLO: gsp_compute_encode_qmd\n");
             return -1;
         }
         {
-            const uint32_t *pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + qmd_off);
+            const uint32_t *pb = (const uint32_t *)((const unsigned char *)chan_gr.pushbuf.va + qmd_off);
             unsigned found_qmd_ver = 0;
             unsigned found_inline = 0;
             unsigned j;
@@ -1818,22 +2288,26 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
 
     /* Teardown G4e/G4f antes del vmm_fini de check_vmm (este test es autónomo). */
     base = *rpc.rptr;
-    fake_rpc_post_payload(lo, base % 63, NV_VGPU_MSG_FUNCTION_FREE, 0, NULL, 0);
-    fake_rpc_post_payload(lo, (base + 1) % 63, NV_VGPU_MSG_FUNCTION_FREE, 0, NULL, 0);
-    fake_rpc_post_payload(lo, (base + 2) % 63, NV_VGPU_MSG_FUNCTION_FREE, 0, NULL, 0);
-    fake_rpc_post_payload(lo, (base + 3) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
-                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
-    for (i = 0; i < 5; i++) {
-        fake_rpc_post_payload(lo, (base + 4 + i) % 63, NV_VGPU_MSG_FUNCTION_FREE,
+    for (i = 0; i < 4; i++) {
+        fake_rpc_post_payload(lo, (base + i) % 63, NV_VGPU_MSG_FUNCTION_FREE,
                               0, NULL, 0);
     }
-    msgq->tx.writePtr = (base + 9) % 63;
+    fake_rpc_post_payload(lo, (base + 4) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    for (i = 0; i < 5; i++) {
+        fake_rpc_post_payload(lo, (base + 5 + i) % 63, NV_VGPU_MSG_FUNCTION_FREE,
+                              0, NULL, 0);
+    }
+    msgq->tx.writePtr = (base + 10) % 63;
 
+    /* Orden inverso al de creación: el canal de GR0 después de su compute (que ya
+     * se soltó arriba) y antes del CE. */
+    gsp_chan_fini(&chan_gr);
     gsp_ce_fini(&ce);
     gsp_chan_fini(&chan);
     gsp_vmm_fini(&v);
     (void)test_pat;
-    printf("OK: fini CE → compute → canal → vaspace\n");
+    printf("OK: fini compute → canal GR0 → CE → canal COPY0 → vaspace\n");
     return 0;
 }
 

@@ -111,7 +111,12 @@ static struct gsp_static_info g_static;  /* VRAM utilizable y regalos de RM */
 static struct gsp_vram g_vram_pool;      /* reparto de VRAM sobre esas regiones */
 static struct gsp_vmm g_vmm;             /* vaspace de RM + tablas de páginas */
 static struct gsp_dma_buf g_scratch;     /* página de sysmem visible por la GPU */
-static struct gsp_chan g_chan;           /* canal GPFIFO (G4e) */
+static struct gsp_chan g_chan;           /* canal GPFIFO del CE, motor COPY0 (G4e) */
+/* Segundo canal, atado a GR0. No es duplicación: RM no acepta un objeto de
+ * compute sobre un canal de copia (INVALID_CLASS con la clase correcta, HW
+ * 2026-07-28), así que G4f/G5 necesitan el suyo. El CE se queda con el de COPY0
+ * porque es quien mueve el SASS a VRAM. */
+static struct gsp_chan g_chan_gr;        /* canal GPFIFO del compute, motor GR0 */
 static struct gsp_ce g_ce;               /* motor de copia CE (G4e) */
 static struct gsp_compute g_compute;     /* compute + QMD (G4f) */
 static int g_ce_verified;                /* el CE movió bytes de verdad (G4e) */
@@ -352,7 +357,8 @@ static int try_hw_boot(void)
  * Lo que se mapea es lo que G4e va a necesitar: un bloque de VRAM para que la
  * copia del CE tenga destino, y una página de sysmem para leer de vuelta desde
  * la CPU sin ventana a la VRAM. */
-#define G4D_VA_BASE     0x0000010000000000ull   /* 1 TiB */
+/* Ver `GSP_VA_BASE` en gsp_vmm.h: la base es una y sale de allí. */
+#define G4D_VA_BASE     GSP_VA_BASE
 #define G4D_VRAM_BYTES  (2ull * 1024ull * 1024ull)
 #define G4D_SCRATCH_VA  (G4D_VA_BASE + G4D_VRAM_BYTES)
 
@@ -426,7 +432,8 @@ static int run_vmm_stage(void)
 
 static int run_chan_ce_stage(void)
 {
-    if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan, g_vmm.vaspace) != 0) {
+    if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan, g_vmm.vaspace,
+                      0u, NV2080_ENGINE_TYPE_COPY0) != 0) {
         return -1;
     }
     g_phase = GSP_RM_CHAN;
@@ -452,15 +459,32 @@ static int run_chan_ce_stage(void)
 
 static int run_compute_stage(void)
 {
-    if (gsp_compute_init(&g_vmm.rm, &g_chan, &g_compute) != 0) {
+    /* El canal de GR0 va primero: sin él el `RM_ALLOC` del objeto de compute
+     * vuelve a chocar con el INVALID_CLASS que dio en hardware. */
+    if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan_gr, g_vmm.vaspace,
+                      1u, NV2080_ENGINE_TYPE_GR0) != 0) {
+        lx_printk("nouveau-lx: sin canal de GR0 — no hay compute (el CE sigue "
+                  "en pie)\n");
+        return -1;
+    }
+    if (gsp_compute_init(&g_vmm.rm, &g_chan_gr, &g_compute) != 0) {
+        gsp_chan_fini(&g_chan_gr);
         return -1;
     }
     g_phase = GSP_RM_COMPUTE;
 
-    if (gsp_compute_stage_sass(&g_compute, &g_ce, G4D_SCRATCH_VA, g_scratch.va) != 0) {
-        lx_printk("nouveau-lx: SASS no llegó a VRAM (el CE no señalizó)\n");
+    /* Los dos blobs, cada uno en su página: el matvec de G5 no se stagea en el
+     * primer lanzamiento sino aquí, para que un fallo de copia salga en el
+     * arranque y no en medio de una inferencia. */
+    if (gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.saxpy,
+                               G4D_SCRATCH_VA, g_scratch.va) != 0) {
+        lx_printk("nouveau-lx: SASS de saxpy no llegó a VRAM (el CE no señalizó)\n");
+    } else if (gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.matvec,
+                                      G4D_SCRATCH_VA, g_scratch.va) != 0) {
+        lx_printk("nouveau-lx: SASS de matvec no llegó a VRAM (el CE no señalizó)\n");
     } else {
-        lx_printk("nouveau-lx: SASS de %u B en VRAM\n", g_compute.sass_size);
+        lx_printk("nouveau-lx: SASS en VRAM — saxpy %u B, matvec %u B\n",
+                  g_compute.saxpy.sass_len, g_compute.matvec.sass_len);
     }
     /* El lanzamiento del QMD NO se hace aquí: el bring-up deja el compute
      * armado y sale. Un kernel que se lance en el arranque y falle deja la
@@ -566,6 +590,13 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
                      * lo dice, que es lo que se hacía hasta ahora sin decirlo. */
                     (void)gsp_rm_classes_probe(&g_rm_obj);
 
+                    /* Y qué motores, por el mismo motivo: el canal pide COPY0 y
+                     * hasta ahora eso salía de contar huecos en una tabla de
+                     * `engine.h`. Aquí sólo se vuelca —nadie decide nada con
+                     * esto todavía—, pero es la única forma de que el log diga si
+                     * el motor existe en ESTA tarjeta y en qué runlist está. */
+                    (void)gsp_rm_engines_probe(&g_rm_obj);
+
                     /* G4d: el mapa de VRAM utilizable sale de aquí, no del WPR
                      * meta — en la ruta FMC esos offsets los pone el FMC y no
                      * los devuelve. Se contrasta contra la VRAM que ya leímos
@@ -629,8 +660,11 @@ int lx_nouveau_gsp_fini(void)
      * páginas, esas páginas de sysmem no se pueden soltar. Y tiene que ser
      * antes de `gsp_fini`, que es quien deja a RM sin RPC y a la tarjeta sin
      * DMA — después ya no habría con quién hablar. */
-    /* compute → CE → canal → vaspace, antes de soltar RM y el directorio de páginas. */
+    /* compute → CE → canales → vaspace, antes de soltar RM y el directorio de
+     * páginas. El canal de GR0 se suelta tras su objeto de compute y antes del
+     * de COPY0, en orden inverso al de creación. */
     gsp_compute_fini(&g_compute);
+    gsp_chan_fini(&g_chan_gr);
     gsp_ce_fini(&g_ce);
     gsp_chan_fini(&g_chan);
     gsp_vmm_fini(&g_vmm);
@@ -722,6 +756,17 @@ uint64_t lx_nouveau_vram_bytes(void)
     return g_vram_bytes ? g_vram_bytes : (8ull * 1024ull * 1024ull * 1024ull);
 }
 
+/* `g_ce_verified` es la puerta: si el CE no demostró en el arranque que mueve
+ * bytes por nuestras tablas, lanzar un QMD es tirar trabajo a un canal que no
+ * funciona, y eso en esta máquina se paga con un cuelgue sin traza. Sin esa
+ * prueba, CPU y a otra cosa. Los dos canales tienen que estar en pie: el de COPY0
+ * copia el SASS a VRAM y el de GR0 es el que ejecuta. */
+static int compute_usable(void)
+{
+    return g_ce_verified && g_compute.ready && g_ce.ready && g_chan.ready &&
+           g_chan_gr.ready && g_phase >= GSP_RM_COMPUTE;
+}
+
 /* El valor de retorno es "esto lo ha calculado la GPU" (1) o "la CPU" (0), y es
  * el criterio GO de G4. Devolver 1 con el GSP arrancado era una mentira: aquí
  * abajo no hay más que un bucle de CPU, no existe todavía canal ni kernel. Un
@@ -736,12 +781,7 @@ int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n)
     if (!x || !y || n == 0) {
         return -1;
     }
-    /* `g_ce_verified` es la puerta: si el CE no demostró en el arranque que
-     * mueve bytes por nuestras tablas, lanzar un QMD es tirar trabajo a un
-     * canal que no funciona, y eso en esta máquina se paga con un cuelgue sin
-     * traza. Sin esa prueba, CPU y a otra cosa. */
-    if (g_ce_verified && g_compute.ready && g_ce.ready && g_chan.ready &&
-        g_phase >= GSP_RM_COMPUTE) {
+    if (compute_usable()) {
         if (gsp_compute_saxpy(&g_compute, &g_ce, a, x, y, n,
                               G4D_SCRATCH_VA, g_scratch.va) == 0) {
             return 1;
@@ -753,19 +793,34 @@ int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n)
     return 0;
 }
 
+/* G5. Misma regla que saxpy: el 1 es "lo calculó la GPU" y sólo se devuelve con
+ * el semáforo de cada tanda señalizado y el vector releído de la memoria que
+ * escribió la GPU. El fallback de CPU está aquí abajo y no es un plan B teórico:
+ * es el camino normal mientras `compute_usable()` no se cumpla, y `soso-llm`
+ * distingue los dos por este valor de retorno (`on_gpu`), no por adivinarlo. */
 int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned cols,
                                  const float *x, float *y)
 {
     unsigned r, c;
+
     if (!w || !x || !y || rows == 0 || cols == 0) {
         return -1;
+    }
+    if (compute_usable()) {
+        if (gsp_compute_matvec_f32(&g_compute, &g_ce, w, rows, cols, x, y,
+                                   G4D_SCRATCH_VA, g_scratch.va) == 0) {
+            return 1;
+        }
+        /* La GPU no lo hizo. `y` puede tener tandas escritas a medias, así que el
+         * bucle de abajo lo recalcula ENTERO: quedarse con lo que sobrevivió
+         * sería mezclar dos resultados y no poder distinguirlos después. */
     }
     for (r = 0; r < rows; r++) {
         float sum = 0.0f;
         for (c = 0; c < cols; c++) {
-            sum += w[r * cols + c] * x[c];
+            sum += w[(unsigned long)r * cols + c] * x[c];
         }
         y[r] = sum;
     }
-    return 0;   /* CPU — ver la nota de lx_nouveau_submit_saxpy */
+    return 0;
 }

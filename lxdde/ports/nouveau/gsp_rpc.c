@@ -153,6 +153,50 @@ static const char *rpc_function_name(uint32_t fn)
     }
 }
 
+/* Nombres de `NV_STATUS`, verificados uno a uno contra `nvstatuscodes.h` de
+ * open-gpu-kernel-modules (2026-07-28). Vivía en gsp_rm_obj.c, y aquí había una
+ * segunda tabla más corta con los mismos códigos: el 0x22 (INVALID_CLASS) del
+ * RM_ALLOC de compute salió impreso como "?" porque estaba en la otra. Una sola,
+ * y las dos rutas —el status de dentro del wrapper y el `rpc_result` del
+ * transporte— tiran de ella.
+ *
+ * Dos de los nombres que hubo aquí estaban inventados: el 0x2b no es
+ * INVALID_CLASS sino INVALID_HEAP, y el 0x2f no es INVALID_OBJECT_PARENT sino
+ * INVALID_LOCK_STATE. Los de verdad son 0x22 y 0x36. Un nombre falso en un
+ * mensaje de error manda el diagnóstico al lado contrario. */
+const char *nv_status_name(uint32_t st)
+{
+    switch (st) {
+    case 0x00u: return "OK";
+    case 0x1eu: return "INVALID_ADDRESS";
+    case 0x1fu: return "INVALID_ARGUMENT";
+    case 0x21u: return "INVALID_CHANNEL";
+    case 0x22u: return "INVALID_CLASS";
+    case 0x23u: return "INVALID_CLIENT";
+    case 0x26u: return "INVALID_DEVICE";
+    case 0x29u: return "INVALID_FLAGS";
+    case 0x2bu: return "INVALID_HEAP";
+    case 0x2fu: return "INVALID_LOCK_STATE";
+    case 0x31u: return "INVALID_OBJECT";
+    case 0x33u: return "INVALID_OBJECT_HANDLE";
+    case 0x36u: return "INVALID_OBJECT_PARENT";
+    case 0x37u: return "INVALID_OFFSET";
+    case 0x3au: return "INVALID_PARAM_STRUCT";
+    case 0x3bu: return "INVALID_PARAMETER";
+    case 0x40u: return "INVALID_STATE";
+    case 0x4fu: return "NO_FREE_FIFOS";
+    case 0x51u: return "NO_MEMORY";
+    case 0x55u: return "NOT_READY";
+    case 0x56u: return "NOT_SUPPORTED";
+    case 0x57u: return "OBJECT_NOT_FOUND";
+    case 0x58u: return "OBJECT_TYPE_MISMATCH";
+    case 0x59u: return "OPERATING_SYSTEM";
+    case 0x65u: return "TIMEOUT";
+    case 0x66u: return "TIMEOUT_RETRY";
+    default:    return "?";
+    }
+}
+
 /* Códigos de `rpc_result`. Hay DOS familias y confundirlas cuesta caro:
  *
  *  - por debajo de 0xff000000 es un NV_STATUS normal de RM (el 0x59 que salió
@@ -166,17 +210,6 @@ static const char *rpc_function_name(uint32_t fn)
 static const char *rpc_status_name(uint32_t status)
 {
     switch (status) {
-    /* El que devuelve el RM_ALLOC del canal GPFIFO (2026-07-27). La numeración
-     * de `nvstatuscodes.h` es correlativa y cuadra con los seis que ya había
-     * aquí (0x51/0x55/0x56/0x59/0x65/0x66), así que 0x3b es INVALID_PARAMETER:
-     * RM entendió la petición y le pareció mal el contenido — cosa nuestra. */
-    case 0x3bu: return "INVALID_PARAMETER";
-    case 0x51u: return "NO_MEMORY";
-    case 0x55u: return "NOT_READY";
-    case 0x56u: return "NOT_SUPPORTED";
-    case 0x59u: return "OPERATING_SYSTEM";
-    case 0x65u: return "TIMEOUT";
-    case 0x66u: return "TIMEOUT_RETRY";
     case 0xff100001u: return "RPC_UNKNOWN_FUNCTION";
     case 0xff100002u: return "RPC_INVALID_MESSAGE_FORMAT";
     case 0xff100003u: return "RPC_HANDLE_NOT_FOUND";
@@ -184,7 +217,11 @@ static const char *rpc_status_name(uint32_t status)
     case 0xff100005u: return "RPC_UNKNOWN_RM_ERROR";
     case 0xff100006u: return "RPC_UNKNOWN_VMIOP_ERROR";
     case 0xff100007u: return "RPC_RESERVED_HANDLE";
-    default:    return "?";
+    /* Por debajo de 0xff000000 es un NV_STATUS y lo nombra la tabla de arriba.
+     * Había DOS tablas —una aquí y otra en gsp_rm_obj.c— y el 0x22 del compute
+     * salió como "?" porque estaba sólo en la otra (2026-07-28). Dos tablas de
+     * lo mismo divergen siempre; ahora hay una. */
+    default:    return nv_status_name(status);
     }
 }
 

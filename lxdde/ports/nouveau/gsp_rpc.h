@@ -64,6 +64,11 @@ struct gsp_rpc {
 };
 
 /* Cablea los punteros del anillo a partir de la memoria compartida del paso 5. */
+/* Nombre de un `NV_STATUS` de RM. Única tabla del port: la usan tanto el status
+ * que viene dentro del wrapper de RM_ALLOC/RM_CONTROL como el `rpc_result` del
+ * transporte. Nunca devuelve NULL; los desconocidos salen como "?". */
+const char *nv_status_name(uint32_t st);
+
 int gsp_rpc_init(const struct gsp_libos *lo, struct gsp_rpc *out);
 
 /* Publica `app_version` y comprueba que el núcleo RISC-V está activo. */

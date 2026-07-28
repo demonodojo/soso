@@ -162,6 +162,7 @@ int gsp_ce_wait(struct gsp_ce *ce, unsigned ms)
     }
     lx_printk("nouveau-lx: CE — semáforo no llegó a %u en %u ms (vale %u)\n",
               ce->pending, ms, *sem);
+    gsp_chan_dump(ce->chan, "CE sin señalizar");
     return -1;
 }
 
