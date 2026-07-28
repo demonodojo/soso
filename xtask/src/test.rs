@@ -77,7 +77,12 @@ pub fn run() {
             ssh_init_test(&key)
         });
 
-        // --- 6) sesión SSH autenticada + halt ---
+        // --- 6) pipeline con más datos que la capacidad del pipe ---
+        let _ = paso_con_reintento("pipeline de sosh (6 KiB por un pipe)", &mut fallos, || {
+            ssh_pipeline(&key)
+        });
+
+        // --- 7) sesión SSH autenticada + halt ---
         let _ = paso("SSH por clave pública + comando + halt", &mut fallos, || {
             ssh_sesion(&key)
         });
@@ -300,6 +305,63 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
     if uploads >= calls {
         return Err(format!(
             "los pesos se resuben en cada matvec ({uploads} subidas / {calls} matvec):              el cacheo no está funcionando — {linea:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Un pipeline de sosh moviendo MÁS datos que la capacidad del pipe (4 KiB).
+///
+/// Es la prueba de punta a punta del camino que se arregló: el pipe transfería 256
+/// bytes por llamada (el tamaño de un temporal del kernel) y el userspace no miraba
+/// el retorno, así que se perdía la cola de cada trozo. Se piden DOS copias del
+/// README por un solo pipe para que se llene de verdad y `write_all` tenga que
+/// completar escrituras cortas; se compara byte a byte contra el fichero real, que
+/// el host lee en el momento (nada hardcodeado).
+fn ssh_pipeline(key: &std::path::Path) -> Result<(), String> {
+    let real = std::fs::read(super::project_root().join("rootfs/README.md"))
+        .map_err(|e| format!("no se pudo leer rootfs/README.md: {e}"))?;
+
+    let mut hijo = Command::new("ssh")
+        .args(["-tt", "-i"])
+        .arg(key)
+        .args(["-p", "2222"])
+        .args(["-o", "StrictHostKeyChecking=no"])
+        .args(["-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "LogLevel=ERROR"])
+        .args(["-o", "ConnectTimeout=10"])
+        .arg("soso@localhost")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
+    {
+        let mut stdin = hijo.stdin.take().unwrap();
+        stdin
+            .write_all(b"cat /README.md /README.md | cat -\nexit\n")
+            .map_err(|e| e.to_string())?;
+        stdin.flush().ok();
+        std::thread::sleep(Duration::from_secs(20));
+    }
+    let salida = hijo.wait_with_output().map_err(|e| e.to_string())?;
+    let texto = String::from_utf8_lossy(&salida.stdout).replace("\r\n", "\n");
+    let marca = "cat -\n";
+    let ini = texto
+        .find(marca)
+        .ok_or_else(|| format!("no se vio el comando en la salida: {texto:?}"))?
+        + marca.len();
+    let fin = texto[ini..]
+        .rfind("$ ")
+        .map(|p| ini + p)
+        .unwrap_or(texto.len());
+    let cuerpo = &texto[ini..fin];
+    let esperado = String::from_utf8_lossy(&real).replace("\r\n", "\n").repeat(2);
+    if cuerpo.trim_end() != esperado.trim_end() {
+        return Err(format!(
+            "el pipeline entregó {} bytes y el fichero ×2 son {}",
+            cuerpo.trim_end().len(),
+            esperado.trim_end().len()
         ));
     }
     Ok(())
