@@ -241,20 +241,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
 /// Las páginas del rango están mapeadas y con los permisos pedidos. Un solo
 /// candado para todo el rango: es el camino rápido y el habitual.
 fn range_present(ptr: u64, len: u64, need_write: bool) -> bool {
-    super::with_current(|p| {
-        let space = p.space.as_ref().unwrap();
-        let mut page = ptr & !0xfff;
-        while page < ptr + len {
-            match space.translate_flags(page) {
-                Some(fl)
-                    if fl.contains(PageTableFlags::USER_ACCESSIBLE)
-                        && (!need_write || fl.contains(PageTableFlags::WRITABLE)) => {}
-                _ => return false,
-            }
-            page += 4096;
-        }
-        true
-    })
+    super::with_current(|p| p.space.as_ref().unwrap().range_ok(ptr, len, need_write))
 }
 
 /// Valida un rango de usuario, **materializando las páginas de `mmap` que el
@@ -462,6 +449,12 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
         if len == 0 {
             return Ok(0);
         }
+        // ANTES de tocar `buf`. Este camino se saltaba la validación por completo
+        // —`user_slice` está más abajo, sólo para los fd que no son pipe ni
+        // socket—, así que un puntero ajeno tumbaba el kernel desde ring 3.
+        if !user_range_ok(buf, len, false) {
+            return Err(-abi::EFAULT);
+        }
         if pipe::no_readers(id) {
             return Err(-abi::EPIPE);
         }
@@ -491,6 +484,9 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
     if let Some(slot) = tcp_slot {
         if len == 0 {
             return Ok(0);
+        }
+        if !user_range_ok(buf, len, false) {
+            return Err(-abi::EFAULT);
         }
         let n = crate::net::tcp_try_write(slot, buf, len)?;
         if n > 0 {
@@ -571,6 +567,10 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
     if let Some(slot) = tcp_slot {
         if len == 0 {
             return Ok(0);
+        }
+        // `true`: el kernel escribe el dato recibido en el búfer del proceso.
+        if !user_range_ok(buf, len, true) {
+            return Err(-abi::EFAULT);
         }
         let n = crate::net::tcp_try_read(slot, buf, len)?;
         if n > 0 {
@@ -1100,6 +1100,10 @@ fn sys_read_timeout(
     if let Some(slot) = tcp_slot {
         if len == 0 {
             return Ok(0);
+        }
+        // `true`: el kernel escribe el dato recibido en el búfer del proceso.
+        if !user_range_ok(buf, len, true) {
+            return Err(-abi::EFAULT);
         }
         let n = crate::net::tcp_try_read(slot, buf, len)?;
         if n > 0 {

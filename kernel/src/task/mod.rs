@@ -690,6 +690,20 @@ extern "C" fn schedule_inner() -> ! {
         for i in 0..procs.len() {
             if let State::WaitingPipe { pipe_id, buf, len, write } = procs[i].state {
                 procs[i].space.as_ref().unwrap().activate();
+                // Revalidar el rango del usuario: se comprobó al entrar en la
+                // syscall, pero otro hilo del proceso pudo hacer `munmap` mientras
+                // este estaba bloqueado, y aquí el kernel copia sin red. Se usa
+                // `AddrSpace::range_ok`, que no toma candados (ya tenemos PROCS).
+                if !procs[i]
+                    .space
+                    .as_ref()
+                    .unwrap()
+                    .range_ok(buf, len, !write)
+                {
+                    procs[i].ctx.rax = (-soso_abi::EFAULT) as u64;
+                    procs[i].state = State::Runnable;
+                    continue;
+                }
                 if write {
                     match pipe_wake_write(pipe_id, buf, len) {
                         Ok(n) if n > 0 => {
@@ -745,25 +759,36 @@ extern "C" fn schedule_inner() -> ! {
                         procs[i].ctx.rax = (-soso_abi::ECONNREFUSED) as u64;
                         procs[i].state = State::Runnable;
                     }
-                } else if write {
-                    match crate::net::tcp_try_write(slot, buf, len) {
-                        Ok(n) if n > 0 => {
-                            procs[i].ctx.rax = n;
-                            procs[i].state = State::Runnable;
-                        }
-                        _ => {}
-                    }
                 } else {
-                    match crate::net::tcp_try_read(slot, buf, len) {
-                        Ok(n) if n > 0 => {
-                            procs[i].ctx.rax = n;
-                            procs[i].state = State::Runnable;
+                    // Igual que en el pipe: el rango se validó al entrar en la
+                    // syscall, pero otro hilo pudo hacer `munmap` durante el
+                    // bloqueo, y estas dos ramas copian del/al búfer del usuario.
+                    // `accept`/`connect` no tocan memoria y quedan fuera.
+                    if !procs[i].space.as_ref().unwrap().range_ok(buf, len, !write) {
+                        procs[i].ctx.rax = (-soso_abi::EFAULT) as u64;
+                        procs[i].state = State::Runnable;
+                        continue;
+                    }
+                    if write {
+                        match crate::net::tcp_try_write(slot, buf, len) {
+                            Ok(n) if n > 0 => {
+                                procs[i].ctx.rax = n;
+                                procs[i].state = State::Runnable;
+                            }
+                            _ => {}
                         }
-                        Ok(0) if !crate::net::tcp_is_connected(slot) => {
-                            procs[i].ctx.rax = 0;
-                            procs[i].state = State::Runnable;
+                    } else {
+                        match crate::net::tcp_try_read(slot, buf, len) {
+                            Ok(n) if n > 0 => {
+                                procs[i].ctx.rax = n;
+                                procs[i].state = State::Runnable;
+                            }
+                            Ok(0) if !crate::net::tcp_is_connected(slot) => {
+                                procs[i].ctx.rax = 0;
+                                procs[i].state = State::Runnable;
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }

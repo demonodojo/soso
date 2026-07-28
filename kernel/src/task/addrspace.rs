@@ -280,6 +280,38 @@ impl AddrSpace {
     }
 
     /// Traduce una dirección de usuario a flags de la PTE.
+    /// `true` si todo el rango está mapeado para el usuario con los permisos
+    /// pedidos. **No toma ningún candado**: es un recorrido de tablas sobre este
+    /// espacio, y por eso se puede llamar desde el planificador (que ya tiene
+    /// `PROCS`) igual que desde una syscall.
+    ///
+    /// Existe porque tres caminos —`write` a pipe, `write` a socket y
+    /// `read_timeout` de socket— usaban el puntero del usuario SIN comprobarlo, y
+    /// un puntero ajeno hacía que el kernel copiase de esa dirección: pánico en
+    /// ring 0 desde un proceso sin privilegios (comprobado en QEMU: `page fault
+    /// accediendo a 0x7f00dead0000 … cs=0x8`). Y hace falta también al REANUDAR una
+    /// escritura bloqueada: entre la entrada y el desbloqueo, otro hilo del proceso
+    /// puede haber hecho `munmap` de ese rango.
+    pub fn range_ok(&self, ptr: u64, len: u64, need_write: bool) -> bool {
+        if len == 0 {
+            return true;
+        }
+        if ptr == 0 || ptr.checked_add(len).is_none_or(|e| e > USER_MAX) {
+            return false;
+        }
+        let mut page = ptr & !0xfff;
+        while page < ptr + len {
+            match self.translate_flags(page) {
+                Some(fl)
+                    if fl.contains(PageTableFlags::USER_ACCESSIBLE)
+                        && (!need_write || fl.contains(PageTableFlags::WRITABLE)) => {}
+                _ => return false,
+            }
+            page += 4096;
+        }
+        true
+    }
+
     pub fn translate_flags(&self, va: u64) -> Option<PageTableFlags> {
         use x86_64::structures::paging::mapper::TranslateResult;
         match self.mapper().translate(VirtAddr::new(va)) {
