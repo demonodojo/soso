@@ -976,7 +976,14 @@ fn sys_gpu_alloc(size: u64) -> Result<u64, i64> {
 }
 
 fn sys_gpu_map(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
-    if !user_range_ok(user_ptr, len, true) {
+    // `false`, y es lo contrario que en `sys_gpu_read`: aquí el kernel LEE del
+    // búfer del proceso y lo copia al dispositivo. Pedir permiso de escritura era
+    // exigirle al llamante algo que esta syscall no necesita, y tenía una
+    // consecuencia concreta: los pesos de un modelo están en un mapeo de fichero
+    // de SÓLO LECTURA, así que subirlos directamente daba EFAULT y había que
+    // copiarlos antes a memoria escribible — una copia de la matriz entera, más un
+    // mmap y un munmap, por cada subida.
+    if !user_range_ok(user_ptr, len, false) {
         return Err(-abi::EFAULT);
     }
     crate::drivers::gpu::upload_from_user(gpu_handle, user_ptr, len).map_err(|e| -e)
