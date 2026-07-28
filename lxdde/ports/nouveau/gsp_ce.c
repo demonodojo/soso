@@ -42,15 +42,30 @@ int gsp_ce_init(struct gsp_rm *rm, struct gsp_chan *chan, struct gsp_ce *ce)
     ce->rm = rm;
     ce->chan = chan;
     ce->handle = NVKM_RM_CE0;
+    {
+        /* Misma regla que el canal: la clase la dice el catálogo del chip. Para
+         * GB20x es `BLACKWELL_DMA_COPY_B` (`rm/gb20x.c`), no la de Ampere que
+         * pedíamos aquí. Los métodos `NVC6B5_*` del pushbuffer no cambian entre
+         * estas clases —el encoding de la copia lineal es el mismo—, así que
+         * sólo cambia el número que va en el ALLOC. */
+        static const uint32_t cand[] = {
+            BLACKWELL_DMA_COPY_B, BLACKWELL_DMA_COPY_A, HOPPER_DMA_COPY_A,
+            AMPERE_DMA_COPY_B, AMPERE_DMA_COPY_A,
+        };
 
-    if (gsp_rm_alloc(rm, chan->handle, ce->handle, AMPERE_DMA_COPY_A,
+        ce->cls = gsp_rm_class_pick("CE (DMA copy)", cand,
+                                    (unsigned)(sizeof(cand) / sizeof(cand[0])));
+    }
+
+    if (gsp_rm_alloc(rm, chan->handle, ce->handle, ce->cls,
                      NULL, 0, NULL) != 0) {
-        lx_printk("nouveau-lx: RM_ALLOC CE falló\n");
+        lx_printk("nouveau-lx: RM_ALLOC CE falló (cls=0x%04x)\n", ce->cls);
         return -1;
     }
 
     ce->ready = 1;
-    lx_printk("nouveau-lx: CE listo handle=0x%08x\n", ce->handle);
+    lx_printk("nouveau-lx: CE listo cls=0x%04x handle=0x%08x\n",
+              ce->cls, ce->handle);
     return 0;
 }
 

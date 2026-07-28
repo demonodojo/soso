@@ -97,17 +97,30 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
     }
     cp->mapped = 1;
 
-    if (gsp_rm_alloc(rm, chan->handle, cp->handle, BLACKWELL_COMPUTE_A,
+    {
+        /* GB20x lleva `BLACKWELL_COMPUTE_B`; la A que había aquí es de GB100.
+         * Igual que el canal y el CE: lo dice el catálogo, no un #define. */
+        static const uint32_t cand[] = {
+            BLACKWELL_COMPUTE_B, BLACKWELL_COMPUTE_A, HOPPER_COMPUTE_A,
+            ADA_COMPUTE_A, AMPERE_COMPUTE_B, AMPERE_COMPUTE_A,
+        };
+
+        cp->cls = gsp_rm_class_pick("compute", cand,
+                                    (unsigned)(sizeof(cand) / sizeof(cand[0])));
+    }
+
+    if (gsp_rm_alloc(rm, chan->handle, cp->handle, cp->cls,
                      NULL, 0, NULL) != 0) {
-        lx_printk("nouveau-lx: RM_ALLOC compute falló\n");
+        lx_printk("nouveau-lx: RM_ALLOC compute falló (cls=0x%04x)\n", cp->cls);
         gsp_dma_free(&cp->data);
         cp->mapped = 0;
         return -1;
     }
     cp->ready = 1;
-    lx_printk("nouveau-lx: compute listo handle=0x%08x sass=%u B regs=%u "
-              "params@cbank0+0x%x\n",
-              cp->handle, cp->sass_size, gsp_saxpy_regcount, gsp_saxpy_param_base);
+    lx_printk("nouveau-lx: compute listo cls=0x%04x handle=0x%08x sass=%u B "
+              "regs=%u params@cbank0+0x%x\n",
+              cp->cls, cp->handle, cp->sass_size, gsp_saxpy_regcount,
+              gsp_saxpy_param_base);
     return 0;
 }
 

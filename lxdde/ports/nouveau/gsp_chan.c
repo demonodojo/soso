@@ -124,6 +124,9 @@ static int chan_fill_alloc(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p,
 struct chan_variant {
     const char *name;
     void (*apply)(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p);
+    /* 0 = la clase que eligió el catálogo. Distinto de 0 = probar ESA clase, que
+     * es una hipótesis tan legítima como cualquier campo de los params. */
+    uint32_t cls;
 };
 
 /* Handle del USERD en VRAM para la variante 3; 0 si no se pudo reservar. */
@@ -199,15 +202,22 @@ static void var_unpriv_gpfifo_phys(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *
 }
 
 static const struct chan_variant chan_variants[] = {
-    { "base (priv, USERD sysmem, GPFIFO por VA, engine 9)", var_base },
-    { "sin privilegio (flags bit5=0, internalFlags USER)",  var_unpriv },
-    { "USERD en VRAM (apertura 2)",                          var_userd_vram },
-    { "GPFIFO por dirección física",                         var_gpfifo_phys },
-    { "gpFifoEntries = 512 (la página entera)",              var_entries_full },
-    { "sin method buffer",                                   var_no_mthdbuf },
-    { "engineType = 6 (el viejo, de control)",               var_engine6 },
-    { "sin privilegio + USERD en VRAM",                      var_unpriv_userd_vram },
-    { "sin privilegio + GPFIFO físico",                      var_unpriv_gpfifo_phys },
+    { "base (priv, USERD sysmem, GPFIFO por VA, engine 9)", var_base, 0 },
+    { "sin privilegio (flags bit5=0, internalFlags USER)",  var_unpriv, 0 },
+    { "USERD en VRAM (apertura 2)",                          var_userd_vram, 0 },
+    { "GPFIFO por dirección física",                         var_gpfifo_phys, 0 },
+    { "gpFifoEntries = 512 (la página entera)",              var_entries_full, 0 },
+    { "sin method buffer",                                   var_no_mthdbuf, 0 },
+    { "engineType = 6 (el viejo, de control)",               var_engine6, 0 },
+    { "sin privilegio + USERD en VRAM",                      var_unpriv_userd_vram, 0 },
+    { "sin privilegio + GPFIFO físico",                      var_unpriv_gpfifo_phys, 0 },
+    /* Las dos clases que el port pedía antes de mirar el catálogo. Si el
+     * catálogo acierta nunca llegan a correr; si RM resulta aceptar la vieja y
+     * no la nueva, esto lo dice en el mismo arranque en vez de en el siguiente. */
+    { "clase AMPERE_CHANNEL_GPFIFO_A (la de antes)", var_base,
+      AMPERE_CHANNEL_GPFIFO_A },
+    { "clase BLACKWELL_CHANNEL_GPFIFO_A (la otra Blackwell)", var_base,
+      BLACKWELL_CHANNEL_GPFIFO_A },
 };
 
 static int chan_alloc_probing(struct gsp_chan *c, struct gsp_vram *vram,
@@ -223,15 +233,26 @@ static int chan_alloc_probing(struct gsp_chan *c, struct gsp_vram *vram,
 
     for (i = 0; i < sizeof(chan_variants) / sizeof(chan_variants[0]); i++) {
         NV_CHANNEL_ALLOC_PARAMS params = *base;
+        uint32_t cls = chan_variants[i].cls ? chan_variants[i].cls : c->cls;
         uint32_t status = 0;
 
         chan_variants[i].apply(c, &params);
-        lx_printk("nouveau-lx: sonda %u/%u — %s\n", i + 1,
+        lx_printk("nouveau-lx: sonda %u/%u — cls=0x%04x %s\n", i + 1,
                   (unsigned)(sizeof(chan_variants) / sizeof(chan_variants[0])),
-                  chan_variants[i].name);
-        if (gsp_rm_alloc(c->rm, c->rm->device, c->handle, AMPERE_CHANNEL_GPFIFO_A,
+                  cls, chan_variants[i].name);
+        if (gsp_rm_alloc(c->rm, c->rm->device, c->handle, cls,
                          &params, (uint32_t)sizeof(params), &status) == 0) {
             lx_printk("nouveau-lx: sonda %u ACEPTADA — es la buena\n", i + 1);
+            /* La que pasó no tiene por qué ser la base, y a partir de aquí el
+             * canal vive con lo que RM aceptó, no con lo que creíamos. Dejarlo
+             * apuntado evita que el CE de después se coma un misterio: con la
+             * variante del USERD en VRAM, por ejemplo, `userd_ctl` apunta a un
+             * sysmem que la GPU ya no mira, y el CE fallaría sin decir por qué. */
+            c->cls = cls;
+            if (i != 0) {
+                lx_printk("nouveau-lx: sonda — OJO: el canal NO es el base; lo "
+                          "que venga detrás puede fallar por eso\n");
+            }
             return 0;
         }
     }
@@ -253,6 +274,18 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
     c->rm = rm;
     c->vmm = vmm;
     c->handle = NVKM_RM_CHAN(0);
+    /* De más nueva a más vieja. `rm/gb20x.c` de nouveau usa la B de Blackwell
+     * para este chip; el catálogo del chip decide y esta lista solo ordena. */
+    {
+        static const uint32_t cand[] = {
+            BLACKWELL_CHANNEL_GPFIFO_B, BLACKWELL_CHANNEL_GPFIFO_A,
+            HOPPER_CHANNEL_GPFIFO_A, AMPERE_CHANNEL_GPFIFO_B,
+            AMPERE_CHANNEL_GPFIFO_A,
+        };
+
+        c->cls = gsp_rm_class_pick("canal GPFIFO", cand,
+                                   (unsigned)(sizeof(cand) / sizeof(cand[0])));
+    }
 
     /* Antes de reservar nada: el tamaño del method buffer lo manda RM. */
     if (chan_query_mthdbuf_size(c, &c->mthdbuf_size) != 0) {
@@ -300,9 +333,10 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
     }
 
     c->ready = 1;
-    lx_printk("nouveau-lx: canal GPFIFO listo handle=0x%08x gpfifo=0x%llx (VA) "
+    lx_printk("nouveau-lx: canal GPFIFO listo cls=0x%04x handle=0x%08x "
+              "gpfifo=0x%llx (VA) "
               "userd=0x%llx+0x%x inst=0x%llx (VRAM) mthdbuf=%u B\n",
-              c->handle, (unsigned long long)c->gpfifo_va,
+              c->cls, c->handle, (unsigned long long)c->gpfifo_va,
               (unsigned long long)c->userd.phys, GSP_CHAN_USERD_HW_SIZE,
               (unsigned long long)c->inst_addr, c->mthdbuf_size);
     return 0;

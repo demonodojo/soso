@@ -15,18 +15,162 @@ void *memset(void *dst, int c, unsigned long n);
  * es lo primero que hace GSP-RM tras arrancar y puede tardar. */
 #define RM_TIMEOUT_MS 2000u
 
+/* Nombres de `NV_STATUS`, verificados uno a uno contra `nvstatuscodes.h` de
+ * open-gpu-kernel-modules (2026-07-28). Dos de los siete que había estaban mal:
+ * el 0x2b no es INVALID_CLASS sino INVALID_HEAP, y el 0x2f no es
+ * INVALID_OBJECT_PARENT sino INVALID_LOCK_STATE. Los de verdad son 0x22 y 0x36,
+ * y ninguno de los dos estaba en la tabla. Un nombre inventado en un mensaje de
+ * error no es un detalle cosmético: manda el diagnóstico al lado contrario,
+ * exactamente como el enum de r535 apuntando a NVLink en un portátil sin NVLink.
+ * Los que faltaban y salen en esta ruta van también: el canal es de donde han
+ * venido casi todos los rechazos. */
 static const char *rm_status_hint(uint32_t st)
 {
     switch (st) {
     case 0x00u: return "OK";
+    case 0x1eu: return "INVALID_ADDRESS";
     case 0x1fu: return "INVALID_ARGUMENT";
-    case 0x2bu: return "INVALID_CLASS";
-    case 0x2fu: return "INVALID_OBJECT_PARENT";
+    case 0x21u: return "INVALID_CHANNEL";
+    case 0x22u: return "INVALID_CLASS";
+    case 0x23u: return "INVALID_CLIENT";
+    case 0x26u: return "INVALID_DEVICE";
+    case 0x29u: return "INVALID_FLAGS";
+    case 0x2bu: return "INVALID_HEAP";
+    case 0x2fu: return "INVALID_LOCK_STATE";
+    case 0x31u: return "INVALID_OBJECT";
+    case 0x33u: return "INVALID_OBJECT_HANDLE";
+    case 0x36u: return "INVALID_OBJECT_PARENT";
+    case 0x37u: return "INVALID_OFFSET";
+    case 0x3au: return "INVALID_PARAM_STRUCT";
+    case 0x3bu: return "INVALID_PARAMETER";
+    case 0x40u: return "INVALID_STATE";
+    case 0x4fu: return "NO_FREE_FIFOS";
     case 0x51u: return "NO_MEMORY";
+    case 0x55u: return "NOT_READY";
     case 0x56u: return "NOT_SUPPORTED";
+    case 0x57u: return "OBJECT_NOT_FOUND";
+    case 0x58u: return "OBJECT_TYPE_MISMATCH";
     case 0x59u: return "OPERATING_SYSTEM";
     default:    return "?";
     }
+}
+
+/* ---- Catálogo de clases del chip -------------------------------------------
+ *
+ * Qué clases acepta esta GPU no se deduce: se pregunta. Hasta ahora el port
+ * llevaba `AMPERE_CHANNEL_GPFIFO_A` y `AMPERE_DMA_COPY_A` a pelo sobre una
+ * GB205, con un comentario que afirmaba que "GB205 comparte la ruta Ampere" —
+ * afirmación que nadie había comprobado y que `rm/gb20x.c` de nouveau
+ * desmiente: para este chip son las variantes **B de Blackwell**.
+ *
+ * El catálogo se pide una vez, tras los objetos de RM, y vale para el canal, el
+ * CE y el compute de G4f. Si la consulta falla no se aborta nada: se avisa y se
+ * usa la primera candidata, que es lo mismo que se hacía antes pero dicho. */
+static uint32_t rm_class[NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE];
+static unsigned rm_class_nr;
+static int rm_class_known;
+
+void gsp_rm_classes_forget(void)
+{
+    rm_class_nr = 0;
+    rm_class_known = 0;
+}
+
+int gsp_rm_classes_probe(struct gsp_rm *rm)
+{
+    NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS *p;
+    uint32_t status = 0;
+    unsigned i;
+
+    if (!rm || !rm->ready) {
+        return -1;
+    }
+    /* 804 B no caben en la pila de una fibra del bring-up. */
+    p = lx_kzalloc(sizeof(*p), GFP_KERNEL);
+    if (!p) {
+        lx_printk("nouveau-lx: sin memoria para el catálogo de clases\n");
+        return -1;
+    }
+    if (gsp_rm_control(rm, rm->device, NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2,
+                       p, (uint32_t)sizeof(*p), &status) != 0) {
+        lx_printk("nouveau-lx: GET_CLASSLIST_V2 rechazado (status=0x%x) — "
+                  "se tirará de la primera clase candidata\n", status);
+        lx_kfree(p);
+        return -1;
+    }
+    if (p->numClasses == 0 || p->numClasses > NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE) {
+        lx_printk("nouveau-lx: catálogo con %u clases (fuera de rango)\n",
+                  p->numClasses);
+        lx_kfree(p);
+        return -1;
+    }
+    rm_class_nr = p->numClasses;
+    for (i = 0; i < rm_class_nr; i++) {
+        rm_class[i] = p->classList[i];
+    }
+    rm_class_known = 1;
+    lx_kfree(p);
+
+    lx_printk("nouveau-lx: catálogo de clases: %u\n", rm_class_nr);
+    /* La lista entera, de ocho en ocho. Es la respuesta a "¿qué clase de canal,
+     * de CE y de compute tiene este chip?" y se paga una sola vez. */
+    for (i = 0; i < rm_class_nr; i += 8u) {
+        unsigned n = rm_class_nr - i;
+
+        if (n > 8u) {
+            n = 8u;
+        }
+        lx_printk("nouveau-lx:   [%3u] %04x %04x %04x %04x %04x %04x %04x %04x\n",
+                  i,
+                  rm_class[i], n > 1 ? rm_class[i + 1] : 0,
+                  n > 2 ? rm_class[i + 2] : 0, n > 3 ? rm_class[i + 3] : 0,
+                  n > 4 ? rm_class[i + 4] : 0, n > 5 ? rm_class[i + 5] : 0,
+                  n > 6 ? rm_class[i + 6] : 0, n > 7 ? rm_class[i + 7] : 0);
+    }
+    return 0;
+}
+
+int gsp_rm_class_supported(uint32_t cls)
+{
+    unsigned i;
+
+    if (!rm_class_known) {
+        return -1;      /* no se sabe, que no es lo mismo que "no" */
+    }
+    for (i = 0; i < rm_class_nr; i++) {
+        if (rm_class[i] == cls) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint32_t gsp_rm_class_pick(const char *what, const uint32_t *cand, unsigned n)
+{
+    unsigned i;
+
+    if (!cand || !n) {
+        return 0;
+    }
+    if (!rm_class_known) {
+        lx_printk("nouveau-lx: %s sin catálogo — se prueba 0x%04x a ciegas\n",
+                  what, cand[0]);
+        return cand[0];
+    }
+    for (i = 0; i < n; i++) {
+        if (gsp_rm_class_supported(cand[i]) == 1) {
+            lx_printk("nouveau-lx: %s → clase 0x%04x (del catálogo)\n",
+                      what, cand[i]);
+            return cand[i];
+        }
+    }
+    /* Ninguna candidata está en el catálogo: el dato importa más que el intento.
+     * Se sigue con la primera para que el log muestre qué contesta RM, pero
+     * queda dicho que la clase que vamos a pedir NO la reconoce el chip. */
+    lx_printk("nouveau-lx: %s — NINGUNA de las %u candidatas está en el "
+              "catálogo; se manda 0x%04x igual para ver qué dice RM\n",
+              what, n, cand[0]);
+    return cand[0];
 }
 
 int gsp_rm_alloc(struct gsp_rm *rm, uint32_t parent, uint32_t handle, uint32_t cls,

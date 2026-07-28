@@ -34,6 +34,7 @@ struct gsp_compute {
     struct gsp_rm *rm;
     struct gsp_chan *chan;
     uint32_t handle;
+    uint32_t cls;      /* la que aceptó RM; la elige el catálogo del chip */
     uint64_t sass_va;
     uint32_t sass_size;
     struct gsp_dma_buf data;   /* cbank0 + x + y + semáforo, en sysmem */

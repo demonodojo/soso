@@ -35,7 +35,7 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G4b | RPC síncrono (`gsp_cmdq_call`) | round-trip + anillo que envuelve, en hostcheck | **GO** (2026-07-25), sin HW todavía |
 | G4c | Objetos de RM: cliente → device → subdevice (`GSP_RM_ALLOC`) | un `NV_RM_CONTROL` que responde | **GO** (2026-07-25): `objetos RM listos cli=0xc1d00000 dev=0xde1d0000 sub=0x5d1d0000` en GB205 real |
 | G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | **escrito entero, sin probar en HW**: static info + reparto de VRAM + `FERMI_VASPACE_A` externo + tablas VER3 + `SET_PAGE_DIRECTORY`, todo cubierto en hostcheck; falta un ciclo de HW |
-| G4e | **Canal + CE** (`gsp_chan`, `gsp_ce`) | ALLOC GPFIFO/USERD/PB; copia CE + readback VRAM | **escrito + hostcheck** (2026-07-27); GO HW pendiente VFIO |
+| G4e | **Canal + CE** (`gsp_chan`, `gsp_ce`) | ALLOC GPFIFO/USERD/PB; copia CE + readback VRAM | **escrito + hostcheck** (2026-07-28, clases del catálogo del chip); GO HW pendiente VFIO |
 | G4f | QMD + kernel SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real | pendiente, **bloqueado por el toolchain** |
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
 | **L6-H** | `--cuda-host` → cuda-proxy | texto + tok/s desde soso | **GO** (2026-07-27): ~35 tok/s, Docker llama-server |
@@ -338,6 +338,26 @@ el bring-up comprueba además que **una VA sin mapear falla**. No prueba que la
 GPU traduzca: eso solo lo dice el CE moviendo bytes, en G4e. `g3-check` tiene
 los dos criterios separados por eso mismo.
 
+**Gotcha 7 (2026-07-28): las clases de objeto NO se deducen del port, las dice
+el chip.** El canal y el CE se pedían con `AMPERE_CHANNEL_GPFIFO_A` (0xc56f) y
+`AMPERE_DMA_COPY_A` sobre una GB205, apoyándose en un comentario que afirmaba
+que «GB205 comparte la ruta Ampere» — sin comprobar. `rm/gb20x.c` de nouveau
+dice lo contrario: para este chip son `BLACKWELL_CHANNEL_GPFIFO_B` (0xca6f),
+`BLACKWELL_DMA_COPY_B` (0xcab5) y `BLACKWELL_COMPUTE_B` (0xcec0) — la de compute
+también estaba mal (teníamos la **A**, que es de GB100). Ahora
+`gsp_rm_classes_probe` pide `GET_CLASSLIST_V2` (0x800292, **la V2**: la vieja
+devuelve la lista por un `NvP64` del llamante, inútil por RPC) y
+`gsp_rm_class_pick` elige la primera candidata que esté en el catálogo. Sin
+catálogo se usa la primera y se dice en el log. La lista completa se vuelca al
+serie: de ahí sale también la clase de compute de G4f.
+
+**Y el `0x3b` no era la clase**: `INVALID_CLASS` es **0x22**. La tabla
+`rm_status_hint` del port llamaba INVALID_CLASS al 0x2b (que es `INVALID_HEAP`) y
+INVALID_OBJECT_PARENT al 0x2f (que es `INVALID_LOCK_STATE`); dos de siete
+entradas inventadas. Verificada entera contra `nvstatuscodes.h` el 2026-07-28.
+Mismo vicio que el enum de r535 apuntando a NVLink: **un nombre falso en un
+mensaje de error manda el diagnóstico al lado contrario.**
+
 **Gotcha 6 (2026-07-25): soltar la tarjeta con el GSP vivo cuelga el host.**
 Una prueba VFIO congeló la máquina entera. **No fue un panic**: `efi_pstore` está
 registrado en este equipo y capturó el GPF de `drm_framebuffer_cleanup` del día
@@ -404,7 +424,11 @@ FSP se detecta. Cubre además el lado G4: la cadena de objetos de RM, que
 2/2** (el vaspace externo con su cliente propio, el `SET_PAGE_DIRECTORY` con sus
 2 entradas en sysmem, los 512 PTEs y los PDEs bit a bit contra dev_mmu.h, que
 fuera del mapeo no traduzca, el reparto de VRAM y que el fini quite el
-directorio antes de soltar las tablas), **G4e** (canal GPFIFO + CE: `check_g4e_chan_ce`,
+directorio antes de soltar las tablas), **el catálogo de clases** (`check_classlist`:
+que se pida `GET_CLASSLIST_V2` sobre el device con sus 804 B, y que la elección
+**cambie** con el catálogo — dos chips simulados, uno Blackwell y otro Ampere, que
+tienen que dar clases distintas; un `pick` que devolviera siempre la primera pasaría
+una prueba de un solo chip), **G4e** (canal GPFIFO + CE: `check_g4e_chan_ce`,
 ALLOC, pushbuffer, fini CE→canal→VMM), y el apagado
 —`FREE` con fn=10, el unload con fn=47, el handshake del mailbox y que **el bus
 master se quite aunque no haya RPC vivo** (gotcha 6).

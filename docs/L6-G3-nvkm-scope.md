@@ -98,6 +98,31 @@ solo **4 dummies restantes, TODOS HW/ROM** (`nvbios_image`/`nvbios_shadow`/`bit_
 pendiente de ciclo VFIO. Siguiente tras GO G4e: **G4f** (SASS). G3b y G4a–c ya
 validados en GB205 (2026-07-25).
 
+#### Las clases no se deducen, se preguntan (2026-07-28)
+
+El port pedía `AMPERE_CHANNEL_GPFIFO_A` (0xc56f) y `AMPERE_DMA_COPY_A` (0xc6b5)
+en una GB205, sobre un comentario que afirmaba que «GB205 comparte la ruta
+Ampere en RM 570.144». Nadie lo había comprobado y es **falso**:
+`nvkm/subdev/gsp/rm/gb20x.c` de nouveau usa para este chip
+`BLACKWELL_CHANNEL_GPFIFO_B` (0xca6f), `BLACKWELL_DMA_COPY_B` (0xcab5) y
+`BLACKWELL_COMPUTE_B` (0xcec0). La tercera también estaba mal aquí: teníamos
+apuntada la **A** de compute (0xcdc0), que es de GB100.
+
+En vez de cambiar tres `#define` por otros tres —que es la misma apuesta con
+otros números—, el catálogo lo da la tarjeta: `gsp_rm_classes_probe` pide
+`NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2` (0x800292) sobre el device y
+`gsp_rm_class_pick` coge la primera candidata que el chip reconozca, de más
+nueva a más vieja. **La V2 y no la de siempre**: `GET_CLASSLIST` (0x800201)
+devuelve la lista por un `NvP64` que apunta a memoria del llamante, y un puntero
+al otro lado de un RPC no significa nada; la V2 lleva el array dentro de los
+params (804 B, dentro de `RM_PARAMS_MAX`). Si la consulta falla no se aborta:
+cada objeto pide su primera candidata **y lo dice en el log**, que es lo que se
+hacía antes sin decirlo.
+
+Ojo a la lectura del `0x3b` en este contexto: `INVALID_CLASS` es **0x22**, así
+que el rechazo del canal que se vio en HW no era por la clase. Era el
+`engineType` (GR5 en vez de COPY0) y ese arreglo aún no ha pasado por hardware.
+
 ### Ola 2 — ACR + falcon (lx-native, antes del port nvkm completo)
 
 | Módulo lx | Notas |

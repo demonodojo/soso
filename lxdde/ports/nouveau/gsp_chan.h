@@ -28,6 +28,9 @@ struct gsp_chan {
     struct gsp_rm *rm;
     struct gsp_vmm *vmm;
     uint32_t handle;
+    /* Clase con la que RM aceptó el canal. No es un `#define` porque depende
+     * del chip y la dice su catálogo (`gsp_rm_class_pick`). */
+    uint32_t cls;
     struct gsp_dma_buf gpfifo;
     struct gsp_dma_buf userd;
     struct gsp_dma_buf pushbuf;

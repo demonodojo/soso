@@ -560,6 +560,12 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
                 if (gsp_rm_init(&g_cmdq, &g_rpc, &g_rm_obj) == 0) {
                     g_phase = GSP_RM_OBJECTS;
 
+                    /* Qué clases tiene este chip, preguntado y no supuesto. Va
+                     * antes que nada porque lo usan el canal, el CE y el
+                     * compute; si falla, cada uno pide su candidata a ciegas y
+                     * lo dice, que es lo que se hacía hasta ahora sin decirlo. */
+                    (void)gsp_rm_classes_probe(&g_rm_obj);
+
                     /* G4d: el mapa de VRAM utilizable sale de aquí, no del WPR
                      * meta — en la ruta FMC esos offsets los pone el FMC y no
                      * los devuelve. Se contrasta contra la VRAM que ya leímos

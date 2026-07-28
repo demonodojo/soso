@@ -164,12 +164,19 @@ pub fn run(_args: &[String]) {
         "G4d traducción releída de las tablas (log)",
         log_contains(&log, "traducción verificada") && !gpu_gone,
     );
+    // Qué clases dice tener el chip. No es un gate: es el dato que decide qué
+    // clase de canal, de CE y de compute se piden, y hasta el 2026-07-28 se
+    // suponía (mal: se pedían las de Ampere en una Blackwell).
+    print_criterion(
+        "G4e catálogo de clases del chip (log)",
+        log_contains(&log, "catálogo de clases:") && !gpu_gone,
+    );
     // G4e es el primer criterio que no se puede satisfacer leyendo registros:
     // exige que la GPU haya movido bytes por nuestras tablas de páginas. El
     // "canal armado" va aparte justamente para que no se confunda con el GO.
     print_criterion(
         "G4e canal GPFIFO + CE armados (log)",
-        log_contains(&log, "CE listo handle=") && !gpu_gone,
+        log_contains(&log, "CE listo cls=") && !gpu_gone,
     );
     print_criterion(
         "G4e GO: readback sysmem→VRAM→sysmem (log)",
@@ -177,7 +184,7 @@ pub fn run(_args: &[String]) {
     );
     print_criterion(
         "G4f SASS en VRAM + compute armado (log)",
-        log_contains(&log, "SASS de ") && log_contains(&log, "compute listo handle=")
+        log_contains(&log, "SASS de ") && log_contains(&log, "compute listo cls=")
             && !gpu_gone,
     );
     print_criterion(

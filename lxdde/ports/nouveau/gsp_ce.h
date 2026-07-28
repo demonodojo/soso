@@ -17,6 +17,7 @@ struct gsp_ce {
     struct gsp_rm *rm;
     struct gsp_chan *chan;
     uint32_t handle;
+    uint32_t cls;      /* la que aceptó RM; la elige el catálogo del chip */
     uint32_t seq;      /* payload del semáforo: uno por copia, monótono */
     uint32_t pending;  /* payload de la última copia encolada */
     int ready;

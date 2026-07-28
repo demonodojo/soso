@@ -502,6 +502,23 @@ typedef struct NV_VASPACE_ALLOCATION_PARAMETERS
 #define NV0080_CTRL_CMD_DMA_SET_PAGE_DIRECTORY   0x801813u
 #define NV0080_CTRL_CMD_DMA_UNSET_PAGE_DIRECTORY 0x801814u
 
+/* Catálogo de clases del chip. **V2 y no la de siempre**: la primera
+ * (`GET_CLASSLIST`, 0x800201) devuelve la lista por un `NvP64 classList` que
+ * apunta a memoria del llamante — un puntero que al otro lado del RPC no
+ * significa nada. La V2 lleva el array dentro de los params, que es lo que
+ * cabe en un mensaje. 804 B de ida, dentro de RM_PARAMS_MAX. */
+#define NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2     0x800292u
+#define NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE       200u
+
+typedef struct NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS
+{
+    NvU32                   numClasses;
+    NvU32                   classList[NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE];
+} NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS;
+
+typedef char nv0080_classlist_size_check[
+    sizeof(NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS) == 804 ? 1 : -1];
+
 typedef struct NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS
 {
     NvU64                   physAddress;
@@ -553,13 +570,32 @@ typedef char nv0080_set_pd_size_check[
 /* ---- Canal GPFIFO + CE (G4e) -----------------------------------------------
  *
  * Referencias: `class/clc56f.h`, `class/clc6b5.h`, `alloc/alloc_channel.h`
- * (open-gpu-kernel-modules). Ampere/Blackwell usan AMPERE_CHANNEL_GPFIFO_A
- * y AMPERE_DMA_COPY_A; GB205 comparte la ruta Ampere en RM 570.144. */
+ * (open-gpu-kernel-modules), `include/nvif/class.h` de nouveau.
+ *
+ * **GB20x NO comparte la ruta Ampere** — eso era una suposición y estaba mal.
+ * `nvkm/subdev/gsp/rm/gb20x.c` de nouveau dice para este chip:
+ * canal = `BLACKWELL_CHANNEL_GPFIFO_B`, CE = `BLACKWELL_DMA_COPY_B`,
+ * compute = `BLACKWELL_COMPUTE_B`. Ninguna de las tres es la que pedíamos.
+ *
+ * Aun así aquí no se elige por familia: se pregunta. `GET_CLASSLIST_V2` da la
+ * lista exacta de clases del chip y `gsp_rm_class_pick` coge la primera de la
+ * lista de candidatas que RM reconozca. Una tabla por familia es otra tabla que
+ * se queda vieja con el siguiente chip; el catálogo lo dice la tarjeta. */
 #define NV_MAX_SUBDEVICES 32u
 
-#define AMPERE_CHANNEL_GPFIFO_A  0x0000c56fu
-#define AMPERE_DMA_COPY_A          0x0000c6b5u
+#define AMPERE_CHANNEL_GPFIFO_A    0x0000c56fu
+#define AMPERE_CHANNEL_GPFIFO_B    0x0000c76fu
+#define HOPPER_CHANNEL_GPFIFO_A    0x0000c86fu
+#define BLACKWELL_CHANNEL_GPFIFO_A 0x0000c96fu
+#define BLACKWELL_CHANNEL_GPFIFO_B 0x0000ca6fu
 
+#define AMPERE_DMA_COPY_A          0x0000c6b5u
+#define AMPERE_DMA_COPY_B          0x0000c7b5u
+#define HOPPER_DMA_COPY_A          0x0000c8b5u
+#define BLACKWELL_DMA_COPY_A       0x0000c9b5u
+#define BLACKWELL_DMA_COPY_B       0x0000cab5u
+
+/* Handle, no clase: sale de un espacio propio y da igual qué DMA_COPY sea. */
 #define NVKM_RM_CE0                0xc6b50000u
 
 /* `NV2080_ENGINE_TYPE_COPY0` de `rm/r535/nvrm/engine.h`. **9, no 6**: la tabla
@@ -742,8 +778,17 @@ typedef char nv_memory_desc_size_check[sizeof(NV_MEMORY_DESC_PARAMS) == 24 ? 1 :
 typedef char nvc56f_control_size_check[sizeof(Nvc56fControl) == 512 ? 1 : -1];
 
 /* ---- Compute Blackwell + QMD v05 (G4f) ------------------------------------
- * Referencias: `classes/compute/clcdc0.h`, `clcdc0qmd.h` (open-gpu-doc). */
+ * Referencias: `classes/compute/clcdc0.h`, `clcdc0qmd.h` (open-gpu-doc).
+ *
+ * GB20x usa la **B** (`BLACKWELL_COMPUTE_B`, `rm/gb20x.c`); la A es de GB100.
+ * Como con el canal, la elige el catálogo y no un `#define`. Los métodos
+ * `NVCDC0_*` valen para las dos: cambia la clase, no el encoding. */
+#define AMPERE_COMPUTE_A          0x0000c6c0u
+#define AMPERE_COMPUTE_B          0x0000c7c0u
+#define ADA_COMPUTE_A             0x0000c9c0u
+#define HOPPER_COMPUTE_A          0x0000cbc0u
 #define BLACKWELL_COMPUTE_A       0x0000cdc0u
+#define BLACKWELL_COMPUTE_B       0x0000cec0u
 #define NVKM_RM_COMPUTE0          0xcdc00000u
 
 #define GSP_QMD_VERSION_CURRENT   5u

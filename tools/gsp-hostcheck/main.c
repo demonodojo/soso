@@ -707,7 +707,12 @@ static int check_rm_objects(const struct gsp_libos *lo)
     /* Y un NV_STATUS dentro del wrapper tiene que salir como fallo — es el que
      * llega con el RPC impecable y un error de RM dentro. */
     memset(&ok, 0, sizeof(ok));
-    ok.status = 0x2bu;   /* INVALID_CLASS */
+    /* 0x22, que es INVALID_CLASS de verdad. Aquí ponía 0x2b siguiendo la tabla
+     * de nombres del port, que lo llamaba así y no lo es: el 0x2b es
+     * INVALID_HEAP. El valor daba igual para lo que prueba este caso —que un
+     * NV_STATUS dentro de un wrapper impecable se detecte— pero un nombre falso
+     * en una prueba se copia luego a un diagnóstico. */
+    ok.status = 0x22u;   /* INVALID_CLASS */
     base = *rpc.rptr;
     fake_rpc_post_payload(lo, base % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC, 0,
                           (const unsigned char *)&ok, (uint32_t)sizeof(ok));
@@ -722,12 +727,12 @@ static int check_rm_objects(const struct gsp_libos *lo)
             printf("FALLO: un NV_STATUS de RM se dio por bueno\n");
             return -1;
         }
-        if (st != 0x2bu) {
+        if (st != 0x22u) {
             printf("FALLO: NV_STATUS del wrapper no propagado (0x%x)\n", st);
             return -1;
         }
     }
-    printf("OK: el NV_STATUS de dentro del wrapper se detecta (0x2b = INVALID_CLASS)\n");
+    printf("OK: el NV_STATUS de dentro del wrapper se detecta (0x22 = INVALID_CLASS)\n");
 
     /* G4d: GET_GSP_STATIC_INFO. Se fabrica una respuesta con VRAM y nombre
      * conocidos y se comprueba que los campos se leen de donde deben — que es
@@ -1304,6 +1309,161 @@ static int check_compute_params(struct gsp_compute *cp)
  * pregunte y que lo contestado llegue tal cual al descriptor. */
 #define FAKE_MTHDBUF_SIZE  0x1000u
 
+/* Catálogo de clases: que se pida bien y que lo contestado mande de verdad.
+ *
+ * Lo que hace falta demostrar aquí no es que la petición salga —eso es fácil—
+ * sino que la elección **cambia con el catálogo**. Un `pick` que siempre
+ * devuelve la primera candidata pasaría cualquier prueba que solo mirase el
+ * caso Blackwell, y sería exactamente el bug que trae este cambio: elegir a
+ * ciegas creyendo que se está preguntando. Por eso hay dos catálogos, uno de
+ * cada familia, y se exige que salgan clases distintas. */
+static int check_classlist(const struct gsp_libos *lo)
+{
+    struct gsp_rpc rpc;
+    struct gsp_cmdq q;
+    struct gsp_rm rm;
+    struct gsp_msgq_headers *msgq =
+        (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->msgq_offset);
+    unsigned char *cmdq_base = (unsigned char *)lo->shm.va + lo->cmdq_offset;
+    rpc_gsp_rm_alloc ok;
+    uint32_t base;
+    uint32_t wptr0;
+    unsigned i;
+    static const uint32_t chan_cand[] = {
+        BLACKWELL_CHANNEL_GPFIFO_B, BLACKWELL_CHANNEL_GPFIFO_A,
+        HOPPER_CHANNEL_GPFIFO_A, AMPERE_CHANNEL_GPFIFO_B,
+        AMPERE_CHANNEL_GPFIFO_A,
+    };
+    static const uint32_t ce_cand[] = {
+        BLACKWELL_DMA_COPY_B, BLACKWELL_DMA_COPY_A, HOPPER_DMA_COPY_A,
+        AMPERE_DMA_COPY_B, AMPERE_DMA_COPY_A,
+    };
+    /* Dos chips de mentira. El de Blackwell lleva las clases que `rm/gb20x.c`
+     * dice para GB205; el de Ampere, las de una GA10x. Ninguno de los dos lleva
+     * las del otro: si el pick no mira el catálogo, uno de los dos falla. */
+    static const uint32_t cat_blackwell[] = {
+        0x0000u, 0x0080u, 0x2080u, BLACKWELL_CHANNEL_GPFIFO_B,
+        BLACKWELL_DMA_COPY_B, BLACKWELL_COMPUTE_B, 0x902du,
+    };
+    static const uint32_t cat_ampere[] = {
+        0x0000u, 0x0080u, 0x2080u, AMPERE_CHANNEL_GPFIFO_A,
+        AMPERE_DMA_COPY_A, AMPERE_COMPUTE_B,
+    };
+    const struct {
+        const char *name;
+        const uint32_t *list;
+        unsigned nr;
+        uint32_t want_chan;
+        uint32_t want_ce;
+    } chip[2] = {
+        { "gb20x",  cat_blackwell,
+          (unsigned)(sizeof(cat_blackwell) / sizeof(cat_blackwell[0])),
+          BLACKWELL_CHANNEL_GPFIFO_B, BLACKWELL_DMA_COPY_B },
+        { "ga10x",  cat_ampere,
+          (unsigned)(sizeof(cat_ampere) / sizeof(cat_ampere[0])),
+          AMPERE_CHANNEL_GPFIFO_A, AMPERE_DMA_COPY_A },
+    };
+
+    if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (cls)\n"); return -1; }
+    if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (cls)\n"); return -1; }
+
+    memset(&ok, 0, sizeof(ok));
+    base = *rpc.rptr;
+    for (i = 0; i < 3; i++) {
+        fake_rpc_post_payload(lo, (base + i) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                              0, (const unsigned char *)&ok, (uint32_t)sizeof(ok));
+    }
+    msgq->tx.writePtr = (base + 3) % 63;
+    if (gsp_rm_init(&q, &rpc, &rm) != 0) {
+        printf("FALLO: gsp_rm_init (cls)\n");
+        return -1;
+    }
+
+    /* Sin catálogo: `supported` no puede decir "no", tiene que decir "no sé". */
+    gsp_rm_classes_forget();
+    if (gsp_rm_class_supported(BLACKWELL_CHANNEL_GPFIFO_B) != -1) {
+        printf("FALLO: sin catálogo, supported() no devuelve -1\n");
+        return -1;
+    }
+    if (gsp_rm_class_pick("canal (sin catálogo)", chan_cand, 5) != chan_cand[0]) {
+        printf("FALLO: sin catálogo el pick no cae en la primera candidata\n");
+        return -1;
+    }
+    printf("OK: sin catálogo, 'no se sabe' (-1) y se prueba la primera candidata\n");
+
+    for (i = 0; i < 2; i++) {
+        unsigned char *reply = calloc(1, sizeof(rpc_gsp_rm_control) +
+                                         sizeof(NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS));
+        NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS *cl;
+        uint32_t chan_cls;
+        uint32_t ce_cls;
+        unsigned k;
+
+        if (!reply) { printf("FALLO: sin memoria (cls)\n"); return -1; }
+        cl = (NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS *)
+                 (reply + sizeof(rpc_gsp_rm_control));
+        cl->numClasses = chip[i].nr;
+        for (k = 0; k < chip[i].nr; k++) {
+            cl->classList[k] = chip[i].list[k];
+        }
+
+        base = *rpc.rptr;
+        fake_rpc_post_payload(lo, base % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL, 0,
+                              reply, (uint32_t)(sizeof(rpc_gsp_rm_control) +
+                                  sizeof(NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS)));
+        msgq->tx.writePtr = (base + 1) % 63;
+
+        wptr0 = *q.wptr;
+        gsp_rm_classes_forget();
+        if (gsp_rm_classes_probe(&rm) != 0) {
+            printf("FALLO: gsp_rm_classes_probe (%s)\n", chip[i].name);
+            free(reply);
+            return -1;
+        }
+        free(reply);
+
+        /* La petición: control de device, mandado entero (gotcha 5). */
+        {
+            const unsigned char *entry = cmdq_base + 4096 +
+                                         (unsigned long)(wptr0 % 63) * 4096;
+            const struct gsp_rpc_hdr *hdr =
+                (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+            const rpc_gsp_rm_control *c = (const rpc_gsp_rm_control *)(hdr + 1);
+
+            if (c->cmd != NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2 ||
+                c->hObject != NVKM_RM_DEVICE ||
+                c->paramsSize != sizeof(NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS)) {
+                printf("FALLO: GET_CLASSLIST_V2 cmd=0x%x obj=0x%08x params=%u "
+                       "(esperaba 0x%x/0x%08x/%zu)\n",
+                       c->cmd, c->hObject, c->paramsSize,
+                       NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2, NVKM_RM_DEVICE,
+                       sizeof(NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS));
+                return -1;
+            }
+        }
+
+        chan_cls = gsp_rm_class_pick("canal", chan_cand, 5);
+        ce_cls = gsp_rm_class_pick("CE", ce_cand, 5);
+        if (chan_cls != chip[i].want_chan || ce_cls != chip[i].want_ce) {
+            printf("FALLO: %s eligió canal=0x%04x CE=0x%04x (esperaba "
+                   "0x%04x/0x%04x)\n", chip[i].name, chan_cls, ce_cls,
+                   chip[i].want_chan, chip[i].want_ce);
+            return -1;
+        }
+        if (gsp_rm_class_supported(chip[i].want_chan) != 1 ||
+            gsp_rm_class_supported(0xdeadu) != 0) {
+            printf("FALLO: supported() no distingue del catálogo (%s)\n",
+                   chip[i].name);
+            return -1;
+        }
+        printf("OK: catálogo %s (%u clases) → canal 0x%04x, CE 0x%04x\n",
+               chip[i].name, chip[i].nr, chan_cls, ce_cls);
+    }
+
+    gsp_rm_classes_forget();
+    return 0;
+}
+
 static int check_g4e_chan_ce(const struct gsp_libos *lo)
 {
     struct gsp_rpc rpc;
@@ -1327,6 +1487,11 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
 
     printf("sizeof NV_CHANNEL_ALLOC_PARAMS=%zu Nvc56fControl=%zu\n",
            sizeof(NV_CHANNEL_ALLOC_PARAMS), sizeof(Nvc56fControl));
+
+    /* Este escenario corre SIN catálogo a propósito: comprueba la ruta a ciegas,
+     * que es la que se toma si GET_CLASSLIST_V2 falla en hardware. Las clases
+     * esperadas son entonces las primeras candidatas (las B de Blackwell). */
+    gsp_rm_classes_forget();
 
     if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (g4e)\n"); return -1; }
     if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (g4e)\n"); return -1; }
@@ -1394,7 +1559,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         const NV_CHANNEL_ALLOC_PARAMS *p =
             (const NV_CHANNEL_ALLOC_PARAMS *)(a + 1);
 
-        if (a->hClass != AMPERE_CHANNEL_GPFIFO_A ||
+        if (a->hClass != BLACKWELL_CHANNEL_GPFIFO_B ||
             a->hObject != NVKM_RM_CHAN(0) ||
             a->hParent != NVKM_RM_DEVICE) {
             printf("FALLO: canal cls=0x%x obj=0x%08x padre=0x%08x\n",
@@ -1512,7 +1677,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     printf("OK: canal contra r535_chan_alloc — flags 0x%08x, GPFIFO por VA, "
            "USERD 0x200, method buffer propio de %u B\n",
            0x00200020u, chan.mthdbuf_size);
-    printf("OK: AMPERE_CHANNEL_GPFIFO_A alloc params (layout r570, inst+ramfc en VRAM)\n");
+    printf("OK: BLACKWELL_CHANNEL_GPFIFO_B alloc params (layout r570, inst+ramfc en VRAM)\n");
 
     if (chan.userd_ctl->GPPut != 0 || chan.gpput != 0) {
         printf("FALLO: USERD/GPPut no arrancan en cero\n");
@@ -1531,14 +1696,14 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
 
-        if (a->hClass != AMPERE_DMA_COPY_A || a->hObject != NVKM_RM_CE0 ||
+        if (a->hClass != BLACKWELL_DMA_COPY_B || a->hObject != NVKM_RM_CE0 ||
             a->hParent != NVKM_RM_CHAN(0)) {
             printf("FALLO: CE cls=0x%x obj=0x%08x padre=0x%08x\n",
                    a->hClass, a->hObject, a->hParent);
             return -1;
         }
     }
-    printf("OK: AMPERE_DMA_COPY_A colgado del canal\n");
+    printf("OK: BLACKWELL_DMA_COPY_B colgado del canal\n");
 
     if (gsp_ce_encode_copy(&ce, GSP_CHAN_VA_BASE + 8192ull,
                            GSP_CHAN_VA_BASE + 12288ull, 4096,
@@ -1609,13 +1774,13 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             printf("FALLO: gsp_compute_init\n");
             return -1;
         }
-        if (a->hClass != BLACKWELL_COMPUTE_A || a->hObject != NVKM_RM_COMPUTE0 ||
+        if (a->hClass != BLACKWELL_COMPUTE_B || a->hObject != NVKM_RM_COMPUTE0 ||
             a->hParent != NVKM_RM_CHAN(0)) {
             printf("FALLO: compute cls=0x%x obj=0x%08x padre=0x%08x\n",
                    a->hClass, a->hObject, a->hParent);
             return -1;
         }
-        printf("OK: BLACKWELL_COMPUTE_A colgado del canal\n");
+        printf("OK: BLACKWELL_COMPUTE_B colgado del canal\n");
 
         gsp_compute_fill_saxpy_qmd(&cp, &qmd, G4F_SASS_VA, 4);
         if (check_qmd_fields(&cp, &qmd) != 0)
@@ -2014,6 +2179,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_rpc_sync(&lo) != 0)
         return -1;
     if (check_rm_objects(&lo) != 0)
+        return -1;
+    if (check_classlist(&lo) != 0)
         return -1;
     if (check_vmm(&lo) != 0)
         return -1;

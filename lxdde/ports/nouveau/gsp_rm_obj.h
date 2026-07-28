@@ -51,6 +51,23 @@ int gsp_rm_client_new(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm
 /* El cliente 0, el del bring-up. */
 int gsp_rm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_rm *rm);
 
+/* Catálogo de clases del chip (`GET_CLASSLIST_V2`), una vez tras los objetos de
+ * RM. Sin él las clases se piden a ciegas; con él, `gsp_rm_class_pick` elige. */
+int gsp_rm_classes_probe(struct gsp_rm *rm);
+
+/* 1 = sí, 0 = no, **-1 = no se sabe** (nadie ha pedido el catálogo o falló). Los
+ * tres casos son distintos y colapsar el -1 con el 0 haría que un catálogo
+ * ausente pareciera un chip sin clases. */
+int gsp_rm_class_supported(uint32_t cls);
+
+/* La primera de `cand` que el chip reconozca, de más nueva a más vieja. Sin
+ * catálogo devuelve `cand[0]` diciéndolo. Nunca devuelve 0 salvo lista vacía. */
+uint32_t gsp_rm_class_pick(const char *what, const uint32_t *cand, unsigned n);
+
+/* Sólo para pruebas: tira el catálogo para que el siguiente escenario empiece
+ * sin saber nada. En el kernel no hay nada que lo llame. */
+void gsp_rm_classes_forget(void);
+
 /* Lo que sacamos de `GET_GSP_STATIC_INFO`: el mapa de VRAM utilizable y los
  * regalos de RM (su juego interno de objetos y las bases de las tablas de
  * páginas de BAR1/BAR2, que RM ya ha construido). */
