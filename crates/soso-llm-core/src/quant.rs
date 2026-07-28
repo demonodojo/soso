@@ -75,6 +75,119 @@ pub(crate) fn q4k_scale_min(scales: &[u8], j: usize) -> (u8, u8) {
     }
 }
 
+/// Inverso de `q4k_scale_min`: mete ocho pares (escala, mínimo) de 6 bits en 12
+/// bytes. Vivía en los tests y ahora hace falta de verdad para poder CUANTIZAR;
+/// sigue cubierto por `q4k_scale_min_roundtrip`, que es lo que ata las dos mitades.
+pub(crate) fn q4k_pack_scales(sc: [u8; 8], m: [u8; 8]) -> [u8; 12] {
+    let mut s = [0u8; 12];
+    for j in 0..4 {
+        s[j] = (sc[j] & 63) | ((sc[j + 4] >> 4) << 6);
+        s[j + 4] = (m[j] & 63) | ((m[j + 4] >> 4) << 6);
+        s[j + 8] = (sc[j + 4] & 0x0F) | ((m[j + 4] & 0x0F) << 4);
+    }
+    s
+}
+
+/// Cuantiza a superbloques Q4_K (256 elementos), formato GGML exacto.
+///
+/// **Existe para poder PROBAR el camino Q4_K.** El descuantizador está desde L2
+/// porque los modelos vienen de GGUF ya cuantizados, así que no había forma de
+/// sintetizar un modelo Q4_K y el camino sólo se ejercitaba con un modelo real de
+/// gigabytes — o no se ejercitaba, que es lo que pasaba con el offload a GPU.
+///
+/// Cada sub-bloque de 32 elementos se reconstruye como `v = (d·sc)·q - (dmin·m)`
+/// con `q` de 4 bits, `sc`/`m` de 6 y `d`/`dmin` en f16 compartidos por el
+/// superbloque. Dos detalles que no son evidentes:
+///
+///  1. **El rango de cada sub-bloque se estira hasta incluir el 0.** `dmin` es uno
+///     para los ocho sub-bloques y `m` no tiene signo, así que un sub-bloque cuyo
+///     mínimo fuese positivo no se podría representar con el desplazamiento que le
+///     toca. Forzar `lo ≤ 0 ≤ hi` cuesta precisión y siempre es representable.
+///  2. **Los `q` se calculan con la escala EFECTIVA**, la que queda después de
+///     redondear `d`/`dmin` a f16 y `sc`/`m` a 6 bits — no con la ideal. Con la
+///     ideal, el error de redondeo de las escalas se suma al de los `q` en vez de
+///     compensarse, y el round-trip empeora visiblemente.
+pub fn quantize_q4_k(src: &[f32]) -> Vec<u8> {
+    let blocks = src.len().div_ceil(Q4_K_BLOCK_ELEMS);
+    let mut out = Vec::with_capacity(blocks * Q4_K_BLOCK_BYTES);
+
+    for b in 0..blocks {
+        let base = b * Q4_K_BLOCK_ELEMS;
+        let val = |i: usize| -> f32 { src.get(base + i).copied().unwrap_or(0.0) };
+
+        // Paso 1: escala y desplazamiento ideales de cada sub-bloque.
+        let mut s_ideal = [0.0f32; 8];
+        let mut o_ideal = [0.0f32; 8];
+        for j in 0..8 {
+            let mut lo = 0.0f32;
+            let mut hi = 0.0f32;
+            for l in 0..32 {
+                let v = val(j * 32 + l);
+                if v < lo {
+                    lo = v;
+                }
+                if v > hi {
+                    hi = v;
+                }
+            }
+            s_ideal[j] = (hi - lo) / 15.0;
+            o_ideal[j] = -lo;
+        }
+
+        // Paso 2: d y dmin, los dos factores f16 del superbloque.
+        let max_s = s_ideal.iter().fold(0.0f32, |a, &v| if v > a { v } else { a });
+        let max_o = o_ideal.iter().fold(0.0f32, |a, &v| if v > a { v } else { a });
+        let d_bits = crate::f16::f32_to_f16(max_s / 63.0);
+        let dmin_bits = crate::f16::f32_to_f16(max_o / 63.0);
+        let d = crate::f16::f16_to_f32(d_bits);
+        let dmin = crate::f16::f16_to_f32(dmin_bits);
+
+        // Paso 3: sc y m de 6 bits, y las escalas EFECTIVAS que salen de ahí.
+        let mut sc = [0u8; 8];
+        let mut m = [0u8; 8];
+        for j in 0..8 {
+            sc[j] = if d > 0.0 {
+                libm::roundf(s_ideal[j] / d).clamp(0.0, 63.0) as u8
+            } else {
+                0
+            };
+            m[j] = if dmin > 0.0 {
+                libm::roundf(o_ideal[j] / dmin).clamp(0.0, 63.0) as u8
+            } else {
+                0
+            };
+        }
+
+        out.extend_from_slice(&d_bits.to_le_bytes());
+        out.extend_from_slice(&dmin_bits.to_le_bytes());
+        out.extend_from_slice(&q4k_pack_scales(sc, m));
+
+        // Paso 4: los nibbles. El byte `pair*32+l` lleva el elemento `pair*64+l`
+        // en la mitad baja y el `pair*64+32+l` en la alta (igual que lee el
+        // descuantizador; invertirlo daría un tensor con las mitades cruzadas y
+        // ningún error).
+        for pair in 0..4 {
+            let (s1, o1) = (d * sc[2 * pair] as f32, dmin * m[2 * pair] as f32);
+            let (s2, o2) = (d * sc[2 * pair + 1] as f32, dmin * m[2 * pair + 1] as f32);
+            for l in 0..32 {
+                let q1 = quantize_nibble(val(pair * 64 + l), s1, o1);
+                let q2 = quantize_nibble(val(pair * 64 + 32 + l), s2, o2);
+                out.push(q1 | (q2 << 4));
+            }
+        }
+    }
+    out
+}
+
+/// `q = round((v + o) / s)` acotado a 4 bits. `s == 0` (sub-bloque constante) da 0,
+/// que reconstruye exactamente `-o`.
+fn quantize_nibble(v: f32, s: f32, o: f32) -> u8 {
+    if s <= 0.0 {
+        return 0;
+    }
+    libm::roundf((v + o) / s).clamp(0.0, 15.0) as u8
+}
+
 /// Descuantiza `out.len()` elementos Q4_K a partir del elemento `elem_off`.
 pub fn dequant_q4_k_range(bytes: &[u8], elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
     if bytes.len() % Q4_K_BLOCK_BYTES != 0 || out.is_empty() {
@@ -157,15 +270,9 @@ mod tests {
         }
     }
 
-    /// Inverso de q4k_scale_min para construir bloques de test.
+    /// El empaquetado ya no es del test: lo usa `quantize_q4_k`.
     fn pack_scales(sc: [u8; 8], m: [u8; 8]) -> [u8; 12] {
-        let mut s = [0u8; 12];
-        for j in 0..4 {
-            s[j] = (sc[j] & 63) | ((sc[j + 4] >> 4) << 6);
-            s[j + 4] = (m[j] & 63) | ((m[j + 4] >> 4) << 6);
-            s[j + 8] = (sc[j + 4] & 0x0F) | ((m[j + 4] & 0x0F) << 4);
-        }
-        s
+        q4k_pack_scales(sc, m)
     }
 
     fn q4k_block_test() -> (Vec<u8>, [u8; 8], [u8; 8], f32, f32) {
@@ -183,6 +290,120 @@ mod tests {
             blk.push(((i % 16) | (((i * 7) % 16) << 4)) as u8);
         }
         (blk, sc, m, f16_to_f32(d_bits), f16_to_f32(dmin_bits))
+    }
+
+    /// Round-trip Q4_K: cuantizar y descuantizar tiene que devolver algo cercano.
+    ///
+    /// La tolerancia no es un número bonito: con 4 bits por elemento y el rango
+    /// estirado hasta el 0, el error máximo esperable es ~rango/15 por sub-bloque,
+    /// y se comprueba CONTRA ESO en vez de contra una constante global — así el test
+    /// sigue siendo estricto si alguien cambia los datos de prueba.
+    #[test]
+    fn q4k_roundtrip_aproximado() {
+        // Dos superbloques con sub-bloques de rangos distintos —pero dentro de lo
+        // que el formato puede representar, ver `q4k_rango_dinamico_del_formato`—,
+        // incluidos uno todo-positivo, uno todo-negativo y uno constante, que son
+        // los tres casos donde el desplazamiento (`m`) se comporta distinto.
+        let src: Vec<f32> = (0..512)
+            .map(|i| {
+                let sub = (i / 32) % 8;
+                let t = (i % 32) as f32 / 31.0;
+                match sub {
+                    0 => t * 20.0 - 10.0,     // rango ancho centrado en 0
+                    1 => t * 1.5 + 0.5,       // todo positivo (fuerza lo=0)
+                    2 => -t * 2.0,            // todo negativo
+                    3 => 7.0,                 // constante
+                    _ => (i as f32 % 13.0) - 6.0,
+                }
+            })
+            .collect();
+        let packed = quantize_q4_k(&src);
+        assert_eq!(packed.len(), 2 * Q4_K_BLOCK_BYTES);
+        let mut out = vec![0.0f32; src.len()];
+        dequant_q4_k(&packed, &mut out).unwrap();
+
+        for sb in 0..src.len() / 32 {
+            let ini = sb * 32;
+            let trozo = &src[ini..ini + 32];
+            let lo = trozo.iter().fold(0.0f32, |a, &v| a.min(v));
+            let hi = trozo.iter().fold(0.0f32, |a, &v| a.max(v));
+            let paso = (hi - lo) / 15.0;
+            for l in 0..32 {
+                let (a, b) = (src[ini + l], out[ini + l]);
+                // Un paso de cuantización más margen para el redondeo de las
+                // escalas a f16/6 bits.
+                let tope = paso * 1.5 + (hi - lo) * 0.02 + 1e-6;
+                assert!(
+                    (a - b).abs() <= tope,
+                    "sub-bloque {sb} elem {l}: {a} vs {b} (tope {tope})"
+                );
+            }
+        }
+    }
+
+    /// El **límite del formato**, no del cuantizador: `d` es uno por superbloque y
+    /// las escalas por sub-bloque son de 6 bits, así que el rango dinámico útil
+    /// entre sub-bloques de un mismo superbloque es ~63:1. Un sub-bloque 10000×
+    /// más pequeño que el mayor se queda plano, y eso le pasa igual a GGML.
+    ///
+    /// Está escrito como test para que quien vea resultados raros con datos así
+    /// encuentre la explicación en vez de buscar un bug que no existe.
+    #[test]
+    fn q4k_rango_dinamico_del_formato() {
+        let mut src = vec![0.0f32; 256];
+        for l in 0..32 {
+            src[l] = (l as f32 / 31.0) * 100.0 - 50.0; // sub-bloque 0: rango 100
+            src[32 + l] = (l as f32 / 31.0) * 0.01; // sub-bloque 1: rango 0.01
+        }
+        let packed = quantize_q4_k(&src);
+        let mut out = vec![0.0f32; 256];
+        dequant_q4_k(&packed, &mut out).unwrap();
+
+        // El grande se representa bien...
+        let paso = 100.0 / 15.0;
+        for l in 0..32 {
+            assert!(
+                (src[l] - out[l]).abs() <= paso * 1.5,
+                "el sub-bloque grande tendría que salir bien: {} vs {}",
+                src[l],
+                out[l]
+            );
+        }
+        // ...y el diminuto se aplana. Si algún día esto deja de cumplirse será
+        // porque alguien mejoró la elección de escalas, y entonces hay que
+        // actualizar este test a conciencia, no borrarlo.
+        let plano = out[32..64].iter().all(|&v| v == out[32]);
+        assert!(
+            plano,
+            "el sub-bloque diminuto sale con detalle inesperado: {:?}",
+            &out[32..40]
+        );
+    }
+
+    /// El matvec fusionado sobre los bytes Q4_K coincide con descuantizar y
+    /// multiplicar. Con Q8_0 esto ya existía; con Q4_K no se podía escribir porque
+    /// no había cuantizador, y es justo el kernel que usa el modelo real.
+    #[test]
+    fn matvec_q4_k_fusionado_coincide_con_referencia() {
+        use crate::gemm::{matvec_f32, matvec_q4_k};
+        let rows = 4;
+        let cols = 256;
+        let w: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 71) as f32 - 35.0) * 0.03)
+            .collect();
+        let x: Vec<f32> = (0..cols).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
+
+        let packed = quantize_q4_k(&w);
+        let mut wq = vec![0.0f32; rows * cols];
+        dequant_q4_k(&packed, &mut wq).unwrap();
+        let mut esperado = vec![0.0f32; rows];
+        matvec_f32(&wq, rows, cols, &x, &mut esperado);
+
+        let mut out = vec![0.0f32; rows];
+        matvec_q4_k(&packed, rows, cols, &x, &mut out).unwrap();
+        for (a, b) in esperado.iter().zip(&out) {
+            assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+        }
     }
 
     #[test]

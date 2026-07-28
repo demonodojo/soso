@@ -6,3 +6,6 @@ license = "GPL-2.0-only"
 
 [dependencies]
 sosomodel = { path = "../../crates/sosomodel", features = ["std"] }
+# Sólo por `quantize_q8_0`: generar un modelo cuantizado de pruebas sin tener que
+# duplicar aquí el formato de bloque.
+soso-llm-core = { path = "../../crates/soso-llm-core", features = ["std"] }

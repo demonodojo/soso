@@ -281,6 +281,7 @@ dependencies = [
 name = "mkmodel-soso"
 version = "0.1.0"
 dependencies = [
+ "soso-llm-core",
  "sosomodel",
 ]
 

@@ -4,8 +4,17 @@
 //! --layers/--vocab/--heads/--seq` genera modelos de tamaño arbitrario
 //! (decenas de GB) para medir la ruta de modelos grandes. Los shards se
 //! escriben en streaming: no se materializa ningún tensor completo en RAM.
+//!
+//! `--quant q8_0` o `--quant q4_k` generan los tensores 2D cuantizados (los `norm`
+//! de una dimensión se quedan en F32, como en un modelo real). Sirve para probar el
+//! camino de pesos cuantizados —el offload a GPU sólo admitía F32 y con un modelo
+//! cuantizado no se usaba— y **rompe el streaming**: cuantizar necesita el tensor
+//! entero en RAM, así que este modo es para modelos de prueba, no para los de
+//! decenas de GB.
 
-use sosomodel::index::{make_f32_entry, TensorIndex, SHARD_PAYLOAD_OFF};
+use sosomodel::index::{
+    make_f32_entry, make_q4_k_entry, make_q8_0_entry, TensorIndex, SHARD_PAYLOAD_OFF,
+};
 use sosomodel::layout::{INDEX_FILE, MAGIC, MANIFEST_FILE, SHARDS_DIR};
 use sosomodel::manifest::{LayerPrefetch, Manifest};
 use sosomodel::{align_up, Crc32cDigest, BLOCK_ALIGN};
@@ -46,6 +55,27 @@ fn write_f32_shard(path: &std::path::Path, elems: usize, fill: impl Fn(usize) ->
         f.write_all(&buf).unwrap();
     }
     let total = SHARD_PAYLOAD_OFF + payload_len;
+    let pad = align_up(total, BLOCK_ALIGN) - total;
+    f.write_all(&vec![0u8; pad]).unwrap();
+    f.flush().unwrap();
+}
+
+/// Escribe un shard v2 cuyo payload ya está en memoria (el camino cuantizado).
+fn write_bytes_shard(path: &std::path::Path, payload: &[u8]) {
+    let mut crc = Crc32cDigest::new();
+    crc.update(payload);
+    let crc = crc.finalize();
+
+    let mut f = std::io::BufWriter::new(fs::File::create(path).unwrap());
+    let mut header = Vec::with_capacity(SHARD_PAYLOAD_OFF);
+    header.extend_from_slice(&MAGIC);
+    header.extend_from_slice(&crc.to_le_bytes());
+    header.extend_from_slice(&2u32.to_le_bytes());
+    header.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    header.resize(SHARD_PAYLOAD_OFF, 0);
+    f.write_all(&header).unwrap();
+    f.write_all(payload).unwrap();
+    let total = SHARD_PAYLOAD_OFF + payload.len();
     let pad = align_up(total, BLOCK_ALIGN) - total;
     f.write_all(&vec![0u8; pad]).unwrap();
     f.flush().unwrap();
@@ -93,6 +123,23 @@ fn main() {
     let heads = arg_u32(&args, "--heads", tiny.num_heads);
     let kv_heads = arg_u32(&args, "--kv-heads", heads);
     let max_seq = arg_u32(&args, "--seq", tiny.max_seq);
+    let quant = arg_string(&args, "--quant", "f32");
+    if quant != "f32" && quant != "q8_0" && quant != "q4_k" {
+        eprintln!("mkmodel-soso: --quant {quant} no soportado (f32 | q8_0 | q4_k)");
+        std::process::exit(2);
+    }
+    let cuantizado = quant != "f32";
+    // Q4_K empaqueta superbloques de 256 elementos y el matvec fusionado exige que
+    // cada FILA sea un número entero de superbloques (`cols % 256 == 0`). Con
+    // hidden=128 el modelo se genera sin protestar y luego la inferencia falla con
+    // un `Err(())` mudo, así que se rechaza aquí y se dice por qué.
+    if quant == "q4_k" && (hidden % 256 != 0 || ffn % 256 != 0) {
+        eprintln!(
+            "mkmodel-soso: --quant q4_k exige hidden y ffn múltiplos de 256 \
+             (hidden={hidden}, ffn={ffn}); prueba --hidden 256 --ffn 512"
+        );
+        std::process::exit(2);
+    }
 
     let mut prefetch = Vec::new();
     for layer in 0..num_layers {
@@ -151,17 +198,39 @@ fn main() {
             let shard_name = format!("{base}.tensor");
             let elems: usize = shape.iter().map(|&d| d as usize).product();
             let is_norm = shape.len() == 1;
-            write_f32_shard(&shards.join(&shard_name), elems, move |i| {
+            let valor = move |i: usize| {
                 if is_norm {
                     1.0f32
                 } else {
                     ((i as u32).wrapping_mul(0x9e37_79b9) ^ layer_u) as f32 * 1e-9
                 }
-            });
-            total_bytes += (elems * 4) as u64;
-            index
-                .entries
-                .push(make_f32_entry(id, base, &shard_name, 0, &shape));
+            };
+            // Los `norm` se quedan en F32 aunque se pida cuantización: es lo que
+            // hace un modelo real (son vectores, no matrices) y además el camino de
+            // rmsnorm no los descuantiza.
+            if cuantizado && !is_norm {
+                let plano: Vec<f32> = (0..elems).map(valor).collect();
+                let (bytes, entrada) = if quant == "q8_0" {
+                    (
+                        soso_llm_core::quant::quantize_q8_0(&plano),
+                        make_q8_0_entry(id, base, &shard_name, 0, &shape),
+                    )
+                } else {
+                    (
+                        soso_llm_core::quant::quantize_q4_k(&plano),
+                        make_q4_k_entry(id, base, &shard_name, 0, &shape),
+                    )
+                };
+                total_bytes += bytes.len() as u64;
+                write_bytes_shard(&shards.join(&shard_name), &bytes);
+                index.entries.push(entrada);
+            } else {
+                write_f32_shard(&shards.join(&shard_name), elems, valor);
+                total_bytes += (elems * 4) as u64;
+                index
+                    .entries
+                    .push(make_f32_entry(id, base, &shard_name, 0, &shape));
+            }
             id += 1;
         }
     }
