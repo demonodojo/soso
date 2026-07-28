@@ -368,6 +368,81 @@ fn suite() -> u8 {
         let _ = tids;
     }
 
+    // Pipes: una escritura grande NO se recorta a un temporal del kernel.
+    //
+    // Aquí había una pérdida de datos silenciosa: el pipe transfería 256 bytes por
+    // llamada porque ése era el tamaño del búfer de tránsito del kernel, lo decía
+    // en el retorno (correcto) y nadie lo miraba (no correcto). `cat` de un fichero
+    // por SSH entregaba 1435 bytes de 3086 y salía con éxito. Se fija por los dos
+    // lados: que el kernel transfiera hasta llenar el pipe y que `write_all`
+    // complete lo que una escritura corta deje a medias.
+    {
+        const GRANDE: usize = 3000;
+        let mut w_buf = alloc::vec![0u8; GRANDE];
+        for (i, b) in w_buf.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        let (r, w) = match sys::pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                println!("init: FALLO  pipe() para la escritura grande, errno {e}");
+                return 1;
+            }
+        };
+        let n = sys::write(w, &w_buf);
+        check!(
+            n == GRANDE as i64,
+            "una escritura de {GRANDE} B al pipe transfiere {n} (el tope de 256 era              del búfer del kernel, no del pipe)"
+        );
+        let mut r_buf = alloc::vec![0u8; GRANDE];
+        let leidos = sys::read(r, &mut r_buf);
+        check!(
+            leidos == GRANDE as i64 && r_buf == w_buf,
+            "y se relee igual ({leidos} B)"
+        );
+        // Y por encima de la capacidad del pipe (4 KiB) la escritura ES corta: eso
+        // sí es legítimo, y `write_all` es quien tiene que completarla.
+        let enorme = alloc::vec![0x5au8; 6000];
+        let corta = sys::write(w, &enorme);
+        check!(
+            corta > 0 && corta < 6000,
+            "por encima de la capacidad la escritura es corta ({corta} de 6000)"
+        );
+        let mut vaciar = alloc::vec![0u8; 8192];
+        let _ = sys::read(r, &mut vaciar);
+        sys::close(r);
+        sys::close(w);
+    }
+
+    // Punteros que no son del proceso: EFAULT, no un fallo de página EN EL KERNEL.
+    //
+    // `sys_read` valida al entrar, pero tres caminos usaban `buf` antes de cualquier
+    // comprobación —`write` a un pipe, `write` a un socket y `read_timeout` de un
+    // socket—, así que un puntero basura hacía que el kernel copiase de una
+    // dirección ajena: con suerte pánico, con mala suerte los datos de otro proceso.
+    // Cualquier programa podía tumbar el sistema con una syscall.
+    {
+        const BASURA: u64 = 0x0000_7f00_dead_0000;
+        let (r, w) = match sys::pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                println!("init: FALLO  pipe() para la prueba de punteros, errno {e}");
+                return 1;
+            }
+        };
+        let rc = sys::raw4(abi::SYS_WRITE, w, BASURA, 64, 0);
+        check!(
+            rc == -abi::EFAULT,
+            "write a un pipe con puntero ajeno da EFAULT (rc={rc})"
+        );
+        // Y el camino bueno sigue funcionando después del rechazo.
+        check!(sys::write(w, b"ok") == 2, "el pipe sigue usable tras el EFAULT");
+        let mut b = [0u8; 2];
+        check!(sys::read(r, &mut b) == 2 && &b == b"ok", "y se relee");
+        sys::close(r);
+        sys::close(w);
+    }
+
     // Filesystem desde VARIOS HILOS a la vez.
     //
     // La auditoría de concurrencia de `fs` estaba pendiente y no tenía ninguna
