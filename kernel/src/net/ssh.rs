@@ -307,6 +307,18 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
     }
 
     // 4) ¿Terminó la shell? Cerrar el canal.
+    //
+    // LIMITACIÓN CONOCIDA (medida, no especulada): lo que quedara en TX al
+    // morir la shell se pierde aquí — 8 bytes en una sesión trivial ("$ " más
+    // el eco de "exit"). Es cosmético: la salida sustantiva ya salió en
+    // vueltas anteriores del paso 5 (comprobado: llegan "init: TODO OK" y la
+    // línea "soso-llm: generado … tok/s", que es el criterio GO del ciclo de
+    // GPU). Se intentó vaciar TX antes de `channel_done` y NO vale: los bytes
+    // recién metidos en el buffer de envío de smoltcp hacen que `close()` no
+    // pase a FinWait, `poll` no llega a resetear, y el cliente se queda
+    // esperando un FIN que no llega — la sesión no termina nunca. Cambiar
+    // 8 bytes cosméticos por un cuelgue es peor; si algún día se arregla,
+    // hay que tocar también el criterio de cierre de `poll`.
     if let Some(pid) = sess.shell_pid
         && !task::exists(pid)
     {
@@ -328,6 +340,21 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
                 }
             }
             Ok(_) => {}
+            // El EOF del cliente NO pierde entrada: medido con sonda, lo que
+            // manda llega siempre antes (`read_channel Ok(15)` con el payload
+            // completo). Lo que sí rompe es la reacción de sunset a ese EOF:
+            // `channel.rs::handle_eof` ESPEJA un ChannelEof de vuelta
+            // (`if !self.sent_eof { s.send(ChannelEof) }`, con su propio
+            // "//TODO: check existing state?"), o sea que anuncia "no enviaré
+            // más datos" solo porque el cliente dejó de enviar. El EOF es por
+            // dirección, así que eso es incorrecto: OpenSSH lo recibe, cierra
+            // su salida ("output drain -> closed") y TIRA todo lo que la shell
+            // imprima después. Efecto práctico: `printf 'cmd\n' | ssh` ejecuta
+            // el comando (verificado escribiendo un fichero y leyéndolo en otra
+            // sesión) pero no devuelve NADA de su salida.
+            // Por eso los arneses (xtask/src/test.rs, scripts/l6-g1-vfio-test.sh)
+            // mantienen stdin abierto con un FIFO y nunca cierran la entrada.
+            // Arreglarlo de verdad exige parchear sunset.
             Err(sunset::Error::ChannelEOF) => {}
             Err(e) => return Err(e),
         }

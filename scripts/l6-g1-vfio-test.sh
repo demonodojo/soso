@@ -130,12 +130,59 @@ ssh_key="${run_home}/.ssh/id_ed25519"
 # no llegaba a ejecutarse nunca — el script acababa avisando de que el guest no
 # se había apagado con el guest perfectamente vivo en su prompt (2026-07-27).
 # El comando va por stdin, como hace el arnés de `cargo xtask test`.
-soso_ssh() {
-  printf '%s\n' "$*" | sudo -u "$run_user" -- env "HOME=${run_home}" \
-    ssh -i "$ssh_key" -p 2222 \
+#
+# Y va EXACTAMENTE como lo hace ese arnés (xtask/src/test.rs), porque `printf | ssh`
+# a secas perdía la carga entera sin decir nada (2026-07-28: el log de la carga
+# tenía sólo el motd y el `$`, y sosh hace eco de lo que lee, así que no había
+# llegado un solo byte). Dos diferencias, las dos necesarias:
+#
+#   -tt          el arnés fuerza pty; sin pedirla el canal es otro camino menos
+#                probado del sshd propio.
+#   stdin abierto  `printf | ssh` cierra stdin al instante y pega el CHANNEL_EOF
+#                al mismo lote que los datos. En kernel/src/net/ssh.rs el EOF se
+#                traga con `Err(ChannelEOF) => {}`, y si sunset lo entrega antes
+#                de drenar lo que quedaba en el canal los bytes se pierden. El
+#                `halt` (una línea, guest ya ocioso) colaba por temporización;
+#                la carga, enviada cuando el guest aún estaba ocupado con el
+#                bring-up, no. No se depende de esa carrera: no se manda EOF.
+#
+# El FIFO es lo que mantiene stdin abierto: el `sleep` de fondo tiene el extremo
+# de escritura cogido, así que cuando `printf` cierra el suyo ssh NO ve EOF. La
+# sesión termina porque el guest cierra el canal al salir la shell (`exit`/`halt`),
+# no porque se le cierre la entrada.
+#
+# Y todo bajo `timeout`: antes NO había ninguno y un guest que no contestase
+# colgaba el ciclo para siempre (2026-07-28, seis minutos hasta que se miró; con
+# VFIO no se puede salir del paso matando QEMU).
+soso_ssh_do() {
+  local salida="$1" max="$2"; shift 2
+  local in; in=$(mktemp -u "${ROOT}/target/.g1-ssh-in.XXXXXX")
+  mkfifo "$in" || return 1
+  chmod 666 "$in"
+  # Ambos escritores bloquean en el open hasta que ssh abra para leer.
+  sleep "$max" >"$in" &
+  local holder=$!
+  printf '%s\n' "$@" >"$in" &
+  local writer=$!
+  timeout -k 5 "$max" sudo -u "$run_user" -- env "HOME=${run_home}" \
+    ssh -tt -i "$ssh_key" -p 2222 \
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR -o ConnectTimeout=10 \
-        soso@localhost >/dev/null 2>&1
+        soso@localhost <"$in" >"$salida" 2>&1
+  local rc=$?
+  kill "$holder" "$writer" 2>/dev/null || true
+  wait "$holder" "$writer" 2>/dev/null || true
+  rm -f "$in"
+  # 124 = se agotó el `timeout`: el guest no cerró el canal. Lo dice, porque a
+  # partir de aquí el `halt` puede no llegar y hay que soltar la GPU a mano.
+  if [[ "$rc" == 124 ]]; then
+    echo "AVISO: la sesión SSH no terminó en ${max}s (se corta y se sigue)." >&2
+  fi
+  return "$rc"
+}
+
+soso_ssh() {
+  soso_ssh_do /dev/null "${SOSO_G1_SSH_TIMEOUT:-60}" "$@"
 }
 
 # Igual que `soso_ssh` pero guardando la salida: la carga de trabajo de G4f/G5 se
@@ -143,11 +190,7 @@ soso_ssh() {
 # es justo el criterio GO, así que no se puede tirar a /dev/null.
 soso_ssh_log() {
   local salida="$1"; shift
-  printf '%s\n' "$@" | sudo -u "$run_user" -- env "HOME=${run_home}" \
-    ssh -i "$ssh_key" -p 2222 \
-        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o LogLevel=ERROR -o ConnectTimeout=10 \
-        soso@localhost >"$salida" 2>&1
+  soso_ssh_do "$salida" "${SOSO_G1_CMD_TIMEOUT:-300}" "$@"
 }
 
 # NO se mata QEMU con `timeout`: cerrar el proceso con el GSP vivo hace que
@@ -332,8 +375,17 @@ if [[ "$booted" == 1 ]]; then
     cmdlog="${log%.log}-cmd.log"
     soso_ssh_log "$cmdlog" "${SOSO_G1_CMD}" "exit" || true
     echo "--- salida de la carga (${cmdlog}) ---"
-    sed 's/^/  /' "$cmdlog" || true
+    # La pty de `-tt` mete \r en cada salto: se quitan para leer el log.
+    tr -d '\r' <"$cmdlog" | sed 's/^/  /' || true
     echo "---"
+    # sosh hace eco de lo que lee, así que si el comando no aparece en su propia
+    # salida es que el guest no lo recibió — el fallo silencioso del 2026-07-28,
+    # que sólo se notaba porque el ciclo se quedaba colgado sin decir nada.
+    primer=${SOSO_G1_CMD%%$'\n'*}
+    if ! tr -d '\r' <"$cmdlog" | grep -qF -- "$primer"; then
+      echo "AVISO: la carga NO llegó al guest (sosh no hizo eco de '${primer}')." >&2
+      echo "       El ciclo probó el bring-up, pero ni saxpy ni matvec." >&2
+    fi
   fi
   echo "pidiendo halt por SSH para que apague el GSP"
   soso_ssh halt || true
