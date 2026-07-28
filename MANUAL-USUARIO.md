@@ -603,6 +603,25 @@ cargo run --release -p mkmodel-soso -- target/big-model \
   --hidden 2048 --ffn 5632 --layers 10 --vocab 32000 --heads 32 --kv-heads 8
 ```
 
+Con `--quant q8_0` o `--quant q4_k` los tensores 2D salen cuantizados (los `norm`
+se quedan en F32, como en un modelo real), que es lo que hace falta para probar el
+camino de pesos cuantizados. Ese modo necesita cada tensor entero en RAM, así que es
+para modelos de prueba, no para los de decenas de GB:
+
+```sh
+cargo run --release -p mkmodel-soso -- /tmp/tiny-q8 --name tiny --quant q8_0
+SOSO_MODELS_DIR=/tmp/tiny-q8 cargo xtask mkfs && cargo xtask build
+```
+
+**Q4_K exige `hidden` y `ffn` múltiplos de 256** (el superbloque del formato), y el
+generador lo rechaza si no lo son en vez de producir un modelo que falla al
+inferir:
+
+```sh
+cargo run --release -p mkmodel-soso -- /tmp/tiny-q4k --name tiny --quant q4_k \
+  --hidden 256 --ffn 512
+```
+
 Cuantizaciones GGUF distintas de F32/F16/Q8_0 (Q4_K…) aún no están
 soportadas. Nota: dentro de QEMU sin KVM la velocidad la limita la emulación
 TCG, no soso.

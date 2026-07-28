@@ -286,10 +286,49 @@ El escalado es sub-lineal bajo emulación TCG (overhead del host); en hardware
 real con KVM se espera acercarse al ×n cores sobre decode memory-bound.
 `soso-llm` imprime tok/s in-guest vía `SYS_UPTIME_MS`.
 
+**✅ `sbrk` agrupado (2026-07-28).** El allocator de `libsoso` pedía memoria al
+kernel **por asignación**: `sbrk(0)` para preguntar el break, otra para el relleno
+de alineación y otra para el tamaño. Un `soso-llm run tiny --max 4` gastaba **7050
+syscalls sbrk**; ahora gasta **1**. El camino rápido es un arena de 256 KiB servido
+con aritmética en userspace, con dos añadidos que valen tanto como el chunk:
+
+- **crecer en el sitio** (`realloc`) cuando el bloque es el último del arena — es el
+  caso del `Vec` que dobla, y sin ello cada etapa copiaba y abandonaba la anterior;
+- **deshacer el último bloque** al liberarlo, que es el patrón de "pedir y soltar".
+
+El arena lo comparten los hilos (`thread_spawn` comparte el AddrSpace) y necesita
+candado propio: antes la exclusión la daba el kernel de rebote, porque cada reserva
+era una syscall. `init test` estresa ahora eso — 4 hilos × 200 reservas con
+verificación del contenido — y es la única prueba concurrente que tiene el arena.
+
+**✅ Auditoría de concurrencia de `net/`/`fs`/`drivers/` (2026-07-28).** Resultado:
+**limpia en los patrones que de verdad matan**, y por construcción, no por suerte:
+
+- No hay `static mut` ni estado global sin sincronizar en los tres árboles. Los
+  `unsafe impl Send` de `nvme`/`fb`/`usb_storage` (punteros crudos) viven dentro de
+  un `Mutex`, que es el uso correcto.
+- **La disciplina ISR/candado está cerrada donde importa.** `net::poll` usa
+  `try_lock` —si una syscall tiene la pila de red, el timer se la salta en vez de
+  esperar—, y el propio `timer_tick` sólo atiende red **cuando ha interrumpido a
+  ring 3** (`if f.cs & 3 != 3 { return }`), o sea cuando el kernel no sostenía
+  ningún candado. Eso es lo que hace seguro que `lxdde::poll` sí tome
+  `RXQ.lock()`: sin ese guardia, un timer sobre una syscall que tuviera RXQ se
+  bloquearía contra sí mismo en el mismo core.
+
+Lo que faltaba no era mirar, era **probar**: `fs` no tenía ninguna prueba
+concurrente. `init test` estresa ahora 4 hilos × 12 ficheros de **4 KiB** (cruzan el
+bloque de sosofs, así que ejercitan asignación de bloques y CoW, no sólo el inodo),
+creando, escribiendo, releyendo y borrando, con verificación de contenido. Verde con
+**SMP=1 y SMP=4** (`ncpu=4` confirmado en el log).
+
+**✅ Reintento en el arnés SSH (2026-07-28).** Los pasos que van por SSH reintentan
+una vez tras 5 s, y **lo anuncian** en la salida: la reconexión inmediata tras
+cerrar la sesión anterior fallaba a veces y daba rojo por algo del arnés, que es la
+peor clase de test —enseña a desconfiar de los rojos—, pero un flake permanente
+sigue viéndose porque el reintento sale impreso.
+
 *Mejoras futuras (fuera del cierre L3b, no bloqueantes):*
-- Auditoría de concurrencia más amplia en `net/` / `fs` / `drivers/`.
-- Agrupar `sbrk` en `SbrkAllocator` (menos syscalls bajo contención).
-- Reintento en el arnés SSH del xtask tras reconexión rápida.
+- Ninguna pendiente de las apuntadas en el cierre de L3b.
 
 ## Fase L4 — SIMD
 
@@ -499,6 +538,90 @@ encenderlo:
    lanza kernels: subía la matriz por syscalls y luego la calculaba en CPU igual.
    `GpuInfo.compute` lo separa, y el bit `GPU_SUBMIT_COMPUTED` distingue "el
    resultado está en el búfer" de "lo hizo la GPU" (`GPU_SUBMIT_ON_GPU`).
+
+**Copias de la matriz en el kernel (2026-07-28).** Los búferes del dispositivo eran
+`Vec<u8>`, que sólo garantiza alineación 1, así que cada `MATVF` construía un
+`Vec<f32>` con la matriz ENTERA (de 4 en 4 bytes con `from_le_bytes`) sólo para poder
+mirarla: en un modelo de verdad son 16 MiB por matvec y por token. Ahora se reservan
+como `Vec<u32>` —base alineada a 4— y la matriz se le presta al motor **sin copia**;
+sólo se copian los vectores `x` e `y`, que son de `cols`/`rows` elementos. El candado
+del dispositivo se mantiene durante el cálculo, porque la matriz va prestada desde su
+búfer (y dos submits a la vez sobre un canal no tendrían sentido).
+
+Efecto medido con el dispositivo software (`tiny`, 8 tokens): **1,10 → 3,36 tok/s** en
+la ruta de offload, que pasa de ser 3,6× más lenta que el backend de CPU a estar a un
+17% de él. Lo que queda de coste es la copia al staging de `lxdde`, que es inevitable.
+
+**El offload no admitía pesos cuantizados (2026-07-28).** `try_gpu_matvec` se
+rendía si el dtype no era F32, así que con un modelo Q8_0 o Q4_K —los que caben en
+una tarjeta de 12 GiB, o sea los que interesan— **el offload no se usaba nunca y no
+lo decía**: el matvec se iba a CPU en silencio. Ahora pasan F32, Q8_0 y Q4_K, y el
+despacho **descuantiza una sola vez al subir** los pesos: son residentes, luego se
+paga por tensor y no por token. El precio es VRAM (Q4_K a F32 son ~8×) y ése es
+justo el criterio del offload híbrido — lo que no cabe se queda en CPU, con su
+cifra propia en el resumen (`N sin sitio (a CPU)`) para que "va lento" no se
+confunda con "no está usando el dispositivo". Que un tensor no quepa devuelve
+`Ok(false)`, no `Err`: con `Err` se abortaba la inferencia entera.
+
+Verificado con igualdad EXACTA de tokens contra la ruta de CPU, en **Q8_0 y Q4_K**:
+en el host (`generate.rs`, modelos sintéticos, greedy) y en el guest con
+`mkmodel-soso --quant …` + `soso-llm --gpu-soft` (7 tokens por los dos caminos, 168
+matvec en el dispositivo con 24 subidas). Los `--quant` son nuevos en `mkmodel-soso`
+y rompen el streaming a propósito (cuantizar necesita el tensor entero en RAM), así
+que son para modelos de prueba:
+
+```bash
+cargo run --release -p mkmodel-soso -- /tmp/tiny-q8  --name tiny --quant q8_0
+cargo run --release -p mkmodel-soso -- /tmp/tiny-q4k --name tiny --quant q4_k \
+  --hidden 256 --ffn 512
+SOSO_MODELS_DIR=/tmp/tiny-q4k cargo xtask mkfs && cargo xtask build
+```
+
+**`quantize_q4_k` es nuevo (2026-07-28).** Sólo existía el descuantizador —los
+modelos llegan de GGUF ya cuantizados—, así que el camino Q4_K no se podía probar
+más que con un modelo real de gigabytes: por eso el offload a GPU pudo estar sin
+admitir cuantizados sin que salte nada. Dos cosas que el cuantizador tiene que
+hacer bien y no son evidentes: **estirar el rango de cada sub-bloque hasta incluir
+el 0** (hay un solo `dmin` por superbloque y `m` no tiene signo, así que un
+sub-bloque todo-positivo no sería representable de otro modo) y **calcular los
+nibbles con la escala EFECTIVA**, la que queda tras redondear `d`/`dmin` a f16 y
+`sc`/`m` a 6 bits — con la ideal, los dos errores se suman en vez de compensarse.
+
+Tres tests nuevos en `quant.rs`: round-trip con tolerancia derivada del rango de
+cada sub-bloque (no una constante), el matvec fusionado Q4_K contra descuantizar +
+multiplicar, y uno que **documenta el límite del formato**: con 63 niveles de escala
+compartida, un sub-bloque 10000× más pequeño que su vecino se aplana, y eso le pasa
+igual a GGML. Está escrito como test para que quien lo vea no busque un bug que no
+existe.
+
+Y un guardia en `mkmodel-soso`: `--quant q4_k` con `hidden`/`ffn` que no sean
+múltiplos de 256 **se rechaza**. El matvec fusionado exige una fila = número entero
+de superbloques; sin el guardia el modelo se generaba sin protestar y la inferencia
+moría luego con un `Err(())` mudo (que es exactamente cómo lo encontré).
+
+Dato de rendimiento del offload con cuantizados: en el guest, la ruta de dispositivo
+sale **más rápida** que la de CPU (1,31 vs 1,08 tok/s con Q4_K), porque descuantizar
+una vez al subir y multiplicar en f32 gana al kernel fusionado ejecutado por token.
+El precio es memoria (~8× para Q4_K), que es el criterio del offload híbrido.
+
+**Siete syscalls por matvec, cuatro de trámite (2026-07-28).** Cada llamada pedía un
+`mmap`, copiaba los datos, llamaba a `gpu_map`/`gpu_read` y soltaba el `mmap` — más
+una falta de página por cada página nueva del mapeo. Y todo eso existía por un
+**permiso al revés**: `SYS_GPU_MAP` exigía escritura en el búfer del que sólo LEE, y
+los pesos de un modelo viven en un mapeo de fichero de **sólo lectura**, así que
+subirlos directamente daba EFAULT y había que copiarlos antes a memoria escribible.
+
+Con el permiso corregido (`gpu_map` lee → no pide escritura; `gpu_read` escribe →
+sí), el despacho pasa las direcciones **tal cual**: 7 → 3 syscalls por matvec, cero
+copias en userspace para F32 (los pesos se suben directamente desde el modelo
+mapeado) y ninguna página nueva que faltar. La ruta de dispositivo queda a un **7%**
+de la de CPU (3,51 vs 3,76 tok/s con el modelo tiny), desde el 3,6× más lenta que
+era antes de esta tanda de mejoras.
+
+La asimetría de permisos entre las dos syscalls está **fijada en `init test`**: subir
+desde un mapeo de sólo lectura tiene que funcionar y leer sobre él tiene que dar
+EFAULT. Sin esa prueba, "endurecer" `gpu_map` devolvería el offload a CPU sin un
+solo error visible.
 
 Cobertura nueva: `cargo xtask test` ejecuta ahora **`init test` dentro del guest**
 (que no corría en la suite: hilos de L3b, FPU de L4 y el ABI de GPU con
