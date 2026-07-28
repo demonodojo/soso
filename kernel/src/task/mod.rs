@@ -681,6 +681,14 @@ extern "C" fn schedule_inner() -> ! {
             {
                 // La copia necesita su espacio activo.
                 procs[i].space.as_ref().unwrap().activate();
+                // Y revalidar el rango, igual que en pipe y socket: se comprobó al
+                // entrar en `sys_read`, pero otro hilo pudo desmapearlo durante la
+                // espera y `tty_read_into` escribe con un puntero pelado.
+                if !procs[i].space.as_ref().unwrap().range_ok(buf, len, true) {
+                    procs[i].ctx.rax = (-soso_abi::EFAULT) as u64;
+                    procs[i].state = State::Runnable;
+                    continue;
+                }
                 let console = procs[i].console;
                 procs[i].ctx.rax = tty_read_into(console, buf, len);
                 procs[i].state = State::Runnable;
