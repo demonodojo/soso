@@ -568,10 +568,9 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
         if len == 0 {
             return Ok(0);
         }
-        // `true`: el kernel escribe el dato recibido en el búfer del proceso.
-        if !user_range_ok(buf, len, true) {
-            return Err(-abi::EFAULT);
-        }
+        // Sin validar aquí: `dst` de arriba ya comprobó `buf`/`len` con permiso de
+        // escritura, que es lo que necesita este camino. En `sys_read_timeout` sí
+        // hace falta, porque allí no se pasa por `user_slice_mut`.
         let n = crate::net::tcp_try_read(slot, buf, len)?;
         if n > 0 {
             return Ok(n);
@@ -730,7 +729,14 @@ fn sys_seek(fd: u64, off: i64, whence: u64) -> Result<u64, i64> {
 
 fn sys_stat(path_ptr: u64, path_len: u64, out: u64) -> Result<u64, i64> {
     let path = resolve_user_path(path_ptr, path_len)?;
-    let dst = user_slice_mut(out, core::mem::size_of::<abi::Stat>() as u64)?;
+    // Nada de prestar el búfer del usuario: se comprueba y se copia DENTRO de
+    // `with_current`, que sostiene PROCS. `munmap` también necesita PROCS, así que
+    // así no puede desmapear el rango entre la comprobación y la copia — y con
+    // `unmap_range` devolviendo los frames al allocator GLOBAL, ese hueco no es
+    // autolesión del proceso: el frame puede estar ya en otro.
+    if !user_range_ok(out, core::mem::size_of::<abi::Stat>() as u64, true) {
+        return Err(-abi::EFAULT);
+    }
     let (ino, st) = with_vfs(|| {
         let ino = crate::vfs::resolve(&path)?;
         Ok((ino, crate::vfs::stat_inode(ino)?))
@@ -742,13 +748,17 @@ fn sys_stat(path_ptr: u64, path_len: u64, out: u64) -> Result<u64, i64> {
         file_type: st.file_type,
         _pad: [0; 7],
     };
-    dst.copy_from_slice(unsafe {
+    let bytes = unsafe {
         core::slice::from_raw_parts(
             (&stat as *const abi::Stat).cast::<u8>(),
             core::mem::size_of::<abi::Stat>(),
         )
-    });
-    Ok(0)
+    };
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(0)
+    })
 }
 
 fn sys_getdents(fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
@@ -804,10 +814,19 @@ fn sys_getcwd(buf_ptr: u64, len: u64) -> Result<u64, i64> {
     if len < bytes.len() as u64 + 1 {
         return Err(-abi::EINVAL);
     }
-    let buf = user_slice_mut(buf_ptr, len)?;
-    buf[..bytes.len()].copy_from_slice(bytes);
-    buf[bytes.len()] = 0;
-    Ok(buf_ptr)
+    // Comprobar y copiar bajo PROCS, no prestar el búfer: ver `sys_stat`.
+    let total = bytes.len() as u64 + 1;
+    if !user_range_ok(buf_ptr, total, true) {
+        return Err(-abi::EFAULT);
+    }
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(buf_ptr, bytes).ok_or(-abi::EFAULT)?;
+        space
+            .write(buf_ptr + bytes.len() as u64, &[0u8])
+            .ok_or(-abi::EFAULT)?;
+        Ok(buf_ptr)
+    })
 }
 
 fn sys_spawn(path_ptr: u64, path_len: u64, args_ptr: u64, args_len: u64) -> Result<u64, i64> {
@@ -960,15 +979,23 @@ fn sys_munmap(addr: u64, len: u64) -> Result<u64, i64> {
 }
 
 fn sys_gpu_info(out: u64) -> Result<u64, i64> {
-    let dst = user_slice_mut(out, core::mem::size_of::<abi::GpuInfo>() as u64)?;
+    let n = core::mem::size_of::<abi::GpuInfo>() as u64;
+    if !user_range_ok(out, n, true) {
+        return Err(-abi::EFAULT);
+    }
     let info = crate::drivers::gpu::info();
-    dst.copy_from_slice(unsafe {
+    let bytes = unsafe {
         core::slice::from_raw_parts(
             (&info as *const abi::GpuInfo).cast::<u8>(),
-            core::mem::size_of::<abi::GpuInfo>(),
+            n as usize,
         )
-    });
-    Ok(0)
+    };
+    // Copia bajo PROCS: ver `sys_stat`.
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(0)
+    })
 }
 
 fn sys_gpu_alloc(size: u64) -> Result<u64, i64> {
