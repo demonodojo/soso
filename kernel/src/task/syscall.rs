@@ -210,6 +210,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_GPU_ALLOC => sys_gpu_alloc(a1),
         abi::SYS_GPU_MAP => sys_gpu_map(a1, a2, a3),
         abi::SYS_GPU_READ => sys_gpu_read(a1, a2, a3),
+        abi::SYS_GPU_FREE => crate::drivers::gpu::free(a1).map_err(|e| -e),
         abi::SYS_GPU_SUBMIT => sys_gpu_submit(a1, a2),
         abi::SYS_PIPE => sys_pipe(),
         abi::SYS_SPAWN_IO => sys_spawn_io(a1),
@@ -237,13 +238,9 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
 // CR3 es el del proceso durante toda la syscall: validado el rango, se
 // puede desreferenciar directamente.
 
-fn user_range_ok(ptr: u64, len: u64, need_write: bool) -> bool {
-    if len == 0 {
-        return true;
-    }
-    if ptr == 0 || len > 16 * 1024 * 1024 || ptr.checked_add(len).is_none_or(|e| e > USER_MAX) {
-        return false;
-    }
+/// Las páginas del rango están mapeadas y con los permisos pedidos. Un solo
+/// candado para todo el rango: es el camino rápido y el habitual.
+fn range_present(ptr: u64, len: u64, need_write: bool) -> bool {
     super::with_current(|p| {
         let space = p.space.as_ref().unwrap();
         let mut page = ptr & !0xfff;
@@ -258,6 +255,41 @@ fn user_range_ok(ptr: u64, len: u64, need_write: bool) -> bool {
         }
         true
     })
+}
+
+/// Valida un rango de usuario, **materializando las páginas de `mmap` que el
+/// proceso pidió y todavía no ha tocado**.
+///
+/// Antes esto sólo miraba las tablas, y una región de `mmap` recién creada no
+/// tiene páginas hasta que el proceso escribe en ella: cualquier syscall a la que
+/// le pases un búfer así contestaba EFAULT aunque el búfer fuese perfectamente
+/// legítimo. Lo encontró el camino de GPU (`gpu_read` sobre una página mmap virgen
+/// daba -14 sin más explicación), pero el agujero no era de la GPU: le pasa igual a
+/// un `read()` con destino en un mmap sin estrenar. Se materializa por el MISMO
+/// camino que la falta de página (`handle_mmap_fault`), así que sólo se rellenan
+/// páginas dentro de una región declarada y con los permisos que declaró — un
+/// puntero inventado sigue siendo EFAULT.
+fn user_range_ok(ptr: u64, len: u64, need_write: bool) -> bool {
+    if len == 0 {
+        return true;
+    }
+    if ptr == 0 || len > 16 * 1024 * 1024 || ptr.checked_add(len).is_none_or(|e| e > USER_MAX) {
+        return false;
+    }
+    if range_present(ptr, len, need_write) {
+        return true;
+    }
+    // Camino lento. `handle_mmap_fault` toma `with_current` por su cuenta, así que
+    // NO puede llamarse desde dentro del cierre de `range_present`: sería el mismo
+    // candado dos veces.
+    let mut page = ptr & !0xfff;
+    while page < ptr + len {
+        if !range_present(page, 1, need_write) && !super::handle_mmap_fault(page, need_write) {
+            return false;
+        }
+        page += 4096;
+    }
+    range_present(ptr, len, need_write)
 }
 
 fn user_slice(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
@@ -951,7 +983,10 @@ fn sys_gpu_map(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
 }
 
 fn sys_gpu_read(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
-    if !user_range_ok(user_ptr, len, false) {
+    // `true`: aquí el kernel ESCRIBE en el búfer del proceso. Con `false` se
+    // aceptaba un destino de sólo lectura y `AddrSpace::write` lo escribía igual
+    // por el alias físico, saltándose la protección de la página.
+    if !user_range_ok(user_ptr, len, true) {
         return Err(-abi::EFAULT);
     }
     crate::drivers::gpu::map_to_user(gpu_handle, user_ptr, len).map_err(|e| -e)

@@ -564,9 +564,37 @@ soso-llm run tinyllama --prompt Once upon a time --max 32 --temp 0.8 --top-p 0.9
 | `--temp <t>` | Temperatura; 0 = greedy (por defecto) |
 | `--top-p <p>` | Muestreo nucleus (0.9 por defecto) |
 | `--seed <s>` | Semilla determinista del muestreo |
+| `--gpu-soft` | Dispositivo de cómputo **software** del kernel (ver abajo) |
 
 El prompt admite varias palabras (hasta el siguiente flag); sosh no
 interpreta comillas.
+
+### `--gpu-soft`: el camino de la GPU sin GPU
+
+Con `--gpu-soft`, soso enciende un dispositivo de cómputo de mentira que calcula
+en la CPU del kernel, y `soso-llm` manda los matvec por las mismas syscalls que
+usaría con una GPU de verdad. **No acelera nada** —es más lento que el backend de
+CPU normal, porque los datos van y vienen por syscalls— y sirve para dos cosas:
+
+- comprobar en cualquier máquina que la fontanería del offload funciona (reservar
+  búferes, subir pesos, lanzar, leer el resultado);
+- ver el resumen que imprime al final: matvec lanzados, **subidas de pesos** y
+  matrices residentes. Si las subidas fueran tantas como los matvec, los pesos se
+  estarían resubiendo en cada token.
+
+```sh
+soso-llm run tiny --prompt test --gpu-soft --max 4
+```
+
+```
+soso-llm: dispositivo de cómputo «soft (CPU del kernel, pruebas)», VRAM libre 268435456 bytes
+soso-llm: generado (6 tokens, 5450 ms, 1.10 tok/s)
+soso-llm: dispositivo «soft (CPU del kernel, pruebas)» — 144 matvec, 24 subidas de pesos, 24 matrices residentes, último on_gpu=0
+```
+
+`on_gpu=0` dice la verdad: **lo calculó la CPU**. Ese bit sólo vale 1 cuando el
+resultado viene del silicio de una GPU. El dispositivo se apaga al terminar el
+comando.
 
 Para generar modelos sintéticos de prueba de cualquier tamaño:
 

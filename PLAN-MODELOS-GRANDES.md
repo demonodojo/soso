@@ -473,6 +473,40 @@ por tandas de filas (232 KiB de staging) con un QMD y un semáforo por tanda; si
 una tanda no señaliza se recalcula todo en CPU, porque medio vector bueno es peor
 que ninguno.
 
+**El camino de syscalls GPU no tenía cobertura (2026-07-28).** Sin GPU en PCI,
+`SYS_GPU_ALLOC/MAP/SUBMIT/READ` y el despacho de `soso-llm` no se ejecutaban ni una
+vez en QEMU: el primer sitio donde se habrían probado era la tarjeta real, donde un
+fallo de fontanería es indistinguible de un fallo de la GPU y cuesta un ciclo VFIO
+por intento. Ahora el kernel puede encender un **dispositivo de cómputo software**
+(`SYS_GPU_SUBMIT` con `SOFTG`, `soso-llm --gpu-soft`, apagado con `SOFTX`) que
+calcula en su CPU, y con él se ejercita todo lo que rodea a la GPU. Lo que salió al
+encenderlo:
+
+1. **`user_range_ok` no materializaba las páginas de `mmap`** — y esto no era de la
+   GPU: cualquier syscall con destino en un `mmap` recién pedido contestaba EFAULT
+   aunque el búfer fuese legítimo, porque la región existe pero no tiene páginas
+   hasta que el proceso escribe. Ahora se rellenan por el mismo camino que la falta
+   de página (`handle_mmap_fault`), así que un puntero inventado sigue siendo EFAULT.
+2. **`SYS_GPU_MAP`/`READ` recortaban en silencio** (`len.min(buffer)`): subir 16 MiB
+   a un búfer de 4 daba éxito y media matriz. Ahora es EINVAL.
+3. **`sys_gpu_read` validaba el destino sin pedir permiso de escritura**, y el kernel
+   escribía igual por el alias físico, saltándose la protección de la página.
+4. **Los pesos se resubían en cada matvec** (una vez por proyección y por token).
+   Ahora residen en el dispositivo, indexados por **nombre de tensor** —no por
+   dirección: los shards se pueden desmapear y una dirección reutilizada devolvería
+   pesos ajenos sin un solo error—, con `SYS_GPU_FREE` (nueva) para poder desalojar.
+5. **`SysGpu` se enganchaba a cualquier `present=1`**, incluida una iGPU Intel que no
+   lanza kernels: subía la matriz por syscalls y luego la calculaba en CPU igual.
+   `GpuInfo.compute` lo separa, y el bit `GPU_SUBMIT_COMPUTED` distingue "el
+   resultado está en el búfer" de "lo hizo la GPU" (`GPU_SUBMIT_ON_GPU`).
+
+Cobertura nueva: `cargo xtask test` ejecuta ahora **`init test` dentro del guest**
+(que no corría en la suite: hilos de L3b, FPU de L4 y el ABI de GPU con
+comprobación numérica de `MATVF`) y una inferencia con `--gpu-soft` que exige que
+las subidas de pesos sean menos que los matvec. En el host, `generate.rs` prueba el
+despacho completo contra un dispositivo de mentira y exige los MISMOS tokens que la
+ruta de CPU.
+
 Scripts: `scripts/l6-pack-firmware.sh`, `scripts/l6-g1-vfio-test.sh`,
 `scripts/l6-g1-vfio-persist.sh`, `scripts/l6-g3-gsp-hostcheck.sh`,
 `scripts/l6-g4f-build-sass.sh`.

@@ -173,3 +173,113 @@ fn prompt_mas_largo_que_max_seq_falla() {
     let prompt: Vec<u32> = (0..max_seq as u32 + 1).map(|i| i % 200).collect();
     assert!(rt.generate(&mut source, &prompt, 1, None).is_err());
 }
+
+/// Dispositivo de mentira que hace lo que hace el kernel: calcula el matvec y
+/// dice "ya está hecho". Cuenta llamadas por tensor para poder afirmar que el
+/// despacho recibe TODAS las proyecciones y con qué clave.
+struct FakeDevice {
+    llamadas: std::collections::BTreeMap<String, usize>,
+}
+
+impl soso_llm_core::gpu::GpuDispatch for FakeDevice {
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn matvec_f32(
+        &mut self,
+        key: &str,
+        view: &soso_llm_core::layer::TensorView<'_>,
+        rows: usize,
+        cols: usize,
+        x: &[f32],
+        out: &mut [f32],
+    ) -> Result<bool, ()> {
+        let w = view.f32().ok_or(())?;
+        if w.len() != rows * cols || x.len() != cols || out.len() != rows {
+            return Err(());
+        }
+        *self.llamadas.entry(String::from(key)).or_insert(0) += 1;
+        for r in 0..rows {
+            let mut sum = 0.0f32;
+            for c in 0..cols {
+                sum += w[r * cols + c] * x[c];
+            }
+            out[r] = sum;
+        }
+        Ok(true)
+    }
+}
+
+/// El camino de offload completo, con un dispositivo que sí calcula.
+///
+/// Esto existe porque en QEMU sin GPU el despacho no se ejercita nunca y el
+/// primer sitio donde se probaría es la tarjeta real. Compara contra la ruta de
+/// CPU: el dispositivo calcula lo mismo, así que los tokens tienen que ser los
+/// mismos, y si no lo son es que el despacho está mandando otra cosa (pesos de
+/// otro tensor, dimensiones cambiadas o el vector de entrada equivocado).
+#[test]
+fn generate_por_dispositivo_igual_que_cpu() {
+    use soso_llm_core::gpu::GpuDispatch;
+
+    let esperado = {
+        let (manifest, index, mapper) = tiny_model();
+        let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+        rt.set_backend(soso_llm_core::runtime::Backend::Cpu);
+        let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+        let mut sampler = soso_llm_core::sample::Sampler::greedy();
+        let mut sin_gpu: Option<&mut dyn GpuDispatch> = None;
+        rt.generate_stream_par(
+            &mut source,
+            &[10, 20, 30],
+            4,
+            None,
+            &mut sampler,
+            |_| {},
+            None,
+            &mut sin_gpu,
+        )
+        .expect("la ruta de CPU debe funcionar")
+    };
+
+    let (manifest, index, mapper) = tiny_model();
+    let num_layers = manifest.num_layers;
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 64 * 1024 * 1024);
+    rt.set_backend(soso_llm_core::runtime::Backend::Auto);
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    let mut sampler = soso_llm_core::sample::Sampler::greedy();
+    let mut dev = FakeDevice {
+        llamadas: std::collections::BTreeMap::new(),
+    };
+    let tokens = {
+        let mut gpu: Option<&mut dyn GpuDispatch> = Some(&mut dev);
+        rt.generate_stream_par(
+            &mut source,
+            &[10, 20, 30],
+            4,
+            None,
+            &mut sampler,
+            |_| {},
+            None,
+            &mut gpu,
+        )
+        .expect("la ruta de dispositivo debe funcionar")
+    };
+
+    assert_eq!(tokens, esperado, "el dispositivo no da los mismos tokens que la CPU");
+
+    // Todas las proyecciones de todas las capas han pasado por el dispositivo, y
+    // la clave es el nombre del tensor (no una dirección).
+    for layer in 0..num_layers {
+        for t in ["attn_q", "attn_k", "attn_v", "attn_output", "ffn_up", "ffn_down"] {
+            let key = format!("L{layer:02}.{t}");
+            assert!(
+                dev.llamadas.get(&key).copied().unwrap_or(0) > 0,
+                "el dispositivo no recibió {key}"
+            );
+        }
+    }
+    // Y se le llamó una vez por token y por proyección: 3 del prompt + 4 nuevos.
+    let q0 = dev.llamadas["L00.attn_q"];
+    assert_eq!(q0, tokens.len(), "L00.attn_q: {q0} llamadas para {} tokens", tokens.len());
+}

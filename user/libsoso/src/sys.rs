@@ -190,6 +190,12 @@ pub fn gpu_read(handle: u64, ptr: u64, len: u64) -> i64 {
     syscall4(abi::SYS_GPU_READ, handle, ptr, len, 0)
 }
 
+/// Libera un búfer del dispositivo. Devuelve sus bytes, que vuelven a la VRAM
+/// contable: sin esto, cachear pesos en el dispositivo es una fuga garantizada.
+pub fn gpu_free(handle: u64) -> i64 {
+    syscall1(abi::SYS_GPU_FREE, handle)
+}
+
 pub fn gpu_submit(cmd: &[u8]) -> i64 {
     syscall4(abi::SYS_GPU_SUBMIT, cmd.as_ptr() as u64, cmd.len() as u64, 0, 0)
 }

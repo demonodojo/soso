@@ -1,17 +1,74 @@
 //! Despacho GPU vía syscalls del kernel (G5).
+//!
+//! DOS COSAS QUE ESTABAN MAL Y NO DABAN ERROR:
+//!
+//! 1. **La matriz se resubía en cada llamada.** `matvec_f32` se llama una vez por
+//!    proyección y por token, y los pesos no cambian entre tokens: subir
+//!    `rows*cols*4` bytes por syscall en cada una convierte el offload en la ruta
+//!    lenta. Ahora los pesos se cachean por NOMBRE de tensor y se suben una vez.
+//!    Por nombre y no por dirección: los shards se mapean y se pueden desmapear, y
+//!    una dirección reutilizada por otro tensor devolvería pesos ajenos con toda la
+//!    pinta de estar bien.
+//! 2. **Un búfer reservado para la primera capa se reutilizaba para otra mayor.**
+//!    `ensure_buffer` devolvía Ok en cuanto el handle existía, sin mirar el
+//!    tamaño, y `SYS_GPU_MAP` recortaba en silencio: media matriz subida y un
+//!    resultado creíble. El kernel ahora contesta EINVAL y aquí se guarda el
+//!    tamaño reservado para poder crecer.
+//!
+//! Y una tercera, de rebote: `SysGpu::new` se enganchaba a cualquier dispositivo
+//! con `present=1`. En una caja con iGPU Intel eso son dos copias de la matriz por
+//! matvec para luego calcular en CPU igual. Ahora exige `compute=1`.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use libsoso::sys;
 use soso_abi as abi;
 use soso_llm_core::gpu::GpuDispatch;
 use soso_llm_core::layer::TensorView;
 
+/// Pesos ya residentes en el dispositivo, indexados por el nombre del tensor.
+///
+/// Por NOMBRE y no por dirección: los shards del modelo están mapeados y se
+/// pueden desmapear, así que una dirección reutilizada por otro tensor devolvería
+/// pesos ajenos con toda la pinta de estar bien. El nombre lo da el ejecutor de
+/// capas, que es quien sabe cuál es.
+struct Resident {
+    key: String,
+    bytes: u64,
+    handle: u64,
+}
+
+/// Búfer de trabajo del que sí hace falta saber cuánto se reservó.
+struct Scratch {
+    handle: u64,
+    bytes: u64,
+}
+
+impl Scratch {
+    const NONE: Scratch = Scratch {
+        handle: u64::MAX,
+        bytes: 0,
+    };
+}
+
 pub struct SysGpu {
     vram_free: u64,
-    w_handle: u64,
-    x_handle: u64,
-    y_handle: u64,
+    /// Nombre que dio el kernel. Se guarda para poder decir de qué dispositivo se
+    /// habla: "GPU detectada" sobre el dispositivo software de pruebas sería
+    /// mentira, y quien lea el log no tiene otra forma de saberlo.
+    name: [u8; 32],
+    on_gpu: bool,
+    resident: Vec<Resident>,
+    x: Scratch,
+    y: Scratch,
+    uploads: usize,
+    calls: usize,
 }
+
+/// Tope de matrices residentes. No es por memoria —eso lo controla `vram_free`—
+/// sino para que la búsqueda lineal siga siendo barata: un modelo pone del orden
+/// de 7 proyecciones por capa, y con esto entran las de varias capas.
+const MAX_RESIDENT: usize = 64;
 
 impl SysGpu {
     pub fn new() -> Option<Self> {
@@ -19,17 +76,51 @@ impl SysGpu {
         if sys::gpu_info(&mut info) < 0 || info.present == 0 {
             return None;
         }
+        if info.compute == 0 {
+            // Presente pero incapaz de lanzar nada (iGPU Intel hoy). Enganchar el
+            // despacho aquí sólo añadiría copias.
+            return None;
+        }
         Some(Self {
             vram_free: info.vram_free,
-            w_handle: u64::MAX,
-            x_handle: u64::MAX,
-            y_handle: u64::MAX,
+            name: info.name,
+            on_gpu: false,
+            resident: Vec::new(),
+            x: Scratch::NONE,
+            y: Scratch::NONE,
+            uploads: 0,
+            calls: 0,
         })
     }
 
-    fn ensure_buffer(handle: &mut u64, bytes: u64, vram_free: &mut u64) -> Result<(), ()> {
-        if *handle != u64::MAX {
-            return Ok(());
+    /// Nombre del dispositivo tal y como lo dio el kernel.
+    pub fn device_name(&self) -> &str {
+        let end = self.name.iter().position(|&b| b == 0).unwrap_or(self.name.len());
+        core::str::from_utf8(&self.name[..end]).unwrap_or("?")
+    }
+
+    /// `true` si el último `matvec_f32` lo calculó de verdad el silicio de la GPU
+    /// (y no el bucle de CPU del kernel ni el dispositivo software).
+    pub fn last_on_gpu(&self) -> bool {
+        self.on_gpu
+    }
+
+    pub fn stats(&self) -> (usize, usize, usize) {
+        (self.calls, self.uploads, self.resident.len())
+    }
+
+    /// Reserva o agranda un búfer de trabajo. Devolver el handle viejo cuando el
+    /// nuevo tamaño no cabe es el bug 2 de la cabecera.
+    fn ensure_scratch(s: &mut Scratch, bytes: u64, vram_free: &mut u64) -> Result<u64, ()> {
+        if s.handle != u64::MAX && s.bytes >= bytes {
+            return Ok(s.handle);
+        }
+        if s.handle != u64::MAX {
+            let freed = sys::gpu_free(s.handle);
+            if freed > 0 {
+                *vram_free = vram_free.saturating_add(freed as u64);
+            }
+            *s = Scratch::NONE;
         }
         if bytes > *vram_free {
             return Err(());
@@ -38,57 +129,57 @@ impl SysGpu {
         if h < 0 {
             return Err(());
         }
-        *handle = h as u64;
         *vram_free = vram_free.saturating_sub(bytes);
-        Ok(())
+        s.handle = h as u64;
+        s.bytes = bytes;
+        Ok(s.handle)
     }
 
-    fn write_f32(&self, handle: u64, data: &[f32]) -> Result<(), ()> {
-        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let map = sys::mmap(0, bytes.len() as u64, u64::MAX, 0);
-        if map < 0 {
-            return Err(());
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), map as *mut u8, bytes.len());
-        }
-        if sys::gpu_map(handle, map as u64, bytes.len() as u64) < 0 {
-            sys::munmap(map as u64, bytes.len() as u64);
-            return Err(());
-        }
-        sys::munmap(map as u64, bytes.len() as u64);
-        Ok(())
-    }
+    /// Handle de los pesos, subiéndolos sólo la primera vez que se ven.
+    fn resident_weights(&mut self, key: &str, w: &[f32]) -> Result<u64, ()> {
+        let bytes = (w.len() * 4) as u64;
 
-    fn read_f32(&self, handle: u64, elems: usize) -> Result<Vec<f32>, ()> {
-        let bytes = elems * 4;
-        let map = sys::mmap(0, bytes as u64, u64::MAX, 0);
-        if map < 0 {
-            return Err(());
+        if let Some(r) = self
+            .resident
+            .iter()
+            .find(|r| r.key == key && r.bytes == bytes)
+        {
+            return Ok(r.handle);
         }
-        if sys::gpu_read(handle, map as u64, bytes as u64) < 0 {
-            sys::munmap(map as u64, bytes as u64);
-            return Err(());
-        }
-        let mut out = alloc::vec![0f32; elems];
-        unsafe {
-            let src = map as *const f32;
-            for (i, slot) in out.iter_mut().enumerate() {
-                *slot = src.add(i).read();
+        // Sitio: primero por número de entradas, luego por VRAM. Se echa la más
+        // antigua, que con un recorrido de capas en orden es la que más tardará
+        // en volver a hacer falta.
+        while self.resident.len() >= MAX_RESIDENT || bytes > self.vram_free {
+            let Some(old) = self.resident.first() else {
+                return Err(());
+            };
+            let freed = sys::gpu_free(old.handle);
+            if freed > 0 {
+                self.vram_free = self.vram_free.saturating_add(freed as u64);
             }
+            self.resident.remove(0);
         }
-        sys::munmap(map as u64, bytes as u64);
-        Ok(out)
+        let h = sys::gpu_alloc(bytes);
+        if h < 0 {
+            return Err(());
+        }
+        let handle = h as u64;
+        self.vram_free = self.vram_free.saturating_sub(bytes);
+        if write_f32(handle, w).is_err() {
+            sys::gpu_free(handle);
+            self.vram_free = self.vram_free.saturating_add(bytes);
+            return Err(());
+        }
+        self.uploads += 1;
+        self.resident.push(Resident {
+            key: String::from(key),
+            bytes,
+            handle,
+        });
+        Ok(handle)
     }
 
-    fn submit_matvf(
-        &self,
-        w_h: u64,
-        rows: u32,
-        cols: u32,
-        x_h: u64,
-        y_h: u64,
-    ) -> Result<bool, ()> {
+    fn submit_matvf(w_h: u64, rows: u32, cols: u32, x_h: u64, y_h: u64) -> Result<u64, ()> {
         let mut cmd = [0u8; 37];
         cmd[0..5].copy_from_slice(b"MATVF");
         cmd[5..13].copy_from_slice(&w_h.to_le_bytes());
@@ -100,8 +191,49 @@ impl SysGpu {
         if rc < 0 {
             return Err(());
         }
-        Ok((rc as u64) >> 32 != 0)
+        Ok(rc as u64)
     }
+}
+
+/// Copia `data` a un búfer del dispositivo pasando por una página mmap. Es una
+/// función libre porque el préstamo de `self` no da para tenerla como método
+/// mientras se recorre `resident`.
+fn write_f32(handle: u64, data: &[f32]) -> Result<(), ()> {
+    let bytes = data.len() * 4;
+    let map = sys::mmap(0, bytes as u64, u64::MAX, 0);
+    if map < 0 {
+        return Err(());
+    }
+    // Copia directa de los f32: el `Vec<u8>` intermedio de antes era otra copia
+    // entera de la matriz en el heap del proceso, y para 16 MiB eso se nota.
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), map as *mut f32, data.len());
+    }
+    let rc = sys::gpu_map(handle, map as u64, bytes as u64);
+    sys::munmap(map as u64, bytes as u64);
+    if rc < 0 {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn read_f32_into(handle: u64, out: &mut [f32]) -> Result<(), ()> {
+    let bytes = out.len() * 4;
+    let map = sys::mmap(0, bytes as u64, u64::MAX, 0);
+    if map < 0 {
+        return Err(());
+    }
+    let rc = sys::gpu_read(handle, map as u64, bytes as u64);
+    if rc >= 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(map as *const f32, out.as_mut_ptr(), out.len());
+        }
+    }
+    sys::munmap(map as u64, bytes as u64);
+    if rc < 0 {
+        return Err(());
+    }
+    Ok(())
 }
 
 impl GpuDispatch for SysGpu {
@@ -109,8 +241,13 @@ impl GpuDispatch for SysGpu {
         true
     }
 
+    /// `Ok(true)` significa **el resultado ya está en `out`**, no "lo hizo la
+    /// GPU": eso último es `last_on_gpu()`. Cuando el kernel calcula con su bucle
+    /// de CPU (canal no listo, dispositivo software) el vector es igual de bueno y
+    /// repetirlo aquí es trabajo tirado — pero decir "GPU" sería falso.
     fn matvec_f32(
         &mut self,
+        key: &str,
         view: &TensorView<'_>,
         rows: usize,
         cols: usize,
@@ -118,27 +255,26 @@ impl GpuDispatch for SysGpu {
         out: &mut [f32],
     ) -> Result<bool, ()> {
         let w = view.f32().ok_or(())?;
-        if w.len() != rows * cols {
+        if w.len() != rows * cols || x.len() != cols || out.len() != rows {
             return Err(());
         }
-        let w_bytes = (rows * cols * 4) as u64;
+        let w_handle = self.resident_weights(key, w)?;
         let x_bytes = (cols * 4) as u64;
         let y_bytes = (rows * 4) as u64;
-        Self::ensure_buffer(&mut self.w_handle, w_bytes, &mut self.vram_free)?;
-        Self::ensure_buffer(&mut self.x_handle, x_bytes.max(4096), &mut self.vram_free)?;
-        Self::ensure_buffer(&mut self.y_handle, y_bytes.max(4096), &mut self.vram_free)?;
-        self.write_f32(self.w_handle, w)?;
-        self.write_f32(self.x_handle, x)?;
-        self.write_f32(self.y_handle, out)?;
-        let gpu = self.submit_matvf(
-            self.w_handle,
-            rows as u32,
-            cols as u32,
-            self.x_handle,
-            self.y_handle,
-        )?;
-        let y = self.read_f32(self.y_handle, rows)?;
-        out.copy_from_slice(&y);
-        Ok(gpu)
+        let mut vram = self.vram_free;
+        let x_handle = Self::ensure_scratch(&mut self.x, x_bytes, &mut vram)?;
+        let y_handle = Self::ensure_scratch(&mut self.y, y_bytes, &mut vram)?;
+        self.vram_free = vram;
+
+        write_f32(x_handle, x)?;
+        let bits = Self::submit_matvf(w_handle, rows as u32, cols as u32, x_handle, y_handle)?;
+        self.calls += 1;
+        self.on_gpu = bits & abi::GPU_SUBMIT_ON_GPU != 0;
+        if bits & abi::GPU_SUBMIT_COMPUTED == 0 {
+            // El dispositivo no calculó nada: que lo haga la CPU de quien llama.
+            return Ok(false);
+        }
+        read_f32_into(y_handle, out)?;
+        Ok(true)
     }
 }

@@ -70,7 +70,12 @@ pub fn run() {
         // --- 4) inferencia LLM (modelo tiny en disco 1) ---
         let _ = paso("soso-llm run tiny --prompt test", &mut fallos, || ssh_llm(&key));
 
-        // --- 5) sesión SSH autenticada + halt ---
+        // --- 5) regresión de syscalls dentro del guest (incl. GPU, hilos, FPU) ---
+        let _ = paso("init test (syscalls, hilos, FPU, GPU)", &mut fallos, || {
+            ssh_init_test(&key)
+        });
+
+        // --- 6) sesión SSH autenticada + halt ---
         let _ = paso("SSH por clave pública + comando + halt", &mut fallos, || {
             ssh_sesion(&key)
         });
@@ -211,8 +216,15 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
 
     {
         let mut stdin = hijo.stdin.take().unwrap();
+        // Dos inferencias en la misma sesión: la de CPU y la que pasa por el
+        // camino de syscalls GPU con el dispositivo software del kernel. La
+        // segunda es la única cobertura que tiene ese camino sin tarjeta —
+        // alloc/map/submit/read, el cacheo de pesos y el crecimiento de búferes
+        // entre capas de distinto tamaño.
         stdin
-            .write_all(b"soso-llm run tiny --prompt test\nexit\n")
+            .write_all(
+                b"soso-llm run tiny --prompt test\n                  soso-llm run tiny --prompt test --gpu-soft --max 4\n                  exit\n",
+            )
             .map_err(|e| e.to_string())?;
         stdin.flush().ok();
         // Con SMP>1 el margen justo de antes (45s) empezó a fallar por poco
@@ -224,18 +236,96 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
         // en la práctica; el arreglo de fondo (no necesario para que esto
         // pase, pero deseable) sería que el allocator de libsoso agrupe
         // sbrk en vez de una syscall por asignación.
-        std::thread::sleep(Duration::from_secs(100));
+        // La segunda inferencia (--max 4, dispositivo software) añade su propio
+        // tiempo: 150s en vez de 100 para las dos.
+        std::thread::sleep(Duration::from_secs(150));
     }
 
     let salida = hijo.wait_with_output().map_err(|e| e.to_string())?;
     let texto = String::from_utf8_lossy(&salida.stdout);
-    if texto.contains("soso-llm: generado") {
-        Ok(())
-    } else {
-        Err(format!(
+    if !texto.contains("soso-llm: generado") {
+        return Err(format!(
             "soso-llm no generó salida esperada; stdout: {texto:?}"
-        ))
+        ));
     }
+    if !texto.contains("dispositivo «soft") {
+        return Err(format!(
+            "--gpu-soft no enganchó el dispositivo software; stdout: {texto:?}"
+        ));
+    }
+    // Lo que de verdad se comprueba: que los pesos se suban UNA vez por matriz y
+    // no en cada matvec. Sin el cacheo, subidas == matvec, y con 4 tokens eso son
+    // decenas de subidas de la matriz entera que en el log no se distinguían de
+    // nada. Se exige subidas < matvec y que el resumen aparezca.
+    let linea = texto
+        .lines()
+        .find(|l| l.contains("matvec,") && l.contains("subidas de pesos"))
+        .ok_or_else(|| format!("falta el resumen del dispositivo; stdout: {texto:?}"))?;
+    let num = |tras: &str| -> Option<usize> {
+        let idx = linea.find(tras)?;
+        linea[..idx]
+            .split_whitespace()
+            .next_back()
+            .and_then(|t| t.parse().ok())
+    };
+    let calls = num("matvec,").ok_or_else(|| format!("no se pudo leer matvec: {linea:?}"))?;
+    let uploads = num("subidas").ok_or_else(|| format!("no se pudo leer subidas: {linea:?}"))?;
+    if calls == 0 {
+        return Err(format!("el dispositivo no recibió ningún matvec: {linea:?}"));
+    }
+    if uploads >= calls {
+        return Err(format!(
+            "los pesos se resuben en cada matvec ({uploads} subidas / {calls} matvec):              el cacheo no está funcionando — {linea:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// `init test`: la batería de regresión de syscalls que corre DENTRO del guest.
+///
+/// Existía desde la fase 6 y la suite no la ejecutaba: hilos+futex (L3b), estrés
+/// FPU/YMM (L4) y ahora el camino de syscalls GPU eran subpruebas que sólo se
+/// veían si alguien las lanzaba a mano. Un test que hay que acordarse de correr no
+/// es una red de seguridad.
+fn ssh_init_test(key: &std::path::Path) -> Result<(), String> {
+    let mut hijo = Command::new("ssh")
+        .args(["-tt", "-i"])
+        .arg(key)
+        .args(["-p", "2222"])
+        .args(["-o", "StrictHostKeyChecking=no"])
+        .args(["-o", "UserKnownHostsFile=/dev/null"])
+        .args(["-o", "LogLevel=ERROR"])
+        .args(["-o", "ConnectTimeout=10"])
+        .arg("soso@localhost")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
+
+    {
+        let mut stdin = hijo.stdin.take().unwrap();
+        stdin
+            .write_all(b"init test\nexit\n")
+            .map_err(|e| e.to_string())?;
+        stdin.flush().ok();
+        std::thread::sleep(Duration::from_secs(45));
+    }
+
+    let salida = hijo.wait_with_output().map_err(|e| e.to_string())?;
+    let texto = String::from_utf8_lossy(&salida.stdout);
+    // El FALLO se mira ANTES del TODO OK: la suite del guest corta en el primer
+    // fallo, así que sin esto un "FALLO" temprano y ningún "TODO OK" darían el
+    // mismo error genérico que un timeout, y son cosas distintas.
+    if let Some(l) = texto.lines().find(|l| l.contains("init: FALLO")) {
+        return Err(format!("la suite del guest falló: {}", l.trim()));
+    }
+    if !texto.contains("init: TODO OK") {
+        return Err(format!(
+            "init test no llegó al final (¿timeout?); stdout: {texto:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn ssh_sesion(key: &std::path::Path) -> Result<(), String> {

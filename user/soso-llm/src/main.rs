@@ -143,11 +143,31 @@ fn main(args: &str) -> u8 {
                 standby_retry,
             );
         }
-        return run_model(name, &prompt, max_new, Sampler::new(temp, top_p, seed));
+        // Dispositivo software del kernel: enciende el camino de syscalls GPU en
+        // una máquina sin GPU. Es para pruebas —lo calcula la CPU del kernel— y se
+        // dice tal cual en el log; sirve para ejercitar alloc/map/submit/read y el
+        // cacheo de pesos, que de otro modo sólo se estrenarían en la tarjeta real.
+        let soft = parts.contains(&"--gpu-soft");
+        if soft {
+            let rc = sys::gpu_submit(b"SOFTG");
+            if rc < 0 {
+                println!("soso-llm: no se pudo activar el dispositivo software (rc={rc})");
+            }
+        }
+        let rc = run_model(name, &prompt, max_new, Sampler::new(temp, top_p, seed));
+        if soft {
+            // Se apaga al salir: el dispositivo es estado GLOBAL del kernel, y
+            // dejarlo puesto hace que el siguiente proceso de este arranque vea una
+            // GPU que no existe (y se crea el offload).
+            let _ = sys::gpu_submit(b"SOFTX");
+        }
+        return rc;
     }
     println!("uso:");
     println!("  soso-llm run <modelo> --prompt <texto> [--max <n>]");
     println!("    [--cuda-host <ip:puerto>]  (inferencia CUDA en host Linux, L6-H)");
+    println!("    [--gpu-soft]               (dispositivo software del kernel: ejercita");
+    println!("                                el camino de syscalls GPU sin GPU real)");
     println!("    [--pipeline <ip:puerto>,...] [--splits <n1,n2,...>]");
     println!("    [--step-timeout-ms <ms>] [--handshake-timeout-ms <ms>]");
     println!("    [--ping-interval-ms <ms>] [--ping-idle-ms <ms>]");
@@ -482,15 +502,24 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
     let mut gpu = abi::GpuInfo::default();
     let _ = sys::gpu_info(&mut gpu);
     let mut sys_gpu = gpu::SysGpu::new();
-    if gpu.present != 0 {
+    // El `present` del kernel no basta para decidir: un dispositivo puede aceptar
+    // búferes y no ejecutar nada (iGPU Intel), y entonces `SysGpu::new` dice no.
+    // Anunciar "GPU detectada" mirando sólo `present` era prometer un offload que
+    // no iba a ocurrir — y con el dispositivo software, además, mentir.
+    if let Some(ref g) = sys_gpu {
         println!(
-            "soso-llm: GPU detectada, VRAM libre {} bytes (GSP offload)",
+            "soso-llm: dispositivo de cómputo «{}», VRAM libre {} bytes",
+            g.device_name(),
             gpu.vram_free
         );
         bundle.rt.set_backend(Backend::Auto);
-        if let Some(ref mut g) = sys_gpu {
-            bundle.rt.tiers.vram_budget = gpu.vram_free as usize;
-        }
+        bundle.rt.tiers.vram_budget = gpu.vram_free as usize;
+    } else if gpu.present != 0 {
+        println!(
+            "soso-llm: hay GPU («{}») pero no ejecuta kernels; backend CPU",
+            nombre_dispositivo(&gpu.name)
+        );
+        bundle.rt.set_backend(Backend::Cpu);
     } else {
         println!("soso-llm: backend CPU");
         bundle.rt.set_backend(Backend::Cpu);
@@ -540,6 +569,21 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
                 "soso-llm: generado ({} tokens, {} ms, {:.2} tok/s)",
                 n, elapsed_ms, tok_s
             );
+            // Los pesos SUBIDOS frente a las llamadas es la cifra que dice si el
+            // cacheo funciona: sin él eran una subida de la matriz entera por
+            // llamada, y en el log no se veía nada raro. Y `on_gpu` separa "lo
+            // calculó el dispositivo" de "lo calculó la GPU".
+            if let Some(ref g) = sys_gpu {
+                let (calls, uploads, resident) = g.stats();
+                println!(
+                    "soso-llm: dispositivo «{}» — {} matvec, {} subidas de pesos,                      {} matrices residentes, último on_gpu={}",
+                    g.device_name(),
+                    calls,
+                    uploads,
+                    resident,
+                    g.last_on_gpu() as u8
+                );
+            }
             0
         }
         Err(()) => {
@@ -547,6 +591,12 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
             1
         }
     }
+}
+
+/// El nombre que da el kernel viene en un `[u8; 32]` con relleno a cero.
+fn nombre_dispositivo(name: &[u8; 32]) -> &str {
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    core::str::from_utf8(&name[..end]).unwrap_or("?")
 }
 
 fn read_file(path: &str) -> Result<Vec<u8>, i64> {

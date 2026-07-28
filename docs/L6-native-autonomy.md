@@ -70,6 +70,22 @@ script **leyéndolos del cubin**; el port los compara con lo que su header decla
 (`param_count`) y falla si no cuadran, porque un `.cu` con un parámetro más y un
 header sin tocar es un lanzamiento que lee basura sin dar ningún error.
 
+## Ejercitar el camino de la GPU sin GPU
+
+`soso-llm --gpu-soft` (o `SYS_GPU_SUBMIT` con `SOFTG`) enciende un dispositivo de
+cómputo software en el kernel: calcula en la CPU y devuelve `COMPUTED=1, ON_GPU=0`,
+así que el offload recorre las mismas syscalls que recorrería con la tarjeta.
+
+No prueba nada de la GPU; prueba **todo lo que la rodea**, que es justo lo que no
+conviene depurar a golpe de ciclo VFIO. Al encenderlo por primera vez (2026-07-28)
+salieron cinco fallos latentes, uno de ellos ajeno a la GPU: `user_range_ok` no
+materializaba las páginas de un `mmap` sin estrenar, así que **cualquier** syscall
+que escribiese en un búfer así contestaba EFAULT. Ver PLAN-MODELOS-GRANDES.md.
+
+```bash
+cargo xtask test          # incluye `init test` en el guest y una inferencia --gpu-soft
+```
+
 ## Tu siguiente paso (GO en HW de G4e/G4f/G5)
 
 G4e/G4f/G5 están cableados (`gsp_chan`, `gsp_ce`, `gsp_compute`) y cubiertos por

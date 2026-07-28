@@ -32,6 +32,18 @@ pub const SYS_GPU_ALLOC: u64 = 18;
 pub const SYS_GPU_MAP: u64 = 19;
 pub const SYS_GPU_SUBMIT: u64 = 20;
 pub const SYS_GPU_READ: u64 = 33;
+pub const SYS_GPU_FREE: u64 = 34;
+
+/// Bits del valor que devuelve `SYS_GPU_SUBMIT` para SAXPY/MATVF.
+///
+/// Son DOS preguntas distintas y hacían falta las dos: `ON_GPU` es "lo calculó
+/// el silicio de la GPU" (el criterio GO de L6, y no se pone por cortesía) y
+/// `COMPUTED` es "el resultado ya está en el búfer, no lo recalcules". El camino
+/// de NVIDIA cae en CPU dentro del kernel cuando el canal no está listo: eso es
+/// `COMPUTED=1, ON_GPU=0`, y con un solo bit el userspace lo repetía por su
+/// cuenta creyendo que no se había hecho nada.
+pub const GPU_SUBMIT_ON_GPU: u64 = 1 << 32;
+pub const GPU_SUBMIT_COMPUTED: u64 = 1 << 33;
 pub const SYS_PIPE: u64 = 21;
 pub const SYS_SPAWN_IO: u64 = 22;
 pub const SYS_CHDIR: u64 = 23;
@@ -71,7 +83,14 @@ pub const MMAP_LIMIT: u64 = 0x78_0000_0000; // 480 GiB
 pub struct GpuInfo {
     pub present: u8,
     pub vendor: u8,
-    pub _pad: [u8; 6],
+    /// 1 = `SYS_GPU_SUBMIT` **calcula el resultado** en este dispositivo (aunque
+    /// sea con el bucle de CPU del kernel); 0 = acepta búferes pero no ejecuta
+    /// nada. Sin este bit, un userspace que ve `present=1` sube la matriz entera
+    /// por syscalls a una iGPU Intel que no va a lanzar ningún kernel, y luego
+    /// la recalcula en CPU: coste doble sin ninguna señal de que algo va mal.
+    /// Sale del hueco de `_pad`, así que el layout no cambia.
+    pub compute: u8,
+    pub _pad: [u8; 5],
     pub vram_total: u64,
     pub vram_free: u64,
     pub name: [u8; 32],
@@ -100,6 +119,7 @@ pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
 pub const EPIPE: i64 = 32;
 pub const EAGAIN: i64 = 11;
+pub const EBUSY: i64 = 16;
 pub const ECONNREFUSED: i64 = 61;
 pub const ENOTCONN: i64 = 107;
 

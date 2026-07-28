@@ -10,6 +10,12 @@ const VENDOR_INTEL: u16 = 0x8086;
 const VENDOR_NVIDIA: u16 = 0x10de;
 const GPU_VENDOR_NVIDIA: u8 = 2;
 const GPU_VENDOR_INTEL: u8 = 1;
+/// Dispositivo de mentira que calcula en la CPU del kernel. NO es un atajo para
+/// producción: existe porque sin él todo el camino de syscalls GPU (alloc, map,
+/// submit, read) no se ejecuta ni una vez en QEMU, y el primer sitio donde se
+/// probaría sería la tarjeta real — donde un fallo de fontanería es
+/// indistinguible de un fallo de la GPU. Se enciende a petición (`SOFTG`).
+const GPU_VENDOR_SOFT: u8 = 3;
 
 struct GpuBuffer {
     data: Vec<u8>,
@@ -18,6 +24,8 @@ struct GpuBuffer {
 struct GpuState {
     present: bool,
     vendor: u8,
+    /// `submit` calcula de verdad sobre este dispositivo. Ver `abi::GpuInfo`.
+    compute: bool,
     name: [u8; 32],
     vram_total: u64,
     vram_used: u64,
@@ -59,6 +67,10 @@ pub fn init() {
         GpuState {
             present: true,
             vendor: GPU_VENDOR_NVIDIA,
+            // La capa C siempre deja un resultado: con canal y QMD lo calcula la
+            // GPU, y si no, su bucle de CPU. En los dos casos el búfer sale
+            // bueno, que es lo que este bit promete.
+            compute: true,
             name,
             vram_total: vram,
             vram_used: 0,
@@ -76,6 +88,8 @@ pub fn init() {
         GpuState {
             present: true,
             vendor: GPU_VENDOR_INTEL,
+            // Se le pueden dar búferes, pero no hay quien lance nada en ella.
+            compute: false,
             name,
             vram_total: vram,
             vram_used: 0,
@@ -86,6 +100,7 @@ pub fn init() {
         GpuState {
             present: false,
             vendor: 0,
+            compute: false,
             name: [0; 32],
             vram_total: 0,
             vram_used: 0,
@@ -149,7 +164,8 @@ pub fn info() -> GpuInfo {
     GpuInfo {
         present: g.present as u8,
         vendor: g.vendor,
-        _pad: [0; 6],
+        compute: g.compute as u8,
+        _pad: [0; 5],
         vram_total: g.vram_total,
         vram_free: g.vram_total.saturating_sub(g.vram_used),
         name: g.name,
@@ -175,6 +191,24 @@ pub fn alloc(size: u64) -> Result<u64, i64> {
     Ok(handle)
 }
 
+/// Libera un búfer del dispositivo y devuelve su tamaño a la cuenta de VRAM.
+///
+/// Faltaba, y sin esto no hay forma de tener pesos residentes: quien quisiera
+/// cachear matrices en el dispositivo sólo podía ir dejando búferes muertos hasta
+/// agotar la VRAM contada, y entonces `alloc` empieza a devolver ENOMEM sin que
+/// nada haya hecho nada mal.
+pub fn free(handle: u64) -> Result<u64, i64> {
+    let mut g = gpu().lock();
+    if !g.present {
+        return Err(abi::ENOSYS);
+    }
+    let slot = g.buffers.get_mut(handle as usize).ok_or(abi::EINVAL)?;
+    let bytes = slot.as_ref().ok_or(abi::EINVAL)?.data.len() as u64;
+    *slot = None;
+    g.vram_used = g.vram_used.saturating_sub(bytes);
+    Ok(bytes)
+}
+
 pub fn map_to_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     let g = gpu().lock();
     let buf = g
@@ -182,7 +216,14 @@ pub fn map_to_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
         .get(handle as usize)
         .and_then(|b| b.as_ref())
         .ok_or(abi::EINVAL)?;
-    let n = len.min(buf.data.len() as u64) as usize;
+    // EINVAL, no recorte. Pedir más de lo que hay en el búfer es un error del
+    // llamante, y contestarle con los bytes que había dejaba al userspace con
+    // media matriz y ninguna pista: el `min()` de antes convertía un handle
+    // equivocado o un búfer que se quedó pequeño en un resultado creíble.
+    if len > buf.data.len() as u64 {
+        return Err(abi::EINVAL);
+    }
+    let n = len as usize;
     crate::task::with_current(|p| {
         let space = p.space.as_ref().ok_or(abi::EFAULT)?;
         space.write(user_ptr, &buf.data[..n]).ok_or(abi::EFAULT)?;
@@ -197,7 +238,13 @@ pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64
         .get_mut(handle as usize)
         .and_then(|b| b.as_mut())
         .ok_or(abi::EINVAL)?;
-    let n = len.min(slot.data.len() as u64) as usize;
+    // Igual que en la lectura: subir 16 MiB a un búfer de 4 y que la syscall
+    // conteste 0 es la peor variante posible. El caso real que esto caza es el de
+    // un búfer reservado para la primera capa y reutilizado para una más grande.
+    if len > slot.data.len() as u64 {
+        return Err(abi::EINVAL);
+    }
+    let n = len as usize;
     crate::task::with_current(|p| {
         let space = p.space.as_ref().ok_or(abi::EFAULT)?;
         space.read(user_ptr, &mut slot.data[..n]).ok_or(abi::EFAULT)?;
@@ -205,16 +252,78 @@ pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64
     })
 }
 
+/// Enciende el dispositivo software de pruebas (`SOFTG`). Nunca pisa hardware
+/// real: si ya hay GPU, contesta EBUSY en vez de tapar la de verdad.
+fn enable_soft() -> Result<u64, i64> {
+    let mut g = gpu().lock();
+    if g.present && g.vendor != GPU_VENDOR_SOFT {
+        return Err(abi::EBUSY);
+    }
+    if g.present && g.vendor == GPU_VENDOR_SOFT {
+        return Ok(0);
+    }
+    let mut name = [0u8; 32];
+    let label = b"soft (CPU del kernel, pruebas)";
+    name[..label.len()].copy_from_slice(label);
+    g.present = true;
+    g.vendor = GPU_VENDOR_SOFT;
+    g.compute = true;
+    g.name = name;
+    g.vram_total = 256 * 1024 * 1024;
+    g.vram_used = 0;
+    g.buffers.clear();
+    println!("gpu: dispositivo software activado (cómputo en CPU, para pruebas)");
+    Ok(0)
+}
+
+/// Lo apaga y suelta sus búferes. El test que lo encendió lo deja como estaba:
+/// dejarlo puesto haría que el siguiente proceso del mismo arranque viera una
+/// GPU que no existe.
+fn disable_soft() -> Result<u64, i64> {
+    let mut g = gpu().lock();
+    if !g.present || g.vendor != GPU_VENDOR_SOFT {
+        return Err(abi::EINVAL);
+    }
+    g.present = false;
+    g.vendor = 0;
+    g.compute = false;
+    g.name = [0; 32];
+    g.vram_total = 0;
+    g.vram_used = 0;
+    g.buffers.clear();
+    println!("gpu: dispositivo software apagado");
+    Ok(0)
+}
+
 /// Comandos GPU (userspace):
 /// - `b"SAXPY"` + f32 a + u64 x_handle + u64 y_handle + u32 n
 /// - `b"MATVF"` + u64 w_handle + u32 rows + u32 cols + u64 x_handle + u64 y_handle
 /// - `b"GFINI"` — apaga GSP-RM y deja la tarjeta sin DMA (irreversible)
+/// - `b"SOFTG"` / `b"SOFTX"` — enciende/apaga el dispositivo software de pruebas
+///
+/// El valor de vuelta de SAXPY/MATVF lleva `abi::GPU_SUBMIT_ON_GPU` (lo hizo el
+/// silicio) y `abi::GPU_SUBMIT_COMPUTED` (el resultado está en el búfer). Ver el
+/// comentario de esas constantes: son dos preguntas distintas.
 pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
+    // Antes del candado y antes de `present`: encender el dispositivo de pruebas
+    // es justo lo que se pide cuando NO hay ninguno.
+    if cmd.len() >= 5 && &cmd[..5] == b"SOFTG" {
+        return enable_soft();
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"SOFTX" {
+        return disable_soft();
+    }
     let g = gpu().lock();
     if !g.present {
         return Err(abi::ENOSYS);
     }
-    if g.vendor != GPU_VENDOR_NVIDIA {
+    if !g.compute {
+        // Intel: acepta búferes, no ejecuta. Se contesta 0 —ni ON_GPU ni
+        // COMPUTED— para que el llamante calcule él y no se crea el búfer.
+        return Ok(0);
+    }
+    let soft = g.vendor == GPU_VENDOR_SOFT;
+    if g.vendor != GPU_VENDOR_NVIDIA && !soft {
         return Ok(0);
     }
     // Antes que nada: apagar no necesita buffers ni handles, y tiene que poder
@@ -231,9 +340,16 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         let x = read_f32_buffer(&g, x_h, n)?;
         let mut y = read_f32_buffer(&g, y_h, n)?;
         drop(g);
-        let on_gpu = nvidia_compute::submit_saxpy(a, &x, &mut y).map_err(|_| abi::EIO)?;
+        let on_gpu = if soft {
+            for i in 0..n {
+                y[i] = a * x[i] + y[i];
+            }
+            false
+        } else {
+            nvidia_compute::submit_saxpy(a, &x, &mut y).map_err(|_| abi::EIO)?
+        };
         write_f32_buffer(&mut gpu().lock(), y_h, &y)?;
-        return Ok(((on_gpu as u64) << 32) | y[0].to_bits() as u64);
+        return Ok(submit_bits(on_gpu) | y[0].to_bits() as u64);
     }
     if cmd.len() >= 5 && &cmd[..5] == b"MATVF" && cmd.len() >= 37 {
         let w_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
@@ -245,9 +361,21 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         let x = read_f32_buffer(&g, x_h, cols)?;
         let mut y = read_f32_buffer(&g, y_h, rows)?;
         drop(g);
-        let on_gpu = nvidia_compute::submit_matvec_f32(&w, rows, cols, &x, &mut y).map_err(|_| abi::EIO)?;
+        let on_gpu = if soft {
+            for r in 0..rows {
+                let mut sum = 0.0f32;
+                for c in 0..cols {
+                    sum += w[r * cols + c] * x[c];
+                }
+                y[r] = sum;
+            }
+            false
+        } else {
+            nvidia_compute::submit_matvec_f32(&w, rows, cols, &x, &mut y)
+                .map_err(|_| abi::EIO)?
+        };
         write_f32_buffer(&mut gpu().lock(), y_h, &y)?;
-        return Ok((on_gpu as u64) << 32);
+        return Ok(submit_bits(on_gpu));
     }
     // Legacy: SAXPY con datos embebidos (tests)
     if cmd.len() >= 8 && &cmd[..5] == b"SAXPY" {
@@ -259,6 +387,12 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         }
     }
     Ok(0)
+}
+
+/// `COMPUTED` va siempre que hemos escrito el búfer; `ON_GPU` sólo si lo hizo la
+/// tarjeta. Ponerlos juntos en una función evita que un camino se olvide de uno.
+fn submit_bits(on_gpu: bool) -> u64 {
+    abi::GPU_SUBMIT_COMPUTED | if on_gpu { abi::GPU_SUBMIT_ON_GPU } else { 0 }
 }
 
 fn read_f32_buffer(g: &GpuState, handle: u64, elems: usize) -> Result<Vec<f32>, i64> {

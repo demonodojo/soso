@@ -333,7 +333,155 @@ fn suite() -> u8 {
         let _ = tids;
     }
 
-    println!("init: TODO OK — syscalls desde ring 3 (incl. pipe, spawn_io e hilos)");
+    // Camino de syscalls GPU sobre el dispositivo software del kernel.
+    //
+    // POR QUÉ ESTÁ AQUÍ: sin GPU en PCI, `SYS_GPU_ALLOC/MAP/SUBMIT/READ` no se
+    // ejecutan ni una vez en QEMU, así que el primer sitio donde se probarían es
+    // la tarjeta real — y allí un fallo de fontanería (un handle mal contado, un
+    // búfer que se quedó corto) es indistinguible de un fallo de la GPU, con un
+    // ciclo VFIO de coste por intento. El dispositivo software calcula en la CPU
+    // del kernel: no prueba nada de la GPU, prueba TODO lo que la rodea.
+    {
+        let soft = sys::gpu_submit(b"SOFTG");
+        if soft < 0 {
+            // Con GPU real presente el kernel contesta EBUSY y no se toca nada:
+            // esta subprueba no va a tapar un dispositivo de verdad.
+            println!("init: OK  sin dispositivo software (rc={soft}, hay GPU real o no aplica)");
+        } else {
+            let mut info = abi::GpuInfo::default();
+            check!(
+                sys::gpu_info(&mut info) == 0 && info.present == 1 && info.compute == 1,
+                "gpu_info: dispositivo software presente y con cómputo"
+            );
+
+            // Matriz 3×4 y vector, con valores que hacen visible cualquier
+            // transposición: si se confundieran filas y columnas, los resultados
+            // no coincidirían con la referencia de abajo.
+            const ROWS: usize = 3;
+            const COLS: usize = 4;
+            let w: [f32; ROWS * COLS] = [
+                1.0, 2.0, 3.0, 4.0,
+                5.0, 6.0, 7.0, 8.0,
+                -1.0, 0.5, 2.0, -3.0,
+            ];
+            let x: [f32; COLS] = [1.0, 10.0, 100.0, 1000.0];
+            let mut esperado = [0.0f32; ROWS];
+            for r in 0..ROWS {
+                let mut sum = 0.0f32;
+                for c in 0..COLS {
+                    sum += w[r * COLS + c] * x[c];
+                }
+                esperado[r] = sum;
+            }
+
+            let w_h = sys::gpu_alloc((w.len() * 4) as u64);
+            let x_h = sys::gpu_alloc((x.len() * 4) as u64);
+            let y_h = sys::gpu_alloc((ROWS * 4) as u64);
+            check!(
+                w_h >= 0 && x_h >= 0 && y_h >= 0,
+                "gpu_alloc ×3 (w={w_h} x={x_h} y={y_h})"
+            );
+            let (w_h, x_h, y_h) = (w_h as u64, x_h as u64, y_h as u64);
+
+            // Subir más de lo que cabe tiene que ser EINVAL, no un recorte
+            // silencioso: el recorte convertía un búfer que se quedó pequeño en
+            // media matriz subida y un resultado creíble.
+            let rc = sys::gpu_map(y_h, w.as_ptr() as u64, (w.len() * 4) as u64);
+            check!(
+                rc == -abi::EINVAL,
+                "gpu_map de {} B en un búfer de {} B da EINVAL (rc={rc})",
+                w.len() * 4,
+                ROWS * 4
+            );
+            let rc = sys::gpu_read(y_h, esperado.as_mut_ptr() as u64, 4096);
+            check!(rc == -abi::EINVAL, "gpu_read pasado de largo da EINVAL (rc={rc})");
+            // `esperado` no se ha tocado (EINVAL antes de escribir), pero se
+            // recalcula por si acaso: una comprobación que se apoya en un búfer
+            // que acaba de fallar no demuestra nada.
+            for r in 0..ROWS {
+                let mut sum = 0.0f32;
+                for c in 0..COLS {
+                    sum += w[r * COLS + c] * x[c];
+                }
+                esperado[r] = sum;
+            }
+
+            check!(
+                sys::gpu_map(w_h, w.as_ptr() as u64, (w.len() * 4) as u64) == 0
+                    && sys::gpu_map(x_h, x.as_ptr() as u64, (x.len() * 4) as u64) == 0,
+                "gpu_map de w y x"
+            );
+
+            let mut cmd = [0u8; 37];
+            cmd[0..5].copy_from_slice(b"MATVF");
+            cmd[5..13].copy_from_slice(&w_h.to_le_bytes());
+            cmd[13..17].copy_from_slice(&(ROWS as u32).to_le_bytes());
+            cmd[17..21].copy_from_slice(&(COLS as u32).to_le_bytes());
+            cmd[21..29].copy_from_slice(&x_h.to_le_bytes());
+            cmd[29..37].copy_from_slice(&y_h.to_le_bytes());
+            let bits = sys::gpu_submit(&cmd);
+            check!(bits >= 0, "gpu_submit MATVF (rc={bits})");
+            let bits = bits as u64;
+            check!(
+                bits & abi::GPU_SUBMIT_COMPUTED != 0,
+                "MATVF dice COMPUTED (el resultado está en el búfer)"
+            );
+            check!(
+                bits & abi::GPU_SUBMIT_ON_GPU == 0,
+                "MATVF NO dice ON_GPU: lo calculó la CPU del kernel y se admite"
+            );
+
+            let mut y = [0.0f32; ROWS];
+            check!(
+                sys::gpu_read(y_h, y.as_mut_ptr() as u64, (ROWS * 4) as u64) == 0,
+                "gpu_read del resultado"
+            );
+            let mut iguales = true;
+            for r in 0..ROWS {
+                if (y[r] - esperado[r]).abs() > 0.001 {
+                    iguales = false;
+                }
+            }
+            check!(
+                iguales,
+                "MATVF calcula y=W·x ({} {} {} vs {} {} {})",
+                y[0], y[1], y[2], esperado[0], esperado[1], esperado[2]
+            );
+
+            // free devuelve los bytes y el handle deja de valer.
+            let freed = sys::gpu_free(w_h);
+            check!(
+                freed == (w.len() * 4) as i64,
+                "gpu_free devuelve {} bytes (esperado {})",
+                freed,
+                w.len() * 4
+            );
+            check!(
+                sys::gpu_free(w_h) == -abi::EINVAL,
+                "gpu_free dos veces del mismo handle da EINVAL"
+            );
+            check!(
+                sys::gpu_map(w_h, w.as_ptr() as u64, 4) == -abi::EINVAL,
+                "un handle liberado ya no acepta datos"
+            );
+            let _ = sys::gpu_free(x_h);
+            let _ = sys::gpu_free(y_h);
+
+            // Y se apaga: dejarlo puesto haría que el siguiente proceso de este
+            // arranque viera una GPU que no existe.
+            check!(
+                sys::gpu_submit(b"SOFTX") == 0,
+                "dispositivo software apagado"
+            );
+            let mut info = abi::GpuInfo::default();
+            check!(
+                sys::gpu_info(&mut info) == 0 && info.present == 0,
+                "gpu_info vuelve a decir que no hay dispositivo"
+            );
+        }
+    }
+
+    println!("init: TODO OK — syscalls desde ring 3 (incl. pipe, spawn_io, hilos y GPU)");
     0
 }
 

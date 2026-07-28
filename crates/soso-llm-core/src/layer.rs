@@ -194,6 +194,7 @@ impl LayerScratch {
 fn matvec_step(
     use_gpu: bool,
     gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+    key: &str,
     v: TensorView<'_>,
     rows: usize,
     cols: usize,
@@ -203,7 +204,7 @@ fn matvec_step(
 ) -> Result<(), ()> {
     if use_gpu {
         if let Some(g) = gpu.as_deref_mut() {
-            if crate::gpu::try_gpu_matvec(g, &v, rows, cols, x, out)? {
+            if crate::gpu::try_gpu_matvec(g, key, &v, rows, cols, x, out)? {
                 return Ok(());
             }
         }
@@ -241,6 +242,15 @@ impl<'a> LayerExecutor<'a> {
         let eps = self.manifest.rms_eps;
         let theta = self.manifest.rope_theta;
         let prefix = format!("L{layer:02}");
+        // Los nombres se construyen UNA vez y se usan dos: para leer el tensor y
+        // como clave estable del despacho a GPU (ver `GpuDispatch::matvec_f32`).
+        let name_attn_q = format!("{prefix}.attn_q");
+        let name_attn_k = format!("{prefix}.attn_k");
+        let name_attn_v = format!("{prefix}.attn_v");
+        let name_attn_output = format!("{prefix}.attn_output");
+        let name_ffn_up = format!("{prefix}.ffn_up");
+        let name_ffn_gate = format!("{prefix}.ffn_gate");
+        let name_ffn_down = format!("{prefix}.ffn_down");
         let seq = Sequential;
         let par: &dyn RowParallel = self.parallel.unwrap_or(&seq);
 
@@ -252,7 +262,8 @@ impl<'a> LayerExecutor<'a> {
         matvec_step(
             use_gpu,
             gpu,
-            source.tensor_view(&format!("{prefix}.attn_q"))?,
+            &name_attn_q,
+            source.tensor_view(&name_attn_q)?,
             h,
             h,
             hidden,
@@ -262,7 +273,8 @@ impl<'a> LayerExecutor<'a> {
         matvec_step(
             use_gpu,
             gpu,
-            source.tensor_view(&format!("{prefix}.attn_k"))?,
+            &name_attn_k,
+            source.tensor_view(&name_attn_k)?,
             kv_dim,
             h,
             hidden,
@@ -272,7 +284,8 @@ impl<'a> LayerExecutor<'a> {
         matvec_step(
             use_gpu,
             gpu,
-            source.tensor_view(&format!("{prefix}.attn_v"))?,
+            &name_attn_v,
+            source.tensor_view(&name_attn_v)?,
             kv_dim,
             h,
             hidden,
@@ -325,7 +338,8 @@ impl<'a> LayerExecutor<'a> {
         matvec_step(
             use_gpu,
             gpu,
-            source.tensor_view(&format!("{prefix}.attn_output"))?,
+            &name_attn_output,
+            source.tensor_view(&name_attn_output)?,
             h,
             h,
             &s.attn_out,
@@ -344,7 +358,8 @@ impl<'a> LayerExecutor<'a> {
         matvec_step(
             use_gpu,
             gpu,
-            source.tensor_view(&format!("{prefix}.ffn_up"))?,
+            &name_ffn_up,
+            source.tensor_view(&name_ffn_up)?,
             ffn,
             h,
             hidden,
@@ -355,7 +370,8 @@ impl<'a> LayerExecutor<'a> {
             matvec_step(
                 use_gpu,
                 gpu,
-                source.tensor_view(&format!("{prefix}.ffn_gate"))?,
+                &name_ffn_gate,
+            source.tensor_view(&name_ffn_gate)?,
                 ffn,
                 h,
                 hidden,
@@ -373,7 +389,8 @@ impl<'a> LayerExecutor<'a> {
         matvec_step(
             use_gpu,
             gpu,
-            source.tensor_view(&format!("{prefix}.ffn_down"))?,
+            &name_ffn_down,
+            source.tensor_view(&name_ffn_down)?,
             h,
             ffn,
             &s.up,
