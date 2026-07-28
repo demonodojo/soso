@@ -369,12 +369,55 @@ stdin (ninguno de los actuales lo hace) y `spawn_io`; era una mina para el prime
 que la pisara, no una pérdida en curso.
 
 **Lo que salió limpio:** la dirección del permiso en las otras 27 syscalls, y los
-`min()` de `sys_read`/`getdents`/pipe (todos con el recuento en el retorno). Queda
-anotado un riesgo que NO se ha tocado: `user_slice`/`user_slice_mut` devuelven un
-`&'static [u8]` tras validar, y otro hilo del mismo proceso puede desmapear ese
-rango mientras la syscall lo usa (TOCTOU). Cerrarlo de verdad pide copiar dentro y
-fuera (`copy_from_user`/`copy_to_user`) en vez de prestar memoria de usuario, y eso
-toca todas las syscalls: es un cambio de diseño, no un parche.
+`min()` de `sys_read`/`getdents`/pipe (todos con el recuento en el retorno).
+
+### El TOCTOU de `user_slice`: alcance medido y opciones
+
+`user_slice`/`user_slice_mut` validan y luego devuelven un `&'static [u8]` sobre
+memoria de usuario. Si otro hilo del mismo proceso hace `munmap` de ese rango
+mientras la syscall lo usa, el kernel copia de/a una página que ya no es del
+proceso. Y no es autolesión: `unmap_range` devuelve los frames al allocator
+**global**, así que ese frame puede estar ya en OTRO proceso — lectura o escritura
+cruzada, no sólo un pánico.
+
+Lo primero fue medir, porque **la exposición no es uniforme**: `munmap` necesita
+`PROCS`, así que toda copia hecha con `PROCS` tomado está serializada contra él y no
+tiene ventana.
+
+| Camino | ¿Copia bajo `PROCS`? |
+|---|---|
+| `write` a tty/WriteBuf, `getdents` | Sí, dentro de `with_fd` — **sin ventana** |
+| `gpu_map`/`gpu_read` | Sí, `space.read/write` en `with_current` — **sin ventana** |
+| Reanudación de pipe/socket bloqueado | Sí, el planificador tiene `PROCS` — **sin ventana** |
+| `stat`, `getcwd`, `gpu_info` | No → **arreglados** (2026-07-28), ahora copian en `with_current` |
+| `read`/`write` por pipe o socket, `read_timeout`, `gpu_submit`, rutas de `user_str` | No → **ventana abierta** |
+
+Las tres primeras filas no eran suerte: son el patrón bueno. Las tres de `stat`/
+`getcwd`/`gpu_info` se han pasado a ese patrón (comprobar y copiar dentro de
+`with_current`), que cuesta ~5 líneas cada una y no cambia ninguna firma.
+
+Lo que queda son los caminos que pasan `buf`/`len` **crudos** a `pipe::*` y
+`net::tcp_*`, y ahí ya no vale el truco: la copia ocurre bajo `PIPES`/`NET`, no bajo
+`PROCS`. Tres opciones, con lo que cuesta cada una:
+
+- **A. Copiar dentro y fuera** (`copy_from_user`/`copy_to_user` estilo Linux). El
+  primitivo YA existe y es el que usan las filas sin ventana: `AddrSpace::read` y
+  `write`. Habría que cambiar la firma de cuatro ayudantes (`pipe::try_read/write`,
+  `tcp_try_read/write`) para que tomen `&[u8]`/`&mut [u8]` en vez de un puntero, y
+  la syscall hace la copia. Cuesta una copia extra por llamada (≤4 KiB en todo lo
+  real; el tope de 16 MiB sigue puesto) y quita de paso la ficción del `&'static`.
+- **B. Guarda de préstamo por AddrSpace**: las syscalls cuentan préstamos en curso y
+  `munmap` espera a que bajen a cero. Sin copias, ~60 líneas, pero hay que
+  garantizar que ningún préstamo sobreviva a un bloqueo o `munmap` se queda
+  esperando para siempre.
+- **C. Recuperación en el handler de fallos** (estilo `extable`): NO sirve. Si el
+  frame ya se reasignó a otro proceso no hay fallo ninguno — el kernel lee o escribe
+  memoria ajena en silencio, que es justo el caso grave.
+
+**Recomendación: A.** Es el patrón que ya funciona en este kernel, no añade
+candados ni riesgo de interbloqueo, y el coste es un `memcpy` de unos KiB. Son ~10
+sitios y cuatro firmas; no está hecho porque cambia el contrato de todas las
+syscalls que tocan memoria de usuario y eso se decide, no se cuela en un parche.
 
 ## Fase L4 — SIMD
 
