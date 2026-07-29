@@ -95,6 +95,41 @@ impl<M: FileMapper> MmapTensorSource<M> {
             }
         }
     }
+
+    /// Mapea shards y toca páginas a stride de 2 MiB (page-fault adelantado
+    /// alineado con el camino huge del kernel), no solo el primer byte.
+    pub fn prefetch_shards_impl(&mut self, shards: &[String]) {
+        const STRIDE: usize = 2 * 1024 * 1024;
+        for name in shards {
+            if let Ok(cached) = self.ensure_mapped(name) {
+                let ptr = cached.mapped.addr as *const u8;
+                let len = cached.mapped.len;
+                if len == 0 {
+                    continue;
+                }
+                let mut off = 0usize;
+                while off < len {
+                    let _ = unsafe { core::ptr::read_volatile(ptr.add(off)) };
+                    off = off.saturating_add(STRIDE);
+                    if off == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Desmapea todo lo que no esté en `keep` (working set de capas).
+    pub fn release_shards_except_impl(&mut self, keep: &[String]) {
+        let keys: alloc::vec::Vec<String> = self.cache.keys().cloned().collect();
+        for key in keys {
+            if !keep.iter().any(|k| k == &key) {
+                if let Some(entry) = self.cache.remove(&key) {
+                    self.mapper.unmap_file(&entry.mapped);
+                }
+            }
+        }
+    }
 }
 
 impl<M: FileMapper> Drop for MmapTensorSource<M> {
@@ -166,6 +201,14 @@ impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
             dtype,
             elems,
         })
+    }
+
+    fn prefetch_shards(&mut self, shards: &[String]) {
+        self.prefetch_shards_impl(shards);
+    }
+
+    fn release_shards_except(&mut self, keep: &[String]) {
+        self.release_shards_except_impl(keep);
     }
 }
 

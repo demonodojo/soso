@@ -81,12 +81,17 @@ impl Runtime {
         let has_gate = index.find("L00.ffn_gate").is_some();
         let has_lm_head = index.find("lm_head").is_some();
         let has_output_norm = index.find("output_norm").is_some();
+        let head_dim = (manifest.hidden_dim / manifest.num_heads) as usize;
+        let kv_dim = manifest.num_kv_heads as usize * head_dim;
+        let kv_cap = (manifest.max_seq as usize).min(256).max(32);
         Self {
             manifest,
             index,
             tiers: TierManager::new(ram_budget, vram_budget),
             hidden: vec![0.0f32; h],
-            kv: (0..n).map(|_| LayerKv::new()).collect(),
+            kv: (0..n)
+                .map(|_| LayerKv::with_capacity(kv_cap, kv_dim))
+                .collect(),
             pos: 0,
             backend: Backend::Auto,
             scratch,
@@ -198,6 +203,7 @@ impl Runtime {
             None,
         )?;
         self.advance_pos();
+        self.slide_kv_if_needed();
         Ok(())
     }
 
@@ -218,6 +224,7 @@ impl Runtime {
             Some(clock_ms),
         )?;
         self.advance_pos();
+        self.slide_kv_if_needed();
         let replanned = self
             .planner
             .as_mut()
@@ -255,7 +262,8 @@ impl Runtime {
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         clock_ms: Option<fn() -> u64>,
     ) -> Result<(), ()> {
-        if self.pos >= self.manifest.max_seq as usize {
+        // Con planner: la ventana KV deslizante permite superar max_seq.
+        if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
             return Err(());
         }
         if layer_start > layer_end || layer_end > self.manifest.num_layers {
@@ -269,8 +277,17 @@ impl Runtime {
             parallel,
         };
         for layer in layer_start..layer_end {
+            // Prefetch layer-ahead (ScoutAttention / LayerKV): mapear N+1
+            // mientras se calcula N.
+            if let Some(next) = self.manifest.prefetch.get((layer + 1) as usize) {
+                source.prefetch_shards(&next.shards);
+                if let Some(pl) = self.planner.as_mut() {
+                    pl.note_prefetch();
+                }
+            }
             if let Some(pf) = self.manifest.prefetch.get(layer as usize) {
                 self.tiers.schedule_prefetch(&pf.shards);
+                source.prefetch_shards(&pf.shards);
             }
             let use_gpu = base_gpu
                 && self
@@ -305,8 +322,43 @@ impl Runtime {
                 let ms = c().saturating_sub(t0.unwrap_or(0));
                 pl.observe_layer(layer, dest, ms);
             }
+            // Liberar shards fuera del working set (streaming FlexGen).
+            let keep = self
+                .planner
+                .as_ref()
+                .map(|pl| pl.keep_shards_after(layer, layer_end, &self.manifest));
+            if let Some(keep) = keep {
+                if !keep.is_empty() {
+                    source.release_shards_except(&keep);
+                    if let Some(pl) = self.planner.as_mut() {
+                        pl.note_shard_release();
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    /// StreamingLLM: recorta KV a la ventana presupuestada (sink + recientes).
+    pub fn slide_kv_if_needed(&mut self) {
+        let (keep, sink) = match self.planner.as_ref() {
+            Some(pl) => (pl.kv_window_tokens(), pl.sink_tokens()),
+            None => return,
+        };
+        let head_dim = (self.manifest.hidden_dim / self.manifest.num_heads) as usize;
+        let kv_dim = self.manifest.num_kv_heads as usize * head_dim;
+        let mut slid = false;
+        for kv in &mut self.kv {
+            if kv.tokens(kv_dim) > keep {
+                kv.slide_window(keep, sink, kv_dim);
+                slid = true;
+            }
+        }
+        if slid {
+            if let Some(pl) = self.planner.as_mut() {
+                pl.note_kv_slide();
+            }
+        }
     }
 
     pub fn advance_pos(&mut self) {
@@ -424,7 +476,7 @@ impl Runtime {
             self.forward_step_par(source, parallel, gpu)?;
         }
         for _ in 0..max_new {
-            if self.pos >= self.manifest.max_seq as usize {
+            if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
                 break;
             }
             let logits = self.logits_par(source, parallel)?;
@@ -436,6 +488,7 @@ impl Runtime {
             on_token(next);
             self.embed_token(next, source)?;
             self.forward_step_par(source, parallel, gpu)?;
+            self.slide_kv_if_needed();
         }
         Ok(tokens)
     }
@@ -467,9 +520,6 @@ impl Runtime {
             let _ = self.forward_step_timed(source, parallel, gpu, clock_ms)?;
         }
         for _ in 0..max_new {
-            if self.pos >= self.manifest.max_seq as usize {
-                break;
-            }
             let logits = self.logits_par(source, parallel)?;
             let next = sampler.sample(logits);
             if eos == Some(next) {
@@ -481,6 +531,7 @@ impl Runtime {
             if self.forward_step_timed(source, parallel, gpu, clock_ms)? {
                 if let Some(pl) = self.planner.as_mut() {
                     pl.refresh_mem(refresh_mem());
+                    pl.recompute_streaming_budgets(&self.manifest);
                 }
             }
         }

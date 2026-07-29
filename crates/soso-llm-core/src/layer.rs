@@ -4,8 +4,8 @@
 //! mapeados: no hay copia de matrices por token, solo lecturas en streaming
 //! durante el matvec. El KV cache se guarda en f16 (mitad de ancho de banda).
 
-use crate::f16::{f16_to_f32, f32_to_f16};
-use crate::gemm::{matvec_f32, matvec_q4_k, matvec_q8_0, rmsnorm, rope_inplace, silu, softmax_inplace};
+use crate::f16::f32_to_f16;
+use crate::gemm::{matvec_f32, matvec_q4_k, matvec_q8_0, rmsnorm, rope_inplace, silu};
 use crate::parallel::{RowParallel, Sequential};
 use alloc::format;
 use alloc::vec;
@@ -43,6 +43,11 @@ pub trait TensorSource {
     fn load_f32_range(&mut self, name: &str, elem_off: usize, out: &mut [f32]) -> Result<(), ()>;
     /// Vista zero-copy del tensor completo.
     fn tensor_view(&mut self, name: &str) -> Result<TensorView<'_>, ()>;
+    /// Prefetch layer-ahead (ScoutAttention / LayerKV): mapear shards y tocar
+    /// la primera página para solapar I/O con el cómputo de la capa actual.
+    fn prefetch_shards(&mut self, _shards: &[alloc::string::String]) {}
+    /// Liberar shards fuera del working set (streaming FlexGen/LayerKV).
+    fn release_shards_except(&mut self, _keep: &[alloc::string::String]) {}
 }
 
 /// matvec despachado por dtype directamente sobre la vista (sin copiar pesos).
@@ -134,6 +139,10 @@ pub fn matvec_view_par(
 }
 
 /// KV cache por capa en f16.
+///
+/// Estilo PagedAttention/StreamingLLM: capacidad pre-reservada y ventana
+/// deslizante (sink + recientes) cuando el presupuesto de memoria no permite
+/// la secuencia completa.
 pub struct LayerKv {
     pub k: Vec<u16>,
     pub v: Vec<u16>,
@@ -147,9 +156,52 @@ impl LayerKv {
         }
     }
 
+    /// Reserva capacidad para `tokens` posiciones × `kv_dim` elementos f16.
+    pub fn with_capacity(tokens: usize, kv_dim: usize) -> Self {
+        let n = tokens.saturating_mul(kv_dim);
+        Self {
+            k: Vec::with_capacity(n),
+            v: Vec::with_capacity(n),
+        }
+    }
+
     pub fn reset(&mut self) {
         self.k.clear();
         self.v.clear();
+    }
+
+    pub fn tokens(&self, kv_dim: usize) -> usize {
+        if kv_dim == 0 {
+            0
+        } else {
+            self.k.len() / kv_dim
+        }
+    }
+
+    pub fn append_f16(&mut self, k: &[f32], v: &[f32]) {
+        self.k.extend(k.iter().map(|&x| f32_to_f16(x)));
+        self.v.extend(v.iter().map(|&x| f32_to_f16(x)));
+    }
+
+    /// Ventana StreamingLLM: conserva `sink` tokens iniciales + los más recientes
+    /// hasta `keep` en total. Los K/V ya llevan RoPE aplicado; truncar el frente
+    /// no invalida las posiciones restantes.
+    pub fn slide_window(&mut self, keep: usize, sink: usize, kv_dim: usize) {
+        let n = self.tokens(kv_dim);
+        if n <= keep || keep == 0 || kv_dim == 0 {
+            return;
+        }
+        let sink = sink.min(keep);
+        let drop = n - keep;
+        let start_recent = sink + drop;
+        let mut new_k = Vec::with_capacity(keep * kv_dim);
+        let mut new_v = Vec::with_capacity(keep * kv_dim);
+        new_k.extend_from_slice(&self.k[..sink * kv_dim]);
+        new_v.extend_from_slice(&self.v[..sink * kv_dim]);
+        new_k.extend_from_slice(&self.k[start_recent * kv_dim..]);
+        new_v.extend_from_slice(&self.v[start_recent * kv_dim..]);
+        self.k = new_k;
+        self.v = new_v;
     }
 }
 
@@ -313,37 +365,26 @@ impl<'a> LayerExecutor<'a> {
             rope_inplace(&mut s.k[head * head_dim..(head + 1) * head_dim], pos, theta);
         }
 
-        kv.k.extend(s.k.iter().map(|&x| f32_to_f16(x)));
-        kv.v.extend(s.v.iter().map(|&x| f32_to_f16(x)));
-        let seq = pos + 1;
+        kv.append_f16(&s.k, &s.v);
+        // Longitud real del cache (ventana deslizante puede ser < pos+1).
+        let seq = kv.tokens(kv_dim);
+        let _ = pos; // RoPE ya aplicado con posición absoluta del token actual
 
+        // FlashAttention-style decode: online softmax por tiles de KV.
         s.attn_out.fill(0.0);
-        if s.scores.len() < seq {
-            s.scores.resize(seq, 0.0);
-        }
-        let inv_sqrt = 1.0 / libm::sqrtf(head_dim as f32);
         for head in 0..heads {
             let q_h = &s.q[head * head_dim..(head + 1) * head_dim];
             let kv_head = head / group;
-            let scores = &mut s.scores[..seq];
-            for (t, sc) in scores.iter_mut().enumerate() {
-                let k_off = t * kv_dim + kv_head * head_dim;
-                let k_h = &kv.k[k_off..k_off + head_dim];
-                let mut dot = 0.0f32;
-                for (qv, &kb) in q_h.iter().zip(k_h) {
-                    dot += qv * f16_to_f32(kb);
-                }
-                *sc = dot * inv_sqrt;
-            }
-            softmax_inplace(scores);
-            s.head_out.fill(0.0);
-            for (t, &sc) in scores.iter().enumerate() {
-                let v_off = t * kv_dim + kv_head * head_dim;
-                let v_h = &kv.v[v_off..v_off + head_dim];
-                for (o, &vb) in s.head_out.iter_mut().zip(v_h) {
-                    *o += sc * f16_to_f32(vb);
-                }
-            }
+            crate::attn::attention_decode_f16_tiled(
+                q_h,
+                &kv.k,
+                &kv.v,
+                head_dim,
+                kv_dim,
+                kv_head,
+                seq,
+                &mut s.head_out,
+            );
             s.attn_out[head * head_dim..(head + 1) * head_dim].copy_from_slice(&s.head_out);
         }
 

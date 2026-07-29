@@ -557,6 +557,11 @@ fn run_model(
             st.remote_layers,
         );
         println!(
+            "soso-llm: streaming — working-set {} capas, ventana KV {} tokens (LayerKV+StreamingLLM)",
+            st.resident_layers,
+            st.kv_window_tokens,
+        );
+        println!(
             "soso-llm: memoria — libre {} KiB, reclaimable {} KiB",
             mem.free_bytes() / 1024,
             mem.reclaimable_bytes() / 1024,
@@ -651,6 +656,12 @@ fn run_model(
                     st.avg_cpu_ms,
                     st.avg_gpu_ms,
                     st.avg_remote_ms,
+                );
+                println!(
+                    "soso-llm: streaming — prefetch {}, liberaciones shard {}, ventanas KV {}",
+                    st.prefeches,
+                    st.shard_releases,
+                    st.kv_slides,
                 );
             }
             // Los pesos SUBIDOS frente a las llamadas es la cifra que dice si el

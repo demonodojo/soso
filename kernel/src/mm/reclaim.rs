@@ -4,6 +4,10 @@
 //! bajo la marca de agua, se desmapean las más antiguas **sin** borrar la
 //! `MmapRegion`, de modo que un acceso posterior vuelve a faultar y recarga
 //! desde sosomfs.
+//!
+//! Algoritmo **clock** (segunda oportunidad): un re-acceso reciente (touch
+//! vía `register` de la misma VA) pone el bit; al evictar se salta una vez.
+//! El TLB shootdown se agrupa por lote para no saturar el IPI en cada página.
 
 use alloc::collections::VecDeque;
 use crate::task::addrspace::AddrSpace;
@@ -11,14 +15,16 @@ use spin::Mutex;
 
 /// Reserva mínima de frames libres (4 MiB).
 const WATERMARK_FRAMES: usize = 1024;
-/// Cuántas páginas intentar evictar por ronda de presión.
-const EVICT_BATCH: usize = 16;
+/// Páginas a considerar por ronda de clock antes de forzar.
+const CLOCK_SCAN: usize = 32;
 
 struct CachedPage {
     space: AddrSpace,
     va: u64,
     /// `true` si el mapeo es de 2 MiB.
     is_2m: bool,
+    /// Segunda oportunidad (clock).
+    referenced: bool,
 }
 
 struct ReclaimState {
@@ -40,11 +46,27 @@ pub fn reclaimable_frames() -> usize {
 }
 
 /// Registra una página file-backed RO recién mapeada.
+/// Si ya estaba en la cola (mismo espacio+VA), marca `referenced`.
 pub fn register(space: &AddrSpace, va: u64, is_2m: bool) {
-    RECLAIM.lock().queue.push_back(CachedPage {
+    let va = if is_2m {
+        va & !(2 * 1024 * 1024 - 1)
+    } else {
+        va & !0xfff
+    };
+    let mut st = RECLAIM.lock();
+    let pml4 = space.pml4_phys();
+    for e in st.queue.iter_mut() {
+        if e.va == va && e.space.pml4_phys() == pml4 {
+            e.referenced = true;
+            e.is_2m = is_2m;
+            return;
+        }
+    }
+    st.queue.push_back(CachedPage {
         space: space.clone(),
         va,
         is_2m,
+        referenced: true,
     });
 }
 
@@ -59,23 +81,58 @@ pub fn ensure_free_frames(need: usize) -> bool {
         if free >= target {
             return true;
         }
-        let entry = RECLAIM.lock().queue.pop_front();
-        let Some(entry) = entry else {
+        let mut victims = alloc::vec::Vec::new();
+        {
+            let mut st = RECLAIM.lock();
+            if st.queue.is_empty() {
+                return free >= need;
+            }
+            let mut scanned = 0;
+            while scanned < CLOCK_SCAN && !st.queue.is_empty() && victims.is_empty() {
+                scanned += 1;
+                if let Some(mut e) = st.queue.pop_front() {
+                    if e.referenced {
+                        e.referenced = false;
+                        st.queue.push_back(e);
+                    } else {
+                        victims.push(e);
+                    }
+                }
+            }
+            // Si todo el scan tenía referenced, forzar la más antigua.
+            if victims.is_empty() {
+                if let Some(e) = st.queue.pop_front() {
+                    victims.push(e);
+                }
+            }
+        }
+        if victims.is_empty() {
             return free >= need;
-        };
-        entry.space.evict_page(entry.va, entry.is_2m);
+        }
+        for e in victims {
+            e.space.evict_page(e.va, e.is_2m);
+        }
         crate::arch::apic::tlb_shootdown_all();
     }
 }
 
 /// Evicta un lote explícito (p. ej. antes de un bloque 2 MiB grande).
 pub fn evict_batch(max_pages: usize) {
-    for _ in 0..max_pages {
-        let entry = RECLAIM.lock().queue.pop_front();
-        let Some(entry) = entry else {
-            break;
-        };
-        entry.space.evict_page(entry.va, entry.is_2m);
+    let mut victims = alloc::vec::Vec::new();
+    {
+        let mut st = RECLAIM.lock();
+        for _ in 0..max_pages {
+            match st.queue.pop_front() {
+                Some(e) => victims.push(e),
+                None => break,
+            }
+        }
+    }
+    if victims.is_empty() {
+        return;
+    }
+    for e in victims {
+        e.space.evict_page(e.va, e.is_2m);
     }
     crate::arch::apic::tlb_shootdown_all();
 }

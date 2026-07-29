@@ -561,13 +561,18 @@ pesos bajo presión de memoria (marca de agua ~4 MiB): un modelo puede ser más
 grande que la RAM y degradar a velocidad de disco en lugar de morir por OOM.
 `soso-llm` incluye un **planificador de recursos** que lee la memoria libre
 (`SYS_MEMINFO`), reparte capas entre CPU/GPU/nodo remoto según latencia medida
-y replanifica cada pocos tokens. Al arrancar y al terminar verás líneas como:
+y replanifica cada pocos tokens. Además aplica streaming estilo **LayerKV /
+FlexGen** (solo unas pocas capas de pesos residentes, prefetch de la siguiente)
+y ventana **StreamingLLM** en el KV cache (sink + recientes) para no crecer
+sin límite. Al arrancar y al terminar verás líneas como:
 
 ```text
 soso-llm: planificador — presupuesto pesos … KiB, modelo … KiB, capas CPU/GPU/remoto …
+soso-llm: streaming — working-set N capas, ventana KV T tokens (LayerKV+StreamingLLM)
 soso-llm: memoria — libre … KiB, reclaimable … KiB
 …
 soso-llm: planificador — replanes N, latencia media CPU/GPU/remoto … ms
+soso-llm: streaming — prefetch …, liberaciones shard …, ventanas KV …
 ```
 
 La ventana de mapeo de usuario llega a ~416 GiB; la imagen de modelos se

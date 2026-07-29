@@ -1,5 +1,12 @@
 //! Planificador consciente de recursos: presupuesto de memoria, latencia
 //! por capa/destino y replanificación adaptativa.
+//!
+//! Optimizaciones inspiradas en papers recientes de inferencia:
+//! - **LayerKV / FlexGen**: working set de pocas capas residentes + prefetch
+//!   layer-ahead (solapar I/O con cómputo).
+//! - **StreamingLLM**: ventana KV (sink + recientes) bajo presión de memoria.
+//! - **PagedAttention (espíritu)**: capacidad KV pre-reservada; no crecer
+//!   ciegamente hasta OOM.
 
 use alloc::format;
 use alloc::string::String;
@@ -15,6 +22,10 @@ const EWMA_ALPHA: f64 = 0.25;
 const MEM_RESERVE_PCT: u64 = 30;
 /// Si la EWMA remota supera esto, degradar a CPU local.
 const REMOTE_SLOW_MS: f64 = 500.0;
+/// Capas de pesos a mantener mapeadas (actual + prefetch).
+const DEFAULT_RESIDENT_LAYERS: u32 = 2;
+/// Tokens sink (StreamingLLM) que nunca se evictan del KV.
+const DEFAULT_SINK_TOKENS: usize = 4;
 
 /// Instantánea de memoria (compatible con `soso_abi::MemInfo`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -67,6 +78,13 @@ pub struct PlannerStats {
     pub avg_remote_ms: f64,
     pub weight_budget_bytes: u64,
     pub model_weight_bytes: u64,
+    /// Capas de pesos en el working set (streaming).
+    pub resident_layers: u32,
+    /// Ventana máxima de tokens KV bajo presupuesto.
+    pub kv_window_tokens: u32,
+    pub shard_releases: u32,
+    pub kv_slides: u32,
+    pub prefeches: u32,
 }
 
 pub struct ResourcePlanner {
@@ -82,6 +100,13 @@ pub struct ResourcePlanner {
     remote_available: bool,
     remote_degraded: bool,
     remote_rtt_ms: f64,
+    /// Capas de pesos a mantener mapeadas a la vez.
+    resident_layers: u32,
+    /// Máximo de tokens en KV (todas las capas) bajo presupuesto.
+    kv_window_tokens: usize,
+    sink_tokens: usize,
+    avg_layer_bytes: u64,
+    kv_bytes_per_token: u64,
     stats: PlannerStats,
 }
 
@@ -112,6 +137,14 @@ pub fn total_model_weight_bytes(index: &TensorIndex) -> u64 {
     index.entries.iter().map(|e| e.byte_len).sum()
 }
 
+/// Bytes de KV f16 por token de secuencia (todas las capas).
+pub fn kv_bytes_per_token(manifest: &Manifest) -> u64 {
+    let head_dim = (manifest.hidden_dim / manifest.num_heads) as u64;
+    let kv_dim = manifest.num_kv_heads as u64 * head_dim;
+    // K + V, f16 = 2 bytes, × num_layers
+    kv_dim * 2 * 2 * manifest.num_layers as u64
+}
+
 impl ResourcePlanner {
     pub fn new(
         manifest: &Manifest,
@@ -123,6 +156,15 @@ impl ResourcePlanner {
         let n = manifest.num_layers as usize;
         let model_weight_bytes = total_model_weight_bytes(index);
         let weight_budget = mem.weight_budget_bytes();
+        let avg_layer = if n == 0 {
+            0
+        } else {
+            (0..manifest.num_layers)
+                .map(|l| bytes_for_layer(l, index))
+                .sum::<u64>()
+                / n as u64
+        };
+        let kv_bpt = kv_bytes_per_token(manifest);
         let mut planner = Self {
             layer_plans: Vec::with_capacity(n),
             layer_ms_cpu: vec![0.0; n],
@@ -136,12 +178,18 @@ impl ResourcePlanner {
             remote_available,
             remote_degraded: false,
             remote_rtt_ms: 0.0,
+            resident_layers: DEFAULT_RESIDENT_LAYERS,
+            kv_window_tokens: manifest.max_seq as usize,
+            sink_tokens: DEFAULT_SINK_TOKENS,
+            avg_layer_bytes: avg_layer,
+            kv_bytes_per_token: kv_bpt,
             stats: PlannerStats {
                 weight_budget_bytes: weight_budget,
                 model_weight_bytes,
                 ..Default::default()
             },
         };
+        planner.recompute_streaming_budgets(manifest);
         planner.rebuild_plan(manifest, index);
         planner
     }
@@ -152,8 +200,56 @@ impl ResourcePlanner {
         self.stats.weight_budget_bytes = self.weight_budget;
     }
 
+    pub fn recompute_streaming_budgets(&mut self, manifest: &Manifest) {
+        // LayerKV: cuantas capas caben en el presupuesto de pesos.
+        let layers = if self.avg_layer_bytes == 0 {
+            DEFAULT_RESIDENT_LAYERS
+        } else {
+            let fit = (self.weight_budget / self.avg_layer_bytes.max(1)).max(1) as u32;
+            fit.min(DEFAULT_RESIDENT_LAYERS.max(1)).min(manifest.num_layers.max(1))
+        };
+        self.resident_layers = layers.max(1);
+
+        // Mitad del presupuesto para KV (el resto son pesos streaming + scratch).
+        let kv_budget = self.weight_budget / 2;
+        let window = if self.kv_bytes_per_token == 0 {
+            manifest.max_seq as usize
+        } else {
+            let w = (kv_budget / self.kv_bytes_per_token) as usize;
+            w.max(self.sink_tokens + 8)
+                .min(manifest.max_seq as usize)
+        };
+        self.kv_window_tokens = window;
+        self.stats.resident_layers = self.resident_layers;
+        self.stats.kv_window_tokens = self.kv_window_tokens as u32;
+    }
+
     pub fn stats(&self) -> &PlannerStats {
         &self.stats
+    }
+
+    pub fn resident_layers(&self) -> u32 {
+        self.resident_layers
+    }
+
+    pub fn kv_window_tokens(&self) -> usize {
+        self.kv_window_tokens
+    }
+
+    pub fn sink_tokens(&self) -> usize {
+        self.sink_tokens
+    }
+
+    pub fn note_prefetch(&mut self) {
+        self.stats.prefeches = self.stats.prefeches.saturating_add(1);
+    }
+
+    pub fn note_shard_release(&mut self) {
+        self.stats.shard_releases = self.stats.shard_releases.saturating_add(1);
+    }
+
+    pub fn note_kv_slide(&mut self) {
+        self.stats.kv_slides = self.stats.kv_slides.saturating_add(1);
     }
 
     pub fn layer_dest(&self, layer: u32) -> ExecDest {
@@ -172,6 +268,30 @@ impl ResourcePlanner {
             .get(layer as usize)
             .map(|p| p.gpu_tensors.iter().any(|t| tensor.ends_with(t)))
             .unwrap_or(false)
+    }
+
+    /// Shards a mantener tras terminar `layer` (working set = capas recientes).
+    pub fn keep_shards_after(
+        &self,
+        layer: u32,
+        layer_end: u32,
+        manifest: &Manifest,
+    ) -> Vec<String> {
+        let start = layer.saturating_sub(self.resident_layers.saturating_sub(1));
+        let end = (layer + 1).min(layer_end).min(manifest.num_layers);
+        let mut keep = Vec::new();
+        for l in start..end {
+            if let Some(pf) = manifest.prefetch.get(l as usize) {
+                keep.extend(pf.shards.iter().cloned());
+            }
+        }
+        // Prefetch layer-ahead
+        if end < layer_end.min(manifest.num_layers) {
+            if let Some(pf) = manifest.prefetch.get(end as usize) {
+                keep.extend(pf.shards.iter().cloned());
+            }
+        }
+        keep
     }
 
     pub fn observe_layer(&mut self, layer: u32, dest: ExecDest, ms: u64) {
@@ -202,6 +322,7 @@ impl ResourcePlanner {
             return false;
         }
         self.tokens_since_replan = 0;
+        self.recompute_streaming_budgets(manifest);
         self.rebuild_plan(manifest, index);
         self.stats.replans += 1;
         true
@@ -224,11 +345,17 @@ impl ResourcePlanner {
         let mut gpu_layers = 0u32;
         let mut remote_layers = 0u32;
 
+        // Con streaming, el presupuesto efectivo es capas residentes × tamaño.
+        let stream_budget = self
+            .avg_layer_bytes
+            .saturating_mul(self.resident_layers as u64)
+            .max(self.weight_budget.min(self.avg_layer_bytes.saturating_mul(2)));
+
         for layer in 0..manifest.num_layers {
             let lb = bytes_for_layer(layer, index);
             let dest = choose_dest(
                 lb,
-                self.weight_budget,
+                stream_budget,
                 self.model_weight_bytes,
                 vram_left,
                 self.remote_available,
@@ -274,6 +401,8 @@ impl ResourcePlanner {
         self.stats.cpu_layers = cpu_layers;
         self.stats.gpu_layers = gpu_layers;
         self.stats.remote_layers = remote_layers;
+        self.stats.resident_layers = self.resident_layers;
+        self.stats.kv_window_tokens = self.kv_window_tokens as u32;
     }
 }
 
@@ -390,5 +519,39 @@ mod tests {
         assert!(planner.remote_degraded);
         planner.rebuild_plan(&manifest, &index);
         assert!(planner.layer_plans.iter().all(|p| p.dest != ExecDest::Remote));
+    }
+
+    #[test]
+    fn streaming_budgets_under_pressure() {
+        let manifest = Manifest::tiny("t");
+        let index = TensorIndex::default();
+        // Muy poca RAM: el working set debe ser 1 capa y la ventana KV acotada.
+        let mem = MemSnapshot {
+            total_frames: 256,
+            free_frames: 64,
+            reclaimable_frames: 0,
+        };
+        let planner = ResourcePlanner::new(&manifest, &index, mem, 0, false);
+        assert!(planner.resident_layers() >= 1);
+        assert!(planner.kv_window_tokens() >= DEFAULT_SINK_TOKENS + 8);
+    }
+
+    #[test]
+    fn kv_slide_preserves_sink_and_recent() {
+        use crate::layer::LayerKv;
+        let kv_dim = 4;
+        let mut kv = LayerKv::new();
+        for t in 0..20u16 {
+            let k = [t as f32; 4];
+            let v = [(t + 100) as f32; 4];
+            kv.append_f16(&k, &v);
+        }
+        kv.slide_window(8, 2, kv_dim);
+        assert_eq!(kv.tokens(kv_dim), 8);
+        // sink: tokens 0,1
+        assert_eq!(kv.k[0], crate::f16::f32_to_f16(0.0));
+        assert_eq!(kv.k[kv_dim], crate::f16::f32_to_f16(1.0));
+        // recent: 14..19
+        assert_eq!(kv.k[2 * kv_dim], crate::f16::f32_to_f16(14.0));
     }
 }
