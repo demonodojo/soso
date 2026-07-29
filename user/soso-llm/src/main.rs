@@ -20,6 +20,7 @@ use libsoso::{println, sys};
 use pool::ThreadPool;
 use soso_abi::{self as abi, O_RDONLY};
 use soso_llm_core::parallel::RowParallel;
+use soso_llm_core::plan::{MemSnapshot, ResourcePlanner};
 use soso_llm_core::pipeline::{PipelinePlan, PipelineRole};
 use soso_llm_core::runtime::{Backend, Runtime};
 use soso_llm_core::sample::Sampler;
@@ -29,6 +30,23 @@ use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
 
 libsoso::entry!(main);
+
+fn read_mem_snapshot() -> MemSnapshot {
+    let mut mi = abi::MemInfo::default();
+    if sys::meminfo(&mut mi) == 0 {
+        MemSnapshot {
+            total_frames: mi.total_frames,
+            free_frames: mi.free_frames,
+            reclaimable_frames: mi.reclaimable_frames,
+        }
+    } else {
+        MemSnapshot::default()
+    }
+}
+
+fn clock_ms() -> u64 {
+    sys::uptime_ms().max(0) as u64
+}
 
 struct SyscallMapper;
 
@@ -519,6 +537,31 @@ fn run_model(
 
     let mut gpu = abi::GpuInfo::default();
     let _ = sys::gpu_info(&mut gpu);
+    let mem = read_mem_snapshot();
+    let planner = ResourcePlanner::new(
+        &bundle.rt.manifest,
+        &bundle.rt.index,
+        mem,
+        gpu.vram_free,
+        false,
+    );
+    bundle.rt.set_planner(planner);
+    if let Some(pl) = bundle.rt.planner.as_ref() {
+        let st = pl.stats();
+        println!(
+            "soso-llm: planificador — presupuesto pesos {} KiB, modelo {} KiB, capas CPU/GPU/remoto {}/{}/{}",
+            st.weight_budget_bytes / 1024,
+            st.model_weight_bytes / 1024,
+            st.cpu_layers,
+            st.gpu_layers,
+            st.remote_layers,
+        );
+        println!(
+            "soso-llm: memoria — libre {} KiB, reclaimable {} KiB",
+            mem.free_bytes() / 1024,
+            mem.reclaimable_bytes() / 1024,
+        );
+    }
     let mut sys_gpu = if force_cpu {
         None
     } else {
@@ -540,6 +583,9 @@ fn run_model(
         );
         bundle.rt.set_backend(Backend::Auto);
         bundle.rt.tiers.vram_budget = gpu.vram_free as usize;
+        if let Some(pl) = bundle.rt.planner.as_mut() {
+            pl.set_vram_free(gpu.vram_free);
+        }
     } else if gpu.present != 0 {
         println!(
             "soso-llm: hay GPU («{}») pero no ejecuta kernels; backend CPU",
@@ -566,7 +612,7 @@ fn run_model(
     let prompt_tokens = bundle.tokenizer.encode(text);
     let mut decoder = StreamDecoder::new();
     let t0 = sys::uptime_ms();
-    let result = bundle.rt.generate_stream_par(
+    let result = bundle.rt.generate_stream_planned(
         &mut bundle.source,
         &prompt_tokens,
         max_new,
@@ -580,6 +626,8 @@ fn run_model(
         },
         par,
         &mut gpu_ref,
+        clock_ms,
+        read_mem_snapshot,
     );
     match result {
         Ok(tokens) => {
@@ -595,6 +643,16 @@ fn run_model(
                 "soso-llm: generado ({} tokens, {} ms, {:.2} tok/s)",
                 n, elapsed_ms, tok_s
             );
+            if let Some(pl) = bundle.rt.planner.as_ref() {
+                let st = pl.stats();
+                println!(
+                    "soso-llm: planificador — replanes {}, latencia media CPU/GPU/remoto {:.1}/{:.1}/{:.1} ms",
+                    st.replans,
+                    st.avg_cpu_ms,
+                    st.avg_gpu_ms,
+                    st.avg_remote_ms,
+                );
+            }
             // Los pesos SUBIDOS frente a las llamadas es la cifra que dice si el
             // cacheo funciona: sin él eran una subida de la matriz entera por
             // llamada, y en el log no se veía nada raro. Y `on_gpu` separa "lo

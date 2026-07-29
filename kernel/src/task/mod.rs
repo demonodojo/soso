@@ -254,6 +254,12 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
         if space.is_mapped(addr & !0xfff) {
             return true;
         }
+        // Presión de memoria: evictar pesos mmap RO antes de pedir frames nuevos.
+        if !region.writable && region.inode != 0 {
+            if !crate::mm::reclaim::ensure_free_frames(1) {
+                return false;
+            }
+        }
         // Los guards de FRAME_ALLOC no pueden seguir vivos al llamar a
         // map_page*, que toma el mismo spinlock para los frames de tablas.
         let free_frame = |frame| unsafe {
@@ -269,6 +275,9 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
             && off_2m % HUGE == 0
             && off_2m + HUGE <= region.file_len;
         if huge_ok {
+            if !region.writable && region.inode != 0 {
+                let _ = crate::mm::reclaim::ensure_free_frames(512);
+            }
             let frame2m = crate::mm::FRAME_ALLOC.get().unwrap().lock().allocate_2m();
             if let Some(frame) = frame2m {
                 let dst = unsafe {
@@ -280,6 +289,9 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
                 if crate::fs::load_file_range(region.inode, off_2m as usize, dst).is_ok()
                     && space.map_page_2m(va_2m, frame, region.writable).is_some()
                 {
+                    if !region.writable && region.inode != 0 {
+                        crate::mm::reclaim::register(&space, va_2m, true);
+                    }
                     return true;
                 }
                 unsafe {
@@ -322,6 +334,9 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
         if space.map_page(page_va, frame, region.writable).is_none() {
             free_frame(frame);
             return false;
+        }
+        if !region.writable && region.inode != 0 {
+            crate::mm::reclaim::register(&space, page_va, false);
         }
         true
     })

@@ -556,9 +556,23 @@ SOSO_QEMU_MEM=16G SOSO_QEMU_SMP=4 cargo xtask run
 ```
 
 Los pesos se leen **sin copia** directamente del mmap del modelo (páginas de
-2 MiB bajo demanda) y el KV cache va en f16: el límite de tamaño de modelo es
-la RAM que le des a QEMU (ventana de mapeo de ~416 GiB). La imagen de modelos
-se dimensiona con `SOSO_MODELS_SIZE` (por defecto 8G) si el modelo no cabe.
+2 MiB bajo demanda) y el KV cache va en f16. El kernel **reclama** páginas de
+pesos bajo presión de memoria (marca de agua ~4 MiB): un modelo puede ser más
+grande que la RAM y degradar a velocidad de disco en lugar de morir por OOM.
+`soso-llm` incluye un **planificador de recursos** que lee la memoria libre
+(`SYS_MEMINFO`), reparte capas entre CPU/GPU/nodo remoto según latencia medida
+y replanifica cada pocos tokens. Al arrancar y al terminar verás líneas como:
+
+```text
+soso-llm: planificador — presupuesto pesos … KiB, modelo … KiB, capas CPU/GPU/remoto …
+soso-llm: memoria — libre … KiB, reclaimable … KiB
+…
+soso-llm: planificador — replanes N, latencia media CPU/GPU/remoto … ms
+```
+
+La ventana de mapeo de usuario llega a ~416 GiB; la imagen de modelos se
+dimensiona con `SOSO_MODELS_SIZE` (por defecto 8G) si el árbol `.som` no cabe
+en el disco de modelos.
 
 `soso-llm run` genera en **streaming** (imprime cada token según sale) y
 acepta muestreo además del greedy por defecto:

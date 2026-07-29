@@ -40,6 +40,20 @@ pub fn run() {
         if st.success() { Ok(()) } else { Err("los tests de sosofs fallaron".into()) }
     });
 
+    // --- 1c) planificador de recursos (host) ---
+    let _ = paso("planificador soso-llm-core (host)", &mut fallos, || {
+        let st = Command::new("cargo")
+            .current_dir(&root)
+            .args(["test", "-q", "-p", "soso-llm-core", "--features", "std"])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if st.success() {
+            Ok(())
+        } else {
+            Err("los tests del planificador fallaron".into())
+        }
+    });
+
     // --- construir e ir a QEMU ---
     super::build_user();
     let img = super::build_image();
@@ -105,6 +119,11 @@ pub fn run() {
         }
     }
     let _ = qemu.wait();
+
+    // --- inferencia con RAM reducida (reclaim de pesos mmap) ---
+    let _ = paso("soso-llm con RAM 48M (reclaim)", &mut fallos, || {
+        test_reclaim_low_mem(&img, &data, &models)
+    });
 
     exit_resumen(if fallos == 0 { 0 } else { 1 });
 }
@@ -314,6 +333,11 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
             "soso-llm no generó salida esperada; stdout: {texto:?}"
         ));
     }
+    if !texto.contains("soso-llm: planificador") {
+        return Err(format!(
+            "soso-llm no mostró el planificador de recursos; stdout: {texto:?}"
+        ));
+    }
     if !texto.contains("dispositivo «soft") {
         return Err(format!(
             "--gpu-soft no enganchó el dispositivo software; stdout: {texto:?}"
@@ -433,6 +457,53 @@ pub(crate) fn espera_salida(qemu: &mut Child, limite: Duration) -> Option<i32> {
         }
     }
     None
+}
+
+/// Segunda instancia QEMU con poca RAM: el reclaim del kernel debe permitir
+/// completar la inferencia del modelo tiny (pesos en disco, streaming).
+fn test_reclaim_low_mem(
+    img: &std::path::Path,
+    data: &std::path::Path,
+    models: &std::path::Path,
+) -> Result<(), String> {
+    let root = super::project_root();
+    let serial = root.join("target/test-reclaim-serial.log");
+    let _ = std::fs::remove_file(&serial);
+    let mut qemu = Command::new("qemu-system-x86_64");
+    qemu.args(["-machine", "q35", "-cpu", "max"])
+        .args(["-m", "48M"])
+        .args(["-smp", "1"]);
+    super::apply_firmware(&mut qemu, img);
+    qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
+    super::apply_qemu_disks(&mut qemu, data, models);
+    super::apply_qemu_nic(&mut qemu);
+    super::apply_qemu_gpu(&mut qemu);
+    qemu.args(["-serial", &format!("file:{}", serial.display())])
+        .args(["-display", "none"])
+        .arg("-no-reboot")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = qemu.spawn().map_err(|e| e.to_string())?;
+    esperar_en_fichero(&serial, "sosh —", Duration::from_secs(120))?;
+    let key = root.join("target/soso_test_key");
+    let texto = ssh_guion(
+        &key,
+        "soso-llm run tiny --prompt x --max 2\nexit\n",
+        Duration::from_secs(180),
+    )?;
+    let _ = child.kill();
+    let _ = child.wait();
+    if !texto.contains("soso-llm: generado") {
+        return Err(format!(
+            "inferencia con 48M no completó; stdout: {texto:?}"
+        ));
+    }
+    if !texto.contains("soso-llm: planificador") {
+        return Err(format!(
+            "falta salida del planificador con 48M; stdout: {texto:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// Smoke test lx-e1000e (`SOSO_LXDDE_TEST=1` tras `cargo xtask test`).

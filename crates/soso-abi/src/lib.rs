@@ -33,6 +33,8 @@ pub const SYS_GPU_MAP: u64 = 19;
 pub const SYS_GPU_SUBMIT: u64 = 20;
 pub const SYS_GPU_READ: u64 = 33;
 pub const SYS_GPU_FREE: u64 = 34;
+/// Contadores de memoria física (frames de 4 KiB).
+pub const SYS_MEMINFO: u64 = 35;
 
 /// Bits del valor que devuelve `SYS_GPU_SUBMIT` para SAXPY/MATVF.
 ///
@@ -108,6 +110,16 @@ pub struct GpuInfo {
 
 /// Umbral: ficheros mayores se abren en modo lazy (sin cargar todo).
 pub const LAZY_FILE_THRESHOLD: u64 = 64 * 1024;
+
+/// Respuesta de `SYS_MEMINFO`: frames de 4 KiB (multiplicar ×4096 para bytes).
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct MemInfo {
+    pub total_frames: u64,
+    pub free_frames: u64,
+    /// Páginas mmap RO file-backed registradas y evictables por el kernel.
+    pub reclaimable_frames: u64,
+}
 
 // ---- errnos (el kernel devuelve -errno) ----
 

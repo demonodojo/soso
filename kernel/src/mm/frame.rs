@@ -49,6 +49,10 @@ impl BootInfoFrameAllocator {
         self.total_usable - self.cursor_consumed + self.free.len()
     }
 
+    pub fn total_usable_frames(&self) -> usize {
+        self.total_usable
+    }
+
     /// Avanza el cursor hasta `count` frames contiguos alineados a
     /// `align_frames`. Los frames saltados por la alineación (y los restos
     /// de región que no caben) se reciclan en la lista de libres.

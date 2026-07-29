@@ -201,8 +201,14 @@ fn matvec_step(
     x: &[f32],
     out: &mut [f32],
     par: &dyn RowParallel,
+    planner: Option<&crate::plan::ResourcePlanner>,
+    layer: u32,
 ) -> Result<(), ()> {
-    if use_gpu {
+    let gpu_ok = use_gpu
+        && planner
+            .map(|p| p.gpu_tensor_allowed(layer, key))
+            .unwrap_or(true);
+    if gpu_ok {
         if let Some(g) = gpu.as_deref_mut() {
             if crate::gpu::try_gpu_matvec(g, key, &v, rows, cols, x, out)? {
                 return Ok(());
@@ -231,6 +237,7 @@ impl<'a> LayerExecutor<'a> {
         source: &mut S,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         use_gpu: bool,
+        planner: Option<&crate::plan::ResourcePlanner>,
     ) -> Result<(), ()> {
         let h = self.manifest.hidden_dim as usize;
         let heads = self.manifest.num_heads as usize;
@@ -269,6 +276,8 @@ impl<'a> LayerExecutor<'a> {
             hidden,
             &mut s.q,
             par,
+            planner,
+            layer,
         )?;
         matvec_step(
             use_gpu,
@@ -280,6 +289,8 @@ impl<'a> LayerExecutor<'a> {
             hidden,
             &mut s.k,
             par,
+            planner,
+            layer,
         )?;
         matvec_step(
             use_gpu,
@@ -291,6 +302,8 @@ impl<'a> LayerExecutor<'a> {
             hidden,
             &mut s.v,
             par,
+            planner,
+            layer,
         )?;
 
         for head in 0..heads {
@@ -345,6 +358,8 @@ impl<'a> LayerExecutor<'a> {
             &s.attn_out,
             &mut s.q,
             par,
+            planner,
+            layer,
         )?;
         for i in 0..h {
             hidden[i] = s.residual[i] + s.q[i];
@@ -365,18 +380,22 @@ impl<'a> LayerExecutor<'a> {
             hidden,
             &mut s.up,
             par,
+            planner,
+            layer,
         )?;
         if self.has_gate {
             matvec_step(
                 use_gpu,
                 gpu,
                 &name_ffn_gate,
-            source.tensor_view(&name_ffn_gate)?,
+                source.tensor_view(&name_ffn_gate)?,
                 ffn,
                 h,
                 hidden,
                 &mut s.gate,
                 par,
+                planner,
+                layer,
             )?;
             for i in 0..ffn {
                 s.up[i] = silu(s.gate[i]) * s.up[i];
@@ -396,6 +415,8 @@ impl<'a> LayerExecutor<'a> {
             &s.up,
             hidden,
             par,
+            planner,
+            layer,
         )?;
 
         for i in 0..h {

@@ -42,7 +42,7 @@ soso/
 
 ### Syscalls principales
 
-`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd` (+ GPU)
+`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo` (+ GPU, TCP, hilos)
 
 - **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`; hijos heredan cwd del padre
 - **Escritura:** `open(O_WRONLY)` → buffer en kernel; `create_file` en sosofs al `close()`
@@ -96,6 +96,8 @@ soso/
 - Segundo disco virtio-blk; montaje en `/models/<nombre>/`
 - Ficheros `.som` con cabecera común (magic+crc+versión+payload_len, `pack_som`/`parse_som` en sosomodel): `manifest.som` (v2: GQA `num_kv_heads`, `rope_theta`, `rms_eps`), `index.som` (shape `[filas,columnas]` row-major, dtype F32/Q8_0), `tokenizer.som` (vocabulario SentencePiece-ish, opcional), shards `.tensor`
 - Runtime (`soso-llm-core`): llama completo — RoPE, GQA, **Wo (`attn_output`)**, SwiGLU (`ffn_gate` opcional), `output_norm`, Q8_0 y Q4_K (layout GGML passthrough, matvec fusionado); pesos zero-copy (`TensorView` sobre mmap), KV cache f16, sampling temp/top-p (`sample.rs`), streaming (`generate_stream` + `StreamDecoder`); buffers reutilizados (`LayerScratch`) — libsoso libera solo bloques ≥1 MiB (mmap anónimo), no reservar por token
+- **Planificador de recursos** (`plan.rs` + `ResourcePlanner`): lee `SYS_MEMINFO`, calcula presupuesto de pesos (70 % de libre+reclaimable), cronometra capas (EWMA CPU/GPU/remoto), replanifica cada 8 tokens; `soso-llm` imprime plan y estadísticas al arrancar/finalizar
+- **Reclaim kernel** (`mm/reclaim.rs`): páginas mmap RO file-backed evictables bajo marca de agua (4 MiB); TLB shootdown IPI (`TLB_SHOOTDOWN_VECTOR=0x42`) en SMP — permite modelos > RAM vía streaming desde sosomfs
 - **SIMD**: userspace compila con target propio `user/x86_64-soso-user.json` (SSE..AVX2+FMA, build-std); kernels AVX2 en `gemm.rs::avx2` con dispatch por `target_feature` (escalar = referencia para tests). **Estado FPU**: el kernel preserva x87/XMM/YMM con **xsave64** (`arch/fpu.rs`; fxsave NO basta — pierde las mitades altas YMM entre procesos): timer_isr guarda a `TIMER_FPU` antes de net::poll, `timer_tick` lo copia a `Process.fpu` al desalojar, `schedule_inner` restaura al reanudar, el page fault handler preserva en `mmap_fault_shim`; syscalls no preservan (los wrappers de libsoso llevan `clobber_abi("C")`). `init test` estresa YMM con dos hijos "fpu" concurrentes
 - Harness rápido de calidad en host: `cargo run --release -p soso-llm-core --features std --example hostrun -- <modelo-dir> "<prompt>" <n>` (velocidad nativa, SOSO_DEBUG=1 para estadísticas por capa)
 - `Runtime::validate_shapes()` comprueba index↔manifest antes de inferir
@@ -118,7 +120,8 @@ soso/
   se construye en runtime** (`nvkm_bringup_lx.c` → `ga102_gsp_new`). El boot GSP
   efectivo y el compute siguen **soft/CPU** hasta cablear MMIO real (requiere G1/HW).
 - **Syscalls GPU** (`soso-abi`): `SYS_GPU_INFO=17`, `SYS_GPU_ALLOC=18`,
-  `SYS_GPU_MAP=19`, `SYS_GPU_SUBMIT=20`, `SYS_GPU_READ=33` (en `task/syscall.rs`).
+  `SYS_GPU_MAP=19`, `SYS_GPU_SUBMIT=20`, `SYS_GPU_READ=33`, `SYS_GPU_FREE=34`,
+  `SYS_MEMINFO=35` (frames totales/libres/reclaimable).
 - **Puente Rust↔C**: `kernel/src/lxdde/gpu.rs` (`lx_nouveau_*`), drivers en
   `kernel/src/drivers/{gpu,nvidia_probe,nvidia_compute}.rs`. Modo por
   `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau`.

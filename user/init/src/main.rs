@@ -359,6 +359,21 @@ fn suite() -> u8 {
             N * PER
         );
         check!(sys::ncpu() >= 1, "ncpu={}", sys::ncpu());
+        {
+            let mut mi = abi::MemInfo::default();
+            check!(sys::meminfo(&mut mi) == 0, "meminfo errno");
+            check!(mi.total_frames > 0, "total_frames={}", mi.total_frames);
+            check!(
+                mi.free_frames <= mi.total_frames,
+                "free={} total={}",
+                mi.free_frames,
+                mi.total_frames
+            );
+            println!(
+                "init: OK  meminfo total={} libre={} reclaimable={}",
+                mi.total_frames, mi.free_frames, mi.reclaimable_frames
+            );
+        }
         check!(
             ALLOC_MAL.load(Ordering::Relaxed) == 0,
             "arena concurrente: {} bloques corruptos en {} hilos × 200 reservas",

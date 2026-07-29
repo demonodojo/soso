@@ -244,6 +244,31 @@ impl AddrSpace {
         Some(())
     }
 
+    /// Desmapea una página ya mapeada y libera su frame, **sin** tocar el
+    /// libro mmap (reclaim). El siguiente acceso vuelve a page-fault.
+    pub fn evict_page(&self, va: u64, is_2m: bool) {
+        const HUGE: u64 = 2 * 1024 * 1024;
+        let mut mapper = self.mapper();
+        let mut fa = mm::FRAME_ALLOC.get().unwrap().lock();
+        if is_2m {
+            let page2m = Page::<Size2MiB>::containing_address(VirtAddr::new(va & !(HUGE - 1)));
+            if let Ok((frame, flush)) = mapper.unmap(page2m) {
+                flush.flush();
+                unsafe {
+                    fa.deallocate_2m(PhysFrame::containing_address(frame.start_address()));
+                }
+            }
+            return;
+        }
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va & !0xfff));
+        if let Ok((frame, flush)) = mapper.unmap(page) {
+            flush.flush();
+            unsafe {
+                fa.deallocate_frame(frame);
+            }
+        }
+    }
+
     /// Desmapea un rango de páginas (4 KiB o 2 MiB) y libera sus frames.
     pub fn unmap_range(&self, start: u64, len: u64) {
         const HUGE: u64 = 2 * 1024 * 1024;

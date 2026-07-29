@@ -7,6 +7,7 @@ pub mod frame;
 pub mod heap;
 pub mod memtest;
 pub mod paging;
+pub mod reclaim;
 
 use bootloader_api::BootInfo;
 use frame::BootInfoFrameAllocator;

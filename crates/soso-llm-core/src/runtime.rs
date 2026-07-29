@@ -3,6 +3,7 @@
 use crate::gemm::rmsnorm;
 use crate::layer::{matvec_view_par, LayerExecutor, LayerKv, LayerScratch, TensorSource, TensorView};
 use crate::parallel::{RowParallel, Sequential};
+use crate::plan::{ExecDest, ResourcePlanner};
 use crate::tier::TierManager;
 use alloc::string::String;
 use alloc::vec;
@@ -61,6 +62,7 @@ pub struct Runtime {
     has_gate: bool,
     has_lm_head: bool,
     has_output_norm: bool,
+    pub planner: Option<ResourcePlanner>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,7 +94,12 @@ impl Runtime {
             has_gate,
             has_lm_head,
             has_output_norm,
+            planner: None,
         }
+    }
+
+    pub fn set_planner(&mut self, planner: ResourcePlanner) {
+        self.planner = Some(planner);
     }
 
     /// Comprueba que las shapes del index casan con lo que espera el ejecutor
@@ -182,9 +189,41 @@ impl Runtime {
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     ) -> Result<(), ()> {
-        self.forward_layers_range(0, self.manifest.num_layers, source, parallel, gpu)?;
+        self.forward_layers_range_clock(
+            0,
+            self.manifest.num_layers,
+            source,
+            parallel,
+            gpu,
+            None,
+        )?;
         self.advance_pos();
         Ok(())
+    }
+
+    /// Como `forward_step_par` con reloj y replanificación al final del token.
+    pub fn forward_step_timed(
+        &mut self,
+        source: &mut impl TensorSource,
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        clock_ms: fn() -> u64,
+    ) -> Result<bool, ()> {
+        self.forward_layers_range_clock(
+            0,
+            self.manifest.num_layers,
+            source,
+            parallel,
+            gpu,
+            Some(clock_ms),
+        )?;
+        self.advance_pos();
+        let replanned = self
+            .planner
+            .as_mut()
+            .map(|p| p.on_token_complete(&self.manifest, &self.index))
+            .unwrap_or(false);
+        Ok(replanned)
     }
 
     /// Ejecuta un rango de capas en la posición actual sin avanzar `pos`.
@@ -196,13 +235,33 @@ impl Runtime {
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     ) -> Result<(), ()> {
+        self.forward_layers_range_clock(
+            layer_start,
+            layer_end,
+            source,
+            parallel,
+            gpu,
+            None,
+        )
+    }
+
+    /// Como `forward_layers_range` pero cronometra capas si se pasa `clock_ms`.
+    pub fn forward_layers_range_clock(
+        &mut self,
+        layer_start: u32,
+        layer_end: u32,
+        source: &mut impl TensorSource,
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        clock_ms: Option<fn() -> u64>,
+    ) -> Result<(), ()> {
         if self.pos >= self.manifest.max_seq as usize {
             return Err(());
         }
         if layer_start > layer_end || layer_end > self.manifest.num_layers {
             return Err(());
         }
-        let use_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
+        let base_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
             && gpu.as_ref().is_some_and(|g| g.available());
         let exec = LayerExecutor {
             manifest: &self.manifest,
@@ -213,6 +272,24 @@ impl Runtime {
             if let Some(pf) = self.manifest.prefetch.get(layer as usize) {
                 self.tiers.schedule_prefetch(&pf.shards);
             }
+            let use_gpu = base_gpu
+                && self
+                    .planner
+                    .as_ref()
+                    .map(|p| p.use_gpu_for_layer(layer))
+                    .unwrap_or(true);
+            let dest = if use_gpu {
+                ExecDest::Gpu
+            } else if self
+                .planner
+                .as_ref()
+                .is_some_and(|p| p.layer_dest(layer) == ExecDest::Remote)
+            {
+                ExecDest::Remote
+            } else {
+                ExecDest::Cpu
+            };
+            let t0 = clock_ms.map(|c| c());
             exec.forward_layer(
                 layer,
                 self.pos,
@@ -222,7 +299,12 @@ impl Runtime {
                 source,
                 gpu,
                 use_gpu,
+                self.planner.as_ref(),
             )?;
+            if let (Some(c), Some(pl)) = (clock_ms, self.planner.as_mut()) {
+                let ms = c().saturating_sub(t0.unwrap_or(0));
+                pl.observe_layer(layer, dest, ms);
+            }
         }
         Ok(())
     }
@@ -354,6 +436,53 @@ impl Runtime {
             on_token(next);
             self.embed_token(next, source)?;
             self.forward_step_par(source, parallel, gpu)?;
+        }
+        Ok(tokens)
+    }
+
+    /// Como `generate_stream_par` con cronometraje de capas y replanificación.
+    pub fn generate_stream_planned(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        max_new: usize,
+        eos: Option<u32>,
+        sampler: &mut crate::sample::Sampler,
+        mut on_token: impl FnMut(u32),
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        clock_ms: fn() -> u64,
+        mut refresh_mem: impl FnMut() -> crate::plan::MemSnapshot,
+    ) -> Result<Vec<u32>, ()> {
+        if prompt.is_empty() {
+            return Err(());
+        }
+        self.reset_sequence();
+        if let Some(pl) = self.planner.as_mut() {
+            pl.refresh_mem(refresh_mem());
+        }
+        let mut tokens: Vec<u32> = prompt.to_vec();
+        for &tok in prompt {
+            self.embed_token(tok, source)?;
+            let _ = self.forward_step_timed(source, parallel, gpu, clock_ms)?;
+        }
+        for _ in 0..max_new {
+            if self.pos >= self.manifest.max_seq as usize {
+                break;
+            }
+            let logits = self.logits_par(source, parallel)?;
+            let next = sampler.sample(logits);
+            if eos == Some(next) {
+                break;
+            }
+            tokens.push(next);
+            on_token(next);
+            self.embed_token(next, source)?;
+            if self.forward_step_timed(source, parallel, gpu, clock_ms)? {
+                if let Some(pl) = self.planner.as_mut() {
+                    pl.refresh_mem(refresh_mem());
+                }
+            }
         }
         Ok(tokens)
     }

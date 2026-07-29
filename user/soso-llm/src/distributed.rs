@@ -308,6 +308,7 @@ fn run_head_step(
             break;
         }
         // El nodo está calculando: solo timeout total, sin keepalive idle.
+        let t0 = now_ms();
         match recv_msg(
             &mut link.tx,
             step_timeout_ms,
@@ -320,6 +321,9 @@ fn run_head_step(
                     return Err(());
                 }
                 hidden = r.hidden;
+                if let Some(pl) = rt.planner.as_mut() {
+                    pl.observe_remote_rtt(now_ms().saturating_sub(t0));
+                }
             }
             Message::Error(e) => {
                 println!("soso-llm: error remoto ({}): {}", link.addr, e.message);

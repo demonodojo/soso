@@ -234,6 +234,16 @@ pub fn uptime_ms() -> i64 {
     syscall1(abi::SYS_UPTIME_MS, 0)
 }
 
+pub fn meminfo(out: &mut abi::MemInfo) -> i64 {
+    syscall4(
+        abi::SYS_MEMINFO,
+        out as *mut abi::MemInfo as u64,
+        0,
+        0,
+        0,
+    )
+}
+
 pub fn tcp_connect(addr: &abi::SockAddr, timeout_ms: u64) -> i64 {
     syscall4(
         abi::SYS_TCP_CONNECT,

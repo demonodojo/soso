@@ -46,6 +46,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
         ));
     }
     idt[apic::RESCHED_VECTOR].set_handler_fn(resched_handler);
+    idt[apic::TLB_SHOOTDOWN_VECTOR].set_handler_fn(tlb_shootdown_handler);
     idt[InterruptIndex::Com1 as u8].set_handler_fn(com1_handler);
     crate::arch::irq::install_stubs(&mut idt);
     idt
@@ -54,6 +55,16 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
 /// IPI de replanificación: solo EOI. Despierta al core del `hlt` para que
 /// el bucle del scheduler vuelva a mirar `PROCS`.
 extern "x86-interrupt" fn resched_handler(_stack_frame: InterruptStackFrame) {
+    apic::eoi();
+}
+
+/// IPI de shootdown TLB: recarga CR3 del proceso actual en este core.
+extern "x86-interrupt" fn tlb_shootdown_handler(_stack_frame: InterruptStackFrame) {
+    use x86_64::registers::control::Cr3;
+    let (frame, flags) = Cr3::read();
+    unsafe {
+        Cr3::write(frame, flags);
+    }
     apic::eoi();
 }
 

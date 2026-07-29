@@ -12,6 +12,7 @@ pub mod parallel;
 pub mod quant;
 pub mod optim;
 pub mod pipeline;
+pub mod plan;
 pub mod runtime;
 pub mod sample;
 pub mod tier;
@@ -20,4 +21,5 @@ pub mod source;
 pub mod tokenizer;
 
 pub use runtime::Runtime;
+pub use plan::{ExecDest, MemSnapshot, PlannerStats, ResourcePlanner};
 pub use source::{FileMapper, MappedShard, MmapTensorSource};

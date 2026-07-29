@@ -91,10 +91,11 @@ Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp).
 # Host-only sosofs crash-safety
 cargo test -q -p sosofs --features std
 
-# Host: soso-llm-core, sosomodel, convert-gguf
-cargo test -q -p soso-llm-core -p sosomodel -p convert-gguf
+# Host: soso-llm-core (incl. planificador), sosomodel, convert-gguf
+cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 
-# End-to-end (builds, QEMU, serial log, TCP, SSH, soso-llm via SSH, halt)
+# End-to-end (builds, QEMU, serial log, TCP, SSH, soso-llm, init test meminfo,
+# inferencia con RAM 48M/reclaim, halt)
 cargo xtask test
 
 # Decode tok/s con modelo sintético bench (default SMP=1,4 mem=8G)

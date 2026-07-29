@@ -226,6 +226,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_TCP_LISTEN => sys_tcp_listen(a1),
         abi::SYS_TCP_ACCEPT => sys_tcp_accept(f, a1, a2),
         abi::SYS_READ_TIMEOUT => sys_read_timeout(f, a1, a2, a3, a4),
+        abi::SYS_MEMINFO => sys_meminfo(a1),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -991,6 +992,29 @@ fn sys_gpu_info(out: u64) -> Result<u64, i64> {
         )
     };
     // Copia bajo PROCS: ver `sys_stat`.
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(0)
+    })
+}
+
+fn sys_meminfo(out: u64) -> Result<u64, i64> {
+    let n = core::mem::size_of::<abi::MemInfo>() as u64;
+    if !user_range_ok(out, n, true) {
+        return Err(-abi::EFAULT);
+    }
+    let fa = crate::mm::FRAME_ALLOC.get().ok_or(-abi::ENOMEM)?;
+    let alloc = fa.lock();
+    let info = abi::MemInfo {
+        total_frames: alloc.total_usable_frames() as u64,
+        free_frames: alloc.free_frames() as u64,
+        reclaimable_frames: crate::mm::reclaim::reclaimable_frames() as u64,
+    };
+    drop(alloc);
+    let bytes = unsafe {
+        core::slice::from_raw_parts((&info as *const abi::MemInfo).cast::<u8>(), n as usize)
+    };
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
         space.write(out, bytes).ok_or(-abi::EFAULT)?;
