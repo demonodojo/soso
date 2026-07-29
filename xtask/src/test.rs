@@ -227,7 +227,22 @@ fn conectar_reintentando(puerto: u16, limite: Duration) -> Result<TcpStream, Str
     }
 }
 
-fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
+/// Abre una sesión SSH, le pasa `guion` por stdin y espera a que **termine sola**,
+/// como máximo `limite`. Devuelve el stdout de la sesión.
+///
+/// Antes cada prueba dormía un tiempo fijo (150 + 45 + 20 + 4 = 219 s de reloj en
+/// total) porque no había señal de fin en la que esperar: sunset espejaba el
+/// CHANNEL_EOF del cliente y OpenSSH cerraba su salida al recibirlo, así que una
+/// sesión con stdin cerrado no devolvía nada y el arnés se apoyaba en dormir "de
+/// sobra". Con el parche de `vendor/sunset-0.5.0` la shell cierra el canal al
+/// ejecutar `exit` y el cliente sale, así que se espera al proceso y no al reloj:
+/// el límite pasa a ser una red de seguridad y la suite tarda lo que tarde el
+/// guest. Por eso los límites de abajo son holgados — ya no se pagan.
+///
+/// stdin se mantiene abierto hasta que el hijo muere. Con el parche ya no es
+/// imprescindible, pero cerrarlo antes manda un EOF que el servidor no necesita
+/// ver, y esa es justo la piedra en la que tropezó todo esto (2026-07-28).
+fn ssh_guion(key: &std::path::Path, guion: &str, limite: Duration) -> Result<String, String> {
     let mut hijo = Command::new("ssh")
         .args(["-tt", "-i"])
         .arg(key)
@@ -243,35 +258,57 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
 
-    {
-        let mut stdin = hijo.stdin.take().unwrap();
-        // Dos inferencias en la misma sesión: la de CPU y la que pasa por el
-        // camino de syscalls GPU con el dispositivo software del kernel. La
-        // segunda es la única cobertura que tiene ese camino sin tarjeta —
-        // alloc/map/submit/read, el cacheo de pesos y el crecimiento de búferes
-        // entre capas de distinto tamaño.
-        stdin
-            .write_all(
-                b"soso-llm run tiny --prompt test\n                  soso-llm run tiny --prompt test --gpu-soft --max 4\n                  exit\n",
-            )
-            .map_err(|e| e.to_string())?;
-        stdin.flush().ok();
-        // Con SMP>1 el margen justo de antes (45s) empezó a fallar por poco
-        // al activar el scheduler multicore real: cada syscall compite un
-        // poco más por PROCS.lock() con los cores ociosos sondeando, y
-        // user/libsoso hace ~15000 syscalls sbrk (una por asignación
-        // pequeña, sin agrupar) incluso para el modelo sintético diminuto
-        // de este test — con SMP la cola se nota. 100s da margen de sobra
-        // en la práctica; el arreglo de fondo (no necesario para que esto
-        // pase, pero deseable) sería que el allocator de libsoso agrupe
-        // sbrk en vez de una syscall por asignación.
-        // La segunda inferencia (--max 4, dispositivo software) añade su propio
-        // tiempo: 150s en vez de 100 para las dos.
-        std::thread::sleep(Duration::from_secs(150));
-    }
+    let pid = hijo.id();
+    let mut stdin = hijo.stdin.take().unwrap();
+    stdin.write_all(guion.as_bytes()).map_err(|e| e.to_string())?;
+    stdin.flush().ok();
 
-    let salida = hijo.wait_with_output().map_err(|e| e.to_string())?;
-    let texto = String::from_utf8_lossy(&salida.stdout);
+    // `wait_with_output` en un hilo: además de esperar, drena stdout/stderr, que
+    // con `cat /README.md` dos veces mueven más que el buffer de un pipe.
+    let hilo = std::thread::spawn(move || hijo.wait_with_output());
+
+    let fin = Instant::now() + limite;
+    while !hilo.is_finished() {
+        if Instant::now() >= fin {
+            drop(stdin);
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+            let texto = hilo
+                .join()
+                .map_err(|_| "hilo ssh".to_string())?
+                .map(|s| String::from_utf8_lossy(&s.stdout).into_owned())
+                .unwrap_or_default();
+            return Err(format!(
+                "la sesión SSH no terminó en {}s; stdout: {texto:?}",
+                limite.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(stdin);
+
+    let salida = hilo
+        .join()
+        .map_err(|_| "hilo ssh".to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&salida.stdout).into_owned())
+}
+
+fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
+    // Dos inferencias en la misma sesión: la de CPU y la que pasa por el camino de
+    // syscalls GPU con el dispositivo software del kernel. La segunda es la única
+    // cobertura que tiene ese camino sin tarjeta — alloc/map/submit/read, el
+    // cacheo de pesos y el crecimiento de búferes entre capas de distinto tamaño.
+    //
+    // El límite (antes un sleep de 150 s) hay que dejarlo holgado por SMP: con el
+    // scheduler multicore real cada syscall compite más por PROCS.lock() con los
+    // cores ociosos sondeando, y user/libsoso hace ~15000 syscalls sbrk (una por
+    // asignación pequeña, sin agrupar) incluso para el modelo sintético diminuto
+    // de este test. El arreglo de fondo sería agrupar sbrk en un arena local.
+    let texto = ssh_guion(
+        key,
+        "soso-llm run tiny --prompt test\n                  soso-llm run tiny --prompt test --gpu-soft --max 4\n                  exit\n",
+        Duration::from_secs(240),
+    )?;
     if !texto.contains("soso-llm: generado") {
         return Err(format!(
             "soso-llm no generó salida esperada; stdout: {texto:?}"
@@ -322,30 +359,12 @@ fn ssh_pipeline(key: &std::path::Path) -> Result<(), String> {
     let real = std::fs::read(super::project_root().join("rootfs/README.md"))
         .map_err(|e| format!("no se pudo leer rootfs/README.md: {e}"))?;
 
-    let mut hijo = Command::new("ssh")
-        .args(["-tt", "-i"])
-        .arg(key)
-        .args(["-p", "2222"])
-        .args(["-o", "StrictHostKeyChecking=no"])
-        .args(["-o", "UserKnownHostsFile=/dev/null"])
-        .args(["-o", "LogLevel=ERROR"])
-        .args(["-o", "ConnectTimeout=10"])
-        .arg("soso@localhost")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
-    {
-        let mut stdin = hijo.stdin.take().unwrap();
-        stdin
-            .write_all(b"cat /README.md /README.md | cat -\nexit\n")
-            .map_err(|e| e.to_string())?;
-        stdin.flush().ok();
-        std::thread::sleep(Duration::from_secs(20));
-    }
-    let salida = hijo.wait_with_output().map_err(|e| e.to_string())?;
-    let texto = String::from_utf8_lossy(&salida.stdout).replace("\r\n", "\n");
+    let texto = ssh_guion(
+        key,
+        "cat /README.md /README.md | cat -\nexit\n",
+        Duration::from_secs(90),
+    )?
+    .replace("\r\n", "\n");
     let marca = "cat -\n";
     let ini = texto
         .find(marca)
@@ -374,32 +393,7 @@ fn ssh_pipeline(key: &std::path::Path) -> Result<(), String> {
 /// veían si alguien las lanzaba a mano. Un test que hay que acordarse de correr no
 /// es una red de seguridad.
 fn ssh_init_test(key: &std::path::Path) -> Result<(), String> {
-    let mut hijo = Command::new("ssh")
-        .args(["-tt", "-i"])
-        .arg(key)
-        .args(["-p", "2222"])
-        .args(["-o", "StrictHostKeyChecking=no"])
-        .args(["-o", "UserKnownHostsFile=/dev/null"])
-        .args(["-o", "LogLevel=ERROR"])
-        .args(["-o", "ConnectTimeout=10"])
-        .arg("soso@localhost")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
-
-    {
-        let mut stdin = hijo.stdin.take().unwrap();
-        stdin
-            .write_all(b"init test\nexit\n")
-            .map_err(|e| e.to_string())?;
-        stdin.flush().ok();
-        std::thread::sleep(Duration::from_secs(45));
-    }
-
-    let salida = hijo.wait_with_output().map_err(|e| e.to_string())?;
-    let texto = String::from_utf8_lossy(&salida.stdout);
+    let texto = ssh_guion(key, "init test\nexit\n", Duration::from_secs(150))?;
     // El FALLO se mira ANTES del TODO OK: la suite del guest corta en el primer
     // fallo, así que sin esto un "FALLO" temprano y ningún "TODO OK" darían el
     // mismo error genérico que un timeout, y son cosas distintas.
@@ -416,34 +410,11 @@ fn ssh_init_test(key: &std::path::Path) -> Result<(), String> {
 
 fn ssh_sesion(key: &std::path::Path) -> Result<(), String> {
     let token = "soso_ssh_ok_42";
-    let mut hijo = Command::new("ssh")
-        .args(["-tt", "-i"])
-        .arg(key)
-        .args(["-p", "2222"])
-        .args(["-o", "StrictHostKeyChecking=no"])
-        .args(["-o", "UserKnownHostsFile=/dev/null"])
-        .args(["-o", "LogLevel=ERROR"])
-        .args(["-o", "ConnectTimeout=10"])
-        .arg("soso@localhost")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
-
-    // Enviar el comando y halt.
-    {
-        let mut stdin = hijo.stdin.take().unwrap();
-        let guion = format!("echo {token} > /tmp/xtask.txt\ncat /tmp/xtask.txt\nhalt\n");
-        // Dar tiempo entre comandos escribiendo con pausa.
-        stdin.write_all(guion.as_bytes()).map_err(|e| e.to_string())?;
-        stdin.flush().ok();
-        std::thread::sleep(Duration::from_secs(4));
-        // stdin se cierra al salir del scope.
-    }
-
-    let salida = hijo.wait_with_output().map_err(|e| e.to_string())?;
-    let texto = String::from_utf8_lossy(&salida.stdout);
+    // Acaba en `halt`: aquí la sesión no se cierra porque salga la shell, sino
+    // porque el guest se apaga y se lleva la conexión por delante. Vale igual para
+    // esperar al cliente, y de paso deja de ser una carrera contra un sleep de 4 s.
+    let guion = format!("echo {token} > /tmp/xtask.txt\ncat /tmp/xtask.txt\nhalt\n");
+    let texto = ssh_guion(key, &guion, Duration::from_secs(60))?;
     if texto.contains(token) {
         Ok(())
     } else {

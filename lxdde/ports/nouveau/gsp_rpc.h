@@ -48,6 +48,7 @@ struct gsp_rpc_hdr {
 #define NV_VGPU_MSG_EVENT_FIRST_EVENT           0x1000u
 #define NV_VGPU_MSG_EVENT_GSP_INIT_DONE         0x1001u
 #define NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER 0x1002u
+#define NV_VGPU_MSG_EVENT_RC_TRIGGERED          0x1004u
 #define NV_VGPU_MSG_EVENT_OS_ERROR_LOG          0x1006u
 #define NV_VGPU_MSG_EVENT_UCODE_LIBOS_PRINT     0x100cu
 #define NV_VGPU_MSG_EVENT_GSP_LOCKDOWN_NOTICE   0x101cu
@@ -90,5 +91,21 @@ int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms);
  * varias páginas y **dar la vuelta al anillo**: la copia lo tiene en cuenta. */
 int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
                  uint32_t *payload_len, uint32_t *status, unsigned timeout_ms);
+
+/* Escucha `ms` sin esperar nada concreto y registra lo que llegue (incluido el
+ * volcado de los primeros NOCAT). Para llamar cuando algo del canal falla en
+ * silencio: RM avisa de los errores de canal por eventos, y si nadie está
+ * escuchando esos avisos se quedan en la cola hasta que otra llamada los arrastre
+ * —el CE que no señalizó (2026-07-28) sólo enseñó sus NOCAT páginas más tarde, en
+ * medio del alloc siguiente—. Se llama entre llamadas síncronas, nunca en medio de
+ * una: consumiría su respuesta. Devuelve cuántos mensajes vio. */
+unsigned gsp_rpc_drain(struct gsp_rpc *rpc, unsigned ms);
+
+/* Decodifica el payload de RC_TRIGGERED (fn=0x1004). Devuelve 0 si la cabecera
+ * fija cabe; -1 si el buffer es demasiado corto. */
+int gsp_rpc_rc_triggered_log(const void *payload, uint32_t len);
+
+/* Nombre legible de mmuFaultType (`NV_n_*`, dev_fault.h gb202). */
+const char *mmu_fault_type_name(uint32_t type);
 
 #endif

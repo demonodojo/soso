@@ -23,9 +23,9 @@ checklist de avance para otras placas o reinstalaciones.
 | G1 | BAR0 + NV_PMC_BOOT_0 bajo VFIO | Log `nvidia: … NV_PMC_BOOT_0=0x…` | **GO** — `0x1b5000a1` |
 | G2 | Firmware gb205 en sosofs | `lxdde-fw: cargado …/gb205/gsp/…` | **Go** |
 | G3 | GSP boot vía nvkm (sin display) | `GSP booted` sin `(soft)` | **GO** (2026-07-25) |
-| G4e | CE copia en VRAM | Readback correcto desde GPU | **Pendiente** |
-| G4f | Saxpy SASS en GPU | `SYS_GPU_SUBMIT` SAXPY correcto | Pendiente G4e + toolchain |
-| G5 | matvec híbrido en soso-llm | tok/s GPU > CPU | Pendiente G4 |
+| G4e | CE copia en VRAM | Readback correcto desde GPU | **GO** (2026-07-29) |
+| G4f | Saxpy/matvec SASS en GPU | `SYS_GPU_SUBMIT` / PCAS con `on_gpu=1` | **GO** (2026-07-29) |
+| G5 | matvec híbrido en soso-llm | matvec en GPU (tiny OK); tok/s vs CPU | **GO funcional** (2026-07-29) |
 
 L6-H (CUDA en host) es **opcional** — [`L6-H-cuda-hybrid.md`](L6-H-cuda-hybrid.md).
 
@@ -118,7 +118,8 @@ SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 | IOMMU | **Go** — 30 grupos |
 | GSP boot (G3b) | **GO** — `GSP booted (hw, GSP-FMC vía FSP)` |
 | G4a–c (RPC + RM) | **GO** en GB205 (2026-07-25) |
-| Siguiente | **G4e** — canal CE + readback VRAM |
+| G4d–G5 (CE + SASS + soso-llm) | **GO** en GB205 (2026-07-29) — ver `soso-gpu` |
+| Siguiente | Medir tok/s GPU vs CPU; Gen4 PCIe; modelos grandes |
 
 ### Fallback (solo BAR0, no cierra G1 oficial)
 
@@ -130,11 +131,12 @@ sudo ./scripts/l6-g1-vfio-noiommu.sh
 
 Marca **PARTIAL** — valida lectura BAR0 pero sin aislamiento IOMMU.
 
-## Veredicto (2026-07-27)
+## Veredicto (2026-07-29)
 
-**G1 cerrado** en MSI Vector 16 HX con GB205. El port nvkm nativo (62 fuentes)
-compila, enlaza y ha completado G3b y G4a–c en hardware real. El trabajo activo
-es **G4e** (CE en VRAM), luego G4f (SASS) y G5 (LLM híbrido). Detalle:
-`docs/L6-G3-nvkm-scope.md`; skill `soso-gpu`.
+**G1 cerrado** en MSI Vector 16 HX con GB205. El port ha completado **G3b y
+G4a–G5 en hardware real**: CE readback, QMD/PCAS SASS y `soso-llm run tiny` con
+matvec en GPU (~97 OK). Operativa: enlace PCIe a Gen3 tras reboot del host; build
+con `SOSO_LXDDE`/`SOSO_QEMU_GPU`. Detalle: `docs/L6-G3-nvkm-scope.md`; skill
+`soso-gpu`.
 
 Generado como parte del roadmap L6 (lxdde).

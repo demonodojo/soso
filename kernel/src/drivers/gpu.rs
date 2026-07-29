@@ -202,6 +202,17 @@ fn gpu() -> &'static Mutex<GpuState> {
 
 pub fn info() -> GpuInfo {
     let g = gpu().lock();
+    let mut phase = [0u8; 16];
+    // Sólo la NVIDIA tiene fases de bring-up. Rellenarlo también para el
+    // dispositivo de software o la iGPU sería decirle a userspace que un `rm_ce`
+    // habla de un dispositivo que no ha visto un GSP en su vida.
+    if g.vendor == GPU_VENDOR_NVIDIA {
+        let label = gsp_label().as_bytes();
+        // Se trunca en vez de fallar: es un dato de diagnóstico, y el nombre más
+        // largo de la tabla (`booted_soft`, 11) cabe de sobra en 15 + NUL.
+        let n = core::cmp::min(label.len(), phase.len() - 1);
+        phase[..n].copy_from_slice(&label[..n]);
+    }
     GpuInfo {
         present: g.present as u8,
         vendor: g.vendor,
@@ -210,6 +221,7 @@ pub fn info() -> GpuInfo {
         vram_total: g.vram_total,
         vram_free: g.vram_total.saturating_sub(g.vram_used),
         name: g.name,
+        phase,
     }
 }
 

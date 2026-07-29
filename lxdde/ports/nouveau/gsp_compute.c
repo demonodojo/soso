@@ -1,8 +1,11 @@
-/* G4f/G5: objeto compute Blackwell + QMD inline. Ver gsp_compute.h. */
+/* G4f/G5: objeto compute Blackwell + QMD en sysmem + SEND_PCAS. Ver gsp_compute.h. */
 #include "gsp_compute.h"
 
 void *memset(void *dst, int c, unsigned long n);
 void *memcpy(void *dst, const void *src, unsigned long n);
+
+/* `NVA06F_SUBCHANNEL_COMPUTE` = 1 (`cla06fsubch.h`). */
+#define GSP_COMPUTE_SUBCHANNEL 1u
 
 static void cp_pb_write(struct gsp_chan *c, unsigned *pos, uint32_t v)
 {
@@ -23,15 +26,34 @@ static void cp_pb_method(struct gsp_chan *c, unsigned *pos, unsigned subc,
     cp_pb_write(c, pos, hdr);
 }
 
-static void cp_pb_immed(struct gsp_chan *c, unsigned *pos, unsigned subc,
-                     unsigned method, uint32_t data)
+/* IMMD_DATA_METHOD lleva el dato EN LA CABECERA (bits 28:16, máx 13 bits) y no
+ * hay dword de datos detrás. La reescritura de G4h puso un `1` literal en ese
+ * campo y escribió el dato como dword suelto; el PBDMA leía ese dword como la
+ * SIGUIENTE cabecera —tras el WFI quedaba un 0x00000000 crudo, método INC con
+ * count=0— y levantaba PBDMA_ERROR (type 32) sin consumir nada (2026-07-29,
+ * GPGet=0 con GPPut avanzando). */
+static void cp_pb_immd(struct gsp_chan *c, unsigned *pos, unsigned subc,
+                       unsigned method, uint32_t data)
 {
     uint32_t hdr = (NVC56F_DMA_SEC_OP_IMMD_DATA_METHOD << 29) |
                    (subc << 13) |
                    ((data & 0x1fffu) << 16) |
                    ((method >> 2) & 0xfffu);
 
+    if (data > 0x1fffu) {
+        lx_printk("nouveau-lx: compute — dato IMMD 0x%x no cabe en 13 bits "
+                  "(método 0x%x); usa cp_pb_method\n", data, method);
+    }
     cp_pb_write(c, pos, hdr);
+}
+
+/* Paridad nouveau/UVM: `SET_OBJECT` lleva la clase (bits 15:0) por el subcanal
+ * de compute (1), no el handle de RM por el subcanal 0 (= GR). */
+static void cp_pb_set_object(struct gsp_chan *c, unsigned *pos, unsigned subc,
+                             uint32_t oclass)
+{
+    cp_pb_method(c, pos, subc, NVCEC0_SET_OBJECT, 1);
+    cp_pb_write(c, pos, oclass);
 }
 
 static void qmd_set_bits(uint32_t *qmd, unsigned lo, unsigned hi, uint32_t val)
@@ -372,9 +394,12 @@ void gsp_compute_fill_qmd(struct gsp_compute *cp, const struct gsp_kernel *k,
     uint32_t cb_size = (k->cbank_size + 15u) & ~15u;
 
     memset(qmd, 0, sizeof(*qmd));
-    qmd_set_bits(qmd->words, QMDV05_QMD_TYPE, NVCDC0_QMDV05_00_QMD_TYPE_GRID_CTA);
+    qmd_set_bits(qmd->words, QMDV05_QMD_TYPE, NVCEC0_QMDV05_00_QMD_TYPE_GRID_CTA);
     qmd_set_bits(qmd->words, QMDV05_QMD_MAJOR_VERSION,
-                 NVCDC0_QMDV05_00_QMD_MAJOR_VERSION_V05);
+                 NVCEC0_QMDV05_00_QMD_MAJOR_VERSION_V05);
+    qmd_set_bits(qmd->words, QMDV05_QMD_GROUP_ID, 0x1fu);
+    qmd_set_bits(qmd->words, QMDV05_API_VISIBLE_CALL_LIMIT,
+                 NVCEC0_QMDV05_00_API_VISIBLE_CALL_LIMIT_NO_CHECK);
 
     qmd_set_bits(qmd->words, QMDV05_GRID_WIDTH, grid_x ? grid_x : 1u);
     qmd_set_bits(qmd->words, QMDV05_GRID_HEIGHT, 1u);
@@ -403,18 +428,18 @@ void gsp_compute_fill_qmd(struct gsp_compute *cp, const struct gsp_kernel *k,
                  (uint32_t)((cb_shift >> 32) & 0x7ffffu));
     qmd_set_bits(qmd->words, QMDV05_CBANK0_SIZE_S4, cb_size >> 4);
     qmd_set_bits(qmd->words, QMDV05_CBANK0_VALID,
-                 NVCDC0_QMDV05_00_CONSTANT_BUFFER_VALID_TRUE);
+                 NVCEC0_QMDV05_00_CONSTANT_BUFFER_VALID_TRUE);
     qmd_set_bits(qmd->words, QMDV05_CBANK0_INVALIDATE,
-                 NVCDC0_QMDV05_00_CONSTANT_BUFFER_INVALIDATE_TRUE);
+                 NVCEC0_QMDV05_00_CONSTANT_BUFFER_INVALIDATE_TRUE);
 
     /* Semáforo de fin: sin él no hay forma de saber que el kernel terminó, y
      * "on_gpu" volvería a ser una afirmación sin prueba. */
     qmd_set_bits(qmd->words, QMDV05_RELEASE_ENABLE0,
-                 NVCDC0_QMDV05_00_RELEASE_ENABLE_TRUE);
+                 NVCEC0_QMDV05_00_RELEASE_ENABLE_TRUE);
     qmd_set_bits(qmd->words, QMDV05_RELEASE_STRUCTURE_SIZE0,
-                 NVCDC0_QMDV05_00_RELEASE_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD);
+                 NVCEC0_QMDV05_00_RELEASE_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD);
     qmd_set_bits(qmd->words, QMDV05_RELEASE_MEMBAR_TYPE0,
-                 NVCDC0_QMDV05_00_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR);
+                 NVCEC0_QMDV05_00_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR);
     qmd_set_bits(qmd->words, QMDV05_RELEASE_SEM0_ADDR_LOWER,
                  (uint32_t)(sem_va & 0xffffffffu));
     qmd_set_bits(qmd->words, QMDV05_RELEASE_SEM0_ADDR_UPPER,
@@ -428,33 +453,29 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
     struct gsp_chan *c;
     unsigned pos;
     unsigned start;
-    unsigned i;
-    uint64_t qmd_va = G4F_QMD_VA;
+    uint64_t qmd_va;
 
     if (!cp || !cp->ready || !qmd) {
         return -1;
     }
     c = cp->chan;
     start = (unsigned)c->pb_pos;
-    if (gsp_chan_pb_reserve(c, 512 + GSP_QMD_INLINE_WORDS * 4) < 0) {
+    if (gsp_chan_pb_reserve(c, 64) < 0) {
         return -1;
     }
     pos = start;
 
-    cp_pb_immed(c, &pos, 0, NVCDC0_SET_OBJECT, cp->handle);
-    cp_pb_method(c, &pos, 0, NVCDC0_SET_QMD_VERSION, 1);
-    cp_pb_write(c, &pos, (GSP_QMD_VERSION_CURRENT) |
-                      (GSP_QMD_VERSION_CURRENT << 16));
-    cp_pb_method(c, &pos, 0, NVCDC0_SET_INLINE_QMD_ADDRESS_A, 1);
-    cp_pb_write(c, &pos, NVCDC0_SET_INLINE_QMD_ADDRESS_A_INLINE_SIZE_INLINE_384 |
-                      (uint32_t)((qmd_va >> 32) & 0x1ffu));
-    cp_pb_method(c, &pos, 0, NVCDC0_SET_INLINE_QMD_ADDRESS_B, 1);
-    cp_pb_write(c, &pos, (uint32_t)(qmd_va >> 8));
+    qmd_va = cp->data_va + G4F_QMD_OFF;
+    memcpy(cp_data(cp, G4F_QMD_OFF), qmd->words, sizeof(qmd->words));
+    __asm__ __volatile__("mfence" ::: "memory");
 
-    for (i = 0; i < GSP_QMD_INLINE_WORDS; i++) {
-        cp_pb_method(c, &pos, 0, NVCDC0_LOAD_INLINE_QMD_DATA(i), 1);
-        cp_pb_write(c, &pos, qmd->words[i]);
-    }
+    cp_pb_set_object(c, &pos, GSP_COMPUTE_SUBCHANNEL, cp->cls);
+    /* Mesa/nvk: WFI del canal antes del dispatch en Blackwell. */
+    cp_pb_immd(c, &pos, 0u, NVC86F_WFI, 0u);
+    cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVCEC0_SEND_PCAS_A, 1);
+    cp_pb_write(c, &pos, (uint32_t)(qmd_va >> 8));
+    cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVCEC0_SEND_SIGNALING_PCAS2_B,
+               NVCEC0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE);
 
     if (pb_off) {
         *pb_off = start;
@@ -481,6 +502,7 @@ static int launch_wait(struct gsp_compute *cp, const struct gsp_kernel *k,
 
     gsp_compute_fill_qmd(cp, k, &qmd, grid);
     if (gsp_compute_encode_qmd(cp, &qmd, &pb_off, &pb_len) != 0) {
+        /* 64×64 B llenan el PB; el ack del wait anterior deja gpget==gpput. */
         if (gsp_chan_pb_rewind(cp->chan) != 0 ||
             gsp_compute_encode_qmd(cp, &qmd, &pb_off, &pb_len) != 0) {
             lx_printk("nouveau-lx: %s — pushbuffer lleno y sin rebobinar\n", what);
@@ -499,20 +521,20 @@ static int launch_wait(struct gsp_compute *cp, const struct gsp_kernel *k,
     for (waited = 0; waited < G4F_SPIN_TRIES; waited++) {
         __asm__ __volatile__("mfence" ::: "memory");
         if (*sem == G4F_SEM_PAYLOAD) {
+            gsp_chan_ack_progress(cp->chan);
             return 0;
         }
     }
     for (waited = 0; waited <= G4F_WAIT_MS; waited++) {
         __asm__ __volatile__("mfence" ::: "memory");
         if (*sem == G4F_SEM_PAYLOAD) {
+            gsp_chan_ack_progress(cp->chan);
             return 0;
         }
         lx_mdelay(1);
     }
     lx_printk("nouveau-lx: %s — el QMD no señalizó en %u ms (sem=0x%08x)\n",
               what, G4F_WAIT_MS, *sem);
-    /* GPGet parte el problema en dos mitades que no se solapan; sin esto, un
-     * kernel que no arranca y uno que no señaliza se ven igual desde fuera. */
     gsp_chan_dump(cp->chan, what);
     return -1;
 }

@@ -205,6 +205,25 @@ typedef struct rpc_gsp_rm_control
     /* params[] detrás */
 } rpc_gsp_rm_control;
 
+/* `rm/r570/nvrm/fifo.h` — evento RC_TRIGGERED (fn=0x1004). El journal va detrás
+ * de `rcJournalBufferSize` palabras; aquí sólo decodificamos la cabecera fija. */
+typedef struct rpc_rc_triggered_v17_02
+{
+    NvU32      nv2080EngineType;
+    NvU32      chid;
+    NvU32      gfid;
+    NvU32      exceptLevel;
+    NvU32      exceptType;
+    NvU32      scope;
+    NvU16      partitionAttributionId;
+    NvU32      mmuFaultAddrLo;
+    NvU32      mmuFaultAddrHi;
+    NvU32      mmuFaultType;
+    NvBool     bCallbackNeeded;
+    NvU32      rcJournalBufferSize;
+    NvU8       rcJournalBuffer[];
+} rpc_rc_triggered_v17_02;
+
 /* Números de función de `rm/r570/nvrm/rpcfn.h`.
  *
  * `FREE` valía 27 aquí y es **10**. El 27 es `DMA_FILL_PTE_MEM`: liberar un
@@ -649,8 +668,11 @@ typedef char nv0080_set_pd_size_check[
  * vive en sysmem (mthdbuf), así que 1=sysmem y 2=VRAM. El 4 no es sysmem. */
 #define NV_ADDRESS_SPACE_SYSMEM           1u
 #define NV_ADDRESS_SPACE_FBMEM            2u
-#define NV_CACHE_ATTR_DEFAULT             0u
-#define NV_CACHE_ATTR_CACHED              1u
+/* Valores de `nv_memory_type.h` (OGKM). Los nombres viejos estaban invertidos
+ * respecto a upstream: r535 pone cacheAttrib=1 en VRAM (= UNCACHED aquí). */
+#define NV_CACHE_ATTR_CACHED              0u
+#define NV_CACHE_ATTR_UNCACHED            1u
+#define NV_CACHE_ATTR_DEFAULT             6u
 
 /* `NV_KERNELCHANNEL_ALLOC_INTERNALFLAGS` (alloc_channel.h). El enum de tipo de
  * notificador es UNKNOWN=0, NONE=1, CTXDMA=2, MEMORY=3 — o sea que dejar
@@ -768,9 +790,29 @@ typedef char nv_memory_desc_size_check[
  *   con PAGE_VALUE = chid / CHID_PER_USERD e INDEX_VALUE = chid %
  *   CHID_PER_USERD (CHID_PER_USERD son 8: ocho USERD de 0x200 B por página).
  *   Con chid=0 los dos valores son 0 y el único bit que queda es este.
+ *
+ * **Y ahí estaba el fallo del segundo canal** (2026-07-28): esta regla estaba
+ * escrita aquí y el código la ignoraba, poniendo INDEX_VALUE=0 y PAGE_VALUE=0
+ * **fijos**. Con un solo canal da igual —chid 0 son ceros— pero el segundo pedía
+ * el MISMO slot de USERD que el primero teniéndolo declarado como fijo, y su
+ * `GSP_RM_ALLOC` volvió con `NO_MEMORY`. Estos dos campos son la vía por la que
+ * el llamante le dice a RM qué chid quiere: en `r535_chan_alloc` el chid lo
+ * elige nouveau con su propio asignador y sólo viaja hasta RM dentro de estos
+ * bits. Verbatim de upstream (master, `rm/r535/fifo.c`):
+ *
+ *     const int userd_p = chid / CHID_PER_USERD;
+ *     const int userd_i = chid % CHID_PER_USERD;
+ *     args->flags |= NVVAL(NVOS04, FLAGS, CHANNEL_USERD_INDEX_VALUE, userd_i);
+ *     args->flags |= NVDEF(NVOS04, FLAGS, CHANNEL_USERD_INDEX_FIXED, FALSE);
+ *     args->flags |= NVVAL(NVOS04, FLAGS, CHANNEL_USERD_INDEX_PAGE_VALUE, userd_p);
+ *     args->flags |= NVDEF(NVOS04, FLAGS, CHANNEL_USERD_INDEX_PAGE_FIXED, TRUE);
  */
 #define NVOS04_FLAGS_PRIVILEGED_CHANNEL_TRUE            (1u << 5)
 #define NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(i)       (((i) & 0x7u) << 8)
+/* INDEX_FIXED (11:11) va a FALSE, que es 0. Existe como define para que se vea que
+ * es una decisión de upstream y no un campo que se nos olvidó: el que va fijo es
+ * la PÁGINA, no el índice dentro de ella. */
+#define NVOS04_FLAGS_CHANNEL_USERD_INDEX_FIXED_FALSE    0u
 #define NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_VALUE(p)  (((p) & 0x1ffu) << 12)
 #define NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED_TRUE (1u << 21)
 #define NV_CHID_PER_USERD                               8u
@@ -894,12 +936,10 @@ typedef char nva06f_schedule_size_check[
 typedef char nva06f_bind_size_check[
     sizeof(NVA06F_CTRL_BIND_PARAMS) == 4 ? 1 : -1];
 
-/* El valor que hay que escribir en el doorbell se le PIDE a RM en vez de
- * construirlo. Upstream lo compone como `(runl->doorbell << 16) | chid`, donde
- * `runl->doorbell` sale de leer un registro de la runlist — y para saber en qué
- * registro habría que decidir a mano qué significa cada word de `engineData` de
- * la tabla del FIFO. Este control lo da hecho, y es lo que usan de todas formas
- * UVM y el espacio de usuario en Volta+. */
+/* GET_WORK_SUBMIT_TOKEN da runlist+chid para la vía interna de GSP-RM. El valor
+ * que hay que escribir en NV_VFN_DOORBELL lo construye el driver: en gb20x lleva
+ * además RUNLIST_DOORBELL_ENABLE (bit 30) — ver gsp_chan_doorbell_kick() y
+ * gb202/dev_vm.h. Referencia: gb202_chan_doorbell_handle, tu102_chan_doorbell_handle. */
 #define NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN  0xc36f0108u
 
 typedef struct NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS {
@@ -918,6 +958,12 @@ typedef struct NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS {
  * mantiene `user = { 0x030000, 0x010000 }`. */
 #define NV_VFN_USERMODE_BASE     0xbb0000u
 #define NV_VFN_DOORBELL          (NV_VFN_USERMODE_BASE + 0x0090u)
+
+/* Campos de NV_VIRTUAL_FUNCTION_DOORBELL (gb202/dev_vm.h, tag 570.144). Turing
+ * solo tiene VECTOR+RUNLIST_ID; Blackwell añade RUNLIST_DOORBELL en el bit 30. */
+#define NV_VF_DOORBELL_VECTOR_MASK           0x00000fffu
+#define NV_VF_DOORBELL_RUNLIST_ID_MASK       0x007f0000u
+#define NV_VF_DOORBELL_RUNLIST_DOORBELL_ENABLE  0x40000000u
 
 /* Bloque de instancia del canal. Upstream (`r535_chan_alloc`) apunta
  * `instanceMem` al bloque entero y `ramfcMem` a sus primeros 0x200 B, los dos
@@ -967,12 +1013,15 @@ typedef struct NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS {
 typedef char nv_memory_desc_size_check[sizeof(NV_MEMORY_DESC_PARAMS) == 24 ? 1 : -1];
 typedef char nvc56f_control_size_check[sizeof(Nvc56fControl) == 512 ? 1 : -1];
 
-/* ---- Compute Blackwell + QMD v05 (G4f) ------------------------------------
- * Referencias: `classes/compute/clcdc0.h`, `clcdc0qmd.h` (open-gpu-doc).
+/* ---- Compute Blackwell + QMD v05 (G4f/G4h) --------------------------------
+ * Referencias: `classes/compute/clcec0.h`, `clcec0qmd.h` (open-gpu-doc, gb20x
+ * clase B). Los campos del QMD coinciden con `clcdc0qmd.h` (clase A); cambia la
+ * clase, no el encoding del descriptor.
  *
  * GB20x usa la **B** (`BLACKWELL_COMPUTE_B`, `rm/gb20x.c`); la A es de GB100.
- * Como con el canal, la elige el catálogo y no un `#define`. Los métodos
- * `NVCDC0_*` valen para las dos: cambia la clase, no el encoding. */
+ * El lanzamiento sigue a Mesa/nvk Blackwell: QMD en memoria + WFI del canal +
+ * SEND_PCAS_A + SEND_SIGNALING_PCAS2_B — no el camino inline (mal codificado y
+ * sin paridad en ningún driver real, ciclo 2026-07-29). */
 #define AMPERE_COMPUTE_A          0x0000c6c0u
 #define AMPERE_COMPUTE_B          0x0000c7c0u
 #define ADA_COMPUTE_A             0x0000c9c0u
@@ -982,23 +1031,25 @@ typedef char nvc56f_control_size_check[sizeof(Nvc56fControl) == 512 ? 1 : -1];
 #define NVKM_RM_COMPUTE0          0xcdc00000u
 
 #define GSP_QMD_VERSION_CURRENT   5u
-#define GSP_QMD_INLINE_WORDS      96u   /* 384 B inline QMD (Blackwell v05) */
+#define GSP_QMD_INLINE_WORDS      96u   /* 384 B QMD v05 (Blackwell) */
 
-#define NVCDC0_SET_OBJECT                    0x00000000u
-#define NVCDC0_SET_QMD_VERSION               0x00000288u
-#define NVCDC0_SET_INLINE_QMD_ADDRESS_A      0x00000318u
-#define NVCDC0_SET_INLINE_QMD_ADDRESS_B      0x0000031cu
-#define NVCDC0_LOAD_INLINE_QMD_DATA(i)       (0x00000320u + (uint32_t)(i) * 4u)
+#define NVCEC0_SET_OBJECT                    0x00000000u
+#define NVCEC0_SEND_PCAS_A                   0x000002b4u
+#define NVCEC0_SEND_SIGNALING_PCAS2_B        0x000002c0u
+#define NVCEC0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE 0x3u
 
-#define NVCDC0_SET_INLINE_QMD_ADDRESS_A_INLINE_SIZE_INLINE_384  0x00000001u
+/* Stall del command streamer antes del dispatch en Blackwell (Mesa/nvk). */
+#define NVC86F_WFI                           0x00000078u
 
-#define NVCDC0_QMDV05_00_QMD_TYPE_GRID_CTA   0x00000002u
+#define NVCEC0_QMDV05_00_QMD_TYPE_GRID_CTA   0x00000002u
 
 /* Campos del QMD v05, como pares (lo, hi) para `qmd_set_bits`. Transcritos de
- * `classes/compute/clcdc0qmd.h` (open-gpu-doc), donde vienen como MW(hi:lo).
+ * `classes/compute/clcec0qmd.h` (open-gpu-doc), donde vienen como MW(hi:lo).
  * OJO con los `_SHIFTED`: la dirección del programa va >>4, la del constant
  * bank >>6 (⇒ alineada a 64 B) y su tamaño >>4 (⇒ múltiplo de 16 B). */
 #define QMDV05_QMD_TYPE                   151u, 153u
+#define QMDV05_QMD_GROUP_ID               144u, 149u
+#define QMDV05_API_VISIBLE_CALL_LIMIT     456u, 456u
 #define QMDV05_RELEASE_ENABLE0            288u, 288u
 #define QMDV05_RELEASE_STRUCTURE_SIZE0    289u, 290u
 #define QMDV05_RELEASE_MEMBAR_TYPE0       291u, 291u
@@ -1023,17 +1074,135 @@ typedef char nvc56f_control_size_check[sizeof(Nvc56fControl) == 512 ? 1 : -1];
 #define QMDV05_CBANK0_VALID               1856u, 1856u
 #define QMDV05_CBANK0_INVALIDATE          1859u, 1859u
 
-#define NVCDC0_QMDV05_00_RELEASE_ENABLE_TRUE                        0x00000001u
-#define NVCDC0_QMDV05_00_RELEASE_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD  0x00000001u
-#define NVCDC0_QMDV05_00_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR           0x00000001u
-#define NVCDC0_QMDV05_00_CONSTANT_BUFFER_VALID_TRUE                 0x00000001u
-#define NVCDC0_QMDV05_00_CONSTANT_BUFFER_INVALIDATE_TRUE            0x00000001u
-#define NVCDC0_QMDV05_00_QMD_MAJOR_VERSION_V05                      0x00000005u
+#define NVCEC0_QMDV05_00_RELEASE_ENABLE_TRUE                        0x00000001u
+#define NVCEC0_QMDV05_00_RELEASE_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD  0x00000001u
+#define NVCEC0_QMDV05_00_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR           0x00000001u
+#define NVCEC0_QMDV05_00_CONSTANT_BUFFER_VALID_TRUE                 0x00000001u
+#define NVCEC0_QMDV05_00_CONSTANT_BUFFER_INVALIDATE_TRUE            0x00000001u
+#define NVCEC0_QMDV05_00_QMD_MAJOR_VERSION_V05                      0x00000005u
+#define NVCEC0_QMDV05_00_API_VISIBLE_CALL_LIMIT_NO_CHECK            0x00000001u
+
+/* Alias NVCDC0_* → NVCEC0_* (mismo encoding; el código previo usaba CDC0). */
+#define NVCDC0_SET_OBJECT                    NVCEC0_SET_OBJECT
+#define NVCDC0_QMDV05_00_QMD_TYPE_GRID_CTA   NVCEC0_QMDV05_00_QMD_TYPE_GRID_CTA
+#define NVCDC0_QMDV05_00_RELEASE_ENABLE_TRUE                        NVCEC0_QMDV05_00_RELEASE_ENABLE_TRUE
+#define NVCDC0_QMDV05_00_RELEASE_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD  NVCEC0_QMDV05_00_RELEASE_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD
+#define NVCDC0_QMDV05_00_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR           NVCEC0_QMDV05_00_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR
+#define NVCDC0_QMDV05_00_CONSTANT_BUFFER_VALID_TRUE                 NVCEC0_QMDV05_00_CONSTANT_BUFFER_VALID_TRUE
+#define NVCDC0_QMDV05_00_CONSTANT_BUFFER_INVALIDATE_TRUE            NVCEC0_QMDV05_00_CONSTANT_BUFFER_INVALIDATE_TRUE
+#define NVCDC0_QMDV05_00_QMD_MAJOR_VERSION_V05                      NVCEC0_QMDV05_00_QMD_MAJOR_VERSION_V05
 
 typedef struct GspQmdV05 {
     NvU32 words[GSP_QMD_INLINE_WORDS];
 } GspQmdV05;
 
 typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 4 ? 1 : -1];
+
+/* ---- Contexto de GR: consulta y promoción (G4f) ---------------------------
+ *
+ * Un canal de GR no ejecuta nada hasta que su contexto está **promocionado**: RM
+ * necesita saber dónde viven los búferes de contexto del gráfico (el principal, el
+ * de parches, los constant buffers globales, el mapa de acceso privilegiado…). El
+ * driver los reserva y los mapea, y se los entrega con un solo control.
+ *
+ * Transcrito el 2026-07-28 de dos sitios, no de memoria: la consulta y sus params
+ * de `rm/r570/nvrm/gr.h` de nouveau (que es el juego de 570.144, el de estos
+ * blobs), y `NV2080_CTRL_GPU_PROMOTE_CTX_*` del header de la SDK en
+ * open-gpu-kernel-modules 570.144 (`ctrl2080gpu.h`). Los asserts de tamaño y
+ * offset de abajo son la defensa: el `hHandleVASpace` inventado del canal
+ * desplazaba TODO lo que venía detrás y RM contestaba con un error que hablaba de
+ * otra cosa. Un layout mal pero coherente consigo mismo es invisible desde dentro.
+ */
+#define NV2080_CTRL_CMD_INTERNAL_STATIC_KGR_GET_CONTEXT_BUFFERS_INFO 0x20800a32u
+#define NV2080_CTRL_INTERNAL_GR_MAX_ENGINES                          8u
+#define NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_COUNT 0x1au
+
+typedef struct NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_BUFFER_INFO {
+    NvU32 size;
+    NvU32 alignment;
+} NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_BUFFER_INFO;
+
+typedef struct NV2080_CTRL_INTERNAL_STATIC_GR_CONTEXT_BUFFERS_INFO {
+    NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_BUFFER_INFO
+        engine[NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_COUNT];
+} NV2080_CTRL_INTERNAL_STATIC_GR_CONTEXT_BUFFERS_INFO;
+
+typedef struct NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS {
+    NV2080_CTRL_INTERNAL_STATIC_GR_CONTEXT_BUFFERS_INFO
+        engineContextBuffersInfo[NV2080_CTRL_INTERNAL_GR_MAX_ENGINES];
+} NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS;
+
+/* Índices de `engine[]`: son ids de propiedad de contexto
+ * (`NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_*`), NO los bufferId
+ * de la promoción. Los dos juegos de números existen y no coinciden: el mapa de
+ * `gsp_grctx.c` traduce de unos a otros. */
+#define NV0080_CTX_PROP_GRAPHICS                 0x00u
+#define NV0080_CTX_PROP_GRAPHICS_PAGEPOOL        0x0du
+#define NV0080_CTX_PROP_GRAPHICS_PATCH           0x10u
+#define NV0080_CTX_PROP_GRAPHICS_BUNDLE_CB       0x11u
+#define NV0080_CTX_PROP_GRAPHICS_ATTRIBUTE_CB    0x13u
+#define NV0080_CTX_PROP_GRAPHICS_RTV_CB_GLOBAL   0x14u
+#define NV0080_CTX_PROP_GRAPHICS_FECS_EVENT      0x17u
+#define NV0080_CTX_PROP_GRAPHICS_PRIV_ACCESS_MAP 0x18u
+
+#define NV2080_CTRL_CMD_GPU_PROMOTE_CTX          0x2080012bu
+#define NV2080_CTRL_GPU_PROMOTE_CONTEXT_MAX_ENTRIES 16u
+
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_MAIN                         0u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PM                           1u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PATCH                        2u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_BUFFER_BUNDLE_CB             3u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PAGEPOOL                     4u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_ATTRIBUTE_CB                 5u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_RTV_CB_GLOBAL                6u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_GFXP_POOL                    7u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_GFXP_CTRL_BLK                8u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_FECS_EVENT                   9u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PRIV_ACCESS_MAP              10u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_UNRESTRICTED_PRIV_ACCESS_MAP 11u
+#define NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_GLOBAL_PRIV_ACCESS_MAP       12u
+
+/* `physAttr` vale 4 en la promoción de upstream y sólo se rellena cuando el búfer
+ * se inicializa; el resto de los campos de la entrada se quedan a cero. */
+#define NV2080_CTRL_GPU_PROMOTE_CTX_PHYS_ATTR_DEFAULT 4u
+
+typedef struct NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY {
+    NvU64 gpuPhysAddr;
+    NvU64 gpuVirtAddr;
+    NvU64 size;
+    NvU32 physAttr;
+    NvU16 bufferId;
+    NvU8  bInitialize;
+    NvU8  bNonmapped;
+} NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY;
+
+typedef struct NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS {
+    NvU32    engineType;
+    NvHandle hClient;
+    NvU32    ChID;
+    NvHandle hChanClient;
+    NvHandle hObject;
+    NvHandle hVirtMemory;
+    NvU64    virtAddress;
+    NvU64    size;
+    NvU32    entryCount;
+    /* El array va alineado a 8 en el header de la SDK (`NV_DECLARE_ALIGNED`), y con
+     * `entryCount` en el offset 40 eso mete **4 bytes de relleno** antes: empieza
+     * en el 48, no en el 44. Ese hueco es exactamente la clase de detalle que
+     * desplaza medio struct sin que nada se queje, y por eso está en un assert. */
+    NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY
+        promoteEntry[NV2080_CTRL_GPU_PROMOTE_CONTEXT_MAX_ENTRIES];
+} NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS;
+
+typedef char nv2080_grctx_info_size_check[
+    sizeof(NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS) == 1664 ? 1 : -1];
+typedef char nv2080_promote_entry_size_check[
+    sizeof(NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY) == 32 ? 1 : -1];
+typedef char nv2080_promote_params_size_check[
+    sizeof(NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS) == 560 ? 1 : -1];
+typedef char nv2080_promote_entry_off_check[
+    offsetof(NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS, promoteEntry) == 48 ? 1 : -1];
+typedef char nv2080_promote_virtaddr_off_check[
+    offsetof(NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS, virtAddress) == 24 ? 1 : -1];
 
 #endif

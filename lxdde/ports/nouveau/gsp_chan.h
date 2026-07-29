@@ -13,8 +13,12 @@
 #include "gsp_vram.h"
 #include "nvrm_r570.h"
 
-#define GSP_CHAN_GPFIFO_ENTRIES  64u
-#define GSP_CHAN_GPFIFO_SIZE     4096u
+/* En Blackwell el USERD no actualiza GPGet (siempre 0). El HW usa ese Get para
+ * el “anillo lleno”: con 64 entradas, al publicar GPPut=64 el PBDMA cuelga
+ * (2026-07-29, gpget SW=63 sem=63). 4096 entradas × 8 B = 32 KiB — bastante
+ * para un run de soso-llm; el progreso SW (`gpget`) sigue gobernando el PB. */
+#define GSP_CHAN_GPFIFO_ENTRIES  4096u
+#define GSP_CHAN_GPFIFO_SIZE     (GSP_CHAN_GPFIFO_ENTRIES * NVC56F_GP_ENTRY__SIZE)
 #define GSP_CHAN_USERD_SIZE      4096u
 #define GSP_CHAN_PB_SIZE         4096u
 #define GSP_CHAN_NOTIFIER_SIZE   4096u
@@ -26,16 +30,21 @@
  * base viva por debajo de 2^40: aquí dentro está el pushbuffer, y su VA va en una
  * entrada de GPFIFO, que sólo llega al bit 39. */
 #define GSP_CHAN_VA_BASE         (GSP_VA_BASE + 0x20000000ull)
-/* Cada canal se lleva su propia ventana. Sus cuatro búferes ocupan 16 KiB; el
- * hueco de 64 KiB deja sitio de sobra y hace que la VA diga de un vistazo de qué
- * canal es. Con dos canales apilados a 16 KiB, un desbordamiento del pushbuffer
- * de uno caería dentro del GPFIFO del otro sin que nada se quejara. */
+/* Ventana por canal: GPFIFO 32 KiB + USERD/PB/notifier 12 KiB ≈ 44 KiB; 64 KiB
+ * de stride separa canales para que un desborde no pise al vecino. */
 #define GSP_CHAN_VA_STRIDE       0x10000ull
 
 struct gsp_chan {
     struct gsp_rm *rm;
     struct gsp_vmm *vmm;
     uint32_t handle;
+    /* El chid que le PEDIMOS a RM. No se manda como número: viaja dentro de los
+     * dos subcampos de USERD de `flags` (índice = chid % 8, página = chid / 8), que
+     * es como lo hace `r535_chan_alloc`. Dos canales con el mismo chid piden el
+     * mismo slot de USERD y el segundo se lleva un NO_MEMORY. El token de
+     * `GET_WORK_SUBMIT_TOKEN` dice cuál acabó siendo, y contrastarlo con éste es
+     * lo que prueba que el mecanismo es el que creemos. */
+    uint32_t chid;
     /* `NV2080_ENGINE_TYPE_*` al que va atado. No es un detalle de configuración:
      * el motor decide qué objetos acepta RM sobre este canal (CE en COPY0,
      * compute en GR0), y equivocarlo se paga con un INVALID_CLASS que parece
@@ -57,18 +66,24 @@ struct gsp_chan {
     uint64_t userd_va;
     uint64_t pushbuf_va;
     uint64_t notifier_va;
-    /* Bloque de instancia del canal, en VRAM. No lo tocamos nunca desde la CPU
-     * (sin BAR1 no hay ventana): es RM quien lo usa, nosotros solo decimos
-     * dónde está. Por eso es una dirección pelada y no un gsp_dma_buf. */
+    /* Bloque de instancia del canal, en VRAM. La CPU lo lee por PRAMIN
+     * (`gsp_pramin_*`), no por BAR1. */
     uint64_t inst_addr;
-    Nvc56fControl *userd_ctl;
+    /* USERD en VRAM (paridad r535); GPPut vía PRAMIN en cada submit. */
+    int userd_vram;
     unsigned gpput;
+    /* Progreso del GPFIFO visto por SW. Desde VOLTA el USERD solo actualiza
+     * GPGet a timer (compat) y en BLACKWELL_CHANNEL_GPFIFO_* el writeback
+     * desapareció del todo (nouveau 862450a / Skeggs 2025): leer 0x88 siempre
+     * da 0. El ack lo pone quien espera el semáforo CE/QMD —equivalente al
+     * non-WFI sem release de upstream— y pb_rewind mira este valor, no el USERD. */
+    unsigned gpget;
     unsigned pb_pos;
-    /* Valor a escribir en el doorbell para patear ESTE canal, tal cual lo da RM
-     * (`GET_WORK_SUBMIT_TOKEN`). El flag va aparte del valor porque un token de
-     * 0 es perfectamente legítimo —runlist 0, chid 0— y no se puede usar el cero
-     * como "no lo tengo". */
+    /* Valor a escribir en el doorbell para patear ESTE canal. El RPC
+     * GET_WORK_SUBMIT_TOKEN da runlist+chid; en gb20x hay que OR el bit 30
+     * (RUNLIST_DOORBELL_ENABLE) — ver gsp_chan_doorbell_kick(). */
     uint32_t doorbell_token;
+    uint32_t doorbell_kick;
     int doorbell_ok;
     int ready;
 };
@@ -84,19 +99,20 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
 /* Reserva espacio en el pushbuffer (alineado a 4 B). Devuelve el offset o -1. */
 int gsp_chan_pb_reserve(struct gsp_chan *c, unsigned bytes);
 
-/* Vuelve al principio del pushbuffer para reutilizarlo. SOLO es válido cuando el
- * host ya consumió todo lo encolado (GPGet == GPPut): reescribir métodos que el
- * host todavía no ha leído es corrupción silenciosa del trabajo en vuelo, así
- * que si no se cumple esto falla en vez de rebobinar. Devuelve 0 si rebobinó. */
+/* Vuelve al principio del pushbuffer para reutilizarlo. SOLO es válido cuando
+ * `gpget == gpput` (progreso SW tras ack): reescribir métodos que el host
+ * todavía no ha leído es corrupción silenciosa. Devuelve 0 si rebobinó. */
 int gsp_chan_pb_rewind(struct gsp_chan *c);
+
+/* Marca todo lo encolado como consumido. Llamar solo tras un wait del semáforo
+ * CE/QMD que haya visto el payload — en Blackwell no hay otra forma fiable de
+ * saber que el PBDMA terminó el segmento. */
+void gsp_chan_ack_progress(struct gsp_chan *c);
 
 /* Encola un segmento del pushbuffer en el GPFIFO y publica Put/GPPut. */
 int gsp_chan_submit(struct gsp_chan *c, unsigned pb_off, unsigned pb_len);
 
-/* Vuelca el estado del canal visto desde el USERD. Diagnóstico, no control: lo
- * llama quien se queda esperando algo que no llega. Lo importante es `GPGet`,
- * que dice si el host recogió el trabajo o ni se enteró — ver el comentario de
- * la implementación. */
+/* Vuelca USERD + progreso SW. En Blackwell el GPGet del USERD es cosmético. */
 void gsp_chan_dump(struct gsp_chan *c, const char *why);
 
 void gsp_chan_fini(struct gsp_chan *c);

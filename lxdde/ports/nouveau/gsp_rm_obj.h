@@ -38,6 +38,11 @@ int gsp_rm_alloc(struct gsp_rm *rm, uint32_t parent, uint32_t handle, uint32_t c
 int gsp_rm_control(struct gsp_rm *rm, uint32_t object, uint32_t cmd,
                    void *params, uint32_t params_size, uint32_t *rm_status);
 
+/* Igual con timeout explícito (ms). PROMOTE_CTX y otros controles lentos lo usan. */
+int gsp_rm_control_timeout(struct gsp_rm *rm, uint32_t object, uint32_t cmd,
+                           void *params, uint32_t params_size, uint32_t *rm_status,
+                           unsigned timeout_ms);
+
 /* Libera un objeto (`NV_VGPU_MSG_FUNCTION_FREE`). */
 int gsp_rm_free(struct gsp_rm *rm, uint32_t handle);
 
@@ -74,6 +79,14 @@ void gsp_rm_classes_forget(void);
  * tarjeta, en vez de darlo por bueno por aritmética sobre una tabla. Devuelve 0
  * si los dos controles pasaron; que fallen no impide arrancar. */
 int gsp_rm_engines_probe(struct gsp_rm *rm);
+
+/* Dónde están los registros del FIFO de `engine` (`NV2080_ENGINE_TYPE_*`): el pri
+ * base de su runlist y el de su channel RAM, tal como los dio la tabla de arriba.
+ * Devuelve 0 si el motor estaba en la tabla y su base cae dentro de BAR0. Es para
+ * diagnóstico —mirar en el silicio si el canal está encendido y si el PBDMA se ha
+ * quejado—, no para programar nada: en el camino GSP el FIFO lo lleva RM. */
+int gsp_rm_engine_fifo_regs(uint32_t engine, uint32_t *runl_pri,
+                            uint32_t *chram_pri);
 
 /* Lo que sacamos de `GET_GSP_STATIC_INFO`: el mapa de VRAM utilizable y los
  * regalos de RM (su juego interno de objetos y las bases de las tablas de

@@ -1,5 +1,6 @@
 /* Tablas de páginas VER3 y espacio de direcciones de RM. Ver gsp_vmm.h. */
 #include "gsp_vmm.h"
+#include "gsp_mmio.h"
 #include "nvrm_r570.h"
 
 void *memset(void *dst, int c, unsigned long n);
@@ -27,6 +28,16 @@ static const struct {
 #define VMM_VA_BITS    57u
 #define VMM_ADDR_MASK  0x000ffffffffff000ull   /* ADDRESS 51:12 */
 
+/* PRI de invalidación de la MMU del cliente (tu102_vmm_flush → dev_vm.h gb100,
+ * alias físico 0xb83000). Nuestro directorio vive en sysmem coherente. */
+#define VMM_INVAL_PDB         0xb830a0u
+#define VMM_INVAL_UPPER_PDB   0xb830a4u
+#define VMM_INVAL             0xb830b0u
+#define VMM_INVAL_TRIGGER     0x80000000u
+#define VMM_INVAL_ALL_VA      0x00000001u
+#define VMM_INVAL_APERTURE_SYS 0x2u
+#define VMM_INVAL_POLL_MS     2000u
+
 /* Índice de `va` dentro de la tabla de nivel `lvl`. */
 static uint32_t lvl_index(unsigned lvl, uint64_t va)
 {
@@ -47,17 +58,44 @@ static uint64_t lvl_cover(unsigned lvl, uint64_t va)
 
 /* PTE de 4 KiB. Bit 0 VALID, APERTURE 2:1, PCF 7:3, KIND 11:8, ADDRESS 51:12.
  *
- * PCF: `REGULAR_RW_ATOMIC_CACHED_ACD` (0x10) para VRAM y
- * `REGULAR_RW_ATOMIC_UNCACHED_ACD` (0x11) para sysmem — es lo que elige
- * `gh100_vmm_valid` con priv=0, ro=0 y `vol` según el target.
+ * El PCF no es un número suelto: son cinco bits con estructura, y la tabla entera
+ * está en `NV_MMU_VER3_PTE_PCF_*` de `nvhw/ref/gh100/dev_mmu.h` (transcrita el
+ * 2026-07-29). Leídos de arriba abajo: bit 4 = ACD (frente a ACE), bit 3 =
+ * NO_ATOMIC, **bit 2 = RO**, bit 1 = PRIVILEGE, bit 0 = UNCACHED. De ahí salen los
+ * cuatro que usa este port, con su nombre de upstream y no a ojo:
+ *
+ *   0x10 REGULAR_RW_ATOMIC_CACHED_ACD     VRAM, lectura y escritura
+ *   0x11 REGULAR_RW_ATOMIC_UNCACHED_ACD   sysmem, lectura y escritura
+ *   0x14 REGULAR_RO_ATOMIC_CACHED_ACD     VRAM, sólo lectura
+ *   0x15 REGULAR_RO_ATOMIC_UNCACHED_ACD   sysmem, sólo lectura
+ *
+ * Sysmem va sin cachear porque la CPU escribe ahí y no hay quien invalide la L2 de
+ * la GPU; VRAM sí se cachea. Lo que NO se usa es la variante PRIVILEGE: upstream
+ * mapea el contexto de GR con `priv = 1`, y la nuestra queda REGULAR, que es
+ * **más** permisiva (un acceso privilegiado a una página regular pasa; al revés
+ * no), así que no rompe nada y queda dicho aquí.
+ *
  * KIND 0 = `PITCH`: memoria lineal sin tiling ni compresión, que es lo único
  * que se mapea aquí. */
-static uint64_t pte_encode(uint64_t phys, enum gsp_vmm_target target)
+#define VMM_PCF_REGULAR_RW_ATOMIC_CACHED_ACD   0x10u
+#define VMM_PCF_REGULAR_RW_ATOMIC_UNCACHED_ACD 0x11u
+#define VMM_PCF_REGULAR_RO_ATOMIC_CACHED_ACD   0x14u
+#define VMM_PCF_REGULAR_RO_ATOMIC_UNCACHED_ACD 0x15u
+
+static uint64_t pte_encode(uint64_t phys, enum gsp_vmm_target target, unsigned flags)
 {
     uint64_t d = 1ull;                                  /* VALID */
+    unsigned pcf;
 
+    if (target == GSP_VMM_VRAM) {
+        pcf = (flags & GSP_VMM_RO) ? VMM_PCF_REGULAR_RO_ATOMIC_CACHED_ACD
+                                   : VMM_PCF_REGULAR_RW_ATOMIC_CACHED_ACD;
+    } else {
+        pcf = (flags & GSP_VMM_RO) ? VMM_PCF_REGULAR_RO_ATOMIC_UNCACHED_ACD
+                                   : VMM_PCF_REGULAR_RW_ATOMIC_UNCACHED_ACD;
+    }
     d |= (uint64_t)(target == GSP_VMM_VRAM ? 0u : 2u) << 1;      /* APERTURE */
-    d |= (uint64_t)(target == GSP_VMM_VRAM ? 0x10u : 0x11u) << 3; /* PCF */
+    d |= (uint64_t)pcf << 3;                                     /* PCF */
     d |= phys & VMM_ADDR_MASK;                          /* KIND = 0 */
     return d;
 }
@@ -156,8 +194,51 @@ static struct gsp_vmm_pt *pt_get(struct gsp_vmm *v, unsigned lvl, uint64_t va,
     return pt;
 }
 
+/* Paridad con tu102_vmm_flush: tras cada mapeo hay que barrer la TLB y las
+ * cachés de PDE, o la GPU puede seguir viendo entradas inválidas (GR_FAULT_DURING
+ * _CTXSW con mmuFaultType=PDE en una VA ya mapeada, ciclo 2026-07-29). */
+static void gsp_vmm_invalidate(struct gsp_vmm *v)
+{
+    uint64_t root_phys;
+    uint32_t type = VMM_INVAL_ALL_VA;
+    unsigned waited = 0;
+
+    if (!v || !v->bound || !v->pt_nr) {
+        return;
+    }
+    root_phys = v->pt[0].mem.phys;
+    gsp_mmio_wr32(VMM_INVAL_PDB,
+                  (uint32_t)((root_phys >> 8) | VMM_INVAL_APERTURE_SYS));
+    gsp_mmio_wr32(VMM_INVAL_UPPER_PDB, (uint32_t)(root_phys >> 40));
+    gsp_mmio_wr32(VMM_INVAL, VMM_INVAL_TRIGGER | type);
+
+    for (;;) {
+        uint32_t busy = gsp_mmio_rd32(VMM_INVAL);
+
+        if (gsp_mmio_pri_error(busy)) {
+            lx_printk("nouveau-lx: MMU invalidate PRI error 0x%08x\n", busy);
+            return;
+        }
+        if (!(busy & VMM_INVAL_TRIGGER)) {
+            return;
+        }
+        if (waited >= VMM_INVAL_POLL_MS) {
+            lx_printk("nouveau-lx: MMU invalidate timeout (0x%08x)\n", busy);
+            return;
+        }
+        lx_mdelay(1);
+        waited++;
+    }
+}
+
 int gsp_vmm_map(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
                 enum gsp_vmm_target target)
+{
+    return gsp_vmm_map_flags(v, va, phys, size, target, 0u);
+}
+
+int gsp_vmm_map_flags(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
+                      enum gsp_vmm_target target, unsigned flags)
 {
     uint64_t off;
 
@@ -200,7 +281,7 @@ int gsp_vmm_map(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
             }
             parent = child;
         }
-        pt_write(parent, lvl_index(0, at), pte_encode(phys + off, target));
+        pt_write(parent, lvl_index(0, at), pte_encode(phys + off, target, flags));
         v->pages_mapped++;
     }
 
@@ -208,6 +289,7 @@ int gsp_vmm_map(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
               (unsigned long long)(size >> 10), (unsigned long long)va,
               target == GSP_VMM_VRAM ? "VRAM" : "sysmem",
               (unsigned long long)phys);
+    gsp_vmm_invalidate(v);
     return 0;
 }
 

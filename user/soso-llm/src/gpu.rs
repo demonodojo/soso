@@ -69,6 +69,10 @@ pub struct SysGpu {
     /// habla: "GPU detectada" sobre el dispositivo software de pruebas sería
     /// mentira, y quien lea el log no tiene otra forma de saberlo.
     name: [u8; 32],
+    /// Fase del bring-up del dispositivo (`rm_ce`, `rm_compute`…). Es lo que
+    /// convierte un `on_gpu=0` en un diagnóstico: sin ella, saber dónde se quedó
+    /// el silicio obliga a abrir el log de serie.
+    phase: [u8; 16],
     on_gpu: bool,
     resident: Vec<Resident>,
     x: Scratch,
@@ -100,6 +104,7 @@ impl SysGpu {
         Some(Self {
             vram_free: info.vram_free,
             name: info.name,
+            phase: info.phase,
             on_gpu: false,
             resident: Vec::new(),
             x: Scratch::NONE,
@@ -112,8 +117,13 @@ impl SysGpu {
 
     /// Nombre del dispositivo tal y como lo dio el kernel.
     pub fn device_name(&self) -> &str {
-        let end = self.name.iter().position(|&b| b == 0).unwrap_or(self.name.len());
-        core::str::from_utf8(&self.name[..end]).unwrap_or("?")
+        libsoso::str_hasta_nul(&self.name)
+    }
+
+    /// Fase del bring-up tal y como la dio el kernel; vacía si el dispositivo no
+    /// tiene fases.
+    pub fn phase(&self) -> &str {
+        libsoso::str_hasta_nul(&self.phase)
     }
 
     /// `true` si el último `matvec_f32` lo calculó de verdad el silicio de la GPU

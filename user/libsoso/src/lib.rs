@@ -76,6 +76,18 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
+/// Un campo de texto de tamaño fijo del kernel (`GpuInfo::name`, `::phase`, un
+/// nombre de dirent…) como `&str`: hasta el primer NUL, o el campo entero si no
+/// lo hay, y `"?"` si no es UTF-8 válido.
+///
+/// Estaba copiado en cuatro sitios —dos los añadió el campo `phase` de `GpuInfo`—
+/// y cada copia es una ocasión más de olvidar el `unwrap_or` y hacer panic en un
+/// binario cuyo panic handler no tiene a dónde escribir.
+pub fn str_hasta_nul(bytes: &[u8]) -> &str {
+    let n = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..n]).unwrap_or("?")
+}
+
 pub fn errno_str(e: i64) -> &'static str {
     match -e {
         x if x == abi::ENOENT => "no existe",

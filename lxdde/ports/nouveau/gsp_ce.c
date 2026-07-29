@@ -3,6 +3,10 @@
 
 void *memset(void *dst, int c, unsigned long n);
 
+/* Mapa de subcanales de NVIDIA (`cla06fsubch.h` / `push906f.h` de nouveau):
+ * 3D=0, COMPUTE=1, I2M=2, 2D=3, COPY_ENGINE=4. */
+#define GSP_CE_SUBCHANNEL 4u
+
 static void pb_write(struct gsp_chan *c, unsigned *pos, uint32_t v)
 {
     uint32_t *p = (uint32_t *)((unsigned char *)c->pushbuf.va + *pos);
@@ -22,15 +26,17 @@ static void pb_method(struct gsp_chan *c, unsigned *pos, unsigned subc,
     pb_write(c, pos, hdr);
 }
 
-static void pb_immed(struct gsp_chan *c, unsigned *pos, unsigned subc,
-                     unsigned method, uint32_t data)
+/* `SET_OBJECT` en Volta+ lleva la **clase** del motor (bits 15:0), no el handle de
+ * RM. nouveau: `PUSH_NVSQ(push, NVA0B5, 0x0000, handle & 0x0000ffff)` con handle
+ * = `oclass | engine<<16` → el dato es 0xcab5, no 0xc6b50000. UVM hace lo mismo
+ * en el canal CE. Además los métodos del copy engine van por el subcanal 4
+ * (`PUSH906F_SUBC_NVA0B5`), no por el 0 (= 3D/GR). Mandar el handle entero por
+ * subcanal 0 dejó clase 0x0000 atada a GR → PBDMA_HANG_DURING_HTE (2026-07-29). */
+static void pb_set_object(struct gsp_chan *c, unsigned *pos, unsigned subc,
+                          uint32_t oclass)
 {
-    uint32_t hdr = (NVC56F_DMA_SEC_OP_IMMD_DATA_METHOD << 29) |
-                   (subc << 13) |
-                   ((data & 0x1fffu) << 16) |
-                   ((method >> 2) & 0xfffu);
-
-    pb_write(c, pos, hdr);
+    pb_method(c, pos, subc, NVC56F_SET_OBJECT, 1);
+    pb_write(c, pos, oclass);
 }
 
 int gsp_ce_init(struct gsp_rm *rm, struct gsp_chan *chan, struct gsp_ce *ce)
@@ -78,46 +84,54 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
     unsigned end;
     uint32_t launch;
     uint64_t sem_va;
+    int off;
 
     if (!ce || !ce->ready || !ce->chan || !size) {
         return -1;
     }
     c = ce->chan;
-    start = (unsigned)c->pb_pos;
 
-    if (gsp_chan_pb_reserve(c, 160) < 0) {
-        return -1;
+    off = gsp_chan_pb_reserve(c, 160);
+    if (off < 0) {
+        /* ~25 reservas de 160 B llenan el PB; tras el wait CE ya hubo ack del
+         * progreso SW y rebobinar es seguro (Blackwell no escribe USERD GPGet). */
+        if (gsp_chan_pb_rewind(c) != 0 ||
+            (off = gsp_chan_pb_reserve(c, 160)) < 0) {
+            lx_printk("nouveau-lx: CE — pushbuffer lleno y sin rebobinar\n");
+            return -1;
+        }
     }
+    start = (unsigned)off;
     pos = start;
 
-    pb_immed(c, &pos, 0, NVC56F_SET_OBJECT, ce->handle);
+    pb_set_object(c, &pos, GSP_CE_SUBCHANNEL, ce->cls);
 
-    pb_method(c, &pos, 0, NVC6B5_OFFSET_IN_UPPER, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_IN_UPPER, 1);
     pb_write(c, &pos, (uint32_t)(src_va >> 32));
-    pb_method(c, &pos, 0, NVC6B5_OFFSET_IN_LOWER, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_IN_LOWER, 1);
     pb_write(c, &pos, (uint32_t)src_va);
-    pb_method(c, &pos, 0, NVC6B5_PITCH_IN, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_PITCH_IN, 1);
     pb_write(c, &pos, size);
 
-    pb_method(c, &pos, 0, NVC6B5_OFFSET_OUT_UPPER, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_OUT_UPPER, 1);
     pb_write(c, &pos, (uint32_t)(dst_va >> 32));
-    pb_method(c, &pos, 0, NVC6B5_OFFSET_OUT_LOWER, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_OUT_LOWER, 1);
     pb_write(c, &pos, (uint32_t)dst_va);
-    pb_method(c, &pos, 0, NVC6B5_PITCH_OUT, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_PITCH_OUT, 1);
     pb_write(c, &pos, size);
 
-    pb_method(c, &pos, 0, NVC6B5_LINE_LENGTH_IN, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_LINE_LENGTH_IN, 1);
     pb_write(c, &pos, size);
-    pb_method(c, &pos, 0, NVC6B5_LINE_COUNT, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_LINE_COUNT, 1);
     pb_write(c, &pos, 1);
 
     sem_va = c->notifier_va;
     ce->pending = ++ce->seq;
-    pb_method(c, &pos, 0, NVC6B5_SET_SEMAPHORE_A, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_SET_SEMAPHORE_A, 1);
     pb_write(c, &pos, (uint32_t)(sem_va >> 32));
-    pb_method(c, &pos, 0, NVC6B5_SET_SEMAPHORE_B, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_SET_SEMAPHORE_B, 1);
     pb_write(c, &pos, (uint32_t)sem_va);
-    pb_method(c, &pos, 0, NVC6B5_SET_SEMAPHORE_PAYLOAD, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_SET_SEMAPHORE_PAYLOAD, 1);
     pb_write(c, &pos, ce->pending);
 
     launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
@@ -128,7 +142,7 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
              NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH |
              NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
 
-    pb_method(c, &pos, 0, NVC6B5_LAUNCH_DMA, 1);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_LAUNCH_DMA, 1);
     pb_write(c, &pos, launch);
 
     end = pos;
@@ -156,6 +170,7 @@ int gsp_ce_wait(struct gsp_ce *ce, unsigned ms)
         /* Comparación con resta: el payload es monótono y así un envoltorio del
          * contador de 32 bits no deja la espera colgada para siempre. */
         if ((int32_t)(*sem - ce->pending) >= 0) {
+            gsp_chan_ack_progress(ce->chan);
             return 0;
         }
         lx_mdelay(1);

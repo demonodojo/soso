@@ -1,18 +1,4 @@
-/* G4f/G5: lanzamiento compute (QMD inline + SASS).
- *
- * El SASS lo compila `scripts/l6-g4f-build-sass.sh` y llega por
- * `saxpy_sass_embed.c` / `matvec_sass_embed.c` junto con los metadatos que el
- * cubin declara: dónde espera el kernel sus parámetros dentro del constant bank 0
- * y cuántos registros usa. Esos dos números NO se inventan aquí — si se
- * hardcodean y el .cu cambia, el lanzamiento lee basura sin decir nada.
- *
- * DOS KERNELS, UN SOLO CAMINO. saxpy es la prueba de vida de G4f y matvec es lo
- * que usa `soso-llm` (G5). Todo lo que los distingue está en `struct gsp_kernel`,
- * y el QMD se rellena desde ahí: cuando esto era código de un solo kernel, el
- * regcount y el tamaño del cbank estaban leídos directamente de los símbolos de
- * saxpy dentro de la función que rellena el QMD, así que el segundo kernel habría
- * lanzado con los números del primero.
- */
+/* G4f/G5: lanzamiento compute (QMD en sysmem + SEND_PCAS). Ver gsp_compute.h. */
 #ifndef GSP_COMPUTE_H
 #define GSP_COMPUTE_H
 
@@ -25,7 +11,8 @@
  * antigua sin que nada se quejara. */
 #define G4F_SASS_VA   (GSP_VA_BASE + 0x1000ull)      /* VRAM: blob SASS de saxpy */
 #define G5_SASS_VA    (GSP_VA_BASE + 0x2000ull)      /* VRAM: blob SASS de matvec */
-#define G4F_QMD_VA    (GSP_VA_BASE + 0x20000ull)     /* VRAM: destino del QMD inline */
+/* QMD v05 (384 B) dentro de `cp->data`; SEND_PCAS_A exige alineación >>8. */
+#define G4F_QMD_OFF   0x1000u
 
 /* Sysmem coherente propia del compute, detrás de los búferes del canal. La CPU
  * escribe aquí directamente: sin BAR1 no hay ventana a la VRAM, así que el
@@ -130,7 +117,7 @@ int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
                            const struct gsp_kernel *k,
                            uint64_t scratch_va, void *scratch_cpu);
 
-/* Codifica inline QMD + métodos compute en el pushbuffer. */
+/* Codifica SET_OBJECT + WFI + SEND_PCAS en el pushbuffer; el QMD va a sysmem. */
 int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
                            unsigned *pb_off, unsigned *pb_len);
 

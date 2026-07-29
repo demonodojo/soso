@@ -94,10 +94,10 @@ solo **4 dummies restantes, TODOS HW/ROM** (`nvbios_image`/`nvbios_shadow`/`bit_
 = VBIOS por PCI ROM, `nvkm_pci_msi_rearm` = PCI MSI). Shims nuevos: bitmap ops
 (`find_first_zero_bit`, `__set_bit`), `atomic_inc_return`.
 
-**G4e** escrito + hostcheck (`gsp_chan`, `gsp_ce`); GO HW (readback VRAM vía CE)
-pendiente de ciclo VFIO. **G4f y G5 también escritos + hostcheck** (2026-07-28):
-canal GR0, saxpy y matvec SASS por tandas de filas. G3b y G4a–c ya validados en
-GB205 (2026-07-25).
+**G4e / G4f / G5 en GO HW** (2026-07-29, GB205 VFIO): `CE readback verificado`,
+PCAS 24 B + QMD v05 sobre GR0 (`0xcec0`), `soso-llm run tiny --max 4` → ~97
+`matvec en GPU OK`. Hostcheck sigue cubriendo el encoder. G3b y G4a–c ya
+validados (2026-07-25).
 
 #### Las clases no se deducen, se preguntan (2026-07-28)
 
@@ -152,13 +152,13 @@ sigue pendiente para boot hw real.
 
 | Módulo nvkm / lxdde | Notas |
 |---------------------|-------|
-| `engine/dma/*`, canal GPFIFO (COPY0) | **G4e** — copia CE en VRAM (hostcheck OK; GO HW pendiente) |
-| `engine/gr/*.c`, canal GPFIFO (GR0) | **G4f/G5** — SAXPY y matvec SASS |
+| `engine/dma/*`, canal GPFIFO (COPY0) | **G4e GO** — copia CE en VRAM (2026-07-29) |
+| `engine/gr/*.c`, canal GPFIFO (GR0) | **G4f/G5 GO** — SAXPY/matvec SASS + soso-llm |
 
-**Criterio G4e:** readback correcto tras copia CE. **Criterio G4f:**
-`lx_nouveau_submit_saxpy` con `on_gpu=1` real (no loop CPU). **Criterio G5:**
-`lx_nouveau_submit_matvec_f32` con `on_gpu=1` y el vector releído de la memoria
-que escribió la GPU, en todas las tandas.
+**Criterio G4e:** `CE readback verificado (G4e GO)`. **Criterio G4f:**
+`lx_nouveau_submit_saxpy` / matvec con `on_gpu=1` real. **Criterio G5:**
+`soso-llm` con matvec en GPU (cumplido en tiny; tok/s vs CPU en modelos grandes
+pendiente).
 
 ## Inventario de símbolos (workflow)
 
@@ -547,36 +547,24 @@ nouveau-lx: GSP booted
 
 ## G4 — RPC, RM y compute (2026-07-25 →)
 
-Tras G3b, el bring-up avanza por sub-fases. Estado al **2026-07-27**:
+Tras G3b, el bring-up avanza por sub-fases. Estado al **2026-07-29**:
 
 | Sub-fase | Módulos | Criterio | Estado |
 |----------|---------|----------|--------|
 | **G4a** | `gsp_rpc.c` (recv), `SET_SYSTEM_INFO`/`SET_REGISTRY` | `GSP_INIT_DONE`, `GSP-RM listo` | **GO** HW |
 | **G4b** | `gsp_cmdq.c` (`gsp_cmdq_call`) | Round-trip síncrono | **GO** |
 | **G4c** | `gsp_rm_obj.c` | Cliente/device/subdevice + static info | **GO** HW |
-| **G4d** | `gsp_vram.c`, `gsp_vmm.c` | VER3 + `SET_PAGE_DIRECTORY` | Escrito + hostcheck |
-| **G4e** | `gsp_chan.c`, `gsp_ce.c` | ALLOC canal/CE, PB, USERD; readback VRAM | **Escrito + hostcheck** |
-| **G4f** | canal GR0, `saxpy.sass.bin` | `SYS_GPU_SUBMIT`, `on_gpu=1` | **Escrito + hostcheck** |
-| **G5** | `matvec.sass.bin`, tandas de filas | `MATVF` con `on_gpu=1` | **Escrito + hostcheck** |
+| **G4d** | `gsp_vram.c`, `gsp_vmm.c` | VER3 + `SET_PAGE_DIRECTORY` | **GO** HW |
+| **G4e** | `gsp_chan.c`, `gsp_ce.c` | ALLOC canal/CE, PB, USERD; readback VRAM | **GO** HW |
+| **G4f** | canal GR0, `gsp_compute.c`, SASS | PCAS/QMD, `on_gpu=1` | **GO** HW |
+| **G5** | matvec + `soso-llm` | matvec en GPU en inferencia | **GO** funcional HW |
 
-**GO G4e en HW** (cuando puedas VFIO): el CE ejercita traducción GPU, canal,
-pushbuffer, timbre y semáforo sin necesitar SASS. Los mapeos de G4d/G4e en
-`gsp_bringup.c` (`G4D_VA_BASE`, `GSP_CHAN_VA_BASE`, scratch) están listos para
-readback.
-
-**G4f/G5 (2026-07-28):** el toolchain ya no bloquea. `l6-g4f-build-sass.sh` compila
-los dos kernels con el `nvcc` del host o, si no hay, con Docker
-(`nvidia/cuda:12.8.0-devel-ubuntu24.04`) — `ptxas` no necesita GPU. Salen
-`saxpy.sass.bin` (512 B, 10 regs) y `matvec.sass.bin` (2944 B, 37 regs), con sus
-metadatos leídos del cubin.
-
-Lo que sí faltaba era el **canal**: un objeto de compute no cuelga de un canal de
-COPY0 (RM: `INVALID_CLASS` con la clase correcta, HW 2026-07-28). El bring-up
-levanta ahora dos canales, `gsp_chan_init(..., idx, engine)` — COPY0 para el CE y
-GR0 para el compute — cada uno con su ventana de VAs y su bloque de instancia.
+**GO G4e–G5 en HW (2026-07-29):** CE readback; pushbuffer PCAS de 24 B (IMMD
+correcto); progreso GPFIFO por `gsp_chan_ack_progress` (Blackwell no escribe
+USERD GPGet); GPFIFO 4096×8 B; `soso-llm run tiny --max 4` → ~97 matvec OK.
+Cap PCIe Gen3 en el host tras reboot. Dos canales: COPY0 (CE) + GR0 (compute).
 
 **Apagado:** `gsp_fini.c` — `halt` / `SYS_GPU_SUBMIT` GFINI antes de soltar VFIO
 (gotcha 6).
 
-Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh` (cubre G4d, G4e canal/CE
-+ fini).
+Verificación sin GPU: `./scripts/l6-g3-gsp-hostcheck.sh` (G4d–G4f encoders + fini).

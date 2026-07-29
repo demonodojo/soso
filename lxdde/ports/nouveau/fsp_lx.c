@@ -154,18 +154,69 @@ static int fsp_poll(uint32_t *bytes)
     return 1;
 }
 
-/* Un -1 de fsp_poll() puede ser un reset de función, que deja la tarjeta en el
- * bus pero sin decode de memoria y de eso se vuelve. Mismo criterio que el bucle
- * de arranque del FMC. Devuelve 1 si el MMIO ha vuelto. */
-static int fsp_gone_recovered(const char *cuando)
+/* Plazo para que la tarjeta vuelva antes de declararla muerta. Un reset del
+ * enlace PCIe tarda en reentrenar: en esta máquina se midieron **207 ms** con el
+ * monitor del root port (2026-07-28, `target/g1-vfio-link.log`: 32 GT/s →
+ * 2.5 GT/s → 32 GT/s). 2 s son casi 10× ese margen y no cuestan nada cuando no
+ * hace falta, porque el sondeo sale en cuanto el MMIO contesta. */
+#define FSP_GONE_BUDGET_MS 2000u
+
+/* Un all-ones del MMIO admite tres lecturas y sólo una es definitiva:
+ *
+ *   - **reset de función**: la tarjeta sigue en el bus pero sin decode de
+ *     memoria. Se ve en el espacio de configuración y se arregla reactivando
+ *     memory+bus-master.
+ *   - **reset del enlace**: el enlace cae y reentrena, y durante ese rato TODO
+ *     el MMIO se lee a unos. Rendirse en la primera lectura convierte un reset
+ *     transitorio en un "se cayó del bus" definitivo — que es exactamente lo que
+ *     pasó arrancando el FMC el 2026-07-28: el driver se rindió **a los 3 ms** y
+ *     el enlace volvió a 32 GT/s 207 ms después, sin nadie mirando.
+ *   - la tarjeta muerta de verdad, que no vuelve (2026-07-25 y 2026-07-27).
+ *
+ * Por eso aquí se espera hasta `budget_ms` antes de dar el diagnóstico final.
+ *
+ * OJO con el espacio de configuración bajo VFIO: `id` lo emula vfio-pci desde su
+ * copia guardada, así que **un id válido NO prueba que la tarjeta conteste**. En
+ * el fallo del 2026-07-28 se leyó `id=0x2f1810de` con `sts=0xffff` y el MMIO
+ * muerto. El único juez es `gsp_mmio_alive()`, que lee un registro de verdad.
+ *
+ * Devuelve los ms esperados (>= 0) si el MMIO volvió, o -1 si no volvió. */
+static int fsp_gone_recovered(const char *cuando, unsigned budget_ms)
 {
+    unsigned waited = 0;
+
+    /* Primera pasada con traza: deja en el log la firma del espacio de
+     * configuración en el momento del fallo y reactiva el decode si un reset de
+     * función lo apagó. */
     if (gsp_mmio_pci_recover() == 0 && gsp_mmio_alive()) {
         lx_printk("nouveau-lx: el MMIO ha vuelto tras reactivar el decode (%s)\n", cuando);
-        return 1;
+        return 0;
     }
-    lx_printk("nouveau-lx: la GPU se ha caído del bus %s\n", cuando);
+
+    /* Sondeo barato con `gsp_mmio_alive()` (una lectura, sin traza) y cada 250 ms
+     * un reintento por configuración, que sí traza: cuatro líneas por segundo de
+     * espera en vez de mil. */
+    while (waited < budget_ms) {
+        lx_mdelay(1);
+        waited++;
+        if (gsp_mmio_alive()) {
+            lx_printk("nouveau-lx: el MMIO ha VUELTO a los +%u ms (%s) — era un reset, "
+                      "no una muerte\n", waited, cuando);
+            /* Tras un reset el decode puede haberse quedado apagado. */
+            (void)gsp_mmio_pci_recover();
+            return (int)waited;
+        }
+        if ((waited % 250u) == 0u) {
+            lx_printk("nouveau-lx: esperando que la GPU vuelva… +%u/%u ms (%s)\n",
+                      waited, budget_ms, cuando);
+            (void)gsp_mmio_pci_recover();
+        }
+    }
+
+    lx_printk("nouveau-lx: la GPU se ha caído del bus %s (no volvió en %u ms)\n",
+              cuando, budget_ms);
     log_gsp_state("fuera del bus");
-    return 0;
+    return -1;
 }
 
 static int fsp_send(const void *packet, uint32_t packet_size)
@@ -206,8 +257,19 @@ static int fsp_wait_reply(unsigned timeout_ms)
         if (st > 0) {
             return 0;
         }
-        if (st < 0 && !fsp_gone_recovered("esperando la respuesta al COT")) {
-            return -1;
+        if (st < 0) {
+            unsigned budget = FSP_GONE_BUDGET_MS;
+            int volvio;
+
+            if (budget > timeout_ms) {
+                budget = timeout_ms;
+            }
+            volvio = fsp_gone_recovered("esperando la respuesta al COT", budget);
+            if (volvio < 0) {
+                return -1;
+            }
+            timeout_ms = ((unsigned)volvio >= timeout_ms) ? 0u
+                                                         : timeout_ms - (unsigned)volvio;
         }
         lx_mdelay(1);
     }
@@ -225,7 +287,10 @@ static int fsp_recv(struct fsp_reply *reply)
          * imprimió "FSP no contesta"), y una vuelta después head==tail==all-ones.
          * Es decir, la tarjeta murió entre las dos lecturas, no que el FSP
          * contestara raro. */
-        (void)fsp_gone_recovered("antes de leer la respuesta al COT");
+        /* La respuesta ya está perdida pase lo que pase, pero merece la pena
+         * esperar: que el log diga "volvió a los +N ms" en vez de "se cayó del
+         * bus" cambia el diagnóstico de tarjeta muerta a reset transitorio. */
+        (void)fsp_gone_recovered("antes de leer la respuesta al COT", FSP_GONE_BUDGET_MS);
         return -1;
     }
     if (st == 0) {
@@ -436,15 +501,25 @@ int fsp_lx_boot_gsp_fmc(const struct fmc_staged *fmc, const struct gsp_libos *li
         uint32_t elapsed = 8000u - (uint32_t)time;
 
         if (!gsp_mmio_alive()) {
+            unsigned budget = FSP_GONE_BUDGET_MS;
+            int volvio;
+
             lx_printk("nouveau-lx: la GPU dejó de contestar al MMIO **+%u ms** "
                       "después de que el FSP aceptase el COT\n", elapsed);
             /* Puede que la GPU siga en el bus y solo haya perdido el decode de
-             * memoria (lo que deja un reset de función). El espacio de
-             * configuración lo dice; si es eso, se reactiva y se sigue esperando. */
-            if (fsp_gone_recovered("mientras arrancaba el FMC")) {
-                continue;
+             * memoria (reset de función), o que el enlace esté reentrenando. Las
+             * dos cosas se recuperan; sólo la muerte de verdad no. */
+            if (budget > (unsigned)time) {
+                budget = (unsigned)time;   /* no gastar más plazo del que queda */
             }
-            return -1;
+            volvio = fsp_gone_recovered("mientras arrancaba el FMC", budget);
+            if (volvio < 0) {
+                return -1;
+            }
+            /* Lo esperado ahí dentro cuenta como plazo consumido: si no, los
+             * "+N ms" de las trazas siguientes mentirían. */
+            time = ((unsigned)volvio >= time) ? 1u : time - (unsigned)volvio;
+            continue;
         }
         if (lockdown_released(args_addr, &mbox0)) {
             lx_printk("nouveau-lx: lockdown liberado a los +%u ms del COT\n", elapsed);

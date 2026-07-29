@@ -233,6 +233,56 @@ static int engines_list_probe(struct gsp_rm *rm)
     return 0;
 }
 
+/* Lo que hace falta guardarse de la tabla del FIFO: por motor, dónde están sus
+ * registros. Sin esto, mirar el estado del canal en el silicio es imposible y el
+ * único síntoma de un submit que no arranca es un semáforo a cero.
+ *
+ * Los índices de `engineData` no están en un enum nuestro, así que estos tres
+ * salen de la tabla del propio chip (2026-07-28): data[2] es el engineType —GR0=1,
+ * CE0=9, CE1=10, que casan con `NV2080_ENGINE_TYPE_*`—, data[11] el pri base de la
+ * runlist —0x00d00000 para GR0/CE0 y 0x00d00400 para CE1, exactamente los valores
+ * que nouveau saca de PTOP como `tdev->runlist`— y data[14] el de la channel RAM.
+ * Y no se quedan en suposición: quien los usa lee `chcfg` en runlist+0x004 y
+ * comprueba que `chcfg & 0xfffffff0` es data[14]. Si no cuadra, lo dice. */
+#define FIFO_DEVINFO_ENGINE_TYPE   2u
+#define FIFO_DEVINFO_RUNLIST_PRI  11u
+#define FIFO_DEVINFO_CHRAM_PRI    14u
+#define FIFO_ENGN_MAX             24u
+
+static struct {
+    uint32_t engine;
+    uint32_t runl_pri;
+    uint32_t chram_pri;
+} g_fifo_engn[FIFO_ENGN_MAX];
+static unsigned g_fifo_engn_cnt;
+
+int gsp_rm_engine_fifo_regs(uint32_t engine, uint32_t *runl_pri,
+                            uint32_t *chram_pri)
+{
+    unsigned i;
+
+    for (i = 0; i < g_fifo_engn_cnt; i++) {
+        if (g_fifo_engn[i].engine != engine) {
+            continue;
+        }
+        /* Un pri base a cero o fuera de los 16 MiB de BAR0 mapeados no se
+         * devuelve: sería un offset inventado y lo leído, basura con pinta de
+         * dato. */
+        if (g_fifo_engn[i].runl_pri == 0u ||
+            g_fifo_engn[i].runl_pri >= 0x1000000u) {
+            return -1;
+        }
+        if (runl_pri) {
+            *runl_pri = g_fifo_engn[i].runl_pri;
+        }
+        if (chram_pri) {
+            *chram_pri = g_fifo_engn[i].chram_pri;
+        }
+        return 0;
+    }
+    return -1;
+}
+
 static int engines_fifo_table_probe(struct gsp_rm *rm)
 {
     NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS *t;
@@ -240,6 +290,7 @@ static int engines_fifo_table_probe(struct gsp_rm *rm)
     unsigned page;
     int ret = -1;
 
+    g_fifo_engn_cnt = 0;
     t = lx_kzalloc(sizeof(*t), GFP_KERNEL);
     if (!t) {
         lx_printk("nouveau-lx: sin memoria para la tabla de dispositivos del FIFO\n");
@@ -277,6 +328,15 @@ static int engines_fifo_table_probe(struct gsp_rm *rm)
             unsigned j;
 
             engine_name_safe(d->engineName, name, sizeof(name));
+            if (g_fifo_engn_cnt < FIFO_ENGN_MAX) {
+                g_fifo_engn[g_fifo_engn_cnt].engine =
+                    d->engineData[FIFO_DEVINFO_ENGINE_TYPE];
+                g_fifo_engn[g_fifo_engn_cnt].runl_pri =
+                    d->engineData[FIFO_DEVINFO_RUNLIST_PRI];
+                g_fifo_engn[g_fifo_engn_cnt].chram_pri =
+                    d->engineData[FIFO_DEVINFO_CHRAM_PRI];
+                g_fifo_engn_cnt++;
+            }
             /* `numPbdmas` acotado antes de indexar: el array son 2 y el número
              * lo pone RM.
              *
@@ -400,8 +460,9 @@ out:
     return ret;
 }
 
-int gsp_rm_control(struct gsp_rm *rm, uint32_t object, uint32_t cmd,
-                   void *params, uint32_t params_size, uint32_t *rm_status)
+int gsp_rm_control_timeout(struct gsp_rm *rm, uint32_t object, uint32_t cmd,
+                           void *params, uint32_t params_size, uint32_t *rm_status,
+                           unsigned timeout_ms)
 {
     unsigned long cap = sizeof(rpc_gsp_rm_control) + RM_PARAMS_MAX;
     unsigned char *buf;
@@ -442,7 +503,7 @@ int gsp_rm_control(struct gsp_rm *rm, uint32_t object, uint32_t cmd,
     }
 
     if (gsp_cmdq_call(rm->q, rm->rpc, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL, buf, total,
-                      reply, (uint32_t)cap, &got, &transport, RM_TIMEOUT_MS) != 0) {
+                      reply, (uint32_t)cap, &got, &transport, timeout_ms) != 0) {
         lx_printk("nouveau-lx: RM_CONTROL cmd=0x%08x sin respuesta (transporte=0x%x)\n",
                   cmd, transport);
         goto out;
@@ -471,6 +532,13 @@ out:
     lx_kfree(buf);
     lx_kfree(reply);
     return ret;
+}
+
+int gsp_rm_control(struct gsp_rm *rm, uint32_t object, uint32_t cmd,
+                   void *params, uint32_t params_size, uint32_t *rm_status)
+{
+    return gsp_rm_control_timeout(rm, object, cmd, params, params_size, rm_status,
+                                  RM_TIMEOUT_MS);
 }
 
 int gsp_rm_free(struct gsp_rm *rm, uint32_t handle)

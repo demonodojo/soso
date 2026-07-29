@@ -235,6 +235,65 @@ soso_ssh_log() {
 # Así que se intenta el valor exacto y, si el kernel lo rechaza, "default"
 # (→ pci_init_reset_methods()), que aquí deja 'flr'. Eso NO es una re-derivación
 # defectuosa: es la respuesta correcta para el bus tal como está ahora.
+# ---- Reset DELIBERADO antes de arrancar (2026-07-29) -------------------------
+#
+# Vaciar reset_method protege al host de la FLR de CIERRE, pero también quita la
+# de APERTURA: vfio recibe la tarjeta tal como la dejó el ciclo anterior, y sin
+# reset el firmware de la propia GPU (GFW) no vuelve a correr su devinit. El
+# 2026-07-29 eso se midió desde dentro: `0x118234 = 0x00000000` (progress 0, ni
+# empezado) al mapear BAR0, y al mandarle el COT igual el FMC arrancó y **a los
+# 313 ms la GPU se cayó del bus** con AER uncorrectable. O sea: un ciclo por
+# reinicio del equipo.
+#
+# Así que la FLR se hace aquí, a propósito y con el enlace sano, que es
+# exactamente lo que vfio haría si le dejáramos. El orden importa: primero
+# resetear (necesita reset_method con métodos), después vaciarlo para el cierre.
+#
+# El peligro es el mismo de siempre —una FLR sobre un enlace muerto cuelga el
+# host— así que hay puerta: sólo se resetea si el enlace del root port está a su
+# velocidad plena y no hay AER reciente de la GPU ni de su puerto. Con
+# SOSO_G1_NO_RESET=1 se salta (y entonces cuenta con llegar con la tarjeta recién
+# arrancada).
+gpu_link_healthy() {
+  local rp speed err_pat bdf_pat parent
+  rp=$(dirname "$(readlink -f "/sys/bus/pci/devices/${FULL}")")
+  speed=$(<"${rp}/current_link_speed") 2>/dev/null || return 1
+  # Un enlace entrenado a 2.5 GT/s es el síntoma de la caída (baja y no sube).
+  [[ "$speed" == "2.5 GT/s PCIe" ]] && return 1
+  err_pat='PCIe Bus Error|error message received|AER: (Multiple )?(Corrected|Correctable|Uncorrectable|Fatal|Non-Fatal)'
+  bdf_pat="0000:${BDF}"
+  parent=$(basename "$rp")
+  [[ "$parent" == 0000:* ]] && bdf_pat="${bdf_pat}|${parent}"
+  if dmesg 2>/dev/null | tail -200 | grep -E "$err_pat" | grep -qE "$bdf_pat"; then
+    return 1
+  fi
+  return 0
+}
+
+if [[ "${SOSO_G1_NO_RESET:-0}" == "1" ]]; then
+  echo "red: reset previo saltado (SOSO_G1_NO_RESET=1) — si el devinit no ha"
+  echo "     corrido, soso se negará a mandar el COT y lo dirá"
+elif [[ ! -w "/sys/bus/pci/devices/${FULL}/reset" ]]; then
+  echo "AVISO: no hay fichero 'reset' escribible en ${FULL}: no se puede forzar el" >&2
+  echo "       devinit. Si soso dice que el GFW no ha completado, reinicia." >&2
+elif ! gpu_link_healthy; then
+  echo "AVISO: el enlace no está sano (velocidad reducida o AER reciente): NO se" >&2
+  echo "       intenta la FLR, porque sobre un enlace muerto cuelga el host." >&2
+  echo "       Reinicia para devolver la tarjeta a un estado arrancable." >&2
+else
+  echo "red: reset de función a ${FULL} para que el GFW rehaga el devinit…"
+  if printf '1\n' >"/sys/bus/pci/devices/${FULL}/reset" 2>/dev/null; then
+    # El GFW tarda del orden de cientos de ms; soso lo espera otra vez por su
+    # cuenta (hasta 2050 ms, los de tu102_devinit_wait), así que aquí basta con
+    # no adelantarse al re-entrenado del enlace.
+    sleep 1
+    echo "red: reset hecho; enlace: $(<"$(dirname "$(readlink -f "/sys/bus/pci/devices/${FULL}")")/current_link_speed")"
+  else
+    echo "AVISO: la FLR falló; sigue el ciclo, pero si el GFW no ha completado soso" >&2
+    echo "       se negará a arrancar el GSP." >&2
+  fi
+fi
+
 declare -A saved_reset=()
 disabled_reset=()
 for path in /sys/bus/pci/devices/0000:${slot}.*; do

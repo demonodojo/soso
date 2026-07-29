@@ -21,4 +21,14 @@ int gsp_mmio_pci_recover(void);
 int gsp_mmio_poll_ready(unsigned timeout_ms);
 int gsp_mmio_kick_boot(void);
 
+/* 1 si el valor leído es un error del anillo PRI (`0xbadfxxxx`) y no un dato: el
+ * bloque de destino no contesta o el acceso no está permitido. */
+int gsp_mmio_pri_error(uint32_t v);
+
+/* Espera a que el firmware de la GPU (GFW) acabe su devinit: 0x118128 bit 0 y
+ * 0x118234 PROGRESS = 0xff, como `tu102_devinit_wait`. `when` es una etiqueta para
+ * el log. Devuelve 0 si completó; en caso contrario deja los valores dichos y sigue
+ * siendo el llamante quien decide. */
+int gsp_mmio_gfw_wait(unsigned timeout_ms, const char *when);
+
 #endif

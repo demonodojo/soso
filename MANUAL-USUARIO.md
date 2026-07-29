@@ -578,6 +578,15 @@ soso-llm run tinyllama --prompt Once upon a time --max 32 --temp 0.8 --top-p 0.9
 El prompt admite varias palabras (hasta el siguiente flag); sosh no
 interpreta comillas.
 
+### GPU NVIDIA nativa (cuando hay dGPU en QEMU)
+
+Si arrancas soso con la GPU pasada por VFIO (`SOSO_QEMU_GPU=vfio:…`), el bring-up
+GSP puede dejar el compute listo (`rm_compute`). Entonces `soso-llm run` usa la
+GPU sola, sin flags extra: los matvec salen con `on_gpu=1` y el resumen final
+cuenta trabajo en silicio. En la RTX 5070 Ti Mobile (GB205) esto ya funciona para
+modelos pequeños (`tiny` con `--max 4`). Si el GSP no llega a compute, `soso-llm`
+sigue en CPU sin que tengas que hacer nada.
+
 ### `--gpu-soft`: el camino de la GPU sin GPU
 
 Con `--gpu-soft`, soso enciende un dispositivo de cómputo de mentira que calcula
@@ -596,14 +605,20 @@ soso-llm run tiny --prompt test --gpu-soft --max 4
 ```
 
 ```
-soso-llm: dispositivo de cómputo «soft (CPU del kernel, pruebas)», VRAM libre 268435456 bytes
+soso-llm: dispositivo de cómputo «soft (CPU del kernel, pruebas)» (fase ), VRAM libre 268435456 bytes
 soso-llm: generado (6 tokens, 5450 ms, 1.10 tok/s)
 soso-llm: dispositivo «soft (CPU del kernel, pruebas)» — 144 matvec, 24 subidas de pesos, 24 matrices residentes, último on_gpu=0
+soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «»
 ```
 
 `on_gpu=0` dice la verdad: **lo calculó la CPU**. Ese bit sólo vale 1 cuando el
 resultado viene del silicio de una GPU. El dispositivo se apaga al terminar el
 comando.
+
+La **fase** sale vacía aquí porque el dispositivo de software no tiene bring-up que
+recorrer. Con una GPU NVIDIA de verdad dice hasta dónde llegó (`booted`, `rm_ce`,
+`rm_compute`…), que es lo que convierte un `on_gpu=0` en un diagnóstico sin tener que
+leer el log de serie.
 
 Para generar modelos sintéticos de prueba de cualquier tamaño:
 

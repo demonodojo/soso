@@ -34,11 +34,51 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G4a | RPC con GSP-RM (recibir + `SET_SYSTEM_INFO`/`SET_REGISTRY`) | `GSP_INIT_DONE` con `res=0x0` | **GO** (2026-07-25): llega tras 22 mensajes, `GSP-RM listo (RPC en marcha)` |
 | G4b | RPC síncrono (`gsp_cmdq_call`) | round-trip + anillo que envuelve, en hostcheck | **GO** (2026-07-25), sin HW todavía |
 | G4c | Objetos de RM: cliente → device → subdevice (`GSP_RM_ALLOC`) | un `NV_RM_CONTROL` que responde | **GO** (2026-07-25): `objetos RM listos cli=0xc1d00000 dev=0xde1d0000 sub=0x5d1d0000` en GB205 real |
-| G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | **escrito entero, sin probar en HW**: static info + reparto de VRAM + `FERMI_VASPACE_A` externo + tablas VER3 + `SET_PAGE_DIRECTORY`, todo cubierto en hostcheck; falta un ciclo de HW |
-| G4e | **Canal + CE** (`gsp_chan`, `gsp_ce`) | ALLOC GPFIFO/USERD/PB; copia CE + readback VRAM | **escrito + hostcheck** (2026-07-28, clases del catálogo del chip); GO HW pendiente VFIO |
-| G4f | QMD + kernel SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real | pendiente, **bloqueado por el toolchain** |
-| G5 | LLM híbrido (capas en ~12 GiB VRAM) | tok/s GPU > CPU | Pendiente G4 |
+| G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | **GO** HW (ejercitado por CE/compute 2026-07-29): VER3 + `SET_PAGE_DIRECTORY` + mapeos scratch/SASS |
+| G4e | **Canal + CE** (`gsp_chan`, `gsp_ce`) | ALLOC GPFIFO/USERD/PB; copia CE + readback VRAM | **GO** (2026-07-29): `CE readback verificado (G4e GO)` en GB205; canal `0xca6f` + CE `0xcab5` |
+| G4f | QMD + kernel SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real | **GO** (2026-07-29): PCAS 24 B + QMD v05; saxpy/matvec SASS en silicio (clase `0xcec0` sobre GR0) |
+| G5 | LLM híbrido (capas en ~12 GiB VRAM) | matvec en GPU en `soso-llm` | **GO funcional** (2026-07-29): `soso-llm run tiny --max 4` → **97 matvec en GPU OK**, sin caída a CPU; tok/s vs CPU aún por medir en modelos grandes |
 | **L6-H** | `--cuda-host` → cuda-proxy | texto + tok/s desde soso | **GO** (2026-07-27): ~35 tok/s, Docker llama-server |
+
+### Estado en silicio (2026-07-29) — GB205 bajo VFIO
+
+Criterio de ciclo verde en `target/g1-vfio-serial.log`:
+
+- `lockdown liberado` (~+183 ms tras COT), `GSP-RM listo`, `CE readback verificado (G4e GO)`
+- `matvec en GPU OK` (≈97 con `tiny --max 4`), **sin** `camino de GPU desactivado` / `RC_TRIGGERED` / `semáforo no llegó`
+- `GSP-RM apagado (objetos=ok unload=ok halt=ok)`
+
+**Operativa host (imprescindible tras cada reboot del host):** capar el enlace PCIe
+del root port a Gen3 antes del ciclo VFIO — a Gen5 (32 GT/s) el FMC provoca tormenta
+AER y a veces hard lockup:
+
+```bash
+sudo setpci -s 00:06.0 CAP_EXP+0x30.w=3:f          # Target Link Speed = Gen3
+sudo setpci -s 00:06.0 CAP_EXP+0x10.w=20:20         # Retrain
+# opcional Gen4 cuando compute esté estable: =4:f
+```
+
+Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
+(o `SOSO_QEMU_GPU=vfio:…`, que ya activa la feature). Sin eso la imagen no enlaza
+`liblxdde.a`.
+
+### Gotchas cerrados el 2026-07-29 (compute)
+
+1. **IMMD_DATA_METHOD** (`cp_pb_immd` en `gsp_compute.c`): el dato va en bits 28:16
+   de la cabecera, **sin** dword detrás. G4h lo había roto (literal `1` en el campo +
+   dato suelto) → `PBDMA_ERROR` type 32 con `GPGet=0`. Pushbuffer PCAS = **24 B**
+   (SET_OBJECT + WFI immd + SEND_PCAS_A + PCAS2 immd). Hostcheck: `SEND_PCAS (24 B)`.
+2. **USERD GPGet en Blackwell no escribe** (nouveau `862450a` / Skeggs): desde Volta
+   solo a timer; en `BLACKWELL_CHANNEL_GPFIFO_*` el writeback desapareció. Leer
+   `USERD+0x88` siempre da 0 aunque el trabajo corra. Progreso = semáforo CE/QMD →
+   `gsp_chan_ack_progress()` (`gpget` SW). `pb_rewind` mira `gpget==gpput`, no el USERD.
+3. **Anillo GPFIFO y Get=0 del HW**: el HW sigue usando USERD GPGet para “lleno”.
+   Con 64 entradas, `GPPut=64` cuelga el PBDMA (`sem=63`). GPFIFO = **4096 entradas /
+   32 KiB** (`GSP_CHAN_GPFIFO_SIZE = ENTRIES * 8`) con VAs: GPFIFO → PB → notifier
+   (no pisar el PB a +4 KiB).
+4. **RC_TRIGGERED**: `gsp_rpc_rc_triggered_log` vuelca 8 palabras del journal
+   (cabeza) además de type/chid/engn.
+5. **Enlace PCIe Gen5**: inestable durante reset FMC bajo VFIO → cap Gen3 (arriba).
 
 **G1 superado (2026-07-25).** Con VT-d activo en la BIOS y el bind persistente puesto
 (`l6-g1-vfio-persist.sh --enable` + reboot), `sudo ./scripts/l6-g1-vfio-test.sh` da GO:
@@ -174,6 +214,28 @@ sean todo efes.**
 acepta el COT, el FMC arranca y baja el lockdown: `HWCFG2` pasa de `0x8187a7f7` a
 `0x818787f7` (cae el bit 13) con `mbox0=0`. Sin un solo `0xffffffff` en el log.
 
+**Gotcha 8 (2026-07-28): "se cayó del bus" puede ser un reset del enlace, y
+rendirse en 3 ms lo hace indistinguible de la muerte.** Ciclo VFIO con la carga
+por SSH ya visible: el FSP acepta el COT, y **+3 ms** después todo el MMIO se lee
+a unos → `GSP init falló (status=gone)`. Pero el monitor del root port del propio
+script (`target/g1-vfio-link.log`) enseña el enlace haciendo **32 GT/s → 2.5 GT/s
+→ 32 GT/s en 207 ms**, dos veces (la segunda al cerrar QEMU el fd de vfio). Una
+tarjeta muerta de las de 2026-07-25/27 no reentrena el enlace: esto tiene pinta de
+**reset**, no de muerte. `fsp_gone_recovered` (`fsp_lx.c`) ya no se rinde en la
+primera lectura: espera hasta `FSP_GONE_BUDGET_MS` (2 s, ~10× los 207 ms medidos)
+sondeando `gsp_mmio_alive()` y reintentando el decode por configuración cada
+250 ms, y descuenta lo esperado del plazo del bucle para que los `+N ms` de las
+trazas no mientan. Cubierto sin HW en el hostcheck (`fake_die_after_mbox0` +
+`fake_revive_after_mdelays`): un reset de 300 ms tiene que **arrancar**, y una
+muerte sin vuelta tiene que seguir fallando.
+
+**Y el corolario del espacio de configuración: bajo VFIO un `id` válido no prueba
+nada.** En ese fallo `gsp_mmio_pci_recover()` leyó `id=0x2f1810de` —correcto— con
+`sts=0xffff` y `cmd=0xfbff`: vfio-pci **emula** los primeros registros desde la
+copia que guardó al abrir el dispositivo, así que el id sobrevive a la muerte de
+la tarjeta. El juez es `gsp_mmio_alive()`, que lee un registro de verdad; el
+`sts` a unos se traza aparte para que el log no invite a creer que está sana.
+
 **Antes de eso hubo un intento en el que la GPU se caía del bus** ~1 s después de
 arrancar el FMC, con `nvidia.ko` cargándose y descargándose ~5 veces por segundo
 mientras la tarjeta estaba en VFIO (pares `nvlink: Nvlink Core is being initialized`
@@ -237,15 +299,234 @@ debajo corría un bucle de CPU. Eso hace el criterio GO de G4 incumplible de fal
 el mismo vicio que dio `G3b GO` con la tarjeta fuera del bus. Devuelve 0 hasta que
 haya canal y el resultado venga de VRAM.
 
-**G4f está bloqueado por el toolchain, no por el código.**
-`lxdde/ports/nouveau/saxpy.sass.bin` mide **0 bytes** y en esta máquina no hay `nvcc`,
-`ptxas`, `nvdisasm` ni toolkit CUDA. GB205 es `sm_120`, cuyo encoding no está
-documentado: escribir SASS a mano no es viable. Dos salidas: instalar CUDA ≥12.8 solo
-por `ptxas` (compilar no necesita la GPU, funciona con la tarjeta en VFIO), o **probar
-el canal con el motor de copia (CE)** — un DMA en VRAM ejercita VA space, canal,
-pushbuffer, timbre y semáforo sin una instrucción máquina. Recomendado: CE primero en
-cualquier caso, porque G4c–G4e son comunes a las dos ramas y un readback de VRAM
-escrita por la GPU ya es prueba falsable.
+**El toolchain de SASS ya no bloquea G4f** (lo bloqueó hasta el 2026-07-28, cuando
+`saxpy.sass.bin` medía 0 bytes y no había `ptxas` en la máquina). Hoy los dos blobs
+están compilados y embebidos: saxpy 512 B / 32 instrucciones, matvec 2944 B / 184, y
+el hostcheck compara el `.bin` con el embebido. **G4e/G4f/G5 están en GO en GB205**
+(2026-07-29): CE readback + PCAS/QMD + `soso-llm` con matvec en GPU. El historial de
+diagnóstico de `GPGet=0` / `NO_MEMORY` GR0 que sigue debajo documenta el camino hasta
+ese GO; no es el estado actual.
+
+**Primer ciclo de G4e en HW (2026-07-28): RM acepta todo y el host no recoge
+nada.** Con la carga por SSH y VFIO: `GET_CLASSLIST_V2` → canal `BLACKWELL_CHANNEL_
+GPFIFO_B` (0xca6f) y CE `BLACKWELL_DMA_COPY_B` (0xcab5) reservados sobre el vaspace
+externo, `BIND(motor 9)` + `SCHEDULE(bEnable=1)` + `GET_WORK_SUBMIT_TOKEN` = 0
+(runlist 0, chid 0), los cinco búferes mapeados. Y luego **`GPGet=0`, `Get=0`,
+semáforo a 0**: el trabajo se encoló (`GPPut=1`, `Put=100`, entrada bien formada
+apuntando al pushbuffer) y el host no lo tocó. Detrás, **dos `GSP_POST_NOCAT_RECORD`**
+y el canal de GR0 fallando con `NO_MEMORY` (0x51).
+
+**Gotcha 9 (2026-07-28): `SET_OBJECT` no cabe en un inmediato.** El pushbuffer
+empezaba con `pb_immed(..., NVC56F_SET_OBJECT, ce->handle)` y el campo `IMMD_DATA` es
+**28:16, trece bits**: `0xc6b50000 & 0x1fff` = 0, o sea la subchannel 0 atada al
+objeto **0**, y todos los métodos del CE que venían detrás sin motor que los
+ejecutase. Upstream lo emite como método normal de dos palabras
+(`PUSH_MTHD(push, NV9039, SET_OBJECT, handle)` con `PUSH_WAIT(push, 2)`). Estaba
+igual de mal en el QMD de compute (`NVCDC0_SET_OBJECT`). El hostcheck buscaba el
+`LAUNCH_DMA` —que era perfecto— y no miraba la primera palabra; ahora comprueba la
+cabecera bit a bit y que el dato sea el handle entero. **Un pushbuffer con un método
+mal no se ve distinto de un doorbell que no llega: los dos dejan `GPGet=0`.**
+
+**Segundo ciclo (2026-07-28): el `SET_OBJECT` estaba mal y NO era la causa.** Con el
+método bien (26 dwords, `Put=104`) el resultado es idéntico: `GPGet=0`. Lo decisivo es
+que `gsp_rpc_drain` no encontró **ni un evento** después: RM no se quejó, así que el
+trabajo no llegó a fallar del lado de RM — el host no lo recogió. Un error de método
+habría dejado un aviso.
+
+**Gotcha 12 (2026-07-29): el indicador de "firmware arrancado" NO es el mismo en
+Blackwell, y creerlo cuesta un ciclo.** Con la comprobación nueva puesta salió
+`GFW boot NO completado … 118234=0x00000000 progress=0x00` **en una máquina recién
+reiniciada y con una FLR hecha justo antes** — o sea que el registro vale 0 siempre. La
+fuente lo explica: `0x118234` es
+`NV_PGC6_AON_SECURE_SCRATCH_GROUP_05(0)` alias `..._GFW_BOOT` (PROGRESS 7:0, COMPLETED
+0xff) **de `dev_gc6_island_addendum.h` de tu102**, y para gb202 NVIDIA **no publica ni
+`dev_gc6_island.h`** (su directorio sólo tiene dev_boot, dev_ce, dev_fault, dev_fsp_*,
+dev_mmu, dev_ram, dev_runlist, dev_therm*, dev_vm, dev_xtl_ep_pcfg_gpu…). En gb202 el
+indicador es **`NV_THERM_I2CS_SCRATCH_FSP_BOOT_COMPLETE`** (= `NV_THERM_I2CS_SCRATCH`,
+`0x00ad00bc`; STATUS 31:0, SUCCESS `0xff`, FAILED `0x00`) — el mismo registro que este
+port ya leía como "FSP secure boot" y que ya vale `0xff`. Su nombre de verdad es ése.
+
+Y el otro registro de la pareja tampoco era lo que parecía: `0x118128` es
+`..._GROUP_05_PRIV_LEVEL_MASK`, cuyo bit 0 es `READ_PROTECTION_LEVEL0_ENABLE` — un
+**permiso de lectura**, no un progreso.
+
+**Consecuencias, todas correcciones de lo que escribí ayer:**
+- La puerta que añadí antes del COT **estaba de más y era falsa**: `fsp_ready_to_send()`
+  ya exige `FSP_BOOT_COMPLETE` desde antes y pasaba. Quitada; sólo bloqueó una tarjeta
+  sana y dejó el arranque en `booted_soft`.
+- `gsp_mmio_gfw_wait` sólo se llama **si la familia no es Blackwell** (en gb20x gastaba
+  2 s esperando un registro que no existe) y su mensaje ya no dictamina "el devinit no ha
+  terminado": es informativo.
+- **La hipótesis del devinit está muerta**: el arranque del firmware estaba completo en
+  todos los ciclos. El `ASSERT` de RM sobre `GFW_BOOT_PROGRESS` es RM mirando ese mismo
+  scratch de Turing, y no le impidió llegar a `GSP_INIT_DONE`, objetos, canal y CE — es
+  ruido, no la causa.
+- La FLR previa del script **se queda** (llegar con la tarjeta en un estado conocido es
+  buena higiene y el ciclo del 2026-07-29 sobrevivió con ella), pero **no** por la razón
+  que decía: no rehace ningún devinit que faltara.
+
+**Y el `0xbadf5040` de la runlist sigue abierto, con mejor pista: PTOP confirma que
+`data[11]` SÍ era la base.** Leída del chip: GR0 → `0xd00000`, CE0 → `0xd00000`, CE1 →
+`0xd00400`, 32 motores en 152 palabras (GSP0 en `0x110000`, que casa con la base del
+falcon que ya usábamos). Idénticos a `engineData[11]`. Así que la dirección era correcta
+y lo que falla es el **acceso**: un `0xbadfxxxx` con el resto del chip respondiendo
+apunta a que ese bloque PRI no es legible con nuestro nivel de privilegio bajo VFIO — no
+a que esté sin inicializar. Si es eso, `chan_dump_hw` nunca podrá leer el estado del
+canal en este chip y hay que buscarlo por RM.
+
+**Gotcha 10 (2026-07-28): nadie esperaba el devinit de la GPU, y RM lo dijo por
+NOCAT.** Los dos primeros registros NOCAT, volcados ya, contienen literalmente
+`ASSERT` + `NV_PGC6_AON_SECURE_SCRATCH_GROUP_05_0_GFW_BOOT_PROGRESS_N`: GSP-RM asertó
+que el **GFW boot** —el firmware de la propia GPU, el que corre el devinit tras un
+reset— no está en COMPLETED. Y es verdad que no lo mirábamos: `gsp_mmio_poll_ready`
+(que comprueba justo eso, `0x118128` bit 0 y `0x118234 & 0xff == 0xff`, como
+`tu102_devinit_wait`) **sólo se llama en la ruta ACR de Ampere**; la ruta FMC de
+Blackwell iba directa al COT. Un FLR de vfio es un reset, y tras un reset ese devinit
+vuelve a correr. Ahora `gsp_mmio_gfw_wait` (2050 ms, los de upstream) se llama **dos
+veces** —tras mapear BAR0 y otra vez tras el FMC, porque en medio hay un reset del
+enlace (gotcha 8)— y deja los dos valores en el log pase lo que pase. **Si el devinit
+no ha terminado, no hay FIFO que recoja un doorbell**, y eso explicaría el `GPGet=0`,
+el `NO_MEMORY` de GR0 y los `0xbadf` de abajo con una sola causa.
+
+**Y el `0xbadfxxxx` no es un dato, es el anillo PRI diciendo que ahí no hay nadie.**
+El volcado de registros del canal leyó `0xd00000+0x100 = 0xbadf5040` y
+`+0x004/+0x008 = 0x00000002` los dos: ni es un `chcfg` (daría chram y nº de canales,
+salió chram=0 y "4 canales") ni responde. Así que **`data[11]` no es la base de la
+runlist en GB205** —o el bloque no está inicializado— y la ruta queda descartada: la
+comprobación cruzada (`chcfg & 0xfffffff0` == `data[14]`) la cazó y el volcado se para
+ahí en vez de inventarse un estado. `gsp_mmio_pri_error()` reconoce esa familia de
+valores (el `0xbadf4100` del falcon con el ACR de Ampere era la misma cosa).
+
+**Y para no volver a gastar un ciclo adivinando, cuatro diagnósticos nuevos:**
+- **Los NOCAT se vuelcan** (`gsp_rpc.c`): palabras en crudo + las cadenas que lleven
+  dentro. RM mete ahí el motor, el código de error y la aserción; contarlos no dice
+  nada. Se **desduplican por contenido** (huella FNV-1a saltando la palabra 2, que es
+  un contador de tiempo) y el tope son 6 avisos *distintos*: volcar "los dos primeros"
+  gastó el cupo en dos copias del mismo aviso y tiró los tres siguientes, entre ellos
+  el que acompañaba al `NO_MEMORY` de GR0.
+- **La sonda del aperture de usermode** (`chan_probe_usermode`): el doorbell es una
+  escritura ciega, así que un aperture en la dirección equivocada se ve igual que un
+  canal que no arranca. Lo que sí se puede leer es el reloj — `clc361.h` pone
+  TIME_0/TIME_1 en usermode+0x80/+0x84 y el mismo reloj está en `NV04_PTIMER_TIME_0`
+  (0x9400) — así que si el privilegiado avanza y el de usermode no, el `+0x90` no es el
+  timbre de nadie. Se sondea al arrancar el canal, antes del primer submit. El
+  hostcheck exige que el port lea ese offset (mismo truco que `FAKE_DOORBELL_REG`).
+- **`gsp_rpc_drain`**: los avisos de RM sobre el canal son eventos, y sin nadie
+  escuchando se quedan en la cola — los dos NOCAT del CE aparecieron páginas más
+  abajo, dentro del alloc siguiente, como si fueran de aquél. Se llama tras un CE que
+  no señaliza. Que **no** haya nada también informa: RM no se quejó → el trabajo no
+  llegó a fallar en RM, no arrancó.
+- **`chan_dump_hw`** (`gsp_chan.c`): registros del FIFO leídos de BAR0 —`chcfg`/`dbcfg`
+  de la runlist, el estado del canal en la channel RAM (`2`=corriendo, `3`=parado,
+  `ffffffff`=sin atar) y los INTR del PBDMA, donde `EMPTY_SUBC` (0x00800000) e
+  `ILLEGAL_MTHD` (0x00200000) señalan justo el bug de arriba con su subc y su método.
+  Las bases salen de la tabla del FIFO (`data[11]` runlist, `data[14]` channel RAM,
+  índices inferidos) y **se validan contra el silicio**: `chcfg & 0xfffffff0` tiene que
+  ser `data[14]`, y si no cuadra el volcado lo dice y no usa nada. Un 0 en un INTR no
+  prueba nada (RM los limpia al atenderlos); un bit puesto, sí. **En GB205 la
+  validación falla** (ver el `0xbadf5040` de arriba): esta ruta no da estado del canal
+  en este chip, sólo dice que ese bloque no contesta — que ya es un dato.
+- **La espera del GFW boot** (`gsp_mmio_gfw_wait`, gotcha 10): en dos puntos del
+  arranque, con los valores crudos en el log.
+- **PTOP** (`gsp_top.c`), que sustituye a la inferencia: la tabla de motores que
+  publica el chip en `0x0224fc >> 20` palabras desde `0x022800`, con tipo, bloque de
+  registros, **runlist**, id de fallo y bit de reset por motor, parseada como
+  `ga100_top_parse` (tres palabras encadenadas por el bit 31, huecos incluidos). El
+  volcado del canal pide la runlist a PTOP y **enseña las dos** —la de PTOP y la de la
+  tabla de RM— para zanjar si `data[11]` significaba lo que creíamos. Cubierto en el
+  hostcheck con tres motores de runlists distintas, un hueco en medio, y el caso de
+  GPU ausente (que no debe "encontrar" tabla).
+
+**La fase del bring-up llega a userspace** (`GpuInfo.phase`, 16 B con NUL). Se rellena
+sólo para la NVIDIA —un `rm_ce` sobre el dispositivo de software sería mentira— y sale
+por `soso-llm` («dispositivo «…» (fase rm_ce)» y, si nada se calculó en el silicio, una
+línea que lo dice) y por la sonda de `init test`, que antes mandaba a abrir el log de
+serie para averiguar una palabra. Va como **cadena y no como código**: la tabla de
+nombres vive sólo en el port, porque dos tablas de lo mismo divergen siempre.
+
+Y `cargo xtask g3-check` ya evalúa los criterios nuevos —los dos GFW boot, PTOP y el
+aperture de usermode— y avisa si ve un NOCAT de `GFW_BOOT_PROGRESS`, así que tras cada
+ciclo dice el estado sin leer 900 líneas de serie.
+
+**Gotcha 11 (2026-07-28): el chid se pide por los índices de USERD, y los teníamos
+clavados a cero.** El `NO_MEMORY` del canal de GR0 tiene una explicación que estaba
+**escrita en nuestro propio header y que el código no seguía**: en `r535_chan_alloc` el
+chid lo elige el llamante y viaja hasta RM sólo dentro de dos subcampos de `flags`
+—`CHANNEL_USERD_INDEX_VALUE = chid % 8` y `..._PAGE_VALUE = chid / 8`, con
+`PAGE_FIXED = TRUE` e `INDEX_FIXED = FALSE`—. `chan_fill_alloc` los ponía a 0 y 0
+fijos: con un canal da igual (chid 0 son ceros, y el token confirmó chid 0), pero el
+segundo pedía **el mismo slot que el primero** declarándolo fijo. Ahora salen de
+`c->chid = idx`, y el port **contrasta** el chid del `GET_WORK_SUBMIT_TOKEN` con el
+pedido: si no cuadran, el chid no se pide por ahí y hay que mirar en otro sitio. El
+hostcheck exige que el segundo canal declare otro índice y reciba otro token —dos
+canales con el mismo token serían dos canales pateando el mismo—.
+
+**Contexto de GR (`gsp_grctx.c`), escrito: sin promocionarlo el QMD no puede correr.**
+En el camino GSP un canal de GR no ejecuta nada hasta que su contexto está
+promocionado. La cadena, en el orden de `r535_gr_oneinit` (canal → clase → promoción,
+que es el que sigue el bring-up):
+1. `NV2080_CTRL_CMD_INTERNAL_STATIC_KGR_GET_CONTEXT_BUFFERS_INFO` (0x20800a32, params
+   de **1664 B** = 8 motores × 26 propiedades × {size, alignment}) da los tamaños.
+2. `gsp_grctx_plan` los convierte en la lista de búferes con el mapa de
+   `r535_gr_get_ctxbuf_info`. **Tres reglas que no se ven si se equivocan**: el
+   principal se lleva `ALIGN(size, 0x1000) + 64 páginas`; la página es 2^21/2^16/2^12
+   según el tamaño; y el attribute CB se alinea a `order_base_2(size)` —**no** a su
+   página—, así que 24 MiB pide 32 MiB de alineación y no 2 MiB. Un tamaño 0 se salta,
+   y el `PRIV_ACCESS_MAP` se promociona **dos veces** (la segunda como
+   `UNRESTRICTED`). Todo eso está en el hostcheck con los números a mano.
+3. `gsp_grctx_promote` reserva en VRAM, mapea en el vaspace (ventana propia en
+   `GSP_VA_BASE + 0x40000000`) y manda `NV2080_CTRL_CMD_GPU_PROMOTE_CTX` (0x2080012b).
+   `engineType` es el **1 literal** del control (GR), no el del canal; `hClient`/`ChID`/
+   `hVirtMemory`/`virtAddress`/`size` van a cero como upstream. Se reserva **todo**,
+   globales incluidos: somos el primer canal y no hay contexto dorado del que heredar
+   (el camino `golden = true`).
+
+El hostcheck cubre las dos mitades por separado, que es lo que hace falta: `check_grctx`
+la aritmética del plan (números a mano) y `check_g4e_chan_ce` **los bytes de la petición
+tal como viajan** por la cmdq —cmd, objeto, `paramsSize` 560, los campos a cero, el
+`entryCount`, que la entrada del principal lleve física y `physAttr=4`, que el
+`PRIV_ACCESS_MAP` vaya sin mapear y **sin VA**, y que la VA del attribute CB esté
+alineada a 32 MiB y no a su página—. Un `promoteEntry` que empezara en el offset 44 en
+vez del 48 no se ve de ninguna otra forma.
+
+**Y dos juegos de números que no coinciden**: la consulta se indexa por *id de
+propiedad* (`NV0080_CTX_PROP_*`, 0x00…0x19) y la promoción habla de *bufferId*
+(0…12). La propiedad 0x17 es el bufferId 9; usar uno por otro da un búfer del tamaño
+de otro sin un solo mensaje de error. Los layouts están transcritos de
+`rm/r570/nvrm/gr.h` y del `ctrl2080gpu.h` de open-gpu-kernel-modules 570.144, con
+asserts de `sizeof` (560 los params, 32 la entrada, 1664 la consulta) y de `offsetof`
+—el `promoteEntry` empieza en el **48**, no en el 44: el array va alineado a 8 y
+`entryCount` deja cuatro bytes de relleno—.
+
+Lo que sí quedó comprobado de paso: **no hace falta TSG ni channel group** —
+`r535_chan_alloc` no crea ninguno ni pasa `hObjectBuffer`/`hContextShare`/`cid`—, así
+que esa vía queda descartada como causa del `NO_MEMORY`.
+
+**Y tres cosas de r570 que NO hay que añadir** (comprobadas en `rm/r570/gr.c`, no
+supuestas): (a) el `INIT_BUG4208224_WAR` que aparece en su `gr.h` es del *scrubber* y
+está detrás de un `switch (device->chipset)` con **0x162/0x164/0x166** — TU11x; GB205
+es 0x1b5, así que no aplica; (b) `r570_gr_get_ctxbufs_and_zcull_info` usa **el mismo**
+control y el mismo tamaño que r535 para los tamaños de contexto, sobre el subdevice, e
+itera `engineContextBuffersInfo[0]` con el **índice 0 fijo** — igual que
+`gsp_grctx_query(rm, 0, ...)`; (c) la consulta de zcull que añade r570 es best-effort y
+es cosa del gráfico (depth culling), no del compute. La promoción va **después** del
+canal y de la clase, que es el orden que sigue el bring-up.
+
+**El `ro` del contexto ya se mapea como tal, y el PCF dejó de ser un número suelto.**
+La tabla entera de `NV_MMU_VER3_PTE_PCF_*` (`nvhw/ref/gh100/dev_mmu.h`, transcrita el
+2026-07-29) tiene estructura: bit 4 = ACD frente a ACE, bit 3 = NO_ATOMIC, **bit 2 =
+RO**, bit 1 = PRIVILEGE, bit 0 = UNCACHED. De ahí los cuatro que usa el port, con
+nombre: `0x10` VRAM RW cacheada, `0x11` sysmem RW sin cachear, `0x14`/`0x15` sus
+variantes de sólo lectura. `gsp_vmm_map_flags(..., GSP_VMM_RO)` es lo que las pide;
+`gsp_vmm_map` sigue siendo eso con 0. El hostcheck comprueba los cuatro PTE **con los
+números a mano** (0x81/0x8d/0xa1/0xad — derivarlos con la misma expresión que el código
+haría que un PCF mal elegido pasara), que el `ro` no se queda pegado en el mapeo
+siguiente, y que el `UNRESTRICTED_PRIV_ACCESS_MAP` del contexto llega al PTE de sólo
+lectura: el plan lo marca, el mapeo lo aplica y la traducción lo confirma.
+
+Queda **una** desviación, dicha en `pte_encode`: upstream mapea además con `priv = 1` y
+nuestro PCF es `REGULAR_*`, que es más permisivo (un acceso privilegiado a una página
+regular pasa; al revés no), así que no rompe nada.
 
 **Trampa de numeración: r535 y r570 divergen desde 0x101c.** En r535 ese código es
 `NVLINK_FAULT_UP` y `0x1020` no existe; en r570 son `GSP_LOCKDOWN_NOTICE` y
@@ -485,12 +766,26 @@ Detalle y tabla de pasos 1–6 de la cadena FSP/COT en `docs/L6-G3-nvkm-scope.md
   Deshacer: `--disable` + reboot (restaura GRUB exacto, con backup `.bak.<fecha>`).
   Mientras esté activo **no hay CUDA ni nvidia-smi en el host**. `--status` no toca nada.
 
+## Referencias Blackwell (solo lectura)
+
+Para GB205 **no uses `lxdde/linux/` (6.6.32) como fuente de offsets** — es anterior a
+Blackwell. Vendoriza y consulta en local:
+
+- `lxdde/reference/open-gpu-kernel-modules-570.144/` — tag **570.144**, misma versión que
+  los blobs; headers `published/blackwell/gb202/*`, HAL FIFO/CE/FSP, PRI masks.
+- `lxdde/reference/linux-master-nouveau/` — nouveau `master` sparse (`gb202.c`,
+  `nvkm/subdev/gsp/rm/r570/`, `include/nvhw/ref/gb202/`).
+
+Ver `lxdde/reference/README.md` y `docs/L6-reference-audit-gb205.md`. Regenerar con los
+comandos del README; el árbol está en `.gitignore` (~160 MiB).
+
 ## Capa lxdde
 
 DDE estilo `lx_emul`: compila C (drivers Linux o first-party) → `liblxdde.a`,
 enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 - Lee `lxdde/ports/<port>/source.list`; líneas `lxdde/…` = fuentes propias, otras =
   rutas del árbol Linux 6.6.32 en `lxdde/linux/` (tarball cacheado, ya extraído).
+  **Offsets y structs de GB20x: contrastar contra `lxdde/reference/`, no contra 6.6.**
 - Compila con clang freestanding (`-nostdinc`, `-include autoconf.h/compat.h/kconfig.h`),
   con include dirs privados de nouveau (`drivers/gpu/drm/nouveau/{include,include/nvkm,nvkm,.}`).
 - **`generate_stubs()`**: dummy `lx_emul_trace_and_stop("sym")` para cada símbolo
@@ -505,20 +800,27 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 
 | Archivo | Rol | Nota |
 |---------|-----|------|
-| `gsp_bringup.c` | Máquina de fases GSP | **soft boot** (`booted_soft`); saxpy/matvec en CPU; VRAM hardcodeada |
+| `gsp_bringup.c` | Máquina de fases GSP | **hw boot** GB205: FMC→RM→CE→compute; fallback soft si no hay GPU |
 | `gsp_fw.c` | Carga blobs GSP + staging GEM | valida ELF/magic; el ucode NO va a GEM |
 | `gsp_rm.c` | ELF64 del ucode → `.fwimage`/firma + **radix3** verificada | fase `rm_radix3`, sin MMIO |
 | `gsp_wpr.c` | Bootloader RISC-V en sysmem + **`GspFwWprMeta`** | fase `wpr_meta`, solo lee VRAM |
 | `gsp_libos.c` | Colas, logs, RMARGS, **`GSP_FMC_BOOT_PARAMS`** | fases `libos_args`/`cot_ready`, sin MMIO |
 | `gsp_dma.c` | `gsp_dma_buf` (equivalente de `nvkm_gsp_mem`) | reservas coherentes compartidas |
 | `fsp_lx.c` | **Envío del COT** por EMEM + espera al FMC | fase `cot_sent`; escribe MMIO |
-| `gsp_rpc.c` | **Recepción de RPCs** de GSP-RM por la cola | fase `rm_ready`; solo escribe el rptr |
+| `gsp_rpc.c` | RPCs GSP-RM + log `RC_TRIGGERED` (journal cabeza) | fase `rm_ready` |
 | `gsp_rm_obj.c` | Objetos de RM (cliente/device/subdevice) + static info | fase `rm_objects` |
 | `gsp_vram.c` | Reparto de VRAM sobre las regiones utilizables | puntero que avanza, sin liberar |
 | `gsp_vmm.c` | **Tablas VER3 + `FERMI_VASPACE_A` externo + directorio** | fase `rm_vmm` |
+| `gsp_chan.c` | Canal GPFIFO + USERD + PB; `ack_progress` (Blackwell) | COPY0 + GR0; GPFIFO 4096×8 B |
+| `gsp_ce.c` | Motor CE (DMA copy) + selftest readback | **G4e GO** |
+| `gsp_compute.c` | QMD v05 + PCAS 24 B + saxpy/matvec | **G4f/G5 GO** |
 | `gsp_fini.c` | **Apagado ordenado** de GSP-RM + corte de DMA | fase `fini`; ver gotcha 6 |
 | `fmc_lx.c` | Ruta FSP/GSP-FMC de Blackwell | valida el ELF FMC y **lee** el FSP |
-| `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick | `kick_boot` NO arranca HW real (solo traza) |
+| `gsp_mmio.c` | BAR0 rd32/wr32, poll, kick, **espera del GFW boot** | `kick_boot` NO arranca HW real (solo traza) |
+| `gsp_chip.c` | Familia + doorbell kick (bit 30 gb20x) | |
+| `gsp_top.c` | **PTOP**: motores, runlists y fault ids que publica el chip | sólo lee; sustituye a inferir índices de la tabla de RM |
+| `gsp_grctx.c` | **Contexto de GR**: consulta de tamaños, plan, reserva, mapeo y `PROMOTE_CTX` | el plan es función pura y va entero en el hostcheck |
+| `gsp_pramin.c` | Ventana PRAMIN → VRAM (USERD/inst) | |
 | `acr_fw.c`,`falcon_lx.c`,`acr_lx.c` | ACR ola2 lx-native (AHESASC→ASB) | best-effort/soft-fail |
 | `nouveau_stub.c` | pci_driver + exports C | probe vendor 0x10de |
 | `nvkm_bringup_lx.c` | **puente Ola 3** | construye `nvkm_device` real + `ga102_gsp_new` |
@@ -530,11 +832,10 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `nvkm/subdev/acr/{base,lsfw,tu102,ga102,ga100,gp102,gm200}.c` | **ACR real (Ola 2)** | secuencia AHESASC→ASB |
 | `nvkm/subdev/{timer,mc,top,bar,instmem,fb,mmu}/{base,vmm}.c` | **subdev base real (Ola 1 f2)** | infra genérica |
 
-**Distinción clave:** el grafo de objetos nvkm real **se construye en runtime**
-(validado: `nvkm device graph OK — subdev='gsp0'` en arranque QEMU nouveau, sin
-panic). Pero el "boot" GSP efectivo y el compute siguen **soft/CPU** — falta cablear
-`device->pri` con reads/writes MMIO reales (`nvkm_rd32/wr32` ↔ `gsp_mmio.c`) y ejecutar
-la secuencia falcon/ACR real, que requiere HW (tras G1). G3b/G4 lo completan.
+**Distinción clave:** el grafo nvkm se construye en runtime; el **boot GSP y el
+compute en GB205 van por la ruta lx-native** (`fmc_lx`/`gsp_*`, no por
+`ga102_gsp_new` completo). G3b–G5 están en **GO en silicio** (2026-07-29). La
+ruta ACR Ampere sigue escrita y sin probar (no hay 3060 en esta máquina).
 
 **Estado (2026-07-24): 62 fuentes nvkm/lib integradas, solo 4 dummies restantes**
 (`target/g3-nvkm-undefined.txt`), **todos dependientes de HW/ROM:**

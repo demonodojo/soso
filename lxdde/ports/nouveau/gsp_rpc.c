@@ -114,6 +114,8 @@ static const char *rpc_event_name(uint32_t fn)
         return "GSP_INIT_DONE";
     case NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER:
         return "GSP_RUN_CPU_SEQUENCER";
+    case NV_VGPU_MSG_EVENT_RC_TRIGGERED:
+        return "RC_TRIGGERED";
     case NV_VGPU_MSG_EVENT_OS_ERROR_LOG:
         return "OS_ERROR_LOG";
     case NV_VGPU_MSG_EVENT_UCODE_LIBOS_PRINT:
@@ -225,12 +227,213 @@ static const char *rpc_status_name(uint32_t status)
     }
 }
 
+/* Cuántos NOCAT DISTINTOS se vuelcan por arranque. RM los suelta a cientos cuando
+ * algo le va mal (G4a los vio en avalancha), así que volcarlos todos ahoga el
+ * serie. Pero volcar "los dos primeros" tampoco valía: el 2026-07-28 los dos
+ * primeros eran **el mismo aviso repetido** y los tres siguientes —entre ellos el
+ * que acompañaba al NO_MEMORY del canal de GR0— se cayeron por el tope. Se
+ * desduplica por contenido y así el tope cuenta avisos, no copias. */
+#define GSP_NOCAT_DUMP_MAX   6u
+#define GSP_NOCAT_DUMP_WORDS 24u
+
+static unsigned g_nocat_dumped;
+static uint32_t g_nocat_seen[GSP_NOCAT_DUMP_MAX];
+
+/* Huella del registro **saltando la palabra 2**, que es un contador de tiempo
+ * (0x0c133d60 y 0x27c14360 en dos copias del mismo aviso): con ella dentro, cada
+ * copia sería única y la desduplicación no serviría de nada. FNV-1a sobre las
+ * primeras 96 palabras, que es donde están el tipo, el motor y las cadenas. */
+static uint32_t nocat_fingerprint(const unsigned char *p, uint32_t len)
+{
+    uint32_t h = 2166136261u;
+    uint32_t i;
+    uint32_t n = len < 96u ? len : 96u;
+
+    for (i = 0; i < n; i++) {
+        if (i >= 8u && i < 12u) {
+            continue;
+        }
+        h = (h ^ (uint32_t)p[i]) * 16777619u;
+    }
+    return h;
+}
+
+/* 1 si este aviso no se ha visto todavía y queda hueco para volcarlo. */
+static int nocat_is_new(const unsigned char *p, uint32_t len)
+{
+    uint32_t fp = nocat_fingerprint(p, len);
+    unsigned i;
+
+    for (i = 0; i < g_nocat_dumped; i++) {
+        if (g_nocat_seen[i] == fp) {
+            return 0;
+        }
+    }
+    if (g_nocat_dumped >= GSP_NOCAT_DUMP_MAX) {
+        return 0;
+    }
+    g_nocat_seen[g_nocat_dumped] = fp;
+    return 1;
+}
+/* Estático y no en la pila: el registro son ~1,2 KiB y la pila del bring-up no
+ * está para eso. Aquí sólo hay una fibra tocando el RPC. */
+static unsigned char g_nocat_buf[1536];
+
+/* El registro NOCAT es un `NV2080_NOCAT_JOURNAL_ENTRY` y su layout NO está en
+ * nuestras cabeceras. Bautizar campos a ojo es cómo se acaba leyendo un offset
+ * por otro (el enum de r535 apuntando a NVLink, o los tres nombres inventados de
+ * `rm_status_hint`), así que esto no interpreta: vuelca las primeras palabras en
+ * crudo y saca las cadenas, que se identifican solas — RM mete ahí el motor, el
+ * código de error y la aserción con fichero y línea. */
+static void nocat_dump(const unsigned char *p, uint32_t len)
+{
+    char run[65];
+    unsigned n = 0;
+    uint32_t i;
+    uint32_t words = len / 4u;
+
+    if (words > GSP_NOCAT_DUMP_WORDS) {
+        words = GSP_NOCAT_DUMP_WORDS;
+    }
+    for (i = 0; i < words; i += 4u) {
+        uint32_t w[4] = { 0, 0, 0, 0 };
+        uint32_t j;
+
+        for (j = 0; j < 4u && i + j < words; j++) {
+            memcpy(&w[j], p + (i + j) * 4u, 4);
+        }
+        lx_printk("nouveau-lx: NOCAT[%u] +0x%03x: %08x %08x %08x %08x\n",
+                  g_nocat_dumped, (unsigned)(i * 4u), w[0], w[1], w[2], w[3]);
+    }
+
+    /* Cadenas de 4 caracteres o más. Menos que eso es ruido binario que casa con
+     * ASCII por casualidad y ensucia lo que sí es un mensaje. */
+    for (i = 0; i <= len; i++) {
+        int c = i < len ? p[i] : 0;
+
+        if (c >= 0x20 && c < 0x7f) {
+            if (n < sizeof(run) - 1u) {
+                run[n++] = (char)c;
+            }
+            continue;
+        }
+        if (n >= 4u) {
+            run[n] = '\0';
+            lx_printk("nouveau-lx: NOCAT[%u] texto: %s\n", g_nocat_dumped, run);
+        }
+        n = 0;
+    }
+    g_nocat_dumped++;
+}
+
+/* Copia el registro mientras el mensaje sigue siendo nuestro (antes de publicar el
+ * rptr) y lo vuelca si es un aviso que no habíamos visto. */
+static void nocat_capture(const struct gsp_rpc *rpc, uint32_t rptr, uint32_t length)
+{
+    uint32_t plen = length - GSP_RPC_HDR_SIZE;
+
+    if (g_nocat_dumped >= GSP_NOCAT_DUMP_MAX) {
+        return;
+    }
+    if (plen > (uint32_t)sizeof(g_nocat_buf)) {
+        plen = (uint32_t)sizeof(g_nocat_buf);
+    }
+    ring_copy(rpc, rptr, GSP_MSG_HDR_SIZE + GSP_RPC_HDR_SIZE, g_nocat_buf, plen);
+    if (nocat_is_new(g_nocat_buf, plen)) {
+        nocat_dump(g_nocat_buf, plen);
+    }
+}
+
 static void flush_repeats(unsigned *repeats)
 {
     if (*repeats) {
         lx_printk("nouveau-lx: ... y %u más iguales\n", *repeats);
         *repeats = 0;
     }
+}
+
+/* Códigos `ROBUST_CHANNEL_*` de `nverror.h` (OGKM 570.144). Solo los que puede
+ * ver este bring-up; el resto sale como "?". */
+static const char *rc_except_name(uint32_t type)
+{
+    switch (type) {
+    case 13u: return "GR_EXCEPTION";
+    case 31u: return "FIFO_ERROR_MMU_ERR_FLT";
+    case 32u: return "PBDMA_ERROR";
+    case 39u: return "CE0_ERROR";
+    case 44u: return "GR_FAULT_DURING_CTXSW";
+    case 69u: return "GR_CLASS_ERROR";
+    case 79u: return "GPU_HAS_FALLEN_OFF_THE_BUS";
+    default:  return "?";
+    }
+}
+
+/* `NV_n_*` de dev_fault.h gb202 — lo que trae el RC en mmuFaultType. */
+const char *mmu_fault_type_name(uint32_t type)
+{
+    switch (type) {
+    case 0u:  return "PDE";
+    case 1u:  return "PDE_SIZE";
+    case 2u:  return "PTE";
+    case 3u:  return "VA_LIMIT_VIOLATION";
+    case 4u:  return "UNBOUND_INST_BLOCK";
+    case 5u:  return "PRIV_VIOLATION";
+    case 6u:  return "RO_VIOLATION";
+    case 7u:  return "WO_VIOLATION";
+    case 8u:  return "PITCH_MASK_VIOLATION";
+    case 9u:  return "WORK_CREATION";
+    case 10u: return "UNSUPPORTED_APERTURE";
+    case 11u: return "CC_VIOLATION";
+    case 12u: return "UNSUPPORTED_KIND";
+    case 13u: return "REGION_VIOLATION";
+    case 14u: return "POISONED";
+    case 15u: return "ATOMIC_VIOLATION";
+    default:  return "?";
+    }
+}
+
+int gsp_rpc_rc_triggered_log(const void *payload, uint32_t len)
+{
+    const rpc_rc_triggered_v17_02 *msg = payload;
+    uint64_t fault;
+
+    if (!payload || len < sizeof(rpc_rc_triggered_v17_02)) {
+        return -1;
+    }
+    fault = ((uint64_t)msg->mmuFaultAddrHi << 32) | (uint64_t)msg->mmuFaultAddrLo;
+    lx_printk("nouveau-lx: rc: engn=%08x chid=%u type=%u (%s) scope=%u part=%u\n",
+              msg->nv2080EngineType, msg->chid, msg->exceptType,
+              rc_except_name(msg->exceptType), msg->scope,
+              (unsigned)msg->partitionAttributionId);
+    if (fault || msg->mmuFaultType) {
+        lx_printk("nouveau-lx: rc: mmuFault=0x%llx type=%u (%s)\n",
+                  (unsigned long long)fault, msg->mmuFaultType,
+                  mmu_fault_type_name(msg->mmuFaultType));
+    }
+    /* Cabecera del journal de RC (2026-07-29): el subtipo exacto del error —qué
+     * método/dato atragantó al PBDMA— viaja aquí y no en los campos fijos. Solo
+     * las primeras palabras: el journal entero son ~6 KiB y ahogaría el serie. */
+    if (msg->rcJournalBufferSize && len >= sizeof(*msg) + 32u) {
+        const uint32_t *j = (const uint32_t *)(const void *)msg->rcJournalBuffer;
+
+        lx_printk("nouveau-lx: rc: journal %u B, cabeza: %08x %08x %08x %08x  "
+                  "%08x %08x %08x %08x\n", msg->rcJournalBufferSize,
+                  j[0], j[1], j[2], j[3], j[4], j[5], j[6], j[7]);
+    }
+    return 0;
+}
+
+static void rc_capture(const struct gsp_rpc *rpc, uint32_t rptr, uint32_t length)
+{
+    /* Cabecera fija + 32 B del journal, que es donde va el subtipo del error. */
+    unsigned char buf[sizeof(rpc_rc_triggered_v17_02) + 32u];
+    uint32_t plen = length - GSP_RPC_HDR_SIZE;
+
+    if (plen > (uint32_t)sizeof(buf)) {
+        plen = (uint32_t)sizeof(buf);
+    }
+    ring_copy(rpc, rptr, GSP_MSG_HDR_SIZE + GSP_RPC_HDR_SIZE, buf, plen);
+    gsp_rpc_rc_triggered_log(buf, plen);
 }
 
 int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
@@ -288,6 +491,16 @@ int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
                       hdr.rpc_result);
         }
 
+        /* El contenido de los NOCAT distintos: "2 registro(s) NOCAT antes del
+         * fallo" no dice qué falló, y la causa del NO_MEMORY del canal de GR0 o
+         * del CE que no arranca está aquí dentro. */
+        if (hdr.function == NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD) {
+            nocat_capture(rpc, rptr, hdr.length);
+        }
+        if (hdr.function == NV_VGPU_MSG_EVENT_RC_TRIGGERED) {
+            rc_capture(rpc, rptr, hdr.length);
+        }
+
         /* Copiar ANTES de mover el puntero: en cuanto lo publicamos, el GSP
          * puede reutilizar esas páginas. */
         matched = hdr.function == fn;
@@ -341,6 +554,76 @@ int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
     lx_printk("nouveau-lx: no llegó fn=0x%04x (%u mensaje(s) vistos, %u NOCAT)\n",
               fn, seen, nocat);
     return -1;
+}
+
+unsigned gsp_rpc_drain(struct gsp_rpc *rpc, unsigned ms)
+{
+    unsigned seen = 0;
+    unsigned nocat = 0;
+    uint32_t last_fn = 0xffffffffu;
+    unsigned repeats = 0;
+    uint32_t ring_bytes;
+
+    /* `ms == 0` aparte: el `while (ms--)` de abajo lo convertiría en 2^32 vueltas
+     * por el envoltorio del unsigned. */
+    if (!rpc || !rpc->ready || ms == 0u) {
+        return 0;
+    }
+    ring_bytes = rpc->cnt * GSP_PAGE_SIZE;
+
+    while (ms--) {
+        uint32_t rptr = *rpc->rptr;
+        struct gsp_rpc_hdr hdr;
+        uint32_t pages;
+
+        if (msgq_used(rpc, rptr) == 0) {
+            if (!gsp_mmio_alive()) {
+                break;
+            }
+            lx_mdelay(1);
+            continue;
+        }
+        ring_copy(rpc, rptr, GSP_MSG_HDR_SIZE, &hdr, GSP_RPC_HDR_SIZE);
+        if (hdr.length < GSP_RPC_HDR_SIZE ||
+            hdr.length > ring_bytes - GSP_MSG_HDR_SIZE) {
+            lx_printk("nouveau-lx: RPC con longitud imposible (%u) al vaciar\n",
+                      hdr.length);
+            break;
+        }
+        seen++;
+        if (hdr.function == last_fn) {
+            repeats++;
+        } else {
+            flush_repeats(&repeats);
+            last_fn = hdr.function;
+            lx_printk("nouveau-lx: RPC (sin pedir) fn=0x%04x (%s) len=%u res=0x%x\n",
+                      hdr.function, rpc_function_name(hdr.function), hdr.length,
+                      hdr.rpc_result);
+        }
+        if (hdr.function == NV_VGPU_MSG_EVENT_GSP_POST_NOCAT_RECORD) {
+            nocat++;
+            nocat_capture(rpc, rptr, hdr.length);
+        }
+        if (hdr.function == NV_VGPU_MSG_EVENT_RC_TRIGGERED) {
+            rc_capture(rpc, rptr, hdr.length);
+        }
+
+        pages = (hdr.length + GSP_MSG_HDR_SIZE + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
+        rptr = (rptr + pages) % rpc->cnt;
+        gsp_rpc_barrier();
+        *rpc->rptr = rptr;
+    }
+    flush_repeats(&repeats);
+    if (seen) {
+        lx_printk("nouveau-lx: %u mensaje(s) pendientes de GSP-RM (%u NOCAT)\n",
+                  seen, nocat);
+    } else {
+        /* Que no haya nada NO es un detalle menor: significa que RM no se ha
+         * quejado, así que el trabajo no llegó a fallar del lado de RM — no
+         * arrancó. Eso apunta al doorbell o al canal, no a los métodos. */
+        lx_printk("nouveau-lx: GSP-RM no tenía nada que decir (ni un evento)\n");
+    }
+    return seen;
 }
 
 int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms)

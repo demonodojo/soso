@@ -600,8 +600,12 @@ fn suite() -> u8 {
                     if en_gpu {
                         println!("init: >>> G5 EN SILICIO: on_gpu=1 <<<");
                     } else {
+                        // La fase la da el propio kernel en `GpuInfo`: antes esto
+                        // mandaba a abrir el log de serie, que son cientos de
+                        // líneas para averiguar una palabra.
+                        let fase = libsoso::str_hasta_nul(&info.phase);
                         println!(
-                            "init: sonda GPU calculada por la CPU del kernel                              (on_gpu=0) — mira el log de serie para ver dónde paró"
+                            "init: sonda GPU calculada por la CPU del kernel                              (on_gpu=0) — el GSP se quedó en la fase «{fase}»"
                         );
                     }
                     let _ = sys::gpu_free(wh);

@@ -16,43 +16,18 @@
 #include "gsp_chan.h"
 #include "gsp_ce.h"
 #include "gsp_compute.h"
+#include "gsp_grctx.h"
+#include "gsp_top.h"
 #include "gsp_vram.h"
 #include "gsp_wpr.h"
+#include "gsp_chip.h"
 #include "lx_emul.h"
 
 #define NV_PMC_BOOT_0_OFF 0x0000u
-#define GB205_DEVICE_ID   0x2f18u  /* RTX 5070 Ti Mobile (Blackwell) */
 #define GSP_POLL_MS         2000u
-
-/* Familia de chip para bring-up chip-aware. */
-enum nv_family { NV_FAM_UNKNOWN = 0, NV_FAM_AMPERE, NV_FAM_ADA, NV_FAM_BLACKWELL };
-
-/* NV_PMC_BOOT_0: bits 20-28 = arquitectura (>>20 & 0x1ff). Ampere=0x170,
- * Ada=0x190, Blackwell(GB20x)=0x1a0+. Fallback por device_id si boot0=0. */
-static enum nv_family nv_family_of(uint32_t boot0, uint16_t dev_id)
-{
-    unsigned arch = (boot0 >> 20) & 0x1ffu;
-    if (boot0) {
-        if (arch >= 0x1a0u) return NV_FAM_BLACKWELL;
-        if (arch >= 0x190u) return NV_FAM_ADA;
-        if (arch >= 0x170u) return NV_FAM_AMPERE;
-    }
-    if (dev_id == GB205_DEVICE_ID) return NV_FAM_BLACKWELL;
-    /* Ampere consumer: GA102/104/106/107 = 0x22xx..0x25xx (incl. RTX 3060). */
-    if ((dev_id & 0xff00u) >= 0x2200u && (dev_id & 0xff00u) <= 0x2500u)
-        return NV_FAM_AMPERE;
-    return NV_FAM_UNKNOWN;
-}
-
-static const char *nv_family_name(enum nv_family f)
-{
-    switch (f) {
-    case NV_FAM_AMPERE:    return "Ampere (ga10x)";
-    case NV_FAM_ADA:       return "Ada (ad10x)";
-    case NV_FAM_BLACKWELL: return "Blackwell (gb20x)";
-    default:               return "desconocida";
-    }
-}
+/* Los 50 + 2000 ms de `tu102_devinit_wait`, que es quien decide cuánto puede tardar
+ * el firmware de la GPU en acabar su devinit. */
+#define GSP_GFW_WAIT_MS     2050u
 
 /* Qué juego de firmware pedir. Ada aún no tiene blobs empaquetados (ad10x); cae
  * en el juego Blackwell, que es el que trae el rootfs. */
@@ -119,24 +94,22 @@ static struct gsp_chan g_chan;           /* canal GPFIFO del CE, motor COPY0 (G4
 static struct gsp_chan g_chan_gr;        /* canal GPFIFO del compute, motor GR0 */
 static struct gsp_ce g_ce;               /* motor de copia CE (G4e) */
 static struct gsp_compute g_compute;     /* compute + QMD (G4f) */
+static struct gsp_grctx g_grctx;          /* contexto del canal de GR (G4f) */
 static int g_ce_verified;                /* el CE movió bytes de verdad (G4e) */
 static uint64_t g_vram_block;            /* bloque de VRAM mapeado en G4d */
 static struct lx_pci_dev *g_pdev;   /* para leer BARs y BDF del espacio de config */
-static uint16_t g_device_id;
-static uint32_t g_boot0;
 static uint64_t g_vram_bytes;
 
 void lx_nouveau_set_boot0(unsigned boot0, unsigned device_id)
 {
-    g_boot0 = (uint32_t)boot0;
-    g_device_id = (uint16_t)device_id;
+    gsp_nv_family_set((uint32_t)boot0, (uint16_t)device_id);
     /* NO retroceder la fase. `nvidia_probe::init()` corre en el kernel DESPUÉS
      * del bring-up (main.rs: lxdde::init → gpu::init → nvidia_probe::init) y
      * volvía a poner GSP_BAR0 encima de un `rm_ready` ya conseguido: el arranque
      * del 2026-07-25 llegó a `GSP-RM listo` y aun así el log decía `GSP=bar0`,
      * `gsp_ready()` daba falso y el compute se iba a la CPU sin avisar. Esta
      * función solo aporta boot0/device_id; la fase la manda el bring-up. */
-    if (g_boot0 != 0 && g_phase == GSP_NONE) {
+    if (gsp_nv_family_boot0() != 0 && g_phase == GSP_NONE) {
         g_phase = GSP_BAR0;
     }
 }
@@ -145,8 +118,8 @@ void lx_nouveau_set_boot0(unsigned boot0, unsigned device_id)
  * 12 GiB (GA106) o 8 GiB (3060 Ti/GA104); default Ampere = 12 GiB. */
 static uint64_t vram_for_device(uint16_t dev_id)
 {
-    enum nv_family fam = nv_family_of(g_boot0, dev_id);
-    if (dev_id == GB205_DEVICE_ID) {
+    enum nv_family fam = gsp_nv_family_of(gsp_nv_family_boot0(), dev_id);
+    if (dev_id == 0x2f18u) {
         return 12ull * 1024ull * 1024ull * 1024ull;   /* 5070 Ti Mobile */
     }
     if (fam == NV_FAM_AMPERE) {
@@ -236,6 +209,17 @@ static int run_fmc_blackwell(void)
 {
     const struct gsp_fw_blob *fmc = gsp_fw_get(GSP_FW_FMC);
     struct fmc_image img;
+
+    /* Aquí hubo un rato una puerta que exigía el GFW boot de la isla GC6
+     * (`0x118234`) antes de mandar el COT, y **estaba mal**: en gb20x ese registro
+     * no es el indicador —NVIDIA no publica siquiera `dev_gc6_island.h` para
+     * gb202— y leerlo 0 es lo normal, así que bloqueaba una tarjeta sana y el
+     * arranque acababa en `booted_soft` (2026-07-29).
+     *
+     * El indicador de este chip es `NV_THERM_I2CS_SCRATCH_FSP_BOOT_COMPLETE`
+     * (0x00ad00bc, SUCCESS = 0xff) y **ya se comprueba donde toca**:
+     * `fsp_ready_to_send()` no manda el COT sin él. O sea que la puerta correcta
+     * llevaba puesta desde el principio y lo que sobraba era la nueva. */
 
     g_phase = GSP_FMC_PARSE;
     if (!fmc || !fmc->data) {
@@ -338,7 +322,7 @@ static int try_hw_boot(void)
     if (gsp_mmio_poll_ready(GSP_POLL_MS) == 0) {
         g_phase = GSP_BOOTED;
         lx_printk("nouveau-lx: GSP booted (hw poll ok, %s)\n",
-                  nv_family_name(nv_family_of(g_boot0, g_device_id)));
+                  gsp_nv_family_name(gsp_nv_family_current()));
         return 0;
     }
     return -1;
@@ -453,6 +437,10 @@ static int run_chan_ce_stage(void)
         lx_printk("nouveau-lx: CE readback verificado (G4e GO)\n");
     } else {
         lx_printk("nouveau-lx: CE sin readback — canal vivo pero no movió datos\n");
+        /* Los avisos de RM sobre el canal llegan por eventos, y si nadie escucha
+         * se quedan en la cola: la vez anterior sus dos NOCAT aparecieron páginas
+         * más abajo, dentro del alloc siguiente, y parecían de aquél. */
+        gsp_rpc_drain(&g_rpc, 200u);
     }
     return 0;
 }
@@ -472,6 +460,21 @@ static int run_compute_stage(void)
         return -1;
     }
     g_phase = GSP_RM_COMPUTE;
+
+    /* Y el contexto del canal de GR, en este orden porque es el de upstream:
+     * `r535_gr_oneinit` reserva el canal, le cuelga la clase y **después**
+     * promociona (`chan.alloc` → `RM_ALLOC` de la clase → `promote_ctx`). Sin
+     * contexto promocionado el canal existe y el primer QMD no puede correr.
+     *
+     * Best-effort como todo lo de esta fase: si falla, el CE y el resto del
+     * arranque siguen en pie y el log dice dónde paró. */
+    if (gsp_grctx_query(&g_vmm.rm, 0u, &g_grctx) < 0) {
+        lx_printk("nouveau-lx: sin tamaños de contexto de GR — no se promociona\n");
+    } else if (gsp_grctx_promote(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan_gr,
+                                 &g_grctx) != 0) {
+        lx_printk("nouveau-lx: contexto de GR sin promocionar — el QMD no puede "
+                  "correr todavía\n");
+    }
 
     /* Los dos blobs, cada uno en su página: el matvec de G5 no se stagea en el
      * primer lanzamiento sino aquí, para que un fallo de copia salga en el
@@ -506,7 +509,7 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     }
     lx_pci_set_master(pdev);
 
-    g_device_id = (uint16_t)lx_pci_device_id(pdev);
+    gsp_nv_family_set(0, (uint16_t)lx_pci_device_id(pdev));
 
     bar = lx_pci_iomap(pdev, 0, 16u * 1024u * 1024u);
     if (!bar) {
@@ -517,17 +520,39 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     gsp_mmio_set_pci(pdev);   /* para poder mirar la configuración si el MMIO calla */
     g_pdev = pdev;
     boot0 = gsp_mmio_rd32(NV_PMC_BOOT_0_OFF);
-    g_boot0 = boot0;
+    gsp_nv_family_set(boot0, gsp_nv_family_device_id());
     /* La VRAM de verdad la da el hardware (`ga102_fb_vidmem_size`); la tabla por
      * SKU es solo el respaldo para cuando no hay BAR0 que leer. */
     g_vram_bytes = gsp_wpr_vidmem_size();
     if (!g_vram_bytes) {
-        g_vram_bytes = vram_for_device(g_device_id);  /* usa boot0 para la familia */
+        g_vram_bytes = vram_for_device(gsp_nv_family_device_id());
     }
     g_phase = GSP_BAR0;
     lx_printk("nouveau-lx: BAR0 boot0=0x%08x dev=0x%04x familia=%s vram=%uMiB\n",
-              boot0, g_device_id, nv_family_name(nv_family_of(boot0, g_device_id)),
+              boot0, gsp_nv_family_device_id(),
+              gsp_nv_family_name(gsp_nv_family_of(boot0, gsp_nv_family_device_id())),
               (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+
+    /* Esperar a que el firmware de la GPU acabe su arranque, como
+     * `tu102_devinit_post` → `tu102_devinit_wait`. **Pero el registro depende de la
+     * familia** y confundirlos cuesta un ciclo: el scratch de la isla GC6
+     * (`0x118234`, `NV_PGC6_AON_SECURE_SCRATCH_GROUP_05_0_GFW_BOOT`) es de
+     * Turing/Ampere, y en gb202 NVIDIA **no publica ni `dev_gc6_island.h`** — ahí
+     * el indicador es `NV_THERM_I2CS_SCRATCH_FSP_BOOT_COMPLETE` (0x00ad00bc,
+     * SUCCESS = 0xff), que lee `fmc_lx_fsp_probe` y exige `fsp_ready_to_send`
+     * antes del COT.
+     *
+     * Así que en Blackwell esto no se llama: esperaría 2 s a un registro que
+     * siempre vale 0 y luego diría en el log que el devinit no ha terminado, que es
+     * exactamente el error que se cometió el 2026-07-29. */
+    if (gsp_nv_family_of(boot0, gsp_nv_family_device_id()) != NV_FAM_BLACKWELL) {
+        (void)gsp_mmio_gfw_wait(GSP_GFW_WAIT_MS, "tras BAR0");
+    }
+
+    /* Y la topología según el chip, que es lo que da las direcciones de las
+     * runlists sin inferir índices de la tabla de RM. Va aquí porque sólo necesita
+     * BAR0 y porque su volcado sirve de referencia para todo lo que viene. */
+    (void)gsp_top_probe();
 
     /* Ola 3: ejercita el grafo nvkm real (device+subdev GSP+falcon) con BAR0.
      * Best-effort — la construcción no toca MMIO; el boot HW real llega tras G1. */
@@ -536,7 +561,7 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     g_phase = GSP_FW_LOADING;
     /* Solo el juego de blobs de esta familia: cargar los dos duplicaba 60,6 MiB
      * de ucode (en linux-firmware el gsp de gb205 es symlink al de ga102). */
-    if (gsp_fw_load_all(gsp_fw_chip_of(nv_family_of(boot0, g_device_id))) != 0) {
+    if (gsp_fw_load_all(gsp_fw_chip_of(gsp_nv_family_of(boot0, gsp_nv_family_device_id()))) != 0) {
         return -1;
     }
     g_phase = GSP_FW_READY;
@@ -552,7 +577,7 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
      * 60 MiB es el propio GSP, por DMA, siguiendo la tabla). Todo en memoria:
      * nada de esto escribe un registro. */
     g_phase = GSP_RM_RADIX3;
-    if (gsp_rm_prepare(gsp_fw_chip_of(nv_family_of(boot0, g_device_id)), &g_rm) == 0) {
+    if (gsp_rm_prepare(gsp_fw_chip_of(gsp_nv_family_of(boot0, gsp_nv_family_device_id())), &g_rm) == 0) {
         /* El ucode en bruto ya no hace falta: `g_rm.img` tiene la sección que
          * importa, alineada a página. Son 60,6 MiB de heap de vuelta. */
         gsp_fw_release_one(GSP_FW_UCODE);
@@ -563,12 +588,13 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     /* El ACR de `acr_fw.c` es el de Ampere (ucode ga102 en SEC2). En Blackwell el
      * falcon ni ejecutaba — `mbox0=0xbadf4100` — porque GB20x arranca por GSP-FMC/FSP.
      * Cada familia va por lo suyo. */
-    if (nv_family_of(boot0, g_device_id) == NV_FAM_BLACKWELL) {
+    if (gsp_nv_family_of(boot0, gsp_nv_family_device_id()) == NV_FAM_BLACKWELL) {
         if (run_fmc_blackwell() == 0) {
             /* El GSP lo arrancó el FMC: el kick/poll de tu102 no pinta nada. */
             g_phase = GSP_BOOTED;
             lx_printk("nouveau-lx: GSP booted (hw, GSP-FMC vía FSP, %u MiB VRAM)\n",
                       (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+
 
             /* Ya arrancado, GSP-RM habla por las colas. Escuchar su primer
              * mensaje es best-effort: si no llega, el GSP sigue arrancado. */

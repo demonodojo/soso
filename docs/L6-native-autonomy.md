@@ -17,7 +17,9 @@ Con el driver `nvidia` activo puedes avanzar sin soltar la dGPU:
 | QEMU | `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask run` | Sin GPU en PCI → no GSP soft |
 | Inferencia CUDA | L6-H: llama-server + cuda-proxy + `--cuda-host 10.0.2.2:11400` | **GO** 2026-07-27 |
 
-El GO de G4e en hardware (readback VRAM vía CE) sigue requiriendo un ciclo VFIO puntual.
+G4e–G5 ya tienen **GO en GB205** bajo VFIO (2026-07-29). Tras cada reboot del host,
+capar el enlace PCIe a Gen3 (`setpci` en root port `00:06.0`) antes del ciclo — ver
+skill `soso-gpu`.
 
 ## Mapa de fases
 
@@ -29,7 +31,7 @@ G4  Compute              ──►  CE en VRAM (G4e) → canal GR0 + saxpy SASS 
 G5  LLM híbrido          ──►  matvec SASS por tandas de filas (VRAM ~12 GiB)
 ```
 
-## Estado actual (2026-07-28)
+## Estado actual (2026-07-29)
 
 | Fase | Entregable | Estado |
 |------|------------|--------|
@@ -40,10 +42,10 @@ G5  LLM híbrido          ──►  matvec SASS por tandas de filas (VRAM ~12 G
 | **G4a** | RPC recibir + `GSP_INIT_DONE` | **GO** (2026-07-25): `GSP-RM listo (RPC en marcha)` |
 | **G4b** | RPC síncrono (`gsp_cmdq_call`) | **GO** — hostcheck + HW |
 | **G4c** | Objetos RM (cliente → device → subdevice) | **GO** (2026-07-25): handles verificados en GB205 |
-| **G4d** | VRAM + VA space externo + tablas VER3 | **Escrito + hostcheck** — falta validar en HW con el CE |
-| **G4e** | Canal GPFIFO + CE (copia DMA en VRAM) | **Escrito + hostcheck** — GO HW aplazado (VFIO) |
-| **G4f** | QMD + kernel SASS (`SYS_GPU_SUBMIT`) | **Escrito + hostcheck** — `saxpy.sass.bin` son 512 B de `sm_120` reales (10 regs, params en cbank0+0x380); GO HW pendiente VFIO |
-| **G5** | matvec SASS + tok/s GPU > CPU | **Escrito + hostcheck** (2026-07-28) — `matvec.sass.bin` 2944 B/37 regs, tandas de filas; GO HW pendiente VFIO |
+| **G4d** | VRAM + VA space externo + tablas VER3 | **GO** HW (2026-07-29) — ejercitado por CE/compute |
+| **G4e** | Canal GPFIFO + CE (copia DMA en VRAM) | **GO** (2026-07-29): `CE readback verificado (G4e GO)` |
+| **G4f** | QMD + kernel SASS (`SYS_GPU_SUBMIT`) | **GO** (2026-07-29): PCAS 24 B, clase `0xcec0`, saxpy/matvec en silicio |
+| **G5** | matvec SASS en `soso-llm` | **GO funcional** (2026-07-29): `tiny --max 4` → 97 matvec GPU OK; tok/s vs CPU en modelos grandes pendiente |
 | **L6-H** | `--cuda-host` → cuda-proxy → llama-server | **GO** (2026-07-27): ~35 tok/s en QEMU |
 
 **GPUs soportadas (bring-up chip-aware):** **GB205 Blackwell** (`10de:2f18`, RTX

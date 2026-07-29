@@ -55,10 +55,12 @@
 #include "gsp_rm_obj.h"
 
 #define GSP_VMM_LEVELS   6u
-/* Tablas vivas a la vez. Con 4 KiB de página, una cadena completa son 6 y cada
- * tabla hoja cubre 2 MiB: 24 dan de sobra para lo que reserva G4d/G4e y avisan
- * en vez de corromper si algún día no bastan. */
-#define GSP_VMM_MAX_PT  24u
+/* Tablas vivas a la vez. Con PTEs de 4 KiB cada hoja cubre 2 MiB. G4d/G4e
+ * bastaban con ~13 tablas; la promoción del grctx de gb205 (~56 MiB, solo
+ * ATTRIBUTE_CB ~51552 KiB ≈ 26 hojas) suma ~29 más → ~42 en total. El pool de
+ * 24 del bring-up CE se agotaba justo al mapear ATTRIBUTE_CB (2026-07-29). 96
+ * deja margen 2x; cada tabla sigue reservándose bajo demanda en sysmem. */
+#define GSP_VMM_MAX_PT  96u
 
 /* Base de TODO el mapa de VAs del bring-up (G4d, canal, CE, compute). Estaba
  * repetida a mano en cinco constantes de tres ficheros, todas empezando por
@@ -117,6 +119,16 @@ int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v);
  * 4 KiB. Crea las tablas que falten por el camino. */
 int gsp_vmm_map(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
                 enum gsp_vmm_target target);
+
+/* Sólo lectura para la GPU: el PCF del PTE pasa de `REGULAR_RW_*` a `REGULAR_RO_*`
+ * (`NV_MMU_VER3_PTE_PCF_*`, bit 2 del campo). Lo pide el contexto de GR para el
+ * mapa de acceso privilegiado, que upstream mapea con `.ro = 1`. */
+#define GSP_VMM_RO 0x1u
+
+/* Igual que `gsp_vmm_map` pero con banderas. `gsp_vmm_map` es esto con 0, para no
+ * tocar los ocho sitios que no necesitan ninguna. */
+int gsp_vmm_map_flags(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
+                      enum gsp_vmm_target target, unsigned flags);
 
 /* Recorre las tablas ya construidas como lo haría la MMU y devuelve a qué
  * física traduce `va`. -1 si algún nivel falta o está inválido. Existe para

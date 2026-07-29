@@ -136,6 +136,27 @@ pub fn run(_args: &[String]) {
         "G3b hw boot (log: GSP booted sin soft)",
         gsp_log_ok && log_contains(&log, "GSP booted (hw") && !gpu_gone,
     );
+    // El arranque del firmware de la GPU. En gb20x el indicador NO es el scratch de
+    // la isla GC6 de Turing (que se lee 0 siempre) sino
+    // `NV_THERM_I2CS_SCRATCH_FSP_BOOT_COMPLETE`, y es el que exige
+    // `fsp_ready_to_send()` antes del COT. Confundirlos costó un ciclo el 2026-07-29.
+    print_criterion(
+        "firmware de la GPU arrancado (log: FSP boot complete = 0xff)",
+        log_contains(&log, "FSP secure boot=0x000000ff") && !gpu_gone,
+    );
+    if log_contains(&log, "GFW_BOOT_PROGRESS") {
+        println!(
+            "   NOTA  GSP-RM asertó sobre GFW_BOOT_PROGRESS en un NOCAT. En gb20x ese\n\
+             \x20        scratch (isla GC6, de Turing) se lee 0 y NO es el indicador de\n\
+             \x20        este chip: el bueno es el FSP boot complete de arriba."
+        );
+    }
+    // PTOP: la topología la publica el chip. No es un gate, es lo que evita seguir
+    // adivinando índices de la tabla del FIFO de RM (que en GB205 dieron 0xbadf5040).
+    print_criterion(
+        "PTOP: topología de motores leída del chip (log)",
+        log_contains(&log, "PTOP: ") && !gpu_gone,
+    );
     print_criterion(
         "G4a SET_SYSTEM_INFO/SET_REGISTRY encolados (log)",
         log_contains(&log, "SET_SYSTEM_INFO") && log_contains(&log, "SET_REGISTRY"),
@@ -178,9 +199,22 @@ pub fn run(_args: &[String]) {
         "G4e canal GPFIFO + CE armados (log)",
         log_contains(&log, "CE listo cls=") && !gpu_gone,
     );
+    // El doorbell es una escritura ciega: si el aperture de usermode no está donde
+    // creemos, el trabajo se encola y nadie lo recoge, que es indistinguible de un
+    // canal que no arranca. Lo único legible de ahí es su reloj.
+    print_criterion(
+        "G4e aperture de usermode responde (log: su reloj avanza)",
+        log_contains(&log, "aperture de usermode vivo") && !gpu_gone,
+    );
     print_criterion(
         "G4e GO: readback sysmem→VRAM→sysmem (log)",
         log_contains(&log, "CE readback verificado (G4e GO)") && !gpu_gone,
+    );
+    // Sin contexto promocionado el canal de GR existe y el QMD no puede correr, así
+    // que esto va antes del criterio del SASS.
+    print_criterion(
+        "G4f contexto de GR promocionado (log)",
+        log_contains(&log, "contexto de GR promocionado") && !gpu_gone,
     );
     print_criterion(
         "G4f SASS en VRAM + compute armado (log)",

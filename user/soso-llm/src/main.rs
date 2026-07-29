@@ -508,8 +508,9 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
     // no iba a ocurrir — y con el dispositivo software, además, mentir.
     if let Some(ref g) = sys_gpu {
         println!(
-            "soso-llm: dispositivo de cómputo «{}», VRAM libre {} bytes",
+            "soso-llm: dispositivo de cómputo «{}» (fase {}), VRAM libre {} bytes",
             g.device_name(),
+            g.phase(),
             gpu.vram_free
         );
         bundle.rt.set_backend(Backend::Auto);
@@ -517,7 +518,7 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
     } else if gpu.present != 0 {
         println!(
             "soso-llm: hay GPU («{}») pero no ejecuta kernels; backend CPU",
-            nombre_dispositivo(&gpu.name)
+            libsoso::str_hasta_nul(&gpu.name)
         );
         bundle.rt.set_backend(Backend::Cpu);
     } else {
@@ -584,6 +585,15 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
                     sin_sitio,
                     g.last_on_gpu() as u8
                 );
+                /* Y si NADA se calculó en el silicio, dónde se quedó el bring-up.
+                 * El `on_gpu=0` de arriba dice que no pasó; esto dice por qué, sin
+                 * abrir el log de serie. */
+                if !g.last_on_gpu() {
+                    println!(
+                        "soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «{}»",
+                        g.phase()
+                    );
+                }
             }
             0
         }
@@ -595,11 +605,6 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
 }
 
 /// El nombre que da el kernel viene en un `[u8; 32]` con relleno a cero.
-fn nombre_dispositivo(name: &[u8; 32]) -> &str {
-    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-    core::str::from_utf8(&name[..end]).unwrap_or("?")
-}
-
 fn read_file(path: &str) -> Result<Vec<u8>, i64> {
     let fd = sys::open(path, O_RDONLY);
     if fd < 0 {

@@ -57,7 +57,22 @@ static void *lx_dma_alloc_coherent(struct lx_pci_dev *d, size_t size, uint64_t *
 static void lx_dma_free_coherent(struct lx_pci_dev *d, size_t size, void *va, uint64_t dma)
 { (void)d; (void)dma; lx_free_pages_exact(va, size); }
 
-static void lx_mdelay(unsigned ms) { (void)ms; }
+/* Estado de "la GPU no contesta", declarado aquí arriba porque `lx_mdelay` es
+ * quien hace avanzar el tiempo simulado y necesita verlo. */
+static int fake_gpu_gone;                    /* todo el MMIO a unos */
+static unsigned fake_revive_after_mdelays;   /* vuelve tras N ms simulados */
+
+/* El reloj no existe aquí, así que cada `lx_mdelay(1)` cuenta como 1 ms
+ * simulado. Sirve para modelar un reset del enlace: la tarjeta vuelve sola tras
+ * N milisegundos, que es lo que hace en hardware (207 ms medidos el 2026-07-28)
+ * y lo que el driver tiene que esperar en vez de rendirse en la primera lectura. */
+static void lx_mdelay(unsigned ms)
+{
+    (void)ms;
+    if (fake_revive_after_mdelays && --fake_revive_after_mdelays == 0u) {
+        fake_gpu_gone = 0;
+    }
+}
 
 /* El apagado quita el bus master; aquí solo se cuenta que lo pida. */
 static unsigned pci_master_cleared;
@@ -90,11 +105,27 @@ static uint32_t fsp_sent[512];
 static unsigned fsp_sent_dwords;
 static unsigned fsp_mbox_reads;
 static uint32_t fsp_reply_error;   /* !=0 para probar el rechazo del FSP */
-static int fake_gpu_gone;          /* la GPU no contesta: todo el MMIO a unos */
 static int fake_die_after_mtail;   /* 0 = no morir; N = morir tras N lecturas de MSGQ_TAIL */
 static unsigned fake_mtail_reads;
 static unsigned fake_recover_calls;
 static int fake_unload_pending;    /* !=0 → MAILBOX0 acaba dando 0x80000000 */
+/* Muerte DENTRO del bucle de arranque del FMC: N = morir en la N-ésima lectura de
+ * MAILBOX0, que es la que hace `lockdown_released`. Distinto de
+ * `fake_die_after_mtail`, que mata antes, en la respuesta al COT. */
+static int fake_die_after_mbox0;
+static int fake_died_once;         /* la muerte se dispara una vez, no en bucle */
+/* Qué contesta el espacio de configuración. -1 = ni eso responde; 0 = responde
+ * (que es lo que hace vfio-pci, emulando el id, aunque el MMIO esté muerto). */
+static int fake_recover_ret = -1;
+static uint32_t fake_pramin_win;
+/* MMU invalidate (tu102_vmm_flush → 0xb830a0/a4/b0). La lectura de INVALIDATE
+ * devuelve el valor sin el bit TRIGGER: invalidación instantánea en el mock. */
+#define FAKE_MMU_INVAL_PDB       0xb830a0u
+#define FAKE_MMU_INVAL_UPPER_PDB 0xb830a4u
+#define FAKE_MMU_INVAL           0xb830b0u
+static uint32_t fake_mmu_inval_pdb;
+static uint32_t fake_mmu_inval_upper;
+static uint32_t fake_mmu_inval;
 
 static void fake_fsp_reset(void)
 {
@@ -104,6 +135,11 @@ static void fake_fsp_reset(void)
     fsp_sent_dwords = fsp_mbox_reads = 0;
     fake_gpu_gone = fake_die_after_mtail = 0;
     fake_mtail_reads = fake_recover_calls = 0;
+    fake_die_after_mbox0 = fake_died_once = 0;
+    fake_revive_after_mdelays = 0;
+    fake_recover_ret = -1;
+    fake_pramin_win = 0;
+    fake_mmu_inval_pdb = fake_mmu_inval_upper = fake_mmu_inval = 0;
 }
 
 /* Escribir QUEUE_HEAD es el timbre: el FSP lee el mensaje y contesta. */
@@ -124,6 +160,67 @@ static void fake_fsp_consume(void)
     /* Las lecturas de MSGQ_TAIL se cuentan desde que hay respuesta encolada: las
      * de fsp_ready_to_send(), anteriores al envío, no deben gastar el contador. */
     fake_mtail_reads = 0;
+}
+
+/* Igual que `FAKE_DOORBELL_REG`: literales porque este mock va antes del
+ * `#include "nvrm_r570.h"`, atados abajo con asserts de compilación. */
+#define FAKE_USERMODE_TIME 0xbb0080u
+#define FAKE_PTIMER_TIME   0x009400u
+static unsigned fake_usermode_reads;
+static int fake_usermode_dead;
+static uint32_t fake_clock;
+
+/* Tabla PTOP simulada, con el formato de `ga100_top_parse`: tres palabras por
+ * motor, las dos primeras con el bit 31 puesto para encadenar. Se montan GR0 y dos
+ * CE con runlists DISTINTAS a propósito: un parser que devolviera siempre la
+ * primera entrada, o que ignorase la instancia, pasaría una tabla de un solo
+ * motor. La palabra a cero del medio es un hueco, que la tabla real también tiene
+ * y no debe cortar el recorrido. */
+#define FAKE_PTOP_SCAL   0x0224fcu
+#define FAKE_PTOP_INFO   0x022800u
+#define FAKE_PTOP_WORDS  10u
+#define FAKE_TOP_GR_RUNL   0x00d00000u
+#define FAKE_TOP_CE0_RUNL  0x00d00000u
+#define FAKE_TOP_CE1_RUNL  0x00d00400u
+static const uint32_t fake_ptop[FAKE_PTOP_WORDS] = {
+    /* GR0: tipo 0x00, inst 0, fault 0x1a | addr 0x400000 reset 2 | runlist */
+    0x8000001au, 0x80400002u, FAKE_TOP_GR_RUNL | 0u,
+    0u,                                     /* hueco */
+    /* CE0: tipo 0x13, inst 0, fault 0x1b | addr 0x104000 reset 3 | runlist, engine 1 */
+    0x9300001bu, 0x80104003u, FAKE_TOP_CE0_RUNL | 1u,
+    /* CE1: tipo 0x13, inst 1, fault 0x1c | addr 0x105000 reset 4 | runlist, engine 1 */
+    0x9301001cu, 0x80105004u, FAKE_TOP_CE1_RUNL | 1u,
+};
+
+/* PRAMIN: ventana 0x10fd40 → lectura FB en 0x700000+off (nouveau instmem). */
+#define FAKE_PRAMIN_WINDOW  0x0010fd40u
+#define FAKE_PRAMIN_BASE    0x00700000u
+#define FAKE_USERD_OFF_GPPUT 0x8cu
+static uint8_t fake_vram[0x400000];
+
+static uint64_t fake_pramin_vaddr(unsigned win_off)
+{
+    return ((uint64_t)fake_pramin_win << 16) | (uint64_t)win_off;
+}
+
+static uint32_t fake_pramin_mmio_rd(unsigned win_off)
+{
+    uint64_t vaddr = fake_pramin_vaddr(win_off);
+
+    if (vaddr + 4u > sizeof(fake_vram)) {
+        return 0;
+    }
+    return *(const uint32_t *)(fake_vram + vaddr);
+}
+
+static void fake_pramin_mmio_wr(unsigned win_off, uint32_t val)
+{
+    uint64_t vaddr = fake_pramin_vaddr(win_off);
+
+    if (vaddr + 4u > sizeof(fake_vram)) {
+        return;
+    }
+    *(uint32_t *)(fake_vram + vaddr) = val;
 }
 
 static uint32_t gsp_mmio_rd32(uint32_t off)
@@ -162,11 +259,46 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
         if (fake_unload_pending) {
             return fsp_mbox_reads++ < 3 ? 0u : 0x80000000u;
         }
+        /* Muerte a mitad del arranque del FMC: `lockdown_released` sondea aquí,
+         * así que la N-ésima lectura es un punto de corte controlado. Se dispara
+         * una sola vez para poder simular que la tarjeta vuelve. */
+        if (fake_die_after_mbox0 && !fake_died_once &&
+            (int)fsp_mbox_reads + 1 >= fake_die_after_mbox0) {
+            fake_died_once = 1;
+            fake_gpu_gone = 1;
+        }
         return fsp_mbox_reads++ < 3 ? 0xbadf4100u : 0u;
     case R_MBOX1: return 0;
     case R_HWCFG2: return 0;                    /* lockdown liberado */
     case R_CPUCTL: return 0x180u;               /* RISC-V activo (bit 7) */
-    default: return 0;
+    /* Los dos relojes de `chan_probe_usermode`. Avanzan en cada lectura para que
+     * la comprobación recorra su camino bueno; el contador de lecturas del de
+     * usermode es la señal observable de que el port mira ESE offset y no otro
+     * (mismo truco que `FAKE_DOORBELL_REG`). */
+    case FAKE_USERMODE_TIME:
+        fake_usermode_reads++;
+        /* Aperture muerto: el anillo PRI contesta con un `0xbadfxxxx`, que es lo
+         * que se vería si el usermode de este chip no estuviera en 0xbb0000. */
+        return fake_usermode_dead ? 0xbadf1000u : ++fake_clock;
+    case FAKE_PTIMER_TIME:   return ++fake_clock;
+    /* Devinit del firmware de la GPU ya terminado: `tu102_devinit_wait` quiere el
+     * bit 0 de 0x118128 y 0xff en 0x118234. */
+    case 0x118128u: return 1u;
+    case 0x118234u: return 0xffu;
+    case FAKE_PTOP_SCAL: return FAKE_PTOP_WORDS << 20;
+    case FAKE_PRAMIN_WINDOW: return fake_pramin_win;
+    case FAKE_MMU_INVAL_PDB: return fake_mmu_inval_pdb;
+    case FAKE_MMU_INVAL_UPPER_PDB: return fake_mmu_inval_upper;
+    case FAKE_MMU_INVAL: return fake_mmu_inval;
+    default:
+        if (off >= FAKE_PRAMIN_BASE && off + 4u <= FAKE_PRAMIN_BASE + 0x10000u) {
+            return fake_pramin_mmio_rd(off - FAKE_PRAMIN_BASE);
+        }
+        if (off >= FAKE_PTOP_INFO &&
+            off < FAKE_PTOP_INFO + FAKE_PTOP_WORDS * 4u) {
+            return fake_ptop[(off - FAKE_PTOP_INFO) / 4u];
+        }
+        return 0;
     }
 }
 
@@ -175,7 +307,8 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
  * observable de que el driver la diagnostica como caída (intenta recuperar por
  * espacio de configuración) y no como cola vacía. */
 static int gsp_mmio_alive(void) { return !fake_gpu_gone; }
-static int gsp_mmio_pci_recover(void) { fake_recover_calls++; return -1; }
+static int gsp_mmio_pci_recover(void) { fake_recover_calls++; return fake_recover_ret; }
+static int gsp_mmio_pri_error(uint32_t v) { return (v & 0xffff0000u) == 0xbadf0000u; }
 
 /* Doorbell del canal. El literal es inevitable —este mock está ANTES del
  * `#include "nvrm_r570.h"`, así que aquí `NV_VFN_DOORBELL` todavía no existe—,
@@ -199,7 +332,24 @@ static void gsp_mmio_wr32(uint32_t off, uint32_t val)
         fake_doorbell_writes++;
         fake_doorbell_last = val;
         break;
-    default: break;
+    case FAKE_PRAMIN_WINDOW:
+        fake_pramin_win = val;
+        break;
+    case FAKE_MMU_INVAL_PDB:
+        fake_mmu_inval_pdb = val;
+        break;
+    case FAKE_MMU_INVAL_UPPER_PDB:
+        fake_mmu_inval_upper = val;
+        break;
+    case FAKE_MMU_INVAL:
+        fake_mmu_inval = val & ~0x80000000u;
+        break;
+    default:
+        if (off >= FAKE_PRAMIN_BASE && off + 4u <= FAKE_PRAMIN_BASE + 0x10000u) {
+            fake_pramin_mmio_wr(off - FAKE_PRAMIN_BASE, val);
+            break;
+        }
+        break;
     }
 }
 
@@ -219,6 +369,10 @@ static const struct gsp_fw_blob *gsp_fw_get(enum gsp_fw_kind k)
  * header. Esto es lo que impide que los dos números se separen. */
 typedef char fake_doorbell_reg_check[
     FAKE_DOORBELL_REG == NV_VFN_DOORBELL ? 1 : -1];
+/* Y el reloj de usermode, por lo mismo: si el aperture se mueve, el mock tiene que
+ * moverse con él o la sonda daría verde leyendo un registro que ya no es. */
+typedef char fake_usermode_reg_check[
+    FAKE_USERMODE_TIME == NV_VFN_USERMODE_BASE + 0x80u ? 1 : -1];
 
 #include "gsp_dma_body.inc"
 #include "gsp_rm_body.inc"
@@ -231,8 +385,12 @@ typedef char fake_doorbell_reg_check[
 #include "gsp_rm_obj_body.inc"
 #include "gsp_vram_body.inc"
 #include "gsp_vmm_body.inc"
+#include "gsp_top_body.inc"
+#include "gsp_chip_body.inc"
+#include "gsp_pramin_body.inc"
 #include "gsp_chan_body.inc"
 #include "gsp_ce_body.inc"
+#include "gsp_grctx_body.inc"
 #include "gsp_compute_body.inc"
 #include "gsp_fini_body.inc"
 
@@ -912,6 +1070,12 @@ static int check_rm_objects(const struct gsp_libos *lo)
  * sysmem → aper 2, pcf 0x11 (REGULAR_RW_ATOMIC_UNCACHED_ACD) → 0x8d */
 #define VMM_T_PTE_VRAM_LOW   0x81ull
 #define VMM_T_PTE_SYS_LOW    0x8dull
+/* Y los de sólo lectura, que sólo cambian el bit 2 del PCF (0x10→0x14, 0x11→0x15):
+ * VRAM RO → 0xa1, sysmem RO → 0xad. Los números están puestos a mano a propósito;
+ * derivarlos con la misma expresión que el código haría que un PCF mal elegido
+ * pasara la prueba. */
+#define VMM_T_PTE_VRAM_RO_LOW 0xa1ull
+#define VMM_T_PTE_SYS_RO_LOW  0xadull
 /* PDE: **bit 0 a cero** (ahí vive IS_PTE, no VALID) | APERTURE(2:1) | PCF(5:3).
  * sysmem coherente → aper 2, pcf 1 (VALID_UNCACHED_ATS_ALLOWED) → 0xc */
 #define VMM_T_PDE_SYS_LOW    0x0cull
@@ -1068,6 +1232,28 @@ static int check_vmm(const struct gsp_libos *lo)
         printf("FALLO: gsp_vmm_map\n");
         return -1;
     }
+    {
+        uint32_t want_pdb = (uint32_t)((root_phys >> 8) | 0x2u);
+        uint32_t want_upper = (uint32_t)(root_phys >> 40);
+
+        if (fake_mmu_inval_pdb != want_pdb) {
+            printf("FALLO: MMU INVALIDATE_PDB=0x%08x (esperaba 0x%08x)\n",
+                   fake_mmu_inval_pdb, want_pdb);
+            return -1;
+        }
+        if (fake_mmu_inval_upper != want_upper) {
+            printf("FALLO: MMU INVALIDATE_UPPER_PDB=0x%08x (esperaba 0x%08x)\n",
+                   fake_mmu_inval_upper, want_upper);
+            return -1;
+        }
+        if (fake_mmu_inval != 0x1u) {
+            printf("FALLO: MMU INVALIDATE=0x%08x (esperaba 0x1 ALL_VA sin trigger)\n",
+                   fake_mmu_inval);
+            return -1;
+        }
+    }
+    printf("OK: MMU invalidate tras mapeo (PDB sysmem 0x%08x, trigger ALL_VA)\n",
+           fake_mmu_inval_pdb);
     if (v.pages_mapped != 512 + 1) {
         printf("FALLO: %u páginas mapeadas (esperaba 513)\n", v.pages_mapped);
         return -1;
@@ -1110,6 +1296,50 @@ static int check_vmm(const struct gsp_libos *lo)
     }
     printf("OK: PTE de sysmem, banderas 0x%llx (aper 2, PCF 0x11)\n",
            (unsigned long long)VMM_T_PTE_SYS_LOW);
+
+    /* Sólo lectura, en las dos aperturas. Lo que se prueba no es que la bandera
+     * llegue, sino que **cambia el PCF y nada más**: un `ro` que además tocara la
+     * apertura o el caché sería otra cosa mapeada de otra forma, y desde fuera se
+     * vería igual de "read-only". */
+    {
+        uint64_t ro_va = VMM_T_VA + VMM_T_VRAM_SZ + 0x10000ull;
+
+        if (gsp_vmm_map_flags(&v, ro_va, VMM_T_VRAM_PA, 4096ull, GSP_VMM_VRAM,
+                              GSP_VMM_RO) != 0 ||
+            gsp_vmm_map_flags(&v, ro_va + 4096ull, scratch.phys, 4096ull,
+                              GSP_VMM_SYSMEM, GSP_VMM_RO) != 0) {
+            printf("FALLO: gsp_vmm_map_flags con GSP_VMM_RO\n");
+            return -1;
+        }
+        if (gsp_vmm_translate(&v, ro_va, &phys, &pte) != 0 ||
+            (pte & ~VMM_T_ADDR_MASK) != VMM_T_PTE_VRAM_RO_LOW) {
+            printf("FALLO: PTE de VRAM sólo lectura con banderas 0x%llx (esperaba "
+                   "0x%llx)\n", (unsigned long long)(pte & ~VMM_T_ADDR_MASK),
+                   (unsigned long long)VMM_T_PTE_VRAM_RO_LOW);
+            return -1;
+        }
+        if (gsp_vmm_translate(&v, ro_va + 4096ull, &phys, &pte) != 0 ||
+            (pte & ~VMM_T_ADDR_MASK) != VMM_T_PTE_SYS_RO_LOW) {
+            printf("FALLO: PTE de sysmem sólo lectura con banderas 0x%llx "
+                   "(esperaba 0x%llx)\n",
+                   (unsigned long long)(pte & ~VMM_T_ADDR_MASK),
+                   (unsigned long long)VMM_T_PTE_SYS_RO_LOW);
+            return -1;
+        }
+        /* Y que sin la bandera siga saliendo el de lectura y escritura: si el `ro`
+         * se quedara pegado en algún estado, esto lo caza. */
+        if (gsp_vmm_map(&v, ro_va + 8192ull, VMM_T_VRAM_PA, 4096ull,
+                        GSP_VMM_VRAM) != 0 ||
+            gsp_vmm_translate(&v, ro_va + 8192ull, &phys, &pte) != 0 ||
+            (pte & ~VMM_T_ADDR_MASK) != VMM_T_PTE_VRAM_LOW) {
+            printf("FALLO: tras un mapeo RO, el siguiente sin bandera sale 0x%llx\n",
+                   (unsigned long long)(pte & ~VMM_T_ADDR_MASK));
+            return -1;
+        }
+        printf("OK: sólo lectura cambia sólo el PCF (VRAM 0x%llx, sysmem 0x%llx) y "
+               "no se queda pegado\n", (unsigned long long)VMM_T_PTE_VRAM_RO_LOW,
+               (unsigned long long)VMM_T_PTE_SYS_RO_LOW);
+    }
 
     /* Lo que no está mapeado tiene que fallar; si no, el recorrido no prueba nada. */
     if (gsp_vmm_translate(&v, VMM_T_VA + VMM_T_VRAM_SZ + 4096ull, &phys, &pte) == 0) {
@@ -1164,6 +1394,89 @@ static int check_vmm(const struct gsp_libos *lo)
         }
     }
     printf("OK: PDEs con bit 0 a cero, aper 2 y PCF 1; la mitad grande vacía\n");
+
+    /* Promoción del grctx de gb205 (tamaños del ciclo 2026-07-29): con el pool de
+     * 24 tablas esto fallaba al mapear ATTRIBUTE_CB; aquí se comprueba que cabe. */
+    {
+        static const struct {
+            uint64_t size;
+            uint64_t align;
+            unsigned ro;
+            unsigned skip_map;
+            unsigned is_attr_cb;
+            const char *name;
+        } gb205_grctx[] = {
+            { 0x349000ull, 0x200000ull, 0, 0, 0, "MAIN" },
+            { 36ull * 1024ull, 0x1000ull, 0, 0, 0, "PATCH" },
+            { 12ull * 1024ull, 0x1000ull, 0, 0, 0, "BUNDLE_CB" },
+            { 128ull * 1024ull, 0x10000ull, 0, 0, 0, "PAGEPOOL" },
+            { 51552ull * 1024ull, 0x4000000ull, 0, 0, 1, "ATTRIBUTE_CB" },
+            { 512ull * 1024ull, 0x10000ull, 0, 0, 0, "RTV_CB_GLOBAL" },
+            { 64ull * 1024ull, 0x10000ull, 0, 0, 0, "FECS_EVENT" },
+            { 512ull * 1024ull, 0x10000ull, 0, 1, 0, "PRIV_ACCESS_MAP" },
+            { 512ull * 1024ull, 0x10000ull, 1, 0, 0, "UNRESTRICTED_PRIV_ACCESS_MAP" },
+        };
+        uint64_t va_next = GSP_GRCTX_VA_BASE;
+        uint64_t fake_phys = 0x600000ull;
+        uint64_t attr_va = 0;
+        unsigned n;
+        unsigned pt_grctx_start = v.pt_nr;
+
+        for (n = 0; n < sizeof(gb205_grctx) / sizeof(gb205_grctx[0]); n++) {
+            const uint64_t size = gb205_grctx[n].size;
+            const uint64_t align = gb205_grctx[n].align;
+            uint64_t va = align_up_u64(va_next, align);
+            unsigned flags = gb205_grctx[n].ro ? GSP_VMM_RO : 0u;
+
+            if (gb205_grctx[n].skip_map) {
+                va_next = va + size;
+                continue;
+            }
+            if (gsp_vmm_map_flags(&v, va, fake_phys, size, GSP_VMM_VRAM, flags) != 0) {
+                printf("FALLO: grctx gb205 no mapea %s en 0x%llx (%llu KiB, "
+                       "tablas=%u/%u)\n", gb205_grctx[n].name,
+                       (unsigned long long)va,
+                       (unsigned long long)(size / 1024ull), v.pt_nr,
+                       GSP_VMM_MAX_PT);
+                return -1;
+            }
+            if (gsp_vmm_translate(&v, va, &phys, &pte) != 0 ||
+                phys != fake_phys) {
+                printf("FALLO: grctx %s VA 0x%llx → phys 0x%llx\n",
+                       gb205_grctx[n].name, (unsigned long long)va,
+                       (unsigned long long)phys);
+                return -1;
+            }
+            if (gb205_grctx[n].is_attr_cb) {
+                attr_va = va;
+                if (gsp_vmm_translate(&v, va + size - 4096ull, &phys, &pte) != 0 ||
+                    phys != fake_phys + size - 4096ull) {
+                    printf("FALLO: grctx ATTRIBUTE_CB extremo alto no traduce\n");
+                    return -1;
+                }
+            }
+            fake_phys += size;
+            va_next = va + size;
+        }
+        if (v.pt_nr >= GSP_VMM_MAX_PT) {
+            printf("FALLO: grctx agotó el pool (%u >= %u)\n", v.pt_nr,
+                   GSP_VMM_MAX_PT);
+            return -1;
+        }
+        if (v.pt_nr <= 24u) {
+            printf("FALLO: grctx usa %u tablas — no supera el límite viejo de 24\n",
+                   v.pt_nr);
+            return -1;
+        }
+        if (attr_va != 0x8044000000ull) {
+            printf("FALLO: ATTRIBUTE_CB VA 0x%llx (esperaba 0x8044000000)\n",
+                   (unsigned long long)attr_va);
+            return -1;
+        }
+        printf("OK: grctx gb205 mapeado (%u tablas, +%u desde %u; ATTRIBUTE_CB "
+               "0x%llx)\n", v.pt_nr, v.pt_nr - pt_grctx_start, pt_grctx_start,
+               (unsigned long long)attr_va);
+    }
 
     /* Y el reparto de VRAM. La región basada en 0 es EL caso de esta tarjeta,
      * no un caso raro: los offsets de VRAM cuentan desde el inicio del
@@ -1257,7 +1570,7 @@ static uint64_t qmd_get_bits(const uint32_t *qmd, unsigned lo, unsigned hi)
 
 /* G4f/G5: el QMD tal y como lo va a leer el SM. Un campo a cero aquí no da error
  * en ningún sitio — simplemente lanza mal, y en la GPU eso es un cuelgue sin
- * traza. Se contrasta contra clcdc0qmd.h campo a campo.
+ * traza. Se contrasta contra clcec0qmd.h campo a campo.
  *
  * Va parametrizado por kernel y por malla porque los dos números que de verdad
  * cambian entre saxpy y matvec —el regcount (10 vs 37) y la VA del programa— son
@@ -1270,10 +1583,13 @@ static int check_qmd_fields(const struct gsp_compute *cp,
     const uint32_t *w = q->words;
     uint64_t prog, cbank, sem;
 
-    if (qmd_get_bits(w, QMDV05_QMD_TYPE) != NVCDC0_QMDV05_00_QMD_TYPE_GRID_CTA ||
+    if (qmd_get_bits(w, QMDV05_QMD_TYPE) != NVCEC0_QMDV05_00_QMD_TYPE_GRID_CTA ||
         qmd_get_bits(w, QMDV05_QMD_MAJOR_VERSION) !=
-            NVCDC0_QMDV05_00_QMD_MAJOR_VERSION_V05) {
-        printf("FALLO: QMD type/version\n");
+            NVCEC0_QMDV05_00_QMD_MAJOR_VERSION_V05 ||
+        qmd_get_bits(w, QMDV05_QMD_GROUP_ID) != 0x1fu ||
+        qmd_get_bits(w, QMDV05_API_VISIBLE_CALL_LIMIT) !=
+            NVCEC0_QMDV05_00_API_VISIBLE_CALL_LIMIT_NO_CHECK) {
+        printf("FALLO: QMD type/version/group/call_limit\n");
         return -1;
     }
 
@@ -1545,6 +1861,7 @@ static int check_mv_tiling(struct gsp_compute *cp)
  * bien copiado pero mal escrito es indistinguible de uno mal copiado si el
  * número es pequeño. */
 #define FAKE_DOORBELL_TOKEN  0x00070000u
+#define FAKE_DOORBELL_KICK   (FAKE_DOORBELL_TOKEN | NV_VF_DOORBELL_RUNLIST_DOORBELL_ENABLE)
 
 /* Catálogo de clases: que se pida bien y que lo contestado mande de verdad.
  *
@@ -1701,6 +2018,293 @@ static int check_classlist(const struct gsp_libos *lo)
     return 0;
 }
 
+/* El plan del contexto de GR: aritmética pura sobre lo que contesta RM, y por eso
+ * probable sin GPU. Aquí no hay mensajes de error posibles —un búfer del tamaño o
+ * la alineación equivocados sale del silicio como "el gráfico lee fuera"—, así que
+ * los números se comprueban uno a uno contra `r535_gr_get_ctxbuf_info`. */
+static int check_grctx(void)
+{
+    NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS *info;
+    struct gsp_grctx ctx;
+    const struct gsp_grctx_buf *b;
+    unsigned i;
+    int n;
+
+    info = calloc(1, sizeof(*info));
+    if (!info) {
+        printf("FALLO: sin memoria para la info de contexto\n");
+        return -1;
+    }
+#define ENG0(prop) info->engineContextBuffersInfo[0].engine[(prop)]
+#define ENG1(prop) info->engineContextBuffersInfo[1].engine[(prop)]
+    ENG0(NV0080_CTX_PROP_GRAPHICS).size = 0x9000u;            /* el principal */
+    ENG0(NV0080_CTX_PROP_GRAPHICS_PATCH).size = 0x1000u;
+    ENG0(NV0080_CTX_PROP_GRAPHICS_BUNDLE_CB).size = 0x30000u; /* 192 KiB */
+    ENG0(NV0080_CTX_PROP_GRAPHICS_PAGEPOOL).size = 0x8000u;   /* 32 KiB */
+    ENG0(NV0080_CTX_PROP_GRAPHICS_ATTRIBUTE_CB).size = 0x1800000u; /* 24 MiB */
+    ENG0(NV0080_CTX_PROP_GRAPHICS_RTV_CB_GLOBAL).size = 0u;   /* este chip no lo usa */
+    ENG0(NV0080_CTX_PROP_GRAPHICS_FECS_EVENT).size = 0x1000u;
+    ENG0(NV0080_CTX_PROP_GRAPHICS_PRIV_ACCESS_MAP).size = 0x10000u;
+    /* Otro motor con tamaños distintos: si el plan ignorase `engine_idx`, cogería
+     * estos y los números de abajo no cuadrarían. */
+    ENG1(NV0080_CTX_PROP_GRAPHICS).size = 0x400000u;
+    ENG1(NV0080_CTX_PROP_GRAPHICS_PATCH).size = 0x400000u;
+
+    n = gsp_grctx_plan(info, 0, &ctx);
+    /* Siete propiedades con tamaño (la de RTV va a cero y se salta) más el
+     * duplicado del mapa de acceso privilegiado = 8. */
+    if (n != 8) {
+        printf("FALLO: el plan da %d búferes, esperaba 8\n", n);
+        goto fallo;
+    }
+
+    /* MAIN: ALIGN(0x9000, 0x1000) + 64 páginas = 0x49000, que ya pasa de 64 KiB →
+     * página 2^16. Sin el margen de las 64 páginas saldría 0x9000 y página 2^12:
+     * el mismo búfer con la mitad de sitio y otra alineación. */
+    b = &ctx.buf[0];
+    if (b->buffer_id != NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_MAIN ||
+        b->size != 0x49000u || b->page_shift != 16 || b->align != 0x10000u ||
+        !b->init || b->global) {
+        printf("FALLO: MAIN size=0x%llx page=2^%u align=0x%llx init=%u global=%u\n",
+               (unsigned long long)b->size, b->page_shift,
+               (unsigned long long)b->align, b->init, b->global);
+        goto fallo;
+    }
+    /* ATTRIBUTE_CB: la alineación es `order_base_2(size)`, NO la página. 24 MiB
+     * redondea a 32 MiB; con la página saldrían 2 MiB y RM no se quejaría. */
+    for (i = 0, b = NULL; i < ctx.nr; i++) {
+        if (ctx.buf[i].buffer_id == NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_ATTRIBUTE_CB) {
+            b = &ctx.buf[i];
+        }
+    }
+    if (!b || b->align != 0x2000000u || b->page_shift != 21 || !b->global || b->init) {
+        printf("FALLO: ATTRIBUTE_CB align=0x%llx page=2^%u global=%u init=%u\n",
+               b ? (unsigned long long)b->align : 0ull, b ? b->page_shift : 0,
+               b ? b->global : 0, b ? b->init : 0);
+        goto fallo;
+    }
+    /* El de RTV, con tamaño 0, no debe estar: reservarle una página "por si acaso"
+     * es memoria que RM no espera en ese bufferId. */
+    for (i = 0; i < ctx.nr; i++) {
+        if (ctx.buf[i].buffer_id == NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_RTV_CB_GLOBAL) {
+            printf("FALLO: el plan incluye un búfer de tamaño 0\n");
+            goto fallo;
+        }
+    }
+    /* El mapa de acceso privilegiado va dos veces, con el mismo tamaño y el segundo
+     * con el bufferId "sin restricciones". Y es el único `ro`. */
+    if (ctx.buf[ctx.nr - 2].buffer_id !=
+            NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PRIV_ACCESS_MAP ||
+        ctx.buf[ctx.nr - 1].buffer_id !=
+            NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_UNRESTRICTED_PRIV_ACCESS_MAP ||
+        ctx.buf[ctx.nr - 1].size != ctx.buf[ctx.nr - 2].size ||
+        !ctx.buf[ctx.nr - 1].ro) {
+        printf("FALLO: el PRIV_ACCESS_MAP no se duplica bien (%u/%u)\n",
+               ctx.buf[ctx.nr - 2].buffer_id, ctx.buf[ctx.nr - 1].buffer_id);
+        goto fallo;
+    }
+    /* Y que los dos juegos de números no se confundan: la propiedad 0x17 tiene que
+     * salir como bufferId 9, no como 0x17. */
+    for (i = 0, b = NULL; i < ctx.nr; i++) {
+        if (ctx.buf[i].prop_id == NV0080_CTX_PROP_GRAPHICS_FECS_EVENT) {
+            b = &ctx.buf[i];
+        }
+    }
+    if (!b || b->buffer_id != NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_FECS_EVENT) {
+        printf("FALLO: la propiedad 0x17 no traduce a bufferId 9\n");
+        goto fallo;
+    }
+
+    /* El otro motor, para demostrar que `engine_idx` se usa. */
+    n = gsp_grctx_plan(info, 1, &ctx);
+    if (n != 2 || ctx.buf[0].size != 0x400000u + 64u * 0x1000u) {
+        printf("FALLO: el plan del motor 1 da %d búferes (MAIN 0x%llx)\n", n,
+               n > 0 ? (unsigned long long)ctx.buf[0].size : 0ull);
+        goto fallo;
+    }
+    /* Un motor fuera de rango no se inventa nada. */
+    if (gsp_grctx_plan(info, NV2080_CTRL_INTERNAL_GR_MAX_ENGINES, &ctx) != -1) {
+        printf("FALLO: el plan acepta un índice de motor fuera de rango\n");
+        goto fallo;
+    }
+#undef ENG0
+#undef ENG1
+    free(info);
+    printf("OK: plan del contexto de GR — 8 búferes, MAIN +64 páginas, "
+           "ATTRIBUTE_CB alineado a 32 MiB, tamaño 0 saltado, PRIV_ACCESS_MAP "
+           "duplicado\n");
+    return 0;
+/* Un solo sitio donde soltar `info`: el `free` + `return -1` estaba repetido ocho
+ * veces, y la novena comprobación que se añadiera se lo dejaría. */
+fallo:
+    free(info);
+    return -1;
+}
+
+/* PTOP: la topología que publica el chip, que es de donde tienen que salir las
+ * direcciones de las runlists en vez de un índice inferido de la tabla de RM
+ * (2026-07-28: la inferencia leyó 0xbadf5040 en GB205).
+ *
+ * La tabla simulada tiene tres motores con runlists distintas y un hueco en medio;
+ * un parser que devolviera la primera entrada, o que ignorase la instancia, o que
+ * cortase en el hueco, pasaría una prueba de un solo motor y aquí no. */
+static int check_ptop(void)
+{
+    uint32_t runl = 0;
+    uint32_t addr = 0;
+    uint8_t type = 0;
+    uint8_t inst = 0;
+    int n;
+
+    /* Primero el caso malo: sin GPU en el bus, PTOP no puede "encontrar" nada. Si
+     * esto colase, el volcado del canal se pondría a leer registros a partir de
+     * una tabla de ceros y diría cosas sobre un chip que no está. */
+    fake_gpu_gone = 1;
+    if (gsp_top_probe() != -1 ||
+        gsp_top_runlist_of(GSP_TOP_TYPE_CE, 0, &runl, NULL) == 0) {
+        printf("FALLO: PTOP se cree una tabla con la GPU fuera del bus\n");
+        fake_gpu_gone = 0;
+        return -1;
+    }
+    fake_gpu_gone = 0;
+
+    n = gsp_top_probe();
+    if (n != 3) {
+        printf("FALLO: PTOP devuelve %d motores, esperaba 3\n", n);
+        return -1;
+    }
+    if (gsp_top_runlist_of(GSP_TOP_TYPE_GR, 0, &runl, &addr) != 0 ||
+        runl != FAKE_TOP_GR_RUNL || addr != 0x400000u) {
+        printf("FALLO: PTOP GR0 runlist=0x%06x addr=0x%06x\n", runl, addr);
+        return -1;
+    }
+    if (gsp_top_runlist_of(GSP_TOP_TYPE_CE, 0, &runl, &addr) != 0 ||
+        runl != FAKE_TOP_CE0_RUNL || addr != 0x104000u) {
+        printf("FALLO: PTOP CE0 runlist=0x%06x addr=0x%06x\n", runl, addr);
+        return -1;
+    }
+    /* La que separa "lee la tabla" de "devuelve la primera que encuentra". */
+    if (gsp_top_runlist_of(GSP_TOP_TYPE_CE, 1, &runl, &addr) != 0 ||
+        runl != FAKE_TOP_CE1_RUNL || addr != 0x105000u) {
+        printf("FALLO: PTOP CE1 runlist=0x%06x addr=0x%06x (¿ignora la "
+               "instancia?)\n", runl, addr);
+        return -1;
+    }
+    if (gsp_top_runlist_of(GSP_TOP_TYPE_NVDEC, 0, &runl, NULL) == 0) {
+        printf("FALLO: PTOP inventa un NVDEC que no está en la tabla\n");
+        return -1;
+    }
+
+    /* Y la traducción desde los engineType de RM, que es como llega la pregunta. */
+    if (gsp_top_type_of_engine(NV2080_ENGINE_TYPE_GR0, &type, &inst) != 0 ||
+        type != GSP_TOP_TYPE_GR || inst != 0) {
+        printf("FALLO: GR0 de RM no traduce a PTOP (0x%02x/%u)\n", type, inst);
+        return -1;
+    }
+    if (gsp_top_type_of_engine(NV2080_ENGINE_TYPE_COPY0 + 1u, &type, &inst) != 0 ||
+        type != GSP_TOP_TYPE_CE || inst != 1) {
+        printf("FALLO: COPY1 de RM no traduce a CE1 (0x%02x/%u)\n", type, inst);
+        return -1;
+    }
+    /* Un motor que no sabemos traducir tiene que fallar, no caer en el 0 — que es
+     * justo GR y mandaría el volcado a los registros del gráfico. */
+    if (gsp_top_type_of_engine(100u, &type, &inst) == 0) {
+        printf("FALLO: un engineType desconocido traduce a 0x%02x/%u\n", type, inst);
+        return -1;
+    }
+    printf("OK: PTOP — 3 motores (GR0, CE0, CE1 con runlists 0x%06x/0x%06x), "
+           "hueco saltado, y sin GPU no inventa tabla\n",
+           FAKE_TOP_CE0_RUNL, FAKE_TOP_CE1_RUNL);
+    return 0;
+}
+
+static int check_pramin(void)
+{
+    gsp_pramin_invalidate();
+
+    gsp_mmio_wr32(FAKE_PRAMIN_WINDOW, 0x10u);
+    if (gsp_mmio_rd32(FAKE_PRAMIN_WINDOW) != 0x10u) {
+        printf("FALLO: PRAMIN ventana readback (escribí 0x10, leí 0x%x)\n",
+               gsp_mmio_rd32(FAKE_PRAMIN_WINDOW));
+        return -1;
+    }
+
+    gsp_pramin_wr32(0x1234ull, 0xdeadbeefu);
+    if (gsp_pramin_rd32(0x1234ull) != 0xdeadbeefu) {
+        printf("FALLO: PRAMIN rd/wr (escribí deadbeef, leí %08x)\n",
+               gsp_pramin_rd32(0x1234ull));
+        return -1;
+    }
+
+    gsp_pramin_wr32(0xfffcull, 0xaaaau);
+    gsp_pramin_wr32(0x10000ull, 0xbbbau);
+    if (gsp_pramin_rd32(0xfffcull) != 0xaaaau ||
+        gsp_pramin_rd32(0x10000ull) != 0xbbbau) {
+        printf("FALLO: PRAMIN cruce 64K (0xfffc=%08x 0x10000=%08x)\n",
+               gsp_pramin_rd32(0xfffcull), gsp_pramin_rd32(0x10000ull));
+        return -1;
+    }
+
+    if (!gsp_pramin_alive()) {
+        printf("FALLO: gsp_pramin_alive\n");
+        return -1;
+    }
+
+    printf("OK: PRAMIN ventana BAR0 + rd/wr + cruce 64K\n");
+    return 0;
+}
+
+static int check_rc_triggered(void)
+{
+    rpc_rc_triggered_v17_02 msg;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.nv2080EngineType = NV2080_ENGINE_TYPE_COPY0;
+    msg.chid = 0;
+    msg.exceptType = 32;
+    msg.scope = 1;
+    msg.partitionAttributionId = 0;
+    msg.mmuFaultAddrLo = 0x1000u;
+    msg.mmuFaultType = 3;
+
+    if (gsp_rpc_rc_triggered_log(&msg, sizeof(msg)) != 0) {
+        printf("FALLO: gsp_rpc_rc_triggered_log\n");
+        return -1;
+    }
+    if (gsp_rpc_rc_triggered_log(&msg, 4u) == 0) {
+        printf("FALLO: rc parser aceptó payload corto\n");
+        return -1;
+    }
+    if (strcmp(mmu_fault_type_name(0), "PDE") != 0) {
+        printf("FALLO: mmu_fault_type_name(0)=%s (esperaba PDE)\n",
+               mmu_fault_type_name(0));
+        return -1;
+    }
+    printf("OK: RC_TRIGGERED decodificado (engn=%08x chid=%u type=%u PBDMA_ERROR)\n",
+           msg.nv2080EngineType, msg.chid, msg.exceptType);
+    return 0;
+}
+
+static int check_doorbell_kick_by_family(void)
+{
+    uint32_t kick_bw = gsp_chan_doorbell_kick(NV_FAM_BLACKWELL, FAKE_DOORBELL_TOKEN);
+    uint32_t kick_amp = gsp_chan_doorbell_kick(NV_FAM_AMPERE, FAKE_DOORBELL_TOKEN);
+
+    if (kick_bw != FAKE_DOORBELL_KICK) {
+        printf("FALLO: kick gb20x=0x%08x (esperaba 0x%08x)\n", kick_bw,
+               FAKE_DOORBELL_KICK);
+        return -1;
+    }
+    if (kick_amp != FAKE_DOORBELL_TOKEN ||
+        (kick_amp & NV_VF_DOORBELL_RUNLIST_DOORBELL_ENABLE) != 0) {
+        printf("FALLO: kick Ampere=0x%08x (esperaba 0x%08x sin bit 30)\n",
+               kick_amp, FAKE_DOORBELL_TOKEN);
+        return -1;
+    }
+    printf("OK: doorbell kick chip-aware (gb20x bit30 ON, Ampere sin bit30)\n");
+    return 0;
+}
+
 static int check_g4e_chan_ce(const struct gsp_libos *lo)
 {
     struct gsp_rpc rpc;
@@ -1720,6 +2324,14 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                                sizeof(NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS)];
     unsigned char ctrl_token[sizeof(rpc_gsp_rm_control) +
                              sizeof(NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS)];
+    /* Uno por canal: las respuestas se encolan TODAS antes de las llamadas, así que
+     * dos canales con tokens distintos necesitan dos búferes vivos a la vez. */
+    unsigned char ctrl_token_gr[sizeof(rpc_gsp_rm_control) +
+                                sizeof(NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS)];
+    /* 1664 B de tamaños de búferes de contexto + el wrapper: 1688, que sigue
+     * cabiendo en la página de un elemento de cola. */
+    unsigned char ctrl_grctx[sizeof(rpc_gsp_rm_control) +
+                             sizeof(NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS)];
     uint32_t base, wptr0;
     unsigned pb_off = 0, pb_len = 0;
     unsigned i;
@@ -1727,6 +2339,9 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
 
     printf("sizeof NV_CHANNEL_ALLOC_PARAMS=%zu Nvc56fControl=%zu\n",
            sizeof(NV_CHANNEL_ALLOC_PARAMS), sizeof(Nvc56fControl));
+
+    /* GB205 simulado: el kick del doorbell lleva bit 30 solo en Blackwell. */
+    gsp_nv_family_set(0x1b5000a1u, 0x2f18u);
 
     /* Este escenario corre SIN catálogo a propósito: comprueba la ruta a ciegas,
      * que es la que se toma si GET_CLASSLIST_V2 falla en hardware. Las clases
@@ -1793,11 +2408,48 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                           0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
     fake_rpc_post_payload(lo, (base + 14) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                           0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
-    fake_rpc_post_payload(lo, (base + 15) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
-                          0, ctrl_token, (uint32_t)sizeof(ctrl_token));
+    {
+        /* El token del segundo canal trae **otro chid**, el 1: es lo que RM
+         * contesta si el chid se pide por los índices de USERD, que es lo que este
+         * canal declara. Dos canales con el mismo token serían dos canales pateando
+         * el mismo, y el port lo dice en cuanto el token no cuadra con lo pedido. */
+        NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS *tk =
+            (NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS *)
+                (ctrl_token_gr + sizeof(rpc_gsp_rm_control));
+
+        memset(ctrl_token_gr, 0, sizeof(ctrl_token_gr));
+        tk->workSubmitToken = FAKE_DOORBELL_TOKEN | 1u;
+        fake_rpc_post_payload(lo, (base + 15) % 63,
+                              NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                              0, ctrl_token_gr, (uint32_t)sizeof(ctrl_token_gr));
+    }
     fake_rpc_post_payload(lo, (base + 16) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
-    msgq->tx.writePtr = (base + 17) % 63;
+    /* Y las dos del contexto de GR: los tamaños de los búferes y la promoción. Los
+     * tamaños son los mismos que usa `check_grctx` para que los números del plan se
+     * puedan seguir de una prueba a la otra. */
+    {
+        NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS *gi =
+            (NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS *)
+                (ctrl_grctx + sizeof(rpc_gsp_rm_control));
+
+        memset(ctrl_grctx, 0, sizeof(ctrl_grctx));
+#define GI(prop) gi->engineContextBuffersInfo[0].engine[(prop)].size
+        GI(NV0080_CTX_PROP_GRAPHICS) = 0x9000u;
+        GI(NV0080_CTX_PROP_GRAPHICS_PATCH) = 0x1000u;
+        GI(NV0080_CTX_PROP_GRAPHICS_BUNDLE_CB) = 0x30000u;
+        GI(NV0080_CTX_PROP_GRAPHICS_PAGEPOOL) = 0x8000u;
+        GI(NV0080_CTX_PROP_GRAPHICS_ATTRIBUTE_CB) = 0x1800000u;
+        GI(NV0080_CTX_PROP_GRAPHICS_FECS_EVENT) = 0x1000u;
+        GI(NV0080_CTX_PROP_GRAPHICS_PRIV_ACCESS_MAP) = 0x10000u;
+#undef GI
+        fake_rpc_post_payload(lo, (base + 17) % 63,
+                              NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                              0, ctrl_grctx, (uint32_t)sizeof(ctrl_grctx));
+    }
+    fake_rpc_post_payload(lo, (base + 18) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    msgq->tx.writePtr = (base + 19) % 63;
 
     wptr0 = *q.wptr;
     if (gsp_vmm_init(&q, &rpc, &v) != 0) {
@@ -1810,7 +2462,9 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     vram_si.ready = 1;
     vram_si.region_nr = 1;
     vram_si.region[0].base = 0;
-    vram_si.region[0].size = 0x100000ull;
+    /* 256 MiB: el contexto de GR se lleva el attribute CB con alineación de 32 MiB,
+     * y con 1 MiB no cabía ni el hueco de alinearlo. */
+    vram_si.region[0].size = 0x10000000ull;
     if (gsp_vram_init(&pool, &vram_si) != 0) {
         printf("FALLO: gsp_vram_init (g4e)\n");
         return -1;
@@ -1883,9 +2537,15 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                    offsetof(NV_CHANNEL_ALLOC_PARAMS, instanceMem));
             return -1;
         }
-        if (p->userdMem.addressSpace != 1u || p->mthdbufMem.addressSpace != 1u) {
-            printf("FALLO: aperturas sysmem userd=%u mthdbuf=%u (upstream: 1)\n",
+        if (p->userdMem.addressSpace != 2u || p->mthdbufMem.addressSpace != 1u) {
+            printf("FALLO: aperturas userd=%u mthdbuf=%u (upstream: userd=2 VRAM, "
+                   "mthdbuf=1 sysmem)\n",
                    p->userdMem.addressSpace, p->mthdbufMem.addressSpace);
+            return -1;
+        }
+        if (!chan.userd_vram || chan.userd.phys == 0) {
+            printf("FALLO: USERD no está en VRAM (userd_vram=%d phys=0x%llx)\n",
+                   chan.userd_vram, (unsigned long long)chan.userd.phys);
             return -1;
         }
         /* Bloque de instancia y RAMFC: en VRAM (2), mismo base, y el RAMFC son
@@ -2030,15 +2690,20 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         }
     }
     /* Y que el token que contestó RM haya llegado entero al canal. */
-    if (!chan.doorbell_ok || chan.doorbell_token != FAKE_DOORBELL_TOKEN) {
-        printf("FALLO: token del doorbell ok=%d val=0x%08x (esperaba 0x%08x)\n",
-               chan.doorbell_ok, chan.doorbell_token, FAKE_DOORBELL_TOKEN);
+    if (!chan.doorbell_ok || chan.doorbell_token != FAKE_DOORBELL_TOKEN ||
+        chan.doorbell_kick != FAKE_DOORBELL_KICK) {
+        printf("FALLO: token del doorbell ok=%d RPC=0x%08x kick=0x%08x "
+               "(esperaba RPC=0x%08x kick=0x%08x)\n",
+               chan.doorbell_ok, chan.doorbell_token, chan.doorbell_kick,
+               FAKE_DOORBELL_TOKEN, FAKE_DOORBELL_KICK);
         return -1;
     }
     printf("OK: canal arrancado — BIND(9) + SCHEDULE(bEnable=1, 3 B) + token "
-           "0x%08x, los tres sobre el canal\n", chan.doorbell_token);
+           "RPC=0x%08x kick=0x%08x, los tres sobre el canal\n",
+           chan.doorbell_token, chan.doorbell_kick);
 
-    if (chan.userd_ctl->GPPut != 0 || chan.gpput != 0) {
+    if (gsp_pramin_rd32(chan.userd.phys + FAKE_USERD_OFF_GPPUT) != 0 ||
+        chan.gpput != 0) {
         printf("FALLO: USERD/GPPut no arrancan en cero\n");
         return -1;
     }
@@ -2047,6 +2712,38 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                fake_doorbell_writes);
         return -1;
     }
+    /* El arranque del canal tiene que haber comprobado que el aperture de
+     * usermode contesta: es lo único que se puede LEER del sitio donde después se
+     * escribe el doorbell a ciegas. */
+    if (fake_usermode_reads < 2u) {
+        printf("FALLO: el canal arrancó sin sondear el reloj de usermode "
+               "(%u lecturas de 0x%06x)\n", fake_usermode_reads,
+               FAKE_USERMODE_TIME);
+        return -1;
+    }
+    if (g_usermode_verdict != 1) {
+        printf("FALLO: el aperture de usermode contesta y el veredicto es %d\n",
+               g_usermode_verdict);
+        return -1;
+    }
+    printf("OK: aperture de usermode sondeado antes del primer submit "
+           "(0x%06x, %u lecturas)\n", FAKE_USERMODE_TIME, fake_usermode_reads);
+
+    /* Y el camino malo, que es el que va a importar en hardware: con el aperture
+     * mudo la sonda tiene que DECIRLO. Un veredicto que sólo sabe dar buenas
+     * noticias no distingue un doorbell escrito en el vacío de un canal que no
+     * arranca, que es exactamente el par que vino a separar. */
+    fake_usermode_dead = 1;
+    g_usermode_verdict = 0;
+    chan_probe_usermode();
+    fake_usermode_dead = 0;
+    if (g_usermode_verdict != -1) {
+        printf("FALLO: con el usermode a 0xbadf1000 el veredicto es %d\n",
+               g_usermode_verdict);
+        return -1;
+    }
+    g_usermode_verdict = 1;
+    printf("OK: un aperture de usermode mudo se detecta (no se da por bueno)\n");
 
     if (gsp_ce_init(&v.rm, &chan, &ce) != 0) {
         printf("FALLO: gsp_ce_init\n");
@@ -2081,6 +2778,22 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         const uint32_t *pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + pb_off);
         unsigned found_launch = 0;
 
+        /* Lo PRIMERO del pushbuffer: SET_OBJECT con la **clase** del CE por el
+         * subcanal 4 (COPY_ENGINE), en paridad con nouveau/UVM. El handle de RM
+         * entero por subcanal 0 dejaba clase 0x0000 atada a GR.
+         *
+         * INCR_OPCODE (31:29) | count=1 (28:16) | subc (15:13) | mthd>>2 (11:0). */
+        if (pb_len < 8u ||
+            pb[0] != ((NVC56F_DMA_INCR_OPCODE_VALUE << 29) | (1u << 16) |
+                      (4u << 13) | ((NVC56F_SET_OBJECT >> 2) & 0xfffu)) ||
+            pb[1] != ce.cls) {
+            printf("FALLO: el pushbuffer no empieza por SET_OBJECT(cls=0x%04x "
+                   "subc=4): %08x %08x\n", ce.cls, pb[0],
+                   pb_len >= 8u ? pb[1] : 0u);
+            return -1;
+        }
+        printf("OK: SET_OBJECT lleva la clase 0x%04x por subcanal 4\n", ce.cls);
+
         for (i = 0; i < pb_len / 4; i++) {
             if (pb[i] == (NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
                           NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
@@ -2104,8 +2817,11 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         printf("FALLO: gsp_chan_submit\n");
         return -1;
     }
-    if (chan.gpput != 1 || chan.userd_ctl->GPPut != 1) {
-        printf("FALLO: GPPut=%u gpput=%u\n", chan.userd_ctl->GPPut, chan.gpput);
+    if (chan.gpput != 1 ||
+        gsp_pramin_rd32(chan.userd.phys + FAKE_USERD_OFF_GPPUT) != 1) {
+        printf("FALLO: GPPut=%u gpput=%u\n",
+               gsp_pramin_rd32(chan.userd.phys + FAKE_USERD_OFF_GPPUT),
+               chan.gpput);
         return -1;
     }
     /* Y el kick, que es la razón de todo este cambio: publicar GPPut en el USERD
@@ -2114,10 +2830,10 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
      * desde dentro se ve idéntico a un submit correcto, así que hay que
      * comprobarlo aquí: una escritura, en el registro de usermode, con el token
      * ENTERO que devolvió RM. */
-    if (fake_doorbell_writes != 1 || fake_doorbell_last != FAKE_DOORBELL_TOKEN) {
+    if (fake_doorbell_writes != 1 || fake_doorbell_last != FAKE_DOORBELL_KICK) {
         printf("FALLO: doorbell escrituras=%u último=0x%08x (esperaba 1 y 0x%08x "
                "en 0x%06x)\n", fake_doorbell_writes, fake_doorbell_last,
-               FAKE_DOORBELL_TOKEN, NV_VFN_DOORBELL);
+               FAKE_DOORBELL_KICK, NV_VFN_DOORBELL);
         return -1;
     }
     {
@@ -2187,6 +2903,28 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                    p->engineType);
             return -1;
         }
+        /* Y el slot de USERD, que es por donde se pide el chid: el segundo canal
+         * tiene que pedir OTRO. Con los índices clavados a 0 —como estaban— los dos
+         * canales pedían el mismo teniéndolo declarado fijo, y el segundo se llevó
+         * un NO_MEMORY en hardware. El valor esperado es el del chid 1: índice 1
+         * (bit 8), página 0, PAGE_FIXED y PRIVILEGED. */
+        if (p->flags != (0x00200020u | NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(1))) {
+            printf("FALLO: flags del canal GR0 = 0x%08x, esperaba 0x%08x "
+                   "(índice de USERD 1, no el del primer canal)\n",
+                   p->flags,
+                   0x00200020u | NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(1));
+            return -1;
+        }
+        if (chan_gr.doorbell_token != (FAKE_DOORBELL_TOKEN | 1u) ||
+            chan_gr.doorbell_token == chan.doorbell_token) {
+            printf("FALLO: token del canal GR0 = 0x%08x (el del CE es 0x%08x)\n",
+                   chan_gr.doorbell_token, chan.doorbell_token);
+            return -1;
+        }
+        printf("OK: el segundo canal pide otro slot de USERD (flags 0x%08x → "
+               "índice %u, página %u) y recibe otro token (0x%08x ≠ 0x%08x)\n",
+               p->flags, (p->flags >> 8) & 0x7u, (p->flags >> 12) & 0x1ffu,
+               chan_gr.doorbell_token, chan.doorbell_token);
         /* Dos canales, dos ventanas de VAs. Compartir el pushbuffer o el GPFIFO
          * sería un canal escribiendo métodos dentro del ring del otro. */
         if (chan_gr.pushbuf_va == chan.pushbuf_va ||
@@ -2258,31 +2996,204 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
          * del CE aquí daba "pushbuffer sin QMD" con el encoder perfectamente
          * bien: los métodos estaban, pero en el otro canal. */
         chan_gr.pb_pos = 0;
+        /* 6 dwords: SET_OBJECT(2) + WFI immd(1) + SEND_PCAS_A(2) + PCAS2 immd(1).
+         * Un IMMD lleva el dato en la cabecera (bits 28:16) y NO tiene dword de
+         * datos: los 32 B de antes eran el bug de 2026-07-29 (el dato suelto se
+         * leía como la siguiente cabecera y el PBDMA levantaba PBDMA_ERROR). */
         if (gsp_compute_encode_qmd(&cp, &qmd, &qmd_off, &qmd_len) != 0 ||
-            qmd_len < 64) {
-            printf("FALLO: gsp_compute_encode_qmd\n");
+            qmd_len != 24) {
+            printf("FALLO: gsp_compute_encode_qmd (len=%u, esperaba 24)\n", qmd_len);
             return -1;
         }
         {
-            const uint32_t *pb = (const uint32_t *)((const unsigned char *)chan_gr.pushbuf.va + qmd_off);
-            unsigned found_qmd_ver = 0;
-            unsigned found_inline = 0;
+            const uint32_t *pb =
+                (const uint32_t *)((const unsigned char *)chan_gr.pushbuf.va + qmd_off);
+            const uint32_t *stored =
+                (const uint32_t *)((const unsigned char *)cp.data.va + G4F_QMD_OFF);
+            uint64_t qmd_va = cp.data_va + G4F_QMD_OFF;
+            uint32_t want_pcas = (uint32_t)(qmd_va >> 8);
             unsigned j;
 
-            for (j = 0; j < qmd_len / 4; j++) {
-                if (pb[j] == (GSP_QMD_VERSION_CURRENT | (GSP_QMD_VERSION_CURRENT << 16))) {
-                    found_qmd_ver = 1;
-                }
-                if (pb[j] == qmd.words[0]) {
-                    found_inline = 1;
-                }
-            }
-            if (!found_qmd_ver || !found_inline) {
-                printf("FALLO: pushbuffer compute sin QMD/version\n");
+            if (memcmp(stored, qmd.words, sizeof(qmd.words)) != 0) {
+                printf("FALLO: QMD no copiado a sysmem en +0x%x\n", G4F_QMD_OFF);
                 return -1;
             }
+            printf("OK: QMD v05 copiado a sysmem 0x%llx (+0x%x)\n",
+                   (unsigned long long)qmd_va, G4F_QMD_OFF);
+
+            /* SET_OBJECT con la clase de compute por subcanal 1. */
+            if (pb[0] != ((NVC56F_DMA_INCR_OPCODE_VALUE << 29) | (1u << 16) |
+                          (1u << 13) | ((NVCEC0_SET_OBJECT >> 2) & 0xfffu)) ||
+                pb[1] != cp.cls) {
+                printf("FALLO: el QMD no empieza por SET_OBJECT(cls=0x%04x "
+                       "subc=1): %08x %08x\n", cp.cls, pb[0], pb[1]);
+                return -1;
+            }
+            /* WFI immd con dato 0: bits 28:16 a cero y SIN dword detrás. */
+            if (pb[2] != ((NVC56F_DMA_SEC_OP_IMMD_DATA_METHOD << 29) |
+                          ((NVC86F_WFI >> 2) & 0xfffu))) {
+                printf("FALLO: pushbuffer sin WFI del canal: %08x\n", pb[2]);
+                return -1;
+            }
+            if (pb[3] != ((NVC56F_DMA_INCR_OPCODE_VALUE << 29) | (1u << 16) |
+                          (1u << 13) | ((NVCEC0_SEND_PCAS_A >> 2) & 0xfffu)) ||
+                pb[4] != want_pcas) {
+                printf("FALLO: SEND_PCAS_A=0x%08x (esperaba 0x%08x va>>8)\n",
+                       pb[4], want_pcas);
+                return -1;
+            }
+            if (pb[5] != ((NVC56F_DMA_SEC_OP_IMMD_DATA_METHOD << 29) |
+                          (NVCEC0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE << 16) |
+                          (1u << 13) |
+                          ((NVCEC0_SEND_SIGNALING_PCAS2_B >> 2) & 0xfffu))) {
+                printf("FALLO: SEND_SIGNALING_PCAS2_B: hdr=%08x\n", pb[5]);
+                return -1;
+            }
+            for (j = 6; j < qmd_len / 4; j++) {
+                if (pb[j] != 0u) {
+                    printf("FALLO: pushbuffer compute tiene palabra extra pb[%u]=%08x\n",
+                           j, pb[j]);
+                    return -1;
+                }
+            }
+            printf("OK: SET_OBJECT compute cls=0x%04x subcanal 1\n", cp.cls);
         }
-        printf("OK: pushbuffer compute QMD inline (%u B)\n", qmd_len);
+        printf("OK: pushbuffer compute SEND_PCAS (%u B)\n", qmd_len);
+
+        /* Y la promoción del contexto de GR **tal como viaja**. `check_grctx` prueba la
+         * aritmética del plan; esto prueba lo otro: que la petición sale con el layout
+         * y el contenido correctos. Es donde ya se perdió un ciclo de hardware (el
+         * `hHandleVASpace` que no existe desplazaba todo el struct del canal y RM
+         * contestaba un error que hablaba de otra cosa), y donde un `promoteEntry` que
+         * empezara en el offset 44 en vez del 48 pasaría desapercibido. */
+        {
+            struct gsp_grctx ctx;
+            const unsigned char *entry;
+            const struct gsp_rpc_hdr *hdr;
+            const rpc_gsp_rm_control *c;
+            const NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS *p;
+            const NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY *e;
+            unsigned nmapped = 0, nonmapped = 0, j;
+
+            if (gsp_grctx_query(&v.rm, 0u, &ctx) < 0) {
+                printf("FALLO: gsp_grctx_query\n");
+                return -1;
+            }
+            if (gsp_grctx_promote(&v.rm, &v, &pool, &chan_gr, &ctx) != 0) {
+                printf("FALLO: gsp_grctx_promote\n");
+                return -1;
+            }
+            /* La consulta va en el índice 17 y la promoción en el 18. */
+            entry = cmdq_base + 4096 + (unsigned long)((wptr0 + 18) % 63) * 4096;
+            hdr = (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+            c = (const rpc_gsp_rm_control *)(hdr + 1);
+            p = (const NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS *)(c + 1);
+
+            if (c->cmd != NV2080_CTRL_CMD_GPU_PROMOTE_CTX ||
+                c->hObject != v.rm.subdevice ||
+                c->paramsSize != sizeof(*p)) {
+                printf("FALLO: PROMOTE_CTX cmd=0x%08x obj=0x%08x params=%u (esperaba "
+                       "0x%08x/0x%08x/%u)\n", c->cmd, c->hObject, c->paramsSize,
+                       NV2080_CTRL_CMD_GPU_PROMOTE_CTX, v.rm.subdevice,
+                       (unsigned)sizeof(*p));
+                return -1;
+            }
+            /* `engineType` es el 1 del control (GR), no el engineType del canal, que
+             * para GR0 también vale 1 y por eso hay que decirlo: si el canal fuera otro
+             * y aquí se colase el suyo, el error sería invisible en este test. */
+            if (p->engineType != 1u || p->hChanClient != v.rm.client ||
+                p->hObject != chan_gr.handle) {
+                printf("FALLO: PROMOTE_CTX engineType=%u hChanClient=0x%08x "
+                       "hObject=0x%08x\n", p->engineType, p->hChanClient, p->hObject);
+                return -1;
+            }
+            /* Los campos que upstream deja a cero. Rellenar `virtAddress`/`size` con el
+             * contexto entero sería describirlo dos veces y de dos formas distintas. */
+            if (p->hClient != 0u || p->ChID != 0u || p->hVirtMemory != 0u ||
+                p->virtAddress != 0u || p->size != 0u) {
+                printf("FALLO: PROMOTE_CTX trae campos que upstream deja a cero\n");
+                return -1;
+            }
+            if (p->entryCount != ctx.nr) {
+                printf("FALLO: entryCount=%u y el plan tiene %u búferes\n",
+                       p->entryCount, ctx.nr);
+                return -1;
+            }
+
+            /* El principal: inicializado, con física y tamaño, y con `physAttr` a 4. */
+            e = &p->promoteEntry[0];
+            if (e->bufferId != NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_MAIN ||
+                !e->bInitialize || e->gpuPhysAddr == 0u || e->size != 0x49000u ||
+                e->physAttr != NV2080_CTRL_GPU_PROMOTE_CTX_PHYS_ATTR_DEFAULT ||
+                e->gpuVirtAddr == 0u) {
+                printf("FALLO: entrada MAIN pa=0x%llx va=0x%llx sz=0x%llx attr=%u "
+                       "init=%u\n", (unsigned long long)e->gpuPhysAddr,
+                       (unsigned long long)e->gpuVirtAddr,
+                       (unsigned long long)e->size, e->physAttr, e->bInitialize);
+                return -1;
+            }
+
+            for (j = 0; j < p->entryCount; j++) {
+                e = &p->promoteEntry[j];
+
+                if (e->bNonmapped) {
+                    nonmapped++;
+                    /* Sin mapear **es** sin VA: una VA aquí sería decirle a RM que hay
+                     * traducción para algo que no se ha mapeado. */
+                    if (e->gpuVirtAddr != 0u) {
+                        printf("FALLO: la entrada %u dice bNonmapped y trae VA 0x%llx\n",
+                               j, (unsigned long long)e->gpuVirtAddr);
+                        return -1;
+                    }
+                    if (e->bufferId != NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PRIV_ACCESS_MAP) {
+                        printf("FALLO: bNonmapped en el bufferId %u, sólo lo lleva el "
+                               "PRIV_ACCESS_MAP\n", e->bufferId);
+                        return -1;
+                    }
+                    continue;
+                }
+                nmapped++;
+                if (e->gpuVirtAddr == 0u) {
+                    printf("FALLO: la entrada %u (id %u) va mapeada y sin VA\n", j,
+                           e->bufferId);
+                    return -1;
+                }
+                /* Y la alineación de la VA, que es la prueba de que el mapeo respeta lo
+                 * que dijo el plan y no sólo la página: el attribute CB de 24 MiB pide
+                 * 32 MiB, y con la página saldría alineado a 2 MiB — que también
+                 * "parece" bien. */
+                if (e->bufferId == NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_ATTRIBUTE_CB &&
+                    (e->gpuVirtAddr & 0x1ffffffull) != 0u) {
+                    printf("FALLO: el ATTRIBUTE_CB está en 0x%llx, no alineado a "
+                           "32 MiB\n", (unsigned long long)e->gpuVirtAddr);
+                    return -1;
+                }
+                /* El único `ro` del contexto tiene que haber llegado al PTE como
+                 * tal. Esto cierra el círculo: el plan lo marca, el mapeo lo aplica
+                 * y la traducción lo confirma — tres sitios para un solo bit. */
+                if (e->bufferId ==
+                        NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_UNRESTRICTED_PRIV_ACCESS_MAP) {
+                    uint64_t ro_pa = 0, ro_pte = 0;
+
+                    if (gsp_vmm_translate(&v, e->gpuVirtAddr, &ro_pa, &ro_pte) != 0 ||
+                        (ro_pte & ~VMM_T_ADDR_MASK) != VMM_T_PTE_VRAM_RO_LOW) {
+                        printf("FALLO: el UNRESTRICTED_PRIV_ACCESS_MAP no está "
+                               "mapeado de sólo lectura (PTE 0x%llx)\n",
+                               (unsigned long long)(ro_pte & ~VMM_T_ADDR_MASK));
+                        return -1;
+                    }
+                }
+            }
+            if (nonmapped != 1u || nmapped != ctx.nr - 1u) {
+                printf("FALLO: %u entradas sin mapear y %u mapeadas de %u\n",
+                       nonmapped, nmapped, ctx.nr);
+                return -1;
+            }
+            printf("OK: PROMOTE_CTX sobre el subdevice — %u entradas (%u B), MAIN con "
+                   "física y physAttr=4, PRIV_ACCESS_MAP sin mapear, ATTRIBUTE_CB "
+                   "alineado a 32 MiB\n", p->entryCount, c->paramsSize);
+        }
+
         gsp_compute_fini(&cp);
     }
 
@@ -2646,6 +3557,42 @@ static int check_cot(const struct gsp_wpr *wpr)
     printf("OK: GPU caída del bus en la respuesta al COT — se dice, no se disfraza de "
            "'tamaño raro'\n");
 
+    /* Y el fallo del ciclo de HW del 2026-07-28, que es OTRO: el FSP acepta el
+     * COT, el FMC arranca y **el enlace se resetea**. El driver se rindió a los
+     * 3 ms cantando "se cayó del bus"; el monitor del root port enseñó el enlace
+     * volviendo a 32 GT/s 207 ms después (32 → 2.5 → 32), o sea que la tarjeta no
+     * estaba muerta, estaba reentrenando. Aquí se simula igual: muere dentro del
+     * bucle del FMC, el espacio de configuración sigue contestando (vfio emula el
+     * id) y vuelve a los 300 ms. Tiene que arrancar. */
+    fake_fsp_reset();
+    fake_die_after_mbox0 = 2;
+    fake_revive_after_mdelays = 300;
+    fake_recover_ret = 0;
+    if (fsp_lx_boot_gsp_fmc(&staged, &lo, wpr) != 0) {
+        printf("FALLO: un reset del enlace de 300 ms se trató como muerte de la GPU\n");
+        return -1;
+    }
+    if (fake_gpu_gone) {
+        printf("FALLO: la simulación no llegó a revivir la GPU (prueba inválida)\n");
+        return -1;
+    }
+    fake_fsp_reset();
+    printf("OK: reset del enlace a mitad del FMC — se espera y se arranca, no se "
+           "declara muerta a los 3 ms\n");
+
+    /* La cara B, para que la espera no se coma el diagnóstico verdadero: si NO
+     * vuelve, sigue siendo un fallo, y acotado (el plazo es finito). */
+    fake_fsp_reset();
+    fake_die_after_mbox0 = 2;
+    fake_revive_after_mdelays = 0;   /* no vuelve nunca */
+    fake_recover_ret = 0;
+    if (fsp_lx_boot_gsp_fmc(&staged, &lo, wpr) == 0) {
+        printf("FALLO: la GPU no volvió y el arranque se dio por bueno\n");
+        return -1;
+    }
+    fake_fsp_reset();
+    printf("OK: si no vuelve dentro del plazo, sigue siendo caída del bus\n");
+
     if (check_rpc(&lo) != 0)
         return -1;
     if (check_cmdq(&lo) != 0)
@@ -2657,6 +3604,16 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_classlist(&lo) != 0)
         return -1;
     if (check_vmm(&lo) != 0)
+        return -1;
+    if (check_ptop() != 0)
+        return -1;
+    if (check_grctx() != 0)
+        return -1;
+    if (check_pramin() != 0)
+        return -1;
+    if (check_rc_triggered() != 0)
+        return -1;
+    if (check_doorbell_kick_by_family() != 0)
         return -1;
     if (check_g4e_chan_ce(&lo) != 0)
         return -1;

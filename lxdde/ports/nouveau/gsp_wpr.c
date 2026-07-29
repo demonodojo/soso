@@ -1,5 +1,6 @@
 /* G3b paso 4: bootloader RISC-V en sysmem + `GspFwWprMeta`. Ver gsp_wpr.h. */
 #include "gsp_wpr.h"
+#include "gsp_dma.h"   /* align_up_u64, que antes era una copia privada de aquí */
 #include "gsp_mmio.h"
 
 /* Definidos en el shim (lxdde/shim/src/shims.c). */
@@ -69,11 +70,6 @@ struct gsp_riscv_desc {
 };
 
 #define GSP_BIN_MAGIC 0x000010deu
-
-static uint64_t align_up_u64(uint64_t v, uint64_t a)
-{
-    return (v + a - 1ull) & ~(a - 1ull);
-}
 
 uint64_t gsp_wpr_vidmem_size(void)
 {

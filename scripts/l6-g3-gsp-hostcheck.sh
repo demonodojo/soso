@@ -35,7 +35,7 @@ strip_module() {
 
 # Orden = orden de dependencias entre módulos.
 for m in gsp_dma gsp_rm gsp_wpr gsp_libos fmc_lx fsp_lx gsp_rpc gsp_cmdq gsp_rm_obj \
-         gsp_vram gsp_vmm gsp_chan gsp_ce gsp_compute gsp_fini; do
+         gsp_vram gsp_vmm gsp_top gsp_chip gsp_pramin gsp_chan gsp_ce gsp_grctx gsp_compute gsp_fini; do
     guard="$(echo "$m" | tr '[:lower:]' '[:upper:]')_H"
     { strip_module "$src/$m.h" "$guard"; strip_module "$src/$m.c" "$guard"; } \
         > "$out/${m}_body.inc"

@@ -94,6 +94,16 @@ pub struct GpuInfo {
     pub vram_total: u64,
     pub vram_free: u64,
     pub name: [u8; 32],
+    /// Hasta dónde llegó el bring-up del dispositivo, en texto y con NUL
+    /// (`bar0`, `booted`, `rm_ce`, `rm_compute`, `booted_soft`…). Va como cadena
+    /// y no como código numérico a propósito: la tabla de nombres vive en un solo
+    /// sitio —el port— y no en dos que divergirían, que es el vicio que ya dio un
+    /// `INVALID_CLASS` con nombre inventado.
+    ///
+    /// Existe porque `on_gpu=0` no dice **dónde** paró, y averiguarlo obligaba a
+    /// abrir cientos de líneas del log de serie. Vacía cuando no hay dispositivo
+    /// con fases (el de software, o ninguno).
+    pub phase: [u8; 16],
 }
 
 /// Umbral: ficheros mayores se abren en modo lazy (sin cargar todo).
