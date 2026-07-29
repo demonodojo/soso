@@ -99,7 +99,7 @@ Guest network: DHCP at boot, fallback **10.0.2.15/24** in QEMU slirp. Port forwa
 - [x] **Live USB image** — `cargo xtask package-usb-live` (single GPT stick: ESP + sosofs + sosomfs); see [`docs/L5c-on-box.md`](docs/L5c-on-box.md)
 - [x] **QEMU live mode** — `SOSO_QEMU_LIVE=1 cargo xtask run`
 
-### lxdde and native GPU (L6, in progress)
+### lxdde and native GPU (L6 — G1→G5 GO on GB205)
 
 Optional kernel feature (`SOSO_LXDDE=1`) linking a freestanding C library built from
 ported Linux driver code:
@@ -108,7 +108,7 @@ ported Linux driver code:
 |------|--------|
 | `spike`, `testdrv` | DDE plumbing validated |
 | `e1000e` | Linux-style NIC backend (`SOSO_QEMU_NIC=lx-e1000e`) |
-| `nouveau` | nvkm port for NVIDIA GSP bring-up (GB205 Blackwell + Ampere GA10x) |
+| `nouveau` | **G5 GO** on GB205 (GSP-FMC → RM → CE → SASS matvec in `soso-llm`); Ampere GA10x path written, untested |
 
 GPU syscalls: `SYS_GPU_INFO`, `SYS_GPU_ALLOC`, `SYS_GPU_MAP`, `SYS_GPU_SUBMIT`,
 `SYS_GPU_READ`. Firmware is packed into rootfs with `./scripts/l6-pack-firmware.sh`.
@@ -122,13 +122,13 @@ GPU syscalls: `SYS_GPU_INFO`, `SYS_GPU_ALLOC`, `SYS_GPU_MAP`, `SYS_GPU_SUBMIT`,
 | G3a | ELF validation, GEM staging | **Done** |
 | G3b | Real GSP boot (FSP/COT, radix3, WPR, libos) | **Done** on GB205 HW |
 | G4a–c | GSP-RM RPC + RM objects | **Done** on GB205 HW |
-| G4d | VRAM + external VA space (VER3 page tables) | Written + hostcheck; HW validation with CE |
-| G4e | GPFIFO channel + CE copy (`gsp_chan`, `gsp_ce`) | **Written + hostcheck**; HW readback pending VFIO |
-| G4f | SAXPY SASS (`SYS_GPU_SUBMIT`) | Blocked on CUDA `ptxas` for `sm_120` |
-| G5 | Hybrid LLM matvec on GPU | Pending G4 |
+| G4d | VRAM + external VA space (VER3 page tables) | **Done** on GB205 HW (exercised by CE/compute) |
+| G4e | GPFIFO channel + CE copy (`gsp_chan`, `gsp_ce`) | **Done** (2026-07-29): `CE readback verificado (G4e GO)` |
+| G4f | SAXPY / matvec SASS (`SYS_GPU_SUBMIT`) | **Done** (2026-07-29): PCAS 24 B + QMD v05, `on_gpu=1` |
+| G5 | Hybrid LLM matvec on GPU | **GO functional** (2026-07-29): `soso-llm run tiny` → matvec on GPU; tok/s on large models still TBD |
 | **L6-H** | CUDA inference on host Linux (`--cuda-host`) | **GO** (2026-07-27): ~35 tok/s via cuda-proxy + llama-server |
 
-Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G1-gate.md`](docs/L6-G1-gate.md), [`docs/L6-G3-nvkm-scope.md`](docs/L6-G3-nvkm-scope.md), [`docs/L6-H-cuda-hybrid.md`](docs/L6-H-cuda-hybrid.md).
+Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G1-gate.md`](docs/L6-G1-gate.md), [`docs/L6-G3-nvkm-scope.md`](docs/L6-G3-nvkm-scope.md), [`docs/L6-H-cuda-hybrid.md`](docs/L6-H-cuda-hybrid.md). Skill: `.cursor/skills/soso-gpu/` (or `.claude/skills/soso-gpu/`).
 
 **Daily dev without releasing the GPU** (driver stays on the host):
 
@@ -151,9 +151,10 @@ Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G
 | `cargo xtask bench-llm` | Measure decode tok/s under configurable SMP |
 | `cargo xtask test-distributed-llm` | Two-QEMU distributed LLM smoke test |
 | `./scripts/l6-pack-firmware.sh` | Pack NVIDIA GSP firmware (.zst→.bin) into rootfs |
-| `./scripts/l6-g3-gsp-hostcheck.sh` | GSP bring-up hostcheck (steps 3–6 + G4d/G4e, no GPU) |
+| `./scripts/l6-g3-gsp-hostcheck.sh` | GSP bring-up hostcheck (steps 3–6 + G4d–G4f encoders, no GPU) |
 | `./scripts/l6-h-start-cuda.sh` | L6-H: llama-server (native) + cuda-proxy (requires `llama-server` in PATH) |
-| `./scripts/l6-g1-vfio-persist.sh` | Persistent VFIO bind for iterative G1–G4 work |
+| `./scripts/l6-g1-vfio-persist.sh` | Persistent VFIO bind for iterative G1–G5 / VFIO cycles |
+| `./scripts/l6-g1-vfio-test.sh` | Full VFIO cycle (cap PCIe Gen3 first; see soso-gpu skill) |
 
 Useful environment variables:
 

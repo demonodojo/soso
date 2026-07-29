@@ -122,7 +122,7 @@ soso/
 - **Puente Rust↔C**: `kernel/src/lxdde/gpu.rs` (`lx_nouveau_*`), drivers en
   `kernel/src/drivers/{gpu,nvidia_probe,nvidia_compute}.rs`. Modo por
   `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau`.
-- Detalle completo (roadmap G1→G5, VFIO/IOMMU, firmware, workflow de port nvkm):
+- Detalle completo (roadmap G1→G5 **GO** en GB205, VFIO/IOMMU, firmware, workflow de port nvkm):
   skill **`soso-gpu`**.
 
 ## Coding constraints

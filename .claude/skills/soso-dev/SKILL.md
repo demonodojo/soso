@@ -31,16 +31,17 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
 | `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (host tool) |
 | `cargo xtask lx-build` | Compilar `liblxdde.a` (drivers Linux portados) |
-| `cargo xtask lx-build nouveau` | Compilar solo el port nouveau/nvkm (GPU, L6/G3) |
+| `cargo xtask lx-build nouveau` | Compilar solo el port nouveau/nvkm (GPU, L6/G5 GO en GB205) |
 | `cargo xtask g1-check` | Checklist host G1 (IOMMU/VFIO, firmware, BAR0) |
 | `cargo xtask g3-check` | Checklist bring-up GSP (firmware, módulos, fases) |
 | `./scripts/l6-pack-firmware.sh` | Empaquetar firmware GSP gb205 (.zst→.bin) en rootfs |
-| `./scripts/l6-g3-gsp-hostcheck.sh` | GSP hostcheck (~1 s, G4d/G4e, sin GPU) |
+| `./scripts/l6-g3-gsp-hostcheck.sh` | GSP hostcheck (~1 s, G4d–G4f encoders, sin GPU) |
+| `./scripts/l6-g1-vfio-test.sh` | Ciclo VFIO completo (cap PCIe Gen3 antes; ver soso-gpu) |
 | `./scripts/l6-h-start-cuda.sh` | L6-H nativo (requiere `llama-server` en PATH) |
 
 **Exit QEMU:** `Ctrl-A X` (not Ctrl-C).
 
-> **GPU / L6 (NVIDIA nouveau/GSP):** roadmap G1→G5, VFIO, firmware — skill **`soso-gpu`**.
+> **GPU / L6 (NVIDIA nouveau/GSP):** G1→G5 **GO** en GB205 (matvec en `soso-llm`) — skill **`soso-gpu`**.
 > **L6-H (CUDA en host):** `docs/L6-H-cuda-hybrid.md` — `--cuda-host 10.0.2.2:11400`.
 
 ## Daily dev (GPU stays on host NVIDIA driver)

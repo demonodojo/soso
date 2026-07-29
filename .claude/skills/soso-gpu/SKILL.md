@@ -32,7 +32,7 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G3a | firmware ELF + GEM staging + fases | `N blobs GSP validados` | **Go** (soft boot) |
 | G3b | GSP real vía nvkm (sin display) | `GSP booted` **sin** `soft` | **GO** (2026-07-25): `GSP booted (hw, GSP-FMC vía FSP)` en GB205 real, lockdown liberado, sin un solo all-ones en el log |
 | G4a | RPC con GSP-RM (recibir + `SET_SYSTEM_INFO`/`SET_REGISTRY`) | `GSP_INIT_DONE` con `res=0x0` | **GO** (2026-07-25): llega tras 22 mensajes, `GSP-RM listo (RPC en marcha)` |
-| G4b | RPC síncrono (`gsp_cmdq_call`) | round-trip + anillo que envuelve, en hostcheck | **GO** (2026-07-25), sin HW todavía |
+| G4b | RPC síncrono (`gsp_cmdq_call`) | round-trip + anillo que envuelve | **GO** (2026-07-25 hostcheck; ejercitado en HW vía G4c+) |
 | G4c | Objetos de RM: cliente → device → subdevice (`GSP_RM_ALLOC`) | un `NV_RM_CONTROL` que responde | **GO** (2026-07-25): `objetos RM listos cli=0xc1d00000 dev=0xde1d0000 sub=0x5d1d0000` en GB205 real |
 | G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | **GO** HW (ejercitado por CE/compute 2026-07-29): VER3 + `SET_PAGE_DIRECTORY` + mapeos scratch/SASS |
 | G4e | **Canal + CE** (`gsp_chan`, `gsp_ce`) | ALLOC GPFIFO/USERD/PB; copia CE + readback VRAM | **GO** (2026-07-29): `CE readback verificado (G4e GO)` en GB205; canal `0xca6f` + CE `0xcab5` |
@@ -40,13 +40,17 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | matvec en GPU en `soso-llm` | **GO funcional** (2026-07-29): `soso-llm run tiny --max 4` → **97 matvec en GPU OK**, sin caída a CPU; tok/s vs CPU aún por medir en modelos grandes |
 | **L6-H** | `--cuda-host` → cuda-proxy | texto + tok/s desde soso | **GO** (2026-07-27): ~35 tok/s, Docker llama-server |
 
+**Pendiente post-G5 (no bloquea el gate):** medir tok/s nativo vs CPU en modelos
+grandes; Ampere GA10x (3060) sin HW en esta máquina; enlace PCIe Gen4+ cuando
+compute esté estable a Gen3.
+
 ### Estado en silicio (2026-07-29) — GB205 bajo VFIO
 
 Criterio de ciclo verde en `target/g1-vfio-serial.log`:
 
 - `lockdown liberado` (~+183 ms tras COT), `GSP-RM listo`, `CE readback verificado (G4e GO)`
 - `matvec en GPU OK` (≈97 con `tiny --max 4`), **sin** `camino de GPU desactivado` / `RC_TRIGGERED` / `semáforo no llegó`
-- `GSP-RM apagado (objetos=ok unload=ok halt=ok)`
+- `GSP-RM apagado (objetos=ok unload=ok halt=ok dma=off)`
 
 **Operativa host (imprescindible tras cada reboot del host):** capar el enlace PCIe
 del root port a Gen3 antes del ciclo VFIO — a Gen5 (32 GT/s) el FMC provoca tormenta
@@ -906,10 +910,11 @@ cargo xtask lx-build nouveau      # compila el port (incl. nvkm Ola 1)
 cargo xtask g1-check              # host: IOMMU/VFIO/firmware/BAR0
 cargo xtask g3-check              # bring-up GSP: firmware, módulos, fases
 ./scripts/l6-pack-firmware.sh     # empaqueta firmware GSP
-./scripts/l6-g3-gsp-hostcheck.sh  # pasos 3-6 + G4d/G4e (chan+CE) sin GPU ni sudo
+./scripts/l6-g3-gsp-hostcheck.sh  # pasos 3-6 + G4d–G4f (chan/CE/compute) sin GPU ni sudo
 ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list   # inventario símbolos
 ./scripts/l6-kdump-setup.sh --status   # ¿el host capturaría el próximo cuelgue?
-# Passthrough (tras cerrar G1): SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
+# Ciclo VFIO (G5): cap Gen3 → sudo ./scripts/l6-g1-vfio-test.sh
+# Passthrough a mano: SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run  (apagar con halt)
 ```
 
 **Nunca sueltes la tarjeta con el GSP vivo** (gotcha 6). Si lanzas el
@@ -951,5 +956,6 @@ QEMU sin passthrough: `nvidia: sin GPU NVIDIA en PCI` — normal. `GSP booted (s
 ## Riesgos
 
 - GB205 es reciente; nouveau upstream puede ir por detrás. Fallback de validación:
-  Ampere `ga102`.
-- G1 depende de BIOS (usuario). El grueso del trabajo software (G3b) avanza sin HW.
+  Ampere `ga102` (escrito, sin HW aquí).
+- Enlace PCIe Gen5 bajo VFIO inestable en FMC (capar a Gen3; ver operativa arriba).
+- No soltar la GPU con GSP vivo (gotcha 6): siempre `halt` → `gsp_fini`.
