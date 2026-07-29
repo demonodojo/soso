@@ -72,10 +72,11 @@ Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
    solo a timer; en `BLACKWELL_CHANNEL_GPFIFO_*` el writeback desapareció. Leer
    `USERD+0x88` siempre da 0 aunque el trabajo corra. Progreso = semáforo CE/QMD →
    `gsp_chan_ack_progress()` (`gpget` SW). `pb_rewind` mira `gpget==gpput`, no el USERD.
-3. **Anillo GPFIFO y Get=0 del HW**: el HW sigue usando USERD GPGet para “lleno”.
-   Con 64 entradas, `GPPut=64` cuelga el PBDMA (`sem=63`). GPFIFO = **4096 entradas /
-   32 KiB** (`GSP_CHAN_GPFIFO_SIZE = ENTRIES * 8`) con VAs: GPFIFO → PB → notifier
-   (no pisar el PB a +4 KiB).
+3. **Anillo GPFIFO y Put sin módulo**: con 64 entradas, `GPPut=64` cuelga; con
+   4096, `GPPut=4096` dejaba `sem=0` (`gpput=4096`). Upstream no escribe
+   `USERD.GPGet` (Blackwell sin writeback; progreso = semáforo). Fix: en
+   `submit`, `USERD.GPPut = gpput % ENTRIES`; `ack_progress` solo avanza
+   `gpget` SW. GPFIFO = **4096×8 B**; VAs GPFIFO → PB → notifier.
 4. **RC_TRIGGERED**: `gsp_rpc_rc_triggered_log` vuelca 8 palabras del journal
    (cabeza) además de type/chid/engn.
 5. **Enlace PCIe Gen5**: inestable durante reset FMC bajo VFIO → cap Gen3 (arriba).

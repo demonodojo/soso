@@ -404,11 +404,33 @@ mkfifo -m 666 "$fifo"
 dd of="$log" bs=4096 oflag=dsync status=none <"$fifo" &
 dd_pid=$!
 
-sudo -u "$run_user" -- env \
-  "PATH=$(dirname "$cargo_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-  "HOME=${run_home}" \
-  SOSO_QEMU_GPU="vfio:${BDF}" \
-  "$cargo_bin" xtask run >"$fifo" 2>&1 &
+# sudo -u + env_reset tira SOSO_*; reinyectar las que el ciclo necesite.
+pass_env=(
+  "PATH=$(dirname "$cargo_bin"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  "HOME=${run_home}"
+  "SOSO_QEMU_GPU=vfio:${BDF}"
+)
+for v in SOSO_MODELS_DIR SOSO_MODELS_SIZE SOSO_QEMU_MEM SOSO_LXDDE SOSO_LXDDE_MODE; do
+  if [[ -n "${!v:-}" ]]; then
+    pass_env+=("${v}=${!v}")
+  fi
+done
+# VFIO fija (mlock) toda la RAM del guest. El hard limit del usuario (~3.7 GiB
+# aquí) hace fallar -m 4G+ con VFIO_MAP_DMA; con -m 2G el guest hace OOM en
+# `bench`. Subimos memlock como root y luego bajamos a $run_user (el RLIMIT
+# sobrevive al setuid).
+uid=$(id -u "$run_user")
+gid=$(id -g "$run_user")
+if command -v setpriv >/dev/null && command -v prlimit >/dev/null; then
+  prlimit --memlock=unlimited:unlimited -- \
+    setpriv --reuid="$uid" --regid="$gid" --init-groups -- \
+    env "${pass_env[@]}" \
+    "$cargo_bin" xtask run >"$fifo" 2>&1 &
+else
+  echo "AVISO: sin setpriv/prlimit; memlock del usuario puede tumbar VFIO con -m>2G" >&2
+  sudo -u "$run_user" -- env "${pass_env[@]}" \
+    "$cargo_bin" xtask run >"$fifo" 2>&1 &
+fi
 run_pid=$!
 
 booted=0

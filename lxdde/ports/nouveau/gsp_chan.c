@@ -466,7 +466,13 @@ void gsp_chan_ack_progress(struct gsp_chan *c)
     if (!c || !c->ready) {
         return;
     }
+    /* Solo progreso SW. Upstream (nouveau Skeggs / nvidia-push) no escribe
+     * USERD.GPGet: en Blackwell el writeback no existe y el espacio libre se
+     * decide por el semáforo CE/QMD que acaba de señalizar. GPPut en USERD
+     * ya va módulo ENTRIES en submit (como nvidia-push), no hace falta
+     * resetearlo aquí. */
     c->gpget = c->gpput;
+    gsp_chan_barrier();
 }
 
 int gsp_chan_submit(struct gsp_chan *c, unsigned pb_off, unsigned pb_len)
@@ -528,7 +534,9 @@ int gsp_chan_submit(struct gsp_chan *c, unsigned pb_off, unsigned pb_len)
     (void)*(const volatile uint32_t *)ring;
 
     c->gpput++;
-    chan_userd_wr32(c, USERD_OFF_GPPUT, c->gpput);
+    /* GPPut en USERD es índice 0..ENTRIES-1 (nvidia-push enmascara igual).
+     * Escribir el contador libre (4096, 4097…) cuelga el PBDMA en Blackwell. */
+    chan_userd_wr32(c, USERD_OFF_GPPUT, c->gpput % GSP_CHAN_GPFIFO_ENTRIES);
     chan_userd_wr32(c, USERD_OFF_PUT, pb_off + pb_len);
 
     /* Y el doorbell, que es lo que faltaba: en Volta+ escribir GPPut en el USERD

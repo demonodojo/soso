@@ -16,8 +16,13 @@ pub const HEAP_START: u64 = 0x_4444_4444_0000;
 //
 // 32 MiB tampoco bastan para el bring-up GSP: el ucode `gsp-570.144.bin` son
 // 60,6 MiB y el port mantiene dos copias vivas (el buffer de `g_blobs` y el
-// objeto GEM del staging), ~121 MiB de pico. 256 MiB dejan holgura de sobra.
-pub const HEAP_SIZE: u64 = 256 * 1024 * 1024;
+// objeto GEM del staging), ~121 MiB de pico.
+//
+// Con pesos residentes en `GpuBuffer` (Vec en este heap), `bench` (~128 MiB)
+// + GSP (~121 MiB) rompe 256 MiB a los ~11 matvec: `alloc of 4194304 bytes
+// failed` (una matriz 1024×1024). 512 MiB cubre bench y deja margen; modelos
+// mayores pedirán más o dejar de espejar pesos enteros en el heap del kernel.
+pub const HEAP_SIZE: u64 = 512 * 1024 * 1024;
 
 #[global_allocator]
 static ALLOCATOR: Talck<Mutex<()>, ClaimOnOom> =

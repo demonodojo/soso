@@ -148,13 +148,24 @@ fn main(args: &str) -> u8 {
         // dice tal cual en el log; sirve para ejercitar alloc/map/submit/read y el
         // cacheo de pesos, que de otro modo sólo se estrenarían en la tarjeta real.
         let soft = parts.contains(&"--gpu-soft");
+        let force_cpu = parts.contains(&"--cpu");
+        if soft && force_cpu {
+            println!("soso-llm: --cpu y --gpu-soft no se combinan; elige uno");
+            return 1;
+        }
         if soft {
             let rc = sys::gpu_submit(b"SOFTG");
             if rc < 0 {
                 println!("soso-llm: no se pudo activar el dispositivo software (rc={rc})");
             }
         }
-        let rc = run_model(name, &prompt, max_new, Sampler::new(temp, top_p, seed));
+        let rc = run_model(
+            name,
+            &prompt,
+            max_new,
+            Sampler::new(temp, top_p, seed),
+            force_cpu,
+        );
         if soft {
             // Se apaga al salir: el dispositivo es estado GLOBAL del kernel, y
             // dejarlo puesto hace que el siguiente proceso de este arranque vea una
@@ -166,6 +177,7 @@ fn main(args: &str) -> u8 {
     println!("uso:");
     println!("  soso-llm run <modelo> --prompt <texto> [--max <n>]");
     println!("    [--cuda-host <ip:puerto>]  (inferencia CUDA en host Linux, L6-H)");
+    println!("    [--cpu]                    (fuerza matvec en CPU; para comparar tok/s)");
     println!("    [--gpu-soft]               (dispositivo software del kernel: ejercita");
     println!("                                el camino de syscalls GPU sin GPU real)");
     println!("    [--pipeline <ip:puerto>,...] [--splits <n1,n2,...>]");
@@ -488,7 +500,13 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
     }
 }
 
-fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> u8 {
+fn run_model(
+    name: &str,
+    prompt: &str,
+    max_new: usize,
+    mut sampler: Sampler,
+    force_cpu: bool,
+) -> u8 {
     let num_layers = read_num_layers(name).unwrap_or(4);
     let mut bundle = match load_model(name, PipelineRole::Full, 0, num_layers) {
         Ok(b) => b,
@@ -501,12 +519,19 @@ fn run_model(name: &str, prompt: &str, max_new: usize, mut sampler: Sampler) -> 
 
     let mut gpu = abi::GpuInfo::default();
     let _ = sys::gpu_info(&mut gpu);
-    let mut sys_gpu = gpu::SysGpu::new();
+    let mut sys_gpu = if force_cpu {
+        None
+    } else {
+        gpu::SysGpu::new()
+    };
     // El `present` del kernel no basta para decidir: un dispositivo puede aceptar
     // búferes y no ejecutar nada (iGPU Intel), y entonces `SysGpu::new` dice no.
     // Anunciar "GPU detectada" mirando sólo `present` era prometer un offload que
     // no iba a ocurrir — y con el dispositivo software, además, mentir.
-    if let Some(ref g) = sys_gpu {
+    if force_cpu {
+        println!("soso-llm: backend CPU (--cpu)");
+        bundle.rt.set_backend(Backend::Cpu);
+    } else if let Some(ref g) = sys_gpu {
         println!(
             "soso-llm: dispositivo de cómputo «{}» (fase {}), VRAM libre {} bytes",
             g.device_name(),

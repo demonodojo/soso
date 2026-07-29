@@ -13,10 +13,10 @@
 #include "gsp_vram.h"
 #include "nvrm_r570.h"
 
-/* En Blackwell el USERD no actualiza GPGet (siempre 0). El HW usa ese Get para
- * el “anillo lleno”: con 64 entradas, al publicar GPPut=64 el PBDMA cuelga
- * (2026-07-29, gpget SW=63 sem=63). 4096 entradas × 8 B = 32 KiB — bastante
- * para un run de soso-llm; el progreso SW (`gpget`) sigue gobernando el PB. */
+/* En Blackwell el USERD no hace writeback de GPGet (lee 0). El progreso lo
+ * lleva SW tras el semáforo CE/QMD (`ack_progress`); no se escribe USERD.GPGet
+ * (nouveau / nvidia-push). USERD.GPPut va módulo ENTRIES en submit — escribir
+ * el contador libre (4096…) cuelga el PBDMA. 4096×8 B. */
 #define GSP_CHAN_GPFIFO_ENTRIES  4096u
 #define GSP_CHAN_GPFIFO_SIZE     (GSP_CHAN_GPFIFO_ENTRIES * NVC56F_GP_ENTRY__SIZE)
 #define GSP_CHAN_USERD_SIZE      4096u
@@ -104,9 +104,8 @@ int gsp_chan_pb_reserve(struct gsp_chan *c, unsigned bytes);
  * todavía no ha leído es corrupción silenciosa. Devuelve 0 si rebobinó. */
 int gsp_chan_pb_rewind(struct gsp_chan *c);
 
-/* Marca todo lo encolado como consumido. Llamar solo tras un wait del semáforo
- * CE/QMD que haya visto el payload — en Blackwell no hay otra forma fiable de
- * saber que el PBDMA terminó el segmento. */
+/* Marca todo lo encolado como consumido (gpget SW). Llamar solo tras un wait
+ * del semáforo CE/QMD que haya visto el payload. No toca USERD.GPGet. */
 void gsp_chan_ack_progress(struct gsp_chan *c);
 
 /* Encola un segmento del pushbuffer en el GPFIFO y publica Put/GPPut. */
