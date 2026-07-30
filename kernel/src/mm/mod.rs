@@ -55,6 +55,7 @@ pub fn phys_to_virt(phys: u64) -> VirtAddr {
 }
 
 /// Traduce VA → PA si está mapeada (RAM vía offset o identidad/MMIO).
+#[allow(dead_code)]
 pub fn virt_to_phys(virt: u64) -> Option<u64> {
     let va = VirtAddr::new(virt);
     let mapper = MAPPER.get()?.lock();
@@ -117,6 +118,7 @@ pub fn map_dma_uc(phys: u64, size: u64) -> VirtAddr {
 }
 
 /// Mapeo write-combining para BARs de GPU (G2).
+#[allow(dead_code)]
 pub fn map_dma_wc(phys: u64, size: u64) -> VirtAddr {
     use core::sync::atomic::{AtomicU64, Ordering};
     use x86_64::structures::paging::PageTableFlags as F;

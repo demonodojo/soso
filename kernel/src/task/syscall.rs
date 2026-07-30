@@ -17,7 +17,6 @@ use sosofs::FsError;
 use x86_64::VirtAddr;
 use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
-use x86_64::structures::paging::PageTableFlags;
 
 pub fn init_msrs() {
     let s = gdt::selectors();

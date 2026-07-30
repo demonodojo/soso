@@ -251,6 +251,7 @@ pub fn init() {
 }
 
 /// Carga una página de 4 KiB (delega en el VFS unificado).
+#[allow(dead_code)]
 pub fn load_file_page(inode: u64, file_off: usize, page: &mut [u8; 4096]) -> Result<(), ()> {
     crate::vfs::read_file_range(inode, file_off, 4096, page).map_err(|_| ())
 }

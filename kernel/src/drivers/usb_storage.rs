@@ -98,6 +98,7 @@ pub fn init() {
     *DISK.lock() = Some(UsbDisk { ctrl, ms });
 }
 
+#[allow(dead_code)]
 pub fn present() -> bool {
     DISK.lock().is_some()
 }

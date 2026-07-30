@@ -177,7 +177,6 @@ pub fn poll_entry(
                         .iter()
                         .find_map(|cidr| match cidr.address() {
                             IpAddress::Ipv4(v4) => Some(v4),
-                            _ => None,
                         })
                         .unwrap_or(Ipv4Address::UNSPECIFIED);
                     let local = IpListenEndpoint::from((
@@ -232,6 +231,7 @@ pub fn fallback_addr_from_mac(mac: [u8; 6]) -> Ipv4Address {
     }
 }
 
+#[allow(dead_code)]
 pub fn uptime_ms() -> u64 {
     pit::uptime_ms()
 }

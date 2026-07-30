@@ -28,7 +28,7 @@ pub fn enable() {
 /// XCR0 = x87|SSE|AVX. Sin esto, vmovups en ring 3 da #UD.
 unsafe fn habilitar_avx() {
     use core::arch::x86_64::__cpuid;
-    let f = unsafe { __cpuid(1) };
+    let f = __cpuid(1);
     let xsave = f.ecx & (1 << 26) != 0;
     let avx = f.ecx & (1 << 28) != 0;
     if !(xsave && avx) {

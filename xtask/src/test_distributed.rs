@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub fn run() {
-    let root = super::project_root();
+    let _root = super::project_root();
     super::build_user();
     let img = super::build_image();
     let data = super::mkfs_rootfs(true);
@@ -351,7 +351,7 @@ fn conectar_serial(port: u16, limite: Duration) -> Result<TcpStream, String> {
     loop {
         match TcpStream::connect(("127.0.0.1", port)) {
             Ok(s) => return Ok(s),
-            Err(e) if Instant::now() < fin => {
+            Err(_e) if Instant::now() < fin => {
                 std::thread::sleep(Duration::from_millis(200));
             }
             Err(e) => return Err(format!("no conecta a serial :{port}: {e}")),

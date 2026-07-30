@@ -203,7 +203,7 @@ pub fn init(rsdp_phys: u64) {
             (dst.add(CR3_OFF) as *mut u64).write_unaligned(cr3);
             // convención post-call (rsp%16==8)
             (dst.add(STACK_OFF) as *mut u64).write_unaligned(stack_top - 8);
-            (dst.add(ENTRY_OFF) as *mut u64).write_unaligned(ap_entry as usize as u64);
+            (dst.add(ENTRY_OFF) as *mut u64).write_unaligned(ap_entry as *const () as usize as u64);
             (dst.add(CPUIDX_OFF) as *mut u64).write_unaligned((i + 1) as u64);
         }
         let antes = CPUS_ONLINE.load(Ordering::SeqCst);

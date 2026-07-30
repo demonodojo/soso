@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 use block_dev::{Block, BlockError};
-use crate::layout::{CACHE_NORMAL, CACHE_PIN, CACHE_STREAM};
+use crate::layout::{CACHE_PIN, CACHE_STREAM};
 use crate::volume_set::VolumeSet;
 
 const STREAM_WINDOW: usize = 32;

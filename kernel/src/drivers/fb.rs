@@ -53,6 +53,7 @@ pub fn init(buffer_start: u64, info: FrameBufferInfo) {
     // No usar println! aquí: puede reentrar al espejo FB. El caller loguea.
 }
 
+#[allow(dead_code)]
 pub fn available() -> bool {
     FB.lock().is_some()
 }
@@ -154,6 +155,7 @@ pub fn write_bytes(s: &[u8]) {
     }
 }
 
+#[allow(dead_code)]
 pub struct FbWriter;
 
 impl Write for FbWriter {

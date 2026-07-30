@@ -45,7 +45,7 @@ static mut PERCPU: [PerCpu; MAX_CPUS] = [const {
 /// Área xsave por-CPU para las ISR de timer (BSP y AP la necesitan cada una
 /// la suya): fuera de `PerCpu` porque `FpuArea` exige alineación de 64 B.
 #[repr(align(64))]
-struct FpuSlot(FpuArea);
+struct FpuSlot(#[allow(dead_code)] FpuArea);
 static mut FPU_SCRATCH: [FpuSlot; MAX_CPUS] = [const { FpuSlot(FpuArea::empty()) }; MAX_CPUS];
 
 /// Inicializa y activa el bloque per-CPU de la CPU actual (`cpu`: 0 = BSP).

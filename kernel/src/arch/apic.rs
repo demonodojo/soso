@@ -57,7 +57,7 @@ fn msr_write(off: u32, v: u64) {
 
 /// Detección + mapeo MMIO. Llamar UNA vez en la BSP antes de los APs.
 pub fn init_bsp() {
-    let f = unsafe { core::arch::x86_64::__cpuid(1) };
+    let f = core::arch::x86_64::__cpuid(1);
     let tiene_x2 = f.ecx & (1 << 21) != 0;
     MODO_X2.store(tiene_x2, Ordering::Relaxed);
     if !tiene_x2 {

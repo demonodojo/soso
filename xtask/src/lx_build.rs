@@ -144,7 +144,7 @@ fn cc_flags(root: &Path) -> Vec<String> {
     let linux = linux_root(root);
     let shim = root.join("lxdde/shim/include");
     let nouveau = linux.join("drivers/gpu/drm/nouveau");
-    let mut inc = vec![
+    let inc = vec![
         format!("-I{}", shim.display()),
         format!("-I{}", linux.join("arch/x86/include").display()),
         format!("-I{}", linux.join("arch/x86/include/uapi").display()),

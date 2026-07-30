@@ -43,6 +43,7 @@ pub fn allocate(handler: IrqHandler) -> Option<u8> {
 }
 
 /// Libera un vector previamente asignado.
+#[allow(dead_code)]
 pub fn free(vector: u8) {
     if let Some(idx) = index(vector) {
         SLOTS.lock()[idx].handler = None;

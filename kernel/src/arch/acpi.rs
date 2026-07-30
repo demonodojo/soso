@@ -17,6 +17,7 @@ fn bytes(phys: u64, len: usize) -> &'static [u8] {
 
 #[derive(Clone, Copy, Debug)]
 pub struct IoApicInfo {
+    #[allow(dead_code)]
     pub id: u8,
     pub address: u32,
     pub gsi_base: u32,

@@ -1,6 +1,9 @@
 //! Driver NVMe mínimo: admin queue + 1 I/O queue, MSI-X, Identify, R/W síncrono.
 //!
 //! Disco de modelos (sosomfs). Namespace 1; LBA 512 o 4096.
+//!
+//! API completa aunque el arranque actual no la use (VFIO/live la necesitan).
+#![allow(dead_code)]
 
 use crate::arch::irq;
 use crate::drivers::{dma, pci};

@@ -199,7 +199,7 @@ pub fn read_file_range(ino: u64, offset: usize, len: usize, out: &mut [u8]) -> R
         let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
         return fs.lock().read_file_range(ino, offset, len, out);
     }
-    let mut mfs = crate::fs::MODELS.get().ok_or(SosoFsError::Io)?;
+    let mfs = crate::fs::MODELS.get().ok_or(SosoFsError::Io)?;
     let mut mfs = mfs.lock();
     let (model_idx, entry) = decode(ino);
     let shard = mfs
@@ -268,6 +268,7 @@ pub fn lookup(dir: u64, name: &str) -> Result<u64, SosoFsError> {
         .ok_or(SosoFsError::NotFound)
 }
 
+#[allow(dead_code)]
 pub fn cache_policy_for_inode(ino: u64) -> u8 {
     if !is_sosomfs(ino) {
         return sosomfs::layout::CACHE_NORMAL;

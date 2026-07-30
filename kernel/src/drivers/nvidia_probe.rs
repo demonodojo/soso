@@ -5,6 +5,7 @@ use crate::mm;
 use spin::Once;
 
 const VENDOR_NVIDIA: u16 = 0x10de;
+#[allow(dead_code)]
 const NV_PMC_BOOT_0: u64 = 0x0000;
 
 static NVIDIA_CHIPSET: Once<Option<u32>> = Once::new();
@@ -50,6 +51,7 @@ pub fn chipset_id() -> Option<u32> {
     *NVIDIA_CHIPSET.get().unwrap_or(&None)
 }
 
+#[allow(dead_code)]
 pub fn device_id() -> Option<u16> {
     *NVIDIA_DEVICE.get().unwrap_or(&None)
 }

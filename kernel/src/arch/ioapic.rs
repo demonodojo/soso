@@ -120,6 +120,7 @@ pub fn route_isa(irq: u8, vector: u8, dest_apic: u32) -> Result<(), &'static str
 }
 
 /// Enmascara la RTE del GSI.
+#[allow(dead_code)]
 pub fn mask(gsi: u32) -> Result<(), &'static str> {
     let io = IOAPIC.get().ok_or("ioapic no inicializado")?;
     if gsi < io.gsi_base {

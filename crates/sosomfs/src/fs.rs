@@ -181,7 +181,7 @@ impl<V: VolumeSet> Sosomfs<V> {
         if path == "/models" || path == "/models/" {
             return Ok((0, 2));
         }
-        let (model, sub) = Self::parse_models_path(path)?;
+        let (_model, sub) = Self::parse_models_path(path)?;
         if sub.is_empty() {
             return Ok((0, 2));
         }

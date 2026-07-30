@@ -211,7 +211,9 @@ pub struct MsixInfo {
     pub function: u8,
     /// Offset de la capability MSI-X en config space.
     pub cap_off: u8,
+    #[allow(dead_code)]
     pub table_bar: u8,
+    #[allow(dead_code)]
     pub table_offset: u32,
     pub table_size: u16,
     pub table_phys: u64,

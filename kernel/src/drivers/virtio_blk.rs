@@ -88,6 +88,7 @@ pub fn write_sector(sector: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), &'static
     write_sector_slot(0, sector, buf)
 }
 
+#[allow(dead_code)]
 pub fn read_sector1(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {
     read_sector_slot(1, sector, buf)
 }

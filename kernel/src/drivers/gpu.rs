@@ -23,6 +23,7 @@ enum GpuStorage {
         words: alloc::vec::Vec<u32>,
         len: usize,
     },
+    #[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
     Device {
         va: u64,
         len: usize,
@@ -43,6 +44,7 @@ impl GpuBuffer {
         }
     }
 
+    #[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
     fn device(va: u64, bytes: usize) -> Self {
         Self {
             storage: GpuStorage::Device { va, len: bytes },
@@ -397,7 +399,10 @@ pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64
             return Ok(len);
         }
         #[cfg(not(feature = "lxdde"))]
-        return Err(abi::ENOSYS);
+        {
+            let _ = va;
+            return Err(abi::ENOSYS);
+        }
     }
     crate::task::with_current(|p| -> Result<u64, i64> {
         let space = p.space.as_ref().ok_or(abi::EFAULT)?;
@@ -555,7 +560,7 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
     // Legacy: SAXPY con datos embebidos (tests)
     if cmd.len() >= 8 && &cmd[..5] == b"SAXPY" {
         let a = f32::from_le_bytes(cmd[5..9].try_into().unwrap_or([0; 4]));
-        let mut x = [1.0f32, 2.0, 3.0];
+        let x = [1.0f32, 2.0, 3.0];
         let mut y = [0.0f32; 3];
         if nvidia_compute::submit_saxpy(a, &x, &mut y).is_ok() {
             return Ok(y[0].to_bits() as u64);

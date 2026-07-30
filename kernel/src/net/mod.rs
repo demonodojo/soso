@@ -422,6 +422,7 @@ pub fn tcp_is_connected(slot: usize) -> bool {
     entry.role == tcp_user::TcpRole::Connected && !entry.closed
 }
 
+#[allow(dead_code)]
 pub fn tcp_is_connecting(slot: usize) -> bool {
     let Some(net) = NET.get() else { return false };
     let n = net.lock();

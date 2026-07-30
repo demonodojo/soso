@@ -75,6 +75,7 @@ pub fn submit_saxpy(a: f32, x: &[f32], y: &mut [f32]) -> Result<bool, ()> {
     Ok(false)
 }
 
+#[cfg_attr(not(feature = "lxdde"), allow(unused_variables))]
 pub fn submit_matvec_f32(w: &[f32], rows: usize, cols: usize, x: &[f32], y: &mut [f32]) -> Result<bool, ()> {
     let mut st = COMPUTE.lock();
     let Some(s) = st.as_mut() else {
@@ -98,6 +99,7 @@ pub fn submit_matvec_f32(w: &[f32], rows: usize, cols: usize, x: &[f32], y: &mut
     Ok(false)
 }
 
+#[cfg_attr(not(feature = "lxdde"), allow(unused_variables))]
 pub fn submit_matvec_resident(
     w_va: u64,
     rows: usize,
@@ -120,10 +122,12 @@ pub fn submit_matvec_resident(
     Err(())
 }
 
+#[allow(dead_code)]
 pub fn channel_ready() -> bool {
     COMPUTE.lock().as_ref().is_some_and(|s| s.channel_ready)
 }
 
+#[allow(dead_code)]
 pub fn last_gpu_path() -> bool {
     COMPUTE.lock().as_ref().is_some_and(|s| s.gpu_path)
 }

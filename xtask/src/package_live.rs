@@ -80,7 +80,7 @@ pub fn run() {
     println!("\n✅ Live USB listo en {}", out_dir.display());
 }
 
-fn write_flash(out_dir: &Path, live: &Path, data_len: u64, models_len: u64, total: u64) {
+fn write_flash(out_dir: &Path, _live: &Path, data_len: u64, models_len: u64, total: u64) {
     let flash = out_dir.join("FLASH-LIVE.txt");
     let body = format!(
         r#"soso — arranque LIVE desde USB (no modifica el disco interno)
