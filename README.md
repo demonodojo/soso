@@ -154,7 +154,7 @@ Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G
 | `./scripts/l6-g3-gsp-hostcheck.sh` | GSP bring-up hostcheck (steps 3–6 + G4d–G4f encoders, no GPU) |
 | `./scripts/l6-h-start-cuda.sh` | L6-H: llama-server (native) + cuda-proxy (requires `llama-server` in PATH) |
 | `./scripts/l6-g1-vfio-persist.sh` | Persistent VFIO bind for iterative G1–G5 / VFIO cycles |
-| `./scripts/l6-g1-vfio-test.sh` | Full VFIO cycle (cap PCIe Gen3 first; see soso-gpu skill) |
+| `./scripts/l6-g1-vfio-test.sh` | Full VFIO cycle (PCIe Gen3 cap + Gen4/5 bump GO; see soso-gpu skill) |
 
 Useful environment variables:
 

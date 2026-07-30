@@ -119,7 +119,8 @@ SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 | GSP boot (G3b) | **GO** — `GSP booted (hw, GSP-FMC vía FSP)` |
 | G4a–c (RPC + RM) | **GO** en GB205 (2026-07-25) |
 | G4d–G5 (CE + SASS + soso-llm) | **GO** en GB205 (2026-07-29) — ver `soso-gpu` |
-| Siguiente | Medir tok/s GPU vs CPU; Gen4 PCIe; modelos grandes |
+| PCIe Gen4/5 post-GSP | **GO** (2026-07-30) — cap Gen3 en FMC, bump `SOSO_G1_PCIE_BUMP=4\|5` |
+| Siguiente | Medir tok/s GPU vs CPU; modelos grandes |
 
 ### Fallback (solo BAR0, no cierra G1 oficial)
 
@@ -135,8 +136,8 @@ Marca **PARTIAL** — valida lectura BAR0 pero sin aislamiento IOMMU.
 
 **G1 cerrado** en MSI Vector 16 HX con GB205. El port ha completado **G3b y
 G4a–G5 en hardware real**: CE readback, QMD/PCAS SASS y `soso-llm run tiny` con
-matvec en GPU (~97 OK). Operativa: enlace PCIe a Gen3 tras reboot del host; build
-con `SOSO_LXDDE`/`SOSO_QEMU_GPU`. Detalle: `docs/L6-G3-nvkm-scope.md`; skill
-`soso-gpu`.
+matvec en GPU (~97 OK). Operativa PCIe: cap Gen3 en FMC + bump Gen4/5 post-GSP
+(**GO** 2026-07-30, `l6-g1-vfio-test.sh`); build con `SOSO_LXDDE`/`SOSO_QEMU_GPU`.
+Detalle: `docs/L6-G3-nvkm-scope.md`; skill `soso-gpu`.
 
 Generado como parte del roadmap L6 (lxdde).

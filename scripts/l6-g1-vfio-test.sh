@@ -78,6 +78,48 @@ for path in /sys/bus/pci/devices/0000:${slot}.*; do
 done
 echo "OK: ${bound} función(es) del slot ${slot} → vfio-pci"
 
+# ---- Root port PCIe (cap automático antes del FMC) ---------------------------
+# Target Link Speed no sobrevive al reboot. Gen5 durante el reset del FMC bajo
+# VFIO provoca tormenta AER en el root port (2026-07-27); Gen3 es el default
+# estable. SOSO_G1_PCIE_GEN=0 no toca nada; SOSO_G1_PCIE_BUMP=4|5 sube la
+# velocidad tras 'GSP-RM listo' (opt-in, ver bucle de arranque).
+if [[ -n "${SOSO_G1_ROOT_PORT:-}" ]]; then
+  RP_SYS="/sys/bus/pci/devices/0000:${SOSO_G1_ROOT_PORT}"
+else
+  RP_SYS=$(dirname "$(readlink -f "/sys/bus/pci/devices/${FULL}")")
+fi
+RP_BDF=$(basename "$RP_SYS")
+RP_SHORT="${RP_BDF#0000:}"
+
+pcie_set_target_link_speed() {
+  local gen="$1" label="${2:-}"
+  local readback cur
+  if [[ -z "$gen" || "$gen" == "0" ]]; then
+    return 0
+  fi
+  if ! command -v setpci >/dev/null; then
+    echo "FAIL: setpci no encontrado; hace falta para cap PCIe Gen${gen}." >&2
+    exit 1
+  fi
+  if ! setpci -s "$RP_SHORT" "CAP_EXP+0x30.w=${gen}:f" 2>/dev/null; then
+    echo "FAIL: no se pudo escribir Target Link Speed Gen${gen} en ${RP_SHORT}." >&2
+    exit 1
+  fi
+  readback=$(setpci -s "$RP_SHORT" CAP_EXP+0x30.w 2>/dev/null || echo "0")
+  readback=$((readback & 0xf))
+  if [[ "$readback" != "$gen" ]]; then
+    echo "FAIL: Target Link Speed en ${RP_SHORT} = ${readback}, se pidió Gen${gen}." >&2
+    exit 1
+  fi
+  if ! setpci -s "$RP_SHORT" CAP_EXP+0x10.w=20:20 2>/dev/null; then
+    echo "FAIL: retrain del enlace en ${RP_SHORT} falló." >&2
+    exit 1
+  fi
+  sleep 0.5
+  cur=$(<"${RP_SYS}/current_link_speed" 2>/dev/null || echo "?")
+  echo "pcie: ${label}Target Link Speed Gen${gen} en ${RP_SHORT} (current_link_speed=${cur})"
+}
+
 # Permisos para el usuario que invocó sudo
 if [[ -n "${SUDO_USER:-}" ]]; then
   uid=$(id -u "$SUDO_USER")
@@ -235,6 +277,14 @@ soso_ssh_log() {
 # Así que se intenta el valor exacto y, si el kernel lo rechaza, "default"
 # (→ pci_init_reset_methods()), que aquí deja 'flr'. Eso NO es una re-derivación
 # defectuosa: es la respuesta correcta para el bus tal como está ahora.
+#
+# Cap PCIe ANTES de la FLR: la FLR reentrena el enlace y debe hacerlo con el
+# target ya fijado (Gen3 por defecto). SOSO_G1_PCIE_GEN=0 = no tocar.
+SOSO_G1_PCIE_GEN="${SOSO_G1_PCIE_GEN:-3}"
+if [[ "$SOSO_G1_PCIE_GEN" != "0" ]]; then
+  pcie_set_target_link_speed "$SOSO_G1_PCIE_GEN" ""
+fi
+
 # ---- Reset DELIBERADO antes de arrancar (2026-07-29) -------------------------
 #
 # Vaciar reset_method protege al host de la FLR de CIERRE, pero también quita la
@@ -383,15 +433,14 @@ restore_reset_method() {
 # es justo lo que colgó el host el 27 (`pci_conf1_read` con las IRQs cerradas).
 linklog="${ROOT}/target/g1-vfio-link.log"
 rm -f "$linklog"
-rp="/sys/bus/pci/devices/0000:00:06.0"
 link_pid=""
-if [[ -r "${rp}/current_link_speed" ]]; then
+if [[ -r "${RP_SYS}/current_link_speed" ]]; then
   {
     prev=""
     while :; do
-      now=$(cat "${rp}/current_link_speed" 2>/dev/null)/$(cat "${rp}/current_link_width" 2>/dev/null)
+      now=$(cat "${RP_SYS}/current_link_speed" 2>/dev/null)/$(cat "${RP_SYS}/current_link_width" 2>/dev/null)
       if [[ "$now" != "$prev" ]]; then
-        printf '%s  root port 00:06.0 → %s\n' "$(date +%H:%M:%S.%3N)" "$now"
+        printf '%s  root port %s → %s\n' "$(date +%H:%M:%S.%3N)" "$RP_SHORT" "$now"
         prev="$now"
       fi
       sleep 0.2
@@ -434,8 +483,19 @@ fi
 run_pid=$!
 
 booted=0
+pcie_bumped=0
 deadline=$((SECONDS + TIMEOUT))
 while [[ "$SECONDS" -lt "$deadline" ]]; do
+  # Bump opt-in tras GSP-RM listo: la ventana peligrosa es el FMC (~1 s tras COT).
+  # Probar primero SOSO_G1_PCIE_BUMP=4; Gen5 solo si Gen4 aguanta varios ciclos.
+  if [[ "$pcie_bumped" == 0 && -n "${SOSO_G1_PCIE_BUMP:-}" && "${SOSO_G1_PCIE_BUMP}" != "0" ]]; then
+    if grep -q 'GSP-RM listo (RPC en marcha)' "$log" 2>/dev/null; then
+      pcie_bumped=1
+      pcie_set_target_link_speed "${SOSO_G1_PCIE_BUMP}" "bump post-GSP "
+      printf '%s  host: bump Gen%s tras GSP-RM listo\n' "$(date +%H:%M:%S.%3N)" "${SOSO_G1_PCIE_BUMP}" \
+        >>"$linklog" 2>/dev/null || true
+    fi
+  fi
   if grep -q 'sosh —' "$log" 2>/dev/null; then
     booted=1
     break

@@ -41,8 +41,7 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | **L6-H** | `--cuda-host` → cuda-proxy | texto + tok/s desde soso | **GO** (2026-07-27): ~35 tok/s, Docker llama-server |
 
 **Pendiente post-G5 (no bloquea el gate):** medir tok/s nativo vs CPU en modelos
-grandes; Ampere GA10x (3060) sin HW en esta máquina; enlace PCIe Gen4+ cuando
-compute esté estable a Gen3.
+grandes; Ampere GA10x (3060) sin HW en esta máquina.
 
 ### Estado en silicio (2026-07-29) — GB205 bajo VFIO
 
@@ -52,14 +51,31 @@ Criterio de ciclo verde en `target/g1-vfio-serial.log`:
 - `matvec en GPU OK` (≈97 con `tiny --max 4`), **sin** `camino de GPU desactivado` / `RC_TRIGGERED` / `semáforo no llegó`
 - `GSP-RM apagado (objetos=ok unload=ok halt=ok dma=off)`
 
-**Operativa host (imprescindible tras cada reboot del host):** capar el enlace PCIe
-del root port a Gen3 antes del ciclo VFIO — a Gen5 (32 GT/s) el FMC provoca tormenta
-AER y a veces hard lockup:
+**Enlace PCIe (automático en `l6-g1-vfio-test.sh`) — Gen4/5 GO (2026-07-30):** Gen5
+durante el reset FMC bajo VFIO provoca tormenta AER y a veces hard lockup. Estrategia
+validada: cap a **Gen3 antes del FMC**, bump post-`GSP-RM listo` a Gen4/5. `Target Link
+Speed` no sobrevive al reboot.
+
+| Variable | Default | Efecto |
+|----------|---------|--------|
+| `SOSO_G1_PCIE_GEN` | `3` | Cap antes del FMC (`0` = no tocar) |
+| `SOSO_G1_PCIE_BUMP` | (vacío) | Tras `GSP-RM listo`, subir a Gen4/5 |
+| `SOSO_G1_ROOT_PORT` | (derivado) | Root port del padre de la GPU; MSI Vector = `00:06.0` |
+
+| Bump | Estado | Evidencia (2026-07-30, GB205) |
+|------|--------|------------------------------|
+| Gen4 (`SOSO_G1_PCIE_BUMP=4`) | **GO** | `16.0 GT/s ×8`, CE + 192 matvec GPU, `on_gpu=1`, unload ok |
+| Gen5 (`SOSO_G1_PCIE_BUMP=5`) | **GO** | `32.0 GT/s ×8`, mismos criterios |
+
+Tras el FMC el enlace puede bajar a 2.5 GT/s y el monitor tarda en mostrar 16/32 GT/s; el
+compute no se cae. `sudo` hace `env_reset`: pasar `sudo SOSO_G1_PCIE_BUMP=5 …` (no
+`VAR=… sudo`).
+
+Passthrough a mano (`SOSO_QEMU_GPU=vfio:… cargo xtask run`) sigue requiriendo cap manual:
 
 ```bash
 sudo setpci -s 00:06.0 CAP_EXP+0x30.w=3:f          # Target Link Speed = Gen3
 sudo setpci -s 00:06.0 CAP_EXP+0x10.w=20:20         # Retrain
-# opcional Gen4 cuando compute esté estable: =4:f
 ```
 
 Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
@@ -83,7 +99,8 @@ Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
    `gpget` SW. GPFIFO = **4096×8 B**; VAs GPFIFO → PB → notifier.
 4. **RC_TRIGGERED**: `gsp_rpc_rc_triggered_log` vuelca 8 palabras del journal
    (cabeza) además de type/chid/engn.
-5. **Enlace PCIe Gen5**: inestable durante reset FMC bajo VFIO → cap Gen3 (arriba).
+5. **Enlace PCIe Gen5 en FMC**: inestable durante reset FMC bajo VFIO → cap Gen3
+   automático; **bump Gen4/5 post-GSP es GO** (2026-07-30, tabla arriba).
 
 **G1 superado (2026-07-25).** Con VT-d activo en la BIOS y el bind persistente puesto
 (`l6-g1-vfio-persist.sh --enable` + reboot), `sudo ./scripts/l6-g1-vfio-test.sh` da GO:
@@ -913,8 +930,10 @@ cargo xtask g3-check              # bring-up GSP: firmware, módulos, fases
 ./scripts/l6-g3-gsp-hostcheck.sh  # pasos 3-6 + G4d–G4f (chan/CE/compute) sin GPU ni sudo
 ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list   # inventario símbolos
 ./scripts/l6-kdump-setup.sh --status   # ¿el host capturaría el próximo cuelgue?
-# Ciclo VFIO (G5): cap Gen3 → sudo ./scripts/l6-g1-vfio-test.sh
-# Passthrough a mano: SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run  (apagar con halt)
+# Ciclo VFIO (G5): sudo ./scripts/l6-g1-vfio-test.sh  (cap Gen3 automático)
+# Bump Gen4/5 post-GSP (GO 2026-07-30):
+#   sudo SOSO_G1_PCIE_BUMP=5 SOSO_G1_CMD='soso-llm run tiny --max 4' ./scripts/l6-g1-vfio-test.sh
+# Passthrough a mano: SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run  (cap manual; apagar con halt)
 ```
 
 **Nunca sueltes la tarjeta con el GSP vivo** (gotcha 6). Si lanzas el
@@ -957,5 +976,5 @@ QEMU sin passthrough: `nvidia: sin GPU NVIDIA en PCI` — normal. `GSP booted (s
 
 - GB205 es reciente; nouveau upstream puede ir por detrás. Fallback de validación:
   Ampere `ga102` (escrito, sin HW aquí).
-- Enlace PCIe Gen5 bajo VFIO inestable en FMC (capar a Gen3; ver operativa arriba).
+- Enlace PCIe Gen5 en FMC bajo VFIO inestable: cap Gen3 + bump post-GSP (`SOSO_G1_PCIE_BUMP`).
 - No soltar la GPU con GSP vivo (gotcha 6): siempre `halt` → `gsp_fini`.

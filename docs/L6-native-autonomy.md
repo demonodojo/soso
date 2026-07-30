@@ -17,9 +17,9 @@ Con el driver `nvidia` activo puedes avanzar sin soltar la dGPU:
 | QEMU | `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask run` | Sin GPU en PCI → no GSP soft |
 | Inferencia CUDA | L6-H: llama-server + cuda-proxy + `--cuda-host 10.0.2.2:11400` | **GO** 2026-07-27 |
 
-G4e–G5 ya tienen **GO en GB205** bajo VFIO (2026-07-29). Tras cada reboot del host,
-capar el enlace PCIe a Gen3 (`setpci` en root port `00:06.0`) antes del ciclo — ver
-skill `soso-gpu`.
+G4e–G5 ya tienen **GO en GB205** bajo VFIO (2026-07-29). Enlace PCIe: cap Gen3 antes del
+FMC y bump post-`GSP-RM listo` a **Gen4/Gen5 GO** (2026-07-30; skill `soso-gpu`:
+`SOSO_G1_PCIE_GEN`, `SOSO_G1_PCIE_BUMP`, `SOSO_G1_ROOT_PORT`).
 
 ## Mapa de fases
 

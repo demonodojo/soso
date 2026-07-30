@@ -267,13 +267,19 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
         };
 
         // --- camino de página grande (2 MiB) ---
+        // Si ya hay alguna PTE de 4 KiB en la ventana (p. ej. un fault anterior
+        // cayó aquí porque no había bloque contiguo), `map_page_2m` falla. Antes
+        // devolvíamos false y matábamos el proceso (bench: page fault en
+        // 0x1000a00000 tras mapear embed y empezar el siguiente shard). Cualquier
+        // fallo del camino huge cae al de 4 KiB.
         let va_2m = addr & !(HUGE - 1);
         let off_2m = region.file_offset + va_2m.saturating_sub(region.virt_start);
         let huge_ok = region.inode != 0
             && va_2m >= region.virt_start
             && va_2m + HUGE <= region.virt_start + region.len
             && off_2m % HUGE == 0
-            && off_2m + HUGE <= region.file_len;
+            && off_2m + HUGE <= region.file_len
+            && !space.is_mapped(va_2m);
         if huge_ok {
             if !region.writable && region.inode != 0 {
                 let _ = crate::mm::reclaim::ensure_free_frames(512);
@@ -297,7 +303,7 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
                 unsafe {
                     crate::mm::FRAME_ALLOC.get().unwrap().lock().deallocate_2m(frame);
                 }
-                return false;
+                // fall through → 4 KiB
             }
             // sin bloque contiguo libre: se sirve con páginas de 4 KiB
         }
