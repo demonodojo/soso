@@ -65,6 +65,72 @@ pub fn silu(x: f32) -> f32 {
     x / (1.0 + libm::expf(-x))
 }
 
+/// SwiGLU in-place: `up[i] = silu(gate[i]) * up[i]`.
+pub fn swiglu_inplace(up: &mut [f32], gate: &[f32]) {
+    let n = up.len().min(gate.len());
+    for i in 0..n {
+        up[i] = silu(gate[i]) * up[i];
+    }
+}
+
+/// SiLU unario in-place (FFN sin gate).
+pub fn silu_inplace(x: &mut [f32]) {
+    for v in x.iter_mut() {
+        *v = silu(*v);
+    }
+}
+
+#[cfg(test)]
+mod residual_tests {
+    use super::*;
+
+    #[test]
+    fn add_f32_matches_scalar() {
+        let a = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let b = [0.5f32; 9];
+        let mut dst = [0.0f32; 9];
+        add_f32(&a, &b, &mut dst);
+        for i in 0..9 {
+            assert!((dst[i] - (a[i] + b[i])).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn add_assign_matches() {
+        let mut dst = [1.0f32, 2.0, 3.0];
+        add_assign_f32(&mut dst, &[10.0, 20.0, 30.0]);
+        assert_eq!(dst, [11.0, 22.0, 33.0]);
+    }
+}
+
+/// `dst[i] = a[i] + b[i]` (residual de atención).
+pub fn add_f32(a: &[f32], b: &[f32], dst: &mut [f32]) {
+    let n = a.len().min(b.len()).min(dst.len());
+    if AVX2 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            return avx2::add_f32(a, b, dst, n);
+        }
+    }
+    for i in 0..n {
+        dst[i] = a[i] + b[i];
+    }
+}
+
+/// `dst[i] += src[i]` (residual de FFN).
+pub fn add_assign_f32(dst: &mut [f32], src: &[f32]) {
+    let n = dst.len().min(src.len());
+    if AVX2 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            return avx2::add_assign_f32(dst, src, n);
+        }
+    }
+    for i in 0..n {
+        dst[i] += src[i];
+    }
+}
+
 /// matvec fusionado sobre pesos Q8_0 on-disk (bloques de escala f32 + 32 i8):
 /// descuantiza en registros dentro del bucle, sin buffer f32 intermedio.
 /// `cols` debe ser múltiplo del bloque (32).
@@ -180,6 +246,40 @@ pub mod avx2 {
             let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
             let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
             _mm_cvtss_f32(s)
+        }
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn add_f32(a: &[f32], b: &[f32], dst: &mut [f32], n: usize) {
+        unsafe {
+            let mut i = 0usize;
+            while i + 8 <= n {
+                let va = _mm256_loadu_ps(a.as_ptr().add(i));
+                let vb = _mm256_loadu_ps(b.as_ptr().add(i));
+                _mm256_storeu_ps(dst.as_mut_ptr().add(i), _mm256_add_ps(va, vb));
+                i += 8;
+            }
+            while i < n {
+                dst[i] = a[i] + b[i];
+                i += 1;
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn add_assign_f32(dst: &mut [f32], src: &[f32], n: usize) {
+        unsafe {
+            let mut i = 0usize;
+            while i + 8 <= n {
+                let vd = _mm256_loadu_ps(dst.as_ptr().add(i));
+                let vs = _mm256_loadu_ps(src.as_ptr().add(i));
+                _mm256_storeu_ps(dst.as_mut_ptr().add(i), _mm256_add_ps(vd, vs));
+                i += 8;
+            }
+            while i < n {
+                dst[i] += src[i];
+                i += 1;
+            }
         }
     }
 

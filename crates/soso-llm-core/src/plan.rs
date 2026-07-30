@@ -7,7 +7,15 @@
 //! - **StreamingLLM**: ventana KV (sink + recientes) bajo presión de memoria.
 //! - **PagedAttention (espíritu)**: capacidad KV pre-reservada; no crecer
 //!   ciegamente hasta OOM.
+//! - **KIVI-lite**: KV int8 por token bajo presión de memoria (~2× ahorro).
+//! - **H2O**: eviction por masa de atención + sink + recientes.
+//! - **Quest-lite**: atención sparse por bloques en secuencias largas.
+//!
+//! Tras cada etapa de `/loop` que toque esto: actualizar skills
+//! `soso-architecture` / `soso-dev` y `MANUAL-USUARIO.md` si hay UX nueva.
 
+use crate::attn::SPARSE_TOKEN_THRESHOLD;
+use crate::kv::KvDtype;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -85,6 +93,20 @@ pub struct PlannerStats {
     pub shard_releases: u32,
     pub kv_slides: u32,
     pub prefeches: u32,
+    /// Tokens aceptados por Prompt Lookup Decoding.
+    pub pld_accepted: u32,
+    /// Intentos de draft PLD (cadenas iniciadas).
+    pub pld_attempts: u32,
+    /// 0 = f16, 1 = int8 (KIVI-lite).
+    pub kv_dtype_i8: u32,
+    pub h2o_enabled: u32,
+    pub sparse_attn: u32,
+    /// EWMA ms por capa: proyecciones matvec vs atención softmax.
+    pub avg_matvec_ms: f64,
+    pub avg_attn_ms: f64,
+    /// n-gramo preferido actual del PLD (autotune).
+    pub pld_prefer_n: u32,
+    pub pld_max_draft: u32,
 }
 
 pub struct ResourcePlanner {
@@ -107,6 +129,17 @@ pub struct ResourcePlanner {
     sink_tokens: usize,
     avg_layer_bytes: u64,
     kv_bytes_per_token: u64,
+    /// Bytes KV f16 por token (base); I8 usa la mitad efectiva.
+    kv_bytes_per_token_f16: u64,
+    kv_dtype: KvDtype,
+    use_h2o: bool,
+    use_sparse: bool,
+    /// Hot path: EWMA de ms matvec (proyecciones) vs attn por capa.
+    matvec_ms_ewma: f64,
+    attn_ms_ewma: f64,
+    /// PLD: n preferido y tope de draft (se afina con la tasa de aceptación).
+    pld_prefer_n: usize,
+    pld_max_draft: usize,
     stats: PlannerStats,
 }
 
@@ -183,9 +216,19 @@ impl ResourcePlanner {
             sink_tokens: DEFAULT_SINK_TOKENS,
             avg_layer_bytes: avg_layer,
             kv_bytes_per_token: kv_bpt,
+            kv_bytes_per_token_f16: kv_bpt,
+            kv_dtype: KvDtype::F16,
+            use_h2o: false,
+            use_sparse: false,
+            matvec_ms_ewma: 0.0,
+            attn_ms_ewma: 0.0,
+            pld_prefer_n: 4,
+            pld_max_draft: 8,
             stats: PlannerStats {
                 weight_budget_bytes: weight_budget,
                 model_weight_bytes,
+                pld_prefer_n: 4,
+                pld_max_draft: 8,
                 ..Default::default()
             },
         };
@@ -212,16 +255,53 @@ impl ResourcePlanner {
 
         // Mitad del presupuesto para KV (el resto son pesos streaming + scratch).
         let kv_budget = self.weight_budget / 2;
-        let window = if self.kv_bytes_per_token == 0 {
+        let bpt_f16 = self.kv_bytes_per_token_f16.max(1);
+        let mut window = if bpt_f16 == 0 {
             manifest.max_seq as usize
         } else {
-            let w = (kv_budget / self.kv_bytes_per_token) as usize;
+            let w = (kv_budget / bpt_f16) as usize;
             w.max(self.sink_tokens + 8)
                 .min(manifest.max_seq as usize)
         };
+
+        // KIVI-lite: si la ventana f16 queda muy corta vs max_seq, pasar a int8
+        // (≈ mitad de bytes) y recalcular.
+        let tight = window < (manifest.max_seq as usize / 4).max(64)
+            || self.weight_budget < self.model_weight_bytes / 4;
+        if tight {
+            self.kv_dtype = KvDtype::I8;
+            self.kv_bytes_per_token = bpt_f16 / 2;
+            window = ((kv_budget / self.kv_bytes_per_token.max(1)) as usize)
+                .max(self.sink_tokens + 8)
+                .min(manifest.max_seq as usize);
+        } else {
+            self.kv_dtype = KvDtype::F16;
+            self.kv_bytes_per_token = bpt_f16;
+        }
+
+        // H2O si hay presión (ventana < max_seq); sparse si la ventana puede ser larga.
+        self.use_h2o = window < manifest.max_seq as usize || tight;
+        self.use_sparse = window >= SPARSE_TOKEN_THRESHOLD;
+
         self.kv_window_tokens = window;
         self.stats.resident_layers = self.resident_layers;
         self.stats.kv_window_tokens = self.kv_window_tokens as u32;
+        self.stats.kv_dtype_i8 = u32::from(matches!(self.kv_dtype, KvDtype::I8));
+        self.stats.h2o_enabled = u32::from(self.use_h2o);
+        self.stats.sparse_attn = u32::from(self.use_sparse);
+    }
+
+    pub fn kv_dtype(&self) -> KvDtype {
+        self.kv_dtype
+    }
+
+    pub fn use_h2o(&self) -> bool {
+        self.use_h2o
+    }
+
+    /// Quest-lite: sparse solo si el planner lo activó y la seq supera el umbral.
+    pub fn use_sparse_attn(&self, seq: usize) -> bool {
+        self.use_sparse && seq > SPARSE_TOKEN_THRESHOLD
     }
 
     pub fn stats(&self) -> &PlannerStats {
@@ -250,6 +330,50 @@ impl ResourcePlanner {
 
     pub fn note_kv_slide(&mut self) {
         self.stats.kv_slides = self.stats.kv_slides.saturating_add(1);
+    }
+
+    pub fn note_pld_attempt(&mut self) {
+        self.stats.pld_attempts = self.stats.pld_attempts.saturating_add(1);
+    }
+
+    pub fn note_pld_accepted(&mut self, n: u32) {
+        self.stats.pld_accepted = self.stats.pld_accepted.saturating_add(n);
+    }
+
+    /// Acumula timing del hot path (una capa).
+    pub fn observe_hotpath(&mut self, matvec_ms: u64, attn_ms: u64) {
+        ewma(&mut self.matvec_ms_ewma, matvec_ms as f64);
+        ewma(&mut self.attn_ms_ewma, attn_ms as f64);
+        self.stats.avg_matvec_ms = self.matvec_ms_ewma;
+        self.stats.avg_attn_ms = self.attn_ms_ewma;
+    }
+
+    /// Parámetros PLD actuales: `(max_draft, min_n, max_n, hint_n)`.
+    pub fn pld_params(&self) -> (usize, usize, usize, usize) {
+        let max_d = self.pld_max_draft.clamp(1, 16);
+        let hint = self.pld_prefer_n.clamp(2, 7);
+        (max_d, 2, 7, hint)
+    }
+
+    /// Ajusta n-gramo / draft según tokens aceptados vs ofrecidos en un intento.
+    pub fn tune_pld(&mut self, offered: usize, accepted: u32) {
+        if offered == 0 {
+            return;
+        }
+        let rate = accepted as f64 / offered as f64;
+        if rate >= 0.75 {
+            // Buena aceptación: drafts más largos; n un poco más corto (más hits).
+            self.pld_max_draft = (self.pld_max_draft + 1).min(12);
+            self.pld_prefer_n = self.pld_prefer_n.saturating_sub(1).max(2);
+        } else if rate == 0.0 {
+            // Fallo total: n más largo (más precisión), draft más corto.
+            self.pld_prefer_n = (self.pld_prefer_n + 1).min(7);
+            self.pld_max_draft = self.pld_max_draft.saturating_sub(1).max(2);
+        } else if rate < 0.35 {
+            self.pld_prefer_n = (self.pld_prefer_n + 1).min(7);
+        }
+        self.stats.pld_prefer_n = self.pld_prefer_n as u32;
+        self.stats.pld_max_draft = self.pld_max_draft as u32;
     }
 
     pub fn layer_dest(&self, layer: u32) -> ExecDest {
@@ -507,6 +631,24 @@ mod tests {
     }
 
     #[test]
+    fn hotpath_and_pld_tune() {
+        let manifest = Manifest::tiny("t");
+        let index = TensorIndex::default();
+        let mut planner = ResourcePlanner::new(&manifest, &index, MemSnapshot::default(), 0, false);
+        planner.observe_hotpath(10, 2);
+        planner.observe_hotpath(14, 4);
+        assert!(planner.stats().avg_matvec_ms > 0.0);
+        assert!(planner.stats().avg_attn_ms > 0.0);
+        assert!(planner.stats().avg_matvec_ms > planner.stats().avg_attn_ms);
+        let n0 = planner.pld_prefer_n;
+        planner.tune_pld(8, 0);
+        assert!(planner.pld_prefer_n >= n0);
+        let d0 = planner.pld_max_draft;
+        planner.tune_pld(4, 4);
+        assert!(planner.pld_max_draft >= d0);
+    }
+
+    #[test]
     fn remote_degraded_on_slow_rtt() {
         let manifest = Manifest::tiny("t");
         let index = TensorIndex::default();
@@ -538,7 +680,7 @@ mod tests {
 
     #[test]
     fn kv_slide_preserves_sink_and_recent() {
-        use crate::layer::LayerKv;
+        use crate::kv::LayerKv;
         let kv_dim = 4;
         let mut kv = LayerKv::new();
         for t in 0..20u16 {
@@ -548,10 +690,11 @@ mod tests {
         }
         kv.slide_window(8, 2, kv_dim);
         assert_eq!(kv.tokens(kv_dim), 8);
+        let k = kv.k_f16_slice();
         // sink: tokens 0,1
-        assert_eq!(kv.k[0], crate::f16::f32_to_f16(0.0));
-        assert_eq!(kv.k[kv_dim], crate::f16::f32_to_f16(1.0));
+        assert_eq!(k[0], crate::f16::f32_to_f16(0.0));
+        assert_eq!(k[kv_dim], crate::f16::f32_to_f16(1.0));
         // recent: 14..19
-        assert_eq!(kv.k[2 * kv_dim], crate::f16::f32_to_f16(14.0));
+        assert_eq!(k[2 * kv_dim], crate::f16::f32_to_f16(14.0));
     }
 }

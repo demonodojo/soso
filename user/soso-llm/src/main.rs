@@ -557,9 +557,12 @@ fn run_model(
             st.remote_layers,
         );
         println!(
-            "soso-llm: streaming — working-set {} capas, ventana KV {} tokens (LayerKV+StreamingLLM)",
+            "soso-llm: streaming — working-set {} capas, ventana KV {} tokens (LayerKV+StreamingLLM), KV {} H2O={} sparse={}",
             st.resident_layers,
             st.kv_window_tokens,
+            if st.kv_dtype_i8 != 0 { "int8" } else { "f16" },
+            st.h2o_enabled,
+            st.sparse_attn,
         );
         println!(
             "soso-llm: memoria — libre {} KiB, reclaimable {} KiB",
@@ -657,12 +660,24 @@ fn run_model(
                     st.avg_gpu_ms,
                     st.avg_remote_ms,
                 );
+                if st.avg_matvec_ms > 0.0 || st.avg_attn_ms > 0.0 {
+                    println!(
+                        "soso-llm: hot path — matvec {:.2} ms/capa, attn {:.2} ms/capa",
+                        st.avg_matvec_ms, st.avg_attn_ms
+                    );
+                }
                 println!(
                     "soso-llm: streaming — prefetch {}, liberaciones shard {}, ventanas KV {}",
                     st.prefeches,
                     st.shard_releases,
                     st.kv_slides,
                 );
+                if st.pld_attempts > 0 || st.pld_accepted > 0 {
+                    println!(
+                        "soso-llm: prompt-lookup — {} aceptados en {} intentos (n≈{}, draft≤{})",
+                        st.pld_accepted, st.pld_attempts, st.pld_prefer_n, st.pld_max_draft
+                    );
+                }
             }
             // Los pesos SUBIDOS frente a las llamadas es la cifra que dice si el
             // cacheo funciona: sin él eran una subida de la matriz entera por

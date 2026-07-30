@@ -2,10 +2,13 @@
 //!
 //! Los pesos se leen como vistas zero-copy (`TensorView`) sobre los shards
 //! mapeados: no hay copia de matrices por token, solo lecturas en streaming
-//! durante el matvec. El KV cache se guarda en f16 (mitad de ancho de banda).
+//! durante el matvec. El KV cache es f16 o int8 (KIVI-lite) según el planner.
 
-use crate::f16::f32_to_f16;
-use crate::gemm::{matvec_f32, matvec_q4_k, matvec_q8_0, rmsnorm, rope_inplace, silu};
+use crate::gemm::{
+    add_assign_f32, add_f32, matvec_f32, matvec_q4_k, matvec_q8_0, rmsnorm, rope_inplace,
+    silu_inplace, swiglu_inplace,
+};
+pub use crate::kv::{KvDtype, LayerKv};
 use crate::parallel::{RowParallel, Sequential};
 use alloc::format;
 use alloc::vec;
@@ -48,6 +51,8 @@ pub trait TensorSource {
     fn prefetch_shards(&mut self, _shards: &[alloc::string::String]) {}
     /// Liberar shards fuera del working set (streaming FlexGen/LayerKV).
     fn release_shards_except(&mut self, _keep: &[alloc::string::String]) {}
+    /// Prefetch de la fila de `embed` del token (page-fault adelantado).
+    fn prefetch_embed_row(&mut self, _token: u32, _hidden: usize) {}
 }
 
 /// matvec despachado por dtype directamente sobre la vista (sin copiar pesos).
@@ -138,73 +143,6 @@ pub fn matvec_view_par(
     }
 }
 
-/// KV cache por capa en f16.
-///
-/// Estilo PagedAttention/StreamingLLM: capacidad pre-reservada y ventana
-/// deslizante (sink + recientes) cuando el presupuesto de memoria no permite
-/// la secuencia completa.
-pub struct LayerKv {
-    pub k: Vec<u16>,
-    pub v: Vec<u16>,
-}
-
-impl LayerKv {
-    pub fn new() -> Self {
-        Self {
-            k: Vec::new(),
-            v: Vec::new(),
-        }
-    }
-
-    /// Reserva capacidad para `tokens` posiciones × `kv_dim` elementos f16.
-    pub fn with_capacity(tokens: usize, kv_dim: usize) -> Self {
-        let n = tokens.saturating_mul(kv_dim);
-        Self {
-            k: Vec::with_capacity(n),
-            v: Vec::with_capacity(n),
-        }
-    }
-
-    pub fn reset(&mut self) {
-        self.k.clear();
-        self.v.clear();
-    }
-
-    pub fn tokens(&self, kv_dim: usize) -> usize {
-        if kv_dim == 0 {
-            0
-        } else {
-            self.k.len() / kv_dim
-        }
-    }
-
-    pub fn append_f16(&mut self, k: &[f32], v: &[f32]) {
-        self.k.extend(k.iter().map(|&x| f32_to_f16(x)));
-        self.v.extend(v.iter().map(|&x| f32_to_f16(x)));
-    }
-
-    /// Ventana StreamingLLM: conserva `sink` tokens iniciales + los más recientes
-    /// hasta `keep` en total. Los K/V ya llevan RoPE aplicado; truncar el frente
-    /// no invalida las posiciones restantes.
-    pub fn slide_window(&mut self, keep: usize, sink: usize, kv_dim: usize) {
-        let n = self.tokens(kv_dim);
-        if n <= keep || keep == 0 || kv_dim == 0 {
-            return;
-        }
-        let sink = sink.min(keep);
-        let drop = n - keep;
-        let start_recent = sink + drop;
-        let mut new_k = Vec::with_capacity(keep * kv_dim);
-        let mut new_v = Vec::with_capacity(keep * kv_dim);
-        new_k.extend_from_slice(&self.k[..sink * kv_dim]);
-        new_v.extend_from_slice(&self.v[..sink * kv_dim]);
-        new_k.extend_from_slice(&self.k[start_recent * kv_dim..]);
-        new_v.extend_from_slice(&self.v[start_recent * kv_dim..]);
-        self.k = new_k;
-        self.v = new_v;
-    }
-}
-
 /// Buffers reutilizados entre tokens: el heap de userspace no libera bloques
 /// pequeños, así que las reservas deben hacerse una sola vez.
 pub struct LayerScratch {
@@ -216,8 +154,9 @@ pub struct LayerScratch {
     pub up: Vec<f32>,
     pub gate: Vec<f32>,
     pub attn_out: Vec<f32>,
-    pub scores: Vec<f32>,
     pub head_out: Vec<f32>,
+    /// Masa softmax por token (H2O); reutilizada, crece con la ventana KV.
+    pub mass_buf: Vec<f32>,
 }
 
 impl LayerScratch {
@@ -227,6 +166,7 @@ impl LayerScratch {
         let heads = m.num_heads as usize;
         let head_dim = h / heads;
         let kv_dim = m.num_kv_heads as usize * head_dim;
+        let kv_cap = (m.max_seq as usize).min(256).max(32);
         Self {
             residual: vec![0.0; h],
             norm_w: vec![0.0; h],
@@ -236,8 +176,8 @@ impl LayerScratch {
             up: vec![0.0; ffn],
             gate: vec![0.0; ffn],
             attn_out: vec![0.0; h],
-            scores: Vec::new(),
             head_out: vec![0.0; head_dim],
+            mass_buf: vec![0.0; kv_cap],
         }
     }
 }
@@ -278,6 +218,13 @@ pub struct LayerExecutor<'a> {
     pub parallel: Option<&'a dyn RowParallel>,
 }
 
+/// Timing del hot path de una capa (ms del reloj del runtime).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LayerTiming {
+    pub matvec_ms: u64,
+    pub attn_ms: u64,
+}
+
 impl<'a> LayerExecutor<'a> {
     pub fn forward_layer<S: TensorSource>(
         &self,
@@ -290,7 +237,9 @@ impl<'a> LayerExecutor<'a> {
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         use_gpu: bool,
         planner: Option<&crate::plan::ResourcePlanner>,
-    ) -> Result<(), ()> {
+        clock_ms: Option<fn() -> u64>,
+    ) -> Result<LayerTiming, ()> {
+        let tick = |c: Option<fn() -> u64>| c.map(|f| f()).unwrap_or(0);
         let h = self.manifest.hidden_dim as usize;
         let heads = self.manifest.num_heads as usize;
         let kv_heads = self.manifest.num_kv_heads as usize;
@@ -318,6 +267,7 @@ impl<'a> LayerExecutor<'a> {
         source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w)?;
         rmsnorm(hidden, &s.norm_w, eps);
 
+        let t_mv0 = tick(clock_ms);
         matvec_step(
             use_gpu,
             gpu,
@@ -357,6 +307,7 @@ impl<'a> LayerExecutor<'a> {
             planner,
             layer,
         )?;
+        let t_attn0 = tick(clock_ms);
 
         for head in 0..heads {
             rope_inplace(&mut s.q[head * head_dim..(head + 1) * head_dim], pos, theta);
@@ -366,27 +317,59 @@ impl<'a> LayerExecutor<'a> {
         }
 
         kv.append_f16(&s.k, &s.v);
-        // Longitud real del cache (ventana deslizante puede ser < pos+1).
         let seq = kv.tokens(kv_dim);
-        let _ = pos; // RoPE ya aplicado con posición absoluta del token actual
-
-        // FlashAttention-style decode: online softmax por tiles de KV.
+        let _ = pos;
+        let sparse = planner.is_some_and(|p| p.use_sparse_attn(seq));
+        let use_h2o = planner.is_some_and(|p| p.use_h2o());
+        // Fast path: KV f16 denso sin masa → tiled SIMD (sin dequant por token).
+        let fast_f16 = matches!(kv.dtype, KvDtype::F16) && !sparse && !use_h2o;
+        if use_h2o && s.mass_buf.len() < seq {
+            s.mass_buf.resize(seq, 0.0);
+        }
         s.attn_out.fill(0.0);
         for head in 0..heads {
             let q_h = &s.q[head * head_dim..(head + 1) * head_dim];
             let kv_head = head / group;
-            crate::attn::attention_decode_f16_tiled(
-                q_h,
-                &kv.k,
-                &kv.v,
-                head_dim,
-                kv_dim,
-                kv_head,
-                seq,
-                &mut s.head_out,
-            );
+            if fast_f16 {
+                crate::attn::attention_decode_f16_tiled(
+                    q_h,
+                    kv.k_f16_slice(),
+                    kv.v_f16_slice(),
+                    head_dim,
+                    kv_dim,
+                    kv_head,
+                    seq,
+                    &mut s.head_out,
+                );
+            } else {
+                let mass = if use_h2o {
+                    Some(&mut s.mass_buf[..seq])
+                } else {
+                    None
+                };
+                crate::attn::attention_decode_kv(
+                    q_h,
+                    kv,
+                    head_dim,
+                    kv_dim,
+                    kv_head,
+                    seq,
+                    &mut s.head_out,
+                    mass,
+                    sparse,
+                );
+            }
             s.attn_out[head * head_dim..(head + 1) * head_dim].copy_from_slice(&s.head_out);
+            if use_h2o {
+                let inv_h = 1.0 / heads as f32;
+                for t in 0..seq {
+                    if t < kv.mass.len() {
+                        kv.mass[t] += s.mass_buf[t] * inv_h;
+                    }
+                }
+            }
         }
+        let t_attn1 = tick(clock_ms);
 
         // proyección de salida de la atención (Wo) y residual
         matvec_step(
@@ -402,9 +385,7 @@ impl<'a> LayerExecutor<'a> {
             planner,
             layer,
         )?;
-        for i in 0..h {
-            hidden[i] = s.residual[i] + s.q[i];
-        }
+        add_f32(&s.residual, &s.q, hidden);
 
         // --- FFN ---
         s.residual.copy_from_slice(hidden);
@@ -438,13 +419,9 @@ impl<'a> LayerExecutor<'a> {
                 planner,
                 layer,
             )?;
-            for i in 0..ffn {
-                s.up[i] = silu(s.gate[i]) * s.up[i];
-            }
+            swiglu_inplace(&mut s.up, &s.gate);
         } else {
-            for x in s.up.iter_mut() {
-                *x = silu(*x);
-            }
+            silu_inplace(&mut s.up);
         }
         matvec_step(
             use_gpu,
@@ -460,9 +437,15 @@ impl<'a> LayerExecutor<'a> {
             layer,
         )?;
 
-        for i in 0..h {
-            hidden[i] += s.residual[i];
+        add_assign_f32(hidden, &s.residual);
+        let t_mv1 = tick(clock_ms);
+        let mut timing = LayerTiming::default();
+        if clock_ms.is_some() {
+            timing.matvec_ms = t_attn0
+                .saturating_sub(t_mv0)
+                .saturating_add(t_mv1.saturating_sub(t_attn1));
+            timing.attn_ms = t_attn1.saturating_sub(t_attn0);
         }
-        Ok(())
+        Ok(timing)
     }
 }

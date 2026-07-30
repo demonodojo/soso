@@ -556,24 +556,32 @@ SOSO_QEMU_MEM=16G SOSO_QEMU_SMP=4 cargo xtask run
 ```
 
 Los pesos se leen **sin copia** directamente del mmap del modelo (páginas de
-2 MiB bajo demanda) y el KV cache va en f16. El kernel **reclama** páginas de
-pesos bajo presión de memoria (marca de agua ~4 MiB): un modelo puede ser más
-grande que la RAM y degradar a velocidad de disco en lugar de morir por OOM.
+2 MiB bajo demanda). El KV cache usa **f16** por defecto, o **int8** (KIVI-lite)
+si el planificador detecta poca RAM. El kernel **reclama** páginas de pesos bajo
+presión (marca de agua ~4 MiB): un modelo puede ser más grande que la RAM y
+degradar a velocidad de disco en lugar de morir por OOM.
 `soso-llm` incluye un **planificador de recursos** que lee la memoria libre
 (`SYS_MEMINFO`), reparte capas entre CPU/GPU/nodo remoto según latencia medida
 y replanifica cada pocos tokens. Además aplica streaming estilo **LayerKV /
-FlexGen** (solo unas pocas capas de pesos residentes, prefetch de la siguiente)
-y ventana **StreamingLLM** en el KV cache (sink + recientes) para no crecer
-sin límite. Al arrancar y al terminar verás líneas como:
+FlexGen** (pocas capas de pesos residentes + prefetch de la siguiente), ventana
+**StreamingLLM** / **H2O** en el KV (sink + tokens de mayor atención + recientes)
+y, con contextos largos, atención sparse por bloques (**Quest-lite**). Al
+arrancar y al terminar verás:
 
 ```text
 soso-llm: planificador — presupuesto pesos … KiB, modelo … KiB, capas CPU/GPU/remoto …
-soso-llm: streaming — working-set N capas, ventana KV T tokens (LayerKV+StreamingLLM)
+soso-llm: streaming — working-set N capas, ventana KV T tokens …, KV f16|int8 H2O=… sparse=…
 soso-llm: memoria — libre … KiB, reclaimable … KiB
 …
 soso-llm: planificador — replanes N, latencia media CPU/GPU/remoto … ms
+soso-llm: hot path — matvec … ms/capa, attn … ms/capa
 soso-llm: streaming — prefetch …, liberaciones shard …, ventanas KV …
+soso-llm: prompt-lookup — N aceptados en M intentos (n≈…, draft≤…)
 ```
+
+En greedy, **Prompt Lookup** reutiliza continuaciones del propio contexto (sin modelo
+draft) y **autotunea** el n-gramo / longitud de draft según la tasa de aceptación.
+El prefill hace prefetch del embed del siguiente token mientras calcula.
 
 La ventana de mapeo de usuario llega a ~416 GiB; la imagen de modelos se
 dimensiona con `SOSO_MODELS_SIZE` (por defecto 8G) si el árbol `.som` no cabe

@@ -25,7 +25,8 @@ Actualiza `MANUAL-USUARIO.md` en la **misma tarea** que cambia la funcionalidad 
 | Cambio de puertos, SSH o auth | Actualizar sección de acceso |
 | Nuevo fichero en rootfs visible al usuario | Actualizar estructura del disco |
 | Cambio de cwd, rutas relativas o redirecciones | Actualizar sosh y ejemplos |
-| Modelos LLM o `soso-llm` | Sección `/models` y conversión GGUF |
+| Modelos LLM o `soso-llm` | Sección `/models`, planificador/streaming, conversión GGUF |
+| Etapa de `/loop` que cambie strings o UX de `soso-llm` | Actualizar en **esa misma etapa** (no aplazar) |
 | Solo refactor interno sin cambio de UX | No tocar el manual |
 | Cambio solo de kernel-shell de depuración | Solo si afecta comandos que el usuario final usa |
 

@@ -95,10 +95,32 @@ soso/
 
 - Segundo disco virtio-blk; montaje en `/models/<nombre>/`
 - Ficheros `.som` con cabecera común (magic+crc+versión+payload_len, `pack_som`/`parse_som` en sosomodel): `manifest.som` (v2: GQA `num_kv_heads`, `rope_theta`, `rms_eps`), `index.som` (shape `[filas,columnas]` row-major, dtype F32/Q8_0), `tokenizer.som` (vocabulario SentencePiece-ish, opcional), shards `.tensor`
-- Runtime (`soso-llm-core`): llama completo — RoPE, GQA, **Wo (`attn_output`)**, SwiGLU (`ffn_gate` opcional), `output_norm`, Q8_0 y Q4_K (layout GGML passthrough, matvec fusionado); pesos zero-copy (`TensorView` sobre mmap), KV cache f16, sampling temp/top-p (`sample.rs`), streaming (`generate_stream` + `StreamDecoder`); buffers reutilizados (`LayerScratch`) — libsoso libera solo bloques ≥1 MiB (mmap anónimo), no reservar por token
-- **Planificador de recursos** (`plan.rs` + `ResourcePlanner`): lee `SYS_MEMINFO`, presupuesto de pesos (70 % libre+reclaimable), EWMA por capa/destino, replanifica cada 8 tokens; streaming **LayerKV/FlexGen** (working set de capas + prefetch N+1 + `release_shards_except`); ventana **StreamingLLM** en KV (`slide_window` sink+recientes); `soso-llm` imprime plan/stats
-- **Atención tiled** (`attn.rs`): decode FlashAttention-style (online softmax por tiles de 64 tokens sobre KV f16); prefetch de shards a stride 2 MiB
+- Runtime (`soso-llm-core`): llama completo — RoPE, GQA, **Wo (`attn_output`)**, SwiGLU (`ffn_gate` opcional), `output_norm`, Q8_0 y Q4_K (layout GGML passthrough, matvec fusionado); pesos zero-copy (`TensorView` sobre mmap), KV en `kv.rs` (f16 o int8 KIVI-lite), sampling temp/top-p (`sample.rs`), streaming (`generate_stream` / `generate_stream_planned` + `StreamDecoder`); buffers reutilizados (`LayerScratch`) — libsoso libera solo bloques ≥1 MiB (mmap anónimo), no reservar por token
+- **Planificador de recursos** (`plan.rs` + `ResourcePlanner`): lee `SYS_MEMINFO`, presupuesto de pesos (70 % libre+reclaimable), EWMA por capa/destino, replanifica cada 8 tokens; elige `KvDtype`, H2O y sparse según presión; `Runtime::set_planner` recrea KV con el dtype; stats incluyen `kv_dtype_i8` / `h2o_enabled` / `sparse_attn` / PLD
+- **KV cache** (`kv.rs` + `LayerKv`): `append` f16 o int8+escala/token; `load_k_head`/`load_v_head`; masa H2O; `slide_window_h2o(keep, sink, recent, …)`; decode vía `attention_decode_kv`
+- **Atención** (`attn.rs`): decode FlashAttention-style tiled (tiles 64, path f16 clásico); `attention_decode_kv` (f16/I8 + masa); **Quest-lite** sparse si `seq > 256` (bloques 32, top-4 + sink/recent); **AVX2+FMA** f16→f32; prefetch shards stride 2 MiB
+- **Prompt Lookup Decoding** (`prompt_lookup_draft_hinted`): greedy; hint de n autotuneado (`tune_pld` por tasa de aceptación) + fallback max→min; stats `pld_*` / `pld_prefer_n` / `pld_max_draft`
+- **Hot path** (`LayerTiming`): EWMA matvec vs attn por capa (`observe_hotpath`); `soso-llm` imprime `hot path — matvec/attn ms/capa`. Decode: si KV f16 + denso + sin H2O → `attention_decode_f16_tiled` (SIMD); si no, `attention_decode_kv`. `LayerScratch.mass_buf` reutilizado (sin alloc por token)
+- **Prefill**: `prefill_prompt` prefetch del embed N+1; residuales `add_f32`/`add_assign_f32` AVX2; SwiGLU helper
 - **Reclaim kernel** (`mm/reclaim.rs`): clock (segunda oportunidad) sobre páginas mmap RO; marca de agua 4 MiB; TLB shootdown IPI (`0x42`) en lote — modelos > RAM degradan a I/O de disco
+- **Optimizaciones paper → código** (mantener al día en cada etapa de `/loop` inferencia):
+
+| Técnica | Origen | Módulo |
+|--------|--------|--------|
+| Layer streaming + release | LayerKV / FlexGen | `plan.rs`, `source.rs`, `runtime.rs` |
+| Prefetch layer-ahead / 2 MiB | ScoutAttention-style | `source.rs` |
+| Ventana sink+recientes | StreamingLLM | `kv.rs::slide_window` |
+| Eviction por masa attn | H2O | `kv.rs::slide_window_h2o`, masa en decode |
+| KV int8 + escala/token | KIVI-lite | `kv.rs` `KvDtype::I8` |
+| Attn sparse por bloques | Quest-lite | `attn.rs` `SPARSE_*` + planner |
+| Online softmax tiled | FlashAttention decode | `attn.rs` |
+| Draft n-gramo + autotune | Prompt Lookup Decoding | `attn.rs` hinted, `plan::tune_pld` |
+| Perfil matvec vs attn | — (telemetría) | `LayerTiming`, `observe_hotpath` |
+| Fast path attn f16 | Flash decode | `attention_decode_f16_tiled` si !H2O/!sparse |
+| Capacidad KV pre-reservada | espíritu PagedAttention | `LayerKv::with_capacity_*` |
+| Clock reclaim + shootdown | OS / vLLM-like | `kernel/src/mm/reclaim.rs` |
+
+- **Cierre de etapa `/loop` (obligatorio):** al terminar cada pase de optimización, actualizar esta skill (tabla + bullets), espejo `.cursor/skills/soso-architecture/SKILL.md`, `soso-dev` si cambian tests/comandos, y `MANUAL-USUARIO.md` si hay strings o comportamiento visible al usuario. No dejar docs aplazados al “final del loop”.
 - **SIMD**: userspace compila con target propio `user/x86_64-soso-user.json` (SSE..AVX2+FMA, build-std); kernels AVX2 en `gemm.rs::avx2` con dispatch por `target_feature` (escalar = referencia para tests). **Estado FPU**: el kernel preserva x87/XMM/YMM con **xsave64** (`arch/fpu.rs`; fxsave NO basta — pierde las mitades altas YMM entre procesos): timer_isr guarda a `TIMER_FPU` antes de net::poll, `timer_tick` lo copia a `Process.fpu` al desalojar, `schedule_inner` restaura al reanudar, el page fault handler preserva en `mmap_fault_shim`; syscalls no preservan (los wrappers de libsoso llevan `clobber_abi("C")`). `init test` estresa YMM con dos hijos "fpu" concurrentes
 - Harness rápido de calidad en host: `cargo run --release -p soso-llm-core --features std --example hostrun -- <modelo-dir> "<prompt>" <n>` (velocidad nativa, SOSO_DEBUG=1 para estadísticas por capa)
 - `Runtime::validate_shapes()` comprueba index↔manifest antes de inferir

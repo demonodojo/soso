@@ -91,8 +91,10 @@ Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp).
 # Host-only sosofs crash-safety
 cargo test -q -p sosofs --features std
 
-# Host: soso-llm-core (incl. planificador), sosomodel, convert-gguf
+# Host: soso-llm-core (planificador, kv KIVI/H2O, attn sparse, PLD), sosomodel, convert-gguf
 cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
+# Subconjuntos útiles tras tocar inferencia:
+#   cargo test -p soso-llm-core --features std -- plan:: kv:: attn::
 
 # End-to-end (builds, QEMU, serial log, TCP, SSH, soso-llm, init test meminfo,
 # inferencia con RAM 48M/reclaim, halt)
@@ -118,7 +120,11 @@ User rule for this project: **mock HTTP and Celery calls in tests** (soso has no
 
 ## Skills layout
 
-Skills live in `.claude/skills/`. `.cursor/skills` mirrors them — edit under `.claude/skills/`.
+Skills live in `.claude/skills/`. `.cursor/skills` mirrors them — edit under `.claude/skills/`
+and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: actualizar
+`soso-architecture` (tabla paper→código), este skill si hay tests/comandos nuevos, y
+`MANUAL-USUARIO.md` si el usuario ve strings o comportamiento distinto (skill
+`soso-user-manual`).
 
 ## Common issues
 

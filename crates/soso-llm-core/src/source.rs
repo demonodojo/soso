@@ -210,6 +210,31 @@ impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
     fn release_shards_except(&mut self, keep: &[String]) {
         self.release_shards_except_impl(keep);
     }
+
+    fn prefetch_embed_row(&mut self, token: u32, hidden: usize) {
+        let Some(entry) = self.index.find("embed") else {
+            return;
+        };
+        let entry = entry.clone();
+        let elem_off = token as usize * hidden;
+        if elem_off >= entry.elems() {
+            return;
+        }
+        let byte_off = match entry.dtype {
+            DTYPE_F32 => elem_off * 4,
+            _ => 0, // cuantizado: tocar inicio del shard basta
+        };
+        let need = if entry.dtype == DTYPE_F32 {
+            (hidden * 4).min(entry.byte_len as usize - byte_off)
+        } else {
+            64.min(entry.byte_len as usize)
+        };
+        if let Ok(bytes) = self.tensor_bytes(&entry, byte_off, need.max(1).min(4096)) {
+            if !bytes.is_empty() {
+                let _ = unsafe { core::ptr::read_volatile(bytes.as_ptr()) };
+            }
+        }
+    }
 }
 
 #[cfg(feature = "std")]

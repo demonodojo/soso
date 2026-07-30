@@ -1,7 +1,8 @@
 //! Runtime de inferencia: bucle de generación de tokens.
 
 use crate::gemm::rmsnorm;
-use crate::layer::{matvec_view_par, LayerExecutor, LayerKv, LayerScratch, TensorSource, TensorView};
+use crate::kv::LayerKv;
+use crate::layer::{matvec_view_par, LayerExecutor, LayerScratch, TensorSource, TensorView};
 use crate::parallel::{RowParallel, Sequential};
 use crate::plan::{ExecDest, ResourcePlanner};
 use crate::tier::TierManager;
@@ -104,6 +105,16 @@ impl Runtime {
     }
 
     pub fn set_planner(&mut self, planner: ResourcePlanner) {
+        // Antes del primer token: alinear dtype KV (KIVI-lite) con el planner.
+        if self.pos == 0 {
+            let dtype = planner.kv_dtype();
+            let head_dim = (self.manifest.hidden_dim / self.manifest.num_heads) as usize;
+            let kv_dim = self.manifest.num_kv_heads as usize * head_dim;
+            let kv_cap = planner.kv_window_tokens().min(256).max(32);
+            self.kv = (0..self.manifest.num_layers as usize)
+                .map(|_| LayerKv::with_capacity_dtype(kv_cap, kv_dim, dtype))
+                .collect();
+        }
         self.planner = Some(planner);
     }
 
@@ -182,6 +193,38 @@ impl Runtime {
             return Err(());
         }
         source.load_f32_range("embed", token as usize * h, &mut self.hidden)
+    }
+
+    /// Prefetch de la fila de embed (solapa I/O con el forward del token actual).
+    pub fn prefetch_embed(&mut self, token: u32, source: &mut impl TensorSource) {
+        let h = self.manifest.hidden_dim as usize;
+        if token < self.manifest.vocab_size {
+            source.prefetch_embed_row(token, h);
+        }
+    }
+
+    /// Prefill del prompt: prefetch del siguiente embed mientras se calcula
+    /// el forward del token actual.
+    pub fn prefill_prompt(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        clock_ms: Option<fn() -> u64>,
+    ) -> Result<(), ()> {
+        for (i, &tok) in prompt.iter().enumerate() {
+            if let Some(&next) = prompt.get(i + 1) {
+                self.prefetch_embed(next, source);
+            }
+            self.embed_token(tok, source)?;
+            if let Some(c) = clock_ms {
+                let _ = self.forward_step_timed(source, parallel, gpu, c)?;
+            } else {
+                self.forward_step_par(source, parallel, gpu)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn forward_step(&mut self, source: &mut impl TensorSource) -> Result<(), ()> {
@@ -307,7 +350,7 @@ impl Runtime {
                 ExecDest::Cpu
             };
             let t0 = clock_ms.map(|c| c());
-            exec.forward_layer(
+            let timing = exec.forward_layer(
                 layer,
                 self.pos,
                 &mut self.hidden,
@@ -317,10 +360,12 @@ impl Runtime {
                 gpu,
                 use_gpu,
                 self.planner.as_ref(),
+                clock_ms,
             )?;
             if let (Some(c), Some(pl)) = (clock_ms, self.planner.as_mut()) {
                 let ms = c().saturating_sub(t0.unwrap_or(0));
                 pl.observe_layer(layer, dest, ms);
+                pl.observe_hotpath(timing.matvec_ms, timing.attn_ms);
             }
             // Liberar shards fuera del working set (streaming FlexGen).
             let keep = self
@@ -339,18 +384,19 @@ impl Runtime {
         Ok(())
     }
 
-    /// StreamingLLM: recorta KV a la ventana presupuestada (sink + recientes).
+    /// StreamingLLM / H2O: recorta KV a la ventana presupuestada.
     pub fn slide_kv_if_needed(&mut self) {
-        let (keep, sink) = match self.planner.as_ref() {
-            Some(pl) => (pl.kv_window_tokens(), pl.sink_tokens()),
+        let (keep, sink, use_h2o) = match self.planner.as_ref() {
+            Some(pl) => (pl.kv_window_tokens(), pl.sink_tokens(), pl.use_h2o()),
             None => return,
         };
         let head_dim = (self.manifest.hidden_dim / self.manifest.num_heads) as usize;
         let kv_dim = self.manifest.num_kv_heads as usize * head_dim;
+        let recent = keep.saturating_sub(sink) / 2;
         let mut slid = false;
         for kv in &mut self.kv {
             if kv.tokens(kv_dim) > keep {
-                kv.slide_window(keep, sink, kv_dim);
+                kv.slide_window_h2o(keep, sink, recent, kv_dim, use_h2o);
                 slid = true;
             }
         }
@@ -471,24 +517,49 @@ impl Runtime {
         }
         self.reset_sequence();
         let mut tokens: Vec<u32> = prompt.to_vec();
-        for &tok in prompt {
-            self.embed_token(tok, source)?;
-            self.forward_step_par(source, parallel, gpu)?;
-        }
-        for _ in 0..max_new {
+        self.prefill_prompt(source, prompt, parallel, gpu, None)?;
+        let greedy = sampler.temp <= 0.0;
+        let mut remaining = max_new;
+        while remaining > 0 {
             if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
                 break;
             }
             let logits = self.logits_par(source, parallel)?;
-            let next = sampler.sample(logits);
+            let mut next = sampler.sample(logits);
             if eos == Some(next) {
                 break;
             }
             tokens.push(next);
             on_token(next);
+            remaining -= 1;
+            let drafts = if greedy {
+                crate::attn::prompt_lookup_draft(&tokens, remaining.min(8))
+            } else {
+                alloc::vec::Vec::new()
+            };
+            if let Some(&d0) = drafts.first() {
+                self.prefetch_embed(d0, source);
+            }
             self.embed_token(next, source)?;
             self.forward_step_par(source, parallel, gpu)?;
-            self.slide_kv_if_needed();
+            for (di, &draft) in drafts.iter().enumerate() {
+                if remaining == 0 {
+                    break;
+                }
+                let logits = self.logits_par(source, parallel)?;
+                next = Self::argmax(logits);
+                if next != draft || eos == Some(next) {
+                    break;
+                }
+                tokens.push(next);
+                on_token(next);
+                remaining -= 1;
+                if let Some(&nxt) = drafts.get(di + 1) {
+                    self.prefetch_embed(nxt, source);
+                }
+                self.embed_token(next, source)?;
+                self.forward_step_par(source, parallel, gpu)?;
+            }
         }
         Ok(tokens)
     }
@@ -515,24 +586,76 @@ impl Runtime {
             pl.refresh_mem(refresh_mem());
         }
         let mut tokens: Vec<u32> = prompt.to_vec();
-        for &tok in prompt {
-            self.embed_token(tok, source)?;
-            let _ = self.forward_step_timed(source, parallel, gpu, clock_ms)?;
-        }
-        for _ in 0..max_new {
+        self.prefill_prompt(source, prompt, parallel, gpu, Some(clock_ms))?;
+        let greedy = sampler.temp <= 0.0;
+        let mut remaining = max_new;
+        while remaining > 0 {
             let logits = self.logits_par(source, parallel)?;
-            let next = sampler.sample(logits);
+            let mut next = sampler.sample(logits);
             if eos == Some(next) {
                 break;
             }
             tokens.push(next);
             on_token(next);
+            remaining -= 1;
+            let drafts = if greedy {
+                let (max_d, min_n, max_n, hint) = self
+                    .planner
+                    .as_ref()
+                    .map(|p| p.pld_params())
+                    .unwrap_or((8, 2, 7, 4));
+                crate::attn::prompt_lookup_draft_hinted(
+                    &tokens,
+                    remaining.min(max_d),
+                    min_n,
+                    max_n,
+                    hint,
+                )
+            } else {
+                alloc::vec::Vec::new()
+            };
+            if let Some(&d0) = drafts.first() {
+                self.prefetch_embed(d0, source);
+            }
             self.embed_token(next, source)?;
             if self.forward_step_timed(source, parallel, gpu, clock_ms)? {
                 if let Some(pl) = self.planner.as_mut() {
                     pl.refresh_mem(refresh_mem());
                     pl.recompute_streaming_budgets(&self.manifest);
                 }
+            }
+            if drafts.is_empty() {
+                continue;
+            }
+            let offered = drafts.len();
+            if let Some(pl) = self.planner.as_mut() {
+                pl.note_pld_attempt();
+            }
+            let mut accepted = 0u32;
+            for (di, &draft) in drafts.iter().enumerate() {
+                if remaining == 0 {
+                    break;
+                }
+                let logits = self.logits_par(source, parallel)?;
+                next = Self::argmax(logits);
+                if next != draft || eos == Some(next) {
+                    break;
+                }
+                tokens.push(next);
+                on_token(next);
+                remaining -= 1;
+                accepted += 1;
+                if let Some(&nxt) = drafts.get(di + 1) {
+                    self.prefetch_embed(nxt, source);
+                }
+                self.embed_token(next, source)?;
+                let _ = self.forward_step_timed(source, parallel, gpu, clock_ms)?;
+            }
+            if let Some(pl) = self.planner.as_mut() {
+                if accepted > 0 {
+                    pl.note_pld_accepted(accepted);
+                }
+                pl.tune_pld(offered, accepted);
             }
         }
         Ok(tokens)
