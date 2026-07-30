@@ -74,6 +74,11 @@ static void lx_mdelay(unsigned ms)
     }
 }
 
+uint64_t lx_ktime_get_ns(void)
+{
+    return 0;
+}
+
 /* El apagado quita el bus master; aquí solo se cuenta que lo pida. */
 static unsigned pci_master_cleared;
 static void lx_pci_clear_master(struct lx_pci_dev *d) { (void)d; pci_master_cleared++; }
@@ -391,6 +396,7 @@ typedef char fake_usermode_reg_check[
 #include "gsp_chan_body.inc"
 #include "gsp_ce_body.inc"
 #include "gsp_grctx_body.inc"
+#include "gsp_buf_body.inc"
 #include "gsp_compute_body.inc"
 #include "gsp_fini_body.inc"
 
@@ -1850,6 +1856,35 @@ static int check_mv_tiling(struct gsp_compute *cp)
     return 0;
 }
 
+/* G6: aritmética del matvec residente (un QMD, warp/fila). */
+static int check_g6_resident(void)
+{
+    unsigned grid;
+
+    if (G6_ROWS_PER_CTA != 8u) {
+        printf("FALLO: G6_ROWS_PER_CTA=%u (esperado 8)\n", G6_ROWS_PER_CTA);
+        return -1;
+    }
+    grid = (2816u + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
+    if (grid != 352u) {
+        printf("FALLO: grid G6 para 2816 filas = %u (esperado 352)\n", grid);
+        return -1;
+    }
+    if (G6_VA_BASE >= G6_VA_LIMIT ||
+        G6_RES_X_BYTES != G5_MV_X_BYTES ||
+        G6_MAX_ROWS < 1024u) {
+        printf("FALLO: constantes de layout G6 incoherentes\n");
+        return -1;
+    }
+    if (G6_UPLOAD_CHUNK != 4096u) {
+        printf("FALLO: troceo de subida G6\n");
+        return -1;
+    }
+    printf("OK: G6 residente — grid 2816→%u, VA 0x%llx, troceo %u B\n",
+           grid, (unsigned long long)G6_VA_BASE, G6_UPLOAD_CHUNK);
+    return 0;
+}
+
 /* Lo que el RM de mentira contesta a CE_GET_FAULT_METHOD_BUFFER_SIZE. El valor
  * concreto da igual —en HW lo dice la tarjeta—; lo que se comprueba es que se
  * pregunte y que lo contestado llegue tal cual al descriptor. */
@@ -2992,6 +3027,12 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         }
         if (check_mv_tiling(&cp) != 0)
             return -1;
+        if (check_g6_resident() != 0)
+            return -1;
+        if (!cp.res_mapped) {
+            printf("FALLO: el staging G6 no quedó mapeado\n");
+            return -1;
+        }
         /* El pushbuffer del canal de GR0, que es el que usa el compute. Mirar el
          * del CE aquí daba "pushbuffer sin QMD" con el encoder perfectamente
          * bien: los métodos estaban, pero en el otro canal. */

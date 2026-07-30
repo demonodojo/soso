@@ -40,4 +40,7 @@ int gsp_vram_init(struct gsp_vram *v, const struct gsp_static_info *info);
  * nunca empieza en 0 en esta tarjeta, y aun así `gsp_vram_init` lo comprueba. */
 uint64_t gsp_vram_alloc(struct gsp_vram *v, uint64_t size, uint64_t align);
 
+/* Devuelve un bloque liberado por G6; no reutiliza el bump pointer. */
+void gsp_vram_return(struct gsp_vram *v, uint64_t phys, uint64_t size);
+
 #endif

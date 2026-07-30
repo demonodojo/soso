@@ -17,48 +17,81 @@ const GPU_VENDOR_INTEL: u8 = 1;
 /// indistinguible de un fallo de la GPU. Se enciende a petición (`SOFTG`).
 const GPU_VENDOR_SOFT: u8 = 3;
 
-/// Búfer del dispositivo.
-///
-/// Se reserva como `Vec<u32>` y no como `Vec<u8>` por una razón concreta: un
-/// `Vec<u8>` sólo garantiza alineación 1, así que sus bytes no se pueden releer
-/// como `f32` sin copiarlos a otro sitio. Con la base alineada a 4, un búfer de
-/// pesos se le pasa al motor de cómputo **sin copia**; antes cada `MATVF` construía
-/// un `Vec<f32>` entero de la matriz (y a golpe de `from_le_bytes` de 4 en 4) sólo
-/// para poder mirarla.
+/// Búfer del dispositivo: heap (soft/Intel/fallback) o VRAM residente (G6).
+enum GpuStorage {
+    Heap {
+        words: alloc::vec::Vec<u32>,
+        len: usize,
+    },
+    Device {
+        va: u64,
+        len: usize,
+    },
+}
+
 struct GpuBuffer {
-    words: Vec<u32>,
-    /// Bytes lógicos: lo que pidió el usuario, que no tiene que ser múltiplo de 4.
-    len: usize,
+    storage: GpuStorage,
 }
 
 impl GpuBuffer {
-    fn new(bytes: usize) -> Self {
+    fn heap(bytes: usize) -> Self {
         Self {
-            words: alloc::vec![0u32; bytes.div_ceil(4)],
-            len: bytes,
+            storage: GpuStorage::Heap {
+                words: alloc::vec![0u32; bytes.div_ceil(4)],
+                len: bytes,
+            },
+        }
+    }
+
+    fn device(va: u64, bytes: usize) -> Self {
+        Self {
+            storage: GpuStorage::Device { va, len: bytes },
         }
     }
 
     fn len(&self) -> usize {
-        self.len
-    }
-
-    fn bytes(&self) -> &[u8] {
-        // La reserva cubre `len` redondeado hacia arriba, así que `len` bytes
-        // siempre están dentro.
-        unsafe { core::slice::from_raw_parts(self.words.as_ptr().cast::<u8>(), self.len) }
-    }
-
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        unsafe { core::slice::from_raw_parts_mut(self.words.as_mut_ptr().cast::<u8>(), self.len) }
-    }
-
-    /// Vista `&[f32]` sin copia. `None` si no caben `elems`.
-    fn f32s(&self, elems: usize) -> Option<&[f32]> {
-        if elems * 4 > self.len {
-            return None;
+        match &self.storage {
+            GpuStorage::Heap { len, .. } | GpuStorage::Device { len, .. } => *len,
         }
-        Some(unsafe { core::slice::from_raw_parts(self.words.as_ptr().cast::<f32>(), elems) })
+    }
+
+    fn device_va(&self) -> Option<u64> {
+        match &self.storage {
+            GpuStorage::Device { va, .. } => Some(*va),
+            GpuStorage::Heap { .. } => None,
+        }
+    }
+
+    fn bytes(&self) -> Option<&[u8]> {
+        match &self.storage {
+            GpuStorage::Heap { words, len } => Some(unsafe {
+                core::slice::from_raw_parts(words.as_ptr().cast::<u8>(), *len)
+            }),
+            GpuStorage::Device { .. } => None,
+        }
+    }
+
+    fn bytes_mut(&mut self) -> Option<&mut [u8]> {
+        match &mut self.storage {
+            GpuStorage::Heap { words, len } => Some(unsafe {
+                core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), *len)
+            }),
+            GpuStorage::Device { .. } => None,
+        }
+    }
+
+    fn f32s(&self, elems: usize) -> Option<&[f32]> {
+        match &self.storage {
+            GpuStorage::Heap { words, len } => {
+                if elems * 4 > *len {
+                    return None;
+                }
+                Some(unsafe {
+                    core::slice::from_raw_parts(words.as_ptr().cast::<f32>(), elems)
+                })
+            }
+            GpuStorage::Device { .. } => None,
+        }
     }
 }
 
@@ -196,8 +229,30 @@ fn gsp_label() -> &'static str {
     "off"
 }
 
-fn gpu() -> &'static Mutex<GpuState> {
-    GPU.get().expect("gpu no inicializada")
+fn device_bufs_available(g: &GpuState) -> bool {
+    g.vendor == GPU_VENDOR_NVIDIA && g.compute && {
+        #[cfg(feature = "lxdde")]
+        {
+            crate::lxdde::gsp_ready()
+        }
+        #[cfg(not(feature = "lxdde"))]
+        {
+            false
+        }
+    }
+}
+
+fn vram_free_bytes(g: &GpuState) -> u64 {
+    if device_bufs_available(g) {
+        #[cfg(feature = "lxdde")]
+        {
+            let free = crate::lxdde::device_vram_free();
+            if free > 0 {
+                return free;
+            }
+        }
+    }
+    g.vram_total.saturating_sub(g.vram_used)
 }
 
 pub fn info() -> GpuInfo {
@@ -219,10 +274,14 @@ pub fn info() -> GpuInfo {
         compute: g.compute as u8,
         _pad: [0; 5],
         vram_total: g.vram_total,
-        vram_free: g.vram_total.saturating_sub(g.vram_used),
+        vram_free: vram_free_bytes(&g),
         name: g.name,
         phase,
     }
+}
+
+fn gpu() -> &'static Mutex<GpuState> {
+    GPU.get().expect("gpu no inicializada")
 }
 
 pub fn alloc(size: u64) -> Result<u64, i64> {
@@ -237,7 +296,23 @@ pub fn alloc(size: u64) -> Result<u64, i64> {
         return Err(abi::ENOMEM);
     }
     let handle = g.buffers.len() as u64;
-    g.buffers.push(Some(GpuBuffer::new(size as usize)));
+    let buf = if device_bufs_available(&g) {
+        #[cfg(feature = "lxdde")]
+        {
+            if let Ok(va) = crate::lxdde::device_buf_alloc(size) {
+                GpuBuffer::device(va, size as usize)
+            } else {
+                GpuBuffer::heap(size as usize)
+            }
+        }
+        #[cfg(not(feature = "lxdde"))]
+        {
+            GpuBuffer::heap(size as usize)
+        }
+    } else {
+        GpuBuffer::heap(size as usize)
+    };
+    g.buffers.push(Some(buf));
     g.vram_used += size;
     Ok(handle)
 }
@@ -254,7 +329,16 @@ pub fn free(handle: u64) -> Result<u64, i64> {
         return Err(abi::ENOSYS);
     }
     let slot = g.buffers.get_mut(handle as usize).ok_or(abi::EINVAL)?;
-    let bytes = slot.as_ref().ok_or(abi::EINVAL)?.len() as u64;
+    let buf = slot.as_ref().ok_or(abi::EINVAL)?;
+    let bytes = buf.len() as u64;
+    if let Some(va) = buf.device_va() {
+        #[cfg(feature = "lxdde")]
+        {
+            let _ = crate::lxdde::device_buf_free(va);
+        }
+        #[cfg(not(feature = "lxdde"))]
+        let _ = va;
+    }
     *slot = None;
     g.vram_used = g.vram_used.saturating_sub(bytes);
     Ok(bytes)
@@ -274,10 +358,13 @@ pub fn map_to_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     if len > buf.len() as u64 {
         return Err(abi::EINVAL);
     }
+    if buf.device_va().is_some() {
+        return Err(abi::ENOSYS);
+    }
     let n = len as usize;
     crate::task::with_current(|p| {
         let space = p.space.as_ref().ok_or(abi::EFAULT)?;
-        space.write(user_ptr, &buf.bytes()[..n]).ok_or(abi::EFAULT)?;
+        space.write(user_ptr, &buf.bytes().ok_or(abi::EFAULT)?[..n]).ok_or(abi::EFAULT)?;
         Ok(0)
     })
 }
@@ -296,11 +383,30 @@ pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64
         return Err(abi::EINVAL);
     }
     let n = len as usize;
-    crate::task::with_current(|p| {
+    if let Some(va) = slot.device_va() {
+        let mut tmp = alloc::vec![0u8; n];
+        crate::task::with_current(|p| -> Result<u64, i64> {
+            let space = p.space.as_ref().ok_or(abi::EFAULT)?;
+            space.read(user_ptr, &mut tmp).ok_or(abi::EFAULT)?;
+            Ok(0)
+        })?;
+        drop(g);
+        #[cfg(feature = "lxdde")]
+        {
+            crate::lxdde::device_buf_upload(va, &tmp).map_err(|_| abi::EIO)?;
+            return Ok(len);
+        }
+        #[cfg(not(feature = "lxdde"))]
+        return Err(abi::ENOSYS);
+    }
+    crate::task::with_current(|p| -> Result<u64, i64> {
         let space = p.space.as_ref().ok_or(abi::EFAULT)?;
-        space.read(user_ptr, &mut slot.bytes_mut()[..n]).ok_or(abi::EFAULT)?;
+        space
+            .read(user_ptr, &mut slot.bytes_mut().ok_or(abi::EFAULT)?[..n])
+            .ok_or(abi::EFAULT)?;
         Ok(0)
-    })
+    })?;
+    Ok(len)
 }
 
 /// Enciende el dispositivo software de pruebas (`SOFTG`). Nunca pisa hardware
@@ -414,10 +520,11 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         // viene a evitar.
         let x = read_f32_vec(&g, x_h, cols)?;
         let mut y = read_f32_vec(&g, y_h, rows)?;
-        // El candado del dispositivo se mantiene mientras dura el cálculo: la
-        // matriz se le pasa prestada desde el búfer, y además dos submits a la vez
-        // sobre un solo canal no tendrían sentido. Antes se soltaba porque los
-        // datos ya estaban copiados.
+        let w_va = g
+            .buffers
+            .get(w_h as usize)
+            .and_then(|b| b.as_ref())
+            .and_then(|b| b.device_va());
         let on_gpu = if soft {
             let w = f32_view(&g, w_h, rows * cols)?;
             for r in 0..rows {
@@ -428,6 +535,14 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
                 y[r] = sum;
             }
             false
+        } else if let Some(va) = w_va {
+            match nvidia_compute::submit_matvec_resident(va, rows, cols, &x, &mut y) {
+                Ok(true) => true,
+                _ => {
+                    drop(g);
+                    return Ok(0);
+                }
+            }
         } else {
             let w = f32_view(&g, w_h, rows * cols)?;
             nvidia_compute::submit_matvec_f32(w, rows, cols, &x, &mut y)
@@ -473,12 +588,17 @@ fn read_f32_vec(g: &GpuState, handle: u64, elems: usize) -> Result<Vec<f32>, i64
 }
 
 fn write_f32_buffer(g: &mut GpuState, handle: u64, data: &[f32]) -> Result<(), i64> {
-    let slot = g.buffers.get_mut(handle as usize).and_then(|b| b.as_mut()).ok_or(abi::EINVAL)?;
+    let slot = g
+        .buffers
+        .get_mut(handle as usize)
+        .and_then(|b| b.as_mut())
+        .ok_or(abi::EINVAL)?;
     let bytes = data.len() * 4;
     if slot.len() < bytes {
         return Err(abi::EINVAL);
     }
-    slot.bytes_mut()[..bytes].copy_from_slice(unsafe {
+    let buf = slot.bytes_mut().ok_or(abi::EINVAL)?;
+    buf[..bytes].copy_from_slice(unsafe {
         core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), bytes)
     });
     Ok(())

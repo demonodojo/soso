@@ -90,6 +90,11 @@ static unsigned char *cp_mv(struct gsp_compute *cp, unsigned off)
     return (unsigned char *)cp->mv.va + off;
 }
 
+static unsigned char *cp_res(struct gsp_compute *cp, unsigned off)
+{
+    return (unsigned char *)cp->res.va + off;
+}
+
 /* Que el constant bank quepa donde se le reservó y que los parámetros estén
  * dentro de él. Se comprueba por kernel: los dos comparten la misma región de
  * 1 KiB y basta que uno crezca para que se salga. `param_count` va aquí porque es
@@ -259,6 +264,19 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
         cp->mv_mapped = 1;
     }
 
+    /* G6: staging de x/y completos para matvec residente (W en VRAM). */
+    cp->res_va = G6_RES_VA;
+    if (gsp_dma_alloc(&cp->res, G6_RES_SIZE, "compute matvec resident") != 0) {
+        lx_printk("nouveau-lx: compute — sin staging G6 (matvec residente irá "
+                  "por tandas)\n");
+    } else if (gsp_vmm_map(chan->vmm, cp->res_va, cp->res.phys, G6_RES_SIZE,
+                           GSP_VMM_SYSMEM) != 0) {
+        lx_printk("nouveau-lx: compute — no se pudo mapear staging G6\n");
+        gsp_dma_free(&cp->res);
+    } else {
+        cp->res_mapped = 1;
+    }
+
     {
         /* GB20x lleva `BLACKWELL_COMPUTE_B`; la A que había aquí es de GB100.
          * Igual que el canal y el CE: lo dice el catálogo, no un #define. */
@@ -308,11 +326,12 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
     cp->ready = 1;
     lx_printk("nouveau-lx: compute listo cls=0x%04x handle=0x%08x sobre canal "
               "0x%08x (motor %u) — saxpy %u B/%u regs, matvec %u B/%u regs, "
-              "staging G5 %s\n",
+              "staging G5 %s, G6 %s\n",
               cp->cls, cp->handle, chan->handle, chan->engine,
               cp->saxpy.sass_len, cp->saxpy.regcount,
               cp->matvec.sass_len, cp->matvec.regcount,
-              cp->mv_mapped ? "listo" : "NO");
+              cp->mv_mapped ? "listo" : "NO",
+              cp->res_mapped ? "listo" : "NO");
     return 0;
 }
 
@@ -653,7 +672,7 @@ int gsp_compute_matvec_f32(struct gsp_compute *cp, struct gsp_ce *ce,
 
     for (row0 = 0u; row0 < rows; row0 += per_tile) {
         unsigned n = (rows - row0) < per_tile ? (rows - row0) : per_tile;
-        unsigned grid = (n + G4F_CTA_THREADS - 1u) / G4F_CTA_THREADS;
+        unsigned grid = (n + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
 
         gsp_compute_mv_stage(cp, w, x, n, cols, row0);
         gsp_compute_set_mv_params(cp, cp->mv_va + G5_MV_W_OFF,
@@ -686,6 +705,78 @@ int gsp_compute_matvec_f32(struct gsp_compute *cp, struct gsp_ce *ce,
     return 0;
 }
 
+/* Última forma de matvec residente anunciada por el log. */
+static unsigned g_mv_res_last_rows;
+static unsigned g_mv_res_last_cols;
+
+int gsp_compute_matvec_resident(struct gsp_compute *cp, struct gsp_ce *ce,
+                                uint64_t w_va, unsigned rows, unsigned cols,
+                                const float *x, float *y,
+                                uint64_t scratch_va, void *scratch_cpu)
+{
+    unsigned grid;
+    float *gx, *gy;
+    uint64_t x_va, y_va;
+    extern uint64_t lx_ktime_get_ns(void);
+    uint64_t t0, t1;
+
+    if (!cp || !cp->ready || !ce || !x || !y || rows == 0u || cols == 0u ||
+        w_va == 0) {
+        return -1;
+    }
+    if (!cp->res_mapped) {
+        return -1;
+    }
+    if (cols > G5_MAX_COLS) {
+        lx_printk("nouveau-lx: matvec residente — %u columnas > tope %u\n",
+                  cols, G5_MAX_COLS);
+        return -1;
+    }
+    if (rows > G6_MAX_ROWS) {
+        lx_printk("nouveau-lx: matvec residente — %u filas > tope %u\n",
+                  rows, G6_MAX_ROWS);
+        return -1;
+    }
+    if ((unsigned long)cols * 4ul > G6_RES_X_BYTES ||
+        (unsigned long)rows * 4ul > G6_RES_Y_BYTES) {
+        return -1;
+    }
+
+    if (gsp_compute_stage_sass(cp, ce, &cp->matvec, scratch_va, scratch_cpu) != 0) {
+        return -1;
+    }
+
+    gx = (float *)cp_res(cp, G6_RES_X_OFF);
+    gy = (float *)cp_res(cp, G6_RES_Y_OFF);
+    memcpy(gx, x, (unsigned long)cols * 4ul);
+    memset(gy, 0, (unsigned long)rows * 4ul);
+    *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+    __asm__ __volatile__("mfence" ::: "memory");
+
+    x_va = cp->res_va + G6_RES_X_OFF;
+    y_va = cp->res_va + G6_RES_Y_OFF;
+    gsp_compute_set_mv_params(cp, w_va, x_va, y_va, rows, cols);
+
+    grid = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
+    t0 = lx_ktime_get_ns();
+    if (launch_wait(cp, &cp->matvec, grid, "matvec-res") != 0) {
+        return -1;
+    }
+    t1 = lx_ktime_get_ns();
+
+    __asm__ __volatile__("mfence" ::: "memory");
+    memcpy(y, gy, (unsigned long)rows * 4ul);
+
+    if (rows != g_mv_res_last_rows || cols != g_mv_res_last_cols) {
+        g_mv_res_last_rows = rows;
+        g_mv_res_last_cols = cols;
+        lx_printk("nouveau-lx: matvec residente OK — %ux%u, 1 QMD, ~%llu us\n",
+                  rows, cols,
+                  (unsigned long long)((t1 - t0) / 1000ull));
+    }
+    return 0;
+}
+
 void gsp_compute_fini(struct gsp_compute *cp)
 {
     if (!cp) {
@@ -696,6 +787,9 @@ void gsp_compute_fini(struct gsp_compute *cp)
     }
     if (cp->mv.va) {
         gsp_dma_free(&cp->mv);
+    }
+    if (cp->res.va) {
+        gsp_dma_free(&cp->res);
     }
     if (cp->data.va) {
         gsp_dma_free(&cp->data);

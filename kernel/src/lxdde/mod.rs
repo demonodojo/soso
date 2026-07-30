@@ -116,6 +116,22 @@ pub fn nouveau_vram_total() -> u64 {
     gpu::vram_total()
 }
 
+pub fn device_vram_free() -> u64 {
+    gpu::device_vram_free()
+}
+
+pub fn device_buf_alloc(size: u64) -> Result<u64, ()> {
+    gpu::device_buf_alloc(size)
+}
+
+pub fn device_buf_upload(va: u64, data: &[u8]) -> Result<(), ()> {
+    gpu::device_buf_upload(va, data)
+}
+
+pub fn device_buf_free(va: u64) -> Result<(), ()> {
+    gpu::device_buf_free(va)
+}
+
 pub fn gsp_fini() -> bool {
     gpu::gsp_fini()
 }
@@ -140,4 +156,14 @@ pub fn submit_matvec_f32(
     y: &mut [f32],
 ) -> Result<bool, ()> {
     gpu::submit_matvec_f32(w, rows, cols, x, y)
+}
+
+pub fn submit_matvec_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    gpu::submit_matvec_resident(w_va, rows, cols, x, y)
 }

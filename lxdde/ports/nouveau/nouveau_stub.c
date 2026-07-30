@@ -8,7 +8,14 @@ extern const char *lx_nouveau_gsp_status(void);
 extern int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n);
 extern int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned cols,
                                         const float *x, float *y);
+extern int lx_nouveau_submit_matvec_resident(uint64_t w_va, unsigned rows,
+                                             unsigned cols, const float *x,
+                                             float *y);
 extern uint64_t lx_nouveau_vram_bytes(void);
+extern uint64_t lx_nouveau_buf_alloc(uint64_t size);
+extern int lx_nouveau_buf_upload(uint64_t va, const void *src, uint64_t size);
+extern int lx_nouveau_buf_free(uint64_t va);
+extern uint64_t lx_nouveau_buf_vram_free(void);
 
 static int nouveau_probe(struct lx_pci_dev *pdev, const struct lx_pci_device_id *id)
 {
@@ -66,7 +73,33 @@ int lx_nouveau_compute_matvec_f32(const float *w, unsigned rows, unsigned cols,
     return lx_nouveau_submit_matvec_f32(w, rows, cols, x, y);
 }
 
+int lx_nouveau_compute_matvec_resident(uint64_t w_va, unsigned rows, unsigned cols,
+                                       const float *x, float *y)
+{
+    return lx_nouveau_submit_matvec_resident(w_va, rows, cols, x, y);
+}
+
 uint64_t lx_nouveau_vram_total(void)
 {
     return lx_nouveau_vram_bytes();
+}
+
+uint64_t lx_nouveau_device_buf_alloc(uint64_t size)
+{
+    return lx_nouveau_buf_alloc(size);
+}
+
+int lx_nouveau_device_buf_upload(uint64_t va, const void *src, uint64_t size)
+{
+    return lx_nouveau_buf_upload(va, src, size);
+}
+
+int lx_nouveau_device_buf_free(uint64_t va)
+{
+    return lx_nouveau_buf_free(va);
+}
+
+uint64_t lx_nouveau_device_vram_free(void)
+{
+    return lx_nouveau_buf_vram_free();
 }

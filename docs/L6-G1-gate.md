@@ -120,7 +120,7 @@ SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 | G4a–c (RPC + RM) | **GO** en GB205 (2026-07-25) |
 | G4d–G5 (CE + SASS + soso-llm) | **GO** en GB205 (2026-07-29) — ver `soso-gpu` |
 | PCIe Gen4/5 post-GSP | **GO** (2026-07-30) — cap Gen3 en FMC, bump `SOSO_G1_PCIE_BUMP=4\|5` |
-| Siguiente | Medir tok/s GPU vs CPU; modelos grandes |
+| Siguiente | **G6** pesos en VRAM + 1 QMD/matvec (2026-07-30); medir tok/s vs CPU en silicio |
 
 ### Fallback (solo BAR0, no cierra G1 oficial)
 

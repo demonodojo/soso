@@ -89,3 +89,13 @@ uint64_t gsp_vram_alloc(struct gsp_vram *v, uint64_t size, uint64_t align)
               (unsigned long long)(v->total >> 20));
     return 0;
 }
+
+void gsp_vram_return(struct gsp_vram *v, uint64_t phys, uint64_t size)
+{
+    if (!v || !v->ready || phys == 0 || size == 0) {
+        return;
+    }
+    size = (size + VRAM_PAGE - 1) & ~(VRAM_PAGE - 1);
+    v->used = v->used > size ? v->used - size : 0;
+    (void)phys;
+}

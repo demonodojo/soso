@@ -98,6 +98,28 @@ pub fn submit_matvec_f32(w: &[f32], rows: usize, cols: usize, x: &[f32], y: &mut
     Ok(false)
 }
 
+pub fn submit_matvec_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    let mut st = COMPUTE.lock();
+    let Some(s) = st.as_mut() else {
+        return Err(());
+    };
+    #[cfg(feature = "lxdde")]
+    {
+        if let Ok(on_gpu) = crate::lxdde::submit_matvec_resident(w_va, rows, cols, x, y) {
+            s.gpu_path = on_gpu;
+            s.channel_ready = crate::lxdde::gsp_ready();
+            return Ok(on_gpu);
+        }
+    }
+    Err(())
+}
+
 pub fn channel_ready() -> bool {
     COMPUTE.lock().as_ref().is_some_and(|s| s.channel_ready)
 }

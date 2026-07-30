@@ -37,10 +37,11 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G4d | VRAM + VA space + mapeos | reserva y mapeo verificados | **GO** HW (ejercitado por CE/compute 2026-07-29): VER3 + `SET_PAGE_DIRECTORY` + mapeos scratch/SASS |
 | G4e | **Canal + CE** (`gsp_chan`, `gsp_ce`) | ALLOC GPFIFO/USERD/PB; copia CE + readback VRAM | **GO** (2026-07-29): `CE readback verificado (G4e GO)` en GB205; canal `0xca6f` + CE `0xcab5` |
 | G4f | QMD + kernel SASS | `SYS_GPU_SUBMIT` con `on_gpu=1` real | **GO** (2026-07-29): PCAS 24 B + QMD v05; saxpy/matvec SASS en silicio (clase `0xcec0` sobre GR0) |
-| G5 | LLM híbrido (capas en ~12 GiB VRAM) | matvec en GPU en `soso-llm` | **GO funcional** (2026-07-29): `soso-llm run tiny --max 4` → **97 matvec en GPU OK**, sin caída a CPU; tok/s vs CPU aún por medir en modelos grandes |
+| G5 | LLM híbrido (capas en ~12 GiB VRAM) | matvec en GPU en `soso-llm` | **GO funcional** (2026-07-29): `soso-llm run tiny --max 4` → **97 matvec en GPU OK** |
+| **G6** | Pesos en VRAM, 1 QMD/matvec | `matvec residente OK` | **Implementado** (2026-07-30): `gsp_buf` + CE upload; recompilar SASS antes del ciclo HW |
 | **L6-H** | `--cuda-host` → cuda-proxy | texto + tok/s desde soso | **GO** (2026-07-27): ~35 tok/s, Docker llama-server |
 
-**Pendiente post-G5 (no bloquea el gate):** medir tok/s nativo vs CPU en modelos
+**Pendiente post-G6:** medir tok/s nativo vs CPU en silicio (`bench`, timeout amplio)
 grandes; Ampere GA10x (3060) sin HW en esta máquina.
 
 ### Estado en silicio (2026-07-29) — GB205 bajo VFIO
@@ -48,7 +49,8 @@ grandes; Ampere GA10x (3060) sin HW en esta máquina.
 Criterio de ciclo verde en `target/g1-vfio-serial.log`:
 
 - `lockdown liberado` (~+183 ms tras COT), `GSP-RM listo`, `CE readback verificado (G4e GO)`
-- `matvec en GPU OK` (≈97 con `tiny --max 4`), **sin** `camino de GPU desactivado` / `RC_TRIGGERED` / `semáforo no llegó`
+- `matvec residente OK` — **G6**: un QMD, W en VRAM (`~N us` en log serie)
+- `matvec en GPU OK` (≈97 con `tiny --max 4`, ruta G5 por tandas), **sin** `camino de GPU desactivado`
 - `GSP-RM apagado (objetos=ok unload=ok halt=ok dma=off)`
 
 **Enlace PCIe (automático en `l6-g1-vfio-test.sh`) — Gen4/5 GO (2026-07-30):** Gen5

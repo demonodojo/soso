@@ -681,33 +681,17 @@ fn run_model(
             }
             // Los pesos SUBIDOS frente a las llamadas es la cifra que dice si el
             // cacheo funciona: sin él eran una subida de la matriz entera por
-            // llamada, y en el log no se veía nada raro. Y `on_gpu` separa "lo
-            // calculó el dispositivo" de "lo calculó la GPU".
+            // llamada, y en el log no se veía nada raro.
             if let Some(ref g) = sys_gpu {
-                let (calls, uploads, resident, sin_sitio) = g.stats();
-                println!(
-                    "soso-llm: dispositivo «{}» — {} matvec, {} subidas de pesos, {} matrices residentes, {} sin sitio (a CPU), último on_gpu={}",
-                    g.device_name(),
-                    calls,
-                    uploads,
-                    resident,
-                    sin_sitio,
-                    g.last_on_gpu() as u8
-                );
-                /* Y si NADA se calculó en el silicio, dónde se quedó el bring-up.
-                 * El `on_gpu=0` de arriba dice que no pasó; esto dice por qué, sin
-                 * abrir el log de serie. */
-                if !g.last_on_gpu() {
-                    println!(
-                        "soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «{}»",
-                        g.phase()
-                    );
-                }
+                g.print_diagnostics();
             }
             0
         }
         Err(()) => {
             println!("soso-llm: inferencia falló");
+            if let Some(ref g) = sys_gpu {
+                g.print_diagnostics();
+            }
             1
         }
     }

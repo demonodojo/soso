@@ -19,6 +19,7 @@
 #include "gsp_grctx.h"
 #include "gsp_top.h"
 #include "gsp_vram.h"
+#include "gsp_buf.h"
 #include "gsp_wpr.h"
 #include "gsp_chip.h"
 #include "lx_emul.h"
@@ -94,6 +95,7 @@ static struct gsp_chan g_chan;           /* canal GPFIFO del CE, motor COPY0 (G4
 static struct gsp_chan g_chan_gr;        /* canal GPFIFO del compute, motor GR0 */
 static struct gsp_ce g_ce;               /* motor de copia CE (G4e) */
 static struct gsp_compute g_compute;     /* compute + QMD (G4f) */
+static struct gsp_buf g_buf;             /* buffers de usuario en VRAM (G6) */
 static struct gsp_grctx g_grctx;          /* contexto del canal de GR (G4f) */
 static int g_ce_verified;                /* el CE movió bytes de verdad (G4e) */
 static uint64_t g_vram_block;            /* bloque de VRAM mapeado en G4d */
@@ -489,6 +491,13 @@ static int run_compute_stage(void)
         lx_printk("nouveau-lx: SASS en VRAM — saxpy %u B, matvec %u B\n",
                   g_compute.saxpy.sass_len, g_compute.matvec.sass_len);
     }
+    if (gsp_buf_init(&g_buf, &g_vram_pool, &g_vmm, &g_ce, G4D_SCRATCH_VA,
+                     g_scratch.va, 4096u) != 0) {
+        lx_printk("nouveau-lx: G6 — pool de buffers VRAM no inicializado\n");
+    } else {
+        lx_printk("nouveau-lx: G6 — buffers VRAM listos (libre ~%llu MiB)\n",
+                  (unsigned long long)(gsp_buf_vram_free(&g_buf) >> 20));
+    }
     /* El lanzamiento del QMD NO se hace aquí: el bring-up deja el compute
      * armado y sale. Un kernel que se lance en el arranque y falle deja la
      * tarjeta en un estado del que sólo se sale reseteando el equipo. */
@@ -689,6 +698,7 @@ int lx_nouveau_gsp_fini(void)
     /* compute → CE → canales → vaspace, antes de soltar RM y el directorio de
      * páginas. El canal de GR0 se suelta tras su objeto de compute y antes del
      * de COPY0, en orden inverso al de creación. */
+    gsp_buf_fini(&g_buf);
     gsp_compute_fini(&g_compute);
     gsp_chan_fini(&g_chan_gr);
     gsp_ce_fini(&g_ce);
@@ -782,6 +792,38 @@ uint64_t lx_nouveau_vram_bytes(void)
     return g_vram_bytes ? g_vram_bytes : (8ull * 1024ull * 1024ull * 1024ull);
 }
 
+uint64_t lx_nouveau_buf_alloc(uint64_t size)
+{
+    if (!g_buf.ready) {
+        return 0;
+    }
+    return gsp_buf_alloc(&g_buf, size);
+}
+
+int lx_nouveau_buf_upload(uint64_t va, const void *src, uint64_t size)
+{
+    if (!g_buf.ready) {
+        return -1;
+    }
+    return gsp_buf_upload(&g_buf, va, src, size);
+}
+
+int lx_nouveau_buf_free(uint64_t va)
+{
+    if (!g_buf.ready) {
+        return -1;
+    }
+    return gsp_buf_free(&g_buf, va);
+}
+
+uint64_t lx_nouveau_buf_vram_free(void)
+{
+    if (!g_buf.ready) {
+        return 0;
+    }
+    return gsp_buf_vram_free(&g_buf);
+}
+
 /* `g_ce_verified` es la puerta: si el CE no demostró en el arranque que mueve
  * bytes por nuestras tablas, lanzar un QMD es tirar trabajo a un canal que no
  * funciona, y eso en esta máquina se paga con un cuelgue sin traza. Sin esa
@@ -849,6 +891,24 @@ int lx_nouveau_submit_saxpy(float a, const float *x, float *y, unsigned n)
         y[i] = a * x[i] + y[i];
     }
     return 0;
+}
+
+int lx_nouveau_submit_matvec_resident(uint64_t w_va, unsigned rows, unsigned cols,
+                                      const float *x, float *y)
+{
+    if (!x || !y || rows == 0 || cols == 0 || w_va == 0) {
+        return -1;
+    }
+    if (compute_usable() && g_compute.res_mapped && g_buf.ready) {
+        int ok = gsp_compute_matvec_resident(&g_compute, &g_ce, w_va, rows, cols,
+                                             x, y, G4D_SCRATCH_VA,
+                                             g_scratch.va) == 0;
+        compute_resultado(ok);
+        if (ok) {
+            return 1;
+        }
+    }
+    return -1;
 }
 
 /* G5. Misma regla que saxpy: el 1 es "lo calculó la GPU" y sólo se devuelve con

@@ -1,27 +1,48 @@
-/* G5: matvec f32 (y = W·x) para GB205 (sm_120). Compilar con
+/* G5/G6: matvec f32 (y = W·x) para GB205 (sm_120). Compilar con
  * scripts/l6-g4f-build-sass.sh, igual que saxpy.cu.
  *
- * Un hilo por fila. `rows` es la altura de la TANDA que se lanza, no la de la
- * matriz entera: el staging de G5 no cabe en la sysmem del compute y las filas
- * van por tandas (ver gsp_compute_mv_rows_per_tile). Por eso `w` e `y` apuntan
- * al principio de la tanda y el kernel no sabe nada del troceado.
+ * G6: un warp por fila — los 32 hilos reparten las columnas y reducen con
+ * shuffle. Misma firma que la versión lenta de depuración (un hilo/fila).
  *
- * Sin memoria compartida ni reducciones entre hilos a propósito: cada hilo lee
- * su fila entera y escribe un solo float. Es la versión lenta, y es la que se
- * puede depurar cuando lo único que se ve del otro lado es un semáforo. */
+ * `rows` en el kernel es la altura de la TANDA en G5 o la matriz entera en G6
+ * residente. `w` e `y` apuntan al inicio de la región activa. */
+extern "C" __device__ float warp_reduce_sum(float v)
+{
+    unsigned mask = 0xffffffffu;
+    v += __shfl_down_sync(mask, v, 16);
+    v += __shfl_down_sync(mask, v, 8);
+    v += __shfl_down_sync(mask, v, 4);
+    v += __shfl_down_sync(mask, v, 2);
+    v += __shfl_down_sync(mask, v, 1);
+    return v;
+}
+
 extern "C" __global__ void matvec_f32(const float *w, const float *x, float *y,
                                       int rows, int cols)
 {
-    int r = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    if (r >= rows) {
+    int tid = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    int warp_id = tid >> 5;
+    int lane = tid & 31;
+
+    if (warp_id >= rows) {
         return;
     }
 
-    const float *row = w + (long)r * (long)cols;
+    const float *row = w + (long)warp_id * (long)cols;
     float sum = 0.0f;
+    int c;
 
-    for (int c = 0; c < cols; c++) {
+    for (c = lane; c + 3 < cols; c += 32) {
+        float4 w4 = *(const float4 *)(row + c);
+        float4 x4 = *(const float4 *)(x + c);
+        sum += w4.x * x4.x + w4.y * x4.y + w4.z * x4.z + w4.w * x4.w;
+    }
+    for (; c < cols; c += 32) {
         sum += row[c] * x[c];
     }
-    y[r] = sum;
+
+    sum = warp_reduce_sum(sum);
+    if (lane == 0) {
+        y[warp_id] = sum;
+    }
 }

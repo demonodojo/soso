@@ -26,6 +26,7 @@
 #define G4F_MAX_N         256u      /* 1 KiB por vector */
 
 #define G4F_CTA_THREADS   256u
+#define G6_ROWS_PER_CTA   (G4F_CTA_THREADS / 32u)
 #define G4F_SEM_PAYLOAD   0x5a5a0001u
 #define G4F_WAIT_MS       2000u
 /* Sondeos a pelo antes de empezar a dormir de milisegundo en milisegundo. */
@@ -53,6 +54,15 @@
 #define G5_MV_Y_BYTES     0x01000u   /* 4 KiB → 1024 filas por tanda */
 #define G5_MAX_COLS       (G5_MV_X_BYTES / 4u)
 #define G5_MAX_TILE_ROWS  (G5_MV_Y_BYTES / 4u)
+
+/* G6: staging sysmem para matvec residente (x + y completos, sin trocear W). */
+#define G6_RES_VA         (GSP_VA_BASE + 0x30300000ull)
+#define G6_RES_SIZE       0x40000u   /* 256 KiB */
+#define G6_RES_X_OFF      0x00000u
+#define G6_RES_X_BYTES    0x20000u   /* 128 KiB → G5_MAX_COLS columnas */
+#define G6_RES_Y_OFF      0x20000u
+#define G6_RES_Y_BYTES    0x20000u   /* 128 KiB → 32768 filas */
+#define G6_MAX_ROWS       (G6_RES_Y_BYTES / 4u)
 
 /* Lo que el cubin dice de un kernel, junto. Lo rellena `gsp_compute_init` desde
  * los símbolos generados; nadie lo escribe a mano. */
@@ -82,8 +92,11 @@ struct gsp_compute {
     uint64_t data_va;
     struct gsp_dma_buf mv;     /* G5: tanda de filas + x + y, en sysmem */
     uint64_t mv_va;
+    struct gsp_dma_buf res;    /* G6: x + y completos para matvec residente */
+    uint64_t res_va;
     int mapped;
     int mv_mapped;
+    int res_mapped;
     int ready;
 };
 
@@ -162,6 +175,12 @@ int gsp_compute_matvec_f32(struct gsp_compute *cp, struct gsp_ce *ce,
                            const float *w, unsigned rows, unsigned cols,
                            const float *x, float *y,
                            uint64_t scratch_va, void *scratch_cpu);
+
+/* G6: y = W·x con W ya residente en VRAM (VA del dispositivo). Un solo QMD. */
+int gsp_compute_matvec_resident(struct gsp_compute *cp, struct gsp_ce *ce,
+                                uint64_t w_va, unsigned rows, unsigned cols,
+                                const float *x, float *y,
+                                uint64_t scratch_va, void *scratch_cpu);
 
 void gsp_compute_fini(struct gsp_compute *cp);
 

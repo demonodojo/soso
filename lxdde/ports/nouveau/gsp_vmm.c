@@ -285,10 +285,6 @@ int gsp_vmm_map_flags(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t si
         v->pages_mapped++;
     }
 
-    lx_printk("nouveau-lx: mapeadas %llu KiB en VA 0x%llx → %s 0x%llx\n",
-              (unsigned long long)(size >> 10), (unsigned long long)va,
-              target == GSP_VMM_VRAM ? "VRAM" : "sysmem",
-              (unsigned long long)phys);
     gsp_vmm_invalidate(v);
     return 0;
 }

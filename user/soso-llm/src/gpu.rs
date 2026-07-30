@@ -83,6 +83,9 @@ pub struct SysGpu {
     /// del offload híbrido, no un error: sin verla, "va lento" no se distingue de
     /// "no está usando la GPU".
     sin_sitio: usize,
+    /// Último fallo duro del despacho (syscall, dimensiones…). No incluye el
+    /// fallback a CPU por falta de VRAM.
+    last_fail: Option<&'static str>,
 }
 
 /// Tope de matrices residentes. No es por memoria —eso lo controla `vram_free`—
@@ -112,6 +115,7 @@ impl SysGpu {
             uploads: 0,
             calls: 0,
             sin_sitio: 0,
+            last_fail: None,
         })
     }
 
@@ -136,9 +140,45 @@ impl SysGpu {
         (self.calls, self.uploads, self.resident.len(), self.sin_sitio)
     }
 
+    pub fn last_fail(&self) -> Option<&'static str> {
+        self.last_fail
+    }
+
+    fn note_fail(&mut self, reason: &'static str) {
+        self.last_fail = Some(reason);
+    }
+
+    /// Estadísticas del despacho GPU (éxito o fallo de inferencia).
+    pub fn print_diagnostics(&self) {
+        let (calls, uploads, resident, sin_sitio) = self.stats();
+        libsoso::println!(
+            "soso-llm: dispositivo «{}» — {} matvec, {} subidas de pesos, {} matrices residentes, {} sin sitio (a CPU), último on_gpu={}",
+            self.device_name(),
+            calls,
+            uploads,
+            resident,
+            sin_sitio,
+            self.last_on_gpu() as u8
+        );
+        if let Some(r) = self.last_fail() {
+            libsoso::println!("soso-llm: último fallo GPU — {}", r);
+        }
+        if !self.last_on_gpu() && calls > 0 {
+            libsoso::println!(
+                "soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «{}»",
+                self.phase()
+            );
+        }
+    }
+
     /// Reserva o agranda un búfer de trabajo. Devolver el handle viejo cuando el
     /// nuevo tamaño no cabe es el bug 2 de la cabecera.
-    fn ensure_scratch(s: &mut Scratch, bytes: u64, vram_free: &mut u64) -> Result<u64, ()> {
+    fn ensure_scratch(
+        s: &mut Scratch,
+        bytes: u64,
+        vram_free: &mut u64,
+        on_fail: &mut Option<&'static str>,
+    ) -> Result<u64, ()> {
         if s.handle != u64::MAX && s.bytes >= bytes {
             return Ok(s.handle);
         }
@@ -150,10 +190,12 @@ impl SysGpu {
             *s = Scratch::NONE;
         }
         if bytes > *vram_free {
+            *on_fail = Some("scratch sin VRAM");
             return Err(());
         }
         let h = sys::gpu_alloc(bytes);
         if h < 0 {
+            *on_fail = Some("gpu_alloc scratch");
             return Err(());
         }
         *vram_free = vram_free.saturating_sub(bytes);
@@ -199,6 +241,7 @@ impl SysGpu {
         }
         let h = sys::gpu_alloc(bytes);
         if h < 0 {
+            self.note_fail("gpu_alloc pesos");
             return Err(());
         }
         let handle = h as u64;
@@ -221,6 +264,7 @@ impl SysGpu {
         if subido.is_err() {
             sys::gpu_free(handle);
             self.vram_free = self.vram_free.saturating_add(bytes);
+            self.note_fail("subida de pesos");
             return Err(());
         }
         self.uploads += 1;
@@ -292,6 +336,7 @@ impl GpuDispatch for SysGpu {
         out: &mut [f32],
     ) -> Result<bool, ()> {
         if view.elems != rows * cols || x.len() != cols || out.len() != rows {
+            self.note_fail("dimensiones matvec");
             return Err(());
         }
         // Que no quepa NO es un error: devolver Err aquí abortaría la inferencia
@@ -302,20 +347,41 @@ impl GpuDispatch for SysGpu {
         };
         let x_bytes = (cols * 4) as u64;
         let y_bytes = (rows * 4) as u64;
-        let mut vram = self.vram_free;
-        let x_handle = Self::ensure_scratch(&mut self.x, x_bytes, &mut vram)?;
-        let y_handle = Self::ensure_scratch(&mut self.y, y_bytes, &mut vram)?;
-        self.vram_free = vram;
+        let x_handle = Self::ensure_scratch(
+            &mut self.x,
+            x_bytes,
+            &mut self.vram_free,
+            &mut self.last_fail,
+        )?;
+        let y_handle = Self::ensure_scratch(
+            &mut self.y,
+            y_bytes,
+            &mut self.vram_free,
+            &mut self.last_fail,
+        )?;
 
-        write_f32(x_handle, x)?;
-        let bits = Self::submit_matvf(w_handle, rows as u32, cols as u32, x_handle, y_handle)?;
+        if write_f32(x_handle, x).is_err() {
+            self.note_fail("gpu_map vector x");
+            return Err(());
+        }
+        let bits = match Self::submit_matvf(w_handle, rows as u32, cols as u32, x_handle, y_handle)
+        {
+            Ok(b) => b,
+            Err(()) => {
+                self.note_fail("gpu_submit MATVF");
+                return Err(());
+            }
+        };
         self.calls += 1;
         self.on_gpu = bits & abi::GPU_SUBMIT_ON_GPU != 0;
         if bits & abi::GPU_SUBMIT_COMPUTED == 0 {
             // El dispositivo no calculó nada: que lo haga la CPU de quien llama.
             return Ok(false);
         }
-        read_f32_into(y_handle, out)?;
+        if read_f32_into(y_handle, out).is_err() {
+            self.note_fail("gpu_read resultado");
+            return Err(());
+        }
         Ok(true)
     }
 }

@@ -1,4 +1,4 @@
-//! Puente Rust ↔ nouveau-lx (GSP + compute G4/G5).
+//! Puente Rust ↔ nouveau-lx (GSP + compute G4/G5/G6).
 
 use core::ffi::c_void;
 
@@ -13,7 +13,18 @@ unsafe extern "C" {
         x: *const f32,
         y: *mut f32,
     ) -> i32;
+    fn lx_nouveau_compute_matvec_resident(
+        w_va: u64,
+        rows: u32,
+        cols: u32,
+        x: *const f32,
+        y: *mut f32,
+    ) -> i32;
     fn lx_nouveau_vram_total() -> u64;
+    fn lx_nouveau_device_buf_alloc(size: u64) -> u64;
+    fn lx_nouveau_device_buf_upload(va: u64, src: *const c_void, size: u64) -> i32;
+    fn lx_nouveau_device_buf_free(va: u64) -> i32;
+    fn lx_nouveau_device_vram_free() -> u64;
     fn lx_nouveau_set_boot0(boot0: u32, device_id: u32);
     fn lx_nouveau_gsp_fini() -> i32;
 }
@@ -46,6 +57,45 @@ pub fn vram_total() -> u64 {
     unsafe { lx_nouveau_vram_total() }
 }
 
+pub fn device_vram_free() -> u64 {
+    unsafe { lx_nouveau_device_vram_free() }
+}
+
+pub fn device_buf_alloc(size: u64) -> Result<u64, ()> {
+    let va = unsafe { lx_nouveau_device_buf_alloc(size) };
+    if va == 0 {
+        Err(())
+    } else {
+        Ok(va)
+    }
+}
+
+pub fn device_buf_upload(va: u64, data: &[u8]) -> Result<(), ()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let rc = unsafe {
+        lx_nouveau_device_buf_upload(
+            va,
+            data.as_ptr().cast(),
+            data.len() as u64,
+        )
+    };
+    if rc < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn device_buf_free(va: u64) -> Result<(), ()> {
+    if unsafe { lx_nouveau_device_buf_free(va) } < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
 /// Apaga GSP-RM y deja la GPU sin DMA. **Sin vuelta atrás** en este arranque:
 /// tras esto `gsp_ready()` es falso y el cómputo cae a CPU.
 ///
@@ -76,6 +126,32 @@ pub fn submit_matvec_f32(w: &[f32], rows: usize, cols: usize, x: &[f32], y: &mut
     let rc = unsafe {
         lx_nouveau_compute_matvec_f32(
             w.as_ptr(),
+            rows as u32,
+            cols as u32,
+            x.as_ptr(),
+            y.as_mut_ptr(),
+        )
+    };
+    if rc < 0 {
+        Err(())
+    } else {
+        Ok(rc > 0)
+    }
+}
+
+pub fn submit_matvec_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    if w_va == 0 || x.len() != cols || y.len() != rows {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_matvec_resident(
+            w_va,
             rows as u32,
             cols as u32,
             x.as_ptr(),
