@@ -42,11 +42,24 @@ pub fn init(boot_info: &'static mut BootInfo) {
         Mutex::new(unsafe { BootInfoFrameAllocator::new(&boot_info.memory_regions) })
     });
 
-    heap::init(
+    // La RAM utilizable se lee ANTES de tomar el candado para el mapeo: este
+    // Mutex no es reentrante y pedirlo dos veces aquí colgaría el arranque en
+    // silencio, que es peor que cualquier fallo de memoria.
+    let usable = {
+        let fa = FRAME_ALLOC.get().unwrap().lock();
+        fa.total_usable_frames() as u64 * 4096
+    };
+    let heap = heap::init(
         &mut *MAPPER.get().unwrap().lock(),
         &mut *FRAME_ALLOC.get().unwrap().lock(),
+        usable,
     )
     .expect("fallo inicializando el heap");
+    crate::println!(
+        "mm: heap {} MiB de {} MiB utilizables",
+        heap / (1024 * 1024),
+        usable / (1024 * 1024)
+    );
 }
 
 /// Dirección virtual de una física, vía el mapeo completo del bootloader.

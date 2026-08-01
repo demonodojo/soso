@@ -86,6 +86,9 @@ pub struct SysGpu {
     /// Último fallo duro del despacho (syscall, dimensiones…). No incluye el
     /// fallback a CPU por falta de VRAM.
     last_fail: Option<&'static str>,
+    /// Tras un fallo de subida/submit (CE atascado, EIO…): no reintentar offload.
+    /// Distinto de `sin_sitio`: eso es híbrido legítimo; esto es canal roto.
+    offload_dead: bool,
 }
 
 /// Tope de matrices residentes. No es por memoria —eso lo controla `vram_free`—
@@ -116,6 +119,7 @@ impl SysGpu {
             calls: 0,
             sin_sitio: 0,
             last_fail: None,
+            offload_dead: false,
         })
     }
 
@@ -148,6 +152,19 @@ impl SysGpu {
         self.last_fail = Some(reason);
     }
 
+    /// Corta el offload: el canal CE/compute no responde. Sin esto, cada matvec
+    /// reintenta `gpu_map` de pesos y el log de serie se llena (2026-07-30).
+    fn kill_offload(&mut self, reason: &'static str) {
+        self.note_fail(reason);
+        if !self.offload_dead {
+            self.offload_dead = true;
+            libsoso::println!(
+                "soso-llm: offload GPU desactivado — {} (resto de la inferencia en CPU)",
+                reason
+            );
+        }
+    }
+
     /// Estadísticas del despacho GPU (éxito o fallo de inferencia).
     pub fn print_diagnostics(&self) {
         let (calls, uploads, resident, sin_sitio) = self.stats();
@@ -163,7 +180,9 @@ impl SysGpu {
         if let Some(r) = self.last_fail() {
             libsoso::println!("soso-llm: último fallo GPU — {}", r);
         }
-        if !self.last_on_gpu() && calls > 0 {
+        if self.offload_dead {
+            libsoso::println!("soso-llm: offload estaba desactivado (fallo duro previo)");
+        } else if !self.last_on_gpu() && calls > 0 {
             libsoso::println!(
                 "soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «{}»",
                 self.phase()
@@ -239,9 +258,10 @@ impl SysGpu {
             }
             self.resident.remove(0);
         }
-        let h = sys::gpu_alloc(bytes);
+        let h = sys::gpu_alloc_vram(bytes);
         if h < 0 {
-            self.note_fail("gpu_alloc pesos");
+            // Sin VRAM contable o pool G6 vacío: híbrido, no canal roto.
+            self.sin_sitio += 1;
             return Err(());
         }
         let handle = h as u64;
@@ -264,7 +284,9 @@ impl SysGpu {
         if subido.is_err() {
             sys::gpu_free(handle);
             self.vram_free = self.vram_free.saturating_add(bytes);
-            self.note_fail("subida de pesos");
+            // CE/DMA roto: cortar offload. Reintentar por cada proyección llenaba
+            // la serie con "pushbuffer lleno" (~150 líneas/matvec).
+            self.kill_offload("subida de pesos");
             return Err(());
         }
         self.uploads += 1;
@@ -319,7 +341,7 @@ fn read_f32_into(handle: u64, out: &mut [f32]) -> Result<(), ()> {
 
 impl GpuDispatch for SysGpu {
     fn available(&self) -> bool {
-        true
+        !self.offload_dead
     }
 
     /// `Ok(true)` significa **el resultado ya está en `out`**, no "lo hizo la
@@ -335,52 +357,62 @@ impl GpuDispatch for SysGpu {
         x: &[f32],
         out: &mut [f32],
     ) -> Result<bool, ()> {
+        if self.offload_dead {
+            return Ok(false);
+        }
         if view.elems != rows * cols || x.len() != cols || out.len() != rows {
             self.note_fail("dimensiones matvec");
             return Err(());
         }
         // Que no quepa NO es un error: devolver Err aquí abortaría la inferencia
         // entera en vez de calcular esa capa en CPU, que es lo que hay que hacer
-        // con un modelo más grande que la VRAM.
+        // con un modelo más grande que la VRAM. Subida CE fallida sí corta offload
+        // (`kill_offload` dentro de `resident_weights`).
         let Ok(w_handle) = self.resident_weights(key, view, rows * cols) else {
             return Ok(false);
         };
         let x_bytes = (cols * 4) as u64;
         let y_bytes = (rows * 4) as u64;
-        let x_handle = Self::ensure_scratch(
+        let Ok(x_handle) = Self::ensure_scratch(
             &mut self.x,
             x_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
-        )?;
-        let y_handle = Self::ensure_scratch(
+        ) else {
+            return Ok(false);
+        };
+        let Ok(y_handle) = Self::ensure_scratch(
             &mut self.y,
             y_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
-        )?;
+        ) else {
+            return Ok(false);
+        };
 
         if write_f32(x_handle, x).is_err() {
-            self.note_fail("gpu_map vector x");
-            return Err(());
+            self.kill_offload("gpu_map vector x");
+            return Ok(false);
         }
         let bits = match Self::submit_matvf(w_handle, rows as u32, cols as u32, x_handle, y_handle)
         {
             Ok(b) => b,
             Err(()) => {
-                self.note_fail("gpu_submit MATVF");
-                return Err(());
+                self.kill_offload("gpu_submit MATVF");
+                return Ok(false);
             }
         };
         self.calls += 1;
         self.on_gpu = bits & abi::GPU_SUBMIT_ON_GPU != 0;
         if bits & abi::GPU_SUBMIT_COMPUTED == 0 {
             // El dispositivo no calculó nada: que lo haga la CPU de quien llama.
+            // Si el canal está muerto el kernel ya habrá contado fallos; aquí no
+            // cortamos aún — un COMPUTED=0 puntual (soft) no es CE stuck.
             return Ok(false);
         }
         if read_f32_into(y_handle, out).is_err() {
-            self.note_fail("gpu_read resultado");
-            return Err(());
+            self.kill_offload("gpu_read resultado");
+            return Ok(false);
         }
         Ok(true)
     }

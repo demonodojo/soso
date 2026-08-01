@@ -13,6 +13,17 @@
  * responder, y quedarse esperando durante el bring-up es peor que fallar. */
 #define GSP_CE_WAIT_MS  2000u
 
+/* Longitud de línea de las copias multilínea. Es el tamaño de página porque es
+ * el que usa `nve0_bo_move_copy` y el que garantiza que src y dst caen en
+ * páginas enteras del vaspace. */
+#define GSP_CE_LINE_BYTES  4096u
+
+/* Cuánto se escucha el anillo de mensajes cuando una espera vence. RM cuenta los
+ * fallos de canal por evento (RC_TRIGGERED: tipo de excepción, chid y dirección
+ * de la falta de MMU) y si nadie escucha se quedan en la cola: el ciclo del
+ * 2026-07-30 se fue sin saber por qué murió el canal por no drenar aquí. */
+#define GSP_CE_RC_DRAIN_MS  300u
+
 struct gsp_ce {
     struct gsp_rm *rm;
     struct gsp_chan *chan;
@@ -21,6 +32,10 @@ struct gsp_ce {
     uint32_t seq;      /* payload del semáforo: uno por copia, monótono */
     uint32_t pending;  /* payload de la última copia encolada */
     int ready;
+    /* Tras un timeout o pushbuffer irrecuperable: no reencolar. Un CE atascado
+     * (gpget fijo) llena el log con "subida CE falló" por cada matvec si se
+     * sigue intentando — G6 lo vio en silicio el 2026-07-30. */
+    int stuck;
 };
 
 int gsp_ce_init(struct gsp_rm *rm, struct gsp_chan *chan, struct gsp_ce *ce);
@@ -35,6 +50,11 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
 /* Espera a que el semáforo del canal alcance el payload de la última copia.
  * Devuelve 0 si llegó, -1 si venció el plazo. */
 int gsp_ce_wait(struct gsp_ce *ce, unsigned ms);
+
+/* Escucha el anillo de mensajes de GSP-RM y registra lo que haya (RC_TRIGGERED,
+ * NOCAT…). Sólo para llamar cuando algo ha vencido: nunca en medio de una
+ * llamada síncrona, porque consumiría su respuesta. */
+void gsp_ce_drain_events(struct gsp_ce *ce);
 
 /* encode + submit + wait. Devuelve 0 solo si el CE señalizó. */
 int gsp_ce_copy_sync(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,

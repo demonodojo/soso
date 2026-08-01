@@ -140,12 +140,28 @@ int gsp_buf_upload(struct gsp_buf *b, uint64_t va, const void *src, uint64_t siz
         if (chunk > b->scratch_bytes) {
             chunk = b->scratch_bytes;
         }
+        /* Cada tramo o es múltiplo de página (copia multilínea, la de upstream)
+         * o es el rabo final de menos de una página (una línea, que es lo único
+         * que estaba probado antes). Sin este redondeo un tramo de, digamos,
+         * 1 MiB + 300 B saldría por el camino de una línea de más de 4 KiB, que
+         * no ha visto silicio. */
+        if (chunk > VRAM_PAGE) {
+            chunk &= ~(VRAM_PAGE - 1ull);
+        }
         memcpy(b->scratch_cpu, p + off, (unsigned long)chunk);
+        /* El rebote es memoria cacheada: sin bajar las líneas a RAM, una lectura
+         * no-snoop del CE se llevaría lo que hubiera antes. `mfence` ordena pero
+         * no vacía. Con el rebote UC de antes esto no hacía falta, y por eso es
+         * fácil olvidarlo al agrandarlo. */
+        lx_dma_flush_range(b->scratch_cpu, (unsigned long)chunk);
         __asm__ __volatile__("mfence" ::: "memory");
         if (gsp_ce_copy_sync(b->ce, va + off, b->scratch_va, (uint32_t)chunk,
                              GSP_CE_WAIT_MS) != 0) {
-            lx_printk("nouveau-lx: G6 — subida CE falló en offset %llu\n",
-                      (unsigned long long)off);
+            /* Una sola línea: si el CE quedó stuck, los reintentos son silenciosos. */
+            if (!b->ce->stuck) {
+                lx_printk("nouveau-lx: G6 — subida CE falló en offset %llu\n",
+                          (unsigned long long)off);
+            }
             return -1;
         }
     }

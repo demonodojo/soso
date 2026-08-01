@@ -2,8 +2,12 @@
 //! hay lease en unos segundos, fallback a IP estática 10.0.2.15/24 (QEMU
 //! slirp).
 //!
-//! `poll()` se llama desde el scheduler / timer / IRQ de la NIC. Usa
-//! try_lock: si la pila está ocupada, la próxima pasada lo recoge.
+//! `poll()` se llama desde el bucle del scheduler, el tick del timer (sólo si
+//! interrumpió ring 3) y el `irq_exit` de una IRQ que venía de ring 3 — **nunca
+//! desde una IRQ dura**: ahí abajo se toman PROCS, las colas de ssh, el VFS y el
+//! heap, y las syscalls sostienen esos mismos candados en ring 0 con IF=1. Lo
+//! comprueba el aserto de `poll()`. Usa try_lock: si la pila está ocupada, la
+//! próxima pasada lo recoge.
 
 mod device;
 pub mod ssh;
@@ -258,12 +262,44 @@ fn poll_tcp_services(
     }
 }
 
+/// Trabajo de red agendado por una IRQ dura y aún sin procesar. Es el
+/// `__napi_schedule` de Linux: el handler marca y sale, la pila corre fuera del
+/// contexto de interrupción (ver la avería documentada en
+/// `drivers::virtio_net::net_irq_handler`).
+static TRABAJO_PENDIENTE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Llamable desde IRQ dura: sólo marca, no toca ni un candado.
+pub fn marcar_trabajo_pendiente() {
+    TRABAJO_PENDIENTE.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// ¿Hay trabajo agendado? Lo consume: lo va a procesar quien pregunte.
+pub fn trabajo_pendiente() -> bool {
+    TRABAJO_PENDIENTE.swap(false, core::sync::atomic::Ordering::AcqRel)
+}
+
 /// Procesa la red: DHCP, entrada/salida pendiente y el servidor de eco.
 /// Reentrante-seguro vía try_lock (puede llamarse desde el tick de timer
 /// que interrumpió a un proceso de usuario: ahí el kernel no tiene locks).
 pub fn poll() {
+    // NUNCA desde una IRQ dura: aquí abajo se toman PROCS (`task::exists`,
+    // `spawn_console`), las colas RX/TX de ssh, el VFS y el heap del kernel, y
+    // las syscalls sostienen esos mismos candados en ring 0 con IF=1 (el `sti`
+    // de `syscall_entry`). Reentrar desde el handler MSI-X era un interbloqueo
+    // en el propio core y así se colgaba la sesión SSH justo tras el prompt
+    // (2026-08-01). El aserto es una carga atómica: sale gratis y convierte una
+    // regresión silenciosa en un panic con traza, en vez de en una tarde de
+    // bisección con QEMU.
+    debug_assert!(
+        !crate::arch::irq::en_irq_dura(),
+        "net::poll() desde IRQ dura: reentraría en PROCS/RX/TX/heap"
+    );
     let Some(net) = NET.get() else { return };
     let Some(mut n) = net.try_lock() else { return };
+    // El flag se limpia DESPUÉS del try_lock: si la pila estaba ocupada, el
+    // aviso tiene que sobrevivir para la siguiente pasada.
+    TRABAJO_PENDIENTE.store(false, core::sync::atomic::Ordering::Relaxed);
     let NetStack {
         iface,
         sockets,

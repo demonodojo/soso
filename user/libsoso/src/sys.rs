@@ -186,7 +186,13 @@ pub fn gpu_info(out: &mut abi::GpuInfo) -> i64 {
 }
 
 pub fn gpu_alloc(size: u64) -> i64 {
-    syscall1(abi::SYS_GPU_ALLOC, size)
+    syscall4(abi::SYS_GPU_ALLOC, size, abi::GPU_ALLOC_GART, 0, 0)
+}
+
+/// Reserva en VRAM del dispositivo (pesos residentes G6). Si no hay GSP, cae a
+/// heap del kernel como TTM fallback.
+pub fn gpu_alloc_vram(size: u64) -> i64 {
+    syscall4(abi::SYS_GPU_ALLOC, size, abi::GPU_ALLOC_VRAM, 0, 0)
 }
 
 pub fn gpu_map(handle: u64, ptr: u64, len: u64) -> i64 {

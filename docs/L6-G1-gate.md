@@ -120,7 +120,29 @@ SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 | G4a–c (RPC + RM) | **GO** en GB205 (2026-07-25) |
 | G4d–G5 (CE + SASS + soso-llm) | **GO** en GB205 (2026-07-29) — ver `soso-gpu` |
 | PCIe Gen4/5 post-GSP | **GO** (2026-07-30) — cap Gen3 en FMC, bump `SOSO_G1_PCIE_BUMP=4\|5` |
-| Siguiente | **G6** pesos en VRAM + 1 QMD/matvec (2026-07-30); medir tok/s vs CPU en silicio |
+| G6 (pesos en VRAM) | **PARCIAL** (2026-07-30) — la subida por CE llegó; el primer QMD residente no señalizó y el CE murió detrás |
+| Siguiente | ciclo de instrumentos (2026-08-01): sonda doble sysmem/VRAM, `rc:` al vencer una espera, y volcado de las tablas de BAR1 |
+
+### Qué mirar en el próximo ciclo de VFIO (2026-08-01)
+
+El ciclo del 30-jul se fue sin diagnóstico porque **nadie drenaba el anillo de
+mensajes**: RM cuenta los fallos de canal por evento y el `RC_TRIGGERED` con su
+`mmuFault` se quedó en la cola. Eso ya está arreglado; en el log hay que buscar,
+por este orden:
+
+1. `SONDA GPU (sysmem)` y `SONDA GPU (VRAM)` — dos matvec iguales, uno con los
+   pesos en sysmem y otro residentes. Si el primero va y el segundo no, el
+   problema es la ventana G6 y no el compute.
+2. `nouveau-lx: rc: … mmuFault=0x… type=…` justo detrás de un «no señalizó».
+   Es el nombre del fallo: `PTE`/`PDE` = tabla mal; `VA_LIMIT_VIOLATION` = la VA
+   se sale; `UNSUPPORTED_APERTURE` = la apertura del PTE no vale para ese motor.
+3. `nouveau-lx: BAR1 va=0x0 PD3[0] @…` — el recorrido de las tablas que RM ya
+   construyó. Dice en qué nivel se corta la cadena y en qué apertura viven sus
+   tablas, que es lo que hace falta para que la CPU escriba VRAM por la apertura
+   en vez de por el CE.
+4. `G6 — buffers VRAM listos (… rebote 1024 KiB)`: confirma que el rebote grande
+   entró. Con él, una subida es un `LAUNCH_DMA` multilínea por MiB en vez de uno
+   por página.
 
 ### Fallback (solo BAR0, no cierra G1 oficial)
 

@@ -5,7 +5,8 @@
 void *memcpy(void *dst, const void *src, unsigned long n);
 void *memset(void *dst, int c, unsigned long n);
 
-int gsp_dma_alloc(struct gsp_dma_buf *b, unsigned long size, const char *what)
+static int dma_alloc_common(struct gsp_dma_buf *b, unsigned long size,
+                            const char *what, int cached)
 {
     uint64_t phys = 0;
     void *va;
@@ -13,7 +14,8 @@ int gsp_dma_alloc(struct gsp_dma_buf *b, unsigned long size, const char *what)
     if (!b || size == 0) {
         return -1;
     }
-    va = lx_dma_alloc_coherent(NULL, size, &phys, GFP_KERNEL);
+    va = cached ? lx_dma_alloc_wb(NULL, size, &phys, GFP_KERNEL)
+                : lx_dma_alloc_coherent(NULL, size, &phys, GFP_KERNEL);
     if (!va || !phys) {
         if (va) {
             lx_dma_free_coherent(NULL, size, va, phys);
@@ -27,6 +29,16 @@ int gsp_dma_alloc(struct gsp_dma_buf *b, unsigned long size, const char *what)
     b->phys = phys;
     b->size = size;
     return 0;
+}
+
+int gsp_dma_alloc(struct gsp_dma_buf *b, unsigned long size, const char *what)
+{
+    return dma_alloc_common(b, size, what, 0);
+}
+
+int gsp_dma_alloc_wb(struct gsp_dma_buf *b, unsigned long size, const char *what)
+{
+    return dma_alloc_common(b, size, what, 1);
 }
 
 int gsp_dma_alloc_copy(struct gsp_dma_buf *b, const void *src, unsigned long size,

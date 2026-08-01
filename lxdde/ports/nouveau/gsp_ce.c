@@ -75,6 +75,28 @@ int gsp_ce_init(struct gsp_rm *rm, struct gsp_chan *chan, struct gsp_ce *ce)
     return 0;
 }
 
+/* Lo que RM tenga que decir del canal. Se llama SOLO cuando una espera ha
+ * vencido: en ese punto no hay ninguna llamada síncrona en vuelo cuya respuesta
+ * podamos robar, y es la única forma de que el motivo (RC_TRIGGERED con su
+ * mmuFault) salga por el log en el mismo ciclo en que pasó. */
+void gsp_ce_drain_events(struct gsp_ce *ce)
+{
+    if (!ce || !ce->rm || !ce->rm->rpc) {
+        return;
+    }
+    gsp_rpc_drain(ce->rm->rpc, GSP_CE_RC_DRAIN_MS);
+}
+
+static void ce_mark_stuck(struct gsp_ce *ce, const char *why)
+{
+    if (!ce || ce->stuck) {
+        return;
+    }
+    ce->stuck = 1;
+    lx_printk("nouveau-lx: CE atascado — %s; no más copias (reinicia soso)\n",
+              why ? why : "error");
+}
+
 int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
                        uint32_t size, unsigned *pb_off, unsigned *pb_len)
 {
@@ -83,13 +105,31 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
     unsigned start;
     unsigned end;
     uint32_t launch;
+    uint32_t line_len, lines, pitch;
     uint64_t sem_va;
     int off;
 
-    if (!ce || !ce->ready || !ce->chan || !size) {
+    if (!ce || !ce->ready || !ce->chan || !size || ce->stuck) {
         return -1;
     }
     c = ce->chan;
+
+    /* Una copia contigua se puede encodear de dos formas y las dos son legales:
+     * una línea de `size` bytes, o `size/4096` líneas de página con el pitch a
+     * 4096 (que deja las líneas pegadas). Upstream mueve un buffer entero con la
+     * segunda —`nve0_bo_move_copy`: PITCH=PAGE_SIZE, LINE_COUNT=PFN_UP(size),
+     * MULTI_LINE_ENABLE— y por eso un BO de 64 MiB es UN launch y una valla. La
+     * de una línea sólo está probada aquí hasta 4 KiB, así que se reserva para
+     * el rabo que no llega a página. */
+    if (size > GSP_CE_LINE_BYTES && (size % GSP_CE_LINE_BYTES) == 0u) {
+        line_len = GSP_CE_LINE_BYTES;
+        lines = size / GSP_CE_LINE_BYTES;
+        pitch = GSP_CE_LINE_BYTES;
+    } else {
+        line_len = size;
+        lines = 1u;
+        pitch = size;
+    }
 
     off = gsp_chan_pb_reserve(c, 160);
     if (off < 0) {
@@ -97,7 +137,7 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
          * progreso SW y rebobinar es seguro (Blackwell no escribe USERD GPGet). */
         if (gsp_chan_pb_rewind(c) != 0 ||
             (off = gsp_chan_pb_reserve(c, 160)) < 0) {
-            lx_printk("nouveau-lx: CE — pushbuffer lleno y sin rebobinar\n");
+            ce_mark_stuck(ce, "pushbuffer lleno y sin rebobinar");
             return -1;
         }
     }
@@ -111,19 +151,19 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
     pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_IN_LOWER, 1);
     pb_write(c, &pos, (uint32_t)src_va);
     pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_PITCH_IN, 1);
-    pb_write(c, &pos, size);
+    pb_write(c, &pos, pitch);
 
     pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_OUT_UPPER, 1);
     pb_write(c, &pos, (uint32_t)(dst_va >> 32));
     pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_OUT_LOWER, 1);
     pb_write(c, &pos, (uint32_t)dst_va);
     pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_PITCH_OUT, 1);
-    pb_write(c, &pos, size);
+    pb_write(c, &pos, pitch);
 
     pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_LINE_LENGTH_IN, 1);
-    pb_write(c, &pos, size);
+    pb_write(c, &pos, line_len);
     pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_LINE_COUNT, 1);
-    pb_write(c, &pos, 1);
+    pb_write(c, &pos, lines);
 
     sem_va = c->notifier_va;
     ce->pending = ++ce->seq;
@@ -141,6 +181,9 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
              NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
              NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH |
              NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
+    if (lines > 1u) {
+        launch |= NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE;
+    }
 
     pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_LAUNCH_DMA, 1);
     pb_write(c, &pos, launch);
@@ -160,7 +203,7 @@ int gsp_ce_wait(struct gsp_ce *ce, unsigned ms)
     const volatile uint32_t *sem;
     unsigned waited;
 
-    if (!ce || !ce->ready || !ce->chan || !ce->chan->notifier.va) {
+    if (!ce || !ce->ready || !ce->chan || !ce->chan->notifier.va || ce->stuck) {
         return -1;
     }
     sem = (const volatile uint32_t *)ce->chan->notifier.va;
@@ -178,6 +221,8 @@ int gsp_ce_wait(struct gsp_ce *ce, unsigned ms)
     lx_printk("nouveau-lx: CE — semáforo no llegó a %u en %u ms (vale %u)\n",
               ce->pending, ms, *sem);
     gsp_chan_dump(ce->chan, "CE sin señalizar");
+    gsp_ce_drain_events(ce);
+    ce_mark_stuck(ce, "semáforo CE sin señalizar");
     return -1;
 }
 
@@ -186,6 +231,9 @@ int gsp_ce_copy_sync(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
 {
     unsigned pb_off = 0, pb_len = 0;
 
+    if (!ce || ce->stuck) {
+        return -1;
+    }
     if (gsp_ce_encode_copy(ce, dst_va, src_va, size, &pb_off, &pb_len) != 0 ||
         gsp_chan_submit(ce->chan, pb_off, pb_len) != 0) {
         return -1;

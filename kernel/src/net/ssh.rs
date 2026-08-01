@@ -11,14 +11,22 @@
 //! el canal va a la cola RX (que la shell lee por su fd 0).
 //!
 //! Reglas de concurrencia: `poll()` solo corre desde `net::poll` (bajo el
-//! try_lock de NetStack) y nunca reentra; las colas RX/TX las tocan además
-//! las syscalls del proceso, pero jamás a la vez (una syscall corre en
-//! ring 0 y el tick de timer no llama a `net::poll` desde ring 0).
+//! try_lock de NetStack) y nunca reentra. Las colas RX/TX las tocan además las
+//! syscalls del proceso, en ring 0 y con las interrupciones ABIERTAS (el `sti`
+//! de `syscall_entry`), así que se toman con `without_interrupts`, igual que el
+//! serie con su IRQ.
+//!
+//! Hasta 2026-08-01 aquí se afirmaba «jamás a la vez» porque el tick del timer
+//! no llama a `net::poll` desde ring 0. Cierto — pero el handler MSI-X de
+//! virtio-net sí lo hacía, y el interbloqueo monocore resultante mataba la
+//! máquina justo después del prompt de una sesión nueva. La regla ahora la
+//! comprueba el aserto de `net::poll` en vez de un comentario.
 
 use crate::task::{self, Console};
 use alloc::collections::VecDeque;
 use smoltcp::socket::tcp;
 use spin::{Mutex, Once};
+use x86_64::instructions::interrupts::without_interrupts;
 use sunset::event::{Event, ServEvent};
 use sunset::{ChanData, ChanHandle, Runner, Server, SignKey};
 
@@ -37,23 +45,25 @@ static RX: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 static TX: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 
 pub fn rx_has_data() -> bool {
-    !RX.lock().is_empty()
+    without_interrupts(|| !RX.lock().is_empty())
 }
 pub fn rx_pop() -> Option<u8> {
-    RX.lock().pop_front()
+    without_interrupts(|| RX.lock().pop_front())
 }
 /// Empujar stdout de la shell hacia el canal. La tty SSH es cruda: sin
 /// `\r` antes de `\n` el cursor no vuelve al inicio de línea.
 pub fn tx_push(data: &[u8]) {
-    let mut tx = TX.lock();
-    let mut prev = tx.back().copied();
-    for &b in data {
-        if b == b'\n' && prev != Some(b'\r') {
-            tx.push_back(b'\r');
+    without_interrupts(|| {
+        let mut tx = TX.lock();
+        let mut prev = tx.back().copied();
+        for &b in data {
+            if b == b'\n' && prev != Some(b'\r') {
+                tx.push_back(b'\r');
+            }
+            tx.push_back(b);
+            prev = Some(b);
         }
-        tx.push_back(b);
-        prev = Some(b);
-    }
+    });
 }
 
 /// Lee un fichero pequeño del FS montado (claves). None si no existe.

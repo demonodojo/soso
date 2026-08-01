@@ -14,7 +14,12 @@
 #define G6_VA_BASE   (GSP_VA_BASE + 0x40000000ull)
 #define G6_VA_LIMIT  (GSP_VA_BASE + 0x50000000ull) /* 256 MiB de ventana */
 
-#define G6_UPLOAD_CHUNK  4096u
+/* Búfer de rebote de las subidas: sysmem contigua, cacheada, con su propia VA.
+ * 1 MiB = 256 páginas, una sola tabla hoja. El tamaño manda de verdad: la subida
+ * es un LAUNCH_DMA y una espera de semáforo POR BÚFER, así que con 4 KiB un
+ * tensor de 64 MiB eran 16384 idas y vueltas y con esto son 64. */
+#define G6_BOUNCE_VA     (GSP_VA_BASE + 0x30400000ull)
+#define G6_BOUNCE_BYTES  0x100000u
 
 struct gsp_buf {
     struct gsp_vram *vram;

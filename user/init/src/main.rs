@@ -516,6 +516,15 @@ fn suite() -> u8 {
                 }
                 sys::unlink(ruta);
             }
+            // Una línea por hilo al terminar. Parece ruido y no lo es: cuando la
+            // batería se quedaba muda justo aquí, esta línea fue lo que DESCARTÓ
+            // el futex — no aparecía ninguna de las cuatro, o sea que los hilos
+            // no habían llegado al `fetch_add` y el principal dormido era el
+            // comportamiento correcto. (La avería estaba en otro sitio: la pila
+            // de red corriendo desde la IRQ dura, ver `net_irq_handler`.) Se
+            // queda porque separa «falta un hilo» de «se perdió el despertar»,
+            // que desde fuera se ven exactamente igual.
+            println!("init: fs hilo {id} terminó sus {FS_VUELTAS} vueltas");
             FS_LISTOS.fetch_add(1, Ordering::Release);
             let _ = sys::futex_wake(&FS_LISTOS as *const AtomicU32 as *const u32, u64::MAX);
             sys::exit(0);
@@ -583,10 +592,25 @@ fn suite() -> u8 {
                     }
                     esperado[r] = sum;
                 }
-                let wh = sys::gpu_alloc((w.len() * 4) as u64);
-                let xh = sys::gpu_alloc((x.len() * 4) as u64);
-                let yh = sys::gpu_alloc((R * 4) as u64);
-                if wh >= 0 && xh >= 0 && yh >= 0 {
+                // DOS sondas con la misma matriz, y en este orden: primero los
+                // pesos en sysmem (el camino escalonado, el que llevaba meses
+                // funcionando) y después residentes en VRAM (el camino G6). Con
+                // una sola no se puede distinguir "el compute está roto" de "la
+                // ventana de VRAM está rota", que es justo lo que pasó el
+                // 2026-07-30: el primer lanzamiento del arranque fue el
+                // residente, colgó, y el log no decía cuál de los dos fallaba.
+                for (etiqueta, en_vram) in [("sysmem", false), ("VRAM", true)] {
+                    let wh = if en_vram {
+                        sys::gpu_alloc_vram((w.len() * 4) as u64)
+                    } else {
+                        sys::gpu_alloc((w.len() * 4) as u64)
+                    };
+                    // x e y son scratch: siempre sysmem, como en la inferencia.
+                    let xh = sys::gpu_alloc((x.len() * 4) as u64);
+                    let yh = sys::gpu_alloc((R * 4) as u64);
+                    if wh < 0 || xh < 0 || yh < 0 {
+                        continue;
+                    }
                     let (wh, xh, yh) = (wh as u64, xh as u64, yh as u64);
                     let subido = sys::gpu_map(wh, w.as_ptr() as u64, (w.len() * 4) as u64) == 0
                         && sys::gpu_map(xh, x.as_ptr() as u64, (x.len() * 4) as u64) == 0;
@@ -609,18 +633,18 @@ fn suite() -> u8 {
                     // silicio, no: sin canal el kernel lo calcula en CPU y lo dice.
                     check!(
                         bien,
-                        "SONDA GPU: un matvec {R}x{C} da el resultado correcto                          (bits={bits:#x}, on_gpu={})",
+                        "SONDA GPU ({etiqueta}): un matvec {R}x{C} da el resultado correcto                          (bits={bits:#x}, on_gpu={})",
                         en_gpu as u8
                     );
                     if en_gpu {
-                        println!("init: >>> G5 EN SILICIO: on_gpu=1 <<<");
+                        println!("init: >>> G5 EN SILICIO ({etiqueta}): on_gpu=1 <<<");
                     } else {
                         // La fase la da el propio kernel en `GpuInfo`: antes esto
                         // mandaba a abrir el log de serie, que son cientos de
                         // líneas para averiguar una palabra.
                         let fase = libsoso::str_hasta_nul(&info.phase);
                         println!(
-                            "init: sonda GPU calculada por la CPU del kernel                              (on_gpu=0) — el GSP se quedó en la fase «{fase}»"
+                            "init: sonda GPU ({etiqueta}) calculada por la CPU del kernel                              (on_gpu=0) — el GSP se quedó en la fase «{fase}»"
                         );
                     }
                     let _ = sys::gpu_free(wh);
@@ -687,10 +711,15 @@ fn suite() -> u8 {
                 esperado[r] = sum;
             }
 
+            // Los dos rc por separado: un `&&` de dos syscalls dice que algo falló
+            // pero no cuál ni por qué, y con -22/-14/-38 en juego eso es la
+            // diferencia entre un handle malo, un puntero que el proceso no puede
+            // leer y un búfer que vive en el dispositivo.
+            let rc_w = sys::gpu_map(w_h, w.as_ptr() as u64, (w.len() * 4) as u64);
+            let rc_x = sys::gpu_map(x_h, x.as_ptr() as u64, (x.len() * 4) as u64);
             check!(
-                sys::gpu_map(w_h, w.as_ptr() as u64, (w.len() * 4) as u64) == 0
-                    && sys::gpu_map(x_h, x.as_ptr() as u64, (x.len() * 4) as u64) == 0,
-                "gpu_map de w y x"
+                rc_w == 0 && rc_x == 0,
+                "gpu_map de w y x (rc_w={rc_w} rc_x={rc_x})"
             );
 
             let mut cmd = [0u8; 37];

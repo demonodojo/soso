@@ -999,6 +999,10 @@ typedef struct NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS {
 #define NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH     (1u << 8)
 #define NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED (2u << 0)
 #define NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD  (1u << 3)
+/* 9:9 en `cla0b5.h`. Con él, la copia son `LINE_COUNT` líneas de `LINE_LENGTH_IN`
+ * separadas por `PITCH`: con pitch = longitud de línea salen contiguas, que es
+ * como upstream mueve un buffer entero en un solo LAUNCH_DMA. */
+#define NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE           (1u << 9)
 
 /* Métodos de canal (class/clc56f.h). */
 #define NVC56F_SET_OBJECT                    0x00000000u

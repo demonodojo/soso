@@ -20,6 +20,7 @@
 #include "gsp_top.h"
 #include "gsp_vram.h"
 #include "gsp_buf.h"
+#include "gsp_bar1.h"
 #include "gsp_wpr.h"
 #include "gsp_chip.h"
 #include "lx_emul.h"
@@ -87,6 +88,11 @@ static struct gsp_static_info g_static;  /* VRAM utilizable y regalos de RM */
 static struct gsp_vram g_vram_pool;      /* reparto de VRAM sobre esas regiones */
 static struct gsp_vmm g_vmm;             /* vaspace de RM + tablas de páginas */
 static struct gsp_dma_buf g_scratch;     /* página de sysmem visible por la GPU */
+/* Rebote de las subidas a VRAM (G6). Aparte del scratch de G4d y mucho mayor:
+ * la subida cuesta un LAUNCH_DMA + una espera de semáforo por búfer, así que su
+ * tamaño es el que decide si un modelo tarda segundos o minutos en entrar. Va
+ * cacheado porque aquí la CPU escribe megabytes y el dispositivo sólo lee. */
+static struct gsp_dma_buf g_bounce;
 static struct gsp_chan g_chan;           /* canal GPFIFO del CE, motor COPY0 (G4e) */
 /* Segundo canal, atado a GR0. No es duplicación: RM no acepta un objeto de
  * compute sobre un canal de copia (INVALID_CLASS con la clase correcta, HW
@@ -96,6 +102,7 @@ static struct gsp_chan g_chan_gr;        /* canal GPFIFO del compute, motor GR0 
 static struct gsp_ce g_ce;               /* motor de copia CE (G4e) */
 static struct gsp_compute g_compute;     /* compute + QMD (G4f) */
 static struct gsp_buf g_buf;             /* buffers de usuario en VRAM (G6) */
+static struct gsp_bar1 g_bar1;           /* apertura de CPU a VRAM: sólo mirar */
 static struct gsp_grctx g_grctx;          /* contexto del canal de GR (G4f) */
 static int g_ce_verified;                /* el CE movió bytes de verdad (G4e) */
 static uint64_t g_vram_block;            /* bloque de VRAM mapeado en G4d */
@@ -392,6 +399,29 @@ static int vmm_selfcheck(void)
     return 0;
 }
 
+/* Mirar las tablas de BAR1 de RM, sin tocarlas. Es lo único que hace falta para
+ * decidir si la CPU puede escribir VRAM por la apertura en vez de por el CE, y
+ * la respuesta no se puede deducir sin la tarjeta: hay que ver en qué nivel se
+ * corta la cadena que RM dejó hecha. Best-effort puro — no condiciona nada. */
+static void run_bar1_probe(void)
+{
+    struct gsp_sysinfo si = { 0 };
+
+    if (!g_static.ready) {
+        return;
+    }
+    if (g_pdev) {
+        collect_sysinfo(&si);
+    }
+    if (gsp_bar1_init(&g_bar1, si.bar1_phys, g_static.bar1_size,
+                      g_static.bar1_pde_base) != 0) {
+        return;
+    }
+    /* Offset 0 de la apertura: si RM ha mapeado algo ahí, la cadena estará
+     * entera y sabremos que las tablas de abajo son suyas y viven en VRAM. */
+    gsp_bar1_dump(&g_bar1, 0);
+}
+
 static int run_vmm_stage(void)
 {
     if (gsp_vram_init(&g_vram_pool, &g_static) != 0) {
@@ -491,12 +521,35 @@ static int run_compute_stage(void)
         lx_printk("nouveau-lx: SASS en VRAM — saxpy %u B, matvec %u B\n",
                   g_compute.saxpy.sass_len, g_compute.matvec.sass_len);
     }
-    if (gsp_buf_init(&g_buf, &g_vram_pool, &g_vmm, &g_ce, G4D_SCRATCH_VA,
-                     g_scratch.va, 4096u) != 0) {
-        lx_printk("nouveau-lx: G6 — pool de buffers VRAM no inicializado\n");
-    } else {
-        lx_printk("nouveau-lx: G6 — buffers VRAM listos (libre ~%llu MiB)\n",
-                  (unsigned long long)(gsp_buf_vram_free(&g_buf) >> 20));
+    /* El rebote grande es un lujo, no un requisito: si no hay 1 MiB contiguo o
+     * no se puede mapear, G6 sigue con la página de 4 KiB de G4d y lo dice. Lo
+     * que no vale es quedarse a medias, con memoria reservada y sin mapear. */
+    {
+        uint64_t bounce_va = G4D_SCRATCH_VA;
+        void *bounce_cpu = g_scratch.va;
+        unsigned bounce_len = 4096u;
+
+        if (gsp_dma_alloc_wb(&g_bounce, G6_BOUNCE_BYTES, "rebote de subidas G6") == 0) {
+            if (gsp_vmm_map(&g_vmm, G6_BOUNCE_VA, g_bounce.phys, G6_BOUNCE_BYTES,
+                            GSP_VMM_SYSMEM) == 0) {
+                bounce_va = G6_BOUNCE_VA;
+                bounce_cpu = g_bounce.va;
+                bounce_len = G6_BOUNCE_BYTES;
+            } else {
+                lx_printk("nouveau-lx: G6 — rebote de %u KiB sin mapear; se sube "
+                          "de 4 KiB en 4 KiB\n", G6_BOUNCE_BYTES >> 10);
+                gsp_dma_free(&g_bounce);
+            }
+        }
+        if (gsp_buf_init(&g_buf, &g_vram_pool, &g_vmm, &g_ce, bounce_va,
+                         bounce_cpu, bounce_len) != 0) {
+            lx_printk("nouveau-lx: G6 — pool de buffers VRAM no inicializado\n");
+        } else {
+            lx_printk("nouveau-lx: G6 — buffers VRAM listos (libre ~%llu MiB, "
+                      "rebote %u KiB)\n",
+                      (unsigned long long)(gsp_buf_vram_free(&g_buf) >> 20),
+                      bounce_len >> 10);
+        }
     }
     /* El lanzamiento del QMD NO se hace aquí: el bring-up deja el compute
      * armado y sale. Un kernel que se lance en el arranque y falle deja la
@@ -638,7 +691,7 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
                      * por registro: si no cuadra, la transcripción del struct
                      * está desplazada y lo demás no es de fiar. */
                     if (gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static) == 0 &&
-                        run_vmm_stage() == 0) {
+                        (run_bar1_probe(), run_vmm_stage() == 0)) {
                         g_phase = GSP_RM_VMM;
                         if (run_chan_ce_stage() == 0) {
                             (void)run_compute_stage();
@@ -704,6 +757,7 @@ int lx_nouveau_gsp_fini(void)
     gsp_ce_fini(&g_ce);
     gsp_chan_fini(&g_chan);
     gsp_vmm_fini(&g_vmm);
+    gsp_dma_free(&g_bounce);
     gsp_dma_free(&g_scratch);
 
     rc = gsp_fini(&g_rm_obj, &g_cmdq, &g_rpc, g_pdev);

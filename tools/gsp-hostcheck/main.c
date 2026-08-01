@@ -54,6 +54,12 @@ static void *lx_dma_alloc_coherent(struct lx_pci_dev *d, size_t size, uint64_t *
         *dma = lx_virt_to_phys(p);
     return p;
 }
+/* En el host no hay diferencia entre WB y UC: es la misma malloc. */
+static void *lx_dma_alloc_wb(struct lx_pci_dev *d, size_t size, uint64_t *dma, unsigned gfp)
+{
+    return lx_dma_alloc_coherent(d, size, dma, gfp);
+}
+static void lx_dma_flush_range(const void *p, size_t len) { (void)p; (void)len; }
 static void lx_dma_free_coherent(struct lx_pci_dev *d, size_t size, void *va, uint64_t dma)
 { (void)d; (void)dma; lx_free_pages_exact(va, size); }
 
@@ -393,6 +399,7 @@ typedef char fake_usermode_reg_check[
 #include "gsp_top_body.inc"
 #include "gsp_chip_body.inc"
 #include "gsp_pramin_body.inc"
+#include "gsp_bar1_body.inc"
 #include "gsp_chan_body.inc"
 #include "gsp_ce_body.inc"
 #include "gsp_grctx_body.inc"
@@ -1876,12 +1883,36 @@ static int check_g6_resident(void)
         printf("FALLO: constantes de layout G6 incoherentes\n");
         return -1;
     }
-    if (G6_UPLOAD_CHUNK != 4096u) {
-        printf("FALLO: troceo de subida G6\n");
+    /* El rebote de las subidas: múltiplo de página (la copia multilínea del CE
+     * lo exige) y con ventana de VAs PROPIA. Solapar con el staging de G5 o con
+     * el de matvec residente no daría error en ninguna parte: la subida
+     * escribiría encima de `x`/`y` y el modelo escupiría números plausibles. */
+    if (G6_BOUNCE_BYTES < 4096u || (G6_BOUNCE_BYTES % 4096u) != 0u) {
+        printf("FALLO: rebote G6 de %u B no es múltiplo de página\n",
+               G6_BOUNCE_BYTES);
         return -1;
     }
-    printf("OK: G6 residente — grid 2816→%u, VA 0x%llx, troceo %u B\n",
-           grid, (unsigned long long)G6_VA_BASE, G6_UPLOAD_CHUNK);
+    {
+        const struct { uint64_t base; uint64_t size; const char *que; } otros[] = {
+            { G4F_DATA_VA, G4F_DATA_SIZE, "data G4f" },
+            { G5_MV_VA,    G5_MV_SIZE,    "staging G5" },
+            { G6_RES_VA,   G6_RES_SIZE,   "staging residente G6" },
+        };
+        unsigned i;
+
+        for (i = 0; i < sizeof(otros) / sizeof(otros[0]); i++) {
+            if (G6_BOUNCE_VA < otros[i].base + otros[i].size &&
+                otros[i].base < G6_BOUNCE_VA + G6_BOUNCE_BYTES) {
+                printf("FALLO: el rebote G6 (0x%llx+%u) pisa el %s\n",
+                       (unsigned long long)G6_BOUNCE_VA, G6_BOUNCE_BYTES,
+                       otros[i].que);
+                return -1;
+            }
+        }
+    }
+    printf("OK: G6 residente — grid 2816→%u, VA 0x%llx, rebote %u KiB en ventana "
+           "propia\n", grid, (unsigned long long)G6_VA_BASE,
+           G6_BOUNCE_BYTES >> 10);
     return 0;
 }
 
@@ -2289,6 +2320,105 @@ static int check_pramin(void)
     return 0;
 }
 
+/* Recorrido de las tablas de BAR1. Aquí no hay tarjeta, así que la cadena se
+ * PLANTA en la VRAM falsa y se comprueba que el recorrido la lee entera y que
+ * se para donde tiene que pararse. Lo que se valida es la aritmética de niveles
+ * (índices, tamaño de entrada, la mitad alta de la PDE doble del PD0) y la
+ * decodificación de APERTURE — que es justo lo que no se puede depurar en
+ * hardware sin gastar un ciclo de VFIO por error de un bit. */
+static int check_bar1_walk(void)
+{
+    struct gsp_bar1 b;
+    struct gsp_bar1_step steps[GSP_BAR1_LEVELS];
+    const uint64_t pd3 = 0x10000ull, pd2 = 0x11000ull, pd1 = 0x12000ull;
+    const uint64_t pd0 = 0x13000ull, spt = 0x14000ull, page = 0x2a000ull;
+    int n;
+
+    gsp_pramin_invalidate();
+    (void)gsp_pramin_alive();
+
+    /* PDE: APERTURE (2:1) = 1 (VRAM), PCF = 2, ADDRESS 51:12. El bit 0 NO se
+     * pone: ahí `IS_PTE` convertiría el puntero en una traducción final. */
+#define FAKE_PDE(addr) (((uint64_t)(addr) & 0x000ffffffffff000ull) | (1ull << 1) | (2ull << 3))
+    {
+        struct { uint64_t at; uint64_t val; } e[] = {
+            { pd3 + 0u,  FAKE_PDE(pd2) },       /* PD3[0] → PD2 */
+            { pd2 + 0u,  FAKE_PDE(pd1) },       /* PD2[0] → PD1 */
+            { pd1 + 0u,  FAKE_PDE(pd0) },       /* PD1[0] → PD0 */
+            /* PD0 son 16 B por entrada: el PDE de 4 KiB va en la mitad ALTA. */
+            { pd0 + 8u,  FAKE_PDE(spt) },
+            /* Hoja: aquí el bit 0 sí es VALID y VRAM se codifica como 0. */
+            { spt + 0u,  ((uint64_t)page & 0x000ffffffffff000ull) | 1ull | (0x10ull << 3) },
+        };
+        unsigned i;
+
+        for (i = 0; i < sizeof(e) / sizeof(e[0]); i++) {
+            gsp_pramin_wr32(e[i].at, (uint32_t)e[i].val);
+            gsp_pramin_wr32(e[i].at + 4u, (uint32_t)(e[i].val >> 32));
+        }
+    }
+
+    if (gsp_bar1_init(&b, 0xf0000000ull, 256ull << 20, pd3) != 0) {
+        printf("FALLO: gsp_bar1_init con raíz y apertura buenas\n");
+        return -1;
+    }
+    n = gsp_bar1_walk(&b, 0, steps, GSP_BAR1_LEVELS);
+    if (n != (int)GSP_BAR1_LEVELS) {
+        printf("FALLO: el recorrido de BAR1 dio %d pasos, esperaba %u\n",
+               n, GSP_BAR1_LEVELS);
+        return -1;
+    }
+    if (steps[0].table != pd3 || steps[1].table != pd2 || steps[2].table != pd1 ||
+        steps[3].table != pd0 || steps[4].table != spt || steps[4].next != page) {
+        printf("FALLO: el recorrido no siguió la cadena plantada "
+               "(%llx %llx %llx %llx %llx → %llx)\n",
+               (unsigned long long)steps[0].table, (unsigned long long)steps[1].table,
+               (unsigned long long)steps[2].table, (unsigned long long)steps[3].table,
+               (unsigned long long)steps[4].table, (unsigned long long)steps[4].next);
+        return -1;
+    }
+
+    /* Una rama sin construir corta el recorrido, y no se sigue leyendo: un PDE a
+     * cero apunta a la VRAM 0, que en la tarjeta tiene datos de RM y daría un
+     * volcado con pinta de tabla. */
+    gsp_pramin_wr32(pd1 + 0u, 0u);
+    gsp_pramin_wr32(pd1 + 4u, 0u);
+    n = gsp_bar1_walk(&b, 0, steps, GSP_BAR1_LEVELS);
+    if (n != 3 || steps[2].aperture != 0u) {
+        printf("FALLO: con PD1 inválido el recorrido dio %d pasos (ap=%u)\n",
+               n, n >= 3 ? steps[2].aperture : 99u);
+        return -1;
+    }
+
+    /* Y una tabla en sysmem también corta: PRAMIN sólo llega a VRAM. */
+    {
+        /* APERTURE = 2 (SYS_COH), no 1: el campo son los bits 2:1 enteros, así
+         * que hay que ponerlo, no añadirle un bit al de VRAM. */
+        uint64_t sys_pde = ((uint64_t)pd0 & 0x000ffffffffff000ull) |
+                           (2ull << 1) | (1ull << 3);
+
+        gsp_pramin_wr32(pd1 + 0u, (uint32_t)sys_pde);
+        gsp_pramin_wr32(pd1 + 4u, (uint32_t)(sys_pde >> 32));
+        n = gsp_bar1_walk(&b, 0, steps, GSP_BAR1_LEVELS);
+        if (n != 3 || steps[2].aperture != 2u) {
+            printf("FALLO: con PD1 en sysmem el recorrido dio %d pasos (ap=%u)\n",
+                   n, n >= 3 ? steps[2].aperture : 99u);
+            return -1;
+        }
+    }
+
+    /* Raíz a cero: no hay recorrido que valga. */
+    if (gsp_bar1_init(&b, 0xf0000000ull, 0, 0) == 0) {
+        printf("FALLO: gsp_bar1_init aceptó bar1PdeBase=0\n");
+        return -1;
+    }
+#undef FAKE_PDE
+
+    printf("OK: BAR1 — recorrido PD3→SPT de la cadena de RM, y se para en rama "
+           "inválida o en sysmem\n");
+    return 0;
+}
+
 static int check_rc_triggered(void)
 {
     rpc_rc_triggered_v17_02 msg;
@@ -2338,6 +2468,31 @@ static int check_doorbell_kick_by_family(void)
     }
     printf("OK: doorbell kick chip-aware (gb20x bit30 ON, Ampere sin bit30)\n");
     return 0;
+}
+
+/* Valor de un método dentro de un pushbuffer ya codificado. Recorre las
+ * cabeceras como haría el host (INCR con `count` datos detrás) en vez de asumir
+ * un offset fijo: así el banco no se rompe cada vez que se reordena la copia. */
+static int pb_method_value(const uint32_t *pb, unsigned dwords, unsigned mthd,
+                           uint32_t *out)
+{
+    unsigned i = 0;
+
+    while (i < dwords) {
+        uint32_t hdr = pb[i];
+        unsigned count = (hdr >> 16) & 0x1fffu;
+        unsigned m = (hdr & 0xfffu) << 2;
+
+        if (count == 0u || i + count >= dwords + 1u) {
+            return -1;
+        }
+        if (m == mthd) {
+            *out = pb[i + 1u];
+            return 0;
+        }
+        i += 1u + count;
+    }
+    return -1;
 }
 
 static int check_g4e_chan_ce(const struct gsp_libos *lo)
@@ -2908,6 +3063,61 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     }
     printf("OK: GPFIFO entry + USERD GPPut + doorbell 0x%08x en 0x%06x\n",
            fake_doorbell_last, NV_VFN_DOORBELL);
+
+    /* Copia de más de una página: la que sube los pesos. Tiene que salir como
+     * la de upstream (`nve0_bo_move_copy`) —N líneas de página con el pitch a
+     * página y MULTI_LINE— y no como una línea gigante, que es un encoding que
+     * no ha visto silicio. Sin esto, el cambio de "un LAUNCH_DMA por búfer" se
+     * comprobaría por primera vez en la tarjeta, a un ciclo de VFIO por intento. */
+    {
+        unsigned mpb_off = 0, mpb_len = 0;
+        const uint32_t *pb;
+        uint32_t pitch_in = 0, pitch_out = 0, line_len = 0, lines = 0, launch = 0;
+        const uint32_t size = 3u * 4096u;
+
+        if (gsp_ce_encode_copy(&ce, GSP_CHAN_VA_BASE + 8192ull,
+                               GSP_CHAN_VA_BASE + 16384ull, size,
+                               &mpb_off, &mpb_len) != 0) {
+            printf("FALLO: gsp_ce_encode_copy multilínea\n");
+            return -1;
+        }
+        pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + mpb_off);
+        if (pb_method_value(pb, mpb_len / 4u, NVC6B5_PITCH_IN, &pitch_in) != 0 ||
+            pb_method_value(pb, mpb_len / 4u, NVC6B5_PITCH_OUT, &pitch_out) != 0 ||
+            pb_method_value(pb, mpb_len / 4u, NVC6B5_LINE_LENGTH_IN, &line_len) != 0 ||
+            pb_method_value(pb, mpb_len / 4u, NVC6B5_LINE_COUNT, &lines) != 0 ||
+            pb_method_value(pb, mpb_len / 4u, NVC6B5_LAUNCH_DMA, &launch) != 0) {
+            printf("FALLO: al pushbuffer multilínea le falta algún método\n");
+            return -1;
+        }
+        if (pitch_in != GSP_CE_LINE_BYTES || pitch_out != GSP_CE_LINE_BYTES ||
+            line_len != GSP_CE_LINE_BYTES || lines != size / GSP_CE_LINE_BYTES ||
+            !(launch & NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE)) {
+            printf("FALLO: multilínea pitch=%u/%u len=%u count=%u launch=0x%08x\n",
+                   pitch_in, pitch_out, line_len, lines, launch);
+            return -1;
+        }
+        /* Y el rabo de menos de una página sigue siendo de una línea: con pitch
+         * de página, una línea corta escribiría 4 KiB donde hay 300 B. */
+        if (gsp_ce_encode_copy(&ce, GSP_CHAN_VA_BASE + 8192ull,
+                               GSP_CHAN_VA_BASE + 16384ull, 300u,
+                               &mpb_off, &mpb_len) != 0) {
+            printf("FALLO: gsp_ce_encode_copy del rabo\n");
+            return -1;
+        }
+        pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + mpb_off);
+        if (pb_method_value(pb, mpb_len / 4u, NVC6B5_LINE_COUNT, &lines) != 0 ||
+            pb_method_value(pb, mpb_len / 4u, NVC6B5_LINE_LENGTH_IN, &line_len) != 0 ||
+            pb_method_value(pb, mpb_len / 4u, NVC6B5_LAUNCH_DMA, &launch) != 0 ||
+            lines != 1u || line_len != 300u ||
+            (launch & NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE)) {
+            printf("FALLO: el rabo de 300 B no salió de una línea (count=%u "
+                   "len=%u launch=0x%08x)\n", lines, line_len, launch);
+            return -1;
+        }
+        printf("OK: copia de %u B = %u líneas de página con MULTI_LINE; 300 B = "
+               "una línea\n", size, size / GSP_CE_LINE_BYTES);
+    }
 
     /* --- G4f/G5: canal de GR0 + compute + QMD inline --- */
     if (gsp_chan_init(&v.rm, &v, &pool, &chan_gr, v.vaspace, 1u,
@@ -3651,6 +3861,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_grctx() != 0)
         return -1;
     if (check_pramin() != 0)
+        return -1;
+    if (check_bar1_walk() != 0)
         return -1;
     if (check_rc_triggered() != 0)
         return -1;

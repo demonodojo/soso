@@ -153,9 +153,32 @@ fn find_virtio_common_cfg(bus: u8, dev: u8, func: u8) -> Option<(u64, u32)> {
     None
 }
 
+/// Handler de la MSI-X de virtio-net. **Sólo hace ack y agenda: no procesa la
+/// pila de red.**
+///
+/// AVERÍA (2026-08-01): aquí se llamaba a `crate::net::poll()`, así que la IRQ
+/// ejecutaba smoltcp + sunset + `ssh::drive` con IF=0. Ese camino toma PROCS
+/// (`task::exists` desde `net/ssh.rs`), las colas RX/TX de ssh, el VFS
+/// (`spawn_console` carga /bin/sosh) y el heap del kernel (talc, con un
+/// `spin::Mutex` pelado que el propio camino de TX pide al reservar su búfer).
+/// Una syscall corre en ring 0 con las interrupciones ABIERTAS —el `sti` de
+/// `syscall_entry`— sosteniendo esos mismos candados, y `sosh` hace una syscall
+/// `write` POR CARÁCTER echoado: en el arranque de una sesión la ventana es
+/// enorme. Si la IRQ caía dentro, monocore = giro eterno con IF=0.
+///
+/// Se medía como «la sesión SSH recibe banner y prompt (117 bytes) y el stdin no
+/// vuelve nunca», 1 de cada 5 arranques, con el serie mudo desde «ssh: sesión
+/// abierta» y sin poder abrir otra sesión («timed out during banner exchange»).
+///
+/// Es el mismo problema que el serie ya resolvía con `without_interrupts`
+/// (`drivers/serial.rs`: «en monocore eso sería un interbloqueo»), y la solución
+/// es la de Linux: la IRQ dura sólo hace ack y `__napi_schedule`; la pila corre
+/// en softirq.
 fn net_irq_handler() {
     let n = MSI_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     if n == 0 {
+        // `println!` sí es seguro desde IRQ: el serie toma su candado siempre
+        // bajo `without_interrupts`, así que nadie puede sostenerlo con IF=1.
         println!("net: primera IRQ MSI-X recibida");
     }
     if let Some(nic) = NET.get() {
@@ -163,8 +186,10 @@ fn net_irq_handler() {
             let _ = nic.ack_interrupt();
         }
     }
-    // Poll inmediato si el stack está libre; si no, el timer lo recoge.
-    crate::net::poll();
+    // Agendar y salir. Lo recoge `irq::dispatch` al volver a ring 3, el bucle
+    // del scheduler o el tick del timer: los tres son contextos que no pueden
+    // estar dentro de esos candados.
+    crate::net::marcar_trabajo_pendiente();
 }
 
 /// ¿MSI-X activo?

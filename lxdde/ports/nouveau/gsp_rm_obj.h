@@ -105,6 +105,9 @@ struct gsp_static_info {
     uint64_t usable_bytes;          /* suma de las anteriores */
     uint64_t bar1_pde_base;
     uint64_t bar2_pde_base;
+    /* Tamaño de la apertura de BAR1 según RM (`sriovCaps`). Puede venir a cero
+     * en una tarjeta sin SR-IOV; entonces sólo sabemos dónde empieza. */
+    uint64_t bar1_size;
     uint32_t internal_client;
     uint32_t internal_device;
     uint32_t internal_subdevice;

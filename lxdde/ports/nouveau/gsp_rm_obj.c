@@ -627,6 +627,7 @@ int gsp_static_info_get(struct gsp_rm *rm, uint64_t vram_expected,
     out->fb_length = info->fb_length;
     out->bar1_pde_base = info->bar1PdeBase;
     out->bar2_pde_base = info->bar2PdeBase;
+    out->bar1_size = info->sriovCaps.bar1Size;
     out->internal_client = info->hInternalClient;
     out->internal_device = info->hInternalDevice;
     out->internal_subdevice = info->hInternalSubdevice;

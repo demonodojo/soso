@@ -19,6 +19,7 @@ lxdde/ports/nouveau/matvec_sass_embed.c
 lxdde/ports/nouveau/gsp_fini.c
 lxdde/ports/nouveau/gsp_mmio.c
 lxdde/ports/nouveau/gsp_pramin.c
+lxdde/ports/nouveau/gsp_bar1.c
 lxdde/ports/nouveau/gsp_top.c
 lxdde/ports/nouveau/gsp_chip.c
 lxdde/ports/nouveau/gsp_bringup.c

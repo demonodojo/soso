@@ -4,8 +4,10 @@
 //! LAPIC tras invocar el handler del driver.
 
 use crate::arch::apic;
-use core::sync::atomic::{AtomicU8, Ordering};
+use crate::arch::smp::MAX_CPUS;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use spin::Mutex;
+use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 /// Primer vector asignable (tras timer LAPIC 0x40 y resched 0x41).
@@ -27,8 +29,39 @@ static SLOTS: Mutex<[Slot; VECTOR_COUNT as usize]> = Mutex::new(
 
 static NEXT: AtomicU8 = AtomicU8::new(0);
 
+/// Profundidad de IRQ dura por CPU (el `hardirq_count()` de Linux).
+///
+/// AVERÍA (2026-08-01): el handler MSI-X de virtio-net llamaba a `net::poll()`,
+/// o sea que ejecutaba smoltcp + sunset + `ssh::drive` con IF=0 (estos stubs son
+/// puertas de INTERRUPCIÓN). Ese camino toma PROCS, las colas RX/TX de ssh, el
+/// VFS (lee /bin/sosh y /etc/motd) y el heap del kernel — los mismos
+/// `spin::Mutex` que una syscall sostiene en ring 0 con las interrupciones
+/// ABIERTAS (el `sti` de `syscall_entry`). En monocore la IRQ se quedaba girando
+/// sobre un candado cuyo dueño era el contexto que ella misma había
+/// interrumpido: máquina muerta, con la sesión SSH cortada justo después del
+/// prompt y el puerto serie mudo desde ese instante.
+///
+/// Este contador existe para poder AFIRMAR la regla «la pila de red no corre
+/// desde IRQ dura» en vez de suponerla — que es exactamente como se perdió: el
+/// comentario de `net/ssh.rs` la daba por cierta razonando sólo sobre el tick
+/// del timer, y el handler de la NIC la incumplía.
+static PROF_IRQ: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
+
+/// ¿Está esta CPU dentro de un handler de IRQ dura?
+pub fn en_irq_dura() -> bool {
+    PROF_IRQ[crate::arch::percpu::cpu_index()].load(Ordering::Relaxed) > 0
+}
+
 /// Reserva un vector libre e instala `handler`. Devuelve el vector o None.
 pub fn allocate(handler: IrqHandler) -> Option<u8> {
+    // `dispatch` toma SLOTS desde IRQ dura, así que en contexto de proceso hay
+    // que enmascarar: es la disciplina `spin_lock_irqsave` de Linux. Aquí sólo
+    // se llama al registrar drivers, pero un candado compartido con la IRQ no
+    // admite excepciones «porque casi nunca coincide».
+    without_interrupts(|| allocate_locked(handler))
+}
+
+fn allocate_locked(handler: IrqHandler) -> Option<u8> {
     let mut slots = SLOTS.lock();
     let start = NEXT.load(Ordering::Relaxed) as usize;
     for i in 0..VECTOR_COUNT as usize {
@@ -46,7 +79,7 @@ pub fn allocate(handler: IrqHandler) -> Option<u8> {
 #[allow(dead_code)]
 pub fn free(vector: u8) {
     if let Some(idx) = index(vector) {
-        SLOTS.lock()[idx].handler = None;
+        without_interrupts(|| SLOTS.lock()[idx].handler = None);
     }
 }
 
@@ -58,7 +91,18 @@ fn index(vector: u8) -> Option<usize> {
     }
 }
 
-pub(crate) fn dispatch(vector: u8) {
+/// Invoca el handler del vector y hace EOI.
+///
+/// `desde_ring3` dice si el contexto interrumpido estaba en usuario: **sólo en
+/// ese caso** este core no sostiene ningún candado del kernel, y por tanto sólo
+/// entonces se puede procesar aquí el trabajo de red que la IRQ haya agendado.
+/// Es el `irq_exit`/softirq de Linux, y el mismo invariante que `task::timer_tick`
+/// ya usa (`if f.cs & 3 != 3 { return 0; }`). Si interrumpimos al kernel, el
+/// trabajo se queda agendado y lo recoge el bucle del scheduler o el próximo tick
+/// que venga de usuario.
+pub(crate) fn dispatch(vector: u8, desde_ring3: bool) {
+    let prof = &PROF_IRQ[crate::arch::percpu::cpu_index()];
+    prof.fetch_add(1, Ordering::Relaxed);
     if let Some(idx) = index(vector) {
         let handler = SLOTS.lock()[idx].handler;
         if let Some(h) = handler {
@@ -66,13 +110,22 @@ pub(crate) fn dispatch(vector: u8) {
         }
     }
     apic::eoi();
+    prof.fetch_sub(1, Ordering::Relaxed);
+    // Ya fuera del contexto de IRQ dura: aquí sí se puede tocar la pila de red.
+    if desde_ring3 && crate::net::trabajo_pendiente() {
+        crate::net::poll();
+    }
 }
 
 macro_rules! irq_stubs {
     ($(($vec:expr, $name:ident)),+ $(,)?) => {
         $(
-            extern "x86-interrupt" fn $name(_frame: InterruptStackFrame) {
-                dispatch($vec);
+            extern "x86-interrupt" fn $name(frame: InterruptStackFrame) {
+                // El privilegio del contexto interrumpido decide si el trabajo
+                // diferido puede correr al salir (ver `dispatch`).
+                let desde_ring3 =
+                    frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+                dispatch($vec, desde_ring3);
             }
         )+
 

@@ -114,13 +114,16 @@ fn rw(base: u64, off: u32, v: u32) {
     }
 }
 
+/// Igual que `virtio_net::net_irq_handler`: sólo ack y agendar. Ejecutar
+/// `net::poll()` desde aquí (IF=0) reentraba en PROCS/RX/TX/VFS/heap sostenidos
+/// por una syscall con IF=1, y colgaba el core entero (avería del 2026-08-01).
 fn e1000_irq() {
     if let Some(n) = NIC.get() {
         if let Some(nic) = n.try_lock() {
             let _ = rr(nic.mmio, REG_ICR); // ack
         }
     }
-    crate::net::poll();
+    crate::net::marcar_trabajo_pendiente();
 }
 
 pub fn present() -> bool {

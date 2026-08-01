@@ -286,7 +286,7 @@ fn gpu() -> &'static Mutex<GpuState> {
     GPU.get().expect("gpu no inicializada")
 }
 
-pub fn alloc(size: u64) -> Result<u64, i64> {
+pub fn alloc(size: u64, domain: u64) -> Result<u64, i64> {
     if size == 0 {
         return Err(abi::EINVAL);
     }
@@ -298,7 +298,8 @@ pub fn alloc(size: u64) -> Result<u64, i64> {
         return Err(abi::ENOMEM);
     }
     let handle = g.buffers.len() as u64;
-    let buf = if device_bufs_available(&g) {
+    let want_vram = domain == abi::GPU_ALLOC_VRAM;
+    let buf = if want_vram && device_bufs_available(&g) {
         #[cfg(feature = "lxdde")]
         {
             if let Ok(va) = crate::lxdde::device_buf_alloc(size) {
@@ -371,6 +372,13 @@ pub fn map_to_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     })
 }
 
+/// Sube `len` bytes del proceso al búfer. **Devuelve 0**, no la cuenta de bytes.
+///
+/// Lo devolvía, y su hermana `map_to_user` (gpu_read) devolvía 0: la asimetría no
+/// estaba escrita en ninguna parte y ningún llamante usaba el número —`soso-llm`
+/// sólo mira el signo—, pero `init test` comparaba con 0 y llevaba en rojo desde
+/// entonces, tapado por un timeout del arnés que se comía el paso entero. Si algún
+/// día hace falta la cuenta, que sea en las DOS y escrito aquí.
 pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     let mut g = gpu().lock();
     let slot = g
@@ -396,7 +404,7 @@ pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64
         #[cfg(feature = "lxdde")]
         {
             crate::lxdde::device_buf_upload(va, &tmp).map_err(|_| abi::EIO)?;
-            return Ok(len);
+            return Ok(0);
         }
         #[cfg(not(feature = "lxdde"))]
         {
@@ -411,7 +419,7 @@ pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64
             .ok_or(abi::EFAULT)?;
         Ok(0)
     })?;
-    Ok(len)
+    Ok(0)
 }
 
 /// Enciende el dispositivo software de pruebas (`SOFTG`). Nunca pisa hardware

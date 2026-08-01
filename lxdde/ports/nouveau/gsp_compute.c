@@ -555,6 +555,12 @@ static int launch_wait(struct gsp_compute *cp, const struct gsp_kernel *k,
     lx_printk("nouveau-lx: %s — el QMD no señalizó en %u ms (sem=0x%08x)\n",
               what, G4F_WAIT_MS, *sem);
     gsp_chan_dump(cp->chan, what);
+    /* Mismo motivo que en el CE: el porqué lo cuenta RM por evento, y si nadie
+     * escucha se queda en la cola. Un QMD que no señaliza suele ser una falta de
+     * MMU, y el RC_TRIGGERED trae la dirección exacta. */
+    if (cp->rm && cp->rm->rpc) {
+        gsp_rpc_drain(cp->rm->rpc, GSP_CE_RC_DRAIN_MS);
+    }
     return -1;
 }
 

@@ -323,10 +323,19 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
     // cores ociosos sondeando, y user/libsoso hace ~15000 syscalls sbrk (una por
     // asignación pequeña, sin agrupar) incluso para el modelo sintético diminuto
     // de este test. El arreglo de fondo sería agrupar sbrk en un arena local.
+    //
+    // Y **no cuentes con el contador de «generado»** para dimensionarlo: sólo mide
+    // la generación. En una máquina sin KVM (QEMU en TCG) las dos inferencias
+    // suman 106 s de generación y la sesión entera tarda 269 s — el resto se lo
+    // llevan el arranque de `soso-llm` (abrir el modelo, planificar, mapear los
+    // shards) y el cierre, dos veces. Con 240 s el paso vencía por 30 s, mataba la
+    // sesión SSH dejando al guest masticando, y a partir de ahí TODOS los pasos
+    // siguientes salían en rojo con stdout vacío: un timeout ajustado no falla
+    // solo, se lleva la suite por delante (medido el 2026-08-01).
     let texto = ssh_guion(
         key,
         "soso-llm run tiny --prompt test\n                  soso-llm run tiny --prompt test --gpu-soft --max 4\n                  exit\n",
-        Duration::from_secs(240),
+        Duration::from_secs(600),
     )?;
     if !texto.contains("soso-llm: generado") {
         return Err(format!(
@@ -417,7 +426,11 @@ fn ssh_pipeline(key: &std::path::Path) -> Result<(), String> {
 /// veían si alguien las lanzaba a mano. Un test que hay que acordarse de correr no
 /// es una red de seguridad.
 fn ssh_init_test(key: &std::path::Path) -> Result<(), String> {
-    let texto = ssh_guion(key, "init test\nexit\n", Duration::from_secs(150))?;
+    // 150 s bastaban con KVM; sin él (TCG) esta batería —hilos, futex, estrés de
+    // FPU/YMM y el camino de syscalls GPU— se pone en varios minutos. Ver la nota
+    // del límite en `ssh_llm`: pasarse de corto aquí no cuesta un rojo, cuesta la
+    // suite entera desde este punto.
+    let texto = ssh_guion(key, "init test\nexit\n", Duration::from_secs(420))?;
     // El FALLO se mira ANTES del TODO OK: la suite del guest corta en el primer
     // fallo, así que sin esto un "FALLO" temprano y ningún "TODO OK" darían el
     // mismo error genérico que un timeout, y son cosas distintas.
@@ -459,6 +472,23 @@ pub(crate) fn espera_salida(qemu: &mut Child, limite: Duration) -> Option<i32> {
     None
 }
 
+/// QEMU que se muere solo al salir del ámbito, pase lo que pase.
+///
+/// El `?` de un paso que vence salía de la función SIN matar al hijo, y ese QEMU
+/// huérfano se queda con el puerto 2222 y con el lock de escritura de la imagen:
+/// a partir de ahí TODAS las ejecuciones siguientes fallan al arrancar («Failed
+/// to get "write" lock») y el rojo que se ve no tiene nada que ver con el
+/// cambio que se estaba probando. Costó dos líneas base enteras averiguarlo
+/// (2026-08-01), así que el kill deja de depender del camino de salida.
+struct QemuVivo(Child);
+
+impl Drop for QemuVivo {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Segunda instancia QEMU con poca RAM: el reclaim del kernel debe permitir
 /// completar la inferencia del modelo tiny (pesos en disco, streaming).
 fn test_reclaim_low_mem(
@@ -483,16 +513,19 @@ fn test_reclaim_low_mem(
         .arg("-no-reboot")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = qemu.spawn().map_err(|e| e.to_string())?;
-    esperar_en_fichero(&serial, "sosh —", Duration::from_secs(120))?;
+    let _vivo = QemuVivo(qemu.spawn().map_err(|e| e.to_string())?);
+    // Arrancar con 48 MiB obliga al kernel a reclamar desde el primer momento, y
+    // sin KVM eso se pasa de los 120 s que bastaban con aceleración.
+    esperar_en_fichero(&serial, "sosh —", Duration::from_secs(300))?;
     let key = root.join("target/soso_test_key");
     let texto = ssh_guion(
         &key,
         "soso-llm run tiny --prompt x --max 2\nexit\n",
-        Duration::from_secs(180),
+        // Dos tokens, pero con 48 MiB el reclaim relee shards todo el rato y sin
+        // KVM eso son minutos. Mismo razonamiento que en `ssh_llm`.
+        Duration::from_secs(420),
     )?;
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(_vivo);
     if !texto.contains("soso-llm: generado") {
         return Err(format!(
             "inferencia con 48M no completó; stdout: {texto:?}"

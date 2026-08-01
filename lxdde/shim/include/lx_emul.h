@@ -117,6 +117,17 @@ void lx_pci_set_drvdata(struct lx_pci_dev *dev, void *data);
 
 /* --- DMA --- */
 void *lx_dma_alloc_coherent(struct lx_pci_dev *dev, size_t size, uint64_t *dma_handle, unsigned gfp);
+/* Igual, pero con el mapeo de CPU **cacheado** (write-back), que es lo que
+ * devuelve `dma_alloc_coherent` de Linux en x86 porque el DMA de PCIe fisga la
+ * caché. Sólo para buffers que la CPU ESCRIBE en volumen y el dispositivo LEE:
+ * un `memcpy` de 1 MiB a memoria UC tarda dos órdenes de magnitud más. No usarlo
+ * para anillos donde el dispositivo escribe (ahí sí hace falta UC). Se libera con
+ * `lx_dma_free_coherent`. */
+void *lx_dma_alloc_wb(struct lx_pci_dev *dev, size_t size, uint64_t *dma_handle, unsigned gfp);
+/* Baja a RAM las líneas de caché del rango y ordena la escritura. Obligatorio
+ * tras escribir en memoria de `lx_dma_alloc_wb` y antes de que el dispositivo la
+ * lea: una GPU puede pedir la lectura en modo no-snoop y saltarse la caché. */
+void lx_dma_flush_range(const void *ptr, size_t len);
 void lx_dma_free_coherent(struct lx_pci_dev *dev, size_t size, void *cpu_addr, uint64_t dma_handle);
 uint64_t lx_dma_map_single(struct lx_pci_dev *dev, void *ptr, size_t size, int dir);
 void lx_dma_unmap_single(struct lx_pci_dev *dev, uint64_t dma_addr, size_t size, int dir);

@@ -80,6 +80,23 @@ pub const MMAP_LIMIT: u64 = 0x78_0000_0000; // 480 GiB
 
 // ---- GPU ----
 
+/// Dominio de `SYS_GPU_ALLOC` (arg2; arg1 = bytes). Como nouveau: quien crea el
+/// búfer elige VRAM (pesos residentes) o sysmem/GART (scratch x/y).
+pub const GPU_ALLOC_GART: u64 = 0;
+pub const GPU_ALLOC_VRAM: u64 = 1;
+
+/// Contrato de retorno de las syscalls GPU, porque no estaba escrito y las dos
+/// mitades del mismo par no coincidían:
+///
+/// - `SYS_GPU_ALLOC`  → handle (≥ 0).
+/// - `SYS_GPU_MAP`    → **0**. Subir de más es EINVAL, no un recorte.
+/// - `SYS_GPU_READ`   → **0**. Igual.
+/// - `SYS_GPU_FREE`   → bytes devueltos a la cuenta de VRAM (los usa el llamante
+///   para su contabilidad de residentes; ese sí es un número con dueño).
+/// - `SYS_GPU_SUBMIT` → bits `GPU_SUBMIT_*`.
+///
+/// Negativo es siempre `-errno`.
+
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct GpuInfo {
