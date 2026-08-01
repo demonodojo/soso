@@ -82,7 +82,7 @@ static uint64_t lvl_cover(unsigned lvl, uint64_t va)
 #define VMM_PCF_REGULAR_RO_ATOMIC_CACHED_ACD   0x14u
 #define VMM_PCF_REGULAR_RO_ATOMIC_UNCACHED_ACD 0x15u
 
-static uint64_t pte_encode(uint64_t phys, enum gsp_vmm_target target, unsigned flags)
+uint64_t gsp_vmm_pte_encode(uint64_t phys, enum gsp_vmm_target target, unsigned flags)
 {
     uint64_t d = 1ull;                                  /* VALID */
     unsigned pcf;
@@ -109,7 +109,7 @@ static uint64_t pte_encode(uint64_t phys, enum gsp_vmm_target target, unsigned f
  *
  * Vale también para la mitad pequeña de la PDE doble del nivel 1: sus campos
  * están en las mismas posiciones 64 bits más arriba (ver gsp_vmm.h). */
-static uint64_t pde_encode(uint64_t phys, enum gsp_vmm_target target)
+uint64_t gsp_vmm_pde_encode(uint64_t phys, enum gsp_vmm_target target)
 {
     uint64_t d = 0ull;
 
@@ -277,11 +277,11 @@ int gsp_vmm_map_flags(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t si
             }
             if (created) {
                 pt_write(parent, lvl_index(lvl, at),
-                         pde_encode(child->mem.phys, GSP_VMM_SYSMEM));
+                         gsp_vmm_pde_encode(child->mem.phys, GSP_VMM_SYSMEM));
             }
             parent = child;
         }
-        pt_write(parent, lvl_index(0, at), pte_encode(phys + off, target, flags));
+        pt_write(parent, lvl_index(0, at), gsp_vmm_pte_encode(phys + off, target, flags));
         v->pages_mapped++;
     }
 
@@ -383,6 +383,35 @@ static int page_directory_set(struct gsp_vmm *v, uint64_t root_phys)
         lx_printk("nouveau-lx: SET_PAGE_DIRECTORY rechazado (status=0x%x)\n", status);
         return -1;
     }
+    v->bound = 1;
+    return 0;
+}
+
+/* Vaspace SIN RM: sólo el directorio raíz en sysmem. Lo usa BAR1, que no le pide
+ * nada a RM — su directorio se le entrega al hardware escribiéndolo en el bloque
+ * de instancia de la apertura, no con `SET_PAGE_DIRECTORY`.
+ *
+ * La raíz es el MISMO nivel que la de un vaspace normal (PD4, 2 entradas) aunque
+ * el espacio sea de 16 GiB: `nvkm_vmm_ctor` (`nvkm/subdev/mmu/vmm.c:1114-1131`)
+ * recorre el descriptor hasta el final y coge el nivel más alto SIEMPRE; lo que
+ * acota el espacio es el `limit` del bloque de instancia, no la profundidad. */
+int gsp_vmm_init_bare(struct gsp_vmm *v)
+{
+    struct gsp_vmm_pt *root;
+    int created = 0;
+
+    if (!v) {
+        return -1;
+    }
+    memset(v, 0, sizeof(*v));
+    v->ready = 1;                 /* para que pt_get pueda trabajar */
+    root = pt_get(v, VMM_ROOT, 0, &created);
+    if (!root) {
+        v->ready = 0;
+        return -1;
+    }
+    /* `bound` es lo que habilita el invalidate en `gsp_vmm_map`. Aquí no hay RM
+     * que acepte nada, pero el directorio existe y es nuestro. */
     v->bound = 1;
     return 0;
 }

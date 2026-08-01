@@ -392,6 +392,83 @@ const char *mmu_fault_type_name(uint32_t type)
     }
 }
 
+/* Nombre del tipo de registro del journal (`RMCD_RECORD_TYPE`, r570 rmcd.h). */
+static const char *rcd_record_name(unsigned tipo)
+{
+    switch (tipo) {
+    case 138u: return "BugCheck";
+    case 139u: return "SwRmAssert";
+    case 140u: return "GpuTimeout";
+    case 141u: return "SwDbgBreakpoint";
+    case 142u: return "BadRead";
+    case 143u: return "SurpriseRemoval";
+    case 144u: return "PowerState";
+    case 145u: return "PrbErrorInfo";
+    case 146u: return "PrbFullDump";
+    case RMCD_RECORD_RCDIAGREPORT: return "RcDiagReport";
+    case RMCD_RECORD_NOCATREPORT:  return "NocatReport";
+    case 150u: return "DispState";
+    default:   return "?";
+    }
+}
+
+void gsp_rpc_rc_journal_log(const unsigned char *j, uint32_t hay, uint32_t total)
+{
+    NVCD_RECORD_hdr hdr;
+    unsigned tipo;
+    uint32_t off;
+    unsigned mostradas = 0;
+
+    if (!j || hay < sizeof(hdr)) {
+        return;
+    }
+    memcpy(&hdr, j, sizeof(hdr));
+    tipo = hdr.cRecordType;
+    lx_printk("nouveau-lx: rc: journal %u B (llegan %u) — registro grupo=%u "
+              "tipo=%u (%s) tam=%u\n", total, hay, hdr.cRecordGroup, tipo,
+              rcd_record_name(tipo), hdr.wRecordSize);
+
+    if (tipo != RMCD_RECORD_RCDIAGREPORT) {
+        return;
+    }
+    /* El cuerpo del RcDiagReport son entradas `{offset, tag, value, attribute}`:
+     * el volcado de registros que RM leyó cuando saltó la excepción. Empiezan
+     * detrás de la cabecera común y del encabezado del propio registro; en vez
+     * de fiarlo todo al padding exacto de dos structs con NvU16 y NvU32
+     * mezclados, se BUSCA el principio: una entrada de verdad tiene un offset
+     * que parece un registro (dentro de BAR0, no nulo) y esa comprobación es más
+     * robusta que contar bytes a ciegas. */
+    off = (uint32_t)(sizeof(RmRCCommonJournal_RECORD_hdr) +
+                     sizeof(RmRcDiag_RECORD_hdr));
+    off &= ~3u;
+    for (; off + sizeof(RmRcDiagRecordEntry) <= hay && mostradas < 48u;
+         off += (uint32_t)sizeof(RmRcDiagRecordEntry)) {
+        RmRcDiagRecordEntry e;
+
+        memcpy(&e, j + off, sizeof(e));
+        if (!e.offset || e.offset >= 0x01000000u) {
+            continue;   /* no parece un registro de BAR0 */
+        }
+        lx_printk("nouveau-lx: rc: reg 0x%06x = 0x%08x (tag=%u attr=0x%x)\n",
+                  e.offset, e.value, e.tag, e.attribute);
+        mostradas++;
+    }
+    if (!mostradas) {
+        const uint32_t *w = (const uint32_t *)(const void *)j;
+        unsigned i;
+
+        lx_printk("nouveau-lx: rc: sin entradas reconocibles; crudo:\n");
+        for (i = 0; i + 8u <= hay / 4u; i += 8u) {
+            if (i >= 32u) {
+                break;
+            }
+            lx_printk("nouveau-lx: rc: +0x%02x: %08x %08x %08x %08x  %08x %08x "
+                      "%08x %08x\n", i * 4u, w[i], w[i + 1], w[i + 2], w[i + 3],
+                      w[i + 4], w[i + 5], w[i + 6], w[i + 7]);
+        }
+    }
+}
+
 int gsp_rpc_rc_triggered_log(const void *payload, uint32_t len)
 {
     const rpc_rc_triggered_v17_02 *msg = payload;
@@ -411,22 +488,36 @@ int gsp_rpc_rc_triggered_log(const void *payload, uint32_t len)
                   mmu_fault_type_name(msg->mmuFaultType));
     }
     /* Cabecera del journal de RC (2026-07-29): el subtipo exacto del error —qué
-     * método/dato atragantó al PBDMA— viaja aquí y no en los campos fijos. Solo
-     * las primeras palabras: el journal entero son ~6 KiB y ahogaría el serie. */
-    if (msg->rcJournalBufferSize && len >= sizeof(*msg) + 32u) {
-        const uint32_t *j = (const uint32_t *)(const void *)msg->rcJournalBuffer;
-
-        lx_printk("nouveau-lx: rc: journal %u B, cabeza: %08x %08x %08x %08x  "
-                  "%08x %08x %08x %08x\n", msg->rcJournalBufferSize,
-                  j[0], j[1], j[2], j[3], j[4], j[5], j[6], j[7]);
+     * método/dato atragantó al PBDMA, o qué excepción levantó GR— viaja aquí y no
+     * en los campos fijos.
+     *
+     * Ocho palabras no bastaron: con el GR_EXCEPTION de la GB205 (silicio,
+     * 2026-08-01) la cabeza sale casi toda a cero y lo que importa está más
+     * abajo. Se suben a 32 palabras (128 B) y se imprime en cuatro líneas de
+     * ocho, con el offset delante para poder contarlas. El journal entero son
+     * ~6,5 KiB: eso sí ahogaría el serie, y además su cola son registros
+     * repetidos por motor. Las líneas a cero se saltan — en un volcado de 128 B
+     * casi todo suele serlo, y lo que se busca es dónde deja de serlo. */
+    if (msg->rcJournalBufferSize && len > sizeof(*msg)) {
+        gsp_rpc_rc_journal_log(msg->rcJournalBuffer,
+                               len - (uint32_t)sizeof(*msg),
+                               msg->rcJournalBufferSize);
+    } else if (msg->rcJournalBufferSize) {
+        lx_printk("nouveau-lx: rc: journal %u B pero sólo llegaron %u B de "
+                  "mensaje: la copia del anillo se quedó corta\n",
+                  msg->rcJournalBufferSize, len);
     }
     return 0;
 }
 
 static void rc_capture(const struct gsp_rpc *rpc, uint32_t rptr, uint32_t length)
 {
-    /* Cabecera fija + 32 B del journal, que es donde va el subtipo del error. */
-    unsigned char buf[sizeof(rpc_rc_triggered_v17_02) + 32u];
+    /* Cabecera fija + 128 B del journal, que es donde va el subtipo del error.
+     * 2 KiB: el `RcDiagReport` trae ~200 entradas de 16 B y con 512 B sólo
+     * entraban doce. Las que faltan son las que pueden nombrar la unidad exacta
+     * que levantó la excepción — el volcado de GR ya viene en el mensaje, sólo
+     * había que quedárselo entero. */
+    unsigned char buf[sizeof(rpc_rc_triggered_v17_02) + 2048u];
     uint32_t plen = length - GSP_RPC_HDR_SIZE;
 
     if (plen > (uint32_t)sizeof(buf)) {

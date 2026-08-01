@@ -599,7 +599,21 @@ fn suite() -> u8 {
                 // ventana de VRAM está rota", que es justo lo que pasó el
                 // 2026-07-30: el primer lanzamiento del arranque fue el
                 // residente, colgó, y el log no decía cuál de los dos fallaba.
-                for (etiqueta, en_vram) in [("sysmem", false), ("VRAM", true)] {
+                // TRES pasadas, y la repetición de sysmem no es por gusto: el
+                // volcado de registros que RM adjunta al GR_EXCEPTION dice que
+                // la interrupción viene del CTXCTL (0x400100 bit 19 =
+                // `gf100_gr_ctxctl_isr` en nouveau), o sea del cambio de
+                // contexto, no del SM. Eso abre la posibilidad de que lo que
+                // falle no sea «los pesos en VRAM» sino «el SEGUNDO lanzamiento
+                // del canal», que es el primero que obliga a FECS a salvar y
+                // restaurar contexto. Si la segunda pasada de sysmem también
+                // falla, la variable no era la VRAM y llevábamos mirando al
+                // sitio equivocado (2026-08-02).
+                for (etiqueta, en_vram) in [
+                    ("sysmem", false),
+                    ("sysmem otra vez", false),
+                    ("VRAM", true),
+                ] {
                     let wh = if en_vram {
                         sys::gpu_alloc_vram((w.len() * 4) as u64)
                     } else {

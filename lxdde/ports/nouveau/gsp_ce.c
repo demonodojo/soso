@@ -208,10 +208,25 @@ int gsp_ce_wait(struct gsp_ce *ce, unsigned ms)
     }
     sem = (const volatile uint32_t *)ce->chan->notifier.va;
 
+    /* Igual que el QMD: primero sondeo con reloj fino, y sólo después el bucle
+     * de ticks. Una copia de 1 MiB la resuelve el CE en decenas de
+     * microsegundos, y con `lx_mdelay(1)` costando un tick de 10 ms la subida de
+     * un modelo se iba en dormir, no en copiar. */
+    {
+        uint64_t t_fin = lx_ktime_get_ns() + (uint64_t)GSP_CE_SPIN_US * 1000ull;
+
+        do {
+            __asm__ __volatile__("mfence" ::: "memory");
+            /* Comparación con resta: el payload es monótono y así un envoltorio
+             * del contador de 32 bits no deja la espera colgada para siempre. */
+            if ((int32_t)(*sem - ce->pending) >= 0) {
+                gsp_chan_ack_progress(ce->chan);
+                return 0;
+            }
+        } while (lx_ktime_get_ns() < t_fin);
+    }
     for (waited = 0; waited <= ms; waited++) {
         __asm__ __volatile__("mfence" ::: "memory");
-        /* Comparación con resta: el payload es monótono y así un envoltorio del
-         * contador de 32 bits no deja la espera colgada para siempre. */
         if ((int32_t)(*sem - ce->pending) >= 0) {
             gsp_chan_ack_progress(ce->chan);
             return 0;

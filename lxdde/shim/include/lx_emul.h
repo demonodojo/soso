@@ -97,6 +97,10 @@ int lx_pci_register_driver(const char *name,
                            int (*probe)(struct lx_pci_dev *, const struct lx_pci_device_id *),
                            void (*remove)(struct lx_pci_dev *));
 void *lx_pci_iomap(struct lx_pci_dev *dev, int bar, unsigned long max_len);
+/* Base de la apertura de FB (BAR1) y su tamaño por `size_out`. Los dos vienen de
+ * la enumeración: dimensionar un BAR en caliente exige escribirle unos, y el
+ * bring-up del GSP lo pediría con la tarjeta ya en marcha. 0 = sin BAR1. */
+uint64_t lx_pci_bar1(struct lx_pci_dev *dev, uint64_t *size_out);
 void lx_pci_iounmap(struct lx_pci_dev *dev, void *addr);
 int lx_pci_enable_device(struct lx_pci_dev *dev);
 void lx_pci_disable_device(struct lx_pci_dev *dev);

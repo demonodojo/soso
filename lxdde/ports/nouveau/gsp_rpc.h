@@ -105,6 +105,13 @@ unsigned gsp_rpc_drain(struct gsp_rpc *rpc, unsigned ms);
  * fija cabe; -1 si el buffer es demasiado corto. */
 int gsp_rpc_rc_triggered_log(const void *payload, uint32_t len);
 
+/* Descifra el journal que RM adjunta al RC: cabecera `NVCD_RECORD` y, si es un
+ * `RcDiagReport` (tipo 147), las entradas `{offset, tag, value, attribute}` —
+ * que son los REGISTROS que RM leyó al saltar la excepción. Transcrito de
+ * `rmcd.h` de open-gpu-kernel-modules 570.144, que es la versión de RM que
+ * corre nuestro firmware. */
+void gsp_rpc_rc_journal_log(const unsigned char *j, uint32_t hay, uint32_t total);
+
 /* Nombre legible de mmuFaultType (`NV_n_*`, dev_fault.h gb202). */
 const char *mmu_fault_type_name(uint32_t type);
 

@@ -10,9 +10,26 @@
 #include "gsp_vmm.h"
 #include "gsp_vram.h"
 
-/* Ventana de VAs para tensores residentes, separada de G4f/G5. */
-#define G6_VA_BASE   (GSP_VA_BASE + 0x40000000ull)
-#define G6_VA_LIMIT  (GSP_VA_BASE + 0x50000000ull) /* 256 MiB de ventana */
+/* Ventana de VAs para tensores residentes, separada de G4f/G5 **y del contexto
+ * de GR**, que es lo que no estaba y costó tres días.
+ *
+ * AVERÍA (2026-08-02): esto estaba en `GSP_VA_BASE + 0x40000000`, que es
+ * exactamente `GSP_GRCTX_VA_BASE`, y la ventana del grctx mide 1 GiB
+ * (`GSP_GRCTX_VA_SIZE`). O sea que los pesos residentes se mapeaban ENCIMA de
+ * los búferes de contexto de GR que la promoción acababa de colocar ahí (en el
+ * log salían en `va=0x8047260000` y compañía, dentro de este rango).
+ *
+ * El síntoma no se parecía en nada a la causa: el matvec con pesos en VRAM
+ * levantaba un `GR_EXCEPTION` **sin falta de MMU** —las VAs estaban mapeadas, sí:
+ * a las páginas equivocadas— y el volcado de registros que RM adjunta al RC
+ * apuntaba al CTXCTL (`0x400100` bit 19 = `gf100_gr_ctxctl_isr` en nouveau), o
+ * sea a FECS salvando y restaurando un contexto que ya no estaba. La ruta
+ * escalonada seguía funcionando porque no toca esta ventana.
+ *
+ * Detrás del grctx, no delante: el attribute CB pide alineación a su propio
+ * tamaño redondeado a potencia de dos y esa ventana puede crecer con el chip. */
+#define G6_VA_BASE   (GSP_VA_BASE + 0x80000000ull)
+#define G6_VA_LIMIT  (GSP_VA_BASE + 0x90000000ull) /* 256 MiB de ventana */
 
 /* Búfer de rebote de las subidas: sysmem contigua, cacheada, con su propia VA.
  * 1 MiB = 256 páginas, una sola tabla hoja. El tamaño manda de verdad: la subida

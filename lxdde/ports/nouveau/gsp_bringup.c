@@ -405,21 +405,43 @@ static int vmm_selfcheck(void)
  * corta la cadena que RM dejó hecha. Best-effort puro — no condiciona nada. */
 static void run_bar1_probe(void)
 {
-    struct gsp_sysinfo si = { 0 };
+    uint64_t base, size = 0;
 
-    if (!g_static.ready) {
+    if (!g_static.ready || !g_pdev) {
         return;
     }
-    if (g_pdev) {
-        collect_sysinfo(&si);
-    }
-    if (gsp_bar1_init(&g_bar1, si.bar1_phys, g_static.bar1_size,
-                      g_static.bar1_pde_base) != 0) {
+    /* El tamaño de la apertura sale del BAR, no de RM: `sriovCaps.bar1Size` vino
+     * a 0 en la GB205 (silicio, 2026-08-01), y sin tamaño no se puede elegir la
+     * ventana alta. La base también, por coherencia: es el mismo registro. */
+    base = lx_pci_bar1(g_pdev, &size);
+    if (gsp_bar1_init(&g_bar1, base, size, g_static.bar1_pde_base) != 0) {
         return;
     }
-    /* Offset 0 de la apertura: si RM ha mapeado algo ahí, la cadena estará
-     * entera y sabremos que las tablas de abajo son suyas y viven en VRAM. */
+    /* Ventana propia al final de la apertura, alineada a 2 MiB (una entrada de
+     * PD0). Con los 16 GiB de esta tarjeta cae en PD1[31], lejísimos del PD1[0]
+     * donde RM tiene lo suyo. */
+    if (size >= 2ull * GSP_BAR1_WINDOW_BYTES) {
+        g_bar1.window_va = (size - GSP_BAR1_WINDOW_BYTES) & ~(GSP_BAR1_WINDOW_BYTES - 1ull);
+    }
+    /* DOS sitios, no uno, porque el ciclo de placa cuesta un reinicio y con un
+     * solo volcado no se decide nada:
+     *
+     *  - offset 0: cómo es la cadena que RM ya construyó (hasta qué nivel llega
+     *    y en qué apertura viven sus tablas). Es lo que hay que imitar.
+     *  - la última ventana de 2 MiB de la apertura: ahí es donde pensamos
+     *    colgar NUESTRAS tablas, y lo que hace falta saber es si esa rama está
+     *    vacía. Una entrada de PD3 cubre 2^47, así que TODA la apertura vive
+     *    dentro de `PD3[0]` — no hay entrada libre que tomar y hay que
+     *    descender por la cadena de RM hasta el primer nivel sin construir.
+     *    Si esa rama ya estuviera ocupada, escribir ahí pisaría un mapeo que
+     *    RM usa, y eso no se arregla: se cuelga la tarjeta. */
     gsp_bar1_dump(&g_bar1, 0);
+    if (g_bar1.window_va) {
+        gsp_bar1_dump(&g_bar1, g_bar1.window_va);
+    } else {
+        lx_printk("nouveau-lx: BAR1 — apertura de %llu B: no hay sitio para una "
+                  "ventana propia\n", (unsigned long long)g_bar1.aperture_size);
+    }
 }
 
 static int run_vmm_stage(void)
@@ -467,6 +489,99 @@ static int run_chan_ce_stage(void)
     if (gsp_ce_selftest(&g_ce, G4D_SCRATCH_VA, G4D_VA_BASE, g_scratch.va, 4096) == 0) {
         g_ce_verified = 1;
         lx_printk("nouveau-lx: CE readback verificado (G4e GO)\n");
+        /* Con el CE ya verificado se puede probar BAR1, que necesita justo eso
+         * para ser falsable: escribir por la apertura y releer por el otro
+         * camino. Best-effort — si BAR1 no va, el CE sigue siendo la ruta.
+         *
+         * DOS ventanas, y en este orden, porque separan dos averías distintas
+         * con un solo ciclo de placa (la alta falló el 2026-08-01 con
+         * `0xbad0ac00`, que es el centinela de acceso rechazado del chip):
+         *
+         *  - la alta (final de la apertura) no puede chocar con RM, pero puede
+         *    caer FUERA del vaspace que RM abrió de verdad: los 16 GiB son el
+         *    tamaño del BAR, no una promesa de que RM haya construido tanto.
+         *  - la baja (segunda ventana de 2 MiB) está dentro de cualquier límite
+         *    razonable y cuelga del PD0 que RM ya tiene, pero es territorio
+         *    suyo: si esa entrada está ocupada el mapeo se niega y lo dice.
+         *
+         * Si la baja va y la alta no, el problema es el límite del vaspace. Si
+         * fallan las dos igual, no es la VA. */
+        /* ANTES de mapear nada: preguntarle al hardware qué raíz recorre BAR1 y
+         * hasta dónde llega su vaspace, en vez de fiarnos de lo que RM contó en
+         * `GspStaticConfigInfo`. Tres ciclos de placa se fueron en parchear
+         * tablas que la MMU de BAR1 podía no estar mirando siquiera. */
+        {
+            uint64_t pdb = 0, limite = 0;
+
+            if (gsp_bar1_inst_probe(&g_bar1, &pdb, &limite) != 0) {
+                /* RM no ató BAR1 (0xb80f40 a cero, medido el 2026-08-02): la
+                 * apertura no tiene vaspace y por eso rechazaba TODO acceso, sin
+                 * importar qué tablas parcheáramos. Lo atamos nosotros, que es lo
+                 * que hace el camino sin GSP de nouveau. */
+                (void)gsp_bar1_bind(&g_bar1, &g_vram_pool);
+            } else {
+                if (pdb && pdb != g_bar1.pd3) {
+                    lx_printk("nouveau-lx: BAR1 — usando la raíz del bloque de "
+                              "instancia (0x%llx) en vez de la de RM\n",
+                              (unsigned long long)pdb);
+                    (void)gsp_bar1_init(&g_bar1, g_bar1.aperture_phys,
+                                        g_bar1.aperture_size, pdb);
+                }
+                /* El límite es `vmm->limit - 1`, o sea la última VA válida. Una
+                 * ventana por encima no puede traducir por muy bien escrito que
+                 * esté el PTE. */
+                if (limite && g_bar1.window_va > limite) {
+                    uint64_t nueva = ((limite + 1ull) - GSP_BAR1_WINDOW_BYTES) &
+                                     ~(GSP_BAR1_WINDOW_BYTES - 1ull);
+
+                    lx_printk("nouveau-lx: BAR1 — la ventana 0x%llx se sale del "
+                              "límite 0x%llx; bajándola a 0x%llx\n",
+                              (unsigned long long)g_bar1.window_va,
+                              (unsigned long long)limite,
+                              (unsigned long long)nueva);
+                    g_bar1.window_va = nueva;
+                }
+                gsp_bar1_dump(&g_bar1, g_bar1.window_va);
+            }
+        }
+        if (gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block, G4D_VA_BASE,
+                              G4D_SCRATCH_VA, g_scratch.va) != 0 &&
+            g_bar1.window_va != GSP_BAR1_WINDOW_BYTES) {
+            lx_printk("nouveau-lx: BAR1 — reintento con ventana BAJA (0x%llx)\n",
+                      (unsigned long long)GSP_BAR1_WINDOW_BYTES);
+            g_bar1.window_va = GSP_BAR1_WINDOW_BYTES;
+            if (gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block, G4D_VA_BASE,
+                                  G4D_SCRATCH_VA, g_scratch.va) != 0) {
+                /* Las dos ventanas fallan igual y las escrituras a las tablas SÍ
+                 * se quedan (el readback pasa): entonces la MMU de BAR1 no está
+                 * mirando la raíz que estamos parcheando.
+                 *
+                 * La sospecha es la cola de `GspStaticConfigInfo`: `fb_length` y
+                 * `gpuNameString` validan el principio y el medio del struct,
+                 * pero entre el nombre y `bar1PdeBase` hay una tira de NvBool y
+                 * dos NvU16 de RTD3 transcritos de r570 SIN contraste, y un solo
+                 * campo de más o de menos ahí desplaza la raíz al campo vecino.
+                 * `bar2PdeBase` también es una raíz válida y su recorrido sale
+                 * igual de coherente, así que por el valor no se distinguen.
+                 *
+                 * Se prueba, que es más barato que discutirlo: si con la otra
+                 * raíz la apertura empieza a funcionar, el struct está desplazado
+                 * y hay que corregir la transcripción (no dejar esto así). */
+                lx_printk("nouveau-lx: BAR1 — las dos ventanas fallan y las tablas "
+                          "sí se escriben: probando con la OTRA raíz "
+                          "(bar2Pde=0x%llx) por si el struct está desplazado\n",
+                          (unsigned long long)g_static.bar2_pde_base);
+                if (gsp_bar1_init(&g_bar1, g_bar1.aperture_phys,
+                                  g_bar1.aperture_size,
+                                  g_static.bar2_pde_base) == 0) {
+                    g_bar1.window_va = GSP_BAR1_WINDOW_BYTES;
+                    gsp_bar1_dump(&g_bar1, g_bar1.window_va);
+                    (void)gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block,
+                                            G4D_VA_BASE, G4D_SCRATCH_VA,
+                                            g_scratch.va);
+                }
+            }
+        }
     } else {
         lx_printk("nouveau-lx: CE sin readback — canal vivo pero no movió datos\n");
         /* Los avisos de RM sobre el canal llegan por eventos, y si nadie escucha

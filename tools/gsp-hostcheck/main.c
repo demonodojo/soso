@@ -60,6 +60,10 @@ static void *lx_dma_alloc_wb(struct lx_pci_dev *d, size_t size, uint64_t *dma, u
     return lx_dma_alloc_coherent(d, size, dma, gfp);
 }
 static void lx_dma_flush_range(const void *p, size_t len) { (void)p; (void)len; }
+/* La apertura de BAR1 no existe en el host: el selftest de BAR1 no se ejecuta
+ * aquí (necesita tarjeta), pero el enlazador quiere el símbolo. */
+static void *lx_map_wc(unsigned long phys, unsigned long size)
+{ (void)phys; (void)size; return NULL; }
 static void lx_dma_free_coherent(struct lx_pci_dev *d, size_t size, void *va, uint64_t dma)
 { (void)d; (void)dma; lx_free_pages_exact(va, size); }
 
@@ -399,9 +403,9 @@ typedef char fake_usermode_reg_check[
 #include "gsp_top_body.inc"
 #include "gsp_chip_body.inc"
 #include "gsp_pramin_body.inc"
-#include "gsp_bar1_body.inc"
 #include "gsp_chan_body.inc"
 #include "gsp_ce_body.inc"
+#include "gsp_bar1_body.inc"
 #include "gsp_grctx_body.inc"
 #include "gsp_buf_body.inc"
 #include "gsp_compute_body.inc"
@@ -1883,10 +1887,43 @@ static int check_g6_resident(void)
         printf("FALLO: constantes de layout G6 incoherentes\n");
         return -1;
     }
+    /* NINGUNA ventana de VAs puede solaparse con otra. Esto no es celo: la de
+     * pesos residentes (G6) estuvo tres días encima de la del contexto de GR
+     * —las dos empezaban en `GSP_VA_BASE + 0x40000000`— y el síntoma era un
+     * `GR_EXCEPTION` sin falta de MMU en el matvec residente, con el volcado de
+     * RM señalando al CTXCTL. Nada fallaba al mapear: las VAs estaban mapeadas,
+     * a las páginas de otro. Un solapamiento no da error en ninguna parte, y por
+     * eso tiene que darlo aquí. */
+    {
+        const struct { uint64_t base; uint64_t size; const char *que; } vent[] = {
+            { G4F_DATA_VA,       G4F_DATA_SIZE,      "data G4f" },
+            { G5_MV_VA,          G5_MV_SIZE,         "staging G5" },
+            { G6_RES_VA,         G6_RES_SIZE,        "staging residente G6" },
+            { G6_BOUNCE_VA,      G6_BOUNCE_BYTES,    "rebote G6" },
+            { G6_VA_BASE,        G6_VA_LIMIT - G6_VA_BASE, "pesos residentes G6" },
+            { GSP_GRCTX_VA_BASE, GSP_GRCTX_VA_SIZE,  "contexto de GR" },
+        };
+        unsigned i, j;
+
+        for (i = 0; i < sizeof(vent) / sizeof(vent[0]); i++) {
+            for (j = i + 1; j < sizeof(vent) / sizeof(vent[0]); j++) {
+                if (vent[i].base < vent[j].base + vent[j].size &&
+                    vent[j].base < vent[i].base + vent[i].size) {
+                    printf("FALLO: la ventana de %s (0x%llx+0x%llx) pisa la de %s "
+                           "(0x%llx+0x%llx)\n",
+                           vent[i].que, (unsigned long long)vent[i].base,
+                           (unsigned long long)vent[i].size, vent[j].que,
+                           (unsigned long long)vent[j].base,
+                           (unsigned long long)vent[j].size);
+                    return -1;
+                }
+            }
+        }
+        printf("OK: las 6 ventanas de VAs del bring-up no se pisan entre sí\n");
+    }
+
     /* El rebote de las subidas: múltiplo de página (la copia multilínea del CE
-     * lo exige) y con ventana de VAs PROPIA. Solapar con el staging de G5 o con
-     * el de matvec residente no daría error en ninguna parte: la subida
-     * escribiría encima de `x`/`y` y el modelo escupiría números plausibles. */
+     * lo exige) y con ventana de VAs PROPIA. */
     if (G6_BOUNCE_BYTES < 4096u || (G6_BOUNCE_BYTES % 4096u) != 0u) {
         printf("FALLO: rebote G6 de %u B no es múltiplo de página\n",
                G6_BOUNCE_BYTES);
@@ -2416,6 +2453,114 @@ static int check_bar1_walk(void)
 
     printf("OK: BAR1 — recorrido PD3→SPT de la cadena de RM, y se para en rama "
            "inválida o en sysmem\n");
+    return 0;
+}
+
+/* El mapeo de BAR1 escribe PDEs ENCIMA de las tablas de RM. Eso no se puede
+ * depurar en la tarjeta: si el índice o el encoding están mal, se pisa un mapeo
+ * que RM usa y la GPU se cuelga — a un ciclo de VFIO por intento. Aquí la cadena
+ * se planta en la VRAM falsa con la MISMA forma que la real (PD3[0]→PD2[0]→PD1[0]
+ * en VRAM, medida el 2026-08-01) y se comprueba entrada por entrada dónde
+ * escribe, que se niegue cuando la ventana está ocupada, y que el unmap deshaga. */
+static int check_bar1_map(void)
+{
+    struct gsp_bar1 b;
+    const uint64_t pd3 = 0x20000ull, pd2 = 0x21000ull, pd1 = 0x22000ull;
+    const uint64_t apertura = 0xf800000000ull;
+    const uint64_t tam = 16ull * 1024 * 1024 * 1024;      /* 16 GiB, como la GB205 */
+    const uint64_t vram = 0x7000000ull;                   /* la VRAM a exponer */
+    uint64_t va, off, e;
+    uint32_t i1, i0, is;
+
+    gsp_pramin_invalidate();
+    (void)gsp_pramin_alive();
+
+#define PDE_VRAM(addr) (((uint64_t)(addr) & 0x000ffffffffff000ull) | (1ull << 1) | (2ull << 3))
+    /* Cadena de RM hasta PD1, igual que en silicio. PD1[31] se queda inválido. */
+    gsp_pramin_wr32(pd3, (uint32_t)PDE_VRAM(pd2));
+    gsp_pramin_wr32(pd3 + 4u, (uint32_t)(PDE_VRAM(pd2) >> 32));
+    gsp_pramin_wr32(pd2, (uint32_t)PDE_VRAM(pd1));
+    gsp_pramin_wr32(pd2 + 4u, (uint32_t)(PDE_VRAM(pd1) >> 32));
+#undef PDE_VRAM
+
+    memset(&b, 0, sizeof(b));
+    if (gsp_bar1_init(&b, apertura, tam, pd3) != 0) {
+        printf("FALLO: gsp_bar1_init con la apertura de 16 GiB\n");
+        return -1;
+    }
+    b.window_va = (tam - GSP_BAR1_WINDOW_BYTES) & ~(GSP_BAR1_WINDOW_BYTES - 1ull);
+    i1 = (uint32_t)((b.window_va >> 29) & 0x1ffu);
+    i0 = (uint32_t)((b.window_va >> 21) & 0xffu);
+    is = (uint32_t)((b.window_va >> 12) & 0x1ffu);
+    if (i1 != 31u || i0 != 255u || is != 0u) {
+        printf("FALLO: la ventana alta cae en PD1[%u] PD0[%u] SPT[%u]; esperaba "
+               "31/255/0\n", i1, i0, is);
+        return -1;
+    }
+
+    va = gsp_bar1_map(&b, vram, 4096);
+    if (va != b.window_va) {
+        printf("FALLO: gsp_bar1_map devolvió 0x%llx, esperaba 0x%llx\n",
+               (unsigned long long)va, (unsigned long long)b.window_va);
+        return -1;
+    }
+    /* El enlace tiene que estar en la tabla de RM (VRAM) y apuntar a NUESTRO PD0
+     * en sysmem: aperture 2, no 1. Un 1 aquí mandaría a la MMU a leer tablas a
+     * una dirección de VRAM que no existe. */
+    e = (uint64_t)gsp_pramin_rd32(pd1 + (uint64_t)i1 * 8u) |
+        ((uint64_t)gsp_pramin_rd32(pd1 + (uint64_t)i1 * 8u + 4u) << 32);
+    if (((e >> 1) & 3u) != 2u ||
+        (e & 0x000ffffffffff000ull) != (b.pd0.phys & 0x000ffffffffff000ull)) {
+        printf("FALLO: PD1[%u] = 0x%016llx no apunta a nuestro PD0 (0x%llx) en "
+               "sysmem\n", i1, (unsigned long long)e,
+               (unsigned long long)b.pd0.phys);
+        return -1;
+    }
+    /* Y la PDE doble del PD0: la mitad ALTA es la de 4 KiB; la baja a cero. */
+    {
+        const uint64_t *pd0 = (const uint64_t *)b.pd0.va;
+
+        if (pd0[(unsigned long)i0 * 2u] != 0 ||
+            ((pd0[(unsigned long)i0 * 2u + 1u] >> 1) & 3u) != 2u) {
+            printf("FALLO: PD0[%u] mal: baja=0x%llx alta=0x%llx\n", i0,
+                   (unsigned long long)pd0[(unsigned long)i0 * 2u],
+                   (unsigned long long)pd0[(unsigned long)i0 * 2u + 1u]);
+            return -1;
+        }
+    }
+    /* La hoja: PTE de VRAM (bit 0 VALID, aperture 0) a la física pedida. */
+    {
+        const uint64_t *spt = (const uint64_t *)b.spt.va;
+
+        if (!(spt[is] & 1ull) || ((spt[is] >> 1) & 3u) != 0u ||
+            (spt[is] & 0x000ffffffffff000ull) != vram) {
+            printf("FALLO: SPT[%u] = 0x%016llx no es un PTE de VRAM a 0x%llx\n",
+                   is, (unsigned long long)spt[is], (unsigned long long)vram);
+            return -1;
+        }
+    }
+
+    /* Con la ventana ya enlazada, un segundo mapeo tiene que NEGARSE: es lo que
+     * protege las estructuras de RM de que un segundo llamante las pise. */
+    off = gsp_bar1_map(&b, vram + 0x10000ull, 4096);
+    if (off != 0) {
+        printf("FALLO: gsp_bar1_map pisó una ventana ya válida (devolvió 0x%llx)\n",
+               (unsigned long long)off);
+        return -1;
+    }
+
+    gsp_bar1_unmap(&b);
+    e = (uint64_t)gsp_pramin_rd32(pd1 + (uint64_t)i1 * 8u) |
+        ((uint64_t)gsp_pramin_rd32(pd1 + (uint64_t)i1 * 8u + 4u) << 32);
+    if (e != 0) {
+        printf("FALLO: tras unmap PD1[%u] sigue a 0x%016llx\n", i1,
+               (unsigned long long)e);
+        return -1;
+    }
+
+    printf("OK: BAR1 mapeo — ventana 0x%llx en PD1[31]/PD0[255]/SPT[0], PDE a "
+           "sysmem, PTE a VRAM, se niega a pisar y el unmap deshace\n",
+           (unsigned long long)b.window_va);
     return 0;
 }
 
@@ -3863,6 +4008,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_pramin() != 0)
         return -1;
     if (check_bar1_walk() != 0)
+        return -1;
+    if (check_bar1_map() != 0)
         return -1;
     if (check_rc_triggered() != 0)
         return -1;

@@ -108,19 +108,56 @@ pub fn read8(bus: u8, dev: u8, func: u8, off: u8) -> u8 {
     (read32(bus, dev, func, off & !3) >> ((off & 3) * 8)) as u8
 }
 
+/// Tamaño de un BAR por el método estándar (escribir unos y leer la máscara).
+///
+/// **Los dos dwords en un BAR de 64 bits.** Antes sólo se dimensionaba el bajo, y
+/// para un BAR grande eso da cero: la apertura de FB de la GB205 son 16 GiB, o
+/// sea que todos los bits de tamaño están por encima del 31 y el dword bajo se
+/// lee entero a cero. `bar_info` lo interpretaba como "no hay BAR" y devolvía
+/// None, así que la ventana de BAR1 no se podía ni intentar (silicio,
+/// 2026-08-01). El comentario de `bar_info` ya decía "soporta 64-bit"; el tamaño
+/// no lo soportaba.
 fn bar_size(bus: u8, dev: u8, func: u8, bar_off: u8) -> u64 {
-    let old = read32(bus, dev, func, bar_off);
+    let old_lo = read32(bus, dev, func, bar_off);
+    if old_lo & 1 != 0 {
+        return 0; // BAR de E/S
+    }
+    let is_64 = (old_lo >> 1) & 0b11 == 0b10;
+    let old_hi = if is_64 {
+        read32(bus, dev, func, bar_off + 4)
+    } else {
+        0
+    };
     write32(bus, dev, func, bar_off, 0xffff_ffff);
-    let mask = read32(bus, dev, func, bar_off);
-    write32(bus, dev, func, bar_off, old);
-    if old & 1 != 0 {
-        return 0;
+    if is_64 {
+        write32(bus, dev, func, bar_off + 4, 0xffff_ffff);
     }
-    let size_mask = mask & !0xf;
-    if size_mask == 0 {
-        return 0;
+    let lo = read32(bus, dev, func, bar_off);
+    let hi = if is_64 {
+        read32(bus, dev, func, bar_off + 4)
+    } else {
+        0
+    };
+    write32(bus, dev, func, bar_off, old_lo);
+    if is_64 {
+        write32(bus, dev, func, bar_off + 4, old_hi);
     }
-    (!size_mask as u64) + 1
+    // La máscara se complementa con la ANCHURA del BAR: hacerlo a 64 bits en uno
+    // de 32 metería los bits altos (que no son del campo) y el tamaño saldría
+    // disparatado.
+    if is_64 {
+        let mask = ((hi as u64) << 32) | ((lo & !0xf) as u64);
+        if mask == 0 {
+            return 0;
+        }
+        (!mask).wrapping_add(1)
+    } else {
+        let mask = lo & !0xf;
+        if mask == 0 {
+            return 0;
+        }
+        (!mask as u64).wrapping_add(1)
+    }
 }
 
 /// Lee BAR (memoria); soporta 64-bit. Devuelve (addr, size).

@@ -489,6 +489,91 @@ typedef struct GspStaticConfigInfo
 
 #define NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO 65u
 
+/* UPDATE_BAR_PDE (fn=70, `rpc_global_enums.h`). Es LA forma soportada de meter
+ * una PDE en el vaspace de una apertura cuando manda GSP-RM: bajo lockdown el
+ * host no puede escribir el registro que ata el bloque de instancia (se escribe
+ * y se relee cero, medido en la GB205 el 2026-08-02), así que se le pide a RM.
+ *
+ * `r535_bar_bar2_update_pde` (`nvkm/subdev/bar/r535.c:46-60`) lo usa para BAR2
+ * con `entryValue = (addr >> 4) | 2` —el comentario de upstream dice literalmente
+ * «PD3 entry format!»— y `entryLevelShift = 47`, o sea que la entrada que RM
+ * escribe es del nivel cuyas entradas cubren 2^47 y apunta a la tabla PD2 del
+ * driver. Para BAR1 es el mismo mensaje con otro `barType`. */
+#define NV_VGPU_MSG_FUNCTION_UPDATE_BAR_PDE 70u
+
+/* ---- Journal de RC (r570: `src/common/sdk/nvidia/inc/rmcd.h`) --------------
+ *
+ * Lo que RM adjunta al RC_TRIGGERED no es opaco: empieza por una cabecera
+ * `NVCD_RECORD` con el TIPO de registro, y para el tipo 147 (`RmRcDiagReport`)
+ * el cuerpo son entradas `{offset, tag, value, attribute}` — o sea **el volcado
+ * de registros que RM leyó al saltar la excepción**, con dirección y valor.
+ *
+ * Estaba llegando desde el primer ciclo y lo imprimíamos como hexadecimal a
+ * pelo. Con la cabeza que capturó el silicio el 2026-08-01 (`0cc89301`) sale
+ * grupo=1 tipo=0x93=147 tamaño=0x0cc8: encaja exactamente. */
+typedef struct NVCD_RECORD_hdr
+{
+    NvU8                    cRecordGroup;
+    NvU8                    cRecordType;
+    NvU16                   wRecordSize;
+} NVCD_RECORD_hdr;
+
+/* Cabecera común que RM pide poner al principio de todo registro del journal. */
+typedef struct RmRCCommonJournal_RECORD_hdr
+{
+    NVCD_RECORD_hdr         Header;
+    NvU32                   GPUTag;
+    NvU64                   CPUTag;
+    NvU64                   timeStamp;
+    NvU64                   stateMask;
+    NvU64                   pNext;      /* puntero del host: aquí sólo se salta */
+} RmRCCommonJournal_RECORD_hdr;
+
+typedef struct RmRcDiagRecordEntry
+{
+    NvU32                   offset;     /* registro leído */
+    NvU32                   tag;
+    NvU32                   value;      /* lo que valía */
+    NvU32                   attribute;
+} RmRcDiagRecordEntry;
+
+/* Cuerpo del tipo 147, sin el array (se recorre a mano sobre el búfer). */
+typedef struct RmRcDiag_RECORD_hdr
+{
+    NvU16                   idx;
+    NvU32                   timeStamp;
+    NvU16                   type;
+    NvU32                   flags;
+    NvU16                   count;
+    NvU32                   owner;
+    NvU32                   processId;
+} RmRcDiag_RECORD_hdr;
+
+#define RMCD_RECORD_RCDIAGREPORT 147u
+#define RMCD_RECORD_NOCATREPORT  149u
+
+typedef char rcdiag_entry_size_check[sizeof(RmRcDiagRecordEntry) == 16 ? 1 : -1];
+
+#define NV_RPC_UPDATE_PDE_BAR_1 0u
+#define NV_RPC_UPDATE_PDE_BAR_2 1u
+
+typedef struct UpdateBarPde_v15_00
+{
+    NvU32                   barType;
+    NvU64                   entryValue;
+    NvU64                   entryLevelShift;
+} UpdateBarPde_v15_00;
+
+typedef struct rpc_update_bar_pde_v15_00
+{
+    UpdateBarPde_v15_00     info;
+} rpc_update_bar_pde_v15_00;
+
+/* 24 B con alineación natural: barType (4) + hueco (4) + dos NvU64. Si esto
+ * baila, RM lee el barType donde no es y actualizaría la apertura equivocada. */
+typedef char update_bar_pde_size_check[
+    sizeof(rpc_update_bar_pde_v15_00) == 24 ? 1 : -1];
+
 /* ---- Espacio de direcciones (G4d 2/2) --------------------------------------
  *
  * Transcrito de `rm/r535/nvrm/vmm.h` (r570 lo hereda sin tocar) y usado por

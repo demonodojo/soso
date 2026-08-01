@@ -32,11 +32,22 @@ pub extern "C" fn lx_jiffies_to_msecs(j: u64) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn lx_ktime_get_ns() -> u64 {
-    pit::uptime_ms() * 1_000_000
+    // TSC, no tick: con el PIT a 100 Hz esto devolvía múltiplos de 10 ms y las
+    // medidas de los lanzamientos de GPU no medían el lanzamiento sino el tick
+    // («~10000 us por QMD» en el log del 2026-08-02, que era exactamente uno).
+    crate::arch::tsc::now_ns()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn lx_udelay(us: u64) {
+    // Con el reloj fino, un microsegundo es un microsegundo. Antes esto hacía
+    // `end = start + us/1000 + 1` sobre el contador de ticks, o sea que
+    // `lx_udelay(1)` esperaba **hasta 10 ms**: el bring-up está lleno de bucles
+    // de sondeo que llamaban aquí.
+    if crate::arch::tsc::ready() {
+        crate::arch::tsc::spin_us(us);
+        return;
+    }
     let start = pit::uptime_ms();
     let end = start + us / 1000 + 1;
     while pit::uptime_ms() < end {

@@ -18,6 +18,11 @@
  * páginas enteras del vaspace. */
 #define GSP_CE_LINE_BYTES  4096u
 
+/* Sondeo con reloj fino antes de dormir por ticks, igual que el QMD. Con el tick
+ * a 100 Hz, cada `lx_mdelay(1)` cuesta 10 ms: una subida de 64 MiB son 64 copias
+ * y eso era más de medio segundo de puro dormir. */
+#define GSP_CE_SPIN_US     2000u
+
 /* Cuánto se escucha el anillo de mensajes cuando una espera vence. RM cuenta los
  * fallos de canal por evento (RC_TRIGGERED: tipo de excepción, chid y dirección
  * de la falta de MMU) y si nadie escucha se quedan en la cola: el ciclo del

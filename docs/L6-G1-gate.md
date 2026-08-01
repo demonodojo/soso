@@ -144,6 +144,47 @@ por este orden:
    entró. Con él, una subida es un `LAUNCH_DMA` multilínea por MiB en vez de uno
    por página.
 
+### Diseño del mapeo de BAR1 (números de ESTA placa)
+
+Leído del host con `lspci -v -s 01:00.0` (no del guest, que no puede dimensionar
+un BAR en caliente sin dejar de decodificar memoria):
+
+| BAR | Tamaño | Base | Qué es |
+|-----|--------|------|--------|
+| 0 | 64 MiB | `0x8c000000` | registros (PRAMIN en +0x700000) |
+| 1 | **16 GiB** | `0xa000000000` | apertura de FB — resizable, ya al máximo |
+| 3 | 32 MiB | `0xa400000000` | instancia |
+
+Cómo lo hace upstream (`nvkm/subdev/bar/gf100.c:96-121`): el vaspace de BAR1 es
+un `nvkm_vmm` normal con rango `[0, bar_len)` —**el offset dentro de la apertura
+ES la VA**— y para BAR1 **no** se llama a `nvkm_vmm_boot`: los niveles inferiores
+se crean bajo demanda al mapear. Con GSP, `r535_bar_bar1_init`
+(`bar/r535.c:111-131`) sólo sustituye la raíz del VMM por el PD3 que RM ya
+construyó (`bar1PdeBase`) y deja que la maquinaria del driver cuelgue de ahí sus
+propias tablas. Es decir: **construir nosotros PD0+SPT y enlazarlos bajo la
+cadena de RM es lo que hace nouveau**, no un atajo.
+
+Aritmética VER3 con estos 16 GiB (una entrada de cada nivel cubre):
+
+| Nivel | Cubre por entrada | Índices que ocupa la apertura |
+|-------|-------------------|------------------------------|
+| PD3 | 2^47 | sólo el **0** — no hay entrada libre que tomar |
+| PD2 | 2^38 = 256 GiB | sólo el **0** |
+| PD1 | 2^29 = 512 MiB | **0..31** |
+| PD0 | 2^21 = 2 MiB | 256 por PD1 |
+| SPT | 4 KiB | 512 por PD0 |
+
+De ahí sale el plan: la ventana propia va **al final de la apertura**
+(`PD1[31]`), lejos del `PD1[0]` donde RM mapea lo suyo, así que la granularidad
+de no-interferencia es de 512 MiB. Lo que el ciclo de placa tiene que confirmar
+es sólo esto: que `PD3[0]`→`PD2[0]` existen y viven en VRAM (los de RM) y que
+**`PD1[31]` está inválido**. Si estuviera ocupado, escribir ahí pisaría un mapeo
+que RM usa y eso cuelga la tarjeta: en ese caso hay que buscar otra ventana, no
+forzarla.
+
+Por eso `run_bar1_probe` vuelca DOS caminos (offset 0 y la última ventana de
+2 MiB): con uno solo no se decide nada y el ciclo cuesta un reinicio.
+
 ### Fallback (solo BAR0, no cierra G1 oficial)
 
 Si VT-d no está disponible:

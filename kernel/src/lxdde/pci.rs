@@ -28,6 +28,13 @@ pub struct LxPciDev {
     device_id: u16,
     bar0: u64,
     bar0_size: u64,
+    /// Apertura de FB (BAR1) y su tamaño, capturados AQUÍ y no cuando se piden.
+    /// Dimensionar un BAR exige escribirle unos y devolverlo: en QEMU lo emula
+    /// vfio-pci y es inocuo, pero sobre un dispositivo vivo en metal desnudo no,
+    /// y el bring-up del GSP lo pide con la tarjeta ya en marcha. RM tampoco
+    /// sirve: `sriovCaps.bar1Size` vino a 0 en la GB205 (silicio, 2026-08-01).
+    bar1: u64,
+    bar1_size: u64,
     data: usize,
     mmio: u64,
     irq_vectors: Vec<u8>,
@@ -51,6 +58,8 @@ pub fn init() {
                 continue;
             }
             let (bar0, bar0_size) = pci::bar_info(d.bus, d.device, d.function, 0).unwrap_or((0, 0));
+            let (bar1, bar1_size) =
+                pci::bar_info(d.bus, d.device, d.function, 1).unwrap_or((0, 0));
             let mut lx = LxPciDev {
                 bus: d.bus,
                 device: d.device,
@@ -59,6 +68,8 @@ pub fn init() {
                 device_id: d.device_id,
                 bar0,
                 bar0_size,
+                bar1,
+                bar1_size,
                 data: 0,
                 mmio: 0,
                 irq_vectors: Vec::new(),
@@ -193,6 +204,23 @@ pub extern "C" fn lx_pci_iomap(dev: *mut LxPciDev, bar: i32, _max_len: u64) -> *
         mm::ensure_mmio_mapped(d.bar0, size);
         d.mmio = d.bar0;
         mm::phys_to_virt(d.bar0).as_mut_ptr::<u8>() as *mut c_void
+    }
+}
+
+/// Base de la apertura de FB (BAR1) y, por `size_out`, su tamaño. Los dos salen
+/// de la enumeración, no de un sondeo en caliente (ver el campo `bar1`).
+/// Devuelve 0 si el dispositivo no tiene BAR1 utilizable.
+#[unsafe(no_mangle)]
+pub extern "C" fn lx_pci_bar1(dev: *mut LxPciDev, size_out: *mut u64) -> u64 {
+    if dev.is_null() {
+        return 0;
+    }
+    unsafe {
+        let d = &*dev;
+        if !size_out.is_null() {
+            *size_out = d.bar1_size;
+        }
+        d.bar1
     }
 }
 

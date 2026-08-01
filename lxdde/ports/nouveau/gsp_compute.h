@@ -29,8 +29,11 @@
 #define G6_ROWS_PER_CTA   (G4F_CTA_THREADS / 32u)
 #define G4F_SEM_PAYLOAD   0x5a5a0001u
 #define G4F_WAIT_MS       2000u
-/* Sondeos a pelo antes de empezar a dormir de milisegundo en milisegundo. */
-#define G4F_SPIN_TRIES    20000u
+/* Cuánto se sondea el semáforo con el reloj fino antes de caer al bucle de
+ * ticks. 2 ms cubre de sobra un lanzamiento normal (la GPU resuelve un matvec de
+ * una tanda en microsegundos) y evita pagar un tick de 10 ms por cada QMD, que
+ * es lo que hundía el rendimiento a 137 ms/capa. */
+#define G4F_SPIN_US       2000u
 
 /* G5: staging de matvec. Su propia reserva y su propia ventana de VAs (2 MiB por
  * delante de la de G4f, alineada a 2 MiB para que quepa en una sola tabla hoja).
@@ -77,6 +80,18 @@ struct gsp_kernel {
     const unsigned *param_off;
     unsigned param_count;
     uint64_t sass_va;       /* dónde se stagea en VRAM */
+    /* Ya está en VRAM: no volver a copiarlo.
+     *
+     * `gsp_compute_stage_sass` se llamaba en CADA lanzamiento, así que cada
+     * matvec pagaba un `memcpy` al rebote MÁS una copia CE con su espera de
+     * semáforo — y con el tick a 100 Hz esa espera costaba 10 ms. Dos esperas
+     * cuantizadas por matvec (la del CE y la del QMD) son la otra mitad de los
+     * 137 ms/capa medidos en silicio el 2026-08-02.
+     *
+     * El blob no cambia nunca. Se copiaba por si alguien hubiera pisado esa VRAM
+     * — y de hecho alguien la pisaba: la ventana de pesos residentes estaba
+     * encima del contexto de GR. Arreglado eso, la copia defensiva sólo cuesta. */
+    int staged;
 };
 
 struct gsp_compute {
@@ -125,9 +140,11 @@ extern const unsigned gsp_matvec_param_count;
 int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
                      struct gsp_compute *cp);
 
-/* Copia el SASS de `k` a VRAM vía CE y espera al semáforo. */
+/* Copia el SASS de `k` a VRAM vía CE y espera al semáforo. Idempotente: la
+ * primera vez copia y marca `k->staged`; las siguientes no hacen nada. Por eso
+ * `k` no es const. */
 int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
-                           const struct gsp_kernel *k,
+                           struct gsp_kernel *k,
                            uint64_t scratch_va, void *scratch_cpu);
 
 /* Codifica SET_OBJECT + WFI + SEND_PCAS en el pushbuffer; el QMD va a sysmem. */

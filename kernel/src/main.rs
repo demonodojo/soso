@@ -90,6 +90,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         None => println!("smp: sin RSDP del bootloader; monocore"),
     }
 
+    // Reloj fino, antes de que nadie mida o espere. El tick va a 100 Hz, así que
+    // sin esto la unidad más pequeña de tiempo del kernel son 10 ms: los bucles
+    // de espera de la GPU pagaban un tick entero por lanzamiento y el matvec
+    // residente salía a 137 ms/capa (2026-08-02).
+    arch::tsc::calibrate();
+
     drivers::pci::init_ecam();
     drivers::pci::init();
     drivers::nvme::init();

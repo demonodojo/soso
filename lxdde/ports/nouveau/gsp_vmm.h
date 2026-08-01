@@ -115,6 +115,19 @@ struct gsp_vmm {
  * device vuelve a ser 0xde1d0000 sin chocar con el de G4c. */
 int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v);
 
+/* Vaspace sin RM: sólo el directorio raíz. Para BAR1, que entrega su directorio
+ * por el bloque de instancia de la apertura y no por `SET_PAGE_DIRECTORY`. */
+int gsp_vmm_init_bare(struct gsp_vmm *v);
+
+/* Codificadores del formato VER3, expuestos porque BAR1 construye sus propias
+ * tablas y NO debe reimplementarlos: las tres trampas del formato (el bit 0 de un
+ * PDE no es «válido» sino IS_PTE, la APERTURE se codifica distinto en PTE que en
+ * PDE, y la mitad que cuenta de la PDE doble del nivel 1 es la ALTA) están
+ * explicadas arriba y valen para los dos usuarios. Dos copias de esto serían dos
+ * sitios donde equivocarse en silencio. */
+uint64_t gsp_vmm_pte_encode(uint64_t phys, enum gsp_vmm_target target, unsigned flags);
+uint64_t gsp_vmm_pde_encode(uint64_t phys, enum gsp_vmm_target target);
+
 /* Mapea `size` bytes desde `phys` en `va`. Los tres han de estar alineados a
  * 4 KiB. Crea las tablas que falten por el camino. */
 int gsp_vmm_map(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,

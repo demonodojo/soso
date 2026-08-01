@@ -336,7 +336,7 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
 }
 
 int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
-                           const struct gsp_kernel *k,
+                           struct gsp_kernel *k,
                            uint64_t scratch_va, void *scratch_cpu)
 {
     if (!cp || !cp->ready || !ce || !k || !scratch_cpu || !k->sass_len) {
@@ -345,11 +345,18 @@ int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
     if (k->sass_len > 4096) {
         return -1;
     }
+    if (k->staged) {
+        return 0;
+    }
     memcpy(scratch_cpu, k->sass, k->sass_len);
     __asm__ __volatile__("mfence" ::: "memory");
 
-    return gsp_ce_copy_sync(ce, k->sass_va, scratch_va, k->sass_len,
-                            GSP_CE_WAIT_MS);
+    if (gsp_ce_copy_sync(ce, k->sass_va, scratch_va, k->sass_len,
+                         GSP_CE_WAIT_MS) != 0) {
+        return -1;
+    }
+    k->staged = 1;
+    return 0;
 }
 
 /* El prólogo del banco 0 (todo lo anterior a `param_base`) lo rellena el driver
@@ -534,15 +541,29 @@ static int launch_wait(struct gsp_compute *cp, const struct gsp_kernel *k,
     }
 
     sem = (const volatile uint32_t *)cp_data(cp, G4F_SEM_OFF);
-    /* Primero sondeo a pelo y sólo después `mdelay`. Un kernel de una tanda tarda
-     * microsegundos y el bucle de milisegundos convertiría un matvec de 8192 filas
-     * (miles de tandas) en segundos de dormir, no de calcular. */
-    for (waited = 0; waited < G4F_SPIN_TRIES; waited++) {
-        __asm__ __volatile__("mfence" ::: "memory");
-        if (*sem == G4F_SEM_PAYLOAD) {
-            gsp_chan_ack_progress(cp->chan);
-            return 0;
-        }
+    /* Sondeo contra RELOJ, no contra un contador de vueltas.
+     *
+     * La idea de sondear antes de dormir ya estaba; lo que faltaba era que el
+     * dormir costara lo que dice. Con el tick a 100 Hz, `lx_mdelay(1)` espera
+     * hasta 10 ms, así que un matvec que la GPU resuelve en microsegundos
+     * costaba un tick entero: el modelo salía a 137 ms/capa, más lento que en
+     * CPU (medido en silicio el 2026-08-02). Y `G4F_SPIN_TRIES` vueltas no son
+     * una duración: en un core rápido se agotan en decenas de microsegundos y en
+     * uno lento tardan de más.
+     *
+     * Ahora se sondea `G4F_SPIN_US` microsegundos de reloj real —suficiente para
+     * cubrir un lanzamiento normal— y sólo si no llega se cae al bucle de ticks,
+     * que sigue estando para el caso patológico. */
+    {
+        uint64_t t_fin = lx_ktime_get_ns() + (uint64_t)G4F_SPIN_US * 1000ull;
+
+        do {
+            __asm__ __volatile__("mfence" ::: "memory");
+            if (*sem == G4F_SEM_PAYLOAD) {
+                gsp_chan_ack_progress(cp->chan);
+                return 0;
+            }
+        } while (lx_ktime_get_ns() < t_fin);
     }
     for (waited = 0; waited <= G4F_WAIT_MS; waited++) {
         __asm__ __volatile__("mfence" ::: "memory");

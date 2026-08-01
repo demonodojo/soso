@@ -341,6 +341,7 @@ fn provided_symbols() -> HashSet<&'static str> {
         "lx_pci_read_config", "lx_pci_write_config",
         "lx_pci_alloc_irq_vectors", "lx_pci_free_irq_vectors", "lx_pci_irq_vector",
         "lx_pci_get_drvdata", "lx_pci_set_drvdata", "lx_pci_device_id", "lx_pci_bdf",
+        "lx_pci_bar1",
         "lx_dma_alloc_coherent", "lx_dma_alloc_wb", "lx_dma_flush_range", "lx_dma_free_coherent",
         "lx_dma_map_single", "lx_dma_unmap_single",
         "lx_register_initcall",
