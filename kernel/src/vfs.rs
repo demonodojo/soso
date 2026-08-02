@@ -237,6 +237,28 @@ pub fn read_file_range_mmap(ino: u64, offset: usize, len: usize, out: &mut [u8])
 
 /// Lectura directa (sin caché de bloques) para rangos grandes de modelos;
 /// el resto de inodos van por la ruta normal con caché.
+/// Lectura agrupada que además deja los bloques en la caché: el racimo de las
+/// faltas de página, que se relee al remapear un shard.
+pub fn read_file_range_racimo(ino: u64, offset: usize, out: &mut [u8]) -> Result<(), SosoFsError> {
+    if !is_sosomfs(ino) {
+        let len = out.len();
+        return read_file_range(ino, offset, len, out);
+    }
+    let mfs = crate::fs::MODELS.get().ok_or(SosoFsError::Io)?;
+    let mut mfs = mfs.lock();
+    let (model_idx, entry) = decode(ino);
+    let shard = mfs
+        .catalog
+        .models
+        .get(model_idx as usize)
+        .and_then(|m| m.shards.get(entry as usize))
+        .cloned()
+        .ok_or(SosoFsError::NotFound)?;
+    let len = out.len();
+    mfs.read_range_cacheado(&shard, offset, len, out)
+        .map_err(som_errno)
+}
+
 pub fn read_file_range_direct(ino: u64, offset: usize, out: &mut [u8]) -> Result<(), SosoFsError> {
     if !is_sosomfs(ino) {
         let len = out.len();
@@ -263,6 +285,14 @@ pub fn create_file(dir: u64, name: &str, data: &[u8], mtime: u64) -> Result<u64,
     }
     let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
     fs.lock().create_file(dir, name, data, mtime)
+}
+
+pub fn append_file(ino: u64, data: &[u8], mtime: u64) -> Result<(), SosoFsError> {
+    if is_sosomfs(ino) {
+        return Err(SosoFsError::Io);
+    }
+    let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
+    fs.lock().append_file(ino, data, mtime)
 }
 
 pub fn mkdir(dir: u64, name: &str, mtime: u64) -> Result<u64, SosoFsError> {

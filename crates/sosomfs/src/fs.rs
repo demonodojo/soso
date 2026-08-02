@@ -373,6 +373,31 @@ impl<V: VolumeSet> Sosomfs<V> {
         len: usize,
         out: &mut [u8],
     ) -> Result<(), FsError> {
+        self.read_range_agrupado(shard, offset, len, out, false)
+    }
+
+    /// Igual, pero **poblando la caché de bloques**: para los racimos de las
+    /// faltas de página, que son pequeños y se releen cuando el planificador
+    /// libera y vuelve a mapear un shard. Los rangos grandes (2 MiB) siguen sin
+    /// cachear: meter 512 bloques de una tacada sólo desaloja lo útil.
+    pub fn read_range_cacheado(
+        &mut self,
+        shard: &ShardEntry,
+        offset: usize,
+        len: usize,
+        out: &mut [u8],
+    ) -> Result<(), FsError> {
+        self.read_range_agrupado(shard, offset, len, out, true)
+    }
+
+    fn read_range_agrupado(
+        &mut self,
+        shard: &ShardEntry,
+        offset: usize,
+        len: usize,
+        out: &mut [u8],
+        cachear: bool,
+    ) -> Result<(), FsError> {
         if offset % BLOCK_SIZE != 0 || len % BLOCK_SIZE != 0 || out.len() < len {
             return Err(FsError::Corrupt);
         }
@@ -397,10 +422,17 @@ impl<V: VolumeSet> Sosomfs<V> {
                 // consecutivos dentro de uno.
                 let bytes = (end - cur).min(ext_end - cur).min(max * BLOCK_SIZE);
                 let lba = ext.start_lba + ((cur - file_pos) / BLOCK_SIZE) as u64;
-                self.cache
-                    .volume_mut()
-                    .read_range_lba(lba, &mut out[out_off..out_off + bytes])
-                    .map_err(|_| FsError::Io)?;
+                let dst = &mut out[out_off..out_off + bytes];
+                if cachear {
+                    self.cache
+                        .read_range(lba, dst, shard.cache_policy)
+                        .map_err(|_| FsError::Io)?;
+                } else {
+                    self.cache
+                        .volume_mut()
+                        .read_range_lba(lba, dst)
+                        .map_err(|_| FsError::Io)?;
+                }
                 cur += bytes;
                 out_off += bytes;
             }

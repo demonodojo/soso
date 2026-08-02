@@ -29,6 +29,15 @@ impl FileMapper for StdMapper {
     fn unmap_file(&mut self, _shard: &MappedShard) {}
 }
 
+/// Reloj real: el planificador replanifica según el tiempo, y con un reloj
+/// clavado a 0 no se ejercita ese camino.
+fn reloj_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = args.next().unwrap_or_else(|| "target/tinyllama-model".into());
@@ -57,8 +66,25 @@ fn main() {
 
     let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
     rt.validate_shapes().expect("shapes inválidas");
-    let mut source = MmapTensorSource::new(format!("{dir}/shards"), index, StdMapper);
+    let mut source = MmapTensorSource::new(format!("{dir}/shards"), index.clone(), StdMapper);
     source.async_staging = true;
+
+    // `SOSO_PLANNER=1` enciende el `ResourcePlanner` y el decode planificado,
+    // que es lo que usa `soso-llm` en la máquina. Sin esto el arnés de host no
+    // ejercita `touch_moe_experts` ni el prefetch MoE, y un fallo que sólo
+    // aparece con planificador obliga a depurarlo dentro de QEMU.
+    if std::env::var("SOSO_PLANNER").is_ok() {
+        let mem = soso_llm_core::plan::MemSnapshot {
+            total_frames: 512 * 1024,
+            free_frames: 400 * 1024,
+            reclaimable_frames: 0,
+        };
+        let planner = soso_llm_core::plan::ResourcePlanner::new(
+            &rt.manifest, &index, mem, 0, false,
+        );
+        rt.set_planner(planner);
+        eprintln!("planificador: activado");
+    }
 
     // "@bos" = prompt de un solo token BOS (RoPE identidad en pos 0)
     let prompt_tokens = if prompt == "@bos" {
@@ -99,6 +125,41 @@ fn main() {
     let mut sampler = Sampler::new(temp, top_p, seed);
     let mut dec = StreamDecoder::new();
     let t0 = std::time::Instant::now();
+    if std::env::var("SOSO_PLANNER").is_ok() {
+        // El mismo camino que usa `soso-llm` en la máquina.
+        let mut gpu: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = None;
+        let r = rt.generate_stream_planned(
+            &mut source,
+            &prompt_tokens,
+            max_new,
+            tokenizer.eos(),
+            &mut sampler,
+            |t| {
+                let s = dec.push(&tokenizer, t);
+                if !s.is_empty() {
+                    print!("{s}");
+                    let _ = std::io::stdout().flush();
+                }
+            },
+            None,
+            &mut gpu,
+            reloj_ms,
+            || soso_llm_core::plan::MemSnapshot {
+                total_frames: 512 * 1024,
+                free_frames: 400 * 1024,
+                reclaimable_frames: 0,
+            },
+        );
+        match r {
+            Ok(t) => eprintln!("\nplanificado: {} tokens", t.len()),
+            Err(()) => {
+                eprintln!("\nplanificado: FALLÓ (mismo Err(()) que «inferencia falló» en soso)");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let tokens = rt
         .generate_stream(
             &mut source,

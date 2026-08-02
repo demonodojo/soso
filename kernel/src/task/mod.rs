@@ -146,6 +146,14 @@ pub enum Fd {
     /// Fichero grande: lectura parcial bajo demanda.
     LazyFile { inode: u64, size: usize, pos: usize },
     WriteBuf { dir: u64, name: String, data: Vec<u8>, pos: usize },
+    /// Escritura streaming a sosofs (p. ej. `/var/models/`); vacía por bloques.
+    StreamWrite {
+        dir: u64,
+        name: String,
+        inode: Option<u64>,
+        pos: usize,
+        buf: Vec<u8>,
+    },
     Dir { entries: Vec<soso_abi::Dirent>, pos: usize },
     PipeRead(pipe::PipeId),
     PipeWrite(pipe::PipeId),
@@ -288,7 +296,7 @@ fn racimo(space: &AddrSpace, region: &mmap::MmapRegion, addr: u64) -> bool {
         return false;
     }
     let mut buf = TRANSITO.lock();
-    if crate::fs::load_file_range(region.inode, off_base as usize, &mut buf[..bytes]).is_err() {
+    if crate::fs::load_file_range_racimo(region.inode, off_base as usize, &mut buf[..bytes]).is_err() {
         return false;
     }
     let mut servida = false;

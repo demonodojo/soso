@@ -306,6 +306,13 @@ impl<D: BlockDevice> Sosofs<D> {
             let copy_end = (end - ext_start).min(chunk.len());
             if copy_start < copy_end {
                 let n = copy_end - copy_start;
+                // Extents solapados (o un `out` más corto de lo que dice `len`)
+                // no deben matar al kernel: es un FS malformado, no un bug del
+                // llamante. Sin esto, un append que insertaba extents en claves
+                // no alineadas panicaba aquí con «range end index N out of range».
+                if written + n > out.len() {
+                    return Err(FsError::Corrupt);
+                }
                 out[written..written + n].copy_from_slice(&chunk[copy_start..copy_end]);
                 written += n;
             }

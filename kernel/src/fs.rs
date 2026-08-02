@@ -355,3 +355,8 @@ pub fn load_file_page(inode: u64, file_off: usize, page: &mut [u8; 4096]) -> Res
 pub fn load_file_range(inode: u64, file_off: usize, out: &mut [u8]) -> Result<(), ()> {
     crate::vfs::read_file_range_direct(inode, file_off, out).map_err(|_| ())
 }
+
+/// Igual, pero cacheando: el racimo de 128 KiB de una falta de página.
+pub fn load_file_range_racimo(inode: u64, file_off: usize, out: &mut [u8]) -> Result<(), ()> {
+    crate::vfs::read_file_range_racimo(inode, file_off, out).map_err(|_| ())
+}

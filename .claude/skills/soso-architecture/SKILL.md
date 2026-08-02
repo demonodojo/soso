@@ -125,10 +125,23 @@ soso/
   pinta de cadena (p. ej. `0x6e7474612e3032be` = «…20.attn»). Coste: el
   solapamiento prefetch↔cómputo se pierde casi entero; recuperarlo pide un lock
   por shard dentro de `prefetch_shards_sync`, no quitar la sincronización.
-- **Pendiente conocido**: la caché de bloques sigue siendo O(n) (`read_lba`
-  busca linealmente sobre hasta 2048 entradas y `evict_lru` barre otra vez).
-  Con las lecturas ya agrupadas es el siguiente cuello, y poblar la caché desde
-  los racimos sin arreglarlo antes cuelga el banco de 128 MiB.
+- **Caché de bloques O(1)** (`sosomfs/src/cache.rs`): índice abierto
+  `lba → entrada` con hash de Fibonacci (los LBA de un shard son consecutivos y
+  el módulo directo los amontona) y **lápidas** para las bajas; recompacta sólo
+  al pasar de 1/4 de tabla. Evicción por reloj de segunda oportunidad, con la
+  misma semántica que el LRU exacto al que sustituye (nunca `PIN`; `STREAM` sólo
+  desaloja `STREAM`, y `None` antes que robarle el sitio a otra política). Con
+  esto el racimo puede poblar la caché (`read_range_cacheado`), que sin el
+  índice colgaba el banco de 128 MiB. Medido en `tiny`: 82 → **46 peticiones**,
+  1986 → **1122 bloques**, 42 → **25 ms**.
+  - **Cómo se prueba** (`crates/sosomfs/tests/cache.rs`, 9 tests): con cachés
+    diminutas para que haya desalojo real, y comprobando invariantes en cada
+    paso. Aviso ganado a pulso: **medir aciertos no vale**. `buscar` verifica
+    `entries[v].lba == lba`, así que una ranura obsoleta da la respuesta
+    correcta, y una tabla saturada sigue acertando barriéndola entera. La
+    propiedad que hay que afirmar es el **número de sondeos** (`sondeos()`,
+    sólo en host). Validado por sabotaje: anular `desindexar` dispara el test
+    con «10 aciertos han costado 225 sondeos».
 - Ficheros `.som` con cabecera común (magic+crc+versión+payload_len, `pack_som`/`parse_som` en sosomodel): `manifest.som` (v4: tabla `LayerSpec` por capa — `AttnKind` Gqa/Mla/Kda, `FfnKind` Dense/Moe/LatentMoe, overrides MLA/MoE; v3: MoE global `num_experts`, `num_experts_per_tok`, `moe_ffn_dim`; v2: GQA `num_kv_heads`, `rope_theta`, `rms_eps`; parse v1–v3 sintetiza layers uniformes), `index.som` (shape `[filas,columnas]` row-major, dtype F32/Q8_0/Q4_K), `tokenizer.som` (vocabulario SentencePiece-ish, opcional), shards `.tensor`
 - **MoE (Mixtral-style, manifest v3):** `num_experts > 0` activa `forward_moe_ffn` en `layer.rs`: router `L{i}.ffn_gate_inp` → `topk_softmax` → SwiGLU por experto `L{i}.E{e}.ffn_{gate,up,down}` (un shard `.tensor` por tensor); prefetch de capa solo attn+router; expertos fríos vía `plan.rs::touch_moe_experts` + `source.prefetch_shards`; `keep_all_shards_after` retiene cache LRU de expertos calientes junto al working set de capas
 - Runtime (`soso-llm-core`): llama denso o **MoE** — RoPE, GQA, **Wo (`attn_output`)**, SwiGLU (`ffn_gate` opcional o por experto), `output_norm`, Q8_0 y Q4_K (layout GGML passthrough, matvec fusionado); pesos zero-copy (`TensorView` sobre mmap), KV en `kv.rs` (f16 o int8 KIVI-lite), sampling temp/top-p (`sample.rs`), streaming (`generate_stream` / `generate_stream_planned` + `StreamDecoder`); buffers reutilizados (`LayerScratch`, incl. `router`/`moe_acc` en MoE) — libsoso libera solo bloques ≥1 MiB (mmap anónimo), no reservar por token

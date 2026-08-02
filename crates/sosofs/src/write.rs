@@ -399,6 +399,12 @@ impl<D: BlockDevice> Sosofs<D> {
         self.finish(r)
     }
 
+    /// Añade bytes al final de un fichero existente (escritura streaming).
+    pub fn append_file(&mut self, ino: u64, data: &[u8], mtime: u64) -> Result<(), FsError> {
+        let r = self.append_file_inner(ino, data, mtime);
+        self.finish(r).map(|_| ())
+    }
+
     pub fn unlink(&mut self, dir: u64, name: &str) -> Result<(), FsError> {
         let r = self.unlink_inner(dir, name);
         self.finish(r)
@@ -514,6 +520,98 @@ impl<D: BlockDevice> Sosofs<D> {
         }
 
         self.insert_dirent(dir, name, ino)?;
+        Ok(ino)
+    }
+
+    fn append_file_inner(&mut self, ino: u64, data: &[u8], mtime: u64) -> Result<u64, FsError> {
+        if data.is_empty() {
+            return Ok(ino);
+        }
+        let st = self.stat_inode(ino)?;
+        if st.file_type != FT_FILE {
+            return Err(FsError::NotAFile);
+        }
+        let size = st.size.get() as usize;
+        let new_size = size + data.len();
+
+        // La clave de un extent es un offset de fichero **alineado a bloque**:
+        // así los emite `create_file_inner` y así los interpreta
+        // `read_file_range`, que calcula `ext_end = key.offset + bloques*4096`.
+        //
+        // AVERÍA: esto arrancaba en `off = st.size`, el tamaño actual a pelo. Al
+        // añadir a un fichero de 6 bytes, el extent nuevo se indexaba en el
+        // offset 6 y se solapaba con el que cubre [0, 4096): al leer, los rangos
+        // se contaban dos veces, `written` pasaba de `len` y el kernel moría en
+        // `fs.rs` con «range end index 9 out of range for slice of length 6».
+        // Y como `sys_write` pasa por aquí, le ocurría a **cualquier** escritura
+        // de tamaño no múltiplo de 4096.
+        //
+        // No basta con alinear al bloque que contiene `size`: ese bloque puede
+        // estar en medio de un extent de varios bloques, y un extent nuevo a
+        // mitad de otro vuelve a solaparse. Hay que reescribir desde el
+        // principio del **último extent**, que sí es una clave existente y
+        // alineada; así el `tree_insert` lo reemplaza en vez de añadir uno que
+        // pise.
+        let (min, max) = Key::range(ino, KIND_EXTENT);
+        let mut extents = Vec::new();
+        self.scan_range(min, max, &mut extents)?;
+        let base = extents.last().map(|(k, _)| k.offset as usize).unwrap_or(0);
+        if base > size {
+            return Err(FsError::Corrupt);
+        }
+
+        // Lo que ya había en ese último extent se reescribe junto con lo nuevo.
+        let previo = size - base;
+        let mut buf = Vec::new();
+        buf.try_reserve(previo + data.len()).map_err(|_| FsError::NoSpace)?;
+        if previo > 0 {
+            buf.resize(previo, 0);
+            self.read_file_range(ino, base, previo, &mut buf)?;
+        }
+        buf.extend_from_slice(data);
+
+        let mut payload_inode = [0u8; ITEM_PAYLOAD];
+        let inode = InodeItem {
+            file_type: FT_FILE,
+            _pad: [0; 7],
+            size: (new_size as u64).into(),
+            mtime: mtime.into(),
+        };
+        payload_inode[..core::mem::size_of::<InodeItem>()].copy_from_slice(inode.as_bytes());
+        self.tree_insert(Key::inode(ino), &payload_inode)?;
+
+        let mut off = base;
+        let mut chunk_off = 0usize;
+        while chunk_off < buf.len() {
+            let restante = buf.len() - chunk_off;
+            let want = (restante.div_ceil(BLOCK_SIZE) as u64).min(EXTENT_MAX_BLOCKS);
+            let (start, got) = self.alloc_extent(want)?;
+            let chunk_len = restante.min(got as usize * BLOCK_SIZE);
+            let mut padded = vec![0u8; got as usize * BLOCK_SIZE];
+            padded[..chunk_len].copy_from_slice(&buf[chunk_off..chunk_off + chunk_len]);
+            for (j, bloque) in padded.chunks(BLOCK_SIZE).enumerate() {
+                self.dev
+                    .write_block(start + j as u64, bloque.try_into().unwrap())
+                    .map_err(|_| FsError::Io)?;
+            }
+            let ext = ExtentItem {
+                start_block: start.into(),
+                block_count: (got as u32).into(),
+                crc: crate::crc32c(&padded).into(),
+            };
+            let mut payload = [0u8; ITEM_PAYLOAD];
+            payload[..core::mem::size_of::<ExtentItem>()].copy_from_slice(ext.as_bytes());
+            self.tree_insert(
+                Key {
+                    inode: ino,
+                    kind: KIND_EXTENT,
+                    offset: off as u64,
+                },
+                &payload,
+            )?;
+            off += chunk_len;
+            chunk_off += chunk_len;
+        }
         Ok(ino)
     }
 

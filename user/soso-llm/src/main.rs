@@ -346,13 +346,24 @@ fn parse_pipeline_list(pipeline: &str) -> Vec<String> {
         .collect()
 }
 
+fn model_base(name: &str) -> String {
+    for prefix in ["/models/", "/var/models/"] {
+        let p = format!("{prefix}{name}/manifest.som");
+        let mut st = soso_abi::Stat::default();
+        if sys::stat(&p, &mut st) == 0 {
+            return format!("{prefix}{name}");
+        }
+    }
+    format!("/models/{name}")
+}
+
 fn load_model(
     name: &str,
     role: PipelineRole,
     layer_start: u32,
     layer_end: u32,
 ) -> Result<ModelBundle, u8> {
-    let base = format!("/models/{name}");
+    let base = model_base(name);
     let manifest_path = format!("{base}/manifest.som");
     let index_path = format!("{base}/index.som");
 
@@ -672,7 +683,18 @@ fn run_model(
         None
     };
     let text = if prompt.is_empty() { "hola" } else { prompt };
-    let prompt_tokens = bundle.tokenizer.encode(text);
+    // `@bos` = prompt de un solo token BOS, igual que en el arnés de host
+    // (`examples/hostrun.rs`). Aquí faltaba, así que `--prompt @bos` se
+    // tokenizaba byte a byte: '@'=64, 'b'=98, 'o'=111, 's'=115. Con un modelo
+    // de vocabulario pequeño —`tiny-moe` tiene 64— ninguno de esos índices
+    // existe, `embed_token` devolvía `Err` y la única señal era un escueto
+    // «inferencia falló». El `tiny` denso no lo notaba porque su vocabulario es
+    // 256 y cualquier byte es un token válido.
+    let prompt_tokens = if text == "@bos" {
+        alloc::vec![1u32]
+    } else {
+        bundle.tokenizer.encode(text)
+    };
     let mut decoder = StreamDecoder::new();
     let t0 = sys::uptime_ms();
     let result = bundle.rt.generate_stream_planned(

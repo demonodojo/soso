@@ -42,6 +42,26 @@ extern "C" fn _start() -> ! {
     )
 }
 
+// ---- soporte de C freestanding ----
+
+/// Protector de pila del compilador de C.
+///
+/// El `cc` de las dependencias en C (el `ring` que arrastra rustls) trae
+/// `-fstack-protector` activado por defecto en la mayoría de distribuciones, y
+/// emite una llamada a `__stack_chk_fail` cuando detecta que se ha pisado el
+/// canario. En Linux lo pone la libc; aquí no hay libc, así que el enlazado
+/// moría con `undefined symbol: __stack_chk_fail` y se llevaba por delante todo
+/// el workspace de userspace — no sólo al binario que lo arrastraba.
+///
+/// La alternativa sería compilar el C con `-fno-stack-protector`, pero eso hay
+/// que recordarlo en cada dependencia nueva; proveer el símbolo lo arregla de
+/// una vez y además **conserva la comprobación**: si el canario salta, el
+/// proceso muere aquí en vez de seguir con la pila corrupta.
+#[unsafe(no_mangle)]
+pub extern "C" fn __stack_chk_fail() -> ! {
+    panic!("__stack_chk_fail: canario de pila pisado en código C");
+}
+
 // ---- print ----
 
 struct Stdout;
