@@ -120,8 +120,9 @@ SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 | G4a–c (RPC + RM) | **GO** en GB205 (2026-07-25) |
 | G4d–G5 (CE + SASS + soso-llm) | **GO** en GB205 (2026-07-29) — ver `soso-gpu` |
 | PCIe Gen4/5 post-GSP | **GO** (2026-07-30) — cap Gen3 en FMC, bump `SOSO_G1_PCIE_BUMP=4\|5` |
-| G6 (pesos en VRAM) | **PARCIAL** (2026-07-30) — la subida por CE llegó; el primer QMD residente no señalizó y el CE murió detrás |
-| Siguiente | ciclo de instrumentos (2026-08-01): sonda doble sysmem/VRAM, `rc:` al vencer una espera, y volcado de las tablas de BAR1 |
+| G6 (pesos en VRAM) | **GO** (2026-08-02) — 192 matvec en GPU, 24 matrices residentes, 0 caídas a CPU. Lo bloqueaba un solapamiento de ventanas de VA: los pesos se mapeaban sobre el contexto de GR |
+| Rendimiento G6 | Lanzamiento de QMD **10 ms → ~0,4 ms** y matvec **137 → 31,5 ms/capa** (2026-08-02) al dar al kernel un reloj fino: el tick va a 100 Hz y las esperas dormían un tick entero |
+| Siguiente | El matvec ya sólo es el **3%** del tiempo de inferencia (126 ms de 4,3 s por token): el cuello está en el streaming de shards desde disco, no en la GPU |
 
 ### Qué mirar en el próximo ciclo de VFIO (2026-08-01)
 
