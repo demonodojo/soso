@@ -4,6 +4,7 @@ use crate::cache::BlockCache;
 use crate::catalog::Catalog;
 use crate::layout::*;
 use crate::volume_set::{SingleDev, VolumeSet};
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use block_dev::{BlockDevice, BlockError, BLOCK_SIZE};
@@ -25,6 +26,21 @@ pub struct Sosomfs<V: VolumeSet> {
     pub sb: Superblock,
     pub catalog: Catalog,
     pub catalog_blocks: u64,
+    /// LBA de arranque de cada segmento cuyo CRC ya se comprobó en este
+    /// montaje. Una entrada de 8 bytes por segmento.
+    ///
+    /// El CRC de segmento se verificaba **en cada lectura** que cayera en el
+    /// primer bloque del extent, y verificarlo cuesta releer el extent entero,
+    /// copiarlo a un `Vec` y pasarle crc32c. Con el modelo `tiny` eso eran 43
+    /// verificaciones sobre 1171 bloques —4,8 MiB de CRC— para 577 bloques de
+    /// modelo.
+    ///
+    /// El precio de recordarlo: si un bloque ya verificado se desaloja de la
+    /// caché y el disco se corrompe *después*, la relectura ya no lo detecta.
+    /// Es la misma decisión que toma dm-verity al cachear bloques verificados,
+    /// y aquí el volumen de modelos es de sólo lectura: se escribe al
+    /// construirlo, y eso sube la generación del superbloque.
+    segmentos_ok: BTreeSet<u64>,
 }
 
 fn crc32c(data: &[u8]) -> u32 {
@@ -126,6 +142,7 @@ impl<V: VolumeSet> Sosomfs<V> {
             sb,
             catalog,
             catalog_blocks: sb.catalog_blocks,
+            segmentos_ok: BTreeSet::new(),
         })
     }
 
@@ -228,12 +245,49 @@ impl<V: VolumeSet> Sosomfs<V> {
         Err(FsError::NotADir)
     }
 
+    /// Lectura por la caché de bloques, verificando el CRC del extent la
+    /// primera vez que se toca.
     pub fn read_range(
         &mut self,
         shard: &ShardEntry,
         offset: usize,
         len: usize,
         out: &mut [u8],
+    ) -> Result<(), FsError> {
+        self.read_range_inner(shard, offset, len, out, true)
+    }
+
+    /// Igual, pero sin verificar el CRC de segmento: para las faltas de página
+    /// de un mmap, cuyo consumidor ya comprueba el payload entero.
+    ///
+    /// `read_range_direct` —el camino de 2 MiB— lleva tomando esta decisión
+    /// desde siempre; el de 4 KiB hacía lo contrario sobre los mismos datos y
+    /// para el mismo consumidor. Verificar cuesta releer el extent COMPLETO
+    /// (incluido el relleno de alineación de 64 KiB) y copiarlo a un `Vec`:
+    /// medido el 2026-08-02 con `tiny`, 34 verificaciones sobre 1042 bloques
+    /// —4,3 MiB para un modelo de 2,3— y **199 ms de los 650 de carga en frío**,
+    /// más las lecturas de disco del relleno que no hacen falta para nada.
+    ///
+    /// Quien mapea un shard y no comprueba el payload se queda sin red: aquí el
+    /// consumidor es `MmapTensorSource`, que pasa `verify_shard` sobre el shard
+    /// entero en `ensure_mapped`.
+    pub fn read_range_sin_crc(
+        &mut self,
+        shard: &ShardEntry,
+        offset: usize,
+        len: usize,
+        out: &mut [u8],
+    ) -> Result<(), FsError> {
+        self.read_range_inner(shard, offset, len, out, false)
+    }
+
+    fn read_range_inner(
+        &mut self,
+        shard: &ShardEntry,
+        offset: usize,
+        len: usize,
+        out: &mut [u8],
+        verificar: bool,
     ) -> Result<(), FsError> {
         if offset + len > shard.byte_len as usize {
             return Err(FsError::Corrupt);
@@ -260,7 +314,11 @@ impl<V: VolumeSet> Sosomfs<V> {
                 self.cache
                     .read_lba(lba, shard.cache_policy, &mut block)
                     .map_err(|_| FsError::Io)?;
-                if ext.segment_crc32c != 0 && (lba_off * BLOCK_SIZE) % SEGMENT_SIZE == 0 {
+                if verificar
+                    && ext.segment_crc32c != 0
+                    && (lba_off * BLOCK_SIZE) % SEGMENT_SIZE == 0
+                    && !self.segmentos_ok.contains(&lba)
+                {
                     let seg_off = lba_off * BLOCK_SIZE;
                     let seg_len = SEGMENT_SIZE.min(ext_bytes - seg_off);
                     let mut seg_buf = alloc::vec::Vec::with_capacity(seg_len);
@@ -278,6 +336,7 @@ impl<V: VolumeSet> Sosomfs<V> {
                     if crc32c(&seg_buf[..seg_len]) != ext.segment_crc32c {
                         return Err(FsError::Corrupt);
                     }
+                    self.segmentos_ok.insert(lba);
                 }
                 let n = (BLOCK_SIZE - in_block).min(remaining);
                 out[out_off..out_off + n].copy_from_slice(&block[in_block..in_block + n]);

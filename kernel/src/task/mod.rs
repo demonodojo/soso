@@ -330,7 +330,7 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
         if region.inode != 0 {
             let avail = (region.file_len as usize).saturating_sub(file_off).min(4096);
             if avail == 0
-                || crate::vfs::read_file_range(region.inode, file_off, avail, &mut dst[..avail])
+                || crate::vfs::read_file_range_mmap(region.inode, file_off, avail, &mut dst[..avail])
                     .is_err()
             {
                 free_frame(frame);

@@ -122,8 +122,8 @@ SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 | PCIe Gen4/5 post-GSP | **GO** (2026-07-30) — cap Gen3 en FMC, bump `SOSO_G1_PCIE_BUMP=4\|5` |
 | G6 (pesos en VRAM) | **GO** (2026-08-02) — 192 matvec en GPU, 24 matrices residentes, 0 caídas a CPU. Lo bloqueaba un solapamiento de ventanas de VA: los pesos se mapeaban sobre el contexto de GR |
 | Rendimiento G6 | Lanzamiento de QMD **10 ms → ~0,4 ms** y matvec **137 → 31,5 ms/capa** (2026-08-02) al dar al kernel un reloj fino: el tick va a 100 Hz y las esperas dormían un tick entero |
-| Streaming de shards | **85 360 → 2 970 ms** en 20 tokens (0,23 → 6,73 tok/s) el 2026-08-02, midiendo en QEMU con el modelo `tiny`. Ver abajo |
-| Siguiente | El matvec vuelve a mandar: 2,16 s de los 2,97 (73%). Lo que queda del streaming son 620 ms de carga en frío, y son coste único, no por token |
+| Streaming de shards | **85 360 → 2 760 ms** en 20 tokens (0,23 → 7,25 tok/s) el 2026-08-02, midiendo en QEMU con el modelo `tiny`. Ver abajo |
+| Siguiente | El matvec vuelve a mandar (~75%). Lo que queda del streaming son 520 ms de carga en frío, y son coste único, no por token: con 44 tokens siguen siendo los mismos |
 
 ### Los 97% que no eran del matvec (2026-08-02)
 
@@ -147,6 +147,23 @@ familia —una constante fija donde hacía falta una proporción—:
 Medido a nivel de dispositivo, la amplificación de lectura era de **94 bloques
 leídos por cada bloque de modelo**: 54 272 lecturas de 4 KiB a ~177 us —9,2 s de
 disco— para un modelo de 577 bloques. Tras (3) y (4) quedan ~1 100.
+
+Una quinta pasada sobre los 620 ms de carga en frío que quedaban: **620 → 520 ms**
+y las lecturas de disco a la mitad (~600). El desglose medido eran 318 ms de
+disco y 278 ms de verificación de CRC de segmento, y de lo segundo la mayor parte
+no era la aritmética sino releer el extent COMPLETO —relleno de alineación de
+64 KiB incluido: 1042 bloques para un modelo de 577— y copiarlo a un `Vec`.
+
+- Memoizar los segmentos ya verificados (`segmentos_ok`) rindió **casi nada**:
+  tras (3) y (4) ya no quedaba casi redundancia, 34 verificaciones para ~35
+  extents. La hipótesis de partida («se reverifica todo el rato») estaba vieja.
+- Lo que sí valió: **no verificar el CRC en la ruta de faltas de página**. El
+  camino de 2 MiB (`read_range_direct`) ya lo hacía desde siempre, con la razón
+  escrita en su doc —«la integridad del payload la valida `verify_shard` en el
+  consumidor»— y el de 4 KiB hacía lo contrario sobre los mismos datos y para el
+  mismo consumidor. 34 verificaciones sobre 1042 bloques → 8 sobre 98.
+- Y compilar `crc`/`sosomfs`/`sosofs` con `opt-level = 3` aun en perfil `dev`: el
+  kernel va sin optimizar y el CRC salía a 15 MB/s.
 
 Lección de método: el corte se encontró bajando un nivel cada vez y **midiendo**
 —faltas de página por ventana, no acumuladas (el acumulado bajaba de 13 a 4 ms y

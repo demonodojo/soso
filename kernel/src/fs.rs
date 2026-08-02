@@ -10,6 +10,7 @@ use spin::{Mutex, Once};
 pub struct VirtioDev0;
 pub struct VirtioDev1;
 
+
 const SECTORS_PER_BLOCK: u64 = (BLOCK_SIZE / 512) as u64;
 
 impl BlockDevice for VirtioDev0 {

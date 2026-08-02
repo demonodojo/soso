@@ -55,5 +55,19 @@ sunset = { path = "../vendor/sunset-0.5.0" }
 [profile.dev]
 panic = "abort"
 
+# El kernel se compila en `dev` (los tests y el ciclo de trabajo van así), pero
+# hay dependencias que están en el camino caliente y no queremos sin optimizar.
+#
+# `crc` es la peor: sosomfs verifica el CRC32C de cada extent al leerlo, y sin
+# optimizar eso son 15 MB/s. Medido el 2026-08-02 con el modelo `tiny`: **278 ms
+# de CRC** sobre 4,3 MiB en una inferencia de 2,8 s. Optimizar sólo este paquete
+# no cambia la depurabilidad del kernel, que sigue en dev.
+[profile.dev.package.crc]
+opt-level = 3
+[profile.dev.package.sosomfs]
+opt-level = 3
+[profile.dev.package.sosofs]
+opt-level = 3
+
 [profile.release]
 panic = "abort"

@@ -213,6 +213,28 @@ pub fn read_file_range(ino: u64, offset: usize, len: usize, out: &mut [u8]) -> R
         .map_err(som_errno)
 }
 
+/// Lectura para faltas de página de mmap: por la caché, pero sin reverificar
+/// el CRC del extent. El consumidor del shard ya comprueba el payload, y
+/// verificar aquí obliga a releer el extent entero (relleno incluido) por cada
+/// página que caiga en su primer bloque. Mismo criterio que `read_file_range_direct`.
+pub fn read_file_range_mmap(ino: u64, offset: usize, len: usize, out: &mut [u8]) -> Result<(), SosoFsError> {
+    if !is_sosomfs(ino) {
+        return read_file_range(ino, offset, len, out);
+    }
+    let mfs = crate::fs::MODELS.get().ok_or(SosoFsError::Io)?;
+    let mut mfs = mfs.lock();
+    let (model_idx, entry) = decode(ino);
+    let shard = mfs
+        .catalog
+        .models
+        .get(model_idx as usize)
+        .and_then(|m| m.shards.get(entry as usize))
+        .cloned()
+        .ok_or(SosoFsError::NotFound)?;
+    mfs.read_range_sin_crc(&shard, offset, len, out)
+        .map_err(som_errno)
+}
+
 /// Lectura directa (sin caché de bloques) para rangos grandes de modelos;
 /// el resto de inodos van por la ruta normal con caché.
 pub fn read_file_range_direct(ino: u64, offset: usize, out: &mut [u8]) -> Result<(), SosoFsError> {
