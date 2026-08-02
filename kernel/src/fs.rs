@@ -1,5 +1,6 @@
 //! Montaje de sosofs (virtio-blk 0 o NVMe 0) y sosomfs (NVMe 1 / NVMe 0 / virtio-blk 1).
 
+use crate::drivers::blkstat;
 use crate::drivers::nvme;
 use crate::println;
 use block_dev::{Block, BlockDevice, BlockError, BLOCK_SIZE};
@@ -94,14 +95,18 @@ impl BlockDevice for RootDev {
     }
 
     fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError> {
-        match self {
+        let t = blkstat::Peticion::empieza();
+        let r = match self {
             RootDev::Virtio(v) => v.read_block(block, buf),
             RootDev::Nvme => nvme::read_block4k_slot(0, block, buf).map_err(|_| BlockError::Io),
             RootDev::Live(l) => l.read_block(block, buf),
-        }
+        };
+        t.termina(1);
+        r
     }
 
     fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {
+        blkstat::escritura(1);
         match self {
             RootDev::Virtio(v) => v.write_block(block, buf),
             RootDev::Nvme => nvme::write_block4k_slot(0, block, buf).map_err(|_| BlockError::Io),
@@ -135,16 +140,20 @@ impl BlockDevice for ModelsDev {
     }
 
     fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError> {
-        match self {
+        let t = blkstat::Peticion::empieza();
+        let r = match self {
             ModelsDev::Nvme(slot) => {
                 nvme::read_block4k_slot(*slot, block, buf).map_err(|_| BlockError::Io)
             }
             ModelsDev::Virtio(v) => v.read_block(block, buf),
             ModelsDev::Live(l) => l.read_block(block, buf),
-        }
+        };
+        t.termina(1);
+        r
     }
 
     fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {
+        blkstat::escritura(1);
         match self {
             ModelsDev::Nvme(slot) => {
                 nvme::write_block4k_slot(*slot, block, buf).map_err(|_| BlockError::Io)

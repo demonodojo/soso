@@ -86,6 +86,11 @@ pub fn run() {
             ssh_llm(&key)
         });
 
+        // --- 4b) inferencia MoE (tiny-moe, streaming por experto) ---
+        let _ = paso_con_reintento("soso-llm run tiny-moe --prompt @bos --max 2", &mut fallos, || {
+            ssh_llm_moe(&key)
+        });
+
         // --- 5) regresión de syscalls dentro del guest (incl. GPU, hilos, FPU) ---
         let _ = paso_con_reintento("init test (syscalls, hilos, FPU, GPU)", &mut fallos, || {
             ssh_init_test(&key)
@@ -376,6 +381,28 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
         return Err(format!(
             "los pesos se resuben en cada matvec ({uploads} subidas / {calls} matvec):              el cacheo no está funcionando — {linea:?}"
         ));
+    }
+    Ok(())
+}
+
+fn ssh_llm_moe(key: &std::path::Path) -> Result<(), String> {
+    let texto = ssh_guion(
+        key,
+        "soso-llm run tiny-moe --prompt @bos --max 2\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    if !texto.contains("soso-llm: generado") {
+        return Err(format!(
+            "soso-llm tiny-moe no generó salida esperada; stdout: {texto:?}"
+        ));
+    }
+    if !texto.contains("moe_hits") && !texto.contains("moe_misses") {
+        // El planificador puede omitir stats MoE si no hay planner; al menos debe inferir.
+        if !texto.contains("soso-llm: planificador") {
+            return Err(format!(
+                "soso-llm tiny-moe sin planificador; stdout: {texto:?}"
+            ));
+        }
     }
     Ok(())
 }

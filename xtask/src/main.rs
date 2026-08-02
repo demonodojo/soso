@@ -356,6 +356,17 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
         if !status.success() {
             exit(status.code().unwrap_or(1));
         }
+        // tiny-moe en la misma imagen de modelos (Mixtral-style MoE para E2E).
+        let moe_src = root.join("target/tiny-moe-model");
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args(["run", "-q", "--release", "-p", "mkmodel-soso", "--"])
+            .args(["--moe", moe_src.to_str().unwrap()])
+            .status()
+            .expect("mkmodel-soso tiny-moe");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
     }
     let vieja = path
         .metadata()
@@ -367,13 +378,24 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
         return path;
     }
     let size = std::env::var("SOSO_MODELS_SIZE").unwrap_or_else(|_| "8G".into());
+    let mut mkfs_args = vec![
+        "run".to_string(),
+        "-q".to_string(),
+        "--release".to_string(),
+        "-p".to_string(),
+        "mkfs-sosomfs".to_string(),
+        "--".to_string(),
+        model_src.to_string_lossy().into_owned(),
+    ];
+    if custom.is_none() {
+        mkfs_args.push(root.join("target/tiny-moe-model").to_string_lossy().into_owned());
+    }
+    mkfs_args.push(path.to_string_lossy().into_owned());
+    mkfs_args.push("--size".into());
+    mkfs_args.push(size);
     let status = Command::new("cargo")
         .current_dir(&root)
-        .args(["run", "-q", "--release", "-p", "mkfs-sosomfs", "--"])
-        .arg(&model_src)
-        .arg(&path)
-        .arg("--size")
-        .arg(&size)
+        .args(&mkfs_args)
         .status()
         .expect("mkfs-sosomfs");
     if !status.success() {

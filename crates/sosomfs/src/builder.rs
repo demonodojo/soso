@@ -55,11 +55,174 @@ pub struct BuildReport {
     pub shards: usize,
 }
 
+struct ModelBuild {
+    manifest: Manifest,
+    plans: Vec<WritePlan>,
+}
+
 pub fn build_from_dir<D: BlockDevice>(
     dev: &mut D,
     model_root: &Path,
     generation: u64,
 ) -> Result<BuildReport, String> {
+    build_from_dirs(dev, &[model_root], generation)
+}
+
+/// Empaqueta varios directorios sosomodel en una sola imagen (p. ej. `tiny` + `tiny-moe`).
+pub fn build_from_dirs<D: BlockDevice>(
+    dev: &mut D,
+    model_roots: &[&Path],
+    generation: u64,
+) -> Result<BuildReport, String> {
+    if model_roots.is_empty() {
+        return Err("falta al menos un directorio de modelo".into());
+    }
+    let builds: Vec<ModelBuild> = model_roots
+        .iter()
+        .map(|p| plans_for_model(p))
+        .collect::<Result<_, _>>()?;
+
+    let catalog_root = SUPERBLOCK_SLOTS;
+    let mut next_lba = catalog_root + 64;
+    let mut seg_buf = vec![0u8; SEGMENT_SIZE];
+    let mut model_entries: Vec<ModelEntry> = Vec::new();
+    let mut total_shards = 0usize;
+
+    for build in &builds {
+        let mut shard_entries: Vec<ShardEntry> = Vec::new();
+        let start_lba_model = next_lba;
+        let mut lba_by_path: BTreeMap<String, u64> = BTreeMap::new();
+        let mut prefetch_map: BTreeMap<String, (String, u32)> = BTreeMap::new();
+        for plan in &build.plans {
+            if let Some(next) = &plan.prefetch_next {
+                prefetch_map.insert(plan.rel_path.clone(), (next.clone(), plan.prefetch_bytes));
+            }
+        }
+
+        for plan in &build.plans {
+            use std::io::Read;
+            let padded_len = align_bytes(plan.len, plan.align_requirement);
+            let blocks = (padded_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            let start_lba = next_lba;
+            lba_by_path.insert(plan.rel_path.clone(), start_lba);
+
+            let mut file = match &plan.src {
+                PlanSource::File(p) => {
+                    Some(fs::File::open(p).map_err(|e| format!("abrir {}: {e}", p.display()))?)
+                }
+                PlanSource::Inline(_) => None,
+            };
+            let mut shard_crc = sosomodel::Crc32cDigest::new();
+            let mut extents = Vec::new();
+            let mut off = 0usize;
+            while off < padded_len {
+                let seg_len = SEGMENT_SIZE.min(padded_len - off);
+                let buf = &mut seg_buf[..seg_len];
+                buf.fill(0);
+                let avail = plan.len.saturating_sub(off).min(seg_len);
+                if avail > 0 {
+                    match &plan.src {
+                        PlanSource::File(_) => {
+                            file.as_mut()
+                                .unwrap()
+                                .read_exact(&mut buf[..avail])
+                                .map_err(|e| format!("leer {}: {e}", plan.rel_path))?;
+                        }
+                        PlanSource::Inline(d) => buf[..avail].copy_from_slice(&d[off..off + avail]),
+                    }
+                }
+                let seg_crc = crc32c(buf);
+                shard_crc.update(buf);
+                write_payload(dev, start_lba + (off / BLOCK_SIZE) as u64, buf)
+                    .map_err(|_| "escribir shard".to_string())?;
+                extents.push(Extent {
+                    volume_id: 0,
+                    start_lba: start_lba + (off / BLOCK_SIZE) as u64,
+                    block_count: ((seg_len + BLOCK_SIZE - 1) / BLOCK_SIZE) as u64,
+                    segment_crc32c: seg_crc,
+                    stripe_width: 0,
+                    stripe_index: 0,
+                });
+                off += seg_len;
+            }
+            shard_entries.push(ShardEntry {
+                rel_path: plan.rel_path.clone(),
+                byte_len: padded_len as u64,
+                extents,
+                prefetch_next_lba: 0,
+                prefetch_bytes: plan.prefetch_bytes,
+                cache_policy: plan.cache_policy,
+                align_requirement: plan.align_requirement,
+                flags: plan.flags,
+                shard_crc32c: shard_crc.finalize(),
+            });
+            next_lba += blocks as u64;
+        }
+
+        for shard in &mut shard_entries {
+            if let Some((next_path, _)) = prefetch_map.get(&shard.rel_path) {
+                shard.prefetch_next_lba = lba_by_path.get(next_path).copied().unwrap_or(0);
+            }
+        }
+
+        let manifest_lba = lba_by_path
+            .get(MANIFEST_FILE)
+            .copied()
+            .unwrap_or(start_lba_model);
+        let index_lba = lba_by_path.get(INDEX_FILE).copied().unwrap_or(0);
+        let manifest_blocks = shard_entries
+            .iter()
+            .find(|s| s.rel_path == MANIFEST_FILE)
+            .map(|s| s.extents.iter().map(|e| e.block_count).sum())
+            .unwrap_or(0);
+        let index_blocks = shard_entries
+            .iter()
+            .find(|s| s.rel_path == INDEX_FILE)
+            .map(|s| s.extents.iter().map(|e| e.block_count).sum())
+            .unwrap_or(0);
+
+        total_shards += shard_entries.len();
+        model_entries.push(ModelEntry {
+            name: build.manifest.name.clone(),
+            manifest_lba,
+            manifest_blocks,
+            index_lba,
+            index_blocks,
+            shards: shard_entries,
+        });
+    }
+
+    let sb = Superblock {
+        generation,
+        block_size: BLOCK_SIZE as u32,
+        total_blocks: dev.block_count(),
+        catalog_bucket_count: 1,
+        catalog_bucket_root: catalog_root,
+        data_start: catalog_root + 64,
+        volume_count: 1,
+        catalog_blocks: 0,
+        volumes: [{
+            VolumeDesc {
+                volume_id: 0,
+                device_slot: 0,
+                start_lba: 0,
+                block_count: dev.block_count(),
+            }
+        }; 16],
+    };
+
+    let catalog = Catalog {
+        models: model_entries,
+    };
+    write_image(dev, &catalog, &sb).map_err(|_| "escribir imagen".to_string())?;
+    Ok(BuildReport {
+        total_blocks: sb.total_blocks,
+        models: catalog.models.len(),
+        shards: total_shards,
+    })
+}
+
+fn plans_for_model(model_root: &Path) -> Result<ModelBuild, String> {
     let manifest_data = fs::read(model_root.join(MANIFEST_FILE))
         .map_err(|e| format!("leer manifest: {e}"))?;
     let manifest = Manifest::parse(&manifest_data).map_err(|_| "manifest inválido".to_string())?;
@@ -90,15 +253,6 @@ pub fn build_from_dir<D: BlockDevice>(
         }
     }
 
-    // El apunte de prefetch es «tras leer este shard, trae el siguiente». Los
-    // bytes tienen que ser los del shard siguiente y nada más.
-    //
-    // AVERÍA (2026-08-02): aquí había un 8 MiB fijo para todos. El shard que
-    // viene detrás ocupa decenas de KiB, así que cada prefetch arrastraba 2048
-    // bloques del disco —el resto del modelo y lo que hubiera después— y
-    // desalojaba lo que sí hacía falta. Con `tiny` (2,3 MiB) eso eran 54 272
-    // lecturas de 4 KiB para 577 bloques de modelo: 9,2 s de disco en una
-    // inferencia de 20 tokens.
     let tam = |rel: &str| -> u32 {
         fs::metadata(model_root.join(rel))
             .map(|m| m.len().min(u32::MAX as u64) as u32)
@@ -174,129 +328,7 @@ pub fn build_from_dir<D: BlockDevice>(
         });
     }
 
-    let catalog_root = SUPERBLOCK_SLOTS;
-    let mut next_lba = catalog_root + 64;
-    let mut shard_entries: Vec<ShardEntry> = Vec::new();
-    let mut lba_by_path: BTreeMap<String, u64> = BTreeMap::new();
-
-    // Escritura en streaming: un segmento (8 MiB) en RAM cada vez, con CRC
-    // de segmento y de shard incrementales. Nunca se carga un fichero entero.
-    let mut seg_buf = vec![0u8; SEGMENT_SIZE];
-    for plan in &plans {
-        use std::io::Read;
-        let padded_len = align_bytes(plan.len, plan.align_requirement);
-        let blocks = (padded_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        let start_lba = next_lba;
-        lba_by_path.insert(plan.rel_path.clone(), start_lba);
-
-        let mut file = match &plan.src {
-            PlanSource::File(p) => {
-                Some(fs::File::open(p).map_err(|e| format!("abrir {}: {e}", p.display()))?)
-            }
-            PlanSource::Inline(_) => None,
-        };
-        let mut shard_crc = sosomodel::Crc32cDigest::new();
-        let mut extents = Vec::new();
-        let mut off = 0usize;
-        while off < padded_len {
-            let seg_len = SEGMENT_SIZE.min(padded_len - off);
-            let buf = &mut seg_buf[..seg_len];
-            buf.fill(0);
-            let avail = plan.len.saturating_sub(off).min(seg_len);
-            if avail > 0 {
-                match &plan.src {
-                    PlanSource::File(_) => {
-                        file.as_mut()
-                            .unwrap()
-                            .read_exact(&mut buf[..avail])
-                            .map_err(|e| format!("leer {}: {e}", plan.rel_path))?;
-                    }
-                    PlanSource::Inline(d) => buf[..avail].copy_from_slice(&d[off..off + avail]),
-                }
-            }
-            let seg_crc = crc32c(buf);
-            shard_crc.update(buf);
-            write_payload(dev, start_lba + (off / BLOCK_SIZE) as u64, buf)
-                .map_err(|_| "escribir shard".to_string())?;
-            extents.push(Extent {
-                volume_id: 0,
-                start_lba: start_lba + (off / BLOCK_SIZE) as u64,
-                block_count: ((seg_len + BLOCK_SIZE - 1) / BLOCK_SIZE) as u64,
-                segment_crc32c: seg_crc,
-                stripe_width: 0,
-                stripe_index: 0,
-            });
-            off += seg_len;
-        }
-        shard_entries.push(ShardEntry {
-            rel_path: plan.rel_path.clone(),
-            byte_len: padded_len as u64,
-            extents,
-            prefetch_next_lba: 0,
-            prefetch_bytes: plan.prefetch_bytes,
-            cache_policy: plan.cache_policy,
-            align_requirement: plan.align_requirement,
-            flags: plan.flags,
-            shard_crc32c: shard_crc.finalize(),
-        });
-        next_lba += blocks as u64;
-    }
-
-    for shard in &mut shard_entries {
-        if let Some((next_path, _)) = prefetch_map.get(&shard.rel_path) {
-            shard.prefetch_next_lba = lba_by_path.get(next_path).copied().unwrap_or(0);
-        }
-    }
-
-    let manifest_lba = lba_by_path.get(MANIFEST_FILE).copied().unwrap_or(0);
-    let index_lba = lba_by_path.get(INDEX_FILE).copied().unwrap_or(0);
-    let manifest_blocks = shard_entries
-        .iter()
-        .find(|s| s.rel_path == MANIFEST_FILE)
-        .map(|s| s.extents.iter().map(|e| e.block_count).sum())
-        .unwrap_or(0);
-    let index_blocks = shard_entries
-        .iter()
-        .find(|s| s.rel_path == INDEX_FILE)
-        .map(|s| s.extents.iter().map(|e| e.block_count).sum())
-        .unwrap_or(0);
-
-    let catalog = Catalog {
-        models: vec![ModelEntry {
-            name: manifest.name.clone(),
-            manifest_lba,
-            manifest_blocks,
-            index_lba,
-            index_blocks,
-            shards: shard_entries,
-        }],
-    };
-
-    let sb = Superblock {
-        generation,
-        block_size: BLOCK_SIZE as u32,
-        total_blocks: dev.block_count(),
-        catalog_bucket_count: 1,
-        catalog_bucket_root: catalog_root,
-        data_start: catalog_root + 64,
-        volume_count: 1,
-        catalog_blocks: 0,
-        volumes: [{
-            VolumeDesc {
-                volume_id: 0,
-                device_slot: 0,
-                start_lba: 0,
-                block_count: dev.block_count(),
-            }
-        }; 16],
-    };
-
-    write_image(dev, &catalog, &sb).map_err(|_| "escribir imagen".to_string())?;
-    Ok(BuildReport {
-        total_blocks: sb.total_blocks,
-        models: 1,
-        shards: catalog.models[0].shards.len(),
-    })
+    Ok(ModelBuild { manifest, plans })
 }
 
 fn write_payload<D: BlockDevice>(dev: &mut D, start: u64, data: &[u8]) -> Result<(), BlockError> {

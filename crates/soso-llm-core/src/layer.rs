@@ -6,13 +6,14 @@
 
 use crate::gemm::{
     add_assign_f32, add_f32, matvec_f32, matvec_q4_k, matvec_q8_0, rmsnorm, rope_inplace,
-    silu_inplace, swiglu_inplace,
+    silu_inplace, swiglu_inplace, topk_softmax,
 };
 pub use crate::kv::{KvDtype, LayerKv};
 use crate::parallel::{RowParallel, Sequential};
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
+use sosomodel::index::TensorIndex;
 use sosomodel::layout::{DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0};
 use sosomodel::manifest::Manifest;
 
@@ -155,6 +156,10 @@ pub struct LayerScratch {
     pub gate: Vec<f32>,
     pub attn_out: Vec<f32>,
     pub head_out: Vec<f32>,
+    /// Logits del router MoE (num_experts).
+    pub router: Vec<f32>,
+    /// Acumulador de salida FFN MoE ponderada.
+    pub moe_acc: Vec<f32>,
     /// Masa softmax por token (H2O); reutilizada, crece con la ventana KV.
     pub mass_buf: Vec<f32>,
 }
@@ -162,11 +167,16 @@ pub struct LayerScratch {
 impl LayerScratch {
     pub fn new(m: &Manifest) -> Self {
         let h = m.hidden_dim as usize;
-        let ffn = m.ffn_dim as usize;
+        let ffn = if m.is_moe() {
+            m.expert_ffn_dim() as usize
+        } else {
+            m.ffn_dim as usize
+        };
         let heads = m.num_heads as usize;
         let head_dim = h / heads;
         let kv_dim = m.num_kv_heads as usize * head_dim;
         let kv_cap = (m.max_seq as usize).min(256).max(32);
+        let n_exp = if m.is_moe() { m.num_experts as usize } else { 0 };
         Self {
             residual: vec![0.0; h],
             norm_w: vec![0.0; h],
@@ -177,6 +187,8 @@ impl LayerScratch {
             gate: vec![0.0; ffn],
             attn_out: vec![0.0; h],
             head_out: vec![0.0; head_dim],
+            router: vec![0.0; n_exp.max(1)],
+            moe_acc: vec![0.0; h],
             mass_buf: vec![0.0; kv_cap],
         }
     }
@@ -236,7 +248,8 @@ impl<'a> LayerExecutor<'a> {
         source: &mut S,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         use_gpu: bool,
-        planner: Option<&crate::plan::ResourcePlanner>,
+        planner: Option<&mut crate::plan::ResourcePlanner>,
+        index: Option<&TensorIndex>,
         clock_ms: Option<fn() -> u64>,
     ) -> Result<LayerTiming, ()> {
         let tick = |c: Option<fn() -> u64>| c.map(|f| f()).unwrap_or(0);
@@ -246,7 +259,11 @@ impl<'a> LayerExecutor<'a> {
         let head_dim = h / heads;
         let kv_dim = kv_heads * head_dim;
         let group = heads / kv_heads;
-        let ffn = self.manifest.ffn_dim as usize;
+        let ffn = if self.manifest.is_moe() {
+            self.manifest.expert_ffn_dim() as usize
+        } else {
+            self.manifest.ffn_dim as usize
+        };
         let eps = self.manifest.rms_eps;
         let theta = self.manifest.rope_theta;
         let prefix = format!("L{layer:02}");
@@ -261,6 +278,7 @@ impl<'a> LayerExecutor<'a> {
         let name_ffn_down = format!("{prefix}.ffn_down");
         let seq = Sequential;
         let par: &dyn RowParallel = self.parallel.unwrap_or(&seq);
+        let planner_ro = planner.as_deref();
 
         // --- atención ---
         s.residual.copy_from_slice(hidden);
@@ -278,7 +296,7 @@ impl<'a> LayerExecutor<'a> {
             hidden,
             &mut s.q,
             par,
-            planner,
+            planner_ro,
             layer,
         )?;
         matvec_step(
@@ -291,7 +309,7 @@ impl<'a> LayerExecutor<'a> {
             hidden,
             &mut s.k,
             par,
-            planner,
+            planner_ro,
             layer,
         )?;
         matvec_step(
@@ -304,7 +322,7 @@ impl<'a> LayerExecutor<'a> {
             hidden,
             &mut s.v,
             par,
-            planner,
+            planner_ro,
             layer,
         )?;
         let t_attn0 = tick(clock_ms);
@@ -319,8 +337,8 @@ impl<'a> LayerExecutor<'a> {
         kv.append_f16(&s.k, &s.v);
         let seq = kv.tokens(kv_dim);
         let _ = pos;
-        let sparse = planner.is_some_and(|p| p.use_sparse_attn(seq));
-        let use_h2o = planner.is_some_and(|p| p.use_h2o());
+        let sparse = planner_ro.is_some_and(|p| p.use_sparse_attn(seq));
+        let use_h2o = planner_ro.is_some_and(|p| p.use_h2o());
         // Fast path: KV f16 denso sin masa → tiled SIMD (sin dequant por token).
         let fast_f16 = matches!(kv.dtype, KvDtype::F16) && !sparse && !use_h2o;
         if use_h2o && s.mass_buf.len() < seq {
@@ -382,60 +400,77 @@ impl<'a> LayerExecutor<'a> {
             &s.attn_out,
             &mut s.q,
             par,
-            planner,
+            planner_ro,
             layer,
         )?;
         add_f32(&s.residual, &s.q, hidden);
 
-        // --- FFN ---
+        // --- FFN (denso o MoE) ---
         s.residual.copy_from_slice(hidden);
         source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w)?;
         rmsnorm(hidden, &s.norm_w, eps);
 
-        matvec_step(
-            use_gpu,
-            gpu,
-            &name_ffn_up,
-            source.tensor_view(&name_ffn_up)?,
-            ffn,
-            h,
-            hidden,
-            &mut s.up,
-            par,
-            planner,
-            layer,
-        )?;
-        if self.has_gate {
+        if self.manifest.is_moe() {
+            self.forward_moe_ffn(
+                layer,
+                prefix,
+                h,
+                ffn,
+                hidden,
+                s,
+                source,
+                gpu,
+                use_gpu,
+                par,
+                planner,
+                index,
+            )?;
+        } else {
             matvec_step(
                 use_gpu,
                 gpu,
-                &name_ffn_gate,
-                source.tensor_view(&name_ffn_gate)?,
+                &name_ffn_up,
+                source.tensor_view(&name_ffn_up)?,
                 ffn,
                 h,
                 hidden,
-                &mut s.gate,
+                &mut s.up,
                 par,
-                planner,
+                planner_ro,
                 layer,
             )?;
-            swiglu_inplace(&mut s.up, &s.gate);
-        } else {
-            silu_inplace(&mut s.up);
+            if self.has_gate {
+                matvec_step(
+                    use_gpu,
+                    gpu,
+                    &name_ffn_gate,
+                    source.tensor_view(&name_ffn_gate)?,
+                    ffn,
+                    h,
+                    hidden,
+                    &mut s.gate,
+                    par,
+                    planner_ro,
+                    layer,
+                )?;
+                swiglu_inplace(&mut s.up, &s.gate);
+            } else {
+                silu_inplace(&mut s.up);
+            }
+            matvec_step(
+                use_gpu,
+                gpu,
+                &name_ffn_down,
+                source.tensor_view(&name_ffn_down)?,
+                h,
+                ffn,
+                &s.up,
+                hidden,
+                par,
+                planner_ro,
+                layer,
+            )?;
         }
-        matvec_step(
-            use_gpu,
-            gpu,
-            &name_ffn_down,
-            source.tensor_view(&name_ffn_down)?,
-            h,
-            ffn,
-            &s.up,
-            hidden,
-            par,
-            planner,
-            layer,
-        )?;
 
         add_assign_f32(hidden, &s.residual);
         let t_mv1 = tick(clock_ms);
@@ -447,5 +482,106 @@ impl<'a> LayerExecutor<'a> {
             timing.attn_ms = t_attn1.saturating_sub(t_attn0);
         }
         Ok(timing)
+    }
+
+    /// FFN MoE estilo Mixtral: router → top-k → SwiGLU por experto → suma ponderada.
+    fn forward_moe_ffn<S: TensorSource>(
+        &self,
+        layer: u32,
+        prefix: String,
+        h: usize,
+        ffn: usize,
+        hidden: &mut [f32],
+        s: &mut LayerScratch,
+        source: &mut S,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        use_gpu: bool,
+        par: &dyn RowParallel,
+        mut planner: Option<&mut crate::plan::ResourcePlanner>,
+        index: Option<&TensorIndex>,
+    ) -> Result<(), ()> {
+        let n_exp = self.manifest.num_experts as usize;
+        let top_k = self.manifest.num_experts_per_tok as usize;
+        if n_exp == 0 || top_k == 0 || s.router.len() < n_exp {
+            return Err(());
+        }
+        let name_router = format!("{prefix}.ffn_gate_inp");
+        matvec_step(
+            use_gpu,
+            gpu,
+            &name_router,
+            source.tensor_view(&name_router)?,
+            n_exp,
+            h,
+            hidden,
+            &mut s.router[..n_exp],
+            par,
+            planner.as_deref(),
+            layer,
+        )?;
+        let ranked = topk_softmax(&mut s.router[..n_exp], top_k);
+        let prefetch_shards = if let (Some(pl), Some(idx)) = (planner.as_mut(), index) {
+            let ids: alloc::vec::Vec<(u32, f32)> =
+                ranked.iter().map(|(i, w)| (*i as u32, *w)).collect();
+            pl.touch_moe_experts(layer, &ids, idx)
+        } else {
+            alloc::vec::Vec::new()
+        };
+        if !prefetch_shards.is_empty() {
+            source.prefetch_shards(&prefetch_shards);
+        }
+
+        s.moe_acc.fill(0.0);
+        for (expert, weight) in &ranked {
+            let ep = format!("{prefix}.E{expert:02}");
+            let name_gate = format!("{ep}.ffn_gate");
+            let name_up = format!("{ep}.ffn_up");
+            let name_down = format!("{ep}.ffn_down");
+            matvec_step(
+                use_gpu,
+                gpu,
+                &name_gate,
+                source.tensor_view(&name_gate)?,
+                ffn,
+                h,
+                hidden,
+                &mut s.gate,
+                par,
+                planner.as_deref(),
+                layer,
+            )?;
+            matvec_step(
+                use_gpu,
+                gpu,
+                &name_up,
+                source.tensor_view(&name_up)?,
+                ffn,
+                h,
+                hidden,
+                &mut s.up,
+                par,
+                planner.as_deref(),
+                layer,
+            )?;
+            swiglu_inplace(&mut s.up, &s.gate);
+            matvec_step(
+                use_gpu,
+                gpu,
+                &name_down,
+                source.tensor_view(&name_down)?,
+                h,
+                ffn,
+                &s.up,
+                &mut s.q,
+                par,
+                planner.as_deref(),
+                layer,
+            )?;
+            for i in 0..h {
+                s.moe_acc[i] += s.q[i] * weight;
+            }
+        }
+        hidden.copy_from_slice(&s.moe_acc);
+        Ok(())
     }
 }

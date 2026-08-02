@@ -20,4 +20,4 @@ pub use layout::*;
 pub use volume_set::{SingleDev, VolumeSet};
 
 #[cfg(feature = "std")]
-pub use builder::{build_from_dir, parse_size, BuildReport};
+pub use builder::{build_from_dir, build_from_dirs, parse_size, BuildReport};

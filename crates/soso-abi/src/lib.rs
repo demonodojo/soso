@@ -35,6 +35,7 @@ pub const SYS_GPU_READ: u64 = 33;
 pub const SYS_GPU_FREE: u64 = 34;
 /// Contadores de memoria física (frames de 4 KiB).
 pub const SYS_MEMINFO: u64 = 35;
+pub const SYS_IOSTAT: u64 = 36;
 
 /// Bits del valor que devuelve `SYS_GPU_SUBMIT` para SAXPY/MATVF.
 ///
@@ -136,6 +137,23 @@ pub struct MemInfo {
     pub free_frames: u64,
     /// Páginas mmap RO file-backed registradas y evictables por el kernel.
     pub reclaimable_frames: u64,
+}
+
+/// Respuesta de `SYS_IOSTAT`: contadores de E/S de bloque desde el arranque.
+///
+/// `peticiones` frente a `bloques` es la distinción que importa al agrupar
+/// lecturas: bajar bloques es leer menos, bajar peticiones es leer lo mismo en
+/// menos viajes al dispositivo.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct IoStat {
+    pub peticiones: u64,
+    pub bloques: u64,
+    pub nanos: u64,
+    pub escrituras: u64,
+    /// Caché de bloques de sosomfs (0 si no hay disco de modelos montado).
+    pub cache_aciertos: u64,
+    pub cache_fallos: u64,
 }
 
 // ---- errnos (el kernel devuelve -errno) ----

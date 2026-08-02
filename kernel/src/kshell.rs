@@ -44,7 +44,7 @@ fn exec(line: &str) {
 
     match cmd {
         "help" => {
-            println!("comandos: help spawn <elf> [args] ps ls cat stat write <ruta> <texto> mkdir <ruta> rm <ruta> df uptime mem blk blkread blkwrite pf panic halt");
+            println!("comandos: help spawn <elf> [args] ps ls cat stat write <ruta> <texto> mkdir <ruta> rm <ruta> df uptime mem io blk blkread blkwrite pf panic halt");
         }
         "spawn" => match args.first() {
             Some(ruta) => {
@@ -148,6 +148,25 @@ fn exec(line: &str) {
         "mem" => {
             let libres = crate::mm::FRAME_ALLOC.get().unwrap().lock().free_frames();
             println!("{} frames libres ({} MiB)", libres, libres * 4096 / (1024 * 1024));
+        }
+        "io" => {
+            if args.first() == Some(&"reset") {
+                crate::drivers::blkstat::reiniciar();
+                println!("contadores de disco a cero");
+            } else {
+                let (peticiones, bloques, nanos, escrituras) = crate::drivers::blkstat::leer();
+                let us_por_peticion = if peticiones > 0 { nanos / peticiones / 1000 } else { 0 };
+                println!(
+                    "disco: {peticiones} lecturas, {bloques} bloques, {} ms ({us_por_peticion} us/lectura), {escrituras} escrituras",
+                    nanos / 1_000_000
+                );
+                if let Some(m) = crate::fs::MODELS.get().and_then(|m| m.try_lock()) {
+                    let (aciertos, fallos) = m.cache.estadisticas();
+                    let total = aciertos + fallos;
+                    let pct = if total > 0 { aciertos * 100 / total } else { 0 };
+                    println!("caché sosomfs: {aciertos} aciertos, {fallos} fallos ({pct} %)");
+                }
+            }
         }
         "blk" => match virtio_blk::capacity_sectors() {
             Some(cap) => println!("{} sectores ({} MiB)", cap, cap * 512 / (1024 * 1024)),

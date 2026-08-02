@@ -86,6 +86,12 @@ fn convert(gguf_path: &str, out_dir: &Path, name: Option<&str>) -> Result<(), St
         .or_else(|| tokens.as_ref().map(|t| t.len() as u32))
         .unwrap_or(256);
     let max_seq = gguf.meta_u32("llama.context_length").unwrap_or(2048);
+    let num_experts = gguf.meta_u32("llama.expert_count").unwrap_or(0);
+    let num_experts_per_tok = gguf
+        .meta_u32("llama.expert_used_count")
+        .unwrap_or(if num_experts > 0 { 2 } else { 0 });
+    let is_moe = num_experts > 0;
+    let moe_ffn_dim = if is_moe { ffn_dim } else { 0 };
 
     let model_name = name
         .map(String::from)
@@ -148,11 +154,57 @@ fn convert(gguf_path: &str, out_dir: &Path, name: Option<&str>) -> Result<(), St
 
     for layer in 0..num_layers {
         let mut shards = Vec::new();
-        for (gguf_part, som_part) in layer_parts {
-            let gguf_name = format!("blk.{layer}.{gguf_part}.weight");
-            let som_name = format!("L{layer:02}.{som_part}");
-            if emit(&mut file, &mut index, &mut id, &gguf_name, &som_name)? {
-                shards.push(format!("{som_name}.tensor"));
+        if is_moe {
+            let attn_parts = [
+                ("attn_norm", "attn_norm"),
+                ("attn_q", "attn_q"),
+                ("attn_k", "attn_k"),
+                ("attn_v", "attn_v"),
+                ("attn_output", "attn_output"),
+                ("ffn_norm", "ffn_norm"),
+            ];
+            for (gguf_part, som_part) in attn_parts {
+                let gguf_name = format!("blk.{layer}.{gguf_part}.weight");
+                let som_name = format!("L{layer:02}.{som_part}");
+                if emit(&mut file, &mut index, &mut id, &gguf_name, &som_name)? {
+                    shards.push(format!("{som_name}.tensor"));
+                }
+            }
+            let router_gguf = format!("blk.{layer}.ffn_gate_inp.weight");
+            let router_som = format!("L{layer:02}.ffn_gate_inp");
+            if emit(
+                &mut file,
+                &mut index,
+                &mut id,
+                &router_gguf,
+                &router_som,
+            )? {
+                shards.push(format!("{router_som}.tensor"));
+            }
+            for (gguf_suffix, som_suffix) in [
+                ("ffn_gate_exps", "ffn_gate"),
+                ("ffn_up_exps", "ffn_up"),
+                ("ffn_down_exps", "ffn_down"),
+            ] {
+                emit_moe_experts(
+                    &mut file,
+                    &gguf,
+                    &mut index,
+                    &mut id,
+                    &format!("blk.{layer}.{gguf_suffix}.weight"),
+                    layer,
+                    num_experts,
+                    som_suffix,
+                    &shards_dir,
+                )?;
+            }
+        } else {
+            for (gguf_part, som_part) in layer_parts {
+                let gguf_name = format!("blk.{layer}.{gguf_part}.weight");
+                let som_name = format!("L{layer:02}.{som_part}");
+                if emit(&mut file, &mut index, &mut id, &gguf_name, &som_name)? {
+                    shards.push(format!("{som_name}.tensor"));
+                }
             }
         }
         prefetch.push(LayerPrefetch { layer, shards });
@@ -176,6 +228,9 @@ fn convert(gguf_path: &str, out_dir: &Path, name: Option<&str>) -> Result<(), St
         max_seq,
         rope_theta,
         rms_eps,
+        num_experts,
+        num_experts_per_tok,
+        moe_ffn_dim,
         prefetch,
     };
     fs::write(out_dir.join(MANIFEST_FILE), manifest.serialize()).map_err(|e| e.to_string())?;
@@ -191,6 +246,97 @@ fn convert(gguf_path: &str, out_dir: &Path, name: Option<&str>) -> Result<(), St
         .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Trocea un tensor 3D MoE `[n_expert, rows, cols]` en shards 2D por experto.
+fn emit_moe_experts(
+    file: &mut fs::File,
+    gguf: &GgufFile,
+    index: &mut TensorIndex,
+    id: &mut u32,
+    gguf_name: &str,
+    layer: u32,
+    num_experts: u32,
+    som_suffix: &str,
+    shards_dir: &Path,
+) -> Result<(), String> {
+    let Some(t) = gguf.tensors.get(gguf_name) else {
+        return Ok(());
+    };
+    if t.shape.len() != 3 {
+        return Err(format!("{gguf_name}: se esperaban 3 dimensiones MoE"));
+    }
+    let (payload, dtype) = read_tensor(file, gguf, t)?;
+    // GGUF ne[] rápido primero → sosomodel [n_expert, rows, cols].
+    let shape: Vec<u32> = t.shape.iter().rev().map(|&d| d as u32).collect();
+    let n_exp = shape[0] as usize;
+    let rows = shape[1] as usize;
+    let cols = shape[2] as usize;
+    if n_exp as u32 != num_experts {
+        return Err(format!(
+            "{gguf_name}: {n_exp} expertos en tensor vs {num_experts} en meta"
+        ));
+    }
+    for expert in 0..num_experts {
+        let slice = slice_expert_3d(&payload, dtype, rows, cols, expert as usize)?;
+        let som_name = format!("L{layer:02}.E{expert:02}.{som_suffix}");
+        let shard_name = format!("{som_name}.tensor");
+        fs::write(shards_dir.join(&shard_name), pack_shard(&slice)).map_err(|e| e.to_string())?;
+        let exp_shape = vec![rows as u32, cols as u32];
+        index.entries.push(match dtype {
+            DTYPE_Q8_0 => make_q8_0_entry(*id, &som_name, &shard_name, 0, &exp_shape),
+            DTYPE_Q4_K => make_q4_k_entry(*id, &som_name, &shard_name, 0, &exp_shape),
+            _ => make_f32_entry(*id, &som_name, &shard_name, 0, &exp_shape),
+        });
+        *id += 1;
+    }
+    Ok(())
+}
+
+fn slice_expert_3d(
+    payload: &[u8],
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    expert: usize,
+) -> Result<Vec<u8>, String> {
+    match dtype {
+        DTYPE_F32 => {
+            let row_bytes = cols * 4;
+            let expert_bytes = rows * row_bytes;
+            let off = expert * expert_bytes;
+            let end = off + expert_bytes;
+            payload
+                .get(off..end)
+                .map(|s| s.to_vec())
+                .ok_or_else(|| "slice experto F32 fuera de rango".into())
+        }
+        DTYPE_Q8_0 => {
+            if cols % 32 != 0 {
+                return Err(format!("Q8_0 MoE: cols={cols} no múltiplo de 32"));
+            }
+            let row_bytes = (cols / 32) * 36;
+            let expert_bytes = rows * row_bytes;
+            let off = expert * expert_bytes;
+            payload
+                .get(off..off + expert_bytes)
+                .map(|s| s.to_vec())
+                .ok_or_else(|| "slice experto Q8_0 fuera de rango".into())
+        }
+        DTYPE_Q4_K => {
+            if cols % 256 != 0 {
+                return Err(format!("Q4_K MoE: cols={cols} no múltiplo de 256"));
+            }
+            let row_bytes = (cols / 256) * Q4_K_BLOCK_BYTES;
+            let expert_bytes = rows * row_bytes;
+            let off = expert * expert_bytes;
+            payload
+                .get(off..off + expert_bytes)
+                .map(|s| s.to_vec())
+                .ok_or_else(|| "slice experto Q4_K fuera de rango".into())
+        }
+        other => Err(format!("dtype {other} no soportado en slice MoE")),
+    }
 }
 
 struct TensorInfo {

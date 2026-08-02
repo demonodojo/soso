@@ -97,6 +97,41 @@ fn arg_string(args: &[String], flag: &str, default: &str) -> String {
         .unwrap_or_else(|| default.into())
 }
 
+fn arg_bool(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
+}
+
+fn emit_tensor_f32(
+    shards: &std::path::Path,
+    index: &mut TensorIndex,
+    id: &mut u32,
+    base: &str,
+    shape: &[u32],
+    layer_u: u32,
+    expert_u: u32,
+    total_bytes: &mut u64,
+) {
+    let shard_name = format!("{base}.tensor");
+    let elems: usize = shape.iter().map(|&d| d as usize).product();
+    let is_norm = shape.len() == 1;
+    write_f32_shard(&shards.join(&shard_name), elems, move |i| {
+        if is_norm {
+            1.0f32
+        } else {
+            ((i as u32)
+                .wrapping_mul(0x9e37_79b9)
+                .wrapping_add(layer_u.wrapping_mul(0x100))
+                .wrapping_add(expert_u.wrapping_mul(0x10))) as f32
+                * 1e-9
+        }
+    });
+    *total_bytes += (elems * 4) as u64;
+    index
+        .entries
+        .push(make_f32_entry(*id, base, &shard_name, 0, shape));
+    *id += 1;
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // posicional = dir de salida; el resto son parejas --flag valor
@@ -104,7 +139,11 @@ fn main() {
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") {
-            i += 2;
+            if args[i] == "--moe" {
+                i += 1;
+            } else {
+                i += 2;
+            }
         } else {
             if out.is_none() {
                 out = Some(args[i].clone());
@@ -112,10 +151,22 @@ fn main() {
             i += 1;
         }
     }
-    let out = PathBuf::from(out.unwrap_or_else(|| "target/tiny-model".into()));
+    let out = PathBuf::from(out.unwrap_or_else(|| {
+        if arg_bool(&args, "--moe") {
+            "target/tiny-moe-model".into()
+        } else {
+            "target/tiny-model".into()
+        }
+    }));
 
-    let tiny = Manifest::tiny("tiny");
-    let name = arg_string(&args, "--name", "tiny");
+    let moe = arg_bool(&args, "--moe");
+    let tiny = if moe {
+        Manifest::tiny_moe("tiny-moe")
+    } else {
+        Manifest::tiny("tiny")
+    };
+    let default_name = if moe { "tiny-moe" } else { "tiny" };
+    let name = arg_string(&args, "--name", default_name);
     let hidden = arg_u32(&args, "--hidden", tiny.hidden_dim);
     let ffn = arg_u32(&args, "--ffn", tiny.ffn_dim);
     let num_layers = arg_u32(&args, "--layers", tiny.num_layers);
@@ -123,6 +174,21 @@ fn main() {
     let heads = arg_u32(&args, "--heads", tiny.num_heads);
     let kv_heads = arg_u32(&args, "--kv-heads", heads);
     let max_seq = arg_u32(&args, "--seq", tiny.max_seq);
+    let num_experts = if moe {
+        arg_u32(&args, "--experts", tiny.num_experts)
+    } else {
+        0
+    };
+    let num_experts_per_tok = if moe {
+        arg_u32(&args, "--experts-per-tok", tiny.num_experts_per_tok)
+    } else {
+        0
+    };
+    let moe_ffn = if moe {
+        arg_u32(&args, "--moe-ffn", tiny.moe_ffn_dim)
+    } else {
+        0
+    };
     let quant = arg_string(&args, "--quant", "f32");
     if quant != "f32" && quant != "q8_0" && quant != "q4_k" {
         eprintln!("mkmodel-soso: --quant {quant} no soportado (f32 | q8_0 | q4_k)");
@@ -133,28 +199,32 @@ fn main() {
     // cada FILA sea un número entero de superbloques (`cols % 256 == 0`). Con
     // hidden=128 el modelo se genera sin protestar y luego la inferencia falla con
     // un `Err(())` mudo, así que se rechaza aquí y se dice por qué.
-    if quant == "q4_k" && (hidden % 256 != 0 || ffn % 256 != 0) {
+    let ffn_check = if moe { moe_ffn } else { ffn };
+    if quant == "q4_k" && (hidden % 256 != 0 || ffn_check % 256 != 0) {
         eprintln!(
-            "mkmodel-soso: --quant q4_k exige hidden y ffn múltiplos de 256 \
-             (hidden={hidden}, ffn={ffn}); prueba --hidden 256 --ffn 512"
+            "mkmodel-soso: --quant q4_k exige hidden y ffn/moe-ffn múltiplos de 256 \
+             (hidden={hidden}, ffn={ffn_check})"
         );
         std::process::exit(2);
     }
 
     let mut prefetch = Vec::new();
     for layer in 0..num_layers {
-        prefetch.push(LayerPrefetch {
-            layer,
-            shards: vec![
-                format!("L{layer:02}.attn_norm.tensor"),
-                format!("L{layer:02}.attn_q.tensor"),
-                format!("L{layer:02}.attn_k.tensor"),
-                format!("L{layer:02}.attn_v.tensor"),
-                format!("L{layer:02}.ffn_norm.tensor"),
-                format!("L{layer:02}.ffn_up.tensor"),
-                format!("L{layer:02}.ffn_down.tensor"),
-            ],
-        });
+        let mut shards = vec![
+            format!("L{layer:02}.attn_norm.tensor"),
+            format!("L{layer:02}.attn_q.tensor"),
+            format!("L{layer:02}.attn_k.tensor"),
+            format!("L{layer:02}.attn_v.tensor"),
+            format!("L{layer:02}.attn_output.tensor"),
+            format!("L{layer:02}.ffn_norm.tensor"),
+        ];
+        if moe {
+            shards.push(format!("L{layer:02}.ffn_gate_inp.tensor"));
+        } else {
+            shards.push(format!("L{layer:02}.ffn_up.tensor"));
+            shards.push(format!("L{layer:02}.ffn_down.tensor"));
+        }
+        prefetch.push(LayerPrefetch { layer, shards });
     }
     let manifest = Manifest {
         name,
@@ -167,6 +237,9 @@ fn main() {
         max_seq,
         rope_theta: 10000.0,
         rms_eps: 1e-5,
+        num_experts,
+        num_experts_per_tok,
+        moe_ffn_dim: if moe { moe_ffn } else { 0 },
         prefetch,
     };
 
@@ -183,55 +256,97 @@ fn main() {
 
     for layer in 0..num_layers {
         let layer_u = layer;
-        // convención [filas, columnas] = [out_dim, in_dim]
-        let tensors: [(&str, Vec<u32>); 8] = [
+        let attn_tensors: [(&str, Vec<u32>); 6] = [
             (&format!("L{layer:02}.attn_norm"), vec![h]),
             (&format!("L{layer:02}.attn_q"), vec![h, h]),
             (&format!("L{layer:02}.attn_k"), vec![kv_dim, h]),
             (&format!("L{layer:02}.attn_v"), vec![kv_dim, h]),
             (&format!("L{layer:02}.attn_output"), vec![h, h]),
             (&format!("L{layer:02}.ffn_norm"), vec![h]),
-            (&format!("L{layer:02}.ffn_up"), vec![ffn, h]),
-            (&format!("L{layer:02}.ffn_down"), vec![h, ffn]),
         ];
-        for (base, shape) in tensors {
-            let shard_name = format!("{base}.tensor");
-            let elems: usize = shape.iter().map(|&d| d as usize).product();
-            let is_norm = shape.len() == 1;
-            let valor = move |i: usize| {
-                if is_norm {
-                    1.0f32
-                } else {
-                    ((i as u32).wrapping_mul(0x9e37_79b9) ^ layer_u) as f32 * 1e-9
-                }
-            };
-            // Los `norm` se quedan en F32 aunque se pida cuantización: es lo que
-            // hace un modelo real (son vectores, no matrices) y además el camino de
-            // rmsnorm no los descuantiza.
-            if cuantizado && !is_norm {
-                let plano: Vec<f32> = (0..elems).map(valor).collect();
-                let (bytes, entrada) = if quant == "q8_0" {
-                    (
-                        soso_llm_core::quant::quantize_q8_0(&plano),
-                        make_q8_0_entry(id, base, &shard_name, 0, &shape),
-                    )
-                } else {
-                    (
-                        soso_llm_core::quant::quantize_q4_k(&plano),
-                        make_q4_k_entry(id, base, &shard_name, 0, &shape),
-                    )
-                };
-                total_bytes += bytes.len() as u64;
-                write_bytes_shard(&shards.join(&shard_name), &bytes);
-                index.entries.push(entrada);
-            } else {
-                write_f32_shard(&shards.join(&shard_name), elems, valor);
-                total_bytes += (elems * 4) as u64;
-                index
-                    .entries
-                    .push(make_f32_entry(id, base, &shard_name, 0, &shape));
+        for (base, shape) in attn_tensors {
+            emit_tensor_f32(&shards, &mut index, &mut id, base, &shape, layer_u, 0, &mut total_bytes);
+        }
+        if moe {
+            emit_tensor_f32(
+                &shards,
+                &mut index,
+                &mut id,
+                &format!("L{layer:02}.ffn_gate_inp"),
+                &[num_experts, h],
+                layer_u,
+                0,
+                &mut total_bytes,
+            );
+            for expert in 0..num_experts {
+                let ep = format!("L{layer:02}.E{expert:02}");
+                emit_tensor_f32(
+                    &shards,
+                    &mut index,
+                    &mut id,
+                    &format!("{ep}.ffn_gate"),
+                    &[moe_ffn, h],
+                    layer_u,
+                    expert,
+                    &mut total_bytes,
+                );
+                emit_tensor_f32(
+                    &shards,
+                    &mut index,
+                    &mut id,
+                    &format!("{ep}.ffn_up"),
+                    &[moe_ffn, h],
+                    layer_u,
+                    expert,
+                    &mut total_bytes,
+                );
+                emit_tensor_f32(
+                    &shards,
+                    &mut index,
+                    &mut id,
+                    &format!("{ep}.ffn_down"),
+                    &[h, moe_ffn],
+                    layer_u,
+                    expert,
+                    &mut total_bytes,
+                );
             }
-            id += 1;
+        } else {
+            let dense: [(&str, Vec<u32>); 2] = [
+                (&format!("L{layer:02}.ffn_up"), vec![ffn, h]),
+                (&format!("L{layer:02}.ffn_down"), vec![h, ffn]),
+            ];
+            for (base, shape) in dense {
+                let shard_name = format!("{base}.tensor");
+                let elems: usize = shape.iter().map(|&d| d as usize).product();
+                let valor = move |i: usize| {
+                    ((i as u32).wrapping_mul(0x9e37_79b9) ^ layer_u) as f32 * 1e-9
+                };
+                if cuantizado {
+                    let plano: Vec<f32> = (0..elems).map(valor).collect();
+                    let (bytes, entrada) = if quant == "q8_0" {
+                        (
+                            soso_llm_core::quant::quantize_q8_0(&plano),
+                            make_q8_0_entry(id, base, &shard_name, 0, &shape),
+                        )
+                    } else {
+                        (
+                            soso_llm_core::quant::quantize_q4_k(&plano),
+                            make_q4_k_entry(id, base, &shard_name, 0, &shape),
+                        )
+                    };
+                    total_bytes += bytes.len() as u64;
+                    write_bytes_shard(&shards.join(&shard_name), &bytes);
+                    index.entries.push(entrada);
+                } else {
+                    write_f32_shard(&shards.join(&shard_name), elems, valor);
+                    total_bytes += (elems * 4) as u64;
+                    index
+                        .entries
+                        .push(make_f32_entry(id, base, &shard_name, 0, &shape));
+                }
+                id += 1;
+            }
         }
     }
 

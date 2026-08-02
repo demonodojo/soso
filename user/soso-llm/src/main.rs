@@ -31,6 +31,42 @@ use sosomodel::manifest::Manifest;
 
 libsoso::entry!(main);
 
+fn read_iostat() -> abi::IoStat {
+    let mut io = abi::IoStat::default();
+    let _ = sys::iostat(&mut io);
+    io
+}
+
+/// Imprime lo que ha costado el disco entre dos instantáneas.
+///
+/// `peticiones` frente a `bloques` es la cifra que dice si una optimización
+/// agrupó lecturas o simplemente leyó menos: son cosas distintas y hasta ahora
+/// no se distinguían porque no se medía ninguna de las dos.
+fn print_iostat(antes: &abi::IoStat) {
+    let ahora = read_iostat();
+    let peticiones = ahora.peticiones.saturating_sub(antes.peticiones);
+    let bloques = ahora.bloques.saturating_sub(antes.bloques);
+    let ms = ahora.nanos.saturating_sub(antes.nanos) / 1_000_000;
+    let aciertos = ahora.cache_aciertos.saturating_sub(antes.cache_aciertos);
+    let fallos = ahora.cache_fallos.saturating_sub(antes.cache_fallos);
+    let total_cache = aciertos + fallos;
+    let pct = if total_cache > 0 { aciertos * 100 / total_cache } else { 0 };
+    let us = if peticiones > 0 {
+        (ahora.nanos.saturating_sub(antes.nanos) / peticiones) / 1000
+    } else {
+        0
+    };
+    println!(
+        "soso-llm: disco — {} peticiones, {} bloques ({} KiB), {} ms ({} us/petición), caché {} %",
+        peticiones,
+        bloques,
+        bloques * 4,
+        ms,
+        us,
+        pct,
+    );
+}
+
 fn read_mem_snapshot() -> MemSnapshot {
     let mut mi = abi::MemInfo::default();
     if sys::meminfo(&mut mi) == 0 {
@@ -525,6 +561,7 @@ fn run_model(
     mut sampler: Sampler,
     force_cpu: bool,
 ) -> u8 {
+    let io0 = read_iostat();
     let num_layers = read_num_layers(name).unwrap_or(4);
     let mut bundle = match load_model(name, PipelineRole::Full, 0, num_layers) {
         Ok(b) => b,
@@ -651,6 +688,7 @@ fn run_model(
                 "soso-llm: generado ({} tokens, {} ms, {:.2} tok/s)",
                 n, elapsed_ms, tok_s
             );
+            print_iostat(&io0);
             if let Some(pl) = bundle.rt.planner.as_ref() {
                 let st = pl.stats();
                 println!(

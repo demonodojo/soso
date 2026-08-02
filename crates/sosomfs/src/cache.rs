@@ -41,6 +41,8 @@ pub struct BlockCache<V: VolumeSet> {
     /// cada lectura de 4 KiB volvía a prefetchear desde cero.
     prefetch_hechos: [u64; PREFETCH_RECIENTES],
     prefetch_siguiente: usize,
+    aciertos: u64,
+    fallos: u64,
 }
 
 impl<V: VolumeSet> BlockCache<V> {
@@ -55,11 +57,20 @@ impl<V: VolumeSet> BlockCache<V> {
             stream_cap: (capacity / 2).max(STREAM_WINDOW_MIN).min(capacity),
             prefetch_hechos: [u64::MAX; PREFETCH_RECIENTES],
             prefetch_siguiente: 0,
+            aciertos: 0,
+            fallos: 0,
         }
     }
 
     pub fn volume_mut(&mut self) -> &mut V {
         &mut self.vol
+    }
+
+    /// (aciertos, fallos) desde el montaje. El kernel los publica por
+    /// `SYS_IOSTAT`; sin esto, la amplificación de lectura sólo se puede medir
+    /// reinstrumentando a mano, que es como se perdieron las cifras anteriores.
+    pub fn estadisticas(&self) -> (u64, u64) {
+        (self.aciertos, self.fallos)
     }
 
     fn touch(&mut self, idx: usize) {
@@ -89,8 +100,10 @@ impl<V: VolumeSet> BlockCache<V> {
         if let Some(idx) = self.entries.iter().position(|e| e.lba == lba) {
             buf.copy_from_slice(&self.entries[idx].data);
             self.touch(idx);
+            self.aciertos += 1;
             return Ok(());
         }
+        self.fallos += 1;
         self.vol.read_lba(lba, buf)?;
         self.insert(lba, *buf, policy);
         Ok(())

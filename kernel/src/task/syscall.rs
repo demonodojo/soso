@@ -226,6 +226,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_TCP_ACCEPT => sys_tcp_accept(f, a1, a2),
         abi::SYS_READ_TIMEOUT => sys_read_timeout(f, a1, a2, a3, a4),
         abi::SYS_MEMINFO => sys_meminfo(a1),
+        abi::SYS_IOSTAT => sys_iostat(a1),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -1018,6 +1019,37 @@ fn sys_meminfo(out: u64) -> Result<u64, i64> {
     drop(alloc);
     let bytes = unsafe {
         core::slice::from_raw_parts((&info as *const abi::MemInfo).cast::<u8>(), n as usize)
+    };
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(0)
+    })
+}
+
+fn sys_iostat(out: u64) -> Result<u64, i64> {
+    let n = core::mem::size_of::<abi::IoStat>() as u64;
+    if !user_range_ok(out, n, true) {
+        return Err(-abi::EFAULT);
+    }
+    let (peticiones, bloques, nanos, escrituras) = crate::drivers::blkstat::leer();
+    // `try_lock`: el disco de modelos puede estar ocupado sirviendo una falta de
+    // página de otro core, y una estadística no merece bloquear a nadie.
+    let (cache_aciertos, cache_fallos) = crate::fs::MODELS
+        .get()
+        .and_then(|m| m.try_lock())
+        .map(|m| m.cache.estadisticas())
+        .unwrap_or((0, 0));
+    let info = abi::IoStat {
+        peticiones,
+        bloques,
+        nanos,
+        escrituras,
+        cache_aciertos,
+        cache_fallos,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts((&info as *const abi::IoStat).cast::<u8>(), n as usize)
     };
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;

@@ -29,7 +29,9 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
-| `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (host tool) |
+| `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (denso o MoE Mixtral, host tool) |
+| `cargo run -p mkmodel-soso -- --moe target/tiny-moe-model` | Generar modelo sintético MoE (4 expertos, top-2) |
+| `cargo run -p mkfs-sosomfs -- dir1 dir2 imagen.img --size 8G` | Empaquetar varios modelos en una imagen sosomfs |
 | `cargo xtask lx-build` | Compilar `liblxdde.a` (drivers Linux portados) |
 | `cargo xtask lx-build nouveau` | Compilar solo el port nouveau/nvkm (GPU, L6/G5 GO en GB205) |
 | `cargo xtask g1-check` | Checklist host G1 (IOMMU/VFIO, firmware, BAR0) |
@@ -62,7 +64,7 @@ QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
 
 1. Compiles userspace (`user/`) and copies ELFs to `rootfs/bin/`
 2. Runs `mkfs-soso` on `rootfs/` → data disk image (64 MiB default)
-3. Generates models disk (`target/soso-models.img`) with synthetic **tiny** model
+3. Generates models disk (`target/soso-models.img`) with synthetic **tiny** (denso) and **tiny-moe** (MoE Mixtral-style) models
 4. Injects SSH keys into the image:
    - Authorized key: `~/.ssh/id_ed25519.pub` if present, else `target/soso_test_key`
    - Host key: persistent seed in `rootfs/etc/ssh_host_key`
@@ -91,13 +93,16 @@ Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp).
 # Host-only sosofs crash-safety
 cargo test -q -p sosofs --features std
 
-# Host: soso-llm-core (planificador, kv KIVI/H2O, attn sparse, PLD), sosomodel, convert-gguf
+# Host: soso-llm-core (planificador, kv KIVI/H2O, attn sparse, PLD, MoE), sosomodel, convert-gguf
 cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 # Subconjuntos útiles tras tocar inferencia:
-#   cargo test -p soso-llm-core --features std -- plan:: kv:: attn::
+#   cargo test -p soso-llm-core --features std -- plan:: kv:: attn:: moe::
+# Hostrun MoE sintético:
+#   cargo run -q --release -p mkmodel-soso -- --moe target/tiny-moe-model
+#   cargo run --release -p soso-llm-core --features std --example hostrun -- target/tiny-moe-model @bos 4
 
-# End-to-end (builds, QEMU, serial log, TCP, SSH, soso-llm, init test meminfo,
-# inferencia con RAM 48M/reclaim, halt)
+# End-to-end (builds, QEMU, serial log, TCP, SSH, soso-llm tiny + tiny-moe,
+# init test meminfo, inferencia con RAM 48M/reclaim, halt)
 cargo xtask test
 
 # Decode tok/s con modelo sintético bench (default SMP=1,4 mem=8G)

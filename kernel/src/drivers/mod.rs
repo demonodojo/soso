@@ -1,3 +1,4 @@
+pub mod blkstat;
 pub mod dma;
 pub mod e1000e;
 pub mod fb;

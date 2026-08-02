@@ -250,6 +250,10 @@ pub fn meminfo(out: &mut abi::MemInfo) -> i64 {
     )
 }
 
+pub fn iostat(out: &mut abi::IoStat) -> i64 {
+    syscall4(abi::SYS_IOSTAT, out as *mut abi::IoStat as u64, 0, 0, 0)
+}
+
 pub fn tcp_connect(addr: &abi::SockAddr, timeout_ms: u64) -> i64 {
     syscall4(
         abi::SYS_TCP_CONNECT,

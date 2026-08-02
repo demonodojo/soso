@@ -104,6 +104,10 @@ pub struct PlannerStats {
     pub pld_accepted: u32,
     /// Intentos de draft PLD (cadenas iniciadas).
     pub pld_attempts: u32,
+    /// Cache LRU MoE: aciertos (experto ya residente).
+    pub moe_hits: u32,
+    /// Cache LRU MoE: fallos (experto frío, prefetch desde disco).
+    pub moe_misses: u32,
     /// 0 = f16, 1 = int8 (KIVI-lite).
     pub kv_dtype_i8: u32,
     pub h2o_enabled: u32,
@@ -147,6 +151,10 @@ pub struct ResourcePlanner {
     /// PLD: n preferido y tope de draft (se afina con la tasa de aceptación).
     pld_prefer_n: usize,
     pld_max_draft: usize,
+    /// Cache LRU de expertos MoE calientes (shard names).
+    moe_cache: Vec<(u32, u32, Vec<String>)>,
+    moe_cache_budget: u64,
+    moe_cache_bytes: u64,
     stats: PlannerStats,
 }
 
@@ -163,8 +171,43 @@ pub fn layer_tensor_prefix(layer: u32) -> String {
     format!("L{layer:02}.")
 }
 
+/// ¿Tensor de un experto MoE? (`L00.E02.ffn_gate`, etc.)
+pub fn is_expert_tensor(name: &str) -> bool {
+    // Tras "Lxx." debe aparecer "E" + dos dígitos.
+    let Some(rest) = name.strip_prefix("L") else {
+        return false;
+    };
+    let Some(after_layer) = rest.get(2..) else {
+        return false;
+    };
+    after_layer.starts_with(".E")
+}
+
+pub fn expert_tensor_prefix(layer: u32, expert: u32) -> String {
+    format!("L{layer:02}.E{expert:02}.")
+}
+
+pub fn expert_shard_names(layer: u32, expert: u32) -> [String; 3] {
+    let p = format!("L{layer:02}.E{expert:02}");
+    [
+        format!("{p}.ffn_gate"),
+        format!("{p}.ffn_up"),
+        format!("{p}.ffn_down"),
+    ]
+}
+
 pub fn bytes_for_layer(layer: u32, index: &TensorIndex) -> u64 {
     let prefix = layer_tensor_prefix(layer);
+    index
+        .entries
+        .iter()
+        .filter(|e| e.name.starts_with(&prefix) && !is_expert_tensor(&e.name))
+        .map(|e| e.byte_len)
+        .sum()
+}
+
+pub fn bytes_for_expert(layer: u32, expert: u32, index: &TensorIndex) -> u64 {
+    let prefix = expert_tensor_prefix(layer, expert);
     index
         .entries
         .iter()
@@ -231,6 +274,9 @@ impl ResourcePlanner {
             attn_ms_ewma: 0.0,
             pld_prefer_n: 4,
             pld_max_draft: 8,
+            moe_cache: Vec::new(),
+            moe_cache_budget: weight_budget / 4,
+            moe_cache_bytes: 0,
             stats: PlannerStats {
                 weight_budget_bytes: weight_budget,
                 model_weight_bytes,
@@ -239,7 +285,7 @@ impl ResourcePlanner {
                 ..Default::default()
             },
         };
-        planner.recompute_streaming_budgets(manifest);
+        planner.recompute_streaming_budgets(manifest, index);
         planner.rebuild_plan(manifest, index);
         planner
     }
@@ -250,7 +296,7 @@ impl ResourcePlanner {
         self.stats.weight_budget_bytes = self.weight_budget;
     }
 
-    pub fn recompute_streaming_budgets(&mut self, manifest: &Manifest) {
+    pub fn recompute_streaming_budgets(&mut self, manifest: &Manifest, index: &TensorIndex) {
         // LayerKV: cuantas capas caben en el presupuesto de pesos.
         //
         // El tope son las capas del modelo, NO `DEFAULT_RESIDENT_LAYERS`. Ese 2
@@ -305,6 +351,16 @@ impl ResourcePlanner {
         self.kv_window_tokens = window;
         self.stats.resident_layers = self.resident_layers;
         self.stats.kv_window_tokens = self.kv_window_tokens as u32;
+        // Presupuesto LRU para expertos MoE: ~25 % del de pesos, mínimo 1 experto.
+        self.moe_cache_budget = self.weight_budget / 4;
+        if manifest.is_moe() {
+            let per_expert = bytes_for_expert(0, 0, index);
+            if per_expert > 0 {
+                self.moe_cache_budget = self
+                    .moe_cache_budget
+                    .max(per_expert * manifest.num_experts_per_tok as u64);
+            }
+        }
         self.stats.kv_dtype_i8 = u32::from(matches!(self.kv_dtype, KvDtype::I8));
         self.stats.h2o_enabled = u32::from(self.use_h2o);
         self.stats.sparse_attn = u32::from(self.use_sparse);
@@ -414,6 +470,78 @@ impl ResourcePlanner {
         matches!(self.layer_dest(layer), ExecDest::Gpu) && self.vram_free > 0
     }
 
+    pub fn note_moe_miss(&mut self) {
+        self.stats.moe_misses = self.stats.moe_misses.saturating_add(1);
+    }
+
+    pub fn note_moe_hit(&mut self) {
+        self.stats.moe_hits = self.stats.moe_hits.saturating_add(1);
+    }
+
+    /// Registra uso de expertos en una capa; actualiza LRU y devuelve shards a prefetch.
+    pub fn touch_moe_experts(
+        &mut self,
+        layer: u32,
+        experts: &[(u32, f32)],
+        index: &TensorIndex,
+    ) -> Vec<String> {
+        let mut prefetch = Vec::new();
+        for &(expert, _) in experts {
+            let shards: Vec<String> = expert_shard_names(layer, expert)
+                .into_iter()
+                .map(|n| format!("{n}.tensor"))
+                .collect();
+            let bytes = bytes_for_expert(layer, expert, index);
+            let hit = self
+                .moe_cache
+                .iter()
+                .any(|(l, e, _)| *l == layer && *e == expert);
+            if hit {
+                self.note_moe_hit();
+            } else {
+                self.note_moe_miss();
+                prefetch.extend(shards.iter().cloned());
+            }
+            // Quitar entrada previa del mismo experto.
+            if let Some(pos) = self
+                .moe_cache
+                .iter()
+                .position(|(l, e, _)| *l == layer && *e == expert)
+            {
+                let (_, _, old) = self.moe_cache.remove(pos);
+                self.moe_cache_bytes = self.moe_cache_bytes.saturating_sub(bytes);
+                let _ = old;
+            }
+            // Insertar al frente (MRU).
+            while self.moe_cache_bytes.saturating_add(bytes) > self.moe_cache_budget
+                && !self.moe_cache.is_empty()
+            {
+                let (_, _, evicted) = self.moe_cache.pop().unwrap();
+                let evicted_bytes: u64 = evicted
+                    .iter()
+                    .filter_map(|s| {
+                        let name = s.strip_suffix(".tensor")?;
+                        index.find(name).map(|e| e.byte_len)
+                    })
+                    .sum();
+                self.moe_cache_bytes = self.moe_cache_bytes.saturating_sub(evicted_bytes);
+            }
+            self.moe_cache
+                .insert(0, (layer, expert, shards.clone()));
+            self.moe_cache_bytes = self.moe_cache_bytes.saturating_add(bytes);
+        }
+        prefetch
+    }
+
+    /// Shards de expertos en el cache LRU (mantener mapeados).
+    pub fn moe_cached_shards(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (_, _, shards) in &self.moe_cache {
+            out.extend(shards.iter().cloned());
+        }
+        out
+    }
+
     pub fn gpu_tensor_allowed(&self, layer: u32, tensor: &str) -> bool {
         self.layer_plans
             .get(layer as usize)
@@ -455,6 +583,18 @@ impl ResourcePlanner {
         keep
     }
 
+    /// Shards a retener tras `layer`, incluyendo expertos MoE en cache LRU.
+    pub fn keep_all_shards_after(
+        &self,
+        layer: u32,
+        layer_end: u32,
+        manifest: &Manifest,
+    ) -> Vec<String> {
+        let mut keep = self.keep_shards_after(layer, layer_end, manifest);
+        keep.extend(self.moe_cached_shards());
+        keep
+    }
+
     pub fn observe_layer(&mut self, layer: u32, dest: ExecDest, ms: u64) {
         let i = layer as usize;
         if i >= self.layer_ms_cpu.len() {
@@ -483,7 +623,7 @@ impl ResourcePlanner {
             return false;
         }
         self.tokens_since_replan = 0;
-        self.recompute_streaming_budgets(manifest);
+        self.recompute_streaming_budgets(manifest, index);
         self.rebuild_plan(manifest, index);
         self.stats.replans += 1;
         true
@@ -619,6 +759,7 @@ fn choose_dest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sosomodel::index::{make_f32_entry, TensorIndex};
     use sosomodel::manifest::Manifest;
 
     #[test]
@@ -683,6 +824,36 @@ mod tests {
         let d0 = planner.pld_max_draft;
         planner.tune_pld(4, 4);
         assert!(planner.pld_max_draft >= d0);
+    }
+
+    #[test]
+    fn moe_expert_cache_tracks_hits() {
+        let manifest = Manifest::tiny_moe("moe");
+        let mut index = TensorIndex::default();
+        for layer in 0..manifest.num_layers {
+            for expert in 0..manifest.num_experts {
+                let p = format!("L{layer:02}.E{expert:02}.ffn_gate");
+                index.entries.push(make_f32_entry(
+                    index.entries.len() as u32,
+                    &p,
+                    &format!("{p}.tensor"),
+                    0,
+                    &[manifest.expert_ffn_dim(), manifest.hidden_dim],
+                ));
+            }
+        }
+        let mem = MemSnapshot {
+            total_frames: 100_000,
+            free_frames: 50_000,
+            reclaimable_frames: 0,
+        };
+        let mut planner = ResourcePlanner::new(&manifest, &index, mem, 0, false);
+        let experts = [(0u32, 1.0), (1, 0.0)];
+        let pf = planner.touch_moe_experts(0, &experts, &index);
+        assert!(!pf.is_empty());
+        assert_eq!(planner.stats().moe_misses, 2);
+        let _ = planner.touch_moe_experts(0, &experts, &index);
+        assert!(planner.stats().moe_hits >= 2);
     }
 
     #[test]

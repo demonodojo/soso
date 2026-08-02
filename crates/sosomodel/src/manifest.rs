@@ -26,7 +26,28 @@ pub struct Manifest {
     pub rope_theta: f32,
     /// Épsilon del RMSNorm.
     pub rms_eps: f32,
+    /// Número de expertos MoE (0 = modelo denso clásico).
+    pub num_experts: u32,
+    /// Expertos activos por token (top-k del router).
+    pub num_experts_per_tok: u32,
+    /// Dimensión FFN por experto; 0 = usar `ffn_dim`.
+    pub moe_ffn_dim: u32,
     pub prefetch: Vec<LayerPrefetch>,
+}
+
+impl Manifest {
+    pub fn is_moe(&self) -> bool {
+        self.num_experts > 0
+    }
+
+    /// Dimensión del FFN por experto (MoE o denso).
+    pub fn expert_ffn_dim(&self) -> u32 {
+        if self.is_moe() && self.moe_ffn_dim > 0 {
+            self.moe_ffn_dim
+        } else {
+            self.ffn_dim
+        }
+    }
 }
 
 impl Manifest {
@@ -58,6 +79,46 @@ impl Manifest {
             max_seq: 128,
             rope_theta: 10000.0,
             rms_eps: 1e-5,
+            num_experts: 0,
+            num_experts_per_tok: 0,
+            moe_ffn_dim: 0,
+            prefetch,
+        }
+    }
+
+    /// Modelo MoE diminuto para tests (4 expertos, top-2, 2 capas).
+    pub fn tiny_moe(name: &str) -> Self {
+        let num_layers = 2u32;
+        let num_experts = 4u32;
+        let mut prefetch = Vec::new();
+        for layer in 0..num_layers {
+            prefetch.push(LayerPrefetch {
+                layer,
+                shards: alloc::vec![
+                    format!("L{layer:02}.attn_norm.tensor"),
+                    format!("L{layer:02}.attn_q.tensor"),
+                    format!("L{layer:02}.attn_k.tensor"),
+                    format!("L{layer:02}.attn_v.tensor"),
+                    format!("L{layer:02}.attn_output.tensor"),
+                    format!("L{layer:02}.ffn_norm.tensor"),
+                    format!("L{layer:02}.ffn_gate_inp.tensor"),
+                ],
+            });
+        }
+        Self {
+            name: String::from(name),
+            vocab_size: 64,
+            hidden_dim: 64,
+            num_layers,
+            num_heads: 4,
+            num_kv_heads: 4,
+            ffn_dim: 128,
+            max_seq: 64,
+            rope_theta: 10000.0,
+            rms_eps: 1e-5,
+            num_experts,
+            num_experts_per_tok: 2,
+            moe_ffn_dim: 32,
             prefetch,
         }
     }
@@ -76,6 +137,10 @@ impl Manifest {
         body.extend_from_slice(&self.num_kv_heads.to_le_bytes());
         body.extend_from_slice(&self.rope_theta.to_le_bytes());
         body.extend_from_slice(&self.rms_eps.to_le_bytes());
+        // v3: MoE (Mixtral / Qwen3-MoE estilo llama+expert_count)
+        body.extend_from_slice(&self.num_experts.to_le_bytes());
+        body.extend_from_slice(&self.num_experts_per_tok.to_le_bytes());
+        body.extend_from_slice(&self.moe_ffn_dim.to_le_bytes());
         body.extend_from_slice(&(self.prefetch.len() as u32).to_le_bytes());
         for pf in &self.prefetch {
             body.extend_from_slice(&pf.layer.to_le_bytes());
@@ -85,7 +150,7 @@ impl Manifest {
                 body.push(0);
             }
         }
-        pack_som(&body, 2, CACHE_ALIGN)
+        pack_som(&body, 3, CACHE_ALIGN)
     }
 
     pub fn parse(data: &[u8]) -> Result<Self, ()> {
@@ -102,6 +167,11 @@ impl Manifest {
             (r.u32()?, r.f32()?, r.f32()?)
         } else {
             (num_heads, 10000.0, 1e-5)
+        };
+        let (num_experts, num_experts_per_tok, moe_ffn_dim) = if version >= 3 {
+            (r.u32()?, r.u32()?, r.u32()?)
+        } else {
+            (0, 0, 0)
         };
         if num_heads == 0
             || num_kv_heads == 0
@@ -132,6 +202,9 @@ impl Manifest {
             max_seq,
             rope_theta,
             rms_eps,
+            num_experts,
+            num_experts_per_tok,
+            moe_ffn_dim,
             prefetch,
         })
     }

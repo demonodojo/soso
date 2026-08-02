@@ -134,9 +134,12 @@ impl Runtime {
         let h = self.manifest.hidden_dim;
         let vocab = self.manifest.vocab_size;
         let ffn = self.manifest.ffn_dim;
+        let moe_ffn = self.manifest.expert_ffn_dim();
         let heads = self.manifest.num_heads;
         let head_dim = h / heads;
         let kv_dim = self.manifest.num_kv_heads * head_dim;
+        let is_moe = self.manifest.is_moe();
+        let n_exp = self.manifest.num_experts;
 
         let check = |name: &str, want: &[u32], required: bool| -> Result<(), ()> {
             match self.index.find(name) {
@@ -165,9 +168,23 @@ impl Runtime {
             check(&alloc::format!("{p}.attn_v"), &[kv_dim, h], true)?;
             check(&alloc::format!("{p}.attn_output"), &[h, h], true)?;
             check(&alloc::format!("{p}.ffn_norm"), &[h], true)?;
-            check(&alloc::format!("{p}.ffn_up"), &[ffn, h], true)?;
-            check(&alloc::format!("{p}.ffn_down"), &[h, ffn], true)?;
-            check(&alloc::format!("{p}.ffn_gate"), &[ffn, h], self.has_gate)?;
+            if is_moe {
+                check(
+                    &alloc::format!("{p}.ffn_gate_inp"),
+                    &[n_exp, h],
+                    true,
+                )?;
+                for e in 0..n_exp {
+                    let ep = alloc::format!("{p}.E{e:02}");
+                    check(&alloc::format!("{ep}.ffn_gate"), &[moe_ffn, h], true)?;
+                    check(&alloc::format!("{ep}.ffn_up"), &[moe_ffn, h], true)?;
+                    check(&alloc::format!("{ep}.ffn_down"), &[h, moe_ffn], true)?;
+                }
+            } else {
+                check(&alloc::format!("{p}.ffn_up"), &[ffn, h], true)?;
+                check(&alloc::format!("{p}.ffn_down"), &[h, ffn], true)?;
+                check(&alloc::format!("{p}.ffn_gate"), &[ffn, h], self.has_gate)?;
+            }
         }
         Ok(())
     }
@@ -366,7 +383,8 @@ impl Runtime {
                 source,
                 gpu,
                 use_gpu,
-                self.planner.as_ref(),
+                self.planner.as_mut(),
+                Some(&self.index),
                 clock_ms,
             )?;
             if let (Some(c), Some(pl)) = (clock_ms, self.planner.as_mut()) {
@@ -378,7 +396,7 @@ impl Runtime {
             let keep = self
                 .planner
                 .as_ref()
-                .map(|pl| pl.keep_shards_after(layer, layer_end, &self.manifest));
+                .map(|pl| pl.keep_all_shards_after(layer, layer_end, &self.manifest));
             if let Some(keep) = keep {
                 if !keep.is_empty() {
                     let tr0 = clock_ms.map(|c| c());
@@ -634,7 +652,7 @@ impl Runtime {
             if self.forward_step_timed(source, parallel, gpu, clock_ms)? {
                 if let Some(pl) = self.planner.as_mut() {
                     pl.refresh_mem(refresh_mem());
-                    pl.recompute_streaming_budgets(&self.manifest);
+                    pl.recompute_streaming_budgets(&self.manifest, &self.index);
                 }
             }
             if drafts.is_empty() {

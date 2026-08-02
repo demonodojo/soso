@@ -52,6 +52,23 @@ pub fn softmax_inplace(x: &mut [f32]) {
     }
 }
 
+/// Softmax seguido de top-k; devuelve `(índice, peso)` ordenados por peso desc.
+pub fn topk_softmax(logits: &mut [f32], k: usize) -> alloc::vec::Vec<(usize, f32)> {
+    use alloc::vec::Vec;
+    softmax_inplace(logits);
+    let mut ranked: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
+    ranked.truncate(k.min(ranked.len()));
+    // Renormalizar pesos del top-k (Mixtral).
+    let sum: f32 = ranked.iter().map(|(_, w)| *w).sum();
+    if sum > 0.0 {
+        for (_, w) in &mut ranked {
+            *w /= sum;
+        }
+    }
+    ranked
+}
+
 pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
     let n = x.len() as f32;
     let var = x.iter().map(|v| v * v).sum::<f32>() / n;

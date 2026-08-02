@@ -251,9 +251,11 @@ halt
 
 ```sh
 soso-llm run tiny --prompt hola
+soso-llm run tiny-moe --prompt @bos --max 4
 ```
 
-Ejecuta inferencia greedy sobre el modelo en `/models/tiny/`. Ver sección
+Ejecuta inferencia greedy sobre modelos en `/models/<nombre>/`. Por defecto
+incluye **tiny** (denso) y **tiny-moe** (MoE estilo Mixtral). Ver sección
 [Modelos LLM](#modelos-llm-soso-llm) para importar modelos y más detalle.
 
 ---
@@ -270,7 +272,8 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 │   ├── authorized_key    # Clave pública ed25519 autorizada (32 bytes)
 │   └── ssh_host_key      # Semilla de la host key del servidor SSH
 ├── models/       # Modelos LLM (disco sosomfs, solo lectura)
-│   └── tiny/             # Modelo sintético de prueba
+│   ├── tiny/             # Modelo sintético denso (4 capas)
+│   └── tiny-moe/         # Modelo MoE sintético (4 expertos, top-2)
 └── hola.txt      # Fichero de ejemplo
 ```
 
@@ -421,26 +424,60 @@ soso incluye un segundo disco virtual (`virtio-blk1`) con el filesystem de model
 /models/tiny/index.som       # tabla tensor → shard + offset + shape + dtype
 /models/tiny/tokenizer.som   # vocabulario (solo modelos importados de GGUF)
 /models/tiny/shards/*.tensor # pesos empaquetados (F32 o Q8_0, con CRC32C)
+/models/tiny-moe/            # Modelo MoE sintético (Mixtral-style, 4 expertos top-2)
 ```
+
+El manifest v3 añade campos MoE: `num_experts`, `num_experts_per_tok`, `moe_ffn_dim`.
+Los tensores de expertos siguen la convención `L{i}.E{e}.ffn_{gate,up,down}`; el
+router es `L{i}.ffn_gate_inp`. Solo se cargan en RAM los expertos activos por token
+(streaming estilo AirLLM).
 
 ### Modelo de prueba incluido
 
-Al arrancar con `cargo xtask run`, se genera automáticamente el modelo sintético **tiny** (4 capas, hidden 128). Puedes ejecutar inferencia desde **sosh**:
+Al arrancar con `cargo xtask run`, se generan los modelos sintéticos **tiny** (4 capas,
+denso, hidden 128) y **tiny-moe** (2 capas, 4 expertos, top-2). Puedes ejecutar
+inferencia desde **sosh**:
 
 ```sh
 soso-llm run tiny --prompt hola
+soso-llm run tiny-moe --prompt @bos --max 4
 ```
 
 La salida muestra el texto generado con decode greedy. El modelo tiny usa un
 tokenizer byte-level; los modelos importados de GGUF usan su propio
-vocabulario (`tokenizer.som`).
+vocabulario (`tokenizer.som`). Para **tiny-moe** (vocab 64) usa `@bos` como
+prompt o tokens con id &lt; 64.
+
+### Modelos MoE (Mixtral-style)
+
+Los modelos con `num_experts > 0` en el manifest (v3) usan un router por capa
+(`ffn_gate_inp`) que elige los expertos activos por token (top-k). Solo esos
+expertos se cargan en memoria — el resto permanece en disco hasta que el
+router los necesite. Esto permite inferir modelos MoE mucho mayores que la
+RAM disponible (técnica inspirada en AirLLM).
+
+Ejemplo con Mixtral convertido desde GGUF:
+
+```sh
+# En el host
+cargo xtask convert-gguf mixtral-8x7b.Q4_K_M.gguf target/mixtral --name mixtral
+SOSO_MODELS_DIR=target/mixtral cargo xtask run
+
+# En el guest
+soso-llm run mixtral --prompt "Once upon a time" --max 16
+```
+
+Los expertos siguen la convención `L{i}.E{e}.ffn_{gate,up,down}` en el índice
+del modelo; el convertidor trocea automáticamente los tensores 3D `ffn_*_exps`
+del GGUF.
 
 ### Importar un modelo GGUF
 
 En la máquina anfitriona, convierte un fichero GGUF de arquitectura llama al
 layout `.som`. Se soportan tensores **F32, F16, Q8_0 y Q4_K** (los Q4_K_M
 descargables funcionan tal cual; sus tensores Q6_K se convierten a Q8_0),
-GQA, SwiGLU con `ffn_gate` y el vocabulario del tokenizer. Verificado con
+GQA, SwiGLU con `ffn_gate`, **MoE Mixtral** (`llama.expert_count > 0`: trocea
+`ffn_*_exps` en shards por experto) y el vocabulario del tokenizer. Verificado con
 TinyLlama-1.1B-Chat Q4_K_M:
 
 ```sh
@@ -563,7 +600,9 @@ degradar a velocidad de disco en lugar de morir por OOM.
 `soso-llm` incluye un **planificador de recursos** que lee la memoria libre
 (`SYS_MEMINFO`), reparte capas entre CPU/GPU/nodo remoto según latencia medida
 y replanifica cada pocos tokens. Además aplica streaming estilo **LayerKV /
-FlexGen** (pocas capas de pesos residentes + prefetch de la siguiente), ventana
+FlexGen** (pocas capas de pesos residentes + prefetch de la siguiente). En
+modelos **MoE**, los expertos se cargan bajo demanda (solo los activos por
+token) con cache LRU de expertos calientes entre tokens. También aplica ventana
 **StreamingLLM** / **H2O** en el KV (sink + tokens de mayor atención + recientes)
 y, con contextos largos, atención sparse por bloques (**Quest-lite**). Al
 arrancar y al terminar verás:
@@ -696,6 +735,7 @@ cat nota.txt
 ls /
 ls /models
 soso-llm run tiny --prompt hola
+soso-llm run tiny-moe --prompt @bos --max 4
 cat /etc/motd
 mkdir prueba
 halt
