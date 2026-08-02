@@ -40,11 +40,23 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             convert_gguf(&args);
         }
+        "fetch-hf" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            fetch_hf::run(&args);
+        }
         "package-usb" => {
             package_usb();
         }
         "package-usb-live" => {
             package_live::run();
+        }
+        "install-disk" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            install_disk::run(&args);
+        }
+        "flash-usb-live" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            flash_usb_live::run(&args);
         }
         "lx-build" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
@@ -70,7 +82,7 @@ fn main() {
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-distributed-llm | test-distributed-llm-3 | convert-gguf | package-usb | package-usb-live | lx-build | bench-llm | g1-check | g3-check)"
+                 (usa build | run | gdb | mkfs | test | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | lx-build | bench-llm | g1-check | g3-check)"
             );
             exit(2);
         }
@@ -78,8 +90,11 @@ fn main() {
 }
 
 mod bench;
+mod fetch_hf;
+mod flash_usb_live;
 mod g1_check;
 mod g3_check;
+mod install_disk;
 mod lx_build;
 mod package_live;
 mod test;
@@ -267,7 +282,7 @@ pub(crate) fn build_user() -> bool {
     let bin = root.join("rootfs/bin");
     std::fs::create_dir_all(&bin).expect("no se pudo crear rootfs/bin");
     let mut cambiado = false;
-    for prog in ["init", "sosh", "ls", "cat", "echo", "mkdir", "rm", "hexdump", "halt", "soso-llm"] {
+    for prog in ["init", "sosh", "ls", "cat", "echo", "mkdir", "rm", "hexdump", "halt", "soso-llm", "soso-install", "soso-hf"] {
         let src = out.join(prog);
         let dst = bin.join(prog);
         let igual = std::fs::read(&src).ok() == std::fs::read(&dst).ok();
@@ -692,7 +707,7 @@ fn chrono_lite_now() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn run_qemu(img: &Path, gdb: bool) {
+pub(crate) fn run_qemu(img: &Path, gdb: bool) {
     build_user();
     let (data, models) = mkfs(false);
     let mut qemu = Command::new("qemu-system-x86_64");

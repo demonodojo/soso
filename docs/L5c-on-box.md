@@ -1,18 +1,58 @@
 # L5c — Bring-up en placa (on-box)
 
-Arranque **live desde USB** sin modificar el Linux del disco interno.
+Arranque **live desde USB** sin modificar el Linux del disco interno, o **dual-boot**
+con un segundo disco dedicado.
 
 ## Resumen
 
 | Componente | Estado |
 |------------|--------|
 | Imagen live GPT (`soso-live.img`) | `cargo xtask package-usb-live` |
-| Montaje part2/3 vía GPT | `live_disk` en kernel |
+| USB live + instalador (`install-soso.sh`) | `sudo cargo xtask flash-usb-live /dev/sdX --yes` |
+| Instalación desde soso live | `soso-install list` / `soso-install nvme1 --yes` |
+| GRUB tras install live | `install-soso.sh --grub-only /dev/nvmeXn1` desde Linux |
+| Montaje part2/3 vía GPT (USB / NVMe) | `live_disk` en kernel |
 | Validación QEMU | `SOSO_QEMU_LIVE=1 cargo xtask run` |
 | USB BOT (mismo stick en placa) | Implementado — `live: GPT backend=Usb` |
-| NVMe interno | **No usar** en modo live |
+| NVMe dedicado (dual-boot) | Implementado — `live: GPT backend=Nvme(0)` |
+| NVMe interno con Linux | **No tocar** — usar otro disco o USB live |
 
-## Modo live (recomendado)
+## Dual-boot (segundo disco + GRUB)
+
+Si tienes un NVMe/SSD **vacío** aparte del Linux:
+
+```bash
+lsblk   # identificar el disco, p. ej. /dev/nvme1n1 — NO /dev/nvme0n1
+
+# Con cargo en la máquina de desarrollo:
+sudo cargo xtask install-disk /dev/nvme1n1 --yes
+
+# O con USB live que incluye instalador (sin cargo en el PC destino):
+sudo cargo xtask flash-usb-live /dev/sdX --yes   # flashear pendrive
+# … Linux en marcha, USB conectado …
+sudo /media/$USER/SOSO_INSTALL/install-soso.sh /dev/nvme1n1 --yes
+
+# reiniciar → menú GRUB → "soso"
+```
+
+Layout del disco (igual que USB live):
+
+1. **ESP** — kernel UEFI
+2. **sosofs** — rootfs
+3. **sosomfs** — modelos
+
+GRUB de Linux hace chainload a `/EFI/BOOT/BOOTX64.EFI` en la ESP de ese disco.
+El disco con Linux **no se modifica** (salvo el snippet `/etc/grub.d/41_soso`).
+
+Desinstalar la entrada GRUB:
+
+```bash
+sudo rm /etc/grub.d/41_soso && sudo update-grub
+```
+
+Ver también [`MANUAL-USUARIO.md`](../MANUAL-USUARIO.md) (sección dual-boot).
+
+## Modo live (recomendado para pruebas sin tocar discos)
 
 Un solo pendrive con tres particiones:
 
@@ -60,7 +100,7 @@ Tras arrancar desde USB, el kernel debe leer las particiones 2/3 **del mismo sti
 - xHCI se detecta e inicializa (RUN).
 - **BOT/read aún no implementado** → en placa real puede fallar el montaje live.
 
-**Workaround temporal:** segundo disco NVMe vacío dedicado a soso (modo clásico `package-usb`, no live).
+**Workaround temporal:** segundo disco NVMe vacío dedicado a soso (modo clásico `package-usb`, o dual-boot con `install-disk`).
 
 **Validación sin placa:** QEMU simula el disco live con virtio:
 
@@ -69,9 +109,9 @@ SOSO_QEMU_LIVE=1 cargo xtask run
 # Log esperado: live: GPT … | fs: sosofs live | sosh —
 ```
 
-## Modo clásico (segundo disco)
+## Modo clásico (segundo disco, manual)
 
-Si tienes un NVMe/SSD **vacío** aparte del Linux:
+Si prefieres copiar las imágenes a mano en lugar de `install-disk`:
 
 ```bash
 cargo xtask package-usb

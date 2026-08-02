@@ -1,0 +1,13 @@
+[package]
+name = "gguf2som"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[features]
+default = ["std"]
+std = ["sosomodel/std", "soso-llm-core/std"]
+
+[dependencies]
+sosomodel = { path = "../sosomodel" }
+soso-llm-core = { path = "../soso-llm-core" }

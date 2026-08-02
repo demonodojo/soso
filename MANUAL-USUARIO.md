@@ -471,6 +471,39 @@ Los expertos siguen la convención `L{i}.E{e}.ffn_{gate,up,down}` en el índice
 del modelo; el convertidor trocea automáticamente los tensores 3D `ffn_*_exps`
 del GGUF.
 
+### Descargar desde Hugging Face (host)
+
+En la máquina anfitriona puedes bajar un GGUF del Hub, convertirlo a `.som` y
+dejar listo el arranque con QEMU:
+
+```sh
+# elige Q4_K_M automáticamente si existe
+cargo xtask fetch-hf TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
+# repos gated: export HF_TOKEN=hf_…
+cargo xtask fetch-hf org/repo --file modelo.Q4_K_M.gguf --name mi-modelo --run
+```
+
+Cache en `target/hf-cache/`; modelos convertidos en `target/hf-models/<nombre>/`.
+Al terminar imprime `SOSO_MODELS_DIR=… SOSO_MODELS_SIZE=… cargo xtask run`.
+
+### Descargar desde Hugging Face (guest)
+
+Con red en QEMU/soso puedes instalar un modelo en `/var/models/` sin
+reconstruir la imagen de modelos en el host:
+
+```sh
+# token opcional para repos privados
+echo hf_… > /etc/hf_token
+
+soso-hf pull TinyLlama/TinyLlama-1.1B-Chat-v1.0
+soso-hf pull org/repo --file mixtral.Q4_K_M.gguf --name mixtral
+soso-llm run tinyllama --prompt hola
+```
+
+`soso-llm` busca modelos en `/models/` (disco de arranque) y luego en
+`/var/models/` (almacén RW en sosofs).
+
 ### Importar un modelo GGUF
 
 En la máquina anfitriona, convierte un fichero GGUF de arquitectura llama al
@@ -720,6 +753,87 @@ cargo run --release -p mkmodel-soso -- /tmp/tiny-q4k --name tiny --quant q4_k \
 Cuantizaciones GGUF distintas de F32/F16/Q8_0 (Q4_K…) aún no están
 soportadas. Nota: dentro de QEMU sin KVM la velocidad la limita la emulación
 TCG, no soso.
+
+---
+
+## Dual-boot con Linux (GRUB, UEFI)
+
+Si tienes un **segundo disco vacío** (sin montar) y Linux arranca en **UEFI**, puedes
+instalar soso ahí y elegir entre Linux y soso en el menú GRUB al reiniciar.
+
+### Requisitos
+
+| Requisito | Detalle |
+|-----------|---------|
+| Firmware | UEFI (no BIOS/Legacy en esta versión) |
+| Disco | Entero y sin montar (p. ej. `/dev/nvme1n1`, **no** el disco de Linux) |
+| Herramientas host | `dd`, `sgdisk`, `blkid`, `lsblk`, `findmnt` |
+| Permisos | `sudo` para escribir el disco y actualizar GRUB |
+
+### Instalación
+
+**Opción A — desde soso live (USB):**
+
+```sh
+# Tras arrancar desde USB live:
+soso-install list
+soso-install nvme1 --yes
+
+# Apagar, arrancar Linux (USB conectado), añadir GRUB:
+sudo /media/$USER/SOSO_INSTALL/install-soso.sh --grub-only /dev/nvme1n1
+```
+
+**Opción B — desde Linux (cargo):**
+
+```sh
+# 1. Identifica el disco vacío (comprueba que NO es el de Linux)
+lsblk
+
+# 2. Compila e instala (pide confirmación si omites --yes)
+sudo cargo xtask install-disk /dev/nvme1n1 --yes
+```
+
+**Opción C — USB live con instalador (sin cargo en el equipo destino):**
+
+```sh
+# En la máquina de desarrollo: generar artefactos
+cargo xtask package-usb-live
+
+# Flashear pendrive (live + partición SOSO_INSTALL con install-soso.sh)
+sudo cargo xtask flash-usb-live /dev/sdX --yes
+
+# En el PC con Linux (USB conectado): probar soso arrancando desde USB,
+# luego instalar en el disco vacío:
+lsblk
+sudo /media/$USER/SOSO_INSTALL/install-soso.sh /dev/nvme1n1 --yes
+# (o desde target/usb-live/: sudo ./install-soso.sh /dev/nvme1n1 --yes)
+```
+
+El instalador:
+
+1. Genera `soso-live.img` (ESP + sosofs + sosomfs), igual que el USB live.
+2. Escribe la imagen en el disco indicado.
+3. Amplía la partición de modelos si el disco es más grande que la imagen.
+4. Añade `/etc/grub.d/41_soso` con una entrada **soso** (chainload a `BOOTX64.EFI`).
+5. Ejecuta `update-grub`.
+
+Si no tienes permisos para GRUB, usa `--no-grub` y copia el snippet que deja en
+`target/install-disk/41_soso`.
+
+### Arranque
+
+Reinicia la máquina. En GRUB elige **soso**. Linux sigue intacto en su disco.
+
+Dentro de soso: consola serie o SSH (`ssh -i target/soso_test_key soso@<ip>`).
+
+### Desinstalar
+
+```sh
+sudo rm /etc/grub.d/41_soso
+sudo update-grub
+```
+
+El disco de soso puede borrarse o reutilizarse aparte; Linux no se modifica.
 
 ---
 

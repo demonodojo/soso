@@ -27,6 +27,7 @@ cargo xtask build          # compile kernel → target/soso-bios.img
 cargo xtask run            # build + QEMU q35, serial console on stdio
 cargo xtask gdb            # like run, frozen at boot; gdb -ex 'target remote :1234'
 cargo xtask test           # integration: FS, boot, TCP, SSH, soso-llm, halt
+cargo xtask fetch-hf     # host: Hugging Face → GGUF → .som
 cargo xtask convert-gguf   # host: GGUF → .som layout
 ```
 
@@ -97,6 +98,8 @@ Guest network: DHCP at boot, fallback **10.0.2.15/24** in QEMU slirp. Port forwa
 
 - [x] **Classic USB package** — `cargo xtask package-usb` (UEFI + separate data/models images)
 - [x] **Live USB image** — `cargo xtask package-usb-live` (single GPT stick: ESP + sosofs + sosomfs); see [`docs/L5c-on-box.md`](docs/L5c-on-box.md)
+- [x] **Live USB + installer** — `sudo cargo xtask flash-usb-live /dev/sdX --yes` (`install-soso.sh` on SOSO_INSTALL partition)
+- [x] **Dual-boot UEFI + Linux** — `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` (disco dedicado + entrada GRUB)
 - [x] **QEMU live mode** — `SOSO_QEMU_LIVE=1 cargo xtask run`
 
 ### lxdde and native GPU (L6 — G1→G5 GO on GB205)
@@ -145,6 +148,9 @@ Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G
 | Command | Action |
 |---------|--------|
 | `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
+| `cargo xtask package-usb-live` | Single GPT image (ESP + sosofs + sosomfs) for USB or install |
+| `sudo cargo xtask flash-usb-live /dev/sdX --yes` | Flash live USB + SOSO_INSTALL partition with `install-soso.sh` |
+| `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot: write live image to empty disk + GRUB entry |
 | `cargo xtask lx-build [port\|all]` | Build `liblxdde.a` (spike, testdrv, e1000e, nouveau) |
 | `cargo xtask g1-check` | Host checklist: IOMMU/VFIO, firmware, BAR0 |
 | `cargo xtask g3-check` | GSP bring-up checklist (firmware, modules, phases) |

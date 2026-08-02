@@ -1,6 +1,7 @@
 //! Disco live: lee particiones GPT (2=sosofs, 3=sosomfs) sobre un disco 512 B/LBA.
 //!
-//! Backend: virtio-blk0 (QEMU `SOSO_QEMU_LIVE`) o USB mass storage (placa real).
+//! Backend: USB mass storage, NVMe (dual-boot en disco dedicado), o virtio-blk0
+//! (QEMU `SOSO_QEMU_LIVE`).
 
 use block_dev::{Block, BlockDevice, BlockError, BLOCK_SIZE};
 use sosofs::layout::MAGIC as SOSOFS_MAGIC;
@@ -9,11 +10,13 @@ use spin::Once;
 const SECTOR: usize = 512;
 const GPT_HDR_LBA: u64 = 1;
 const GPT_PARTS_LBA: u64 = 2;
+const NVME_SLOTS: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiveBackend {
     Virtio0,
     Usb,
+    Nvme(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,15 +30,22 @@ static LIVE_ROOT: Once<Option<LivePart>> = Once::new();
 static LIVE_MODELS: Once<Option<LivePart>> = Once::new();
 
 pub fn init() {
-    // Preferir USB (stick de arranque) sobre virtio.
+    // Preferir USB (stick de arranque) sobre NVMe y virtio.
     if try_backend(LiveBackend::Usb).is_some() {
         return;
+    }
+    for slot in 0..NVME_SLOTS {
+        if crate::drivers::nvme::present_slot(slot) {
+            if try_backend(LiveBackend::Nvme(slot as u8)).is_some() {
+                return;
+            }
+        }
     }
     let _ = try_backend(LiveBackend::Virtio0);
 }
 
 fn try_backend(backend: LiveBackend) -> Option<()> {
-    if !sector_reader(backend, GPT_HDR_LBA, &mut [0u8; SECTOR]).is_ok() {
+    if sector_reader(backend, GPT_HDR_LBA, &mut [0u8; SECTOR]).is_err() {
         return None;
     }
     let mut hdr = [0u8; SECTOR];
@@ -109,13 +119,73 @@ fn sector_reader(backend: LiveBackend, lba: u64, buf: &mut [u8; SECTOR]) -> Resu
     match backend {
         LiveBackend::Virtio0 => crate::drivers::virtio_blk::read_sector(lba, buf).map_err(|_| ()),
         LiveBackend::Usb => crate::drivers::usb_storage::read_sector(lba, buf).map_err(|_| ()),
+        LiveBackend::Nvme(slot) => nvme_read_sector(slot, lba, buf),
     }
 }
 
 fn range_reader(backend: LiveBackend, lba: u64, buf: &mut [u8]) -> Result<(), ()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    if buf.len() % SECTOR != 0 {
+        return Err(());
+    }
     match backend {
         LiveBackend::Virtio0 => crate::drivers::virtio_blk::read_sectors(lba, buf).map_err(|_| ()),
         LiveBackend::Usb => crate::drivers::usb_storage::read_sectors(lba, buf).map_err(|_| ()),
+        LiveBackend::Nvme(slot) => nvme_read_sectors(slot, lba, buf),
+    }
+}
+
+/// GPT y `sgdisk` usan LBA de 512 B; el namespace NVMe puede ser 512 o 4096 B.
+fn nvme_read_sector(slot: u8, gpt_lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), ()> {
+    let slot = slot as usize;
+    let lba_size = crate::drivers::nvme::lba_size_slot(slot).ok_or(())?;
+    match lba_size {
+        512 => crate::drivers::nvme::read_lba_slot(slot, gpt_lba, buf).map_err(|_| ()),
+        4096 => {
+            let nvme_lba = gpt_lba / 8;
+            let off = (gpt_lba % 8) as usize * SECTOR;
+            let mut page = [0u8; 4096];
+            crate::drivers::nvme::read_lba_slot(slot, nvme_lba, &mut page).map_err(|_| ())?;
+            buf.copy_from_slice(&page[off..off + SECTOR]);
+            Ok(())
+        }
+        _ => {
+            crate::println!("live: NVMe slot {slot} LBA {lba_size} B no soportado (solo 512/4096)");
+            Err(())
+        }
+    }
+}
+
+fn nvme_read_sectors(slot: u8, gpt_lba: u64, buf: &mut [u8]) -> Result<(), ()> {
+    let mut lba = gpt_lba;
+    for chunk in buf.chunks_mut(SECTOR) {
+        let mut sec = [0u8; SECTOR];
+        nvme_read_sector(slot, lba, &mut sec)?;
+        chunk.copy_from_slice(&sec);
+        lba += 1;
+    }
+    Ok(())
+}
+
+fn nvme_write_sector(slot: u8, gpt_lba: u64, buf: &[u8; SECTOR]) -> Result<(), BlockError> {
+    let slot = slot as usize;
+    let lba_size = crate::drivers::nvme::lba_size_slot(slot).ok_or(BlockError::Io)?;
+    match lba_size {
+        512 => crate::drivers::nvme::write_lba_slot(slot, gpt_lba, buf).map_err(|_| BlockError::Io),
+        4096 => {
+            let nvme_lba = gpt_lba / 8;
+            let off = (gpt_lba % 8) as usize * SECTOR;
+            let mut page = [0u8; 4096];
+            crate::drivers::nvme::read_lba_slot(slot, nvme_lba, &mut page).map_err(|_| BlockError::Io)?;
+            page[off..off + SECTOR].copy_from_slice(buf);
+            crate::drivers::nvme::write_lba_slot(slot, nvme_lba, &page).map_err(|_| BlockError::Io)
+        }
+        _ => {
+            crate::println!("live: NVMe slot {slot} LBA {lba_size} B no soportado (solo 512/4096)");
+            Err(BlockError::Io)
+        }
     }
 }
 
@@ -215,6 +285,7 @@ fn write_sector(part: &LivePart, lba: u64, buf: &[u8; SECTOR]) -> Result<(), Blo
             .map_err(|_| BlockError::Io),
         LiveBackend::Usb => crate::drivers::usb_storage::write_sector(part.first_lba + lba, buf)
             .map_err(|_| BlockError::Io),
+        LiveBackend::Nvme(slot) => nvme_write_sector(slot, part.first_lba + lba, buf),
     }
 }
 

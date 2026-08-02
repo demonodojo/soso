@@ -37,6 +37,15 @@ pub const SYS_GPU_FREE: u64 = 34;
 pub const SYS_MEMINFO: u64 = 35;
 pub const SYS_IOSTAT: u64 = 36;
 
+/// Lista discos raw para instalación (`DiskInfo` en buffer de usuario).
+pub const SYS_DISK_LIST: u64 = 37;
+/// Lee sectores de 512 B: `(id, lba, buf, len)`.
+pub const SYS_DISK_READ: u64 = 38;
+/// Escribe sectores de 512 B en NVMe destino: `(id, lba, buf, len)`.
+pub const SYS_DISK_WRITE: u64 = 39;
+/// Resuelve un nombre DNS a IPv4 (`host_ptr`, `host_len`, `out: *mut u8[4]`).
+pub const SYS_DNS_RESOLVE: u64 = 40;
+
 /// Bits del valor que devuelve `SYS_GPU_SUBMIT` para SAXPY/MATVF.
 ///
 /// Son DOS preguntas distintas y hacían falta las dos: `ON_GPU` es "lo calculó
@@ -156,6 +165,28 @@ pub struct IoStat {
     pub cache_fallos: u64,
 }
 
+/// Tipos de disco para `DiskInfo.kind`.
+pub const DISK_KIND_USB: u32 = 0;
+pub const DISK_KIND_VIRTIO: u32 = 1;
+pub const DISK_KIND_NVME: u32 = 2;
+
+/// Flags de `DiskInfo.flags`.
+pub const DISK_FLAG_READONLY: u32 = 1;
+/// Disco de arranque live (origen de clonación).
+pub const DISK_FLAG_BOOT: u32 = 2;
+
+/// Entrada devuelta por `SYS_DISK_LIST`.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct DiskInfo {
+    pub id: u32,
+    pub kind: u32,
+    pub slot: u32,
+    pub sectors: u64,
+    pub flags: u32,
+    pub name: [u8; 16],
+}
+
 // ---- errnos (el kernel devuelve -errno) ----
 
 pub const ENOENT: i64 = 2;
@@ -177,6 +208,8 @@ pub const ENOTEMPTY: i64 = 39;
 pub const EPIPE: i64 = 32;
 pub const EAGAIN: i64 = 11;
 pub const EBUSY: i64 = 16;
+pub const EROFS: i64 = 30;
+pub const ENOTSUP: i64 = 95;
 pub const ECONNREFUSED: i64 = 61;
 pub const ENOTCONN: i64 = 107;
 
@@ -197,6 +230,8 @@ pub const O_RDONLY: u64 = 0;
 pub const O_WRONLY: u64 = 1;
 /// Con `O_WRONLY`: conserva el contenido existente y escribe al final.
 pub const O_APPEND: u64 = 2;
+/// Con `O_WRONLY`: crea el fichero si no existe.
+pub const O_CREAT: u64 = 4;
 
 /// Valor de stdio en `SpawnIo` para usar la tty del proceso (fd 0/1/2).
 pub const FD_INHERIT_TTY: u64 = u64::MAX;

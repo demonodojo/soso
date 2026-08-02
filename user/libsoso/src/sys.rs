@@ -254,6 +254,36 @@ pub fn iostat(out: &mut abi::IoStat) -> i64 {
     syscall4(abi::SYS_IOSTAT, out as *mut abi::IoStat as u64, 0, 0, 0)
 }
 
+pub fn disk_list(out: &mut [abi::DiskInfo]) -> i64 {
+    syscall4(
+        abi::SYS_DISK_LIST,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+        0,
+        0,
+    )
+}
+
+pub fn disk_read(id: u32, lba: u64, buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_DISK_READ,
+        id as u64,
+        lba,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    )
+}
+
+pub fn disk_write(id: u32, lba: u64, buf: &[u8]) -> i64 {
+    syscall4(
+        abi::SYS_DISK_WRITE,
+        id as u64,
+        lba,
+        buf.as_ptr() as u64,
+        buf.len() as u64,
+    )
+}
+
 pub fn tcp_connect(addr: &abi::SockAddr, timeout_ms: u64) -> i64 {
     syscall4(
         abi::SYS_TCP_CONNECT,
@@ -302,6 +332,21 @@ pub fn write_all(fd: u64, buf: &[u8]) -> Result<(), i64> {
         off += n as usize;
     }
     Ok(())
+}
+
+pub fn dns_resolve(host: &str, out: &mut [u8; 4]) -> Result<(), i64> {
+    let r = syscall4(
+        abi::SYS_DNS_RESOLVE,
+        host.as_ptr() as u64,
+        host.len() as u64,
+        out.as_mut_ptr() as u64,
+        0,
+    );
+    if r < 0 {
+        Err(r)
+    } else {
+        Ok(())
+    }
 }
 
 /// IPv4 + puerto en formato de red.

@@ -7,3 +7,4 @@ license = "GPL-2.0-only"
 [dependencies]
 sosomodel = { path = "../../crates/sosomodel", features = ["std"] }
 soso-llm-core = { path = "../../crates/soso-llm-core", features = ["std"] }
+gguf2som = { path = "../../crates/gguf2som", features = ["std"] }

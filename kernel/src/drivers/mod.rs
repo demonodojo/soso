@@ -9,6 +9,7 @@ pub mod nvidia_compute;
 pub mod nvidia_probe;
 pub mod nvme;
 pub mod pci;
+pub mod raw_disk;
 pub mod serial;
 pub mod virtio_blk;
 pub mod virtio_hal;

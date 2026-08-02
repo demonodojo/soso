@@ -10,6 +10,7 @@
 //! próxima pasada lo recoge.
 
 mod device;
+pub mod dns;
 pub mod ssh;
 mod tcp_user;
 

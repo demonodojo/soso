@@ -137,3 +137,11 @@ pub fn read_sectors(lba: u64, buf: &mut [u8]) -> Result<(), &'static str> {
 pub fn write_sector(_lba: u64, _buf: &[u8; SECTOR]) -> Result<(), &'static str> {
     Err("usb ro")
 }
+
+pub fn active() -> bool {
+    DISK.lock().is_some()
+}
+
+pub fn sector_count() -> Option<u64> {
+    DISK.lock().as_ref().map(|d| d.ms.sectors)
+}
