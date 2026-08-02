@@ -187,7 +187,12 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
         Ok(())
     }
 
-    fn read_plain(&mut self, out: &mut Vec<u8>, timeout_ms: u64) -> Result<(), HttpError> {
+    fn read_plain_to<S: BodySink>(
+        &mut self,
+        stream: &mut HttpStreamState,
+        sink: &mut S,
+        timeout_ms: u64,
+    ) -> Result<(), HttpError> {
         let mut out_buf = [0u8; 8192];
         loop {
             let discard = {
@@ -204,7 +209,7 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                         ConnectionState::ReadTraffic(mut rt) => {
                             while let Some(rec) = rt.next_record() {
                                 let rec = rec.map_err(|_| HttpError::Tls)?;
-                                out.extend_from_slice(rec.payload);
+                                stream.feed(rec.payload, sink)?;
                             }
                             drop(rt);
                         }
@@ -236,6 +241,98 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
     }
 }
 
+/// Destino del cuerpo HTTP: en RAM (respuestas pequeñas) o disco (descargas grandes).
+pub trait BodySink {
+    fn write_body(&mut self, chunk: &[u8]) -> Result<(), HttpError>;
+}
+
+struct VecSink<'a>(&'a mut Vec<u8>);
+
+impl BodySink for VecSink<'_> {
+    fn write_body(&mut self, chunk: &[u8]) -> Result<(), HttpError> {
+        self.0.extend_from_slice(chunk);
+        Ok(())
+    }
+}
+
+struct DiscardSink;
+
+impl BodySink for DiscardSink {
+    fn write_body(&mut self, _chunk: &[u8]) -> Result<(), HttpError> {
+        Ok(())
+    }
+}
+
+const MAX_HTTP_HEADER: usize = 16 * 1024;
+
+/// Acumula cabeceras HTTP y vuelca el cuerpo al sink en cuanto llega.
+struct HttpStreamState {
+    header_buf: Vec<u8>,
+    headers_done: bool,
+    discard_body: bool,
+    status: Option<u16>,
+    headers: Vec<(String, String)>,
+}
+
+impl HttpStreamState {
+    fn new() -> Self {
+        Self {
+            header_buf: Vec::new(),
+            headers_done: false,
+            discard_body: false,
+            status: None,
+            headers: Vec::new(),
+        }
+    }
+
+    fn feed<S: BodySink>(&mut self, chunk: &[u8], sink: &mut S) -> Result<(), HttpError> {
+        if !self.headers_done {
+            self.header_buf.extend_from_slice(chunk);
+            if self.header_buf.len() > MAX_HTTP_HEADER {
+                return Err(HttpError::Parse);
+            }
+            let Some(sep) = self
+                .header_buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+            else {
+                return Ok(());
+            };
+            let (status, headers) = parse_response_head(&self.header_buf[..sep])?;
+            self.status = Some(status);
+            self.headers = headers;
+            self.discard_body = (300..400).contains(&status);
+            self.headers_done = true;
+            let body = self.header_buf[sep + 4..].to_vec();
+            self.header_buf.clear();
+            if !self.discard_body && !body.is_empty() {
+                sink.write_body(&body)?;
+            }
+            return Ok(());
+        }
+        if !self.discard_body {
+            sink.write_body(chunk)?;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(u16, Vec<(String, String)>), HttpError> {
+        if let Some(status) = self.status {
+            return Ok((status, self.headers));
+        }
+        if !self.header_buf.is_empty() {
+            let sep = self
+                .header_buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .ok_or(HttpError::Parse)?;
+            let (status, headers) = parse_response_head(&self.header_buf[..sep])?;
+            return Ok((status, headers));
+        }
+        Err(HttpError::Parse)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpError {
     Parse,
@@ -244,12 +341,13 @@ pub enum HttpError {
     Dns,
 }
 
-/// GET HTTPS con redirects (hasta 8). `auth` opcional: token Bearer HF.
-pub fn https_get<T: TcpTransport>(
+/// GET HTTPS volcando el cuerpo a `sink` (p. ej. fichero). Sigue redirects (hasta 8).
+pub fn https_download<T: TcpTransport, S: BodySink>(
     transport: &T,
     url: &str,
     auth: Option<&str>,
-) -> Result<Response, HttpError> {
+    sink: &mut S,
+) -> Result<(u16, Vec<(String, String)>), HttpError> {
     let mut current = url.to_string();
     for _ in 0..8 {
         let (scheme, host, port, path) = parse_url(&current)?;
@@ -272,19 +370,30 @@ pub fn https_get<T: TcpTransport>(
         tls.handshake()?;
         let req = build_get(host, &path, auth);
         tls.write(req.as_bytes())?;
-        let mut raw = Vec::new();
-        tls.read_plain(&mut raw, 60_000)?;
+        let mut stream = HttpStreamState::new();
+        tls.read_plain_to(&mut stream, sink, 60_000)?;
         transport.close(fd);
-        let (status, headers, body) = parse_response(&raw)?;
+        let (status, headers) = stream.finish()?;
         if (300..400).contains(&status) {
             if let Some(loc) = header_value(&headers, "location") {
-                current = resolve_redirect(url, loc);
+                current = resolve_redirect(&current, loc);
                 continue;
             }
         }
-        return Ok(Response { status, body });
+        return Ok((status, headers));
     }
     Err(HttpError::Parse)
+}
+
+/// GET HTTPS con redirects (hasta 8). `auth` opcional: token Bearer HF.
+pub fn https_get<T: TcpTransport>(
+    transport: &T,
+    url: &str,
+    auth: Option<&str>,
+) -> Result<Response, HttpError> {
+    let mut body = Vec::new();
+    let (status, _) = https_download(transport, url, auth, &mut VecSink(&mut body))?;
+    Ok(Response { status, body })
 }
 
 fn build_get(host: &str, path: &str, auth: Option<&str>) -> String {
@@ -310,9 +419,8 @@ fn parse_url(url: &str) -> Result<(&str, &str, u16, String), HttpError> {
     }
 }
 
-fn parse_response(raw: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), HttpError> {
-    let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or(HttpError::Parse)?;
-    let head = core::str::from_utf8(&raw[..sep]).map_err(|_| HttpError::Parse)?;
+fn parse_response_head(head: &[u8]) -> Result<(u16, Vec<(String, String)>), HttpError> {
+    let head = core::str::from_utf8(head).map_err(|_| HttpError::Parse)?;
     let mut lines = head.split("\r\n");
     let status_line = lines.next().ok_or(HttpError::Parse)?;
     let status = status_line
@@ -326,6 +434,12 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), H
             headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
         }
     }
+    Ok((status, headers))
+}
+
+fn parse_response(raw: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), HttpError> {
+    let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or(HttpError::Parse)?;
+    let (status, headers) = parse_response_head(&raw[..sep])?;
     let body = raw[sep + 4..].to_vec();
     Ok((status, headers, body))
 }
@@ -392,6 +506,39 @@ mod tests {
         let (st, _, body) = parse_response(raw).unwrap();
         assert_eq!(st, 200);
         assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn http_stream_state_chunks() {
+        let mut stream = HttpStreamState::new();
+        let mut out = Vec::new();
+        stream.feed(b"HTTP/1.1 200 OK\r\n", &mut VecSink(&mut out)).unwrap();
+        assert!(out.is_empty());
+        stream
+            .feed(b"Content-Length: 5\r\n\r\nhel", &mut VecSink(&mut out))
+            .unwrap();
+        assert_eq!(out, b"hel");
+        stream.feed(b"lo", &mut VecSink(&mut out)).unwrap();
+        assert_eq!(out, b"hello");
+        let (st, _) = stream.finish().unwrap();
+        assert_eq!(st, 200);
+    }
+
+    #[test]
+    fn http_stream_discards_redirect_body() {
+        let mut stream = HttpStreamState::new();
+        let mut out = Vec::new();
+        stream
+            .feed(
+                b"HTTP/1.1 302 Found\r\nLocation: https://x/y\r\n\r\nignored",
+                &mut VecSink(&mut out),
+            )
+            .unwrap();
+        stream.feed(b"more", &mut VecSink(&mut out)).unwrap();
+        assert!(out.is_empty());
+        let (st, headers) = stream.finish().unwrap();
+        assert_eq!(st, 302);
+        assert_eq!(header_value(&headers, "location"), Some("https://x/y"));
     }
 
     #[test]

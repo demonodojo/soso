@@ -1,10 +1,9 @@
-//! HTTPS y descarga a fichero en guest.
+//! HTTPS y descarga a fichero en guest (streaming a disco).
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use libsoso::sys;
 use soso_abi::SockAddr;
-use soso_http::{HttpError, Response, TcpTransport};
+use soso_http::{BodySink, HttpError, Response, TcpTransport};
 
 struct Net;
 
@@ -35,6 +34,17 @@ impl TcpTransport for Net {
     }
 }
 
+struct FileSink {
+    fd: u64,
+}
+
+impl BodySink for FileSink {
+    fn write_body(&mut self, chunk: &[u8]) -> Result<(), HttpError> {
+        sys::write_all(self.fd, chunk).map_err(|_| HttpError::Io)
+    }
+}
+
+/// Respuestas pequeñas (JSON del árbol Hub) en RAM.
 pub fn https_get_body(url: &str, token: Option<&str>) -> Result<Vec<u8>, HttpError> {
     let Response { status, body } = soso_http::https_get(&Net, url, token)?;
     if status != 200 {
@@ -43,21 +53,19 @@ pub fn https_get_body(url: &str, token: Option<&str>) -> Result<Vec<u8>, HttpErr
     Ok(body)
 }
 
+/// Descarga grande: escribe cada chunk TLS en `dest` (StreamWrite del kernel).
 pub fn download_url(url: &str, dest: &str, token: Option<&str>) -> Result<(), HttpError> {
-    let data = https_get_body(url, token)?;
     let fd = sys::open(dest, soso_abi::O_WRONLY | soso_abi::O_CREAT);
     if fd < 0 {
         return Err(HttpError::Io);
     }
-    let mut off = 0usize;
-    while off < data.len() {
-        let n = sys::write(fd as u64, &data[off..]);
-        if n <= 0 {
-            let _ = sys::close(fd as u64);
-            return Err(HttpError::Io);
-        }
-        off += n as usize;
+    let fd = fd as u64;
+    let mut sink = FileSink { fd };
+    let (status, _) = soso_http::https_download(&Net, url, token, &mut sink)?;
+    let _ = sys::close(fd);
+    if status != 200 {
+        let _ = sys::unlink(dest);
+        return Err(HttpError::Parse);
     }
-    let _ = sys::close(fd as u64);
     Ok(())
 }
