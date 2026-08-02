@@ -60,7 +60,29 @@ struct NvmeCtrl {
     lba_shift: u8,
     n_lba: u64,
     next_cid: AtomicU16,
+    /// Bytes por comando. Sale de MDTS del Identify Controller, acotado a
+    /// `REBOTE_PAGINAS`. Antes era **4 KiB fijo** «para simplicidad»: leer
+    /// 128 MiB costaba 32 768 comandos, y cada uno reservaba, mapeaba sin
+    /// caché y liberaba su propia página de rebote.
+    max_req_bytes: usize,
+    /// Rebote DMA persistente, contiguo, mapeado write-back. Se reserva una
+    /// vez por controlador y no se libera: la versión anterior lo hacía por
+    /// comando, y `map_dma_uc` **nunca desmapea**, así que cada 4 KiB de E/S
+    /// fugaba direcciones virtuales y tablas de páginas.
+    rebote_phys: dma::PhysAddr,
+    rebote_virt: *mut u8,
+    /// Página de lista PRP (direcciones de la 2.ª en adelante del rebote).
+    prp_list_phys: dma::PhysAddr,
+    prp_list_virt: *mut u8,
 }
+
+// SAFETY: los punteros crudos sólo se tocan con el Mutex del controlador
+// tomado, igual que los de `Queue`.
+unsafe impl Send for NvmeCtrl {}
+
+/// Páginas del rebote DMA por controlador: 32 × 4 KiB = 128 KiB, el mismo tope
+/// que usa sosomfs por petición.
+const REBOTE_PAGINAS: usize = sosomfs::MAX_REQ_BLOCKS;
 
 static CTRL: Once<Mutex<NvmeCtrl>> = Once::new();
 static CTRL1: Once<Mutex<NvmeCtrl>> = Once::new();
@@ -224,18 +246,46 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
         lba_shift: 9,
         n_lba: 0,
         next_cid: AtomicU16::new(1),
+        max_req_bytes: 4096,
+        rebote_phys: 0,
+        rebote_virt: core::ptr::null_mut(),
+        prp_list_phys: 0,
+        prp_list_virt: core::ptr::null_mut(),
     };
 
     // Identify Controller (valida admin queue).
-    let (idc_phys, _) = dma::alloc_zeroed_uc(1);
+    let (idc_phys, idc_v) = dma::alloc_zeroed_uc(1);
     if let Err(e) = admin_identify_ctrl(&mut ctrl, idc_phys) {
         println!("nvme[{slot}]: identify ctrl: {e}");
         dump_admin_cq(&ctrl);
         dma::free_pages(idc_phys, 1);
         return Err(());
     }
+    // MDTS (byte 77): tamaño máximo de transferencia en unidades de MPSMIN,
+    // que aquí es 4 KiB porque arriba se rechaza cualquier otro. 0 = sin
+    // límite. Se leía el Identify entero y se tiraba sin mirar este byte, y por
+    // eso el driver se creía limitado a una página.
+    let mdts = unsafe { idc_v.as_ptr().add(77).read_volatile() };
+    let tope_ctrl = if mdts == 0 || mdts >= 32 {
+        usize::MAX
+    } else {
+        4096usize.saturating_mul(1 << mdts)
+    };
+    ctrl.max_req_bytes = tope_ctrl.min(REBOTE_PAGINAS * dma::PAGE_SIZE);
     dma::free_pages(idc_phys, 1);
-    println!("nvme[{slot}]: identify ctrl OK (dstrd={dstrd})");
+    println!(
+        "nvme[{slot}]: identify ctrl OK (dstrd={dstrd}, MDTS={mdts} → {} KiB/comando)",
+        ctrl.max_req_bytes / 1024
+    );
+
+    // Rebote de datos: contiguo y write-back (el DMA es coherente en x86; sólo
+    // las colas necesitan UC). La lista PRP sí va UC: la lee el dispositivo.
+    let (reb_phys, reb_v) = dma::alloc_zeroed(REBOTE_PAGINAS);
+    ctrl.rebote_phys = reb_phys;
+    ctrl.rebote_virt = reb_v.as_ptr();
+    let (prp_phys, prp_v) = dma::alloc_zeroed_uc(1);
+    ctrl.prp_list_phys = prp_phys;
+    ctrl.prp_list_virt = prp_v.as_ptr();
 
     // Create I/O CQ then SQ (antes de MSI-X: el admin queue se polea).
     let (io_cq_phys, io_cq_v) = dma::alloc_zeroed_uc(pages_for(QUEUE_ENTRIES as usize * CQE_SIZE));
@@ -471,39 +521,62 @@ pub fn read_lba_slot(slot: usize, lba: u64, buf: &mut [u8]) -> Result<(), &'stat
     if buf.len() % lba_size != 0 {
         return Err("len no alineado a LBA");
     }
-    let nlb = (buf.len() / lba_size) as u32;
-    if nlb == 0 {
+    if buf.is_empty() {
         return Ok(());
     }
-    // Una página DMA de rebote (máx 4 KiB por comando para simplicidad).
-    let max = dma::PAGE_SIZE;
+    if ctrl.rebote_virt.is_null() {
+        return Err("nvme sin rebote DMA");
+    }
+    let max = ctrl.max_req_bytes;
     let mut done = 0usize;
     while done < buf.len() {
         let chunk = (buf.len() - done).min(max);
         let chunk_nlb = (chunk / lba_size) as u32;
-        let (phys, ptr) = dma::alloc_zeroed_uc(1);
         let mut sqe = [0u8; SQE_SIZE];
         sqe[0] = OPC_IO_READ;
         sqe[4..8].copy_from_slice(&ctrl.nsid.to_le_bytes());
-        let prp = phys as u64;
-        sqe[24..32].copy_from_slice(&prp.to_le_bytes());
+        let (prp1, prp2) = prp_para(&ctrl, chunk);
+        sqe[24..32].copy_from_slice(&prp1.to_le_bytes());
+        sqe[32..40].copy_from_slice(&prp2.to_le_bytes());
         let slba = lba + (done / lba_size) as u64;
         sqe[40..48].copy_from_slice(&slba.to_le_bytes());
         // CDW12: NLB (0-based)
         let cdw12 = chunk_nlb - 1;
         sqe[48..52].copy_from_slice(&cdw12.to_le_bytes());
-        let r = submit_sync(&mut ctrl, false, &mut sqe);
-        if r.is_ok() {
-            unsafe {
-                core::ptr::copy_nonoverlapping(ptr.as_ptr(), buf.as_mut_ptr().add(done), chunk);
-            }
+        let rebote = ctrl.rebote_virt;
+        submit_sync(&mut ctrl, false, &mut sqe)?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(rebote, buf.as_mut_ptr().add(done), chunk);
         }
-        dma::free_pages(phys, 1);
-        r?;
         done += chunk;
-        let _ = chunk_nlb;
     }
     Ok(())
+}
+
+/// PRP1/PRP2 para `bytes` desde el rebote del controlador.
+///
+/// Una página → sólo PRP1. Dos → PRP2 es la segunda página. Más → PRP2 apunta
+/// a la lista PRP, que se rellena aquí con las páginas 2..n. Con el tope de
+/// 128 KiB caben 31 entradas en una página de 512: nunca hay que encadenar.
+fn prp_para(ctrl: &NvmeCtrl, bytes: usize) -> (u64, u64) {
+    let base = ctrl.rebote_phys as u64;
+    let paginas = bytes.div_ceil(dma::PAGE_SIZE);
+    if paginas <= 1 {
+        return (base, 0);
+    }
+    if paginas == 2 {
+        return (base, base + dma::PAGE_SIZE as u64);
+    }
+    for i in 1..paginas {
+        let entrada = base + (i * dma::PAGE_SIZE) as u64;
+        unsafe {
+            ctrl.prp_list_virt
+                .cast::<u64>()
+                .add(i - 1)
+                .write_volatile(entrada);
+        }
+    }
+    (base, ctrl.prp_list_phys as u64)
 }
 
 /// Escribe `buf` en LBA `lba`.
@@ -518,30 +591,47 @@ pub fn write_lba_slot(slot: usize, lba: u64, buf: &[u8]) -> Result<(), &'static 
     if buf.len() % lba_size != 0 {
         return Err("len no alineado a LBA");
     }
-    let max = dma::PAGE_SIZE;
+    if buf.is_empty() {
+        return Ok(());
+    }
+    if ctrl.rebote_virt.is_null() {
+        return Err("nvme sin rebote DMA");
+    }
+    let max = ctrl.max_req_bytes;
     let mut done = 0usize;
     while done < buf.len() {
         let chunk = (buf.len() - done).min(max);
         let chunk_nlb = (chunk / lba_size) as u32;
-        let (phys, ptr) = dma::alloc_zeroed_uc(1);
         unsafe {
-            core::ptr::copy_nonoverlapping(buf.as_ptr().add(done), ptr.as_ptr(), chunk);
+            core::ptr::copy_nonoverlapping(buf.as_ptr().add(done), ctrl.rebote_virt, chunk);
         }
         let mut sqe = [0u8; SQE_SIZE];
         sqe[0] = OPC_IO_WRITE;
         sqe[4..8].copy_from_slice(&ctrl.nsid.to_le_bytes());
-        let prp = phys as u64;
-        sqe[24..32].copy_from_slice(&prp.to_le_bytes());
+        let (prp1, prp2) = prp_para(&ctrl, chunk);
+        sqe[24..32].copy_from_slice(&prp1.to_le_bytes());
+        sqe[32..40].copy_from_slice(&prp2.to_le_bytes());
         let slba = lba + (done / lba_size) as u64;
         sqe[40..48].copy_from_slice(&slba.to_le_bytes());
         let cdw12 = chunk_nlb - 1;
         sqe[48..52].copy_from_slice(&cdw12.to_le_bytes());
-        let r = submit_sync(&mut ctrl, false, &mut sqe);
-        dma::free_pages(phys, 1);
-        r?;
+        submit_sync(&mut ctrl, false, &mut sqe)?;
         done += chunk;
     }
     Ok(())
+}
+
+/// `buf.len()/4096` bloques consecutivos desde el bloque `start`.
+pub fn read_blocks4k_slot(slot: usize, start: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+    let lba_size = lba_size_slot(slot).ok_or("nvme no init")?;
+    read_lba_slot(slot, start * (4096 / lba_size as u64), buf)
+}
+
+/// Bloques de 4 KiB que admite el controlador en un solo comando.
+pub fn max_blocks4k_slot(slot: usize) -> usize {
+    slot_ctrl(slot)
+        .map(|c| (c.lock().max_req_bytes / 4096).max(1))
+        .unwrap_or(1)
 }
 
 /// Lee un bloque de 4 KiB (índice de bloque sosofs/sosomfs).

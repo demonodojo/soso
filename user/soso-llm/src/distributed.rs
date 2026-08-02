@@ -14,7 +14,7 @@ use soso_llm_core::pipeline::{
 };
 use soso_llm_core::runtime::Runtime;
 use soso_llm_core::sample::Sampler;
-use soso_llm_core::source::MmapTensorSource;
+use soso_llm_core::layer::TensorSource;
 use soso_llm_core::tokenizer::{StreamDecoder, Tokenizer};
 
 pub struct DistributedConfig {
@@ -85,7 +85,7 @@ fn recv_msg(
 /// Head en modo standby: reintenta hasta tomar el control del cluster tras failover.
 pub fn run_head_standby(
     rt: &mut Runtime,
-    source: &mut MmapTensorSource<impl soso_llm_core::source::FileMapper>,
+    source: &mut impl TensorSource,
     tok: &Tokenizer,
     cfg: &DistributedConfig,
     prompt: &str,
@@ -111,7 +111,7 @@ pub fn run_head_standby(
 
 pub fn run_head(
     rt: &mut Runtime,
-    source: &mut MmapTensorSource<impl soso_llm_core::source::FileMapper>,
+    source: &mut impl TensorSource,
     tok: &Tokenizer,
     cfg: &DistributedConfig,
     prompt: &str,
@@ -280,7 +280,7 @@ fn hello_matches_node(
 
 fn run_head_step(
     rt: &mut Runtime,
-    source: &mut MmapTensorSource<impl soso_llm_core::source::FileMapper>,
+    source: &mut impl TensorSource,
     head_seg: soso_llm_core::pipeline::PipelineSegment,
     token: u32,
     want_token: bool,
@@ -368,7 +368,7 @@ fn recv_token_from_chain(
 /// Nodo persistente: re-escucha tras caída del head o timeout de sesión.
 pub fn run_node(
     rt: &mut Runtime,
-    source: &mut MmapTensorSource<impl soso_llm_core::source::FileMapper>,
+    source: &mut impl TensorSource,
     cfg: &DistributedConfig,
     par: Option<&dyn RowParallel>,
 ) -> Result<(), ()> {
@@ -398,7 +398,7 @@ pub fn run_node(
 
 fn run_node_session(
     rt: &mut Runtime,
-    source: &mut MmapTensorSource<impl soso_llm_core::source::FileMapper>,
+    source: &mut impl TensorSource,
     cfg: &DistributedConfig,
     par: Option<&dyn RowParallel>,
     stream: TcpFd,

@@ -217,7 +217,7 @@ fn convert(gguf_path: &str, out_dir: &Path, name: Option<&str>) -> Result<(), St
         return Err("el GGUF no contiene token_embd.weight".into());
     }
 
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         name: model_name,
         vocab_size: vocab,
         hidden_dim: hidden,
@@ -231,8 +231,10 @@ fn convert(gguf_path: &str, out_dir: &Path, name: Option<&str>) -> Result<(), St
         num_experts,
         num_experts_per_tok,
         moe_ffn_dim,
+        layers: Vec::new(),
         prefetch,
     };
+    manifest.fill_layers_from_globals();
     fs::write(out_dir.join(MANIFEST_FILE), manifest.serialize()).map_err(|e| e.to_string())?;
     fs::write(out_dir.join(INDEX_FILE), index.serialize()).map_err(|e| e.to_string())?;
 

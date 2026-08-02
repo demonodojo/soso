@@ -4,7 +4,7 @@ use soso_llm_core::gemm::{matvec_f32, topk_softmax};
 use soso_llm_core::plan::ResourcePlanner;
 use soso_llm_core::runtime::{MemoryTensorSource, Runtime};
 use sosomodel::index::{make_f32_entry, TensorIndex};
-use sosomodel::manifest::Manifest;
+use sosomodel::manifest::{AttnKind, Manifest};
 
 fn build_tiny_moe_tensors() -> (Manifest, TensorIndex, MemoryTensorSource) {
     let manifest = Manifest::tiny_moe("test-moe");
@@ -79,6 +79,27 @@ fn build_tiny_moe_tensors() -> (Manifest, TensorIndex, MemoryTensorSource) {
     }
 
     (manifest, index, tensors)
+}
+
+#[test]
+fn manifest_v4_moe_roundtrip() {
+    let m = Manifest::tiny_moe("moe");
+    let parsed = Manifest::parse(&m.serialize()).unwrap();
+    assert_eq!(parsed.num_experts, 4);
+    assert_eq!(parsed.num_experts_per_tok, 2);
+    assert_eq!(parsed.moe_ffn_dim, 32);
+    assert_eq!(parsed.layers.len(), 2);
+    assert_eq!(parsed.layers[0].ffn_kind, sosomodel::FfnKind::Moe);
+}
+
+#[test]
+fn runtime_rechaza_mla() {
+    let mut m = Manifest::tiny("mla");
+    m.layers[0].attn_kind = AttnKind::Mla;
+    assert!(m.supported_by_runtime().is_err());
+    let index = TensorIndex::default();
+    let rt = Runtime::new(m, index, 0, 0);
+    assert!(rt.validate_shapes().is_err());
 }
 
 #[test]
@@ -176,6 +197,31 @@ fn moe_planner_lru_registra_hits() {
     assert!(
         stats2.moe_hits > hits0,
         "segundo token debe reutilizar expertos calientes"
+    );
+}
+
+#[test]
+fn moe_speculative_hits_en_segundo_token() {
+    let (manifest, index, mut source) = build_tiny_moe_tensors();
+    let mem = soso_llm_core::plan::MemSnapshot {
+        total_frames: 100_000,
+        free_frames: 50_000,
+        reclaimable_frames: 0,
+    };
+    let mut rt = Runtime::new(manifest.clone(), index, 0, 0);
+    let planner = ResourcePlanner::new(&manifest, &rt.index, mem, 0, false);
+    rt.set_planner(planner);
+    rt.embed_token(0, &mut source).unwrap();
+    rt.forward_layers_range(0, manifest.num_layers, &mut source, None, &mut None)
+        .unwrap();
+    rt.advance_pos();
+    rt.embed_token(0, &mut source).unwrap();
+    rt.forward_layers_range(0, manifest.num_layers, &mut source, None, &mut None)
+        .unwrap();
+    let stats = rt.planner.as_ref().unwrap().stats();
+    assert!(
+        stats.moe_spec_hits > 0,
+        "segundo token debe acertar hint MoE especulativo"
     );
 }
 

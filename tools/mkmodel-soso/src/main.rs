@@ -226,7 +226,7 @@ fn main() {
         }
         prefetch.push(LayerPrefetch { layer, shards });
     }
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         name,
         vocab_size: vocab,
         hidden_dim: hidden,
@@ -240,8 +240,10 @@ fn main() {
         num_experts,
         num_experts_per_tok,
         moe_ffn_dim: if moe { moe_ffn } else { 0 },
+        layers: Vec::new(),
         prefetch,
     };
+    manifest.fill_layers_from_globals();
 
     let shards = out.join(SHARDS_DIR);
     fs::create_dir_all(&shards).expect("crear shards");

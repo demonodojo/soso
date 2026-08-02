@@ -347,6 +347,15 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
             "soso-llm no generó salida esperada; stdout: {texto:?}"
         ));
     }
+    // El coste de disco de la carga en frío, a la vista aunque el paso pase.
+    // Es gratis (ya se ha ejecutado) y es la única forma de que una regresión de
+    // E/S se note sin volver a instrumentar el kernel a mano.
+    for l in texto
+        .lines()
+        .filter(|l| l.contains("soso-llm: disco") || l.contains("soso-llm: carga en frío"))
+    {
+        println!("      {}", l.trim());
+    }
     if !texto.contains("soso-llm: planificador") {
         return Err(format!(
             "soso-llm no mostró el planificador de recursos; stdout: {texto:?}"

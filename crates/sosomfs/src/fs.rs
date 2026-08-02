@@ -12,6 +12,15 @@ use crc::{CRC_32_ISCSI, Crc};
 
 const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
+/// Tope de bloques por petición al dispositivo: 32 × 4 KiB = 128 KiB.
+///
+/// No es un número redondo por gusto. El rebote DMA de virtio pide páginas
+/// **físicamente contiguas** y `dma::alloc_pages` las recicla por número exacto
+/// de páginas (y panica si no las encuentra), así que las peticiones tienen que
+/// ser pocas tallas distintas y pequeñas. 128 KiB es además la alineación con
+/// la que el builder coloca los shards de streaming (`ALIGN_GPU_DMA_64K` × 2).
+pub const MAX_REQ_BLOCKS: usize = 32;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
     Io,
@@ -367,6 +376,16 @@ impl<V: VolumeSet> Sosomfs<V> {
         if offset % BLOCK_SIZE != 0 || len % BLOCK_SIZE != 0 || out.len() < len {
             return Err(FsError::Corrupt);
         }
+        // Tope por petición. Es el mínimo entre lo que admite el dispositivo y
+        // MAX_REQ_BLOCKS, y ese segundo tope no es estético: virtio rebota por
+        // un buffer DMA **físicamente contiguo** (`dma::alloc_pages`, que
+        // ademas panica si no lo encuentra), así que pedir 2 MiB de una vez
+        // sería pedir 512 páginas contiguas por cada falta de página.
+        let max = self
+            .cache
+            .volume_mut()
+            .max_blocks_per_request()
+            .clamp(1, MAX_REQ_BLOCKS);
         let end = offset + len;
         let mut cur = offset;
         let mut out_off = 0usize;
@@ -374,16 +393,16 @@ impl<V: VolumeSet> Sosomfs<V> {
         for ext in &shard.extents {
             let ext_end = file_pos + (ext.block_count as usize) * BLOCK_SIZE;
             while cur < end && cur >= file_pos && cur < ext_end {
+                // El trozo se recorta al final del extent: los LBAs sólo son
+                // consecutivos dentro de uno.
+                let bytes = (end - cur).min(ext_end - cur).min(max * BLOCK_SIZE);
                 let lba = ext.start_lba + ((cur - file_pos) / BLOCK_SIZE) as u64;
-                let dst: &mut [u8; BLOCK_SIZE] = (&mut out[out_off..out_off + BLOCK_SIZE])
-                    .try_into()
-                    .map_err(|_| FsError::Io)?;
                 self.cache
                     .volume_mut()
-                    .read_lba(lba, dst)
+                    .read_range_lba(lba, &mut out[out_off..out_off + bytes])
                     .map_err(|_| FsError::Io)?;
-                cur += BLOCK_SIZE;
-                out_off += BLOCK_SIZE;
+                cur += bytes;
+                out_off += bytes;
             }
             file_pos = ext_end;
             if cur >= end {

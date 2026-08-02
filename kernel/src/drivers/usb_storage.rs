@@ -119,6 +119,21 @@ pub fn read_sector(lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), &'static str>
     }
 }
 
+/// `buf.len()/512` sectores consecutivos en una sola transacción BOT.
+pub fn read_sectors(lba: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+    let mut guard = DISK.lock();
+    let disk = guard.as_mut().ok_or("sin usb")?;
+    let n = (buf.len() / SECTOR) as u64;
+    if lba.saturating_add(n) > disk.ms.sectors {
+        return Err("lba");
+    }
+    if disk.ctrl.read_sectors10(&disk.ms, lba as u32, buf) {
+        Ok(())
+    } else {
+        Err("usb read")
+    }
+}
+
 pub fn write_sector(_lba: u64, _buf: &[u8; SECTOR]) -> Result<(), &'static str> {
     Err("usb ro")
 }

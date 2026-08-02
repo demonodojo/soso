@@ -11,7 +11,7 @@ const ENTRY_MODELS_ROOT: u32 = 0xFFFF_FFFF;
 const ENTRY_MODEL_DIR: u32 = 0xFFFF_FFFE;
 const ENTRY_SHARDS_DIR: u32 = 0xFFFF_FFFD;
 
-fn is_sosomfs(ino: u64) -> bool {
+pub(crate) fn is_sosomfs(ino: u64) -> bool {
     ino & SOSOMFS_BIT != 0
 }
 

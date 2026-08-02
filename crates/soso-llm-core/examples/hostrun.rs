@@ -58,6 +58,7 @@ fn main() {
     let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
     rt.validate_shapes().expect("shapes inválidas");
     let mut source = MmapTensorSource::new(format!("{dir}/shards"), index, StdMapper);
+    source.async_staging = true;
 
     // "@bos" = prompt de un solo token BOS (RoPE identidad en pos 0)
     let prompt_tokens = if prompt == "@bos" {

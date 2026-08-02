@@ -84,6 +84,20 @@ pub fn read_sector(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), &'sta
     read_sector_slot(0, sector, buf)
 }
 
+/// `buf.len()/512` sectores consecutivos en una sola cadena de descriptores.
+/// El camino live (partición GPT sobre virtio-blk 0) lo necesita para no partir
+/// cada bloque de 4 KiB en ocho peticiones.
+pub fn read_sectors(sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+    if buf.is_empty() || buf.len() % SECTOR_SIZE != 0 {
+        return Err("longitud no alineada a sector");
+    }
+    BLK0.get()
+        .ok_or("no hay disco 0")?
+        .lock()
+        .read_blocks(sector as usize, buf)
+        .map_err(|_| "error de lectura")
+}
+
 pub fn write_sector(sector: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
     write_sector_slot(0, sector, buf)
 }

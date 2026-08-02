@@ -108,6 +108,20 @@ pub fn run() {
             Ok(out) => {
                 if let Some((workers, tok_s)) = parse_bench_line(&out) {
                     println!("bench-llm: SMP={smp} workers={workers} {tok_s:.2} tok/s");
+                    // El coste de disco es la mitad de la historia en la carga de
+                    // pesos y hasta ahora no salía en el banco: sin esta línea,
+                    // agrupar lecturas se mide a ojo.
+                    for etiqueta in [
+                        "soso-llm: generado",
+                        "soso-llm: carga en frío",
+                        "soso-llm: streaming — prefetch",
+                        "soso-llm: hot path",
+                        "soso-llm: disco",
+                    ] {
+                        if let Some(l) = out.lines().find(|l| l.contains(etiqueta)) {
+                            println!("bench-llm: SMP={smp} {}", l.trim());
+                        }
+                    }
                     rows.push((smp, workers, tok_s));
                 } else {
                     eprintln!("bench-llm: SMP={smp} salida inesperada: {out:?}");

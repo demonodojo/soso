@@ -37,6 +37,17 @@ impl BlockDevice for VirtioDev0 {
         let blk = crate::drivers::virtio_blk::BLK0.get().ok_or(BlockError::Io)?;
         blk.lock().flush().map_err(|_| BlockError::Io)
     }
+
+    fn max_blocks_per_request(&self) -> usize {
+        sosomfs::MAX_REQ_BLOCKS
+    }
+
+    fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        let blk = crate::drivers::virtio_blk::BLK0.get().ok_or(BlockError::Io)?;
+        blk.lock()
+            .read_blocks((start * SECTORS_PER_BLOCK) as usize, buf)
+            .map_err(|_| BlockError::Io)
+    }
 }
 
 impl BlockDevice for VirtioDev1 {
@@ -61,6 +72,17 @@ impl BlockDevice for VirtioDev1 {
     fn flush(&mut self) -> Result<(), BlockError> {
         let blk = crate::drivers::virtio_blk::BLK1.get().ok_or(BlockError::Io)?;
         blk.lock().flush().map_err(|_| BlockError::Io)
+    }
+
+    fn max_blocks_per_request(&self) -> usize {
+        sosomfs::MAX_REQ_BLOCKS
+    }
+
+    fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        let blk = crate::drivers::virtio_blk::BLK1.get().ok_or(BlockError::Io)?;
+        blk.lock()
+            .read_blocks((start * SECTORS_PER_BLOCK) as usize, buf)
+            .map_err(|_| BlockError::Io)
     }
 }
 
@@ -121,6 +143,28 @@ impl BlockDevice for RootDev {
             RootDev::Live(l) => l.flush(),
         }
     }
+
+    fn max_blocks_per_request(&self) -> usize {
+        match self {
+            RootDev::Virtio(v) => v.max_blocks_per_request(),
+            RootDev::Nvme => nvme::max_blocks4k_slot(0).min(sosomfs::MAX_REQ_BLOCKS),
+            RootDev::Live(l) => l.max_blocks_per_request(),
+        }
+    }
+
+    fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        let bloques = (buf.len() / block_dev::BLOCK_SIZE) as u64;
+        let t = blkstat::Peticion::empieza();
+        let r = match self {
+            RootDev::Virtio(v) => v.read_blocks(start, buf),
+            RootDev::Nvme => {
+                nvme::read_blocks4k_slot(0, start, buf).map_err(|_| BlockError::Io)
+            }
+            RootDev::Live(l) => l.read_blocks(start, buf),
+        };
+        t.termina(bloques);
+        r
+    }
 }
 
 /// Backend del disco de modelos: NVMe (slot 1 preferido) o virtio-blk 1.
@@ -169,6 +213,28 @@ impl BlockDevice for ModelsDev {
             ModelsDev::Virtio(v) => v.flush(),
             ModelsDev::Live(l) => l.flush(),
         }
+    }
+
+    fn max_blocks_per_request(&self) -> usize {
+        match self {
+            ModelsDev::Nvme(slot) => nvme::max_blocks4k_slot(*slot).min(sosomfs::MAX_REQ_BLOCKS),
+            ModelsDev::Virtio(v) => v.max_blocks_per_request(),
+            ModelsDev::Live(l) => l.max_blocks_per_request(),
+        }
+    }
+
+    fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        let bloques = (buf.len() / block_dev::BLOCK_SIZE) as u64;
+        let t = blkstat::Peticion::empieza();
+        let r = match self {
+            ModelsDev::Nvme(slot) => {
+                nvme::read_blocks4k_slot(*slot, start, buf).map_err(|_| BlockError::Io)
+            }
+            ModelsDev::Virtio(v) => v.read_blocks(start, buf),
+            ModelsDev::Live(l) => l.read_blocks(start, buf),
+        };
+        t.termina(bloques);
+        r
     }
 }
 

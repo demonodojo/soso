@@ -128,4 +128,12 @@ impl TierManager {
         self.prefetch_queue.clear();
         self.prefetch_queue.extend(shards.iter().cloned());
     }
+
+    /// Consume la cola de prefetch y la lanza vía kick (TierManager → stager).
+    pub fn kick_pending<S: crate::layer::TensorSource>(&mut self, source: &mut S) {
+        if !self.prefetch_queue.is_empty() {
+            source.kick_prefetch_shards(&self.prefetch_queue);
+            self.prefetch_queue.clear();
+        }
+    }
 }

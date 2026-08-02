@@ -112,9 +112,20 @@ fn sector_reader(backend: LiveBackend, lba: u64, buf: &mut [u8; SECTOR]) -> Resu
     }
 }
 
+fn range_reader(backend: LiveBackend, lba: u64, buf: &mut [u8]) -> Result<(), ()> {
+    match backend {
+        LiveBackend::Virtio0 => crate::drivers::virtio_blk::read_sectors(lba, buf).map_err(|_| ()),
+        LiveBackend::Usb => crate::drivers::usb_storage::read_sectors(lba, buf).map_err(|_| ()),
+    }
+}
+
 impl LivePart {
     fn read_sector(&self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), BlockError> {
         sector_reader(self.backend, self.first_lba + lba, buf).map_err(|_| BlockError::Io)
+    }
+
+    fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        range_reader(self.backend, self.first_lba + lba, buf).map_err(|_| BlockError::Io)
     }
 }
 
@@ -137,6 +148,14 @@ impl BlockDevice for LiveRootDev {
     fn flush(&mut self) -> Result<(), BlockError> {
         Ok(())
     }
+
+    fn max_blocks_per_request(&self) -> usize {
+        sosomfs::MAX_REQ_BLOCKS
+    }
+
+    fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        read_blocks_512(&self.0, start, buf)
+    }
 }
 
 impl BlockDevice for LiveModelsDev {
@@ -155,16 +174,29 @@ impl BlockDevice for LiveModelsDev {
     fn flush(&mut self) -> Result<(), BlockError> {
         Ok(())
     }
+
+    fn max_blocks_per_request(&self) -> usize {
+        sosomfs::MAX_REQ_BLOCKS
+    }
+
+    fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        read_blocks_512(&self.0, start, buf)
+    }
 }
 
+/// Un bloque de 4 KiB = 8 sectores, en **una** transacción.
+///
+/// Antes eran ocho: ocho peticiones al dispositivo y ocho `copy_from_slice` de
+/// rebote por cada bloque del FS. Sobre USB eso son ocho CBW/datos/CSW.
 fn read_block_512(part: &LivePart, block: u64, buf: &mut Block) -> Result<(), BlockError> {
-    let base = block * (BLOCK_SIZE / SECTOR) as u64;
-    for i in 0..(BLOCK_SIZE / SECTOR) {
-        let mut sec = [0u8; SECTOR];
-        part.read_sector(base + i as u64, &mut sec)?;
-        buf[i * SECTOR..(i + 1) * SECTOR].copy_from_slice(&sec);
+    part.read_sectors(block * (BLOCK_SIZE / SECTOR) as u64, buf)
+}
+
+fn read_blocks_512(part: &LivePart, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+    if buf.len() % BLOCK_SIZE != 0 {
+        return Err(BlockError::OutOfRange);
     }
-    Ok(())
+    part.read_sectors(start * (BLOCK_SIZE / SECTOR) as u64, buf)
 }
 
 fn write_block_512(part: &LivePart, block: u64, buf: &Block) -> Result<(), BlockError> {

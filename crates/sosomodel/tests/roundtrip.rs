@@ -1,5 +1,83 @@
 use sosomodel::index::{pack_shard, TensorIndex, make_f32_entry};
-use sosomodel::manifest::Manifest;
+use sosomodel::manifest::{AttnKind, FfnKind, LayerSpec, Manifest};
+
+#[test]
+fn manifest_v4_roundtrip_layer_specs() {
+    let mut m = Manifest::tiny("v4");
+    m.num_layers = 2;
+    m.prefetch.truncate(2);
+    m.layers = vec![
+        LayerSpec {
+            attn_kind: AttnKind::Kda,
+            ffn_kind: FfnKind::LatentMoe,
+            num_experts: 896,
+            num_experts_per_tok: 16,
+            num_shared_experts: 2,
+            moe_ffn_dim: 3072,
+            ..LayerSpec::default()
+        },
+        LayerSpec {
+            attn_kind: AttnKind::Mla,
+            ffn_kind: FfnKind::LatentMoe,
+            kv_lora_rank: 512,
+            q_lora_rank: 1536,
+            qk_rope_head_dim: 64,
+            qk_nope_head_dim: 128,
+            v_head_dim: 128,
+            num_experts: 896,
+            num_experts_per_tok: 16,
+            ..LayerSpec::default()
+        },
+    ];
+    let bytes = m.serialize();
+    let parsed = Manifest::parse(&bytes).unwrap();
+    assert_eq!(parsed.layers.len(), 2);
+    assert_eq!(parsed.layers[0].attn_kind, AttnKind::Kda);
+    assert_eq!(parsed.layers[1].attn_kind, AttnKind::Mla);
+    assert_eq!(parsed.layers[0].num_shared_experts, 2);
+    assert_eq!(parsed.layers[1].kv_lora_rank, 512);
+}
+
+#[test]
+fn manifest_v3_synthesizes_layers() {
+    let mut m = Manifest::tiny("v3");
+    m.layers.clear();
+    let mut body = Vec::new();
+    body.extend_from_slice(m.name.as_bytes());
+    body.push(0);
+    body.extend_from_slice(&m.vocab_size.to_le_bytes());
+    body.extend_from_slice(&m.hidden_dim.to_le_bytes());
+    body.extend_from_slice(&m.num_layers.to_le_bytes());
+    body.extend_from_slice(&m.num_heads.to_le_bytes());
+    body.extend_from_slice(&m.ffn_dim.to_le_bytes());
+    body.extend_from_slice(&m.max_seq.to_le_bytes());
+    body.extend_from_slice(&m.num_kv_heads.to_le_bytes());
+    body.extend_from_slice(&m.rope_theta.to_le_bytes());
+    body.extend_from_slice(&m.rms_eps.to_le_bytes());
+    body.extend_from_slice(&m.num_experts.to_le_bytes());
+    body.extend_from_slice(&m.num_experts_per_tok.to_le_bytes());
+    body.extend_from_slice(&m.moe_ffn_dim.to_le_bytes());
+    body.extend_from_slice(&(m.prefetch.len() as u32).to_le_bytes());
+    for pf in &m.prefetch {
+        body.extend_from_slice(&pf.layer.to_le_bytes());
+        body.extend_from_slice(&(pf.shards.len() as u32).to_le_bytes());
+        for s in &pf.shards {
+            body.extend_from_slice(s.as_bytes());
+            body.push(0);
+        }
+    }
+    let v3_bytes = sosomodel::pack_som(&body, 3, sosomodel::CACHE_ALIGN);
+    let parsed = Manifest::parse(&v3_bytes).unwrap();
+    assert_eq!(parsed.layers.len(), 4);
+    assert_eq!(parsed.layers[0].attn_kind, AttnKind::Gqa);
+    assert_eq!(parsed.layers[0].ffn_kind, FfnKind::Dense);
+}
+
+#[test]
+fn manifest_max_ffn_dim_moe() {
+    let m = Manifest::tiny_moe("moe");
+    assert_eq!(m.max_ffn_dim(), m.moe_ffn_dim);
+}
 
 #[test]
 fn manifest_roundtrip() {

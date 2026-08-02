@@ -50,6 +50,15 @@ pub trait TensorSource {
     /// Prefetch layer-ahead (ScoutAttention / LayerKV): mapear shards y tocar
     /// la primera página para solapar I/O con el cómputo de la capa actual.
     fn prefetch_shards(&mut self, _shards: &[alloc::string::String]) {}
+    /// Arranca prefetch sin esperar (double-buffer AirLLM).
+    fn kick_prefetch_shards(&mut self, shards: &[alloc::string::String]) {
+        self.prefetch_shards(shards);
+    }
+    /// Une prefetch en curso antes de usar los shards.
+    fn wait_prefetch(&mut self) {}
+    /// Prefetch MoE especulativo (slot aparte del layer-ahead).
+    fn kick_moe_prefetch(&mut self, _shards: &[alloc::string::String]) {}
+    fn wait_moe_prefetch(&mut self) {}
     /// Liberar shards fuera del working set (streaming FlexGen/LayerKV).
     fn release_shards_except(&mut self, _keep: &[alloc::string::String]) {}
     /// Prefetch de la fila de `embed` del token (page-fault adelantado).
@@ -167,16 +176,12 @@ pub struct LayerScratch {
 impl LayerScratch {
     pub fn new(m: &Manifest) -> Self {
         let h = m.hidden_dim as usize;
-        let ffn = if m.is_moe() {
-            m.expert_ffn_dim() as usize
-        } else {
-            m.ffn_dim as usize
-        };
+        let ffn = m.max_ffn_dim() as usize;
         let heads = m.num_heads as usize;
         let head_dim = h / heads;
         let kv_dim = m.num_kv_heads as usize * head_dim;
         let kv_cap = (m.max_seq as usize).min(256).max(32);
-        let n_exp = if m.is_moe() { m.num_experts as usize } else { 0 };
+        let n_exp = m.max_router_experts() as usize;
         Self {
             residual: vec![0.0; h],
             norm_w: vec![0.0; h],
@@ -248,22 +253,18 @@ impl<'a> LayerExecutor<'a> {
         source: &mut S,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         use_gpu: bool,
-        planner: Option<&mut crate::plan::ResourcePlanner>,
+        mut planner: Option<&mut crate::plan::ResourcePlanner>,
         index: Option<&TensorIndex>,
         clock_ms: Option<fn() -> u64>,
     ) -> Result<LayerTiming, ()> {
         let tick = |c: Option<fn() -> u64>| c.map(|f| f()).unwrap_or(0);
         let h = self.manifest.hidden_dim as usize;
-        let heads = self.manifest.num_heads as usize;
-        let kv_heads = self.manifest.num_kv_heads as usize;
+        let heads = self.manifest.effective_num_heads(layer) as usize;
+        let kv_heads = self.manifest.effective_num_kv_heads(layer) as usize;
         let head_dim = h / heads;
         let kv_dim = kv_heads * head_dim;
         let group = heads / kv_heads;
-        let ffn = if self.manifest.is_moe() {
-            self.manifest.expert_ffn_dim() as usize
-        } else {
-            self.manifest.ffn_dim as usize
-        };
+        let ffn = self.manifest.layer_expert_ffn_dim(layer) as usize;
         let eps = self.manifest.rms_eps;
         let theta = self.manifest.rope_theta;
         let prefix = format!("L{layer:02}");
@@ -278,6 +279,17 @@ impl<'a> LayerExecutor<'a> {
         let name_ffn_down = format!("{prefix}.ffn_down");
         let seq = Sequential;
         let par: &dyn RowParallel = self.parallel.unwrap_or(&seq);
+
+        // Prefetch MoE especulativo (expertos del token anterior) antes de attn.
+        if self.manifest.layer_is_moe(layer) {
+            if let (Some(pl), Some(idx)) = (planner.as_mut(), index) {
+                let hint = pl.moe_speculative_shards(layer, idx);
+                if !hint.is_empty() {
+                    source.kick_moe_prefetch(&hint);
+                }
+            }
+        }
+
         let planner_ro = planner.as_deref();
 
         // --- atención ---
@@ -410,7 +422,7 @@ impl<'a> LayerExecutor<'a> {
         source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w)?;
         rmsnorm(hidden, &s.norm_w, eps);
 
-        if self.manifest.is_moe() {
+        if self.manifest.layer_is_moe(layer) {
             self.forward_moe_ffn(
                 layer,
                 prefix,
@@ -488,7 +500,7 @@ impl<'a> LayerExecutor<'a> {
     fn forward_moe_ffn<S: TensorSource>(
         &self,
         layer: u32,
-        prefix: String,
+        prefix: alloc::string::String,
         h: usize,
         ffn: usize,
         hidden: &mut [f32],
@@ -500,8 +512,8 @@ impl<'a> LayerExecutor<'a> {
         mut planner: Option<&mut crate::plan::ResourcePlanner>,
         index: Option<&TensorIndex>,
     ) -> Result<(), ()> {
-        let n_exp = self.manifest.num_experts as usize;
-        let top_k = self.manifest.num_experts_per_tok as usize;
+        let n_exp = self.manifest.effective_num_experts(layer) as usize;
+        let top_k = self.manifest.effective_num_experts_per_tok(layer) as usize;
         if n_exp == 0 || top_k == 0 || s.router.len() < n_exp {
             return Err(());
         }
@@ -520,6 +532,7 @@ impl<'a> LayerExecutor<'a> {
             layer,
         )?;
         let ranked = topk_softmax(&mut s.router[..n_exp], top_k);
+        source.wait_moe_prefetch();
         let prefetch_shards = if let (Some(pl), Some(idx)) = (planner.as_mut(), index) {
             let ids: alloc::vec::Vec<(u32, f32)> =
                 ranked.iter().map(|(i, w)| (*i as u32, *w)).collect();

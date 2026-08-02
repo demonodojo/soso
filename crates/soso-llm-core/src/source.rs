@@ -2,6 +2,7 @@
 
 use crate::layer::{TensorSource, TensorView};
 use crate::quant::{dequant_q4_k, dequant_q4_k_range, dequant_q8_0, dequant_q8_0_range};
+use crate::stage::{PrefetchSink, SyncStager};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
@@ -35,6 +36,10 @@ pub struct MmapTensorSource<M: FileMapper> {
     pub index: TensorIndex,
     pub mapper: M,
     cache: BTreeMap<String, CachedShard>,
+    /// Double-buffer AirLLM: kick/wait solapan I/O con cómputo.
+    pub stager: SyncStager,
+    /// Si true, kick/wait usan el stager; si false, prefetch síncrono clásico.
+    pub async_staging: bool,
 }
 
 impl<M: FileMapper> MmapTensorSource<M> {
@@ -44,7 +49,14 @@ impl<M: FileMapper> MmapTensorSource<M> {
             index,
             mapper,
             cache: BTreeMap::new(),
+            stager: SyncStager::new(),
+            async_staging: true,
         }
+    }
+
+    pub fn with_sync_prefetch(mut self) -> Self {
+        self.async_staging = false;
+        self
     }
 
     fn shard_path(&self, shard: &str) -> String {
@@ -132,6 +144,12 @@ impl<M: FileMapper> MmapTensorSource<M> {
     }
 }
 
+impl<M: FileMapper> PrefetchSink for MmapTensorSource<M> {
+    fn prefetch_shards_sync(&mut self, shards: &[String]) {
+        self.prefetch_shards_impl(shards);
+    }
+}
+
 impl<M: FileMapper> Drop for MmapTensorSource<M> {
     fn drop(&mut self) {
         self.drop_cache();
@@ -205,6 +223,40 @@ impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
 
     fn prefetch_shards(&mut self, shards: &[String]) {
         self.prefetch_shards_impl(shards);
+    }
+
+    fn kick_prefetch_shards(&mut self, shards: &[String]) {
+        if self.async_staging {
+            self.stager.kick_layer(shards);
+        } else {
+            self.prefetch_shards_impl(shards);
+        }
+    }
+
+    fn wait_prefetch(&mut self) {
+        if self.async_staging {
+            let shards = self.stager.drain_layer_shards();
+            if !shards.is_empty() {
+                self.prefetch_shards_impl(&shards);
+            }
+        }
+    }
+
+    fn kick_moe_prefetch(&mut self, shards: &[String]) {
+        if self.async_staging {
+            self.stager.kick_moe(shards);
+        } else if !shards.is_empty() {
+            self.prefetch_shards_impl(shards);
+        }
+    }
+
+    fn wait_moe_prefetch(&mut self) {
+        if self.async_staging {
+            let shards = self.stager.drain_moe_shards();
+            if !shards.is_empty() {
+                self.prefetch_shards_impl(&shards);
+            }
+        }
     }
 
     fn release_shards_except(&mut self, keep: &[String]) {

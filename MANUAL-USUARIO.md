@@ -614,12 +614,17 @@ soso-llm: memoria — libre … KiB, reclaimable … KiB
 …
 soso-llm: planificador — replanes N, latencia media CPU/GPU/remoto … ms
 soso-llm: hot path — matvec … ms/capa, attn … ms/capa
-soso-llm: streaming — prefetch …, liberaciones shard …, ventanas KV …
+soso-llm: streaming — prefetch …, staging wait … ms, liberaciones shard …, ventanas KV …
+soso-llm: MoE especulativo — N aciertos, M fallos
 soso-llm: prompt-lookup — N aceptados en M intentos (n≈…, draft≤…)
 ```
 
-En greedy, **Prompt Lookup** reutiliza continuaciones del propio contexto (sin modelo
-draft) y **autotunea** el n-gramo / longitud de draft según la tasa de aceptación.
+El runtime aplica **double-buffer estilo AirLLM**: `kick` de la capa N+1 mientras
+calcula N, y un hilo de staging en userspace solapa el page-fault de shards con
+matvec/attn. En MoE, además prefetcha los expertos del token anterior antes del
+router (hint especulativo). En greedy, **Prompt Lookup** reutiliza continuaciones del
+propio contexto (sin modelo draft) y **autotunea** el n-gramo / longitud de draft
+según la tasa de aceptación.
 El prefill hace prefetch del embed del siguiente token mientras calcula.
 
 La ventana de mapeo de usuario llega a ~416 GiB; la imagen de modelos se

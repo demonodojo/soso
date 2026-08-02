@@ -10,6 +10,7 @@ mod distributed;
 mod gpu;
 mod net;
 mod pool;
+mod staging;
 
 use alloc::format;
 use alloc::string::String;
@@ -24,8 +25,9 @@ use soso_llm_core::plan::{MemSnapshot, ResourcePlanner};
 use soso_llm_core::pipeline::{PipelinePlan, PipelineRole};
 use soso_llm_core::runtime::{Backend, Runtime};
 use soso_llm_core::sample::Sampler;
-use soso_llm_core::source::{FileMapper, MappedShard, MmapTensorSource};
+use soso_llm_core::source::MmapTensorSource;
 use soso_llm_core::tokenizer::{StreamDecoder, Tokenizer};
+use staging::StagedSource;
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
 
@@ -84,42 +86,43 @@ fn clock_ms() -> u64 {
     sys::uptime_ms().max(0) as u64
 }
 
-struct SyscallMapper;
-
-impl FileMapper for SyscallMapper {
-    fn map_file(&mut self, path: &str) -> Result<MappedShard, ()> {
-        let fd = sys::open(path, O_RDONLY);
-        if fd < 0 {
-            return Err(());
-        }
-        let mut st = abi::Stat::default();
-        if sys::stat(path, &mut st) < 0 {
-            sys::close(fd as u64);
-            return Err(());
-        }
-        let size = st.size as usize;
-        let map = sys::mmap(0, size as u64, fd as u64, 0);
+fn read_file(path: &str) -> Result<Vec<u8>, i64> {
+    let fd = sys::open(path, O_RDONLY);
+    if fd < 0 {
+        return Err(fd);
+    }
+    let mut st = abi::Stat::default();
+    if sys::stat(path, &mut st) < 0 {
+        sys::close(fd as u64);
+        return Err(-abi::EIO);
+    }
+    if st.size > 16 * 1024 * 1024 {
+        let map = sys::mmap(0, st.size, fd as u64, 0);
         sys::close(fd as u64);
         if map < 0 {
-            return Err(());
+            return Err(map);
         }
+        let mut out = Vec::with_capacity(st.size as usize);
         let ptr = map as *const u8;
-        let _ = unsafe { core::ptr::read_volatile(ptr) };
-        Ok(MappedShard {
-            addr: map as u64,
-            len: size,
-        })
+        for i in 0..st.size as usize {
+            out.push(unsafe { core::ptr::read_volatile(ptr.add(i)) });
+        }
+        sys::munmap(map as u64, st.size.next_multiple_of(4096));
+        return Ok(out);
     }
-
-    fn unmap_file(&mut self, shard: &MappedShard) {
-        let aligned = shard.len.next_multiple_of(4096);
-        let _ = sys::munmap(shard.addr, aligned as u64);
+    let mut buf = vec![0u8; st.size as usize];
+    let n = sys::read(fd as u64, &mut buf);
+    sys::close(fd as u64);
+    if n < 0 {
+        return Err(n);
     }
+    buf.truncate(n as usize);
+    Ok(buf)
 }
 
 struct ModelBundle {
     rt: Runtime,
-    source: MmapTensorSource<SyscallMapper>,
+    source: StagedSource,
     tokenizer: Tokenizer,
     manifest_crc: u32,
     index_crc: u32,
@@ -390,7 +393,9 @@ fn load_model(
         Err(_) => Tokenizer::byte_level(),
     };
 
-    let source = MmapTensorSource::new(format!("{base}/shards"), index, SyscallMapper);
+    let inner = MmapTensorSource::new(format!("{base}/shards"), index, staging::SyscallMapper);
+    let mut source = StagedSource::new(inner);
+    source.enable_worker();
     Ok(ModelBundle {
         rt,
         source,
@@ -562,11 +567,24 @@ fn run_model(
     force_cpu: bool,
 ) -> u8 {
     let io0 = read_iostat();
+    let t_carga = sys::uptime_ms();
     let num_layers = read_num_layers(name).unwrap_or(4);
     let mut bundle = match load_model(name, PipelineRole::Full, 0, num_layers) {
         Ok(b) => b,
         Err(c) => return c,
     };
+    // La carga en frío va aparte de tok/s: `generado` sólo cronometra el
+    // decode, y el disco se gasta casi entero antes de que ese reloj arranque.
+    // Medirlas juntas es lo que hacía invisible el coste de E/S.
+    let carga_ms = (sys::uptime_ms() - t_carga).max(0) as u64;
+    let io_carga = read_iostat();
+    println!(
+        "soso-llm: carga en frío — {} ms, {} peticiones de disco, {} bloques ({} ms de disco)",
+        carga_ms,
+        io_carga.peticiones.saturating_sub(io0.peticiones),
+        io_carga.bloques.saturating_sub(io0.bloques),
+        io_carga.nanos.saturating_sub(io0.nanos) / 1_000_000,
+    );
     println!(
         "soso-llm: modelo {} ({} capas, hidden={})",
         bundle.rt.manifest.name, bundle.rt.manifest.num_layers, bundle.rt.manifest.hidden_dim
@@ -705,13 +723,20 @@ fn run_model(
                     );
                 }
                 println!(
-                    "soso-llm: streaming — prefetch {} ({} ms), liberaciones shard {} ({} ms), ventanas KV {}",
+                    "soso-llm: streaming — prefetch {} ({} ms), staging wait {} ms, liberaciones shard {} ({} ms), ventanas KV {}",
                     st.prefeches,
                     st.stream_ms,
+                    st.stage_wait_ms,
                     st.shard_releases,
                     st.release_ms,
                     st.kv_slides,
                 );
+                if st.moe_spec_hits > 0 || st.moe_spec_misses > 0 {
+                    println!(
+                        "soso-llm: MoE especulativo — {} aciertos, {} fallos",
+                        st.moe_spec_hits, st.moe_spec_misses
+                    );
+                }
                 if st.pld_attempts > 0 || st.pld_accepted > 0 {
                     println!(
                         "soso-llm: prompt-lookup — {} aceptados en {} intentos (n≈{}, draft≤{})",
@@ -735,39 +760,4 @@ fn run_model(
             1
         }
     }
-}
-
-/// El nombre que da el kernel viene en un `[u8; 32]` con relleno a cero.
-fn read_file(path: &str) -> Result<Vec<u8>, i64> {
-    let fd = sys::open(path, O_RDONLY);
-    if fd < 0 {
-        return Err(fd);
-    }
-    let mut st = abi::Stat::default();
-    if sys::stat(path, &mut st) < 0 {
-        sys::close(fd as u64);
-        return Err(-abi::EIO);
-    }
-    if st.size > 16 * 1024 * 1024 {
-        let map = sys::mmap(0, st.size, fd as u64, 0);
-        sys::close(fd as u64);
-        if map < 0 {
-            return Err(map);
-        }
-        let mut out = Vec::with_capacity(st.size as usize);
-        let ptr = map as *const u8;
-        for i in 0..st.size as usize {
-            out.push(unsafe { core::ptr::read_volatile(ptr.add(i)) });
-        }
-        sys::munmap(map as u64, st.size.next_multiple_of(4096));
-        return Ok(out);
-    }
-    let mut buf = vec![0u8; st.size as usize];
-    let n = sys::read(fd as u64, &mut buf);
-    sys::close(fd as u64);
-    if n < 0 {
-        return Err(n);
-    }
-    buf.truncate(n as usize);
-    Ok(buf)
 }

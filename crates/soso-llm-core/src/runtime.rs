@@ -121,6 +121,7 @@ impl Runtime {
     /// Comprueba que las shapes del index casan con lo que espera el ejecutor
     /// (convención row-major `[filas, columnas]` = `[out_dim, in_dim]`).
     pub fn validate_shapes(&self) -> Result<(), ()> {
+        self.manifest.supported_by_runtime().map_err(|_| ())?;
         self.validate_shapes_for_role(PipelineRole::Full, 0, self.manifest.num_layers)
     }
 
@@ -133,13 +134,6 @@ impl Runtime {
     ) -> Result<(), ()> {
         let h = self.manifest.hidden_dim;
         let vocab = self.manifest.vocab_size;
-        let ffn = self.manifest.ffn_dim;
-        let moe_ffn = self.manifest.expert_ffn_dim();
-        let heads = self.manifest.num_heads;
-        let head_dim = h / heads;
-        let kv_dim = self.manifest.num_kv_heads * head_dim;
-        let is_moe = self.manifest.is_moe();
-        let n_exp = self.manifest.num_experts;
 
         let check = |name: &str, want: &[u32], required: bool| -> Result<(), ()> {
             match self.index.find(name) {
@@ -162,6 +156,14 @@ impl Runtime {
         check("output_norm", &[h], needs_logits && self.has_output_norm)?;
         for layer in layer_start..layer_end {
             let p = alloc::format!("L{layer:02}");
+            let layer_heads = self.manifest.effective_num_heads(layer);
+            let layer_kv_heads = self.manifest.effective_num_kv_heads(layer);
+            let head_dim = h / layer_heads;
+            let kv_dim = layer_kv_heads * head_dim;
+            let ffn = self.manifest.effective_ffn_dim(layer);
+            let moe_ffn = self.manifest.effective_moe_ffn_dim(layer);
+            let is_moe = self.manifest.layer_is_moe(layer);
+            let n_exp = self.manifest.effective_num_experts(layer);
             check(&alloc::format!("{p}.attn_norm"), &[h], true)?;
             check(&alloc::format!("{p}.attn_q"), &[h, h], true)?;
             check(&alloc::format!("{p}.attn_k"), &[kv_dim, h], true)?;
@@ -201,6 +203,9 @@ impl Runtime {
         self.pos = 0;
         for layer in &mut self.kv {
             layer.reset();
+        }
+        if let Some(pl) = self.planner.as_mut() {
+            pl.reset_moe_hints();
         }
     }
 
@@ -336,24 +341,29 @@ impl Runtime {
             has_gate: self.has_gate,
             parallel,
         };
+        // Kick capa inicial (prefetch adelantado antes del bucle).
+        if let Some(pf) = self.manifest.prefetch.get(layer_start as usize) {
+            source.kick_prefetch_shards(&pf.shards);
+            if let Some(pl) = self.planner.as_mut() {
+                pl.note_prefetch();
+            }
+        }
         for layer in layer_start..layer_end {
-            // Prefetch layer-ahead (ScoutAttention / LayerKV): mapear N+1
-            // mientras se calcula N.
-            let ts0 = clock_ms.map(|c| c());
-            if let Some(next) = self.manifest.prefetch.get((layer + 1) as usize) {
-                source.prefetch_shards(&next.shards);
+            // Esperar capa N (prefetchada mientras se calculó N-1).
+            let wait0 = clock_ms.map(|c| c());
+            source.wait_prefetch();
+            if let (Some(c), Some(t0)) = (clock_ms, wait0) {
+                let ms = c().saturating_sub(t0);
                 if let Some(pl) = self.planner.as_mut() {
-                    pl.note_prefetch();
+                    pl.note_stage_wait_ms(ms);
                 }
             }
-            if let Some(pf) = self.manifest.prefetch.get(layer as usize) {
-                self.tiers.schedule_prefetch(&pf.shards);
-                source.prefetch_shards(&pf.shards);
-            }
-            if let (Some(c), Some(t)) = (clock_ms, ts0) {
-                let ms = c().saturating_sub(t);
+            // Kick capa N+1 antes del cómputo (solape I/O ∥ matvec/attn).
+            if let Some(next) = self.manifest.prefetch.get((layer + 1) as usize) {
+                self.tiers.schedule_prefetch(&next.shards);
+                self.tiers.kick_pending(source);
                 if let Some(pl) = self.planner.as_mut() {
-                    pl.note_stream_ms(ms);
+                    pl.note_prefetch();
                 }
             }
             let use_gpu = base_gpu

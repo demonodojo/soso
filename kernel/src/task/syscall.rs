@@ -679,7 +679,17 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
             Fd::Dir { entries, pos: 0 }
         } else {
             let st = with_vfs(|| crate::vfs::stat_inode(ino))?;
-            if st.size.get() > abi::LAZY_FILE_THRESHOLD {
+            // Los shards de modelos van SIEMPRE en lazy, pese al umbral.
+            //
+            // `map_file` de soso-llm hace open → stat → mmap → close, y el
+            // volumen de modelos es de sólo lectura: nadie lee un shard por el
+            // fd. Pero el builder rellena los shards de streaming a múltiplos
+            // de 64 KiB (`ALIGN_GPU_DMA_64K`) y `stat` devuelve el tamaño CON
+            // relleno, así que los shards pequeños caían justo del lado eager:
+            // se leía el shard entero —por la ruta con CRC de segmento, la
+            // cara—, se copiaba al heap del kernel, y el `close()` inmediato lo
+            // tiraba. Después las faltas de página lo volvían a leer entero.
+            if st.size.get() > abi::LAZY_FILE_THRESHOLD || crate::vfs::is_sosomfs(ino) {
                 Fd::LazyFile {
                     inode: ino,
                     size: st.size.get() as usize,

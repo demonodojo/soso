@@ -102,3 +102,49 @@ fn manifest_pin_policy() {
     let man = m.shards.iter().find(|s| s.rel_path == "manifest.som").unwrap();
     assert_eq!(man.cache_policy, CACHE_PIN);
 }
+
+/// `read_range_direct` tiene que agrupar: una petición al dispositivo por cada
+/// `MAX_REQ_BLOCKS`, no una por bloque de 4 KiB.
+///
+/// Esta prueba es la red contra la regresión que motivó todo el cambio: hasta
+/// ahora el camino de los fallos de página grandes hacía **una petición por
+/// cada 4 KiB**, y a 178 us por viaje eso son 12,9 s de disco para arrancar un
+/// modelo de 128 MiB. `MemBlockDevice::read_count()` cuenta *peticiones*, así
+/// que si alguien vuelve a poner un bucle bloque a bloque, este test lo dice.
+#[test]
+fn lectura_directa_agrupa_peticiones() {
+    use block_dev::MemBlockDevice;
+
+    let model = tiny_model_dir();
+    let blocks = (64 * 1024 * 1024 / BLOCK_SIZE) as u64;
+    let mut dev = MemBlockDevice::new(blocks);
+    build_from_dir(&mut dev, &model, 1).unwrap();
+    let mut fs = Sosomfs::mount(sosomfs::SingleDev::new(dev)).unwrap();
+
+    // Un shard con varios bloques y su contenido leído bloque a bloque, para
+    // tener la referencia con la que comparar.
+    let shard = fs
+        .shard_for_path("/models/tiny/shards/L00.ffn_down.tensor")
+        .unwrap();
+    let bloques = (shard.byte_len as usize) / BLOCK_SIZE;
+    assert!(bloques >= 8, "shard demasiado pequeño para la prueba: {bloques} bloques");
+    let len = bloques * BLOCK_SIZE;
+
+    let mut esperado = vec![0u8; len];
+    for i in 0..bloques {
+        fs.read_range(&shard, i * BLOCK_SIZE, BLOCK_SIZE, &mut esperado[i * BLOCK_SIZE..])
+            .unwrap();
+    }
+
+    let antes = fs.cache.volume_mut().inner().read_count();
+    let mut obtenido = vec![0u8; len];
+    fs.read_range_direct(&shard, 0, len, &mut obtenido).unwrap();
+    let peticiones = fs.cache.volume_mut().inner().read_count() - antes;
+
+    assert_eq!(obtenido, esperado, "los bytes agrupados no coinciden");
+    let esperadas = bloques.div_ceil(sosomfs::MAX_REQ_BLOCKS) as u64;
+    assert_eq!(
+        peticiones, esperadas,
+        "{bloques} bloques deberían ser {esperadas} peticiones, no {peticiones}"
+    );
+}

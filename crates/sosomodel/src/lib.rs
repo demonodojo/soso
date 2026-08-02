@@ -15,7 +15,7 @@ pub mod index;
 pub mod validate;
 
 pub use layout::*;
-pub use manifest::Manifest;
+pub use manifest::{AttnKind, FfnKind, LayerSpec, Manifest, UnsupportedLayer};
 pub use index::{TensorEntry, TensorIndex};
 
 use crc::{CRC_32_ISCSI, Crc};

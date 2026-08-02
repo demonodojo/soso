@@ -231,6 +231,106 @@ pub fn with_current<R>(f: impl FnOnce(&mut Process) -> R) -> R {
     f(p)
 }
 
+/// Bytes que trae de golpe una falta de página sobre un mapeo de fichero RO.
+///
+/// 128 KiB = 32 páginas = el mismo tope que `sosomfs::MAX_REQ_BLOCKS`, así que
+/// el racimo entero se sirve con **una sola petición** al dispositivo.
+const RACIMO: u64 = 128 * 1024;
+const RACIMO_PAGINAS: usize = (RACIMO / 4096) as usize;
+
+/// Buffer de tránsito del racimo.
+///
+/// POR QUÉ NO SE PIDEN FRAMES CONTIGUOS. Sería más directo reservar 32 frames
+/// consecutivos y leer encima sin copiar, como hace el camino de 2 MiB. Pero
+/// `allocate_contiguous` sólo avanza el cursor bump y **nunca** reconsolida la
+/// lista de libres (`deallocate_2m` devuelve 512 frames sueltos), así que pedir
+/// contigüidad en cada falta se come el pool de bloques grandes hasta que
+/// `allocate_2m` deja de encontrar nada y el camino de 2 MiB muere en silencio.
+/// La copia extra son unos microsegundos por racimo, frente a las 31 lecturas
+/// de disco que ahorra.
+static TRANSITO: Mutex<[u8; RACIMO as usize]> = Mutex::new([0; RACIMO as usize]);
+
+/// Sirve la falta trayendo el racimo de 128 KiB que la contiene, con una sola
+/// lectura. Devuelve `false` ante cualquier contratiempo: el llamante cae al
+/// camino de 4 KiB, que siempre funciona.
+fn racimo(space: &AddrSpace, region: &mmap::MmapRegion, addr: u64) -> bool {
+    let pagina_va = addr & !0xfff;
+    let off_pagina = region.file_offset + pagina_va.saturating_sub(region.virt_start);
+    // Alinear por **offset de fichero**, no por VA: así dos faltas seguidas del
+    // mismo tramo caen en el mismo racimo y no se relee nada.
+    let off_base = off_pagina & !(RACIMO - 1);
+    let atras = off_pagina - off_base;
+    if pagina_va < region.virt_start + atras {
+        return false;
+    }
+    let va_base = pagina_va - atras;
+    if va_base < region.virt_start {
+        return false;
+    }
+    // Racimo **parcial** cuando no cabe uno entero.
+    //
+    // Rechazarlo era peor que no tenerlo: los shards de `tiny` miden 64 KiB y
+    // nunca alcanzan los 128 KiB, así que el racimo no entraba jamás donde más
+    // falta hacía, y donde sí entraba se leía hasta el final del racimo aunque
+    // el fichero acabase antes. Recortar al final de la región y del fichero
+    // deja el racimo del tamaño exacto de lo que hay.
+    let hasta = RACIMO
+        .min(region.virt_start + region.len - va_base)
+        .min(region.file_len - off_base);
+    let bytes = (hasta / 4096 * 4096) as usize;
+    // Con una sola página no hay nada que amortizar y sí una copia que pagar.
+    if bytes < 2 * 4096 {
+        return false;
+    }
+    let paginas = bytes / 4096;
+    // Bajo presión, ni intentarlo: el racimo es un acelerador, no un requisito.
+    if !crate::mm::reclaim::ensure_free_frames(paginas) {
+        return false;
+    }
+    let mut buf = TRANSITO.lock();
+    if crate::fs::load_file_range(region.inode, off_base as usize, &mut buf[..bytes]).is_err() {
+        return false;
+    }
+    let mut servida = false;
+    for i in 0..paginas {
+        let va = va_base + (i * 4096) as u64;
+        // Reclaim puede haber evictado páginas sueltas de este tramo: el racimo
+        // puede estar medio presente.
+        if space.is_mapped(va) {
+            if va == pagina_va {
+                servida = true;
+            }
+            continue;
+        }
+        let frame = {
+            let mut fa = match crate::mm::FRAME_ALLOC.get() {
+                Some(f) => f.lock(),
+                None => break,
+            };
+            match fa.allocate_frame() {
+                Some(f) => f,
+                None => break,
+            }
+        };
+        let dst = unsafe {
+            &mut *crate::mm::phys_to_virt(frame.start_address().as_u64())
+                .as_mut_ptr::<[u8; 4096]>()
+        };
+        dst.copy_from_slice(&buf[i * 4096..(i + 1) * 4096]);
+        if space.map_page(va, frame, false).is_none() {
+            unsafe {
+                crate::mm::FRAME_ALLOC.get().unwrap().lock().deallocate_frame(frame);
+            }
+            break;
+        }
+        crate::mm::reclaim::register(space, va, false);
+        if va == pagina_va {
+            servida = true;
+        }
+    }
+    servida
+}
+
 /// Intenta resolver un page fault de usuario en una región mmap.
 ///
 /// Si la región respalda un fichero y el fault cae en un tramo de 2 MiB
@@ -306,6 +406,15 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
                 // fall through → 4 KiB
             }
             // sin bloque contiguo libre: se sirve con páginas de 4 KiB
+        }
+
+        // --- camino de racimo (128 KiB) ---
+        // Entre el de 2 MiB y el de 4 KiB, para los shards que no llegan a
+        // 2 MiB: con el modelo `tiny` (2,3 MiB repartidos en tensores de
+        // decenas de KiB) el camino huge no entra NUNCA, y la carga en frío
+        // eran 577 faltas de 4 KiB, cada una con su viaje al disco.
+        if region.inode != 0 && !region.writable && racimo(&space, &region, addr) {
+            return true;
         }
 
         // --- camino de página de 4 KiB ---

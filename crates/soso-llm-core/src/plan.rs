@@ -108,6 +108,12 @@ pub struct PlannerStats {
     pub moe_hits: u32,
     /// Cache LRU MoE: fallos (experto frío, prefetch desde disco).
     pub moe_misses: u32,
+    /// Prefetch MoE especulativo: acierto (hint = router real).
+    pub moe_spec_hits: u32,
+    /// Prefetch MoE especulativo: fallo (router distinto al hint).
+    pub moe_spec_misses: u32,
+    /// Milisegundos esperando staging layer-ahead (wait_prefetch).
+    pub stage_wait_ms: u64,
     /// 0 = f16, 1 = int8 (KIVI-lite).
     pub kv_dtype_i8: u32,
     pub h2o_enabled: u32,
@@ -155,6 +161,8 @@ pub struct ResourcePlanner {
     moe_cache: Vec<(u32, u32, Vec<String>)>,
     moe_cache_budget: u64,
     moe_cache_bytes: u64,
+    /// Top-k del token anterior por capa (prefetch MoE especulativo).
+    last_experts: Vec<Vec<u32>>,
     stats: PlannerStats,
 }
 
@@ -277,6 +285,7 @@ impl ResourcePlanner {
             moe_cache: Vec::new(),
             moe_cache_budget: weight_budget / 4,
             moe_cache_bytes: 0,
+            last_experts: vec![Vec::new(); n],
             stats: PlannerStats {
                 weight_budget_bytes: weight_budget,
                 model_weight_bytes,
@@ -411,6 +420,40 @@ impl ResourcePlanner {
         self.stats.release_ms = self.stats.release_ms.saturating_add(ms);
     }
 
+    pub fn note_stage_wait_ms(&mut self, ms: u64) {
+        self.stats.stage_wait_ms = self.stats.stage_wait_ms.saturating_add(ms);
+    }
+
+    pub fn note_moe_spec_hit(&mut self) {
+        self.stats.moe_spec_hits = self.stats.moe_spec_hits.saturating_add(1);
+    }
+
+    pub fn note_moe_spec_miss(&mut self) {
+        self.stats.moe_spec_misses = self.stats.moe_spec_misses.saturating_add(1);
+    }
+
+    pub fn reset_moe_hints(&mut self) {
+        for row in &mut self.last_experts {
+            row.clear();
+        }
+    }
+
+    /// Shards de expertos del token anterior (hint para prefetch especulativo).
+    pub fn moe_speculative_shards(&self, layer: u32, index: &TensorIndex) -> Vec<String> {
+        let li = layer as usize;
+        if li >= self.last_experts.len() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for &expert in &self.last_experts[li] {
+            for name in expert_shard_names(layer, expert) {
+                out.push(format!("{name}.tensor"));
+            }
+        }
+        let _ = index;
+        out
+    }
+
     pub fn note_kv_slide(&mut self) {
         self.stats.kv_slides = self.stats.kv_slides.saturating_add(1);
     }
@@ -478,13 +521,30 @@ impl ResourcePlanner {
         self.stats.moe_hits = self.stats.moe_hits.saturating_add(1);
     }
 
-    /// Registra uso de expertos en una capa; actualiza LRU y devuelve shards a prefetch.
+    /// Registra uso de expertos; devuelve shards fríos a prefetch (post-router).
     pub fn touch_moe_experts(
         &mut self,
         layer: u32,
         experts: &[(u32, f32)],
         index: &TensorIndex,
     ) -> Vec<String> {
+        let actual: alloc::vec::Vec<u32> = experts.iter().map(|(id, _)| *id).collect();
+        let li = layer as usize;
+        if li < self.last_experts.len() {
+            let hint = &self.last_experts[li];
+            if !hint.is_empty() {
+                let mut hint_sorted = hint.clone();
+                hint_sorted.sort_unstable();
+                let mut actual_sorted = actual.clone();
+                actual_sorted.sort_unstable();
+                if hint_sorted == actual_sorted {
+                    self.note_moe_spec_hit();
+                } else {
+                    self.note_moe_spec_miss();
+                }
+            }
+            self.last_experts[li] = actual;
+        }
         let mut prefetch = Vec::new();
         for &(expert, _) in experts {
             let shards: Vec<String> = expert_shard_names(layer, expert)

@@ -19,6 +19,35 @@ pub trait BlockDevice {
     fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError>;
     fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError>;
     fn flush(&mut self) -> Result<(), BlockError>;
+
+    /// Cuántos bloques admite el dispositivo en **una sola** petición. 1 = no
+    /// sabe agrupar, y el llamante no debe molestarse en juntar rangos.
+    ///
+    /// Existe porque el tope no es del formato sino del transporte: virtio
+    /// rebota por un buffer DMA físicamente contiguo y NVMe por una lista PRP,
+    /// y cada uno se rinde a un tamaño distinto.
+    fn max_blocks_per_request(&self) -> usize {
+        1
+    }
+
+    /// Lee `buf.len() / BLOCK_SIZE` bloques consecutivos desde `start`.
+    ///
+    /// El método por defecto es el bucle de toda la vida, para que los
+    /// dispositivos de host (imagen en fichero, memoria) sigan funcionando sin
+    /// tocarlos. Los backends que sepan servirlo en una petición lo
+    /// sobrescriben — y ahí está toda la ganancia: hasta ahora **cada bloque de
+    /// 4 KiB costaba un viaje completo al dispositivo** (medido: 178 us, o sea
+    /// 22 MB/s, en un disco que no existe).
+    fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        if buf.len() % BLOCK_SIZE != 0 {
+            return Err(BlockError::OutOfRange);
+        }
+        for (i, trozo) in buf.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+            let b: &mut Block = trozo.try_into().map_err(|_| BlockError::OutOfRange)?;
+            self.read_block(start + i as u64, b)?;
+        }
+        Ok(())
+    }
 }
 
 /// Dispositivo en memoria: tests y construcción de imágenes pequeñas.
@@ -74,6 +103,28 @@ impl BlockDevice for MemBlockDevice {
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
+        Ok(())
+    }
+
+    fn max_blocks_per_request(&self) -> usize {
+        usize::MAX
+    }
+
+    /// Una petición, una copia. Es lo que hace que `read_count()` cuente
+    /// **peticiones** y no bloques, y por tanto lo que permite a los tests de
+    /// host afirmar que la agrupación ocurre de verdad.
+    fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        if buf.len() % BLOCK_SIZE != 0 {
+            return Err(BlockError::OutOfRange);
+        }
+        #[cfg(feature = "std")]
+        self.reads.set(self.reads.get() + 1);
+        let off = start as usize * BLOCK_SIZE;
+        let src = self
+            .data
+            .get(off..off + buf.len())
+            .ok_or(BlockError::OutOfRange)?;
+        buf.copy_from_slice(src);
         Ok(())
     }
 }

@@ -47,6 +47,21 @@ impl XhciController {
 
     /// BOT READ(10) — un sector 512 B.
     pub fn read_sector10(&mut self, ms: &MassStorage, lba: u32, buf: &mut [u8; 512]) -> bool {
+        self.read_sectors10(ms, lba, buf)
+    }
+
+    /// BOT READ(10) — `buf.len()/512` sectores consecutivos en **una** sola
+    /// transacción CBW/datos/CSW.
+    ///
+    /// Antes sólo existía la variante de un sector, así que leer un bloque de
+    /// 4 KiB del FS costaba **ocho** viajes de ida y vuelta por USB. La cuenta
+    /// va en `cdb[7..9]` (big-endian) y los bytes esperados en `cbw[8..12]`;
+    /// las dos estaban clavadas a 1 y a 512.
+    pub fn read_sectors10(&mut self, ms: &MassStorage, lba: u32, buf: &mut [u8]) -> bool {
+        if buf.is_empty() || buf.len() % 512 != 0 || buf.len() / 512 > u16::MAX as usize {
+            return false;
+        }
+        let count = (buf.len() / 512) as u16;
         let tag = TAG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let mut cdb = [0u8; 16];
         cdb[0] = 0x28;
@@ -54,12 +69,13 @@ impl XhciController {
         cdb[3] = (lba >> 16) as u8;
         cdb[4] = (lba >> 8) as u8;
         cdb[5] = lba as u8;
-        cdb[8] = 1;
+        cdb[7] = (count >> 8) as u8;
+        cdb[8] = count as u8;
 
         let mut cbw = [0u8; 31];
         cbw[0..4].copy_from_slice(&CBW_SIG.to_le_bytes());
         cbw[4..8].copy_from_slice(&tag.to_le_bytes());
-        cbw[8..12].copy_from_slice(&512u32.to_le_bytes());
+        cbw[8..12].copy_from_slice(&(buf.len() as u32).to_le_bytes());
         cbw[12] = 0x80;
         cbw[14] = 10;
         cbw[15..25].copy_from_slice(&cdb[..10]);

@@ -15,7 +15,7 @@ pub mod builder;
 
 pub use cache::BlockCache;
 pub use catalog::Catalog;
-pub use fs::{mount, FsError, Sosomfs};
+pub use fs::{mount, FsError, Sosomfs, MAX_REQ_BLOCKS};
 pub use layout::*;
 pub use volume_set::{SingleDev, VolumeSet};
 
