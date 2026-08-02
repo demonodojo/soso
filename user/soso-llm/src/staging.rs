@@ -97,11 +97,23 @@ extern "C" fn worker_entry(_arg: u64) -> ! {
     let mut last = 0u32;
     let mut buf = Vec::new();
     loop {
+        // Dormir en el futex, NO girar.
+        //
+        // AVERÍA: esto era `while ... { spin_loop() }`. El banco corre con un
+        // solo core, así que el planificador round-robin le daba una rodaja
+        // entera de 20 ms al worker para girar en vacío mientras el hilo
+        // principal tenía trabajo real. Medido con el modelo de 128 MiB:
+        // matvec **1079 -> 3240 ms/capa** y 0,21 -> 0,07 tok/s, con el disco
+        // idéntico (670 vs 806 ms). Un hilo de prefetch que se pasa el rato
+        // esperando tiene que estar bloqueado, no listo para ejecutar.
         while shared.generation.load(Ordering::Acquire) == last {
             if shared.shutdown.load(Ordering::Acquire) != 0 {
                 sys::exit(0);
             }
-            core::hint::spin_loop();
+            sys::futex_wait(
+                &shared.generation as *const AtomicU32 as *const u32,
+                last,
+            );
         }
         last = shared.generation.load(Ordering::Acquire);
         if shared.shutdown.load(Ordering::Acquire) != 0 {
@@ -115,6 +127,7 @@ extern "C" fn worker_entry(_arg: u64) -> ! {
             }
         }
         shared.done.store(1, Ordering::Release);
+        sys::futex_wake(&shared.done as *const AtomicU32 as *const u32, 1);
     }
 }
 
@@ -170,12 +183,25 @@ impl StagingWorker {
         store_shards(shards);
         shared.done.store(0, Ordering::Release);
         let _ = shared.generation.fetch_add(1, Ordering::AcqRel);
+        sys::futex_wake(
+            &shared.generation as *const AtomicU32 as *const u32,
+            1,
+        );
     }
 
     fn wait(&self) {
         let shared = unsafe { &*(&raw const STAGE) };
-        while shared.done.load(Ordering::Acquire) == 0 {
+        // Giro corto para el caso común (el prefetch ya terminó): una syscall
+        // cuesta más que unas cuantas vueltas. Si no, dormir — con un solo core,
+        // girar aquí le roba al worker justo el CPU que necesita para acabar.
+        for _ in 0..256 {
+            if shared.done.load(Ordering::Acquire) != 0 {
+                return;
+            }
             core::hint::spin_loop();
+        }
+        while shared.done.load(Ordering::Acquire) == 0 {
+            sys::futex_wait(&shared.done as *const AtomicU32 as *const u32, 0);
         }
     }
 }
