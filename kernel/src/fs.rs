@@ -62,6 +62,20 @@ impl BlockDevice for VirtioDev1 {
     }
 }
 
+/// Bloques de caché para sosomfs, según la memoria que hay de verdad.
+///
+/// Era un 2048 fijo (8,4 MiB de entradas). En la máquina de 48 MiB del test de
+/// reclaim eso no cabe: el `Vec` de entradas revienta al duplicarse. La caché es
+/// un acelerador, así que su tamaño tiene que salir de la memoria disponible,
+/// igual que el heap. Un frame de caché por cada 32 libres, con suelo y techo.
+fn cache_blocks_modelos() -> usize {
+    let libres = crate::mm::FRAME_ALLOC
+        .get()
+        .map(|a| a.lock().free_frames())
+        .unwrap_or(0);
+    (libres / 32).clamp(64, 2048)
+}
+
 /// Backend del rootfs: virtio-blk 0, NVMe 0, o partición GPT live.
 pub enum RootDev {
     Virtio(VirtioDev0),
@@ -173,12 +187,14 @@ fn mount_live() {
     }
 
     if let Some(models) = crate::drivers::live_disk::models_dev() {
-        match Sosomfs::mount_with_cache(sosomfs::SingleDev::new(ModelsDev::Live(models)), 2048) {
+        let cache_blocks = cache_blocks_modelos();
+        match Sosomfs::mount_with_cache(sosomfs::SingleDev::new(ModelsDev::Live(models)), cache_blocks) {
             Ok(mfs) => {
                 println!(
-                    "fs: sosomfs live (generación {}, {} bloques)",
+                    "fs: sosomfs live (generación {}, {} bloques, caché {})",
                     mfs.generation(),
-                    mfs.total_blocks()
+                    mfs.total_blocks(),
+                    cache_blocks
                 );
                 for m in &mfs.catalog.models {
                     println!("fs:   modelo {} ({} shards)", m.name, m.shards.len());
@@ -233,12 +249,14 @@ pub fn init() {
     };
 
     if let Some(dev) = models_backend {
-        match Sosomfs::mount_with_cache(sosomfs::SingleDev::new(dev), 2048) {
+        let cache_blocks = cache_blocks_modelos();
+        match Sosomfs::mount_with_cache(sosomfs::SingleDev::new(dev), cache_blocks) {
             Ok(mfs) => {
                 println!(
-                    "fs: sosomfs montado (generación {}, {} bloques, caché 2048)",
+                    "fs: sosomfs montado (generación {}, {} bloques, caché {})",
                     mfs.generation(),
-                    mfs.total_blocks()
+                    mfs.total_blocks(),
+                    cache_blocks
                 );
                 for m in &mfs.catalog.models {
                     println!("fs:   modelo {} ({} shards)", m.name, m.shards.len());

@@ -667,9 +667,11 @@ fn run_model(
                     );
                 }
                 println!(
-                    "soso-llm: streaming — prefetch {}, liberaciones shard {}, ventanas KV {}",
+                    "soso-llm: streaming — prefetch {} ({} ms), liberaciones shard {} ({} ms), ventanas KV {}",
                     st.prefeches,
+                    st.stream_ms,
                     st.shard_releases,
+                    st.release_ms,
                     st.kv_slides,
                 );
                 if st.pld_attempts > 0 || st.pld_accepted > 0 {

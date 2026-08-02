@@ -122,7 +122,38 @@ SOSO_QEMU_GPU=vfio:01:00.0 cargo xtask run
 | PCIe Gen4/5 post-GSP | **GO** (2026-07-30) — cap Gen3 en FMC, bump `SOSO_G1_PCIE_BUMP=4\|5` |
 | G6 (pesos en VRAM) | **GO** (2026-08-02) — 192 matvec en GPU, 24 matrices residentes, 0 caídas a CPU. Lo bloqueaba un solapamiento de ventanas de VA: los pesos se mapeaban sobre el contexto de GR |
 | Rendimiento G6 | Lanzamiento de QMD **10 ms → ~0,4 ms** y matvec **137 → 31,5 ms/capa** (2026-08-02) al dar al kernel un reloj fino: el tick va a 100 Hz y las esperas dormían un tick entero |
-| Siguiente | El matvec ya sólo es el **3%** del tiempo de inferencia (126 ms de 4,3 s por token): el cuello está en el streaming de shards desde disco, no en la GPU |
+| Streaming de shards | **85 360 → 2 970 ms** en 20 tokens (0,23 → 6,73 tok/s) el 2026-08-02, midiendo en QEMU con el modelo `tiny`. Ver abajo |
+| Siguiente | El matvec vuelve a mandar: 2,16 s de los 2,97 (73%). Lo que queda del streaming son 620 ms de carga en frío, y son coste único, no por token |
+
+### Los 97% que no eran del matvec (2026-08-02)
+
+El tiempo de inferencia no estaba en el cálculo ni en la GPU sino en la ruta de
+pesos, y no salía en ningún cronómetro: `observe_layer` mide `forward_layer`,
+pero `prefetch_shards` corre **antes** de arrancar el reloj y
+`release_shards_except` **después** de pararlo. 160 ms de capas medidas frente a
+4,3 s de token real. Lo primero fue cronometrar esas dos llamadas
+(`stats.stream_ms` / `stats.release_ms`, ahora en la línea `streaming —`).
+
+Con eso a la vista salieron cuatro averías encadenadas, todas de la misma
+familia —una constante fija donde hacía falta una proporción—:
+
+| # | Avería | Efecto |
+|---|--------|--------|
+| 1 | `recompute_streaming_budgets` recortaba el working-set a `DEFAULT_RESIDENT_LAYERS` (2). Ese 2 es el valor de reserva para cuando no se sabe cuánto pesa una capa, no un techo | Un modelo de 2,3 MiB con 1 GiB de presupuesto —cabe 400 veces— liberaba y remapeaba medio modelo por token. **85,4 → 46,5 s** |
+| 2 | `keep_shards_after` extendía la ventana sólo hacia atrás (`end = layer + 1`), así que en la capa 0 liberaba las capas 2 y 3 recién mapeadas | Dos desalojos y sus refaltos por token aunque el working-set fuera de 4 capas. **46,5 → 7,2 s** |
+| 3 | `BlockCache` daba a los shards (`CACHE_STREAM`) una ventana fija de 32 bloques —128 KiB— y `last_prefetch` era una sola casilla, que no sobrevive a un acceso que alterna entre shards | Cada prefetch leía el shard siguiente entero y sólo podía quedarse con 32 bloques. **7,2 → 5,4 s** |
+| 4 | El constructor de sosomfs ponía `prefetch_bytes = 8 MiB` fijo para todos los shards, cuando el siguiente ocupa decenas de KiB | Cada prefetch arrastraba 2048 bloques de disco y desalojaba lo útil. **5,4 → 3,0 s** |
+
+Medido a nivel de dispositivo, la amplificación de lectura era de **94 bloques
+leídos por cada bloque de modelo**: 54 272 lecturas de 4 KiB a ~177 us —9,2 s de
+disco— para un modelo de 577 bloques. Tras (3) y (4) quedan ~1 100.
+
+Lección de método: el corte se encontró bajando un nivel cada vez y **midiendo**
+—faltas de página por ventana, no acumuladas (el acumulado bajaba de 13 a 4 ms y
+escondía que las 512 primeras costaban 12 ms y el resto 0,8); luego el coste
+dentro del FS; luego las lecturas reales al dispositivo—. Las tres primeras
+hipótesis por inspección del código (CRC de segmento, lecturas sector a sector,
+walk de metadatos) eran plausibles y las tres estaban equivocadas.
 
 ### Qué mirar en el próximo ciclo de VFIO (2026-08-01)
 

@@ -974,6 +974,11 @@ fn sys_munmap(addr: u64, len: u64) -> Result<u64, i64> {
             return Err(-abi::EINVAL);
         }
         space.unmap_range(addr, len_aligned);
+        // Y darlas de baja en el reclaim: si no, la cola se queda con VAs que ya
+        // no existen y que el asignador de mmap puede reutilizar para otra cosa
+        // (`mmap::next_addr` es first-fit). Además es lo que mantiene la cola del
+        // tamaño del working set en vez de crecer con cada shard que se libera.
+        crate::mm::reclaim::forget_range(space, addr, len_aligned);
         Ok(0)
     })
 }

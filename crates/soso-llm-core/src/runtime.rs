@@ -322,6 +322,7 @@ impl Runtime {
         for layer in layer_start..layer_end {
             // Prefetch layer-ahead (ScoutAttention / LayerKV): mapear N+1
             // mientras se calcula N.
+            let ts0 = clock_ms.map(|c| c());
             if let Some(next) = self.manifest.prefetch.get((layer + 1) as usize) {
                 source.prefetch_shards(&next.shards);
                 if let Some(pl) = self.planner.as_mut() {
@@ -331,6 +332,12 @@ impl Runtime {
             if let Some(pf) = self.manifest.prefetch.get(layer as usize) {
                 self.tiers.schedule_prefetch(&pf.shards);
                 source.prefetch_shards(&pf.shards);
+            }
+            if let (Some(c), Some(t)) = (clock_ms, ts0) {
+                let ms = c().saturating_sub(t);
+                if let Some(pl) = self.planner.as_mut() {
+                    pl.note_stream_ms(ms);
+                }
             }
             let use_gpu = base_gpu
                 && self
@@ -374,9 +381,15 @@ impl Runtime {
                 .map(|pl| pl.keep_shards_after(layer, layer_end, &self.manifest));
             if let Some(keep) = keep {
                 if !keep.is_empty() {
+                    let tr0 = clock_ms.map(|c| c());
                     source.release_shards_except(&keep);
+                    let ms = match (clock_ms, tr0) {
+                        (Some(c), Some(t)) => c().saturating_sub(t),
+                        _ => 0,
+                    };
                     if let Some(pl) = self.planner.as_mut() {
                         pl.note_shard_release();
+                        pl.note_release_ms(ms);
                     }
                 }
             }

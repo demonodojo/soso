@@ -45,8 +45,22 @@ pub fn reclaimable_frames() -> usize {
         .sum()
 }
 
-/// Registra una página file-backed RO recién mapeada.
-/// Si ya estaba en la cola (mismo espacio+VA), marca `referenced`.
+/// Registra una página file-backed RO recién mapeada. **O(1)**.
+///
+/// AVERÍA (2026-08-02): esto recorría la cola ENTERA en cada fallo de página
+/// para deduplicar, y la cola no se purgaba ni al `munmap` ni al morir el
+/// proceso. Con `soso-llm` haciendo streaming —mapea shards, los usa, los
+/// desmapea y vuelve a mapearlos en el token siguiente— la cola se llenaba de
+/// entradas muertas y cada fallo costaba más que el anterior: coste cuadrático
+/// en el número de páginas. Con el modelo `tiny` (2,3 MiB) ya eran ~4600
+/// entradas y ~10 M comparaciones por token; con un modelo de 512 MiB serían
+/// 131 072 páginas y no se acaba nunca.
+///
+/// El escaneo estaba para no meter duplicados. Se puede quitar porque la fuente
+/// de los duplicados ya no existe: `handle_mmap_fault` sale antes si la página
+/// está mapeada, así que un fallo significa que NO lo está, y las entradas
+/// obsoletas se dan de baja en `forget_range` (munmap) y `forget_space` (muerte
+/// del proceso). Sin esas dos bajas el escaneo sólo tapaba la fuga.
 pub fn register(space: &AddrSpace, va: u64, is_2m: bool) {
     let va = if is_2m {
         va & !(2 * 1024 * 1024 - 1)
@@ -54,20 +68,37 @@ pub fn register(space: &AddrSpace, va: u64, is_2m: bool) {
         va & !0xfff
     };
     let mut st = RECLAIM.lock();
-    let pml4 = space.pml4_phys();
-    for e in st.queue.iter_mut() {
-        if e.va == va && e.space.pml4_phys() == pml4 {
-            e.referenced = true;
-            e.is_2m = is_2m;
-            return;
-        }
-    }
     st.queue.push_back(CachedPage {
         space: space.clone(),
         va,
         is_2m,
         referenced: true,
     });
+}
+
+/// Da de baja las páginas de `[start, start+len)` de este espacio.
+///
+/// La llama `munmap`: sin esto, desmapear un shard dejaba sus páginas en la cola
+/// apuntando a VAs que ya no existen —y peor, esa VA puede reutilizarse para otra
+/// región (el asignador de mmap es first-fit), con lo que un desalojo posterior
+/// tiraría la página de OTRA cosa.
+pub fn forget_range(space: &AddrSpace, start: u64, len: u64) {
+    let fin = start.saturating_add(len);
+    let pml4 = space.pml4_phys();
+    let mut st = RECLAIM.lock();
+    st.queue
+        .retain(|e| !(e.space.pml4_phys() == pml4 && e.va >= start && e.va < fin));
+}
+
+/// Da de baja todo lo de un espacio que se muere.
+///
+/// Cada entrada guarda un `AddrSpace`, que es un `Arc`: mientras la cola tenga
+/// una, el espacio del proceso muerto NO se libera y sus tablas de páginas siguen
+/// ocupando memoria. Un proceso por token de `soso-llm` y la cuenta sale sola.
+pub fn forget_space(space: &AddrSpace) {
+    let pml4 = space.pml4_phys();
+    let mut st = RECLAIM.lock();
+    st.queue.retain(|e| e.space.pml4_phys() != pml4);
 }
 
 /// Libera frames hasta que haya al menos `watermark + need` libres.

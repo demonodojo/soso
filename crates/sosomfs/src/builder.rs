@@ -90,6 +90,20 @@ pub fn build_from_dir<D: BlockDevice>(
         }
     }
 
+    // El apunte de prefetch es «tras leer este shard, trae el siguiente». Los
+    // bytes tienen que ser los del shard siguiente y nada más.
+    //
+    // AVERÍA (2026-08-02): aquí había un 8 MiB fijo para todos. El shard que
+    // viene detrás ocupa decenas de KiB, así que cada prefetch arrastraba 2048
+    // bloques del disco —el resto del modelo y lo que hubiera después— y
+    // desalojaba lo que sí hacía falta. Con `tiny` (2,3 MiB) eso eran 54 272
+    // lecturas de 4 KiB para 577 bloques de modelo: 9,2 s de disco en una
+    // inferencia de 20 tokens.
+    let tam = |rel: &str| -> u32 {
+        fs::metadata(model_root.join(rel))
+            .map(|m| m.len().min(u32::MAX as u64) as u32)
+            .unwrap_or(0)
+    };
     let mut prefetch_map: BTreeMap<String, (String, u32)> = BTreeMap::new();
     for pf in &manifest.prefetch {
         let chain: Vec<String> = pf
@@ -98,7 +112,11 @@ pub fn build_from_dir<D: BlockDevice>(
             .map(|s| format!("{SHARDS_DIR}/{s}"))
             .collect();
         for i in 0..chain.len().saturating_sub(1) {
-            prefetch_map.insert(chain[i].clone(), (chain[i + 1].clone(), 8 * 1024 * 1024));
+            let bytes = tam(&chain[i + 1]);
+            if bytes == 0 {
+                continue;
+            }
+            prefetch_map.insert(chain[i].clone(), (chain[i + 1].clone(), bytes));
         }
     }
 

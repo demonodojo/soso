@@ -665,7 +665,11 @@ extern "C" fn schedule_inner() -> ! {
                     && matches!(procs[i].state, State::Zombie(_))
                     && !crate::arch::percpu::pid_en_ejecucion(procs[i].pid)
                 {
-                    drop(procs.remove(i).space);
+                    let muerto = procs.remove(i).space;
+                    if let Some(sp) = &muerto {
+                        crate::mm::reclaim::forget_space(sp);
+                    }
+                    drop(muerto);
                 } else {
                     i += 1;
                 }

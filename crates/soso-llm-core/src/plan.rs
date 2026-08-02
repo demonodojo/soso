@@ -93,6 +93,13 @@ pub struct PlannerStats {
     pub shard_releases: u32,
     pub kv_slides: u32,
     pub prefeches: u32,
+    /// Milisegundos gastados mapeando shards (prefetch).
+    ///
+    /// Esto NO entra en `avg_*_ms`: el cronómetro de la capa arranca después del
+    /// prefetch y para antes del release, así que el streaming era invisible.
+    pub stream_ms: u64,
+    /// Milisegundos gastados desmapeando shards fuera del working set.
+    pub release_ms: u64,
     /// Tokens aceptados por Prompt Lookup Decoding.
     pub pld_accepted: u32,
     /// Intentos de draft PLD (cadenas iniciadas).
@@ -245,11 +252,23 @@ impl ResourcePlanner {
 
     pub fn recompute_streaming_budgets(&mut self, manifest: &Manifest) {
         // LayerKV: cuantas capas caben en el presupuesto de pesos.
+        //
+        // El tope son las capas del modelo, NO `DEFAULT_RESIDENT_LAYERS`. Ese 2
+        // es el valor de reserva para cuando no sabemos cuánto pesa una capa; se
+        // estaba usando además como máximo, así que un modelo que cabía entero en
+        // memoria se quedaba con dos capas mapeadas y liberaba el resto —
+        // obligando a remapearlo y a refaltar sus páginas en el token siguiente.
+        //
+        // Medido (2026-08-02): con `tiny` (2308 KiB) y presupuesto de 1 GiB —cabe
+        // 400 veces— el planificador anunciaba «working-set 2 capas» y hacía 3
+        // prefetch y 4 liberaciones POR TOKEN. El coste no salía en ningún
+        // cronómetro porque `observe_layer` mide `forward_layer` y el streaming
+        // ocurre fuera: 160 ms de capa medidos frente a 4,3 s de token real.
         let layers = if self.avg_layer_bytes == 0 {
             DEFAULT_RESIDENT_LAYERS
         } else {
             let fit = (self.weight_budget / self.avg_layer_bytes.max(1)).max(1) as u32;
-            fit.min(DEFAULT_RESIDENT_LAYERS.max(1)).min(manifest.num_layers.max(1))
+            fit.min(manifest.num_layers.max(1))
         };
         self.resident_layers = layers.max(1);
 
@@ -328,6 +347,14 @@ impl ResourcePlanner {
         self.stats.shard_releases = self.stats.shard_releases.saturating_add(1);
     }
 
+    pub fn note_stream_ms(&mut self, ms: u64) {
+        self.stats.stream_ms = self.stats.stream_ms.saturating_add(ms);
+    }
+
+    pub fn note_release_ms(&mut self, ms: u64) {
+        self.stats.release_ms = self.stats.release_ms.saturating_add(ms);
+    }
+
     pub fn note_kv_slide(&mut self) {
         self.stats.kv_slides = self.stats.kv_slides.saturating_add(1);
     }
@@ -401,8 +428,18 @@ impl ResourcePlanner {
         layer_end: u32,
         manifest: &Manifest,
     ) -> Vec<String> {
+        // La ventana se ancla en `start` y se extiende `resident_layers` HACIA
+        // DELANTE. Antes acababa en `layer + 1`, o sea que sólo miraba hacia
+        // atrás: en la capa 0 la ventana era `[0,1)` y liberaba las capas 2 y 3
+        // recién mapeadas, para volver a mapearlas dos capas después. Con un
+        // presupuesto que da para el modelo entero eso son dos desalojos y sus
+        // refaltos por token, gratis para nadie.
         let start = layer.saturating_sub(self.resident_layers.saturating_sub(1));
-        let end = (layer + 1).min(layer_end).min(manifest.num_layers);
+        let end = start
+            .saturating_add(self.resident_layers)
+            .max(layer + 1)
+            .min(layer_end)
+            .min(manifest.num_layers);
         let mut keep = Vec::new();
         for l in start..end {
             if let Some(pf) = manifest.prefetch.get(l as usize) {

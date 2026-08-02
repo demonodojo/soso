@@ -2,10 +2,13 @@
 
 use alloc::vec::Vec;
 use block_dev::{Block, BlockError};
-use crate::layout::{CACHE_PIN, CACHE_STREAM};
+use crate::layout::{CACHE_NORMAL, CACHE_PIN, CACHE_STREAM};
 use crate::volume_set::VolumeSet;
 
-const STREAM_WINDOW: usize = 32;
+/// Suelo de la ventana de streaming, para cachés diminutas.
+const STREAM_WINDOW_MIN: usize = 32;
+/// Recuerdo de prefetch: cuántos destinos recientes se dan por hechos.
+const PREFETCH_RECIENTES: usize = 16;
 
 struct Entry {
     lba: u64,
@@ -20,20 +23,38 @@ pub struct BlockCache<V: VolumeSet> {
     capacity: usize,
     tick: u32,
     pin_count: usize,
-    /// Último start_lba prefetcheado: evita repetir el prefetch completo en
-    /// cada lectura de 4 KiB (p. ej. la tormenta de page faults de mmap).
-    last_prefetch: u64,
+    /// Techo de entradas para los shards (`CACHE_STREAM`), para que un modelo
+    /// grande no se coma la caché entera.
+    ///
+    /// AVERÍA (2026-08-02): esto era una constante de 32 bloques —128 KiB— y
+    /// convertía el prefetch en un generador de trabajo inútil: `prefetch` leía
+    /// el shard siguiente entero del disco y la ventana sólo podía quedarse con
+    /// los 32 últimos bloques, así que lo tiraba y las faltas de página que
+    /// venían detrás lo releían. Medido con el modelo `tiny` (577 bloques):
+    /// **54 272 lecturas de 4 KiB a 177 us**, 94 bloques leídos por cada bloque
+    /// del modelo, 9,2 s de disco. La ventana tiene que ser proporcional a la
+    /// caché, no un número fijo más pequeño que un solo prefetch.
+    stream_cap: usize,
+    /// Destinos de prefetch ya servidos. Era **una sola casilla**, y eso sólo
+    /// frena repeticiones consecutivas del mismo destino: en cuanto el acceso
+    /// alterna entre dos shards (el runtime mapea la capa N y la N+1 a la vez)
+    /// cada lectura de 4 KiB volvía a prefetchear desde cero.
+    prefetch_hechos: [u64; PREFETCH_RECIENTES],
+    prefetch_siguiente: usize,
 }
 
 impl<V: VolumeSet> BlockCache<V> {
     pub fn new(vol: V, capacity: usize) -> Self {
+        let capacity = capacity.max(8);
         Self {
             vol,
             entries: Vec::new(),
-            capacity: capacity.max(8),
+            capacity,
             tick: 0,
             pin_count: 0,
-            last_prefetch: u64::MAX,
+            stream_cap: (capacity / 2).max(STREAM_WINDOW_MIN).min(capacity),
+            prefetch_hechos: [u64::MAX; PREFETCH_RECIENTES],
+            prefetch_siguiente: 0,
         }
     }
 
@@ -78,7 +99,7 @@ impl<V: VolumeSet> BlockCache<V> {
     fn insert(&mut self, lba: u64, data: Block, policy: u8) {
         self.tick = self.tick.wrapping_add(1);
         let cap = if policy == CACHE_STREAM {
-            STREAM_WINDOW
+            self.stream_cap
         } else {
             self.capacity
         };
@@ -95,8 +116,27 @@ impl<V: VolumeSet> BlockCache<V> {
                 return;
             }
         }
-        if self.entries.len() < self.capacity {
+        // Crecer con `try_reserve`: la capacidad es un techo, no una promesa.
+        //
+        // AVERÍA (2026-08-02): `push` a secas duplica el buffer, y con capacidad
+        // 2048 la última duplicación pide 2048 × 4112 B = **8,4 MiB contiguos**
+        // de una vez. En la máquina de 48 MiB del test de reclaim eso es un
+        // `memory allocation of 8421376 bytes failed` y el kernel entero se cae.
+        // No se veía porque el techo fijo de 32 bloques impedía llegar; en cuanto
+        // la ventana pasó a ser proporcional, saltó. Si no hay memoria, dejar de
+        // crecer y reciclar entradas es una degradación correcta.
+        if self.entries.len() < self.capacity
+            && self.entries.try_reserve(1).is_ok()
+        {
             self.entries.push(Entry { lba, data, age: self.tick, policy });
+            if policy == CACHE_PIN {
+                self.pin_count += 1;
+            }
+            return;
+        }
+        // Sin sitio para crecer: reutilizar la entrada más vieja que se pueda.
+        if let Some(idx) = self.evict_lru(policy).or_else(|| self.evict_lru(CACHE_NORMAL)) {
+            self.entries[idx] = Entry { lba, data, age: self.tick, policy };
             if policy == CACHE_PIN {
                 self.pin_count += 1;
             }
@@ -104,11 +144,20 @@ impl<V: VolumeSet> BlockCache<V> {
     }
 
     pub fn prefetch(&mut self, start_lba: u64, bytes: u32, policy: u8) {
-        if start_lba == self.last_prefetch {
+        if self.prefetch_hechos.contains(&start_lba) {
             return;
         }
-        self.last_prefetch = start_lba;
-        let blocks = (bytes as u64 + 4095) / 4096;
+        self.prefetch_hechos[self.prefetch_siguiente] = start_lba;
+        self.prefetch_siguiente = (self.prefetch_siguiente + 1) % PREFETCH_RECIENTES;
+        // Nunca traer más de lo que la política puede retener: prefetchear por
+        // encima del techo desaloja la cabeza del propio prefetch y garantiza
+        // que las lecturas que vienen detrás fallen igualmente.
+        let cap = if policy == CACHE_STREAM {
+            self.stream_cap as u64
+        } else {
+            self.capacity as u64
+        };
+        let blocks = ((bytes as u64 + 4095) / 4096).min(cap);
         let end = start_lba.saturating_add(blocks).min(self.vol.total_blocks());
         let mut lba = start_lba;
         while lba < end {
