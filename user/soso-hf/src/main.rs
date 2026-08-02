@@ -11,9 +11,8 @@ mod net;
 
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use gguf2som::{convert, SomOut};
 use guest_io::{GuestFile, GuestSomOut};
+use gguf2som::{convert, SomOut};
 use libsoso::{println, sys};
 use soso_abi::O_RDONLY;
 
@@ -25,18 +24,118 @@ fn parse_args(args: &str) -> alloc::vec::Vec<alloc::string::String> {
 
 fn main(args: &str) -> u8 {
     let args = parse_args(args);
-    if args.len() < 2 {
+    if args.is_empty() {
+        print_usage();
+        return 2;
+    }
+    match args[0].as_str() {
+        "pull" => cmd_pull(&args[1..]),
+        "search" => cmd_search(&args[1..]),
+        "list" => cmd_list(&args[1..]),
+        other => {
+            println!("soso-hf: subcomando desconocido {other}");
+            print_usage();
+            2
+        }
+    }
+}
+
+fn print_usage() {
+    println!("uso:");
+    println!("  soso-hf search <consulta> [--limit N] [--all]");
+    println!("  soso-hf list <org/repo>");
+    println!("  soso-hf pull <org/repo> [--file NAME.gguf] [--name NOMBRE]");
+}
+
+fn cmd_search(args: &[String]) -> u8 {
+    let query = match args.first() {
+        Some(q) if !q.is_empty() => q.as_str(),
+        _ => {
+            println!("uso: soso-hf search <consulta> [--limit N] [--all]");
+            return 2;
+        }
+    };
+    let mut limit = 20u32;
+    let mut gguf_only = true;
+    let mut i = 1usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--limit" => {
+                i += 1;
+                limit = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(20);
+            }
+            "--all" => gguf_only = false,
+            other => {
+                println!("soso-hf: opción desconocida {other}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+    let token = read_hf_token();
+    let hits = match hf::fetch_search(query, limit, token.as_deref()) {
+        Ok(h) => h,
+        Err(e) => {
+            println!("soso-hf: {e}");
+            return 1;
+        }
+    };
+    let hits: alloc::vec::Vec<_> = if gguf_only {
+        hits.into_iter().filter(|h| h.has_gguf_tag()).collect()
+    } else {
+        hits
+    };
+    if hits.is_empty() {
+        println!("(sin resultados)");
+        return 0;
+    }
+    for h in hits {
+        println!("{}  {} descargas", h.id, h.downloads);
+    }
+    0
+}
+
+fn cmd_list(args: &[String]) -> u8 {
+    let repo = match args.first() {
+        Some(r) => r.as_str(),
+        None => {
+            println!("uso: soso-hf list <org/repo>");
+            return 2;
+        }
+    };
+    let slug = repo.trim().trim_end_matches('/');
+    if !slug.contains('/') {
+        println!("soso-hf: el repo debe ser org/nombre");
+        return 2;
+    }
+    let token = read_hf_token();
+    let entries = match hf::fetch_tree(slug, token.as_deref()) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("soso-hf: {e}");
+            return 1;
+        }
+    };
+    let ggufs: alloc::vec::Vec<_> = entries.iter().filter(|e| e.path.ends_with(".gguf")).collect();
+    if ggufs.is_empty() {
+        println!("soso-hf: {slug} no contiene ficheros .gguf");
+        return 0;
+    }
+    for e in ggufs {
+        println!("{}  ({} B)", e.path, e.size);
+    }
+    0
+}
+
+fn cmd_pull(args: &[String]) -> u8 {
+    if args.is_empty() {
         println!("uso: soso-hf pull <org/repo> [--file NAME.gguf] [--name NOMBRE]");
         return 2;
     }
-    if args[0] != "pull" {
-        println!("soso-hf: subcomando desconocido (solo pull)");
-        return 2;
-    }
-    let repo = &args[1];
+    let repo = &args[0];
     let mut file: Option<String> = None;
     let mut name: Option<String> = None;
-    let mut i = 2usize;
+    let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
             "--file" => {

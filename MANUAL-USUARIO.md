@@ -477,6 +477,13 @@ En la máquina anfitriona puedes bajar un GGUF del Hub, convertirlo a `.som` y
 dejar listo el arranque con QEMU:
 
 ```sh
+# buscar modelos GGUF en el Hub (por defecto solo repos con tag gguf)
+cargo xtask fetch-hf search tinyllama
+cargo xtask fetch-hf search llama --limit 10 --all
+
+# listar ficheros .gguf de un repo
+cargo xtask fetch-hf list TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
 # elige Q4_K_M automáticamente si existe
 cargo xtask fetch-hf TinyLlama/TinyLlama-1.1B-Chat-v1.0
 
@@ -496,6 +503,8 @@ reconstruir la imagen de modelos en el host:
 # token opcional para repos privados
 echo hf_… > /etc/hf_token
 
+soso-hf search tinyllama
+soso-hf list TinyLlama/TinyLlama-1.1B-Chat-v1.0
 soso-hf pull TinyLlama/TinyLlama-1.1B-Chat-v1.0
 soso-hf pull org/repo --file mixtral.Q4_K_M.gguf --name mixtral
 soso-llm run tinyllama --prompt hola

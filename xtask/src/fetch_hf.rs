@@ -1,7 +1,10 @@
 //! Descarga modelos GGUF desde Hugging Face Hub, convierte a `.som` y deja
 //! listo `SOSO_MODELS_DIR` para `cargo xtask run`.
 //!
-//! Uso: `cargo xtask fetch-hf <org/repo> [--file NAME.gguf] [--name NOMBRE] [--out DIR] [--run]`
+//! Uso:
+//!   cargo xtask fetch-hf search <consulta> [--limit N] [--all]
+//!   cargo xtask fetch-hf list <org/repo>
+//!   cargo xtask fetch-hf <org/repo> [--file …] [--name …] [--out …] [--run]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
@@ -11,6 +14,87 @@ use std::process::{Command, exit};
 pub struct HfTreeEntry {
     pub path: String,
     pub size: u64,
+}
+
+/// Resultado de búsqueda en el Hub (`/api/models?search=…`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HfModelHit {
+    pub id: String,
+    pub downloads: u64,
+    pub tags: Vec<String>,
+}
+
+impl HfModelHit {
+    pub fn has_gguf_tag(&self) -> bool {
+        self.tags.iter().any(|t| t.eq_ignore_ascii_case("gguf"))
+    }
+}
+
+/// Parsea la respuesta JSON de búsqueda de modelos del Hub.
+pub fn parse_hf_search(json: &str) -> Result<Vec<HfModelHit>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("JSON de búsqueda Hub inválido: {e}"))?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| "se esperaba un array en la búsqueda Hub".to_string())?;
+    let mut out = Vec::new();
+    for item in arr {
+        let id = item
+            .get("id")
+            .or_else(|| item.get("modelId"))
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| "entrada sin id".to_string())?
+            .to_string();
+        let downloads = item.get("downloads").and_then(|d| d.as_u64()).unwrap_or(0);
+        let tags: Vec<String> = item
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(HfModelHit { id, downloads, tags });
+    }
+    Ok(out)
+}
+
+fn format_bytes(n: u64) -> String {
+    const G: u64 = 1024 * 1024 * 1024;
+    const M: u64 = 1024 * 1024;
+    if n >= G {
+        format!("{:.1} GiB", n as f64 / G as f64)
+    } else if n >= M {
+        format!("{:.0} MiB", n / M)
+    } else if n > 0 {
+        format!("{n} B")
+    } else {
+        String::from("?")
+    }
+}
+
+fn print_model_hits(hits: &[HfModelHit]) {
+    if hits.is_empty() {
+        println!("(sin resultados)");
+        return;
+    }
+    let w = hits.iter().map(|h| h.id.len()).max().unwrap_or(8).max(8);
+    for h in hits {
+        println!("  {:w$}  {:>10} descargas", h.id, h.downloads, w = w);
+    }
+}
+
+fn print_gguf_list(slug: &str, entries: &[HfTreeEntry]) {
+    let ggufs: Vec<_> = entries.iter().filter(|e| e.path.ends_with(".gguf")).collect();
+    if ggufs.is_empty() {
+        println!("fetch-hf: {slug} no contiene ficheros .gguf");
+        return;
+    }
+    println!("GGUF en {slug}:");
+    for e in ggufs {
+        println!("  {}  ({})", e.path, format_bytes(e.size));
+    }
 }
 
 fn gguf_basename(path: &str) -> &str {
@@ -124,12 +208,83 @@ fn suggest_models_size(bytes: u64) -> String {
 }
 
 pub fn run(args: &[String]) {
+    match args.first().map(String::as_str) {
+        Some("search") => run_search(&args[1..]),
+        Some("list") => run_list(&args[1..]),
+        Some(s) if s.contains('/') => run_pull(args),
+        _ => {
+            eprintln!(
+                "uso:\n  \
+                 cargo xtask fetch-hf search <consulta> [--limit N] [--all]\n  \
+                 cargo xtask fetch-hf list <org/repo>\n  \
+                 cargo xtask fetch-hf <org/repo> [--file NAME.gguf] [--name N] [--out DIR] [--run]"
+            );
+            exit(2);
+        }
+    }
+}
+
+fn run_search(args: &[String]) {
+    let query = args.first().cloned().unwrap_or_else(|| {
+        eprintln!("uso: cargo xtask fetch-hf search <consulta> [--limit N] [--all]");
+        exit(2);
+    });
+    let mut limit = 20u32;
+    let mut gguf_only = true;
+    let mut i = 1usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--limit" => {
+                i += 1;
+                limit = args.get(i).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("fetch-hf: --limit requiere un número");
+                    exit(2);
+                });
+            }
+            "--all" => gguf_only = false,
+            other => {
+                eprintln!("fetch-hf: opción desconocida {other}");
+                exit(2);
+            }
+        }
+        i += 1;
+    }
+    let hits = search_models(&query, limit);
+    let hits: Vec<_> = if gguf_only {
+        hits.into_iter().filter(|h| h.has_gguf_tag()).collect()
+    } else {
+        hits
+    };
+    if gguf_only {
+        println!("Modelos GGUF en el Hub (consulta «{query}», límite {limit}):");
+    } else {
+        println!("Modelos en el Hub (consulta «{query}», límite {limit}):");
+    }
+    print_model_hits(&hits);
+    if gguf_only && hits.is_empty() {
+        eprintln!("fetch-hf: prueba con --all o una consulta distinta");
+    }
+}
+
+fn run_list(args: &[String]) {
+    let slug = args.first().cloned().unwrap_or_else(|| {
+        eprintln!("uso: cargo xtask fetch-hf list <org/repo>");
+        exit(2);
+    });
+    let slug = repo_slug(&slug);
+    if !slug.contains('/') {
+        eprintln!("fetch-hf: el repo debe ser org/nombre");
+        exit(2);
+    }
+    let entries = fetch_tree(&slug);
+    print_gguf_list(&slug, &entries);
+}
+
+fn run_pull(args: &[String]) {
     let root = super::project_root();
     let mut pos = 0usize;
     let repo = args.get(pos).cloned().unwrap_or_else(|| {
-        eprintln!(
-            "uso: cargo xtask fetch-hf <org/repo> [--file NAME.gguf] [--name NOMBRE] [--out DIR] [--run]"
-        );
+        eprintln!("fetch-hf: falta org/repo");
         exit(2);
     });
     pos += 1;
@@ -272,6 +427,53 @@ fn download_gguf(slug: &str, file: &str, dest: &Path) {
     println!("fetch-hf: guardado en {}", dest.display());
 }
 
+fn search_models(query: &str, limit: u32) -> Vec<HfModelHit> {
+    let q = urlencoding_query(query);
+    let url = format!(
+        "https://huggingface.co/api/models?search={q}&limit={limit}&sort=downloads&direction=-1"
+    );
+    println!("fetch-hf: buscando {url}…");
+    let mut cmd = Command::new("curl");
+    cmd.args(["-fsSL", &url]);
+    if let Some(tok) = hf_token() {
+        cmd.args(["-H", &format!("Authorization: Bearer {tok}")]);
+    }
+    let out = cmd.output().unwrap_or_else(|e| {
+        eprintln!("fetch-hf: no se pudo ejecutar curl: {e}");
+        exit(1);
+    });
+    if !out.status.success() {
+        eprintln!(
+            "fetch-hf: búsqueda falló (HTTP {}): {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        exit(1);
+    }
+    let body = String::from_utf8_lossy(&out.stdout);
+    match parse_hf_search(&body) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("fetch-hf: {e}");
+            exit(1);
+        }
+    }
+}
+
+fn urlencoding_query(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push_str("%20"),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 fn convert_gguf(root: &Path, gguf: &Path, out_dir: &Path, name: &str) {
     if out_dir.join("manifest.som").exists() {
         println!(
@@ -331,5 +533,20 @@ mod tests {
         let e = parse_hf_tree(r#"[{"type":"file","path":"model.safetensors","size":1}]"#)
             .unwrap();
         assert!(pick_gguf_file(&e, None).is_err());
+    }
+
+    #[test]
+    fn parse_search_id_y_tags() {
+        let json = r#"[{"id":"org/m","downloads":42,"tags":["gguf","en"]}]"#;
+        let h = parse_hf_search(json).unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].id, "org/m");
+        assert_eq!(h[0].downloads, 42);
+        assert!(h[0].has_gguf_tag());
+    }
+
+    #[test]
+    fn urlencoding_espacios() {
+        assert_eq!(urlencoding_query("tiny llama"), "tiny%20llama");
     }
 }

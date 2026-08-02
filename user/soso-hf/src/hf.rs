@@ -6,6 +6,19 @@ use alloc::vec::Vec;
 
 pub struct TreeEntry {
     pub path: String,
+    pub size: u64,
+}
+
+pub struct ModelHit {
+    pub id: String,
+    pub downloads: u64,
+    pub tags: Vec<String>,
+}
+
+impl ModelHit {
+    pub fn has_gguf_tag(&self) -> bool {
+        self.tags.iter().any(|t| t.eq_ignore_ascii_case("gguf"))
+    }
 }
 
 pub fn default_name(file: &str) -> String {
@@ -58,15 +71,70 @@ pub fn parse_tree(json: &str) -> Result<Vec<TreeEntry>, String> {
             .and_then(|p| p.as_str())
             .ok_or("entrada sin path")?
             .to_string();
-        out.push(TreeEntry { path });
+        let size = item.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+        out.push(TreeEntry { path, size });
     }
     Ok(out)
+}
+
+pub fn parse_search(json: &str) -> Result<Vec<ModelHit>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("JSON inválido: {e}"))?;
+    let arr = v.as_array().ok_or("se esperaba array")?;
+    let mut out = Vec::new();
+    for item in arr {
+        let id = item
+            .get("id")
+            .or_else(|| item.get("modelId"))
+            .and_then(|x| x.as_str())
+            .ok_or("entrada sin id")?
+            .to_string();
+        let downloads = item.get("downloads").and_then(|d| d.as_u64()).unwrap_or(0);
+        let tags: Vec<String> = item
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(ModelHit { id, downloads, tags });
+    }
+    Ok(out)
+}
+
+fn urlencoding_query(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push_str("%20"),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 pub fn fetch_tree(slug: &str, token: Option<&str>) -> Result<Vec<TreeEntry>, String> {
     let url = format!("https://huggingface.co/api/models/{slug}/tree/main");
     let body = crate::net::https_get_body(&url, token).map_err(|e| format!("HTTP: {e:?}"))?;
     parse_tree(core::str::from_utf8(&body).map_err(|_| String::from("utf8 inválido"))?)
+}
+
+pub fn fetch_search(
+    query: &str,
+    limit: u32,
+    token: Option<&str>,
+) -> Result<Vec<ModelHit>, String> {
+    let q = urlencoding_query(query);
+    let url = format!(
+        "https://huggingface.co/api/models?search={q}&limit={limit}&sort=downloads&direction=-1"
+    );
+    let body = crate::net::https_get_body(&url, token).map_err(|e| format!("HTTP: {e:?}"))?;
+    parse_search(core::str::from_utf8(&body).map_err(|_| String::from("utf8 inválido"))?)
 }
 
 #[cfg(test)]
@@ -76,9 +144,16 @@ mod tests {
     #[test]
     fn pick_q4km() {
         let e = vec![
-            TreeEntry { path: String::from("a-f16.gguf") },
-            TreeEntry { path: String::from("b-q4_k_m.gguf") },
+            TreeEntry { path: String::from("a-f16.gguf"), size: 1 },
+            TreeEntry { path: String::from("b-q4_k_m.gguf"), size: 2 },
         ];
         assert_eq!(pick_gguf(&e, None).unwrap(), "b-q4_k_m.gguf");
+    }
+
+    #[test]
+    fn parse_search_gguf_tag() {
+        let json = r#"[{"id":"org/m","downloads":10,"tags":["gguf"]}]"#;
+        let h = parse_search(json).unwrap();
+        assert!(h[0].has_gguf_tag());
     }
 }
