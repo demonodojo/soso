@@ -198,11 +198,16 @@ pub mod host {
         Shutdown,
     }
 
+    enum Done {
+        Layer,
+        Moe,
+    }
+
     /// Prefetch en hilo std (AirLLM ThreadPoolExecutor).
     pub struct StdThreadStager<S: PrefetchSink + Send + 'static> {
         stager: AsyncStager,
         tx: Sender<Job>,
-        rx_done: Receiver<()>,
+        rx_done: Receiver<Done>,
         _handle: JoinHandle<()>,
         _marker: core::marker::PhantomData<S>,
     }
@@ -212,18 +217,20 @@ pub mod host {
             let (tx, rx) = mpsc::channel();
             let (tx_done, rx_done) = mpsc::channel();
             let stager = AsyncStager::new();
-            let busy = Arc::new(std::sync::atomic::AtomicU32::new(0));
-            let busy_w = busy.clone();
             let handle = thread::spawn(move || {
                 while let Ok(job) = rx.recv() {
                     match job {
-                        Job::Layer(shards) | Job::Moe(shards) => {
-                            busy_w.store(1, std::sync::atomic::Ordering::Release);
+                        Job::Layer(shards) => {
                             if let Ok(mut s) = sink.lock() {
                                 s.prefetch_shards_sync(&shards);
                             }
-                            busy_w.store(0, std::sync::atomic::Ordering::Release);
-                            let _ = tx_done.send(());
+                            let _ = tx_done.send(Done::Layer);
+                        }
+                        Job::Moe(shards) => {
+                            if let Ok(mut s) = sink.lock() {
+                                s.prefetch_shards_sync(&shards);
+                            }
+                            let _ = tx_done.send(Done::Moe);
                         }
                         Job::Shutdown => break,
                     }
@@ -239,26 +246,40 @@ pub mod host {
         }
 
         pub fn kick_layer(&mut self, shards: &[String]) {
+            self.wait_layer();
             self.stager.kick_layer(shards);
             let _ = self.tx.send(Job::Layer(shards.to_vec()));
         }
 
         pub fn kick_moe(&mut self, shards: &[String]) {
+            self.wait_moe();
             self.stager.kick_moe(shards);
             let _ = self.tx.send(Job::Moe(shards.to_vec()));
         }
 
         pub fn wait_layer(&mut self) {
-            if self.stager.inner().layer_in_flight() {
-                let _ = self.rx_done.recv();
-                self.stager.inner_mut().layer.state = StageState::Ready;
+            while self.stager.inner().layer_in_flight() {
+                match self.rx_done.recv() {
+                    Ok(Done::Layer) => {
+                        self.stager.inner_mut().layer.state = StageState::Ready;
+                        break;
+                    }
+                    Ok(Done::Moe) => {}
+                    Err(_) => break,
+                }
             }
         }
 
         pub fn wait_moe(&mut self) {
-            if self.stager.inner().moe_in_flight() {
-                let _ = self.rx_done.recv();
-                self.stager.inner_mut().moe.state = StageState::Ready;
+            while self.stager.inner().moe_in_flight() {
+                match self.rx_done.recv() {
+                    Ok(Done::Moe) => {
+                        self.stager.inner_mut().moe.state = StageState::Ready;
+                        break;
+                    }
+                    Ok(Done::Layer) => {}
+                    Err(_) => break,
+                }
             }
         }
     }

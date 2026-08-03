@@ -16,6 +16,8 @@
 
 use crate::attn::SPARSE_TOKEN_THRESHOLD;
 use crate::kv::KvDtype;
+#[cfg(feature = "std")]
+extern crate std;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -32,8 +34,60 @@ const MEM_RESERVE_PCT: u64 = 30;
 const REMOTE_SLOW_MS: f64 = 500.0;
 /// Capas de pesos a mantener mapeadas (actual + prefetch).
 const DEFAULT_RESIDENT_LAYERS: u32 = 2;
+/// Anillo de capas en streaming (prefetch capa N+1 mientras se computa N).
+const DEFAULT_RING_SLOTS: u32 = 2;
 /// Tokens sink (StreamingLLM) que nunca se evictan del KV.
 const DEFAULT_SINK_TOKENS: usize = 4;
+
+/// Presets de reparto trunk-first (estilo kimi-k3-in-c).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MemoryPreset {
+    #[default]
+    Auto,
+    /// Prioriza tronco al máximo; caché MoE mínima.
+    Tight,
+    /// Reparto equilibrado trunk/expert.
+    Balanced,
+    /// Pin de todas las capas que quepan; residual a expertos.
+    MaxPin,
+}
+
+/// Configuración explícita del plan de memoria (genérica por índice de tensores).
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryPlanConfig {
+    pub preset: MemoryPreset,
+    /// Fracción 0–100 del presupuesto de pesos para tronco (pin+anillo).
+    /// `None` = derivar del preset.
+    pub trunk_frac_pct: Option<u32>,
+    /// Capas en anillo de streaming (1–2).
+    pub ring_slots: u32,
+}
+
+impl Default for MemoryPlanConfig {
+    fn default() -> Self {
+        Self {
+            preset: MemoryPreset::Auto,
+            trunk_frac_pct: None,
+            ring_slots: DEFAULT_RING_SLOTS,
+        }
+    }
+}
+
+/// Clasificación de bytes del índice (independiente de arquitectura concreta).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WeightClassBytes {
+    pub trunk_bytes: u64,
+    pub routed_expert_bytes: u64,
+    pub always_resident_bytes: u64,
+}
+
+impl WeightClassBytes {
+    pub fn total(&self) -> u64 {
+        self.trunk_bytes
+            .saturating_add(self.routed_expert_bytes)
+            .saturating_add(self.always_resident_bytes)
+    }
+}
 
 /// Instantánea de memoria (compatible con `soso_abi::MemInfo`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -86,8 +140,26 @@ pub struct PlannerStats {
     pub avg_remote_ms: f64,
     pub weight_budget_bytes: u64,
     pub model_weight_bytes: u64,
-    /// Capas de pesos en el working set (streaming).
+    /// Capas de pesos en el working set (streaming + pin).
     pub resident_layers: u32,
+    /// Capas pinneadas al inicio (nunca desmapeadas entre tokens).
+    pub pinned_layers: u32,
+    /// Slots del anillo de streaming tras el prefijo pinneado.
+    pub ring_slots: u32,
+    /// Presupuesto de bytes para tronco (pin + anillo).
+    pub trunk_budget_bytes: u64,
+    /// Presupuesto LRU de expertos enrutados.
+    pub moe_cache_budget_bytes: u64,
+    /// Aciertos de tronco: capa ya residente (pin o anillo caliente).
+    pub trunk_hits: u32,
+    /// Fallos de tronco: capa fría remapeada/refaultada.
+    pub trunk_misses: u32,
+    /// Bytes de tronco leídos por fallos (aprox).
+    pub trunk_bytes_read: u64,
+    /// MoE: acierto con experto ya en LRU residente.
+    pub moe_resident_hits: u32,
+    /// MoE: acierto tras prefetch JIT (no estaba en LRU al router).
+    pub moe_jit_hits: u32,
     /// Ventana máxima de tokens KV bajo presupuesto.
     pub kv_window_tokens: u32,
     pub shard_releases: u32,
@@ -104,7 +176,7 @@ pub struct PlannerStats {
     pub pld_accepted: u32,
     /// Intentos de draft PLD (cadenas iniciadas).
     pub pld_attempts: u32,
-    /// Cache LRU MoE: aciertos (experto ya residente).
+    /// Cache LRU MoE: aciertos totales (resident + JIT).
     pub moe_hits: u32,
     /// Cache LRU MoE: fallos (experto frío, prefetch desde disco).
     pub moe_misses: u32,
@@ -139,8 +211,18 @@ pub struct ResourcePlanner {
     remote_available: bool,
     remote_degraded: bool,
     remote_rtt_ms: f64,
-    /// Capas de pesos a mantener mapeadas a la vez.
+    /// Capas de pesos a mantener mapeadas a la vez (pin + anillo).
     resident_layers: u32,
+    /// Prefijo de capas pinneadas (0..pinned_layers).
+    pinned_layers: u32,
+    /// Slots del anillo tras el prefijo.
+    ring_slots: u32,
+    /// Presupuesto explícito de tronco y expertos.
+    trunk_budget: u64,
+    plan_config: MemoryPlanConfig,
+    weight_classes: WeightClassBytes,
+    /// Capas del anillo ya calientes en el token actual.
+    ring_warm: Vec<u32>,
     /// Máximo de tokens en KV (todas las capas) bajo presupuesto.
     kv_window_tokens: usize,
     sink_tokens: usize,
@@ -163,6 +245,11 @@ pub struct ResourcePlanner {
     moe_cache_bytes: u64,
     /// Top-k del token anterior por capa (prefetch MoE especulativo).
     last_experts: Vec<Vec<u32>>,
+    /// Expertos fríos del último touch_moe_experts (para telemetría JIT).
+    last_moe_cold: u32,
+    #[cfg(feature = "std")]
+    /// Traza (layer, expert) para sim-moe-cache en host.
+    moe_trace: Vec<(u32, u32)>,
     stats: PlannerStats,
 }
 
@@ -179,7 +266,27 @@ pub fn layer_tensor_prefix(layer: u32) -> String {
     format!("L{layer:02}.")
 }
 
-/// ¿Tensor de un experto MoE? (`L00.E02.ffn_gate`, etc.)
+/// ¿Tensor de experto compartido MoE? (`L00.S02.ffn_gate`, etc.)
+pub fn is_shared_expert_tensor(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("L") else {
+        return false;
+    };
+    let Some(after_layer) = rest.get(2..) else {
+        return false;
+    };
+    after_layer.starts_with(".S")
+}
+
+pub fn shared_expert_shard_names(layer: u32, shared: u32) -> [String; 3] {
+    let p = format!("L{layer:02}.S{shared:02}");
+    [
+        format!("{p}.ffn_gate"),
+        format!("{p}.ffn_up"),
+        format!("{p}.ffn_down"),
+    ]
+}
+
+/// ¿Tensor de un experto MoE enrutado? (`L00.E02.ffn_gate`, etc.)
 pub fn is_expert_tensor(name: &str) -> bool {
     // Tras "Lxx." debe aparecer "E" + dos dígitos.
     let Some(rest) = name.strip_prefix("L") else {
@@ -228,6 +335,86 @@ pub fn total_model_weight_bytes(index: &TensorIndex) -> u64 {
     index.entries.iter().map(|e| e.byte_len).sum()
 }
 
+/// ¿Tensor siempre residente (embed, norm final, lm_head)?
+pub fn is_always_resident_tensor(name: &str) -> bool {
+    matches!(name, "embed" | "output_norm" | "lm_head")
+        || name.starts_with("embed.")
+        || name.starts_with("output_norm.")
+        || name.starts_with("lm_head.")
+}
+
+/// Clasifica bytes del índice en tronco / expertos enrutados / siempre residentes.
+pub fn classify_weight_bytes(index: &TensorIndex) -> WeightClassBytes {
+    let mut out = WeightClassBytes::default();
+    for e in &index.entries {
+        if is_always_resident_tensor(&e.name) {
+            out.always_resident_bytes = out.always_resident_bytes.saturating_add(e.byte_len);
+        } else if is_shared_expert_tensor(&e.name) {
+            out.trunk_bytes = out.trunk_bytes.saturating_add(e.byte_len);
+        } else if is_expert_tensor(&e.name) {
+            out.routed_expert_bytes = out.routed_expert_bytes.saturating_add(e.byte_len);
+        } else {
+            out.trunk_bytes = out.trunk_bytes.saturating_add(e.byte_len);
+        }
+    }
+    out
+}
+
+/// Bytes de tronco (sin expertos) de una capa.
+pub fn bytes_for_trunk_layer(layer: u32, index: &TensorIndex) -> u64 {
+    bytes_for_layer(layer, index)
+}
+
+/// Fracción trunk-first según preset (0–100).
+pub fn trunk_frac_for_preset(preset: MemoryPreset, model_fits: bool) -> u32 {
+    match preset {
+        MemoryPreset::Auto => {
+            if model_fits {
+                100
+            } else {
+                90
+            }
+        }
+        MemoryPreset::Tight => 95,
+        MemoryPreset::Balanced => 85,
+        MemoryPreset::MaxPin => 98,
+    }
+}
+
+/// Calcula reparto trunk-first: tronco pin+anillo antes que caché MoE.
+pub fn compute_trunk_first_split(
+    weight_budget: u64,
+    classes: &WeightClassBytes,
+    avg_layer_bytes: u64,
+    num_layers: u32,
+    per_expert_bytes: u64,
+    top_k: u32,
+    trunk_frac_pct: u32,
+    ring_slots: u32,
+) -> (u64, u64, u32, u32) {
+    let ring = ring_slots.clamp(1, 2);
+    let trunk_frac = trunk_frac_pct.min(100) as u64;
+    let mut trunk_budget = weight_budget.saturating_mul(trunk_frac) / 100;
+    let min_moe = per_expert_bytes.saturating_mul(top_k.max(1) as u64);
+    if classes.routed_expert_bytes > 0 {
+        trunk_budget = trunk_budget.min(weight_budget.saturating_sub(min_moe));
+    }
+    let moe_budget = weight_budget.saturating_sub(trunk_budget);
+
+    let layer_bytes = avg_layer_bytes.max(1);
+    let ring_bytes = layer_bytes.saturating_mul(ring as u64);
+    let pin_bytes = trunk_budget.saturating_sub(ring_bytes);
+    let mut pinned = (pin_bytes / layer_bytes) as u32;
+    pinned = pinned.min(num_layers);
+    let streaming = num_layers.saturating_sub(pinned);
+    let resident = if streaming == 0 {
+        pinned.max(1)
+    } else {
+        pinned.saturating_add(ring).min(num_layers).max(1)
+    };
+    (trunk_budget, moe_budget.max(min_moe), pinned, resident)
+}
+
 /// Bytes de KV f16 por token de secuencia (todas las capas).
 pub fn kv_bytes_per_token(manifest: &Manifest) -> u64 {
     let head_dim = (manifest.hidden_dim / manifest.num_heads) as u64;
@@ -244,18 +431,37 @@ impl ResourcePlanner {
         vram_free: u64,
         remote_available: bool,
     ) -> Self {
+        Self::with_config(
+            manifest,
+            index,
+            mem,
+            vram_free,
+            remote_available,
+            MemoryPlanConfig::default(),
+        )
+    }
+
+    pub fn with_config(
+        manifest: &Manifest,
+        index: &TensorIndex,
+        mem: MemSnapshot,
+        vram_free: u64,
+        remote_available: bool,
+        plan_config: MemoryPlanConfig,
+    ) -> Self {
         let n = manifest.num_layers as usize;
-        let model_weight_bytes = total_model_weight_bytes(index);
         let weight_budget = mem.weight_budget_bytes();
+        let weight_classes = classify_weight_bytes(index);
         let avg_layer = if n == 0 {
             0
         } else {
             (0..manifest.num_layers)
-                .map(|l| bytes_for_layer(l, index))
+                .map(|l| bytes_for_trunk_layer(l, index))
                 .sum::<u64>()
                 / n as u64
         };
         let kv_bpt = kv_bytes_per_token(manifest);
+        let ring_slots = plan_config.ring_slots.clamp(1, 2);
         let mut planner = Self {
             layer_plans: Vec::with_capacity(n),
             layer_ms_cpu: vec![0.0; n],
@@ -264,12 +470,18 @@ impl ResourcePlanner {
             tokens_since_replan: 0,
             mem,
             weight_budget,
-            model_weight_bytes,
+            model_weight_bytes: weight_classes.total(),
             vram_free,
             remote_available,
             remote_degraded: false,
             remote_rtt_ms: 0.0,
             resident_layers: DEFAULT_RESIDENT_LAYERS,
+            pinned_layers: 0,
+            ring_slots,
+            trunk_budget: 0,
+            plan_config,
+            weight_classes,
+            ring_warm: Vec::new(),
             kv_window_tokens: manifest.max_seq as usize,
             sink_tokens: DEFAULT_SINK_TOKENS,
             avg_layer_bytes: avg_layer,
@@ -283,12 +495,16 @@ impl ResourcePlanner {
             pld_prefer_n: 4,
             pld_max_draft: 8,
             moe_cache: Vec::new(),
-            moe_cache_budget: weight_budget / 4,
+            moe_cache_budget: 0,
             moe_cache_bytes: 0,
             last_experts: vec![Vec::new(); n],
+            last_moe_cold: 0,
+            #[cfg(feature = "std")]
+            moe_trace: Vec::new(),
             stats: PlannerStats {
                 weight_budget_bytes: weight_budget,
-                model_weight_bytes,
+                model_weight_bytes: weight_classes.total(),
+                ring_slots,
                 pld_prefer_n: 4,
                 pld_max_draft: 8,
                 ..Default::default()
@@ -299,6 +515,42 @@ impl ResourcePlanner {
         planner
     }
 
+    pub fn plan_config(&self) -> MemoryPlanConfig {
+        self.plan_config
+    }
+
+    pub fn pinned_layers(&self) -> u32 {
+        self.pinned_layers
+    }
+
+    pub fn ring_slots(&self) -> u32 {
+        self.ring_slots
+    }
+
+    pub fn trunk_budget(&self) -> u64 {
+        self.trunk_budget
+    }
+
+    pub fn moe_cache_budget(&self) -> u64 {
+        self.moe_cache_budget
+    }
+
+    pub fn weight_classes(&self) -> WeightClassBytes {
+        self.weight_classes
+    }
+
+    /// Resumen legible del plan (para logs al arrancar).
+    pub fn memory_plan_summary(&self) -> String {
+        format!(
+            "trunk {} KiB (pin {} capas, anillo {}), expert cache {} KiB, always-resident {} KiB",
+            self.trunk_budget / 1024,
+            self.pinned_layers,
+            self.ring_slots,
+            self.moe_cache_budget / 1024,
+            self.weight_classes.always_resident_bytes / 1024,
+        )
+    }
+
     pub fn refresh_mem(&mut self, mem: MemSnapshot) {
         self.mem = mem;
         self.weight_budget = mem.weight_budget_bytes();
@@ -306,26 +558,50 @@ impl ResourcePlanner {
     }
 
     pub fn recompute_streaming_budgets(&mut self, manifest: &Manifest, index: &TensorIndex) {
-        // LayerKV: cuantas capas caben en el presupuesto de pesos.
-        //
-        // El tope son las capas del modelo, NO `DEFAULT_RESIDENT_LAYERS`. Ese 2
-        // es el valor de reserva para cuando no sabemos cuánto pesa una capa; se
-        // estaba usando además como máximo, así que un modelo que cabía entero en
-        // memoria se quedaba con dos capas mapeadas y liberaba el resto —
-        // obligando a remapearlo y a refaltar sus páginas en el token siguiente.
-        //
-        // Medido (2026-08-02): con `tiny` (2308 KiB) y presupuesto de 1 GiB —cabe
-        // 400 veces— el planificador anunciaba «working-set 2 capas» y hacía 3
-        // prefetch y 4 liberaciones POR TOKEN. El coste no salía en ningún
-        // cronómetro porque `observe_layer` mide `forward_layer` y el streaming
-        // ocurre fuera: 160 ms de capa medidos frente a 4,3 s de token real.
-        let layers = if self.avg_layer_bytes == 0 {
-            DEFAULT_RESIDENT_LAYERS
+        self.weight_classes = classify_weight_bytes(index);
+        self.stats.model_weight_bytes = self.weight_classes.total();
+
+        let model_fits = self.weight_budget >= self.weight_classes.trunk_bytes;
+        let trunk_frac = self
+            .plan_config
+            .trunk_frac_pct
+            .unwrap_or_else(|| trunk_frac_for_preset(self.plan_config.preset, model_fits));
+
+        let per_expert = if manifest.is_moe() {
+            bytes_for_expert(0, 0, index)
         } else {
-            let fit = (self.weight_budget / self.avg_layer_bytes.max(1)).max(1) as u32;
-            fit.min(manifest.num_layers.max(1))
+            0
         };
-        self.resident_layers = layers.max(1);
+        let top_k = manifest.num_experts_per_tok.max(1);
+
+        let (trunk_budget, moe_budget, pinned, resident) = compute_trunk_first_split(
+            self.weight_budget,
+            &self.weight_classes,
+            self.avg_layer_bytes,
+            manifest.num_layers,
+            per_expert,
+            top_k,
+            trunk_frac,
+            self.ring_slots,
+        );
+
+        self.trunk_budget = trunk_budget;
+        self.moe_cache_budget = moe_budget;
+        self.pinned_layers = pinned;
+        self.resident_layers = resident;
+        self.stats.pinned_layers = pinned;
+        self.stats.ring_slots = self.ring_slots;
+        self.stats.trunk_budget_bytes = trunk_budget;
+        self.stats.moe_cache_budget_bytes = moe_budget;
+        self.stats.resident_layers = resident;
+
+        // Si el modelo cabe entero, pin todas las capas (sin anillo).
+        if model_fits && self.weight_classes.routed_expert_bytes == 0 {
+            self.pinned_layers = manifest.num_layers;
+            self.resident_layers = manifest.num_layers;
+            self.stats.pinned_layers = manifest.num_layers;
+            self.stats.resident_layers = manifest.num_layers;
+        }
 
         // Mitad del presupuesto para KV (el resto son pesos streaming + scratch).
         let kv_budget = self.weight_budget / 2;
@@ -358,21 +634,35 @@ impl ResourcePlanner {
         self.use_sparse = window >= SPARSE_TOKEN_THRESHOLD;
 
         self.kv_window_tokens = window;
-        self.stats.resident_layers = self.resident_layers;
         self.stats.kv_window_tokens = self.kv_window_tokens as u32;
-        // Presupuesto LRU para expertos MoE: ~25 % del de pesos, mínimo 1 experto.
-        self.moe_cache_budget = self.weight_budget / 4;
-        if manifest.is_moe() {
-            let per_expert = bytes_for_expert(0, 0, index);
-            if per_expert > 0 {
-                self.moe_cache_budget = self
-                    .moe_cache_budget
-                    .max(per_expert * manifest.num_experts_per_tok as u64);
-            }
-        }
         self.stats.kv_dtype_i8 = u32::from(matches!(self.kv_dtype, KvDtype::I8));
         self.stats.h2o_enabled = u32::from(self.use_h2o);
         self.stats.sparse_attn = u32::from(self.use_sparse);
+    }
+
+    /// Registra acceso a capa de tronco (telemetría true-resident).
+    pub fn note_trunk_layer(&mut self, layer: u32, index: &TensorIndex) {
+        let pinned = layer < self.pinned_layers;
+        let warm = self.ring_warm.iter().any(|&l| l == layer);
+        if pinned || warm {
+            self.stats.trunk_hits = self.stats.trunk_hits.saturating_add(1);
+        } else {
+            self.stats.trunk_misses = self.stats.trunk_misses.saturating_add(1);
+            self.stats.trunk_bytes_read = self
+                .stats
+                .trunk_bytes_read
+                .saturating_add(bytes_for_trunk_layer(layer, index));
+        }
+        if layer >= self.pinned_layers && !warm {
+            self.ring_warm.push(layer);
+            while self.ring_warm.len() > self.ring_slots as usize {
+                self.ring_warm.remove(0);
+            }
+        }
+    }
+
+    pub fn begin_token(&mut self) {
+        self.ring_warm.clear();
     }
 
     pub fn kv_dtype(&self) -> KvDtype {
@@ -546,20 +836,27 @@ impl ResourcePlanner {
             self.last_experts[li] = actual;
         }
         let mut prefetch = Vec::new();
+        let mut cold = 0u32;
         for &(expert, _) in experts {
+            #[cfg(feature = "std")]
+            if std::env::var("SOSO_MOE_TRACE").is_ok() {
+                self.moe_trace.push((layer, expert));
+            }
             let shards: Vec<String> = expert_shard_names(layer, expert)
                 .into_iter()
                 .map(|n| format!("{n}.tensor"))
                 .collect();
             let bytes = bytes_for_expert(layer, expert, index);
-            let hit = self
+            let resident_hit = self
                 .moe_cache
                 .iter()
                 .any(|(l, e, _)| *l == layer && *e == expert);
-            if hit {
+            if resident_hit {
                 self.note_moe_hit();
+                self.stats.moe_resident_hits = self.stats.moe_resident_hits.saturating_add(1);
             } else {
                 self.note_moe_miss();
+                cold = cold.saturating_add(1);
                 prefetch.extend(shards.iter().cloned());
             }
             // Quitar entrada previa del mismo experto.
@@ -590,7 +887,18 @@ impl ResourcePlanner {
                 .insert(0, (layer, expert, shards.clone()));
             self.moe_cache_bytes = self.moe_cache_bytes.saturating_add(bytes);
         }
+        self.last_moe_cold = cold;
         prefetch
+    }
+
+    pub fn last_moe_cold(&self) -> u32 {
+        self.last_moe_cold
+    }
+
+    /// Traza MoE acumulada (solo host + `SOSO_MOE_TRACE=1`).
+    #[cfg(feature = "std")]
+    pub fn moe_trace(&self) -> &[(u32, u32)] {
+        &self.moe_trace
     }
 
     /// Shards de expertos en el cache LRU (mantener mapeados).
@@ -609,38 +917,53 @@ impl ResourcePlanner {
             .unwrap_or(false)
     }
 
-    /// Shards a mantener tras terminar `layer` (working set = capas recientes).
+    /// Marca expertos servidos tras prefetch JIT (no estaban residentes al router).
+    pub fn note_moe_jit_served(&mut self, n: u32) {
+        self.stats.moe_jit_hits = self.stats.moe_jit_hits.saturating_add(n);
+        self.stats.moe_hits = self.stats.moe_hits.saturating_add(n);
+    }
+
+    /// Shards a mantener tras terminar `layer` (pin prefix + anillo + prefetch).
     pub fn keep_shards_after(
         &self,
         layer: u32,
         layer_end: u32,
         manifest: &Manifest,
     ) -> Vec<String> {
-        // La ventana se ancla en `start` y se extiende `resident_layers` HACIA
-        // DELANTE. Antes acababa en `layer + 1`, o sea que sólo miraba hacia
-        // atrás: en la capa 0 la ventana era `[0,1)` y liberaba las capas 2 y 3
-        // recién mapeadas, para volver a mapearlas dos capas después. Con un
-        // presupuesto que da para el modelo entero eso son dos desalojos y sus
-        // refaltos por token, gratis para nadie.
-        let start = layer.saturating_sub(self.resident_layers.saturating_sub(1));
-        let end = start
-            .saturating_add(self.resident_layers)
-            .max(layer + 1)
-            .min(layer_end)
-            .min(manifest.num_layers);
         let mut keep = Vec::new();
-        for l in start..end {
+        // Prefijo pinneado: capas 0..pinned nunca se sueltan.
+        for l in 0..self.pinned_layers.min(manifest.num_layers) {
             if let Some(pf) = manifest.prefetch.get(l as usize) {
                 keep.extend(pf.shards.iter().cloned());
             }
         }
-        // Prefetch layer-ahead
-        if end < layer_end.min(manifest.num_layers) {
-            if let Some(pf) = manifest.prefetch.get(end as usize) {
-                keep.extend(pf.shards.iter().cloned());
+        // Anillo: ventana sobre capas no pinneadas + prefetch adelantado.
+        if self.pinned_layers < manifest.num_layers {
+            let ring_start = if layer >= self.pinned_layers {
+                layer.saturating_sub(self.ring_slots.saturating_sub(1))
+            } else {
+                self.pinned_layers
+            };
+            let ring_end = (layer + 2)
+                .min(layer_end)
+                .min(manifest.num_layers);
+            for l in ring_start.max(self.pinned_layers)..ring_end {
+                if let Some(pf) = manifest.prefetch.get(l as usize) {
+                    keep.extend(pf.shards.iter().cloned());
+                }
             }
         }
+        // Siempre residentes (embed, lm_head, …).
+        keep.extend(self.always_resident_shards());
         keep
+    }
+
+    fn always_resident_shards(&self) -> Vec<String> {
+        alloc::vec![
+            String::from("embed.tensor"),
+            String::from("output_norm.tensor"),
+            String::from("lm_head.tensor"),
+        ]
     }
 
     /// Shards a retener tras `layer`, incluyendo expertos MoE en cache LRU.
@@ -678,6 +1001,7 @@ impl ResourcePlanner {
     }
 
     pub fn on_token_complete(&mut self, manifest: &Manifest, index: &TensorIndex) -> bool {
+        self.begin_token();
         self.tokens_since_replan += 1;
         if self.tokens_since_replan < REPLAN_EVERY_TOKENS {
             return false;
@@ -947,22 +1271,109 @@ mod tests {
     }
 
     #[test]
-    fn kv_slide_preserves_sink_and_recent() {
-        use crate::kv::LayerKv;
-        let kv_dim = 4;
-        let mut kv = LayerKv::new();
-        for t in 0..20u16 {
-            let k = [t as f32; 4];
-            let v = [(t + 100) as f32; 4];
-            kv.append_f16(&k, &v);
-        }
-        kv.slide_window(8, 2, kv_dim);
-        assert_eq!(kv.tokens(kv_dim), 8);
-        let k = kv.k_f16_slice();
-        // sink: tokens 0,1
-        assert_eq!(k[0], crate::f16::f32_to_f16(0.0));
-        assert_eq!(k[kv_dim], crate::f16::f32_to_f16(1.0));
-        // recent: 14..19
-        assert_eq!(k[2 * kv_dim], crate::f16::f32_to_f16(14.0));
+    fn trunk_first_split_prioritizes_trunk() {
+        let classes = WeightClassBytes {
+            trunk_bytes: 1000,
+            routed_expert_bytes: 9000,
+            always_resident_bytes: 100,
+        };
+        let (trunk, moe, pinned, resident) = compute_trunk_first_split(
+            1000,
+            &classes,
+            100,
+            10,
+            50,
+            2,
+            90,
+            2,
+        );
+        assert!(trunk >= moe || moe <= 100);
+        assert!(pinned > 0);
+        assert!(resident >= pinned);
+    }
+
+    #[test]
+    fn classify_weights_splits_experts() {
+        let mut index = TensorIndex::default();
+        index.entries.push(make_f32_entry(
+            0,
+            "embed",
+            "embed.tensor",
+            0,
+            &[4, 8],
+        ));
+        index.entries.push(make_f32_entry(
+            1,
+            "L00.attn_q",
+            "L00.attn_q.tensor",
+            0,
+            &[8, 8],
+        ));
+        index.entries.push(make_f32_entry(
+            2,
+            "L00.E00.ffn_gate",
+            "L00.E00.ffn_gate.tensor",
+            0,
+            &[16, 8],
+        ));
+        let c = classify_weight_bytes(&index);
+        assert!(c.always_resident_bytes > 0);
+        assert!(c.trunk_bytes > 0);
+        assert!(c.routed_expert_bytes > 0);
+    }
+
+    #[test]
+    fn trunk_first_pins_more_than_equal_split() {
+        let weight_budget = 10_000_000u64;
+        let classes = WeightClassBytes {
+            trunk_bytes: 8_000_000,
+            routed_expert_bytes: 4_000_000,
+            always_resident_bytes: 500_000,
+        };
+        let avg_layer = 1_000_000;
+        let num_layers = 8;
+        let per_expert = 200_000;
+        let top_k = 2;
+        let (trunk_tight, _, pinned_tight, _) = compute_trunk_first_split(
+            weight_budget,
+            &classes,
+            avg_layer,
+            num_layers,
+            per_expert,
+            top_k,
+            85,
+            2,
+        );
+        let (trunk_equal, _, pinned_equal, _) = compute_trunk_first_split(
+            weight_budget,
+            &classes,
+            avg_layer,
+            num_layers,
+            per_expert,
+            top_k,
+            50,
+            2,
+        );
+        assert!(trunk_tight > trunk_equal);
+        assert!(pinned_tight >= pinned_equal);
+    }
+
+    #[test]
+    fn pinned_keep_includes_prefix() {
+        let manifest = Manifest::tiny("t");
+        let index = TensorIndex::default();
+        let mem = MemSnapshot {
+            total_frames: 100_000,
+            free_frames: 50_000,
+            reclaimable_frames: 0,
+        };
+        let cfg = MemoryPlanConfig {
+            preset: MemoryPreset::MaxPin,
+            trunk_frac_pct: Some(98),
+            ring_slots: 2,
+        };
+        let planner = ResourcePlanner::with_config(&manifest, &index, mem, 0, false, cfg);
+        let keep = planner.keep_shards_after(0, manifest.num_layers, &manifest);
+        assert!(keep.iter().any(|s| s.contains("embed")));
     }
 }

@@ -156,21 +156,46 @@ impl Runtime {
         check("output_norm", &[h], needs_logits && self.has_output_norm)?;
         for layer in layer_start..layer_end {
             let p = alloc::format!("L{layer:02}");
+            let spec = self.manifest.layer(layer).cloned().unwrap_or_default();
             let layer_heads = self.manifest.effective_num_heads(layer);
             let layer_kv_heads = self.manifest.effective_num_kv_heads(layer);
             let head_dim = h / layer_heads;
             let kv_dim = layer_kv_heads * head_dim;
             let ffn = self.manifest.effective_ffn_dim(layer);
             let moe_ffn = self.manifest.effective_moe_ffn_dim(layer);
-            let is_moe = self.manifest.layer_is_moe(layer);
+            let is_moe = self.manifest.layer_is_moe(layer)
+                || spec.ffn_kind == sosomodel::FfnKind::LatentMoe;
             let n_exp = self.manifest.effective_num_experts(layer);
+            let n_shared = spec.num_shared_experts;
             check(&alloc::format!("{p}.attn_norm"), &[h], true)?;
-            check(&alloc::format!("{p}.attn_q"), &[h, h], true)?;
-            check(&alloc::format!("{p}.attn_k"), &[kv_dim, h], true)?;
-            check(&alloc::format!("{p}.attn_v"), &[kv_dim, h], true)?;
-            check(&alloc::format!("{p}.attn_output"), &[h, h], true)?;
+            if spec.attn_kind == sosomodel::AttnKind::Mla {
+                let q_rank = spec.q_lora_rank;
+                let kv_rank = spec.kv_lora_rank;
+                check(&alloc::format!("{p}.attn_q_down"), &[q_rank, h], true)?;
+                check(&alloc::format!("{p}.attn_q_up"), &[h, q_rank], true)?;
+                check(&alloc::format!("{p}.attn_kv_down"), &[kv_rank, h], true)?;
+                check(&alloc::format!("{p}.attn_k_up"), &[kv_dim, kv_rank], true)?;
+                check(&alloc::format!("{p}.attn_v_up"), &[kv_dim, kv_rank], true)?;
+                check(&alloc::format!("{p}.attn_output"), &[h, h], true)?;
+            } else {
+                check(&alloc::format!("{p}.attn_q"), &[h, h], true)?;
+                check(&alloc::format!("{p}.attn_k"), &[kv_dim, h], true)?;
+                check(&alloc::format!("{p}.attn_v"), &[kv_dim, h], true)?;
+                check(&alloc::format!("{p}.attn_output"), &[h, h], true)?;
+            }
             check(&alloc::format!("{p}.ffn_norm"), &[h], true)?;
-            if is_moe {
+            if spec.ffn_kind == sosomodel::FfnKind::LatentMoe {
+                let latent = moe_ffn;
+                check(&alloc::format!("{p}.ffn_latent_in"), &[latent, h], true)?;
+                check(&alloc::format!("{p}.ffn_latent_out"), &[h, latent], true)?;
+                check(&alloc::format!("{p}.ffn_gate_inp"), &[n_exp, latent], true)?;
+                for e in 0..n_exp {
+                    let ep = alloc::format!("{p}.E{e:02}");
+                    check(&alloc::format!("{ep}.ffn_gate"), &[latent, latent], true)?;
+                    check(&alloc::format!("{ep}.ffn_up"), &[latent, latent], true)?;
+                    check(&alloc::format!("{ep}.ffn_down"), &[latent, latent], true)?;
+                }
+            } else if is_moe {
                 check(
                     &alloc::format!("{p}.ffn_gate_inp"),
                     &[n_exp, h],
@@ -181,6 +206,12 @@ impl Runtime {
                     check(&alloc::format!("{ep}.ffn_gate"), &[moe_ffn, h], true)?;
                     check(&alloc::format!("{ep}.ffn_up"), &[moe_ffn, h], true)?;
                     check(&alloc::format!("{ep}.ffn_down"), &[h, moe_ffn], true)?;
+                }
+                for s in 0..n_shared {
+                    let sp = alloc::format!("{p}.S{s:02}");
+                    check(&alloc::format!("{sp}.ffn_gate"), &[moe_ffn, h], true)?;
+                    check(&alloc::format!("{sp}.ffn_up"), &[moe_ffn, h], true)?;
+                    check(&alloc::format!("{sp}.ffn_down"), &[h, moe_ffn], true)?;
                 }
             } else {
                 check(&alloc::format!("{p}.ffn_up"), &[ffn, h], true)?;
@@ -383,6 +414,9 @@ impl Runtime {
             } else {
                 ExecDest::Cpu
             };
+            if let Some(pl) = self.planner.as_mut() {
+                pl.note_trunk_layer(layer, &self.index);
+            }
             let t0 = clock_ms.map(|c| c());
             let timing = exec.forward_layer(
                 layer,
@@ -631,6 +665,9 @@ impl Runtime {
         let greedy = sampler.temp <= 0.0;
         let mut remaining = max_new;
         while remaining > 0 {
+            if let Some(pl) = self.planner.as_mut() {
+                pl.begin_token();
+            }
             let logits = self.logits_par(source, parallel)?;
             let mut next = sampler.sample(logits);
             if eos == Some(next) {

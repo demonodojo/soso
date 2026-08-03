@@ -1,8 +1,9 @@
 //! index.som: tabla tensor_id → shard, offset, shape, dtype.
 
 use crate::layout::{
-    DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0, Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES,
-    Q8_0_BLOCK_ELEMS, QUANT_NONE, QUANT_Q4_K, QUANT_Q8_0,
+    DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0, MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS,
+    Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS, QUANT_MXFP4,
+    QUANT_NONE, QUANT_Q4_K, QUANT_Q8_0,
 };
 use crate::{pack_som, parse_som, Reader, BLOCK_ALIGN, CACHE_ALIGN};
 use alloc::string::String;
@@ -193,5 +194,27 @@ pub fn make_q8_0_entry(
         shape: shape.to_vec(),
         dtype: DTYPE_Q8_0,
         quant: QUANT_Q8_0,
+    }
+}
+
+/// Entrada MXFP4: bloques de 32 elementos (escala f32 + 16 bytes nibbles).
+pub fn make_mxfp4_entry(
+    id: u32,
+    name: &str,
+    shard: &str,
+    offset: u64,
+    shape: &[u32],
+) -> TensorEntry {
+    let elems: u64 = shape.iter().map(|&d| d as u64).product();
+    let blocks = elems.div_ceil(MXFP4_BLOCK_ELEMS as u64);
+    TensorEntry {
+        id,
+        name: String::from(name),
+        shard: String::from(shard),
+        offset,
+        byte_len: blocks * MXFP4_BLOCK_BYTES as u64,
+        shape: shape.to_vec(),
+        dtype: DTYPE_MXFP4,
+        quant: QUANT_MXFP4,
     }
 }

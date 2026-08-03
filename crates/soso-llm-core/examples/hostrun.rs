@@ -3,9 +3,11 @@
 //!   cargo run --release -p soso-llm-core --features std --example hostrun -- \
 //!     target/tinyllama-model "The capital of France is" 8 [temp] [top_p] [seed]
 
+use soso_llm_core::plan::{MemoryPlanConfig, MemoryPreset, MemSnapshot, ResourcePlanner};
 use soso_llm_core::runtime::Runtime;
 use soso_llm_core::sample::Sampler;
 use soso_llm_core::source::{FileMapper, MappedShard, MmapTensorSource};
+use soso_llm_core::ThreadStagedSource;
 use soso_llm_core::tokenizer::{StreamDecoder, Tokenizer};
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
@@ -29,6 +31,83 @@ impl FileMapper for StdMapper {
     fn unmap_file(&mut self, _shard: &MappedShard) {}
 }
 
+enum RunSource {
+    Plain(MmapTensorSource<StdMapper>),
+    Staged(ThreadStagedSource<StdMapper>),
+}
+
+impl soso_llm_core::layer::TensorSource for RunSource {
+    fn load_f32(&mut self, name: &str, out: &mut [f32]) -> Result<(), ()> {
+        match self {
+            Self::Plain(s) => s.load_f32(name, out),
+            Self::Staged(s) => s.load_f32(name, out),
+        }
+    }
+
+    fn load_f32_range(&mut self, name: &str, elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
+        match self {
+            Self::Plain(s) => s.load_f32_range(name, elem_off, out),
+            Self::Staged(s) => s.load_f32_range(name, elem_off, out),
+        }
+    }
+
+    fn tensor_view(&mut self, name: &str) -> Result<soso_llm_core::layer::TensorView<'_>, ()> {
+        match self {
+            Self::Plain(s) => s.tensor_view(name),
+            Self::Staged(s) => s.tensor_view(name),
+        }
+    }
+
+    fn prefetch_shards(&mut self, shards: &[String]) {
+        match self {
+            Self::Plain(s) => s.prefetch_shards(shards),
+            Self::Staged(s) => s.prefetch_shards(shards),
+        }
+    }
+
+    fn kick_prefetch_shards(&mut self, shards: &[String]) {
+        match self {
+            Self::Plain(s) => s.kick_prefetch_shards(shards),
+            Self::Staged(s) => s.kick_prefetch_shards(shards),
+        }
+    }
+
+    fn wait_prefetch(&mut self) {
+        match self {
+            Self::Plain(s) => s.wait_prefetch(),
+            Self::Staged(s) => s.wait_prefetch(),
+        }
+    }
+
+    fn kick_moe_prefetch(&mut self, shards: &[String]) {
+        match self {
+            Self::Plain(s) => s.kick_moe_prefetch(shards),
+            Self::Staged(s) => s.kick_moe_prefetch(shards),
+        }
+    }
+
+    fn wait_moe_prefetch(&mut self) {
+        match self {
+            Self::Plain(s) => s.wait_moe_prefetch(),
+            Self::Staged(s) => s.wait_moe_prefetch(),
+        }
+    }
+
+    fn release_shards_except(&mut self, keep: &[String]) {
+        match self {
+            Self::Plain(s) => s.release_shards_except(keep),
+            Self::Staged(s) => s.release_shards_except(keep),
+        }
+    }
+
+    fn prefetch_embed_row(&mut self, token: u32, hidden: usize) {
+        match self {
+            Self::Plain(s) => s.prefetch_embed_row(token, hidden),
+            Self::Staged(s) => s.prefetch_embed_row(token, hidden),
+        }
+    }
+}
+
 /// Reloj real: el planificador replanifica según el tiempo, y con un reloj
 /// clavado a 0 no se ejercita ese camino.
 fn reloj_ms() -> u64 {
@@ -36,6 +115,36 @@ fn reloj_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn mem_snapshot() -> MemSnapshot {
+    let free_mb: u64 = std::env::var("SOSO_FREE_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1600);
+    let free_frames = free_mb * 1024 * 1024 / 4096;
+    MemSnapshot {
+        total_frames: free_frames.saturating_mul(2),
+        free_frames,
+        reclaimable_frames: 0,
+    }
+}
+
+fn memory_plan_config() -> MemoryPlanConfig {
+    let preset = match std::env::var("SOSO_MEM_PRESET").as_deref() {
+        Ok("tight") => MemoryPreset::Tight,
+        Ok("balanced") => MemoryPreset::Balanced,
+        Ok("max-pin") | Ok("max_pin") => MemoryPreset::MaxPin,
+        _ => MemoryPreset::Auto,
+    };
+    let trunk_frac_pct = std::env::var("SOSO_TRUNK_FRAC")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    MemoryPlanConfig {
+        preset,
+        trunk_frac_pct,
+        ring_slots: 2,
+    }
 }
 
 fn main() {
@@ -66,24 +175,29 @@ fn main() {
 
     let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
     rt.validate_shapes().expect("shapes inválidas");
-    let mut source = MmapTensorSource::new(format!("{dir}/shards"), index.clone(), StdMapper);
-    source.async_staging = true;
+    let base_source = MmapTensorSource::new(format!("{dir}/shards"), index.clone(), StdMapper);
+    let mut source = if std::env::var("SOSO_SYNC_STAGING").is_ok() {
+        RunSource::Plain(base_source.with_sync_prefetch())
+    } else {
+        RunSource::Staged(ThreadStagedSource::new(base_source))
+    };
 
     // `SOSO_PLANNER=1` enciende el `ResourcePlanner` y el decode planificado,
     // que es lo que usa `soso-llm` en la máquina. Sin esto el arnés de host no
     // ejercita `touch_moe_experts` ni el prefetch MoE, y un fallo que sólo
     // aparece con planificador obliga a depurarlo dentro de QEMU.
     if std::env::var("SOSO_PLANNER").is_ok() {
-        let mem = soso_llm_core::plan::MemSnapshot {
-            total_frames: 512 * 1024,
-            free_frames: 400 * 1024,
-            reclaimable_frames: 0,
-        };
-        let planner = soso_llm_core::plan::ResourcePlanner::new(
-            &rt.manifest, &index, mem, 0, false,
+        let mem = mem_snapshot();
+        let cfg = memory_plan_config();
+        let planner = ResourcePlanner::with_config(
+            &rt.manifest, &index, mem, 0, false, cfg,
+        );
+        eprintln!(
+            "planificador: activado — {} (libre ~{} MiB)",
+            planner.memory_plan_summary(),
+            mem.free_bytes() / 1024 / 1024,
         );
         rt.set_planner(planner);
-        eprintln!("planificador: activado");
     }
 
     // "@bos" = prompt de un solo token BOS (RoPE identidad en pos 0)
@@ -144,14 +258,54 @@ fn main() {
             None,
             &mut gpu,
             reloj_ms,
-            || soso_llm_core::plan::MemSnapshot {
-                total_frames: 512 * 1024,
-                free_frames: 400 * 1024,
-                reclaimable_frames: 0,
-            },
+            mem_snapshot,
         );
+        let dt = t0.elapsed().as_secs_f64();
         match r {
-            Ok(t) => eprintln!("\nplanificado: {} tokens", t.len()),
+            Ok(t) => {
+                let generated = t.len().saturating_sub(prompt_tokens.len());
+                eprintln!("\nplanificado: {} tokens ({} nuevos)", t.len(), generated);
+                if generated > 0 && dt > 0.0 {
+                    eprintln!(
+                        "rendimiento: {:.2} tok/s ({:.0} ms/token)",
+                        generated as f64 / dt,
+                        dt * 1000.0 / generated as f64,
+                    );
+                }
+                if let Some(pl) = rt.planner.as_ref() {
+                    let st = pl.stats();
+                    eprintln!(
+                        "tronco: {} hits, {} misses, {} KiB | MoE: {} resident, {} JIT, {} fríos | staging {} ms",
+                        st.trunk_hits,
+                        st.trunk_misses,
+                        st.trunk_bytes_read / 1024,
+                        st.moe_resident_hits,
+                        st.moe_jit_hits,
+                        st.moe_misses,
+                        st.stage_wait_ms,
+                    );
+                }
+                if std::env::var("SOSO_MOE_TRACE").is_ok() {
+                    if let Some(pl) = rt.planner.as_ref() {
+                        let path = std::env::var("SOSO_MOE_TRACE_OUT")
+                            .unwrap_or_else(|_| "target/moe_trace.bin".into());
+                        let mut buf = Vec::new();
+                        for &(layer, expert) in pl.moe_trace() {
+                            buf.extend_from_slice(&layer.to_le_bytes());
+                            buf.extend_from_slice(&expert.to_le_bytes());
+                        }
+                        if let Err(e) = std::fs::write(&path, &buf) {
+                            eprintln!("moe trace: no se pudo escribir {path}: {e}");
+                        } else {
+                            eprintln!(
+                                "moe trace: {} entradas → {} (sim: python3 tools/sim-moe-cache.py {path})",
+                                pl.moe_trace().len(),
+                                path
+                            );
+                        }
+                    }
+                }
+            }
             Err(()) => {
                 eprintln!("\nplanificado: FALLÓ (mismo Err(()) que «inferencia falló» en soso)");
                 std::process::exit(1);

@@ -245,22 +245,18 @@ impl StagedSource {
 
 impl TensorSource for StagedSource {
     fn load_f32(&mut self, name: &str, out: &mut [f32]) -> Result<(), ()> {
-        self.sincroniza();
         self.inner.load_f32(name, out)
     }
 
     fn load_f32_range(&mut self, name: &str, elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
-        self.sincroniza();
         self.inner.load_f32_range(name, elem_off, out)
     }
 
     fn tensor_view(&mut self, name: &str) -> Result<soso_llm_core::layer::TensorView<'_>, ()> {
-        self.sincroniza();
         self.inner.tensor_view(name)
     }
 
     fn prefetch_shards(&mut self, shards: &[String]) {
-        self.sincroniza();
         self.inner.prefetch_shards(shards);
     }
 
@@ -306,7 +302,6 @@ impl TensorSource for StagedSource {
     }
 
     fn prefetch_embed_row(&mut self, token: u32, hidden: usize) {
-        self.sincroniza();
         self.inner.prefetch_embed_row(token, hidden);
     }
 }

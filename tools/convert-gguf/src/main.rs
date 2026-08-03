@@ -12,12 +12,18 @@ fn main() {
     });
     let mut out = PathBuf::from("target/converted-model");
     let mut name = None;
+    let mut pack_trunk = false;
     let mut rest: Vec<String> = args.collect();
     let mut i = 0;
     while i < rest.len() {
         if rest[i] == "--name" {
             name = rest.get(i + 1).cloned();
             rest.remove(i);
+            rest.remove(i);
+            continue;
+        }
+        if rest[i] == "--pack-trunk" {
+            pack_trunk = true;
             rest.remove(i);
             continue;
         }
@@ -28,7 +34,12 @@ fn main() {
         }
         i += 1;
     }
-    if let Err(e) = gguf2som::convert_path(&gguf, &out, name.as_deref()) {
+    if let Err(e) = gguf2som::convert_path_with_options(
+        &gguf,
+        &out,
+        name.as_deref(),
+        gguf2som::ConvertOptions::default().with_pack_trunk(pack_trunk),
+    ) {
         eprintln!("convert-gguf: {e}");
         process::exit(1);
     }

@@ -118,13 +118,11 @@ soso/
   que costó sangre aprender: (1) `SOURCE_PTR` se republica **en cada kick**, no
   una vez en `enable_worker` — el `StagedSource` se mueve dentro de
   `ModelBundle` justo después y un puntero crudo entregado a otro hilo no
-  sobrevive a un move; (2) el hilo principal llama a `sincroniza()` antes de
-  tocar `inner` en cualquier método del trait, porque la caché de shards es un
-  `BTreeMap` sin sincronizar y dos hilos mutándolo lo dejan con punteros
-  inventados. Síntoma de ambos: page fault de usuario en una dirección con
-  pinta de cadena (p. ej. `0x6e7474612e3032be` = «…20.attn»). Coste: el
-  solapamiento prefetch↔cómputo se pierde casi entero; recuperarlo pide un lock
-  por shard dentro de `prefetch_shards_sync`, no quitar la sincronización.
+  sobrevive a un move; (2) `sincroniza()` solo en `release_shards_except`;
+  `load_*`/`tensor_view` usan `CacheLock` en `source.rs` (insert con
+  double-check). El worker solo hace `prefetch_shards_sync`. Síntoma de puntero
+  muerto: page fault con pinta de cadena (p. ej. `…20.attn`). Host:
+  `ThreadStagedSource` con hilo std.
 - **Caché de bloques O(1)** (`sosomfs/src/cache.rs`): índice abierto
   `lba → entrada` con hash de Fibonacci (los LBA de un shard son consecutivos y
   el módulo directo los amontona) y **lápidas** para las bajas; recompacta sólo
@@ -145,7 +143,7 @@ soso/
 - Ficheros `.som` con cabecera común (magic+crc+versión+payload_len, `pack_som`/`parse_som` en sosomodel): `manifest.som` (v4: tabla `LayerSpec` por capa — `AttnKind` Gqa/Mla/Kda, `FfnKind` Dense/Moe/LatentMoe, overrides MLA/MoE; v3: MoE global `num_experts`, `num_experts_per_tok`, `moe_ffn_dim`; v2: GQA `num_kv_heads`, `rope_theta`, `rms_eps`; parse v1–v3 sintetiza layers uniformes), `index.som` (shape `[filas,columnas]` row-major, dtype F32/Q8_0/Q4_K), `tokenizer.som` (vocabulario SentencePiece-ish, opcional), shards `.tensor`
 - **MoE (Mixtral-style, manifest v3):** `num_experts > 0` activa `forward_moe_ffn` en `layer.rs`: router `L{i}.ffn_gate_inp` → `topk_softmax` → SwiGLU por experto `L{i}.E{e}.ffn_{gate,up,down}` (un shard `.tensor` por tensor); prefetch de capa solo attn+router; expertos fríos vía `plan.rs::touch_moe_experts` + `source.prefetch_shards`; `keep_all_shards_after` retiene cache LRU de expertos calientes junto al working set de capas
 - Runtime (`soso-llm-core`): llama denso o **MoE** — RoPE, GQA, **Wo (`attn_output`)**, SwiGLU (`ffn_gate` opcional o por experto), `output_norm`, Q8_0 y Q4_K (layout GGML passthrough, matvec fusionado); pesos zero-copy (`TensorView` sobre mmap), KV en `kv.rs` (f16 o int8 KIVI-lite), sampling temp/top-p (`sample.rs`), streaming (`generate_stream` / `generate_stream_planned` + `StreamDecoder`); buffers reutilizados (`LayerScratch`, incl. `router`/`moe_acc` en MoE) — libsoso libera solo bloques ≥1 MiB (mmap anónimo), no reservar por token
-- **Planificador de recursos** (`plan.rs` + `ResourcePlanner`): lee `SYS_MEMINFO`, presupuesto de pesos (70 % libre+reclaimable), EWMA por capa/destino, replanifica cada 8 tokens; elige `KvDtype`, H2O y sparse según presión; **cache LRU de expertos MoE** (`touch_moe_experts`, stats `moe_hits`/`moe_misses`); **prefetch MoE especulativo** (`last_experts`, stats `moe_spec_hits`/`moe_spec_misses`); **staging AirLLM** (`stage.rs` kick/wait + `stage_wait_ms`); `Runtime::set_planner` recrea KV con el dtype; stats incluyen `kv_dtype_i8` / `h2o_enabled` / `sparse_attn` / PLD
+- **Planificador de recursos** (`plan.rs` + `ResourcePlanner`): lee `SYS_MEMINFO`, presupuesto de pesos (70 % libre+reclaimable), **split trunk-first** (tronco pin+anillo antes que caché MoE; presets `auto|tight|balanced|max-pin`), clasificación genérica `trunk|routed_expert|always_resident`, EWMA por capa/destino, replanifica cada 8 tokens; elige `KvDtype`, H2O y sparse según presión; **pin prefix + anillo 1–2 slots** (`pinned_layers`, `ring_slots`); **cache LRU de expertos MoE** con telemetría resident vs JIT; **prefetch MoE especulativo** (`last_experts`); **staging AirLLM** (`stage.rs` kick/wait + `stage_wait_ms`); stats `trunk_hits/misses`, `trunk_bytes_read`, `moe_resident_hits`, `moe_jit_hits`
 - **KV cache** (`kv.rs` + `LayerKv`): `append` f16 o int8+escala/token; `load_k_head`/`load_v_head`; masa H2O; `slide_window_h2o(keep, sink, recent, …)`; decode vía `attention_decode_kv`
 - **Atención** (`attn.rs`): decode FlashAttention-style tiled (tiles 64, path f16 clásico); `attention_decode_kv` (f16/I8 + masa); **Quest-lite** sparse si `seq > 256` (bloques 32, top-4 + sink/recent); **AVX2+FMA** f16→f32; prefetch shards stride 2 MiB
 - **Prompt Lookup Decoding** (`prompt_lookup_draft_hinted`): greedy; hint de n autotuneado (`tune_pld` por tasa de aceptación) + fallback max→min; stats `pld_*` / `pld_prefer_n` / `pld_max_draft`
@@ -171,12 +169,19 @@ soso/
 | Fast path attn f16 | Flash decode | `attention_decode_f16_tiled` si !H2O/!sparse |
 | Capacidad KV pre-reservada | espíritu PagedAttention | `LayerKv::with_capacity_*` |
 | Clock reclaim + shootdown | OS / vLLM-like | `kernel/src/mm/reclaim.rs` |
+| Trunk-first split (pin antes que expert cache) | kimi-k3-in-c | `plan.rs::compute_trunk_first_split`, CLI `--mem-*` |
+| Pin prefix + ring streaming | kimi-k3-in-c trunk | `plan.rs::keep_shards_after`, `pinned_layers` |
+| Packed trunk por capa (`Lxx.trunk.tensor`) | kimi-k3-in-c pack | `gguf2som --pack-trunk`, offsets en `index.som` |
+| True-resident hits (tronco/MoE) | kimi-k3-in-c telemetría | `plan.rs` stats, líneas `soso-llm` |
+| Arquitecturas MLA/KDA/LatentMoE/shared/MXFP4 | Kimi K3 | `arch.rs`, `manifest.rs` v4, `mkmodel-soso --attn/--ffn-kind/--shared-experts` |
+| Shard cache lock (staging ∥ compute) | — | `source.rs::CacheLock` (TOCTOU-safe insert), `staging.rs` wait en release |
+| Sim cache MoE offline | kimi-k3 sim_cache | `tools/sim-moe-cache.py`, `SOSO_MOE_TRACE=1` hostrun |
 
 - **Cierre de etapa `/loop` (obligatorio):** al terminar cada pase de optimización, actualizar esta skill (tabla + bullets), espejo `.cursor/skills/soso-architecture/SKILL.md`, `soso-dev` si cambian tests/comandos, y `MANUAL-USUARIO.md` si hay strings o comportamiento visible al usuario. No dejar docs aplazados al “final del loop”.
 - **SIMD**: userspace compila con target propio `user/x86_64-soso-user.json` (SSE..AVX2+FMA, build-std); kernels AVX2 en `gemm.rs::avx2` con dispatch por `target_feature` (escalar = referencia para tests). **Estado FPU**: el kernel preserva x87/XMM/YMM con **xsave64** (`arch/fpu.rs`; fxsave NO basta — pierde las mitades altas YMM entre procesos): timer_isr guarda a `TIMER_FPU` antes de net::poll, `timer_tick` lo copia a `Process.fpu` al desalojar, `schedule_inner` restaura al reanudar, el page fault handler preserva en `mmap_fault_shim`; syscalls no preservan (los wrappers de libsoso llevan `clobber_abi("C")`). `init test` estresa YMM con dos hijos "fpu" concurrentes
 - Harness rápido de calidad en host: `cargo run --release -p soso-llm-core --features std --example hostrun -- <modelo-dir> "<prompt>" <n>` (velocidad nativa, SOSO_DEBUG=1 para estadísticas por capa)
 - `Runtime::validate_shapes()` comprueba index↔manifest antes de inferir
-- Host: `cargo xtask convert-gguf` (GGUF llama denso o MoE Mixtral → `.som` v4; trocea `ffn_*_exps` por experto), `mkfs-sosomfs` (multi-modelo: `mkfs-sosomfs dir1 dir2 imagen.img`), `mkmodel-soso` (`tiny` denso + `--moe` → `tiny-moe`; flags `--experts`, `--experts-per-tok`, `--moe-ffn`)
+- Host: `cargo xtask convert-gguf` (GGUF llama denso o MoE Mixtral → `.som` v4; `--pack-trunk` empaqueta attn+FFN por capa; trocea `ffn_*_exps` por experto), `mkfs-sosomfs` (multi-modelo: `mkfs-sosomfs dir1 dir2 imagen.img`), `mkmodel-soso` (`tiny` denso + `--moe` → `tiny-moe`; flags `--experts`, `--experts-per-tok`, `--moe-ffn`)
 - Tests host MoE: `cargo test -p soso-llm-core --features std --test moe`
 - `SOSO_MODELS_DIR=<dir> cargo xtask run` empaqueta un modelo propio en vez de tiny
 - Userspace: `soso-llm run <modelo> --prompt <texto>` vía mmap + greedy decode; mmap pagina bajo demanda (`handle_mmap_fault` — ojo: `map_page` toma `FRAME_ALLOC`, no llamarla con ese lock tomado)

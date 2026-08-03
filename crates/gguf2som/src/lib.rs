@@ -28,6 +28,20 @@ pub trait SomOut {
     fn write(&mut self, rel: &str, data: &[u8]) -> Result<(), String>;
 }
 
+/// Opciones de conversión (layout de shards).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConvertOptions {
+    /// Empaqueta attn+FFN denso+router por capa en `Lxx.trunk.tensor`.
+    pub pack_trunk: bool,
+}
+
+impl ConvertOptions {
+    pub fn with_pack_trunk(mut self, on: bool) -> Self {
+        self.pack_trunk = on;
+        self
+    }
+}
+
 #[cfg(feature = "std")]
 pub fn convert_path(gguf_path: &str, out_dir: &std::path::Path, name: Option<&str>) -> Result<(), String> {
     use crate::io::std_file::File as IoFile;
@@ -55,7 +69,41 @@ pub fn convert_path(gguf_path: &str, out_dir: &std::path::Path, name: Option<&st
     let mut out = StdOut {
         root: out_dir.to_path_buf(),
     };
-    convert(&mut f, &mut out, stem.as_deref())
+    convert_with_options(&mut f, &mut out, stem.as_deref(), ConvertOptions::default())
+}
+
+pub fn convert_path_with_options(
+    gguf_path: &str,
+    out_dir: &std::path::Path,
+    name: Option<&str>,
+    options: ConvertOptions,
+) -> Result<(), String> {
+    use crate::io::std_file::File as IoFile;
+    struct StdOut {
+        root: std::path::PathBuf,
+    }
+    impl SomOut for StdOut {
+        fn mkdir(&mut self, path: &str) -> Result<(), String> {
+            std::fs::create_dir_all(self.root.join(path)).map_err(|e| e.to_string())
+        }
+        fn write(&mut self, rel: &str, data: &[u8]) -> Result<(), String> {
+            let p = self.root.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(p, data).map_err(|e| e.to_string())
+        }
+    }
+    let mut f = IoFile(std::fs::File::open(gguf_path).map_err(|e| format!("abrir {gguf_path}: {e}"))?);
+    let stem = name.map(String::from).or_else(|| {
+        std::path::Path::new(gguf_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+    });
+    let mut out = StdOut {
+        root: out_dir.to_path_buf(),
+    };
+    convert_with_options(&mut f, &mut out, stem.as_deref(), options)
 }
 
 const GGML_F32: u32 = 0;
@@ -70,6 +118,15 @@ pub fn convert<R: Read + Seek>(
     file: &mut R,
     out: &mut dyn SomOut,
     name: Option<&str>,
+) -> Result<(), String> {
+    convert_with_options(file, out, name, ConvertOptions::default())
+}
+
+pub fn convert_with_options<R: Read + Seek>(
+    file: &mut R,
+    out: &mut dyn SomOut,
+    name: Option<&str>,
+    options: ConvertOptions,
 ) -> Result<(), String> {
     let gguf = parse_gguf(file)?;
 
@@ -133,6 +190,54 @@ pub fn convert<R: Read + Seek>(
     let mut id = 0u32;
     let mut prefetch = Vec::new();
 
+    struct TrunkPiece {
+        som_name: String,
+        payload: Vec<u8>,
+        dtype: u8,
+        shape: Vec<u32>,
+    }
+
+    let write_trunk_pack = |layer: u32,
+                            pieces: &[TrunkPiece],
+                            index: &mut TensorIndex,
+                            id: &mut u32,
+                            out: &mut dyn SomOut|
+     -> Result<Vec<String>, String> {
+        if pieces.is_empty() {
+            return Ok(Vec::new());
+        }
+        let shard_name = format!("L{layer:02}.trunk.tensor");
+        let mut blob = Vec::new();
+        let mut offset = 0u64;
+        for piece in pieces {
+            index.entries.push(match piece.dtype {
+                DTYPE_Q8_0 => make_q8_0_entry(
+                    *id,
+                    &piece.som_name,
+                    &shard_name,
+                    offset,
+                    &piece.shape,
+                ),
+                DTYPE_Q4_K => make_q4_k_entry(
+                    *id,
+                    &piece.som_name,
+                    &shard_name,
+                    offset,
+                    &piece.shape,
+                ),
+                _ => make_f32_entry(*id, &piece.som_name, &shard_name, offset, &piece.shape),
+            });
+            *id += 1;
+            blob.extend_from_slice(&piece.payload);
+            offset = offset.saturating_add(piece.payload.len() as u64);
+        }
+        out.write(
+            &format!("{SHARDS_DIR}/{shard_name}"),
+            &pack_shard(&blob),
+        )?;
+        Ok(alloc::vec![shard_name])
+    };
+
     let emit = |file: &mut R,
                     index: &mut TensorIndex,
                     id: &mut u32,
@@ -160,6 +265,7 @@ pub fn convert<R: Read + Seek>(
 
     for layer in 0..num_layers {
         let mut shards = Vec::new();
+        let mut trunk_pieces: Vec<TrunkPiece> = Vec::new();
         if is_moe {
             let attn_parts = [
                 ("attn_norm", "attn_norm"),
@@ -172,13 +278,35 @@ pub fn convert<R: Read + Seek>(
             for (gguf_part, som_part) in attn_parts {
                 let gguf_name = format!("blk.{layer}.{gguf_part}.weight");
                 let som_name = format!("L{layer:02}.{som_part}");
-                if emit(file, &mut index, &mut id, &gguf_name, &som_name, out)? {
+                if options.pack_trunk {
+                    if let Some(t) = gguf.tensors.get(&gguf_name) {
+                        let (payload, dtype) = read_tensor(file, &gguf, t)?;
+                        let shape: Vec<u32> = t.shape.iter().rev().map(|&d| d as u32).collect();
+                        trunk_pieces.push(TrunkPiece {
+                            som_name,
+                            payload,
+                            dtype,
+                            shape,
+                        });
+                    }
+                } else if emit(file, &mut index, &mut id, &gguf_name, &som_name, out)? {
                     shards.push(format!("{som_name}.tensor"));
                 }
             }
             let router_gguf = format!("blk.{layer}.ffn_gate_inp.weight");
             let router_som = format!("L{layer:02}.ffn_gate_inp");
-            if emit(
+            if options.pack_trunk {
+                if let Some(t) = gguf.tensors.get(&router_gguf) {
+                    let (payload, dtype) = read_tensor(file, &gguf, t)?;
+                    let shape: Vec<u32> = t.shape.iter().rev().map(|&d| d as u32).collect();
+                    trunk_pieces.push(TrunkPiece {
+                        som_name: router_som,
+                        payload,
+                        dtype,
+                        shape,
+                    });
+                }
+            } else if emit(
                 file,
                 &mut index,
                 &mut id,
@@ -187,6 +315,15 @@ pub fn convert<R: Read + Seek>(
                 out,
             )? {
                 shards.push(format!("{router_som}.tensor"));
+            }
+            if options.pack_trunk {
+                shards.extend(write_trunk_pack(
+                    layer,
+                    &trunk_pieces,
+                    &mut index,
+                    &mut id,
+                    out,
+                )?);
             }
             for (gguf_suffix, som_suffix) in [
                 ("ffn_gate_exps", "ffn_gate"),
@@ -205,13 +342,49 @@ pub fn convert<R: Read + Seek>(
                     out,
                 )?;
             }
+            for (gguf_suffix, som_suffix) in [
+                ("ffn_gate_shexp", "ffn_gate"),
+                ("ffn_up_shexp", "ffn_up"),
+                ("ffn_down_shexp", "ffn_down"),
+            ] {
+                emit_moe_shared_experts(
+                    file,
+                    &gguf,
+                    &mut index,
+                    &mut id,
+                    &format!("blk.{layer}.{gguf_suffix}.weight"),
+                    layer,
+                    som_suffix,
+                    out,
+                )?;
+            }
         } else {
             for (gguf_part, som_part) in layer_parts {
                 let gguf_name = format!("blk.{layer}.{gguf_part}.weight");
                 let som_name = format!("L{layer:02}.{som_part}");
-                if emit(file, &mut index, &mut id, &gguf_name, &som_name, out)? {
+                if options.pack_trunk {
+                    if let Some(t) = gguf.tensors.get(&gguf_name) {
+                        let (payload, dtype) = read_tensor(file, &gguf, t)?;
+                        let shape: Vec<u32> = t.shape.iter().rev().map(|&d| d as u32).collect();
+                        trunk_pieces.push(TrunkPiece {
+                            som_name,
+                            payload,
+                            dtype,
+                            shape,
+                        });
+                    }
+                } else if emit(file, &mut index, &mut id, &gguf_name, &som_name, out)? {
                     shards.push(format!("{som_name}.tensor"));
                 }
+            }
+            if options.pack_trunk {
+                shards.extend(write_trunk_pack(
+                    layer,
+                    &trunk_pieces,
+                    &mut index,
+                    &mut id,
+                    out,
+                )?);
             }
         }
         prefetch.push(LayerPrefetch { layer, shards });
@@ -288,6 +461,44 @@ fn emit_moe_experts<R: Read + Seek>(
     for expert in 0..num_experts {
         let slice = slice_expert_3d(&payload, dtype, rows, cols, expert as usize)?;
         let som_name = format!("L{layer:02}.E{expert:02}.{som_suffix}");
+        let shard_name = format!("{som_name}.tensor");
+        out.write(&format!("{SHARDS_DIR}/{shard_name}"), &pack_shard(&slice))?;
+        let exp_shape = vec![rows as u32, cols as u32];
+        index.entries.push(match dtype {
+            DTYPE_Q8_0 => make_q8_0_entry(*id, &som_name, &shard_name, 0, &exp_shape),
+            DTYPE_Q4_K => make_q4_k_entry(*id, &som_name, &shard_name, 0, &exp_shape),
+            _ => make_f32_entry(*id, &som_name, &shard_name, 0, &exp_shape),
+        });
+        *id += 1;
+    }
+    Ok(())
+}
+
+/// Trocea expertos compartidos MoE (`ffn_*_shexp`) en `Lxx.Syy.*`.
+fn emit_moe_shared_experts<R: Read + Seek>(
+    file: &mut R,
+    gguf: &GgufFile,
+    index: &mut TensorIndex,
+    id: &mut u32,
+    gguf_name: &str,
+    layer: u32,
+    som_suffix: &str,
+    out: &mut dyn SomOut,
+) -> Result<(), String> {
+    let Some(t) = gguf.tensors.get(gguf_name) else {
+        return Ok(());
+    };
+    if t.shape.len() != 3 {
+        return Err(format!("{gguf_name}: se esperaban 3 dimensiones shared MoE"));
+    }
+    let (payload, dtype) = read_tensor(file, gguf, t)?;
+    let shape: Vec<u32> = t.shape.iter().rev().map(|&d| d as u32).collect();
+    let n_exp = shape[0] as usize;
+    let rows = shape[1] as usize;
+    let cols = shape[2] as usize;
+    for shared in 0..n_exp {
+        let slice = slice_expert_3d(&payload, dtype, rows, cols, shared)?;
+        let som_name = format!("L{layer:02}.S{shared:02}.{som_suffix}");
         let shard_name = format!("{som_name}.tensor");
         out.write(&format!("{SHARDS_DIR}/{shard_name}"), &pack_shard(&slice))?;
         let exp_shape = vec![rows as u32, cols as u32];

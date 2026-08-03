@@ -3,7 +3,7 @@
 
 use crate::f16::f16_to_f32;
 use alloc::vec::Vec;
-use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS};
+use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS, MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS};
 
 /// Cuantiza a bloques Q8_0; el último bloque se rellena con ceros.
 pub fn quantize_q8_0(src: &[f32]) -> Vec<u8> {
@@ -231,6 +231,68 @@ pub fn dequant_q4_k_range(bytes: &[u8], elem_off: usize, out: &mut [f32]) -> Res
 /// Descuantiza el tensor Q4_K completo.
 pub fn dequant_q4_k(bytes: &[u8], out: &mut [f32]) -> Result<(), ()> {
     dequant_q4_k_range(bytes, 0, out)
+}
+
+/// Cuantiza a bloques MXFP4 (escala f32 + nibbles empaquetados).
+pub fn quantize_mxfp4(src: &[f32]) -> Vec<u8> {
+    let blocks = src.len().div_ceil(MXFP4_BLOCK_ELEMS);
+    let mut out = Vec::with_capacity(blocks * MXFP4_BLOCK_BYTES);
+    for chunk in src.chunks(MXFP4_BLOCK_ELEMS) {
+        let mut max = 0.0f32;
+        for &v in chunk {
+            max = max.max(v.abs());
+        }
+        let scale = if max > 0.0 { max / 7.0 } else { 1.0 };
+        out.extend_from_slice(&scale.to_le_bytes());
+        let mut packed = [0u8; 16];
+        for (i, &v) in chunk.iter().enumerate() {
+            let q = libm::roundf(v / scale).clamp(-7.0, 7.0) as i8;
+            let n = (q as u8) & 0x0f;
+            if i % 2 == 0 {
+                packed[i / 2] = n;
+            } else {
+                packed[i / 2] |= n << 4;
+            }
+        }
+        out.extend_from_slice(&packed);
+    }
+    out
+}
+
+pub fn dequant_mxfp4(bytes: &[u8], out: &mut [f32]) -> Result<(), ()> {
+    dequant_mxfp4_range(bytes, 0, out)
+}
+
+pub fn dequant_mxfp4_range(bytes: &[u8], elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
+    if bytes.len() % MXFP4_BLOCK_BYTES != 0 || out.is_empty() {
+        return Err(());
+    }
+    let total = (bytes.len() / MXFP4_BLOCK_BYTES) * MXFP4_BLOCK_ELEMS;
+    let end = elem_off.checked_add(out.len()).ok_or(())?;
+    if end > total {
+        return Err(());
+    }
+    let first = elem_off / MXFP4_BLOCK_ELEMS;
+    let last = (end - 1) / MXFP4_BLOCK_ELEMS;
+    for b in first..=last {
+        let chunk = &bytes[b * MXFP4_BLOCK_BYTES..(b + 1) * MXFP4_BLOCK_BYTES];
+        let scale = f32::from_le_bytes(chunk[..4].try_into().map_err(|_| ())?);
+        let base = b * MXFP4_BLOCK_ELEMS;
+        for j in 0..MXFP4_BLOCK_ELEMS {
+            let e = base + j;
+            if e >= elem_off && e < end {
+                let byte = chunk[4 + j / 2];
+                let n = if j % 2 == 0 { byte & 0x0f } else { byte >> 4 };
+                let signed = if n & 0x8 != 0 {
+                    (n as i8).wrapping_sub(16)
+                } else {
+                    n as i8
+                };
+                out[e - elem_off] = signed as f32 * scale;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

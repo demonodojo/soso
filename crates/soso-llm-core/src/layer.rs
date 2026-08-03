@@ -14,8 +14,8 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use sosomodel::index::TensorIndex;
-use sosomodel::layout::{DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0};
-use sosomodel::manifest::Manifest;
+use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
+use sosomodel::manifest::{AttnKind, FfnKind, Manifest};
 
 /// Vista zero-copy del payload de un tensor (bytes crudos del shard mapeado,
 /// alineados a 64 B en shards v2).
@@ -137,6 +137,18 @@ pub fn matvec_view_par(
                 )
                 .is_ok()
             }
+            DTYPE_MXFP4 => {
+                use sosomodel::layout::{MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS};
+                let row_bytes = (cols / MXFP4_BLOCK_ELEMS) * MXFP4_BLOCK_BYTES;
+                crate::gemm::matvec_mxfp4(
+                    &bytes[r0 * row_bytes..r1 * row_bytes],
+                    r1 - r0,
+                    cols,
+                    x,
+                    &mut out[r0..r1],
+                )
+                .is_ok()
+            }
             _ => false,
         };
         if !ok {
@@ -200,7 +212,7 @@ impl LayerScratch {
 }
 
 /// matvec con offload GPU opcional (G5).
-fn matvec_step(
+pub(crate) fn matvec_step(
     use_gpu: bool,
     gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     key: &str,
@@ -291,8 +303,52 @@ impl<'a> LayerExecutor<'a> {
         }
 
         let planner_ro = planner.as_deref();
+        let spec = self
+            .manifest
+            .layer(layer)
+            .cloned()
+            .unwrap_or_default();
+        let mut timing = LayerTiming::default();
 
         // --- atención ---
+        if spec.attn_kind == AttnKind::Mla {
+            let (mv, att) = crate::arch::forward_mla_attn(
+                &spec,
+                self.manifest,
+                layer,
+                pos,
+                &prefix,
+                hidden,
+                s,
+                kv,
+                source,
+                gpu,
+                use_gpu,
+                par,
+                planner_ro,
+                clock_ms,
+            )?;
+            timing.matvec_ms = mv;
+            timing.attn_ms = att;
+        } else if spec.attn_kind == AttnKind::Kda {
+            let (mv, att) = crate::arch::forward_kda_attn(
+                self.manifest,
+                layer,
+                pos,
+                &prefix,
+                hidden,
+                s,
+                kv,
+                source,
+                gpu,
+                use_gpu,
+                par,
+                planner_ro,
+                clock_ms,
+            )?;
+            timing.matvec_ms = mv;
+            timing.attn_ms = att;
+        } else {
         s.residual.copy_from_slice(hidden);
         source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w)?;
         rmsnorm(hidden, &s.norm_w, eps);
@@ -416,13 +472,36 @@ impl<'a> LayerExecutor<'a> {
             layer,
         )?;
         add_f32(&s.residual, &s.q, hidden);
+        if clock_ms.is_some() {
+            timing.matvec_ms = t_attn0.saturating_sub(t_mv0);
+            timing.attn_ms = t_attn1.saturating_sub(t_attn0);
+        }
+        } // Gqa
 
-        // --- FFN (denso o MoE) ---
+        // --- FFN (denso, MoE o LatentMoE) ---
         s.residual.copy_from_slice(hidden);
         source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w)?;
         rmsnorm(hidden, &s.norm_w, eps);
 
-        if self.manifest.layer_is_moe(layer) {
+        let t_ffn0 = tick(clock_ms);
+        if spec.ffn_kind == FfnKind::LatentMoe {
+            let latent = self.manifest.effective_moe_ffn_dim(layer) as usize;
+            crate::arch::forward_latent_moe_ffn(
+                self.manifest,
+                layer,
+                prefix.clone(),
+                h,
+                latent,
+                hidden,
+                s,
+                source,
+                gpu,
+                use_gpu,
+                par,
+                planner,
+                index,
+            )?;
+        } else if self.manifest.layer_is_moe(layer) {
             self.forward_moe_ffn(
                 layer,
                 prefix,
@@ -485,13 +564,11 @@ impl<'a> LayerExecutor<'a> {
         }
 
         add_assign_f32(hidden, &s.residual);
-        let t_mv1 = tick(clock_ms);
-        let mut timing = LayerTiming::default();
+        let t_ffn1 = tick(clock_ms);
         if clock_ms.is_some() {
-            timing.matvec_ms = t_attn0
-                .saturating_sub(t_mv0)
-                .saturating_add(t_mv1.saturating_sub(t_attn1));
-            timing.attn_ms = t_attn1.saturating_sub(t_attn0);
+            timing.matvec_ms = timing
+                .matvec_ms
+                .saturating_add(t_ffn1.saturating_sub(t_ffn0));
         }
         Ok(timing)
     }
@@ -542,6 +619,9 @@ impl<'a> LayerExecutor<'a> {
         };
         if !prefetch_shards.is_empty() {
             source.prefetch_shards(&prefetch_shards);
+            if let Some(pl) = planner.as_mut() {
+                pl.note_moe_jit_served(pl.last_moe_cold());
+            }
         }
 
         s.moe_acc.fill(0.0);
@@ -592,6 +672,60 @@ impl<'a> LayerExecutor<'a> {
             )?;
             for i in 0..h {
                 s.moe_acc[i] += s.q[i] * weight;
+            }
+        }
+        let n_shared = self
+            .manifest
+            .layer(layer)
+            .map(|sp| sp.num_shared_experts)
+            .unwrap_or(0);
+        for shared in 0..n_shared {
+            let ep = format!("{prefix}.S{shared:02}");
+            let name_gate = format!("{ep}.ffn_gate");
+            let name_up = format!("{ep}.ffn_up");
+            let name_down = format!("{ep}.ffn_down");
+            matvec_step(
+                use_gpu,
+                gpu,
+                &name_gate,
+                source.tensor_view(&name_gate)?,
+                ffn,
+                h,
+                hidden,
+                &mut s.gate,
+                par,
+                planner.as_deref(),
+                layer,
+            )?;
+            matvec_step(
+                use_gpu,
+                gpu,
+                &name_up,
+                source.tensor_view(&name_up)?,
+                ffn,
+                h,
+                hidden,
+                &mut s.up,
+                par,
+                planner.as_deref(),
+                layer,
+            )?;
+            swiglu_inplace(&mut s.up, &s.gate);
+            matvec_step(
+                use_gpu,
+                gpu,
+                &name_down,
+                source.tensor_view(&name_down)?,
+                h,
+                ffn,
+                &s.up,
+                &mut s.q,
+                par,
+                planner.as_deref(),
+                layer,
+            )?;
+            for i in 0..h {
+                s.moe_acc[i] += s.q[i];
             }
         }
         hidden.copy_from_slice(&s.moe_acc);

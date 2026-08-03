@@ -190,6 +190,30 @@ pub fn matvec_q8_0_scalar(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out
     }
 }
 
+/// matvec sobre pesos MXFP4 (bloques de 32 elems / 20 B).
+pub fn matvec_mxfp4(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ()> {
+    use crate::quant::dequant_mxfp4_range;
+    use sosomodel::layout::{MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS};
+    if cols % MXFP4_BLOCK_ELEMS != 0 || x.len() != cols || out.len() != rows {
+        return Err(());
+    }
+    let row_bytes = (cols / MXFP4_BLOCK_ELEMS) * MXFP4_BLOCK_BYTES;
+    if bytes.len() != rows * row_bytes {
+        return Err(());
+    }
+    let mut row_f32 = alloc::vec![0.0f32; cols];
+    for (r, o) in out.iter_mut().enumerate() {
+        let row = &bytes[r * row_bytes..(r + 1) * row_bytes];
+        dequant_mxfp4_range(row, 0, &mut row_f32).map_err(|_| ())?;
+        let mut acc = 0.0f32;
+        for (w, &xi) in row_f32.iter().zip(x.iter()) {
+            acc += w * xi;
+        }
+        *o = acc;
+    }
+    Ok(())
+}
+
 /// matvec fusionado sobre pesos Q4_K (superbloques GGML de 256 elems /
 /// 144 B). Por sub-bloque: acc += d·sc·Σ(q·x) − dmin·m·Σx, descuantizando
 /// en registros. `cols` debe ser múltiplo de 256.

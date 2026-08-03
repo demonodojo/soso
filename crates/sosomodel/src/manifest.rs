@@ -333,35 +333,33 @@ impl Manifest {
         Ok(())
     }
 
-    /// Solo Gqa + (Dense|Moe) sin shared experts ni ranks MLA.
+    /// Capacidades soportadas por capa (Gqa/Mla/Kda + Dense/Moe/LatentMoe + shared).
     pub fn supported_by_runtime(&self) -> Result<(), UnsupportedLayer> {
         for layer in 0..self.num_layers {
             let spec = self.layer(layer).ok_or(UnsupportedLayer {
                 layer,
                 reason: "missing layer spec",
             })?;
-            if spec.attn_kind != AttnKind::Gqa {
+            if spec.flags != 0 {
                 return Err(UnsupportedLayer {
                     layer,
-                    reason: "attention kind not supported",
+                    reason: "layer flags not supported",
                 });
+            }
+            match spec.attn_kind {
+                AttnKind::Gqa | AttnKind::Mla | AttnKind::Kda => {}
             }
             match spec.ffn_kind {
-                FfnKind::Dense | FfnKind::Moe => {}
-                FfnKind::LatentMoe => {
+                FfnKind::Dense | FfnKind::Moe | FfnKind::LatentMoe => {}
+            }
+            if spec.attn_kind == AttnKind::Mla {
+                if spec.q_lora_rank == 0 || spec.kv_lora_rank == 0 {
                     return Err(UnsupportedLayer {
                         layer,
-                        reason: "LatentMoE not supported",
+                        reason: "MLA ranks required",
                     });
                 }
-            }
-            if spec.num_shared_experts > 0 {
-                return Err(UnsupportedLayer {
-                    layer,
-                    reason: "shared experts not supported",
-                });
-            }
-            if spec.kv_lora_rank > 0
+            } else if spec.kv_lora_rank > 0
                 || spec.q_lora_rank > 0
                 || spec.qk_rope_head_dim > 0
                 || spec.qk_nope_head_dim > 0
@@ -369,7 +367,7 @@ impl Manifest {
             {
                 return Err(UnsupportedLayer {
                     layer,
-                    reason: "MLA dims not supported",
+                    reason: "MLA dims on non-MLA layer",
                 });
             }
         }

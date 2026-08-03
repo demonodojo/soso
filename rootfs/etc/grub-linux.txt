@@ -1,0 +1,8 @@
+Tras instalar desde soso live (soso-install), añade la entrada GRUB desde Linux:
+
+sudo /media/$USER/SOSO_INSTALL/install-soso.sh --grub-only /dev/nvme1n1
+
+Sustituye /dev/nvme1n1 por el disco donde instalaste soso (lsblk).
+Luego reinicia y elige "soso" en el menú GRUB.
+
+Desinstalar: sudo rm /etc/grub.d/41_soso && sudo update-grub

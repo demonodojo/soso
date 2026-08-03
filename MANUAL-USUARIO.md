@@ -653,13 +653,30 @@ arrancar y al terminar verás:
 soso-llm: planificador — presupuesto pesos … KiB, modelo … KiB, capas CPU/GPU/remoto …
 soso-llm: streaming — working-set N capas, ventana KV T tokens …, KV f16|int8 H2O=… sparse=…
 soso-llm: memoria — libre … KiB, reclaimable … KiB
+soso-llm: plan memoria — trunk … KiB (pin N capas, anillo …), expert cache … KiB …
+soso-llm: pesos — tronco … KiB, expertos … KiB, siempre-residente … KiB
 …
 soso-llm: planificador — replanes N, latencia media CPU/GPU/remoto … ms
 soso-llm: hot path — matvec … ms/capa, attn … ms/capa
 soso-llm: streaming — prefetch …, staging wait … ms, liberaciones shard …, ventanas KV …
+soso-llm: tronco — N hits, M misses, … KiB leídos
+soso-llm: MoE cache — N resident, M JIT, K fríos
 soso-llm: MoE especulativo — N aciertos, M fallos
 soso-llm: prompt-lookup — N aceptados en M intentos (n≈…, draft≤…)
 ```
+
+Presets de memoria (split **tronco antes que caché MoE**, estilo kimi-k3-in-c):
+
+```text
+soso-llm run mixtral --prompt hola --mem-tight      # máximo pin de tronco
+soso-llm run mixtral --prompt hola --mem-balanced   # reparto 85/15
+soso-llm run mixtral --prompt hola --mem-max-pin    # pin agresivo
+soso-llm run mixtral --prompt hola --trunk-frac 90 --ring-slots 2
+```
+
+En host, `convert-gguf modelo.gguf salida/ --pack-trunk` empaqueta attn+FFN por capa
+en `Lxx.trunk.tensor` (menos mmap/faults por token). Simular caché MoE offline:
+`SOSO_MOE_TRACE=1 SOSO_PLANNER=1 hostrun …` y `python3 tools/sim-moe-cache.py trace.bin`.
 
 El runtime aplica **double-buffer estilo AirLLM**: `kick` de la capa N+1 mientras
 calcula N, y un hilo de staging en userspace solapa el page-fault de shards con

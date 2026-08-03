@@ -18,6 +18,7 @@ pub mod runtime;
 pub mod sample;
 pub mod tier;
 pub mod stage;
+pub mod arch;
 pub mod attn;
 pub mod source;
 pub mod tokenizer;
@@ -25,6 +26,12 @@ pub mod tokenizer;
 pub use runtime::Runtime;
 pub use attn::{prompt_lookup_draft, prompt_lookup_draft_hinted};
 pub use kv::{KvDtype, LayerKv};
-pub use plan::{ExecDest, MemSnapshot, PlannerStats, ResourcePlanner};
+pub use plan::{
+    classify_weight_bytes, compute_trunk_first_split, is_shared_expert_tensor,
+    shared_expert_shard_names, ExecDest, MemoryPlanConfig, MemoryPreset,
+    MemSnapshot, PlannerStats, ResourcePlanner, WeightClassBytes,
+};
 pub use source::{FileMapper, MappedShard, MmapTensorSource};
+#[cfg(feature = "std")]
+pub use source::host::ThreadStagedSource;
 pub use stage::{PrefetchSink, SyncStager};

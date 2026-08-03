@@ -21,7 +21,7 @@ use libsoso::{println, sys};
 use pool::ThreadPool;
 use soso_abi::{self as abi, O_RDONLY};
 use soso_llm_core::parallel::RowParallel;
-use soso_llm_core::plan::{MemSnapshot, ResourcePlanner};
+use soso_llm_core::plan::{MemSnapshot, MemoryPlanConfig, MemoryPreset, ResourcePlanner};
 use soso_llm_core::pipeline::{PipelinePlan, PipelineRole};
 use soso_llm_core::runtime::{Backend, Runtime};
 use soso_llm_core::sample::Sampler;
@@ -222,6 +222,7 @@ fn main(args: &str) -> u8 {
             max_new,
             Sampler::new(temp, top_p, seed),
             force_cpu,
+            parse_memory_plan(&parts),
         );
         if soft {
             // Se apaga al salir: el dispositivo es estado GLOBAL del kernel, y
@@ -241,7 +242,8 @@ fn main(args: &str) -> u8 {
     println!("    [--step-timeout-ms <ms>] [--handshake-timeout-ms <ms>]");
     println!("    [--ping-interval-ms <ms>] [--ping-idle-ms <ms>]");
     println!("    [--standby] [--standby-retry-ms <ms>]");
-    println!("    [--remote <ip:puerto> --split <n>]  (compat v1)");
+    println!("    [--mem-tight|--mem-balanced|--mem-max-pin]  (preset trunk-first)");
+    println!("    [--trunk-frac <0-100>] [--ring-slots <1|2>]");
     println!("  soso-llm node <modelo> --listen <puerto> --layers <start>:<end>");
     println!("  soso-llm worker ...  (alias de node)");
     1
@@ -300,6 +302,33 @@ fn read_num_layers(name: &str) -> Option<u32> {
 }
 
 fn parse_flag(parts: &[&str], flag: &str) -> Option<String> {
+    parts
+        .iter()
+        .position(|&p| p == flag)
+        .and_then(|i| parts.get(i + 1))
+        .map(|&v| v.into())
+}
+
+fn parse_memory_plan(parts: &[&str]) -> MemoryPlanConfig {
+    let preset = if parts.iter().any(|&p| p == "--mem-tight") {
+        MemoryPreset::Tight
+    } else if parts.iter().any(|&p| p == "--mem-balanced") {
+        MemoryPreset::Balanced
+    } else if parts.iter().any(|&p| p == "--mem-max-pin") {
+        MemoryPreset::MaxPin
+    } else {
+        MemoryPreset::Auto
+    };
+    let trunk_frac_pct = parse_flag(parts, "--trunk-frac").and_then(|v| v.parse().ok());
+    let ring_slots = parse_flag(parts, "--ring-slots")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    MemoryPlanConfig {
+        preset,
+        trunk_frac_pct,
+        ring_slots,
+    }
+}
     parts
         .iter()
         .position(|&p| p == flag)
@@ -576,6 +605,7 @@ fn run_model(
     max_new: usize,
     mut sampler: Sampler,
     force_cpu: bool,
+    mem_plan: MemoryPlanConfig,
 ) -> u8 {
     let io0 = read_iostat();
     let t_carga = sys::uptime_ms();
@@ -604,12 +634,13 @@ fn run_model(
     let mut gpu = abi::GpuInfo::default();
     let _ = sys::gpu_info(&mut gpu);
     let mem = read_mem_snapshot();
-    let planner = ResourcePlanner::new(
+    let planner = ResourcePlanner::with_config(
         &bundle.rt.manifest,
         &bundle.rt.index,
         mem,
         gpu.vram_free,
         false,
+        mem_plan,
     );
     bundle.rt.set_planner(planner);
     if let Some(pl) = bundle.rt.planner.as_ref() {
@@ -634,6 +665,14 @@ fn run_model(
             "soso-llm: memoria — libre {} KiB, reclaimable {} KiB",
             mem.free_bytes() / 1024,
             mem.reclaimable_bytes() / 1024,
+        );
+        println!("soso-llm: plan memoria — {}", pl.memory_plan_summary());
+        let wc = pl.weight_classes();
+        println!(
+            "soso-llm: pesos — tronco {} KiB, expertos {} KiB, siempre-residente {} KiB",
+            wc.trunk_bytes / 1024,
+            wc.routed_expert_bytes / 1024,
+            wc.always_resident_bytes / 1024,
         );
     }
     let mut sys_gpu = if force_cpu {
@@ -757,6 +796,22 @@ fn run_model(
                     println!(
                         "soso-llm: MoE especulativo — {} aciertos, {} fallos",
                         st.moe_spec_hits, st.moe_spec_misses
+                    );
+                }
+                if st.trunk_hits > 0 || st.trunk_misses > 0 {
+                    println!(
+                        "soso-llm: tronco — {} hits, {} misses, {} KiB leídos",
+                        st.trunk_hits,
+                        st.trunk_misses,
+                        st.trunk_bytes_read / 1024,
+                    );
+                }
+                if st.moe_resident_hits > 0 || st.moe_jit_hits > 0 || st.moe_misses > 0 {
+                    println!(
+                        "soso-llm: MoE cache — {} resident, {} JIT, {} fríos",
+                        st.moe_resident_hits,
+                        st.moe_jit_hits,
+                        st.moe_misses,
                     );
                 }
                 if st.pld_attempts > 0 || st.pld_accepted > 0 {
