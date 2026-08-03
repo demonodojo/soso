@@ -3,7 +3,7 @@
 use crate::attn;
 use crate::gemm::{add_f32, rmsnorm, rope_inplace, swiglu_inplace, topk_softmax};
 use crate::gpu::GpuDispatch;
-use crate::kv::{KvDtype, LayerKv};
+use crate::kv::LayerKv;
 use crate::layer::{matvec_step, LayerScratch, TensorSource};
 use crate::plan::ResourcePlanner;
 use crate::parallel::RowParallel;
@@ -130,36 +130,28 @@ pub fn forward_mla_attn<S: TensorSource>(
         rope_inplace(&mut s.k[head * head_dim..(head + 1) * head_dim], pos, theta);
     }
 
-    kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);
-    let seq = kv.tokens(kv_dim);
+    kv.append_mla_latent(&s.up[..kv_rank]);
+    let seq = kv.tokens(kv_rank);
     s.attn_out.fill(0.0);
     for head in 0..heads {
         let q_h = &s.q[head * head_dim..(head + 1) * head_dim];
         let kv_head = head / group;
-        if matches!(kv.dtype, KvDtype::F16) {
-            attn::attention_decode_f16_tiled(
-                q_h,
-                kv.k_f16_slice(),
-                kv.v_f16_slice(),
-                head_dim,
-                kv_dim,
-                kv_head,
-                seq,
-                &mut s.head_out,
-            );
-        } else {
-            attn::attention_decode_kv(
-                q_h,
-                kv,
-                head_dim,
-                kv_dim,
-                kv_head,
-                seq,
-                &mut s.head_out,
-                None,
-                false,
-            );
-        }
+        attn::attention_decode_mla_latent(
+            q_h,
+            kv,
+            kv_rank,
+            kv_dim,
+            head_dim,
+            kv_head,
+            seq,
+            source,
+            &name_k_up,
+            &name_v_up,
+            &mut s.k[..kv_dim],
+            &mut s.v[..kv_dim],
+            &mut s.gate[..kv_rank],
+            &mut s.head_out,
+        )?;
         s.attn_out[head * head_dim..(head + 1) * head_dim].copy_from_slice(&s.head_out);
     }
     let t_attn1 = tick(clock_ms);
@@ -336,71 +328,6 @@ pub fn forward_kda_attn<S: TensorSource>(
         t_attn0.saturating_sub(t_mv0).saturating_add(t_mv1.saturating_sub(t_attn1)),
         t_attn1.saturating_sub(t_attn0),
     ))
-}
-
-pub fn run_shared_expert<S: TensorSource>(
-    prefix: &str,
-    shared: u32,
-    h: usize,
-    ffn: usize,
-    hidden: &[f32],
-    s: &mut LayerScratch,
-    source: &mut S,
-    gpu: &mut Option<&mut dyn GpuDispatch>,
-    use_gpu: bool,
-    par: &dyn RowParallel,
-    planner: Option<&ResourcePlanner>,
-    layer: u32,
-    acc: &mut [f32],
-) -> Result<(), ()> {
-    let ep = format!("{prefix}.S{shared:02}");
-    let name_gate = format!("{ep}.ffn_gate");
-    let name_up = format!("{ep}.ffn_up");
-    let name_down = format!("{ep}.ffn_down");
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_gate,
-        source.tensor_view(&name_gate)?,
-        ffn,
-        h,
-        hidden,
-        &mut s.gate,
-        par,
-        planner,
-        layer,
-    )?;
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_up,
-        source.tensor_view(&name_up)?,
-        ffn,
-        h,
-        hidden,
-        &mut s.up,
-        par,
-        planner,
-        layer,
-    )?;
-    swiglu_inplace(&mut s.up, &s.gate);
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_down,
-        source.tensor_view(&name_down)?,
-        h,
-        ffn,
-        &s.up,
-        &mut s.q,
-        par,
-        planner,
-        layer,
-    )?;
-    for i in 0..h {
-        acc[i] += s.q[i];
-    }
-    Ok(())
 }
 
 pub fn forward_latent_moe_ffn<S: TensorSource>(

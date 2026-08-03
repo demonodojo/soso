@@ -7,6 +7,7 @@
 
 use crate::f16::f16_to_f32;
 use crate::gemm::{dot_f32, softmax_inplace};
+use crate::layer::{matvec_view, TensorSource};
 use alloc::vec::Vec;
 
 /// Tamaño de tile sobre la secuencia KV (tokens). 64 encaja bien en L1
@@ -299,6 +300,84 @@ mod avx2 {
             }
         }
     }
+}
+
+/// Decode MLA con cache latente: expande K/V on-the-fly vía `k_up`/`v_up`.
+pub fn attention_decode_mla_latent<S: TensorSource>(
+    q: &[f32],
+    kv: &crate::kv::LayerKv,
+    kv_rank: usize,
+    kv_dim: usize,
+    head_dim: usize,
+    kv_head: usize,
+    n_tokens: usize,
+    source: &mut S,
+    k_up_name: &str,
+    v_up_name: &str,
+    k_full: &mut [f32],
+    v_full: &mut [f32],
+    c_buf: &mut [f32],
+    out: &mut [f32],
+) -> Result<(), ()> {
+    out.fill(0.0);
+    if n_tokens == 0 || head_dim == 0 || !kv.mla_latent {
+        return Err(());
+    }
+    let inv = 1.0 / libm::sqrtf(head_dim as f32);
+    let mut logits = alloc::vec![0.0f32; n_tokens];
+    let k_off = kv_head * head_dim;
+    for t in 0..n_tokens {
+        kv.load_latent_token(t, kv_rank, &mut c_buf[..kv_rank]);
+        matvec_view(
+            &source.tensor_view(k_up_name)?,
+            kv_dim,
+            kv_rank,
+            &c_buf[..kv_rank],
+            k_full,
+        )?;
+        matvec_view(
+            &source.tensor_view(v_up_name)?,
+            kv_dim,
+            kv_rank,
+            &c_buf[..kv_rank],
+            v_full,
+        )?;
+        let mut dot = 0.0f32;
+        for d in 0..head_dim {
+            dot += q[d] * k_full[k_off + d];
+        }
+        logits[t] = dot * inv;
+    }
+    let mut max_l = logits[0];
+    for t in 1..n_tokens {
+        if logits[t] > max_l {
+            max_l = logits[t];
+        }
+    }
+    let mut sum = 0.0f32;
+    for t in 0..n_tokens {
+        logits[t] = libm::expf(logits[t] - max_l);
+        sum += logits[t];
+    }
+    if sum > 0.0 {
+        for t in 0..n_tokens {
+            logits[t] /= sum;
+        }
+    }
+    for t in 0..n_tokens {
+        kv.load_latent_token(t, kv_rank, &mut c_buf[..kv_rank]);
+        matvec_view(
+            &source.tensor_view(v_up_name)?,
+            kv_dim,
+            kv_rank,
+            &c_buf[..kv_rank],
+            v_full,
+        )?;
+        for d in 0..head_dim {
+            out[d] += logits[t] * v_full[k_off + d];
+        }
+    }
+    Ok(())
 }
 
 /// Umbral Quest-lite: por encima, solo se atienden bloques top-k + sink + recent.

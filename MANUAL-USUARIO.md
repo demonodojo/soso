@@ -757,6 +757,38 @@ cargo run --release -p mkmodel-soso -- target/big-model \
   --hidden 2048 --ffn 5632 --layers 10 --vocab 32000 --heads 32 --kv-heads 8
 ```
 
+Opciones adicionales de arquitectura y MoE:
+
+| Flag | Valores | Uso |
+|------|---------|-----|
+| `--moe` | flag | Modelo MoE (router + expertos) |
+| `--experts N` | entero | Número de expertos routed |
+| `--experts-per-tok K` | entero | Top-K del router |
+| `--moe-ffn D` | entero | Dimensión FFN por experto (o espacio latente con `--ffn-kind latent-moe`) |
+| `--shared-experts S` | entero | Expertos compartidos `Lxx.Syy.*` por capa |
+| `--attn` | `gqa` (default), `mla`, `kda` | Atención GQA, MLA (tensores `attn_q_down/up`, …) o KDA sintético |
+| `--ffn-kind` | `dense`, `moe`, `latent-moe` | FFN denso, MoE Mixtral o LatentMoE (`ffn_latent_in/out`, expertos `[latent,latent]`) |
+| `--pack-trunk` | flag | Empaqueta attn+FFN por capa en `Lxx.trunk.tensor` (solo F32) |
+
+Ejemplos:
+
+```sh
+# MLA sintético (1 capa, smoke tests)
+cargo run --release -p mkmodel-soso -- target/tiny-mla --moe --attn mla --layers 1 --hidden 128
+
+# LatentMoE (--moe obligatorio)
+cargo run --release -p mkmodel-soso -- target/tiny-latent-moe --moe --ffn-kind latent-moe --layers 1
+
+# MoE con expertos compartidos
+cargo run --release -p mkmodel-soso -- target/tiny-moe-sh --moe --shared-experts 2
+```
+
+Tests host de arquitecturas extendidas (requieren `--features std`):
+
+```sh
+cargo test -p soso-llm-core --features std --test arch_ext
+```
+
 Con `--quant q8_0` o `--quant q4_k` los tensores 2D salen cuantizados (los `norm`
 se quedan en F32, como en un modelo real), que es lo que hace falta para probar el
 camino de pesos cuantizados. Ese modo necesita cada tensor entero en RAM, así que es

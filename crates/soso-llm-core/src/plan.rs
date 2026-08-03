@@ -417,10 +417,20 @@ pub fn compute_trunk_first_split(
 
 /// Bytes de KV f16 por token de secuencia (todas las capas).
 pub fn kv_bytes_per_token(manifest: &Manifest) -> u64 {
-    let head_dim = (manifest.hidden_dim / manifest.num_heads) as u64;
-    let kv_dim = manifest.num_kv_heads as u64 * head_dim;
-    // K + V, f16 = 2 bytes, × num_layers
-    kv_dim * 2 * 2 * manifest.num_layers as u64
+    use sosomodel::manifest::AttnKind;
+    let mut total = 0u64;
+    for layer in 0..manifest.num_layers {
+        let spec = manifest.layer(layer).cloned().unwrap_or_default();
+        if spec.attn_kind == AttnKind::Mla && spec.kv_lora_rank > 0 {
+            // Un vector latente c_kv por token (f16).
+            total += spec.kv_lora_rank as u64 * 2;
+        } else {
+            let head_dim = manifest.hidden_dim as u64 / manifest.effective_num_heads(layer) as u64;
+            let kv_dim = manifest.effective_num_kv_heads(layer) as u64 * head_dim;
+            total += kv_dim * 2 * 2;
+        }
+    }
+    total
 }
 
 impl ResourcePlanner {

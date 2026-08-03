@@ -173,7 +173,7 @@ soso/
 | Pin prefix + ring streaming | kimi-k3-in-c trunk | `plan.rs::keep_shards_after`, `pinned_layers` |
 | Packed trunk por capa (`Lxx.trunk.tensor`) | kimi-k3-in-c pack | `gguf2som --pack-trunk`, offsets en `index.som` |
 | True-resident hits (tronco/MoE) | kimi-k3-in-c telemetría | `plan.rs` stats, líneas `soso-llm` |
-| Arquitecturas MLA/KDA/LatentMoE/shared/MXFP4 | Kimi K3 | `arch.rs`, `manifest.rs` v4, `mkmodel-soso --attn/--ffn-kind/--shared-experts` |
+| Arquitecturas MLA/KDA/LatentMoE/shared/MXFP4 | Kimi K3 | `arch.rs`, `manifest.rs` v4, `mkmodel-soso --attn/--ffn-kind/--shared-experts`; MLA cache latente en `kv.rs` + `attention_decode_mla_latent` |
 | Shard cache lock (staging ∥ compute) | — | `source.rs::CacheLock` (TOCTOU-safe insert), `staging.rs` wait en release |
 | Sim cache MoE offline | kimi-k3 sim_cache | `tools/sim-moe-cache.py`, `SOSO_MOE_TRACE=1` hostrun |
 
@@ -181,7 +181,8 @@ soso/
 - **SIMD**: userspace compila con target propio `user/x86_64-soso-user.json` (SSE..AVX2+FMA, build-std); kernels AVX2 en `gemm.rs::avx2` con dispatch por `target_feature` (escalar = referencia para tests). **Estado FPU**: el kernel preserva x87/XMM/YMM con **xsave64** (`arch/fpu.rs`; fxsave NO basta — pierde las mitades altas YMM entre procesos): timer_isr guarda a `TIMER_FPU` antes de net::poll, `timer_tick` lo copia a `Process.fpu` al desalojar, `schedule_inner` restaura al reanudar, el page fault handler preserva en `mmap_fault_shim`; syscalls no preservan (los wrappers de libsoso llevan `clobber_abi("C")`). `init test` estresa YMM con dos hijos "fpu" concurrentes
 - Harness rápido de calidad en host: `cargo run --release -p soso-llm-core --features std --example hostrun -- <modelo-dir> "<prompt>" <n>` (velocidad nativa, SOSO_DEBUG=1 para estadísticas por capa)
 - `Runtime::validate_shapes()` comprueba index↔manifest antes de inferir
-- Host: `cargo xtask convert-gguf` (GGUF llama denso o MoE Mixtral → `.som` v4; `--pack-trunk` empaqueta attn+FFN por capa; trocea `ffn_*_exps` por experto), `mkfs-sosomfs` (multi-modelo: `mkfs-sosomfs dir1 dir2 imagen.img`), `mkmodel-soso` (`tiny` denso + `--moe` → `tiny-moe`; flags `--experts`, `--experts-per-tok`, `--moe-ffn`)
+- Host: `cargo xtask convert-gguf` (GGUF **llama** o **deepseek2** MLA → `.som` v4; `--pack-trunk` empaqueta attn+FFN por capa; trocea `ffn_*_exps` por experto; `ffn_*_shexp` → `Sxx` con `num_shared_experts`), `mkfs-sosomfs` (multi-modelo: `mkfs-sosomfs dir1 dir2 imagen.img`), `mkmodel-soso` (`tiny` denso + `--moe` → `tiny-moe`; flags `--attn mla|kda`, `--ffn-kind latent-moe`, `--shared-experts`, `--pack-trunk`, `--experts`, `--experts-per-tok`, `--moe-ffn`)
+- Tests host arquitecturas: `cargo test -p soso-llm-core --features std --test arch_ext` (MLA/LatentMoE/shared/MXFP4)
 - Tests host MoE: `cargo test -p soso-llm-core --features std --test moe`
 - `SOSO_MODELS_DIR=<dir> cargo xtask run` empaqueta un modelo propio en vez de tiny
 - Userspace: `soso-llm run <modelo> --prompt <texto>` vía mmap + greedy decode; mmap pagina bajo demanda (`handle_mmap_fault` — ojo: `map_page` toma `FRAME_ALLOC`, no llamarla con ese lock tomado)

@@ -189,6 +189,18 @@ impl LayerScratch {
     pub fn new(m: &Manifest) -> Self {
         let h = m.hidden_dim as usize;
         let ffn = m.max_ffn_dim() as usize;
+        let latent_max = (0..m.num_layers)
+            .filter_map(|l| {
+                let spec = m.layer(l)?;
+                if spec.ffn_kind == FfnKind::LatentMoe {
+                    Some(m.effective_moe_ffn_dim(l) as usize)
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        let act_dim = ffn.max(latent_max).max(h);
         let heads = m.num_heads as usize;
         let head_dim = h / heads;
         let kv_dim = m.num_kv_heads as usize * head_dim;
@@ -200,12 +212,12 @@ impl LayerScratch {
             q: vec![0.0; h],
             k: vec![0.0; kv_dim],
             v: vec![0.0; kv_dim],
-            up: vec![0.0; ffn],
-            gate: vec![0.0; ffn],
+            up: vec![0.0; act_dim],
+            gate: vec![0.0; act_dim],
             attn_out: vec![0.0; h],
             head_out: vec![0.0; head_dim],
             router: vec![0.0; n_exp.max(1)],
-            moe_acc: vec![0.0; h],
+            moe_acc: vec![0.0; h.max(latent_max)],
             mass_buf: vec![0.0; kv_cap],
         }
     }
@@ -525,7 +537,7 @@ impl<'a> LayerExecutor<'a> {
                 ffn,
                 h,
                 hidden,
-                &mut s.up,
+                &mut s.up[..ffn],
                 par,
                 planner_ro,
                 layer,
@@ -539,14 +551,14 @@ impl<'a> LayerExecutor<'a> {
                     ffn,
                     h,
                     hidden,
-                    &mut s.gate,
+                    &mut s.gate[..ffn],
                     par,
                     planner_ro,
                     layer,
                 )?;
-                swiglu_inplace(&mut s.up, &s.gate);
+                swiglu_inplace(&mut s.up[..ffn], &s.gate[..ffn]);
             } else {
-                silu_inplace(&mut s.up);
+                silu_inplace(&mut s.up[..ffn]);
             }
             matvec_step(
                 use_gpu,
@@ -555,7 +567,7 @@ impl<'a> LayerExecutor<'a> {
                 source.tensor_view(&name_ffn_down)?,
                 h,
                 ffn,
-                &s.up,
+                &s.up[..ffn],
                 hidden,
                 par,
                 planner_ro,
@@ -638,7 +650,7 @@ impl<'a> LayerExecutor<'a> {
                 ffn,
                 h,
                 hidden,
-                &mut s.gate,
+                &mut s.gate[..ffn],
                 par,
                 planner.as_deref(),
                 layer,
@@ -651,12 +663,12 @@ impl<'a> LayerExecutor<'a> {
                 ffn,
                 h,
                 hidden,
-                &mut s.up,
+                &mut s.up[..ffn],
                 par,
                 planner.as_deref(),
                 layer,
             )?;
-            swiglu_inplace(&mut s.up, &s.gate);
+            swiglu_inplace(&mut s.up[..ffn], &s.gate[..ffn]);
             matvec_step(
                 use_gpu,
                 gpu,
@@ -664,7 +676,7 @@ impl<'a> LayerExecutor<'a> {
                 source.tensor_view(&name_down)?,
                 h,
                 ffn,
-                &s.up,
+                &s.up[..ffn],
                 &mut s.q,
                 par,
                 planner.as_deref(),
@@ -692,7 +704,7 @@ impl<'a> LayerExecutor<'a> {
                 ffn,
                 h,
                 hidden,
-                &mut s.gate,
+                &mut s.gate[..ffn],
                 par,
                 planner.as_deref(),
                 layer,
@@ -705,12 +717,12 @@ impl<'a> LayerExecutor<'a> {
                 ffn,
                 h,
                 hidden,
-                &mut s.up,
+                &mut s.up[..ffn],
                 par,
                 planner.as_deref(),
                 layer,
             )?;
-            swiglu_inplace(&mut s.up, &s.gate);
+            swiglu_inplace(&mut s.up[..ffn], &s.gate[..ffn]);
             matvec_step(
                 use_gpu,
                 gpu,
@@ -718,7 +730,7 @@ impl<'a> LayerExecutor<'a> {
                 source.tensor_view(&name_down)?,
                 h,
                 ffn,
-                &s.up,
+                &s.up[..ffn],
                 &mut s.q,
                 par,
                 planner.as_deref(),

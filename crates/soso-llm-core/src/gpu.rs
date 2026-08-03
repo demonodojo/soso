@@ -11,7 +11,7 @@
 //! que no cabe se queda en CPU.
 
 use crate::layer::TensorView;
-use sosomodel::layout::{DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0};
+use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
 
 /// Despacho opcional hacia la GPU del kernel (implementado en userspace).
 pub trait GpuDispatch {
@@ -66,7 +66,7 @@ impl GpuDispatch for NoGpu {
 /// Dtypes que el despacho sabe presentar. Un dtype nuevo NO cae aquí por defecto:
 /// mejor que se vaya a CPU a que llegue al dispositivo como bytes sin interpretar.
 pub fn dtype_ofrecible(dtype: u8) -> bool {
-    matches!(dtype, DTYPE_F32 | DTYPE_Q8_0 | DTYPE_Q4_K)
+    matches!(dtype, DTYPE_F32 | DTYPE_Q8_0 | DTYPE_Q4_K | DTYPE_MXFP4)
 }
 
 /// Intenta el offload; `true` si el resultado ya está en `out`.

@@ -101,6 +101,54 @@ fn arg_bool(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
 }
 
+fn layer_prefetch_shards(
+    layer: u32,
+    pack_trunk: bool,
+    attn_kind: &str,
+    moe: bool,
+    latent_moe: bool,
+) -> Vec<String> {
+    if pack_trunk {
+        return vec![format!("L{layer:02}.trunk.tensor")];
+    }
+    let mut shards = vec![format!("L{layer:02}.attn_norm.tensor")];
+    if attn_kind == "mla" {
+        shards.extend([
+            format!("L{layer:02}.attn_q_down.tensor"),
+            format!("L{layer:02}.attn_q_up.tensor"),
+            format!("L{layer:02}.attn_kv_down.tensor"),
+            format!("L{layer:02}.attn_k_up.tensor"),
+            format!("L{layer:02}.attn_v_up.tensor"),
+            format!("L{layer:02}.attn_output.tensor"),
+        ]);
+    } else {
+        shards.extend([
+            format!("L{layer:02}.attn_q.tensor"),
+            format!("L{layer:02}.attn_k.tensor"),
+            format!("L{layer:02}.attn_v.tensor"),
+            format!("L{layer:02}.attn_output.tensor"),
+        ]);
+    }
+    shards.push(format!("L{layer:02}.ffn_norm.tensor"));
+    if moe {
+        if latent_moe {
+            shards.extend([
+                format!("L{layer:02}.ffn_latent_in.tensor"),
+                format!("L{layer:02}.ffn_latent_out.tensor"),
+                format!("L{layer:02}.ffn_gate_inp.tensor"),
+            ]);
+        } else {
+            shards.push(format!("L{layer:02}.ffn_gate_inp.tensor"));
+        }
+    } else {
+        shards.extend([
+            format!("L{layer:02}.ffn_up.tensor"),
+            format!("L{layer:02}.ffn_down.tensor"),
+        ]);
+    }
+    shards
+}
+
 fn emit_tensor_f32(
     shards: &std::path::Path,
     index: &mut TensorIndex,
@@ -241,6 +289,11 @@ fn main() {
     };
     let attn_kind = arg_string(&args, "--attn", "gqa");
     let ffn_kind = arg_string(&args, "--ffn-kind", if moe { "moe" } else { "dense" });
+    let latent_moe = ffn_kind == "latent-moe";
+    if latent_moe && !moe {
+        eprintln!("mkmodel-soso: --ffn-kind latent-moe requiere --moe");
+        std::process::exit(2);
+    }
     let quant = arg_string(&args, "--quant", "f32");
     if quant != "f32" && quant != "q8_0" && quant != "q4_k" {
         eprintln!("mkmodel-soso: --quant {quant} no soportado (f32 | q8_0 | q4_k)");
@@ -265,29 +318,6 @@ fn main() {
         std::process::exit(2);
     }
 
-    let mut prefetch = Vec::new();
-    for layer in 0..num_layers {
-        let shards = if pack_trunk {
-            vec![format!("L{layer:02}.trunk.tensor")]
-        } else {
-            let mut shards = vec![
-                format!("L{layer:02}.attn_norm.tensor"),
-                format!("L{layer:02}.attn_q.tensor"),
-                format!("L{layer:02}.attn_k.tensor"),
-                format!("L{layer:02}.attn_v.tensor"),
-                format!("L{layer:02}.attn_output.tensor"),
-                format!("L{layer:02}.ffn_norm.tensor"),
-            ];
-            if moe {
-                shards.push(format!("L{layer:02}.ffn_gate_inp.tensor"));
-            } else {
-                shards.push(format!("L{layer:02}.ffn_up.tensor"));
-                shards.push(format!("L{layer:02}.ffn_down.tensor"));
-            }
-            shards
-        };
-        prefetch.push(LayerPrefetch { layer, shards });
-    }
     let mut manifest = Manifest {
         name,
         vocab_size: vocab,
@@ -303,7 +333,7 @@ fn main() {
         num_experts_per_tok,
         moe_ffn_dim: if moe { moe_ffn } else { 0 },
         layers: Vec::new(),
-        prefetch,
+        prefetch: Vec::new(),
     };
     manifest.fill_layers_from_globals();
     if num_shared > 0 {
@@ -322,15 +352,20 @@ fn main() {
             layer.attn_kind = sosomodel::AttnKind::Kda;
         }
     }
-    if ffn_kind == "latent-moe" {
+    if latent_moe {
         for layer in manifest.layers.iter_mut() {
             layer.ffn_kind = sosomodel::FfnKind::LatentMoe;
         }
     }
+    manifest.prefetch = (0..num_layers)
+        .map(|layer| LayerPrefetch {
+            layer,
+            shards: layer_prefetch_shards(layer, pack_trunk, &attn_kind, moe, latent_moe),
+        })
+        .collect();
 
     let shards = out.join(SHARDS_DIR);
     fs::create_dir_all(&shards).expect("crear shards");
-    fs::write(out.join(MANIFEST_FILE), manifest.serialize()).unwrap();
 
     let h = hidden;
     let head_dim = h / heads;
@@ -377,16 +412,35 @@ fn main() {
                 }
             }
             if moe {
-                total_bytes += append_f32_to_trunk(
-                    &mut blob,
-                    &mut index,
-                    &mut id,
-                    &format!("L{layer:02}.ffn_gate_inp"),
-                    &shard_name,
-                    &[num_experts, h],
-                    layer_u,
-                    0,
-                );
+                if latent_moe {
+                    for (base, shape) in [
+                        (&format!("L{layer:02}.ffn_latent_in"), vec![moe_ffn, h]),
+                        (&format!("L{layer:02}.ffn_latent_out"), vec![h, moe_ffn]),
+                        (&format!("L{layer:02}.ffn_gate_inp"), vec![num_experts, moe_ffn]),
+                    ] {
+                        total_bytes += append_f32_to_trunk(
+                            &mut blob,
+                            &mut index,
+                            &mut id,
+                            base,
+                            &shard_name,
+                            &shape,
+                            layer_u,
+                            0,
+                        );
+                    }
+                } else {
+                    total_bytes += append_f32_to_trunk(
+                        &mut blob,
+                        &mut index,
+                        &mut id,
+                        &format!("L{layer:02}.ffn_gate_inp"),
+                        &shard_name,
+                        &[num_experts, h],
+                        layer_u,
+                        0,
+                    );
+                }
             } else {
                 for (base, shape) in [
                     (&format!("L{layer:02}.ffn_up"), vec![ffn, h]),
@@ -443,26 +497,74 @@ fn main() {
             }
         }
         if moe {
+            let latent = moe_ffn;
             if !pack_trunk {
-                emit_tensor_f32(
-                    &shards,
-                    &mut index,
-                    &mut id,
-                    &format!("L{layer:02}.ffn_gate_inp"),
-                    &[num_experts, h],
-                    layer_u,
-                    0,
-                    &mut total_bytes,
-                );
+                if latent_moe {
+                    emit_tensor_f32(
+                        &shards,
+                        &mut index,
+                        &mut id,
+                        &format!("L{layer:02}.ffn_latent_in"),
+                        &[latent, h],
+                        layer_u,
+                        0,
+                        &mut total_bytes,
+                    );
+                    emit_tensor_f32(
+                        &shards,
+                        &mut index,
+                        &mut id,
+                        &format!("L{layer:02}.ffn_latent_out"),
+                        &[h, latent],
+                        layer_u,
+                        0,
+                        &mut total_bytes,
+                    );
+                    emit_tensor_f32(
+                        &shards,
+                        &mut index,
+                        &mut id,
+                        &format!("L{layer:02}.ffn_gate_inp"),
+                        &[num_experts, latent],
+                        layer_u,
+                        0,
+                        &mut total_bytes,
+                    );
+                } else {
+                    emit_tensor_f32(
+                        &shards,
+                        &mut index,
+                        &mut id,
+                        &format!("L{layer:02}.ffn_gate_inp"),
+                        &[num_experts, h],
+                        layer_u,
+                        0,
+                        &mut total_bytes,
+                    );
+                }
             }
             for expert in 0..num_experts {
                 let ep = format!("L{layer:02}.E{expert:02}");
+                let (gate_shape, up_shape, down_shape): (Vec<u32>, Vec<u32>, Vec<u32>) = if latent_moe
+                {
+                    (
+                        vec![latent, latent],
+                        vec![latent, latent],
+                        vec![latent, latent],
+                    )
+                } else {
+                    (
+                        vec![moe_ffn, h],
+                        vec![moe_ffn, h],
+                        vec![h, moe_ffn],
+                    )
+                };
                 emit_tensor_f32(
                     &shards,
                     &mut index,
                     &mut id,
                     &format!("{ep}.ffn_gate"),
-                    &[moe_ffn, h],
+                    &gate_shape,
                     layer_u,
                     expert,
                     &mut total_bytes,
@@ -472,7 +574,7 @@ fn main() {
                     &mut index,
                     &mut id,
                     &format!("{ep}.ffn_up"),
-                    &[moe_ffn, h],
+                    &up_shape,
                     layer_u,
                     expert,
                     &mut total_bytes,
@@ -482,44 +584,46 @@ fn main() {
                     &mut index,
                     &mut id,
                     &format!("{ep}.ffn_down"),
-                    &[h, moe_ffn],
+                    &down_shape,
                     layer_u,
                     expert,
                     &mut total_bytes,
                 );
             }
-            for shared in 0..num_shared {
-                let sp = format!("L{layer:02}.S{shared:02}");
-                emit_tensor_f32(
-                    &shards,
-                    &mut index,
-                    &mut id,
-                    &format!("{sp}.ffn_gate"),
-                    &[moe_ffn, h],
-                    layer_u,
-                    shared,
-                    &mut total_bytes,
-                );
-                emit_tensor_f32(
-                    &shards,
-                    &mut index,
-                    &mut id,
-                    &format!("{sp}.ffn_up"),
-                    &[moe_ffn, h],
-                    layer_u,
-                    shared,
-                    &mut total_bytes,
-                );
-                emit_tensor_f32(
-                    &shards,
-                    &mut index,
-                    &mut id,
-                    &format!("{sp}.ffn_down"),
-                    &[h, moe_ffn],
-                    layer_u,
-                    shared,
-                    &mut total_bytes,
-                );
+            if !latent_moe {
+                for shared in 0..num_shared {
+                    let sp = format!("L{layer:02}.S{shared:02}");
+                    emit_tensor_f32(
+                        &shards,
+                        &mut index,
+                        &mut id,
+                        &format!("{sp}.ffn_gate"),
+                        &[moe_ffn, h],
+                        layer_u,
+                        shared,
+                        &mut total_bytes,
+                    );
+                    emit_tensor_f32(
+                        &shards,
+                        &mut index,
+                        &mut id,
+                        &format!("{sp}.ffn_up"),
+                        &[moe_ffn, h],
+                        layer_u,
+                        shared,
+                        &mut total_bytes,
+                    );
+                    emit_tensor_f32(
+                        &shards,
+                        &mut index,
+                        &mut id,
+                        &format!("{sp}.ffn_down"),
+                        &[h, moe_ffn],
+                        layer_u,
+                        shared,
+                        &mut total_bytes,
+                    );
+                }
             }
         } else if !pack_trunk {
             let dense: [(&str, Vec<u32>); 2] = [
@@ -573,6 +677,7 @@ fn main() {
         .push(make_f32_entry(id, "lm_head", "embed.tensor", 0, &emb_shape));
 
     fs::write(out.join(INDEX_FILE), index.serialize()).unwrap();
+    fs::write(out.join(MANIFEST_FILE), manifest.serialize()).unwrap();
     println!(
         "mkmodel-soso: modelo en {} ({} tensores, {:.2} GiB de pesos)",
         out.display(),

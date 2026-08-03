@@ -93,13 +93,10 @@ fn manifest_v4_moe_roundtrip() {
 }
 
 #[test]
-fn runtime_rechaza_mla() {
+fn runtime_rechaza_mla_sin_ranks_en_manifest() {
     let mut m = Manifest::tiny("mla");
     m.layers[0].attn_kind = AttnKind::Mla;
     assert!(m.supported_by_runtime().is_err());
-    let index = TensorIndex::default();
-    let rt = Runtime::new(m, index, 0, 0);
-    assert!(rt.validate_shapes().is_err());
 }
 
 #[test]

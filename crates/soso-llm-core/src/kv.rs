@@ -18,6 +18,8 @@ pub enum KvDtype {
 /// Cache K/V de una capa.
 pub struct LayerKv {
     pub dtype: KvDtype,
+    /// Si true, `k_*` guarda el vector latente MLA (`c_kv`) por token.
+    pub mla_latent: bool,
     /// f16 packed, o vacío si I8.
     pub k_f16: Vec<u16>,
     pub v_f16: Vec<u16>,
@@ -44,6 +46,7 @@ impl LayerKv {
         match dtype {
             KvDtype::F16 => Self {
                 dtype,
+                mla_latent: false,
                 k_f16: Vec::with_capacity(n),
                 v_f16: Vec::with_capacity(n),
                 k_i8: Vec::new(),
@@ -54,6 +57,7 @@ impl LayerKv {
             },
             KvDtype::I8 => Self {
                 dtype,
+                mla_latent: false,
                 k_f16: Vec::new(),
                 v_f16: Vec::new(),
                 k_i8: Vec::with_capacity(n),
@@ -63,6 +67,19 @@ impl LayerKv {
                 mass: Vec::with_capacity(tokens),
             },
         }
+    }
+
+    /// Cache MLA: un vector latente `c_kv` por token (sin materializar K/V).
+    pub fn with_capacity_mla(tokens: usize, kv_rank: usize) -> Self {
+        let mut kv = Self::with_capacity_dtype(tokens, kv_rank, KvDtype::F16);
+        kv.mla_latent = true;
+        kv
+    }
+
+    pub fn with_capacity_mla_dtype(tokens: usize, kv_rank: usize, dtype: KvDtype) -> Self {
+        let mut kv = Self::with_capacity_dtype(tokens, kv_rank, dtype);
+        kv.mla_latent = true;
+        kv
     }
 
     pub fn reset(&mut self) {
@@ -104,6 +121,10 @@ impl LayerKv {
     }
 
     pub fn append(&mut self, k: &[f32], v: &[f32]) {
+        if self.mla_latent {
+            self.append_mla_latent(k);
+            return;
+        }
         match self.dtype {
             KvDtype::F16 => {
                 self.k_f16.extend(k.iter().map(|&x| f32_to_f16(x)));
@@ -119,6 +140,43 @@ impl LayerKv {
             }
         }
         self.mass.push(0.0);
+    }
+
+    /// Append del vector latente MLA (`c_kv`); ignora `v`.
+    pub fn append_mla_latent(&mut self, c_kv: &[f32]) {
+        debug_assert!(self.mla_latent);
+        match self.dtype {
+            KvDtype::F16 => {
+                self.k_f16.extend(c_kv.iter().map(|&x| f32_to_f16(x)));
+            }
+            KvDtype::I8 => {
+                let (kq, ks) = Self::quantize_token(c_kv);
+                self.k_i8.extend_from_slice(&kq);
+                self.k_scale.push(ks);
+            }
+        }
+        self.mass.push(0.0);
+    }
+
+    /// Lee `c_kv` del token `t` (modo MLA).
+    pub fn load_latent_token(&self, t: usize, kv_rank: usize, out: &mut [f32]) {
+        if !self.mla_latent || out.len() < kv_rank {
+            return;
+        }
+        let base = t * kv_rank;
+        match self.dtype {
+            KvDtype::F16 => {
+                for d in 0..kv_rank {
+                    out[d] = f16_to_f32(self.k_f16[base + d]);
+                }
+            }
+            KvDtype::I8 => {
+                let s = self.k_scale[t];
+                for d in 0..kv_rank {
+                    out[d] = self.k_i8[base + d] as f32 * s;
+                }
+            }
+        }
     }
 
     /// Compat: append desde f32 (antes `append_f16`).
@@ -213,11 +271,15 @@ impl LayerKv {
                 for &t in idx {
                     let off = t * kv_dim;
                     nk.extend_from_slice(&self.k_f16[off..off + kv_dim]);
-                    nv.extend_from_slice(&self.v_f16[off..off + kv_dim]);
+                    if !self.mla_latent {
+                        nv.extend_from_slice(&self.v_f16[off..off + kv_dim]);
+                    }
                     nm.push(self.mass.get(t).copied().unwrap_or(0.0));
                 }
                 self.k_f16 = nk;
-                self.v_f16 = nv;
+                if !self.mla_latent {
+                    self.v_f16 = nv;
+                }
                 self.mass = nm;
             }
             KvDtype::I8 => {
@@ -229,15 +291,19 @@ impl LayerKv {
                 for &t in idx {
                     let off = t * kv_dim;
                     nk.extend_from_slice(&self.k_i8[off..off + kv_dim]);
-                    nv.extend_from_slice(&self.v_i8[off..off + kv_dim]);
+                    if !self.mla_latent {
+                        nv.extend_from_slice(&self.v_i8[off..off + kv_dim]);
+                        nvs.push(self.v_scale[t]);
+                    }
                     nks.push(self.k_scale[t]);
-                    nvs.push(self.v_scale[t]);
                     nm.push(self.mass.get(t).copied().unwrap_or(0.0));
                 }
                 self.k_i8 = nk;
-                self.v_i8 = nv;
+                if !self.mla_latent {
+                    self.v_i8 = nv;
+                    self.v_scale = nvs;
+                }
                 self.k_scale = nks;
-                self.v_scale = nvs;
                 self.mass = nm;
             }
         }

@@ -11,7 +11,35 @@ use alloc::vec;
 use alloc::vec::Vec;
 use crate::pipeline::PipelineRole;
 use sosomodel::index::TensorIndex;
-use sosomodel::manifest::Manifest;
+use sosomodel::manifest::{AttnKind, Manifest};
+
+fn kv_storage_dim(manifest: &Manifest, layer: u32) -> usize {
+    let spec = manifest.layer(layer).cloned().unwrap_or_default();
+    if spec.attn_kind == AttnKind::Mla && spec.kv_lora_rank > 0 {
+        spec.kv_lora_rank as usize
+    } else {
+        let head_dim =
+            (manifest.hidden_dim / manifest.effective_num_heads(layer)) as usize;
+        manifest.effective_num_kv_heads(layer) as usize * head_dim
+    }
+}
+
+fn make_layer_kv(
+    manifest: &Manifest,
+    layer: u32,
+    kv_cap: usize,
+    dtype: crate::kv::KvDtype,
+) -> LayerKv {
+    let spec = manifest.layer(layer).cloned().unwrap_or_default();
+    if spec.attn_kind == AttnKind::Mla && spec.kv_lora_rank > 0 {
+        LayerKv::with_capacity_mla_dtype(kv_cap, spec.kv_lora_rank as usize, dtype)
+    } else {
+        let head_dim =
+            (manifest.hidden_dim / manifest.effective_num_heads(layer)) as usize;
+        let kv_dim = manifest.effective_num_kv_heads(layer) as usize * head_dim;
+        LayerKv::with_capacity_dtype(kv_cap, kv_dim, dtype)
+    }
+}
 
 pub struct MemoryTensorSource {
     pub tensors: alloc::collections::BTreeMap<String, Vec<f32>>,
@@ -83,15 +111,23 @@ impl Runtime {
         let has_lm_head = index.find("lm_head").is_some();
         let has_output_norm = index.find("output_norm").is_some();
         let head_dim = (manifest.hidden_dim / manifest.num_heads) as usize;
-        let kv_dim = manifest.num_kv_heads as usize * head_dim;
+        let _kv_dim = manifest.num_kv_heads as usize * head_dim;
         let kv_cap = (manifest.max_seq as usize).min(256).max(32);
+        let manifest_for_kv = manifest.clone();
         Self {
             manifest,
             index,
             tiers: TierManager::new(ram_budget, vram_budget),
             hidden: vec![0.0f32; h],
             kv: (0..n)
-                .map(|_| LayerKv::with_capacity(kv_cap, kv_dim))
+                .map(|l| {
+                    make_layer_kv(
+                        &manifest_for_kv,
+                        l as u32,
+                        kv_cap,
+                        crate::kv::KvDtype::F16,
+                    )
+                })
                 .collect(),
             pos: 0,
             backend: Backend::Auto,
@@ -108,11 +144,10 @@ impl Runtime {
         // Antes del primer token: alinear dtype KV (KIVI-lite) con el planner.
         if self.pos == 0 {
             let dtype = planner.kv_dtype();
-            let head_dim = (self.manifest.hidden_dim / self.manifest.num_heads) as usize;
-            let kv_dim = self.manifest.num_kv_heads as usize * head_dim;
             let kv_cap = planner.kv_window_tokens().min(256).max(32);
+            let manifest = self.manifest.clone();
             self.kv = (0..self.manifest.num_layers as usize)
-                .map(|_| LayerKv::with_capacity_dtype(kv_cap, kv_dim, dtype))
+                .map(|l| make_layer_kv(&manifest, l as u32, kv_cap, dtype))
                 .collect();
         }
         self.planner = Some(planner);
@@ -465,13 +500,12 @@ impl Runtime {
             Some(pl) => (pl.kv_window_tokens(), pl.sink_tokens(), pl.use_h2o()),
             None => return,
         };
-        let head_dim = (self.manifest.hidden_dim / self.manifest.num_heads) as usize;
-        let kv_dim = self.manifest.num_kv_heads as usize * head_dim;
         let recent = keep.saturating_sub(sink) / 2;
         let mut slid = false;
-        for kv in &mut self.kv {
-            if kv.tokens(kv_dim) > keep {
-                kv.slide_window_h2o(keep, sink, recent, kv_dim, use_h2o);
+        for (layer_idx, kv) in self.kv.iter_mut().enumerate() {
+            let storage = kv_storage_dim(&self.manifest, layer_idx as u32);
+            if kv.tokens(storage) > keep {
+                kv.slide_window_h2o(keep, sink, recent, storage, use_h2o);
                 slid = true;
             }
         }

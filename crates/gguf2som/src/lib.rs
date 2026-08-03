@@ -16,12 +16,12 @@ pub use io::{Read, ReadSeek, Seek};
 
 use soso_llm_core::quant::quantize_q8_0;
 use soso_llm_core::tokenizer::{VocabTokenizer, NO_TOKEN};
-use sosomodel::index::{make_f32_entry, make_q4_k_entry, make_q8_0_entry, pack_shard, TensorIndex};
+use sosomodel::index::{make_f32_entry, make_mxfp4_entry, make_q4_k_entry, make_q8_0_entry, pack_shard, TensorIndex};
 use sosomodel::layout::{
-    DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0, INDEX_FILE, MANIFEST_FILE, Q4_K_BLOCK_BYTES,
+    DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0, INDEX_FILE, MANIFEST_FILE, Q4_K_BLOCK_BYTES,
     SHARDS_DIR, TOKENIZER_FILE,
 };
-use sosomodel::manifest::{LayerPrefetch, Manifest};
+use sosomodel::manifest::{AttnKind, LayerPrefetch, Manifest};
 
 pub trait SomOut {
     fn mkdir(&mut self, path: &str) -> Result<(), String>;
@@ -111,6 +111,8 @@ const GGML_F16: u32 = 1;
 const GGML_Q8_0: u32 = 8;
 const GGML_Q4_K: u32 = 12;
 const GGML_Q6_K: u32 = 14;
+/// MXFP4 en GGUF reciente (llama.cpp); passthrough sin re-cuantizar.
+const GGML_MXFP4: u32 = 39;
 /// Bloque GGML Q6_K: ql[128] + qh[64] + scales[16 i8] + d f16 = 210 bytes.
 const Q6_K_BLOCK_BYTES: usize = 210;
 
@@ -130,36 +132,68 @@ pub fn convert_with_options<R: Read + Seek>(
 ) -> Result<(), String> {
     let gguf = parse_gguf(file)?;
 
-    if let Some(MetaValue::Str(arch)) = gguf.meta.get("general.architecture") {
-        if arch != "llama" {
-            return Err(format!("arquitectura {arch} no soportada (solo llama)"));
-        }
+    let arch_name = gguf
+        .meta
+        .get("general.architecture")
+        .and_then(|v| match v {
+            MetaValue::Str(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .unwrap_or("llama");
+    let is_mla = arch_name == "deepseek2";
+    if arch_name != "llama" && !is_mla {
+        return Err(format!(
+            "arquitectura {arch_name} no soportada (llama | deepseek2)"
+        ));
     }
+    let meta_prefix = if is_mla { "deepseek2" } else { "llama" };
 
-    let hidden = gguf.meta_u32("llama.embedding_length")?;
-    let num_layers = gguf.meta_u32("llama.block_count")?;
-    let ffn_dim = gguf.meta_u32("llama.feed_forward_length")?;
-    let num_heads = gguf.meta_u32("llama.attention.head_count")?;
+    let hidden = gguf.meta_u32(&format!("{meta_prefix}.embedding_length"))?;
+    let num_layers = gguf.meta_u32(&format!("{meta_prefix}.block_count"))?;
+    let ffn_dim = gguf.meta_u32(&format!("{meta_prefix}.feed_forward_length"))?;
+    let num_heads = gguf.meta_u32(&format!("{meta_prefix}.attention.head_count"))?;
     let num_kv_heads = gguf
-        .meta_u32("llama.attention.head_count_kv")
+        .meta_u32(&format!("{meta_prefix}.attention.head_count_kv"))
         .unwrap_or(num_heads);
-    let rope_theta = gguf.meta_f32("llama.rope.freq_base").unwrap_or(10000.0);
+    let rope_theta = gguf
+        .meta_f32(&format!("{meta_prefix}.rope.freq_base"))
+        .unwrap_or(10000.0);
     let rms_eps = gguf
-        .meta_f32("llama.attention.layer_norm_rms_epsilon")
+        .meta_f32(&format!("{meta_prefix}.attention.layer_norm_rms_epsilon"))
         .unwrap_or(1e-5);
+    let q_lora_rank = if is_mla {
+        gguf.meta_u32(&format!("{meta_prefix}.attention.q_lora_rank"))
+            .unwrap_or(hidden / 4)
+    } else {
+        0
+    };
+    let kv_lora_rank = if is_mla {
+        gguf.meta_u32(&format!("{meta_prefix}.attention.kv_lora_rank"))
+            .unwrap_or(hidden / 4)
+    } else {
+        0
+    };
     let tokens = match gguf.meta.get("tokenizer.ggml.tokens") {
         Some(MetaValue::StrArray(v)) => Some(v.clone()),
         _ => None,
     };
     let vocab = gguf
-        .meta_u32("llama.vocab_size")
+        .meta_u32(&format!("{meta_prefix}.vocab_size"))
+        .or_else(|_| gguf.meta_u32("llama.vocab_size"))
         .ok()
         .or_else(|| tokens.as_ref().map(|t| t.len() as u32))
         .unwrap_or(256);
-    let max_seq = gguf.meta_u32("llama.context_length").unwrap_or(2048);
-    let num_experts = gguf.meta_u32("llama.expert_count").unwrap_or(0);
+    let max_seq = gguf
+        .meta_u32(&format!("{meta_prefix}.context_length"))
+        .or_else(|_| gguf.meta_u32("llama.context_length"))
+        .unwrap_or(2048);
+    let num_experts = gguf
+        .meta_u32(&format!("{meta_prefix}.expert_count"))
+        .or_else(|_| gguf.meta_u32("llama.expert_count"))
+        .unwrap_or(0);
     let num_experts_per_tok = gguf
-        .meta_u32("llama.expert_used_count")
+        .meta_u32(&format!("{meta_prefix}.expert_used_count"))
+        .or_else(|_| gguf.meta_u32("llama.expert_used_count"))
         .unwrap_or(if num_experts > 0 { 2 } else { 0 });
     let is_moe = num_experts > 0;
     let moe_ffn_dim = if is_moe { ffn_dim } else { 0 };
@@ -169,7 +203,7 @@ pub fn convert_with_options<R: Read + Seek>(
     out.mkdir(SHARDS_DIR)?;
 
     // tensores por capa (GGUF → nombre .som)
-    let layer_parts = [
+    const LLAMA_LAYER_PARTS: &[(&str, &str)] = &[
         ("attn_norm", "attn_norm"),
         ("attn_q", "attn_q"),
         ("attn_k", "attn_k"),
@@ -180,6 +214,24 @@ pub fn convert_with_options<R: Read + Seek>(
         ("ffn_gate", "ffn_gate"),
         ("ffn_down", "ffn_down"),
     ];
+    const MLA_LAYER_PARTS: &[(&str, &str)] = &[
+        ("attn_norm", "attn_norm"),
+        ("attn_q_a_proj", "attn_q_down"),
+        ("attn_q_b_proj", "attn_q_up"),
+        ("attn_kv_a_proj", "attn_kv_down"),
+        ("attn_k_b_proj", "attn_k_up"),
+        ("attn_v_b_proj", "attn_v_up"),
+        ("attn_output", "attn_output"),
+        ("ffn_norm", "ffn_norm"),
+        ("ffn_up", "ffn_up"),
+        ("ffn_gate", "ffn_gate"),
+        ("ffn_down", "ffn_down"),
+    ];
+    let layer_parts = if is_mla {
+        MLA_LAYER_PARTS
+    } else {
+        LLAMA_LAYER_PARTS
+    };
     let globals = [
         ("token_embd.weight", "embed"),
         ("output.weight", "lm_head"),
@@ -189,6 +241,7 @@ pub fn convert_with_options<R: Read + Seek>(
     let mut index = TensorIndex::default();
     let mut id = 0u32;
     let mut prefetch = Vec::new();
+    let mut shared_by_layer: BTreeMap<u32, u32> = BTreeMap::new();
 
     struct TrunkPiece {
         som_name: String,
@@ -257,6 +310,7 @@ pub fn convert_with_options<R: Read + Seek>(
         index.entries.push(match dtype {
             DTYPE_Q8_0 => make_q8_0_entry(*id, som_name, &shard_name, 0, &shape),
             DTYPE_Q4_K => make_q4_k_entry(*id, som_name, &shard_name, 0, &shape),
+            DTYPE_MXFP4 => make_mxfp4_entry(*id, som_name, &shard_name, 0, &shape),
             _ => make_f32_entry(*id, som_name, &shard_name, 0, &shape),
         });
         *id += 1;
@@ -347,7 +401,7 @@ pub fn convert_with_options<R: Read + Seek>(
                 ("ffn_up_shexp", "ffn_up"),
                 ("ffn_down_shexp", "ffn_down"),
             ] {
-                emit_moe_shared_experts(
+                let n_shared = emit_moe_shared_experts(
                     file,
                     &gguf,
                     &mut index,
@@ -357,6 +411,9 @@ pub fn convert_with_options<R: Read + Seek>(
                     som_suffix,
                     out,
                 )?;
+                if n_shared > 0 {
+                    shared_by_layer.insert(layer, n_shared);
+                }
             }
         } else {
             for (gguf_part, som_part) in layer_parts {
@@ -415,6 +472,18 @@ pub fn convert_with_options<R: Read + Seek>(
         prefetch,
     };
     manifest.fill_layers_from_globals();
+    if is_mla {
+        for spec in manifest.layers.iter_mut() {
+            spec.attn_kind = AttnKind::Mla;
+            spec.q_lora_rank = q_lora_rank;
+            spec.kv_lora_rank = kv_lora_rank;
+        }
+    }
+    for (layer, n) in shared_by_layer {
+        if let Some(spec) = manifest.layers.get_mut(layer as usize) {
+            spec.num_shared_experts = n;
+        }
+    }
     out.write(MANIFEST_FILE, &manifest.serialize())?;
     out.write(INDEX_FILE, &index.serialize())?;
 
@@ -484,9 +553,9 @@ fn emit_moe_shared_experts<R: Read + Seek>(
     layer: u32,
     som_suffix: &str,
     out: &mut dyn SomOut,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     let Some(t) = gguf.tensors.get(gguf_name) else {
-        return Ok(());
+        return Ok(0);
     };
     if t.shape.len() != 3 {
         return Err(format!("{gguf_name}: se esperaban 3 dimensiones shared MoE"));
@@ -509,7 +578,7 @@ fn emit_moe_shared_experts<R: Read + Seek>(
         });
         *id += 1;
     }
-    Ok(())
+    Ok(n_exp as u32)
 }
 
 fn slice_expert_3d(
@@ -704,6 +773,17 @@ fn read_tensor<R: Read + Seek>(
             let mut out = vec![0u8; (elems / 256) * Q4_K_BLOCK_BYTES];
             file.read_exact(&mut out)?;
             Ok((out, DTYPE_Q4_K))
+        }
+        GGML_MXFP4 => {
+            use sosomodel::layout::{MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS};
+            if elems % MXFP4_BLOCK_ELEMS != 0 {
+                return Err(format!(
+                    "tensor MXFP4 con {elems} elems (no múltiplo de {MXFP4_BLOCK_ELEMS})"
+                ));
+            }
+            let mut out = vec![0u8; (elems / MXFP4_BLOCK_ELEMS) * MXFP4_BLOCK_BYTES];
+            file.read_exact(&mut out)?;
+            Ok((out, DTYPE_MXFP4))
         }
         GGML_Q6_K => {
             // sin soporte nativo Q6_K: descuantizar y re-cuantizar a Q8_0
@@ -1036,5 +1116,104 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tok.eos(), Some(1));
+    }
+
+    #[test]
+    fn convierte_deepseek2_mla_sintetico() {
+        const H: usize = 8;
+        const FFN: usize = 16;
+        const RANK: usize = 4;
+        const KV_DIM: usize = 4;
+        const VOCAB: usize = 6;
+
+        let tensors: Vec<(&str, Vec<u64>)> = vec![
+            ("token_embd.weight", vec![H as u64, VOCAB as u64]),
+            ("output_norm.weight", vec![H as u64]),
+            ("blk.0.attn_norm.weight", vec![H as u64]),
+            ("blk.0.attn_q_a_proj.weight", vec![H as u64, RANK as u64]),
+            ("blk.0.attn_q_b_proj.weight", vec![RANK as u64, H as u64]),
+            ("blk.0.attn_kv_a_proj.weight", vec![H as u64, RANK as u64]),
+            ("blk.0.attn_k_b_proj.weight", vec![RANK as u64, KV_DIM as u64]),
+            ("blk.0.attn_v_b_proj.weight", vec![RANK as u64, KV_DIM as u64]),
+            ("blk.0.attn_output.weight", vec![H as u64, H as u64]),
+            ("blk.0.ffn_norm.weight", vec![H as u64]),
+            ("blk.0.ffn_up.weight", vec![H as u64, FFN as u64]),
+            ("blk.0.ffn_gate.weight", vec![H as u64, FFN as u64]),
+            ("blk.0.ffn_down.weight", vec![FFN as u64, H as u64]),
+        ];
+
+        let mut g: Vec<u8> = Vec::new();
+        g.extend_from_slice(b"GGUF");
+        g.extend_from_slice(&3u32.to_le_bytes());
+        g.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+        g.extend_from_slice(&12u64.to_le_bytes());
+
+        gguf_string(&mut g, "general.architecture");
+        g.extend_from_slice(&8u32.to_le_bytes());
+        gguf_string(&mut g, "deepseek2");
+        gguf_kv_u32(&mut g, "deepseek2.embedding_length", H as u32);
+        gguf_kv_u32(&mut g, "deepseek2.block_count", 1);
+        gguf_kv_u32(&mut g, "deepseek2.feed_forward_length", FFN as u32);
+        gguf_kv_u32(&mut g, "deepseek2.attention.head_count", 2);
+        gguf_kv_u32(&mut g, "deepseek2.attention.head_count_kv", 1);
+        gguf_kv_u32(&mut g, "deepseek2.attention.q_lora_rank", RANK as u32);
+        gguf_kv_u32(&mut g, "deepseek2.attention.kv_lora_rank", RANK as u32);
+        gguf_kv_f32(&mut g, "deepseek2.attention.layer_norm_rms_epsilon", 1e-6);
+        gguf_kv_bool(&mut g, "tokenizer.ggml.add_bos_token", true);
+        gguf_kv_str_array(
+            &mut g,
+            "tokenizer.ggml.tokens",
+            &["<s>", "</s>", "a", "b", "c", "d"],
+        );
+        gguf_kv_u32(&mut g, "tokenizer.ggml.eos_token_id", 1);
+
+        let mut offset = 0u64;
+        for (name, shape) in &tensors {
+            gguf_string(&mut g, name);
+            g.extend_from_slice(&(shape.len() as u32).to_le_bytes());
+            for d in shape {
+                g.extend_from_slice(&d.to_le_bytes());
+            }
+            g.extend_from_slice(&GGML_F32.to_le_bytes());
+            g.extend_from_slice(&offset.to_le_bytes());
+            let elems: u64 = shape.iter().product();
+            offset = (offset + elems * 4).next_multiple_of(32);
+        }
+        while g.len() % 32 != 0 {
+            g.push(0);
+        }
+        for (i, (_, shape)) in tensors.iter().enumerate() {
+            let elems: u64 = shape.iter().product();
+            for e in 0..elems {
+                g.extend_from_slice(&((i as f32) + (e as f32) * 1e-3).to_le_bytes());
+            }
+            while g.len() % 32 != 0 {
+                g.push(0);
+            }
+        }
+
+        let dir = std::env::temp_dir().join("convert-gguf-ds2-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("ds2.gguf");
+        fs::File::create(&gguf_path)
+            .unwrap()
+            .write_all(&g)
+            .unwrap();
+
+        let out = dir.join("out");
+        convert_path(gguf_path.to_str().unwrap(), &out, Some("ds2-mla")).unwrap();
+
+        let manifest =
+            Manifest::parse(&fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.layers[0].attn_kind, AttnKind::Mla);
+        assert_eq!(manifest.layers[0].q_lora_rank, RANK as u32);
+        assert_eq!(manifest.layers[0].kv_lora_rank, RANK as u32);
+
+        let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
+        assert!(index.find("L00.attn_q_down").is_some());
+        assert!(index.find("L00.attn_kv_down").is_some());
+        let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
+        rt.validate_shapes().expect("deepseek2 MLA shapes");
     }
 }
