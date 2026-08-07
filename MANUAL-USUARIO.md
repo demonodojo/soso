@@ -255,7 +255,7 @@ soso-llm run tiny-moe --prompt @bos --max 4
 ```
 
 Ejecuta inferencia greedy sobre modelos en `/models/<nombre>/`. Por defecto
-incluye **tiny** (denso) y **tiny-moe** (MoE estilo Mixtral). Ver sección
+incluye **tiny** (denso), **tiny-moe** (MoE estilo Mixtral), **tiny-mla** (MLA sintético, 1 capa) y **tiny-latent-moe** (LatentMoE, 1 capa). Ver sección
 [Modelos LLM](#modelos-llm-soso-llm) para importar modelos y más detalle.
 
 ---
@@ -273,7 +273,9 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 │   └── ssh_host_key      # Semilla de la host key del servidor SSH
 ├── models/       # Modelos LLM (disco sosomfs, solo lectura)
 │   ├── tiny/             # Modelo sintético denso (4 capas)
-│   └── tiny-moe/         # Modelo MoE sintético (4 expertos, top-2)
+│   ├── tiny-moe/         # Modelo MoE sintético (4 expertos, top-2)
+│   ├── tiny-mla/         # Modelo MLA sintético (1 capa, KV latente)
+│   └── tiny-latent-moe/  # Modelo LatentMoE sintético (1 capa, vocab 64)
 └── hola.txt      # Fichero de ejemplo
 ```
 
@@ -425,6 +427,7 @@ soso incluye un segundo disco virtual (`virtio-blk1`) con el filesystem de model
 /models/tiny/tokenizer.som   # vocabulario (solo modelos importados de GGUF)
 /models/tiny/shards/*.tensor # pesos empaquetados (F32 o Q8_0, con CRC32C)
 /models/tiny-moe/            # Modelo MoE sintético (Mixtral-style, 4 expertos top-2)
+/models/tiny-mla/            # Modelo MLA sintético (1 capa, atención comprimida)
 ```
 
 El manifest v3 añade campos MoE: `num_experts`, `num_experts_per_tok`, `moe_ffn_dim`.
@@ -435,13 +438,18 @@ router es `L{i}.ffn_gate_inp`. Solo se cargan en RAM los expertos activos por to
 ### Modelo de prueba incluido
 
 Al arrancar con `cargo xtask run`, se generan los modelos sintéticos **tiny** (4 capas,
-denso, hidden 128) y **tiny-moe** (2 capas, 4 expertos, top-2). Puedes ejecutar
+denso, hidden 128), **tiny-moe** (2 capas, 4 expertos, top-2), **tiny-mla** (1 capa MLA) y **tiny-latent-moe** (1 capa LatentMoE). Puedes ejecutar
 inferencia desde **sosh**:
 
 ```sh
 soso-llm run tiny --prompt hola
 soso-llm run tiny-moe --prompt @bos --max 4
+soso-llm run tiny-mla --prompt test --max 2
+soso-llm run tiny-mla --prompt test --gpu-soft --max 2
+soso-llm run tiny-latent-moe --prompt @bos --max 2
 ```
+
+El offload GPU (sin `--cpu`) descuantiza al subir pesos **F32, Q8_0, Q4_K y MXFP4** a VRAM. Con `--gpu-soft` ejercitas esa fontanería sin silicio NVIDIA.
 
 La salida muestra el texto generado con decode greedy. El modelo tiny usa un
 tokenizer byte-level; los modelos importados de GGUF usan su propio
@@ -524,6 +532,15 @@ TinyLlama-1.1B-Chat Q4_K_M:
 
 ```sh
 cargo xtask convert-gguf ruta/al/modelo.gguf target/mi-modelo --name mi-modelo
+```
+
+Arquitectura **deepseek2** (MLA): el convertidor acepta GGUF con
+`general.architecture = deepseek2`. Smoke en host tras convertir:
+
+```sh
+cargo test -p gguf2som --features std convierte_deepseek2_mla_sintetico
+cargo run --release -p soso-llm-core --features std --example hostrun -- \
+  target/mi-modelo "a" 1
 ```
 
 Después arranca con la variable `SOSO_MODELS_DIR` apuntando al modelo
@@ -774,7 +791,7 @@ Ejemplos:
 
 ```sh
 # MLA sintético (1 capa, smoke tests)
-cargo run --release -p mkmodel-soso -- target/tiny-mla --moe --attn mla --layers 1 --hidden 128
+cargo run --release -p mkmodel-soso -- target/tiny-mla --attn mla --name tiny-mla --layers 1 --hidden 128
 
 # LatentMoE (--moe obligatorio)
 cargo run --release -p mkmodel-soso -- target/tiny-latent-moe --moe --ffn-kind latent-moe --layers 1
@@ -838,7 +855,7 @@ soso-install list
 soso-install nvme1 --yes
 
 # Apagar, arrancar Linux (USB conectado), añadir GRUB:
-sudo /media/$USER/SOSO_INSTALL/install-soso.sh --grub-only /dev/nvme1n1
+sudo /media/$USER/SOSOINSTALL/install-soso.sh --grub-only /dev/nvme1n1
 ```
 
 **Opción B — desde Linux (cargo):**
@@ -857,13 +874,13 @@ sudo cargo xtask install-disk /dev/nvme1n1 --yes
 # En la máquina de desarrollo: generar artefactos
 cargo xtask package-usb-live
 
-# Flashear pendrive (live + partición SOSO_INSTALL con install-soso.sh)
+# Flashear pendrive (live + partición SOSOINSTALL con install-soso.sh)
 sudo cargo xtask flash-usb-live /dev/sdX --yes
 
 # En el PC con Linux (USB conectado): probar soso arrancando desde USB,
 # luego instalar en el disco vacío:
 lsblk
-sudo /media/$USER/SOSO_INSTALL/install-soso.sh /dev/nvme1n1 --yes
+sudo /media/$USER/SOSOINSTALL/install-soso.sh /dev/nvme1n1 --yes
 # (o desde target/usb-live/: sudo ./install-soso.sh /dev/nvme1n1 --yes)
 ```
 

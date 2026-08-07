@@ -72,6 +72,7 @@ pub fn convert_path(gguf_path: &str, out_dir: &std::path::Path, name: Option<&st
     convert_with_options(&mut f, &mut out, stem.as_deref(), ConvertOptions::default())
 }
 
+#[cfg(feature = "std")]
 pub fn convert_path_with_options(
     gguf_path: &str,
     out_dir: &std::path::Path,
@@ -1213,7 +1214,43 @@ mod tests {
         let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
         assert!(index.find("L00.attn_q_down").is_some());
         assert!(index.find("L00.attn_kv_down").is_some());
-        let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
+        let rt = soso_llm_core::runtime::Runtime::new(manifest.clone(), index.clone(), 0, 0);
         rt.validate_shapes().expect("deepseek2 MLA shapes");
+
+        use soso_llm_core::source::{FileMapper, MappedShard, MmapTensorSource};
+
+        struct DirMapper {
+            root: std::path::PathBuf,
+        }
+
+        impl FileMapper for DirMapper {
+            fn map_file(&mut self, path: &str) -> Result<MappedShard, ()> {
+                let data = std::fs::read(self.root.join(path)).map_err(|_| ())?;
+                let len = data.len();
+                let ptr = Box::leak(data.into_boxed_slice()).as_ptr();
+                Ok(MappedShard {
+                    addr: ptr as u64,
+                    len,
+                })
+            }
+
+            fn unmap_file(&mut self, _shard: &MappedShard) {}
+        }
+
+        let shard_root = out.join("shards");
+        let base = shard_root.to_string_lossy().into_owned();
+        let mut source = MmapTensorSource::new(
+            base,
+            index.clone(),
+            DirMapper {
+                root: shard_root,
+            },
+        );
+        let mut rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
+        rt.embed_token(0, &mut source).expect("embed");
+        rt.forward_layers_range(0, rt.manifest.num_layers, &mut source, None, &mut None)
+            .expect("forward 1 token");
+        let logits = rt.logits(&mut source).expect("logits");
+        assert!(logits.iter().all(|x| x.is_finite()));
     }
 }

@@ -85,6 +85,62 @@ fn tiny_model_q4_k() -> (Manifest, TensorIndex, MemFileMapper) {
     tiny_model_cuantizado(true)
 }
 
+fn tiny_model_mxfp4() -> (Manifest, TensorIndex, MemFileMapper) {
+    use soso_llm_core::quant::quantize_mxfp4;
+    use sosomodel::index::make_mxfp4_entry;
+
+    let manifest = Manifest::tiny("tiny");
+    let h = manifest.hidden_dim;
+    let ffn = manifest.ffn_dim;
+    let vocab = manifest.vocab_size;
+
+    let mut mapper = MemFileMapper::new();
+    let mut index = TensorIndex::default();
+    let mut id = 0u32;
+    let mut add = |index: &mut TensorIndex,
+                   mapper: &mut MemFileMapper,
+                   id: &mut u32,
+                   name: &str,
+                   shape: &[u32],
+                   mx: bool| {
+        let elems: usize = shape.iter().map(|&d| d as usize).product();
+        let values: Vec<f32> = (0..elems)
+            .map(|i| ((i as u32).wrapping_mul(0x9e37_79b9) ^ *id) as f32 % 100.0 * 1e-3)
+            .collect();
+        let shard = format!("{name}.tensor");
+        if mx {
+            mapper
+                .files
+                .insert(format!("{BASE}/{shard}"), pack_shard(&quantize_mxfp4(&values)));
+            index
+                .entries
+                .push(make_mxfp4_entry(*id, name, &shard, 0, shape));
+        } else {
+            let raw: Vec<u8> = values.iter().flat_map(|f| f.to_le_bytes()).collect();
+            mapper.files.insert(format!("{BASE}/{shard}"), pack_shard(&raw));
+            index
+                .entries
+                .push(make_f32_entry(*id, name, &shard, 0, shape));
+        }
+        *id += 1;
+    };
+
+    for layer in 0..manifest.num_layers {
+        let p = format!("L{layer:02}");
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.attn_norm"), &[h], false);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.attn_q"), &[h, h], true);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.attn_k"), &[h, h], true);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.attn_v"), &[h, h], true);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.attn_output"), &[h, h], true);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.ffn_norm"), &[h], false);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.ffn_up"), &[ffn, h], true);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.ffn_down"), &[h, ffn], true);
+    }
+    add(&mut index, &mut mapper, &mut id, "embed", &[vocab, h], true);
+
+    (manifest, index, mapper)
+}
+
 /// Modelo tiny con los tensores 2D cuantizados: Q4_K si `q4k`, Q8_0 si no.
 fn tiny_model_cuantizado(q4k: bool) -> (Manifest, TensorIndex, MemFileMapper) {
     use soso_llm_core::quant::{quantize_q4_k, quantize_q8_0};
@@ -225,7 +281,7 @@ impl soso_llm_core::gpu::GpuDispatch for FakeDevice {
         x: &[f32],
         out: &mut [f32],
     ) -> Result<bool, ()> {
-        use sosomodel::layout::{DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0};
+        use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
 
         if view.elems != rows * cols || x.len() != cols || out.len() != rows {
             return Err(());
@@ -239,6 +295,7 @@ impl soso_llm_core::gpu::GpuDispatch for FakeDevice {
             DTYPE_F32 => plano.copy_from_slice(view.f32().ok_or(())?),
             DTYPE_Q8_0 => soso_llm_core::quant::dequant_q8_0(view.bytes, &mut plano)?,
             DTYPE_Q4_K => soso_llm_core::quant::dequant_q4_k(view.bytes, &mut plano)?,
+            DTYPE_MXFP4 => soso_llm_core::quant::dequant_mxfp4(view.bytes, &mut plano)?,
             _ => return Ok(false),
         }
         *self.llamadas.entry(String::from(key)).or_insert(0) += 1;
@@ -449,5 +506,55 @@ fn generate_por_dispositivo_con_pesos_cuantizados() {
     assert_eq!(
         tokens, esperado,
         "descuantizar al subir no da lo mismo que el kernel fusionado de CPU"
+    );
+}
+
+/// Pesos **MXFP4** por el dispositivo, contra la ruta de CPU.
+#[test]
+fn generate_por_dispositivo_con_pesos_mxfp4() {
+    use soso_llm_core::gpu::GpuDispatch;
+
+    let esperado = {
+        let (manifest, index, mapper) = tiny_model_mxfp4();
+        let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+        rt.set_backend(soso_llm_core::runtime::Backend::Cpu);
+        let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+        let mut sampler = soso_llm_core::sample::Sampler::greedy();
+        let mut sin_gpu: Option<&mut dyn GpuDispatch> = None;
+        rt.generate_stream_par(
+            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut sin_gpu,
+        )
+        .expect("la ruta de CPU con MXFP4 debe funcionar")
+    };
+
+    let (manifest, index, mapper) = tiny_model_mxfp4();
+    let num_layers = manifest.num_layers;
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 64 * 1024 * 1024);
+    rt.set_backend(soso_llm_core::runtime::Backend::Auto);
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    let mut sampler = soso_llm_core::sample::Sampler::greedy();
+    let mut dev = FakeDevice {
+        llamadas: std::collections::BTreeMap::new(),
+    };
+    let tokens = {
+        let mut gpu: Option<&mut dyn GpuDispatch> = Some(&mut dev);
+        rt.generate_stream_par(
+            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut gpu,
+        )
+        .expect("la ruta de dispositivo con MXFP4 debe funcionar")
+    };
+
+    for layer in 0..num_layers {
+        for t in ["attn_q", "attn_k", "attn_v", "attn_output", "ffn_up", "ffn_down"] {
+            let key = format!("L{layer:02}.{t}");
+            assert!(
+                dev.llamadas.get(&key).copied().unwrap_or(0) > 0,
+                "el dispositivo no recibió {key} en MXFP4 (¿se rindió por el dtype?)"
+            );
+        }
+    }
+    assert_eq!(
+        tokens, esperado,
+        "descuantizar MXFP4 al subir no da lo mismo que el kernel fusionado de CPU"
     );
 }

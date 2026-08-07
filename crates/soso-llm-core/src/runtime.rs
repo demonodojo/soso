@@ -206,11 +206,23 @@ impl Runtime {
             if spec.attn_kind == sosomodel::AttnKind::Mla {
                 let q_rank = spec.q_lora_rank;
                 let kv_rank = spec.kv_lora_rank;
+                let qk_per = if spec.qk_nope_head_dim > 0 || spec.qk_rope_head_dim > 0 {
+                    spec.qk_nope_head_dim + spec.qk_rope_head_dim
+                } else {
+                    head_dim as u32
+                };
+                let v_dim = if spec.v_head_dim > 0 {
+                    spec.v_head_dim
+                } else {
+                    qk_per
+                };
+                let kv_qk = layer_kv_heads * qk_per;
+                let kv_v = layer_kv_heads * v_dim;
                 check(&alloc::format!("{p}.attn_q_down"), &[q_rank, h], true)?;
                 check(&alloc::format!("{p}.attn_q_up"), &[h, q_rank], true)?;
                 check(&alloc::format!("{p}.attn_kv_down"), &[kv_rank, h], true)?;
-                check(&alloc::format!("{p}.attn_k_up"), &[kv_dim, kv_rank], true)?;
-                check(&alloc::format!("{p}.attn_v_up"), &[kv_dim, kv_rank], true)?;
+                check(&alloc::format!("{p}.attn_k_up"), &[kv_qk, kv_rank], true)?;
+                check(&alloc::format!("{p}.attn_v_up"), &[kv_v, kv_rank], true)?;
                 check(&alloc::format!("{p}.attn_output"), &[h, h], true)?;
             } else {
                 check(&alloc::format!("{p}.attn_q"), &[h, h], true)?;

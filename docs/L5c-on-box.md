@@ -30,7 +30,7 @@ sudo cargo xtask install-disk /dev/nvme1n1 --yes
 # O con USB live que incluye instalador (sin cargo en el PC destino):
 sudo cargo xtask flash-usb-live /dev/sdX --yes   # flashear pendrive
 # … Linux en marcha, USB conectado …
-sudo /media/$USER/SOSO_INSTALL/install-soso.sh /dev/nvme1n1 --yes
+sudo /media/$USER/SOSOINSTALL/install-soso.sh /dev/nvme1n1 --yes
 
 # reiniciar → menú GRUB → "soso"
 ```

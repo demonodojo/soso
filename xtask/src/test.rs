@@ -91,6 +91,18 @@ pub fn run() {
             ssh_llm_moe(&key)
         });
 
+        // --- 4c) inferencia MLA (tiny-mla, KV latente) ---
+        let _ = paso_con_reintento("soso-llm run tiny-mla --prompt test --max 2", &mut fallos, || {
+            ssh_llm_mla(&key)
+        });
+
+        // --- 4d) inferencia LatentMoE (tiny-latent-moe) ---
+        let _ = paso_con_reintento(
+            "soso-llm run tiny-latent-moe --prompt @bos --max 2",
+            &mut fallos,
+            || ssh_llm_latent_moe(&key),
+        );
+
         // --- 5) regresión de syscalls dentro del guest (incl. GPU, hilos, FPU) ---
         let _ = paso_con_reintento("init test (syscalls, hilos, FPU, GPU)", &mut fallos, || {
             ssh_init_test(&key)
@@ -412,6 +424,58 @@ fn ssh_llm_moe(key: &std::path::Path) -> Result<(), String> {
                 "soso-llm tiny-moe sin planificador; stdout: {texto:?}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn ssh_llm_mla(key: &std::path::Path) -> Result<(), String> {
+    let texto = ssh_guion(
+        key,
+        "soso-llm run tiny-mla --prompt test --max 2\n                  soso-llm run tiny-mla --prompt test --gpu-soft --max 2\n                  exit\n",
+        Duration::from_secs(600),
+    )?;
+    if !texto.contains("soso-llm: generado") {
+        return Err(format!(
+            "soso-llm tiny-mla no generó salida esperada; stdout: {texto:?}"
+        ));
+    }
+    if !texto.contains("dispositivo «soft") {
+        return Err(format!(
+            "--gpu-soft no enganchó el dispositivo software en tiny-mla; stdout: {texto:?}"
+        ));
+    }
+    if let Some(linea) = texto
+        .lines()
+        .find(|l| l.contains("matvec,") && l.contains("subidas de pesos"))
+    {
+        let num = |tras: &str| -> Option<usize> {
+            let idx = linea.find(tras)?;
+            linea[..idx]
+                .split_whitespace()
+                .next_back()
+                .and_then(|t| t.parse().ok())
+        };
+        if let (Some(calls), Some(uploads)) = (num("matvec,"), num("subidas")) {
+            if calls > 0 && uploads >= calls {
+                return Err(format!(
+                    "tiny-mla gpu-soft: pesos resubidos en cada matvec ({uploads}/{calls}): {linea:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ssh_llm_latent_moe(key: &std::path::Path) -> Result<(), String> {
+    let texto = ssh_guion(
+        key,
+        "soso-llm run tiny-latent-moe --prompt @bos --max 2\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    if !texto.contains("soso-llm: generado") {
+        return Err(format!(
+            "soso-llm tiny-latent-moe no generó salida esperada; stdout: {texto:?}"
+        ));
     }
     Ok(())
 }

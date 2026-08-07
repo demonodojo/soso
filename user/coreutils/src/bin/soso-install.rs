@@ -62,7 +62,7 @@ fn help() {
            soso-install nvme1 [--yes]\n\
          \n\
          Tras instalar, reinicia en Linux y ejecuta install-soso.sh --grub-only\n\
-         (partición SOSO_INSTALL) o cargo xtask install-disk --no-grub + update-grub."
+         (partición SOSOINSTALL) o cargo xtask install-disk --no-grub + update-grub."
     );
 }
 
@@ -211,7 +211,7 @@ fn print_grub_instructions(dst: &DiskInfo) {
     println!(
         "Reinicia en Linux. Luego, con el USB conectado:\n\
          \n\
-           sudo /media/$USER/SOSO_INSTALL/install-soso.sh --grub-only\n\
+           sudo /media/$USER/SOSOINSTALL/install-soso.sh --grub-only\n\
          \n\
          (detecta la ESP de soso en el disco destino y añade entrada GRUB.)\n\
          \n\

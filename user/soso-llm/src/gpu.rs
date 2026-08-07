@@ -23,7 +23,7 @@
 //! —siete syscalls por matvec, cuatro de ellas puro trámite— para copiar datos que
 //! el kernel podía leer de donde ya estaban. Ver `write_f32`.
 //!
-//! **Pesos cuantizados (Q8_0/Q4_K).** El dispositivo calcula en f32, así que los
+//! **Pesos cuantizados (Q8_0/Q4_K/MXFP4).** El dispositivo calcula en f32, así que los
 //! pesos se **descuantizan una sola vez, al subirlos**: son residentes, luego el
 //! coste es por tensor y no por token. Lo que sube es F32, así que un Q4_K ocupa
 //! ~8× en el dispositivo; cuando no cabe en `vram_free` el tensor se queda en CPU y
@@ -35,8 +35,8 @@ use libsoso::sys;
 use soso_abi as abi;
 use soso_llm_core::gpu::GpuDispatch;
 use soso_llm_core::layer::TensorView;
-use soso_llm_core::quant::{dequant_q4_k, dequant_q8_0};
-use sosomodel::layout::{DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0};
+use soso_llm_core::quant::{dequant_mxfp4, dequant_q4_k, dequant_q8_0};
+use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
 
 /// Pesos ya residentes en el dispositivo, indexados por el nombre del tensor.
 ///
@@ -278,6 +278,10 @@ impl SysGpu {
                     dequant_q4_k(view.bytes, &mut plano)
                 };
                 ok.and_then(|_| write_f32(handle, &plano))
+            }
+            DTYPE_MXFP4 => {
+                let mut plano = alloc::vec![0f32; elems];
+                dequant_mxfp4(view.bytes, &mut plano).and_then(|_| write_f32(handle, &plano))
             }
             _ => Err(()),
         };

@@ -12,6 +12,42 @@ use alloc::string::String;
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::{LayerSpec, Manifest};
 
+/// Dimensiones efectivas MLA por cabeza (RoPE solo en el slice `rope`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MlaHeadDims {
+    pub qk_nope: usize,
+    pub qk_rope: usize,
+    pub qk_per_head: usize,
+    pub v_dim: usize,
+    pub kv_qk_dim: usize,
+    pub kv_v_dim: usize,
+}
+
+pub fn mla_head_dims(spec: &LayerSpec, head_dim: usize, kv_heads: usize) -> MlaHeadDims {
+    let (qk_nope, qk_rope) = if spec.qk_rope_head_dim == 0 && spec.qk_nope_head_dim == 0 {
+        (0, head_dim)
+    } else {
+        (
+            spec.qk_nope_head_dim as usize,
+            spec.qk_rope_head_dim as usize,
+        )
+    };
+    let qk_per_head = qk_nope + qk_rope;
+    let v_dim = if spec.v_head_dim > 0 {
+        spec.v_head_dim as usize
+    } else {
+        qk_per_head
+    };
+    MlaHeadDims {
+        qk_nope,
+        qk_rope,
+        qk_per_head,
+        v_dim,
+        kv_qk_dim: kv_heads * qk_per_head,
+        kv_v_dim: kv_heads * v_dim,
+    }
+}
+
 pub fn forward_mla_attn<S: TensorSource>(
     spec: &LayerSpec,
     manifest: &Manifest,
@@ -33,12 +69,13 @@ pub fn forward_mla_attn<S: TensorSource>(
     let heads = manifest.effective_num_heads(layer) as usize;
     let head_dim = h / heads;
     let kv_heads = manifest.effective_num_kv_heads(layer) as usize;
-    let kv_dim = kv_heads * head_dim;
+    let dims = mla_head_dims(spec, head_dim, kv_heads);
     let group = heads / kv_heads;
     let q_rank = spec.q_lora_rank as usize;
     let kv_rank = spec.kv_lora_rank as usize;
     let eps = manifest.rms_eps;
     let theta = manifest.rope_theta;
+    let kv_buf = dims.kv_qk_dim.max(dims.kv_v_dim);
 
     s.residual.copy_from_slice(hidden);
     source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w)?;
@@ -95,39 +132,17 @@ pub fn forward_mla_attn<S: TensorSource>(
         planner,
         layer,
     )?;
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_k_up,
-        source.tensor_view(&name_k_up)?,
-        kv_dim,
-        kv_rank,
-        &s.up[..kv_rank],
-        &mut s.k[..kv_dim],
-        par,
-        planner,
-        layer,
-    )?;
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_v_up,
-        source.tensor_view(&name_v_up)?,
-        kv_dim,
-        kv_rank,
-        &s.up[..kv_rank],
-        &mut s.v[..kv_dim],
-        par,
-        planner,
-        layer,
-    )?;
     let t_attn0 = tick(clock_ms);
 
     for head in 0..heads {
-        rope_inplace(&mut s.q[head * head_dim..(head + 1) * head_dim], pos, theta);
-    }
-    for head in 0..kv_heads {
-        rope_inplace(&mut s.k[head * head_dim..(head + 1) * head_dim], pos, theta);
+        let base = head * head_dim;
+        if dims.qk_rope > 0 {
+            rope_inplace(
+                &mut s.q[base + dims.qk_nope..base + dims.qk_nope + dims.qk_rope],
+                pos,
+                theta,
+            );
+        }
     }
 
     kv.append_mla_latent(&s.up[..kv_rank]);
@@ -136,19 +151,27 @@ pub fn forward_mla_attn<S: TensorSource>(
     for head in 0..heads {
         let q_h = &s.q[head * head_dim..(head + 1) * head_dim];
         let kv_head = head / group;
+        if s.k.len() < kv_buf || s.v.len() < kv_buf {
+            return Err(());
+        }
         attn::attention_decode_mla_latent(
             q_h,
             kv,
             kv_rank,
-            kv_dim,
+            dims.qk_nope,
+            dims.qk_rope,
+            dims.v_dim,
             head_dim,
             kv_head,
             seq,
+            theta,
             source,
             &name_k_up,
             &name_v_up,
-            &mut s.k[..kv_dim],
-            &mut s.v[..kv_dim],
+            dims.kv_qk_dim,
+            dims.kv_v_dim,
+            &mut s.k[..kv_buf],
+            &mut s.v[..kv_buf],
             &mut s.gate[..kv_rank],
             &mut s.head_out,
         )?;

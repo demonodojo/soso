@@ -342,10 +342,16 @@ fn main() {
         }
     }
     if attn_kind == "mla" {
+        let head_dim = hidden / heads;
+        let qk_nope = head_dim / 2;
+        let qk_rope = head_dim - qk_nope;
         for layer in manifest.layers.iter_mut() {
             layer.attn_kind = sosomodel::AttnKind::Mla;
             layer.q_lora_rank = hidden / 4;
             layer.kv_lora_rank = hidden / 4;
+            layer.qk_nope_head_dim = qk_nope;
+            layer.qk_rope_head_dim = qk_rope;
+            layer.v_head_dim = head_dim;
         }
     } else if attn_kind == "kda" {
         for layer in manifest.layers.iter_mut() {
@@ -370,6 +376,14 @@ fn main() {
     let h = hidden;
     let head_dim = h / heads;
     let kv_dim = kv_heads * head_dim;
+    let (kv_qk_dim, kv_v_dim) = if attn_kind == "mla" {
+        let qk_nope = head_dim / 2;
+        let qk_rope = head_dim - qk_nope;
+        let qk_per = qk_nope + qk_rope;
+        (kv_heads * qk_per, kv_heads * head_dim)
+    } else {
+        (kv_dim, kv_dim)
+    };
     let mut index = TensorIndex::default();
     let mut id = 0u32;
     let mut total_bytes = 0u64;
@@ -387,8 +401,8 @@ fn main() {
                     (&format!("L{layer:02}.attn_q_down"), vec![q_rank, h]),
                     (&format!("L{layer:02}.attn_q_up"), vec![h, q_rank]),
                     (&format!("L{layer:02}.attn_kv_down"), vec![kv_rank, h]),
-                    (&format!("L{layer:02}.attn_k_up"), vec![kv_dim, kv_rank]),
-                    (&format!("L{layer:02}.attn_v_up"), vec![kv_dim, kv_rank]),
+                    (&format!("L{layer:02}.attn_k_up"), vec![kv_qk_dim, kv_rank]),
+                    (&format!("L{layer:02}.attn_v_up"), vec![kv_v_dim, kv_rank]),
                     (&format!("L{layer:02}.attn_output"), vec![h, h]),
                     (&format!("L{layer:02}.ffn_norm"), vec![h]),
                 ] {
@@ -465,8 +479,8 @@ fn main() {
                 (&format!("L{layer:02}.attn_q_down"), vec![q_rank, h]),
                 (&format!("L{layer:02}.attn_q_up"), vec![h, q_rank]),
                 (&format!("L{layer:02}.attn_kv_down"), vec![kv_rank, h]),
-                (&format!("L{layer:02}.attn_k_up"), vec![kv_dim, kv_rank]),
-                (&format!("L{layer:02}.attn_v_up"), vec![kv_dim, kv_rank]),
+                (&format!("L{layer:02}.attn_k_up"), vec![kv_qk_dim, kv_rank]),
+                (&format!("L{layer:02}.attn_v_up"), vec![kv_v_dim, kv_rank]),
                 (&format!("L{layer:02}.attn_output"), vec![h, h]),
                 (&format!("L{layer:02}.ffn_norm"), vec![h]),
             ] {

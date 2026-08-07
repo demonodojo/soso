@@ -98,7 +98,7 @@ Guest network: DHCP at boot, fallback **10.0.2.15/24** in QEMU slirp. Port forwa
 
 - [x] **Classic USB package** — `cargo xtask package-usb` (UEFI + separate data/models images)
 - [x] **Live USB image** — `cargo xtask package-usb-live` (single GPT stick: ESP + sosofs + sosomfs); see [`docs/L5c-on-box.md`](docs/L5c-on-box.md)
-- [x] **Live USB + installer** — `sudo cargo xtask flash-usb-live /dev/sdX --yes` (`install-soso.sh` on SOSO_INSTALL partition)
+- [x] **Live USB + installer** — `sudo cargo xtask flash-usb-live /dev/sdX --yes` (`install-soso.sh` on SOSOINSTALL partition)
 - [x] **Dual-boot UEFI + Linux** — `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` (disco dedicado + entrada GRUB)
 - [x] **QEMU live mode** — `SOSO_QEMU_LIVE=1 cargo xtask run`
 
@@ -149,7 +149,7 @@ Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G
 |---------|--------|
 | `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
 | `cargo xtask package-usb-live` | Single GPT image (ESP + sosofs + sosomfs) for USB or install |
-| `sudo cargo xtask flash-usb-live /dev/sdX --yes` | Flash live USB + SOSO_INSTALL partition with `install-soso.sh` |
+| `sudo cargo xtask flash-usb-live /dev/sdX --yes` | Flash live USB + SOSOINSTALL partition with `install-soso.sh` |
 | `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot: write live image to empty disk + GRUB entry |
 | `cargo xtask lx-build [port\|all]` | Build `liblxdde.a` (spike, testdrv, e1000e, nouveau) |
 | `cargo xtask g1-check` | Host checklist: IOMMU/VFIO, firmware, BAR0 |

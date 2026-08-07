@@ -84,7 +84,7 @@ fn usage() -> ! {
            lsblk\n\
            sudo cargo xtask flash-usb-live /dev/sde --yes\n\
          \n\
-         Graba soso-live.img en el pendrive y añade partición SOSO_INSTALL\n\
+         Graba soso-live.img en el pendrive y añade partición SOSOINSTALL\n\
          con install-soso.sh para dual-boot desde Linux."
     );
     exit(2);
@@ -109,7 +109,7 @@ fn add_install_partition(usb: &Path) -> Option<String> {
             .arg("-t")
             .arg("4:0700")
             .arg("-c")
-            .arg("4:SOSO_INSTALL")
+            .arg("4:SOSOINSTALL")
             .arg(usb),
         "sgdisk part4",
     );
@@ -117,7 +117,7 @@ fn add_install_partition(usb: &Path) -> Option<String> {
     let part = install_partition_node(usb, 4)?;
     install_disk::run_cmd(
         Command::new("mkfs.vfat")
-            .args(["-F", "32", "-n", "SOSO_INSTALL"])
+            .args(["-F", "32", "-n", "SOSOINSTALL"])
             .arg(&part),
         "mkfs.vfat",
     );
@@ -189,7 +189,7 @@ fn print_flash_summary(usb: &Path, out_dir: &Path) {
             lsblk\n\
             sudo {}/install-soso.sh /dev/nvme1n1 --yes\n\
          \n\
-         (Si la partición SOSO_INSTALL no se montó sola: sudo mount /dev/sdX4 /mnt\n\
+         (Si la partición SOSOINSTALL no se montó sola: sudo mount /dev/sdX4 /mnt\n\
           y ejecuta /mnt/install-soso.sh …)\n\
          \n\
          Artefactos también en {}",

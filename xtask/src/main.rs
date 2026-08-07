@@ -382,6 +382,45 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
         if !status.success() {
             exit(status.code().unwrap_or(1));
         }
+        // tiny-mla: smoke MLA + KV latente en el disco de modelos por defecto.
+        let mla_src = root.join("target/tiny-mla-model");
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args(["run", "-q", "--release", "-p", "mkmodel-soso", "--"])
+            .args([
+                "--attn",
+                "mla",
+                "--name",
+                "tiny-mla",
+                "--layers",
+                "1",
+                mla_src.to_str().unwrap(),
+            ])
+            .status()
+            .expect("mkmodel-soso tiny-mla");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
+        // tiny-latent-moe: MoE con FFN latente en la imagen por defecto.
+        let latent_moe_src = root.join("target/tiny-latent-moe-model");
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args(["run", "-q", "--release", "-p", "mkmodel-soso", "--"])
+            .args([
+                "--moe",
+                "--ffn-kind",
+                "latent-moe",
+                "--name",
+                "tiny-latent-moe",
+                "--layers",
+                "1",
+                latent_moe_src.to_str().unwrap(),
+            ])
+            .status()
+            .expect("mkmodel-soso tiny-latent-moe");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
     }
     let vieja = path
         .metadata()
@@ -404,6 +443,12 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
     ];
     if custom.is_none() {
         mkfs_args.push(root.join("target/tiny-moe-model").to_string_lossy().into_owned());
+        mkfs_args.push(root.join("target/tiny-mla-model").to_string_lossy().into_owned());
+        mkfs_args.push(
+            root.join("target/tiny-latent-moe-model")
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     mkfs_args.push(path.to_string_lossy().into_owned());
     mkfs_args.push("--size".into());

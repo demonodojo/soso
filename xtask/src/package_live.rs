@@ -105,7 +105,7 @@ fn write_rootfs_install_meta(root: &Path, total: u64) {
 const GRUB_LINUX_TXT: &str = "\
 Tras instalar desde soso live (soso-install), añade la entrada GRUB desde Linux:\n\
 \n\
-  sudo /media/$USER/SOSO_INSTALL/install-soso.sh --grub-only /dev/nvme1n1\n\
+  sudo /media/$USER/SOSOINSTALL/install-soso.sh --grub-only /dev/nvme1n1\n\
 \n\
 Sustituye /dev/nvme1n1 por el disco donde instalaste soso (lsblk).\n\
 Luego reinicia y elige \"soso\" en el menú GRUB.\n\
@@ -138,7 +138,7 @@ Archivo: soso-live.img ({:.1} GiB)
 
    Luego reinicia en Linux y ejecuta (USB conectado):
 
-   sudo /media/$USER/SOSO_INSTALL/install-soso.sh --grub-only /dev/nvme1n1
+   sudo /media/$USER/SOSOINSTALL/install-soso.sh --grub-only /dev/nvme1n1
 
 5) Instalar desde Linux (sin arrancar soso):
 

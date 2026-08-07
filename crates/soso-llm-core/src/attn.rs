@@ -6,7 +6,7 @@
 //! sin esas features se usa el camino escalar (tests host / referencia).
 
 use crate::f16::f16_to_f32;
-use crate::gemm::{dot_f32, softmax_inplace};
+use crate::gemm::{dot_f32, rope_inplace, softmax_inplace};
 use crate::layer::{matvec_view, TensorSource};
 use alloc::vec::Vec;
 
@@ -307,43 +307,57 @@ pub fn attention_decode_mla_latent<S: TensorSource>(
     q: &[f32],
     kv: &crate::kv::LayerKv,
     kv_rank: usize,
-    kv_dim: usize,
+    qk_nope: usize,
+    qk_rope: usize,
+    v_dim: usize,
     head_dim: usize,
     kv_head: usize,
     n_tokens: usize,
+    theta: f32,
     source: &mut S,
     k_up_name: &str,
     v_up_name: &str,
+    kv_qk_dim: usize,
+    kv_v_dim: usize,
     k_full: &mut [f32],
     v_full: &mut [f32],
     c_buf: &mut [f32],
     out: &mut [f32],
 ) -> Result<(), ()> {
     out.fill(0.0);
-    if n_tokens == 0 || head_dim == 0 || !kv.mla_latent {
+    if n_tokens == 0 || !kv.mla_latent {
         return Err(());
     }
-    let inv = 1.0 / libm::sqrtf(head_dim as f32);
+    let qk_per = qk_nope + qk_rope;
+    if qk_per == 0 || v_dim == 0 || head_dim == 0 {
+        return Err(());
+    }
+    if k_full.len() < kv_qk_dim || v_full.len() < kv_v_dim {
+        return Err(());
+    }
+    let inv = 1.0 / libm::sqrtf(qk_per as f32);
     let mut logits = alloc::vec![0.0f32; n_tokens];
-    let k_off = kv_head * head_dim;
+    let k_off = kv_head * qk_per;
+    let v_off = kv_head * v_dim;
     for t in 0..n_tokens {
         kv.load_latent_token(t, kv_rank, &mut c_buf[..kv_rank]);
         matvec_view(
             &source.tensor_view(k_up_name)?,
-            kv_dim,
+            kv_qk_dim,
             kv_rank,
             &c_buf[..kv_rank],
             k_full,
         )?;
-        matvec_view(
-            &source.tensor_view(v_up_name)?,
-            kv_dim,
-            kv_rank,
-            &c_buf[..kv_rank],
-            v_full,
-        )?;
+        if qk_rope > 0 {
+            rope_inplace(
+                &mut k_full[k_off + qk_nope..k_off + qk_nope + qk_rope],
+                t,
+                theta,
+            );
+        }
+        let q_len = qk_per.min(q.len());
         let mut dot = 0.0f32;
-        for d in 0..head_dim {
+        for d in 0..q_len {
             dot += q[d] * k_full[k_off + d];
         }
         logits[t] = dot * inv;
@@ -368,13 +382,15 @@ pub fn attention_decode_mla_latent<S: TensorSource>(
         kv.load_latent_token(t, kv_rank, &mut c_buf[..kv_rank]);
         matvec_view(
             &source.tensor_view(v_up_name)?,
-            kv_dim,
+            kv_v_dim,
             kv_rank,
             &c_buf[..kv_rank],
             v_full,
         )?;
         for d in 0..head_dim {
-            out[d] += logits[t] * v_full[k_off + d];
+            if d < v_dim {
+                out[d] += logits[t] * v_full[v_off + d];
+            }
         }
     }
     Ok(())

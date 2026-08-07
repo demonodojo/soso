@@ -329,12 +329,6 @@ fn parse_memory_plan(parts: &[&str]) -> MemoryPlanConfig {
         ring_slots,
     }
 }
-    parts
-        .iter()
-        .position(|&p| p == flag)
-        .and_then(|i| parts.get(i + 1))
-        .map(|&v| v.into())
-}
 
 fn parse_prompt(parts: &[&str]) -> Option<String> {
     let i = parts.iter().position(|&p| p == "--prompt")?;
