@@ -640,6 +640,7 @@ pub(crate) fn qemu_smp() -> String {
 }
 
 /// `SOSO_QEMU_NVME=1`: añade un NVMe con la imagen de modelos (además de virtio).
+/// `SOSO_QEMU_NVME_IMG=<ruta>`: imagen raw para ese NVMe (p. ej. disco fake Linux).
 pub(crate) fn qemu_nvme() -> bool {
     matches!(
         std::env::var("SOSO_QEMU_NVME").as_deref(),
@@ -776,6 +777,17 @@ pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
             qemu.args(["-device", "virtio-blk-pci,drive=live0"]);
             println!("xtask: modo live virtio → {}", live.display());
         }
+        if qemu_nvme() {
+            let nvme_img = std::env::var("SOSO_QEMU_NVME_IMG")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| nvme_copy(models, "soso-models-nvme.img"));
+            qemu.args([
+                "-drive",
+                &format!("file={},format=raw,if=none,id=nvme0", nvme_img.display()),
+            ]);
+            qemu.args(["-device", "nvme,serial=soso,drive=nvme0"]);
+            println!("xtask: NVMe extra → {}", nvme_img.display());
+        }
         return;
     }
 
@@ -801,7 +813,9 @@ pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
         .args(["-device", "virtio-blk-pci,drive=data1"]);
 
     if qemu_nvme() {
-        let nvme_img = nvme_copy(models, "soso-models-nvme.img");
+        let nvme_img = std::env::var("SOSO_QEMU_NVME_IMG")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| nvme_copy(models, "soso-models-nvme.img"));
         qemu.args([
             "-drive",
             &format!("file={},format=raw,if=none,id=nvme0", nvme_img.display()),

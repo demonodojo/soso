@@ -174,6 +174,10 @@ pub const DISK_KIND_NVME: u32 = 2;
 pub const DISK_FLAG_READONLY: u32 = 1;
 /// Disco de arranque live (origen de clonación).
 pub const DISK_FLAG_BOOT: u32 = 2;
+/// GPT con magic SOSOFS10 en la partición 2: soso previo, reinstalar es seguro.
+pub const DISK_FLAG_SOSO: u32 = 4;
+/// Sin tabla de particiones y primer sector a cero.
+pub const DISK_FLAG_EMPTY: u32 = 8;
 
 /// Entrada devuelta por `SYS_DISK_LIST`.
 #[derive(Clone, Copy, Default)]

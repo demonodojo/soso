@@ -1,6 +1,10 @@
 //! Acceso raw a discos de instalación (512 B/LBA): USB live, virtio-blk0, NVMe.
 
-use soso_abi::{DiskInfo, DISK_FLAG_BOOT, DISK_FLAG_READONLY, DISK_KIND_NVME, DISK_KIND_USB, DISK_KIND_VIRTIO};
+use soso_abi::{
+    DiskInfo, DISK_FLAG_BOOT, DISK_FLAG_EMPTY, DISK_FLAG_READONLY, DISK_FLAG_SOSO,
+    DISK_KIND_NVME, DISK_KIND_USB, DISK_KIND_VIRTIO,
+};
+use sosofs::layout::MAGIC as SOSOFS_MAGIC;
 
 const SECTOR: usize = 512;
 const NVME_SLOTS: usize = 2;
@@ -34,6 +38,7 @@ pub fn list(out: &mut [DiskInfo]) -> usize {
     if crate::drivers::usb_storage::active() {
         if n < out.len() {
             out[n] = info_usb(boot == Some(RawId::Usb));
+            out[n].flags |= probe_content(RawId::Usb);
             n += 1;
         }
     }
@@ -41,6 +46,7 @@ pub fn list(out: &mut [DiskInfo]) -> usize {
     if crate::drivers::virtio_blk::BLK0.get().is_some() {
         if n < out.len() {
             out[n] = info_virtio0(boot == Some(RawId::Virtio0));
+            out[n].flags |= probe_content(RawId::Virtio0);
             n += 1;
         }
     }
@@ -48,7 +54,13 @@ pub fn list(out: &mut [DiskInfo]) -> usize {
     for slot in 0..NVME_SLOTS {
         if crate::drivers::nvme::present_slot(slot) {
             if n < out.len() {
+                let id = if slot == 0 {
+                    RawId::Nvme0
+                } else {
+                    RawId::Nvme1
+                };
                 out[n] = info_nvme(slot);
+                out[n].flags |= probe_content(id);
                 n += 1;
             }
         }
@@ -142,6 +154,54 @@ fn info_nvme(slot: usize) -> DiskInfo {
 fn copy_name(dst: &mut [u8; 16], src: &[u8]) {
     let n = src.len().min(15);
     dst[..n].copy_from_slice(&src[..n]);
+}
+
+/// Clasifica el contenido del disco para `soso-install list` y la guarda de destino.
+/// Solo marcamos estados seguros (`SOSO`, `VACÍO`); lo demás queda sin flag.
+fn probe_content(id: RawId) -> u32 {
+    let mut sec = [0u8; SECTOR];
+    if read_sector(id, 1, &mut sec).is_err() {
+        return 0;
+    }
+    if &sec[0..8] == b"EFI PART" {
+        let entry_lba = u64::from_le_bytes(sec[72..80].try_into().unwrap_or([0; 8]));
+        return gpt_part2_flags(id, entry_lba);
+    }
+
+    if read_sector(id, 0, &mut sec).is_err() {
+        return 0;
+    }
+    if sec[510] == 0x55 && sec[511] == 0xAA {
+        for i in 0..4usize {
+            if sec[446 + i * 16 + 4] != 0 {
+                return 0;
+            }
+        }
+    }
+    if sec.iter().all(|&b| b == 0) {
+        return DISK_FLAG_EMPTY;
+    }
+    0
+}
+
+fn gpt_part2_flags(id: RawId, entry_lba: u64) -> u32 {
+    let mut sec = [0u8; SECTOR];
+    if read_sector(id, entry_lba, &mut sec).is_err() {
+        return 0;
+    }
+    let ent = &sec[128..256];
+    if ent[0..16].iter().all(|&b| b == 0) {
+        return 0;
+    }
+    let first = u64::from_le_bytes(ent[32..40].try_into().unwrap_or([0; 8]));
+    if read_sector(id, first, &mut sec).is_err() {
+        return 0;
+    }
+    if sec.starts_with(&SOSOFS_MAGIC) {
+        DISK_FLAG_SOSO
+    } else {
+        0
+    }
 }
 
 pub fn read(id: u32, lba: u64, buf: &mut [u8]) -> Result<(), i64> {
