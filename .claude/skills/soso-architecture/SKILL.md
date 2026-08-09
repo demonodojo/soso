@@ -54,7 +54,7 @@ soso/
 | Module | Role |
 |--------|------|
 | `arch/` | GDT/TSS, IDT, PIC+PIT 100 Hz, paging |
-| `drivers/` | serial, virtio-blk, virtio-net (PCI ECAM) |
+| `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
 | `fs/` | sosofs (blk0) + sosomfs (blk1); VFS enruta `/models/*` |
 | `vfs.rs` | Router: lectura/escritura sosofs; modelos → sosomfs (read-only) |
 | `net/` | smoltcp, DHCPv4 al arrancar (fallback 10.0.2.15), polled from scheduler |
@@ -84,6 +84,9 @@ soso/
 ## Network & SSH
 
 - smoltcp TCP/IPv4 + cliente DHCPv4 en kernel; fallback estático 10.0.2.15/24 si no hay lease en 8 s
+- **WiFi (lxdde/iwlwifi):** Intel AX211 (`8086:7f70`); transporte Gen2 + firmware en `/lib/firmware/`; mini-supplicant WPA2 en `net/wifi_wpa.rs`; backend `NicDev::LxWifi` si no hay Ethernet; config `/etc/wifi.conf`; kshell `wifi scan|status|connect`
+- **Drivers modulares:** features Cargo `drv-*` + `drv-all` (default); `drivers/registry.rs`; kshell `hwscan`; `SOSODRV.TXT` en ESP live; host `SOSO_DRIVERS`, `cargo xtask fit-drivers`, `cargo xtask driver-add`
+- **Drivers modulares:** features Cargo `drv-virtio-blk`, `drv-virtio-net`, `drv-e1000e`, `drv-nvme`, `drv-usb`, `drv-gpu-nvidia`, `drv-live-disk`; meta `drv-all` (default). Metadatos PCI en `drivers/registry.rs`; `hwscan` en kshell; informe en `SOSODRV.TXT` (ESP live). Host: `SOSO_DRIVERS=qemu|live-usb|all` o `--drivers`; `cargo xtask fit-drivers <informe>` reempaqueta; `cargo xtask driver-add <git-url>` registra ports lxdde externos en `lxdde/ports-extern/`
 - NIC polled (no IRQ-driven RX)
 - sunset: curve25519 + ed25519 + chacha20-poly1305
 - Auth: ed25519 public key only (`/etc/authorized_key`, 32 raw bytes)

@@ -85,7 +85,47 @@ compilar, o regenera la imagen con `cargo xtask mkfs`.
 
 > **Nota:** la primera conexión puede avisar de una host key desconocida. La host key
 > del servidor se guarda en `/etc/ssh_host_key` dentro del disco y persiste entre
-> arranques si no borras la imagen de datos.
+> reconstrucciones de la imagen si no borras el disco de datos.
+
+### 2b. WiFi (Intel AX211, arranque en hardware real)
+
+En placa con tarjeta **Intel Wi-Fi 6E AX211** (PCI `8086:7f70`), soso puede usar WiFi
+en lugar de Ethernet cableada si compilas con la capa **lxdde/iwlwifi**:
+
+```sh
+cargo xtask lx-build iwlwifi
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=iwlwifi cargo xtask build
+# USB live en la máquina objetivo:
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=iwlwifi cargo xtask flash-usb-live /dev/sdX --yes
+```
+
+**Configuración** en `/etc/wifi.conf` (claves `ssid=` y opcionalmente `psk=`):
+
+```ini
+ssid=MiRed
+psk=MiClaveWPA2
+```
+
+El firmware va en `/lib/firmware/iwlwifi-so-a0-gf-a0-89.ucode` y `.pnvm` (incluidos
+en `rootfs/lib/firmware/`).
+
+**Consola de emergencia (kernel-shell):**
+
+```text
+wifi scan          # listar redes
+wifi status        # estado del driver
+wifi connect Red   # red abierta
+wifi connect Red clave  # WPA2-PSK
+```
+
+**Prueba con VFIO** (passthrough del dispositivo WiFi a QEMU):
+
+```sh
+sudo ./scripts/l6-wifi-vfio-test.sh
+```
+
+La red WiFi tiene prioridad sobre virtio-net **solo si no hay Ethernet cableada**.
+DHCP y SSH funcionan igual que con virtio/e1000e.
 
 ### 3. Echo TCP (prueba de red)
 
@@ -301,6 +341,8 @@ Comandos principales:
 | Comando | Descripción |
 |---|---|
 | `help` | Lista todos los comandos |
+| `dmesg` | Log de consola paginado (espacio/enter = más, `q` = salir); el FB solo muestra ~40 líneas |
+| `dmesg save` | Volcar el log a `SOSOLOG.TXT` en la ESP del USB live (también se hace solo cada ~2 s) |
 | `ls [ruta]` | Listar directorio (por defecto `/`) |
 | `cat <ruta>` | Mostrar un fichero (`cat -` lee stdin, para pipelines) |
 | `stat <ruta>` | Metadatos de un fichero o directorio |
@@ -314,9 +356,49 @@ Comandos principales:
 | `mem` | Memoria física libre |
 | `halt` | Apagar |
 
-La kernel-shell también incluye comandos de bajo nivel para depuración (`blk`,
-`blkread`, `blkwrite`, `pf`, `panic`). Están pensados para desarrollo, no para uso
-habitual.
+La kernel-shell también incluye comandos de bajo nivel para depuración (`hwscan`,
+`blk`, `blkread`, `blkwrite`, `pf`, `panic`). Están pensados para desarrollo,
+no para uso habitual.
+
+### Autodescubrimiento de drivers (`hwscan`)
+
+El comando **`hwscan`** enumera dispositivos PCI y muestra qué driver los
+atendería y si está compilado en el kernel actual. Formato de cada línea:
+
+```
+drv: bb:dd.f VVVV:DDDD nombre-driver compilado|ausente
+```
+
+En arranque **live**, si falta algún driver para el hardware detectado, el
+informe se imprime también por serie y se guarda en **`SOSODRV.TXT`** en la ESP
+(junto a `SOSOLOG.TXT`). En el PC de desarrollo:
+
+```sh
+cargo xtask fit-drivers /ruta/a/SOSODRV.TXT
+# o actualizar solo la ESP del pendrive:
+cargo xtask fit-drivers target/SOSODRV.TXT --esp /dev/sdX
+```
+
+### Trazas persistentes en USB live (`SOSOLOG.TXT`)
+
+En arranque live, el kernel vuelca automáticamente el log de consola (ring de
+~256 KiB) al fichero **`SOSOLOG.TXT`** en la **ESP** (partición 1 FAT del
+pendrive). No hace falta teclado: el volcado empieza en cuanto se detecta el
+disco live y se repite cada ~2 s si hay trazas nuevas (también en panic).
+
+Tras probar soso en placa o QEMU, vuelve a Linux y lee el log:
+
+```sh
+# La ESP suele montarse sola (ej. /media/$USER/UEFI o similar)
+ls /media/$USER/*/SOSOLOG.TXT
+cat /media/$USER/*/SOSOLOG.TXT | less
+
+# O con mtools sobre la imagen:
+mcopy -i target/usb-live/soso-live.img@@$(sgdisk -i 1 target/usb-live/soso-live.img | awk '/First sector/{print $3*512}') ::/SOSOLOG.TXT -
+```
+
+Regenera la imagen live tras actualizar el kernel:
+`cargo xtask package-usb-live` (incluye el fichero pre-creado en la ESP).
 
 ---
 

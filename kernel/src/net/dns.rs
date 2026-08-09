@@ -3,7 +3,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use smoltcp::iface::{Interface, SocketHandle, SocketSet};
+use smoltcp::iface::{Interface, SocketSet};
 use smoltcp::socket::udp;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
@@ -175,7 +175,7 @@ pub fn resolve_hostname(host: &str) -> Result<soso_abi::SockAddr, i64> {
     })
 }
 
-use super::{NetStack, NET};
+use super::NetStack;
 
 fn parse_dotted_ipv4(s: &str) -> Option<[u8; 4]> {
     let mut oct = [0u8; 4];

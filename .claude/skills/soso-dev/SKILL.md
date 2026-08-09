@@ -22,6 +22,9 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | Command | Action |
 |---------|--------|
 | `cargo xtask build` | Compile kernel → `target/soso-bios.img` |
+| `cargo xtask build --drivers qemu` | Kernel mínimo (virtio-blk + virtio-net) |
+| `cargo xtask fit-drivers target/SOSODRV.TXT` | Reempaqueta kernel según informe hwscan |
+| `cargo xtask driver-add <git-url>` | Clona port lxdde externo a `lxdde/ports-extern/` |
 | `cargo xtask run` | Build + launch QEMU (serial on stdio) |
 | `cargo xtask gdb` | Frozen at boot; `gdb -ex 'target remote :1234'` |
 | `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
@@ -35,6 +38,8 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo run -p mkfs-sosomfs -- dir1 dir2 imagen.img --size 8G` | Empaquetar varios modelos en una imagen sosomfs |
 | `cargo xtask lx-build` | Compilar `liblxdde.a` (drivers Linux portados) |
 | `cargo xtask lx-build nouveau` | Compilar solo el port nouveau/nvkm (GPU, L6/G5 GO en GB205) |
+| `cargo xtask lx-build iwlwifi` | Compilar driver Intel AX211 (WiFi + mac80211 mínimo) |
+| `./scripts/l6-wifi-vfio-test.sh` | Passthrough VFIO WiFi AX211 a QEMU (prueba ALIVE) |
 | `cargo xtask g1-check` | Checklist host G1 (IOMMU/VFIO, firmware, BAR0) |
 | `cargo xtask g3-check` | Checklist bring-up GSP (firmware, módulos, fases) |
 | `./scripts/l6-pack-firmware.sh` | Empaquetar firmware GSP gb205 (.zst→.bin) en rootfs |
@@ -60,6 +65,35 @@ SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask run
 ```
 
 QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
+
+## WiFi (Intel AX211, hardware real)
+
+```sh
+cargo xtask lx-build iwlwifi
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=iwlwifi cargo xtask build
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=iwlwifi cargo xtask flash-usb-live /dev/sdX --yes
+# VFIO passthrough a QEMU (requiere root + IOMMU):
+sudo ./scripts/l6-wifi-vfio-test.sh
+```
+
+Config: `/etc/wifi.conf` (`ssid=`, `psk=`). Firmware en `rootfs/lib/firmware/iwlwifi-so-a0-gf-a0-*`.
+Kshell: `wifi scan`, `wifi status`, `wifi connect <ssid> [psk]`, `hwscan` (informe PCI → serie y `SOSODRV.TXT` en live).
+
+## Perfiles de drivers (`SOSO_DRIVERS` / `--drivers`)
+
+| Preset | Features kernel | Uso |
+|--------|-----------------|-----|
+| `all` (default) | `drv-all` | Desarrollo y `cargo xtask test` |
+| `qemu` | virtio-blk, virtio-net | Imagen mínima QEMU |
+| `live-usb` | virtio + nvme + usb + live-disk | Pendrive live |
+
+Tras arrancar en hardware con kernel mínimo, `hwscan` lista dispositivos PCI y
+drivers ausentes. En host: `cargo xtask fit-drivers /media/.../SOSODRV.TXT`
+(o `--esp /dev/sdX1`) regenera el kernel con los drivers necesarios.
+
+Ports lxdde externos: repo con `source.list` (+ opcional `driver.toml`,
+`firmware/`). `cargo xtask driver-add <url>` los registra en
+`drivers-extern.toml` y `lx-build all` los incluye.
 
 ## What `run` does
 
@@ -102,9 +136,16 @@ cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 #   cargo run -q --release -p mkmodel-soso -- --moe target/tiny-moe-model
 #   cargo run --release -p soso-llm-core --features std --example hostrun -- target/tiny-moe-model @bos 4
 
-# End-to-end (builds, QEMU, serial log, TCP, SSH, soso-llm tiny + tiny-moe,
-# init test meminfo, inferencia con RAM 48M/reclaim, halt)
+# End-to-end (builds, QEMU shards en paralelo, TCP, SSH, soso-llm, init test, reclaim, halt)
 cargo xtask test
+
+# Paralelismo (default 2 QEMU simultáneos; 1 = secuencial para depurar; 4 con KVM)
+SOSO_TEST_JOBS=4 cargo xtask test
+SOSO_TEST_JOBS=1 cargo xtask test
+
+# Logs por shard: target/test-{llm-dense,llm-moe,sys,reclaim}-serial.log
+# Imágenes copiadas: target/test-{shard}-{bios,data,models}.img
+# `cargo xtask run` y `bench-llm` siguen en puertos 2222/7777
 
 # Decode tok/s con modelo sintético bench (default SMP=1,4 mem=8G)
 cargo xtask bench-llm

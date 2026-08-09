@@ -1,0 +1,8 @@
+# iwlwifi — Intel AX211 via capa lx_emul (transporte + mac80211 mínimo)
+lxdde/ports/iwlwifi/iwlwifi_lx.c
+lxdde/ports/iwlwifi/iwl_ax211.c
+lxdde/shim/src/iwlwifi_shim.c
+lxdde/shim/src/skbuff_lx.c
+lxdde/shim/src/netdev_lx.c
+lxdde/shim/src/cfg80211_lx.c
+lxdde/shim/src/mac80211_lx.c

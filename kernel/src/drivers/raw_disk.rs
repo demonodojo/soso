@@ -30,18 +30,21 @@ pub fn list(out: &mut [DiskInfo]) -> usize {
     let mut n = 0usize;
     let boot = boot_source();
 
+    #[cfg(feature = "drv-usb")]
     if crate::drivers::usb_storage::active() {
         if n < out.len() {
             out[n] = info_usb(boot == Some(RawId::Usb));
             n += 1;
         }
     }
+    #[cfg(feature = "drv-virtio-blk")]
     if crate::drivers::virtio_blk::BLK0.get().is_some() {
         if n < out.len() {
             out[n] = info_virtio0(boot == Some(RawId::Virtio0));
             n += 1;
         }
     }
+    #[cfg(feature = "drv-nvme")]
     for slot in 0..NVME_SLOTS {
         if crate::drivers::nvme::present_slot(slot) {
             if n < out.len() {
@@ -53,31 +56,38 @@ pub fn list(out: &mut [DiskInfo]) -> usize {
     n
 }
 
-/// Disco del que arrancó el live (origen de la imagen a clonar).
 fn boot_source() -> Option<RawId> {
+    #[cfg(feature = "drv-live-disk")]
     if !crate::drivers::live_disk::active() {
         return None;
     }
-    // live_disk no exporta backend; re-probar en el mismo orden que init().
+    #[cfg(not(feature = "drv-live-disk"))]
+    return None;
+
+    #[cfg(all(feature = "drv-live-disk", feature = "drv-usb"))]
     if crate::drivers::usb_storage::active() && probe_gpt_usb() {
         return Some(RawId::Usb);
     }
+    #[cfg(all(feature = "drv-live-disk", feature = "drv-virtio-blk"))]
     if crate::drivers::virtio_blk::BLK0.get().is_some() && probe_gpt_virtio() {
         return Some(RawId::Virtio0);
     }
     None
 }
 
+#[cfg(all(feature = "drv-live-disk", feature = "drv-usb"))]
 fn probe_gpt_usb() -> bool {
     let mut sec = [0u8; SECTOR];
     crate::drivers::usb_storage::read_sector(1, &mut sec).is_ok() && &sec[0..8] == b"EFI PART"
 }
 
+#[cfg(all(feature = "drv-live-disk", feature = "drv-virtio-blk"))]
 fn probe_gpt_virtio() -> bool {
     let mut sec = [0u8; SECTOR];
     crate::drivers::virtio_blk::read_sector(1, &mut sec).is_ok() && &sec[0..8] == b"EFI PART"
 }
 
+#[cfg(feature = "drv-usb")]
 fn info_usb(boot: bool) -> DiskInfo {
     let sectors = crate::drivers::usb_storage::sector_count().unwrap_or(0);
     let mut name = [0u8; 16];
@@ -92,6 +102,7 @@ fn info_usb(boot: bool) -> DiskInfo {
     }
 }
 
+#[cfg(feature = "drv-virtio-blk")]
 fn info_virtio0(boot: bool) -> DiskInfo {
     let sectors = crate::drivers::virtio_blk::capacity_sectors().unwrap_or(0);
     let mut name = [0u8; 16];
@@ -106,6 +117,7 @@ fn info_virtio0(boot: bool) -> DiskInfo {
     }
 }
 
+#[cfg(feature = "drv-nvme")]
 fn info_nvme(slot: usize) -> DiskInfo {
     let lba_size = crate::drivers::nvme::lba_size_slot(slot).unwrap_or(512);
     let n = crate::drivers::nvme::capacity_lba_slot(slot).unwrap_or(0);
@@ -114,7 +126,11 @@ fn info_nvme(slot: usize) -> DiskInfo {
     let label = if slot == 0 { b"nvme0" } else { b"nvme1" };
     copy_name(&mut name, label);
     DiskInfo {
-        id: if slot == 0 { RawId::Nvme0 as u32 } else { RawId::Nvme1 as u32 },
+        id: if slot == 0 {
+            RawId::Nvme0 as u32
+        } else {
+            RawId::Nvme1 as u32
+        },
         kind: DISK_KIND_NVME,
         slot: slot as u32,
         sectors,
@@ -133,9 +149,6 @@ pub fn read(id: u32, lba: u64, buf: &mut [u8]) -> Result<(), i64> {
         return Err(-soso_abi::EINVAL);
     }
     let id = RawId::from_u32(id).ok_or(-soso_abi::EINVAL)?;
-    if is_boot(id) && !writable(id) {
-        // lectura OK
-    }
     let mut off = 0usize;
     while off < buf.len() {
         let mut sec = [0u8; SECTOR];
@@ -178,23 +191,36 @@ fn writable(id: RawId) -> bool {
 
 fn read_sector(id: RawId, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), i64> {
     match id {
-        RawId::Usb => crate::drivers::usb_storage::read_sector(lba, buf).map_err(|_| -soso_abi::EIO),
+        #[cfg(feature = "drv-usb")]
+        RawId::Usb => {
+            crate::drivers::usb_storage::read_sector(lba, buf).map_err(|_| -soso_abi::EIO)
+        }
+        #[cfg(feature = "drv-virtio-blk")]
         RawId::Virtio0 => {
             crate::drivers::virtio_blk::read_sector(lba, buf).map_err(|_| -soso_abi::EIO)
         }
+        #[cfg(feature = "drv-nvme")]
         RawId::Nvme0 => nvme_read_512(0, lba, buf),
+        #[cfg(feature = "drv-nvme")]
         RawId::Nvme1 => nvme_read_512(1, lba, buf),
+        #[cfg(not(any(feature = "drv-usb", feature = "drv-virtio-blk", feature = "drv-nvme")))]
+        _ => Err(-soso_abi::ENOENT),
+        #[allow(unreachable_patterns)]
+        _ => Err(-soso_abi::ENOENT),
     }
 }
 
 fn write_sector(id: RawId, lba: u64, buf: &[u8; SECTOR]) -> Result<(), i64> {
     match id {
+        #[cfg(feature = "drv-nvme")]
         RawId::Nvme0 => nvme_write_512(0, lba, buf),
+        #[cfg(feature = "drv-nvme")]
         RawId::Nvme1 => nvme_write_512(1, lba, buf),
         _ => Err(-soso_abi::EROFS),
     }
 }
 
+#[cfg(feature = "drv-nvme")]
 fn nvme_read_512(slot: usize, gpt_lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), i64> {
     if !crate::drivers::nvme::present_slot(slot) {
         return Err(-soso_abi::ENOENT);
@@ -206,7 +232,8 @@ fn nvme_read_512(slot: usize, gpt_lba: u64, buf: &mut [u8; SECTOR]) -> Result<()
             let nvme_lba = gpt_lba / 8;
             let off = (gpt_lba % 8) as usize * SECTOR;
             let mut page = [0u8; 4096];
-            crate::drivers::nvme::read_lba_slot(slot, nvme_lba, &mut page).map_err(|_| -soso_abi::EIO)?;
+            crate::drivers::nvme::read_lba_slot(slot, nvme_lba, &mut page)
+                .map_err(|_| -soso_abi::EIO)?;
             buf.copy_from_slice(&page[off..off + SECTOR]);
             Ok(())
         }
@@ -214,6 +241,7 @@ fn nvme_read_512(slot: usize, gpt_lba: u64, buf: &mut [u8; SECTOR]) -> Result<()
     }
 }
 
+#[cfg(feature = "drv-nvme")]
 fn nvme_write_512(slot: usize, gpt_lba: u64, buf: &[u8; SECTOR]) -> Result<(), i64> {
     if !crate::drivers::nvme::present_slot(slot) {
         return Err(-soso_abi::ENOENT);
@@ -227,7 +255,8 @@ fn nvme_write_512(slot: usize, gpt_lba: u64, buf: &[u8; SECTOR]) -> Result<(), i
             let nvme_lba = gpt_lba / 8;
             let off = (gpt_lba % 8) as usize * SECTOR;
             let mut page = [0u8; 4096];
-            crate::drivers::nvme::read_lba_slot(slot, nvme_lba, &mut page).map_err(|_| -soso_abi::EIO)?;
+            crate::drivers::nvme::read_lba_slot(slot, nvme_lba, &mut page)
+                .map_err(|_| -soso_abi::EIO)?;
             page[off..off + SECTOR].copy_from_slice(buf);
             crate::drivers::nvme::write_lba_slot(slot, nvme_lba, &page).map_err(|_| -soso_abi::EIO)
         }

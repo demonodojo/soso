@@ -38,7 +38,7 @@ pub struct DistributedConfig {
 struct RemoteLink {
     addr: String,
     tx: FramedTransport<TcpFd>,
-    segment: soso_llm_core::pipeline::PipelineSegment,
+    _segment: soso_llm_core::pipeline::PipelineSegment,
 }
 
 fn now_ms() -> u64 {
@@ -166,7 +166,7 @@ pub fn run_head(
         remotes.push(RemoteLink {
             addr: remote.clone(),
             tx,
-            segment: seg,
+            _segment: seg,
         });
     }
 

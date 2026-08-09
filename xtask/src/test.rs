@@ -6,144 +6,452 @@
 //! 4. Sesión SSH autenticada por clave, ejecuta un comando y apaga con
 //!    `halt` (que a su vez comprueba el apagado limpio).
 //!
+//! Los pasos de guest se reparten en shards QEMU independientes (puertos e
+//! imágenes propios) limitados por `SOSO_TEST_JOBS` (default 2).
+//!
 //! Sale con código 0 si todo pasa, 1 si algo falla.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// QEMU sale con (code<<1)|1; ExitCode::Success = 0x10 -> 33.
 const HALT_EXIT: i32 = 33;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShardId {
+    LlmDense,
+    LlmMoe,
+    Sys,
+    Reclaim,
+}
+
+impl ShardId {
+    const ALL: [ShardId; 4] = [
+        ShardId::LlmDense,
+        ShardId::LlmMoe,
+        ShardId::Sys,
+        ShardId::Reclaim,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            ShardId::LlmDense => "llm-dense",
+            ShardId::LlmMoe => "llm-moe",
+            ShardId::Sys => "sys",
+            ShardId::Reclaim => "reclaim",
+        }
+    }
+
+    fn index(self) -> u8 {
+        match self {
+            ShardId::LlmDense => 0,
+            ShardId::LlmMoe => 1,
+            ShardId::Sys => 2,
+            ShardId::Reclaim => 3,
+        }
+    }
+
+    fn ssh_port(self) -> u16 {
+        2200 + 10 * u16::from(self.index())
+    }
+
+    fn echo_port(self) -> u16 {
+        7700 + 10 * u16::from(self.index())
+    }
+
+    fn mac(self) -> String {
+        format!("52:54:00:12:34:{:02x}", 0x20 + self.index())
+    }
+}
+
+struct QemuSlot {
+    id: &'static str,
+    ssh_port: u16,
+    echo_port: u16,
+    mac: String,
+    serial: PathBuf,
+    bios: PathBuf,
+    data: PathBuf,
+    models: PathBuf,
+    mem: Option<String>,
+    smp: Option<String>,
+}
+
+struct Report {
+    fallos: Mutex<u32>,
+}
+
+struct JobPool {
+    available: Mutex<usize>,
+    cvar: Condvar,
+}
+
+struct JobPermit<'a> {
+    pool: &'a JobPool,
+}
+
+impl Report {
+    fn new() -> Self {
+        Self {
+            fallos: Mutex::new(0),
+        }
+    }
+
+    fn fallos(&self) -> u32 {
+        *self.fallos.lock().unwrap()
+    }
+
+    fn marca(&self, shard: &str, nombre: &str, ok: bool) {
+        println!(
+            "{}  [{shard}] {nombre}",
+            if ok { "OK  " } else { "FALLO" }
+        );
+    }
+
+    fn paso<F: FnOnce() -> Result<(), String>>(
+        &self,
+        shard: &str,
+        nombre: &str,
+        f: F,
+    ) -> Result<(), ()> {
+        match f() {
+            Ok(()) => {
+                self.marca(shard, nombre, true);
+                Ok(())
+            }
+            Err(e) => {
+                self.marca(shard, &format!("{nombre}: {e}"), false);
+                *self.fallos.lock().unwrap() += 1;
+                Err(())
+            }
+        }
+    }
+
+    fn paso_con_reintento<F: FnMut() -> Result<(), String>>(
+        &self,
+        shard: &str,
+        nombre: &str,
+        mut f: F,
+    ) -> Result<(), ()> {
+        if let Err(e) = f() {
+            println!("      [{shard}] (reintento de «{nombre}» tras 5 s: {e})");
+            std::thread::sleep(Duration::from_secs(5));
+            return self.paso(shard, nombre, f);
+        }
+        self.marca(shard, nombre, true);
+        Ok(())
+    }
+}
+
+impl JobPool {
+    fn new(max: usize) -> Self {
+        Self {
+            available: Mutex::new(max),
+            cvar: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> JobPermit<'_> {
+        let mut avail = self.available.lock().unwrap();
+        while *avail == 0 {
+            avail = self.cvar.wait(avail).unwrap();
+        }
+        *avail -= 1;
+        JobPermit { pool: self }
+    }
+}
+
+impl Drop for JobPermit<'_> {
+    fn drop(&mut self) {
+        let mut avail = self.pool.available.lock().unwrap();
+        *avail += 1;
+        self.pool.cvar.notify_one();
+    }
+}
+
+fn test_jobs() -> usize {
+    std::env::var("SOSO_TEST_JOBS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2)
+        .clamp(1, 4)
+}
+
 pub fn run() {
     let root = super::project_root();
-    let mut fallos = 0;
+    let report = Arc::new(Report::new());
 
-    // --- 1b) tests sosomfs en el host ---
-    let _ = paso("sosomfs (host)", &mut fallos, || {
-        let st = Command::new("cargo")
-            .current_dir(&root)
-            .args(["test", "-q", "-p", "sosomfs", "--features", "std"])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if st.success() { Ok(()) } else { Err("los tests de sosomfs fallaron".into()) }
-    });
+    run_host_tests_parallel(&root, &report);
 
-    // --- 1) crash-safety del FS en el host ---
-    let _ = paso("crash-safety de sosofs (host)", &mut fallos, || {
-        let st = Command::new("cargo")
-            .current_dir(&root)
-            .args(["test", "-q", "-p", "sosofs", "--features", "std"])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if st.success() { Ok(()) } else { Err("los tests de sosofs fallaron".into()) }
-    });
-
-    // --- 1c) planificador de recursos (host) ---
-    let _ = paso("planificador soso-llm-core (host)", &mut fallos, || {
-        let st = Command::new("cargo")
-            .current_dir(&root)
-            .args(["test", "-q", "-p", "soso-llm-core", "--features", "std"])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if st.success() {
-            Ok(())
-        } else {
-            Err("los tests del planificador fallaron".into())
-        }
-    });
-
-    // --- construir e ir a QEMU ---
     super::build_user();
     let img = super::build_image();
     let data = super::mkfs_rootfs(true);
     let models = super::mkfs_models(true);
     let key = root.join("target/soso_test_key");
-    let serial = root.join("target/test-serial.log");
-    let _ = std::fs::remove_file(&serial);
 
-    let mut qemu = match lanzar_qemu(&img, &data, &models, &serial) {
+    let jobs = test_jobs();
+    println!("xtask test: hasta {jobs} QEMU en paralelo (SOSO_TEST_JOBS)");
+
+    run_shards_parallel(&report, jobs, &img, &data, &models, &key);
+
+    exit_resumen(if report.fallos() == 0 { 0 } else { 1 });
+}
+
+fn run_host_tests_parallel(root: &Path, report: &Arc<Report>) {
+    let crates = [
+        ("sosomfs", "sosomfs (host)"),
+        ("sosofs", "crash-safety de sosofs (host)"),
+        ("soso-llm-core", "planificador soso-llm-core (host)"),
+    ];
+    std::thread::scope(|scope| {
+        for (pkg, nombre) in crates {
+            let root = root.to_path_buf();
+            let report = Arc::clone(report);
+            scope.spawn(move || {
+                let result = (|| {
+                    let st = Command::new("cargo")
+                        .current_dir(&root)
+                        .args(["test", "-q", "-p", pkg, "--features", "std"])
+                        .status()
+                        .map_err(|e| e.to_string())?;
+                    if st.success() {
+                        Ok(())
+                    } else {
+                        Err(format!("los tests de {pkg} fallaron"))
+                    }
+                })();
+                match result {
+                    Ok(()) => report.marca("host", nombre, true),
+                    Err(e) => {
+                        report.marca("host", &format!("{nombre}: {e}"), false);
+                        *report.fallos.lock().unwrap() += 1;
+                    }
+                }
+            });
+        }
+    });
+}
+
+fn run_shards_parallel(
+    report: &Arc<Report>,
+    jobs: usize,
+    img: &Path,
+    data: &Path,
+    models: &Path,
+    key: &Path,
+) {
+    let pool = Arc::new(JobPool::new(jobs));
+    std::thread::scope(|scope| {
+        for shard in ShardId::ALL {
+            let report = Arc::clone(report);
+            let pool = Arc::clone(&pool);
+            let img = img.to_path_buf();
+            let data = data.to_path_buf();
+            let models = models.to_path_buf();
+            let key = key.to_path_buf();
+            scope.spawn(move || {
+                let _permit = pool.acquire();
+                let slot = make_slot(shard, &img, &data, &models);
+                run_shard(shard, &slot, &key, &report);
+            });
+        }
+    });
+}
+
+fn make_slot(shard: ShardId, img: &Path, data: &Path, models: &Path) -> QemuSlot {
+    let id = shard.name();
+    let root = super::project_root();
+    let serial = root.join(format!("test-{id}-serial.log"));
+    let _ = std::fs::remove_file(&serial);
+    QemuSlot {
+        id,
+        ssh_port: shard.ssh_port(),
+        echo_port: shard.echo_port(),
+        mac: shard.mac(),
+        serial,
+        bios: copiar_imagen(img, id, "bios"),
+        data: copiar_imagen(data, id, "data"),
+        models: copiar_imagen(models, id, "models"),
+        mem: if shard == ShardId::Reclaim {
+            Some("48M".into())
+        } else {
+            None
+        },
+        smp: if shard == ShardId::Reclaim {
+            Some("1".into())
+        } else {
+            None
+        },
+    }
+}
+
+fn copiar_imagen(src: &Path, shard_id: &str, kind: &str) -> PathBuf {
+    let dst = super::project_root()
+        .join("target")
+        .join(format!("test-{shard_id}-{kind}.img"));
+    std::fs::copy(src, &dst).unwrap_or_else(|e| {
+        panic!(
+            "copiar {} → {}: {e}",
+            src.display(),
+            dst.display()
+        );
+    });
+    dst
+}
+
+fn run_shard(shard: ShardId, slot: &QemuSlot, key: &Path, report: &Report) {
+    match shard {
+        ShardId::LlmDense => run_shard_llm_dense(slot, key, report),
+        ShardId::LlmMoe => run_shard_llm_moe(slot, key, report),
+        ShardId::Sys => run_shard_sys(slot, key, report),
+        ShardId::Reclaim => run_shard_reclaim(slot, key, report),
+    }
+}
+
+fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report) {
+    let sid = slot.id;
+    let qemu = match lanzar_qemu(slot) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("FALLO  lanzar QEMU: {e}");
-            exit_resumen(1);
+            report.marca(sid, &format!("lanzar QEMU: {e}"), false);
+            *report.fallos.lock().unwrap() += 1;
+            return;
         }
     };
-
-    // --- 2) arranque hasta la shell ---
-    let arrancado = paso("arranque hasta la shell", &mut fallos, || {
-        esperar_en_fichero(&serial, "sosh —", Duration::from_secs(90))
-    })
-    .is_ok();
-
+    let _vivo = QemuVivo(qemu);
+    let arrancado = report
+        .paso(sid, "arranque hasta la shell", || {
+            esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(90))
+        })
+        .is_ok();
     if arrancado {
-        // --- 3) echo TCP ---
-        let _ = paso("echo TCP en :7777", &mut fallos, echo_tcp);
-
-        // --- 4) inferencia LLM (modelo tiny en disco 1) ---
-        let _ = paso_con_reintento("soso-llm run tiny --prompt test", &mut fallos, || {
-            ssh_llm(&key)
+        let port = slot.ssh_port;
+        let _ = report.paso_con_reintento(sid, "soso-llm run tiny --prompt test", || {
+            ssh_llm(key, port)
         });
-
-        // --- 4b) inferencia MoE (tiny-moe, streaming por experto) ---
-        let _ = paso_con_reintento("soso-llm run tiny-moe --prompt @bos --max 2", &mut fallos, || {
-            ssh_llm_moe(&key)
-        });
-
-        // --- 4c) inferencia MLA (tiny-mla, KV latente) ---
-        let _ = paso_con_reintento("soso-llm run tiny-mla --prompt test --max 2", &mut fallos, || {
-            ssh_llm_mla(&key)
-        });
-
-        // --- 4d) inferencia LatentMoE (tiny-latent-moe) ---
-        let _ = paso_con_reintento(
-            "soso-llm run tiny-latent-moe --prompt @bos --max 2",
-            &mut fallos,
-            || ssh_llm_latent_moe(&key),
+        let _ = report.paso_con_reintento(
+            sid,
+            "soso-llm run tiny-mla --prompt test --max 2",
+            || ssh_llm_mla(key, port),
         );
+    }
+}
 
-        // --- 5) regresión de syscalls dentro del guest (incl. GPU, hilos, FPU) ---
-        let _ = paso_con_reintento("init test (syscalls, hilos, FPU, GPU)", &mut fallos, || {
-            ssh_init_test(&key)
+fn run_shard_llm_moe(slot: &QemuSlot, key: &Path, report: &Report) {
+    let sid = slot.id;
+    let qemu = match lanzar_qemu(slot) {
+        Ok(c) => c,
+        Err(e) => {
+            report.marca(sid, &format!("lanzar QEMU: {e}"), false);
+            *report.fallos.lock().unwrap() += 1;
+            return;
+        }
+    };
+    let _vivo = QemuVivo(qemu);
+    let arrancado = report
+        .paso(sid, "arranque hasta la shell", || {
+            esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(90))
+        })
+        .is_ok();
+    if arrancado {
+        let port = slot.ssh_port;
+        let _ = report.paso_con_reintento(
+            sid,
+            "soso-llm run tiny-moe --prompt @bos --max 2",
+            || ssh_llm_moe(key, port),
+        );
+        let _ = report.paso_con_reintento(
+            sid,
+            "soso-llm run tiny-latent-moe --prompt @bos --max 2",
+            || ssh_llm_latent_moe(key, port),
+        );
+    }
+}
+
+fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report) {
+    let sid = slot.id;
+    let mut qemu = match lanzar_qemu(slot) {
+        Ok(c) => c,
+        Err(e) => {
+            report.marca(sid, &format!("lanzar QEMU: {e}"), false);
+            *report.fallos.lock().unwrap() += 1;
+            return;
+        }
+    };
+    let arrancado = report
+        .paso(sid, "arranque hasta la shell", || {
+            esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(90))
+        })
+        .is_ok();
+    if arrancado {
+        let echo = slot.echo_port;
+        let port = slot.ssh_port;
+        let _ = report.paso(sid, &format!("echo TCP en :{echo}"), || echo_tcp(echo));
+        let _ = report.paso_con_reintento(sid, "init test (syscalls, hilos, FPU, GPU)", || {
+            ssh_init_test(key, port)
         });
-
-        // --- 6) pipeline con más datos que la capacidad del pipe ---
-        let _ = paso_con_reintento("pipeline de sosh (6 KiB por un pipe)", &mut fallos, || {
-            ssh_pipeline(&key)
+        let _ = report.paso_con_reintento(sid, "pipeline de sosh (6 KiB por un pipe)", || {
+            ssh_pipeline(key, port)
         });
-
-        // --- 7) sesión SSH autenticada + halt ---
-        let _ = paso("SSH por clave pública + comando + halt", &mut fallos, || {
-            ssh_sesion(&key)
+        let _ = report.paso(sid, "SSH por clave pública + comando + halt", || {
+            ssh_sesion(key, port)
         });
     }
-
-    // --- comprobar apagado por halt (o matar QEMU) ---
-    let apagado = espera_salida(&mut qemu, Duration::from_secs(10));
-    match apagado {
+    match espera_salida(&mut qemu, Duration::from_secs(10)) {
         Some(code) if code == HALT_EXIT => {
-            marca("apagado limpio por halt", true);
+            report.marca(sid, "apagado limpio por halt", true);
         }
         Some(code) => {
-            marca(&format!("QEMU salió con código inesperado {code}"), false);
-            fallos += 1;
+            report.marca(sid, &format!("QEMU salió con código inesperado {code}"), false);
+            *report.fallos.lock().unwrap() += 1;
         }
         None => {
-            marca("QEMU no se apagó con halt (matado)", false);
-            fallos += 1;
+            report.marca(sid, "QEMU no se apagó con halt (matado)", false);
+            *report.fallos.lock().unwrap() += 1;
             let _ = qemu.kill();
         }
     }
     let _ = qemu.wait();
-
-    // --- inferencia con RAM reducida (reclaim de pesos mmap) ---
-    let _ = paso("soso-llm con RAM 48M (reclaim)", &mut fallos, || {
-        test_reclaim_low_mem(&img, &data, &models)
-    });
-
-    exit_resumen(if fallos == 0 { 0 } else { 1 });
 }
+
+fn run_shard_reclaim(slot: &QemuSlot, key: &Path, report: &Report) {
+    let sid = slot.id;
+    let qemu = match lanzar_qemu(slot) {
+        Ok(c) => c,
+        Err(e) => {
+            report.marca(sid, &format!("lanzar QEMU: {e}"), false);
+            *report.fallos.lock().unwrap() += 1;
+            return;
+        }
+    };
+    let _vivo = QemuVivo(qemu);
+    let port = slot.ssh_port;
+    let _ = report.paso(sid, "soso-llm con RAM 48M (reclaim)", || {
+        esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(300))?;
+        let texto = ssh_guion(
+            key,
+            port,
+            "soso-llm run tiny --prompt x --max 2\nexit\n",
+            Duration::from_secs(420),
+        )?;
+        if !texto.contains("soso-llm: generado") {
+            return Err(format!(
+                "inferencia con 48M no completó; stdout: {texto:?}"
+            ));
+        }
+        if !texto.contains("soso-llm: planificador") {
+            return Err(format!(
+                "falta salida del planificador con 48M; stdout: {texto:?}"
+            ));
+        }
+        Ok(())
+    });
+}
+
 
 fn exit_resumen(code: i32) -> ! {
     if code == 0 {
@@ -172,54 +480,55 @@ fn paso<F: FnOnce() -> Result<(), String>>(
     }
 }
 
-/// Como `paso`, pero reintenta una vez tras una pausa.
-///
-/// Para los pasos que van por SSH: una reconexión inmediata tras cerrar la
-/// sesión anterior falla a veces (el servidor de soso aún está soltando la
-/// sesión previa). Es un fallo conocido del arnés, no del sistema, y hacía que la
-/// suite diese rojo por algo que a la segunda va — que es la peor clase de test,
-/// porque enseña a desconfiar de los rojos. El reintento se ANUNCIA, para que un
-/// flake permanente siga siendo visible en vez de quedar tapado.
-fn paso_con_reintento<F: FnMut() -> Result<(), String>>(
-    nombre: &str,
-    fallos: &mut u32,
-    mut f: F,
-) -> Result<(), ()> {
-    if let Err(e) = f() {
-        println!("      (reintento de «{nombre}» tras 5 s: {e})");
-        std::thread::sleep(Duration::from_secs(5));
-        return paso(nombre, fallos, f);
-    }
-    marca(nombre, true);
-    Ok(())
-}
-
 fn marca(nombre: &str, ok: bool) {
     println!("{}  {nombre}", if ok { "OK  " } else { "FALLO" });
 }
 
-fn lanzar_qemu(
-    img: &std::path::Path,
-    data: &std::path::Path,
-    models: &std::path::Path,
-    serial: &std::path::Path,
-) -> std::io::Result<Child> {
+fn lanzar_qemu(slot: &QemuSlot) -> std::io::Result<Child> {
+    let mem = slot.mem.clone().unwrap_or_else(super::qemu_mem);
+    let smp = slot.smp.clone().unwrap_or_else(super::qemu_smp);
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args(["-machine", "q35", "-cpu", "max"])
-        .args(["-m", &super::qemu_mem()])
-        .args(["-smp", &super::qemu_smp()]);
-    super::apply_firmware(&mut qemu, img);
-    qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
-    super::apply_qemu_disks(&mut qemu, data, models);
-    super::apply_qemu_nic(&mut qemu);
+        .args(["-m", &mem])
+        .args(["-smp", &smp]);
+    super::apply_firmware(&mut qemu, &slot.bios);
+    qemu.args([
+        "-drive",
+        &format!("format=raw,file={}", slot.bios.display()),
+    ]);
+    super::apply_qemu_disks(&mut qemu, &slot.data, &slot.models);
+    super::apply_qemu_usb(&mut qemu);
+    super::apply_qemu_nic_with_ports(&mut qemu, slot.ssh_port, slot.echo_port, Some(&slot.mac));
     super::apply_qemu_gpu(&mut qemu);
-    qemu.args(["-serial", &format!("file:{}", serial.display())])
+    qemu.args(["-serial", &format!("file:{}", slot.serial.display())])
         .args(["-display", "none"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .arg("-no-reboot")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
+}
+
+/// Arranque con puertos por defecto (test-usb, lx-e1000e smoke).
+fn lanzar_qemu_legacy(
+    img: &Path,
+    data: &Path,
+    models: &Path,
+    serial: &Path,
+) -> std::io::Result<Child> {
+    let slot = QemuSlot {
+        id: "legacy",
+        ssh_port: 2222,
+        echo_port: 7777,
+        mac: "52:54:00:12:34:15".into(),
+        serial: serial.to_path_buf(),
+        bios: img.to_path_buf(),
+        data: data.to_path_buf(),
+        models: models.to_path_buf(),
+        mem: None,
+        smp: None,
+    };
+    lanzar_qemu(&slot)
 }
 
 /// Espera a que aparezca `patron` en el fichero de serie.
@@ -240,8 +549,8 @@ pub(crate) fn esperar_en_fichero(
     Err(format!("no apareció {patron:?} en {limite:?}"))
 }
 
-fn echo_tcp() -> Result<(), String> {
-    let mut s = conectar_reintentando(7777, Duration::from_secs(10))?;
+fn echo_tcp(echo_port: u16) -> Result<(), String> {
+    let mut s = conectar_reintentando(echo_port, Duration::from_secs(10))?;
     s.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let msg = b"soso echo test\n";
     s.write_all(msg).map_err(|e| e.to_string())?;
@@ -278,11 +587,16 @@ fn conectar_reintentando(puerto: u16, limite: Duration) -> Result<TcpStream, Str
 /// stdin se mantiene abierto hasta que el hijo muere. Con el parche ya no es
 /// imprescindible, pero cerrarlo antes manda un EOF que el servidor no necesita
 /// ver, y esa es justo la piedra en la que tropezó todo esto (2026-07-28).
-fn ssh_guion(key: &std::path::Path, guion: &str, limite: Duration) -> Result<String, String> {
+fn ssh_guion(
+    key: &Path,
+    ssh_port: u16,
+    guion: &str,
+    limite: Duration,
+) -> Result<String, String> {
     let mut hijo = Command::new("ssh")
         .args(["-tt", "-i"])
         .arg(key)
-        .args(["-p", "2222"])
+        .args(["-p", &ssh_port.to_string()])
         .args(["-o", "StrictHostKeyChecking=no"])
         .args(["-o", "UserKnownHostsFile=/dev/null"])
         .args(["-o", "LogLevel=ERROR"])
@@ -329,7 +643,7 @@ fn ssh_guion(key: &std::path::Path, guion: &str, limite: Duration) -> Result<Str
     Ok(String::from_utf8_lossy(&salida.stdout).into_owned())
 }
 
-fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
+fn ssh_llm(key: &Path, ssh_port: u16) -> Result<(), String> {
     // Dos inferencias en la misma sesión: la de CPU y la que pasa por el camino de
     // syscalls GPU con el dispositivo software del kernel. La segunda es la única
     // cobertura que tiene ese camino sin tarjeta — alloc/map/submit/read, el
@@ -351,6 +665,7 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
     // solo, se lleva la suite por delante (medido el 2026-08-01).
     let texto = ssh_guion(
         key,
+        ssh_port,
         "soso-llm run tiny --prompt test\n                  soso-llm run tiny --prompt test --gpu-soft --max 4\n                  exit\n",
         Duration::from_secs(600),
     )?;
@@ -406,9 +721,10 @@ fn ssh_llm(key: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ssh_llm_moe(key: &std::path::Path) -> Result<(), String> {
+fn ssh_llm_moe(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion(
         key,
+        ssh_port,
         "soso-llm run tiny-moe --prompt @bos --max 2\nexit\n",
         Duration::from_secs(120),
     )?;
@@ -428,9 +744,10 @@ fn ssh_llm_moe(key: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ssh_llm_mla(key: &std::path::Path) -> Result<(), String> {
+fn ssh_llm_mla(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion(
         key,
+        ssh_port,
         "soso-llm run tiny-mla --prompt test --max 2\n                  soso-llm run tiny-mla --prompt test --gpu-soft --max 2\n                  exit\n",
         Duration::from_secs(600),
     )?;
@@ -466,9 +783,10 @@ fn ssh_llm_mla(key: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ssh_llm_latent_moe(key: &std::path::Path) -> Result<(), String> {
+fn ssh_llm_latent_moe(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion(
         key,
+        ssh_port,
         "soso-llm run tiny-latent-moe --prompt @bos --max 2\nexit\n",
         Duration::from_secs(120),
     )?;
@@ -488,12 +806,13 @@ fn ssh_llm_latent_moe(key: &std::path::Path) -> Result<(), String> {
 /// README por un solo pipe para que se llene de verdad y `write_all` tenga que
 /// completar escrituras cortas; se compara byte a byte contra el fichero real, que
 /// el host lee en el momento (nada hardcodeado).
-fn ssh_pipeline(key: &std::path::Path) -> Result<(), String> {
+fn ssh_pipeline(key: &Path, ssh_port: u16) -> Result<(), String> {
     let real = std::fs::read(super::project_root().join("rootfs/README.md"))
         .map_err(|e| format!("no se pudo leer rootfs/README.md: {e}"))?;
 
     let texto = ssh_guion(
         key,
+        ssh_port,
         "cat /README.md /README.md | cat -\nexit\n",
         Duration::from_secs(90),
     )?
@@ -525,12 +844,12 @@ fn ssh_pipeline(key: &std::path::Path) -> Result<(), String> {
 /// FPU/YMM (L4) y ahora el camino de syscalls GPU eran subpruebas que sólo se
 /// veían si alguien las lanzaba a mano. Un test que hay que acordarse de correr no
 /// es una red de seguridad.
-fn ssh_init_test(key: &std::path::Path) -> Result<(), String> {
+fn ssh_init_test(key: &Path, ssh_port: u16) -> Result<(), String> {
     // 150 s bastaban con KVM; sin él (TCG) esta batería —hilos, futex, estrés de
     // FPU/YMM y el camino de syscalls GPU— se pone en varios minutos. Ver la nota
     // del límite en `ssh_llm`: pasarse de corto aquí no cuesta un rojo, cuesta la
     // suite entera desde este punto.
-    let texto = ssh_guion(key, "init test\nexit\n", Duration::from_secs(420))?;
+    let texto = ssh_guion(key, ssh_port, "init test\nexit\n", Duration::from_secs(420))?;
     // El FALLO se mira ANTES del TODO OK: la suite del guest corta en el primer
     // fallo, así que sin esto un "FALLO" temprano y ningún "TODO OK" darían el
     // mismo error genérico que un timeout, y son cosas distintas.
@@ -545,13 +864,13 @@ fn ssh_init_test(key: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ssh_sesion(key: &std::path::Path) -> Result<(), String> {
+fn ssh_sesion(key: &Path, ssh_port: u16) -> Result<(), String> {
     let token = "soso_ssh_ok_42";
     // Acaba en `halt`: aquí la sesión no se cierra porque salga la shell, sino
     // porque el guest se apaga y se lleva la conexión por delante. Vale igual para
     // esperar al cliente, y de paso deja de ser una carrera contra un sleep de 4 s.
     let guion = format!("echo {token} > /tmp/xtask.txt\ncat /tmp/xtask.txt\nhalt\n");
-    let texto = ssh_guion(key, &guion, Duration::from_secs(60))?;
+    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(60))?;
     if texto.contains(token) {
         Ok(())
     } else {
@@ -589,56 +908,6 @@ impl Drop for QemuVivo {
     }
 }
 
-/// Segunda instancia QEMU con poca RAM: el reclaim del kernel debe permitir
-/// completar la inferencia del modelo tiny (pesos en disco, streaming).
-fn test_reclaim_low_mem(
-    img: &std::path::Path,
-    data: &std::path::Path,
-    models: &std::path::Path,
-) -> Result<(), String> {
-    let root = super::project_root();
-    let serial = root.join("target/test-reclaim-serial.log");
-    let _ = std::fs::remove_file(&serial);
-    let mut qemu = Command::new("qemu-system-x86_64");
-    qemu.args(["-machine", "q35", "-cpu", "max"])
-        .args(["-m", "48M"])
-        .args(["-smp", "1"]);
-    super::apply_firmware(&mut qemu, img);
-    qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
-    super::apply_qemu_disks(&mut qemu, data, models);
-    super::apply_qemu_nic(&mut qemu);
-    super::apply_qemu_gpu(&mut qemu);
-    qemu.args(["-serial", &format!("file:{}", serial.display())])
-        .args(["-display", "none"])
-        .arg("-no-reboot")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let _vivo = QemuVivo(qemu.spawn().map_err(|e| e.to_string())?);
-    // Arrancar con 48 MiB obliga al kernel a reclamar desde el primer momento, y
-    // sin KVM eso se pasa de los 120 s que bastaban con aceleración.
-    esperar_en_fichero(&serial, "sosh —", Duration::from_secs(300))?;
-    let key = root.join("target/soso_test_key");
-    let texto = ssh_guion(
-        &key,
-        "soso-llm run tiny --prompt x --max 2\nexit\n",
-        // Dos tokens, pero con 48 MiB el reclaim relee shards todo el rato y sin
-        // KVM eso son minutos. Mismo razonamiento que en `ssh_llm`.
-        Duration::from_secs(420),
-    )?;
-    drop(_vivo);
-    if !texto.contains("soso-llm: generado") {
-        return Err(format!(
-            "inferencia con 48M no completó; stdout: {texto:?}"
-        ));
-    }
-    if !texto.contains("soso-llm: planificador") {
-        return Err(format!(
-            "falta salida del planificador con 48M; stdout: {texto:?}"
-        ));
-    }
-    Ok(())
-}
-
 /// Smoke test lx-e1000e (`SOSO_LXDDE_TEST=1` tras `cargo xtask test`).
 pub fn run_lx_e1000e_smoke() {
     let root = super::project_root();
@@ -650,7 +919,7 @@ pub fn run_lx_e1000e_smoke() {
     let models = super::mkfs_models(true);
     let serial = root.join("target/test-lx-serial.log");
     let _ = std::fs::remove_file(&serial);
-    let mut qemu = lanzar_qemu(&img, &data, &models, &serial).expect("QEMU lx-e1000e");
+    let mut qemu = lanzar_qemu_legacy(&img, &data, &models, &serial).expect("QEMU lx-e1000e");
     let ok = esperar_en_fichero(&serial, "sosh —", Duration::from_secs(120)).is_ok();
     let _ = qemu.kill();
     let _ = qemu.wait();
@@ -659,5 +928,119 @@ pub fn run_lx_e1000e_smoke() {
     } else {
         eprintln!("FALLO  lx-e1000e smoke (ver {})", serial.display());
         std::process::exit(1);
+    }
+}
+
+struct UsbTestScenario {
+    name: &'static str,
+    log: &'static str,
+    xhci: Option<&'static str>,
+    usb_kbd: bool,
+    extra_serial: Option<&'static str>,
+}
+
+/// Batería USB/xHCI en QEMU (`cargo xtask test-usb`).
+pub fn run_usb() {
+    let root = super::project_root();
+    let mut fallos = 0u32;
+
+    super::build_user();
+    let img = super::build_image();
+    let data = super::mkfs_rootfs(true);
+    let models = super::mkfs_models(true);
+
+    let escenarios = [
+        UsbTestScenario {
+            name: "BOT qemu-xhci",
+            log: "target/test-usb-qemu.log",
+            xhci: None,
+            usb_kbd: false,
+            extra_serial: None,
+        },
+        UsbTestScenario {
+            name: "BOT nec-usb-xhci",
+            log: "target/test-usb-nec.log",
+            xhci: Some("nec"),
+            usb_kbd: false,
+            extra_serial: None,
+        },
+        UsbTestScenario {
+            name: "BOT + teclado HID",
+            log: "target/test-usb-kbd.log",
+            xhci: None,
+            usb_kbd: true,
+            extra_serial: Some("kbd=true"),
+        },
+    ];
+
+    for esc in escenarios {
+        let serial = root.join(esc.log);
+        let _ = std::fs::remove_file(&serial);
+        let ok = paso(&format!("USB: {}", esc.name), &mut fallos, || {
+            run_usb_scenario(&img, &data, &models, &serial, esc)
+        })
+        .is_ok();
+        if !ok {
+            eprintln!("      ver log serie: {}", serial.display());
+        }
+    }
+
+    if fallos > 0 {
+        eprintln!("\ntest-usb: {fallos} escenario(s) fallaron");
+        std::process::exit(1);
+    }
+    println!("\ntest-usb: todos los escenarios OK");
+}
+
+fn run_usb_scenario(
+    img: &std::path::Path,
+    data: &std::path::Path,
+    models: &std::path::Path,
+    serial: &std::path::Path,
+    esc: UsbTestScenario,
+) -> Result<(), String> {
+    clear_usb_qemu_env();
+    unsafe {
+        std::env::set_var("SOSO_QEMU_LIVE", "1");
+        std::env::set_var("SOSO_QEMU_LIVE_USB", "1");
+        if let Some(model) = esc.xhci {
+            std::env::set_var("SOSO_QEMU_XHCI", model);
+        }
+        if esc.usb_kbd {
+            std::env::set_var("SOSO_QEMU_USB_KBD", "1");
+        }
+    }
+
+    let mut qemu = lanzar_qemu_legacy(img, data, models, serial).map_err(|e| e.to_string())?;
+    esperar_en_fichero(serial, "sosh —", Duration::from_secs(180))?;
+
+    if let Some(patron) = esc.extra_serial {
+        let contenido = std::fs::read_to_string(serial).map_err(|e| e.to_string())?;
+        if !contenido.contains(patron) && !contenido.contains("teclado HID") {
+            let _ = qemu.kill();
+            let _ = qemu.wait();
+            clear_usb_qemu_env();
+            return Err(format!("no apareció {patron:?} ni «teclado HID» en el log serie"));
+        }
+    }
+
+    let _ = qemu.kill();
+    let _ = qemu.wait();
+    clear_usb_qemu_env();
+    Ok(())
+}
+
+fn clear_usb_qemu_env() {
+    unsafe {
+        for key in [
+            "SOSO_QEMU_LIVE",
+            "SOSO_QEMU_LIVE_USB",
+            "SOSO_QEMU_XHCI",
+            "SOSO_QEMU_USB_KBD",
+            "SOSO_QEMU_USB_HOST",
+            "SOSO_QEMU_TRACE_USB",
+        ] {
+            std::env::remove_var(key);
+        }
     }
 }

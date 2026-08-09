@@ -78,6 +78,9 @@ pub fn run() {
         "dd models",
     );
 
+    create_sosolog_on_esp(&live, &out_dir);
+    create_sosodrv_on_esp(&live, &out_dir);
+
     write_flash(&out_dir, &live, data_len, models_len, total);
     write_installer_bundle(&out_dir, total);
     println!("package-usb-live: {}", live.display());
@@ -131,6 +134,13 @@ Archivo: soso-live.img ({:.1} GiB)
 
 3) Consola serie / GOP: live: GPT … | fs: sosofs live | ssh soso@<ip>
 
+   Trazas de arranque: al volver a Linux, monta la ESP del USB (partición 1):
+   - BOOTMARK.TXT — la escribe el shim UEFI; si sigue vacía, el firmware nunca
+     llegó a ejecutar nuestro loader (Secure Boot, orden de arranque…).
+   - SOSOLOG.TXT (256 KiB) — log del kernel; vacío con BOOTMARK escrita = el
+     kernel se colgó o no detectó el USB (mira los checkpoints «boot:» en
+     pantalla).
+
 4) Instalar en disco interno **desde soso live**:
 
    soso-install list
@@ -169,6 +179,43 @@ fn chrono_now() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".into())
+}
+
+fn create_sosodrv_on_esp(live: &Path, out_dir: &Path) {
+    let p1_start = partition_first_sector(live, 1).expect("part1 lba");
+    let template = out_dir.join("sosodrv-template.bin");
+    std::fs::write(&template, vec![b'\n'; 16 * 1024]).expect("sosodrv template");
+    let name = *b"SOSODRV ";
+    let ext = *b"TXT";
+    if let Err(e) = crate::fat32_write::write_root_file(
+        live,
+        p1_start,
+        &name,
+        &ext,
+        &std::fs::read(&template).expect("read template"),
+    ) {
+        eprintln!("package-usb-live: aviso: no pude crear SOSODRV.TXT: {e}");
+        return;
+    }
+    println!(
+        "package-usb-live: SOSODRV.TXT (16 KiB) en ESP part1 LBA {p1_start}"
+    );
+}
+
+fn create_sosolog_on_esp(live: &Path, out_dir: &Path) {
+    let p1_start = partition_first_sector(live, 1).expect("part1 lba");
+    let template = out_dir.join("sosolog-template.bin");
+    std::fs::write(&template, vec![b'\n'; 256 * 1024]).expect("sosolog template");
+    let name = *b"SOSOLOG ";
+    let ext = *b"TXT";
+    if let Err(e) = crate::fat32_write::write_root_file(live, p1_start, &name, &ext, &std::fs::read(&template).expect("read template")) {
+        eprintln!("package-usb-live: aviso: no pude crear SOSOLOG.TXT: {e}");
+        eprintln!("package-usb-live: instala mtools o regenera con espacio libre en la ESP");
+        return;
+    }
+    println!(
+        "package-usb-live: SOSOLOG.TXT (256 KiB) en ESP part1 LBA {p1_start}"
+    );
 }
 
 fn run_cmd(cmd: &mut Command, label: &str) {

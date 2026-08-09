@@ -410,7 +410,7 @@ fn load_model(
     })?;
     let index_crc = crc_bytes(&index_data);
 
-    let mut rt = Runtime::new(manifest, index.clone(), 32 * 1024 * 1024, 0);
+    let rt = Runtime::new(manifest, index.clone(), 32 * 1024 * 1024, 0);
     if rt
         .validate_shapes_for_role(role, layer_start, layer_end)
         .is_err()
@@ -509,7 +509,7 @@ fn run_distributed_head(
         standby_retry_ms,
     };
     let text = if prompt.is_empty() { "test" } else { prompt };
-    let run = if standby {
+    let run = if cfg.standby {
         distributed::run_head_standby(
             &mut bundle.rt,
             &mut bundle.source,

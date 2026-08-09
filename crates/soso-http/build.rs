@@ -17,7 +17,6 @@ fn main() {
         return;
     };
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let mut asm_files = Vec::new();
     for entry in fs::read_dir(&ring_pregen).unwrap().flatten() {
         let name = entry.file_name();

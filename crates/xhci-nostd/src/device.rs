@@ -65,6 +65,9 @@ pub const USB_RECIP_ENDPOINT: u8 = 0x02;
 // ---------------------------------------------------------------------------
 
 pub const USB_CLASS_HID: u8 = 0x03;
+pub const USB_CLASS_HUB: u8 = 0x09;
+
+pub const USB_DESC_HUB: u8 = 0x29;
 
 // ---------------------------------------------------------------------------
 // USB Device Descriptor (18 bytes)
@@ -93,6 +96,10 @@ impl DeviceDescriptor {
     pub const SIZE: usize = 18;
 
     /// Parse from a raw byte buffer. Returns None if buffer is too small.
+    pub fn is_hub(&self) -> bool {
+        self.b_device_class == USB_CLASS_HUB
+    }
+
     pub fn parse(buf: &[u8]) -> Option<Self> {
         if buf.len() < Self::SIZE {
             log::warn!("xhci: device descriptor too short ({} bytes)", buf.len());
@@ -617,13 +624,25 @@ pub struct UsbDevice {
     pub keyboard_interface: Option<u8>,
     /// If this is a HID keyboard: the interrupt IN endpoint DCI
     pub keyboard_endpoint_dci: Option<u8>,
+    /// Route string xHCI (0 = dispositivo en puerto root directo).
+    pub route_string: u32,
+    /// TT hub slot / port (USB2 full/low detrás de hub).
+    pub tt_hub_slot: u8,
+    pub tt_port: u8,
 }
 
 impl UsbDevice {
     /// Create a new device in the initial state.
-    pub fn new(slot_id: u8, port: u8, speed: UsbSpeed) -> Self {
+    pub fn new(
+        slot_id: u8,
+        port: u8,
+        speed: UsbSpeed,
+        route_string: u32,
+        tt_hub_slot: u8,
+        tt_port: u8,
+    ) -> Self {
         log::info!(
-            "xhci: new USB device slot={} port={} speed={:?}",
+            "xhci: new USB device slot={} port={} speed={:?} route={route_string:#x}",
             slot_id, port, speed
         );
         Self {
@@ -635,6 +654,9 @@ impl UsbDevice {
             configured: false,
             keyboard_interface: None,
             keyboard_endpoint_dci: None,
+            route_string,
+            tt_hub_slot,
+            tt_port,
         }
     }
 

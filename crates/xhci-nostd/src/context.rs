@@ -40,6 +40,10 @@ pub const SLOT_CTX_DW1_ROOT_HUB_PORT_MASK: u32 = 0xFF << 16;
 pub const SLOT_CTX_DW1_NUM_PORTS_SHIFT: u32 = 24;
 pub const SLOT_CTX_DW1_NUM_PORTS_MASK: u32 = 0xFF << 24;
 
+pub const SLOT_CTX_DW2_TT_HUB_SLOT_MASK: u32 = 0xFF;
+pub const SLOT_CTX_DW2_TT_PORT_SHIFT: u32 = 8;
+pub const SLOT_CTX_DW2_TT_PORT_MASK: u32 = 0xFF << 8;
+
 pub const SLOT_CTX_DW3_DEVICE_ADDRESS_MASK: u32 = 0xFF;
 pub const SLOT_CTX_DW3_SLOT_STATE_SHIFT: u32 = 27;
 pub const SLOT_CTX_DW3_SLOT_STATE_MASK: u32 = 0x1F << 27;
@@ -258,6 +262,15 @@ impl SlotContext {
             self.raw.dw(0) & !SLOT_CTX_DW0_HUB
         };
         self.raw.set_dw(0, dw0);
+        self
+    }
+
+    /// TT Hub Slot ID + TT Port Number (DW2) — dispositivos full/low detrás de hub USB2.
+    pub fn set_tt(&mut self, hub_slot: u8, hub_port: u8) -> &mut Self {
+        let dw2 = (self.raw.dw(2) & !(SLOT_CTX_DW2_TT_HUB_SLOT_MASK | SLOT_CTX_DW2_TT_PORT_MASK))
+            | (hub_slot as u32)
+            | ((hub_port as u32) << SLOT_CTX_DW2_TT_PORT_SHIFT);
+        self.raw.set_dw(2, dw2);
         self
     }
 

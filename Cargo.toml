@@ -17,7 +17,7 @@ members = [
     "crates/soso-http",
     "tools/cuda-proxy",
 ]
-# El kernel y el userspace se compilan para x86_64-unknown-none con su propio
-# árbol de dependencias; los excluimos para que `cargo build` en la raíz no
-# intente compilarlos para el host.
-exclude = ["kernel", "user"]
+# El kernel y el userspace se compilan para x86_64-unknown-none (y el shim de
+# arranque para x86_64-unknown-uefi) con su propio árbol de dependencias; los
+# excluimos para que `cargo build` en la raíz no intente compilarlos para el host.
+exclude = ["kernel", "user", "boot-shim"]

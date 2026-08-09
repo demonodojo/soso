@@ -13,18 +13,26 @@ mod device;
 pub mod dns;
 pub mod ssh;
 mod tcp_user;
+#[cfg(feature = "lxdde")]
+pub mod wifi_wpa;
 
 use crate::arch::pit;
-use crate::drivers::{e1000e, virtio_net};
 use crate::println;
 use alloc::vec;
 use alloc::vec::Vec;
-use device::{E1000Dev, NicDev, SmolDev};
+use device::NicDev;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::{dhcpv4, tcp};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, IpCidr, Ipv4Address, Ipv4Cidr};
 use spin::{Mutex, Once};
+
+#[cfg(feature = "drv-e1000e")]
+use crate::drivers::e1000e;
+#[cfg(feature = "drv-e1000e")]
+use device::E1000Dev;
+#[cfg(feature = "drv-virtio-net")]
+use crate::drivers::virtio_net;
 
 pub const ECHO_PORT: u16 = 7;
 
@@ -64,16 +72,25 @@ fn net_backend() -> Option<([u8; 6], NicDev)> {
         println!("net: backend lx-e1000e");
         return Some((mac, NicDev::LxE1000e(device::LxE1000Dev)));
     }
+    #[cfg(feature = "drv-e1000e")]
     if e1000e::present() {
         let mac = e1000e::mac()?;
         println!("net: backend e1000e");
-        Some((mac, NicDev::E1000e(E1000Dev)))
-    } else if let Some(mac) = virtio_net::init() {
-        println!("net: backend virtio-net");
-        Some((mac, NicDev::Virtio(SmolDev)))
-    } else {
-        None
+        return Some((mac, NicDev::E1000e(E1000Dev)));
     }
+    #[cfg(feature = "lxdde")]
+    if crate::lxdde::wifi_present() && crate::lxdde::wifi_alive() {
+        if let Some(mac) = crate::lxdde::wifi_mac() {
+            println!("net: backend lx-wifi (Intel AX211)");
+            return Some((mac, NicDev::LxWifi(device::LxWifiDev)));
+        }
+    }
+    #[cfg(feature = "drv-virtio-net")]
+    if let Some(mac) = virtio_net::init() {
+        println!("net: backend virtio-net");
+        return Some((mac, NicDev::Virtio(device::SmolDev)));
+    }
+    None
 }
 
 fn random_seed() -> u64 {

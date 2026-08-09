@@ -1,4 +1,4 @@
-//! Disco live: lee particiones GPT (2=sosofs, 3=sosomfs) sobre un disco 512 B/LBA.
+//! Disco live: lee particiones GPT (1=ESP, 2=sosofs, 3=sosomfs) sobre un disco 512 B/LBA.
 //!
 //! Backend: USB mass storage, NVMe (dual-boot en disco dedicado), o virtio-blk0
 //! (QEMU `SOSO_QEMU_LIVE`).
@@ -26,11 +26,12 @@ pub struct LivePart {
     sectors: u64,
 }
 
+static LIVE_ESP: Once<Option<LivePart>> = Once::new();
 static LIVE_ROOT: Once<Option<LivePart>> = Once::new();
 static LIVE_MODELS: Once<Option<LivePart>> = Once::new();
 
 pub fn init() {
-    // Preferir USB (stick de arranque) sobre NVMe y virtio.
+    crate::drivers::usb_storage::rescan();
     if try_backend(LiveBackend::Usb).is_some() {
         return;
     }
@@ -42,6 +43,9 @@ pub fn init() {
         }
     }
     let _ = try_backend(LiveBackend::Virtio0);
+    if !active() {
+        crate::println!("live: sin GPT sosofs (USB/NVMe/virtio); solo kernel-shell");
+    }
 }
 
 fn try_backend(backend: LiveBackend) -> Option<()> {
@@ -59,6 +63,7 @@ fn try_backend(backend: LiveBackend) -> Option<()> {
         sector_reader(backend, GPT_PARTS_LBA + i as u64, &mut sec).ok()?;
         ents[i * SECTOR..(i + 1) * SECTOR].copy_from_slice(&sec);
     }
+    let p1 = parse_entry(&ents, 0, backend);
     let p2 = parse_entry(&ents, 1, backend)?;
     let p3 = parse_entry(&ents, 2, backend)?;
     if !partition_has_sosofs(backend, p2.first_lba) {
@@ -71,6 +76,9 @@ fn try_backend(backend: LiveBackend) -> Option<()> {
         p3.first_lba,
         p3.sectors * SECTOR as u64 / (1024 * 1024)
     );
+    if let Some(esp) = p1 {
+        LIVE_ESP.call_once(|| Some(esp));
+    }
     LIVE_ROOT.call_once(|| {
         Some(LivePart {
             backend,
@@ -169,6 +177,36 @@ fn nvme_read_sectors(slot: u8, gpt_lba: u64, buf: &mut [u8]) -> Result<(), ()> {
     Ok(())
 }
 
+fn range_writer(backend: LiveBackend, lba: u64, buf: &[u8]) -> Result<(), ()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    if buf.len() % SECTOR != 0 {
+        return Err(());
+    }
+    match backend {
+        LiveBackend::Virtio0 => {
+            for (i, chunk) in buf.chunks(SECTOR).enumerate() {
+                let sec: &[u8; SECTOR] = chunk.try_into().map_err(|_| ())?;
+                crate::drivers::virtio_blk::write_sector(lba + i as u64, sec).map_err(|_| ())?;
+            }
+            Ok(())
+        }
+        LiveBackend::Usb => crate::drivers::usb_storage::write_sectors(lba, buf).map_err(|_| ()),
+        LiveBackend::Nvme(slot) => nvme_write_sectors(slot, lba, buf),
+    }
+}
+
+fn nvme_write_sectors(slot: u8, gpt_lba: u64, buf: &[u8]) -> Result<(), ()> {
+    let mut lba = gpt_lba;
+    for chunk in buf.chunks(SECTOR) {
+        let sec: &[u8; SECTOR] = chunk.try_into().map_err(|_| ())?;
+        nvme_write_sector(slot, lba, sec).map_err(|_| ())?;
+        lba += 1;
+    }
+    Ok(())
+}
+
 fn nvme_write_sector(slot: u8, gpt_lba: u64, buf: &[u8; SECTOR]) -> Result<(), BlockError> {
     let slot = slot as usize;
     let lba_size = crate::drivers::nvme::lba_size_slot(slot).ok_or(BlockError::Io)?;
@@ -190,12 +228,12 @@ fn nvme_write_sector(slot: u8, gpt_lba: u64, buf: &[u8; SECTOR]) -> Result<(), B
 }
 
 impl LivePart {
-    fn read_sector(&self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), BlockError> {
-        sector_reader(self.backend, self.first_lba + lba, buf).map_err(|_| BlockError::Io)
-    }
-
     fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         range_reader(self.backend, self.first_lba + lba, buf).map_err(|_| BlockError::Io)
+    }
+
+    fn write_sectors(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        range_writer(self.backend, self.first_lba + lba, buf).map_err(|_| BlockError::Io)
     }
 }
 
@@ -299,4 +337,16 @@ pub fn models_dev() -> Option<LiveModelsDev> {
 
 pub fn active() -> bool {
     LIVE_ROOT.get().is_some_and(|p| p.is_some())
+}
+
+/// Lee sectores de la partición 1 (ESP FAT).
+pub fn esp_read_sectors(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+    let part = LIVE_ESP.get().and_then(|p| *p).ok_or(BlockError::Io)?;
+    part.read_sectors(lba, buf)
+}
+
+/// Escribe sectores de la partición 1 (ESP FAT).
+pub fn esp_write_sectors(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    let part = LIVE_ESP.get().and_then(|p| *p).ok_or(BlockError::Io)?;
+    part.write_sectors(lba, buf)
 }

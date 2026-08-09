@@ -255,14 +255,6 @@ impl BodySink for VecSink<'_> {
     }
 }
 
-struct DiscardSink;
-
-impl BodySink for DiscardSink {
-    fn write_body(&mut self, _chunk: &[u8]) -> Result<(), HttpError> {
-        Ok(())
-    }
-}
-
 const MAX_HTTP_HEADER: usize = 16 * 1024;
 
 /// Acumula cabeceras HTTP y vuelca el cuerpo al sink en cuanto llega.
@@ -437,6 +429,7 @@ fn parse_response_head(head: &[u8]) -> Result<(u16, Vec<(String, String)>), Http
     Ok((status, headers))
 }
 
+#[cfg(test)]
 fn parse_response(raw: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), HttpError> {
     let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or(HttpError::Parse)?;
     let (status, headers) = parse_response_head(&raw[..sep])?;

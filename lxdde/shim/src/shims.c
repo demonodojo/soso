@@ -72,6 +72,30 @@ void *memset(void *dst, int c, unsigned long n)
     return dst;
 }
 
+char *strncpy(char *dst, const char *src, unsigned long n)
+{
+    unsigned long i;
+    for (i = 0; i < n && src[i]; i++)
+        dst[i] = src[i];
+    for (; i < n; i++)
+        dst[i] = '\0';
+    return dst;
+}
+
+void *memmove(void *dst, const void *src, unsigned long n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    if (d < s) {
+        for (unsigned long i = 0; i < n; i++)
+            d[i] = s[i];
+    } else {
+        for (unsigned long i = n; i > 0; i--)
+            d[i - 1] = s[i - 1];
+    }
+    return dst;
+}
+
 /* --- Página física para nvkm (flush_page de fb): memoria real de PAGE_SIZE. --- */
 extern void *lx_kzalloc(unsigned long size, unsigned flags);
 extern void lx_kfree(void *ptr);

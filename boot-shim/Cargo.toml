@@ -1,0 +1,19 @@
+[package]
+name = "boot-shim"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Shim UEFI: escribe BOOTMARK.TXT en la ESP y chainloadea el bootloader real"
+
+# Fuera del workspace raíz: se compila para x86_64-unknown-uefi.
+[workspace]
+
+[dependencies]
+uefi = { version = "0.39.0", features = ["alloc", "global_allocator", "panic_handler"] }
+
+# Binario pequeño: el shim viaja dentro de los clusters de bootx64.efi.
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

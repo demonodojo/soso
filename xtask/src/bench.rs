@@ -288,6 +288,7 @@ fn lanzar_qemu(
     super::apply_firmware(&mut qemu, img);
     qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
     super::apply_qemu_disks(&mut qemu, data, models);
+    super::apply_qemu_usb(&mut qemu);
     super::apply_qemu_nic(&mut qemu);
     super::apply_qemu_gpu(&mut qemu);
     qemu.args(["-serial", &format!("file:{}", serial.display())])

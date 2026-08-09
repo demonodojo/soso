@@ -25,5 +25,7 @@
 # Capa lxdde (Linux pinneado + artefactos de build)
 lxdde/linux/
 lxdde/reference/
+lxdde/ports-extern/
 lxdde/shim/src/generated_dummies.c
+drivers-extern.toml
 board.txt

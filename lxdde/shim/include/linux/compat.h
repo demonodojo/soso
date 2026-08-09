@@ -2,8 +2,8 @@
 #ifndef LX_LINUX_COMPAT_H
 #define LX_LINUX_COMPAT_H
 
-#define KBUILD_MODNAME "e1000e"
-#define KBUILD_BASENAME "e1000e"
+#define KBUILD_MODNAME "iwlwifi"
+#define KBUILD_BASENAME "iwlwifi"
 
 /* Tipos base disponibles en toda TU (p.ej. lib/rbtree.c no pasa por el prelude
  * de slab.h que arrastra <linux/types.h>). */

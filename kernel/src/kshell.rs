@@ -1,18 +1,27 @@
 //! Kernel-shell por el puerto serie. Es la consola de emergencia y el
 //! banco de pruebas hasta que exista la shell de usuario (fase 7).
 
-use crate::drivers::virtio_blk;
 use crate::{drivers::serial, print, println, qemu};
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Evita spamear el banner si `schedule` reentra al kshell (p. ej. tras `spawn`).
+static BANNER_SHOWN: AtomicBool = AtomicBool::new(false);
 
 pub fn run() -> ! {
-    println!("kernel-shell lista; escribe 'help'");
+    if !BANNER_SHOWN.swap(true, Ordering::Relaxed) {
+        println!("kernel-shell lista; escribe 'help' (dmesg = log de arranque)");
+    }
     let mut line = String::new();
     print!("soso> ");
     loop {
+        // Polling activo: PS/2 y USB HID no dependen solo de IRQ (placa real).
         let Some(byte) = serial::read_byte() else {
             crate::net::poll();
+            #[cfg(feature = "drv-live-disk")]
+            crate::drivers::fatlog::poll();
+            let _ = crate::drivers::kbd::has_input();
             x86_64::instructions::hlt();
             continue;
         };
@@ -44,7 +53,28 @@ fn exec(line: &str) {
 
     match cmd {
         "help" => {
-            println!("comandos: help spawn <elf> [args] ps ls cat stat write <ruta> <texto> mkdir <ruta> rm <ruta> df uptime mem io blk blkread blkwrite pf panic halt");
+            println!("comandos: help dmesg hwscan spawn ps ls cat stat write mkdir rm df uptime mem io wifi blk blkread blkwrite pf panic halt");
+        }
+        "dmesg" => {
+            if args.first() == Some(&"save") {
+                #[cfg(feature = "drv-live-disk")]
+                match crate::drivers::fatlog::flush() {
+                    Ok(()) => println!("dmesg: volcado a SOSOLOG.TXT"),
+                    Err(()) => println!("dmesg: fatlog no activo o fallo de escritura"),
+                }
+                #[cfg(not(feature = "drv-live-disk"))]
+                println!("dmesg: fatlog no disponible en esta imagen");
+            } else {
+                dmesg_paged();
+            }
+        }
+        "hwscan" => {
+            crate::drivers::registry::print_hwscan();
+            #[cfg(feature = "drv-live-disk")]
+            match crate::drivers::drvlog::flush() {
+                Ok(()) => println!("hwscan: informe en SOSODRV.TXT"),
+                Err(()) => println!("hwscan: sin ESP live o fallo de escritura"),
+            }
         }
         "spawn" => match args.first() {
             Some(ruta) => {
@@ -168,27 +198,75 @@ fn exec(line: &str) {
                 }
             }
         }
-        "blk" => match virtio_blk::capacity_sectors() {
+        "wifi" => {
+            #[cfg(feature = "lxdde")]
+            {
+                match args.first() {
+                    Some(&"scan") => {
+                        crate::lxdde::wifi_scan();
+                        for (ssid, rssi, ch, open) in crate::lxdde::wifi_scan_results() {
+                            let sec = if open { "abierta" } else { "WPA" };
+                            println!("  {ssid}: {rssi} dBm, canal {ch}, {sec}");
+                        }
+                    }
+                    Some(&"status") => {
+                        println!(
+                            "wifi: alive={} connected={} phase={}",
+                            crate::lxdde::wifi_alive(),
+                            crate::lxdde::wifi_connected(),
+                            crate::lxdde::wifi_phase()
+                        );
+                        if let Some(mac) = crate::lxdde::wifi_mac() {
+                            println!(
+                                "  mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                            );
+                        }
+                    }
+                    Some(&"connect") => match args.get(1) {
+                        Some(ssid) => {
+                            let rc = if args.len() > 2 {
+                                let pass = args[2..].join(" ");
+                                crate::net::wifi_wpa::connect_wpa2(ssid, &pass)
+                            } else {
+                                crate::lxdde::wifi::connect_open(ssid)
+                            };
+                            println!("wifi connect: rc={rc}");
+                        }
+                        None => println!("uso: wifi connect <ssid> [psk]"),
+                    }
+                    _ => println!("uso: wifi scan | status | connect <ssid> [psk]"),
+                }
+            }
+            #[cfg(not(feature = "lxdde"))]
+            println!("wifi: requiere feature lxdde");
+        }
+        #[cfg(feature = "drv-virtio-blk")]
+        "blk" => match crate::drivers::virtio_blk::capacity_sectors() {
             Some(cap) => println!("{} sectores ({} MiB)", cap, cap * 512 / (1024 * 1024)),
             None => println!("no hay disco"),
         },
+        #[cfg(not(feature = "drv-virtio-blk"))]
+        "blk" => println!("blk: driver virtio-blk no compilado"),
+        #[cfg(feature = "drv-virtio-blk")]
         "blkread" => match args.first().and_then(|s| s.parse().ok()) {
             Some(sector) => {
                 let mut buf = [0u8; 512];
-                match virtio_blk::read_sector(sector, &mut buf) {
+                match crate::drivers::virtio_blk::read_sector(sector, &mut buf) {
                     Ok(()) => hexdump(sector * 512, &buf[..64]),
                     Err(e) => println!("blkread: {e}"),
                 }
             }
             None => println!("uso: blkread <sector>"),
         },
+        #[cfg(feature = "drv-virtio-blk")]
         "blkwrite" => match args.first().and_then(|s| s.parse::<u64>().ok()) {
             Some(sector) => {
                 let texto = args[1..].join(" ");
                 let mut buf = [0u8; 512];
                 let n = texto.len().min(512);
                 buf[..n].copy_from_slice(&texto.as_bytes()[..n]);
-                match virtio_blk::write_sector(sector, &buf) {
+                match crate::drivers::virtio_blk::write_sector(sector, &buf) {
                     Ok(()) => println!("{n} bytes escritos en el sector {sector}"),
                     Err(e) => println!("blkwrite: {e}"),
                 }
@@ -210,6 +288,66 @@ fn exec(line: &str) {
             println!("¿{otro}? escribe 'help'");
         }
     }
+}
+
+/// Vuelca el ring buffer de consola por páginas (~30 líneas) para que no se
+/// pierda otra vez por el scroll del framebuffer.
+fn dmesg_paged() {
+    let total = crate::drivers::logbuf::len();
+    println!("--- dmesg ({total} bytes; espacio/enter = más, q = salir) ---");
+    let mut offset = 0usize;
+    let mut page_lines = 0usize;
+    let mut tmp = [0u8; 256];
+    const PAGE_LINES: usize = 30;
+
+    while offset < total {
+        let n = crate::drivers::logbuf::copy_from(offset, &mut tmp);
+        if n == 0 {
+            break;
+        }
+        let mut take = n;
+        let mut lines = page_lines;
+        for (i, &b) in tmp[..n].iter().enumerate() {
+            if b == b'\n' {
+                lines += 1;
+                if lines >= PAGE_LINES {
+                    take = i + 1;
+                    break;
+                }
+            }
+        }
+        serial::write_bytes_raw(&tmp[..take]);
+        page_lines = lines;
+        offset += take;
+
+        if offset >= total {
+            break;
+        }
+        if page_lines >= PAGE_LINES {
+            page_lines = 0;
+            serial::write_bytes_raw(b"--more--");
+            loop {
+                let Some(byte) = serial::read_byte() else {
+                    crate::net::poll();
+                    x86_64::instructions::hlt();
+                    continue;
+                };
+                match byte {
+                    b'q' | b'Q' => {
+                        serial::write_bytes_raw(b"\n");
+                        println!("--- dmesg abortado ---");
+                        return;
+                    }
+                    b' ' | b'\r' | b'\n' => {
+                        serial::write_bytes_raw(b"\r        \r");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    println!("--- fin dmesg ---");
 }
 
 /// Separa una ruta en (directorio padre, nombre): "/a/b/c" -> ("/a/b", "c").

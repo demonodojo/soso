@@ -62,6 +62,14 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             lx_build::run(&args);
         }
+        "fit-drivers" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            drivers::run_fit_drivers(&args);
+        }
+        "driver-add" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            drivers::run_driver_add(&args);
+        }
         "bench-llm" => {
             bench::run();
         }
@@ -79,10 +87,13 @@ fn main() {
         "test-distributed-llm-3" => {
             test_distributed::run_3();
         }
+        "test-usb" => {
+            test::run_usb();
+        }
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | lx-build | bench-llm | g1-check | g3-check)"
+                 (usa build | run | gdb | mkfs | test | test-usb | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
             );
             exit(2);
         }
@@ -90,6 +101,8 @@ fn main() {
 }
 
 mod bench;
+mod drivers;
+mod fat32_write;
 mod fetch_hf;
 mod flash_usb_live;
 mod g1_check;
@@ -187,11 +200,19 @@ fn ovmf_vars_writable(src: &Path) -> PathBuf {
 /// corresponda a `SOSO_FIRMWARE` (BIOS por defecto; si se pide UEFI y no
 /// hay OVMF, avisa y cae a BIOS).
 pub(crate) fn build_image() -> PathBuf {
+    build_image_with_profile(&drivers::profile_from_env_or_args())
+}
+
+pub(crate) fn build_image_with_profile(profile: &drivers::DriverProfile) -> PathBuf {
     let root = project_root();
-    if lxdde_enabled() {
+    let ports = drivers::lx_ports_for_build(profile);
+    if !ports.is_empty() {
+        lx_build::run(&ports);
+    } else if lxdde_enabled() {
         lx_build::run(&["all".into()]);
     }
     let target = root.join("kernel/x86_64-soso.json");
+    let feats = drivers::kernel_feature_args(profile);
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root.join("kernel"))
         .args([
@@ -200,10 +221,11 @@ pub(crate) fn build_image() -> PathBuf {
             target.to_str().unwrap(),
             "--target-dir",
             root.join("target/kernel").to_str().unwrap(),
+            "--features",
+            &feats.join(","),
         ]);
-    if lxdde_enabled() {
-        cmd.arg("--features").arg("lxdde");
-        if let Some(mode) = lxdde_mode_env() {
+    if feats.iter().any(|f| f == "lxdde") {
+        if let Some(mode) = profile.lxdde_mode.clone().or_else(lxdde_mode_env) {
             cmd.env("SOSO_LXDDE_MODE", mode);
         }
     }
@@ -213,7 +235,19 @@ pub(crate) fn build_image() -> PathBuf {
     }
 
     let kernel_elf = root.join("target/kernel/x86_64-soso/debug/kernel");
-    let builder = bootloader::DiskImageBuilder::new(kernel_elf);
+    let mut builder = bootloader::DiskImageBuilder::new(kernel_elf);
+
+    // Shim UEFI de diagnóstico (boot-shim/): el loader real viaja como
+    // efi/boot/bootsoso.efi y BOOTMARK.TXT recoge la marca de que el firmware
+    // llegó a ejecutarnos. bootx64.efi se sustituye por el shim tras generar
+    // la imagen (el builder no permite pisar sus ficheros internos).
+    let shim = build_boot_shim(&root);
+    if shim.is_some() {
+        if let Some(loader) = uefi_loader_bytes(&root) {
+            builder.set_file_contents("efi/boot/bootsoso.efi".into(), loader);
+            builder.set_file_contents("bootmark.txt".into(), vec![b'\n'; 4096]);
+        }
+    }
 
     let bios = root.join("target/soso-bios.img");
     builder
@@ -226,6 +260,10 @@ pub(crate) fn build_image() -> PathBuf {
         .create_uefi_image(&uefi)
         .expect("fallo creando la imagen UEFI");
     println!("imagen UEFI: {}", uefi.display());
+
+    if let Some(shim) = shim {
+        install_boot_shim(&uefi, &shim);
+    }
 
     match firmware() {
         Firmware::Uefi => {
@@ -242,6 +280,89 @@ pub(crate) fn build_image() -> PathBuf {
         }
         Firmware::Bios => bios,
     }
+}
+
+/// Compila `boot-shim/` para x86_64-unknown-uefi y devuelve la ruta del .efi.
+/// Best-effort: sin el target instalado avisa y la imagen queda estándar.
+fn build_boot_shim(root: &Path) -> Option<PathBuf> {
+    let target_dir = root.join("target/boot-shim");
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--manifest-path",
+            root.join("boot-shim/Cargo.toml").to_str().unwrap(),
+            "--release",
+            "--target",
+            "x86_64-unknown-uefi",
+            "--target-dir",
+            target_dir.to_str().unwrap(),
+        ])
+        .status();
+    if !matches!(&status, Ok(s) if s.success()) {
+        eprintln!(
+            "xtask: aviso: boot-shim no compiló (¿rustup target add x86_64-unknown-uefi?); \
+             imagen UEFI sin shim/BOOTMARK"
+        );
+        return None;
+    }
+    let efi = target_dir.join("x86_64-unknown-uefi/release/boot-shim.efi");
+    efi.exists().then_some(efi)
+}
+
+/// Extrae los bytes del bootloader UEFI embebido en el crate `bootloader`
+/// (no hay API pública directa; la carpeta TFTP lo escribe como `bootloader`).
+fn uefi_loader_bytes(root: &Path) -> Option<Vec<u8>> {
+    let dir = root.join("target/boot-shim/tftp");
+    std::fs::create_dir_all(&dir).ok()?;
+    bootloader::DiskImageBuilder::empty()
+        .create_uefi_tftp_folder(&dir)
+        .ok()?;
+    std::fs::read(dir.join("bootloader")).ok()
+}
+
+/// Sustituye in situ el contenido de efi/boot/bootx64.efi de la imagen UEFI
+/// por el shim (los clusters sobrantes quedan a cero; LoadImage usa las
+/// cabeceras PE, no el tamaño del fichero).
+fn install_boot_shim(uefi_img: &Path, shim: &Path) {
+    let data = std::fs::read(shim).expect("leer boot-shim.efi");
+    let Some(p1) = gpt_first_partition_lba(uefi_img) else {
+        eprintln!("xtask: aviso: sin GPT en la imagen UEFI; shim no instalado");
+        return;
+    };
+    match fat32_write::overwrite_in_dir(
+        uefi_img,
+        p1,
+        &[*b"EFI        ", *b"BOOT       "],
+        b"BOOTX64 EFI",
+        &data,
+    ) {
+        Ok(orig) => println!(
+            "shim UEFI: bootx64.efi ← boot-shim ({} B; loader real {orig} B en efi/boot/bootsoso.efi)",
+            data.len()
+        ),
+        Err(e) => eprintln!("xtask: aviso: no pude instalar el shim UEFI: {e}"),
+    }
+}
+
+/// Primer LBA de la partición 1 leyendo la cabecera GPT de la imagen.
+pub(crate) fn gpt_first_partition_lba(img: &Path) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(img).ok()?;
+    let mut hdr = [0u8; 512];
+    f.seek(SeekFrom::Start(512)).ok()?;
+    f.read_exact(&mut hdr).ok()?;
+    if &hdr[0..8] != b"EFI PART" {
+        return None;
+    }
+    let parts_lba = u64::from_le_bytes(hdr[72..80].try_into().ok()?);
+    let entry_size = u32::from_le_bytes(hdr[84..88].try_into().ok()?) as usize;
+    let mut ent = vec![0u8; entry_size.max(128)];
+    f.seek(SeekFrom::Start(parts_lba * 512)).ok()?;
+    f.read_exact(&mut ent).ok()?;
+    if ent[0..16].iter().all(|&b| b == 0) {
+        return None;
+    }
+    Some(u64::from_le_bytes(ent[32..40].try_into().ok()?))
 }
 
 /// Añade a `qemu` los drives de firmware (pflash OVMF) si la imagen es UEFI.
@@ -312,8 +433,20 @@ fn newest_mtime(dir: &Path) -> std::time::SystemTime {
 
 /// Disco de datos persistente (virtio-blk 0) con sosofs desde rootfs/.
 pub(crate) fn mkfs_rootfs(force: bool) -> PathBuf {
+    mkfs_rootfs_with_profile(force, &drivers::profile_from_env_or_args())
+}
+
+pub(crate) fn mkfs_rootfs_with_profile(
+    force: bool,
+    profile: &drivers::DriverProfile,
+) -> PathBuf {
     let root = project_root();
-    pack_nvidia_firmware(&root);
+    if profile.kernel_features.iter().any(|f| f == "drv-gpu-nvidia")
+        || profile.kernel_features.iter().any(|f| f == "drv-all")
+    {
+        pack_nvidia_firmware(&root);
+    }
+    drivers::filter_rootfs_firmware(&root.join("rootfs"), profile);
     let path = root.join("target/soso-data.img");
     let vieja = path
         .metadata()
@@ -523,7 +656,11 @@ pub(crate) fn qemu_nvme_root() -> bool {
 }
 
 /// `SOSO_QEMU_LIVE=1`: un solo disco con `soso-live.img` (GPT part2/3).
-/// `SOSO_QEMU_LIVE_USB=1`: mismo disco vía qemu-xhci + usb-storage (prueba BOT).
+/// `SOSO_QEMU_LIVE_USB=1`: mismo disco vía xHCI + usb-storage (prueba BOT).
+/// `SOSO_QEMU_XHCI=qemu|nec`: modelo del controlador (default `qemu`).
+/// `SOSO_QEMU_USB_KBD=1`: añade `usb-kbd` al bus xHCI (HID boot).
+/// `SOSO_QEMU_USB_HOST=VID:PID`: passthrough de dispositivo USB real (requiere acceso a `/dev/bus/usb`).
+/// `SOSO_QEMU_TRACE_USB=1`: trazas `usb_xhci_*` en `target/qemu-usb-trace.log`.
 pub(crate) fn qemu_live() -> bool {
     matches!(
         std::env::var("SOSO_QEMU_LIVE").as_deref(),
@@ -538,12 +675,42 @@ pub(crate) fn qemu_live_usb() -> bool {
     )
 }
 
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+/// `SOSO_QEMU_XHCI=qemu|nec` — default `qemu`.
+pub(crate) fn qemu_xhci_model() -> String {
+    std::env::var("SOSO_QEMU_XHCI").unwrap_or_else(|_| "qemu".into())
+}
+
+/// `SOSO_QEMU_USB_KBD=1`: teclado HID emulado en el bus xHCI.
+pub(crate) fn qemu_usb_kbd() -> bool {
+    env_flag("SOSO_QEMU_USB_KBD")
+}
+
+/// `SOSO_QEMU_USB_HOST=VID:PID` — passthrough USB (hex, con o sin `0x`).
+pub(crate) fn qemu_usb_host() -> Option<(u16, u16)> {
+    let spec = std::env::var("SOSO_QEMU_USB_HOST").ok()?;
+    let (vid_s, pid_s) = spec.split_once(':')?;
+    let parse = |s: &str| u16::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok();
+    Some((parse(vid_s)?, parse(pid_s)?))
+}
+
+/// `SOSO_QEMU_TRACE_USB=1`: volcado de trazas xHCI de QEMU.
+pub(crate) fn qemu_trace_usb() -> bool {
+    env_flag("SOSO_QEMU_TRACE_USB")
+}
+
 /// `SOSO_QEMU_NIC=e1000e|lx-e1000e` sustituye virtio-net; default virtio.
 pub(crate) fn qemu_nic() -> String {
     std::env::var("SOSO_QEMU_NIC").unwrap_or_else(|_| "virtio".into())
 }
 
-fn lxdde_enabled() -> bool {
+pub(crate) fn lxdde_enabled() -> bool {
     matches!(
         std::env::var("SOSO_LXDDE").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
@@ -556,7 +723,7 @@ fn lxdde_enabled() -> bool {
     ) || std::env::var("SOSO_QEMU_GPU").is_ok()
 }
 
-fn lxdde_mode_env() -> Option<String> {
+pub(crate) fn lxdde_mode_env() -> Option<String> {
     if let Ok(m) = std::env::var("SOSO_LXDDE_MODE") {
         return Some(m);
     }
@@ -604,9 +771,7 @@ pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
             &format!("file={},format=raw,if=none,id=live0", live.display()),
         ]);
         if qemu_live_usb() {
-            qemu.args(["-device", "qemu-xhci,id=xhci"]);
-            qemu.args(["-device", "usb-storage,bus=xhci.0,drive=live0"]);
-            println!("xtask: modo live USB → {}", live.display());
+            println!("xtask: modo live USB (drive) → {}", live.display());
         } else {
             qemu.args(["-device", "virtio-blk-pci,drive=live0"]);
             println!("xtask: modo live virtio → {}", live.display());
@@ -646,11 +811,26 @@ pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
 }
 
 pub(crate) fn apply_qemu_nic(qemu: &mut Command) {
+    apply_qemu_nic_with_ports(qemu, 2222, 7777, None);
+}
+
+/// NIC slirp con reenvío SSH/echo configurables (tests en paralelo).
+pub(crate) fn apply_qemu_nic_with_ports(
+    qemu: &mut Command,
+    ssh_port: u16,
+    echo_port: u16,
+    mac: Option<&str>,
+) {
     qemu.args([
         "-netdev",
-        "user,id=net0,hostfwd=tcp::7777-:7,hostfwd=tcp::2222-:22",
+        &format!(
+            "user,id=net0,hostfwd=tcp::{echo_port}-:7,hostfwd=tcp::{ssh_port}-:22"
+        ),
     ]);
-    let mac = std::env::var("SOSO_QEMU_MAC").unwrap_or_else(|_| "52:54:00:12:34:15".into());
+    let mac = mac
+        .map(String::from)
+        .or_else(|| std::env::var("SOSO_QEMU_MAC").ok())
+        .unwrap_or_else(|| "52:54:00:12:34:15".into());
     match qemu_nic().to_ascii_lowercase().as_str() {
         "e1000e" | "e1000" => {
             qemu.args(["-device", &format!("e1000e,netdev=net0,mac={mac}")]);
@@ -661,6 +841,57 @@ pub(crate) fn apply_qemu_nic(qemu: &mut Command) {
         _ => {
             qemu.args(["-device", &format!("virtio-net-pci,netdev=net0,mac={mac}")]);
         }
+    }
+}
+
+/// Controlador xHCI y dispositivos USB (storage live, teclado, passthrough, trazas).
+pub(crate) fn apply_qemu_usb(qemu: &mut Command) {
+    let live_storage = qemu_live_usb() && qemu_live();
+    let host = qemu_usb_host();
+    let kbd = qemu_usb_kbd();
+    let need_xhci = live_storage || kbd || host.is_some();
+
+    if need_xhci {
+        let model = qemu_xhci_model().to_ascii_lowercase();
+        let dev = match model.as_str() {
+            "nec" | "nec-usb-xhci" => "nec-usb-xhci,id=xhci",
+            _ => "qemu-xhci,id=xhci",
+        };
+        qemu.args(["-device", dev]);
+        println!("xtask: xHCI ({model})");
+
+        if live_storage {
+            qemu.args(["-device", "usb-storage,bus=xhci.0,drive=live0"]);
+            let live = package_live::live_image_path();
+            println!("xtask: usb-storage BOT → {}", live.display());
+        }
+        if kbd {
+            qemu.args(["-device", "usb-kbd,bus=xhci.0"]);
+            println!("xtask: usb-kbd en bus xHCI");
+        }
+        if let Some((vid, pid)) = host {
+            qemu.args([
+                "-device",
+                &format!(
+                    "usb-host,bus=xhci.0,vendorid=0x{vid:04x},productid=0x{pid:04x}"
+                ),
+            ]);
+            println!("xtask: usb-host passthrough {vid:04x}:{pid:04x} (requiere /dev/bus/usb)");
+        }
+    }
+
+    if qemu_trace_usb() {
+        let trace_log = project_root().join("target/qemu-usb-trace.log");
+        if let Some(parent) = trace_log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        qemu.args([
+            "-trace",
+            "usb_xhci_*",
+            "-D",
+            &trace_log.display().to_string(),
+        ]);
+        println!("xtask: trazas USB → {}", trace_log.display());
     }
 }
 
@@ -765,6 +996,7 @@ pub(crate) fn run_qemu(img: &Path, gdb: bool) {
     apply_firmware(&mut qemu, img);
     qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
     apply_qemu_disks(&mut qemu, &data, &models);
+    apply_qemu_usb(&mut qemu);
     apply_qemu_nic(&mut qemu);
     apply_qemu_gpu(&mut qemu);
     // mon:stdio multiplexa monitor y serie: Ctrl-A X sale, Ctrl-A C monitor

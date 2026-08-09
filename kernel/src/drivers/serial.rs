@@ -71,7 +71,10 @@ pub fn read_byte() -> Option<u8> {
         while let Ok(byte) = port.try_receive() {
             queue.push(byte);
         }
-        queue.pop()
+        if let Some(b) = queue.pop() {
+            return Some(b);
+        }
+        crate::drivers::kbd::read_byte()
     })
 }
 
@@ -84,7 +87,7 @@ pub fn has_input() -> bool {
         while let Ok(byte) = port.try_receive() {
             queue.push(byte);
         }
-        queue.head != queue.tail
+        queue.head != queue.tail || crate::drivers::kbd::has_input()
     })
 }
 
@@ -92,11 +95,19 @@ pub fn has_input() -> bool {
 /// sin pasar por fmt, que rompería el UTF-8 multibyte.
 pub fn write_bytes(data: &[u8]) {
     without_interrupts(|| {
+        crate::drivers::logbuf::append(data);
+        write_bytes_raw(data);
+    });
+}
+
+/// Consola sin pasar por el ring buffer (p. ej. volcado de `dmesg`).
+pub fn write_bytes_raw(data: &[u8]) {
+    {
         let mut port = SERIAL1.lock();
         for &b in data {
             port.send_raw(b);
         }
-    });
+    }
     crate::drivers::fb::write_bytes(data);
 }
 
@@ -104,6 +115,7 @@ struct DualConsole;
 
 impl core::fmt::Write for DualConsole {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        crate::drivers::logbuf::append(s.as_bytes());
         {
             let mut port = SERIAL1.lock();
             port.write_str(s)?;

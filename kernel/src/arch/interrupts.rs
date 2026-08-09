@@ -2,6 +2,7 @@
 
 use crate::arch::{apic, gdt, pit};
 use crate::println;
+use core::sync::atomic::{AtomicU64, Ordering};
 use pic8259::ChainedPics;
 use spin::{Lazy, Mutex};
 use x86_64::structures::idt::{
@@ -48,9 +49,50 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt[apic::RESCHED_VECTOR].set_handler_fn(resched_handler);
     idt[apic::TLB_SHOOTDOWN_VECTOR].set_handler_fn(tlb_shootdown_handler);
     idt[InterruptIndex::Com1 as u8].set_handler_fn(com1_handler);
+    // IRQ1 teclado (PIC): debe existir antes de desenmascarar; si falta,
+    // un flanco en placa real → #GP en vector 33 → panic desalineado → #DF.
+    idt[PIC_1_OFFSET + 1].set_handler_fn(kbd_pic_handler);
+    install_pic_fallback_handlers(&mut idt);
     crate::arch::irq::install_stubs(&mut idt);
     idt
 });
+
+/// EOI genérico del 8259. Vectores PIC sin handler → #GP al entregar la IRQ
+/// → double fault (rip suele quedar en el `ret` tras `sti` de without_interrupts).
+fn pic_eoi(vector: u8) {
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(vector);
+    }
+}
+
+macro_rules! pic_fallback_handlers {
+    ($($vec:literal => $name:ident),+ $(,)?) => {
+        $(
+            extern "x86-interrupt" fn $name(_stack_frame: InterruptStackFrame) {
+                pic_eoi($vec);
+            }
+        )+
+        fn install_pic_fallback_handlers(idt: &mut InterruptDescriptorTable) {
+            $( idt[$vec].set_handler_fn($name); )+
+        }
+    };
+}
+
+pic_fallback_handlers! {
+    34 => pic_vec_34, // IRQ2 cascada del esclavo
+    35 => pic_vec_35,
+    37 => pic_vec_37,
+    38 => pic_vec_38,
+    39 => pic_vec_39,
+    40 => pic_vec_40,
+    41 => pic_vec_41,
+    42 => pic_vec_42,
+    43 => pic_vec_43,
+    44 => pic_vec_44,
+    45 => pic_vec_45,
+    46 => pic_vec_46,
+    47 => pic_vec_47,
+}
 
 /// IPI de replanificación: solo EOI. Despierta al core del `hlt` para que
 /// el bucle del scheduler vuelva a mirar `PROCS`.
@@ -78,8 +120,9 @@ pub fn init() {
     unsafe {
         let mut pics = PICS.lock();
         pics.initialize();
-        // Solo timer (IRQ0), cascada (IRQ2) y COM1 (IRQ4); el resto enmascarado.
-        pics.write_masks(!0b0001_0101, 0xFF);
+        // Timer (IRQ0) y COM1 (IRQ4). IRQ1 en kbd::init; cascada/esclavo con
+        // handlers de respaldo pero enmascarados hasta haga falta el PIC legacy.
+        pics.write_masks(!0b0001_0001, 0xFF);
     }
     pit::init();
     x86_64::instructions::interrupts::enable();
@@ -88,8 +131,16 @@ pub fn init() {
 // ---- excepciones ----
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
-    // Recuperable: se usa como prueba de vida de la IDT.
-    println!("EXCEPCIÓN: breakpoint en {:?}", stack_frame.instruction_pointer);
+    // Recuperable: prueba de vida de la IDT. Solo ASCII (el FB es 7-bit) y
+    // println vía trampolín: x86-interrupt deja rsp % 16 == 8 y el fmt/SSE
+    // del print GPF-ea en placa real (panic truncado a «EXCEPCI»).
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let _ = con_rsp_alineado(breakpoint_print_shim, rip, 0);
+}
+
+extern "sysv64" fn breakpoint_print_shim(rip: u64, _b: u64) -> u64 {
+    println!("idt: breakpoint ok rip={rip:#x}");
+    0
 }
 
 /// Una excepción llegando de ring 3 mata al proceso, no al kernel.
@@ -97,24 +148,40 @@ fn desde_usuario(stack_frame: &InterruptStackFrame) -> bool {
     stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3
 }
 
+static EXC_RIP: AtomicU64 = AtomicU64::new(0);
+static EXC_RSP: AtomicU64 = AtomicU64::new(0);
+static EXC_EXTRA: AtomicU64 = AtomicU64::new(0);
+
+fn stash_exc(rip: u64, rsp: u64, extra: u64) {
+    EXC_RIP.store(rip, Ordering::Relaxed);
+    EXC_RSP.store(rsp, Ordering::Relaxed);
+    EXC_EXTRA.store(extra, Ordering::Relaxed);
+}
+
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     if desde_usuario(&stack_frame) {
         con_rsp_alineado(kill_shim, 2, 0);
     }
-    panic!("EXCEPCIÓN: invalid opcode\n{stack_frame:#?}");
+    stash_exc(
+        stack_frame.instruction_pointer.as_u64(),
+        stack_frame.stack_pointer.as_u64(),
+        0,
+    );
+    let _ = con_rsp_alineado(exception_panic_shim, 0, 0);
+    loop {}
 }
 
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
     if desde_usuario(&stack_frame) {
         con_rsp_alineado(kill_shim, 1, 0);
     }
-    // rip/rsp como escalares primero: el Debug del frame puede fallar si el
-    // contexto está corrupto y perderíamos el dato clave.
-    panic!(
-        "EXCEPCIÓN: general protection fault (error {error_code:#x}) rip={:#x} rsp={:#x}\n{stack_frame:#?}",
+    stash_exc(
         stack_frame.instruction_pointer.as_u64(),
-        stack_frame.stack_pointer.as_u64()
+        stack_frame.stack_pointer.as_u64(),
+        error_code,
     );
+    let _ = con_rsp_alineado(exception_panic_shim, 1, 0);
+    loop {}
 }
 
 /// La convención `x86-interrupt` con código de error deja `rsp % 16 == 8`
@@ -187,17 +254,50 @@ extern "x86-interrupt" fn page_fault_handler(
     } else {
         0
     };
-    panic!(
-        "EXCEPCIÓN: page fault accediendo a {addr:#x} ({error_code:?}) rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x} cs={:#x}\n{stack_frame:#?}",
-        stack_frame.code_segment.0
-    );
+    stash_exc(rip, rsp, ret);
+    let _ = con_rsp_alineado(kernel_pf_panic_shim, addr, 0);
+    loop {}
 }
 
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
-    panic!("EXCEPCIÓN: double fault\n{stack_frame:#?}");
+    stash_exc(
+        stack_frame.instruction_pointer.as_u64(),
+        stack_frame.stack_pointer.as_u64(),
+        0,
+    );
+    let _ = con_rsp_alineado(exception_panic_shim, 2, 0);
+    loop {}
+}
+
+extern "sysv64" fn exception_panic_shim(kind: u64, _: u64) -> u64 {
+    let rip = EXC_RIP.load(Ordering::Relaxed);
+    let rsp = EXC_RSP.load(Ordering::Relaxed);
+    let extra = EXC_EXTRA.load(Ordering::Relaxed);
+    match kind {
+        0 => panic!("EXCEPTION: invalid opcode rip={rip:#x} rsp={rsp:#x}"),
+        1 => panic!(
+            "EXCEPTION: general protection fault (error {extra:#x}) rip={rip:#x} rsp={rsp:#x}"
+        ),
+        2 => panic!("EXCEPTION: double fault rip={rip:#x} rsp={rsp:#x}"),
+        _ => panic!("EXCEPTION: rip={rip:#x} rsp={rsp:#x}"),
+    }
+}
+
+extern "sysv64" fn kernel_pf_panic_shim(addr: u64, _: u64) -> u64 {
+    let rip = EXC_RIP.load(Ordering::Relaxed);
+    let rsp = EXC_RSP.load(Ordering::Relaxed);
+    let ret = EXC_EXTRA.load(Ordering::Relaxed);
+    panic!("EXCEPTION: page fault at {addr:#x} rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x}");
+}
+
+extern "x86-interrupt" fn kbd_pic_handler(_stack_frame: InterruptStackFrame) {
+    crate::drivers::kbd::handle_irq();
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(PIC_1_OFFSET + 1);
+    }
 }
 
 // ---- IRQs ----

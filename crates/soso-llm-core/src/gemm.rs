@@ -171,7 +171,7 @@ pub fn matvec_q8_0(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut 
     Ok(())
 }
 
-pub fn matvec_q8_0_scalar(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
+pub fn matvec_q8_0_scalar(bytes: &[u8], _rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
     use sosomodel::layout::{Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS};
     let row_bytes = (cols / Q8_0_BLOCK_ELEMS) * Q8_0_BLOCK_BYTES;
     for (r, o) in out.iter_mut().enumerate() {
@@ -237,7 +237,7 @@ pub fn matvec_q4_k(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut 
     Ok(())
 }
 
-pub fn matvec_q4_k_scalar(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
+pub fn matvec_q4_k_scalar(bytes: &[u8], _rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
     use crate::f16::f16_to_f32;
     use crate::quant::q4k_scale_min;
     use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};

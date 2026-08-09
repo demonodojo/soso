@@ -244,7 +244,6 @@ pub fn with_current<R>(f: impl FnOnce(&mut Process) -> R) -> R {
 /// 128 KiB = 32 páginas = el mismo tope que `sosomfs::MAX_REQ_BLOCKS`, así que
 /// el racimo entero se sirve con **una sola petición** al dispositivo.
 const RACIMO: u64 = 128 * 1024;
-const RACIMO_PAGINAS: usize = (RACIMO / 4096) as usize;
 
 /// Buffer de tránsito del racimo.
 ///
@@ -697,6 +696,15 @@ pub fn block_current(ctx: Context, state: State) -> ! {
     schedule();
 }
 
+/// IRQ teclado: despertar al scheduler si hay lectores tty bloqueados.
+pub fn kick_if_tty_waiting() {
+    let need = PROCS.lock().iter().any(|p| matches!(p.state, State::WaitingTty { .. }));
+    if need {
+        crate::arch::apic::send_ipi(crate::arch::apic::id(), crate::arch::apic::RESCHED_VECTOR);
+        crate::arch::apic::kick_idle_cpus();
+    }
+}
+
 // ---- scheduler ----
 
 /// Punto de entrada del scheduler: resetea la pila (la de ESTE core) y no
@@ -764,6 +772,8 @@ extern "C" fn schedule_inner() -> ! {
         let es_bsp = crate::arch::percpu::cpu_index() == 0;
         if es_bsp {
             crate::net::poll();
+            #[cfg(feature = "drv-live-disk")]
+            crate::drivers::fatlog::poll();
             #[cfg(feature = "lxdde")]
             crate::lxdde::poll();
         }

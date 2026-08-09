@@ -239,39 +239,45 @@ impl SbrkAllocator {
 
 unsafe impl core::alloc::GlobalAlloc for SbrkAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let size = layout.size();
-        if size >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
-            let p = sys::mmap(0, size as u64, u64::MAX, 0);
-            if p > 0 {
-                return p as *mut u8;
+        // SAFETY: GlobalAlloc::alloc — el caller garantiza layout válido.
+        unsafe {
+            let size = layout.size();
+            if size >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
+                let p = sys::mmap(0, size as u64, u64::MAX, 0);
+                if p > 0 {
+                    return p as *mut u8;
+                }
+                // si el mmap falla, se intenta por el arena
             }
-            // si el mmap falla, se intenta por el arena
+            let align = layout.align().max(16);
+            ARENA.lock();
+            let ptr = Self::bump(&mut *ARENA.st.get(), size, align);
+            ARENA.unlock();
+            ptr
         }
-        let align = layout.align().max(16);
-        ARENA.lock();
-        let ptr = Self::bump(&mut *ARENA.st.get(), size, align);
-        ARENA.unlock();
-        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        if layout.size() >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
-            // Si el alloc grande cayó al arena por fallo de mmap, munmap devuelve
-            // EINVAL y se ignora (fuga, como siempre).
-            let _ = sys::munmap(ptr as u64, (layout.size() as u64).next_multiple_of(4096));
-            return;
+        // SAFETY: GlobalAlloc::dealloc — ptr/layout vienen de un alloc previo.
+        unsafe {
+            if layout.size() >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
+                // Si el alloc grande cayó al arena por fallo de mmap, munmap devuelve
+                // EINVAL y se ignora (fuga, como siempre).
+                let _ = sys::munmap(ptr as u64, (layout.size() as u64).next_multiple_of(4096));
+                return;
+            }
+            // El arena sigue sin liberar en general (es un bump), pero deshacer el
+            // ÚLTIMO bloque es gratis y es el caso que más aparece: liberar lo que se
+            // acaba de pedir. Sin esto, un `Vec` que crece deja atrás cada etapa.
+            let p = ptr as usize;
+            ARENA.lock();
+            let st = &mut *ARENA.st.get();
+            if p == st.last_start && p + layout.size() == st.last_end && st.cur == st.last_end {
+                st.cur = st.last_start;
+                st.last_end = st.last_start;
+            }
+            ARENA.unlock();
         }
-        // El arena sigue sin liberar en general (es un bump), pero deshacer el
-        // ÚLTIMO bloque es gratis y es el caso que más aparece: liberar lo que se
-        // acaba de pedir. Sin esto, un `Vec` que crece deja atrás cada etapa.
-        let p = ptr as usize;
-        ARENA.lock();
-        let st = &mut *ARENA.st.get();
-        if p == st.last_start && p + layout.size() == st.last_end && st.cur == st.last_end {
-            st.cur = st.last_start;
-            st.last_end = st.last_start;
-        }
-        ARENA.unlock();
     }
 
     /// Crecer en el sitio cuando el bloque es el último del arena.
@@ -285,30 +291,34 @@ unsafe impl core::alloc::GlobalAlloc for SbrkAllocator {
         layout: core::alloc::Layout,
         new_size: usize,
     ) -> *mut u8 {
-        let en_arena = layout.size() < MMAP_ALLOC_MIN || layout.align() > 4096;
-        let sigue_en_arena = new_size < MMAP_ALLOC_MIN || layout.align() > 4096;
-        if en_arena && sigue_en_arena {
-            let p = ptr as usize;
-            ARENA.lock();
-            let st = &mut *ARENA.st.get();
-            let es_ultimo =
-                p == st.last_start && p + layout.size() == st.last_end && st.cur == st.last_end;
-            if es_ultimo && p + new_size <= st.end {
-                st.cur = p + new_size;
-                st.last_end = st.cur;
+        // SAFETY: GlobalAlloc::realloc — ptr/layout de un alloc previo; new_size
+        // lo elige el allocator (Layout::from_size_align_unchecked es válido).
+        unsafe {
+            let en_arena = layout.size() < MMAP_ALLOC_MIN || layout.align() > 4096;
+            let sigue_en_arena = new_size < MMAP_ALLOC_MIN || layout.align() > 4096;
+            if en_arena && sigue_en_arena {
+                let p = ptr as usize;
+                ARENA.lock();
+                let st = &mut *ARENA.st.get();
+                let es_ultimo =
+                    p == st.last_start && p + layout.size() == st.last_end && st.cur == st.last_end;
+                if es_ultimo && p + new_size <= st.end {
+                    st.cur = p + new_size;
+                    st.last_end = st.cur;
+                    ARENA.unlock();
+                    return ptr;
+                }
                 ARENA.unlock();
-                return ptr;
             }
-            ARENA.unlock();
+            // Camino general: reservar, copiar lo que quepa y soltar el viejo.
+            let nuevo = core::alloc::Layout::from_size_align_unchecked(new_size, layout.align());
+            let dst = self.alloc(nuevo);
+            if !dst.is_null() {
+                core::ptr::copy_nonoverlapping(ptr, dst, layout.size().min(new_size));
+                self.dealloc(ptr, layout);
+            }
+            dst
         }
-        // Camino general: reservar, copiar lo que quepa y soltar el viejo.
-        let nuevo = core::alloc::Layout::from_size_align_unchecked(new_size, layout.align());
-        let dst = self.alloc(nuevo);
-        if !dst.is_null() {
-            core::ptr::copy_nonoverlapping(ptr, dst, layout.size().min(new_size));
-            self.dealloc(ptr, layout);
-        }
-        dst
     }
 }
 

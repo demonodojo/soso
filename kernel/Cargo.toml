@@ -6,8 +6,25 @@ license = "GPL-2.0-only"
 build = "build.rs"
 
 [features]
-default = []
+default = ["drv-all"]
 lxdde = []
+# Meta-feature: todos los drivers nativos (compatibilidad con cargo xtask test).
+drv-all = [
+    "drv-virtio-blk",
+    "drv-virtio-net",
+    "drv-e1000e",
+    "drv-nvme",
+    "drv-usb",
+    "drv-gpu-nvidia",
+    "drv-live-disk",
+]
+drv-virtio-blk = []
+drv-virtio-net = []
+drv-e1000e = []
+drv-nvme = []
+drv-usb = []
+drv-gpu-nvidia = []
+drv-live-disk = ["drv-virtio-blk", "drv-nvme", "drv-usb"]
 
 [dependencies]
 bootloader_api = "0.11.15"
@@ -42,6 +59,11 @@ ed25519-dalek = { version = "2.1", default-features = false }
 # Aleatoriedad en bare-metal: backend RDRAND (instrucción del x86, QEMU la
 # soporta). Sin esto getrandom no compila para el target del kernel.
 getrandom = { version = "0.2", features = ["rdrand"] }
+sha1 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# Fuente 8×8 VGA (public domain) para la consola GOP en placa.
+font8x8 = { version = "0.3", default-features = false }
 
 # Crate independiente del workspace raíz: se compila solo para
 # x86_64-soso (target JSON) a través de xtask.

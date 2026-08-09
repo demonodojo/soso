@@ -196,21 +196,37 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
             State::Sleeping(crate::arch::pit::uptime_ms() + a1),
         ),
         abi::SYS_HALT => {
-            // Antes de que el proceso desaparezca: apagar GSP-RM y cortarle el
-            // DMA. Si la GPU viene por VFIO, el host la resetea en cuanto se
-            // cierra QEMU, y ese reset sobre un GSP vivo cuelga la máquina.
+            #[cfg(feature = "drv-gpu-nvidia")]
             crate::drivers::gpu::shutdown();
             crate::println!("halt: apagando soso");
             crate::qemu::exit(crate::qemu::ExitCode::Success);
         }
         abi::SYS_MMAP => sys_mmap(a1, a2, a3, a4),
         abi::SYS_MUNMAP => sys_munmap(a1, a2),
+        #[cfg(feature = "drv-gpu-nvidia")]
         abi::SYS_GPU_INFO => sys_gpu_info(a1),
+        #[cfg(not(feature = "drv-gpu-nvidia"))]
+        abi::SYS_GPU_INFO => Err(-abi::ENOSYS),
+        #[cfg(feature = "drv-gpu-nvidia")]
         abi::SYS_GPU_ALLOC => sys_gpu_alloc(a1, a2),
+        #[cfg(not(feature = "drv-gpu-nvidia"))]
+        abi::SYS_GPU_ALLOC => Err(-abi::ENOSYS),
+        #[cfg(feature = "drv-gpu-nvidia")]
         abi::SYS_GPU_MAP => sys_gpu_map(a1, a2, a3),
+        #[cfg(not(feature = "drv-gpu-nvidia"))]
+        abi::SYS_GPU_MAP => Err(-abi::ENOSYS),
+        #[cfg(feature = "drv-gpu-nvidia")]
         abi::SYS_GPU_READ => sys_gpu_read(a1, a2, a3),
+        #[cfg(not(feature = "drv-gpu-nvidia"))]
+        abi::SYS_GPU_READ => Err(-abi::ENOSYS),
+        #[cfg(feature = "drv-gpu-nvidia")]
         abi::SYS_GPU_FREE => crate::drivers::gpu::free(a1).map_err(|e| -e),
+        #[cfg(not(feature = "drv-gpu-nvidia"))]
+        abi::SYS_GPU_FREE => Err(-abi::ENOSYS),
+        #[cfg(feature = "drv-gpu-nvidia")]
         abi::SYS_GPU_SUBMIT => sys_gpu_submit(a1, a2),
+        #[cfg(not(feature = "drv-gpu-nvidia"))]
+        abi::SYS_GPU_SUBMIT => Err(-abi::ENOSYS),
         abi::SYS_PIPE => sys_pipe(),
         abi::SYS_SPAWN_IO => sys_spawn_io(a1),
         abi::SYS_CHDIR => sys_chdir(a1, a2),

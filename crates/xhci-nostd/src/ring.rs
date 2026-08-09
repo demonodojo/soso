@@ -211,6 +211,18 @@ impl Trb {
         }
     }
 
+    /// Build a Disable Slot command TRB
+    pub fn disable_slot(slot_id: u8, cycle: bool) -> Self {
+        Self {
+            parameter_lo: 0,
+            parameter_hi: 0,
+            status: 0,
+            control: (TRB_TYPE_DISABLE_SLOT << TRB_TYPE_SHIFT)
+                | ((slot_id as u32) << TRB_SLOT_ID_SHIFT)
+                | if cycle { TRB_CYCLE_BIT } else { 0 },
+        }
+    }
+
     /// Build an Address Device command TRB
     pub fn address_device(input_ctx_phys: u64, slot_id: u8, bsr: bool, cycle: bool) -> Self {
         let mut trb = Self::zeroed();
@@ -253,6 +265,17 @@ impl Trb {
                 | ((endpoint_id as u32) << TRB_ENDPOINT_ID_SHIFT)
                 | if cycle { TRB_CYCLE_BIT } else { 0 },
         }
+    }
+
+    /// Build a Set TR Dequeue Pointer command TRB (Linux `xhci_set_tr_dequeue`).
+    pub fn set_tr_dequeue(dequeue_ptr: u64, slot_id: u8, endpoint_id: u8, cycle: bool) -> Self {
+        let mut trb = Self::zeroed();
+        trb.set_parameter(dequeue_ptr);
+        trb.control = (TRB_TYPE_SET_TR_DEQUEUE << TRB_TYPE_SHIFT)
+            | ((slot_id as u32) << TRB_SLOT_ID_SHIFT)
+            | ((endpoint_id as u32) << TRB_ENDPOINT_ID_SHIFT)
+            | if cycle { TRB_CYCLE_BIT } else { 0 };
+        trb
     }
 
     /// Build a Link TRB pointing to `next_segment_phys`, optionally toggling cycle
@@ -298,7 +321,7 @@ impl Trb {
         trb.set_parameter(data_phys);
         trb.status = length & 0x1FFFF; // bits 16:0 = TRB transfer length (max 64K)
         trb.control = (TRB_TYPE_DATA_STAGE << TRB_TYPE_SHIFT)
-            | if dir_in { TRB_DIR_IN } else { 0 }
+            | if dir_in { TRB_DIR_IN | TRB_ISP } else { 0 }
             | if cycle { TRB_CYCLE_BIT } else { 0 };
         trb
     }
@@ -596,6 +619,12 @@ impl EventRing {
     }
 }
 
+/// Handles físicos de un control transfer (para casar eventos de transfer).
+pub struct ControlTransferHandles {
+    pub status_trb_phys: u64,
+    pub data_trb_phys: Option<u64>,
+}
+
 // ---------------------------------------------------------------------------
 // Transfer Ring
 // ---------------------------------------------------------------------------
@@ -652,6 +681,11 @@ impl TransferRing {
         self.ring_phys | if self.cycle { 1 } else { 0 }
     }
 
+    /// Puntero de enqueue actual con DCS (Set TR Dequeue tras recover EP halted).
+    pub fn enqueue_phys_with_dcs(&self) -> u64 {
+        self.ring_phys + (self.enqueue_idx * Trb::SIZE) as u64 | if self.cycle { 1 } else { 0 }
+    }
+
     /// Enqueue a TRB onto the transfer ring. Sets the cycle bit appropriately.
     pub fn enqueue(&mut self, mut trb: Trb) -> u64 {
         if self.cycle {
@@ -678,7 +712,7 @@ impl TransferRing {
     }
 
     /// Enqueue a control transfer (Setup + optional Data + Status).
-    /// Returns the physical address of the Status Stage TRB.
+    /// Cada etapa es un TD independiente (sin TRB_CHAIN), como Linux `xhci_queue_ctrl_tx`.
     pub fn enqueue_control_transfer(
         &mut self,
         request_type: u8,
@@ -687,7 +721,7 @@ impl TransferRing {
         index: u16,
         data_phys: u64,
         data_len: u16,
-    ) -> u64 {
+    ) -> ControlTransferHandles {
         let dir_in = request_type & 0x80 != 0;
 
         // Determine Transfer Type for Setup Stage
@@ -704,21 +738,25 @@ impl TransferRing {
             request_type, request, value, index, data_len, dir_in
         );
 
-        // Setup Stage TRB
         let setup = Trb::setup_stage(request_type, request, value, index, data_len, trt, false);
         self.enqueue(setup);
 
-        // Data Stage TRB (if needed)
-        if data_len > 0 {
+        let data_trb_phys = if data_len > 0 {
             let data = Trb::data_stage(data_phys, data_len as u32, dir_in, false);
-            self.enqueue(data);
-        }
+            Some(self.enqueue(data))
+        } else {
+            None
+        };
 
         // Status Stage TRB — direction is opposite of data stage
         // (or IN if no data stage)
         let status_dir = if data_len == 0 { true } else { !dir_in };
         let status = Trb::status_stage(status_dir, false);
-        self.enqueue(status)
+        let status_trb_phys = self.enqueue(status);
+        ControlTransferHandles {
+            status_trb_phys,
+            data_trb_phys,
+        }
     }
 
     /// Enqueue an interrupt IN transfer (e.g., for HID keyboard polling).

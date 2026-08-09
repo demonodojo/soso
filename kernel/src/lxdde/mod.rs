@@ -13,6 +13,8 @@ mod pci;
 mod printk;
 mod timer;
 mod workqueue;
+#[cfg(feature = "lxdde")]
+pub mod wifi;
 
 use spin::Mutex;
 
@@ -23,6 +25,7 @@ unsafe extern "C" {
     fn lx_testdrv_run();
     fn lx_e1000e_init_module() -> i32;
     fn lx_nouveau_init_module() -> i32;
+    fn lx_iwlwifi_init_module() -> i32;
 }
 
 /// Modo de la capa lx al arrancar.
@@ -33,6 +36,7 @@ pub enum LxddeMode {
     TestDrv,
     E1000e,
     Nouveau,
+    Iwlwifi,
 }
 
 /// Inicializa la capa lx_emul.
@@ -59,6 +63,10 @@ pub fn init(mode: LxddeMode) {
                 let rc = lx_nouveau_init_module();
                 crate::println!("lxdde: nouveau init rc={rc} phase={}", gpu::gsp_phase());
             }
+            LxddeMode::Iwlwifi => {
+                let rc = wifi::init();
+                crate::println!("lxdde: iwlwifi init rc={rc} phase={}", wifi::phase());
+            }
             LxddeMode::Off => {}
         }
     }
@@ -82,6 +90,8 @@ pub fn poll() {
     workqueue::poll();
     irq::poll();
     net::poll_rx();
+    #[cfg(feature = "lxdde")]
+    wifi::poll();
 }
 
 pub fn e1000e_present() -> bool {
@@ -134,6 +144,46 @@ pub fn device_buf_free(va: u64) -> Result<(), ()> {
 
 pub fn gsp_fini() -> bool {
     gpu::gsp_fini()
+}
+
+pub fn wifi_present() -> bool {
+    wifi::wifi_present()
+}
+
+pub fn wifi_alive() -> bool {
+    wifi::alive()
+}
+
+pub fn wifi_mac() -> Option<[u8; 6]> {
+    wifi::mac()
+}
+
+pub fn wifi_connected() -> bool {
+    wifi::connected()
+}
+
+pub fn wifi_receive(buf: &mut [u8]) -> Option<usize> {
+    wifi::receive(buf)
+}
+
+pub fn wifi_send(data: &[u8]) -> Result<(), ()> {
+    wifi::send(data)
+}
+
+pub fn wifi_can_send() -> bool {
+    wifi::can_send()
+}
+
+pub fn wifi_scan() -> i32 {
+    wifi::scan()
+}
+
+pub fn wifi_scan_results() -> alloc::vec::Vec<(alloc::string::String, i8, u8, bool)> {
+    wifi::scan_results()
+}
+
+pub fn wifi_phase() -> &'static str {
+    wifi::phase()
 }
 
 pub fn poll_rx() {

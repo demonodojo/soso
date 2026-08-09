@@ -18,15 +18,34 @@ pub fn run(args: &[String]) {
     let out_dir = root.join("target/lxdde");
     fs::create_dir_all(&out_dir).expect("crear target/lxdde");
 
-    let ports: Vec<&str> = match port {
-        "spike" => vec!["spike"],
-        "testdrv" => vec!["testdrv"],
-        "e1000e" => vec!["e1000e"],
-        "nouveau" => vec!["nouveau"],
-        "all" => vec!["spike", "testdrv", "e1000e", "nouveau"],
+    let ports: Vec<String> = match port {
+        "spike" => vec!["spike".into()],
+        "testdrv" => vec!["testdrv".into()],
+        "e1000e" => vec!["e1000e".into()],
+        "nouveau" => vec!["nouveau".into()],
+        "iwlwifi" => vec!["iwlwifi".into()],
+        "all" => {
+            let mut names = vec![
+                "spike".into(),
+                "testdrv".into(),
+                "e1000e".into(),
+                "nouveau".into(),
+                "iwlwifi".into(),
+            ];
+            for ext in external_port_names(&root) {
+                if !names.iter().any(|n| n == &ext) {
+                    names.push(ext);
+                }
+            }
+            names
+        }
         other => {
-            eprintln!("lx-build: puerto desconocido {other}");
-            exit(2);
+            if port_dir(&root, other).is_some() {
+                vec![other.into()]
+            } else {
+                eprintln!("lx-build: puerto desconocido {other}");
+                exit(2);
+            }
         }
     };
 
@@ -74,9 +93,11 @@ fn linux_root(root: &Path) -> PathBuf {
     root.join("lxdde")
 }
 
-fn port_needs_linux(root: &Path, ports: &[&str]) -> bool {
+fn port_needs_linux(root: &Path, ports: &[String]) -> bool {
     for p in ports {
-        let list_path = root.join("lxdde/ports").join(p).join("source.list");
+        let list_path = port_dir(root, p)
+            .map(|d| d.join("source.list"))
+            .unwrap_or_else(|| root.join("lxdde/ports").join(p).join("source.list"));
         if let Ok(list) = fs::read_to_string(&list_path) {
             for line in list.lines() {
                 let line = line.trim();
@@ -143,9 +164,12 @@ fn ensure_linux(root: &Path) {
 fn cc_flags(root: &Path) -> Vec<String> {
     let linux = linux_root(root);
     let shim = root.join("lxdde/shim/include");
+    let iwlwifi_port = root.join("lxdde/ports/iwlwifi");
     let nouveau = linux.join("drivers/gpu/drm/nouveau");
+    let iwlwifi = linux.join("drivers/net/wireless/intel/iwlwifi");
     let inc = vec![
         format!("-I{}", shim.display()),
+        format!("-I{}", iwlwifi_port.display()),
         format!("-I{}", linux.join("arch/x86/include").display()),
         format!("-I{}", linux.join("arch/x86/include/uapi").display()),
         format!("-I{}", linux.join("include").display()),
@@ -157,6 +181,7 @@ fn cc_flags(root: &Path) -> Vec<String> {
         format!("-I{}", nouveau.join("include/nvkm").display()),
         format!("-I{}", nouveau.join("nvkm").display()),
         format!("-I{}", nouveau.display()),
+        format!("-I{}", iwlwifi.display()),
     ];
     let mut flags = vec![
         "-target".into(),
@@ -191,7 +216,10 @@ fn cc_flags(root: &Path) -> Vec<String> {
 }
 
 fn compile_port(root: &Path, port: &str, out_dir: &Path, dep_mtime: std::time::SystemTime) -> Vec<PathBuf> {
-    let list_path = root.join("lxdde/ports").join(port).join("source.list");
+    let port_base = port_dir(root, port).unwrap_or_else(|| {
+        panic!("lx-build: sin directorio para port {port}");
+    });
+    let list_path = port_base.join("source.list");
     let list = fs::read_to_string(&list_path).unwrap_or_else(|e| {
         panic!("{}: {e}", list_path.display());
     });
@@ -204,6 +232,10 @@ fn compile_port(root: &Path, port: &str, out_dir: &Path, dep_mtime: std::time::S
         }
         let src = if line.starts_with("lxdde/") {
             root.join(line)
+        } else if line.starts_with("ports-extern/") || line.starts_with("ports/") {
+            root.join("lxdde").join(line)
+        } else if port_base.join(line).exists() {
+            port_base.join(line)
         } else {
             linux_root(root).join(line)
         };
@@ -214,6 +246,49 @@ fn compile_port(root: &Path, port: &str, out_dir: &Path, dep_mtime: std::time::S
         objs.push(compile_c(root, out_dir, &src, &flags, dep_mtime));
     }
     objs
+}
+
+fn port_dir(root: &Path, port: &str) -> Option<PathBuf> {
+    let internal = root.join("lxdde/ports").join(port);
+    if internal.join("source.list").exists() {
+        return Some(internal);
+    }
+    let external = root.join("lxdde/ports-extern").join(port);
+    if external.join("source.list").exists() {
+        return Some(external);
+    }
+    None
+}
+
+fn external_port_names(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let dir = root.join("lxdde/ports-extern");
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            if e.path().join("source.list").exists() {
+                if let Some(name) = e.file_name().to_str() {
+                    out.push(name.into());
+                }
+            }
+        }
+    }
+    let cfg = root.join("drivers-extern.toml");
+    if cfg.exists() {
+        if let Ok(text) = fs::read_to_string(&cfg) {
+            for line in text.lines() {
+                if line.trim().starts_with("name = ") {
+                    let name = line
+                        .trim()
+                        .trim_start_matches("name = ")
+                        .trim_matches('"');
+                    if !out.iter().any(|n| n == name) {
+                        out.push(name.into());
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// mtime más reciente bajo un directorio (recursivo). Sirve para invalidar la
@@ -355,6 +430,12 @@ fn provided_symbols() -> HashSet<&'static str> {
         "lx_nouveau_init_module", "lx_nouveau_gsp_is_ready", "lx_nouveau_gsp_phase",
         "lx_nouveau_compute_saxpy", "lx_nouveau_compute_matvec_f32", "lx_nouveau_vram_total",
         "lx_nouveau_set_boot0",
+        "lx_iwlwifi_init_module", "lx_iwlwifi_exit_module", "lx_iwlwifi_fw_alive",
+        "lx_iwlwifi_fw_phase", "lx_iwlwifi_scan", "lx_iwlwifi_connect_open",
+        "lx_iwlwifi_connect_wpa2", "lx_iwlwifi_connected", "lx_iwlwifi_rx",
+        "lx_iwlwifi_tx", "lx_iwlwifi_mac", "lx_iwlwifi_poll",
+        "lx_iwlwifi_set_alive", "lx_iwlwifi_set_phase",
+        "iwl_ax211_deliver_rx", "iwl_ax211_add_bss",
         "memcpy", "memset", "memmove", "strlen", "strcmp", "strncmp", "strncpy", "strnlen",
         "snprintf", "scnprintf", "vsnprintf",
         "alloc_page", "__free_page", "page_address", "page_to_pfn",

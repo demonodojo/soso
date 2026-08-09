@@ -12,7 +12,7 @@
 #define THIS_MODULE ((struct module *)0)
 
 #define module_param(name, type, perm) static type name
-#define module_init(x) static void lx_modinit_##x(void) { (void)x; }
+#define module_init(x) /* init explícito desde iwlwifi_lx.c */
 #define module_exit(x)
 #define EXPORT_SYMBOL(x)
 #define EXPORT_SYMBOL_GPL(x)

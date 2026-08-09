@@ -12,7 +12,7 @@ mod net;
 use alloc::format;
 use alloc::string::{String, ToString};
 use guest_io::{GuestFile, GuestSomOut};
-use gguf2som::{convert, SomOut};
+use gguf2som::convert;
 use libsoso::{println, sys};
 use soso_abi::O_RDONLY;
 

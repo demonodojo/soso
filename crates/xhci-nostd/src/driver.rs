@@ -13,20 +13,46 @@ use crate::context::{
 use crate::device::{
     alloc_dma_buffer, read_dma_buffer, DeviceDescriptor, EndpointDescriptor,
     ParsedConfiguration, UsbDevice, UsbSpeed,
-    USB_DESC_CONFIGURATION, USB_DESC_DEVICE,
+    USB_DESC_CONFIGURATION, USB_DESC_DEVICE, USB_DESC_HUB,
     USB_DIR_IN, USB_DIR_OUT, USB_RECIP_DEVICE, USB_RECIP_INTERFACE,
-    USB_REQ_GET_DESCRIPTOR, USB_REQ_SET_CONFIGURATION,
+    USB_REQ_GET_DESCRIPTOR, USB_REQ_GET_STATUS, USB_REQ_SET_CONFIGURATION,
     USB_TYPE_CLASS, USB_TYPE_STANDARD,
 };
 use crate::hid::{
     BootKeyboardReport, KeyEvent, KeyboardState,
     HID_PROTOCOL_BOOT, HID_REQ_SET_IDLE, HID_REQ_SET_PROTOCOL,
 };
+use crate::dma::delay_us;
 use crate::registers::*;
 use crate::ring::*;
 
-/// Maximum number of command completion retries before giving up.
-const MAX_EVENT_POLL_RETRIES: u32 = 100_000;
+/// Intervalo entre polls del event ring (µs).
+const EVENT_POLL_INTERVAL_US: u32 = 10;
+/// Timeout de comandos xHCI (Linux XHCI_CMD_DEFAULT_TIMEOUT ≈ 5 s).
+const CMD_TIMEOUT_US: u32 = 5_000_000;
+/// Timeout de transfer events.
+const TRANSFER_TIMEOUT_US: u32 = 5_000_000;
+/// Debounce de conexión antes de reset (Linux hub_port_debounce).
+const PORT_DEBOUNCE_US: u32 = 100_000;
+/// TRSTRCY USB2 full/low-speed (≥10 ms).
+const TRSTRCY_FS_US: u32 = 10_000;
+/// TRSTRCY USB2 high-speed (≥50 ms).
+const TRSTRCY_HS_US: u32 = 50_000;
+/// Pausa entre reintentos de Address Device (Linux hub_port_init).
+const ADDR_RETRY_DELAY_US: u32 = 200_000;
+const MAX_ADDR_RETRIES: u32 = 3;
+const HUB_POWER_ON_US: u32 = 100_000;
+/// Tras Address Device, antes del primer GET_DESCRIPTOR (Linux hub_port_init).
+const SET_ADDRESS_SETTLE_US: u32 = 10_000;
+/// Reintentos por lectura de descriptor en EP0 (Linux usb_get_device_descriptor).
+const GET_DESCRIPTOR_RETRIES: u32 = 3;
+const GET_DESCRIPTOR_RETRY_DELAY_US: u32 = 200_000;
+/// Reintentos completos con re-reset de puerto si el descriptor sigue fallando.
+const GET_DESCRIPTOR_TRIES: u32 = 2;
+const EP0_DCI: u8 = 1;
+
+/// Como Linux `XHCI_IRQS`: EIE | HSEIE | EWE.
+const USBCMD_IRQS: u32 = USBCMD_INTE | USBCMD_HSEE | USBCMD_EWE;
 
 /// The xHCI Host Controller driver.
 pub struct XhciController {
@@ -75,25 +101,75 @@ struct KeyboardInfo {
     transfer_pending: bool,
 }
 
+/// Ruta xHCI hasta un dispositivo (root o detrás de hub).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DevPath {
+    root_port: u8,
+    route: u32,
+    tt_hub_slot: u8,
+    tt_port: u8,
+}
+
+impl DevPath {
+    pub(crate) fn root(port: u8) -> Self {
+        Self {
+            root_port: port,
+            route: 0,
+            tt_hub_slot: 0,
+            tt_port: 0,
+        }
+    }
+
+    fn behind_hub(root_port: u8, hub_port: u8, hub_slot: u8) -> Self {
+        Self {
+            root_port,
+            route: hub_port as u32,
+            tt_hub_slot: hub_slot,
+            tt_port: hub_port,
+        }
+    }
+}
+
+const USB_RECIP_OTHER: u8 = 0x03;
+const HUB_REQ_SET_FEATURE: u8 = 3;
+const HUB_REQ_CLEAR_FEATURE: u8 = 1;
+const HUB_FEATURE_PORT_POWER: u16 = 8;
+const HUB_FEATURE_PORT_RESET: u16 = 4;
+const HUB_FEATURE_C_PORT_RESET: u16 = 20;
+const HUB_PORT_CONNECTED: u16 = 1 << 0;
+const HUB_PORT_LOW_SPEED: u16 = 1 << 9;
+const HUB_PORT_HIGH_SPEED: u16 = 1 << 10;
+const HUB_PORT_CHANGE_RESET: u16 = 1 << 4;
+
+fn usb_speed_from_hub_status(status: u16) -> UsbSpeed {
+    if status & HUB_PORT_LOW_SPEED != 0 {
+        UsbSpeed::Low
+    } else if status & HUB_PORT_HIGH_SPEED != 0 {
+        UsbSpeed::High
+    } else {
+        UsbSpeed::Full
+    }
+}
+
+fn trst_recovery_us(speed: UsbSpeed) -> u32 {
+    match speed {
+        UsbSpeed::High => TRSTRCY_HS_US,
+        _ => TRSTRCY_FS_US,
+    }
+}
+
 impl XhciController {
     /// Initialize the xHCI controller from a PCI BAR0 address.
     ///
-    /// This performs the full initialization sequence per xHCI spec 4.2:
-    /// 1. Read capability registers
-    /// 2. Wait for CNR = 0 (Controller Not Ready)
-    /// 3. Reset the controller (HCRST)
-    /// 4. Program MaxSlotsEn
-    /// 5. Allocate and program DCBAA
-    /// 6. Allocate and program Command Ring (CRCR)
-    /// 7. Allocate and program Event Ring (ERSTBA/ERSTSZ/ERDP)
-    /// 8. Enable interrupts, set Run/Stop = 1
+    /// Secuencia: USBLEGSUP handoff → halt → HCRST (necesario: sin él,
+    /// Address Device falla con TRB Error) → programar anillos → Run →
+    /// recuperación de puertos (PP, espera larga, ciclo PP, warm-reset).
     ///
     /// # Safety
     /// `pci_bar0` must be a valid, identity-mapped MMIO address for an xHCI controller.
     pub unsafe fn init(pci_bar0: usize) -> Self {
         log::info!("xhci: initializing controller at BAR0={:#x}", pci_bar0);
 
-        // --- Step 1: Read capability registers ---
         let cap = CapabilityRegs::new(pci_bar0);
         let caplength = cap.caplength();
         let hciversion = cap.hciversion();
@@ -112,104 +188,42 @@ impl XhciController {
         let rt = RuntimeRegs::new(cap.runtime_base());
         let db = DoorbellRegs::new(cap.doorbell_base());
 
-        log::debug!(
-            "xhci: operational base={:#x} runtime base={:#x} doorbell base={:#x}",
-            cap.operational_base(),
-            cap.runtime_base(),
-            cap.doorbell_base(),
-        );
-
-        // --- Step 2: Wait for Controller Not Ready = 0 ---
-        log::debug!("xhci: waiting for controller ready (CNR=0)...");
-        let mut timeout = 1_000_000u32;
-        while !op.is_ready() {
-            timeout -= 1;
-            if timeout == 0 {
-                panic!("xhci: controller not ready after timeout (USBSTS={:#x})", op.usbsts());
-            }
+        let mut had_ccs_boot = false;
+        for port in 1..=max_ports.min(32) {
+            let portsc = op.portsc(port);
+            let ccs = portsc & PORTSC_CCS != 0;
+            had_ccs_boot |= ccs;
+            log::info!(
+                "xhci: boot port {port} PORTSC={portsc:#010x} ccs={ccs} pp={}",
+                portsc & PORTSC_PP != 0,
+            );
         }
-        log::info!("xhci: controller ready");
-
-        // --- Step 3: Reset the controller ---
-        log::debug!("xhci: issuing HCRST...");
-        // First, ensure the controller is halted
-        if !op.is_halted() {
-            log::debug!("xhci: stopping controller (clearing RS)...");
-            op.set_usbcmd(op.usbcmd() & !USBCMD_RS);
-
-            timeout = 1_000_000;
-            while !op.is_halted() {
-                timeout -= 1;
-                if timeout == 0 {
-                    panic!("xhci: controller did not halt (USBSTS={:#x})", op.usbsts());
-                }
-            }
-            log::debug!("xhci: controller halted");
+        if !had_ccs_boot {
+            log::warn!("xhci: UEFI ya soltó todos los puertos (ccs=0); recovery post-HCRST");
         }
 
-        op.set_usbcmd(op.usbcmd() | USBCMD_HCRST);
+        linux_bios_handoff(pci_bar0, &cap, &op);
+        do_hcrst(&op, max_ports);
 
-        // Wait for HCRST to clear
-        timeout = 1_000_000;
-        while op.usbcmd() & USBCMD_HCRST != 0 {
-            timeout -= 1;
-            if timeout == 0 {
-                panic!("xhci: HCRST did not clear");
-            }
-        }
-
-        // Wait for CNR to clear again after reset
-        timeout = 1_000_000;
-        while !op.is_ready() {
-            timeout -= 1;
-            if timeout == 0 {
-                panic!("xhci: controller not ready after reset");
-            }
-        }
-        log::info!("xhci: controller reset complete");
-
-        // --- Step 4: Program MaxSlotsEn ---
         op.set_config(max_slots as u32);
-        log::debug!("xhci: CONFIG.MaxSlotsEn = {}", max_slots);
 
-        // --- Step 5: Allocate DCBAA ---
         let dcbaa = Dcbaa::new(max_slots, ctx_size, scratchpad);
         op.set_dcbaap(dcbaa.phys_addr());
-        log::debug!("xhci: DCBAAP = {:#x}", dcbaa.phys_addr());
 
-        // --- Step 6: Allocate Command Ring ---
         let cmd_ring = CommandRing::new();
         op.set_crcr(cmd_ring.phys_addr_with_cycle());
-        log::debug!("xhci: CRCR = {:#x}", cmd_ring.phys_addr_with_cycle());
 
-        // --- Step 7: Allocate Event Ring for interrupter 0 ---
         let evt_ring = EventRing::new();
-
-        // Program ERSTSZ, ERDP, then ERSTBA (order matters per spec 5.5.2.3.2)
         rt.set_erstsz(0, evt_ring.erst_size());
         rt.set_erdp(0, evt_ring.dequeue_phys());
         rt.set_erstba(0, evt_ring.erst_phys());
-
-        log::debug!(
-            "xhci: interrupter 0: ERSTSZ={} ERDP={:#x} ERSTBA={:#x}",
-            evt_ring.erst_size(),
-            evt_ring.dequeue_phys(),
-            evt_ring.erst_phys(),
-        );
-
-        // Set IMOD for interrupter 0 (4000 = ~1ms at 250ns intervals)
         rt.set_imod(0, 4000);
-
-        // Enable interrupter 0
         rt.set_iman(0, IMAN_IP | IMAN_IE);
-        log::debug!("xhci: interrupter 0 enabled");
 
-        // --- Step 8: Set Run/Stop = 1, Interrupter Enable ---
         let usbcmd = op.usbcmd() | USBCMD_RS | USBCMD_INTE;
         op.set_usbcmd(usbcmd);
         log::info!("xhci: controller started (USBCMD={:#x})", op.usbcmd());
 
-        // Verify the controller is running
         if op.is_halted() {
             panic!(
                 "xhci: controller still halted after setting RS (USBSTS={:#x})",
@@ -217,7 +231,6 @@ impl XhciController {
             );
         }
 
-        // Initialize device tracking arrays
         let mut devices = Vec::with_capacity(max_slots as usize + 1);
         let mut transfer_rings = Vec::with_capacity(max_slots as usize + 1);
         for _ in 0..=max_slots {
@@ -225,9 +238,7 @@ impl XhciController {
             transfer_rings.push(Vec::new());
         }
 
-        log::info!("xhci: initialization complete, {} ports available", max_ports);
-
-        Self {
+        let mut ctrl = Self {
             bar0: pci_bar0,
             cap,
             op,
@@ -242,6 +253,166 @@ impl XhciController {
             devices,
             transfer_rings,
             keyboard: None,
+        };
+
+        ctrl.power_ports();
+        ctrl.clear_pcd();
+        ctrl.clear_port_change_bits();
+        delay_us(100_000);
+        ctrl.recover_root_ports();
+        ctrl.log_ports();
+        log::info!("xhci: initialization complete, {} ports available", max_ports);
+        ctrl
+    }
+
+    pub fn any_root_port_connected(&self) -> bool {
+        (1..=self.max_ports()).any(|p| self.portsc(p) & PORTSC_CCS != 0)
+    }
+
+    /// Post-HCRST / hub_activate: PP + clear change bits + esperar CCS.
+    /// Si no aparece CCS, conmuta PP y prueba warm-reset en puertos con PP.
+    pub fn recover_root_ports(&mut self) {
+        self.power_ports();
+        self.clear_pcd();
+        self.clear_port_change_bits();
+        if self.wait_for_ports_connected(40) {
+            self.reset_connected_without_ped();
+            return;
+        }
+
+        self.log_root_ports_pls("sin CCS tras espera");
+
+        // Ciclo PP off→on (algunos AMD no reenumeran tras HCRST sin glitch VBus).
+        log::info!("xhci: sin CCS tras espera; ciclo PP off/on");
+        self.power_ports_off();
+        delay_us(100_000);
+        self.power_ports();
+        delay_us(200_000);
+        self.drain_port_events();
+        self.clear_port_change_bits();
+        if self.wait_for_ports_connected(40) {
+            self.reset_connected_without_ped();
+            return;
+        }
+
+        // Warm reset en Compliance o puertos con PP sin CCS (hub_port_warm_reset_required).
+        log::info!("xhci: warm-reset puertos perezosos/compliance");
+        self.warm_reset_lazy_ports();
+        delay_us(200_000);
+        self.drain_port_events();
+        self.clear_port_change_bits();
+        if self.wait_for_ports_connected(20) {
+            self.reset_connected_without_ped();
+        } else {
+            self.log_root_ports_pls("recovery sin CCS");
+            log::warn!("xhci: recovery sin CCS en ningún puerto root");
+        }
+    }
+
+    fn reset_connected_without_ped(&mut self) {
+        for port in 1..=self.max_ports() {
+            let portsc = self.op.portsc(port);
+            if portsc & PORTSC_CCS != 0 && portsc & PORTSC_PED == 0 {
+                log::info!("xhci: reset puerto {port} (CCS sin PED)");
+                self.reset_port(port);
+            }
+        }
+    }
+
+    fn clear_pcd(&mut self) {
+        if self.op.usbsts() & USBSTS_PCD != 0 {
+            self.op.set_usbsts(USBSTS_PCD);
+        }
+    }
+
+    /// Escribe PORTSC sin tocar PED (escribir 1 en PED deshabilita el puerto).
+    fn write_portsc_masked(&self, port: u8, portsc: u32, or_bits: u32) {
+        let val = (portsc & !PORTSC_CHANGE_BITS & !PORTSC_PED) | or_bits;
+        self.op.set_portsc(port, val);
+    }
+
+    fn log_root_ports_pls(&self, tag: &str) {
+        for port in 1..=self.max_ports() {
+            let portsc = self.op.portsc(port);
+            let pls = self.op.port_link_state(port);
+            log::info!(
+                "xhci: {tag} port {port} PORTSC={portsc:#010x} pls={pls} pp={} ccs={}",
+                portsc & PORTSC_PP != 0,
+                portsc & PORTSC_CCS != 0,
+            );
+        }
+    }
+
+    fn warm_reset_lazy_ports(&mut self) {
+        for port in 1..=self.max_ports() {
+            let portsc = self.op.portsc(port);
+            let pls = self.op.port_link_state(port);
+            let need =
+                pls == PLS_COMPLIANCE || (portsc & PORTSC_PP != 0 && portsc & PORTSC_CCS == 0);
+            if need {
+                log::info!("xhci: warm-reset puerto {port} (pls={pls})");
+                self.warm_reset_port(port);
+            }
+        }
+    }
+
+    fn clear_port_change_bits(&mut self) {
+        for port in 1..=self.max_ports() {
+            let portsc = self.op.portsc(port);
+            let ch = portsc & PORTSC_CHANGE_BITS;
+            if ch != 0 {
+                self.write_portsc_masked(port, portsc, ch);
+            }
+        }
+    }
+
+    fn wait_for_ports_connected(&mut self, max_passes: u32) -> bool {
+        for pass in 0..max_passes {
+            self.drain_port_events();
+            self.clear_pcd();
+            self.power_ports();
+            if self.any_root_port_connected() {
+                log::info!("xhci: CCS en puerto root (espera pass {pass})");
+                return true;
+            }
+            delay_us(50_000);
+        }
+        false
+    }
+
+    fn power_ports_off(&mut self) {
+        for port in 1..=self.max_ports {
+            let portsc = self.op.portsc(port);
+            if portsc & PORTSC_PP != 0 {
+                let val = portsc & !PORTSC_CHANGE_BITS & !PORTSC_PP & !PORTSC_PED;
+                self.op.set_portsc(port, val);
+            }
+        }
+    }
+
+    /// Warm port reset (WPR) — USB3; ignora si el puerto no lo soporta.
+    fn warm_reset_port(&mut self, port: u8) {
+        let portsc = self.op.portsc(port);
+        self.write_portsc_masked(port, portsc, PORTSC_WPR | PORTSC_PP);
+        for _ in 0..500 {
+            let ps = self.op.portsc(port);
+            if ps & PORTSC_WPR == 0 {
+                if ps & PORTSC_WRC != 0 {
+                    self.write_portsc_masked(port, ps, PORTSC_WRC);
+                }
+                break;
+            }
+            delay_us(1000);
+        }
+    }
+
+    /// Enciende PP en todos los puertos root (requerido post-HCRST en placa).
+    pub fn power_ports(&mut self) {
+        for port in 1..=self.max_ports {
+            let portsc = self.op.portsc(port);
+            if portsc & PORTSC_PP == 0 {
+                self.write_portsc_masked(port, portsc, PORTSC_PP);
+            }
         }
     }
 
@@ -249,37 +420,39 @@ impl XhciController {
     // Port enumeration
     // -----------------------------------------------------------------------
 
-    /// Scan all ports for connected devices and enumerate them.
+    /// Scan all ports for connected devices and enumerate them (una pasada).
     pub fn enumerate_ports(&mut self) {
+        if !self.any_root_port_connected() {
+            log::info!("xhci: enumerate_ports omitido (ningún CCS en root)");
+            return;
+        }
         log::info!("xhci: scanning {} ports for connected devices...", self.max_ports);
 
-        for port in 1..=self.max_ports {
+        for port in 1..=self.max_ports() {
             let portsc = self.op.portsc(port);
             let connected = portsc & PORTSC_CCS != 0;
-            let enabled = portsc & PORTSC_PED != 0;
-            let speed = (portsc & PORTSC_SPEED_MASK) >> PORTSC_SPEED_SHIFT;
-
-            log::debug!(
-                "xhci: port {}: PORTSC={:#010x} connected={} enabled={} speed={}",
-                port, portsc, connected, enabled, speed
+            if !connected {
+                continue;
+            }
+            let speed_code = (portsc & PORTSC_SPEED_MASK) >> PORTSC_SPEED_SHIFT;
+            let mut usb_speed = UsbSpeed::from_port_speed(speed_code);
+            log::info!(
+                "xhci: port {}: device connected PORTSC={portsc:#010x} speed={:?}",
+                port, usb_speed
             );
 
-            if connected {
-                let usb_speed = UsbSpeed::from_port_speed(speed);
-                log::info!(
-                    "xhci: port {}: device connected, speed={:?}",
-                    port, usb_speed
-                );
+            // USB2: reset siempre aunque PED=1 (estado heredado del UEFI).
+            if speed_code < 4 {
+                self.reset_port(port);
+                let speed_code = self.op.port_speed(port);
+                usb_speed = UsbSpeed::from_port_speed(speed_code);
+            }
 
-                // If not yet enabled, issue a port reset
-                if !enabled {
-                    self.reset_port(port);
-                }
-
-                // Try to enumerate the device
-                if let Some(slot_id) = self.enable_slot() {
-                    self.initialize_device(slot_id, port, usb_speed);
-                }
+            if let Some(slot_id) = self.enable_slot() {
+                self.initialize_device(slot_id, DevPath::root(port), usb_speed);
+            } else {
+                log::warn!("xhci: sin slots libres en port {port}");
+                break;
             }
         }
     }
@@ -288,33 +461,50 @@ impl XhciController {
     pub(crate) fn reset_port(&mut self, port: u8) {
         log::debug!("xhci: resetting port {}...", port);
 
+        // Debounce (Linux hub_port_debounce ≈ 100 ms).
+        delay_us(PORT_DEBOUNCE_US);
+
         let portsc = self.op.portsc(port);
-        // Preserve power, set reset, clear status change bits
-        let val = (portsc & !(PORTSC_CHANGE_BITS | PORTSC_PED)) | PORTSC_PR;
+        // PP + PR; no tocar bits RW1C (escribir 0 = no clear).
+        let val = (portsc & !PORTSC_CHANGE_BITS & !PORTSC_PED) | PORTSC_PP | PORTSC_PR;
         self.op.set_portsc(port, val);
 
         // Wait for reset to complete (PRC set)
-        let mut timeout = 500_000u32;
+        let mut waited = 0u32;
         loop {
             let portsc = self.op.portsc(port);
             if portsc & PORTSC_PRC != 0 {
-                // Clear PRC
-                self.op.set_portsc(
-                    port,
-                    (portsc & !PORTSC_CHANGE_BITS) | PORTSC_PRC,
-                );
+                self.write_portsc_masked(port, portsc, PORTSC_PRC);
                 break;
             }
-            timeout -= 1;
-            if timeout == 0 {
-                log::warn!("xhci: port {} reset timeout", port);
+            delay_us(100);
+            waited += 100;
+            if waited >= 500_000 {
+                log::warn!("xhci: port {} reset PRC timeout", port);
                 return;
+            }
+        }
+
+        // Wait for port enabled (PED=1)
+        waited = 0;
+        loop {
+            let portsc = self.op.portsc(port);
+            if portsc & PORTSC_PED != 0 {
+                break;
+            }
+            delay_us(100);
+            waited += 100;
+            if waited >= 500_000 {
+                log::warn!("xhci: port {} PED timeout after reset", port);
+                break;
             }
         }
 
         let portsc = self.op.portsc(port);
         let enabled = portsc & PORTSC_PED != 0;
         let speed = (portsc & PORTSC_SPEED_MASK) >> PORTSC_SPEED_SHIFT;
+        let usb_speed = UsbSpeed::from_port_speed(speed);
+        delay_us(trst_recovery_us(usb_speed));
         log::info!(
             "xhci: port {} reset complete: enabled={} speed={}",
             port, enabled, speed
@@ -331,8 +521,8 @@ impl XhciController {
         let _phys = self.cmd_ring.enqueue(trb);
         self.db.ring_command();
 
-        // Poll event ring for completion
-        for _ in 0..MAX_EVENT_POLL_RETRIES {
+        let mut elapsed = 0u32;
+        while elapsed < CMD_TIMEOUT_US {
             if let Some(evt) = self.evt_ring.dequeue() {
                 // Update ERDP
                 self.rt.set_erdp(0, self.evt_ring.dequeue_phys() | (1 << 3));
@@ -358,11 +548,18 @@ impl XhciController {
                 }
             }
 
-            // Tiny busy-wait between polls
-            core::hint::spin_loop();
+            delay_us(EVENT_POLL_INTERVAL_US);
+            elapsed += EVENT_POLL_INTERVAL_US;
         }
 
-        log::warn!("xhci: command completion timeout after {} retries", MAX_EVENT_POLL_RETRIES);
+        let sts = self.op.usbsts();
+        log::warn!(
+            "xhci: command completion timeout after {} ms USBSTS={:#x} HCE={}",
+            CMD_TIMEOUT_US / 1000,
+            sts,
+            sts & USBSTS_HCE != 0,
+        );
+        self.log_ports();
         None
     }
 
@@ -405,48 +602,144 @@ impl XhciController {
         Some(slot_id)
     }
 
+    /// Liberar un slot tras fallo de address/config (evita agotar MaxSlots).
+    pub(crate) fn disable_slot(&mut self, slot_id: u8) {
+        if slot_id == 0 || slot_id as usize >= self.devices.len() {
+            return;
+        }
+        let trb = Trb::disable_slot(slot_id, false);
+        let _ = self.send_command(trb);
+        self.devices[slot_id as usize] = None;
+        self.transfer_rings[slot_id as usize] = Vec::new();
+        for _ in 0..32 {
+            self.transfer_rings[slot_id as usize].push(None);
+        }
+    }
+
     /// Initialize a device: Address Device, Get Descriptors, Configure.
-    fn initialize_device(&mut self, slot_id: u8, port: u8, speed: UsbSpeed) {
+    fn initialize_device(&mut self, mut slot_id: u8, path: DevPath, speed: UsbSpeed) {
         log::info!(
-            "xhci: initializing device slot={} port={} speed={:?}",
-            slot_id, port, speed
+            "xhci: initializing device slot={} root_port={} route={:#x} speed={:?}",
+            slot_id, path.root_port, path.route, speed
         );
 
-        let device = UsbDevice::new(slot_id, port, speed);
-        self.devices[slot_id as usize] = Some(device);
+        let mut addressed = false;
+        for attempt in 0..MAX_ADDR_RETRIES {
+            if attempt > 0 {
+                log::info!(
+                    "xhci: Address Device retry {}/{} (slot={})",
+                    attempt + 1,
+                    MAX_ADDR_RETRIES,
+                    slot_id
+                );
+                self.disable_slot(slot_id);
+                if path.route == 0 {
+                    self.reset_port(path.root_port);
+                } else if !self.hub_reset_child_port(path.tt_hub_slot, path.tt_port) {
+                    log::warn!(
+                        "xhci: hub child reset failed hub_slot={} port={}",
+                        path.tt_hub_slot,
+                        path.tt_port
+                    );
+                }
+                delay_us(ADDR_RETRY_DELAY_US);
+                slot_id = match self.enable_slot() {
+                    Some(s) => s,
+                    None => {
+                        log::warn!("xhci: Enable Slot failed on Address retry");
+                        return;
+                    }
+                };
+            }
 
-        // --- Address Device (BSR=0: set address immediately) ---
-        if !self.address_device(slot_id, port, speed) {
-            log::warn!("xhci: Address Device failed for slot {}", slot_id);
+            self.devices[slot_id as usize] = Some(UsbDevice::new(
+                slot_id,
+                path.root_port,
+                speed,
+                path.route,
+                path.tt_hub_slot,
+                path.tt_port,
+            ));
+
+            if self.address_device(slot_id, path, speed) {
+                addressed = true;
+                break;
+            }
+            log::warn!(
+                "xhci: Address Device failed attempt {} slot {}",
+                attempt + 1,
+                slot_id
+            );
+        }
+
+        if !addressed {
+            log::warn!(
+                "xhci: Address Device failed for slot {} after {} attempts",
+                slot_id, MAX_ADDR_RETRIES
+            );
+            self.disable_slot(slot_id);
             return;
         }
 
-        // --- GET_DESCRIPTOR(Device) ---
-        let dev_desc = match self.get_device_descriptor(slot_id) {
+        let mut dev_desc = None;
+        for desc_try in 0..GET_DESCRIPTOR_TRIES {
+            if desc_try > 0 {
+                log::info!(
+                    "xhci: GET_DESCRIPTOR full retry {}/{} slot={}",
+                    desc_try + 1,
+                    GET_DESCRIPTOR_TRIES,
+                    slot_id
+                );
+                self.disable_slot(slot_id);
+                if path.route == 0 {
+                    self.reset_port(path.root_port);
+                } else if !self.hub_reset_child_port(path.tt_hub_slot, path.tt_port) {
+                    log::warn!(
+                        "xhci: hub child reset failed hub_slot={} port={}",
+                        path.tt_hub_slot,
+                        path.tt_port
+                    );
+                }
+                delay_us(ADDR_RETRY_DELAY_US);
+                slot_id = match self.enable_slot() {
+                    Some(s) => s,
+                    None => {
+                        log::warn!("xhci: Enable Slot failed on GET_DESCRIPTOR retry");
+                        return;
+                    }
+                };
+                self.devices[slot_id as usize] = Some(UsbDevice::new(
+                    slot_id,
+                    path.root_port,
+                    speed,
+                    path.route,
+                    path.tt_hub_slot,
+                    path.tt_port,
+                ));
+                if !self.address_device(slot_id, path, speed) {
+                    continue;
+                }
+            }
+
+            dev_desc = self.get_device_descriptor(slot_id);
+            if dev_desc.is_some() {
+                break;
+            }
+        }
+
+        let dev_desc = match dev_desc {
             Some(d) => d,
             None => {
                 log::warn!("xhci: failed to get device descriptor for slot {}", slot_id);
+                self.disable_slot(slot_id);
                 return;
             }
         };
-
-        // Update EP0 max packet size if needed
-        let actual_mps = dev_desc.b_max_packet_size0;
-        if actual_mps != speed.default_max_packet_size0() as u8 {
-            log::debug!(
-                "xhci: slot {} EP0 max packet size: default={} actual={}",
-                slot_id,
-                speed.default_max_packet_size0(),
-                actual_mps
-            );
-            // Would issue Evaluate Context to update EP0 here
-        }
 
         if let Some(ref mut dev) = self.devices[slot_id as usize] {
             dev.device_desc = Some(dev_desc.clone());
         }
 
-        // --- GET_DESCRIPTOR(Configuration, index=0) ---
         let parsed_config = match self.get_configuration_descriptor(slot_id, 0) {
             Some(c) => c,
             None => {
@@ -455,11 +748,10 @@ impl XhciController {
             }
         };
 
-        // Check if this is a keyboard (clone endpoint descriptor to avoid borrow conflict)
-        let keyboard_info = parsed_config.find_hid_keyboard()
+        let keyboard_info = parsed_config
+            .find_hid_keyboard()
             .map(|(iface_num, ep)| (iface_num, ep.clone()));
 
-        // --- SET_CONFIGURATION ---
         let config_val = parsed_config.config.b_configuration_value;
         if !self.set_configuration(slot_id, config_val, &parsed_config) {
             log::warn!("xhci: SET_CONFIGURATION failed for slot {}", slot_id);
@@ -471,7 +763,6 @@ impl XhciController {
             dev.configured = true;
         }
 
-        // --- Setup keyboard if found ---
         if let Some((iface_num, ref ep_desc)) = keyboard_info {
             log::info!(
                 "xhci: setting up HID keyboard on slot={} interface={}",
@@ -479,31 +770,37 @@ impl XhciController {
             );
             self.setup_keyboard(slot_id, iface_num, ep_desc);
         }
+
+        if dev_desc.is_hub() {
+            log::info!("xhci: hub en slot={} root_port={}", slot_id, path.root_port);
+            self.enumerate_hub_children(slot_id, path.root_port);
+        }
     }
 
     /// Issue an Address Device command.
-    pub(crate) fn address_device(&mut self, slot_id: u8, port: u8, speed: UsbSpeed) -> bool {
-        log::debug!("xhci: Address Device slot={} port={}", slot_id, port);
+    pub(crate) fn address_device(&mut self, slot_id: u8, path: DevPath, speed: UsbSpeed) -> bool {
+        log::debug!(
+            "xhci: Address Device slot={} root_port={} route={:#x}",
+            slot_id, path.root_port, path.route
+        );
 
         let ctx_size = self.ctx_size;
 
-        // Allocate EP0 transfer ring
         let ep0_ring = unsafe { TransferRing::new() };
         let ep0_ring_phys = ep0_ring.phys_addr_with_dcs();
         self.transfer_rings[slot_id as usize][1] = Some(ep0_ring);
 
-        // Build Input Context
         let input_ctx = unsafe { InputContext::new(ctx_size) };
-
-        // Add flags: Slot Context (bit 0) + EP0 Context (bit 1)
         input_ctx.set_add_flags(0x3);
 
-        // Slot Context
         let mut slot = SlotContext::new(ctx_size);
-        slot.set_route_string(0)
+        slot.set_route_string(path.route)
             .set_speed(speed.to_slot_speed())
-            .set_context_entries(1) // Only EP0
-            .set_root_hub_port(port);
+            .set_context_entries(1)
+            .set_root_hub_port(path.root_port);
+        if path.tt_hub_slot != 0 {
+            slot.set_tt(path.tt_hub_slot, path.tt_port);
+        }
         input_ctx.write_slot_context(&slot);
 
         // EP0 Context
@@ -526,6 +823,7 @@ impl XhciController {
         match self.send_command(trb) {
             Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
                 log::info!("xhci: slot {} addressed successfully", slot_id);
+                delay_us(SET_ADDRESS_SETTLE_US);
                 true
             }
             Some(evt) => {
@@ -542,39 +840,183 @@ impl XhciController {
         }
     }
 
+    /// GET_DESCRIPTOR IN estándar en EP0.
+    fn ep0_get_descriptor_in(
+        &mut self,
+        slot_id: u8,
+        desc_type: u8,
+        desc_index: u8,
+        buf_phys: u64,
+        length: u16,
+    ) -> bool {
+        let handles = {
+            let ring = match self.transfer_rings[slot_id as usize][1].as_mut() {
+                Some(r) => r,
+                None => return false,
+            };
+            ring.enqueue_control_transfer(
+                USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                USB_REQ_GET_DESCRIPTOR,
+                ((desc_type as u16) << 8) | (desc_index as u16),
+                0,
+                buf_phys,
+                length,
+            )
+        };
+        self.db.ring_endpoint(slot_id, 1);
+        match self.wait_transfer_event(slot_id, Some(handles.status_trb_phys)) {
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS
+                || evt.completion_code() == TRB_COMPLETION_SHORT_PACKET =>
+            {
+                true
+            }
+            Some(evt) => {
+                let code = evt.completion_code();
+                log::warn!(
+                    "xhci: GET_DESCRIPTOR(type={desc_type}) failed: code={code}"
+                );
+                if Self::ep0_needs_recover(code) {
+                    let _ = self.recover_ep0(slot_id);
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn ep0_needs_recover(code: u8) -> bool {
+        code == TRB_COMPLETION_BABBLE
+            || code == TRB_COMPLETION_USB_TRANSACTION_ERROR
+            || code == TRB_COMPLETION_STALL
+    }
+
+    /// Recupera EP0 halted: Reset Endpoint + Set TR Dequeue (Linux xhci_cleanup_halted_endpoint).
+    fn recover_ep0(&mut self, slot_id: u8) -> bool {
+        let trb = Trb::reset_endpoint(slot_id, EP0_DCI, false);
+        match self.send_command(trb) {
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {}
+            Some(evt) => {
+                log::warn!(
+                    "xhci: Reset EP0 failed slot={slot_id}: code={}",
+                    evt.completion_code()
+                );
+                return false;
+            }
+            None => {
+                log::warn!("xhci: Reset EP0 timeout slot={slot_id}");
+                return false;
+            }
+        }
+
+        let dequeue = match self.transfer_rings[slot_id as usize][1].as_ref() {
+            Some(r) => r.enqueue_phys_with_dcs(),
+            None => return false,
+        };
+        let trb = Trb::set_tr_dequeue(dequeue, slot_id, EP0_DCI, false);
+        match self.send_command(trb) {
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
+                log::info!("xhci: EP0 recovered slot={slot_id}");
+                true
+            }
+            Some(evt) => {
+                log::warn!(
+                    "xhci: Set TR Dequeue EP0 failed slot={slot_id}: code={}",
+                    evt.completion_code()
+                );
+                false
+            }
+            None => {
+                log::warn!("xhci: Set TR Dequeue EP0 timeout slot={slot_id}");
+                false
+            }
+        }
+    }
+
+    /// Actualiza max packet size de EP0 tras leer bMaxPacketSize0 (Linux usb_get_device_descriptor).
+    fn evaluate_ep0_max_packet(&mut self, slot_id: u8, max_pkt: u16) -> bool {
+        let ep0_ring_phys = match self.transfer_rings[slot_id as usize][1].as_ref() {
+            Some(r) => r.phys_addr_with_dcs(),
+            None => return false,
+        };
+
+        let input_ctx = unsafe { InputContext::new(self.ctx_size) };
+        input_ctx.set_add_flags(1 << 1); // EP0 (DCI 1)
+
+        let mut ep0 = EndpointContext::new(self.ctx_size);
+        ep0.set_ep_type(EP_TYPE_CONTROL)
+            .set_max_packet_size(max_pkt)
+            .set_cerr(3)
+            .set_tr_dequeue_pointer(ep0_ring_phys)
+            .set_average_trb_length(8);
+        input_ctx.write_endpoint_context(1, &ep0);
+
+        let trb = Trb::evaluate_context(input_ctx.phys_addr(), slot_id, false);
+        match self.send_command(trb) {
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
+                log::info!("xhci: EP0 max_packet_size={max_pkt} slot={slot_id}");
+                true
+            }
+            Some(evt) => {
+                log::warn!(
+                    "xhci: Evaluate Context EP0 failed: code={}",
+                    evt.completion_code()
+                );
+                false
+            }
+            None => false,
+        }
+    }
+
     /// Issue GET_DESCRIPTOR(Device) on EP0.
     pub(crate) fn get_device_descriptor(&mut self, slot_id: u8) -> Option<DeviceDescriptor> {
         log::debug!("xhci: GET_DESCRIPTOR(Device) slot={}", slot_id);
 
-        let buf_size = DeviceDescriptor::SIZE;
-        let (buf_va, buf_phys) = unsafe { alloc_dma_buffer(buf_size) };
-
-        let ring = self.transfer_rings[slot_id as usize][1].as_mut()?;
-        ring.enqueue_control_transfer(
-            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-            USB_REQ_GET_DESCRIPTOR,
-            (USB_DESC_DEVICE as u16) << 8,
-            0,
-            buf_phys,
-            buf_size as u16,
-        );
-
-        // Ring EP0 doorbell (DCI=1)
-        self.db.ring_endpoint(slot_id, 1);
-
-        // Wait for transfer event
-        let evt = self.wait_transfer_event(slot_id)?;
-        if evt.completion_code() != TRB_COMPLETION_SUCCESS
-            && evt.completion_code() != TRB_COMPLETION_SHORT_PACKET
-        {
-            log::warn!(
-                "xhci: GET_DESCRIPTOR(Device) failed: code={}",
-                evt.completion_code()
-            );
+        // Paso 1: leer 8 bytes (incluye bMaxPacketSize0 en offset 7), con reintentos.
+        let (header_va, header_phys) = unsafe { alloc_dma_buffer(8) };
+        let mut header_ok = false;
+        for attempt in 0..GET_DESCRIPTOR_RETRIES {
+            if attempt > 0 {
+                delay_us(GET_DESCRIPTOR_RETRY_DELAY_US);
+            }
+            if self.ep0_get_descriptor_in(slot_id, USB_DESC_DEVICE, 0, header_phys, 8) {
+                header_ok = true;
+                break;
+            }
+        }
+        if !header_ok {
+            log::warn!("xhci: GET_DESCRIPTOR(Device) header failed for slot {slot_id}");
+            return None;
+        }
+        let header = unsafe { read_dma_buffer(header_va, 8) };
+        if header.len() < 8 {
             return None;
         }
 
-        let data = unsafe { read_dma_buffer(buf_va, buf_size) };
+        let max_pkt0 = header[7] as u16;
+        if max_pkt0 != 0 && max_pkt0 != 8 {
+            let _ = self.evaluate_ep0_max_packet(slot_id, max_pkt0);
+        }
+
+        // Paso 2: leer descriptor completo.
+        let total_len = header[0].max(DeviceDescriptor::SIZE as u8) as usize;
+        let (buf_va, buf_phys) = unsafe { alloc_dma_buffer(total_len) };
+        let mut full_ok = false;
+        for attempt in 0..GET_DESCRIPTOR_RETRIES {
+            if attempt > 0 {
+                delay_us(GET_DESCRIPTOR_RETRY_DELAY_US);
+            }
+            if self.ep0_get_descriptor_in(slot_id, USB_DESC_DEVICE, 0, buf_phys, total_len as u16)
+            {
+                full_ok = true;
+                break;
+            }
+        }
+        if !full_ok {
+            log::warn!("xhci: GET_DESCRIPTOR(Device) full failed for slot {slot_id}");
+            return None;
+        }
+
+        let data = unsafe { read_dma_buffer(buf_va, total_len) };
         DeviceDescriptor::parse(&data)
     }
 
@@ -594,7 +1036,7 @@ impl XhciController {
         let (hdr_va, hdr_phys) = unsafe { alloc_dma_buffer(header_size) };
 
         let ring = self.transfer_rings[slot_id as usize][1].as_mut()?;
-        ring.enqueue_control_transfer(
+        let handles = ring.enqueue_control_transfer(
             USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
             USB_REQ_GET_DESCRIPTOR,
             (USB_DESC_CONFIGURATION as u16) << 8 | config_index as u16,
@@ -604,7 +1046,7 @@ impl XhciController {
         );
         self.db.ring_endpoint(slot_id, 1);
 
-        let evt = self.wait_transfer_event(slot_id)?;
+        let evt = self.wait_transfer_event(slot_id, Some(handles.status_trb_phys))?;
         if evt.completion_code() != TRB_COMPLETION_SUCCESS
             && evt.completion_code() != TRB_COMPLETION_SHORT_PACKET
         {
@@ -623,7 +1065,7 @@ impl XhciController {
         let (full_va, full_phys) = unsafe { alloc_dma_buffer(total_len) };
 
         let ring = self.transfer_rings[slot_id as usize][1].as_mut()?;
-        ring.enqueue_control_transfer(
+        let handles = ring.enqueue_control_transfer(
             USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
             USB_REQ_GET_DESCRIPTOR,
             (USB_DESC_CONFIGURATION as u16) << 8 | config_index as u16,
@@ -633,7 +1075,7 @@ impl XhciController {
         );
         self.db.ring_endpoint(slot_id, 1);
 
-        let evt = self.wait_transfer_event(slot_id)?;
+        let evt = self.wait_transfer_event(slot_id, Some(handles.status_trb_phys))?;
         if evt.completion_code() != TRB_COMPLETION_SUCCESS
             && evt.completion_code() != TRB_COMPLETION_SHORT_PACKET
         {
@@ -665,7 +1107,7 @@ impl XhciController {
             Some(r) => r,
             None => return false,
         };
-        ring.enqueue_control_transfer(
+        let handles = ring.enqueue_control_transfer(
             USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
             USB_REQ_SET_CONFIGURATION,
             config_value as u16,
@@ -675,7 +1117,7 @@ impl XhciController {
         );
         self.db.ring_endpoint(slot_id, 1);
 
-        match self.wait_transfer_event(slot_id) {
+        match self.wait_transfer_event(slot_id, Some(handles.status_trb_phys)) {
             Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
                 log::debug!("xhci: SET_CONFIGURATION USB request succeeded");
             }
@@ -748,16 +1190,19 @@ impl XhciController {
             .as_ref()
             .map(|d| d.speed)
             .unwrap_or(UsbSpeed::Unknown);
-        let port = self.devices[slot_id as usize]
+        let (port, route, tt_hub, tt_port) = self.devices[slot_id as usize]
             .as_ref()
-            .map(|d| d.port)
-            .unwrap_or(0);
+            .map(|d| (d.port, d.route_string, d.tt_hub_slot, d.tt_port))
+            .unwrap_or((0, 0, 0, 0));
 
         let mut slot = SlotContext::new(ctx_size);
-        slot.set_route_string(0)
+        slot.set_route_string(route)
             .set_speed(speed.to_slot_speed())
             .set_context_entries(max_dci)
             .set_root_hub_port(port);
+        if tt_hub != 0 {
+            slot.set_tt(tt_hub, tt_port);
+        }
         input_ctx.write_slot_context(&slot);
 
         log::debug!(
@@ -801,7 +1246,7 @@ impl XhciController {
         // SET_PROTOCOL(Boot Protocol = 0)
         log::debug!("xhci: SET_PROTOCOL(Boot) on interface {}", iface_num);
         if let Some(ring) = self.transfer_rings[slot_id as usize][1].as_mut() {
-            ring.enqueue_control_transfer(
+            let handles = ring.enqueue_control_transfer(
                 USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
                 HID_REQ_SET_PROTOCOL,
                 HID_PROTOCOL_BOOT,
@@ -811,7 +1256,7 @@ impl XhciController {
             );
             self.db.ring_endpoint(slot_id, 1);
 
-            match self.wait_transfer_event(slot_id) {
+            match self.wait_transfer_event(slot_id, Some(handles.status_trb_phys)) {
                 Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
                     log::info!("xhci: SET_PROTOCOL(Boot) succeeded");
                 }
@@ -827,7 +1272,7 @@ impl XhciController {
         // SET_IDLE(0) — don't wait for changes, report constantly
         log::debug!("xhci: SET_IDLE(0) on interface {}", iface_num);
         if let Some(ring) = self.transfer_rings[slot_id as usize][1].as_mut() {
-            ring.enqueue_control_transfer(
+            let handles = ring.enqueue_control_transfer(
                 USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
                 HID_REQ_SET_IDLE,
                 0, // duration=0, report_id=0
@@ -837,7 +1282,7 @@ impl XhciController {
             );
             self.db.ring_endpoint(slot_id, 1);
 
-            match self.wait_transfer_event(slot_id) {
+            match self.wait_transfer_event(slot_id, Some(handles.status_trb_phys)) {
                 Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
                     log::debug!("xhci: SET_IDLE succeeded");
                 }
@@ -980,19 +1425,55 @@ impl XhciController {
     // Transfer event waiting
     // -----------------------------------------------------------------------
 
-    /// Wait for a transfer event on any endpoint. Returns the event TRB.
-    pub(crate) fn wait_transfer_event(&mut self, _expected_slot: u8) -> Option<Trb> {
-        for _ in 0..MAX_EVENT_POLL_RETRIES {
+    /// Wait for a transfer event. Con `status_trb_phys`, espera el evento del Status
+    /// TRB de un control transfer (tolerando short-packet del Data Stage).
+    pub(crate) fn wait_transfer_event(
+        &mut self,
+        expected_slot: u8,
+        status_trb_phys: Option<u64>,
+    ) -> Option<Trb> {
+        let mut elapsed = 0u32;
+        while elapsed < TRANSFER_TIMEOUT_US {
             if let Some(evt) = self.evt_ring.dequeue() {
                 // Update ERDP
                 self.rt.set_erdp(0, self.evt_ring.dequeue_phys() | (1 << 3));
 
                 let evt_type = evt.trb_type();
 
-                if evt_type == TRB_TYPE_TRANSFER_EVENT
-                    || evt_type == TRB_TYPE_COMMAND_COMPLETION
-                {
-                    return Some(evt);
+                if evt_type == TRB_TYPE_TRANSFER_EVENT {
+                    if evt.slot_id() != expected_slot {
+                        log::trace!(
+                            "xhci: transfer event slot {} (expected {})",
+                            evt.slot_id(),
+                            expected_slot
+                        );
+                        continue;
+                    }
+
+                    let code = evt.completion_code();
+                    let evt_ptr = evt.parameter() & !0xF;
+
+                    match status_trb_phys {
+                        None => return Some(evt),
+                        Some(status_phys) => {
+                            let status_ptr = status_phys & !0xF;
+                            if evt_ptr == status_ptr {
+                                return Some(evt);
+                            }
+                            // Short packet en Data Stage: seguir esperando Status.
+                            if code == TRB_COMPLETION_SHORT_PACKET && evt.endpoint_id() == EP0_DCI
+                            {
+                                log::debug!("xhci: EP0 data short packet, waiting for status");
+                                continue;
+                            }
+                            // Error en Setup/Data: devolver de inmediato.
+                            if code != TRB_COMPLETION_SUCCESS {
+                                return Some(evt);
+                            }
+                            log::trace!("xhci: EP0 event before status, waiting");
+                            continue;
+                        }
+                    }
                 }
 
                 if evt_type == TRB_TYPE_PORT_STATUS_CHANGE {
@@ -1004,15 +1485,30 @@ impl XhciController {
                 log::trace!("xhci: unexpected event type {} during transfer wait", evt_type);
                 continue;
             }
-            core::hint::spin_loop();
+            delay_us(EVENT_POLL_INTERVAL_US);
+            elapsed += EVENT_POLL_INTERVAL_US;
         }
 
-        log::warn!("xhci: transfer event timeout");
+        let sts = self.op.usbsts();
+        log::warn!(
+            "xhci: transfer event timeout after {} ms USBSTS={:#x} HCE={}",
+            TRANSFER_TIMEOUT_US / 1000,
+            sts,
+            sts & USBSTS_HCE != 0,
+        );
+        self.log_ports();
         None
     }
 
-    pub(crate) fn set_device(&mut self, slot_id: u8, port: u8, speed: UsbSpeed) {
-        self.devices[slot_id as usize] = Some(UsbDevice::new(slot_id, port, speed));
+    pub(crate) fn set_device(&mut self, slot_id: u8, path: DevPath, speed: UsbSpeed) {
+        self.devices[slot_id as usize] = Some(UsbDevice::new(
+            slot_id,
+            path.root_port,
+            speed,
+            path.route,
+            path.tt_hub_slot,
+            path.tt_port,
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1031,6 +1527,29 @@ impl XhciController {
         UsbSpeed::from_port_speed(self.op.port_speed(port))
     }
 
+    /// Procesa eventos de cambio de puerto pendientes (re-conexión tras HCRST).
+    pub fn drain_port_events(&mut self) {
+        while let Some(evt) = self.evt_ring.dequeue() {
+            self.rt.set_erdp(0, self.evt_ring.dequeue_phys() | (1 << 3));
+            if evt.trb_type() == TRB_TYPE_PORT_STATUS_CHANGE {
+                let port_id = (evt.parameter() >> 24) as u8;
+                log::info!("xhci: port status change port={port_id}");
+            }
+        }
+    }
+
+    /// Estado de cada puerto root (diagnóstico en placa).
+    pub fn log_ports(&self) {
+        for port in 1..=self.max_ports() {
+            let portsc = self.portsc(port);
+            log::info!(
+                "xhci: port {port}: PORTSC={portsc:#010x} ccs={} ped={}",
+                portsc & PORTSC_CCS != 0,
+                portsc & PORTSC_PED != 0,
+            );
+        }
+    }
+
     pub(crate) fn transfer_ring(&mut self, slot_id: u8, dci: u8) -> Option<&mut TransferRing> {
         self.transfer_rings
             .get_mut(slot_id as usize)?
@@ -1042,10 +1561,315 @@ impl XhciController {
         self.db.ring_endpoint(slot_id, dci);
     }
 
+    fn get_hub_port_count(&mut self, hub_slot: u8) -> Option<u8> {
+        let (va, phys) = unsafe { alloc_dma_buffer(16) };
+        let ring = self.transfer_rings[hub_slot as usize][1].as_mut()?;
+        let handles = ring.enqueue_control_transfer(
+            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+            USB_REQ_GET_DESCRIPTOR,
+            (USB_DESC_HUB as u16) << 8,
+            0,
+            phys,
+            16,
+        );
+        self.db.ring_endpoint(hub_slot, 1);
+        let evt = self.wait_transfer_event(hub_slot, Some(handles.status_trb_phys))?;
+        if evt.completion_code() != TRB_COMPLETION_SUCCESS
+            && evt.completion_code() != TRB_COMPLETION_SHORT_PACKET
+        {
+            return None;
+        }
+        let data = unsafe { read_dma_buffer(va, 16) };
+        (data.len() >= 3).then_some(data[2])
+    }
+
+    fn hub_set_port_feature(&mut self, hub_slot: u8, port: u8, feature: u16) -> bool {
+        let ring = match self.transfer_rings[hub_slot as usize][1].as_mut() {
+            Some(r) => r,
+            None => return false,
+        };
+        let handles = ring.enqueue_control_transfer(
+            USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_OTHER,
+            HUB_REQ_SET_FEATURE,
+            feature,
+            port as u16,
+            0,
+            0,
+        );
+        self.db.ring_endpoint(hub_slot, 1);
+        matches!(
+            self.wait_transfer_event(hub_slot, Some(handles.status_trb_phys)),
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS
+        )
+    }
+
+    fn hub_clear_port_feature(&mut self, hub_slot: u8, port: u8, feature: u16) -> bool {
+        let ring = match self.transfer_rings[hub_slot as usize][1].as_mut() {
+            Some(r) => r,
+            None => return false,
+        };
+        let handles = ring.enqueue_control_transfer(
+            USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_OTHER,
+            HUB_REQ_CLEAR_FEATURE,
+            feature,
+            port as u16,
+            0,
+            0,
+        );
+        self.db.ring_endpoint(hub_slot, 1);
+        matches!(
+            self.wait_transfer_event(hub_slot, Some(handles.status_trb_phys)),
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS
+        )
+    }
+
+    fn hub_get_port_status(&mut self, hub_slot: u8, port: u8) -> Option<(u16, u16)> {
+        let (va, phys) = unsafe { alloc_dma_buffer(4) };
+        let ring = self.transfer_rings[hub_slot as usize][1].as_mut()?;
+        let handles = ring.enqueue_control_transfer(
+            USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_OTHER,
+            USB_REQ_GET_STATUS,
+            0,
+            port as u16,
+            phys,
+            4,
+        );
+        self.db.ring_endpoint(hub_slot, 1);
+        let evt = self.wait_transfer_event(hub_slot, Some(handles.status_trb_phys))?;
+        if evt.completion_code() != TRB_COMPLETION_SUCCESS
+            && evt.completion_code() != TRB_COMPLETION_SHORT_PACKET
+        {
+            return None;
+        }
+        let data = unsafe { read_dma_buffer(va, 4) };
+        if data.len() < 4 {
+            return None;
+        }
+        Some((
+            u16::from_le_bytes([data[0], data[1]]),
+            u16::from_le_bytes([data[2], data[3]]),
+        ))
+    }
+
+    fn hub_wait_port_reset_complete(&mut self, hub_slot: u8, port: u8) -> bool {
+        for _ in 0..500 {
+            delay_us(1000);
+            let Some((_status, change)) = self.hub_get_port_status(hub_slot, port) else {
+                continue;
+            };
+            if change & HUB_PORT_CHANGE_RESET != 0 {
+                if !self.hub_clear_port_feature(hub_slot, port, HUB_FEATURE_C_PORT_RESET) {
+                    return false;
+                }
+                let Some((status, _)) = self.hub_get_port_status(hub_slot, port) else {
+                    return false;
+                };
+                delay_us(trst_recovery_us(usb_speed_from_hub_status(status)));
+                return status & HUB_PORT_CONNECTED != 0;
+            }
+        }
+        false
+    }
+
+    fn hub_reset_child_port(&mut self, hub_slot: u8, port: u8) -> bool {
+        if !self.hub_set_port_feature(hub_slot, port, HUB_FEATURE_PORT_RESET) {
+            return false;
+        }
+        self.hub_wait_port_reset_complete(hub_slot, port)
+    }
+
+    fn enumerate_hub_children(&mut self, hub_slot: u8, root_port: u8) {
+        let n_ports = match self.get_hub_port_count(hub_slot) {
+            Some(n) => n,
+            None => {
+                log::warn!("xhci: hub slot={hub_slot} sin descriptor");
+                return;
+            }
+        };
+        log::info!("xhci: hub slot={hub_slot} {n_ports} puertos downstream");
+        for hp in 1..=n_ports {
+            if !self.hub_set_port_feature(hub_slot, hp, HUB_FEATURE_PORT_POWER) {
+                continue;
+            }
+            delay_us(HUB_POWER_ON_US);
+            let (status, _change) = match self.hub_get_port_status(hub_slot, hp) {
+                Some(s) => s,
+                None => continue,
+            };
+            if status & HUB_PORT_CONNECTED == 0 {
+                continue;
+            }
+            log::info!("xhci: hub puerto {hp} conectado status={status:#06x}");
+            if !self.hub_set_port_feature(hub_slot, hp, HUB_FEATURE_PORT_RESET) {
+                continue;
+            }
+            if !self.hub_wait_port_reset_complete(hub_slot, hp) {
+                log::warn!("xhci: hub puerto {hp} reset timeout");
+                continue;
+            }
+            let (status, _) = self
+                .hub_get_port_status(hub_slot, hp)
+                .unwrap_or((0, 0));
+            let child_speed = usb_speed_from_hub_status(status);
+            let path = DevPath::behind_hub(root_port, hp, hub_slot);
+            if let Some(slot) = self.enable_slot() {
+                self.initialize_device(slot, path, child_speed);
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Diagnostics
     // -----------------------------------------------------------------------
 
+}
+
+/// Capacidad extendida ID 1: USB Legacy Support (handoff BIOS ↔ OS).
+const XHCI_EXT_CAP_LEGACY: u8 = 1;
+const USBLEGSUP_BIOS_OWNED: u32 = 1 << 16;
+const USBLEGSUP_OS_OWNED: u32 = 1 << 24;
+/// Offset USBLEGCTLSTS respecto a USBLEGSUP (xHCI §7.1.2 / Linux).
+const XHCI_LEGACY_CONTROL_OFFSET: usize = 0x04;
+/// Bits a preservar al apagar SMIs (Linux `XHCI_LEGACY_DISABLE_SMI`).
+const XHCI_LEGACY_DISABLE_SMI: u32 = (0x7 << 1) + (0xff << 5) + (0x7 << 17);
+/// Eventos SMI RW1C (Linux `XHCI_LEGACY_SMI_EVENTS`).
+const XHCI_LEGACY_SMI_EVENTS: u32 = 0x7 << 29;
+
+fn wait_root_port_resets_idle(op: &OperationalRegs, max_ports: u8) {
+    for port in 1..=max_ports {
+        for _ in 0..200 {
+            let portsc = op.portsc(port);
+            if portsc & (PORTSC_PR | PORTSC_WPR) == 0 {
+                break;
+            }
+            delay_us(1000);
+        }
+    }
+}
+
+/// Linux `xhci_reset`: HCRST + esperar CNR=0 + PR/WPR idle.
+fn do_hcrst(op: &OperationalRegs, max_ports: u8) {
+    log::info!("xhci: HCRST");
+    op.set_usbcmd(op.usbcmd() | USBCMD_HCRST);
+    // Intel quirk (Linux udelay(1000)): no tocar regs ~1 ms tras HCRST.
+    delay_us(1000);
+    let mut timeout_ms = 0u32;
+    while op.usbcmd() & USBCMD_HCRST != 0 {
+        delay_us(100);
+        timeout_ms += 1;
+        if timeout_ms > 10_000 {
+            panic!("xhci: HCRST did not clear");
+        }
+    }
+    timeout_ms = 0;
+    while !op.is_ready() {
+        delay_us(100);
+        timeout_ms += 1;
+        if timeout_ms > 50_000 {
+            panic!("xhci: controller not ready after reset");
+        }
+    }
+    wait_root_port_resets_idle(op, max_ports);
+    log::info!("xhci: controller reset complete");
+}
+
+/// Equivalente a Linux `quirk_usb_handoff_xhci`: ownership + SMI off + halt.
+fn linux_bios_handoff(bar0: usize, cap: &CapabilityRegs, op: &OperationalRegs) {
+    let xecp = hccparams1_xecp(cap.hccparams1());
+    if xecp == 0 {
+        log::info!("xhci: sin xECP; no hay USBLEGSUP");
+    } else {
+        let mut off = (xecp as usize) * 4;
+        let mut found = false;
+        for _ in 0..64 {
+            if off == 0 || off >= 0x10000 {
+                break;
+            }
+            let addr = bar0 + off;
+            let val = unsafe { mmio_read32(addr) };
+            let id = (val & 0xff) as u8;
+            let next = ((val >> 8) & 0xff) as usize;
+            if id == XHCI_EXT_CAP_LEGACY {
+                found = true;
+                let bios = val & USBLEGSUP_BIOS_OWNED != 0;
+                let os = val & USBLEGSUP_OS_OWNED != 0;
+                log::info!("xhci: USBLEGSUP bios_owned={bios} os_owned={os}");
+                if bios {
+                    unsafe { mmio_write32(addr, val | USBLEGSUP_OS_OWNED) };
+                    // Linux: handshake 1 s, poll ~10 µs.
+                    let mut ok = false;
+                    for _ in 0..100_000 {
+                        if unsafe { mmio_read32(addr) } & USBLEGSUP_BIOS_OWNED == 0 {
+                            ok = true;
+                            break;
+                        }
+                        delay_us(10);
+                    }
+                    if ok {
+                        log::info!("xhci: handoff BIOS→OS OK");
+                    } else {
+                        let v = unsafe { mmio_read32(addr) };
+                        unsafe {
+                            mmio_write32(addr, (v | USBLEGSUP_OS_OWNED) & !USBLEGSUP_BIOS_OWNED);
+                        }
+                        log::warn!("xhci: handoff timeout; forzado OS owned");
+                    }
+                } else if !os {
+                    unsafe { mmio_write32(addr, val | USBLEGSUP_OS_OWNED) };
+                }
+
+                // Apagar SMIs del firmware (USBLEGCTLSTS).
+                let ctl_addr = addr + XHCI_LEGACY_CONTROL_OFFSET;
+                let ctl = unsafe { mmio_read32(ctl_addr) };
+                let ctl = (ctl & XHCI_LEGACY_DISABLE_SMI) | XHCI_LEGACY_SMI_EVENTS;
+                unsafe { mmio_write32(ctl_addr, ctl) };
+                log::info!("xhci: USBLEGCTLSTS SMI disabled");
+                break;
+            }
+            if next == 0 {
+                break;
+            }
+            off += next * 4;
+        }
+        if !found {
+            log::info!("xhci: USBLEGSUP no presente en xECP");
+        }
+    }
+
+    // CNR=0 (Linux handshake hasta 5 s).
+    for _ in 0..50_000 {
+        if op.is_ready() {
+            break;
+        }
+        delay_us(100);
+    }
+    if !op.is_ready() {
+        log::warn!(
+            "xhci: CNR sigue activo tras handoff (USBSTS={:#x})",
+            op.usbsts()
+        );
+    }
+
+    // Halt + deshabilitar IRQs (Linux: clear RUN | IRQS).
+    let cmd = op.usbcmd() & !(USBCMD_RS | USBCMD_IRQS);
+    op.set_usbcmd(cmd);
+    for _ in 0..320 {
+        if op.is_halted() {
+            break;
+        }
+        delay_us(125);
+    }
+    if !op.is_halted() {
+        log::warn!(
+            "xhci: no halt tras handoff (USBSTS={:#x})",
+            op.usbsts()
+        );
+    } else {
+        log::info!("xhci: halt post-handoff OK");
+    }
+}
+
+impl XhciController {
     /// Print controller status to log.
     pub fn dump_status(&self) {
         let usbsts = self.op.usbsts();

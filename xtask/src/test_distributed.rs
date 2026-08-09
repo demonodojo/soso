@@ -171,6 +171,7 @@ fn lanzar_qemu_dist(
     super::apply_firmware(&mut qemu, img);
     qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
     super::apply_qemu_disks(&mut qemu, data, models);
+    super::apply_qemu_usb(&mut qemu);
     apply_qemu_nic_dist(&mut qemu, instance, sock_port, listen);
     super::apply_qemu_gpu(&mut qemu);
     qemu.args([
