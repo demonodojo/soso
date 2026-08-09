@@ -68,6 +68,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
 
+    // En placa sin COM1 la consola es sólo el framebuffer y el teclado PS/2.
+    if drivers::serial::present() {
+        println!("serial: COM1 0x3F8 presente");
+    } else {
+        println!("serial: COM1 0x3F8 ausente (consola = framebuffer + PS/2)");
+    }
+
     println!(
         "memoria: {} MiB libres tras el heap",
         mm::FRAME_ALLOC.get().unwrap().lock().free_frames() * 4096 / (1024 * 1024)

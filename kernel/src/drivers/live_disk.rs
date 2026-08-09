@@ -49,24 +49,41 @@ pub fn init() {
 }
 
 fn try_backend(backend: LiveBackend) -> Option<()> {
-    if sector_reader(backend, GPT_HDR_LBA, &mut [0u8; SECTOR]).is_err() {
+    // Antes esto devolvía None en silencio en cada paso: «no hay GPT» y «no pude
+    // leer» se veían igual en pantalla, que es lo que escondió durante todo un
+    // arranque un pendrive perfectamente detectado pero con capacidad falsa.
+    let mut hdr = [0u8; SECTOR];
+    if sector_reader(backend, GPT_HDR_LBA, &mut hdr).is_err() {
+        crate::println!("live: {backend:?}: no pude leer la LBA {GPT_HDR_LBA} (cabecera GPT)");
         return None;
     }
-    let mut hdr = [0u8; SECTOR];
-    sector_reader(backend, GPT_HDR_LBA, &mut hdr).ok()?;
     if &hdr[0..8] != b"EFI PART" {
+        crate::println!(
+            "live: {backend:?}: LBA {GPT_HDR_LBA} sin firma «EFI PART» (empieza por {:02x?})",
+            &hdr[0..8]
+        );
         return None;
     }
     let mut ents = [0u8; SECTOR * 4];
     for i in 0..4usize {
         let mut sec = [0u8; SECTOR];
-        sector_reader(backend, GPT_PARTS_LBA + i as u64, &mut sec).ok()?;
+        if sector_reader(backend, GPT_PARTS_LBA + i as u64, &mut sec).is_err() {
+            crate::println!("live: {backend:?}: no pude leer la tabla de particiones");
+            return None;
+        }
         ents[i * SECTOR..(i + 1) * SECTOR].copy_from_slice(&sec);
     }
     let p1 = parse_entry(&ents, 0, backend);
-    let p2 = parse_entry(&ents, 1, backend)?;
-    let p3 = parse_entry(&ents, 2, backend)?;
+    let (Some(p2), Some(p3)) = (parse_entry(&ents, 1, backend), parse_entry(&ents, 2, backend))
+    else {
+        crate::println!("live: {backend:?}: GPT sin particiones 2 y 3 (¿imagen live incompleta?)");
+        return None;
+    };
     if !partition_has_sosofs(backend, p2.first_lba) {
+        crate::println!(
+            "live: {backend:?}: sin magic SOSOFS10 en la LBA {} (partición 2)",
+            p2.first_lba
+        );
         return None;
     }
     crate::println!(

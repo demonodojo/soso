@@ -95,6 +95,7 @@ struct KeyboardInfo {
     /// DMA buffer for interrupt reports
     report_buf_va: *mut u8,
     report_buf_phys: u64,
+    report_buf_len: usize,
     /// Keyboard state tracker for event generation
     state: KeyboardState,
     /// Whether we have an outstanding interrupt transfer
@@ -428,6 +429,7 @@ impl XhciController {
         }
         log::info!("xhci: scanning {} ports for connected devices...", self.max_ports);
 
+        let mut fallos_seguidos = 0u32;
         for port in 1..=self.max_ports() {
             let portsc = self.op.portsc(port);
             let connected = portsc & PORTSC_CCS != 0;
@@ -448,11 +450,24 @@ impl XhciController {
                 usb_speed = UsbSpeed::from_port_speed(speed_code);
             }
 
-            if let Some(slot_id) = self.enable_slot() {
-                self.initialize_device(slot_id, DevPath::root(port), usb_speed);
-            } else {
-                log::warn!("xhci: sin slots libres en port {port}");
-                break;
+            match self.enable_slot() {
+                Some(slot_id) => {
+                    fallos_seguidos = 0;
+                    self.initialize_device(slot_id, DevPath::root(port), usb_speed);
+                }
+                None => {
+                    // `None` incluye el timeout de comando de 5 s, no sólo «sin
+                    // slots»: abortar aquí dejaba sin enumerar todos los puertos
+                    // siguientes. Linux sigue con el resto del bus.
+                    fallos_seguidos += 1;
+                    log::warn!(
+                        "xhci: Enable Slot falló en port {port} ({fallos_seguidos} seguidos)"
+                    );
+                    if fallos_seguidos >= 2 {
+                        log::warn!("xhci: dos Enable Slot seguidos fallando; corto el escaneo");
+                        break;
+                    }
+                }
             }
         }
     }
@@ -518,7 +533,7 @@ impl XhciController {
     /// Send a command TRB and wait for the completion event.
     /// Returns the completion event TRB, or None on timeout.
     pub(crate) fn send_command(&mut self, trb: Trb) -> Option<Trb> {
-        let _phys = self.cmd_ring.enqueue(trb);
+        let phys = self.cmd_ring.enqueue(trb);
         self.db.ring_command();
 
         let mut elapsed = 0u32;
@@ -532,9 +547,27 @@ impl XhciController {
                 if evt_type == TRB_TYPE_COMMAND_COMPLETION {
                     let code = evt.completion_code();
                     let slot = evt.slot_id();
+                    // El Command TRB Pointer del evento debe apuntar al TRB que
+                    // acabamos de encolar. Si no, es la respuesta tardía de un
+                    // comando que expiró antes (Linux casa cada evento contra su
+                    // cmd_list): tomarla desfasaría todas las respuestas siguientes.
+                    if evt.parameter() & !0xF != phys & !0xF {
+                        log::warn!(
+                            "xhci: command completion huérfano (ptr={:#x}, esperado {:#x}) \
+                             code={} ({}) slot={}; hubo un timeout previo",
+                            evt.parameter(),
+                            phys,
+                            code,
+                            completion_name(code),
+                            slot,
+                        );
+                        continue;
+                    }
                     log::debug!(
-                        "xhci: command completion: code={} slot={}",
-                        code, slot
+                        "xhci: command completion: code={} ({}) slot={}",
+                        code,
+                        completion_name(code),
+                        slot,
                     );
                     return Some(evt);
                 } else if evt_type == TRB_TYPE_PORT_STATUS_CHANGE {
@@ -575,9 +608,11 @@ impl XhciController {
         let evt = self.send_command(trb)?;
 
         if evt.completion_code() != TRB_COMPLETION_SUCCESS {
+            let code = evt.completion_code();
             log::warn!(
-                "xhci: Enable Slot failed: completion code={}",
-                evt.completion_code()
+                "xhci: Enable Slot failed: completion code={} ({})",
+                code,
+                completion_name(code),
             );
             return None;
         }
@@ -744,6 +779,7 @@ impl XhciController {
             Some(c) => c,
             None => {
                 log::warn!("xhci: failed to get config descriptor for slot {}", slot_id);
+                self.disable_slot(slot_id);
                 return;
             }
         };
@@ -753,14 +789,27 @@ impl XhciController {
             .map(|(iface_num, ep)| (iface_num, ep.clone()));
 
         let config_val = parsed_config.config.b_configuration_value;
-        if !self.set_configuration(slot_id, config_val, &parsed_config) {
-            log::warn!("xhci: SET_CONFIGURATION failed for slot {}", slot_id);
-            return;
-        }
-
-        if let Some(ref mut dev) = self.devices[slot_id as usize] {
-            dev.config = Some(parsed_config);
-            dev.configured = true;
+        let needs_config = parsed_config.needs_full_config(&dev_desc);
+        if needs_config {
+            if !self.set_configuration(slot_id, config_val, &parsed_config, &dev_desc) {
+                log::warn!("xhci: SET_CONFIGURATION failed for slot {}", slot_id);
+                if dev_desc.is_hub() || keyboard_info.is_some() || parsed_config.is_mass_storage()
+                {
+                    // Sin liberar el slot, cada dispositivo que falla se come uno
+                    // de los MaxSlots para siempre y acaba ahogando la enumeración.
+                    self.disable_slot(slot_id);
+                    return;
+                }
+            } else if let Some(ref mut dev) = self.devices[slot_id as usize] {
+                dev.config = Some(parsed_config.clone());
+                dev.configured = true;
+            }
+        } else {
+            log::info!(
+                "xhci: omitiendo SET_CONFIGURATION slot={} VID={:#06x} (no hub/hid/ms)",
+                slot_id,
+                dev_desc.id_vendor
+            );
         }
 
         if let Some((iface_num, ref ep_desc)) = keyboard_info {
@@ -827,9 +876,12 @@ impl XhciController {
                 true
             }
             Some(evt) => {
+                let code = evt.completion_code();
                 log::warn!(
-                    "xhci: Address Device failed for slot {}: code={}",
-                    slot_id, evt.completion_code()
+                    "xhci: Address Device failed for slot {}: code={} ({})",
+                    slot_id,
+                    code,
+                    completion_name(code),
                 );
                 false
             }
@@ -1096,6 +1148,7 @@ impl XhciController {
         slot_id: u8,
         config_value: u8,
         config: &ParsedConfiguration,
+        dev_desc: &DeviceDescriptor,
     ) -> bool {
         log::debug!(
             "xhci: SET_CONFIGURATION slot={} value={}",
@@ -1144,7 +1197,24 @@ impl XhciController {
         // Add flags start with Slot Context (bit 0)
         let mut add_flags: u32 = 1; // Bit 0 = Slot Context
 
-        for (_iface_num, ep_desc) in &config.endpoints {
+        let active: alloc::vec::Vec<(u8, &EndpointDescriptor)> =
+            config.active_endpoints().collect();
+        log::info!(
+            "xhci: Configure Endpoint slot={} eps={} (alt0 only)",
+            slot_id,
+            active.len()
+        );
+
+        let speed = self.devices[slot_id as usize]
+            .as_ref()
+            .map(|d| d.speed)
+            .unwrap_or(UsbSpeed::Unknown);
+
+        // DCIs cuyo anillo instalamos: hay que revertirlos si el HC rechaza el
+        // Configure Endpoint, o quedarían anillos vivos para endpoints que no existen.
+        let mut dcis_instalados: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+        for (_iface_num, ep_desc) in &active {
             let dci = ep_desc.dci();
             if dci > max_dci {
                 max_dci = dci;
@@ -1155,24 +1225,34 @@ impl XhciController {
             let tr = unsafe { TransferRing::new() };
             let tr_phys = tr.phys_addr_with_dcs();
 
+            let max_pkt = ep_desc.xhci_max_packet_size();
+            let interval = ep_desc.xhci_interval(speed);
+            let mult = ep_desc.xhci_mult(speed);
+            // xHCI 6.2.3.2: CErr «shall be set to 0 for Isoch endpoints».
+            // Linux: `if (!usb_endpoint_xfer_isoc(&ep->desc)) err_count = 3;`
+            let cerr = if ep_desc.is_isoch() { 0 } else { 3 };
+
             // Build endpoint context
             let mut ep_ctx = EndpointContext::new(ctx_size);
             ep_ctx
                 .set_ep_type(ep_desc.xhci_ep_type())
-                .set_max_packet_size(ep_desc.w_max_packet_size)
-                .set_cerr(3)
-                .set_interval(ep_desc.b_interval)
+                .set_max_packet_size(max_pkt)
+                .set_mult(mult)
+                .set_cerr(cerr)
+                .set_interval(interval)
                 .set_tr_dequeue_pointer(tr_phys)
                 .set_average_trb_length(if ep_desc.is_interrupt() { 8 } else { 1024 });
 
             input_ctx.write_endpoint_context(dci, &ep_ctx);
 
             log::debug!(
-                "xhci: configure EP DCI={} type={} max_pkt={} interval={} ring={:#x}",
+                "xhci: configure EP DCI={} type={} max_pkt={} mult={} interval={} cerr={} ring={:#x}",
                 dci,
                 ep_desc.xhci_ep_type(),
-                ep_desc.w_max_packet_size,
-                ep_desc.b_interval,
+                max_pkt,
+                mult,
+                interval,
+                cerr,
                 tr_phys,
             );
 
@@ -1181,27 +1261,37 @@ impl XhciController {
                 self.transfer_rings[slot_id as usize].push(None);
             }
             self.transfer_rings[slot_id as usize][dci as usize] = Some(tr);
+            dcis_instalados.push(dci);
         }
 
         input_ctx.set_add_flags(add_flags);
 
-        // Update Slot Context with new Context Entries
-        let speed = self.devices[slot_id as usize]
-            .as_ref()
-            .map(|d| d.speed)
-            .unwrap_or(UsbSpeed::Unknown);
+        // Slot Context: partir del output (conserva USB Device Address) y actualizar entries.
         let (port, route, tt_hub, tt_port) = self.devices[slot_id as usize]
             .as_ref()
             .map(|d| (d.port, d.route_string, d.tt_hub_slot, d.tt_port))
             .unwrap_or((0, 0, 0, 0));
 
-        let mut slot = SlotContext::new(ctx_size);
-        slot.set_route_string(route)
-            .set_speed(speed.to_slot_speed())
-            .set_context_entries(max_dci)
-            .set_root_hub_port(port);
-        if tt_hub != 0 {
-            slot.set_tt(tt_hub, tt_port);
+        let mut slot = unsafe {
+            self.dcbaa
+                .read_slot_context(slot_id, ctx_size)
+                .unwrap_or_else(|| {
+                    let mut s = SlotContext::new(ctx_size);
+                    s.set_route_string(route)
+                        .set_speed(speed.to_slot_speed())
+                        .set_root_hub_port(port);
+                    if tt_hub != 0 {
+                        s.set_tt(tt_hub, tt_port);
+                    }
+                    s
+                })
+        };
+        slot.set_context_entries(max_dci);
+        if dev_desc.is_hub() {
+            slot.set_hub(true);
+            if let Some(n) = config.hub_num_ports {
+                slot.set_num_ports(n);
+            }
         }
         input_ctx.write_slot_context(&slot);
 
@@ -1211,15 +1301,18 @@ impl XhciController {
         );
 
         let trb = Trb::configure_endpoint(input_ctx.phys_addr(), slot_id, false);
-        match self.send_command(trb) {
+        let ok = match self.send_command(trb) {
             Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
                 log::info!("xhci: slot {} configured successfully", slot_id);
                 true
             }
             Some(evt) => {
+                let code = evt.completion_code();
                 log::warn!(
-                    "xhci: Configure Endpoint failed for slot {}: code={}",
-                    slot_id, evt.completion_code()
+                    "xhci: Configure Endpoint failed for slot {}: code={} ({})",
+                    slot_id,
+                    code,
+                    completion_name(code),
                 );
                 false
             }
@@ -1227,7 +1320,16 @@ impl XhciController {
                 log::warn!("xhci: Configure Endpoint timeout for slot {}", slot_id);
                 false
             }
+        };
+
+        if !ok {
+            // El HC no configuró esos endpoints: dejar los anillos puestos haría
+            // que un ring_endpoint() posterior tocase un DCI inexistente.
+            for dci in dcis_instalados {
+                self.transfer_rings[slot_id as usize][dci as usize] = None;
+            }
         }
+        ok
     }
 
     // -----------------------------------------------------------------------
@@ -1299,13 +1401,14 @@ impl XhciController {
             }
         }
 
-        // Allocate report buffer for interrupt transfers
-        let (report_va, report_phys) = unsafe { alloc_dma_buffer(8) };
+        // Allocate report buffer for interrupt transfers (≥ max packet del EP)
+        let report_len = ep_desc.xhci_max_packet_size().max(8) as usize;
+        let (report_va, report_phys) = unsafe { alloc_dma_buffer(report_len) };
 
         // Queue the first interrupt IN transfer
         if let Some(ring) = self.transfer_rings[slot_id as usize].get_mut(dci as usize) {
             if let Some(ring) = ring.as_mut() {
-                ring.enqueue_interrupt_in(report_phys, 8);
+                ring.enqueue_interrupt_in(report_phys, report_len as u32);
                 self.db.ring_endpoint(slot_id, dci);
                 log::debug!("xhci: first keyboard interrupt transfer queued");
             }
@@ -1322,6 +1425,7 @@ impl XhciController {
             dci,
             report_buf_va: report_va,
             report_buf_phys: report_phys,
+            report_buf_len: report_len,
             state: KeyboardState::new(),
             transfer_pending: true,
         });
@@ -1366,9 +1470,9 @@ impl XhciController {
                     );
 
                     if code == TRB_COMPLETION_SUCCESS || code == TRB_COMPLETION_SHORT_PACKET {
-                        // Parse the HID report
+                        let report_len = kb.report_buf_len;
                         let report_data = unsafe {
-                            read_dma_buffer(kb.report_buf_va, 8)
+                            read_dma_buffer(kb.report_buf_va, report_len)
                         };
 
                         if let Some(report) = BootKeyboardReport::parse(&report_data) {
@@ -1386,6 +1490,7 @@ impl XhciController {
 
                     // Re-queue the interrupt transfer
                     let buf_phys = kb.report_buf_phys;
+                    let buf_len = kb.report_buf_len as u32;
                     let slot_id = kb.slot_id;
                     let dci = kb.dci;
 
@@ -1393,7 +1498,7 @@ impl XhciController {
                         .get_mut(dci as usize)
                         .and_then(|r| r.as_mut())
                     {
-                        ring.enqueue_interrupt_in(buf_phys, 8);
+                        ring.enqueue_interrupt_in(buf_phys, buf_len);
                         self.db.ring_endpoint(slot_id, dci);
                     }
                 }

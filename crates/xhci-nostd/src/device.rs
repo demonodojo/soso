@@ -69,6 +69,11 @@ pub const USB_CLASS_HUB: u8 = 0x09;
 
 pub const USB_DESC_HUB: u8 = 0x29;
 
+/// `fls()` de Linux: posición 1-indexada del bit más alto puesto (0 si x==0).
+const fn fls(x: u32) -> u32 {
+    32 - x.leading_zeros()
+}
+
 // ---------------------------------------------------------------------------
 // USB Device Descriptor (18 bytes)
 // ---------------------------------------------------------------------------
@@ -235,7 +240,9 @@ impl InterfaceDescriptor {
             i_interface: buf[8],
         };
 
-        log::info!(
+        // A nivel debug: en placa real sin serie la pantalla son ~40 filas y un
+        // dispositivo compuesto (8 interfaces, 17 endpoints) se las come todas.
+        log::debug!(
             "xhci: interface descriptor: num={}, alt={}, eps={}, class={:#x} sub={:#x} proto={:#x}",
             desc.b_interface_number,
             desc.b_alternate_setting,
@@ -248,11 +255,16 @@ impl InterfaceDescriptor {
         Some(desc)
     }
 
-    /// Is this a HID keyboard interface? (class=3, subclass=1, protocol=1)
-    pub fn is_hid_keyboard(&self) -> bool {
+    /// Boot HID keyboard (class=3, subclass=1, protocol=1).
+    pub fn is_hid_boot_keyboard(&self) -> bool {
         self.b_interface_class == USB_CLASS_HID
-            && self.b_interface_sub_class == 1  // Boot Interface Subclass
-            && self.b_interface_protocol == 1   // Keyboard
+            && self.b_interface_sub_class == 1
+            && self.b_interface_protocol == 1
+    }
+
+    /// Candidato a teclado: HID que no es ratón (p. ej. ASUS NKEY en report protocol).
+    pub fn is_hid_keyboard_candidate(&self) -> bool {
+        self.b_interface_class == USB_CLASS_HID && self.b_interface_protocol != 2
     }
 
     /// Is this a HID interface?
@@ -294,7 +306,7 @@ impl EndpointDescriptor {
             b_interval: buf[6],
         };
 
-        log::info!(
+        log::debug!(
             "xhci: endpoint descriptor: addr={:#x}, attr={:#x}, max_pkt={}, interval={}",
             desc.b_endpoint_address,
             desc.bm_attributes,
@@ -339,6 +351,49 @@ impl EndpointDescriptor {
             1 // Control endpoint is always DCI 1
         } else {
             ep_num * 2 + if self.is_in() { 1 } else { 0 }
+        }
+    }
+
+    /// Max packet size para Endpoint Context (bits 10:0 de wMaxPacketSize).
+    pub fn xhci_max_packet_size(&self) -> u16 {
+        self.w_max_packet_size & 0x7FF
+    }
+
+    /// Mult (bits 9:8 EP context DW0) — solo HS periódico.
+    pub fn xhci_mult(&self, speed: UsbSpeed) -> u8 {
+        if speed == UsbSpeed::High && (self.is_interrupt() || self.transfer_type() == 1) {
+            ((self.w_max_packet_size >> 11) & 0x03) as u8
+        } else {
+            0
+        }
+    }
+
+    /// ¿Endpoint isócrono? (bmAttributes bits 1:0 = 1)
+    pub fn is_isoch(&self) -> bool {
+        self.transfer_type() == 1
+    }
+
+    /// Intervalo codificado para el Endpoint Context, calcando
+    /// `xhci_get_endpoint_interval()` de Linux (drivers/usb/host/xhci-mem.c).
+    ///
+    /// Ojo: en Low/Full speed `bInterval` son **milisegundos** (1..255), no un
+    /// exponente. El xHCI spec 6.2.3.6 sólo admite 3..10 para interrupt FS/LS y
+    /// 3..18 para isoch FS; escribir el valor crudo saca el campo de rango y el
+    /// Configure Endpoint responde Parameter Error (código 17).
+    pub fn xhci_interval(&self, speed: UsbSpeed) -> u8 {
+        let b = self.b_interval as u32;
+        match (self.transfer_type(), speed) {
+            // Control y bulk no tienen periodo.
+            (0, _) | (2, _) => 0,
+            // HS/SS periódicos: bInterval ya es un exponente de microframes.
+            (1 | 3, UsbSpeed::High | UsbSpeed::Super | UsbSpeed::SuperPlus) => {
+                (b.clamp(1, 16) - 1) as u8
+            }
+            // Isoch Full speed: exponente en frames; +3 para pasarlo a microframes.
+            (1, _) => (b.clamp(1, 16) - 1 + 3) as u8,
+            // Interrupt Full/Low speed: fls(bInterval * 8) - 1, acotado a 3..10.
+            (3, _) => (fls(b.max(1) * 8) - 1).clamp(3, 10) as u8,
+            _ => 0,
         }
     }
 
@@ -416,8 +471,11 @@ impl HidDescriptor {
 pub struct ParsedConfiguration {
     pub config: ConfigurationDescriptor,
     pub interfaces: Vec<InterfaceDescriptor>,
-    pub endpoints: Vec<(u8, EndpointDescriptor)>, // (interface_number, endpoint)
+    /// (interface_number, alternate_setting, endpoint)
+    pub endpoints: Vec<(u8, u8, EndpointDescriptor)>,
     pub hid_descriptors: Vec<(u8, HidDescriptor)>, // (interface_number, hid)
+    /// bNbrPorts del hub descriptor embebido (solo hubs).
+    pub hub_num_ports: Option<u8>,
 }
 
 impl ParsedConfiguration {
@@ -439,6 +497,8 @@ impl ParsedConfiguration {
         let mut endpoints = Vec::new();
         let mut hid_descriptors = Vec::new();
         let mut current_iface: u8 = 0;
+        let mut current_alt: u8 = 0;
+        let mut hub_num_ports: Option<u8> = None;
 
         let mut offset = config.b_length as usize;
         while offset + 2 <= parse_len {
@@ -457,17 +517,27 @@ impl ParsedConfiguration {
                 USB_DESC_INTERFACE => {
                     if let Some(iface) = InterfaceDescriptor::parse(&buf[offset..]) {
                         current_iface = iface.b_interface_number;
+                        current_alt = iface.b_alternate_setting;
                         interfaces.push(iface);
                     }
                 }
                 USB_DESC_ENDPOINT => {
                     if let Some(ep) = EndpointDescriptor::parse(&buf[offset..]) {
-                        endpoints.push((current_iface, ep));
+                        endpoints.push((current_iface, current_alt, ep));
                     }
                 }
                 USB_DESC_HID => {
                     if let Some(hid) = HidDescriptor::parse(&buf[offset..]) {
                         hid_descriptors.push((current_iface, hid));
+                    }
+                }
+                USB_DESC_HUB => {
+                    if desc_len >= 3 {
+                        hub_num_ports = Some(buf[offset + 2]);
+                        log::info!(
+                            "xhci: hub descriptor: {} puertos downstream",
+                            buf[offset + 2]
+                        );
                     }
                 }
                 _ => {
@@ -481,10 +551,12 @@ impl ParsedConfiguration {
             offset += desc_len;
         }
 
+        let active_n = endpoints.iter().filter(|(_, alt, _)| *alt == 0).count();
         log::info!(
-            "xhci: parsed config: {} interfaces, {} endpoints, {} HID descriptors",
+            "xhci: parsed config: {} interfaces, {} endpoints ({} alt0), {} HID descriptors",
             interfaces.len(),
             endpoints.len(),
+            active_n,
             hid_descriptors.len(),
         );
 
@@ -493,37 +565,80 @@ impl ParsedConfiguration {
             interfaces,
             endpoints,
             hid_descriptors,
+            hub_num_ports,
         })
+    }
+
+    /// ¿Necesita SET_CONFIGURATION + Configure Endpoint? (hub, teclado, mass storage).
+    pub fn needs_full_config(&self, dev_desc: &DeviceDescriptor) -> bool {
+        if dev_desc.is_hub() {
+            return true;
+        }
+        if self.find_hid_keyboard().is_some() {
+            return true;
+        }
+        self.is_mass_storage()
+    }
+
+    /// Interfaz BOT mass storage en alternate 0.
+    pub fn is_mass_storage(&self) -> bool {
+        const MS_CLASS: u8 = 0x08;
+        const MS_SUBCLASS: u8 = 0x06;
+        const MS_PROTO: u8 = 0x50;
+        self.interfaces.iter().any(|i| {
+            i.b_alternate_setting == 0
+                && i.b_interface_class == MS_CLASS
+                && i.b_interface_sub_class == MS_SUBCLASS
+                && i.b_interface_protocol == MS_PROTO
+        })
+    }
+
+    /// Endpoints del alternate activo tras SET_CONFIGURATION (Linux: alt 0 por defecto).
+    pub fn active_endpoints(&self) -> impl Iterator<Item = (u8, &EndpointDescriptor)> {
+        self.endpoints
+            .iter()
+            .filter(|(_, alt, _)| *alt == 0)
+            .map(|(iface, _, ep)| (*iface, ep))
     }
 
     /// Find the first HID keyboard interface (class=3, subclass=1, protocol=1).
     /// Returns (interface_number, interrupt IN endpoint).
     pub fn find_hid_keyboard(&self) -> Option<(u8, &EndpointDescriptor)> {
         for iface in &self.interfaces {
-            if iface.is_hid_keyboard() {
-                log::info!(
-                    "xhci: found HID keyboard on interface {}",
-                    iface.b_interface_number
-                );
-
-                // Find the interrupt IN endpoint for this interface
-                for (iface_num, ep) in &self.endpoints {
-                    if *iface_num == iface.b_interface_number
-                        && ep.is_interrupt()
-                        && ep.is_in()
-                    {
-                        log::info!(
-                            "xhci: keyboard interrupt IN endpoint: addr={:#x} max_pkt={} interval={}",
-                            ep.b_endpoint_address,
-                            ep.w_max_packet_size,
-                            ep.b_interval,
-                        );
-                        return Some((iface.b_interface_number, ep));
-                    }
-                }
-
-                log::warn!("xhci: HID keyboard interface {} has no interrupt IN endpoint", iface.b_interface_number);
+            if iface.b_alternate_setting != 0 || !iface.is_hid_keyboard_candidate() {
+                continue;
             }
+            let kind = if iface.is_hid_boot_keyboard() {
+                "boot"
+            } else {
+                "generic HID"
+            };
+            log::info!(
+                "xhci: found HID keyboard ({}) on interface {}",
+                kind,
+                iface.b_interface_number
+            );
+
+            for (iface_num, alt, ep) in &self.endpoints {
+                if *iface_num == iface.b_interface_number
+                    && *alt == 0
+                    && ep.is_interrupt()
+                    && ep.is_in()
+                {
+                    log::info!(
+                        "xhci: keyboard interrupt IN endpoint: addr={:#x} max_pkt={} interval={}",
+                        ep.b_endpoint_address,
+                        ep.w_max_packet_size,
+                        ep.b_interval,
+                    );
+                    return Some((iface.b_interface_number, ep));
+                }
+            }
+
+            log::warn!(
+                "xhci: HID keyboard interface {} has no interrupt IN endpoint",
+                iface.b_interface_number
+            );
         }
         None
     }

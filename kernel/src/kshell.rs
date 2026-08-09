@@ -53,10 +53,10 @@ fn exec(line: &str) {
 
     match cmd {
         "help" => {
-            println!("comandos: help dmesg hwscan spawn ps ls cat stat write mkdir rm df uptime mem io wifi blk blkread blkwrite pf panic halt");
+            println!("comandos: help dmesg [patrón|save] hwscan spawn ps ls cat stat write mkdir rm df uptime mem io wifi blk blkread blkwrite pf panic halt");
         }
-        "dmesg" => {
-            if args.first() == Some(&"save") {
+        "dmesg" => match args.first() {
+            Some(&"save") => {
                 #[cfg(feature = "drv-live-disk")]
                 match crate::drivers::fatlog::flush() {
                     Ok(()) => println!("dmesg: volcado a SOSOLOG.TXT"),
@@ -64,10 +64,10 @@ fn exec(line: &str) {
                 }
                 #[cfg(not(feature = "drv-live-disk"))]
                 println!("dmesg: fatlog no disponible en esta imagen");
-            } else {
-                dmesg_paged();
             }
-        }
+            Some(pat) => dmesg_grep(pat),
+            None => dmesg_paged(),
+        },
         "hwscan" => {
             crate::drivers::registry::print_hwscan();
             #[cfg(feature = "drv-live-disk")]
@@ -348,6 +348,82 @@ fn dmesg_paged() {
         }
     }
     println!("--- fin dmesg ---");
+}
+
+/// Espera en `--more--`. Devuelve false si el usuario aborta con 'q'.
+fn esperar_pagina() -> bool {
+    serial::write_bytes_raw(b"--more--");
+    loop {
+        let Some(byte) = serial::read_byte() else {
+            crate::net::poll();
+            x86_64::instructions::hlt();
+            continue;
+        };
+        match byte {
+            b'q' | b'Q' => {
+                serial::write_bytes_raw(b"\n");
+                return false;
+            }
+            b' ' | b'\r' | b'\n' => {
+                serial::write_bytes_raw(b"\r        \r");
+                return true;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `dmesg <patrón>`: sólo las líneas que contienen la subcadena. En placa real
+/// la pantalla son ~40 filas y el log de arranque pasa de 100: sin filtro no
+/// hay forma de leer las líneas de un subsistema concreto.
+fn dmesg_grep(pat: &str) {
+    let total = crate::drivers::logbuf::len();
+    println!("--- dmesg «{pat}» (espacio/enter = más, q = salir) ---");
+
+    // Una línea de log cabe de sobra aquí; las más largas se parten.
+    let mut linea = [0u8; 320];
+    let mut largo = 0usize;
+    let mut tmp = [0u8; 256];
+    let mut offset = 0usize;
+    let mut page_lines = 0usize;
+    let mut encontradas = 0usize;
+    const PAGE_LINES: usize = 30;
+
+    while offset < total {
+        let n = crate::drivers::logbuf::copy_from(offset, &mut tmp);
+        if n == 0 {
+            break;
+        }
+        offset += n;
+
+        for &b in &tmp[..n] {
+            if b != b'\n' && largo < linea.len() {
+                linea[largo] = b;
+                largo += 1;
+                continue;
+            }
+            if b != b'\n' {
+                continue; // línea desbordada: se descarta el resto
+            }
+            if let Ok(s) = core::str::from_utf8(&linea[..largo]) {
+                if s.contains(pat) {
+                    encontradas += 1;
+                    println!("{s}");
+                    page_lines += 1;
+                    if page_lines >= PAGE_LINES {
+                        page_lines = 0;
+                        if !esperar_pagina() {
+                            println!("--- dmesg abortado ---");
+                            return;
+                        }
+                    }
+                }
+            }
+            largo = 0;
+        }
+    }
+
+    println!("--- fin dmesg: {encontradas} líneas con «{pat}» ---");
 }
 
 /// Separa una ruta en (directorio padre, nombre): "/a/b/c" -> ("/a/b", "c").

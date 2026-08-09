@@ -56,6 +56,8 @@ pub const TRB_COMPLETION_BABBLE: u8 = 3;
 pub const TRB_COMPLETION_USB_TRANSACTION_ERROR: u8 = 4;
 pub const TRB_COMPLETION_TRB_ERROR: u8 = 5;
 pub const TRB_COMPLETION_STALL: u8 = 6;
+pub const TRB_COMPLETION_BANDWIDTH_ERROR: u8 = 8;
+pub const TRB_COMPLETION_NO_SLOTS: u8 = 9;
 pub const TRB_COMPLETION_SHORT_PACKET: u8 = 13;
 pub const TRB_COMPLETION_RING_UNDERRUN: u8 = 14;
 pub const TRB_COMPLETION_RING_OVERRUN: u8 = 15;
@@ -63,7 +65,45 @@ pub const TRB_COMPLETION_EVENT_RING_FULL: u8 = 21;
 pub const TRB_COMPLETION_COMMAND_RING_STOPPED: u8 = 24;
 pub const TRB_COMPLETION_COMMAND_ABORTED: u8 = 25;
 pub const TRB_COMPLETION_STOPPED: u8 = 26;
+pub const TRB_COMPLETION_PARAMETER_ERROR: u8 = 17;
+pub const TRB_COMPLETION_CONTEXT_STATE_ERROR: u8 = 19;
 pub const TRB_COMPLETION_STOPPED_LENGTH_INVALID: u8 = 27;
+
+/// Nombre del código de completion (xHCI 1.2, Tabla 6-90). Un número pelado en
+/// el log de una placa sin serie no dice nada; el nombre sí.
+pub fn completion_name(code: u8) -> &'static str {
+    match code {
+        TRB_COMPLETION_INVALID => "Invalid",
+        TRB_COMPLETION_SUCCESS => "Success",
+        TRB_COMPLETION_DATA_BUFFER_ERROR => "Data Buffer Error",
+        TRB_COMPLETION_BABBLE => "Babble Detected",
+        TRB_COMPLETION_USB_TRANSACTION_ERROR => "USB Transaction Error",
+        TRB_COMPLETION_TRB_ERROR => "TRB Error",
+        TRB_COMPLETION_STALL => "Stall Error",
+        7 => "Resource Error",
+        TRB_COMPLETION_BANDWIDTH_ERROR => "Bandwidth Error",
+        TRB_COMPLETION_NO_SLOTS => "No Slots Available",
+        10 => "Invalid Stream Type",
+        11 => "Slot Not Enabled",
+        12 => "Endpoint Not Enabled",
+        TRB_COMPLETION_SHORT_PACKET => "Short Packet",
+        TRB_COMPLETION_RING_UNDERRUN => "Ring Underrun",
+        TRB_COMPLETION_RING_OVERRUN => "Ring Overrun",
+        16 => "VF Event Ring Full",
+        TRB_COMPLETION_PARAMETER_ERROR => "Parameter Error",
+        18 => "Bandwidth Overrun",
+        TRB_COMPLETION_CONTEXT_STATE_ERROR => "Context State Error",
+        20 => "No Ping Response",
+        TRB_COMPLETION_EVENT_RING_FULL => "Event Ring Full",
+        22 => "Incompatible Device",
+        23 => "Missed Service",
+        TRB_COMPLETION_COMMAND_RING_STOPPED => "Command Ring Stopped",
+        TRB_COMPLETION_COMMAND_ABORTED => "Command Aborted",
+        TRB_COMPLETION_STOPPED => "Stopped",
+        TRB_COMPLETION_STOPPED_LENGTH_INVALID => "Stopped - Length Invalid",
+        _ => "?",
+    }
+}
 
 // ---------------------------------------------------------------------------
 // TRB field masks and shifts
