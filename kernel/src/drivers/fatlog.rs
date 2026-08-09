@@ -35,7 +35,9 @@ struct FatParams {
 }
 
 pub fn init() {
-    if !crate::drivers::live_disk::active() {
+    // Basta con tener ESP: el log no necesita que el root live haya montado, y
+    // es justo cuando NO monta cuando más falta hace poder leerlo.
+    if !crate::drivers::live_disk::esp_available() {
         return;
     }
     match locate_sosolog() {

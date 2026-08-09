@@ -45,34 +45,70 @@ pub fn init() {
     let _ = try_backend(LiveBackend::Virtio0);
     if !active() {
         crate::println!("live: sin GPT sosofs (USB/NVMe/virtio); solo kernel-shell");
+        register_log_esp();
     }
 }
 
-fn try_backend(backend: LiveBackend) -> Option<()> {
-    // Antes esto devolvía None en silencio en cada paso: «no hay GPT» y «no pude
-    // leer» se veían igual en pantalla, que es lo que escondió durante todo un
-    // arranque un pendrive perfectamente detectado pero con capacidad falsa.
+/// Sin live montado no había dónde dejar el log: `fatlog` se apagaba porque
+/// `active()` era falso, y en una placa sin puerto serie eso deja el arranque
+/// sin ningún canal legible. Pero la ESP es la partición 1 y el root la 2 — son
+/// independientes. Si el pendrive se lee, el log puede ir a su ESP igualmente.
+///
+/// Sólo se mira el USB a propósito: es donde existe `SOSOLOG.TXT`, y así no hay
+/// forma de acabar escribiendo en la ESP del disco interno.
+fn register_log_esp() {
+    let backend = LiveBackend::Usb;
+    let Some(ents) = read_gpt_entries(backend, true) else {
+        return;
+    };
+    let Some(esp) = parse_entry(&ents, 0, backend) else {
+        return;
+    };
+    crate::println!(
+        "live: sin root, pero hay ESP en {backend:?} LBA {} — el log de arranque va ahí",
+        esp.first_lba
+    );
+    LIVE_ESP.call_once(|| Some(esp));
+}
+
+/// Lee la cabecera GPT y las 4 primeras entradas. Con `quiet` no imprime nada
+/// (el respaldo de log reintenta sobre un backend que ya se quejó una vez).
+fn read_gpt_entries(backend: LiveBackend, quiet: bool) -> Option<[u8; SECTOR * 4]> {
+    // Antes cada paso devolvía None en silencio: «no hay GPT» y «no pude leer»
+    // se veían igual en pantalla, que es lo que escondió durante todo un arranque
+    // un pendrive perfectamente detectado pero con capacidad falsa.
     let mut hdr = [0u8; SECTOR];
     if sector_reader(backend, GPT_HDR_LBA, &mut hdr).is_err() {
-        crate::println!("live: {backend:?}: no pude leer la LBA {GPT_HDR_LBA} (cabecera GPT)");
+        if !quiet {
+            crate::println!("live: {backend:?}: no pude leer la LBA {GPT_HDR_LBA} (cabecera GPT)");
+        }
         return None;
     }
     if &hdr[0..8] != b"EFI PART" {
-        crate::println!(
-            "live: {backend:?}: LBA {GPT_HDR_LBA} sin firma «EFI PART» (empieza por {:02x?})",
-            &hdr[0..8]
-        );
+        if !quiet {
+            crate::println!(
+                "live: {backend:?}: LBA {GPT_HDR_LBA} sin firma «EFI PART» (empieza por {:02x?})",
+                &hdr[0..8]
+            );
+        }
         return None;
     }
     let mut ents = [0u8; SECTOR * 4];
     for i in 0..4usize {
         let mut sec = [0u8; SECTOR];
         if sector_reader(backend, GPT_PARTS_LBA + i as u64, &mut sec).is_err() {
-            crate::println!("live: {backend:?}: no pude leer la tabla de particiones");
+            if !quiet {
+                crate::println!("live: {backend:?}: no pude leer la tabla de particiones");
+            }
             return None;
         }
         ents[i * SECTOR..(i + 1) * SECTOR].copy_from_slice(&sec);
     }
+    Some(ents)
+}
+
+fn try_backend(backend: LiveBackend) -> Option<()> {
+    let ents = read_gpt_entries(backend, false)?;
     let p1 = parse_entry(&ents, 0, backend);
     let (Some(p2), Some(p3)) = (parse_entry(&ents, 1, backend), parse_entry(&ents, 2, backend))
     else {
@@ -354,6 +390,11 @@ pub fn models_dev() -> Option<LiveModelsDev> {
 
 pub fn active() -> bool {
     LIVE_ROOT.get().is_some_and(|p| p.is_some())
+}
+
+/// ¿Hay una ESP donde escribir los logs? Puede haberla sin live montado.
+pub fn esp_available() -> bool {
+    LIVE_ESP.get().is_some_and(|p| p.is_some())
 }
 
 /// Lee sectores de la partición 1 (ESP FAT).

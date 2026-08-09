@@ -16,7 +16,7 @@ struct Slot {
 }
 
 pub fn init() {
-    if !crate::drivers::live_disk::active() {
+    if !crate::drivers::live_disk::esp_available() {
         return;
     }
     match locate_file(b"SOSODRV ", b"TXT") {
