@@ -1,9 +1,10 @@
-//! HTTPS y descarga a fichero en guest (streaming a disco).
+//! HTTPS y descarga en guest (scratch sosomfs o fichero sosofs).
 
 use alloc::vec::Vec;
+use crate::guest_io::ScratchSink;
 use libsoso::sys;
 use soso_abi::SockAddr;
-use soso_http::{BodySink, HttpError, Response, TcpTransport};
+use soso_http::{HttpError, Response, TcpTransport};
 
 struct Net;
 
@@ -34,16 +35,6 @@ impl TcpTransport for Net {
     }
 }
 
-struct FileSink {
-    fd: u64,
-}
-
-impl BodySink for FileSink {
-    fn write_body(&mut self, chunk: &[u8]) -> Result<(), HttpError> {
-        sys::write_all(self.fd, chunk).map_err(|_| HttpError::Io)
-    }
-}
-
 /// Respuestas pequeñas (JSON del árbol Hub) en RAM.
 pub fn https_get_body(url: &str, token: Option<&str>) -> Result<Vec<u8>, HttpError> {
     let Response { status, body } = soso_http::https_get(&Net, url, token)?;
@@ -53,19 +44,25 @@ pub fn https_get_body(url: &str, token: Option<&str>) -> Result<Vec<u8>, HttpErr
     Ok(body)
 }
 
-/// Descarga grande: escribe cada chunk TLS en `dest` (StreamWrite del kernel).
-pub fn download_url(url: &str, dest: &str, token: Option<&str>) -> Result<(), HttpError> {
-    let fd = sys::open(dest, soso_abi::O_WRONLY | soso_abi::O_CREAT);
-    if fd < 0 {
-        return Err(HttpError::Io);
-    }
-    let fd = fd as u64;
-    let mut sink = FileSink { fd };
+/// Descarga grande en scratch sosomfs (cola de p3).
+pub fn download_to_scratch(
+    url: &str,
+    token: Option<&str>,
+    mut sink: ScratchSink,
+) -> Result<(), HttpError> {
     let (status, _) = soso_http::https_download(&Net, url, token, &mut sink)?;
-    let _ = sys::close(fd);
     if status != 200 {
-        let _ = sys::unlink(dest);
         return Err(HttpError::Parse);
     }
-    Ok(())
+    sink.finish().map_err(|_| HttpError::Io)
+}
+
+/// GET parcial HTTPS (`Range: bytes=start-end`).
+pub fn https_get_range_bytes(
+    url: &str,
+    token: Option<&str>,
+    start: u64,
+    end: u64,
+) -> Result<(u16, alloc::vec::Vec<u8>), HttpError> {
+    soso_http::https_get_range(&Net, url, token, start, end)
 }

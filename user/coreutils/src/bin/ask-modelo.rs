@@ -45,7 +45,12 @@ fn main(args: &str) -> u8 {
         match actual {
             Some(ref m) if disponibles.iter().any(|d| d == m) => {}
             Some(m) => println!("ask-modelo: {CONF} dice «{m}», que no está en /models"),
-            None => println!("ask-modelo: sin {CONF}; `ask` usará {}", disponibles[0]),
+            // Sin fijar no es un problema: es el modo por defecto, y el primero
+            // de /models es el modelo de verdad en el pendrive live.
+            None => println!(
+                "ask-modelo: sin fijar en {CONF}; `ask` usa el primero: {}",
+                disponibles[0]
+            ),
         }
         return 0;
     }

@@ -81,6 +81,11 @@ Un solo pendrive con tres particiones:
 2. **sosofs** — rootfs (~64 MiB)
 3. **sosomfs** — modelos (**TinyLlama 1.1B Chat** + `tiny` sintético, ~2 GiB por defecto)
 
+Tras `cargo xtask flash-usb-live`, si el pendrive es más grande que la imagen,
+**p3 se estira** hasta dejar 32 MiB al final para p4 `SOSOINSTALL`; al arrancar,
+sosomfs hace **grow** del superbloque para usar ese espacio (import HF con
+`soso-hf pull`).
+
 El disco NVMe/SSD con Linux **no se toca**.
 
 ### Host — generar imagen
@@ -167,6 +172,16 @@ Si falla el montaje, busca en serie/`SOSOLOG.TXT`:
 - `xhci: bulk … Stall Error` con `CSW inválido sig=0` → transferencia mayor de la que
   admite un Normal TRB (longitud de 17 bits). El troceo a 64 KiB está en
   `mass_storage::MAX_XFER`; si vuelve a aparecer, es que algún camino lo saltó.
+- `lxdde-fw: cargado …/ga102/…` cuando la GPU es un **ga107** → **no es un fallo,
+  es el diseño**. Los cuatro blobs GSP de `ga107` y `ga102` en linux-firmware son
+  **byte a byte idénticos** (mismo md5) y `ga107/acr/*` son symlinks a
+  `ga102/acr/*`, así que el fallback carga exactamente los mismos bytes. Se
+  decidió **no empaquetar `ga107`** (2026-08-16): duplicaría el
+  `gsp-570.144.bin` de 63 MiB y sumaría ~64 MiB a la imagen live para nada.
+  `lx_request_firmware` ya no imprime los intentos fallidos (llenaban el
+  arranque de «no encontrado» que parecían averías); el fallo de verdad lo canta
+  el llamante: `nouveau-lx: GSP … incompleto (n/m blobs)` o
+  `iwl_ax211: firmware no encontrado`.
 
 **Validación sin placa:** QEMU simula el disco live con virtio o USB:
 

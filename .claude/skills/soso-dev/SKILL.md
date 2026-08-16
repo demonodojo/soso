@@ -4,7 +4,8 @@ description: >-
   Build, run, test and debug the soso bare-metal OS in QEMU — cargo xtask,
   mkfs, SSH access, serial console, gdb and integration tests. Use when
   starting soso, compiling the kernel or userspace, running QEMU, connecting
-  by SSH, troubleshooting boot/network, or running cargo xtask test.
+  by SSH, troubleshooting boot/network, reading SOSOLOG.TXT from the live USB
+  (`cargo xtask sosolog`), or running cargo xtask test.
 ---
 
 # soso — Development workflow
@@ -32,6 +33,8 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
+| `cargo xtask flash-usb-live /dev/sdX --yes` | Graba live + estira p3 al sobrante del stick (p4 SOSOINSTALL 32 MiB al final) |
+| `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
 | `cargo xtask fetch-hf` | Descargar GGUF de Hugging Face, convertir a `.som` y preparar `SOSO_MODELS_DIR` |
 | `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (denso o MoE Mixtral, host tool) |
@@ -96,6 +99,24 @@ Ports lxdde externos: repo con `source.list` (+ opcional `driver.toml`,
 `firmware/`). `cargo xtask driver-add <url>` los registra en
 `drivers-extern.toml` y `lx-build all` los incluye.
 
+## Log del USB live (`cargo xtask sosolog`)
+
+`SOSOLOG.TXT` está en la **ESP (partición 1, FAT)**. Linux no la monta sola
+(oculta las EFI); el volumen que sí aparece suele ser p4 `SOSOINSTALL`, que
+no tiene el log.
+
+```sh
+cargo xtask sosolog              # auto-detecta el USB live
+cargo xtask sosolog /dev/sdX     # disco entero → p1
+cargo xtask sosolog /dev/sdX1    # ESP concreta
+cargo xtask sosolog | less
+```
+
+No uses `sudo cargo`: root no tiene rustup. La xtask pide `sudo` solo para
+`mount`/`umount` (y monta con `uid`/`gid` del usuario para poder leer).
+Implementación: `xtask/src/sosolog.rs`. El kernel vuelca el ring cada ~2 s
+(`drivers/fatlog.rs`) sobre el hueco pre-creado en `package-usb-live`.
+
 ## What `run` does
 
 1. Compiles userspace (`user/`) and copies ELFs to `rootfs/bin/`
@@ -129,6 +150,12 @@ Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp).
 # Host-only sosofs crash-safety
 cargo test -q -p sosofs --features std
 
+# Host: sosomfs import atómico (grow, crash sin commit, catálogo)
+cargo test -q -p sosomfs --features std
+
+# Host: soso-http (Range header; sin red real)
+cargo test -q -p soso-http
+
 # Host: soso-llm-core (planificador, kv KIVI/H2O, attn sparse, PLD, MoE), sosomodel, convert-gguf
 cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 # Subconjuntos útiles tras tocar inferencia:
@@ -148,6 +175,16 @@ SOSO_TEST_JOBS=1 cargo xtask test
 # Imágenes copiadas: target/test-{shard}-{bios,data,models}.img
 # `cargo xtask run` y `bench-llm` siguen en puertos 2222/7777
 
+# Los shards NO son intercambiables: cada uno existe por su configuración.
+#   llm-dense  -smp 2   único sitio donde `ThreadPool` crea workers (`ncpu-1`);
+#                       con 1 core ese código no se ejecuta. Incluye el paso
+#                       «sigue viva tras dos pools de hilos».
+#   reclaim    -m 96M   presión de memoria (`RECLAIM_MEM` en xtask/src/test.rs).
+#                       Súbela si el bootloader falla con FrameAllocationFailed
+#                       —el kernel ha crecido—, pero lo justo: con 72M la
+#                       inferencia muere a media generación de forma inestable.
+#   sys                 syscalls, pipes, SSH, `ask` (texto literal) y halt.
+
 # Decode tok/s con modelo sintético bench (default SMP=1,4 mem=8G)
 cargo xtask bench-llm
 SOSO_BENCH_SMP=1,8 SOSO_BENCH_MAX=8 cargo xtask bench-llm
@@ -166,6 +203,46 @@ User rule for this project: **mock HTTP and Celery calls in tests** (soso has no
 - Kernel-shell (`soso>`) is emergency fallback when userspace exits cleanly.
 - QEMU uses `-no-reboot`; page faults in ring 3 kill the process, not the kernel.
 
+### Se ha colgado: ¿dónde? (monitor de QEMU)
+
+Lo primero ante un cuelgue, antes de teorizar. Lanza QEMU con un monitor Unix y
+pregúntale dónde está cada core:
+
+```sh
+# OJO: ruta corta, el socket UNIX tiene tope de 108 bytes (el scratchpad no cabe)
+qemu-system-x86_64 … -monitor unix:/tmp/soso-mon.sock,server,nowait
+```
+
+```python
+# info registers -a → un RIP por vCPU
+s = socket.socket(socket.AF_UNIX); s.connect("/tmp/soso-mon.sock")
+s.sendall(b"info registers -a\n")
+```
+
+| RIP | Dónde | Cómo resolverlo |
+|-----|-------|-----------------|
+| `0x4xxxxx` | userspace (ELF en 0x400000) | `objdump -d target/user/x86_64-soso-user/release/<bin>` |
+| `0x100000xxxxx` | kernel (PIE en 0x10000000000) | `addr2line -f -C -e target/kernel/x86_64-soso/debug/kernel <rip - 0x10000000000>` |
+
+Sano en reposo = todos en `enable_and_hlt`. Todos en el mismo RIP de usuario =
+bucle de spin (así se cazó la fuga de workers de `ThreadPool`, 2026-08-16).
+
+### Teclado PS/2 de verdad, sin pantalla
+
+El banco entra siempre por SSH, así que **el camino teclado→tty no se ejercita
+nunca** y ahí se escondieron dos cuelgues de placa. Se puede inyectar scancodes
+reales (con su IRQ 1) por el mismo monitor:
+
+```
+sendkey a          # y spc, ret, minus, slash, dot…
+```
+
+Para reproducir el arranque live entero (rootfs por USB BOT, que es donde hay
+contención de `HOSTS`), levanta QEMU a mano con la imagen live como
+`usb-storage` sobre `qemu-xhci` y `-smp 8`; el `-drive` de `soso-bios.img` sigue
+siendo el de arranque. Ver `xtask/src/test_install.rs` para el patrón de
+argumentos.
+
 ## Skills layout
 
 Skills live in `.claude/skills/`. `.cursor/skills` mirrors them — edit under `.claude/skills/`
@@ -180,6 +257,8 @@ and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: a
 |---------|-----|
 | SSH permission denied | Use `-i target/soso_test_key` or ensure `~/.ssh/id_ed25519.pub` existed before build |
 | Connection refused :2222 | Wait for `sosh — escribe 'help'`; or prior QEMU still running → `pkill qemu-system-x86` |
+| Teclado muerto tras la primera tecla (placa) | Algo del camino IRQ 1 toma un `lock()` o imprime; ver «Candados y contexto de interrupción» en `soso-architecture` |
+| La máquina se arrastra tras usar `soso-llm`/`ask` | Workers del pool girando sin apagar; `ThreadPool` tiene que hacer `Drop` con `shutdown` + espera |
 | `Could not set up host forwarding rule tcp::2222` | Puerto ocupado; `pkill qemu-system-x86` y relanzar |
 | SSH output desalineada | Kernel debe enviar CRLF en `ssh::tx_push` (tty cruda) |
 | SSH no reconecta tras Ctrl-C | Kernel debe hacer `reset_socket` en CloseWait/TimeWait |
@@ -190,3 +269,4 @@ and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: a
 | `cuda-proxy`: binary not found | `cargo build -p cuda-proxy --release --target-dir target` |
 | L6-H: connection refused :11400 | Start cuda-proxy; llama-server must answer `/health` on :8080 |
 | L6-H: no tok/s from soso | Host is `10.0.2.2` from QEMU guest; model name must match loaded GGUF |
+| No se ve `SOSOLOG.TXT` en el USB | Está en la ESP (p1), que Linux no monta; `cargo xtask sosolog` |

@@ -21,6 +21,21 @@ use std::time::{Duration, Instant};
 /// QEMU sale con (code<<1)|1; ExitCode::Success = 0x10 -> 33.
 const HALT_EXIT: i32 = 33;
 
+/// RAM del shard `reclaim`. Tiene que ser **lo más baja que arranque**: la
+/// gracia del shard es que la presión de memoria dispare el reclaim de páginas.
+/// Estuvo en 48M hasta que el kernel creció y el bootloader dejó de poder mapear
+/// la memoria física (`FrameAllocationFailed` antes siquiera de arrancar), así
+/// que si vuelve a fallar así, súbela — pero lo justo, y comprueba con
+/// `memoria: N MiB libres tras el heap` en el log de serie que sigue habiendo
+/// presión.
+///
+/// Medido con el kernel de 2026-08-16: 48M ni arranca (el bootloader no puede
+/// mapear la memoria física), 64M arranca y deja 15 MiB libres, 72M deja 19 y
+/// 96M deja 31. **Con 72M la inferencia muere a media generación** —pasó una
+/// vez y falló a la siguiente, así que es inestable, no marginal— y un gate que
+/// falla a veces no vale para nada. 96M es el valor que aguanta.
+const RECLAIM_MEM: &str = "96M";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShardId {
     LlmDense,
@@ -283,14 +298,20 @@ fn make_slot(shard: ShardId, img: &Path, data: &Path, models: &Path) -> QemuSlot
         data: copiar_imagen(data, id, "data"),
         models: copiar_imagen(models, id, "models"),
         mem: if shard == ShardId::Reclaim {
-            Some("48M".into())
+            Some(RECLAIM_MEM.into())
         } else {
             None
         },
-        smp: if shard == ShardId::Reclaim {
-            Some("1".into())
-        } else {
-            None
+        // El shard denso corre con DOS cores a propósito: es el único sitio
+        // donde `ThreadPool` llega a crear workers (`ncpu - 1`), y con un solo
+        // core ese código no se ejecuta jamás. Con 2 basta —un worker -- y no
+        // carga el host como 4. Así se coló que el pool
+        // no apagaba sus hilos al morir: giraban al 100 % para siempre y en
+        // placa de 8 cores la segunda inferencia dejaba la máquina inservible.
+        smp: match shard {
+            ShardId::Reclaim => Some("1".into()),
+            ShardId::LlmDense => Some("2".into()),
+            _ => None,
         },
     }
 }
@@ -344,6 +365,23 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report) {
             "soso-llm run tiny-mla --prompt test --max 2",
             || ssh_llm_mla(key, port),
         );
+        // Tras DOS pools creados y destruidos (este shard corre con 4 cores),
+        // la máquina tiene que seguir usable. Si los workers no se apagan,
+        // giran al 100 % para siempre y esto se arrastra o no contesta.
+        let _ = report.paso(sid, "sigue viva tras dos pools de hilos", || {
+            ssh_vive(key, port)
+        });
+    }
+}
+
+/// Un comando trivial que debe contestar rápido: detecta la máquina ahogada
+/// por hilos que quedaron girando.
+fn ssh_vive(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let texto = ssh_guion(key, ssh_port, "echo vivo\nexit\n", Duration::from_secs(45))?;
+    if texto.contains("vivo") {
+        Ok(())
+    } else {
+        Err(format!("sin respuesta al echo; stdout: {texto:?}"))
     }
 }
 
@@ -439,7 +477,8 @@ fn run_shard_reclaim(slot: &QemuSlot, key: &Path, report: &Report) {
     };
     let _vivo = QemuVivo(qemu);
     let port = slot.ssh_port;
-    let _ = report.paso(sid, "soso-llm con RAM 48M (reclaim)", || {
+    let etiqueta = format!("soso-llm con RAM {RECLAIM_MEM} (reclaim)");
+    let _ = report.paso(sid, &etiqueta, || {
         esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(300))?;
         let texto = ssh_guion(
             key,
@@ -449,12 +488,12 @@ fn run_shard_reclaim(slot: &QemuSlot, key: &Path, report: &Report) {
         )?;
         if !texto.contains("soso-llm: generado") {
             return Err(format!(
-                "inferencia con 48M no completó; stdout: {texto:?}"
+                "inferencia con {RECLAIM_MEM} no completó; stdout: {texto:?}"
             ));
         }
         if !texto.contains("soso-llm: planificador") {
             return Err(format!(
-                "falta salida del planificador con 48M; stdout: {texto:?}"
+                "falta salida del planificador con {RECLAIM_MEM}; stdout: {texto:?}"
             ));
         }
         Ok(())

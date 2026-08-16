@@ -12,6 +12,7 @@ mod kshell;
 mod mm;
 mod net;
 mod qemu;
+mod som_import;
 mod task;
 
 #[cfg(feature = "lxdde")]

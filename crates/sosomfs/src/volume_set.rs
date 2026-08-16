@@ -20,6 +20,9 @@ pub trait VolumeSet {
         }
         Ok(())
     }
+
+    /// Tras grow del superbloque, alinear tope lógico con la partición (solo `SingleDev`).
+    fn refresh_total(&mut self) {}
 }
 
 pub struct SingleDev<D: BlockDevice> {
@@ -39,6 +42,11 @@ impl<D: BlockDevice> SingleDev<D> {
 
     pub fn inner_mut(&mut self) -> &mut D {
         &mut self.dev
+    }
+
+    /// Tras grow del superbloque, alinear tope lógico con la partición.
+    pub fn refresh_total(&mut self) {
+        self.total = self.dev.block_count();
     }
 }
 
@@ -69,5 +77,9 @@ impl<D: BlockDevice> VolumeSet for SingleDev<D> {
             return Err(BlockError::OutOfRange);
         }
         self.dev.read_blocks(start, buf)
+    }
+
+    fn refresh_total(&mut self) {
+        self.total = self.dev.block_count();
     }
 }

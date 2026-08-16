@@ -2,6 +2,7 @@
 
 use crate::cache::BlockCache;
 use crate::catalog::Catalog;
+use crate::import;
 use crate::layout::*;
 use crate::volume_set::{SingleDev, VolumeSet};
 use alloc::collections::BTreeSet;
@@ -56,7 +57,7 @@ fn crc32c(data: &[u8]) -> u32 {
     CRC32C.checksum(data)
 }
 
-fn read_super_raw<V: VolumeSet>(vol: &mut V, slot: u64) -> Result<Superblock, ()> {
+pub(crate) fn read_super_raw<V: VolumeSet>(vol: &mut V, slot: u64) -> Result<Superblock, ()> {
     let mut buf = [0u8; BLOCK_SIZE];
     vol.read_lba(slot, &mut buf).map_err(|_| ())?;
     if buf[..8] != MAGIC {
@@ -107,7 +108,7 @@ fn read_super_raw<V: VolumeSet>(vol: &mut V, slot: u64) -> Result<Superblock, ()
     })
 }
 
-fn write_super_raw<D: BlockDevice>(dev: &mut D, slot: u64, sb: &Superblock) -> Result<(), BlockError> {
+pub(crate) fn write_super_raw<D: BlockDevice>(dev: &mut D, slot: u64, sb: &Superblock) -> Result<(), BlockError> {
     let mut buf = [0u8; BLOCK_SIZE];
     buf[..8].copy_from_slice(&MAGIC);
     buf[16..24].copy_from_slice(&sb.generation.to_le_bytes());
@@ -165,6 +166,28 @@ impl<V: VolumeSet> Sosomfs<V> {
 
     pub fn generation(&self) -> u64 {
         self.sb.generation
+    }
+
+    pub fn superblock(&self) -> &Superblock {
+        &self.sb
+    }
+
+    pub fn catalog_ref(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Tras un import o grow, recarga metadatos desde disco e invalida caché.
+    pub fn reload_from_disk(&mut self) -> Result<(), FsError> {
+        import::reload_mounted(
+            self.cache.volume_mut(),
+            &mut self.sb,
+            &mut self.catalog,
+            &mut self.catalog_blocks,
+        )?;
+        self.segmentos_ok.clear();
+        self.cache.clear();
+        self.cache.volume_mut().refresh_total();
+        Ok(())
     }
 
     fn parse_models_path(path: &str) -> Result<(&str, &str), FsError> {

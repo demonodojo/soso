@@ -348,14 +348,18 @@ comprobar que la shell no ha tocado nada.
 configuración vive en **`/etc/llm.conf`**:
 
 ```
-modelo=tiny
+# modelo=tinyllama    (sin fijar: el primero de /models)
 max=128
 temp=0.7
 top_p=0.9
 ```
 
-Si el fichero no está o el modelo no existe en `/models`, `ask` usa el primero
-que encuentre.
+**Lo normal es no fijar `modelo`.** `ask` coge entonces el primero de `/models`,
+y el empaquetado del live pone ahí el modelo de verdad por delante de los
+sintéticos: en el pendrive sale ese, y en las imágenes de prueba sale `tiny`.
+Fíjalo solo si tienes varios y quieres elegir, y hazlo con `ask-modelo` en la
+máquina donde estés — si lo dejas escrito en la imagen y ese modelo no viaja en
+ella, `ask` avisa en cada respuesta y usa otro.
 
 ### ask-modelo — elegir el modelo de `ask`
 
@@ -471,15 +475,15 @@ En arranque live, el kernel vuelca automáticamente el log de consola (ring de
 pendrive). No hace falta teclado: el volcado empieza en cuanto se detecta el
 disco live y se repite cada ~2 s si hay trazas nuevas (también en panic).
 
-Tras probar soso en placa o QEMU, vuelve a Linux y lee el log:
+Tras probar soso en placa, vuelve a Linux y lee el log. La ESP **no se monta sola**
+(Linux oculta las particiones EFI); usa la utilidad, que monta, muestra y desmonta.
+Pide `sudo` solo para mount/umount: no lances `sudo cargo` (root no tiene rustup).
 
 ```sh
-# La ESP suele montarse sola (ej. /media/$USER/UEFI o similar)
-ls /media/$USER/*/SOSOLOG.TXT
-cat /media/$USER/*/SOSOLOG.TXT | less
-
-# O con mtools sobre la imagen:
-mcopy -i target/usb-live/soso-live.img@@$(sgdisk -i 1 target/usb-live/soso-live.img | awk '/First sector/{print $3*512}') ::/SOSOLOG.TXT -
+cargo xtask sosolog              # auto-detecta el USB live
+cargo xtask sosolog /dev/sdX     # disco entero → partición 1
+cargo xtask sosolog /dev/sdX1    # ESP concreta
+cargo xtask sosolog | less
 ```
 
 Regenera la imagen live tras actualizar el kernel:
@@ -685,11 +689,12 @@ Al terminar imprime `SOSO_MODELS_DIR=… SOSO_MODELS_SIZE=… cargo xtask run`.
 
 ### Descargar desde Hugging Face (guest)
 
-Con red en QEMU/soso puedes instalar un modelo en `/var/models/` sin
-reconstruir la imagen de modelos en el host:
+Con red en QEMU o en soso live puedes instalar un modelo **directamente en
+`/models/`** (partición sosomfs). No hace falta reconstruir la imagen de
+modelos en el host ni usar `/var/models/` como almacén intermedio.
 
 ```sh
-# token opcional para repos privados
+# token opcional para repos privados o gated
 echo hf_… > /etc/hf_token
 
 soso-hf search tinyllama
@@ -699,8 +704,14 @@ soso-hf pull org/repo --file mixtral.Q4_K_M.gguf --name mixtral
 soso-llm run tinyllama --prompt hola
 ```
 
-`soso-llm` busca modelos en `/models/` (disco de arranque) y luego en
-`/var/models/` (almacén RW en sosofs).
+`soso-hf pull` descarga el GGUF, lo convierte a `.som` e importa el modelo de
+forma atómica. Si el Hub admite HTTP Range, la conversión no guarda una copia
+completa del GGUF en disco; si no, usa un área temporal en la propia partición
+de modelos. Al terminar, el modelo aparece en `/models/<nombre>/` y `soso-llm`
+(o `ask`) lo listan sin reiniciar.
+
+`soso-llm` busca modelos en `/models/`; `/var/models/` queda solo como respaldo
+legacy si copias ficheros a mano en sosofs.
 
 ### Importar un modelo GGUF
 

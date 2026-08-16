@@ -18,6 +18,7 @@ pub fn bucket_index(model: &str, path: &str, bucket_count: u32) -> u32 {
     hash_path(model, path) % bucket_count.max(1)
 }
 
+#[derive(Clone)]
 pub struct Catalog {
     pub models: Vec<ModelEntry>,
 }

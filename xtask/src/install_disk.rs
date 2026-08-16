@@ -280,6 +280,61 @@ pub(crate) fn expand_models_partition(dev: &Path, live: &Path) {
     );
 }
 
+/// Estira p3 (sosomfs) dejando `install_reserve_sectors` al final para p4 (SOSOINSTALL).
+pub(crate) fn expand_models_leave_install(dev: &Path, install_reserve_sectors: u64) {
+    let disk_sectors = disk_sectors(dev);
+    if disk_sectors <= install_reserve_sectors + 64 {
+        return;
+    }
+    let tail = install_reserve_sectors + 34;
+    println!(
+        "flash-usb-live: ampliando p3 (reservando {} MiB para instalador)",
+        install_reserve_sectors * 512 / (1024 * 1024)
+    );
+    run_cmd(Command::new("sgdisk").arg("-e").arg(dev), "sgdisk -e");
+    run_cmd(
+        Command::new("sgdisk")
+            .arg("-d")
+            .arg("3")
+            .arg("-n")
+            .arg(format!("3:0:-{tail}S"))
+            .arg("-t")
+            .arg("3:8300")
+            .arg(dev),
+        "sgdisk expand p3",
+    );
+}
+
+/// Crea p4 SOSOINSTALL en los últimos `install_sectors` del disco.
+pub(crate) fn create_install_partition_tail(dev: &Path, install_sectors: u64) -> Option<String> {
+    run_cmd(
+        Command::new("sgdisk")
+            .arg("-n")
+            .arg(format!("4:-{install_sectors}S:0"))
+            .arg("-t")
+            .arg("4:0700")
+            .arg("-c")
+            .arg("4:SOSOINSTALL")
+            .arg(dev),
+        "sgdisk part4",
+    );
+    install_partition_node(dev, 4)
+}
+
+pub(crate) fn install_partition_node(disk: &Path, num: u32) -> Option<String> {
+    let base = disk.to_string_lossy();
+    let candidate = if base.contains("nvme") || base.contains("mmcblk") {
+        format!("{base}p{num}")
+    } else {
+        format!("{base}{num}")
+    };
+    if Path::new(&candidate).exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 fn disk_sectors(dev: &Path) -> u64 {
     let out = Command::new("blockdev")
         .args(["--getsz"])

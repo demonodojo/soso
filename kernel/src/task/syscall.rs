@@ -249,6 +249,18 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_DNS_RESOLVE => sys_dns_resolve(a1, a2, a3),
         abi::SYS_BOOTREQ_WRITE => sys_bootreq_write(a1, a2),
         abi::SYS_BOOTREQ_READ => sys_bootreq_read(a1, a2),
+        abi::SYS_SOM_BEGIN => crate::som_import::begin(a1, a2).map(|_| 0),
+        abi::SYS_SOM_PUT => crate::som_import::put(a1, a2, a3, a4).map(|_| 0),
+        abi::SYS_SOM_COMMIT => crate::som_import::commit().map(|_| 0),
+        abi::SYS_SOM_ABORT => crate::som_import::abort().map(|_| 0),
+        abi::SYS_SOM_SCRATCH_ALLOC => crate::som_import::scratch_alloc(a1),
+        abi::SYS_SOM_SCRATCH_WRITE => {
+            crate::som_import::scratch_write(a1, a2, a3, a4).map(|_| 0)
+        }
+        abi::SYS_SOM_SCRATCH_READ => {
+            crate::som_import::scratch_read(a1, a2, a3, a4).map(|_| 0)
+        }
+        abi::SYS_SOM_SCRATCH_FREE => crate::som_import::scratch_free().map(|_| 0),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -302,21 +314,21 @@ fn user_range_ok(ptr: u64, len: u64, need_write: bool) -> bool {
     range_present(ptr, len, need_write)
 }
 
-fn user_slice(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
+pub(crate) fn user_slice(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
     if !user_range_ok(ptr, len, false) {
         return Err(-abi::EFAULT);
     }
     Ok(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
 }
 
-fn user_slice_mut(ptr: u64, len: u64) -> Result<&'static mut [u8], i64> {
+pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<&'static mut [u8], i64> {
     if !user_range_ok(ptr, len, true) {
         return Err(-abi::EFAULT);
     }
     Ok(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) })
 }
 
-fn user_str(ptr: u64, len: u64) -> Result<&'static str, i64> {
+pub(crate) fn user_str(ptr: u64, len: u64) -> Result<&'static str, i64> {
     if len > 4096 {
         return Err(-abi::ENAMETOOLONG);
     }

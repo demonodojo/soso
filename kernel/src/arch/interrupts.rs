@@ -293,8 +293,21 @@ extern "sysv64" fn kernel_pf_panic_shim(addr: u64, _: u64) -> u64 {
     panic!("EXCEPTION: page fault at {addr:#x} rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x}");
 }
 
-extern "x86-interrupt" fn kbd_pic_handler(_stack_frame: InterruptStackFrame) {
-    crate::drivers::kbd::handle_irq();
+/// IRQ 1 (teclado). **Solo se sondea si veníamos de ring 3**, la misma regla
+/// que sigue `timer_tick`: desde ring 0 el kernel puede tener cogido cualquier
+/// candado (`PROCS` en una syscall, `HOSTS` en una lectura del disco live, el
+/// de la consola mientras la shell hace eco) y el sondeo vuelve a pedirlos —
+/// mismo core, spinlock no reentrante, máquina clavada. Pasó en placa real al
+/// pulsar la primera tecla (2026-08-16).
+///
+/// No se pierde nada: el scancode se queda en el búfer del i8042 (o en el ring
+/// del xHCI) y lo recoge el siguiente sondeo, que hacen `kbd::has_input` y
+/// `kbd::read_byte` — el scheduler los llama en cada vuelta mientras haya un
+/// lector de tty esperando, y la kernel-shell también.
+extern "x86-interrupt" fn kbd_pic_handler(stack_frame: InterruptStackFrame) {
+    if desde_usuario(&stack_frame) {
+        crate::drivers::kbd::handle_irq();
+    }
     unsafe {
         PICS.lock().notify_end_of_interrupt(PIC_1_OFFSET + 1);
     }

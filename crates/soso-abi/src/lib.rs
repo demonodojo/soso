@@ -52,6 +52,15 @@ pub const SYS_DNS_RESOLVE: u64 = 40;
 pub const SYS_BOOTREQ_WRITE: u64 = 41;
 /// Lee ese mismo fichero: `(buf, len)`. Devuelve los bytes leídos.
 pub const SYS_BOOTREQ_READ: u64 = 42;
+/// Import atómico de modelos en sosomfs (ver `som_import`).
+pub const SYS_SOM_BEGIN: u64 = 43;
+pub const SYS_SOM_PUT: u64 = 44;
+pub const SYS_SOM_COMMIT: u64 = 45;
+pub const SYS_SOM_ABORT: u64 = 46;
+pub const SYS_SOM_SCRATCH_ALLOC: u64 = 47;
+pub const SYS_SOM_SCRATCH_WRITE: u64 = 48;
+pub const SYS_SOM_SCRATCH_READ: u64 = 49;
+pub const SYS_SOM_SCRATCH_FREE: u64 = 50;
 /// Tamaño fijo de `SOSOBOOT.TXT`.
 pub const BOOTREQ_SIZE: usize = 4096;
 

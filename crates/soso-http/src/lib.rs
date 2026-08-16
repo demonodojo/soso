@@ -333,14 +333,61 @@ pub enum HttpError {
     Dns,
 }
 
-/// GET HTTPS volcando el cuerpo a `sink` (p. ej. fichero). Sigue redirects (hasta 8).
-pub fn https_download<T: TcpTransport, S: BodySink>(
+/// GET HTTPS con redirects (hasta 8). `auth` opcional: token Bearer HF.
+pub fn https_get<T: TcpTransport>(
     transport: &T,
     url: &str,
     auth: Option<&str>,
+) -> Result<Response, HttpError> {
+    let mut body = Vec::new();
+    let (status, _) = https_download(transport, url, auth, &mut VecSink(&mut body))?;
+    Ok(Response { status, body })
+}
+
+fn build_get(host: &str, path: &str, auth: Option<&str>) -> String {
+    let mut req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    if let Some(tok) = auth {
+        let _ = write!(req, "Authorization: Bearer {tok}\r\n");
+    }
+    req.push_str("\r\n");
+    req
+}
+
+fn build_get_range(host: &str, path: &str, auth: Option<&str>, start: u64, end: u64) -> String {
+    let mut req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nRange: bytes={start}-{end}\r\n"
+    );
+    if let Some(tok) = auth {
+        let _ = write!(req, "Authorization: Bearer {tok}\r\n");
+    }
+    req.push_str("\r\n");
+    req
+}
+
+enum HttpReqKind {
+    Full,
+    Range { start: u64, end: u64 },
+}
+
+impl HttpReqKind {
+    fn build(&self, host: &str, path: &str, auth: Option<&str>) -> String {
+        match self {
+            Self::Full => build_get(host, path, auth),
+            Self::Range { start, end } => build_get_range(host, path, auth, *start, *end),
+        }
+    }
+}
+
+fn https_request<T: TcpTransport, S: BodySink>(
+    transport: &T,
+    url: &str,
+    auth: Option<&str>,
+    kind: HttpReqKind,
     sink: &mut S,
+    read_timeout_ms: u64,
 ) -> Result<(u16, Vec<(String, String)>), HttpError> {
     let mut current = url.to_string();
+    let kind = kind;
     for _ in 0..8 {
         let (scheme, host, port, path) = parse_url(&current)?;
         if scheme != "https" {
@@ -360,10 +407,10 @@ pub fn https_download<T: TcpTransport, S: BodySink>(
             .map_err(|_| HttpError::Io)?;
         let mut tls = TlsSession::new(transport, fd, host)?;
         tls.handshake()?;
-        let req = build_get(host, &path, auth);
+        let req = kind.build(host, &path, auth);
         tls.write(req.as_bytes())?;
         let mut stream = HttpStreamState::new();
-        tls.read_plain_to(&mut stream, sink, 60_000)?;
+        tls.read_plain_to(&mut stream, sink, read_timeout_ms)?;
         transport.close(fd);
         let (status, headers) = stream.finish()?;
         if (300..400).contains(&status) {
@@ -377,24 +424,49 @@ pub fn https_download<T: TcpTransport, S: BodySink>(
     Err(HttpError::Parse)
 }
 
-/// GET HTTPS con redirects (hasta 8). `auth` opcional: token Bearer HF.
-pub fn https_get<T: TcpTransport>(
+/// GET HTTPS volcando el cuerpo a `sink` (p. ej. fichero). Sigue redirects (hasta 8).
+pub fn https_download<T: TcpTransport, S: BodySink>(
     transport: &T,
     url: &str,
     auth: Option<&str>,
-) -> Result<Response, HttpError> {
-    let mut body = Vec::new();
-    let (status, _) = https_download(transport, url, auth, &mut VecSink(&mut body))?;
-    Ok(Response { status, body })
+    sink: &mut S,
+) -> Result<(u16, Vec<(String, String)>), HttpError> {
+    let (scheme, _, _, _) = parse_url(url)?;
+    if scheme != "https" {
+        return Err(HttpError::Parse);
+    }
+    https_request(
+        transport,
+        url,
+        auth,
+        HttpReqKind::Full,
+        sink,
+        60_000,
+    )
 }
 
-fn build_get(host: &str, path: &str, auth: Option<&str>) -> String {
-    let mut req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
-    if let Some(tok) = auth {
-        let _ = write!(req, "Authorization: Bearer {tok}\r\n");
+/// GET HTTPS con cabecera `Range: bytes=start-end` (respuesta en RAM).
+pub fn https_get_range<T: TcpTransport>(
+    transport: &T,
+    url: &str,
+    auth: Option<&str>,
+    start: u64,
+    end: u64,
+) -> Result<(u16, Vec<u8>), HttpError> {
+    let (scheme, _, _, _) = parse_url(url)?;
+    if scheme != "https" {
+        return Err(HttpError::Parse);
     }
-    req.push_str("\r\n");
-    req
+    let mut body = Vec::new();
+    let (status, _) = https_request(
+        transport,
+        url,
+        auth,
+        HttpReqKind::Range { start, end },
+        &mut VecSink(&mut body),
+        120_000,
+    )?;
+    Ok((status, body))
 }
 
 fn parse_url(url: &str) -> Result<(&str, &str, u16, String), HttpError> {
@@ -532,6 +604,14 @@ mod tests {
         let (st, headers) = stream.finish().unwrap();
         assert_eq!(st, 302);
         assert_eq!(header_value(&headers, "location"), Some("https://x/y"));
+    }
+
+    #[test]
+    fn build_get_range_header() {
+        let req = build_get_range("huggingface.co", "/f.gguf", Some("tok"), 100, 199);
+        assert!(req.contains("Range: bytes=100-199"));
+        assert!(req.contains("Authorization: Bearer tok"));
+        assert!(req.starts_with("GET /f.gguf HTTP/1.1"));
     }
 
     #[test]

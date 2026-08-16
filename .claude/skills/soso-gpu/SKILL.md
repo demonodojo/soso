@@ -922,6 +922,26 @@ Regla: los shims son supersets mínimos; deben servir a TODOS los ports sin regr
 Layout: `rootfs/lib/firmware/nvidia/gb205/gsp/{bootloader,fmc,gsp}-570.144.bin` (+
 `ga102/acr/{ucode_ahesasc,ucode_asb}.bin`). Luego `cargo xtask build`.
 
+**`ga107` no se empaqueta, y es a propósito** (decidido 2026-08-16, tras verlo en
+placa con la 3050 Mobile). Los cuatro blobs GSP de `ga107` y `ga102` en
+linux-firmware son **byte a byte idénticos** (mismo md5: `bootloader`,
+`booter_load`, `booter_unload`, `gsp`) y `ga107/acr/*` son **symlinks** a
+`ga102/acr/*`. O sea: el fallback `ga107 → ga102` de `gsp_fw.c` carga exactamente
+los mismos bytes. Empaquetar `ga107` duplicaría el `gsp-570.144.bin` de 63 MiB y
+sumaría ~64 MiB a la imagen live sin cambiar nada. Compruébalo antes de "arreglarlo":
+
+```bash
+md5sum /lib/firmware/nvidia/ga{102,107}/gsp/gsp-570.144.bin.zst
+ls -l  /lib/firmware/nvidia/ga107/acr/
+```
+
+`lx_request_firmware` **ya no imprime los intentos fallidos**: todos sus llamantes
+prueban alternativas (nouveau `ga107`→`ga102`, iwlwifi `-89`→`-77`), así que cada
+miss es normal y llenaba el arranque de «no encontrado» con pinta de avería. El
+fallo real lo canta el llamante (`nouveau-lx: GSP … incompleto (n/m blobs)`,
+`iwl_ax211: firmware no encontrado`); la línea `lxdde-fw: cargado <ruta>` se
+mantiene porque es la única que dice **qué fichero se usó de verdad**.
+
 ## Comandos
 
 ```bash

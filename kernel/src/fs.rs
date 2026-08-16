@@ -96,6 +96,27 @@ fn cache_blocks_modelos() -> usize {
     (libres / 32).clamp(64, 2048)
 }
 
+fn grow_models_if_needed(mfs: &mut ModelsFs, part_blocks: u64) {
+    if part_blocks <= mfs.total_blocks() {
+        return;
+    }
+    let mut sb = *mfs.superblock();
+    sosomfs::import::grow_superblock(&mut sb, part_blocks);
+    if sosomfs::import::commit_grow(mfs.cache.volume_mut().inner_mut(), &sb).is_err() {
+        println!("fs: sosomfs grow falló");
+        return;
+    }
+    if mfs.reload_from_disk().is_err() {
+        println!("fs: sosomfs reload tras grow falló");
+        return;
+    }
+    println!(
+        "fs: sosomfs grow → {} bloques (partición {})",
+        mfs.total_blocks(),
+        part_blocks
+    );
+}
+
 /// Backend del rootfs: virtio-blk 0, NVMe 0, o partición GPT live.
 pub enum RootDev {
     #[cfg(feature = "drv-virtio-blk")]
@@ -304,12 +325,14 @@ fn mount_live() {
     }
 
     if let Some(models) = crate::drivers::live_disk::models_dev() {
+        let part_blocks = models.block_count();
         let cache_blocks = cache_blocks_modelos();
         match Sosomfs::mount_with_cache(
             sosomfs::SingleDev::new(ModelsDev::Live(models)),
             cache_blocks,
         ) {
-            Ok(mfs) => {
+            Ok(mut mfs) => {
+                grow_models_if_needed(&mut mfs, part_blocks);
                 println!(
                     "fs: sosomfs live (generación {}, {} bloques, caché {})",
                     mfs.generation(),
@@ -389,9 +412,11 @@ pub fn init() {
     let root_on_virtio = false;
 
     if let Some(dev) = pick_models_backend(root_on_virtio) {
+        let part_blocks = dev.block_count();
         let cache_blocks = cache_blocks_modelos();
         match Sosomfs::mount_with_cache(sosomfs::SingleDev::new(dev), cache_blocks) {
-            Ok(mfs) => {
+            Ok(mut mfs) => {
+                grow_models_if_needed(&mut mfs, part_blocks);
                 println!(
                     "fs: sosomfs montado (generación {}, {} bloques, caché {})",
                     mfs.generation(),

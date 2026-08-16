@@ -59,6 +59,7 @@ soso/
 | `arch/` | GDT/TSS, IDT, PIC+PIT 100 Hz, paging |
 | `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
 | `drivers/espfat.rs` | Localiza ficheros 8.3 contiguos en la ESP del live; lo comparten `fatlog` (SOSOLOG), `drvlog` (SOSODRV) y `bootreq` (SOSOBOOT) |
+| `xtask/src/sosolog.rs` | Host: monta la ESP del USB, imprime `SOSOLOG.TXT` y desmonta (`cargo xtask sosolog`) |
 | `fs/` | sosofs (blk0) + sosomfs (blk1); VFS enruta `/models/*` |
 | `vfs.rs` | Router: lectura/escritura sosofs; modelos → sosomfs (read-only) |
 | `net/` | smoltcp, DHCPv4 al arrancar (fallback 10.0.2.15), polled from scheduler |
@@ -81,6 +82,7 @@ soso/
 | `/bin/init` | PID 1: spawns sosh, relaunches on crash; `init test` = syscall regression suite |
 | `/bin/sosh` | Shell: pipes, redirecciones, builtins `cd`/`pwd`/`help`/`exit`/`ask` |
 | `/bin/soso-llm` | Inferencia LLM sobre modelos en `/models/`; subcomando `ask` (texto crudo, silencioso, REPL) |
+| `/bin/soso-hf` | Descarga GGUF desde Hugging Face Hub → import atómico a `/models/` (`pull`/`search`/`list`) |
 | `/bin/ask-modelo` | Fija el modelo de `ask` en `/etc/llm.conf` |
 | `/bin/soso-install` | Instalador nativo desde el live: guardas por tipo de partición, clon, `gptdisk::relayout` + GUID nuevos, y petición de entrada UEFI |
 | `/bin/{ls,cat,echo,mkdir,rm,hexdump,halt}` | Coreutils |
@@ -95,7 +97,14 @@ lanza `/bin/soso-llm ask <texto crudo>` — es la única forma de que comillas, 
 `|`/`>` lleguen al modelo, porque el tokenizador de la shell no tiene escapes.
 `soso-llm` lo despacha sobre su `args` sin trocear. `run_model` está partido en
 `preparar_sesion` + `generar` (`verboso` apaga el diagnóstico) para que el REPL cargue
-el modelo una vez. Config en `/etc/llm.conf`, fallback al primer modelo de `/models`.
+el modelo una vez. Config en `/etc/llm.conf`, que **no fija modelo por defecto**: se
+usa el primero de `/models`, y `mkfs_models_live` pone el modelo de verdad delante de
+los sintéticos, así que el pendrive coge ese y las imágenes de prueba `tiny`. Fijar un
+nombre ahí lo hereda toda imagen que se genere, y avisa en cada respuesta si no viaja
+con ella — por eso `ask-modelo` escribe el fichero en el disco de la máquina, no en el
+árbol. `:eco <texto>` se resuelve antes de leer nada: devuelve el texto tal cual llegó
+y es lo que hace verificable el camino crudo (`ask :eco a|b>c "x"`).
+
 **Cargar un segundo modelo en el mismo proceso** destapó que `StagingWorker::spawned`
 era por instancia: el hilo de staging y `STAGE` son del proceso, así que arrancaba un
 segundo worker y reseteaba `generation` (que el vivo leía como kick) → dos hilos sobre
@@ -117,6 +126,17 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 ## sosomfs + LLM
 
 - Segundo disco virtio-blk; montaje en `/models/<nombre>/`
+- **VFS read-only:** `create`/`append`/`mkdir` en `/models/*` siguen rechazados; el
+  guest **no** escribe la partición con `SYS_DISK_WRITE` (QEMU: blk1 fuera de
+  `raw_disk`; live USB: disco de arranque → `EBUSY`).
+- **Import atómico (kernel):** syscalls `SYS_SOM_BEGIN` / `PUT` / `COMMIT` /
+  `ABORT` + scratch `SYS_SOM_SCRATCH_*` (`kernel/src/som_import.rs`,
+  `crates/sosomfs/src/import.rs`). Una sesión; extents primero, catálogo +
+  `generation++` al commit; recarga del catálogo en RAM tras commit. **Grow al
+  montar:** si la partición GPT es mayor que `sb.total_blocks`, actualiza el
+  superbloque (`grow_models_if_needed` en `kernel/src/fs.rs`).
+- **`soso-hf pull`:** Hub → GGUF (HTTP Range o scratch en cola p3) → `gguf2som` →
+  import → `/models/<nombre>/` visible sin reiniciar.
 - **E/S de bloque agrupada (2026-08-02):** `BlockDevice::read_blocks(start, buf)` +
   `max_blocks_per_request()` (método por defecto = el bucle de siempre, así que
   los dispositivos de host no cambian); tope `sosomfs::MAX_REQ_BLOCKS = 32`
@@ -254,6 +274,19 @@ memoria como datos movidos.
 Verificación: `cargo xtask test-install` (3 arranques OVMF, incluye un NVMe falso con
 swap/ESP que el instalador debe rechazar).
 
+## Hilos de usuario: nadie los recoge
+
+`thread_spawn` crea **procesos** del scheduler que comparten el `AddrSpace`, y
+`exit` mata sólo al que lo llama: **los hilos sobreviven al proceso que los creó**.
+`soso_llm::pool::worker_entry` hace spin-wait al 100 % por diseño (sin futex en el
+camino del matvec), así que un pool sin apagar deja `ncpu-1` cores quemados para
+siempre — en placa de 8 cores, el segundo `ask`/`soso-llm run` dejaba la máquina
+inservible (todos los cores en `worker_entry`, comprobado con `info registers -a`
+del monitor de QEMU). `ThreadPool` tiene ahora `Drop` que pone `shutdown` y
+**espera** a que los workers salgan (contador `vivos`). Regla: cualquier cosa que
+lance hilos los apaga y los espera antes de morir. **En QEMU con `-smp 1` esto no
+existe** (`want == 0`): por eso el shard `llm-dense` corre con `-smp 2`.
+
 ## Candados y contexto de interrupción
 
 `PROCS`, `HOSTS` (usb_storage) y la consola son `spin::Mutex` **no reentrantes**, y
@@ -280,8 +313,11 @@ con `kbd` en la kernel-shell.
 | Layer | Command |
 |-------|---------|
 | sosofs unit + crash | `cargo test -p sosofs --features std` |
+| GPT del instalador | `cargo test -p gptdisk` (sin features) |
 | Syscall regression | `/bin/init test` in QEMU |
 | Full system | `cargo xtask test` |
+| Instalación nativa live→disco | `cargo xtask test-install` (3 arranques OVMF) |
+| Teclado/tty, hilos con SMP | Sólo con `-smp >1` y `sendkey` por el monitor de QEMU; ver `soso-dev` → Debugging |
 
 ## Out of scope (by design)
 

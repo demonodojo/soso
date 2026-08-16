@@ -50,6 +50,7 @@ Actualiza `MANUAL-USUARIO.md` en la **misma tarea** que cambia la funcionalidad 
 Referencia rápida — ampliar el manual si cambian:
 
 - **Arranque:** `cargo xtask run`, salida `Ctrl-A X`, `pkill qemu-system-x86` si puerto 2222 ocupado
+- **Log USB live:** `cargo xtask sosolog` (ESP p1; no `sudo cargo`)
 - **SSH:** `ssh -tt -i target/soso_test_key -p 2222 soso@localhost` (reconexión tras Ctrl-C)
 - **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, pipes `|`, redirecciones `>`, `>>`, `<`)
 - **Rutas:** relativas al cwd (por defecto `/`); absolutas con `/`

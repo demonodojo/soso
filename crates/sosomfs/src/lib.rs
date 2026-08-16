@@ -7,6 +7,7 @@ extern crate alloc;
 pub mod cache;
 pub mod catalog;
 pub mod fs;
+pub mod import;
 pub mod layout;
 pub mod volume_set;
 
@@ -16,6 +17,7 @@ pub mod builder;
 pub use cache::BlockCache;
 pub use catalog::Catalog;
 pub use fs::{mount, FsError, Sosomfs, MAX_REQ_BLOCKS};
+pub use import::{ImportError, ImportSession, ScratchRegion, CATALOG_RESERVED_BLOCKS};
 pub use layout::*;
 pub use volume_set::{SingleDev, VolumeSet};
 

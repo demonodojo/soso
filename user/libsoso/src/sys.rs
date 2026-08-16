@@ -307,6 +307,62 @@ pub fn bootreq_read(buf: &mut [u8]) -> i64 {
     )
 }
 
+pub fn som_begin(name: &str) -> i64 {
+    syscall4(
+        abi::SYS_SOM_BEGIN,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        0,
+        0,
+    )
+}
+
+pub fn som_put(rel: &str, data: &[u8]) -> i64 {
+    syscall4(
+        abi::SYS_SOM_PUT,
+        rel.as_ptr() as u64,
+        rel.len() as u64,
+        data.as_ptr() as u64,
+        data.len() as u64,
+    )
+}
+
+pub fn som_commit() -> i64 {
+    syscall4(abi::SYS_SOM_COMMIT, 0, 0, 0, 0)
+}
+
+pub fn som_abort() -> i64 {
+    syscall4(abi::SYS_SOM_ABORT, 0, 0, 0, 0)
+}
+
+pub fn som_scratch_alloc(size: u64) -> i64 {
+    syscall4(abi::SYS_SOM_SCRATCH_ALLOC, size, 0, 0, 0)
+}
+
+pub fn som_scratch_write(start_lba: u64, offset: u64, data: &[u8]) -> i64 {
+    syscall4(
+        abi::SYS_SOM_SCRATCH_WRITE,
+        start_lba,
+        offset,
+        data.as_ptr() as u64,
+        data.len() as u64,
+    )
+}
+
+pub fn som_scratch_read(start_lba: u64, offset: u64, buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_SOM_SCRATCH_READ,
+        start_lba,
+        offset,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    )
+}
+
+pub fn som_scratch_free() -> i64 {
+    syscall4(abi::SYS_SOM_SCRATCH_FREE, 0, 0, 0, 0)
+}
+
 pub fn tcp_connect(addr: &abi::SockAddr, timeout_ms: u64) -> i64 {
     syscall4(
         abi::SYS_TCP_CONNECT,

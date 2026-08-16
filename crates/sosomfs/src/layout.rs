@@ -31,7 +31,7 @@ pub struct VolumeDesc {
     pub block_count: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Extent {
     pub volume_id: u32,
@@ -42,7 +42,7 @@ pub struct Extent {
     pub stripe_index: u16,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShardEntry {
     pub rel_path: alloc::string::String,
     pub byte_len: u64,
@@ -55,7 +55,7 @@ pub struct ShardEntry {
     pub shard_crc32c: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelEntry {
     pub name: alloc::string::String,
     pub manifest_lba: u64,

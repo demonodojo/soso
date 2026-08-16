@@ -46,10 +46,18 @@ pub extern "C" fn lx_request_firmware(
             crate::println!("lxdde-fw: cargado {} ({} bytes)", vfs_path, len);
             0
         }
-        Err(_) => {
-            crate::println!("lxdde-fw: no encontrado {}", vfs_path);
-            -2
-        }
+        // Callar la ausencia a propósito: **todos** los llamantes usan esto
+        // para probar alternativas —nouveau pide `ga107/…` y cae a `ga102/…`
+        // (los blobs son byte a byte idénticos en linux-firmware), iwlwifi
+        // prueba `-89.ucode` y luego `-77.ucode`—, así que cada intento fallido
+        // es normal, no un error. Imprimirlo aquí llenaba el arranque en placa
+        // de ocho «no encontrado» seguidos de su «cargado» correspondiente, que
+        // parecen una avería y no lo son.
+        //
+        // El fallo de verdad lo canta quien sabe si se quedó sin alternativas:
+        // `nouveau-lx: GSP … incompleto (n/m blobs)` en `gsp_fw.c` y
+        // `iwl_ax211: firmware no encontrado` en `iwl_ax211.c`.
+        Err(_) => -2,
     }
 }
 

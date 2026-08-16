@@ -20,6 +20,9 @@ struct Shared {
     done: AtomicU32,
     n_workers: u32,
     shutdown: AtomicU32,
+    /// Workers realmente vivos. Sin este contador nadie sabe cuándo han
+    /// salido, y `Drop` no puede esperarlos.
+    vivos: AtomicU32,
 }
 
 static mut SHARED: Shared = Shared {
@@ -30,6 +33,7 @@ static mut SHARED: Shared = Shared {
     done: AtomicU32::new(0),
     n_workers: 0,
     shutdown: AtomicU32::new(0),
+    vivos: AtomicU32::new(0),
 };
 
 fn store_fn<'a>(shared: &Shared, f: &'a (dyn Fn(usize, usize) + Sync + 'a)) {
@@ -54,17 +58,18 @@ fn load_fn(shared: &Shared) -> Option<*const RowFn> {
 extern "C" fn worker_entry(arg: u64) -> ! {
     let idx = arg as usize;
     let shared = unsafe { &*(&raw const SHARED) };
+    shared.vivos.fetch_add(1, Ordering::AcqRel);
     let mut last = 0u32;
     loop {
         while shared.generation.load(Ordering::Acquire) == last {
             if shared.shutdown.load(Ordering::Acquire) != 0 {
-                sys::exit(0);
+                salir(shared);
             }
             core::hint::spin_loop();
         }
         last = shared.generation.load(Ordering::Acquire);
         if shared.shutdown.load(Ordering::Acquire) != 0 {
-            sys::exit(0);
+            salir(shared);
         }
         let rows = shared.rows.load(Ordering::Acquire);
         let n = shared.n_workers as usize + 1;
@@ -78,6 +83,11 @@ extern "C" fn worker_entry(arg: u64) -> ! {
     }
 }
 
+fn salir(shared: &Shared) -> ! {
+    shared.vivos.fetch_sub(1, Ordering::AcqRel);
+    sys::exit(0)
+}
+
 /// Pool con hasta `ncpu - 1` workers (el llamante también trabaja).
 pub struct ThreadPool {
     n_total: usize,
@@ -88,6 +98,15 @@ impl ThreadPool {
         let ncpu = sys::ncpu().max(1) as usize;
         let want = ncpu.saturating_sub(1);
         let shared = unsafe { &mut *(&raw mut SHARED) };
+        // Si un pool anterior de este proceso dejó workers a medio salir,
+        // esperarlos antes de tocar `shutdown`: ponerlo a 0 con hilos vivos
+        // los resucita y acabaríamos con dos juegos sobre el mismo `SHARED`.
+        for _ in 0..1_000_000 {
+            if shared.vivos.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
         shared.shutdown.store(0, Ordering::Release);
         shared.generation.store(0, Ordering::Release);
         let mut spawned = 0usize;
@@ -105,6 +124,39 @@ impl ThreadPool {
 
     pub fn workers(&self) -> usize {
         self.n_total
+    }
+}
+
+impl Drop for ThreadPool {
+    /// Apaga los workers y **espera a que hayan salido**.
+    ///
+    /// AVERÍA (2026-08-16, placa real de 8 cores): no existía este `Drop` y
+    /// nadie ponía `shutdown` a 1 jamás. Los workers giran a 100 % de CPU por
+    /// diseño (spin-wait, sin futex, para no pagar una syscall por fila), y
+    /// son procesos del scheduler que comparten el AddrSpace: **sobrevivían al
+    /// proceso que los creó**. Cada `soso-llm`/`ask` dejaba `ncpu-1` hilos
+    /// quemando un core para siempre; al segundo `ask` la máquina ya estaba
+    /// repartida entre 14 giradores y parecía colgada. En QEMU no se veía
+    /// porque el banco corre con `SOSO_QEMU_SMP=1` y entonces `want == 0`.
+    fn drop(&mut self) {
+        if self.n_total <= 1 {
+            return;
+        }
+        let shared = unsafe { &mut *(&raw mut SHARED) };
+        shared.shutdown.store(1, Ordering::Release);
+        // Un cambio de generación por si alguno estuviera entre las dos
+        // comprobaciones de `shutdown`.
+        let _ = shared.generation.fetch_add(1, Ordering::AcqRel);
+        // Están girando, así que salen enseguida; el tope evita quedarse
+        // clavado aquí si uno muriera de otra forma.
+        for _ in 0..1_000_000 {
+            if shared.vivos.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        shared.n_workers = 0;
+        self.n_total = 1;
     }
 }
 

@@ -7,11 +7,12 @@ extern crate alloc;
 
 mod guest_io;
 mod hf;
+mod hf_range;
 mod net;
 
 use alloc::format;
 use alloc::string::{String, ToString};
-use guest_io::{GuestFile, GuestSomOut};
+use guest_io::{ScratchFile, ScratchSink, SomImportOut};
 use gguf2som::convert;
 use libsoso::{println, sys};
 use soso_abi::O_RDONLY;
@@ -159,6 +160,11 @@ fn cmd_pull(args: &[String]) -> u8 {
     0
 }
 
+fn abort_import() {
+    let _ = sys::som_scratch_free();
+    let _ = sys::som_abort();
+}
+
 fn pull(repo: &str, file: Option<&str>, name: Option<&str>) -> Result<(), u8> {
     let slug = repo.trim().trim_end_matches('/');
     if !slug.contains('/') {
@@ -174,37 +180,72 @@ fn pull(repo: &str, file: Option<&str>, name: Option<&str>) -> Result<(), u8> {
         println!("soso-hf: {e}");
         1
     })?;
+    let gguf_size = entries
+        .iter()
+        .find(|e| e.path == chosen)
+        .map(|e| e.size)
+        .unwrap_or(0);
+    if gguf_size == 0 {
+        println!("soso-hf: tamaño desconocido para {chosen}");
+        return Err(1);
+    }
     let model_name = name
         .map(String::from)
         .unwrap_or_else(|| hf::default_name(chosen.rsplit('/').next().unwrap_or(&chosen)));
-    let base = format!("/var/models/{model_name}");
-    let gguf_path = format!("/tmp/soso-hf-{model_name}.gguf");
-    let _ = sys::mkdir("/var");
-    let _ = sys::mkdir("/var/models");
-    let _ = sys::mkdir(&base);
+
+    if sys::som_begin(&model_name) < 0 {
+        println!("soso-hf: som_begin falló (¿modelo duplicado o import en curso?)");
+        return Err(1);
+    }
+
+    let start_lba = sys::som_scratch_alloc(gguf_size);
+    if start_lba < 0 {
+        println!("soso-hf: sin espacio en sosomfs (errno {start_lba})");
+        abort_import();
+        return Err(1);
+    }
 
     let url = format!(
         "https://huggingface.co/{slug}/resolve/main/{}",
         chosen.trim_start_matches('/')
     );
-    println!("soso-hf: descargando {url}…");
-    net::download_url(&url, &gguf_path, token.as_deref()).map_err(|e| {
-        println!("soso-hf: descarga falló ({e:?})");
-        1
-    })?;
 
-    println!("soso-hf: convirtiendo a .som en {base}…");
-    let mut src = GuestFile::open(&gguf_path).map_err(|_| {
-        println!("soso-hf: no puedo abrir {gguf_path}");
-        1
-    })?;
-    let mut out = GuestSomOut::new(&base);
-    convert(&mut src, &mut out, Some(model_name.as_str())).map_err(|e| {
-        println!("soso-hf: conversión falló: {e}");
-        1
-    })?;
-    let _ = sys::unlink(&gguf_path);
-    println!("soso-hf: listo — soso-llm run {model_name} --prompt hola");
+    // Camino preferido: HTTP Range (sin materializar GGUF completo en scratch).
+    if hf_range::convert_from_url(&url, token.as_deref(), &model_name, gguf_size).is_ok() {
+        let _ = sys::som_scratch_free();
+        if sys::som_commit() < 0 {
+            println!("soso-hf: som_commit falló");
+            abort_import();
+            return Err(1);
+        }
+        println!("soso-hf: listo en /models/{model_name} — soso-llm run {model_name} --prompt hola");
+        return Ok(());
+    }
+
+    println!("soso-hf: descargando {url}…");
+    let sink = ScratchSink::new(start_lba as u64);
+    if net::download_to_scratch(&url, token.as_deref(), sink).is_err() {
+        println!("soso-hf: descarga falló");
+        abort_import();
+        return Err(1);
+    }
+
+    println!("soso-hf: convirtiendo a .som en /models/{model_name}…");
+    let mut src = ScratchFile::new(start_lba as u64, gguf_size);
+    let mut out = SomImportOut;
+    if convert(&mut src, &mut out, Some(model_name.as_str())).is_err() {
+        println!("soso-hf: conversión falló");
+        abort_import();
+        return Err(1);
+    }
+
+    let _ = sys::som_scratch_free();
+    if sys::som_commit() < 0 {
+        println!("soso-hf: som_commit falló");
+        abort_import();
+        return Err(1);
+    }
+    println!("soso-hf: listo en /models/{model_name} — soso-llm run {model_name} --prompt hola");
     Ok(())
 }
 

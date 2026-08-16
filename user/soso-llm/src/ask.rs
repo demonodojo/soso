@@ -134,6 +134,12 @@ pub fn modelos() -> Vec<String> {
 }
 
 /// El modelo configurado si existe; si no, el primero que haya.
+///
+/// Sin `modelo=` en la config no hay aviso ninguno: es el modo por defecto, y
+/// el primero de `/models` es el bueno — `mkfs_models_live` mete el modelo de
+/// verdad delante de los sintéticos y `read_dir` conserva ese orden. El aviso
+/// se reserva para cuando alguien SÍ pidió un modelo y no está, que eso sí es
+/// una configuración equivocada.
 pub fn modelo_efectivo(conf: &Conf) -> Option<String> {
     let disponibles = modelos();
     if !conf.modelo.is_empty() && disponibles.iter().any(|m| *m == conf.modelo) {
@@ -149,23 +155,32 @@ pub fn modelo_efectivo(conf: &Conf) -> Option<String> {
 }
 
 pub fn run_ask(texto: &str) -> u8 {
+    // `:eco` va lo PRIMERO: enseña el texto exactamente como llegó y no
+    // necesita modelo ninguno. Estaba después de resolver la configuración, y
+    // eso colaba por delante avisos como «el modelo X no está en /models» —
+    // justo el ruido que este modo existe para no tener.
+    if let Some(t) = resto_tras(":eco", texto) {
+        println!("{t}");
+        return 0;
+    }
+
     let conf = leer_conf();
     let Some(modelo) = modelo_efectivo(&conf) else {
         println!("ask: no hay ningún modelo en /models");
         return 1;
     };
 
-    // `:eco` no carga nada: enseña el texto exactamente como llegó. Es el modo
-    // de comprobar de un vistazo que las comillas, las tildes y los `|` han
-    // sobrevivido a la shell.
-    if let Some(t) = resto_tras(":eco", texto) {
-        println!("{t}");
-        return 0;
-    }
-
+    // Una línea antes de cargar, siempre. `ask` calla el diagnóstico, pero
+    // callarse también **durante la carga** es lo que hace que en un pendrive
+    // lento parezca colgado: el modelo se lee del disco y eso puede tardar,
+    // sin nada en pantalla desde que se pulsa Enter.
+    println!("ask: cargando {modelo}…");
     let mut sesion = match preparar_sesion(&modelo, false, MemoryPlanConfig::default(), false) {
         Ok(s) => s,
-        Err(c) => return c,
+        Err(c) => {
+            println!("ask: no pude cargar «{modelo}» (código {c})");
+            return c;
+        }
     };
     if texto.is_empty() {
         repl(&mut sesion, &modelo, conf)
@@ -233,6 +248,7 @@ fn repl(sesion: &mut Sesion, modelo: &str, mut conf: Conf) -> u8 {
                 println!("ask: no hay ningún modelo «{n}» en /models");
                 continue;
             }
+            println!("ask: cargando {n}…");
             match preparar_sesion(n, false, MemoryPlanConfig::default(), false) {
                 Ok(nueva) => {
                     *sesion = nueva;

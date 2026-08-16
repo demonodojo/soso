@@ -1,105 +1,141 @@
-//! I/O de ficheros vía syscalls para gguf2som en guest.
+//! I/O de guest: scratch en sosomfs e import vía syscalls.
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use gguf2som::{Read, Seek, SomOut};
 use libsoso::sys;
-use soso_abi::O_RDONLY;
 
-pub struct GuestFile {
-    fd: u64,
+const BLOCK: usize = 4096;
+
+/// GGUF temporal en la cola de la partición de modelos (scratch sosomfs).
+pub struct ScratchFile {
+    start_lba: u64,
+    size: u64,
+    pos: u64,
+    cache_lba: u64,
+    cache: [u8; BLOCK],
 }
 
-impl GuestFile {
-    pub fn open(path: &str) -> Result<Self, ()> {
-        let fd = sys::open(path, O_RDONLY);
-        if fd < 0 {
-            Err(())
-        } else {
-            Ok(Self { fd: fd as u64 })
+impl ScratchFile {
+    pub fn new(start_lba: u64, size: u64) -> Self {
+        Self {
+            start_lba,
+            size,
+            pos: 0,
+            cache_lba: u64::MAX,
+            cache: [0u8; BLOCK],
         }
     }
-}
 
-impl Drop for GuestFile {
-    fn drop(&mut self) {
-        let _ = sys::close(self.fd);
-    }
-}
-
-impl Read for GuestFile {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
-        let n = sys::read(self.fd, buf);
-        if n < 0 {
-            Err(format!("read errno {n}"))
-        } else {
-            Ok(n as usize)
+    fn load_block(&mut self, lba: u64) -> Result<(), String> {
+        if self.cache_lba == lba {
+            return Ok(());
         }
-    }
-}
-
-impl Seek for GuestFile {
-    fn seek_start(&mut self, pos: u64) -> Result<(), String> {
-        let r = sys::seek(self.fd, pos as i64, soso_abi::SEEK_SET);
+        let off = lba.saturating_sub(self.start_lba) * BLOCK as u64;
+        let r = sys::som_scratch_read(self.start_lba, off, &mut self.cache);
         if r < 0 {
-            Err(format!("seek errno {r}"))
-        } else {
-            Ok(())
+            return Err(format!("scratch read errno {r}"));
         }
+        self.cache_lba = lba;
+        Ok(())
+    }
+}
+
+impl Read for ScratchFile {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+        if self.pos >= self.size {
+            return Ok(0);
+        }
+        let mut n = 0usize;
+        while n < buf.len() && self.pos < self.size {
+            let lba = self.start_lba + self.pos / BLOCK as u64;
+            self.load_block(lba)?;
+            let in_block = (self.pos % BLOCK as u64) as usize;
+            let take = (BLOCK - in_block)
+                .min(buf.len() - n)
+                .min((self.size - self.pos) as usize);
+            buf[n..n + take].copy_from_slice(&self.cache[in_block..in_block + take]);
+            self.pos += take as u64;
+            n += take;
+        }
+        Ok(n)
+    }
+}
+
+impl Seek for ScratchFile {
+    fn seek_start(&mut self, pos: u64) -> Result<(), String> {
+        if pos > self.size {
+            return Err(format!("seek fuera de scratch ({pos} > {})", self.size));
+        }
+        self.pos = pos;
+        Ok(())
     }
 
     fn stream_position(&mut self) -> Result<u64, String> {
-        let r = sys::seek(self.fd, 0, soso_abi::SEEK_CUR);
-        if r < 0 {
-            Err(format!("tell errno {r}"))
-        } else {
-            Ok(r as u64)
-        }
+        Ok(self.pos)
     }
 }
 
-pub struct GuestSomOut {
-    base: String,
-}
+/// Destino `.som` vía importador del kernel → `/models/<nombre>/`.
+pub struct SomImportOut;
 
-impl GuestSomOut {
-    pub fn new(base: &str) -> Self {
-        Self {
-            base: String::from(base),
-        }
-    }
-
-    fn full_path(&self, rel: &str) -> String {
-        format!("{}/{}", self.base, rel)
-    }
-}
-
-impl SomOut for GuestSomOut {
-    fn mkdir(&mut self, path: &str) -> Result<(), String> {
-        let p = self.full_path(path);
-        let _ = sys::mkdir(&p);
+impl SomOut for SomImportOut {
+    fn mkdir(&mut self, _path: &str) -> Result<(), String> {
         Ok(())
     }
 
     fn write(&mut self, rel: &str, data: &[u8]) -> Result<(), String> {
-        let p = self.full_path(rel);
-        if let Some(parent) = rel.rsplit_once('/') {
-            let _ = sys::mkdir(&self.full_path(parent.0));
+        let r = sys::som_put(rel, data);
+        if r < 0 {
+            Err(format!("som_put {rel} errno {r}"))
+        } else {
+            Ok(())
         }
-        let fd = sys::open(&p, soso_abi::O_WRONLY | soso_abi::O_CREAT | soso_abi::O_APPEND);
-        if fd < 0 {
-            return Err(format!("open {p} errno {fd}"));
+    }
+}
+
+/// Sink HTTP que escribe en scratch sosomfs (bloques de 4 KiB).
+pub struct ScratchSink {
+    start_lba: u64,
+    offset: u64,
+    pending: Vec<u8>,
+}
+
+impl ScratchSink {
+    pub fn new(start_lba: u64) -> Self {
+        Self {
+            start_lba,
+            offset: 0,
+            pending: Vec::new(),
         }
-        let mut off = 0usize;
-        while off < data.len() {
-            let n = sys::write(fd as u64, &data[off..]);
-            if n <= 0 {
-                let _ = sys::close(fd as u64);
-                return Err(format!("write {p}"));
+    }
+
+    pub fn finish(self) -> Result<(), String> {
+        if !self.pending.is_empty() {
+            let mut pad = [0u8; BLOCK];
+            let n = self.pending.len();
+            pad[..n].copy_from_slice(&self.pending);
+            let r = sys::som_scratch_write(self.start_lba, self.offset, &pad);
+            if r < 0 {
+                return Err(format!("scratch write final errno {r}"));
             }
-            off += n as usize;
         }
-        let _ = sys::close(fd as u64);
+        Ok(())
+    }
+}
+
+impl soso_http::BodySink for ScratchSink {
+    fn write_body(&mut self, chunk: &[u8]) -> Result<(), soso_http::HttpError> {
+        self.pending.extend_from_slice(chunk);
+        while self.pending.len() >= BLOCK {
+            let r = sys::som_scratch_write(self.start_lba, self.offset, &self.pending[..BLOCK]);
+            if r < 0 {
+                return Err(soso_http::HttpError::Io);
+            }
+            self.offset += BLOCK as u64;
+            self.pending.drain(..BLOCK);
+        }
         Ok(())
     }
 }

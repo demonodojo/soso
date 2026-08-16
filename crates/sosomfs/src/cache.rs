@@ -119,6 +119,20 @@ impl<V: VolumeSet> BlockCache<V> {
         &mut self.vol
     }
 
+    /// Vacía la caché (p. ej. tras recargar catálogo desde disco).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.pin_count = 0;
+        self.lapidas = 0;
+        self.desalojables = 0;
+        self.mano = 0;
+        self.prefetch_siguiente = 0;
+        self.prefetch_hechos = [u64::MAX; PREFETCH_RECIENTES];
+        if !self.indice.is_empty() {
+            self.indice.fill(VACIO);
+        }
+    }
+
     /// (aciertos, fallos) desde el montaje. El kernel los publica por
     /// `SYS_IOSTAT`; sin esto, la amplificación de lectura sólo se puede medir
     /// reinstrumentando a mano, que es como se perdieron las cifras anteriores.

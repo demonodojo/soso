@@ -58,6 +58,10 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             flash_usb_live::run(&args);
         }
+        "sosolog" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            sosolog::run(&args);
+        }
         "lx-build" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             lx_build::run(&args);
@@ -96,7 +100,7 @@ fn main() {
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
+                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
             );
             exit(2);
         }
@@ -113,6 +117,7 @@ mod g3_check;
 mod install_disk;
 mod lx_build;
 mod package_live;
+mod sosolog;
 mod test;
 mod test_distributed;
 mod test_install;

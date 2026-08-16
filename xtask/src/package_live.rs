@@ -296,6 +296,8 @@ Archivo: soso-live.img ({:.1} GiB)
    sudo ./install-soso.sh /dev/nvme1n1 --yes
 
 6) Flashear USB con instalador: sudo cargo xtask flash-usb-live /dev/sdX --yes
+   (estira p3 al sobrante del stick; p4 SOSOINSTALL 32 MiB al final; sosomfs
+   crece al arrancar)
 
 7) Apagar, quitar USB, arrancar disco habitual → Linux intacto (si no instalaste).
 

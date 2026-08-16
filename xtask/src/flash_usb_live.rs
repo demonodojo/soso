@@ -1,12 +1,14 @@
 //! `cargo xtask flash-usb-live <usb> [--yes]`
 //!
-//! Graba `soso-live.img` en un pendrive y añade partición FAT con el instalador.
+//! Graba `soso-live.img` en un pendrive, estira p3 (sosomfs) y añade p4 SOSOINSTALL.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 use crate::install_disk;
 use crate::package_live;
+
+const INSTALL_SECTORS: u64 = 65536; // 32 MiB
 
 pub fn run(args: &[String]) {
     let mut device: Option<PathBuf> = None;
@@ -52,20 +54,32 @@ pub fn run(args: &[String]) {
     );
     install_disk::run_cmd(&mut Command::new("sync"), "sync");
 
-    if let Some(part4) = add_install_partition(&usb) {
-        if mount_install_partition(&part4) {
-            copy_installer_files(&out_dir, "/mnt/soso-install");
-            let _ = Command::new("umount").arg("/mnt/soso-install").status();
-            println!("flash-usb-live: instalador en {part4}");
-        } else {
-            eprintln!(
-                "flash-usb-live: aviso: no pude montar {part4}; copia manual desde {}",
-                out_dir.display()
+    let img_sectors = std::fs::metadata(&live).map(|m| m.len() / 512).unwrap_or(0);
+    let disk_sectors = blockdev_sectors(&usb).unwrap_or(0);
+
+    if disk_sectors >= img_sectors + INSTALL_SECTORS {
+        install_disk::expand_models_leave_install(&usb, INSTALL_SECTORS);
+        if let Some(part4) = install_disk::create_install_partition_tail(&usb, INSTALL_SECTORS) {
+            install_disk::run_cmd(
+                Command::new("mkfs.vfat")
+                    .args(["-F", "32", "-n", "SOSOINSTALL"])
+                    .arg(&part4),
+                "mkfs.vfat",
             );
+            if mount_install_partition(&part4) {
+                copy_installer_files(&out_dir, "/mnt/soso-install");
+                let _ = Command::new("umount").arg("/mnt/soso-install").status();
+                println!("flash-usb-live: instalador en {part4}");
+            } else {
+                eprintln!(
+                    "flash-usb-live: aviso: no pude montar {part4}; copia manual desde {}",
+                    out_dir.display()
+                );
+            }
         }
     } else {
         eprintln!(
-            "flash-usb-live: aviso: USB sin espacio libre para partición instalador;\n\
+            "flash-usb-live: aviso: USB sin espacio para p4 ({INSTALL_SECTORS} sectores);\n\
              copia {} a un directorio accesible desde Linux",
             out_dir.display()
         );
@@ -83,58 +97,10 @@ fn usage() -> ! {
            lsblk\n\
            sudo cargo xtask flash-usb-live /dev/sde --yes\n\
          \n\
-         Graba soso-live.img en el pendrive y añade partición SOSOINSTALL\n\
+         Graba soso-live.img, estira p3 (modelos) y añade p4 SOSOINSTALL\n\
          con install-soso.sh para dual-boot desde Linux."
     );
     exit(2);
-}
-
-fn add_install_partition(usb: &Path) -> Option<String> {
-    let img_sectors = std::fs::metadata(package_live::live_image_path())
-        .ok()?
-        .len()
-        / 512;
-    let disk_sectors = blockdev_sectors(usb)?;
-    // Al menos 32 MiB libres para la partición instalador.
-    if disk_sectors < img_sectors + 65536 {
-        return None;
-    }
-
-    install_disk::run_cmd(Command::new("sgdisk").arg("-e").arg(usb), "sgdisk -e");
-    install_disk::run_cmd(
-        Command::new("sgdisk")
-            .arg("-n")
-            .arg("4:0:0")
-            .arg("-t")
-            .arg("4:0700")
-            .arg("-c")
-            .arg("4:SOSOINSTALL")
-            .arg(usb),
-        "sgdisk part4",
-    );
-
-    let part = install_partition_node(usb, 4)?;
-    install_disk::run_cmd(
-        Command::new("mkfs.vfat")
-            .args(["-F", "32", "-n", "SOSOINSTALL"])
-            .arg(&part),
-        "mkfs.vfat",
-    );
-    Some(part)
-}
-
-fn install_partition_node(disk: &Path, num: u32) -> Option<String> {
-    let base = disk.to_string_lossy();
-    let candidate = if base.contains("nvme") || base.contains("mmcblk") {
-        format!("{base}p{num}")
-    } else {
-        format!("{base}{num}")
-    };
-    if Path::new(&candidate).exists() {
-        Some(candidate)
-    } else {
-        None
-    }
 }
 
 fn blockdev_sectors(dev: &Path) -> Option<u64> {
