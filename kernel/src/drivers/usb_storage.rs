@@ -288,8 +288,15 @@ pub fn sector_count() -> Option<u64> {
 }
 
 /// Teclado USB HID boot (si `enumerate_usb_devices` lo encontró).
+/// Sondea el teclado HID. **`try_lock`**: esto se llama desde el handler de la
+/// IRQ 1, y `HOSTS` es el mismo candado que tiene cogido *cualquier* lectura
+/// del disco live — que en un arranque desde USB es casi todo el rato. Con
+/// `lock()`, pulsar una tecla mientras el FS leía del pendrive clavaba la
+/// máquina en el mismo core que ya tenía el candado. Si está ocupado no pasa
+/// nada: `poll_hw` vuelve a pasar por aquí desde `read_byte`/`has_input`, que
+/// corren fuera de la interrupción.
 pub fn poll_keyboard_scancode() -> Option<u8> {
-    let mut guard = HOSTS.lock();
+    let mut guard = HOSTS.try_lock()?;
     for host in guard.iter_mut() {
         if let Some(evt) = host.ctrl.poll_keyboard() {
             if evt.pressed {

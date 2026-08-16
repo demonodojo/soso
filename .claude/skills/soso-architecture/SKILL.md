@@ -254,6 +254,18 @@ memoria como datos movidos.
 Verificación: `cargo xtask test-install` (3 arranques OVMF, incluye un NVMe falso con
 swap/ESP que el instalador debe rechazar).
 
+## Candados y contexto de interrupción
+
+`PROCS`, `HOSTS` (usb_storage) y la consola son `spin::Mutex` **no reentrantes**, y
+`with_current`/`with_fd` toman `PROCS` con las interrupciones ABIERTAS. Regla: todo lo
+que corra dentro de un handler de IRQ usa `try_lock`, nunca `lock`, y **no imprime**.
+Se saltó tres veces en el camino de la IRQ 1 del teclado y la placa se clavaba en la
+primera tecla (2026-08-16): `kick_if_tty_waiting` (PROCS), `usb_storage::poll_keyboard_scancode`
+(HOSTS — el mismo candado que tiene cogido cualquier lectura del disco live, o el flush
+de `fatlog` cada 2 s) y `log_scancode_raw` (consola). **QEMU no lo ve**: las pruebas
+entran por SSH y la IRQ 1 nunca se dispara. Los scancodes de diagnóstico se leen ahora
+con `kbd` en la kernel-shell.
+
 ## Coding constraints
 
 1. **Minimize scope** — smallest correct diff; match existing style

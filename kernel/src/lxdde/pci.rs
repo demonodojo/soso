@@ -55,7 +55,7 @@ pub fn init() {
     for drv in DRIVERS.lock().iter() {
         let devs = pci::enumerate();
         for d in devs {
-            if !match_id(&drv.ids, d.vendor_id, d.device_id) {
+            if !match_id(&drv.ids, d.vendor_id, d.device_id, d.class) {
                 continue;
             }
             let (bar0, bar0_size) = pci::bar_info(d.bus, d.device, d.function, 0).unwrap_or((0, 0));
@@ -98,10 +98,17 @@ pub fn init() {
     }
 }
 
-fn match_id(ids: &[LxPciDeviceId], vendor: u16, device: u16) -> bool {
+fn match_id(ids: &[LxPciDeviceId], vendor: u16, device: u16, class: u8) -> bool {
     ids.iter().any(|id| {
-        id.vendor == 0 && id.device == 0
-            || (id.vendor as u16 == vendor && (id.device == 0 || id.device as u16 == device))
+        if id.vendor == 0 && id.device == 0 && id.class_mask == 0 {
+            return false;
+        }
+        let vendor_ok = id.vendor as u16 == vendor;
+        let device_ok = id.device == 0 || id.device as u16 == device;
+        let class24 = (class as u32) << 16;
+        let class_ok =
+            id.class_mask == 0 || (class24 & id.class_mask) == (id.class & id.class_mask);
+        vendor_ok && device_ok && class_ok
     }) && !ids.is_empty()
 }
 

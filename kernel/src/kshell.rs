@@ -53,7 +53,7 @@ fn exec(line: &str) {
 
     match cmd {
         "help" => {
-            println!("comandos: help dmesg [patrón|save] hwscan spawn ps ls cat stat write mkdir rm df uptime mem io wifi blk blkread blkwrite pf panic halt");
+            println!("comandos: help dmesg [patrón|save] hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem io wifi blk blkread blkwrite pf panic halt");
         }
         "dmesg" => match args.first() {
             Some(&"save") => {
@@ -178,6 +178,22 @@ fn exec(line: &str) {
         "mem" => {
             let libres = crate::mm::FRAME_ALLOC.get().unwrap().lock().free_frames();
             println!("{} frames libres ({} MiB)", libres, libres * 4096 / (1024 * 1024));
+        }
+        "kbd" => {
+            // Los primeros scancodes vistos. Antes se imprimían desde el
+            // handler de la IRQ, que es un sitio donde no se puede tomar el
+            // candado de la consola sin arriesgar un interbloqueo.
+            let mut sc = [0u8; 8];
+            let n = crate::drivers::kbd::scancodes_iniciales(&mut sc);
+            if n == 0 {
+                println!("kbd: ningún scancode todavía");
+            } else {
+                print!("kbd: primeros scancodes:");
+                for b in &sc[..n] {
+                    print!(" {b:#04x}");
+                }
+                println!();
+            }
         }
         "io" => {
             if args.first() == Some(&"reset") {

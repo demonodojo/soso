@@ -697,8 +697,23 @@ pub fn block_current(ctx: Context, state: State) -> ! {
 }
 
 /// IRQ teclado: despertar al scheduler si hay lectores tty bloqueados.
+///
+/// **`try_lock`, nunca `lock`.** Esto corre dentro del handler de la IRQ 1, y
+/// `with_current`/`with_fd` toman `PROCS` con las interrupciones ABIERTAS en
+/// cualquier syscall. Bloquearse aquí a esperar ese mismo candado, en el mismo
+/// core que lo tiene tomado, es un interbloqueo duro: la máquina se queda
+/// clavada **en la primera tecla** que se pulse mientras haya una syscall en
+/// vuelo. Costó un arranque en placa real (2026-08-16) y no se ve en QEMU
+/// porque allí las pruebas entran por SSH y la IRQ 1 no llega a dispararse.
+///
+/// Si el candado está ocupado se manda el IPI igual: despertar al scheduler de
+/// más no cuesta nada (da una vuelta y vuelve a dormirse) y perder el aviso sí
+/// dejaría una tecla sin atender.
 pub fn kick_if_tty_waiting() {
-    let need = PROCS.lock().iter().any(|p| matches!(p.state, State::WaitingTty { .. }));
+    let need = match PROCS.try_lock() {
+        Some(procs) => procs.iter().any(|p| matches!(p.state, State::WaitingTty { .. })),
+        None => true,
+    };
     if need {
         crate::arch::apic::send_ipi(crate::arch::apic::id(), crate::arch::apic::RESCHED_VECTOR);
         crate::arch::apic::kick_idle_cpus();

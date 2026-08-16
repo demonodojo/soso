@@ -93,6 +93,7 @@ static SHIFT: AtomicBool = AtomicBool::new(false);
 static CAPS: AtomicBool = AtomicBool::new(false);
 static I8042_OK: AtomicBool = AtomicBool::new(false);
 static SC_LOG: AtomicU8 = AtomicU8::new(0);
+static SC_HIST: [AtomicU8; 8] = [const { AtomicU8::new(0) }; 8];
 
 fn status() -> u8 {
     unsafe { Port::<u8>::new(STATUS).read() }
@@ -241,12 +242,27 @@ fn atkbd_enable() {
     println!("kbd: enable scan sin ACK (ok en muchos portátiles)");
 }
 
+/// Guarda los primeros scancodes para diagnóstico. **No imprime**: esto corre
+/// dentro del handler de la IRQ 1, y `println!` toma el candado de la consola
+/// (serie o framebuffer) que el proceso interrumpido puede tener cogido —
+/// justo lo que pasa mientras la shell hace eco de lo que escribes. Interbloqueo
+/// duro en la primera tecla, y encima con el mensaje ya pintado, que despista.
+/// Se leen con `kbd` desde la kernel-shell.
 fn log_scancode_raw(sc: u8) {
-    let n = SC_LOG.load(Ordering::Relaxed);
-    if n < 8 {
-        println!("kbd: sc={sc:#04x}");
-        SC_LOG.store(n + 1, Ordering::Relaxed);
+    let n = SC_LOG.load(Ordering::Relaxed) as usize;
+    if n < SC_HIST.len() {
+        SC_HIST[n].store(sc, Ordering::Relaxed);
+        SC_LOG.store(n as u8 + 1, Ordering::Relaxed);
     }
+}
+
+/// Los primeros scancodes vistos, para `kbd` en la kernel-shell.
+pub fn scancodes_iniciales(out: &mut [u8]) -> usize {
+    let n = (SC_LOG.load(Ordering::Relaxed) as usize).min(out.len()).min(SC_HIST.len());
+    for (i, o) in out.iter_mut().take(n).enumerate() {
+        *o = SC_HIST[i].load(Ordering::Relaxed);
+    }
+    n
 }
 
 fn scancode_ascii(sc: u8) -> Option<u8> {

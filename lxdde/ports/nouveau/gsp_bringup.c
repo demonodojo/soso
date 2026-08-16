@@ -683,6 +683,11 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
     if (!pdev) {
         return -1;
     }
+    if (g_phase != GSP_NONE && g_phase != GSP_GONE) {
+        lx_printk("nouveau-lx: GSP ya inicializado (phase=%s) — se ignora otro 10de\n",
+                  lx_nouveau_gsp_status());
+        return 0;
+    }
     if (lx_pci_enable_device(pdev) != 0) {
         lx_printk("nouveau-lx: pci_enable falló\n");
         return -1;

@@ -35,7 +35,9 @@ static void nouveau_remove(struct lx_pci_dev *pdev)
 }
 
 static const struct lx_pci_device_id nouveau_ids[] = {
-    { 0x10de, 0, 0, 0, 0, 0, 0 },
+    /* Solo VGA/3D (clase 0x03). 0x228b es el HD Audio HDMI de la misma
+     * tarjeta: su BAR0 son ~16 KiB y leer 0x1183a4 (VRAM) page-faultea. */
+    { 0x10de, 0, 0, 0, 0x030000, 0xff0000, 0 },
     { 0, 0, 0, 0, 0, 0, 0 },
 };
 
