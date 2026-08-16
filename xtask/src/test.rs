@@ -7,7 +7,8 @@
 //!    `halt` (que a su vez comprueba el apagado limpio).
 //!
 //! Los pasos de guest se reparten en shards QEMU independientes (puertos e
-//! imágenes propios) limitados por `SOSO_TEST_JOBS` (default 2).
+//! imágenes propios) limitados por `SOSO_TEST_JOBS` (default 4 con KVM, 2 en
+//! TCG). QEMU usa `-accel kvm` si `/dev/kvm` es legible (`SOSO_QEMU_ACCEL`).
 //!
 //! Sale con código 0 si todo pasa, 1 si algo falla.
 
@@ -192,7 +193,7 @@ fn test_jobs() -> usize {
     std::env::var("SOSO_TEST_JOBS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(2)
+        .unwrap_or_else(super::test_jobs_default)
         .clamp(1, 4)
 }
 
@@ -200,15 +201,25 @@ pub fn run() {
     let root = super::project_root();
     let report = Arc::new(Report::new());
 
-    run_host_tests_parallel(&root, &report);
+    let img = std::thread::scope(|scope| {
+        let report_host = Arc::clone(&report);
+        let root_host = root.clone();
+        scope.spawn(move || run_host_tests(&root_host, &report_host));
 
-    super::build_user();
-    let img = super::build_image();
+        scope.spawn(super::build_user);
+
+        let kernel = scope.spawn(super::build_image);
+
+        kernel.join().unwrap()
+    });
+
     let data = super::mkfs_rootfs(true);
     let models = super::mkfs_models(true);
     let key = root.join("target/soso_test_key");
 
     let jobs = test_jobs();
+    let accel = super::qemu_accel_mode();
+    println!("xtask test: QEMU accel={accel} (SOSO_QEMU_ACCEL)");
     println!("xtask test: hasta {jobs} QEMU en paralelo (SOSO_TEST_JOBS)");
 
     run_shards_parallel(&report, jobs, &img, &data, &models, &key);
@@ -216,45 +227,70 @@ pub fn run() {
     exit_resumen(if report.fallos() == 0 { 0 } else { 1 });
 }
 
-fn run_host_tests_parallel(root: &Path, report: &Arc<Report>) {
-    // `std` solo donde el crate lo tiene: gptdisk compila en el host con
-    // `cfg(test)` y no necesita feature.
-    let crates = [
-        ("sosomfs", true, "sosomfs (host)"),
-        ("sosofs", true, "crash-safety de sosofs (host)"),
-        ("soso-llm-core", true, "planificador soso-llm-core (host)"),
-        ("gptdisk", false, "GPT del instalador (host)"),
-    ];
+fn run_host_tests(root: &Path, report: &Arc<Report>) {
     std::thread::scope(|scope| {
-        for (pkg, con_std, nombre) in crates {
-            let root = root.to_path_buf();
-            let report = Arc::clone(report);
-            scope.spawn(move || {
-                let result = (|| {
-                    let mut cmd = Command::new("cargo");
-                    cmd.current_dir(&root).args(["test", "-q", "-p", pkg]);
-                    if con_std {
-                        cmd.args(["--features", "std"]);
-                    }
-                    let st = cmd
-                        .status()
-                        .map_err(|e| e.to_string())?;
-                    if st.success() {
-                        Ok(())
-                    } else {
-                        Err(format!("los tests de {pkg} fallaron"))
-                    }
-                })();
-                match result {
-                    Ok(()) => report.marca("host", nombre, true),
-                    Err(e) => {
-                        report.marca("host", &format!("{nombre}: {e}"), false);
-                        *report.fallos.lock().unwrap() += 1;
-                    }
-                }
-            });
-        }
+        let root_a = root.to_path_buf();
+        let report_a = Arc::clone(report);
+        scope.spawn(move || {
+            run_cargo_test_batch(
+                &root_a,
+                &report_a,
+                "host (sosofs+sosomfs+soso-llm-core)",
+                &["sosofs", "sosomfs", "soso-llm-core"],
+                true,
+            );
+        });
+
+        let root_b = root.to_path_buf();
+        let report_b = Arc::clone(report);
+        scope.spawn(move || {
+            run_cargo_test_batch(
+                &root_b,
+                &report_b,
+                "host (gptdisk+soso-http+sosomodel+convert-gguf+cuda-proxy)",
+                &[
+                    "gptdisk",
+                    "soso-http",
+                    "sosomodel",
+                    "convert-gguf",
+                    "cuda-proxy",
+                ],
+                false,
+            );
+        });
     });
+}
+
+fn run_cargo_test_batch(
+    root: &Path,
+    report: &Arc<Report>,
+    nombre: &str,
+    pkgs: &[&str],
+    con_std: bool,
+) {
+    let result = (|| {
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(root).args(["test", "-q"]);
+        for pkg in pkgs {
+            cmd.args(["-p", pkg]);
+        }
+        if con_std {
+            cmd.args(["--features", "std"]);
+        }
+        let st = cmd.status().map_err(|e| e.to_string())?;
+        if st.success() {
+            Ok(())
+        } else {
+            Err(format!("los tests de {nombre} fallaron"))
+        }
+    })();
+    match result {
+        Ok(()) => report.marca("host", nombre, true),
+        Err(e) => {
+            report.marca("host", &format!("{nombre}: {e}"), false);
+            *report.fallos.lock().unwrap() += 1;
+        }
+    }
 }
 
 fn run_shards_parallel(
@@ -510,28 +546,6 @@ fn exit_resumen(code: i32) -> ! {
     std::process::exit(code);
 }
 
-fn paso<F: FnOnce() -> Result<(), String>>(
-    nombre: &str,
-    fallos: &mut u32,
-    f: F,
-) -> Result<(), ()> {
-    match f() {
-        Ok(()) => {
-            marca(nombre, true);
-            Ok(())
-        }
-        Err(e) => {
-            marca(&format!("{nombre}: {e}"), false);
-            *fallos += 1;
-            Err(())
-        }
-    }
-}
-
-fn marca(nombre: &str, ok: bool) {
-    println!("{}  {nombre}", if ok { "OK  " } else { "FALLO" });
-}
-
 fn lanzar_qemu(slot: &QemuSlot) -> std::io::Result<Child> {
     let mem = slot.mem.clone().unwrap_or_else(super::qemu_mem);
     let smp = slot.smp.clone().unwrap_or_else(super::qemu_smp);
@@ -539,6 +553,7 @@ fn lanzar_qemu(slot: &QemuSlot) -> std::io::Result<Child> {
     qemu.args(["-machine", "q35", "-cpu", "max"])
         .args(["-m", &mem])
         .args(["-smp", &smp]);
+    super::apply_qemu_accel(&mut qemu);
     super::apply_firmware(&mut qemu, &slot.bios);
     qemu.args([
         "-drive",
@@ -564,11 +579,23 @@ fn lanzar_qemu_legacy(
     models: &Path,
     serial: &Path,
 ) -> std::io::Result<Child> {
+    lanzar_qemu_legacy_ports(img, data, models, serial, 2222, 7777, "52:54:00:12:34:15")
+}
+
+fn lanzar_qemu_legacy_ports(
+    img: &Path,
+    data: &Path,
+    models: &Path,
+    serial: &Path,
+    ssh_port: u16,
+    echo_port: u16,
+    mac: &str,
+) -> std::io::Result<Child> {
     let slot = QemuSlot {
         id: "legacy",
-        ssh_port: 2222,
-        echo_port: 7777,
-        mac: "52:54:00:12:34:15".into(),
+        ssh_port,
+        echo_port,
+        mac: mac.into(),
         serial: serial.to_path_buf(),
         bios: img.to_path_buf(),
         data: data.to_path_buf(),
@@ -1010,52 +1037,67 @@ pub fn run_lx_e1000e_smoke() {
 }
 
 struct UsbTestScenario {
+    id: &'static str,
     name: &'static str,
     log: &'static str,
+    index: u8,
     xhci: Option<&'static str>,
     usb_kbd: bool,
     usb_hub: bool,
     extra_serial: Option<&'static str>,
 }
 
+static USB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Batería USB/xHCI en QEMU (`cargo xtask test-usb`).
 pub fn run_usb() {
     let root = super::project_root();
-    let mut fallos = 0u32;
+    let report = Arc::new(Report::new());
 
-    super::build_user();
-    let img = super::build_image();
+    let img = std::thread::scope(|scope| {
+        scope.spawn(super::build_user);
+        let kernel = scope.spawn(super::build_image);
+        kernel.join().unwrap()
+    });
     let data = super::mkfs_rootfs(true);
     let models = super::mkfs_models(true);
 
     let escenarios = [
         UsbTestScenario {
+            id: "qemu",
             name: "BOT qemu-xhci",
             log: "target/test-usb-qemu.log",
+            index: 0,
             xhci: None,
             usb_kbd: false,
             usb_hub: false,
             extra_serial: None,
         },
         UsbTestScenario {
+            id: "nec",
             name: "BOT nec-usb-xhci",
             log: "target/test-usb-nec.log",
+            index: 1,
             xhci: Some("nec"),
             usb_kbd: false,
             usb_hub: false,
             extra_serial: None,
         },
         UsbTestScenario {
+            id: "kbd",
             name: "BOT + teclado HID",
             log: "target/test-usb-kbd.log",
+            index: 2,
             xhci: None,
             usb_kbd: true,
             usb_hub: false,
             extra_serial: Some("kbd=true"),
         },
         UsbTestScenario {
+            id: "hub",
             name: "BOT hub + teclado HID",
             log: "target/test-usb-hub.log",
+            index: 3,
             xhci: None,
             usb_kbd: true,
             usb_hub: true,
@@ -1063,23 +1105,49 @@ pub fn run_usb() {
         },
     ];
 
-    for esc in escenarios {
-        let serial = root.join(esc.log);
-        let _ = std::fs::remove_file(&serial);
-        let ok = paso(&format!("USB: {}", esc.name), &mut fallos, || {
-            run_usb_scenario(&img, &data, &models, &serial, esc)
-        })
-        .is_ok();
-        if !ok {
-            eprintln!("      ver log serie: {}", serial.display());
-        }
-    }
+    let jobs = test_jobs();
+    let accel = super::qemu_accel_mode();
+    println!("test-usb: QEMU accel={accel}");
+    println!("test-usb: hasta {jobs} escenarios en paralelo (SOSO_TEST_JOBS)");
 
-    if fallos > 0 {
-        eprintln!("\ntest-usb: {fallos} escenario(s) fallaron");
-        std::process::exit(1);
-    }
-    println!("\ntest-usb: todos los escenarios OK");
+    let pool = Arc::new(JobPool::new(jobs));
+    std::thread::scope(|scope| {
+        for esc in escenarios {
+            let report = Arc::clone(&report);
+            let pool = Arc::clone(&pool);
+            let img = img.clone();
+            let data = data.clone();
+            let models = models.clone();
+            let root = root.clone();
+            scope.spawn(move || {
+                let _permit = pool.acquire();
+                let serial = root.join(esc.log);
+                let _ = std::fs::remove_file(&serial);
+                let bios = copiar_imagen(&img, esc.id, "bios");
+                let data_img = copiar_imagen(&data, esc.id, "data");
+                let models_img = copiar_imagen(&models, esc.id, "models");
+                let nombre = format!("USB: {}", esc.name);
+                let ok = report
+                    .paso("usb", &nombre, || {
+                        run_usb_scenario(&bios, &data_img, &models_img, &serial, esc)
+                    })
+                    .is_ok();
+                if !ok {
+                    eprintln!("      ver log serie: {}", serial.display());
+                }
+            });
+        }
+    });
+
+    exit_resumen(if report.fallos() == 0 { 0 } else { 1 });
+}
+
+fn usb_ports(index: u8) -> (u16, u16, String) {
+    // Rango 228x/778x: no choca con shards (220x/770x) ni test-install (2242).
+    let ssh = 2280 + u16::from(index) * 10;
+    let echo = 7780 + u16::from(index) * 10;
+    let mac = format!("52:54:00:12:35:{:02x}", 0x10 + index);
+    (ssh, echo, mac)
 }
 
 fn run_usb_scenario(
@@ -1089,6 +1157,8 @@ fn run_usb_scenario(
     serial: &std::path::Path,
     esc: UsbTestScenario,
 ) -> Result<(), String> {
+    let (ssh_port, echo_port, mac) = usb_ports(esc.index);
+    let _env_guard = USB_ENV_LOCK.lock().unwrap();
     clear_usb_qemu_env();
     unsafe {
         std::env::set_var("SOSO_QEMU_LIVE", "1");
@@ -1104,7 +1174,19 @@ fn run_usb_scenario(
         }
     }
 
-    let mut qemu = lanzar_qemu_legacy(img, data, models, serial).map_err(|e| e.to_string())?;
+    let mut qemu = lanzar_qemu_legacy_ports(
+        img,
+        data,
+        models,
+        serial,
+        ssh_port,
+        echo_port,
+        &mac,
+    )
+    .map_err(|e| e.to_string())?;
+    drop(_env_guard);
+    clear_usb_qemu_env();
+
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(180))?;
 
     if let Some(patron) = esc.extra_serial {
@@ -1112,14 +1194,12 @@ fn run_usb_scenario(
         if !contenido.contains(patron) && !contenido.contains("teclado HID") {
             let _ = qemu.kill();
             let _ = qemu.wait();
-            clear_usb_qemu_env();
             return Err(format!("no apareció {patron:?} ni «teclado HID» en el log serie"));
         }
     }
 
     let _ = qemu.kill();
     let _ = qemu.wait();
-    clear_usb_qemu_env();
     Ok(())
 }
 

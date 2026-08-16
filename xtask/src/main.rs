@@ -767,6 +767,62 @@ pub(crate) fn qemu_smp() -> String {
     std::env::var("SOSO_QEMU_SMP").unwrap_or_else(|_| "1".into())
 }
 
+/// `/dev/kvm` legible por el usuario actual.
+pub(crate) fn kvm_usable() -> bool {
+    let kvm = Path::new("/dev/kvm");
+    kvm.exists()
+        && std::fs::OpenOptions::new()
+            .read(true)
+            .open(kvm)
+            .is_ok()
+}
+
+/// Acelerador QEMU: auto (`kvm` si hay `/dev/kvm`, si no TCG), o
+/// `SOSO_QEMU_ACCEL=kvm|tcg`.
+pub(crate) fn qemu_accel_mode() -> &'static str {
+    match std::env::var("SOSO_QEMU_ACCEL").as_deref() {
+        Ok("tcg") => "tcg",
+        Ok("kvm") => {
+            if kvm_usable() {
+                "kvm"
+            } else {
+                eprintln!("xtask: SOSO_QEMU_ACCEL=kvm pero /dev/kvm no usable; TCG");
+                "tcg"
+            }
+        }
+        Ok(other) => {
+            eprintln!("xtask: SOSO_QEMU_ACCEL={other} desconocido; auto");
+            if kvm_usable() {
+                "kvm"
+            } else {
+                "tcg"
+            }
+        }
+        Err(_) => {
+            if kvm_usable() {
+                "kvm"
+            } else {
+                "tcg"
+            }
+        }
+    }
+}
+
+pub(crate) fn apply_qemu_accel(qemu: &mut Command) {
+    if qemu_accel_mode() == "kvm" {
+        qemu.args(["-accel", "kvm"]);
+    }
+}
+
+/// Default de `SOSO_TEST_JOBS`: 4 con KVM, 2 en TCG.
+pub(crate) fn test_jobs_default() -> usize {
+    if qemu_accel_mode() == "kvm" {
+        4
+    } else {
+        2
+    }
+}
+
 /// `SOSO_QEMU_NVME=1`: añade un NVMe con la imagen de modelos (además de virtio).
 /// `SOSO_QEMU_NVME_IMG=<ruta>`: imagen raw para ese NVMe (p. ej. disco fake Linux).
 pub(crate) fn qemu_nvme() -> bool {
@@ -1162,6 +1218,7 @@ pub(crate) fn run_qemu(img: &Path, gdb: bool) {
         .args(["-cpu", "max"])
         .args(["-m", &qemu_mem()])
         .args(["-smp", &qemu_smp()]);
+    apply_qemu_accel(&mut qemu);
     apply_firmware(&mut qemu, img);
     qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
     apply_qemu_disks(&mut qemu, &data, &models);

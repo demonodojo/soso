@@ -164,12 +164,17 @@ cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 #   cargo run -q --release -p mkmodel-soso -- --moe target/tiny-moe-model
 #   cargo run --release -p soso-llm-core --features std --example hostrun -- target/tiny-moe-model @bos 4
 
-# End-to-end (builds, QEMU shards en paralelo, TCP, SSH, soso-llm, init test, reclaim, halt)
+# End-to-end (host tests ∥ build user/kernel, luego 4 shards QEMU en paralelo)
 cargo xtask test
 
-# Paralelismo (default 2 QEMU simultáneos; 1 = secuencial para depurar; 4 con KVM)
-SOSO_TEST_JOBS=4 cargo xtask test
+# QEMU: auto `-accel kvm` si /dev/kvm legible; forzar TCG para comparar:
+SOSO_QEMU_ACCEL=tcg cargo xtask test
+
+# Paralelismo QEMU (default 4 con KVM, 2 en TCG; 1 = secuencial para depurar)
 SOSO_TEST_JOBS=1 cargo xtask test
+
+# USB/xHCI: 4 escenarios en paralelo (mismo SOSO_TEST_JOBS, imágenes copiadas)
+cargo xtask test-usb
 
 # Logs por shard: target/test-{llm-dense,llm-moe,sys,reclaim}-serial.log
 # Imágenes copiadas: target/test-{shard}-{bios,data,models}.img
