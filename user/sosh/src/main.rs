@@ -1,6 +1,11 @@
 //! sosh: la shell de soso. Pipes (`|`) y redirecciones (`<`, `>`, `>>`).
 //! Una línea puede ser un pipeline de comandos de /bin, más los builtins
-//! `exit` y `help`.
+//! `exit`, `help`, `cd`, `pwd` y `ask`.
+//!
+//! `ask` es el único que se resuelve **antes** de tokenizar: todo lo que va
+//! detrás es el texto de la pregunta, con sus comillas, sus tildes y sus `|` o
+//! `>` si los lleva. Cualquier otro camino los interpretaría como pipe o
+//! redirección, y no hay forma de escaparlos en esta shell.
 
 #![no_std]
 #![no_main]
@@ -10,50 +15,26 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use libsoso::linea::Lector;
 use libsoso::{abi, errno_str, print, println, sys};
 
 libsoso::entry!(main);
 
 const PROMPT: &str = "$ ";
+/// El binario que atiende `ask`: la inferencia vive donde ya estaba.
+const LLM: &str = "/bin/soso-llm";
 
 fn main(_args: &str) -> u8 {
     println!("sosh — escribe 'help' para la ayuda");
-    let mut line = [0u8; 256];
-    let mut len = 0usize;
-    print!("{PROMPT}");
+    let mut lector = Lector::new();
     loop {
-        let mut buf = [0u8; 64];
-        let n = sys::read(0, &mut buf);
-        if n <= 0 {
-            continue;
-        }
-        for &c in &buf[..n as usize] {
-            match c {
-                b'\r' | b'\n' => {
-                    println!();
-                    let cmd = core::str::from_utf8(&line[..len]).unwrap_or("");
-                    if let Some(code) = ejecutar(cmd) {
-                        return code;
-                    }
-                    len = 0;
-                    print!("{PROMPT}");
-                }
-                0x08 | 0x7f => {
-                    if len > 0 {
-                        len -= 1;
-                        print!("\x08 \x08");
-                    }
-                }
-                0x20..=0x7e if len < line.len() => {
-                    line[len] = c;
-                    len += 1;
-                    // El eco de la tecla también por `write_all`: si el pipe está
-                    // lleno, un `write` suelto devuelve 0 y el carácter se pierde
-                    // de la pantalla sin que nada lo diga.
-                    let _ = sys::write_all(1, &[c]);
-                }
-                _ => {}
-            }
+        print!("{PROMPT}");
+        let Some(cmd) = lector.siguiente() else {
+            // Ctrl-D: salir como con `exit`.
+            return 0;
+        };
+        if let Some(code) = ejecutar(&cmd) {
+            return code;
         }
     }
 }
@@ -292,11 +273,63 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
     None
 }
 
+fn ayuda() {
+    println!("builtins: exit [código], help, cd, pwd, ask");
+    println!("ask:      ask <pregunta>  — el texto va literal al modelo");
+    println!("          ask             — modo interactivo (Ctrl-D o «salir»)");
+    println!("          /bin/ask-modelo — elegir el modelo que usa ask");
+    println!("comandos: ELF de /bin o ruta absoluta");
+    println!("pipes:    cmd1 | cmd2 | cmd3");
+    println!("redirect: cmd > fichero, cmd >> fichero, cmd < fichero");
+    println!("ojo:      ask no admite pipes ni redirecciones, justamente para");
+    println!("          que `|` y `>` puedan formar parte de la pregunta");
+}
+
+/// Si `line` es `cmd` o empieza por `cmd `, devuelve el resto **sin tocar**
+/// (solo se recorta el espacio del final, que sobra siempre).
+fn resto_de<'a>(cmd: &str, line: &'a str) -> Option<&'a str> {
+    if line == cmd {
+        return Some("");
+    }
+    line.strip_prefix(cmd)
+        .filter(|r| r.starts_with(' '))
+        .map(|r| r[1..].trim_end())
+}
+
+/// Lanza `/bin/soso-llm ask <texto>` heredando la tty: el hijo escribe la
+/// respuesta y, si no hay texto, se queda con el terminal para su propio REPL.
+fn ejecutar_ask(texto: &str) -> Option<u8> {
+    let args = if texto.is_empty() {
+        "ask".to_string()
+    } else {
+        format!("ask {texto}")
+    };
+    let pid = sys::spawn(LLM, &args);
+    if pid < 0 {
+        println!("sosh: ask: {} ({LLM})", errno_str(pid));
+        return None;
+    }
+    match sys::wait() {
+        Ok((_, code)) if code != 0 => println!("sosh: [ask salió con código {code}]"),
+        Ok(_) => {}
+        Err(e) => println!("sosh: ask: wait: {}", errno_str(e)),
+    }
+    None
+}
+
 /// Ejecuta una línea. Some(código) = salir de la shell.
 fn ejecutar(line: &str) -> Option<u8> {
     let line = line.trim();
     if line.is_empty() {
         return None;
+    }
+
+    // `ask` va antes que el tokenizador a propósito: el resto de la línea es
+    // texto para el modelo, no una expresión de la shell. Si pasara por
+    // `tokenize`, un `¿2 > 1?` se leería como redirección a un fichero `1?` y
+    // las comillas quedarían dentro de las palabras.
+    if let Some(texto) = resto_de("ask", line) {
+        return ejecutar_ask(texto);
     }
 
     let tokens = tokenize(line);
@@ -316,10 +349,7 @@ fn ejecutar(line: &str) -> Option<u8> {
         match cmds[0].prog.as_str() {
             "exit" if cmds[0].args.is_empty() => return Some(0),
             "help" if cmds[0].args.is_empty() => {
-                println!("builtins: exit [código], help, cd, pwd");
-                println!("comandos: ELF de /bin o ruta absoluta");
-                println!("pipes:    cmd1 | cmd2 | cmd3");
-                println!("redirect: cmd > fichero, cmd >> fichero, cmd < fichero");
+                ayuda();
                 return None;
             }
             "cd" => {
@@ -353,10 +383,7 @@ fn ejecutar(line: &str) -> Option<u8> {
         match cmds[0].prog.as_str() {
             "exit" => return Some(0),
             "help" => {
-                println!("builtins: exit [código], help, cd, pwd");
-                println!("comandos: ELF de /bin o ruta absoluta");
-                println!("pipes:    cmd1 | cmd2 | cmd3");
-                println!("redirect: cmd > fichero, cmd >> fichero, cmd < fichero");
+                ayuda();
                 return None;
             }
             _ => {}

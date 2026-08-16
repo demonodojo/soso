@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+mod ask;
 mod cuda_host;
 mod distributed;
 mod gpu;
@@ -16,6 +17,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use ask::{resto_tras, run_ask};
 use distributed::{crc_bytes, default_keepalive, default_timeouts, DistributedConfig};
 use libsoso::{println, sys};
 use pool::ThreadPool;
@@ -129,6 +131,13 @@ struct ModelBundle {
 }
 
 fn main(args: &str) -> u8 {
+    // `ask` se resuelve sobre el string CRUDO, antes de trocear: todo lo que
+    // va detrás es la pregunta, con sus comillas, sus tildes y sus `|` o `>`.
+    // Es la única forma de que el texto llegue tal como se escribió, y por eso
+    // sosh lo desvía aquí sin pasarlo por su tokenizador.
+    if let Some(texto) = resto_tras("ask", args) {
+        return run_ask(texto);
+    }
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.first() == Some(&"node") || parts.first() == Some(&"worker") {
         return run_node_cmd(&parts);
@@ -246,6 +255,7 @@ fn main(args: &str) -> u8 {
     println!("    [--trunk-frac <0-100>] [--ring-slots <1|2>]");
     println!("  soso-llm node <modelo> --listen <puerto> --layers <start>:<end>");
     println!("  soso-llm worker ...  (alias de node)");
+    println!("  soso-llm ask <pregunta>   (texto literal; lo normal es usar `ask`)");
     1
 }
 
@@ -593,6 +603,18 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
     }
 }
 
+/// Modelo cargado y listo para generar.
+///
+/// Existe porque el REPL de `ask` pregunta varias veces seguidas: lo caro es
+/// cargar (disco), no generar, y antes las dos cosas estaban pegadas en la
+/// misma función. `gpu_ref` no se guarda aquí — sería autorreferencial: se
+/// construye en cada generación desde `sys_gpu`.
+struct Sesion {
+    bundle: ModelBundle,
+    pool: ThreadPool,
+    sys_gpu: Option<gpu::SysGpu>,
+}
+
 fn run_model(
     name: &str,
     prompt: &str,
@@ -602,28 +624,45 @@ fn run_model(
     mem_plan: MemoryPlanConfig,
 ) -> u8 {
     let io0 = read_iostat();
-    let t_carga = sys::uptime_ms();
-    let num_layers = read_num_layers(name).unwrap_or(4);
-    let mut bundle = match load_model(name, PipelineRole::Full, 0, num_layers) {
-        Ok(b) => b,
+    let mut sesion = match preparar_sesion(name, force_cpu, mem_plan, true) {
+        Ok(s) => s,
         Err(c) => return c,
     };
+    generar(&mut sesion, prompt, max_new, &mut sampler, true, Some(&io0))
+}
+
+/// Carga el modelo y decide planificador, backend y workers.
+///
+/// `verboso` apaga el diagnóstico entero: `ask` quiere la respuesta y nada
+/// más, y `soso-llm run` sigue contándolo todo.
+fn preparar_sesion(
+    name: &str,
+    force_cpu: bool,
+    mem_plan: MemoryPlanConfig,
+    verboso: bool,
+) -> Result<Sesion, u8> {
+    let io0 = read_iostat();
+    let t_carga = sys::uptime_ms();
+    let num_layers = read_num_layers(name).unwrap_or(4);
+    let mut bundle = load_model(name, PipelineRole::Full, 0, num_layers)?;
     // La carga en frío va aparte de tok/s: `generado` sólo cronometra el
     // decode, y el disco se gasta casi entero antes de que ese reloj arranque.
     // Medirlas juntas es lo que hacía invisible el coste de E/S.
     let carga_ms = (sys::uptime_ms() - t_carga).max(0) as u64;
     let io_carga = read_iostat();
-    println!(
-        "soso-llm: carga en frío — {} ms, {} peticiones de disco, {} bloques ({} ms de disco)",
-        carga_ms,
-        io_carga.peticiones.saturating_sub(io0.peticiones),
-        io_carga.bloques.saturating_sub(io0.bloques),
-        io_carga.nanos.saturating_sub(io0.nanos) / 1_000_000,
-    );
-    println!(
-        "soso-llm: modelo {} ({} capas, hidden={})",
-        bundle.rt.manifest.name, bundle.rt.manifest.num_layers, bundle.rt.manifest.hidden_dim
-    );
+    if verboso {
+        println!(
+            "soso-llm: carga en frío — {} ms, {} peticiones de disco, {} bloques ({} ms de disco)",
+            carga_ms,
+            io_carga.peticiones.saturating_sub(io0.peticiones),
+            io_carga.bloques.saturating_sub(io0.bloques),
+            io_carga.nanos.saturating_sub(io0.nanos) / 1_000_000,
+        );
+        println!(
+            "soso-llm: modelo {} ({} capas, hidden={})",
+            bundle.rt.manifest.name, bundle.rt.manifest.num_layers, bundle.rt.manifest.hidden_dim
+        );
+    }
 
     let mut gpu = abi::GpuInfo::default();
     let _ = sys::gpu_info(&mut gpu);
@@ -637,84 +676,103 @@ fn run_model(
         mem_plan,
     );
     bundle.rt.set_planner(planner);
-    if let Some(pl) = bundle.rt.planner.as_ref() {
-        let st = pl.stats();
-        println!(
-            "soso-llm: planificador — presupuesto pesos {} KiB, modelo {} KiB, capas CPU/GPU/remoto {}/{}/{}",
-            st.weight_budget_bytes / 1024,
-            st.model_weight_bytes / 1024,
-            st.cpu_layers,
-            st.gpu_layers,
-            st.remote_layers,
-        );
-        println!(
-            "soso-llm: streaming — working-set {} capas, ventana KV {} tokens (LayerKV+StreamingLLM), KV {} H2O={} sparse={}",
-            st.resident_layers,
-            st.kv_window_tokens,
-            if st.kv_dtype_i8 != 0 { "int8" } else { "f16" },
-            st.h2o_enabled,
-            st.sparse_attn,
-        );
-        println!(
-            "soso-llm: memoria — libre {} KiB, reclaimable {} KiB",
-            mem.free_bytes() / 1024,
-            mem.reclaimable_bytes() / 1024,
-        );
-        println!("soso-llm: plan memoria — {}", pl.memory_plan_summary());
-        let wc = pl.weight_classes();
-        println!(
-            "soso-llm: pesos — tronco {} KiB, expertos {} KiB, siempre-residente {} KiB",
-            wc.trunk_bytes / 1024,
-            wc.routed_expert_bytes / 1024,
-            wc.always_resident_bytes / 1024,
-        );
+    if verboso {
+        if let Some(pl) = bundle.rt.planner.as_ref() {
+            let st = pl.stats();
+            println!(
+                "soso-llm: planificador — presupuesto pesos {} KiB, modelo {} KiB, capas CPU/GPU/remoto {}/{}/{}",
+                st.weight_budget_bytes / 1024,
+                st.model_weight_bytes / 1024,
+                st.cpu_layers,
+                st.gpu_layers,
+                st.remote_layers,
+            );
+            println!(
+                "soso-llm: streaming — working-set {} capas, ventana KV {} tokens (LayerKV+StreamingLLM), KV {} H2O={} sparse={}",
+                st.resident_layers,
+                st.kv_window_tokens,
+                if st.kv_dtype_i8 != 0 { "int8" } else { "f16" },
+                st.h2o_enabled,
+                st.sparse_attn,
+            );
+            println!(
+                "soso-llm: memoria — libre {} KiB, reclaimable {} KiB",
+                mem.free_bytes() / 1024,
+                mem.reclaimable_bytes() / 1024,
+            );
+            println!("soso-llm: plan memoria — {}", pl.memory_plan_summary());
+            let wc = pl.weight_classes();
+            println!(
+                "soso-llm: pesos — tronco {} KiB, expertos {} KiB, siempre-residente {} KiB",
+                wc.trunk_bytes / 1024,
+                wc.routed_expert_bytes / 1024,
+                wc.always_resident_bytes / 1024,
+            );
+        }
     }
-    let mut sys_gpu = if force_cpu {
-        None
-    } else {
-        gpu::SysGpu::new()
-    };
+    let sys_gpu = if force_cpu { None } else { gpu::SysGpu::new() };
     // El `present` del kernel no basta para decidir: un dispositivo puede aceptar
     // búferes y no ejecutar nada (iGPU Intel), y entonces `SysGpu::new` dice no.
     // Anunciar "GPU detectada" mirando sólo `present` era prometer un offload que
     // no iba a ocurrir — y con el dispositivo software, además, mentir.
     if force_cpu {
-        println!("soso-llm: backend CPU (--cpu)");
+        if verboso {
+            println!("soso-llm: backend CPU (--cpu)");
+        }
         bundle.rt.set_backend(Backend::Cpu);
     } else if let Some(ref g) = sys_gpu {
-        println!(
-            "soso-llm: dispositivo de cómputo «{}» (fase {}), VRAM libre {} bytes",
-            g.device_name(),
-            g.phase(),
-            gpu.vram_free
-        );
+        if verboso {
+            println!(
+                "soso-llm: dispositivo de cómputo «{}» (fase {}), VRAM libre {} bytes",
+                g.device_name(),
+                g.phase(),
+                gpu.vram_free
+            );
+        }
         bundle.rt.set_backend(Backend::Auto);
         bundle.rt.tiers.vram_budget = gpu.vram_free as usize;
         if let Some(pl) = bundle.rt.planner.as_mut() {
             pl.set_vram_free(gpu.vram_free);
         }
     } else if gpu.present != 0 {
-        println!(
-            "soso-llm: hay GPU («{}») pero no ejecuta kernels; backend CPU",
-            libsoso::str_hasta_nul(&gpu.name)
-        );
+        if verboso {
+            println!(
+                "soso-llm: hay GPU («{}») pero no ejecuta kernels; backend CPU",
+                libsoso::str_hasta_nul(&gpu.name)
+            );
+        }
         bundle.rt.set_backend(Backend::Cpu);
     } else {
-        println!("soso-llm: backend CPU");
+        if verboso {
+            println!("soso-llm: backend CPU");
+        }
         bundle.rt.set_backend(Backend::Cpu);
     }
 
-    let mut gpu_ref: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = sys_gpu
-        .as_mut()
-        .map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
-
     let pool = ThreadPool::new();
-    println!("soso-llm: workers={}", pool.workers());
-    let par: Option<&dyn RowParallel> = if pool.workers() > 1 {
-        Some(&pool)
-    } else {
-        None
-    };
+    if verboso {
+        println!("soso-llm: workers={}", pool.workers());
+    }
+    Ok(Sesion {
+        bundle,
+        pool,
+        sys_gpu,
+    })
+}
+
+/// Genera la respuesta a `prompt` sobre una sesión ya cargada, en streaming.
+///
+/// `io0` es la marca de E/S desde la que contar (la de antes de cargar, para
+/// que `soso-llm run` siga informando de la carga y el decode juntos); `None`
+/// omite esa línea.
+fn generar(
+    sesion: &mut Sesion,
+    prompt: &str,
+    max_new: usize,
+    sampler: &mut Sampler,
+    verboso: bool,
+    io0: Option<&abi::IoStat>,
+) -> u8 {
     let text = if prompt.is_empty() { "hola" } else { prompt };
     // `@bos` = prompt de un solo token BOS, igual que en el arnés de host
     // (`examples/hostrun.rs`). Aquí faltaba, así que `--prompt @bos` se
@@ -726,8 +784,18 @@ fn run_model(
     let prompt_tokens = if text == "@bos" {
         alloc::vec![1u32]
     } else {
-        bundle.tokenizer.encode(text)
+        sesion.bundle.tokenizer.encode(text)
     };
+    let par: Option<&dyn RowParallel> = if sesion.pool.workers() > 1 {
+        Some(&sesion.pool)
+    } else {
+        None
+    };
+    let mut gpu_ref: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = sesion
+        .sys_gpu
+        .as_mut()
+        .map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
+    let bundle = &mut sesion.bundle;
     let mut decoder = StreamDecoder::new();
     let t0 = sys::uptime_ms();
     let result = bundle.rt.generate_stream_planned(
@@ -735,7 +803,7 @@ fn run_model(
         &prompt_tokens,
         max_new,
         bundle.tokenizer.eos(),
-        &mut sampler,
+        sampler,
         |t| {
             let s = decoder.push(&bundle.tokenizer, t);
             if !s.is_empty() {
@@ -755,13 +823,18 @@ fn run_model(
                 libsoso::print!("{resto}");
             }
             println!();
+            if !verboso {
+                return 0;
+            }
             let n = tokens.len();
             let tok_s = n as f64 * 1000.0 / elapsed_ms as f64;
             println!(
                 "soso-llm: generado ({} tokens, {} ms, {:.2} tok/s)",
                 n, elapsed_ms, tok_s
             );
-            print_iostat(&io0);
+            if let Some(io0) = io0 {
+                print_iostat(io0);
+            }
             if let Some(pl) = bundle.rt.planner.as_ref() {
                 let st = pl.stats();
                 println!(
@@ -818,15 +891,17 @@ fn run_model(
             // Los pesos SUBIDOS frente a las llamadas es la cifra que dice si el
             // cacheo funciona: sin él eran una subida de la matriz entera por
             // llamada, y en el log no se veía nada raro.
-            if let Some(ref g) = sys_gpu {
+            if let Some(ref g) = sesion.sys_gpu {
                 g.print_diagnostics();
             }
             0
         }
         Err(()) => {
             println!("soso-llm: inferencia falló");
-            if let Some(ref g) = sys_gpu {
-                g.print_diagnostics();
+            if verboso {
+                if let Some(ref g) = sesion.sys_gpu {
+                    g.print_diagnostics();
+                }
             }
             1
         }

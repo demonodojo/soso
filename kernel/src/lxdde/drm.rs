@@ -11,6 +11,7 @@ pub struct LxDrmDevice {
 }
 
 struct GemObject {
+    #[allow(dead_code)]
     size: u64,
     handle: u32,
     data: Vec<u8>,

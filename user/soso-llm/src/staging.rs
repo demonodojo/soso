@@ -65,6 +65,11 @@ static mut STAGE: StageShared = StageShared {
 
 static mut SOURCE_PTR: usize = 0;
 
+/// ¿Hay ya un hilo de staging en este proceso? Va aparte del `spawned` de cada
+/// `StagingWorker` porque el hilo es único y sobrevive a la fuente que lo
+/// arrancó.
+static WORKER_VIVO: AtomicU32 = AtomicU32::new(0);
+
 fn store_shards(shards: &[String]) {
     let shared = unsafe { &mut *(&raw mut STAGE) };
     let n = shards.len().min(MAX_SHARDS);
@@ -157,16 +162,37 @@ impl StagingWorker {
         }
     }
 
+    /// Engancha esta fuente al hilo de staging, arrancándolo la primera vez.
+    ///
+    /// El hilo y `STAGE` son **del proceso**, no de este `StagedSource`: sólo
+    /// puede haber uno. Con `spawned` como campo de instancia, cargar un
+    /// segundo modelo en el mismo proceso (el `:modelo` del REPL de `ask`)
+    /// arrancaba otro worker sobre el mismo estado global y además reseteaba
+    /// `generation` a 0, que el worker vivo veía como un kick nuevo: dos hilos
+    /// prefetchando a la vez sobre el `BTreeMap` de la fuente, que no está
+    /// sincronizado. Salía como «inferencia falló», y a veces como page fault
+    /// en una dirección con pinta de cadena (`0x2f736c65646f6d2f` = «/models/»).
+    /// Nadie pone `shutdown` a 1 nunca, así que el hilo dura lo que el proceso
+    /// y reutilizarlo es lo correcto.
     pub fn attach(&mut self, source: *mut MmapTensorSource<SyscallMapper>) {
         self.publicar(source);
-        if !self.spawned {
-            let shared = unsafe { &mut *(&raw mut STAGE) };
-            shared.shutdown.store(0, Ordering::Release);
-            shared.generation.store(0, Ordering::Release);
-            shared.done.store(1, Ordering::Release);
-            if thread::spawn(worker_entry, 0).is_ok() {
-                self.spawned = true;
-            }
+        if self.spawned {
+            return;
+        }
+        if WORKER_VIVO.swap(1, Ordering::AcqRel) != 0 {
+            // Ya hay hilo de este proceso: reutilizarlo tal cual, sin tocar
+            // `generation` ni `done`.
+            self.spawned = true;
+            return;
+        }
+        let shared = unsafe { &mut *(&raw mut STAGE) };
+        shared.shutdown.store(0, Ordering::Release);
+        shared.generation.store(0, Ordering::Release);
+        shared.done.store(1, Ordering::Release);
+        if thread::spawn(worker_entry, 0).is_ok() {
+            self.spawned = true;
+        } else {
+            WORKER_VIVO.store(0, Ordering::Release);
         }
     }
 

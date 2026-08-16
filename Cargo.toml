@@ -6,6 +6,7 @@ members = [
     "crates/sosofs",
     "crates/sosomfs",
     "crates/soso-abi",
+    "crates/gptdisk",
     "crates/sosomodel",
     "crates/soso-llm-core",
     "crates/soso-gpu",

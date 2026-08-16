@@ -531,8 +531,12 @@ Ver guía completa: [`docs/L5c-on-box.md`](docs/L5c-on-box.md).
 | Placa | UEFI boot once desde USB — **no toca el NVMe con Linux** |
 | Placa | Log: `live: GPT`, `fs: sosofs live`, `fs: sosomfs live`, DHCP, SSH |
 | Placa | `soso-llm run …`; apagar y arrancar Linux habitual → intacto |
+| Placa | `soso-install list` → `soso-install <id> --yes` (instala en un NVMe dedicado, sin pasar por Linux) |
+| Placa | Reiniciar con el USB puesto → el shim registra `Boot####` «soso»; quitar USB y arrancar |
 | QEMU | `SOSO_QEMU_LIVE=1 cargo xtask run` valida la imagen sin placa |
+| QEMU | `cargo xtask test-install` valida la instalación nativa entera (3 arranques OVMF) |
 | Gap | ~~USB BOT read en placa~~ — implementado (`SOSO_QEMU_LIVE_USB=1` valida BOT) |
+| Gap | ~~Instalar sin volver a Linux~~ — implementado (`soso-install` + entrada UEFI del shim) |
 
 **Verificación L5c prep (QEMU, hecha):**
 

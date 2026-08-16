@@ -44,6 +44,7 @@ struct DriverReg {
     name: String,
     ids: Vec<LxPciDeviceId>,
     probe: extern "C" fn(*mut LxPciDev, *const LxPciDeviceId) -> i32,
+    #[allow(dead_code)]
     remove: Option<extern "C" fn(*mut LxPciDev)>,
 }
 
@@ -332,7 +333,6 @@ pub extern "C" fn lx_pci_get_drvdata(dev: *mut LxPciDev) -> *mut c_void {
     unsafe { (*dev).data as *mut c_void }
 }
 
-#[unsafe(no_mangle)]
 /// `pci_dev_id()` de Linux: bus en los bits altos, device/function en los bajos.
 /// GSP-RM lo quiere en `GspSystemInfo.nvDomainBusDeviceFunc`.
 #[unsafe(no_mangle)]

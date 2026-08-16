@@ -25,7 +25,6 @@ unsafe extern "C" {
     fn lx_testdrv_run();
     fn lx_e1000e_init_module() -> i32;
     fn lx_nouveau_init_module() -> i32;
-    fn lx_iwlwifi_init_module() -> i32;
 }
 
 /// Modo de la capa lx al arrancar.

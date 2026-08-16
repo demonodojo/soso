@@ -39,6 +39,7 @@ struct Runtime {
 
 static RUNTIME: Mutex<Option<Runtime>> = Mutex::new(None);
 
+#[allow(dead_code)]
 struct SwitchRequest {
     from_idx: usize,
     to_idx: usize,
@@ -48,6 +49,7 @@ struct SwitchRequest {
 
 unsafe impl Sync for SwitchRequest {}
 
+#[allow(dead_code)]
 static SWITCH: Mutex<Option<SwitchRequest>> = Mutex::new(None);
 
 pub fn init() {
@@ -64,12 +66,12 @@ pub fn init() {
 pub fn spawn_main(entry: fn()) {
     let mut rt = RUNTIME.lock();
     let rt = rt.as_mut().unwrap();
-    let mut stack = Box::new([0u8; STACK_SIZE]);
+    let stack = Box::new([0u8; STACK_SIZE]);
     let top = stack.as_ptr() as u64 + STACK_SIZE as u64;
     let mut sp = top & !15;
     sp -= 8;
     unsafe {
-        *(sp as *mut u64) = fiber_entry as u64;
+        *(sp as *mut u64) = fiber_entry as *const () as u64;
         sp -= 8;
         *(sp as *mut u64) = entry as u64;
         for _ in 0..6 {
@@ -84,6 +86,7 @@ pub fn spawn_main(entry: fn()) {
     });
 }
 
+#[allow(dead_code)]
 pub fn poll() {
     loop {
         let (from_idx, to_idx, from_ctx, to_ctx) = {
@@ -172,7 +175,7 @@ pub fn unblock_all() {
     }
 }
 
-extern "C" fn fiber_entry(entry: fn()) -> ! {
+fn fiber_entry(entry: fn()) -> ! {
     entry();
     {
         let mut rt = RUNTIME.lock();

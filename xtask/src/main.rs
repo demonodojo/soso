@@ -90,10 +90,13 @@ fn main() {
         "test-usb" => {
             test::run_usb();
         }
+        "test-install" => {
+            test_install::run();
+        }
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-usb | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
+                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
             );
             exit(2);
         }
@@ -112,6 +115,7 @@ mod lx_build;
 mod package_live;
 mod test;
 mod test_distributed;
+mod test_install;
 
 fn convert_gguf(args: &[String]) {
     let root = project_root();
@@ -147,7 +151,7 @@ pub(crate) fn firmware() -> Firmware {
 }
 
 /// Rutas típicas de OVMF; override con `SOSO_OVMF_CODE` / `SOSO_OVMF_VARS`.
-fn ovmf_paths() -> Option<(PathBuf, PathBuf)> {
+pub(crate) fn ovmf_paths() -> Option<(PathBuf, PathBuf)> {
     if let (Some(code), Some(vars)) = (
         std::env::var_os("SOSO_OVMF_CODE"),
         std::env::var_os("SOSO_OVMF_VARS"),
@@ -403,7 +407,21 @@ pub(crate) fn build_user() -> bool {
     let bin = root.join("rootfs/bin");
     std::fs::create_dir_all(&bin).expect("no se pudo crear rootfs/bin");
     let mut cambiado = false;
-    for prog in ["init", "sosh", "ls", "cat", "echo", "mkdir", "rm", "hexdump", "halt", "soso-llm", "soso-install", "soso-hf"] {
+    for prog in [
+        "init",
+        "sosh",
+        "ls",
+        "cat",
+        "echo",
+        "mkdir",
+        "rm",
+        "hexdump",
+        "halt",
+        "soso-llm",
+        "soso-install",
+        "soso-hf",
+        "ask-modelo",
+    ] {
         let src = out.join(prog);
         let dst = bin.join(prog);
         let igual = std::fs::read(&src).ok() == std::fs::read(&dst).ok();
@@ -457,8 +475,17 @@ pub(crate) fn mkfs_rootfs_with_profile(
         return path;
     }
     let pubkey = client_pubkey();
-    let fw = root.join("rootfs/lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin");
-    let disk_mib: u64 = if fw.exists() { 128 } else { 64 };
+    let fw_gb205 = root.join("rootfs/lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin");
+    let fw_ga102 = root.join("rootfs/lib/firmware/nvidia/ga102/gsp/bootloader-570.144.bin");
+    let fw_ga107 = root.join("rootfs/lib/firmware/nvidia/ga107/gsp/bootloader-570.144.bin");
+    let ampere = fw_ga102.exists() || fw_ga107.exists();
+    let blackwell = fw_gb205.exists();
+    // ga102 + gb205 duplican ~60 MiB de ucode; 128 MiB no basta para las dos familias.
+    let disk_mib: u64 = match (ampere, blackwell) {
+        (true, true) => 256,
+        (true, false) | (false, true) => 128,
+        (false, false) => 64,
+    };
     let status = Command::new("cargo")
         .current_dir(&root)
         .args(["run", "-q", "-p", "mkfs-soso", "--"])
@@ -597,6 +624,102 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
     path
 }
 
+/// Disco de modelos para el live USB: TinyLlama 1.1B Chat + `tiny` sintético (2 GiB).
+/// QEMU/tests siguen usando [`mkfs_models`] (sintéticos, 8 GiB).
+/// `SOSO_MODELS_DIR` sustituye el set por defecto (como en `mkfs_models`).
+pub(crate) fn mkfs_models_live(force: bool) -> PathBuf {
+    let root = project_root();
+    let path = root.join("target/soso-models-live.img");
+    let custom = std::env::var_os("SOSO_MODELS_DIR").map(PathBuf::from);
+
+    if let Some(ref model_src) = custom {
+        if !model_src.join("manifest.som").exists() {
+            eprintln!(
+                "xtask: SOSO_MODELS_DIR={} no contiene manifest.som",
+                model_src.display()
+            );
+            exit(1);
+        }
+        let size = std::env::var("SOSO_MODELS_SIZE").unwrap_or_else(|_| "2G".into());
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args([
+                "run",
+                "-q",
+                "--release",
+                "-p",
+                "mkfs-sosomfs",
+                "--",
+            ])
+            .arg(model_src)
+            .arg(&path)
+            .arg("--size")
+            .arg(&size)
+            .status()
+            .expect("mkfs-sosomfs live");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
+        return path;
+    }
+
+    let tinyllama = root.join("target/tinyllama-model");
+    if !tinyllama.join("manifest.som").exists() {
+        eprintln!("xtask: falta target/tinyllama-model (manifest.som)");
+        eprintln!("  cargo xtask fetch-hf TinyLlama/TinyLlama-1.1B-Chat-v1.0");
+        exit(1);
+    }
+
+    let tiny = root.join("target/tiny-model");
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args(["run", "-q", "--release", "-p", "mkmodel-soso", "--"])
+        .arg(&tiny)
+        .status()
+        .expect("mkmodel-soso tiny (live)");
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+
+    let vieja = path
+        .metadata()
+        .and_then(|m| m.modified())
+        .map(|img| {
+            newest_mtime(&tinyllama) > img || newest_mtime(&tiny) > img
+        })
+        .unwrap_or(true);
+    if path.exists() && !force && !vieja {
+        return path;
+    }
+
+    let size = std::env::var("SOSO_MODELS_SIZE").unwrap_or_else(|_| "2G".into());
+    println!(
+        "package-usb-live: modelos tinyllama + tiny ({})",
+        size
+    );
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args([
+            "run",
+            "-q",
+            "--release",
+            "-p",
+            "mkfs-sosomfs",
+            "--",
+        ])
+        .arg(&tinyllama)
+        .arg(&tiny)
+        .arg(&path)
+        .arg("--size")
+        .arg(&size)
+        .status()
+        .expect("mkfs-sosomfs live");
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+    path
+}
+
 /// Regenera ambos discos (rootfs + modelos).
 fn mkfs(force: bool) -> (PathBuf, PathBuf) {
     (mkfs_rootfs(force), mkfs_models(force))
@@ -693,6 +816,11 @@ pub(crate) fn qemu_usb_kbd() -> bool {
     env_flag("SOSO_QEMU_USB_KBD")
 }
 
+/// `SOSO_QEMU_USB_HUB=1`: storage/kbd detrás de `usb-hub` en xHCI.
+pub(crate) fn qemu_usb_hub() -> bool {
+    env_flag("SOSO_QEMU_USB_HUB")
+}
+
 /// `SOSO_QEMU_USB_HOST=VID:PID` — passthrough USB (hex, con o sin `0x`).
 pub(crate) fn qemu_usb_host() -> Option<(u16, u16)> {
     let spec = std::env::var("SOSO_QEMU_USB_HOST").ok()?;
@@ -742,8 +870,9 @@ fn pack_nvidia_firmware(root: &Path) {
     if !script.exists() {
         return;
     }
-    let fw_dst = root.join("rootfs/lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin");
-    if fw_dst.exists() {
+    let fw_gb205 = root.join("rootfs/lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin");
+    let fw_ga107 = root.join("rootfs/lib/firmware/nvidia/ga107/gsp/bootloader-570.144.bin");
+    if fw_gb205.exists() || fw_ga107.exists() {
         return;
     }
     let status = Command::new("bash")
@@ -752,7 +881,9 @@ fn pack_nvidia_firmware(root: &Path) {
         .status();
     match status {
         Ok(s) if s.success() => {}
-        _ => println!("xtask: aviso — ejecutar ./scripts/l6-pack-firmware.sh para GSP gb205"),
+        _ => println!(
+            "xtask: aviso — ejecutar ./scripts/l6-pack-firmware.sh para GSP (gb205/ga107)"
+        ),
     }
 }
 
@@ -863,6 +994,7 @@ pub(crate) fn apply_qemu_usb(qemu: &mut Command) {
     let live_storage = qemu_live_usb() && qemu_live();
     let host = qemu_usb_host();
     let kbd = qemu_usb_kbd();
+    let hub = qemu_usb_hub();
     let need_xhci = live_storage || kbd || host.is_some();
 
     if need_xhci {
@@ -874,14 +1006,32 @@ pub(crate) fn apply_qemu_usb(qemu: &mut Command) {
         qemu.args(["-device", dev]);
         println!("xtask: xHCI ({model})");
 
+        let (storage_bus, storage_port) = if hub {
+            qemu.args(["-device", "usb-hub,bus=xhci.0,port=1"]);
+            println!("xtask: usb-hub en puerto 1 de xHCI");
+            ("xhci.0", "1.1")
+        } else {
+            ("xhci.0", "1")
+        };
+
         if live_storage {
-            qemu.args(["-device", "usb-storage,bus=xhci.0,drive=live0"]);
+            qemu.args([
+                "-device",
+                &format!("usb-storage,bus={storage_bus},port={storage_port},drive=live0"),
+            ]);
             let live = package_live::live_image_path();
             println!("xtask: usb-storage BOT → {}", live.display());
         }
         if kbd {
-            qemu.args(["-device", "usb-kbd,bus=xhci.0"]);
-            println!("xtask: usb-kbd en bus xHCI");
+            let kbd_port = if hub { "1.2" } else { "2" };
+            qemu.args([
+                "-device",
+                &format!("usb-kbd,bus={storage_bus},port={kbd_port}"),
+            ]);
+            println!(
+                "xtask: usb-kbd en bus xHCI{}",
+                if hub { " (hub puerto 2)" } else { "" }
+            );
         }
         if let Some((vid, pid)) = host {
             qemu.args([

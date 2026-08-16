@@ -124,12 +124,15 @@ void lx_nouveau_set_boot0(unsigned boot0, unsigned device_id)
 }
 
 /* VRAM heurística por SKU (en HW real la da nvkm_ram del fb). El RTX 3060 tiene
- * 12 GiB (GA106) o 8 GiB (3060 Ti/GA104); default Ampere = 12 GiB. */
+ * 12 GiB (GA106) o 8 GiB (3060 Ti/GA104); la 3050 Mobile (GA107) = 4 GiB. */
 static uint64_t vram_for_device(uint16_t dev_id)
 {
     enum nv_family fam = gsp_nv_family_of(gsp_nv_family_boot0(), dev_id);
     if (dev_id == 0x2f18u) {
         return 12ull * 1024ull * 1024ull * 1024ull;   /* 5070 Ti Mobile */
+    }
+    if (dev_id == GA107_DEVICE_ID) {
+        return 4ull * 1024ull * 1024ull * 1024ull;    /* 3050 Mobile */
     }
     if (fam == NV_FAM_AMPERE) {
         if (dev_id == 0x2486u || dev_id == 0x2489u) /* 3060 Ti (GA104) */
@@ -709,6 +712,13 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
               boot0, gsp_nv_family_device_id(),
               gsp_nv_family_name(gsp_nv_family_of(boot0, gsp_nv_family_device_id())),
               (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+
+    if (!gsp_mmio_alive()) {
+        g_phase = GSP_GONE;
+        lx_printk("nouveau-lx: GPU fuera del bus / sin D0 — NV_PMC_BOOT_0=0x%08x\n",
+                  boot0);
+        return -1;
+    }
 
     /* Esperar a que el firmware de la GPU acabe su arranque, como
      * `tu102_devinit_post` → `tu102_devinit_wait`. **Pero el registro depende de la

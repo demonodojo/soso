@@ -99,8 +99,9 @@ Guest network: DHCP at boot, fallback **10.0.2.15/24** in QEMU slirp. Port forwa
 - [x] **Classic USB package** — `cargo xtask package-usb` (UEFI + separate data/models images)
 - [x] **Live USB image** — `cargo xtask package-usb-live` (single GPT stick: ESP + sosofs + sosomfs); see [`docs/L5c-on-box.md`](docs/L5c-on-box.md)
 - [x] **Live USB + installer** — `sudo cargo xtask flash-usb-live /dev/sdX --yes` (`install-soso.sh` on SOSOINSTALL partition)
-- [x] **Dual-boot UEFI + Linux** — `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` (disco dedicado + entrada GRUB)
-- [x] **QEMU live mode** — `SOSO_QEMU_LIVE=1 cargo xtask run`
+- [x] **Native installer** — `soso-install` runs inside soso from the live stick: partition-aware safety checks, GPT relayout to the target disk and a UEFI `Boot####` entry registered by the boot shim. No Linux involved at any point
+- [x] **Dual-boot UEFI + Linux** — `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` (dedicated disk + GRUB entry), or `install-soso.sh --grub-only` as a fallback
+- [x] **QEMU live mode** — `SOSO_QEMU_LIVE=1 cargo xtask run`; full install flow: `cargo xtask test-install`
 
 ### lxdde and native GPU (L6 — G1→G5 GO on GB205)
 

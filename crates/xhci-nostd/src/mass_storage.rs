@@ -24,6 +24,10 @@ fn rw10_cdb(opcode: u8, lba: u32, count: u16) -> [u8; 10] {
     cdb
 }
 
+/// Bytes por transacción BOT. El límite duro es el campo de longitud del
+/// Normal TRB (17 bits); 64 KiB deja margen y es lo que QEMU acepta escribir.
+const MAX_XFER: usize = 64 * 1024;
+
 const CBW_SIG: u32 = 0x4342_5355;
 const CSW_SIG: u32 = 0x5342_5355;
 const MS_CLASS: u8 = 0x08;
@@ -70,8 +74,48 @@ pub struct MassStorage {
 }
 
 impl XhciController {
-    /// Escanea puertos y configura el primer stick BOT encontrado.
+    /// Escanea puertos (root y hubs) y configura HID + el primer stick BOT válido.
     pub fn probe_mass_storage(&mut self) -> Option<MassStorage> {
+        self.enumerate_usb_devices()
+    }
+
+    /// Tras SET_CONFIGURATION de un dispositivo BOT, deja la unidad lista y
+    /// guarda el primer mass storage válido (root o detrás de hub).
+    pub(crate) fn try_activate_mass_storage(
+        &mut self,
+        slot_id: u8,
+        config: &ParsedConfiguration,
+    ) {
+        if self.mass_storage.is_some() {
+            return;
+        }
+        let (iface, bulk_out, bulk_in) = match config.find_mass_storage() {
+            Some(t) => t,
+            None => return,
+        };
+        if !self.wait_unit_ready(slot_id, bulk_out.dci(), bulk_in.dci()) {
+            log::warn!("xhci: mass storage slot={slot_id} no quedó lista (TEST UNIT READY)");
+            return;
+        }
+        let Some(sectors) = self.read_capacity10(slot_id, bulk_out.dci(), bulk_in.dci()) else {
+            log::warn!("xhci: mass storage slot={slot_id} READ CAPACITY falló");
+            return;
+        };
+        log::info!(
+            "xhci: mass storage slot={slot_id} iface={iface} sectors={sectors}"
+        );
+        self.mass_storage = Some(MassStorage {
+            slot_id,
+            iface,
+            bulk_out_dci: bulk_out.dci(),
+            bulk_in_dci: bulk_in.dci(),
+            sectors,
+        });
+    }
+
+    /// Escanea puertos root con BOT dedicado (legacy; preferir `enumerate_usb_devices`).
+    #[allow(dead_code)]
+    fn probe_mass_storage_root_only(&mut self) -> Option<MassStorage> {
         self.drain_port_events();
         for port in 1..=self.max_ports() {
             let portsc = self.portsc(port);
@@ -244,6 +288,24 @@ impl XhciController {
         if buf.is_empty() || buf.len() % 512 != 0 || buf.len() / 512 > u16::MAX as usize {
             return false;
         }
+        // Un Normal TRB lleva la longitud en 17 bits: 0x20000 se desborda a
+        // cero, el dispositivo manda datos que nadie recoge y el endpoint se
+        // queda en Stall («CSW inválido sig=0»). Se trocea igual que la
+        // escritura, y así 128 KiB —el tamaño de petición de sosomfs— dejan de
+        // ser una bomba de relojería en el camino live.
+        if buf.len() > MAX_XFER {
+            let mut off = 0usize;
+            let mut cur_lba = lba;
+            while off < buf.len() {
+                let chunk = (buf.len() - off).min(MAX_XFER);
+                if !self.read_sectors10(ms, cur_lba, &mut buf[off..off + chunk]) {
+                    return false;
+                }
+                cur_lba += (chunk / 512) as u32;
+                off += chunk;
+            }
+            return true;
+        }
         let count = (buf.len() / 512) as u16;
         let cdb = rw10_cdb(SCSI_READ10, lba, count);
         let esperado = buf.len();
@@ -281,13 +343,11 @@ impl XhciController {
         if buf.is_empty() || buf.len() % 512 != 0 {
             return false;
         }
-        // BOT: trocear escrituras grandes (128 KiB lectura ok; escritura QEMU ≤64 KiB).
-        const MAX_WRITE: usize = 64 * 1024;
-        if buf.len() > MAX_WRITE {
+        if buf.len() > MAX_XFER {
             let mut off = 0usize;
             let mut cur_lba = lba;
             while off < buf.len() {
-                let chunk = (buf.len() - off).min(MAX_WRITE);
+                let chunk = (buf.len() - off).min(MAX_XFER);
                 if !self.write_sectors10(ms, cur_lba, &buf[off..off + chunk]) {
                     return false;
                 }
@@ -431,8 +491,24 @@ impl XhciController {
         None
     }
 
+    /// Búfer de rebote persistente para las transferencias bulk: se agranda si
+    /// hace falta y se reutiliza siempre. El asignador DMA del kernel no
+    /// libera, así que pedir uno por comando era una fuga proporcional a los
+    /// datos movidos.
+    fn bounce_buffer(&mut self, size: usize) -> (*mut u8, u64) {
+        let size = size.max(64);
+        if let Some((va, pa, cap)) = self.bounce {
+            if cap >= size {
+                return (va, pa);
+            }
+        }
+        let (va, pa) = unsafe { alloc_dma_buffer(size) };
+        self.bounce = Some((va, pa, size));
+        (va, pa)
+    }
+
     pub(crate) fn bulk_out(&mut self, slot_id: u8, dci: u8, data: &[u8]) -> bool {
-        let (va, phys) = unsafe { alloc_dma_buffer(data.len().max(64)) };
+        let (va, phys) = self.bounce_buffer(data.len());
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), va, data.len());
         }
@@ -444,7 +520,7 @@ impl XhciController {
     /// fase de datos y contesta el CSW directamente: sin el recuento no hay forma
     /// de distinguirlo de una lectura buena.
     pub(crate) fn bulk_in_len(&mut self, slot_id: u8, dci: u8, buf: &mut [u8]) -> Option<usize> {
-        let (va, phys) = unsafe { alloc_dma_buffer(buf.len().max(64)) };
+        let (va, phys) = self.bounce_buffer(buf.len());
         let n = self.bulk_xfer(slot_id, dci, phys, buf.len() as u32, true)? as usize;
         let n = n.min(buf.len());
         let got = unsafe { read_dma_buffer(va, buf.len()) };

@@ -1,4 +1,20 @@
-//! Instalador dual-boot desde soso live: clona el USB de arranque a un NVMe.
+//! Instalador nativo: clona el USB live a un NVMe y lo deja arrancable.
+//!
+//! Todo ocurre dentro de soso, sin volver a Linux. Tres pasos:
+//!
+//! 1. **Clonar** el disco de arranque sector a sector sobre el destino.
+//! 2. **Reparar la GPT** del destino: el clon describe el pendrive (cabecera de
+//!    respaldo a mitad de disco, partición de modelos del tamaño del USB y los
+//!    mismos GUID que el original), así que se recoloca al tamaño real y se
+//!    reparten GUID nuevos.
+//! 3. **Pedir la entrada de arranque UEFI**: el kernel no puede llamar a
+//!    `SetVariable` (no hay Runtime Services tras `ExitBootServices`), así que
+//!    la petición se deja en `SOSOBOOT.TXT` de la ESP del USB y la ejecuta el
+//!    shim en el siguiente arranque.
+//!
+//! El disco de Linux no se toca en ningún momento: el kernel rechaza escribir
+//! en el disco de arranque y solo admite NVMe como destino, y aquí además se
+//! rechaza cualquier disco con particiones de otro sistema.
 
 #![no_std]
 #![no_main]
@@ -6,16 +22,21 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
+use gptdisk::{Guid, Header, Plan};
 use libsoso::abi::{
-    DiskInfo, DISK_FLAG_BOOT, DISK_FLAG_EMPTY, DISK_FLAG_SOSO, DISK_KIND_NVME, DISK_KIND_USB,
+    DISK_FLAG_BOOT, DISK_FLAG_EMPTY, DISK_FLAG_SOSO, DISK_KIND_NVME, DISK_KIND_USB, DiskInfo,
     O_RDONLY,
 };
 use libsoso::{print, println, sys};
 
 libsoso::entry!(main);
 
-const CHUNK: usize = 32 * 1024;
+/// Coincide con `raw_disk::MAX_XFER`: cada syscall es una transferencia al
+/// dispositivo, ni troceada de más ni partida por el kernel.
+const CHUNK: usize = 128 * 1024;
+const SECTOR: usize = 512;
 
 fn main(args: &str) -> u8 {
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -25,6 +46,9 @@ fn main(args: &str) -> u8 {
     }
     if parts[0] == "list" {
         return cmd_list();
+    }
+    if parts[0] == "status" {
+        return cmd_status();
     }
 
     let mut yes = false;
@@ -61,15 +85,21 @@ fn help() {
         "soso-install — instalar soso en un disco NVMe (desde live USB)\n\
          \n\
          Uso:\n\
-           soso-install list\n\
+           soso-install list           # discos y qué hay en cada uno\n\
+           soso-install status         # estado de la entrada de arranque UEFI\n\
            soso-install <id> [--yes]\n\
            soso-install nvme1 [--yes]\n\
            soso-install <id> --force   # sobrescribir disco con otro SO\n\
          \n\
-         Tras instalar, reinicia en Linux y ejecuta install-soso.sh --grub-only\n\
-         (partición SOSOINSTALL) o cargo xtask install-disk --no-grub + update-grub."
+         Al terminar, reinicia con el USB puesto: el shim UEFI registra la\n\
+         entrada de arranque «soso». Después ya puedes quitar el USB.\n\
+         \n\
+         Plan B si tu firmware ignora entradas nuevas: desde Linux,\n\
+         install-soso.sh --grub-only (partición SOSOINSTALL)."
     );
 }
+
+// ------------------------------------------------------------------ listado
 
 fn cmd_list() -> u8 {
     let mut disks = [DiskInfo::default(); 8];
@@ -81,7 +111,11 @@ fn cmd_list() -> u8 {
     println!("id  nombre   sectores      tamano  contenido");
     for d in &disks[..n as usize] {
         let name = disk_name(d);
-        let boot = if d.flags & DISK_FLAG_BOOT != 0 { " boot" } else { "" };
+        let boot = if d.flags & DISK_FLAG_BOOT != 0 {
+            " boot"
+        } else {
+            ""
+        };
         let ro = if d.kind == DISK_KIND_USB { " ro" } else { "" };
         let mib = d.sectors / 2048;
         println!(
@@ -94,8 +128,43 @@ fn cmd_list() -> u8 {
             ro,
             boot
         );
+        // Enseñar las particiones es la mitad del trabajo del instalador: es lo
+        // que deja ver que un disco lleva un sistema ajeno antes de borrarlo.
+        for line in partition_lines(d) {
+            println!("      {line}");
+        }
     }
     0
+}
+
+/// Una línea por partición: `p2  linux     64 MiB  sosofs`.
+fn partition_lines(d: &DiskInfo) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some((hdr, entries)) = read_gpt(d.id) else {
+        return out;
+    };
+    for i in 0..hdr.num_entries as usize {
+        let Some(e) = gptdisk::entry(&entries, &hdr, i) else {
+            break;
+        };
+        if !gptdisk::entry_used(e) {
+            continue;
+        }
+        let first = gptdisk::entry_first_lba(e);
+        let last = gptdisk::entry_last_lba(e);
+        let mib = last.saturating_sub(first).saturating_add(1) / 2048;
+        let mut name = [0u8; 36];
+        let n = gptdisk::entry_name_ascii(e, &mut name);
+        let name = core::str::from_utf8(&name[..n]).unwrap_or("");
+        out.push(alloc::format!(
+            "p{}  {:<10} {:>7} MiB  {}",
+            i + 1,
+            gptdisk::type_label(&gptdisk::entry_type(e)),
+            mib,
+            name
+        ));
+    }
+    out
 }
 
 fn disk_name(d: &DiskInfo) -> String {
@@ -116,6 +185,94 @@ fn content_label(flags: u32) -> &'static str {
 fn disk_safe(d: &DiskInfo) -> bool {
     d.flags & DISK_FLAG_SOSO != 0 || d.flags & DISK_FLAG_EMPTY != 0
 }
+
+/// Particiones que delatan otro sistema operativo (swap, LVM, Windows, raíces
+/// Linux con GUID de tipo propio…). El live usa 0x8300 genérico, así que ese
+/// tipo por sí solo no cuenta.
+fn foreign_partitions(d: &DiskInfo) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some((hdr, entries)) = read_gpt(d.id) else {
+        return out;
+    };
+    for i in 0..hdr.num_entries as usize {
+        let Some(e) = gptdisk::entry(&entries, &hdr, i) else {
+            break;
+        };
+        if !gptdisk::entry_used(e) {
+            continue;
+        }
+        let t = gptdisk::entry_type(e);
+        if gptdisk::is_foreign(&t) {
+            out.push(alloc::format!("p{} {}", i + 1, gptdisk::type_label(&t)));
+        }
+    }
+    out
+}
+
+// ------------------------------------------------------------------ GPT
+
+/// Lee cabecera primaria y array de entradas de un disco.
+fn read_gpt(id: u32) -> Option<(Header, Vec<u8>)> {
+    let mut sec = [0u8; SECTOR];
+    if sys::disk_read(id, 1, &mut sec) < 0 {
+        return None;
+    }
+    let hdr = Header::parse(&sec).ok()?;
+    let bytes = hdr.entries_bytes();
+    let padded = bytes.div_ceil(SECTOR) * SECTOR;
+    let mut entries = vec![0u8; padded];
+    if sys::disk_read(id, hdr.entries_lba, &mut entries) < 0 {
+        return None;
+    }
+    entries.truncate(bytes);
+    Some((hdr, entries))
+}
+
+/// Adapta la GPT recién clonada al disco destino y devuelve el GUID de su ESP,
+/// que es lo que el shim necesita para localizarla en el siguiente arranque.
+fn fix_gpt(id: u32, disk_sectors: u64, seed: u64) -> Result<Guid, &'static str> {
+    let (mut hdr, mut entries) = read_gpt(id).ok_or("no pude leer la GPT clonada")?;
+    let bytes = hdr.entries_bytes();
+    entries.resize(bytes.div_ceil(SECTOR) * SECTOR, 0);
+
+    let plan: Plan =
+        gptdisk::relayout(&mut hdr, &mut entries, disk_sectors).map_err(|_| "relayout")?;
+    let mut rng = gptdisk::Rng::new(seed);
+    gptdisk::reseed_guids(&mut hdr, &mut entries, &mut rng);
+
+    let esp = gptdisk::entry(&entries, &hdr, 0)
+        .map(gptdisk::entry_unique)
+        .ok_or("sin partición 1")?;
+
+    // Respaldo primero y cabecera primaria al final: si se corta la corriente a
+    // medias, el disco es un destino dedicado y se reinstala, pero al menos la
+    // primaria vieja sigue describiendo algo coherente hasta el último paso.
+    let backup = gptdisk::render_backup(&hdr, &entries, &plan);
+    write_sectors(id, plan.backup_entries_lba, &entries)?;
+    write_sectors(id, plan.backup_header_lba, &backup)?;
+
+    let primary = gptdisk::render_primary(&hdr, &entries, &plan);
+    write_sectors(id, plan.primary_entries_lba, &entries)?;
+
+    let mut mbr = [0u8; SECTOR];
+    if sys::disk_read(id, 0, &mut mbr) < 0 {
+        return Err("no pude leer el MBR protector");
+    }
+    gptdisk::protective_mbr_fix(&mut mbr, disk_sectors);
+    write_sectors(id, 0, &mbr)?;
+
+    write_sectors(id, plan.primary_header_lba, &primary)?;
+    Ok(esp)
+}
+
+fn write_sectors(id: u32, lba: u64, buf: &[u8]) -> Result<(), &'static str> {
+    if sys::disk_write(id, lba, buf) < 0 {
+        return Err("escritura de la GPT falló");
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ instalar
 
 fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
     let mut disks = [DiskInfo::default(); 8];
@@ -147,20 +304,22 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         return 1;
     }
 
-    if !disk_safe(dst) {
+    let ajenas = foreign_partitions(dst);
+    if !disk_safe(dst) || !ajenas.is_empty() {
+        let name = disk_name(dst);
+        if !ajenas.is_empty() {
+            println!("soso-install: {name} tiene particiones de otro sistema:");
+            for p in &ajenas {
+                println!("    {p}");
+            }
+        } else {
+            println!("soso-install: destino {name} tiene contenido ajeno a soso");
+        }
         if !force {
-            println!(
-                "soso-install: destino {} tiene contenido ajeno a soso",
-                disk_name(dst)
-            );
-            println!("  ejecuta soso-install list para identificar discos");
-            println!(
-                "  para sobrescribir: soso-install {} --force",
-                disk_name(dst)
-            );
+            println!("  ejecuta soso-install list para ver qué hay en cada disco");
+            println!("  para sobrescribirlo de todos modos: soso-install {name} --force");
             return 1;
         }
-        let name = disk_name(dst);
         print!("ATENCIÓN: sobrescribir {name}. Escribe \"{name}\" para confirmar: ");
         let mut line = [0u8; 32];
         let nr = read_line(&mut line);
@@ -182,7 +341,7 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
             return 1;
         }
     };
-    let sectors = (bytes + 511) / 512;
+    let sectors = bytes.div_ceil(512);
     if dst.sectors < sectors {
         println!(
             "soso-install: destino pequeño ({} sectores, hacen falta {})",
@@ -215,35 +374,129 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         }
     }
 
-    let mut buf = [0u8; CHUNK];
+    if !clonar(src.id, dst.id, bytes) {
+        return 1;
+    }
+    println!("soso-install: copia terminada");
+
+    // Semilla de GUID: no hace falta calidad criptográfica, solo que el destino
+    // no acabe con los mismos identificadores que el pendrive del que salió.
+    let seed = (sys::uptime_ms() as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ dst.sectors
+        ^ (dst.id as u64) << 32;
+    let esp = match fix_gpt(dst.id, dst.sectors, seed) {
+        Ok(g) => g,
+        Err(e) => {
+            println!("soso-install: no pude reparar la GPT del destino: {e}");
+            println!("  el disco tiene los datos pero no arrancará; reinstala");
+            return 1;
+        }
+    };
+    println!(
+        "soso-install: GPT ajustada al disco ({} MiB) — ESP {esp}",
+        dst.sectors / 2048
+    );
+
+    println!();
+    pedir_arranque(&esp, dst);
+    0
+}
+
+fn clonar(src_id: u32, dst_id: u32, bytes: u64) -> bool {
+    // En el heap, no en la pila: la pila de usuario son 64 KiB.
+    let mut buf = vec![0u8; CHUNK];
     let mut lba = 0u64;
     let mut left = bytes as usize;
+    let mut last_pct = u64::MAX;
     while left > 0 {
-        let chunk = left.min(CHUNK);
-        let chunk = chunk / 512 * 512;
+        let chunk = left.min(CHUNK) / SECTOR * SECTOR;
         if chunk == 0 {
             break;
         }
-        if sys::disk_read(src.id, lba, &mut buf[..chunk]) < 0 {
+        if sys::disk_read(src_id, lba, &mut buf[..chunk]) < 0 {
             println!("soso-install: lectura falló en LBA {lba}");
-            return 1;
+            return false;
         }
-        if sys::disk_write(dst.id, lba, &buf[..chunk]) < 0 {
+        if sys::disk_write(dst_id, lba, &buf[..chunk]) < 0 {
             println!("soso-install: escritura falló en LBA {lba}");
-            return 1;
+            return false;
         }
-        lba += (chunk / 512) as u64;
+        lba += (chunk / SECTOR) as u64;
         left -= chunk;
-        if lba % 2048 == 0 {
-            let pct = (bytes as u64 - left as u64) * 100 / bytes;
+        let pct = (bytes - left as u64) * 100 / bytes;
+        if pct != last_pct && pct % 5 == 0 {
             println!("  {pct}%");
+            last_pct = pct;
         }
     }
-    println!("soso-install: copia terminada");
-    println!();
-    print_grub_instructions(dst);
+    true
+}
+
+// ------------------------------------------------------------ arranque UEFI
+
+const BOOTREQ_HEAD: &str = "SOSOBOOT v1";
+
+/// Deja la petición en `SOSOBOOT.TXT` de la ESP del USB. Lo lee el shim en el
+/// siguiente arranque, que sí está en contexto UEFI y puede tocar la NVRAM.
+fn pedir_arranque(esp: &Guid, dst: &DiskInfo) {
+    let payload = alloc::format!(
+        "{BOOTREQ_HEAD}\nINSTALL {esp}\ndisco {} id {}\n",
+        disk_name(dst),
+        dst.id
+    );
+    let r = sys::bootreq_write(payload.as_bytes());
+    if r < 0 {
+        println!("=== Falta un paso: hacer arrancable el disco ===");
+        println!(
+            "No pude escribir SOSOBOOT.TXT en la ESP del USB (errno {}).\n\
+             El disco está instalado, pero nadie ha registrado la entrada de\n\
+             arranque. Opciones:\n\
+           \x20 - elegir el disco directamente en el menú de arranque de la placa\n\
+           \x20   (F12 / Boot menu): la ESP tiene EFI\\BOOT\\BOOTX64.EFI\n\
+           \x20 - desde Linux: install-soso.sh --grub-only",
+            -r
+        );
+        return;
+    }
+    println!("=== Último paso: reinicia con el USB puesto ===");
+    println!(
+        "Petición de arranque anotada en SOSOBOOT.TXT (ESP del USB).\n\
+         \n\
+         1) Reinicia SIN quitar el pendrive.\n\
+         2) El shim UEFI registrará la entrada de arranque «soso» apuntando a\n\x20  \
+            la ESP {esp} del disco {}.\n\
+         3) Apaga, quita el USB y arranca: «soso» estará en el menú de la placa.\n\
+         \n\
+         Comprueba con: soso-install status",
+        disk_name(dst)
+    );
+}
+
+fn cmd_status() -> u8 {
+    let mut buf = [0u8; 512];
+    let n = sys::bootreq_read(&mut buf);
+    if n < 0 {
+        println!("soso-install: sin SOSOBOOT.TXT en la ESP (errno {})", -n);
+        return 1;
+    }
+    let text = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
+    let mut vacio = true;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        vacio = false;
+        println!("{line}");
+    }
+    if vacio {
+        println!("soso-install: sin petición de arranque pendiente");
+    }
     0
 }
+
+// ------------------------------------------------------------------ varios
 
 fn read_line(buf: &mut [u8]) -> i64 {
     let mut n = 0usize;
@@ -284,46 +537,4 @@ fn read_live_bytes() -> Option<u64> {
     }
     let s = core::str::from_utf8(&buf[..n as usize]).ok()?;
     s.trim().parse().ok()
-}
-
-fn print_grub_instructions(dst: &DiskInfo) {
-    println!("=== Siguiente paso (desde Linux) ===");
-    println!(
-        "Reinicia en Linux. Luego, con el USB conectado:\n\
-         \n\
-           sudo /media/$USER/SOSOINSTALL/install-soso.sh --grub-only\n\
-         \n\
-         (detecta la ESP de soso en el disco destino y añade entrada GRUB.)\n\
-         \n\
-         Disco destino: {} (id {}, ESP suele ser {}p1)",
-        disk_name(dst),
-        dst.id,
-        disk_name(dst)
-    );
-    if let Ok(text) = read_file("/etc/grub-linux.txt") {
-        println!();
-        print!("{text}");
-    }
-}
-
-fn read_file(path: &str) -> Result<String, i64> {
-    let fd = sys::open(path, O_RDONLY);
-    if fd < 0 {
-        return Err(fd);
-    }
-    let mut out = String::new();
-    let mut buf = [0u8; 512];
-    loop {
-        let n = sys::read(fd as u64, &mut buf);
-        if n < 0 {
-            let _ = sys::close(fd as u64);
-            return Err(n);
-        }
-        if n == 0 {
-            break;
-        }
-        out.push_str(core::str::from_utf8(&buf[..n as usize]).unwrap_or(""));
-    }
-    let _ = sys::close(fd as u64);
-    Ok(out)
 }

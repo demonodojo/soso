@@ -1,4 +1,9 @@
-Tras instalar desde soso live (soso-install), añade la entrada GRUB desde Linux:
+soso-install ya deja el disco arrancable por sí solo: registra una entrada UEFI
+«soso» en la NVRAM de la placa (lo hace el shim en el siguiente arranque del
+USB). No hace falta Linux para nada.
+
+Esto es solo el plan B, por si tu firmware ignora las entradas nuevas y prefieres
+arrancar soso desde el GRUB de Linux:
 
 sudo /media/$USER/SOSOINSTALL/install-soso.sh --grub-only /dev/nvme1n1
 

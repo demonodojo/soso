@@ -37,7 +37,6 @@ pub fn run(args: &[String]) {
 
     let root = super::project_root();
     super::build_user();
-    let _ = super::build_image();
     package_live::run();
 
     let live = package_live::live_image_path();

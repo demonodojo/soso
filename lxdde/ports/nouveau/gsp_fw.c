@@ -1,5 +1,6 @@
 /* G3: carga y staging GEM de firmware GSP. */
 #include "gsp_fw.h"
+#include "gsp_chip.h"
 #include "lx_emul.h"
 
 struct gsp_fw_slot {
@@ -11,6 +12,7 @@ struct gsp_fw_slot {
 
 static struct gsp_fw_blob g_blobs[GSP_FW_COUNT];
 static int g_loaded;
+static char g_ampere_paths[GSP_FW_COUNT][96];
 
 /* Blackwell arranca por FMC: bootloader + fmc + ucode. */
 static const struct gsp_fw_slot g_paths_blackwell[] = {
@@ -19,12 +21,18 @@ static const struct gsp_fw_slot g_paths_blackwell[] = {
     { "nvidia/gb205/gsp/gsp-570.144.bin", GSP_FW_UCODE, 1, 0 },
 };
 
-/* Ampere no tiene fmc: el ACR va por booter_load/booter_unload. */
-static const struct gsp_fw_slot g_paths_ampere[] = {
-    { "nvidia/ga102/gsp/bootloader-570.144.bin", GSP_FW_BOOTLOADER, 0, 1 },
-    { "nvidia/ga102/gsp/booter_load-570.144.bin", GSP_FW_BOOTER_LOAD, 0, 0 },
-    { "nvidia/ga102/gsp/booter_unload-570.144.bin", GSP_FW_BOOTER_UNLOAD, 0, 0 },
-    { "nvidia/ga102/gsp/gsp-570.144.bin", GSP_FW_UCODE, 1, 0 },
+struct gsp_ampere_slot {
+    enum gsp_fw_kind kind;
+    const char *leaf;
+    int is_elf;
+    int is_boot_nv;
+};
+
+static const struct gsp_ampere_slot g_ampere_slots[] = {
+    { GSP_FW_BOOTLOADER, "bootloader-570.144.bin", 0, 1 },
+    { GSP_FW_BOOTER_LOAD, "booter_load-570.144.bin", 0, 0 },
+    { GSP_FW_BOOTER_UNLOAD, "booter_unload-570.144.bin", 0, 0 },
+    { GSP_FW_UCODE, "gsp-570.144.bin", 1, 0 },
 };
 
 /* En este linux-firmware `gb205/gsp/gsp-*.bin` es un symlink al de ga102: cargar
@@ -32,8 +40,8 @@ static const struct gsp_fw_slot g_paths_ampere[] = {
 static const struct gsp_fw_slot *chip_paths(enum gsp_fw_chip chip, unsigned *count)
 {
     if (chip == GSP_FW_CHIP_AMPERE) {
-        *count = sizeof(g_paths_ampere) / sizeof(g_paths_ampere[0]);
-        return g_paths_ampere;
+        *count = 0;
+        return NULL;
     }
     *count = sizeof(g_paths_blackwell) / sizeof(g_paths_blackwell[0]);
     return g_paths_blackwell;
@@ -41,7 +49,9 @@ static const struct gsp_fw_slot *chip_paths(enum gsp_fw_chip chip, unsigned *cou
 
 static const char *chip_name(enum gsp_fw_chip chip)
 {
-    return chip == GSP_FW_CHIP_AMPERE ? "ga102" : "gb205";
+    if (chip == GSP_FW_CHIP_AMPERE)
+        return gsp_nv_ampere_chip_name(gsp_nv_family_device_id());
+    return "gb205";
 }
 
 static int blob_valid(const unsigned char *data, unsigned long len, const struct gsp_fw_slot *slot)
@@ -91,6 +101,61 @@ static int load_one(const struct gsp_fw_slot *slot, struct gsp_fw_blob *out)
     return 0;
 }
 
+static int load_ampere_one(const struct gsp_ampere_slot *desc, struct gsp_fw_blob *out)
+{
+    const char *primary = gsp_nv_ampere_chip_name(gsp_nv_family_device_id());
+    const char *fallback = "ga102";
+    const char *chips[2];
+    unsigned nchips = 0;
+    char path[96];
+    struct gsp_fw_slot slot;
+    unsigned i;
+    const char *leaf;
+
+    chips[nchips++] = primary;
+    if (primary != fallback)
+        chips[nchips++] = fallback;
+
+    slot.is_elf = desc->is_elf;
+    slot.is_boot_nv = desc->is_boot_nv;
+    for (i = 0; i < nchips; i++) {
+        {
+            const char *chip = chips[i];
+            unsigned pos = 0;
+            const char *prefix = "nvidia/";
+
+            while (*prefix && pos + 1u < sizeof(path))
+                path[pos++] = *prefix++;
+            while (*chip && pos + 1u < sizeof(path))
+                path[pos++] = *chip++;
+            if (pos + 5u < sizeof(path)) {
+                path[pos++] = '/';
+                path[pos++] = 'g';
+                path[pos++] = 's';
+                path[pos++] = 'p';
+                path[pos++] = '/';
+            }
+            leaf = desc->leaf;
+            while (*leaf && pos + 1u < sizeof(path))
+                path[pos++] = *leaf++;
+            path[pos] = '\0';
+        }
+        slot.path = path;
+        if (load_one(&slot, out) == 0) {
+            unsigned j;
+            char *stored = g_ampere_paths[desc->kind];
+
+            for (j = 0; j < sizeof(path) && path[j]; j++)
+                stored[j] = path[j];
+            if (j < sizeof(g_ampere_paths[0]))
+                stored[j] = '\0';
+            out->path = stored;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 int gsp_fw_load_all(enum gsp_fw_chip chip)
 {
     const struct gsp_fw_slot *paths;
@@ -109,12 +174,25 @@ int gsp_fw_load_all(enum gsp_fw_chip chip)
         g_blobs[i].gem_handle = 0;
         g_blobs[i].valid = 0;
     }
-    for (i = 0; i < count; i++) {
-        struct gsp_fw_blob *b = &g_blobs[paths[i].kind];
-        b->path = paths[i].path;
-        if (load_one(&paths[i], b) == 0) {
-            ok++;
-            lx_printk("nouveau-lx: fw %s (%lu bytes)\n", b->path, b->len);
+    if (chip == GSP_FW_CHIP_AMPERE) {
+        for (i = 0; i < sizeof(g_ampere_slots) / sizeof(g_ampere_slots[0]); i++) {
+            struct gsp_fw_blob *b = &g_blobs[g_ampere_slots[i].kind];
+
+            b->path = g_ampere_slots[i].leaf;
+            if (load_ampere_one(&g_ampere_slots[i], b) == 0) {
+                ok++;
+                lx_printk("nouveau-lx: fw %s (%lu bytes)\n", b->path, b->len);
+            }
+        }
+        count = sizeof(g_ampere_slots) / sizeof(g_ampere_slots[0]);
+    } else {
+        for (i = 0; i < count; i++) {
+            struct gsp_fw_blob *b = &g_blobs[paths[i].kind];
+            b->path = paths[i].path;
+            if (load_one(&paths[i], b) == 0) {
+                ok++;
+                lx_printk("nouveau-lx: fw %s (%lu bytes)\n", b->path, b->len);
+            }
         }
     }
     if (ok != count) {

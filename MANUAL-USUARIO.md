@@ -206,6 +206,7 @@ pipelines de esta sección **no funcionaban** aunque estuvieran documentados.
 | `cd <dir>` | Cambia el directorio de trabajo |
 | `pwd` | Imprime el directorio de trabajo actual |
 | `exit` | Cierra la shell (código de salida opcional, por defecto 0) |
+| `ask [pregunta]` | Habla con el LLM. Ver [ask](#ask--preguntarle-al-modelo) |
 
 Ejemplos:
 
@@ -217,6 +218,12 @@ cd ..                       # sube al directorio padre
 exit
 exit 1
 ```
+
+**`ask` es la excepción al parseo de arriba.** Se resuelve *antes* de trocear la
+línea, así que todo lo que va detrás es texto para el modelo: comillas, tildes,
+`|`, `>` y `<` incluidos. El precio es que `ask` no admite pipes ni
+redirecciones — que es justamente lo que permite que esos caracteres formen
+parte de la pregunta.
 
 ### Salir del sistema
 
@@ -298,6 +305,83 @@ Ejecuta inferencia greedy sobre modelos en `/models/<nombre>/`. Por defecto
 incluye **tiny** (denso), **tiny-moe** (MoE estilo Mixtral), **tiny-mla** (MLA sintético, 1 capa) y **tiny-latent-moe** (LatentMoE, 1 capa). Ver sección
 [Modelos LLM](#modelos-llm-soso-llm) para importar modelos y más detalle.
 
+### ask — preguntarle al modelo
+
+```sh
+ask ¿por qué el cielo es azul?
+ask                                # modo interactivo
+```
+
+Escribe la pregunta detrás y ya está: **el texto llega al modelo tal cual se
+escribió**, con comillas, tildes, `|`, `>` o lo que lleve. La respuesta sale por
+el terminal según se genera, sin una sola línea de diagnóstico (para eso está
+`soso-llm run`).
+
+Sin texto, `ask` abre su propio prompt y el modelo se carga **una sola vez** para
+toda la sesión, así que a partir de la segunda pregunta la respuesta empieza
+mucho antes:
+
+```
+$ ask
+ask: modelo tiny, máx 128 tokens
+ask: escribe la pregunta; «salir» o Ctrl-D para terminar
+?> ¿cuánto es 2 > 1?
+...
+?> salir
+$
+```
+
+Dentro del prompt, las órdenes empiezan por `:` para no chocar con el texto libre:
+
+| Orden | Efecto |
+|---|---|
+| `:modelos` | Lista los modelos y marca el que se está usando |
+| `:modelo <nombre>` | Cambia de modelo (lo recarga) |
+| `:max <n>` | Cambia el máximo de tokens por respuesta |
+| `:eco <texto>` | Devuelve el texto tal cual llegó, sin pasar por el modelo |
+| `salir`, `exit`, Ctrl-D | Volver a sosh |
+
+`:eco` sirve fuera del prompt igual (`ask :eco a|b>c "x"`) y es la forma rápida de
+comprobar que la shell no ha tocado nada.
+
+`ask` no lleva flags —todo lo que va detrás es la pregunta—, así que su
+configuración vive en **`/etc/llm.conf`**:
+
+```
+modelo=tiny
+max=128
+temp=0.7
+top_p=0.9
+```
+
+Si el fichero no está o el modelo no existe en `/models`, `ask` usa el primero
+que encuentre.
+
+### ask-modelo — elegir el modelo de `ask`
+
+```sh
+ask-modelo                  # lista los modelos y marca el actual
+ask-modelo tiny-moe         # lo fija en /etc/llm.conf
+```
+
+Escribe solo la clave `modelo=` y respeta el resto del fichero.
+
+Aviso con los modelos sintéticos: `tiny-moe` tiene un vocabulario de 64 tokens y
+el tokenizador de reserva es byte a byte, así que casi cualquier texto se le sale
+de rango. `ask` lo dice en vez de fallar sin explicación; usa `tiny` (vocabulario
+256) o un modelo importado de verdad.
+
+### soso-install — instalar soso en un disco
+
+```sh
+soso-install list          # discos y particiones de cada uno
+soso-install 3 --yes       # instalar en el disco con ese id
+soso-install status        # estado de la entrada de arranque UEFI
+```
+
+Solo tiene sentido arrancando desde el pendrive live. Ver
+[Instalar soso en un disco](#instalar-soso-en-un-disco-dual-boot-uefi).
+
 ---
 
 ## Estructura del disco
@@ -310,6 +394,7 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 ├── etc/
 │   ├── motd              # Mensaje de bienvenida
 │   ├── authorized_key    # Clave pública ed25519 autorizada (32 bytes)
+│   ├── llm.conf          # Modelo y límites que usa `ask` (ver ask-modelo)
 │   └── ssh_host_key      # Semilla de la host key del servidor SSH
 ├── models/       # Modelos LLM (disco sosomfs, solo lectura)
 │   ├── tiny/             # Modelo sintético denso (4 capas)
@@ -399,6 +484,20 @@ mcopy -i target/usb-live/soso-live.img@@$(sgdisk -i 1 target/usb-live/soso-live.
 
 Regenera la imagen live tras actualizar el kernel:
 `cargo xtask package-usb-live` (incluye el fichero pre-creado en la ESP).
+
+### Buzón de instalación (`SOSOBOOT.TXT`)
+
+Tercer fichero pre-creado en la ESP del pendrive, de 4 KiB. Es por donde
+`soso-install` le pide al shim UEFI que registre la entrada de arranque del
+disco recién instalado, y por donde el shim contesta. Se lee desde soso con
+`soso-install status`, y desde Linux montando la ESP:
+
+- `INSTALL <guid-de-la-ESP-destino>` — petición pendiente; se atiende en el
+  siguiente arranque del USB.
+- `DONE Boot0007 soso` — entrada creada y puesta la primera en `BootOrder`.
+- `ERROR …` — el shim no pudo (firmware que rechaza `SetVariable`, o la ESP
+  destino no aparece). El arranque del USB continúa igual: esto nunca lo
+  bloquea.
 
 ---
 
@@ -913,84 +1012,124 @@ TCG, no soso.
 
 ---
 
-## Dual-boot con Linux (GRUB, UEFI)
+## Instalar soso en un disco (dual-boot UEFI)
 
-Si tienes un **segundo disco vacío** (sin montar) y Linux arranca en **UEFI**, puedes
-instalar soso ahí y elegir entre Linux y soso en el menú GRUB al reiniciar.
+Si tienes un **segundo disco NVMe vacío** (o con una instalación previa de soso)
+y la máquina arranca en **UEFI**, puedes instalar soso ahí y elegir entre Linux
+y soso al encender. Lo normal es hacerlo **desde el propio soso live, sin pasar
+por Linux en ningún momento**.
 
 ### Requisitos
 
 | Requisito | Detalle |
 |-----------|---------|
 | Firmware | UEFI (no BIOS/Legacy en esta versión) |
-| Disco | Entero y sin montar (p. ej. `/dev/nvme1n1`, **no** el disco de Linux) |
-| Herramientas host | `dd`, `sgdisk`, `blkid`, `lsblk`, `findmnt` |
-| Permisos | `sudo` para escribir el disco y actualizar GRUB |
+| Disco destino | NVMe entero, vacío o con soso. **Nunca el disco de Linux** |
+| Origen | Pendrive live generado con `cargo xtask package-usb-live` |
 
-### Instalación
+soso solo sabe escribir en discos NVMe (`raw_disk::writable`) y el kernel
+rechaza cualquier escritura sobre el disco desde el que arrancó. El disco de
+Linux no se toca: ni su tabla de particiones, ni su ESP, ni GRUB.
 
-**Opción A — desde soso live (USB):**
+### Opción A — desde soso live, sin Linux (recomendada)
 
 ```sh
-# Tras arrancar desde USB live:
+# 1. Arranca desde el pendrive live y mira qué hay en cada disco:
 soso-install list
-soso-install nvme1 --yes
+# id  nombre   sectores      tamano  contenido
+#  0  usb          843776     412 MiB  soso ro boot
+#       p1  ESP             26 MiB  boot
+#       p2  linux          128 MiB
+#       p3  linux          257 MiB
+#  2  nvme0    1953525168  953869 MiB  OTRO
+#       p1  ESP            512 MiB
+#       p2  linux         900000 MiB
+#       p3  swap           16384 MiB
+#  3  nvme1       8388608    4096 MiB  vacio
 
-# Apagar, arrancar Linux (USB conectado), añadir GRUB:
-sudo /media/$USER/SOSOINSTALL/install-soso.sh --grub-only /dev/nvme1n1
+# 2. Instala en el disco vacío (aquí el id 3):
+soso-install 3 --yes
+
+# 3. Reinicia SIN quitar el pendrive: el shim UEFI registra la entrada
+#    de arranque «soso» en la NVRAM de la placa.
+
+# 4. Apaga, quita el USB y arranca: «soso» está en el menú de la placa (F12),
+#    y puedes dejarlo como predeterminado en la BIOS.
 ```
 
-**Opción B — desde Linux (cargo):**
+Qué hace `soso-install`:
+
+1. **Comprueba el destino.** Rechaza el disco de arranque, cualquier disco que
+   no sea NVMe y todo disco con particiones de otro sistema (swap, LVM,
+   Windows, raíces Linux con GUID propio); las lista antes de negarse. Para
+   sobrescribirlo de todos modos hace falta `--force` **y** teclear el nombre
+   del disco.
+2. **Clona** el pendrive entero sobre el destino.
+3. **Repara la GPT** del destino: el clon describe el pendrive, así que se
+   recoloca la cabecera de respaldo al final del disco, la partición de modelos
+   se estira hasta llenarlo y se reparten GUID nuevos (si no, el disco sería
+   indistinguible del USB para el firmware).
+4. **Anota la petición de arranque** en `SOSOBOOT.TXT` de la ESP del pendrive.
+   El kernel no puede tocar la NVRAM (ya no hay Runtime Services UEFI cuando
+   corre soso), así que lo hace el shim en el siguiente arranque del USB.
+
+`soso-install status` enseña el estado de esa petición: `INSTALL <guid>`
+mientras está pendiente y `DONE Boot0007 soso` cuando el shim la ha atendido.
+
+### Opción B — desde Linux (cargo)
 
 ```sh
-# 1. Identifica el disco vacío (comprueba que NO es el de Linux)
-lsblk
-
-# 2. Compila e instala (pide confirmación si omites --yes)
+lsblk                                        # identifica el disco vacío
 sudo cargo xtask install-disk /dev/nvme1n1 --yes
 ```
 
-**Opción C — USB live con instalador (sin cargo en el equipo destino):**
+Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
+`update-grub`. Con `--no-grub` deja el snippet en `target/install-disk/41_soso`.
+
+### Opción C — USB live con instalador (sin cargo en el equipo destino)
 
 ```sh
-# En la máquina de desarrollo: generar artefactos
+# En la máquina de desarrollo (TinyLlama por defecto; fetch-hf solo la primera vez):
+cargo xtask fetch-hf TinyLlama/TinyLlama-1.1B-Chat-v1.0   # si falta target/tinyllama-model
 cargo xtask package-usb-live
+sudo cargo xtask flash-usb-live /dev/sdX --yes   # live + partición SOSOINSTALL
 
-# Flashear pendrive (live + partición SOSOINSTALL con install-soso.sh)
-sudo cargo xtask flash-usb-live /dev/sdX --yes
+# En placa: ask  o  soso-llm run tinyllama --prompt "hola" --max 32
 
-# En el PC con Linux (USB conectado): probar soso arrancando desde USB,
-# luego instalar en el disco vacío:
+# Instalar en disco interno desde Linux (USB conectado):
 lsblk
 sudo /media/$USER/SOSOINSTALL/install-soso.sh /dev/nvme1n1 --yes
-# (o desde target/usb-live/: sudo ./install-soso.sh /dev/nvme1n1 --yes)
 ```
 
-El instalador:
+### Si tu firmware ignora la entrada nueva
 
-1. Genera `soso-live.img` (ESP + sosofs + sosomfs), igual que el USB live.
-2. Escribe la imagen en el disco indicado.
-3. Amplía la partición de modelos si el disco es más grande que la imagen.
-4. Añade `/etc/grub.d/41_soso` con una entrada **soso** (chainload a `BOOTX64.EFI`).
-5. Ejecuta `update-grub`.
+Algunas placas rehacen el orden de arranque por su cuenta. La entrada sigue
+existiendo: elige el disco en el menú de arranque (F12) o súbela en la BIOS.
+Y si prefieres arrancar soso desde el GRUB de Linux, con el USB conectado:
 
-Si no tienes permisos para GRUB, usa `--no-grub` y copia el snippet que deja en
-`target/install-disk/41_soso`.
+```sh
+sudo /media/$USER/SOSOINSTALL/install-soso.sh --grub-only /dev/nvme1n1
+```
+
+soso no puede hacer esto por sí mismo: `grub.cfg` vive en la partición ext4 de
+Linux y soso no escribe ext4 — que es justo lo que no debe tocar.
 
 ### Arranque
 
-Reinicia la máquina. En GRUB elige **soso**. Linux sigue intacto en su disco.
-
-Dentro de soso: consola serie o SSH (`ssh -i target/soso_test_key soso@<ip>`).
+Reinicia. Elige **soso** (o Linux) en el menú de la placa. Dentro de soso:
+consola serie, pantalla, o SSH (`ssh -i target/soso_test_key soso@<ip>`).
 
 ### Desinstalar
+
+Borra la entrada desde la BIOS de la placa (o el disco entero). Si añadiste la
+entrada de GRUB:
 
 ```sh
 sudo rm /etc/grub.d/41_soso
 sudo update-grub
 ```
 
-El disco de soso puede borrarse o reutilizarse aparte; Linux no se modifica.
+Linux no se modifica en ningún caso.
 
 ---
 
@@ -1010,6 +1149,9 @@ echo hola > nota.txt
 cat nota.txt
 ls /
 ls /models
+ask ¿cuánto es 2 > 1?       # el texto va literal al modelo
+ask                         # modo interactivo
+ask-modelo                  # ver/cambiar el modelo que usa ask
 soso-llm run tiny --prompt hola
 soso-llm run tiny-moe --prompt @bos --max 4
 cat /etc/motd

@@ -1,0 +1,8 @@
+[package]
+name = "gptdisk"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "Lectura y reescritura de tablas GPT sobre búferes de sectores (no_std)"
+
+[dependencies]

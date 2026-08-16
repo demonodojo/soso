@@ -21,6 +21,7 @@ soso/
 │   ├── sosofs/       # CoW FS (no_std + "std" feature for host tests)
 │   ├── sosomfs/      # read-only model shards FS (second virtio-blk)
 │   ├── soso-abi/     # syscall numbers, Stat, Dirent, errno
+│   ├── gptdisk/      # GPT: leer/reubicar/reescribir tablas (no_std + tests host)
 │   ├── soso-llm-core/  # inference runtime (host + userspace)
 │   ├── sosomodel/    # .som manifest/index/shard format
 │   └── block-dev/    # BlockDevice trait (virtio-blk, host File)
@@ -44,6 +45,8 @@ soso/
 
 `exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo` (+ GPU, TCP, hilos)
 
+- **Instalación:** `disk_list=37`, `disk_read=38`, `disk_write=39` (raw, 512 B/LBA; `raw_disk` solo deja escribir NVMe y nunca el disco de arranque), `bootreq_write=41` / `bootreq_read=42` (único camino a la ESP del disco live, y solo al fichero pre-creado `SOSOBOOT.TXT`)
+
 - **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`; hijos heredan cwd del padre
 - **Escritura:** `open(O_WRONLY)` → buffer en kernel; `create_file` en sosofs al `close()`
 - **Rutas:** `task/path.rs` resuelve relativas contra `Process.cwd` (default `/`)
@@ -55,6 +58,7 @@ soso/
 |--------|------|
 | `arch/` | GDT/TSS, IDT, PIC+PIT 100 Hz, paging |
 | `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
+| `drivers/espfat.rs` | Localiza ficheros 8.3 contiguos en la ESP del live; lo comparten `fatlog` (SOSOLOG), `drvlog` (SOSODRV) y `bootreq` (SOSOBOOT) |
 | `fs/` | sosofs (blk0) + sosomfs (blk1); VFS enruta `/models/*` |
 | `vfs.rs` | Router: lectura/escritura sosofs; modelos → sosomfs (read-only) |
 | `net/` | smoltcp, DHCPv4 al arrancar (fallback 10.0.2.15), polled from scheduler |
@@ -75,11 +79,27 @@ soso/
 | Binary | Role |
 |--------|------|
 | `/bin/init` | PID 1: spawns sosh, relaunches on crash; `init test` = syscall regression suite |
-| `/bin/sosh` | Shell: pipes, redirecciones, builtins `cd`/`pwd`/`help`/`exit` |
-| `/bin/soso-llm` | Inferencia LLM sobre modelos en `/models/` |
+| `/bin/sosh` | Shell: pipes, redirecciones, builtins `cd`/`pwd`/`help`/`exit`/`ask` |
+| `/bin/soso-llm` | Inferencia LLM sobre modelos en `/models/`; subcomando `ask` (texto crudo, silencioso, REPL) |
+| `/bin/ask-modelo` | Fija el modelo de `ask` en `/etc/llm.conf` |
+| `/bin/soso-install` | Instalador nativo desde el live: guardas por tipo de partición, clon, `gptdisk::relayout` + GUID nuevos, y petición de entrada UEFI |
 | `/bin/{ls,cat,echo,mkdir,rm,hexdump,halt}` | Coreutils |
 
-`libsoso`: crt0, syscall wrappers, mini-libstd (256 KiB heap arena).
+`libsoso`: crt0, syscall wrappers, mini-libstd (256 KiB heap arena), `linea::Lector`
+(lectura de línea con eco: **acepta UTF-8** y borra por carácter; lee **byte a byte**
+para que lo que venga detrás de la línea se quede en la cola de la tty y lo vea el
+hijo que se acabe de lanzar).
+
+**`ask`** (`user/soso-llm/src/ask.rs`): `sosh` lo resuelve **antes de tokenizar** y
+lanza `/bin/soso-llm ask <texto crudo>` — es la única forma de que comillas, tildes y
+`|`/`>` lleguen al modelo, porque el tokenizador de la shell no tiene escapes.
+`soso-llm` lo despacha sobre su `args` sin trocear. `run_model` está partido en
+`preparar_sesion` + `generar` (`verboso` apaga el diagnóstico) para que el REPL cargue
+el modelo una vez. Config en `/etc/llm.conf`, fallback al primer modelo de `/models`.
+**Cargar un segundo modelo en el mismo proceso** destapó que `StagingWorker::spawned`
+era por instancia: el hilo de staging y `STAGE` son del proceso, así que arrancaba un
+segundo worker y reseteaba `generation` (que el vivo leía como kick) → dos hilos sobre
+el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 
 ## Network & SSH
 
@@ -212,6 +232,27 @@ soso/
   `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau`.
 - Detalle completo (roadmap G1→G5 **GO** en GB205, VFIO/IOMMU, firmware, workflow de port nvkm):
   skill **`soso-gpu`**.
+
+## Instalación nativa (live → disco)
+
+`soso-install` (userspace) clona el pendrive al NVMe destino, repara su GPT con
+`crates/gptdisk` (respaldo al final del disco real, última partición estirada,
+GUID regenerados — si no, el destino sería indistinguible del USB para el
+firmware) y deja `INSTALL <guid-ESP>` en `SOSOBOOT.TXT` de la ESP del live vía
+`SYS_BOOTREQ_WRITE`. **El kernel no puede tocar la NVRAM**: `bootloader_api::BootInfo`
+no expone la System Table y tras `ExitBootServices` no hay Runtime Services. Quien
+crea el `Boot####` es `boot-shim/src/bootentry.rs`, en el arranque siguiente del USB;
+deja `DONE Boot#### soso` en el mismo fichero y nunca aborta el arranque si falla.
+
+Transferencias: `raw_disk::{read,write}` van en bloques de 128 KiB (`MAX_XFER`) y
+`mass_storage` trocea a 64 KiB — **el campo de longitud de un Normal TRB es de 17
+bits, así que 0x20000 exactos se desbordan a cero** y el endpoint acaba en Stall
+(`CSW inválido sig=0`). El rebote DMA de xHCI es persistente (`XhciController::bounce`):
+el asignador DMA del kernel no libera, y uno por comando tiraba a la basura tanta
+memoria como datos movidos.
+
+Verificación: `cargo xtask test-install` (3 arranques OVMF, incluye un NVMe falso con
+swap/ESP que el instalador debe rechazar).
 
 ## Coding constraints
 

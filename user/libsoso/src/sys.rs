@@ -284,6 +284,29 @@ pub fn disk_write(id: u32, lba: u64, buf: &[u8]) -> i64 {
     )
 }
 
+/// Deja la petición de entrada de arranque en `SOSOBOOT.TXT` de la ESP live,
+/// para que el shim UEFI la registre en el siguiente arranque.
+pub fn bootreq_write(buf: &[u8]) -> i64 {
+    syscall4(
+        abi::SYS_BOOTREQ_WRITE,
+        buf.as_ptr() as u64,
+        buf.len() as u64,
+        0,
+        0,
+    )
+}
+
+/// Lee `SOSOBOOT.TXT`; `buf.len()` debe ser múltiplo de 512.
+pub fn bootreq_read(buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_BOOTREQ_READ,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+        0,
+    )
+}
+
 pub fn tcp_connect(addr: &abi::SockAddr, timeout_ms: u64) -> i64 {
     syscall4(
         abi::SYS_TCP_CONNECT,

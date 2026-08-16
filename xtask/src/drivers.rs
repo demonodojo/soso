@@ -79,10 +79,11 @@ pub fn preset_live_usb() -> DriverProfile {
             "drv-nvme".into(),
             "drv-usb".into(),
             "drv-live-disk".into(),
+            "drv-gpu-nvidia".into(),
         ],
-        lxdde_ports: vec![],
-        lxdde_mode: None,
-        firmware_exclude: vec!["lib/firmware/nvidia/**".into()],
+        lxdde_ports: vec!["nouveau".into()],
+        lxdde_mode: Some("nouveau".into()),
+        firmware_exclude: vec![],
     }
 }
 

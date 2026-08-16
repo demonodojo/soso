@@ -132,6 +132,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         drivers::live_disk::init();
         drivers::fatlog::init();
         drivers::drvlog::init();
+        drivers::bootreq::init();
     }
     println!("boot: kbd");
     drivers::kbd::init();

@@ -8,6 +8,11 @@ use sosofs::layout::MAGIC as SOSOFS_MAGIC;
 
 const SECTOR: usize = 512;
 const NVME_SLOTS: usize = 2;
+/// Bytes por transferencia al dispositivo. Clonar el live son ~8 GiB: sector a
+/// sector eso son 16 millones de comandos BOT y el instalador no termina nunca.
+/// 128 KiB es el tope que el camino de lectura USB tiene validado (el de
+/// escritura trocea solo a 64 KiB) y coincide con `sosomfs::MAX_REQ_BLOCKS`.
+const MAX_XFER: usize = 128 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -209,13 +214,8 @@ pub fn read(id: u32, lba: u64, buf: &mut [u8]) -> Result<(), i64> {
         return Err(-soso_abi::EINVAL);
     }
     let id = RawId::from_u32(id).ok_or(-soso_abi::EINVAL)?;
-    let mut off = 0usize;
-    while off < buf.len() {
-        let mut sec = [0u8; SECTOR];
-        read_sector(id, lba + (off / SECTOR) as u64, &mut sec)?;
-        let n = SECTOR.min(buf.len() - off);
-        buf[off..off + n].copy_from_slice(&sec[..n]);
-        off += n;
+    for (i, part) in buf.chunks_mut(MAX_XFER).enumerate() {
+        read_range(id, lba + (i * MAX_XFER / SECTOR) as u64, part)?;
     }
     Ok(())
 }
@@ -231,12 +231,8 @@ pub fn write(id: u32, lba: u64, buf: &[u8]) -> Result<(), i64> {
     if !writable(id) {
         return Err(-soso_abi::EROFS);
     }
-    let mut off = 0usize;
-    while off < buf.len() {
-        let mut sec = [0u8; SECTOR];
-        sec.copy_from_slice(&buf[off..off + SECTOR]);
-        write_sector(id, lba + (off / SECTOR) as u64, &sec)?;
-        off += SECTOR;
+    for (i, part) in buf.chunks(MAX_XFER).enumerate() {
+        write_range(id, lba + (i * MAX_XFER / SECTOR) as u64, part)?;
     }
     Ok(())
 }
@@ -249,77 +245,131 @@ fn writable(id: RawId) -> bool {
     matches!(id, RawId::Nvme0 | RawId::Nvme1)
 }
 
-fn read_sector(id: RawId, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), i64> {
+fn read_range(id: RawId, lba: u64, buf: &mut [u8]) -> Result<(), i64> {
     match id {
         #[cfg(feature = "drv-usb")]
         RawId::Usb => {
-            crate::drivers::usb_storage::read_sector(lba, buf).map_err(|_| -soso_abi::EIO)
+            crate::drivers::usb_storage::read_sectors(lba, buf).map_err(|_| -soso_abi::EIO)
         }
         #[cfg(feature = "drv-virtio-blk")]
         RawId::Virtio0 => {
-            crate::drivers::virtio_blk::read_sector(lba, buf).map_err(|_| -soso_abi::EIO)
+            crate::drivers::virtio_blk::read_sectors(lba, buf).map_err(|_| -soso_abi::EIO)
         }
         #[cfg(feature = "drv-nvme")]
-        RawId::Nvme0 => nvme_read_512(0, lba, buf),
+        RawId::Nvme0 => nvme_read_512_range(0, lba, buf),
         #[cfg(feature = "drv-nvme")]
-        RawId::Nvme1 => nvme_read_512(1, lba, buf),
-        #[cfg(not(any(feature = "drv-usb", feature = "drv-virtio-blk", feature = "drv-nvme")))]
-        _ => Err(-soso_abi::ENOENT),
+        RawId::Nvme1 => nvme_read_512_range(1, lba, buf),
         #[allow(unreachable_patterns)]
         _ => Err(-soso_abi::ENOENT),
     }
 }
 
-fn write_sector(id: RawId, lba: u64, buf: &[u8; SECTOR]) -> Result<(), i64> {
+fn write_range(id: RawId, lba: u64, buf: &[u8]) -> Result<(), i64> {
     match id {
         #[cfg(feature = "drv-nvme")]
-        RawId::Nvme0 => nvme_write_512(0, lba, buf),
+        RawId::Nvme0 => nvme_write_512_range(0, lba, buf),
         #[cfg(feature = "drv-nvme")]
-        RawId::Nvme1 => nvme_write_512(1, lba, buf),
+        RawId::Nvme1 => nvme_write_512_range(1, lba, buf),
         _ => Err(-soso_abi::EROFS),
     }
 }
 
+/// Traduce un rango en LBA de 512 B (los que usa GPT) a los del namespace, que
+/// puede tener bloques de 4096 B: extremos desalineados por read-modify-write y
+/// el tramo central de una tacada.
 #[cfg(feature = "drv-nvme")]
-fn nvme_read_512(slot: usize, gpt_lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), i64> {
-    if !crate::drivers::nvme::present_slot(slot) {
-        return Err(-soso_abi::ENOENT);
-    }
+pub(crate) fn nvme_read_512_range(slot: usize, gpt_lba: u64, buf: &mut [u8]) -> Result<(), i64> {
     let lba_size = crate::drivers::nvme::lba_size_slot(slot).ok_or(-soso_abi::EIO)?;
-    match lba_size {
-        512 => crate::drivers::nvme::read_lba_slot(slot, gpt_lba, buf).map_err(|_| -soso_abi::EIO),
-        4096 => {
-            let nvme_lba = gpt_lba / 8;
-            let off = (gpt_lba % 8) as usize * SECTOR;
-            let mut page = [0u8; 4096];
-            crate::drivers::nvme::read_lba_slot(slot, nvme_lba, &mut page)
-                .map_err(|_| -soso_abi::EIO)?;
-            buf.copy_from_slice(&page[off..off + SECTOR]);
-            Ok(())
-        }
-        _ => Err(-soso_abi::ENOTSUP),
+    if lba_size == SECTOR {
+        return crate::drivers::nvme::read_lba_slot(slot, gpt_lba, buf)
+            .map_err(|_| -soso_abi::EIO);
     }
+    if lba_size != 4096 {
+        return Err(-soso_abi::ENOTSUP);
+    }
+    let per_page = 4096 / SECTOR as u64; // 8 sectores por bloque NVMe
+    let mut lba = gpt_lba;
+    let mut off = 0usize;
+    let mut page = [0u8; 4096];
+
+    if lba % per_page != 0 {
+        let skip = (lba % per_page) as usize * SECTOR;
+        let n = (4096 - skip).min(buf.len());
+        nvme_page(slot, lba / per_page, &mut page)?;
+        buf[..n].copy_from_slice(&page[skip..skip + n]);
+        off = n;
+        lba += (n / SECTOR) as u64;
+    }
+
+    let whole = (buf.len() - off) / 4096 * 4096;
+    if whole > 0 {
+        crate::drivers::nvme::read_lba_slot(slot, lba / per_page, &mut buf[off..off + whole])
+            .map_err(|_| -soso_abi::EIO)?;
+        off += whole;
+        lba += (whole / SECTOR) as u64;
+    }
+
+    if off < buf.len() {
+        let n = buf.len() - off;
+        nvme_page(slot, lba / per_page, &mut page)?;
+        buf[off..].copy_from_slice(&page[..n]);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "drv-nvme")]
-fn nvme_write_512(slot: usize, gpt_lba: u64, buf: &[u8; SECTOR]) -> Result<(), i64> {
-    if !crate::drivers::nvme::present_slot(slot) {
-        return Err(-soso_abi::ENOENT);
-    }
+pub(crate) fn nvme_write_512_range(slot: usize, gpt_lba: u64, buf: &[u8]) -> Result<(), i64> {
     let lba_size = crate::drivers::nvme::lba_size_slot(slot).ok_or(-soso_abi::EIO)?;
-    match lba_size {
-        512 => {
-            crate::drivers::nvme::write_lba_slot(slot, gpt_lba, buf).map_err(|_| -soso_abi::EIO)
-        }
-        4096 => {
-            let nvme_lba = gpt_lba / 8;
-            let off = (gpt_lba % 8) as usize * SECTOR;
-            let mut page = [0u8; 4096];
-            crate::drivers::nvme::read_lba_slot(slot, nvme_lba, &mut page)
-                .map_err(|_| -soso_abi::EIO)?;
-            page[off..off + SECTOR].copy_from_slice(buf);
-            crate::drivers::nvme::write_lba_slot(slot, nvme_lba, &page).map_err(|_| -soso_abi::EIO)
-        }
-        _ => Err(-soso_abi::ENOTSUP),
+    if lba_size == SECTOR {
+        return crate::drivers::nvme::write_lba_slot(slot, gpt_lba, buf)
+            .map_err(|_| -soso_abi::EIO);
     }
+    if lba_size != 4096 {
+        return Err(-soso_abi::ENOTSUP);
+    }
+    let per_page = 4096 / SECTOR as u64;
+    let mut lba = gpt_lba;
+    let mut off = 0usize;
+    let mut page = [0u8; 4096];
+
+    if lba % per_page != 0 {
+        let skip = (lba % per_page) as usize * SECTOR;
+        let n = (4096 - skip).min(buf.len());
+        nvme_page(slot, lba / per_page, &mut page)?;
+        page[skip..skip + n].copy_from_slice(&buf[..n]);
+        nvme_page_write(slot, lba / per_page, &page)?;
+        off = n;
+        lba += (n / SECTOR) as u64;
+    }
+
+    let whole = (buf.len() - off) / 4096 * 4096;
+    if whole > 0 {
+        crate::drivers::nvme::write_lba_slot(slot, lba / per_page, &buf[off..off + whole])
+            .map_err(|_| -soso_abi::EIO)?;
+        off += whole;
+        lba += (whole / SECTOR) as u64;
+    }
+
+    if off < buf.len() {
+        let n = buf.len() - off;
+        nvme_page(slot, lba / per_page, &mut page)?;
+        page[..n].copy_from_slice(&buf[off..]);
+        nvme_page_write(slot, lba / per_page, &page)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "drv-nvme")]
+fn nvme_page(slot: usize, nvme_lba: u64, page: &mut [u8; 4096]) -> Result<(), i64> {
+    crate::drivers::nvme::read_lba_slot(slot, nvme_lba, page).map_err(|_| -soso_abi::EIO)
+}
+
+#[cfg(feature = "drv-nvme")]
+fn nvme_page_write(slot: usize, nvme_lba: u64, page: &[u8; 4096]) -> Result<(), i64> {
+    crate::drivers::nvme::write_lba_slot(slot, nvme_lba, page).map_err(|_| -soso_abi::EIO)
+}
+
+/// Un solo sector, para los sondeos de contenido (`probe_content`).
+fn read_sector(id: RawId, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), i64> {
+    read_range(id, lba, buf)
 }

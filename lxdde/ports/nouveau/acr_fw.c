@@ -1,16 +1,18 @@
-/* G3 ola 2: firmware ACR ga102 (AHESASC + ASB) en heap lx + DMA. */
+/* G3 ola 2: firmware ACR ga107/ga102 (AHESASC + ASB) en heap lx + DMA. */
 #include "acr_fw.h"
+#include "gsp_chip.h"
 #include "lx_emul.h"
 
 static struct acr_fw_blob g_acr[ACR_FW_COUNT];
 static int g_acr_loaded;
+static char g_acr_paths[ACR_FW_COUNT][96];
 
-static const char *const g_acr_paths[ACR_FW_COUNT] = {
-    "nvidia/ga102/acr/ucode_ahesasc.bin",
-    "nvidia/ga102/acr/ucode_asb.bin",
+static const char *const g_acr_leaf[ACR_FW_COUNT] = {
+    "ucode_ahesasc.bin",
+    "ucode_asb.bin",
 };
 
-static int load_one(enum acr_fw_kind kind, const char *path)
+static int load_one_path(enum acr_fw_kind kind, const char *path)
 {
     const unsigned char *tmp = NULL;
     unsigned long tmp_len = 0;
@@ -57,6 +59,56 @@ static int load_one(enum acr_fw_kind kind, const char *path)
     return 0;
 }
 
+static int load_acr_one(enum acr_fw_kind kind)
+{
+    const char *primary = gsp_nv_ampere_chip_name(gsp_nv_family_device_id());
+    const char *fallback = "ga102";
+    const char *chips[2];
+    unsigned nchips = 0;
+    char path[96];
+    unsigned i;
+
+    chips[nchips++] = primary;
+    if (primary != fallback)
+        chips[nchips++] = fallback;
+
+    for (i = 0; i < nchips; i++) {
+        const char *chip = chips[i];
+        unsigned pos = 0;
+        const char *prefix = "nvidia/";
+
+        while (*prefix && pos + 1u < sizeof(path))
+            path[pos++] = *prefix++;
+        while (*chip && pos + 1u < sizeof(path))
+            path[pos++] = *chip++;
+        if (pos + 5u < sizeof(path)) {
+            path[pos++] = '/';
+            path[pos++] = 'a';
+            path[pos++] = 'c';
+            path[pos++] = 'r';
+            path[pos++] = '/';
+        }
+        {
+            const char *leaf = g_acr_leaf[kind];
+            while (*leaf && pos + 1u < sizeof(path))
+                path[pos++] = *leaf++;
+            path[pos] = '\0';
+        }
+        if (load_one_path(kind, path) == 0) {
+            unsigned j;
+            char *stored = g_acr_paths[kind];
+
+            for (j = 0; j < sizeof(path) && path[j]; j++)
+                stored[j] = path[j];
+            if (j < sizeof(g_acr_paths[0]))
+                stored[j] = '\0';
+            g_acr[kind].path = stored;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 int acr_fw_load_all(void)
 {
     unsigned i;
@@ -69,7 +121,7 @@ int acr_fw_load_all(void)
         g_acr[i].valid = 0;
     }
     for (i = 0; i < ACR_FW_COUNT; i++) {
-        if (load_one((enum acr_fw_kind)i, g_acr_paths[i]) == 0) {
+        if (load_acr_one((enum acr_fw_kind)i) == 0) {
             ok++;
         }
     }

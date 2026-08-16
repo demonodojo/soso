@@ -220,14 +220,7 @@ fn nvme_read_sector(slot: u8, gpt_lba: u64, buf: &mut [u8; SECTOR]) -> Result<()
 }
 
 fn nvme_read_sectors(slot: u8, gpt_lba: u64, buf: &mut [u8]) -> Result<(), ()> {
-    let mut lba = gpt_lba;
-    for chunk in buf.chunks_mut(SECTOR) {
-        let mut sec = [0u8; SECTOR];
-        nvme_read_sector(slot, lba, &mut sec)?;
-        chunk.copy_from_slice(&sec);
-        lba += 1;
-    }
-    Ok(())
+    crate::drivers::raw_disk::nvme_read_512_range(slot as usize, gpt_lba, buf).map_err(|_| ())
 }
 
 fn range_writer(backend: LiveBackend, lba: u64, buf: &[u8]) -> Result<(), ()> {
@@ -251,13 +244,7 @@ fn range_writer(backend: LiveBackend, lba: u64, buf: &[u8]) -> Result<(), ()> {
 }
 
 fn nvme_write_sectors(slot: u8, gpt_lba: u64, buf: &[u8]) -> Result<(), ()> {
-    let mut lba = gpt_lba;
-    for chunk in buf.chunks(SECTOR) {
-        let sec: &[u8; SECTOR] = chunk.try_into().map_err(|_| ())?;
-        nvme_write_sector(slot, lba, sec).map_err(|_| ())?;
-        lba += 1;
-    }
-    Ok(())
+    crate::drivers::raw_disk::nvme_write_512_range(slot as usize, gpt_lba, buf).map_err(|_| ())
 }
 
 fn nvme_write_sector(slot: u8, gpt_lba: u64, buf: &[u8; SECTOR]) -> Result<(), BlockError> {

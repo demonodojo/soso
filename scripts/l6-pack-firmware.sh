@@ -130,6 +130,25 @@ for f in "${GA102_ACR[@]}"; do
   copy_one "$f" || true
 done
 
+# --- Set GSP ga107 (Ampere RTX 3050 Mobile) — rutas propias, a menudo symlink a ga102 ---
+GA107_GSP=(
+  ga107/gsp/bootloader-570.144.bin.zst
+  ga107/gsp/booter_load-570.144.bin.zst
+  ga107/gsp/booter_unload-570.144.bin.zst
+  ga107/gsp/gsp-570.144.bin.zst
+)
+for f in "${GA107_GSP[@]}"; do
+  copy_one "$f" || true
+done
+
+GA107_ACR=(
+  ga107/acr/ucode_ahesasc.bin.zst
+  ga107/acr/ucode_asb.bin.zst
+)
+for f in "${GA107_ACR[@]}"; do
+  copy_one "$f" || true
+done
+
 decompress_zst_in "$DST"
 
 # Enlace gb205/gsp/gsp-570.144.bin → ga102 descomprimido (si aplica)
@@ -154,6 +173,19 @@ verify_ga102_gsp() {
   fi
 }
 verify_ga102_gsp
+
+verify_ga107_gsp() {
+  local n=0
+  for f in bootloader booter_load booter_unload gsp; do
+    [[ -s "$DST/ga107/gsp/${f}-570.144.bin" ]] && n=$((n+1))
+  done
+  if [[ $n -ge 3 ]]; then
+    echo "OK: set GSP ga107 (RTX 3050 Mobile) presente ($n/4 blobs)"
+  else
+    echo "WARN: set GSP ga107 incompleto ($n/4) — para la 3050 Mobile instala linux-firmware con nvidia/ga107/gsp/{bootloader,booter_load,booter_unload,gsp}-570.144.bin"
+  fi
+}
+verify_ga107_gsp
 
 count=$(find "$DST" -type f 2>/dev/null | wc -l)
 du_human=$(du -sh "$DST" | cut -f1)

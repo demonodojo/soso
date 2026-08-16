@@ -113,11 +113,11 @@ fn try_probe_ctrl(
     if !ctrl.any_root_port_connected() {
         ctrl.recover_root_ports();
     }
-    // Sin CCS tras settle: no tiene sentido reintentar BOT 6 s (Linux tampoco).
+    // Una pasada unificada: HID + hubs + BOT (root o detrás de hub).
     if ctrl.any_root_port_connected() {
         for intento in 0..3 {
             ctrl.drain_port_events();
-            if let Some(ms) = ctrl.probe_mass_storage() {
+            if let Some(ms) = ctrl.enumerate_usb_devices() {
                 return Some((ctrl, Some(ms)));
             }
             if intento + 1 < 3 {
@@ -128,7 +128,6 @@ fn try_probe_ctrl(
                 }
             }
         }
-        ctrl.enumerate_ports();
     }
     if ctrl.has_keyboard() {
         println!(
@@ -288,7 +287,7 @@ pub fn sector_count() -> Option<u64> {
         .find_map(|h| h.ms.as_ref().map(|m| m.sectors))
 }
 
-/// Teclado USB HID boot (si `enumerate_ports` lo encontró).
+/// Teclado USB HID boot (si `enumerate_usb_devices` lo encontró).
 pub fn poll_keyboard_scancode() -> Option<u8> {
     let mut guard = HOSTS.lock();
     for host in guard.iter_mut() {
@@ -317,19 +316,13 @@ pub fn rescan() {
             host.ctrl.recover_root_ports();
         }
         if host.ms.is_none() && host.ctrl.any_root_port_connected() {
-            if let Some(ms) = host.ctrl.probe_mass_storage() {
+            if let Some(ms) = host.ctrl.enumerate_usb_devices() {
                 println!(
                     "usb: mass storage (rescan) — {} sectores ({} MiB)",
                     ms.sectors,
                     ms.sectors * SECTOR as u64 / (1024 * 1024)
                 );
                 host.ms = Some(ms);
-            }
-        }
-        if !host.ctrl.has_keyboard() && host.ctrl.any_root_port_connected() {
-            host.ctrl.enumerate_ports();
-            if host.ctrl.has_keyboard() {
-                println!("usb: teclado HID (rescan)");
             }
         }
     }

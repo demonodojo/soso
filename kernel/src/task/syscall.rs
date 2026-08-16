@@ -247,6 +247,8 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_DISK_READ => sys_disk_read(a1, a2, a3, a4),
         abi::SYS_DISK_WRITE => sys_disk_write(a1, a2, a3, a4),
         abi::SYS_DNS_RESOLVE => sys_dns_resolve(a1, a2, a3),
+        abi::SYS_BOOTREQ_WRITE => sys_bootreq_write(a1, a2),
+        abi::SYS_BOOTREQ_READ => sys_bootreq_read(a1, a2),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -1219,6 +1221,54 @@ fn sys_disk_write(id: u64, lba: u64, buf: u64, len: u64) -> Result<u64, i64> {
     })?;
     crate::drivers::raw_disk::write(id as u32, lba, &kbuf)?;
     Ok(len)
+}
+
+/// Deja la petición de entrada de arranque en `SOSOBOOT.TXT` (ESP live).
+/// A diferencia de `sys_disk_write`, esta sí puede tocar el disco de arranque:
+/// el destino es un único fichero pre-asignado, no un LBA a elección.
+#[cfg(feature = "drv-live-disk")]
+fn sys_bootreq_write(buf: u64, len: u64) -> Result<u64, i64> {
+    if len == 0 || len as usize > abi::BOOTREQ_SIZE {
+        return Err(-abi::EINVAL);
+    }
+    if !user_range_ok(buf, len, false) {
+        return Err(-abi::EFAULT);
+    }
+    let mut kbuf = alloc::vec![0u8; len as usize];
+    super::with_current(|p| -> Result<(), i64> {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.read(buf, &mut kbuf).ok_or(-abi::EFAULT)?;
+        Ok(())
+    })?;
+    crate::drivers::bootreq::write(&kbuf)?;
+    Ok(len)
+}
+
+#[cfg(feature = "drv-live-disk")]
+fn sys_bootreq_read(buf: u64, len: u64) -> Result<u64, i64> {
+    if len == 0 || len as usize > abi::BOOTREQ_SIZE || len % 512 != 0 {
+        return Err(-abi::EINVAL);
+    }
+    if !user_range_ok(buf, len, true) {
+        return Err(-abi::EFAULT);
+    }
+    let mut kbuf = alloc::vec![0u8; len as usize];
+    let n = crate::drivers::bootreq::read(&mut kbuf)?;
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(buf, &kbuf[..n]).ok_or(-abi::EFAULT)?;
+        Ok(n as u64)
+    })
+}
+
+#[cfg(not(feature = "drv-live-disk"))]
+fn sys_bootreq_write(_buf: u64, _len: u64) -> Result<u64, i64> {
+    Err(-abi::ENOTSUP)
+}
+
+#[cfg(not(feature = "drv-live-disk"))]
+fn sys_bootreq_read(_buf: u64, _len: u64) -> Result<u64, i64> {
+    Err(-abi::ENOTSUP)
 }
 
 fn sys_gpu_alloc(size: u64, domain: u64) -> Result<u64, i64> {

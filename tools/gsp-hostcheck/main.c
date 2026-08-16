@@ -2615,6 +2615,29 @@ static int check_doorbell_kick_by_family(void)
     return 0;
 }
 
+/* RTX 3050 Mobile: boot0 muerto no puede clasificarse como Blackwell/FMC. */
+static int check_ga107_dead_boot0(void)
+{
+    enum nv_family fam = gsp_nv_family_of(0xffffffffu, 0x249cu);
+
+    if (fam != NV_FAM_AMPERE) {
+        printf("FALLO: 0x249c + boot0 all-ones → familia %d (esperaba Ampere)\n",
+               (int)fam);
+        return -1;
+    }
+    if (gsp_nv_ampere_chip_name(0x249cu)[0] != 'g' ||
+        strcmp(gsp_nv_ampere_chip_name(0x249cu), "ga107") != 0) {
+        printf("FALLO: chip 0x249c=%s (esperaba ga107)\n",
+               gsp_nv_ampere_chip_name(0x249cu));
+        return -1;
+    }
+    if (!gsp_nv_boot0_valid(0xffffffffu)) {
+        printf("OK: boot0 all-ones no es válido para arch\n");
+    }
+    printf("OK: 0x249c + boot0 muerto → Ampere/ga107 (no Blackwell/FMC)\n");
+    return 0;
+}
+
 /* Valor de un método dentro de un pushbuffer ya codificado. Recorre las
  * cabeceras como haría el host (INCR con `count` datos detrás) en vez de asumir
  * un offset fijo: así el banco no se rompe cada vez que se reordena la copia. */
@@ -4014,6 +4037,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_rc_triggered() != 0)
         return -1;
     if (check_doorbell_kick_by_family() != 0)
+        return -1;
+    if (check_ga107_dead_boot0() != 0)
         return -1;
     if (check_g4e_chan_ce(&lo) != 0)
         return -1;

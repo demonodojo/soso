@@ -7,9 +7,19 @@ use spin::Once;
 const VENDOR_NVIDIA: u16 = 0x10de;
 #[allow(dead_code)]
 const NV_PMC_BOOT_0: u64 = 0x0000;
+const PCI_CMD_MEMORY: u16 = 0x2;
+const PCI_CMD_MASTER: u16 = 0x4;
 
 static NVIDIA_CHIPSET: Once<Option<u32>> = Once::new();
 static NVIDIA_DEVICE: Once<Option<u16>> = Once::new();
+
+fn pci_enable_mem_master(gpu: &pci::PciDevice) {
+    let cmd = pci::read16(gpu.bus, gpu.device, gpu.function, 0x04);
+    let want = cmd | PCI_CMD_MEMORY | PCI_CMD_MASTER;
+    if want != cmd {
+        pci::write16(gpu.bus, gpu.device, gpu.function, 0x04, want);
+    }
+}
 
 pub fn init() {
     let devs = pci::enumerate();
@@ -33,14 +43,23 @@ pub fn init() {
         NVIDIA_DEVICE.call_once(|| None);
         return;
     }
+    pci_enable_mem_master(gpu);
     mm::ensure_mmio_mapped(gpu.bar0, gpu.bar0_size.min(16 * 1024 * 1024));
     let boot0 = unsafe { mm::phys_to_virt(gpu.bar0).as_ptr::<u32>().read_volatile() };
-    crate::println!(
-        "nvidia: GPU {:04x}:{:04x} NV_PMC_BOOT_0=0x{:08x}",
-        gpu.vendor_id,
-        gpu.device_id,
-        boot0
-    );
+    if boot0 == 0xffffffff {
+        crate::println!(
+            "nvidia: GPU {:04x}:{:04x} NV_PMC_BOOT_0=0xffffffff (fuera del bus / sin D0)",
+            gpu.vendor_id,
+            gpu.device_id
+        );
+    } else {
+        crate::println!(
+            "nvidia: GPU {:04x}:{:04x} NV_PMC_BOOT_0=0x{:08x}",
+            gpu.vendor_id,
+            gpu.device_id,
+            boot0
+        );
+    }
     #[cfg(feature = "lxdde")]
     crate::lxdde::notify_boot0(boot0, gpu.device_id);
     NVIDIA_CHIPSET.call_once(|| Some(boot0));

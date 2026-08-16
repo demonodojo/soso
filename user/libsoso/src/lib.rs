@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+pub mod linea;
 pub mod sys;
 pub mod thread;
 

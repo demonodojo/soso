@@ -45,6 +45,15 @@ pub const SYS_DISK_READ: u64 = 38;
 pub const SYS_DISK_WRITE: u64 = 39;
 /// Resuelve un nombre DNS a IPv4 (`host_ptr`, `host_len`, `out: *mut u8[4]`).
 pub const SYS_DNS_RESOLVE: u64 = 40;
+/// Escribe la petición de arranque en `SOSOBOOT.TXT` de la ESP live:
+/// `(buf, len)`. Es el único camino por el que userspace toca el disco de
+/// arranque, y solo ese fichero pre-creado. Lo lee el shim UEFI en el
+/// siguiente arranque para registrar la entrada `Boot####`.
+pub const SYS_BOOTREQ_WRITE: u64 = 41;
+/// Lee ese mismo fichero: `(buf, len)`. Devuelve los bytes leídos.
+pub const SYS_BOOTREQ_READ: u64 = 42;
+/// Tamaño fijo de `SOSOBOOT.TXT`.
+pub const BOOTREQ_SIZE: usize = 4096;
 
 /// Bits del valor que devuelve `SYS_GPU_SUBMIT` para SAXPY/MATVF.
 ///

@@ -202,20 +202,26 @@ pub fn run() {
 }
 
 fn run_host_tests_parallel(root: &Path, report: &Arc<Report>) {
+    // `std` solo donde el crate lo tiene: gptdisk compila en el host con
+    // `cfg(test)` y no necesita feature.
     let crates = [
-        ("sosomfs", "sosomfs (host)"),
-        ("sosofs", "crash-safety de sosofs (host)"),
-        ("soso-llm-core", "planificador soso-llm-core (host)"),
+        ("sosomfs", true, "sosomfs (host)"),
+        ("sosofs", true, "crash-safety de sosofs (host)"),
+        ("soso-llm-core", true, "planificador soso-llm-core (host)"),
+        ("gptdisk", false, "GPT del instalador (host)"),
     ];
     std::thread::scope(|scope| {
-        for (pkg, nombre) in crates {
+        for (pkg, con_std, nombre) in crates {
             let root = root.to_path_buf();
             let report = Arc::clone(report);
             scope.spawn(move || {
                 let result = (|| {
-                    let st = Command::new("cargo")
-                        .current_dir(&root)
-                        .args(["test", "-q", "-p", pkg, "--features", "std"])
+                    let mut cmd = Command::new("cargo");
+                    cmd.current_dir(&root).args(["test", "-q", "-p", pkg]);
+                    if con_std {
+                        cmd.args(["--features", "std"]);
+                    }
+                    let st = cmd
                         .status()
                         .map_err(|e| e.to_string())?;
                     if st.success() {
@@ -396,6 +402,9 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report) {
         });
         let _ = report.paso_con_reintento(sid, "pipeline de sosh (6 KiB por un pipe)", || {
             ssh_pipeline(key, port)
+        });
+        let _ = report.paso_con_reintento(sid, "ask: el texto llega literal", || {
+            ssh_ask_literal(key, port)
         });
         let _ = report.paso(sid, "SSH por clave pública + comando + halt", || {
             ssh_sesion(key, port)
@@ -587,7 +596,7 @@ fn conectar_reintentando(puerto: u16, limite: Duration) -> Result<TcpStream, Str
 /// stdin se mantiene abierto hasta que el hijo muere. Con el parche ya no es
 /// imprescindible, pero cerrarlo antes manda un EOF que el servidor no necesita
 /// ver, y esa es justo la piedra en la que tropezó todo esto (2026-07-28).
-fn ssh_guion(
+pub(crate) fn ssh_guion(
     key: &Path,
     ssh_port: u16,
     guion: &str,
@@ -838,6 +847,36 @@ fn ssh_pipeline(key: &Path, ssh_port: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// `ask` tiene que entregar al modelo exactamente lo que se escribió.
+///
+/// Es el punto entero de este comando, y se rompe con una facilidad enorme: la
+/// shell trocea por `|`, `>` y `<` y no entiende comillas, y hasta hace poco
+/// descartaba en silencio todo byte ≥ 0x80 (adiós tildes). Con `:eco` la
+/// comprobación no depende de lo que conteste un modelo: se compara la línea
+/// devuelta carácter por carácter con la enviada.
+fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let payload = r#"¿2 > 1? | sí, "así" & <ñ>"#;
+    let guion = format!("ask :eco {payload}\nexit\n");
+    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(90))?
+        .replace("\r\n", "\n");
+    // El eco del propio comando aparece primero; interesa la línea de después.
+    let marca = format!("ask :eco {payload}\n");
+    let ini = texto
+        .find(&marca)
+        .ok_or_else(|| format!("no se vio el comando en la salida: {texto:?}"))?
+        + marca.len();
+    let salida = texto[ini..]
+        .lines()
+        .next()
+        .ok_or_else(|| format!("sin respuesta tras el comando: {texto:?}"))?;
+    if salida != payload {
+        return Err(format!(
+            "ask entregó {salida:?} y se escribió {payload:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// `init test`: la batería de regresión de syscalls que corre DENTRO del guest.
 ///
 /// Existía desde la fase 6 y la suite no la ejecutaba: hilos+futex (L3b), estrés
@@ -936,6 +975,7 @@ struct UsbTestScenario {
     log: &'static str,
     xhci: Option<&'static str>,
     usb_kbd: bool,
+    usb_hub: bool,
     extra_serial: Option<&'static str>,
 }
 
@@ -955,6 +995,7 @@ pub fn run_usb() {
             log: "target/test-usb-qemu.log",
             xhci: None,
             usb_kbd: false,
+            usb_hub: false,
             extra_serial: None,
         },
         UsbTestScenario {
@@ -962,6 +1003,7 @@ pub fn run_usb() {
             log: "target/test-usb-nec.log",
             xhci: Some("nec"),
             usb_kbd: false,
+            usb_hub: false,
             extra_serial: None,
         },
         UsbTestScenario {
@@ -969,7 +1011,16 @@ pub fn run_usb() {
             log: "target/test-usb-kbd.log",
             xhci: None,
             usb_kbd: true,
+            usb_hub: false,
             extra_serial: Some("kbd=true"),
+        },
+        UsbTestScenario {
+            name: "BOT hub + teclado HID",
+            log: "target/test-usb-hub.log",
+            xhci: None,
+            usb_kbd: true,
+            usb_hub: true,
+            extra_serial: None,
         },
     ];
 
@@ -1009,6 +1060,9 @@ fn run_usb_scenario(
         if esc.usb_kbd {
             std::env::set_var("SOSO_QEMU_USB_KBD", "1");
         }
+        if esc.usb_hub {
+            std::env::set_var("SOSO_QEMU_USB_HUB", "1");
+        }
     }
 
     let mut qemu = lanzar_qemu_legacy(img, data, models, serial).map_err(|e| e.to_string())?;
@@ -1037,6 +1091,7 @@ fn clear_usb_qemu_env() {
             "SOSO_QEMU_LIVE_USB",
             "SOSO_QEMU_XHCI",
             "SOSO_QEMU_USB_KBD",
+            "SOSO_QEMU_USB_HUB",
             "SOSO_QEMU_USB_HOST",
             "SOSO_QEMU_TRACE_USB",
         ] {

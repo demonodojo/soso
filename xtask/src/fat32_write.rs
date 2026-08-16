@@ -153,6 +153,42 @@ pub fn overwrite_in_dir(
     Ok(size)
 }
 
+/// Lee un fichero contiguo del directorio raíz. Sirve para inspeccionar desde
+/// el host lo que el guest dejó en la ESP (`SOSOBOOT.TXT`, `SOSOLOG.TXT`).
+pub fn read_root_file(
+    img: &Path,
+    part_first_lba: u64,
+    file_name11: &[u8; 11],
+) -> Result<Vec<u8>, String> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .open(img)
+        .map_err(|e| format!("open: {e}"))?;
+    let vol = read_vol(&mut f, part_first_lba)?;
+
+    let fat_bytes = (vol.spf * vol.bps) as usize;
+    let mut fat = vec![0u8; fat_bytes];
+    read_at(&mut f, vol.base + vol.reserved * vol.bps, &mut fat)?;
+
+    let root_cluster = if vol.fat16 {
+        None
+    } else {
+        Some(((vol.root_lba - vol.data_start) / (vol.spc * vol.bps)) as u32 + 2)
+    };
+    let offsets = dir_sector_offsets(&vol, &fat, root_cluster);
+    let (cluster, size) = find_entry(&mut f, &offsets, file_name11, false)?
+        .ok_or_else(|| format!("fichero {:?} no encontrado", ascii(file_name11)))?;
+
+    let cluster_bytes = vol.spc * vol.bps;
+    let mut buf = vec![0u8; size as usize];
+    read_at(
+        &mut f,
+        vol.data_start + (cluster - 2) as u64 * cluster_bytes,
+        &mut buf,
+    )?;
+    Ok(buf)
+}
+
 /// Offsets absolutos (bytes) de los sectores de un directorio: raíz FAT16
 /// (`None`) o cadena de clusters.
 fn dir_sector_offsets(vol: &Vol, fat: &[u8], start_cluster: Option<u32>) -> Vec<u64> {

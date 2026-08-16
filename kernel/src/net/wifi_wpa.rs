@@ -58,20 +58,7 @@ pub fn autoconnect_from_config() -> i32 {
         None => return -1,
     };
     let text = core::str::from_utf8(&data).unwrap_or("");
-    let mut ssid = None;
-    let mut psk = None;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("ssid=") {
-            ssid = Some(v.trim().to_string());
-        } else if let Some(v) = line.strip_prefix("psk=") {
-            psk = Some(v.trim().to_string());
-        }
-    }
-    let Some(ssid) = ssid else {
+    let Some((ssid, psk)) = parse_wifi_conf(text) else {
         crate::println!("wifi-wpa: falta ssid= en /etc/wifi.conf");
         return -1;
     };
@@ -87,6 +74,9 @@ pub fn parse_wifi_conf(text: &str) -> Option<(String, Option<String>)> {
     let mut psk = None;
     for line in text.lines() {
         let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         if let Some(v) = line.strip_prefix("ssid=") {
             ssid = Some(v.trim().to_string());
         } else if let Some(v) = line.strip_prefix("psk=") {

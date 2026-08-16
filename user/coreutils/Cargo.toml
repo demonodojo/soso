@@ -7,3 +7,4 @@ license = "GPL-2.0-only"
 
 [dependencies]
 libsoso = { workspace = true }
+gptdisk = { path = "../../crates/gptdisk" }

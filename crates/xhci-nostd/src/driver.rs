@@ -22,6 +22,7 @@ use crate::hid::{
     BootKeyboardReport, KeyEvent, KeyboardState,
     HID_PROTOCOL_BOOT, HID_REQ_SET_IDLE, HID_REQ_SET_PROTOCOL,
 };
+use crate::mass_storage::MassStorage;
 use crate::dma::delay_us;
 use crate::registers::*;
 use crate::ring::*;
@@ -84,6 +85,16 @@ pub struct XhciController {
     transfer_rings: Vec<Vec<Option<TransferRing>>>,
     /// HID keyboard state (if a keyboard is found)
     keyboard: Option<KeyboardInfo>,
+    /// CCS en puertos root vistos antes de HCRST (bit N = puerto N+1).
+    boot_ccs_mask: u32,
+    /// Primer mass storage BOT activado durante `enumerate_usb_devices`.
+    pub(crate) mass_storage: Option<MassStorage>,
+    /// Búfer de rebote reutilizado por las transferencias bulk (VA, PA, bytes).
+    ///
+    /// El asignador DMA del kernel no libera: pedir uno nuevo en cada comando
+    /// BOT tiraba una copia entera de la imagen a la basura (clonar 8 GiB son
+    /// ~128 000 comandos), y el instalador se quedaba sin memoria contigua.
+    pub(crate) bounce: Option<(*mut u8, u64, usize)>,
 }
 
 /// Keyboard-specific state bundled together.
@@ -189,18 +200,25 @@ impl XhciController {
         let rt = RuntimeRegs::new(cap.runtime_base());
         let db = DoorbellRegs::new(cap.doorbell_base());
 
-        let mut had_ccs_boot = false;
+        let mut boot_ccs_mask = 0u32;
         for port in 1..=max_ports.min(32) {
             let portsc = op.portsc(port);
             let ccs = portsc & PORTSC_CCS != 0;
-            had_ccs_boot |= ccs;
+            if ccs {
+                boot_ccs_mask |= 1 << (port - 1);
+            }
             log::info!(
                 "xhci: boot port {port} PORTSC={portsc:#010x} ccs={ccs} pp={}",
                 portsc & PORTSC_PP != 0,
             );
         }
-        if !had_ccs_boot {
+        if boot_ccs_mask == 0 {
             log::warn!("xhci: UEFI ya soltó todos los puertos (ccs=0); recovery post-HCRST");
+        } else {
+            log::info!(
+                "xhci: boot CCS mask={boot_ccs_mask:#x} ({} puerto(s))",
+                boot_ccs_mask.count_ones()
+            );
         }
 
         linux_bios_handoff(pci_bar0, &cap, &op);
@@ -254,6 +272,9 @@ impl XhciController {
             devices,
             transfer_rings,
             keyboard: None,
+            boot_ccs_mask,
+            mass_storage: None,
+            bounce: None,
         };
 
         ctrl.power_ports();
@@ -276,7 +297,7 @@ impl XhciController {
         self.power_ports();
         self.clear_pcd();
         self.clear_port_change_bits();
-        if self.wait_for_ports_connected(40) {
+        if self.wait_for_boot_ports(40) {
             self.reset_connected_without_ped();
             return;
         }
@@ -291,7 +312,7 @@ impl XhciController {
         delay_us(200_000);
         self.drain_port_events();
         self.clear_port_change_bits();
-        if self.wait_for_ports_connected(40) {
+        if self.wait_for_boot_ports(40) {
             self.reset_connected_without_ped();
             return;
         }
@@ -302,11 +323,21 @@ impl XhciController {
         delay_us(200_000);
         self.drain_port_events();
         self.clear_port_change_bits();
-        if self.wait_for_ports_connected(20) {
+        if self.wait_for_boot_ports(20) {
             self.reset_connected_without_ped();
         } else {
             self.log_root_ports_pls("recovery sin CCS");
-            log::warn!("xhci: recovery sin CCS en ningún puerto root");
+            let missing = self.boot_ccs_mask & !self.current_ccs_mask();
+            if missing != 0 {
+                log::warn!(
+                    "xhci: recovery incompleta — faltan puertos CCS mask={missing:#x} \
+                     (teníamos boot_ccs={:#x}, ahora={:#x})",
+                    self.boot_ccs_mask,
+                    self.current_ccs_mask(),
+                );
+            } else {
+                log::warn!("xhci: recovery sin CCS en ningún puerto root");
+            }
         }
     }
 
@@ -368,12 +399,38 @@ impl XhciController {
     }
 
     fn wait_for_ports_connected(&mut self, max_passes: u32) -> bool {
+        self.wait_for_boot_ports(max_passes)
+    }
+
+    fn current_ccs_mask(&self) -> u32 {
+        let mut mask = 0u32;
+        for port in 1..=self.max_ports() {
+            if self.portsc(port) & PORTSC_CCS != 0 {
+                mask |= 1 << (port - 1);
+            }
+        }
+        mask
+    }
+
+    fn boot_ports_satisfied(&self) -> bool {
+        if self.boot_ccs_mask == 0 {
+            self.any_root_port_connected()
+        } else {
+            (self.current_ccs_mask() & self.boot_ccs_mask) == self.boot_ccs_mask
+        }
+    }
+
+    fn wait_for_boot_ports(&mut self, max_passes: u32) -> bool {
+        let expected = self.boot_ccs_mask.count_ones().max(1);
         for pass in 0..max_passes {
             self.drain_port_events();
             self.clear_pcd();
             self.power_ports();
-            if self.any_root_port_connected() {
-                log::info!("xhci: CCS en puerto root (espera pass {pass})");
+            if self.boot_ports_satisfied() {
+                let now = self.current_ccs_mask().count_ones();
+                log::info!(
+                    "xhci: puertos root recuperados {now}/{expected} CCS esperados (pass {pass})"
+                );
                 return true;
             }
             delay_us(50_000);
@@ -470,6 +527,15 @@ impl XhciController {
                 }
             }
         }
+    }
+
+    /// Una pasada unificada: HID, hubs y mass storage BOT (root o detrás de hub).
+    /// Devuelve el primer BOT con capacidad válida; no para al encontrarlo.
+    pub fn enumerate_usb_devices(&mut self) -> Option<MassStorage> {
+        self.mass_storage = None;
+        self.drain_port_events();
+        self.enumerate_ports();
+        self.mass_storage
     }
 
     /// Reset a port to enable it.
@@ -820,9 +886,17 @@ impl XhciController {
             self.setup_keyboard(slot_id, iface_num, ep_desc);
         }
 
+        if parsed_config.is_mass_storage()
+            && self.devices[slot_id as usize]
+                .as_ref()
+                .is_some_and(|d| d.configured)
+        {
+            self.try_activate_mass_storage(slot_id, &parsed_config);
+        }
+
         if dev_desc.is_hub() {
             log::info!("xhci: hub en slot={} root_port={}", slot_id, path.root_port);
-            self.enumerate_hub_children(slot_id, path.root_port);
+            self.enumerate_hub_children(slot_id, path.root_port, parsed_config.hub_num_ports);
         }
     }
 
@@ -1669,8 +1743,9 @@ impl XhciController {
     fn get_hub_port_count(&mut self, hub_slot: u8) -> Option<u8> {
         let (va, phys) = unsafe { alloc_dma_buffer(16) };
         let ring = self.transfer_rings[hub_slot as usize][1].as_mut()?;
+        // Linux usa bmRequestType 0xA0 (IN | CLASS | DEVICE), no STANDARD.
         let handles = ring.enqueue_control_transfer(
-            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+            USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_DEVICE,
             USB_REQ_GET_DESCRIPTOR,
             (USB_DESC_HUB as u16) << 8,
             0,
@@ -1682,10 +1757,18 @@ impl XhciController {
         if evt.completion_code() != TRB_COMPLETION_SUCCESS
             && evt.completion_code() != TRB_COMPLETION_SHORT_PACKET
         {
+            log::warn!(
+                "xhci: GET hub descriptor slot={hub_slot} code={}",
+                evt.completion_code()
+            );
             return None;
         }
         let data = unsafe { read_dma_buffer(va, 16) };
-        (data.len() >= 3).then_some(data[2])
+        if data.len() >= 3 {
+            log::info!("xhci: hub descriptor slot={hub_slot}: {} puertos", data[2]);
+            return Some(data[2]);
+        }
+        None
     }
 
     fn hub_set_port_feature(&mut self, hub_slot: u8, port: u8, feature: u16) -> bool {
@@ -1783,13 +1866,11 @@ impl XhciController {
         self.hub_wait_port_reset_complete(hub_slot, port)
     }
 
-    fn enumerate_hub_children(&mut self, hub_slot: u8, root_port: u8) {
-        let n_ports = match self.get_hub_port_count(hub_slot) {
-            Some(n) => n,
-            None => {
-                log::warn!("xhci: hub slot={hub_slot} sin descriptor");
-                return;
-            }
+    fn enumerate_hub_children(&mut self, hub_slot: u8, root_port: u8, ports_hint: Option<u8>) {
+        let n_ports = ports_hint.or_else(|| self.get_hub_port_count(hub_slot));
+        let Some(n_ports) = n_ports else {
+            log::warn!("xhci: hub slot={hub_slot} sin descriptor");
+            return;
         };
         log::info!("xhci: hub slot={hub_slot} {n_ports} puertos downstream");
         for hp in 1..=n_ports {

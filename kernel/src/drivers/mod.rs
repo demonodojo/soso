@@ -7,7 +7,11 @@ pub mod fb;
 pub mod gpu;
 pub mod kbd;
 #[cfg(feature = "drv-live-disk")]
+pub mod bootreq;
+#[cfg(feature = "drv-live-disk")]
 pub mod drvlog;
+#[cfg(feature = "drv-live-disk")]
+pub mod espfat;
 #[cfg(feature = "drv-live-disk")]
 pub mod fatlog;
 #[cfg(feature = "drv-live-disk")]

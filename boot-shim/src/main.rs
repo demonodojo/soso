@@ -13,6 +13,8 @@
 
 extern crate alloc;
 
+mod bootentry;
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -44,6 +46,18 @@ fn main() -> Status {
         uefi_rev.minor(),
     );
     write_mark(&head);
+
+    // Antes del chainload: si el instalador dejó una petición en SOSOBOOT.TXT,
+    // este es el único momento en que hay Runtime Services para atenderla.
+    let head = match bootentry::atender() {
+        Some(linea) => {
+            uefi::println!("soso-shim: {linea}");
+            let head = format!("{head}bootentry: {linea}\n");
+            write_mark(&head);
+            head
+        }
+        None => head,
+    };
 
     let loader = match read_loader() {
         Ok(data) => data,
