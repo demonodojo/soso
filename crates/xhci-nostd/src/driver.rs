@@ -51,6 +51,9 @@ const GET_DESCRIPTOR_RETRY_DELAY_US: u32 = 200_000;
 /// Reintentos completos con re-reset de puerto si el descriptor sigue fallando.
 const GET_DESCRIPTOR_TRIES: u32 = 2;
 const EP0_DCI: u8 = 1;
+/// Transfer events de otros slots mientras se espera uno concreto (p. ej. HID
+/// durante BOT del pendrive). Sin cola, `wait_transfer_event` los tiraba.
+const MAX_PENDING_TRANSFERS: usize = 32;
 
 /// Como Linux `XHCI_IRQS`: EIE | HSEIE | EWE.
 const USBCMD_IRQS: u32 = USBCMD_INTE | USBCMD_HSEE | USBCMD_EWE;
@@ -83,8 +86,10 @@ pub struct XhciController {
     devices: Vec<Option<UsbDevice>>,
     /// Transfer rings per slot/endpoint (slot_id -> dci -> ring)
     transfer_rings: Vec<Vec<Option<TransferRing>>>,
-    /// HID keyboard state (if a keyboard is found)
-    keyboard: Option<KeyboardInfo>,
+    /// Teclados HID activos (puede haber más de uno en el mismo xHCI).
+    keyboards: Vec<KeyboardInfo>,
+    /// Transfer completions desviados mientras otro slot esperaba su evento.
+    pending_transfers: Vec<Trb>,
     /// CCS en puertos root vistos antes de HCRST (bit N = puerto N+1).
     boot_ccs_mask: u32,
     /// Primer mass storage BOT activado durante `enumerate_usb_devices`.
@@ -271,7 +276,8 @@ impl XhciController {
             dcbaa,
             devices,
             transfer_rings,
-            keyboard: None,
+            keyboards: Vec::new(),
+            pending_transfers: Vec::new(),
             boot_ccs_mask,
             mass_storage: None,
             bounce: None,
@@ -1494,7 +1500,7 @@ impl XhciController {
             dev.keyboard_endpoint_dci = Some(dci);
         }
 
-        self.keyboard = Some(KeyboardInfo {
+        self.keyboards.push(KeyboardInfo {
             slot_id,
             dci,
             report_buf_va: report_va,
@@ -1508,96 +1514,227 @@ impl XhciController {
     }
 
     // -----------------------------------------------------------------------
+    // Event ring dispatch (un solo consumidor del anillo HW)
+    // -----------------------------------------------------------------------
+
+    fn dequeue_hw_event(&mut self) -> Option<Trb> {
+        let evt = self.evt_ring.dequeue()?;
+        self.rt
+            .set_erdp(0, self.evt_ring.dequeue_phys() | (1 << 3));
+        Some(evt)
+    }
+
+    fn clear_event_interrupt(&mut self) {
+        let iman = self.rt.iman(0);
+        if iman & IMAN_IP != 0 {
+            self.rt.set_iman(0, iman | IMAN_IP);
+        }
+    }
+
+    fn keyboard_index(&self, slot_id: u8, ep_id: u8) -> Option<usize> {
+        self.keyboards
+            .iter()
+            .position(|kb| kb.slot_id == slot_id && kb.dci == ep_id)
+    }
+
+    fn queue_pending(&mut self, evt: Trb) {
+        if self.pending_transfers.len() >= MAX_PENDING_TRANSFERS {
+            log::warn!(
+                "xhci: cola de transferencias llena; descarto slot={} ep={}",
+                evt.slot_id(),
+                evt.endpoint_id()
+            );
+            return;
+        }
+        self.pending_transfers.push(evt);
+    }
+
+    fn handle_keyboard_transfer(&mut self, idx: usize, evt: &Trb) {
+        let code = evt.completion_code();
+        let (slot_id, dci, report_va, report_len, buf_phys) = {
+            let kb = &self.keyboards[idx];
+            (
+                kb.slot_id,
+                kb.dci,
+                kb.report_buf_va,
+                kb.report_buf_len,
+                kb.report_buf_phys,
+            )
+        };
+
+        log::trace!(
+            "xhci: keyboard transfer event: slot={} code={} residual={}",
+            slot_id,
+            code,
+            evt.transfer_length()
+        );
+
+        if code == TRB_COMPLETION_SUCCESS || code == TRB_COMPLETION_SHORT_PACKET {
+            let report_data = unsafe { read_dma_buffer(report_va, report_len) };
+            if let Some(report) = BootKeyboardReport::parse(&report_data) {
+                log::trace!(
+                    "xhci: keyboard report: mods={:#x} keys=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
+                    report.modifiers,
+                    report.keycodes[0],
+                    report.keycodes[1],
+                    report.keycodes[2],
+                    report.keycodes[3],
+                    report.keycodes[4],
+                    report.keycodes[5],
+                );
+                self.keyboards[idx].state.process_report(&report);
+            }
+        } else {
+            log::warn!("xhci: keyboard transfer error: code={}", code);
+        }
+
+        if let Some(ring) = self.transfer_rings[slot_id as usize]
+            .get_mut(dci as usize)
+            .and_then(|r| r.as_mut())
+        {
+            ring.enqueue_interrupt_in(buf_phys, report_len as u32);
+            self.db.ring_endpoint(slot_id, dci);
+        }
+        self.keyboards[idx].transfer_pending = true;
+    }
+
+    /// Despacha un evento del anillo: teclado → rearma IN; otro slot → cola.
+    fn dispatch_event(&mut self, evt: Trb) {
+        let evt_type = evt.trb_type();
+        if evt_type == TRB_TYPE_TRANSFER_EVENT {
+            let slot = evt.slot_id();
+            let ep = evt.endpoint_id();
+            if let Some(idx) = self.keyboard_index(slot, ep) {
+                self.handle_keyboard_transfer(idx, &evt);
+            } else {
+                self.queue_pending(evt);
+            }
+        } else if evt_type == TRB_TYPE_PORT_STATUS_CHANGE {
+            let port_id = (evt.parameter() >> 24) as u8;
+            log::info!("xhci: port status change event: port={}", port_id);
+        } else {
+            log::trace!("xhci: unhandled event type {}", evt_type);
+        }
+    }
+
+    fn drain_hw_events(&mut self) {
+        while let Some(evt) = self.dequeue_hw_event() {
+            self.dispatch_event(evt);
+        }
+        self.clear_event_interrupt();
+    }
+
+    /// ¿Este transfer event satisface la espera activa?
+    fn transfer_matches_wait(
+        evt: &Trb,
+        expected_slot: u8,
+        status_trb_phys: Option<u64>,
+    ) -> bool {
+        if evt.trb_type() != TRB_TYPE_TRANSFER_EVENT || evt.slot_id() != expected_slot {
+            return false;
+        }
+        let code = evt.completion_code();
+        let evt_ptr = evt.parameter() & !0xF;
+        match status_trb_phys {
+            None => true,
+            Some(status_phys) => {
+                let status_ptr = status_phys & !0xF;
+                if evt_ptr == status_ptr {
+                    return true;
+                }
+                if evt.endpoint_id() == EP0_DCI {
+                    if code == TRB_COMPLETION_SHORT_PACKET {
+                        return false;
+                    }
+                    if code != TRB_COMPLETION_SUCCESS {
+                        return true;
+                    }
+                    return false;
+                }
+                false
+            }
+        }
+    }
+
+    /// EP0 en curso: el evento se consumió del anillo pero aún no es la respuesta.
+    fn ep0_wait_continues(evt: &Trb, status_trb_phys: Option<u64>) -> bool {
+        status_trb_phys.is_some()
+            && evt.trb_type() == TRB_TYPE_TRANSFER_EVENT
+            && evt.endpoint_id() == EP0_DCI
+            && (evt.completion_code() == TRB_COMPLETION_SHORT_PACKET
+                || evt.completion_code() == TRB_COMPLETION_SUCCESS)
+    }
+
+    fn take_matching_pending(
+        &mut self,
+        expected_slot: u8,
+        status_trb_phys: Option<u64>,
+    ) -> Option<Trb> {
+        let mut i = 0;
+        while i < self.pending_transfers.len() {
+            let evt = self.pending_transfers[i];
+            if Self::transfer_matches_wait(&evt, expected_slot, status_trb_phys) {
+                return Some(self.pending_transfers.remove(i));
+            }
+            if Self::ep0_wait_continues(&evt, status_trb_phys) && evt.slot_id() == expected_slot {
+                i += 1;
+                continue;
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn try_consume_for_wait(
+        &mut self,
+        evt: Trb,
+        expected_slot: u8,
+        status_trb_phys: Option<u64>,
+    ) -> Option<Trb> {
+        if evt.trb_type() != TRB_TYPE_TRANSFER_EVENT {
+            self.dispatch_event(evt);
+            return None;
+        }
+        if Self::transfer_matches_wait(&evt, expected_slot, status_trb_phys) {
+            return Some(evt);
+        }
+        if Self::ep0_wait_continues(&evt, status_trb_phys) && evt.slot_id() == expected_slot {
+            log::trace!("xhci: EP0 event before status, waiting");
+            return None;
+        }
+        self.dispatch_event(evt);
+        None
+    }
+
+    fn next_buffered_key(&mut self) -> Option<KeyEvent> {
+        for kb in &mut self.keyboards {
+            if let Some(evt) = kb.state.next_event() {
+                return Some(evt);
+            }
+        }
+        None
+    }
+
+    // -----------------------------------------------------------------------
     // Keyboard polling
     // -----------------------------------------------------------------------
 
     /// Poll for keyboard events. Call this from the kernel's main loop or
     /// interrupt handler. Returns the next key event, if any.
     pub fn poll_keyboard(&mut self) -> Option<KeyEvent> {
-        let kb = self.keyboard.as_mut()?;
-
-        // First, check if we have buffered events
-        if let Some(evt) = kb.state.next_event() {
+        if self.keyboards.is_empty() {
+            return None;
+        }
+        if let Some(evt) = self.next_buffered_key() {
             return Some(evt);
         }
-
-        // Check the event ring for transfer completion events
-        while let Some(evt) = self.evt_ring.dequeue() {
-            // Update ERDP
-            self.rt.set_erdp(0, self.evt_ring.dequeue_phys() | (1 << 3));
-
-            let evt_type = evt.trb_type();
-
-            if evt_type == TRB_TYPE_TRANSFER_EVENT {
-                let evt_slot = evt.slot_id();
-                let evt_ep = evt.endpoint_id();
-                let code = evt.completion_code();
-
-                // Re-borrow keyboard info
-                let kb = self.keyboard.as_mut().unwrap();
-
-                if evt_slot == kb.slot_id && evt_ep == kb.dci {
-                    log::trace!(
-                        "xhci: keyboard transfer event: code={} residual={}",
-                        code,
-                        evt.transfer_length()
-                    );
-
-                    if code == TRB_COMPLETION_SUCCESS || code == TRB_COMPLETION_SHORT_PACKET {
-                        let report_len = kb.report_buf_len;
-                        let report_data = unsafe {
-                            read_dma_buffer(kb.report_buf_va, report_len)
-                        };
-
-                        if let Some(report) = BootKeyboardReport::parse(&report_data) {
-                            log::trace!(
-                                "xhci: keyboard report: mods={:#x} keys=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
-                                report.modifiers,
-                                report.keycodes[0], report.keycodes[1], report.keycodes[2],
-                                report.keycodes[3], report.keycodes[4], report.keycodes[5],
-                            );
-                            kb.state.process_report(&report);
-                        }
-                    } else {
-                        log::warn!("xhci: keyboard transfer error: code={}", code);
-                    }
-
-                    // Re-queue the interrupt transfer
-                    let buf_phys = kb.report_buf_phys;
-                    let buf_len = kb.report_buf_len as u32;
-                    let slot_id = kb.slot_id;
-                    let dci = kb.dci;
-
-                    if let Some(ring) = self.transfer_rings[slot_id as usize]
-                        .get_mut(dci as usize)
-                        .and_then(|r| r.as_mut())
-                    {
-                        ring.enqueue_interrupt_in(buf_phys, buf_len);
-                        self.db.ring_endpoint(slot_id, dci);
-                    }
-                }
-            } else if evt_type == TRB_TYPE_PORT_STATUS_CHANGE {
-                let port_id = (evt.parameter() >> 24) as u8;
-                log::info!("xhci: port status change event: port={}", port_id);
-            } else {
-                log::trace!("xhci: unhandled event type {} during keyboard poll", evt_type);
-            }
-        }
-
-        // Clear any pending interrupt
-        let iman = self.rt.iman(0);
-        if iman & IMAN_IP != 0 {
-            self.rt.set_iman(0, iman | IMAN_IP); // W1C to clear IP
-        }
-
-        // Return buffered event if any were generated
-        let kb = self.keyboard.as_mut()?;
-        kb.state.next_event()
+        self.drain_hw_events();
+        self.next_buffered_key()
     }
 
     /// Check if a keyboard has been found and initialized.
     pub fn has_keyboard(&self) -> bool {
-        self.keyboard.is_some()
+        !self.keyboards.is_empty()
     }
 
     // -----------------------------------------------------------------------
@@ -1613,57 +1750,19 @@ impl XhciController {
     ) -> Option<Trb> {
         let mut elapsed = 0u32;
         while elapsed < TRANSFER_TIMEOUT_US {
-            if let Some(evt) = self.evt_ring.dequeue() {
-                // Update ERDP
-                self.rt.set_erdp(0, self.evt_ring.dequeue_phys() | (1 << 3));
+            if let Some(evt) = self.take_matching_pending(expected_slot, status_trb_phys) {
+                return Some(evt);
+            }
 
-                let evt_type = evt.trb_type();
-
-                if evt_type == TRB_TYPE_TRANSFER_EVENT {
-                    if evt.slot_id() != expected_slot {
-                        log::trace!(
-                            "xhci: transfer event slot {} (expected {})",
-                            evt.slot_id(),
-                            expected_slot
-                        );
-                        continue;
-                    }
-
-                    let code = evt.completion_code();
-                    let evt_ptr = evt.parameter() & !0xF;
-
-                    match status_trb_phys {
-                        None => return Some(evt),
-                        Some(status_phys) => {
-                            let status_ptr = status_phys & !0xF;
-                            if evt_ptr == status_ptr {
-                                return Some(evt);
-                            }
-                            // Short packet en Data Stage: seguir esperando Status.
-                            if code == TRB_COMPLETION_SHORT_PACKET && evt.endpoint_id() == EP0_DCI
-                            {
-                                log::debug!("xhci: EP0 data short packet, waiting for status");
-                                continue;
-                            }
-                            // Error en Setup/Data: devolver de inmediato.
-                            if code != TRB_COMPLETION_SUCCESS {
-                                return Some(evt);
-                            }
-                            log::trace!("xhci: EP0 event before status, waiting");
-                            continue;
-                        }
-                    }
+            if let Some(evt) = self.dequeue_hw_event() {
+                if let Some(matched) =
+                    self.try_consume_for_wait(evt, expected_slot, status_trb_phys)
+                {
+                    return Some(matched);
                 }
-
-                if evt_type == TRB_TYPE_PORT_STATUS_CHANGE {
-                    let port_id = (evt.parameter() >> 24) as u8;
-                    log::debug!("xhci: port status change during transfer wait: port={}", port_id);
-                    continue;
-                }
-
-                log::trace!("xhci: unexpected event type {} during transfer wait", evt_type);
                 continue;
             }
+
             delay_us(EVENT_POLL_INTERVAL_US);
             elapsed += EVENT_POLL_INTERVAL_US;
         }
@@ -1706,15 +1805,9 @@ impl XhciController {
         UsbSpeed::from_port_speed(self.op.port_speed(port))
     }
 
-    /// Procesa eventos de cambio de puerto pendientes (re-conexión tras HCRST).
+    /// Procesa eventos pendientes en el anillo (re-conexión, teclado, cola).
     pub fn drain_port_events(&mut self) {
-        while let Some(evt) = self.evt_ring.dequeue() {
-            self.rt.set_erdp(0, self.evt_ring.dequeue_phys() | (1 << 3));
-            if evt.trb_type() == TRB_TYPE_PORT_STATUS_CHANGE {
-                let port_id = (evt.parameter() >> 24) as u8;
-                log::info!("xhci: port status change port={port_id}");
-            }
-        }
+        self.drain_hw_events();
     }
 
     /// Estado de cada puerto root (diagnóstico en placa).
@@ -2103,5 +2196,77 @@ impl XhciController {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod event_dispatch_tests {
+    use alloc::vec::Vec;
+
+    use super::XhciController;
+    use crate::ring::{
+        Trb, TRB_COMPLETION_CODE_SHIFT, TRB_COMPLETION_SHORT_PACKET, TRB_COMPLETION_SUCCESS,
+        TRB_ENDPOINT_ID_SHIFT, TRB_SLOT_ID_SHIFT, TRB_TYPE_SHIFT, TRB_TYPE_TRANSFER_EVENT,
+    };
+
+    fn transfer_evt(slot: u8, ep: u8, completion: u8, param: u64) -> Trb {
+        Trb {
+            parameter_lo: param as u32,
+            parameter_hi: (param >> 32) as u32,
+            status: (completion as u32) << TRB_COMPLETION_CODE_SHIFT,
+            control: (TRB_TYPE_TRANSFER_EVENT << TRB_TYPE_SHIFT)
+                | ((slot as u32) << TRB_SLOT_ID_SHIFT)
+                | ((ep as u32) << TRB_ENDPOINT_ID_SHIFT),
+        }
+    }
+
+    #[test]
+    fn bulk_wait_matches_same_slot_only() {
+        let disk = transfer_evt(1, 2, TRB_COMPLETION_SUCCESS, 0);
+        let kbd = transfer_evt(3, 3, TRB_COMPLETION_SUCCESS, 0);
+        assert!(XhciController::transfer_matches_wait(&disk, 1, None));
+        assert!(!XhciController::transfer_matches_wait(&kbd, 1, None));
+    }
+
+    #[test]
+    fn ep0_status_wait_matches_status_trb_only() {
+        let status_phys = 0x20ab_c000u64;
+        let status_evt = transfer_evt(2, 1, TRB_COMPLETION_SUCCESS, status_phys);
+        let data_evt = transfer_evt(2, 1, TRB_COMPLETION_SHORT_PACKET, 0x1000);
+        assert!(XhciController::transfer_matches_wait(
+            &status_evt,
+            2,
+            Some(status_phys)
+        ));
+        assert!(!XhciController::transfer_matches_wait(
+            &data_evt,
+            2,
+            Some(status_phys)
+        ));
+        assert!(XhciController::ep0_wait_continues(
+            &data_evt,
+            Some(status_phys)
+        ));
+    }
+
+    #[test]
+    fn pending_queue_preserves_alien_slot_for_later() {
+        let mut pending = Vec::new();
+        let kbd = transfer_evt(3, 3, TRB_COMPLETION_SUCCESS, 0);
+        let disk = transfer_evt(1, 2, TRB_COMPLETION_SUCCESS, 0);
+        pending.push(kbd);
+        pending.push(disk);
+
+        let take = |pending: &mut Vec<Trb>, slot: u8| -> Option<Trb> {
+            let i = pending
+                .iter()
+                .position(|evt| XhciController::transfer_matches_wait(evt, slot, None))?;
+            Some(pending.remove(i))
+        };
+
+        assert_eq!(take(&mut pending, 1).unwrap().slot_id(), 1);
+        assert!(take(&mut pending, 1).is_none());
+        assert_eq!(take(&mut pending, 3).unwrap().slot_id(), 3);
+        assert!(pending.is_empty());
     }
 }

@@ -16,6 +16,7 @@ members = [
     "tools/convert-gguf",
     "crates/gguf2som",
     "crates/soso-http",
+    "crates/xhci-nostd",
     "tools/cuda-proxy",
 ]
 # El kernel y el userspace se compilan para x86_64-unknown-none (y el shim de

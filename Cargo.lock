@@ -799,6 +799,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xhci-nostd"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "xtask"
 version = "0.1.0"
 dependencies = [

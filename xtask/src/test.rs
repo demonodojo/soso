@@ -95,6 +95,8 @@ struct QemuSlot {
     models: PathBuf,
     mem: Option<String>,
     smp: Option<String>,
+    /// Socket UNIX del monitor QEMU (`sendkey` tras I/O USB).
+    monitor: Option<PathBuf>,
 }
 
 struct Report {
@@ -349,6 +351,7 @@ fn make_slot(shard: ShardId, img: &Path, data: &Path, models: &Path) -> QemuSlot
             ShardId::LlmDense => Some("2".into()),
             _ => None,
         },
+        monitor: None,
     }
 }
 
@@ -563,6 +566,13 @@ fn lanzar_qemu(slot: &QemuSlot) -> std::io::Result<Child> {
     super::apply_qemu_usb(&mut qemu);
     super::apply_qemu_nic_with_ports(&mut qemu, slot.ssh_port, slot.echo_port, Some(&slot.mac));
     super::apply_qemu_gpu(&mut qemu);
+    if let Some(mon) = &slot.monitor {
+        let _ = std::fs::remove_file(mon);
+        qemu.args([
+            "-monitor",
+            &format!("unix:{},server,nowait", mon.display()),
+        ]);
+    }
     qemu.args(["-serial", &format!("file:{}", slot.serial.display())])
         .args(["-display", "none"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
@@ -602,8 +612,41 @@ fn lanzar_qemu_legacy_ports(
         models: models.to_path_buf(),
         mem: None,
         smp: None,
+        monitor: None,
     };
     lanzar_qemu(&slot)
+}
+
+fn qemu_monitor_cmd(mon: &Path, cmd: &str) -> Result<(), String> {
+    use std::os::unix::net::UnixStream;
+
+    for _ in 0..100 {
+        if mon.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut s = UnixStream::connect(mon).map_err(|e| format!("monitor {mon:?}: {e}"))?;
+    s.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    s.write_all(format!("{cmd}\n").as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Tras I/O del BOT en xHCI, el teclado HID debe seguir respondiendo en serie.
+fn usb_kbd_vivo_despues_io(
+    key: &Path,
+    ssh_port: u16,
+    serial: &Path,
+    monitor: &Path,
+) -> Result<(), String> {
+    ssh_guion(key, ssh_port, "ls /models\nexit\n", Duration::from_secs(120))?;
+    std::thread::sleep(Duration::from_secs(1));
+    for k in ["h", "e", "l", "p", "ret"] {
+        qemu_monitor_cmd(monitor, &format!("sendkey {k}"))?;
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    esperar_en_fichero(serial, "builtins:", Duration::from_secs(30))
 }
 
 /// Espera a que aparezca `patron` en el fichero de serie.
@@ -1174,16 +1217,28 @@ fn run_usb_scenario(
         }
     }
 
-    let mut qemu = lanzar_qemu_legacy_ports(
-        img,
-        data,
-        models,
-        serial,
+    let root = super::project_root();
+    let monitor = if esc.usb_kbd {
+        Some(root.join(format!("target/test-usb-{}-mon.sock", esc.id)))
+    } else {
+        None
+    };
+
+    let slot = QemuSlot {
+        id: "usb",
         ssh_port,
         echo_port,
-        &mac,
-    )
-    .map_err(|e| e.to_string())?;
+        mac: mac.into(),
+        serial: serial.to_path_buf(),
+        bios: img.to_path_buf(),
+        data: data.to_path_buf(),
+        models: models.to_path_buf(),
+        mem: None,
+        smp: None,
+        monitor: monitor.clone(),
+    };
+
+    let mut qemu = lanzar_qemu(&slot).map_err(|e| e.to_string())?;
     drop(_env_guard);
     clear_usb_qemu_env();
 
@@ -1195,6 +1250,13 @@ fn run_usb_scenario(
             let _ = qemu.kill();
             let _ = qemu.wait();
             return Err(format!("no apareció {patron:?} ni «teclado HID» en el log serie"));
+        }
+    }
+
+    if esc.usb_kbd {
+        let key = root.join("target/soso_test_key");
+        if let Some(ref mon) = monitor {
+            usb_kbd_vivo_despues_io(&key, ssh_port, serial, mon)?;
         }
     }
 
