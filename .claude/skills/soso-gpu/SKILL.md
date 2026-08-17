@@ -104,6 +104,33 @@ Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
 5. **Enlace PCIe Gen5 en FMC**: inestable durante reset FMC bajo VFIO → cap Gen3
    automático; **bump Gen4/5 post-GSP es GO** (2026-07-30, tabla arriba).
 
+### Gotchas cerrados el 2026-08-17 (subida de pesos)
+
+6. **«offload GPU desactivado — subida de pesos» no era la GPU**: `sys_gpu_map`
+   validaba con `user_range_ok`, que da **EFAULT a todo `len > 16 MiB`**. Se sube
+   f32 descuantizado, así que `ffn_up`/`ffn_down` de TinyLlama (5632×2048 = 44 MiB)
+   morían en la syscall, en la capa 0 del primer token. Invisible hasta la placa:
+   `bench-model` es 1024/3072 (12 MiB) y `attn_q` de TinyLlama son 16 MiB **exactos**
+   (el test es `>`, pasa por un byte). Ahora `gpu_map`/`gpu_read` usan
+   `user_range_ok_bulk` y `init test` sube 20 MiB con centinelas en los dos extremos.
+7. **`gsp_ready()` no significa que haya pool de VRAM**: es cierto ya con `booted`
+   —y con `booted_soft`—, pero el pool lo monta `gsp_buf_init` al final de
+   RM → VMM → canal/CE, cadena que **sólo corre en la rama Blackwell/FMC**. En la
+   ROG (ga107) `alloc` pedía al pool, recibía 0 y **caía en silencio a un búfer del
+   heap del kernel**: `gpu_map` decía OK y `MATVF`, sin `device_va`, multiplicaba
+   con el bucle de CPU del kernel. Todo decía «offload» sin un byte en la tarjeta.
+   Ahora `device_bufs_available` pregunta por el pool (`lx_nouveau_buf_ready`),
+   `GPU_ALLOC_VRAM` falla con ENOTSUP, el arranque dice `pool VRAM=no` y
+   `GpuInfo::vram_bufs` lo lleva a userspace.
+8. **Subir sin copias**: `gsp_buf_upload_at` (offset dentro del slot) para trocear
+   desde el kernel, y `gsp_buf_upload_dma`, que mapea las páginas del proceso en
+   `G6_SRC_VA` y deja que el CE lea de ellas — un `LAUNCH_DMA` por lote de 16 MiB
+   en vez de uno por MiB de rebote. Exige todo alineado a página (la multilínea es
+   la única probada en silicio por encima de 4 KiB) y **fijar las páginas**
+   (`mm::reclaim::pin_range`): son mmap RO de pesos, las primeras que se desalojan.
+   Validado en `scripts/l6-g3-gsp-hostcheck.sh` (encoding y rechazos), **no en
+   silicio**: hace falta un ciclo VFIO en la GB205 con TinyLlama.
+
 **G1 superado (2026-07-25).** Con VT-d activo en la BIOS y el bind persistente puesto
 (`l6-g1-vfio-persist.sh --enable` + reboot), `sudo ./scripts/l6-g1-vfio-test.sh` da GO:
 soso lee `NV_PMC_BOOT_0=0x1b5000a1` de la BAR0 real (`familia=Blackwell (gb20x)`).

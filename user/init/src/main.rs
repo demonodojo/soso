@@ -694,6 +694,44 @@ fn suite() -> u8 {
                     let _ = sys::gpu_free(xh);
                     let _ = sys::gpu_free(yh);
                 }
+
+                // Y una subida GRANDE a VRAM, que es lo que rompía en la placa:
+                // los `ffn_up`/`ffn_down` de TinyLlama son 44 MiB en f32 y la
+                // syscall los rechazaba con EFAULT por un techo de 16 MiB. Aquí es
+                // además la única prueba en silicio del camino sin copias (el CE
+                // leyendo de las páginas del proceso): el origen viene de `mmap`,
+                // así que está alineado a página y entra por ahí.
+                if info.vram_bufs == 1 {
+                    const GRANDE: u64 = 20 * 1024 * 1024;
+                    let src = sys::mmap(0, GRANDE, u64::MAX, 0);
+                    let h = sys::gpu_alloc_vram(GRANDE);
+                    if src > 0 && h >= 0 {
+                        unsafe {
+                            (src as *mut u32).write(0xa5a5_a5a5);
+                            ((src as u64 + GRANDE - 4) as *mut u32).write(0x5a5a_5a5a);
+                        }
+                        let rc = sys::gpu_map(h as u64, src as u64, GRANDE);
+                        check!(
+                            rc == 0,
+                            "SONDA GPU: subida de {} MiB a VRAM (rc={rc}) — el tamaño \
+                             que la syscall rechazaba",
+                            GRANDE / (1024 * 1024)
+                        );
+                        let _ = sys::gpu_free(h as u64);
+                    } else {
+                        println!(
+                            "init: sin sitio para la sonda grande (mmap={src} handle={h})"
+                        );
+                    }
+                    if src > 0 {
+                        sys::munmap(src as u64, GRANDE);
+                    }
+                } else {
+                    let fase = libsoso::str_hasta_nul(&info.phase);
+                    println!(
+                        "init: sin pool de VRAM (fase «{fase}») — la sonda de subida grande no aplica"
+                    );
+                }
             }
         } else {
             let mut info = abi::GpuInfo::default();
@@ -830,6 +868,63 @@ fn suite() -> u8 {
                         sys::munmap(map as u64, st_ro.size.next_multiple_of(4096) as u64);
                         sys::close(fd as u64);
                     }
+                }
+            }
+
+            // Una subida MAYOR DE 16 MiB, que es el agujero que dejó la placa en
+            // rojo el 2026-08-17: `gpu_map` y `gpu_read` validaban el rango con el
+            // techo de un búfer de syscall normal, así que cualquier tensor por
+            // encima daba EFAULT — y ni un test subía más de unos KiB, así que el
+            // primer sitio donde se vio fue TinyLlama en la placa, con sus
+            // `ffn_up`/`ffn_down` de 44 MiB en f32, disfrazado de «subida de
+            // pesos» del offload. 20 MiB es lo justo para pasarse del techo.
+            //
+            // Anónimo y no un `Vec`: hace falta que el rango exista sin haber sido
+            // tocado, que es además el caso que materializa la propia syscall.
+            {
+                const GRANDE: u64 = 20 * 1024 * 1024;
+                let src = sys::mmap(0, GRANDE, u64::MAX, 0);
+                let dst = sys::mmap(0, GRANDE, u64::MAX, 0);
+                check!(src > 0 && dst > 0, "mmap ×2 de {} MiB", GRANDE / (1024 * 1024));
+                // GART y no VRAM: el ida y vuelta necesita que el búfer sea
+                // legible desde la CPU, y un búfer del dispositivo no lo es
+                // (`gpu_read` da ENOSYS sobre VRAM residente). Da igual para lo
+                // que se comprueba: el techo estaba en la SYSCALL, no en el tipo
+                // de búfer. La variante en VRAM va justo debajo.
+                let h = sys::gpu_alloc(GRANDE);
+                check!(h >= 0, "gpu_alloc de {} MiB (rc={h})", GRANDE / (1024 * 1024));
+                if src > 0 && dst > 0 && h >= 0 {
+                    let (h, src, dst) = (h as u64, src as u64, dst as u64);
+                    // Centinelas en los dos extremos: el del final es el que caza un
+                    // recorte silencioso, que es el fallo que un tope disfraza.
+                    let primero = 0xa5a5_a5a5u32;
+                    let ultimo = 0x5a5a_5a5au32;
+                    unsafe {
+                        (src as *mut u32).write(primero);
+                        ((src + GRANDE - 4) as *mut u32).write(ultimo);
+                    }
+                    let rc = sys::gpu_map(h, src, GRANDE);
+                    check!(rc == 0, "gpu_map de {} MiB (rc={rc})", GRANDE / (1024 * 1024));
+                    let rc = sys::gpu_read(h, dst, GRANDE);
+                    check!(rc == 0, "gpu_read de {} MiB (rc={rc})", GRANDE / (1024 * 1024));
+                    let (a, b) = unsafe {
+                        (
+                            (dst as *const u32).read(),
+                            ((dst + GRANDE - 4) as *const u32).read(),
+                        )
+                    };
+                    check!(
+                        a == primero && b == ultimo,
+                        "la subida grande vuelve entera (0x{a:08x}/0x{b:08x} \
+                         esperado 0x{primero:08x}/0x{ultimo:08x})"
+                    );
+                    // Y el tope del BÚFER sigue en pie: lo que se quitó es el techo
+                    // de la syscall, no la comprobación de que el destino quepa.
+                    let rc = sys::gpu_map(h, src, GRANDE + 4);
+                    check!(rc == -abi::EINVAL, "pasarse del búfer sigue dando EINVAL (rc={rc})");
+                    let _ = sys::gpu_free(h);
+                    sys::munmap(src, GRANDE);
+                    sys::munmap(dst, GRANDE);
                 }
             }
 

@@ -3287,6 +3287,149 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                "una línea\n", size, size / GSP_CE_LINE_BYTES);
     }
 
+    /* --- G6: subida a un offset del búfer y subida por DMA sin copia de CPU ---
+     *
+     * Las dos nacieron del mismo fallo (2026-08-17): el kernel copiaba el tensor
+     * ENTERO a un temporal de su heap —44 MiB en TinyLlama— porque esta capa sólo
+     * aceptaba la VA base del slot. Con `offset` puede subir a trozos, y con la
+     * variante DMA no copia nada: mapea las páginas del proceso en `G6_SRC_VA` y
+     * el CE lee de ahí. Nada de esto se puede probar en la placa Ampere (no llega
+     * a haber pool), así que el encoding y los rechazos se juzgan aquí. */
+    {
+        struct gsp_buf buf;
+        struct gsp_dma_buf rebote;
+        struct gsp_dma_buf origen;
+        static unsigned char datos[3u * 4096u];
+        uint64_t va, phys[3], phys_leida = 0, pte = 0;
+        unsigned antes, i;
+        const uint32_t *pb;
+        uint32_t hi = 0, lo = 0, lines = 0, launch = 0;
+        uint64_t dst, src;
+
+        /* El semáforo del CE no lo firma nadie en el host: se deja por encima de
+         * cualquier payload futuro para que la espera pase y lo que se juzgue sea
+         * el pushbuffer, que es lo que este banco sí puede leer. */
+        *(volatile uint32_t *)chan.notifier.va = 0x40000000u;
+
+        if (gsp_dma_alloc(&rebote, 8u * 4096u, "rebote G6") != 0 ||
+            gsp_vmm_map(&v, G6_BOUNCE_VA, rebote.phys, 8u * 4096u,
+                        GSP_VMM_SYSMEM) != 0) {
+            printf("FALLO: rebote G6\n");
+            return -1;
+        }
+        if (gsp_buf_init(&buf, &pool, &v, &ce, G6_BOUNCE_VA, rebote.va,
+                         8u * 4096u) != 0) {
+            printf("FALLO: gsp_buf_init\n");
+            return -1;
+        }
+        va = gsp_buf_alloc(&buf, 3u * 4096u);
+        if (!va) {
+            printf("FALLO: gsp_buf_alloc\n");
+            return -1;
+        }
+
+        /* Con offset, el destino del CE es va+offset y no la base del slot. */
+        memset(datos, 0xab, sizeof(datos));
+        antes = chan.pb_pos;
+        if (gsp_buf_upload_at(&buf, va, 4096u, datos, 4096u) != 0) {
+            printf("FALLO: gsp_buf_upload_at\n");
+            return -1;
+        }
+        pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + antes);
+        if (pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_OFFSET_OUT_UPPER, &hi) != 0 ||
+            pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_OFFSET_OUT_LOWER, &lo) != 0) {
+            printf("FALLO: al pushbuffer de la subida le falta OFFSET_OUT\n");
+            return -1;
+        }
+        dst = ((uint64_t)hi << 32) | lo;
+        if (dst != va + 4096ull) {
+            printf("FALLO: subida con offset escribe en 0x%llx (esperaba 0x%llx)\n",
+                   (unsigned long long)dst, (unsigned long long)(va + 4096ull));
+            return -1;
+        }
+        printf("OK: gsp_buf_upload_at copia a va+offset (0x%llx)\n",
+               (unsigned long long)dst);
+
+        /* Y lo que NO puede hacer: salirse del slot (pisaría el tensor de al lado
+         * y el síntoma saldría capas después, en otro peso) ni empezar a mitad de
+         * página (la copia dejaría de ser la multilínea probada). */
+        if (gsp_buf_upload_at(&buf, va, 4096u, datos, 3u * 4096u) == 0 ||
+            gsp_buf_upload_at(&buf, va, 100u, datos, 4096u) == 0) {
+            printf("FALLO: la subida con offset acepta pasarse del búfer o sin alinear\n");
+            return -1;
+        }
+        printf("OK: subida con offset rechaza pasarse del búfer y el offset sin alinear\n");
+
+        /* DMA: el origen son páginas ajenas, se mapean en G6_SRC_VA y el CE lee
+         * de ahí. Un solo LAUNCH_DMA para todo el lote. */
+        if (gsp_dma_alloc(&origen, 3u * 4096u, "origen G6") != 0) {
+            printf("FALLO: origen G6\n");
+            return -1;
+        }
+        for (i = 0; i < 3u; i++) {
+            phys[i] = origen.phys + (uint64_t)i * 4096ull;
+        }
+        antes = chan.pb_pos;
+        if (gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 3u * 4096u) != 0) {
+            printf("FALLO: gsp_buf_upload_dma\n");
+            return -1;
+        }
+        for (i = 0; i < 3u; i++) {
+            if (gsp_vmm_translate(&v, G6_SRC_VA + (uint64_t)i * 4096ull,
+                                  &phys_leida, &pte) != 0 ||
+                phys_leida != phys[i]) {
+                printf("FALLO: la ventana del origen traduce la página %u a 0x%llx "
+                       "(esperaba 0x%llx)\n", i, (unsigned long long)phys_leida,
+                       (unsigned long long)phys[i]);
+                return -1;
+            }
+        }
+        pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + antes);
+        if (pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_OFFSET_IN_UPPER, &hi) != 0 ||
+            pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_OFFSET_IN_LOWER, &lo) != 0) {
+            printf("FALLO: al pushbuffer del DMA le falta OFFSET_IN\n");
+            return -1;
+        }
+        src = ((uint64_t)hi << 32) | lo;
+        if (pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_LINE_COUNT, &lines) != 0 ||
+            pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_LAUNCH_DMA, &launch) != 0) {
+            printf("FALLO: al pushbuffer del DMA le faltan métodos\n");
+            return -1;
+        }
+        if (src != G6_SRC_VA || lines != 3u ||
+            !(launch & NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE)) {
+            printf("FALLO: DMA src=0x%llx lines=%u launch=0x%08x\n",
+                   (unsigned long long)src, lines, launch);
+            return -1;
+        }
+        printf("OK: subida por DMA — origen mapeado en G6_SRC_VA y UN LAUNCH_DMA "
+               "de %u líneas, sin copia de CPU\n", lines);
+
+        /* Y sus rechazos, todos antes de tocar el CE: si la lista de páginas no
+         * cuadra con el tamaño, el mapeo y la copia dirían cosas distintas. */
+        if (gsp_buf_upload_dma(&buf, va, 0, phys, 2u, 3u * 4096u) == 0 ||
+            gsp_buf_upload_dma(&buf, va, 0, phys, 3u, G6_SRC_MAX + 4096ull) == 0 ||
+            gsp_buf_upload_dma(&buf, va, 100u, phys, 3u, 3u * 4096u) == 0) {
+            printf("FALLO: el DMA acepta una lista que no cuadra, pasarse de "
+                   "ventana o un offset sin alinear\n");
+            return -1;
+        }
+        {
+            uint64_t torcida[3];
+
+            for (i = 0; i < 3u; i++) {
+                torcida[i] = phys[i] + 8ull;
+            }
+            if (gsp_buf_upload_dma(&buf, va, 0, torcida, 3u, 3u * 4096u) == 0) {
+                printf("FALLO: el DMA acepta físicas sin alinear a página\n");
+                return -1;
+            }
+        }
+        printf("OK: el DMA rechaza lista descuadrada, ventana pasada, offset y "
+               "físicas sin alinear\n");
+        gsp_buf_fini(&buf);
+    }
+
     /* --- G4f/G5: canal de GR0 + compute + QMD inline --- */
     if (gsp_chan_init(&v.rm, &v, &pool, &chan_gr, v.vaspace, 1u,
                       NV2080_ENGINE_TYPE_GR0) != 0) {

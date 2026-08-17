@@ -38,6 +38,22 @@
 #define G6_BOUNCE_VA     (GSP_VA_BASE + 0x30400000ull)
 #define G6_BOUNCE_BYTES  0x100000u
 
+/* Ventana para el ORIGEN de las subidas por DMA: aquí se mapean las páginas del
+ * propio búfer del proceso y el CE lee de ellas, sin copia intermedia. Se
+ * remapea en cada lote (`gsp_vmm_map` ya invalida la TLB de la MMU al terminar,
+ * y no hay `unmap` que hacer).
+ *
+ * El hueco: el rebote acaba en +0x30500000 y el grctx empieza en +0x40000000,
+ * así que 16 MiB en +0x31000000 quedan lejos de los dos. NO usar la zona de
+ * +0x40000000: ahí está el grctx y pisarlo da un GR_EXCEPTION sin falta de MMU
+ * (ver la avería del 2026-08-02 arriba).
+ *
+ * 16 MiB de lote es un equilibrio: la lista de físicas que el kernel prepara son
+ * 8 bytes por página (4096 entradas), y cada lote es UN LAUNCH_DMA con una sola
+ * espera de semáforo — contra los 44 que salían subiendo de MiB en MiB. */
+#define G6_SRC_VA        (GSP_VA_BASE + 0x31000000ull)
+#define G6_SRC_MAX       (16ull * 1024ull * 1024ull)
+
 struct gsp_buf {
     struct gsp_vram *vram;
     struct gsp_vmm *vmm;
@@ -67,6 +83,28 @@ uint64_t gsp_buf_alloc(struct gsp_buf *b, uint64_t size);
 
 /* Copia `size` bytes desde `src` (sysmem CPU) a la VA residente. */
 int gsp_buf_upload(struct gsp_buf *b, uint64_t va, const void *src, uint64_t size);
+
+/* Igual, pero a `offset` bytes del principio del búfer. Existe para que el
+ * kernel pueda subir un tensor a trozos: sin offset tenía que copiarlo ENTERO a
+ * un temporal de su heap antes de llamar aquí (44 MiB por subida en TinyLlama),
+ * porque esta función sólo aceptaba la VA base del slot. `offset` ha de ser
+ * múltiplo de página, como `size` salvo el rabo final. */
+int gsp_buf_upload_at(struct gsp_buf *b, uint64_t va, uint64_t offset,
+                      const void *src, uint64_t size);
+
+/* Sube SIN copia de CPU: `phys` son las físicas de las páginas del origen (en
+ * orden), se mapean en `G6_SRC_VA` y el CE copia de ahí a la VRAM del slot.
+ *
+ * Exige todo alineado a página —`offset`, el origen (implícito en que se den
+ * páginas enteras) y `size` salvo el rabo final— porque la copia multilínea del
+ * CE con pitch de página es la única probada en silicio para más de 4 KiB
+ * (`gsp_ce_encode_copy`). Si el llamante no puede cumplirlo, tiene
+ * `gsp_buf_upload_at`, que rebota por sysmem propia.
+ *
+ * Devuelve 0, o -1 sin haber tocado el CE si algo no encaja (y entonces el
+ * llamante puede rebotar). */
+int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
+                       const uint64_t *phys, unsigned npages, uint64_t size);
 
 /* Libera la VA; devuelve 0 si ok, -1 si no existía. */
 int gsp_buf_free(struct gsp_buf *b, uint64_t va);

@@ -723,6 +723,38 @@ las subidas de pesos sean menos que los matvec. En el host, `generate.rs` prueba
 despacho completo contra un dispositivo de mentira y exige los MISMOS tokens que la
 ruta de CPU.
 
+**El techo de 16 MiB que dejó a TinyLlama fuera de la GPU (2026-08-17).** En la
+placa, `ask hola` decía `offload GPU desactivado — subida de pesos` y la GPU no
+tenía nada que ver: `sys_gpu_map` validaba el rango con `user_range_ok`, que
+rechaza con EFAULT todo `len > 16 MiB`. Como lo que se sube es siempre f32
+descuantizado, los `ffn_up`/`ffn_down` de TinyLlama (5632×2048 → **44 MiB**)
+morían en la primera capa del primer token. No salió antes porque todo lo probado
+quedaba debajo: `bench-model` es 1024/3072 (12 MiB) y `attn_q` de TinyLlama son
+16 MiB **exactos**, que pasan por un byte. Arreglado en tres capas:
+
+1. `gpu_map`/`gpu_read` tienen su propio validador (`user_range_ok_bulk`), sin el
+   techo de un búfer de syscall normal y recorriendo el rango en tramos de 2 MiB
+   —por página eran ~11 000 tomas de `PROCS` por tensor—. El tamaño lo acota el
+   búfer del dispositivo, comprobado **antes** de materializar páginas.
+2. El kernel ya no copia el tensor entero a su heap: `gsp_buf_upload_at` acepta un
+   offset dentro del slot y la subida va en trozos de 2 MiB. Antes eran 44 MiB
+   contiguos de un heap de 512 MiB por cada peso.
+3. Y por encima de eso, `gsp_buf_upload_dma`: las páginas del propio proceso se
+   mapean en `G6_SRC_VA` y **el CE lee de ellas**, sin copia de CPU y con un solo
+   `LAUNCH_DMA` por lote de 16 MiB (contra uno por MiB de rebote). Se fijan contra
+   `mm::reclaim` mientras el DMA las lee: son mmap RO de pesos, o sea justo las
+   evictables, y otro core podía devolver sus frames en mitad de la copia.
+
+Pendiente de ahí: **descuantizar en la GPU**. Con Q4_K lo que se sube no está en
+disco —userspace construye el plano f32 en RAM—, así que «directo desde sosomfs»
+no es completo hasta que haya un kernel SASS que coma bloques Q4_K. Es también el
+ahorro grande: 4× menos tráfico y 4× menos VRAM.
+
+Y el otro pendiente, que el techo tapaba: en **Ampere** la cadena
+RM → VMM → canal/CE → pool sólo existe en la rama Blackwell/FMC de
+`gsp_bringup.c`, así que no hay dónde subir. Ahora se dice en vez de repartir
+heap del kernel disfrazado de VRAM (ver `GpuInfo::vram_bufs`).
+
 Scripts: `scripts/l6-pack-firmware.sh`, `scripts/l6-g1-vfio-test.sh`,
 `scripts/l6-g1-vfio-persist.sh`, `scripts/l6-g3-gsp-hostcheck.sh`,
 `scripts/l6-g4f-build-sass.sh`.

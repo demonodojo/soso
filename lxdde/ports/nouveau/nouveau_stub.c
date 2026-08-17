@@ -13,7 +13,13 @@ extern int lx_nouveau_submit_matvec_resident(uint64_t w_va, unsigned rows,
                                              float *y);
 extern uint64_t lx_nouveau_vram_bytes(void);
 extern uint64_t lx_nouveau_buf_alloc(uint64_t size);
+extern int lx_nouveau_buf_ready(void);
 extern int lx_nouveau_buf_upload(uint64_t va, const void *src, uint64_t size);
+extern int lx_nouveau_buf_upload_at(uint64_t va, uint64_t offset, const void *src,
+                                    uint64_t size);
+extern int lx_nouveau_buf_upload_dma(uint64_t va, uint64_t offset,
+                                     const uint64_t *phys, unsigned npages,
+                                     uint64_t size);
 extern int lx_nouveau_buf_free(uint64_t va);
 extern uint64_t lx_nouveau_buf_vram_free(void);
 
@@ -91,9 +97,27 @@ uint64_t lx_nouveau_device_buf_alloc(uint64_t size)
     return lx_nouveau_buf_alloc(size);
 }
 
+int lx_nouveau_device_bufs_ready(void)
+{
+    return lx_nouveau_buf_ready();
+}
+
 int lx_nouveau_device_buf_upload(uint64_t va, const void *src, uint64_t size)
 {
     return lx_nouveau_buf_upload(va, src, size);
+}
+
+int lx_nouveau_device_buf_upload_at(uint64_t va, uint64_t offset, const void *src,
+                                    uint64_t size)
+{
+    return lx_nouveau_buf_upload_at(va, offset, src, size);
+}
+
+int lx_nouveau_device_buf_upload_dma(uint64_t va, uint64_t offset,
+                                     const uint64_t *phys, unsigned npages,
+                                     uint64_t size)
+{
+    return lx_nouveau_buf_upload_dma(va, offset, phys, npages, size);
 }
 
 int lx_nouveau_device_buf_free(uint64_t va)

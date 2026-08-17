@@ -126,6 +126,19 @@ Tras arrancar desde USB (sin VFIO, sin tocar el NVMe de Linux):
 Verde mínimo: BAR0 vivo + firmware de esa familia. Amarillo aceptable en primera
 tanda Ampere: ACR soft-fail o `GSP booted (soft)` si BAR0 ya responde.
 
+**En Ampere el offload no va a correr todavía, y ahora se ve por qué.** La cadena
+RM → VMM → canal/CE → pool de VRAM sólo existe en la rama Blackwell/FMC de
+`gsp_bringup.c`: con un ga107 el bring-up llega a `GSP booted (hw poll ok)` y
+vuelve, así que no hay pool y las reservas de VRAM fallan a propósito en vez de
+repartir memoria del kernel disfrazada. Se reconoce por:
+
+- Arranque: `gpu: NVIDIA detectada (chipset …, GSP=booted, pool VRAM=no)`.
+- Inferencia: `soso-llm: GPU presente sin pool de VRAM (fase=booted) — inferencia en CPU`.
+
+Si en vez de eso sale `offload GPU desactivado — subida de pesos`, es otra cosa:
+el camino de subida falló con pool disponible (2026-08-17 era el techo de 16 MiB
+de la syscall, ya quitado).
+
 ```bash
 # Modelo tiny por defecto; modelos grandes:
 # SOSO_MODELS_DIR=/ruta/al/modelo SOSO_MODELS_SIZE=32G cargo xtask package-usb-live
@@ -225,6 +238,7 @@ Ver `target/usb-package/FLASH.txt`.
 | 6 | Red | DHCP, ping/SSH |
 | 7 | Inferencia | `ask` o `soso-llm run tinyllama --prompt hola --max 32` |
 | 7b | GPU (Ampere o Blackwell) | `10de:249c` → `familia=ga107`; `10de:2f18` → `familia=Blackwell`; `NV_PMC_BOOT_0 ≠ ffffffff` |
+| 7c | Offload: dice la verdad | Línea de arranque `pool VRAM=sí/no`; con `no`, `ask` dice `GPU presente sin pool de VRAM (fase=…)` y **nunca** `subida de pesos` |
 | 8 | Reboot sin USB | Linux host intacto |
 | 9 | `soso-install list` | Lista particiones de cada disco; el de Linux sale como `OTRO` |
 | 10 | `soso-install <id> --yes` | `copia terminada` + `GPT ajustada al disco` |

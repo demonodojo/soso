@@ -926,6 +926,18 @@ cuenta trabajo en silicio. En la RTX 5070 Ti Mobile (GB205) esto ya funciona par
 modelos pequeños (`tiny` con `--max 4`). Si el GSP no llega a compute, `soso-llm`
 sigue en CPU sin que tengas que hacer nada.
 
+Cuando la tarjeta está pero no hay dónde poner los pesos —el bring-up arrancó el
+GSP y no llegó a canal ni motor de copia, que es hoy el caso de las Ampere— lo
+dice y se va a CPU sin más:
+
+```
+soso-llm: GPU presente sin pool de VRAM (fase=booted) — inferencia en CPU
+```
+
+Y el arranque lo canta antes de que preguntes: `gpu: NVIDIA detectada (…, pool
+VRAM=no)`. Si en su lugar ves `offload GPU desactivado — <razón>`, ahí sí falló
+algo del camino de la GPU con el dispositivo listo, y la razón dice dónde.
+
 ### `--gpu-soft`: el camino de la GPU sin GPU
 
 Con `--gpu-soft`, soso enciende un dispositivo de cómputo de mentira que calcula

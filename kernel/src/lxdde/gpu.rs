@@ -22,7 +22,22 @@ unsafe extern "C" {
     ) -> i32;
     fn lx_nouveau_vram_total() -> u64;
     fn lx_nouveau_device_buf_alloc(size: u64) -> u64;
-    fn lx_nouveau_device_buf_upload(va: u64, src: *const c_void, size: u64) -> i32;
+    fn lx_nouveau_device_bufs_ready() -> i32;
+    // `lx_nouveau_device_buf_upload` (sin offset) existe en la capa C y la usa el
+    // hostcheck; desde aquí siempre se sube con offset, aunque sea 0.
+    fn lx_nouveau_device_buf_upload_at(
+        va: u64,
+        offset: u64,
+        src: *const c_void,
+        size: u64,
+    ) -> i32;
+    fn lx_nouveau_device_buf_upload_dma(
+        va: u64,
+        offset: u64,
+        phys: *const u64,
+        npages: u32,
+        size: u64,
+    ) -> i32;
     fn lx_nouveau_device_buf_free(va: u64) -> i32;
     fn lx_nouveau_device_vram_free() -> u64;
     fn lx_nouveau_set_boot0(boot0: u32, device_id: u32);
@@ -61,6 +76,12 @@ pub fn device_vram_free() -> u64 {
     unsafe { lx_nouveau_device_vram_free() }
 }
 
+/// ¿El pool de búferes en VRAM existe? Más estricto que `gsp_ready()`, que es
+/// cierto con el GSP arrancado aunque no haya llegado a haber canal ni CE.
+pub fn device_bufs_ready() -> bool {
+    unsafe { lx_nouveau_device_bufs_ready() != 0 }
+}
+
 pub fn device_buf_alloc(size: u64) -> Result<u64, ()> {
     let va = unsafe { lx_nouveau_device_buf_alloc(size) };
     if va == 0 {
@@ -70,22 +91,30 @@ pub fn device_buf_alloc(size: u64) -> Result<u64, ()> {
     }
 }
 
-pub fn device_buf_upload(va: u64, data: &[u8]) -> Result<(), ()> {
+/// Sube `data` a `offset` bytes del principio del búfer. `offset` múltiplo de
+/// página; el último trozo puede no serlo.
+pub fn device_buf_upload_at(va: u64, offset: u64, data: &[u8]) -> Result<(), ()> {
     if data.is_empty() {
         return Ok(());
     }
     let rc = unsafe {
-        lx_nouveau_device_buf_upload(
-            va,
-            data.as_ptr().cast(),
-            data.len() as u64,
-        )
+        lx_nouveau_device_buf_upload_at(va, offset, data.as_ptr().cast(), data.len() as u64)
     };
-    if rc < 0 {
-        Err(())
-    } else {
-        Ok(())
+    if rc < 0 { Err(()) } else { Ok(()) }
+}
+
+/// Sube `size` bytes a `offset` **sin copia de CPU**: `phys` son las páginas del
+/// origen, que la capa C mapea en el espacio de la GPU para que el CE lea de
+/// ellas. `Err` significa «no se cumplía algo y no se ha tocado el CE», así que
+/// el llamante puede rebotar por `device_buf_upload_at`.
+pub fn device_buf_upload_dma(va: u64, offset: u64, phys: &[u64], size: u64) -> Result<(), ()> {
+    if phys.is_empty() || size == 0 {
+        return Err(());
     }
+    let rc = unsafe {
+        lx_nouveau_device_buf_upload_dma(va, offset, phys.as_ptr(), phys.len() as u32, size)
+    };
+    if rc < 0 { Err(()) } else { Ok(()) }
 }
 
 pub fn device_buf_free(va: u64) -> Result<(), ()> {

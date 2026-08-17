@@ -984,12 +984,41 @@ uint64_t lx_nouveau_buf_alloc(uint64_t size)
     return gsp_buf_alloc(&g_buf, size);
 }
 
+/* ¿Hay pool de VRAM de verdad? Es distinto de `lx_nouveau_gsp_ready()`, que es
+ * cierto ya con el GSP arrancado: la cadena RM → VMM → canal/CE → pool sólo
+ * corre hoy en la rama Blackwell/FMC, así que en Ampere el GSP arranca y este
+ * pool no existe. El kernel necesita saberlo para no repartir búferes de su heap
+ * haciéndolos pasar por VRAM (era lo que ocurría, y `MATVF` los multiplicaba con
+ * su bucle de CPU mientras todo decía «offload»). */
+int lx_nouveau_buf_ready(void)
+{
+    return g_buf.ready ? 1 : 0;
+}
+
 int lx_nouveau_buf_upload(uint64_t va, const void *src, uint64_t size)
 {
     if (!g_buf.ready) {
         return -1;
     }
     return gsp_buf_upload(&g_buf, va, src, size);
+}
+
+int lx_nouveau_buf_upload_at(uint64_t va, uint64_t offset, const void *src,
+                             uint64_t size)
+{
+    if (!g_buf.ready) {
+        return -1;
+    }
+    return gsp_buf_upload_at(&g_buf, va, offset, src, size);
+}
+
+int lx_nouveau_buf_upload_dma(uint64_t va, uint64_t offset, const uint64_t *phys,
+                              unsigned npages, uint64_t size)
+{
+    if (!g_buf.ready) {
+        return -1;
+    }
+    return gsp_buf_upload_dma(&g_buf, va, offset, phys, npages, size);
 }
 
 int lx_nouveau_buf_free(uint64_t va)

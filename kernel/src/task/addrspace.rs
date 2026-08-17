@@ -186,6 +186,30 @@ impl AddrSpace {
         Some(())
     }
 
+    /// Físicas de las páginas que respaldan `[va, va+len)`, en orden, para que un
+    /// dispositivo pueda leerlas por DMA sin que la CPU las copie.
+    ///
+    /// `va` y `len` han de ser múltiplos de página: quien vaya a mapear esto en el
+    /// espacio de la GPU no puede hacer nada con media página. Devuelve `None` si
+    /// no cabe en `out` o si algo del rango no está mapeado — y ahí es
+    /// responsabilidad del llamante haberlo materializado antes
+    /// (`user_range_ok_bulk`) y tenerlo fijado mientras el DMA lo lee.
+    pub fn phys_pages(&self, va: u64, len: u64, out: &mut [u64]) -> Option<usize> {
+        if va % 4096 != 0 || len % 4096 != 0 || len == 0 {
+            return None;
+        }
+        let n = (len / 4096) as usize;
+        if n > out.len() {
+            return None;
+        }
+        let mapper = self.mapper();
+        for (i, slot) in out[..n].iter_mut().enumerate() {
+            let p = mapper.translate_addr(VirtAddr::new(va + (i as u64) * 4096))?;
+            *slot = p.as_u64();
+        }
+        Some(n)
+    }
+
     /// Escribe `data` en `va` del espacio (sin necesidad de activarlo).
     pub fn write(&self, va: u64, data: &[u8]) -> Option<()> {
         let mapper = self.mapper();

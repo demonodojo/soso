@@ -101,6 +101,58 @@ pub fn forget_space(space: &AddrSpace) {
     st.queue.retain(|e| e.space.pml4_phys() != pml4);
 }
 
+/// Ventanas intocables mientras un dispositivo lee de ellas por DMA.
+///
+/// Hace falta porque las páginas mmap RO de pesos son justo las evictables: otro
+/// core que faltee puede desmapearlas y devolver sus frames al asignador **en
+/// medio** de la copia, y con un DMA leyendo directamente de ellas eso no es un
+/// fallo de página, es leer lo que ya haya escrito otro. Es una lista, no un bit
+/// por entrada: la cola llega a cientos de miles de páginas y recorrerla en cada
+/// subida sería O(n); ventanas hay una por subida en vuelo.
+static PINCHADAS: Mutex<alloc::vec::Vec<(u64, u64, u64)>> = Mutex::new(alloc::vec::Vec::new());
+
+/// Fija `[va, va+len)` de este espacio hasta el `unpin`. Reentrante: dos subidas
+/// solapadas añaden dos ventanas y cada `unpin` quita la suya.
+pub fn pin_range(space: &AddrSpace, va: u64, len: u64) {
+    PINCHADAS
+        .lock()
+        .push((space.pml4_phys(), va, va.saturating_add(len)));
+}
+
+pub fn unpin_range(space: &AddrSpace, va: u64, len: u64) {
+    let clave = (space.pml4_phys(), va, va.saturating_add(len));
+    let mut st = PINCHADAS.lock();
+    if let Some(i) = st.iter().position(|e| *e == clave) {
+        st.remove(i);
+    }
+}
+
+/// `true` si esta página cae en alguna ventana fijada. Con la lista vacía —el
+/// caso normal— es una comparación y fuera.
+fn pinchada(e: &CachedPage) -> bool {
+    let st = PINCHADAS.lock();
+    if st.is_empty() {
+        return false;
+    }
+    let fin = e.va + if e.is_2m { 2 * 1024 * 1024 } else { 4096 };
+    let pml4 = e.space.pml4_phys();
+    st.iter()
+        .any(|&(p, ini, f)| p == pml4 && e.va < f && fin > ini)
+}
+
+/// Saca de la cola la primera candidata que no esté fijada, rotando las que sí.
+fn primera_no_pinchada(st: &mut ReclaimState) -> Option<CachedPage> {
+    for _ in 0..st.queue.len() {
+        let e = st.queue.pop_front()?;
+        if pinchada(&e) {
+            st.queue.push_back(e);
+        } else {
+            return Some(e);
+        }
+    }
+    None
+}
+
 /// Libera frames hasta que haya al menos `watermark + need` libres.
 pub fn ensure_free_frames(need: usize) -> bool {
     let target = WATERMARK_FRAMES.saturating_add(need);
@@ -122,7 +174,12 @@ pub fn ensure_free_frames(need: usize) -> bool {
             while scanned < CLOCK_SCAN && !st.queue.is_empty() && victims.is_empty() {
                 scanned += 1;
                 if let Some(mut e) = st.queue.pop_front() {
-                    if e.referenced {
+                    if pinchada(&e) {
+                        // Al fondo y con la segunda oportunidad intacta: mientras el
+                        // DMA la esté leyendo no es candidata a nada.
+                        e.referenced = true;
+                        st.queue.push_back(e);
+                    } else if e.referenced {
                         e.referenced = false;
                         st.queue.push_back(e);
                     } else {
@@ -130,9 +187,11 @@ pub fn ensure_free_frames(need: usize) -> bool {
                     }
                 }
             }
-            // Si todo el scan tenía referenced, forzar la más antigua.
+            // Si todo el scan tenía referenced, forzar la más antigua **no fijada**:
+            // forzar a ciegas se saltaría el pin, que es lo único que protege a un
+            // DMA en vuelo.
             if victims.is_empty() {
-                if let Some(e) = st.queue.pop_front() {
+                if let Some(e) = primera_no_pinchada(&mut st) {
                     victims.push(e);
                 }
             }
@@ -154,7 +213,7 @@ pub fn evict_batch(max_pages: usize) {
     {
         let mut st = RECLAIM.lock();
         for _ in 0..max_pages {
-            match st.queue.pop_front() {
+            match primera_no_pinchada(&mut st) {
                 Some(e) => victims.push(e),
                 None => break,
             }

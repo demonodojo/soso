@@ -116,8 +116,13 @@ pub const GPU_ALLOC_VRAM: u64 = 1;
 /// Contrato de retorno de las syscalls GPU, porque no estaba escrito y las dos
 /// mitades del mismo par no coincidían:
 ///
-/// - `SYS_GPU_ALLOC`  → handle (≥ 0).
-/// - `SYS_GPU_MAP`    → **0**. Subir de más es EINVAL, no un recorte.
+/// - `SYS_GPU_ALLOC`  → handle (≥ 0). `GPU_ALLOC_VRAM` en la NVIDIA sale del pool
+///   del dispositivo o falla (ENOTSUP sin pool, ENOMEM si está lleno): nunca del
+///   heap del kernel disfrazado. Ver `GpuInfo::vram_bufs`.
+/// - `SYS_GPU_MAP`    → **0**. Subir de más es EINVAL, no un recorte. El único
+///   límite de `len` es el tamaño del búfer: estas dos son transferencias
+///   masivas y NO comparten el techo de 16 MiB de un búfer de syscall normal
+///   (lo compartían, y un tensor de 44 MiB daba EFAULT).
 /// - `SYS_GPU_READ`   → **0**. Igual.
 /// - `SYS_GPU_FREE`   → bytes devueltos a la cuenta de VRAM (los usa el llamante
 ///   para su contabilidad de residentes; ese sí es un número con dueño).
@@ -137,7 +142,19 @@ pub struct GpuInfo {
     /// la recalcula en CPU: coste doble sin ninguna señal de que algo va mal.
     /// Sale del hueco de `_pad`, así que el layout no cambia.
     pub compute: u8,
-    pub _pad: [u8; 5],
+    /// 1 = `GPU_ALLOC_VRAM` entrega memoria que **este dispositivo** puede leer;
+    /// 0 = el dispositivo existe pero no hay pool (en NVIDIA: GSP arrancado sin
+    /// haber llegado a canal ni CE, que es todo lo que hay hoy en Ampere).
+    ///
+    /// Con 0, el `alloc` de VRAM falla en vez de repartir búferes del heap del
+    /// kernel disfrazados: hacerlo pasar por VRAM daba `gpu_map` a OK y un
+    /// `MATVF` calculado por la CPU del kernel, o sea «offload» sin GPU y un
+    /// heap que se agota tensor a tensor. El de software lleva 1 —su heap ES su
+    /// VRAM y su bucle de CPU es lo que promete—; la Intel, 0.
+    ///
+    /// Sale del hueco de `_pad`, así que el layout no cambia.
+    pub vram_bufs: u8,
+    pub _pad: [u8; 4],
     pub vram_total: u64,
     pub vram_free: u64,
     pub name: [u8; 32],

@@ -107,6 +107,19 @@ impl SysGpu {
             // despacho aquí sólo añadiría copias.
             return None;
         }
+        if info.vram_bufs == 0 {
+            // Sabe calcular pero no tiene dónde ponerle los pesos: `GPU_ALLOC_VRAM`
+            // va a fallar en cada tensor. Se dice UNA vez y con la fase, porque es
+            // la pregunta que costó una noche: la placa Ampere arranca el GSP pero
+            // no llega a canal ni CE, así que no hay pool. Sin esta línea, lo único
+            // que se veía era «offload desactivado — subida de pesos», que suena a
+            // avería de la subida y no a que no había destino.
+            libsoso::println!(
+                "soso-llm: GPU presente sin pool de VRAM (fase={}) — inferencia en CPU",
+                libsoso::str_hasta_nul(&info.phase)
+            );
+            return None;
+        }
         Some(Self {
             vram_free: info.vram_free,
             name: info.name,

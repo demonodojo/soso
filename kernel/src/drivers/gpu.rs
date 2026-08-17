@@ -135,10 +135,14 @@ pub fn init() {
         let label = b"NVIDIA GB205 (soso/lxdde)";
         name[..label.len()].copy_from_slice(label);
         let vram = nvidia_vram();
+        // El estado del pool va en la línea de arranque a propósito: queda en la
+        // consola y en `SOSOLOG.TXT` sin que nadie tenga que lanzar una
+        // inferencia para descubrir que el offload no tenía dónde subir nada.
         println!(
-            "gpu: NVIDIA detectada (chipset {:?}, GSP={})",
+            "gpu: NVIDIA detectada (chipset {:?}, GSP={}, pool VRAM={})",
             nvidia_probe::chipset_id(),
-            gsp_label()
+            gsp_label(),
+            if pool_vram_listo() { "sí" } else { "no" }
         );
         GpuState {
             present: true,
@@ -222,6 +226,16 @@ fn gsp_fini() -> bool {
     false
 }
 
+/// El pool de la línea de arranque, sin `GpuState` todavía construido.
+fn pool_vram_listo() -> bool {
+    #[cfg(feature = "lxdde")]
+    {
+        return crate::lxdde::device_bufs_ready();
+    }
+    #[cfg(not(feature = "lxdde"))]
+    false
+}
+
 fn gsp_label() -> &'static str {
     #[cfg(feature = "lxdde")]
     {
@@ -231,16 +245,36 @@ fn gsp_label() -> &'static str {
     "off"
 }
 
+/// ¿`GPU_ALLOC_VRAM` puede darle a este dispositivo memoria que él lea?
+///
+/// AVERÍA (2026-08-17): esto miraba `gsp_ready()`, que es cierto ya con el GSP
+/// arrancado —y hasta con `booted_soft`—. Pero el pool de VRAM lo monta
+/// `gsp_buf_init`, al final de la cadena RM → VMM → canal/CE que hoy sólo corre
+/// en la rama Blackwell/FMC. En la placa Ampere, entonces, `alloc` pedía al pool,
+/// recibía 0 y **caía en silencio a un búfer del heap del kernel**: `gpu_map`
+/// contestaba OK y `MATVF`, al no ver `device_va`, multiplicaba con el bucle de
+/// CPU del kernel. Todo decía «offload» y no había ni un byte en la tarjeta.
+/// Ahora se pregunta por el pool, que es la pregunta de verdad.
 fn device_bufs_available(g: &GpuState) -> bool {
     g.vendor == GPU_VENDOR_NVIDIA && g.compute && {
         #[cfg(feature = "lxdde")]
         {
-            crate::lxdde::gsp_ready()
+            crate::lxdde::device_bufs_ready()
         }
         #[cfg(not(feature = "lxdde"))]
         {
             false
         }
+    }
+}
+
+/// Lo que ve userspace en `GpuInfo::vram_bufs`. El de software dice 1: su heap
+/// ES su VRAM y su bucle de CPU es exactamente lo que promete `compute`.
+fn vram_bufs_usables(g: &GpuState) -> bool {
+    match g.vendor {
+        GPU_VENDOR_SOFT => g.present,
+        GPU_VENDOR_NVIDIA => device_bufs_available(g),
+        _ => false,
     }
 }
 
@@ -274,7 +308,8 @@ pub fn info() -> GpuInfo {
         present: g.present as u8,
         vendor: g.vendor,
         compute: g.compute as u8,
-        _pad: [0; 5],
+        vram_bufs: vram_bufs_usables(&g) as u8,
+        _pad: [0; 4],
         vram_total: g.vram_total,
         vram_free: vram_free_bytes(&g),
         name: g.name,
@@ -284,6 +319,19 @@ pub fn info() -> GpuInfo {
 
 fn gpu() -> &'static Mutex<GpuState> {
     GPU.get().expect("gpu no inicializada")
+}
+
+/// Una vez por arranque, no por tensor: son cientos de reservas por inferencia y
+/// llenar la serie con la misma línea taparía lo que venga después.
+fn aviso_sin_pool() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static DICHO: AtomicBool = AtomicBool::new(false);
+    if !DICHO.swap(true, Ordering::Relaxed) {
+        println!(
+            "gpu: GPU_ALLOC_VRAM sin pool (fase={}) — el cómputo se queda en CPU",
+            gsp_label()
+        );
+    }
 }
 
 pub fn alloc(size: u64, domain: u64) -> Result<u64, i64> {
@@ -299,18 +347,27 @@ pub fn alloc(size: u64, domain: u64) -> Result<u64, i64> {
     }
     let handle = g.buffers.len() as u64;
     let want_vram = domain == abi::GPU_ALLOC_VRAM;
-    let buf = if want_vram && device_bufs_available(&g) {
+    // VRAM pedida a la NVIDIA: o sale del pool o **falla**. El heap del kernel no
+    // vale como VRAM (ver `device_bufs_available`), y el llamante sabe qué hacer
+    // con un error: `soso-llm` lo cuenta como «no cabe» y calcula esa capa en CPU.
+    let buf = if want_vram && g.vendor == GPU_VENDOR_NVIDIA {
         #[cfg(feature = "lxdde")]
         {
-            if let Ok(va) = crate::lxdde::device_buf_alloc(size) {
-                GpuBuffer::device(va, size as usize)
-            } else {
-                GpuBuffer::heap(size as usize)
+            if !device_bufs_available(&g) {
+                aviso_sin_pool();
+                return Err(abi::ENOTSUP);
+            }
+            match crate::lxdde::device_buf_alloc(size) {
+                Ok(va) => GpuBuffer::device(va, size as usize),
+                // Pool lleno o sin slots: es ENOMEM de verdad, no un sitio donde
+                // improvisar con memoria del kernel.
+                Err(()) => return Err(abi::ENOMEM),
             }
         }
         #[cfg(not(feature = "lxdde"))]
         {
-            GpuBuffer::heap(size as usize)
+            aviso_sin_pool();
+            return Err(abi::ENOTSUP);
         }
     } else {
         GpuBuffer::heap(size as usize)
@@ -347,6 +404,18 @@ pub fn free(handle: u64) -> Result<u64, i64> {
     Ok(bytes)
 }
 
+/// Bytes del búfer de `handle`. Para que la syscall pueda rechazar un `len`
+/// imposible antes de materializar páginas de usuario; el driver lo vuelve a
+/// comprobar con el candado tomado.
+pub fn buffer_len(handle: u64) -> Result<u64, i64> {
+    let g = gpu().lock();
+    g.buffers
+        .get(handle as usize)
+        .and_then(|b| b.as_ref())
+        .map(|b| b.len() as u64)
+        .ok_or(abi::EINVAL)
+}
+
 pub fn map_to_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     let g = gpu().lock();
     let buf = g
@@ -372,6 +441,100 @@ pub fn map_to_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     })
 }
 
+/// Trozo del rebote entre el proceso y la VRAM. Múltiplo del rebote de 1 MiB de
+/// `gsp_buf.h`, que es la unidad real de la copia del CE.
+#[cfg(feature = "lxdde")]
+const TROZO_SUBIDA: usize = 2 * 1024 * 1024;
+
+/// Copia `n` bytes del proceso a la VA del dispositivo en trozos de
+/// `TROZO_SUBIDA`.
+///
+/// AVERÍA (2026-08-17): esto reservaba `vec![0u8; n]` —el tensor ENTERO— antes de
+/// llamar a la capa C. Con TinyLlama son 44 MiB de heap del kernel por subida, y
+/// el heap son 512 MiB como mucho: pedirlos contiguos en cada peso es una avería
+/// esperando. No hacía falta ni entonces: la capa C ya trocea contra su rebote de
+/// 1 MiB, sólo le faltaba aceptar un offset dentro del búfer.
+#[cfg(feature = "lxdde")]
+fn subir_por_trozos(va: u64, user_ptr: u64, n: usize) -> Result<u64, i64> {
+    // Primero sin copias: si el origen está alineado a página, el CE puede leer
+    // directamente de las páginas del proceso y esto no toca un solo byte.
+    if subir_por_dma(va, user_ptr, n).is_ok() {
+        return Ok(0);
+    }
+    let mut tmp = alloc::vec![0u8; core::cmp::min(n, TROZO_SUBIDA)];
+    let mut off = 0usize;
+    while off < n {
+        let c = core::cmp::min(TROZO_SUBIDA, n - off);
+        crate::task::with_current(|p| -> Result<u64, i64> {
+            let space = p.space.as_ref().ok_or(abi::EFAULT)?;
+            space
+                .read(user_ptr + off as u64, &mut tmp[..c])
+                .ok_or(abi::EFAULT)?;
+            Ok(0)
+        })?;
+        crate::lxdde::device_buf_upload_at(va, off as u64, &tmp[..c]).map_err(|_| abi::EIO)?;
+        off += c;
+    }
+    Ok(0)
+}
+
+/// Lote de la subida por DMA. Es `G6_SRC_MAX` de `gsp_buf.h`: el tamaño de la
+/// ventana de VA donde la capa C mapea el origen.
+#[cfg(feature = "lxdde")]
+const LOTE_DMA: usize = 16 * 1024 * 1024;
+
+/// Sube sin copiar: el CE lee de las páginas del propio proceso.
+///
+/// `Err(())` es «por aquí no» y el llamante rebota; ninguno de los caminos de
+/// salida deja el búfer a medias de forma que el rebote no pueda arreglar
+/// (reescribe los mismos bytes).
+///
+/// Requisitos que se comprueban aquí porque son de este lado: el origen alineado
+/// a página (lo exige la copia multilínea del CE, la única probada en silicio por
+/// encima de 4 KiB) y las páginas **fijadas** mientras el CE lee: son mmap RO de
+/// pesos, o sea justo las que `mm::reclaim` desaloja bajo presión, y otro core
+/// puede devolver sus frames al asignador en mitad del DMA.
+#[cfg(feature = "lxdde")]
+fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), ()> {
+    if user_ptr % 4096 != 0 || n == 0 {
+        return Err(());
+    }
+    // El espacio se clona una vez (es un `Arc`) en vez de reentrar en
+    // `with_current` por lote: cada entrada toma `PROCS`, y con los cores ociosos
+    // sondeando ese candado no es gratis.
+    let space = crate::task::with_current(|p| p.space.clone()).ok_or(())?;
+    // Lo que vaya a hacer falta y no el lote entero: un `gpu_map` de 4 KiB no
+    // tiene por qué pedir 32 KiB de lista.
+    let mut phys = alloc::vec![0u64; core::cmp::min(n.div_ceil(4096), LOTE_DMA / 4096)];
+    let mut off = 0usize;
+    while off < n {
+        // Los lotes van en múltiplos de página; el rabo que no llega a página va
+        // solo, en su propia copia de una línea (lo que el CE sí tiene probado).
+        let resto = n - off;
+        let c = if resto > LOTE_DMA {
+            LOTE_DMA
+        } else if resto > 4096 {
+            resto & !0xfff
+        } else {
+            resto
+        };
+        let paginas = c.div_ceil(4096);
+        let ventana = (paginas * 4096) as u64;
+        let ini = user_ptr + off as u64;
+        crate::mm::reclaim::pin_range(&space, ini, ventana);
+        let r = space
+            .phys_pages(ini, ventana, &mut phys[..paginas])
+            .ok_or(())
+            .and_then(|k| {
+                crate::lxdde::device_buf_upload_dma(va, off as u64, &phys[..k], c as u64)
+            });
+        crate::mm::reclaim::unpin_range(&space, ini, ventana);
+        r?;
+        off += c;
+    }
+    Ok(())
+}
+
 /// Sube `len` bytes del proceso al búfer. **Devuelve 0**, no la cuenta de bytes.
 ///
 /// Lo devolvía, y su hermana `map_to_user` (gpu_read) devolvía 0: la asimetría no
@@ -394,17 +557,10 @@ pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64
     }
     let n = len as usize;
     if let Some(va) = slot.device_va() {
-        let mut tmp = alloc::vec![0u8; n];
-        crate::task::with_current(|p| -> Result<u64, i64> {
-            let space = p.space.as_ref().ok_or(abi::EFAULT)?;
-            space.read(user_ptr, &mut tmp).ok_or(abi::EFAULT)?;
-            Ok(0)
-        })?;
         drop(g);
         #[cfg(feature = "lxdde")]
         {
-            crate::lxdde::device_buf_upload(va, &tmp).map_err(|_| abi::EIO)?;
-            return Ok(0);
+            return subir_por_trozos(va, user_ptr, n);
         }
         #[cfg(not(feature = "lxdde"))]
         {

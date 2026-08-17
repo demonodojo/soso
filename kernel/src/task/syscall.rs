@@ -292,10 +292,31 @@ fn range_present(ptr: u64, len: u64, need_write: bool) -> bool {
 /// páginas dentro de una región declarada y con los permisos que declaró — un
 /// puntero inventado sigue siendo EFAULT.
 fn user_range_ok(ptr: u64, len: u64, need_write: bool) -> bool {
+    user_range_materialize(ptr, len, need_write, MAX_SYSCALL_BUF)
+}
+
+/// Techo de un búfer de syscall normal (`read`, `write`, `send`…). Es una guarda
+/// de cordura contra longitudes disparatadas, no un límite del hardware.
+const MAX_SYSCALL_BUF: u64 = 16 * 1024 * 1024;
+
+/// Techo de las syscalls de transferencia masiva (`gpu_map`, `gpu_read`), donde
+/// el tamaño de verdad lo pone el búfer del dispositivo y se comprueba aparte.
+///
+/// AVERÍA (2026-08-17): estas dos pasaban por el techo de 16 MiB de arriba y
+/// **cualquier tensor mayor daba EFAULT**. Los `ffn_up`/`ffn_down` de TinyLlama
+/// son 5632×2048 → 44 MiB en f32, así que en la primera capa del primer token
+/// `soso-llm` cortaba el offload con «subida de pesos» y parecía avería de la
+/// GPU. No se vio antes porque todo lo probado quedaba por debajo:
+/// `bench-model` es 1024/3072 (12 MiB) y `attn_q` de TinyLlama son 16 MiB
+/// EXACTOS, que pasan por un byte porque la comparación es `>`.
+const MAX_BULK_BUF: u64 = 1024 * 1024 * 1024;
+
+/// Materializa y valida un rango de usuario con el techo que le corresponda.
+fn user_range_materialize(ptr: u64, len: u64, need_write: bool, max_len: u64) -> bool {
     if len == 0 {
         return true;
     }
-    if ptr == 0 || len > 16 * 1024 * 1024 || ptr.checked_add(len).is_none_or(|e| e > USER_MAX) {
+    if ptr == 0 || len > max_len || ptr.checked_add(len).is_none_or(|e| e > USER_MAX) {
         return false;
     }
     if range_present(ptr, len, need_write) {
@@ -304,14 +325,35 @@ fn user_range_ok(ptr: u64, len: u64, need_write: bool) -> bool {
     // Camino lento. `handle_mmap_fault` toma `with_current` por su cuenta, así que
     // NO puede llamarse desde dentro del cierre de `range_present`: sería el mismo
     // candado dos veces.
-    let mut page = ptr & !0xfff;
-    while page < ptr + len {
-        if !range_present(page, 1, need_write) && !super::handle_mmap_fault(page, need_write) {
-            return false;
+    //
+    // Se recorre en tramos de 2 MiB y sólo se baja a página en el tramo que falte:
+    // con un tensor de 44 MiB, ir de 4 KiB en 4 KiB eran ~11 000 `with_current`
+    // (uno por página) aunque estuviera todo presente menos el final. Y encaja con
+    // `handle_mmap_fault`, que en regiones de fichero mapea 2 MiB de una vez.
+    const TRAMO: u64 = 2 * 1024 * 1024;
+    let fin = ptr + len;
+    let mut base = ptr & !(TRAMO - 1);
+    while base < fin {
+        let tramo_ini = base.max(ptr);
+        let tramo_fin = (base + TRAMO).min(fin);
+        if !range_present(tramo_ini, tramo_fin - tramo_ini, need_write) {
+            let mut page = tramo_ini & !0xfff;
+            while page < tramo_fin {
+                if !range_present(page, 1, need_write) && !super::handle_mmap_fault(page, need_write)
+                {
+                    return false;
+                }
+                page += 4096;
+            }
         }
-        page += 4096;
+        base += TRAMO;
     }
     range_present(ptr, len, need_write)
+}
+
+/// Igual que `user_range_ok` pero para las syscalls de transferencia masiva.
+fn user_range_ok_bulk(ptr: u64, len: u64, need_write: bool) -> bool {
+    user_range_materialize(ptr, len, need_write, MAX_BULK_BUF)
 }
 
 pub(crate) fn user_slice(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
@@ -1295,17 +1337,34 @@ fn sys_gpu_map(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     // de SÓLO LECTURA, así que subirlos directamente daba EFAULT y había que
     // copiarlos antes a memoria escribible — una copia de la matriz entera, más un
     // mmap y un munmap, por cada subida.
-    if !user_range_ok(user_ptr, len, false) {
+    //
+    // El tamaño del búfer se comprueba ANTES de materializar: pedir 44 MiB a un
+    // búfer de 4 KiB ya es EINVAL, y traerse 44 MiB de disco a golpe de falta de
+    // página para luego rechazarlos es trabajo tirado.
+    cabe_en_buffer(gpu_handle, len)?;
+    if !user_range_ok_bulk(user_ptr, len, false) {
         return Err(-abi::EFAULT);
     }
     crate::drivers::gpu::upload_from_user(gpu_handle, user_ptr, len).map_err(|e| -e)
+}
+
+/// `len` no pasa del búfer del dispositivo. El error es EINVAL —del llamante—, y
+/// lo vuelve a comprobar el driver con el candado tomado: esto es sólo para no
+/// materializar páginas de balde.
+fn cabe_en_buffer(handle: u64, len: u64) -> Result<(), i64> {
+    let cap = crate::drivers::gpu::buffer_len(handle).map_err(|e| -e)?;
+    if len > cap {
+        return Err(-abi::EINVAL);
+    }
+    Ok(())
 }
 
 fn sys_gpu_read(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     // `true`: aquí el kernel ESCRIBE en el búfer del proceso. Con `false` se
     // aceptaba un destino de sólo lectura y `AddrSpace::write` lo escribía igual
     // por el alias físico, saltándose la protección de la página.
-    if !user_range_ok(user_ptr, len, true) {
+    cabe_en_buffer(gpu_handle, len)?;
+    if !user_range_ok_bulk(user_ptr, len, true) {
         return Err(-abi::EFAULT);
     }
     crate::drivers::gpu::map_to_user(gpu_handle, user_ptr, len).map_err(|e| -e)

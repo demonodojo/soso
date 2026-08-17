@@ -129,12 +129,20 @@ pub fn device_vram_free() -> u64 {
     gpu::device_vram_free()
 }
 
+pub fn device_bufs_ready() -> bool {
+    gpu::device_bufs_ready()
+}
+
 pub fn device_buf_alloc(size: u64) -> Result<u64, ()> {
     gpu::device_buf_alloc(size)
 }
 
-pub fn device_buf_upload(va: u64, data: &[u8]) -> Result<(), ()> {
-    gpu::device_buf_upload(va, data)
+pub fn device_buf_upload_at(va: u64, offset: u64, data: &[u8]) -> Result<(), ()> {
+    gpu::device_buf_upload_at(va, offset, data)
+}
+
+pub fn device_buf_upload_dma(va: u64, offset: u64, phys: &[u64], size: u64) -> Result<(), ()> {
+    gpu::device_buf_upload_dma(va, offset, phys, size)
 }
 
 pub fn device_buf_free(va: u64) -> Result<(), ()> {
