@@ -15,6 +15,12 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static LAST_FLUSH_LEN: AtomicUsize = AtomicUsize::new(0);
 static FLUSH_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_POLL_MS: AtomicUsize = AtomicUsize::new(0);
+/// Último latido de teclado volcado, para no reescribir sin necesidad.
+static LAST_LATIDO: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Contenido del fichero. Estático de módulo (y no local de `flush`) porque
+/// `flush_cabecera` reescribe su primer sector sin regenerar todo lo demás.
+static mut BUF: [u8; FILE_SIZE] = [b'\n'; FILE_SIZE];
 
 pub fn init() {
     // Basta con tener ESP: el log no necesita que el root live haya montado, y
@@ -57,7 +63,39 @@ pub fn poll() {
     let cur = crate::drivers::logbuf::len();
     if cur > LAST_FLUSH_LEN.load(Ordering::Relaxed) {
         let _ = flush();
+        return;
     }
+    // Escribir teclas no imprime nada, así que sin esto el latido nunca
+    // llegaría al pendrive y un cuelgue tecleando dejaría la cabecera de
+    // arranque, que no dice nada. Solo se reescribe el **primer sector**: 512 B
+    // cada 2 s, en vez de los 256 KiB del volcado entero, que además pelearían
+    // por el candado del USB justo con lo que estamos intentando diagnosticar.
+    let (sc, _, _, ent) = crate::drivers::kbd::latido();
+    let marca = sc ^ (ent << 16);
+    if marca != LAST_LATIDO.swap(marca, Ordering::Relaxed) {
+        let _ = flush_cabecera();
+    }
+}
+
+/// Reescribe solo la cabecera (primer sector) con el latido al día.
+fn flush_cabecera() -> Result<(), ()> {
+    let slot = SLOT.get().and_then(|s| *s).ok_or(())?;
+    let n = FLUSH_COUNT.load(Ordering::Relaxed);
+    let uptime = crate::arch::pit::uptime_ms();
+    let log_len = LAST_FLUSH_LEN.load(Ordering::Relaxed);
+
+    // SAFETY: mismo BUF y mismo llamante único que `flush`.
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(BUF).cast::<u8>(), FILE_SIZE)
+    };
+    let mut hdr = [0u8; 160];
+    let hlen = format_header(&mut hdr, n, uptime, log_len).min(SECTOR);
+    buf[..hlen].copy_from_slice(&hdr[..hlen]);
+
+    let ok = crate::drivers::logbuf::run_without_capture(|| {
+        espfat::write(slot.data_lba, &buf[..SECTOR]).is_ok()
+    });
+    if ok { Ok(()) } else { Err(()) }
 }
 
 pub fn flush() -> Result<(), ()> {
@@ -69,13 +107,12 @@ pub fn flush() -> Result<(), ()> {
     let n = FLUSH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     let uptime = crate::arch::pit::uptime_ms();
 
-    static mut BUF: [u8; FILE_SIZE] = [b'\n'; FILE_SIZE];
     // SAFETY: solo la BSP llama a flush (scheduler/kshell/panic); no reentrante.
     let buf = unsafe {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(BUF).cast(), FILE_SIZE)
     };
 
-    let mut hdr = [0u8; 128];
+    let mut hdr = [0u8; 160];
     let hlen = format_header(&mut hdr, n, uptime, log_len);
     let copy = hlen.min(buf.len());
     buf[..copy].copy_from_slice(&hdr[..copy]);
@@ -130,9 +167,15 @@ fn format_header(out: &mut [u8], flush_n: u32, uptime_ms: u64, log_len: usize) -
         }
     }
     let mut w = W { buf: out, pos: 0 };
+    // El latido del teclado va en la cabecera a propósito: si la máquina se
+    // cuelga escribiendo, esto es lo ÚNICO que queda en el pendrive para saber
+    // por dónde se atascó. `sc` sube = la IRQ y el sondeo siguen vivos;
+    // `enc` sube y `ent` no = el atasco está del lado de la tty/consola.
+    let (sc, ultimo, enc, ent) = crate::drivers::kbd::latido();
     let _ = write!(
         w,
-        "=== soso log flush #{flush_n} uptime={uptime_ms}ms bytes={log_len} ===\n"
+        "=== soso log flush #{flush_n} uptime={uptime_ms}ms bytes={log_len} \
+         kbd sc={sc} ultimo={ultimo:#04x} enc={enc} ent={ent} ===\n"
     );
     w.pos
 }

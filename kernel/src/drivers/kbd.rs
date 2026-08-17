@@ -6,7 +6,7 @@
 
 use crate::arch::{apic, ioapic, irq};
 use crate::println;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::port::Port;
@@ -94,6 +94,18 @@ static CAPS: AtomicBool = AtomicBool::new(false);
 static I8042_OK: AtomicBool = AtomicBool::new(false);
 static SC_LOG: AtomicU8 = AtomicU8::new(0);
 static SC_HIST: [AtomicU8; 8] = [const { AtomicU8::new(0) }; 8];
+
+// Latido del camino teclado→tty, para que un cuelgue deje rastro. Son atómicos
+// sueltos a propósito: los lee `fatlog` en cada volcado a SOSOLOG.TXT y el
+// comando `kbd` del kshell, y ninguno de los dos puede permitirse un candado.
+/// Scancodes vistos (todos, no solo los 8 del histórico).
+static SC_TOTAL: AtomicU32 = AtomicU32::new(0);
+/// Último scancode visto.
+static SC_ULTIMO: AtomicU8 = AtomicU8::new(0);
+/// Caracteres encolados hacia la tty.
+static CH_ENCOLADOS: AtomicU32 = AtomicU32::new(0);
+/// Caracteres entregados a quien leía.
+static CH_ENTREGADOS: AtomicU32 = AtomicU32::new(0);
 
 fn status() -> u8 {
     unsafe { Port::<u8>::new(STATUS).read() }
@@ -249,11 +261,27 @@ fn atkbd_enable() {
 /// duro en la primera tecla, y encima con el mensaje ya pintado, que despista.
 /// Se leen con `kbd` desde la kernel-shell.
 fn log_scancode_raw(sc: u8) {
+    SC_TOTAL.fetch_add(1, Ordering::Relaxed);
+    SC_ULTIMO.store(sc, Ordering::Relaxed);
     let n = SC_LOG.load(Ordering::Relaxed) as usize;
     if n < SC_HIST.len() {
         SC_HIST[n].store(sc, Ordering::Relaxed);
         SC_LOG.store(n as u8 + 1, Ordering::Relaxed);
     }
+}
+
+/// Latido del camino teclado→tty: `(scancodes, último, encolados, entregados)`.
+///
+/// Si tras un cuelgue los scancodes siguen subiendo pero los entregados no, el
+/// atasco está del lado de la tty/consola; si no sube ninguno, del lado del
+/// sondeo o de la propia IRQ.
+pub fn latido() -> (u32, u8, u32, u32) {
+    (
+        SC_TOTAL.load(Ordering::Relaxed),
+        SC_ULTIMO.load(Ordering::Relaxed),
+        CH_ENCOLADOS.load(Ordering::Relaxed),
+        CH_ENTREGADOS.load(Ordering::Relaxed),
+    )
 }
 
 /// Los primeros scancodes vistos, para `kbd` en la kernel-shell.
@@ -309,6 +337,7 @@ fn handle_scancode(sc: u8) {
         _ => {
             if let Some(ch) = scancode_ascii(sc) {
                 RX.lock().push(ch);
+                CH_ENCOLADOS.fetch_add(1, Ordering::Relaxed);
                 crate::task::kick_if_tty_waiting();
             }
         }
@@ -338,15 +367,38 @@ fn poll_hw() {
     }
 }
 
+/// Entrada de la IRQ del teclado, **común a los dos caminos**: IOAPIC (vector
+/// 0x42 vía `irq::dispatch`, que es el que se usa en placa) y PIC legacy
+/// (`kbd_pic_handler`, el de QEMU sin IOAPIC).
+///
+/// Sondear solo si veníamos de ring 3, la misma regla que `timer_tick`: desde
+/// ring 0 el kernel puede tener cogido `PROCS` (una syscall), `HOSTS` (una
+/// lectura del disco live) o el candado de la consola, y el sondeo vuelve a
+/// pedirlos — mismo core, spinlock no reentrante, máquina clavada.
+///
+/// AVERÍA: esta guarda estaba puesta solo en `kbd_pic_handler`, que en placa
+/// **no se ejecuta nunca** porque la IRQ 1 va por el IOAPIC (`kbd: ps2 irq1
+/// vector=0x42 (ioapic)` en el log de arranque). Con eso el arreglo no llegaba
+/// a la máquina que fallaba.
+///
+/// No se pierde la tecla: el scancode se queda en el búfer del i8042 y lo
+/// recoge el siguiente sondeo, que hacen `has_input` y `read_byte`.
 pub fn handle_irq() {
+    if !crate::arch::irq::desde_ring3() {
+        return;
+    }
     poll_hw();
 }
 
 pub fn read_byte() -> Option<u8> {
-    without_interrupts(|| {
+    let b = without_interrupts(|| {
         poll_hw();
         RX.lock().pop()
-    })
+    });
+    if b.is_some() {
+        CH_ENTREGADOS.fetch_add(1, Ordering::Relaxed);
+    }
+    b
 }
 
 pub fn has_input() -> bool {

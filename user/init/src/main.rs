@@ -65,6 +65,15 @@ fn main(args: &str) -> u8 {
 /// memoria en cada iteración, todo en UN bloque asm (el compilador no puede
 /// tocar esos registros por medio). El timer desaloja este bucle decenas de
 /// veces; si el kernel no preserva XMM/YMM, la comparación falla.
+/// MXCSR de este proceso (`stmxcsr`).
+fn leer_mxcsr() -> u32 {
+    let mut v: u32 = 0;
+    unsafe {
+        core::arch::asm!("stmxcsr [{p}]", p = in(reg) &mut v, options(nostack));
+    }
+    v
+}
+
 fn fpu_stress(seed: u8) -> u8 {
     let pat = [seed as f32 * 1.5 + 0.25; 8];
     let mut fallos: u64;
@@ -223,6 +232,26 @@ fn suite() -> u8 {
     let rb = sys::wait();
     let fpu_ok = matches!(ra, Ok((_, 0))) && matches!(rb, Ok((_, 0)));
     check!(fpu_ok, "los YMM sobreviven a los desalojos");
+
+    // MXCSR del proceso recién nacido: las seis excepciones SIMD ENMASCARADAS.
+    //
+    // Con MXCSR=0 cualquier operación inexacta levanta #XM, y en soso eso era
+    // un double fault sin diagnóstico. Pasó en placa real: `"0.7".parse::<f32>()`
+    // compila a un `vdivss` en `dec2flt` y mataba a `ask` al leer /etc/llm.conf.
+    // QEMU no entrega #XM, así que el único modo de cazarlo en el banco es
+    // mirar el registro. `xrstor` carga MXCSR de la imagen SIEMPRE, así que un
+    // área xsave a ceros lo deja a 0 — de ahí venía.
+    let mxcsr = leer_mxcsr();
+    check!(
+        mxcsr & 0x1F80 == 0x1F80,
+        "MXCSR con las excepciones SIMD enmascaradas"
+    );
+    if mxcsr & 0x1F80 != 0x1F80 {
+        println!("init:   MXCSR={mxcsr:#06x} (esperaba los bits 7..12 a 1)");
+    }
+    // Y que una división inexacta de verdad no reviente.
+    let inexacta: f32 = "0.7".parse().unwrap_or(0.0);
+    check!(inexacta > 0.69 && inexacta < 0.71, "parse::<f32> de 0.7 (dec2flt/vdivss)");
 
     // sleep_ms.
     check!(sys::sleep_ms(200) == 0, "sleep_ms(200)");

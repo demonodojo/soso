@@ -97,10 +97,14 @@ fn main() {
         "test-install" => {
             test_install::run();
         }
+        "sosomfs-check" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            sosomfs_check::run(&args);
+        }
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
+                 (usa build | run | gdb | mkfs | test | test-usb | test-install | sosomfs-check | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
             );
             exit(2);
         }
@@ -120,6 +124,7 @@ mod package_live;
 mod sosolog;
 mod test;
 mod test_distributed;
+mod sosomfs_check;
 mod test_install;
 
 fn convert_gguf(args: &[String]) {

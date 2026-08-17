@@ -390,7 +390,7 @@ fn run_cmd(cmd: &mut Command, label: &str) {
     }
 }
 
-fn partition_first_sector(img: &Path, part: u32) -> Option<u64> {
+pub(crate) fn partition_first_sector(img: &Path, part: u32) -> Option<u64> {
     let out = Command::new("sgdisk")
         .args(["-i", &part.to_string()])
         .arg(img)

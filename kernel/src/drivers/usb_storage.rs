@@ -307,6 +307,20 @@ pub fn poll_keyboard_scancode() -> Option<u8> {
     None
 }
 
+/// Suelta `HOSTS` a la fuerza. **Solo para el panic handler**: el volcado de
+/// `SOSOLOG.TXT` escribe por USB, y si el panic salta con el candado cogido
+/// —que es lo normal si el fallo viene del propio camino del disco— el volcado
+/// se queda girando y el pendrive conserva el log ANTERIOR. O sea: justo en el
+/// caso que más falta hace, el diagnóstico no llega. Mismo razonamiento que el
+/// `force_unlock` de la consola y del logbuf.
+///
+/// # Safety
+/// Rompe la exclusión mutua. Solo es aceptable cuando el kernel ya se está
+/// muriendo y lo único que queda por hacer es dejar constancia.
+pub unsafe fn force_unlock() {
+    unsafe { HOSTS.force_unlock() };
+}
+
 pub fn has_usb_keyboard() -> bool {
     HOSTS.lock().iter().any(|h| h.ctrl.has_keyboard())
 }

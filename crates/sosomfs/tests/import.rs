@@ -62,7 +62,7 @@ fn grow_ampliar_total_blocks() {
         .unwrap()
         .set_len(large * BLOCK_SIZE as u64)
         .unwrap();
-    let mut dev2 = FileBlockDevice::open(&img).unwrap();
+    let dev2 = FileBlockDevice::open(&img).unwrap();
     assert_eq!(dev2.block_count(), large);
     let mut fs = mount(dev2).unwrap();
     assert_eq!(fs.total_blocks(), small);
@@ -71,6 +71,55 @@ fn grow_ampliar_total_blocks() {
     import::commit_grow(fs.cache.volume_mut().inner_mut(), &sb).unwrap();
     fs.reload_from_disk().unwrap();
     assert_eq!(fs.total_blocks(), large);
+}
+
+/// Un `grow` a medias NO puede dejar el volumen sin superbloque.
+///
+/// Es el caso real del pendrive live: la partición 3 queda siempre algo más
+/// grande que la imagen, así que el kernel hace `grow` en el primer arranque de
+/// cada stick recién flasheado. Si esa escritura se corta (corte de corriente,
+/// sector malo, USB que falla), el volumen tiene que seguir montando con el
+/// superbloque anterior — que es justo lo que no pasaba cuando `commit_grow`
+/// pisaba los dos slots empezando por el que estaba vivo.
+#[test]
+fn grow_a_medias_no_pierde_el_volumen() {
+    let model = tiny_model_dir();
+    let img = PathBuf::from("target/test-import-grow-torn.img");
+    let small = (32 * 1024 * 1024 / BLOCK_SIZE) as u64;
+    let large = (64 * 1024 * 1024 / BLOCK_SIZE) as u64;
+    let mut dev = FileBlockDevice::create(&img, small).unwrap();
+    build_from_dir(&mut dev, &model, 1).unwrap();
+    drop(dev);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&img)
+        .unwrap()
+        .set_len(large * BLOCK_SIZE as u64)
+        .unwrap();
+
+    let mut fs = mount(FileBlockDevice::open(&img).unwrap()).unwrap();
+    let gen_antes = fs.generation();
+    let mut sb = *fs.superblock();
+    import::grow_superblock(&mut sb, large);
+    import::commit_grow(fs.cache.volume_mut().inner_mut(), &sb).unwrap();
+    fs.reload_from_disk().unwrap();
+    assert_eq!(fs.total_blocks(), large);
+    let gen_nueva = fs.generation();
+    assert!(gen_nueva > gen_antes, "el commit debe subir la generación");
+    drop(fs);
+
+    // Escritura a medias: el slot recién escrito queda ilegible.
+    let slot_nuevo = gen_nueva % 2;
+    let mut datos = std::fs::read(&img).unwrap();
+    let off = slot_nuevo as usize * BLOCK_SIZE;
+    datos[off..off + BLOCK_SIZE].fill(0);
+    std::fs::write(&img, &datos).unwrap();
+
+    // Tiene que seguir montando, con el tamaño de antes del grow.
+    let fs = mount(FileBlockDevice::open(&img).unwrap())
+        .expect("un grow a medias no puede dejar el volumen sin superbloque");
+    assert_eq!(fs.generation(), gen_antes);
+    assert_eq!(fs.total_blocks(), small);
 }
 
 #[test]

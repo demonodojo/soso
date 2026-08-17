@@ -26,6 +26,12 @@ pub const MAX_REQ_BLOCKS: usize = 32;
 pub enum FsError {
     Io,
     Corrupt,
+    /// Ningún superbloque válido en los dos slots: el volumen no se puede
+    /// montar y no hay a qué volver. Va aparte de `Corrupt` porque en el
+    /// arranque es la diferencia entre «se perdió el superbloque» (escritura a
+    /// medias del `grow`) y «el catálogo no parsea» — y con un solo `Corrupt`
+    /// para las dos cosas no había forma de saber cuál desde el log de placa.
+    SinSuperbloque,
     NotFound,
     NotADir,
     NotAFile,
@@ -143,7 +149,7 @@ impl<V: VolumeSet> Sosomfs<V> {
                 }
             }
         }
-        let sb = best.ok_or(FsError::Corrupt)?;
+        let sb = best.ok_or(FsError::SinSuperbloque)?;
         let catalog_bytes = read_catalog_bytes(&mut vol, sb.catalog_bucket_root, sb.catalog_blocks)
         .map_err(|_| FsError::Io)?;
         let catalog = Catalog::parse(&catalog_bytes).map_err(|_| FsError::Corrupt)?;

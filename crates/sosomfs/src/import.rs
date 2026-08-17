@@ -89,11 +89,26 @@ pub fn grow_superblock(sb: &mut Superblock, partition_blocks: u64) {
     }
 }
 
-/// Persiste el superbloque ampliado (misma generación).
+/// Persiste el superbloque ampliado en el **slot alterno**, con la generación
+/// siguiente. El que está vivo no se toca.
+///
+/// AVERÍA: esto escribía los DOS slots con la misma generación, y encima
+/// empezando por el que estaba vivo. Los superbloques A/B existen justo para
+/// que una escritura a medias no deje el volumen sin ninguna copia buena, y así
+/// la primera escritura ya destruía la única válida: cualquier corte, sector
+/// malo o fallo del USB en ese momento deja el volumen **sin superbloque** y el
+/// montaje siguiente da `Corrupt`. Y no es un caso raro: el kernel llama a
+/// `grow` en el primer arranque de cada pendrive live recién flasheado, porque
+/// la partición 3 siempre queda un poco más grande que la imagen.
+///
+/// Con el commit alterno, un fallo en cualquier punto deja intacto el
+/// superbloque anterior y `mount_with_cache` —que se queda con la generación
+/// más alta de las válidas— vuelve a él. Es la misma disciplina que sosofs.
 pub fn commit_grow<D: BlockDevice>(dev: &mut D, sb: &Superblock) -> Result<(), BlockError> {
-    let slot = sb.generation % SUPERBLOCK_SLOTS;
-    write_super_raw(dev, slot, sb)?;
-    write_super_raw(dev, 1 - slot, sb)?;
+    let mut nuevo = *sb;
+    nuevo.generation = sb.generation.wrapping_add(1);
+    let slot = nuevo.generation % SUPERBLOCK_SLOTS;
+    write_super_raw(dev, slot, &nuevo)?;
     dev.flush()
 }
 

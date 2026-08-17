@@ -183,6 +183,10 @@ fn exec(line: &str) {
             // Los primeros scancodes vistos. Antes se imprimían desde el
             // handler de la IRQ, que es un sitio donde no se puede tomar el
             // candado de la consola sin arriesgar un interbloqueo.
+            let (tot, ultimo, enc, ent) = crate::drivers::kbd::latido();
+            println!(
+                "kbd: {tot} scancodes (último {ultimo:#04x}), {enc} encolados, {ent} entregados"
+            );
             let mut sc = [0u8; 8];
             let n = crate::drivers::kbd::scancodes_iniciales(&mut sc);
             if n == 0 {

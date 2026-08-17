@@ -5,7 +5,7 @@
 
 use crate::arch::apic;
 use crate::arch::smp::MAX_CPUS;
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
@@ -46,6 +46,28 @@ static NEXT: AtomicU8 = AtomicU8::new(0);
 /// comentario de `net/ssh.rs` la daba por cierta razonando sólo sobre el tick
 /// del timer, y el handler de la NIC la incumplía.
 static PROF_IRQ: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
+
+/// ¿El contexto que interrumpió esta IRQ estaba en ring 3?
+///
+/// `dispatch` ya lo sabe, pero los handlers son `fn()` y no lo recibían, así que
+/// no podían aplicar la misma regla que `timer_tick`: **desde ring 0 el kernel
+/// puede tener cogido cualquier candado** y un handler que vuelva a pedirlo
+/// clava el core. Lo necesita el teclado, que en placa entra por aquí (IOAPIC,
+/// vector 0x42) y no por `kbd_pic_handler`.
+static DESDE_RING3: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
+pub fn desde_ring3() -> bool {
+    DESDE_RING3[crate::arch::percpu::cpu_index()].load(Ordering::Relaxed)
+}
+
+/// Ejecuta el handler dejando anotado el privilegio del contexto interrumpido.
+pub(crate) fn con_contexto<R>(desde_ring3: bool, f: impl FnOnce() -> R) -> R {
+    let flag = &DESDE_RING3[crate::arch::percpu::cpu_index()];
+    let previo = flag.swap(desde_ring3, Ordering::Relaxed);
+    let r = f();
+    flag.store(previo, Ordering::Relaxed);
+    r
+}
 
 /// ¿Está esta CPU dentro de un handler de IRQ dura?
 pub fn en_irq_dura() -> bool {
@@ -106,7 +128,7 @@ pub(crate) fn dispatch(vector: u8, desde_ring3: bool) {
     if let Some(idx) = index(vector) {
         let handler = SLOTS.lock()[idx].handler;
         if let Some(h) = handler {
-            h();
+            con_contexto(desde_ring3, h);
         }
     }
     apic::eoi();

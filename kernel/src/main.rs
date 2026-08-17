@@ -239,6 +239,13 @@ fn panic(info: &PanicInfo) -> ! {
         info as *const PanicInfo<'_> as u64,
         0,
     );
+    // El volcado del log va por el disco live (USB en placa): si el panic saltó
+    // con ese candado cogido, sin soltarlo el flush gira para siempre y el
+    // pendrive se queda con el log del arranque anterior.
+    #[cfg(feature = "drv-usb")]
+    unsafe {
+        drivers::usb_storage::force_unlock()
+    };
     #[cfg(feature = "drv-live-disk")]
     let _ = drivers::fatlog::flush();
     qemu::exit(qemu::ExitCode::Failed);

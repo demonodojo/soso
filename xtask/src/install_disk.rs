@@ -263,6 +263,10 @@ pub(crate) fn expand_models_partition(dev: &Path, live: &Path) {
     if img_sectors <= live_sectors {
         return;
     }
+    let Some(inicio) = crate::package_live::partition_first_sector(dev, 3) else {
+        eprintln!("install-disk: no pude leer el inicio de p3; no la amplío");
+        return;
+    };
     println!(
         "install-disk: ampliando partición 3 hasta el final del disco ({img_sectors} sectores)"
     );
@@ -272,8 +276,10 @@ pub(crate) fn expand_models_partition(dev: &Path, live: &Path) {
             .arg(dev)
             .arg("-d")
             .arg("3")
+            .arg("-a")
+            .arg("1")
             .arg("-n")
-            .arg("3:0:0")
+            .arg(format!("3:{inicio}:0"))
             .arg("-t")
             .arg("3:8300"),
         "sgdisk expand",
@@ -287,8 +293,21 @@ pub(crate) fn expand_models_leave_install(dev: &Path, install_reserve_sectors: u
         return;
     }
     let tail = install_reserve_sectors + 34;
+    // El inicio EXACTO de p3, leído antes de borrarla.
+    //
+    // AVERÍA (2026-08-17, dos pendrives): esto hacía `-d 3 -n 3:0:…` y sgdisk
+    // elige el primer sector libre **realineado** — 583714 → 583720. La
+    // partición quedaba 6 sectores por delante de los datos que el `dd` ya
+    // había escrito, así que el superbloque de sosomfs se salía por el
+    // principio y el kernel arrancaba con `sosomfs falló (Corrupt)`. Recrearla
+    // en su sitio no basta: sgdisk realinea también un inicio explícito, hace
+    // falta `-a 1`.
+    let Some(inicio) = crate::package_live::partition_first_sector(dev, 3) else {
+        eprintln!("flash-usb-live: no pude leer el inicio de p3; no la amplío");
+        return;
+    };
     println!(
-        "flash-usb-live: ampliando p3 (reservando {} MiB para instalador)",
+        "flash-usb-live: ampliando p3 desde el sector {inicio} (reservando {} MiB para instalador)",
         install_reserve_sectors * 512 / (1024 * 1024)
     );
     run_cmd(Command::new("sgdisk").arg("-e").arg(dev), "sgdisk -e");
@@ -296,8 +315,10 @@ pub(crate) fn expand_models_leave_install(dev: &Path, install_reserve_sectors: u
         Command::new("sgdisk")
             .arg("-d")
             .arg("3")
+            .arg("-a")
+            .arg("1")
             .arg("-n")
-            .arg(format!("3:0:-{tail}S"))
+            .arg(format!("3:{inicio}:-{tail}S"))
             .arg("-t")
             .arg("3:8300")
             .arg(dev),

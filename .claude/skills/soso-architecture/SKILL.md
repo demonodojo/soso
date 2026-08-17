@@ -287,6 +287,24 @@ del monitor de QEMU). `ThreadPool` tiene ahora `Drop` que pone `shutdown` y
 lance hilos los apaga y los espera antes de morir. **En QEMU con `-smp 1` esto no
 existe** (`want == 0`): por eso el shard `llm-dense` corre con `-smp 2`.
 
+## Estado FPU y excepciones de CPU
+
+`xrstor` **carga MXCSR siempre** desde la imagen si la máscara incluye SSE/AVX,
+ignore lo que ignore `XSTATE_BV`: un `FpuArea` a ceros deja **MXCSR=0** = las seis
+excepciones SIMD desenmascaradas, y la primera operación inexacta levanta #XM.
+`FpuArea::inicial()` escribe MXCSR=0x1F80 y MXCSR_MASK=0xFFBF a mano
+(`arch/fpu.rs`). Los `FpuArea::empty()` que quedan son buffers de save→restore,
+donde el contenido inicial da igual.
+
+La IDT instala **todas** las excepciones 0..31 que soso puede ver, no solo
+#UD/#GP/#PF/#DF (`instalar_excepciones_restantes` en `arch/interrupts.rs`): con la
+IDT incompleta, cualquier excepción sin entrada se convierte en un `double fault`
+mudo y se pierde el diagnóstico. Pasó dos veces —la IRQ1 del teclado y #XM— y en
+las dos costó una sesión entera.
+
+**QEMU no entrega #XM**: esta clase de fallo solo sale en silicio. `init test`
+comprueba el *registro* con `stmxcsr` en vez de esperar la excepción.
+
 ## Candados y contexto de interrupción
 
 `PROCS`, `HOSTS` (usb_storage) y la consola son `spin::Mutex` **no reentrantes**, y
