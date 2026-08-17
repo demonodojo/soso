@@ -38,8 +38,18 @@ pub fn run(args: &[String]) {
     install_disk::validate_device(&usb, yes, None);
 
     let root = super::project_root();
+    let disk_bytes = blockdev_bytes(&usb).unwrap_or_else(|| {
+        eprintln!("flash-usb-live: no pude leer el tamaño de {}", usb.display());
+        exit(1);
+    });
+    println!(
+        "flash-usb-live: pendrive {} ({})",
+        usb.display(),
+        crate::live_models::format_bytes(disk_bytes)
+    );
+
     super::build_user();
-    package_live::run();
+    package_live::run_with_capacity(Some(disk_bytes));
 
     let live = package_live::live_image_path();
     let out_dir = package_live::out_dir();
@@ -97,7 +107,8 @@ fn usage() -> ! {
            lsblk\n\
            sudo cargo xtask flash-usb-live /dev/sde --yes\n\
          \n\
-         Graba soso-live.img, estira p3 (modelos) y añade p4 SOSOINSTALL\n\
+         Graba soso-live.img (modelo según tamaño del stick), estira p3 (modelos)\n\
+         y añade p4 SOSOINSTALL\n\
          con install-soso.sh para dual-boot desde Linux."
     );
     exit(2);
@@ -116,6 +127,10 @@ fn blockdev_sectors(dev: &Path) -> Option<u64> {
         .trim()
         .parse()
         .ok()
+}
+
+fn blockdev_bytes(dev: &Path) -> Option<u64> {
+    blockdev_sectors(dev).map(|s| s.saturating_mul(512))
 }
 
 fn mount_install_partition(part: &str) -> bool {

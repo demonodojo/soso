@@ -1,13 +1,6 @@
-//! Pila de red: smoltcp sobre e1000e o virtio-net. DHCP al arrancar; si no
-//! hay lease en unos segundos, fallback a IP estática 10.0.2.15/24 (QEMU
-//! slirp).
-//!
-//! `poll()` se llama desde el bucle del scheduler, el tick del timer (sólo si
-//! interrumpió ring 3) y el `irq_exit` de una IRQ que venía de ring 3 — **nunca
-//! desde una IRQ dura**: ahí abajo se toman PROCS, las colas de ssh, el VFS y el
-//! heap, y las syscalls sostienen esos mismos candados en ring 0 con IF=1. Lo
-//! comprueba el aserto de `poll()`. Usa try_lock: si la pila está ocupada, la
-//! próxima pasada lo recoge.
+//! Pila de red: smoltcp sobre e1000e, virtio-net o WiFi AX211.
+//! DHCP al arrancar en backends cableados; en WiFi sólo tras asociación.
+//! Fallback 10.0.2.x únicamente en QEMU (virtio/e1000e).
 
 mod device;
 pub mod dns;
@@ -35,16 +28,15 @@ use device::E1000Dev;
 use crate::drivers::virtio_net;
 
 pub const ECHO_PORT: u16 = 7;
-
-/// Sockets de eco escuchando a la vez: mientras uno atiende o se cierra,
-/// otro sigue en LISTEN (si no, una segunda conexión rápida recibe RST).
 const ECHO_SOCKETS: usize = 4;
-
-/// Tiempo máximo de espera de DHCP antes del fallback estático.
 const DHCP_TIMEOUT: Duration = Duration::from_secs(8);
-
-/// IP y pasarela del fallback QEMU slirp (último octeto derivado de MAC).
 const FALLBACK_GW: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackendKind {
+    Wired,
+    Wifi,
+}
 
 struct NetStack {
     iface: Interface,
@@ -53,9 +45,11 @@ struct NetStack {
     ssh: SocketHandle,
     dhcp: SocketHandle,
     configured: bool,
+    dhcp_enabled: bool,
     dhcp_started: Instant,
     dev: NicDev,
     mac: [u8; 6],
+    backend: BackendKind,
     user_tcp: tcp_user::TcpTable,
 }
 
@@ -65,30 +59,30 @@ fn now() -> Instant {
     Instant::from_millis(pit::uptime_ms() as i64)
 }
 
-fn net_backend() -> Option<([u8; 6], NicDev)> {
+fn net_backend() -> Option<([u8; 6], NicDev, BackendKind)> {
     #[cfg(feature = "lxdde")]
     if crate::lxdde::e1000e_present() {
         let mac = crate::lxdde::e1000e_mac()?;
         println!("net: backend lx-e1000e");
-        return Some((mac, NicDev::LxE1000e(device::LxE1000Dev)));
+        return Some((mac, NicDev::LxE1000e(device::LxE1000Dev), BackendKind::Wired));
     }
     #[cfg(feature = "drv-e1000e")]
     if e1000e::present() {
         let mac = e1000e::mac()?;
         println!("net: backend e1000e");
-        return Some((mac, NicDev::E1000e(E1000Dev)));
+        return Some((mac, NicDev::E1000e(E1000Dev), BackendKind::Wired));
     }
     #[cfg(feature = "lxdde")]
     if crate::lxdde::wifi_present() && crate::lxdde::wifi_alive() {
         if let Some(mac) = crate::lxdde::wifi_mac() {
             println!("net: backend lx-wifi (Intel AX211)");
-            return Some((mac, NicDev::LxWifi(device::LxWifiDev)));
+            return Some((mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi));
         }
     }
     #[cfg(feature = "drv-virtio-net")]
     if let Some(mac) = virtio_net::init() {
         println!("net: backend virtio-net");
-        return Some((mac, NicDev::Virtio(device::SmolDev)));
+        return Some((mac, NicDev::Virtio(device::SmolDev), BackendKind::Wired));
     }
     None
 }
@@ -137,13 +131,7 @@ fn close_tcp_services(sockets: &mut SocketSet<'static>, echo: &[SocketHandle], s
     }
 }
 
-pub fn init() {
-    // Preferir lx-e1000e (driver Linux vía lxdde), luego e1000e nativo, luego virtio.
-    let Some((mac, mut dev)) = net_backend() else {
-        println!("net: sin NIC");
-        return;
-    };
-
+fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: bool) {
     let mut config = Config::new(EthernetAddress(mac).into());
     config.random_seed = random_seed();
     let iface = Interface::new(config, &mut dev, now());
@@ -168,7 +156,7 @@ pub fn init() {
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
     ssh::init();
-    let dhcp_started = now();
+    let dhcp_started = if dhcp_now { now() } else { Instant::from_millis(0) };
     NET.call_once(|| {
         Mutex::new(NetStack {
             iface,
@@ -177,12 +165,66 @@ pub fn init() {
             ssh,
             dhcp,
             configured: false,
+            dhcp_enabled: dhcp_now,
             dhcp_started,
             dev,
             mac,
+            backend,
             user_tcp: tcp_user::TcpTable::new(),
         })
     });
+}
+
+/// Intenta crear la pila si hay NIC disponible (WiFi ALIVE incluido).
+pub fn try_attach() {
+    if NET.get().is_some() {
+        return;
+    }
+    let Some((mac, dev, backend)) = net_backend() else {
+        return;
+    };
+    let dhcp_now = backend == BackendKind::Wired
+        || (backend == BackendKind::Wifi && wifi_link_up());
+    attach_stack(mac, dev, backend, dhcp_now);
+}
+
+#[cfg(feature = "lxdde")]
+fn wifi_link_up() -> bool {
+    crate::lxdde::wifi_connected()
+}
+
+#[cfg(not(feature = "lxdde"))]
+fn wifi_link_up() -> bool {
+    false
+}
+
+pub fn init() {
+    try_attach();
+    if NET.get().is_none() {
+        println!("net: sin NIC");
+    }
+}
+
+/// Tras asociar WiFi: reinicia DHCP y habilita el cliente.
+pub fn on_wifi_connected() {
+    try_attach();
+    let Some(net) = NET.get() else {
+        return;
+    };
+    let mut n = net.lock();
+    if n.backend != BackendKind::Wifi {
+        return;
+    }
+    n.configured = false;
+    n.dhcp_enabled = true;
+    n.dhcp_started = now();
+    clear_ipv4_config(&mut n.iface);
+    let echo = n.echo.clone();
+    let ssh = n.ssh;
+    let dhcp = n.dhcp;
+    close_tcp_services(&mut n.sockets, &echo, ssh);
+    n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
+    println!("net: wifi asociada — solicitando DHCP…");
 }
 
 fn poll_dhcp(
@@ -217,8 +259,6 @@ fn poll_dhcp(
             *configured = true;
         }
         Some(dhcpv4::Event::Deconfigured) => {
-            // smoltcp emite Deconfigured al arrancar (estado Discovering con
-            // config_changed=true); ignorar si aún no hubo lease.
             if !*configured {
                 return;
             }
@@ -233,9 +273,13 @@ fn poll_dhcp(
 fn try_static_fallback(
     iface: &mut Interface,
     mac: [u8; 6],
+    backend: BackendKind,
     dhcp_started: Instant,
     configured: &mut bool,
 ) {
+    if backend == BackendKind::Wifi {
+        return;
+    }
     if *configured || now() < dhcp_started + DHCP_TIMEOUT {
         return;
     }
@@ -254,17 +298,13 @@ fn poll_tcp_services(
     if !configured {
         return;
     }
-
-    // Servidor SSH (puerto 22).
     ssh::poll(sockets.get_mut::<tcp::Socket>(ssh));
-
     for &h in echo {
         let s = sockets.get_mut::<tcp::Socket>(h);
         if !s.is_open() {
             s.listen(ECHO_PORT).ok();
             continue;
         }
-        // Eco: reenviar lo recibido mientras quepa en el buffer de salida.
         let mut buf = [0u8; 1024];
         while s.can_recv() && s.can_send() {
             let leidos = s.recv_slice(&mut buf).unwrap_or(0);
@@ -273,50 +313,31 @@ fn poll_tcp_services(
             }
             s.send_slice(&buf[..leidos]).ok();
         }
-        // El cliente cerró su lado: cerrar el nuestro al vaciarse todo.
         if s.state() == tcp::State::CloseWait && !s.can_recv() {
             s.close();
         }
     }
 }
 
-/// Trabajo de red agendado por una IRQ dura y aún sin procesar. Es el
-/// `__napi_schedule` de Linux: el handler marca y sale, la pila corre fuera del
-/// contexto de interrupción (ver la avería documentada en
-/// `drivers::virtio_net::net_irq_handler`).
 static TRABAJO_PENDIENTE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Llamable desde IRQ dura: sólo marca, no toca ni un candado.
 pub fn marcar_trabajo_pendiente() {
     TRABAJO_PENDIENTE.store(true, core::sync::atomic::Ordering::Release);
 }
 
-/// ¿Hay trabajo agendado? Lo consume: lo va a procesar quien pregunte.
 pub fn trabajo_pendiente() -> bool {
     TRABAJO_PENDIENTE.swap(false, core::sync::atomic::Ordering::AcqRel)
 }
 
-/// Procesa la red: DHCP, entrada/salida pendiente y el servidor de eco.
-/// Reentrante-seguro vía try_lock (puede llamarse desde el tick de timer
-/// que interrumpió a un proceso de usuario: ahí el kernel no tiene locks).
 pub fn poll() {
-    // NUNCA desde una IRQ dura: aquí abajo se toman PROCS (`task::exists`,
-    // `spawn_console`), las colas RX/TX de ssh, el VFS y el heap del kernel, y
-    // las syscalls sostienen esos mismos candados en ring 0 con IF=1 (el `sti`
-    // de `syscall_entry`). Reentrar desde el handler MSI-X era un interbloqueo
-    // en el propio core y así se colgaba la sesión SSH justo tras el prompt
-    // (2026-08-01). El aserto es una carga atómica: sale gratis y convierte una
-    // regresión silenciosa en un panic con traza, en vez de en una tarde de
-    // bisección con QEMU.
     debug_assert!(
         !crate::arch::irq::en_irq_dura(),
         "net::poll() desde IRQ dura: reentraría en PROCS/RX/TX/heap"
     );
+    try_attach();
     let Some(net) = NET.get() else { return };
     let Some(mut n) = net.try_lock() else { return };
-    // El flag se limpia DESPUÉS del try_lock: si la pila estaba ocupada, el
-    // aviso tiene que sobrevivir para la siguiente pasada.
     TRABAJO_PENDIENTE.store(false, core::sync::atomic::Ordering::Relaxed);
     let NetStack {
         iface,
@@ -325,15 +346,19 @@ pub fn poll() {
         ssh,
         dhcp,
         configured,
+        dhcp_enabled,
         dhcp_started,
         dev,
         mac,
+        backend,
         user_tcp,
     } = &mut *n;
 
     iface.poll(now(), dev, sockets);
-    poll_dhcp(iface, sockets, echo, *ssh, *dhcp, configured);
-    try_static_fallback(iface, *mac, *dhcp_started, configured);
+    if *dhcp_enabled {
+        poll_dhcp(iface, sockets, echo, *ssh, *dhcp, configured);
+        try_static_fallback(iface, *mac, *backend, *dhcp_started, configured);
+    }
     poll_tcp_services(sockets, echo, *ssh, *configured);
     poll_user_tcp(iface, sockets, user_tcp, *configured);
     iface.poll(now(), dev, sockets);
@@ -352,7 +377,6 @@ fn poll_user_tcp(
     }
 }
 
-/// Reserva un socket TCP en la pila de red (llamar con NET tomado).
 pub fn tcp_listen(port: u16) -> Result<usize, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;
     let mut n = net.lock();
@@ -369,6 +393,8 @@ pub fn tcp_listen(port: u16) -> Result<usize, i64> {
     }
     Ok(slot)
 }
+
+// ... rest of tcp_* functions unchanged from original
 
 pub fn tcp_connect(remote: soso_abi::SockAddr) -> Result<usize, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;

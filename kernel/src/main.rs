@@ -134,6 +134,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         drivers::fatlog::init();
         drivers::drvlog::init();
         drivers::bootreq::init();
+        drivers::wificonf::init();
     }
     println!("boot: kbd");
     drivers::kbd::init();
@@ -144,14 +145,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("boot: ethernet");
     #[cfg(feature = "lxdde")]
     {
-        let mode = lxdde_mode();
-        if mode != lxdde::LxddeMode::Off {
-            lxdde::init(mode);
+        let modes = lxdde_modes();
+        if !modes.is_off() {
+            lxdde::init(modes);
         }
-        if mode == lxdde::LxddeMode::Nouveau {
+        if modes.nouveau {
             drivers::nvidia_probe::init();
         }
-        if mode != lxdde::LxddeMode::E1000e && mode != lxdde::LxddeMode::Iwlwifi {
+        if !modes.e1000e && !modes.iwlwifi {
             #[cfg(feature = "drv-e1000e")]
             let _ = drivers::e1000e::init();
         }
@@ -168,10 +169,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("boot: red");
     net::init();
     #[cfg(feature = "lxdde")]
-    if lxdde_mode() == lxdde::LxddeMode::Iwlwifi {
-        let rc = net::wifi_wpa::autoconnect_from_config();
+    if lxdde_modes().iwlwifi && crate::lxdde::wifi_alive() {
+        let rc = net::wifi_wpa::autoconnect();
         if rc == 0 {
-            println!("wifi: conectado desde /etc/wifi.conf");
+            net::on_wifi_connected();
+            println!("wifi: conectado (autoconnect)");
         }
     }
     // Autodescubrimiento: informe parseable en serie; en live también en ESP.
@@ -200,15 +202,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 }
 
 #[cfg(feature = "lxdde")]
-fn lxdde_mode() -> lxdde::LxddeMode {
-    match option_env!("SOSO_LXDDE_MODE").unwrap_or("") {
-        "spike" => lxdde::LxddeMode::Spike,
-        "testdrv" => lxdde::LxddeMode::TestDrv,
-        "e1000e" => lxdde::LxddeMode::E1000e,
-        "nouveau" => lxdde::LxddeMode::Nouveau,
-        "iwlwifi" => lxdde::LxddeMode::Iwlwifi,
-        _ => lxdde::LxddeMode::Off,
-    }
+fn lxdde_modes() -> lxdde::LxddeModes {
+    lxdde::LxddeModes::from_env()
 }
 
 extern "sysv64" fn panic_print_shim(info: u64, _b: u64) -> u64 {

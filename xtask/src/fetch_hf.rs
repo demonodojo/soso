@@ -343,17 +343,8 @@ fn run_pull(args: &[String]) {
 
     let model_name = name.clone().unwrap_or_else(|| default_model_name(&slug, &chosen));
     let out_dir = out.unwrap_or_else(|| root.join("target/hf-models").join(&model_name));
-    let cache_dir = root.join("target/hf-cache").join(&slug);
-    std::fs::create_dir_all(&cache_dir).expect("crear cache hf");
-    let gguf_cache = cache_dir.join(chosen.rsplit('/').next().unwrap_or(&chosen));
 
-    if !gguf_cache.exists() {
-        download_gguf(&slug, &chosen, &gguf_cache);
-    } else {
-        println!("fetch-hf: cache hit → {}", gguf_cache.display());
-    }
-
-    convert_gguf(&root, &gguf_cache, &out_dir, &model_name);
+    pull_to(&root, &slug, Some(&chosen), &model_name, &out_dir);
 
     let size_hint = suggest_models_size(dir_size_bytes(&out_dir));
     println!("fetch-hf: modelo listo en {}", out_dir.display());
@@ -372,6 +363,49 @@ fn run_pull(args: &[String]) {
         let img = super::build_image();
         super::run_qemu(&img, false);
     }
+}
+
+/// Descarga GGUF (cache en `target/hf-cache/`) y convierte a `.som` en `out_dir`.
+///
+/// `repo` es `org/nombre`. `file` opcional fija el GGUF; si es `None` se lista
+/// el árbol del Hub y se elige Q4_K_M.
+pub fn pull_to(
+    root: &Path,
+    repo: &str,
+    file: Option<&str>,
+    model_name: &str,
+    out_dir: &Path,
+) {
+    let slug = repo_slug(repo);
+    if slug.is_empty() || !slug.contains('/') {
+        eprintln!("fetch-hf: el repo debe ser org/nombre (ej. TinyLlama/TinyLlama-1.1B-Chat-v1.0)");
+        exit(2);
+    }
+
+    let chosen = if let Some(f) = file {
+        f.to_string()
+    } else {
+        let entries = fetch_tree(&slug);
+        match pick_gguf_file(&entries, None) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("fetch-hf: {e}");
+                exit(1);
+            }
+        }
+    };
+
+    let cache_dir = root.join("target/hf-cache").join(&slug);
+    std::fs::create_dir_all(&cache_dir).expect("crear cache hf");
+    let gguf_cache = cache_dir.join(chosen.rsplit('/').next().unwrap_or(&chosen));
+
+    if !gguf_cache.exists() {
+        download_gguf(&slug, &chosen, &gguf_cache);
+    } else {
+        println!("fetch-hf: cache hit → {}", gguf_cache.display());
+    }
+
+    convert_gguf(root, &gguf_cache, out_dir, model_name);
 }
 
 fn fetch_tree(slug: &str) -> Vec<HfTreeEntry> {

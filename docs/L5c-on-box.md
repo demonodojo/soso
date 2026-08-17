@@ -91,15 +91,12 @@ El disco NVMe/SSD con Linux **no se toca**.
 ### Host — generar imagen
 
 ```bash
-# Modelo real (solo la primera vez si falta target/tinyllama-model)
-cargo xtask fetch-hf TinyLlama/TinyLlama-1.1B-Chat-v1.0
-
 # Firmware Ampere (ga107 + ga102 fallback)
 ./scripts/l6-pack-firmware.sh
 
 # Imagen live con perfil live-usb (nouveau + drv-gpu-nvidia + firmware Ampere y Blackwell)
-cargo xtask package-usb-live
-# o flashear directo:
+cargo xtask package-usb-live          # TinyLlama (sin medir pendrive)
+# o flashear midiendo el stick (elige el mejor modelo que quepa):
 sudo cargo xtask flash-usb-live /dev/sdX --yes
 
 ls -lh target/usb-live/
@@ -108,10 +105,29 @@ ls -lh target/usb-live/
 ```
 
 `package-usb-live` y `flash-usb-live` usan el perfil **`live-usb`** por defecto
-(lxdde + nouveau + firmware ga107/ga102 y gb205). Override: `SOSO_DRIVERS=…`.
+(lxdde **nouveau + iwlwifi** + firmware ga107/ga102 y gb205). Override: `SOSO_DRIVERS=…`.
 
-En placa, `ask` o `soso-llm run tinyllama --prompt "hola" --max 32 --chat` demuestran
-texto real. Override de modelos: `SOSO_MODELS_DIR=… SOSO_MODELS_SIZE=…`.
+**WiFi en placa:** el live arranca nouveau (GPU) e iwlwifi (AX211) a la vez.
+Credenciales en `SOSOWIFI.TXT` (ESP, 4 KiB) o `/etc/wifi.conf`. Tras asociación,
+DHCP y SSH en **:22** (no el 2222 de QEMU slirp).
+
+```bash
+# VFIO passthrough del AX211 a QEMU (requiere IOMMU + root):
+sudo ./scripts/l6-wifi-vfio-test.sh
+# Criterio GO: «firmware ALIVE (UCODE_ALIVE_NTFY)» — no «ALIVE degradado»
+```
+
+**Modelo demo según tamaño del USB** (al flashear; descarga/convierte Q4_K_M si falta):
+
+| Pendrive | Modelo |
+|----------|--------|
+| 8 GB | `tinyllama` |
+| 16 GB | `mistral-7b` |
+| 32 GB | `mixtral` |
+| 64 GB+ | `llama2-70b` |
+
+Simular sin pendrive: `SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live`.
+Override: `SOSO_MODELS_DIR=…`. En placa, `ask` o `soso-llm run <modelo> --prompt "hola" --max 32 --chat`.
 
 **El modelo empaquetado tiene que ser v5 o `ask` contestará como si continuara un
 texto**: la plantilla de chat va en el manifiesto, y los `.som` convertidos antes
@@ -244,7 +260,8 @@ Ver `target/usb-package/FLASH.txt`.
 | 3 | Boot UEFI USB | Log kernel `soso 0.1` |
 | 4 | ACPI/PCI | MCFG, ECAM, NIC PCI ID |
 | 5 | Live mount | `fs: sosofs live` + modelos listados |
-| 6 | Red | DHCP, ping/SSH |
+| 6 | Red | WiFi: `iwl_ax211: probe` → `firmware ALIVE (UCODE_ALIVE_NTFY)` → `net: dhcp …` → `ssh -i target/soso_test_key soso@<ip>` (**puerto 22**, no 2222) |
+| 6b | WiFi config | Editar `SOSOWIFI.TXT` en ESP p1 (`ssid=`, `psk=`) antes de arrancar, o `/etc/wifi.conf` en rootfs |
 | 7 | Inferencia | `ask hola` contesta **como asistente** (la plantilla de chat sale del modelo); `soso-llm run tinyllama --prompt hola --max 32 --chat` para lo mismo con diagnóstico |
 | 7b | GPU (Ampere o Blackwell) | `10de:249c` → `familia=ga107`; `10de:2f18` → `familia=Blackwell`; `NV_PMC_BOOT_0 ≠ ffffffff` |
 | 7c | Offload: dice la verdad | Línea de arranque `pool VRAM=sí/no`; con `no`, `ask` dice `GPU presente sin pool de VRAM (fase=…)` y **nunca** `subida de pesos` |
@@ -258,13 +275,15 @@ Ver `target/usb-package/FLASH.txt`.
 
 | Variable | Efecto |
 |----------|--------|
-| `SOSO_MODELS_DIR` | Árbol `.som` al empaquetar |
-| `SOSO_MODELS_SIZE` | Tamaño imagen modelos (default 8G) |
+| `SOSO_MODELS_DIR` | Árbol `.som` al empaquetar (override del catálogo live) |
+| `SOSO_MODELS_SIZE` | Tamaño imagen modelos (si no, se calcula del árbol) |
+| `SOSO_LIVE_CAPACITY` | Simula tamaño de pendrive al empaquetar (`64G`, `32G`, …) |
 | `SOSO_QEMU_LIVE=1` | QEMU con `soso-live.img` |
 | `SOSO_QEMU_LIVE_USB=1` | Mismo disco vía xHCI + `usb-storage` (BOT) |
 | `SOSO_QEMU_USB_HUB=1` | Storage/kbd detrás de `usb-hub` (prueba placa) |
 | `SOSO_FIRMWARE=uefi` | Arranque OVMF en QEMU |
 | `SOSO_QEMU_NIC=e1000e` | NIC física en QEMU |
+| `SOSO_QEMU_NIC=vfio:BB:DD.F` | Passthrough WiFi AX211 (sin virtio-net/slirp) |
 
 ## Siguiente hito
 

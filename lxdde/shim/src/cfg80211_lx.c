@@ -2,6 +2,8 @@
 #include "iwl_ax211.h"
 #include "lx_emul.h"
 
+extern void *memcpy(void *dst, const void *src, unsigned long n);
+
 int lx_cfg80211_scan(void)
 {
     struct iwl_ax211_bss tmp[IWL_AX211_MAX_SCAN];
@@ -28,8 +30,9 @@ int lx_cfg80211_connected(void)
 
 int lx_cfg80211_add_key(const unsigned char *gtk, unsigned int gtk_len, int key_idx)
 {
-    (void)gtk;
-    (void)gtk_len;
-    (void)key_idx;
-    return 0;
+    if (!gtk || gtk_len < 16)
+        return -1;
+    unsigned char key16[16];
+    memcpy(key16, gtk, 16);
+    return iwl_ax211_install_key(key16, key_idx);
 }

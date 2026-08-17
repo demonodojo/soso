@@ -1,26 +1,26 @@
 INFO : Framebuffer info: FrameBufferInfo { byte_len: 2764800, width: 1280, height: 720, pixel_format: Bgr, bytes_per_pixel: 3, stride: 1280 }
 INFO : 4th Stage
-INFO : BiosInfo { stage_4: Region { start: 130000, len: 245f8 }, kernel: Region { start: 1000000, len: 1a0b758 }, ramdisk: Region { start: 2a0c000, len: 0 }, config_file: Region { start: 2a0c000, len: 0 }, last_used_addr: 2a0bfff, framebuffer: BiosFramebufferInfo { region: Region { start: fd000000, len: 2a3000 }, width: 500, height: 2d0, bytes_per_pixel: 3, stride: 500, pixel_format: Bgr }, memory_map_addr: 11ea0, memory_map_len: 9 }
+INFO : BiosInfo { stage_4: Region { start: 130000, len: 245f8 }, kernel: Region { start: 1000000, len: 1a0dd50 }, ramdisk: Region { start: 2a0e000, len: 0 }, config_file: Region { start: 2a0e000, len: 0 }, last_used_addr: 2a0dfff, framebuffer: BiosFramebufferInfo { region: Region { start: fd000000, len: 2a3000 }, width: 500, height: 2d0, bytes_per_pixel: 3, stride: 500, pixel_format: Bgr }, memory_map_addr: 11eb0, memory_map_len: 9 }
 INFO : BIOS boot
 INFO : Elf file loaded at Pointer {
     addr: 0x0000000001000000,
-    metadata: 27309912,
+    metadata: 27319632,
 }
 INFO : virtual_address_offset: 0x10000000000
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 7c034, mem_size: 7c034, align: 1000 })
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 7c040, virtual_addr: 7d040, physical_addr: 7d040, file_size: 2fbeaa, mem_size: 2fbeaa, align: 1000 })
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 377ef0, virtual_addr: 379ef0, physical_addr: 379ef0, file_size: 3e188, mem_size: 3f110, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 7c094, mem_size: 7c094, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 7c0a0, virtual_addr: 7d0a0, physical_addr: 7d0a0, file_size: 2fc54a, mem_size: 2fc54a, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 3785f0, virtual_addr: 37a5f0, physical_addr: 37a5f0, file_size: 3e188, mem_size: 3ea10, align: 1000 })
 INFO : Mapping bss section
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 3b6080, virtual_addr: 3b9080, physical_addr: 3b9080, file_size: 44f20, mem_size: 277420, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 3b6780, virtual_addr: 3b9780, physical_addr: 3b9780, file_size: 44f20, mem_size: 277440, align: 1000 })
 INFO : Mapping bss section
-INFO : Entry point at: 0x100001047f0
+INFO : Entry point at: 0x100001042d0
 INFO : Creating GDT at PhysAddr(0x2ca4000)
 INFO : Map framebuffer
 INFO : Map physical memory
 INFO : Allocate bootinfo
 INFO : Create Memory Map
 INFO : Create bootinfo
-INFO : Jumping to kernel entry point at VirtAddr(0x100001047f0)
+INFO : Jumping to kernel entry point at VirtAddr(0x100001042d0)
 soso 0.1
 mm: heap 512 MiB de 2014 MiB utilizables
 fb: 1280x720 mapped_h=720 stride=1280 bpp=3 scale=2
@@ -28,7 +28,7 @@ serial: COM1 0x3F8 presente
 memoria: 1501 MiB libres tras el heap
 boot: memtest
 memtest: OK (4096 KiB)
-idt: breakpoint ok rip=0x10000174981
+idt: breakpoint ok rip=0x10000178651
 boot: acpi/smp
 acpi: MCFG ecam=0xb0000000 buses 0-255
 acpi: MADT 1 CPUs, 1 IOAPIC, 5 ISO
@@ -36,7 +36,7 @@ ioapic: base=0xfec00000 gsi_base=0 max_entry=23
 apic: xAPIC mmio (id 0)
 smp: MADT con 1 CPUs (bsp apic 0)
 boot: tsc
-tsc: 2879 MHz (calibrado contra el PIT en 50 ms)
+tsc: 2878 MHz (calibrado contra el PIT en 50 ms)
 boot: pci
 pci: 8 dispositivos
 pci: GPU 1234:1111 bar0=0xfd000000 (16384 KiB)

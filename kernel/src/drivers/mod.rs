@@ -10,6 +10,8 @@ pub mod kbd;
 #[cfg(feature = "drv-live-disk")]
 pub mod bootreq;
 #[cfg(feature = "drv-live-disk")]
+pub mod wificonf;
+#[cfg(feature = "drv-live-disk")]
 pub mod drvlog;
 #[cfg(feature = "drv-live-disk")]
 pub mod espfat;

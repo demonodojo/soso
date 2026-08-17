@@ -100,9 +100,11 @@ lanza `/bin/soso-llm ask <texto crudo>` — es la única forma de que comillas, 
 `soso-llm` lo despacha sobre su `args` sin trocear. `run_model` está partido en
 `preparar_sesion` + `generar` (`verboso` apaga el diagnóstico) para que el REPL cargue
 el modelo una vez. Config en `/etc/llm.conf`, que **no fija modelo por defecto**: se
-usa el primero de `/models`, y `mkfs_models_live` pone el modelo de verdad delante de
-los sintéticos, así que el pendrive coge ese y las imágenes de prueba `tiny`. Fijar un
-nombre ahí lo hereda toda imagen que se genere, y avisa en cada respuesta si no viaja
+usa el primero de `/models`, y el empaquetado live (`package-usb-live` /
+`flash-usb-live`) pone el modelo demo delante de `tiny` sintético — al flashear
+elige el mejor GGUF llama que quepa (tinyllama → mistral-7b → mixtral →
+llama2-70b según tamaño del USB). Las imágenes de prueba QEMU siguen con
+`synthetic tiny`. Fijar un nombre ahí lo hereda toda imagen que se genere, y avisa en cada respuesta si no viaja
 con ella — por eso `ask-modelo` escribe el fichero en el disco de la máquina, no en el
 árbol. `:eco <texto>` se resuelve antes de leer nada: devuelve el texto tal cual llegó
 y es lo que hace verificable el camino crudo (`ask :eco a|b>c "x"`).
@@ -114,8 +116,9 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 
 ## Network & SSH
 
-- smoltcp TCP/IPv4 + cliente DHCPv4 en kernel; fallback estático 10.0.2.15/24 si no hay lease en 8 s
-- **WiFi (lxdde/iwlwifi):** Intel AX211 (`8086:7f70`); transporte Gen2 + firmware en `/lib/firmware/`; mini-supplicant WPA2 en `net/wifi_wpa.rs`; backend `NicDev::LxWifi` si no hay Ethernet; config `/etc/wifi.conf`; kshell `wifi scan|status|connect`
+- smoltcp TCP/IPv4 + cliente DHCPv4 en kernel; fallback estático 10.0.2.15/24 solo con virtio-net/e1000e (no en WiFi)
+- **WiFi (lxdde/iwlwifi):** Intel AX211 (`8086:7f70/51f0/54f0`); driver first-party en `lxdde/ports/iwlwifi/` (TLV fw, context-info gen3, MVM scan/assoc/TX); mini-supplicant WPA2 EAPOL en `net/wifi_wpa.rs`; backend `NicDev::LxWifi`; credenciales `SOSOWIFI.TXT` (ESP live) o `/etc/wifi.conf`; DHCP tras asociación (sin fallback slirp); kshell `wifi scan|status|connect`
+- **Live USB:** perfil `live-usb` = nouveau + iwlwifi (`SOSO_LXDDE_MODE=nouveau,iwlwifi`); SSH :22 tras lease DHCP
 - **Drivers modulares:** features Cargo `drv-*` + `drv-all` (default); `drivers/registry.rs`; kshell `hwscan`; `SOSODRV.TXT` en ESP live; host `SOSO_DRIVERS`, `cargo xtask fit-drivers`, `cargo xtask driver-add`
 - **Drivers modulares:** features Cargo `drv-virtio-blk`, `drv-virtio-net`, `drv-e1000e`, `drv-nvme`, `drv-usb`, `drv-gpu-nvidia`, `drv-live-disk`; meta `drv-all` (default). Metadatos PCI en `drivers/registry.rs`; `hwscan` en kshell; informe en `SOSODRV.TXT` (ESP live). Host: `SOSO_DRIVERS=qemu|live-usb|all` o `--drivers`; `cargo xtask fit-drivers <informe>` reempaqueta; `cargo xtask driver-add <git-url>` registra ports lxdde externos en `lxdde/ports-extern/`
 - NIC polled (no IRQ-driven RX)

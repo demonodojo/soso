@@ -119,6 +119,7 @@ mod flash_usb_live;
 mod g1_check;
 mod g3_check;
 mod install_disk;
+mod live_models;
 mod lx_build;
 mod package_live;
 mod sosolog;
@@ -634,96 +635,67 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
     path
 }
 
-/// Disco de modelos para el live USB: TinyLlama 1.1B Chat + `tiny` sintético (2 GiB).
-/// QEMU/tests siguen usando [`mkfs_models`] (sintéticos, 8 GiB).
-/// `SOSO_MODELS_DIR` sustituye el set por defecto (como en `mkfs_models`).
-pub(crate) fn mkfs_models_live(force: bool) -> PathBuf {
+/// Disco de modelos para el live USB.
+///
+/// `primary` va delante de `tiny` en sosomfs (el demo usa el primero de `/models`).
+/// `SOSO_MODELS_SIZE` puede forzar el tamaño de imagen; si no, se calcula del árbol.
+pub(crate) fn mkfs_models_live_for_dirs(
+    force: bool,
+    primary: &Path,
+    tiny: Option<&Path>,
+) -> PathBuf {
     let root = project_root();
     let path = root.join("target/soso-models-live.img");
-    let custom = std::env::var_os("SOSO_MODELS_DIR").map(PathBuf::from);
 
-    if let Some(ref model_src) = custom {
-        if !model_src.join("manifest.som").exists() {
-            eprintln!(
-                "xtask: SOSO_MODELS_DIR={} no contiene manifest.som",
-                model_src.display()
-            );
-            exit(1);
-        }
-        let size = std::env::var("SOSO_MODELS_SIZE").unwrap_or_else(|_| "2G".into());
-        let status = Command::new("cargo")
-            .current_dir(&root)
-            .args([
-                "run",
-                "-q",
-                "--release",
-                "-p",
-                "mkfs-sosomfs",
-                "--",
-            ])
-            .arg(model_src)
-            .arg(&path)
-            .arg("--size")
-            .arg(&size)
-            .status()
-            .expect("mkfs-sosomfs live");
-        if !status.success() {
-            exit(status.code().unwrap_or(1));
-        }
-        return path;
-    }
-
-    let tinyllama = root.join("target/tinyllama-model");
-    if !tinyllama.join("manifest.som").exists() {
-        eprintln!("xtask: falta target/tinyllama-model (manifest.som)");
-        eprintln!("  cargo xtask fetch-hf TinyLlama/TinyLlama-1.1B-Chat-v1.0");
+    if !primary.join("manifest.som").exists() {
+        eprintln!(
+            "xtask: {} no contiene manifest.som",
+            primary.display()
+        );
         exit(1);
     }
-
-    let tiny = root.join("target/tiny-model");
-    let status = Command::new("cargo")
-        .current_dir(&root)
-        .args(["run", "-q", "--release", "-p", "mkmodel-soso", "--"])
-        .arg(&tiny)
-        .status()
-        .expect("mkmodel-soso tiny (live)");
-    if !status.success() {
-        exit(status.code().unwrap_or(1));
+    if let Some(t) = tiny {
+        if !t.join("manifest.som").exists() {
+            eprintln!("xtask: {} no contiene manifest.som", t.display());
+            exit(1);
+        }
     }
 
-    let vieja = path
-        .metadata()
-        .and_then(|m| m.modified())
-        .map(|img| {
-            newest_mtime(&tinyllama) > img || newest_mtime(&tiny) > img
-        })
-        .unwrap_or(true);
+    let size = std::env::var("SOSO_MODELS_SIZE").unwrap_or_else(|_| {
+        if let Some(t) = tiny {
+            live_models::suggest_models_image_size(primary, t)
+        } else {
+            live_models::suggest_models_image_size(primary, primary)
+        }
+    });
+
+    let vieja = path.metadata().and_then(|m| m.modified()).map(|img| {
+        newest_mtime(primary) > img || tiny.map(|t| newest_mtime(t) > img).unwrap_or(false)
+    }).unwrap_or(true);
     if path.exists() && !force && !vieja {
         return path;
     }
 
-    let size = std::env::var("SOSO_MODELS_SIZE").unwrap_or_else(|_| "2G".into());
-    println!(
-        "package-usb-live: modelos tinyllama + tiny ({})",
-        size
-    );
-    let status = Command::new("cargo")
-        .current_dir(&root)
-        .args([
-            "run",
-            "-q",
-            "--release",
-            "-p",
-            "mkfs-sosomfs",
-            "--",
-        ])
-        .arg(&tinyllama)
-        .arg(&tiny)
-        .arg(&path)
-        .arg("--size")
-        .arg(&size)
-        .status()
-        .expect("mkfs-sosomfs live");
+    let label = match tiny {
+        Some(t) => format!(
+            "{} + {} ({})",
+            primary.file_name().unwrap().to_string_lossy(),
+            t.file_name().unwrap().to_string_lossy(),
+            size
+        ),
+        None => format!("{} ({})", primary.display(), size),
+    };
+    println!("package-usb-live: modelos {label}");
+
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(&root)
+        .args(["run", "-q", "--release", "-p", "mkfs-sosomfs", "--"])
+        .arg(primary);
+    if let Some(t) = tiny {
+        cmd.arg(t);
+    }
+    cmd.arg(&path).arg("--size").arg(&size);
+    let status = cmd.status().expect("mkfs-sosomfs live");
     if !status.success() {
         exit(status.code().unwrap_or(1));
     }
@@ -914,8 +886,11 @@ pub(crate) fn lxdde_enabled() -> bool {
         "lx-e1000e" | "lx_e1000e"
     ) || matches!(
         std::env::var("SOSO_LXDDE_MODE").as_deref(),
-        Ok("nouveau")
+        Ok(m) if m.contains("nouveau") || m.contains("iwlwifi")
     ) || std::env::var("SOSO_QEMU_GPU").is_ok()
+        || std::env::var("SOSO_QEMU_NIC")
+            .map(|v| v.starts_with("vfio:"))
+            .unwrap_or(false)
 }
 
 pub(crate) fn lxdde_mode_env() -> Option<String> {
@@ -1032,24 +1007,41 @@ pub(crate) fn apply_qemu_nic_with_ports(
     echo_port: u16,
     mac: Option<&str>,
 ) {
-    qemu.args([
-        "-netdev",
-        &format!(
-            "user,id=net0,hostfwd=tcp::{echo_port}-:7,hostfwd=tcp::{ssh_port}-:22"
-        ),
-    ]);
     let mac = mac
         .map(String::from)
         .or_else(|| std::env::var("SOSO_QEMU_MAC").ok())
         .unwrap_or_else(|| "52:54:00:12:34:15".into());
     match qemu_nic().to_ascii_lowercase().as_str() {
+        s if s.starts_with("vfio:") => {
+            let bdf = s.strip_prefix("vfio:").unwrap_or("");
+            println!("xtask: NIC VFIO passthrough {bdf} (sin slirp)");
+            qemu.args(["-device", &format!("vfio-pci,host={bdf}")]);
+        }
         "e1000e" | "e1000" => {
+            qemu.args([
+                "-netdev",
+                &format!(
+                    "user,id=net0,hostfwd=tcp::{echo_port}-:7,hostfwd=tcp::{ssh_port}-:22"
+                ),
+            ]);
             qemu.args(["-device", &format!("e1000e,netdev=net0,mac={mac}")]);
         }
         "lx-e1000e" | "lx_e1000e" => {
+            qemu.args([
+                "-netdev",
+                &format!(
+                    "user,id=net0,hostfwd=tcp::{echo_port}-:7,hostfwd=tcp::{ssh_port}-:22"
+                ),
+            ]);
             qemu.args(["-device", &format!("e1000e,netdev=net0,mac={mac}")]);
         }
         _ => {
+            qemu.args([
+                "-netdev",
+                &format!(
+                    "user,id=net0,hostfwd=tcp::{echo_port}-:7,hostfwd=tcp::{ssh_port}-:22"
+                ),
+            ]);
             qemu.args(["-device", &format!("virtio-net-pci,netdev=net0,mac={mac}")]);
         }
     }

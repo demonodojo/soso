@@ -27,20 +27,36 @@ unsafe extern "C" {
     fn lx_nouveau_init_module() -> i32;
 }
 
-/// Modo de la capa lx al arrancar.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum LxddeMode {
-    Off,
-    Spike,
-    TestDrv,
-    E1000e,
-    Nouveau,
-    Iwlwifi,
+/// Puertos lxdde activos (compile-time vía `SOSO_LXDDE_MODE`, coma-separado).
+#[derive(Clone, Copy, Default)]
+pub struct LxddeModes {
+    pub spike: bool,
+    pub testdrv: bool,
+    pub e1000e: bool,
+    pub nouveau: bool,
+    pub iwlwifi: bool,
+}
+
+impl LxddeModes {
+    pub fn from_env() -> Self {
+        let s = option_env!("SOSO_LXDDE_MODE").unwrap_or("");
+        Self {
+            spike: s.contains("spike"),
+            testdrv: s.contains("testdrv"),
+            e1000e: s.contains("e1000e"),
+            nouveau: s.contains("nouveau"),
+            iwlwifi: s.contains("iwlwifi"),
+        }
+    }
+
+    pub fn is_off(self) -> bool {
+        !self.spike && !self.testdrv && !self.e1000e && !self.nouveau && !self.iwlwifi
+    }
 }
 
 /// Inicializa la capa lx_emul.
-pub fn init(mode: LxddeMode) {
-    if mode == LxddeMode::Off {
+pub fn init(modes: LxddeModes) {
+    if modes.is_off() {
         return;
     }
     fiber::init();
@@ -52,27 +68,37 @@ pub fn init(mode: LxddeMode) {
     net::init();
 
     unsafe {
-        match mode {
-            LxddeMode::Spike => fiber::spawn_main(|| lx_spike_run()),
-            LxddeMode::TestDrv => fiber::spawn_main(|| lx_testdrv_run()),
-            LxddeMode::E1000e => {
-                let _ = lx_e1000e_init_module();
-            }
-            LxddeMode::Nouveau => {
-                let rc = lx_nouveau_init_module();
-                crate::println!("lxdde: nouveau init rc={rc} phase={}", gpu::gsp_phase());
-            }
-            LxddeMode::Iwlwifi => {
-                let rc = wifi::init();
-                crate::println!("lxdde: iwlwifi init rc={rc} phase={}", wifi::phase());
-            }
-            LxddeMode::Off => {}
+        if modes.spike {
+            fiber::spawn_main(|| lx_spike_run());
+        }
+        if modes.testdrv {
+            fiber::spawn_main(|| lx_testdrv_run());
+        }
+        if modes.e1000e {
+            let _ = lx_e1000e_init_module();
+        }
+        if modes.nouveau {
+            let rc = lx_nouveau_init_module();
+            crate::println!("lxdde: nouveau init rc={rc} phase={}", gpu::gsp_phase());
+        }
+        if modes.iwlwifi {
+            let rc = wifi::init();
+            crate::println!("lxdde: iwlwifi register rc={rc}");
         }
     }
 
     pci::init();
 
-    if matches!(mode, LxddeMode::Spike | LxddeMode::TestDrv) {
+    if modes.iwlwifi {
+        let rc = wifi::start_firmware();
+        crate::println!(
+            "lxdde: iwlwifi start rc={rc} phase={} alive={}",
+            wifi::phase(),
+            wifi::alive()
+        );
+    }
+
+    if modes.spike || modes.testdrv {
         poll();
     }
 }

@@ -33,7 +33,7 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
-| `cargo xtask flash-usb-live /dev/sdX --yes` | Graba live + estira p3 al sobrante del stick (p4 SOSOINSTALL 32 MiB al final) |
+| `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3 (p4 SOSOINSTALL 32 MiB al final) |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
 | `cargo xtask fetch-hf` | Descargar GGUF de Hugging Face, convertir a `.som` y preparar `SOSO_MODELS_DIR` |
@@ -73,14 +73,14 @@ QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
 ## WiFi (Intel AX211, hardware real)
 
 ```sh
-cargo xtask lx-build iwlwifi
-SOSO_LXDDE=1 SOSO_LXDDE_MODE=iwlwifi cargo xtask build
-SOSO_LXDDE=1 SOSO_LXDDE_MODE=iwlwifi cargo xtask flash-usb-live /dev/sdX --yes
-# VFIO passthrough a QEMU (requiere root + IOMMU):
-sudo ./scripts/l6-wifi-vfio-test.sh
+# Live USB ya incluye nouveau+iwlwifi; solo flash:
+cargo xtask flash-usb-live /dev/sdX --yes
+# WiFi: edita SOSOWIFI.TXT en ESP p1 o /etc/wifi.conf antes de flashear
+# SSH en placa: ssh -i target/soso_test_key soso@<ip>  (puerto 22)
+sudo ./scripts/l6-wifi-vfio-test.sh   # VFIO AX211 en QEMU
 ```
 
-Config: `/etc/wifi.conf` (`ssid=`, `psk=`). Firmware en `rootfs/lib/firmware/iwlwifi-so-a0-gf-a0-*`.
+Config: `SOSOWIFI.TXT` (ESP) o `/etc/wifi.conf` (`ssid=`, `psk=`). Firmware en `rootfs/lib/firmware/iwlwifi-so-a0-gf-a0-*`.
 Kshell: `wifi scan`, `wifi status`, `wifi connect <ssid> [psk]`, `hwscan` (informe PCI → serie y `SOSODRV.TXT` en live).
 
 ## Perfiles de drivers (`SOSO_DRIVERS` / `--drivers`)
@@ -89,7 +89,7 @@ Kshell: `wifi scan`, `wifi status`, `wifi connect <ssid> [psk]`, `hwscan` (infor
 |--------|-----------------|-----|
 | `all` (default) | `drv-all` | Desarrollo y `cargo xtask test` |
 | `qemu` | virtio-blk, virtio-net | Imagen mínima QEMU |
-| `live-usb` | virtio + nvme + usb + live-disk | Pendrive live |
+| `live-usb` | virtio + nvme + usb + live-disk + nouveau + iwlwifi | Pendrive live (GPU + WiFi) |
 
 Tras arrancar en hardware con kernel mínimo, `hwscan` lista dispositivos PCI y
 drivers ausentes. En host: `cargo xtask fit-drivers /media/.../SOSODRV.TXT`

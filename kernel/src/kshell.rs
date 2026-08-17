@@ -257,6 +257,9 @@ fn exec(line: &str) {
                             } else {
                                 crate::lxdde::wifi::connect_open(ssid)
                             };
+                            if rc == 0 {
+                                crate::net::on_wifi_connected();
+                            }
                             println!("wifi connect: rc={rc}");
                         }
                         None => println!("uso: wifi connect <ssid> [psk]"),

@@ -81,8 +81,8 @@ pub fn preset_live_usb() -> DriverProfile {
             "drv-live-disk".into(),
             "drv-gpu-nvidia".into(),
         ],
-        lxdde_ports: vec!["nouveau".into()],
-        lxdde_mode: Some("nouveau".into()),
+        lxdde_ports: vec!["nouveau".into(), "iwlwifi".into()],
+        lxdde_mode: Some("nouveau,iwlwifi".into()),
         firmware_exclude: vec![],
     }
 }

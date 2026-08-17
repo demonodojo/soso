@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 use crate::drivers::{self, DriverProfile};
+use crate::live_models;
 
 /// Perfil live: `SOSO_DRIVERS` si está definido; si no, `live-usb` (GPU GA107 incluida).
 fn live_profile() -> DriverProfile {
@@ -18,18 +19,43 @@ fn live_profile() -> DriverProfile {
 }
 
 pub fn run() {
+    let capacity = std::env::var("SOSO_LIVE_CAPACITY")
+        .ok()
+        .map(|v| {
+            live_models::parse_capacity_env(&v).unwrap_or_else(|e| {
+                eprintln!("package-usb-live: {e}");
+                exit(1);
+            })
+        });
+    run_with_capacity(capacity);
+}
+
+/// Empaqueta el live USB. `usb_bytes` fija el presupuesto de modelos (p. ej. tamaño del pendrive).
+pub fn run_with_capacity(usb_bytes: Option<u64>) {
     let root = super::project_root();
     let profile = live_profile();
     preflight_gpu_firmware(&root, &profile);
     print_profile_summary(&profile);
 
     super::build_user();
-    let _llm_conf = LiveLlmConf::set_tinyllama(&root);
     let _ = super::build_image_with_profile(&profile);
 
     let uefi = root.join("target/soso-uefi.img");
     let mut data = super::mkfs_rootfs_with_profile(true, &profile);
-    let models = super::mkfs_models_live(true);
+
+    let align = 1024 * 1024;
+    let data_len = std::fs::metadata(&data).expect("data").len();
+    let uefi_len = std::fs::metadata(&uefi).expect("uefi").len();
+    let esp_aligned = (uefi_len + align - 1) / align * align;
+    let rootfs_aligned = (data_len + align - 1) / align * align;
+
+    let selection = resolve_live_models(&root, usb_bytes, esp_aligned, rootfs_aligned);
+    let _llm_conf = LiveLlmConf::set_model(&root, &selection.llm_name);
+    let models = super::mkfs_models_live_for_dirs(
+        true,
+        &selection.primary_dir,
+        selection.tiny_dir.as_deref(),
+    );
 
     let mut total = live_image_bytes(&data, &models, &uefi);
     for _ in 0..2 {
@@ -41,7 +67,6 @@ pub fn run() {
     let data_len = std::fs::metadata(&data).expect("data").len();
     let models_len = std::fs::metadata(&models).expect("models").len();
     let total = live_image_bytes(&data, &models, &uefi);
-    let align = 1024 * 1024;
     let p2_size = (data_len + align - 1) / align * align;
 
     let out_dir = root.join("target/usb-live");
@@ -101,12 +126,100 @@ pub fn run() {
     create_esp_file(&live, &out_dir, b"SOSOLOG ", b"TXT", 256 * 1024);
     create_esp_file(&live, &out_dir, b"SOSODRV ", b"TXT", 16 * 1024);
     create_esp_file(&live, &out_dir, b"SOSOBOOT", b"TXT", 4096);
+    create_esp_file(&live, &out_dir, b"SOSOWIFI", b"TXT", 4096);
 
-    write_flash(&out_dir, &live, data_len, models_len, total);
+    write_flash(
+        &out_dir,
+        &live,
+        data_len,
+        models_len,
+        total,
+        usb_bytes,
+        &selection,
+    );
     write_installer_bundle(&out_dir, total);
     println!("package-usb-live: {}", live.display());
     print_profile_summary(&profile);
     println!("\n✅ Live USB listo en {}", out_dir.display());
+}
+
+struct LiveModelSelection {
+    primary_dir: PathBuf,
+    tiny_dir: Option<PathBuf>,
+    llm_name: String,
+}
+
+fn resolve_live_models(
+    root: &Path,
+    usb_bytes: Option<u64>,
+    esp_aligned: u64,
+    rootfs_aligned: u64,
+) -> LiveModelSelection {
+    if let Some(custom) = std::env::var_os("SOSO_MODELS_DIR").map(PathBuf::from) {
+        if !custom.join("manifest.som").exists() {
+            eprintln!(
+                "xtask: SOSO_MODELS_DIR={} no contiene manifest.som",
+                custom.display()
+            );
+            exit(1);
+        }
+        let llm_name = std::env::var("SOSO_LIVE_MODEL")
+            .ok()
+            .or_else(|| infer_model_name_from_dir(&custom))
+            .unwrap_or_else(|| "tinyllama".into());
+        println!(
+            "package-usb-live: SOSO_MODELS_DIR={} (modelo={llm_name})",
+            custom.display()
+        );
+        return LiveModelSelection {
+            primary_dir: custom,
+            tiny_dir: None,
+            llm_name,
+        };
+    }
+
+    let spec = if let Some(usb) = usb_bytes {
+        println!(
+            "package-usb-live: USB {} → presupuesto modelos {}",
+            live_models::format_bytes(usb),
+            live_models::format_bytes(live_models::models_budget_from_layout(
+                usb,
+                esp_aligned,
+                rootfs_aligned,
+            ))
+        );
+        let chosen = live_models::pick_for_usb(usb, esp_aligned, rootfs_aligned, root);
+        println!(
+            "package-usb-live: modelo demo {} (need {})",
+            chosen.name,
+            chosen.format_need(root)
+        );
+        chosen
+    } else {
+        println!(
+            "package-usb-live: sin capacidad USB → {}",
+            live_models::CATALOG[0].name
+        );
+        live_models::CATALOG[0]
+    };
+
+    live_models::ensure_materialized(root, &spec);
+    let tiny = live_models::ensure_tiny(root);
+    LiveModelSelection {
+        primary_dir: spec.target_dir(root),
+        tiny_dir: Some(tiny),
+        llm_name: spec.name.to_string(),
+    }
+}
+
+fn infer_model_name_from_dir(dir: &Path) -> Option<String> {
+    let base = dir.file_name()?.to_string_lossy();
+    let name = base.strip_suffix("-model").unwrap_or(&base);
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 fn preflight_gpu_firmware(root: &Path, profile: &DriverProfile) {
@@ -182,32 +295,33 @@ fn print_profile_summary(profile: &DriverProfile) {
     }
 }
 
-/// Pone `modelo=tinyllama` en rootfs solo durante el empaquetado live; restaura al salir.
+/// Pone `modelo=<name>` en rootfs solo durante el empaquetado live; restaura al salir.
 struct LiveLlmConf {
     path: PathBuf,
     saved: Option<String>,
 }
 
 impl LiveLlmConf {
-    fn set_tinyllama(root: &Path) -> Self {
+    fn set_model(root: &Path, name: &str) -> Self {
         let path = root.join("rootfs/etc/llm.conf");
         let saved = std::fs::read_to_string(&path).ok();
         let mut content = saved.clone().unwrap_or_else(|| {
             "modelo=tiny\nmax=128\ntemp=0.7\ntop_p=0.9\n".into()
         });
+        let line = format!("modelo={name}\n");
         if content.contains("modelo=") {
             let mut out = String::new();
-            for line in content.lines() {
-                if line.starts_with("modelo=") {
-                    out.push_str("modelo=tinyllama\n");
+            for ln in content.lines() {
+                if ln.starts_with("modelo=") {
+                    out.push_str(&line);
                 } else {
-                    out.push_str(line);
+                    out.push_str(ln);
                     out.push('\n');
                 }
             }
             content = out;
         } else {
-            content.push_str("modelo=tinyllama\n");
+            content.push_str(&line);
         }
         std::fs::write(&path, &content).expect("llm.conf live");
         Self { path, saved }
@@ -256,8 +370,24 @@ Luego reinicia y elige \"soso\" en el menú GRUB.\n\
 Desinstalar: sudo rm /etc/grub.d/41_soso && sudo update-grub\n\
 ";
 
-fn write_flash(out_dir: &Path, _live: &Path, data_len: u64, models_len: u64, total: u64) {
+fn write_flash(
+    out_dir: &Path,
+    _live: &Path,
+    data_len: u64,
+    models_len: u64,
+    total: u64,
+    usb_bytes: Option<u64>,
+    selection: &LiveModelSelection,
+) {
     let flash = out_dir.join("FLASH-LIVE.txt");
+    let usb_line = usb_bytes
+        .map(|b| format!("Medido al flashear: {}.\n", live_models::format_bytes(b)))
+        .unwrap_or_default();
+    let model_demo = format!(
+        "Modelo demo empaquetado: `{}` (Q4_K_M). También `tiny` sintético.\n\
+         Escalera automática al flashear: tinyllama → mistral-7b → mixtral → llama2-70b.",
+        selection.llm_name
+    );
     let body = format!(
         r#"soso — arranque LIVE desde USB (no modifica el disco interno)
 
@@ -265,10 +395,14 @@ Archivo: soso-live.img ({:.1} GiB)
   Partición 1 — ESP UEFI (kernel)
   Partición 2 — rootfs sosofs (~{:.0} MiB)
   Partición 3 — modelos sosomfs (~{:.1} GiB)
-
+{usb_line}
 1) Escribir SOLO en el pendrive (identifica con lsblk, ej. /dev/sdX):
 
    sudo dd if=soso-live.img of=/dev/sdX bs=4M status=progress conv=fsync
+
+   O con instalador y modelo según tamaño del stick:
+
+   sudo cargo xtask flash-usb-live /dev/sdX --yes
 
 2) UEFI → arrancar una vez desde USB (F12 / Boot menu).
 
@@ -280,6 +414,7 @@ Archivo: soso-live.img ({:.1} GiB)
    - SOSOLOG.TXT (256 KiB) — log del kernel; vacío con BOOTMARK escrita = el
      kernel se colgó o no detectó el USB (mira los checkpoints «boot:» en
      pantalla).
+   - SOSOWIFI.TXT (4 KiB) — ssid=/psk= editables en la ESP antes de arrancar
    - SOSOBOOT.TXT — buzón entre soso-install y el shim; dice si la entrada de
      arranque UEFI se llegó a registrar y con qué número.
 
@@ -296,8 +431,8 @@ Archivo: soso-live.img ({:.1} GiB)
    sudo ./install-soso.sh /dev/nvme1n1 --yes
 
 6) Flashear USB con instalador: sudo cargo xtask flash-usb-live /dev/sdX --yes
-   (estira p3 al sobrante del stick; p4 SOSOINSTALL 32 MiB al final; sosomfs
-   crece al arrancar)
+   (mide el pendrive, elige el mejor modelo GGUF llama que quepa, estira p3 al
+   sobrante del stick; p4 SOSOINSTALL 32 MiB al final; sosomfs crece al arrancar)
 
 7) Apagar, quitar USB, arrancar disco habitual → Linux intacto (si no instalaste).
 
@@ -320,17 +455,15 @@ no uses VFIO en live (solo arranque directo desde USB).
 Trazas: ESP part1 → SOSOLOG.TXT; kshell → hwscan (gpu-nvidia / lx-nouveau).
 SSH: ssh -i target/soso_test_key soso@<ip>
 
-Demo LLM (TinyLlama 1.1B Chat Q4_K_M en /models)
--------------------------------------------------
-El live trae `tinyllama` por defecto (`ask` y /etc/llm.conf). También `tiny` sintético.
+Demo LLM
+--------
+{model_demo}
 
   ask
-  soso-llm run tinyllama --prompt "hola" --max 32
+  soso-llm run {llm} --prompt "hola" --max 32
 
-Si falta el modelo al empaquetar:
-  cargo xtask fetch-hf TinyLlama/TinyLlama-1.1B-Chat-v1.0
-
-Override al generar: SOSO_MODELS_DIR=/ruta/al/modelo SOSO_MODELS_SIZE=2G cargo xtask package-usb-live
+Simular capacidad sin pendrive: SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
+Override de modelo: SOSO_MODELS_DIR=/ruta/al/modelo cargo xtask package-usb-live
 
 QEMU: SOSO_QEMU_LIVE=1 cargo xtask run
       (QEMU no tiene GPU NVIDIA — solo valida montaje live, no GA107)
@@ -340,6 +473,7 @@ Generado: {gen}
         total as f64 / (1024.0 * 1024.0 * 1024.0),
         data_len as f64 / (1024.0 * 1024.0),
         models_len as f64 / (1024.0 * 1024.0),
+        llm = selection.llm_name,
         gen = chrono_now()
     );
     std::fs::write(&flash, body).expect("FLASH-LIVE.txt");

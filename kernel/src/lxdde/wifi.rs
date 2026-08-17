@@ -17,11 +17,13 @@ pub struct LxWifiBss {
 
 unsafe extern "C" {
     fn lx_iwlwifi_init_module() -> c_int;
+    fn lx_iwlwifi_start_module() -> c_int;
     fn lx_iwlwifi_fw_alive() -> c_int;
     fn lx_iwlwifi_fw_phase() -> *const c_char;
     fn lx_iwlwifi_scan(out: *mut LxWifiBss, max: c_int, count: *mut c_int) -> c_int;
     fn lx_iwlwifi_connect_open(ssid: *const c_char) -> c_int;
     fn lx_iwlwifi_connect_wpa2(ssid: *const c_char, psk: *const u8) -> c_int;
+    fn lx_iwlwifi_install_key(key: *const u8, key_idx: c_int) -> c_int;
     fn lx_iwlwifi_connected() -> c_int;
     fn lx_iwlwifi_rx(buf: *mut u8, buflen: c_int) -> c_int;
     fn lx_iwlwifi_tx(buf: *const u8, len: c_int) -> c_int;
@@ -29,18 +31,21 @@ unsafe extern "C" {
     fn lx_iwlwifi_poll();
 }
 
-static mut WIFI_READY: bool = false;
+static mut WIFI_REGISTERED: bool = false;
 
 pub fn init() -> i32 {
     let rc = unsafe { lx_iwlwifi_init_module() };
     if rc == 0 {
-        unsafe { WIFI_READY = true; }
-        let phase = phase();
-        crate::println!("lxdde-wifi: init ok phase={phase} alive={}", alive());
-    } else {
-        crate::println!("lxdde-wifi: init rc={rc}");
+        unsafe { WIFI_REGISTERED = true; }
     }
     rc
+}
+
+pub fn start_firmware() -> i32 {
+    if !wifi_present() {
+        return -1;
+    }
+    unsafe { lx_iwlwifi_start_module() }
 }
 
 pub fn poll() {
@@ -50,7 +55,7 @@ pub fn poll() {
 }
 
 pub fn wifi_present() -> bool {
-    unsafe { WIFI_READY }
+    unsafe { WIFI_REGISTERED }
 }
 
 pub fn alive() -> bool {
@@ -120,6 +125,10 @@ pub fn connect_wpa2(ssid: &str, psk: &[u8; 32]) -> i32 {
     let n = bytes.len().min(SSID_MAX);
     buf[..n].copy_from_slice(&bytes[..n]);
     unsafe { lx_iwlwifi_connect_wpa2(buf.as_ptr() as *const c_char, psk.as_ptr()) }
+}
+
+pub fn install_key(key: &[u8; 16], key_idx: i32) -> i32 {
+    unsafe { lx_iwlwifi_install_key(key.as_ptr(), key_idx) }
 }
 
 pub fn receive(buf: &mut [u8]) -> Option<usize> {

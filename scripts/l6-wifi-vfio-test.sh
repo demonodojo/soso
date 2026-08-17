@@ -66,17 +66,13 @@ rm -f "$SERIAL_LOG"
 timeout "$TIMEOUT" env SOSO_LXDDE=1 SOSO_LXDDE_MODE=iwlwifi \
   cargo xtask run -- --serial-log "$SERIAL_LOG" 2>&1 | tee "$SERIAL_LOG" || true
 
-if grep -q "firmware ALIVE" "$SERIAL_LOG" 2>/dev/null; then
-  echo "GO: ALIVE detectado"
+if grep -q "firmware ALIVE (UCODE_ALIVE_NTFY)" "$SERIAL_LOG" 2>/dev/null; then
+  echo "GO: ALIVE real detectado"
   exit 0
 fi
 if grep -q "ALIVE degradado" "$SERIAL_LOG" 2>/dev/null; then
-  echo "WARN: ALIVE degradado (sin confirmación HW completa)"
-  exit 0
-fi
-if grep -q "lxdde-wifi: init ok" "$SERIAL_LOG" 2>/dev/null; then
-  echo "PARTIAL: driver init ok"
-  exit 0
+  echo "FAIL: ALIVE degradado ya no es válido" >&2
+  exit 1
 fi
 
 echo "FAIL: revisa ${SERIAL_LOG}" >&2

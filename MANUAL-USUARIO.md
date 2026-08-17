@@ -117,25 +117,28 @@ compilar, o regenera la imagen con `cargo xtask mkfs`.
 
 ### 2b. WiFi (Intel AX211, arranque en hardware real)
 
-En placa con tarjeta **Intel Wi-Fi 6E AX211** (PCI `8086:7f70`), soso puede usar WiFi
-en lugar de Ethernet cableada si compilas con la capa **lxdde/iwlwifi**:
+El **USB live** incluye drivers **nouveau + iwlwifi** (Intel AX211 `8086:7f70`).
+Tras arrancar, soso escanea/asocia y pide DHCP; SSH escucha en el **puerto 22**
+(no 2222 — ese es solo QEMU).
 
-```sh
-cargo xtask lx-build iwlwifi
-SOSO_LXDDE=1 SOSO_LXDDE_MODE=iwlwifi cargo xtask build
-# USB live en la máquina objetivo:
-SOSO_LXDDE=1 SOSO_LXDDE_MODE=iwlwifi cargo xtask flash-usb-live /dev/sdX --yes
-```
+**Configuración WiFi** (elige una):
 
-**Configuración** en `/etc/wifi.conf` (claves `ssid=` y opcionalmente `psk=`):
+1. **En el pendrive (recomendado):** edita `SOSOWIFI.TXT` en la ESP (partición 1
+   FAT). Mismo formato que abajo. No hace falta regenerar la imagen.
+2. **En rootfs:** `/etc/wifi.conf` (se empaqueta al flashear).
 
 ```ini
 ssid=MiRed
 psk=MiClaveWPA2
 ```
 
-El firmware va en `/lib/firmware/iwlwifi-so-a0-gf-a0-89.ucode` y `.pnvm` (incluidos
-en `rootfs/lib/firmware/`).
+Firmware en `/lib/firmware/iwlwifi-so-a0-gf-a0-89.ucode` y `.pnvm`.
+
+**SSH en placa** (IP del log `net: dhcp …`):
+
+```sh
+ssh -i target/soso_test_key soso@<ip>
+```
 
 **Consola de emergencia (kernel-shell):**
 
@@ -146,14 +149,20 @@ wifi connect Red   # red abierta
 wifi connect Red clave  # WPA2-PSK
 ```
 
-**Prueba con VFIO** (passthrough del dispositivo WiFi a QEMU):
+**Flashear live:**
+
+```sh
+cargo xtask flash-usb-live /dev/sdX --yes
+```
+
+**Prueba VFIO** (AX211 passthrough a QEMU):
 
 ```sh
 sudo ./scripts/l6-wifi-vfio-test.sh
 ```
 
-La red WiFi tiene prioridad sobre virtio-net **solo si no hay Ethernet cableada**.
-DHCP y SSH funcionan igual que con virtio/e1000e.
+WiFi tiene prioridad sobre virtio-net si no hay Ethernet. En WiFi no hay fallback
+`10.0.2.x` (solo lease DHCP real).
 
 ### 3. Echo TCP (prueba de red)
 
@@ -1198,12 +1207,25 @@ Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
 ### Opción C — USB live con instalador (sin cargo en el equipo destino)
 
 ```sh
-# En la máquina de desarrollo (TinyLlama por defecto; fetch-hf solo la primera vez):
-cargo xtask fetch-hf TinyLlama/TinyLlama-1.1B-Chat-v1.0   # si falta target/tinyllama-model
-cargo xtask package-usb-live
-sudo cargo xtask flash-usb-live /dev/sdX --yes   # live + partición SOSOINSTALL
+# En la máquina de desarrollo:
+sudo cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
 
-# En placa: ask  o  soso-llm run tinyllama --prompt "hola" --max 32
+# Escalera automática (Q4_K_M, arquitectura llama):
+#   8 GB  → tinyllama
+#  16 GB  → mistral-7b
+#  32 GB  → mixtral
+#  64 GB+ → llama2-70b
+# La primera vez descarga desde Hugging Face (puede tardar horas en modelos grandes).
+
+# Sin pendrive conectado (TinyLlama) o simular capacidad:
+cargo xtask package-usb-live
+SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
+
+# En placa: ask  o  soso-llm run <modelo> --prompt "hola" --max 32
+# (<modelo> = el empaquetado: tinyllama, mistral-7b, mixtral o llama2-70b)
+
+# Override manual:
+# SOSO_MODELS_DIR=target/mi-modelo cargo xtask flash-usb-live /dev/sdX --yes
 
 # Instalar en disco interno desde Linux (USB conectado):
 lsblk

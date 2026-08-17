@@ -55,7 +55,7 @@ Referencia rápida — ampliar el manual si cambian:
 - **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, pipes `|`, redirecciones `>`, `>>`, `<`)
 - **Rutas:** relativas al cwd (por defecto `/`); absolutas con `/`
 - **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `halt`
-- **LLM:** `soso-llm run tiny --prompt …`; `soso-llm run tiny-moe --prompt @bos --max 4`; modelos en `/models/` (tiny + tiny-moe por defecto)
+- **LLM:** `soso-llm run tiny --prompt …`; modelos en `/models/`; live USB elige automáticamente tinyllama → mistral-7b → mixtral → llama2-70b según tamaño del pendrive (`flash-usb-live`)
 - **Red:** `nc localhost 7777` (echo TCP)
 
 ## Skills compartidas

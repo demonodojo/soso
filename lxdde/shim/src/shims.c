@@ -82,6 +82,19 @@ char *strncpy(char *dst, const char *src, unsigned long n)
     return dst;
 }
 
+int strncmp(const char *a, const char *b, unsigned long n)
+{
+    for (unsigned long i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
+        if (ca != cb)
+            return (int)ca - (int)cb;
+        if (ca == '\0')
+            return 0;
+    }
+    return 0;
+}
+
 void *memmove(void *dst, const void *src, unsigned long n)
 {
     unsigned char *d = (unsigned char *)dst;
