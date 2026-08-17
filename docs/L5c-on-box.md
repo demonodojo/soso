@@ -110,8 +110,17 @@ ls -lh target/usb-live/
 `package-usb-live` y `flash-usb-live` usan el perfil **`live-usb`** por defecto
 (lxdde + nouveau + firmware ga107/ga102 y gb205). Override: `SOSO_DRIVERS=…`.
 
-En placa, `ask` o `soso-llm run tinyllama --prompt "hola" --max 32` demuestran texto
-real. Override de modelos: `SOSO_MODELS_DIR=… SOSO_MODELS_SIZE=…`.
+En placa, `ask` o `soso-llm run tinyllama --prompt "hola" --max 32 --chat` demuestran
+texto real. Override de modelos: `SOSO_MODELS_DIR=… SOSO_MODELS_SIZE=…`.
+
+**El modelo empaquetado tiene que ser v5 o `ask` contestará como si continuara un
+texto**: la plantilla de chat va en el manifiesto, y los `.som` convertidos antes
+del 2026-08-17 no la llevan. Se arregla reconvirtiendo desde el GGUF cacheado,
+sin volver a descargar:
+
+```bash
+cargo run --release -p convert-gguf -- target/tinyllama-q4km.gguf target/tinyllama-model --name tinyllama
+```
 
 ### Prueba GPU en placa (mismo stick, Ampere o Blackwell)
 
@@ -236,7 +245,7 @@ Ver `target/usb-package/FLASH.txt`.
 | 4 | ACPI/PCI | MCFG, ECAM, NIC PCI ID |
 | 5 | Live mount | `fs: sosofs live` + modelos listados |
 | 6 | Red | DHCP, ping/SSH |
-| 7 | Inferencia | `ask` o `soso-llm run tinyllama --prompt hola --max 32` |
+| 7 | Inferencia | `ask hola` contesta **como asistente** (la plantilla de chat sale del modelo); `soso-llm run tinyllama --prompt hola --max 32 --chat` para lo mismo con diagnóstico |
 | 7b | GPU (Ampere o Blackwell) | `10de:249c` → `familia=ga107`; `10de:2f18` → `familia=Blackwell`; `NV_PMC_BOOT_0 ≠ ffffffff` |
 | 7c | Offload: dice la verdad | Línea de arranque `pool VRAM=sí/no`; con `no`, `ask` dice `GPU presente sin pool de VRAM (fase=…)` y **nunca** `subida de pesos` |
 | 8 | Reboot sin USB | Linux host intacto |

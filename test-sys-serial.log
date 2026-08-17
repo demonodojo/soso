@@ -1,26 +1,26 @@
 INFO : Framebuffer info: FrameBufferInfo { byte_len: 2764800, width: 1280, height: 720, pixel_format: Bgr, bytes_per_pixel: 3, stride: 1280 }
 INFO : 4th Stage
-INFO : BiosInfo { stage_4: Region { start: 130000, len: 245f8 }, kernel: Region { start: 1000000, len: 19fd618 }, ramdisk: Region { start: 29fe000, len: 0 }, config_file: Region { start: 29fe000, len: 0 }, last_used_addr: 29fdfff, framebuffer: BiosFramebufferInfo { region: Region { start: fd000000, len: 2a3000 }, width: 500, height: 2d0, bytes_per_pixel: 3, stride: 500, pixel_format: Bgr }, memory_map_addr: 11ea0, memory_map_len: 9 }
+INFO : BiosInfo { stage_4: Region { start: 130000, len: 245f8 }, kernel: Region { start: 1000000, len: 1a0b758 }, ramdisk: Region { start: 2a0c000, len: 0 }, config_file: Region { start: 2a0c000, len: 0 }, last_used_addr: 2a0bfff, framebuffer: BiosFramebufferInfo { region: Region { start: fd000000, len: 2a3000 }, width: 500, height: 2d0, bytes_per_pixel: 3, stride: 500, pixel_format: Bgr }, memory_map_addr: 11ea0, memory_map_len: 9 }
 INFO : BIOS boot
 INFO : Elf file loaded at Pointer {
     addr: 0x0000000001000000,
-    metadata: 27252248,
+    metadata: 27309912,
 }
 INFO : virtual_address_offset: 0x10000000000
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 7b3b4, mem_size: 7b3b4, align: 1000 })
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 7b3c0, virtual_addr: 7c3c0, physical_addr: 7c3c0, file_size: 2f8dfa, mem_size: 2f8dfa, align: 1000 })
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 3741c0, virtual_addr: 3761c0, physical_addr: 3761c0, file_size: 3de58, mem_size: 3ee40, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(4), offset: 0, virtual_addr: 0, physical_addr: 0, file_size: 7c034, mem_size: 7c034, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(5), offset: 7c040, virtual_addr: 7d040, physical_addr: 7d040, file_size: 2fbeaa, mem_size: 2fbeaa, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 377ef0, virtual_addr: 379ef0, physical_addr: 379ef0, file_size: 3e188, mem_size: 3f110, align: 1000 })
 INFO : Mapping bss section
-INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 3b2020, virtual_addr: 3b5020, physical_addr: 3b5020, file_size: 44f00, mem_size: 277440, align: 1000 })
+INFO : Handling Segment: Ph64(ProgramHeader64 { type_: Ok(Load), flags: Flags(6), offset: 3b6080, virtual_addr: 3b9080, physical_addr: 3b9080, file_size: 44f20, mem_size: 277420, align: 1000 })
 INFO : Mapping bss section
-INFO : Entry point at: 0x10000104070
-INFO : Creating GDT at PhysAddr(0x2c95000)
+INFO : Entry point at: 0x100001047f0
+INFO : Creating GDT at PhysAddr(0x2ca4000)
 INFO : Map framebuffer
 INFO : Map physical memory
 INFO : Allocate bootinfo
 INFO : Create Memory Map
 INFO : Create bootinfo
-INFO : Jumping to kernel entry point at VirtAddr(0x10000104070)
+INFO : Jumping to kernel entry point at VirtAddr(0x100001047f0)
 soso 0.1
 mm: heap 512 MiB de 2014 MiB utilizables
 fb: 1280x720 mapped_h=720 stride=1280 bpp=3 scale=2
@@ -28,7 +28,7 @@ serial: COM1 0x3F8 presente
 memoria: 1501 MiB libres tras el heap
 boot: memtest
 memtest: OK (4096 KiB)
-idt: breakpoint ok rip=0x10000198571
+idt: breakpoint ok rip=0x10000174981
 boot: acpi/smp
 acpi: MCFG ecam=0xb0000000 buses 0-255
 acpi: MADT 1 CPUs, 1 IOAPIC, 5 ISO
@@ -54,6 +54,7 @@ live: Virtio0: LBA 1 sin firma «EFI PART» (empieza por [00, 00, 00, 00, 00, 00
 live: sin GPT sosofs (USB/NVMe/virtio); solo kernel-shell
 boot: kbd
 kbd: i8042 status=0x1c
+kbd: layout es
 kbd: id0=0xab
 kbd: id1=0x41
 kbd: enable scan OK
@@ -86,9 +87,3 @@ net: dhcp 10.0.2.15/24 gw 10.0.2.2
 net: primera IRQ MSI-X recibida
 sosh — escribe 'help' para la ayuda
 $ ssh: sesión abierta, /bin/sosh pid 3
-gpu: dispositivo software activado (cómputo en CPU, para pruebas)
-gpu: dispositivo software apagado
-ssh: sesión abierta, /bin/sosh pid 19
-ssh: sesión abierta, /bin/sosh pid 22
-ssh: sesión abierta, /bin/sosh pid 24
-halt: apagando soso

@@ -242,6 +242,9 @@ reales (con su IRQ 1) por el mismo monitor:
 sendkey a          # y spc, ret, minus, slash, dot…
 ```
 
+Mapa por defecto **es** (ISO español); en QEMU con teclado US usa `kbd us` en la
+kernel-shell. La consola GOP decodifica UTF-8 (una celda por carácter).
+
 Para reproducir el arranque live entero (rootfs por USB BOT, que es donde hay
 contención de `HOSTS`), levanta QEMU a mano con la imagen live como
 `usb-storage` sobre `qemu-xhci` y `-smp 8`; el `-drive` de `soso-bios.img` sigue
@@ -263,6 +266,7 @@ and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: a
 | SSH permission denied | Use `-i target/soso_test_key` or ensure `~/.ssh/id_ed25519.pub` existed before build |
 | Connection refused :2222 | Wait for `sosh — escribe 'help'`; or prior QEMU still running → `pkill qemu-system-x86` |
 | Teclado muerto tras la primera tecla (placa) | Algo del camino IRQ 1 toma un `lock()` o imprime; ver «Candados y contexto de interrupción» en `soso-architecture` |
+| Teclas no coinciden (QWERTY vs ñ/¿) | Mapa por defecto **es**; `kbd us` en kernel-shell para teclado americano/QEMU |
 | La máquina se arrastra tras usar `soso-llm`/`ask` | Workers del pool girando sin apagar; `ThreadPool` tiene que hacer `Drop` con `shutdown` + espera |
 | `Could not set up host forwarding rule tcp::2222` | Puerto ocupado; `pkill qemu-system-x86` y relanzar |
 | SSH output desalineada | Kernel debe enviar CRLF en `ssh::tx_push` (tty cruda) |

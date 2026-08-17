@@ -57,6 +57,8 @@ soso/
 | Module | Role |
 |--------|------|
 | `arch/` | GDT/TSS, IDT, PIC+PIT 100 Hz, paging |
+| `drivers/kbd.rs` | PS/2 + USB HID → cola tty; mapa **es** por defecto (`keymap.rs`), AltGr, teclas muertas |
+| `drivers/fb.rs` | Consola GOP: buffer UTF-8 con glifos Latin-1 + € |
 | `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
 | `drivers/espfat.rs` | Localiza ficheros 8.3 contiguos en la ESP del live; lo comparten `fatlog` (SOSOLOG), `drvlog` (SOSODRV) y `bootreq` (SOSOBOOT) |
 | `xtask/src/sosolog.rs` | Host: monta la ESP del USB, imprime `SOSOLOG.TXT` y desmonta (`cargo xtask sosolog`) |

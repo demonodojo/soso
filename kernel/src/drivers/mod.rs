@@ -3,6 +3,7 @@ pub mod dma;
 #[cfg(any(feature = "drv-e1000e", feature = "lxdde"))]
 pub mod e1000e;
 pub mod fb;
+pub mod keymap;
 #[cfg(feature = "drv-gpu-nvidia")]
 pub mod gpu;
 pub mod kbd;

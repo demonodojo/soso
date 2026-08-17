@@ -334,6 +334,9 @@ fn main() {
         moe_ffn_dim: if moe { moe_ffn } else { 0 },
         layers: Vec::new(),
         prefetch: Vec::new(),
+        // Sin plantilla de chat: estos modelos son pesos sintéticos para probar
+        // fontanería, no conversan, y van con el tokenizador byte-level.
+        chat_template: String::new(),
     };
     manifest.fill_layers_from_globals();
     if num_shared > 0 {

@@ -58,6 +58,34 @@ soso ofrece tres interfaces:
 Es la forma más directa. Al ejecutar `cargo xtask run`, interactúas con sosh en
 la misma terminal donde corre QEMU.
 
+En **placa real** (live USB, sin adaptador serie), la consola es el **framebuffer**
+de la pantalla: el teclado integrado o USB alimenta la shell directamente.
+
+#### Teclado y UTF-8 en consola física
+
+El mapa de teclado por defecto es **español (ISO-105)**: `ñ`, `ç`, `¡`, `¿`, tildes
+con teclas muertas (`´` + vocal → `á`, etc.) y **AltGr** para `@`, `#`, `€`, `|`, `{`, `}`…
+
+La consola gráfica decodifica **UTF-8** y pinta un carácter por celda (incluidos
+acentos y `€`). El eco de **sosh** y el REPL de `ask` también aceptan UTF-8 en
+entrada.
+
+Si usas un teclado americano o QEMU con layout US, cambia en la kernel-shell
+(`soso>`):
+
+```
+kbd us
+```
+
+Para volver al mapa español:
+
+```
+kbd es
+```
+
+Por SSH el terminal del anfitrión pinta los caracteres; el mapa del kernel solo
+afecta al teclado conectado a la máquina soso.
+
 ### 2. SSH (acceso remoto cifrado)
 
 Con soso en marcha, abre **otra terminal** en el anfitrión:
@@ -361,6 +389,41 @@ Fíjalo solo si tienes varios y quieres elegir, y hazlo con `ask-modelo` en la
 máquina donde estés — si lo dejas escrito en la imagen y ese modelo no viaja en
 ella, `ask` avisa en cada respuesta y usa otro.
 
+#### La plantilla de chat (y por qué no hay que tocarla)
+
+Un modelo de chat no se entrenó con texto suelto sino con turnos marcados. A
+TinyLlama hay que darle esto:
+
+```
+<|user|>
+hola</s>
+<|assistant|>
+```
+
+Si se le manda «hola» a secas no ve una conversación: ve un fragmento de texto y
+lo continúa, y la respuesta sale con pinta de novela a medias. **Eso ya está
+resuelto y no hay que configurar nada**: la plantilla viaja dentro del modelo (la
+guardan `convert-gguf` y `soso-hf pull` al convertirlo) y `ask` la aplica sola.
+
+La clave `plantilla=` de `/etc/llm.conf` está para los casos raros:
+
+| Valor | Efecto |
+|---|---|
+| sin poner | la que trae el modelo — lo normal |
+| `crudo` | ninguna; el texto va pelado (para comparar) |
+| `<\|user\|>\n{prompt}{eos}\n<\|assistant\|>\n` | ésa, pisando la del modelo |
+
+`{prompt}` es la pregunta y `{eos}` el token de fin **del modelo**: es un token,
+no las letras `</s>`, y ahí está el detalle que hace que funcione. Los saltos de
+línea se escriben `\n`.
+
+Se ignora en los modelos sintéticos (`tiny`, `tiny-moe`…): su tokenizador es el
+byte-level de reserva, donde `<|user|>` no es un token sino nueve bytes de ruido.
+
+Y una expectativa honesta: la plantilla arregla el **formato** —el modelo
+contesta como asistente en vez de continuar un texto— no lo que sabe. TinyLlama
+son 1.1B cuantizados y en español se le nota; en inglés responde bastante mejor.
+
 ### ask-modelo — elegir el modelo de `ask`
 
 ```sh
@@ -443,6 +506,7 @@ Comandos principales:
 | `ps` | Listar procesos |
 | `uptime` | Tiempo desde el arranque |
 | `mem` | Memoria física libre |
+| `kbd` | Estado del teclado; `kbd es` / `kbd us` cambia el mapa |
 | `halt` | Apagar |
 
 La kernel-shell también incluye comandos de bajo nivel para depuración (`hwscan`,
@@ -579,6 +643,16 @@ error, `init` la relanza automáticamente.
 
 - QEMU usa `-serial mon:stdio`. Escribe en la misma terminal donde lanzaste `run`.
 - Para salir: `Ctrl-A X` (no `Ctrl-C`).
+
+### Caracteres raros o teclado «americano» en pantalla
+
+- En placa, el mapa por defecto es **es** (ISO español). Si las teclas no coinciden
+  con lo impreso, prueba `kbd us` en la kernel-shell (`soso>`) o `kbd es` si tenías
+  el mapa US.
+- Si ves dos símbolos basura por cada letra acentuada, recompila el kernel reciente
+  (la consola GOP decodifica UTF-8 desde una sola celda por carácter).
+- Por SSH, el layout lo gestiona tu terminal; esto solo aplica al teclado físico
+  conectado a soso.
 
 ### «no existe» al acceder a un fichero
 
@@ -913,9 +987,21 @@ soso-llm run tinyllama --prompt Once upon a time --max 32 --temp 0.8 --top-p 0.9
 | `--top-p <p>` | Muestreo nucleus (0.9 por defecto) |
 | `--seed <s>` | Semilla determinista del muestreo |
 | `--gpu-soft` | Dispositivo de cómputo **software** del kernel (ver abajo) |
+| `--chat` | Aplica la plantilla de chat del modelo (lo que hace `ask` siempre) |
 
 El prompt admite varias palabras (hasta el siguiente flag); sosh no
 interpreta comillas.
+
+**`--chat` es opt-in aquí a propósito.** `soso-llm run` es la herramienta de
+diagnóstico, y lo que la hace útil es poder lanzar el mismo prompt con y sin
+plantilla sobre el mismo modelo:
+
+```sh
+soso-llm run tinyllama --prompt What is the capital of France? --max 24 --chat
+```
+
+Sin `--chat` un modelo de chat continúa el texto en vez de responder. `ask` no
+tiene el flag porque siempre la aplica.
 
 ### GPU NVIDIA nativa (cuando hay dGPU en QEMU)
 

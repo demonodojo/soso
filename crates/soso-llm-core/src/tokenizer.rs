@@ -37,11 +37,40 @@ impl Tokenizer {
         }
     }
 
+    /// Token de comienzo, si el vocabulario tiene uno. El byte-level no tiene:
+    /// sus tokens son bytes y no hay ninguno reservado.
+    pub fn bos(&self) -> Option<u32> {
+        match self {
+            Tokenizer::ByteLevel => None,
+            Tokenizer::Vocab(v) => (v.bos != NO_TOKEN).then_some(v.bos),
+        }
+    }
+
     pub fn encode(&self, text: &str) -> Vec<u32> {
+        self.encode_trozo(text, true, true)
+    }
+
+    /// Codifica un TROZO de un texto mayor.
+    ///
+    /// `bos` y `prefijo` son lo que distingue el principio del prompt de lo que
+    /// va detrás: SentencePiece pone el BOS y el `▁` de cortesía **una vez**, al
+    /// empezar el texto, no en cada pedazo. Sin poder apagarlos, una plantilla de
+    /// chat armada por segmentos repetía el BOS en cada uno y sembraba espacios
+    /// que el modelo no vio al entrenar.
+    pub fn encode_trozo(&self, text: &str, bos: bool, prefijo: bool) -> Vec<u32> {
         match self {
             Tokenizer::ByteLevel => text.bytes().map(|b| b as u32).collect(),
-            Tokenizer::Vocab(v) => v.encode(text),
+            Tokenizer::Vocab(v) => v.encode(text, bos, prefijo),
         }
+    }
+
+    /// `true` si el modelo trae su propio vocabulario (`tokenizer.som`).
+    ///
+    /// Con el byte-level de reserva no hay tokens de verdad —`<|user|>` son nueve
+    /// bytes de ruido— así que quien vaya a aplicar una plantilla de chat debe
+    /// preguntar esto antes.
+    pub fn tiene_vocabulario(&self) -> bool {
+        matches!(self, Tokenizer::Vocab(_))
     }
 
     pub fn decode(&self, tokens: &[u32]) -> String {
@@ -118,12 +147,16 @@ impl VocabTokenizer {
 
     /// Greedy longest-match sobre el texto normalizado (espacios → `▁`,
     /// `▁` inicial). Caracteres sin pieza caen al byte-fallback `<0xXX>`.
-    fn encode(&self, text: &str) -> Vec<u32> {
+    fn encode(&self, text: &str, bos: bool, prefijo: bool) -> Vec<u32> {
         let mut out = Vec::new();
-        if self.bos != NO_TOKEN {
+        if bos && self.bos != NO_TOKEN {
             out.push(self.bos);
         }
-        let normalized = format!("\u{2581}{}", text.replace(' ', "\u{2581}"));
+        let normalized = if prefijo {
+            format!("\u{2581}{}", text.replace(' ', "\u{2581}"))
+        } else {
+            text.replace(' ', "\u{2581}")
+        };
         let s = normalized.as_str();
         let mut i = 0;
         while i < s.len() {

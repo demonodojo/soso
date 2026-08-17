@@ -203,6 +203,18 @@ fn main() {
     // "@bos" = prompt de un solo token BOS (RoPE identidad en pos 0)
     let prompt_tokens = if prompt == "@bos" {
         vec![1u32]
+    } else if std::env::var("SOSO_CHAT").is_ok() {
+        // Con la plantilla del modelo, que es como lo va a usar `ask`. Sin esto
+        // un modelo de chat contesta ensalada de palabras y no hay forma de
+        // juzgar la calidad sin arrancar QEMU o la placa.
+        let plantilla = std::env::var("SOSO_PLANTILLA")
+            .unwrap_or_else(|_| rt.manifest.chat_template.clone());
+        if plantilla.is_empty() {
+            eprintln!("SOSO_CHAT: el modelo no trae plantilla; prompt crudo");
+        } else {
+            eprintln!("plantilla: {plantilla:?}");
+        }
+        soso_llm_core::chat::render(&plantilla, &prompt, &tokenizer)
     } else {
         tokenizer.encode(&prompt)
     };

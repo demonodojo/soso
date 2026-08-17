@@ -1,16 +1,108 @@
 //! Consola framebuffer mínima (UEFI GOP / bootloader).
 //!
 //! Buffer de texto de hasta 240×135 celdas (recortado a la resolución real).
-//! Scroll en modo "redraw" (como fbcon de Linux sobre efifb/simpledrm):
-//! cada fila se compone en RAM y se vuelca a VRAM de una pasada; jamás se
-//! lee del framebuffer, que en hardware real es write-combining y leerlo
-//! cuesta un orden de magnitud más que escribirlo.
+//! Decodifica UTF-8 con estado (eco byte a byte desde userspace) y pinta un
+//! glifo 8×8 por carácter Unicode (ASCII + Latin-1 + €).
 
 use alloc::vec::Vec;
 use bootloader_api::info::{FrameBufferInfo, PixelFormat};
 use core::fmt::{self, Write};
-use font8x8::legacy::BASIC_LEGACY;
+use font8x8::legacy::{BASIC_LEGACY, LATIN_LEGACY};
 use spin::Mutex;
+
+const CELL_SPACE: u16 = b' ' as u16;
+
+struct Utf8Acc {
+    buf: [u8; 4],
+    len: u8,
+    need: u8,
+}
+
+impl Utf8Acc {
+    const fn new() -> Self {
+        Self {
+            buf: [0; 4],
+            len: 0,
+            need: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.len = 0;
+        self.need = 0;
+    }
+
+    /// Devuelve `Some(cp)` cuando hay un carácter completo; `None` si falta
+    /// continuación. Secuencias inválidas emiten `?`.
+    fn feed(&mut self, b: u8) -> Option<u16> {
+        if self.len == 0 {
+            if b < 0x80 {
+                return Some(b as u16);
+            }
+            self.buf[0] = b;
+            self.len = 1;
+            self.need = if b & 0xE0 == 0xC0 {
+                2
+            } else if b & 0xF0 == 0xE0 {
+                3
+            } else if b & 0xF8 == 0xF0 {
+                4
+            } else {
+                self.reset();
+                return Some(b'?' as u16);
+            };
+            return None;
+        }
+
+        if b & 0xC0 != 0x80 {
+            self.reset();
+            return Some(b'?' as u16);
+        }
+
+        self.buf[self.len as usize] = b;
+        self.len += 1;
+        if self.len < self.need {
+            return None;
+        }
+
+        let cp = decode_utf8(&self.buf[..self.len as usize]);
+        self.reset();
+        Some(cp)
+    }
+}
+
+fn decode_utf8(bytes: &[u8]) -> u16 {
+    let c = match bytes {
+        [b0, b1] if b0 & 0xE0 == 0xC0 => {
+            let cp = ((b0 & 0x1F) as u32) << 6 | (b1 & 0x3F) as u32;
+            if cp < 0x80 {
+                return b'?' as u16;
+            }
+            cp
+        }
+        [b0, b1, b2] if b0 & 0xF0 == 0xE0 => {
+            ((b0 & 0x0F) as u32) << 12
+                | ((b1 & 0x3F) as u32) << 6
+                | (b2 & 0x3F) as u32
+        }
+        [b0, b1, b2, b3] if b0 & 0xF8 == 0xF0 => {
+            let cp = ((b0 & 0x07) as u32) << 18
+                | ((b1 & 0x3F) as u32) << 12
+                | ((b2 & 0x3F) as u32) << 6
+                | (b3 & 0x3F) as u32;
+            if cp > 0xFFFF {
+                return b'?' as u16;
+            }
+            cp
+        }
+        _ => return b'?' as u16,
+    };
+    if c > 0xFFFF {
+        b'?' as u16
+    } else {
+        c as u16
+    }
+}
 
 struct FbState {
     ptr: *mut u8,
@@ -21,28 +113,32 @@ struct FbState {
     scale: usize,
     cell_w: usize,
     cell_h: usize,
-    /// ROWS filas de COLS celdas, en heap: inline (32 KiB) reventaba el stack
-    /// de arranque de 80 KiB al construir `FbState` (double fault en debug,
-    /// que duplica el agregado en temporales).
-    text: Vec<[u8; COLS]>,
-    /// Fila de celdas compuesta en RAM antes de volcarla a VRAM de una
-    /// pasada (bpl × cell_h bytes). El framebuffer real es write-combining:
-    /// escribir es rápido pero leerlo es un orden de magnitud más lento,
-    /// así que nunca se usa como origen ni se pinta dos veces (parpadeo).
+    text: Vec<[u16; COLS]>,
     rowbuf: Vec<u8>,
+    utf8: Utf8Acc,
 }
 
 unsafe impl Send for FbState {}
 
 static FB: Mutex<Option<FbState>> = Mutex::new(None);
 
-/// Dimensión máxima del buffer de texto: 4K entera a 2× (3840/16 × 2160/16).
-/// El área activa la recortan `max_cols`/`max_rows` según la resolución real.
 const COLS: usize = 240;
 const ROWS: usize = 135;
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 8;
 const FG: (u8, u8, u8) = (0xc8, 0xd0, 0xb0);
+
+/// Glifo 8×8 para U+20AC (€), ausente en LATIN_LEGACY.
+const GLYPH_EURO: [u8; 8] = [
+    0b00111100,
+    0b01100110,
+    0b01100000,
+    0b00111100,
+    0b01100000,
+    0b01100110,
+    0b00111100,
+    0b00000000,
+];
 
 fn bytes_per_scanline(info: &FrameBufferInfo) -> usize {
     info.stride * info.bytes_per_pixel
@@ -56,23 +152,33 @@ fn mapped_height(info: &FrameBufferInfo) -> usize {
     (info.byte_len / bpl).min(info.height)
 }
 
-/// 2× = celdas de 16 px, el mismo raster que las trazas del bootloader
-/// (validado en placa real: 3×/4× resulta enorme y 1× ilegible). 1× solo
-/// para framebuffers pequeños (QEMU con ventana chica), donde 8 px se lee bien.
 fn choose_scale(width: usize, height: usize) -> usize {
-    if width >= 1280 && height >= 720 { 2 } else { 1 }
+    if width >= 1280 && height >= 720 {
+        2
+    } else {
+        1
+    }
 }
 
-fn glyph_row(ch: u8, row: usize) -> u8 {
+fn glyph_row_cp(cp: u16, row: usize) -> u8 {
     if row >= GLYPH_H {
         return 0;
     }
-    let idx = if (ch as usize) < BASIC_LEGACY.len() {
-        ch as usize
-    } else {
-        b'?' as usize
-    };
-    BASIC_LEGACY[idx][row]
+    if cp == 0x20AC {
+        return GLYPH_EURO[row];
+    }
+    if cp < 0x80 {
+        let idx = cp as usize;
+        if idx < BASIC_LEGACY.len() {
+            return BASIC_LEGACY[idx][row];
+        }
+    } else if (0xA0..=0xFF).contains(&cp) {
+        let idx = (cp - 0xA0) as usize;
+        if idx < LATIN_LEGACY.len() {
+            return LATIN_LEGACY[idx][row];
+        }
+    }
+    BASIC_LEGACY[b'?' as usize][row]
 }
 
 pub fn init(buffer_start: u64, info: FrameBufferInfo) {
@@ -82,8 +188,6 @@ pub fn init(buffer_start: u64, info: FrameBufferInfo) {
     let cell_w = GLYPH_W * scale;
     let cell_h = GLYPH_H * scale;
     let rowbuf = alloc::vec![0u8; bytes_per_scanline(&info) * cell_h];
-    // Limpiar solo lo mapeado: byte_len puede exceder el mapeo del bootloader
-    // (mismo motivo por el que existe `mapped_height`).
     unsafe {
         core::ptr::write_bytes(ptr, 0, bytes_per_scanline(&info) * mapped_height);
     }
@@ -96,8 +200,9 @@ pub fn init(buffer_start: u64, info: FrameBufferInfo) {
         scale,
         cell_w,
         cell_h,
-        text: alloc::vec![[b' '; COLS]; ROWS],
+        text: alloc::vec![[CELL_SPACE; COLS]; ROWS],
         rowbuf,
+        utf8: Utf8Acc::new(),
     });
 }
 
@@ -198,8 +303,8 @@ fn fill_rect(st: &FbState, x0: usize, y0: usize, w: usize, h: usize, r: u8, g: u
     }
 }
 
-fn paint_glyph(st: &FbState, row: usize, col: usize, ch: u8) {
-    if ch == b' ' || ch == 0 {
+fn paint_glyph(st: &FbState, row: usize, col: usize, cp: u16) {
+    if cp == CELL_SPACE || cp == 0 {
         return;
     }
     let x0 = col * st.cell_w;
@@ -210,7 +315,7 @@ fn paint_glyph(st: &FbState, row: usize, col: usize, ch: u8) {
     let px = pack_pixel(st, FG.0, FG.1, FG.2);
     unsafe {
         for gy in 0..GLYPH_H {
-            let bits = glyph_row(ch, gy);
+            let bits = glyph_row_cp(cp, gy);
             for gx in 0..GLYPH_W {
                 if bits & (1 << gx) == 0 {
                     continue;
@@ -248,16 +353,12 @@ fn clear_cell(st: &FbState, row: usize, col: usize) {
 
 fn refresh_cell(st: &FbState, row: usize, col: usize) {
     clear_cell(st, row, col);
-    let ch = st.text[row][col];
-    if ch != b' ' {
-        paint_glyph(st, row, col, ch);
+    let cp = st.text[row][col];
+    if cp != CELL_SPACE {
+        paint_glyph(st, row, col, cp);
     }
 }
 
-/// Compone la fila `row` entera en `rowbuf` (RAM cacheada) y la vuelca a
-/// VRAM con un solo memcpy. Es el modo "redraw" de fbcon en Linux
-/// (efifb/simpledrm): el scroll nunca lee del framebuffer ni escribe dos
-/// veces el mismo píxel, solo escrituras secuenciales write-combining.
 fn paint_row(st: &mut FbState, row: usize) {
     let bpl = bytes_per_scanline(&st.info);
     let y0 = row * st.cell_h;
@@ -274,13 +375,13 @@ fn paint_row(st: &mut FbState, row: usize) {
     let mut buf = core::mem::take(&mut st.rowbuf);
     buf[..bytes].fill(0);
     for c in 0..cols {
-        let ch = st.text[row][c];
-        if ch == b' ' || ch == 0 {
+        let cp = st.text[row][c];
+        if cp == CELL_SPACE || cp == 0 {
             continue;
         }
         let x0 = c * st.cell_w;
         for gy in 0..GLYPH_H {
-            let bits = glyph_row(ch, gy);
+            let bits = glyph_row_cp(cp, gy);
             if bits == 0 {
                 continue;
             }
@@ -308,18 +409,12 @@ fn paint_row(st: &mut FbState, row: usize) {
     st.rowbuf = buf;
 }
 
-/// Tras un scroll el texto de todas las filas cambia: se redibujan todas
-/// desde el buffer de texto (nunca se desplazan píxeles en VRAM).
-fn sync_rows_after_scroll(st: &mut FbState, scroll_lines: usize) {
-    if scroll_lines == 0 {
-        return;
-    }
+fn sync_rows_after_scroll(st: &mut FbState) {
     for r in 0..max_rows(st) {
         paint_row(st, r);
     }
 }
 
-/// Solo mueve el buffer de texto; el FB se sincroniza al final del write.
 fn scroll_text(st: &mut FbState) {
     let rows = max_rows(st);
     if rows == 0 {
@@ -328,13 +423,7 @@ fn scroll_text(st: &mut FbState) {
     for r in 0..rows.saturating_sub(1) {
         st.text[r] = st.text[r + 1];
     }
-    st.text[rows - 1] = [b' '; COLS];
-}
-
-fn cursor_bar(st: &FbState) -> (usize, usize, usize, usize) {
-    let y0 = st.row * st.cell_h;
-    let bar_y = y0 + st.cell_h.saturating_sub(st.scale);
-    (st.col * st.cell_w, bar_y, st.cell_w, st.scale)
+    st.text[rows - 1] = [CELL_SPACE; COLS];
 }
 
 fn erase_cursor(st: &FbState) {
@@ -342,14 +431,15 @@ fn erase_cursor(st: &FbState) {
 }
 
 fn draw_cursor(st: &FbState) {
-    let (x, y, w, h) = cursor_bar(st);
-    if y < st.mapped_height {
-        fill_rect(st, x, y, w, h, FG.0, FG.1, FG.2);
+    let y0 = st.row * st.cell_h;
+    let bar_y = y0 + st.cell_h.saturating_sub(st.scale);
+    let x = st.col * st.cell_w;
+    if bar_y < st.mapped_height {
+        fill_rect(st, x, bar_y, st.cell_w, st.scale, FG.0, FG.1, FG.2);
     }
 }
 
-/// Devuelve `true` si hubo scroll (hace falta redibujar el plano).
-fn draw_char(st: &mut FbState, ch: u8, defer_paint: bool) -> bool {
+fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> bool {
     let cols = max_cols(st);
     let rows = max_rows(st);
     if cols == 0 || rows == 0 {
@@ -357,17 +447,17 @@ fn draw_char(st: &mut FbState, ch: u8, defer_paint: bool) -> bool {
     }
     let mut scrolled = false;
 
-    if ch == 0x08 || ch == 0x7f {
+    if cp == 0x08 || cp == 0x7f {
         if st.col > 0 {
             st.col -= 1;
-            st.text[st.row][st.col] = b' ';
+            st.text[st.row][st.col] = CELL_SPACE;
             if !defer_paint {
                 clear_cell(st, st.row, st.col);
             }
         }
         return false;
     }
-    if ch == b'\n' {
+    if cp == b'\n' as u16 {
         st.col = 0;
         st.row += 1;
         if st.row >= rows {
@@ -377,9 +467,9 @@ fn draw_char(st: &mut FbState, ch: u8, defer_paint: bool) -> bool {
         }
         return scrolled;
     }
-    if ch == b'\r' {
+    if cp == b'\r' as u16 {
         st.col = 0;
-        st.text[st.row] = [b' '; COLS];
+        st.text[st.row] = [CELL_SPACE; COLS];
         if !defer_paint {
             fill_rect(
                 st,
@@ -407,10 +497,10 @@ fn draw_char(st: &mut FbState, ch: u8, defer_paint: bool) -> bool {
     }
     let row = st.row;
     let col = st.col;
-    st.text[row][col] = ch;
+    st.text[row][col] = cp;
     if !defer_paint && !scrolled {
         clear_cell(st, row, col);
-        paint_glyph(st, row, col, ch);
+        paint_glyph(st, row, col, cp);
     }
     st.col += 1;
     if st.col >= cols {
@@ -425,30 +515,29 @@ fn draw_char(st: &mut FbState, ch: u8, defer_paint: bool) -> bool {
     scrolled
 }
 
-/// Solo panic handler: suelta el lock si el contexto interrumpido lo tenía,
-/// para que el mensaje de panic llegue a la pantalla.
-///
-/// # Safety
-/// El poseedor anterior del lock ya no va a continuar (estamos en panic).
 pub unsafe fn force_unlock() {
     unsafe { FB.force_unlock() };
 }
 
 pub fn write_bytes(s: &[u8]) {
     let mut guard = FB.lock();
-    let Some(st) = guard.as_mut() else { return };
+    let Some(st) = guard.as_mut() else {
+        return;
+    };
 
     erase_cursor(st);
 
     let mut scroll_lines = 0usize;
-    for &c in s {
-        if draw_char(st, c, scroll_lines > 0) {
-            scroll_lines += 1;
+    for &b in s {
+        if let Some(cp) = st.utf8.feed(b) {
+            if draw_codepoint(st, cp, scroll_lines > 0) {
+                scroll_lines += 1;
+            }
         }
     }
 
     if scroll_lines > 0 {
-        sync_rows_after_scroll(st, scroll_lines);
+        sync_rows_after_scroll(st);
     }
     draw_cursor(st);
 }

@@ -287,24 +287,45 @@ pub fn sector_count() -> Option<u64> {
         .find_map(|h| h.ms.as_ref().map(|m| m.sectors))
 }
 
-/// Teclado USB HID boot (si `enumerate_usb_devices` lo encontró).
-/// Sondea el teclado HID. **`try_lock`**: esto se llama desde el handler de la
-/// IRQ 1, y `HOSTS` es el mismo candado que tiene cogido *cualquier* lectura
-/// del disco live — que en un arranque desde USB es casi todo el rato. Con
-/// `lock()`, pulsar una tecla mientras el FS leía del pendrive clavaba la
-/// máquina en el mismo core que ya tenía el candado. Si está ocupado no pasa
-/// nada: `poll_hw` vuelve a pasar por aquí desde `read_byte`/`has_input`, que
-/// corren fuera de la interrupción.
-pub fn poll_keyboard_scancode() -> Option<u8> {
+/// Evento de teclado USB normalizado para el driver PS/2/keymap.
+pub struct UsbKbdEvent {
+    pub scancode: u8,
+    pub usage_id: u8,
+    pub pressed: bool,
+    pub shift: bool,
+    pub altgr: bool,
+}
+
+/// Sondea el teclado HID. **`try_lock`**: ver comentario en el bloque anterior.
+pub fn poll_keyboard_event() -> Option<UsbKbdEvent> {
+    use xhci_nostd::hid::{MOD_LEFT_SHIFT, MOD_RIGHT_ALT, MOD_RIGHT_SHIFT};
+
     let mut guard = HOSTS.try_lock()?;
     for host in guard.iter_mut() {
         if let Some(evt) = host.ctrl.poll_keyboard() {
-            if evt.pressed {
-                return Some(evt.scancode);
-            }
+            let shift = evt.modifiers & (MOD_LEFT_SHIFT | MOD_RIGHT_SHIFT) != 0;
+            let altgr = evt.modifiers & MOD_RIGHT_ALT != 0;
+            return Some(UsbKbdEvent {
+                scancode: evt.scancode,
+                usage_id: evt.usage_id,
+                pressed: evt.pressed,
+                shift,
+                altgr,
+            });
         }
     }
     None
+}
+
+#[allow(dead_code)]
+pub fn poll_keyboard_scancode() -> Option<u8> {
+    poll_keyboard_event().and_then(|e| {
+        if e.pressed && e.scancode != 0 {
+            Some(e.scancode)
+        } else {
+            None
+        }
+    })
 }
 
 /// Suelta `HOSTS` a la fuerza. **Solo para el panic handler**: el volcado de

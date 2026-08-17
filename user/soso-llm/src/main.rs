@@ -232,6 +232,7 @@ fn main(args: &str) -> u8 {
             Sampler::new(temp, top_p, seed),
             force_cpu,
             parse_memory_plan(&parts),
+            parts.contains(&"--chat"),
         );
         if soft {
             // Se apaga al salir: el dispositivo es estado GLOBAL del kernel, y
@@ -622,13 +623,27 @@ fn run_model(
     mut sampler: Sampler,
     force_cpu: bool,
     mem_plan: MemoryPlanConfig,
+    chat: bool,
 ) -> u8 {
     let io0 = read_iostat();
     let mut sesion = match preparar_sesion(name, force_cpu, mem_plan, true) {
         Ok(s) => s,
         Err(c) => return c,
     };
-    generar(&mut sesion, prompt, max_new, &mut sampler, true, Some(&io0))
+    if !chat {
+        // Sin `--chat` el prompt va crudo, y eso es lo que hace útil a `run`:
+        // poder comparar con y sin plantilla sobre el mismo modelo.
+        return generar(&mut sesion, prompt, max_new, &mut sampler, true, Some(&io0));
+    }
+    let conf = ask::leer_conf();
+    let plantilla = ask::plantilla_efectiva(&conf, &sesion);
+    if plantilla.is_empty() {
+        println!("soso-llm: --chat sin plantilla (ni el modelo ni /etc/llm.conf traen una)");
+    } else {
+        println!("soso-llm: plantilla de chat aplicada");
+    }
+    let tokens = soso_llm_core::chat::render(plantilla, prompt, &sesion.bundle.tokenizer);
+    generar_tokens(&mut sesion, &tokens, max_new, &mut sampler, true, Some(&io0))
 }
 
 /// Carga el modelo y decide planificador, backend y workers.
@@ -786,6 +801,22 @@ fn generar(
     } else {
         sesion.bundle.tokenizer.encode(text)
     };
+    generar_tokens(sesion, &prompt_tokens, max_new, sampler, verboso, io0)
+}
+
+/// Igual que `generar` pero con el prompt YA tokenizado.
+///
+/// Existe porque una plantilla de chat no se puede expresar como texto: el fin de
+/// turno es el token EOS y no sus cuatro letras (ver `soso_llm_core::chat`), así
+/// que quien la aplica trae tokens, no una cadena.
+fn generar_tokens(
+    sesion: &mut Sesion,
+    prompt_tokens: &[u32],
+    max_new: usize,
+    sampler: &mut Sampler,
+    verboso: bool,
+    io0: Option<&abi::IoStat>,
+) -> u8 {
     let par: Option<&dyn RowParallel> = if sesion.pool.workers() > 1 {
         Some(&sesion.pool)
     } else {
@@ -800,7 +831,7 @@ fn generar(
     let t0 = sys::uptime_ms();
     let result = bundle.rt.generate_stream_planned(
         &mut bundle.source,
-        &prompt_tokens,
+        prompt_tokens,
         max_new,
         bundle.tokenizer.eos(),
         sampler,

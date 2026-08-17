@@ -16,10 +16,11 @@ use alloc::vec::Vec;
 
 use libsoso::linea::Lector;
 use libsoso::{abi, println, sys};
+use soso_llm_core::chat;
 use soso_llm_core::plan::MemoryPlanConfig;
 use soso_llm_core::sample::Sampler;
 
-use crate::{generar, preparar_sesion, Sesion};
+use crate::{generar_tokens, preparar_sesion, Sesion};
 
 const CONF: &str = "/etc/llm.conf";
 const PROMPT: &str = "?> ";
@@ -42,7 +43,14 @@ pub struct Conf {
     pub temp: f32,
     pub top_p: f32,
     pub seed: u64,
+    /// Plantilla de chat, con tres valores posibles y por eso una sola clave:
+    /// vacía = la que traiga el modelo (lo normal), `crudo` = ninguna, y
+    /// cualquier otra cosa = ésa. Ver `plantilla_efectiva`.
+    pub plantilla: String,
 }
+
+/// Valor de `plantilla=` que apaga la plantilla del modelo.
+pub const PLANTILLA_CRUDA: &str = "crudo";
 
 impl Default for Conf {
     fn default() -> Self {
@@ -52,7 +60,28 @@ impl Default for Conf {
             temp: 0.7,
             top_p: 0.9,
             seed: 42,
+            plantilla: String::new(),
         }
+    }
+}
+
+/// Qué plantilla usar de verdad, cruzando la conf con la del modelo.
+///
+/// Un modelo de chat al que se le manda el texto pelado no ve una conversación:
+/// ve un fragmento de corpus y lo continúa (era la ensalada de palabras de
+/// `ask hola` en la placa). Y al revés, meterle marcadores a un modelo que no los
+/// vio al entrenar también es ruido — de ahí que esto pueda contestar «ninguna».
+///
+/// El byte-level de reserva no tiene tokens de verdad, así que ahí `<|user|>` son
+/// nueve bytes de basura y la plantilla se ignora aunque esté puesta.
+pub fn plantilla_efectiva<'a>(conf: &'a Conf, sesion: &'a Sesion) -> &'a str {
+    if !sesion.bundle.tokenizer.tiene_vocabulario() {
+        return "";
+    }
+    match conf.plantilla.as_str() {
+        PLANTILLA_CRUDA => "",
+        "" => sesion.bundle.rt.manifest.chat_template.as_str(),
+        otra => otra,
     }
 }
 
@@ -86,6 +115,11 @@ pub fn leer_conf() -> Conf {
             if let Ok(n) = v.trim().parse() {
                 c.seed = n;
             }
+        } else if let Some(v) = linea.strip_prefix("plantilla=") {
+            // Sin `trim` por la derecha: las plantillas acaban en `\n` a
+            // propósito (el turno del asistente empieza en línea nueva) y
+            // recortarlo cambiaría lo que ve el modelo.
+            c.plantilla = chat::desescapar(v.trim_start());
         }
     }
     c
@@ -190,12 +224,15 @@ pub fn run_ask(texto: &str) -> u8 {
 }
 
 fn responder(sesion: &mut Sesion, texto: &str, conf: &Conf) -> u8 {
+    // Los tokens que se van a generar de verdad, plantilla incluida: el chequeo
+    // de abajo tiene que mirar éstos y no el texto pelado.
+    let plantilla = plantilla_efectiva(conf, sesion);
+    let tokens = chat::render(plantilla, texto, &sesion.bundle.tokenizer);
     // Los modelos sintéticos pequeños tienen vocabularios de juguete
     // (`tiny-moe` son 64 tokens) y el tokenizador de reserva es byte-level:
     // cualquier letra normal se sale de rango y la inferencia muere con un
     // escueto «inferencia falló» que no dice de qué. Mejor avisar aquí.
     let vocab = sesion.bundle.rt.manifest.vocab_size;
-    let tokens = sesion.bundle.tokenizer.encode(texto);
     if let Some(t) = tokens.iter().find(|&&t| t >= vocab) {
         println!(
             "ask: este modelo sólo entiende {vocab} tokens y el texto usa el {t}; \
@@ -204,7 +241,7 @@ fn responder(sesion: &mut Sesion, texto: &str, conf: &Conf) -> u8 {
         return 1;
     }
     let mut sampler = Sampler::new(conf.temp, conf.top_p, conf.seed);
-    generar(sesion, texto, conf.max, &mut sampler, false, None)
+    generar_tokens(sesion, &tokens, conf.max, &mut sampler, false, None)
 }
 
 /// Bucle de preguntas. Al leer de la tty directamente, el texto no pasa por

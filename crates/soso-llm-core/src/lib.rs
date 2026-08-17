@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+pub mod chat;
 pub mod f16;
 pub mod gemm;
 pub mod gpu;

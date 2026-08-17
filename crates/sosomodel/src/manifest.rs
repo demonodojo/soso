@@ -125,6 +125,14 @@ pub struct Manifest {
     pub moe_ffn_dim: u32,
     pub layers: Vec<LayerSpec>,
     pub prefetch: Vec<LayerPrefetch>,
+    /// Plantilla de chat del modelo (v5), con los marcadores de
+    /// `soso_llm_core::chat`: `{prompt}` y `{eos}`. Vacía = el modelo no es de
+    /// chat o no se supo traducir su plantilla al convertirlo.
+    ///
+    /// Viaja en el modelo y no en la imagen a propósito: la plantilla es del
+    /// modelo, así que un `soso-hf pull` de otra familia trae la suya y
+    /// `/etc/llm.conf` sólo hace falta para pisarla.
+    pub chat_template: String,
 }
 
 const LAYER_SPEC_BYTES: usize = 60;
@@ -407,6 +415,9 @@ impl Manifest {
             moe_ffn_dim: 0,
             layers: Vec::new(),
             prefetch,
+            // Sintético: no es un modelo de chat y su tokenizador es el
+            // byte-level de reserva, donde `<|user|>` sólo son bytes.
+            chat_template: String::new(),
         };
         m.fill_layers_from_globals();
         m
@@ -447,6 +458,9 @@ impl Manifest {
             moe_ffn_dim: 32,
             layers: Vec::new(),
             prefetch,
+            // Sintético: no es un modelo de chat y su tokenizador es el
+            // byte-level de reserva, donde `<|user|>` sólo son bytes.
+            chat_template: String::new(),
         };
         m.fill_layers_from_globals();
         m
@@ -482,8 +496,12 @@ impl Manifest {
                 body.push(0);
             }
         }
+        // v5: plantilla de chat, al final y con NUL. Va detrás de todo lo demás
+        // para que un lector de v4 llegue a su fin natural sin verla.
+        body.extend_from_slice(self.chat_template.as_bytes());
+        body.push(0);
         debug_assert_eq!(LAYER_SPEC_BYTES, 60);
-        pack_som(&body, 4, CACHE_ALIGN)
+        pack_som(&body, 5, CACHE_ALIGN)
     }
 
     pub fn parse(data: &[u8]) -> Result<Self, ()> {
@@ -537,6 +555,13 @@ impl Manifest {
             }
             prefetch.push(LayerPrefetch { layer, shards });
         }
+        // v5: si el modelo es anterior, no hay plantilla y el texto va crudo, que
+        // es exactamente lo que hacía todo antes de esta versión.
+        let chat_template = if version >= 5 {
+            String::from(r.cstr()?)
+        } else {
+            String::new()
+        };
         let manifest = Self {
             name,
             vocab_size,
@@ -553,6 +578,7 @@ impl Manifest {
             moe_ffn_dim,
             layers,
             prefetch,
+            chat_template,
         };
         manifest.validate_layer_divisibility()?;
         Ok(manifest)

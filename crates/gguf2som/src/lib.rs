@@ -455,6 +455,7 @@ pub fn convert_with_options<R: Read + Seek>(
         return Err("el GGUF no contiene token_embd.weight".into());
     }
 
+    let chat_template = plantilla_de_chat(&gguf);
     let mut manifest = Manifest {
         name: model_name,
         vocab_size: vocab,
@@ -471,6 +472,7 @@ pub fn convert_with_options<R: Read + Seek>(
         moe_ffn_dim,
         layers: Vec::new(),
         prefetch,
+        chat_template,
     };
     manifest.fill_layers_from_globals();
     if is_mla {
@@ -665,6 +667,69 @@ impl GgufFile {
             Some(MetaValue::Int(v)) => Ok(*v as f32),
             Some(_) => Err(format!("meta {key} no es float")),
             None => Err(format!("meta {key} ausente")),
+        }
+    }
+
+    fn meta_str(&self, key: &str) -> Option<&str> {
+        match self.meta.get(key) {
+            Some(MetaValue::Str(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// Traduce la plantilla de chat del GGUF a la forma con marcadores que entiende
+/// `soso_llm_core::chat` (`{prompt}` y `{eos}`).
+///
+/// El GGUF trae la plantilla **en Jinja** (`tokenizer.chat_template`: 410 B en el
+/// de TinyLlama). Aquí no se evalúa Jinja ni se pretende: se reconoce a qué
+/// familia pertenece por los marcadores que usa —que es lo que de verdad
+/// distingue una de otra— y se emite la forma equivalente de un solo turno con
+/// el prompt de generación al final.
+///
+/// Lo que no se reconoce vuelve vacío, y entonces el modelo se usa con el texto
+/// crudo (lo de siempre). Se avisa al convertir, que es el único momento en que
+/// alguien puede hacer algo al respecto; sin el aviso, un modelo de chat nuevo
+/// contestaría ensalada de palabras sin una sola pista de por qué.
+fn traducir_plantilla(jinja: &str) -> Option<&'static str> {
+    if jinja.contains("<|im_start|>") {
+        // ChatML (Qwen, muchos finetunes). `<|im_end|>` es un token añadido y
+        // está en la lista de tokens del GGUF, así que el emparejado más largo
+        // del tokenizador lo encuentra entero.
+        return Some("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
+    }
+    if jinja.contains("<|user|>") && jinja.contains("<|assistant|>") {
+        // Zephyr / TinyLlama-Chat. El fin de turno del usuario es el token EOS.
+        return Some("<|user|>\n{prompt}{eos}\n<|assistant|>\n");
+    }
+    if jinja.contains("[INST]") {
+        // Llama-2 chat.
+        return Some("[INST] {prompt} [/INST]");
+    }
+    None
+}
+
+fn plantilla_de_chat(gguf: &GgufFile) -> String {
+    let Some(jinja) = gguf.meta_str("tokenizer.chat_template") else {
+        return String::new();
+    };
+    // El aviso sólo en el host: este crate también se compila `no_std` para el
+    // `soso-hf pull` de dentro de soso, y ahí no hay stderr. Quien convierta en la
+    // placa lo ve por otro lado: `soso-llm run --chat` dice si no hay plantilla.
+    match traducir_plantilla(jinja) {
+        Some(p) => {
+            #[cfg(feature = "std")]
+            std::eprintln!("gguf2som: plantilla de chat reconocida → {p:?}");
+            p.to_string()
+        }
+        None => {
+            #[cfg(feature = "std")]
+            std::eprintln!(
+                "gguf2som: el modelo trae plantilla de chat pero no reconozco su \
+                 familia; se usará el texto crudo. Ponla a mano en /etc/llm.conf \
+                 (plantilla=…) con los marcadores {{prompt}} y {{eos}}"
+            );
+            String::new()
         }
     }
 }
@@ -942,6 +1007,12 @@ mod tests {
         out.push(v as u8);
     }
 
+    fn gguf_kv_str(out: &mut Vec<u8>, key: &str, v: &str) {
+        gguf_string(out, key);
+        out.extend_from_slice(&8u32.to_le_bytes());
+        gguf_string(out, v);
+    }
+
     fn gguf_kv_str_array(out: &mut Vec<u8>, key: &str, vals: &[&str]) {
         gguf_string(out, key);
         out.extend_from_slice(&9u32.to_le_bytes());
@@ -1030,7 +1101,7 @@ mod tests {
         g.extend_from_slice(b"GGUF");
         g.extend_from_slice(&3u32.to_le_bytes());
         g.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
-        g.extend_from_slice(&10u64.to_le_bytes()); // kv_count
+        g.extend_from_slice(&11u64.to_le_bytes()); // kv_count
 
         gguf_string(&mut g, "general.architecture");
         g.extend_from_slice(&8u32.to_le_bytes());
@@ -1049,6 +1120,15 @@ mod tests {
             &["<s>", "</s>", "\u{2581}a", "\u{2581}b", "c", "d"],
         );
         gguf_kv_u32(&mut g, "tokenizer.ggml.eos_token_id", 1);
+        // La plantilla de chat viaja en el GGUF y tiene que acabar en el
+        // manifiesto: es lo que hace que `ask` no mande el texto pelado a un
+        // modelo de chat. Ésta es la de TinyLlama recortada a lo que se reconoce.
+        gguf_kv_str(
+            &mut g,
+            "tokenizer.chat_template",
+            "{% if message['role'] == 'user' %}{{ '<|user|>\n' + message['content'] \
+             + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|assistant|>\n' }}",
+        );
 
         // tabla de tensores
         let mut offset = 0u64;
@@ -1095,6 +1175,10 @@ mod tests {
         assert_eq!(manifest.num_kv_heads, 1);
         assert_eq!(manifest.vocab_size, VOCAB as u32);
         assert!((manifest.rms_eps - 1e-6).abs() < 1e-9);
+        assert_eq!(
+            manifest.chat_template, "<|user|>\n{prompt}{eos}\n<|assistant|>\n",
+            "la plantilla del GGUF tiene que llegar al manifiesto"
+        );
 
         let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
         // shapes invertidas a [filas, columnas]
@@ -1117,6 +1201,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tok.eos(), Some(1));
+    }
+
+    #[test]
+    fn familias_de_plantilla_reconocidas() {
+        // La de TinyLlama, tal cual sale de su GGUF (410 B de Jinja).
+        let tinyllama = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n\
+            {{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] \
+            == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif \
+            message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] \
+            + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n\
+            {{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}";
+        assert_eq!(
+            traducir_plantilla(tinyllama),
+            Some("<|user|>\n{prompt}{eos}\n<|assistant|>\n")
+        );
+        assert_eq!(
+            traducir_plantilla("{{ '<|im_start|>' + message['role'] }}"),
+            Some("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+        );
+        assert_eq!(
+            traducir_plantilla("{{ '[INST] ' + message['content'] + ' [/INST]' }}"),
+            Some("[INST] {prompt} [/INST]")
+        );
+        // Familia desconocida: vacía y a texto crudo, nunca una plantilla
+        // inventada — meterle marcadores que el modelo no vio es peor que nada.
+        assert_eq!(traducir_plantilla("{{ raro }}"), None);
     }
 
     #[test]

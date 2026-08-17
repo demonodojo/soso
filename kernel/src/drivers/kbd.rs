@@ -1,10 +1,9 @@
-//! Teclado PS/2 (i8042) — scancode set 1 → ASCII US.
+//! Teclado PS/2 (i8042) y USB HID — scancode set 1 → UTF-8 vía [`keymap`].
 //!
 //! IRQ1 vía IOAPIC en placa; respaldo por polling en `read_byte` (QEMU/edge).
-//! Init al estilo Linux: quiesce del controlador (`i8042_controller_init`),
-//! capa ps2 con ACK/reintentos (`libps2`) y enable del dispositivo (`atkbd`).
 
 use crate::arch::{apic, ioapic, irq};
+use crate::drivers::keymap::{self, KeyOutput, KeymapState, Layout};
 use crate::println;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use spin::Mutex;
@@ -17,10 +16,8 @@ const CMD: u16 = 0x64;
 
 const ST_OUT_FULL: u8 = 1;
 const ST_IN_FULL: u8 = 2;
-/// Bit 5: dato del puerto AUX (ratón/touchpad), no del teclado.
 const ST_AUX_DATA: u8 = 1 << 5;
 
-/// Byte de configuración del i8042 (CTR).
 const CTR_KBD_INT: u8 = 1 << 0;
 const CTR_AUX_INT: u8 = 1 << 1;
 const CTR_KBD_DIS: u8 = 1 << 4;
@@ -30,26 +27,8 @@ const CTR_XLATE: u8 = 1 << 6;
 const PS2_ACK: u8 = 0xFA;
 const PS2_RESEND: u8 = 0xFE;
 
-/// Espera por byte en salida del dispositivo (Linux libps2: 200 ms).
 const PS2_IO_TIMEOUT_US: u64 = 200_000;
-/// Espera corta de buffer de entrada del controlador.
 const IO_WAIT_US: u64 = 10_000;
-
-/// Fila numérica sin shift / con shift (scancodes 0x02..=0x0D).
-const ROW1: [u8; 12] = *b"1234567890-=";
-const ROW1_SHIFT: [u8; 12] = *b"!@#$%^&*()_+";
-
-/// 0x10..=0x1B
-const ROW_Q: [u8; 12] = *b"qwertyuiop[]";
-const ROW_Q_SHIFT: [u8; 12] = *b"QWERTYUIOP{}";
-
-/// 0x1E..=0x28 (hueco 0x27 = ;)
-const ROW_A: [u8; 11] = *b"asdfghjkl;'";
-const ROW_A_SHIFT: [u8; 11] = *b"ASDFGHJKL:\"";
-
-/// 0x2C..=0x35
-const ROW_Z: [u8; 10] = *b"zxcvbnm,./";
-const ROW_Z_SHIFT: [u8; 10] = *b"ZXCVBNM<>?";
 
 struct RxQueue {
     buf: [u8; 256],
@@ -89,22 +68,15 @@ impl RxQueue {
 }
 
 static RX: Mutex<RxQueue> = Mutex::new(RxQueue::new());
-static SHIFT: AtomicBool = AtomicBool::new(false);
-static CAPS: AtomicBool = AtomicBool::new(false);
+static KM: Mutex<KeymapState> = Mutex::new(KeymapState::new());
 static I8042_OK: AtomicBool = AtomicBool::new(false);
+static EXTENDED: AtomicBool = AtomicBool::new(false);
 static SC_LOG: AtomicU8 = AtomicU8::new(0);
 static SC_HIST: [AtomicU8; 8] = [const { AtomicU8::new(0) }; 8];
 
-// Latido del camino teclado→tty, para que un cuelgue deje rastro. Son atómicos
-// sueltos a propósito: los lee `fatlog` en cada volcado a SOSOLOG.TXT y el
-// comando `kbd` del kshell, y ninguno de los dos puede permitirse un candado.
-/// Scancodes vistos (todos, no solo los 8 del histórico).
 static SC_TOTAL: AtomicU32 = AtomicU32::new(0);
-/// Último scancode visto.
 static SC_ULTIMO: AtomicU8 = AtomicU8::new(0);
-/// Caracteres encolados hacia la tty.
 static CH_ENCOLADOS: AtomicU32 = AtomicU32::new(0);
-/// Caracteres entregados a quien leía.
 static CH_ENTREGADOS: AtomicU32 = AtomicU32::new(0);
 
 fn status() -> u8 {
@@ -157,7 +129,6 @@ fn wait_input_empty_timeout(us: u64) {
     }
 }
 
-/// Espera dato en el buffer de salida (bounded, resolución µs vía TSC).
 fn wait_output_full_timeout(us: u64) -> bool {
     if !i8042_present() {
         return false;
@@ -201,7 +172,6 @@ fn write_config(b: u8) {
     write_data(b);
 }
 
-/// Envía un byte al dispositivo teclado y espera ACK (libps2, 3 reintentos).
 fn ps2_send(b: u8, want_ack: bool) -> bool {
     for _ in 0..3 {
         flush_output();
@@ -222,7 +192,6 @@ fn ps2_send(b: u8, want_ack: bool) -> bool {
     false
 }
 
-/// GETID (0xF2): tolerante a timeout — muchos ECs no responden.
 fn atkbd_probe() {
     flush_output();
     if !ps2_send(0xF2, true) {
@@ -242,7 +211,6 @@ fn atkbd_probe() {
     flush_output();
 }
 
-/// Enable scanning (0xF4) con reintentos (atkbd).
 fn atkbd_enable() {
     for attempt in 0..3 {
         if ps2_send(0xF4, true) {
@@ -254,12 +222,6 @@ fn atkbd_enable() {
     println!("kbd: enable scan sin ACK (ok en muchos portátiles)");
 }
 
-/// Guarda los primeros scancodes para diagnóstico. **No imprime**: esto corre
-/// dentro del handler de la IRQ 1, y `println!` toma el candado de la consola
-/// (serie o framebuffer) que el proceso interrumpido puede tener cogido —
-/// justo lo que pasa mientras la shell hace eco de lo que escribes. Interbloqueo
-/// duro en la primera tecla, y encima con el mensaje ya pintado, que despista.
-/// Se leen con `kbd` desde la kernel-shell.
 fn log_scancode_raw(sc: u8) {
     SC_TOTAL.fetch_add(1, Ordering::Relaxed);
     SC_ULTIMO.store(sc, Ordering::Relaxed);
@@ -270,11 +232,6 @@ fn log_scancode_raw(sc: u8) {
     }
 }
 
-/// Latido del camino teclado→tty: `(scancodes, último, encolados, entregados)`.
-///
-/// Si tras un cuelgue los scancodes siguen subiendo pero los entregados no, el
-/// atasco está del lado de la tty/consola; si no sube ninguno, del lado del
-/// sondeo o de la propia IRQ.
 pub fn latido() -> (u32, u8, u32, u32) {
     (
         SC_TOTAL.load(Ordering::Relaxed),
@@ -284,64 +241,127 @@ pub fn latido() -> (u32, u8, u32, u32) {
     )
 }
 
-/// Los primeros scancodes vistos, para `kbd` en la kernel-shell.
 pub fn scancodes_iniciales(out: &mut [u8]) -> usize {
-    let n = (SC_LOG.load(Ordering::Relaxed) as usize).min(out.len()).min(SC_HIST.len());
+    let n = (SC_LOG.load(Ordering::Relaxed) as usize)
+        .min(out.len())
+        .min(SC_HIST.len());
     for (i, o) in out.iter_mut().take(n).enumerate() {
         *o = SC_HIST[i].load(Ordering::Relaxed);
     }
     n
 }
 
-fn scancode_ascii(sc: u8) -> Option<u8> {
-    let shift = SHIFT.load(Ordering::Relaxed) ^ CAPS.load(Ordering::Relaxed);
-    match sc {
-        0x02..=0x0D => {
-            let i = (sc - 0x02) as usize;
-            Some(if shift { ROW1_SHIFT[i] } else { ROW1[i] })
-        }
-        0x10..=0x1B => {
-            let i = (sc - 0x10) as usize;
-            Some(if shift { ROW_Q_SHIFT[i] } else { ROW_Q[i] })
-        }
-        0x1E..=0x28 => {
-            let i = (sc - 0x1E) as usize;
-            Some(if shift { ROW_A_SHIFT[i] } else { ROW_A[i] })
-        }
-        0x29 => Some(if shift { b'~' } else { b'`' }),
-        0x2B => Some(if shift { b'|' } else { b'\\' }),
-        0x2C..=0x35 => {
-            let i = (sc - 0x2C) as usize;
-            Some(if shift { ROW_Z_SHIFT[i] } else { ROW_Z[i] })
-        }
-        0x39 => Some(b' '),
-        0x0E => Some(0x08),
-        0x0F => Some(b'\t'),
-        0x1C => Some(b'\n'),
-        _ => None,
+pub fn layout_name() -> &'static str {
+    keymap::layout().name()
+}
+
+pub fn set_layout(name: &str) -> bool {
+    if let Some(l) = Layout::parse(name) {
+        keymap::set_layout(l);
+        true
+    } else {
+        false
     }
+}
+
+fn enqueue_output(km: &mut KeymapState, out: KeyOutput) {
+    let mut buf = [0u8; 4];
+    let n = keymap::output_bytes(out, &mut buf);
+    if n == 0 {
+        return;
+    }
+    let mut rx = RX.lock();
+    for &b in &buf[..n] {
+        rx.push(b);
+        CH_ENCOLADOS.fetch_add(1, Ordering::Relaxed);
+    }
+    while let Some(pending) = km.take_pending() {
+        let n2 = keymap::output_bytes(pending, &mut buf);
+        for &b in &buf[..n2] {
+            rx.push(b);
+            CH_ENCOLADOS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    drop(rx);
+    crate::task::kick_if_tty_waiting();
+}
+
+fn handle_make_scancode(sc: u8) {
+    let mut km = KM.lock();
+    let out = km.translate(sc);
+    enqueue_output(&mut km, out);
 }
 
 fn handle_scancode(sc: u8) {
     log_scancode_raw(sc);
+
+    if sc == 0xE0 {
+        EXTENDED.store(true, Ordering::Relaxed);
+        return;
+    }
+
+    let extended = EXTENDED.swap(false, Ordering::Relaxed);
+
+    // Break (bit 7) en set 1 traducido por i8042.
     if sc & 0x80 != 0 {
-        match sc {
-            0xAA | 0xB6 => SHIFT.store(false, Ordering::Relaxed),
+        let code = sc & 0x7F;
+        let mut km = KM.lock();
+        match code {
+            0x2A | 0x36 => km.shift_press(false),
+            0x38 if extended => km.altgr_press(false),
             _ => {}
         }
         return;
     }
+
+    let mut km = KM.lock();
     match sc {
-        0x2A | 0x36 => SHIFT.store(true, Ordering::Relaxed),
-        0x3A => CAPS.store(!CAPS.load(Ordering::Relaxed), Ordering::Relaxed),
-        _ => {
-            if let Some(ch) = scancode_ascii(sc) {
-                RX.lock().push(ch);
-                CH_ENCOLADOS.fetch_add(1, Ordering::Relaxed);
-                crate::task::kick_if_tty_waiting();
-            }
+        0x2A | 0x36 => {
+            km.shift_press(true);
+            return;
         }
+        0x38 if extended => {
+            km.altgr_press(true);
+            return;
+        }
+        0x38 => {
+            // Left Alt: no activa AltGr en layout ES.
+            return;
+        }
+        0x3A => {
+            km.caps_toggle();
+            return;
+        }
+        _ => {}
     }
+    drop(km);
+
+    handle_make_scancode(sc);
+}
+
+#[cfg(feature = "drv-usb")]
+fn handle_usb_event(evt: crate::drivers::usb_storage::UsbKbdEvent) {
+    if evt.scancode == 0 && evt.usage_id < 0xE0 {
+        return;
+    }
+    log_scancode_raw(evt.scancode);
+    let mut km = KM.lock();
+
+    if evt.usage_id >= 0xE0 && evt.usage_id <= 0xE7 {
+        match evt.usage_id {
+            0xE1 | 0xE5 => km.shift_press(evt.pressed),
+            0xE6 => km.altgr_press(evt.pressed),
+            _ => {}
+        }
+        return;
+    }
+
+    if !evt.pressed || evt.scancode == 0 {
+        return;
+    }
+
+    let out = km.translate_scancode(evt.scancode, evt.shift, evt.altgr);
+    enqueue_output(&mut km, out);
 }
 
 fn poll_hw() {
@@ -360,29 +380,11 @@ fn poll_hw() {
         }
     }
     #[cfg(feature = "drv-usb")]
-    while let Some(sc) = crate::drivers::usb_storage::poll_keyboard_scancode() {
-        if sc != 0 {
-            handle_scancode(sc);
-        }
+    while let Some(evt) = crate::drivers::usb_storage::poll_keyboard_event() {
+        handle_usb_event(evt);
     }
 }
 
-/// Entrada de la IRQ del teclado, **común a los dos caminos**: IOAPIC (vector
-/// 0x42 vía `irq::dispatch`, que es el que se usa en placa) y PIC legacy
-/// (`kbd_pic_handler`, el de QEMU sin IOAPIC).
-///
-/// Sondear solo si veníamos de ring 3, la misma regla que `timer_tick`: desde
-/// ring 0 el kernel puede tener cogido `PROCS` (una syscall), `HOSTS` (una
-/// lectura del disco live) o el candado de la consola, y el sondeo vuelve a
-/// pedirlos — mismo core, spinlock no reentrante, máquina clavada.
-///
-/// AVERÍA: esta guarda estaba puesta solo en `kbd_pic_handler`, que en placa
-/// **no se ejecuta nunca** porque la IRQ 1 va por el IOAPIC (`kbd: ps2 irq1
-/// vector=0x42 (ioapic)` en el log de arranque). Con eso el arreglo no llegaba
-/// a la máquina que fallaba.
-///
-/// No se pierde la tecla: el scancode se queda en el búfer del i8042 y lo
-/// recoge el siguiente sondeo, que hacen `has_input` y `read_byte`.
 pub fn handle_irq() {
     if !crate::arch::irq::desde_ring3() {
         return;
@@ -408,13 +410,10 @@ pub fn has_input() -> bool {
     })
 }
 
-/// Init del i8042 como Linux: quiesce → CTR final → puerto KBD → atkbd.
-/// No self-test del controlador ni reset 0xFF (rompe ECs en portátiles).
 fn setup_controller() -> Option<(u8, u8)> {
     flush_output();
     let before = read_config()?;
 
-    // Quiesce: silenciar interfaces e IRQs antes de reconfigurar.
     let mut quiesce = before;
     quiesce |= CTR_KBD_DIS | CTR_AUX_DIS;
     quiesce &= !(CTR_KBD_INT | CTR_AUX_INT);
@@ -422,7 +421,6 @@ fn setup_controller() -> Option<(u8, u8)> {
     flush_output();
     crate::arch::tsc::spin_us(1000);
 
-    // CTR final: IRQ1 + traducción set1 + teclado on + ratón off.
     let mut cfg = quiesce;
     cfg |= CTR_KBD_INT | CTR_XLATE;
     cfg &= !CTR_KBD_DIS;
@@ -457,10 +455,10 @@ fn route_irq1() {
     }
 }
 
-/// Inicializa i8042 y enruta IRQ1. Seguro llamar sin IOAPIC (solo polling).
 pub fn init() {
     let st = status();
     println!("kbd: i8042 status={st:#04x}");
+    println!("kbd: layout {}", keymap::layout().name());
     if !i8042_present() {
         I8042_OK.store(false, Ordering::Relaxed);
         println!("kbd: sin i8042");

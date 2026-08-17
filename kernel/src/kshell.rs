@@ -180,9 +180,15 @@ fn exec(line: &str) {
             println!("{} frames libres ({} MiB)", libres, libres * 4096 / (1024 * 1024));
         }
         "kbd" => {
-            // Los primeros scancodes vistos. Antes se imprimían desde el
-            // handler de la IRQ, que es un sitio donde no se puede tomar el
-            // candado de la consola sin arriesgar un interbloqueo.
+            if let Some(name) = args.first() {
+                if crate::drivers::kbd::set_layout(name) {
+                    println!("kbd: layout {}", crate::drivers::kbd::layout_name());
+                } else {
+                    println!("kbd: layout desconocido (es|us)");
+                }
+                return;
+            }
+            println!("kbd: layout {}", crate::drivers::kbd::layout_name());
             let (tot, ultimo, enc, ent) = crate::drivers::kbd::latido();
             println!(
                 "kbd: {tot} scancodes (último {ultimo:#04x}), {enc} encolados, {ent} entregados"

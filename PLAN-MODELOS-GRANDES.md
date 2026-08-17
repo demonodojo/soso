@@ -723,6 +723,26 @@ las subidas de pesos sean menos que los matvec. En el host, `generate.rs` prueba
 despacho completo contra un dispositivo de mentira y exige los MISMOS tokens que la
 ruta de CPU.
 
+**La plantilla de chat viaja en el modelo (2026-08-17).** `ask hola` con TinyLlama
+contestaba texto inconexo y no era ni el modelo ni el offload: un modelo *chat*
+espera turnos marcados (`<|user|>\n…{eos}\n<|assistant|>\n`) y se le estaba
+mandando el texto pelado, así que continuaba un fragmento de corpus en vez de
+responder. El detalle que lo hace funcionar es que el fin de turno es el **token**
+EOS y no las letras `</s>` —como texto son cuatro piezas que el modelo nunca vio
+ahí—, así que `soso_llm_core::chat` renderiza a **tokens**, no a una cadena, y
+`Tokenizer::encode_trozo` permite apagar el BOS y el `▁` de cortesía en los
+segmentos que no son el principio.
+
+La plantilla la trae el GGUF (`tokenizer.chat_template`, en Jinja).
+`gguf2som` reconoce la familia por sus marcadores —Zephyr/TinyLlama, ChatML,
+Llama-2— y guarda la forma equivalente en el manifiesto, que pasa a **v5**; lo que
+no reconoce queda vacío (texto crudo) y lo dice al convertir. Así cualquier modelo
+que entre por `soso-hf pull` funciona solo y la imagen no lleva nada específico de
+TinyLlama; `plantilla=` en `/etc/llm.conf` sólo hace falta para pisarla o para
+apagarla (`crudo`). Medido en el host con `SOSO_CHAT=1 … hostrun`: sin plantilla,
+«Rodrigo: ¿Qué es lo que piensa usted? / Ana: No»; con ella, «The capital of
+France is Paris.»
+
 **El techo de 16 MiB que dejó a TinyLlama fuera de la GPU (2026-08-17).** En la
 placa, `ask hola` decía `offload GPU desactivado — subida de pesos` y la GPU no
 tenía nada que ver: `sys_gpu_map` validaba el rango con `user_range_ok`, que
