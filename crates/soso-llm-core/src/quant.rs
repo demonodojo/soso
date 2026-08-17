@@ -1,7 +1,6 @@
 //! Cuantización on-disk: Q8_0 (bloques de 32, escala f32 + 32 i8) y Q4_K
 //! (layout GGML exacto: superbloques de 256, 144 bytes).
 
-use crate::f16::f16_to_f32;
 use alloc::vec::Vec;
 use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS, MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS};
 
@@ -24,37 +23,15 @@ pub fn quantize_q8_0(src: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Descuantiza `out.len()` elementos a partir del elemento `elem_off`.
-/// `bytes` es el tensor Q8_0 completo (múltiplo de bloque).
-pub fn dequant_q8_0_range(bytes: &[u8], elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
-    if bytes.len() % Q8_0_BLOCK_BYTES != 0 || out.is_empty() {
-        return Err(());
-    }
-    let total = (bytes.len() / Q8_0_BLOCK_BYTES) * Q8_0_BLOCK_ELEMS;
-    let end = elem_off.checked_add(out.len()).ok_or(())?;
-    if end > total {
-        return Err(());
-    }
-    let first = elem_off / Q8_0_BLOCK_ELEMS;
-    let last = (end - 1) / Q8_0_BLOCK_ELEMS;
-    for b in first..=last {
-        let chunk = &bytes[b * Q8_0_BLOCK_BYTES..(b + 1) * Q8_0_BLOCK_BYTES];
-        let scale = f32::from_le_bytes(chunk[..4].try_into().map_err(|_| ())?);
-        let base = b * Q8_0_BLOCK_ELEMS;
-        for (j, &q) in chunk[4..].iter().enumerate() {
-            let e = base + j;
-            if e >= elem_off && e < end {
-                out[e - elem_off] = (q as i8) as f32 * scale;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Descuantiza el tensor completo.
-pub fn dequant_q8_0(bytes: &[u8], out: &mut [f32]) -> Result<(), ()> {
-    dequant_q8_0_range(bytes, 0, out)
-}
+// Los DESCUANTIZADORES viven en `sosomodel::dequant`, no aquí: el kernel también
+// los necesita (su dispositivo software descuantiza para el comando `MATVQ`, que es
+// lo único que da cobertura numérica al camino de pesos cuantizados en GPU sin
+// silicio) y no enlaza este crate. Los CUANTIZADORES se quedan, porque usan
+// `libm::roundf` y `sosomodel` no depende de `libm`.
+pub use sosomodel::dequant::{
+    dequant_mxfp4, dequant_mxfp4_range, dequant_q4_k, dequant_q4_k_range, dequant_q8_0,
+    dequant_q8_0_range, q4k_scale_min,
+};
 
 // ---- Q4_K (layout GGML) ----
 //
@@ -62,18 +39,6 @@ pub fn dequant_q8_0(bytes: &[u8], out: &mut [f32]) -> Result<(), ()> {
 //   d: f16 | dmin: f16 | scales[12] (8 escalas + 8 mins de 6 bits) | qs[128]
 // 8 sub-bloques de 32; el elemento e del par n usa el nibble bajo (primeros
 // 32) o alto (siguientes 32) de qs. valor = d·sc·q − dmin·m.
-
-/// Escala y min de 6 bits del sub-bloque `j` (0..8) — `get_scale_min_k4`.
-pub(crate) fn q4k_scale_min(scales: &[u8], j: usize) -> (u8, u8) {
-    if j < 4 {
-        (scales[j] & 63, scales[j + 4] & 63)
-    } else {
-        (
-            (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4),
-            (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4),
-        )
-    }
-}
 
 /// Inverso de `q4k_scale_min`: mete ocho pares (escala, mínimo) de 6 bits en 12
 /// bytes. Vivía en los tests y ahora hace falta de verdad para poder CUANTIZAR;
@@ -188,51 +153,6 @@ fn quantize_nibble(v: f32, s: f32, o: f32) -> u8 {
     libm::roundf((v + o) / s).clamp(0.0, 15.0) as u8
 }
 
-/// Descuantiza `out.len()` elementos Q4_K a partir del elemento `elem_off`.
-pub fn dequant_q4_k_range(bytes: &[u8], elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
-    if bytes.len() % Q4_K_BLOCK_BYTES != 0 || out.is_empty() {
-        return Err(());
-    }
-    let total = (bytes.len() / Q4_K_BLOCK_BYTES) * Q4_K_BLOCK_ELEMS;
-    let end = elem_off.checked_add(out.len()).ok_or(())?;
-    if end > total {
-        return Err(());
-    }
-    let first = elem_off / Q4_K_BLOCK_ELEMS;
-    let last = (end - 1) / Q4_K_BLOCK_ELEMS;
-    for b in first..=last {
-        let blk = &bytes[b * Q4_K_BLOCK_BYTES..(b + 1) * Q4_K_BLOCK_BYTES];
-        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
-        let dmin = f16_to_f32(u16::from_le_bytes([blk[2], blk[3]]));
-        let scales = &blk[4..16];
-        let qs = &blk[16..144];
-        for pair in 0..4 {
-            let (sc1, m1) = q4k_scale_min(scales, 2 * pair);
-            let (sc2, m2) = q4k_scale_min(scales, 2 * pair + 1);
-            let (d1, min1) = (d * sc1 as f32, dmin * m1 as f32);
-            let (d2, min2) = (d * sc2 as f32, dmin * m2 as f32);
-            let base = b * Q4_K_BLOCK_ELEMS + pair * 64;
-            for l in 0..32 {
-                let q = qs[pair * 32 + l];
-                let e1 = base + l;
-                let e2 = base + 32 + l;
-                if e1 >= elem_off && e1 < end {
-                    out[e1 - elem_off] = d1 * (q & 0x0F) as f32 - min1;
-                }
-                if e2 >= elem_off && e2 < end {
-                    out[e2 - elem_off] = d2 * (q >> 4) as f32 - min2;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Descuantiza el tensor Q4_K completo.
-pub fn dequant_q4_k(bytes: &[u8], out: &mut [f32]) -> Result<(), ()> {
-    dequant_q4_k_range(bytes, 0, out)
-}
-
 /// Cuantiza a bloques MXFP4 (escala f32 + nibbles empaquetados).
 pub fn quantize_mxfp4(src: &[f32]) -> Vec<u8> {
     let blocks = src.len().div_ceil(MXFP4_BLOCK_ELEMS);
@@ -257,42 +177,6 @@ pub fn quantize_mxfp4(src: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&packed);
     }
     out
-}
-
-pub fn dequant_mxfp4(bytes: &[u8], out: &mut [f32]) -> Result<(), ()> {
-    dequant_mxfp4_range(bytes, 0, out)
-}
-
-pub fn dequant_mxfp4_range(bytes: &[u8], elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
-    if bytes.len() % MXFP4_BLOCK_BYTES != 0 || out.is_empty() {
-        return Err(());
-    }
-    let total = (bytes.len() / MXFP4_BLOCK_BYTES) * MXFP4_BLOCK_ELEMS;
-    let end = elem_off.checked_add(out.len()).ok_or(())?;
-    if end > total {
-        return Err(());
-    }
-    let first = elem_off / MXFP4_BLOCK_ELEMS;
-    let last = (end - 1) / MXFP4_BLOCK_ELEMS;
-    for b in first..=last {
-        let chunk = &bytes[b * MXFP4_BLOCK_BYTES..(b + 1) * MXFP4_BLOCK_BYTES];
-        let scale = f32::from_le_bytes(chunk[..4].try_into().map_err(|_| ())?);
-        let base = b * MXFP4_BLOCK_ELEMS;
-        for j in 0..MXFP4_BLOCK_ELEMS {
-            let e = base + j;
-            if e >= elem_off && e < end {
-                let byte = chunk[4 + j / 2];
-                let n = if j % 2 == 0 { byte & 0x0f } else { byte >> 4 };
-                let signed = if n & 0x8 != 0 {
-                    (n as i8).wrapping_sub(16)
-                } else {
-                    n as i8
-                };
-                out[e - elem_off] = signed as f32 * scale;
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -466,6 +350,73 @@ mod tests {
         for (a, b) in esperado.iter().zip(&out) {
             assert!((a - b).abs() < 1e-3, "{a} vs {b}");
         }
+    }
+
+    /// Las DOS formas de multiplicar una fila cuantizada tienen que dar lo mismo:
+    /// el matvec fusionado de `gemm` —lo que ejecuta la CPU— y descuantizar la fila
+    /// y hacer el producto punto, que es lo que hace `sosomodel::dequant::matvec_row`
+    /// (el dispositivo software del kernel) y lo que transcribirá el kernel SASS.
+    ///
+    /// Sin esto, una discrepancia entre las dos aparecería por primera vez como
+    /// «la GPU saca otros tokens» y se buscaría en el silicio, que es donde no
+    /// está. Se prueban varios `cols` porque el bug natural aquí es el `row_bytes`
+    /// (una fila = número entero de superbloques) y con un solo tamaño no se ve.
+    #[test]
+    fn matvec_por_filas_coincide_con_el_fusionado() {
+        use crate::gemm::{matvec_q4_k, matvec_q8_0};
+        use sosomodel::dequant::{matvec_row, row_bytes};
+        use sosomodel::layout::{DTYPE_Q4_K, DTYPE_Q8_0};
+
+        for &cols in &[256usize, 512, 2048] {
+            let rows = 3;
+            let w: Vec<f32> = (0..rows * cols)
+                .map(|i| ((i % 71) as f32 - 35.0) * 0.03)
+                .collect();
+            let x: Vec<f32> = (0..cols).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
+
+            for (dtype, packed) in [
+                (DTYPE_Q4_K, quantize_q4_k(&w)),
+                (DTYPE_Q8_0, quantize_q8_0(&w)),
+            ] {
+                let rb = row_bytes(dtype, cols).unwrap();
+                assert_eq!(packed.len(), rows * rb, "row_bytes con cols={cols}");
+
+                let mut fusionado = vec![0.0f32; rows];
+                if dtype == DTYPE_Q4_K {
+                    matvec_q4_k(&packed, rows, cols, &x, &mut fusionado).unwrap();
+                } else {
+                    matvec_q8_0(&packed, rows, cols, &x, &mut fusionado).unwrap();
+                }
+
+                let mut scratch = vec![0.0f32; cols];
+                for r in 0..rows {
+                    let fila = &packed[r * rb..(r + 1) * rb];
+                    let porfila = matvec_row(dtype, fila, cols, &x, &mut scratch).unwrap();
+                    let esperado = fusionado[r];
+                    assert!(
+                        (porfila - esperado).abs() <= 1e-3 * esperado.abs().max(1.0),
+                        "dtype={dtype} cols={cols} fila {r}: {porfila} vs {esperado}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `row_bytes` rechaza lo que no es una fila entera de superbloques. Es el
+    /// guardia que impide que un kernel de la GPU lea la fila del tensor de al lado
+    /// y devuelva un vector creíble.
+    #[test]
+    fn row_bytes_rechaza_cols_que_no_cuadran() {
+        use sosomodel::dequant::row_bytes;
+        use sosomodel::layout::{DTYPE_F32, DTYPE_Q4_K, DTYPE_Q8_0};
+
+        assert_eq!(row_bytes(DTYPE_Q4_K, 256), Some(144));
+        assert_eq!(row_bytes(DTYPE_Q4_K, 5632), Some(22 * 144));
+        assert_eq!(row_bytes(DTYPE_Q4_K, 255), None);
+        assert_eq!(row_bytes(DTYPE_Q4_K, 0), None);
+        assert_eq!(row_bytes(DTYPE_Q8_0, 32), Some(36));
+        assert_eq!(row_bytes(DTYPE_Q8_0, 33), None);
+        assert_eq!(row_bytes(DTYPE_F32, 256), None);
     }
 
     #[test]

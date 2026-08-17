@@ -168,6 +168,17 @@ pub struct GpuInfo {
     /// abrir cientos de líneas del log de serie. Vacía cuando no hay dispositivo
     /// con fases (el de software, o ninguno).
     pub phase: [u8; 16],
+    /// Subidas a VRAM que fueron por DMA del CE (sin copia de CPU) y por rebote.
+    ///
+    /// Existen porque el camino sin copias llevaba desde el 2026-08-17 **sin
+    /// dispararse nunca con los pesos del modelo** —el payload de un shard empieza
+    /// en el byte 64 y `subir_por_dma` exigía alineación de página— y desde fuera
+    /// era indistinguible del camino rápido: el rebote funciona, sólo es lento.
+    /// Un `uploads_bounce` distinto de 0 es una regresión, no un detalle.
+    pub uploads_dma: u32,
+    pub uploads_bounce: u32,
+    /// Bytes que pasaron por el rebote (heap del kernel + rebote de 1 MiB del CE).
+    pub bounce_bytes: u64,
 }
 
 /// Umbral: ficheros mayores se abren en modo lazy (sin cargar todo).
@@ -250,6 +261,7 @@ pub const EBUSY: i64 = 16;
 pub const EROFS: i64 = 30;
 pub const ENOTSUP: i64 = 95;
 pub const ECONNREFUSED: i64 = 61;
+pub const EADDRINUSE: i64 = 98;
 pub const ENOTCONN: i64 = 107;
 
 /// Dirección IPv4 + puerto para syscalls TCP.

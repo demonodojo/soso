@@ -40,7 +40,7 @@ fn sparse_1tib_addressing() {
     let mut dev = SparseBlockDevice::new(blocks);
     let report = build_from_dir(&mut dev, &model, 1).unwrap();
     assert_eq!(report.total_blocks, blocks);
-    let mut fs = Sosomfs::mount(sosomfs::SingleDev::new(dev)).unwrap();
+    let fs = Sosomfs::mount(sosomfs::SingleDev::new(dev)).unwrap();
     assert_eq!(fs.total_blocks(), blocks);
     let st = fs.stat("/models/tiny/shards/L00.attn_q.tensor").unwrap();
     assert!(st.0 > 0);

@@ -4,6 +4,7 @@
 
 mod device;
 pub mod dns;
+mod loopback;
 pub mod ssh;
 mod tcp_user;
 #[cfg(feature = "lxdde")]
@@ -206,6 +207,7 @@ pub fn init() {
 }
 
 /// Tras asociar WiFi: reinicia DHCP y habilita el cliente.
+#[cfg(feature = "lxdde")]
 pub fn on_wifi_connected() {
     try_attach();
     let Some(net) = NET.get() else {
@@ -385,18 +387,23 @@ pub fn tcp_listen(port: u16) -> Result<usize, i64> {
         user_tcp,
         ..
     } = &mut *n;
+    if user_tcp.find_listener(port).is_some() {
+        return Err(-soso_abi::EADDRINUSE);
+    }
     let slot = user_tcp
         .alloc(sockets, tcp_user::TcpRole::Listening, port, None)
         .map_err(|_| -soso_abi::EMFILE)?;
     if let Some(entry) = user_tcp.entries[slot].as_mut() {
+        entry.loop_listener = true;
         tcp_user::listen_start(sockets, entry).map_err(|_| -soso_abi::EIO)?;
     }
     Ok(slot)
 }
 
-// ... rest of tcp_* functions unchanged from original
-
 pub fn tcp_connect(remote: soso_abi::SockAddr) -> Result<usize, i64> {
+    if loopback::is_loopback_addr(&remote.addr) {
+        return tcp_connect_loopback(remote.port);
+    }
     let net = NET.get().ok_or(-soso_abi::EIO)?;
     let mut n = net.lock();
     let NetStack {
@@ -416,6 +423,45 @@ pub fn tcp_connect(remote: soso_abi::SockAddr) -> Result<usize, i64> {
     Ok(slot)
 }
 
+fn tcp_connect_loopback(port: u16) -> Result<usize, i64> {
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let mut n = net.lock();
+    let listener_slot = n
+        .user_tcp
+        .find_listener(port)
+        .ok_or(-soso_abi::ECONNREFUSED)?;
+    let pair_id = loopback::alloc_pair();
+    let client_slot = {
+        let NetStack { sockets, user_tcp, .. } = &mut *n;
+        user_tcp
+            .alloc_loopback(
+                sockets,
+                tcp_user::TcpRole::Connected,
+                pair_id,
+                loopback::LoopSide::Client,
+            )
+            .map_err(|_| -soso_abi::EMFILE)?
+    };
+    let server_slot = {
+        let NetStack { sockets, user_tcp, .. } = &mut *n;
+        user_tcp
+            .alloc_loopback(
+                sockets,
+                tcp_user::TcpRole::Connected,
+                pair_id,
+                loopback::LoopSide::Server,
+            )
+            .map_err(|_| -soso_abi::EMFILE)?
+    };
+    loopback::register_pending(listener_slot, server_slot);
+    Ok(client_slot)
+}
+
+/// Acepta una conexión loopback pendiente. Devuelve el slot del lado servidor.
+pub fn tcp_accept_loopback(listener_slot: usize) -> Result<usize, i64> {
+    loopback::take_pending(listener_slot).ok_or(-soso_abi::EAGAIN)
+}
+
 pub fn tcp_accept(listener_slot: usize) -> Result<usize, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;
     let n = net.lock();
@@ -425,6 +471,10 @@ pub fn tcp_accept(listener_slot: usize) -> Result<usize, i64> {
         .get(listener_slot)
         .and_then(|e| e.as_ref())
         .ok_or(-soso_abi::EBADF)?;
+    if entry.loop_listener {
+        drop(n);
+        return tcp_accept_loopback(listener_slot);
+    }
     if entry.role != tcp_user::TcpRole::Listening && entry.role != tcp_user::TcpRole::Connected {
         return Err(-soso_abi::EINVAL);
     }
@@ -448,36 +498,40 @@ pub fn tcp_accept(listener_slot: usize) -> Result<usize, i64> {
 pub fn tcp_try_read(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;
     let mut n = net.lock();
-    let (handle, role, closed) = {
-        let entry = n
-            .user_tcp
-            .entries
-            .get(slot)
-            .and_then(|e| e.as_ref())
-            .ok_or(-soso_abi::EBADF)?;
-        (entry.handle, entry.role, entry.closed)
-    };
-    if closed {
+    let entry = n
+        .user_tcp
+        .entries
+        .get(slot)
+        .and_then(|e| e.as_ref())
+        .ok_or(-soso_abi::EBADF)?;
+    if entry.closed {
         return Ok(0);
     }
+    if entry.loopback {
+        return tcp_user::try_read_loopback(entry, buf, len);
+    }
+    let handle = entry.handle;
+    let role = entry.role;
     tcp_user::try_read(&mut n.sockets, handle, role, buf, len)
 }
 
 pub fn tcp_try_write(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;
     let mut n = net.lock();
-    let (handle, role, closed) = {
-        let entry = n
-            .user_tcp
-            .entries
-            .get(slot)
-            .and_then(|e| e.as_ref())
-            .ok_or(-soso_abi::EBADF)?;
-        (entry.handle, entry.role, entry.closed)
-    };
-    if closed {
+    let entry = n
+        .user_tcp
+        .entries
+        .get(slot)
+        .and_then(|e| e.as_ref())
+        .ok_or(-soso_abi::EBADF)?;
+    if entry.closed {
         return Err(-soso_abi::EPIPE);
     }
+    if entry.loopback {
+        return tcp_user::try_write_loopback(entry, buf, len);
+    }
+    let handle = entry.handle;
+    let role = entry.role;
     tcp_user::try_write(&mut n.sockets, handle, role, buf, len)
 }
 
@@ -499,6 +553,9 @@ pub fn tcp_is_connected(slot: usize) -> bool {
     let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
         return false;
     };
+    if entry.loopback {
+        return entry.role == tcp_user::TcpRole::Connected && !entry.closed;
+    }
     entry.role == tcp_user::TcpRole::Connected && !entry.closed
 }
 
@@ -521,11 +578,36 @@ pub fn tcp_connect_failed(slot: usize) -> bool {
     entry.role == tcp_user::TcpRole::Connecting && entry.closed
 }
 
+pub fn tcp_slot_loop_listener(slot: usize) -> bool {
+    let Some(net) = NET.get() else { return false };
+    let n = net.lock();
+    n.user_tcp
+        .entries
+        .get(slot)
+        .and_then(|e| e.as_ref())
+        .is_some_and(|e| e.loop_listener)
+}
+
+/// Resultado de accept al despertar un waiter: `None` = mismo fd; `Some(slot)` = fd nuevo.
+pub fn tcp_accept_wake(listener_slot: usize) -> Result<Option<usize>, i64> {
+    if !tcp_listener_ready(listener_slot) {
+        return Err(-soso_abi::EAGAIN);
+    }
+    if tcp_slot_loop_listener(listener_slot) {
+        return tcp_accept_loopback(listener_slot).map(Some);
+    }
+    tcp_accept(listener_slot)?;
+    Ok(None)
+}
+
 pub fn tcp_listener_ready(slot: usize) -> bool {
     let Some(net) = NET.get() else { return false };
     let n = net.lock();
     let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
         return false;
     };
+    if entry.loop_listener {
+        return loopback::has_pending(slot);
+    }
     tcp_user::is_established(&n.sockets, entry.handle)
 }

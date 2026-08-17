@@ -167,8 +167,14 @@ pub fn device_buf_upload_at(va: u64, offset: u64, data: &[u8]) -> Result<(), ()>
     gpu::device_buf_upload_at(va, offset, data)
 }
 
-pub fn device_buf_upload_dma(va: u64, offset: u64, phys: &[u64], size: u64) -> Result<(), ()> {
-    gpu::device_buf_upload_dma(va, offset, phys, size)
+pub fn device_buf_upload_dma(
+    va: u64,
+    offset: u64,
+    phys: &[u64],
+    src_off: u32,
+    size: u64,
+) -> Result<(), ()> {
+    gpu::device_buf_upload_dma(va, offset, phys, src_off, size)
 }
 
 pub fn device_buf_free(va: u64) -> Result<(), ()> {
@@ -249,4 +255,15 @@ pub fn submit_matvec_resident(
     y: &mut [f32],
 ) -> Result<bool, ()> {
     gpu::submit_matvec_resident(w_va, rows, cols, x, y)
+}
+
+pub fn submit_matvec_q_resident(
+    w_va: u64,
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    gpu::submit_matvec_q_resident(w_va, dtype, rows, cols, x, y)
 }

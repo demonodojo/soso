@@ -23,11 +23,21 @@
 //! —siete syscalls por matvec, cuatro de ellas puro trámite— para copiar datos que
 //! el kernel podía leer de donde ya estaban. Ver `write_f32`.
 //!
-//! **Pesos cuantizados (Q8_0/Q4_K/MXFP4).** El dispositivo calcula en f32, así que los
-//! pesos se **descuantizan una sola vez, al subirlos**: son residentes, luego el
-//! coste es por tensor y no por token. Lo que sube es F32, así que un Q4_K ocupa
-//! ~8× en el dispositivo; cuando no cabe en `vram_free` el tensor se queda en CPU y
-//! esa capa se calcula ahí. Eso es el offload híbrido, no un fallo.
+//! **Pesos cuantizados (Q8_0/Q4_K/MXFP4).** Q4_K y Q8_0 se suben **EN CRUDO** y la
+//! GPU los multiplica sin expandirlos (comando `MATVQ`, kernels `matvec_q4k`/
+//! `matvec_q80`): los bytes viajan del page cache de sosomfs a la VRAM por DMA del
+//! CE sin que la CPU toque uno. Antes se descuantizaban a un plano f32 en el heap
+//! —44 MiB por un `ffn_up` de TinyLlama que en disco son 5,9—, y ese plano costaba
+//! más que descuantizar: ~11 000 faltas de página anónimas (el mmap anónimo no
+//! admite huge pages), 44 MiB de puesta a cero, otro tanto de `munmap`, y 8× de
+//! tráfico PCIe y de VRAM, **por tensor**.
+//!
+//! MXFP4 y los cuantizados cuyo `cols` no es número entero de bloques siguen el
+//! camino viejo (descuantizar + subir f32). No es código muerto: es el fallback.
+//! Lo que hay en el búfer se guarda en `Resident::fmt` y el despacho va por ahí,
+//! nunca por `view.dtype` — ver el comentario de ese campo.
+//!
+//! Cuando un tensor no cabe se queda en CPU: eso es el offload híbrido, no un fallo.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -36,6 +46,7 @@ use soso_abi as abi;
 use soso_llm_core::gpu::GpuDispatch;
 use soso_llm_core::layer::TensorView;
 use soso_llm_core::quant::{dequant_mxfp4, dequant_q4_k, dequant_q8_0};
+use sosomodel::dequant::row_bytes;
 use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
 
 /// Pesos ya residentes en el dispositivo, indexados por el nombre del tensor.
@@ -48,6 +59,23 @@ struct Resident {
     key: String,
     bytes: u64,
     handle: u64,
+    /// **Qué hay dentro del búfer**, que no es lo mismo que el dtype del tensor:
+    /// un Q4_K con `cols` que no sea múltiplo de 256 se sube descuantizado y aquí
+    /// pone `F32`.
+    ///
+    /// Sin este campo el fallo es mortal y mudo: subir bloques Q4_K en crudo y
+    /// lanzar `MATVF` hace que el kernel lea nibbles como si fueran f32. Salen
+    /// números finitos, sale texto plausible, y no hay ningún error. Por eso
+    /// `matvec` despacha por esto y **nunca** vuelve a mirar `view.dtype`.
+    fmt: Formato,
+}
+
+/// Lo que de verdad está en el búfer del dispositivo.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Formato {
+    F32,
+    Q4K,
+    Q80,
 }
 
 /// Búfer de trabajo del que sí hace falta saber cuánto se reservó.
@@ -89,12 +117,27 @@ pub struct SysGpu {
     /// Tras un fallo de subida/submit (CE atascado, EIO…): no reintentar offload.
     /// Distinto de `sin_sitio`: eso es híbrido legítimo; esto es canal roto.
     offload_dead: bool,
+    /// Ciclos gastados en descuantizar y en `gpu_map`, por separado.
+    ///
+    /// En ciclos y no en milisegundos porque el reloj de `SYS_UPTIME_MS` es el PIT
+    /// y subcuenta durante el polling de disco: con él, mover trabajo de CPU a E/S
+    /// (o al revés) cambia la cifra por razones que no son el cambio. Y separados
+    /// porque son dos culpables muy distintos —el plano f32 en el heap y el camino
+    /// a la VRAM— y hasta ahora no había forma de saber cuál dominaba.
+    ciclos_dequant: u64,
+    ciclos_map: u64,
+    /// Tensores echados del dispositivo para hacer sitio. Era mudo: con desalojo en
+    /// marcha, cada token resube matrices enteras y el aserto de la suite
+    /// (`uploads < calls`) sigue en verde.
+    evictions: usize,
+    /// Subidas que fueron **en crudo** (bloques cuantizados, sin expandir a f32).
+    ///
+    /// Se cuenta porque el fallback es correcto y silencioso: si `row_bytes` dejara
+    /// de aceptar un `cols`, todo seguiría dando los mismos tokens por el camino del
+    /// plano f32 y se perderían el 8× de VRAM y de PCIe sin que nada se pusiera
+    /// rojo. Es exactamente la forma del bug que costó tres meses en el camino DMA.
+    crudas: usize,
 }
-
-/// Tope de matrices residentes. No es por memoria —eso lo controla `vram_free`—
-/// sino para que la búsqueda lineal siga siendo barata: un modelo pone del orden
-/// de 7 proyecciones por capa, y con esto entran las de varias capas.
-const MAX_RESIDENT: usize = 64;
 
 impl SysGpu {
     pub fn new() -> Option<Self> {
@@ -133,6 +176,10 @@ impl SysGpu {
             sin_sitio: 0,
             last_fail: None,
             offload_dead: false,
+            ciclos_dequant: 0,
+            ciclos_map: 0,
+            evictions: 0,
+            crudas: 0,
         })
     }
 
@@ -190,6 +237,38 @@ impl SysGpu {
             sin_sitio,
             self.last_on_gpu() as u8
         );
+        // Ciclos, no ms: el reloj de `SYS_UPTIME_MS` es el PIT y subcuenta durante
+        // el polling de disco, así que no sirve para repartir culpas entre CPU y
+        // E/S — que es justo lo que hay que hacer aquí.
+        if uploads > 0 {
+            libsoso::println!(
+                "soso-llm: subidas — {} de {} en crudo (sin expandir a f32), {} Mciclos descuantizando, {} Mciclos en gpu_map",
+                self.crudas,
+                uploads,
+                self.ciclos_dequant / 1_000_000,
+                self.ciclos_map / 1_000_000
+            );
+        }
+        // El camino sin copias del CE llevaba desde el 2026-08-17 sin dispararse
+        // NUNCA con pesos de un modelo (el payload de un shard empieza en +64 y el
+        // kernel exigía alineación de página), y desde fuera no se veía: el rebote
+        // da el mismo resultado, sólo cuesta una copia entera del tensor por la
+        // CPU. Un `rebote` distinto de 0 es una regresión, no un detalle.
+        let mut info = abi::GpuInfo::default();
+        if sys::gpu_info(&mut info) == 0 && (info.uploads_dma | info.uploads_bounce) != 0 {
+            libsoso::println!(
+                "soso-llm: subidas a VRAM — {} por DMA del CE (sin copia), {} por rebote ({} MiB copiados)",
+                info.uploads_dma,
+                info.uploads_bounce,
+                info.bounce_bytes >> 20
+            );
+        }
+        if self.evictions > 0 {
+            libsoso::println!(
+                "soso-llm: {} desalojos de pesos — el modelo no cabe residente y se resube por token",
+                self.evictions
+            );
+        }
         if let Some(r) = self.last_fail() {
             libsoso::println!("soso-llm: último fallo GPU — {}", r);
         }
@@ -236,29 +315,50 @@ impl SysGpu {
         Ok(s.handle)
     }
 
-    /// Handle de los pesos, subiéndolos sólo la primera vez que se ven.
+    /// Handle de los pesos y **qué formato tienen dentro**, subiéndolos sólo la
+    /// primera vez que se ven.
     ///
-    /// `elems` son los f32 LÓGICOS del tensor: lo que ocupará en el dispositivo,
-    /// que con pesos cuantizados no es lo que ocupa en el modelo.
+    /// Los cuantizados se suben EN CRUDO cuando la GPU sabe comerlos (`cols`
+    /// múltiplo del bloque): los bytes viajan del page cache de sosomfs a la VRAM
+    /// por DMA del CE sin que la CPU toque uno. Antes se descuantizaban a un plano
+    /// f32 del heap —44 MiB por un `ffn_up` de TinyLlama que en disco son 5,9— y esa
+    /// reserva costaba más que descuantizar: ~11 000 faltas de página anónimas (el
+    /// mmap anónimo no admite huge pages), 44 MiB de puesta a cero y otro tanto de
+    /// `munmap` al soltarla, **por tensor**.
+    ///
+    /// Lo que no puede ir en crudo (MXFP4, o `cols` que no sea bloque entero) sigue
+    /// el camino de siempre. No es código muerto: es el fallback.
     fn resident_weights(
         &mut self,
         key: &str,
         view: &TensorView<'_>,
         elems: usize,
-    ) -> Result<u64, ()> {
-        let bytes = (elems * 4) as u64;
+        cols: usize,
+    ) -> Result<(u64, Formato), ()> {
+        // Qué formato acabará en el dispositivo, y cuánto ocupa. `row_bytes` es lo
+        // que decide si la GPU puede leer la matriz sin expandirla, y es la misma
+        // función que usa el driver para acotar el búfer.
+        let (fmt, bytes) = match view.dtype {
+            DTYPE_Q4_K if row_bytes(DTYPE_Q4_K, cols).is_some() => {
+                (Formato::Q4K, view.bytes.len() as u64)
+            }
+            DTYPE_Q8_0 if row_bytes(DTYPE_Q8_0, cols).is_some() => {
+                (Formato::Q80, view.bytes.len() as u64)
+            }
+            _ => (Formato::F32, (elems * 4) as u64),
+        };
 
         if let Some(r) = self
             .resident
             .iter()
-            .find(|r| r.key == key && r.bytes == bytes)
+            .find(|r| r.key == key && r.bytes == bytes && r.fmt == fmt)
         {
-            return Ok(r.handle);
+            return Ok((r.handle, r.fmt));
         }
         // Sitio: primero por número de entradas, luego por VRAM. Se echa la más
         // antigua, que con un recorrido de capas en orden es la que más tardará
         // en volver a hacer falta.
-        while self.resident.len() >= MAX_RESIDENT || bytes > self.vram_free {
+        while bytes > self.vram_free {
             let Some(old) = self.resident.first() else {
                 // Ni vaciando el dispositivo cabe este tensor: se queda en CPU. Es
                 // el caso normal de un modelo más grande que la VRAM, no un error.
@@ -270,6 +370,10 @@ impl SysGpu {
                 self.vram_free = self.vram_free.saturating_add(freed as u64);
             }
             self.resident.remove(0);
+            // Se cuenta porque era mudo: con el desalojo en marcha, `uploads` sube
+            // en cada token y el aserto de la suite (`uploads < calls`) pasa igual
+            // con la mayoría de los matvec resubiendo la matriz entera.
+            self.evictions += 1;
         }
         let h = sys::gpu_alloc_vram(bytes);
         if h < 0 {
@@ -279,25 +383,34 @@ impl SysGpu {
         }
         let handle = h as u64;
         self.vram_free = self.vram_free.saturating_sub(bytes);
-        // Lo que sube es SIEMPRE f32. Descuantizar aquí es lo que hace que un
-        // modelo Q4_K pueda usar el dispositivo, y se paga una vez por tensor.
-        let subido = match view.dtype {
-            DTYPE_F32 => view.f32().ok_or(()).and_then(|w| write_f32(handle, w)),
-            DTYPE_Q8_0 | DTYPE_Q4_K => {
-                let mut plano = alloc::vec![0f32; elems];
-                let ok = if view.dtype == DTYPE_Q8_0 {
-                    dequant_q8_0(view.bytes, &mut plano)
-                } else {
-                    dequant_q4_k(view.bytes, &mut plano)
-                };
-                ok.and_then(|_| write_f32(handle, &plano))
-            }
-            DTYPE_MXFP4 => {
-                let mut plano = alloc::vec![0f32; elems];
-                dequant_mxfp4(view.bytes, &mut plano).and_then(|_| write_f32(handle, &plano))
-            }
-            _ => Err(()),
+        let mut ciclos_deq = 0u64;
+        let t_todo = libsoso::ciclos();
+        let subido = match fmt {
+            // Los bytes del shard tal cual: el kernel los pasa al CE, que los lee
+            // del propio page cache. Cero copias de CPU.
+            Formato::Q4K | Formato::Q80 => write_bytes(handle, view.bytes),
+            Formato::F32 => match view.dtype {
+                DTYPE_F32 => view.f32().ok_or(()).and_then(|w| write_f32(handle, w)),
+                DTYPE_Q8_0 | DTYPE_Q4_K | DTYPE_MXFP4 => {
+                    // Fallback: MXFP4 (sin kernel) o `cols` que no es bloque entero.
+                    let t0 = libsoso::ciclos();
+                    let mut plano = alloc::vec![0f32; elems];
+                    let ok = match view.dtype {
+                        DTYPE_Q8_0 => dequant_q8_0(view.bytes, &mut plano),
+                        DTYPE_Q4_K => dequant_q4_k(view.bytes, &mut plano),
+                        _ => dequant_mxfp4(view.bytes, &mut plano),
+                    };
+                    ciclos_deq = libsoso::ciclos().wrapping_sub(t0);
+                    ok.and_then(|_| write_f32(handle, &plano))
+                }
+                _ => Err(()),
+            },
         };
+        let ciclos_todo = libsoso::ciclos().wrapping_sub(t_todo);
+        self.ciclos_dequant = self.ciclos_dequant.wrapping_add(ciclos_deq);
+        self.ciclos_map = self
+            .ciclos_map
+            .wrapping_add(ciclos_todo.saturating_sub(ciclos_deq));
         if subido.is_err() {
             sys::gpu_free(handle);
             self.vram_free = self.vram_free.saturating_add(bytes);
@@ -307,23 +420,51 @@ impl SysGpu {
             return Err(());
         }
         self.uploads += 1;
+        if fmt != Formato::F32 {
+            self.crudas += 1;
+        }
         self.resident.push(Resident {
             key: String::from(key),
             bytes,
             handle,
+            fmt,
         });
-        Ok(handle)
+        Ok((handle, fmt))
     }
 
-    fn submit_matvf(w_h: u64, rows: u32, cols: u32, x_h: u64, y_h: u64) -> Result<u64, ()> {
-        let mut cmd = [0u8; 37];
-        cmd[0..5].copy_from_slice(b"MATVF");
+    /// `MATVF` (matriz f32) o `MATVQ` (matriz cuantizada sin expandir), según lo que
+    /// haya EN EL BÚFER. El despacho va por `Formato` y no por `view.dtype`: ver el
+    /// comentario del campo `Resident::fmt`.
+    fn submit_matv(
+        fmt: Formato,
+        w_h: u64,
+        rows: u32,
+        cols: u32,
+        x_h: u64,
+        y_h: u64,
+    ) -> Result<u64, ()> {
+        let mut cmd = [0u8; 38];
+        let n = match fmt {
+            Formato::F32 => {
+                cmd[0..5].copy_from_slice(b"MATVF");
+                37
+            }
+            Formato::Q4K | Formato::Q80 => {
+                cmd[0..5].copy_from_slice(b"MATVQ");
+                cmd[37] = if fmt == Formato::Q4K {
+                    DTYPE_Q4_K
+                } else {
+                    DTYPE_Q8_0
+                };
+                38
+            }
+        };
         cmd[5..13].copy_from_slice(&w_h.to_le_bytes());
         cmd[13..17].copy_from_slice(&rows.to_le_bytes());
         cmd[17..21].copy_from_slice(&cols.to_le_bytes());
         cmd[21..29].copy_from_slice(&x_h.to_le_bytes());
         cmd[29..37].copy_from_slice(&y_h.to_le_bytes());
-        let rc = sys::gpu_submit(&cmd);
+        let rc = sys::gpu_submit(&cmd[..n]);
         if rc < 0 {
             return Err(());
         }
@@ -339,12 +480,19 @@ impl SysGpu {
 /// `SYS_GPU_MAP` exigía permiso de escritura en el búfer de origen, y los pesos de
 /// un modelo viven en un mapeo de fichero de sólo lectura. Corregido eso en el
 /// kernel, la dirección del propio tensor sirve tal cual.
-fn write_f32(handle: u64, data: &[f32]) -> Result<(), ()> {
-    let bytes = (data.len() * 4) as u64;
-    if sys::gpu_map(handle, data.as_ptr() as u64, bytes) < 0 {
+fn write_bytes(handle: u64, data: &[u8]) -> Result<(), ()> {
+    if sys::gpu_map(handle, data.as_ptr() as u64, data.len() as u64) < 0 {
         return Err(());
     }
     Ok(())
+}
+
+/// Igual, con el tipo del llamante. El kernel **no interpreta** lo que se sube: son
+/// bytes, y quien sabe qué son es quien luego elige `MATVF` o `MATVQ`.
+fn write_f32(handle: u64, data: &[f32]) -> Result<(), ()> {
+    write_bytes(handle, unsafe {
+        core::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4)
+    })
 }
 
 /// Lee el resultado **directamente sobre el destino** del llamante.
@@ -385,7 +533,7 @@ impl GpuDispatch for SysGpu {
         // entera en vez de calcular esa capa en CPU, que es lo que hay que hacer
         // con un modelo más grande que la VRAM. Subida CE fallida sí corta offload
         // (`kill_offload` dentro de `resident_weights`).
-        let Ok(w_handle) = self.resident_weights(key, view, rows * cols) else {
+        let Ok((w_handle, fmt)) = self.resident_weights(key, view, rows * cols, cols) else {
             return Ok(false);
         };
         let x_bytes = (cols * 4) as u64;
@@ -411,11 +559,17 @@ impl GpuDispatch for SysGpu {
             self.kill_offload("gpu_map vector x");
             return Ok(false);
         }
-        let bits = match Self::submit_matvf(w_handle, rows as u32, cols as u32, x_handle, y_handle)
-        {
+        let bits = match Self::submit_matv(
+            fmt,
+            w_handle,
+            rows as u32,
+            cols as u32,
+            x_handle,
+            y_handle,
+        ) {
             Ok(b) => b,
             Err(()) => {
-                self.kill_offload("gpu_submit MATVF");
+                self.kill_offload("gpu_submit matvec");
                 return Ok(false);
             }
         };
@@ -432,5 +586,25 @@ impl GpuDispatch for SysGpu {
             return Ok(false);
         }
         Ok(true)
+    }
+}
+
+impl Drop for SysGpu {
+    fn drop(&mut self) {
+        for r in self.resident.drain(..) {
+            let freed = sys::gpu_free(r.handle);
+            if freed > 0 {
+                self.vram_free = self.vram_free.saturating_add(freed as u64);
+            }
+        }
+        for s in [&mut self.x, &mut self.y] {
+            if s.handle != u64::MAX {
+                let freed = sys::gpu_free(s.handle);
+                if freed > 0 {
+                    self.vram_free = self.vram_free.saturating_add(freed as u64);
+                }
+                *s = Scratch::NONE;
+            }
+        }
     }
 }

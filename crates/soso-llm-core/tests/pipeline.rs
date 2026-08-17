@@ -3,9 +3,8 @@
 #![cfg(feature = "std")]
 
 use soso_llm_core::pipeline::{
-    self, crc32c, decode_message, encode_message, FramedTransport, Message, PipelinePlan,
-    PipelineRole, RecvError, StepPayload, StepReplyPayload, Transport, HelloPayload, ROLE_HEAD,
-    ROLE_NODE,
+    crc32c, decode_message, encode_message, FramedTransport, Message, PipelinePlan, PipelineRole,
+    RecvError, StepPayload, StepReplyPayload, Transport, HelloPayload, ROLE_HEAD,
 };
 use soso_llm_core::runtime::Runtime;
 use soso_llm_core::source::host::MemFileMapper;

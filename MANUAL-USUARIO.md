@@ -356,7 +356,12 @@ el terminal según se genera, sin una sola línea de diagnóstico (para eso est�
 
 Sin texto, `ask` abre su propio prompt y el modelo se carga **una sola vez** para
 toda la sesión, así que a partir de la segunda pregunta la respuesta empieza
-mucho antes:
+mucho antes.
+
+El modelo vive en un servicio de máquina (`soso-llm askd` en `127.0.0.1:7420`):
+consola, SSH y reconexiones comparten la misma carga. Solo se recarga al cambiar
+de modelo (`:modelo` / `ask-modelo`), si el planificador necesita RAM, o al
+apagar. Salir de sosh o cortar SSH **no** descarga el modelo.
 
 ```
 $ ask
@@ -717,7 +722,11 @@ soso-llm run tiny-mla --prompt test --gpu-soft --max 2
 soso-llm run tiny-latent-moe --prompt @bos --max 2
 ```
 
-El offload GPU (sin `--cpu`) descuantiza al subir pesos **F32, Q8_0, Q4_K y MXFP4** a VRAM. Con `--gpu-soft` ejercitas esa fontanería sin silicio NVIDIA.
+El offload GPU (sin `--cpu`) admite pesos **F32, Q8_0, Q4_K y MXFP4**. Q4_K y Q8_0
+se suben a VRAM **tal como están en disco** y el dispositivo los multiplica sin
+expandirlos: 8× menos memoria de vídeo y 8× menos tráfico por el bus que
+descuantizarlos antes, así que caben 8× más capas en la tarjeta. MXFP4 sí se
+descuantiza al subir. Con `--gpu-soft` ejercitas esa fontanería sin silicio NVIDIA.
 
 La salida muestra el texto generado con decode greedy. El modelo tiny usa un
 tokenizer byte-level; los modelos importados de GGUF usan su propio
@@ -1044,7 +1053,14 @@ CPU normal, porque los datos van y vienen por syscalls— y sirve para dos cosas
   búferes, subir pesos, lanzar, leer el resultado);
 - ver el resumen que imprime al final: matvec lanzados, **subidas de pesos** y
   matrices residentes. Si las subidas fueran tantas como los matvec, los pesos se
-  estarían resubiendo en cada token.
+  estarían resubiendo en cada token;
+- y la línea de **subidas**, que dice cuántas fueron *en crudo* (bloques
+  cuantizados sin expandir) y cuántos ciclos se han ido en descuantizar y en la
+  propia subida. Si con un modelo Q4_K ninguna va en crudo, se está pagando 8× de
+  memoria de vídeo sin necesidad. Con una GPU de verdad aparece además una línea
+  con las subidas que fueron por **DMA** (el motor de copia leyendo directamente de
+  donde está el modelo, sin que la CPU toque un byte) y las que cayeron al camino
+  lento: ahí lo que se quiere ver es cero por rebote.
 
 ```sh
 soso-llm run tiny --prompt test --gpu-soft --max 4
@@ -1053,9 +1069,13 @@ soso-llm run tiny --prompt test --gpu-soft --max 4
 ```
 soso-llm: dispositivo de cómputo «soft (CPU del kernel, pruebas)» (fase ), VRAM libre 268435456 bytes
 soso-llm: generado (6 tokens, 5450 ms, 1.10 tok/s)
-soso-llm: dispositivo «soft (CPU del kernel, pruebas)» — 144 matvec, 24 subidas de pesos, 24 matrices residentes, último on_gpu=0
+soso-llm: dispositivo «soft (CPU del kernel, pruebas)» — 144 matvec, 24 subidas de pesos, 24 matrices residentes, 0 sin sitio (a CPU), último on_gpu=0
+soso-llm: subidas — 0 de 24 en crudo (sin expandir a f32), 0 Mciclos descuantizando, 21 Mciclos en gpu_map
 soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «»
 ```
+
+(`0 de 24 en crudo` porque el modelo `tiny` es F32: no hay nada que expandir. Con
+`tiny-q4k` o un modelo importado en Q4_K las 24 van en crudo.)
 
 `on_gpu=0` dice la verdad: **lo calculó la CPU**. Ese bit sólo vale 1 cuando el
 resultado viene del silicio de una GPU. El dispositivo se apaga al terminar el
@@ -1216,6 +1236,8 @@ sudo cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el 
 #  32 GB  → mixtral
 #  64 GB+ → llama2-70b
 # La primera vez descarga desde Hugging Face (puede tardar horas en modelos grandes).
+# Sin descargas: el mayor ya materializado que quepa en el stick:
+# SOSO_LIVE_OFFLINE=1 sudo cargo xtask flash-usb-live /dev/sdX --yes
 
 # Sin pendrive conectado (TinyLlama) o simular capacidad:
 cargo xtask package-usb-live

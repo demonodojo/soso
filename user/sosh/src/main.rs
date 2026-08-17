@@ -21,8 +21,12 @@ use libsoso::{abi, errno_str, print, println, sys};
 libsoso::entry!(main);
 
 const PROMPT: &str = "$ ";
-/// El binario que atiende `ask`: la inferencia vive donde ya estaba.
-const LLM: &str = "/bin/soso-llm";
+/// Demonio de sesión de máquina (modelo residente entre preguntas y SSH).
+const ASKD: &str = "/bin/soso-llm";
+const ASK_ADDR: &str = "127.0.0.1:7420";
+const PROTO_FIN: u8 = 0xFF;
+const LINE_MAX: usize = 1024;
+const CONF: &str = "/etc/llm.conf";
 
 fn main(_args: &str) -> u8 {
     println!("sosh — escribe 'help' para la ayuda");
@@ -257,9 +261,9 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
 
     let mut fallo = false;
     for (cmd, pid) in cmds.iter().zip(pids.iter()) {
-        match sys::wait() {
-            Ok((got, 0)) if got == *pid as u64 => {}
-            Ok((_, code)) => {
+        match wait_pid(*pid as u64) {
+            Ok(0) => {}
+            Ok(code) => {
                 println!("sosh: [{} salió con código {code}]", cmd.prog);
                 fallo = true;
             }
@@ -296,25 +300,206 @@ fn resto_de<'a>(cmd: &str, line: &'a str) -> Option<&'a str> {
         .map(|r| r[1..].trim_end())
 }
 
-/// Lanza `/bin/soso-llm ask <texto>` heredando la tty: el hijo escribe la
-/// respuesta y, si no hay texto, se queda con el terminal para su propio REPL.
-fn ejecutar_ask(texto: &str) -> Option<u8> {
-    let args = if texto.is_empty() {
-        "ask".to_string()
+/// Espera a un hijo concreto; si otro hijo zombi (p. ej. askd) sale antes, lo
+/// recoge y sigue esperando.
+fn wait_pid(want: u64) -> Result<u8, i64> {
+    loop {
+        match sys::wait() {
+            Ok((got, code)) if got == want => return Ok(code),
+            Ok(_) => {}
+            Err(e) if e == -abi::ECHILD => return Err(-abi::ECHILD),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn parse_sock_addr(s: &str) -> Option<abi::SockAddr> {
+    let (host, port) = s.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    let mut oct = [0u8; 4];
+    for (i, part) in host.split('.').enumerate() {
+        if i >= 4 {
+            return None;
+        }
+        oct[i] = part.parse().ok()?;
+    }
+    Some(sys::sock_addr(oct[0], oct[1], oct[2], oct[3], port))
+}
+
+fn spawn_askd() {
+    let _ = sys::spawn(ASKD, "askd");
+}
+
+fn connect_askd() -> Result<u64, i64> {
+    let addr = parse_sock_addr(ASK_ADDR).ok_or(-abi::EINVAL)?;
+    let fd = sys::tcp_connect(&addr, 5_000);
+    if fd < 0 {
+        Err(fd)
     } else {
-        format!("ask {texto}")
+        Ok(fd as u64)
+    }
+}
+
+fn copiar_respuesta_ask(fd: u64) {
+    let mut buf = [0u8; 512];
+    loop {
+        let n = sys::read_timeout(fd, &mut buf, 120_000);
+        if n == -(abi::EAGAIN as i64) {
+            continue;
+        }
+        if n <= 0 {
+            break;
+        }
+        for &b in &buf[..n as usize] {
+            if b == PROTO_FIN {
+                return;
+            }
+            let mut one = [b];
+            let _ = sys::write(1, &mut one);
+        }
+    }
+}
+
+fn preguntar_via_askd(texto: &str) -> u8 {
+    let fd = match connect_askd() {
+        Ok(f) => f,
+        Err(_) => {
+            spawn_askd();
+            let mut fd = None;
+            for _ in 0..100 {
+                let _ = sys::sleep_ms(50);
+                if let Ok(f) = connect_askd() {
+                    fd = Some(f);
+                    break;
+                }
+            }
+            match fd {
+                Some(f) => f,
+                None => {
+                    println!("ask: no pude conectar con el servicio en {ASK_ADDR}");
+                    return 1;
+                }
+            }
+        }
     };
-    let pid = sys::spawn(LLM, &args);
-    if pid < 0 {
-        println!("sosh: ask: {} ({LLM})", errno_str(pid));
+    let mut linea = alloc::vec![0u8; LINE_MAX];
+    let bytes = texto.as_bytes();
+    let n = bytes.len().min(LINE_MAX - 1);
+    linea[..n].copy_from_slice(&bytes[..n]);
+    linea[n] = b'\n';
+    if sys::write_all(fd, &linea[..=n]).is_err() {
+        let _ = sys::close(fd);
+        println!("ask: error al enviar la pregunta");
+        return 1;
+    }
+    copiar_respuesta_ask(fd);
+    let _ = sys::close(fd);
+    0
+}
+
+fn leer_conf_modelo() -> (String, usize) {
+    let mut modelo = String::new();
+    let mut max = 128usize;
+    let fd = sys::open(CONF, abi::O_RDONLY);
+    if fd < 0 {
+        return (modelo, max);
+    }
+    let mut texto = String::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = sys::read(fd as u64, &mut buf);
+        if n <= 0 {
+            break;
+        }
+        texto.push_str(core::str::from_utf8(&buf[..n as usize]).unwrap_or(""));
+    }
+    sys::close(fd as u64);
+    for linea in texto.lines() {
+        let linea = linea.trim();
+        if let Some(v) = linea.strip_prefix("modelo=") {
+            modelo = v.trim().to_string();
+        } else if let Some(v) = linea.strip_prefix("max=") {
+            if let Ok(n) = v.trim().parse() {
+                max = n;
+            }
+        }
+    }
+    (modelo, max)
+}
+
+fn modelo_efectivo(conf_modelo: &str) -> Option<String> {
+    let fd = sys::open("/models", abi::O_RDONLY);
+    if fd < 0 {
         return None;
     }
-    match sys::wait() {
-        Ok((_, code)) if code != 0 => println!("sosh: [ask salió con código {code}]"),
-        Ok(_) => {}
-        Err(e) => println!("sosh: ask: wait: {}", errno_str(e)),
+    let mut disponibles = Vec::new();
+    let mut ents = [abi::Dirent::default(); 16];
+    loop {
+        let n = sys::getdents(fd as u64, &mut ents);
+        if n <= 0 {
+            break;
+        }
+        for d in &ents[..n as usize / abi::DIRENT_SIZE] {
+            if let Ok(nombre) = core::str::from_utf8(d.name_bytes()) {
+                disponibles.push(nombre.to_string());
+            }
+        }
     }
-    None
+    sys::close(fd as u64);
+    if !conf_modelo.is_empty() && disponibles.iter().any(|m| m == conf_modelo) {
+        return Some(conf_modelo.to_string());
+    }
+    disponibles.into_iter().next()
+}
+
+fn repl_ask() -> Option<u8> {
+    let (conf_modelo, max) = leer_conf_modelo();
+    let Some(modelo) = modelo_efectivo(&conf_modelo) else {
+        println!("ask: no hay ningún modelo en /models");
+        return Some(1);
+    };
+    println!("ask: modelo {modelo}, máx {max} tokens");
+    println!("ask: escribe la pregunta; «salir» o Ctrl-D para terminar");
+    let mut lector = Lector::new();
+    loop {
+        print!("?> ");
+        let Some(linea) = lector.siguiente() else {
+            return Some(0);
+        };
+        let texto = linea.trim();
+        if texto.is_empty() {
+            continue;
+        }
+        if texto == "salir" || texto == "exit" {
+            return Some(0);
+        }
+        if let Some(t) = resto_de(":eco", texto) {
+            println!("{t}");
+            continue;
+        }
+        let code = preguntar_via_askd(texto);
+        if code != 0 {
+            return Some(code);
+        }
+        println!();
+    }
+}
+
+/// Cliente TCP del askd global; `:eco` va local sin demonio.
+fn ejecutar_ask(texto: &str) -> Option<u8> {
+    if let Some(t) = resto_de(":eco", texto) {
+        println!("{t}");
+        return None;
+    }
+    if texto.is_empty() {
+        return repl_ask();
+    }
+    let code = preguntar_via_askd(texto);
+    if code != 0 {
+        Some(code)
+    } else {
+        None
+    }
 }
 
 /// Ejecuta una línea. Some(código) = salir de la shell.

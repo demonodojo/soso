@@ -33,7 +33,7 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
-| `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3 (p4 SOSOINSTALL 32 MiB al final) |
+| `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3 (p4 SOSOINSTALL 32 MiB al final). `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
 | `cargo xtask fetch-hf` | Descargar GGUF de Hugging Face, convertir a `.som` y preparar `SOSO_MODELS_DIR` |
@@ -188,6 +188,7 @@ cargo xtask test-usb
 #                       Súbela si el bootloader falla con FrameAllocationFailed
 #                       —el kernel ha crecido—, pero lo justo: con 72M la
 #                       inferencia muere a media generación de forma inestable.
+#   llm-dense             ask residente (carga una vez, reconexión SSH sin recargar)
 #   sys                 syscalls, pipes, SSH, `ask` (texto literal) y halt.
 
 # Decode tok/s con modelo sintético bench (default SMP=1,4 mem=8G)
@@ -267,7 +268,9 @@ and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: a
 | Connection refused :2222 | Wait for `sosh — escribe 'help'`; or prior QEMU still running → `pkill qemu-system-x86` |
 | Teclado muerto tras la primera tecla (placa) | Algo del camino IRQ 1 toma un `lock()` o imprime; ver «Candados y contexto de interrupción» en `soso-architecture` |
 | Teclas no coinciden (QWERTY vs ñ/¿) | Mapa por defecto **es**; `kbd us` en kernel-shell para teclado americano/QEMU |
-| La máquina se arrastra tras usar `soso-llm`/`ask` | Workers del pool girando sin apagar; `ThreadPool` tiene que hacer `Drop` con `shutdown` + espera |
+| La máquina se arrastra tras usar `soso-llm`/`ask` | En askd el `ThreadPool` se suelta tras cada respuesta (`drop_pool`); si giran al 100 %, revisar `pool.rs` |
+| `ask` recarga en cada pregunta | Debe haber un solo askd en `:7420`; la segunda pregunta no debe mostrar «ask: cargando» salvo cambio de modelo o presión de RAM |
+| `ask` recarga en cada pregunta | Debe haber un solo askd en `:7420`; la segunda pregunta no debe mostrar «ask: cargando» salvo cambio de modelo o presión de RAM |
 | `Could not set up host forwarding rule tcp::2222` | Puerto ocupado; `pkill qemu-system-x86` y relanzar |
 | SSH output desalineada | Kernel debe enviar CRLF en `ssh::tx_push` (tty cruda) |
 | SSH no reconecta tras Ctrl-C | Kernel debe hacer `reset_socket` en CloseWait/TimeWait |

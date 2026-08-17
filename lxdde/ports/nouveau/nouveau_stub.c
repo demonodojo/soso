@@ -11,6 +11,9 @@ extern int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned 
 extern int lx_nouveau_submit_matvec_resident(uint64_t w_va, unsigned rows,
                                              unsigned cols, const float *x,
                                              float *y);
+extern int lx_nouveau_submit_matvec_q_resident(uint64_t w_va, unsigned dtype,
+                                               unsigned rows, unsigned cols,
+                                               const float *x, float *y);
 extern uint64_t lx_nouveau_vram_bytes(void);
 extern uint64_t lx_nouveau_buf_alloc(uint64_t size);
 extern int lx_nouveau_buf_ready(void);
@@ -19,7 +22,7 @@ extern int lx_nouveau_buf_upload_at(uint64_t va, uint64_t offset, const void *sr
                                     uint64_t size);
 extern int lx_nouveau_buf_upload_dma(uint64_t va, uint64_t offset,
                                      const uint64_t *phys, unsigned npages,
-                                     uint64_t size);
+                                     unsigned src_off, uint64_t size);
 extern int lx_nouveau_buf_free(uint64_t va);
 extern uint64_t lx_nouveau_buf_vram_free(void);
 
@@ -87,6 +90,13 @@ int lx_nouveau_compute_matvec_resident(uint64_t w_va, unsigned rows, unsigned co
     return lx_nouveau_submit_matvec_resident(w_va, rows, cols, x, y);
 }
 
+int lx_nouveau_compute_matvec_q_resident(uint64_t w_va, unsigned dtype,
+                                         unsigned rows, unsigned cols,
+                                         const float *x, float *y)
+{
+    return lx_nouveau_submit_matvec_q_resident(w_va, dtype, rows, cols, x, y);
+}
+
 uint64_t lx_nouveau_vram_total(void)
 {
     return lx_nouveau_vram_bytes();
@@ -115,9 +125,9 @@ int lx_nouveau_device_buf_upload_at(uint64_t va, uint64_t offset, const void *sr
 
 int lx_nouveau_device_buf_upload_dma(uint64_t va, uint64_t offset,
                                      const uint64_t *phys, unsigned npages,
-                                     uint64_t size)
+                                     unsigned src_off, uint64_t size)
 {
-    return lx_nouveau_buf_upload_dma(va, offset, phys, npages, size);
+    return lx_nouveau_buf_upload_dma(va, offset, phys, npages, src_off, size);
 }
 
 int lx_nouveau_device_buf_free(uint64_t va)

@@ -21,7 +21,7 @@ pub fn begin(name_ptr: u64, name_len: u64) -> Result<(), i64> {
         return Err(-soso_abi::EBUSY);
     }
     let mfs = MODELS.get().ok_or(-soso_abi::ENOSYS)?;
-    let mut guard = mfs.lock();
+    let guard = mfs.lock();
     let session = ImportSession::begin(
         *guard.superblock(),
         guard.catalog_ref().clone(),

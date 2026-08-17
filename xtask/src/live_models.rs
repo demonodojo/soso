@@ -113,6 +113,59 @@ pub fn pick_for_usb(
     CATALOG[0]
 }
 
+/// `SOSO_LIVE_OFFLINE=1|true|yes`: no descargar desde Hugging Face al empaquetar/flashear.
+pub fn offline_mode() -> bool {
+    matches!(
+        std::env::var("SOSO_LIVE_OFFLINE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+pub fn is_materialized(root: &Path, spec: &LiveModelSpec) -> bool {
+    spec.target_dir(root).join("manifest.som").exists()
+}
+
+/// Mejor modelo ya materializado que cabe en el USB (`SOSO_LIVE_OFFLINE`).
+pub fn pick_materialized_for_usb(
+    usb_bytes: u64,
+    esp_aligned: u64,
+    rootfs_aligned: u64,
+    root: &Path,
+) -> Option<LiveModelSpec> {
+    let budget = models_budget_from_layout(usb_bytes, esp_aligned, rootfs_aligned);
+    for spec in CATALOG.iter().rev() {
+        if !is_materialized(root, spec) {
+            continue;
+        }
+        if usb_bytes >= spec.min_usb_bytes && spec.need_bytes(root) <= budget {
+            return Some(*spec);
+        }
+    }
+    None
+}
+
+/// Mayor modelo del catálogo con `manifest.som` (sin comprobar tamaño de USB).
+pub fn pick_largest_materialized(root: &Path) -> Option<LiveModelSpec> {
+    CATALOG
+        .iter()
+        .rev()
+        .find(|spec| is_materialized(root, spec))
+        .copied()
+}
+
+fn materialized_catalog_names(root: &Path) -> Vec<&'static str> {
+    CATALOG
+        .iter()
+        .filter(|spec| is_materialized(root, spec))
+        .map(|spec| spec.name)
+        .collect()
+}
+
+/// Nombres de modelos ya materializados (para mensajes de error).
+pub fn list_materialized(root: &Path) -> Vec<&'static str> {
+    materialized_catalog_names(root)
+}
+
 /// Parsea `SOSO_LIVE_CAPACITY` (`64G`, `128G`, …) o bytes enteros.
 pub fn parse_capacity_env(raw: &str) -> Result<u64, String> {
     let s = raw.trim();
@@ -179,6 +232,29 @@ pub fn suggest_models_image_size(model_dir: &Path, tiny_dir: &Path) -> String {
     const G: u64 = 1024 * 1024 * 1024;
     let gb = (bytes + G - 1) / G;
     format!("{}G", gb.max(1))
+}
+
+/// Falla si falta `manifest.som` (modo offline; no descarga).
+pub fn require_materialized(root: &Path, spec: &LiveModelSpec) {
+    let out = spec.target_dir(root);
+    if out.join("manifest.som").exists() {
+        println!(
+            "live-models: {} ya en {}",
+            spec.name,
+            out.display()
+        );
+        return;
+    }
+    eprintln!(
+        "live-models: SOSO_LIVE_OFFLINE=1 pero falta {} en {}\n\
+         Descarga antes con: cargo xtask fetch-hf {} --name {} --out {}",
+        spec.name,
+        out.display(),
+        spec.repo,
+        spec.name,
+        out.display()
+    );
+    exit(1);
 }
 
 /// Descarga/convierte el modelo si falta `manifest.som`.
@@ -281,5 +357,47 @@ mod tests {
         let budget = models_budget_from_layout(usb, esp, rootfs);
         assert!(budget < usb);
         assert!(budget > 30 * 1024 * 1024 * 1024);
+    }
+
+    fn offline_fixture(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "soso-live-offline-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        for name in ["tinyllama", "mistral-7b"] {
+            let model = dir.join(format!("target/{name}-model"));
+            std::fs::create_dir_all(&model).unwrap();
+            std::fs::write(model.join("manifest.som"), b"x").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn pick_offline_largest_materialized() {
+        let root = offline_fixture("largest");
+        let spec = pick_largest_materialized(&root).unwrap();
+        assert_eq!(spec.name, "mistral-7b");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pick_offline_for_usb_skips_missing() {
+        let root = offline_fixture("usb64");
+        let usb = 64 * 1024 * 1024 * 1024;
+        let spec =
+            pick_materialized_for_usb(usb, 64 * 1024 * 1024, 512 * 1024 * 1024, &root).unwrap();
+        assert_eq!(spec.name, "mistral-7b");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pick_offline_for_usb_falls_back_to_smaller() {
+        let root = offline_fixture("usb8");
+        let usb = 8 * 1024 * 1024 * 1024;
+        let spec =
+            pick_materialized_for_usb(usb, 64 * 1024 * 1024, 512 * 1024 * 1024, &root).unwrap();
+        assert_eq!(spec.name, "tinyllama");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

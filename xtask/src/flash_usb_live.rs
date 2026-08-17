@@ -109,7 +109,10 @@ fn usage() -> ! {
          \n\
          Graba soso-live.img (modelo según tamaño del stick), estira p3 (modelos)\n\
          y añade p4 SOSOINSTALL\n\
-         con install-soso.sh para dual-boot desde Linux."
+         con install-soso.sh para dual-boot desde Linux.\n\
+         \n\
+         Sin descargar modelos (el mayor ya en target/*-model/ que quepa):\n\
+           SOSO_LIVE_OFFLINE=1 sudo cargo xtask flash-usb-live /dev/sde --yes"
     );
     exit(2);
 }

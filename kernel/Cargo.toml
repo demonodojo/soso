@@ -37,6 +37,10 @@ pic8259 = "0.11"
 virtio-drivers = "0.13"
 sosofs = { path = "../crates/sosofs" }
 sosomfs = { path = "../crates/sosomfs" }
+# Explícita, no sólo a través de `sosomfs`: el dispositivo software de la GPU
+# descuantiza con `sosomodel::dequant` para poder ejecutar `MATVQ`, que es lo único
+# que da cobertura numérica al camino de pesos cuantizados en GPU sin silicio.
+sosomodel = { path = "../crates/sosomodel" }
 block-dev = { path = "../crates/block-dev" }
 soso-abi = { path = "../crates/soso-abi" }
 xmas-elf = "0.10"

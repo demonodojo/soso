@@ -1,28 +1,10 @@
 //! Conversión f16 (IEEE 754 binary16) ↔ f32, sin hardware F16C.
 //! Usada por el KV cache en f16 y por la importación de GGUF.
 
-pub fn f16_to_f32(bits: u16) -> f32 {
-    let sign = ((bits >> 15) & 1) as u32;
-    let exp = ((bits >> 10) & 0x1f) as u32;
-    let frac = (bits & 0x3ff) as u32;
-    if exp == 0 {
-        if frac == 0 {
-            return f32::from_bits(sign << 31);
-        }
-        let v = (frac as f32) / 1024.0 * POW2_NEG14;
-        return if sign != 0 { -v } else { v };
-    }
-    if exp == 31 {
-        return if frac == 0 {
-            f32::from_bits((sign << 31) | 0x7f80_0000)
-        } else {
-            f32::NAN
-        };
-    }
-    f32::from_bits((sign << 31) | ((exp + 112) << 23) | (frac << 13))
-}
-
-pub(crate) const POW2_NEG14: f32 = 6.103_515_6e-5; // 2^-14
+/// f16 → f32. La implementación vive en `sosomodel::dequant` porque el **kernel**
+/// también la necesita (el dispositivo software descuantiza para `MATVQ`) y no
+/// enlaza este crate. Reexportada aquí para no tocar sus llamantes.
+pub use sosomodel::dequant::f16_to_f32;
 
 /// Redondeo al más cercano (empates hacia arriba, suficiente para KV cache).
 pub fn f32_to_f16(v: f32) -> u16 {

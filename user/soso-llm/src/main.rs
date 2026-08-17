@@ -138,6 +138,9 @@ fn main(args: &str) -> u8 {
     if let Some(texto) = resto_tras("ask", args) {
         return run_ask(texto);
     }
+    if args.trim_start().starts_with("askd") {
+        return ask::run_askd();
+    }
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.first() == Some(&"node") || parts.first() == Some(&"worker") {
         return run_node_cmd(&parts);
@@ -605,15 +608,11 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
 }
 
 /// Modelo cargado y listo para generar.
-///
-/// Existe porque el REPL de `ask` pregunta varias veces seguidas: lo caro es
-/// cargar (disco), no generar, y antes las dos cosas estaban pegadas en la
-/// misma función. `gpu_ref` no se guarda aquí — sería autorreferencial: se
-/// construye en cada generación desde `sys_gpu`.
-struct Sesion {
+pub(crate) struct Sesion {
     bundle: ModelBundle,
-    pool: ThreadPool,
+    pool: Option<ThreadPool>,
     sys_gpu: Option<gpu::SysGpu>,
+    pub(crate) modelo: String,
 }
 
 fn run_model(
@@ -626,7 +625,7 @@ fn run_model(
     chat: bool,
 ) -> u8 {
     let io0 = read_iostat();
-    let mut sesion = match preparar_sesion(name, force_cpu, mem_plan, true) {
+    let mut sesion = match preparar_sesion(name, force_cpu, mem_plan, true, true) {
         Ok(s) => s,
         Err(c) => return c,
     };
@@ -643,18 +642,19 @@ fn run_model(
         println!("soso-llm: plantilla de chat aplicada");
     }
     let tokens = soso_llm_core::chat::render(plantilla, prompt, &sesion.bundle.tokenizer);
-    generar_tokens(&mut sesion, &tokens, max_new, &mut sampler, true, Some(&io0))
+    generar_tokens(&mut sesion, &tokens, max_new, &mut sampler, true, Some(&io0), None, false)
 }
 
 /// Carga el modelo y decide planificador, backend y workers.
 ///
 /// `verboso` apaga el diagnóstico entero: `ask` quiere la respuesta y nada
 /// más, y `soso-llm run` sigue contándolo todo.
-fn preparar_sesion(
+pub(crate) fn preparar_sesion(
     name: &str,
     force_cpu: bool,
     mem_plan: MemoryPlanConfig,
     verboso: bool,
+    with_pool: bool,
 ) -> Result<Sesion, u8> {
     let io0 = read_iostat();
     let t_carga = sys::uptime_ms();
@@ -764,14 +764,20 @@ fn preparar_sesion(
         bundle.rt.set_backend(Backend::Cpu);
     }
 
-    let pool = ThreadPool::new();
-    if verboso {
-        println!("soso-llm: workers={}", pool.workers());
-    }
+    let pool = if with_pool {
+        let pool = ThreadPool::new();
+        if verboso {
+            println!("soso-llm: workers={}", pool.workers());
+        }
+        Some(pool)
+    } else {
+        None
+    };
     Ok(Sesion {
         bundle,
         pool,
         sys_gpu,
+        modelo: String::from(name),
     })
 }
 
@@ -801,7 +807,7 @@ fn generar(
     } else {
         sesion.bundle.tokenizer.encode(text)
     };
-    generar_tokens(sesion, &prompt_tokens, max_new, sampler, verboso, io0)
+    generar_tokens(sesion, &prompt_tokens, max_new, sampler, verboso, io0, None, false)
 }
 
 /// Igual que `generar` pero con el prompt YA tokenizado.
@@ -809,19 +815,24 @@ fn generar(
 /// Existe porque una plantilla de chat no se puede expresar como texto: el fin de
 /// turno es el token EOS y no sus cuatro letras (ver `soso_llm_core::chat`), así
 /// que quien la aplica trae tokens, no una cadena.
-fn generar_tokens(
+pub(crate) fn generar_tokens(
     sesion: &mut Sesion,
     prompt_tokens: &[u32],
     max_new: usize,
     sampler: &mut Sampler,
     verboso: bool,
     io0: Option<&abi::IoStat>,
+    fd_out: Option<u64>,
+    drop_pool: bool,
 ) -> u8 {
-    let par: Option<&dyn RowParallel> = if sesion.pool.workers() > 1 {
-        Some(&sesion.pool)
-    } else {
-        None
-    };
+    if sesion.pool.is_none() {
+        sesion.pool = Some(ThreadPool::new());
+    }
+    let par: Option<&dyn RowParallel> = sesion
+        .pool
+        .as_ref()
+        .filter(|p| p.workers() > 1)
+        .map(|p| p as &dyn RowParallel);
     let mut gpu_ref: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = sesion
         .sys_gpu
         .as_mut()
@@ -838,7 +849,11 @@ fn generar_tokens(
         |t| {
             let s = decoder.push(&bundle.tokenizer, t);
             if !s.is_empty() {
-                libsoso::print!("{s}");
+                if let Some(fd) = fd_out {
+                    let _ = sys::write_all(fd, s.as_bytes());
+                } else {
+                    libsoso::print!("{s}");
+                }
             }
         },
         par,
@@ -851,9 +866,18 @@ fn generar_tokens(
             let elapsed_ms = (sys::uptime_ms() - t0).max(1) as u64;
             let resto = decoder.finish();
             if !resto.is_empty() {
-                libsoso::print!("{resto}");
+                if let Some(fd) = fd_out {
+                    let _ = sys::write_all(fd, resto.as_bytes());
+                } else {
+                    libsoso::print!("{resto}");
+                }
             }
-            println!();
+            if fd_out.is_none() {
+                println!();
+            }
+            if drop_pool {
+                sesion.pool = None;
+            }
             if !verboso {
                 return 0;
             }
@@ -928,7 +952,12 @@ fn generar_tokens(
             0
         }
         Err(()) => {
-            println!("soso-llm: inferencia falló");
+            if drop_pool {
+                sesion.pool = None;
+            }
+            if fd_out.is_none() {
+                println!("soso-llm: inferencia falló");
+            }
             if verboso {
                 if let Some(ref g) = sesion.sys_gpu {
                     g.print_diagnostics();

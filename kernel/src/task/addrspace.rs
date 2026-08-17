@@ -194,6 +194,7 @@ impl AddrSpace {
     /// no cabe en `out` o si algo del rango no está mapeado — y ahí es
     /// responsabilidad del llamante haberlo materializado antes
     /// (`user_range_ok_bulk`) y tenerlo fijado mientras el DMA lo lee.
+    #[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
     pub fn phys_pages(&self, va: u64, len: u64, out: &mut [u64]) -> Option<usize> {
         if va % 4096 != 0 || len % 4096 != 0 || len == 0 {
             return None;

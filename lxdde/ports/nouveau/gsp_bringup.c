@@ -626,18 +626,27 @@ static int run_compute_stage(void)
                   "correr todavía\n");
     }
 
-    /* Los dos blobs, cada uno en su página: el matvec de G5 no se stagea en el
-     * primer lanzamiento sino aquí, para que un fallo de copia salga en el
-     * arranque y no en medio de una inferencia. */
+    /* Los cuatro blobs, cada uno en su hueco: no se stagean en el primer
+     * lanzamiento sino aquí, para que un fallo de copia salga en el arranque y no
+     * en medio de una inferencia. Los cuantizados NO abortan si fallan: sin ellos
+     * se pierde el matvec sobre pesos sin expandir, pero el f32 sigue entero. */
     if (gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.saxpy,
-                               G4D_SCRATCH_VA, g_scratch.va) != 0) {
+                               G4D_SCRATCH_VA, g_scratch.va, 4096u) != 0) {
         lx_printk("nouveau-lx: SASS de saxpy no llegó a VRAM (el CE no señalizó)\n");
     } else if (gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.matvec,
-                                      G4D_SCRATCH_VA, g_scratch.va) != 0) {
+                                      G4D_SCRATCH_VA, g_scratch.va, 4096u) != 0) {
         lx_printk("nouveau-lx: SASS de matvec no llegó a VRAM (el CE no señalizó)\n");
     } else {
-        lx_printk("nouveau-lx: SASS en VRAM — saxpy %u B, matvec %u B\n",
-                  g_compute.saxpy.sass_len, g_compute.matvec.sass_len);
+        int q4k = gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.matvec_q4k,
+                                         G4D_SCRATCH_VA, g_scratch.va, 4096u);
+        int q80 = gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.matvec_q80,
+                                         G4D_SCRATCH_VA, g_scratch.va, 4096u);
+
+        lx_printk("nouveau-lx: SASS en VRAM — saxpy %u B, matvec %u B, "
+                  "matvec_q4k %u B (%s), matvec_q80 %u B (%s)\n",
+                  g_compute.saxpy.sass_len, g_compute.matvec.sass_len,
+                  g_compute.matvec_q4k.sass_len, q4k == 0 ? "ok" : "FALLO",
+                  g_compute.matvec_q80.sass_len, q80 == 0 ? "ok" : "FALLO");
     }
     /* El rebote grande es un lujo, no un requisito: si no hay 1 MiB contiguo o
      * no se puede mapear, G6 sigue con la página de 4 KiB de G4d y lo dice. Lo
@@ -663,9 +672,16 @@ static int run_compute_stage(void)
                          bounce_cpu, bounce_len) != 0) {
             lx_printk("nouveau-lx: G6 — pool de buffers VRAM no inicializado\n");
         } else {
-            lx_printk("nouveau-lx: G6 — buffers VRAM listos (libre ~%llu MiB, "
-                      "rebote %u KiB)\n",
+            /* El techo se dice aquí y no sólo el pool: son cifras distintas (pool
+             * 11 902 MiB, techo ~108 MiB en la GB205) y confundirlas es lo que hacía
+             * que «sin sitio» fuese un misterio. Ver `gsp_buf_vram_free`. */
+            lx_printk("nouveau-lx: G6 — buffers VRAM listos (techo residente "
+                      "~%llu MiB de %llu MiB de pool; ventana VA %llu MiB, "
+                      "tablas libres %u; rebote %u KiB)\n",
                       (unsigned long long)(gsp_buf_vram_free(&g_buf) >> 20),
+                      (unsigned long long)((g_vram_pool.total - g_vram_pool.used) >> 20),
+                      (unsigned long long)((G6_VA_LIMIT - G6_VA_BASE) >> 20),
+                      GSP_VMM_MAX_PT - g_vmm.pt_nr,
                       bounce_len >> 10);
         }
     }
@@ -1013,12 +1029,12 @@ int lx_nouveau_buf_upload_at(uint64_t va, uint64_t offset, const void *src,
 }
 
 int lx_nouveau_buf_upload_dma(uint64_t va, uint64_t offset, const uint64_t *phys,
-                              unsigned npages, uint64_t size)
+                              unsigned npages, unsigned src_off, uint64_t size)
 {
     if (!g_buf.ready) {
         return -1;
     }
-    return gsp_buf_upload_dma(&g_buf, va, offset, phys, npages, size);
+    return gsp_buf_upload_dma(&g_buf, va, offset, phys, npages, src_off, size);
 }
 
 int lx_nouveau_buf_free(uint64_t va)
@@ -1116,6 +1132,29 @@ int lx_nouveau_submit_matvec_resident(uint64_t w_va, unsigned rows, unsigned col
         int ok = gsp_compute_matvec_resident(&g_compute, &g_ce, w_va, rows, cols,
                                              x, y, G4D_SCRATCH_VA,
                                              g_scratch.va) == 0;
+        compute_resultado(ok);
+        if (ok) {
+            return 1;
+        }
+    }
+    return -1;
+}
+
+/* G7: igual, con la matriz cuantizada sin expandir. **No hay fallback de CPU aquí**
+ * y es deliberado: sin BAR1 el kernel no puede leer esa VRAM, y userspace tiene su
+ * matvec fusionado con AVX2 sobre el shard ya mapeado, que es mejor que cualquier
+ * bucle escalar de aquí. El -1 significa «hazlo tú». */
+int lx_nouveau_submit_matvec_q_resident(uint64_t w_va, unsigned dtype,
+                                        unsigned rows, unsigned cols,
+                                        const float *x, float *y)
+{
+    if (!x || !y || rows == 0 || cols == 0 || w_va == 0) {
+        return -1;
+    }
+    if (compute_usable() && g_compute.res_mapped && g_buf.ready) {
+        int ok = gsp_compute_matvec_q_resident(&g_compute, &g_ce, w_va, dtype, rows,
+                                               cols, x, y, G4D_SCRATCH_VA,
+                                               g_scratch.va, 4096u) == 0;
         compute_resultado(ok);
         if (ok) {
             return 1;

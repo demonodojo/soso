@@ -921,10 +921,23 @@ extern "C" fn schedule_inner() -> ! {
                     continue;
                 }
                 if accept {
-                    if crate::net::tcp_listener_ready(slot) {
-                        let _ = crate::net::tcp_accept(slot);
-                        procs[i].ctx.rax = result_fd;
-                        procs[i].state = State::Runnable;
+                    match crate::net::tcp_accept_wake(slot) {
+                        Ok(None) => {
+                            procs[i].ctx.rax = result_fd;
+                            procs[i].state = State::Runnable;
+                        }
+                        Ok(Some(server_slot)) => {
+                            if let Some(fd) =
+                                syscall::alloc_fd_for_process(&mut procs[i], Fd::Tcp { slot: server_slot })
+                            {
+                                procs[i].ctx.rax = fd;
+                                procs[i].state = State::Runnable;
+                            } else {
+                                procs[i].ctx.rax = (-soso_abi::EMFILE) as u64;
+                                procs[i].state = State::Runnable;
+                            }
+                        }
+                        Err(_) => {}
                     }
                 } else if connect {
                     if crate::net::tcp_is_connected(slot) {

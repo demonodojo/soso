@@ -389,6 +389,12 @@ typedef char fake_doorbell_reg_check[
 typedef char fake_usermode_reg_check[
     FAKE_USERMODE_TIME == NV_VFN_USERMODE_BASE + 0x80u ? 1 : -1];
 
+/* La decodificación de bloques cuantizados, compilada con clang en C plano: la
+ * MISMA cabecera que compila nvcc dentro de los `.cu`. Es el único amarre sin GPU
+ * entre lo que decodifica el silicio y lo que decodifica la CPU (el Rust de
+ * `sosomodel::dequant`), y por eso está aquí y no dentro del kernel. */
+#include "q4k_decode.h"
+
 #include "gsp_dma_body.inc"
 #include "gsp_rm_body.inc"
 #include "gsp_wpr_body.inc"
@@ -1709,7 +1715,7 @@ static int check_mv_params(struct gsp_compute *cp)
     const uint64_t wv = 0xaaaabbbbccccddddull, xv = 0x1111222233334444ull;
     const uint64_t yv = 0x5555666677778888ull;
 
-    gsp_compute_set_mv_params(cp, wv, xv, yv, 33u, 1024u);
+    gsp_compute_set_mv_params(cp, &cp->matvec, wv, xv, yv, 33u, 1024u);
 
     if (gsp_matvec_param_base + gsp_matvec_param_size != gsp_matvec_cbank_size) {
         printf("FALLO: params de matvec en %u+%u no acaban en el final del cbank "
@@ -1740,6 +1746,175 @@ static int check_mv_params(struct gsp_compute *cp)
            gsp_matvec_param_base, gsp_matvec_param_off[0], gsp_matvec_param_off[1],
            gsp_matvec_param_off[2], gsp_matvec_param_off[3],
            gsp_matvec_param_off[4], G4F_CTA_THREADS);
+    return 0;
+}
+
+/* Los kernels cuantizados: mismos parámetros que matvec (w, x, y, rows, cols), pero
+ * cada uno con su `param_off`/`cbank_size` del cubin. Se comprueban los TRES porque
+ * `gsp_compute_set_mv_params` llevaba `&cp->matvec` incrustado y hoy los offsets
+ * coinciden por casualidad estructural: en cuanto un `.cu` cambie de firma, la
+ * versión con el kernel fijo escribiría los parámetros en los offsets de otro y no
+ * daría un solo error. */
+static int check_mvq_params(struct gsp_compute *cp)
+{
+    const unsigned char *cb = (const unsigned char *)cp->data.va + G4F_CBANK_OFF;
+    const uint64_t wv = 0x0102030405060708ull, xv = 0x1112131415161718ull;
+    const uint64_t yv = 0x2122232425262728ull;
+    const struct gsp_kernel *ks[2];
+    unsigned i;
+
+    ks[0] = &cp->matvec_q4k;
+    ks[1] = &cp->matvec_q80;
+
+    for (i = 0; i < 2u; i++) {
+        const struct gsp_kernel *k = ks[i];
+        const unsigned char *p = cb + k->param_base;
+
+        if (k->param_count != 5u) {
+            printf("FALLO: %s declara %u parámetros (esperaba 5)\n", k->name,
+                   k->param_count);
+            return -1;
+        }
+        if (k->param_base + k->param_size != k->cbank_size) {
+            printf("FALLO: params de %s en %u+%u no acaban en el final del cbank "
+                   "(%u)\n", k->name, k->param_base, k->param_size, k->cbank_size);
+            return -1;
+        }
+        gsp_compute_set_mv_params(cp, k, wv, xv, yv, 7u, 2048u);
+        if (*(const uint64_t *)(p + k->param_off[0]) != wv ||
+            *(const uint64_t *)(p + k->param_off[1]) != xv ||
+            *(const uint64_t *)(p + k->param_off[2]) != yv ||
+            *(const uint32_t *)(p + k->param_off[3]) != 7u ||
+            *(const uint32_t *)(p + k->param_off[4]) != 2048u) {
+            printf("FALLO: parámetros de %s mal colocados en el constant bank\n",
+                   k->name);
+            return -1;
+        }
+    }
+    printf("OK: params de matvec_q4k y matvec_q80 en su propio cbank (+%u/+%u), "
+           "escritos por kernel y no por el fijo\n",
+           cp->matvec_q4k.param_base, cp->matvec_q80.param_base);
+    return 0;
+}
+
+/* La aritmética que decide QUÉ TROZO DE VRAM lee un warp. Es la parte que en
+ * hardware no deja rastro: una fila mal medida lee los bytes del tensor de al lado y
+ * devuelve un vector perfectamente creíble. Se comprueba con los tamaños reales de
+ * los modelos que interesan (2048 y 5632 son hidden y ffn de TinyLlama) y que los
+ * `cols` que no son número entero de bloques se RECHACEN. */
+static int check_mvq_layout(void)
+{
+    static const unsigned cols_ok[] = { 256u, 1024u, 2048u, 5632u, 11008u };
+    unsigned i;
+
+    for (i = 0; i < sizeof(cols_ok) / sizeof(cols_ok[0]); i++) {
+        unsigned c = cols_ok[i];
+        unsigned long q4k = q_row_bytes(GSP_DTYPE_Q4_K, c);
+        unsigned long q80 = q_row_bytes(GSP_DTYPE_Q8_0, c);
+
+        if (q4k != (unsigned long)(c / Q4K_BLOCK_ELEMS) * Q4K_BLOCK_BYTES ||
+            q80 != (unsigned long)(c / Q80_BLOCK_ELEMS) * Q80_BLOCK_BYTES) {
+            printf("FALLO: row_bytes(%u) = %lu / %lu\n", c, q4k, q80);
+            return -1;
+        }
+    }
+    /* Rechazos: 255 y 0 no son superbloques enteros; 33 no es bloque Q8_0 entero;
+     * F32 y MXFP4 no tienen kernel. */
+    if (q_row_bytes(GSP_DTYPE_Q4_K, 255u) != 0ul ||
+        q_row_bytes(GSP_DTYPE_Q4_K, 0u) != 0ul ||
+        q_row_bytes(GSP_DTYPE_Q8_0, 33u) != 0ul ||
+        q_row_bytes(GSP_DTYPE_F32, 256u) != 0ul ||
+        q_row_bytes(GSP_DTYPE_MXFP4, 256u) != 0ul) {
+        printf("FALLO: row_bytes acepta cols que no cuadran o un dtype sin kernel\n");
+        return -1;
+    }
+    /* Y la talla que importa: una fila de ffn_up de TinyLlama son 22 superbloques,
+     * 3168 B — contra los 22528 B que ocuparía en f32. */
+    if (q_row_bytes(GSP_DTYPE_Q4_K, 5632u) != 3168ul) {
+        printf("FALLO: la fila Q4_K de 5632 columnas mide %lu B\n",
+               q_row_bytes(GSP_DTYPE_Q4_K, 5632u));
+        return -1;
+    }
+    printf("OK: row_bytes de Q4_K/Q8_0 para las tallas reales, y rechazo de cols "
+           "que no son bloque entero (fila de 5632 = 3168 B vs 22528 en f32)\n");
+    return 0;
+}
+
+/* EL AMARRE C↔RUST. La misma aritmética existe dos veces: aquí en C (lo que compila
+ * nvcc dentro del kernel SASS) y en Rust (`sosomodel::dequant`, lo que ejecuta la
+ * CPU y el dispositivo software). Los números de abajo están duplicados a propósito
+ * en `crates/sosomodel/tests/dequant_golden.rs`: tocar la decodificación de un lado
+ * pone en rojo a uno de los dos. Sin esto, una divergencia sólo se ve como «la GPU
+ * saca otros tokens» y se busca en el silicio, que es donde no está. */
+static int check_q4k_decode(void)
+{
+    static const unsigned char scales[12] = {
+        0x41, 0x82, 0xC3, 0x04, 0x45, 0x86, 0xC7, 0x08, 0x9A, 0xBC, 0xDE, 0xF0
+    };
+    static const unsigned char sc_esperado[8] = { 1, 2, 3, 4, 26, 44, 62, 0 };
+    static const unsigned char m_esperado[8] = { 5, 6, 7, 8, 25, 43, 61, 15 };
+    unsigned char blk[Q4K_BLOCK_BYTES];
+    float x[Q4K_BLOCK_ELEMS];
+    unsigned char q80[Q80_BLOCK_BYTES];
+    float dot, dot80;
+    int i, j;
+
+    /* Misma receta que el test de Rust. */
+    for (i = 0; i < Q4K_BLOCK_BYTES; i++) {
+        blk[i] = 0;
+    }
+    blk[0] = 0x00; blk[1] = 0x38;   /* d = 0.5 en f16 */
+    blk[2] = 0x00; blk[3] = 0x34;   /* dmin = 0.25 */
+    for (i = 0; i < 12; i++) {
+        blk[4 + i] = scales[i];
+    }
+    for (i = 0; i < 128; i++) {
+        blk[16 + i] = (unsigned char)((i * 7 + 3) % 256);
+    }
+    for (i = 0; i < Q4K_BLOCK_ELEMS; i++) {
+        x[i] = ((float)(i % 13) - 6.0f) * 0.125f;
+    }
+
+    for (j = 0; j < 8; j++) {
+        unsigned char sc, m;
+
+        q4k_scale_min(blk + 4, j, &sc, &m);
+        if (sc != sc_esperado[j] || m != m_esperado[j]) {
+            printf("FALLO: q4k_scale_min(%d) = (%u,%u), esperaba (%u,%u) — el lado "
+                   "Rust dice lo segundo (dequant_golden.rs)\n",
+                   j, sc, m, sc_esperado[j], m_esperado[j]);
+            return -1;
+        }
+    }
+
+    /* Valor dorado del producto punto, calculado por el Rust y fijado allí también. */
+    dot = q4k_dot_block(blk, x);
+    if (dot < -15.885f || dot > -15.865f) {
+        printf("FALLO: q4k_dot_block = %f, el Rust dice -15.875 (dequant_golden.rs)\n",
+               (double)dot);
+        return -1;
+    }
+
+    /* Y el Q8_0, que es el kernel de humo: escala f32 + 32 int8, sin nibbles. */
+    {
+        union { unsigned int u; float f; } s;
+        s.f = 0.25f;
+        q80[0] = (unsigned char)(s.u & 0xffu);
+        q80[1] = (unsigned char)((s.u >> 8) & 0xffu);
+        q80[2] = (unsigned char)((s.u >> 16) & 0xffu);
+        q80[3] = (unsigned char)((s.u >> 24) & 0xffu);
+    }
+    for (i = 0; i < 32; i++) {
+        q80[4 + i] = (unsigned char)(signed char)(i * 9 - 100);
+    }
+    dot80 = q80_dot_block(q80, x);
+    if (dot80 < 172.58f || dot80 > 172.61f) {
+        printf("FALLO: q80_dot_block = %f, el Rust dice 172.59375\n", (double)dot80);
+        return -1;
+    }
+
+    printf("OK: la decodificación Q4_K/Q8_0 en C da los mismos números que el Rust "
+           "(escalas de 6 bits, nibbles cruzados y los dos productos punto)\n");
     return 0;
 }
 
@@ -3370,7 +3545,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             phys[i] = origen.phys + (uint64_t)i * 4096ull;
         }
         antes = chan.pb_pos;
-        if (gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 3u * 4096u) != 0) {
+        if (gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 0u, 3u * 4096u) != 0) {
             printf("FALLO: gsp_buf_upload_dma\n");
             return -1;
         }
@@ -3407,9 +3582,9 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
 
         /* Y sus rechazos, todos antes de tocar el CE: si la lista de páginas no
          * cuadra con el tamaño, el mapeo y la copia dirían cosas distintas. */
-        if (gsp_buf_upload_dma(&buf, va, 0, phys, 2u, 3u * 4096u) == 0 ||
-            gsp_buf_upload_dma(&buf, va, 0, phys, 3u, G6_SRC_MAX + 4096ull) == 0 ||
-            gsp_buf_upload_dma(&buf, va, 100u, phys, 3u, 3u * 4096u) == 0) {
+        if (gsp_buf_upload_dma(&buf, va, 0, phys, 2u, 0u, 3u * 4096u) == 0 ||
+            gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 0u, G6_SRC_MAX + 4096ull) == 0 ||
+            gsp_buf_upload_dma(&buf, va, 100u, phys, 3u, 0u, 3u * 4096u) == 0) {
             printf("FALLO: el DMA acepta una lista que no cuadra, pasarse de "
                    "ventana o un offset sin alinear\n");
             return -1;
@@ -3420,13 +3595,51 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             for (i = 0; i < 3u; i++) {
                 torcida[i] = phys[i] + 8ull;
             }
-            if (gsp_buf_upload_dma(&buf, va, 0, torcida, 3u, 3u * 4096u) == 0) {
+            if (gsp_buf_upload_dma(&buf, va, 0, torcida, 3u, 0u, 3u * 4096u) == 0) {
                 printf("FALLO: el DMA acepta físicas sin alinear a página\n");
                 return -1;
             }
         }
         printf("OK: el DMA rechaza lista descuadrada, ventana pasada, offset y "
                "físicas sin alinear\n");
+
+        /* EL CASO DE VERDAD: el payload de un shard `.som` empieza en el byte 64
+         * del fichero, así que el puntero de un tensor mapeado llega aquí en +64.
+         * Mientras esto exigió alineación de página, el camino sin copias no se
+         * ejecutó ni una vez con pesos de un modelo y nadie lo notó (el rebote da
+         * el mismo resultado, sólo cuesta una copia entera por la CPU). Aquí se
+         * fija que el CE lee de G6_SRC_VA+64 y que las páginas cubren 64+size. */
+        antes = chan.pb_pos;
+        if (gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 64u, 2u * 4096u) != 0) {
+            printf("FALLO: el DMA rechaza un origen en +64 (el caso del shard)\n");
+            return -1;
+        }
+        pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + antes);
+        if (pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_OFFSET_IN_UPPER, &hi) != 0 ||
+            pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_OFFSET_IN_LOWER, &lo) != 0 ||
+            pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_LINE_COUNT, &lines) != 0) {
+            printf("FALLO: al pushbuffer del DMA desalineado le faltan métodos\n");
+            return -1;
+        }
+        src = ((uint64_t)hi << 32) | lo;
+        if (src != G6_SRC_VA + 64ull || lines != 2u) {
+            printf("FALLO: DMA desalineado src=0x%llx (esperaba 0x%llx) lines=%u\n",
+                   (unsigned long long)src, (unsigned long long)(G6_SRC_VA + 64ull),
+                   lines);
+            return -1;
+        }
+        printf("OK: subida por DMA desde un origen en +64 — el CE lee de "
+               "G6_SRC_VA+64 (el caso del payload de un shard)\n");
+
+        if (gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 4096u, 2u * 4096u) == 0 ||
+            gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 64u, 3u * 4096u) == 0 ||
+            gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 64u, G6_SRC_MAX) == 0) {
+            printf("FALLO: el DMA acepta src_off de una página entera, una lista "
+                   "que no cubre src_off+size, o pasarse de ventana con src_off\n");
+            return -1;
+        }
+        printf("OK: el DMA rechaza src_off >= 4096, lista corta para src_off+size "
+               "y ventana pasada por el src_off\n");
         gsp_buf_fini(&buf);
     }
 
@@ -3539,6 +3752,12 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         /* Y el mismo QMD para matvec: otro programa, otro regcount, otra malla. */
         gsp_compute_fill_qmd(&cp, &cp.matvec, &qmd, 17);
         if (check_qmd_fields(&cp, &cp.matvec, 17, &qmd) != 0)
+            return -1;
+        if (check_mvq_params(&cp) != 0)
+            return -1;
+        if (check_mvq_layout() != 0)
+            return -1;
+        if (check_q4k_decode() != 0)
             return -1;
         if (check_mv_params(&cp) != 0)
             return -1;

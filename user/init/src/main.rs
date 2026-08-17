@@ -697,10 +697,15 @@ fn suite() -> u8 {
 
                 // Y una subida GRANDE a VRAM, que es lo que rompía en la placa:
                 // los `ffn_up`/`ffn_down` de TinyLlama son 44 MiB en f32 y la
-                // syscall los rechazaba con EFAULT por un techo de 16 MiB. Aquí es
-                // además la única prueba en silicio del camino sin copias (el CE
-                // leyendo de las páginas del proceso): el origen viene de `mmap`,
-                // así que está alineado a página y entra por ahí.
+                // syscall los rechazaba con EFAULT por un techo de 16 MiB.
+                //
+                // OJO: esta sonda **no** vale como prueba del camino sin copias, y
+                // su comentario decía que sí. El origen es un `mmap` anónimo, cuya
+                // base está alineada a página por construcción, así que por diseño
+                // no podía cazar el fallo que sí había: el payload de un shard
+                // empieza en el byte 64 y el kernel exigía alineación de página, de
+                // modo que los pesos de verdad se subían por rebote y nadie lo
+                // sabía. Esa prueba es la de abajo, sobre un `.tensor` real.
                 if info.vram_bufs == 1 {
                     const GRANDE: u64 = 20 * 1024 * 1024;
                     let src = sys::mmap(0, GRANDE, u64::MAX, 0);
@@ -717,6 +722,41 @@ fn suite() -> u8 {
                              que la syscall rechazaba",
                             GRANDE / (1024 * 1024)
                         );
+                        // LA SONDA QUE FALTABA: un origen que NO empieza en
+                        // frontera de página. El payload de un shard `.som` está
+                        // en el byte 64 del fichero, así que el puntero de todo
+                        // tensor mapeado llega a `gpu_map` en +64; mientras el
+                        // kernel exigió `%4096 == 0`, el camino sin copias no se
+                        // ejecutó ni una vez con pesos de verdad y ninguna prueba
+                        // podía verlo, porque todas subían desde un `mmap` cuya
+                        // base está alineada por construcción. Se piden 64 bytes
+                        // menos una página para no salirse del mapeo.
+                        const DESALINEADO: u64 = GRANDE - 4096;
+                        let h2 = sys::gpu_alloc_vram(DESALINEADO);
+                        if h2 >= 0 {
+                            let rc = sys::gpu_map(h2 as u64, src as u64 + 64, DESALINEADO);
+                            check!(
+                                rc == 0,
+                                "SONDA GPU: subida de {} MiB desde un origen en +64 \
+                                 (rc={rc}) — el caso del payload de un shard",
+                                DESALINEADO / (1024 * 1024)
+                            );
+                            let _ = sys::gpu_free(h2 as u64);
+                        }
+                        // Y que hayan ido por DMA, no por rebote. Sin esto lo
+                        // anterior pasa igual: el rebote da el mismo resultado, sólo
+                        // cuesta una copia entera del tensor por la CPU.
+                        let mut tras = abi::GpuInfo::default();
+                        if sys::gpu_info(&mut tras) == 0 {
+                            check!(
+                                tras.uploads_dma > 0 && tras.uploads_bounce == 0,
+                                "SONDA GPU: las subidas fueron por DMA del CE \
+                                 (dma={} rebote={} {} MiB copiados)",
+                                tras.uploads_dma,
+                                tras.uploads_bounce,
+                                tras.bounce_bytes >> 20
+                            );
+                        }
                         let _ = sys::gpu_free(h as u64);
                     } else {
                         println!(
@@ -839,6 +879,100 @@ fn suite() -> u8 {
                 y[0], y[1], y[2], esperado[0], esperado[1], esperado[2]
             );
 
+            // MATVQ: la matriz va CUANTIZADA en el búfer y el dispositivo la
+            // multiplica sin expandirla. Se prueba con Q8_0 —escala f32 + 32 int8,
+            // sin escalas de 6 bits ni nibbles cruzados— porque `init` no enlaza
+            // `soso-llm-core` y los bytes se construyen a mano aquí: si esto falla,
+            // el problema es del comando y no de la decodificación.
+            {
+                const QROWS: usize = 3;
+                const QCOLS: usize = 32; // un bloque exacto
+                const QBLK: usize = 36; // 4 + 32
+                let mut wq = [0u8; QROWS * QBLK];
+                let mut esp = [0.0f32; QROWS];
+                // `x` del MATVF son 4 columnas; aquí hacen falta 32 (un bloque).
+                let mut xq = [0.0f32; QCOLS];
+                for (c, v) in xq.iter_mut().enumerate() {
+                    *v = (c as f32 - 16.0) * 0.5;
+                }
+                let escala = 0.25f32;
+                for r in 0..QROWS {
+                    wq[r * QBLK..r * QBLK + 4].copy_from_slice(&escala.to_le_bytes());
+                    let mut sum = 0.0f32;
+                    for c in 0..QCOLS {
+                        let q = ((r * 7 + c) as i32 % 61 - 30) as i8;
+                        wq[r * QBLK + 4 + c] = q as u8;
+                        sum += q as f32 * escala * xq[c];
+                    }
+                    esp[r] = sum;
+                }
+                let wq_h = sys::gpu_alloc(wq.len() as u64);
+                let xq_h = sys::gpu_alloc((QCOLS * 4) as u64);
+                let yq_h = sys::gpu_alloc((QROWS * 4) as u64);
+                check!(
+                    wq_h >= 0 && xq_h >= 0 && yq_h >= 0,
+                    "gpu_alloc para MATVQ (w={wq_h} x={xq_h} y={yq_h})"
+                );
+                let (wq_h, xq_h, yq_h) = (wq_h as u64, xq_h as u64, yq_h as u64);
+                check!(
+                    sys::gpu_map(wq_h, wq.as_ptr() as u64, wq.len() as u64) == 0
+                        && sys::gpu_map(xq_h, xq.as_ptr() as u64, (QCOLS * 4) as u64) == 0,
+                    "gpu_map de la matriz Q8_0 en crudo y del vector"
+                );
+                let mut q = [0u8; 38];
+                q[0..5].copy_from_slice(b"MATVQ");
+                q[5..13].copy_from_slice(&wq_h.to_le_bytes());
+                q[13..17].copy_from_slice(&(QROWS as u32).to_le_bytes());
+                q[17..21].copy_from_slice(&(QCOLS as u32).to_le_bytes());
+                q[21..29].copy_from_slice(&xq_h.to_le_bytes());
+                q[29..37].copy_from_slice(&yq_h.to_le_bytes());
+                q[37] = 2; // DTYPE_Q8_0
+                let bits = sys::gpu_submit(&q);
+                check!(bits >= 0, "gpu_submit MATVQ (rc={bits})");
+                let bits = bits as u64;
+                check!(
+                    bits & abi::GPU_SUBMIT_COMPUTED != 0,
+                    "MATVQ dice COMPUTED"
+                );
+                let mut yq = [0.0f32; QROWS];
+                check!(
+                    sys::gpu_read(yq_h, yq.as_mut_ptr() as u64, (QROWS * 4) as u64) == 0,
+                    "gpu_read del resultado de MATVQ"
+                );
+                let mut ok = true;
+                for r in 0..QROWS {
+                    if (yq[r] - esp[r]).abs() > 0.01 {
+                        ok = false;
+                    }
+                }
+                check!(
+                    ok,
+                    "MATVQ multiplica Q8_0 sin expandir ({} {} {} vs {} {} {})",
+                    yq[0], yq[1], yq[2], esp[0], esp[1], esp[2]
+                );
+
+                // Los dos rechazos que impiden un resultado creíble y falso: un
+                // `cols` que no es bloque entero se manda a CPU (sin COMPUTED), y un
+                // búfer más pequeño que `rows*row_bytes` es EINVAL. Sin el segundo,
+                // el kernel leería la fila del tensor de al lado.
+                q[17..21].copy_from_slice(&33u32.to_le_bytes());
+                let bits = sys::gpu_submit(&q);
+                check!(
+                    bits >= 0 && (bits as u64) & abi::GPU_SUBMIT_COMPUTED == 0,
+                    "MATVQ con cols=33 (no es bloque Q8_0 entero) se va a CPU (rc={bits})"
+                );
+                q[17..21].copy_from_slice(&(QCOLS as u32).to_le_bytes());
+                q[13..17].copy_from_slice(&(QROWS as u32 + 1).to_le_bytes());
+                let bits = sys::gpu_submit(&q);
+                check!(
+                    bits == -abi::EINVAL,
+                    "MATVQ con más filas de las que caben en el búfer da EINVAL (rc={bits})"
+                );
+                let _ = sys::gpu_free(wq_h);
+                let _ = sys::gpu_free(xq_h);
+                let _ = sys::gpu_free(yq_h);
+            }
+
             // La ASIMETRÍA de permisos entre las dos syscalls, que es lo que
             // permite subir los pesos sin copiarlos: `gpu_map` LEE del proceso, así
             // que un mapeo de sólo lectura (como el del modelo) vale; `gpu_read`
@@ -959,6 +1093,49 @@ fn suite() -> u8 {
                 "gpu_info vuelve a decir que no hay dispositivo"
             );
         }
+    }
+
+    // TCP loopback 127.0.0.1: empareja listener userspace sin NIC loopback.
+    {
+        const PORT: u16 = 17420;
+        let listener = sys::tcp_listen(PORT);
+        check!(listener >= 0, "tcp_listen loopback (rc={listener})");
+        let listener = listener as u64;
+        let addr = sys::sock_addr(127, 0, 0, 1, PORT);
+        let client = sys::tcp_connect(&addr, 5_000);
+        check!(client >= 0, "tcp_connect 127.0.0.1 (rc={client})");
+        let client = client as u64;
+        let server = sys::tcp_accept(listener, 5_000);
+        check!(server >= 0, "tcp_accept loopback (rc={server})");
+        let server = server as u64;
+        let msg = b"hola loopback";
+        check!(sys::write_all(client, msg).is_ok(), "write cliente loopback");
+        let mut buf = [0u8; 32];
+        let n = sys::read(server, &mut buf);
+        check!(n == msg.len() as i64, "read servidor loopback (n={n})");
+        check!(&buf[..n as usize] == msg, "datos loopback coinciden");
+        let _ = sys::close(client);
+        let _ = sys::close(server);
+        let client2 = sys::tcp_connect(&addr, 5_000);
+        check!(client2 >= 0, "segundo tcp_connect loopback (rc={client2})");
+        let server2 = sys::tcp_accept(listener, 5_000);
+        check!(server2 >= 0, "segundo tcp_accept loopback (rc={server2})");
+        let _ = sys::close(client2 as u64);
+        let _ = sys::close(server2 as u64);
+        let _ = sys::close(listener);
+        let sin_listener = sys::tcp_connect(&addr, 500);
+        check!(
+            sin_listener == -(abi::ECONNREFUSED as i64),
+            "connect sin listener da ECONNREFUSED (rc={sin_listener})"
+        );
+        let l1 = sys::tcp_listen(PORT);
+        check!(l1 >= 0, "re-listen tras cerrar (rc={l1})");
+        let l2 = sys::tcp_listen(PORT);
+        check!(
+            l2 == -(abi::EADDRINUSE as i64),
+            "listen duplicado da EADDRINUSE (rc={l2})"
+        );
+        let _ = sys::close(l1 as u64);
     }
 
     println!("init: TODO OK — syscalls desde ring 3 (incl. pipe, spawn_io, hilos y GPU)");

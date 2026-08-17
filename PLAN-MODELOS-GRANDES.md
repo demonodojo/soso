@@ -765,10 +765,96 @@ quedaba debajo: `bench-model` es 1024/3072 (12 MiB) y `attn_q` de TinyLlama son
    `mm::reclaim` mientras el DMA las lee: son mmap RO de pesos, o sea justo las
    evictables, y otro core podía devolver sus frames en mitad de la copia.
 
-Pendiente de ahí: **descuantizar en la GPU**. Con Q4_K lo que se sube no está en
-disco —userspace construye el plano f32 en RAM—, así que «directo desde sosomfs»
-no es completo hasta que haya un kernel SASS que coma bloques Q4_K. Es también el
-ahorro grande: 4× menos tráfico y 4× menos VRAM.
+**G7 — los pesos van del shard a la VRAM sin que la CPU toque un byte
+(2026-08-17, segunda tanda).** Al ir a medir de dónde salían los ciclos de la
+subida aparecieron cuatro cosas encadenadas, y **ninguna daba error**: el sistema
+degradaba en silencio y lo llamaba «offload híbrido».
+
+1. **El camino sin copias del CE llevaba el mismo día sin dispararse nunca con
+   pesos de un modelo.** `subir_por_dma` exigía `user_ptr % 4096 == 0` y el
+   payload de un shard `.som` empieza en el **byte 64** (`SHARD_PAYLOAD_OFF`),
+   así que todo tensor mapeado llegaba en `+64` y se iba al rebote. Desde fuera
+   no se veía: el rebote da el mismo resultado, sólo cuesta una copia entera del
+   tensor por la CPU. Arreglado en el kernel y no en el formato —así funciona con
+   los modelos ya convertidos que hay en la placa, y cubre de paso los offsets
+   arbitrarios de un shard `--pack-trunk`—: `gsp_buf_upload_dma` acepta un
+   `src_off` de 0..4095 y el CE lee de `G6_SRC_VA + src_off`. El encoding lo
+   admite (la copia multilínea lleva `PITCH = LINE_LENGTH = 4096` en los dos
+   lados, que es una copia contigua y no exige alineación de las direcciones);
+   lo que sí tiene que estar alineado es el destino.
+2. **Y cuando se disparaba podía ser más lento que el rebote.** El origen se
+   mapeaba con una llamada a `gsp_vmm_map` **por página**, y cada una acaba en
+   `gsp_vmm_invalidate`: tres escrituras MMIO y un sondeo que, si no acierta a la
+   primera, espera con `lx_mdelay(1)` — un milisegundo de granularidad. Un tensor
+   de 44 MiB son 11 264 invalidaciones de MMU. Ahora hay `gsp_vmm_map_pages`, que
+   escribe todos los PTE y barre la TLB **una** vez (legítimo: la GPU no lee esas
+   VAs hasta el `LAUNCH_DMA`, que se encola después).
+3. **Lo que se subía era 8× lo que hay en disco.** Los pesos son Q4_K y el
+   despacho los descuantizaba a un plano f32 del heap: 44 MiB por un `ffn_up` de
+   TinyLlama que en disco son 5,9. Y ese plano costaba **más que descuantizar**:
+   pasa por `sys::mmap` (`MMAP_ALLOC_MIN = 1 MiB`) y el mmap anónimo **no admite
+   huge pages** (`handle_mmap_fault` exige `region.inode != 0`), así que son
+   ~11 000 faltas de 4 KiB, 44 MiB de puesta a cero que `SbrkAllocator` no evita
+   —no implementa `alloc_zeroed`— y otro `unmap_range` de 11 000 páginas al
+   soltarlo, **por tensor**. Ahora Q4_K y Q8_0 se suben **en crudo** y la GPU los
+   multiplica sin expandirlos: comando `MATVQ` + kernels SASS `matvec_q4k` y
+   `matvec_q80` (un warp por fila, los lanes reparten **sub-bloques** de 32 y no
+   superbloques — una fila de FFN son 22 superbloques y sólo trabajarían 22 de los
+   32 lanes). 8× menos tráfico PCIe, 8× menos VRAM y 8× menos ancho de banda de
+   VRAM por token, que en decode es el recurso que manda. MXFP4 y los `cols` que
+   no son bloque entero siguen por el camino viejo: es el fallback, no código
+   muerto.
+4. **El techo real de residencia eran ~108 MiB, no los 11,9 GiB que se
+   anunciaban.** `gsp_buf_vram_free` devolvía el pool físico, pero lo que muerde
+   antes es el presupuesto de tablas de página: `GSP_VMM_MAX_PT = 96` con PTEs de
+   4 KiB (hoja = 2 MiB) menos las ~42 que ya gastan el bring-up y la promoción del
+   grctx. Con planos f32 eso son **dos tensores**: TinyLlama offloadeaba la primera
+   capa y las otras 21 se iban a CPU contadas como `sin sitio`, indistinguible de
+   un híbrido legítimo. Ahora devuelve el mínimo de pool, ventana de VA y tablas
+   libres, y el arranque lo dice.
+
+Tres guardias estructurales, porque los tres fallos posibles aquí dan **texto
+plausible y ningún error**: `Resident::fmt` guarda qué hay en el búfer y el
+despacho va por eso y nunca por `view.dtype` (subir crudo y lanzar `MATVF` lee
+nibbles como f32); el driver comprueba `rows*row_bytes <= buffer_len` antes de
+lanzar (en VRAM la GPU no comprueba nada, y un dtype equivocado leería la fila del
+tensor de al lado); y la decodificación existe **una vez por lenguaje** con las
+dos atadas por valores dorados —`sosomodel::dequant` en Rust,
+`lxdde/ports/nouveau/q4k_decode.h` en C, incluido tanto por los `.cu` como por el
+hostcheck—. Los decodificadores se movieron a `sosomodel` justamente para eso: el
+kernel no enlaza `soso-llm-core` pero su dispositivo software tiene que poder
+ejecutar `MATVQ`, que es lo único que da cobertura numérica sin silicio.
+
+Y un arreglo que hacía falta antes de escribir el primer `.cu`:
+`gsp_compute_stage_sass` rechazaba blobs de más de 4 KiB, y con CUDA 12.8 hasta
+`matvec` sale a 4608 bytes (`matvec_q4k` son 6400). Con el tope, `gsp_compute_init`
+devolvía -1 y **se desactivaba el camino de GPU completo**, no sólo el kernel
+nuevo. Ahora trocea contra el rebote. Y `gsp_compute_set_mv_params` llevaba
+`&cp->matvec` incrustado: hoy los offsets de los cuatro kernels coinciden por
+casualidad estructural, y en cuanto un `.cu` cambiara de firma habría escrito los
+parámetros en los offsets de otro.
+
+Cobertura: 90 casos en `gsp-hostcheck` (tres nuevos: los parámetros de los kernels
+cuantizados escritos **por kernel**, la aritmética de `row_bytes` con las tallas
+reales y sus rechazos, y el amarre C↔Rust de la decodificación), el `src_off` con
+su caso positivo en `+64` y sus rechazos, dos tests nuevos en `soso-llm-core`
+(matvec fusionado vs por filas, y `row_bytes`), tres de valores dorados en
+`sosomodel`, sonda `MATVQ` en `init test` con sus dos negativos, sonda de subida
+desde un origen **desalineado** en la placa —la que había usaba `mmap` anónimo,
+alineado por construcción, y por diseño no podía cazar el `+64`—, y un modelo
+`tiny-q4k` en la imagen de QEMU que compara **los mismos tokens** con y sin
+dispositivo. Antes no había ni un modelo cuantizado en la imagen: todo este camino
+sólo se ejercitaba con un modelo real de gigabytes.
+
+Sin probar en silicio: los dos kernels nuevos y el `src_off`. Hace falta un ciclo
+VFIO en la GB205; en Ampere sigue sin haber pool.
+
+Pendiente de ahí: **páginas de 2 MiB en el vaspace del GSP**. `pt_write` deja a
+cero la mitad baja del PDE dual de PD0 a propósito, y ahí va el PTE grande: una
+tabla cubriría 512 MiB en vez de 2 MiB, y TinyLlama Q4_K (~636 MiB, 154 tensores)
+cabría entero residente — los pesos se subirían una vez por inferencia y no por
+capa. Invariante crítico: una entrada de PD0 es PTE grande **o** PDE a la SPT,
+nunca las dos.
 
 Y el otro pendiente, que el techo tapaba: en **Ampere** la cadena
 RM → VMM → canal/CE → pool sólo existe en la rama Blackwell/FMC de

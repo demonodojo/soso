@@ -11,6 +11,14 @@
  * antigua sin que nada se quejara. */
 #define G4F_SASS_VA   (GSP_VA_BASE + 0x1000ull)      /* VRAM: blob SASS de saxpy */
 #define G5_SASS_VA    (GSP_VA_BASE + 0x2000ull)      /* VRAM: blob SASS de matvec */
+/* Los kernels cuantizados van a 64 KiB de separación y no a 4 KiB como los dos de
+ * arriba. No es simetría rota por gusto: `matvec_q4k` son 6400 bytes (decodificar
+ * escalas de 6 bits y nibbles cuesta código) y con el hueco de una página pisaría al
+ * vecino. Todo esto vive dentro de los 2 MiB de VRAM que `G4D_VA_BASE` mapea, y
+ * `gsp_compute_init` comprueba que ningún blob se sale de su hueco. */
+#define G7_SASS_VA    (GSP_VA_BASE + 0x10000ull)     /* VRAM: blob SASS de matvec_q4k */
+#define G8_SASS_VA    (GSP_VA_BASE + 0x20000ull)     /* VRAM: blob SASS de matvec_q80 */
+#define G_SASS_SLOT   0x10000ull                     /* hueco de los dos de arriba */
 /* QMD v05 (384 B) dentro de `cp->data`; SEND_PCAS_A exige alineación >>8. */
 #define G4F_QMD_OFF   0x1000u
 
@@ -24,6 +32,11 @@
 #define G4F_Y_OFF         0x800u
 #define G4F_SEM_OFF       0xc00u
 #define G4F_MAX_N         256u      /* 1 KiB por vector */
+
+/* Trozo con el que se copia un blob SASS a VRAM. Es la página de sysmem de G4d,
+ * que es el rebote que le pasa el bring-up, y por debajo de 4 KiB la copia del CE va
+ * en una línea: el camino probado en silicio. */
+#define G4F_STAGE_CHUNK   4096u
 
 #define G4F_CTA_THREADS   256u
 #define G6_ROWS_PER_CTA   (G4F_CTA_THREADS / 32u)
@@ -103,6 +116,9 @@ struct gsp_compute {
     uint32_t cls;      /* la que aceptó RM; la elige el catálogo del chip */
     struct gsp_kernel saxpy;
     struct gsp_kernel matvec;
+    /* Matvec con la matriz cuantizada residente, sin expandir a f32. */
+    struct gsp_kernel matvec_q4k;
+    struct gsp_kernel matvec_q80;
     struct gsp_dma_buf data;   /* cbank0 + x + y + semáforo, en sysmem */
     uint64_t data_va;
     struct gsp_dma_buf mv;     /* G5: tanda de filas + x + y, en sysmem */
@@ -137,15 +153,43 @@ extern const unsigned gsp_matvec_cbank_size;
 extern const unsigned gsp_matvec_param_off[5];
 extern const unsigned gsp_matvec_param_count;
 
+/* Ídem para los dos kernels cuantizados (w, x, y, rows, cols — misma forma que
+ * matvec, así que comparten el escritor de parámetros). */
+extern const unsigned char gsp_matvec_q4k_sass[];
+extern const unsigned gsp_matvec_q4k_sass_len;
+extern const unsigned gsp_matvec_q4k_regcount;
+extern const unsigned gsp_matvec_q4k_param_base;
+extern const unsigned gsp_matvec_q4k_param_size;
+extern const unsigned gsp_matvec_q4k_cbank_size;
+extern const unsigned gsp_matvec_q4k_param_off[5];
+extern const unsigned gsp_matvec_q4k_param_count;
+
+extern const unsigned char gsp_matvec_q80_sass[];
+extern const unsigned gsp_matvec_q80_sass_len;
+extern const unsigned gsp_matvec_q80_regcount;
+extern const unsigned gsp_matvec_q80_param_base;
+extern const unsigned gsp_matvec_q80_param_size;
+extern const unsigned gsp_matvec_q80_cbank_size;
+extern const unsigned gsp_matvec_q80_param_off[5];
+extern const unsigned gsp_matvec_q80_param_count;
+
 int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
                      struct gsp_compute *cp);
 
 /* Copia el SASS de `k` a VRAM vía CE y espera al semáforo. Idempotente: la
  * primera vez copia y marca `k->staged`; las siguientes no hacen nada. Por eso
  * `k` no es const. */
+/* `scratch_bytes` es el tamaño del rebote, y la copia se trocea contra él.
+ *
+ * AVERÍA EVITADA (2026-08-17): esto rechazaba `sass_len > 4096` porque el rebote
+ * que le pasa el bring-up es la página de sysmem de G4d. Recompilar los kernels con
+ * CUDA 12.8 deja `matvec` en 4608 bytes y `matvec_q4k` en 6400: con el tope, el
+ * `gsp_compute_init` entero devolvía -1 y **se desactivaba el camino de GPU
+ * completo**, no sólo el kernel nuevo. */
 int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
                            struct gsp_kernel *k,
-                           uint64_t scratch_va, void *scratch_cpu);
+                           uint64_t scratch_va, void *scratch_cpu,
+                           unsigned scratch_bytes);
 
 /* Codifica SET_OBJECT + WFI + SEND_PCAS en el pushbuffer; el QMD va a sysmem. */
 int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
@@ -159,10 +203,15 @@ void gsp_compute_fill_qmd(struct gsp_compute *cp, const struct gsp_kernel *k,
 void gsp_compute_set_params(struct gsp_compute *cp, float a, uint64_t x_va,
                             uint64_t y_va, unsigned n);
 
-/* Ídem para matvec. `rows` es la altura de la TANDA, no de la matriz. */
-void gsp_compute_set_mv_params(struct gsp_compute *cp, uint64_t w_va,
-                               uint64_t x_va, uint64_t y_va, unsigned rows,
-                               unsigned cols);
+/* Ídem para matvec. `rows` es la altura de la TANDA, no de la matriz.
+ *
+ * `k` es explícito y no `&cp->matvec` incrustado: los kernels cuantizados tienen su
+ * propio `param_off`/`cbank_size` del cubin, y hoy coinciden con los de matvec por
+ * casualidad estructural. En cuanto uno de los `.cu` cambie de firma, la versión con
+ * el kernel fijo escribiría los parámetros en los offsets de otro. */
+void gsp_compute_set_mv_params(struct gsp_compute *cp, const struct gsp_kernel *k,
+                               uint64_t w_va, uint64_t x_va, uint64_t y_va,
+                               unsigned rows, unsigned cols);
 
 /* Filas que caben en una tanda con `cols` columnas; 0 si `cols` no cabe. Es una
  * función pura a propósito: es la aritmética que decide qué se copia dónde, y sin
@@ -198,6 +247,19 @@ int gsp_compute_matvec_resident(struct gsp_compute *cp, struct gsp_ce *ce,
                                 uint64_t w_va, unsigned rows, unsigned cols,
                                 const float *x, float *y,
                                 uint64_t scratch_va, void *scratch_cpu);
+
+/* G7: igual, pero W está en VRAM **cuantizada** (`dtype` = `DTYPE_Q4_K`/`Q8_0` de
+ * sosomodel) y el kernel decodifica los bloques al multiplicar. Es lo que permite
+ * subir los bytes del shard tal cual: 8× menos VRAM y 8× menos ancho de banda por
+ * token que el plano f32.
+ *
+ * Devuelve -1 si el dtype no tiene kernel, si `cols` no es número entero de bloques
+ * o si el blob no está; el llamante lo calcula en CPU. */
+int gsp_compute_matvec_q_resident(struct gsp_compute *cp, struct gsp_ce *ce,
+                                  uint64_t w_va, unsigned dtype, unsigned rows,
+                                  unsigned cols, const float *x, float *y,
+                                  uint64_t scratch_va, void *scratch_cpu,
+                                  unsigned scratch_bytes);
 
 void gsp_compute_fini(struct gsp_compute *cp);
 

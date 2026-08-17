@@ -572,6 +572,32 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
         if !status.success() {
             exit(status.code().unwrap_or(1));
         }
+        // tiny-q4k: el ÚNICO modelo cuantizado de la imagen, y sin él todo el
+        // camino de pesos Q4_K en el dispositivo —subida en crudo y comando
+        // `MATVQ`— quedaría sin ejercitar en la suite. Q4_K exige hidden y ffn
+        // múltiplos de 256 (una fila = número entero de superbloques).
+        let q4k_src = root.join("target/tiny-q4k-model");
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args(["run", "-q", "--release", "-p", "mkmodel-soso", "--"])
+            .args([
+                "--quant",
+                "q4_k",
+                "--name",
+                "tiny-q4k",
+                "--layers",
+                "2",
+                "--hidden",
+                "256",
+                "--ffn",
+                "512",
+                q4k_src.to_str().unwrap(),
+            ])
+            .status()
+            .expect("mkmodel-soso tiny-q4k");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
         // tiny-latent-moe: MoE con FFN latente en la imagen por defecto.
         let latent_moe_src = root.join("target/tiny-latent-moe-model");
         let status = Command::new("cargo")
@@ -620,6 +646,7 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
                 .to_string_lossy()
                 .into_owned(),
         );
+        mkfs_args.push(root.join("target/tiny-q4k-model").to_string_lossy().into_owned());
     }
     mkfs_args.push(path.to_string_lossy().into_owned());
     mkfs_args.push("--size".into());

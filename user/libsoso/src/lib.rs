@@ -109,6 +109,28 @@ pub fn str_hasta_nul(bytes: &[u8]) -> &str {
     core::str::from_utf8(&bytes[..n]).unwrap_or("?")
 }
 
+/// Contador de ciclos de la CPU, para medir tramos cortos desde userspace.
+///
+/// Existe porque el único reloj que había —`SYS_UPTIME_MS`— es el PIT, y el PIT
+/// **subcuenta durante el polling de disco**: medir con él un camino que mezcla
+/// E/S y CPU mueve el resultado por razones que no son el cambio que se está
+/// midiendo. Y funciona sin tocar el kernel: nadie pone `CR4.TSD`, así que `rdtsc`
+/// no está restringido a ring 0.
+///
+/// No sirve para comparar entre cores (el TSC es invariante en el hardware
+/// objetivo, pero nada aquí lo garantiza) ni para convertir a segundos sin conocer
+/// la frecuencia: es para restar dos lecturas del mismo hilo.
+#[inline]
+pub fn ciclos() -> u64 {
+    // SAFETY: rdtsc no toca memoria y está disponible en ring 3 (CR4.TSD=0).
+    unsafe {
+        let hi: u32;
+        let lo: u32;
+        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
+        ((hi as u64) << 32) | lo as u64
+    }
+}
+
 pub fn errno_str(e: i64) -> &'static str {
     match -e {
         x if x == abi::ENOENT => "no existe",

@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+pub mod dequant;
 pub mod layout;
 pub mod manifest;
 pub mod index;

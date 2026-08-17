@@ -2,9 +2,9 @@
 
 #![cfg(feature = "std")]
 
-use block_dev::{BlockDevice, MemBlockDevice, BLOCK_SIZE};
+use block_dev::MemBlockDevice;
 use sosofs::builder::build_image;
-use sosofs::{CachedBlockDevice, FsError, Sosofs};
+use sosofs::{CachedBlockDevice, Sosofs};
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -36,7 +36,7 @@ fn block_cache_reutiliza_lecturas() {
     let mut inner = MemBlockDevice::new(256);
     build_image(&fixture("cache"), &mut inner).unwrap();
     let reads_before = inner.read_count();
-    let mut cached = CachedBlockDevice::with_capacity(inner, 64);
+    let cached = CachedBlockDevice::with_capacity(inner, 64);
     let mut fs = Sosofs::mount(cached).unwrap();
     let ino = fs.resolve("/big.bin").unwrap();
     let mut a = [0u8; 1024];

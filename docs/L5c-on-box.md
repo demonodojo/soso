@@ -127,6 +127,7 @@ sudo ./scripts/l6-wifi-vfio-test.sh
 | 64 GB+ | `llama2-70b` |
 
 Simular sin pendrive: `SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live`.
+Sin descargas HF: `SOSO_LIVE_OFFLINE=1` — elige el mayor modelo ya en `target/*-model/` que quepa (al flashear mide el stick).
 Override: `SOSO_MODELS_DIR=…`. En placa, `ask` o `soso-llm run <modelo> --prompt "hola" --max 32 --chat`.
 
 **El modelo empaquetado tiene que ser v5 o `ask` contestará como si continuara un
@@ -278,6 +279,7 @@ Ver `target/usb-package/FLASH.txt`.
 | `SOSO_MODELS_DIR` | Árbol `.som` al empaquetar (override del catálogo live) |
 | `SOSO_MODELS_SIZE` | Tamaño imagen modelos (si no, se calcula del árbol) |
 | `SOSO_LIVE_CAPACITY` | Simula tamaño de pendrive al empaquetar (`64G`, `32G`, …) |
+| `SOSO_LIVE_OFFLINE=1` | No descarga HF; el mayor modelo ya en `target/*-model/` que quepa |
 | `SOSO_QEMU_LIVE=1` | QEMU con `soso-live.img` |
 | `SOSO_QEMU_LIVE_USB=1` | Mismo disco vía xHCI + `usb-storage` (BOT) |
 | `SOSO_QEMU_USB_HUB=1` | Storage/kbd detrás de `usb-hub` (prueba placa) |

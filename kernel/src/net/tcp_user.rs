@@ -24,6 +24,12 @@ pub struct UserTcp {
     pub remote: Option<IpEndpoint>,
     pub closed: bool,
     pub connect_started: bool,
+    /// Conexión 127.0.0.1 (sin smoltcp).
+    pub loopback: bool,
+    pub loop_pair: Option<usize>,
+    pub loop_side: super::loopback::LoopSide,
+    /// Listener loopback: no pasa a Connected al aceptar.
+    pub loop_listener: bool,
 }
 
 pub struct TcpTable {
@@ -56,18 +62,68 @@ impl TcpTable {
             remote,
             closed: false,
             connect_started: false,
+            loopback: false,
+            loop_pair: None,
+            loop_side: super::loopback::LoopSide::Client,
+            loop_listener: false,
+        });
+        Ok(slot)
+    }
+
+    /// Slot loopback sin socket smoltcp (127.0.0.1).
+    pub fn alloc_loopback(
+        &mut self,
+        sockets: &mut smoltcp::iface::SocketSet<'static>,
+        role: TcpRole,
+        pair_id: usize,
+        side: super::loopback::LoopSide,
+    ) -> Result<usize, ()> {
+        let slot = self.entries.iter().position(|e| e.is_none()).ok_or(())?;
+        let handle = sockets.add(tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; TCP_BUF]),
+            tcp::SocketBuffer::new(vec![0; TCP_BUF]),
+        ));
+        self.entries[slot] = Some(UserTcp {
+            handle,
+            role,
+            port: 0,
+            remote: None,
+            closed: false,
+            connect_started: false,
+            loopback: true,
+            loop_pair: Some(pair_id),
+            loop_side: side,
+            loop_listener: false,
         });
         Ok(slot)
     }
 
     pub fn free(&mut self, sockets: &mut smoltcp::iface::SocketSet<'static>, slot: usize) {
         if let Some(entry) = self.entries[slot].take() {
-            let s = sockets.get_mut::<tcp::Socket>(entry.handle);
-            if s.is_open() {
-                s.close();
+            if entry.loopback {
+                if let (Some(pair), side) = (entry.loop_pair, entry.loop_side) {
+                    super::loopback::close_side(pair, side);
+                }
+            } else {
+                let s = sockets.get_mut::<tcp::Socket>(entry.handle);
+                if s.is_open() {
+                    s.close();
+                }
+                sockets.remove(entry.handle);
             }
-            sockets.remove(entry.handle);
         }
+    }
+
+    /// Slot en escucha sobre `port`, si existe.
+    pub fn find_listener(&self, port: u16) -> Option<usize> {
+        self.entries.iter().enumerate().find_map(|(i, e)| {
+            let e = e.as_ref()?;
+            if e.role == TcpRole::Listening && e.port == port && !e.closed {
+                Some(i)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -85,6 +141,30 @@ pub fn listen_start(
 pub fn is_established(sockets: &smoltcp::iface::SocketSet<'static>, handle: SocketHandle) -> bool {
     let s = sockets.get::<tcp::Socket>(handle);
     s.state() == tcp::State::Established
+}
+
+pub fn try_read_loopback(
+    entry: &UserTcp,
+    buf: u64,
+    len: u64,
+) -> Result<u64, i64> {
+    if entry.role != TcpRole::Connected {
+        return Err(-soso_abi::ENOTCONN);
+    }
+    let pair = entry.loop_pair.ok_or(-soso_abi::ENOTCONN)?;
+    super::loopback::try_read(pair, entry.loop_side, buf, len)
+}
+
+pub fn try_write_loopback(
+    entry: &UserTcp,
+    buf: u64,
+    len: u64,
+) -> Result<u64, i64> {
+    if entry.role != TcpRole::Connected {
+        return Err(-soso_abi::ENOTCONN);
+    }
+    let pair = entry.loop_pair.ok_or(-soso_abi::ENOTCONN)?;
+    super::loopback::try_write(pair, entry.loop_side, buf, len)
 }
 
 pub fn try_read(
@@ -156,7 +236,10 @@ pub fn poll_entry(
     entry: &mut UserTcp,
     configured: bool,
 ) {
-    if !configured || entry.closed {
+    if entry.closed || entry.loopback {
+        return;
+    }
+    if !configured {
         return;
     }
     match entry.role {

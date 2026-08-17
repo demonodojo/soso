@@ -122,6 +122,39 @@ pub fn submit_matvec_resident(
     Err(())
 }
 
+/// Como `submit_matvec_resident` pero con la matriz **cuantizada** en VRAM: el
+/// kernel SASS decodifica los bloques al multiplicar.
+///
+/// No hay camino de CPU aquí, y es deliberado: sin `lxdde` (o sin canal) esto
+/// devuelve `Err` y el driver contesta `Ok(0)` para que userspace lo calcule con su
+/// matvec fusionado AVX2 sobre el shard ya mapeado, que es más rápido que cualquier
+/// bucle escalar del kernel.
+#[cfg_attr(not(feature = "lxdde"), allow(unused_variables))]
+pub fn submit_matvec_q_resident(
+    w_va: u64,
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    let mut st = COMPUTE.lock();
+    let Some(s) = st.as_mut() else {
+        return Err(());
+    };
+    #[cfg(feature = "lxdde")]
+    {
+        if let Ok(on_gpu) =
+            crate::lxdde::submit_matvec_q_resident(w_va, dtype, rows, cols, x, y)
+        {
+            s.gpu_path = on_gpu;
+            s.channel_ready = crate::lxdde::gsp_ready();
+            return Ok(on_gpu);
+        }
+    }
+    Err(())
+}
+
 #[allow(dead_code)]
 pub fn channel_ready() -> bool {
     COMPUTE.lock().as_ref().is_some_and(|s| s.channel_ready)

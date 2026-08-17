@@ -143,6 +143,17 @@ int gsp_vmm_map(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
 int gsp_vmm_map_flags(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
                       enum gsp_vmm_target target, unsigned flags);
 
+/* Mapea `npages` físicas (dispersas) en VAs consecutivas desde `va`, con UNA sola
+ * invalidación de MMU al final en vez de una por página.
+ *
+ * Existe por rendimiento y no por comodidad: `gsp_vmm_invalidate` son tres
+ * escrituras MMIO más un sondeo cuyo reintento espera un milisegundo, así que la
+ * subida por DMA de un tensor de 44 MiB pagaba 11 264 de ellas y salía más cara
+ * que el rebote. Escribir todos los PTE antes de barrer es correcto porque la GPU
+ * no lee estas VAs hasta el `LAUNCH_DMA`, que se encola después. */
+int gsp_vmm_map_pages(struct gsp_vmm *v, uint64_t va, const uint64_t *phys,
+                      unsigned npages, enum gsp_vmm_target target);
+
 /* Recorre las tablas ya construidas como lo haría la MMU y devuelve a qué
  * física traduce `va`. -1 si algún nivel falta o está inválido. Existe para
  * poder comprobar el mapeo sin la GPU: se construye por un camino y se lee por

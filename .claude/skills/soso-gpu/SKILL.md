@@ -125,11 +125,57 @@ Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
 8. **Subir sin copias**: `gsp_buf_upload_at` (offset dentro del slot) para trocear
    desde el kernel, y `gsp_buf_upload_dma`, que mapea las páginas del proceso en
    `G6_SRC_VA` y deja que el CE lea de ellas — un `LAUNCH_DMA` por lote de 16 MiB
-   en vez de uno por MiB de rebote. Exige todo alineado a página (la multilínea es
-   la única probada en silicio por encima de 4 KiB) y **fijar las páginas**
-   (`mm::reclaim::pin_range`): son mmap RO de pesos, las primeras que se desalojan.
-   Validado en `scripts/l6-g3-gsp-hostcheck.sh` (encoding y rechazos), **no en
-   silicio**: hace falta un ciclo VFIO en la GB205 con TinyLlama.
+   en vez de uno por MiB de rebote. **Fijar las páginas** (`mm::reclaim::pin_range`):
+   son mmap RO de pesos, las primeras que se desalojan.
+9. **El origen NO tiene que estar alineado a página, y exigirlo dejó el camino sin
+   copias muerto desde el día que se escribió** (2026-08-17). El payload de un shard
+   `.som` empieza en el **byte 64**, así que todo tensor mapeado llega a `gpu_map`
+   con `%4096 == 64` y se iba al rebote. Invisible: el rebote da el mismo resultado,
+   sólo cuesta una copia entera del tensor por la CPU. Ahora `gsp_buf_upload_dma`
+   acepta `src_off` (0..4095) y el CE lee de `G6_SRC_VA + src_off`; lo que sí tiene
+   que estar alineado es el **destino**. La copia multilínea lleva
+   `PITCH = LINE_LENGTH = 4096` en los dos lados, o sea una copia contigua, y no
+   exige alineación de las direcciones. Contadores `uploads_dma`/`uploads_bounce` en
+   `GpuInfo` + una línea de serie la primera vez que se rebota: sin ellos esto vuelve
+   a pasar desapercibido. **La sonda de `init test` que decía probar este camino usaba
+   `mmap` anónimo** —alineado por construcción— y por diseño no podía cazarlo; ahora
+   hay una con el origen en `+64`.
+10. **Una invalidación de MMU por página cuesta más que la copia que ahorras.**
+   `gsp_vmm_map` acaba en `gsp_vmm_invalidate` (3 MMIO + sondeo que espera con
+   `lx_mdelay(1)`, granularidad de **1 ms**), y el origen se mapeaba página a página:
+   11 264 invalidaciones por un tensor de 44 MiB. `gsp_vmm_map_pages` escribe todos
+   los PTE y barre **una** vez; es correcto porque la GPU no lee esas VAs hasta el
+   `LAUNCH_DMA`, que se encola después.
+11. **`gsp_buf_vram_free` mentía por dos órdenes de magnitud.** Devolvía el pool
+   (11 902 MiB en la GB205) cuando el techo real son ~108 MiB: manda el presupuesto
+   de tablas (`GSP_VMM_MAX_PT = 96`, hoja = 2 MiB con PTEs de 4 KiB, menos las ~42
+   del bring-up y el grctx), y antes incluso la ventana de VA de G6 (256 MiB). Con
+   planos f32 eso son DOS tensores. Ahora es el mínimo de los tres y el arranque lo
+   dice. **Lo siguiente aquí son páginas de 2 MiB**: `pt_write` deja a cero la mitad
+   baja del PDE dual de PD0 a propósito y ahí va el PTE grande (1 tabla = 512 MiB).
+   Invariante: una entrada de PD0 es PTE grande **o** PDE a la SPT, nunca las dos.
+12. **G7 — pesos cuantizados sin expandir.** `MATVQ` (`b"MATVQ"` + los campos de
+   `MATVF` + `u8 dtype`) con `matvec_q4k`/`matvec_q80`: la matriz vive en VRAM tal
+   como está en disco. Tres guardias, porque los tres fallos posibles dan **texto
+   plausible y ningún error**: `Resident::fmt` en userspace (subir crudo y lanzar
+   `MATVF` lee nibbles como f32), `rows*row_bytes <= buffer_len` en el driver antes
+   de lanzar (en VRAM la GPU no comprueba nada), y la decodificación **una vez por
+   lenguaje** con las dos atadas por valores dorados: `sosomodel::dequant` (Rust) ↔
+   `lxdde/ports/nouveau/q4k_decode.h` (C, incluido por los `.cu` **y** por el
+   hostcheck). Los decodificadores viven en `sosomodel` para que el kernel pueda
+   ejecutar `MATVQ` en su dispositivo software, que es la única cobertura numérica
+   sin silicio.
+13. **Un blob SASS de más de 4 KiB desactivaba el camino de GPU ENTERO.**
+   `gsp_compute_stage_sass` lo rechazaba y `gsp_compute_init` devolvía -1 — no sólo
+   el kernel nuevo. Con CUDA 12.8 hasta `matvec` sale a 4608 B (`matvec_q4k`, 6400).
+   Ahora trocea contra el rebote. Y `gsp_compute_set_mv_params` llevaba
+   `&cp->matvec` incrustado: los offsets de los cuatro kernels coinciden por
+   casualidad estructural, y el primer `.cu` que cambie de firma habría escrito sus
+   parámetros en los de otro.
+
+Validado en `scripts/l6-g3-gsp-hostcheck.sh` (90 casos: encoding, rechazos,
+`row_bytes`, y el amarre C↔Rust de la decodificación), **no en silicio**: hace falta
+un ciclo VFIO en la GB205 con TinyLlama.
 
 **G1 superado (2026-07-25).** Con VT-d activo en la BIOS y el bind persistente puesto
 (`l6-g1-vfio-persist.sh --enable` + reboot), `sudo ./scripts/l6-g1-vfio-test.sh` da GO:

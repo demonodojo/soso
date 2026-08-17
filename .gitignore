@@ -16,6 +16,9 @@
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 
+# Logs de `cargo xtask test` (serial por shard en la raíz del repo)
+/test-*-serial.log
+
 # Editor / OS
 .DS_Store
 *~

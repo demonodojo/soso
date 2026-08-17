@@ -178,7 +178,31 @@ fn resolve_live_models(
         };
     }
 
-    let spec = if let Some(usb) = usb_bytes {
+    let spec = if live_models::offline_mode() {
+        println!("package-usb-live: SOSO_LIVE_OFFLINE=1 (sin descargas HF)");
+        if let Some(usb) = usb_bytes {
+            live_models::pick_materialized_for_usb(usb, esp_aligned, rootfs_aligned, root)
+        } else {
+            live_models::pick_largest_materialized(root)
+        }
+        .unwrap_or_else(|| {
+            let have = live_models::list_materialized(root);
+            if have.is_empty() {
+                eprintln!(
+                    "live-models: SOSO_LIVE_OFFLINE=1 pero no hay modelos en target/*-model/\n\
+                     Descarga uno con: cargo xtask fetch-hf <org/repo> --name <nombre> --out target/<nombre>-model"
+                );
+            } else if usb_bytes.is_some() {
+                eprintln!(
+                    "live-models: SOSO_LIVE_OFFLINE=1 pero ninguno de [{}] cabe en este USB",
+                    have.join(", ")
+                );
+            } else {
+                eprintln!("live-models: SOSO_LIVE_OFFLINE=1 pero no hay modelos materializados");
+            }
+            exit(1);
+        })
+    } else if let Some(usb) = usb_bytes {
         println!(
             "package-usb-live: USB {} → presupuesto modelos {}",
             live_models::format_bytes(usb),
@@ -203,7 +227,16 @@ fn resolve_live_models(
         live_models::CATALOG[0]
     };
 
-    live_models::ensure_materialized(root, &spec);
+    if live_models::offline_mode() {
+        println!(
+            "package-usb-live: modelo offline {} (need {})",
+            spec.name,
+            spec.format_need(root)
+        );
+        live_models::require_materialized(root, &spec);
+    } else {
+        live_models::ensure_materialized(root, &spec);
+    }
     let tiny = live_models::ensure_tiny(root);
     LiveModelSelection {
         primary_dir: spec.target_dir(root),
@@ -463,6 +496,7 @@ Demo LLM
   soso-llm run {llm} --prompt "hola" --max 32
 
 Simular capacidad sin pendrive: SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
+Sin descargas HF (el mayor ya materializado que quepa): SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 Override de modelo: SOSO_MODELS_DIR=/ruta/al/modelo cargo xtask package-usb-live
 
 QEMU: SOSO_QEMU_LIVE=1 cargo xtask run

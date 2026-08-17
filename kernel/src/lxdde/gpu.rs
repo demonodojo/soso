@@ -20,6 +20,14 @@ unsafe extern "C" {
         x: *const f32,
         y: *mut f32,
     ) -> i32;
+    fn lx_nouveau_compute_matvec_q_resident(
+        w_va: u64,
+        dtype: u32,
+        rows: u32,
+        cols: u32,
+        x: *const f32,
+        y: *mut f32,
+    ) -> i32;
     fn lx_nouveau_vram_total() -> u64;
     fn lx_nouveau_device_buf_alloc(size: u64) -> u64;
     fn lx_nouveau_device_bufs_ready() -> i32;
@@ -36,6 +44,7 @@ unsafe extern "C" {
         offset: u64,
         phys: *const u64,
         npages: u32,
+        src_off: u32,
         size: u64,
     ) -> i32;
     fn lx_nouveau_device_buf_free(va: u64) -> i32;
@@ -105,14 +114,29 @@ pub fn device_buf_upload_at(va: u64, offset: u64, data: &[u8]) -> Result<(), ()>
 
 /// Sube `size` bytes a `offset` **sin copia de CPU**: `phys` son las páginas del
 /// origen, que la capa C mapea en el espacio de la GPU para que el CE lea de
-/// ellas. `Err` significa «no se cumplía algo y no se ha tocado el CE», así que
-/// el llamante puede rebotar por `device_buf_upload_at`.
-pub fn device_buf_upload_dma(va: u64, offset: u64, phys: &[u64], size: u64) -> Result<(), ()> {
-    if phys.is_empty() || size == 0 {
+/// ellas. `src_off` es lo que le sobra al origen para caer en frontera de página
+/// (el payload de un shard empieza en el byte 64, así que casi nunca es 0).
+/// `Err` significa «no se cumplía algo y no se ha tocado el CE», así que el
+/// llamante puede rebotar por `device_buf_upload_at`.
+pub fn device_buf_upload_dma(
+    va: u64,
+    offset: u64,
+    phys: &[u64],
+    src_off: u32,
+    size: u64,
+) -> Result<(), ()> {
+    if phys.is_empty() || size == 0 || src_off >= 4096 {
         return Err(());
     }
     let rc = unsafe {
-        lx_nouveau_device_buf_upload_dma(va, offset, phys.as_ptr(), phys.len() as u32, size)
+        lx_nouveau_device_buf_upload_dma(
+            va,
+            offset,
+            phys.as_ptr(),
+            phys.len() as u32,
+            src_off,
+            size,
+        )
     };
     if rc < 0 { Err(()) } else { Ok(()) }
 }
@@ -192,6 +216,33 @@ pub fn submit_matvec_resident(
     } else {
         Ok(rc > 0)
     }
+}
+
+/// Matriz **cuantizada** residente en VRAM: el kernel SASS decodifica los bloques
+/// al multiplicar, así que en la tarjeta viven los bytes del shard tal cual (8×
+/// menos VRAM y 8× menos ancho de banda por token que el plano f32).
+pub fn submit_matvec_q_resident(
+    w_va: u64,
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    if w_va == 0 || x.len() != cols || y.len() != rows {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_matvec_q_resident(
+            w_va,
+            dtype as u32,
+            rows as u32,
+            cols as u32,
+            x.as_ptr(),
+            y.as_mut_ptr(),
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
 }
 
 #[allow(dead_code)]

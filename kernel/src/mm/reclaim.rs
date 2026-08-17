@@ -113,12 +113,14 @@ static PINCHADAS: Mutex<alloc::vec::Vec<(u64, u64, u64)>> = Mutex::new(alloc::ve
 
 /// Fija `[va, va+len)` de este espacio hasta el `unpin`. Reentrante: dos subidas
 /// solapadas añaden dos ventanas y cada `unpin` quita la suya.
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
 pub fn pin_range(space: &AddrSpace, va: u64, len: u64) {
     PINCHADAS
         .lock()
         .push((space.pml4_phys(), va, va.saturating_add(len)));
 }
 
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
 pub fn unpin_range(space: &AddrSpace, va: u64, len: u64) {
     let clave = (space.pml4_phys(), va, va.saturating_add(len));
     let mut st = PINCHADAS.lock();

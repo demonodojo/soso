@@ -62,12 +62,43 @@ int gsp_buf_init(struct gsp_buf *b, struct gsp_vram *vram, struct gsp_vmm *vmm,
     return 0;
 }
 
+/* Margen de tablas de nivel alto: una ventana nueva puede necesitar además de la
+ * hoja alguna tabla intermedia. Cuatro cubre bajar los cinco niveles de sobra. */
+#define G6_PT_MARGEN 4u
+
 uint64_t gsp_buf_vram_free(const struct gsp_buf *b)
 {
+    uint64_t pool, ventana, tablas;
+    unsigned libres;
+
     if (!b || !b->vram || !b->vram->ready) {
         return 0;
     }
-    return b->vram->total - b->vram->used;
+    pool = b->vram->total - b->vram->used;
+
+    /* MENTÍA, y caro: esto devolvía sólo el pool —11 902 MiB en la GB205— cuando
+     * lo que muerde antes es la ventana de VA de G6 (256 MiB) y, antes todavía, el
+     * presupuesto de tablas de página: con PTEs de 4 KiB cada hoja cubre 2 MiB y
+     * `GSP_VMM_MAX_PT` son 96, de las que el bring-up y la promoción del grctx ya
+     * gastan ~42. El techo real son ~108 MiB. Con planos f32 eso son DOS tensores:
+     * `soso-llm` creía tener 11,9 GiB, no desalojaba nada, y a partir del tercer
+     * peso `GPU_ALLOC_VRAM` fallaba y las 21 capas restantes se iban a CPU
+     * contadas como «sin sitio» — indistinguible de un offload híbrido legítimo. */
+    ventana = b->va_next < G6_VA_LIMIT ? G6_VA_LIMIT - b->va_next : 0ull;
+
+    libres = b->vmm && b->vmm->pt_nr < GSP_VMM_MAX_PT
+                 ? GSP_VMM_MAX_PT - b->vmm->pt_nr
+                 : 0u;
+    libres = libres > G6_PT_MARGEN ? libres - G6_PT_MARGEN : 0u;
+    tablas = (uint64_t)libres * (2ull * 1024ull * 1024ull);
+
+    if (ventana < pool) {
+        pool = ventana;
+    }
+    if (tablas < pool) {
+        pool = tablas;
+    }
+    return pool;
 }
 
 uint64_t gsp_buf_alloc(struct gsp_buf *b, uint64_t size)
@@ -194,7 +225,8 @@ int gsp_buf_upload_at(struct gsp_buf *b, uint64_t va, uint64_t offset,
 }
 
 int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
-                       const uint64_t *phys, unsigned npages, uint64_t size)
+                       const uint64_t *phys, unsigned npages, unsigned src_off,
+                       uint64_t size)
 {
     struct gsp_buf_slot *s;
     uint64_t esperadas;
@@ -203,12 +235,20 @@ int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
     if (!b || !b->ready || !b->vmm || !phys || npages == 0 || size == 0) {
         return -1;
     }
-    if (size > G6_SRC_MAX) {
+    /* `src_off` es lo que le sobra al origen para empezar en frontera de página.
+     * NO es un lujo: el payload de un shard `.som` empieza en el byte 64 del
+     * fichero, así que el puntero de CUALQUIER tensor mapeado llega aquí en +64 y
+     * sin esto el camino sin copias no se disparaba nunca con pesos de verdad. */
+    if (src_off >= VRAM_PAGE) {
         return -1;
     }
-    /* Las páginas tienen que cubrir exactamente `size` (la última puede ir a
-     * medias): si sobran o faltan, el mapeo y la copia dirían cosas distintas. */
-    esperadas = (size + VRAM_PAGE - 1ull) / VRAM_PAGE;
+    if (size > G6_SRC_MAX - (uint64_t)src_off) {
+        return -1;
+    }
+    /* Las páginas tienen que cubrir exactamente `src_off + size` (la última puede
+     * ir a medias): si sobran o faltan, el mapeo y la copia dirían cosas
+     * distintas. */
+    esperadas = ((uint64_t)src_off + size + VRAM_PAGE - 1ull) / VRAM_PAGE;
     if ((uint64_t)npages != esperadas) {
         return -1;
     }
@@ -237,10 +277,12 @@ int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
         }
     }
 
-    /* Mapear el origen página a página: son las del proceso, dispersas por
-     * definición, y lo que las vuelve contiguas para el CE es justo esta ventana.
-     * `gsp_vmm_map` invalida la TLB de la MMU al salir, así que remapear la misma
-     * VA en el lote siguiente es legítimo.
+    /* Mapear el origen: son páginas del proceso, dispersas por definición, y lo
+     * que las vuelve contiguas para el CE es justo esta ventana. `gsp_vmm_map_pages`
+     * invalida la TLB de la MMU UNA vez al final, así que remapear la misma VA en
+     * el lote siguiente sigue siendo legítimo. (Antes era una llamada —y una
+     * invalidación, con su sondeo de milisegundos— por página: ver el comentario
+     * de `gsp_vmm_map_pages`.)
      *
      * Al terminar la ventana NO se desmapea (no hay `gsp_vmm_unmap`, y cada lote
      * reescribe las entradas que va a usar). Consecuencia a tener presente: entre
@@ -248,19 +290,23 @@ int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
      * Ninguna copia lee de ahí sin haberlas remapeado antes, así que no es un
      * error de datos; si algún día hace falta cerrarlo del todo, el sitio es aquí
      * con un unmap de verdad. */
-    for (i = 0; i < npages; i++) {
-        if (gsp_vmm_map(b->vmm, G6_SRC_VA + (uint64_t)i * VRAM_PAGE, phys[i],
-                        VRAM_PAGE, GSP_VMM_SYSMEM) != 0) {
-            lx_printk("nouveau-lx: G6 — DMA: fallo al mapear el origen (página %u)\n", i);
-            return -1;
-        }
+    if (gsp_vmm_map_pages(b->vmm, G6_SRC_VA, phys, npages, GSP_VMM_SYSMEM) != 0) {
+        lx_printk("nouveau-lx: G6 — DMA: fallo al mapear el origen (%u páginas)\n",
+                  npages);
+        return -1;
     }
 
     /* Nada de `lx_dma_flush_range` aquí: no hemos escrito nosotros esas páginas.
      * Quien las escribió (el proceso) lo hizo con sus propias barreras, y el
-     * kernel ha pasado por la syscall —serializante— entre medias. */
-    if (gsp_ce_copy_sync(b->ce, va + offset, G6_SRC_VA, (uint32_t)size,
-                         GSP_CE_WAIT_MS) != 0) {
+     * kernel ha pasado por la syscall —serializante— entre medias.
+     *
+     * El origen es `G6_SRC_VA + src_off`, no la base de la ventana: la copia
+     * multilínea del CE lleva PITCH = LINE_LENGTH = 4096 en los dos lados, que es
+     * una copia contigua de `size` bytes y no exige que las direcciones estén
+     * alineadas a página (ver `gsp_ce_encode_copy`). Lo que sí tiene que estar
+     * alineado es el DESTINO, comprobado arriba. */
+    if (gsp_ce_copy_sync(b->ce, va + offset, G6_SRC_VA + (uint64_t)src_off,
+                         (uint32_t)size, GSP_CE_WAIT_MS) != 0) {
         if (!b->ce->stuck) {
             lx_printk("nouveau-lx: G6 — DMA: el CE falló (off=%llu size=%llu)\n",
                       (unsigned long long)offset, (unsigned long long)size);

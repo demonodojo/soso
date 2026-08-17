@@ -16,6 +16,8 @@ lxdde/ports/nouveau/gsp_buf.c
 lxdde/ports/nouveau/gsp_compute.c
 lxdde/ports/nouveau/saxpy_sass_embed.c
 lxdde/ports/nouveau/matvec_sass_embed.c
+lxdde/ports/nouveau/matvec_q4k_sass_embed.c
+lxdde/ports/nouveau/matvec_q80_sass_embed.c
 lxdde/ports/nouveau/gsp_fini.c
 lxdde/ports/nouveau/gsp_mmio.c
 lxdde/ports/nouveau/gsp_pramin.c

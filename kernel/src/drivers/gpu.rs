@@ -3,8 +3,22 @@
 use crate::drivers::{nvidia_compute, nvidia_probe, pci};
 use crate::println;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use soso_abi::{self as abi, GpuInfo};
 use spin::{Mutex, Once};
+
+/// Cuántas subidas a VRAM fueron por DMA del CE y cuántas por rebote.
+///
+/// POR QUÉ EXISTEN: el camino sin copias (`subir_por_dma`) se escribió el
+/// 2026-08-17 y **no se disparaba nunca con los pesos de un modelo**. El payload
+/// de un shard `.som` empieza en el byte 64 (`SHARD_PAYLOAD_OFF`), la syscall
+/// recibía por tanto un puntero con `%4096 == 64`, y la primera comprobación de
+/// `subir_por_dma` lo rechazaba. Desde fuera no se veía nada: el rebote da el
+/// mismo resultado, sólo cuesta una copia entera del tensor por la CPU. Sin un
+/// contador, el único síntoma es «va lento».
+static SUBIDAS_DMA: AtomicU32 = AtomicU32::new(0);
+static SUBIDAS_REBOTE: AtomicU32 = AtomicU32::new(0);
+static BYTES_REBOTE: AtomicU64 = AtomicU64::new(0);
 
 const VENDOR_INTEL: u16 = 0x8086;
 const VENDOR_NVIDIA: u16 = 0x10de;
@@ -314,6 +328,9 @@ pub fn info() -> GpuInfo {
         vram_free: vram_free_bytes(&g),
         name: g.name,
         phase,
+        uploads_dma: SUBIDAS_DMA.load(Ordering::Relaxed),
+        uploads_bounce: SUBIDAS_REBOTE.load(Ordering::Relaxed),
+        bounce_bytes: BYTES_REBOTE.load(Ordering::Relaxed),
     }
 }
 
@@ -456,11 +473,17 @@ const TROZO_SUBIDA: usize = 2 * 1024 * 1024;
 /// 1 MiB, sólo le faltaba aceptar un offset dentro del búfer.
 #[cfg(feature = "lxdde")]
 fn subir_por_trozos(va: u64, user_ptr: u64, n: usize) -> Result<u64, i64> {
-    // Primero sin copias: si el origen está alineado a página, el CE puede leer
-    // directamente de las páginas del proceso y esto no toca un solo byte.
-    if subir_por_dma(va, user_ptr, n).is_ok() {
-        return Ok(0);
+    // Primero sin copias: el CE lee directamente de las páginas del proceso y
+    // esto no toca un solo byte.
+    match subir_por_dma(va, user_ptr, n) {
+        Ok(()) => {
+            SUBIDAS_DMA.fetch_add(1, Ordering::Relaxed);
+            return Ok(0);
+        }
+        Err(motivo) => aviso_rebote(motivo, user_ptr, n),
     }
+    SUBIDAS_REBOTE.fetch_add(1, Ordering::Relaxed);
+    BYTES_REBOTE.fetch_add(n as u64, Ordering::Relaxed);
     let mut tmp = alloc::vec![0u8; core::cmp::min(n, TROZO_SUBIDA)];
     let mut off = 0usize;
     while off < n {
@@ -478,10 +501,45 @@ fn subir_por_trozos(va: u64, user_ptr: u64, n: usize) -> Result<u64, i64> {
     Ok(0)
 }
 
-/// Lote de la subida por DMA. Es `G6_SRC_MAX` de `gsp_buf.h`: el tamaño de la
-/// ventana de VA donde la capa C mapea el origen.
+/// Lote de la subida por DMA. Es `G6_SRC_MAX` de `gsp_buf.h` menos una página: la
+/// ventana tiene que alojar además el `lead_in` del origen desalineado.
 #[cfg(feature = "lxdde")]
-const LOTE_DMA: usize = 16 * 1024 * 1024;
+const LOTE_DMA: usize = 16 * 1024 * 1024 - 4096;
+
+/// Por qué no se pudo subir sin copia. Eran cuatro causas distintas devolviendo
+/// el mismo `Err(())`, y la que estuvo activa tres meses —el origen en `+64`— no
+/// se distinguía de un CE roto.
+#[cfg(feature = "lxdde")]
+#[derive(Clone, Copy)]
+enum Motivo {
+    Vacio,
+    SinEspacio,
+    PhysPages,
+    CapaC,
+}
+
+/// Una línea de serie la primera vez y sólo la primera: son cientos de subidas
+/// por inferencia. Mismo criterio que `aviso_sin_pool`.
+#[cfg(feature = "lxdde")]
+fn aviso_rebote(motivo: Motivo, user_ptr: u64, n: usize) {
+    use core::sync::atomic::AtomicBool;
+    static DICHO: AtomicBool = AtomicBool::new(false);
+    if DICHO.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let que = match motivo {
+        Motivo::Vacio => "longitud cero",
+        Motivo::SinEspacio => "el proceso no tiene espacio de direcciones",
+        Motivo::PhysPages => "páginas del origen sin materializar",
+        Motivo::CapaC => "el CE rechazó el lote",
+    };
+    println!(
+        "gpu: subida a VRAM por rebote — {} (origen en +{}, {} B). El camino DMA sin copia NO se está usando",
+        que,
+        user_ptr % 4096,
+        n
+    );
+}
 
 /// Sube sin copiar: el CE lee de las páginas del propio proceso.
 ///
@@ -489,23 +547,34 @@ const LOTE_DMA: usize = 16 * 1024 * 1024;
 /// salida deja el búfer a medias de forma que el rebote no pueda arreglar
 /// (reescribe los mismos bytes).
 ///
-/// Requisitos que se comprueban aquí porque son de este lado: el origen alineado
-/// a página (lo exige la copia multilínea del CE, la única probada en silicio por
-/// encima de 4 KiB) y las páginas **fijadas** mientras el CE lee: son mmap RO de
-/// pesos, o sea justo las que `mm::reclaim` desaloja bajo presión, y otro core
-/// puede devolver sus frames al asignador en mitad del DMA.
+/// **El origen NO tiene que estar alineado a página**, y eso es el arreglo del
+/// 2026-08-17 (segunda tanda): lo que se mapea es la ventana, y el CE lee de
+/// `G6_SRC_VA + lead_in`. Mientras aquí se exigió `user_ptr % 4096 == 0`, este
+/// camino **no se ejecutó ni una vez con pesos de un modelo**: el payload de un
+/// shard `.som` empieza en el byte 64, así que todo tensor mapeado llega en +64 y
+/// se iba al rebote sin decirlo. `lead_in` es el mismo en todos los lotes porque
+/// el destino avanza en múltiplos de página, y con él el origen.
+///
+/// Lo que sí se comprueba aquí porque es de este lado: las páginas **fijadas**
+/// mientras el CE lee. Son mmap RO de pesos, o sea justo las que `mm::reclaim`
+/// desaloja bajo presión, y otro core puede devolver sus frames al asignador en
+/// mitad del DMA.
 #[cfg(feature = "lxdde")]
-fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), ()> {
-    if user_ptr % 4096 != 0 || n == 0 {
-        return Err(());
+fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
+    if n == 0 {
+        return Err(Motivo::Vacio);
     }
+    let lead_in = (user_ptr % 4096) as usize;
+    let base = user_ptr - lead_in as u64;
     // El espacio se clona una vez (es un `Arc`) en vez de reentrar en
     // `with_current` por lote: cada entrada toma `PROCS`, y con los cores ociosos
     // sondeando ese candado no es gratis.
-    let space = crate::task::with_current(|p| p.space.clone()).ok_or(())?;
+    let space = crate::task::with_current(|p| p.space.clone()).ok_or(Motivo::SinEspacio)?;
     // Lo que vaya a hacer falta y no el lote entero: un `gpu_map` de 4 KiB no
-    // tiene por qué pedir 32 KiB de lista.
-    let mut phys = alloc::vec![0u64; core::cmp::min(n.div_ceil(4096), LOTE_DMA / 4096)];
+    // tiene por qué pedir 32 KiB de lista. El `+1` es la página que puede añadir
+    // el `lead_in`.
+    let tope = core::cmp::min((lead_in + n).div_ceil(4096), LOTE_DMA / 4096 + 1);
+    let mut phys = alloc::vec![0u64; tope];
     let mut off = 0usize;
     while off < n {
         // Los lotes van en múltiplos de página; el rabo que no llega a página va
@@ -518,15 +587,24 @@ fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), ()> {
         } else {
             resto
         };
-        let paginas = c.div_ceil(4096);
+        // La ventana empieza en la página que contiene al origen del lote, así que
+        // cubre `lead_in + c`.
+        let paginas = (lead_in + c).div_ceil(4096);
         let ventana = (paginas * 4096) as u64;
-        let ini = user_ptr + off as u64;
+        let ini = base + off as u64;
         crate::mm::reclaim::pin_range(&space, ini, ventana);
         let r = space
             .phys_pages(ini, ventana, &mut phys[..paginas])
-            .ok_or(())
+            .ok_or(Motivo::PhysPages)
             .and_then(|k| {
-                crate::lxdde::device_buf_upload_dma(va, off as u64, &phys[..k], c as u64)
+                crate::lxdde::device_buf_upload_dma(
+                    va,
+                    off as u64,
+                    &phys[..k],
+                    lead_in as u32,
+                    c as u64,
+                )
+                .map_err(|()| Motivo::CapaC)
             });
         crate::mm::reclaim::unpin_range(&space, ini, ventana);
         r?;
@@ -624,11 +702,15 @@ fn disable_soft() -> Result<u64, i64> {
 /// Comandos GPU (userspace):
 /// - `b"SAXPY"` + f32 a + u64 x_handle + u64 y_handle + u32 n
 /// - `b"MATVF"` + u64 w_handle + u32 rows + u32 cols + u64 x_handle + u64 y_handle
+/// - `b"MATVQ"` + lo mismo + u8 dtype — la matriz está en el búfer **cuantizada**
+///   (`sosomodel::layout::DTYPE_Q4_K`/`Q8_0`/`MXFP4`) y se multiplica sin
+///   expandirla. Es lo que permite subir los bytes del shard tal cual: 8× menos
+///   tráfico y 8× menos VRAM que el plano f32.
 /// - `b"GFINI"` — apaga GSP-RM y deja la tarjeta sin DMA (irreversible)
 /// - `b"SOFTG"` / `b"SOFTX"` — enciende/apaga el dispositivo software de pruebas
 ///
-/// El valor de vuelta de SAXPY/MATVF lleva `abi::GPU_SUBMIT_ON_GPU` (lo hizo el
-/// silicio) y `abi::GPU_SUBMIT_COMPUTED` (el resultado está en el búfer). Ver el
+/// El valor de vuelta de SAXPY/MATVF/MATVQ lleva `abi::GPU_SUBMIT_ON_GPU` (lo hizo
+/// el silicio) y `abi::GPU_SUBMIT_COMPUTED` (el resultado está en el búfer). Ver el
 /// comentario de esas constantes: son dos preguntas distintas.
 pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
     // Antes del candado y antes de `present`: encender el dispositivo de pruebas
@@ -716,6 +798,78 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
             let w = f32_view(&g, w_h, rows * cols)?;
             nvidia_compute::submit_matvec_f32(w, rows, cols, &x, &mut y)
                 .map_err(|_| abi::EIO)?
+        };
+        drop(g);
+        write_f32_buffer(&mut gpu().lock(), y_h, &y)?;
+        return Ok(submit_bits(on_gpu));
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"MATVQ" && cmd.len() >= 38 {
+        let w_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let rows = u32::from_le_bytes(cmd[13..17].try_into().unwrap_or([0; 4])) as usize;
+        let cols = u32::from_le_bytes(cmd[17..21].try_into().unwrap_or([0; 4])) as usize;
+        let x_h = u64::from_le_bytes(cmd[21..29].try_into().unwrap_or([0; 8]));
+        let y_h = u64::from_le_bytes(cmd[29..37].try_into().unwrap_or([0; 8]));
+        let dtype = cmd[37];
+        // TODOS los guardias, aquí y antes de lanzar nada: en VRAM la GPU no
+        // comprueba una sola cosa, así que un dtype equivocado o un `cols` que no
+        // sea número entero de bloques leería la fila del tensor de al lado y
+        // devolvería un vector perfectamente creíble. Este es el único sitio del
+        // sistema donde se puede acotar.
+        let Some(row_bytes) = sosomodel::dequant::row_bytes(dtype, cols) else {
+            // Dtype no soportado o `cols` que no cuadra: no es un error del
+            // llamante, es «esto lo haces tú» — se calcula en CPU.
+            return Ok(0);
+        };
+        let total = rows.checked_mul(row_bytes).ok_or(abi::EINVAL)?;
+        let cap = g
+            .buffers
+            .get(w_h as usize)
+            .and_then(|b| b.as_ref())
+            .ok_or(abi::EINVAL)?
+            .len();
+        if total > cap {
+            return Err(abi::EINVAL);
+        }
+        let x = read_f32_vec(&g, x_h, cols)?;
+        let mut y = read_f32_vec(&g, y_h, rows)?;
+        let w_va = g
+            .buffers
+            .get(w_h as usize)
+            .and_then(|b| b.as_ref())
+            .and_then(|b| b.device_va());
+        let on_gpu = if soft {
+            // El dispositivo software descuantiza fila a fila con un scratch de
+            // `cols`, no el tensor entero: es la referencia numérica del kernel
+            // SASS y comparten implementación (`sosomodel::dequant`), que es lo que
+            // impide que las dos versiones divieran sin que nada se ponga rojo.
+            let w = g
+                .buffers
+                .get(w_h as usize)
+                .and_then(|b| b.as_ref())
+                .and_then(|b| b.bytes())
+                .ok_or(abi::EINVAL)?;
+            let mut scratch = alloc::vec![0f32; cols];
+            for r in 0..rows {
+                let fila = &w[r * row_bytes..(r + 1) * row_bytes];
+                y[r] = sosomodel::dequant::matvec_row(dtype, fila, cols, &x, &mut scratch)
+                    .ok_or(abi::EINVAL)?;
+            }
+            false
+        } else if let Some(va) = w_va {
+            match nvidia_compute::submit_matvec_q_resident(va, dtype, rows, cols, &x, &mut y) {
+                Ok(true) => true,
+                _ => {
+                    drop(g);
+                    return Ok(0);
+                }
+            }
+        } else {
+            // Asimétrico con MATVF a propósito: sin `device_va` la matriz está en
+            // el heap del kernel, y descuantizarla con el bucle escalar de aquí es
+            // estrictamente peor que el matvec fusionado con AVX2 que userspace ya
+            // tiene sobre el shard mapeado. Que lo haga él.
+            drop(g);
+            return Ok(0);
         };
         drop(g);
         write_f32_buffer(&mut gpu().lock(), y_h, &y)?;

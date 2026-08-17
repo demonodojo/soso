@@ -97,7 +97,7 @@ fn tiny_model_mxfp4() -> (Manifest, TensorIndex, MemFileMapper) {
     let mut mapper = MemFileMapper::new();
     let mut index = TensorIndex::default();
     let mut id = 0u32;
-    let mut add = |index: &mut TensorIndex,
+    let add = |index: &mut TensorIndex,
                    mapper: &mut MemFileMapper,
                    id: &mut u32,
                    name: &str,
@@ -160,7 +160,7 @@ fn tiny_model_cuantizado(q4k: bool) -> (Manifest, TensorIndex, MemFileMapper) {
     let mut mapper = MemFileMapper::new();
     let mut index = TensorIndex::default();
     let mut id = 0u32;
-    let mut add = |index: &mut TensorIndex,
+    let add = |index: &mut TensorIndex,
                    mapper: &mut MemFileMapper,
                    id: &mut u32,
                    name: &str,

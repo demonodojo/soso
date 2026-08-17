@@ -1,5 +1,7 @@
 /* G4f/G5: objeto compute Blackwell + QMD en sysmem + SEND_PCAS. Ver gsp_compute.h. */
 #include "gsp_compute.h"
+/* Constantes de bloque de los formatos cuantizados, compartidas con los .cu. */
+#include "q4k_decode.h"
 
 void *memset(void *dst, int c, unsigned long n);
 void *memcpy(void *dst, const void *src, unsigned long n);
@@ -225,20 +227,57 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
     cp->matvec.param_count = gsp_matvec_param_count;
     cp->matvec.sass_va = G5_SASS_VA;
 
+    cp->matvec_q4k.name = "matvec_q4k";
+    cp->matvec_q4k.sass = gsp_matvec_q4k_sass;
+    cp->matvec_q4k.sass_len = gsp_matvec_q4k_sass_len;
+    cp->matvec_q4k.regcount = gsp_matvec_q4k_regcount;
+    cp->matvec_q4k.param_base = gsp_matvec_q4k_param_base;
+    cp->matvec_q4k.param_size = gsp_matvec_q4k_param_size;
+    cp->matvec_q4k.cbank_size = gsp_matvec_q4k_cbank_size;
+    cp->matvec_q4k.param_off = gsp_matvec_q4k_param_off;
+    cp->matvec_q4k.param_count = gsp_matvec_q4k_param_count;
+    cp->matvec_q4k.sass_va = G7_SASS_VA;
+
+    cp->matvec_q80.name = "matvec_q80";
+    cp->matvec_q80.sass = gsp_matvec_q80_sass;
+    cp->matvec_q80.sass_len = gsp_matvec_q80_sass_len;
+    cp->matvec_q80.regcount = gsp_matvec_q80_regcount;
+    cp->matvec_q80.param_base = gsp_matvec_q80_param_base;
+    cp->matvec_q80.param_size = gsp_matvec_q80_param_size;
+    cp->matvec_q80.cbank_size = gsp_matvec_q80_cbank_size;
+    cp->matvec_q80.param_off = gsp_matvec_q80_param_off;
+    cp->matvec_q80.param_count = gsp_matvec_q80_param_count;
+    cp->matvec_q80.sass_va = G8_SASS_VA;
+
     /* El constant bank tiene que caber entero: el kernel lee sus parámetros en
      * `param_base`, que está al final de .nv.constant0. */
     if (kernel_check(&cp->saxpy, 4u) != 0 ||
-        kernel_check(&cp->matvec, 5u) != 0) {
+        kernel_check(&cp->matvec, 5u) != 0 ||
+        kernel_check(&cp->matvec_q4k, 5u) != 0 ||
+        kernel_check(&cp->matvec_q80, 5u) != 0) {
         return -1;
     }
-    /* Los dos blobs viven en páginas distintas de VRAM y se copian por la página
-     * de rebote de 4 KiB: si uno crece por encima de eso, pisaría al otro. */
-    if (cp->saxpy.sass_len > 4096u || cp->matvec.sass_len > 4096u ||
-        cp->matvec.sass_va - cp->saxpy.sass_va < 4096ull) {
-        lx_printk("nouveau-lx: compute — los blobs SASS no caben en su página "
-                  "(saxpy %u B, matvec %u B)\n",
-                  cp->saxpy.sass_len, cp->matvec.sass_len);
-        return -1;
+    /* Cada blob tiene que caber en el hueco que va hasta la VA del siguiente. Antes
+     * esto era un `> 4096` a mano para dos kernels; añadir un tercero sin tocarlo
+     * habría sido un solapamiento sin un solo error, y con CUDA 12.8 hasta `matvec`
+     * pasa de 4 KiB. Se comprueba blob a blob y en el orden de las VAs. */
+    {
+        const struct gsp_kernel *ks[4] = { &cp->saxpy, &cp->matvec, &cp->matvec_q4k,
+                                          &cp->matvec_q80 };
+        unsigned i;
+
+        for (i = 0; i < 4u; i++) {
+            uint64_t hueco = i + 1u < 4u ? ks[i + 1]->sass_va - ks[i]->sass_va
+                                         : G_SASS_SLOT;
+
+            if ((uint64_t)ks[i]->sass_len > hueco) {
+                lx_printk("nouveau-lx: compute — el blob SASS de %s (%u B) no cabe "
+                          "en su hueco de %llu B\n",
+                          ks[i]->name, ks[i]->sass_len,
+                          (unsigned long long)hueco);
+                return -1;
+            }
+        }
     }
 
     if (gsp_dma_alloc(&cp->data, G4F_DATA_SIZE, "compute data") != 0) {
@@ -337,23 +376,35 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
 
 int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
                            struct gsp_kernel *k,
-                           uint64_t scratch_va, void *scratch_cpu)
+                           uint64_t scratch_va, void *scratch_cpu,
+                           unsigned scratch_bytes)
 {
-    if (!cp || !cp->ready || !ce || !k || !scratch_cpu || !k->sass_len) {
-        return -1;
-    }
-    if (k->sass_len > 4096) {
+    unsigned off;
+
+    if (!cp || !cp->ready || !ce || !k || !scratch_cpu || !k->sass_len ||
+        scratch_bytes == 0u) {
         return -1;
     }
     if (k->staged) {
         return 0;
     }
-    memcpy(scratch_cpu, k->sass, k->sass_len);
-    __asm__ __volatile__("mfence" ::: "memory");
+    /* Se trocea contra el rebote en vez de exigir que el blob quepa en él. Los
+     * trozos van de `scratch_bytes` (una página con el rebote de G4d), así que cada
+     * copia del CE es de una línea: el camino probado en silicio por debajo de
+     * 4 KiB. El destino avanza en múltiplos del trozo, luego sigue alineado. */
+    for (off = 0; off < k->sass_len; off += scratch_bytes) {
+        unsigned c = k->sass_len - off;
 
-    if (gsp_ce_copy_sync(ce, k->sass_va, scratch_va, k->sass_len,
-                         GSP_CE_WAIT_MS) != 0) {
-        return -1;
+        if (c > scratch_bytes) {
+            c = scratch_bytes;
+        }
+        memcpy(scratch_cpu, k->sass + off, c);
+        __asm__ __volatile__("mfence" ::: "memory");
+
+        if (gsp_ce_copy_sync(ce, k->sass_va + off, scratch_va, c,
+                             GSP_CE_WAIT_MS) != 0) {
+            return -1;
+        }
     }
     k->staged = 1;
     return 0;
@@ -391,11 +442,10 @@ void gsp_compute_set_params(struct gsp_compute *cp, float a, uint64_t x_va,
     __asm__ __volatile__("mfence" ::: "memory");
 }
 
-void gsp_compute_set_mv_params(struct gsp_compute *cp, uint64_t w_va,
-                               uint64_t x_va, uint64_t y_va, unsigned rows,
-                               unsigned cols)
+void gsp_compute_set_mv_params(struct gsp_compute *cp, const struct gsp_kernel *k,
+                               uint64_t w_va, uint64_t x_va, uint64_t y_va,
+                               unsigned rows, unsigned cols)
 {
-    const struct gsp_kernel *k = &cp->matvec;
     unsigned char *p = cbank_prepare(cp, k);
 
     *(uint64_t *)(p + k->param_off[0]) = w_va;
@@ -596,7 +646,8 @@ int gsp_compute_saxpy(struct gsp_compute *cp, struct gsp_ce *ce,
         return -1;
     }
 
-    if (gsp_compute_stage_sass(cp, ce, &cp->saxpy, scratch_va, scratch_cpu) != 0) {
+    if (gsp_compute_stage_sass(cp, ce, &cp->saxpy, scratch_va, scratch_cpu,
+                               G4F_STAGE_CHUNK) != 0) {
         lx_printk("nouveau-lx: saxpy — fallo al copiar SASS a VRAM\n");
         return -1;
     }
@@ -692,7 +743,8 @@ int gsp_compute_matvec_f32(struct gsp_compute *cp, struct gsp_ce *ce,
                   "(tope %u)\n", cols, G5_MAX_COLS);
         return -1;
     }
-    if (gsp_compute_stage_sass(cp, ce, &cp->matvec, scratch_va, scratch_cpu) != 0) {
+    if (gsp_compute_stage_sass(cp, ce, &cp->matvec, scratch_va, scratch_cpu,
+                               G4F_STAGE_CHUNK) != 0) {
         lx_printk("nouveau-lx: matvec — fallo al copiar SASS a VRAM\n");
         return -1;
     }
@@ -702,7 +754,7 @@ int gsp_compute_matvec_f32(struct gsp_compute *cp, struct gsp_ce *ce,
         unsigned grid = (n + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
 
         gsp_compute_mv_stage(cp, w, x, n, cols, row0);
-        gsp_compute_set_mv_params(cp, cp->mv_va + G5_MV_W_OFF,
+        gsp_compute_set_mv_params(cp, &cp->matvec, cp->mv_va + G5_MV_W_OFF,
                                   cp->mv_va + G5_MV_X_OFF,
                                   cp->mv_va + G5_MV_Y_OFF, n, cols);
         /* Una tanda que falla aborta el matvec entero. Devolver 0 con las filas
@@ -769,7 +821,8 @@ int gsp_compute_matvec_resident(struct gsp_compute *cp, struct gsp_ce *ce,
         return -1;
     }
 
-    if (gsp_compute_stage_sass(cp, ce, &cp->matvec, scratch_va, scratch_cpu) != 0) {
+    if (gsp_compute_stage_sass(cp, ce, &cp->matvec, scratch_va, scratch_cpu,
+                               G4F_STAGE_CHUNK) != 0) {
         return -1;
     }
 
@@ -782,7 +835,7 @@ int gsp_compute_matvec_resident(struct gsp_compute *cp, struct gsp_ce *ce,
 
     x_va = cp->res_va + G6_RES_X_OFF;
     y_va = cp->res_va + G6_RES_Y_OFF;
-    gsp_compute_set_mv_params(cp, w_va, x_va, y_va, rows, cols);
+    gsp_compute_set_mv_params(cp, &cp->matvec, w_va, x_va, y_va, rows, cols);
 
     grid = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
     t0 = lx_ktime_get_ns();
@@ -799,6 +852,125 @@ int gsp_compute_matvec_resident(struct gsp_compute *cp, struct gsp_ce *ce,
         g_mv_res_last_cols = cols;
         lx_printk("nouveau-lx: matvec residente OK — %ux%u, 1 QMD, ~%llu us\n",
                   rows, cols,
+                  (unsigned long long)((t1 - t0) / 1000ull));
+    }
+    return 0;
+}
+
+/* Bytes que ocupa una fila de `cols` columnas en `dtype`. Devuelve 0 si el dtype no
+ * tiene kernel o `cols` no es número entero de bloques: es la aritmética que decide
+ * qué trozo de VRAM lee el warp, y equivocarla no da error — da la fila del tensor
+ * de al lado y un vector perfectamente creíble. */
+static unsigned long q_row_bytes(unsigned dtype, unsigned cols)
+{
+    unsigned elems, bytes;
+
+    switch (dtype) {
+    case GSP_DTYPE_Q4_K:
+        elems = Q4K_BLOCK_ELEMS;
+        bytes = Q4K_BLOCK_BYTES;
+        break;
+    case GSP_DTYPE_Q8_0:
+        elems = Q80_BLOCK_ELEMS;
+        bytes = Q80_BLOCK_BYTES;
+        break;
+    default:
+        return 0ul;
+    }
+    if (cols == 0u || (cols % elems) != 0u) {
+        return 0ul;
+    }
+    return ((unsigned long)cols / elems) * bytes;
+}
+
+static struct gsp_kernel *q_kernel(struct gsp_compute *cp, unsigned dtype)
+{
+    switch (dtype) {
+    case GSP_DTYPE_Q4_K:
+        return &cp->matvec_q4k;
+    case GSP_DTYPE_Q8_0:
+        return &cp->matvec_q80;
+    default:
+        return NULL;
+    }
+}
+
+static unsigned g_mvq_last_rows;
+static unsigned g_mvq_last_cols;
+static unsigned g_mvq_last_dtype;
+
+int gsp_compute_matvec_q_resident(struct gsp_compute *cp, struct gsp_ce *ce,
+                                  uint64_t w_va, unsigned dtype, unsigned rows,
+                                  unsigned cols, const float *x, float *y,
+                                  uint64_t scratch_va, void *scratch_cpu,
+                                  unsigned scratch_bytes)
+{
+    struct gsp_kernel *k;
+    unsigned grid;
+    float *gx, *gy;
+    uint64_t x_va, y_va;
+    extern uint64_t lx_ktime_get_ns(void);
+    uint64_t t0, t1;
+
+    if (!cp || !cp->ready || !ce || !x || !y || rows == 0u || cols == 0u ||
+        w_va == 0) {
+        return -1;
+    }
+    if (!cp->res_mapped) {
+        return -1;
+    }
+    k = q_kernel(cp, dtype);
+    if (!k || k->sass_len == 0u || q_row_bytes(dtype, cols) == 0ul) {
+        return -1;
+    }
+    /* Mismos topes que el matvec f32 residente, y por la misma razón: los fija el
+     * staging de x e y, que siguen siendo f32. Lo que cambia es la MATRIZ, que no
+     * pasa por el staging. */
+    if (cols > G5_MAX_COLS || rows > G6_MAX_ROWS) {
+        lx_printk("nouveau-lx: matvec-q residente — %ux%u fuera de topes (%u/%u)\n",
+                  rows, cols, G6_MAX_ROWS, G5_MAX_COLS);
+        return -1;
+    }
+    if ((unsigned long)cols * 4ul > G6_RES_X_BYTES ||
+        (unsigned long)rows * 4ul > G6_RES_Y_BYTES) {
+        return -1;
+    }
+
+    if (gsp_compute_stage_sass(cp, ce, k, scratch_va, scratch_cpu,
+                               scratch_bytes) != 0) {
+        return -1;
+    }
+
+    gx = (float *)cp_res(cp, G6_RES_X_OFF);
+    gy = (float *)cp_res(cp, G6_RES_Y_OFF);
+    memcpy(gx, x, (unsigned long)cols * 4ul);
+    memset(gy, 0, (unsigned long)rows * 4ul);
+    *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+    __asm__ __volatile__("mfence" ::: "memory");
+
+    x_va = cp->res_va + G6_RES_X_OFF;
+    y_va = cp->res_va + G6_RES_Y_OFF;
+    gsp_compute_set_mv_params(cp, k, w_va, x_va, y_va, rows, cols);
+
+    grid = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
+    t0 = lx_ktime_get_ns();
+    if (launch_wait(cp, k, grid, k->name) != 0) {
+        return -1;
+    }
+    t1 = lx_ktime_get_ns();
+
+    __asm__ __volatile__("mfence" ::: "memory");
+    memcpy(y, gy, (unsigned long)rows * 4ul);
+
+    /* Una línea por FORMA, no por matvec: son cientos por token. */
+    if (rows != g_mvq_last_rows || cols != g_mvq_last_cols ||
+        dtype != g_mvq_last_dtype) {
+        g_mvq_last_rows = rows;
+        g_mvq_last_cols = cols;
+        g_mvq_last_dtype = dtype;
+        lx_printk("nouveau-lx: matvec residente %s OK — %ux%u sin expandir, "
+                  "1 QMD, ~%llu us\n",
+                  k->name, rows, cols,
                   (unsigned long long)((t1 - t0) / 1000ull));
     }
     return 0;

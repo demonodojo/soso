@@ -89,18 +89,6 @@ impl KeymapState {
         }
     }
 
-    pub fn shift(&self) -> bool {
-        self.shift
-    }
-
-    pub fn caps(&self) -> bool {
-        self.caps
-    }
-
-    pub fn altgr(&self) -> bool {
-        self.altgr
-    }
-
     pub fn shift_press(&mut self, down: bool) {
         self.shift = down;
     }

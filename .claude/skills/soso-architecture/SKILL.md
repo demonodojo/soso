@@ -94,12 +94,18 @@ soso/
 para que lo que venga detrás de la línea se quede en la cola de la tty y lo vea el
 hijo que se acabe de lanzar).
 
-**`ask`** (`user/soso-llm/src/ask.rs`): `sosh` lo resuelve **antes de tokenizar** y
-lanza `/bin/soso-llm ask <texto crudo>` — es la única forma de que comillas, tildes y
+**`ask`** (`user/soso-llm/src/ask.rs`, cliente en `user/sosh/src/main.rs`): `sosh` lo
+resuelve **antes de tokenizar** y habla por TCP con el demonio de máquina
+`soso-llm askd` en `127.0.0.1:7420` — es la única forma de que comillas, tildes y
 `|`/`>` lleguen al modelo, porque el tokenizador de la shell no tiene escapes.
-`soso-llm` lo despacha sobre su `args` sin trocear. `run_model` está partido en
-`preparar_sesion` + `generar` (`verboso` apaga el diagnóstico) para que el REPL cargue
-el modelo una vez. Config en `/etc/llm.conf`, que **no fija modelo por defecto**: se
+El askd carga el modelo en la **primera pregunta** y lo mantiene entre consola, SSH
+y reconexiones; sólo recarga al cambiar de modelo, si `refresh_mem` lo exige, o al
+`halt`. Protocolo: línea de pregunta → chunks de texto → byte `0xFF` (fin). Un
+generate a la vez; el listen sigue aceptando. `:eco` va local sin askd. Arranque
+perezoso: el cliente conecta y, si falla, `spawn("/bin/soso-llm", "askd")` sin
+`wait`. Kernel: `tcp_connect(127.0.0.1:port)` empareja con un listener userspace sin
+NIC loopback (`kernel/src/net/loopback.rs`). `soso-llm run` no usa askd (carga en
+frío). Config en `/etc/llm.conf`, que **no fija modelo por defecto**: se
 usa el primero de `/models`, y el empaquetado live (`package-usb-live` /
 `flash-usb-live`) pone el modelo demo delante de `tiny` sintético — al flashear
 elige el mejor GGUF llama que quepa (tinyllama → mistral-7b → mixtral →
@@ -117,6 +123,8 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 ## Network & SSH
 
 - smoltcp TCP/IPv4 + cliente DHCPv4 en kernel; fallback estático 10.0.2.15/24 solo con virtio-net/e1000e (no en WiFi)
+- **Loopback userspace:** `tcp_connect(127.0.0.1:port)` → par de búferes kernel contra un `tcp_listen` del mismo puerto (sin paquetes ni iface loopback); multi-accept; `EADDRINUSE` / `ECONNREFUSED`
+- **Loopback userspace:** `tcp_connect(127.0.0.1:port)` → par de búferes kernel contra un `tcp_listen` del mismo puerto (sin paquetes ni iface loopback); multi-accept; `EADDRINUSE` / `ECONNREFUSED`
 - **WiFi (lxdde/iwlwifi):** Intel AX211 (`8086:7f70/51f0/54f0`); driver first-party en `lxdde/ports/iwlwifi/` (TLV fw, context-info gen3, MVM scan/assoc/TX); mini-supplicant WPA2 EAPOL en `net/wifi_wpa.rs`; backend `NicDev::LxWifi`; credenciales `SOSOWIFI.TXT` (ESP live) o `/etc/wifi.conf`; DHCP tras asociación (sin fallback slirp); kshell `wifi scan|status|connect`
 - **Live USB:** perfil `live-usb` = nouveau + iwlwifi (`SOSO_LXDDE_MODE=nouveau,iwlwifi`); SSH :22 tras lease DHCP
 - **Drivers modulares:** features Cargo `drv-*` + `drv-all` (default); `drivers/registry.rs`; kshell `hwscan`; `SOSODRV.TXT` en ESP live; host `SOSO_DRIVERS`, `cargo xtask fit-drivers`, `cargo xtask driver-add`

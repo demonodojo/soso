@@ -446,6 +446,10 @@ fn alloc_fd(p: &mut super::Process, fd: Fd) -> Result<u64, i64> {
     }
 }
 
+pub(crate) fn alloc_fd_for_process(p: &mut super::Process, fd: Fd) -> Option<u64> {
+    alloc_fd(p, fd).ok()
+}
+
 fn fd_ok_for_stdin(fd: &Fd) -> bool {
     matches!(
         fd,
@@ -1538,20 +1542,24 @@ fn sys_tcp_connect(f: &mut SyscallFrame, addr_ptr: u64, timeout_ms: u64) -> Resu
 }
 
 fn sys_tcp_accept(f: &mut SyscallFrame, listener_fd: u64, timeout_ms: u64) -> Result<u64, i64> {
-    let slot = with_fd(listener_fd, |fd| {
+    let listener_slot = with_fd(listener_fd, |fd| {
         Ok(match fd {
             Fd::Tcp { slot } => *slot,
             _ => return Err(-abi::EBADF),
         })
     })?;
-    if crate::net::tcp_listener_ready(slot) {
-        let _ = crate::net::tcp_accept(slot)?;
-        return Ok(listener_fd);
+    match crate::net::tcp_accept_wake(listener_slot) {
+        Ok(None) => return Ok(listener_fd),
+        Ok(Some(server_slot)) => {
+            return super::with_current(|p| alloc_fd(p, Fd::Tcp { slot: server_slot }));
+        }
+        Err(e) if e == -abi::EAGAIN => {}
+        Err(e) => return Err(e),
     }
     super::block_current(
         ctx_from_frame(f),
         State::WaitingSocket {
-            slot,
+            slot: listener_slot,
             buf: 0,
             len: 0,
             write: false,

@@ -95,16 +95,23 @@ int gsp_buf_upload_at(struct gsp_buf *b, uint64_t va, uint64_t offset,
 /* Sube SIN copia de CPU: `phys` son las físicas de las páginas del origen (en
  * orden), se mapean en `G6_SRC_VA` y el CE copia de ahí a la VRAM del slot.
  *
- * Exige todo alineado a página —`offset`, el origen (implícito en que se den
- * páginas enteras) y `size` salvo el rabo final— porque la copia multilínea del
- * CE con pitch de página es la única probada en silicio para más de 4 KiB
- * (`gsp_ce_encode_copy`). Si el llamante no puede cumplirlo, tiene
+ * `src_off` (0..4095) es lo que le falta al origen para empezar en frontera de
+ * página: el CE lee de `G6_SRC_VA + src_off` y las páginas dadas han de cubrir
+ * `src_off + size`. **No es un lujo**: el payload de un shard `.som` empieza en el
+ * byte 64 del fichero, así que el puntero de cualquier tensor mapeado llega en
+ * +64, y mientras esto exigió alineación de página el camino sin copias no se
+ * disparó ni una vez con pesos de verdad (2026-08-17 → 2026-08-17).
+ *
+ * El DESTINO sí tiene que estar alineado a página, y `size` ser múltiplo de página
+ * salvo un único rabo final: es lo probado en silicio de la copia multilínea del
+ * CE (`gsp_ce_encode_copy`). Si el llamante no puede cumplirlo, tiene
  * `gsp_buf_upload_at`, que rebota por sysmem propia.
  *
  * Devuelve 0, o -1 sin haber tocado el CE si algo no encaja (y entonces el
  * llamante puede rebotar). */
 int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
-                       const uint64_t *phys, unsigned npages, uint64_t size);
+                       const uint64_t *phys, unsigned npages, unsigned src_off,
+                       uint64_t size);
 
 /* Libera la VA; devuelve 0 si ok, -1 si no existía. */
 int gsp_buf_free(struct gsp_buf *b, uint64_t va);

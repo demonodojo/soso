@@ -410,6 +410,11 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report) {
         let _ = report.paso(sid, "sigue viva tras dos pools de hilos", || {
             ssh_vive(key, port)
         });
+        let _ = report.paso_con_reintento(
+            sid,
+            "ask: modelo residente (carga una vez, reconexión SSH)",
+            || ssh_ask_resident(key, port),
+        );
     }
 }
 
@@ -451,6 +456,11 @@ fn run_shard_llm_moe(slot: &QemuSlot, key: &Path, report: &Report) {
             sid,
             "soso-llm run tiny-latent-moe --prompt @bos --max 2",
             || ssh_llm_latent_moe(key, port),
+        );
+        let _ = report.paso_con_reintento(
+            sid,
+            "tiny-q4k: mismos tokens con y sin dispositivo (subida en crudo)",
+            || ssh_llm_q4k(key, port),
         );
     }
 }
@@ -901,6 +911,94 @@ fn ssh_llm_mla(key: &Path, ssh_port: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// Modelo Q4_K por los DOS caminos: CPU y dispositivo. Es lo único que ejercita en
+/// QEMU la subida de pesos **en crudo** y el comando `MATVQ`, y lo que exige es lo
+/// que de verdad importa: **los mismos tokens**. Un `row_bytes` mal calculado, un
+/// nibble cruzado o una escala de 6 bits mal desempaquetada dan números finitos y
+/// texto plausible; sólo la comparación los caza.
+///
+/// Antes de esto no había ni un modelo cuantizado en la imagen de QEMU, así que todo
+/// el camino Q4_K sólo se ejercitaba con un modelo real de gigabytes — que es por lo
+/// que el offload pudo estar meses sin admitir cuantizados sin que salte nada.
+fn ssh_llm_q4k(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let texto = ssh_guion(
+        key,
+        ssh_port,
+        "soso-llm run tiny-q4k --prompt test --max 3\n                  soso-llm run tiny-q4k --prompt test --gpu-soft --max 3\n                  exit\n",
+        Duration::from_secs(600),
+    )?;
+    let lineas: Vec<&str> = texto.lines().collect();
+    // El TEXTO generado, no la línea de tok/s: ésa lleva milisegundos y nunca
+    // coincidiría. `soso-llm` lo emite en streaming y lo cierra con un salto, así
+    // que es la línea justo antes del resumen.
+    let salidas: Vec<&str> = lineas
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains("soso-llm: generado"))
+        .map(|(i, _)| if i > 0 { lineas[i - 1].trim() } else { "" })
+        .collect();
+    if salidas.len() < 2 {
+        return Err(format!(
+            "tiny-q4k: faltan las dos ejecuciones ({} vistas); stdout: {texto:?}",
+            salidas.len()
+        ));
+    }
+    if !texto.contains("dispositivo «soft") {
+        return Err(format!(
+            "--gpu-soft no enganchó el dispositivo software en tiny-q4k; stdout: {texto:?}"
+        ));
+    }
+    let cpu = salidas[salidas.len() - 2];
+    let dev = salidas[salidas.len() - 1];
+    if cpu != dev {
+        return Err(format!(
+            "tiny-q4k: el dispositivo da otros tokens que la CPU\n  cpu: {cpu:?}\n  dev: {dev:?}"
+        ));
+    }
+    // Que las subidas hayan ido EN CRUDO. Sin esto el test pasa igual por el camino
+    // del plano f32 —da los mismos tokens— y se pierden el 8× de VRAM y de PCIe sin
+    // que nada se ponga rojo: la misma forma del bug que dejó el DMA sin usar tres
+    // meses. `tiny-q4k` tiene hidden 256 y ffn 512, los dos múltiplos de 256, así
+    // que TODAS las matrices cuantizadas tienen que entrar por ahí.
+    let crudas = texto
+        .lines()
+        .find(|l| l.contains("en crudo (sin expandir"))
+        .ok_or_else(|| format!("tiny-q4k: falta la línea de subidas; stdout: {texto:?}"))?;
+    if crudas.contains(" 0 de ") {
+        return Err(format!(
+            "tiny-q4k: ninguna subida fue en crudo — se está descuantizando a f32: {crudas:?}"
+        ));
+    }
+
+    // Y que los pesos no se resuban por matvec ni haya desalojo: con Q4_K en crudo
+    // el modelo entero cabe de sobra en el dispositivo de pruebas.
+    if texto.contains("desalojos de pesos") {
+        return Err(format!(
+            "tiny-q4k: hubo desalojo de pesos con un modelo de 2 capas; stdout: {texto:?}"
+        ));
+    }
+    if let Some(linea) = texto
+        .lines()
+        .find(|l| l.contains("matvec,") && l.contains("subidas de pesos"))
+    {
+        let num = |tras: &str| -> Option<usize> {
+            let idx = linea.find(tras)?;
+            linea[..idx]
+                .split_whitespace()
+                .next_back()
+                .and_then(|t| t.parse().ok())
+        };
+        if let (Some(calls), Some(uploads)) = (num("matvec,"), num("subidas")) {
+            if calls > 0 && uploads >= calls {
+                return Err(format!(
+                    "tiny-q4k: pesos resubidos en cada matvec ({uploads}/{calls}): {linea:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn ssh_llm_latent_moe(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion(
         key,
@@ -981,6 +1079,29 @@ fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
     if salida != payload {
         return Err(format!(
             "ask entregó {salida:?} y se escribió {payload:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Dos `ask` en la misma sesión SSH cargan el modelo una sola vez; una sesión
+/// nueva sigue sin recargar mientras askd siga vivo.
+fn ssh_ask_resident(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let guion1 = "ask @bos\nask @bos\nexit\n";
+    let texto1 = ssh_guion(key, ssh_port, guion1, Duration::from_secs(180))?
+        .replace("\r\n", "\n");
+    let cargando = texto1.matches("ask: cargando").count();
+    if cargando != 1 {
+        return Err(format!(
+            "esperaba «ask: cargando» una vez en la misma SSH, vi {cargando} veces; stdout: {texto1:?}"
+        ));
+    }
+    let guion2 = "ask @bos\nexit\n";
+    let texto2 = ssh_guion(key, ssh_port, guion2, Duration::from_secs(120))?
+        .replace("\r\n", "\n");
+    if texto2.contains("ask: cargando") {
+        return Err(format!(
+            "tercer ask en nueva SSH recargó el modelo; stdout: {texto2:?}"
         ));
     }
     Ok(())

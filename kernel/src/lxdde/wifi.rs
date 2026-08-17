@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn lx_iwlwifi_fw_phase() -> *const c_char;
     fn lx_iwlwifi_scan(out: *mut LxWifiBss, max: c_int, count: *mut c_int) -> c_int;
     fn lx_iwlwifi_connect_open(ssid: *const c_char) -> c_int;
+    #[allow(dead_code)]
     fn lx_iwlwifi_connect_wpa2(ssid: *const c_char, psk: *const u8) -> c_int;
     fn lx_iwlwifi_install_key(key: *const u8, key_idx: c_int) -> c_int;
     fn lx_iwlwifi_connected() -> c_int;
@@ -119,6 +120,7 @@ pub fn connect_open(ssid: &str) -> i32 {
     unsafe { lx_iwlwifi_connect_open(buf.as_ptr() as *const c_char) }
 }
 
+#[allow(dead_code)]
 pub fn connect_wpa2(ssid: &str, psk: &[u8; 32]) -> i32 {
     let mut buf = [0u8; SSID_MAX + 1];
     let bytes = ssid.as_bytes();

@@ -3,7 +3,7 @@
 //! Mismo formato que `/etc/wifi.conf` (`ssid=`, `psk=`). Si el fichero está
 //! vacío o solo tiene comentarios, el kernel cae a `/etc/wifi.conf`.
 
-use crate::drivers::espfat::{self, SECTOR, Slot};
+use crate::drivers::espfat::{self, Slot};
 use spin::Once;
 
 pub const FILE_SIZE: usize = 4096;
@@ -23,6 +23,7 @@ pub fn init() {
     }
 }
 
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
 pub fn read_text() -> Option<alloc::vec::Vec<u8>> {
     let slot = SLOT.get().and_then(|s| *s)?;
     let mut buf = alloc::vec::Vec::with_capacity(FILE_SIZE);

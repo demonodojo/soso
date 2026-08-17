@@ -237,6 +237,39 @@ int gsp_vmm_map(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
     return gsp_vmm_map_flags(v, va, phys, size, target, 0u);
 }
 
+/* Una página, sin invalidar: baja el árbol creando lo que falte y escribe el PTE.
+ * Separada para que un lote pueda pagar UNA invalidación en vez de N (ver
+ * `gsp_vmm_map_pages`). */
+static int map_one(struct gsp_vmm *v, uint64_t at, uint64_t phys,
+                   enum gsp_vmm_target target, unsigned flags)
+{
+    struct gsp_vmm_pt *parent = pt_find(v, VMM_ROOT, at);
+    unsigned lvl;
+
+    if (!parent) {
+        lx_printk("nouveau-lx: sin directorio raíz\n");
+        return -1;
+    }
+    /* Bajar creando lo que falte y enlazando cada tabla nueva en su padre. */
+    for (lvl = VMM_ROOT; lvl > 0; lvl--) {
+        struct gsp_vmm_pt *child;
+        int created = 0;
+
+        child = pt_get(v, lvl - 1u, at, &created);
+        if (!child) {
+            return -1;
+        }
+        if (created) {
+            pt_write(parent, lvl_index(lvl, at),
+                     gsp_vmm_pde_encode(child->mem.phys, GSP_VMM_SYSMEM));
+        }
+        parent = child;
+    }
+    pt_write(parent, lvl_index(0, at), gsp_vmm_pte_encode(phys, target, flags));
+    v->pages_mapped++;
+    return 0;
+}
+
 int gsp_vmm_map_flags(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
                       enum gsp_vmm_target target, unsigned flags)
 {
@@ -258,31 +291,56 @@ int gsp_vmm_map_flags(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t si
     }
 
     for (off = 0; off < size; off += VMM_PAGE) {
-        uint64_t at = va + off;
-        struct gsp_vmm_pt *parent = pt_find(v, VMM_ROOT, at);
-        unsigned lvl;
-
-        if (!parent) {
-            lx_printk("nouveau-lx: sin directorio raíz\n");
+        if (map_one(v, va + off, phys + off, target, flags) != 0) {
             return -1;
         }
-        /* Bajar creando lo que falte y enlazando cada tabla nueva en su padre. */
-        for (lvl = VMM_ROOT; lvl > 0; lvl--) {
-            struct gsp_vmm_pt *child;
-            int created = 0;
+    }
 
-            child = pt_get(v, lvl - 1u, at, &created);
-            if (!child) {
-                return -1;
-            }
-            if (created) {
-                pt_write(parent, lvl_index(lvl, at),
-                         gsp_vmm_pde_encode(child->mem.phys, GSP_VMM_SYSMEM));
-            }
-            parent = child;
+    gsp_vmm_invalidate(v);
+    return 0;
+}
+
+/* AVERÍA DE RENDIMIENTO (2026-08-17): la subida por DMA mapeaba el origen con una
+ * llamada a `gsp_vmm_map` POR PÁGINA, y cada una acaba en `gsp_vmm_invalidate`:
+ * tres escrituras MMIO más un sondeo que, si no acierta a la primera, espera con
+ * `lx_mdelay(1)` — un milisegundo de granularidad. Un tensor de 44 MiB son 11 264
+ * invalidaciones de MMU, y el «camino sin copias» salía más caro que el rebote que
+ * venía a sustituir. Nadie lo había medido porque no había contadores.
+ *
+ * Escribir todos los PTE y barrer la TLB UNA vez al final es correcto por la misma
+ * razón que lo era antes: la GPU no lee de estas VAs hasta el `LAUNCH_DMA`, que se
+ * encola después. */
+int gsp_vmm_map_pages(struct gsp_vmm *v, uint64_t va, const uint64_t *phys,
+                      unsigned npages, enum gsp_vmm_target target)
+{
+    unsigned i;
+
+    if (!v || !v->ready || !phys || npages == 0) {
+        return -1;
+    }
+    if (va & (VMM_PAGE - 1)) {
+        lx_printk("nouveau-lx: lote de mapeo sin alinear va=0x%llx\n",
+                  (unsigned long long)va);
+        return -1;
+    }
+    if (va >= (1ull << VMM_VA_BITS) ||
+        (uint64_t)npages * VMM_PAGE > (1ull << VMM_VA_BITS) - va) {
+        lx_printk("nouveau-lx: VA 0x%llx fuera de los %u bits del espacio\n",
+                  (unsigned long long)va, VMM_VA_BITS);
+        return -1;
+    }
+    for (i = 0; i < npages; i++) {
+        if (phys[i] & (VMM_PAGE - 1)) {
+            lx_printk("nouveau-lx: página %u del lote sin alinear (0x%llx)\n", i,
+                      (unsigned long long)phys[i]);
+            return -1;
         }
-        pt_write(parent, lvl_index(0, at), gsp_vmm_pte_encode(phys + off, target, flags));
-        v->pages_mapped++;
+    }
+
+    for (i = 0; i < npages; i++) {
+        if (map_one(v, va + (uint64_t)i * VMM_PAGE, phys[i], target, 0u) != 0) {
+            return -1;
+        }
     }
 
     gsp_vmm_invalidate(v);
