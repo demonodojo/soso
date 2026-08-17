@@ -151,10 +151,17 @@ Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
    de tablas (`GSP_VMM_MAX_PT = 96`, hoja = 2 MiB con PTEs de 4 KiB, menos las ~42
    del bring-up y el grctx), y antes incluso la ventana de VA de G6 (256 MiB). Con
    planos f32 eso son DOS tensores. Ahora es el mínimo de los tres y el arranque lo
-   dice. **Lo siguiente aquí son páginas de 2 MiB**: `pt_write` deja a cero la mitad
-   baja del PDE dual de PD0 a propósito y ahí va el PTE grande (1 tabla = 512 MiB).
-   Invariante: una entrada de PD0 es PTE grande **o** PDE a la SPT, nunca las dos.
-12. **G7 — pesos cuantizados sin expandir.** `MATVQ` (`b"MATVQ"` + los campos de
+   dice.
+12. **Páginas de 2 MiB (`gsp_vmm_map_big`)**: el PTE grande va en la mitad **baja**
+   del PDE dual de PD0 (la alta es el PDE hacia la hoja), con el mismo encoding que
+   un PTE normal. Una tabla de PD0 cubre 512 MiB, así que las tablas dejan de ser el
+   límite y manda la ventana de VA: `G6_VA_LIMIT` sube a **8 GiB** y `G6_MAX_SLOTS`
+   a 512. Sólo para slots ≥ 2 MiB (`G6_BIG_MIN`); por debajo la granularidad se
+   comería la VRAM con los `norm`. **Invariante: PTE grande o PDE, nunca las dos** —
+   con ambas mitades válidas la MMU es indefinida; los dos caminos se comprueban
+   entre sí. `gsp_vmm_translate` entiende las grandes (es con lo que el bring-up
+   relee sus mapeos: sin eso diría «no traduce» de una VA mapeada).
+13. **G7 — pesos cuantizados sin expandir.** `MATVQ` (`b"MATVQ"` + los campos de
    `MATVF` + `u8 dtype`) con `matvec_q4k`/`matvec_q80`: la matriz vive en VRAM tal
    como está en disco. Tres guardias, porque los tres fallos posibles dan **texto
    plausible y ningún error**: `Resident::fmt` en userspace (subir crudo y lanzar
@@ -165,7 +172,7 @@ Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
    hostcheck). Los decodificadores viven en `sosomodel` para que el kernel pueda
    ejecutar `MATVQ` en su dispositivo software, que es la única cobertura numérica
    sin silicio.
-13. **Un blob SASS de más de 4 KiB desactivaba el camino de GPU ENTERO.**
+14. **Un blob SASS de más de 4 KiB desactivaba el camino de GPU ENTERO.**
    `gsp_compute_stage_sass` lo rechazaba y `gsp_compute_init` devolvía -1 — no sólo
    el kernel nuevo. Con CUDA 12.8 hasta `matvec` sale a 4608 B (`matvec_q4k`, 6400).
    Ahora trocea contra el rebote. Y `gsp_compute_set_mv_params` llevaba
@@ -173,8 +180,9 @@ Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
    casualidad estructural, y el primer `.cu` que cambie de firma habría escrito sus
    parámetros en los de otro.
 
-Validado en `scripts/l6-g3-gsp-hostcheck.sh` (90 casos: encoding, rechazos,
-`row_bytes`, y el amarre C↔Rust de la decodificación), **no en silicio**: hace falta
+Validado en `scripts/l6-g3-gsp-hostcheck.sh` (92 casos: encoding, rechazos,
+`row_bytes`, el amarre C↔Rust de la decodificación y las páginas de 2 MiB con su
+exclusión mutua), **no en silicio**: hace falta
 un ciclo VFIO en la GB205 con TinyLlama.
 
 **G1 superado (2026-07-25).** Con VT-d activo en la BIOS y el bind persistente puesto

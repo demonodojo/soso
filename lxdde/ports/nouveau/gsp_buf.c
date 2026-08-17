@@ -90,7 +90,10 @@ uint64_t gsp_buf_vram_free(const struct gsp_buf *b)
                  ? GSP_VMM_MAX_PT - b->vmm->pt_nr
                  : 0u;
     libres = libres > G6_PT_MARGEN ? libres - G6_PT_MARGEN : 0u;
-    tablas = (uint64_t)libres * (2ull * 1024ull * 1024ull);
+    /* Con páginas de 2 MiB una tabla de PD0 cubre 512 MiB, no 2 MiB: por eso las
+     * tablas dejan de ser el límite que muerde y pasa a mandar la ventana de VA. Se
+     * sigue contando porque los slots pequeños (`< G6_BIG_MIN`) sí gastan hojas. */
+    tablas = (uint64_t)libres * (512ull * 1024ull * 1024ull);
 
     if (ventana < pool) {
         pool = ventana;
@@ -106,11 +109,16 @@ uint64_t gsp_buf_alloc(struct gsp_buf *b, uint64_t size)
     struct gsp_buf_slot *s;
     uint64_t phys, va, need;
     unsigned i;
+    int big;
 
     if (!b || !b->ready || size == 0) {
         return 0;
     }
-    need = align_up(size, VRAM_PAGE);
+    /* Los slots grandes se alinean y redondean a 2 MiB para poder mapearse con un
+     * PTE por cada 2 MiB en vez de una tabla hoja por cada 2 MiB. Es lo que sube el
+     * techo de residencia de ~108 MiB a la ventana entera. */
+    big = size >= G6_BIG_MIN;
+    need = align_up(size, big ? G6_BIG_MIN : VRAM_PAGE);
 
     /* Primero reutilizar un slot liberado del mismo tamaño. */
     for (i = 0; i < G6_MAX_SLOTS; i++) {
@@ -126,19 +134,20 @@ uint64_t gsp_buf_alloc(struct gsp_buf *b, uint64_t size)
         return 0;
     }
 
-    phys = gsp_vram_alloc(b->vram, need, VRAM_PAGE);
+    phys = gsp_vram_alloc(b->vram, need, big ? G6_BIG_MIN : VRAM_PAGE);
     if (!phys) {
         return 0;
     }
 
-    va = align_up(b->va_next, VRAM_PAGE);
+    va = align_up(b->va_next, big ? G6_BIG_MIN : VRAM_PAGE);
     if (va >= G6_VA_LIMIT || need > G6_VA_LIMIT - va) {
         lx_printk("nouveau-lx: G6 — ventana de VA agotada\n");
         gsp_vram_return(b->vram, phys, need);
         return 0;
     }
 
-    if (gsp_vmm_map(b->vmm, va, phys, need, GSP_VMM_VRAM) != 0) {
+    if ((big ? gsp_vmm_map_big(b->vmm, va, phys, need, GSP_VMM_VRAM)
+             : gsp_vmm_map(b->vmm, va, phys, need, GSP_VMM_VRAM)) != 0) {
         lx_printk("nouveau-lx: G6 — fallo al mapear VRAM en VA 0x%llx\n",
                   (unsigned long long)va);
         gsp_vram_return(b->vram, phys, need);

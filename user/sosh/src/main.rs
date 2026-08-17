@@ -327,7 +327,13 @@ fn parse_sock_addr(s: &str) -> Option<abi::SockAddr> {
 }
 
 fn spawn_askd() {
-    let _ = sys::spawn(ASKD, "askd");
+    if let Ok((r, w)) = sys::pipe() {
+        let _ = sys::close(w);
+        let _ = sys::spawn_io(ASKD, "askd", r, r, r);
+        let _ = sys::close(r);
+    } else {
+        let _ = sys::spawn(ASKD, "askd");
+    }
 }
 
 fn connect_askd() -> Result<u64, i64> {

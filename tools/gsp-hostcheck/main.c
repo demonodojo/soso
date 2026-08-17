@@ -1320,6 +1320,112 @@ static int check_vmm(const struct gsp_libos *lo)
     printf("OK: PTE de sysmem, banderas 0x%llx (aper 2, PCF 0x11)\n",
            (unsigned long long)VMM_T_PTE_SYS_LOW);
 
+    /* PÁGINAS DE 2 MiB. Es lo que rompe el techo de residencia: con PTEs de 4 KiB
+     * cada tabla hoja cubre 2 MiB y `GSP_VMM_MAX_PT` son 96 (menos las ~42 del
+     * bring-up y el grctx), o sea ~108 MiB de pesos residentes como mucho. Una
+     * entrada de PD0 cubre 2 MiB **sin tabla hoja** y su tabla, 512 MiB.
+     *
+     * Lo que se fija aquí es exactamente lo que en hardware no dejaría rastro: que
+     * el PTE grande va en la mitad BAJA de la entrada (la alta es el PDE hacia la
+     * hoja), que tiene el mismo encoding que un PTE normal, que NO se crea tabla
+     * hoja, y que las dos mitades **no** pueden estar válidas a la vez — eso último
+     * es comportamiento indefinido de la MMU, o sea el fallo que sólo se vería como
+     * la GPU leyendo memoria ajena. */
+    {
+        const uint64_t va_big = VMM_T_VA + 0x4000000ull;   /* +64 MiB, alineado a 2 MiB */
+        const uint64_t pa_big = 0x0000000280000000ull;     /* 10 GiB, alineado a 2 MiB */
+        const uint64_t sz_big = 4ull * 1024ull * 1024ull;  /* dos páginas grandes */
+        unsigned tablas_antes = v.pt_nr;
+        unsigned paginas_antes = v.pages_mapped;
+        struct gsp_vmm_pt *pd0;
+        uint64_t bajo, alto;
+
+        if (gsp_vmm_map_big(&v, va_big, pa_big, sz_big, GSP_VMM_VRAM) != 0) {
+            printf("FALLO: gsp_vmm_map_big\n");
+            return -1;
+        }
+        /* Ni una tabla hoja: sólo las intermedias que falten hasta PD0. Con 4 KiB
+         * estos 4 MiB habrían costado DOS hojas. */
+        {
+            unsigned i, hojas = 0;
+
+            for (i = tablas_antes; i < v.pt_nr; i++) {
+                if (v.pt[i].level == 0u) {
+                    hojas++;
+                }
+            }
+            if (hojas != 0u) {
+                printf("FALLO: el mapeo grande creó %u tablas hoja\n", hojas);
+                return -1;
+            }
+        }
+        if (v.pages_mapped - paginas_antes != 2u * 512u) {
+            printf("FALLO: el mapeo grande contó %u páginas (esperaba 1024)\n",
+                   v.pages_mapped - paginas_antes);
+            return -1;
+        }
+        /* El PTE en crudo, en la mitad baja, y la alta intacta. */
+        pd0 = pt_find(&v, 1u, va_big);
+        if (!pd0) {
+            printf("FALLO: no hay tabla de PD0 para la página grande\n");
+            return -1;
+        }
+        bajo = pt_read_big(pd0, lvl_index(1u, va_big));
+        alto = pt_read(pd0, lvl_index(1u, va_big));
+        if ((bajo & ~VMM_T_ADDR_MASK) != VMM_T_PTE_VRAM_LOW ||
+            (bajo & VMM_T_ADDR_MASK) != pa_big) {
+            printf("FALLO: PTE grande 0x%llx (esperaba banderas 0x%llx y phys 0x%llx)\n",
+                   (unsigned long long)bajo, (unsigned long long)VMM_T_PTE_VRAM_LOW,
+                   (unsigned long long)pa_big);
+            return -1;
+        }
+        if (alto != 0ull) {
+            printf("FALLO: la mitad alta de la entrada de PD0 no está vacía (0x%llx) "
+                   "— con las dos válidas la MMU es indefinida\n",
+                   (unsigned long long)alto);
+            return -1;
+        }
+        /* Y que `gsp_vmm_translate` la entienda: si no, la función con la que el
+         * bring-up relee sus propios mapeos diría «no traduce» de una VA mapeada. */
+        if (gsp_vmm_translate(&v, va_big + 0x1000ull, &phys, &pte) != 0 ||
+            phys != pa_big || (pte & ~VMM_T_ADDR_MASK) != VMM_T_PTE_VRAM_LOW) {
+            printf("FALLO: translate de una página grande → 0x%llx (pte 0x%llx)\n",
+                   (unsigned long long)phys, (unsigned long long)pte);
+            return -1;
+        }
+        if (gsp_vmm_translate(&v, va_big + sz_big - 0x1000ull, &phys, &pte) != 0 ||
+            phys != pa_big + 0x200000ull) {
+            printf("FALLO: translate del final del mapeo grande → 0x%llx\n",
+                   (unsigned long long)phys);
+            return -1;
+        }
+        printf("OK: 2 páginas de 2 MiB en la mitad baja de PD0 — sin tabla hoja, "
+               "banderas 0x%llx, y translate las resuelve\n",
+               (unsigned long long)VMM_T_PTE_VRAM_LOW);
+
+        /* LA EXCLUSIÓN MUTUA, en los dos sentidos. */
+        if (gsp_vmm_map(&v, va_big, pa_big, 4096ull, GSP_VMM_VRAM) == 0) {
+            printf("FALLO: se colgó una tabla hoja de 4 KiB de una entrada que ya "
+                   "es página grande\n");
+            return -1;
+        }
+        if (gsp_vmm_map_big(&v, VMM_T_VA, VMM_T_VRAM_PA, 2ull * 1024ull * 1024ull,
+                            GSP_VMM_VRAM) == 0) {
+            printf("FALLO: se puso una página grande donde ya hay tabla hoja\n");
+            return -1;
+        }
+        /* Y los desalineados. */
+        if (gsp_vmm_map_big(&v, va_big + 4096ull, pa_big, sz_big, GSP_VMM_VRAM) == 0 ||
+            gsp_vmm_map_big(&v, va_big, pa_big + 4096ull, sz_big, GSP_VMM_VRAM) == 0 ||
+            gsp_vmm_map_big(&v, va_big, pa_big, 4096ull, GSP_VMM_VRAM) == 0) {
+            printf("FALLO: el mapeo grande acepta VA, física o tamaño sin alinear "
+                   "a 2 MiB\n");
+            return -1;
+        }
+        printf("OK: página grande y tabla hoja se excluyen en la misma entrada de "
+               "PD0 (los dos sentidos), y se rechaza lo no alineado a 2 MiB\n");
+    }
+
     /* Sólo lectura, en las dos aperturas. Lo que se prueba no es que la bandera
      * llegue, sino que **cambia el PCF y nada más**: un `ro` que además tocara la
      * apertura o el caché sería otra cosa mapeada de otra forma, y desde fuera se

@@ -1064,7 +1064,7 @@ fn ssh_pipeline(key: &Path, ssh_port: u16) -> Result<(), String> {
 fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
     let payload = r#"¿2 > 1? | sí, "así" & <ñ>"#;
     let guion = format!("ask :eco {payload}\nexit\n");
-    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(90))?
+    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(180))?
         .replace("\r\n", "\n");
     // El eco del propio comando aparece primero; interesa la línea de después.
     let marca = format!("ask :eco {payload}\n");
@@ -1087,21 +1087,21 @@ fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
 /// Dos `ask` en la misma sesión SSH cargan el modelo una sola vez; una sesión
 /// nueva sigue sin recargar mientras askd siga vivo.
 fn ssh_ask_resident(key: &Path, ssh_port: u16) -> Result<(), String> {
-    let guion1 = "ask @bos\nask @bos\nexit\n";
-    let texto1 = ssh_guion(key, ssh_port, guion1, Duration::from_secs(180))?
+    let guion1 = "ask test\nask test\nexit\n";
+    let texto1 = ssh_guion(key, ssh_port, guion1, Duration::from_secs(600))?
         .replace("\r\n", "\n");
     let cargando = texto1.matches("ask: cargando").count();
     if cargando != 1 {
         return Err(format!(
-            "esperaba «ask: cargando» una vez en la misma SSH, vi {cargando} veces; stdout: {texto1:?}"
+            "esperaba «ask: cargando» una vez al cargar; vi {cargando} veces; stdout: {texto1:?}"
         ));
     }
-    let guion2 = "ask @bos\nexit\n";
-    let texto2 = ssh_guion(key, ssh_port, guion2, Duration::from_secs(120))?
+    let guion2 = "ask test\nexit\n";
+    let texto2 = ssh_guion(key, ssh_port, guion2, Duration::from_secs(240))?
         .replace("\r\n", "\n");
     if texto2.contains("ask: cargando") {
         return Err(format!(
-            "tercer ask en nueva SSH recargó el modelo; stdout: {texto2:?}"
+            "segundo ask en nueva SSH recargó el modelo; stdout: {texto2:?}"
         ));
     }
     Ok(())

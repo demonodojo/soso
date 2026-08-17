@@ -25,6 +25,8 @@ static const struct {
 #define VMM_ROOT       (GSP_VMM_LEVELS - 1u)
 #define VMM_PT_BYTES   4096u
 #define VMM_PAGE       4096ull
+/* Página grande: la entrada de PD0 cubre 2 MiB (shift 21 en `g_level`). */
+#define VMM_BIG_PAGE   (2ull * 1024ull * 1024ull)
 #define VMM_VA_BITS    57u
 #define VMM_ADDR_MASK  0x000ffffffffff000ull   /* ADDRESS 51:12 */
 
@@ -129,8 +131,10 @@ static unsigned pde_aperture(uint64_t raw)
     return (unsigned)((raw >> 1) & 3u);
 }
 
-/* Escribe una entrada. El nivel 1 son 16 B: la mitad baja (páginas grandes) se
- * deja a cero —solo se usan páginas de 4 KiB— y la alta lleva el PDE. */
+/* Escribe un PDE. El nivel 1 son 16 B y la mitad ALTA es la que lleva el PDE hacia
+ * la tabla hoja; la baja se pone a cero porque es donde iría un PTE de página grande
+ * y las dos son mutuamente excluyentes. Pisar un PTE grande vivo NO puede pasar por
+ * aquí: `map_one` lo comprueba con `pt_read_big` y devuelve -1 antes de llegar. */
 static void pt_write(struct gsp_vmm_pt *pt, uint32_t index, uint64_t value)
 {
     uint64_t *slot = (uint64_t *)pt->mem.va;
@@ -141,6 +145,24 @@ static void pt_write(struct gsp_vmm_pt *pt, uint32_t index, uint64_t value)
     } else {
         slot[index] = value;
     }
+}
+
+/* La mitad BAJA de una entrada de PD0: ahí va el PTE de página grande (2 MiB).
+ * `pt_write`/`pt_read` usan la ALTA, que es el PDE hacia la tabla hoja. Las dos son
+ * mutuamente excluyentes: una entrada con las dos mitades válidas es comportamiento
+ * indefinido de la MMU, y por eso `map_big_one`/`map_one` se comprueban entre sí. */
+static void pt_write_big(struct gsp_vmm_pt *pt, uint32_t index, uint64_t value)
+{
+    uint64_t *slot = (uint64_t *)pt->mem.va;
+
+    slot[(unsigned long)index * 2u] = value;
+}
+
+static uint64_t pt_read_big(const struct gsp_vmm_pt *pt, uint32_t index)
+{
+    const uint64_t *slot = (const uint64_t *)pt->mem.va;
+
+    return slot[(unsigned long)index * 2u];
 }
 
 static uint64_t pt_read(const struct gsp_vmm_pt *pt, uint32_t index)
@@ -255,6 +277,14 @@ static int map_one(struct gsp_vmm *v, uint64_t at, uint64_t phys,
         struct gsp_vmm_pt *child;
         int created = 0;
 
+        /* Al llegar a PD0: si esos 2 MiB ya son una página grande, no se puede
+         * colgar una tabla hoja de la misma entrada (las dos mitades válidas es
+         * comportamiento indefinido de la MMU). */
+        if (lvl == 1u && pt_read_big(parent, lvl_index(1, at)) != 0) {
+            lx_printk("nouveau-lx: VA 0x%llx es página grande; no cabe hoja de 4 KiB\n",
+                      (unsigned long long)at);
+            return -1;
+        }
         child = pt_get(v, lvl - 1u, at, &created);
         if (!child) {
             return -1;
@@ -267,6 +297,50 @@ static int map_one(struct gsp_vmm *v, uint64_t at, uint64_t phys,
     }
     pt_write(parent, lvl_index(0, at), gsp_vmm_pte_encode(phys, target, flags));
     v->pages_mapped++;
+    return 0;
+}
+
+/* Mapea 2 MiB con UN PTE en la mitad baja de la entrada de PD0, sin tabla hoja.
+ *
+ * Es lo que rompe el techo de residencia: con PTEs de 4 KiB cada hoja cubre 2 MiB y
+ * `GSP_VMM_MAX_PT` son 96 (menos las ~42 del bring-up y el grctx), o sea ~108 MiB de
+ * pesos residentes como mucho — dos tensores en f32. Una entrada de PD0 cubre 2 MiB
+ * y su tabla, 512 MiB: con esto el modelo entero cabe y los pesos se suben una vez
+ * por inferencia en vez de por capa. */
+static int map_big_one(struct gsp_vmm *v, uint64_t at, uint64_t phys,
+                       enum gsp_vmm_target target, unsigned flags)
+{
+    struct gsp_vmm_pt *parent = pt_find(v, VMM_ROOT, at);
+    unsigned lvl;
+
+    if (!parent) {
+        lx_printk("nouveau-lx: sin directorio raíz\n");
+        return -1;
+    }
+    /* Se baja SÓLO hasta PD0 (nivel 1): la página grande vive en su entrada, no en
+     * una tabla hoja. */
+    for (lvl = VMM_ROOT; lvl > 1u; lvl--) {
+        struct gsp_vmm_pt *child;
+        int created = 0;
+
+        child = pt_get(v, lvl - 1u, at, &created);
+        if (!child) {
+            return -1;
+        }
+        if (created) {
+            pt_write(parent, lvl_index(lvl, at),
+                     gsp_vmm_pde_encode(child->mem.phys, GSP_VMM_SYSMEM));
+        }
+        parent = child;
+    }
+    /* Si esos 2 MiB ya tienen tabla hoja, no puede haber además página grande. */
+    if (pt_read(parent, lvl_index(1, at)) != 0) {
+        lx_printk("nouveau-lx: VA 0x%llx ya tiene tabla hoja; no cabe página grande\n",
+                  (unsigned long long)at);
+        return -1;
+    }
+    pt_write_big(parent, lvl_index(1, at), gsp_vmm_pte_encode(phys, target, flags));
+    v->pages_mapped += VMM_BIG_PAGE / VMM_PAGE;
     return 0;
 }
 
@@ -310,6 +384,37 @@ int gsp_vmm_map_flags(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t si
  * Escribir todos los PTE y barrer la TLB UNA vez al final es correcto por la misma
  * razón que lo era antes: la GPU no lee de estas VAs hasta el `LAUNCH_DMA`, que se
  * encola después. */
+int gsp_vmm_map_big(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
+                    enum gsp_vmm_target target)
+{
+    uint64_t off;
+
+    if (!v || !v->ready || size == 0) {
+        return -1;
+    }
+    if ((va | phys | size) & (VMM_BIG_PAGE - 1ull)) {
+        lx_printk("nouveau-lx: página grande sin alinear a 2 MiB va=0x%llx "
+                  "phys=0x%llx size=0x%llx\n",
+                  (unsigned long long)va, (unsigned long long)phys,
+                  (unsigned long long)size);
+        return -1;
+    }
+    if (va >= (1ull << VMM_VA_BITS) || size > (1ull << VMM_VA_BITS) - va) {
+        lx_printk("nouveau-lx: VA 0x%llx fuera de los %u bits del espacio\n",
+                  (unsigned long long)va, VMM_VA_BITS);
+        return -1;
+    }
+
+    for (off = 0; off < size; off += VMM_BIG_PAGE) {
+        if (map_big_one(v, va + off, phys + off, target, 0u) != 0) {
+            return -1;
+        }
+    }
+
+    gsp_vmm_invalidate(v);
+    return 0;
+}
+
 int gsp_vmm_map_pages(struct gsp_vmm *v, uint64_t va, const uint64_t *phys,
                       unsigned npages, enum gsp_vmm_target target)
 {
@@ -367,6 +472,18 @@ int gsp_vmm_translate(const struct gsp_vmm *v, uint64_t va, uint64_t *phys,
         entry = pt_read(pt, lvl_index(lvl, va));
         if (lvl == 0) {
             break;
+        }
+        /* PD0 puede terminar el recorrido: si la mitad baja de la entrada lleva un
+         * PTE válido, esos 2 MiB son UNA página grande y no hay tabla hoja debajo.
+         * Sin esto, la función que el bring-up usa para releer sus propios mapeos
+         * diría «no traduce» de una VA perfectamente mapeada. */
+        if (lvl == 1u) {
+            uint64_t grande = pt_read_big(pt, lvl_index(1u, va));
+
+            if (grande & 1ull) {
+                entry = grande;
+                break;
+            }
         }
         if (pde_aperture(entry) == 0) {
             return -1;      /* APERTURE_INVALID: no hay tabla debajo */

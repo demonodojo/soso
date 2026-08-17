@@ -834,9 +834,10 @@ nuevo. Ahora trocea contra el rebote. Y `gsp_compute_set_mv_params` llevaba
 casualidad estructural, y en cuanto un `.cu` cambiara de firma habría escrito los
 parámetros en los offsets de otro.
 
-Cobertura: 90 casos en `gsp-hostcheck` (tres nuevos: los parámetros de los kernels
+Cobertura: 92 casos en `gsp-hostcheck` (cinco nuevos: los parámetros de los kernels
 cuantizados escritos **por kernel**, la aritmética de `row_bytes` con las tallas
-reales y sus rechazos, y el amarre C↔Rust de la decodificación), el `src_off` con
+reales y sus rechazos, el amarre C↔Rust de la decodificación, y las páginas de 2 MiB
+con su exclusión mutua y sus desalineados), el `src_off` con
 su caso positivo en `+64` y sus rechazos, dos tests nuevos en `soso-llm-core`
 (matvec fusionado vs por filas, y `row_bytes`), tres de valores dorados en
 `sosomodel`, sonda `MATVQ` en `init test` con sus dos negativos, sonda de subida
@@ -849,12 +850,26 @@ sólo se ejercitaba con un modelo real de gigabytes.
 Sin probar en silicio: los dos kernels nuevos y el `src_off`. Hace falta un ciclo
 VFIO en la GB205; en Ampere sigue sin haber pool.
 
-Pendiente de ahí: **páginas de 2 MiB en el vaspace del GSP**. `pt_write` deja a
-cero la mitad baja del PDE dual de PD0 a propósito, y ahí va el PTE grande: una
-tabla cubriría 512 MiB en vez de 2 MiB, y TinyLlama Q4_K (~636 MiB, 154 tensores)
-cabría entero residente — los pesos se subirían una vez por inferencia y no por
-capa. Invariante crítico: una entrada de PD0 es PTE grande **o** PDE a la SPT,
-nunca las dos.
+**Y las páginas de 2 MiB, que es lo que sube el techo de verdad.** `pt_write`
+dejaba a cero la mitad baja del PDE dual de PD0 a propósito; ahí va el PTE grande.
+`gsp_vmm_map_big` la usa y una tabla de PD0 pasa a cubrir **512 MiB** en vez de los
+2 MiB de una hoja de 4 KiB, así que las tablas dejan de ser el límite que muerde y
+manda la ventana de VA — que sube de 256 MiB a **8 GiB** (sigue por debajo de 2^40,
+el techo del GPFIFO). `G6_MAX_SLOTS` sube de 64 a 512 por lo mismo: TinyLlama son
+154 tensores y 64 slots volvían a ser el techo, ahora en el kernel y con la misma
+cara de «sin sitio». Los slots de menos de 2 MiB siguen con páginas de 4 KiB: la
+granularidad se comería la VRAM con los `norm` de unos KiB, que son la mitad de los
+tensores. Con TinyLlama Q4_K el redondeo a 2 MiB cuesta ~38 % de VRAM (880 MiB por
+636 de pesos) y sobra de largo en 8 GiB de ventana y 11,9 GiB de pool; la
+alternativa no aguantaba ni una capa.
+
+**Invariante crítico, fijado en el hostcheck:** una entrada de PD0 es PTE grande
+**o** PDE hacia la tabla hoja, nunca las dos — con las dos mitades válidas el
+comportamiento de la MMU es indefinido, o sea la GPU leyendo memoria ajena y ni un
+error. Los dos caminos de mapeo se comprueban entre sí y devuelven -1 antes de
+pisar. Y `gsp_vmm_translate` ahora entiende las páginas grandes: es la función con
+la que el bring-up relee sus propios mapeos, y sin eso diría «no traduce» de una VA
+perfectamente mapeada.
 
 Y el otro pendiente, que el techo tapaba: en **Ampere** la cadena
 RM → VMM → canal/CE → pool sólo existe en la rama Blackwell/FMC de

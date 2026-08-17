@@ -213,7 +213,13 @@ fn read_line_fd(fd: u64, buf: &mut [u8]) -> Option<usize> {
 }
 
 fn spawn_askd() {
-    let _ = sys::spawn("/bin/soso-llm", "askd");
+    if let Ok((r, w)) = sys::pipe() {
+        let _ = sys::close(w);
+        let _ = sys::spawn_io("/bin/soso-llm", "askd", r, r, r);
+        let _ = sys::close(r);
+    } else {
+        let _ = sys::spawn("/bin/soso-llm", "askd");
+    }
 }
 
 fn connect_askd() -> Result<TcpFd, i64> {

@@ -154,6 +154,17 @@ int gsp_vmm_map_flags(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t si
 int gsp_vmm_map_pages(struct gsp_vmm *v, uint64_t va, const uint64_t *phys,
                       unsigned npages, enum gsp_vmm_target target);
 
+/* Mapea `size` bytes con PTEs de **2 MiB** en la mitad baja del PDE dual de PD0
+ * (todo alineado a 2 MiB). Una entrada cubre 2 MiB y su tabla 512 MiB, contra los
+ * 2 MiB de una tabla hoja de 4 KiB: es lo que rompe el techo de ~108 MiB de pesos
+ * residentes que imponía `GSP_VMM_MAX_PT`.
+ *
+ * INVARIANTE: una entrada de PD0 es PTE grande **o** PDE hacia la tabla hoja, nunca
+ * las dos — con las dos mitades válidas el comportamiento de la MMU es indefinido.
+ * Los dos caminos de mapeo se comprueban entre sí y devuelven -1 antes de pisar. */
+int gsp_vmm_map_big(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
+                    enum gsp_vmm_target target);
+
 /* Recorre las tablas ya construidas como lo haría la MMU y devuelve a qué
  * física traduce `va`. -1 si algún nivel falta o está inválido. Existe para
  * poder comprobar el mapeo sin la GPU: se construye por un camino y se lee por

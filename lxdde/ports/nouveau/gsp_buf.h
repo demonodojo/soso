@@ -28,8 +28,20 @@
  *
  * Detrás del grctx, no delante: el attribute CB pide alineación a su propio
  * tamaño redondeado a potencia de dos y esa ventana puede crecer con el chip. */
+/* 8 GiB de ventana, no 256 MiB. Los 256 MiB de antes ni se podían llenar: con PTEs
+ * de 4 KiB una tabla hoja cubre 2 MiB y `GSP_VMM_MAX_PT` son 96 menos las ~42 del
+ * bring-up y el grctx, o sea ~108 MiB de techo real. Con PTEs de 2 MiB
+ * (`gsp_vmm_map_big`) una tabla de PD0 cubre 512 MiB y lo que manda pasa a ser esta
+ * ventana: 8 GiB dejan TinyLlama Q4_K (~636 MiB) entero residente y sitio para
+ * modelos mayores. Sigue por debajo de 2^40, que es el techo del GPFIFO
+ * (`GSP_GPFIFO_VA_MAX`): la base son 512 GiB (bits 39:32 = 0x80) y esto llega a
+ * 0x82_8000_0000. */
 #define G6_VA_BASE   (GSP_VA_BASE + 0x80000000ull)
-#define G6_VA_LIMIT  (GSP_VA_BASE + 0x90000000ull) /* 256 MiB de ventana */
+#define G6_VA_LIMIT  (GSP_VA_BASE + 0x280000000ull) /* 8 GiB de ventana */
+/* Desde este tamaño el slot se mapea con páginas de 2 MiB. Por debajo no vale la
+ * pena: el desperdicio por granularidad se comería la VRAM con los `norm` de unos
+ * KiB, que son la mitad de los tensores de un modelo. */
+#define G6_BIG_MIN   (2ull * 1024ull * 1024ull)
 
 /* Búfer de rebote de las subidas: sysmem contigua, cacheada, con su propia VA.
  * 1 MiB = 256 páginas, una sola tabla hoja. El tamaño manda de verdad: la subida
@@ -72,7 +84,10 @@ struct gsp_buf_slot {
     int in_use;
 };
 
-#define G6_MAX_SLOTS 64u
+/* 512, no 64. Con los pesos cuantizados sin expandir cabe el modelo entero en la
+ * ventana, y TinyLlama son 154 tensores: 64 slots volvían a ser el techo, ahora en
+ * el kernel y con la misma cara de «sin sitio». */
+#define G6_MAX_SLOTS 512u
 
 int gsp_buf_init(struct gsp_buf *b, struct gsp_vram *vram, struct gsp_vmm *vmm,
                  struct gsp_ce *ce, uint64_t scratch_va, void *scratch_cpu,
