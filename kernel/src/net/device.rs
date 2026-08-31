@@ -261,7 +261,13 @@ impl TxToken for E1000Tx {
 }
 
 /// Backend de red elegido en `net::init`.
+///
+/// `Ninguno` no es un hueco: la pila se monta igual sin NIC para que exista la
+/// tabla TCP de usuario, y con ella el loopback de `127.0.0.1` (askd). Sin esto,
+/// `tcp_listen` devolvía EIO en una máquina sin driver de red y `ask` no
+/// levantaba nunca (placa real, 2026-08-31).
 pub enum NicDev {
+    Ninguno,
     #[cfg(feature = "drv-virtio-net")]
     Virtio(SmolDev),
     #[cfg(feature = "drv-e1000e")]
@@ -278,6 +284,7 @@ impl Device for NicDev {
 
     fn receive(&mut self, ts: Instant) -> Option<(NicRx, NicTx)> {
         match self {
+            NicDev::Ninguno => None,
             #[cfg(feature = "drv-virtio-net")]
             NicDev::Virtio(d) => d.receive(ts).map(|(r, t)| (NicRx::Virtio(r), NicTx::Virtio(t))),
             #[cfg(feature = "drv-e1000e")]
@@ -291,6 +298,7 @@ impl Device for NicDev {
 
     fn transmit(&mut self, ts: Instant) -> Option<NicTx> {
         match self {
+            NicDev::Ninguno => None,
             #[cfg(feature = "drv-virtio-net")]
             NicDev::Virtio(d) => d.transmit(ts).map(NicTx::Virtio),
             #[cfg(feature = "drv-e1000e")]
@@ -304,6 +312,7 @@ impl Device for NicDev {
 
     fn capabilities(&self) -> DeviceCapabilities {
         match self {
+            NicDev::Ninguno => eth_caps(),
             #[cfg(feature = "drv-virtio-net")]
             NicDev::Virtio(_) => eth_caps(),
             #[cfg(feature = "drv-e1000e")]

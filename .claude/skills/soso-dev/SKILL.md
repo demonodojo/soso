@@ -4,8 +4,9 @@ description: >-
   Build, run, test and debug the soso bare-metal OS in QEMU — cargo xtask,
   mkfs, SSH access, serial console, gdb and integration tests. Use when
   starting soso, compiling the kernel or userspace, running QEMU, connecting
-  by SSH, troubleshooting boot/network, reading SOSOLOG.TXT from the live USB
-  (`cargo xtask sosolog`), or running cargo xtask test.
+  by SSH, troubleshooting boot/network, reading SOSOLOG.TXT or the hwscan
+  report SOSODRV.TXT from the live USB (`cargo xtask sosolog [--drv]`), or
+  running cargo xtask test.
 ---
 
 # soso — Development workflow
@@ -35,6 +36,7 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
 | `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3 (p4 SOSOINSTALL 32 MiB al final). `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
+| `cargo xtask sosolog --drv [/dev/sdX]` | Igual pero muestra `SOSODRV.TXT`: el informe hwscan del último arranque (alias `--hwscan`) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
 | `cargo xtask fetch-hf` | Descargar GGUF de Hugging Face, convertir a `.som` y preparar `SOSO_MODELS_DIR` |
 | `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (denso o MoE Mixtral, host tool) |
@@ -81,7 +83,7 @@ sudo ./scripts/l6-wifi-vfio-test.sh   # VFIO AX211 en QEMU
 ```
 
 Config: `SOSOWIFI.TXT` (ESP) o `/etc/wifi.conf` (`ssid=`, `psk=`). Firmware en `rootfs/lib/firmware/iwlwifi-so-a0-gf-a0-*`.
-Kshell: `wifi scan`, `wifi status`, `wifi connect <ssid> [psk]`, `hwscan` (informe PCI → serie y `SOSODRV.TXT` en live).
+Kshell: `wifi scan`, `wifi status`, `wifi connect <ssid> [psk]`, `hwscan` (informe PCI completo → serie y `SOSODRV.TXT` en live; lee la foto cacheada del bus, no lo reenumera).
 
 ## Perfiles de drivers (`SOSO_DRIVERS` / `--drivers`)
 
@@ -89,11 +91,24 @@ Kshell: `wifi scan`, `wifi status`, `wifi connect <ssid> [psk]`, `hwscan` (infor
 |--------|-----------------|-----|
 | `all` (default) | `drv-all` | Desarrollo y `cargo xtask test` |
 | `qemu` | virtio-blk, virtio-net | Imagen mínima QEMU |
-| `live-usb` | virtio + nvme + usb + live-disk + nouveau + iwlwifi | Pendrive live (GPU + WiFi) |
+| `live-usb` | virtio + **e1000e** + nvme + usb + live-disk + nouveau + iwlwifi | Pendrive live (ethernet + GPU + WiFi) |
 
-Tras arrancar en hardware con kernel mínimo, `hwscan` lista dispositivos PCI y
-drivers ausentes. En host: `cargo xtask fit-drivers /media/.../SOSODRV.TXT`
-(o `--esp /dev/sdX1`) regenera el kernel con los drivers necesarios.
+Tras arrancar en hardware, `hwscan` lista **todos** los dispositivos PCI —con
+driver o sin él— y destaca al final los controladores de red que nadie reclama:
+
+```
+hwscan: 8 dispositivos PCI, 3 con driver conocido
+drv: 00:04.0 1af4:1000 virtio-net compilado clase 02:00:00 ethernet
+drv: 00:1f.0 8086:2918 sin-driver desconocido clase 06:01:00 puente
+hwscan: RED SIN DRIVER 00:1f.6 8086:15fc (ethernet)
+```
+
+Sale por serie en cada arranque y, en live, a `SOSODRV.TXT` (léelo con
+`cargo xtask sosolog --drv`). En host: `cargo xtask fit-drivers
+/media/.../SOSODRV.TXT` (o `--esp /dev/sdX1`) regenera el kernel con los drivers
+necesarios. Si tu NIC sale como `sin-driver`, ese `VVVV:DDDD` es lo que decide si
+basta con ampliar la lista de IDs de `drivers/registry.rs` (el `e1000e` nativo
+sólo cubre `8086:10d3/100e/10f5/10a4`, las tarjetas de QEMU) o hay que portar uno.
 
 Ports lxdde externos: repo con `source.list` (+ opcional `driver.toml`,
 `firmware/`). `cargo xtask driver-add <url>` los registra en
@@ -110,6 +125,7 @@ cargo xtask sosolog              # auto-detecta el USB live
 cargo xtask sosolog /dev/sdX     # disco entero → p1
 cargo xtask sosolog /dev/sdX1    # ESP concreta
 cargo xtask sosolog | less
+cargo xtask sosolog --drv        # SOSODRV.TXT (hwscan) en vez del log
 ```
 
 No uses `sudo cargo`: root no tiene rustup. La xtask pide `sudo` solo para
@@ -166,6 +182,12 @@ cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 
 # End-to-end (host tests ∥ build user/kernel, luego 4 shards QEMU en paralelo)
 cargo xtask test
+# LÍNEA BASE (2026-08-31): sobre main limpio fallan siempre estos dos, y sólo estos:
+#   [sys]        ask: el texto llega literal
+#   [llm-dense]  ask: modelo residente (carga una vez, reconexión SSH)
+# Los dos por el gotcha de stdin por SSH del arnés — en su stdout se ve que el
+# comando SÍ se ejecutó. Si sólo fallan esos, la pasada está limpia; cualquier
+# otro es tuyo. Ante la duda: `git stash` y correr la suite sobre el árbol base.
 
 # QEMU: auto `-accel kvm` si /dev/kvm legible; forzar TCG para comparar:
 SOSO_QEMU_ACCEL=tcg cargo xtask test
@@ -270,7 +292,6 @@ and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: a
 | Teclas no coinciden (QWERTY vs ñ/¿) | Mapa por defecto **es**; `kbd us` en kernel-shell para teclado americano/QEMU |
 | La máquina se arrastra tras usar `soso-llm`/`ask` | En askd el `ThreadPool` se suelta tras cada respuesta (`drop_pool`); si giran al 100 %, revisar `pool.rs` |
 | `ask` recarga en cada pregunta | Debe haber un solo askd en `:7420`; la segunda pregunta no debe mostrar «ask: cargando» salvo cambio de modelo o presión de RAM |
-| `ask` recarga en cada pregunta | Debe haber un solo askd en `:7420`; la segunda pregunta no debe mostrar «ask: cargando» salvo cambio de modelo o presión de RAM |
 | `Could not set up host forwarding rule tcp::2222` | Puerto ocupado; `pkill qemu-system-x86` y relanzar |
 | SSH output desalineada | Kernel debe enviar CRLF en `ssh::tx_push` (tty cruda) |
 | SSH no reconecta tras Ctrl-C | Kernel debe hacer `reset_socket` en CloseWait/TimeWait |
@@ -282,3 +303,6 @@ and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: a
 | L6-H: connection refused :11400 | Start cuda-proxy; llama-server must answer `/health` on :8080 |
 | L6-H: no tok/s from soso | Host is `10.0.2.2` from QEMU guest; model name must match loaded GGUF |
 | No se ve `SOSOLOG.TXT` en el USB | Está en la ESP (p1), que Linux no monta; `cargo xtask sosolog` |
+| El live se queda en bucle «no encuentra la red» | `net::poll()` resondeaba el bus entero por vuelta al no haber NIC. Ya está: `try_attach` va limitada a 1/s y las sondas cachean. Si vuelve a pasar, mira qué `println!` se repite antes de teorizar |
+| La suite se cuelga (QEMU vivo, log de serie parado hace minutos) | `kill <pid>` de ese QEMU concreto; el arnés recoge y sigue. Suele ser el shard `llm-dense` |
+| Un cambio en el arranque cuelga un shard minutos después | ¿Has metido un `pci::enumerate()` post-init? Reescribe los BAR de dispositivos vivos. Usa `pci::devices()` (ver `soso-architecture`) |

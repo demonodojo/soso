@@ -37,7 +37,12 @@ const FALLBACK_GW: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
 enum BackendKind {
     Wired,
     Wifi,
+    /// Sin NIC: la pila existe sólo para el loopback de usuario.
+    Ninguno,
 }
+
+/// MAC administrada localmente para la pila sin NIC. Nunca sale a un cable.
+const MAC_SIN_NIC: [u8; 6] = [0x02, 0x50, 0x53, 0x4f, 0x53, 0x4f];
 
 struct NetStack {
     iface: Interface,
@@ -152,10 +157,14 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
         tcp::SocketBuffer::new(vec![0; 16384]),
     ));
 
-    println!(
-        "net: dhcp… (mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-    );
+    if backend == BackendKind::Ninguno {
+        println!("net: sin NIC — pila sólo para loopback (127.0.0.1)");
+    } else {
+        println!(
+            "net: dhcp… (mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+    }
     ssh::init();
     let dhcp_started = if dhcp_now { now() } else { Instant::from_millis(0) };
     NET.call_once(|| {
@@ -181,10 +190,13 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
 const RESONDEO_MS: u64 = 1000;
 static ULTIMO_SONDEO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Intenta crear la pila si hay NIC disponible (WiFi ALIVE incluido).
+/// ¿Hay ya una NIC de verdad detrás de la pila? (la pila de loopback no cuenta)
+static NIC_REAL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Intenta enganchar una NIC de verdad (WiFi ALIVE incluido).
 /// Limitada en frecuencia: para forzar el intento, `attach_now()`.
 pub fn try_attach() {
-    if NET.get().is_some() {
+    if NIC_REAL.load(core::sync::atomic::Ordering::Relaxed) {
         return;
     }
     let ahora = pit::uptime_ms();
@@ -197,16 +209,55 @@ pub fn try_attach() {
 }
 
 /// Sondeo inmediato, sin esperar al reintento (arranque y asociación WiFi).
+///
+/// Si no hay NIC monta igualmente la pila con backend `Ninguno`: el TCP de
+/// usuario vive dentro de `NetStack`, así que sin ella `tcp_listen` falla y el
+/// loopback —o sea, `ask`— no existe. Si más tarde aparece una NIC de verdad
+/// (el WiFi que asocia tarde), se sustituye el dispositivo **en sitio**, sin
+/// tirar los sockets: el askd que ya estaba escuchando sigue escuchando.
 pub fn attach_now() {
-    if NET.get().is_some() {
+    if NIC_REAL.load(core::sync::atomic::Ordering::Relaxed) {
         return;
     }
     let Some((mac, dev, backend)) = net_backend() else {
+        if NET.get().is_none() {
+            attach_stack(MAC_SIN_NIC, NicDev::Ninguno, BackendKind::Ninguno, false);
+        }
         return;
     };
     let dhcp_now = backend == BackendKind::Wired
         || (backend == BackendKind::Wifi && wifi_link_up());
-    attach_stack(mac, dev, backend, dhcp_now);
+    NIC_REAL.store(true, core::sync::atomic::Ordering::Relaxed);
+    match NET.get() {
+        None => attach_stack(mac, dev, backend, dhcp_now),
+        Some(net) => sustituir_nic(net, mac, dev, backend, dhcp_now),
+    }
+}
+
+/// Cambia el dispositivo de una pila ya montada (era `Ninguno`) por una NIC real.
+fn sustituir_nic(
+    net: &Mutex<NetStack>,
+    mac: [u8; 6],
+    dev: NicDev,
+    backend: BackendKind,
+    dhcp_now: bool,
+) {
+    let mut n = net.lock();
+    n.dev = dev;
+    n.mac = mac;
+    n.backend = backend;
+    n.iface
+        .set_hardware_addr(EthernetAddress(mac).into());
+    n.configured = false;
+    n.dhcp_enabled = dhcp_now;
+    n.dhcp_started = now();
+    clear_ipv4_config(&mut n.iface);
+    let dhcp = n.dhcp;
+    n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
+    println!(
+        "net: NIC encontrada tras arrancar sin ella (mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
 }
 
 #[cfg(feature = "lxdde")]
@@ -221,9 +272,6 @@ fn wifi_link_up() -> bool {
 
 pub fn init() {
     attach_now();
-    if NET.get().is_none() {
-        println!("net: sin NIC");
-    }
 }
 
 /// Tras asociar WiFi: reinicia DHCP y habilita el cliente.

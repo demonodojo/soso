@@ -60,6 +60,7 @@ soso/
 | `drivers/kbd.rs` | PS/2 + USB HID → cola tty; mapa **es** por defecto (`keymap.rs`), AltGr, teclas muertas |
 | `drivers/fb.rs` | Consola GOP: buffer UTF-8 con glifos Latin-1 + € |
 | `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
+| `drivers/pci.rs` | ECAM + MSI-X. `devices()` = foto cacheada del bus (usar esta); `enumerate()` reescribe BARs, sólo en arranque |
 | `drivers/espfat.rs` | Localiza ficheros 8.3 contiguos en la ESP del live; lo comparten `fatlog` (SOSOLOG), `drvlog` (SOSODRV) y `bootreq` (SOSOBOOT) |
 | `xtask/src/sosolog.rs` | Host: monta la ESP del USB, imprime `SOSOLOG.TXT` y desmonta (`cargo xtask sosolog`) |
 | `fs/` | sosofs (blk0) + sosomfs (blk1); VFS enruta `/models/*` |
@@ -124,11 +125,11 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 
 - smoltcp TCP/IPv4 + cliente DHCPv4 en kernel; fallback estático 10.0.2.15/24 solo con virtio-net/e1000e (no en WiFi)
 - **Loopback userspace:** `tcp_connect(127.0.0.1:port)` → par de búferes kernel contra un `tcp_listen` del mismo puerto (sin paquetes ni iface loopback); multi-accept; `EADDRINUSE` / `ECONNREFUSED`
-- **Loopback userspace:** `tcp_connect(127.0.0.1:port)` → par de búferes kernel contra un `tcp_listen` del mismo puerto (sin paquetes ni iface loopback); multi-accept; `EADDRINUSE` / `ECONNREFUSED`
 - **WiFi (lxdde/iwlwifi):** Intel AX211 (`8086:7f70/51f0/54f0`); driver first-party en `lxdde/ports/iwlwifi/` (TLV fw, context-info gen3, MVM scan/assoc/TX); mini-supplicant WPA2 EAPOL en `net/wifi_wpa.rs`; backend `NicDev::LxWifi`; credenciales `SOSOWIFI.TXT` (ESP live) o `/etc/wifi.conf`; DHCP tras asociación (sin fallback slirp); kshell `wifi scan|status|connect`
-- **Live USB:** perfil `live-usb` = nouveau + iwlwifi (`SOSO_LXDDE_MODE=nouveau,iwlwifi`); SSH :22 tras lease DHCP
-- **Drivers modulares:** features Cargo `drv-*` + `drv-all` (default); `drivers/registry.rs`; kshell `hwscan`; `SOSODRV.TXT` en ESP live; host `SOSO_DRIVERS`, `cargo xtask fit-drivers`, `cargo xtask driver-add`
+- **Live USB:** perfil `live-usb` = virtio + nvme + usb + live-disk + **e1000e** + nouveau + iwlwifi (`SOSO_LXDDE_MODE=nouveau,iwlwifi`); SSH :22 tras lease DHCP. El `e1000e` nativo se inicializa salvo que el puerto lxdde `e1000e` lleve ese mismo chip (`if !modes.e1000e` en main.rs) — gatearlo también por `modes.iwlwifi`, como estaba, dejaba la ethernet muerta en el live, donde el iwlwifi siempre está activo
+- **hwscan:** `registry.rs` emite **una línea por dispositivo PCI**, con driver o sin él: `drv: <bdf> <vid>:<did> <driver> <compilado|ausente|desconocido> clase <cc>:<ss>:<pi> <texto>`, y destaca al final cada controlador de red (clase `02`) que nadie reclama (`hwscan: RED SIN DRIVER …`). Se imprime en **todos** los arranques; antes sólo salía si faltaba un driver *conocido*, o sea que el hardware sin regla —el que hay que diagnosticar— no dejaba rastro. Los cuatro primeros campos son contrato: `xtask::drivers::parse_hwscan_line` los lee por posición
 - **Drivers modulares:** features Cargo `drv-virtio-blk`, `drv-virtio-net`, `drv-e1000e`, `drv-nvme`, `drv-usb`, `drv-gpu-nvidia`, `drv-live-disk`; meta `drv-all` (default). Metadatos PCI en `drivers/registry.rs`; `hwscan` en kshell; informe en `SOSODRV.TXT` (ESP live). Host: `SOSO_DRIVERS=qemu|live-usb|all` o `--drivers`; `cargo xtask fit-drivers <informe>` reempaqueta; `cargo xtask driver-add <git-url>` registra ports lxdde externos en `lxdde/ports-extern/`
+- **Enganche de la pila:** `net::attach_now()` sondea backends y monta smoltcp; `net::try_attach()` es la versión limitada a un intento/segundo que llama `poll()`. La distinción importa: `poll()` entra por cada vuelta del bucle ocioso y por cada tick, y mientras no haya NIC el sondeo se repetía entero — en placa real, sin virtio-net, eso era una reenumeración del ECAM y un «net: no se encontró ningún virtio-net» por vuelta, que parecía un cuelgue del live (2026-08-31). Las sondas de dispositivo (`virtio_net::init`) cachean su resultado con `Once`
 - NIC polled (no IRQ-driven RX)
 - sunset: curve25519 + ed25519 + chacha20-poly1305
 - Auth: ed25519 public key only (`/etc/authorized_key`, 32 raw bytes)
@@ -329,6 +330,23 @@ primera tecla (2026-08-16): `kick_if_tty_waiting` (PROCS), `usb_storage::poll_ke
 de `fatlog` cada 2 s) y `log_scancode_raw` (consola). **QEMU no lo ve**: las pruebas
 entran por SSH y la IRQ 1 nunca se dispara. Los scancodes de diagnóstico se leen ahora
 con `kbd` en la kernel-shell.
+
+## PCI: enumerar el bus no es una lectura pasiva
+
+`pci::enumerate()` mide cada BAR0 por el método estándar — escribe `0xffff_ffff`,
+lee la máscara y restaura (`bar_size`, drivers/pci.rs). Durante ese instante el
+BAR decodifica en una dirección falsa: con las colas de un dispositivo ya en
+marcha, cualquier MMIO o DMA en vuelo cae en el hueco. En `pci::init()` es
+inocuo (nadie ha programado nada); **después de levantar los drivers, no**.
+
+Regla: todo lo que sólo quiera *mirar* el bus usa **`pci::devices()`**, la foto
+que `init()` toma una vez y cachea. El hwscan lee de ahí. Se aprendió haciendo
+que `print_hwscan()` corriera en todos los arranques (2026-08-31): cuatro
+barridos con virtio-blk y virtio-net vivos colgaban el shard `llm-dense` de la
+suite a los pocos minutos, con la máquina respondiendo al ping pero no al disco.
+Quedan seis llamantes de `enumerate()` post-arranque (usb_storage, nvme, gpu,
+nvidia_probe, e1000e, lxdde/pci): corren en secuencia durante el boot y sin
+tráfico, pero son la misma clase de bug.
 
 ## Coding constraints
 

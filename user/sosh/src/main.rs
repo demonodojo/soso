@@ -500,12 +500,12 @@ fn ejecutar_ask(texto: &str) -> Option<u8> {
     if texto.is_empty() {
         return repl_ask();
     }
-    let code = preguntar_via_askd(texto);
-    if code != 0 {
-        Some(code)
-    } else {
-        None
-    }
+    // Un `ask` que falla NO mata la shell: `Some(_)` aquí es «sal del bucle», y
+    // devolver el código del comando hacía que init relanzara sosh en cada
+    // pregunta fallida — en placa sin red se veía «sosh murió con código 1»
+    // detrás de cada intento (2026-08-31).
+    let _ = preguntar_via_askd(texto);
+    None
 }
 
 /// Ejecuta una línea. Some(código) = salir de la shell.
