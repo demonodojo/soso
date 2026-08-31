@@ -28,6 +28,8 @@ pub mod nvidia_compute;
 pub mod nvidia_probe;
 #[cfg(feature = "drv-nvme")]
 pub mod nvme;
+#[cfg(feature = "drv-rtl8169")]
+pub mod rtl8169;
 pub mod pci;
 pub mod raw_disk;
 pub mod registry;

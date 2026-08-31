@@ -286,6 +286,15 @@ pub const O_CREAT: u64 = 4;
 
 /// Valor de stdio en `SpawnIo` para usar la tty del proceso (fd 0/1/2).
 pub const FD_INHERIT_TTY: u64 = u64::MAX;
+/// Como `FD_INHERIT_TTY`, pero ata esos fds a la consola serie, no a la del padre.
+/// Sirve para demonios (askd) lanzados desde una sesión SSH: su stdout acaba
+/// en el puerto serie y en `SOSOLOG.TXT`, no mezclado con la sesión remota.
+pub const FD_SERIAL_TTY: u64 = u64::MAX - 1;
+
+/// ¿`spec` de stdio es un centinela (no un fd del padre)?
+pub fn stdio_es_tty(spec: u64) -> bool {
+    spec == FD_INHERIT_TTY || spec == FD_SERIAL_TTY
+}
 
 // ---- seek ----
 

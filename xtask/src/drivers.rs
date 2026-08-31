@@ -18,6 +18,7 @@ const NATIVE_FEATURES: &[&str] = &[
     "drv-virtio-blk",
     "drv-virtio-net",
     "drv-e1000e",
+    "drv-rtl8169",
     "drv-nvme",
     "drv-usb",
     "drv-gpu-nvidia",
@@ -79,6 +80,7 @@ pub fn preset_live_usb() -> DriverProfile {
             // Ethernet cableada en placa real: sin esto el live sólo tenía
             // virtio-net (que en hardware no existe) y el WiFi.
             "drv-e1000e".into(),
+            "drv-rtl8169".into(),
             "drv-nvme".into(),
             "drv-usb".into(),
             "drv-live-disk".into(),

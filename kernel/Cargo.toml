@@ -13,6 +13,7 @@ drv-all = [
     "drv-virtio-blk",
     "drv-virtio-net",
     "drv-e1000e",
+    "drv-rtl8169",
     "drv-nvme",
     "drv-usb",
     "drv-gpu-nvidia",
@@ -21,6 +22,7 @@ drv-all = [
 drv-virtio-blk = []
 drv-virtio-net = []
 drv-e1000e = []
+drv-rtl8169 = []
 drv-nvme = []
 drv-usb = []
 drv-gpu-nvidia = []

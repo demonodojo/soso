@@ -169,6 +169,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         drivers::nvidia_probe::init();
         drivers::nvidia_compute::init();
     }
+    // Sondeo del Realtek: aún no da red, sólo identifica el chip para el
+    // bring-up (ver drivers/rtl8169.rs).
+    #[cfg(feature = "drv-rtl8169")]
+    drivers::rtl8169::probe();
     println!("boot: red");
     net::init();
     #[cfg(feature = "lxdde")]

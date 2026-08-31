@@ -399,6 +399,7 @@ fn load_model(
     role: PipelineRole,
     layer_start: u32,
     layer_end: u32,
+    staging: bool,
 ) -> Result<ModelBundle, u8> {
     let base = model_base(name);
     let manifest_path = format!("{base}/manifest.som");
@@ -443,7 +444,9 @@ fn load_model(
 
     let inner = MmapTensorSource::new(format!("{base}/shards"), index, staging::SyscallMapper);
     let mut source = StagedSource::new(inner);
-    source.enable_worker();
+    if staging {
+        source.enable_worker();
+    }
     Ok(ModelBundle {
         rt,
         source,
@@ -493,7 +496,7 @@ fn run_distributed_head(
         return 1;
     }
     let head = plan.head_segment();
-    let mut bundle = match load_model(name, PipelineRole::Head, head.layer_start, head.layer_end) {
+    let mut bundle = match load_model(name, PipelineRole::Head, head.layer_start, head.layer_end, true) {
         Ok(b) => b,
         Err(c) => return c,
     };
@@ -566,7 +569,7 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
         }
     };
     let role = PipelineRole::from_layer_range(layer_start, layer_end, num_layers);
-    let mut bundle = match load_model(name, role, layer_start, layer_end) {
+    let mut bundle = match load_model(name, role, layer_start, layer_end, true) {
         Ok(b) => b,
         Err(c) => return c,
     };
@@ -659,7 +662,7 @@ pub(crate) fn preparar_sesion(
     let io0 = read_iostat();
     let t_carga = sys::uptime_ms();
     let num_layers = read_num_layers(name).unwrap_or(4);
-    let mut bundle = load_model(name, PipelineRole::Full, 0, num_layers)?;
+    let mut bundle = load_model(name, PipelineRole::Full, 0, num_layers, with_pool)?;
     // La carga en frío va aparte de tok/s: `generado` sólo cronometra el
     // decode, y el disco se gasta casi entero antes de que ese reloj arranque.
     // Medirlas juntas es lo que hacía invisible el coste de E/S.
@@ -825,6 +828,10 @@ pub(crate) fn generar_tokens(
     fd_out: Option<u64>,
     drop_pool: bool,
 ) -> u8 {
+    // Pool sólo durante generate: askd lo tira al acabar (`drop_pool`)
+    // para no dejar giradores entre preguntas. El prefetch de askd es
+    // síncrono (`disable_worker`); pool + staging + sosh en el socket
+    // dejaban `wait` en `done` para siempre (2026-08-31).
     if sesion.pool.is_none() {
         sesion.pool = Some(ThreadPool::new());
     }
@@ -839,38 +846,69 @@ pub(crate) fn generar_tokens(
         .map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
     let bundle = &mut sesion.bundle;
     let mut decoder = StreamDecoder::new();
+    let mut streamed = alloc::string::String::new();
     let t0 = sys::uptime_ms();
-    let result = bundle.rt.generate_stream_planned(
-        &mut bundle.source,
-        prompt_tokens,
-        max_new,
-        bundle.tokenizer.eos(),
-        sampler,
-        |t| {
-            let s = decoder.push(&bundle.tokenizer, t);
-            if !s.is_empty() {
-                if let Some(fd) = fd_out {
-                    let _ = sys::write_all(fd, s.as_bytes());
-                } else {
+    let eos = bundle.tokenizer.eos();
+    // askd: sin clock_ms/refresh_mem (syscall en el matvec AVX2) y sin
+    // planificador por token. `run` sigue con el camino cronometrado.
+    let result = if fd_out.is_some() {
+        bundle.rt.generate_stream_par(
+            &mut bundle.source,
+            prompt_tokens,
+            max_new,
+            eos,
+            sampler,
+            |t| {
+                let s = decoder.push(&bundle.tokenizer, t);
+                if !s.is_empty() {
+                    streamed.push_str(&s);
+                }
+            },
+            par,
+            &mut gpu_ref,
+        )
+    } else {
+        bundle.rt.generate_stream_planned(
+            &mut bundle.source,
+            prompt_tokens,
+            max_new,
+            eos,
+            sampler,
+            |t| {
+                let s = decoder.push(&bundle.tokenizer, t);
+                if !s.is_empty() {
                     libsoso::print!("{s}");
                 }
-            }
-        },
-        par,
-        &mut gpu_ref,
-        clock_ms,
-        read_mem_snapshot,
-    );
+            },
+            par,
+            &mut gpu_ref,
+            clock_ms,
+            read_mem_snapshot,
+        )
+    };
     match result {
         Ok(tokens) => {
             let elapsed_ms = (sys::uptime_ms() - t0).max(1) as u64;
             let resto = decoder.finish();
             if !resto.is_empty() {
-                if let Some(fd) = fd_out {
-                    let _ = sys::write_all(fd, resto.as_bytes());
+                if fd_out.is_some() {
+                    streamed.push_str(&resto);
                 } else {
                     libsoso::print!("{resto}");
                 }
+            }
+            if let Some(fd) = fd_out {
+                // Un NUL o un C0 en la respuesta se cuela al canal SSH y el
+                // cliente cierra la sesión (tiny sintético lo hace a menudo).
+                streamed.retain(|c| {
+                    c == '\n' || c == '\t' || (!c.is_control() && c != '\u{FFFD}')
+                });
+                if !streamed.ends_with('\n') {
+                    streamed.push('\n');
+                }
+                let mut bytes = streamed.into_bytes();
+                bytes.push(crate::ask::PROTO_FIN);
+                let _ = sys::write_all(fd, &bytes);
             }
             if fd_out.is_none() {
                 println!();

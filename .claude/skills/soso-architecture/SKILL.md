@@ -103,8 +103,9 @@ El askd carga el modelo en la **primera pregunta** y lo mantiene entre consola, 
 y reconexiones; sólo recarga al cambiar de modelo, si `refresh_mem` lo exige, o al
 `halt`. Protocolo: línea de pregunta → chunks de texto → byte `0xFF` (fin). Un
 generate a la vez; el listen sigue aceptando. `:eco` va local sin askd. Arranque
-perezoso: el cliente conecta y, si falla, `spawn("/bin/soso-llm", "askd")` sin
-`wait`. Kernel: `tcp_connect(127.0.0.1:port)` empareja con un listener userspace sin
+perezoso: el cliente conecta y, si falla, `spawn_io(..., FD_SERIAL_TTY)` sin
+`wait` — el askd queda atado a la consola serie (y a `SOSOLOG.TXT`), no a la
+sesión SSH de quien lo lanzó. Kernel: `tcp_connect(127.0.0.1:port)` empareja con un listener userspace sin
 NIC loopback (`kernel/src/net/loopback.rs`). `soso-llm run` no usa askd (carga en
 frío). Config en `/etc/llm.conf`, que **no fija modelo por defecto**: se
 usa el primero de `/models`, y el empaquetado live (`package-usb-live` /
@@ -124,7 +125,7 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 ## Network & SSH
 
 - smoltcp TCP/IPv4 + cliente DHCPv4 en kernel; fallback estático 10.0.2.15/24 solo con virtio-net/e1000e (no en WiFi)
-- **Loopback userspace:** `tcp_connect(127.0.0.1:port)` → par de búferes kernel contra un `tcp_listen` del mismo puerto (sin paquetes ni iface loopback); multi-accept; `EADDRINUSE` / `ECONNREFUSED`
+- **Loopback userspace:** `tcp_connect(127.0.0.1:port)` → par de búferes kernel contra un `tcp_listen` del mismo puerto (sin paquetes ni iface loopback); multi-accept; `EADDRINUSE` / `ECONNREFUSED`. Cerrar un extremo = EOF en el otro (`tcp_is_connected` mira `peer_closed`); si no, `read_timeout` devolvía EAGAIN para siempre y sosh se quedaba colgada cuando askd moría. Cerrar un extremo = EOF en el otro (`tcp_is_connected` mira `peer_closed`); si no, `read_timeout` devolvía EAGAIN para siempre y sosh se quedaba colgada cuando askd moría
 - **WiFi (lxdde/iwlwifi):** Intel AX211 (`8086:7f70/51f0/54f0`); driver first-party en `lxdde/ports/iwlwifi/` (TLV fw, context-info gen3, MVM scan/assoc/TX); mini-supplicant WPA2 EAPOL en `net/wifi_wpa.rs`; backend `NicDev::LxWifi`; credenciales `SOSOWIFI.TXT` (ESP live) o `/etc/wifi.conf`; DHCP tras asociación (sin fallback slirp); kshell `wifi scan|status|connect`
 - **Live USB:** perfil `live-usb` = virtio + nvme + usb + live-disk + **e1000e** + nouveau + iwlwifi (`SOSO_LXDDE_MODE=nouveau,iwlwifi`); SSH :22 tras lease DHCP. El `e1000e` nativo se inicializa salvo que el puerto lxdde `e1000e` lleve ese mismo chip (`if !modes.e1000e` en main.rs) — gatearlo también por `modes.iwlwifi`, como estaba, dejaba la ethernet muerta en el live, donde el iwlwifi siempre está activo
 - **hwscan:** `registry.rs` emite **una línea por dispositivo PCI**, con driver o sin él: `drv: <bdf> <vid>:<did> <driver> <compilado|ausente|desconocido> clase <cc>:<ss>:<pi> <texto>`, y destaca al final cada controlador de red (clase `02`) que nadie reclama (`hwscan: RED SIN DRIVER …`). Se imprime en **todos** los arranques; antes sólo salía si faltaba un driver *conocido*, o sea que el hardware sin regla —el que hay que diagnosticar— no dejaba rastro. Los cuatro primeros campos son contrato: `xtask::drivers::parse_hwscan_line` los lee por posición

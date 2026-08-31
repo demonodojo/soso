@@ -463,7 +463,10 @@ pub fn tcp_listen(port: u16) -> Result<usize, i64> {
         .map_err(|_| -soso_abi::EMFILE)?;
     if let Some(entry) = user_tcp.entries[slot].as_mut() {
         entry.loop_listener = true;
-        tcp_user::listen_start(sockets, entry).map_err(|_| -soso_abi::EIO)?;
+        // El accept de userspace es loopback (127.0.0.1); smoltcp listen es
+        // opcional. Sin IP (NicDev::Ninguno) puede fallar, y si abortáramos
+        // aquí el askd no levantaba nunca en placa sin driver de red.
+        let _ = tcp_user::listen_start(sockets, entry);
     }
     Ok(slot)
 }
@@ -621,10 +624,23 @@ pub fn tcp_is_connected(slot: usize) -> bool {
     let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
         return false;
     };
-    if entry.loopback {
-        return entry.role == tcp_user::TcpRole::Connected && !entry.closed;
+    if entry.role != tcp_user::TcpRole::Connected || entry.closed {
+        return false;
     }
-    entry.role == tcp_user::TcpRole::Connected && !entry.closed
+    if entry.loopback {
+        let Some(pair) = entry.loop_pair else {
+            return false;
+        };
+        // Sin esto, el cierre del par (askd muerto) dejaba al cliente
+        // «conectado» para siempre: `try_read` devolvía 0, `tcp_is_connected`
+        // seguía en true y `read_timeout` bloqueaba otra vez → EAGAIN eterno
+        // (sosh giraba en `copiar_respuesta_ask`, 2026-08-31).
+        if loopback::peer_closed(pair, entry.loop_side) && !loopback::has_unread(pair, entry.loop_side)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 #[allow(dead_code)]

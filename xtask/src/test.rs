@@ -1087,7 +1087,10 @@ fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
 /// Dos `ask` en la misma sesión SSH cargan el modelo una sola vez; una sesión
 /// nueva sigue sin recargar mientras askd siga vivo.
 fn ssh_ask_resident(key: &Path, ssh_port: u16) -> Result<(), String> {
-    let guion1 = "ask test\nask test\nexit\n";
+    // `:max 4` carga el modelo sin generar 128 tokens (el default de
+    // `/etc/llm.conf`): en TCG eso no cabe en el tope de 600 s y el
+    // paso mataba la sesión con askd aún masticando.
+    let guion1 = "ask :max 4\nask test\nask test\nexit\n";
     let texto1 = ssh_guion(key, ssh_port, guion1, Duration::from_secs(600))?
         .replace("\r\n", "\n");
     let cargando = texto1.matches("ask: cargando").count();

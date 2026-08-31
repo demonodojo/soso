@@ -485,7 +485,8 @@ pub fn spawn_console(
     spawn_console_io(path, args, parent, console, [soso_abi::FD_INHERIT_TTY; 3])
 }
 
-/// Como `spawn_console` pero con stdio opcional (u64::MAX = tty).
+/// Como `spawn_console` pero con stdio opcional (`FD_INHERIT_TTY` /
+/// `FD_SERIAL_TTY` = tty; el segundo ata al hijo a la consola serie).
 pub fn spawn_console_io(
     path: &str,
     args: &str,
@@ -497,7 +498,7 @@ pub fn spawn_console_io(
     if args.len() > 3000 {
         return Err(-abi::EINVAL);
     }
-    let stdio_fds = if stdio.iter().all(|&f| f == abi::FD_INHERIT_TTY) {
+    let stdio_fds = if stdio.iter().all(|&f| abi::stdio_es_tty(f)) {
         [None, None, None]
     } else if current_pid() == 0 {
         return Err(-abi::EINVAL);

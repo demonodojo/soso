@@ -311,6 +311,18 @@ fn suite() -> u8 {
     );
     sys::unlink("/tmp/spawn_io.txt");
 
+    // spawn_io a consola serie: `FD_SERIAL_TTY` no es un fd del padre. Si el
+    // kernel lo trata como índice, el spawn devuelve EBADF y este check falla.
+    let pid = sys::spawn_io(
+        "/bin/echo",
+        "serial_ok",
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+    );
+    check!(pid > 0, "spawn_io FD_SERIAL_TTY (pid {pid})");
+    check!(sys::wait().is_ok(), "wait spawn_io serial");
+
     // Hilos + futex: N workers incrementan un contador compartido.
     {
         use core::sync::atomic::{AtomicU32, Ordering};
@@ -1114,8 +1126,15 @@ fn suite() -> u8 {
         let n = sys::read(server, &mut buf);
         check!(n == msg.len() as i64, "read servidor loopback (n={n})");
         check!(&buf[..n as usize] == msg, "datos loopback coinciden");
-        let _ = sys::close(client);
+        // Cerrar un extremo tiene que dar EOF (0) al otro, no EAGAIN eterno.
+        // Sin esto sosh giraba en `ask` si el askd moría a media respuesta.
+        check!(sys::write_all(server, b"eof").is_ok(), "write servidor antes de cerrar");
         let _ = sys::close(server);
+        let n = sys::read_timeout(client, &mut buf, 2_000);
+        check!(n == 3 && &buf[..3] == b"eof", "drenar resto tras close (n={n})");
+        let n = sys::read_timeout(client, &mut buf, 2_000);
+        check!(n == 0, "cierre del par da EOF (n={n})");
+        let _ = sys::close(client);
         let client2 = sys::tcp_connect(&addr, 5_000);
         check!(client2 >= 0, "segundo tcp_connect loopback (rc={client2})");
         let server2 = sys::tcp_accept(listener, 5_000);

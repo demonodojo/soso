@@ -109,8 +109,11 @@ impl TcpTable {
                 if s.is_open() {
                     s.close();
                 }
-                sockets.remove(entry.handle);
             }
+            // `alloc_loopback` también mete un socket smoltcp (no se usa para
+            // copiar, pero ocupa 128 KiB). Sin remove, cada `ask` fugaba uno y
+            // a la octava conexión `tcp_listen`/`connect` morían con EMFILE.
+            sockets.remove(entry.handle);
         }
     }
 

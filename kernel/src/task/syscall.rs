@@ -486,11 +486,12 @@ fn flush_stream_write(
     Ok(())
 }
 
-/// Transfiere fds del padre al hijo según `stdio` (FD_INHERIT_TTY = tty).
+/// Transfiere fds del padre al hijo según `stdio` (`FD_INHERIT_TTY` /
+/// `FD_SERIAL_TTY` = tty, sin tocar la tabla del padre).
 pub fn take_stdio_fds(stdio: [u64; 3]) -> Result<[Option<Fd>; 3], i64> {
     super::with_current(|p| {
         for (slot, &spec) in stdio.iter().enumerate() {
-            if spec == abi::FD_INHERIT_TTY {
+            if abi::stdio_es_tty(spec) {
                 continue;
             }
             let fd = p
@@ -509,7 +510,7 @@ pub fn take_stdio_fds(stdio: [u64; 3]) -> Result<[Option<Fd>; 3], i64> {
         }
         let mut out: [Option<Fd>; 3] = [None, None, None];
         for (slot, spec) in stdio.into_iter().enumerate() {
-            if spec == abi::FD_INHERIT_TTY {
+            if abi::stdio_es_tty(spec) {
                 continue;
             }
             out[slot] = p.fds.get_mut(spec as usize).and_then(|s| s.take());
@@ -1018,14 +1019,18 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
     } else {
         user_str(opts.args_ptr, opts.args_len)?
     };
-    let console = super::with_current(|p| p.console);
-    super::spawn_console_io(
-        path,
-        args,
-        super::current_pid(),
-        console,
-        [opts.stdin_fd, opts.stdout_fd, opts.stderr_fd],
-    )
+    let stdio = [opts.stdin_fd, opts.stdout_fd, opts.stderr_fd];
+    // Un centinela `FD_SERIAL_TTY` despega al hijo de la sesión SSH del padre:
+    // fd 0/1/2 quedan en `Fd::Tty` atados a la consola serie. Sin esto, el
+    // askd heredaba el canal SSH, escribía el diagnóstico de carga ahí, y
+    // `take()` del mismo fd de tubo tres veces dejaba stdout/stderr en tty
+    // SSH de todos modos (2026-08-31).
+    let console = if stdio.iter().any(|&f| f == abi::FD_SERIAL_TTY) {
+        super::Console::Serial
+    } else {
+        super::with_current(|p| p.console)
+    };
+    super::spawn_console_io(path, args, super::current_pid(), console, stdio)
 }
 
 fn sys_pipe() -> Result<u64, i64> {
@@ -1133,6 +1138,9 @@ fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
 
 fn sys_munmap(addr: u64, len: u64) -> Result<u64, i64> {
     if len == 0 {
+        return Err(-abi::EINVAL);
+    }
+    if len > u64::MAX - 4096 {
         return Err(-abi::EINVAL);
     }
     let len_aligned = len.next_multiple_of(4096);

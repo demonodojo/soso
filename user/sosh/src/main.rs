@@ -326,14 +326,23 @@ fn parse_sock_addr(s: &str) -> Option<abi::SockAddr> {
     Some(sys::sock_addr(oct[0], oct[1], oct[2], oct[3], port))
 }
 
-fn spawn_askd() {
-    if let Ok((r, w)) = sys::pipe() {
-        let _ = sys::close(w);
-        let _ = sys::spawn_io(ASKD, "askd", r, r, r);
-        let _ = sys::close(r);
-    } else {
-        let _ = sys::spawn(ASKD, "askd");
-    }
+/// Lanza el demonio. Devuelve el pid, o el errno del spawn.
+///
+/// Stdio a la consola serie, no a la sesión SSH de quien lo lanzó: así el
+/// diagnóstico de carga acaba en `SOSOLOG.TXT` y no se mezcla con el canal
+/// remoto. Un tubo de lectura en stdout era `EBADF` al escribir, y reusar el
+/// mismo fd tres veces dejaba 1/2 en la tty SSH del padre (`take` solo cede
+/// una vez). El error NO se traga: un spawn fallido y un askd que tarda en
+/// escuchar daban el mismo síntoma («no pude conectar» a los 5 s).
+fn spawn_askd() -> Result<u64, i64> {
+    let rc = sys::spawn_io(
+        ASKD,
+        "askd",
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+    );
+    if rc < 0 { Err(rc) } else { Ok(rc as u64) }
 }
 
 fn connect_askd() -> Result<u64, i64> {
@@ -348,6 +357,10 @@ fn connect_askd() -> Result<u64, i64> {
 
 fn copiar_respuesta_ask(fd: u64) {
     let mut buf = [0u8; 512];
+    // EAGAIN = el askd sigue vivo y no ha escrito (carga larga). EOF (n==0)
+    // = el par cerró: el kernel lo señala cuando el otro extremo hace close,
+    // no hay que inventar un tope de silencios (la carga de un GGUF en USB
+    // dura más que cualquier timeout razonable).
     loop {
         let n = sys::read_timeout(fd, &mut buf, 120_000);
         if n == -(abi::EAGAIN as i64) {
@@ -356,13 +369,14 @@ fn copiar_respuesta_ask(fd: u64) {
         if n <= 0 {
             break;
         }
-        for &b in &buf[..n as usize] {
-            if b == PROTO_FIN {
-                return;
+        let n = n as usize;
+        if let Some(i) = buf[..n].iter().position(|&b| b == PROTO_FIN) {
+            if i > 0 {
+                let _ = sys::write(1, &mut buf[..i]);
             }
-            let mut one = [b];
-            let _ = sys::write(1, &mut one);
+            return;
         }
+        let _ = sys::write(1, &mut buf[..n]);
     }
 }
 
@@ -370,19 +384,28 @@ fn preguntar_via_askd(texto: &str) -> u8 {
     let fd = match connect_askd() {
         Ok(f) => f,
         Err(_) => {
-            spawn_askd();
+            if let Err(e) = spawn_askd() {
+                println!("ask: no pude lanzar {ASKD} (errno {e})");
+                return 1;
+            }
             let mut fd = None;
+            let mut ultimo = 0i64;
             for _ in 0..100 {
                 let _ = sys::sleep_ms(50);
-                if let Ok(f) = connect_askd() {
-                    fd = Some(f);
-                    break;
+                match connect_askd() {
+                    Ok(f) => {
+                        fd = Some(f);
+                        break;
+                    }
+                    Err(e) => ultimo = e,
                 }
             }
             match fd {
                 Some(f) => f,
                 None => {
-                    println!("ask: no pude conectar con el servicio en {ASK_ADDR}");
+                    println!(
+                        "ask: el servicio no escuchó en {ASK_ADDR} tras 5 s (último errno {ultimo})"
+                    );
                     return 1;
                 }
             }

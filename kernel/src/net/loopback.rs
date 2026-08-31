@@ -104,14 +104,11 @@ pub fn try_read(pair_id: usize, side: LoopSide, buf: u64, len: u64) -> Result<u6
     let Some(pair) = st.pairs.get_mut(pair_id).and_then(|p| p.as_mut()) else {
         return Err(-soso_abi::EBADF);
     };
-    let (data, read_pos, peer_closed) = match side {
-        LoopSide::Client => (&pair.s2c, &mut pair.s2c_read, pair.closed_server),
-        LoopSide::Server => (&pair.c2s, &mut pair.c2s_read, pair.closed_client),
+    let (data, read_pos) = match side {
+        LoopSide::Client => (&pair.s2c, &mut pair.s2c_read),
+        LoopSide::Server => (&pair.c2s, &mut pair.c2s_read),
     };
     if data.len() <= *read_pos {
-        if peer_closed {
-            return Ok(0);
-        }
         return Ok(0);
     }
     let avail = data.len() - *read_pos;
@@ -152,6 +149,30 @@ pub fn try_write(pair_id: usize, side: LoopSide, buf: u64, len: u64) -> Result<u
         dst.push(b);
     }
     Ok(n as u64)
+}
+
+/// ¿El otro extremo ya llamó `close`?
+pub fn peer_closed(pair_id: usize, side: LoopSide) -> bool {
+    let st = LOOP.lock();
+    let Some(pair) = st.pairs.get(pair_id).and_then(|p| p.as_ref()) else {
+        return true;
+    };
+    match side {
+        LoopSide::Client => pair.closed_server,
+        LoopSide::Server => pair.closed_client,
+    }
+}
+
+/// ¿Quedan bytes por leer en este lado?
+pub fn has_unread(pair_id: usize, side: LoopSide) -> bool {
+    let st = LOOP.lock();
+    let Some(pair) = st.pairs.get(pair_id).and_then(|p| p.as_ref()) else {
+        return false;
+    };
+    match side {
+        LoopSide::Client => pair.s2c.len() > pair.s2c_read,
+        LoopSide::Server => pair.c2s.len() > pair.c2s_read,
+    }
 }
 
 pub fn close_side(pair_id: usize, side: LoopSide) {

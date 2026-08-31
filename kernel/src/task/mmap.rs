@@ -29,7 +29,7 @@ pub fn next_addr(regions: &[MmapRegion], hint: u64, len: u64) -> Option<u64> {
     let start = if hint == 0 { MMAP_BASE } else { hint };
     let mut addr = start.next_multiple_of(align);
     loop {
-        if addr + len > MMAP_LIMIT {
+        if addr.checked_add(len).is_none_or(|end| end > MMAP_LIMIT) {
             return None;
         }
         match first_overlap(regions, addr, len) {
@@ -43,23 +43,27 @@ pub fn next_addr(regions: &[MmapRegion], hint: u64, len: u64) -> Option<u64> {
 
 /// Devuelve el final de alguna región que se solape con [start, start+len).
 fn first_overlap(regions: &[MmapRegion], start: u64, len: u64) -> Option<u64> {
-    let end = start + len;
+    let end = start.checked_add(len)?;
     regions
         .iter()
         .filter(|r| {
-            let rend = r.virt_start + r.len;
+            let rend = r.virt_start.saturating_add(r.len);
             start < rend && r.virt_start < end
         })
-        .map(|r| r.virt_start + r.len)
+        .map(|r| r.virt_start.saturating_add(r.len))
         .max()
 }
 
 pub fn find_region(regions: &[MmapRegion], addr: u64) -> Option<&MmapRegion> {
-    regions.iter().find(|r| addr >= r.virt_start && addr < r.virt_start + r.len)
+    regions.iter().find(|r| {
+        addr >= r.virt_start && addr < r.virt_start.saturating_add(r.len)
+    })
 }
 
 pub fn remove_region(regions: &mut Vec<MmapRegion>, addr: u64, len: u64) -> bool {
-    let end = addr + len;
+    let Some(end) = addr.checked_add(len) else {
+        return false;
+    };
     let before = regions.len();
     regions.retain(|r| {
         let rend = r.virt_start + r.len;

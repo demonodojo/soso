@@ -250,6 +250,16 @@ impl StagedSource {
         self.worker.attach(&mut self.inner as *mut _);
         self.inner.async_staging = true;
     }
+
+    /// Prefetch en el hilo que genera, sin el worker.
+    ///
+    /// En askd el cliente (sosh) está bloqueado en el socket. Con SMP>1 el
+    /// worker de staging no llega a correr y `wait_prefetch` espera `done`
+    /// para siempre (2026-08-31: serial «tiny listo», SSH 600 s).
+    pub fn disable_worker(&mut self) {
+        self.worker.spawned = false;
+        self.inner.async_staging = false;
+    }
 }
 
 impl StagedSource {

@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use libsoso::{abi, print, println, sys};
 use soso_llm_core::chat;
-use soso_llm_core::plan::{MemSnapshot, MemoryPlanConfig};
+use soso_llm_core::plan::MemoryPlanConfig;
 use soso_llm_core::sample::Sampler;
 
 use crate::net::{parse_sock_addr, TcpFd};
@@ -158,30 +158,6 @@ pub fn modelo_efectivo(conf: &Conf) -> Option<String> {
     disponibles.into_iter().next()
 }
 
-fn mem_snapshot() -> MemSnapshot {
-    let mut mi = abi::MemInfo::default();
-    if sys::meminfo(&mut mi) == 0 {
-        MemSnapshot {
-            total_frames: mi.total_frames,
-            free_frames: mi.free_frames,
-            reclaimable_frames: mi.reclaimable_frames,
-        }
-    } else {
-        MemSnapshot::default()
-    }
-}
-
-fn refresh_sesion(sesion: &mut Sesion) {
-    let mem = mem_snapshot();
-    if let Some(pl) = sesion.bundle.rt.planner.as_mut() {
-        pl.refresh_mem(mem);
-        pl.recompute_streaming_budgets(
-            &sesion.bundle.rt.manifest,
-            &sesion.bundle.rt.index,
-        );
-    }
-}
-
 fn socket_write(fd: u64, data: &[u8]) {
     let _ = sys::write_all(fd, data);
 }
@@ -212,14 +188,15 @@ fn read_line_fd(fd: u64, buf: &mut [u8]) -> Option<usize> {
     }
 }
 
-fn spawn_askd() {
-    if let Ok((r, w)) = sys::pipe() {
-        let _ = sys::close(w);
-        let _ = sys::spawn_io("/bin/soso-llm", "askd", r, r, r);
-        let _ = sys::close(r);
-    } else {
-        let _ = sys::spawn("/bin/soso-llm", "askd");
-    }
+fn spawn_askd() -> Result<u64, i64> {
+    let rc = sys::spawn_io(
+        "/bin/soso-llm",
+        "askd",
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+    );
+    if rc < 0 { Err(rc) } else { Ok(rc as u64) }
 }
 
 fn connect_askd() -> Result<TcpFd, i64> {
@@ -233,14 +210,19 @@ pub fn preguntar_via_askd(texto: &str) -> u8 {
     if let Ok(mut sock) = connect_askd() {
         return preguntar_en_socket(&mut sock, texto);
     }
-    spawn_askd();
+    if let Err(e) = spawn_askd() {
+        println!("ask: no pude lanzar /bin/soso-llm (errno {e})");
+        return 1;
+    }
+    let mut ultimo = 0i64;
     for _ in 0..100 {
         let _ = sys::sleep_ms(50);
-        if let Ok(mut sock) = connect_askd() {
-            return preguntar_en_socket(&mut sock, texto);
+        match connect_askd() {
+            Ok(mut sock) => return preguntar_en_socket(&mut sock, texto),
+            Err(e) => ultimo = e,
         }
     }
-    println!("ask: no pude conectar con el servicio en {ASK_ADDR}");
+    println!("ask: el servicio no escuchó en {ASK_ADDR} tras 5 s (último errno {ultimo})");
     1
 }
 
@@ -255,11 +237,18 @@ fn preguntar_en_socket(sock: &mut TcpFd, texto: &str) -> u8 {
         return 1;
     }
     let mut buf = [0u8; 512];
+    let mut silencios = 0;
     loop {
         let n = sys::read_timeout(sock.fd, &mut buf, 120_000);
         if n == -(abi::EAGAIN as i64) {
+            silencios += 1;
+            if silencios >= 2 {
+                println!("\nask: el servicio dejó de responder");
+                return 1;
+            }
             continue;
         }
+        silencios = 0;
         if n <= 0 {
             break;
         }
@@ -328,6 +317,7 @@ pub fn run_askd() -> u8 {
             return 1;
         }
     };
+    println!("askd: escuchando en {ASK_ADDR}");
 
     let mut sesion: Option<Sesion> = None;
     let mut conf = leer_conf();
@@ -368,7 +358,9 @@ pub fn run_askd() -> u8 {
             socket_write_str(conn.fd, "ask: error\n");
         }
         socket_fin(conn.fd);
-        let _ = rc;
+        // Ceder el CPU: sosh está bloqueado en el socket y, si no salimos
+        // del hilo, en SMP el despertar del read puede tardar una rodaja.
+        let _ = sys::sleep_ms(1);
     }
 }
 
@@ -391,12 +383,21 @@ fn asegurar_modelo(
         .unwrap_or(true);
     if recargar {
         socket_write_str(fd, &format!("ask: cargando {want}…\n"));
+        println!("askd: cargando {want}");
         match preparar_sesion(&want, false, MemoryPlanConfig::default(), false, false) {
             Ok(s) => {
+                println!("askd: {want} listo");
                 *sesion = Some(s);
                 *modelo = want;
+                // Sin hilo de staging: sosh está bloqueado en el socket y
+                // con SMP>1 el worker no llega a poner `done` (askd cuelga
+                // en generate; 2026-08-31). El prefetch va en este hilo.
+                if let Some(ses) = sesion.as_mut() {
+                    ses.bundle.source.disable_worker();
+                }
             }
             Err(c) => {
+                println!("askd: no pude cargar {want} (código {c})");
                 socket_write_str(fd, &format!("ask: no pude cargar «{want}» (código {c})\n"));
                 return Err(c);
             }
@@ -457,7 +458,6 @@ fn tratar_linea_askd(
         return 1;
     }
     let ses = sesion.as_mut().unwrap();
-    refresh_sesion(ses);
 
     let plantilla = plantilla_efectiva(conf, ses);
     let tokens = chat::render(plantilla, texto, &ses.bundle.tokenizer);
@@ -472,7 +472,8 @@ fn tratar_linea_askd(
         return 1;
     }
     let mut sampler = Sampler::new(conf.temp, conf.top_p, conf.seed);
-    generar_tokens(
+    println!("askd: generando (máx {})", conf.max);
+    let rc = generar_tokens(
         ses,
         &tokens,
         conf.max,
@@ -481,5 +482,7 @@ fn tratar_linea_askd(
         None,
         Some(fd),
         true,
-    )
+    );
+    println!("askd: generar rc={rc}");
+    rc
 }
