@@ -176,8 +176,28 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
     });
 }
 
+/// Reintento de sondeo mientras no hay pila: `poll()` entra aquí en cada vuelta
+/// del bucle ocioso y del tick, y sondear el bus a esa cadencia no aporta nada.
+const RESONDEO_MS: u64 = 1000;
+static ULTIMO_SONDEO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Intenta crear la pila si hay NIC disponible (WiFi ALIVE incluido).
+/// Limitada en frecuencia: para forzar el intento, `attach_now()`.
 pub fn try_attach() {
+    if NET.get().is_some() {
+        return;
+    }
+    let ahora = pit::uptime_ms();
+    let ultimo = ULTIMO_SONDEO.load(core::sync::atomic::Ordering::Relaxed);
+    if ultimo != 0 && ahora.saturating_sub(ultimo) < RESONDEO_MS {
+        return;
+    }
+    ULTIMO_SONDEO.store(ahora.max(1), core::sync::atomic::Ordering::Relaxed);
+    attach_now();
+}
+
+/// Sondeo inmediato, sin esperar al reintento (arranque y asociación WiFi).
+pub fn attach_now() {
     if NET.get().is_some() {
         return;
     }
@@ -200,7 +220,7 @@ fn wifi_link_up() -> bool {
 }
 
 pub fn init() {
-    try_attach();
+    attach_now();
     if NET.get().is_none() {
         println!("net: sin NIC");
     }
@@ -209,7 +229,7 @@ pub fn init() {
 /// Tras asociar WiFi: reinicia DHCP y habilita el cliente.
 #[cfg(feature = "lxdde")]
 pub fn on_wifi_connected() {
-    try_attach();
+    attach_now();
     let Some(net) = NET.get() else {
         return;
     };

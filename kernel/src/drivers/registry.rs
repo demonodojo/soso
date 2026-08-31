@@ -132,14 +132,28 @@ pub fn compiled(info: &DriverInfo) -> bool {
     }
 }
 
+/// Device ID PCI → id de dispositivo virtio (1 = net, 2 = blk).
+///
+/// Los IDs transitional NO son `0x1000 + id`: están asignados a mano y no
+/// siguen el orden de los modernos (0x1002 es balloon = 5, 0x1003 consola = 3).
+/// Con la resta de más se etiquetaba el virtio-blk (1af4:1001) como
+/// «virtio-net» y la NIC de verdad (1af4:1000) se quedaba sin driver en el
+/// informe; la columna de clase PCI del hwscan lo destapó (2026-08-31).
 fn virtio_subtype(device_id: u16) -> Option<u8> {
-    // Transitional: 0x1000 + id; modern: 0x1040 + id.
-    if device_id >= 0x1040 && device_id <= 0x104f {
-        Some((device_id - 0x1040) as u8)
-    } else if device_id >= 0x1000 && device_id <= 0x103f {
-        Some((device_id - 0x1000) as u8)
-    } else {
-        None
+    // Modern: 0x1040 + id de dispositivo virtio.
+    if (0x1040..=0x104f).contains(&device_id) {
+        return Some((device_id - 0x1040) as u8);
+    }
+    // Transitional: tabla explícita (virtio 1.x, 4.1.2 «PCI Device Discovery»).
+    match device_id {
+        0x1000 => Some(1),  // net
+        0x1001 => Some(2),  // blk
+        0x1002 => Some(5),  // balloon
+        0x1003 => Some(3),  // consola
+        0x1004 => Some(8),  // scsi
+        0x1005 => Some(4),  // entropía
+        0x1009 => Some(9),  // 9p
+        _ => None,
     }
 }
 
@@ -200,28 +214,75 @@ fn format_bdf(dev: &PciDevice) -> String {
     s
 }
 
-/// Genera líneas parseables: `drv: <bdf> <vid>:<did> <driver> <compilado|ausente>`.
+/// Nombre corto de la clase PCI, para leer el informe sin tabla delante.
+fn clase_texto(dev: &PciDevice) -> &'static str {
+    match (dev.class, dev.subclass) {
+        (0x01, _) => "almacenamiento",
+        (0x02, 0x00) => "ethernet",
+        (0x02, 0x80) => "red-otra",
+        (0x03, _) => "gráfica",
+        (0x04, _) => "multimedia",
+        (0x06, _) => "puente",
+        (0x0c, 0x03) => "usb",
+        (0x0c, _) => "bus-serie",
+        _ => "otro",
+    }
+}
+
+/// ¿Es un controlador de red (clase 0x02) sin driver que lo reclame?
+fn red_sin_driver(dev: &PciDevice) -> bool {
+    dev.class == 0x02 && driver_for(dev).is_none()
+}
+
+/// Genera líneas parseables, **una por dispositivo PCI**, con o sin driver:
+///   `drv: <bdf> <vid>:<did> <driver> <compilado|ausente> clase <cc>:<ss>:<pi> <texto>`
+///   `drv: <bdf> <vid>:<did> sin-driver desconocido clase <cc>:<ss>:<pi> <texto>`
+///
+/// Los cuatro primeros campos no se tocan: `xtask::drivers::parse_hwscan_line`
+/// lee `driver` y `estado` por posición. Lo que se añadió (2026-08-31) es el
+/// resto del bus: un hardware que no encaja con ninguna regla no aparecía en el
+/// informe, así que la NIC que no arrancaba era justo la que no se veía.
 pub fn hwscan_lines() -> Vec<String> {
-    let devs = crate::drivers::pci::enumerate();
+    let devs = crate::drivers::pci::devices();
     let mut out = Vec::new();
-    for dev in &devs {
-        // live-disk no es un match PCI real; lo omitimos del scan por dispositivo.
-        let Some(info) = driver_for(dev) else {
-            continue;
+    for dev in devs {
+        let (nombre, estado) = match driver_for(dev) {
+            Some(info) if compiled(info) => (info.name, "compilado"),
+            Some(info) => (info.name, "ausente"),
+            None => ("sin-driver", "desconocido"),
         };
         let mut line = String::new();
         let _ = write!(
             line,
-            "drv: {} {:04x}:{:04x} {} {}",
+            "drv: {} {:04x}:{:04x} {} {} clase {:02x}:{:02x}:{:02x} {}",
             format_bdf(dev),
             dev.vendor_id,
             dev.device_id,
-            info.name,
-            if compiled(info) {
-                "compilado"
-            } else {
-                "ausente"
-            }
+            nombre,
+            estado,
+            dev.class,
+            dev.subclass,
+            dev.prog_if,
+            clase_texto(dev)
+        );
+        out.push(line);
+    }
+    out
+}
+
+/// Controladores de red presentes que ningún driver reclama.
+pub fn nics_sin_driver() -> Vec<String> {
+    let devs = crate::drivers::pci::devices();
+    let mut out = Vec::new();
+    for dev in devs.iter().filter(|d| red_sin_driver(d)) {
+        let mut line = String::new();
+        let _ = write!(
+            line,
+            "{} {:04x}:{:04x} ({})",
+            format_bdf(dev),
+            dev.vendor_id,
+            dev.device_id,
+            clase_texto(dev)
         );
         out.push(line);
     }
@@ -229,9 +290,9 @@ pub fn hwscan_lines() -> Vec<String> {
 }
 
 pub fn hwscan_entries() -> Vec<ScanEntry> {
-    let devs = crate::drivers::pci::enumerate();
+    let devs = crate::drivers::pci::devices();
     let mut out = Vec::new();
-    for dev in &devs {
+    for dev in devs {
         let Some(info) = driver_for(dev) else {
             continue;
         };
@@ -251,9 +312,20 @@ pub fn hwscan_entries() -> Vec<ScanEntry> {
 
 /// Imprime el informe por consola (serie / fb).
 pub fn print_hwscan() {
-    println!("hwscan: {} dispositivos con driver conocido", hwscan_entries().len());
-    for line in hwscan_lines() {
+    let lines = hwscan_lines();
+    println!(
+        "hwscan: {} dispositivos PCI, {} con driver conocido",
+        lines.len(),
+        hwscan_entries().len()
+    );
+    for line in lines {
         println!("{line}");
+    }
+    if missing_drivers() {
+        println!("hwscan: hay driver conocido sin compilar (líneas «ausente»)");
+    }
+    for nic in nics_sin_driver() {
+        println!("hwscan: RED SIN DRIVER {nic}");
     }
 }
 

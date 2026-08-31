@@ -218,11 +218,25 @@ pub fn enumerate() -> Vec<PciDevice> {
     out
 }
 
+/// Foto del bus tomada en `init()`, antes de que ningún driver programe nada.
+static SNAPSHOT: spin::Once<Vec<PciDevice>> = spin::Once::new();
+
+/// Enumeración cacheada, para todo el que sólo quiera **mirar** el bus.
+///
+/// `enumerate()` mide cada BAR0 escribiéndole 0xffff_ffff y restaurándolo
+/// después: con las colas de un dispositivo ya en marcha, ese instante deja el
+/// BAR decodificando en una dirección falsa, y cualquier MMIO o DMA en vuelo
+/// cae en el hueco. Hacerlo al arrancar los drivers es inocuo (nadie ha
+/// programado nada todavía); repetirlo luego, no. El hwscan lee de aquí.
+pub fn devices() -> &'static [PciDevice] {
+    SNAPSHOT.call_once(enumerate)
+}
+
 pub fn init() {
     init_ecam();
-    let devs = enumerate();
+    let devs = devices();
     println!("pci: {} dispositivos", devs.len());
-    for d in &devs {
+    for d in devs {
         if d.class == 0x03 {
             println!(
                 "pci: GPU {:04x}:{:04x} bar0={:#x} ({} KiB)",

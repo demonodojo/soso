@@ -76,6 +76,9 @@ pub fn preset_live_usb() -> DriverProfile {
         kernel_features: vec![
             "drv-virtio-blk".into(),
             "drv-virtio-net".into(),
+            // Ethernet cableada en placa real: sin esto el live sólo tenía
+            // virtio-net (que en hardware no existe) y el WiFi.
+            "drv-e1000e".into(),
             "drv-nvme".into(),
             "drv-usb".into(),
             "drv-live-disk".into(),

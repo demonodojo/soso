@@ -152,7 +152,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         if modes.nouveau {
             drivers::nvidia_probe::init();
         }
-        if !modes.e1000e && !modes.iwlwifi {
+        // Sólo el puerto lxdde e1000e compite por este chip; el iwlwifi es
+        // otro dispositivo, y gatear también por él dejaba la ethernet sin
+        // arrancar en el live (iwlwifi siempre activo ahí).
+        if !modes.e1000e {
             #[cfg(feature = "drv-e1000e")]
             let _ = drivers::e1000e::init();
         }
@@ -177,11 +180,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
     // Autodescubrimiento: informe parseable en serie; en live también en ESP.
-    if drivers::registry::missing_drivers() {
-        drivers::registry::print_hwscan();
-        #[cfg(feature = "drv-live-disk")]
-        let _ = drivers::drvlog::flush();
-    }
+    // Incondicional desde 2026-08-31: sólo salía cuando faltaba un driver
+    // *conocido*, así que el hardware que no encaja con ninguna regla —el caso
+    // que hay que diagnosticar— no dejaba rastro en ninguna parte.
+    drivers::registry::print_hwscan();
+    #[cfg(feature = "drv-live-disk")]
+    let _ = drivers::drvlog::flush();
     println!("boot: task");
     task::init();
 

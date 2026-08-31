@@ -530,15 +530,41 @@ no para uso habitual.
 ### Autodescubrimiento de drivers (`hwscan`)
 
 El comando **`hwscan`** enumera dispositivos PCI y muestra qué driver los
-atendería y si está compilado en el kernel actual. Formato de cada línea:
+atendería y si está compilado en el kernel actual. Una línea por dispositivo:
 
 ```
-drv: bb:dd.f VVVV:DDDD nombre-driver compilado|ausente
+drv: bb:dd.f VVVV:DDDD nombre-driver compilado|ausente clase cc:ss:pi texto
+drv: bb:dd.f VVVV:DDDD sin-driver   desconocido        clase cc:ss:pi texto
 ```
 
-En arranque **live**, si falta algún driver para el hardware detectado, el
-informe se imprime también por serie y se guarda en **`SOSODRV.TXT`** en la ESP
-(junto a `SOSOLOG.TXT`). En el PC de desarrollo:
+Los tres estados:
+
+| Estado | Significa |
+| --- | --- |
+| `compilado` | Hay driver y está en este kernel |
+| `ausente` | soso conoce el driver, pero esta imagen no lo lleva |
+| `desconocido` | Ningún driver reclama el dispositivo |
+
+Al final del informe, cada controlador de red (clase PCI `02`) que nadie
+reclama sale destacado:
+
+```
+hwscan: RED SIN DRIVER 00:1f.6 8086:15fc (ethernet)
+```
+
+Ese `VVVV:DDDD` es lo que hace falta para decidir si basta con ampliar la lista
+de IDs de un driver existente o si hay que portar uno nuevo.
+
+El informe se imprime por serie **en cada arranque**, y en live se guarda además
+en **`SOSODRV.TXT`** en la ESP (junto a `SOSOLOG.TXT`). Desde el PC de
+desarrollo, con el pendrive puesto:
+
+```sh
+cargo xtask sosolog --drv           # informe hwscan del último arranque
+cargo xtask sosolog --drv /dev/sdX  # ESP concreta
+```
+
+Y para recalcular el perfil de drivers a partir de él:
 
 ```sh
 cargo xtask fit-drivers /ruta/a/SOSODRV.TXT
@@ -561,6 +587,7 @@ Pide `sudo` solo para mount/umount: no lances `sudo cargo` (root no tiene rustup
 cargo xtask sosolog              # auto-detecta el USB live
 cargo xtask sosolog /dev/sdX     # disco entero → partición 1
 cargo xtask sosolog /dev/sdX1    # ESP concreta
+cargo xtask sosolog --drv        # SOSODRV.TXT (informe hwscan) en vez del log
 cargo xtask sosolog | less
 ```
 

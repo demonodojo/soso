@@ -31,8 +31,17 @@ const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 const VIRTIO_PCI_CAP_VENDOR: u8 = 0x09;
 const NO_VECTOR: u16 = 0xffff;
 
-/// Devuelve la MAC si encontró tarjeta.
+/// Devuelve la MAC si encontró tarjeta. Sonda una sola vez: `net::poll()` llama
+/// aquí en cada vuelta del bucle ocioso mientras no haya pila, y reenumerar el
+/// ECAM entero por vuelta dejaba el live de placa real girando sobre el bus e
+/// inundando la consola con «no se encontró ningún virtio-net» (2026-08-31).
 pub fn init() -> Option<[u8; 6]> {
+    *SONDA.call_once(probe)
+}
+
+static SONDA: Once<Option<[u8; 6]>> = Once::new();
+
+fn probe() -> Option<[u8; 6]> {
     let (ecam_base, ecam_size) = pci::ecam_mmio();
     crate::mm::ensure_mmio_mapped(ecam_base, ecam_size);
     let ecam_ptr = crate::mm::phys_to_virt(ecam_base).as_mut_ptr();

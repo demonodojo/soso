@@ -10,12 +10,16 @@ use std::process::{Command, exit};
 use crate::install_disk;
 
 const LOG_NAME: &str = "SOSOLOG.TXT";
+/// Informe hwscan que vuelca `drivers::drvlog` en cada arranque del live.
+const DRV_NAME: &str = "SOSODRV.TXT";
 
 pub fn run(args: &[String]) {
     let mut device: Option<PathBuf> = None;
+    let mut file = LOG_NAME;
     for a in args {
         match a.as_str() {
             "-h" | "--help" => usage(),
+            "--drv" | "--hwscan" => file = DRV_NAME,
             s if s.starts_with('-') => {
                 eprintln!("sosolog: opción desconocida: {s}");
                 usage();
@@ -35,7 +39,7 @@ pub fn run(args: &[String]) {
         None => auto_detect_esp(),
     };
 
-    match dump_log(&esp) {
+    match dump_log(&esp, file) {
         Ok(()) => {}
         Err(e) => {
             eprintln!("sosolog: {e}");
@@ -46,15 +50,19 @@ pub fn run(args: &[String]) {
 
 fn usage() -> ! {
     eprintln!(
-        "uso: cargo xtask sosolog [dispositivo]\n\
+        "uso: cargo xtask sosolog [--drv] [dispositivo]\n\
          \n\
          Monta la ESP (partición 1) del USB live, muestra SOSOLOG.TXT y desmonta.\n\
          Sin argumento, busca un pendrive soso (ESP FAT, no el disco de Linux).\n\
          \n\
+         --drv (= --hwscan)  muestra SOSODRV.TXT: el informe hwscan del último\n\
+         arranque, una línea por dispositivo PCI con su driver y su estado.\n\
+         \n\
          Ejemplos:\n\
            cargo xtask sosolog\n\
+           cargo xtask sosolog --drv\n\
            cargo xtask sosolog /dev/sdX\n\
-           cargo xtask sosolog /dev/sdX1"
+           cargo xtask sosolog --drv /dev/sdX1"
     );
     exit(2);
 }
@@ -180,22 +188,22 @@ fn lsblk_field(line: &str, key: &str) -> String {
     }
 }
 
-fn dump_log(esp: &Path) -> Result<(), String> {
+fn dump_log(esp: &Path, file: &str) -> Result<(), String> {
     if !esp.exists() {
         return Err(format!("no existe {}", esp.display()));
     }
     let mount = EspMount::acquire(esp)?;
-    let path = mount.point.join(LOG_NAME);
+    let path = mount.point.join(file);
     if !path.exists() {
         return Err(format!(
-            "no está {LOG_NAME} en {} (¿imagen live antigua?)",
+            "no está {file} en {} (¿imagen live antigua?)",
             esp.display()
         ));
     }
     let raw = fs::read(&path).map_err(|e| format!("leer {}: {e}", path.display()))?;
     let text = String::from_utf8_lossy(&raw);
     let body = text.trim_end_matches(['\n', '\r', '\0']);
-    eprintln!("sosolog: {} → {LOG_NAME}", esp.display());
+    eprintln!("sosolog: {} → {file}", esp.display());
     if body.is_empty() {
         eprintln!(
             "sosolog: el fichero existe pero está vacío (el kernel no llegó a volcar el log)"
