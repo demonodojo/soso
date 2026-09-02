@@ -17,6 +17,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use ask::{resto_tras, run_ask};
 use distributed::{crc_bytes, default_keepalive, default_timeouts, DistributedConfig};
 use libsoso::{println, sys};
@@ -840,6 +841,18 @@ fn emitir_ask(fd: u64, s: &str) {
     let _ = sys::sleep_ms(1);
 }
 
+/// Socket del cliente de askd mientras se genera. El hook de capa no puede
+/// capturar el `fd` (es un `fn` en el runtime).
+static ASK_TICK_FD: AtomicU64 = AtomicU64::new(u64::MAX);
+
+fn ask_layer_tick(_layer: u32, _n: u32) {
+    let fd = ASK_TICK_FD.load(Ordering::Relaxed);
+    if fd != u64::MAX {
+        let _ = sys::write_all(fd, b".");
+        let _ = sys::sleep_ms(1);
+    }
+}
+
 /// Igual que `generar` pero con el prompt YA tokenizado.
 ///
 /// Existe porque una plantilla de chat no se puede expresar como texto: el fin de
@@ -855,79 +868,86 @@ pub(crate) fn generar_tokens(
     fd_out: Option<u64>,
     drop_pool: bool,
 ) -> u8 {
-    // askd (fd_out): sin pool ni staging async — un worker a 100 % dejaba
-    // `drop_pool` colgado y el segundo `accept` no llegaba nunca (2026-08-31).
-    if sesion.pool.is_none() && fd_out.is_none() {
+    // askd también usa el pool: Mixtral en un solo core tarda minutos/token
+    // y el terminal parece colgado. Los workers duermen en futex entre
+    // matvecs, así que Drop vuelve al accept (2026-08-31 era spin al 100 %).
+    // Staging async sigue apagado: con SMP el worker no llega a `done`.
+    if sesion.pool.is_none() {
         sesion.pool = Some(ThreadPool::new());
     }
-    let par: Option<&dyn RowParallel> = if fd_out.is_some() {
-        None
-    } else {
-        sesion
-            .pool
-            .as_ref()
-            .filter(|p| p.workers() > 1)
-            .map(|p| p as &dyn RowParallel)
-    };
-    let mut gpu_ref: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = sesion
-        .sys_gpu
-        .as_mut()
-        .map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
-    let bundle = &mut sesion.bundle;
     let mut decoder = StreamDecoder::new();
     let mut streamed = alloc::string::String::new();
     let t0 = sys::uptime_ms();
-    let eos = bundle.tokenizer.eos();
-    // askd: sin clock_ms/refresh_mem (syscall en el matvec AVX2) y sin
-    // planificador por token. `run` sigue con el camino cronometrado.
-    // Los tokens se escriben al socket según salen: Mixtral tarda minutos
-    // en el prefill y, si se espera al final, el terminal parece colgado.
-    let result = if let Some(fd) = fd_out {
-        bundle.rt.generate_stream_par(
-            &mut bundle.source,
-            prompt_tokens,
-            max_new,
-            eos,
-            sampler,
-            |t| {
-                let s = decoder.push(&bundle.tokenizer, t);
-                if !s.is_empty() {
-                    let limpio = texto_ask_seguro(&s);
-                    if !limpio.is_empty() {
-                        streamed.push_str(&limpio);
-                        emitir_ask(fd, &limpio);
+    let result = {
+        let par: Option<&dyn RowParallel> = sesion
+            .pool
+            .as_ref()
+            .filter(|p| p.workers() > 1)
+            .map(|p| p as &dyn RowParallel);
+        let mut gpu_ref: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = sesion
+            .sys_gpu
+            .as_mut()
+            .map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
+        let bundle = &mut sesion.bundle;
+        let eos = bundle.tokenizer.eos();
+        if let Some(fd) = fd_out {
+            ASK_TICK_FD.store(fd, Ordering::Relaxed);
+            bundle.rt.layer_hook = Some(ask_layer_tick);
+        }
+        // askd: sin clock_ms/refresh_mem (syscall en el matvec AVX2) y sin
+        // planificador por token. `run` sigue con el camino cronometrado.
+        // Un punto por capa: Mixtral tarda minutos en el prefill y, si no
+        // hay tráfico, el cliente corta a los 4 min de silencio.
+        if let Some(fd) = fd_out {
+            bundle.rt.generate_stream_par(
+                &mut bundle.source,
+                prompt_tokens,
+                max_new,
+                eos,
+                sampler,
+                |t| {
+                    let s = decoder.push(&bundle.tokenizer, t);
+                    if !s.is_empty() {
+                        let limpio = texto_ask_seguro(&s);
+                        if !limpio.is_empty() {
+                            streamed.push_str(&limpio);
+                            emitir_ask(fd, &limpio);
+                        }
                     }
-                }
-            },
-            par,
-            &mut gpu_ref,
-            &mut |i, total| {
-                let _ = sys::write_all(fd, b".");
-                let _ = sys::sleep_ms(1);
-                if i == total {
-                    emitir_ask(fd, "\n");
-                }
-            },
-        )
-    } else {
-        bundle.rt.generate_stream_planned(
-            &mut bundle.source,
-            prompt_tokens,
-            max_new,
-            eos,
-            sampler,
-            |t| {
-                let s = decoder.push(&bundle.tokenizer, t);
-                if !s.is_empty() {
-                    libsoso::print!("{s}");
-                }
-            },
-            par,
-            &mut gpu_ref,
-            clock_ms,
-            read_mem_snapshot,
-        )
+                },
+                par,
+                &mut gpu_ref,
+                &mut |i, total| {
+                    if i == total {
+                        emitir_ask(fd, "\n");
+                    }
+                },
+            )
+        } else {
+            bundle.rt.generate_stream_planned(
+                &mut bundle.source,
+                prompt_tokens,
+                max_new,
+                eos,
+                sampler,
+                |t| {
+                    let s = decoder.push(&bundle.tokenizer, t);
+                    if !s.is_empty() {
+                        libsoso::print!("{s}");
+                    }
+                },
+                par,
+                &mut gpu_ref,
+                clock_ms,
+                read_mem_snapshot,
+            )
+        }
     };
+    ASK_TICK_FD.store(u64::MAX, Ordering::Relaxed);
+    sesion.bundle.rt.layer_hook = None;
+    if drop_pool {
+        sesion.pool = None;
+    }
     match result {
         Ok(tokens) => {
             let elapsed_ms = (sys::uptime_ms() - t0).max(1) as u64;
@@ -952,9 +972,6 @@ pub(crate) fn generar_tokens(
             if fd_out.is_none() {
                 println!();
             }
-            if drop_pool && fd_out.is_none() {
-                sesion.pool = None;
-            }
             if !verboso {
                 return 0;
             }
@@ -967,7 +984,7 @@ pub(crate) fn generar_tokens(
             if let Some(io0) = io0 {
                 print_iostat(io0);
             }
-            if let Some(pl) = bundle.rt.planner.as_ref() {
+            if let Some(pl) = sesion.bundle.rt.planner.as_ref() {
                 let st = pl.stats();
                 println!(
                     "soso-llm: planificador — replanes {}, latencia media CPU/GPU/remoto {:.1}/{:.1}/{:.1} ms",
@@ -1029,9 +1046,6 @@ pub(crate) fn generar_tokens(
             0
         }
         Err(()) => {
-            if drop_pool && fd_out.is_none() {
-                sesion.pool = None;
-            }
             if fd_out.is_none() {
                 println!("soso-llm: inferencia falló");
             }

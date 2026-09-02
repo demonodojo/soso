@@ -578,6 +578,77 @@ static int check_wpr(const struct gsp_rm_fw *rm, struct gsp_wpr *keep)
     return 0;
 }
 
+/* Layout Ampere (`tu102_gsp_oneinit`): offsets en FB, no los ceros del FMC. */
+static int check_wpr_ampere(const struct gsp_rm_fw *rm)
+{
+    struct gsp_wpr_fb_layout L;
+    struct gsp_wpr w;
+    uint64_t fb4 = 4ull << 30;
+    uint64_t heap4;
+    const struct gsp_wpr_meta *m;
+
+    heap4 = gsp_wpr_heap_size(fb4);
+    if (gsp_wpr_layout_ampere(fb4, 0x31000ull, 0x3c99000ull, heap4, 0, &L) != 0) {
+        printf("FALLO: layout Ampere 4 GiB\n");
+        return -1;
+    }
+    if (L.vga_addr != fb4 - 0x100000ull || L.frts_size != 0x100000ull) {
+        printf("FALLO: VGA/FRTS Ampere\n");
+        return -1;
+    }
+    if (L.wpr_end != (L.vga_addr & ~0x1ffffull) || L.wpr_end > L.vga_addr) {
+        printf("FALLO: wpr_end Ampere 0x%llx\n", (unsigned long long)L.wpr_end);
+        return -1;
+    }
+    if (L.nonwpr_size != 0x100000ull ||
+        L.nonwpr_addr + L.nonwpr_size != L.wpr_start) {
+        printf("FALLO: nonWpr Ampere\n");
+        return -1;
+    }
+    if (!(L.wpr_start <= L.heap_addr &&
+          L.heap_addr + L.heap_size <= L.elf_addr &&
+          L.elf_addr + L.elf_size <= L.boot_addr &&
+          L.boot_addr + L.boot_size <= L.frts_addr &&
+          L.frts_addr + L.frts_size == L.wpr_end &&
+          L.wpr_end <= L.vga_addr &&
+          L.vga_addr + L.vga_size == fb4)) {
+        printf("FALLO: anidado Ampere\n");
+        return -1;
+    }
+    printf("OK: layout Ampere 4 GiB wpr=[0x%llx,0x%llx) heap=%llu MiB\n",
+           (unsigned long long)L.wpr_start, (unsigned long long)L.wpr_end,
+           (unsigned long long)(L.heap_size >> 20));
+
+    if (gsp_wpr_prepare_ampere(rm, &w) != 0) {
+        printf("FALLO: gsp_wpr_prepare_ampere\n");
+        return -1;
+    }
+    m = w.meta;
+    if (!m->gspFwWprStart || !m->gspFwWprEnd || !m->fbSize || !m->frtsOffset ||
+        !m->gspFwOffset || !m->bootBinOffset) {
+        printf("FALLO: Ampere WPR offsets a cero\n");
+        gsp_wpr_release(&w);
+        return -1;
+    }
+    if (m->gspFwWprEnd > m->fbSize || m->gspFwWprStart >= m->gspFwWprEnd) {
+        printf("FALLO: Ampere WPR fuera de FB\n");
+        gsp_wpr_release(&w);
+        return -1;
+    }
+    if (m->nonWprHeapSize != 0x100000ull) {
+        printf("FALLO: Ampere nonWpr %llu\n", (unsigned long long)m->nonWprHeapSize);
+        gsp_wpr_release(&w);
+        return -1;
+    }
+    /* La ruta FMC tiene que seguir con ceros: este meta es otro bloque. */
+    printf("OK: WPR Ampere offsets en FB (%u MiB) wpr=[0x%llx,0x%llx)\n",
+           (unsigned)(m->fbSize >> 20),
+           (unsigned long long)m->gspFwWprStart,
+           (unsigned long long)m->gspFwWprEnd);
+    gsp_wpr_release(&w);
+    return 0;
+}
+
 /* Paso 5: colas compartidas, logs, RMARGS, boot params y staging del FMC. */
 static int check_libos(const struct gsp_wpr *wpr)
 {
@@ -4533,6 +4604,8 @@ int main(int argc, char **argv)
     if (check_radix3(&rm) != 0)
         return 1;
     if (check_wpr(&rm, &wpr) != 0)
+        return 1;
+    if (check_wpr_ampere(&rm) != 0)
         return 1;
     if (check_libos(&wpr) != 0)
         return 1;

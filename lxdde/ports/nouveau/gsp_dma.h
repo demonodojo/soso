@@ -19,6 +19,11 @@ static inline uint64_t align_up_u64(uint64_t v, uint64_t a)
     return (v + a - 1ull) & ~(a - 1ull);
 }
 
+static inline uint64_t align_down_u64(uint64_t v, uint64_t a)
+{
+    return v & ~(a - 1ull);
+}
+
 /* Reserva y pone a cero. Publica va/phys/size a la vez o deja el bloque intacto:
  * un `va` con `size` a cero haría que el release liberase otro tamaño. */
 int gsp_dma_alloc(struct gsp_dma_buf *b, unsigned long size, const char *what);

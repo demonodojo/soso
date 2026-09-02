@@ -171,7 +171,9 @@ static int flcn_fw_load(unsigned base, struct flcn_fw_ctx *fw)
     return 0;
 }
 
-static int flcn_fw_boot_ga102(unsigned base, struct flcn_fw_ctx *fw, unsigned mbox0_ok)
+static int flcn_fw_boot_ga102(unsigned base, struct flcn_fw_ctx *fw,
+                              unsigned mbox0_in, unsigned mbox1_in,
+                              int check_mbox0, unsigned mbox0_ok, unsigned timeout_ms)
 {
     unsigned mbox0, mbox1;
     unsigned t;
@@ -181,11 +183,12 @@ static int flcn_fw_boot_ga102(unsigned base, struct flcn_fw_ctx *fw, unsigned mb
     flcn_wr32(base, LX_FLCN_ADDR2 + 0x198u, fw->ucode_id);
     flcn_wr32(base, LX_FLCN_ADDR2 + 0x180u, 1u);
 
-    flcn_wr32(base, 0x040u, 0xcafebeefu);
+    flcn_wr32(base, 0x040u, mbox0_in);
+    flcn_wr32(base, 0x044u, mbox1_in);
     flcn_wr32(base, 0x104u, fw->boot_addr);
     flcn_wr32(base, 0x100u, 2u);
 
-    t = 2000u;
+    t = timeout_ms ? timeout_ms : 2000u;
     while (t--) {
         if (flcn_rd32(base, 0x100u) & 0x10u) {
             break;
@@ -200,16 +203,17 @@ static int flcn_fw_boot_ga102(unsigned base, struct flcn_fw_ctx *fw, unsigned mb
     mbox1 = flcn_rd32(base, 0x044u);
     lx_printk("nouveau-lx: falcon %s mbox0=0x%x mbox1=0x%x (expect 0x%x)\n",
               "boot", mbox0, mbox1, mbox0_ok);
-    if (mbox0 != mbox0_ok) {
+    if (check_mbox0 && mbox0 != mbox0_ok) {
         return -1;
     }
     return 0;
 }
 
-int falcon_lx_hsfw_boot(unsigned falcon_base, const struct acr_fw_blob *blob, const char *name)
+int falcon_lx_hsfw_boot_mbox(unsigned falcon_base, const struct acr_fw_blob *blob,
+                             const char *name, unsigned mbox0, unsigned mbox1,
+                             int check_mbox0)
 {
     struct flcn_fw_ctx fw;
-    unsigned mbox0_ok = 0u;
 
     if (flcn_parse_hs_v2(blob, &fw) != 0) {
         lx_printk("nouveau-lx: falcon %s parse HS v2 falló\n", name);
@@ -229,11 +233,17 @@ int falcon_lx_hsfw_boot(unsigned falcon_base, const struct acr_fw_blob *blob, co
         return -1;
     }
 
-    if (flcn_fw_boot_ga102(falcon_base, &fw, mbox0_ok) != 0) {
+    if (flcn_fw_boot_ga102(falcon_base, &fw, mbox0, mbox1, check_mbox0, 0u,
+                          check_mbox0 ? 2000u : 4000u) != 0) {
         lx_printk("nouveau-lx: falcon %s boot falló\n", name);
         return -1;
     }
 
     lx_printk("nouveau-lx: falcon %s boot ok\n", name);
     return 0;
+}
+
+int falcon_lx_hsfw_boot(unsigned falcon_base, const struct acr_fw_blob *blob, const char *name)
+{
+    return falcon_lx_hsfw_boot_mbox(falcon_base, blob, name, 0xcafebeefu, 0u, 1);
 }

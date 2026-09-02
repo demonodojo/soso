@@ -154,14 +154,17 @@ Tras arrancar desde USB (sin VFIO, sin tocar el NVMe de Linux):
 Verde mínimo: BAR0 vivo + firmware de esa familia. Amarillo aceptable en primera
 tanda Ampere: ACR soft-fail o `GSP booted (soft)` si BAR0 ya responde.
 
-**En Ampere el offload no va a correr todavía, y ahora se ve por qué.** La cadena
-RM → VMM → canal/CE → pool de VRAM sólo existe en la rama Blackwell/FMC de
-`gsp_bringup.c`: con un ga107 el bring-up llega a `GSP booted (hw poll ok)` y
-vuelve, así que no hay pool y las reservas de VRAM fallan a propósito en vez de
-repartir memoria del kernel disfrazada. Se reconoce por:
+**En Ampere el offload depende del booter.** La cadena RM → VMM → canal/CE →
+pool de VRAM corre tras el FMC (Blackwell) y, desde 2026-09-02, tras
+`booter_load` en SEC2 (Ampere): WPR2 lo calcula el driver (`tu102_gsp_oneinit`),
+libos + `SET_SYSTEM_INFO` van **antes** de arrancar, y el pool se monta igual
+que en GB205. Si el booter no deja el RISC-V vivo, el bring-up cae al kick/poll
+de siempre (`GSP booted (hw poll ok)`) **sin** pool. Se reconoce por:
 
-- Arranque: `gpu: NVIDIA detectada (chipset …, GSP=booted, pool VRAM=no)`.
-- Inferencia: `soso-llm: GPU presente sin pool de VRAM (fase=booted) — inferencia en CPU`.
+- Arranque con pool: `gpu: NVIDIA detectada (… GSP=rm_ce, pool VRAM=sí)` y
+  `nouveau-lx: GSP booted (hw, booter_load Ampere, …)`.
+- Arranque sin pool: `GSP=booted, pool VRAM=no` y
+  `soso-llm: GPU presente sin pool de VRAM (fase=booted) — inferencia en CPU`.
 
 Si en vez de eso sale `offload GPU desactivado — subida de pesos`, es otra cosa:
 el camino de subida falló con pool disponible (2026-08-17 era el techo de 16 MiB

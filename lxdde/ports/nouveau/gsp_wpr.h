@@ -83,20 +83,44 @@ struct gsp_wpr {
     uint64_t fb_bytes;      /* VRAM real, leída de 0x1183a4 */
     uint64_t heap_size;
     /* Lo que el COT reserva al final de la VRAM: heap fuera de WPR + la reserva
-     * del PMU, alineado a 2 MiB (`rsvd_size` en `gh100_gsp_init`). */
+     * del PMU, alineado a 2 MiB (`rsvd_size` en `gh100_gsp_init`). En Ampere no
+     * hay COT; se rellena igual por si el meta lo consulta. */
     uint32_t rsvd_size;
     int ready;
+};
+
+/* Layout de WPR2 en framebuffer, de arriba abajo (`tu102_gsp_oneinit`). */
+struct gsp_wpr_fb_layout {
+    uint64_t vga_addr, vga_size;
+    uint64_t frts_addr, frts_size;
+    uint64_t boot_addr, boot_size;
+    uint64_t elf_addr, elf_size;
+    uint64_t heap_addr, heap_size;
+    uint64_t wpr_start, wpr_end;
+    uint64_t nonwpr_addr, nonwpr_size;
 };
 
 /* VRAM en bytes según el hardware (`ga102_fb_vidmem_size`: 0x1183a4 en MiB).
  * 0 si el registro no responde. Requiere BAR0 mapeada. */
 uint64_t gsp_wpr_vidmem_size(void);
 
+/* `tu102_gsp_wpr_heap_size`: carveout libos3 + base RM + 96 KiB/GiB + 96 MiB. */
+uint64_t gsp_wpr_heap_size(uint64_t fb_bytes);
+
+/* Aritmética pura del layout Ampere. `vga_addr == 0` → `fb - 1 MiB`. */
+int gsp_wpr_layout_ampere(uint64_t fb_bytes, uint64_t boot_size, uint64_t elf_size,
+                          uint64_t heap_size, uint64_t vga_addr,
+                          struct gsp_wpr_fb_layout *out);
+
 /* Prepara el bootloader en memoria DMA y construye el WPR meta a partir de la
  * imagen GSP-RM ya preparada. Solo lee registros (la VRAM); no escribe ninguno.
- * Solo vale para la ruta FMC (GB20x/GH100): en Ampere el layout de WPR lo calcula
- * el driver entero y es otra función. */
+ * Solo vale para la ruta FMC (GB20x/GH100): los offsets de WPR en FB quedan a
+ * cero — los pone el FMC. */
 int gsp_wpr_prepare(const struct gsp_rm_fw *rm, struct gsp_wpr *out);
+
+/* Ampere (`tu102_gsp_oneinit`): el driver calcula WPR2/FRTS/elf/boot en FB y
+ * los escribe en el meta. El booter_load de SEC2 lee esos offsets. */
+int gsp_wpr_prepare_ampere(const struct gsp_rm_fw *rm, struct gsp_wpr *out);
 
 void gsp_wpr_release(struct gsp_wpr *w);
 

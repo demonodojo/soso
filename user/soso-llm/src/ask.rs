@@ -392,7 +392,7 @@ fn asegurar_modelo(
         .map(|s| s.modelo != want)
         .unwrap_or(true);
     if recargar {
-        socket_write_str(fd, &format!("ask: cargando {want}…\n"));
+        socket_write_str(fd, &format!("ask: cargando {want}...\n"));
         println!("askd: cargando {want}");
         match preparar_sesion(&want, false, MemoryPlanConfig::default(), false, false) {
             Ok(s) => {
@@ -483,6 +483,20 @@ fn tratar_linea_askd(
         return 1;
     }
     let mut sampler = Sampler::new(conf.temp, conf.top_p, conf.seed);
+    let m = &ses.bundle.rt.manifest;
+    if ses.sys_gpu.is_none() && m.num_experts > 0 && m.num_layers >= 16 {
+        let atajo = if modelos().iter().any(|n| n == "tiny") {
+            " Para una respuesta ahora: ask :modelo tiny"
+        } else {
+            ""
+        };
+        socket_write_str(
+            fd,
+            &format!(
+                "ask: {modelo} en CPU (GPU sin VRAM); minutos por token.{atajo}\n"
+            ),
+        );
+    }
     println!(
         "askd: generando ({} tokens de contexto, máx {})",
         tokens.len(),
@@ -491,7 +505,7 @@ fn tratar_linea_askd(
     socket_write_str(
         fd,
         &format!(
-            "ask: generando ({} tokens de contexto, máx {})…\n",
+            "ask: generando ({} tokens de contexto, máx {})...\n",
             tokens.len(),
             conf.max
         ),

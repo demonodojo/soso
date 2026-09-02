@@ -290,8 +290,9 @@ and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: a
 | Connection refused :2222 | Wait for `sosh — escribe 'help'`; or prior QEMU still running → `pkill qemu-system-x86` |
 | Teclado muerto tras la primera tecla (placa) | Algo del camino IRQ 1 toma un `lock()` o imprime; ver «Candados y contexto de interrupción» en `soso-architecture` |
 | Teclas no coinciden (QWERTY vs ñ/¿) | Mapa por defecto **es**; `kbd us` en kernel-shell para teclado americano/QEMU |
-| La máquina se arrastra tras usar `soso-llm`/`ask` | En askd el `ThreadPool` se suelta tras cada respuesta (`drop_pool`); si giran al 100 %, revisar `pool.rs` |
+| La máquina se arrastra tras usar `soso-llm`/`ask` | En askd el `ThreadPool` se suelta tras cada respuesta (`drop_pool`); si giran al 100 %, revisar `pool.rs` (deben dormir en futex entre matvecs) |
 | `ask` recarga en cada pregunta | Debe haber un solo askd en `:7420`; la segunda pregunta no debe mostrar «ask: cargando» salvo cambio de modelo o presión de RAM |
+| `ask hola` con Mixtral se queda en puntos | Sin pool de VRAM (`pool VRAM=no`) Mixtral va a CPU. No está colgado; minutos/token. `ask :modelo tiny` o esperar. Tras reflashear, un punto por capa |
 | `Could not set up host forwarding rule tcp::2222` | Puerto ocupado; `pkill qemu-system-x86` y relanzar |
 | SSH output desalineada | Kernel debe enviar CRLF en `ssh::tx_push` (tty cruda) |
 | SSH no reconecta tras Ctrl-C | Kernel debe hacer `reset_socket` en CloseWait/TimeWait |

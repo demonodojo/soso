@@ -263,11 +263,11 @@ fn gsp_label() -> &'static str {
 ///
 /// AVERÍA (2026-08-17): esto miraba `gsp_ready()`, que es cierto ya con el GSP
 /// arrancado —y hasta con `booted_soft`—. Pero el pool de VRAM lo monta
-/// `gsp_buf_init`, al final de la cadena RM → VMM → canal/CE que hoy sólo corre
-/// en la rama Blackwell/FMC. En la placa Ampere, entonces, `alloc` pedía al pool,
-/// recibía 0 y **caía en silencio a un búfer del heap del kernel**: `gpu_map`
-/// contestaba OK y `MATVF`, al no ver `device_va`, multiplicaba con el bucle de
-/// CPU del kernel. Todo decía «offload» y no había ni un byte en la tarjeta.
+/// `gsp_buf_init`, al final de la cadena RM → VMM → canal/CE (FMC en Blackwell,
+/// booter en Ampere). Si esa cadena no llega, `alloc` pedía al pool, recibía 0 y
+/// **caía en silencio a un búfer del heap del kernel**: `gpu_map` contestaba OK
+/// y `MATVF`, al no ver `device_va`, multiplicaba con el bucle de CPU del kernel.
+/// Todo decía «offload» y no había ni un byte en la tarjeta.
 /// Ahora se pregunta por el pool, que es la pregunta de verdad.
 fn device_bufs_available(g: &GpuState) -> bool {
     g.vendor == GPU_VENDOR_NVIDIA && g.compute && {

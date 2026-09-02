@@ -22,16 +22,18 @@ typedef char gsp_wpr_meta_ver_check[offsetof(struct gsp_wpr_meta, verified) == 0
 #define NV_FB_VIDMEM_SIZE_MB 0x001183a4u
 
 /* Parámetros de heap de `r570_wpr_libos3_gb20x` (nvkm/subdev/gsp/rm/r570/rm.c)
- * y `GSP_FW_HEAP_PARAM_*` de los headers nvrm. Todos son de GB20x: otras
- * familias tienen otros y esta ruta es solo la del FMC. */
+ * y `GSP_FW_HEAP_PARAM_*` de los headers nvrm. GB20x y GA10x r570 comparten
+ * LIBOS3 + 14 MiB de base RM; el non-WPR heap sí cambia (1 MiB en Ampere). */
 #define WPR_OS_CARVEOUT_SIZE   (22u << 20)          /* LIBOS3 baremetal */
 #define WPR_BASE_RM_SIZE       (14u << 20)          /* Hopper+ */
 #define WPR_SIZE_PER_GB_FB     (96u << 10)
 #define WPR_CLIENT_ALLOC_SIZE  ((48ull << 10) * 2048ull)
 #define WPR_HEAP_NON_WPR       0x220000u            /* gb20x */
+#define WPR_HEAP_NON_WPR_AMPERE 0x100000u           /* tu102: 1 MiB bajo WPR2 */
 #define WPR_RSVD_SIZE_PMU      0x1820000u           /* ALIGN(0x800000+0x1000000+0x1000, 0x20000) */
 #define WPR_FRTS_SIZE          0x100000u
 #define WPR_VGA_WORKSPACE_SIZE (128u * 1024u)
+#define NV_PDISP_VGA_WORKSPACE 0x00625f04u
 
 /* Cabecera NVIDIA de los blobs de arranque (`nvfw_bin_hdr`, include/nvfw/fw.h). */
 struct gsp_bin_hdr {
@@ -85,7 +87,7 @@ uint64_t gsp_wpr_vidmem_size(void)
 /* `tu102_gsp_wpr_heap_size`. El `max()` con heap_size_min de upstream se queda
  * fuera a propósito: allí vale 170 (MiB sin convertir) contra un total en bytes,
  * así que nunca gana; replicarlo aquí solo confundiría. */
-static uint64_t wpr_heap_size(uint64_t fb_bytes)
+uint64_t gsp_wpr_heap_size(uint64_t fb_bytes)
 {
     uint64_t fb_gb = (fb_bytes + (1ull << 30) - 1ull) >> 30;
 
@@ -215,7 +217,7 @@ int gsp_wpr_prepare(const struct gsp_rm_fw *rm, struct gsp_wpr *out)
         lx_printk("nouveau-lx: WPR sin tamaño de VRAM (0x%08x)\n", NV_FB_VIDMEM_SIZE_MB);
         return -1;
     }
-    out->heap_size = wpr_heap_size(out->fb_bytes);
+    out->heap_size = gsp_wpr_heap_size(out->fb_bytes);
     /* `gh100_gsp_init`: rsvd = heap fuera de WPR + reserva del PMU, a 2 MiB. */
     out->rsvd_size = (uint32_t)align_up_u64((uint64_t)WPR_HEAP_NON_WPR +
                                             (uint64_t)WPR_RSVD_SIZE_PMU, 0x200000ull);
@@ -268,6 +270,223 @@ int gsp_wpr_prepare(const struct gsp_rm_fw *rm, struct gsp_wpr *out)
     lx_printk("nouveau-lx: WPR meta verificado @0x%llx (256 B) heap=%u MiB nonWpr=%u KiB pmu=%u MiB\n",
               (unsigned long long)out->meta_phys, (unsigned)(out->heap_size >> 20),
               (unsigned)(WPR_HEAP_NON_WPR >> 10), (unsigned)(WPR_RSVD_SIZE_PMU >> 20));
+    return 0;
+}
+
+/* `tu102_gsp_vga_workspace_addr`: 0x625f04 bit 3; si no, 1 MiB al final de FB. */
+static uint64_t vga_workspace_addr(uint64_t fb_bytes)
+{
+    uint32_t r = gsp_mmio_rd32(NV_PDISP_VGA_WORKSPACE);
+    uint64_t fallback = fb_bytes - 0x100000ull;
+    uint64_t addr;
+
+    if (!(r & 8u)) {
+        return fallback;
+    }
+    addr = ((uint64_t)(r & 0xffffff00u)) << 8;
+    if (addr > fallback) {
+        return fb_bytes - 0x20000ull;
+    }
+    return addr;
+}
+
+int gsp_wpr_layout_ampere(uint64_t fb_bytes, uint64_t boot_size, uint64_t elf_size,
+                          uint64_t heap_size, uint64_t vga_addr,
+                          struct gsp_wpr_fb_layout *out)
+{
+    uint64_t frts_end;
+
+    if (!out || fb_bytes < (4ull << 20) || !boot_size || !elf_size || !heap_size) {
+        return -1;
+    }
+    if (!vga_addr) {
+        vga_addr = fb_bytes - 0x100000ull;
+    }
+    if (vga_addr >= fb_bytes || vga_addr < (2ull << 20)) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    out->vga_addr = vga_addr;
+    out->vga_size = fb_bytes - vga_addr;
+
+    out->frts_size = WPR_FRTS_SIZE;
+    frts_end = align_down_u64(vga_addr, 0x20000ull);
+    if (frts_end < out->frts_size) {
+        return -1;
+    }
+    out->frts_addr = frts_end - out->frts_size;
+
+    out->boot_size = boot_size;
+    if (out->frts_addr < boot_size) {
+        return -1;
+    }
+    out->boot_addr = align_down_u64(out->frts_addr - boot_size, 0x1000ull);
+
+    out->elf_size = elf_size;
+    if (out->boot_addr < elf_size) {
+        return -1;
+    }
+    out->elf_addr = align_down_u64(out->boot_addr - elf_size, 0x10000ull);
+
+    if (out->elf_addr < heap_size) {
+        return -1;
+    }
+    out->heap_addr = align_down_u64(out->elf_addr - heap_size, 1ull << 20);
+    out->heap_size = align_down_u64(out->elf_addr - out->heap_addr, 1ull << 20);
+    if (!out->heap_size) {
+        return -1;
+    }
+
+    if (out->heap_addr < sizeof(struct gsp_wpr_meta)) {
+        return -1;
+    }
+    out->wpr_start = align_down_u64(out->heap_addr - sizeof(struct gsp_wpr_meta),
+                                    1ull << 20);
+    out->wpr_end = frts_end;
+    if (out->wpr_start < WPR_HEAP_NON_WPR_AMPERE) {
+        return -1;
+    }
+    out->nonwpr_addr = out->wpr_start - WPR_HEAP_NON_WPR_AMPERE;
+    out->nonwpr_size = WPR_HEAP_NON_WPR_AMPERE;
+
+    if (!(out->nonwpr_addr < out->wpr_start &&
+          out->wpr_start <= out->heap_addr &&
+          out->heap_addr + out->heap_size <= out->elf_addr &&
+          out->elf_addr + out->elf_size <= out->boot_addr &&
+          out->boot_addr + out->boot_size <= out->frts_addr &&
+          out->frts_addr + out->frts_size == out->wpr_end &&
+          out->wpr_end <= out->vga_addr &&
+          out->vga_addr + out->vga_size == fb_bytes)) {
+        return -1;
+    }
+    return 0;
+}
+
+static int wpr_meta_verify_ampere(const struct gsp_wpr *w, const struct gsp_rm_fw *rm,
+                                  const struct gsp_wpr_fb_layout *L)
+{
+    const struct gsp_wpr_meta *m = w->meta;
+
+    if (m->magic != GSP_FW_WPR_META_MAGIC || m->revision != GSP_FW_WPR_META_REVISION) {
+        lx_printk("nouveau-lx: WPR Ampere magic/revision mal escritos\n");
+        return -1;
+    }
+    if (m->sysmemAddrOfRadix3Elf != rm->rx3.mem[0].phys ||
+        m->sizeOfRadix3Elf != rm->img_len ||
+        m->sysmemAddrOfSignature != rm->sig_phys ||
+        m->sizeOfSignature != rm->sig_len) {
+        lx_printk("nouveau-lx: WPR Ampere no cuadra con la imagen GSP-RM\n");
+        return -1;
+    }
+    if (m->sysmemAddrOfBootloader != w->boot.phys || m->sizeOfBootloader != w->boot.size) {
+        lx_printk("nouveau-lx: WPR Ampere no cuadra con el bootloader\n");
+        return -1;
+    }
+    if (m->bootCount || m->verified) {
+        lx_printk("nouveau-lx: WPR Ampere con estado de arranque previo\n");
+        return -1;
+    }
+    if (m->gspFwWprStart != L->wpr_start || m->gspFwWprEnd != L->wpr_end ||
+        m->gspFwHeapOffset != L->heap_addr || m->gspFwHeapSize != L->heap_size ||
+        m->gspFwOffset != L->elf_addr || m->bootBinOffset != L->boot_addr ||
+        m->frtsOffset != L->frts_addr || m->frtsSize != L->frts_size ||
+        m->nonWprHeapOffset != L->nonwpr_addr || m->nonWprHeapSize != L->nonwpr_size ||
+        m->gspFwRsvdStart != L->nonwpr_addr || m->fbSize != w->fb_bytes ||
+        m->vgaWorkspaceOffset != L->vga_addr || m->vgaWorkspaceSize != L->vga_size) {
+        lx_printk("nouveau-lx: WPR Ampere offsets no cuadran con el layout\n");
+        return -1;
+    }
+    return 0;
+}
+
+int gsp_wpr_prepare_ampere(const struct gsp_rm_fw *rm, struct gsp_wpr *out)
+{
+    struct gsp_wpr_meta *m;
+    struct gsp_wpr_fb_layout L;
+    uint64_t vga;
+
+    if (!out || !rm || !rm->ready) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    out->fb_bytes = gsp_wpr_vidmem_size();
+    if (!out->fb_bytes) {
+        lx_printk("nouveau-lx: Ampere WPR sin tamaño de VRAM (0x%08x)\n",
+                  NV_FB_VIDMEM_SIZE_MB);
+        return -1;
+    }
+    out->heap_size = gsp_wpr_heap_size(out->fb_bytes);
+    out->rsvd_size = (uint32_t)align_up_u64((uint64_t)WPR_HEAP_NON_WPR_AMPERE +
+                                            (uint64_t)WPR_RSVD_SIZE_PMU, 0x200000ull);
+
+    if (boot_fw_prepare(&out->boot) != 0) {
+        gsp_wpr_release(out);
+        return -1;
+    }
+
+    vga = vga_workspace_addr(out->fb_bytes);
+    if (gsp_wpr_layout_ampere(out->fb_bytes, out->boot.size, rm->img_len,
+                              out->heap_size, vga, &L) != 0) {
+        lx_printk("nouveau-lx: Ampere WPR layout no cabe en %u MiB de FB\n",
+                  (unsigned)(out->fb_bytes >> 20));
+        gsp_wpr_release(out);
+        return -1;
+    }
+
+    out->meta = lx_dma_alloc_coherent(NULL, sizeof(*out->meta), &out->meta_phys, GFP_KERNEL);
+    if (!out->meta || !out->meta_phys) {
+        lx_printk("nouveau-lx: Ampere WPR sin memoria para el meta\n");
+        gsp_wpr_release(out);
+        return -1;
+    }
+    m = out->meta;
+    memset(m, 0, sizeof(*m));
+
+    m->magic = GSP_FW_WPR_META_MAGIC;
+    m->revision = GSP_FW_WPR_META_REVISION;
+
+    m->sysmemAddrOfRadix3Elf = rm->rx3.mem[0].phys;
+    m->sizeOfRadix3Elf = rm->img_len;
+
+    m->sysmemAddrOfBootloader = out->boot.phys;
+    m->sizeOfBootloader = out->boot.size;
+    m->bootloaderCodeOffset = out->boot.code_offset;
+    m->bootloaderDataOffset = out->boot.data_offset;
+    m->bootloaderManifestOffset = out->boot.manifest_offset;
+
+    m->sysmemAddrOfSignature = rm->sig_phys;
+    m->sizeOfSignature = rm->sig_len;
+
+    m->gspFwRsvdStart = L.nonwpr_addr;
+    m->nonWprHeapOffset = L.nonwpr_addr;
+    m->nonWprHeapSize = L.nonwpr_size;
+    m->gspFwWprStart = L.wpr_start;
+    m->gspFwHeapOffset = L.heap_addr;
+    m->gspFwHeapSize = L.heap_size;
+    m->gspFwOffset = L.elf_addr;
+    m->bootBinOffset = L.boot_addr;
+    m->frtsOffset = L.frts_addr;
+    m->frtsSize = L.frts_size;
+    m->gspFwWprEnd = L.wpr_end;
+    m->fbSize = out->fb_bytes;
+    m->vgaWorkspaceOffset = L.vga_addr;
+    m->vgaWorkspaceSize = L.vga_size;
+    m->pmuReservedSize = WPR_RSVD_SIZE_PMU;
+
+    if (wpr_meta_verify_ampere(out, rm, &L) != 0) {
+        gsp_wpr_release(out);
+        return -1;
+    }
+
+    out->ready = 1;
+    lx_printk("nouveau-lx: Ampere WPR layout FB=%u MiB wpr=[0x%llx,0x%llx) "
+              "heap=%u MiB elf=0x%llx boot=0x%llx frts=0x%llx vga=0x%llx\n",
+              (unsigned)(out->fb_bytes >> 20),
+              (unsigned long long)L.wpr_start, (unsigned long long)L.wpr_end,
+              (unsigned)(L.heap_size >> 20),
+              (unsigned long long)L.elf_addr, (unsigned long long)L.boot_addr,
+              (unsigned long long)L.frts_addr, (unsigned long long)L.vga_addr);
     return 0;
 }
 

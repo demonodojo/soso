@@ -1,9 +1,8 @@
 //! Pool de hilos userspace para `RowParallel`.
 //!
-//! Los workers hacen spin-wait sobre un contador de generación (sin futex
-//! en el camino caliente del matvec): más simple y evita lost-wakeups
-//! al arrancar. El futex sigue usándose en libsoso::thread::Barrier y
-//! en la suite de init.
+//! Entre trabajos los workers duermen en futex (si no, ncpu-1 cores al 100 %
+//! y `Drop` en askd no volvía al accept). Dentro del matvec siguen en spin
+//! sobre `done`, sin syscall.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use libsoso::sys;
@@ -65,7 +64,14 @@ extern "C" fn worker_entry(arg: u64) -> ! {
             if shared.shutdown.load(Ordering::Acquire) != 0 {
                 salir(shared);
             }
-            core::hint::spin_loop();
+            // Dormir entre trabajos. El spin de antes quemaba ncpu-1 cores
+            // en vacío: Drop de askd no llegaba al accept y la placa
+            // parecía colgada (2026-08-31). El camino caliente (esperar
+            // `done` dentro del matvec) sigue en spin, sin syscall.
+            sys::futex_wait(
+                &shared.generation as *const AtomicU32 as *const u32,
+                last,
+            );
         }
         last = shared.generation.load(Ordering::Acquire);
         if shared.shutdown.load(Ordering::Acquire) != 0 {
@@ -131,13 +137,11 @@ impl Drop for ThreadPool {
     /// Apaga los workers y **espera a que hayan salido**.
     ///
     /// AVERÍA (2026-08-16, placa real de 8 cores): no existía este `Drop` y
-    /// nadie ponía `shutdown` a 1 jamás. Los workers giran a 100 % de CPU por
-    /// diseño (spin-wait, sin futex, para no pagar una syscall por fila), y
-    /// son procesos del scheduler que comparten el AddrSpace: **sobrevivían al
-    /// proceso que los creó**. Cada `soso-llm`/`ask` dejaba `ncpu-1` hilos
-    /// quemando un core para siempre; al segundo `ask` la máquina ya estaba
-    /// repartida entre 14 giradores y parecía colgada. En QEMU no se veía
-    /// porque el banco corre con `SOSO_QEMU_SMP=1` y entonces `want == 0`.
+    /// nadie ponía `shutdown` a 1 jamás. Los workers eran procesos del
+    /// scheduler que comparten el AddrSpace: **sobrevivían al proceso que
+    /// los creó**. Entre trabajos ahora duermen en futex; el spin queda
+    /// solo dentro del matvec (esperar `done`). En QEMU con
+    /// `SOSO_QEMU_SMP=1`, `want == 0` y este camino no se ejecuta.
     fn drop(&mut self) {
         if self.n_total <= 1 {
             return;
@@ -145,15 +149,18 @@ impl Drop for ThreadPool {
         let shared = unsafe { &mut *(&raw mut SHARED) };
         shared.shutdown.store(1, Ordering::Release);
         // Un cambio de generación por si alguno estuviera entre las dos
-        // comprobaciones de `shutdown`.
+        // comprobaciones de `shutdown`. Están en futex: hay que despertarlos.
         let _ = shared.generation.fetch_add(1, Ordering::AcqRel);
-        // Están girando, así que salen enseguida; el tope evita quedarse
-        // clavado aquí si uno muriera de otra forma.
-        for _ in 0..1_000_000 {
+        sys::futex_wake(
+            &shared.generation as *const AtomicU32 as *const u32,
+            u32::MAX as u64,
+        );
+        // El tope evita quedarse clavado si uno muriera de otra forma.
+        for _ in 0..10_000 {
             if shared.vivos.load(Ordering::Acquire) == 0 {
                 break;
             }
-            core::hint::spin_loop();
+            let _ = sys::sleep_ms(1);
         }
         shared.n_workers = 0;
         self.n_total = 1;
@@ -170,8 +177,12 @@ impl RowParallel for ThreadPool {
         shared.rows.store(rows, Ordering::Release);
         store_fn(shared, f);
         shared.done.store(0, Ordering::Release);
-        // Publicar el job: los workers en spin ven el nuevo generation.
+        // Publicar el job y despertar a quien duerme en el futex.
         let _ = shared.generation.fetch_add(1, Ordering::AcqRel);
+        sys::futex_wake(
+            &shared.generation as *const AtomicU32 as *const u32,
+            shared.n_workers as u64,
+        );
 
         let (r0, r1) = row_strip(rows, 0, self.n_total);
         f(r0, r1);

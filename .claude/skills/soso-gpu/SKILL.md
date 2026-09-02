@@ -115,13 +115,14 @@ Build con lxdde: `SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask build`
    `user_range_ok_bulk` y `init test` sube 20 MiB con centinelas en los dos extremos.
 7. **`gsp_ready()` no significa que haya pool de VRAM**: es cierto ya con `booted`
    —y con `booted_soft`—, pero el pool lo monta `gsp_buf_init` al final de
-   RM → VMM → canal/CE, cadena que **sólo corre en la rama Blackwell/FMC**. En la
-   ROG (ga107) `alloc` pedía al pool, recibía 0 y **caía en silencio a un búfer del
-   heap del kernel**: `gpu_map` decía OK y `MATVF`, sin `device_va`, multiplicaba
-   con el bucle de CPU del kernel. Todo decía «offload» sin un byte en la tarjeta.
-   Ahora `device_bufs_available` pregunta por el pool (`lx_nouveau_buf_ready`),
-   `GPU_ALLOC_VRAM` falla con ENOTSUP, el arranque dice `pool VRAM=no` y
-   `GpuInfo::vram_bufs` lo lleva a userspace.
+   RM → VMM → canal/CE (FMC en Blackwell; `booter_load` en Ampere). En la ROG
+   (ga107) el bring-up paraba en `GSP booted (hw poll ok)` **sin** esa cadena:
+   `alloc` pedía al pool, recibía 0 y **caía en silencio a un búfer del heap del
+   kernel**. `gpu_map` decía OK y `MATVF`, sin `device_va`, multiplicaba con el
+   bucle de CPU. Ahora `device_bufs_available` pregunta por el pool
+   (`lx_nouveau_buf_ready`), `GPU_ALLOC_VRAM` falla con ENOTSUP, el arranque dice
+   `pool VRAM=sí/no` y `GpuInfo::vram_bufs` lo lleva a userspace. Ampere ya
+   intenta el mismo pool; si el booter falla, sigue siendo `pool VRAM=no`.
 8. **Subir sin copias**: `gsp_buf_upload_at` (offset dentro del slot) para trocear
    desde el kernel, y `gsp_buf_upload_dma`, que mapea las páginas del proceso en
    `G6_SRC_VA` y deja que el CE lea de ellas — un `LAUNCH_DMA` por lote de 16 MiB
@@ -214,10 +215,12 @@ ucode **no** se copia a un GEM y su blob en bruto se suelta con
 ≈125 MiB en vez de ≈190. La ruta Ampere está escrita pero **sin probar**: no hay
 3060 en esta máquina.
 
-**Ruta por familia en el bring-up.** `gsp_bringup.c` bifurca: Ampere → `run_acr_sec2()`
-(el ACR de siempre); Blackwell → `run_fmc_blackwell()`. El ACR de `acr_fw.c` es de
-Ampere (ucode `ga102` en SEC2) y en GB205 daba `falcon boot mbox0=0xbadf4100` — el
-falcon ni ejecuta — porque GB20x arranca por GSP-FMC/FSP.
+**Ruta por familia en el bring-up.** `gsp_bringup.c` bifurca: Ampere → layout
+WPR + libos + cmdq + ACR best-effort + `booter_load` en SEC2; Blackwell →
+`run_fmc_blackwell()`. El ACR de `acr_fw.c` es de Ampere (ucode `ga102` en SEC2)
+y en GB205 daba `falcon boot mbox0=0xbadf4100` — el falcon ni ejecuta — porque
+GB20x arranca por GSP-FMC/FSP. Tras un GSP vivo, las dos familias siguen por
+`run_gsp_rm_chain()` (RPC → RM → VMM → CE → pool).
 
 **GSP-FMC (`fmc_lx.c`), estado real.** Upstream de referencia (NO está en el árbol
 6.6 pinneado; se consultó en git.kernel.org): `nvkm/subdev/fsp/{gh100,gb202}.c`,
@@ -939,8 +942,10 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 
 **Distinción clave:** el grafo nvkm se construye en runtime; el **boot GSP y el
 compute en GB205 van por la ruta lx-native** (`fmc_lx`/`gsp_*`, no por
-`ga102_gsp_new` completo). G3b–G5 están en **GO en silicio** (2026-07-29). La
-ruta ACR Ampere sigue escrita y sin probar (no hay 3060 en esta máquina).
+`ga102_gsp_new` completo). G3b–G5 están en **GO en silicio** (2026-07-29). Ampere
+GA10x arranca por `booter_load` (WPR calculado por el driver) y, si el RISC-V
+queda vivo, sigue la misma cadena RM→pool; sin probar en esta máquina (no hay
+3060; la ROG ga107 es el HW de validación).
 
 **Estado (2026-07-24): 62 fuentes nvkm/lib integradas, solo 4 dummies restantes**
 (`target/g3-nvkm-undefined.txt`), **todos dependientes de HW/ROM:**

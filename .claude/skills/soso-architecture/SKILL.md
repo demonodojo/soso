@@ -116,6 +116,12 @@ llama2-70b según tamaño del USB). Las imágenes de prueba QEMU siguen con
 con ella — por eso `ask-modelo` escribe el fichero en el disco de la máquina, no en el
 árbol. `:eco <texto>` se resuelve antes de leer nada: devuelve el texto tal cual llegó
 y es lo que hace verificable el camino crudo (`ask :eco a|b>c "x"`).
+**askd usa `ThreadPool`** (ncpu-1) en cada generate y lo suelta al terminar;
+los workers duermen en futex entre matvecs (si giran, `Drop` no vuelve al
+`accept` y Mixtral en un core parece colgado). Staging async sigue apagado
+en askd (con SMP el worker no pone `done`). `Runtime::layer_hook` emite un
+punto por capa para que el cliente no corte a los 4 min de silencio. Si no hay
+pool de VRAM (`pool VRAM=no`), Mixtral va a CPU: avisa y sugiere `:modelo tiny`.
 
 **Cargar un segundo modelo en el mismo proceso** destapó que `StagingWorker::spawned`
 era por instancia: el hilo de staging y `STAGE` son del proceso, así que arrancaba un
@@ -293,12 +299,11 @@ swap/ESP que el instalador debe rechazar).
 
 `thread_spawn` crea **procesos** del scheduler que comparten el `AddrSpace`, y
 `exit` mata sólo al que lo llama: **los hilos sobreviven al proceso que los creó**.
-`soso_llm::pool::worker_entry` hace spin-wait al 100 % por diseño (sin futex en el
-camino del matvec), así que un pool sin apagar deja `ncpu-1` cores quemados para
-siempre — en placa de 8 cores, el segundo `ask`/`soso-llm run` dejaba la máquina
-inservible (todos los cores en `worker_entry`, comprobado con `info registers -a`
-del monitor de QEMU). `ThreadPool` tiene ahora `Drop` que pone `shutdown` y
-**espera** a que los workers salgan (contador `vivos`). Regla: cualquier cosa que
+`soso_llm::pool::worker_entry` duerme en futex entre trabajos; el spin al 100 %
+queda **dentro** del matvec (esperar `done`, sin syscall). Un pool sin `Drop`
+sigue dejando hilos vivos para siempre — en placa de 8 cores eso ahogaba el
+segundo `ask`. `ThreadPool::Drop` pone `shutdown`, despierta el futex y
+**espera** a que salgan (`vivos`). Regla: cualquier cosa que
 lance hilos los apaga y los espera antes de morir. **En QEMU con `-smp 1` esto no
 existe** (`want == 0`): por eso el shard `llm-dense` corre con `-smp 2`.
 

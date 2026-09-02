@@ -18,7 +18,7 @@ int acr_lx_boot_ahesasc(void)
     }
     lx_printk("nouveau-lx: ACR ola2 — AHESASC (SEC2 @0x%x)\n", LX_FLCN_SEC2_BASE);
     if (falcon_lx_hsfw_boot(LX_FLCN_SEC2_BASE, ahesasc, "AHESASC") != 0) {
-        lx_printk("nouveau-lx: ACR AHESASC falló (WPR/nvkm pendiente)\n");
+        lx_printk("nouveau-lx: ACR AHESASC falló — sigue booter\n");
         return -1;
     }
     return 0;

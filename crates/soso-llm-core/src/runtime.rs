@@ -92,6 +92,9 @@ pub struct Runtime {
     has_lm_head: bool,
     has_output_norm: bool,
     pub planner: Option<ResourcePlanner>,
+    /// Tras cada capa (`layer` 0-based, `n_layers`). `askd` lo usa para no
+    /// parecer colgado: Mixtral en CPU tarda minutos *por token*.
+    pub layer_hook: Option<fn(u32, u32)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -137,6 +140,7 @@ impl Runtime {
             has_lm_head,
             has_output_norm,
             planner: None,
+            layer_hook: None,
         }
     }
 
@@ -498,6 +502,9 @@ impl Runtime {
                 let ms = c().saturating_sub(t0.unwrap_or(0));
                 pl.observe_layer(layer, dest, ms);
                 pl.observe_hotpath(timing.matvec_ms, timing.attn_ms);
+            }
+            if let Some(hook) = self.layer_hook {
+                hook(layer, layer_end);
             }
             // Liberar shards fuera del working set (streaming FlexGen).
             let keep = self

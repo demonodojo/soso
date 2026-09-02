@@ -23,6 +23,8 @@
 #include "gsp_bar1.h"
 #include "gsp_wpr.h"
 #include "gsp_chip.h"
+#include "gsp_dma.h"
+#include "falcon_lx.h"
 #include "lx_emul.h"
 
 #define NV_PMC_BOOT_0_OFF 0x0000u
@@ -78,7 +80,7 @@ enum gsp_phase {
 
 static enum gsp_phase g_phase = GSP_NONE;
 static struct gsp_rm_fw g_rm;   /* imagen GSP-RM + radix3, viva hasta el boot */
-static struct gsp_wpr g_wpr;    /* bootloader + GspFwWprMeta (solo ruta FMC) */
+static struct gsp_wpr g_wpr;    /* bootloader + GspFwWprMeta (FMC y Ampere) */
 static struct gsp_libos g_libos;    /* colas, logs, RMARGS y boot params */
 static struct fmc_staged g_fmc;     /* imagen FMC + cadena de firma en sysmem */
 static struct gsp_rpc g_rpc;        /* anillo de mensajes de GSP-RM */
@@ -213,6 +215,24 @@ static int sysinfo_plausible(const struct gsp_sysinfo *si)
     return 1;
 }
 
+/* SET_SYSTEM_INFO / SET_REGISTRY en la cmdq ANTES de arrancar el GSP
+ * (`r535_gsp_oneinit`). Sin ellas GSP-RM se inicializa a ciegas. */
+static void enqueue_boot_rpcs(void)
+{
+    if (gsp_cmdq_init(&g_libos, &g_cmdq) == 0) {
+        struct gsp_sysinfo si;
+        collect_sysinfo(&si);
+        if (!sysinfo_plausible(&si)) {
+            lx_printk("nouveau-lx: BARs no creíbles — no se manda SET_SYSTEM_INFO\n");
+        } else if (gsp_cmdq_set_system_info(&g_cmdq, &si) != 0 ||
+            gsp_cmdq_set_registry(&g_cmdq) != 0) {
+            lx_printk("nouveau-lx: no se pudieron encolar SET_SYSTEM_INFO/SET_REGISTRY\n");
+        }
+    } else {
+        lx_printk("nouveau-lx: cmdq no inicializable — GSP-RM arrancará a ciegas\n");
+    }
+}
+
 /* Ruta Blackwell: el GSP lo arranca el FSP con la imagen GSP-FMC, no el ACR de
  * SEC2. Validamos el ELF firmado, leemos el estado del FSP y construimos el WPR
  * meta (`gsp_wpr.c`) sobre la radix3 de `gsp_rm.c`. Para enviar el COT falta el
@@ -274,22 +294,8 @@ static int run_fmc_blackwell(void)
     }
 
     /* Las dos RPCs que GSP-RM consume durante su init tienen que estar en la
-     * cmdq ANTES de arrancar el GSP (`r535_gsp_oneinit`). Sin ellas se
-     * inicializa a ciegas: cientos de NOCAT y NV_ERR_OPERATING_SYSTEM. */
-    if (gsp_cmdq_init(&g_libos, &g_cmdq) == 0) {
-        struct gsp_sysinfo si;
-        collect_sysinfo(&si);
-        if (!sysinfo_plausible(&si)) {
-            /* Mejor arrancar sin system info que con direcciones falsas: lo
-             * segundo mata la GPU, lo primero solo hace fallar el init. */
-            lx_printk("nouveau-lx: BARs no creíbles — no se manda SET_SYSTEM_INFO\n");
-        } else if (gsp_cmdq_set_system_info(&g_cmdq, &si) != 0 ||
-            gsp_cmdq_set_registry(&g_cmdq) != 0) {
-            lx_printk("nouveau-lx: no se pudieron encolar SET_SYSTEM_INFO/SET_REGISTRY\n");
-        }
-    } else {
-        lx_printk("nouveau-lx: cmdq no inicializable — GSP-RM arrancará a ciegas\n");
-    }
+     * cmdq ANTES de arrancar el GSP (`r535_gsp_oneinit`). */
+    enqueue_boot_rpcs();
 
     /* Todo lo que el COT referencia está construido y verificado en memoria. */
     g_phase = GSP_COT_READY;
@@ -338,6 +344,110 @@ static int try_hw_boot(void)
         return 0;
     }
     return -1;
+}
+
+#define NV_PGSP_FALCON_MBOX0  0x00110040u
+#define NV_PGSP_FALCON_MBOX1  0x00110044u
+#define NV_PRISCV_CPUCTL      0x00111388u
+#define CPUCTL_ACTIVE_STAT    (1u << 7)
+
+/* Booter_load en SEC2 (`tu102_gsp_booter_load`): mailbox = física del WPR meta.
+ * Antes, la física del array libos en el mailbox del falcon GSP. */
+static int run_ampere_booter(void)
+{
+    const struct gsp_fw_blob *blob = gsp_fw_get(GSP_FW_BOOTER_LOAD);
+    struct gsp_dma_buf dma;
+    struct acr_fw_blob wrap;
+    uint32_t m0, m1;
+    unsigned t;
+    uint32_t cpuctl = 0;
+
+    if (!blob || !blob->valid || !blob->data || !blob->len) {
+        lx_printk("nouveau-lx: Ampere sin blob booter_load\n");
+        return -1;
+    }
+    if (!g_wpr.ready || !g_wpr.meta_phys || !g_libos.ready) {
+        return -1;
+    }
+    if (gsp_dma_alloc_copy(&dma, blob->data, blob->len, "booter_load") != 0) {
+        return -1;
+    }
+
+    gsp_mmio_wr32(NV_PGSP_FALCON_MBOX0, (uint32_t)g_libos.libos.phys);
+    gsp_mmio_wr32(NV_PGSP_FALCON_MBOX1, (uint32_t)(g_libos.libos.phys >> 32));
+
+    wrap.path = blob->path;
+    wrap.data = dma.va;
+    wrap.len = dma.size;
+    wrap.dma_handle = (unsigned)dma.phys;
+    wrap.dma_cpu = dma.va;
+    wrap.valid = 1;
+
+    m0 = (uint32_t)g_wpr.meta_phys;
+    m1 = (uint32_t)(g_wpr.meta_phys >> 32);
+    lx_printk("nouveau-lx: Ampere booter_load en SEC2, WPR meta @0x%llx libos @0x%llx\n",
+              (unsigned long long)g_wpr.meta_phys,
+              (unsigned long long)g_libos.libos.phys);
+
+    if (falcon_lx_hsfw_boot_mbox(LX_FLCN_SEC2_BASE, &wrap, "booter_load", m0, m1, 0) != 0) {
+        gsp_dma_free(&dma);
+        return -1;
+    }
+    gsp_dma_free(&dma);
+
+    t = 4000u;
+    while (t--) {
+        cpuctl = gsp_mmio_rd32(NV_PRISCV_CPUCTL);
+        if (cpuctl & CPUCTL_ACTIVE_STAT) {
+            break;
+        }
+        lx_mdelay(1);
+    }
+    if (!(cpuctl & CPUCTL_ACTIVE_STAT)) {
+        lx_printk("nouveau-lx: Ampere booter ok pero RISC-V inactivo (cpuctl=0x%08x)\n",
+                  cpuctl);
+        return -1;
+    }
+    lx_printk("nouveau-lx: Ampere RISC-V activo (cpuctl=0x%08x)\n", cpuctl);
+    return 0;
+}
+
+/* Ampere: layout WPR + libos + cmdq ANTES de arrancar, ACR best-effort, booter. */
+static int run_ampere_boot(void)
+{
+    int have_wpr = 0;
+
+    if (!g_rm.ready) {
+        lx_printk("nouveau-lx: Ampere sin imagen GSP-RM — sigue kick/poll\n");
+    } else {
+        g_phase = GSP_WPR_META;
+        if (gsp_wpr_prepare_ampere(&g_rm, &g_wpr) != 0) {
+            lx_printk("nouveau-lx: Ampere WPR no preparado — sigue kick/poll\n");
+        } else {
+            g_phase = GSP_LIBOS_ARGS;
+            if (gsp_libos_prepare(&g_wpr, &g_libos) != 0) {
+                lx_printk("nouveau-lx: Ampere libos no preparado — sigue kick/poll\n");
+            } else {
+                enqueue_boot_rpcs();
+                have_wpr = 1;
+            }
+        }
+    }
+
+    run_acr_sec2();
+
+    if (!have_wpr) {
+        return -1;
+    }
+    g_phase = GSP_KICK;
+    if (run_ampere_booter() != 0) {
+        lx_printk("nouveau-lx: Ampere booter_load falló — sigue kick/poll\n");
+        return -1;
+    }
+    g_phase = GSP_BOOTED;
+    lx_printk("nouveau-lx: GSP booted (hw, booter_load Ampere, %u MiB VRAM)\n",
+              (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+    return 0;
 }
 
 /* G4d (2/2): espacio de direcciones, un bloque de VRAM y una página de sysmem
@@ -691,6 +801,34 @@ static int run_compute_stage(void)
     return 0;
 }
 
+/* Tras un GSP vivo (FMC o booter Ampere): RPC → objetos RM → VMM → CE → pool. */
+static void run_gsp_rm_chain(void)
+{
+    if (gsp_rpc_init(&g_libos, &g_rpc) == 0 &&
+        gsp_rpc_start(g_wpr.boot.app_version) == 0 &&
+        gsp_rpc_wait_event(&g_rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 4000) == 0) {
+        g_phase = GSP_RM_READY;
+        lx_printk("nouveau-lx: GSP-RM listo (RPC en marcha)\n");
+
+        if (gsp_rm_init(&g_cmdq, &g_rpc, &g_rm_obj) == 0) {
+            g_phase = GSP_RM_OBJECTS;
+
+            (void)gsp_rm_classes_probe(&g_rm_obj);
+            (void)gsp_rm_engines_probe(&g_rm_obj);
+
+            if (gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static) == 0 &&
+                (run_bar1_probe(), run_vmm_stage() == 0)) {
+                g_phase = GSP_RM_VMM;
+                if (run_chan_ce_stage() == 0) {
+                    (void)run_compute_stage();
+                }
+            }
+        }
+    } else {
+        lx_printk("nouveau-lx: GSP arrancado pero GSP-RM no responde por RPC\n");
+    }
+}
+
 int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
 {
     void *bar;
@@ -795,62 +933,28 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
 
     /* El ACR de `acr_fw.c` es el de Ampere (ucode ga102 en SEC2). En Blackwell el
      * falcon ni ejecutaba — `mbox0=0xbadf4100` — porque GB20x arranca por GSP-FMC/FSP.
-     * Cada familia va por lo suyo. */
-    if (gsp_nv_family_of(boot0, gsp_nv_family_device_id()) == NV_FAM_BLACKWELL) {
-        if (run_fmc_blackwell() == 0) {
-            /* El GSP lo arrancó el FMC: el kick/poll de tu102 no pinta nada. */
-            g_phase = GSP_BOOTED;
-            lx_printk("nouveau-lx: GSP booted (hw, GSP-FMC vía FSP, %u MiB VRAM)\n",
-                      (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+     * Cada familia va por lo suyo. Tras un GSP vivo, RM → VMM → CE → pool. */
+    {
+        enum nv_family fam = gsp_nv_family_of(boot0, gsp_nv_family_device_id());
 
-
-            /* Ya arrancado, GSP-RM habla por las colas. Escuchar su primer
-             * mensaje es best-effort: si no llega, el GSP sigue arrancado. */
-            if (gsp_rpc_init(&g_libos, &g_rpc) == 0 &&
-                gsp_rpc_start(g_wpr.boot.app_version) == 0 &&
-                gsp_rpc_wait_event(&g_rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 4000) == 0) {
-                g_phase = GSP_RM_READY;
-                lx_printk("nouveau-lx: GSP-RM listo (RPC en marcha)\n");
-
-                /* G4c: con el RPC vivo en las dos direcciones, pedir los objetos
-                 * base de RM. También best-effort: si RM los rechaza, el GSP
-                 * sigue arrancado y el diagnóstico queda en el log. */
-                if (gsp_rm_init(&g_cmdq, &g_rpc, &g_rm_obj) == 0) {
-                    g_phase = GSP_RM_OBJECTS;
-
-                    /* Qué clases tiene este chip, preguntado y no supuesto. Va
-                     * antes que nada porque lo usan el canal, el CE y el
-                     * compute; si falla, cada uno pide su candidata a ciegas y
-                     * lo dice, que es lo que se hacía hasta ahora sin decirlo. */
-                    (void)gsp_rm_classes_probe(&g_rm_obj);
-
-                    /* Y qué motores, por el mismo motivo: el canal pide COPY0 y
-                     * hasta ahora eso salía de contar huecos en una tabla de
-                     * `engine.h`. Aquí sólo se vuelca —nadie decide nada con
-                     * esto todavía—, pero es la única forma de que el log diga si
-                     * el motor existe en ESTA tarjeta y en qué runlist está. */
-                    (void)gsp_rm_engines_probe(&g_rm_obj);
-
-                    /* G4d: el mapa de VRAM utilizable sale de aquí, no del WPR
-                     * meta — en la ruta FMC esos offsets los pone el FMC y no
-                     * los devuelve. Se contrasta contra la VRAM que ya leímos
-                     * por registro: si no cuadra, la transcripción del struct
-                     * está desplazada y lo demás no es de fiar. */
-                    if (gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static) == 0 &&
-                        (run_bar1_probe(), run_vmm_stage() == 0)) {
-                        g_phase = GSP_RM_VMM;
-                        if (run_chan_ce_stage() == 0) {
-                            (void)run_compute_stage();
-                        }
-                    }
-                }
-            } else {
-                lx_printk("nouveau-lx: GSP arrancado pero GSP-RM no responde por RPC\n");
+        if (fam == NV_FAM_BLACKWELL) {
+            if (run_fmc_blackwell() == 0) {
+                /* El GSP lo arrancó el FMC: el kick/poll de tu102 no pinta nada. */
+                g_phase = GSP_BOOTED;
+                lx_printk("nouveau-lx: GSP booted (hw, GSP-FMC vía FSP, %u MiB VRAM)\n",
+                          (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+                run_gsp_rm_chain();
+                return 0;
             }
-            return 0;
+        } else if (fam == NV_FAM_AMPERE) {
+            if (run_ampere_boot() == 0) {
+                run_gsp_rm_chain();
+                return 0;
+            }
+            /* run_ampere_boot ya intentó ACR; kick/poll como antes. */
+        } else {
+            run_acr_sec2();
         }
-    } else {
-        run_acr_sec2();
     }
 
     /* Con la tarjeta fuera del bus no hay nada que sondear: el kick/poll de
@@ -1001,9 +1105,9 @@ uint64_t lx_nouveau_buf_alloc(uint64_t size)
 }
 
 /* ¿Hay pool de VRAM de verdad? Es distinto de `lx_nouveau_gsp_ready()`, que es
- * cierto ya con el GSP arrancado: la cadena RM → VMM → canal/CE → pool sólo
- * corre hoy en la rama Blackwell/FMC, así que en Ampere el GSP arranca y este
- * pool no existe. El kernel necesita saberlo para no repartir búferes de su heap
+ * cierto ya con el GSP arrancado: el pool lo monta `gsp_buf_init` al final de
+ * RM → VMM → canal/CE, que corre tras FMC (Blackwell) y tras booter (Ampere).
+ * Si esa cadena no llega, el kernel no debe repartir búferes de su heap
  * haciéndolos pasar por VRAM (era lo que ocurría, y `MATVF` los multiplicaba con
  * su bucle de CPU mientras todo decía «offload»). */
 int lx_nouveau_buf_ready(void)

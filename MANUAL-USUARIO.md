@@ -351,9 +351,23 @@ ask                                # modo interactivo
 
 Escribe la pregunta detrás y ya está: **el texto llega al modelo tal cual se
 escribió**, con comillas, tildes, `|`, `>` o lo que lleve. Tras cargar el modelo
-sale `ask: generando…` y, en modelos grandes, un punto por cada token de
-contexto; el texto de la respuesta aparece según se genera. El diagnóstico de
-velocidad y disco está en `soso-llm run`.
+sale `ask: generando...` y, en modelos grandes, un punto por cada **capa**
+mientras calcula (Mixtral tiene 32: verás una ristra de puntos antes del
+texto). El diagnóstico de velocidad y disco está en `soso-llm run`.
+
+Si arrancas desde el live USB con **Mixtral** y no hay pool de VRAM
+(`GPU presente sin pool de VRAM` / `pool VRAM=no`) — GPU Ampere cuyo booter
+no llegó a montar el pool, o sin GPU —, `ask` corre en CPU: cada token
+puede tardar **minutos**. No está colgado: los puntos siguen saliendo.
+Para una respuesta ahora, sin reflashear:
+
+```sh
+ask :modelo tiny
+ask hola
+```
+
+(`tiny` viaja siempre en el live, detrás del modelo grande.) O `:max 8` si
+quieres quedarte en Mixtral pero cortar la espera.
 
 Sin texto, `ask` abre su propio prompt y el modelo se carga **una sola vez** para
 toda la sesión, así que a partir de la segunda pregunta la respuesta empieza
