@@ -86,12 +86,24 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     run_cmd(Command::new("sgdisk").arg("-e").arg(&live), "sgdisk -e");
 
     let p2_mb = (p2_size / (1024 * 1024)).max(1);
+    let p4_mb = (live_models::P4_INSTALL_BYTES / (1024 * 1024)).max(1);
+    // p4 SOSOINSTALL va *entre* rootfs y modelos (primeros ~350 MiB del stick).
+    // Al final del pendrive Linux no monta: tras dd+sgdisk p4 quedaba en un
+    // LBA que al leer volvía ceros (tabla vieja o capacidad inflada).
     run_cmd(
         Command::new("sgdisk")
+            .arg("-a")
+            .arg("1")
             .arg("-n")
             .arg(format!("2:0:+{p2_mb}M"))
             .arg("-t")
             .arg("2:8300")
+            .arg("-n")
+            .arg(format!("4:0:+{p4_mb}M"))
+            .arg("-t")
+            .arg("4:0700")
+            .arg("-c")
+            .arg("4:SOSOINSTALL")
             .arg("-n")
             .arg("3:0:0")
             .arg("-t")
@@ -102,6 +114,7 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
 
     let p2_start = partition_first_sector(&live, 2).expect("part2 lba");
     let p3_start = partition_first_sector(&live, 3).expect("part3 lba");
+    let p4_start = partition_first_sector(&live, 4).expect("part4 lba");
 
     run_cmd(
         Command::new("dd")
@@ -120,6 +133,18 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
             .arg(format!("seek={p3_start}"))
             .arg("conv=notrunc"),
         "dd models",
+    );
+
+    write_installer_bundle(&out_dir, total);
+    let fat = build_install_fat(&out_dir);
+    run_cmd(
+        Command::new("dd")
+            .arg(format!("if={}", fat.display()))
+            .arg(format!("of={}", live.display()))
+            .arg("bs=512")
+            .arg(format!("seek={p4_start}"))
+            .arg("conv=notrunc"),
+        "dd SOSOINSTALL",
     );
 
     // Log del kernel, informe hwscan y buzón para el instalador → shim UEFI.
@@ -377,7 +402,7 @@ fn live_image_bytes(data: &Path, models: &Path, uefi: &Path) -> u64 {
     let header = (uefi_len + align - 1) / align * align;
     let p2_size = (data_len + align - 1) / align * align;
     let p3_size = (models_len + align - 1) / align * align;
-    header + p2_size + p3_size + align
+    header + p2_size + live_models::P4_INSTALL_BYTES + p3_size + align
 }
 
 fn write_rootfs_install_meta(root: &Path, total: u64) {
@@ -427,6 +452,7 @@ fn write_flash(
 Archivo: soso-live.img ({:.1} GiB)
   Partición 1 — ESP UEFI (kernel)
   Partición 2 — rootfs sosofs (~{:.0} MiB)
+  Partición 4 — SOSOINSTALL (FAT, instalador Linux)
   Partición 3 — modelos sosomfs (~{:.1} GiB)
 {usb_line}
 1) Escribir SOLO en el pendrive (identifica con lsblk, ej. /dev/sdX):
@@ -465,7 +491,7 @@ Archivo: soso-live.img ({:.1} GiB)
 
 6) Flashear USB con instalador: sudo cargo xtask flash-usb-live /dev/sdX --yes
    (mide el pendrive, elige el mejor modelo GGUF llama que quepa, estira p3 al
-   sobrante del stick; p4 SOSOINSTALL 32 MiB al final; sosomfs crece al arrancar)
+   sobrante del stick; p4 SOSOINSTALL va en la imagen, tras el rootfs)
 
 7) Apagar, quitar USB, arrancar disco habitual → Linux intacto (si no instalaste).
 
@@ -559,6 +585,11 @@ fn run_cmd(cmd: &mut Command, label: &str) {
 }
 
 pub(crate) fn partition_first_sector(img: &Path, part: u32) -> Option<u64> {
+    partition_range(img, part).map(|(first, _)| first)
+}
+
+/// `(primer sector, último sector)` leídos de la GPT en disco, no de `/dev/sdXN`.
+pub(crate) fn partition_range(img: &Path, part: u32) -> Option<(u64, u64)> {
     let out = Command::new("sgdisk")
         .args(["-i", &part.to_string()])
         .arg(img)
@@ -568,19 +599,26 @@ pub(crate) fn partition_first_sector(img: &Path, part: u32) -> Option<u64> {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
+    let mut first = None;
+    let mut last = None;
     for line in text.lines() {
         if line.contains("First sector:") {
-            return line
-                .split(':')
-                .nth(1)?
-                .trim()
-                .split_whitespace()
-                .next()?
-                .parse()
-                .ok();
+            first = parse_sgdisk_sector(line);
+        } else if line.contains("Last sector:") {
+            last = parse_sgdisk_sector(line);
         }
     }
-    None
+    Some((first?, last?))
+}
+
+fn parse_sgdisk_sector(line: &str) -> Option<u64> {
+    line.split(':')
+        .nth(1)?
+        .trim()
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 pub fn live_image_path() -> PathBuf {
@@ -650,6 +688,154 @@ Desinstalar entrada GRUB:
     );
     std::fs::write(&install_txt, body).expect("INSTALL.txt");
     println!("package-usb-live: {}", script.display());
+}
+
+/// FAT32 de p4 (`SOSOINSTALL`) con el instalador, para incrustarla en la imagen.
+fn build_install_fat(out_dir: &Path) -> PathBuf {
+    let fat = out_dir.join("soso-install.fat");
+    {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&fat)
+            .unwrap_or_else(|e| panic!("soso-install.fat: {e}"));
+        f.set_len(live_models::P4_INSTALL_BYTES)
+            .unwrap_or_else(|e| panic!("soso-install.fat size: {e}"));
+    }
+    run_cmd(
+        Command::new("mkfs.vfat")
+            .args(["-F", "32", "-n", "SOSOINSTALL"])
+            .arg(&fat),
+        "mkfs.vfat SOSOINSTALL",
+    );
+    if !fill_install_fat(&fat, out_dir) {
+        eprintln!(
+            "package-usb-live: aviso: FAT creada sin copiar el instalador (¿loop/udisks?)"
+        );
+    }
+    fat
+}
+
+fn fill_install_fat(fat: &Path, out_dir: &Path) -> bool {
+    fill_fat_losetup(fat, out_dir) || fill_fat_udisks(fat, out_dir)
+}
+
+fn fill_fat_losetup(fat: &Path, out_dir: &Path) -> bool {
+    let out = Command::new("losetup")
+        .args(["-f", "--show"])
+        .arg(fat)
+        .output();
+    let Ok(out) = out else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let loopdev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if loopdev.is_empty() {
+        return false;
+    }
+    let ok = mount_and_copy_install(&loopdev, out_dir);
+    let _ = Command::new("losetup").args(["-d", &loopdev]).status();
+    ok
+}
+
+fn fill_fat_udisks(fat: &Path, out_dir: &Path) -> bool {
+    let out = Command::new("udisksctl")
+        .args(["loop-setup", "-f"])
+        .arg(fat)
+        .args(["--no-user-interaction"])
+        .output();
+    let Ok(out) = out else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let msg = String::from_utf8_lossy(&out.stdout);
+    let Some(loopdev) = msg
+        .split_whitespace()
+        .rev()
+        .find(|s| s.contains("/dev/"))
+        .map(|s| s.trim_end_matches('.').to_string())
+    else {
+        return false;
+    };
+    let ok = if Command::new("udisksctl")
+        .args(["mount", "-b", &loopdev, "--no-user-interaction"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        let mnt = Command::new("findmnt")
+            .args(["-n", "-o", "TARGET", &loopdev])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(mnt) = mnt {
+            copy_installer_files(out_dir, Path::new(&mnt));
+            let _ = Command::new("udisksctl")
+                .args(["unmount", "-b", &loopdev, "--no-user-interaction"])
+                .status();
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let _ = Command::new("udisksctl")
+        .args(["loop-delete", "-b", &loopdev, "--no-user-interaction"])
+        .status();
+    ok
+}
+
+fn mount_and_copy_install(loopdev: &str, out_dir: &Path) -> bool {
+    let mnt = out_dir.join("soso-install-mnt");
+    let _ = std::fs::create_dir_all(&mnt);
+    let _ = Command::new("umount").arg(&mnt).status();
+    if !Command::new("mount")
+        .args(["-t", "vfat", "-o", "loop"])
+        .arg(loopdev)
+        .arg(&mnt)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        // `mount -o loop` sobre el propio fichero, por si losetup no bastó.
+        if !Command::new("mount")
+            .args(["-t", "vfat"])
+            .arg(loopdev)
+            .arg(&mnt)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
+    copy_installer_files(out_dir, &mnt);
+    let _ = Command::new("umount").arg(&mnt).status();
+    true
+}
+
+fn copy_installer_files(src_dir: &Path, dst: &Path) {
+    for name in ["install-soso.sh", "soso-live.bytes", "INSTALL.txt"] {
+        let src = src_dir.join(name);
+        if src.exists() {
+            let _ = std::fs::copy(&src, dst.join(name));
+        }
+    }
+    let sh = dst.join("install-soso.sh");
+    if sh.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755));
+        }
+    }
 }
 
 fn install_soso_sh(live_bytes: u64) -> String {

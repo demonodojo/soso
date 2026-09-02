@@ -34,7 +34,7 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
-| `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3 (p4 SOSOINSTALL 32 MiB al final). `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa |
+| `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
 | `cargo xtask sosolog --drv [/dev/sdX]` | Igual pero muestra `SOSODRV.TXT`: el informe hwscan del último arranque (alias `--hwscan`) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
@@ -117,8 +117,8 @@ Ports lxdde externos: repo con `source.list` (+ opcional `driver.toml`,
 ## Log del USB live (`cargo xtask sosolog`)
 
 `SOSOLOG.TXT` está en la **ESP (partición 1, FAT)**. Linux no la monta sola
-(oculta las EFI); el volumen que sí aparece suele ser p4 `SOSOINSTALL`, que
-no tiene el log.
+(oculta las EFI); el volumen que sí aparece es p4 `SOSOINSTALL` (FAT tras el
+rootfs, no al final del stick), que no tiene el log.
 
 ```sh
 cargo xtask sosolog              # auto-detecta el USB live

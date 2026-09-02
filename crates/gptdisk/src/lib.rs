@@ -274,9 +274,20 @@ pub fn entry_name_ascii(e: &[u8], out: &mut [u8]) -> usize {
 
 /// Índice de la última entrada usada, o `None` si la tabla está vacía.
 pub fn last_used(entries: &[u8], hdr: &Header) -> Option<usize> {
-    (0..hdr.num_entries as usize)
-        .rev()
-        .find(|&i| entry(entries, hdr, i).is_some_and(entry_used))
+    let mut best: Option<(u64, usize)> = None;
+    for i in 0..hdr.num_entries as usize {
+        let Some(e) = entry(entries, hdr, i) else {
+            break;
+        };
+        if !entry_used(e) {
+            continue;
+        }
+        let last = entry_last_lba(e);
+        if best.is_none_or(|(lba, _)| last >= lba) {
+            best = Some((last, i));
+        }
+    }
+    best.map(|(_, i)| i)
 }
 
 /// Número de particiones definidas.
@@ -731,5 +742,37 @@ mod tests {
         let mut buf = [0u8; 36];
         let n = entry_name_ascii(entry(&entries, &hdr, 1).unwrap(), &mut buf);
         assert_eq!(&buf[..n], b"sosofs");
+    }
+
+    #[test]
+    fn relayout_estira_la_de_mayor_lba_no_el_indice() {
+        // Live con SOSOINSTALL (p4) entre rootfs y modelos: hay que estirar p3.
+        let mut hdr = base_header();
+        let mut entries = vec![0u8; (NUM * ESZ) as usize];
+        let parts = [
+            (T_ESP, 2048u64, 2048 + 45055, "EFI"),
+            (T_LINUX, 47104, 47104 + 20479, "sosofs"),
+            (T_LINUX, 69632, USB_SECTORS - 34, "modelos"),
+            (T_MSDATA, 67584, 69631, "SOSOINSTALL"),
+        ];
+        for (i, (ty, first, last, name)) in parts.iter().enumerate() {
+            let off = i * ESZ as usize;
+            let e = &mut entries[off..off + ESZ as usize];
+            e[0..16].copy_from_slice(&Guid::parse(ty).unwrap().0);
+            e[16..32].copy_from_slice(&Guid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee0").unwrap().0);
+            wr64(e, 32, *first);
+            wr64(e, 40, *last);
+            for (j, c) in name.encode_utf16().enumerate() {
+                e[56 + j * 2..56 + j * 2 + 2].copy_from_slice(&c.to_le_bytes());
+            }
+        }
+        assert_eq!(last_used(&entries, &hdr), Some(2));
+        let disco = 40u64 * 1024 * 1024 * 1024 / 512;
+        relayout(&mut hdr, &mut entries, disco).unwrap();
+        let p3 = entry(&entries, &hdr, 2).unwrap();
+        assert_eq!(entry_last_lba(p3), disco - 34);
+        let p4 = entry(&entries, &hdr, 3).unwrap();
+        assert_eq!(entry_first_lba(p4), 67584);
+        assert_eq!(entry_last_lba(p4), 69631);
     }
 }

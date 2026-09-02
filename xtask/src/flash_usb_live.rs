@@ -1,14 +1,13 @@
 //! `cargo xtask flash-usb-live <usb> [--yes]`
 //!
-//! Graba `soso-live.img` en un pendrive, estira p3 (sosomfs) y añade p4 SOSOINSTALL.
+//! Graba `soso-live.img` en un pendrive y estira p3 (sosomfs). p4 SOSOINSTALL
+//! ya va en la imagen (FAT entre rootfs y modelos), para que Linux la monte.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 use crate::install_disk;
 use crate::package_live;
-
-const INSTALL_SECTORS: u64 = crate::live_models::P4_INSTALL_BYTES / 512;
 
 pub fn run(args: &[String]) {
     let mut device: Option<PathBuf> = None;
@@ -64,56 +63,8 @@ pub fn run(args: &[String]) {
     );
     install_disk::run_cmd(&mut Command::new("sync"), "sync");
 
-    let img_sectors = std::fs::metadata(&live).map(|m| m.len() / 512).unwrap_or(0);
-    let disk_sectors = blockdev_sectors(&usb).unwrap_or(0);
-
-    if disk_sectors >= img_sectors + INSTALL_SECTORS {
-        install_disk::expand_models_leave_install(&usb, INSTALL_SECTORS);
-        install_disk::create_install_partition_tail(&usb, INSTALL_SECTORS);
-        // Tras ampliar p3 + crear p4 en un stick >> imagen, la GPT de respaldo suele
-        // quedar inválida hasta un `sgdisk -e`; mkfs antes de eso formatea offsets viejos.
-        install_disk::repair_gpt_backup(&usb);
-        install_disk::refresh_partition_table(&usb);
-        let Some(part4) = install_disk::wait_install_partition(&usb, 4) else {
-            let hint = install_disk::install_partition_node(&usb, 4)
-                .unwrap_or_else(|| format!("{}4", usb.display()));
-            eprintln!(
-                "flash-usb-live: p4 creada en GPT pero no apareció el nodo; \
-                 prueba `sudo partprobe {}` y:\n  \
-                 sudo mkfs.vfat -F 32 -n SOSOINSTALL {hint}\n  \
-                 sudo mount {hint} /mnt && sudo cp {}/* /mnt/",
-                usb.display(),
-                out_dir.display()
-            );
-            print_flash_summary(&usb, &out_dir);
-            return;
-        };
-        install_disk::run_cmd(
-            Command::new("mkfs.vfat")
-                .args(["-F", "32", "-n", "SOSOINSTALL"])
-                .arg(&part4),
-            "mkfs.vfat",
-        );
-        install_disk::refresh_partition_table(&usb);
-        if mount_install_partition(&part4) {
-            copy_installer_files(&out_dir, "/mnt/soso-install");
-            let _ = Command::new("umount").arg("/mnt/soso-install").status();
-            println!("flash-usb-live: instalador en {part4}");
-        } else {
-            eprintln!(
-                "flash-usb-live: aviso: no pude montar {part4}; copia manual desde {}\n\
-                 (si el kernel sigue con la tabla antigua: sudo partprobe {} && reintenta el mount)",
-                out_dir.display(),
-                usb.display()
-            );
-        }
-    } else {
-        eprintln!(
-            "flash-usb-live: aviso: USB sin espacio para p4 ({INSTALL_SECTORS} sectores);\n\
-             copia {} a un directorio accesible desde Linux",
-            out_dir.display()
-        );
-    }
+    install_disk::expand_models_partition(&usb, &live);
+    install_disk::repair_gpt_backup(&usb);
 
     print_flash_summary(&usb, &out_dir);
     let _ = root;
@@ -127,9 +78,8 @@ fn usage() -> ! {
            lsblk\n\
            sudo cargo xtask flash-usb-live /dev/sde --yes\n\
          \n\
-         Graba soso-live.img (modelo según tamaño del stick), estira p3 (modelos)\n\
-         y añade p4 SOSOINSTALL\n\
-         con install-soso.sh para dual-boot desde Linux.\n\
+         Graba soso-live.img (modelo según tamaño del stick), estira p3 (modelos).\n\
+         p4 SOSOINSTALL (install-soso.sh) va en la imagen, tras el rootfs.\n\
          \n\
          Sin descargar modelos (el mayor ya en target/*-model/ que quepa):\n\
            SOSO_LIVE_OFFLINE=1 sudo cargo xtask flash-usb-live /dev/sde --yes"
@@ -156,35 +106,6 @@ fn blockdev_bytes(dev: &Path) -> Option<u64> {
     blockdev_sectors(dev).map(|s| s.saturating_mul(512))
 }
 
-fn mount_install_partition(part: &str) -> bool {
-    let _ = std::fs::create_dir_all("/mnt/soso-install");
-    Command::new("mount")
-        .args(["-t", "vfat"])
-        .arg(part)
-        .arg("/mnt/soso-install")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn copy_installer_files(src_dir: &Path, dst: &str) {
-    for name in [
-        "install-soso.sh",
-        "soso-live.bytes",
-        "INSTALL.txt",
-    ] {
-        let src = src_dir.join(name);
-        if src.exists() {
-            let _ = std::fs::copy(&src, Path::new(dst).join(name));
-        }
-    }
-    let sh = Path::new(dst).join("install-soso.sh");
-    if sh.exists() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755));
-    }
-}
-
 fn print_flash_summary(usb: &Path, out_dir: &Path) {
     println!("\n✅ USB live listo en {}", usb.display());
     println!(
@@ -193,8 +114,8 @@ fn print_flash_summary(usb: &Path, out_dir: &Path) {
             lsblk\n\
             sudo {}/install-soso.sh /dev/nvme1n1 --yes\n\
          \n\
-         (Si la partición SOSOINSTALL no se montó sola: sudo mount /dev/sdX4 /mnt\n\
-          y ejecuta /mnt/install-soso.sh …)\n\
+         Linux monta sola p4 SOSOINSTALL (FAT tras el rootfs, no la ESP).\n\
+         Si no aparece: sudo mount /dev/sdX4 /mnt && /mnt/install-soso.sh …\n\
          \n\
          Artefactos también en {}",
         out_dir.display(),

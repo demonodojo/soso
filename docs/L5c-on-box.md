@@ -75,14 +75,16 @@ Ver también [`MANUAL-USUARIO.md`](../MANUAL-USUARIO.md) (sección dual-boot).
 
 ## Modo live (recomendado para pruebas sin tocar discos)
 
-Un solo pendrive con tres particiones:
+Un solo pendrive con cuatro particiones:
 
 1. **ESP** — kernel UEFI (~22 MiB)
 2. **sosofs** — rootfs (~64 MiB)
+4. **SOSOINSTALL** — FAT con `install-soso.sh` (64 MiB, tras el rootfs)
 3. **sosomfs** — modelos (**TinyLlama 1.1B Chat** + `tiny` sintético, ~2 GiB por defecto)
 
 Tras `cargo xtask flash-usb-live`, si el pendrive es más grande que la imagen,
-**p3 se estira** hasta dejar 32 MiB al final para p4 `SOSOINSTALL`; al arrancar,
+**p4 `SOSOINSTALL`** (FAT, instalador Linux) va en la imagen tras el rootfs;
+**p3 se estira** al sobrante del stick; al arrancar,
 sosomfs hace **grow** del superbloque para usar ese espacio (import HF con
 `soso-hf pull`).
 

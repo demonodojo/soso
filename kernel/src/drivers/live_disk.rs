@@ -1,4 +1,4 @@
-//! Disco live: lee particiones GPT (1=ESP, 2=sosofs, 3=sosomfs) sobre un disco 512 B/LBA.
+//! Disco live: lee particiones GPT (1=ESP, 2=sosofs, 3=sosomfs; p4 SOSOINSTALL la ignora) sobre un disco 512 B/LBA.
 //!
 //! Backend: USB mass storage, NVMe (dual-boot en disco dedicado), o virtio-blk0
 //! (QEMU `SOSO_QEMU_LIVE`).

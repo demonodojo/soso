@@ -5,8 +5,6 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
-use std::thread;
-use std::time::Duration;
 
 use crate::package_live;
 
@@ -265,6 +263,12 @@ pub(crate) fn expand_models_partition(dev: &Path, live: &Path) {
     if img_sectors <= live_sectors {
         return;
     }
+    // El inicio EXACTO de p3, leído antes de borrarla.
+    //
+    // AVERÍA (2026-08-17, dos pendrives): `-d 3 -n 3:0:…` y sgdisk elige el
+    // primer sector libre **realineado** — 583714 → 583720. La partición
+    // quedaba 6 sectores por delante de los datos del `dd` y sosomfs arrancaba
+    // `Corrupt`. Recrearla en su sitio no basta: hace falta `-a 1`.
     let Some(inicio) = crate::package_live::partition_first_sector(dev, 3) else {
         eprintln!("install-disk: no pude leer el inicio de p3; no la amplío");
         return;
@@ -288,111 +292,12 @@ pub(crate) fn expand_models_partition(dev: &Path, live: &Path) {
     );
 }
 
-/// Estira p3 (sosomfs) dejando `install_reserve_sectors` al final para p4 (SOSOINSTALL).
-pub(crate) fn expand_models_leave_install(dev: &Path, install_reserve_sectors: u64) {
-    let disk_sectors = disk_sectors(dev);
-    if disk_sectors <= install_reserve_sectors + 64 {
-        return;
-    }
-    let tail = install_reserve_sectors + 34;
-    // El inicio EXACTO de p3, leído antes de borrarla.
-    //
-    // AVERÍA (2026-08-17, dos pendrives): esto hacía `-d 3 -n 3:0:…` y sgdisk
-    // elige el primer sector libre **realineado** — 583714 → 583720. La
-    // partición quedaba 6 sectores por delante de los datos que el `dd` ya
-    // había escrito, así que el superbloque de sosomfs se salía por el
-    // principio y el kernel arrancaba con `sosomfs falló (Corrupt)`. Recrearla
-    // en su sitio no basta: sgdisk realinea también un inicio explícito, hace
-    // falta `-a 1`.
-    let Some(inicio) = crate::package_live::partition_first_sector(dev, 3) else {
-        eprintln!("flash-usb-live: no pude leer el inicio de p3; no la amplío");
-        return;
-    };
-    println!(
-        "flash-usb-live: ampliando p3 desde el sector {inicio} (reservando {} MiB para instalador)",
-        install_reserve_sectors * 512 / (1024 * 1024)
-    );
-    run_cmd(Command::new("sgdisk").arg("-e").arg(dev), "sgdisk -e");
-    run_cmd(
-        Command::new("sgdisk")
-            .arg("-d")
-            .arg("3")
-            .arg("-a")
-            .arg("1")
-            .arg("-n")
-            .arg(format!("3:{inicio}:-{tail}S"))
-            .arg("-t")
-            .arg("3:8300")
-            .arg(dev),
-        "sgdisk expand p3",
-    );
-}
-
-/// Crea p4 SOSOINSTALL en los últimos `install_sectors` del disco.
-pub(crate) fn create_install_partition_tail(dev: &Path, install_sectors: u64) {
-    run_cmd(
-        Command::new("sgdisk")
-            .arg("-n")
-            .arg(format!("4:-{install_sectors}S:0"))
-            .arg("-t")
-            .arg("4:0700")
-            .arg("-c")
-            .arg("4:SOSOINSTALL")
-            .arg(dev),
-        "sgdisk part4",
-    );
-}
-
 /// Reubica la GPT de respaldo al final del disco (pendrives > tamaño de soso-live.img).
 pub(crate) fn repair_gpt_backup(dev: &Path) {
     run_cmd(
         Command::new("sgdisk").arg("-e").arg(dev),
         "sgdisk repair",
     );
-}
-
-/// Espera a que exista el nodo de bloque de una partición tras sgdisk.
-pub(crate) fn wait_install_partition(disk: &Path, num: u32) -> Option<String> {
-    for attempt in 0..24 {
-        refresh_partition_table(disk);
-        if let Some(node) = install_partition_node(disk, num) {
-            return Some(node);
-        }
-        if attempt == 12 {
-            eprintln!(
-                "flash-usb-live: esperando nodo p{num} en {}…",
-                disk.display()
-            );
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    None
-}
-
-/// Tras `sgdisk`, el kernel puede tardar en crear `/dev/sdX4`.
-pub(crate) fn refresh_partition_table(dev: &Path) {
-    let dev_s = dev.to_string_lossy();
-    let _ = Command::new("partprobe").arg(dev).status();
-    let _ = Command::new("partx").args(["-u", &*dev_s]).status();
-    let _ = Command::new("blockdev")
-        .args(["--rereadpt"])
-        .arg(dev)
-        .status();
-    let _ = Command::new("sync").status();
-}
-
-pub(crate) fn install_partition_node(disk: &Path, num: u32) -> Option<String> {
-    let base = disk.to_string_lossy();
-    let candidate = if base.contains("nvme") || base.contains("mmcblk") {
-        format!("{base}p{num}")
-    } else {
-        format!("{base}{num}")
-    };
-    if Path::new(&candidate).exists() {
-        Some(candidate)
-    } else {
-        None
-    }
 }
 
 fn disk_sectors(dev: &Path) -> u64 {
