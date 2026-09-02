@@ -426,11 +426,8 @@ fn load_model(
     let index_crc = crc_bytes(&index_data);
 
     let rt = Runtime::new(manifest, index.clone(), 32 * 1024 * 1024, 0);
-    if rt
-        .validate_shapes_for_role(role, layer_start, layer_end)
-        .is_err()
-    {
-        println!("soso-llm: shapes del index no casan con el rol");
+    if let Err(why) = rt.validate_shapes_for_role(role, layer_start, layer_end) {
+        println!("soso-llm: shapes del index no casan con el rol ({why})");
         return Err(1);
     }
 
@@ -443,9 +440,16 @@ fn load_model(
     };
 
     let inner = MmapTensorSource::new(format!("{base}/shards"), index, staging::SyscallMapper);
+    let inner = if staging {
+        inner
+    } else {
+        inner.with_sync_prefetch()
+    };
     let mut source = StagedSource::new(inner);
     if staging {
         source.enable_worker();
+    } else {
+        source.disable_worker();
     }
     Ok(ModelBundle {
         rt,
@@ -705,6 +709,12 @@ pub(crate) fn preparar_sesion(
                 st.gpu_layers,
                 st.remote_layers,
             );
+            if st.gpu_expert_slots > 0 || st.gpu_expert_layers > 0 {
+                println!(
+                    "soso-llm: GPU MoE — {} expertos caben en VRAM, offload en {} capas",
+                    st.gpu_expert_slots, st.gpu_expert_layers,
+                );
+            }
             println!(
                 "soso-llm: streaming — working-set {} capas, ventana KV {} tokens (LayerKV+StreamingLLM), KV {} H2O={} sparse={}",
                 st.resident_layers,
@@ -813,6 +823,23 @@ fn generar(
     generar_tokens(sesion, &prompt_tokens, max_new, sampler, verboso, io0, None, false)
 }
 
+/// Quita C0/NUL/� que tumbarían la sesión SSH si se cuelan al canal.
+fn texto_ask_seguro(s: &str) -> alloc::string::String {
+    s.chars()
+        .filter(|c| *c == '\n' || *c == '\t' || (!c.is_control() && *c != '\u{FFFD}'))
+        .collect()
+}
+
+/// Escribe un trozo al cliente de ask y cede el CPU para que sosh lo imprima.
+fn emitir_ask(fd: u64, s: &str) {
+    let limpio = texto_ask_seguro(s);
+    if limpio.is_empty() {
+        return;
+    }
+    let _ = sys::write_all(fd, limpio.as_bytes());
+    let _ = sys::sleep_ms(1);
+}
+
 /// Igual que `generar` pero con el prompt YA tokenizado.
 ///
 /// Existe porque una plantilla de chat no se puede expresar como texto: el fin de
@@ -828,18 +855,20 @@ pub(crate) fn generar_tokens(
     fd_out: Option<u64>,
     drop_pool: bool,
 ) -> u8 {
-    // Pool sólo durante generate: askd lo tira al acabar (`drop_pool`)
-    // para no dejar giradores entre preguntas. El prefetch de askd es
-    // síncrono (`disable_worker`); pool + staging + sosh en el socket
-    // dejaban `wait` en `done` para siempre (2026-08-31).
-    if sesion.pool.is_none() {
+    // askd (fd_out): sin pool ni staging async — un worker a 100 % dejaba
+    // `drop_pool` colgado y el segundo `accept` no llegaba nunca (2026-08-31).
+    if sesion.pool.is_none() && fd_out.is_none() {
         sesion.pool = Some(ThreadPool::new());
     }
-    let par: Option<&dyn RowParallel> = sesion
-        .pool
-        .as_ref()
-        .filter(|p| p.workers() > 1)
-        .map(|p| p as &dyn RowParallel);
+    let par: Option<&dyn RowParallel> = if fd_out.is_some() {
+        None
+    } else {
+        sesion
+            .pool
+            .as_ref()
+            .filter(|p| p.workers() > 1)
+            .map(|p| p as &dyn RowParallel)
+    };
     let mut gpu_ref: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = sesion
         .sys_gpu
         .as_mut()
@@ -851,7 +880,9 @@ pub(crate) fn generar_tokens(
     let eos = bundle.tokenizer.eos();
     // askd: sin clock_ms/refresh_mem (syscall en el matvec AVX2) y sin
     // planificador por token. `run` sigue con el camino cronometrado.
-    let result = if fd_out.is_some() {
+    // Los tokens se escriben al socket según salen: Mixtral tarda minutos
+    // en el prefill y, si se espera al final, el terminal parece colgado.
+    let result = if let Some(fd) = fd_out {
         bundle.rt.generate_stream_par(
             &mut bundle.source,
             prompt_tokens,
@@ -861,11 +892,22 @@ pub(crate) fn generar_tokens(
             |t| {
                 let s = decoder.push(&bundle.tokenizer, t);
                 if !s.is_empty() {
-                    streamed.push_str(&s);
+                    let limpio = texto_ask_seguro(&s);
+                    if !limpio.is_empty() {
+                        streamed.push_str(&limpio);
+                        emitir_ask(fd, &limpio);
+                    }
                 }
             },
             par,
             &mut gpu_ref,
+            &mut |i, total| {
+                let _ = sys::write_all(fd, b".");
+                let _ = sys::sleep_ms(1);
+                if i == total {
+                    emitir_ask(fd, "\n");
+                }
+            },
         )
     } else {
         bundle.rt.generate_stream_planned(
@@ -892,28 +934,25 @@ pub(crate) fn generar_tokens(
             let resto = decoder.finish();
             if !resto.is_empty() {
                 if fd_out.is_some() {
-                    streamed.push_str(&resto);
+                    let limpio = texto_ask_seguro(&resto);
+                    streamed.push_str(&limpio);
+                    if let Some(fd) = fd_out {
+                        emitir_ask(fd, &limpio);
+                    }
                 } else {
                     libsoso::print!("{resto}");
                 }
             }
             if let Some(fd) = fd_out {
-                // Un NUL o un C0 en la respuesta se cuela al canal SSH y el
-                // cliente cierra la sesión (tiny sintético lo hace a menudo).
-                streamed.retain(|c| {
-                    c == '\n' || c == '\t' || (!c.is_control() && c != '\u{FFFD}')
-                });
-                if !streamed.ends_with('\n') {
-                    streamed.push('\n');
+                if !streamed.is_empty() && !streamed.ends_with('\n') {
+                    emitir_ask(fd, "\n");
                 }
-                let mut bytes = streamed.into_bytes();
-                bytes.push(crate::ask::PROTO_FIN);
-                let _ = sys::write_all(fd, &bytes);
+                let _ = sys::write_all(fd, &[crate::ask::PROTO_FIN]);
             }
             if fd_out.is_none() {
                 println!();
             }
-            if drop_pool {
+            if drop_pool && fd_out.is_none() {
                 sesion.pool = None;
             }
             if !verboso {
@@ -990,7 +1029,7 @@ pub(crate) fn generar_tokens(
             0
         }
         Err(()) => {
-            if drop_pool {
+            if drop_pool && fd_out.is_none() {
                 sesion.pool = None;
             }
             if fd_out.is_none() {

@@ -350,9 +350,10 @@ ask                                # modo interactivo
 ```
 
 Escribe la pregunta detrás y ya está: **el texto llega al modelo tal cual se
-escribió**, con comillas, tildes, `|`, `>` o lo que lleve. La respuesta sale por
-el terminal según se genera, sin una sola línea de diagnóstico (para eso está
-`soso-llm run`).
+escribió**, con comillas, tildes, `|`, `>` o lo que lleve. Tras cargar el modelo
+sale `ask: generando…` y, en modelos grandes, un punto por cada token de
+contexto; el texto de la respuesta aparece según se genera. El diagnóstico de
+velocidad y disco está en `soso-llm run`.
 
 Sin texto, `ask` abre su propio prompt y el modelo se carga **una sola vez** para
 toda la sesión, así que a partir de la segunda pregunta la respuesta empieza
@@ -752,8 +753,10 @@ soso-llm run tiny-latent-moe --prompt @bos --max 2
 El offload GPU (sin `--cpu`) admite pesos **F32, Q8_0, Q4_K y MXFP4**. Q4_K y Q8_0
 se suben a VRAM **tal como están en disco** y el dispositivo los multiplica sin
 expandirlos: 8× menos memoria de vídeo y 8× menos tráfico por el bus que
-descuantizarlos antes, así que caben 8× más capas en la tarjeta. MXFP4 sí se
-descuantiza al subir. Con `--gpu-soft` ejercitas esa fontanería sin silicio NVIDIA.
+descuantizarlos antes, así que caben 8× más capas en la tarjeta. En Mixtral los
+expertos `Lxx.Eyy.ffn_*` también van a ese pool (los que quepan); el FFN denso
+`ffn_gate` igual. MXFP4 sí se descuantiza al subir. Con `--gpu-soft` ejercitas
+esa fontanería sin silicio NVIDIA.
 
 La salida muestra el texto generado con decode greedy. El modelo tiny usa un
 tokenizer byte-level; los modelos importados de GGUF usan su propio
@@ -972,13 +975,17 @@ degradar a velocidad de disco en lugar de morir por OOM.
 y replanifica cada pocos tokens. Además aplica streaming estilo **LayerKV /
 FlexGen** (pocas capas de pesos residentes + prefetch de la siguiente). En
 modelos **MoE**, los expertos se cargan bajo demanda (solo los activos por
-token) con cache LRU de expertos calientes entre tokens. También aplica ventana
+token) con cache LRU de expertos calientes entre tokens. Si hay VRAM, el
+planificador pinnea primero el tronco (atención + router) y deja un pool
+compartido para esos expertos — no reserva los 8 de Mixtral por capa, porque
+solo se activan 2. También aplica ventana
 **StreamingLLM** / **H2O** en el KV (sink + tokens de mayor atención + recientes)
 y, con contextos largos, atención sparse por bloques (**Quest-lite**). Al
 arrancar y al terminar verás:
 
 ```text
 soso-llm: planificador — presupuesto pesos … KiB, modelo … KiB, capas CPU/GPU/remoto …
+soso-llm: GPU MoE — N expertos caben en VRAM, offload en M capas
 soso-llm: streaming — working-set N capas, ventana KV T tokens …, KV f16|int8 H2O=… sparse=…
 soso-llm: memoria — libre … KiB, reclaimable … KiB
 soso-llm: plan memoria — trunk … KiB (pin N capas, anillo …), expert cache … KiB …

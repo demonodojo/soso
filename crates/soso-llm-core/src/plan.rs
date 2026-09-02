@@ -38,6 +38,8 @@ const DEFAULT_RESIDENT_LAYERS: u32 = 2;
 const DEFAULT_RING_SLOTS: u32 = 2;
 /// Tokens sink (StreamingLLM) que nunca se evictan del KV.
 const DEFAULT_SINK_TOKENS: usize = 4;
+/// Suelo absoluto para clasificar embed como gather-only (estilo airllm).
+const GATHER_ONLY_TABLE_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Presets de reparto trunk-first (estilo kimi-k3-in-c).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -124,8 +126,10 @@ pub enum ExecDest {
 pub struct LayerPlan {
     pub layer: u32,
     pub dest: ExecDest,
-    /// Proyecciones que pueden ir a VRAM en esta capa.
+    /// Sufijos de tronco en VRAM (`attn_q`, `S00.ffn_up`, …), exclusivos por capa.
     pub gpu_tensors: Vec<String>,
+    /// Los expertos enrutados de esta capa pueden usar el pool compartido de VRAM.
+    pub gpu_experts: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -134,6 +138,10 @@ pub struct PlannerStats {
     pub cpu_layers: u32,
     pub gpu_layers: u32,
     pub remote_layers: u32,
+    /// Expertos completos (gate+up+down) que caben a la vez en el pool de VRAM.
+    pub gpu_expert_slots: u32,
+    /// Capas Gpu en las que los expertos MoE pueden offloadearse.
+    pub gpu_expert_layers: u32,
     pub tokens_observed: u32,
     pub avg_cpu_ms: f64,
     pub avg_gpu_ms: f64,
@@ -196,6 +204,14 @@ pub struct PlannerStats {
     /// n-gramo preferido actual del PLD (autotune).
     pub pld_prefer_n: u32,
     pub pld_max_draft: u32,
+    /// EWMA ms esperando prefetch layer-ahead (I/O-bound detector).
+    pub avg_stage_wait_ms: f64,
+    /// 1 si stage_wait domina matvec+attn (cuello de botella en disco).
+    pub io_bound: u32,
+    /// 1 si el anillo está forzado a 1 slot (capas demasiado grandes para double-buffer).
+    pub prefetch_single_buffered: u32,
+    /// 1 si embed es gather-only (no se mantiene mapeado entero).
+    pub embed_gather_only: u32,
 }
 
 pub struct ResourcePlanner {
@@ -236,6 +252,12 @@ pub struct ResourcePlanner {
     /// Hot path: EWMA de ms matvec (proyecciones) vs attn por capa.
     matvec_ms_ewma: f64,
     attn_ms_ewma: f64,
+    /// EWMA ms esperando staging layer-ahead.
+    stage_wait_ms_ewma: f64,
+    /// Cuello de botella en I/O de pesos (stage_wait ≫ compute).
+    io_bound: bool,
+    /// Embed demasiado grande: gather por fila, no residente entero.
+    embed_gather_only: bool,
     /// PLD: n preferido y tope de draft (se afina con la tasa de aceptación).
     pld_prefer_n: usize,
     pld_max_draft: usize,
@@ -253,11 +275,16 @@ pub struct ResourcePlanner {
     stats: PlannerStats,
 }
 
-const GPU_PROJ: [&str; 6] = [
+/// Tronco que se pinnea en VRAM por capa (atención + router + FFN denso).
+/// Los expertos enrutados van en un pool aparte: no se reserva uno por capa
+/// (Mixtral usa 2 de 8; pinnear los 8 desperdicia la tarjeta).
+const TRUNK_GPU_PROJ: [&str; 8] = [
     "attn_q",
     "attn_k",
     "attn_v",
     "attn_output",
+    "ffn_gate_inp",
+    "ffn_gate",
     "ffn_up",
     "ffn_down",
 ];
@@ -333,6 +360,11 @@ pub fn bytes_for_expert(layer: u32, expert: u32, index: &TensorIndex) -> u64 {
 
 pub fn total_model_weight_bytes(index: &TensorIndex) -> u64 {
     index.entries.iter().map(|e| e.byte_len).sum()
+}
+
+/// Bytes del tensor de embedding (tabla de lookup).
+pub fn bytes_for_embed(index: &TensorIndex) -> u64 {
+    index.find("embed").map(|e| e.byte_len).unwrap_or(0)
 }
 
 /// ¿Tensor siempre residente (embed, norm final, lm_head)?
@@ -502,6 +534,9 @@ impl ResourcePlanner {
             use_sparse: false,
             matvec_ms_ewma: 0.0,
             attn_ms_ewma: 0.0,
+            stage_wait_ms_ewma: 0.0,
+            io_bound: false,
+            embed_gather_only: false,
             pld_prefer_n: 4,
             pld_max_draft: 8,
             moe_cache: Vec::new(),
@@ -584,6 +619,24 @@ impl ResourcePlanner {
         };
         let top_k = manifest.num_experts_per_tok.max(1);
 
+        // Anillo efectivo: config → cap double-buffer (airllm) → hold bajo I/O-bound.
+        let config_ring = self.plan_config.ring_slots.clamp(1, 2);
+        let can_double_buffer =
+            self.avg_layer_bytes.saturating_mul(2) <= self.mem.free_bytes();
+        let mut effective_ring = if can_double_buffer { config_ring } else { 1 };
+        if self.io_bound && can_double_buffer {
+            effective_ring = 2;
+        }
+        self.ring_slots = effective_ring.clamp(1, 2);
+        self.stats.prefetch_single_buffered = u32::from(!can_double_buffer);
+        self.stats.ring_slots = self.ring_slots;
+
+        // Embed oversized: gather-only (no mantener embed.tensor mapeado).
+        let embed_bytes = bytes_for_embed(index);
+        let gather_threshold = GATHER_ONLY_TABLE_FLOOR_BYTES.max(self.weight_budget / 4);
+        self.embed_gather_only = embed_bytes > gather_threshold;
+        self.stats.embed_gather_only = u32::from(self.embed_gather_only);
+
         let (trunk_budget, moe_budget, pinned, resident) = compute_trunk_first_split(
             self.weight_budget,
             &self.weight_classes,
@@ -600,7 +653,6 @@ impl ResourcePlanner {
         self.pinned_layers = pinned;
         self.resident_layers = resident;
         self.stats.pinned_layers = pinned;
-        self.stats.ring_slots = self.ring_slots;
         self.stats.trunk_budget_bytes = trunk_budget;
         self.stats.moe_cache_budget_bytes = moe_budget;
         self.stats.resident_layers = resident;
@@ -722,6 +774,11 @@ impl ResourcePlanner {
 
     pub fn note_stage_wait_ms(&mut self, ms: u64) {
         self.stats.stage_wait_ms = self.stats.stage_wait_ms.saturating_add(ms);
+        if ms > 0 {
+            ewma(&mut self.stage_wait_ms_ewma, ms as f64);
+            self.stats.avg_stage_wait_ms = self.stage_wait_ms_ewma;
+            self.recompute_io_bound();
+        }
     }
 
     pub fn note_moe_spec_hit(&mut self) {
@@ -772,6 +829,7 @@ impl ResourcePlanner {
         ewma(&mut self.attn_ms_ewma, attn_ms as f64);
         self.stats.avg_matvec_ms = self.matvec_ms_ewma;
         self.stats.avg_attn_ms = self.attn_ms_ewma;
+        self.recompute_io_bound();
     }
 
     /// Parámetros PLD actuales: `(max_draft, min_n, max_n, hint_n)`.
@@ -921,10 +979,19 @@ impl ResourcePlanner {
     }
 
     pub fn gpu_tensor_allowed(&self, layer: u32, tensor: &str) -> bool {
-        self.layer_plans
-            .get(layer as usize)
-            .map(|p| p.gpu_tensors.iter().any(|t| tensor.ends_with(t)))
-            .unwrap_or(false)
+        let Some(p) = self.layer_plans.get(layer as usize) else {
+            return false;
+        };
+        if p.dest != ExecDest::Gpu {
+            return false;
+        }
+        if is_expert_tensor(tensor) {
+            return p.gpu_experts;
+        }
+        let prefix = layer_tensor_prefix(layer);
+        p.gpu_tensors.iter().any(|suf| {
+            tensor.strip_prefix(prefix.as_str()) == Some(suf.as_str()) || tensor == suf.as_str()
+        })
     }
 
     /// Marca expertos servidos tras prefetch JIT (no estaban residentes al router).
@@ -969,11 +1036,23 @@ impl ResourcePlanner {
     }
 
     fn always_resident_shards(&self) -> Vec<String> {
-        alloc::vec![
-            String::from("embed.tensor"),
-            String::from("output_norm.tensor"),
-            String::from("lm_head.tensor"),
-        ]
+        let mut out = Vec::new();
+        if !self.embed_gather_only {
+            out.push(String::from("embed.tensor"));
+        }
+        out.push(String::from("output_norm.tensor"));
+        out.push(String::from("lm_head.tensor"));
+        out
+    }
+
+    /// Recalcula `io_bound`: stage_wait domina matvec+attn cuando ambos EWMAs están calientes.
+    fn recompute_io_bound(&mut self) {
+        self.stats.avg_stage_wait_ms = self.stage_wait_ms_ewma;
+        let compute_warm = self.matvec_ms_ewma > 0.0 && self.attn_ms_ewma > 0.0;
+        self.io_bound = compute_warm
+            && self.stage_wait_ms_ewma > 0.0
+            && self.stage_wait_ms_ewma > (self.matvec_ms_ewma + self.attn_ms_ewma);
+        self.stats.io_bound = u32::from(self.io_bound);
     }
 
     /// Shards a retener tras `layer`, incluyendo expertos MoE en cache LRU.
@@ -1013,6 +1092,7 @@ impl ResourcePlanner {
     pub fn on_token_complete(&mut self, manifest: &Manifest, index: &TensorIndex) -> bool {
         self.begin_token();
         self.tokens_since_replan += 1;
+        self.recompute_io_bound();
         if self.tokens_since_replan < REPLAN_EVERY_TOKENS {
             return false;
         }
@@ -1046,9 +1126,11 @@ impl ResourcePlanner {
             .saturating_mul(self.resident_layers as u64)
             .max(self.weight_budget.min(self.avg_layer_bytes.saturating_mul(2)));
 
+        // Pase 1: destino + tronco en VRAM (atención, router, FFN denso, Sxx).
+        // El *8 a f32 estaba mal: Q4_K/Q8_0 se suben en crudo.
         for layer in 0..manifest.num_layers {
             let lb = bytes_for_layer(layer, index);
-            let dest = choose_dest(
+            let dest0 = choose_dest(
                 lb,
                 stream_budget,
                 self.model_weight_bytes,
@@ -1058,44 +1140,55 @@ impl ResourcePlanner {
                 self.layer_ms_cpu.get(layer as usize).copied().unwrap_or(0.0),
                 self.layer_ms_remote.get(layer as usize).copied().unwrap_or(0.0),
                 self.remote_rtt_ms,
+                self.io_bound,
             );
             let mut gpu_tensors = Vec::new();
-            if dest == ExecDest::Gpu {
-                let prefix = layer_tensor_prefix(layer);
-                for suffix in GPU_PROJ {
-                    let name = format!("{prefix}{suffix}");
-                    if let Some(e) = index.find(&name) {
-                        let need = e.byte_len.saturating_mul(8);
-                        if vram_left >= need {
-                            gpu_tensors.push(String::from(suffix));
-                            vram_left = vram_left.saturating_sub(need);
-                        }
-                    }
-                }
+            let dest = if dest0 == ExecDest::Gpu {
+                gpu_tensors = pack_trunk_gpu(layer, manifest, index, &mut vram_left);
                 if gpu_tensors.is_empty() {
                     cpu_layers += 1;
-                    self.layer_plans.push(LayerPlan {
-                        layer,
-                        dest: ExecDest::Cpu,
-                        gpu_tensors: Vec::new(),
-                    });
-                    continue;
+                    ExecDest::Cpu
+                } else {
+                    gpu_layers += 1;
+                    ExecDest::Gpu
                 }
-                gpu_layers += 1;
-            } else if dest == ExecDest::Remote {
+            } else if dest0 == ExecDest::Remote {
                 remote_layers += 1;
+                dest0
             } else {
                 cpu_layers += 1;
-            }
+                dest0
+            };
             self.layer_plans.push(LayerPlan {
                 layer,
                 dest,
                 gpu_tensors,
+                gpu_experts: false,
             });
+        }
+
+        // Pase 2: pool compartido de expertos. No se pinnea E00..E07 por capa
+        // (Mixtral activa top-k): SysGpu ya hace LRU por nombre.
+        let per_expert = vram_bytes_for_expert(0, 0, index);
+        let slots = if per_expert == 0 {
+            0
+        } else {
+            (vram_left / per_expert) as u32
+        };
+        let mut expert_layers = 0u32;
+        if manifest.is_moe() && slots >= 1 {
+            for p in &mut self.layer_plans {
+                if p.dest == ExecDest::Gpu {
+                    p.gpu_experts = true;
+                    expert_layers += 1;
+                }
+            }
         }
         self.stats.cpu_layers = cpu_layers;
         self.stats.gpu_layers = gpu_layers;
         self.stats.remote_layers = remote_layers;
+        self.stats.gpu_expert_slots = slots;
+        self.stats.gpu_expert_layers = expert_layers;
         self.stats.resident_layers = self.resident_layers;
         self.stats.kv_window_tokens = self.kv_window_tokens as u32;
     }
@@ -1125,8 +1218,74 @@ fn avg_nonzero(v: &[f64]) -> f64 {
     }
 }
 
+/// Bytes que ocupará el tensor en VRAM: Q4_K/Q8_0 en crudo si `cols` es bloque;
+/// si no, el plano f32 del fallback de subida.
+fn vram_bytes_for_entry(e: &sosomodel::index::TensorEntry) -> u64 {
+    let cols = e.shape.get(1).copied().unwrap_or(0) as usize;
+    match e.dtype {
+        sosomodel::layout::DTYPE_Q4_K | sosomodel::layout::DTYPE_Q8_0
+            if sosomodel::dequant::row_bytes(e.dtype, cols).is_some() =>
+        {
+            e.byte_len
+        }
+        sosomodel::layout::DTYPE_F32 => e.byte_len,
+        _ => (e.elems() as u64).saturating_mul(4),
+    }
+}
+
+fn vram_bytes_for_named(index: &TensorIndex, name: &str) -> u64 {
+    index.find(name).map(vram_bytes_for_entry).unwrap_or(0)
+}
+
+fn vram_bytes_for_expert(layer: u32, expert: u32, index: &TensorIndex) -> u64 {
+    expert_shard_names(layer, expert)
+        .iter()
+        .map(|n| vram_bytes_for_named(index, n))
+        .sum()
+}
+
+fn pack_trunk_gpu(
+    layer: u32,
+    manifest: &Manifest,
+    index: &TensorIndex,
+    vram_left: &mut u64,
+) -> Vec<String> {
+    let prefix = layer_tensor_prefix(layer);
+    let mut out = Vec::new();
+    for suffix in TRUNK_GPU_PROJ {
+        let name = format!("{prefix}{suffix}");
+        let Some(e) = index.find(&name) else {
+            continue;
+        };
+        let need = vram_bytes_for_entry(e);
+        if need == 0 || need > *vram_left {
+            continue;
+        }
+        *vram_left -= need;
+        out.push(String::from(suffix));
+    }
+    let n_shared = manifest
+        .layer(layer)
+        .map(|sp| sp.num_shared_experts)
+        .unwrap_or(0);
+    for shared in 0..n_shared {
+        let names = shared_expert_shard_names(layer, shared);
+        let need: u64 = names.iter().map(|n| vram_bytes_for_named(index, n)).sum();
+        if need == 0 || need > *vram_left {
+            continue;
+        }
+        *vram_left -= need;
+        for n in &names {
+            if let Some(suf) = n.strip_prefix(prefix.as_str()) {
+                out.push(String::from(suf));
+            }
+        }
+    }
+    out
+}
+
 fn choose_dest(
-    layer_bytes: u64,
+    _layer_bytes: u64,
     weight_budget: u64,
     model_bytes: u64,
     vram_free: u64,
@@ -1135,6 +1294,7 @@ fn choose_dest(
     cpu_ms: f64,
     remote_layer_ms: f64,
     remote_rtt_ms: f64,
+    io_bound: bool,
 ) -> ExecDest {
     if remote_available && !remote_degraded {
         if remote_layer_ms > 0.0 && cpu_ms > 0.0 && remote_layer_ms + remote_rtt_ms < cpu_ms {
@@ -1143,8 +1303,12 @@ fn choose_dest(
         if model_bytes > weight_budget.saturating_mul(2) && remote_rtt_ms < REMOTE_SLOW_MS {
             return ExecDest::Remote;
         }
+        // I/O-bound: el peer remoto evita lecturas locales de disco.
+        if io_bound && remote_rtt_ms < REMOTE_SLOW_MS {
+            return ExecDest::Remote;
+        }
     }
-    if vram_free > layer_bytes.saturating_mul(4) && layer_bytes > 256 * 1024 {
+    if vram_free > 0 {
         return ExecDest::Gpu;
     }
     ExecDest::Cpu
@@ -1385,5 +1549,230 @@ mod tests {
         let planner = ResourcePlanner::with_config(&manifest, &index, mem, 0, false, cfg);
         let keep = planner.keep_shards_after(0, manifest.num_layers, &manifest);
         assert!(keep.iter().any(|s| s.contains("embed")));
+    }
+
+    fn moe_gpu_index(m: &Manifest) -> TensorIndex {
+        let mut index = TensorIndex::default();
+        let h = m.hidden_dim;
+        let f = m.expert_ffn_dim();
+        let mut push = |name: String, shape: &[u32]| {
+            index.entries.push(make_f32_entry(
+                index.entries.len() as u32,
+                &name,
+                &format!("{name}.tensor"),
+                0,
+                shape,
+            ));
+        };
+        for layer in 0..m.num_layers {
+            let p = format!("L{layer:02}");
+            push(format!("{p}.attn_q"), &[h, h]);
+            push(format!("{p}.attn_k"), &[h, h]);
+            push(format!("{p}.attn_v"), &[h, h]);
+            push(format!("{p}.attn_output"), &[h, h]);
+            push(format!("{p}.ffn_gate_inp"), &[m.num_experts, h]);
+            for e in 0..m.num_experts {
+                let ep = format!("{p}.E{e:02}");
+                push(format!("{ep}.ffn_gate"), &[f, h]);
+                push(format!("{ep}.ffn_up"), &[f, h]);
+                push(format!("{ep}.ffn_down"), &[h, f]);
+            }
+        }
+        index
+    }
+
+    #[test]
+    fn moe_experts_allowed_when_vram_has_pool() {
+        let manifest = Manifest::tiny_moe("moe");
+        let index = moe_gpu_index(&manifest);
+        let mem = MemSnapshot {
+            total_frames: 100_000,
+            free_frames: 50_000,
+            reclaimable_frames: 0,
+        };
+        let planner = ResourcePlanner::new(&manifest, &index, mem, 16 * 1024 * 1024, false);
+        assert!(planner.stats().gpu_layers > 0);
+        assert!(planner.stats().gpu_expert_slots >= 1);
+        assert!(planner.stats().gpu_expert_layers > 0);
+        assert!(planner.gpu_tensor_allowed(0, "L00.attn_q"));
+        assert!(planner.gpu_tensor_allowed(0, "L00.ffn_gate_inp"));
+        assert!(planner.gpu_tensor_allowed(0, "L00.E01.ffn_up"));
+        assert!(
+            !planner.layer_plans[0]
+                .gpu_tensors
+                .iter()
+                .any(|s| s.starts_with('E')),
+            "los expertos van al pool, no pinneados por capa: {:?}",
+            planner.layer_plans[0].gpu_tensors
+        );
+    }
+
+    #[test]
+    fn moe_experts_cpu_when_vram_only_covers_trunk() {
+        let manifest = Manifest::tiny_moe("moe");
+        let index = moe_gpu_index(&manifest);
+        let mut trunk = 0u64;
+        for layer in 0..manifest.num_layers {
+            for suf in ["attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate_inp"] {
+                trunk += vram_bytes_for_named(&index, &format!("L{layer:02}.{suf}"));
+            }
+        }
+        let one_ex = vram_bytes_for_expert(0, 0, &index);
+        assert!(one_ex > 0 && trunk > 0);
+        let mem = MemSnapshot {
+            total_frames: 100_000,
+            free_frames: 50_000,
+            reclaimable_frames: 0,
+        };
+        let planner = ResourcePlanner::new(&manifest, &index, mem, trunk + 1, false);
+        assert!(planner.stats().gpu_layers > 0);
+        assert_eq!(planner.stats().gpu_expert_slots, 0);
+        assert!(!planner.gpu_tensor_allowed(0, "L00.E00.ffn_up"));
+        assert!(planner.gpu_tensor_allowed(0, "L00.attn_q"));
+    }
+
+    #[test]
+    fn q4k_vram_cost_is_raw_not_f32_plane() {
+        let e = sosomodel::index::make_q4_k_entry(0, "w", "w.tensor", 0, &[256, 256]);
+        let vram = vram_bytes_for_entry(&e);
+        assert_eq!(vram, e.byte_len);
+        assert!(vram < (e.elems() as u64) * 4);
+        assert_ne!(vram, e.byte_len.saturating_mul(8));
+    }
+
+    #[test]
+    fn dense_ffn_gate_is_packed() {
+        let manifest = Manifest::tiny("t");
+        let mut index = TensorIndex::default();
+        let h = manifest.hidden_dim;
+        let f = manifest.ffn_dim;
+        for layer in 0..manifest.num_layers {
+            let p = format!("L{layer:02}");
+            for (name, shape) in [
+                (format!("{p}.attn_q"), [h, h]),
+                (format!("{p}.ffn_gate"), [f, h]),
+                (format!("{p}.ffn_up"), [f, h]),
+                (format!("{p}.ffn_down"), [h, f]),
+            ] {
+                index.entries.push(make_f32_entry(
+                    index.entries.len() as u32,
+                    &name,
+                    &format!("{name}.tensor"),
+                    0,
+                    &shape,
+                ));
+            }
+        }
+        let mem = MemSnapshot {
+            total_frames: 100_000,
+            free_frames: 50_000,
+            reclaimable_frames: 0,
+        };
+        let planner = ResourcePlanner::new(&manifest, &index, mem, 8 * 1024 * 1024, false);
+        let t = &planner.layer_plans[0].gpu_tensors;
+        assert!(t.iter().any(|s| s == "ffn_gate"), "{t:?}");
+        assert!(t.iter().any(|s| s == "ffn_up"), "{t:?}");
+        assert!(planner.gpu_tensor_allowed(0, "L00.ffn_gate"));
+        assert!(!planner.gpu_tensor_allowed(0, "L00.E00.ffn_up"));
+    }
+
+    #[test]
+    fn io_bound_flag_sets_when_stage_wait_dominates() {
+        let manifest = Manifest::tiny("t");
+        let index = TensorIndex::default();
+        let mut planner =
+            ResourcePlanner::new(&manifest, &index, MemSnapshot::default(), 0, false);
+        planner.observe_hotpath(1, 1);
+        planner.note_stage_wait_ms(100);
+        planner.note_stage_wait_ms(100);
+        assert_eq!(planner.stats().io_bound, 1);
+        assert!(planner.stats().avg_stage_wait_ms > planner.stats().avg_matvec_ms);
+    }
+
+    #[test]
+    fn io_bound_prefers_remote() {
+        let manifest = Manifest::tiny("t");
+        let index = TensorIndex::default();
+        let mem = MemSnapshot {
+            free_frames: 1000,
+            ..Default::default()
+        };
+        let mut planner = ResourcePlanner::new(&manifest, &index, mem, 0, true);
+        planner.observe_hotpath(1, 1);
+        for _ in 0..4 {
+            planner.note_stage_wait_ms(200);
+        }
+        assert_eq!(planner.stats().io_bound, 1);
+        planner.remote_rtt_ms = 50.0;
+        planner.rebuild_plan(&manifest, &index);
+        assert!(planner.layer_plans.iter().any(|p| p.dest == ExecDest::Remote));
+    }
+
+    #[test]
+    fn huge_layer_forces_single_buffer() {
+        let manifest = Manifest::tiny("t");
+        let mut index = TensorIndex::default();
+        let h = manifest.hidden_dim;
+        // Capas muy grandes (~1 MiB cada una).
+        for layer in 0..manifest.num_layers {
+            let p = format!("L{layer:02}");
+            index.entries.push(make_f32_entry(
+                index.entries.len() as u32,
+                &format!("{p}.attn_q"),
+                &format!("{p}.attn_q.tensor"),
+                0,
+                &[h, 8192],
+            ));
+        }
+        // RAM libre: ~1 MiB — no caben dos capas (~2 MiB).
+        let mem = MemSnapshot {
+            total_frames: 256,
+            free_frames: 256,
+            reclaimable_frames: 0,
+        };
+        let planner = ResourcePlanner::new(&manifest, &index, mem, 0, false);
+        assert_eq!(planner.ring_slots(), 1);
+        assert_eq!(planner.stats().prefetch_single_buffered, 1);
+    }
+
+    #[test]
+    fn oversized_embed_is_gather_only() {
+        let manifest = Manifest::tiny("t");
+        let h = manifest.hidden_dim;
+        let mut big_index = TensorIndex::default();
+        big_index.entries.push(make_f32_entry(
+            0,
+            "embed",
+            "embed.tensor",
+            0,
+            &[manifest.vocab_size, h * 4096],
+        ));
+        let mem = MemSnapshot {
+            total_frames: 256,
+            free_frames: 64,
+            reclaimable_frames: 0,
+        };
+        let planner = ResourcePlanner::new(&manifest, &big_index, mem, 0, false);
+        assert_eq!(planner.stats().embed_gather_only, 1);
+        let keep = planner.keep_shards_after(0, manifest.num_layers, &manifest);
+        assert!(!keep.iter().any(|s| s.contains("embed")));
+
+        let mut small_index = TensorIndex::default();
+        small_index.entries.push(make_f32_entry(
+            0,
+            "embed",
+            "embed.tensor",
+            0,
+            &[manifest.vocab_size, h],
+        ));
+        let mem_big = MemSnapshot {
+            total_frames: 100_000,
+            free_frames: 50_000,
+            reclaimable_frames: 0,
+        };
+        let planner_small = ResourcePlanner::new(&manifest, &small_index, mem_big, 0, false);
+        assert_eq!(planner_small.stats().embed_gather_only, 0);
+        let keep_small = planner_small.keep_shards_after(0, manifest.num_layers, &manifest);
+        assert!(keep_small.iter().any(|s| s.contains("embed")));
     }
 }

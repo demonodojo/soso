@@ -8,8 +8,8 @@ use crate::fetch_hf;
 /// Margen extra sobre el árbol `.som` al dimensionar la imagen sosomfs.
 pub const MODELS_IMAGE_MARGIN: u64 = 256 * 1024 * 1024;
 
-/// Reserva fija para la partición SOSOINSTALL al flashear.
-pub const P4_INSTALL_BYTES: u64 = 32 * 1024 * 1024;
+/// Reserva fija para la partición SOSOINSTALL al flashear (FAT32 exige ≥64 MiB).
+pub const P4_INSTALL_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Holgura GPT + alineaciones al calcular el presupuesto de modelos.
 pub const GPT_OVERHEAD_BYTES: u64 = 1024 * 1024;
@@ -73,8 +73,9 @@ impl LiveModelSpec {
     pub fn need_bytes(&self, root: &Path) -> u64 {
         let dir = self.target_dir(root);
         let model_bytes = if dir.join("manifest.som").exists() {
-            dir_size_bytes(&dir)
+            packed_dir_size_bytes(&dir)
         } else {
+            // GGUF → .som; 115 % cubre cuantización; el empaquetado real usa packed_*.
             (self.gguf_bytes_estimate * 115) / 100
         };
         model_bytes
@@ -209,26 +210,59 @@ pub fn format_bytes(n: u64) -> String {
     }
 }
 
-pub fn dir_size_bytes(dir: &Path) -> u64 {
+/// Tamaño en disco que ocupa un árbol `.som` al empaquetarse en sosomfs
+/// (alineación 2 MiB / 64 KiB — ver `sosomfs/src/builder.rs`).
+fn packed_dir_size_bytes(dir: &Path) -> u64 {
     let mut total = 0u64;
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                total += dir_size_bytes(&p);
-            } else if let Ok(m) = e.metadata() {
-                total += m.len();
-            }
-        }
-    }
+    walk_dir_packed(dir, dir, &mut total);
     total
 }
 
+fn walk_dir_packed(root: &Path, dir: &Path, total: &mut u64) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            walk_dir_packed(root, &p, total);
+            continue;
+        }
+        let Ok(m) = e.metadata() else {
+            continue;
+        };
+        let len = m.len() as usize;
+        let rel = p
+            .strip_prefix(root)
+            .ok()
+            .and_then(|r| r.to_str())
+            .unwrap_or("");
+        let align = if rel.starts_with("shards/") && rel.ends_with(".tensor") {
+            if len >= 2 * 1024 * 1024 {
+                2 * 1024 * 1024
+            } else {
+                64 * 1024
+            }
+        } else {
+            4096
+        };
+        *total += align_up(len, align) as u64;
+    }
+}
+
+fn align_up(len: usize, align: usize) -> usize {
+    (len + align - 1) & !(align - 1)
+}
+
+/// Holgura para catálogo sosomfs + superbloques (no van en el árbol `.som`).
+const SOSOMFS_CATALOG_HEADROOM: u64 = 64 * 1024 * 1024;
+
 /// Tamaño de imagen sosomfs recomendado para un árbol `.som` ya materializado.
 pub fn suggest_models_image_size(model_dir: &Path, tiny_dir: &Path) -> String {
-    let bytes = dir_size_bytes(model_dir)
-        .saturating_add(dir_size_bytes(tiny_dir))
-        .saturating_add(MODELS_IMAGE_MARGIN);
+    let bytes = packed_dir_size_bytes(model_dir)
+        .saturating_add(packed_dir_size_bytes(tiny_dir))
+        .saturating_add(MODELS_IMAGE_MARGIN)
+        .saturating_add(SOSOMFS_CATALOG_HEADROOM);
     const G: u64 = 1024 * 1024 * 1024;
     let gb = (bytes + G - 1) / G;
     format!("{}G", gb.max(1))
@@ -379,6 +413,37 @@ mod tests {
         let spec = pick_largest_materialized(&root).unwrap();
         assert_eq!(spec.name, "mistral-7b");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn packed_size_no_menor_que_raw() {
+        let dir = std::env::temp_dir().join(format!(
+            "soso-packed-size-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("shards")).unwrap();
+        // 4,7 MiB → alineado a 6 MiB (2 MiB).
+        std::fs::write(dir.join("shards/L00.attn_k.tensor"), vec![0u8; 4_900_000]).unwrap();
+        let packed = packed_dir_size_bytes(&dir);
+        assert_eq!(packed, 6 * 1024 * 1024);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggest_mixtral_image_at_least_26g() {
+        let mixtral = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/mixtral-model");
+        if !mixtral.join("manifest.som").exists() {
+            return;
+        }
+        let tiny = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/tiny-model");
+        let size = suggest_models_image_size(&mixtral, &tiny);
+        let gb: u64 = size.trim_end_matches('G').parse().unwrap();
+        assert!(
+            gb >= 26,
+            "mixtral empaquetado necesita ≥26G, sugerido {size}"
+        );
     }
 
     #[test]

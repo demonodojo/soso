@@ -380,22 +380,41 @@ pub fn convert_with_options<R: Read + Seek>(
                     out,
                 )?);
             }
-            for (gguf_suffix, som_suffix) in [
-                ("ffn_gate_exps", "ffn_gate"),
-                ("ffn_up_exps", "ffn_up"),
-                ("ffn_down_exps", "ffn_down"),
+            for (fused_suffix, split_part, som_suffix) in [
+                ("ffn_gate_exps", "ffn_gate", "ffn_gate"),
+                ("ffn_up_exps", "ffn_up", "ffn_up"),
+                ("ffn_down_exps", "ffn_down", "ffn_down"),
             ] {
-                emit_moe_experts(
-                file,
-                &gguf,
-                &mut index,
-                &mut id,
-                &format!("blk.{layer}.{gguf_suffix}.weight"),
+                let fused = emit_moe_experts(
+                    file,
+                    &gguf,
+                    &mut index,
+                    &mut id,
+                    &format!("blk.{layer}.{fused_suffix}.weight"),
                     layer,
                     num_experts,
                     som_suffix,
                     out,
                 )?;
+                if fused {
+                    continue;
+                }
+                let split = emit_moe_experts_split(
+                    file,
+                    &gguf,
+                    &mut index,
+                    &mut id,
+                    layer,
+                    num_experts,
+                    split_part,
+                    som_suffix,
+                    out,
+                )?;
+                if !split {
+                    return Err(format!(
+                        "capa {layer}: faltan expertos {som_suffix} (ni blk.{layer}.{fused_suffix}.weight ni blk.{layer}.{split_part}.N.weight)"
+                    ));
+                }
             }
             for (gguf_suffix, som_suffix) in [
                 ("ffn_gate_shexp", "ffn_gate"),
@@ -502,6 +521,7 @@ pub fn convert_with_options<R: Read + Seek>(
 }
 
 /// Trocea un tensor 3D MoE `[n_expert, rows, cols]` en shards 2D por experto.
+/// Devuelve `false` si el tensor fusionado no está (GGUF Mixtral antiguo).
 fn emit_moe_experts<R: Read + Seek>(
     file: &mut R,
     gguf: &GgufFile,
@@ -512,9 +532,9 @@ fn emit_moe_experts<R: Read + Seek>(
     num_experts: u32,
     som_suffix: &str,
     out: &mut dyn SomOut,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let Some(t) = gguf.tensors.get(gguf_name) else {
-        return Ok(());
+        return Ok(false);
     };
     if t.shape.len() != 3 {
         return Err(format!("{gguf_name}: se esperaban 3 dimensiones MoE"));
@@ -543,7 +563,48 @@ fn emit_moe_experts<R: Read + Seek>(
         });
         *id += 1;
     }
-    Ok(())
+    Ok(true)
+}
+
+/// Expertos Mixtral del GGUF antiguo: `blk.L.ffn_{gate,up,down}.E.weight` (2D).
+fn emit_moe_experts_split<R: Read + Seek>(
+    file: &mut R,
+    gguf: &GgufFile,
+    index: &mut TensorIndex,
+    id: &mut u32,
+    layer: u32,
+    num_experts: u32,
+    gguf_part: &str,
+    som_suffix: &str,
+    out: &mut dyn SomOut,
+) -> Result<bool, String> {
+    let first = format!("blk.{layer}.{gguf_part}.0.weight");
+    if !gguf.tensors.contains_key(&first) {
+        return Ok(false);
+    }
+    for expert in 0..num_experts {
+        let gguf_name = format!("blk.{layer}.{gguf_part}.{expert}.weight");
+        let Some(t) = gguf.tensors.get(&gguf_name) else {
+            return Err(format!(
+                "{gguf_name}: falta (se esperaban {num_experts} expertos)"
+            ));
+        };
+        if t.shape.len() != 2 {
+            return Err(format!("{gguf_name}: se esperaban 2 dimensiones"));
+        }
+        let (payload, dtype) = read_tensor(file, gguf, t)?;
+        let shape: Vec<u32> = t.shape.iter().rev().map(|&d| d as u32).collect();
+        let som_name = format!("L{layer:02}.E{expert:02}.{som_suffix}");
+        let shard_name = format!("{som_name}.tensor");
+        out.write(&format!("{SHARDS_DIR}/{shard_name}"), &pack_shard(&payload))?;
+        index.entries.push(match dtype {
+            DTYPE_Q8_0 => make_q8_0_entry(*id, &som_name, &shard_name, 0, &shape),
+            DTYPE_Q4_K => make_q4_k_entry(*id, &som_name, &shard_name, 0, &shape),
+            _ => make_f32_entry(*id, &som_name, &shard_name, 0, &shape),
+        });
+        *id += 1;
+    }
+    Ok(true)
 }
 
 /// Trocea expertos compartidos MoE (`ffn_*_shexp`) en `Lxx.Syy.*`.
@@ -1362,5 +1423,170 @@ mod tests {
             .expect("forward 1 token");
         let logits = rt.logits(&mut source).expect("logits");
         assert!(logits.iter().all(|x| x.is_finite()));
+    }
+
+    fn pack_gguf_v3(
+        kv_count: u64,
+        write_kv: impl FnOnce(&mut Vec<u8>),
+        tensors: &[(&str, Vec<u64>)],
+    ) -> Vec<u8> {
+        let mut g: Vec<u8> = Vec::new();
+        g.extend_from_slice(b"GGUF");
+        g.extend_from_slice(&3u32.to_le_bytes());
+        g.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+        g.extend_from_slice(&kv_count.to_le_bytes());
+        write_kv(&mut g);
+        let mut offset = 0u64;
+        for (name, shape) in tensors {
+            gguf_string(&mut g, name);
+            g.extend_from_slice(&(shape.len() as u32).to_le_bytes());
+            for d in shape {
+                g.extend_from_slice(&d.to_le_bytes());
+            }
+            g.extend_from_slice(&GGML_F32.to_le_bytes());
+            g.extend_from_slice(&offset.to_le_bytes());
+            let elems: u64 = shape.iter().product();
+            offset = (offset + elems * 4).next_multiple_of(32);
+        }
+        while g.len() % 32 != 0 {
+            g.push(0);
+        }
+        for (i, (_, shape)) in tensors.iter().enumerate() {
+            let elems: u64 = shape.iter().product();
+            for e in 0..elems {
+                g.extend_from_slice(&((i as f32) + (e as f32) * 1e-3).to_le_bytes());
+            }
+            while g.len() % 32 != 0 {
+                g.push(0);
+            }
+        }
+        g
+    }
+
+    fn llama_moe_kv(g: &mut Vec<u8>, h: u32, ffn: u32, n_exp: u32) {
+        gguf_kv_str(g, "general.architecture", "llama");
+        gguf_kv_u32(g, "llama.embedding_length", h);
+        gguf_kv_u32(g, "llama.block_count", 1);
+        gguf_kv_u32(g, "llama.feed_forward_length", ffn);
+        gguf_kv_u32(g, "llama.attention.head_count", 2);
+        gguf_kv_u32(g, "llama.attention.head_count_kv", 1);
+        gguf_kv_f32(g, "llama.attention.layer_norm_rms_epsilon", 1e-6);
+        gguf_kv_u32(g, "llama.expert_count", n_exp);
+        gguf_kv_u32(g, "llama.expert_used_count", 2);
+        gguf_kv_str_array(
+            g,
+            "tokenizer.ggml.tokens",
+            &["<s>", "</s>", "a", "b", "c", "d"],
+        );
+        gguf_kv_u32(g, "tokenizer.ggml.eos_token_id", 1);
+    }
+
+    const MOE_KV: u64 = 11;
+
+    fn moe_trunk(h: u64, kv: u64, n_exp: u64) -> Vec<(&'static str, Vec<u64>)> {
+        vec![
+            ("token_embd.weight", vec![h, 6]),
+            ("output_norm.weight", vec![h]),
+            ("blk.0.attn_norm.weight", vec![h]),
+            ("blk.0.attn_q.weight", vec![h, h]),
+            ("blk.0.attn_k.weight", vec![h, kv]),
+            ("blk.0.attn_v.weight", vec![h, kv]),
+            ("blk.0.attn_output.weight", vec![h, h]),
+            ("blk.0.ffn_norm.weight", vec![h]),
+            ("blk.0.ffn_gate_inp.weight", vec![h, n_exp]),
+        ]
+    }
+
+    #[test]
+    fn convierte_gguf_mixtral_expertos_split() {
+        // TheBloke Mixtral: blk.L.ffn_{gate,up,down}.E.weight (2D), no ffn_*_exps.
+        const H: u64 = 8;
+        const FFN: u64 = 16;
+        const KV: u64 = 4;
+        let mut tensors = moe_trunk(H, KV, 2);
+        tensors.extend_from_slice(&[
+            ("blk.0.ffn_gate.0.weight", vec![H, FFN]),
+            ("blk.0.ffn_up.0.weight", vec![H, FFN]),
+            ("blk.0.ffn_down.0.weight", vec![FFN, H]),
+            ("blk.0.ffn_gate.1.weight", vec![H, FFN]),
+            ("blk.0.ffn_up.1.weight", vec![H, FFN]),
+            ("blk.0.ffn_down.1.weight", vec![FFN, H]),
+        ]);
+        let g = pack_gguf_v3(
+            MOE_KV,
+            |g| llama_moe_kv(g, H as u32, FFN as u32, 2),
+            &tensors,
+        );
+
+        let dir = std::env::temp_dir().join("convert-gguf-moe-split");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("mixtral-old.gguf");
+        fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let out = dir.join("out");
+        convert_path(gguf_path.to_str().unwrap(), &out, Some("mixtral")).unwrap();
+
+        let manifest = Manifest::parse(&fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.num_experts, 2);
+        assert_eq!(manifest.moe_ffn_dim, FFN as u32);
+        let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
+        let gate = index.find("L00.E00.ffn_gate").unwrap();
+        assert_eq!(gate.shape, vec![FFN as u32, H as u32]);
+        let down = index.find("L00.E01.ffn_down").unwrap();
+        assert_eq!(down.shape, vec![H as u32, FFN as u32]);
+        let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
+        rt.validate_shapes().expect("shapes Mixtral split");
+    }
+
+    #[test]
+    fn convierte_gguf_moe_fused_exps() {
+        const H: u64 = 8;
+        const FFN: u64 = 16;
+        const KV: u64 = 4;
+        const N_EXP: u64 = 2;
+        let mut tensors = moe_trunk(H, KV, N_EXP);
+        tensors.extend_from_slice(&[
+            ("blk.0.ffn_gate_exps.weight", vec![H, FFN, N_EXP]),
+            ("blk.0.ffn_up_exps.weight", vec![H, FFN, N_EXP]),
+            ("blk.0.ffn_down_exps.weight", vec![FFN, H, N_EXP]),
+        ]);
+        let g = pack_gguf_v3(
+            MOE_KV,
+            |g| llama_moe_kv(g, H as u32, FFN as u32, N_EXP as u32),
+            &tensors,
+        );
+
+        let dir = std::env::temp_dir().join("convert-gguf-moe-fused");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("mixtral-fused.gguf");
+        fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let out = dir.join("out");
+        convert_path(gguf_path.to_str().unwrap(), &out, Some("mixtral")).unwrap();
+
+        let manifest = Manifest::parse(&fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
+        let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
+        assert!(index.find("L00.E00.ffn_gate").is_some());
+        assert!(index.find("L00.E01.ffn_up").is_some());
+        let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
+        rt.validate_shapes().expect("shapes MoE fused");
+    }
+
+    #[test]
+    fn moe_sin_expertos_no_convierte_en_silencio() {
+        const H: u64 = 8;
+        let tensors = moe_trunk(H, 4, 2);
+        let g = pack_gguf_v3(MOE_KV, |g| llama_moe_kv(g, H as u32, 16, 2), &tensors);
+        let dir = std::env::temp_dir().join("convert-gguf-moe-missing");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("broken.gguf");
+        fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let out = dir.join("out");
+        let err = convert_path(gguf_path.to_str().unwrap(), &out, Some("mixtral")).unwrap_err();
+        assert!(
+            err.contains("faltan expertos"),
+            "tenía que abortar, no convertir a medias: {err}"
+        );
     }
 }

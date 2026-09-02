@@ -158,6 +158,7 @@ impl Runtime {
     pub fn validate_shapes(&self) -> Result<(), ()> {
         self.manifest.supported_by_runtime().map_err(|_| ())?;
         self.validate_shapes_for_role(PipelineRole::Full, 0, self.manifest.num_layers)
+            .map_err(|_| ())
     }
 
     /// Valida solo los tensores necesarios para un rol/rango de capas.
@@ -166,20 +167,20 @@ impl Runtime {
         role: PipelineRole,
         layer_start: u32,
         layer_end: u32,
-    ) -> Result<(), ()> {
+    ) -> Result<(), String> {
         let h = self.manifest.hidden_dim;
         let vocab = self.manifest.vocab_size;
 
-        let check = |name: &str, want: &[u32], required: bool| -> Result<(), ()> {
+        let check = |name: &str, want: &[u32], required: bool| -> Result<(), String> {
             match self.index.find(name) {
                 Some(e) => {
                     if e.shape == want {
                         Ok(())
                     } else {
-                        Err(())
+                        Err(alloc::format!("{name}: shape {:?} vs {want:?}", e.shape))
                     }
                 }
-                None if required => Err(()),
+                None if required => Err(alloc::format!("{name}: falta")),
                 None => Ok(()),
             }
         };
@@ -313,6 +314,20 @@ impl Runtime {
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         clock_ms: Option<fn() -> u64>,
     ) -> Result<(), ()> {
+        self.prefill_prompt_with(source, prompt, parallel, gpu, clock_ms, &mut |_, _| {})
+    }
+
+    /// Como `prefill_prompt`, avisando tras cada token (`i` de `total`, 1-based).
+    pub fn prefill_prompt_with(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        clock_ms: Option<fn() -> u64>,
+        on_progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<(), ()> {
+        let total = prompt.len();
         for (i, &tok) in prompt.iter().enumerate() {
             if let Some(&next) = prompt.get(i + 1) {
                 self.prefetch_embed(next, source);
@@ -323,6 +338,7 @@ impl Runtime {
             } else {
                 self.forward_step_par(source, parallel, gpu)?;
             }
+            on_progress(i + 1, total);
         }
         Ok(())
     }
@@ -618,7 +634,17 @@ impl Runtime {
         sampler: &mut crate::sample::Sampler,
         on_token: impl FnMut(u32),
     ) -> Result<Vec<u32>, ()> {
-        self.generate_stream_par(source, prompt, max_new, eos, sampler, on_token, None, &mut None)
+        self.generate_stream_par(
+            source,
+            prompt,
+            max_new,
+            eos,
+            sampler,
+            on_token,
+            None,
+            &mut None,
+            &mut |_, _| {},
+        )
     }
 
     /// Como `generate_stream` con matvec paralelo opcional.
@@ -632,13 +658,14 @@ impl Runtime {
         mut on_token: impl FnMut(u32),
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        on_prefill: &mut dyn FnMut(usize, usize),
     ) -> Result<Vec<u32>, ()> {
         if prompt.is_empty() {
             return Err(());
         }
         self.reset_sequence();
         let mut tokens: Vec<u32> = prompt.to_vec();
-        self.prefill_prompt(source, prompt, parallel, gpu, None)?;
+        self.prefill_prompt_with(source, prompt, parallel, gpu, None, on_prefill)?;
         let greedy = sampler.temp <= 0.0;
         let mut remaining = max_new;
         while remaining > 0 {

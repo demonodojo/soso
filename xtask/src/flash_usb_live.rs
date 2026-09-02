@@ -8,7 +8,7 @@ use std::process::{Command, exit};
 use crate::install_disk;
 use crate::package_live;
 
-const INSTALL_SECTORS: u64 = 65536; // 32 MiB
+const INSTALL_SECTORS: u64 = crate::live_models::P4_INSTALL_BYTES / 512;
 
 pub fn run(args: &[String]) {
     let mut device: Option<PathBuf> = None;
@@ -69,23 +69,43 @@ pub fn run(args: &[String]) {
 
     if disk_sectors >= img_sectors + INSTALL_SECTORS {
         install_disk::expand_models_leave_install(&usb, INSTALL_SECTORS);
-        if let Some(part4) = install_disk::create_install_partition_tail(&usb, INSTALL_SECTORS) {
-            install_disk::run_cmd(
-                Command::new("mkfs.vfat")
-                    .args(["-F", "32", "-n", "SOSOINSTALL"])
-                    .arg(&part4),
-                "mkfs.vfat",
+        install_disk::create_install_partition_tail(&usb, INSTALL_SECTORS);
+        // Tras ampliar p3 + crear p4 en un stick >> imagen, la GPT de respaldo suele
+        // quedar inválida hasta un `sgdisk -e`; mkfs antes de eso formatea offsets viejos.
+        install_disk::repair_gpt_backup(&usb);
+        install_disk::refresh_partition_table(&usb);
+        let Some(part4) = install_disk::wait_install_partition(&usb, 4) else {
+            let hint = install_disk::install_partition_node(&usb, 4)
+                .unwrap_or_else(|| format!("{}4", usb.display()));
+            eprintln!(
+                "flash-usb-live: p4 creada en GPT pero no apareció el nodo; \
+                 prueba `sudo partprobe {}` y:\n  \
+                 sudo mkfs.vfat -F 32 -n SOSOINSTALL {hint}\n  \
+                 sudo mount {hint} /mnt && sudo cp {}/* /mnt/",
+                usb.display(),
+                out_dir.display()
             );
-            if mount_install_partition(&part4) {
-                copy_installer_files(&out_dir, "/mnt/soso-install");
-                let _ = Command::new("umount").arg("/mnt/soso-install").status();
-                println!("flash-usb-live: instalador en {part4}");
-            } else {
-                eprintln!(
-                    "flash-usb-live: aviso: no pude montar {part4}; copia manual desde {}",
-                    out_dir.display()
-                );
-            }
+            print_flash_summary(&usb, &out_dir);
+            return;
+        };
+        install_disk::run_cmd(
+            Command::new("mkfs.vfat")
+                .args(["-F", "32", "-n", "SOSOINSTALL"])
+                .arg(&part4),
+            "mkfs.vfat",
+        );
+        install_disk::refresh_partition_table(&usb);
+        if mount_install_partition(&part4) {
+            copy_installer_files(&out_dir, "/mnt/soso-install");
+            let _ = Command::new("umount").arg("/mnt/soso-install").status();
+            println!("flash-usb-live: instalador en {part4}");
+        } else {
+            eprintln!(
+                "flash-usb-live: aviso: no pude montar {part4}; copia manual desde {}\n\
+                 (si el kernel sigue con la tabla antigua: sudo partprobe {} && reintenta el mount)",
+                out_dir.display(),
+                usb.display()
+            );
         }
     } else {
         eprintln!(
@@ -139,6 +159,7 @@ fn blockdev_bytes(dev: &Path) -> Option<u64> {
 fn mount_install_partition(part: &str) -> bool {
     let _ = std::fs::create_dir_all("/mnt/soso-install");
     Command::new("mount")
+        .args(["-t", "vfat"])
         .arg(part)
         .arg("/mnt/soso-install")
         .status()

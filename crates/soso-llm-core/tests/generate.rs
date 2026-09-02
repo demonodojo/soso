@@ -337,6 +337,7 @@ fn generate_por_dispositivo_igual_que_cpu() {
             |_| {},
             None,
             &mut sin_gpu,
+            &mut |_, _| {},
         )
         .expect("la ruta de CPU debe funcionar")
     };
@@ -361,6 +362,7 @@ fn generate_por_dispositivo_igual_que_cpu() {
             |_| {},
             None,
             &mut gpu,
+            &mut |_, _| {},
         )
         .expect("la ruta de dispositivo debe funcionar")
     };
@@ -399,7 +401,7 @@ fn generate_por_dispositivo_con_pesos_q4_k() {
         let mut sampler = soso_llm_core::sample::Sampler::greedy();
         let mut sin_gpu: Option<&mut dyn GpuDispatch> = None;
         rt.generate_stream_par(
-            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut sin_gpu,
+            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut sin_gpu, &mut |_, _| {},
         )
         .expect("la ruta de CPU con Q4_K debe funcionar")
     };
@@ -416,7 +418,7 @@ fn generate_por_dispositivo_con_pesos_q4_k() {
     let tokens = {
         let mut gpu: Option<&mut dyn GpuDispatch> = Some(&mut dev);
         rt.generate_stream_par(
-            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut gpu,
+            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut gpu, &mut |_, _| {},
         )
         .expect("la ruta de dispositivo con Q4_K debe funcionar")
     };
@@ -463,6 +465,7 @@ fn generate_por_dispositivo_con_pesos_cuantizados() {
             |_| {},
             None,
             &mut sin_gpu,
+            &mut |_, _| {},
         )
         .expect("la ruta de CPU con Q8_0 debe funcionar")
     };
@@ -487,6 +490,7 @@ fn generate_por_dispositivo_con_pesos_cuantizados() {
             |_| {},
             None,
             &mut gpu,
+            &mut |_, _| {},
         )
         .expect("la ruta de dispositivo con Q8_0 debe funcionar")
     };
@@ -522,7 +526,7 @@ fn generate_por_dispositivo_con_pesos_mxfp4() {
         let mut sampler = soso_llm_core::sample::Sampler::greedy();
         let mut sin_gpu: Option<&mut dyn GpuDispatch> = None;
         rt.generate_stream_par(
-            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut sin_gpu,
+            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut sin_gpu, &mut |_, _| {},
         )
         .expect("la ruta de CPU con MXFP4 debe funcionar")
     };
@@ -539,7 +543,7 @@ fn generate_por_dispositivo_con_pesos_mxfp4() {
     let tokens = {
         let mut gpu: Option<&mut dyn GpuDispatch> = Some(&mut dev);
         rt.generate_stream_par(
-            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut gpu,
+            &mut source, &[5, 10], 4, None, &mut sampler, |_| {}, None, &mut gpu, &mut |_, _| {},
         )
         .expect("la ruta de dispositivo con MXFP4 debe funcionar")
     };

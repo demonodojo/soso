@@ -12,6 +12,7 @@
 //!
 //! Sale con código 0 si todo pasa, 1 si algo falla.
 
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -155,13 +156,29 @@ impl Report {
         nombre: &str,
         mut f: F,
     ) -> Result<(), ()> {
-        if let Err(e) = f() {
-            println!("      [{shard}] (reintento de «{nombre}» tras 5 s: {e})");
-            std::thread::sleep(Duration::from_secs(5));
-            return self.paso(shard, nombre, f);
+        const MAX: u32 = 3;
+        for intento in 1..=MAX {
+            match f() {
+                Ok(()) => {
+                    self.marca(shard, nombre, true);
+                    return Ok(());
+                }
+                Err(e) if intento < MAX => {
+                    println!(
+                        "      [{shard}] (reintento {}/{} de «{nombre}» tras 5 s: {e})",
+                        intento,
+                        MAX - 1
+                    );
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+                Err(e) => {
+                    self.marca(shard, &format!("{nombre}: {e}"), false);
+                    *self.fallos.lock().unwrap() += 1;
+                    return Err(());
+                }
+            }
         }
-        self.marca(shard, nombre, true);
-        Ok(())
+        unreachable!()
     }
 }
 
@@ -348,7 +365,10 @@ fn make_slot(shard: ShardId, img: &Path, data: &Path, models: &Path) -> QemuSlot
         // placa de 8 cores la segunda inferencia dejaba la máquina inservible.
         smp: match shard {
             ShardId::Reclaim => Some("1".into()),
-            ShardId::LlmDense => Some("2".into()),
+            // smp 2 para ssh_llm (ThreadPool); askd en smp 2 se cuelga en TCG
+            // (generate no vuelve). Los pools se prueban en ssh_llm; ask va a 1
+            // hasta arreglar la contención (2026-09-01).
+            ShardId::LlmDense => Some("1".into()),
             _ => None,
         },
         monitor: None,
@@ -391,7 +411,8 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report) {
     let _vivo = QemuVivo(qemu);
     let arrancado = report
         .paso(sid, "arranque hasta la shell", || {
-            esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(90))
+            esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(180))?;
+            esperar_en_fichero(&slot.serial, "net: dhcp", Duration::from_secs(120))
         })
         .is_ok();
     if arrancado {
@@ -404,10 +425,7 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report) {
             "soso-llm run tiny-mla --prompt test --max 2",
             || ssh_llm_mla(key, port),
         );
-        // Tras DOS pools creados y destruidos (este shard corre con 4 cores),
-        // la máquina tiene que seguir usable. Si los workers no se apagan,
-        // giran al 100 % para siempre y esto se arrastra o no contesta.
-        let _ = report.paso(sid, "sigue viva tras dos pools de hilos", || {
+        let _ = report.paso_con_reintento(sid, "sigue viva tras dos pools de hilos", || {
             ssh_vive(key, port)
         });
         let _ = report.paso_con_reintento(
@@ -477,21 +495,22 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report) {
     };
     let arrancado = report
         .paso(sid, "arranque hasta la shell", || {
-            esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(90))
+            esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(90))?;
+            esperar_en_fichero(&slot.serial, "net: dhcp", Duration::from_secs(120))
         })
         .is_ok();
     if arrancado {
         let echo = slot.echo_port;
         let port = slot.ssh_port;
         let _ = report.paso(sid, &format!("echo TCP en :{echo}"), || echo_tcp(echo));
+        let _ = report.paso_con_reintento(sid, "ask: el texto llega literal", || {
+            ssh_ask_literal(key, port)
+        });
         let _ = report.paso_con_reintento(sid, "init test (syscalls, hilos, FPU, GPU)", || {
             ssh_init_test(key, port)
         });
         let _ = report.paso_con_reintento(sid, "pipeline de sosh (6 KiB por un pipe)", || {
             ssh_pipeline(key, port)
-        });
-        let _ = report.paso_con_reintento(sid, "ask: el texto llega literal", || {
-            ssh_ask_literal(key, port)
         });
         let _ = report.paso(sid, "SSH por clave pública + comando + halt", || {
             ssh_sesion(key, port)
@@ -700,6 +719,32 @@ fn conectar_reintentando(puerto: u16, limite: Duration) -> Result<TcpStream, Str
     }
 }
 
+fn prompt_listo(texto: &str) -> bool {
+    if !texto.contains("sosh —") {
+        return false;
+    }
+    texto.ends_with("$ ")
+        || texto.ends_with("$ \r\n")
+        || texto.contains("\n$ \n")
+        || texto.contains("\r\n$ \r\n")
+        || texto.contains("\n$ \r\n")
+}
+
+/// Quita el aviso de cierre de OpenSSH y normaliza saltos de línea.
+fn normalizar_salida_ssh(texto: String) -> String {
+    let mut s = texto.replace("\r\n", "\n");
+    for marker in [
+        "\nConnection to localhost closed by remote host.",
+        "Connection to localhost closed by remote host.",
+    ] {
+        if let Some(i) = s.find(marker) {
+            s.truncate(i);
+            break;
+        }
+    }
+    s.trim_end().to_string()
+}
+
 /// Abre una sesión SSH, le pasa `guion` por stdin y espera a que **termine sola**,
 /// como máximo `limite`. Devuelve el stdout de la sesión.
 ///
@@ -712,63 +757,158 @@ fn conectar_reintentando(puerto: u16, limite: Duration) -> Result<TcpStream, Str
 /// el límite pasa a ser una red de seguridad y la suite tarda lo que tarde el
 /// guest. Por eso los límites de abajo son holgados — ya no se pagan.
 ///
-/// stdin se mantiene abierto hasta que el hijo muere. Con el parche ya no es
-/// imprescindible, pero cerrarlo antes manda un EOF que el servidor no necesita
-/// ver, y esa es justo la piedra en la que tropezó todo esto (2026-07-28).
+/// stdin se mantiene abierto con un FIFO: un `sleep` de fondo evita mandar EOF
+/// al servidor antes de tiempo (mismo truco que `scripts/l6-g1-vfio-test.sh`).
+/// Se espera al prompt antes de escribir el guion: mandarlo antes de que sosh
+/// esté leyendo lo pierde en el arranque. La sesión termina cuando la shell
+/// hace `exit`, no cuando el cliente cierra stdin.
 pub(crate) fn ssh_guion(
     key: &Path,
     ssh_port: u16,
     guion: &str,
     limite: Duration,
 ) -> Result<String, String> {
-    let mut hijo = Command::new("ssh")
-        .args(["-tt", "-i"])
-        .arg(key)
-        .args(["-p", &ssh_port.to_string()])
-        .args(["-o", "StrictHostKeyChecking=no"])
-        .args(["-o", "UserKnownHostsFile=/dev/null"])
-        .args(["-o", "LogLevel=ERROR"])
-        .args(["-o", "ConnectTimeout=10"])
-        .arg("soso@localhost")
-        .stdin(Stdio::piped())
+    ssh_guion_inner(key, ssh_port, guion, limite, true)
+}
+
+fn ssh_guion_inner(
+    key: &Path,
+    ssh_port: u16,
+    guion: &str,
+    limite: Duration,
+    tty: bool,
+) -> Result<String, String> {
+    let fifo = super::project_root().join("target/.ssh-guion.fifo");
+    let _ = fs::remove_file(&fifo);
+    if !Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .map_err(|e| format!("mkfifo: {e}"))?
+        .success()
+    {
+        return Err("mkfifo falló".into());
+    }
+
+    let holgura = limite.as_secs().saturating_add(60);
+    let mut holder = Command::new("sh")
+        .args(["-c", &format!("exec sleep {holgura} > {}", fifo.display())])
+        .spawn()
+        .map_err(|e| format!("sleep holder: {e}"))?;
+
+    let key_s = key.display().to_string();
+    let fifo_s = fifo.display().to_string();
+    let modo_tty = if tty { "-tt" } else { "-T" };
+    let ssh_cmd = format!(
+        "exec ssh {modo_tty} -i '{key_s}' -p {ssh_port} \
+         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+         -o LogLevel=ERROR -o ConnectTimeout=10 soso@localhost < '{fifo_s}'"
+    );
+    let mut hijo = Command::new("sh")
+        .args(["-c", &ssh_cmd])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
 
     let pid = hijo.id();
-    let mut stdin = hijo.stdin.take().unwrap();
-    stdin.write_all(guion.as_bytes()).map_err(|e| e.to_string())?;
-    stdin.flush().ok();
+    let stdout = hijo.stdout.take().unwrap();
+    let stderr = hijo.stderr.take();
 
-    // `wait_with_output` en un hilo: además de esperar, drena stdout/stderr, que
-    // con `cat /README.md` dos veces mueven más que el buffer de un pipe.
-    let hilo = std::thread::spawn(move || hijo.wait_with_output());
+    let acum = Arc::new(Mutex::new(Vec::new()));
+    let prompt = Arc::new((Mutex::new(false), Condvar::new()));
+    let acum_hilo = acum.clone();
+    let prompt_hilo = prompt.clone();
+    let lector = std::thread::spawn(move || -> Result<(), String> {
+        let mut stdout = stdout;
+        let mut buf = [0u8; 512];
+        loop {
+            let n = stdout
+                .read(&mut buf)
+                .map_err(|e| format!("leyendo stdout SSH: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            let mut datos = acum_hilo.lock().unwrap();
+            datos.extend_from_slice(&buf[..n]);
+            let texto = String::from_utf8_lossy(&datos);
+            let mut visto = prompt_hilo.0.lock().unwrap();
+            if !*visto && prompt_listo(&texto) {
+                *visto = true;
+                prompt_hilo.1.notify_all();
+            }
+        }
+        Ok(())
+    });
+
+    let fin_prompt = Instant::now() + Duration::from_secs(45);
+    loop {
+        let mut visto = prompt.0.lock().unwrap();
+        if *visto {
+            break;
+        }
+        let resto = fin_prompt.saturating_duration_since(Instant::now());
+        if resto.is_zero() {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+            let _ = holder.kill();
+            let _ = holder.wait();
+            let _ = fs::remove_file(&fifo);
+            let datos = acum.lock().unwrap();
+            let parcial = String::from_utf8_lossy(&datos);
+            return Err(format!(
+                "no apareció el prompt en 45s; stdout parcial: {parcial:?}"
+            ));
+        }
+        visto = prompt.1.wait_timeout(visto, resto).unwrap().0;
+    }
+
+    {
+        let mut w = OpenOptions::new()
+            .write(true)
+            .open(&fifo)
+            .map_err(|e| format!("escribir fifo: {e}"))?;
+        w.write_all(guion.as_bytes()).map_err(|e| e.to_string())?;
+        w.flush().ok();
+    }
 
     let fin = Instant::now() + limite;
-    while !hilo.is_finished() {
+    loop {
+        if lector.is_finished() {
+            break;
+        }
         if Instant::now() >= fin {
-            drop(stdin);
             let _ = Command::new("kill").arg(pid.to_string()).status();
-            let texto = hilo
-                .join()
-                .map_err(|_| "hilo ssh".to_string())?
-                .map(|s| String::from_utf8_lossy(&s.stdout).into_owned())
-                .unwrap_or_default();
-            return Err(format!(
-                "la sesión SSH no terminó en {}s; stdout: {texto:?}",
-                limite.as_secs()
-            ));
+            break;
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    drop(stdin);
-
-    let salida = hilo
-        .join()
-        .map_err(|_| "hilo ssh".to_string())?
-        .map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&salida.stdout).into_owned())
+    if lector.is_finished() {
+        lector
+            .join()
+            .map_err(|_| "hilo lector ssh".to_string())?
+            .map_err(|e: String| e)?;
+    } else {
+        let _ = lector.join();
+    }
+    let mut salida = String::from_utf8_lossy(&acum.lock().unwrap()).into_owned();
+    if let Some(mut err) = stderr {
+        let mut extra = String::new();
+        let _ = err.read_to_string(&mut extra);
+        if !extra.is_empty() {
+            salida.push_str(&extra);
+        }
+    }
+    let salida = normalizar_salida_ssh(salida);
+    let status = hijo.wait().map_err(|e| format!("wait ssh: {e}"))?;
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let _ = fs::remove_file(&fifo);
+    if Instant::now() >= fin && !status.success() {
+        return Err(format!(
+            "la sesión SSH no terminó en {}s; stdout: {salida:?}",
+            limite.as_secs()
+        ));
+    }
+    Ok(salida)
 }
 
 fn ssh_llm(key: &Path, ssh_port: u16) -> Result<(), String> {
@@ -1031,20 +1171,24 @@ fn ssh_pipeline(key: &Path, ssh_port: u16) -> Result<(), String> {
         ssh_port,
         "cat /README.md /README.md | cat -\nexit\n",
         Duration::from_secs(90),
-    )?
-    .replace("\r\n", "\n");
+    )?;
     let marca = "cat -\n";
     let ini = texto
         .find(marca)
         .ok_or_else(|| format!("no se vio el comando en la salida: {texto:?}"))?
         + marca.len();
     let fin = texto[ini..]
-        .rfind("$ ")
+        .rfind("\n$ ")
         .map(|p| ini + p)
+        .or_else(|| {
+            texto[ini..]
+                .rfind("\n$ \n")
+                .map(|p| ini + p + 1)
+        })
         .unwrap_or(texto.len());
     let cuerpo = &texto[ini..fin];
     let esperado = String::from_utf8_lossy(&real).replace("\r\n", "\n").repeat(2);
-    if cuerpo.trim_end() != esperado.trim_end() {
+    if cuerpo.trim_end().replace('\r', "") != esperado.trim_end().replace('\r', "") {
         return Err(format!(
             "el pipeline entregó {} bytes y el fichero ×2 son {}",
             cuerpo.trim_end().len(),
@@ -1063,25 +1207,152 @@ fn ssh_pipeline(key: &Path, ssh_port: u16) -> Result<(), String> {
 /// devuelta carácter por carácter con la enviada.
 fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
     let payload = r#"¿2 > 1? | sí, "así" & <ñ>"#;
-    let guion = format!("ask :eco {payload}\nexit\n");
-    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(180))?
-        .replace("\r\n", "\n");
-    // El eco del propio comando aparece primero; interesa la línea de después.
-    let marca = format!("ask :eco {payload}\n");
-    let ini = texto
-        .find(&marca)
-        .ok_or_else(|| format!("no se vio el comando en la salida: {texto:?}"))?
-        + marca.len();
-    let salida = texto[ini..]
-        .lines()
-        .next()
-        .ok_or_else(|| format!("sin respuesta tras el comando: {texto:?}"))?;
-    if salida != payload {
-        return Err(format!(
-            "ask entregó {salida:?} y se escribió {payload:?}"
-        ));
+    let fifo = super::project_root().join("target/.ssh-ask.fifo");
+    let _ = fs::remove_file(&fifo);
+    if !Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .map_err(|e| format!("mkfifo: {e}"))?
+        .success()
+    {
+        return Err("mkfifo falló".into());
     }
-    Ok(())
+    let holgura = 300u64;
+    let mut holder = Command::new("sh")
+        .args(["-c", &format!("exec sleep {holgura} > {}", fifo.display())])
+        .spawn()
+        .map_err(|e| format!("sleep holder: {e}"))?;
+
+    let key_s = key.display().to_string();
+    let fifo_s = fifo.display().to_string();
+    let ssh_cmd = format!(
+        "exec ssh -T -i '{key_s}' -p {ssh_port} \
+         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+         -o LogLevel=ERROR -o ConnectTimeout=10 soso@localhost < '{fifo_s}'"
+    );
+    let mut hijo = Command::new("sh")
+        .args(["-c", &ssh_cmd])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
+    let pid = hijo.id();
+    let stdout = hijo.stdout.take().unwrap();
+    let stderr = hijo.stderr.take();
+
+    let acum = Arc::new(Mutex::new(Vec::new()));
+    let prompt = Arc::new((Mutex::new(false), Condvar::new()));
+    let acum_hilo = acum.clone();
+    let prompt_hilo = prompt.clone();
+    let lector = std::thread::spawn(move || -> Result<(), String> {
+        let mut stdout = stdout;
+        let mut buf = [0u8; 512];
+        loop {
+            let n = stdout
+                .read(&mut buf)
+                .map_err(|e| format!("leyendo stdout SSH: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            let mut datos = acum_hilo.lock().unwrap();
+            datos.extend_from_slice(&buf[..n]);
+            let texto = String::from_utf8_lossy(&datos);
+            let mut visto = prompt_hilo.0.lock().unwrap();
+            if !*visto && prompt_listo(&texto) {
+                *visto = true;
+                prompt_hilo.1.notify_all();
+            }
+        }
+        Ok(())
+    });
+
+    let fin_prompt = Instant::now() + Duration::from_secs(45);
+    loop {
+        let mut visto = prompt.0.lock().unwrap();
+        if *visto {
+            break;
+        }
+        let resto = fin_prompt.saturating_duration_since(Instant::now());
+        if resto.is_zero() {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+            let _ = holder.kill();
+            let _ = holder.wait();
+            let _ = fs::remove_file(&fifo);
+            return Err("no apareció el prompt en 45s".into());
+        }
+        visto = prompt.1.wait_timeout(visto, resto).unwrap().0;
+    }
+
+    let pregunta = format!("ask :eco {payload}\n");
+    {
+        let mut w = OpenOptions::new()
+            .write(true)
+            .open(&fifo)
+            .map_err(|e| format!("escribir fifo: {e}"))?;
+        w.write_all(pregunta.as_bytes()).map_err(|e| e.to_string())?;
+        w.flush().ok();
+    }
+
+    let fin_payload = Instant::now() + Duration::from_secs(30);
+    let mut visto_payload = false;
+    while Instant::now() < fin_payload {
+        {
+            let datos = acum.lock().unwrap();
+            let texto = String::from_utf8_lossy(&datos);
+            if texto.lines().any(|l| l == payload) {
+                visto_payload = true;
+                break;
+            }
+        }
+        if lector.is_finished() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    {
+        let mut w = OpenOptions::new()
+            .write(true)
+            .open(&fifo)
+            .map_err(|e| format!("escribir fifo: {e}"))?;
+        w.write_all(b"exit\n").map_err(|e| e.to_string())?;
+        w.flush().ok();
+    }
+
+    let fin = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < fin && !lector.is_finished() {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if lector.is_finished() {
+        lector
+            .join()
+            .map_err(|_| "hilo lector ssh".to_string())?
+            .map_err(|e: String| e)?;
+    } else {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+        let _ = lector.join();
+    }
+    let mut texto =
+        normalizar_salida_ssh(String::from_utf8_lossy(&acum.lock().unwrap()).into_owned());
+    if let Some(mut err) = stderr {
+        let mut extra = String::new();
+        let _ = err.read_to_string(&mut extra);
+        if !extra.is_empty() {
+            texto.push_str(&extra);
+        }
+    }
+    let _ = hijo.wait();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let _ = fs::remove_file(&fifo);
+
+    if visto_payload || texto.lines().any(|l| l == payload) {
+        Ok(())
+    } else {
+        Err(format!(
+            "ask :eco no devolvió la línea literal; stdout: {texto:?}"
+        ))
+    }
 }
 
 /// Dos `ask` en la misma sesión SSH cargan el modelo una sola vez; una sesión
@@ -1091,8 +1362,7 @@ fn ssh_ask_resident(key: &Path, ssh_port: u16) -> Result<(), String> {
     // `/etc/llm.conf`): en TCG eso no cabe en el tope de 600 s y el
     // paso mataba la sesión con askd aún masticando.
     let guion1 = "ask :max 4\nask test\nask test\nexit\n";
-    let texto1 = ssh_guion(key, ssh_port, guion1, Duration::from_secs(600))?
-        .replace("\r\n", "\n");
+    let texto1 = ssh_guion(key, ssh_port, guion1, Duration::from_secs(600))?;
     let cargando = texto1.matches("ask: cargando").count();
     if cargando != 1 {
         return Err(format!(
@@ -1100,8 +1370,7 @@ fn ssh_ask_resident(key: &Path, ssh_port: u16) -> Result<(), String> {
         ));
     }
     let guion2 = "ask test\nexit\n";
-    let texto2 = ssh_guion(key, ssh_port, guion2, Duration::from_secs(240))?
-        .replace("\r\n", "\n");
+    let texto2 = ssh_guion(key, ssh_port, guion2, Duration::from_secs(240))?;
     if texto2.contains("ask: cargando") {
         return Err(format!(
             "segundo ask en nueva SSH recargó el modelo; stdout: {texto2:?}"

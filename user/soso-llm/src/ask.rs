@@ -170,6 +170,17 @@ fn socket_fin(fd: u64) {
     socket_write(fd, &[PROTO_FIN]);
 }
 
+/// Respuesta completa al cliente en un solo `write` (texto + `PROTO_FIN`).
+fn socket_reply(fd: u64, s: &str) {
+    let mut bytes = alloc::vec::Vec::with_capacity(s.len() + 2);
+    bytes.extend_from_slice(s.as_bytes());
+    if !s.ends_with('\n') {
+        bytes.push(b'\n');
+    }
+    bytes.push(PROTO_FIN);
+    let _ = sys::write_all(fd, &bytes);
+}
+
 fn read_line_fd(fd: u64, buf: &mut [u8]) -> Option<usize> {
     let mut pos = 0usize;
     loop {
@@ -355,9 +366,8 @@ pub fn run_askd() -> u8 {
             conn.fd,
         );
         if rc != 0 {
-            socket_write_str(conn.fd, "ask: error\n");
+            socket_reply(conn.fd, "ask: error\n");
         }
-        socket_fin(conn.fd);
         // Ceder el CPU: sosh está bloqueado en el socket y, si no salimos
         // del hilo, en SMP el despertar del read puede tardar una rodaja.
         let _ = sys::sleep_ms(1);
@@ -414,25 +424,26 @@ fn tratar_linea_askd(
     fd: u64,
 ) -> u8 {
     if let Some(t) = resto_tras(":eco", texto) {
-        socket_write_str(fd, t);
-        socket_write(fd, b"\n");
+        socket_reply(fd, t);
         return 0;
     }
     if texto == ":modelos" {
+        let mut out = String::new();
         for m in modelos() {
             let marca = if m == *modelo { '*' } else { ' ' };
-            socket_write_str(fd, &format!("{marca} {m}\n"));
+            out.push_str(&format!("{marca} {m}\n"));
         }
+        socket_reply(fd, &out);
         return 0;
     }
     if let Some(n) = resto_tras(":modelo", texto) {
         let n = n.trim();
         if n.is_empty() {
-            socket_write_str(fd, &format!("ask: modelo actual: {modelo}\n"));
+            socket_reply(fd, &format!("ask: modelo actual: {modelo}\n"));
             return 0;
         }
         if !modelos().iter().any(|m| m == n) {
-            socket_write_str(fd, &format!("ask: no hay ningún modelo «{n}» en /models\n"));
+            socket_reply(fd, &format!("ask: no hay ningún modelo «{n}» en /models\n"));
             return 0;
         }
         conf.modelo = n.to_string();
@@ -440,16 +451,16 @@ fn tratar_linea_askd(
         if asegurar_modelo(sesion, conf, modelo, fd).is_err() {
             return 1;
         }
-        socket_write_str(fd, &format!("ask: modelo {modelo}\n"));
+        socket_reply(fd, &format!("ask: modelo {modelo}\n"));
         return 0;
     }
     if let Some(n) = resto_tras(":max", texto) {
         match n.trim().parse() {
             Ok(v) => {
                 conf.max = v;
-                socket_write_str(fd, &format!("ask: máx {v} tokens\n"));
+                socket_reply(fd, &format!("ask: máx {v} tokens\n"));
             }
-            Err(_) => socket_write_str(fd, "ask: :max necesita un número\n"),
+            Err(_) => socket_reply(fd, "ask: :max necesita un número\n"),
         }
         return 0;
     }
@@ -463,7 +474,7 @@ fn tratar_linea_askd(
     let tokens = chat::render(plantilla, texto, &ses.bundle.tokenizer);
     let vocab = ses.bundle.rt.manifest.vocab_size;
     if let Some(t) = tokens.iter().find(|&&t| t >= vocab) {
-        socket_write_str(
+        socket_reply(
             fd,
             &format!(
                 "ask: este modelo sólo entiende {vocab} tokens y el texto usa el {t}\n"
@@ -472,7 +483,21 @@ fn tratar_linea_askd(
         return 1;
     }
     let mut sampler = Sampler::new(conf.temp, conf.top_p, conf.seed);
-    println!("askd: generando (máx {})", conf.max);
+    println!(
+        "askd: generando ({} tokens de contexto, máx {})",
+        tokens.len(),
+        conf.max
+    );
+    socket_write_str(
+        fd,
+        &format!(
+            "ask: generando ({} tokens de contexto, máx {})…\n",
+            tokens.len(),
+            conf.max
+        ),
+    );
+    ses.bundle.source.disable_worker();
+    let _ = sys::sleep_ms(1);
     let rc = generar_tokens(
         ses,
         &tokens,

@@ -5,6 +5,8 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
+use std::thread;
+use std::time::Duration;
 
 use crate::package_live;
 
@@ -327,7 +329,7 @@ pub(crate) fn expand_models_leave_install(dev: &Path, install_reserve_sectors: u
 }
 
 /// Crea p4 SOSOINSTALL en los últimos `install_sectors` del disco.
-pub(crate) fn create_install_partition_tail(dev: &Path, install_sectors: u64) -> Option<String> {
+pub(crate) fn create_install_partition_tail(dev: &Path, install_sectors: u64) {
     run_cmd(
         Command::new("sgdisk")
             .arg("-n")
@@ -339,7 +341,44 @@ pub(crate) fn create_install_partition_tail(dev: &Path, install_sectors: u64) ->
             .arg(dev),
         "sgdisk part4",
     );
-    install_partition_node(dev, 4)
+}
+
+/// Reubica la GPT de respaldo al final del disco (pendrives > tamaño de soso-live.img).
+pub(crate) fn repair_gpt_backup(dev: &Path) {
+    run_cmd(
+        Command::new("sgdisk").arg("-e").arg(dev),
+        "sgdisk repair",
+    );
+}
+
+/// Espera a que exista el nodo de bloque de una partición tras sgdisk.
+pub(crate) fn wait_install_partition(disk: &Path, num: u32) -> Option<String> {
+    for attempt in 0..24 {
+        refresh_partition_table(disk);
+        if let Some(node) = install_partition_node(disk, num) {
+            return Some(node);
+        }
+        if attempt == 12 {
+            eprintln!(
+                "flash-usb-live: esperando nodo p{num} en {}…",
+                disk.display()
+            );
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    None
+}
+
+/// Tras `sgdisk`, el kernel puede tardar en crear `/dev/sdX4`.
+pub(crate) fn refresh_partition_table(dev: &Path) {
+    let dev_s = dev.to_string_lossy();
+    let _ = Command::new("partprobe").arg(dev).status();
+    let _ = Command::new("partx").args(["-u", &*dev_s]).status();
+    let _ = Command::new("blockdev")
+        .args(["--rereadpt"])
+        .arg(dev)
+        .status();
+    let _ = Command::new("sync").status();
 }
 
 pub(crate) fn install_partition_node(disk: &Path, num: u32) -> Option<String> {
