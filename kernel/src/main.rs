@@ -14,6 +14,7 @@ mod net;
 mod qemu;
 mod som_import;
 mod task;
+mod version;
 
 #[cfg(feature = "lxdde")]
 mod lxdde;
@@ -43,7 +44,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // deshabilitado; cualquier instrucción XMM antes de esto falla.
     arch::sse::enable();
 
-    println!("soso 0.1");
+    println!("soso {} ({})", version::version(), version::build());
 
     // Copiar RSDP y framebuffer antes de que mm::init tome boot_info.
     let rsdp = match boot_info.rsdp_addr {
@@ -134,10 +135,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         drivers::fatlog::init();
         drivers::drvlog::init();
         drivers::bootreq::init();
+        drivers::updslot::init();
         drivers::wificonf::init();
     }
     println!("boot: kbd");
     drivers::kbd::init();
+    drivers::mouse::init();
+    #[cfg(feature = "drv-hda")]
+    {
+        println!("boot: hda");
+        drivers::hda::init();
+    }
     // Antes que lxdde: el bring-up GSP pide sus blobs por VFS
     // (`lx_request_firmware` → `/lib/firmware/…`) y sin montar falla en fw_loading.
     println!("boot: fs");
@@ -169,10 +177,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         drivers::nvidia_probe::init();
         drivers::nvidia_compute::init();
     }
-    // Sondeo del Realtek: aún no da red, sólo identifica el chip para el
-    // bring-up (ver drivers/rtl8169.rs).
     #[cfg(feature = "drv-rtl8169")]
-    drivers::rtl8169::probe();
+    let _ = drivers::rtl8169::init();
     println!("boot: red");
     net::init();
     #[cfg(feature = "lxdde")]

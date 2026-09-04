@@ -43,14 +43,18 @@ soso/
 
 ### Syscalls principales
 
-`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo` (+ GPU, TCP, hilos)
+`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo` (+ GPU, TCP, hilos, WiFi)
 
 - **Instalación:** `disk_list=37`, `disk_read=38`, `disk_write=39` (raw, 512 B/LBA; `raw_disk` solo deja escribir NVMe y nunca el disco de arranque), `bootreq_write=41` / `bootreq_read=42` (único camino a la ESP del disco live, y solo al fichero pre-creado `SOSOBOOT.TXT`)
+- **Actualización:** `version=67`, `upd_write=68`, `upd_read=69` (huecos ESP `SOSOUPD.TXT` + `SOSOKRN.BIN`; ver `drivers/updslot.rs` y boot-shim `actualiza.rs`)
+- **Framebuffer / entrada:** `fb_info=62`, `fb_set_mode=63`, `fb_present=64`, `input_poll=65` (modo gráfico userspace; ratón PS/2 aux)
+- **WiFi:** `wifi_scan=56`, `wifi_status=57`, `wifi_connect=58` (structs `WifiBss`/`WifiStatus`; `psk_len=0` = red abierta); sosh builtin `wifi scan|status|connect`
 
 - **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`; hijos heredan cwd del padre
+- **Señales (mínimo):** SIGINT/SIGKILL/SIGTERM vía `kill`; grupos con `setpgid`/`setsid`/`tcsetpgrp`; Ctrl-C (ISIG) al grupo en primer plano de la consola. Sin handlers (`sigaction`). El líder de sesión en el prompt recibe `-EINTR` en `read` en vez de morir
 - **Escritura:** `open(O_WRONLY)` → buffer en kernel; `create_file` en sosofs al `close()`
 - **Rutas:** `task/path.rs` resuelve relativas contra `Process.cwd` (default `/`)
-- Sin signals ni permisos Unix
+- Sin permisos Unix
 
 ### Key subsystems
 
@@ -83,11 +87,13 @@ soso/
 | Binary | Role |
 |--------|------|
 | `/bin/init` | PID 1: spawns sosh, relaunches on crash; `init test` = syscall regression suite |
-| `/bin/sosh` | Shell: pipes, redirecciones, builtins `cd`/`pwd`/`help`/`exit`/`ask` |
+| `/bin/sosh` | Shell: pipes, redirecciones, builtins `cd`/`pwd`/`help`/`exit`/`wifi`/`ask` |
 | `/bin/soso-llm` | Inferencia LLM sobre modelos en `/models/`; subcomando `ask` (texto crudo, silencioso, REPL) |
 | `/bin/soso-hf` | Descarga GGUF desde Hugging Face Hub → import atómico a `/models/` (`pull`/`search`/`list`) |
 | `/bin/ask-modelo` | Fija el modelo de `ask` en `/etc/llm.conf` |
 | `/bin/soso-install` | Instalador nativo desde el live: guardas por tipo de partición, clon, `gptdisk::relayout` + GUID nuevos, y petición de entrada UEFI |
+| `/bin/soso-update` | Actualiza rootfs y kernel desde GitHub Releases (`comprobar`/`aplicar`/`revertir`); buzón `SOSOUPD.TXT` + hueco `SOSOKRN.BIN` en ESP |
+| `/bin/soso-web` | Navegador mínimo: HTTPS + HTML→texto (modo lectura) o framebuffer (modo `--grafico`) |
 | `/bin/{ls,cat,echo,mkdir,rm,hexdump,halt}` | Coreutils |
 
 `libsoso`: crt0, syscall wrappers, mini-libstd (256 KiB heap arena), `linea::Lector`
@@ -109,10 +115,11 @@ sesión SSH de quien lo lanzó. Kernel: `tcp_connect(127.0.0.1:port)` empareja c
 NIC loopback (`kernel/src/net/loopback.rs`). `soso-llm run` no usa askd (carga en
 frío). Config en `/etc/llm.conf`, que **no fija modelo por defecto**: se
 usa el primero de `/models`, y el empaquetado live (`package-usb-live` /
-`flash-usb-live`) pone el modelo demo delante de `tiny` sintético — al flashear
-elige el mejor GGUF llama que quepa (tinyllama → mistral-7b → mixtral →
-llama2-70b según tamaño del USB). Las imágenes de prueba QEMU siguen con
-`synthetic tiny`. Fijar un nombre ahí lo hereda toda imagen que se genere, y avisa en cada respuesta si no viaja
+`flash-usb-live`) pone el modelo demo delante de `tiny` sintético — sin
+pendrive `package-usb-live` usa **qwen3.8-27b**; al flashear elige el mejor
+GGUF que quepa (tinyllama → mistral-7b → qwen3.8-27b en 32 GB+). Las imágenes
+de prueba QEMU siguen con `synthetic tiny`. Fijar un nombre ahí lo hereda
+toda imagen que se genere, y avisa en cada respuesta si no viaja
 con ella — por eso `ask-modelo` escribe el fichero en el disco de la máquina, no en el
 árbol. `:eco <texto>` se resuelve antes de leer nada: devuelve el texto tal cual llegó
 y es lo que hace verificable el camino crudo (`ask :eco a|b>c "x"`).
@@ -123,6 +130,24 @@ en askd (con SMP el worker no pone `done`). `Runtime::layer_hook` emite un
 punto por capa para que el cliente no corte a los 4 min de silencio. Si no hay
 pool de VRAM (`pool VRAM=no`), Mixtral va a CPU: avisa y sugiere `:modelo tiny`.
 
+**Voz / ASR** (`user/soso-voz/`, cliente en `user/sosh`): demonio `vozd` en
+`127.0.0.1:7421` (molde de askd). Protocolo: `:escucha [ms]`, `:wav <ruta>`,
+`:modelo`, `:modelos` → stream terminado en `0xFF`. Runtime en
+`soso-llm-core/src/asr.rs`; DSP en `crates/soso-audio`. Captura por
+`SYS_AUDIO_*` (59–61) y driver Intel HDA (`drv-hda`, `kernel/src/drivers/hda.rs`).
+Config `/etc/voz.conf`. **Nunca autoejecutar**: sosh inserta la transcripción en
+la línea; Enter confirma. F4 = push-to-talk (byte `0x12` en `linea.rs`).
+Modelo ASR en sosomfs (`tiny-asr` sintético o `SOSO_ASR_DIR` / `convert-whisper`).
+
+**Navegador soso-web** (`user/soso-web/`, parser en `crates/soso-web-core/`):
+modo lectura (HTTPS + reflow HTML a texto en consola/SSH) y modo `--grafico`
+(framebuffer + ratón). Sin JavaScript. Cliente HTTPS vía `soso-http` +
+`TcpTransport` sobre syscalls de red. Modo lectura: `soso-web <url>` o
+`soso-web --local /ruta.html`; navegación `<n>` enlace, `u URL`, `b`, `q`.
+Modo gráfico: `soso-web --grafico <url>` (syscalls FB + `input_poll`, TTF en
+`/lib/fonts/DejaVuSans.ttf` vía fontdue, `--fuente` para otra ruta). Prueba local: `/etc/web-prueba.html`. Tests host: `cargo test -p soso-web-core`;
+E2E: paso `soso-web: HTML local` en `cargo xtask test`.
+
 **Cargar un segundo modelo en el mismo proceso** destapó que `StagingWorker::spawned`
 era por instancia: el hilo de staging y `STAGE` son del proceso, así que arrancaba un
 segundo worker y reseteaba `generation` (que el vivo leía como kick) → dos hilos sobre
@@ -130,12 +155,13 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 
 ## Network & SSH
 
-- smoltcp TCP/IPv4 + cliente DHCPv4 en kernel; fallback estático 10.0.2.15/24 solo con virtio-net/e1000e (no en WiFi)
+- smoltcp TCP/IPv4 + cliente DHCPv4 en kernel; fallback estático 10.0.2.15/24 solo con virtio-net/e1000e (no en WiFi ni en rtl8169 de placa)
 - **Loopback userspace:** `tcp_connect(127.0.0.1:port)` → par de búferes kernel contra un `tcp_listen` del mismo puerto (sin paquetes ni iface loopback); multi-accept; `EADDRINUSE` / `ECONNREFUSED`. Cerrar un extremo = EOF en el otro (`tcp_is_connected` mira `peer_closed`); si no, `read_timeout` devolvía EAGAIN para siempre y sosh se quedaba colgada cuando askd moría. Cerrar un extremo = EOF en el otro (`tcp_is_connected` mira `peer_closed`); si no, `read_timeout` devolvía EAGAIN para siempre y sosh se quedaba colgada cuando askd moría
-- **WiFi (lxdde/iwlwifi):** Intel AX211 (`8086:7f70/51f0/54f0`); driver first-party en `lxdde/ports/iwlwifi/` (TLV fw, context-info gen3, MVM scan/assoc/TX); mini-supplicant WPA2 EAPOL en `net/wifi_wpa.rs`; backend `NicDev::LxWifi`; credenciales `SOSOWIFI.TXT` (ESP live) o `/etc/wifi.conf`; DHCP tras asociación (sin fallback slirp); kshell `wifi scan|status|connect`
-- **Live USB:** perfil `live-usb` = virtio + nvme + usb + live-disk + **e1000e** + nouveau + iwlwifi (`SOSO_LXDDE_MODE=nouveau,iwlwifi`); SSH :22 tras lease DHCP. El `e1000e` nativo se inicializa salvo que el puerto lxdde `e1000e` lleve ese mismo chip (`if !modes.e1000e` en main.rs) — gatearlo también por `modes.iwlwifi`, como estaba, dejaba la ethernet muerta en el live, donde el iwlwifi siempre está activo
+- **WiFi (lxdde/iwlwifi):** Intel AX211 (`8086:7f70/51f0/54f0`, context-info gen3, firmware `so-a0-gf-a0` + pnvm) y AX200 (`8086:2723`, context-info gen2, firmware `cc-a0`, sin pnvm); driver first-party en `lxdde/ports/iwlwifi/` (TLV fw, MVM scan/assoc/TX); mini-supplicant WPA2 EAPOL en `net/wifi_wpa.rs`; backend `NicDev::LxWifi` (prioridad si ya está asociado; si no, ethernet primero); credenciales `SOSOWIFI.TXT` (ESP live) o `/etc/wifi.conf`; DHCP tras asociación (sin fallback slirp); sosh `wifi scan|status|connect`; kshell `wifi scan|status|connect`
+- **Ethernet Realtek:** `drv-rtl8169` nativo (`drivers/rtl8169.rs`) según Linux `r8169`; PCI `10ec:8168/8161/8162/8167/8136`; anillos DMA + PHY (PHYAR o GPHY OCP); backend `NicDev::Rtl8169`; DHCP real, sin 10.0.2.x
+- **Live USB:** perfil `live-usb` = virtio + nvme + usb + live-disk + **e1000e** + **rtl8169** (Realtek `10ec:8168`, Linux r8169) + nouveau + iwlwifi (`SOSO_LXDDE_MODE=nouveau,iwlwifi`); SSH :22 tras lease DHCP. El `e1000e` nativo se inicializa salvo que el puerto lxdde `e1000e` lleve ese mismo chip (`if !modes.e1000e` en main.rs) — gatearlo también por `modes.iwlwifi`, como estaba, dejaba la ethernet muerta en el live, donde el iwlwifi siempre está activo
 - **hwscan:** `registry.rs` emite **una línea por dispositivo PCI**, con driver o sin él: `drv: <bdf> <vid>:<did> <driver> <compilado|ausente|desconocido> clase <cc>:<ss>:<pi> <texto>`, y destaca al final cada controlador de red (clase `02`) que nadie reclama (`hwscan: RED SIN DRIVER …`). Se imprime en **todos** los arranques; antes sólo salía si faltaba un driver *conocido*, o sea que el hardware sin regla —el que hay que diagnosticar— no dejaba rastro. Los cuatro primeros campos son contrato: `xtask::drivers::parse_hwscan_line` los lee por posición
-- **Drivers modulares:** features Cargo `drv-virtio-blk`, `drv-virtio-net`, `drv-e1000e`, `drv-nvme`, `drv-usb`, `drv-gpu-nvidia`, `drv-live-disk`; meta `drv-all` (default). Metadatos PCI en `drivers/registry.rs`; `hwscan` en kshell; informe en `SOSODRV.TXT` (ESP live). Host: `SOSO_DRIVERS=qemu|live-usb|all` o `--drivers`; `cargo xtask fit-drivers <informe>` reempaqueta; `cargo xtask driver-add <git-url>` registra ports lxdde externos en `lxdde/ports-extern/`
+- **Drivers modulares:** features Cargo `drv-virtio-blk`, `drv-virtio-net`, `drv-e1000e`, `drv-rtl8169`, `drv-nvme`, `drv-usb`, `drv-gpu-nvidia`, `drv-live-disk`; meta `drv-all` (default). Metadatos PCI en `drivers/registry.rs`; `hwscan` en kshell; informe en `SOSODRV.TXT` (ESP live). Host: `SOSO_DRIVERS=qemu|live-usb|all` o `--drivers`; `cargo xtask fit-drivers <informe>` reempaqueta; `cargo xtask driver-add <git-url>` registra ports lxdde externos en `lxdde/ports-extern/`
 - **Enganche de la pila:** `net::attach_now()` sondea backends y monta smoltcp; `net::try_attach()` es la versión limitada a un intento/segundo que llama `poll()`. La distinción importa: `poll()` entra por cada vuelta del bucle ocioso y por cada tick, y mientras no haya NIC el sondeo se repetía entero — en placa real, sin virtio-net, eso era una reenumeración del ECAM y un «net: no se encontró ningún virtio-net» por vuelta, que parecía un cuelgue del live (2026-08-31). Las sondas de dispositivo (`virtio_net::init`) cachean su resultado con `Once`
 - NIC polled (no IRQ-driven RX)
 - sunset: curve25519 + ed25519 + chacha20-poly1305
@@ -204,7 +230,7 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
     propiedad que hay que afirmar es el **número de sondeos** (`sondeos()`,
     sólo en host). Validado por sabotaje: anular `desindexar` dispara el test
     con «10 aciertos han costado 225 sondeos».
-- Ficheros `.som` con cabecera común (magic+crc+versión+payload_len, `pack_som`/`parse_som` en sosomodel): `manifest.som` (v4: tabla `LayerSpec` por capa — `AttnKind` Gqa/Mla/Kda, `FfnKind` Dense/Moe/LatentMoe, overrides MLA/MoE; v3: MoE global `num_experts`, `num_experts_per_tok`, `moe_ffn_dim`; v2: GQA `num_kv_heads`, `rope_theta`, `rms_eps`; parse v1–v3 sintetiza layers uniformes), `index.som` (shape `[filas,columnas]` row-major, dtype F32/Q8_0/Q4_K), `tokenizer.som` (vocabulario SentencePiece-ish, opcional), shards `.tensor`
+- Ficheros `.som` con cabecera común (magic+crc+versión+payload_len, `pack_som`/`parse_som` en sosomodel): `manifest.som` (v4: tabla `LayerSpec` por capa — `AttnKind` Gqa/Mla/Kda/Gated/Gdn, `FfnKind` Dense/Moe/LatentMoe, overrides MLA/MoE/Qwen; v3: MoE global `num_experts`, `num_experts_per_tok`, `moe_ffn_dim`; v2: GQA `num_kv_heads`, `rope_theta`, `rms_eps`; parse v1–v3 sintetiza layers uniformes), `index.som` (shape `[filas,columnas]` row-major, dtype F32/Q8_0/Q4_K), `tokenizer.som` (vocabulario SentencePiece-ish, opcional), shards `.tensor`
 - **MoE (Mixtral-style, manifest v3):** `num_experts > 0` activa `forward_moe_ffn` en `layer.rs`: router `L{i}.ffn_gate_inp` → `topk_softmax` → SwiGLU por experto `L{i}.E{e}.ffn_{gate,up,down}` (un shard `.tensor` por tensor); prefetch de capa solo attn+router; expertos fríos vía `plan.rs::touch_moe_experts` + `source.prefetch_shards`; `keep_all_shards_after` retiene cache LRU de expertos calientes junto al working set de capas
 - Runtime (`soso-llm-core`): llama denso o **MoE** — RoPE, GQA, **Wo (`attn_output`)**, SwiGLU (`ffn_gate` opcional o por experto), `output_norm`, Q8_0 y Q4_K (layout GGML passthrough, matvec fusionado); pesos zero-copy (`TensorView` sobre mmap), KV en `kv.rs` (f16 o int8 KIVI-lite), sampling temp/top-p (`sample.rs`), streaming (`generate_stream` / `generate_stream_planned` + `StreamDecoder`); buffers reutilizados (`LayerScratch`, incl. `router`/`moe_acc` en MoE) — libsoso libera solo bloques ≥1 MiB (mmap anónimo), no reservar por token
 - **Planificador de recursos** (`plan.rs` + `ResourcePlanner`): lee `SYS_MEMINFO`, presupuesto de pesos (70 % libre+reclaimable), **split trunk-first** (tronco pin+anillo antes que caché MoE; presets `auto|tight|balanced|max-pin`), clasificación genérica `trunk|routed_expert|always_resident`, EWMA por capa/destino, replanifica cada 8 tokens; elige `KvDtype`, H2O y sparse según presión; **pin prefix + anillo 1–2 slots** (`pinned_layers`, `ring_slots`); **cache LRU de expertos MoE** con telemetría resident vs JIT; **prefetch MoE especulativo** (`last_experts`); **staging AirLLM** (`stage.rs` kick/wait + `stage_wait_ms`); **feedback I/O-bound** (`io_bound` si `stage_wait` ≫ matvec+attn → preferir remoto, mantener anillo=2; cap double-buffer si 2×capa > RAM libre → `prefetch_single_buffered`; embed oversized → gather-only `embed_gather_only`); stats `trunk_hits/misses`, `trunk_bytes_read`, `moe_resident_hits`, `moe_jit_hits`; **offload GPU trunk-first + pool MoE** (atención/router/FFN denso/Sxx pinneados por capa; expertos `Lxx.Eyy` en pool LRU de VRAM con tamaño on-device Q4_K/Q8_0, no ×8 f32)
@@ -238,6 +264,7 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 | Packed trunk por capa (`Lxx.trunk.tensor`) | kimi-k3-in-c pack | `gguf2som --pack-trunk`, offsets en `index.som` |
 | True-resident hits (tronco/MoE) | kimi-k3-in-c telemetría | `plan.rs` stats, líneas `soso-llm` |
 | Arquitecturas MLA/KDA/LatentMoE/shared/MXFP4 | Kimi K3 | `arch.rs`, `manifest.rs` v4, `mkmodel-soso --attn/--ffn-kind/--shared-experts`; MLA cache latente en `kv.rs` + `attention_decode_mla_latent` |
+| Gated attn + Gated DeltaNet (Qwen3.5/3.8) | Qwen3.8 | `arch.rs` `forward_gated_attn`/`forward_gdn_attn`, `AttnKind::Gated/Gdn`, `gguf2som` arch `qwen35`/`qwen38`; KV recurrente O(1) en `LayerKv::gdn_s` |
 | Shard cache lock (staging ∥ compute) | — | `source.rs::CacheLock` (TOCTOU-safe insert), `staging.rs` wait en release |
 | Offload GPU trunk-first + pool MoE | — | `plan.rs` pack `TRUNK_GPU_PROJ` + `gpu_experts`, VRAM Q4_K crudo |
 
@@ -245,8 +272,8 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 - **SIMD**: userspace compila con target propio `user/x86_64-soso-user.json` (SSE..AVX2+FMA, build-std); kernels AVX2 en `gemm.rs::avx2` con dispatch por `target_feature` (escalar = referencia para tests). **Estado FPU**: el kernel preserva x87/XMM/YMM con **xsave64** (`arch/fpu.rs`; fxsave NO basta — pierde las mitades altas YMM entre procesos): timer_isr guarda a `TIMER_FPU` antes de net::poll, `timer_tick` lo copia a `Process.fpu` al desalojar, `schedule_inner` restaura al reanudar, el page fault handler preserva en `mmap_fault_shim`; syscalls no preservan (los wrappers de libsoso llevan `clobber_abi("C")`). `init test` estresa YMM con dos hijos "fpu" concurrentes
 - Harness rápido de calidad en host: `cargo run --release -p soso-llm-core --features std --example hostrun -- <modelo-dir> "<prompt>" <n>` (velocidad nativa, SOSO_DEBUG=1 para estadísticas por capa)
 - `Runtime::validate_shapes()` comprueba index↔manifest antes de inferir
-- Host: `cargo xtask convert-gguf` (GGUF **llama** o **deepseek2** MLA → `.som` v4; `--pack-trunk` empaqueta attn+FFN por capa; trocea `ffn_*_exps` por experto; `ffn_*_shexp` → `Sxx` con `num_shared_experts`), `mkfs-sosomfs` (multi-modelo: `mkfs-sosomfs dir1 dir2 … imagen.img`), `mkmodel-soso` (`tiny` denso + `--moe` → `tiny-moe` + `--attn mla` → `tiny-mla` + `--moe --ffn-kind latent-moe` → `tiny-latent-moe` en imagen por defecto; flags `--attn mla|kda`, `--ffn-kind latent-moe`, `--shared-experts`, `--pack-trunk`, …). Offload GPU userspace: F32/Q8_0/Q4_K/**MXFP4** dequant-on-upload en `user/soso-llm/src/gpu.rs`
-- Tests host arquitecturas: `cargo test -p soso-llm-core --features std --test arch_ext` (MLA/LatentMoE/shared/MXFP4)
+- Host: `cargo xtask convert-gguf` (GGUF **llama**, **deepseek2** MLA o **qwen35/qwen38** → `.som` v4; `--pack-trunk` empaqueta attn+FFN por capa; trocea `ffn_*_exps` por experto; `ffn_*_shexp` → `Sxx` con `num_shared_experts`; Qwen: capas `attn_q` → Gated, el resto GDN; GGUF `blk.N.post_attention_norm` → `Lxx.ffn_norm`, aborta si falta), `mkfs-sosomfs` (multi-modelo: `mkfs-sosomfs dir1 dir2 … imagen.img`), `mkmodel-soso` (`tiny` denso + `--moe` → `tiny-moe` + `--attn mla` → `tiny-mla` + `--moe --ffn-kind latent-moe` → `tiny-latent-moe` en imagen por defecto; flags `--attn mla|kda`, `--ffn-kind latent-moe`, `--shared-experts`, `--pack-trunk`, …). Offload GPU userspace: F32/Q8_0/Q4_K/**MXFP4** dequant-on-upload en `user/soso-llm/src/gpu.rs`
+- Tests host arquitecturas: `cargo test -p soso-llm-core --features std --test arch_ext` (MLA/LatentMoE/shared/MXFP4/Gated/GDN)
 - Tests host MoE: `cargo test -p soso-llm-core --features std --test moe`
 - `SOSO_MODELS_DIR=<dir> cargo xtask run` empaqueta un modelo propio en vez de tiny
 - Userspace: `soso-llm run <modelo> --prompt <texto>` vía mmap + greedy decode; mmap pagina bajo demanda (`handle_mmap_fault` — ojo: `map_page` toma `FRAME_ALLOC`, no llamarla con ese lock tomado)
@@ -293,7 +320,9 @@ el asignador DMA del kernel no libera, y uno por comando tiraba a la basura tant
 memoria como datos movidos.
 
 Verificación: `cargo xtask test-install` (3 arranques OVMF, incluye un NVMe falso con
-swap/ESP que el instalador debe rechazar).
+swap/ESP que el instalador debe rechazar). `cargo xtask test-update` (actualización
+local con release en `/var/actualiza-prueba`). Versión: fichero `VERSION` en la raíz
+del repo → `/etc/soso-release` + banner del kernel (`SOSO_VERSION`/`SOSO_BUILD`).
 
 ## Hilos de usuario: nadie los recoge
 
@@ -376,4 +405,4 @@ tráfico, pero son la misma clase de bug.
 
 ## Out of scope (by design)
 
-Multi-user, permissions, SFTP, IPv6, fork, signals, snapshots/compression in sosofs.
+Multi-user, permissions, SFTP, IPv6, fork, sigaction/handlers, snapshots/compression in sosofs.

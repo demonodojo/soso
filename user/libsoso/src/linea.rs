@@ -22,6 +22,7 @@
 use alloc::string::String;
 
 use crate::sys;
+use soso_abi as abi;
 
 /// Tope de línea. El kernel admite hasta 3000 bytes de argumentos
 /// (`spawn_console_io`), así que 1024 caben de sobra incluso con el prefijo que
@@ -35,6 +36,11 @@ pub struct Lector {
     /// El último byte fue un `\r`: si viene un `\n` detrás es el mismo salto.
     cr_previo: bool,
     eco: bool,
+    /// Texto insertado antes de leer (p. ej. tras dictado por voz).
+    prefijo: Option<String>,
+    prefijo_i: usize,
+    /// Push-to-talk: F4 → transcripción insertada en la línea.
+    hook_ptt: Option<fn() -> Option<String>>,
 }
 
 impl Default for Lector {
@@ -50,6 +56,36 @@ impl Lector {
             len: 0,
             cr_previo: false,
             eco: true,
+            prefijo: None,
+            prefijo_i: 0,
+            hook_ptt: None,
+        }
+    }
+
+    pub fn con_hook_ptt(mut self, hook: fn() -> Option<String>) -> Lector {
+        self.hook_ptt = Some(hook);
+        self
+    }
+
+    pub fn con_texto_inicial(mut self, texto: &str) -> Lector {
+        self.prefijo = Some(String::from(texto));
+        self.prefijo_i = 0;
+        self
+    }
+
+    fn inyectar_prefijo(&mut self) {
+        let Some(ref p) = self.prefijo else { return };
+        while self.prefijo_i < p.len() && self.len < self.linea.len() {
+            let b = p.as_bytes()[self.prefijo_i];
+            self.linea[self.len] = b;
+            self.len += 1;
+            self.prefijo_i += 1;
+            if self.eco {
+                let _ = sys::write_all(1, &[b]);
+            }
+        }
+        if self.prefijo_i >= p.len() {
+            self.prefijo = None;
         }
     }
 
@@ -64,9 +100,15 @@ impl Lector {
     /// REPL. Una línea que no sea UTF-8 válido se descarta con aviso y se
     /// espera a la siguiente.
     pub fn siguiente(&mut self) -> Option<String> {
+        self.inyectar_prefijo();
         loop {
             let mut byte = [0u8; 1];
             let n = sys::read(0, &mut byte);
+            if n == -(abi::EINTR as i64) {
+                self.len = 0;
+                self.eco_str("^C\n");
+                continue;
+            }
             if n < 0 {
                 return None;
             }
@@ -95,6 +137,22 @@ impl Lector {
                     }
                 }
                 0x08 | 0x7f => self.borrar_caracter(),
+                // F4 (keymap) → push-to-talk
+                0x12 => {
+                    if let Some(hook) = self.hook_ptt {
+                        if let Some(texto) = hook() {
+                            for b in texto.bytes() {
+                                if self.len < self.linea.len() {
+                                    self.linea[self.len] = b;
+                                    self.len += 1;
+                                    if self.eco {
+                                        let _ = sys::write_all(1, &[b]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 _ if c >= 0x20 => {
                     if self.len < self.linea.len() {
                         self.linea[self.len] = c;

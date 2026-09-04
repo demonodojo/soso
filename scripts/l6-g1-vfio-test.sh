@@ -510,6 +510,9 @@ if [[ "$booted" == 1 ]]; then
   # tarjeta en un estado del que sólo se sale reseteando el equipo), así que sin
   # esto el ciclo probaría G4e y el armado de G4f, pero ni saxpy ni matvec. Y un
   # ciclo de VFIO cuesta cerrar la sesión gráfica: conviene que pruebe todo.
+  if [[ -z "${SOSO_G1_CMD:-}" && "${SOSO_G1_ASR:-1}" == "1" ]]; then
+    SOSO_G1_CMD=$'soso-voz dictar --wav /etc/voz-prueba.wav --max-tokens 128'
+  fi
   if [[ -n "${SOSO_G1_CMD:-}" ]]; then
     echo "soso arriba — carga de trabajo por SSH:"
     printf '  %s\n' "${SOSO_G1_CMD}"
@@ -526,6 +529,10 @@ if [[ "$booted" == 1 ]]; then
     if ! tr -d '\r' <"$cmdlog" | grep -qF -- "$primer"; then
       echo "AVISO: la carga NO llegó al guest (sosh no hizo eco de '${primer}')." >&2
       echo "       El ciclo probó el bring-up, pero ni saxpy ni matvec." >&2
+    fi
+    if [[ "${SOSO_G1_ASR:-1}" == "1" ]] &&
+       tr -d '\r' <"$cmdlog" | grep -Eq 'soso-voz: transcrito —[[:space:]]*$'; then
+      echo "AVISO: ASR VFIO devolvió transcripción vacía (prueba --max-tokens 128)." >&2
     fi
   fi
   echo "pidiendo halt por SSH para que apague el GSP"

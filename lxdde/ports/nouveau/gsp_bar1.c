@@ -196,7 +196,7 @@ static int vram_wr64_verify(uint64_t addr, uint64_t val, const char *que)
 #define BAR_INST_STATUS    0xb80f50u
 #define BAR_INST_ENABLE    0x80000000u
 
-int gsp_bar1_inst_probe(struct gsp_bar1 *b, uint64_t *pdb_out, uint64_t *limit_out)
+int gsp_bar1_inst_probe(const struct gsp_bar1 *b, uint64_t *pdb_out, uint64_t *limit_out)
 {
     uint32_t reg, st;
     uint64_t inst, pdb, limit;

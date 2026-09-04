@@ -103,7 +103,26 @@ impl Console {
             Console::Ssh => crate::net::ssh::tx_push(data),
         }
     }
+
+    fn fg_pgid(self) -> u64 {
+        match self {
+            Console::Serial => FG_SERIAL.load(Ordering::Relaxed),
+            Console::Ssh => FG_SSH.load(Ordering::Relaxed),
+        }
+    }
+
+    fn set_fg_pgid(self, pgid: u64) {
+        match self {
+            Console::Serial => FG_SERIAL.store(pgid, Ordering::Relaxed),
+            Console::Ssh => FG_SSH.store(pgid, Ordering::Relaxed),
+        }
+    }
 }
+
+static FG_SERIAL: AtomicU64 = AtomicU64::new(1);
+static FG_SSH: AtomicU64 = AtomicU64::new(0);
+static SERIAL_SIGINT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Contexto de usuario para reanudar con iretq. El orden de los 15
 /// registros coincide con los push del timer_isr (memoria ascendente).
@@ -183,6 +202,14 @@ pub struct Process {
     /// marca Zombie todavía (evitar UAF del AddrSpace); el timer del
     /// owner_cpu lo convierte en Zombie al desalojar.
     pub kill_pending: bool,
+    /// Código de salida cuando `kill_pending` se materializa.
+    pub kill_code: u8,
+    /// Si es true, al morir el proceso pasa a huérfano (`parent = 0`).
+    /// Solo el teardown SSH lo pide; las señales no.
+    pub kill_orphan: bool,
+    /// Grupo de procesos y sesión (job control mínimo).
+    pub pgid: u64,
+    pub sid: u64,
 }
 
 pub static PROCS: Mutex<Vec<Process>> = Mutex::new(Vec::new());
@@ -210,6 +237,11 @@ pub fn exists(pid: u64) -> bool {
     PROCS.lock().iter().any(|p| p.pid == pid && !matches!(p.state, State::Zombie(_)))
 }
 
+/// IRQ teclado: Ctrl-C en consola serie (entrega diferida en el scheduler).
+pub fn note_serial_sigint() {
+    SERIAL_SIGINT.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Marca un proceso para morir (cliente SSH desconectado). No libera su
 /// espacio aquí. Si está `Running` en un core, solo pone `kill_pending`
 /// para que ese core lo convierta en Zombie al desalojar (marcar Zombie
@@ -217,18 +249,182 @@ pub fn exists(pid: u64) -> bool {
 /// core → UAF).
 pub fn kill_pid(pid: u64) {
     let mut procs = PROCS.lock();
+    deliver_death(&mut procs, pid, 255, true);
+}
+
+/// Tras `spawn_console` por SSH: nueva sesión y primer plano en esa consola.
+pub fn session_leader(pid: u64, console: Console) {
+    let mut procs = PROCS.lock();
     if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
-        p.parent = 0;
-        if matches!(p.state, State::Zombie(_)) {
-            return;
+        p.sid = pid;
+        p.pgid = pid;
+    }
+    console.set_fg_pgid(pid);
+}
+
+fn valid_signal(sig: u64) -> Option<u8> {
+    match sig {
+        soso_abi::SIGINT | soso_abi::SIGKILL | soso_abi::SIGTERM => Some(sig as u8),
+        _ => None,
+    }
+}
+
+fn signal_ignored(pid: u64, sig: u8) -> bool {
+    pid == 1 && (sig == soso_abi::SIGINT as u8 || sig == soso_abi::SIGTERM as u8)
+}
+
+/// Entrega una señal a un proceso concreto. Devuelve true si tuvo efecto
+/// (incluido ignorada en PID 1).
+fn signal_one(procs: &mut Vec<Process>, pid: u64, sig: u8) -> bool {
+    if signal_ignored(pid, sig) {
+        return true;
+    }
+    let Some(idx) = procs.iter().position(|p| p.pid == pid) else {
+        return false;
+    };
+    if matches!(procs[idx].state, State::Zombie(_)) {
+        return false;
+    }
+    if sig == soso_abi::SIGKILL as u8 {
+        deliver_death(procs, pid, soso_abi::exit_by_signal(sig), false);
+        return true;
+    }
+    if sig == soso_abi::SIGINT as u8 || sig == soso_abi::SIGTERM as u8 {
+        if matches!(procs[idx].state, State::WaitingTty { .. })
+            && procs[idx].pgid == procs[idx].sid
+        {
+            procs[idx].ctx.rax = (-soso_abi::EINTR) as u64;
+            procs[idx].state = State::Runnable;
+            return true;
         }
-        if p.state == State::Running {
-            p.kill_pending = true;
-        } else {
-            p.state = State::Zombie(255);
-            p.kill_pending = false;
+        deliver_death(procs, pid, soso_abi::exit_by_signal(sig), false);
+        return true;
+    }
+    false
+}
+
+fn signal_pgid(procs: &mut Vec<Process>, pgid: u64, sig: u8) -> u32 {
+    let pids: Vec<u64> = procs
+        .iter()
+        .filter(|p| p.pgid == pgid && !matches!(p.state, State::Zombie(_)))
+        .map(|p| p.pid)
+        .collect();
+    let mut n = 0u32;
+    for pid in pids {
+        if signal_one(procs, pid, sig) {
+            n += 1;
         }
     }
+    n
+}
+
+pub fn signal_console(console: Console, sig: u8) {
+    let pgid = console.fg_pgid();
+    if pgid == 0 {
+        return;
+    }
+    let mut procs = PROCS.lock();
+    signal_pgid(&mut procs, pgid, sig);
+}
+
+fn deliver_death(procs: &mut Vec<Process>, pid: u64, code: u8, orphan: bool) {
+    let Some(idx) = procs.iter().position(|p| p.pid == pid) else {
+        return;
+    };
+    if matches!(procs[idx].state, State::Zombie(_)) {
+        return;
+    }
+    if orphan {
+        procs[idx].parent = 0;
+    }
+    if procs[idx].state == State::Running {
+        procs[idx].kill_pending = true;
+        procs[idx].kill_code = code;
+        procs[idx].kill_orphan = orphan;
+        return;
+    }
+    let parent = procs[idx].parent;
+    if let Some(pi) = procs
+        .iter()
+        .position(|p| p.pid == parent && matches!(p.state, State::WaitingChild))
+    {
+        procs[pi].state = State::Runnable;
+        procs[pi].ctx.rax = wait_pack(pid, code);
+        procs.remove(idx);
+    } else {
+        procs[idx].state = State::Zombie(code);
+        procs[idx].kill_pending = false;
+        procs[idx].kill_orphan = false;
+    }
+}
+
+fn poll_pending_tty_signals(procs: &mut Vec<Process>) {
+    if SERIAL_SIGINT.swap(false, core::sync::atomic::Ordering::Relaxed) {
+        let pgid = Console::Serial.fg_pgid();
+        if pgid != 0 {
+            signal_pgid(procs, pgid, soso_abi::SIGINT as u8);
+        }
+    }
+}
+
+pub fn kill_target(pid: i64, sig: u64) -> Result<u32, i64> {
+    let Some(sig) = valid_signal(sig) else {
+        return Err(-soso_abi::EINVAL);
+    };
+    let me = current_pid();
+    let mut procs = PROCS.lock();
+    let n = if pid > 0 {
+        u32::from(signal_one(&mut procs, pid as u64, sig))
+    } else if pid == 0 {
+        let pgid = procs.iter().find(|p| p.pid == me).map(|p| p.pgid).unwrap_or(0);
+        signal_pgid(&mut procs, pgid, sig)
+    } else {
+        signal_pgid(&mut procs, pid.unsigned_abs(), sig)
+    };
+    if n == 0 {
+        Err(-soso_abi::ESRCH)
+    } else {
+        Ok(n)
+    }
+}
+
+pub fn setpgid(pid: u64, pgid: u64) -> Result<(), i64> {
+    if pgid == 0 {
+        return Err(-soso_abi::EINVAL);
+    }
+    let target = if pid == 0 { current_pid() } else { pid };
+    let mut procs = PROCS.lock();
+    let Some(p) = procs.iter_mut().find(|p| p.pid == target) else {
+        return Err(-soso_abi::ESRCH);
+    };
+    if matches!(p.state, State::Zombie(_)) {
+        return Err(-soso_abi::ESRCH);
+    }
+    p.pgid = pgid;
+    Ok(())
+}
+
+pub fn setsid() -> Result<u64, i64> {
+    let me = current_pid();
+    let mut procs = PROCS.lock();
+    let Some(p) = procs.iter_mut().find(|p| p.pid == me) else {
+        return Err(-soso_abi::ESRCH);
+    };
+    if p.sid == me {
+        return Ok(me);
+    }
+    p.sid = me;
+    p.pgid = me;
+    Ok(me)
+}
+
+pub fn tcsetpgrp(pgid: u64) -> Result<(), i64> {
+    if pgid == 0 {
+        return Err(-soso_abi::EINVAL);
+    }
+    let console = with_current(|p| p.console);
+    console.set_fg_pgid(pgid);
+    Ok(())
 }
 
 /// Ejecuta `f` con el proceso actual. Panica si no hay proceso actual.
@@ -513,6 +709,14 @@ pub fn spawn_console_io(
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| String::from("/"))
     };
+    let (parent_pgid, parent_sid) = {
+        let procs = PROCS.lock();
+        procs
+            .iter()
+            .find(|p| p.pid == parent)
+            .map(|p| (p.pgid, p.sid))
+            .unwrap_or((0, 0))
+    };
     let data = {
         let ino = crate::vfs::resolve(path).map_err(crate::task::syscall::fs_errno)?;
         crate::vfs::read_file(ino).map_err(crate::task::syscall::fs_errno)?
@@ -521,6 +725,11 @@ pub fn spawn_console_io(
     match spawn_into(&space, &data, args) {
         Ok((ctx, brk)) => {
             let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+            let (pgid, sid) = if parent == 0 {
+                (pid, pid)
+            } else {
+                (parent_pgid, parent_sid)
+            };
             let mut fds = vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)];
             for (slot, fd) in stdio_fds.into_iter().enumerate() {
                 if let Some(f) = fd {
@@ -541,6 +750,10 @@ pub fn spawn_console_io(
                 cwd,
                 fpu: crate::arch::fpu::FpuArea::inicial(),
                 kill_pending: false,
+                kill_code: 255,
+                kill_orphan: false,
+                pgid,
+                sid,
             });
             crate::arch::apic::kick_idle_cpus();
             Ok(pid)
@@ -563,7 +776,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64) -> Result<u64, i64> {
     if parent == 0 {
         return Err(-abi::EINVAL);
     }
-    let (space, console, cwd, brk, brk_min, name) = with_current(|p| {
+    let (space, console, cwd, brk, brk_min, name, pgid, sid) = with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::ENOMEM)?.clone();
         Ok::<_, i64>((
             space,
@@ -572,6 +785,8 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64) -> Result<u64, i64> {
             p.brk,
             p.brk_min,
             p.name.clone(),
+            p.pgid,
+            p.sid,
         ))
     })?;
     let tid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
@@ -600,6 +815,10 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64) -> Result<u64, i64> {
         cwd,
         fpu: crate::arch::fpu::FpuArea::inicial(),
         kill_pending: false,
+        kill_code: 255,
+        kill_orphan: false,
+        pgid,
+        sid,
     });
     crate::arch::apic::kick_idle_cpus();
     Ok(tid)
@@ -797,7 +1016,9 @@ extern "C" fn schedule_inner() -> ! {
         let now = crate::arch::pit::uptime_ms();
         let mut procs = PROCS.lock();
 
-        // Recoger zombis huérfanos (p. ej. shell de una sesión SSH que el
+        poll_pending_tty_signals(&mut procs);
+
+        // Recoger zombis huérfanos
         // cliente cerró). No liberar el AddrSpace si el pid sigue en
         // ejecución en algún core (race kill_pid → UAF).
         if procs.iter().any(|p| p.parent == 0 && matches!(p.state, State::Zombie(_))) {
@@ -1300,8 +1521,8 @@ fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
         remaining().store(TIMESLICE_TICKS, Ordering::Relaxed);
         return 0;
     }
-    if let Some(p) = procs.iter_mut().find(|p| p.pid == cur) {
-        p.ctx = Context {
+    if let Some(idx) = procs.iter().position(|p| p.pid == cur) {
+        procs[idx].ctx = Context {
             r15: f.r15,
             r14: f.r14,
             r13: f.r13,
@@ -1322,20 +1543,41 @@ fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
             rflags: f.rflags,
         };
         if bsp_fpu {
-            p.fpu = unsafe { (*(&raw const crate::arch::fpu::TIMER_FPU)).clone() };
+            procs[idx].fpu =
+                unsafe { (*(&raw const crate::arch::fpu::TIMER_FPU)).clone() };
         } else {
-            p.fpu = unsafe {
+            procs[idx].fpu = unsafe {
                 (*(crate::arch::percpu::fpu_scratch_ptr() as *const crate::arch::fpu::FpuArea))
                     .clone()
             };
         }
-        if p.kill_pending || matches!(p.state, State::Zombie(_)) {
-            p.kill_pending = false;
-            p.parent = 0;
-            p.state = State::Zombie(255);
+        if procs[idx].kill_pending || matches!(procs[idx].state, State::Zombie(_)) {
+            let code = if procs[idx].kill_pending {
+                procs[idx].kill_code
+            } else if let State::Zombie(c) = procs[idx].state {
+                c
+            } else {
+                255
+            };
+            let orphan = procs[idx].kill_orphan;
+            let pid = procs[idx].pid;
+            let parent = procs[idx].parent;
+            procs[idx].kill_pending = false;
+            procs[idx].kill_orphan = false;
+            if orphan {
+                procs[idx].parent = 0;
+            }
+            if let Some(pi) = procs.iter().position(|p| {
+                p.pid == parent && matches!(p.state, State::WaitingChild)
+            }) {
+                procs[pi].state = State::Runnable;
+                procs[pi].ctx.rax = wait_pack(pid, code);
+                procs.remove(idx);
+            } else {
+                procs[idx].state = State::Zombie(code);
+            }
         } else {
-            // Solo Running → Runnable; no tocar Waiting*/Sleeping.
-            p.state = State::Runnable;
+            procs[idx].state = State::Runnable;
         }
     }
     crate::arch::percpu::set_current_pid(0);

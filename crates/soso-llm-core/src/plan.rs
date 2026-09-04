@@ -456,8 +456,10 @@ pub fn kv_bytes_per_token(manifest: &Manifest) -> u64 {
         if spec.attn_kind == AttnKind::Mla && spec.kv_lora_rank > 0 {
             // Un vector latente c_kv por token (f16).
             total += spec.kv_lora_rank as u64 * 2;
+        } else if spec.attn_kind == AttnKind::Gdn {
+            // Estado recurrente O(1), no crece con la secuencia.
         } else {
-            let head_dim = manifest.hidden_dim as u64 / manifest.effective_num_heads(layer) as u64;
+            let head_dim = manifest.effective_head_dim(layer) as u64;
             let kv_dim = manifest.effective_num_kv_heads(layer) as u64 * head_dim;
             total += kv_dim * 2 * 2;
         }
@@ -1138,6 +1140,7 @@ impl ResourcePlanner {
                 self.remote_available,
                 self.remote_degraded,
                 self.layer_ms_cpu.get(layer as usize).copied().unwrap_or(0.0),
+                self.layer_ms_gpu.get(layer as usize).copied().unwrap_or(0.0),
                 self.layer_ms_remote.get(layer as usize).copied().unwrap_or(0.0),
                 self.remote_rtt_ms,
                 self.io_bound,
@@ -1292,6 +1295,7 @@ fn choose_dest(
     remote_available: bool,
     remote_degraded: bool,
     cpu_ms: f64,
+    gpu_ms: f64,
     remote_layer_ms: f64,
     remote_rtt_ms: f64,
     io_bound: bool,
@@ -1303,15 +1307,27 @@ fn choose_dest(
         if model_bytes > weight_budget.saturating_mul(2) && remote_rtt_ms < REMOTE_SLOW_MS {
             return ExecDest::Remote;
         }
-        // I/O-bound: el peer remoto evita lecturas locales de disco.
         if io_bound && remote_rtt_ms < REMOTE_SLOW_MS {
             return ExecDest::Remote;
         }
     }
-    if vram_free > 0 {
-        return ExecDest::Gpu;
+    if vram_free == 0 {
+        return ExecDest::Cpu;
     }
-    ExecDest::Cpu
+    if gpu_ms > 0.0 && cpu_ms > 0.0 {
+        if gpu_ms <= cpu_ms * 0.8 {
+            return ExecDest::Gpu;
+        }
+        if cpu_ms <= gpu_ms * 0.8 {
+            return ExecDest::Cpu;
+        }
+        return if gpu_ms <= cpu_ms {
+            ExecDest::Gpu
+        } else {
+            ExecDest::Cpu
+        };
+    }
+    ExecDest::Gpu
 }
 
 #[cfg(test)]

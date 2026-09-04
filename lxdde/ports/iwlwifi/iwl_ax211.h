@@ -19,6 +19,8 @@ struct lx_pci_dev;
 struct iwl_ax211_priv {
     struct lx_pci_dev *pdev;
     volatile uint32_t *mmio;
+    uint16_t device_id;
+    int gen3;
     uint8_t mac[6];
     int alive;
     int probed;
@@ -42,6 +44,19 @@ struct iwl_ax211_priv {
     uint64_t tr_tail;
     void *mtr_cpu;
     void *mcr_cpu;
+
+    void *rx_bd_cpu;
+    void *used_bd_cpu;
+    void *rx_page_cpu;
+    volatile uint16_t *rb_stts;
+    uint64_t rx_bd_dma;
+    uint64_t used_bd_dma;
+    uint64_t rx_page_dma;
+    uint64_t rb_stts_dma;
+    uint16_t rx_read;
+    uint16_t rx_write;
+    uint16_t cmd_write;
+    uint16_t cmd_qid;
 
     struct iwl_ax211_tfd tfd[256];
     uint16_t mtr_write;

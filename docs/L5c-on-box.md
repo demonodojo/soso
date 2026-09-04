@@ -97,7 +97,7 @@ El disco NVMe/SSD con Linux **no se toca**.
 ./scripts/l6-pack-firmware.sh
 
 # Imagen live con perfil live-usb (nouveau + drv-gpu-nvidia + firmware Ampere y Blackwell)
-cargo xtask package-usb-live          # TinyLlama (sin medir pendrive)
+cargo xtask package-usb-live          # Qwen3.8-27B (sin medir pendrive)
 # o flashear midiendo el stick (elige el mejor modelo que quepa):
 sudo cargo xtask flash-usb-live /dev/sdX --yes
 
@@ -125,10 +125,10 @@ sudo ./scripts/l6-wifi-vfio-test.sh
 |----------|--------|
 | 8 GB | `tinyllama` |
 | 16 GB | `mistral-7b` |
-| 32 GB | `mixtral` |
-| 64 GB+ | `llama2-70b` |
+| 32 GB+ | `qwen3.8-27b` |
 
-Simular sin pendrive: `SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live`.
+Sin pendrive: `cargo xtask package-usb-live` empaqueta **qwen3.8-27b**.
+Simular otro tamaño: `SOSO_LIVE_CAPACITY=16G cargo xtask package-usb-live`.
 Sin descargas HF: `SOSO_LIVE_OFFLINE=1` — elige el mayor modelo ya en `target/*-model/` que quepa (al flashear mide el stick).
 Override: `SOSO_MODELS_DIR=…`. En placa, `ask` o `soso-llm run <modelo> --prompt "hola" --max 32 --chat`.
 
@@ -170,8 +170,31 @@ Si en vez de eso sale `offload GPU desactivado — subida de pesos`, es otra cos
 el camino de subida falló con pool disponible (2026-08-17 era el techo de 16 MiB
 de la syscall, ya quitado).
 
+### Planificador GPU/CPU por operación (OpSched)
+
+Desde la fase L6c, ASR y LLM eligen CPU o GPU **por operación**, no con reglas
+fijas:
+
+- **`OpSched`** (`crates/soso-llm-core/src/sched.rs`): estima coste GPU vs CPU
+  (`gpu_fixed_ns`, `gpu_ns_per_mac`, `cpu_ns_per_mac`) con histéresis 0.8 y
+  exploración 1/64. Calibración inicial en `SysGpu::calibrar()` al arrancar
+  `soso-voz` / `soso-llm` con GPU.
+- **ASR**: conv1/conv2, cross-K/V y proyecciones del encoder usan **matmul
+  batched** (`MATMF` en kernel) en lugar de un matvec por frame (~34k → ~30
+  lanzamientos GSP). Perfil en `soso-voz --perfil` / `AsrProfile::format_phase_summary`.
+- **LLM**: `choose_dest` en `plan.rs` compara EWMA `layer_ms_cpu` vs
+  `layer_ms_gpu` en lugar de `vram_free > 0 → Gpu`.
+- **Nuevas ops GPU**: `MATMF` (matmul), `SOFTM`, `LNORM`, `BATCH` (lote matvec),
+  `SYS_GPU_WAIT` (fence async). Pushbuffer ampliado a 64 KiB.
+
 ```bash
-# Modelo tiny por defecto; modelos grandes:
+# Perfil ASR en host
+cargo run --release -p soso-llm-core --features std --example asrrun -- \
+  target/tiny-asr-model /ruta/voz.wav 3
+# stderr: asr encode gpu_ns=… cpu_ns=… cross_kv …
+```
+
+```bash
 # SOSO_MODELS_DIR=/ruta/al/modelo SOSO_MODELS_SIZE=32G cargo xtask package-usb-live
 
 cargo xtask package-usb-live

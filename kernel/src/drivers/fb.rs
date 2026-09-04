@@ -7,8 +7,10 @@
 use alloc::vec::Vec;
 use bootloader_api::info::{FrameBufferInfo, PixelFormat};
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicBool, Ordering};
 use font8x8::legacy::{BASIC_LEGACY, LATIN_LEGACY};
 use spin::Mutex;
+use soso_abi::{FbInfo, FB_FMT_BGR, FB_FMT_RGB, FB_FMT_U8};
 
 const CELL_SPACE: u16 = b' ' as u16;
 
@@ -121,6 +123,7 @@ struct FbState {
 unsafe impl Send for FbState {}
 
 static FB: Mutex<Option<FbState>> = Mutex::new(None);
+static GRAPHICS_MODE: AtomicBool = AtomicBool::new(false);
 
 const COLS: usize = 240;
 const ROWS: usize = 135;
@@ -520,6 +523,9 @@ pub unsafe fn force_unlock() {
 }
 
 pub fn write_bytes(s: &[u8]) {
+    if graphics_mode() {
+        return;
+    }
     let mut guard = FB.lock();
     let Some(st) = guard.as_mut() else {
         return;
@@ -550,4 +556,57 @@ impl Write for FbWriter {
         write_bytes(s.as_bytes());
         Ok(())
     }
+}
+
+pub fn set_graphics_mode(on: bool) {
+    GRAPHICS_MODE.store(on, Ordering::Relaxed);
+    if !on {
+        let mut guard = FB.lock();
+        if let Some(st) = guard.as_mut() {
+            erase_cursor(st);
+            draw_cursor(st);
+        }
+    }
+}
+
+pub fn graphics_mode() -> bool {
+    GRAPHICS_MODE.load(Ordering::Relaxed)
+}
+
+fn pixel_format_tag(fmt: PixelFormat) -> u8 {
+    match fmt {
+        PixelFormat::Rgb => FB_FMT_RGB,
+        PixelFormat::Bgr => FB_FMT_BGR,
+        PixelFormat::U8 => FB_FMT_U8,
+        _ => FB_FMT_RGB,
+    }
+}
+
+pub fn user_info(out: &mut FbInfo) -> bool {
+    let guard = FB.lock();
+    let Some(st) = guard.as_ref() else {
+        *out = FbInfo::default();
+        return false;
+    };
+    out.present = 1;
+    out.pixel_format = pixel_format_tag(st.info.pixel_format);
+    out.bytes_per_pixel = st.info.bytes_per_pixel as u8;
+    out.width = st.info.width as u32;
+    out.height = st.info.height as u32;
+    out.stride = st.info.stride as u32;
+    out.byte_len = st.info.byte_len as u64;
+    true
+}
+
+/// Copia un búfer de píxeles (mismo tamaño que `byte_len`) al framebuffer físico.
+pub fn present_from_user(buf: &[u8]) -> Result<(), ()> {
+    let mut guard = FB.lock();
+    let Some(st) = guard.as_mut() else {
+        return Err(());
+    };
+    let want = st.info.byte_len.min(buf.len());
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), st.ptr, want);
+    }
+    Ok(())
 }

@@ -7,3 +7,7 @@ license = "GPL-2.0-only"
 [dependencies]
 bootloader = "0.11.15"
 serde_json = "1"
+chrono = "0.4"
+soso-abi = { path = "../crates/soso-abi" }
+soso-update-core = { path = "../crates/soso-update-core", features = ["std"] }
+sha2 = "0.10"

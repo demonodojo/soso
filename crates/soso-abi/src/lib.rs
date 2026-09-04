@@ -61,8 +61,151 @@ pub const SYS_SOM_SCRATCH_ALLOC: u64 = 47;
 pub const SYS_SOM_SCRATCH_WRITE: u64 = 48;
 pub const SYS_SOM_SCRATCH_READ: u64 = 49;
 pub const SYS_SOM_SCRATCH_FREE: u64 = 50;
+pub const SYS_GETPID: u64 = 51;
+pub const SYS_KILL: u64 = 52;
+pub const SYS_SETPGID: u64 = 53;
+pub const SYS_SETSID: u64 = 54;
+pub const SYS_TCSETPGRP: u64 = 55;
+/// Escanea redes WiFi (`out: *mut WifiBss`, `max`). Devuelve el número de BSS.
+pub const SYS_WIFI_SCAN: u64 = 56;
+/// Estado del adaptador WiFi (`out: *mut WifiStatus`).
+pub const SYS_WIFI_STATUS: u64 = 57;
+/// Asocia a una red: `(ssid_ptr, ssid_len, psk_ptr, psk_len)`. `psk_len=0` = abierta.
+pub const SYS_WIFI_CONNECT: u64 = 58;
+/// Abre captura de audio: `(format_ptr)` → fd lógico 0 si ok.
+pub const SYS_AUDIO_OPEN: u64 = 59;
+/// Lee PCM: `(buf, len, overrun_ptr)` → bytes leídos; `overrun_ptr` recibe 0/1.
+pub const SYS_AUDIO_READ: u64 = 60;
+/// Cierra captura de audio.
+pub const SYS_AUDIO_CLOSE: u64 = 61;
+/// Información del framebuffer GOP.
+pub const SYS_FB_INFO: u64 = 62;
+/// Modo consola (0) o gráfico userspace (1): cede la consola de texto.
+pub const SYS_FB_SET_MODE: u64 = 63;
+/// Copia un búfer de píxeles al framebuffer físico.
+pub const SYS_FB_PRESENT: u64 = 64;
+/// Lee eventos de ratón/teclado pendientes.
+pub const SYS_INPUT_POLL: u64 = 65;
+/// Espera a que termine un QMD encolado con `GPU_SUBMIT_ASYNC` (arg1 = fence).
+pub const SYS_GPU_WAIT: u64 = 66;
+/// Copia la versión del kernel a un buffer de usuario (`buf`, `len`). Devuelve bytes escritos.
+pub const SYS_VERSION: u64 = 67;
+/// Escribe en el hueco de actualización de la ESP: `(which, offset, buf, len)`.
+/// `which`: `UPD_WHICH_MAILBOX` o `UPD_WHICH_KERNEL`. Offset múltiplo de 512.
+pub const SYS_UPD_WRITE: u64 = 68;
+/// Lee del hueco: `(which, offset, buf, len)`. Devuelve bytes leídos.
+pub const SYS_UPD_READ: u64 = 69;
+
+pub const UPD_WHICH_MAILBOX: u64 = 0;
+pub const UPD_WHICH_KERNEL: u64 = 1;
+pub const UPD_MAILBOX_SIZE: usize = 4096;
+pub const UPD_KERNEL_SLOT_SIZE: u64 = 64 * 1024 * 1024;
 /// Tamaño fijo de `SOSOBOOT.TXT`.
 pub const BOOTREQ_SIZE: usize = 4096;
+
+pub const WIFI_SSID_MAX: usize = 32;
+pub const WIFI_PSK_MAX: usize = 63;
+pub const WIFI_SCAN_MAX: usize = 32;
+pub const WIFI_PHASE_MAX: usize = 48;
+pub const WIFI_FLAG_PRESENT: u32 = 1;
+pub const WIFI_FLAG_ALIVE: u32 = 2;
+pub const WIFI_FLAG_CONNECTED: u32 = 4;
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct WifiBss {
+    pub ssid: [u8; WIFI_SSID_MAX],
+    pub ssid_len: u8,
+    pub bssid: [u8; 6],
+    pub rssi: i8,
+    pub channel: u8,
+    pub open: u8,
+    pub _pad: u8,
+}
+
+impl Default for WifiBss {
+    fn default() -> Self {
+        Self {
+            ssid: [0; WIFI_SSID_MAX],
+            ssid_len: 0,
+            bssid: [0; 6],
+            rssi: 0,
+            channel: 0,
+            open: 0,
+            _pad: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct WifiStatus {
+    pub flags: u32,
+    pub mac: [u8; 6],
+    pub _pad: u16,
+    pub phase: [u8; WIFI_PHASE_MAX],
+}
+
+impl Default for WifiStatus {
+    fn default() -> Self {
+        Self {
+            flags: 0,
+            mac: [0; 6],
+            _pad: 0,
+            phase: [0; WIFI_PHASE_MAX],
+        }
+    }
+}
+
+// ---- framebuffer ----
+
+pub const FB_FMT_RGB: u8 = 0;
+pub const FB_FMT_BGR: u8 = 1;
+pub const FB_FMT_U8: u8 = 2;
+
+pub const FB_MODE_CONSOLE: u64 = 0;
+pub const FB_MODE_GRAPHICS: u64 = 1;
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct FbInfo {
+    pub present: u8,
+    pub pixel_format: u8,
+    pub bytes_per_pixel: u8,
+    pub _pad: u8,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub byte_len: u64,
+}
+
+// ---- entrada (ratón / teclado) ----
+
+pub const INPUT_MOUSE_MOVE: u32 = 0;
+pub const INPUT_MOUSE_BTN: u32 = 1;
+pub const INPUT_KEY: u32 = 2;
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct InputEvent {
+    pub kind: u32,
+    pub x: i32,
+    pub y: i32,
+    pub button: u32,
+    pub key: u32,
+    pub pressed: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Formato de captura para `SYS_AUDIO_OPEN`.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct AudioFormat {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub bits_per_sample: u16,
+    pub _pad: u32,
+}
 
 /// Bits del valor que devuelve `SYS_GPU_SUBMIT` para SAXPY/MATVF.
 ///
@@ -74,6 +217,8 @@ pub const BOOTREQ_SIZE: usize = 4096;
 /// cuenta creyendo que no se había hecho nada.
 pub const GPU_SUBMIT_ON_GPU: u64 = 1 << 32;
 pub const GPU_SUBMIT_COMPUTED: u64 = 1 << 33;
+pub const GPU_SUBMIT_ASYNC: u64 = 1 << 34;
+pub const GPU_SUBMIT_FENCE_MASK: u64 = 0xffff;
 pub const SYS_PIPE: u64 = 21;
 pub const SYS_SPAWN_IO: u64 = 22;
 pub const SYS_CHDIR: u64 = 23;
@@ -91,6 +236,17 @@ pub const SYS_READ_TIMEOUT: u64 = 32;
 /// Operaciones de `SYS_FUTEX` (arg `op`).
 pub const FUTEX_WAIT: u64 = 0;
 pub const FUTEX_WAKE: u64 = 1;
+
+// ---- señales (modelo mínimo) ----
+
+pub const SIGINT: u64 = 2;
+pub const SIGKILL: u64 = 9;
+pub const SIGTERM: u64 = 15;
+
+/// Código de salida por señal: 128 + número de señal.
+pub const fn exit_by_signal(sig: u8) -> u8 {
+    128 + sig
+}
 
 // ---- mmap ----
 
@@ -240,6 +396,8 @@ pub struct DiskInfo {
 // ---- errnos (el kernel devuelve -errno) ----
 
 pub const ENOENT: i64 = 2;
+pub const ESRCH: i64 = 3;
+pub const EINTR: i64 = 4;
 pub const EIO: i64 = 5;
 pub const EBADF: i64 = 9;
 pub const ECHILD: i64 = 10;

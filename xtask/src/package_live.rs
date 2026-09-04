@@ -38,7 +38,7 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     print_profile_summary(&profile);
 
     super::build_user();
-    let _ = super::build_image_with_profile(&profile);
+    let _ = super::build_image_with_profile(&profile, true);
 
     let uefi = root.join("target/soso-uefi.img");
     let mut data = super::mkfs_rootfs_with_profile(true, &profile);
@@ -73,7 +73,15 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     std::fs::create_dir_all(&out_dir).expect("usb-live dir");
     let live = out_dir.join("soso-live.img");
 
-    std::fs::write(&live, vec![0u8; total as usize]).expect("truncate live img");
+    {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&live)
+            .expect("live img");
+        f.set_len(total).expect("truncate live img");
+    }
 
     run_cmd(
         Command::new("dd")
@@ -148,10 +156,12 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     );
 
     // Log del kernel, informe hwscan y buzón para el instalador → shim UEFI.
-    create_esp_file(&live, &out_dir, b"SOSOLOG ", b"TXT", 256 * 1024);
-    create_esp_file(&live, &out_dir, b"SOSODRV ", b"TXT", 16 * 1024);
-    create_esp_file(&live, &out_dir, b"SOSOBOOT", b"TXT", 4096);
-    create_esp_file(&live, &out_dir, b"SOSOWIFI", b"TXT", 4096);
+    create_esp_file(&live, b"SOSOLOG ", b"TXT", 256 * 1024);
+    create_esp_file(&live, b"SOSODRV ", b"TXT", 16 * 1024);
+    create_esp_file(&live, b"SOSOBOOT", b"TXT", 4096);
+    create_esp_file(&live, b"SOSOWIFI", b"TXT", 4096);
+    create_esp_file(&live, b"SOSOUPD ", b"TXT", 4096);
+    create_esp_file(&live, b"SOSOKRN ", b"BIN", 64 * 1024 * 1024);
 
     write_flash(
         &out_dir,
@@ -245,11 +255,12 @@ fn resolve_live_models(
         );
         chosen
     } else {
+        let chosen = live_models::default_live_spec();
         println!(
             "package-usb-live: sin capacidad USB → {}",
-            live_models::CATALOG[0].name
+            chosen.name
         );
-        live_models::CATALOG[0]
+        chosen
     };
 
     if live_models::offline_mode() {
@@ -443,7 +454,7 @@ fn write_flash(
         .unwrap_or_default();
     let model_demo = format!(
         "Modelo demo empaquetado: `{}` (Q4_K_M). También `tiny` sintético.\n\
-         Escalera automática al flashear: tinyllama → mistral-7b → mixtral → llama2-70b.",
+         Escalera automática al flashear: tinyllama → mistral-7b → qwen3.8-27b (32 GB+).",
         selection.llm_name
     );
     let body = format!(
@@ -555,16 +566,14 @@ fn chrono_now() -> String {
 /// El kernel no sabe crear ficheros FAT: `drivers/espfat.rs` solo localiza y
 /// sobrescribe sectores de un fichero que ya existe y no está fragmentado. Por
 /// eso el hueco se reserva aquí, en el empaquetado.
-fn create_esp_file(live: &Path, out_dir: &Path, name: &[u8; 8], ext: &[u8; 3], size: usize) {
+fn create_esp_file(live: &Path, name: &[u8; 8], ext: &[u8; 3], size: usize) {
     let p1_start = partition_first_sector(live, 1).expect("part1 lba");
     let label = format!(
         "{}.{}",
         String::from_utf8_lossy(name).trim_end(),
         String::from_utf8_lossy(ext)
     );
-    let template = out_dir.join(format!("{}-template.bin", label.replace('.', "-")));
-    std::fs::write(&template, vec![b'\n'; size]).expect("plantilla ESP");
-    let data = std::fs::read(&template).expect("read template");
+    let data = vec![b'\n'; size];
     if let Err(e) = crate::fat32_write::write_root_file(live, p1_start, name, ext, &data) {
         eprintln!("package-usb-live: aviso: no pude crear {label}: {e}");
         eprintln!("package-usb-live: regenera con espacio libre en la ESP");

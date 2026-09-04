@@ -1,4 +1,4 @@
-//! Pila de red: smoltcp sobre e1000e, virtio-net o WiFi AX211.
+//! Pila de red: smoltcp sobre e1000e, virtio-net, rtl8169 o WiFi Intel (AX211/AX200).
 //! DHCP al arrancar en backends cableados; en WiFi sólo tras asociación.
 //! Fallback 10.0.2.x únicamente en QEMU (virtio/e1000e).
 
@@ -25,6 +25,8 @@ use spin::{Mutex, Once};
 use crate::drivers::e1000e;
 #[cfg(feature = "drv-e1000e")]
 use device::E1000Dev;
+#[cfg(feature = "drv-rtl8169")]
+use crate::drivers::rtl8169;
 #[cfg(feature = "drv-virtio-net")]
 use crate::drivers::virtio_net;
 
@@ -67,6 +69,16 @@ fn now() -> Instant {
 
 fn net_backend() -> Option<([u8; 6], NicDev, BackendKind)> {
     #[cfg(feature = "lxdde")]
+    if crate::lxdde::wifi_present()
+        && crate::lxdde::wifi_alive()
+        && crate::lxdde::wifi_connected()
+    {
+        if let Some(mac) = crate::lxdde::wifi_mac() {
+            println!("net: backend lx-wifi (Intel AX211/AX200)");
+            return Some((mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi));
+        }
+    }
+    #[cfg(feature = "lxdde")]
     if crate::lxdde::e1000e_present() {
         let mac = crate::lxdde::e1000e_mac()?;
         println!("net: backend lx-e1000e");
@@ -78,10 +90,16 @@ fn net_backend() -> Option<([u8; 6], NicDev, BackendKind)> {
         println!("net: backend e1000e");
         return Some((mac, NicDev::E1000e(E1000Dev), BackendKind::Wired));
     }
+    #[cfg(feature = "drv-rtl8169")]
+    if rtl8169::present() {
+        let mac = rtl8169::mac()?;
+        println!("net: backend rtl8169");
+        return Some((mac, NicDev::Rtl8169(device::Rtl8169Dev), BackendKind::Wired));
+    }
     #[cfg(feature = "lxdde")]
     if crate::lxdde::wifi_present() && crate::lxdde::wifi_alive() {
         if let Some(mac) = crate::lxdde::wifi_mac() {
-            println!("net: backend lx-wifi (Intel AX211)");
+            println!("net: backend lx-wifi (Intel AX211/AX200)");
             return Some((mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi));
         }
     }
@@ -344,10 +362,11 @@ fn try_static_fallback(
     iface: &mut Interface,
     mac: [u8; 6],
     backend: BackendKind,
+    dev: &NicDev,
     dhcp_started: Instant,
     configured: &mut bool,
 ) {
-    if backend == BackendKind::Wifi {
+    if backend == BackendKind::Wifi || !dev.fallback_slirp() {
         return;
     }
     if *configured || now() < dhcp_started + DHCP_TIMEOUT {
@@ -427,7 +446,7 @@ pub fn poll() {
     iface.poll(now(), dev, sockets);
     if *dhcp_enabled {
         poll_dhcp(iface, sockets, echo, *ssh, *dhcp, configured);
-        try_static_fallback(iface, *mac, *backend, *dhcp_started, configured);
+        try_static_fallback(iface, *mac, *backend, dev, *dhcp_started, configured);
     }
     poll_tcp_services(sockets, echo, *ssh, *configured);
     poll_user_tcp(iface, sockets, user_tcp, *configured);

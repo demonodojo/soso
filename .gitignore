@@ -10,6 +10,7 @@
 
 # Claves SSH generadas o inyectadas por mkfs-soso / xtask
 /rootfs/etc/authorized_key
+/rootfs/etc/soso-release
 /rootfs/etc/ssh_host_key
 
 # Configuración local de Claude Code

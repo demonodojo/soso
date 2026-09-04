@@ -20,7 +20,7 @@
 #define GSP_CHAN_GPFIFO_ENTRIES  4096u
 #define GSP_CHAN_GPFIFO_SIZE     (GSP_CHAN_GPFIFO_ENTRIES * NVC56F_GP_ENTRY__SIZE)
 #define GSP_CHAN_USERD_SIZE      4096u
-#define GSP_CHAN_PB_SIZE         4096u
+#define GSP_CHAN_PB_SIZE         65536u
 #define GSP_CHAN_NOTIFIER_SIZE   4096u
 /* Tope de cordura para lo que RM conteste como tamaño del method buffer. */
 #define GSP_CHAN_MTHDBUF_MAX     (1u << 20)

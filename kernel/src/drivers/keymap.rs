@@ -68,11 +68,12 @@ pub enum KeyOutput {
     None,
 }
 
-/// Estado del traductor (shift, altgr, tecla muerta).
+/// Estado del traductor (shift, altgr, ctrl, tecla muerta).
 pub struct KeymapState {
     shift: bool,
     caps: bool,
     altgr: bool,
+    ctrl: bool,
     dead: Option<Dead>,
     /// Tras un acento no combinable, queda la tecla siguiente por emitir.
     pending: Option<char>,
@@ -84,6 +85,7 @@ impl KeymapState {
             shift: false,
             caps: false,
             altgr: false,
+            ctrl: false,
             dead: None,
             pending: None,
         }
@@ -95,6 +97,14 @@ impl KeymapState {
 
     pub fn altgr_press(&mut self, down: bool) {
         self.altgr = down;
+    }
+
+    pub fn ctrl_press(&mut self, down: bool) {
+        self.ctrl = down;
+    }
+
+    pub fn ctrl(&self) -> bool {
+        self.ctrl
     }
 
     pub fn caps_toggle(&mut self) {
@@ -205,6 +215,8 @@ impl KeymapState {
             0x0E => KeyOutput::Byte(0x08),
             0x0F => KeyOutput::Byte(b'\t'),
             0x1C => KeyOutput::Byte(b'\n'),
+            // F4 → push-to-talk (PTT) en sosh
+            0x3E => KeyOutput::Byte(0x12),
             _ => KeyOutput::None,
         }
     }
@@ -300,6 +312,7 @@ impl KeymapState {
             0x0E => KeyOutput::Byte(0x08),
             0x0F => KeyOutput::Byte(b'\t'),
             0x1C => KeyOutput::Byte(b'\n'),
+            0x3E => KeyOutput::Byte(0x12),
             _ => KeyOutput::None,
         }
     }

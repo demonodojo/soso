@@ -160,6 +160,26 @@ pub fn wait() -> Result<(u64, u8), i64> {
     if v < 0 { Err(v) } else { Ok(abi::wait_decode(v)) }
 }
 
+pub fn getpid() -> u64 {
+    syscall1(abi::SYS_GETPID, 0) as u64
+}
+
+pub fn kill(pid: i64, sig: u64) -> i64 {
+    syscall4(abi::SYS_KILL, pid as u64, sig, 0, 0)
+}
+
+pub fn setpgid(pid: u64, pgid: u64) -> i64 {
+    syscall4(abi::SYS_SETPGID, pid, pgid, 0, 0)
+}
+
+pub fn setsid() -> i64 {
+    syscall1(abi::SYS_SETSID, 0)
+}
+
+pub fn tcsetpgrp(pgid: u64) -> i64 {
+    syscall1(abi::SYS_TCSETPGRP, pgid)
+}
+
 pub fn sbrk(delta: i64) -> i64 {
     syscall1(abi::SYS_SBRK, delta as u64)
 }
@@ -211,6 +231,10 @@ pub fn gpu_free(handle: u64) -> i64 {
 
 pub fn gpu_submit(cmd: &[u8]) -> i64 {
     syscall4(abi::SYS_GPU_SUBMIT, cmd.as_ptr() as u64, cmd.len() as u64, 0, 0)
+}
+
+pub fn gpu_wait(fence: u64) -> i64 {
+    syscall1(abi::SYS_GPU_WAIT, fence)
 }
 
 /// Crea un hilo: `entry(arg)` con pila en `stack_top` (tope, alineado).
@@ -304,6 +328,39 @@ pub fn bootreq_read(buf: &mut [u8]) -> i64 {
         buf.len() as u64,
         0,
         0,
+    )
+}
+
+/// Versión del kernel (`version build`). Devuelve bytes escritos o errno.
+pub fn version(buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_VERSION,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+        0,
+    )
+}
+
+/// Escribe en el hueco de actualización de la ESP (offset múltiplo de 512).
+pub fn upd_write(which: u64, offset: u64, buf: &[u8]) -> i64 {
+    syscall4(
+        abi::SYS_UPD_WRITE,
+        which,
+        offset,
+        buf.as_ptr() as u64,
+        buf.len() as u64,
+    )
+}
+
+/// Lee del hueco de actualización (longitud múltiplo de 512).
+pub fn upd_read(which: u64, offset: u64, buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_UPD_READ,
+        which,
+        offset,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
     )
 }
 
@@ -413,6 +470,40 @@ pub fn write_all(fd: u64, buf: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
+pub fn wifi_scan(out: &mut [abi::WifiBss]) -> i64 {
+    syscall4(
+        abi::SYS_WIFI_SCAN,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+        0,
+        0,
+    )
+}
+
+pub fn wifi_status(out: &mut abi::WifiStatus) -> i64 {
+    syscall4(
+        abi::SYS_WIFI_STATUS,
+        out as *mut abi::WifiStatus as u64,
+        0,
+        0,
+        0,
+    )
+}
+
+pub fn wifi_connect(ssid: &str, psk: Option<&str>) -> i64 {
+    let (psk_ptr, psk_len) = match psk {
+        Some(p) if !p.is_empty() => (p.as_ptr() as u64, p.len() as u64),
+        _ => (0, 0),
+    };
+    syscall4(
+        abi::SYS_WIFI_CONNECT,
+        ssid.as_ptr() as u64,
+        ssid.len() as u64,
+        psk_ptr,
+        psk_len,
+    )
+}
+
 pub fn dns_resolve(host: &str, out: &mut [u8; 4]) -> Result<(), i64> {
     let r = syscall4(
         abi::SYS_DNS_RESOLVE,
@@ -435,4 +526,58 @@ pub fn sock_addr(a: u8, b: u8, c: u8, d: u8, port: u16) -> abi::SockAddr {
         port,
         _pad: 0,
     }
+}
+
+pub fn audio_open(fmt: &abi::AudioFormat) -> i64 {
+    syscall4(
+        abi::SYS_AUDIO_OPEN,
+        fmt as *const abi::AudioFormat as u64,
+        0,
+        0,
+        0,
+    )
+}
+
+pub fn audio_read(buf: &mut [u8], overrun: &mut u32) -> i64 {
+    syscall4(
+        abi::SYS_AUDIO_READ,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        overrun as *mut u32 as u64,
+        0,
+    )
+}
+
+pub fn audio_close() -> i64 {
+    syscall4(abi::SYS_AUDIO_CLOSE, 0, 0, 0, 0)
+}
+
+pub fn fb_info(out: &mut abi::FbInfo) -> i64 {
+    syscall4(
+        abi::SYS_FB_INFO,
+        out as *mut abi::FbInfo as u64,
+        0,
+        0,
+        0,
+    )
+}
+
+pub fn fb_set_mode(mode: u64) -> Result<(), i64> {
+    let r = syscall1(abi::SYS_FB_SET_MODE, mode);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
+pub fn fb_present(ptr: u64, len: u64) -> Result<(), i64> {
+    let r = syscall4(abi::SYS_FB_PRESENT, ptr, len, 0, 0);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
+pub fn input_poll(out: &mut [abi::InputEvent]) -> i64 {
+    syscall4(
+        abi::SYS_INPUT_POLL,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+        0,
+        0,
+    )
 }

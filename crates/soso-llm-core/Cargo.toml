@@ -9,7 +9,7 @@ default = []
 std = []
 
 [dev-dependencies]
-# std feature activada en tests host
+soso-audio = { path = "../soso-audio", features = ["std"] }
 
 [dependencies]
 sosomodel = { path = "../sosomodel" }

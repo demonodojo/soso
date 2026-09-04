@@ -227,6 +227,10 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_GPU_SUBMIT => sys_gpu_submit(a1, a2),
         #[cfg(not(feature = "drv-gpu-nvidia"))]
         abi::SYS_GPU_SUBMIT => Err(-abi::ENOSYS),
+        #[cfg(feature = "drv-gpu-nvidia")]
+        abi::SYS_GPU_WAIT => crate::drivers::gpu::wait_fence(a1).map_err(|e| -e),
+        #[cfg(not(feature = "drv-gpu-nvidia"))]
+        abi::SYS_GPU_WAIT => Err(-abi::ENOSYS),
         abi::SYS_PIPE => sys_pipe(),
         abi::SYS_SPAWN_IO => sys_spawn_io(a1),
         abi::SYS_CHDIR => sys_chdir(a1, a2),
@@ -261,6 +265,33 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
             crate::som_import::scratch_read(a1, a2, a3, a4).map(|_| 0)
         }
         abi::SYS_SOM_SCRATCH_FREE => crate::som_import::scratch_free().map(|_| 0),
+        abi::SYS_GETPID => Ok(super::current_pid()),
+        abi::SYS_KILL => sys_kill(a1 as i64, a2),
+        abi::SYS_SETPGID => sys_setpgid(a1, a2),
+        abi::SYS_SETSID => sys_setsid(),
+        abi::SYS_TCSETPGRP => sys_tcsetpgrp(a1),
+        abi::SYS_WIFI_SCAN => sys_wifi_scan(a1, a2),
+        abi::SYS_WIFI_STATUS => sys_wifi_status(a1),
+        abi::SYS_WIFI_CONNECT => sys_wifi_connect(a1, a2, a3, a4),
+        #[cfg(feature = "drv-hda")]
+        abi::SYS_AUDIO_OPEN => sys_audio_open(a1),
+        #[cfg(not(feature = "drv-hda"))]
+        abi::SYS_AUDIO_OPEN => Err(-abi::ENOSYS),
+        #[cfg(feature = "drv-hda")]
+        abi::SYS_AUDIO_READ => sys_audio_read(a1, a2, a3),
+        #[cfg(not(feature = "drv-hda"))]
+        abi::SYS_AUDIO_READ => Err(-abi::ENOSYS),
+        #[cfg(feature = "drv-hda")]
+        abi::SYS_AUDIO_CLOSE => sys_audio_close(),
+        #[cfg(not(feature = "drv-hda"))]
+        abi::SYS_AUDIO_CLOSE => Err(-abi::ENOSYS),
+        abi::SYS_FB_INFO => sys_fb_info(a1),
+        abi::SYS_FB_SET_MODE => sys_fb_set_mode(a1),
+        abi::SYS_FB_PRESENT => sys_fb_present(a1, a2),
+        abi::SYS_INPUT_POLL => sys_input_poll(a1, a2),
+        abi::SYS_VERSION => sys_version(a1, a2),
+        abi::SYS_UPD_WRITE => sys_upd_write(a1, a2, a3, a4),
+        abi::SYS_UPD_READ => sys_upd_read(a1, a2, a3, a4),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -631,8 +662,10 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
             Ok(len)
         }
         Fd::WriteBuf { data: out, pos, .. } => {
-            if *pos + data.len() > 16 * 1024 * 1024 {
-                return Err(-abi::ENOSPC);
+            const THRESH: usize = 16 * 1024 * 1024;
+            if *pos + data.len() > THRESH {
+                convert_writebuf_to_stream(f, data)?;
+                return Ok(len);
             }
             if *pos + data.len() > out.len() {
                 out.resize(*pos + data.len(), 0);
@@ -1044,6 +1077,22 @@ fn sys_pipe() -> Result<u64, i64> {
     })
 }
 
+fn sys_kill(pid: i64, sig: u64) -> Result<u64, i64> {
+    super::kill_target(pid, sig).map(|n| n as u64)
+}
+
+fn sys_setpgid(pid: u64, pgid: u64) -> Result<u64, i64> {
+    super::setpgid(pid, pgid).map(|_| 0)
+}
+
+fn sys_setsid() -> Result<u64, i64> {
+    super::setsid()
+}
+
+fn sys_tcsetpgrp(pgid: u64) -> Result<u64, i64> {
+    super::tcsetpgrp(pgid).map(|_| 0)
+}
+
 fn sys_wait(f: &mut SyscallFrame) -> Result<u64, i64> {
     let pid = super::current_pid();
     let listo = {
@@ -1293,6 +1342,124 @@ fn sys_disk_write(id: u64, lba: u64, buf: u64, len: u64) -> Result<u64, i64> {
 /// A diferencia de `sys_disk_write`, esta sí puede tocar el disco de arranque:
 /// el destino es un único fichero pre-asignado, no un LBA a elección.
 #[cfg(feature = "drv-live-disk")]
+fn convert_writebuf_to_stream(f: &mut Fd, data: &[u8]) -> Result<(), i64> {
+    let Fd::WriteBuf {
+        dir,
+        name,
+        data: out,
+        pos,
+    } = f
+    else {
+        return Ok(());
+    };
+    let dir_val = *dir;
+    let name_val = name.clone();
+    let written = *pos;
+    let mut prefix = core::mem::take(out);
+    prefix.truncate(written);
+    let mtime = crate::arch::pit::uptime_ms() / 1000;
+    let inode = if prefix.is_empty() {
+        None
+    } else {
+        Some(with_vfs(|| crate::vfs::create_file(dir_val, &name_val, &prefix, mtime))?)
+    };
+    let new_pos = written + data.len();
+    let mut buf = alloc::vec::Vec::new();
+    buf.extend_from_slice(data);
+    *f = Fd::StreamWrite {
+        dir: dir_val,
+        name: name_val,
+        inode,
+        pos: new_pos,
+        buf,
+    };
+    if let Fd::StreamWrite {
+        dir,
+        name,
+        inode,
+        buf,
+        ..
+    } = f
+    {
+        while buf.len() >= STREAM_FLUSH {
+            let chunk: Vec<u8> = buf.drain(..STREAM_FLUSH).collect();
+            let mtime = crate::arch::pit::uptime_ms() / 1000;
+            if let Some(ino) = *inode {
+                with_vfs(|| crate::vfs::append_file(ino, &chunk, mtime))?;
+            } else {
+                let ino = with_vfs(|| crate::vfs::create_file(*dir, name, &chunk, mtime))?;
+                *inode = Some(ino);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sys_version(buf: u64, len: u64) -> Result<u64, i64> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let s = crate::version::full();
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(len as usize);
+    if !user_range_ok(buf, n as u64, true) {
+        return Err(-abi::EFAULT);
+    }
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(buf, &bytes[..n]).ok_or(-abi::EFAULT)?;
+        Ok(n as u64)
+    })
+}
+
+#[cfg(feature = "drv-live-disk")]
+fn sys_upd_write(which: u64, offset: u64, buf: u64, len: u64) -> Result<u64, i64> {
+    if len == 0 {
+        return Ok(0);
+    }
+    if len % 512 != 0 || offset % 512 != 0 {
+        return Err(-abi::EINVAL);
+    }
+    if !user_range_ok(buf, len, false) {
+        return Err(-abi::EFAULT);
+    }
+    let mut kbuf = alloc::vec![0u8; len as usize];
+    super::with_current(|p| -> Result<(), i64> {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.read(buf, &mut kbuf).ok_or(-abi::EFAULT)?;
+        Ok(())
+    })?;
+    crate::drivers::updslot::write(which, offset, &kbuf)?;
+    Ok(len)
+}
+
+#[cfg(not(feature = "drv-live-disk"))]
+fn sys_upd_write(_which: u64, _offset: u64, _buf: u64, _len: u64) -> Result<u64, i64> {
+    Err(-abi::ENOTSUP)
+}
+
+#[cfg(feature = "drv-live-disk")]
+fn sys_upd_read(which: u64, offset: u64, buf: u64, len: u64) -> Result<u64, i64> {
+    if len == 0 || len % 512 != 0 || offset % 512 != 0 {
+        return Err(-abi::EINVAL);
+    }
+    if !user_range_ok(buf, len, true) {
+        return Err(-abi::EFAULT);
+    }
+    let mut kbuf = alloc::vec![0u8; len as usize];
+    let n = crate::drivers::updslot::read(which, offset, &mut kbuf)?;
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(buf, &kbuf[..n]).ok_or(-abi::EFAULT)?;
+        Ok(n as u64)
+    })
+}
+
+#[cfg(not(feature = "drv-live-disk"))]
+fn sys_upd_read(_which: u64, _offset: u64, _buf: u64, _len: u64) -> Result<u64, i64> {
+    Err(-abi::ENOTSUP)
+}
+
 fn sys_bootreq_write(buf: u64, len: u64) -> Result<u64, i64> {
     if len == 0 || len as usize > abi::BOOTREQ_SIZE {
         return Err(-abi::EINVAL);
@@ -1577,4 +1744,230 @@ fn sys_tcp_accept(f: &mut SyscallFrame, listener_fd: u64, timeout_ms: u64) -> Re
             deadline_ms: socket_deadline(timeout_ms),
         },
     );
+}
+
+fn sys_wifi_scan(out: u64, max: u64) -> Result<u64, i64> {
+    #[cfg(not(feature = "lxdde"))]
+    {
+        let _ = (out, max);
+        return Err(-abi::ENOSYS);
+    }
+    #[cfg(feature = "lxdde")]
+    {
+        if max == 0 || max > abi::WIFI_SCAN_MAX as u64 {
+            return Err(-abi::EINVAL);
+        }
+        if !crate::lxdde::wifi_present() || !crate::lxdde::wifi_alive() {
+            return Err(-abi::ENOTSUP);
+        }
+        let results = crate::lxdde::wifi_scan_results();
+        let count = results.len().min(max as usize);
+        if count == 0 {
+            return Ok(0);
+        }
+        let n = count * core::mem::size_of::<abi::WifiBss>();
+        if !user_range_ok(out, n as u64, true) {
+            return Err(-abi::EFAULT);
+        }
+        let mut buf = alloc::vec![abi::WifiBss::default(); count];
+        for (dst, (ssid, rssi, ch, open)) in buf.iter_mut().zip(results.into_iter()) {
+            let b = ssid.as_bytes();
+            let nssid = b.len().min(abi::WIFI_SSID_MAX);
+            dst.ssid[..nssid].copy_from_slice(&b[..nssid]);
+            dst.ssid_len = nssid as u8;
+            dst.rssi = rssi;
+            dst.channel = ch;
+            dst.open = if open { 1 } else { 0 };
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
+        super::with_current(|p| {
+            let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+            space.write(out, bytes).ok_or(-abi::EFAULT)?;
+            Ok(count as u64)
+        })
+    }
+}
+
+fn sys_wifi_status(out: u64) -> Result<u64, i64> {
+    #[cfg(not(feature = "lxdde"))]
+    {
+        let _ = out;
+        return Err(-abi::ENOSYS);
+    }
+    #[cfg(feature = "lxdde")]
+    {
+        if !user_range_ok(out, core::mem::size_of::<abi::WifiStatus>() as u64, true) {
+            return Err(-abi::EFAULT);
+        }
+        let mut st = abi::WifiStatus::default();
+        if crate::lxdde::wifi_present() {
+            st.flags |= abi::WIFI_FLAG_PRESENT;
+        }
+        if crate::lxdde::wifi_alive() {
+            st.flags |= abi::WIFI_FLAG_ALIVE;
+        }
+        if crate::lxdde::wifi_connected() {
+            st.flags |= abi::WIFI_FLAG_CONNECTED;
+        }
+        if let Some(mac) = crate::lxdde::wifi_mac() {
+            st.mac = mac;
+        }
+        let phase = crate::lxdde::wifi_phase().as_bytes();
+        let n = phase.len().min(abi::WIFI_PHASE_MAX);
+        st.phase[..n].copy_from_slice(&phase[..n]);
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&st as *const abi::WifiStatus).cast::<u8>(),
+                core::mem::size_of::<abi::WifiStatus>(),
+            )
+        };
+        super::with_current(|p| {
+            let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+            space.write(out, bytes).ok_or(-abi::EFAULT)?;
+            Ok(0)
+        })
+    }
+}
+
+#[cfg(feature = "drv-hda")]
+fn sys_audio_open(fmt_ptr: u64) -> Result<u64, i64> {
+    if !crate::drivers::hda::present() {
+        return Err(-abi::ENOTSUP);
+    }
+    let fmt = user_slice(fmt_ptr, core::mem::size_of::<abi::AudioFormat>() as u64)?;
+    let fmt = unsafe { *(fmt.as_ptr() as *const abi::AudioFormat) };
+    crate::drivers::hda::open(fmt.sample_rate, fmt.channels, fmt.bits_per_sample)?;
+    Ok(0)
+}
+
+#[cfg(feature = "drv-hda")]
+fn sys_audio_read(buf: u64, len: u64, overrun_ptr: u64) -> Result<u64, i64> {
+    if len == 0 || len > 256 * 1024 {
+        return Err(-abi::EINVAL);
+    }
+    if !user_range_ok(buf, len, true) {
+        return Err(-abi::EFAULT);
+    }
+    if overrun_ptr != 0 && !user_range_ok(overrun_ptr, 4, true) {
+        return Err(-abi::EFAULT);
+    }
+    let mut kbuf = alloc::vec![0u8; len as usize];
+    let (n, ov) = crate::drivers::hda::read(&mut kbuf)?;
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(buf, &kbuf[..n]).ok_or(-abi::EFAULT)?;
+        if overrun_ptr != 0 {
+            let flag = if ov { 1u32 } else { 0u32 };
+            space
+                .write(overrun_ptr, &flag.to_le_bytes())
+                .ok_or(-abi::EFAULT)?;
+        }
+        Ok(n as u64)
+    })
+}
+
+#[cfg(feature = "drv-hda")]
+fn sys_audio_close() -> Result<u64, i64> {
+    crate::drivers::hda::close()?;
+    Ok(0)
+}
+
+fn sys_wifi_connect(ssid_ptr: u64, ssid_len: u64, psk_ptr: u64, psk_len: u64) -> Result<u64, i64> {
+    #[cfg(not(feature = "lxdde"))]
+    {
+        let _ = (ssid_ptr, ssid_len, psk_ptr, psk_len);
+        return Err(-abi::ENOSYS);
+    }
+    #[cfg(feature = "lxdde")]
+    {
+        if ssid_len == 0 || ssid_len > abi::WIFI_SSID_MAX as u64 {
+            return Err(-abi::EINVAL);
+        }
+        if psk_len > abi::WIFI_PSK_MAX as u64 {
+            return Err(-abi::EINVAL);
+        }
+        if !crate::lxdde::wifi_present() || !crate::lxdde::wifi_alive() {
+            return Err(-abi::ENOTSUP);
+        }
+        let ssid = user_str(ssid_ptr, ssid_len)?;
+        let rc = if psk_len == 0 {
+            crate::lxdde::wifi::connect_open(ssid)
+        } else {
+            if psk_ptr == 0 {
+                return Err(-abi::EFAULT);
+            }
+            let psk = user_str(psk_ptr, psk_len)?;
+            crate::net::wifi_wpa::connect_wpa2(ssid, psk)
+        };
+        if rc != 0 {
+            return Err(-abi::EIO);
+        }
+        crate::net::on_wifi_connected();
+        Ok(0)
+    }
+}
+
+fn sys_fb_info(out: u64) -> Result<u64, i64> {
+    let n = core::mem::size_of::<abi::FbInfo>() as u64;
+    if !user_range_ok(out, n, true) {
+        return Err(-abi::EFAULT);
+    }
+    let mut info = abi::FbInfo::default();
+    if !crate::drivers::fb::user_info(&mut info) {
+        info.present = 0;
+    }
+    let bytes = unsafe {
+        core::slice::from_raw_parts((&info as *const abi::FbInfo).cast::<u8>(), n as usize)
+    };
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(0)
+    })
+}
+
+fn sys_fb_set_mode(mode: u64) -> Result<u64, i64> {
+    crate::drivers::fb::set_graphics_mode(mode == abi::FB_MODE_GRAPHICS);
+    Ok(0)
+}
+
+fn sys_fb_present(buf: u64, len: u64) -> Result<u64, i64> {
+    if len == 0 || len > 32 * 1024 * 1024 {
+        return Err(-abi::EINVAL);
+    }
+    if !user_range_ok(buf, len, false) {
+        return Err(-abi::EFAULT);
+    }
+    let mut kbuf = alloc::vec![0u8; len as usize];
+    super::with_current(|p| -> Result<(), i64> {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.read(buf, &mut kbuf).ok_or(-abi::EFAULT)?;
+        Ok(())
+    })?;
+    crate::drivers::fb::present_from_user(&kbuf).map_err(|_| -abi::EIO)?;
+    Ok(0)
+}
+
+fn sys_input_poll(out: u64, max: u64) -> Result<u64, i64> {
+    if max == 0 || max > 64 {
+        return Err(-abi::EINVAL);
+    }
+    let n = max as usize;
+    let bytes = n * core::mem::size_of::<abi::InputEvent>();
+    if !user_range_ok(out, bytes as u64, true) {
+        return Err(-abi::EFAULT);
+    }
+    let mut kbuf = alloc::vec![abi::InputEvent::default(); n];
+    let got = crate::drivers::input::poll(&mut kbuf);
+    let slice = unsafe {
+        core::slice::from_raw_parts(
+            kbuf.as_ptr().cast::<u8>(),
+            got * core::mem::size_of::<abi::InputEvent>(),
+        )
+    };
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, slice).ok_or(-abi::EFAULT)?;
+        Ok(got as u64)
+    })
 }

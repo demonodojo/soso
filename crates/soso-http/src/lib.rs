@@ -25,6 +25,13 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+/// Respuesta con cabeceras (p. ej. `Content-Encoding` para gzip).
+pub struct FullResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
 /// Transporte TCP (DNS + connect + read/write).
 pub trait TcpTransport {
     fn dns_resolve(&self, host: &str, out: &mut [u8; 4]) -> Result<(), i64>;
@@ -339,13 +346,35 @@ pub fn https_get<T: TcpTransport>(
     url: &str,
     auth: Option<&str>,
 ) -> Result<Response, HttpError> {
-    let mut body = Vec::new();
-    let (status, _) = https_download(transport, url, auth, &mut VecSink(&mut body))?;
+    let FullResponse { status, headers: _, body } = https_get_full(transport, url, auth)?;
     Ok(Response { status, body })
+}
+
+/// GET HTTPS con cabeceras de respuesta (redirects incluidos).
+pub fn https_get_full<T: TcpTransport>(
+    transport: &T,
+    url: &str,
+    auth: Option<&str>,
+) -> Result<FullResponse, HttpError> {
+    let mut body = Vec::new();
+    let (status, headers) = https_request(
+        transport,
+        url,
+        auth,
+        HttpReqKind::Full,
+        &mut VecSink(&mut body),
+        60_000,
+    )?;
+    Ok(FullResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 fn build_get(host: &str, path: &str, auth: Option<&str>) -> String {
     let mut req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+    req.push_str("Accept-Encoding: identity\r\n");
     if let Some(tok) = auth {
         let _ = write!(req, "Authorization: Bearer {tok}\r\n");
     }
@@ -357,6 +386,7 @@ fn build_get_range(host: &str, path: &str, auth: Option<&str>, start: u64, end: 
     let mut req = format!(
         "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nRange: bytes={start}-{end}\r\n"
     );
+    req.push_str("Accept-Encoding: identity\r\n");
     if let Some(tok) = auth {
         let _ = write!(req, "Authorization: Bearer {tok}\r\n");
     }
@@ -509,7 +539,7 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), H
     Ok((status, headers, body))
 }
 
-fn header_value<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a str> {
+pub fn header_value<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a str> {
     headers
         .iter()
         .find(|(k, _)| k == key)

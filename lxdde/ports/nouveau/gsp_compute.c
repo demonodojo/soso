@@ -249,25 +249,59 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
     cp->matvec_q80.param_count = gsp_matvec_q80_param_count;
     cp->matvec_q80.sass_va = G8_SASS_VA;
 
+    cp->matmul.name = "matmul";
+    cp->matmul.sass = gsp_matmul_sass;
+    cp->matmul.sass_len = gsp_matmul_sass_len;
+    cp->matmul.regcount = gsp_matmul_regcount;
+    cp->matmul.param_base = gsp_matmul_param_base;
+    cp->matmul.param_size = gsp_matmul_param_size;
+    cp->matmul.cbank_size = gsp_matmul_cbank_size;
+    cp->matmul.param_off = gsp_matmul_param_off;
+    cp->matmul.param_count = gsp_matmul_param_count;
+    cp->matmul.sass_va = G9_SASS_VA;
+
+    cp->softmax_rows.name = "softmax_rows";
+    cp->softmax_rows.sass = gsp_softmax_rows_sass;
+    cp->softmax_rows.sass_len = gsp_softmax_rows_sass_len;
+    cp->softmax_rows.regcount = gsp_softmax_rows_regcount;
+    cp->softmax_rows.param_base = gsp_softmax_rows_param_base;
+    cp->softmax_rows.param_size = gsp_softmax_rows_param_size;
+    cp->softmax_rows.cbank_size = gsp_softmax_rows_cbank_size;
+    cp->softmax_rows.param_off = gsp_softmax_rows_param_off;
+    cp->softmax_rows.param_count = gsp_softmax_rows_param_count;
+    cp->softmax_rows.sass_va = G10_SASS_VA;
+
+    cp->layernorm_rows.name = "layernorm_rows";
+    cp->layernorm_rows.sass = gsp_layernorm_rows_sass;
+    cp->layernorm_rows.sass_len = gsp_layernorm_rows_sass_len;
+    cp->layernorm_rows.regcount = gsp_layernorm_rows_regcount;
+    cp->layernorm_rows.param_base = gsp_layernorm_rows_param_base;
+    cp->layernorm_rows.param_size = gsp_layernorm_rows_param_size;
+    cp->layernorm_rows.cbank_size = gsp_layernorm_rows_cbank_size;
+    cp->layernorm_rows.param_off = gsp_layernorm_rows_param_off;
+    cp->layernorm_rows.param_count = gsp_layernorm_rows_param_count;
+    cp->layernorm_rows.sass_va = G11_SASS_VA;
+
     /* El constant bank tiene que caber entero: el kernel lee sus parámetros en
      * `param_base`, que está al final de .nv.constant0. */
     if (kernel_check(&cp->saxpy, 4u) != 0 ||
         kernel_check(&cp->matvec, 5u) != 0 ||
         kernel_check(&cp->matvec_q4k, 5u) != 0 ||
-        kernel_check(&cp->matvec_q80, 5u) != 0) {
+        kernel_check(&cp->matvec_q80, 5u) != 0 ||
+        kernel_check(&cp->matmul, 6u) != 0 ||
+        kernel_check(&cp->softmax_rows, 3u) != 0 ||
+        kernel_check(&cp->layernorm_rows, 6u) != 0) {
         return -1;
     }
-    /* Cada blob tiene que caber en el hueco que va hasta la VA del siguiente. Antes
-     * esto era un `> 4096` a mano para dos kernels; añadir un tercero sin tocarlo
-     * habría sido un solapamiento sin un solo error, y con CUDA 12.8 hasta `matvec`
-     * pasa de 4 KiB. Se comprueba blob a blob y en el orden de las VAs. */
+    /* Cada blob tiene que caber en el hueco que va hasta la VA del siguiente. */
     {
-        const struct gsp_kernel *ks[4] = { &cp->saxpy, &cp->matvec, &cp->matvec_q4k,
-                                          &cp->matvec_q80 };
+        const struct gsp_kernel *ks[7] = { &cp->saxpy, &cp->matvec, &cp->matvec_q4k,
+                                          &cp->matvec_q80, &cp->matmul,
+                                          &cp->softmax_rows, &cp->layernorm_rows };
         unsigned i;
 
-        for (i = 0; i < 4u; i++) {
-            uint64_t hueco = i + 1u < 4u ? ks[i + 1]->sass_va - ks[i]->sass_va
+        for (i = 0; i < 7u; i++) {
+            uint64_t hueco = i + 1u < 7u ? ks[i + 1]->sass_va - ks[i]->sass_va
                                          : G_SASS_SLOT;
 
             if ((uint64_t)ks[i]->sass_len > hueco) {
@@ -459,13 +493,30 @@ void gsp_compute_set_mv_params(struct gsp_compute *cp, const struct gsp_kernel *
     __asm__ __volatile__("mfence" ::: "memory");
 }
 
-void gsp_compute_fill_qmd(struct gsp_compute *cp, const struct gsp_kernel *k,
-                          GspQmdV05 *qmd, unsigned grid_x)
+void gsp_compute_set_matmul_params(struct gsp_compute *cp, const struct gsp_kernel *k,
+                                   uint64_t w_va, uint64_t x_va, uint64_t y_va,
+                                   unsigned rows, unsigned cols, unsigned n)
+{
+    unsigned char *p = cbank_prepare(cp, k);
+
+    *(uint64_t *)(p + k->param_off[0]) = w_va;
+    *(uint64_t *)(p + k->param_off[1]) = x_va;
+    *(uint64_t *)(p + k->param_off[2]) = y_va;
+    *(uint32_t *)(p + k->param_off[3]) = rows;
+    *(uint32_t *)(p + k->param_off[4]) = cols;
+    *(uint32_t *)(p + k->param_off[5]) = n;
+
+    __asm__ __volatile__("mfence" ::: "memory");
+}
+
+void gsp_compute_fill_qmd_grid(struct gsp_compute *cp, const struct gsp_kernel *k,
+                               GspQmdV05 *qmd, unsigned grid_x, unsigned grid_y,
+                               unsigned sem_slot)
 {
     uint64_t prog_shift = k->sass_va >> 4;
     uint64_t cb_va = cp->data_va + G4F_CBANK_OFF;
     uint64_t cb_shift = cb_va >> 6;
-    uint64_t sem_va = cp->data_va + G4F_SEM_OFF;
+    uint64_t sem_va = cp->data_va + G4F_SEM_SLOT(sem_slot);
     /* SIZE_SHIFTED4 ⇒ redondeo a múltiplo de 16 B hacia arriba. */
     uint32_t cb_size = (k->cbank_size + 15u) & ~15u;
 
@@ -478,7 +529,7 @@ void gsp_compute_fill_qmd(struct gsp_compute *cp, const struct gsp_kernel *k,
                  NVCEC0_QMDV05_00_API_VISIBLE_CALL_LIMIT_NO_CHECK);
 
     qmd_set_bits(qmd->words, QMDV05_GRID_WIDTH, grid_x ? grid_x : 1u);
-    qmd_set_bits(qmd->words, QMDV05_GRID_HEIGHT, 1u);
+    qmd_set_bits(qmd->words, QMDV05_GRID_HEIGHT, grid_y ? grid_y : 1u);
     qmd_set_bits(qmd->words, QMDV05_GRID_DEPTH, 1u);
     qmd_set_bits(qmd->words, QMDV05_CTA_THREAD_DIMENSION0, G4F_CTA_THREADS);
     qmd_set_bits(qmd->words, QMDV05_CTA_THREAD_DIMENSION1, 1u);
@@ -489,15 +540,10 @@ void gsp_compute_fill_qmd(struct gsp_compute *cp, const struct gsp_kernel *k,
     qmd_set_bits(qmd->words, QMDV05_PROGRAM_ADDRESS_UPPER_S4,
                  (uint32_t)((prog_shift >> 32) & 0x1ffffu));
 
-    /* Sin esto el SM no sabe cuántos registros reservar por hilo: el cubin lo
-     * declara en EIATTR_REGCOUNT y con 0 el lanzamiento no es válido. Sale del
-     * kernel que se va a lanzar, no de saxpy: matvec usa 37 registros y saxpy 10,
-     * y lanzar matvec con 10 es corrupción de registros, no un error. */
     qmd_set_bits(qmd->words, QMDV05_REGISTER_COUNT, k->regcount);
     qmd_set_bits(qmd->words, QMDV05_BARRIER_COUNT, 0u);
     qmd_set_bits(qmd->words, QMDV05_SHARED_MEMORY_SIZE_S7, 0u);
 
-    /* Constant bank 0 = donde el kernel lee sus parámetros. */
     qmd_set_bits(qmd->words, QMDV05_CBANK0_ADDR_LOWER_S6,
                  (uint32_t)(cb_shift & 0xffffffffu));
     qmd_set_bits(qmd->words, QMDV05_CBANK0_ADDR_UPPER_S6,
@@ -508,8 +554,6 @@ void gsp_compute_fill_qmd(struct gsp_compute *cp, const struct gsp_kernel *k,
     qmd_set_bits(qmd->words, QMDV05_CBANK0_INVALIDATE,
                  NVCEC0_QMDV05_00_CONSTANT_BUFFER_INVALIDATE_TRUE);
 
-    /* Semáforo de fin: sin él no hay forma de saber que el kernel terminó, y
-     * "on_gpu" volvería a ser una afirmación sin prueba. */
     qmd_set_bits(qmd->words, QMDV05_RELEASE_ENABLE0,
                  NVCEC0_QMDV05_00_RELEASE_ENABLE_TRUE);
     qmd_set_bits(qmd->words, QMDV05_RELEASE_STRUCTURE_SIZE0,
@@ -521,6 +565,12 @@ void gsp_compute_fill_qmd(struct gsp_compute *cp, const struct gsp_kernel *k,
     qmd_set_bits(qmd->words, QMDV05_RELEASE_SEM0_ADDR_UPPER,
                  (uint32_t)((sem_va >> 32) & 0x1ffffffu));
     qmd_set_bits(qmd->words, QMDV05_RELEASE_SEM0_PAYLOAD_LOWER, G4F_SEM_PAYLOAD);
+}
+
+void gsp_compute_fill_qmd(struct gsp_compute *cp, const struct gsp_kernel *k,
+                          GspQmdV05 *qmd, unsigned grid_x)
+{
+    gsp_compute_fill_qmd_grid(cp, k, qmd, grid_x, 1u, 0u);
 }
 
 int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
@@ -569,16 +619,20 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
  * El rebobinado del pushbuffer está aquí y no en el bucle de tandas porque la
  * condición es "no cupo", no "voy por la tanda N": un QMD inline son ~900 B y en
  * los 4 KiB del pushbuffer caben cuatro. */
-static int launch_wait(struct gsp_compute *cp, const struct gsp_kernel *k,
-                       unsigned grid, const char *what)
+static int launch_wait_sem(struct gsp_compute *cp, const struct gsp_kernel *k,
+                           unsigned grid_x, unsigned grid_y, unsigned sem_slot,
+                           const char *what)
 {
     GspQmdV05 qmd;
     unsigned pb_off = 0, pb_len = 0, waited;
     const volatile uint32_t *sem;
+    extern uint64_t lx_ktime_get_ns(void);
 
-    gsp_compute_fill_qmd(cp, k, &qmd, grid);
+    if (sem_slot >= G4F_SEM_COUNT) {
+        return -1;
+    }
+    gsp_compute_fill_qmd_grid(cp, k, &qmd, grid_x, grid_y, sem_slot);
     if (gsp_compute_encode_qmd(cp, &qmd, &pb_off, &pb_len) != 0) {
-        /* 64×64 B llenan el PB; el ack del wait anterior deja gpget==gpput. */
         if (gsp_chan_pb_rewind(cp->chan) != 0 ||
             gsp_compute_encode_qmd(cp, &qmd, &pb_off, &pb_len) != 0) {
             lx_printk("nouveau-lx: %s — pushbuffer lleno y sin rebobinar\n", what);
@@ -590,20 +644,7 @@ static int launch_wait(struct gsp_compute *cp, const struct gsp_kernel *k,
         return -1;
     }
 
-    sem = (const volatile uint32_t *)cp_data(cp, G4F_SEM_OFF);
-    /* Sondeo contra RELOJ, no contra un contador de vueltas.
-     *
-     * La idea de sondear antes de dormir ya estaba; lo que faltaba era que el
-     * dormir costara lo que dice. Con el tick a 100 Hz, `lx_mdelay(1)` espera
-     * hasta 10 ms, así que un matvec que la GPU resuelve en microsegundos
-     * costaba un tick entero: el modelo salía a 137 ms/capa, más lento que en
-     * CPU (medido en silicio el 2026-08-02). Y `G4F_SPIN_TRIES` vueltas no son
-     * una duración: en un core rápido se agotan en decenas de microsegundos y en
-     * uno lento tardan de más.
-     *
-     * Ahora se sondea `G4F_SPIN_US` microsegundos de reloj real —suficiente para
-     * cubrir un lanzamiento normal— y sólo si no llega se cae al bucle de ticks,
-     * que sigue estando para el caso patológico. */
+    sem = (const volatile uint32_t *)cp_data(cp, G4F_SEM_SLOT(sem_slot));
     {
         uint64_t t_fin = lx_ktime_get_ns() + (uint64_t)G4F_SPIN_US * 1000ull;
 
@@ -626,13 +667,16 @@ static int launch_wait(struct gsp_compute *cp, const struct gsp_kernel *k,
     lx_printk("nouveau-lx: %s — el QMD no señalizó en %u ms (sem=0x%08x)\n",
               what, G4F_WAIT_MS, *sem);
     gsp_chan_dump(cp->chan, what);
-    /* Mismo motivo que en el CE: el porqué lo cuenta RM por evento, y si nadie
-     * escucha se queda en la cola. Un QMD que no señaliza suele ser una falta de
-     * MMU, y el RC_TRIGGERED trae la dirección exacta. */
     if (cp->rm && cp->rm->rpc) {
         gsp_rpc_drain(cp->rm->rpc, GSP_CE_RC_DRAIN_MS);
     }
     return -1;
+}
+
+static int launch_wait(struct gsp_compute *cp, const struct gsp_kernel *k,
+                       unsigned grid, const char *what)
+{
+    return launch_wait_sem(cp, k, grid, 1u, 0u, what);
 }
 
 int gsp_compute_saxpy(struct gsp_compute *cp, struct gsp_ce *ce,
@@ -784,10 +828,6 @@ int gsp_compute_matvec_f32(struct gsp_compute *cp, struct gsp_ce *ce,
     return 0;
 }
 
-/* Última forma de matvec residente anunciada por el log. */
-static unsigned g_mv_res_last_rows;
-static unsigned g_mv_res_last_cols;
-
 int gsp_compute_matvec_resident(struct gsp_compute *cp, struct gsp_ce *ce,
                                 uint64_t w_va, unsigned rows, unsigned cols,
                                 const float *x, float *y,
@@ -811,13 +851,7 @@ int gsp_compute_matvec_resident(struct gsp_compute *cp, struct gsp_ce *ce,
                   cols, G5_MAX_COLS);
         return -1;
     }
-    if (rows > G6_MAX_ROWS) {
-        lx_printk("nouveau-lx: matvec residente — %u filas > tope %u\n",
-                  rows, G6_MAX_ROWS);
-        return -1;
-    }
-    if ((unsigned long)cols * 4ul > G6_RES_X_BYTES ||
-        (unsigned long)rows * 4ul > G6_RES_Y_BYTES) {
+    if ((unsigned long)cols * 4ul > G6_RES_X_BYTES) {
         return -1;
     }
 
@@ -829,31 +863,61 @@ int gsp_compute_matvec_resident(struct gsp_compute *cp, struct gsp_ce *ce,
     gx = (float *)cp_res(cp, G6_RES_X_OFF);
     gy = (float *)cp_res(cp, G6_RES_Y_OFF);
     memcpy(gx, x, (unsigned long)cols * 4ul);
-    memset(gy, 0, (unsigned long)rows * 4ul);
-    *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
-    __asm__ __volatile__("mfence" ::: "memory");
-
     x_va = cp->res_va + G6_RES_X_OFF;
     y_va = cp->res_va + G6_RES_Y_OFF;
-    gsp_compute_set_mv_params(cp, &cp->matvec, w_va, x_va, y_va, rows, cols);
-
-    grid = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
     t0 = lx_ktime_get_ns();
-    if (launch_wait(cp, &cp->matvec, grid, "matvec-res") != 0) {
-        return -1;
+
+    if (rows <= G6_MAX_ROWS) {
+        if ((unsigned long)rows * 4ul > G6_RES_Y_BYTES) {
+            return -1;
+        }
+        memset(gy, 0, (unsigned long)rows * 4ul);
+        *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+        __asm__ __volatile__("mfence" ::: "memory");
+
+        gsp_compute_set_mv_params(cp, &cp->matvec, w_va, x_va, y_va, rows, cols);
+        grid = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
+        if (launch_wait(cp, &cp->matvec, grid, "matvec-res") != 0) {
+            return -1;
+        }
+        __asm__ __volatile__("mfence" ::: "memory");
+        memcpy(y, gy, (unsigned long)rows * 4ul);
+    } else {
+        unsigned row0, qmds = 0;
+
+        for (row0 = 0u; row0 < rows; row0 += G6_MAX_ROWS) {
+            unsigned n = (rows - row0) < G6_MAX_ROWS ? (rows - row0) : G6_MAX_ROWS;
+            uint64_t w_chunk = w_va + (uint64_t)row0 * (uint64_t)cols * 4ull;
+
+            if ((unsigned long)n * 4ul > G6_RES_Y_BYTES) {
+                return -1;
+            }
+            memset(gy, 0, (unsigned long)n * 4ul);
+            *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+            __asm__ __volatile__("mfence" ::: "memory");
+
+            gsp_compute_set_mv_params(cp, &cp->matvec, w_chunk, x_va, y_va, n,
+                                      cols);
+            grid = (n + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
+            if (launch_wait(cp, &cp->matvec, grid, "matvec-res") != 0) {
+                lx_printk("nouveau-lx: matvec residente — tanda falló "
+                          "(filas %u..%u de %u)\n", row0, row0 + n, rows);
+                return -1;
+            }
+            __asm__ __volatile__("mfence" ::: "memory");
+            memcpy(y + row0, gy, (unsigned long)n * 4ul);
+            qmds++;
+        }
+        t1 = lx_ktime_get_ns();
+        (void)t0;
+        (void)t1;
+        (void)qmds;
+        return 0;
     }
     t1 = lx_ktime_get_ns();
+    (void)t0;
+    (void)t1;
 
-    __asm__ __volatile__("mfence" ::: "memory");
-    memcpy(y, gy, (unsigned long)rows * 4ul);
-
-    if (rows != g_mv_res_last_rows || cols != g_mv_res_last_cols) {
-        g_mv_res_last_rows = rows;
-        g_mv_res_last_cols = cols;
-        lx_printk("nouveau-lx: matvec residente OK — %ux%u, 1 QMD, ~%llu us\n",
-                  rows, cols,
-                  (unsigned long long)((t1 - t0) / 1000ull));
-    }
     return 0;
 }
 
@@ -895,10 +959,6 @@ static struct gsp_kernel *q_kernel(struct gsp_compute *cp, unsigned dtype)
     }
 }
 
-static unsigned g_mvq_last_rows;
-static unsigned g_mvq_last_cols;
-static unsigned g_mvq_last_dtype;
-
 int gsp_compute_matvec_q_resident(struct gsp_compute *cp, struct gsp_ce *ce,
                                   uint64_t w_va, unsigned dtype, unsigned rows,
                                   unsigned cols, const float *x, float *y,
@@ -909,8 +969,6 @@ int gsp_compute_matvec_q_resident(struct gsp_compute *cp, struct gsp_ce *ce,
     unsigned grid;
     float *gx, *gy;
     uint64_t x_va, y_va;
-    extern uint64_t lx_ktime_get_ns(void);
-    uint64_t t0, t1;
 
     if (!cp || !cp->ready || !ce || !x || !y || rows == 0u || cols == 0u ||
         w_va == 0) {
@@ -953,27 +1011,239 @@ int gsp_compute_matvec_q_resident(struct gsp_compute *cp, struct gsp_ce *ce,
     gsp_compute_set_mv_params(cp, k, w_va, x_va, y_va, rows, cols);
 
     grid = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
-    t0 = lx_ktime_get_ns();
     if (launch_wait(cp, k, grid, k->name) != 0) {
         return -1;
     }
-    t1 = lx_ktime_get_ns();
 
     __asm__ __volatile__("mfence" ::: "memory");
     memcpy(y, gy, (unsigned long)rows * 4ul);
 
-    /* Una línea por FORMA, no por matvec: son cientos por token. */
-    if (rows != g_mvq_last_rows || cols != g_mvq_last_cols ||
-        dtype != g_mvq_last_dtype) {
-        g_mvq_last_rows = rows;
-        g_mvq_last_cols = cols;
-        g_mvq_last_dtype = dtype;
-        lx_printk("nouveau-lx: matvec residente %s OK — %ux%u sin expandir, "
-                  "1 QMD, ~%llu us\n",
-                  k->name, rows, cols,
-                  (unsigned long long)((t1 - t0) / 1000ull));
+    return 0;
+}
+
+int gsp_compute_matmul_resident(struct gsp_compute *cp, struct gsp_ce *ce,
+                                uint64_t w_va, unsigned rows, unsigned cols,
+                                unsigned n, const float *x, float *y,
+                                uint64_t scratch_va, void *scratch_cpu)
+{
+    unsigned batch0, grid_x, grid_y, max_n;
+    float *gx, *gy;
+    uint64_t x_va, y_va;
+
+    if (!cp || !cp->ready || !ce || !x || !y || rows == 0u || cols == 0u ||
+        n == 0u || w_va == 0) {
+        return -1;
+    }
+    if (!cp->res_mapped) {
+        return -1;
+    }
+    if (cols > G5_MAX_COLS) {
+        return -1;
+    }
+    if (gsp_compute_stage_sass(cp, ce, &cp->matmul, scratch_va, scratch_cpu,
+                               G4F_STAGE_CHUNK) != 0) {
+        return -1;
+    }
+
+    max_n = G6_RES_X_BYTES / ((unsigned long)cols * 4ul);
+    if (max_n == 0u) {
+        return -1;
+    }
+    if (max_n > G6_RES_Y_BYTES / ((unsigned long)rows * 4ul)) {
+        max_n = G6_RES_Y_BYTES / ((unsigned long)rows * 4ul);
+    }
+    if (max_n == 0u) {
+        return -1;
+    }
+
+    gx = (float *)cp_res(cp, G6_RES_X_OFF);
+    gy = (float *)cp_res(cp, G6_RES_Y_OFF);
+    x_va = cp->res_va + G6_RES_X_OFF;
+    y_va = cp->res_va + G6_RES_Y_OFF;
+
+    for (batch0 = 0u; batch0 < n; batch0 += max_n) {
+        unsigned bn = (n - batch0) < max_n ? (n - batch0) : max_n;
+
+        memcpy(gx, x + (unsigned long)batch0 * cols,
+               (unsigned long)bn * cols * 4ul);
+        memset(gy, 0, (unsigned long)bn * rows * 4ul);
+        *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+        __asm__ __volatile__("mfence" ::: "memory");
+
+        gsp_compute_set_matmul_params(cp, &cp->matmul, w_va, x_va, y_va,
+                                      rows, cols, bn);
+        grid_x = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
+        grid_y = bn;
+        if (launch_wait_sem(cp, &cp->matmul, grid_x, grid_y, 0u,
+                            "matmul-res") != 0) {
+            return -1;
+        }
+        __asm__ __volatile__("mfence" ::: "memory");
+        memcpy(y + (unsigned long)batch0 * rows, gy,
+               (unsigned long)bn * rows * 4ul);
     }
     return 0;
+}
+
+int gsp_compute_softmax_rows(struct gsp_compute *cp, struct gsp_ce *ce,
+                             float *x, unsigned rows, unsigned cols,
+                             uint64_t scratch_va, void *scratch_cpu)
+{
+    float *gx;
+    uint64_t x_va;
+    unsigned grid;
+
+    if (!cp || !cp->ready || !ce || !x || rows == 0u || cols == 0u) {
+        return -1;
+    }
+    if (!cp->res_mapped) {
+        return -1;
+    }
+    if ((unsigned long)cols * 4ul > G6_RES_X_BYTES ||
+        (unsigned long)rows * cols * 4ul > G6_RES_X_BYTES) {
+        return -1;
+    }
+    if (gsp_compute_stage_sass(cp, ce, &cp->softmax_rows, scratch_va,
+                               scratch_cpu, G4F_STAGE_CHUNK) != 0) {
+        return -1;
+    }
+
+    gx = (float *)cp_res(cp, G6_RES_X_OFF);
+    memcpy(gx, x, (unsigned long)rows * cols * 4ul);
+    x_va = cp->res_va + G6_RES_X_OFF;
+    *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+    __asm__ __volatile__("mfence" ::: "memory");
+
+    {
+        unsigned char *p = cbank_prepare(cp, &cp->softmax_rows);
+        *(uint64_t *)(p + cp->softmax_rows.param_off[0]) = x_va;
+        *(uint32_t *)(p + cp->softmax_rows.param_off[1]) = rows;
+        *(uint32_t *)(p + cp->softmax_rows.param_off[2]) = cols;
+        __asm__ __volatile__("mfence" ::: "memory");
+    }
+
+    grid = rows;
+    if (launch_wait_sem(cp, &cp->softmax_rows, grid, 1u, 0u, "softmax") != 0) {
+        return -1;
+    }
+    __asm__ __volatile__("mfence" ::: "memory");
+    memcpy(x, gx, (unsigned long)rows * cols * 4ul);
+    return 0;
+}
+
+int gsp_compute_layernorm_rows(struct gsp_compute *cp, struct gsp_ce *ce,
+                               float *x, const float *weight, const float *bias,
+                               unsigned rows, unsigned cols, float eps,
+                               uint64_t scratch_va, void *scratch_cpu)
+{
+    float *gx, *gw, *gb;
+    uint64_t x_va, w_va, b_va;
+    unsigned grid;
+
+    if (!cp || !cp->ready || !ce || !x || !weight || !bias || rows == 0u ||
+        cols == 0u) {
+        return -1;
+    }
+    if (!cp->res_mapped) {
+        return -1;
+    }
+    if ((unsigned long)rows * cols * 4ul + (unsigned long)cols * 8ul >
+        G6_RES_X_BYTES) {
+        return -1;
+    }
+    if (gsp_compute_stage_sass(cp, ce, &cp->layernorm_rows, scratch_va,
+                               scratch_cpu, G4F_STAGE_CHUNK) != 0) {
+        return -1;
+    }
+
+    gx = (float *)cp_res(cp, G6_RES_X_OFF);
+    gw = gx + rows * cols;
+    gb = gw + cols;
+    memcpy(gx, x, (unsigned long)rows * cols * 4ul);
+    memcpy(gw, weight, (unsigned long)cols * 4ul);
+    memcpy(gb, bias, (unsigned long)cols * 4ul);
+    x_va = cp->res_va + G6_RES_X_OFF;
+    w_va = cp->res_va + (unsigned long)rows * cols * 4ul;
+    b_va = w_va + (unsigned long)cols * 4ul;
+    *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+    __asm__ __volatile__("mfence" ::: "memory");
+
+    {
+        unsigned char *p = cbank_prepare(cp, &cp->layernorm_rows);
+        *(uint64_t *)(p + cp->layernorm_rows.param_off[0]) = x_va;
+        *(uint64_t *)(p + cp->layernorm_rows.param_off[1]) = w_va;
+        *(uint64_t *)(p + cp->layernorm_rows.param_off[2]) = b_va;
+        *(uint32_t *)(p + cp->layernorm_rows.param_off[3]) = rows;
+        *(uint32_t *)(p + cp->layernorm_rows.param_off[4]) = cols;
+        *(float *)(p + cp->layernorm_rows.param_off[5]) = eps;
+        __asm__ __volatile__("mfence" ::: "memory");
+    }
+
+    grid = rows;
+    if (launch_wait_sem(cp, &cp->layernorm_rows, grid, 1u, 0u,
+                        "layernorm") != 0) {
+        return -1;
+    }
+    __asm__ __volatile__("mfence" ::: "memory");
+    memcpy(x, gx, (unsigned long)rows * cols * 4ul);
+    return 0;
+}
+
+int gsp_compute_launch_enqueue(struct gsp_compute *cp, const struct gsp_kernel *k,
+                               unsigned grid_x, unsigned grid_y,
+                               unsigned sem_slot, const char *what)
+{
+    GspQmdV05 qmd;
+    unsigned pb_off = 0, pb_len = 0;
+
+    if (!cp || !k || sem_slot >= G4F_SEM_COUNT) {
+        return -1;
+    }
+    *(uint32_t *)cp_data(cp, G4F_SEM_SLOT(sem_slot)) = 0;
+    __asm__ __volatile__("mfence" ::: "memory");
+    gsp_compute_fill_qmd_grid(cp, k, &qmd, grid_x, grid_y, sem_slot);
+    if (gsp_compute_encode_qmd(cp, &qmd, &pb_off, &pb_len) != 0) {
+        if (gsp_chan_pb_rewind(cp->chan) != 0 ||
+            gsp_compute_encode_qmd(cp, &qmd, &pb_off, &pb_len) != 0) {
+            lx_printk("nouveau-lx: %s — pushbuffer lleno\n", what);
+            return -1;
+        }
+    }
+    if (gsp_chan_submit(cp->chan, pb_off, pb_len) != 0) {
+        return -1;
+    }
+    return (int)sem_slot;
+}
+
+int gsp_compute_wait_fence(struct gsp_compute *cp, unsigned sem_slot)
+{
+    const volatile uint32_t *sem;
+    unsigned waited;
+    extern uint64_t lx_ktime_get_ns(void);
+
+    if (!cp || sem_slot >= G4F_SEM_COUNT) {
+        return -1;
+    }
+    sem = (const volatile uint32_t *)cp_data(cp, G4F_SEM_SLOT(sem_slot));
+    {
+        uint64_t t_fin = lx_ktime_get_ns() + (uint64_t)G4F_SPIN_US * 1000ull;
+        do {
+            __asm__ __volatile__("mfence" ::: "memory");
+            if (*sem == G4F_SEM_PAYLOAD) {
+                gsp_chan_ack_progress(cp->chan);
+                return 0;
+            }
+        } while (lx_ktime_get_ns() < t_fin);
+    }
+    for (waited = 0; waited <= G4F_WAIT_MS; waited++) {
+        __asm__ __volatile__("mfence" ::: "memory");
+        if (*sem == G4F_SEM_PAYLOAD) {
+            gsp_chan_ack_progress(cp->chan);
+            return 0;
+        }
+        lx_mdelay(1);
+    }
+    return -1;
 }
 
 void gsp_compute_fini(struct gsp_compute *cp)

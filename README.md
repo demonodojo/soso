@@ -1,15 +1,31 @@
 # soso
 
-A minimalist learning operating system in Rust: bare-metal x86_64 kernel, custom
-copy-on-write filesystem with checksums (sosofs), LLM model storage on a second
-disk (sosomfs), real SSH access, and a growing native NVIDIA GPU stack (L6).
-Single-user by design.
+**soso** is a bare-metal x86_64 operating system written in Rust: own kernel,
+copy-on-write filesystem with checksums (sosofs), a second read-only disk for
+LLM models (sosomfs), real SSH, WiFi and Ethernet on real hardware, voice
+recognition, a minimal web browser, over-the-air updates, and a native NVIDIA GPU
+stack (L6). Single-user by design — one session at a time, no Unix permissions.
 
-**Goal:** boot in QEMU, connect with `ssh -p 2222 localhost` using an ed25519 key,
-use **sosh** with pipes, redirections, and per-process working directories, and run
-LLM inference with **soso-llm**.
+Use it in **QEMU** for development, on a **live USB** on real machines, or
+**installed to NVMe** with UEFI dual-boot alongside Linux.
 
-End-user guide: [`MANUAL-USUARIO.md`](MANUAL-USUARIO.md) (Spanish).
+End-user guide (Spanish): [`MANUAL-USUARIO.md`](MANUAL-USUARIO.md)
+
+## At a glance
+
+| Area | What you get |
+|------|----------------|
+| **Shell** | **sosh** — pipes, redirections, `cd`/`pwd`, WiFi builtins, `ask` to the LLM |
+| **LLM** | **soso-llm** + **ask** (resident daemon); models in `/models/`; MoE, MLA, Qwen, GPU offload |
+| **Models** | **soso-hf** pulls GGUF from Hugging Face inside soso; host tools convert GGUF → `.som` |
+| **Voice** | **soso-voz** / **voz** — Whisper ASR via mic or WAV; push-to-talk (F4) |
+| **Web** | **soso-web** — HTTPS fetch, HTML→text or framebuffer GUI (no JavaScript) |
+| **Install** | **soso-install** — clone live USB to NVMe from soso, no Linux required |
+| **Updates** | **soso-update** — apply GitHub Releases (rootfs + kernel with rollback) |
+| **Network** | DHCP, SSH-2, WiFi (Intel AX211/AX200), Realtek r8169 on live USB |
+| **GPU** | lxdde + nouveau/nvkm; matvec on GB205; optional CUDA hybrid (L6-H) |
+
+Version: [`VERSION`](VERSION) (e.g. `0.2.0`); shown at boot and in `/etc/soso-release`.
 
 ## Requirements
 
@@ -27,8 +43,16 @@ cargo xtask build          # compile kernel → target/soso-bios.img
 cargo xtask run            # build + QEMU q35, serial console on stdio
 cargo xtask gdb            # like run, frozen at boot; gdb -ex 'target remote :1234'
 cargo xtask test           # integration: FS, boot, TCP, SSH, soso-llm, halt
-cargo xtask fetch-hf     # host: Hugging Face → GGUF → .som
+cargo xtask fetch-hf       # host: Hugging Face → GGUF → .som
 cargo xtask convert-gguf   # host: GGUF → .som layout
+cargo xtask package-usb-live   # single GPT image for live USB / install
+cargo xtask release        # pack release artifacts (manifest + rootfs.pack + kernel)
+```
+
+**Live USB on real hardware:**
+
+```sh
+cargo xtask flash-usb-live /dev/sdX --yes   # flash stick (picks best model that fits)
 ```
 
 With soso running (`cargo xtask run`), in another terminal:
@@ -36,7 +60,9 @@ With soso running (`cargo xtask run`), in another terminal:
 ```sh
 nc localhost 7777                                              # TCP echo
 ssh -tt -i target/soso_test_key -p 2222 soso@localhost         # encrypted shell
-soso-llm run tiny --prompt hola                                # LLM inference
+ask hola                                                       # LLM via resident askd
+soso-llm run tiny --prompt hola                                # one-shot LLM inference
+soso-web --local /etc/web-prueba.html                          # minimal browser
 soso-llm run tinyllama-q4km --cuda-host 10.0.2.2:11400 --prompt hola --max 32   # L6-H (host CUDA)
 ```
 
@@ -51,12 +77,13 @@ Guest network: DHCP at boot, fallback **10.0.2.15/24** in QEMU slirp. Port forwa
 | Path | Role |
 |------|------|
 | `kernel/` | `no_std` kernel (`x86_64-unknown-none`, outside root workspace) |
-| `xtask/` | Disk images, mkfs, QEMU launcher, integration tests |
-| `crates/` | sosofs, sosomfs, soso-abi, soso-llm-core, sosomodel, block-dev, soso-gpu, xhci-nostd |
-| `tools/` | mkfs-soso, mkfs-sosomfs, mkmodel-soso, convert-gguf, ssh-proto, cuda-proxy |
-| `user/` | libsoso, init, sosh, coreutils, soso-llm |
-| `rootfs/` | Source tree embedded into the data disk by mkfs-soso — see [`rootfs/README.md`](rootfs/README.md) |
-| `lxdde/` | Linux-style DDE layer (`lx_emul`) for ported C drivers (e1000e, nouveau/nvkm) |
+| `boot-shim/` | UEFI shim: BOOTMARK, install/update mailbox, chainload |
+| `xtask/` | Disk images, mkfs, QEMU, releases, integration tests |
+| `crates/` | sosofs, sosomfs, soso-abi, soso-llm-core, soso-http, soso-update-core, soso-web-core, soso-audio, soso-gpu, … |
+| `tools/` | mkfs-soso, mkfs-sosomfs, mkmodel-soso, convert-gguf, convert-whisper, cuda-proxy |
+| `user/` | libsoso, init, sosh, soso-llm, soso-voz, soso-web, soso-hf, soso-update, soso-install, coreutils |
+| `rootfs/` | Source tree embedded into the data disk — see [`rootfs/README.md`](rootfs/README.md) |
+| `lxdde/` | Linux-style DDE layer (`lx_emul`) for ported C drivers (e1000e, nouveau/nvkm, iwlwifi) |
 | `docs/` | Architecture notes (L5c on-box, L6 GPU roadmap) |
 
 ## What is implemented
@@ -77,31 +104,40 @@ Guest network: DHCP at boot, fallback **10.0.2.15/24** in QEMU slirp. Port forwa
 
 ### Shell and userspace
 
-- [x] **sosh** — pipes `|`, redirections `>`, `>>`, `<`, builtins `cd`/`pwd`/`help`/`exit`
+- [x] **sosh** — pipes `|`, redirections `>`, `>>`, `<`, builtins `cd`/`pwd`/`help`/`exit`/`wifi`/`ask`/`voz`
 - [x] **Per-process cwd** — relative paths resolve against the process working directory
 - [x] **Coreutils** — `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `halt`
-- [x] **init** — PID 1, relaunches sosh; `init test` runs syscall regression suite
-- [x] **SIMD** — userspace built with AVX2+FMA kernels in soso-llm-core; FPU state preserved with xsave64 across context switches
+- [x] **init** — PID 1, relaunches sosh; confirms kernel updates; `init test` runs syscall regression suite
+- [x] **soso-voz** — Whisper ASR daemon (`vozd`), mic capture (Intel HDA), push-to-talk
+- [x] **soso-web** — HTTPS client, HTML reflow or framebuffer GUI (fontdue + DejaVu)
+- [x] **soso-hf** — download/import GGUF models from Hugging Face Hub inside soso
+- [x] **soso-install** — native live→NVMe installer with GPT relayout and UEFI boot entry
+- [x] **soso-update** — OTA updates from GitHub Releases (rootfs pack + kernel slot with rollback)
+- [x] **SIMD** — userspace AVX2+FMA; FPU state preserved with xsave64 across context switches
 
 ### LLM stack
 
 - [x] **sosomfs** — second virtio-blk disk, model shards under `/models/<name>/`
 - [x] **.som format** — manifest, index, tokenizer, quantized tensor shards (F32, Q8_0, Q4_K)
 - [x] **soso-llm-core** — full Llama-style pipeline: RoPE, GQA, SwiGLU, KV cache, greedy/temp/top-p sampling, streaming decode
-- [x] **soso-llm** — userspace CLI (`run`, distributed `node`/`worker` modes)
+- [x] **soso-llm** — userspace CLI (`run`, `askd`, distributed `node`/`worker` modes)
+- [x] **ask** — sosh builtin; talks to resident `askd` on `127.0.0.1:7420` (quotes and UTF-8 safe)
 - [x] **Host tools** — `cargo xtask convert-gguf`, synthetic tiny/bench models via mkmodel-soso
 - [x] **Custom models** — `SOSO_MODELS_DIR=<dir> cargo xtask run`
 - [x] **Distributed inference** — multi-QEMU pipeline over socket netdev (`cargo xtask test-distributed-llm`)
 - [x] **SMP benchmark** — `cargo xtask bench-llm` (decode tok/s vs worker count)
 
-### Deployment and packaging
+### Deployment, install and updates
 
 - [x] **Classic USB package** — `cargo xtask package-usb` (UEFI + separate data/models images)
 - [x] **Live USB image** — `cargo xtask package-usb-live` (single GPT stick: ESP + sosofs + sosomfs); see [`docs/L5c-on-box.md`](docs/L5c-on-box.md)
-- [x] **Live USB + installer** — `sudo cargo xtask flash-usb-live /dev/sdX --yes` (`install-soso.sh` on SOSOINSTALL partition)
-- [x] **Native installer** — `soso-install` runs inside soso from the live stick: partition-aware safety checks, GPT relayout to the target disk and a UEFI `Boot####` entry registered by the boot shim. No Linux involved at any point
-- [x] **Dual-boot UEFI + Linux** — `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` (dedicated disk + GRUB entry), or `install-soso.sh --grub-only` as a fallback
-- [x] **QEMU live mode** — `SOSO_QEMU_LIVE=1 cargo xtask run`; full install flow: `cargo xtask test-install`
+- [x] **Flash live USB** — `sudo cargo xtask flash-usb-live /dev/sdX --yes` (auto-picks largest GGUF that fits)
+- [x] **Native installer** — `soso-install` from live stick: safety checks, block clone, GPT relayout, UEFI `Boot####` via boot-shim
+- [x] **OTA updates** — `soso-update` from installed system; releases via `cargo xtask release [--publish]`
+- [x] **Versioning** — `VERSION` file → `/etc/soso-release` + kernel banner; semver compare in updates
+- [x] **Dual-boot UEFI + Linux** — `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` (host-side), or native install
+- [x] **QEMU live mode** — `SOSO_QEMU_LIVE=1 cargo xtask run`; install flow: `cargo xtask test-install`; update flow: `cargo xtask test-update`
+- [x] **Persistent logs** — `cargo xtask sosolog` reads `SOSOLOG.TXT` / `SOSODRV.TXT` from live ESP
 
 ### lxdde and native GPU (L6 — G1→G5 GO on GB205)
 
@@ -150,7 +186,11 @@ Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G
 |---------|--------|
 | `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
 | `cargo xtask package-usb-live` | Single GPT image (ESP + sosofs + sosomfs) for USB or install |
-| `sudo cargo xtask flash-usb-live /dev/sdX --yes` | Flash live USB + SOSOINSTALL partition with `install-soso.sh` |
+| `sudo cargo xtask flash-usb-live /dev/sdX --yes` | Flash live USB (model sized to stick) |
+| `cargo xtask release [--publish]` | Pack release (`manifest.txt`, `rootfs.pack`, `kernel-x86_64`); `--publish` → GitHub Releases |
+| `cargo xtask test-install` | E2E native install (OVMF, 3 boots) |
+| `cargo xtask test-update` | E2E local update (`soso-update aplicar --local`) |
+| `cargo xtask sosolog [--drv]` | Read `SOSOLOG.TXT` / `SOSODRV.TXT` from live USB ESP |
 | `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot: write live image to empty disk + GRUB entry |
 | `cargo xtask lx-build [port\|all]` | Build `liblxdde.a` (spike, testdrv, e1000e, nouveau) |
 | `cargo xtask g1-check` | Host checklist: IOMMU/VFIO, firmware, BAR0 |

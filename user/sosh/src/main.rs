@@ -1,6 +1,6 @@
 //! sosh: la shell de soso. Pipes (`|`) y redirecciones (`<`, `>`, `>>`).
 //! Una línea puede ser un pipeline de comandos de /bin, más los builtins
-//! `exit`, `help`, `cd`, `pwd` y `ask`.
+//! `exit`, `help`, `cd`, `pwd`, `wifi` y `ask`.
 //!
 //! `ask` es el único que se resuelve **antes** de tokenizar: todo lo que va
 //! detrás es el texto de la pregunta, con sus comillas, sus tildes y sus `|` o
@@ -24,13 +24,17 @@ const PROMPT: &str = "$ ";
 /// Demonio de sesión de máquina (modelo residente entre preguntas y SSH).
 const ASKD: &str = "/bin/soso-llm";
 const ASK_ADDR: &str = "127.0.0.1:7420";
+const VOZD: &str = "/bin/soso-voz";
 const PROTO_FIN: u8 = 0xFF;
 const LINE_MAX: usize = 1024;
 const CONF: &str = "/etc/llm.conf";
 
 fn main(_args: &str) -> u8 {
+    let shell_pgid = sys::getpid();
+    let _ = sys::setsid();
+    let _ = sys::tcsetpgrp(shell_pgid);
     println!("sosh — escribe 'help' para la ayuda");
-    let mut lector = Lector::new();
+    let mut lector = Lector::new().con_hook_ptt(hook_ptt);
     loop {
         print!("{PROMPT}");
         let Some(cmd) = lector.siguiente() else {
@@ -259,10 +263,22 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
         pids.push(pid);
     }
 
+    if let Some(&first) = pids.first() {
+        for &pid in &pids {
+            let _ = sys::setpgid(pid as u64, first as u64);
+        }
+        let _ = sys::tcsetpgrp(first as u64);
+    }
+
+    let shell_pgid = sys::getpid();
     let mut fallo = false;
     for (cmd, pid) in cmds.iter().zip(pids.iter()) {
         match wait_pid(*pid as u64) {
             Ok(0) => {}
+            Ok(130) => {
+                println!("sosh: [{} interrumpido]", cmd.prog);
+                fallo = true;
+            }
             Ok(code) => {
                 println!("sosh: [{} salió con código {code}]", cmd.prog);
                 fallo = true;
@@ -273,15 +289,95 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
             }
         }
     }
+    let _ = sys::tcsetpgrp(shell_pgid);
     let _ = fallo;
     None
 }
 
+fn wifi_uso() {
+    println!("uso: wifi scan | status | connect <ssid> [psk]");
+}
+
+fn ejecutar_wifi(args: &str) {
+    let args = args.trim();
+    if args.is_empty() {
+        wifi_uso();
+        return;
+    }
+    if args == "scan" {
+        let mut bss = [abi::WifiBss::default(); abi::WIFI_SCAN_MAX];
+        let r = sys::wifi_scan(&mut bss);
+        if r < 0 {
+            println!("sosh: wifi scan: {}", errno_str(r));
+            return;
+        }
+        if r == 0 {
+            println!("wifi: ninguna red");
+            return;
+        }
+        for e in &bss[..r as usize] {
+            let n = (e.ssid_len as usize).min(abi::WIFI_SSID_MAX);
+            let ssid = core::str::from_utf8(&e.ssid[..n]).unwrap_or("?");
+            let sec = if e.open != 0 { "abierta" } else { "WPA" };
+            println!("  {ssid}: {} dBm, canal {}, {sec}", e.rssi, e.channel);
+        }
+        return;
+    }
+    if args == "status" {
+        let mut st = abi::WifiStatus::default();
+        let r = sys::wifi_status(&mut st);
+        if r < 0 {
+            println!("sosh: wifi status: {}", errno_str(r));
+            return;
+        }
+        if st.flags & abi::WIFI_FLAG_PRESENT == 0 {
+            println!("wifi: no hay adaptador");
+            return;
+        }
+        let phase_n = st.phase.iter().position(|&b| b == 0).unwrap_or(st.phase.len());
+        let phase = core::str::from_utf8(&st.phase[..phase_n]).unwrap_or("?");
+        println!(
+            "wifi: alive={} connected={} phase={}",
+            st.flags & abi::WIFI_FLAG_ALIVE != 0,
+            st.flags & abi::WIFI_FLAG_CONNECTED != 0,
+            phase
+        );
+        println!(
+            "  mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            st.mac[0], st.mac[1], st.mac[2], st.mac[3], st.mac[4], st.mac[5]
+        );
+        return;
+    }
+    if let Some(rest) = args.strip_prefix("connect") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            wifi_uso();
+            return;
+        }
+        let (ssid, psk) = match rest.split_once(char::is_whitespace) {
+            Some((s, p)) => (s, Some(p.trim())),
+            None => (rest, None),
+        };
+        let r = sys::wifi_connect(ssid, psk);
+        if r < 0 {
+            println!("sosh: wifi connect: {}", errno_str(r));
+        } else {
+            println!("wifi: asociado a '{ssid}'");
+        }
+        return;
+    }
+    wifi_uso();
+}
+
 fn ayuda() {
-    println!("builtins: exit [código], help, cd, pwd, ask");
+    println!("builtins: exit [código], help, cd, pwd, wifi, ask, voz");
+    println!("wifi:     wifi scan | status | connect <ssid> [psk]");
     println!("ask:      ask <pregunta>  — el texto va literal al modelo");
     println!("          ask             — modo interactivo (Ctrl-D o «salir»)");
     println!("          /bin/ask-modelo — elegir el modelo que usa ask");
+    println!("voz:      voz             — dictar; Enter confirma la línea");
+    println!("          voz ask         — prefija «ask » al dictado");
+    println!("          F4              — push-to-talk en la línea");
     println!("comandos: ELF de /bin o ruta absoluta");
     println!("pipes:    cmd1 | cmd2 | cmd3");
     println!("redirect: cmd > fichero, cmd >> fichero, cmd < fichero");
@@ -481,6 +577,100 @@ fn modelo_efectivo(conf_modelo: &str) -> Option<String> {
     disponibles.into_iter().next()
 }
 
+fn hook_ptt() -> Option<String> {
+    transcribir_voz(":escucha")
+}
+
+fn spawn_vozd() -> Result<u64, i64> {
+    let rc = sys::spawn_io(
+        VOZD,
+        "vozd",
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+    );
+    if rc < 0 { Err(rc) } else { Ok(rc as u64) }
+}
+
+fn transcribir_voz(cmd: &str) -> Option<String> {
+    const VOZ_ADDR: &str = "127.0.0.1:7421";
+    let addr = parse_sock_addr(VOZ_ADDR)?;
+    for intento in 0..100 {
+        let fd = sys::tcp_connect(&addr, if intento == 0 { 2_000 } else { 100 });
+        if fd < 0 {
+            if intento == 0 {
+                let _ = spawn_vozd();
+            }
+            let _ = sys::sleep_ms(50);
+            continue;
+        }
+        let fd = fd as u64;
+        let mut req = cmd.as_bytes().to_vec();
+        req.push(b'\n');
+        if sys::write_all(fd, &req).is_err() {
+            sys::close(fd);
+            continue;
+        }
+        let mut out = Vec::new();
+        let mut buf = [0u8; 256];
+        loop {
+            let n = sys::read_timeout(fd, &mut buf, 120_000);
+            if n <= 0 {
+                break;
+            }
+            for &b in &buf[..n as usize] {
+                if b == PROTO_FIN {
+                    sys::close(fd);
+                    return String::from_utf8(out).ok();
+                }
+                out.push(b);
+            }
+        }
+        sys::close(fd);
+    }
+    None
+}
+
+fn ejecutar_voz(texto: &str) -> Option<u8> {
+    let (prefijo, resto_ask) = if let Some(rest) = resto_de("ask", texto) {
+        if rest.is_empty() {
+            ("ask ", false)
+        } else {
+            // voz ask <extra>: el dictado se concatena tras «ask <extra>»
+            match transcribir_voz(":escucha") {
+                Some(t) => {
+                    let linea = format!("ask {rest}{t}");
+                    return ejecutar(&linea);
+                }
+                None => {
+                    println!("voz: error de transcripción");
+                    return None;
+                }
+            }
+        }
+    } else if texto.is_empty() {
+        ("", false)
+    } else {
+        (texto, false)
+    };
+    let _ = resto_ask;
+    match transcribir_voz(":escucha") {
+        Some(t) => {
+            let linea = format!("{prefijo}{t}");
+            print!("{PROMPT}");
+            let mut lector = Lector::new().con_texto_inicial(&linea);
+            let Some(cmd) = lector.siguiente() else {
+                return Some(0);
+            };
+            ejecutar(&cmd)
+        }
+        None => {
+            println!("voz: error de transcripción");
+            None
+        }
+    }
+}
+
 fn repl_ask() -> Option<u8> {
     let (conf_modelo, max) = leer_conf_modelo();
     let Some(modelo) = modelo_efectivo(&conf_modelo) else {
@@ -545,6 +735,9 @@ fn ejecutar(line: &str) -> Option<u8> {
     if let Some(texto) = resto_de("ask", line) {
         return ejecutar_ask(texto);
     }
+    if let Some(texto) = resto_de("voz", line) {
+        return ejecutar_voz(texto);
+    }
 
     let tokens = tokenize(line);
     let cmds = match parse(&tokens) {
@@ -587,6 +780,10 @@ fn ejecutar(line: &str) -> Option<u8> {
                     let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
                     println!("{}", core::str::from_utf8(&buf[..n]).unwrap_or("?"));
                 }
+                return None;
+            }
+            "wifi" => {
+                ejecutar_wifi(cmds[0].args.trim());
                 return None;
             }
             _ => {}

@@ -62,7 +62,22 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_bytes_estimate: 39 * 1024 * 1024 * 1024,
         min_usb_bytes: 64 * 1024 * 1024 * 1024,
     },
+    LiveModelSpec {
+        name: "qwen3.8-27b",
+        repo: "ggml-org/Qwen3.8-27B-GGUF",
+        gguf_file: Some("Qwen3.8-27B-Q4_K_M.gguf"),
+        gguf_bytes_estimate: 19 * 1024 * 1024 * 1024,
+        min_usb_bytes: 32 * 1024 * 1024 * 1024,
+    },
 ];
+
+/// Modelo demo de `package-usb-live` cuando no hay pendrive ni `SOSO_LIVE_CAPACITY`.
+pub fn default_live_spec() -> LiveModelSpec {
+    *CATALOG
+        .iter()
+        .find(|s| s.name == "qwen3.8-27b")
+        .expect("qwen3.8-27b en CATALOG")
+}
 
 impl LiveModelSpec {
     pub fn target_dir(&self, root: &Path) -> PathBuf {
@@ -343,6 +358,11 @@ mod tests {
     }
 
     #[test]
+    fn default_live_es_qwen38() {
+        assert_eq!(default_live_spec().name, "qwen3.8-27b");
+    }
+
+    #[test]
     fn pick_8g_tinyllama() {
         let usb = 8 * 1024 * 1024 * 1024;
         let spec = pick_for_usb(usb, 64 * 1024 * 1024, 512 * 1024 * 1024, &root());
@@ -357,17 +377,17 @@ mod tests {
     }
 
     #[test]
-    fn pick_30g_mixtral() {
+    fn pick_30g_qwen38() {
         let usb = 32 * 1024 * 1024 * 1024;
         let spec = pick_for_usb(usb, 64 * 1024 * 1024, 512 * 1024 * 1024, &root());
-        assert_eq!(spec.name, "mixtral");
+        assert_eq!(spec.name, "qwen3.8-27b");
     }
 
     #[test]
-    fn pick_50g_llama2_70b() {
+    fn pick_64g_sigue_qwen38() {
         let usb = 64 * 1024 * 1024 * 1024;
         let spec = pick_for_usb(usb, 64 * 1024 * 1024, 512 * 1024 * 1024, &root());
-        assert_eq!(spec.name, "llama2-70b");
+        assert_eq!(spec.name, "qwen3.8-27b");
     }
 
     #[test]

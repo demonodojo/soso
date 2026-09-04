@@ -266,10 +266,11 @@ fn run_host_tests(root: &Path, report: &Arc<Report>) {
             run_cargo_test_batch(
                 &root_b,
                 &report_b,
-                "host (gptdisk+soso-http+sosomodel+convert-gguf+cuda-proxy)",
+                "host (gptdisk+soso-http+soso-web-core+sosomodel+convert-gguf+cuda-proxy)",
                 &[
                     "gptdisk",
                     "soso-http",
+                    "soso-web-core",
                     "sosomodel",
                     "convert-gguf",
                     "cuda-proxy",
@@ -505,6 +506,12 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report) {
         let _ = report.paso(sid, &format!("echo TCP en :{echo}"), || echo_tcp(echo));
         let _ = report.paso_con_reintento(sid, "ask: el texto llega literal", || {
             ssh_ask_literal(key, port)
+        });
+        let _ = report.paso_con_reintento(sid, "voz: transcribe WAV de prueba", || {
+            ssh_voz_wav(key, port)
+        });
+        let _ = report.paso_con_reintento(sid, "soso-web: HTML local", || {
+            ssh_soso_web_local(key, port)
         });
         let _ = report.paso_con_reintento(sid, "init test (syscalls, hilos, FPU, GPU)", || {
             ssh_init_test(key, port)
@@ -1193,6 +1200,44 @@ fn ssh_pipeline(key: &Path, ssh_port: u16) -> Result<(), String> {
             "el pipeline entregó {} bytes y el fichero ×2 son {}",
             cuerpo.trim_end().len(),
             esperado.trim_end().len()
+        ));
+    }
+    Ok(())
+}
+
+/// Transcripción determinista desde fichero WAV (no requiere micrófono).
+fn ssh_voz_wav(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let guion = "soso-voz dictar --wav /etc/voz-prueba.wav --max-tokens 128\nexit\n";
+    let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(180))?;
+    if !texto.contains("soso-voz: transcrito") {
+        return Err(format!(
+            "voz WAV no devolvió «soso-voz: transcrito»; stdout: {texto:?}"
+        ));
+    }
+    let transcrito = texto
+        .lines()
+        .find(|l| l.contains("soso-voz: transcrito"))
+        .unwrap_or("");
+    let cuerpo = transcrito.split('—').nth(1).unwrap_or("").trim();
+    if cuerpo.is_empty() || !cuerpo.chars().any(|c| c.is_alphabetic()) {
+        return Err(format!(
+            "voz WAV devolvió transcripción vacía o sin texto; stdout: {texto:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn ssh_soso_web_local(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let guion = "soso-web --local /etc/web-prueba.html\nq\nexit\n";
+    let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
+    if !texto.contains("Página de prueba") {
+        return Err(format!(
+            "soso-web no mostró la página de prueba; stdout: {texto:?}"
+        ));
+    }
+    if !texto.contains("[1]") {
+        return Err(format!(
+            "soso-web no listó enlaces numerados; stdout: {texto:?}"
         ));
     }
     Ok(())

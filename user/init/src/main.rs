@@ -11,6 +11,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use libsoso::abi;
 use libsoso::{print, println, sys};
+use soso_abi::UPD_WHICH_MAILBOX;
+use soso_update_core::mailbox::{Mailbox, MailboxCmd};
 
 libsoso::entry!(main);
 
@@ -36,6 +38,14 @@ fn main(args: &str) -> u8 {
     if args == "hijo" {
         println!("hijo: hola, me voy con código 7");
         return 7;
+    }
+    if let Some(rest) = args.strip_prefix("sleep ") {
+        let ms = rest
+            .trim()
+            .bytes()
+            .fold(0u64, |acc, b| acc.saturating_mul(10).saturating_add((b - b'0') as u64));
+        let _ = sys::sleep_ms(ms);
+        return 0;
     }
     if args == "crash" {
         // Para probar que una falta de usuario mata al proceso, no al kernel.
@@ -106,9 +116,25 @@ fn fpu_stress(seed: u8) -> u8 {
     }
 }
 
+/// Si el shim dejó el buzón en PROBANDO, confirma que el kernel arrancó.
+fn confirmar_actualizacion() {
+    let mut buf = [0u8; 4096];
+    let n = sys::upd_read(UPD_WHICH_MAILBOX, 0, &mut buf);
+    if n <= 0 {
+        return;
+    }
+    let text = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
+    let mb = Mailbox::parse(text);
+    if let MailboxCmd::Probando { version } = mb.cmd {
+        let payload = Mailbox::format_ok(&version);
+        let _ = sys::upd_write(UPD_WHICH_MAILBOX, 0, &payload);
+    }
+}
+
 /// Bucle de PID 1: sosh en marcha siempre. Si la shell sale limpia
 /// (exit 0), init termina y el kernel vuelve a su shell de emergencia.
 fn lanzar_shell() -> u8 {
+    confirmar_actualizacion();
     loop {
         let pid = sys::spawn("/bin/sosh", "");
         if pid < 0 {
@@ -214,6 +240,38 @@ fn suite() -> u8 {
     check!(pid > 0, "spawn hijo (pid {pid})");
     let r = sys::wait();
     check!(r == Ok((pid as u64, 7)), "wait devuelve (pid {pid}, código 7)");
+
+    // Señales: getpid, kill(SIGINT) y grupos de procesos.
+    let me = sys::getpid();
+    check!(me > 0, "getpid ({me})");
+    let sid = sys::setsid();
+    check!(sid == me as i64, "setsid devuelve el pid ({sid})");
+
+    let sleeper = sys::spawn("/bin/init", "sleep 5000");
+    check!(sleeper > 0, "spawn sleeper (pid {sleeper})");
+    check!(sys::kill(sleeper, abi::SIGINT) > 0, "kill SIGINT al sleeper");
+    check!(
+        sys::wait() == Ok((sleeper as u64, abi::exit_by_signal(abi::SIGINT as u8))),
+        "wait sleeper interrumpido (130)"
+    );
+
+    check!(sys::kill(1, abi::SIGINT) > 0, "SIGINT a PID 1 se ignora sin error");
+
+    let g1 = sys::spawn("/bin/init", "sleep 30000");
+    let g2 = sys::spawn("/bin/init", "sleep 30000");
+    check!(g1 > 0 && g2 > 0, "spawn par para kill de grupo");
+    check!(sys::setpgid(g1 as u64, g1 as u64) == 0, "setpgid líder");
+    check!(sys::setpgid(g2 as u64, g1 as u64) == 0, "setpgid segundo al grupo");
+    check!(sys::kill(-(g1 as i64), abi::SIGINT) >= 2, "kill(-pgid) al par");
+    let mut interrumpidos = 0u8;
+    for _ in 0..2 {
+        if let Ok((_, code)) = sys::wait() {
+            if code == abi::exit_by_signal(abi::SIGINT as u8) {
+                interrumpidos += 1;
+            }
+        }
+    }
+    check!(interrumpidos == 2, "wait de ambos del grupo (130)");
 
     // Dos hijos de CPU pura: su salida intercalada demuestra la preempción.
     let p1 = sys::spawn("/bin/init", "cpu A");
@@ -413,6 +471,14 @@ fn suite() -> u8 {
             println!(
                 "init: OK  meminfo total={} libre={} reclaimable={}",
                 mi.total_frames, mi.free_frames, mi.reclaimable_frames
+            );
+        }
+        {
+            let mut st = abi::WifiStatus::default();
+            let r = sys::wifi_status(&mut st);
+            check!(
+                r == 0 || r == -abi::ENOSYS,
+                "wifi_status errno {r}"
             );
         }
         check!(

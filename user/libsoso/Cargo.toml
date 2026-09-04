@@ -9,3 +9,4 @@ soso-abi = { workspace = true }
 talc = { version = "4", default-features = false, features = ["lock_api"] }
 spin = { version = "0.9", features = ["lock_api"] }
 getrandom = { workspace = true }
+linked_list_allocator = "0.10"

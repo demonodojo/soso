@@ -56,7 +56,7 @@ pub const DRIVERS: &[DriverInfo] = &[
         feature: "lxdde",
         rule: MatchRule::PciIds {
             vendor: 0x8086,
-            devices: &[0x7f70, 0x51f0, 0x54f0],
+            devices: &[0x7f70, 0x51f0, 0x54f0, 0x2723],
         },
         lxdde_port: Some("iwlwifi"),
     },
@@ -88,6 +88,15 @@ pub const DRIVERS: &[DriverInfo] = &[
         lxdde_port: None,
     },
     DriverInfo {
+        name: "rtl8169",
+        feature: "drv-rtl8169",
+        rule: MatchRule::PciIds {
+            vendor: 0x10ec,
+            devices: &[0x8168, 0x8161, 0x8162, 0x8167, 0x8136],
+        },
+        lxdde_port: None,
+    },
+    DriverInfo {
         name: "nvme",
         feature: "drv-nvme",
         rule: MatchRule::PciClass {
@@ -113,6 +122,16 @@ pub const DRIVERS: &[DriverInfo] = &[
         rule: MatchRule::NvidiaGpu,
         lxdde_port: None,
     },
+    DriverInfo {
+        name: "hda",
+        feature: "drv-hda",
+        rule: MatchRule::PciClass {
+            class: 0x04,
+            subclass: Some(0x03),
+            prog_if: None,
+        },
+        lxdde_port: None,
+    },
 ];
 
 const VIRTIO_VENDOR: u16 = 0x1af4;
@@ -123,10 +142,12 @@ pub fn compiled(info: &DriverInfo) -> bool {
         "drv-virtio-blk" => cfg!(feature = "drv-virtio-blk"),
         "drv-virtio-net" => cfg!(feature = "drv-virtio-net"),
         "drv-e1000e" => cfg!(feature = "drv-e1000e"),
+        "drv-rtl8169" => cfg!(feature = "drv-rtl8169"),
         "drv-nvme" => cfg!(feature = "drv-nvme"),
         "drv-usb" => cfg!(feature = "drv-usb"),
         "drv-gpu-nvidia" => cfg!(feature = "drv-gpu-nvidia"),
         "drv-live-disk" => cfg!(feature = "drv-live-disk"),
+        "drv-hda" => cfg!(feature = "drv-hda"),
         "lxdde" => cfg!(feature = "lxdde"),
         _ => false,
     }

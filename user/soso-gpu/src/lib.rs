@@ -1,51 +1,18 @@
 //! Despacho GPU vía syscalls del kernel (G5).
-//!
-//! DOS COSAS QUE ESTABAN MAL Y NO DABAN ERROR:
-//!
-//! 1. **La matriz se resubía en cada llamada.** `matvec_f32` se llama una vez por
-//!    proyección y por token, y los pesos no cambian entre tokens: subir
-//!    `rows*cols*4` bytes por syscall en cada una convierte el offload en la ruta
-//!    lenta. Ahora los pesos se cachean por NOMBRE de tensor y se suben una vez.
-//!    Por nombre y no por dirección: los shards se mapean y se pueden desmapear, y
-//!    una dirección reutilizada por otro tensor devolvería pesos ajenos con toda la
-//!    pinta de estar bien.
-//! 2. **Un búfer reservado para la primera capa se reutilizaba para otra mayor.**
-//!    `ensure_buffer` devolvía Ok en cuanto el handle existía, sin mirar el
-//!    tamaño, y `SYS_GPU_MAP` recortaba en silencio: media matriz subida y un
-//!    resultado creíble. El kernel ahora contesta EINVAL y aquí se guarda el
-//!    tamaño reservado para poder crecer.
-//!
-//! Y una tercera, de rebote: `SysGpu::new` se enganchaba a cualquier dispositivo
-//! con `present=1`. En una caja con iGPU Intel eso son dos copias de la matriz por
-//! matvec para luego calcular en CPU igual. Ahora exige `compute=1`.
-//!
-//! Y una cuarta: cada llamada pedía y soltaba búferes de tránsito por `mmap`
-//! —siete syscalls por matvec, cuatro de ellas puro trámite— para copiar datos que
-//! el kernel podía leer de donde ya estaban. Ver `write_f32`.
-//!
-//! **Pesos cuantizados (Q8_0/Q4_K/MXFP4).** Q4_K y Q8_0 se suben **EN CRUDO** y la
-//! GPU los multiplica sin expandirlos (comando `MATVQ`, kernels `matvec_q4k`/
-//! `matvec_q80`): los bytes viajan del page cache de sosomfs a la VRAM por DMA del
-//! CE sin que la CPU toque uno. Antes se descuantizaban a un plano f32 en el heap
-//! —44 MiB por un `ffn_up` de TinyLlama que en disco son 5,9—, y ese plano costaba
-//! más que descuantizar: ~11 000 faltas de página anónimas (el mmap anónimo no
-//! admite huge pages), 44 MiB de puesta a cero, otro tanto de `munmap`, y 8× de
-//! tráfico PCIe y de VRAM, **por tensor**.
-//!
-//! MXFP4 y los cuantizados cuyo `cols` no es número entero de bloques siguen el
-//! camino viejo (descuantizar + subir f32). No es código muerto: es el fallback.
-//! Lo que hay en el búfer se guarda en `Resident::fmt` y el despacho va por ahí,
-//! nunca por `view.dtype` — ver el comentario de ese campo.
-//!
-//! Cuando un tensor no cabe se queda en CPU: eso es el offload híbrido, no un fallo.
+
+#![no_std]
+
+extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use libsoso::sys;
 use soso_abi as abi;
-use soso_llm_core::gpu::GpuDispatch;
+use soso_llm_core::gpu::{GpuDispatch, GpuStats, MatvecOp};
 use soso_llm_core::layer::TensorView;
 use soso_llm_core::quant::{dequant_mxfp4, dequant_q4_k, dequant_q8_0};
+use soso_llm_core::gemm::matvec_f32;
+use soso_llm_core::sched::{tramo_idx, CostModel};
 use sosomodel::dequant::row_bytes;
 use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
 
@@ -137,6 +104,9 @@ pub struct SysGpu {
     /// plano f32 y se perderían el 8× de VRAM y de PCIe sin que nada se pusiera
     /// rojo. Es exactamente la forma del bug que costó tres meses en el camino DMA.
     crudas: usize,
+    cost_model: CostModel,
+    gpu_stats: GpuStats,
+    last_ns: u64,
 }
 
 impl SysGpu {
@@ -180,7 +150,56 @@ impl SysGpu {
             ciclos_map: 0,
             evictions: 0,
             crudas: 0,
+            cost_model: CostModel::default(),
+            gpu_stats: GpuStats::default(),
+            last_ns: 0,
         })
+    }
+
+    /// Calibra el modelo de coste con tres matvec sintéticos (~50 ms).
+    pub fn calibrar(&mut self) {
+        if self.offload_dead || !self.available() {
+            return;
+        }
+        let shapes = [(384usize, 384usize), (1536, 384), (4096, 4096)];
+        let mut gpu_fixed = 0f64;
+        let mut gpu_mac = 0f64;
+        let mut cpu_mac = 0f64;
+        let mut n = 0u32;
+        for &(rows, cols) in &shapes {
+            let elems = rows * cols;
+            let mut w = alloc::vec![0.01f32; elems];
+            let x = alloc::vec![0.01f32; cols];
+            let mut y_cpu = alloc::vec![0.0f32; rows];
+            let mut y_gpu = alloc::vec![0.0f32; rows];
+            for i in 0..w.len() {
+                w[i] = (i as f32 * 0.001) % 0.1;
+            }
+            let v = TensorView {
+                bytes: unsafe {
+                    core::slice::from_raw_parts(w.as_ptr().cast::<u8>(), elems * 4)
+                },
+                dtype: DTYPE_F32,
+                elems,
+            };
+            let t0 = libsoso::ciclos();
+            matvec_f32(&w, rows, cols, &x, &mut y_cpu);
+            let cpu_c = libsoso::ciclos().wrapping_sub(t0);
+            cpu_mac += cpu_c as f64 / (rows * cols) as f64;
+            let tg0 = libsoso::ciclos();
+            let ok = self.matvec("_cal", &v, rows, cols, &x, &mut y_gpu).unwrap_or(false);
+            let gpu_c = libsoso::ciclos().wrapping_sub(tg0);
+            if ok {
+                gpu_fixed += gpu_c as f64 * 0.3;
+                gpu_mac += (gpu_c as f64 * 0.3) / (rows * cols) as f64;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.cost_model.gpu_fixed_ns = gpu_fixed / n as f64;
+            self.cost_model.gpu_ns_per_mac = gpu_mac / n as f64;
+            self.cost_model.cpu_ns_per_mac = cpu_mac / shapes.len() as f64 * 0.3;
+        }
     }
 
     /// Nombre del dispositivo tal y como lo dio el kernel.
@@ -202,6 +221,10 @@ impl SysGpu {
 
     pub fn stats(&self) -> (usize, usize, usize, usize) {
         (self.calls, self.uploads, self.resident.len(), self.sin_sitio)
+    }
+
+    pub fn gpu_stats(&self) -> GpuStats {
+        self.gpu_stats
     }
 
     pub fn last_fail(&self) -> Option<&'static str> {
@@ -464,7 +487,46 @@ impl SysGpu {
         cmd[17..21].copy_from_slice(&cols.to_le_bytes());
         cmd[21..29].copy_from_slice(&x_h.to_le_bytes());
         cmd[29..37].copy_from_slice(&y_h.to_le_bytes());
-        let rc = sys::gpu_submit(&cmd[..n]);
+        Self::submit_batch(&cmd[..n])
+    }
+
+    fn note_launch(&mut self, ns: u64, bytes_up: u64, bytes_down: u64, macs: u64) {
+        self.gpu_stats.launches += 1;
+        self.gpu_stats.total_ns = self.gpu_stats.total_ns.saturating_add(ns);
+        self.gpu_stats.bytes_up = self.gpu_stats.bytes_up.saturating_add(bytes_up);
+        self.gpu_stats.bytes_down = self.gpu_stats.bytes_down.saturating_add(bytes_down);
+        let tr = tramo_idx(macs);
+        self.gpu_stats.samples[tr] = self.gpu_stats.samples[tr].wrapping_add(1);
+        if self.gpu_stats.ewma_ns[tr] <= 0.0 {
+            self.gpu_stats.ewma_ns[tr] = ns as f64;
+        } else {
+            self.gpu_stats.ewma_ns[tr] =
+                0.125 * ns as f64 + 0.875 * self.gpu_stats.ewma_ns[tr];
+        }
+        self.last_ns = ns;
+    }
+
+    fn submit_matmf(
+        w_h: u64,
+        rows: u32,
+        cols: u32,
+        n: u32,
+        x_h: u64,
+        y_h: u64,
+    ) -> Result<u64, ()> {
+        let mut cmd = [0u8; 41];
+        cmd[0..5].copy_from_slice(b"MATMF");
+        cmd[5..13].copy_from_slice(&w_h.to_le_bytes());
+        cmd[13..17].copy_from_slice(&rows.to_le_bytes());
+        cmd[17..21].copy_from_slice(&cols.to_le_bytes());
+        cmd[21..25].copy_from_slice(&n.to_le_bytes());
+        cmd[25..33].copy_from_slice(&x_h.to_le_bytes());
+        cmd[33..41].copy_from_slice(&y_h.to_le_bytes());
+        Self::submit_batch(&cmd)
+    }
+
+    fn submit_batch(cmd: &[u8]) -> Result<u64, ()> {
+        let rc = sys::gpu_submit(cmd);
         if rc < 0 {
             return Err(());
         }
@@ -509,10 +571,14 @@ impl GpuDispatch for SysGpu {
         !self.offload_dead
     }
 
-    /// `Ok(true)` significa **el resultado ya está en `out`**, no "lo hizo la
-    /// GPU": eso último es `last_on_gpu()`. Cuando el kernel calcula con su bucle
-    /// de CPU (canal no listo, dispositivo software) el vector es igual de bueno y
-    /// repetirlo aquí es trabajo tirado — pero decir "GPU" sería falso.
+    fn stats(&self) -> GpuStats {
+        self.gpu_stats
+    }
+
+    fn cost_model(&self) -> CostModel {
+        self.cost_model
+    }
+
     fn matvec(
         &mut self,
         key: &str,
@@ -559,6 +625,7 @@ impl GpuDispatch for SysGpu {
             self.kill_offload("gpu_map vector x");
             return Ok(false);
         }
+        let t0 = libsoso::ciclos();
         let bits = match Self::submit_matv(
             fmt,
             w_handle,
@@ -585,7 +652,150 @@ impl GpuDispatch for SysGpu {
             self.kill_offload("gpu_read resultado");
             return Ok(false);
         }
+        let ns = libsoso::ciclos().wrapping_sub(t0) as u64 * 3 / 10;
+        self.note_launch(
+            ns,
+            x_bytes,
+            y_bytes,
+            (rows as u64).saturating_mul(cols as u64),
+        );
         Ok(true)
+    }
+
+    fn matmul(
+        &mut self,
+        key: &str,
+        view: &TensorView<'_>,
+        rows: usize,
+        cols: usize,
+        n: usize,
+        x: &[f32],
+        out: &mut [f32],
+    ) -> Result<bool, ()> {
+        if self.offload_dead {
+            return Ok(false);
+        }
+        if view.elems != rows * cols || x.len() != cols * n || out.len() != rows * n {
+            return Err(());
+        }
+        let Ok((w_handle, fmt)) = self.resident_weights(key, view, rows * cols, cols) else {
+            return Ok(false);
+        };
+        if fmt != Formato::F32 {
+            return Ok(false);
+        }
+        let x_bytes = (cols * n * 4) as u64;
+        let y_bytes = (rows * n * 4) as u64;
+        let Ok(x_handle) = Self::ensure_scratch(
+            &mut self.x,
+            x_bytes,
+            &mut self.vram_free,
+            &mut self.last_fail,
+        ) else {
+            return Ok(false);
+        };
+        let Ok(y_handle) = Self::ensure_scratch(
+            &mut self.y,
+            y_bytes,
+            &mut self.vram_free,
+            &mut self.last_fail,
+        ) else {
+            return Ok(false);
+        };
+        if write_f32(x_handle, x).is_err() {
+            self.kill_offload("gpu_map matmul x");
+            return Ok(false);
+        }
+        let t0 = libsoso::ciclos();
+        let bits = match Self::submit_matmf(
+            w_handle,
+            rows as u32,
+            cols as u32,
+            n as u32,
+            x_handle,
+            y_handle,
+        ) {
+            Ok(b) => b,
+            Err(()) => {
+                self.kill_offload("gpu_submit matmul");
+                return Ok(false);
+            }
+        };
+        self.calls += 1;
+        self.on_gpu = bits & abi::GPU_SUBMIT_ON_GPU != 0;
+        if bits & abi::GPU_SUBMIT_COMPUTED == 0 {
+            return Ok(false);
+        }
+        if read_f32_into(y_handle, out).is_err() {
+            self.kill_offload("gpu_read matmul");
+            return Ok(false);
+        }
+        let ns = libsoso::ciclos().wrapping_sub(t0) as u64 * 3 / 10;
+        self.note_launch(
+            ns,
+            x_bytes,
+            y_bytes,
+            (rows as u64).saturating_mul(cols as u64).saturating_mul(n as u64),
+        );
+        Ok(true)
+    }
+
+    fn matvec_batch(&mut self, ops: &mut [MatvecOp<'_>]) -> Result<bool, ()> {
+        let mut any = false;
+        for op in ops.iter_mut() {
+            if self.matvec(op.key, op.view, op.rows, op.cols, op.x, op.out)? {
+                any = true;
+            }
+        }
+        Ok(any)
+    }
+
+    fn softmax_rows(&mut self, x: &mut [f32], rows: usize, cols: usize) -> Result<bool, ()> {
+        if self.offload_dead || x.len() != rows * cols {
+            return Ok(false);
+        }
+        let bytes = (x.len() * 4) as u64;
+        let Ok(x_handle) = Self::ensure_scratch(
+            &mut self.x,
+            bytes,
+            &mut self.vram_free,
+            &mut self.last_fail,
+        ) else {
+            return Ok(false);
+        };
+        if write_f32(x_handle, x).is_err() {
+            return Ok(false);
+        }
+        let mut cmd = [0u8; 21];
+        cmd[0..5].copy_from_slice(b"SOFTM");
+        cmd[5..13].copy_from_slice(&x_handle.to_le_bytes());
+        cmd[13..17].copy_from_slice(&(rows as u32).to_le_bytes());
+        cmd[17..21].copy_from_slice(&(cols as u32).to_le_bytes());
+        let t0 = libsoso::ciclos();
+        let Ok(bits) = Self::submit_batch(&cmd) else {
+            return Ok(false);
+        };
+        if bits & abi::GPU_SUBMIT_COMPUTED == 0 {
+            return Ok(false);
+        }
+        if read_f32_into(x_handle, x).is_err() {
+            return Ok(false);
+        }
+        let ns = libsoso::ciclos().wrapping_sub(t0) as u64 * 3 / 10;
+        self.note_launch(ns, bytes, bytes, (rows * cols) as u64);
+        Ok(true)
+    }
+
+    fn layernorm_rows(
+        &mut self,
+        _x: &mut [f32],
+        _weight: &[f32],
+        _bias: &[f32],
+        _rows: usize,
+        _cols: usize,
+        _eps: f32,
+    ) -> Result<bool, ()> {
+        Ok(false)
     }
 }
 

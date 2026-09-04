@@ -1,4 +1,4 @@
-/* Puente lx_emul → driver Intel AX211. */
+/* Puente lx_emul → driver Intel AX211/AX200. */
 #include "lx_emul.h"
 #include "iwl_ax211.h"
 

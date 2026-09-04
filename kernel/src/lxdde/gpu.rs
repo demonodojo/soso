@@ -28,6 +28,24 @@ unsafe extern "C" {
         x: *const f32,
         y: *mut f32,
     ) -> i32;
+    fn lx_nouveau_compute_matmul_resident(
+        w_va: u64,
+        rows: u32,
+        cols: u32,
+        n: u32,
+        x: *const f32,
+        y: *mut f32,
+    ) -> i32;
+    fn lx_nouveau_compute_softmax_rows(x: *mut f32, rows: u32, cols: u32) -> i32;
+    fn lx_nouveau_compute_layernorm_rows(
+        x: *mut f32,
+        weight: *const f32,
+        bias: *const f32,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> i32;
+    fn lx_nouveau_compute_wait(sem_slot: u32) -> i32;
     fn lx_nouveau_vram_total() -> u64;
     fn lx_nouveau_device_buf_alloc(size: u64) -> u64;
     fn lx_nouveau_device_bufs_ready() -> i32;
@@ -243,6 +261,69 @@ pub fn submit_matvec_q_resident(
         )
     };
     if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn submit_matmul_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    n: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    if w_va == 0 || x.len() != cols * n || y.len() != rows * n {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_matmul_resident(
+            w_va,
+            rows as u32,
+            cols as u32,
+            n as u32,
+            x.as_ptr(),
+            y.as_mut_ptr(),
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn submit_softmax_rows(x: &mut [f32], rows: usize, cols: usize) -> Result<bool, ()> {
+    if x.len() != rows * cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_softmax_rows(x.as_mut_ptr(), rows as u32, cols as u32)
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn submit_layernorm_rows(
+    x: &mut [f32],
+    weight: &[f32],
+    bias: &[f32],
+    rows: usize,
+    cols: usize,
+    eps: f32,
+) -> Result<bool, ()> {
+    if x.len() != rows * cols || weight.len() != cols || bias.len() != cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_layernorm_rows(
+            x.as_mut_ptr(),
+            weight.as_ptr(),
+            bias.as_ptr(),
+            rows as u32,
+            cols as u32,
+            eps,
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn wait_fence(sem_slot: u32) -> Result<(), ()> {
+    let rc = unsafe { lx_nouveau_compute_wait(sem_slot) };
+    if rc < 0 { Err(()) } else { Ok(()) }
 }
 
 #[allow(dead_code)]

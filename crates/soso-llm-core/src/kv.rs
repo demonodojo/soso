@@ -30,6 +30,10 @@ pub struct LayerKv {
     pub v_scale: Vec<f32>,
     /// Masa de atención acumulada (H2O), un f32 por token.
     pub mass: Vec<f32>,
+    /// Estado recurrente GDN: `[n_v_heads][d][d]`.
+    pub gdn_s: Vec<f32>,
+    /// Historial causal conv1d: `[(kernel-1) * conv_dim]`.
+    pub gdn_conv: Vec<f32>,
 }
 
 impl LayerKv {
@@ -54,6 +58,8 @@ impl LayerKv {
                 k_scale: Vec::new(),
                 v_scale: Vec::new(),
                 mass: Vec::with_capacity(tokens),
+                gdn_s: Vec::new(),
+                gdn_conv: Vec::new(),
             },
             KvDtype::I8 => Self {
                 dtype,
@@ -65,6 +71,8 @@ impl LayerKv {
                 k_scale: Vec::with_capacity(tokens),
                 v_scale: Vec::with_capacity(tokens),
                 mass: Vec::with_capacity(tokens),
+                gdn_s: Vec::new(),
+                gdn_conv: Vec::new(),
             },
         }
     }
@@ -90,6 +98,21 @@ impl LayerKv {
         self.k_scale.clear();
         self.v_scale.clear();
         self.mass.clear();
+        self.gdn_s.fill(0.0);
+        self.gdn_conv.fill(0.0);
+    }
+
+    /// Reserva (y pone a cero) el estado GDN si el tamaño no coincide.
+    pub fn ensure_gdn(&mut self, n_v_heads: usize, head_dim: usize, conv_len: usize) {
+        let s_len = n_v_heads.saturating_mul(head_dim).saturating_mul(head_dim);
+        if self.gdn_s.len() != s_len {
+            self.gdn_s.clear();
+            self.gdn_s.resize(s_len, 0.0);
+        }
+        if self.gdn_conv.len() != conv_len {
+            self.gdn_conv.clear();
+            self.gdn_conv.resize(conv_len, 0.0);
+        }
     }
 
     pub fn tokens(&self, kv_dim: usize) -> usize {

@@ -29,7 +29,7 @@
 #define CONFIG_NOUVEAU_DEBUG 5
 #define CONFIG_NOUVEAU_DEBUG_DEFAULT 3
 
-/* iwlwifi + mac80211 (Intel AX211) */
+/* iwlwifi + mac80211 (Intel AX211/AX200) */
 #define CONFIG_WIRELESS 1
 #define CONFIG_WIRELESS_EXT 1
 #define CONFIG_CFG80211 1

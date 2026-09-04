@@ -83,7 +83,7 @@ int gsp_bar1_walk(const struct gsp_bar1 *b, uint64_t bar1_va,
  * Turing+, no el 0x001704 de gf100) y de ahí el PDB que la MMU recorre de verdad
  * y el límite de VA del vaspace. Devuelve 0 si pudo leerlos; `pdb_out` y
  * `limit_out` son opcionales. Sólo lee: no toca nada. */
-int gsp_bar1_inst_probe(struct gsp_bar1 *b, uint64_t *pdb_out, uint64_t *limit_out);
+int gsp_bar1_inst_probe(const struct gsp_bar1 *b, uint64_t *pdb_out, uint64_t *limit_out);
 
 /* Ata BAR1 nosotros mismos cuando RM no lo ha hecho: reserva un bloque de
  * instancia en VRAM, construye un vaspace propio, le escribe el PDB y el límite

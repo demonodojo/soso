@@ -11,26 +11,43 @@
 //! que no cabe se queda en CPU.
 
 use crate::layer::TensorView;
+use crate::sched::{CostModel, N_TRAMOS};
 use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
+
+/// Estadísticas acumuladas del despacho GPU.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GpuStats {
+    pub launches: u64,
+    pub total_ns: u64,
+    pub bytes_up: u64,
+    pub bytes_down: u64,
+    pub ewma_ns: [f64; N_TRAMOS],
+    pub samples: [u64; N_TRAMOS],
+}
+
+/// Una operación matvec dentro de un lote.
+pub struct MatvecOp<'a> {
+    pub key: &'a str,
+    pub view: &'a TensorView<'a>,
+    pub rows: usize,
+    pub cols: usize,
+    pub x: &'a [f32],
+    pub out: &'a mut [f32],
+}
 
 /// Despacho opcional hacia la GPU del kernel (implementado en userspace).
 pub trait GpuDispatch {
     fn available(&self) -> bool;
 
+    fn stats(&self) -> GpuStats {
+        GpuStats::default()
+    }
+
+    fn cost_model(&self) -> CostModel {
+        CostModel::default()
+    }
+
     /// matvec de una fila por elemento de `out`.
-    ///
-    /// `key` identifica el tensor (`"L03.ffn_up"`) y es **estable**: el despacho lo
-    /// usa para saber si esos pesos ya están en el dispositivo y no resubirlos en
-    /// cada token. Identificarlos por la dirección de `view` sería más cómodo y
-    /// estaría mal: los shards se mapean y se pueden desmapear, y una dirección
-    /// reutilizada por otro tensor daría pesos ajenos sin ningún error.
-    ///
-    /// `view` puede venir en F32, Q8_0 o Q4_K; quien implementa esto decide si lo
-    /// admite y qué hace con la cuantización. Devolver `Ok(false)` es siempre
-    /// legítimo: significa "no lo he hecho, hazlo tú".
-    ///
-    /// `Ok(true)` = **el resultado ya está en `out`** (lo haya calculado la GPU o
-    /// el kernel); `Ok(false)` = calcúlalo tú.
     fn matvec(
         &mut self,
         key: &str,
@@ -40,6 +57,50 @@ pub trait GpuDispatch {
         x: &[f32],
         out: &mut [f32],
     ) -> Result<bool, ()>;
+
+    /// Y[n×rows] = X[n×cols] · W[rows×cols]^T (W row-major).
+    fn matmul(
+        &mut self,
+        key: &str,
+        view: &TensorView<'_>,
+        rows: usize,
+        cols: usize,
+        n: usize,
+        x: &[f32],
+        out: &mut [f32],
+    ) -> Result<bool, ()> {
+        let _ = (key, view, rows, cols, n, x, out);
+        Ok(false)
+    }
+
+    /// Varios matvec encolados; espera única al final.
+    fn matvec_batch(&mut self, ops: &mut [MatvecOp<'_>]) -> Result<bool, ()> {
+        let mut any = false;
+        for op in ops.iter_mut() {
+            if self.matvec(op.key, op.view, op.rows, op.cols, op.x, op.out)? {
+                any = true;
+            }
+        }
+        Ok(any)
+    }
+
+    fn softmax_rows(&mut self, x: &mut [f32], rows: usize, cols: usize) -> Result<bool, ()> {
+        let _ = (x, rows, cols);
+        Ok(false)
+    }
+
+    fn layernorm_rows(
+        &mut self,
+        x: &mut [f32],
+        weight: &[f32],
+        bias: &[f32],
+        rows: usize,
+        cols: usize,
+        eps: f32,
+    ) -> Result<bool, ()> {
+        let _ = (x, weight, bias, rows, cols, eps);
+        Ok(false)
+    }
 }
 
 /// Sin GPU: siempre CPU.
@@ -63,8 +124,7 @@ impl GpuDispatch for NoGpu {
     }
 }
 
-/// Dtypes que el despacho sabe presentar. Un dtype nuevo NO cae aquí por defecto:
-/// mejor que se vaya a CPU a que llegue al dispositivo como bytes sin interpretar.
+/// Dtypes que el despacho sabe presentar.
 pub fn dtype_ofrecible(dtype: u8) -> bool {
     matches!(dtype, DTYPE_F32 | DTYPE_Q8_0 | DTYPE_Q4_K | DTYPE_MXFP4)
 }
@@ -82,8 +142,6 @@ pub fn try_gpu_matvec(
     if !gpu.available() || !dtype_ofrecible(view.dtype) {
         return Ok(false);
     }
-    // El F32 exige además que la vista sea reinterpretable (alineación): si no lo
-    // es, a CPU. Los cuantizados se leen byte a byte y no tienen ese requisito.
     if view.dtype == DTYPE_F32 && view.f32().is_none() {
         return Ok(false);
     }
@@ -91,4 +149,27 @@ pub fn try_gpu_matvec(
         return Ok(false);
     }
     gpu.matvec(key, view, rows, cols, x, out)
+}
+
+/// Intenta matmul batched; `true` si el resultado ya está en `out`.
+pub fn try_gpu_matmul(
+    gpu: &mut dyn GpuDispatch,
+    key: &str,
+    view: &TensorView<'_>,
+    rows: usize,
+    cols: usize,
+    n: usize,
+    x: &[f32],
+    out: &mut [f32],
+) -> Result<bool, ()> {
+    if !gpu.available() || !dtype_ofrecible(view.dtype) {
+        return Ok(false);
+    }
+    if view.dtype == DTYPE_F32 && view.f32().is_none() {
+        return Ok(false);
+    }
+    if view.elems != rows * cols || x.len() != cols * n || out.len() != rows * n {
+        return Ok(false);
+    }
+    gpu.matmul(key, view, rows, cols, n, x, out)
 }

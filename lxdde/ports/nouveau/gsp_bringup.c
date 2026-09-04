@@ -1300,3 +1300,64 @@ int lx_nouveau_submit_matvec_f32(const float *w, unsigned rows, unsigned cols,
     }
     return 0;
 }
+
+int lx_nouveau_submit_matmul_resident(uint64_t w_va, unsigned rows, unsigned cols,
+                                      unsigned n, const float *x, float *y)
+{
+    if (!x || !y || rows == 0 || cols == 0 || n == 0 || w_va == 0) {
+        return -1;
+    }
+    if (compute_usable() && g_compute.res_mapped && g_buf.ready) {
+        int ok = gsp_compute_matmul_resident(&g_compute, &g_ce, w_va, rows, cols,
+                                             n, x, y, G4D_SCRATCH_VA,
+                                             g_scratch.va) == 0;
+        compute_resultado(ok);
+        if (ok) {
+            return 1;
+        }
+    }
+    return -1;
+}
+
+int lx_nouveau_submit_softmax_rows(float *x, unsigned rows, unsigned cols)
+{
+    if (!x || rows == 0 || cols == 0) {
+        return -1;
+    }
+    if (compute_usable() && g_compute.res_mapped) {
+        int ok = gsp_compute_softmax_rows(&g_compute, &g_ce, x, rows, cols,
+                                          G4D_SCRATCH_VA, g_scratch.va) == 0;
+        compute_resultado(ok);
+        if (ok) {
+            return 1;
+        }
+    }
+    return -1;
+}
+
+int lx_nouveau_submit_layernorm_rows(float *x, const float *weight,
+                                     const float *bias, unsigned rows,
+                                     unsigned cols, float eps)
+{
+    if (!x || !weight || !bias || rows == 0 || cols == 0) {
+        return -1;
+    }
+    if (compute_usable() && g_compute.res_mapped) {
+        int ok = gsp_compute_layernorm_rows(&g_compute, &g_ce, x, weight, bias,
+                                              rows, cols, eps, G4D_SCRATCH_VA,
+                                              g_scratch.va) == 0;
+        compute_resultado(ok);
+        if (ok) {
+            return 1;
+        }
+    }
+    return -1;
+}
+
+int lx_nouveau_compute_wait_fence(unsigned sem_slot)
+{
+    if (!compute_usable()) {
+        return -1;
+    }
+    return gsp_compute_wait_fence(&g_compute, sem_slot);
+}

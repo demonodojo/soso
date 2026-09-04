@@ -267,3 +267,33 @@ pub fn submit_matvec_q_resident(
 ) -> Result<bool, ()> {
     gpu::submit_matvec_q_resident(w_va, dtype, rows, cols, x, y)
 }
+
+pub fn submit_matmul_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    n: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    gpu::submit_matmul_resident(w_va, rows, cols, n, x, y)
+}
+
+pub fn submit_softmax_rows(x: &mut [f32], rows: usize, cols: usize) -> Result<bool, ()> {
+    gpu::submit_softmax_rows(x, rows, cols)
+}
+
+pub fn submit_layernorm_rows(
+    x: &mut [f32],
+    weight: &[f32],
+    bias: &[f32],
+    rows: usize,
+    cols: usize,
+    eps: f32,
+) -> Result<bool, ()> {
+    gpu::submit_layernorm_rows(x, weight, bias, rows, cols, eps)
+}
+
+pub fn wait_fence(sem_slot: u32) -> Result<(), ()> {
+    gpu::wait_fence(sem_slot)
+}

@@ -17,9 +17,10 @@ fn kv_storage_dim(manifest: &Manifest, layer: u32) -> usize {
     let spec = manifest.layer(layer).cloned().unwrap_or_default();
     if spec.attn_kind == AttnKind::Mla && spec.kv_lora_rank > 0 {
         spec.kv_lora_rank as usize
+    } else if spec.attn_kind == AttnKind::Gdn {
+        0
     } else {
-        let head_dim =
-            (manifest.hidden_dim / manifest.effective_num_heads(layer)) as usize;
+        let head_dim = manifest.effective_head_dim(layer) as usize;
         manifest.effective_num_kv_heads(layer) as usize * head_dim
     }
 }
@@ -33,9 +34,17 @@ fn make_layer_kv(
     let spec = manifest.layer(layer).cloned().unwrap_or_default();
     if spec.attn_kind == AttnKind::Mla && spec.kv_lora_rank > 0 {
         LayerKv::with_capacity_mla_dtype(kv_cap, spec.kv_lora_rank as usize, dtype)
+    } else if spec.attn_kind == AttnKind::Gdn {
+        let mut kv = LayerKv::with_capacity_dtype(0, 0, dtype);
+        let n_v = manifest.effective_num_kv_heads(layer) as usize;
+        let d = manifest.effective_head_dim(layer) as usize;
+        let kernel = spec.qk_rope_head_dim.max(1) as usize;
+        let n_k = manifest.effective_num_heads(layer) as usize;
+        let conv_dim = n_k.saturating_mul(d).saturating_mul(2) + n_v.saturating_mul(d);
+        kv.ensure_gdn(n_v, d, kernel.saturating_sub(1).saturating_mul(conv_dim));
+        kv
     } else {
-        let head_dim =
-            (manifest.hidden_dim / manifest.effective_num_heads(layer)) as usize;
+        let head_dim = manifest.effective_head_dim(layer) as usize;
         let kv_dim = manifest.effective_num_kv_heads(layer) as usize * head_dim;
         LayerKv::with_capacity_dtype(kv_cap, kv_dim, dtype)
     }
@@ -113,8 +122,6 @@ impl Runtime {
         let has_gate = index.find("L00.ffn_gate").is_some();
         let has_lm_head = index.find("lm_head").is_some();
         let has_output_norm = index.find("output_norm").is_some();
-        let head_dim = (manifest.hidden_dim / manifest.num_heads) as usize;
-        let _kv_dim = manifest.num_kv_heads as usize * head_dim;
         let kv_cap = (manifest.max_seq as usize).min(256).max(32);
         let manifest_for_kv = manifest.clone();
         Self {
@@ -199,7 +206,7 @@ impl Runtime {
             let spec = self.manifest.layer(layer).cloned().unwrap_or_default();
             let layer_heads = self.manifest.effective_num_heads(layer);
             let layer_kv_heads = self.manifest.effective_num_kv_heads(layer);
-            let head_dim = h / layer_heads;
+            let head_dim = self.manifest.effective_head_dim(layer);
             let kv_dim = layer_kv_heads * head_dim;
             let ffn = self.manifest.effective_ffn_dim(layer);
             let moe_ffn = self.manifest.effective_moe_ffn_dim(layer);
@@ -229,6 +236,30 @@ impl Runtime {
                 check(&alloc::format!("{p}.attn_k_up"), &[kv_qk, kv_rank], true)?;
                 check(&alloc::format!("{p}.attn_v_up"), &[kv_v, kv_rank], true)?;
                 check(&alloc::format!("{p}.attn_output"), &[h, h], true)?;
+            } else if spec.attn_kind == sosomodel::AttnKind::Gated {
+                let q_rows = layer_heads * head_dim * 2;
+                let attn_in = layer_heads * head_dim;
+                check(&alloc::format!("{p}.attn_q"), &[q_rows, h], true)?;
+                check(&alloc::format!("{p}.attn_k"), &[kv_dim, h], true)?;
+                check(&alloc::format!("{p}.attn_v"), &[kv_dim, h], true)?;
+                check(&alloc::format!("{p}.attn_output"), &[h, attn_in], true)?;
+                check(&alloc::format!("{p}.attn_q_norm"), &[head_dim], true)?;
+                check(&alloc::format!("{p}.attn_k_norm"), &[head_dim], true)?;
+            } else if spec.attn_kind == sosomodel::AttnKind::Gdn {
+                let n_k = layer_heads;
+                let n_v = layer_kv_heads;
+                let d = head_dim;
+                let qkv = n_k * d * 2 + n_v * d;
+                let kernel = spec.qk_rope_head_dim.max(1);
+                check(&alloc::format!("{p}.attn_qkv"), &[qkv, h], true)?;
+                check(&alloc::format!("{p}.attn_gate"), &[n_v * d, h], true)?;
+                check(&alloc::format!("{p}.ssm_conv1d"), &[qkv, kernel], true)?;
+                check(&alloc::format!("{p}.ssm_dt"), &[n_v], true)?;
+                check(&alloc::format!("{p}.ssm_a"), &[n_v], true)?;
+                check(&alloc::format!("{p}.ssm_beta"), &[n_v, h], true)?;
+                check(&alloc::format!("{p}.ssm_alpha"), &[n_v, h], true)?;
+                check(&alloc::format!("{p}.ssm_norm"), &[d], true)?;
+                check(&alloc::format!("{p}.ssm_out"), &[h, n_v * d], true)?;
             } else {
                 check(&alloc::format!("{p}.attn_q"), &[h, h], true)?;
                 check(&alloc::format!("{p}.attn_k"), &[kv_dim, h], true)?;

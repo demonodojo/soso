@@ -14,6 +14,14 @@ extern int lx_nouveau_submit_matvec_resident(uint64_t w_va, unsigned rows,
 extern int lx_nouveau_submit_matvec_q_resident(uint64_t w_va, unsigned dtype,
                                                unsigned rows, unsigned cols,
                                                const float *x, float *y);
+extern int lx_nouveau_submit_matmul_resident(uint64_t w_va, unsigned rows,
+                                             unsigned cols, unsigned n,
+                                             const float *x, float *y);
+extern int lx_nouveau_submit_softmax_rows(float *x, unsigned rows, unsigned cols);
+extern int lx_nouveau_submit_layernorm_rows(float *x, const float *weight,
+                                            const float *bias, unsigned rows,
+                                            unsigned cols, float eps);
+extern int lx_nouveau_compute_wait_fence(unsigned sem_slot);
 extern uint64_t lx_nouveau_vram_bytes(void);
 extern uint64_t lx_nouveau_buf_alloc(uint64_t size);
 extern int lx_nouveau_buf_ready(void);
@@ -95,6 +103,29 @@ int lx_nouveau_compute_matvec_q_resident(uint64_t w_va, unsigned dtype,
                                          const float *x, float *y)
 {
     return lx_nouveau_submit_matvec_q_resident(w_va, dtype, rows, cols, x, y);
+}
+
+int lx_nouveau_compute_matmul_resident(uint64_t w_va, unsigned rows, unsigned cols,
+                                       unsigned n, const float *x, float *y)
+{
+    return lx_nouveau_submit_matmul_resident(w_va, rows, cols, n, x, y);
+}
+
+int lx_nouveau_compute_softmax_rows(float *x, unsigned rows, unsigned cols)
+{
+    return lx_nouveau_submit_softmax_rows(x, rows, cols);
+}
+
+int lx_nouveau_compute_layernorm_rows(float *x, const float *weight,
+                                      const float *bias, unsigned rows,
+                                      unsigned cols, float eps)
+{
+    return lx_nouveau_submit_layernorm_rows(x, weight, bias, rows, cols, eps);
+}
+
+int lx_nouveau_compute_wait(unsigned sem_slot)
+{
+    return lx_nouveau_compute_wait_fence(sem_slot);
 }
 
 uint64_t lx_nouveau_vram_total(void)

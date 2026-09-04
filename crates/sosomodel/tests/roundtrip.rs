@@ -39,6 +39,39 @@ fn manifest_v4_roundtrip_layer_specs() {
 }
 
 #[test]
+fn manifest_v4_qwen_gated_gdn_sin_dividir_hidden() {
+    let mut m = Manifest::tiny("qwen");
+    m.hidden_dim = 20;
+    m.num_heads = 3;
+    m.num_kv_heads = 1;
+    m.num_layers = 2;
+    m.prefetch.truncate(2);
+    m.layers = vec![
+        LayerSpec {
+            attn_kind: AttnKind::Gdn,
+            num_heads: 2,
+            num_kv_heads: 4,
+            v_head_dim: 4,
+            qk_rope_head_dim: 2,
+            ..LayerSpec::default()
+        },
+        LayerSpec {
+            attn_kind: AttnKind::Gated,
+            num_heads: 3,
+            num_kv_heads: 1,
+            v_head_dim: 8,
+            qk_rope_head_dim: 2,
+            ..LayerSpec::default()
+        },
+    ];
+    let parsed = Manifest::parse(&m.serialize()).unwrap();
+    assert_eq!(parsed.layers[0].attn_kind, AttnKind::Gdn);
+    assert_eq!(parsed.layers[1].attn_kind, AttnKind::Gated);
+    assert_eq!(parsed.effective_head_dim(1), 8);
+    assert!(parsed.supported_by_runtime().is_ok());
+}
+
+#[test]
 fn manifest_v3_synthesizes_layers() {
     let mut m = Manifest::tiny("v3");
     m.layers.clear();

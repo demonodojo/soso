@@ -1,4 +1,4 @@
-# iwlwifi — Intel AX211 via capa lx_emul (transporte + mac80211 mínimo)
+# iwlwifi — Intel AX211/AX200 via capa lx_emul (transporte + mac80211 mínimo)
 lxdde/ports/iwlwifi/iwlwifi_lx.c
 lxdde/ports/iwlwifi/iwl_ax211.c
 lxdde/ports/iwlwifi/iwl_fw.c

@@ -1,0 +1,22 @@
+[package]
+name = "soso-web"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "soso-web"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+soso-abi = { workspace = true }
+libsoso = { workspace = true }
+soso-http = { path = "../../crates/soso-http" }
+soso-web-core = { path = "../../crates/soso-web-core" }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] }
+
+[dev-dependencies]

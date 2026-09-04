@@ -1,4 +1,4 @@
-//! Convierte GGUF (llama) al layout sosomodel (.som).
+//! Convierte GGUF (llama, deepseek2, qwen35/qwen38) al layout sosomodel (.som).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #[cfg(feature = "std")]
@@ -21,7 +21,7 @@ use sosomodel::layout::{
     DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0, INDEX_FILE, MANIFEST_FILE, Q4_K_BLOCK_BYTES,
     SHARDS_DIR, TOKENIZER_FILE,
 };
-use sosomodel::manifest::{AttnKind, LayerPrefetch, Manifest};
+use sosomodel::manifest::{AttnKind, AudioSpec, LayerPrefetch, Manifest, ModelKind, NormKind};
 
 pub trait SomOut {
     fn mkdir(&mut self, path: &str) -> Result<(), String>;
@@ -142,12 +142,19 @@ pub fn convert_with_options<R: Read + Seek>(
         })
         .unwrap_or("llama");
     let is_mla = arch_name == "deepseek2";
-    if arch_name != "llama" && !is_mla {
+    let is_qwen35 = arch_name == "qwen35" || arch_name == "qwen38";
+    if arch_name != "llama" && !is_mla && !is_qwen35 {
         return Err(format!(
-            "arquitectura {arch_name} no soportada (llama | deepseek2)"
+            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen35 | qwen38)"
         ));
     }
-    let meta_prefix = if is_mla { "deepseek2" } else { "llama" };
+    let meta_prefix = if is_mla {
+        "deepseek2"
+    } else if is_qwen35 {
+        arch_name
+    } else {
+        "llama"
+    };
 
     let hidden = gguf.meta_u32(&format!("{meta_prefix}.embedding_length"))?;
     let num_layers = gguf.meta_u32(&format!("{meta_prefix}.block_count"))?;
@@ -211,6 +218,36 @@ pub fn convert_with_options<R: Read + Seek>(
         ("attn_v", "attn_v"),
         ("attn_output", "attn_output"),
         ("ffn_norm", "ffn_norm"),
+        ("ffn_up", "ffn_up"),
+        ("ffn_gate", "ffn_gate"),
+        ("ffn_down", "ffn_down"),
+    ];
+    // Qwen3.5/3.8 gated full-attn: Q+gate fusionados, QK-norm, post-norm.
+    const QWEN35_GATED_PARTS: &[(&str, &str)] = &[
+        ("attn_norm", "attn_norm"),
+        ("attn_q", "attn_q"),
+        ("attn_k", "attn_k"),
+        ("attn_v", "attn_v"),
+        ("attn_output", "attn_output"),
+        ("attn_q_norm", "attn_q_norm"),
+        ("attn_k_norm", "attn_k_norm"),
+        ("post_attention_norm", "ffn_norm"),
+        ("ffn_up", "ffn_up"),
+        ("ffn_gate", "ffn_gate"),
+        ("ffn_down", "ffn_down"),
+    ];
+    const QWEN35_GDN_PARTS: &[(&str, &str)] = &[
+        ("attn_norm", "attn_norm"),
+        ("attn_qkv", "attn_qkv"),
+        ("attn_gate", "attn_gate"),
+        ("ssm_conv1d", "ssm_conv1d"),
+        ("ssm_dt", "ssm_dt"),
+        ("ssm_a", "ssm_a"),
+        ("ssm_beta", "ssm_beta"),
+        ("ssm_alpha", "ssm_alpha"),
+        ("ssm_norm", "ssm_norm"),
+        ("ssm_out", "ssm_out"),
+        ("post_attention_norm", "ffn_norm"),
         ("ffn_up", "ffn_up"),
         ("ffn_gate", "ffn_gate"),
         ("ffn_down", "ffn_down"),
@@ -436,8 +473,26 @@ pub fn convert_with_options<R: Read + Seek>(
                 }
             }
         } else {
-            for (gguf_part, som_part) in layer_parts {
-                let gguf_name = format!("blk.{layer}.{gguf_part}.weight");
+            let parts = if is_qwen35 {
+                if gguf_has_layer_part(&gguf, layer, "attn_q") {
+                    QWEN35_GATED_PARTS
+                } else {
+                    QWEN35_GDN_PARTS
+                }
+            } else {
+                layer_parts
+            };
+            for (gguf_part, som_part) in parts {
+                let gguf_name = if is_qwen35 && *som_part == "ffn_norm" {
+                    gguf_tensor_name(&gguf, layer, "post_attention_norm")
+                        .or_else(|| gguf_tensor_name(&gguf, layer, "attn_post_norm"))
+                        .or_else(|| gguf_tensor_name(&gguf, layer, "ffn_norm"))
+                } else {
+                    gguf_tensor_name(&gguf, layer, gguf_part)
+                };
+                let Some(gguf_name) = gguf_name else {
+                    continue;
+                };
                 let som_name = format!("L{layer:02}.{som_part}");
                 if options.pack_trunk {
                     if let Some(t) = gguf.tensors.get(&gguf_name) {
@@ -462,6 +517,11 @@ pub fn convert_with_options<R: Read + Seek>(
                     &mut id,
                     out,
                 )?);
+            }
+            if is_qwen35 && index.find(&format!("L{layer:02}.ffn_norm")).is_none() {
+                return Err(format!(
+                    "capa {layer}: falta post_attention_norm (L{layer:02}.ffn_norm)"
+                ));
             }
         }
         prefetch.push(LayerPrefetch { layer, shards });
@@ -492,6 +552,9 @@ pub fn convert_with_options<R: Read + Seek>(
         layers: Vec::new(),
         prefetch,
         chat_template,
+        model_kind: ModelKind::Decoder,
+        audio: AudioSpec::default(),
+        norm_kind: NormKind::Rms,
     };
     manifest.fill_layers_from_globals();
     if is_mla {
@@ -500,6 +563,9 @@ pub fn convert_with_options<R: Read + Seek>(
             spec.q_lora_rank = q_lora_rank;
             spec.kv_lora_rank = kv_lora_rank;
         }
+    }
+    if is_qwen35 {
+        apply_qwen35_layer_specs(&mut manifest, &index, &gguf, meta_prefix);
     }
     for (layer, n) in shared_by_layer {
         if let Some(spec) = manifest.layers.get_mut(layer as usize) {
@@ -518,6 +584,125 @@ pub fn convert_with_options<R: Read + Seek>(
         )?;
     }
     Ok(())
+}
+
+fn gguf_has_layer_part(gguf: &GgufFile, layer: u32, part: &str) -> bool {
+    gguf_tensor_name(gguf, layer, part).is_some()
+}
+
+fn gguf_tensor_name(gguf: &GgufFile, layer: u32, part: &str) -> Option<String> {
+    for name in [
+        format!("blk.{layer}.{part}.weight"),
+        format!("blk.{layer}.{part}.bias"),
+        format!("blk.{layer}.{part}"),
+    ] {
+        if gguf.tensors.contains_key(&name) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn index_rows(index: &TensorIndex, name: &str) -> u32 {
+    index.find(name).and_then(|e| e.shape.first().copied()).unwrap_or(0)
+}
+
+fn index_cols(index: &TensorIndex, name: &str) -> u32 {
+    index.find(name).and_then(|e| e.shape.get(1).copied()).unwrap_or(0)
+}
+
+fn apply_qwen35_layer_specs(
+    manifest: &mut Manifest,
+    index: &TensorIndex,
+    gguf: &GgufFile,
+    meta_prefix: &str,
+) {
+    let interval = gguf
+        .meta_u32(&format!("{meta_prefix}.attention.full_attention_interval"))
+        .unwrap_or(4)
+        .max(1);
+    let rope_n = gguf
+        .meta_u32(&format!("{meta_prefix}.rope.dimension_count"))
+        .unwrap_or(0);
+    let ssm_state = gguf
+        .meta_u32(&format!("{meta_prefix}.ssm.state_size"))
+        .unwrap_or(0);
+    let ssm_groups = gguf
+        .meta_u32(&format!("{meta_prefix}.ssm.group_count"))
+        .unwrap_or(0);
+    let ssm_dt = gguf
+        .meta_u32(&format!("{meta_prefix}.ssm.time_step_rank"))
+        .unwrap_or(0);
+    let ssm_conv = gguf
+        .meta_u32(&format!("{meta_prefix}.ssm.conv_kernel"))
+        .unwrap_or(0);
+
+    let mut gated_hd = 0u32;
+    let mut gdn_d = ssm_state;
+    let mut n_k = ssm_groups;
+    let mut n_v = ssm_dt;
+    let mut conv_k = ssm_conv;
+    for layer in 0..manifest.num_layers {
+        let p = format!("L{layer:02}");
+        if index.find(&format!("{p}.attn_q")).is_some() {
+            let kv_rows = index_rows(index, &format!("{p}.attn_k"));
+            if manifest.num_kv_heads > 0 && kv_rows > 0 {
+                gated_hd = kv_rows / manifest.num_kv_heads;
+            }
+            let qn = index_rows(index, &format!("{p}.attn_q_norm"));
+            if qn > 0 {
+                gated_hd = qn;
+            }
+        } else {
+            let sn = index_rows(index, &format!("{p}.ssm_norm"));
+            if sn > 0 {
+                gdn_d = sn;
+            }
+            let dt = index_rows(index, &format!("{p}.ssm_dt"));
+            if dt > 0 {
+                n_v = dt;
+            }
+            let qkv = index_rows(index, &format!("{p}.attn_qkv"));
+            if gdn_d > 0 && n_v > 0 && qkv > n_v * gdn_d {
+                n_k = (qkv - n_v * gdn_d) / (2 * gdn_d);
+            }
+            let ck = index_cols(index, &format!("{p}.ssm_conv1d"));
+            if ck > 0 {
+                conv_k = ck;
+            }
+        }
+    }
+    if gated_hd == 0 {
+        gated_hd = if manifest.num_heads > 0 {
+            (manifest.hidden_dim / manifest.num_heads).max(1)
+        } else {
+            1
+        };
+    }
+    let rope_dim = if rope_n > 0 {
+        rope_n
+    } else {
+        (gated_hd / 4).max(2)
+    };
+
+    for (i, spec) in manifest.layers.iter_mut().enumerate() {
+        let p = format!("L{i:02}");
+        let is_gated = index.find(&format!("{p}.attn_q")).is_some()
+            || ((i as u32 + 1) % interval == 0 && index.find(&format!("{p}.attn_qkv")).is_none());
+        if is_gated {
+            spec.attn_kind = AttnKind::Gated;
+            spec.num_heads = manifest.num_heads;
+            spec.num_kv_heads = manifest.num_kv_heads;
+            spec.v_head_dim = gated_hd;
+            spec.qk_rope_head_dim = rope_dim;
+        } else {
+            spec.attn_kind = AttnKind::Gdn;
+            spec.num_heads = n_k.max(1);
+            spec.num_kv_heads = n_v.max(1);
+            spec.v_head_dim = gdn_d.max(1);
+            spec.qk_rope_head_dim = conv_k.max(1);
+        }
+    }
 }
 
 /// Trocea un tensor 3D MoE `[n_expert, rows, cols]` en shards 2D por experto.
@@ -1587,6 +1772,127 @@ mod tests {
         assert!(
             err.contains("faltan expertos"),
             "tenía que abortar, no convertir a medias: {err}"
+        );
+    }
+
+    #[test]
+    fn convierte_gguf_qwen35_gdn_y_gated() {
+        const H: u64 = 16;
+        const FFN: u64 = 32;
+        const NK: u64 = 2;
+        const NV: u64 = 4;
+        const D: u64 = 4;
+        const KER: u64 = 2;
+        const GHD: u64 = 8;
+        const HEADS: u64 = 2;
+        const KVH: u64 = 1;
+        let qkv = NK * D * 2 + NV * D;
+        let tensors: Vec<(&str, Vec<u64>)> = vec![
+            ("token_embd.weight", vec![H, 8]),
+            ("output_norm.weight", vec![H]),
+            ("blk.0.attn_norm.weight", vec![H]),
+            ("blk.0.attn_qkv.weight", vec![H, qkv]),
+            ("blk.0.attn_gate.weight", vec![H, NV * D]),
+            ("blk.0.ssm_conv1d.weight", vec![KER, qkv]),
+            ("blk.0.ssm_dt.bias", vec![NV]),
+            ("blk.0.ssm_a", vec![NV]),
+            ("blk.0.ssm_beta.weight", vec![H, NV]),
+            ("blk.0.ssm_alpha.weight", vec![H, NV]),
+            ("blk.0.ssm_norm.weight", vec![D]),
+            ("blk.0.ssm_out.weight", vec![NV * D, H]),
+            ("blk.0.post_attention_norm.weight", vec![H]),
+            ("blk.0.ffn_up.weight", vec![H, FFN]),
+            ("blk.0.ffn_gate.weight", vec![H, FFN]),
+            ("blk.0.ffn_down.weight", vec![FFN, H]),
+            ("blk.1.attn_norm.weight", vec![H]),
+            ("blk.1.attn_q.weight", vec![H, HEADS * GHD * 2]),
+            ("blk.1.attn_k.weight", vec![H, KVH * GHD]),
+            ("blk.1.attn_v.weight", vec![H, KVH * GHD]),
+            ("blk.1.attn_output.weight", vec![HEADS * GHD, H]),
+            ("blk.1.attn_q_norm.weight", vec![GHD]),
+            ("blk.1.attn_k_norm.weight", vec![GHD]),
+            ("blk.1.post_attention_norm.weight", vec![H]),
+            ("blk.1.ffn_up.weight", vec![H, FFN]),
+            ("blk.1.ffn_gate.weight", vec![H, FFN]),
+            ("blk.1.ffn_down.weight", vec![FFN, H]),
+        ];
+        let g = pack_gguf_v3(13, |g| {
+            gguf_kv_str(g, "general.architecture", "qwen35");
+            gguf_kv_u32(g, "qwen35.embedding_length", H as u32);
+            gguf_kv_u32(g, "qwen35.block_count", 2);
+            gguf_kv_u32(g, "qwen35.feed_forward_length", FFN as u32);
+            gguf_kv_u32(g, "qwen35.attention.head_count", HEADS as u32);
+            gguf_kv_u32(g, "qwen35.attention.head_count_kv", KVH as u32);
+            gguf_kv_f32(g, "qwen35.attention.layer_norm_rms_epsilon", 1e-6);
+            gguf_kv_u32(g, "qwen35.attention.full_attention_interval", 2);
+            gguf_kv_u32(g, "qwen35.ssm.state_size", D as u32);
+            gguf_kv_u32(g, "qwen35.ssm.group_count", NK as u32);
+            gguf_kv_u32(g, "qwen35.ssm.time_step_rank", NV as u32);
+            gguf_kv_u32(g, "qwen35.ssm.conv_kernel", KER as u32);
+            gguf_kv_u32(g, "qwen35.vocab_size", 8);
+        }, &tensors);
+        let dir = std::env::temp_dir().join("convert-gguf-qwen35");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("qwen35.gguf");
+        fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let out = dir.join("out");
+        convert_path(gguf_path.to_str().unwrap(), &out, Some("qwen38")).unwrap();
+        let manifest = Manifest::parse(&fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.layers[0].attn_kind, AttnKind::Gdn);
+        assert_eq!(manifest.layers[1].attn_kind, AttnKind::Gated);
+        assert_eq!(manifest.layers[0].v_head_dim, D as u32);
+        assert_eq!(manifest.layers[1].v_head_dim, GHD as u32);
+        let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
+        assert!(index.find("L00.attn_qkv").is_some());
+        assert!(index.find("L00.ssm_a").is_some());
+        assert!(index.find("L01.attn_q_norm").is_some());
+        assert!(index.find("L00.ffn_norm").is_some());
+        let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
+        rt.validate_shapes().expect("shapes qwen35");
+    }
+
+    #[test]
+    fn qwen35_sin_post_attention_norm_aborta() {
+        const H: u64 = 16;
+        const FFN: u64 = 32;
+        let tensors: Vec<(&str, Vec<u64>)> = vec![
+            ("token_embd.weight", vec![H, 8]),
+            ("output_norm.weight", vec![H]),
+            ("blk.0.attn_norm.weight", vec![H]),
+            ("blk.0.attn_qkv.weight", vec![H, 24]),
+            ("blk.0.attn_gate.weight", vec![H, 16]),
+            ("blk.0.ssm_conv1d.weight", vec![2, 24]),
+            ("blk.0.ssm_dt.bias", vec![4]),
+            ("blk.0.ssm_a", vec![4]),
+            ("blk.0.ssm_beta.weight", vec![H, 4]),
+            ("blk.0.ssm_alpha.weight", vec![H, 4]),
+            ("blk.0.ssm_norm.weight", vec![4]),
+            ("blk.0.ssm_out.weight", vec![16, H]),
+            ("blk.0.ffn_up.weight", vec![H, FFN]),
+            ("blk.0.ffn_gate.weight", vec![H, FFN]),
+            ("blk.0.ffn_down.weight", vec![FFN, H]),
+        ];
+        let g = pack_gguf_v3(8, |g| {
+            gguf_kv_str(g, "general.architecture", "qwen35");
+            gguf_kv_u32(g, "qwen35.embedding_length", H as u32);
+            gguf_kv_u32(g, "qwen35.block_count", 1);
+            gguf_kv_u32(g, "qwen35.feed_forward_length", FFN as u32);
+            gguf_kv_u32(g, "qwen35.attention.head_count", 2);
+            gguf_kv_u32(g, "qwen35.attention.head_count_kv", 1);
+            gguf_kv_f32(g, "qwen35.attention.layer_norm_rms_epsilon", 1e-6);
+            gguf_kv_u32(g, "qwen35.vocab_size", 8);
+        }, &tensors);
+        let dir = std::env::temp_dir().join("convert-gguf-qwen35-sin-post-norm");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("qwen35.gguf");
+        fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let out = dir.join("out");
+        let err = convert_path(gguf_path.to_str().unwrap(), &out, Some("qwen38")).unwrap_err();
+        assert!(
+            err.contains("post_attention_norm"),
+            "tenía que abortar sin ffn_norm, no convertir a medias: {err}"
         );
     }
 }

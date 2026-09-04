@@ -3,12 +3,16 @@ pub mod dma;
 #[cfg(any(feature = "drv-e1000e", feature = "lxdde"))]
 pub mod e1000e;
 pub mod fb;
+pub mod input;
 pub mod keymap;
 #[cfg(feature = "drv-gpu-nvidia")]
 pub mod gpu;
 pub mod kbd;
+pub mod mouse;
 #[cfg(feature = "drv-live-disk")]
 pub mod bootreq;
+#[cfg(feature = "drv-live-disk")]
+pub mod updslot;
 #[cfg(feature = "drv-live-disk")]
 pub mod wificonf;
 #[cfg(feature = "drv-live-disk")]
@@ -22,6 +26,8 @@ pub mod live_disk;
 pub mod logbuf;
 #[cfg(feature = "drv-usb")]
 pub mod usb_storage;
+#[cfg(feature = "drv-hda")]
+pub mod hda;
 #[cfg(feature = "drv-gpu-nvidia")]
 pub mod nvidia_compute;
 #[cfg(feature = "drv-gpu-nvidia")]

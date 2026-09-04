@@ -344,9 +344,12 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
         let mut cbuf = [0u8; 1024];
         match sess.runner.read_channel(ch, ChanData::Normal, &mut cbuf) {
             Ok(n) if n > 0 => {
-                let mut rx = RX.lock();
                 for &b in &cbuf[..n] {
-                    rx.push_back(b);
+                    if b == 0x03 {
+                        task::signal_console(task::Console::Ssh, soso_abi::SIGINT as u8);
+                    } else {
+                        RX.lock().push_back(b);
+                    }
                 }
             }
             Ok(_) => {}
@@ -435,6 +438,7 @@ fn lanzar_shell(sess: &mut SshSession) {
     }
     match task::spawn_console("/bin/sosh", "", 0, Console::Ssh) {
         Ok(pid) => {
+            task::session_leader(pid, Console::Ssh);
             crate::println!("ssh: sesión abierta, /bin/sosh pid {pid}");
             sess.shell_pid = Some(pid);
             sess.tuvo_shell = true;

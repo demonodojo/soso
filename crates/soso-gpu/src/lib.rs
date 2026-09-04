@@ -1,6 +1,6 @@
 //! Abstracción GPU para el runtime LLM.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 
 extern crate alloc;
 

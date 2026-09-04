@@ -17,7 +17,7 @@ IMAGE="${SOSO_CUDA_DOCKER:-nvidia/cuda:12.8.0-devel-ubuntu24.04}"
 
 # name:prefijo de símbolo. El fichero es <name>.cu y el kernel de dentro puede
 # llamarse de otra forma (el nombre real se lee del cubin, no de aquí).
-KERNELS=("saxpy:saxpy" "matvec:matvec" "matvec_q4k:matvec_q4k" "matvec_q80:matvec_q80")
+KERNELS=("saxpy:saxpy" "matvec:matvec" "matvec_q4k:matvec_q4k" "matvec_q80:matvec_q80" "matmul:matmul" "softmax_rows:softmax_rows" "layernorm_rows:layernorm_rows")
 
 mkdir -p "$TMP"
 

@@ -23,6 +23,7 @@ const NATIVE_FEATURES: &[&str] = &[
     "drv-usb",
     "drv-gpu-nvidia",
     "drv-live-disk",
+    "drv-hda",
 ];
 
 const LX_PORT_BY_DRIVER: &[(&str, &str)] = &[
@@ -35,10 +36,12 @@ const DRIVER_BY_FEATURE: &[(&str, &str)] = &[
     ("drv-virtio-blk", "virtio-blk"),
     ("drv-virtio-net", "virtio-net"),
     ("drv-e1000e", "e1000e"),
+    ("drv-rtl8169", "rtl8169"),
     ("drv-nvme", "nvme"),
     ("drv-usb", "usb-xhci"),
     ("drv-gpu-nvidia", "gpu-nvidia"),
     ("drv-live-disk", "live-disk"),
+    ("drv-hda", "hda"),
 ];
 
 /// Presets conocidos o lista separada por comas de features/preset.
@@ -62,7 +65,11 @@ pub fn preset_all() -> DriverProfile {
 
 pub fn preset_qemu() -> DriverProfile {
     DriverProfile {
-        kernel_features: vec!["drv-virtio-blk".into(), "drv-virtio-net".into()],
+        kernel_features: vec![
+            "drv-virtio-blk".into(),
+            "drv-virtio-net".into(),
+            "drv-hda".into(),
+        ],
         lxdde_ports: vec![],
         lxdde_mode: None,
         firmware_exclude: vec![
@@ -85,6 +92,7 @@ pub fn preset_live_usb() -> DriverProfile {
             "drv-usb".into(),
             "drv-live-disk".into(),
             "drv-gpu-nvidia".into(),
+            "drv-hda".into(),
         ],
         lxdde_ports: vec!["nouveau".into(), "iwlwifi".into()],
         lxdde_mode: Some("nouveau,iwlwifi".into()),
@@ -353,7 +361,7 @@ pub fn run_fit_drivers(args: &[String]) {
         merged.kernel_features, merged.lxdde_ports
     );
 
-    let _ = super::build_image_with_profile(&merged);
+    let _ = super::build_image_with_profile(&merged, false);
     super::build_user();
     let _ = super::mkfs_rootfs_with_profile(true, &merged);
 

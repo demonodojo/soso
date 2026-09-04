@@ -669,3 +669,142 @@ fn runtime_rechaza_latent_moe_sin_tensores() {
     let rt = Runtime::new(m, TensorIndex::default(), 0, 0);
     assert!(rt.validate_shapes().is_err());
 }
+
+fn add_dense_ffn(
+    tensors: &mut MemoryTensorSource,
+    index: &mut TensorIndex,
+    id: &mut u32,
+    p: &str,
+    h: u32,
+    ffn: u32,
+) {
+    add_tensor(tensors, index, id, &format!("{p}.ffn_norm"), &[h], 1.0);
+    add_tensor(tensors, index, id, &format!("{p}.ffn_up"), &[ffn, h], 0.05);
+    add_tensor(tensors, index, id, &format!("{p}.ffn_gate"), &[ffn, h], 0.05);
+    add_tensor(tensors, index, id, &format!("{p}.ffn_down"), &[h, ffn], 0.05);
+}
+
+fn build_tiny_qwen38() -> (Manifest, TensorIndex, MemoryTensorSource) {
+    let h = 16u32;
+    let ffn = 32u32;
+    let gated_heads = 2u32;
+    let gated_kv = 1u32;
+    let gated_hd = 8u32;
+    let n_k = 2u32;
+    let n_v = 4u32;
+    let d = 4u32;
+    let kernel = 2u32;
+    let qkv = n_k * d * 2 + n_v * d;
+    let mut m = Manifest::tiny("qwen38-smoke");
+    m.hidden_dim = h;
+    m.num_heads = gated_heads;
+    m.num_kv_heads = gated_kv;
+    m.ffn_dim = ffn;
+    m.num_layers = 2;
+    m.max_seq = 8;
+    m.layers = vec![
+        LayerSpec {
+            attn_kind: AttnKind::Gdn,
+            num_heads: n_k,
+            num_kv_heads: n_v,
+            v_head_dim: d,
+            qk_rope_head_dim: kernel,
+            ..LayerSpec::default()
+        },
+        LayerSpec {
+            attn_kind: AttnKind::Gated,
+            num_heads: gated_heads,
+            num_kv_heads: gated_kv,
+            v_head_dim: gated_hd,
+            qk_rope_head_dim: 2,
+            ..LayerSpec::default()
+        },
+    ];
+    let mut index = TensorIndex::default();
+    let mut id = 0u32;
+    let mut tensors = MemoryTensorSource {
+        tensors: Default::default(),
+    };
+    add_tensor(&mut tensors, &mut index, &mut id, "embed", &[m.vocab_size, h], 0.01);
+    add_tensor(&mut tensors, &mut index, &mut id, "output_norm", &[h], 1.0);
+    let p0 = "L00";
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.attn_norm"), &[h], 1.0);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.attn_qkv"), &[qkv, h], 0.02);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.attn_gate"), &[n_v * d, h], 0.02);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.ssm_conv1d"), &[qkv, kernel], 0.1);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.ssm_dt"), &[n_v], 0.1);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.ssm_a"), &[n_v], -0.2);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.ssm_beta"), &[n_v, h], 0.02);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.ssm_alpha"), &[n_v, h], 0.02);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.ssm_norm"), &[d], 1.0);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p0}.ssm_out"), &[h, n_v * d], 0.05);
+    add_dense_ffn(&mut tensors, &mut index, &mut id, p0, h, ffn);
+    let p1 = "L01";
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p1}.attn_norm"), &[h], 1.0);
+    add_tensor(
+        &mut tensors,
+        &mut index,
+        &mut id,
+        &format!("{p1}.attn_q"),
+        &[gated_heads * gated_hd * 2, h],
+        0.03,
+    );
+    add_tensor(
+        &mut tensors,
+        &mut index,
+        &mut id,
+        &format!("{p1}.attn_k"),
+        &[gated_kv * gated_hd, h],
+        0.03,
+    );
+    add_tensor(
+        &mut tensors,
+        &mut index,
+        &mut id,
+        &format!("{p1}.attn_v"),
+        &[gated_kv * gated_hd, h],
+        0.03,
+    );
+    add_tensor(
+        &mut tensors,
+        &mut index,
+        &mut id,
+        &format!("{p1}.attn_output"),
+        &[h, gated_heads * gated_hd],
+        0.03,
+    );
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p1}.attn_q_norm"), &[gated_hd], 1.0);
+    add_tensor(&mut tensors, &mut index, &mut id, &format!("{p1}.attn_k_norm"), &[gated_hd], 1.0);
+    add_dense_ffn(&mut tensors, &mut index, &mut id, p1, h, ffn);
+    (m, index, tensors)
+}
+
+#[test]
+fn qwen38_smoke_gdn_y_gated() {
+    let (manifest, index, mut source) = build_tiny_qwen38();
+    assert_eq!(manifest.attn_kind(0), AttnKind::Gdn);
+    assert_eq!(manifest.attn_kind(1), AttnKind::Gated);
+    assert!(manifest.supported_by_runtime().is_ok());
+    let mut rt = Runtime::new(manifest.clone(), index, 0, 0);
+    rt.validate_shapes().unwrap();
+    assert!(!rt.kv[0].gdn_s.is_empty());
+    rt.embed_token(1, &mut source).unwrap();
+    rt.forward_layers_range(0, manifest.num_layers, &mut source, None, &mut None)
+        .unwrap();
+    let logits = rt.logits(&mut source).unwrap();
+    assert!(logits.iter().all(|x| x.is_finite()));
+    rt.advance_pos();
+    rt.embed_token(2, &mut source).unwrap();
+    rt.forward_layers_range(0, manifest.num_layers, &mut source, None, &mut None)
+        .unwrap();
+    let logits2 = rt.logits(&mut source).unwrap();
+    assert!(logits2.iter().all(|x| x.is_finite()));
+}
+
+#[test]
+fn gdn_kv_bytes_no_crece_con_secuencia() {
+    let (m, _, _) = build_tiny_qwen38();
+    let bpt = kv_bytes_per_token(&m);
+    // Solo la capa gated (1 kv head × 8 dim × K y V × f16).
+    assert_eq!(bpt, 8 * 2 * 2);
+}

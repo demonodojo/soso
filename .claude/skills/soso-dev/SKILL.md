@@ -33,18 +33,21 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask test` | Full integration: sosofs, boot, TCP, SSH, soso-llm, halt |
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
-| `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, ver `docs/L5c-on-box.md`) |
+| `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **qwen3.8-27b**; ver `docs/L5c-on-box.md`) |
 | `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
 | `cargo xtask sosolog --drv [/dev/sdX]` | Igual pero muestra `SOSODRV.TXT`: el informe hwscan del último arranque (alias `--hwscan`) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
+| `cargo xtask test-update` | Actualización local E2E: release en `/var/actualiza-prueba`, `soso-update aplicar --local`, reinicio y comprobación de versión (OVMF) |
+| `cargo xtask release [--publish]` | Empaqueta release en `target/release-soso/v<VERSION>/`; `--publish` sube a GitHub Releases |
 | `cargo xtask fetch-hf` | Descargar GGUF de Hugging Face, convertir a `.som` y preparar `SOSO_MODELS_DIR` |
+| `cargo xtask fetch-whisper` | Descargar `ggml-tiny.bin` (curl reanudable) y convertir a `target/whisper-tiny-model` |
 | `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (denso o MoE Mixtral, host tool) |
 | `cargo run -p mkmodel-soso -- --moe target/tiny-moe-model` | Generar modelo sintético MoE (4 expertos, top-2) |
 | `cargo run -p mkfs-sosomfs -- dir1 dir2 imagen.img --size 8G` | Empaquetar varios modelos en una imagen sosomfs |
 | `cargo xtask lx-build` | Compilar `liblxdde.a` (drivers Linux portados) |
 | `cargo xtask lx-build nouveau` | Compilar solo el port nouveau/nvkm (GPU, L6/G5 GO en GB205) |
-| `cargo xtask lx-build iwlwifi` | Compilar driver Intel AX211 (WiFi + mac80211 mínimo) |
+| `cargo xtask lx-build iwlwifi` | Compilar driver Intel AX211/AX200 (WiFi + mac80211 mínimo) |
 | `./scripts/l6-wifi-vfio-test.sh` | Passthrough VFIO WiFi AX211 a QEMU (prueba ALIVE) |
 | `cargo xtask g1-check` | Checklist host G1 (IOMMU/VFIO, firmware, BAR0) |
 | `cargo xtask g3-check` | Checklist bring-up GSP (firmware, módulos, fases) |
@@ -72,7 +75,7 @@ SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau cargo xtask run
 
 QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
 
-## WiFi (Intel AX211, hardware real)
+## WiFi (Intel AX211/AX200, hardware real)
 
 ```sh
 # Live USB ya incluye nouveau+iwlwifi; solo flash:
@@ -82,7 +85,8 @@ cargo xtask flash-usb-live /dev/sdX --yes
 sudo ./scripts/l6-wifi-vfio-test.sh   # VFIO AX211 en QEMU
 ```
 
-Config: `SOSOWIFI.TXT` (ESP) o `/etc/wifi.conf` (`ssid=`, `psk=`). Firmware en `rootfs/lib/firmware/iwlwifi-so-a0-gf-a0-*`.
+Config: `SOSOWIFI.TXT` (ESP) o `/etc/wifi.conf` (`ssid=`, `psk=`). Firmware en `rootfs/lib/firmware/iwlwifi-so-a0-gf-a0-*` (AX211) y `iwlwifi-cc-a0-*.ucode` (AX200).
+sosh: `wifi scan`, `wifi status`, `wifi connect <ssid> [psk]`.
 Kshell: `wifi scan`, `wifi status`, `wifi connect <ssid> [psk]`, `hwscan` (informe PCI completo → serie y `SOSODRV.TXT` en live; lee la foto cacheada del bus, no lo reenumera).
 
 ## Perfiles de drivers (`SOSO_DRIVERS` / `--drivers`)
@@ -91,7 +95,7 @@ Kshell: `wifi scan`, `wifi status`, `wifi connect <ssid> [psk]`, `hwscan` (infor
 |--------|-----------------|-----|
 | `all` (default) | `drv-all` | Desarrollo y `cargo xtask test` |
 | `qemu` | virtio-blk, virtio-net | Imagen mínima QEMU |
-| `live-usb` | virtio + **e1000e** + nvme + usb + live-disk + nouveau + iwlwifi | Pendrive live (ethernet + GPU + WiFi) |
+| `live-usb` | virtio + **e1000e** + **rtl8169** + nvme + usb + live-disk + nouveau + iwlwifi | Pendrive live (ethernet Intel/Realtek + GPU + WiFi) |
 
 Tras arrancar en hardware, `hwscan` lista **todos** los dispositivos PCI —con
 driver o sin él— y destaca al final los controladores de red que nadie reclama:
@@ -108,7 +112,8 @@ Sale por serie en cada arranque y, en live, a `SOSODRV.TXT` (léelo con
 /media/.../SOSODRV.TXT` (o `--esp /dev/sdX1`) regenera el kernel con los drivers
 necesarios. Si tu NIC sale como `sin-driver`, ese `VVVV:DDDD` es lo que decide si
 basta con ampliar la lista de IDs de `drivers/registry.rs` (el `e1000e` nativo
-sólo cubre `8086:10d3/100e/10f5/10a4`, las tarjetas de QEMU) o hay que portar uno.
+sólo cubre `8086:10d3/100e/10f5/10a4`, las tarjetas de QEMU; `rtl8169` cubre
+Realtek `10ec:8168/8161/8162/8167/8136`) o hay que portar uno.
 
 Ports lxdde externos: repo con `source.list` (+ opcional `driver.toml`,
 `firmware/`). `cargo xtask driver-add <url>` los registra en
@@ -172,10 +177,17 @@ cargo test -q -p sosomfs --features std
 # Host: soso-http (Range header; sin red real)
 cargo test -q -p soso-http
 
-# Host: soso-llm-core (planificador, kv KIVI/H2O, attn sparse, PLD, MoE), sosomodel, convert-gguf
+# Host: parser HTML/reflow de soso-web (sin red)
+cargo test -q -p soso-web-core
+
+# Host: soso-llm-core (planificador, kv KIVI/H2O, attn sparse, PLD, MoE, Qwen Gated/GDN), sosomodel, convert-gguf
 cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 # Subconjuntos útiles tras tocar inferencia:
 #   cargo test -p soso-llm-core --features std -- plan:: kv:: attn:: moe::
+#   cargo test -p soso-llm-core --features std --test arch_ext
+#   cargo test -p soso-llm-core --features std --test asr
+#   cargo test -p soso-audio --features std
+#   cargo test -p gguf2som --features std -- convierte_gguf_qwen35
 # Hostrun MoE sintético:
 #   cargo run -q --release -p mkmodel-soso -- --moe target/tiny-moe-model
 #   cargo run --release -p soso-llm-core --features std --example hostrun -- target/tiny-moe-model @bos 4
@@ -292,10 +304,12 @@ and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: a
 | Teclas no coinciden (QWERTY vs ñ/¿) | Mapa por defecto **es**; `kbd us` en kernel-shell para teclado americano/QEMU |
 | La máquina se arrastra tras usar `soso-llm`/`ask` | En askd el `ThreadPool` se suelta tras cada respuesta (`drop_pool`); si giran al 100 %, revisar `pool.rs` (deben dormir en futex entre matvecs) |
 | `ask` recarga en cada pregunta | Debe haber un solo askd en `:7420`; la segunda pregunta no debe mostrar «ask: cargando» salvo cambio de modelo o presión de RAM |
+| `voz` / `soso-voz dictar` falla | Comprobar `tiny-asr` en `/models`; `soso-voz vozd` en `:7421`; test host: `cargo test -p soso-llm-core --features std --test asr` |
+| Micrófono en QEMU | `SOSO_QEMU_AUDIO=1 cargo xtask run` (Intel HDA); sin flag el shard `sys` usa `--wav` determinista |
 | `ask hola` con Mixtral se queda en puntos | Sin pool de VRAM (`pool VRAM=no`) Mixtral va a CPU. No está colgado; minutos/token. `ask :modelo tiny` o esperar. Tras reflashear, un punto por capa |
 | `Could not set up host forwarding rule tcp::2222` | Puerto ocupado; `pkill qemu-system-x86` y relanzar |
 | SSH output desalineada | Kernel debe enviar CRLF en `ssh::tx_push` (tty cruda) |
-| SSH no reconecta tras Ctrl-C | Kernel debe hacer `reset_socket` en CloseWait/TimeWait |
+| SSH no reconecta tras cerrar sesión | Kernel debe hacer `reset_socket` en CloseWait/TimeWait; Ctrl-C interrumpe comandos, no cierra la sesión con `ssh -tt` |
 | Kernel GPF al conectar SSH | Revisar alineación de pila en `timer_isr` antes de `net::poll` |
 | Redirección `> file` no crea fichero | `vfs::create_file` debe delegar a sosofs (no stub) |
 | RDRAND / crypto errors | QEMU must use `-cpu max` (xtask sets this) |

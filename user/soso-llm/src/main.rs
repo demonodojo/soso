@@ -8,7 +8,6 @@ extern crate alloc;
 mod ask;
 mod cuda_host;
 mod distributed;
-mod gpu;
 mod net;
 mod pool;
 mod staging;
@@ -619,7 +618,7 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
 pub(crate) struct Sesion {
     bundle: ModelBundle,
     pool: Option<ThreadPool>,
-    sys_gpu: Option<gpu::SysGpu>,
+    sys_gpu: Option<soso_gpu::SysGpu>,
     pub(crate) modelo: String,
 }
 
@@ -739,7 +738,7 @@ pub(crate) fn preparar_sesion(
             );
         }
     }
-    let sys_gpu = if force_cpu { None } else { gpu::SysGpu::new() };
+    let sys_gpu = if force_cpu { None } else { soso_gpu::SysGpu::new() };
     // El `present` del kernel no basta para decidir: un dispositivo puede aceptar
     // búferes y no ejecutar nada (iGPU Intel), y entonces `SysGpu::new` dice no.
     // Anunciar "GPU detectada" mirando sólo `present` era prometer un offload que

@@ -155,6 +155,86 @@ pub fn submit_matvec_q_resident(
     Err(())
 }
 
+#[cfg_attr(not(feature = "lxdde"), allow(unused_variables))]
+pub fn submit_matmul_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    n: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    let mut st = COMPUTE.lock();
+    let Some(s) = st.as_mut() else {
+        return Err(());
+    };
+    #[cfg(feature = "lxdde")]
+    {
+        if let Ok(on_gpu) =
+            crate::lxdde::submit_matmul_resident(w_va, rows, cols, n, x, y)
+        {
+            s.gpu_path = on_gpu;
+            s.channel_ready = crate::lxdde::gsp_ready();
+            return Ok(on_gpu);
+        }
+    }
+    Err(())
+}
+
+#[cfg_attr(not(feature = "lxdde"), allow(unused_variables))]
+pub fn submit_softmax_rows(x: &mut [f32], rows: usize, cols: usize) -> Result<bool, ()> {
+    let mut st = COMPUTE.lock();
+    let Some(s) = st.as_mut() else {
+        return Err(());
+    };
+    #[cfg(feature = "lxdde")]
+    {
+        if let Ok(on_gpu) = crate::lxdde::submit_softmax_rows(x, rows, cols) {
+            s.gpu_path = on_gpu;
+            s.channel_ready = crate::lxdde::gsp_ready();
+            return Ok(on_gpu);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg_attr(not(feature = "lxdde"), allow(unused_variables))]
+pub fn submit_layernorm_rows(
+    x: &mut [f32],
+    weight: &[f32],
+    bias: &[f32],
+    rows: usize,
+    cols: usize,
+    eps: f32,
+) -> Result<bool, ()> {
+    let mut st = COMPUTE.lock();
+    let Some(s) = st.as_mut() else {
+        return Err(());
+    };
+    #[cfg(feature = "lxdde")]
+    {
+        if let Ok(on_gpu) =
+            crate::lxdde::submit_layernorm_rows(x, weight, bias, rows, cols, eps)
+        {
+            s.gpu_path = on_gpu;
+            s.channel_ready = crate::lxdde::gsp_ready();
+            return Ok(on_gpu);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg_attr(not(feature = "lxdde"), allow(unused_variables))]
+pub fn wait_fence(sem_slot: u32) -> Result<(), ()> {
+    #[cfg(feature = "lxdde")]
+    {
+        if crate::lxdde::wait_fence(sem_slot).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(())
+}
+
 #[allow(dead_code)]
 pub fn channel_ready() -> bool {
     COMPUTE.lock().as_ref().is_some_and(|s| s.channel_ready)

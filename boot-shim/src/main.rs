@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+mod actualiza;
 mod bootentry;
 
 use alloc::format;
@@ -47,12 +48,20 @@ fn main() -> Status {
     );
     write_mark(&head);
 
-    // Antes del chainload: si el instalador dejó una petición en SOSOBOOT.TXT,
-    // este es el único momento en que hay Runtime Services para atenderla.
+    // Antes del chainload: buzón de instalación y de actualización de kernel.
     let head = match bootentry::atender() {
         Some(linea) => {
             uefi::println!("soso-shim: {linea}");
             let head = format!("{head}bootentry: {linea}\n");
+            write_mark(&head);
+            head
+        }
+        None => head,
+    };
+    let head = match actualiza::atender() {
+        Some(linea) => {
+            uefi::println!("soso-shim: {linea}");
+            let head = format!("{head}actualiza: {linea}\n");
             write_mark(&head);
             head
         }

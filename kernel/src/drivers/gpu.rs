@@ -699,6 +699,30 @@ fn disable_soft() -> Result<u64, i64> {
     Ok(0)
 }
 
+fn soft_expf(x: f32) -> f32 {
+    let mut y = 1.0f32 + x / 256.0;
+    y *= y;
+    y *= y;
+    y *= y;
+    y *= y;
+    y *= y;
+    y *= y;
+    y *= y;
+    y *= y;
+    y
+}
+
+fn soft_sqrtf(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g = x;
+    for _ in 0..8 {
+        g = 0.5 * (g + x / g);
+    }
+    g
+}
+
 /// Comandos GPU (userspace):
 /// - `b"SAXPY"` + f32 a + u64 x_handle + u64 y_handle + u32 n
 /// - `b"MATVF"` + u64 w_handle + u32 rows + u32 cols + u64 x_handle + u64 y_handle
@@ -721,7 +745,7 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
     if cmd.len() >= 5 && &cmd[..5] == b"SOFTX" {
         return disable_soft();
     }
-    let g = gpu().lock();
+    let mut g = gpu().lock();
     if !g.present {
         return Err(abi::ENOSYS);
     }
@@ -875,6 +899,142 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         write_f32_buffer(&mut gpu().lock(), y_h, &y)?;
         return Ok(submit_bits(on_gpu));
     }
+    if cmd.len() >= 5 && &cmd[..5] == b"MATMF" && cmd.len() >= 41 {
+        let w_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let rows = u32::from_le_bytes(cmd[13..17].try_into().unwrap_or([0; 4])) as usize;
+        let cols = u32::from_le_bytes(cmd[17..21].try_into().unwrap_or([0; 4])) as usize;
+        let n = u32::from_le_bytes(cmd[21..25].try_into().unwrap_or([0; 4])) as usize;
+        let x_h = u64::from_le_bytes(cmd[25..33].try_into().unwrap_or([0; 8]));
+        let y_h = u64::from_le_bytes(cmd[33..41].try_into().unwrap_or([0; 8]));
+        let x = read_f32_vec(&g, x_h, cols * n)?;
+        let mut y = read_f32_vec(&g, y_h, rows * n)?;
+        let w_va = g
+            .buffers
+            .get(w_h as usize)
+            .and_then(|b| b.as_ref())
+            .and_then(|b| b.device_va());
+        let on_gpu = if soft {
+            false
+        } else if let Some(va) = w_va {
+            match nvidia_compute::submit_matmul_resident(va, rows, cols, n, &x, &mut y) {
+                Ok(true) => true,
+                _ => {
+                    drop(g);
+                    return Ok(0);
+                }
+            }
+        } else {
+            drop(g);
+            return Ok(0);
+        };
+        drop(g);
+        write_f32_buffer(&mut gpu().lock(), y_h, &y)?;
+        return Ok(submit_bits(on_gpu));
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"SOFTM" && cmd.len() >= 21 {
+        let x_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let rows = u32::from_le_bytes(cmd[13..17].try_into().unwrap_or([0; 4])) as usize;
+        let cols = u32::from_le_bytes(cmd[17..21].try_into().unwrap_or([0; 4])) as usize;
+        let mut x = read_f32_vec(&g, x_h, rows * cols)?;
+        let on_gpu = if soft {
+            for row in x.chunks_mut(cols) {
+                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0.0f32;
+                for v in row.iter_mut() {
+                    *v = soft_expf(*v - max);
+                    sum += *v;
+                }
+                if sum > 0.0 {
+                    for v in row.iter_mut() {
+                        *v /= sum;
+                    }
+                }
+            }
+            false
+        } else {
+            nvidia_compute::submit_softmax_rows(&mut x, rows, cols).unwrap_or(false)
+        };
+        drop(g);
+        write_f32_buffer(&mut gpu().lock(), x_h, &x)?;
+        return Ok(submit_bits(on_gpu));
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"LNORM" && cmd.len() >= 45 {
+        let x_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let w_h = u64::from_le_bytes(cmd[13..21].try_into().unwrap_or([0; 8]));
+        let b_h = u64::from_le_bytes(cmd[21..29].try_into().unwrap_or([0; 8]));
+        let rows = u32::from_le_bytes(cmd[29..33].try_into().unwrap_or([0; 4])) as usize;
+        let cols = u32::from_le_bytes(cmd[33..37].try_into().unwrap_or([0; 4])) as usize;
+        let eps = f32::from_le_bytes(cmd[37..41].try_into().unwrap_or([0; 4]));
+        let mut x = read_f32_vec(&g, x_h, rows * cols)?;
+        let weight = read_f32_vec(&g, w_h, cols)?;
+        let bias = read_f32_vec(&g, b_h, cols)?;
+        let on_gpu = if soft {
+            false
+        } else {
+            nvidia_compute::submit_layernorm_rows(&mut x, &weight, &bias, rows, cols, eps)
+                .unwrap_or(false)
+        };
+        if !on_gpu {
+            for row in x.chunks_mut(cols) {
+                let n = cols as f32;
+                let mean = row.iter().sum::<f32>() / n;
+                let var = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
+                let scale = 1.0 / soft_sqrtf(var + eps);
+                for (xi, (w, b)) in row.iter_mut().zip(weight.iter().zip(bias.iter())) {
+                    *xi = (*xi - mean) * scale * w + b;
+                }
+            }
+        }
+        drop(g);
+        write_f32_buffer(&mut gpu().lock(), x_h, &x)?;
+        return Ok(submit_bits(on_gpu));
+    }
+    if cmd.len() >= 7 && &cmd[..5] == b"BATCH" {
+        let n = u16::from_le_bytes(cmd[5..7].try_into().unwrap_or([0; 2])) as usize;
+        let mut off = 7usize;
+        let mut any_gpu = false;
+        for _ in 0..n {
+            if off + 38 > cmd.len() {
+                break;
+            }
+            let fmt = cmd[off];
+            off += 1;
+            let w_h = u64::from_le_bytes(cmd[off..off + 8].try_into().unwrap_or([0; 8]));
+            off += 8;
+            let rows = u32::from_le_bytes(cmd[off..off + 4].try_into().unwrap_or([0; 4])) as usize;
+            off += 4;
+            let cols = u32::from_le_bytes(cmd[off..off + 4].try_into().unwrap_or([0; 4])) as usize;
+            off += 4;
+            let x_h = u64::from_le_bytes(cmd[off..off + 8].try_into().unwrap_or([0; 8]));
+            off += 8;
+            let y_h = u64::from_le_bytes(cmd[off..off + 8].try_into().unwrap_or([0; 8]));
+            off += 8;
+            let x = read_f32_vec(&g, x_h, cols)?;
+            let mut y = read_f32_vec(&g, y_h, rows)?;
+            let w_va = g
+                .buffers
+                .get(w_h as usize)
+                .and_then(|b| b.as_ref())
+                .and_then(|b| b.device_va());
+            let on_gpu = if fmt == 0 {
+                if let Some(va) = w_va {
+                    nvidia_compute::submit_matvec_resident(va, rows, cols, &x, &mut y)
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            } else if let Some(va) = w_va {
+                nvidia_compute::submit_matvec_q_resident(va, fmt, rows, cols, &x, &mut y)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            write_f32_buffer(&mut g, y_h, &y)?;
+            any_gpu |= on_gpu;
+        }
+        drop(g);
+        return Ok(submit_bits(any_gpu));
+    }
     // Legacy: SAXPY con datos embebidos (tests)
     if cmd.len() >= 8 && &cmd[..5] == b"SAXPY" {
         let a = f32::from_le_bytes(cmd[5..9].try_into().unwrap_or([0; 4]));
@@ -885,6 +1045,23 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         }
     }
     Ok(0)
+}
+
+/// Espera a que termine un QMD encolado de forma asíncrona.
+pub fn wait_fence(sem_slot: u64) -> Result<u64, i64> {
+    let g = gpu().lock();
+    if !g.present || !g.compute {
+        return Err(abi::ENOSYS);
+    }
+    if g.vendor != GPU_VENDOR_NVIDIA && g.vendor != GPU_VENDOR_SOFT {
+        return Err(abi::ENOSYS);
+    }
+    drop(g);
+    if nvidia_compute::wait_fence(sem_slot as u32).is_ok() {
+        Ok(0)
+    } else {
+        Err(abi::EIO)
+    }
 }
 
 /// `COMPUTED` va siempre que hemos escrito el búfer; `ON_GPU` sólo si lo hizo la

@@ -49,15 +49,20 @@ Actualiza `MANUAL-USUARIO.md` en la **misma tarea** que cambia la funcionalidad 
 
 Referencia rápida — ampliar el manual si cambian:
 
-- **`ask`:** modelo residente en `soso-llm askd` (`127.0.0.1:7420`); persiste entre SSH; ver sección ask en el manual
-- **Arranque:** `cargo xtask run`, salida `Ctrl-A X`, `pkill qemu-system-x86` si puerto 2222 ocupado
-- **Log USB live:** `cargo xtask sosolog` (ESP p1; no `sudo cargo`)
-- **SSH:** `ssh -tt -i target/soso_test_key -p 2222 soso@localhost` (reconexión tras Ctrl-C)
-- **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, pipes `|`, redirecciones `>`, `>>`, `<`)
-- **Rutas:** relativas al cwd (por defecto `/`); absolutas con `/`
+- **Panorama:** tabla «¿Qué incluye soso?» al inicio (sosh, ask, voz, web, install, update, …)
+- **`ask`:** modelo residente en `soso-llm askd` (`127.0.0.1:7420`); persiste entre SSH
+- **`voz` / `soso-voz`:** dictado vía `vozd` (`127.0.0.1:7421`); F4 push-to-talk; `/etc/voz.conf`
+- **`soso-web`:** HTTPS o `--local`; `--grafico` con framebuffer
+- **`soso-update`:** `estado`, `comprobar`, `aplicar`, `revertir`; `/etc/actualiza.conf`, `/etc/soso-release`
+- **`soso-install`:** `list`, `<id> --yes`, `status`; buzón `SOSOBOOT.TXT`
+- **`soso-hf`:** `search`, `list`, `pull` (modelos en `/models/` desde el guest)
+- **Arranque:** QEMU `cargo xtask run`; live `flash-usb-live`; salida `Ctrl-A X`
+- **Log USB live:** `cargo xtask sosolog` / `--drv` (ESP p1; no `sudo cargo`)
+- **SSH:** `ssh -tt -i target/soso_test_key -p 2222 soso@localhost` (QEMU); puerto 22 en placa
+- **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, `wifi`, `ask`, `voz`, pipes, redirecciones)
 - **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `halt`
-- **LLM:** `soso-llm run tiny --prompt …`; modelos en `/models/`; live USB elige automáticamente tinyllama → mistral-7b → mixtral → llama2-70b según tamaño del pendrive (`flash-usb-live`)
-- **Red:** `nc localhost 7777` (echo TCP)
+- **LLM:** `soso-llm run …`; modelos en `/models/`; live escala modelo según tamaño del stick
+- **Red:** echo TCP `nc localhost 7777`; live: Realtek 8168 o WiFi AX211/AX200
 
 ## Skills compartidas
 

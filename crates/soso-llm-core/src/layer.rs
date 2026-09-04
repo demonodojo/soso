@@ -200,24 +200,60 @@ impl LayerScratch {
             })
             .max()
             .unwrap_or(0);
-        let act_dim = ffn.max(latent_max).max(h);
-        let heads = m.num_heads as usize;
-        let head_dim = h / heads;
-        let kv_dim = m.num_kv_heads as usize * head_dim;
+        let mut max_q = h;
+        let mut max_k = h;
+        let mut max_v = h;
+        let mut max_attn = h;
+        let mut max_head = 1usize;
+        let mut max_nv = 1usize;
+        for layer in 0..m.num_layers {
+            let heads = m.effective_num_heads(layer) as usize;
+            let kv_heads = m.effective_num_kv_heads(layer) as usize;
+            let hd = m.effective_head_dim(layer) as usize;
+            max_head = max_head.max(hd.max(1));
+            match m.attn_kind(layer) {
+                AttnKind::Gated => {
+                    max_q = max_q.max(heads.saturating_mul(hd).saturating_mul(2));
+                    max_k = max_k.max(kv_heads.saturating_mul(hd));
+                    max_v = max_v.max(kv_heads.saturating_mul(hd));
+                    max_attn = max_attn.max(heads.saturating_mul(hd));
+                }
+                AttnKind::Gdn => {
+                    let qkv = heads
+                        .saturating_mul(hd)
+                        .saturating_mul(2)
+                        .saturating_add(kv_heads.saturating_mul(hd));
+                    max_q = max_q.max(qkv);
+                    max_k = max_k.max(kv_heads.saturating_mul(hd));
+                    max_v = max_v.max(kv_heads.saturating_mul(hd));
+                    max_attn = max_attn.max(kv_heads.saturating_mul(hd));
+                    max_nv = max_nv.max(kv_heads);
+                }
+                _ => {
+                    if heads > 0 {
+                        let classic = h / heads;
+                        max_k = max_k.max(kv_heads.saturating_mul(classic));
+                        max_v = max_v.max(kv_heads.saturating_mul(classic));
+                        max_head = max_head.max(classic.max(1));
+                    }
+                }
+            }
+        }
+        let act_dim = ffn.max(latent_max).max(h).max(max_q).max(max_attn);
         let kv_cap = (m.max_seq as usize).min(256).max(32);
         let n_exp = m.max_router_experts() as usize;
         Self {
             residual: vec![0.0; h],
-            norm_w: vec![0.0; h],
-            q: vec![0.0; h],
-            k: vec![0.0; kv_dim],
-            v: vec![0.0; kv_dim],
+            norm_w: vec![0.0; h.max(max_head)],
+            q: vec![0.0; max_q.max(h)],
+            k: vec![0.0; max_k.max(1)],
+            v: vec![0.0; max_v.max(1)],
             up: vec![0.0; act_dim],
-            gate: vec![0.0; act_dim],
-            attn_out: vec![0.0; h],
-            head_out: vec![0.0; head_dim],
-            router: vec![0.0; n_exp.max(1)],
-            moe_acc: vec![0.0; h.max(latent_max)],
+            gate: vec![0.0; act_dim.max(max_q)],
+            attn_out: vec![0.0; max_attn.max(h)],
+            head_out: vec![0.0; max_head],
+            router: vec![0.0; n_exp.max(max_nv).max(1)],
+            moe_acc: vec![0.0; h.max(latent_max).max(max_nv)],
             mass_buf: vec![0.0; kv_cap],
         }
     }
@@ -344,6 +380,44 @@ impl<'a> LayerExecutor<'a> {
             timing.attn_ms = att;
         } else if spec.attn_kind == AttnKind::Kda {
             let (mv, att) = crate::arch::forward_kda_attn(
+                self.manifest,
+                layer,
+                pos,
+                &prefix,
+                hidden,
+                s,
+                kv,
+                source,
+                gpu,
+                use_gpu,
+                par,
+                planner_ro,
+                clock_ms,
+            )?;
+            timing.matvec_ms = mv;
+            timing.attn_ms = att;
+        } else if spec.attn_kind == AttnKind::Gated {
+            let (mv, att) = crate::arch::forward_gated_attn(
+                &spec,
+                self.manifest,
+                layer,
+                pos,
+                &prefix,
+                hidden,
+                s,
+                kv,
+                source,
+                gpu,
+                use_gpu,
+                par,
+                planner_ro,
+                clock_ms,
+            )?;
+            timing.matvec_ms = mv;
+            timing.attn_ms = att;
+        } else if spec.attn_kind == AttnKind::Gdn {
+            let (mv, att) = crate::arch::forward_gdn_attn(
+                &spec,
                 self.manifest,
                 layer,
                 pos,

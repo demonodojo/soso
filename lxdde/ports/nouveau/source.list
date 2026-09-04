@@ -18,6 +18,9 @@ lxdde/ports/nouveau/saxpy_sass_embed.c
 lxdde/ports/nouveau/matvec_sass_embed.c
 lxdde/ports/nouveau/matvec_q4k_sass_embed.c
 lxdde/ports/nouveau/matvec_q80_sass_embed.c
+lxdde/ports/nouveau/matmul_sass_embed.c
+lxdde/ports/nouveau/softmax_rows_sass_embed.c
+lxdde/ports/nouveau/layernorm_rows_sass_embed.c
 lxdde/ports/nouveau/gsp_fini.c
 lxdde/ports/nouveau/gsp_mmio.c
 lxdde/ports/nouveau/gsp_pramin.c

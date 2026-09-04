@@ -1,11 +1,37 @@
 # Manual de usuario — soso
 
-**soso** es un sistema operativo minimalista de aprendizaje: kernel propio en Rust,
-filesystem copy-on-write con checksums (sosofs) y acceso remoto por SSH real.
-Es **monousuario**: una sola sesión SSH a la vez, sin permisos ni cuentas múltiples.
+**soso** es un sistema operativo propio para x86_64: kernel en Rust, disco con
+filesystem copy-on-write (sosofs), modelos de lenguaje en un segundo disco
+(sosomfs), red real (ethernet, WiFi, SSH), reconocimiento de voz, un navegador
+mínimo, instalación en NVMe y actualizaciones por red. Es **monousuario**: una
+sola sesión SSH a la vez, sin permisos ni cuentas múltiples.
+
+Puedes usarlo en **QEMU** (desarrollo), en un **pendrive live** en hardware real
+o **instalado en un disco NVMe** junto a Linux (dual-boot UEFI).
 
 Este manual describe cómo arrancar el sistema, conectarte y usar la shell y los
-comandos disponibles.
+comandos disponibles. Para compilar el proyecto desde el código fuente, consulta
+el [`README.md`](README.md) (en inglés).
+
+---
+
+## ¿Qué incluye soso?
+
+| Área | Comandos / programas | Para qué sirve |
+|------|----------------------|----------------|
+| Shell | **sosh** | Consola con pipes, redirecciones, WiFi, `ask`, `voz` |
+| LLM | **ask**, **soso-llm** | Preguntar al modelo; inferencia directa o modo interactivo |
+| Modelos | **soso-hf**, **ask-modelo** | Descargar GGUF desde Hugging Face; elegir modelo por defecto |
+| Voz | **voz**, **soso-voz** | Dictado por micrófono o fichero WAV (Whisper) |
+| Web | **soso-web** | Leer páginas HTTPS o HTML local (consola o pantalla gráfica) |
+| Instalación | **soso-install** | Copiar el live a un disco NVMe desde soso, sin Linux |
+| Actualización | **soso-update** | Bajar e instalar releases nuevas (programas + kernel) |
+| Red | **wifi** (builtin) | Escanear y conectar redes WiFi Intel en placa real |
+| Sistema | **halt**, **exit** | Apagar o salir de la shell |
+
+Al arrancar verás una línea como `soso 0.2.0 (6641119fd)` — versión del kernel
+y build. La versión del disco está en `/etc/soso-release` (`soso-update estado`
+la muestra junto al estado del buzón de actualización).
 
 ---
 
@@ -24,7 +50,9 @@ En la máquina anfitriona (Linux) necesitas:
 
 ## Arrancar soso
 
-Desde el directorio del proyecto:
+### En QEMU (desarrollo)
+
+Desde el directorio del proyecto en Linux:
 
 ```sh
 cargo xtask run
@@ -33,7 +61,27 @@ cargo xtask run
 Este comando compila el kernel, genera la imagen del disco con el contenido de
 `rootfs/`, y lanza QEMU. La consola del sistema aparece en la misma terminal.
 
-Comandos relacionados:
+### En hardware real (pendrive live)
+
+1. Genera y graba el live USB (desde el repo, en Linux):
+
+   ```sh
+   cargo xtask flash-usb-live /dev/sdX --yes
+   ```
+
+   Sustituye `/dev/sdX` por tu pendrive (¡comprueba bien el dispositivo!).
+   El empaquetado incluye el mejor modelo GGUF que quepa en el stick.
+
+2. Arranca la máquina desde el USB (menú UEFI / F12).
+
+3. Espera el prompt `$` de **sosh** en pantalla o conéctate por SSH si hay red
+   (DHCP en ethernet Realtek o WiFi Intel; ver [Red en hardware real](#2b-red-en-hardware-real-ethernet-realtek-y-wifi-intel)).
+
+Para **instalar** soso en un NVMe del equipo, sigue la sección
+[Instalar soso en un disco](#instalar-soso-en-un-disco-dual-boot-uefi). Para
+**actualizar** una instalación existente, [soso-update](#soso-update--actualizar-soso-instalado).
+
+Comandos relacionados (desarrollo en el repo):
 
 | Comando | Descripción |
 |---|---|
@@ -99,8 +147,9 @@ ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 - **Cifrado:** SSH-2 con curve25519, ed25519 y chacha20-poly1305.
 
 Al conectar verás el mensaje del día (`/etc/motd`) y luego la misma shell **sosh**
-que en la consola serie. Puedes desconectar con Ctrl-C o `exit` y volver a conectar;
-solo hay **una sesión SSH a la vez**.
+que en la consola serie. Para **cerrar la sesión** usa `exit` o cierra la terminal
+del cliente; solo hay **una sesión SSH a la vez**. Con `ssh -tt`, **Ctrl-C** durante
+un comando interrumpe ese comando (como en la consola serie), no cierra la sesión.
 
 **Clave de acceso:** al construir la imagen, se inyecta una clave pública ed25519 en
 `/etc/authorized_key` del disco:
@@ -115,24 +164,38 @@ compilar, o regenera la imagen con `cargo xtask mkfs`.
 > del servidor se guarda en `/etc/ssh_host_key` dentro del disco y persiste entre
 > reconstrucciones de la imagen si no borras el disco de datos.
 
-### 2b. WiFi (Intel AX211, arranque en hardware real)
+### 2b. Red en hardware real (ethernet Realtek y WiFi Intel)
 
-El **USB live** incluye drivers **nouveau + iwlwifi** (Intel AX211 `8086:7f70`).
-Tras arrancar, soso escanea/asocia y pide DHCP; SSH escucha en el **puerto 22**
-(no 2222 — ese es solo QEMU).
+El **USB live** incluye ethernet **Realtek RTL8111/8168** (`rtl8169`, el mismo
+chip que Linux cubre con `r8169`) y WiFi **Intel AX211** (`8086:7f70`) y
+**AX200** (`8086:2723`) vía `iwlwifi`.
+Enchufa un cable en el RJ45 o configura WiFi; tras DHCP, SSH escucha en el
+**puerto 22** (no 2222 — ese es solo QEMU).
 
 **Configuración WiFi** (elige una):
 
-1. **En el pendrive (recomendado):** edita `SOSOWIFI.TXT` en la ESP (partición 1
-   FAT). Mismo formato que abajo. No hace falta regenerar la imagen.
-2. **En rootfs:** `/etc/wifi.conf` (se empaqueta al flashear).
+1. **Desde sosh** (recomendado cuando ya arrancó):
+
+```sh
+wifi scan
+wifi status
+wifi connect MiRed
+wifi connect MiRed MiClaveWPA2
+```
+
+Tras asociar, soso pide DHCP. SSH queda en el **puerto 22**.
+
+2. **En el pendrive, antes de arrancar:** edita `SOSOWIFI.TXT` en la ESP (partición 1
+   FAT). El kernel se conecta solo al boot. No hace falta regenerar la imagen.
+3. **En rootfs:** `/etc/wifi.conf` (se empaqueta al flashear).
 
 ```ini
 ssid=MiRed
 psk=MiClaveWPA2
 ```
 
-Firmware en `/lib/firmware/iwlwifi-so-a0-gf-a0-89.ucode` y `.pnvm`.
+Firmware en `/lib/firmware/iwlwifi-so-a0-gf-a0-89.ucode` y `.pnvm` (AX211),
+o `iwlwifi-cc-a0-77.ucode` (AX200, sin pnvm).
 
 **SSH en placa** (IP del log `net: dhcp …`):
 
@@ -200,6 +263,9 @@ $
 - Los comandos sin ruta se buscan en `/bin/`.
 - También puedes invocar un ELF por ruta absoluta (por ejemplo `/bin/init test`).
 - **Backspace** funciona para corregir la línea.
+- **Ctrl-C** interrumpe el comando en primer plano (p. ej. un pipeline largo) y
+  devuelve el prompt `$`; en la línea vacía muestra `^C` y sigue en sosh.
+- **Ctrl-D** en una línea vacía cierra la shell (equivalente a `exit`).
 - Si un comando falla, sosh muestra el código de salida.
 
 ### Pipes y redirecciones
@@ -244,6 +310,10 @@ pipelines de esta sección **no funcionaban** aunque estuvieran documentados.
 | `pwd` | Imprime el directorio de trabajo actual |
 | `exit` | Cierra la shell (código de salida opcional, por defecto 0) |
 | `ask [pregunta]` | Habla con el LLM. Ver [ask](#ask--preguntarle-al-modelo) |
+| `voz [ask]` | Dictado por voz: transcribe e inserta en la línea (Enter confirma). Ver [voz](#voz--dictado) |
+| `wifi scan` | Lista redes WiFi (Intel AX211/AX200) |
+| `wifi status` | Estado del adaptador WiFi |
+| `wifi connect <ssid> [psk]` | Asocia a una red (sin `psk` = abierta; con clave = WPA2) |
 
 Ejemplos:
 
@@ -252,6 +322,8 @@ help
 pwd
 cd /tmp
 cd ..                       # sube al directorio padre
+wifi scan
+wifi connect MiRed MiClaveWPA2
 exit
 exit 1
 ```
@@ -341,6 +413,59 @@ soso-llm run tiny-moe --prompt @bos --max 4
 Ejecuta inferencia greedy sobre modelos en `/models/<nombre>/`. Por defecto
 incluye **tiny** (denso), **tiny-moe** (MoE estilo Mixtral), **tiny-mla** (MLA sintético, 1 capa) y **tiny-latent-moe** (LatentMoE, 1 capa). Ver sección
 [Modelos LLM](#modelos-llm-soso-llm) para importar modelos y más detalle.
+
+### voz — dictado
+
+```sh
+voz              # una toma de micrófono → texto en la línea; Enter para ejecutar
+voz ask          # prefija «ask » al dictado
+soso-voz dictar --wav /etc/voz-prueba.wav   # transcribe un WAV (PCM16 mono 16 kHz)
+```
+
+El reconocimiento corre en **`soso-voz vozd`** (`127.0.0.1:7421`), igual que `askd`
+en `:7420`. El texto **nunca se autoejecuta**: se inserta en la línea de sosh y
+confirmas con Enter. Push-to-talk: **F4** en la consola serie.
+
+Config en `/etc/voz.conf`:
+
+| Clave | Significado |
+|-------|-------------|
+| `modelo` | Nombre en `/models` (p. ej. `whisper-tiny`) |
+| `idioma` | Índice de idioma Whisper (3 = español) |
+| `vad` | Umbral RMS para fin de frase (micrófono) |
+| `gpu` | `auto` (GPU si hay pool VRAM), `on` o `off` |
+
+El modelo ASR por defecto es **`whisper-tiny`** en `/models` (Whisper tiny real,
+~150 MiB). Con GPU NVIDIA y pool VRAM activo, `vozd` calienta los pesos en VRAM
+al arrancar y usa matvec en GPU para convoluciones, capas y logits; al terminar
+cada transcripción imprime estadísticas (`matvec`, subidas, residentes).
+
+Para regenerar el modelo en desarrollo: `cargo xtask fetch-whisper` y empaquetar
+con `SOSO_ASR_DIR=target/whisper-tiny-model cargo xtask mkfs`.
+
+Para QEMU con micrófono emulado: `SOSO_QEMU_AUDIO=1 cargo xtask run`.
+
+### soso-web — navegador mínimo
+
+```sh
+soso-web https://example.com          # modo lectura (texto en consola)
+soso-web --local /etc/web-prueba.html # HTML local (pruebas sin red)
+soso-web --grafico https://example.com  # modo gráfico (framebuffer)
+```
+
+Tras abrir una página, el prompt `[soso-web]` acepta:
+
+| Comando | Acción |
+|---------|--------|
+| `<n>` | Seguir el enlace numerado `[n]` |
+| `u <url>` | Ir a otra URL (HTTPS) |
+| `b` | Atrás |
+| `q` | Salir |
+
+Modo lectura: parseo HTML tolerante, sin JavaScript, word-wrap configurable
+(`--ancho N`, default 72). Modo gráfico: requiere framebuffer GOP; el kernel
+cede la consola de texto mientras pinta la app (`SYS_FB_SET_MODE`). Texto con
+DejaVu Sans TTF en `/lib/fonts/DejaVuSans.ttf` (fontdue; `--fuente` para otra ruta).
 
 ### ask — preguntarle al modelo
 
@@ -478,6 +603,45 @@ soso-install status        # estado de la entrada de arranque UEFI
 Solo tiene sentido arrancando desde el pendrive live. Ver
 [Instalar soso en un disco](#instalar-soso-en-un-disco-dual-boot-uefi).
 
+### soso-update — actualizar soso instalado
+
+Comprueba y aplica releases publicadas en GitHub (`demonodojo/soso`):
+
+```sh
+soso-update estado              # versión rootfs, kernel y buzón ESP
+soso-update comprobar           # compara con la última release
+soso-update aplicar             # descarga e instala (rootfs + kernel)
+soso-update revertir            # restaura el kernel anterior (reinicia después)
+```
+
+Opciones útiles: `--forzar` (reinstala aunque la versión no suba), `--sin-kernel`
+(solo `/bin`, `/etc`, `/lib`), `--local /ruta` (artefactos locales, sin red).
+
+Configuración en `/etc/actualiza.conf` (`url=https://…/releases/latest/download`).
+
+Tras `aplicar`, **reinicia** para que el shim UEFI aplique el kernel nuevo.
+Si el arranque falla, el shim revierte solo al reiniciar otra vez.
+Las instalaciones hechas **antes** de tener hueco `SOSOKRN.BIN` en la ESP
+solo pueden actualizar rootfs hasta reflashear/reinstalar el live una vez.
+
+La versión del sistema está en `/etc/soso-release`; el kernel la muestra al
+arrancar (`soso 0.2.0 (build)`).
+
+Ver también [Instalar soso en un disco](#instalar-soso-en-un-disco-dual-boot-uefi)
+(sección «Actualizaciones de kernel»).
+
+### soso-hf — descargar modelos desde Hugging Face
+
+```sh
+soso-hf search tinyllama
+soso-hf list org/repo
+soso-hf pull org/repo --file modelo.Q4_K_M.gguf --name mi-modelo
+```
+
+Descarga el GGUF por HTTPS, lo convierte al formato `.som` e importa el modelo
+en `/models/` sin reiniciar. Requiere red y espacio en el disco de modelos.
+Detalle en [Descargar desde Hugging Face (guest)](#descargar-desde-hugging-face-guest).
+
 ---
 
 ## Estructura del disco
@@ -486,17 +650,26 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 
 ```
 /
-├── bin/          # Programas (init, sosh, ls, cat, soso-llm, …)
+├── bin/          # Programas (init, sosh, soso-llm, soso-update, soso-web, …)
 ├── etc/
-│   ├── motd              # Mensaje de bienvenida
-│   ├── authorized_key    # Clave pública ed25519 autorizada (32 bytes)
-│   ├── llm.conf          # Modelo y límites que usa `ask` (ver ask-modelo)
-│   └── ssh_host_key      # Semilla de la host key del servidor SSH
-├── models/       # Modelos LLM (disco sosomfs, solo lectura)
+│   ├── soso-release    # Versión instalada (version/build/fecha)
+│   ├── actualiza.conf  # URL de releases para soso-update
+│   ├── llm.conf        # Modelo y límites de `ask` (ver ask-modelo)
+│   ├── voz.conf        # Modelo ASR, idioma, VAD
+│   ├── wifi.conf       # SSID y clave WiFi (alternativa a SOSOWIFI.TXT en ESP)
+│   ├── motd            # Mensaje de bienvenida
+│   ├── authorized_key  # Clave pública ed25519 autorizada (32 bytes)
+│   └── ssh_host_key    # Semilla de la host key del servidor SSH
+├── lib/
+│   ├── firmware/       # Firmware WiFi, NVIDIA GSP, …
+│   └── fonts/          # TTF para soso-web --grafico
+├── models/       # Modelos LLM y ASR (disco sosomfs, solo lectura)
 │   ├── tiny/             # Modelo sintético denso (4 capas)
 │   ├── tiny-moe/         # Modelo MoE sintético (4 expertos, top-2)
-│   ├── tiny-mla/         # Modelo MLA sintético (1 capa, KV latente)
-│   └── tiny-latent-moe/  # Modelo LatentMoE sintético (1 capa, vocab 64)
+│   ├── whisper-tiny/     # ASR Whisper (live con fetch-whisper)
+│   └── …                 # Modelos importados (soso-hf, mkfs, …)
+├── var/
+│   └── actualiza-prueba/ # Solo en imágenes de prueba (E2E actualización)
 └── hola.txt      # Fichero de ejemplo
 ```
 
@@ -662,7 +835,7 @@ ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 
 ## Limitaciones conocidas
 
-soso es un sistema de aprendizaje con un alcance deliberadamente reducido:
+soso es un sistema con alcance deliberadamente reducido en algunas áreas:
 
 | Área | Limitación |
 |---|---|
@@ -671,8 +844,9 @@ soso es un sistema de aprendizaje con un alcance deliberadamente reducido:
 | Procesos | `spawn`, no `fork`; scheduler round-robin preemptivo |
 | Red | DHCP automático al arrancar; fallback a `10.0.2.15` en QEMU; sin IPv6 |
 | SSH | Sin SFTP, port forwarding ni múltiples sesiones |
+| Web | Sin JavaScript ni CSS avanzado; modo gráfico básico |
 | Ficheros | Sin permisos Unix, hardlinks ni snapshots |
-| Comandos | Conjunto mínimo de coreutils |
+| Comandos | Conjunto acotado de coreutils y utilidades propias |
 
 Un page fault en userspace mata al proceso afectado, no al kernel. Si sosh muere con
 error, `init` la relanza automáticamente.
@@ -693,7 +867,7 @@ error, `init` la relanza automáticamente.
 - Espera a ver el mensaje `sosh — escribe 'help' para la ayuda` antes de conectar.
 - Si falló un arranque anterior, el puerto puede quedar ocupado: `pkill qemu-system-x86`
   y vuelve a lanzar `cargo xtask run`.
-- Tras desconectar con Ctrl-C puedes reconectar; si falla, espera un segundo o reinicia QEMU.
+- Tras cerrar la sesión con `exit` puedes reconectar; si falla, espera un segundo o reinicia QEMU.
 
 ### La consola no responde
 
@@ -799,6 +973,13 @@ soso-llm run mixtral --prompt "Once upon a time" --max 16
 Los expertos siguen la convención `L{i}.E{e}.ffn_{gate,up,down}` en el índice
 del modelo; el convertidor trocea automáticamente los tensores 3D `ffn_*_exps`
 del GGUF.
+
+### Modelos Qwen3.8 (atención híbrida)
+
+Qwen3.8-27B (el default del live en pendrives de 32 GB+) mezcla **Gated
+DeltaNet** (la mayoría de las capas, estado fijo) con **atención completa
+con puerta** cada cuatro capas. `ask` y `soso-llm run qwen3.8-27b` lo usan
+igual que el resto: no hay flags extra.
 
 ### Descargar desde Hugging Face (host)
 
@@ -1213,6 +1394,10 @@ por Linux en ningún momento**.
 | Disco destino | NVMe entero, vacío o con soso. **Nunca el disco de Linux** |
 | Origen | Pendrive live generado con `cargo xtask package-usb-live` |
 
+**Actualizaciones de kernel:** las instalaciones hechas con un live **anterior** a
+0.2.0 pueden no tener el hueco `SOSOKRN.BIN` en la ESP; reflashea o reinstala
+una vez para poder usar `soso-update aplicar` con kernel.
+
 soso solo sabe escribir en discos NVMe (`raw_disk::writable`) y el kernel
 rechaza cualquier escritura sobre el disco desde el que arrancó. El disco de
 Linux no se toca: ni su tabla de particiones, ni su ESP, ni GRUB.
@@ -1278,21 +1463,20 @@ Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
 # En la máquina de desarrollo:
 sudo cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
 
-# Escalera automática (Q4_K_M, arquitectura llama):
+# Escalera automática (Q4_K_M):
 #   8 GB  → tinyllama
 #  16 GB  → mistral-7b
-#  32 GB  → mixtral
-#  64 GB+ → llama2-70b
+#  32 GB+ → qwen3.8-27b
 # La primera vez descarga desde Hugging Face (puede tardar horas en modelos grandes).
 # Sin descargas: el mayor ya materializado que quepa en el stick:
 # SOSO_LIVE_OFFLINE=1 sudo cargo xtask flash-usb-live /dev/sdX --yes
 
-# Sin pendrive conectado (TinyLlama) o simular capacidad:
+# Sin pendrive conectado (qwen3.8-27b) o simular capacidad:
 cargo xtask package-usb-live
 SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
 
 # En placa: ask  o  soso-llm run <modelo> --prompt "hola" --max 32
-# (<modelo> = el empaquetado: tinyllama, mistral-7b, mixtral o llama2-70b)
+# (<modelo> = el empaquetado: tinyllama, mistral-7b o qwen3.8-27b)
 
 # Override manual:
 # SOSO_MODELS_DIR=target/mi-modelo cargo xtask flash-usb-live /dev/sdX --yes
@@ -1337,24 +1521,43 @@ Linux no se modifica en ningún caso.
 ## Resumen rápido
 
 ```sh
-# Arrancar
+# --- QEMU (desarrollo) ---
 cargo xtask run
+ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 
-# En otra terminal: SSH
-ssh -i target/soso_test_key -p 2222 soso@localhost
-
-# Dentro de sosh
+# --- Dentro de sosh ---
+soso-update estado          # versión rootfs, kernel, buzón
 pwd
 cd /tmp
 echo hola > nota.txt
 cat nota.txt
 ls /
 ls /models
-ask ¿cuánto es 2 > 1?       # el texto va literal al modelo
+
+# LLM
+ask ¿cuánto es 2 > 1?       # texto literal al modelo (askd en :7420)
 ask                         # modo interactivo
-ask-modelo                  # ver/cambiar el modelo que usa ask
+ask-modelo                  # ver/cambiar modelo de ask
 soso-llm run tiny --prompt hola
-soso-llm run tiny-moe --prompt @bos --max 4
+
+# Modelos desde la red (requiere HTTPS)
+soso-hf search llama
+soso-hf pull org/repo --name mi-modelo
+
+# Voz y web
+voz                         # dictado → línea (Enter confirma)
+soso-web --local /etc/web-prueba.html
+soso-web https://example.com
+
+# Red (placa real)
+wifi scan
+wifi connect MiRed MiClaveWPA2
+
+# Instalación / actualización (live o NVMe instalado)
+soso-install list
+soso-update comprobar
+soso-update aplicar           # reiniciar después
+
 cat /etc/motd
 mkdir prueba
 halt
@@ -1362,3 +1565,6 @@ halt
 # Salir de QEMU
 # Ctrl-A X
 ```
+
+**Pendrive live:** grabar con `cargo xtask flash-usb-live /dev/sdX --yes` (desde
+Linux, en el repo). Log del último arranque: `cargo xtask sosolog`.

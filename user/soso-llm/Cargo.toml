@@ -7,5 +7,6 @@ license = "GPL-2.0-only"
 [dependencies]
 libsoso = { workspace = true }
 soso-abi = { workspace = true }
+soso-gpu = { path = "../soso-gpu" }
 sosomodel = { path = "../../crates/sosomodel" }
 soso-llm-core = { path = "../../crates/soso-llm-core" }

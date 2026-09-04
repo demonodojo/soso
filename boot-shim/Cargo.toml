@@ -10,6 +10,8 @@ description = "Shim UEFI: escribe BOOTMARK.TXT en la ESP y chainloadea el bootlo
 
 [dependencies]
 uefi = { version = "0.39.0", features = ["alloc", "global_allocator", "panic_handler"] }
+soso-update-core = { path = "../crates/soso-update-core" }
+sha2 = { version = "0.10", default-features = false }
 
 # Binario pequeño: el shim viaja dentro de los clusters de bootx64.efi.
 [profile.release]

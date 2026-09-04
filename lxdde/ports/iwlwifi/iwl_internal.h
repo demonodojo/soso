@@ -18,8 +18,21 @@
 #define CSR_GPIO_IN                  (CSR_BASE + 0x018)
 #define CSR_CTXT_INFO_BOOT_CTRL      0x0
 #define CSR_CTXT_INFO_ADDR           0x118
+#define CSR_CTXT_INFO_BA             0x40
 #define CSR_IML_DATA_ADDR            0x120
 #define CSR_IML_SIZE_ADDR            0x128
+#define HBUS_TARG_WRPTR              0x460
+#define RFH_Q0_FRBDCB_WIDX_TRG       0x1C80
+#define IWL_PCI_AX200                0x2723u
+#define IWL_MVM_DQA_CMD_QUEUE        9
+#define IWL_GEN2_RX_N                32
+#define IWL_GEN2_RX_SZ               4096
+#define IWL_TFH_TFD_SIZE             256
+#define IWL_TFH_NUM_TBS              25
+#define IWL_CTXT_INFO_TFD_FORMAT_LONG 0x0100u
+#define IWL_CTXT_INFO_RB_CB_SIZE_32   0x0050u
+#define IWL_CTXT_INFO_RB_SIZE_4K      0x0800u
+#define TFD_QUEUE_CB_SIZE_32          2
 
 #define CSR_RESET_REG_FLAG_SW_RESET       (1u << 7)
 #define CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ (1u << 2)
@@ -199,6 +212,74 @@ struct iwl_tfh_tfd {
     uint8_t reserved[6];
 } __attribute__((packed));
 
+struct iwl_tfh_tb_long {
+    uint16_t tb_len;
+    uint64_t addr;
+} __attribute__((packed));
+
+struct iwl_tfh_tfd_long {
+    uint16_t num_tbs;
+    struct iwl_tfh_tb_long tbs[IWL_TFH_NUM_TBS];
+    uint32_t pad;
+} __attribute__((packed));
+
+struct iwl_context_info_version {
+    uint16_t mac_id;
+    uint16_t version;
+    uint16_t size;
+    uint16_t reserved;
+} __attribute__((packed));
+
+struct iwl_context_info_control {
+    uint32_t control_flags;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_context_info_rbd_cfg {
+    uint64_t free_rbd_addr;
+    uint64_t used_rbd_addr;
+    uint64_t status_wr_ptr;
+} __attribute__((packed));
+
+struct iwl_context_info_hcmd_cfg {
+    uint64_t cmd_queue_addr;
+    uint8_t cmd_queue_size;
+    uint8_t reserved[7];
+} __attribute__((packed));
+
+struct iwl_context_info_dump_cfg {
+    uint64_t core_dump_addr;
+    uint32_t core_dump_size;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_context_info_early_dbg_cfg {
+    uint64_t early_debug_addr;
+    uint32_t early_debug_size;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_context_info_pnvm_cfg {
+    uint64_t platform_nvm_addr;
+    uint32_t platform_nvm_size;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_context_info {
+    struct iwl_context_info_version version;
+    struct iwl_context_info_control control;
+    uint64_t reserved0;
+    struct iwl_context_info_rbd_cfg rbd_cfg;
+    struct iwl_context_info_hcmd_cfg hcmd_cfg;
+    uint32_t reserved1[4];
+    struct iwl_context_info_dump_cfg dump_cfg;
+    struct iwl_context_info_early_dbg_cfg edbg_cfg;
+    struct iwl_context_info_pnvm_cfg pnvm_cfg;
+    uint32_t reserved2[16];
+    struct iwl_context_info_dram dram;
+    uint32_t reserved3[16];
+} __attribute__((packed));
+
 struct iwl_rx_packet {
     uint16_t len_n_flags;
     uint8_t group_id;
@@ -217,6 +298,7 @@ struct iwl_cmd_header {
 struct iwl_ax211_priv;
 
 int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned long fw_len);
+int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl);
 int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl);
 void iwl_trans_poll(struct iwl_ax211_priv *iwl);
 int iwl_mvm_scan(struct iwl_ax211_priv *iwl);

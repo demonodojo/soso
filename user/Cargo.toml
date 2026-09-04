@@ -3,11 +3,12 @@
 # workspace raíz; xtask lo compila y copia los ELF a rootfs/bin.
 [workspace]
 resolver = "2"
-members = ["libsoso", "init", "sosh", "coreutils", "soso-llm", "soso-hf"]
+members = ["libsoso", "init", "sosh", "coreutils", "soso-gpu", "soso-llm", "soso-hf", "soso-voz", "soso-web", "soso-update"]
 
 [workspace.dependencies]
 soso-abi = { path = "../crates/soso-abi" }
 libsoso = { path = "libsoso" }
+soso-update-core = { path = "../crates/soso-update-core" }
 getrandom = { version = "0.2", features = ["rdrand"] }
 
 [profile.release]

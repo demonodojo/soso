@@ -1,6 +1,6 @@
 /*
- * Driver Intel AX211 (8086:7f70) para soso/lxdde.
- * Transporte PCIe Gen2 + firmware TLV + scan/assoc/TX mínimos.
+ * Driver Intel AX211 (8086:7f70) y AX200 (8086:2723) para soso/lxdde.
+ * Transporte PCIe gen2/gen3 + firmware TLV + scan/assoc/TX mínimos.
  */
 #include "lx_emul.h"
 #include "iwl_ax211.h"
@@ -38,18 +38,38 @@ static void mac_from_bdf(struct iwl_ax211_priv *iwl)
     iwl->mac[5] = 0;
 }
 
-static int iwl_load_firmware_files(struct iwl_ax211_priv *iwl)
+static int iwl_try_ucode(struct iwl_ax211_priv *iwl, const char *name)
 {
     const unsigned char *data = 0;
     unsigned long len = 0;
+    if (lx_request_firmware(name, &data, &len) != 0)
+        return -1;
+    return iwl_fw_parse_tlv(iwl, data, len);
+}
+
+static int iwl_load_firmware_files(struct iwl_ax211_priv *iwl)
+{
     const unsigned char *pnvm = 0;
     unsigned long pnvm_len = 0;
 
-    if (lx_request_firmware("iwlwifi-so-a0-gf-a0-89.ucode", &data, &len) != 0) {
-        if (lx_request_firmware("iwlwifi-so-a0-gf-a0-77.ucode", &data, &len) != 0)
-            return -1;
+    if (!iwl->gen3) {
+        static const char *const ax200[] = {
+            "iwlwifi-cc-a0-77.ucode",
+            "iwlwifi-cc-a0-74.ucode",
+            "iwlwifi-cc-a0-73.ucode",
+            "iwlwifi-cc-a0-72.ucode",
+            "iwlwifi-cc-a0-66.ucode",
+            0
+        };
+        for (int i = 0; ax200[i]; i++) {
+            if (iwl_try_ucode(iwl, ax200[i]) == 0)
+                return 0;
+        }
+        return -1;
     }
-    if (iwl_fw_parse_tlv(iwl, data, len) != 0)
+
+    if (iwl_try_ucode(iwl, "iwlwifi-so-a0-gf-a0-89.ucode") != 0 &&
+        iwl_try_ucode(iwl, "iwlwifi-so-a0-gf-a0-77.ucode") != 0)
         return -1;
 
     if (lx_request_firmware("iwlwifi-so-a0-gf-a0.pnvm", &pnvm, &pnvm_len) == 0)
@@ -63,6 +83,9 @@ static int iwl_ax211_probe(struct lx_pci_dev *pdev, const struct lx_pci_device_i
     (void)id;
     memset(iwl, 0, sizeof(*iwl));
     iwl->pdev = pdev;
+    iwl->device_id = lx_pci_device_id(pdev);
+    iwl->gen3 = iwl->device_id != IWL_PCI_AX200;
+    iwl->cmd_qid = IWL_MVM_DQA_CMD_QUEUE;
 
     if (lx_pci_enable_device(pdev) != 0)
         return -1;
@@ -75,7 +98,8 @@ static int iwl_ax211_probe(struct lx_pci_dev *pdev, const struct lx_pci_device_i
     lx_pci_set_drvdata(pdev, iwl);
 
     uint32_t rev = iwl_read32(iwl, CSR_HW_REV);
-    lx_printk("iwl_ax211: probe rev=0x%x bdf=0x%x\n", rev, lx_pci_bdf(pdev));
+    lx_printk("iwlwifi: probe id=0x%x gen%s rev=0x%x bdf=0x%x\n",
+              iwl->device_id, iwl->gen3 ? "3" : "2", rev, lx_pci_bdf(pdev));
 
     mac_from_bdf(iwl);
     iwl->probed = 1;
@@ -97,6 +121,7 @@ static struct lx_pci_device_id iwl_ax211_ids[] = {
     { 0x8086u, 0x7f70u, 0, 0, 0, 0, 0 },
     { 0x8086u, 0x51f0u, 0, 0, 0, 0, 0 },
     { 0x8086u, 0x54f0u, 0, 0, 0, 0, 0 },
+    { 0x8086u, IWL_PCI_AX200, 0, 0, 0, 0, 0 },
     { 0, 0, 0, 0, 0, 0, 0 },
 };
 
@@ -127,13 +152,13 @@ int iwl_ax211_start_firmware(void)
 
     iwl_set_phase(iwl, "fw_load");
     if (iwl_load_firmware_files(iwl) != 0) {
-        lx_printk("iwl_ax211: firmware no encontrado\n");
+        lx_printk("iwlwifi: firmware no encontrado\n");
         return -1;
     }
 
     iwl_set_phase(iwl, "fw_start");
-    if (iwl_trans_gen3_start(iwl) != 0) {
-        lx_printk("iwl_ax211: arranque firmware falló\n");
+    if ((iwl->gen3 ? iwl_trans_gen3_start(iwl) : iwl_trans_gen2_start(iwl)) != 0) {
+        lx_printk("iwlwifi: arranque firmware falló\n");
         return -1;
     }
     iwl_set_phase(iwl, "alive");

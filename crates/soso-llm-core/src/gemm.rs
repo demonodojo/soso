@@ -78,6 +78,114 @@ pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
     }
 }
 
+/// LayerNorm (Whisper): gamma y beta.
+pub fn layernorm(x: &mut [f32], gamma: &[f32], beta: &[f32], eps: f32) {
+    let n = x.len() as f32;
+    let mean = x.iter().sum::<f32>() / n;
+    let var = x.iter().map(|v| {
+        let d = v - mean;
+        d * d
+    }).sum::<f32>() / n;
+    let inv = 1.0 / libm::sqrtf(var + eps);
+    for (xi, (g, b)) in x.iter_mut().zip(gamma.iter().zip(beta)) {
+        *xi = (*xi - mean) * inv * g + b;
+    }
+}
+
+/// GELU aproximado (tanh).
+pub fn gelu(x: f32) -> f32 {
+    0.5 * x * (1.0 + libm::tanhf(0.7978845608 * (x + 0.044715 * x * x * x)))
+}
+
+pub fn gelu_inplace(x: &mut [f32]) {
+    for v in x.iter_mut() {
+        *v = gelu(*v);
+    }
+}
+
+/// matvec con bias: out = W @ x + b.
+pub fn matvec_bias_f32(matrix: &[f32], rows: usize, cols: usize, x: &[f32], bias: &[f32], out: &mut [f32]) {
+    matvec_f32(matrix, rows, cols, x, out);
+    for (o, b) in out.iter_mut().zip(bias) {
+        *o += b;
+    }
+}
+
+/// C = A @ B; A [m×k], B [k×n], C [m×n] row-major.
+pub fn matmul_f32(a: &[f32], m: usize, k: usize, b: &[f32], n: usize, c: &mut [f32]) {
+    assert_eq!(a.len(), m * k);
+    assert_eq!(b.len(), k * n);
+    assert_eq!(c.len(), m * n);
+    if AVX2 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            return avx2::matmul_f32(a, m, k, b, n, c);
+        }
+    }
+    matmul_f32_scalar(a, m, k, b, n, c);
+}
+
+pub fn matmul_f32_scalar(a: &[f32], m: usize, k: usize, b: &[f32], n: usize, c: &mut [f32]) {
+    c.fill(0.0);
+    for i in 0..m {
+        for p in 0..k {
+            let av = a[i * k + p];
+            let row_b = &b[p * n..(p + 1) * n];
+            let row_c = &mut c[i * n..(i + 1) * n];
+            for j in 0..n {
+                row_c[j] += av * row_b[j];
+            }
+        }
+    }
+}
+
+/// Y[n×rows] = X[n×cols] · W[rows×cols]^T (W row-major).
+pub fn matmul_xwt_f32(w: &[f32], x: &[f32], rows: usize, cols: usize, n: usize, y: &mut [f32]) {
+    assert_eq!(w.len(), rows * cols);
+    assert_eq!(x.len(), cols * n);
+    assert_eq!(y.len(), rows * n);
+    for i in 0..n {
+        matvec_f32(w, rows, cols, &x[i * cols..(i + 1) * cols], &mut y[i * rows..(i + 1) * rows]);
+    }
+}
+
+/// Conv1d: entrada [in_ch, in_len], pesos [out_ch, in_ch, k], salida [out_ch, out_len].
+/// `padding` añade ceros a izquierda/derecha antes de convolucionar.
+pub fn conv1d_f32(
+    input: &[f32],
+    in_ch: usize,
+    in_len: usize,
+    weight: &[f32],
+    out_ch: usize,
+    k: usize,
+    stride: usize,
+    padding: usize,
+    out: &mut [f32],
+) {
+    let out_len = (in_len + 2 * padding - k) / stride + 1;
+    assert_eq!(input.len(), in_ch * in_len);
+    assert_eq!(weight.len(), out_ch * in_ch * k);
+    assert_eq!(out.len(), out_ch * out_len);
+    out.fill(0.0);
+    for oc in 0..out_ch {
+        for ol in 0..out_len {
+            let in_start = ol * stride;
+            let mut acc = 0.0f32;
+            for ic in 0..in_ch {
+                for ki in 0..k {
+                    let il = in_start as isize + ki as isize - padding as isize;
+                    if il >= 0 && (il as usize) < in_len {
+                        let inp = input[ic * in_len + il as usize];
+                        let w = weight[oc * in_ch * k + ic * k + ki];
+                        acc += inp * w;
+                    }
+                }
+            }
+            out[oc * out_len + ol] = acc;
+        }
+    }
+}
+
 pub fn silu(x: f32) -> f32 {
     x / (1.0 + libm::expf(-x))
 }
@@ -287,6 +395,30 @@ pub mod avx2 {
             let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
             let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
             _mm_cvtss_f32(s)
+        }
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn matmul_f32(a: &[f32], m: usize, k: usize, b: &[f32], n: usize, c: &mut [f32]) {
+        unsafe {
+            c.fill(0.0);
+            for i in 0..m {
+                for p in 0..k {
+                    let av = _mm256_set1_ps(a[i * k + p]);
+                    let mut j = 0usize;
+                    while j + 8 <= n {
+                        let idx = i * n + j;
+                        let bc = _mm256_loadu_ps(b.as_ptr().add(p * n + j));
+                        let cc = _mm256_loadu_ps(c.as_mut_ptr().add(idx));
+                        _mm256_storeu_ps(c.as_mut_ptr().add(idx), _mm256_fmadd_ps(av, bc, cc));
+                        j += 8;
+                    }
+                    while j < n {
+                        c[i * n + j] += a[i * k + p] * b[p * n + j];
+                        j += 1;
+                    }
+                }
+            }
         }
     }
 
@@ -544,10 +676,19 @@ mod tests {
 
 /// RoPE estilo llama sobre una cabeza (parejas intercaladas x[2i], x[2i+1]).
 pub fn rope_inplace(x: &mut [f32], pos: usize, theta: f32) {
-    let head_dim = x.len();
-    let half = head_dim / 2;
+    rope_inplace_n(x, pos, theta, x.len());
+}
+
+/// RoPE solo sobre los primeros `n_rot` elementos (Qwen partial rotary).
+pub fn rope_inplace_n(x: &mut [f32], pos: usize, theta: f32, n_rot: usize) {
+    let n = n_rot.min(x.len());
+    if n < 2 {
+        return;
+    }
+    let half = n / 2;
+    let n_rot_f = n as f32;
     for i in 0..half {
-        let freq = libm::powf(theta, -2.0 * (i as f32) / (head_dim as f32));
+        let freq = libm::powf(theta, -2.0 * (i as f32) / n_rot_f);
         let angle = pos as f32 * freq;
         let (sin, cos) = (libm::sinf(angle), libm::cosf(angle));
         let a = x[2 * i];

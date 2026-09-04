@@ -18,7 +18,10 @@
  * `gsp_compute_init` comprueba que ningún blob se sale de su hueco. */
 #define G7_SASS_VA    (GSP_VA_BASE + 0x10000ull)     /* VRAM: blob SASS de matvec_q4k */
 #define G8_SASS_VA    (GSP_VA_BASE + 0x20000ull)     /* VRAM: blob SASS de matvec_q80 */
-#define G_SASS_SLOT   0x10000ull                     /* hueco de los dos de arriba */
+#define G9_SASS_VA    (GSP_VA_BASE + 0x30000ull)     /* VRAM: blob SASS de matmul */
+#define G10_SASS_VA   (GSP_VA_BASE + 0x40000ull)     /* VRAM: blob SASS de softmax_rows */
+#define G11_SASS_VA   (GSP_VA_BASE + 0x50000ull)     /* VRAM: blob SASS de layernorm_rows */
+#define G_SASS_SLOT   0x10000ull                     /* hueco de los kernels cuantizados */
 /* QMD v05 (384 B) dentro de `cp->data`; SEND_PCAS_A exige alineación >>8. */
 #define G4F_QMD_OFF   0x1000u
 
@@ -31,6 +34,9 @@
 #define G4F_X_OFF         0x400u
 #define G4F_Y_OFF         0x800u
 #define G4F_SEM_OFF       0xc00u
+#define G4F_SEM_STRIDE    16u
+#define G4F_SEM_COUNT     16u
+#define G4F_SEM_SLOT(i)   (G4F_SEM_OFF + (unsigned)(i) * G4F_SEM_STRIDE)
 #define G4F_MAX_N         256u      /* 1 KiB por vector */
 
 /* Trozo con el que se copia un blob SASS a VRAM. Es la página de sysmem de G4d,
@@ -119,6 +125,9 @@ struct gsp_compute {
     /* Matvec con la matriz cuantizada residente, sin expandir a f32. */
     struct gsp_kernel matvec_q4k;
     struct gsp_kernel matvec_q80;
+    struct gsp_kernel matmul;
+    struct gsp_kernel softmax_rows;
+    struct gsp_kernel layernorm_rows;
     struct gsp_dma_buf data;   /* cbank0 + x + y + semáforo, en sysmem */
     uint64_t data_va;
     struct gsp_dma_buf mv;     /* G5: tanda de filas + x + y, en sysmem */
@@ -173,6 +182,33 @@ extern const unsigned gsp_matvec_q80_cbank_size;
 extern const unsigned gsp_matvec_q80_param_off[5];
 extern const unsigned gsp_matvec_q80_param_count;
 
+extern const unsigned char gsp_matmul_sass[];
+extern const unsigned gsp_matmul_sass_len;
+extern const unsigned gsp_matmul_regcount;
+extern const unsigned gsp_matmul_param_base;
+extern const unsigned gsp_matmul_param_size;
+extern const unsigned gsp_matmul_cbank_size;
+extern const unsigned gsp_matmul_param_off[6];
+extern const unsigned gsp_matmul_param_count;
+
+extern const unsigned char gsp_softmax_rows_sass[];
+extern const unsigned gsp_softmax_rows_sass_len;
+extern const unsigned gsp_softmax_rows_regcount;
+extern const unsigned gsp_softmax_rows_param_base;
+extern const unsigned gsp_softmax_rows_param_size;
+extern const unsigned gsp_softmax_rows_cbank_size;
+extern const unsigned gsp_softmax_rows_param_off[3];
+extern const unsigned gsp_softmax_rows_param_count;
+
+extern const unsigned char gsp_layernorm_rows_sass[];
+extern const unsigned gsp_layernorm_rows_sass_len;
+extern const unsigned gsp_layernorm_rows_regcount;
+extern const unsigned gsp_layernorm_rows_param_base;
+extern const unsigned gsp_layernorm_rows_param_size;
+extern const unsigned gsp_layernorm_rows_cbank_size;
+extern const unsigned gsp_layernorm_rows_param_off[6];
+extern const unsigned gsp_layernorm_rows_param_count;
+
 int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
                      struct gsp_compute *cp);
 
@@ -212,6 +248,14 @@ void gsp_compute_set_params(struct gsp_compute *cp, float a, uint64_t x_va,
 void gsp_compute_set_mv_params(struct gsp_compute *cp, const struct gsp_kernel *k,
                                uint64_t w_va, uint64_t x_va, uint64_t y_va,
                                unsigned rows, unsigned cols);
+
+void gsp_compute_set_matmul_params(struct gsp_compute *cp, const struct gsp_kernel *k,
+                                   uint64_t w_va, uint64_t x_va, uint64_t y_va,
+                                   unsigned rows, unsigned cols, unsigned n);
+
+void gsp_compute_fill_qmd_grid(struct gsp_compute *cp, const struct gsp_kernel *k,
+                               GspQmdV05 *qmd, unsigned grid_x, unsigned grid_y,
+                               unsigned sem_slot);
 
 /* Filas que caben en una tanda con `cols` columnas; 0 si `cols` no cabe. Es una
  * función pura a propósito: es la aritmética que decide qué se copia dónde, y sin
@@ -260,6 +304,28 @@ int gsp_compute_matvec_q_resident(struct gsp_compute *cp, struct gsp_ce *ce,
                                   unsigned cols, const float *x, float *y,
                                   uint64_t scratch_va, void *scratch_cpu,
                                   unsigned scratch_bytes);
+
+int gsp_compute_matmul_resident(struct gsp_compute *cp, struct gsp_ce *ce,
+                                uint64_t w_va, unsigned rows, unsigned cols,
+                                unsigned n, const float *x, float *y,
+                                uint64_t scratch_va, void *scratch_cpu);
+
+int gsp_compute_softmax_rows(struct gsp_compute *cp, struct gsp_ce *ce,
+                             float *x, unsigned rows, unsigned cols,
+                             uint64_t scratch_va, void *scratch_cpu);
+
+int gsp_compute_layernorm_rows(struct gsp_compute *cp, struct gsp_ce *ce,
+                               float *x, const float *weight, const float *bias,
+                               unsigned rows, unsigned cols, float eps,
+                               uint64_t scratch_va, void *scratch_cpu);
+
+/* Encola QMD sin esperar; devuelve índice de semáforo (fence). */
+int gsp_compute_launch_enqueue(struct gsp_compute *cp, const struct gsp_kernel *k,
+                               unsigned grid_x, unsigned grid_y,
+                               unsigned sem_slot, const char *what);
+
+/* Espera al semáforo del slot indicado. */
+int gsp_compute_wait_fence(struct gsp_compute *cp, unsigned sem_slot);
 
 void gsp_compute_fini(struct gsp_compute *cp);
 

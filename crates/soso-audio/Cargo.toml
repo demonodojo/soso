@@ -1,0 +1,12 @@
+[package]
+name = "soso-audio"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[features]
+default = []
+std = []
+
+[dependencies]
+libm = "0.2"

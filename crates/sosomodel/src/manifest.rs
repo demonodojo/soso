@@ -11,6 +11,14 @@ pub enum AttnKind {
     Gqa = 0,
     Mla = 1,
     Kda = 2,
+    /// Atención completa con puerta (Qwen3.5/3.8): Q+gate fusionados, QK-norm.
+    Gated = 3,
+    /// Gated DeltaNet (atención lineal recurrente, Qwen3.5/3.8).
+    Gdn = 4,
+    /// Atención bidireccional (encoder Whisper).
+    Bidirectional = 5,
+    /// Cross-attention decoder→encoder (Whisper).
+    Cross = 6,
 }
 
 impl AttnKind {
@@ -19,6 +27,10 @@ impl AttnKind {
             0 => Some(Self::Gqa),
             1 => Some(Self::Mla),
             2 => Some(Self::Kda),
+            3 => Some(Self::Gated),
+            4 => Some(Self::Gdn),
+            5 => Some(Self::Bidirectional),
+            6 => Some(Self::Cross),
             _ => None,
         }
     }
@@ -30,6 +42,8 @@ pub enum FfnKind {
     Dense = 0,
     Moe = 1,
     LatentMoe = 2,
+    /// MLP con GELU (Whisper).
+    GeluMlp = 3,
 }
 
 impl FfnKind {
@@ -38,7 +52,72 @@ impl FfnKind {
             0 => Some(Self::Dense),
             1 => Some(Self::Moe),
             2 => Some(Self::LatentMoe),
+            3 => Some(Self::GeluMlp),
             _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NormKind {
+    Rms = 0,
+    Layer = 1,
+}
+
+impl NormKind {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Rms),
+            1 => Some(Self::Layer),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModelKind {
+    Decoder = 0,
+    AsrEncoderDecoder = 1,
+}
+
+impl ModelKind {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Decoder),
+            1 => Some(Self::AsrEncoderDecoder),
+            _ => None,
+        }
+    }
+}
+
+/// Parámetros de audio/texto para modelos ASR (manifest v6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioSpec {
+    pub n_mels: u32,
+    pub n_audio_ctx: u32,
+    pub n_audio_state: u32,
+    pub n_audio_layer: u32,
+    pub n_audio_head: u32,
+    pub n_text_ctx: u32,
+    pub n_text_state: u32,
+    pub n_text_layer: u32,
+    pub n_text_head: u32,
+}
+
+impl Default for AudioSpec {
+    fn default() -> Self {
+        Self {
+            n_mels: 80,
+            n_audio_ctx: 1500,
+            n_audio_state: 384,
+            n_audio_layer: 4,
+            n_audio_head: 6,
+            n_text_ctx: 448,
+            n_text_state: 384,
+            n_text_layer: 4,
+            n_text_head: 6,
         }
     }
 }
@@ -133,6 +212,12 @@ pub struct Manifest {
     /// modelo, así que un `soso-hf pull` de otra familia trae la suya y
     /// `/etc/llm.conf` sólo hace falta para pisarla.
     pub chat_template: String,
+    /// Tipo de modelo (v6).
+    pub model_kind: ModelKind,
+    /// Parámetros ASR cuando `model_kind == AsrEncoderDecoder`.
+    pub audio: AudioSpec,
+    /// Norma por capa (v6); RMS para decoders clásicos.
+    pub norm_kind: NormKind,
 }
 
 const LAYER_SPEC_BYTES: usize = 60;
@@ -245,6 +330,21 @@ impl Manifest {
             .unwrap_or(self.ffn_dim)
     }
 
+    /// Dimensión por cabeza. Si `v_head_dim > 0` (Gated/GDN/MLA) no es `hidden/heads`.
+    pub fn effective_head_dim(&self, layer: u32) -> u32 {
+        if let Some(s) = self.layer(layer) {
+            if s.v_head_dim > 0 {
+                return s.v_head_dim;
+            }
+        }
+        let heads = self.effective_num_heads(layer);
+        if heads == 0 {
+            0
+        } else {
+            self.hidden_dim / heads
+        }
+    }
+
     pub fn effective_num_experts(&self, layer: u32) -> u32 {
         self.layer(layer)
             .and_then(|s| if s.num_experts > 0 { Some(s.num_experts) } else { None })
@@ -330,18 +430,43 @@ impl Manifest {
         for layer in 0..self.num_layers {
             let heads = self.effective_num_heads(layer);
             let kv_heads = self.effective_num_kv_heads(layer);
-            if heads == 0
-                || kv_heads == 0
-                || self.hidden_dim % heads != 0
-                || heads % kv_heads != 0
-            {
+            let kind = self.attn_kind(layer);
+            if heads == 0 || kv_heads == 0 {
                 return Err(());
+            }
+            match kind {
+                AttnKind::Gdn => {
+                    // n_k / n_v: las cabezas V son múltiplo de las QK.
+                    if kv_heads % heads != 0 || self.effective_head_dim(layer) == 0 {
+                        return Err(());
+                    }
+                }
+                AttnKind::Gated => {
+                    if heads % kv_heads != 0 || self.effective_head_dim(layer) == 0 {
+                        return Err(());
+                    }
+                }
+                AttnKind::Mla => {
+                    if heads % kv_heads != 0 {
+                        return Err(());
+                    }
+                }
+                AttnKind::Gqa | AttnKind::Kda => {
+                    if self.hidden_dim % heads != 0 || heads % kv_heads != 0 {
+                        return Err(());
+                    }
+                }
+                AttnKind::Bidirectional | AttnKind::Cross => {
+                    if self.hidden_dim % heads != 0 || heads % kv_heads != 0 {
+                        return Err(());
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    /// Capacidades soportadas por capa (Gqa/Mla/Kda + Dense/Moe/LatentMoe + shared).
+    /// Capacidades soportadas por capa (Gqa/Mla/Kda/Gated/Gdn + Dense/Moe/LatentMoe + shared).
     pub fn supported_by_runtime(&self) -> Result<(), UnsupportedLayer> {
         for layer in 0..self.num_layers {
             let spec = self.layer(layer).ok_or(UnsupportedLayer {
@@ -355,28 +480,48 @@ impl Manifest {
                 });
             }
             match spec.attn_kind {
-                AttnKind::Gqa | AttnKind::Mla | AttnKind::Kda => {}
+                AttnKind::Gqa
+                | AttnKind::Mla
+                | AttnKind::Kda
+                | AttnKind::Gated
+                | AttnKind::Gdn
+                | AttnKind::Bidirectional
+                | AttnKind::Cross => {}
             }
             match spec.ffn_kind {
-                FfnKind::Dense | FfnKind::Moe | FfnKind::LatentMoe => {}
+                FfnKind::Dense | FfnKind::Moe | FfnKind::LatentMoe | FfnKind::GeluMlp => {}
             }
-            if spec.attn_kind == AttnKind::Mla {
-                if spec.q_lora_rank == 0 || spec.kv_lora_rank == 0 {
-                    return Err(UnsupportedLayer {
-                        layer,
-                        reason: "MLA ranks required",
-                    });
+            match spec.attn_kind {
+                AttnKind::Mla => {
+                    if spec.q_lora_rank == 0 || spec.kv_lora_rank == 0 {
+                        return Err(UnsupportedLayer {
+                            layer,
+                            reason: "MLA ranks required",
+                        });
+                    }
                 }
-            } else if spec.kv_lora_rank > 0
-                || spec.q_lora_rank > 0
-                || spec.qk_rope_head_dim > 0
-                || spec.qk_nope_head_dim > 0
-                || spec.v_head_dim > 0
-            {
-                return Err(UnsupportedLayer {
-                    layer,
-                    reason: "MLA dims on non-MLA layer",
-                });
+                AttnKind::Gated | AttnKind::Gdn => {
+                    if spec.v_head_dim == 0 {
+                        return Err(UnsupportedLayer {
+                            layer,
+                            reason: "Gated/GDN requieren v_head_dim",
+                        });
+                    }
+                }
+                AttnKind::Gqa | AttnKind::Kda => {
+                    if spec.kv_lora_rank > 0
+                        || spec.q_lora_rank > 0
+                        || spec.qk_rope_head_dim > 0
+                        || spec.qk_nope_head_dim > 0
+                        || spec.v_head_dim > 0
+                    {
+                        return Err(UnsupportedLayer {
+                            layer,
+                            reason: "MLA dims on non-MLA layer",
+                        });
+                    }
+                }
+                AttnKind::Bidirectional | AttnKind::Cross => {}
             }
         }
         Ok(())
@@ -418,6 +563,9 @@ impl Manifest {
             // Sintético: no es un modelo de chat y su tokenizador es el
             // byte-level de reserva, donde `<|user|>` sólo son bytes.
             chat_template: String::new(),
+            model_kind: ModelKind::Decoder,
+            audio: AudioSpec::default(),
+            norm_kind: NormKind::Rms,
         };
         m.fill_layers_from_globals();
         m
@@ -461,9 +609,176 @@ impl Manifest {
             // Sintético: no es un modelo de chat y su tokenizador es el
             // byte-level de reserva, donde `<|user|>` sólo son bytes.
             chat_template: String::new(),
+            model_kind: ModelKind::Decoder,
+            audio: AudioSpec::default(),
+            norm_kind: NormKind::Rms,
         };
         m.fill_layers_from_globals();
         m
+    }
+
+    /// Modelo ASR diminuto para tests (1 capa encoder + 1 decoder).
+    pub fn tiny_asr(name: &str) -> Self {
+        let audio = AudioSpec {
+            n_mels: 80,
+            n_audio_ctx: 50,
+            n_audio_state: 64,
+            n_audio_layer: 1,
+            n_audio_head: 2,
+            n_text_ctx: 32,
+            n_text_state: 64,
+            n_text_layer: 1,
+            n_text_head: 2,
+        };
+        let layers = alloc::vec![
+            LayerSpec {
+                attn_kind: AttnKind::Bidirectional,
+                ffn_kind: FfnKind::GeluMlp,
+                num_heads: audio.n_audio_head,
+                ..LayerSpec::default()
+            },
+            LayerSpec {
+                attn_kind: AttnKind::Gqa,
+                ffn_kind: FfnKind::GeluMlp,
+                num_heads: audio.n_text_head,
+                ..LayerSpec::default()
+            },
+        ];
+        let prefetch = alloc::vec![
+            LayerPrefetch {
+                layer: 0,
+                shards: alloc::vec![
+                    String::from("conv1.weight.tensor"),
+                    String::from("conv1.bias.tensor"),
+                    String::from("conv2.weight.tensor"),
+                    String::from("conv2.bias.tensor"),
+                    String::from("pos_embed.tensor"),
+                    String::from("E00.attn_ln.weight.tensor"),
+                    String::from("E00.attn_ln.bias.tensor"),
+                    String::from("E00.attn_q.weight.tensor"),
+                    String::from("E00.attn_q.bias.tensor"),
+                    String::from("E00.attn_k.weight.tensor"),
+                    String::from("E00.attn_v.weight.tensor"),
+                    String::from("E00.attn_out.weight.tensor"),
+                    String::from("E00.attn_out.bias.tensor"),
+                    String::from("E00.mlp_ln.weight.tensor"),
+                    String::from("E00.mlp_ln.bias.tensor"),
+                    String::from("E00.mlp_fc1.weight.tensor"),
+                    String::from("E00.mlp_fc1.bias.tensor"),
+                    String::from("E00.mlp_fc2.weight.tensor"),
+                    String::from("E00.mlp_fc2.bias.tensor"),
+                ],
+            },
+            LayerPrefetch {
+                layer: 1,
+                shards: alloc::vec![
+                    String::from("token_embed.tensor"),
+                    String::from("D00.attn_ln.weight.tensor"),
+                    String::from("D00.attn_ln.bias.tensor"),
+                    String::from("D00.attn_q.weight.tensor"),
+                    String::from("D00.attn_q.bias.tensor"),
+                    String::from("D00.attn_k.weight.tensor"),
+                    String::from("D00.attn_v.weight.tensor"),
+                    String::from("D00.attn_out.weight.tensor"),
+                    String::from("D00.attn_out.bias.tensor"),
+                    String::from("D00.cross_ln.weight.tensor"),
+                    String::from("D00.cross_ln.bias.tensor"),
+                    String::from("D00.cross_q.weight.tensor"),
+                    String::from("D00.cross_q.bias.tensor"),
+                    String::from("D00.cross_k.weight.tensor"),
+                    String::from("D00.cross_v.weight.tensor"),
+                    String::from("D00.cross_out.weight.tensor"),
+                    String::from("D00.cross_out.bias.tensor"),
+                    String::from("D00.mlp_ln.weight.tensor"),
+                    String::from("D00.mlp_ln.bias.tensor"),
+                    String::from("D00.mlp_fc1.weight.tensor"),
+                    String::from("D00.mlp_fc1.bias.tensor"),
+                    String::from("D00.mlp_fc2.weight.tensor"),
+                    String::from("D00.mlp_fc2.bias.tensor"),
+                ],
+            },
+        ];
+        Self {
+            name: String::from(name),
+            vocab_size: 256,
+            hidden_dim: audio.n_text_state,
+            num_layers: 2,
+            num_heads: audio.n_text_head,
+            num_kv_heads: audio.n_text_head,
+            ffn_dim: 128,
+            max_seq: audio.n_text_ctx,
+            rope_theta: 10000.0,
+            rms_eps: 1e-5,
+            num_experts: 0,
+            num_experts_per_tok: 0,
+            moe_ffn_dim: 0,
+            layers,
+            prefetch,
+            chat_template: String::new(),
+            model_kind: ModelKind::AsrEncoderDecoder,
+            audio,
+            norm_kind: NormKind::Layer,
+        }
+    }
+
+    pub fn is_asr(&self) -> bool {
+        self.model_kind == ModelKind::AsrEncoderDecoder
+    }
+
+    /// Manifest Whisper tiny/base (4+4 capas, AudioSpec::default).
+    pub fn whisper_asr(name: &str, vocab_size: u32) -> Self {
+        let audio = AudioSpec::default();
+        let d = audio.n_text_state;
+        let ffn = 4 * d;
+        let mut layers = Vec::new();
+        let mut prefetch = Vec::new();
+        for i in 0..audio.n_audio_layer {
+            layers.push(LayerSpec {
+                attn_kind: AttnKind::Bidirectional,
+                ffn_kind: FfnKind::GeluMlp,
+                num_heads: audio.n_audio_head,
+                ..LayerSpec::default()
+            });
+            let p = format!("E{i:02}");
+            prefetch.push(LayerPrefetch {
+                layer: i,
+                shards: encoder_layer_shards(&p),
+            });
+        }
+        for i in 0..audio.n_text_layer {
+            layers.push(LayerSpec {
+                attn_kind: AttnKind::Gqa,
+                ffn_kind: FfnKind::GeluMlp,
+                num_heads: audio.n_text_head,
+                ..LayerSpec::default()
+            });
+            let p = format!("D{i:02}");
+            prefetch.push(LayerPrefetch {
+                layer: audio.n_audio_layer + i,
+                shards: decoder_layer_shards(&p),
+            });
+        }
+        Self {
+            name: String::from(name),
+            vocab_size,
+            hidden_dim: d,
+            num_layers: audio.n_audio_layer + audio.n_text_layer,
+            num_heads: audio.n_text_head,
+            num_kv_heads: audio.n_text_head,
+            ffn_dim: ffn,
+            max_seq: audio.n_text_ctx,
+            rope_theta: 10000.0,
+            rms_eps: 1e-5,
+            num_experts: 0,
+            num_experts_per_tok: 0,
+            moe_ffn_dim: 0,
+            layers,
+            prefetch,
+            chat_template: String::new(),
+            model_kind: ModelKind::AsrEncoderDecoder,
+            audio,
+            norm_kind: NormKind::Layer,
+        }
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -500,8 +815,26 @@ impl Manifest {
         // para que un lector de v4 llegue a su fin natural sin verla.
         body.extend_from_slice(self.chat_template.as_bytes());
         body.push(0);
+        // v6: tipo ASR + AudioSpec + NormKind
+        body.push(self.model_kind as u8);
+        body.push(self.norm_kind as u8);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&self.audio.n_mels.to_le_bytes());
+        body.extend_from_slice(&self.audio.n_audio_ctx.to_le_bytes());
+        body.extend_from_slice(&self.audio.n_audio_state.to_le_bytes());
+        body.extend_from_slice(&self.audio.n_audio_layer.to_le_bytes());
+        body.extend_from_slice(&self.audio.n_audio_head.to_le_bytes());
+        body.extend_from_slice(&self.audio.n_text_ctx.to_le_bytes());
+        body.extend_from_slice(&self.audio.n_text_state.to_le_bytes());
+        body.extend_from_slice(&self.audio.n_text_layer.to_le_bytes());
+        body.extend_from_slice(&self.audio.n_text_head.to_le_bytes());
         debug_assert_eq!(LAYER_SPEC_BYTES, 60);
-        pack_som(&body, 5, CACHE_ALIGN)
+        let version = if self.model_kind == ModelKind::AsrEncoderDecoder {
+            6
+        } else {
+            5
+        };
+        pack_som(&body, version, CACHE_ALIGN)
     }
 
     pub fn parse(data: &[u8]) -> Result<Self, ()> {
@@ -524,10 +857,13 @@ impl Manifest {
         } else {
             (0, 0, 0)
         };
-        if num_heads == 0
-            || num_kv_heads == 0
-            || hidden_dim % num_heads != 0
-            || num_heads % num_kv_heads != 0
+        if num_heads == 0 || num_kv_heads == 0 {
+            return Err(());
+        }
+        // v4+ puede traer head_dim explícito (Qwen3.8: hidden % heads ≠ 0).
+        // En v1–v3 la divisibilidad clásica sigue siendo contrato.
+        if version < 4
+            && (hidden_dim % num_heads != 0 || num_heads % num_kv_heads != 0)
         {
             return Err(());
         }
@@ -562,6 +898,25 @@ impl Manifest {
         } else {
             String::new()
         };
+        let (model_kind, norm_kind, audio) = if version >= 6 {
+            let mk = ModelKind::from_u8(r.u8()?).ok_or(())?;
+            let nk = NormKind::from_u8(r.u8()?).ok_or(())?;
+            let _pad = u16::from_le_bytes(r.take(2)?.try_into().map_err(|_| ())?);
+            let audio = AudioSpec {
+                n_mels: r.u32()?,
+                n_audio_ctx: r.u32()?,
+                n_audio_state: r.u32()?,
+                n_audio_layer: r.u32()?,
+                n_audio_head: r.u32()?,
+                n_text_ctx: r.u32()?,
+                n_text_state: r.u32()?,
+                n_text_layer: r.u32()?,
+                n_text_head: r.u32()?,
+            };
+            (mk, nk, audio)
+        } else {
+            (ModelKind::Decoder, NormKind::Rms, AudioSpec::default())
+        };
         let manifest = Self {
             name,
             vocab_size,
@@ -579,8 +934,59 @@ impl Manifest {
             layers,
             prefetch,
             chat_template,
+            model_kind,
+            audio,
+            norm_kind,
         };
         manifest.validate_layer_divisibility()?;
         Ok(manifest)
     }
+}
+
+fn encoder_layer_shards(prefix: &str) -> Vec<String> {
+    alloc::vec![
+        format!("{prefix}.attn_ln.weight.tensor"),
+        format!("{prefix}.attn_ln.bias.tensor"),
+        format!("{prefix}.attn_q.weight.tensor"),
+        format!("{prefix}.attn_q.bias.tensor"),
+        format!("{prefix}.attn_k.weight.tensor"),
+        format!("{prefix}.attn_v.weight.tensor"),
+        format!("{prefix}.attn_v.bias.tensor"),
+        format!("{prefix}.attn_out.weight.tensor"),
+        format!("{prefix}.attn_out.bias.tensor"),
+        format!("{prefix}.mlp_ln.weight.tensor"),
+        format!("{prefix}.mlp_ln.bias.tensor"),
+        format!("{prefix}.mlp_fc1.weight.tensor"),
+        format!("{prefix}.mlp_fc1.bias.tensor"),
+        format!("{prefix}.mlp_fc2.weight.tensor"),
+        format!("{prefix}.mlp_fc2.bias.tensor"),
+    ]
+}
+
+fn decoder_layer_shards(prefix: &str) -> Vec<String> {
+    alloc::vec![
+        format!("{prefix}.attn_ln.weight.tensor"),
+        format!("{prefix}.attn_ln.bias.tensor"),
+        format!("{prefix}.attn_q.weight.tensor"),
+        format!("{prefix}.attn_q.bias.tensor"),
+        format!("{prefix}.attn_k.weight.tensor"),
+        format!("{prefix}.attn_v.weight.tensor"),
+        format!("{prefix}.attn_v.bias.tensor"),
+        format!("{prefix}.attn_out.weight.tensor"),
+        format!("{prefix}.attn_out.bias.tensor"),
+        format!("{prefix}.cross_ln.weight.tensor"),
+        format!("{prefix}.cross_ln.bias.tensor"),
+        format!("{prefix}.cross_q.weight.tensor"),
+        format!("{prefix}.cross_q.bias.tensor"),
+        format!("{prefix}.cross_k.weight.tensor"),
+        format!("{prefix}.cross_v.weight.tensor"),
+        format!("{prefix}.cross_out.weight.tensor"),
+        format!("{prefix}.cross_out.bias.tensor"),
+        format!("{prefix}.mlp_ln.weight.tensor"),
+        format!("{prefix}.mlp_ln.bias.tensor"),
+        format!("{prefix}.mlp_fc1.weight.tensor"),
+        format!("{prefix}.mlp_fc1.bias.tensor"),
+        format!("{prefix}.mlp_fc2.weight.tensor"),
+        format!("{prefix}.mlp_fc2.bias.tensor"),
+    ]
 }

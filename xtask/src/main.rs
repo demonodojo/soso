@@ -44,6 +44,10 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             fetch_hf::run(&args);
         }
+        "fetch-whisper" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            fetch_whisper::run(&args);
+        }
         "package-usb" => {
             package_usb();
         }
@@ -97,6 +101,13 @@ fn main() {
         "test-install" => {
             test_install::run();
         }
+        "test-update" => {
+            test_update::run();
+        }
+        "release" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            release::run(&args);
+        }
         "sosomfs-check" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             sosomfs_check::run(&args);
@@ -104,7 +115,7 @@ fn main() {
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-usb | test-install | sosomfs-check | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
+                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-update | release | sosomfs-check | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | fetch-whisper | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
             );
             exit(2);
         }
@@ -115,6 +126,7 @@ mod bench;
 mod drivers;
 mod fat32_write;
 mod fetch_hf;
+mod fetch_whisper;
 mod flash_usb_live;
 mod g1_check;
 mod g3_check;
@@ -122,11 +134,14 @@ mod install_disk;
 mod live_models;
 mod lx_build;
 mod package_live;
+mod release;
 mod sosolog;
 mod test;
 mod test_distributed;
 mod sosomfs_check;
 mod test_install;
+mod test_update;
+mod version;
 
 fn convert_gguf(args: &[String]) {
     let root = project_root();
@@ -215,10 +230,13 @@ fn ovmf_vars_writable(src: &Path) -> PathBuf {
 /// corresponda a `SOSO_FIRMWARE` (BIOS por defecto; si se pide UEFI y no
 /// hay OVMF, avisa y cae a BIOS).
 pub(crate) fn build_image() -> PathBuf {
-    build_image_with_profile(&drivers::profile_from_env_or_args())
+    build_image_with_profile(&drivers::profile_from_env_or_args(), false)
 }
 
-pub(crate) fn build_image_with_profile(profile: &drivers::DriverProfile) -> PathBuf {
+pub(crate) fn build_image_with_profile(
+    profile: &drivers::DriverProfile,
+    reserve_update_slots: bool,
+) -> PathBuf {
     let root = project_root();
     let ports = drivers::lx_ports_for_build(profile);
     if !ports.is_empty() {
@@ -244,6 +262,8 @@ pub(crate) fn build_image_with_profile(profile: &drivers::DriverProfile) -> Path
             cmd.env("SOSO_LXDDE_MODE", mode);
         }
     }
+    cmd.env("SOSO_VERSION", version::read_version(&root));
+    cmd.env("SOSO_BUILD", version::git_build(&root));
     let status = cmd.status().expect("no se pudo ejecutar cargo");
     if !status.success() {
         exit(status.code().unwrap_or(1));
@@ -262,6 +282,17 @@ pub(crate) fn build_image_with_profile(profile: &drivers::DriverProfile) -> Path
             builder.set_file_contents("efi/boot/bootsoso.efi".into(), loader);
             builder.set_file_contents("bootmark.txt".into(), vec![b'\n'; 4096]);
         }
+    }
+    if reserve_update_slots {
+        builder.set_file_contents("SOSOUPD.TXT".into(), vec![b'\n'; soso_abi::UPD_MAILBOX_SIZE]);
+        builder.set_file_contents(
+            "SOSOKRN.BIN".into(),
+            vec![0u8; soso_update_core::UPD_KERNEL_SLOT_SIZE],
+        );
+        println!(
+            "ESP: huecos de actualización (SOSOUPD.TXT + SOSOKRN.BIN {} MiB)",
+            soso_update_core::UPD_KERNEL_SLOT_SIZE / (1024 * 1024)
+        );
     }
 
     let bios = root.join("target/soso-bios.img");
@@ -405,6 +436,7 @@ pub(crate) fn apply_firmware(qemu: &mut Command, img: &Path) {
 /// Compila el workspace user/ (release) y copia los ELF a rootfs/bin.
 pub(crate) fn build_user() -> bool {
     let root = project_root();
+    version::write_soso_release(&root);
     let status = Command::new("cargo")
         .current_dir(root.join("user"))
         .args(["build", "--release", "--target-dir"])
@@ -431,7 +463,10 @@ pub(crate) fn build_user() -> bool {
         "soso-llm",
         "soso-install",
         "soso-hf",
+        "soso-voz",
+        "soso-web",
         "ask-modelo",
+        "soso-update",
     ] {
         let src = out.join(prog);
         let dst = bin.join(prog);
@@ -618,6 +653,18 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
         if !status.success() {
             exit(status.code().unwrap_or(1));
         }
+        let asr_src = fetch_whisper::asr_model_dir(&root);
+        if !asr_src.join("manifest.som").exists() {
+            let status = Command::new("cargo")
+                .current_dir(&root)
+                .args(["run", "-q", "--release", "-p", "mkmodel-soso", "--"])
+                .args(["--asr", root.join("target/tiny-asr-model").to_str().unwrap()])
+                .status()
+                .expect("mkmodel-soso tiny-asr");
+            if !status.success() {
+                exit(status.code().unwrap_or(1));
+            }
+        }
     }
     let vieja = path
         .metadata()
@@ -647,6 +694,8 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
                 .into_owned(),
         );
         mkfs_args.push(root.join("target/tiny-q4k-model").to_string_lossy().into_owned());
+        let asr_dir = fetch_whisper::asr_model_dir(&root);
+        mkfs_args.push(asr_dir.to_string_lossy().into_owned());
     }
     mkfs_args.push(path.to_string_lossy().into_owned());
     mkfs_args.push("--size".into());
@@ -720,6 +769,18 @@ pub(crate) fn mkfs_models_live_for_dirs(
         .arg(primary);
     if let Some(t) = tiny {
         cmd.arg(t);
+    }
+    if let Some(asr) = std::env::var_os("SOSO_ASR_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let w = root.join("target/whisper-tiny-model");
+            w.join("manifest.som").exists().then_some(w)
+        })
+    {
+        if asr.join("manifest.som").exists() {
+            cmd.arg(&asr);
+            println!("package-usb-live: SOSO_ASR_DIR={}", asr.display());
+        }
     }
     cmd.arg(&path).arg("--size").arg(&size);
     let status = cmd.status().expect("mkfs-sosomfs live");
@@ -1158,6 +1219,23 @@ pub(crate) fn apply_qemu_gpu(qemu: &mut Command) {
     println!("xtask: GPU VFIO {arg}");
 }
 
+/// `SOSO_QEMU_AUDIO=1` añade Intel HDA + duplex para captura en QEMU.
+pub(crate) fn apply_qemu_audio(qemu: &mut Command) {
+    if std::env::var("SOSO_QEMU_AUDIO").ok().as_deref() != Some("1") {
+        return;
+    }
+    let backend = std::env::var("SOSO_QEMU_AUDIO_BACKEND").unwrap_or_else(|_| "pa".into());
+    qemu.args([
+        "-audiodev",
+        &format!("{backend},id=snd0"),
+        "-device",
+        "intel-hda",
+        "-device",
+        "hda-duplex,audiodev=snd0",
+    ]);
+    println!("xtask: audio QEMU (intel-hda + hda-duplex, backend={backend})");
+}
+
 fn package_usb() {
     build_user();
     let root = project_root();
@@ -1249,6 +1327,7 @@ pub(crate) fn run_qemu(img: &Path, gdb: bool) {
     apply_qemu_usb(&mut qemu);
     apply_qemu_nic(&mut qemu);
     apply_qemu_gpu(&mut qemu);
+    apply_qemu_audio(&mut qemu);
     // mon:stdio multiplexa monitor y serie: Ctrl-A X sale, Ctrl-A C monitor
     qemu.args(["-serial", "mon:stdio"])
         .args(["-display", "none"])

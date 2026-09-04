@@ -3,7 +3,7 @@
 //! IRQ1 vía IOAPIC en placa; respaldo por polling en `read_byte` (QEMU/edge).
 
 use crate::arch::{apic, ioapic, irq};
-use crate::drivers::keymap::{self, KeyOutput, KeymapState, Layout};
+use crate::drivers::keymap::{self, KeymapState, Layout};
 use crate::println;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use spin::Mutex;
@@ -264,25 +264,57 @@ pub fn set_layout(name: &str) -> bool {
     }
 }
 
-fn enqueue_output(km: &mut KeymapState, out: KeyOutput) {
+fn ctrl_byte(out: keymap::KeyOutput) -> keymap::KeyOutput {
+    use keymap::KeyOutput;
+    match out {
+        KeyOutput::Byte(b @ b'a'..=b'z') | KeyOutput::Byte(b @ b'A'..=b'Z') => {
+            KeyOutput::Byte(b & 0x1F)
+        }
+        KeyOutput::Byte(b' ') => KeyOutput::Byte(0),
+        KeyOutput::Char(c) if c.is_ascii_alphabetic() => {
+            KeyOutput::Byte((c.to_ascii_lowercase() as u8) & 0x1F)
+        }
+        other => other,
+    }
+}
+
+fn emit_tty_byte(b: u8) {
+    if b == 0x03 {
+        crate::task::note_serial_sigint();
+        return;
+    }
+    let mut rx = RX.lock();
+    rx.push(b);
+    CH_ENCOLADOS.fetch_add(1, Ordering::Relaxed);
+}
+
+fn enqueue_output(km: &mut KeymapState, out: keymap::KeyOutput) {
+    let out = if km.ctrl() { ctrl_byte(out) } else { out };
     let mut buf = [0u8; 4];
     let n = keymap::output_bytes(out, &mut buf);
     if n == 0 {
         return;
     }
-    let mut rx = RX.lock();
     for &b in &buf[..n] {
-        rx.push(b);
-        CH_ENCOLADOS.fetch_add(1, Ordering::Relaxed);
-    }
-    while let Some(pending) = km.take_pending() {
-        let n2 = keymap::output_bytes(pending, &mut buf);
-        for &b in &buf[..n2] {
-            rx.push(b);
-            CH_ENCOLADOS.fetch_add(1, Ordering::Relaxed);
+        emit_tty_byte(b);
+        if crate::drivers::fb::graphics_mode() {
+            crate::drivers::input::push_key(b as u32, true);
         }
     }
-    drop(rx);
+    while let Some(pending) = km.take_pending() {
+        let pending = if km.ctrl() {
+            ctrl_byte(pending)
+        } else {
+            pending
+        };
+        let n2 = keymap::output_bytes(pending, &mut buf);
+        for &b in &buf[..n2] {
+            emit_tty_byte(b);
+            if crate::drivers::fb::graphics_mode() {
+                crate::drivers::input::push_key(b as u32, true);
+            }
+        }
+    }
     crate::task::kick_if_tty_waiting();
 }
 
@@ -308,6 +340,7 @@ fn handle_scancode(sc: u8) {
         let mut km = KM.lock();
         match code {
             0x2A | 0x36 => km.shift_press(false),
+            0x1D => km.ctrl_press(false),
             0x38 if extended => km.altgr_press(false),
             _ => {}
         }
@@ -318,6 +351,10 @@ fn handle_scancode(sc: u8) {
     match sc {
         0x2A | 0x36 => {
             km.shift_press(true);
+            return;
+        }
+        0x1D => {
+            km.ctrl_press(true);
             return;
         }
         0x38 if extended => {
@@ -350,6 +387,7 @@ fn handle_usb_event(evt: crate::drivers::usb_storage::UsbKbdEvent) {
     if evt.usage_id >= 0xE0 && evt.usage_id <= 0xE7 {
         match evt.usage_id {
             0xE1 | 0xE5 => km.shift_press(evt.pressed),
+            0xE0 | 0xE4 => km.ctrl_press(evt.pressed),
             0xE6 => km.altgr_press(evt.pressed),
             _ => {}
         }
@@ -369,7 +407,8 @@ fn poll_hw() {
         while i8042_present() && status() & ST_OUT_FULL != 0 {
             let st = status();
             if st & ST_AUX_DATA != 0 {
-                let _ = read_data();
+                let b = read_data();
+                crate::drivers::mouse::on_byte(b);
                 continue;
             }
             let sc = read_data();

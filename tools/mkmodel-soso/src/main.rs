@@ -16,7 +16,7 @@ use sosomodel::index::{
     make_f32_entry, make_q4_k_entry, make_q8_0_entry, pack_shard, TensorIndex, SHARD_PAYLOAD_OFF,
 };
 use sosomodel::layout::{INDEX_FILE, MAGIC, MANIFEST_FILE, SHARDS_DIR};
-use sosomodel::manifest::{LayerPrefetch, Manifest};
+use sosomodel::manifest::{AudioSpec, LayerPrefetch, Manifest, ModelKind, NormKind};
 use sosomodel::{align_up, Crc32cDigest, BLOCK_ALIGN};
 use std::fs;
 use std::io::Write;
@@ -224,6 +224,15 @@ fn write_trunk_shard(path: &std::path::Path, blob: &[u8]) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if arg_bool(&args, "--asr") {
+        let out = args
+            .iter()
+            .find(|a| !a.starts_with("--"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("target/tiny-asr-model"));
+        build_tiny_asr(&out);
+        return;
+    }
     // posicional = dir de salida; el resto son parejas --flag valor
     let mut out = None;
     let mut i = 0;
@@ -337,6 +346,9 @@ fn main() {
         // Sin plantilla de chat: estos modelos son pesos sintéticos para probar
         // fontanería, no conversan, y van con el tokenizador byte-level.
         chat_template: String::new(),
+        model_kind: ModelKind::Decoder,
+        audio: AudioSpec::default(),
+        norm_kind: NormKind::Rms,
     };
     manifest.fill_layers_from_globals();
     if num_shared > 0 {
@@ -700,5 +712,76 @@ fn main() {
         out.display(),
         index.entries.len(),
         total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    );
+}
+
+fn build_tiny_asr(out: &std::path::Path) {
+    let _ = fs::remove_dir_all(out);
+    fs::create_dir_all(out.join(SHARDS_DIR)).unwrap();
+    let manifest = Manifest::tiny_asr("tiny-asr");
+    let audio = manifest.audio;
+    let d = audio.n_audio_state;
+    let ffn = manifest.ffn_dim;
+    let vocab = manifest.vocab_size;
+    let mut index = TensorIndex::default();
+    let mut id = 0u32;
+    let mut total_bytes = 0u64;
+    let shards = out.join(SHARDS_DIR);
+    let mut add = |name: &str, shape: &[u32]| {
+        emit_tensor_f32(&shards, &mut index, &mut id, name, shape, 0, 0, &mut total_bytes);
+    };
+    add("conv1.weight", &[d, 80, 3]);
+    add("conv1.bias", &[d]);
+    add("conv2.weight", &[d, d, 3]);
+    add("conv2.bias", &[d]);
+    add("pos_embed", &[audio.n_audio_ctx, d]);
+    add("E00.attn_ln.weight", &[d]);
+    add("E00.attn_ln.bias", &[d]);
+    add("E00.attn_q.weight", &[d, d]);
+    add("E00.attn_q.bias", &[d]);
+    add("E00.attn_k.weight", &[d, d]);
+    add("E00.attn_v.weight", &[d, d]);
+    add("E00.attn_out.weight", &[d, d]);
+    add("E00.attn_out.bias", &[d]);
+    add("E00.mlp_ln.weight", &[d]);
+    add("E00.mlp_ln.bias", &[d]);
+    add("E00.mlp_fc1.weight", &[ffn, d]);
+    add("E00.mlp_fc1.bias", &[ffn]);
+    add("E00.mlp_fc2.weight", &[d, ffn]);
+    add("E00.mlp_fc2.bias", &[d]);
+    add("enc_ln_post.weight", &[d]);
+    add("enc_ln_post.bias", &[d]);
+    add("token_embed", &[vocab, d]);
+    add("D00.attn_ln.weight", &[d]);
+    add("D00.attn_ln.bias", &[d]);
+    add("D00.attn_q.weight", &[d, d]);
+    add("D00.attn_q.bias", &[d]);
+    add("D00.attn_k.weight", &[d, d]);
+    add("D00.attn_v.weight", &[d, d]);
+    add("D00.attn_out.weight", &[d, d]);
+    add("D00.attn_out.bias", &[d]);
+    add("D00.cross_ln.weight", &[d]);
+    add("D00.cross_ln.bias", &[d]);
+    add("D00.cross_q.weight", &[d, d]);
+    add("D00.cross_q.bias", &[d]);
+    add("D00.cross_k.weight", &[d, d]);
+    add("D00.cross_v.weight", &[d, d]);
+    add("D00.cross_out.weight", &[d, d]);
+    add("D00.cross_out.bias", &[d]);
+    add("D00.mlp_ln.weight", &[d]);
+    add("D00.mlp_ln.bias", &[d]);
+    add("D00.mlp_fc1.weight", &[ffn, d]);
+    add("D00.mlp_fc1.bias", &[ffn]);
+    add("D00.mlp_fc2.weight", &[d, ffn]);
+    add("D00.mlp_fc2.bias", &[d]);
+    add("dec_ln.weight", &[d]);
+    add("dec_ln.bias", &[d]);
+    fs::write(out.join(INDEX_FILE), index.serialize()).unwrap();
+    fs::write(out.join(MANIFEST_FILE), manifest.serialize()).unwrap();
+    println!(
+        "mkmodel-soso: ASR en {} ({} tensores, {:.1} MiB)",
+        out.display(),
+        index.entries.len(),
+        total_bytes as f64 / (1024.0 * 1024.0)
     );
 }
