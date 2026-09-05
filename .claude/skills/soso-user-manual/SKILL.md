@@ -54,7 +54,7 @@ Referencia rápida — ampliar el manual si cambian:
 - **`voz` / `soso-voz`:** dictado vía `vozd` (`127.0.0.1:7421`); F4 push-to-talk; `/etc/voz.conf`
 - **`soso-web`:** HTTPS o `--local`; `--grafico` con framebuffer
 - **`soso-update`:** `estado`, `comprobar`, `aplicar`, `revertir`; `/etc/actualiza.conf`, `/etc/soso-release`
-- **`soso-install`:** `list`, `<id> --yes`, `status`; buzón `SOSOBOOT.TXT`
+- **`soso-install`:** sin args elige disco; `list`, `<id|nombre> --yes`, `status`; buzón `SOSOBOOT.TXT`
 - **`soso-hf`:** `search`, `list`, `pull` (modelos en `/models/` desde el guest)
 - **Arranque:** QEMU `cargo xtask run`; live `flash-usb-live`; salida `Ctrl-A X`
 - **Log USB live:** `cargo xtask sosolog` / `--drv` (ESP p1; no `sudo cargo`)

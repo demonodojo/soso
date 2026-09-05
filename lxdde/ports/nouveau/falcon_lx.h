@@ -15,10 +15,30 @@ int falcon_lx_hsfw_boot_mbox(unsigned falcon_base, const struct acr_fw_blob *blo
                              const char *name, unsigned mbox0, unsigned mbox1,
                              int check_mbox0);
 
-/* Ucode crudo de VBIOS (desc v2/v3 + imagen), p. ej. FWSEC-FRTS en el falcon GSP. */
-int falcon_lx_vbios_boot(unsigned falcon_base, const unsigned char *ucode, unsigned ulen,
-                         unsigned imem_off, unsigned imem_sz, unsigned dmem_off,
-                         unsigned dmem_sz, unsigned boot_addr, unsigned dma_handle,
-                         const char *name);
+struct falcon_lx_raw {
+    const unsigned char *img;
+    unsigned dma_handle;
+    unsigned imem_src;
+    unsigned imem_dst;
+    unsigned imem_len;
+    unsigned dmem_src;
+    unsigned dmem_dst;
+    unsigned dmem_len;
+    unsigned pkc_data_offset;
+    unsigned engine_id_mask;
+    unsigned ucode_id;
+    unsigned boot_addr;
+    unsigned mbox0;
+    unsigned mbox1;
+    int check_mbox0;
+    unsigned timeout_ms;
+    const char *name;
+};
+
+/* Reset del falcon antes de cada carga (ga102 HAL). */
+int falcon_lx_reset(unsigned base);
+
+/* Ucode crudo con parámetros BROM (FWSEC-FRTS en falcon GSP). */
+int falcon_lx_raw_boot(unsigned falcon_base, const struct falcon_lx_raw *raw);
 
 #endif

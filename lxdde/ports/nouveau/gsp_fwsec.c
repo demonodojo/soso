@@ -1,5 +1,6 @@
-/* FWSEC-FRTS: extrae el ucode de la VBIOS (BIT 'p'), parchea FRTS y lo ejecuta en
- * el falcon GSP antes del booter_load de SEC2 (`tu102_gsp_oneinit`). */
+/* FWSEC-FRTS: extrae ucode FWSEC de la VBIOS (PROM @0x300000, cadena PCIR/NPDE,
+ * BIT 0x70 → PmuLookupTable 0x85), parchea FRTS + firma por fuse y arranca en
+ * el falcon GSP antes del booter_load SEC2 (nova-core vbios.rs + fwsec.rs). */
 #include "gsp_fwsec.h"
 #include "falcon_lx.h"
 #include "gsp_dma.h"
@@ -9,39 +10,58 @@
 void *memcpy(void *dst, const void *src, unsigned long n);
 void *memset(void *dst, int c, unsigned long n);
 
-#define NV_VBIOS_BASE           0x00110000u
-#define NV_VBIOS_SIZE           0x20000u
+#define NV_PROM_BASE            0x00300000u
+#define NV_PROM_MAX             0x00100000u
 
 #define NV_PFB_PRI_MMU_WPR2_ADDR_LO 0x001fa824u
 #define NV_PFB_PRI_MMU_WPR2_ADDR_HI 0x001fa828u
-#define NV_PBUS_SW_SCRATCH_0E   0x00134014u
+#define NV_PBUS_SW_SCRATCH_0E   0x00001438u
+
+#define NV_FUSE_OPT_FPF_NVDEC_UCODE1_VERSION 0x00824100u
+#define NV_FUSE_OPT_FPF_SEC2_UCODE1_VERSION  0x00824140u
+#define NV_FUSE_OPT_FPF_GSP_UCODE1_VERSION   0x008241c0u
+#define NV_FUSE_OPT_FPF_SIZE                 16u
 
 #define NVFW_FALCON_APPIF_ID_DMEMMAPPER 0x4u
 #define NVFW_FALCON_APPIF_DMEMMAPPER_CMD_FRTS 0x15u
 #define NVFW_FRTS_CMD_REGION_TYPE_FB 2u
+#define PMU_APPID_FWSEC_PROD 0x85u
+#define BIT_TOKEN_FALCON_DATA 0x70u
+#define BCRT30_RSA3K_SIG_SIZE 384u
 
 struct falcon_ucode_desc_v2 {
-    uint32_t version;
-    uint32_t bootloader_offset;
-    uint32_t bootloader_size;
-    uint32_t bootloader_param_offset;
-    uint32_t bootloader_param_size;
-    uint32_t imem_offset;
-    uint32_t imem_size;
-    uint32_t imem_load_size;
-    uint32_t dmem_offset;
-    uint32_t dmem_size;
-    uint32_t dmem_load_size;
+    uint32_t hdr;
+    uint32_t stored_size;
+    uint32_t uncompressed_size;
+    uint32_t virtual_entry;
     uint32_t interface_offset;
-    uint32_t interface_size;
     uint32_t imem_phys_base;
+    uint32_t imem_load_size;
+    uint32_t imem_virt_base;
+    uint32_t imem_sec_base;
+    uint32_t imem_sec_size;
+    uint32_t dmem_offset;
     uint32_t dmem_phys_base;
-    uint32_t engine_id_mask;
-    uint32_t ucode_id;
-    uint32_t signature_count;
-    uint32_t signature_versions;
+    uint32_t dmem_load_size;
+    uint32_t alt_imem_load_size;
+    uint32_t alt_dmem_load_size;
+};
+
+struct falcon_ucode_desc_v3 {
+    uint32_t hdr;
+    uint32_t stored_size;
     uint32_t pkc_data_offset;
-    uint32_t pkc_data_size;
+    uint32_t interface_offset;
+    uint32_t imem_phys_base;
+    uint32_t imem_load_size;
+    uint32_t imem_virt_base;
+    uint32_t dmem_phys_base;
+    uint32_t dmem_load_size;
+    uint16_t engine_id_mask;
+    uint8_t ucode_id;
+    uint8_t signature_count;
+    uint16_t signature_versions;
+    uint16_t reserved;
 };
 
 struct falcon_appif_hdr_v1 {
@@ -97,61 +117,500 @@ struct frts_cmd {
     struct frts_region_cmd frts_region;
 };
 
-static uint8_t vbios_rd8(unsigned off)
+struct fwsec_ucode_info {
+    uint8_t version;
+    unsigned desc_size;
+    unsigned interface_offset;
+    unsigned imem_load_size;
+    unsigned dmem_load_size;
+    unsigned imem_phys_base;
+    unsigned dmem_phys_base;
+    unsigned imem_src;
+    unsigned dmem_src;
+    unsigned pkc_data_offset;
+    uint16_t engine_id_mask;
+    uint8_t ucode_id;
+    uint8_t signature_count;
+    uint16_t signature_versions;
+    unsigned ucode_rom_off;
+    unsigned ucode_len;
+    unsigned sig_rom_off;
+};
+
+static unsigned rom_data_len;
+
+static uint8_t rom_rd8(unsigned off)
 {
     unsigned word = off & ~3u;
-    uint32_t v = gsp_mmio_rd32(NV_VBIOS_BASE + word);
+    uint32_t v;
+
+    if (off >= rom_data_len) {
+        return 0;
+    }
+    v = gsp_mmio_rd32(NV_PROM_BASE + word);
     return (uint8_t)(v >> ((off & 3u) * 8u));
 }
 
-static int vbios_match(unsigned off, const char *sig, unsigned n)
+static uint16_t rom_rd16(unsigned off)
+{
+    return (uint16_t)rom_rd8(off) | ((uint16_t)rom_rd8(off + 1) << 8);
+}
+
+static uint32_t rom_rd32(unsigned off)
+{
+    return (uint32_t)rom_rd8(off) |
+           ((uint32_t)rom_rd8(off + 1) << 8) |
+           ((uint32_t)rom_rd8(off + 2) << 16) |
+           ((uint32_t)rom_rd8(off + 3) << 24);
+}
+
+static int rom_match(unsigned off, const char *sig, unsigned n)
 {
     unsigned i;
+
     for (i = 0; i < n; i++) {
-        if (vbios_rd8(off + i) != (uint8_t)sig[i]) {
+        if (rom_rd8(off + i) != (uint8_t)sig[i]) {
             return 0;
         }
     }
     return 1;
 }
 
-static int vbios_find_bit_token(unsigned token, unsigned *data_off, unsigned *data_len)
-{
-    unsigned i;
-    for (i = 0; i + 12u < NV_VBIOS_SIZE; i++) {
-        if (!vbios_match(i, "BIT", 3)) {
-            continue;
-        }
-        unsigned hdr = i;
-        unsigned pos = hdr + vbios_rd8(hdr + 4) + vbios_rd8(hdr + 5);
-        unsigned n = vbios_rd8(hdr + 6);
-        unsigned j;
-        for (j = 0; j < n; j++) {
-            if (pos + 3u >= NV_VBIOS_SIZE) {
-                break;
-            }
-            if (vbios_rd8(pos) != token) {
-                pos += 3u;
-                pos += vbios_rd8(pos + 1) | ((unsigned)vbios_rd8(pos + 2) << 8);
-                continue;
-            }
-            unsigned len = vbios_rd8(pos + 1) | ((unsigned)vbios_rd8(pos + 2) << 8);
-            *data_off = pos + 3u;
-            *data_len = len;
-            return 0;
-        }
-    }
-    return -1;
-}
-
-static int vbios_copy(unsigned off, void *dst, unsigned len)
+static int rom_copy(unsigned off, void *dst, unsigned len)
 {
     unsigned char *d = dst;
     unsigned i;
+
+    if (off + len > rom_data_len) {
+        return -1;
+    }
     for (i = 0; i < len; i++) {
-        d[i] = vbios_rd8(off + i);
+        d[i] = rom_rd8(off + i);
     }
     return 0;
+}
+
+static unsigned align_up512(unsigned v)
+{
+    return (v + 511u) & ~511u;
+}
+
+static unsigned desc_hdr_size(uint32_t hdr)
+{
+    return (unsigned)(hdr >> 16);
+}
+
+static unsigned desc_version(uint32_t hdr)
+{
+    return (unsigned)((hdr >> 8) & 0xffu);
+}
+
+static unsigned popcount16(uint16_t v)
+{
+    unsigned n = 0;
+    while (v) {
+        n += v & 1u;
+        v >>= 1;
+    }
+    return n;
+}
+
+static unsigned fuse_leading_bit(uint16_t data)
+{
+    unsigned i;
+    for (i = 16u; i > 0u; i--) {
+        if (data & (1u << (i - 1u))) {
+            return i - 1u;
+        }
+    }
+    return 0;
+}
+
+static int prom_ifr_offset(unsigned *start_out)
+{
+    uint32_t sig = rom_rd32(0);
+
+    if (sig != 0x4947564eu) { /* "NVGI" */
+        *start_out = 0;
+        return 0;
+    }
+
+    {
+        uint32_t fixed1 = rom_rd32(4);
+        unsigned ver = (unsigned)((fixed1 >> 8) & 0xffu);
+        unsigned fixed_data_size = (unsigned)((fixed1 >> 16) & 0x7fffu);
+
+        if (ver == 1u || ver == 2u) {
+            *start_out = fixed_data_size + 4u;
+            return 0;
+        }
+        if (ver == 3u) {
+            uint32_t total = rom_rd32(8) & 0xfffffu;
+            uint32_t flash_status;
+            unsigned dir_off;
+
+            if (total + 4u > rom_data_len) {
+                return -1;
+            }
+            flash_status = rom_rd32(total);
+            dir_off = (unsigned)flash_status + 4096u;
+            if (dir_off + 12u > rom_data_len) {
+                return -1;
+            }
+            if (rom_rd32(dir_off) != 0x44465252u) { /* "RFRD" */
+                lx_printk("nouveau-lx: VBIOS IFR v3 sin directorio RFRD\n");
+                return -1;
+            }
+            *start_out = rom_rd32(dir_off + 8u);
+            return 0;
+        }
+        lx_printk("nouveau-lx: VBIOS IFR versión %u no soportada\n", ver);
+        return -1;
+    }
+}
+
+static unsigned image_size_bytes(unsigned img_off)
+{
+    unsigned pcir_off = img_off + rom_rd16(img_off + 0x18u);
+    uint16_t image_len;
+    unsigned npde_off;
+
+    if (pcir_off + 22u > rom_data_len) {
+        return 0;
+    }
+    image_len = (uint16_t)rom_rd8(pcir_off + 16u) |
+                ((uint16_t)rom_rd8(pcir_off + 17u) << 8);
+
+    npde_off = (pcir_off + rom_rd16(pcir_off + 10u) + 0x0fu) & ~0x0fu;
+    if (npde_off + 12u <= rom_data_len && rom_match(npde_off, "NPDE", 4)) {
+        uint16_t sub = (uint16_t)rom_rd8(npde_off + 8u) |
+                       ((uint16_t)rom_rd8(npde_off + 9u) << 8);
+        if (sub) {
+            return (unsigned)sub * 512u;
+        }
+    }
+    if (!image_len) {
+        return 0;
+    }
+    return (unsigned)image_len * 512u;
+}
+
+static int image_is_last(unsigned img_off)
+{
+    unsigned pcir_off = img_off + rom_rd16(img_off + 0x18u);
+    unsigned npde_off;
+    uint8_t code_type;
+
+    if (pcir_off + 22u > rom_data_len) {
+        return 1;
+    }
+    code_type = rom_rd8(pcir_off + 20u);
+    if (code_type == 0x70u) {
+        return 1;
+    }
+
+    npde_off = (pcir_off + rom_rd16(pcir_off + 10u) + 0x0fu) & ~0x0fu;
+    if (npde_off + 12u <= rom_data_len && rom_match(npde_off, "NPDE", 4)) {
+        return (rom_rd8(npde_off + 0xau) & 0x80u) != 0;
+    }
+    return (rom_rd8(pcir_off + 21u) & 0x80u) != 0;
+}
+
+static uint8_t image_code_type(unsigned img_off)
+{
+    unsigned pcir_off = img_off + rom_rd16(img_off + 0x18u);
+
+    if (pcir_off + 21u > rom_data_len) {
+        return 0xffu;
+    }
+    return rom_rd8(pcir_off + 20u);
+}
+
+static void log_image_chain(unsigned start)
+{
+    unsigned off = start;
+    unsigned n = 0;
+
+    lx_printk("nouveau-lx: VBIOS cadena imágenes @0x%x:\n", start);
+    while (off < rom_data_len && n < 16u) {
+        unsigned sz;
+        uint16_t sig;
+
+        if (off + 2u > rom_data_len) {
+            break;
+        }
+        sig = (uint16_t)rom_rd8(off) | ((uint16_t)rom_rd8(off + 1) << 8);
+        if (sig != 0xaa55u && sig != 0x4e56u) {
+            lx_printk("nouveau-lx:   [%u] @0x%x sig=0x%04x (fin)\n", n, off, sig);
+            break;
+        }
+        sz = image_size_bytes(off);
+        if (!sz) {
+            lx_printk("nouveau-lx:   [%u] @0x%x tipo=0x%02x tamaño inválido\n",
+                      n, off, image_code_type(off));
+            break;
+        }
+        lx_printk("nouveau-lx:   [%u] @0x%x tipo=0x%02x size=0x%x last=%u\n",
+                  n, off, image_code_type(off), sz, image_is_last(off));
+        if (image_is_last(off)) {
+            break;
+        }
+        off = align_up512(off + sz);
+        n++;
+    }
+}
+
+static int find_bit_falcon_ptr(unsigned pciat_off, unsigned pciat_len, unsigned *ptr_out)
+{
+    unsigned i;
+    unsigned end = pciat_off + pciat_len;
+
+    for (i = pciat_off; i + 6u < end; i++) {
+        if (rom_rd8(i) != 0xffu || rom_rd8(i + 1) != 0xb8u) {
+            continue;
+        }
+        if (!rom_match(i + 2, "BIT", 3) || rom_rd8(i + 5) != 0u) {
+            continue;
+        }
+        {
+            unsigned hdr = i;
+            unsigned hdr_size = rom_rd8(hdr + 8);
+            unsigned token_size = rom_rd8(hdr + 9);
+            unsigned token_count = rom_rd8(hdr + 10);
+            unsigned tok_base = hdr + hdr_size;
+            unsigned j;
+
+            for (j = 0; j < token_count; j++) {
+                unsigned eoff = tok_base + j * token_size;
+                uint8_t id;
+                uint16_t data_off;
+
+                if (eoff + 6u > end) {
+                    break;
+                }
+                id = rom_rd8(eoff);
+                if (id != BIT_TOKEN_FALCON_DATA) {
+                    continue;
+                }
+                data_off = (uint16_t)rom_rd8(eoff + 4) |
+                           ((uint16_t)rom_rd8(eoff + 5) << 8);
+                if ((unsigned)data_off + 4u > pciat_len) {
+                    lx_printk("nouveau-lx: BIT 0x70 data_offset 0x%x fuera de PCI-AT\n",
+                              data_off);
+                    return -1;
+                }
+                *ptr_out = rom_rd32(pciat_off + data_off);
+                lx_printk("nouveau-lx: BIT 0x70 ptr=0x%x (pciat_len=0x%x)\n",
+                          *ptr_out, pciat_len);
+                return 0;
+            }
+        }
+    }
+    lx_printk("nouveau-lx: VBIOS sin token BIT 0x70 (Falcon data)\n");
+    return -1;
+}
+
+static int pmu_lookup_fwsec(unsigned fwsec_off, unsigned fwsec_len,
+                            unsigned pciat_len, unsigned falcon_data_off,
+                            unsigned *ucode_off_out)
+{
+    unsigned hdr_len;
+    unsigned entry_len;
+    unsigned entry_count;
+    unsigned i;
+
+    if (falcon_data_off + 4u > fwsec_len) {
+        return -1;
+    }
+    hdr_len = rom_rd8(fwsec_off + falcon_data_off);
+    entry_len = rom_rd8(fwsec_off + falcon_data_off + 2);
+    entry_count = rom_rd8(fwsec_off + falcon_data_off + 3);
+
+    lx_printk("nouveau-lx: PmuLookupTable hdr=%u entry=%u count=%u\n",
+              hdr_len, entry_len, entry_count);
+
+    for (i = 0; i < entry_count; i++) {
+        unsigned eoff = falcon_data_off + hdr_len + i * entry_len;
+        uint8_t app_id;
+        uint32_t data;
+
+        if (eoff + 6u > fwsec_len) {
+            break;
+        }
+        app_id = rom_rd8(fwsec_off + eoff);
+        data = rom_rd32(fwsec_off + eoff + 2);
+        if (app_id != PMU_APPID_FWSEC_PROD) {
+            continue;
+        }
+        if (data < pciat_len) {
+            lx_printk("nouveau-lx: PMU 0x85 data=0x%x < pciat_len\n", data);
+            return -1;
+        }
+        *ucode_off_out = data - pciat_len;
+        lx_printk("nouveau-lx: PMU 0x85 ucode_off=0x%x\n", *ucode_off_out);
+        return 0;
+    }
+    lx_printk("nouveau-lx: PmuLookupTable sin entrada 0x85 (FWSEC_PROD)\n");
+    return -1;
+}
+
+static int parse_fwsec_desc(unsigned fwsec_off, unsigned fwsec_len,
+                            unsigned ucode_rel_off, struct fwsec_ucode_info *info)
+{
+    unsigned abs = fwsec_off + ucode_rel_off;
+    uint32_t hdr;
+    uint8_t ver;
+
+    if (abs + 8u > fwsec_off + fwsec_len) {
+        return -1;
+    }
+    hdr = rom_rd32(abs);
+    ver = (uint8_t)desc_version(hdr);
+    info->version = ver;
+    info->desc_size = desc_hdr_size(hdr);
+
+    if (ver == 3u) {
+        struct falcon_ucode_desc_v3 d;
+
+        if (info->desc_size < sizeof(d) ||
+            rom_copy(abs, &d, sizeof(d)) != 0) {
+            return -1;
+        }
+        info->interface_offset = d.interface_offset;
+        info->imem_load_size = d.imem_load_size;
+        info->dmem_load_size = d.dmem_load_size;
+        info->imem_phys_base = d.imem_phys_base;
+        info->dmem_phys_base = d.dmem_phys_base;
+        info->pkc_data_offset = d.pkc_data_offset;
+        info->engine_id_mask = d.engine_id_mask;
+        info->ucode_id = d.ucode_id;
+        info->signature_count = d.signature_count;
+        info->signature_versions = d.signature_versions;
+        info->imem_src = 0;
+        info->dmem_src = d.imem_load_size;
+    } else if (ver == 2u) {
+        struct falcon_ucode_desc_v2 d;
+
+        if (info->desc_size < sizeof(d) ||
+            rom_copy(abs, &d, sizeof(d)) != 0) {
+            return -1;
+        }
+        info->interface_offset = d.interface_offset;
+        info->imem_load_size = d.imem_load_size;
+        info->dmem_load_size = d.dmem_load_size;
+        info->imem_phys_base = d.imem_phys_base;
+        info->dmem_phys_base = d.dmem_phys_base;
+        info->pkc_data_offset = 0;
+        info->engine_id_mask = 0;
+        info->ucode_id = 0;
+        info->signature_count = 0;
+        info->signature_versions = 0;
+        info->imem_src = 0;
+        info->dmem_src = d.dmem_offset;
+    } else {
+        lx_printk("nouveau-lx: FWSEC desc v%u no soportada\n", ver);
+        return -1;
+    }
+
+    info->ucode_len = info->imem_load_size + info->dmem_load_size;
+    info->sig_rom_off = abs + info->desc_size;
+    info->ucode_rom_off = info->sig_rom_off +
+                          (unsigned)info->signature_count * BCRT30_RSA3K_SIG_SIZE;
+
+    if (!info->ucode_len ||
+        info->ucode_rom_off + info->ucode_len > fwsec_off + fwsec_len) {
+        lx_printk("nouveau-lx: FWSEC ucode fuera de sección FwSec\n");
+        return -1;
+    }
+
+    lx_printk("nouveau-lx: FWSEC desc v%u imem=%u dmem=%u engine=0x%x ucode_id=%u "
+              "sig=%u vers=0x%x\n",
+              ver, info->imem_load_size, info->dmem_load_size,
+              info->engine_id_mask, info->ucode_id,
+              info->signature_count, info->signature_versions);
+    return 0;
+}
+
+static int vbios_locate_fwsec(struct fwsec_ucode_info *info)
+{
+    unsigned start;
+    unsigned off;
+    unsigned pciat_off = 0;
+    unsigned pciat_len = 0;
+    unsigned fwsec_off = 0;
+    unsigned fwsec_len = 0;
+    unsigned falcon_ptr = 0;
+    unsigned falcon_data_off;
+    unsigned ucode_rel_off = 0;
+    int have_pciat = 0;
+    int have_fwsec = 0;
+
+    rom_data_len = NV_PROM_MAX;
+    if (prom_ifr_offset(&start) != 0) {
+        log_image_chain(0);
+        return -1;
+    }
+
+    off = start;
+    while (off < rom_data_len) {
+        unsigned sz;
+        uint16_t sig;
+        uint8_t ctype;
+
+        if (off + 2u > rom_data_len) {
+            break;
+        }
+        sig = (uint16_t)rom_rd8(off) | ((uint16_t)rom_rd8(off + 1) << 8);
+        if (sig != 0xaa55u && sig != 0x4e56u) {
+            break;
+        }
+        sz = image_size_bytes(off);
+        if (!sz) {
+            break;
+        }
+        ctype = image_code_type(off);
+
+        if (ctype == 0x00u && !have_pciat) {
+            pciat_off = off;
+            pciat_len = sz;
+            have_pciat = 1;
+        } else if (ctype == 0xe0u && !have_fwsec) {
+            fwsec_off = off;
+            fwsec_len = rom_data_len - off;
+            have_fwsec = 1;
+        }
+
+        if (have_pciat && have_fwsec && image_is_last(off)) {
+            break;
+        }
+        off = align_up512(off + sz);
+    }
+
+    if (!have_pciat || !have_fwsec) {
+        log_image_chain(start);
+        lx_printk("nouveau-lx: VBIOS falta imagen %s%s\n",
+                  have_pciat ? "" : "PCI-AT ",
+                  have_fwsec ? "" : "FwSec");
+        return -1;
+    }
+
+    if (find_bit_falcon_ptr(pciat_off, pciat_len, &falcon_ptr) != 0) {
+        log_image_chain(start);
+        return -1;
+    }
+    if (falcon_ptr < pciat_len) {
+        lx_printk("nouveau-lx: BIT falcon ptr 0x%x < pciat_len 0x%x\n",
+                  falcon_ptr, pciat_len);
+        return -1;
+    }
+    falcon_data_off = falcon_ptr - pciat_len;
+
+    if (pmu_lookup_fwsec(fwsec_off, fwsec_len, pciat_len, falcon_data_off,
+                         &ucode_rel_off) != 0) {
+        return -1;
+    }
+
+    return parse_fwsec_desc(fwsec_off, fwsec_len, ucode_rel_off, info);
 }
 
 static uint64_t wpr2_hi_bound(void)
@@ -169,6 +628,7 @@ static uint64_t wpr2_lo_bound(void)
 int gsp_fwsec_wpr2_present(uint64_t *lo_out, uint64_t *hi_out)
 {
     uint64_t hi = wpr2_hi_bound();
+
     if (hi == 0) {
         return 0;
     }
@@ -181,18 +641,87 @@ int gsp_fwsec_wpr2_present(uint64_t *lo_out, uint64_t *hi_out)
     return 1;
 }
 
+static uint16_t read_fuse_ucode_version(uint16_t engine_id_mask, uint8_t ucode_id)
+{
+    unsigned base;
+    unsigned idx;
+
+    if (ucode_id < 1u || ucode_id > NV_FUSE_OPT_FPF_SIZE) {
+        return 0;
+    }
+    idx = (unsigned)ucode_id - 1u;
+
+    if (engine_id_mask & 0x0400u) {
+        base = NV_FUSE_OPT_FPF_GSP_UCODE1_VERSION;
+    } else if (engine_id_mask & 0x0001u) {
+        base = NV_FUSE_OPT_FPF_SEC2_UCODE1_VERSION;
+    } else if (engine_id_mask & 0x0004u) {
+        base = NV_FUSE_OPT_FPF_NVDEC_UCODE1_VERSION;
+    } else {
+        return 0;
+    }
+    return (uint16_t)(gsp_mmio_rd32(base + idx * 4u) & 0xffffu);
+}
+
+static int patch_fwsec_signature(unsigned char *ucode, unsigned ulen,
+                                 const struct fwsec_ucode_info *info)
+{
+    uint16_t fuse_data;
+    unsigned fuse_ver;
+    uint16_t mask;
+    unsigned sig_idx;
+    unsigned patch_off;
+    unsigned sig_off;
+
+    if (!info->signature_count) {
+        return 0;
+    }
+
+    fuse_data = read_fuse_ucode_version(info->engine_id_mask, info->ucode_id);
+    fuse_ver = fuse_leading_bit(fuse_data);
+    mask = (uint16_t)(1u << fuse_ver);
+
+    lx_printk("nouveau-lx: FWSEC fuse data=0x%x ver=%u sig_versions=0x%x\n",
+              fuse_data, fuse_ver, info->signature_versions);
+
+    if (!(info->signature_versions & mask)) {
+        lx_printk("nouveau-lx: FWSEC sin firma para fuse ver %u\n", fuse_ver);
+        return -1;
+    }
+
+    sig_idx = popcount16((uint16_t)(info->signature_versions & (mask - 1u)));
+    if (sig_idx >= info->signature_count) {
+        return -1;
+    }
+
+    patch_off = info->imem_load_size + info->pkc_data_offset;
+    sig_off = info->sig_rom_off + sig_idx * BCRT30_RSA3K_SIG_SIZE;
+
+    if (patch_off + BCRT30_RSA3K_SIG_SIZE > ulen) {
+        return -1;
+    }
+
+    if (rom_copy(sig_off, ucode + patch_off, BCRT30_RSA3K_SIG_SIZE) != 0) {
+        return -1;
+    }
+
+    lx_printk("nouveau-lx: FWSEC firma idx=%u → pkc+0x%x\n", sig_idx,
+              info->pkc_data_offset);
+    return 0;
+}
+
 static int patch_fwsec_frts(unsigned char *ucode, unsigned ulen,
-                            const struct falcon_ucode_desc_v2 *desc,
+                            const struct fwsec_ucode_info *info,
                             uint64_t frts_addr, uint64_t frts_size)
 {
     unsigned hdr_off;
     struct falcon_appif_hdr_v1 hdr;
     unsigned i;
 
-    if (desc->imem_load_size + desc->interface_offset + sizeof(hdr) > ulen) {
+    if (info->imem_load_size + info->interface_offset + sizeof(hdr) > ulen) {
         return -1;
     }
-    hdr_off = desc->imem_load_size + desc->interface_offset;
+    hdr_off = info->imem_load_size + info->interface_offset;
     memcpy(&hdr, ucode + hdr_off, sizeof(hdr));
     if (hdr.version != 1u) {
         return -1;
@@ -212,16 +741,18 @@ static int patch_fwsec_frts(unsigned char *ucode, unsigned ulen,
             continue;
         }
 
-        if (desc->imem_load_size + app.dmem_base + sizeof(*map) > ulen) {
+        if (info->imem_load_size + app.dmem_base + sizeof(*map) > ulen) {
             return -1;
         }
-        map = (struct falcon_appif_dmemmapper_v3 *)(ucode + desc->imem_load_size + app.dmem_base);
+        map = (struct falcon_appif_dmemmapper_v3 *)(ucode + info->imem_load_size +
+                                                    app.dmem_base);
         map->init_cmd = NVFW_FALCON_APPIF_DMEMMAPPER_CMD_FRTS;
 
-        if (desc->imem_load_size + map->cmd_in_buffer_offset + sizeof(*cmd) > ulen) {
+        if (info->imem_load_size + map->cmd_in_buffer_offset + sizeof(*cmd) > ulen) {
             return -1;
         }
-        cmd = (struct frts_cmd *)(ucode + desc->imem_load_size + map->cmd_in_buffer_offset);
+        cmd = (struct frts_cmd *)(ucode + info->imem_load_size +
+                                  map->cmd_in_buffer_offset);
         cmd->read_vbios.ver = 1;
         cmd->read_vbios.hdr = (uint32_t)sizeof(cmd->read_vbios);
         cmd->read_vbios.addr = 0;
@@ -237,14 +768,58 @@ static int patch_fwsec_frts(unsigned char *ucode, unsigned ulen,
     return -1;
 }
 
+int gsp_fwsec_probe(uint64_t frts_addr, uint64_t frts_size)
+{
+    struct fwsec_ucode_info info;
+    unsigned char *ucode;
+    struct gsp_dma_buf dma;
+
+    (void)frts_addr;
+    (void)frts_size;
+
+    memset(&info, 0, sizeof(info));
+    if (vbios_locate_fwsec(&info) != 0) {
+        return -1;
+    }
+
+    ucode = lx_kmalloc(info.ucode_len, GFP_KERNEL);
+    if (!ucode) {
+        return -1;
+    }
+    if (rom_copy(info.ucode_rom_off, ucode, info.ucode_len) != 0) {
+        lx_kfree(ucode);
+        return -1;
+    }
+    if (patch_fwsec_frts(ucode, info.ucode_len, &info, frts_addr, frts_size) != 0) {
+        lx_printk("nouveau-lx: FWSEC-FRTS parche DMEMMAPPER falló\n");
+        lx_kfree(ucode);
+        return -1;
+    }
+    if (patch_fwsec_signature(ucode, info.ucode_len, &info) != 0) {
+        lx_printk("nouveau-lx: FWSEC-FRTS parche firma falló\n");
+        lx_kfree(ucode);
+        return -1;
+    }
+
+    if (gsp_dma_alloc_copy(&dma, ucode, info.ucode_len, "fwsec-frts") != 0) {
+        lx_kfree(ucode);
+        return -1;
+    }
+    lx_kfree(ucode);
+    gsp_dma_free(&dma);
+    lx_printk("nouveau-lx: FWSEC probe OK (imem=%u dmem=%u)\n",
+              info.imem_load_size, info.dmem_load_size);
+    return 0;
+}
+
 int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
 {
-    unsigned data_off, data_len;
-    struct falcon_ucode_desc_v2 desc;
+    struct fwsec_ucode_info info;
     unsigned char *ucode;
-    unsigned ulen;
     struct gsp_dma_buf dma;
-    uint32_t err;
+    struct falcon_lx_raw raw;
+    uint32_t scratch;
+    uint64_t wpr2_lo;
 
     if (!gsp_mmio_alive()) {
         return -1;
@@ -257,61 +832,81 @@ int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
         return 0;
     }
 
-    if (vbios_find_bit_token('p', &data_off, &data_len) != 0 || data_len < sizeof(desc)) {
-        lx_printk("nouveau-lx: VBIOS sin partición FWSEC (BIT 'p')\n");
-        return -1;
-    }
-    vbios_copy(data_off, &desc, sizeof(desc));
-    if (desc.version != 2u && desc.version != 3u) {
-        lx_printk("nouveau-lx: FWSEC desc v%u no soportada\n", desc.version);
+    memset(&info, 0, sizeof(info));
+    if (vbios_locate_fwsec(&info) != 0) {
+        lx_printk("nouveau-lx: Ampere FWSEC-FRTS: VBIOS incompleta\n");
         return -1;
     }
 
-    ulen = desc.imem_load_size + desc.dmem_load_size;
-    if (!ulen || data_off + sizeof(desc) + ulen > NV_VBIOS_SIZE) {
-        lx_printk("nouveau-lx: FWSEC ucode fuera de VBIOS\n");
-        return -1;
-    }
-
-    ucode = lx_kmalloc(ulen, GFP_KERNEL);
+    ucode = lx_kmalloc(info.ucode_len, GFP_KERNEL);
     if (!ucode) {
         return -1;
     }
-    vbios_copy(data_off + sizeof(desc), ucode, ulen);
-    if (patch_fwsec_frts(ucode, ulen, &desc, frts_addr, frts_size) != 0) {
+    if (rom_copy(info.ucode_rom_off, ucode, info.ucode_len) != 0) {
+        lx_kfree(ucode);
+        return -1;
+    }
+    if (patch_fwsec_frts(ucode, info.ucode_len, &info, frts_addr, frts_size) != 0) {
         lx_printk("nouveau-lx: FWSEC-FRTS parche DMEMMAPPER falló\n");
         lx_kfree(ucode);
         return -1;
     }
+    if (patch_fwsec_signature(ucode, info.ucode_len, &info) != 0) {
+        lx_printk("nouveau-lx: FWSEC-FRTS parche firma falló\n");
+        lx_kfree(ucode);
+        return -1;
+    }
 
-    if (gsp_dma_alloc_copy(&dma, ucode, ulen, "fwsec-frts") != 0) {
+    if (gsp_dma_alloc_copy(&dma, ucode, info.ucode_len, "fwsec-frts") != 0) {
         lx_kfree(ucode);
         return -1;
     }
     lx_kfree(ucode);
     ucode = dma.va;
-    ulen = (unsigned)dma.size;
 
     lx_printk("nouveau-lx: FWSEC-FRTS frts=0x%llx size=0x%llx imem=%u dmem=%u\n",
               (unsigned long long)frts_addr, (unsigned long long)frts_size,
-              desc.imem_load_size, desc.dmem_load_size);
+              info.imem_load_size, info.dmem_load_size);
 
-    if (falcon_lx_vbios_boot(LX_FLCN_GSP_BASE, ucode, ulen,
-                             desc.imem_offset, desc.imem_load_size,
-                             desc.dmem_offset, desc.dmem_load_size,
-                             desc.imem_offset, (unsigned)dma.phys, "fwsec-frts") != 0) {
+    memset(&raw, 0, sizeof(raw));
+    raw.img = ucode;
+    raw.dma_handle = (unsigned)dma.phys;
+    raw.imem_src = info.imem_src;
+    raw.imem_dst = info.imem_phys_base;
+    raw.imem_len = info.imem_load_size;
+    raw.dmem_src = info.dmem_src;
+    raw.dmem_dst = info.dmem_phys_base;
+    raw.dmem_len = info.dmem_load_size;
+    raw.pkc_data_offset = info.pkc_data_offset;
+    raw.engine_id_mask = info.engine_id_mask;
+    raw.ucode_id = info.ucode_id;
+    raw.boot_addr = 0;
+    raw.mbox0 = 0;
+    raw.mbox1 = 0;
+    raw.check_mbox0 = 1;
+    raw.timeout_ms = 4000u;
+    raw.name = "fwsec-frts";
+
+#ifndef SOSO_FWSEC_HOSTCHECK
+    if (falcon_lx_raw_boot(LX_FLCN_GSP_BASE, &raw) != 0) {
         gsp_dma_free(&dma);
         return -1;
     }
+#endif
     gsp_dma_free(&dma);
 
-    err = gsp_mmio_rd32(NV_PBUS_SW_SCRATCH_0E) & 0xffu;
-    if (err) {
-        lx_printk("nouveau-lx: FWSEC-FRTS error scratch=0x%02x\n", err);
+    scratch = gsp_mmio_rd32(NV_PBUS_SW_SCRATCH_0E);
+    if (scratch & 0xffff0000u) {
+        lx_printk("nouveau-lx: FWSEC-FRTS error scratch=0x%08x\n", scratch);
         return -1;
     }
-    if (!gsp_fwsec_wpr2_present(NULL, NULL)) {
+    if (!gsp_fwsec_wpr2_present(&wpr2_lo, NULL)) {
         lx_printk("nouveau-lx: FWSEC-FRTS terminó pero WPR2 sigue vacío\n");
+        return -1;
+    }
+    if (wpr2_lo != frts_addr) {
+        lx_printk("nouveau-lx: FWSEC WPR2 @0x%llx esperaba 0x%llx\n",
+                  (unsigned long long)wpr2_lo, (unsigned long long)frts_addr);
         return -1;
     }
     lx_printk("nouveau-lx: FWSEC-FRTS OK — WPR2 0x%llx-0x%llx\n",

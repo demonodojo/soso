@@ -494,8 +494,8 @@ Archivo: soso-live.img ({:.1} GiB)
 
 4) Instalar en disco interno **desde soso live** (sin pasar por Linux):
 
-   soso-install list          # mira qué hay en cada disco antes de borrar
-   soso-install nvme1 --yes
+   soso-install                 # enseña discos, uso, y pide en cuál instalar
+   soso-install nvme1 --yes     # o elige por nombre / id
 
    Reinicia con el USB puesto: el shim registra la entrada UEFI «soso».
    Después quita el USB y elige «soso» en el menú de arranque de la placa.

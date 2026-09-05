@@ -201,11 +201,7 @@ fn open_redir(spec: &RedirSpec) -> Result<u64, i64> {
         RedirSpec::Tty => Ok(abi::FD_INHERIT_TTY),
         RedirSpec::Path(path, flags) => {
             let fd = sys::open(path, *flags);
-            if fd < 0 {
-                Err(fd)
-            } else {
-                Ok(fd as u64)
-            }
+            if fd < 0 { Err(fd) } else { Ok(fd as u64) }
         }
     }
 }
@@ -334,7 +330,11 @@ fn ejecutar_wifi(args: &str) {
             println!("wifi: no hay adaptador");
             return;
         }
-        let phase_n = st.phase.iter().position(|&b| b == 0).unwrap_or(st.phase.len());
+        let phase_n = st
+            .phase
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(st.phase.len());
         let phase = core::str::from_utf8(&st.phase[..phase_n]).unwrap_or("?");
         println!(
             "wifi: alive={} connected={} phase={}",
@@ -379,6 +379,8 @@ fn ayuda() {
     println!("          voz ask         — prefija «ask » al dictado");
     println!("          F4              — push-to-talk en la línea");
     println!("comandos: ELF de /bin o ruta absoluta");
+    println!("install:  soso-install  — clonar live a un NVMe (elige disco)");
+    println!("          soso-install list | nvme1 --yes | status");
     println!("pipes:    cmd1 | cmd2 | cmd3");
     println!("redirect: cmd > fichero, cmd >> fichero, cmd < fichero");
     println!("ojo:      ask no admite pipes ni redirecciones, justamente para");
@@ -444,11 +446,7 @@ fn spawn_askd() -> Result<u64, i64> {
 fn connect_askd() -> Result<u64, i64> {
     let addr = parse_sock_addr(ASK_ADDR).ok_or(-abi::EINVAL)?;
     let fd = sys::tcp_connect(&addr, 5_000);
-    if fd < 0 {
-        Err(fd)
-    } else {
-        Ok(fd as u64)
-    }
+    if fd < 0 { Err(fd) } else { Ok(fd as u64) }
 }
 
 fn copiar_respuesta_ask(fd: u64) {

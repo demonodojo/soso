@@ -595,8 +595,9 @@ de rango. `ask` lo dice en vez de fallar sin explicación; usa `tiny` (vocabular
 ### soso-install — instalar soso en un disco
 
 ```sh
-soso-install list          # discos y particiones de cada uno
-soso-install 3 --yes       # instalar en el disco con ese id
+soso-install               # lista discos, su uso, y pide en cuál instalar
+soso-install list          # lo mismo, sin preguntar
+soso-install nvme1 --yes   # instalar en ese disco (id o nombre)
 soso-install status        # estado de la entrada de arranque UEFI
 ```
 
@@ -1405,26 +1406,30 @@ Linux no se toca: ni su tabla de particiones, ni su ESP, ni GRUB.
 ### Opción A — desde soso live, sin Linux (recomendada)
 
 ```sh
-# 1. Arranca desde el pendrive live y mira qué hay en cada disco:
-soso-install list
-# id  nombre   sectores      tamano  contenido
-#  0  usb          843776     412 MiB  soso ro boot
+# 1. Arranca desde el pendrive live. Sin argumentos, el instalador lista
+#    los discos, en qué se están usando, y te pide en cuál instalar:
+soso-install
+# id  nombre      tamaño  uso
+#  0  usb         32.0 GiB  pendrive live (origen)  [no se toca]
 #       p1  ESP             26 MiB  boot
 #       p2  linux          128 MiB
-#       p3  linux          257 MiB
-#  2  nvme0    1953525168  953869 MiB  OTRO
+#       p3  linux         8192 MiB
+#  2  nvme0      931 GiB    Linux (ESP, linux, swap)  [ocupado — --force para borrar]
 #       p1  ESP            512 MiB
 #       p2  linux         900000 MiB
 #       p3  swap           16384 MiB
-#  3  nvme1       8388608    4096 MiB  vacio
+#  3  nvme1        4.0 GiB  vacío  [se puede instalar]
+# Elige en qué disco instalar soso.
+# disco destino (id o nombre, q cancela): nvme1
 
-# 2. Instala en el disco vacío (aquí el id 3):
-soso-install 3 --yes
+# También puedes pasar el disco a mano:
+soso-install nvme1 --yes
+# o el id: soso-install 3 --yes
 
-# 3. Reinicia SIN quitar el pendrive: el shim UEFI registra la entrada
+# 2. Reinicia SIN quitar el pendrive: el shim UEFI registra la entrada
 #    de arranque «soso» en la NVRAM de la placa.
 
-# 4. Apaga, quita el USB y arranca: «soso» está en el menú de la placa (F12),
+# 3. Apaga, quita el USB y arranca: «soso» está en el menú de la placa (F12),
 #    y puedes dejarlo como predeterminado en la BIOS.
 ```
 
@@ -1432,9 +1437,9 @@ Qué hace `soso-install`:
 
 1. **Comprueba el destino.** Rechaza el disco de arranque, cualquier disco que
    no sea NVMe y todo disco con particiones de otro sistema (swap, LVM,
-   Windows, raíces Linux con GUID propio); las lista antes de negarse. Para
-   sobrescribirlo de todos modos hace falta `--force` **y** teclear el nombre
-   del disco.
+   Windows, raíces Linux con GUID propio); las lista y dice para qué se usa
+   cada uno antes de negarse. Para sobrescribirlo de todos modos hace falta
+   `--force` **y** teclear el nombre del disco.
 2. **Clona** el pendrive entero sobre el destino.
 3. **Repara la GPT** del destino: el clon describe el pendrive, así que se
    recoloca la cabecera de respaldo al final del disco, la partición de modelos
@@ -1554,7 +1559,7 @@ wifi scan
 wifi connect MiRed MiClaveWPA2
 
 # Instalación / actualización (live o NVMe instalado)
-soso-install list
+soso-install                  # elige disco; list para solo mirar
 soso-update comprobar
 soso-update aplicar           # reiniciar después
 

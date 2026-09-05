@@ -14,7 +14,8 @@
 //!
 //! El disco de Linux no se toca en ningún momento: el kernel rechaza escribir
 //! en el disco de arranque y solo admite NVMe como destino, y aquí además se
-//! rechaza cualquier disco con particiones de otro sistema.
+//! rechaza cualquier disco con particiones de otro sistema. Sin destino,
+//! lista los discos con su uso y pide al usuario cuál usar.
 
 #![no_std]
 #![no_main]
@@ -29,6 +30,7 @@ use libsoso::abi::{
     DISK_FLAG_BOOT, DISK_FLAG_EMPTY, DISK_FLAG_SOSO, DISK_KIND_NVME, DISK_KIND_USB, DiskInfo,
     O_RDONLY,
 };
+use libsoso::linea::Lector;
 use libsoso::{print, println, sys};
 
 libsoso::entry!(main);
@@ -40,41 +42,67 @@ const SECTOR: usize = 512;
 
 fn main(args: &str) -> u8 {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() || parts[0] == "help" || parts[0] == "--help" {
+    if !parts.is_empty() && (parts[0] == "help" || parts[0] == "--help") {
         help();
         return 0;
     }
-    if parts[0] == "list" {
+    if parts.first() == Some(&"list") {
         return cmd_list();
     }
-    if parts[0] == "status" {
+    if parts.first() == Some(&"status") {
         return cmd_status();
     }
 
     let mut yes = false;
     let mut force = false;
-    let mut target_id: Option<u32> = None;
+    let mut target: Option<String> = None;
     for p in &parts {
         if *p == "--yes" || *p == "-y" {
             yes = true;
         } else if *p == "--force" {
             force = true;
-        } else if let Ok(n) = p.parse::<u32>() {
-            target_id = Some(n);
-        } else if let Some(name) = p.strip_prefix("nvme") {
-            if let Ok(slot) = name.parse::<u32>() {
-                target_id = Some(if slot == 0 { 2 } else { 3 });
-            }
+        } else if p.starts_with('-') {
+            println!("soso-install: argumento desconocido {p}");
+            return 2;
+        } else if target.is_none() {
+            target = Some((*p).into());
         } else {
             println!("soso-install: argumento desconocido {p}");
             return 2;
         }
     }
 
-    let Some(dst) = target_id else {
-        println!("soso-install: falta disco destino (id o nvmeN)");
-        help();
-        return 2;
+    let disks = match cargar_discos() {
+        Ok(d) => d,
+        Err(c) => return c,
+    };
+
+    let dst = match target {
+        Some(ref token) => match resolver_disco(token, &disks) {
+            Some(id) => id,
+            None => {
+                println!("soso-install: disco '{token}' no encontrado");
+                imprimir_discos(&disks);
+                return 1;
+            }
+        },
+        None => {
+            imprimir_discos(&disks);
+            if disks.is_empty() {
+                println!("soso-install: no hay discos");
+                return 1;
+            }
+            if yes {
+                println!("soso-install: indica el disco destino (id o nombre)");
+                println!("  ejemplo: soso-install nvme1 --yes");
+                return 2;
+            }
+            println!("Elige en qué disco instalar soso.");
+            match pedir_destino(&disks) {
+                Some(id) => id,
+                None => return 1,
+            }
+        }
     };
 
     cmd_install(dst, yes, force)
@@ -85,11 +113,16 @@ fn help() {
         "soso-install — instalar soso en un disco NVMe (desde live USB)\n\
          \n\
          Uso:\n\
-           soso-install list           # discos y qué hay en cada uno\n\
+           soso-install                # lista discos y pide cuál\n\
+           soso-install list           # discos, uso y particiones (sin instalar)\n\
            soso-install status         # estado de la entrada de arranque UEFI\n\
-           soso-install <id> [--yes]\n\
+           soso-install <id|nombre> [--yes]\n\
            soso-install nvme1 [--yes]\n\
-           soso-install <id> --force   # sobrescribir disco con otro SO\n\
+           soso-install <id|nombre> --force   # sobrescribir disco con otro SO\n\
+         \n\
+         El listado enseña para qué se usa cada disco (live, soso, Linux,\n\
+         Windows, vacío) y si se puede elegir como destino. Nunca se toca el\n\
+         pendrive de arranque; el destino tiene que ser NVMe.\n\
          \n\
          Al terminar, reinicia con el USB puesto: el shim UEFI registra la\n\
          entrada de arranque «soso». Después ya puedes quitar el USB.\n\
@@ -101,32 +134,42 @@ fn help() {
 
 // ------------------------------------------------------------------ listado
 
-fn cmd_list() -> u8 {
+fn cargar_discos() -> Result<Vec<DiskInfo>, u8> {
     let mut disks = [DiskInfo::default(); 8];
     let n = sys::disk_list(&mut disks);
     if n < 0 {
         println!("soso-install: disk_list errno {}", -n);
-        return 1;
+        return Err(1);
     }
-    println!("id  nombre   sectores      tamano  contenido");
-    for d in &disks[..n as usize] {
+    Ok(disks[..n as usize].to_vec())
+}
+
+fn cmd_list() -> u8 {
+    match cargar_discos() {
+        Ok(disks) => {
+            imprimir_discos(&disks);
+            println!("para instalar: soso-install  o  soso-install <id|nombre>");
+            0
+        }
+        Err(c) => c,
+    }
+}
+
+fn imprimir_discos(disks: &[DiskInfo]) {
+    println!("id  nombre      tamaño  uso");
+    if disks.is_empty() {
+        println!("  (ningún disco)");
+        return;
+    }
+    for d in disks {
         let name = disk_name(d);
-        let boot = if d.flags & DISK_FLAG_BOOT != 0 {
-            " boot"
-        } else {
-            ""
-        };
-        let ro = if d.kind == DISK_KIND_USB { " ro" } else { "" };
-        let mib = d.sectors / 2048;
         println!(
-            "{:2}  {:8}  {:10}  {:>6} MiB  {}{}{}",
+            "{:2}  {:8}  {:>10}  {}  [{}]",
             d.id,
             name,
-            d.sectors,
-            mib,
-            content_label(d.flags),
-            ro,
-            boot
+            tamano_humano(d.sectors),
+            uso_disco(d),
+            nota_destino(d)
         );
         // Enseñar las particiones es la mitad del trabajo del instalador: es lo
         // que deja ver que un disco lleva un sistema ajeno antes de borrarlo.
@@ -134,7 +177,68 @@ fn cmd_list() -> u8 {
             println!("      {line}");
         }
     }
-    0
+    if !disks
+        .iter()
+        .any(|d| d.kind == DISK_KIND_NVME && d.flags & DISK_FLAG_BOOT == 0)
+    {
+        println!("no hay ningún NVMe donde instalar (soso solo escribe en NVMe)");
+    }
+}
+
+fn leer_linea_tty() -> Option<String> {
+    Lector::new().siguiente()
+}
+
+fn pedir_destino(disks: &[DiskInfo]) -> Option<u32> {
+    print!("disco destino (id o nombre, q cancela): ");
+    let typed: String = match leer_linea_tty() {
+        Some(s) => s.trim().into(),
+        None => {
+            println!("cancelado");
+            return None;
+        }
+    };
+    if typed.is_empty() || typed == "q" || typed == "Q" {
+        println!("cancelado");
+        return None;
+    }
+    match resolver_disco(&typed, disks) {
+        Some(id) => Some(id),
+        None => {
+            println!("soso-install: disco '{typed}' no encontrado");
+            None
+        }
+    }
+}
+
+fn resolver_disco(token: &str, disks: &[DiskInfo]) -> Option<u32> {
+    if let Ok(id) = token.parse::<u32>() {
+        return disks.iter().find(|d| d.id == id).map(|d| d.id);
+    }
+    let lower = ascii_lower(token);
+    disks
+        .iter()
+        .find(|d| ascii_lower(&disk_name(d)) == lower)
+        .map(|d| d.id)
+}
+
+fn ascii_lower(s: &str) -> String {
+    s.bytes().map(|b| b.to_ascii_lowercase() as char).collect()
+}
+
+fn tamano_humano(sectors: u64) -> String {
+    let mib = sectors / 2048;
+    if mib >= 1024 {
+        let gib = mib / 1024;
+        let dec = (mib % 1024) * 10 / 1024;
+        if dec == 0 {
+            alloc::format!("{gib} GiB")
+        } else {
+            alloc::format!("{gib}.{dec} GiB")
+        }
+    } else {
+        alloc::format!("{mib} MiB")
+    }
 }
 
 /// Una línea por partición: `p2  linux     64 MiB  sosofs`.
@@ -172,14 +276,91 @@ fn disk_name(d: &DiskInfo) -> String {
     String::from_utf8_lossy(&d.name[..end]).into_owned()
 }
 
-fn content_label(flags: u32) -> &'static str {
-    if flags & DISK_FLAG_SOSO != 0 {
-        "soso"
-    } else if flags & DISK_FLAG_EMPTY != 0 {
-        "vacio"
-    } else {
-        "OTRO"
+/// Para qué se está usando el disco, según GPT y flags del kernel.
+fn uso_disco(d: &DiskInfo) -> String {
+    if d.flags & DISK_FLAG_BOOT != 0 {
+        return "pendrive live (origen)".into();
     }
+    if d.kind == DISK_KIND_USB {
+        return "USB (solo lectura)".into();
+    }
+    if d.flags & DISK_FLAG_EMPTY != 0 {
+        return "vacío".into();
+    }
+    if d.flags & DISK_FLAG_SOSO != 0 {
+        return "soso instalado".into();
+    }
+    let tipos = tipos_particion(d);
+    if tipos.is_empty() {
+        return "sin GPT reconocible".into();
+    }
+    let win = tipos
+        .iter()
+        .any(|t| t.starts_with("windows") || *t == "ms-reserved");
+    let linux = tipos.iter().any(|t| {
+        matches!(
+            *t,
+            "linux" | "linux-root" | "linux-home" | "swap" | "lvm" | "raid"
+        )
+    });
+    let lista = join_tipos(&tipos);
+    if win && linux {
+        alloc::format!("Linux y Windows ({lista})")
+    } else if win {
+        alloc::format!("Windows ({lista})")
+    } else if linux {
+        alloc::format!("Linux ({lista})")
+    } else {
+        alloc::format!("GPT ({lista})")
+    }
+}
+
+fn tipos_particion(d: &DiskInfo) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let Some((hdr, entries)) = read_gpt(d.id) else {
+        return out;
+    };
+    for i in 0..hdr.num_entries as usize {
+        let Some(e) = gptdisk::entry(&entries, &hdr, i) else {
+            break;
+        };
+        if !gptdisk::entry_used(e) {
+            continue;
+        }
+        let label = gptdisk::type_label(&gptdisk::entry_type(e));
+        if !out.iter().any(|x| *x == label) {
+            out.push(label);
+        }
+    }
+    out
+}
+
+fn join_tipos(tipos: &[&str]) -> String {
+    let mut s = String::new();
+    for (i, t) in tipos.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(t);
+    }
+    s
+}
+
+fn nota_destino(d: &DiskInfo) -> &'static str {
+    if d.flags & DISK_FLAG_BOOT != 0 {
+        return "no se toca";
+    }
+    if d.kind != DISK_KIND_NVME {
+        return "no se puede instalar (solo NVMe)";
+    }
+    let ajenas = foreign_partitions(d);
+    if !disk_safe(d) || !ajenas.is_empty() {
+        return "ocupado — --force para borrar";
+    }
+    if d.flags & DISK_FLAG_SOSO != 0 {
+        return "reinstalar";
+    }
+    "se puede instalar"
 }
 
 fn disk_safe(d: &DiskInfo) -> bool {
@@ -288,7 +469,7 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
     };
     let Some(dst) = list.iter().find(|d| d.id == dst_id) else {
         println!("soso-install: disco destino id {dst_id} no encontrado");
-        let _ = cmd_list();
+        imprimir_discos(list);
         return 1;
     };
     if dst.kind != DISK_KIND_NVME {
@@ -316,18 +497,18 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
             println!("soso-install: destino {name} tiene contenido ajeno a soso");
         }
         if !force {
-            println!("  ejecuta soso-install list para ver qué hay en cada disco");
+            println!("  uso: {}", uso_disco(dst));
             println!("  para sobrescribirlo de todos modos: soso-install {name} --force");
             return 1;
         }
         print!("ATENCIÓN: sobrescribir {name}. Escribe \"{name}\" para confirmar: ");
-        let mut line = [0u8; 32];
-        let nr = read_line(&mut line);
-        if nr <= 0 {
-            println!("cancelado");
-            return 1;
-        }
-        let typed = trim_line(&line, nr as usize);
+        let typed: String = match leer_linea_tty() {
+            Some(s) => s.trim().into(),
+            None => {
+                println!("cancelado");
+                return 1;
+            }
+        };
         if typed != name {
             println!("cancelado (esperaba \"{name}\", recibí \"{typed}\")");
             return 1;
@@ -358,16 +539,18 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         dst.id,
         bytes / (1024 * 1024)
     );
+    println!("  destino: {} [{}]", uso_disco(dst), nota_destino(dst));
 
     if !yes {
         print!("¿Borrar destino e instalar? [y/N] ");
-        let mut line = [0u8; 16];
-        let nr = sys::read(0, &mut line);
-        if nr <= 0 {
-            println!("cancelado");
-            return 1;
-        }
-        let ans = line[0] as char;
+        let typed: String = match leer_linea_tty() {
+            Some(s) => s.trim().into(),
+            None => {
+                println!("cancelado");
+                return 1;
+            }
+        };
+        let ans = typed.chars().next().unwrap_or('\0');
         if ans != 'y' && ans != 'Y' {
             println!("cancelado");
             return 1;
@@ -381,8 +564,7 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
 
     // Semilla de GUID: no hace falta calidad criptográfica, solo que el destino
     // no acabe con los mismos identificadores que el pendrive del que salió.
-    let seed = (sys::uptime_ms() as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    let seed = (sys::uptime_ms() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ dst.sectors
         ^ (dst.id as u64) << 32;
     let esp = match fix_gpt(dst.id, dst.sectors, seed) {
@@ -497,32 +679,6 @@ fn cmd_status() -> u8 {
 }
 
 // ------------------------------------------------------------------ varios
-
-fn read_line(buf: &mut [u8]) -> i64 {
-    let mut n = 0usize;
-    loop {
-        if n >= buf.len() {
-            break;
-        }
-        let mut byte = [0u8; 1];
-        let nr = sys::read(0, &mut byte);
-        if nr <= 0 {
-            return if n == 0 { nr } else { n as i64 };
-        }
-        if byte[0] == b'\n' || byte[0] == b'\r' {
-            break;
-        }
-        buf[n] = byte[0];
-        n += 1;
-    }
-    n as i64
-}
-
-fn trim_line(buf: &[u8], len: usize) -> String {
-    let end = len.min(buf.len());
-    let s = core::str::from_utf8(&buf[..end]).unwrap_or("");
-    s.trim().into()
-}
 
 fn read_live_bytes() -> Option<u64> {
     let fd = sys::open("/etc/soso-live.bytes", O_RDONLY);

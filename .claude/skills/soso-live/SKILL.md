@@ -69,7 +69,8 @@ vacío → kernel (checkpoints `boot:` en pantalla).
 
 Userspace: `user/coreutils/src/bin/soso-install.rs`.
 
-1. `list` — `SYS_DISK_LIST`; clasifica particiones (`raw_disk`).
+1. `list` (o sin argumentos) — `SYS_DISK_LIST`; clasifica uso (live, soso,
+   Linux, Windows, vacío) y particiones. Sin destino, pide al usuario cuál.
 2. Destino **solo NVMe**, nunca el disco de arranque; `--force` si hay otro SO.
 3. Clona el live; `gptdisk::relayout` (respaldo GPT al final, p3 estirada,
    **GUID nuevos** — si no, el firmware no distingue USB y destino).

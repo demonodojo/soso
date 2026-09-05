@@ -110,12 +110,14 @@ fn print_flash_summary(usb: &Path, out_dir: &Path) {
     println!("\n✅ USB live listo en {}", usb.display());
     println!(
         "\n1) Probar soso: UEFI → arrancar desde USB (F12).\n\
-         2) Instalar en disco interno (Linux en marcha, USB conectado):\n\
+         2) Instalar en un NVMe dedicado (desde el propio soso live, sin Linux):\n\
+            soso-install\n\
+            soso-install nvme1 --yes\n\
+            reinicia con el USB puesto → quita el USB → «soso» en el menú UEFI\n\
+         \n\
+         Plan B (desde Linux, USB conectado):\n\
             lsblk\n\
             sudo {}/install-soso.sh /dev/nvme1n1 --yes\n\
-         \n\
-         Linux monta sola p4 SOSOINSTALL (FAT tras el rootfs, no la ESP).\n\
-         Si no aparece: sudo mount /dev/sdX4 /mnt && /mnt/install-soso.sh …\n\
          \n\
          Artefactos también en {}",
         out_dir.display(),

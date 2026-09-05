@@ -109,7 +109,7 @@ Skills de dominio: **`soso-dev`** (build/test), **`soso-gpu`**, **`soso-wifi`**,
 | `/bin/soso-llm` | Inferencia LLM sobre modelos en `/models/`; subcomando `ask` (texto crudo, silencioso, REPL) |
 | `/bin/soso-hf` | Descarga GGUF desde Hugging Face Hub → import atómico a `/models/` (`pull`/`search`/`list`) |
 | `/bin/ask-modelo` | Fija el modelo de `ask` en `/etc/llm.conf` |
-| `/bin/soso-install` | Instalador nativo desde el live: guardas por tipo de partición, clon, `gptdisk::relayout` + GUID nuevos, y petición de entrada UEFI |
+| `/bin/soso-install` | Instalador nativo desde el live: lista discos y uso, elige destino, guardas por tipo de partición, clon, `gptdisk::relayout` + GUID nuevos, y petición de entrada UEFI |
 | `/bin/soso-update` | Actualiza rootfs y kernel desde GitHub Releases (`comprobar`/`aplicar`/`revertir`); buzón `SOSOUPD.TXT` + hueco `SOSOKRN.BIN` en ESP |
 | `/bin/soso-web` | Navegador mínimo: HTTPS + HTML→texto (modo lectura) o framebuffer (modo `--grafico`) |
 | `/bin/{ls,cat,echo,mkdir,rm,hexdump,halt}` | Coreutils |

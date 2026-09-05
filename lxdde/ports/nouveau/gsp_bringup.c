@@ -359,6 +359,11 @@ static int run_ampere_booter(void)
         return -1;
     }
 
+    if (falcon_lx_reset(LX_FLCN_GSP_BASE) != 0) {
+        lx_printk("nouveau-lx: Ampere reset falcon GSP falló\n");
+        return -1;
+    }
+
     gsp_mmio_wr32(NV_PGSP_FALCON_MBOX0, (uint32_t)g_libos.libos.phys);
     gsp_mmio_wr32(NV_PGSP_FALCON_MBOX1, (uint32_t)(g_libos.libos.phys >> 32));
 

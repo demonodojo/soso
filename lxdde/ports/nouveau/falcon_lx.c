@@ -61,7 +61,7 @@ static int flcn_select(unsigned base)
 }
 
 /* Reset del falcon antes de cada carga (`nvkm_falcon_reset` / ga102 HAL). */
-static int falcon_lx_reset(unsigned base)
+int falcon_lx_reset(unsigned base)
 {
     unsigned t;
     unsigned hwcfg2;
@@ -287,48 +287,49 @@ int falcon_lx_hsfw_boot(unsigned falcon_base, const struct acr_fw_blob *blob, co
     return falcon_lx_hsfw_boot_mbox(falcon_base, blob, name, 0xcafebeefu, 0u, 1);
 }
 
-int falcon_lx_vbios_boot(unsigned falcon_base, const unsigned char *ucode, unsigned ulen,
-                         unsigned imem_off, unsigned imem_sz, unsigned dmem_off,
-                         unsigned dmem_sz, unsigned boot_addr, unsigned dma_handle,
-                         const char *name)
+int falcon_lx_raw_boot(unsigned falcon_base, const struct falcon_lx_raw *raw)
 {
     struct flcn_fw_ctx fw;
+    const char *name;
 
-    if (!ucode || !imem_sz || !dmem_sz || imem_off + imem_sz > ulen ||
-        dmem_off + dmem_sz > ulen || !dma_handle) {
+    if (!raw || !raw->img || !raw->imem_len || !raw->dmem_len || !raw->dma_handle) {
         return -1;
     }
+    name = raw->name ? raw->name : "raw";
 
     memset(&fw, 0, sizeof(fw));
-    fw.img = ucode;
-    fw.imem_base_img = imem_off;
-    fw.imem_base = 0u;
-    fw.imem_size = imem_sz;
-    fw.dmem_base_img = dmem_off;
-    fw.dmem_base = 0u;
-    fw.dmem_size = dmem_sz;
-    fw.boot_addr = boot_addr ? boot_addr : imem_off;
-    fw.engine_id = 0u;
-    fw.ucode_id = 0u;
-    fw.dmem_sign = 0u;
-    fw.dma_handle = dma_handle;
+    fw.img = raw->img;
+    fw.dma_handle = raw->dma_handle;
+    fw.imem_base_img = raw->imem_src;
+    fw.imem_base = raw->imem_dst;
+    fw.imem_size = raw->imem_len;
+    fw.dmem_base_img = raw->dmem_src;
+    fw.dmem_base = raw->dmem_dst;
+    fw.dmem_size = raw->dmem_len;
+    fw.dmem_sign = raw->pkc_data_offset;
+    fw.engine_id = raw->engine_id_mask;
+    fw.ucode_id = raw->ucode_id;
+    fw.boot_addr = raw->boot_addr;
 
     if (falcon_lx_reset(falcon_base) != 0) {
         lx_printk("nouveau-lx: falcon %s reset falló\n", name);
         return -1;
     }
 
-    lx_printk("nouveau-lx: falcon %s vbios imem=%u dmem=%u boot=0x%x\n",
-              name, imem_sz, dmem_sz, fw.boot_addr);
+    lx_printk("nouveau-lx: falcon %s raw imem=%u dmem=%u engine=0x%x ucode=%u boot=0x%x\n",
+              name, fw.imem_size, fw.dmem_size, fw.engine_id, fw.ucode_id, fw.boot_addr);
 
     if (flcn_fw_load(falcon_base, &fw) != 0) {
-        lx_printk("nouveau-lx: falcon %s vbios DMA load falló\n", name);
+        lx_printk("nouveau-lx: falcon %s raw DMA load falló\n", name);
         return -1;
     }
 
-    if (flcn_fw_boot_ga102(falcon_base, &fw, 0u, 0u, 1, 0u, 4000u) != 0) {
-        lx_printk("nouveau-lx: falcon %s vbios boot falló\n", name);
+    if (flcn_fw_boot_ga102(falcon_base, &fw, raw->mbox0, raw->mbox1,
+                            raw->check_mbox0, 0u,
+                            raw->timeout_ms ? raw->timeout_ms : 4000u) != 0) {
+        lx_printk("nouveau-lx: falcon %s raw boot falló\n", name);
         return -1;
     }
+    lx_printk("nouveau-lx: falcon %s raw boot ok\n", name);
     return 0;
 }

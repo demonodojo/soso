@@ -325,7 +325,7 @@ comportamiento distinto (skill `soso-user-manual`).
 | L6-H: connection refused :11400 | Start cuda-proxy; llama-server must answer `/health` on :8080 |
 | L6-H: no tok/s from soso | Host is `10.0.2.2` from QEMU guest; model name must match loaded GGUF |
 | `soso-llm`: shapes del index no casan (`ffn_norm: falta`, etc.) | Modelo `.som` obsoleto: `cargo run -p convert-gguf -- --check <dir>`; `cargo xtask fetch-hf …` reconvierte si falla; borrar el dir y reconvertir desde caché HF |
-| `GSP=fallo` / `pool VRAM=no` en GA107 | Bring-up Ampere: FWSEC-FRTS + booter_load + `GSP_INIT_DONE`; ver **`soso-gpu`**. Reflashear o `soso-update aplicar --local` tras Ethernet vivo |
+| `GSP=fallo` / `pool VRAM=no` en GA107 | Bring-up Ampere: FWSEC-FRTS (VBIOS PROM 0x300000) + booter_load + `GSP_INIT_DONE`; `./scripts/l6-fwsec-hostcheck.sh` en host; ver **`soso-gpu`**. Reflashear o `soso-update aplicar --local` tras Ethernet vivo |
 | WiFi sin ALIVE / «ALIVE degradado» | Hostcheck `./scripts/l6-iwl-fw-hostcheck.sh`; VFIO exige `UCODE_ALIVE_NTFY` real — **`soso-wifi`** |
 | `SOSOUPD.TXT` / `SOSOKRN.BIN` duplicados en ESP | Pass 1 reserva huecos; pass 2 reutiliza la misma entrada FAT (no duplica). Regenerar con `cargo xtask package-usb-live` |
 | No se ve `SOSOLOG.TXT` en el USB | Está en la ESP (p1), que Linux no monta; `cargo xtask sosolog` |

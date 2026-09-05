@@ -9,7 +9,7 @@ con un segundo disco dedicado.
 |------------|--------|
 | Imagen live GPT (`soso-live.img`) | `cargo xtask package-usb-live` |
 | USB live + instalador (`install-soso.sh`) | `sudo cargo xtask flash-usb-live /dev/sdX --yes` |
-| Instalación desde soso live | `soso-install list` / `soso-install <id> --yes` |
+| Instalación desde soso live | `soso-install` (lista discos y pide cuál) / `soso-install <id|nombre> --yes` |
 | Reparticionado del destino | `crates/gptdisk` — respaldo al final, p3 llena el disco, GUID nuevos |
 | Entrada de arranque UEFI | La registra el shim en el arranque siguiente (`SOSOBOOT.TXT` → `Boot####`) |
 | GRUB tras install live | Opcional: `install-soso.sh --grub-only /dev/nvmeXn1` desde Linux |
@@ -27,8 +27,8 @@ de arranque propia. No se escribe un solo sector en el disco de Linux.
 
 ```bash
 # arrancado desde el pendrive live:
-soso-install list        # enseña las particiones de cada disco antes de borrar
-soso-install 3 --yes     # id del NVMe destino
+soso-install             # enseña discos, uso y pide en cuál instalar
+soso-install nvme1 --yes # o elige por nombre / id
 
 # reiniciar CON el USB puesto → el shim registra Boot#### «soso»
 # apagar, quitar el USB → «soso» en el menú de arranque de la placa
@@ -295,7 +295,7 @@ Ver `target/usb-package/FLASH.txt`.
 | 7b | GPU (Ampere o Blackwell) | `10de:249c` → `familia=ga107`; `10de:2f18` → `familia=Blackwell`; `NV_PMC_BOOT_0 ≠ ffffffff` |
 | 7c | Offload: dice la verdad | Línea de arranque `pool VRAM=sí/no`; con `no`, `ask` dice `GPU presente sin pool de VRAM (fase=…)` y **nunca** `subida de pesos` |
 | 8 | Reboot sin USB | Linux host intacto |
-| 9 | `soso-install list` | Lista particiones de cada disco; el de Linux sale como `OTRO` |
+| 9 | `soso-install` / `list` | Lista discos y uso; Linux sale como `Linux (…)` ocupado, vacío como `vacío` |
 | 10 | `soso-install <id> --yes` | `copia terminada` + `GPT ajustada al disco` |
 | 11 | Reboot con USB puesto | `soso-shim: DONE Boot#### soso` (y en `SOSOBOOT.TXT`) |
 | 12 | Reboot sin USB | «soso» en el menú de la placa; `fs: sosofs live` desde el NVMe |

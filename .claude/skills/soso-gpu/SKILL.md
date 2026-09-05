@@ -218,11 +218,15 @@ ucode **no** se copia a un GEM y su blob en bruto se suelta con
 **Ampere (GA10x / GA107 — `run_ampere_boot` en `gsp_bringup.c`).** Cadena:
 WPR meta (`gsp_wpr_prepare_ampere`) → libos/cmdq → **FWSEC-FRTS** (`gsp_fwsec.c`)
 → `enqueue_boot_rpcs` → `booter_load` en SEC2 → `run_gsp_rm_chain()`.
-FWSEC extrae el ucode de la VBIOS (partición BIT `'p'`), parchea DMEMMAPPER
-cmd FRTS (`0x15`) y lo ejecuta en el falcon GSP para montar **WPR2**
-(`NV_PFB_PRI_MMU_WPR2_ADDR_LO/HI` en `0x001fa824/28`). Si WPR2 ya está
-programado, se omite. Sin WPR2 el booter no puede alojar GSP-RM →
-`pool VRAM=no` / `GSP=fallo` en GA107. Log de éxito:
+FWSEC extrae el ucode de la VBIOS (PROM @BAR0 `0x300000`: cadena PCIR/NPDE,
+BIT token `0x70` → PmuLookupTable app `0x85` → imagen FwSec `0xE0`), parchea
+firma por fuse + DMEMMAPPER cmd FRTS (`0x15`) y lo ejecuta en el falcon GSP
+(`falcon_lx_raw_boot` con BROM params) para montar **WPR2**
+(`NV_PFB_PRI_MMU_WPR2_ADDR_LO/HI` en `0x001fa824/28`; error FRTS en
+`NV_PBUS_SW_SCRATCH_0E` @ `0x1438`). Si WPR2 ya está programado, se omite. Sin
+WPR2 el booter no puede alojar GSP-RM → `pool VRAM=no` / `GSP=fallo` en GA107.
+Hostcheck sin GPU: `./scripts/l6-fwsec-hostcheck.sh [/ruta/vbios.rom]`
+(vuelca `/sys/bus/pci/devices/…/rom` si no se pasa fichero). Log de éxito:
 `GSP booted (hw, booter_load Ampere + RPC, … MiB VRAM)`.
 `g3-check` exige `gsp_fwsec.c` en `source.list`. **HW de validación: GA107
 (ROG 3050 Mobile)**; no hay 3060 en estas máquinas. Blobs `ga107` = mismos
@@ -925,7 +929,7 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `gsp_fw.c` | Carga blobs GSP + staging GEM | valida ELF/magic; el ucode NO va a GEM |
 | `gsp_rm.c` | ELF64 del ucode → `.fwimage`/firma + **radix3** verificada | fase `rm_radix3`, sin MMIO |
 | `gsp_wpr.c` | Bootloader RISC-V en sysmem + **`GspFwWprMeta`** | fase `wpr_meta`, solo lee VRAM |
-| `gsp_fwsec.c` | **FWSEC-FRTS** desde VBIOS (BIT `'p'`) → WPR2 | Ampere, antes de `booter_load` |
+| `gsp_fwsec.c` | **FWSEC-FRTS** desde VBIOS (PROM 0x300000, BIT 0x70, PMU 0x85) → WPR2 | Ampere, antes de `booter_load` |
 | `gsp_libos.c` | Colas, logs, RMARGS, **`GSP_FMC_BOOT_PARAMS`** | fases `libos_args`/`cot_ready`, sin MMIO |
 | `gsp_dma.c` | `gsp_dma_buf` (equivalente de `nvkm_gsp_mem`) | reservas coherentes compartidas |
 | `fsp_lx.c` | **Envío del COT** por EMEM + espera al FMC | fase `cot_sent`; escribe MMIO |
