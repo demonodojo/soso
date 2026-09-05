@@ -22,6 +22,7 @@
 #include "gsp_buf.h"
 #include "gsp_bar1.h"
 #include "gsp_wpr.h"
+#include "gsp_fwsec.h"
 #include "gsp_chip.h"
 #include "gsp_dma.h"
 #include "falcon_lx.h"
@@ -67,6 +68,7 @@ enum gsp_phase {
     GSP_KICK,
     GSP_POLL,
     GSP_BOOTED,
+    GSP_FAILED,
     GSP_RM_READY,
     GSP_RM_OBJECTS,
     GSP_RM_VMM,     /* + espacio de direcciones con VRAM y sysmem mapeadas */
@@ -330,22 +332,6 @@ static void run_acr_sec2(void)
     }
 }
 
-static int try_hw_boot(void)
-{
-    g_phase = GSP_KICK;
-    if (gsp_mmio_kick_boot() != 0) {
-        return -1;
-    }
-    g_phase = GSP_POLL;
-    if (gsp_mmio_poll_ready(GSP_POLL_MS) == 0) {
-        g_phase = GSP_BOOTED;
-        lx_printk("nouveau-lx: GSP booted (hw poll ok, %s)\n",
-                  gsp_nv_family_name(gsp_nv_family_current()));
-        return 0;
-    }
-    return -1;
-}
-
 #define NV_PGSP_FALCON_MBOX0  0x00110040u
 #define NV_PGSP_FALCON_MBOX1  0x00110044u
 #define NV_PRISCV_CPUCTL      0x00111388u
@@ -412,40 +398,49 @@ static int run_ampere_booter(void)
     return 0;
 }
 
-/* Ampere: layout WPR + libos + cmdq ANTES de arrancar, ACR best-effort, booter. */
+/* Tras un GSP vivo (FMC o booter Ampere): RPC → objetos RM → VMM → CE → pool.
+ * Devuelve 0 solo si GSP_INIT_DONE llegó y la cadena RM avanzó. */
+static int run_gsp_rm_chain(void);
+
+/* Ampere: layout WPR + FWSEC-FRTS + libos + cmdq, booter SEC2, RPC/GSP_INIT_DONE. */
 static int run_ampere_boot(void)
 {
-    int have_wpr = 0;
-
     if (!g_rm.ready) {
-        lx_printk("nouveau-lx: Ampere sin imagen GSP-RM — sigue kick/poll\n");
-    } else {
-        g_phase = GSP_WPR_META;
-        if (gsp_wpr_prepare_ampere(&g_rm, &g_wpr) != 0) {
-            lx_printk("nouveau-lx: Ampere WPR no preparado — sigue kick/poll\n");
-        } else {
-            g_phase = GSP_LIBOS_ARGS;
-            if (gsp_libos_prepare(&g_wpr, &g_libos) != 0) {
-                lx_printk("nouveau-lx: Ampere libos no preparado — sigue kick/poll\n");
-            } else {
-                enqueue_boot_rpcs();
-                have_wpr = 1;
-            }
-        }
-    }
-
-    run_acr_sec2();
-
-    if (!have_wpr) {
+        lx_printk("nouveau-lx: Ampere sin imagen GSP-RM\n");
         return -1;
     }
+
+    g_phase = GSP_WPR_META;
+    if (gsp_wpr_prepare_ampere(&g_rm, &g_wpr) != 0) {
+        lx_printk("nouveau-lx: Ampere WPR no preparado\n");
+        return -1;
+    }
+
+    g_phase = GSP_LIBOS_ARGS;
+    if (gsp_libos_prepare(&g_wpr, &g_libos) != 0) {
+        lx_printk("nouveau-lx: Ampere libos no preparado\n");
+        return -1;
+    }
+
+    if (gsp_fwsec_run_frts(g_wpr.meta->frtsOffset, g_wpr.meta->frtsSize) != 0) {
+        lx_printk("nouveau-lx: Ampere FWSEC-FRTS falló\n");
+        return -1;
+    }
+
+    enqueue_boot_rpcs();
+
     g_phase = GSP_KICK;
     if (run_ampere_booter() != 0) {
-        lx_printk("nouveau-lx: Ampere booter_load falló — sigue kick/poll\n");
+        lx_printk("nouveau-lx: Ampere booter_load falló\n");
         return -1;
     }
+
+    if (run_gsp_rm_chain() != 0) {
+        return -1;
+    }
+
     g_phase = GSP_BOOTED;
-    lx_printk("nouveau-lx: GSP booted (hw, booter_load Ampere, %u MiB VRAM)\n",
+    lx_printk("nouveau-lx: GSP booted (hw, booter_load Ampere + RPC, %u MiB VRAM)\n",
               (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
     return 0;
 }
@@ -801,32 +796,34 @@ static int run_compute_stage(void)
     return 0;
 }
 
-/* Tras un GSP vivo (FMC o booter Ampere): RPC → objetos RM → VMM → CE → pool. */
-static void run_gsp_rm_chain(void)
+/* Tras un GSP vivo (FMC o booter Ampere): RPC → objetos RM → VMM → CE → pool.
+ * Devuelve 0 solo si GSP_INIT_DONE llegó y la cadena RM avanzó. */
+static int run_gsp_rm_chain(void)
 {
-    if (gsp_rpc_init(&g_libos, &g_rpc) == 0 &&
-        gsp_rpc_start(g_wpr.boot.app_version) == 0 &&
-        gsp_rpc_wait_event(&g_rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 4000) == 0) {
-        g_phase = GSP_RM_READY;
-        lx_printk("nouveau-lx: GSP-RM listo (RPC en marcha)\n");
+    if (gsp_rpc_init(&g_libos, &g_rpc) != 0 ||
+        gsp_rpc_start(g_wpr.boot.app_version) != 0 ||
+        gsp_rpc_wait_event(&g_rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 4000) != 0) {
+        lx_printk("nouveau-lx: GSP arrancado pero GSP-RM no responde por RPC\n");
+        return -1;
+    }
+    g_phase = GSP_RM_READY;
+    lx_printk("nouveau-lx: GSP-RM listo (RPC en marcha)\n");
 
-        if (gsp_rm_init(&g_cmdq, &g_rpc, &g_rm_obj) == 0) {
-            g_phase = GSP_RM_OBJECTS;
+    if (gsp_rm_init(&g_cmdq, &g_rpc, &g_rm_obj) == 0) {
+        g_phase = GSP_RM_OBJECTS;
 
-            (void)gsp_rm_classes_probe(&g_rm_obj);
-            (void)gsp_rm_engines_probe(&g_rm_obj);
+        (void)gsp_rm_classes_probe(&g_rm_obj);
+        (void)gsp_rm_engines_probe(&g_rm_obj);
 
-            if (gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static) == 0 &&
-                (run_bar1_probe(), run_vmm_stage() == 0)) {
-                g_phase = GSP_RM_VMM;
-                if (run_chan_ce_stage() == 0) {
-                    (void)run_compute_stage();
-                }
+        if (gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static) == 0 &&
+            (run_bar1_probe(), run_vmm_stage() == 0)) {
+            g_phase = GSP_RM_VMM;
+            if (run_chan_ce_stage() == 0) {
+                (void)run_compute_stage();
             }
         }
-    } else {
-        lx_printk("nouveau-lx: GSP arrancado pero GSP-RM no responde por RPC\n");
     }
+    return 0;
 }
 
 int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
@@ -939,40 +936,34 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
 
         if (fam == NV_FAM_BLACKWELL) {
             if (run_fmc_blackwell() == 0) {
-                /* El GSP lo arrancó el FMC: el kick/poll de tu102 no pinta nada. */
-                g_phase = GSP_BOOTED;
-                lx_printk("nouveau-lx: GSP booted (hw, GSP-FMC vía FSP, %u MiB VRAM)\n",
-                          (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
-                run_gsp_rm_chain();
-                return 0;
+                if (run_gsp_rm_chain() == 0) {
+                    g_phase = GSP_BOOTED;
+                    lx_printk("nouveau-lx: GSP booted (hw, GSP-FMC vía FSP, %u MiB VRAM)\n",
+                              (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+                    return 0;
+                }
             }
         } else if (fam == NV_FAM_AMPERE) {
             if (run_ampere_boot() == 0) {
-                run_gsp_rm_chain();
                 return 0;
             }
-            /* run_ampere_boot ya intentó ACR; kick/poll como antes. */
         } else {
             run_acr_sec2();
         }
     }
 
-    /* Con la tarjeta fuera del bus no hay nada que sondear: el kick/poll de
-     * tu102 leería 0xffffffff y lo tomaría por "listo". */
+    /* Con la tarjeta fuera del bus no hay nada que sondear. */
     if (!gsp_mmio_alive()) {
         g_phase = GSP_GONE;
         lx_printk("nouveau-lx: GPU fuera del bus — sin GSP\n");
         return -1;
     }
 
-    if (try_hw_boot() == 0) {
-        return 0;
-    }
-
-    g_phase = GSP_BOOTED_SOFT;
-    lx_printk("nouveau-lx: GSP booted (soft, %u MiB VRAM)\n",
+    g_phase = GSP_FAILED;
+    lx_printk("nouveau-lx: GSP=fallo (phase=%s, %u MiB VRAM)\n",
+              lx_nouveau_gsp_status(),
               (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
-    return 0;
+    return -1;
 }
 
 /* Apaga GSP-RM y deja la tarjeta sin DMA (ver gsp_fini.h). Idempotente: una
@@ -1025,8 +1016,7 @@ int lx_nouveau_gsp_ready(void)
     return g_phase == GSP_BOOTED || g_phase == GSP_RM_READY ||
            g_phase == GSP_RM_OBJECTS || g_phase == GSP_RM_VMM ||
            g_phase == GSP_RM_CHAN || g_phase == GSP_RM_CE ||
-           g_phase == GSP_RM_COMPUTE ||
-           g_phase == GSP_BOOTED_SOFT ? 1 : 0;
+           g_phase == GSP_RM_COMPUTE ? 1 : 0;
 }
 
 const char *lx_nouveau_gsp_status(void)
@@ -1068,6 +1058,8 @@ const char *lx_nouveau_gsp_status(void)
         return "poll";
     case GSP_BOOTED:
         return "booted";
+    case GSP_FAILED:
+        return "fallo";
     case GSP_RM_READY:
         return "rm_ready";
     case GSP_RM_OBJECTS:

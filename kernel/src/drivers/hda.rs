@@ -6,7 +6,28 @@ use crate::mm;
 use crate::println;
 use spin::Mutex;
 
+const CLASS_HDA: u8 = 0x04;
 const SUBCLASS_HDA: u8 = 0x03;
+const VENDOR_NVIDIA: u16 = 0x10de;
+const VENDOR_AMD: u16 = 0x1002;
+
+struct HdaCandidate {
+    bus: u8,
+    device: u8,
+    function: u8,
+    vendor_id: u16,
+    device_id: u16,
+    bar0: u64,
+    bar0_size: u64,
+    score: i32,
+}
+
+fn hda_score(vendor: u16) -> i32 {
+    match vendor {
+        VENDOR_NVIDIA | VENDOR_AMD => 0,
+        _ => 10,
+    }
+}
 
 const GCTL: u32 = 0x08;
 const CORBLBASE: u32 = 0x40;
@@ -146,39 +167,56 @@ impl HdaState {
 static HDA: Mutex<Option<HdaState>> = Mutex::new(None);
 
 pub fn init() {
-    let mut found = false;
+    let mut best: Option<HdaCandidate> = None;
     for d in pci::devices() {
-        if d.subclass != SUBCLASS_HDA {
+        if d.class != CLASS_HDA || d.subclass != SUBCLASS_HDA {
             continue;
         }
         if d.bar0 == 0 {
             continue;
         }
-        pci::write16(d.bus, d.device, d.function, 0x04, pci::read16(d.bus, d.device, d.function, 0x04) | 0x6);
-        mm::ensure_mmio_mapped(d.bar0, d.bar0_size.max(0x10000));
-        println!(
-            "hda: Intel HD Audio {:04x}:{:04x} BAR0={:#x}",
-            d.vendor_id, d.device_id, d.bar0
-        );
-        let mut st = HdaState {
-            bar: d.bar0,
-            corb: 0,
-            rirb: 0,
-            bdl: 0,
-            bufs: [0; BDL_COUNT],
-            read_pos: 0,
-            open: false,
+        let cand = HdaCandidate {
+            bus: d.bus,
+            device: d.device,
+            function: d.function,
+            vendor_id: d.vendor_id,
+            device_id: d.device_id,
+            bar0: d.bar0,
+            bar0_size: d.bar0_size,
+            score: hda_score(d.vendor_id),
         };
-        st.reset();
-        st.setup_rings();
-        st.bringup_codec();
-        *HDA.lock() = Some(st);
-        found = true;
-        break;
+        if best.as_ref().map(|b| cand.score > b.score).unwrap_or(true) {
+            best = Some(cand);
+        } else if best.as_ref().map(|b| cand.score == b.score).unwrap_or(false) {
+            println!(
+                "hda: descartado {:04x}:{:04x} (prefiero códec analógico sobre HDMI)",
+                d.vendor_id, d.device_id
+            );
+        }
     }
-    if !found {
+    let Some(d) = best else {
         println!("hda: no se encontró controlador Intel HD Audio");
-    }
+        return;
+    };
+    pci::write16(d.bus, d.device, d.function, 0x04, pci::read16(d.bus, d.device, d.function, 0x04) | 0x6);
+    mm::ensure_mmio_mapped(d.bar0, d.bar0_size.max(0x10000));
+    println!(
+        "hda: Intel HD Audio {:04x}:{:04x} BAR0={:#x}",
+        d.vendor_id, d.device_id, d.bar0
+    );
+    let mut st = HdaState {
+        bar: d.bar0,
+        corb: 0,
+        rirb: 0,
+        bdl: 0,
+        bufs: [0; BDL_COUNT],
+        read_pos: 0,
+        open: false,
+    };
+    st.reset();
+    st.setup_rings();
+    st.bringup_codec();
+    *HDA.lock() = Some(st);
 }
 
 pub fn open(_rate: u32, _channels: u16, _bits: u16) -> Result<(), i64> {

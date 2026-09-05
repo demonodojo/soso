@@ -382,10 +382,17 @@ fn install_boot_shim(uefi_img: &Path, shim: &Path) {
         b"BOOTX64 EFI",
         &data,
     ) {
-        Ok(orig) => println!(
-            "shim UEFI: bootx64.efi ← boot-shim ({} B; loader real {orig} B en efi/boot/bootsoso.efi)",
-            data.len()
-        ),
+        Ok(orig) => {
+            let pe_ok = data.len() >= 2 && data[0] == b'M' && data[1] == b'Z';
+            if pe_ok {
+                println!(
+                    "shim UEFI OK: bootx64.efi ← boot-shim ({} B; loader real {orig} B en efi/boot/bootsoso.efi)",
+                    data.len()
+                );
+            } else {
+                eprintln!("xtask: aviso: bootx64.efi instalado pero sin cabecera PE");
+            }
+        }
         Err(e) => eprintln!("xtask: aviso: no pude instalar el shim UEFI: {e}"),
     }
 }

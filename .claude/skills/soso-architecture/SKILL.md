@@ -4,7 +4,8 @@ description: >-
   soso OS architecture — kernel layout, sosofs CoW filesystem, syscalls,
   userspace ABI, networking, SSH stack and coding constraints. Use when
   modifying kernel/, crates/, user/, xtask/, adding features, syscalls,
-  drivers, or understanding how components interact.
+  drivers, or understanding how components interact. GPU NVIDIA: skill
+  soso-gpu. WiFi iwlwifi: soso-wifi. Live USB, install and OTA: soso-live.
 ---
 
 # soso — Architecture
@@ -16,28 +17,45 @@ Learning OS in Rust. **10/10 phases complete.** Bare-metal x86_64 on QEMU q35.
 ```
 soso/
 ├── kernel/           # no_std kernel (x86_64-unknown-none, outside root workspace)
-├── xtask/            # build image, mkfs, QEMU launcher, integration tests
+├── boot-shim/        # UEFI: BOOTMARK, buzón install/OTA, chainload bootsoso.efi
+├── xtask/            # build image, mkfs, QEMU, live USB, integration tests
+├── lxdde/            # DDE C: nouveau, iwlwifi, e1000e → liblxdde.a
 ├── crates/
 │   ├── sosofs/       # CoW FS (no_std + "std" feature for host tests)
-│   ├── sosomfs/      # read-only model shards FS (second virtio-blk)
+│   ├── sosomfs/      # model shards FS (VFS RO; import atómico SYS_SOM_*)
 │   ├── soso-abi/     # syscall numbers, Stat, Dirent, errno
-│   ├── gptdisk/      # GPT: leer/reubicar/reescribir tablas (no_std + tests host)
+│   ├── gptdisk/      # GPT: leer/reubicar/reescribir tablas
+│   ├── xhci-nostd/   # xHCI + USB BOT (live stick)
 │   ├── soso-llm-core/  # inference runtime (host + userspace)
 │   ├── sosomodel/    # .som manifest/index/shard format
+│   ├── gguf2som/     # GGUF → .som (llama/MoE/Qwen/MLA)
+│   ├── soso-http/    # HTTPS client (Range)
+│   ├── soso-web-core/# HTML → texto / layout gráfico
+│   ├── soso-audio/   # DSP captura / WAV
+│   ├── soso-gpu/     # ABI GPU userspace
+│   ├── soso-update-core/ # manifest, pack, mailbox OTA
 │   └── block-dev/    # BlockDevice trait (virtio-blk, host File)
 ├── tools/
-│   ├── mkfs-soso/    # host: rootfs dir → sosofs image + SSH key injection
-│   ├── mkfs-sosomfs/ # host: model tree → models disk image
-│   ├── convert-gguf/ # host: GGUF → .som layout
-│   └── ssh-proto/    # host prototype (phase 9), isolated from workspace
-├── user/             # userspace workspace (libsoso, init, sosh, coreutils)
+│   ├── mkfs-soso/    # rootfs dir → sosofs image + SSH keys
+│   ├── mkfs-sosomfs/ # model tree → models disk image
+│   ├── mkmodel-soso/ # modelos sintéticos tiny / tiny-moe / …
+│   ├── convert-gguf/ # GGUF → .som
+│   ├── convert-whisper/ # ggml Whisper → .som ASR
+│   ├── cuda-proxy/   # L6-H TCP → llama-server
+│   ├── gsp-hostcheck/ / iwl-hostcheck/  # parsers C en host
+│   └── ssh-proto/    # host prototype (phase 9), isolated
+├── user/             # libsoso, init, sosh, soso-llm/voz/web/hf/update, coreutils
 └── rootfs/           # source tree embedded into disk by mkfs-soso
 ```
 
-## Kernel (monolithic, single-core)
+Skills de dominio: **`soso-dev`** (build/test), **`soso-gpu`**, **`soso-wifi`**,
+**`soso-live`** (USB/install/OTA), **`soso-user-manual`**.
 
-- Ring 0: drivers, FS, network, SSH server — kernel never preempted
-- Ring 3: ELF processes, round-robin preemptive scheduler
+## Kernel (monolithic)
+
+- Ring 0: drivers, FS, network, SSH — el kernel **no** se desaloja a sí mismo
+- Ring 3: ELF, round-robin **preemptivo**; SMP userspace (`-smp N`, `ncpu` en
+  `ThreadPool`). Con `-smp 1` no hay workers (`want == 0`)
 - **spawn, not fork** — one PML4 per process, static ELFs at `0x400000`
 - Entry: `syscall`/`sysret` (MSRs STAR/LSTAR)
 
@@ -45,10 +63,10 @@ soso/
 
 `exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo` (+ GPU, TCP, hilos, WiFi)
 
-- **Instalación:** `disk_list=37`, `disk_read=38`, `disk_write=39` (raw, 512 B/LBA; `raw_disk` solo deja escribir NVMe y nunca el disco de arranque), `bootreq_write=41` / `bootreq_read=42` (único camino a la ESP del disco live, y solo al fichero pre-creado `SOSOBOOT.TXT`)
-- **Actualización:** `version=67`, `upd_write=68`, `upd_read=69` (huecos ESP `SOSOUPD.TXT` + `SOSOKRN.BIN`; ver `drivers/updslot.rs` y boot-shim `actualiza.rs`)
+- **Instalación / OTA / ESP:** syscalls y huecos 8.3 — skill **`soso-live`** (`disk_*`, `bootreq_*`, `upd_*`, `espfat`)
 - **Framebuffer / entrada:** `fb_info=62`, `fb_set_mode=63`, `fb_present=64`, `input_poll=65` (modo gráfico userspace; ratón PS/2 aux)
-- **WiFi:** `wifi_scan=56`, `wifi_status=57`, `wifi_connect=58` (structs `WifiBss`/`WifiStatus`; `psk_len=0` = red abierta); sosh builtin `wifi scan|status|connect`
+- **WiFi:** `wifi_scan=56`, `wifi_status=57`, `wifi_connect=58` — detalle en **`soso-wifi`**
+- **Audio:** `audio_open=59`, `audio_read=60`, `audio_close=61` (HDA, `drv-hda`)
 
 - **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`; hijos heredan cwd del padre
 - **Señales (mínimo):** SIGINT/SIGKILL/SIGTERM vía `kill`; grupos con `setpgid`/`setsid`/`tcsetpgrp`; Ctrl-C (ISIG) al grupo en primer plano de la consola. Sin handlers (`sigaction`). El líder de sesión en el prompt recibe `-EINTR` en `read` en vez de morir
@@ -65,13 +83,13 @@ soso/
 | `drivers/fb.rs` | Consola GOP: buffer UTF-8 con glifos Latin-1 + € |
 | `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
 | `drivers/pci.rs` | ECAM + MSI-X. `devices()` = foto cacheada del bus (usar esta); `enumerate()` reescribe BARs, sólo en arranque |
-| `drivers/espfat.rs` | Localiza ficheros 8.3 contiguos en la ESP del live; lo comparten `fatlog` (SOSOLOG), `drvlog` (SOSODRV) y `bootreq` (SOSOBOOT) |
+| `drivers/espfat.rs` | Ficheros 8.3 contiguos en la ESP live (SOSOLOG, SOSODRV, SOSOBOOT, SOSOWIFI, SOSOUPD, SOSOKRN) |
 | `xtask/src/sosolog.rs` | Host: monta la ESP del USB, imprime `SOSOLOG.TXT` y desmonta (`cargo xtask sosolog`) |
 | `fs/` | sosofs (blk0) + sosomfs (blk1); VFS enruta `/models/*` |
 | `vfs.rs` | Router: lectura/escritura sosofs; modelos → sosomfs (read-only) |
 | `net/` | smoltcp, DHCPv4 al arrancar (fallback 10.0.2.15), polled from scheduler |
 | `net/ssh.rs` | sunset SSH-2, una sesión, CRLF en tx_push, reset_socket al desconectar |
-| `kshell.rs` | Emergency kernel-shell on serial (`soso>`) |
+| `kshell.rs` | Emergency kernel-shell (`soso>`): `help`, `dmesg [save]`, `hwscan`, `wifi`, `io`, `halt`, … |
 | `task/` | Processes (cwd, console), scheduler, syscall, path normalization |
 
 ## sosofs (v1)
@@ -268,7 +286,7 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 | Shard cache lock (staging ∥ compute) | — | `source.rs::CacheLock` (TOCTOU-safe insert), `staging.rs` wait en release |
 | Offload GPU trunk-first + pool MoE | — | `plan.rs` pack `TRUNK_GPU_PROJ` + `gpu_experts`, VRAM Q4_K crudo |
 
-- **Cierre de etapa `/loop` (obligatorio):** al terminar cada pase de optimización, actualizar esta skill (tabla + bullets), espejo `.cursor/skills/soso-architecture/SKILL.md`, `soso-dev` si cambian tests/comandos, y `MANUAL-USUARIO.md` si hay strings o comportamiento visible al usuario. No dejar docs aplazados al “final del loop”.
+- **Cierre de etapa `/loop` (obligatorio):** al terminar cada pase, actualizar el skill de dominio (esta tabla si es inferencia; `soso-gpu`/`soso-wifi`/`soso-live` si tocan esos stacks), `soso-dev` si cambian tests/comandos, y `MANUAL-USUARIO.md` si hay strings o UX visible. El espejo `.cursor/skills` es un symlink: editar solo `.claude/skills/`. No dejar docs aplazados al “final del loop”.
 - **SIMD**: userspace compila con target propio `user/x86_64-soso-user.json` (SSE..AVX2+FMA, build-std); kernels AVX2 en `gemm.rs::avx2` con dispatch por `target_feature` (escalar = referencia para tests). **Estado FPU**: el kernel preserva x87/XMM/YMM con **xsave64** (`arch/fpu.rs`; fxsave NO basta — pierde las mitades altas YMM entre procesos): timer_isr guarda a `TIMER_FPU` antes de net::poll, `timer_tick` lo copia a `Process.fpu` al desalojar, `schedule_inner` restaura al reanudar, el page fault handler preserva en `mmap_fault_shim`; syscalls no preservan (los wrappers de libsoso llevan `clobber_abi("C")`). `init test` estresa YMM con dos hijos "fpu" concurrentes
 - Harness rápido de calidad en host: `cargo run --release -p soso-llm-core --features std --example hostrun -- <modelo-dir> "<prompt>" <n>` (velocidad nativa, SOSO_DEBUG=1 para estadísticas por capa)
 - `Runtime::validate_shapes()` comprueba index↔manifest antes de inferir
@@ -278,20 +296,20 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 - `SOSO_MODELS_DIR=<dir> cargo xtask run` empaqueta un modelo propio en vez de tiny
 - Userspace: `soso-llm run <modelo> --prompt <texto>` vía mmap + greedy decode; mmap pagina bajo demanda (`handle_mmap_fault` — ojo: `map_page` toma `FRAME_ALLOC`, no llamarla con ese lock tomado)
 
-## Capa lxdde + GPU (L6, en curso)
+## Capa lxdde + GPU (L6) + WiFi
 
-- **lxdde** (`lxdde/`): capa DDE estilo `lx_emul` que compila C (drivers Linux
-  portados o first-party) a `liblxdde.a` y lo enlaza al kernel Rust. Ports:
-  `spike`, `testdrv`, `e1000e`, `nouveau`. Build: `cargo xtask lx-build <port>`
-  lee `source.list`, compila con clang freestanding, y autogenera dummies
-  (`lx_emul_trace_and_stop`) para símbolos undefined no provistos.
+- **lxdde** (`lxdde/`): capa DDE estilo `lx_emul` que compila C a `liblxdde.a`
+  y lo enlaza al kernel Rust. Ports: `spike`, `testdrv`, `e1000e`, `nouveau`,
+  **`iwlwifi`**. Build: `cargo xtask lx-build <port>` lee `source.list`, clang
+  freestanding, dummies `lx_emul_trace_and_stop` para undefined no provistos.
+  WiFi: skill **`soso-wifi`**. Live USB / xHCI / OTA: **`soso-live`**.
 - **Port nouveau/nvkm** (`lxdde/ports/nouveau/`): bring-up de la GPU NVIDIA (GB205
   Blackwell y Ampere GA10x/**RTX 3060**, chip-aware). **62 fuentes nvkm/lib reales**
   de Linux 6.6.32 integradas (core, falcon, nvfw, ACR, mmu, fb, instmem, engine
   gr/fifo/dma base) vía shims mínimos en `lxdde/shim/include/` (slab/pci/mutex/... que
   cortan la avalancha de cabeceras arch del kernel). El **grafo de objetos nvkm real
   se construye en runtime** (`nvkm_bringup_lx.c` → `ga102_gsp_new`). El boot GSP
-  efectivo y el compute siguen **soft/CPU** hasta cablear MMIO real (requiere G1/HW).
+  efectivo y el compute en GB205 van por la ruta lx-native (`fmc_lx`/`gsp_*`).
 - **Syscalls GPU** (`soso-abi`): `SYS_GPU_INFO=17`, `SYS_GPU_ALLOC=18`,
   `SYS_GPU_MAP=19`, `SYS_GPU_SUBMIT=20`, `SYS_GPU_READ=33`, `SYS_GPU_FREE=34`,
   `SYS_MEMINFO=35` (frames totales/libres/reclaimable).
@@ -301,28 +319,13 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 - Detalle completo (roadmap G1→G5 **GO** en GB205, VFIO/IOMMU, firmware, workflow de port nvkm):
   skill **`soso-gpu`**.
 
-## Instalación nativa (live → disco)
+## Instalación nativa, OTA y USB
 
-`soso-install` (userspace) clona el pendrive al NVMe destino, repara su GPT con
-`crates/gptdisk` (respaldo al final del disco real, última partición estirada,
-GUID regenerados — si no, el destino sería indistinguible del USB para el
-firmware) y deja `INSTALL <guid-ESP>` en `SOSOBOOT.TXT` de la ESP del live vía
-`SYS_BOOTREQ_WRITE`. **El kernel no puede tocar la NVRAM**: `bootloader_api::BootInfo`
-no expone la System Table y tras `ExitBootServices` no hay Runtime Services. Quien
-crea el `Boot####` es `boot-shim/src/bootentry.rs`, en el arranque siguiente del USB;
-deja `DONE Boot#### soso` en el mismo fichero y nunca aborta el arranque si falla.
-
-Transferencias: `raw_disk::{read,write}` van en bloques de 128 KiB (`MAX_XFER`) y
-`mass_storage` trocea a 64 KiB — **el campo de longitud de un Normal TRB es de 17
-bits, así que 0x20000 exactos se desbordan a cero** y el endpoint acaba en Stall
-(`CSW inválido sig=0`). El rebote DMA de xHCI es persistente (`XhciController::bounce`):
-el asignador DMA del kernel no libera, y uno por comando tiraba a la basura tanta
-memoria como datos movidos.
-
-Verificación: `cargo xtask test-install` (3 arranques OVMF, incluye un NVMe falso con
-swap/ESP que el instalador debe rechazar). `cargo xtask test-update` (actualización
-local con release en `/var/actualiza-prueba`). Versión: fichero `VERSION` en la raíz
-del repo → `/etc/soso-release` + banner del kernel (`SOSO_VERSION`/`SOSO_BUILD`).
+Detalle (particiones, ESP 8.3, shim, TRB 17 bits, buzón `SOSOUPD`): skill **`soso-live`**.
+Resumen: `soso-install` clona + `gptdisk::relayout` + GUID nuevos; NVRAM la toca
+el shim. Transferencias USB: Normal TRB 17 bits → **no enviar 128 KiB en un TRB**
+(`mass_storage` trocea a 64 KiB). Bounce xHCI persistente. Tests:
+`test-install`, `test-update`, `test-usb`. `VERSION` → `/etc/soso-release`.
 
 ## Hilos de usuario: nadie los recoge
 
@@ -400,8 +403,11 @@ tráfico, pero son la misma clase de bug.
 | GPT del instalador | `cargo test -p gptdisk` (sin features) |
 | Syscall regression | `/bin/init test` in QEMU |
 | Full system | `cargo xtask test` |
-| Instalación nativa live→disco | `cargo xtask test-install` (3 arranques OVMF) |
+| Instalación nativa live→disco | `cargo xtask test-install` (3 arranques OVMF) — **`soso-live`** |
+| OTA local | `cargo xtask test-update` |
+| USB/xHCI | `cargo xtask test-usb` |
 | Teclado/tty, hilos con SMP | Sólo con `-smp >1` y `sendkey` por el monitor de QEMU; ver `soso-dev` → Debugging |
+| Parser firmware iwl | `./scripts/l6-iwl-fw-hostcheck.sh` |
 
 ## Out of scope (by design)
 

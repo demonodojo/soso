@@ -570,11 +570,11 @@ impl ParsedConfiguration {
     }
 
     /// ¿Necesita SET_CONFIGURATION + Configure Endpoint? (hub, teclado, mass storage).
-    pub fn needs_full_config(&self, dev_desc: &DeviceDescriptor) -> bool {
+    pub fn needs_full_config(&self, dev_desc: &DeviceDescriptor, has_keyboard: bool) -> bool {
         if dev_desc.is_hub() {
             return true;
         }
-        if self.find_hid_keyboard().is_some() {
+        if has_keyboard {
             return true;
         }
         self.is_mass_storage()

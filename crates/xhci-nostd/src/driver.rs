@@ -5,6 +5,7 @@
 //! struct that the kernel can init once and then poll for keyboard events.
 
 use alloc::vec::Vec;
+use alloc::vec;
 
 use crate::context::{
     Dcbaa, EndpointContext, InputContext, SlotContext,
@@ -33,6 +34,8 @@ const EVENT_POLL_INTERVAL_US: u32 = 10;
 const CMD_TIMEOUT_US: u32 = 5_000_000;
 /// Timeout de transfer events.
 const TRANSFER_TIMEOUT_US: u32 = 5_000_000;
+/// Timeout de sondeo EP0 (GET_DESCRIPTOR); el de BOT sigue siendo 5 s.
+const EP0_TRANSFER_TIMEOUT_US: u32 = 1_000_000;
 /// Debounce de conexión antes de reset (Linux hub_port_debounce).
 const PORT_DEBOUNCE_US: u32 = 100_000;
 /// TRSTRCY USB2 full/low-speed (≥10 ms).
@@ -100,6 +103,12 @@ pub struct XhciController {
     /// BOT tiraba una copia entera de la imagen a la basura (clonar 8 GiB son
     /// ~128 000 comandos), y el instalador se quedaba sin memoria contigua.
     pub(crate) bounce: Option<(*mut u8, u64, usize)>,
+    /// Evita volcar los 6+ PORTSC en cada timeout (el live se veía como bucle).
+    timeout_ports_logged: bool,
+    /// Bit N = puerto root N+1 ignorado (BT class 224, etc.).
+    ignored_ports: u32,
+    /// Slot activo por puerto root (0 = libre).
+    root_port_slot: Vec<u8>,
 }
 
 /// Keyboard-specific state bundled together.
@@ -281,6 +290,9 @@ impl XhciController {
             boot_ccs_mask,
             mass_storage: None,
             bounce: None,
+            timeout_ports_logged: false,
+            ignored_ports: 0,
+            root_port_slot: vec![0u8; max_ports as usize + 1],
         };
 
         ctrl.power_ports();
@@ -499,6 +511,20 @@ impl XhciController {
             if !connected {
                 continue;
             }
+            if self.ignored_ports & (1u32 << (port - 1)) != 0 {
+                continue;
+            }
+            if let Some(slot) = self.root_port_slot.get(port as usize).copied() {
+                if slot != 0
+                    && self
+                        .devices
+                        .get(slot as usize)
+                        .and_then(|d| d.as_ref())
+                        .is_some()
+                {
+                    continue;
+                }
+            }
             let speed_code = (portsc & PORTSC_SPEED_MASK) >> PORTSC_SPEED_SHIFT;
             let mut usb_speed = UsbSpeed::from_port_speed(speed_code);
             log::info!(
@@ -516,6 +542,9 @@ impl XhciController {
             match self.enable_slot() {
                 Some(slot_id) => {
                     fallos_seguidos = 0;
+                    if let Some(m) = self.root_port_slot.get_mut(port as usize) {
+                        *m = slot_id;
+                    }
                     self.initialize_device(slot_id, DevPath::root(port), usb_speed);
                 }
                 None => {
@@ -540,8 +569,33 @@ impl XhciController {
     pub fn enumerate_usb_devices(&mut self) -> Option<MassStorage> {
         self.mass_storage = None;
         self.drain_port_events();
+        self.wait_polling_ports();
         self.enumerate_ports();
         self.mass_storage
+    }
+
+    /// USB2 en Polling/Recovery (p. ej. el stick tras HCRST) aún no tiene PED.
+    /// Enumerar ya habla con los FS internos y deja el live a medias.
+    fn wait_polling_ports(&mut self) {
+        for pass in 0..40 {
+            let mut busy = false;
+            for port in 1..=self.max_ports() {
+                let pls = self.op.port_link_state(port);
+                if pls == PLS_POLLING || pls == PLS_RECOVERY || pls == PLS_HOT_RESET {
+                    busy = true;
+                }
+            }
+            if !busy {
+                if pass > 0 {
+                    log::info!("xhci: puertos salieron de polling (pass {pass})");
+                    self.log_ports();
+                }
+                return;
+            }
+            self.drain_port_events();
+            delay_us(50_000);
+        }
+        self.log_root_ports_pls("aún en polling");
     }
 
     /// Reset a port to enable it.
@@ -646,6 +700,9 @@ impl XhciController {
                     let port_id = (evt.parameter() >> 24) as u8;
                     log::info!("xhci: port status change event: port={}", port_id);
                     // Could handle hot-plug here; for now continue polling
+                    continue;
+                } else if evt_type == TRB_TYPE_TRANSFER_EVENT {
+                    self.dispatch_event(evt);
                     continue;
                 } else {
                     log::trace!("xhci: unexpected event type {} while waiting for command completion", evt_type);
@@ -861,7 +918,7 @@ impl XhciController {
             .map(|(iface_num, ep)| (iface_num, ep.clone()));
 
         let config_val = parsed_config.config.b_configuration_value;
-        let needs_config = parsed_config.needs_full_config(&dev_desc);
+        let needs_config = parsed_config.needs_full_config(&dev_desc, keyboard_info.is_some());
         if needs_config {
             if !self.set_configuration(slot_id, config_val, &parsed_config, &dev_desc) {
                 log::warn!("xhci: SET_CONFIGURATION failed for slot {}", slot_id);
@@ -882,6 +939,14 @@ impl XhciController {
                 slot_id,
                 dev_desc.id_vendor
             );
+            self.disable_slot(slot_id);
+            if path.root_port != 0 {
+                self.ignored_ports |= 1u32 << (path.root_port - 1);
+                if let Some(m) = self.root_port_slot.get_mut(path.root_port as usize) {
+                    *m = 0;
+                }
+            }
+            return;
         }
 
         if let Some((iface_num, ref ep_desc)) = keyboard_info {
@@ -996,7 +1061,11 @@ impl XhciController {
             )
         };
         self.db.ring_endpoint(slot_id, 1);
-        match self.wait_transfer_event(slot_id, Some(handles.status_trb_phys)) {
+        match self.wait_transfer_event_timeout(
+            slot_id,
+            Some(handles.status_trb_phys),
+            EP0_TRANSFER_TIMEOUT_US,
+        ) {
             Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS
                 || evt.completion_code() == TRB_COMPLETION_SHORT_PACKET =>
             {
@@ -1024,44 +1093,96 @@ impl XhciController {
 
     /// Recupera EP0 halted: Reset Endpoint + Set TR Dequeue (Linux xhci_cleanup_halted_endpoint).
     fn recover_ep0(&mut self, slot_id: u8) -> bool {
-        let trb = Trb::reset_endpoint(slot_id, EP0_DCI, false);
-        match self.send_command(trb) {
-            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {}
-            Some(evt) => {
-                log::warn!(
-                    "xhci: Reset EP0 failed slot={slot_id}: code={}",
-                    evt.completion_code()
-                );
-                return false;
-            }
-            None => {
-                log::warn!("xhci: Reset EP0 timeout slot={slot_id}");
-                return false;
-            }
-        }
+        self.reset_and_requeue_ep(slot_id, EP0_DCI)
+    }
 
-        let dequeue = match self.transfer_rings[slot_id as usize][1].as_ref() {
+    fn set_ep_dequeue(&mut self, slot_id: u8, dci: u8) -> bool {
+        let dequeue = match self
+            .transfer_rings
+            .get(slot_id as usize)
+            .and_then(|eps| eps.get(dci as usize))
+            .and_then(|r| r.as_ref())
+        {
             Some(r) => r.enqueue_phys_with_dcs(),
             None => return false,
         };
-        let trb = Trb::set_tr_dequeue(dequeue, slot_id, EP0_DCI, false);
+        let trb = Trb::set_tr_dequeue(dequeue, slot_id, dci, false);
         match self.send_command(trb) {
             Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
-                log::info!("xhci: EP0 recovered slot={slot_id}");
+                log::info!("xhci: EP recovered slot={slot_id} dci={dci}");
                 true
             }
             Some(evt) => {
                 log::warn!(
-                    "xhci: Set TR Dequeue EP0 failed slot={slot_id}: code={}",
+                    "xhci: Set TR Dequeue slot={slot_id} dci={dci}: code={}",
                     evt.completion_code()
                 );
                 false
             }
             None => {
-                log::warn!("xhci: Set TR Dequeue EP0 timeout slot={slot_id}");
+                log::warn!("xhci: Set TR Dequeue timeout slot={slot_id} dci={dci}");
                 false
             }
         }
+    }
+
+    fn reset_and_requeue_ep(&mut self, slot_id: u8, dci: u8) -> bool {
+        let trb = Trb::reset_endpoint(slot_id, dci, false);
+        match self.send_command(trb) {
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {}
+            Some(evt) => {
+                log::warn!(
+                    "xhci: Reset EP slot={slot_id} dci={dci}: code={}",
+                    evt.completion_code()
+                );
+                return false;
+            }
+            None => {
+                log::warn!("xhci: Reset EP timeout slot={slot_id} dci={dci}");
+                return false;
+            }
+        }
+        self.set_ep_dequeue(slot_id, dci)
+    }
+
+    fn drop_pending_ep(&mut self, slot_id: u8, dci: u8) {
+        self.pending_transfers.retain(|evt| {
+            !(evt.trb_type() == TRB_TYPE_TRANSFER_EVENT
+                && evt.slot_id() == slot_id
+                && evt.endpoint_id() == dci)
+        });
+    }
+
+    /// Timeout: el EP sigue Running con TDs viejos. Sin Stop+requeue, cada
+    /// reintento (hub GET_STATUS × 500, BOT, GET_DESCRIPTOR) vuelve a expirar
+    /// y el live se queda imprimiendo PORTSC.
+    fn recover_timeout_ep(&mut self, slot_id: u8, dci: u8) {
+        self.drop_pending_ep(slot_id, dci);
+        let trb = Trb::stop_endpoint(slot_id, dci, false);
+        match self.send_command(trb) {
+            Some(evt)
+                if evt.completion_code() == TRB_COMPLETION_SUCCESS
+                    || evt.completion_code() == TRB_COMPLETION_STOPPED
+                    || evt.completion_code() == TRB_COMPLETION_STOPPED_LENGTH_INVALID =>
+            {
+                let _ = self.set_ep_dequeue(slot_id, dci);
+            }
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_CONTEXT_STATE_ERROR => {
+                let _ = self.reset_and_requeue_ep(slot_id, dci);
+            }
+            Some(evt) => {
+                log::warn!(
+                    "xhci: Stop EP slot={slot_id} dci={dci}: code={} ({})",
+                    evt.completion_code(),
+                    completion_name(evt.completion_code()),
+                );
+                let _ = self.reset_and_requeue_ep(slot_id, dci);
+            }
+            None => {
+                log::warn!("xhci: Stop EP timeout slot={slot_id} dci={dci}");
+            }
+        }
+        self.drop_pending_ep(slot_id, dci);
     }
 
     /// Actualiza max packet size de EP0 tras leer bMaxPacketSize0 (Linux usb_get_device_descriptor).
@@ -1628,9 +1749,13 @@ impl XhciController {
     fn transfer_matches_wait(
         evt: &Trb,
         expected_slot: u8,
+        expected_dci: u8,
         status_trb_phys: Option<u64>,
     ) -> bool {
         if evt.trb_type() != TRB_TYPE_TRANSFER_EVENT || evt.slot_id() != expected_slot {
+            return false;
+        }
+        if evt.endpoint_id() != expected_dci {
             return false;
         }
         let code = evt.completion_code();
@@ -1642,7 +1767,7 @@ impl XhciController {
                 if evt_ptr == status_ptr {
                     return true;
                 }
-                if evt.endpoint_id() == EP0_DCI {
+                if expected_dci == EP0_DCI {
                     if code == TRB_COMPLETION_SHORT_PACKET {
                         return false;
                     }
@@ -1651,7 +1776,9 @@ impl XhciController {
                     }
                     return false;
                 }
-                false
+                // Bulk/interrupt: un TD activo por EP; el puntero del evento
+                // puede no coincidir byte a byte con el TRB encolado.
+                true
             }
         }
     }
@@ -1668,12 +1795,13 @@ impl XhciController {
     fn take_matching_pending(
         &mut self,
         expected_slot: u8,
+        expected_dci: u8,
         status_trb_phys: Option<u64>,
     ) -> Option<Trb> {
         let mut i = 0;
         while i < self.pending_transfers.len() {
             let evt = self.pending_transfers[i];
-            if Self::transfer_matches_wait(&evt, expected_slot, status_trb_phys) {
+            if Self::transfer_matches_wait(&evt, expected_slot, expected_dci, status_trb_phys) {
                 return Some(self.pending_transfers.remove(i));
             }
             if Self::ep0_wait_continues(&evt, status_trb_phys) && evt.slot_id() == expected_slot {
@@ -1689,13 +1817,14 @@ impl XhciController {
         &mut self,
         evt: Trb,
         expected_slot: u8,
+        expected_dci: u8,
         status_trb_phys: Option<u64>,
     ) -> Option<Trb> {
         if evt.trb_type() != TRB_TYPE_TRANSFER_EVENT {
             self.dispatch_event(evt);
             return None;
         }
-        if Self::transfer_matches_wait(&evt, expected_slot, status_trb_phys) {
+        if Self::transfer_matches_wait(&evt, expected_slot, expected_dci, status_trb_phys) {
             return Some(evt);
         }
         if Self::ep0_wait_continues(&evt, status_trb_phys) && evt.slot_id() == expected_slot {
@@ -1748,15 +1877,48 @@ impl XhciController {
         expected_slot: u8,
         status_trb_phys: Option<u64>,
     ) -> Option<Trb> {
+        self.wait_transfer_on(expected_slot, EP0_DCI, status_trb_phys)
+    }
+
+    pub(crate) fn wait_transfer_event_timeout(
+        &mut self,
+        expected_slot: u8,
+        status_trb_phys: Option<u64>,
+        timeout_us: u32,
+    ) -> Option<Trb> {
+        self.wait_transfer_on_timeout(expected_slot, EP0_DCI, status_trb_phys, timeout_us)
+    }
+
+    pub(crate) fn wait_transfer_on(
+        &mut self,
+        expected_slot: u8,
+        dci: u8,
+        status_trb_phys: Option<u64>,
+    ) -> Option<Trb> {
+        self.wait_transfer_on_timeout(
+            expected_slot,
+            dci,
+            status_trb_phys,
+            TRANSFER_TIMEOUT_US,
+        )
+    }
+
+    pub(crate) fn wait_transfer_on_timeout(
+        &mut self,
+        expected_slot: u8,
+        dci: u8,
+        status_trb_phys: Option<u64>,
+        timeout_us: u32,
+    ) -> Option<Trb> {
         let mut elapsed = 0u32;
-        while elapsed < TRANSFER_TIMEOUT_US {
-            if let Some(evt) = self.take_matching_pending(expected_slot, status_trb_phys) {
+        while elapsed < timeout_us {
+            if let Some(evt) = self.take_matching_pending(expected_slot, dci, status_trb_phys) {
                 return Some(evt);
             }
 
             if let Some(evt) = self.dequeue_hw_event() {
                 if let Some(matched) =
-                    self.try_consume_for_wait(evt, expected_slot, status_trb_phys)
+                    self.try_consume_for_wait(evt, expected_slot, dci, status_trb_phys)
                 {
                     return Some(matched);
                 }
@@ -1769,12 +1931,16 @@ impl XhciController {
 
         let sts = self.op.usbsts();
         log::warn!(
-            "xhci: transfer event timeout after {} ms USBSTS={:#x} HCE={}",
-            TRANSFER_TIMEOUT_US / 1000,
+            "xhci: transfer event timeout after {} ms slot={expected_slot} dci={dci} USBSTS={:#x} HCE={}",
+            timeout_us / 1000,
             sts,
             sts & USBSTS_HCE != 0,
         );
-        self.log_ports();
+        if !self.timeout_ports_logged {
+            self.log_ports();
+            self.timeout_ports_logged = true;
+        }
+        self.recover_timeout_ep(expected_slot, dci);
         None
     }
 
@@ -2224,8 +2390,8 @@ mod event_dispatch_tests {
     fn bulk_wait_matches_same_slot_only() {
         let disk = transfer_evt(1, 2, TRB_COMPLETION_SUCCESS, 0);
         let kbd = transfer_evt(3, 3, TRB_COMPLETION_SUCCESS, 0);
-        assert!(XhciController::transfer_matches_wait(&disk, 1, None));
-        assert!(!XhciController::transfer_matches_wait(&kbd, 1, None));
+        assert!(XhciController::transfer_matches_wait(&disk, 1, 2, None));
+        assert!(!XhciController::transfer_matches_wait(&kbd, 1, 2, None));
     }
 
     #[test]
@@ -2236,16 +2402,36 @@ mod event_dispatch_tests {
         assert!(XhciController::transfer_matches_wait(
             &status_evt,
             2,
+            1,
             Some(status_phys)
         ));
         assert!(!XhciController::transfer_matches_wait(
             &data_evt,
             2,
+            1,
             Some(status_phys)
         ));
         assert!(XhciController::ep0_wait_continues(
             &data_evt,
             Some(status_phys)
+        ));
+    }
+
+    #[test]
+    fn bulk_wait_matches_endpoint_when_ptr_differs() {
+        let trb_phys = 0x3000;
+        let evt = transfer_evt(1, 2, TRB_COMPLETION_SUCCESS, 0x4000);
+        assert!(XhciController::transfer_matches_wait(
+            &evt,
+            1,
+            2,
+            Some(trb_phys)
+        ));
+        assert!(!XhciController::transfer_matches_wait(
+            &evt,
+            1,
+            3,
+            Some(trb_phys)
         ));
     }
 
@@ -2257,16 +2443,16 @@ mod event_dispatch_tests {
         pending.push(kbd);
         pending.push(disk);
 
-        let take = |pending: &mut Vec<Trb>, slot: u8| -> Option<Trb> {
+        let take = |pending: &mut Vec<Trb>, slot: u8, dci: u8| -> Option<Trb> {
             let i = pending
                 .iter()
-                .position(|evt| XhciController::transfer_matches_wait(evt, slot, None))?;
+                .position(|evt| XhciController::transfer_matches_wait(evt, slot, dci, None))?;
             Some(pending.remove(i))
         };
 
-        assert_eq!(take(&mut pending, 1).unwrap().slot_id(), 1);
-        assert!(take(&mut pending, 1).is_none());
-        assert_eq!(take(&mut pending, 3).unwrap().slot_id(), 3);
+        assert_eq!(take(&mut pending, 1, 2).unwrap().slot_id(), 1);
+        assert!(take(&mut pending, 1, 2).is_none());
+        assert_eq!(take(&mut pending, 3, 3).unwrap().slot_id(), 3);
         assert!(pending.is_empty());
     }
 }

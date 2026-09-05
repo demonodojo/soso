@@ -230,9 +230,14 @@ fn exec(line: &str) {
                 match args.first() {
                     Some(&"scan") => {
                         crate::lxdde::wifi_scan();
+                        let mut n = 0u32;
                         for (ssid, rssi, ch, open) in crate::lxdde::wifi_scan_results() {
                             let sec = if open { "abierta" } else { "WPA" };
                             println!("  {ssid}: {rssi} dBm, canal {ch}, {sec}");
+                            n += 1;
+                        }
+                        if n == 0 {
+                            println!("wifi: ninguna red");
                         }
                     }
                     Some(&"status") => {

@@ -60,9 +60,10 @@ fn init_log() {
 
 fn soso_dma_alloc(size: usize, _align: usize) -> (*mut u8, u64) {
     let pages = (size + dma::PAGE_SIZE - 1) / dma::PAGE_SIZE;
-    let paddr = dma::alloc_pages(pages.max(1));
-    let v = dma::virt(paddr);
-    unsafe { core::ptr::write_bytes(v.as_ptr(), 0, pages * dma::PAGE_SIZE) };
+    // Mismo criterio que NVMe: el HC escribe el event ring por DMA. El mapeo
+    // write-back del bootloader dejaba EINT=1 y el software veía el anillo vacío
+    // (timeout + dump de puertos en bucle).
+    let (paddr, v) = dma::alloc_zeroed_uc(pages.max(1));
     (v.as_ptr(), paddr as u64)
 }
 
@@ -115,18 +116,9 @@ fn try_probe_ctrl(
     }
     // Una pasada unificada: HID + hubs + BOT (root o detrás de hub).
     if ctrl.any_root_port_connected() {
-        for intento in 0..3 {
-            ctrl.drain_port_events();
-            if let Some(ms) = ctrl.enumerate_usb_devices() {
-                return Some((ctrl, Some(ms)));
-            }
-            if intento + 1 < 3 {
-                let fin = pit::uptime_ms() + 500;
-                while pit::uptime_ms() < fin {
-                    ctrl.drain_port_events();
-                    core::hint::spin_loop();
-                }
-            }
+        ctrl.drain_port_events();
+        if let Some(ms) = ctrl.enumerate_usb_devices() {
+            return Some((ctrl, Some(ms)));
         }
     }
     if ctrl.has_keyboard() {

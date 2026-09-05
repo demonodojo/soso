@@ -84,6 +84,29 @@ impl LiveModelSpec {
         root.join(format!("target/{}-model", self.name))
     }
 
+    /// Directorio materializado válido (`--check` OK), con fallback a `{name}-model-new`.
+    pub fn resolved_dir(&self, root: &Path) -> PathBuf {
+        let primary = self.target_dir(root);
+        if primary.join("manifest.som").exists() {
+            if crate::fetch_hf::check_som_model(root, &primary).is_ok() {
+                return primary;
+            }
+        }
+        let alt = root.join(format!("target/{}-model-new", self.name));
+        if alt.join("manifest.som").exists() {
+            if crate::fetch_hf::check_som_model(root, &alt).is_ok() {
+                eprintln!(
+                    "live-models: {} obsoleto en {} — uso {}",
+                    self.name,
+                    primary.display(),
+                    alt.display()
+                );
+                return alt;
+            }
+        }
+        primary
+    }
+
     /// Bytes necesarios en p3: modelo principal + `tiny` + margen de imagen.
     pub fn need_bytes(&self, root: &Path) -> u64 {
         let dir = self.target_dir(root);
@@ -287,6 +310,7 @@ pub fn suggest_models_image_size(model_dir: &Path, tiny_dir: &Path) -> String {
 pub fn require_materialized(root: &Path, spec: &LiveModelSpec) {
     let out = spec.target_dir(root);
     if out.join("manifest.som").exists() {
+        crate::fetch_hf::require_valid_model(root, &out);
         println!(
             "live-models: {} ya en {}",
             spec.name,
@@ -310,12 +334,20 @@ pub fn require_materialized(root: &Path, spec: &LiveModelSpec) {
 pub fn ensure_materialized(root: &Path, spec: &LiveModelSpec) {
     let out = spec.target_dir(root);
     if out.join("manifest.som").exists() {
-        println!(
-            "live-models: {} ya en {}",
+        if crate::fetch_hf::check_som_model(root, &out).is_ok() {
+            println!(
+                "live-models: {} ya en {}",
+                spec.name,
+                out.display()
+            );
+            return;
+        }
+        eprintln!(
+            "live-models: {} obsoleto en {} — reconvirtiendo",
             spec.name,
             out.display()
         );
-        return;
+        let _ = std::fs::remove_dir_all(&out);
     }
     println!(
         "live-models: materializando {} desde {}…",

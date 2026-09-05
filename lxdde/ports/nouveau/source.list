@@ -3,6 +3,7 @@ lxdde/ports/nouveau/gsp_dma.c
 lxdde/ports/nouveau/gsp_fw.c
 lxdde/ports/nouveau/gsp_rm.c
 lxdde/ports/nouveau/gsp_wpr.c
+lxdde/ports/nouveau/gsp_fwsec.c
 lxdde/ports/nouveau/gsp_libos.c
 lxdde/ports/nouveau/gsp_rpc.c
 lxdde/ports/nouveau/gsp_cmdq.c

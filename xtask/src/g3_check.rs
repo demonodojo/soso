@@ -52,6 +52,7 @@ pub fn run(_args: &[String]) {
         "gsp_cmdq.c",
         "gsp_mmio.c",
         "gsp_bringup.c",
+        "gsp_fwsec.c",
         "acr_fw.c",
         "falcon_lx.c",
         "acr_lx.c",

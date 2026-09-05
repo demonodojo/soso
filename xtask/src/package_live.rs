@@ -50,6 +50,10 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     let rootfs_aligned = (data_len + align - 1) / align * align;
 
     let selection = resolve_live_models(&root, usb_bytes, esp_aligned, rootfs_aligned);
+    crate::fetch_hf::require_valid_model(&root, &selection.primary_dir);
+    if let Some(tiny) = selection.tiny_dir.as_deref() {
+        crate::fetch_hf::require_valid_model(&root, tiny);
+    }
     let _llm_conf = LiveLlmConf::set_model(&root, &selection.llm_name);
     let models = super::mkfs_models_live_for_dirs(
         true,
@@ -275,7 +279,7 @@ fn resolve_live_models(
     }
     let tiny = live_models::ensure_tiny(root);
     LiveModelSelection {
-        primary_dir: spec.target_dir(root),
+        primary_dir: spec.resolved_dir(root),
         tiny_dir: Some(tiny),
         llm_name: spec.name.to_string(),
     }
@@ -573,6 +577,16 @@ fn create_esp_file(live: &Path, name: &[u8; 8], ext: &[u8; 3], size: usize) {
         String::from_utf8_lossy(name).trim_end(),
         String::from_utf8_lossy(ext)
     );
+    let mut name11 = [0u8; 11];
+    name11[..8].copy_from_slice(name);
+    name11[8..11].copy_from_slice(ext);
+    if let Ok(Some((_, existing))) = crate::fat32_write::find_root_entry(live, p1_start, &name11)
+    {
+        if existing as usize >= size {
+            println!("package-usb-live: {label} ya reservado ({existing} B) — reutilizo");
+            return;
+        }
+    }
     let data = vec![b'\n'; size];
     if let Err(e) = crate::fat32_write::write_root_file(live, p1_start, name, ext, &data) {
         eprintln!("package-usb-live: aviso: no pude crear {label}: {e}");

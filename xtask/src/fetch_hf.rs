@@ -508,13 +508,55 @@ fn urlencoding_query(s: &str) -> String {
     out
 }
 
+/// Valida un árbol `.som` (manifest + index + shapes).
+pub fn check_som_model(root: &Path, dir: &Path) -> Result<(), String> {
+    let output = Command::new("cargo")
+        .current_dir(root)
+        .args(["run", "-q", "-p", "convert-gguf", "--", "--check"])
+        .arg(dir)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let why = String::from_utf8_lossy(&output.stderr);
+        let why = why.trim();
+        if why.is_empty() {
+            Err("shapes del index no casan con el manifiesto".into())
+        } else {
+            Err(why.to_string())
+        }
+    }
+}
+
+/// Aborta si el modelo no pasa `--check`.
+pub fn require_valid_model(root: &Path, dir: &Path) {
+    if let Err(why) = check_som_model(root, dir) {
+        eprintln!(
+            "fetch-hf: modelo inválido en {}: {why}\n\
+             Reconvierte con: cargo xtask fetch-hf … --out {}",
+            dir.display(),
+            dir.display()
+        );
+        exit(1);
+    }
+}
+
 fn convert_gguf(root: &Path, gguf: &Path, out_dir: &Path, name: &str) {
     if out_dir.join("manifest.som").exists() {
-        println!(
-            "fetch-hf: {} ya existe; omitiendo conversión (borra el dir para reconvertir)",
-            out_dir.display()
-        );
-        return;
+        match check_som_model(root, out_dir) {
+            Ok(()) => {
+                println!("fetch-hf: {} ya válido", out_dir.display());
+                return;
+            }
+            Err(why) => {
+                eprintln!(
+                    "fetch-hf: {} obsoleto ({why}) — reconvirtiendo",
+                    out_dir.display()
+                );
+                let _ = std::fs::remove_dir_all(out_dir);
+            }
+        }
     }
     let _ = std::fs::create_dir_all(out_dir);
     let mut cmd = Command::new("cargo");

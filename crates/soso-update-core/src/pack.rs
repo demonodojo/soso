@@ -93,7 +93,6 @@ impl Default for PackWriter {
 pub fn pack_rootfs(root: &std::path::Path) -> std::io::Result<(Vec<u8>, Vec<FileEntry>)> {
     use std::fs;
     use std::io;
-    use std::path::Path;
 
     let mut writer = PackWriter::new();
     let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];

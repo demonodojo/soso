@@ -535,9 +535,9 @@ impl XhciController {
             None => return None,
         };
         let trb = Trb::normal(phys, len, true, false);
-        ring.enqueue(trb);
+        let trb_phys = ring.enqueue(trb);
         self.ring_ep(slot_id, dci);
-        let evt = self.wait_transfer_event(slot_id, None)?;
+        let evt = self.wait_transfer_on(slot_id, dci, Some(trb_phys))?;
         let code = evt.completion_code();
         if code != TRB_COMPLETION_SUCCESS && code != TRB_COMPLETION_SHORT_PACKET {
             log::warn!(

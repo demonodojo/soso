@@ -46,7 +46,15 @@
 #define IWL_UCODE_TLV_INIT         3
 #define IWL_UCODE_TLV_INIT_DATA    4
 #define IWL_UCODE_TLV_BOOT         5
+#define IWL_UCODE_TLV_SEC_RT       19
+#define IWL_UCODE_TLV_SEC_INIT     20
+#define IWL_UCODE_TLV_SEC_WOWLAN   21
+#define IWL_UCODE_TLV_PAGING       32
 #define IWL_UCODE_TLV_PNVM_SKU     64
+
+#define IWL_FW_RT_MAX              128
+#define IWL_CPU1_CPU2_SEPARATOR    0xFFFFCCCCu
+#define IWL_PAGING_SEPARATOR       0xAAAABBBBu
 
 #define IWL_MAX_DRAM_ENTRY         64
 #define IWL_CMD_QUEUE_SIZE         32
@@ -99,12 +107,19 @@ struct iwl_fw_section {
     uint32_t len;
 };
 
+struct iwl_fw_rt_section {
+    const uint8_t *data;
+    uint32_t len;
+};
+
 struct iwl_fw_image {
     struct iwl_fw_section inst;
     struct iwl_fw_section data;
     struct iwl_fw_section init;
     struct iwl_fw_section init_data;
     struct iwl_fw_section boot;
+    struct iwl_fw_rt_section rt[IWL_FW_RT_MAX];
+    int rt_n;
 };
 
 struct iwl_prph_scratch_version {

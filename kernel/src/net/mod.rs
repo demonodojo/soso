@@ -288,6 +288,28 @@ fn wifi_link_up() -> bool {
     false
 }
 
+/// Tras subir el enlace Ethernet: reinicia DHCP.
+#[cfg(feature = "drv-rtl8169")]
+pub fn on_wired_link_up() {
+    let Some(net) = NET.get() else {
+        return;
+    };
+    let mut n = net.lock();
+    if n.backend != BackendKind::Wired {
+        return;
+    }
+    n.configured = false;
+    n.dhcp_enabled = true;
+    n.dhcp_started = now();
+    clear_ipv4_config(&mut n.iface);
+    let echo = n.echo.clone();
+    let ssh = n.ssh;
+    let dhcp = n.dhcp;
+    close_tcp_services(&mut n.sockets, &echo, ssh);
+    n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
+    println!("net: enlace ethernet UP — solicitando DHCP…");
+}
+
 pub fn init() {
     attach_now();
 }
@@ -425,6 +447,10 @@ pub fn poll() {
         "net::poll() desde IRQ dura: reentraría en PROCS/RX/TX/heap"
     );
     try_attach();
+    #[cfg(feature = "drv-rtl8169")]
+    if crate::drivers::rtl8169::poll_link() {
+        on_wired_link_up();
+    }
     let Some(net) = NET.get() else { return };
     let Some(mut n) = net.try_lock() else { return };
     TRABAJO_PENDIENTE.store(false, core::sync::atomic::Ordering::Relaxed);

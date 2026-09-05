@@ -19,6 +19,19 @@ struct Vol {
     data_start: u64,
 }
 
+pub fn find_root_entry(
+    img: &Path,
+    part_first_lba: u64,
+    name11: &[u8; 11],
+) -> Result<Option<(u32, u32)>, String> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .open(img)
+        .map_err(|e| format!("open: {e}"))?;
+    let vol = read_vol(&mut f, part_first_lba)?;
+    find_entry(&mut f, &[vol.root_lba], name11, false)
+}
+
 pub fn write_root_file(
     img: &Path,
     part_first_lba: u64,
@@ -32,6 +45,32 @@ pub fn write_root_file(
         .open(img)
         .map_err(|e| format!("open: {e}"))?;
     let vol = read_vol(&mut f, part_first_lba)?;
+
+    let mut name11 = [0u8; 11];
+    name11[..8].copy_from_slice(name);
+    name11[8..11].copy_from_slice(ext);
+
+    if let Some((cluster, size)) = find_entry(&mut f, &[vol.root_lba], &name11, false)? {
+        let clusters_needed =
+            (data.len() as u64 + vol.bps * vol.spc - 1) / (vol.bps * vol.spc);
+        let clusters_have = (size as u64 + vol.bps * vol.spc - 1) / (vol.bps * vol.spc);
+        if size as usize == data.len() && clusters_have >= clusters_needed {
+            write_at(
+                &mut f,
+                vol.data_start + (cluster as u64 - 2) * vol.spc * vol.bps,
+                data,
+            )?;
+            return Ok(());
+        }
+        if size as usize != data.len() {
+            return Err(format!(
+                "{}.{} ya existe con tamaño {size} B (pedido {} B)",
+                String::from_utf8_lossy(name).trim_end(),
+                String::from_utf8_lossy(ext),
+                data.len()
+            ));
+        }
+    }
 
     let clusters_needed = (data.len() as u64 + vol.bps * vol.spc - 1) / (vol.bps * vol.spc);
     if clusters_needed == 0 {
@@ -439,4 +478,61 @@ fn install_dir_entry(
         }
     }
     Err("directorio raíz lleno".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_min_fat16(img: &mut std::fs::File) {
+        let mut boot = [0u8; 512];
+        boot[510] = 0x55;
+        boot[511] = 0xAA;
+        boot[11..13].copy_from_slice(&512u16.to_le_bytes());
+        boot[13] = 1;
+        boot[16] = 2;
+        boot[17..19].copy_from_slice(&512u16.to_le_bytes());
+        boot[22..24].copy_from_slice(&1u16.to_le_bytes());
+        img.write_all(&boot).unwrap();
+        img.write_all(&vec![0u8; 512 * 2]).unwrap();
+        img.write_all(&vec![0u8; 512 * 32]).unwrap();
+        img.write_all(&vec![0u8; 512 * 64]).unwrap();
+    }
+
+    #[test]
+    fn write_root_file_twice_no_duplica() {
+        let path = std::env::temp_dir().join("soso-fat32-write-test.img");
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            write_min_fat16(&mut f);
+        }
+        let name = *b"TESTFILE";
+        let ext = *b"TXT";
+        write_root_file(&path, 0, &name, &ext, b"uno").unwrap();
+        write_root_file(&path, 0, &name, &ext, b"uno").unwrap();
+        let mut name11 = [0u8; 11];
+        name11[..8].copy_from_slice(&name);
+        name11[8..11].copy_from_slice(&ext);
+        let mut f = std::fs::OpenOptions::new().read(true).open(&path).unwrap();
+        let vol = read_vol(&mut f, 0).unwrap();
+        let mut count = 0;
+        for s in 0..vol.root_sectors {
+            let mut sec = [0u8; 512];
+            read_at(&mut f, vol.root_lba + s * 512, &mut sec).unwrap();
+            for i in 0..16 {
+                let e = &sec[i * 32..i * 32 + 32];
+                if e[0] != 0x00 && e[0] != 0xE5 && &e[0..11] == &name11 {
+                    count += 1;
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(count, 1);
+    }
 }

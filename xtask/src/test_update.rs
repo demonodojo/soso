@@ -1,6 +1,6 @@
 //! `cargo xtask test-update` — actualización local de punta a punta en QEMU/OVMF.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -116,7 +116,7 @@ fn fase_aplicar(
     key: &Path,
 ) -> Result<String, String> {
     let _ = std::fs::remove_file(serial);
-    let mut qemu = lanzar_live(code, vars, live, serial)?;
+    let qemu = lanzar_live(code, vars, live, serial)?;
     let _guard = Matar(qemu.child);
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
     let salida = ssh_guion(
@@ -140,7 +140,7 @@ fn fase_comprobar_version(
     ver: &str,
 ) -> Result<(), String> {
     let _ = std::fs::remove_file(serial);
-    let mut qemu = lanzar_live(code, vars, live, serial)?;
+    let qemu = lanzar_live(code, vars, live, serial)?;
     let _guard = Matar(qemu.child);
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
     let salida = ssh_guion(

@@ -48,7 +48,11 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask lx-build` | Compilar `liblxdde.a` (drivers Linux portados) |
 | `cargo xtask lx-build nouveau` | Compilar solo el port nouveau/nvkm (GPU, L6/G5 GO en GB205) |
 | `cargo xtask lx-build iwlwifi` | Compilar driver Intel AX211/AX200 (WiFi + mac80211 mínimo) |
+| `./scripts/l6-iwl-fw-hostcheck.sh` | Parser TLV iwlwifi vs ucode del rootfs (sin NIC) |
 | `./scripts/l6-wifi-vfio-test.sh` | Passthrough VFIO WiFi AX211 a QEMU (prueba ALIVE) |
+| `cargo xtask test-distributed-llm` | Humo LLM repartido (2 QEMU); `-3` = tres nodos |
+| `cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot desde Linux: escribe live + entrada GRUB |
+| `cargo xtask sosomfs-check` | Comprobar imagen/árbol sosomfs en host |
 | `cargo xtask g1-check` | Checklist host G1 (IOMMU/VFIO, firmware, BAR0) |
 | `cargo xtask g3-check` | Checklist bring-up GSP (firmware, módulos, fases) |
 | `./scripts/l6-pack-firmware.sh` | Empaquetar firmware GSP gb205 (.zst→.bin) en rootfs |
@@ -58,7 +62,9 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 
 **Exit QEMU:** `Ctrl-A X` (not Ctrl-C).
 
-> **GPU / L6 (NVIDIA nouveau/GSP):** G1→G5 **GO** en GB205 (matvec en `soso-llm`) — skill **`soso-gpu`**.
+> **GPU / L6 (NVIDIA nouveau/GSP):** G1→G5 **GO** en GB205 — skill **`soso-gpu`**.
+> **WiFi Intel:** AX211/AX200, hostcheck y VFIO — skill **`soso-wifi`**.
+> **Live USB / install / OTA:** particiones, ESP, shim — skill **`soso-live`**.
 > **L6-H (CUDA en host):** `docs/L6-H-cuda-hybrid.md` — `--cuda-host 10.0.2.2:11400`.
 
 ## Daily dev (GPU stays on host NVIDIA driver)
@@ -82,7 +88,8 @@ QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
 cargo xtask flash-usb-live /dev/sdX --yes
 # WiFi: edita SOSOWIFI.TXT en ESP p1 o /etc/wifi.conf antes de flashear
 # SSH en placa: ssh -i target/soso_test_key soso@<ip>  (puerto 22)
-sudo ./scripts/l6-wifi-vfio-test.sh   # VFIO AX211 en QEMU
+./scripts/l6-iwl-fw-hostcheck.sh          # parser TLV, sin hardware
+sudo ./scripts/l6-wifi-vfio-test.sh       # VFIO AX211 en QEMU
 ```
 
 Config: `SOSOWIFI.TXT` (ESP) o `/etc/wifi.conf` (`ssid=`, `psk=`). Firmware en `rootfs/lib/firmware/iwlwifi-so-a0-gf-a0-*` (AX211) y `iwlwifi-cc-a0-*.ucode` (AX200).
@@ -289,10 +296,10 @@ argumentos.
 ## Skills layout
 
 Skills live in `.claude/skills/`. `.cursor/skills` mirrors them — edit under `.claude/skills/`
-and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: actualizar
-`soso-architecture` (tabla paper→código), este skill si hay tests/comandos nuevos, y
-`MANUAL-USUARIO.md` si el usuario ve strings o comportamiento distinto (skill
-`soso-user-manual`).
+and sync the mirror. Tras cada etapa de un `/loop`: actualizar el skill de dominio
+(`soso-architecture`, `soso-gpu`, `soso-wifi`, `soso-live`), este skill si hay
+tests/comandos nuevos, y `MANUAL-USUARIO.md` si el usuario ve strings o
+comportamiento distinto (skill `soso-user-manual`).
 
 ## Common issues
 
@@ -317,6 +324,10 @@ and sync the mirror. Tras cada etapa de un `/loop` de inferencia/arquitectura: a
 | `cuda-proxy`: binary not found | `cargo build -p cuda-proxy --release --target-dir target` |
 | L6-H: connection refused :11400 | Start cuda-proxy; llama-server must answer `/health` on :8080 |
 | L6-H: no tok/s from soso | Host is `10.0.2.2` from QEMU guest; model name must match loaded GGUF |
+| `soso-llm`: shapes del index no casan (`ffn_norm: falta`, etc.) | Modelo `.som` obsoleto: `cargo run -p convert-gguf -- --check <dir>`; `cargo xtask fetch-hf …` reconvierte si falla; borrar el dir y reconvertir desde caché HF |
+| `GSP=fallo` / `pool VRAM=no` en GA107 | Bring-up Ampere: FWSEC-FRTS + booter_load + `GSP_INIT_DONE`; ver **`soso-gpu`**. Reflashear o `soso-update aplicar --local` tras Ethernet vivo |
+| WiFi sin ALIVE / «ALIVE degradado» | Hostcheck `./scripts/l6-iwl-fw-hostcheck.sh`; VFIO exige `UCODE_ALIVE_NTFY` real — **`soso-wifi`** |
+| `SOSOUPD.TXT` / `SOSOKRN.BIN` duplicados en ESP | Pass 1 reserva huecos; pass 2 reutiliza la misma entrada FAT (no duplica). Regenerar con `cargo xtask package-usb-live` |
 | No se ve `SOSOLOG.TXT` en el USB | Está en la ESP (p1), que Linux no monta; `cargo xtask sosolog` |
 | El live se queda en bucle «no encuentra la red» | `net::poll()` resondeaba el bus entero por vuelta al no haber NIC. Ya está: `try_attach` va limitada a 1/s y las sondas cachean. Si vuelve a pasar, mira qué `println!` se repite antes de teorizar |
 | La suite se cuelga (QEMU vivo, log de serie parado hace minutos) | `kill <pid>` de ese QEMU concreto; el arnés recoge y sigue. Suele ser el shard `llm-dense` |

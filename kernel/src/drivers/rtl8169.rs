@@ -90,9 +90,13 @@ const PHY_100: u8 = 0x08;
 const PHY_1000: u8 = 0x10;
 
 const MII_BMCR: u32 = 0;
+const MII_BMSR: u32 = 1;
 const MII_ADVERTISE: u32 = 4;
 const MII_CTRL1000: u32 = 9;
+const PHY_TBI: u8 = 0x80;
+
 const BMCR_RESET: u16 = 0x8000;
+const BMCR_POWERDOWN: u16 = 0x0800;
 const BMCR_ANENABLE: u16 = 0x1000;
 const BMCR_ANRESTART: u16 = 0x0200;
 
@@ -127,6 +131,7 @@ struct Nic {
     mmio: u64,
     mac: [u8; 6],
     xid: u16,
+    mac_ver: u16,
     ocp_base: u32,
     rx_phys: dma::PhysAddr,
     tx_phys: dma::PhysAddr,
@@ -134,10 +139,12 @@ struct Nic {
     tx_buf_phys: dma::PhysAddr,
     rx_i: u16,
     tx_i: u16,
+    link_up: bool,
 }
 
 static NIC: Once<Mutex<Nic>> = Once::new();
 static PRESENT: AtomicBool = AtomicBool::new(false);
+static LAST_LINK_POLL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn r8(base: u64, off: u32) -> u8 {
     unsafe { core::ptr::read_volatile(mm::phys_to_virt(base + off as u64).as_ptr()) }
@@ -299,9 +306,27 @@ fn eri_clear_bits(mmio: u64, addr: u32, mask: u32, bits: u32) {
     eri_write(mmio, addr, mask, v & !bits);
 }
 
-fn ocp_wait(mmio: u64) -> bool {
+fn mac_version(xid_raw: u16) -> u16 {
+    xid_raw & 0xfcf
+}
+
+fn mac_version_name(ver: u16) -> &'static str {
+    match ver {
+        0x540 | 0x541 => "RTL_GIGA_MAC_VER_46 (8168H)",
+        0x4c0..=0x4cf => "RTL_GIGA_MAC_VER_40+ (8168G)",
+        0x2c0..=0x2cf => "RTL_GIGA_MAC_VER_28+",
+        _ => "desconocido",
+    }
+}
+
+fn is_8168h(ver: u16) -> bool {
+    matches!(ver, 0x540 | 0x541)
+}
+
+fn ocp_wait(mmio: u64, want_set: bool) -> bool {
     for _ in 0..100_000 {
-        if r32(mmio, REG_GPHY_OCP) & OCP_FLAG == 0 {
+        let flag = r32(mmio, REG_GPHY_OCP) & OCP_FLAG != 0;
+        if flag == want_set {
             return true;
         }
         core::hint::spin_loop();
@@ -314,18 +339,18 @@ fn phy_ocp_write(mmio: u64, reg: u32, data: u16) {
         return;
     }
     w32(mmio, REG_GPHY_OCP, OCP_FLAG | (reg << 15) | u32::from(data));
-    let _ = ocp_wait(mmio);
+    let _ = ocp_wait(mmio, false);
 }
 
-fn phy_ocp_read(mmio: u64, reg: u32) -> u16 {
+fn phy_ocp_read(mmio: u64, reg: u32) -> Option<u16> {
     if reg & 1 != 0 {
-        return 0;
+        return None;
     }
     w32(mmio, REG_GPHY_OCP, reg << 15);
-    if !ocp_wait(mmio) {
-        return 0;
+    if !ocp_wait(mmio, true) {
+        return None;
     }
-    (r32(mmio, REG_GPHY_OCP) & 0xffff) as u16
+    Some((r32(mmio, REG_GPHY_OCP) & 0xffff) as u16)
 }
 
 fn phy_write(nic: &mut Nic, reg: u32, val: u16) {
@@ -359,6 +384,35 @@ fn phy_write(nic: &mut Nic, reg: u32, val: u16) {
     spin_n(4_000);
 }
 
+fn phy_power_up(nic: &mut Nic) {
+    let bmcr = phy_read(nic, MII_BMCR);
+    if bmcr != 0 {
+        phy_write(nic, MII_BMCR, bmcr & !BMCR_POWERDOWN);
+    }
+}
+
+fn rtl8168h_hw_phy_config(nic: &mut Nic) {
+    // Tabla ephy mínima (rtl8168h_2_hw_phy_config, sin firmware rtl8168h-2.fw).
+    const EPHY: &[(u16, u16)] = &[
+        (0x06, 0x001f),
+        (0x08, 0x0000),
+        (0x11, 0x9600),
+        (0x12, 0x0000),
+        (0x1d, 0x0000),
+        (0x1e, 0x0000),
+    ];
+    for &(reg, val) in EPHY {
+        phy_ocp_write(nic.mmio, 0xa400 + u32::from(reg) * 2, val);
+    }
+}
+
+fn rtl_hw_init_8168g(bar: u64) {
+    w32(bar, REG_MISC, r32(bar, REG_MISC) | RXDV_GATED_EN);
+    w8(bar, REG_CHIPCMD, 0);
+    spin_n(50_000);
+    w32(bar, REG_MISC, r32(bar, REG_MISC) & !RXDV_GATED_EN);
+}
+
 fn phy_autoneg(nic: &mut Nic) {
     phy_write(nic, MII_BMCR, BMCR_RESET);
     spin_n(80_000);
@@ -380,7 +434,7 @@ fn phy_read(nic: &mut Nic, reg: u32) -> u16 {
         if nic.ocp_base != OCP_STD_PHY {
             r = r.saturating_sub(0x10);
         }
-        return phy_ocp_read(nic.mmio, nic.ocp_base + r * 2);
+        return phy_ocp_read(nic.mmio, nic.ocp_base + r * 2).unwrap_or(0);
     }
     w32(nic.mmio, REG_PHYAR, (reg & 0x1f) << 16);
     for _ in 0..20_000 {
@@ -394,11 +448,58 @@ fn phy_read(nic: &mut Nic, reg: u32) -> u16 {
     0
 }
 
+fn read_link(nic: &mut Nic) -> (bool, u8, u16) {
+    let phy = r8(nic.mmio, REG_PHYSTATUS);
+    let bmsr = phy_read(nic, MII_BMSR);
+    let up = phy & PHY_LINK_OK != 0 && bmsr != 0;
+    (up, phy, bmsr)
+}
+
+fn log_link(nic: &mut Nic, phy: u8, bmsr: u16, up: bool) {
+    let tbi = if phy & PHY_TBI != 0 { " TBI" } else { "" };
+    println!(
+        "rtl8169: phystatus {phy:#04x} bmsr {bmsr:#06x}{tbi} → enlace {} {} {}",
+        if up { "UP" } else { "DOWN" },
+        velocidad(phy),
+        if phy & PHY_FULL_DUP != 0 { "full" } else { "half" }
+    );
+}
+
+/// Sondeo periódico del enlace; devuelve true si pasó de DOWN a UP.
+pub fn poll_link() -> bool {
+    let Some(nic_m) = NIC.get() else {
+        return false;
+    };
+    let now = crate::arch::pit::uptime_ms();
+    let last = LAST_LINK_POLL.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 1000 {
+        return false;
+    }
+    LAST_LINK_POLL.store(now, Ordering::Relaxed);
+    let mut nic = nic_m.lock();
+    let (up, phy, bmsr) = read_link(&mut nic);
+    let was = nic.link_up;
+    nic.link_up = up;
+    if up && !was {
+        log_link(&mut nic, phy, bmsr, up);
+        return true;
+    }
+    false
+}
+
 fn rtl_irq() {
     if let Some(n) = NIC.get() {
-        if let Some(nic) = n.try_lock() {
+        if let Some(mut nic) = n.try_lock() {
             let st = r16(nic.mmio, REG_INTRSTATUS);
             w16(nic.mmio, REG_INTRSTATUS, st);
+            if st & IRQ_LINK_CHG != 0 {
+                let (up, phy, bmsr) = read_link(&mut nic);
+                let was = nic.link_up;
+                nic.link_up = up;
+                if up != was {
+                    log_link(&mut nic, phy, bmsr, up);
+                }
+            }
         }
     }
     crate::net::marcar_trabajo_pendiente();
@@ -454,8 +555,16 @@ pub fn init() -> Option<[u8; 6]> {
         return None;
     }
 
-    let xid = (r32(bar, REG_TXCONFIG) >> 20) as u16;
-    println!("rtl8169: xid {xid:#05x} (TxConfig>>20, tabla r8169)");
+    let xid_raw = (r32(bar, REG_TXCONFIG) >> 20) as u16;
+    let ver = mac_version(xid_raw);
+    println!(
+        "rtl8169: xid {xid_raw:#05x} → {ver:#05x} ({})",
+        mac_version_name(ver)
+    );
+
+    if is_8168h(ver) {
+        rtl_hw_init_8168g(bar);
+    }
 
     let mut mac = [0u8; 6];
     for (i, b) in mac.iter_mut().enumerate() {
@@ -498,7 +607,7 @@ pub fn init() -> Option<[u8; 6]> {
     w8(bar, REG_MAXTXPKT, TX_PKT_MAX);
     w16(bar, REG_RXMAXSIZE, BUF_LEN as u16);
 
-    if phy_ocp(xid) {
+    if phy_ocp(xid_raw) {
         w32(bar, REG_MISC, r32(bar, REG_MISC) & !RXDV_GATED_EN);
         eri_clear_bits(bar, 0xdc, ERIAR_MASK_0001, 1);
         eri_set_bits(bar, 0xdc, ERIAR_MASK_0001, 1);
@@ -514,12 +623,12 @@ pub fn init() -> Option<[u8; 6]> {
     w8(bar, REG_CHIPCMD, CMD_TX_EN | CMD_RX_EN);
 
     let mut rxcfg = RX128_INT_EN | RX_DMA_BURST;
-    if phy_ocp(xid) {
+    if phy_ocp(xid_raw) {
         rxcfg |= RX_MULTI_EN | RX_EARLY_OFF;
     }
     w32(bar, REG_RXCONFIG, rxcfg);
     let mut txcfg = (7u32 << 8) | (3u32 << 24);
-    if xid >= 0x2c0 {
+    if xid_raw >= 0x2c0 {
         txcfg |= TX_AUTO_FIFO;
     }
     w32(bar, REG_TXCONFIG, txcfg);
@@ -535,7 +644,8 @@ pub fn init() -> Option<[u8; 6]> {
     let mut nic = Nic {
         mmio: bar,
         mac,
-        xid,
+        xid: xid_raw,
+        mac_ver: ver,
         ocp_base: OCP_STD_PHY,
         rx_phys,
         tx_phys,
@@ -543,18 +653,17 @@ pub fn init() -> Option<[u8; 6]> {
         tx_buf_phys,
         rx_i: 0,
         tx_i: 0,
+        link_up: false,
     };
+    if is_8168h(ver) {
+        rtl8168h_hw_phy_config(&mut nic);
+    }
+    phy_power_up(&mut nic);
     phy_autoneg(&mut nic);
     spin_n(200_000);
-    let bmsr = phy_read(&mut nic, 1);
-    let phy = r8(bar, REG_PHYSTATUS);
-    println!(
-        "rtl8169: phystatus {:#04x} bmsr {bmsr:#06x} → enlace {} {} {}",
-        phy,
-        if phy & PHY_LINK_OK != 0 { "UP" } else { "DOWN" },
-        velocidad(phy),
-        if phy & PHY_FULL_DUP != 0 { "full" } else { "half" }
-    );
+    let (link_up, phy, bmsr) = read_link(&mut nic);
+    nic.link_up = link_up;
+    log_link(&mut nic, phy, bmsr, link_up);
 
     w16(bar, REG_INTRSTATUS, 0xffff);
     if let Some(msix) = pci::find_msix(dev.bus, dev.device, dev.function) {

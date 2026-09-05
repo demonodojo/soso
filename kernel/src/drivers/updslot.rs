@@ -5,14 +5,11 @@
 //! preparar una actualización de kernel antes del reinicio.
 
 use crate::drivers::espfat::{self, SECTOR, Slot};
-use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Once;
 use soso_abi as abi;
 
 static MAILBOX: Once<Option<Slot>> = Once::new();
 static KERNEL: Once<Option<Slot>> = Once::new();
-static ACTIVE: AtomicBool = AtomicBool::new(false);
-static KERNEL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
     if !crate::drivers::live_disk::esp_available() {
@@ -21,7 +18,6 @@ pub fn init() {
     match espfat::locate(b"SOSOUPD ", b"TXT", abi::UPD_MAILBOX_SIZE) {
         Some(slot) => {
             MAILBOX.call_once(|| Some(slot));
-            ACTIVE.store(true, Ordering::Relaxed);
             crate::println!("updslot: SOSOUPD.TXT LBA {}", slot.data_lba);
         }
         None => crate::println!(
@@ -32,21 +28,12 @@ pub fn init() {
     match espfat::locate(b"SOSOKRN ", b"BIN", ksize) {
         Some(slot) => {
             KERNEL.call_once(|| Some(slot));
-            KERNEL_ACTIVE.store(true, Ordering::Relaxed);
             crate::println!("updslot: SOSOKRN.BIN LBA {} ({} MiB)", slot.data_lba, ksize / (1024 * 1024));
         }
         None => crate::println!(
             "updslot: SOSOKRN.BIN no encontrado; reflashea el live para habilitar actualizaciones de kernel"
         ),
     }
-}
-
-pub fn mailbox_available() -> bool {
-    ACTIVE.load(Ordering::Relaxed)
-}
-
-pub fn kernel_slot_available() -> bool {
-    KERNEL_ACTIVE.load(Ordering::Relaxed)
 }
 
 fn slot_for(which: u64) -> Result<Slot, i64> {
@@ -125,35 +112,4 @@ pub fn read(which: u64, offset: u64, out: &mut [u8]) -> Result<usize, i64> {
     })
     .then_some(n)
     .ok_or(-abi::EIO)
-}
-
-/// Sobrescribe el buzón entero (rellena con `\n` como bootreq).
-pub fn write_mailbox(payload: &[u8]) -> Result<(), i64> {
-    if !mailbox_available() {
-        return Err(-abi::ENOTSUP);
-    }
-    if payload.len() > abi::UPD_MAILBOX_SIZE {
-        return Err(-abi::EINVAL);
-    }
-    static mut BUF: [u8; abi::UPD_MAILBOX_SIZE] = [b'\n'; abi::UPD_MAILBOX_SIZE];
-    let buf = unsafe {
-        core::slice::from_raw_parts_mut(
-            core::ptr::addr_of_mut!(BUF).cast(),
-            abi::UPD_MAILBOX_SIZE,
-        )
-    };
-    buf[..payload.len()].copy_from_slice(payload);
-    buf[payload.len()..].fill(b'\n');
-    write(abi::UPD_WHICH_MAILBOX, 0, buf)
-}
-
-pub fn read_mailbox(out: &mut [u8]) -> Result<usize, i64> {
-    if !mailbox_available() {
-        return Err(-abi::ENOTSUP);
-    }
-    let n = out.len().min(abi::UPD_MAILBOX_SIZE) / SECTOR * SECTOR;
-    if n == 0 {
-        return Ok(0);
-    }
-    read(abi::UPD_WHICH_MAILBOX, 0, &mut out[..n])
 }

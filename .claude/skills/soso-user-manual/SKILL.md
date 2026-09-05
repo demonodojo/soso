@@ -66,4 +66,12 @@ Referencia rápida — ampliar el manual si cambian:
 
 ## Skills compartidas
 
-Las skills viven en `.claude/skills/`. Cursor las descubre vía `.cursor/skills`. Editar bajo `.claude/skills/`.
+Las skills viven en `.claude/skills/`. Cursor las descubre vía `.cursor/skills`. Editar bajo `.claude/skills/`. Índice: `.claude/skills/README.md`.
+
+| Skill | Cuándo |
+|-------|--------|
+| `soso-dev` | build, QEMU, tests, `sosolog` |
+| `soso-architecture` | kernel, FS, syscalls, LLM |
+| `soso-gpu` | nouveau/GSP, VFIO |
+| `soso-wifi` | iwlwifi, `SOSOWIFI.TXT` |
+| `soso-live` | USB live, ESP, install, OTA |

@@ -5,6 +5,8 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::{Lazy, Mutex};
+
+static CONSOLE_LOCK: Mutex<()> = Mutex::new(());
 use uart_16550::SerialPort;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::port::Port;
@@ -189,8 +191,9 @@ impl core::fmt::Write for DualConsole {
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments) {
     use core::fmt::Write;
-    // Sin interrupciones mientras se sostiene el lock: el handler de IRQ4
-    // también lo toma, y en monocore eso sería un interbloqueo.
+    // Candado global: en SMP varios cores pueden intercalar fragmentos de la
+    // misma línea antes de que lleguen a logbuf/consola.
+    let _guard = CONSOLE_LOCK.lock();
     without_interrupts(|| {
         DualConsole
             .write_fmt(args)

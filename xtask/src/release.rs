@@ -1,6 +1,5 @@
 //! `cargo xtask release [--publish]` — empaqueta y opcionalmente publica en GitHub Releases.
 
-use std::path::PathBuf;
 use std::process::{Command, exit};
 
 use soso_update_core::hash::hex_sha256;

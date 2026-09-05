@@ -41,8 +41,9 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | **G6** | Pesos en VRAM, 1 QMD/matvec | `matvec residente OK` | **Implementado** (2026-07-30): `gsp_buf` + CE upload; recompilar SASS antes del ciclo HW |
 | **L6-H** | `--cuda-host` → cuda-proxy | texto + tok/s desde soso | **GO** (2026-07-27): ~35 tok/s, Docker llama-server |
 
-**Pendiente post-G6:** medir tok/s nativo vs CPU en silicio (`bench`, timeout amplio)
-grandes; Ampere GA10x (3060) sin HW en esta máquina.
+**Pendiente post-G6:** medir tok/s nativo vs CPU en silicio (`bench`, timeout amplio);
+Ampere GA10x/GA107: cadena FWSEC-FRTS + booter escrita — validar `pool VRAM=sí`
+en la ROG (ga107) tras Ethernet vivo.
 
 ### Estado en silicio (2026-07-29) — GB205 bajo VFIO
 
@@ -212,11 +213,23 @@ en 256 MiB (`kernel/src/mm/heap.rs`); con los dos juegos ni 256 ni 512 llegaban.
 `lx_release_firmware` ya libera de verdad (era no-op). Desde el paso de radix3 el
 ucode **no** se copia a un GEM y su blob en bruto se suelta con
 `gsp_fw_release_one(GSP_FW_UCODE)` en cuanto `gsp_rm_prepare` tiene su copia: pico
-≈125 MiB en vez de ≈190. La ruta Ampere está escrita pero **sin probar**: no hay
-3060 en esta máquina.
+≈125 MiB en vez de ≈190.
 
-**Ruta por familia en el bring-up.** `gsp_bringup.c` bifurca: Ampere → layout
-WPR + libos + cmdq + ACR best-effort + `booter_load` en SEC2; Blackwell →
+**Ampere (GA10x / GA107 — `run_ampere_boot` en `gsp_bringup.c`).** Cadena:
+WPR meta (`gsp_wpr_prepare_ampere`) → libos/cmdq → **FWSEC-FRTS** (`gsp_fwsec.c`)
+→ `enqueue_boot_rpcs` → `booter_load` en SEC2 → `run_gsp_rm_chain()`.
+FWSEC extrae el ucode de la VBIOS (partición BIT `'p'`), parchea DMEMMAPPER
+cmd FRTS (`0x15`) y lo ejecuta en el falcon GSP para montar **WPR2**
+(`NV_PFB_PRI_MMU_WPR2_ADDR_LO/HI` en `0x001fa824/28`). Si WPR2 ya está
+programado, se omite. Sin WPR2 el booter no puede alojar GSP-RM →
+`pool VRAM=no` / `GSP=fallo` en GA107. Log de éxito:
+`GSP booted (hw, booter_load Ampere + RPC, … MiB VRAM)`.
+`g3-check` exige `gsp_fwsec.c` en `source.list`. **HW de validación: GA107
+(ROG 3050 Mobile)**; no hay 3060 en estas máquinas. Blobs `ga107` = mismos
+bytes que `ga102` (no duplicar en rootfs).
+
+**Ruta por familia en el bring-up.** `gsp_bringup.c` bifurca: Ampere →
+`run_ampere_boot()` (WPR + FWSEC-FRTS + booter SEC2); Blackwell →
 `run_fmc_blackwell()`. El ACR de `acr_fw.c` es de Ampere (ucode `ga102` en SEC2)
 y en GB205 daba `falcon boot mbox0=0xbadf4100` — el falcon ni ejecuta — porque
 GB20x arranca por GSP-FMC/FSP. Tras un GSP vivo, las dos familias siguen por
@@ -912,6 +925,7 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 | `gsp_fw.c` | Carga blobs GSP + staging GEM | valida ELF/magic; el ucode NO va a GEM |
 | `gsp_rm.c` | ELF64 del ucode → `.fwimage`/firma + **radix3** verificada | fase `rm_radix3`, sin MMIO |
 | `gsp_wpr.c` | Bootloader RISC-V en sysmem + **`GspFwWprMeta`** | fase `wpr_meta`, solo lee VRAM |
+| `gsp_fwsec.c` | **FWSEC-FRTS** desde VBIOS (BIT `'p'`) → WPR2 | Ampere, antes de `booter_load` |
 | `gsp_libos.c` | Colas, logs, RMARGS, **`GSP_FMC_BOOT_PARAMS`** | fases `libos_args`/`cot_ready`, sin MMIO |
 | `gsp_dma.c` | `gsp_dma_buf` (equivalente de `nvkm_gsp_mem`) | reservas coherentes compartidas |
 | `fsp_lx.c` | **Envío del COT** por EMEM + espera al FMC | fase `cot_sent`; escribe MMIO |
@@ -943,9 +957,9 @@ enlazado al kernel Rust. `xtask/src/lx_build.rs`:
 **Distinción clave:** el grafo nvkm se construye en runtime; el **boot GSP y el
 compute en GB205 van por la ruta lx-native** (`fmc_lx`/`gsp_*`, no por
 `ga102_gsp_new` completo). G3b–G5 están en **GO en silicio** (2026-07-29). Ampere
-GA10x arranca por `booter_load` (WPR calculado por el driver) y, si el RISC-V
-queda vivo, sigue la misma cadena RM→pool; sin probar en esta máquina (no hay
-3060; la ROG ga107 es el HW de validación).
+GA10x/GA107 arranca por **FWSEC-FRTS + `booter_load`** (WPR calculado por el
+driver) y, si el RISC-V queda vivo, sigue la misma cadena RM→pool. Firmware
+ga107 = ga102 (mismos bytes).
 
 **Estado (2026-07-24): 62 fuentes nvkm/lib integradas, solo 4 dummies restantes**
 (`target/g3-nvkm-undefined.txt`), **todos dependientes de HW/ROM:**

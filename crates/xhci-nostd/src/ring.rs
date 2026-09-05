@@ -307,6 +307,20 @@ impl Trb {
         }
     }
 
+    /// Build a Stop Endpoint command TRB (xHCI 6.4.3.4). Tras un timeout el EP
+    /// sigue en Running: Reset Endpoint exige Halted y falla con Context State.
+    pub fn stop_endpoint(slot_id: u8, endpoint_id: u8, cycle: bool) -> Self {
+        Self {
+            parameter_lo: 0,
+            parameter_hi: 0,
+            status: 0,
+            control: (TRB_TYPE_STOP_ENDPOINT << TRB_TYPE_SHIFT)
+                | ((slot_id as u32) << TRB_SLOT_ID_SHIFT)
+                | ((endpoint_id as u32) << TRB_ENDPOINT_ID_SHIFT)
+                | if cycle { TRB_CYCLE_BIT } else { 0 },
+        }
+    }
+
     /// Build a Set TR Dequeue Pointer command TRB (Linux `xhci_set_tr_dequeue`).
     pub fn set_tr_dequeue(dequeue_ptr: u64, slot_id: u8, endpoint_id: u8, cycle: bool) -> Self {
         let mut trb = Self::zeroed();

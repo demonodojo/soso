@@ -1264,7 +1264,7 @@ GSP y no llegó a canal ni motor de copia, que es hoy el caso de las Ampere— l
 dice y se va a CPU sin más:
 
 ```
-soso-llm: GPU presente sin pool de VRAM (fase=booted) — inferencia en CPU
+soso-llm: GPU presente sin pool de VRAM (fase=booted o **fallo**) — inferencia en CPU
 ```
 
 Y el arranque lo canta antes de que preguntes: `gpu: NVIDIA detectada (…, pool
@@ -1311,7 +1311,7 @@ resultado viene del silicio de una GPU. El dispositivo se apaga al terminar el
 comando.
 
 La **fase** sale vacía aquí porque el dispositivo de software no tiene bring-up que
-recorrer. Con una GPU NVIDIA de verdad dice hasta dónde llegó (`booted`, `rm_ce`,
+recorrer. Con una GPU NVIDIA de verdad dice hasta dónde llegó (`booted`, `fallo`, `rm_ce`,
 `rm_compute`…), que es lo que convierte un `on_gpu=0` en un diagnóstico sin tener que
 leer el log de serie.
 
