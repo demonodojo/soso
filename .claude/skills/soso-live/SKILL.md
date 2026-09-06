@@ -122,6 +122,9 @@ Tests: `cargo xtask test-usb` (4 escenarios en paralelo).
 cargo xtask package-usb-live              # qwen3.8-27b demo (sin medir stick)
 cargo xtask flash-usb-live /dev/sdX --yes # mide, elige GGUF, dd, estira p3
 SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
+# incremental (pendrive ya flasheado; no toca p3 modelos):
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
 SOSO_QEMU_LIVE=1 cargo xtask run
 cargo xtask sosolog [--drv] [/dev/sdX]
 cargo xtask test-install

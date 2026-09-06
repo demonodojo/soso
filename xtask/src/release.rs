@@ -32,6 +32,7 @@ pub fn run(args: &[String]) {
     let kernel_src = root.join("target/kernel/x86_64-soso/debug/kernel");
     let kernel_dst = out_dir.join("kernel-x86_64");
     std::fs::copy(&kernel_src, &kernel_dst).expect("copiar kernel");
+    strip_kernel(&kernel_dst);
 
     let (pack_blob, files) = pack_rootfs(&root.join("rootfs")).expect("empaquetar rootfs");
     let pack_path = out_dir.join("rootfs.pack");
@@ -114,6 +115,32 @@ pub fn run(args: &[String]) {
         exit(status.code().unwrap_or(1));
     }
     println!("release: publicado {tag}");
+}
+
+/// Quita la información de depuración del kernel que se publica.
+///
+/// El perfil de compilación es `debug`, así que dos tercios largos del ELF son
+/// secciones `.debug_*` que nadie lee en tiempo de ejecución (el kernel no
+/// resuelve símbolos para sus panics). Descargarlas en cada actualización sería
+/// pagar ~25 MB por nada; el binario con símbolos sigue en `target/` para gdb.
+pub(crate) fn strip_kernel(path: &std::path::Path) {
+    let antes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    for tool in ["strip", "llvm-strip"] {
+        let ok = Command::new(tool)
+            .arg("-s")
+            .arg(path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            let despues = std::fs::metadata(path).map(|m| m.len()).unwrap_or(antes);
+            println!(
+                "release: kernel sin símbolos de depuración ({antes} B -> {despues} B, {tool})"
+            );
+            return;
+        }
+    }
+    eprintln!("release: aviso — no encontré strip/llvm-strip, publico el kernel entero ({antes} B)");
 }
 
 fn live_profile() -> DriverProfile {

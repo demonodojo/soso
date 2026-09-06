@@ -8,6 +8,10 @@
 # Userspace: binarios ELF copiados por `cargo xtask` desde user/
 /rootfs/bin/
 
+# Artefactos de `cargo xtask test-update` (release de prueba y su marcador)
+/rootfs/etc/actualiza-marca.txt
+/rootfs/var/
+
 # Claves SSH generadas o inyectadas por mkfs-soso / xtask
 /rootfs/etc/authorized_key
 /rootfs/etc/soso-release

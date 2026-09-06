@@ -14,30 +14,33 @@ use core::cmp::Ordering;
 
 use libsoso::{println, sys};
 use soso_abi::{O_RDONLY, O_WRONLY, UPD_WHICH_KERNEL, UPD_WHICH_MAILBOX};
-use soso_update_core::hash::hex_sha256;
-use soso_update_core::manifest::{self, Manifest};
+use soso_update_core::hash::{hex_sha256, Hasher};
+use soso_update_core::manifest::{self, FileEntry, Manifest};
 use soso_update_core::mailbox::Mailbox;
-use soso_update_core::pack::PackReader;
+use soso_update_core::plan::{self, Span};
 use soso_update_core::semver::{self, SemVer};
 
 libsoso::entry!(main);
 
 const SECTOR: usize = 512;
 const CHUNK: usize = 64 * 1024;
+/// Buffer de lectura para hashear ficheros ya instalados.
+const HASH_BUF: usize = 256 * 1024;
 
 fn main(args: &str) -> u8 {
     let parts: Vec<String> = args.split_whitespace().map(String::from).collect();
     let cmd = parts.first().map(|s| s.as_str()).unwrap_or("aplicar");
+    let rest: &[String] = parts.get(1..).unwrap_or(&[]);
     match cmd {
         "estado" => cmd_estado(),
-        "comprobar" => cmd_comprobar(&parts[1..]),
-        "aplicar" => cmd_aplicar(&parts[1..]),
+        "comprobar" => cmd_comprobar(rest),
+        "aplicar" => cmd_aplicar(rest),
         "revertir" => cmd_revertir(),
         "help" | "--help" | "-h" => {
             print_usage();
             0
         }
-        other if other.starts_with('-') || parts.is_empty() => cmd_aplicar(&parts),
+        other if other.starts_with('-') => cmd_aplicar(&parts),
         other => {
             println!("soso-update: subcomando desconocido {other}");
             print_usage();
@@ -113,19 +116,39 @@ fn cmd_comprobar(args: &[String]) -> u8 {
         Ordering::Equal => println!("ya estás en la última versión"),
         Ordering::Less => println!("remoto es más antiguo que local"),
     }
-    let mut cambios = 0u32;
-    for f in &man.files {
-        if file_needs_update(f) {
-            cambios += 1;
-            println!("  ~ {}", f.path);
-        }
+    let pendientes: Vec<FileEntry> = man
+        .files
+        .iter()
+        .filter(|f| file_needs_update(f))
+        .cloned()
+        .collect();
+    for f in &pendientes {
+        println!("  ~ {} ({})", f.path, humano(f.size));
     }
-    if cambios == 0 {
+    let mut total = 0u64;
+    if pendientes.is_empty() {
         println!("rootfs: sin cambios de fichero");
+    } else {
+        let spans = plan::plan_spans(&pendientes, plan::GAP_MAX, plan::SPAN_MAX);
+        let bytes = plan::plan_bytes(&spans);
+        total += bytes;
+        println!(
+            "rootfs: {} en {} {} (pack completo: {})",
+            humano(bytes),
+            spans.len(),
+            if spans.len() == 1 { "petición" } else { "peticiones" },
+            humano(man.pack_size)
+        );
     }
     if man.kernel_size > 0 {
-        println!("kernel: {} B (hash {})", man.kernel_size, &man.kernel_hash[..16]);
+        if read_release().map(|r| r.kernel) == Some(man.kernel_hash.clone()) {
+            println!("kernel: sin cambios");
+        } else {
+            total += man.kernel_size;
+            println!("kernel: {} (hash {})", humano(man.kernel_size), &man.kernel_hash[..16]);
+        }
     }
+    println!("descarga total: {}", humano(total));
     0
 }
 
@@ -153,53 +176,85 @@ fn cmd_aplicar(args: &[String]) -> u8 {
         "/etc/actualiza.estado",
         &format!("APLICANDO {}\n", man.version_raw),
     );
-    let pack = match load_pack(&opts, &man) {
-        Ok(p) => p,
-        Err(e) => {
-            println!("soso-update: {e}");
-            return 1;
+
+    // Sólo los ficheros que de verdad cambian. El resto del pack ni se pide.
+    let pendientes: Vec<FileEntry> = man
+        .files
+        .iter()
+        .filter(|f| file_needs_update(f))
+        .cloned()
+        .collect();
+
+    if pendientes.is_empty() {
+        println!("rootfs: sin cambios");
+    } else {
+        let spans = plan::plan_spans(&pendientes, plan::GAP_MAX, plan::SPAN_MAX);
+        let bytes = plan::plan_bytes(&spans);
+        println!(
+            "rootfs: {} de {} ficheros, {} de {} ({} {})",
+            pendientes.len(),
+            man.files.len(),
+            humano(bytes),
+            humano(man.pack_size),
+            spans.len(),
+            if spans.len() == 1 { "petición" } else { "peticiones" }
+        );
+        for span in &spans {
+            if let Err(e) = apply_span(&opts, &pendientes, span) {
+                println!("soso-update: {e}");
+                return 1;
+            }
         }
-    };
-    if hex_sha256(&pack) != man.pack_hash {
-        println!("soso-update: hash de rootfs.pack no coincide");
-        return 1;
     }
-    let reader = PackReader::new(&pack);
-    for f in &man.files {
-        if !file_needs_update(f) {
-            continue;
-        }
-        let Some(blob) = reader.read_entry(f) else {
-            println!("soso-update: offset inválido para {}", f.path);
-            return 1;
-        };
-        if hex_sha256(blob) != f.hash_hex {
-            println!("soso-update: hash corrupto en {}", f.path);
-            return 1;
-        }
-        let path = format!("/{}", f.path);
-        if let Some(parent) = parent_dir(&path) {
-            let _ = sys::mkdir(parent);
-        }
-        if !write_path(&path, blob) {
-            println!("soso-update: no pude escribir {path}");
-            return 1;
-        }
-        println!("  ok {}", f.path);
-    }
+
     if !opts.sin_kernel {
         if let Err(e) = apply_kernel(&opts, &man) {
             println!("soso-update: aviso kernel: {e}");
         }
     }
     let release = format!(
-        "version={}\nbuild={}\nfecha={}\n",
-        man.version_raw, man.build, man.fecha
+        "version={}\nbuild={}\nfecha={}\nkernel={}\n",
+        man.version_raw, man.build, man.fecha, man.kernel_hash
     );
     write_file("/etc/soso-release", &release);
     let _ = sys::unlink("/etc/actualiza.estado");
     println!("soso-update: listo — reinicia para arrancar soso {}", man.version_raw);
     0
+}
+
+/// Descarga un tramo del pack y escribe los ficheros que contiene.
+fn apply_span(opts: &Opts, pendientes: &[FileEntry], span: &Span) -> Result<(), &'static str> {
+    let blob = fetch_pack_span(opts, span.start, span.len())?;
+    for &i in &span.files {
+        let f = &pendientes[i];
+        let rel = (f.offset - span.start) as usize;
+        let data = blob
+            .get(rel..rel + f.size as usize)
+            .ok_or("tramo incompleto")?;
+        if hex_sha256(data) != f.hash_hex {
+            return Err("hash corrupto en fichero descargado");
+        }
+        let path = format!("/{}", f.path);
+        if let Some(parent) = parent_dir(&path) {
+            let _ = sys::mkdir(parent);
+        }
+        if let Err((fase, e)) = escribir(&path, data) {
+            println!("soso-update: {path}: {fase} falló ({e})");
+            return Err("no pude escribir el fichero");
+        }
+        println!("  ok {} ({})", f.path, humano(f.size));
+    }
+    Ok(())
+}
+
+fn humano(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{},{} MB", bytes / (1024 * 1024), (bytes % (1024 * 1024)) / 104858)
+    } else if bytes >= 1024 {
+        format!("{} kB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn cmd_revertir() -> u8 {
@@ -242,6 +297,7 @@ fn parse_opts(args: &[String]) -> Opts {
 }
 
 struct ReleaseInfo {
+    kernel: String,
     version: String,
     build: String,
     fecha: String,
@@ -262,6 +318,7 @@ fn read_release() -> Option<ReleaseInfo> {
     let mut version = String::new();
     let mut build = String::new();
     let mut fecha = String::new();
+    let mut kernel = String::new();
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("version=") {
             version = v.into();
@@ -269,6 +326,8 @@ fn read_release() -> Option<ReleaseInfo> {
             build = v.into();
         } else if let Some(v) = line.strip_prefix("fecha=") {
             fecha = v.into();
+        } else if let Some(v) = line.strip_prefix("kernel=") {
+            kernel = v.into();
         }
     }
     if version.is_empty() {
@@ -278,6 +337,7 @@ fn read_release() -> Option<ReleaseInfo> {
         version,
         build,
         fecha,
+        kernel,
     })
 }
 
@@ -309,16 +369,54 @@ fn load_manifest(opts: &Opts) -> Result<Manifest, &'static str> {
     Manifest::parse(&data).map_err(|_| "manifest inválido")
 }
 
-fn load_pack(opts: &Opts, man: &Manifest) -> Result<Vec<u8>, &'static str> {
+/// Trae `[start, start+len)` del pack, de la copia local o por HTTP `Range`.
+fn fetch_pack_span(opts: &Opts, start: u64, len: u64) -> Result<Vec<u8>, &'static str> {
     if let Some(dir) = &opts.local {
-        return read_file_bytes(&format!("{dir}/rootfs.pack"), man.pack_size as usize + 1)
+        return read_file_span(&format!("{dir}/rootfs.pack"), start, len)
             .ok_or("rootfs.pack local");
     }
     let url = format!("{}/rootfs.pack", read_config_url().trim_end_matches('/'));
-    net::https_download_all(&url, None, man.pack_size)
+    net::https_download_span(&url, None, start, len)
+}
+
+/// Lee un tramo de un fichero local sin cargarlo entero.
+fn read_file_span(path: &str, start: u64, len: u64) -> Option<Vec<u8>> {
+    let fd = sys::open(path, O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    if sys::seek(fd as u64, start as i64, soso_abi::SEEK_SET) < 0 {
+        let _ = sys::close(fd as u64);
+        return None;
+    }
+    let mut out = Vec::new();
+    if out.try_reserve(len as usize).is_err() {
+        let _ = sys::close(fd as u64);
+        return None;
+    }
+    let mut buf = alloc::vec![0u8; HASH_BUF];
+    while (out.len() as u64) < len {
+        let falta = (len - out.len() as u64).min(HASH_BUF as u64) as usize;
+        let n = sys::read(fd as u64, &mut buf[..falta]);
+        if n <= 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    let _ = sys::close(fd as u64);
+    if out.len() as u64 == len { Some(out) } else { None }
 }
 
 fn apply_kernel(opts: &Opts, man: &Manifest) -> Result<(), &'static str> {
+    // El kernel es el otro bloque grande. Si el que ya está instalado tiene el
+    // hash que pide el manifest, no hay nada que descargar ni que reflashear.
+    if !man.kernel_hash.is_empty()
+        && read_release().map(|r| r.kernel) == Some(man.kernel_hash.clone())
+    {
+        println!("kernel: sin cambios");
+        return Ok(());
+    }
+    println!("kernel: {}", humano(man.kernel_size));
     let data = if let Some(dir) = &opts.local {
         read_file_bytes(
             &format!("{dir}/kernel-x86_64"),
@@ -369,10 +467,52 @@ fn pad_sector(chunk: &[u8]) -> Vec<u8> {
 
 fn file_needs_update(entry: &manifest::FileEntry) -> bool {
     let path = format!("/{}", entry.path);
-    let Some(data) = read_file_bytes(&path, entry.size as usize + 1) else {
-        return true;
+    // El tamaño descarta la mayoría de los casos sin tocar el contenido: leer
+    // los 63 MB de un firmware GSP sólo para descubrir que ha cambiado sería
+    // tirar el disco a la basura.
+    match file_size(&path) {
+        None => true,
+        Some(size) if size != entry.size => true,
+        Some(_) => hash_file(&path).map(|h| h != entry.hash_hex).unwrap_or(true),
+    }
+}
+
+fn file_size(path: &str) -> Option<u64> {
+    let mut st = soso_abi::Stat {
+        ino: 0,
+        size: 0,
+        mtime: 0,
+        file_type: 0,
+        _pad: [0u8; 7],
     };
-    hex_sha256(&data) != entry.hash_hex
+    if sys::stat(path, &mut st) < 0 {
+        return None;
+    }
+    Some(st.size)
+}
+
+/// SHA-256 de un fichero leyéndolo por trozos: el pico de RAM es el buffer, no
+/// el fichero.
+fn hash_file(path: &str) -> Option<String> {
+    let fd = sys::open(path, O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let mut h = Hasher::new();
+    let mut buf = alloc::vec![0u8; HASH_BUF];
+    loop {
+        let n = sys::read(fd as u64, &mut buf);
+        if n < 0 {
+            let _ = sys::close(fd as u64);
+            return None;
+        }
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n as usize]);
+    }
+    let _ = sys::close(fd as u64);
+    Some(h.finish_hex())
 }
 
 fn file_exists(path: &str) -> bool {
@@ -410,15 +550,23 @@ fn write_file(path: &str, content: &str) -> bool {
 }
 
 fn write_path(path: &str, data: &[u8]) -> bool {
+    escribir(path, data).is_ok()
+}
+
+/// Escribe un fichero devolviendo el errno y la fase que falló: con
+/// `Fd::WriteBuf` el contenido se materializa en el `close`, así que un fallo
+/// de disco aparece ahí y no en el `write`.
+fn escribir(path: &str, data: &[u8]) -> Result<(), (&'static str, i64)> {
     let fd = sys::open(path, O_WRONLY);
     if fd < 0 {
-        return false;
+        return Err(("open", fd));
     }
-    if sys::write_all(fd as u64, data).is_err() {
+    if let Err(e) = sys::write_all(fd as u64, data) {
         let _ = sys::close(fd as u64);
-        return false;
+        return Err(("write", e));
     }
-    sys::close(fd as u64) >= 0
+    let r = sys::close(fd as u64);
+    if r < 0 { Err(("close", r)) } else { Ok(()) }
 }
 
 fn parent_dir(path: &str) -> Option<&str> {

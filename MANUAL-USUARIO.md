@@ -620,6 +620,27 @@ Opciones útiles: `--forzar` (reinstala aunque la versión no suba), `--sin-kern
 
 Configuración en `/etc/actualiza.conf` (`url=https://…/releases/latest/download`).
 
+**Solo se descarga lo que cambia.** `aplicar` compara cada fichero instalado con
+el hash del manifiesto y pide por HTTP `Range` únicamente los tramos del pack que
+cubren los ficheros distintos, agrupando los que están cerca para no repetir
+handshakes TLS. El kernel se salta entero si el que ya tienes es el que pide el
+manifiesto. Una actualización que solo toca un par de programas baja unos pocos
+MB en vez del pack completo:
+
+```
+$ soso-update comprobar
+remoto: 0.2.2 (a1b2c3d)
+local:  0.2.1
+hay actualización disponible
+  ~ bin/soso-update (1,3 MB)
+rootfs: 1,3 MB en 1 petición (pack completo: 12 MB)
+kernel: sin cambios
+descarga total: 1,3 MB
+```
+
+`comprobar` no descarga nada: solo trae el manifiesto y te dice el tamaño real
+de la actualización antes de lanzarla.
+
 Tras `aplicar`, **reinicia** para que el shim UEFI aplique el kernel nuevo.
 Si el arranque falla, el shim revierte solo al reiniciar otra vez.
 Las instalaciones hechas **antes** de tener hueco `SOSOKRN.BIN` en la ESP
@@ -782,6 +803,18 @@ cargo xtask sosolog | less
 
 Regenera la imagen live tras actualizar el kernel:
 `cargo xtask package-usb-live` (incluye el fichero pre-creado en la ESP).
+
+**Actualización rápida (desarrollo):** si el pendrive ya está flasheado y solo
+cambiaste kernel o rootfs, no hace falta reescribir los modelos (p3):
+
+```sh
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only rootfs
+```
+
+`--skip-models` actualiza ESP (p1) y rootfs (p2) sin tocar sosomfs. Preserva
+`SOSOWIFI.TXT` si ya lo tenías en la ESP.
 
 ### Buzón de instalación (`SOSOBOOT.TXT`)
 
@@ -1485,6 +1518,9 @@ SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
 
 # Override manual:
 # SOSO_MODELS_DIR=target/mi-modelo cargo xtask flash-usb-live /dev/sdX --yes
+
+# Tras el primer flash: actualizar solo kernel/rootfs (sin reescribir modelos):
+# sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
 
 # Instalar en disco interno desde Linux (USB conectado):
 lsblk

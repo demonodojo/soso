@@ -53,6 +53,8 @@ cargo xtask release        # pack release artifacts (manifest + rootfs.pack + ke
 
 ```sh
 cargo xtask flash-usb-live /dev/sdX --yes   # flash stick (picks best model that fits)
+# incremental update (kernel+rootfs only, keeps models on p3):
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
 ```
 
 With soso running (`cargo xtask run`), in another terminal:
@@ -187,6 +189,7 @@ Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G
 | `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
 | `cargo xtask package-usb-live` | Single GPT image (ESP + sosofs + sosomfs) for USB or install |
 | `sudo cargo xtask flash-usb-live /dev/sdX --yes` | Flash live USB (model sized to stick) |
+| `sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models` | Incremental: ESP + rootfs only (models unchanged) |
 | `cargo xtask release [--publish]` | Pack release (`manifest.txt`, `rootfs.pack`, `kernel-x86_64`); `--publish` → GitHub Releases |
 | `cargo xtask test-install` | E2E native install (OVMF, 3 boots) |
 | `cargo xtask test-update` | E2E local update (`soso-update aplicar --local`) |

@@ -49,22 +49,47 @@ pub fn https_download_all(
     token: Option<&str>,
     total: u64,
 ) -> Result<Vec<u8>, &'static str> {
+    https_download_span(url, token, 0, total)
+}
+
+/// Descarga `len` bytes desde `start` con peticiones `Range` de como mucho
+/// `MAX_RANGE`. Es la primitiva de la actualización parcial: pedimos sólo los
+/// tramos del pack que cubren ficheros cambiados.
+pub fn https_download_span(
+    url: &str,
+    token: Option<&str>,
+    start: u64,
+    len: u64,
+) -> Result<Vec<u8>, &'static str> {
     let mut out = Vec::new();
-    if out.try_reserve(total as usize).is_err() {
+    if len == 0 {
+        return Ok(out);
+    }
+    if out.try_reserve(len as usize).is_err() {
         return Err("sin memoria");
     }
-    let mut off = 0u64;
-    while off < total {
-        let end = (off + MAX_RANGE - 1).min(total - 1);
+    let mut off = start;
+    let fin = start + len;
+    while off < fin {
+        let end = (off + MAX_RANGE).min(fin) - 1;
         let (status, chunk) =
             soso_http::https_get_range(&Net, url, token, off, end).map_err(|_| "range HTTP")?;
-        if status != 206 && !(off == 0 && status == 200) {
+        // 200 sólo vale si el servidor ignoró el Range y nos dio el fichero
+        // entero, y eso únicamente sirve cuando pedíamos desde el principio.
+        if status != 206 {
+            if start == 0 && off == 0 && status == 200 && chunk.len() as u64 >= len {
+                out.extend_from_slice(&chunk[..len as usize]);
+                return Ok(out);
+            }
             return Err("HTTP range");
         }
+        if chunk.is_empty() {
+            return Err("range vacío");
+        }
         out.extend_from_slice(&chunk);
-        off = end + 1;
+        off += chunk.len() as u64;
     }
-    if out.len() as u64 != total {
+    if out.len() as u64 != len {
         return Err("tamaño inesperado");
     }
     Ok(out)

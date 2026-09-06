@@ -7,7 +7,7 @@ use crate::drivers::{self, DriverProfile};
 use crate::live_models;
 
 /// Perfil live: `SOSO_DRIVERS` si está definido; si no, `live-usb` (GPU GA107 incluida).
-fn live_profile() -> DriverProfile {
+pub(crate) fn live_driver_profile() -> DriverProfile {
     if std::env::var("SOSO_DRIVERS")
         .map(|v| !v.is_empty())
         .unwrap_or(false)
@@ -33,7 +33,7 @@ pub fn run() {
 /// Empaqueta el live USB. `usb_bytes` fija el presupuesto de modelos (p. ej. tamaño del pendrive).
 pub fn run_with_capacity(usb_bytes: Option<u64>) {
     let root = super::project_root();
-    let profile = live_profile();
+    let profile = live_driver_profile();
     preflight_gpu_firmware(&root, &profile);
     print_profile_summary(&profile);
 
@@ -159,13 +159,7 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
         "dd SOSOINSTALL",
     );
 
-    // Log del kernel, informe hwscan y buzón para el instalador → shim UEFI.
-    create_esp_file(&live, b"SOSOLOG ", b"TXT", 256 * 1024);
-    create_esp_file(&live, b"SOSODRV ", b"TXT", 16 * 1024);
-    create_esp_file(&live, b"SOSOBOOT", b"TXT", 4096);
-    create_esp_file(&live, b"SOSOWIFI", b"TXT", 4096);
-    create_esp_file(&live, b"SOSOUPD ", b"TXT", 4096);
-    create_esp_file(&live, b"SOSOKRN ", b"BIN", 64 * 1024 * 1024);
+    create_esp_slots(&live);
 
     write_flash(
         &out_dir,
@@ -565,6 +559,127 @@ fn chrono_now() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+/// Huecos 8.3 pre-creados en la ESP (log, hwscan, install, WiFi, OTA).
+pub(crate) fn create_esp_slots(live: &Path) {
+    create_esp_file(live, b"SOSOLOG ", b"TXT", 256 * 1024);
+    create_esp_file(live, b"SOSODRV ", b"TXT", 16 * 1024);
+    create_esp_file(live, b"SOSOBOOT", b"TXT", 4096);
+    create_esp_file(live, b"SOSOWIFI", b"TXT", 4096);
+    create_esp_file(live, b"SOSOUPD ", b"TXT", 4096);
+    create_esp_file(live, b"SOSOKRN ", b"BIN", 64 * 1024 * 1024);
+}
+
+fn esp_wifi_name11() -> [u8; 11] {
+    let mut name11 = [0u8; 11];
+    name11[..8].copy_from_slice(b"SOSOWIFI");
+    name11[8..11].copy_from_slice(b"TXT");
+    name11
+}
+
+/// Lee `SOSOWIFI.TXT` de la ESP si existe (para preservarlo al reflashear p1).
+pub(crate) fn read_esp_wificonf(dev: &Path) -> Option<Vec<u8>> {
+    let p1 = partition_first_sector(dev, 1)?;
+    crate::fat32_write::read_root_file(dev, p1, &esp_wifi_name11()).ok()
+}
+
+/// Restaura credenciales WiFi en la ESP tras actualizar p1.
+pub(crate) fn write_esp_wificonf(dev: &Path, data: &[u8]) -> Result<(), String> {
+    let p1 = partition_first_sector(dev, 1)
+        .ok_or_else(|| String::from("sin partición ESP (p1)"))?;
+    crate::fat32_write::write_root_file(dev, p1, b"SOSOWIFI", b"TXT", data)
+}
+
+/// Comprueba que `dev` tiene la GPT mínima de un live soso (p1–p3).
+pub(crate) fn validate_live_usb(dev: &Path) -> Result<(), String> {
+    let out = Command::new("sgdisk")
+        .args(["-v"])
+        .arg(dev)
+        .output()
+        .map_err(|e| format!("sgdisk: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "no hay GPT válida en {} (¿pendrive sin flashear?)",
+            dev.display()
+        ));
+    }
+    for part in 1..=3 {
+        partition_range(dev, part).ok_or_else(|| {
+            format!(
+                "falta partición {part} en {} — haz un flash completo primero",
+                dev.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Copia una partición entera de `src` a `dst` (mismo número). Aborta si la
+/// fuente no cabe en el destino.
+pub(crate) fn dd_partition(
+    src: &Path,
+    src_part: u32,
+    dst: &Path,
+    dst_part: u32,
+) -> Result<(), String> {
+    let (src_first, src_last) = partition_range(src, src_part)
+        .ok_or_else(|| format!("sin partición {src_part} en {}", src.display()))?;
+    let (dst_first, dst_last) = partition_range(dst, dst_part)
+        .ok_or_else(|| format!("sin partición {dst_part} en {}", dst.display()))?;
+    let src_sectors = src_last.saturating_sub(src_first).saturating_add(1);
+    let dst_sectors = dst_last.saturating_sub(dst_first).saturating_add(1);
+    if src_sectors > dst_sectors {
+        return Err(format!(
+            "partición {dst_part} del destino ({dst_sectors} sectores) es más pequeña \
+             que la fuente ({src_sectors}) — haz un flash completo"
+        ));
+    }
+    let label = format!("dd p{src_part}→p{dst_part}");
+    run_cmd(
+        Command::new("dd")
+            .arg(format!("if={}", src.display()))
+            .arg(format!("of={}", dst.display()))
+            .args(["bs=512", "conv=notrunc"])
+            .arg(format!("skip={src_first}"))
+            .arg(format!("seek={dst_first}"))
+            .arg(format!("count={src_sectors}")),
+        &label,
+    );
+    Ok(())
+}
+
+/// Escribe `data` en la partición `part` del dispositivo (desde el sector 0 de la partición).
+pub(crate) fn dd_to_partition(
+    src: &Path,
+    dst: &Path,
+    dst_part: u32,
+) -> Result<(), String> {
+    let data_len = std::fs::metadata(src)
+        .map_err(|e| format!("stat {}: {e}", src.display()))?
+        .len();
+    let (dst_first, dst_last) = partition_range(dst, dst_part)
+        .ok_or_else(|| format!("sin partición {dst_part} en {}", dst.display()))?;
+    let dst_sectors = dst_last.saturating_sub(dst_first).saturating_add(1);
+    let need_sectors = data_len.div_ceil(512);
+    if need_sectors > dst_sectors {
+        return Err(format!(
+            "{} ({} B) no cabe en partición {dst_part} ({} sectores) — haz un flash completo",
+            src.display(),
+            data_len,
+            dst_sectors
+        ));
+    }
+    run_cmd(
+        Command::new("dd")
+            .arg(format!("if={}", src.display()))
+            .arg(format!("of={}", dst.display()))
+            .args(["bs=512", "conv=notrunc"])
+            .arg(format!("seek={dst_first}"))
+            .arg(format!("count={need_sectors}")),
+        &format!("dd → p{dst_part}"),
+    );
+    Ok(())
+}
+
 /// Pre-crea un fichero contiguo en la raíz de la ESP, relleno de `\n`.
 ///
 /// El kernel no sabe crear ficheros FAT: `drivers/espfat.rs` solo localiza y
@@ -599,7 +714,7 @@ fn create_esp_file(live: &Path, name: &[u8; 8], ext: &[u8; 3], size: usize) {
     );
 }
 
-fn run_cmd(cmd: &mut Command, label: &str) {
+pub(crate) fn run_cmd(cmd: &mut Command, label: &str) {
     let st = cmd.status().unwrap_or_else(|e| panic!("{label}: {e}"));
     if !st.success() {
         eprintln!("xtask: {label} falló");

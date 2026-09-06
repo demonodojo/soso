@@ -10,6 +10,33 @@ pub fn sha256(data: &[u8]) -> Hash256 {
     h.finalize().into()
 }
 
+/// SHA-256 incremental, para hashear sin tener el contenido entero en RAM.
+pub struct Hasher(Sha256);
+
+impl Hasher {
+    pub fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        self.0.update(data);
+    }
+
+    pub fn finish(self) -> Hash256 {
+        self.0.finalize().into()
+    }
+
+    pub fn finish_hex(self) -> alloc::string::String {
+        hex::encode(self.finish())
+    }
+}
+
+impl Default for Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Hex minúsculas de 64 caracteres.
 pub fn hex_sha256(data: &[u8]) -> alloc::string::String {
     let h = sha256(data);

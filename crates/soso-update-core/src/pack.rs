@@ -50,8 +50,9 @@ impl PackWriter {
     }
 
     pub fn should_pack(rel: &str) -> bool {
-        use crate::PACK_SKIP;
+        use crate::{PACK_SKIP, PACK_SKIP_DIRS};
         !PACK_SKIP.iter().any(|skip| *skip == rel)
+            && !PACK_SKIP_DIRS.iter().any(|dir| rel.starts_with(dir))
     }
 
     pub fn push(&mut self, path: String, data: Vec<u8>) {
@@ -91,6 +92,15 @@ impl Default for PackWriter {
 /// Empaqueta un directorio rootfs (host).
 #[cfg(feature = "std")]
 pub fn pack_rootfs(root: &std::path::Path) -> std::io::Result<(Vec<u8>, Vec<FileEntry>)> {
+    pack_rootfs_con(root, |_| true)
+}
+
+/// Como [`pack_rootfs`] pero admitiendo un filtro extra sobre la ruta relativa.
+#[cfg(feature = "std")]
+pub fn pack_rootfs_con<F: Fn(&str) -> bool>(
+    root: &std::path::Path,
+    incluir: F,
+) -> std::io::Result<(Vec<u8>, Vec<FileEntry>)> {
     use std::fs;
     use std::io;
 
@@ -107,7 +117,7 @@ pub fn pack_rootfs(root: &std::path::Path) -> std::io::Result<(Vec<u8>, Vec<File
                     .strip_prefix(root)
                     .map_err(|_| io::Error::other("strip_prefix"))?;
                 let rel = rel.to_string_lossy().replace('\\', "/");
-                if !PackWriter::should_pack(&rel) {
+                if !PackWriter::should_pack(&rel) || !incluir(&rel) {
                     continue;
                 }
                 let data = fs::read(&path)?;
@@ -117,6 +127,21 @@ pub fn pack_rootfs(root: &std::path::Path) -> std::io::Result<(Vec<u8>, Vec<File
     }
     writer.sort_entries();
     Ok(writer.build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PackWriter;
+
+    #[test]
+    fn no_empaqueta_volumenes_de_solo_lectura() {
+        // /models es sosomfs: escribir ahí da EIO y rompe `soso-update aplicar`.
+        assert!(!PackWriter::should_pack("models/tiny/index.som"));
+        assert!(!PackWriter::should_pack("var/actualiza-prueba/rootfs.pack"));
+        assert!(!PackWriter::should_pack("etc/soso-release"));
+        assert!(PackWriter::should_pack("bin/soso-update"));
+        assert!(PackWriter::should_pack("lib/firmware/nvidia/gb205/gsp/fmc-570.144.bin"));
+    }
 }
 
 pub fn pack_hash(data: &[u8]) -> String {

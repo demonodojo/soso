@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use soso_update_core::hash::hex_sha256;
 use soso_update_core::manifest::Manifest;
-use soso_update_core::pack::pack_rootfs;
+use soso_update_core::pack::pack_rootfs_con;
 use soso_update_core::semver::parse as parse_semver;
 
 use crate::test::{esperar_en_fichero, ssh_guion};
@@ -14,6 +14,8 @@ use crate::test::{esperar_en_fichero, ssh_guion};
 const SSH_PORT: u16 = 2243;
 const MAC: &str = "52:54:00:12:34:43";
 const TEST_VER: &str = "0.2.1-prueba";
+const MARCA_NUEVA: &str = "nueva\n";
+const MARCA_VIEJA: &str = "vieja\n";
 
 pub fn run() {
     let root = crate::project_root();
@@ -69,6 +71,9 @@ pub fn run() {
 
 fn preparar_release_prueba(root: &Path) {
     let rel_dir = root.join("rootfs/var/actualiza-prueba");
+    // De una pasada anterior pueden quedar ~160 MB aquí dentro; el rootfs se
+    // empaqueta entero en la imagen y no cabría.
+    let _ = std::fs::remove_dir_all(&rel_dir);
     std::fs::create_dir_all(&rel_dir).expect("actualiza-prueba");
 
     crate::build_user();
@@ -87,10 +92,28 @@ fn preparar_release_prueba(root: &Path) {
         format!("version={TEST_VER}\nbuild=prueba\nfecha=2026-09-04\n"),
     )
     .expect("soso-release prueba");
-    let (pack_blob, files) = pack_rootfs(&root.join("rootfs")).expect("pack");
+    // Un fichero que de verdad cambie: el pack lleva "nueva" y el live que se
+    // instala lleva "vieja", así que `aplicar` tiene que bajar ese tramo y sólo
+    // ese. Sin esto el pack sería idéntico al rootfs instalado y la descarga
+    // parcial no se ejercitaría.
+    let marca_path = etc.join("actualiza-marca.txt");
+    std::fs::write(&marca_path, MARCA_NUEVA).expect("marca nueva");
+    // Sin el firmware de la GPU: son 127 MB que el test no necesita y que, al
+    // vivir el release dentro del propio rootfs, duplicarían la imagen.
+    let (pack_blob, files) = pack_rootfs_con(&root.join("rootfs"), |rel| {
+        !rel.starts_with("lib/firmware/")
+    })
+    .expect("pack");
+    std::fs::write(&marca_path, MARCA_VIEJA).expect("marca vieja");
     crate::version::write_soso_release(root);
 
-    std::fs::write(rel_dir.join("kernel-x86_64"), &kernel_bytes).expect("kernel copy");
+    // Igual que `cargo xtask release`: el kernel que se publica va sin símbolos
+    // de depuración. Así la fase 2 arranca exactamente el ELF que recibiría una
+    // placa real, y no un binario distinto al del release.
+    let kernel_pub = rel_dir.join("kernel-x86_64");
+    std::fs::write(&kernel_pub, &kernel_bytes).expect("kernel copy");
+    crate::release::strip_kernel(&kernel_pub);
+    let kernel_bytes = std::fs::read(&kernel_pub).expect("kernel stripped");
     std::fs::write(rel_dir.join("rootfs.pack"), &pack_blob).expect("pack");
 
     let manifest = Manifest {
@@ -128,6 +151,17 @@ fn fase_aplicar(
     if !salida.contains("listo") {
         return Err(format!("aplicar no terminó bien: {salida:?}"));
     }
+    if !salida.contains("etc/actualiza-marca.txt") {
+        return Err(format!("no actualizó el fichero cambiado: {salida:?}"));
+    }
+    // La gracia de la actualización parcial: se piden unos pocos ficheros, no
+    // los 60 y pico del pack.
+    if let Some(l) = salida.lines().find(|l| l.trim_start().starts_with("rootfs:"))
+        && let Some(n) = l.split_whitespace().nth(1).and_then(|n| n.parse::<usize>().ok())
+        && n > 5
+    {
+        return Err(format!("descargó {n} ficheros, esperaba unos pocos: {l}"));
+    }
     Ok(salida)
 }
 
@@ -146,11 +180,21 @@ fn fase_comprobar_version(
     let salida = ssh_guion(
         key,
         SSH_PORT,
-        "soso-update estado\nexit\n",
+        // El `cat` va primero: la última línea del guion se pierde a veces al
+        // cerrar la sesión SSH, y la salida de `estado` sirve de barrera.
+        // Termina en `halt`, no en `exit`: `exit` cierra sosh pero deja la
+        // sesión SSH abierta y el guion se come el timeout entero.
+        "cat /etc/actualiza-marca.txt\nsoso-update estado\nhalt\n",
         Duration::from_secs(120),
     )?;
-    if !salida.contains(ver) {
-        return Err(format!("estado no muestra {ver}: {salida:?}"));
+    // Ojo: `estado` también imprime el fichero de progreso "APLICANDO <ver>"
+    // que queda si `aplicar` se cortó a medias, así que exigimos la línea del
+    // rootfs; si no, un fallo a mitad se colaría como éxito.
+    if !salida.contains(&format!("rootfs: {ver}")) {
+        return Err(format!("estado no muestra rootfs {ver}: {salida:?}"));
+    }
+    if !salida.contains(MARCA_NUEVA.trim()) {
+        return Err(format!("el fichero actualizado no sobrevivió al reinicio: {salida:?}"));
     }
     Ok(())
 }

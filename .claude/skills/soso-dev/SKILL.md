@@ -34,7 +34,7 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **qwen3.8-27b**; ver `docs/L5c-on-box.md`) |
-| `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa |
+| `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa. **`--skip-models`**: solo ESP+rootfs (bucle diario); **`--only kernel|rootfs`** |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
 | `cargo xtask sosolog --drv [/dev/sdX]` | Igual pero muestra `SOSODRV.TXT`: el informe hwscan del último arranque (alias `--hwscan`) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
@@ -86,6 +86,8 @@ QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
 ```sh
 # Live USB ya incluye nouveau+iwlwifi; solo flash:
 cargo xtask flash-usb-live /dev/sdX --yes
+# Tras el primer flash (solo kernel/rootfs, modelos intactos):
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
 # WiFi: edita SOSOWIFI.TXT en ESP p1 o /etc/wifi.conf antes de flashear
 # SSH en placa: ssh -i target/soso_test_key soso@<ip>  (puerto 22)
 ./scripts/l6-iwl-fw-hostcheck.sh          # parser TLV, sin hardware

@@ -102,7 +102,7 @@ struct read_vbios_cmd {
     uint64_t addr;
     uint32_t size;
     uint32_t flags;
-};
+} __attribute__((packed));
 
 struct frts_region_cmd {
     uint32_t ver;
@@ -110,12 +110,14 @@ struct frts_region_cmd {
     uint32_t addr;
     uint32_t size;
     uint32_t ftype;
-};
+} __attribute__((packed));
 
 struct frts_cmd {
     struct read_vbios_cmd read_vbios;
     struct frts_region_cmd frts_region;
-};
+} __attribute__((packed));
+
+#define NVFW_DMAP_SIGNATURE 0x50414d44u /* "DMAP" */
 
 struct fwsec_ucode_info {
     uint8_t version;
@@ -419,36 +421,37 @@ static int pmu_lookup_fwsec(unsigned fwsec_off, unsigned fwsec_len,
     unsigned entry_count;
     unsigned i;
 
+    unsigned base = fwsec_off + falcon_data_off;
+
     if (falcon_data_off + 4u > fwsec_len) {
         return -1;
     }
-    hdr_len = rom_rd8(fwsec_off + falcon_data_off);
-    entry_len = rom_rd8(fwsec_off + falcon_data_off + 2);
-    entry_count = rom_rd8(fwsec_off + falcon_data_off + 3);
+    hdr_len = rom_rd8(base + 1);
+    entry_len = rom_rd8(base + 2);
+    entry_count = rom_rd8(base + 3);
 
-    lx_printk("nouveau-lx: PmuLookupTable hdr=%u entry=%u count=%u\n",
-              hdr_len, entry_len, entry_count);
+    lx_printk("nouveau-lx: PmuLookupTable @0x%x ver=%u hdr=%u entry=%u count=%u\n",
+              falcon_data_off, rom_rd8(base), hdr_len, entry_len, entry_count);
 
     for (i = 0; i < entry_count; i++) {
         unsigned eoff = falcon_data_off + hdr_len + i * entry_len;
         uint8_t app_id;
         uint32_t data;
 
-        if (eoff + 6u > fwsec_len) {
+        if (eoff + entry_len > fwsec_len || entry_len < 6u) {
             break;
         }
         app_id = rom_rd8(fwsec_off + eoff);
         data = rom_rd32(fwsec_off + eoff + 2);
-        if (app_id != PMU_APPID_FWSEC_PROD) {
-            continue;
+        if (app_id == PMU_APPID_FWSEC_PROD) {
+            if (data < pciat_len) {
+                lx_printk("nouveau-lx: PMU 0x85 data=0x%x < pciat_len\n", data);
+                return -1;
+            }
+            *ucode_off_out = data - pciat_len;
+            lx_printk("nouveau-lx: PMU 0x85 ucode_off=0x%x\n", *ucode_off_out);
+            return 0;
         }
-        if (data < pciat_len) {
-            lx_printk("nouveau-lx: PMU 0x85 data=0x%x < pciat_len\n", data);
-            return -1;
-        }
-        *ucode_off_out = data - pciat_len;
-        lx_printk("nouveau-lx: PMU 0x85 ucode_off=0x%x\n", *ucode_off_out);
-        return 0;
     }
     lx_printk("nouveau-lx: PmuLookupTable sin entrada 0x85 (FWSEC_PROD)\n");
     return -1;
@@ -523,10 +526,10 @@ static int parse_fwsec_desc(unsigned fwsec_off, unsigned fwsec_len,
         return -1;
     }
 
-    lx_printk("nouveau-lx: FWSEC desc v%u imem=%u dmem=%u engine=0x%x ucode_id=%u "
-              "sig=%u vers=0x%x\n",
+    lx_printk("nouveau-lx: FWSEC desc v%u imem=%u dmem=%u if=0x%x engine=0x%x "
+              "ucode_id=%u sig=%u vers=0x%x\n",
               ver, info->imem_load_size, info->dmem_load_size,
-              info->engine_id_mask, info->ucode_id,
+              info->interface_offset, info->engine_id_mask, info->ucode_id,
               info->signature_count, info->signature_versions);
     return 0;
 }
@@ -710,6 +713,52 @@ static int patch_fwsec_signature(unsigned char *ucode, unsigned ulen,
     return 0;
 }
 
+static int patch_frts_cmd_prepare(unsigned char *ucode, unsigned ulen,
+                                  const struct fwsec_ucode_info *info,
+                                  struct falcon_appif_dmemmapper_v3 *map,
+                                  uint64_t frts_addr, uint64_t frts_size)
+{
+    struct frts_cmd *cmd;
+
+    if (info->imem_load_size + map->cmd_in_buffer_offset + sizeof(*cmd) > ulen) {
+        lx_printk("nouveau-lx: FWSEC cmd buf off=0x%x fuera de ucode (0x%x)\n",
+                  map->cmd_in_buffer_offset, ulen);
+        return -1;
+    }
+    map->init_cmd = NVFW_FALCON_APPIF_DMEMMAPPER_CMD_FRTS;
+    cmd = (struct frts_cmd *)(ucode + info->imem_load_size +
+                              map->cmd_in_buffer_offset);
+    cmd->read_vbios.ver = 1;
+    cmd->read_vbios.hdr = (uint32_t)sizeof(cmd->read_vbios);
+    cmd->read_vbios.addr = 0;
+    cmd->read_vbios.size = 0;
+    cmd->read_vbios.flags = 2;
+    cmd->frts_region.ver = 1;
+    cmd->frts_region.hdr = (uint32_t)sizeof(cmd->frts_region);
+    cmd->frts_region.addr = (uint32_t)(frts_addr >> 12);
+    cmd->frts_region.size = (uint32_t)(frts_size >> 12);
+    cmd->frts_region.ftype = NVFW_FRTS_CMD_REGION_TYPE_FB;
+    return 0;
+}
+
+static struct falcon_appif_dmemmapper_v3 *find_dmap_mapper(unsigned char *ucode,
+                                                           unsigned ulen,
+                                                           unsigned imem_sz)
+{
+    unsigned off;
+
+    for (off = imem_sz; off + sizeof(struct falcon_appif_dmemmapper_v3) <= ulen;
+         off += 4u) {
+        struct falcon_appif_dmemmapper_v3 *map;
+
+        map = (struct falcon_appif_dmemmapper_v3 *)(ucode + off);
+        if (map->signature == NVFW_DMAP_SIGNATURE && map->version == 3u) {
+            return map;
+        }
+    }
+    return NULL;
+}
+
 static int patch_fwsec_frts(unsigned char *ucode, unsigned ulen,
                             const struct fwsec_ucode_info *info,
                             uint64_t frts_addr, uint64_t frts_size)
@@ -717,54 +766,58 @@ static int patch_fwsec_frts(unsigned char *ucode, unsigned ulen,
     unsigned hdr_off;
     struct falcon_appif_hdr_v1 hdr;
     unsigned i;
+    struct falcon_appif_dmemmapper_v3 *map;
 
-    if (info->imem_load_size + info->interface_offset + sizeof(hdr) > ulen) {
-        return -1;
-    }
     hdr_off = info->imem_load_size + info->interface_offset;
+    if (hdr_off + sizeof(hdr) > ulen) {
+        lx_printk("nouveau-lx: FWSEC appif fuera de ucode (off=0x%x ulen=0x%x)\n",
+                  hdr_off, ulen);
+        goto scan_dmap;
+    }
     memcpy(&hdr, ucode + hdr_off, sizeof(hdr));
     if (hdr.version != 1u) {
-        return -1;
+        lx_printk("nouveau-lx: FWSEC appif ver=%u (esperaba 1) off=0x%x\n",
+                  hdr.version, hdr_off);
+        goto scan_dmap;
     }
+
+    lx_printk("nouveau-lx: FWSEC appif off=0x%x cnt=%u esz=%u hs=%u\n",
+              hdr_off, hdr.entry_count, hdr.entry_size, hdr.header_size);
 
     for (i = 0; i < hdr.entry_count; i++) {
         unsigned eoff = hdr_off + hdr.header_size + i * hdr.entry_size;
         struct falcon_appif_v1 app;
-        struct falcon_appif_dmemmapper_v3 *map;
-        struct frts_cmd *cmd;
 
         if (eoff + sizeof(app) > ulen) {
-            return -1;
+            break;
         }
         memcpy(&app, ucode + eoff, sizeof(app));
         if (app.id != NVFW_FALCON_APPIF_ID_DMEMMAPPER) {
             continue;
         }
-
         if (info->imem_load_size + app.dmem_base + sizeof(*map) > ulen) {
-            return -1;
+            lx_printk("nouveau-lx: FWSEC mapper off=0x%x fuera de ucode\n",
+                      app.dmem_base);
+            goto scan_dmap;
         }
         map = (struct falcon_appif_dmemmapper_v3 *)(ucode + info->imem_load_size +
-                                                    app.dmem_base);
-        map->init_cmd = NVFW_FALCON_APPIF_DMEMMAPPER_CMD_FRTS;
-
-        if (info->imem_load_size + map->cmd_in_buffer_offset + sizeof(*cmd) > ulen) {
-            return -1;
+                                                      app.dmem_base);
+        if (patch_frts_cmd_prepare(ucode, ulen, info, map, frts_addr, frts_size) == 0) {
+            lx_printk("nouveau-lx: FWSEC DMEMMAPPER vía appif dmem=0x%x\n",
+                      app.dmem_base);
+            return 0;
         }
-        cmd = (struct frts_cmd *)(ucode + info->imem_load_size +
-                                  map->cmd_in_buffer_offset);
-        cmd->read_vbios.ver = 1;
-        cmd->read_vbios.hdr = (uint32_t)sizeof(cmd->read_vbios);
-        cmd->read_vbios.addr = 0;
-        cmd->read_vbios.size = 0;
-        cmd->read_vbios.flags = 2;
-        cmd->frts_region.ver = 1;
-        cmd->frts_region.hdr = (uint32_t)sizeof(cmd->frts_region);
-        cmd->frts_region.addr = (uint32_t)(frts_addr >> 12);
-        cmd->frts_region.size = (uint32_t)(frts_size >> 12);
-        cmd->frts_region.ftype = NVFW_FRTS_CMD_REGION_TYPE_FB;
+    }
+
+scan_dmap:
+    map = find_dmap_mapper(ucode, ulen, info->imem_load_size);
+    if (map && patch_frts_cmd_prepare(ucode, ulen, info, map, frts_addr, frts_size) == 0) {
+        lx_printk("nouveau-lx: FWSEC DMEMMAPPER vía firma DMAP @0x%x\n",
+                  (unsigned)((unsigned char *)map - ucode));
         return 0;
     }
+    lx_printk("nouveau-lx: FWSEC-FRTS sin DMEMMAPPER (if=0x%x imem=0x%x dmem=0x%x)\n",
+              info->interface_offset, info->imem_load_size, info->dmem_load_size);
     return -1;
 }
 
