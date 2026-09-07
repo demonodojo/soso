@@ -2,11 +2,32 @@
 
 use alloc::vec::Vec;
 use crate::guest_io::ScratchSink;
-use libsoso::sys;
+use libsoso::{abi, sys};
 use soso_abi::SockAddr;
 use soso_http::{HttpError, Response, TcpTransport};
 
 struct Net;
+
+fn guest_wall_clock() -> Option<u64> {
+    let mut ts = abi::Timespec::default();
+    if sys::clock_gettime(abi::CLOCK_REALTIME, &mut ts) != 0 {
+        return None;
+    }
+    let secs = ts.tv_sec as u64;
+    if secs < 1_000_000_000 {
+        None
+    } else {
+        Some(secs)
+    }
+}
+
+fn ensure_wall_clock() {
+    static INSTALLED: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+    if !INSTALLED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        soso_http::set_wall_clock(guest_wall_clock);
+    }
+}
 
 impl TcpTransport for Net {
     fn dns_resolve(&self, host: &str, out: &mut [u8; 4]) -> Result<(), i64> {
@@ -37,6 +58,7 @@ impl TcpTransport for Net {
 
 /// Respuestas pequeñas (JSON del árbol Hub) en RAM.
 pub fn https_get_body(url: &str, token: Option<&str>) -> Result<Vec<u8>, HttpError> {
+    ensure_wall_clock();
     let Response { status, body } = soso_http::https_get(&Net, url, token)?;
     if status != 200 {
         return Err(HttpError::Parse);
@@ -50,6 +72,7 @@ pub fn download_to_scratch(
     token: Option<&str>,
     mut sink: ScratchSink,
 ) -> Result<(), HttpError> {
+    ensure_wall_clock();
     let (status, _) = soso_http::https_download(&Net, url, token, &mut sink)?;
     if status != 200 {
         return Err(HttpError::Parse);
@@ -64,5 +87,6 @@ pub fn https_get_range_bytes(
     start: u64,
     end: u64,
 ) -> Result<(u16, alloc::vec::Vec<u8>), HttpError> {
+    ensure_wall_clock();
     soso_http::https_get_range(&Net, url, token, start, end)
 }

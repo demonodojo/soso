@@ -70,6 +70,8 @@ pub struct PciDevice {
     pub prog_if: u8,
     pub bar0: u64,
     pub bar0_size: u64,
+    pub bar1: u64,
+    pub bar1_size: u64,
 }
 
 fn ecam_offset(bus: u8, dev: u8, func: u8, off: u8) -> u64 {
@@ -181,7 +183,7 @@ pub fn bar_info(bus: u8, dev: u8, func: u8, bar_index: u8) -> Option<(u64, u64)>
     Some((addr, size))
 }
 
-pub fn enumerate() -> Vec<PciDevice> {
+pub(crate) fn enumerate() -> Vec<PciDevice> {
     init_ecam();
     let e = ecam();
     let mut out = Vec::new();
@@ -200,6 +202,7 @@ pub fn enumerate() -> Vec<PciDevice> {
                 }
                 let class_rev = read32(bus, dev, func, 0x08);
                 let (bar0, bar0_size) = bar_info(bus, dev, func, 0).unwrap_or((0, 0));
+                let (bar1, bar1_size) = bar_info(bus, dev, func, 4).unwrap_or((0, 0));
                 out.push(PciDevice {
                     bus,
                     device: dev,
@@ -211,6 +214,8 @@ pub fn enumerate() -> Vec<PciDevice> {
                     prog_if: ((class_rev >> 8) & 0xff) as u8,
                     bar0,
                     bar0_size,
+                    bar1,
+                    bar1_size,
                 });
             }
         }

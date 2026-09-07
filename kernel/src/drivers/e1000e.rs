@@ -132,7 +132,7 @@ pub fn present() -> bool {
 
 /// Inicializa la NIC si hay un e1000e; devuelve la MAC.
 pub fn init() -> Option<[u8; 6]> {
-    let devs = pci::enumerate();
+    let devs = pci::devices();
     let dev = devs.iter().find(|d| {
         d.vendor_id == VENDOR_INTEL && DEVICE_IDS.contains(&d.device_id)
     })?;
@@ -146,7 +146,10 @@ pub fn init() -> Option<[u8; 6]> {
     cmd |= 0x6;
     pci::write16(dev.bus, dev.device, dev.function, 0x04, cmd);
 
-    let (bar, bar_size) = pci::bar_info(dev.bus, dev.device, dev.function, 0)?;
+    let (bar, bar_size) = (dev.bar0, dev.bar0_size);
+    if bar == 0 || bar_size == 0 {
+        return None;
+    }
     mm::ensure_mmio_mapped(bar, bar_size.max(0x20000));
 
     // MAC de RAL antes del reset (QEMU ya la programa).

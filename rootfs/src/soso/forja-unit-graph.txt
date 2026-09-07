@@ -1,6 +1,9 @@
-# Plan de build local (soso-forja v1). Generar en host con:
-#   cargo build --unit-graph -p kernel > forja-unit-graph.json
-# y copiar aquí como lista de crates (una por línea).
-coreutils
-kernel
-init
+# Plan de build local (soso-forja v1). Rutas relativas a /src/soso (ver cargo xtask sync-src).
+user/coreutils
+user/init
+user/libsoso
+crates/soso-abi
+crates/soso-std
+user/soso-forja
+crates/soso-update-core
+user/hola-std

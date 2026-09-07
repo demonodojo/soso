@@ -21,6 +21,7 @@ impl FetchError {
             Self::Http(HttpError::Tls) => "error TLS",
             Self::Http(HttpError::Io) => "error HTTP (E/S)",
             Self::Http(HttpError::Dns) => "error DNS",
+            Self::Http(HttpError::Clock) => "reloj del sistema no utilizable",
             Self::Io(_) => "error de E/S",
             Self::Status(_) => "respuesta HTTP no válida",
         }
@@ -29,6 +30,7 @@ impl FetchError {
 
 /// Descarga una URL HTTPS y devuelve HTML como texto.
 pub fn fetch_https(url: &str) -> Result<(String, String), FetchError> {
+    crate::net::ensure_wall_clock();
     let resp = https_get_full(&Net, url, None).map_err(FetchError::Http)?;
     if resp.status != 200 {
         return Err(FetchError::Status(resp.status));

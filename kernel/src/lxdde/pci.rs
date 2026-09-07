@@ -53,14 +53,13 @@ static DEVICES: Mutex<Vec<LxPciDev>> = Mutex::new(Vec::new());
 
 pub fn init() {
     for drv in DRIVERS.lock().iter() {
-        let devs = pci::enumerate();
+        let devs = pci::devices();
         for d in devs {
             if !match_id(&drv.ids, d.vendor_id, d.device_id, d.class) {
                 continue;
             }
-            let (bar0, bar0_size) = pci::bar_info(d.bus, d.device, d.function, 0).unwrap_or((0, 0));
-            let (bar1, bar1_size) =
-                pci::bar_info(d.bus, d.device, d.function, 1).unwrap_or((0, 0));
+            let (bar0, bar0_size) = (d.bar0, d.bar0_size);
+            let (bar1, bar1_size) = (d.bar1, d.bar1_size);
             let mut lx = LxPciDev {
                 bus: d.bus,
                 device: d.device,

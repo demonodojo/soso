@@ -126,18 +126,64 @@ pub fn spawn(path: &str, args: &str) -> i64 {
 }
 
 pub fn spawn_io(path: &str, args: &str, stdin: u64, stdout: u64, stderr: u64) -> i64 {
+    if args.is_empty() {
+        spawn_io_ex(path, &[path], &[], stdin, stdout, stderr)
+    } else {
+        spawn_io_ex(path, &[path, args], &[], stdin, stdout, stderr)
+    }
+}
+
+/// `argv[0]` suele ser el nombre del binario; el resto son argumentos.
+pub fn spawn_io_ex(
+    path: &str,
+    argv: &[&str],
+    env: &[&str],
+    stdin: u64,
+    stdout: u64,
+    stderr: u64,
+) -> i64 {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    let args_joined = if argv.len() > 1 {
+        argv[1..].join(" ")
+    } else if argv.len() == 1 {
+        String::new()
+    } else {
+        String::new()
+    };
+
+    let mut argv_table: Vec<u64> = Vec::with_capacity(argv.len() * 2);
+    for a in argv {
+        argv_table.push(a.as_ptr() as u64);
+        argv_table.push(a.len() as u64);
+    }
+    let mut env_table: Vec<u64> = Vec::with_capacity(env.len() * 2);
+    for e in env {
+        env_table.push(e.as_ptr() as u64);
+        env_table.push(e.len() as u64);
+    }
+
     let opts = abi::SpawnIo {
         path_ptr: path.as_ptr() as u64,
         path_len: path.len() as u64,
-        args_ptr: args.as_ptr() as u64,
-        args_len: args.len() as u64,
+        args_ptr: args_joined.as_ptr() as u64,
+        args_len: args_joined.len() as u64,
         stdin_fd: stdin,
         stdout_fd: stdout,
         stderr_fd: stderr,
-        argv_ptr: 0,
-        argv_count: 0,
-        envp_ptr: 0,
-        envp_count: 0,
+        argv_ptr: if argv.is_empty() {
+            0
+        } else {
+            argv_table.as_ptr() as u64
+        },
+        argv_count: argv.len() as u64,
+        envp_ptr: if env.is_empty() {
+            0
+        } else {
+            env_table.as_ptr() as u64
+        },
+        envp_count: env.len() as u64,
     };
     syscall4(
         abi::SYS_SPAWN_IO,
@@ -280,6 +326,16 @@ pub fn meminfo(out: &mut abi::MemInfo) -> i64 {
 
 pub fn iostat(out: &mut abi::IoStat) -> i64 {
     syscall4(abi::SYS_IOSTAT, out as *mut abi::IoStat as u64, 0, 0, 0)
+}
+
+pub fn fs_resize(op: u64, arg: u64, out: &mut abi::FsSpaceInfo) -> i64 {
+    syscall4(
+        abi::SYS_FS_RESIZE,
+        op,
+        arg,
+        out as *mut abi::FsSpaceInfo as u64,
+        0,
+    )
 }
 
 pub fn disk_list(out: &mut [abi::DiskInfo]) -> i64 {
@@ -672,4 +728,14 @@ pub fn mprotect(addr: u64, len: u64, prot: u64) -> i64 {
 
 pub fn mremap(addr: u64, old_len: u64, new_len: u64, flags: u64) -> i64 {
     syscall4(abi::SYS_MREMAP, addr, old_len, new_len, flags)
+}
+
+pub fn getenv(key: &str, buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_GETENV,
+        key.as_ptr() as u64,
+        key.len() as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    )
 }

@@ -1,8 +1,4 @@
-//! Huecos de actualización en la ESP: `SOSOUPD.TXT` (buzón) y `SOSOKRN.BIN` (kernel).
-//!
-//! Mismo patrón que `bootreq.rs`: ficheros 8.3 pre-creados y contiguos; el kernel
-//! solo sobrescribe sectores de datos. Es el camino por el que userspace puede
-//! preparar una actualización de kernel antes del reinicio.
+//! Huecos de actualización en la ESP: `SOSOUPD.TXT`, `SOSOKRN.BIN`, `SOSOKRN.MET`.
 
 use crate::drivers::espfat::{self, SECTOR, Slot};
 use spin::Once;
@@ -10,6 +6,7 @@ use soso_abi as abi;
 
 static MAILBOX: Once<Option<Slot>> = Once::new();
 static KERNEL: Once<Option<Slot>> = Once::new();
+static META: Once<Option<Slot>> = Once::new();
 
 pub fn init() {
     if !crate::drivers::live_disk::esp_available() {
@@ -34,6 +31,15 @@ pub fn init() {
             "updslot: SOSOKRN.BIN no encontrado; reflashea el live para habilitar actualizaciones de kernel"
         ),
     }
+    match espfat::locate(b"SOSOKRN ", b"MET", abi::UPD_KERNEL_META_SIZE) {
+        Some(slot) => {
+            META.call_once(|| Some(slot));
+            crate::println!("updslot: SOSOKRN.MET LBA {}", slot.data_lba);
+        }
+        None => crate::println!(
+            "updslot: SOSOKRN.MET no encontrado; recuperación OTA limitada hasta reflashear"
+        ),
+    }
 }
 
 fn slot_for(which: u64) -> Result<Slot, i64> {
@@ -46,6 +52,10 @@ fn slot_for(which: u64) -> Result<Slot, i64> {
             .get()
             .and_then(|s| *s)
             .ok_or(-abi::ENOTSUP),
+        abi::UPD_WHICH_META => META
+            .get()
+            .and_then(|s| *s)
+            .ok_or(-abi::ENOTSUP),
         _ => Err(-abi::EINVAL),
     }
 }
@@ -54,6 +64,7 @@ fn max_size(which: u64) -> Result<usize, i64> {
     Ok(match which {
         abi::UPD_WHICH_MAILBOX => abi::UPD_MAILBOX_SIZE,
         abi::UPD_WHICH_KERNEL => abi::UPD_KERNEL_SLOT_SIZE as usize,
+        abi::UPD_WHICH_META => abi::UPD_KERNEL_META_SIZE,
         _ => return Err(-abi::EINVAL),
     })
 }

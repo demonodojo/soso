@@ -365,6 +365,33 @@ impl<D: BlockDevice> Sosofs<D> {
         self.alloc_hint = 2;
     }
 
+    /// Amplía el volumen hasta `new_block_count` bloques (no encoge).
+    ///
+    /// Los bloques nuevos quedan libres. Commit atómico en el slot alterno del
+    /// superbloque, igual que sosomfs `commit_grow`.
+    pub fn grow_to(&mut self, new_block_count: u64) -> Result<(), FsError> {
+        let current = self.sb.block_count.get();
+        if new_block_count <= current {
+            return Ok(());
+        }
+        if new_block_count > self.dev.block_count() {
+            return Err(FsError::NoSpace);
+        }
+        if self.dirty {
+            self.rollback();
+        }
+
+        let new_bitmap_blocks = new_block_count.div_ceil(BLOCK_SIZE as u64 * 8);
+        let new_bitmap_bytes = (new_bitmap_blocks * BLOCK_SIZE as u64) as usize;
+        self.bitmap.resize(new_bitmap_bytes, 0);
+        self.frozen.resize(new_bitmap_bytes, 0);
+
+        self.sb.block_count = new_block_count.into();
+        self.sb.bitmap_blocks = (new_bitmap_blocks as u32).into();
+        self.dirty = true;
+        self.commit()
+    }
+
     fn finish<T>(&mut self, r: Result<T, FsError>) -> Result<T, FsError> {
         match r {
             Ok(v) => match self.commit() {

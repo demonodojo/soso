@@ -13,13 +13,15 @@ extended = false
 tools = ["cargo", "clippy", "rustfmt", "rust-analyzer"]
 
 [rust]
-codegen-backends = ["cranelift"]
+codegen-backends = ["llvm"]
 channel = "dev"
-rpath = false
+download-rustc = true
+
+# Bootstrap cruzado: host linux-gnu compila std/rustc para x86_64-unknown-soso.
+# El self-hosting (host=soso) llega tras instalar stage2 en el guest.
 
 [target.x86_64-unknown-soso]
-linker = "wild"
-runner = "cargo xtask run --"
+linker = "wild-soso"
 
 [llvm]
 download-ci-llvm = false

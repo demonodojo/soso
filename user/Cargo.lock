@@ -427,6 +427,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "soso-git"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+ "soso-update-core",
+]
+
+[[package]]
 name = "soso-gpu"
 version = "0.1.0"
 dependencies = [
@@ -480,12 +488,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "soso-rustc"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+]
+
+[[package]]
 name = "soso-std"
 version = "0.1.0"
 dependencies = [
  "libsoso",
  "soso-abi",
  "spin",
+]
+
+[[package]]
+name = "soso-std-test"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+ "soso-std",
+]
+
+[[package]]
+name = "soso-test-sosofs"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
 ]
 
 [[package]]

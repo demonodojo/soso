@@ -189,7 +189,8 @@ int gsp_top_pmc_enable_mask(uint8_t type, uint8_t inst, uint32_t *mask_out)
     return -1;
 }
 
-#define NV_PMC_ENABLE 0x000600u
+#define NV_PMC_BOOT_0   0x000200u
+#define NV_PMC_ENABLE   0x000600u
 
 void gsp_mc_device_enable(uint32_t mask)
 {
@@ -202,4 +203,48 @@ void gsp_mc_device_enable(uint32_t mask)
     gsp_mmio_wr32(NV_PMC_ENABLE, cur | mask);
     (void)gsp_mmio_rd32(NV_PMC_ENABLE);
     (void)gsp_mmio_rd32(NV_PMC_ENABLE);
+}
+
+void gsp_mc_device_disable(uint32_t mask)
+{
+    uint32_t cur;
+
+    if (!mask) {
+        return;
+    }
+    cur = gsp_mmio_rd32(NV_PMC_ENABLE);
+    gsp_mmio_wr32(NV_PMC_ENABLE, cur & ~mask);
+    (void)gsp_mmio_rd32(NV_PMC_ENABLE);
+    (void)gsp_mmio_rd32(NV_PMC_ENABLE);
+}
+
+void gsp_mc_init_ampere(void)
+{
+    static int done;
+
+    if (done) {
+        return;
+    }
+    gsp_mmio_wr32(NV_PMC_BOOT_0, 0xffffffffu);
+    gsp_mmio_wr32(NV_PMC_ENABLE, 0xffffffffu);
+    (void)gsp_mmio_rd32(NV_PMC_ENABLE);
+    done = 1;
+}
+
+void gsp_mc_engine_reset(uint8_t type, uint8_t inst)
+{
+    uint32_t mask = 0;
+    uint32_t pmc;
+
+    if (gsp_top_pmc_enable_mask(type, inst, &mask) != 0 || !mask) {
+        return;
+    }
+    pmc = gsp_mmio_rd32(NV_PMC_ENABLE);
+    lx_printk("nouveau-lx: PMC reset type=%u inst=%u enable=0x%08x mask=0x%x\n",
+              type, inst, pmc, mask);
+    gsp_mc_device_disable(mask);
+    lx_mdelay(1);
+    gsp_mc_device_enable(mask);
+    pmc = gsp_mmio_rd32(NV_PMC_ENABLE);
+    lx_printk("nouveau-lx: PMC tras reset enable=0x%08x\n", pmc);
 }

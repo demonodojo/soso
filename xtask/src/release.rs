@@ -24,7 +24,7 @@ pub fn run(args: &[String]) {
     let profile = live_profile();
     crate::build_user();
     let _ = crate::build_image_with_profile(&profile, true);
-    crate::mkfs_rootfs_with_profile(true, &profile);
+    crate::mkfs_rootfs_with_profile(true, &profile, crate::RootfsImgMode::PackOnly);
 
     let out_dir = root.join(format!("target/release-soso/v{ver}"));
     std::fs::create_dir_all(&out_dir).expect("release dir");

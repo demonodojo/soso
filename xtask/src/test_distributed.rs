@@ -149,9 +149,7 @@ pub fn run() {
 
 fn copiar_imagen(src: &std::path::Path, name: &str) -> std::path::PathBuf {
     let dst = super::project_root().join("target").join(name);
-    std::fs::copy(src, &dst).unwrap_or_else(|e| {
-        panic!("copiar {} → {}: {e}", src.display(), dst.display());
-    });
+    super::copy_sparse(src, &dst);
     dst
 }
 
@@ -170,8 +168,8 @@ fn lanzar_qemu_dist(
         .args(["-smp", &super::qemu_smp()]);
     super::apply_firmware(&mut qemu, img);
     qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
-    super::apply_qemu_disks(&mut qemu, data, models);
-    super::apply_qemu_usb(&mut qemu);
+    super::apply_qemu_disks(&mut qemu, data, models, &super::QemuGuestConfig::from_env());
+    super::apply_qemu_usb(&mut qemu, &super::QemuGuestConfig::from_env());
     apply_qemu_nic_dist(&mut qemu, instance, sock_port, listen);
     super::apply_qemu_gpu(&mut qemu);
     qemu.args([

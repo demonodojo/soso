@@ -79,6 +79,26 @@ pub fn next_free_lba(sb: &Superblock, catalog: &Catalog) -> u64 {
     free
 }
 
+/// Reduce `total_blocks` si no hay datos más allá del nuevo tope.
+pub fn shrink_superblock(
+    sb: &mut Superblock,
+    catalog: &Catalog,
+    new_blocks: u64,
+) -> Result<(), ImportError> {
+    if new_blocks >= sb.total_blocks {
+        return Ok(());
+    }
+    let used = next_free_lba(sb, catalog);
+    if used > new_blocks {
+        return Err(ImportError::NoSpace);
+    }
+    sb.total_blocks = new_blocks;
+    if sb.volume_count > 0 {
+        sb.volumes[0].block_count = new_blocks;
+    }
+    Ok(())
+}
+
 /// Amplía `total_blocks` si la partición es mayor (sin subir generación).
 pub fn grow_superblock(sb: &mut Superblock, partition_blocks: u64) {
     if partition_blocks > sb.total_blocks {

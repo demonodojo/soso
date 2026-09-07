@@ -26,6 +26,13 @@ pub struct LivePart {
     sectors: u64,
 }
 
+/// Índices en la tabla GPT del live (particiones 1=ESP, 2=root, 3=modelos, 4=install).
+pub const GPT_ESP: usize = 0;
+pub const GPT_ROOT: usize = 1;
+pub const GPT_MODELS: usize = 2;
+pub const GPT_INSTALL: usize = 3;
+
+static LIVE_BACKEND: Once<Option<LiveBackend>> = Once::new();
 static LIVE_ESP: Once<Option<LivePart>> = Once::new();
 static LIVE_ROOT: Once<Option<LivePart>> = Once::new();
 static LIVE_MODELS: Once<Option<LivePart>> = Once::new();
@@ -129,6 +136,7 @@ fn try_backend(backend: LiveBackend) -> Option<()> {
         p3.first_lba,
         p3.sectors * SECTOR as u64 / (1024 * 1024)
     );
+    LIVE_BACKEND.call_once(|| Some(backend));
     if let Some(esp) = p1 {
         LIVE_ESP.call_once(|| Some(esp));
     }
@@ -277,20 +285,87 @@ impl LivePart {
     }
 }
 
-pub struct LiveRootDev(pub LivePart);
-pub struct LiveModelsDev(pub LivePart);
+fn current_part(entry_index: usize) -> Option<LivePart> {
+    let backend = (*LIVE_BACKEND.get()?)?;
+    let ents = read_gpt_entries(backend, true)?;
+    parse_entry(&ents, entry_index, backend)
+}
+
+pub fn backend() -> Option<LiveBackend> {
+    LIVE_BACKEND.get().copied().flatten()
+}
+
+/// Lee un sector LBA 512 B del disco GPT (cabecera, MBR, datos de particiones).
+pub fn disk_read_sector(lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), BlockError> {
+    let backend = backend().ok_or(BlockError::Io)?;
+    sector_reader(backend, lba, buf).map_err(|_| BlockError::Io)
+}
+
+/// Escribe un sector LBA 512 B del disco GPT.
+pub fn disk_write_sector(lba: u64, buf: &[u8; SECTOR]) -> Result<(), BlockError> {
+    let backend = backend().ok_or(BlockError::Io)?;
+    match backend {
+        LiveBackend::Virtio0 => {
+            crate::drivers::virtio_blk::write_sector(lba, buf).map_err(|_| BlockError::Io)
+        }
+        LiveBackend::Usb => {
+            crate::drivers::usb_storage::write_sector(lba, buf).map_err(|_| BlockError::Io)
+        }
+        LiveBackend::Nvme(slot) => nvme_write_sector(slot, lba, buf),
+    }
+}
+
+/// Copia `len` sectores dentro del disco (mismo backend), de atrás hacia delante.
+pub fn disk_slide_sectors(src_lba: u64, dst_lba: u64, sectors: u64) -> Result<(), BlockError> {
+    if sectors == 0 {
+        return Ok(());
+    }
+    if dst_lba <= src_lba {
+        return Err(BlockError::Io);
+    }
+    let mut sec = [0u8; SECTOR];
+    for i in (0..sectors).rev() {
+        disk_read_sector(src_lba + i, &mut sec)?;
+        disk_write_sector(dst_lba + i, &sec)?;
+    }
+    Ok(())
+}
+
+pub struct LiveRootDev {
+    backend: LiveBackend,
+}
+
+pub struct LiveModelsDev {
+    backend: LiveBackend,
+}
+
+impl LiveRootDev {
+    fn part(&self) -> Option<LivePart> {
+        current_part(GPT_ROOT)
+    }
+}
+
+impl LiveModelsDev {
+    fn part(&self) -> Option<LivePart> {
+        current_part(GPT_MODELS)
+    }
+}
 
 impl BlockDevice for LiveRootDev {
     fn block_count(&self) -> u64 {
-        self.0.sectors / (BLOCK_SIZE / SECTOR) as u64
+        self.part()
+            .map(|p| p.sectors / (BLOCK_SIZE / SECTOR) as u64)
+            .unwrap_or(0)
     }
 
     fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError> {
-        read_block_512(&self.0, block, buf)
+        let part = self.part().ok_or(BlockError::Io)?;
+        read_block_512(&part, block, buf)
     }
 
     fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {
-        write_block_512(&self.0, block, buf)
+        let part = self.part().ok_or(BlockError::Io)?;
+        write_block_512(&part, block, buf)
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
@@ -302,21 +377,26 @@ impl BlockDevice for LiveRootDev {
     }
 
     fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        read_blocks_512(&self.0, start, buf)
+        let part = self.part().ok_or(BlockError::Io)?;
+        read_blocks_512(&part, start, buf)
     }
 }
 
 impl BlockDevice for LiveModelsDev {
     fn block_count(&self) -> u64 {
-        self.0.sectors / (BLOCK_SIZE / SECTOR) as u64
+        self.part()
+            .map(|p| p.sectors / (BLOCK_SIZE / SECTOR) as u64)
+            .unwrap_or(0)
     }
 
     fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError> {
-        read_block_512(&self.0, block, buf)
+        let part = self.part().ok_or(BlockError::Io)?;
+        read_block_512(&part, block, buf)
     }
 
     fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {
-        write_block_512(&self.0, block, buf)
+        let part = self.part().ok_or(BlockError::Io)?;
+        write_block_512(&part, block, buf)
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
@@ -328,7 +408,8 @@ impl BlockDevice for LiveModelsDev {
     }
 
     fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        read_blocks_512(&self.0, start, buf)
+        let part = self.part().ok_or(BlockError::Io)?;
+        read_blocks_512(&part, start, buf)
     }
 }
 
@@ -368,11 +449,15 @@ fn write_sector(part: &LivePart, lba: u64, buf: &[u8; SECTOR]) -> Result<(), Blo
 }
 
 pub fn root_dev() -> Option<LiveRootDev> {
-    LIVE_ROOT.get().and_then(|p| p.as_ref().map(|x| LiveRootDev(*x)))
+    LIVE_BACKEND
+        .get()
+        .and_then(|b| b.map(|backend| LiveRootDev { backend }))
 }
 
 pub fn models_dev() -> Option<LiveModelsDev> {
-    LIVE_MODELS.get().and_then(|p| p.as_ref().map(|x| LiveModelsDev(*x)))
+    LIVE_BACKEND
+        .get()
+        .and_then(|b| b.map(|backend| LiveModelsDev { backend }))
 }
 
 pub fn active() -> bool {

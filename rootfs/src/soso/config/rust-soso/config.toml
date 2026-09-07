@@ -1,0 +1,25 @@
+# Bootstrap cruzado de rustc para soso (Hito 3a).
+#
+#   cd vendor/rust  # fork sobre nightly de rust-toolchain.toml
+#   cp ../../config/rust-soso/config.toml config.toml
+#   ./x.py build --host x86_64-unknown-soso --stage 2
+#
+# Backend: Cranelift. Enlazador: wild. Ensamblador: tools/sosoas.
+
+[build]
+host = ["x86_64-unknown-soso"]
+target = ["x86_64-unknown-soso"]
+extended = false
+tools = ["cargo", "clippy", "rustfmt", "rust-analyzer"]
+
+[rust]
+codegen-backends = ["cranelift"]
+channel = "dev"
+rpath = false
+
+[target.x86_64-unknown-soso]
+linker = "wild"
+runner = "cargo xtask run --"
+
+[llvm]
+download-ci-llvm = false

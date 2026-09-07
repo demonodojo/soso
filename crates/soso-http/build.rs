@@ -1,6 +1,6 @@
 //! Enlaza ensamblador pregenerado de `ring` cuando el target no tiene OS (soso-user).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 fn main() {
@@ -10,8 +10,7 @@ fn main() {
         return;
     }
 
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let ring_pregen = find_ring_pregenerated(&manifest_dir);
+    let ring_pregen = find_ring_pregenerated();
     let Some(ring_pregen) = ring_pregen else {
         println!("cargo:warning=soso-http: no se encontró ring pregenerated; TLS puede fallar al enlazar");
         return;
@@ -40,22 +39,65 @@ fn main() {
     cc_build.compile("soso_ring_asm");
 
     println!("cargo:rerun-if-changed={}", ring_pregen.display());
+    println!("cargo:rerun-if-changed=Cargo.lock");
 }
 
-fn find_ring_pregenerated(_manifest_dir: &std::path::Path) -> Option<PathBuf> {
-    let home = env::var("HOME")
-        .or_else(|_| env::var("USERPROFILE"))
+fn ring_version_from_lock() -> Option<String> {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").ok()?);
+    let lock = manifest_dir.join("../../Cargo.lock");
+    let text = fs::read_to_string(lock).ok()?;
+    let mut in_ring = false;
+    for line in text.lines() {
+        if line.trim() == "name = \"ring\"" {
+            in_ring = true;
+            continue;
+        }
+        if in_ring {
+            if let Some(ver) = line.strip_prefix("version = \"") {
+                return Some(ver.trim_end_matches('"').to_string());
+            }
+            if line.starts_with("name = ") {
+                break;
+            }
+        }
+    }
+    None
+}
+
+fn find_ring_pregenerated() -> Option<PathBuf> {
+    let version = ring_version_from_lock().unwrap_or_else(|| "0.17.14".into());
+    let dir_name = format!("ring-{version}");
+    let cargo_home = env::var("CARGO_HOME")
+        .or_else(|_| env::var("HOME").map(|h| format!("{h}/.cargo")))
         .ok()?;
-    let src = PathBuf::from(home).join(".cargo/registry/src/index.crates.io-1949cf8c6b5b557f");
-    if !src.is_dir() {
+    let registry = PathBuf::from(cargo_home).join("registry/src");
+    if !registry.is_dir() {
         return None;
     }
-    for crate_dir in fs::read_dir(&src).ok()?.flatten() {
-        let name = crate_dir.file_name().to_string_lossy().into_owned();
-        if name.starts_with("ring-0.17.") {
-            let pregen = crate_dir.path().join("pregenerated");
-            if pregen.is_dir() {
-                return Some(pregen);
+    for index_dir in fs::read_dir(&registry).ok()?.flatten() {
+        if !index_dir.file_type().ok()?.is_dir() {
+            continue;
+        }
+        let candidate = index_dir.path().join(&dir_name).join("pregenerated");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    find_ring_fallback(&registry)
+}
+
+fn find_ring_fallback(registry: &Path) -> Option<PathBuf> {
+    for index_dir in fs::read_dir(registry).ok()?.flatten() {
+        if !index_dir.file_type().ok()?.is_dir() {
+            continue;
+        }
+        for crate_dir in fs::read_dir(index_dir.path()).ok()?.flatten() {
+            let name = crate_dir.file_name().to_string_lossy().into_owned();
+            if name.starts_with("ring-0.17.") {
+                let pregen = crate_dir.path().join("pregenerated");
+                if pregen.is_dir() {
+                    return Some(pregen);
+                }
             }
         }
     }

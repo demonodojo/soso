@@ -5,6 +5,7 @@
 #include "falcon_lx.h"
 #include "gsp_dma.h"
 #include "gsp_mmio.h"
+#include "gsp_top.h"
 #include "lx_emul.h"
 
 void *memcpy(void *dst, const void *src, unsigned long n);
@@ -16,6 +17,7 @@ void *memset(void *dst, int c, unsigned long n);
 #define NV_PFB_PRI_MMU_WPR2_ADDR_LO 0x001fa824u
 #define NV_PFB_PRI_MMU_WPR2_ADDR_HI 0x001fa828u
 #define NV_PBUS_SW_SCRATCH_0E   0x00001438u
+#define LX_FLCN_ENG_IDLE        0x100u
 
 #define NV_FUSE_OPT_FPF_NVDEC_UCODE1_VERSION 0x00824100u
 #define NV_FUSE_OPT_FPF_SEC2_UCODE1_VERSION  0x00824140u
@@ -865,6 +867,34 @@ static int gsp_fwsec_wait_wpr2(uint64_t *lo_out, unsigned budget_ms)
     return -1;
 }
 
+#define NV_PMC_ENABLE 0x000600u
+
+static void gsp_fwsec_prepare_hw(void)
+{
+    uint32_t pmc;
+
+    gsp_mc_init_ampere();
+    pmc = gsp_mmio_rd32(NV_PMC_ENABLE);
+    lx_printk("nouveau-lx: FWSEC prepare PMC enable=0x%08x\n", pmc);
+    gsp_mc_engine_reset(GSP_TOP_TYPE_GSP, 0);
+}
+
+static void gsp_fwsec_wait_engine_idle(unsigned falcon_base, unsigned budget_ms)
+{
+    unsigned t;
+    uint32_t eng;
+
+    for (t = 0; t < budget_ms; t++) {
+        eng = gsp_mmio_rd32(falcon_base + LX_FLCN_ENG_IDLE);
+        if (!(eng & 0x10u)) {
+            break;
+        }
+        lx_mdelay(1);
+    }
+    eng = gsp_mmio_rd32(falcon_base + LX_FLCN_ENG_IDLE);
+    lx_printk("nouveau-lx: FWSEC falcon eng=0x%08x\n", eng);
+}
+
 int gsp_fwsec_probe(uint64_t frts_addr, uint64_t frts_size)
 {
     struct fwsec_ucode_info info;
@@ -985,17 +1015,23 @@ int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
     raw.name = "fwsec-frts";
 
 #ifndef SOSO_FWSEC_HOSTCHECK
+    gsp_fwsec_prepare_hw();
     if (falcon_lx_raw_boot(LX_FLCN_GSP_BASE, &raw) != 0) {
         gsp_dma_free(&dma);
         return -1;
     }
+    gsp_fwsec_wait_engine_idle(LX_FLCN_GSP_BASE, 2000u);
 #endif
 
     scratch = gsp_mmio_rd32(NV_PBUS_SW_SCRATCH_0E);
     if (scratch & 0xffff0000u) {
-        lx_printk("nouveau-lx: FWSEC-FRTS error scratch=0x%08x\n", scratch);
+        lx_printk("nouveau-lx: FWSEC-FRTS error scratch=0x%08x (hi=0x%x lo=0x%x)\n",
+                  scratch, scratch >> 16, scratch & 0xffffu);
         gsp_dma_free(&dma);
         return -1;
+    }
+    if (scratch & 0x0000ffffu) {
+        lx_printk("nouveau-lx: FWSEC-FRTS scratch lower=0x%04x\n", scratch & 0xffffu);
     }
     if (gsp_fwsec_wait_wpr2(&wpr2_lo, 4000u) != 0) {
         uint32_t wpr2_raw_lo = gsp_mmio_rd32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);

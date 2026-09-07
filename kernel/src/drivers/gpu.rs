@@ -136,7 +136,7 @@ fn nvidia_vram() -> u64 {
 }
 
 pub fn init() {
-    let devs = pci::enumerate();
+    let devs = pci::devices();
     let nvidia = devs
         .iter()
         .find(|d| d.vendor_id == VENDOR_NVIDIA && d.class == 0x03);

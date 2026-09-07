@@ -4,20 +4,25 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use sha2::{Digest, Sha256};
 use soso_update_core::hash::decode_hex_sha256;
+use soso_update_core::kernel_apply::verify_staged_kernel;
+use soso_update_core::kernel_meta::{KernelMeta, KernelPhase, KERNEL_META_SIZE};
 use soso_update_core::mailbox::{Mailbox, MailboxCmd};
 use soso_update_core::UPD_KERNEL_SLOT_SIZE;
 use uefi::boot;
-use uefi::proto::media::file::{File, FileAttribute, FileMode, RegularFile};
+use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode, RegularFile};
 use uefi::{cstr16, CStr16};
 
 const BUZON: &CStr16 = cstr16!("SOSOUPD.TXT");
 const SLOT: &CStr16 = cstr16!("SOSOKRN.BIN");
+const META: &CStr16 = cstr16!("SOSOKRN.MET");
 const KERNEL: &CStr16 = cstr16!("kernel-x86_64");
 
 /// Atiende el buzón de actualización. Devuelve una línea para el log.
 pub fn atender() -> Option<String> {
+    if let Some(msg) = recuperar_interrumpido() {
+        return Some(msg);
+    }
     let texto = leer_fichero(BUZON)?;
     let mb = Mailbox::parse(&texto);
     match mb.cmd {
@@ -44,9 +49,24 @@ pub fn atender() -> Option<String> {
         },
         MailboxCmd::Ok { .. } => {
             let _ = escribir_buzon(&soso_update_core::Mailbox::format_idle());
+            let _ = escribir_kernel_meta(&KernelMeta::idle());
             None
         }
         MailboxCmd::Idle | MailboxCmd::Revertido { .. } => None,
+    }
+}
+
+fn recuperar_interrumpido() -> Option<String> {
+    let meta = leer_kernel_meta()?;
+    if !meta.needs_recovery() {
+        return None;
+    }
+    match revertir_desde_meta(&meta) {
+        Ok(()) => Some(format!(
+            "actualiza: recuperado tras corte (fase {:?})",
+            meta.phase
+        )),
+        Err(e) => Some(format!("actualiza: ERROR recuperar: {e}")),
     }
 }
 
@@ -54,54 +74,94 @@ fn aplicar_kernel(size: u64, hash_hex: &str, version: &str) -> Result<(), String
     if size == 0 || size as usize > UPD_KERNEL_SLOT_SIZE {
         return Err(format!("tamaño de kernel inválido: {size}"));
     }
-    let expect = decode_hex_sha256(hash_hex).ok_or_else(|| "hash inválido".to_string())?;
-    let mut nuevo = leer_fichero_bytes(SLOT, size as usize)
+    let staged = leer_fichero_bytes(SLOT, UPD_KERNEL_SLOT_SIZE)
         .ok_or_else(|| "no pude leer SOSOKRN.BIN".to_string())?;
-    nuevo.truncate(size as usize);
-    if sha256(&nuevo) != expect {
-        return Err("hash del kernel en el hueco no coincide".into());
-    }
-    let viejo = leer_fichero_bytes(KERNEL, UPD_KERNEL_SLOT_SIZE)
+    verify_staged_kernel(&staged, size, hash_hex)
+        .map_err(|_| "hash del kernel en el hueco no coincide".to_string())?;
+    let nuevo = staged[..size as usize].to_vec();
+
+    let viejo = leer_fichero_completo(KERNEL, UPD_KERNEL_SLOT_SIZE)
         .ok_or_else(|| "no pude leer kernel-x86_64".to_string())?;
-    let viejo_len = viejo.len();
-    escribir_fichero(SLOT, &viejo).map_err(|e| format!("escribir copia en hueco: {e}"))?;
-    escribir_fichero(KERNEL, &nuevo).map_err(|e| format!("escribir kernel nuevo: {e}"))?;
-    let _ = viejo_len;
+    let (backup_size, backup_hash) = soso_update_core::backup_digest(&viejo);
+
+    let mut meta = KernelMeta::staged(version, size, hash_hex);
+    meta.phase = KernelPhase::Applying;
+    meta.backup_size = backup_size;
+    meta.backup_hash = backup_hash.clone();
+    escribir_kernel_meta(&meta).map_err(|e| format!("meta applying: {e}"))?;
+
+    escribir_fichero_exacto(SLOT, &viejo).map_err(|e| format!("copia backup en hueco: {e}"))?;
+
+    meta.phase = KernelPhase::BackupReady;
+    escribir_kernel_meta(&meta).map_err(|e| format!("meta backup: {e}"))?;
+
+    meta.phase = KernelPhase::Applying;
+    escribir_kernel_meta(&meta).map_err(|e| format!("meta applying2: {e}"))?;
+
+    escribir_fichero_exacto(KERNEL, &nuevo).map_err(|e| format!("escribir kernel nuevo: {e}"))?;
+
+    meta.phase = KernelPhase::Probando;
+    escribir_kernel_meta(&meta).map_err(|e| format!("meta probando: {e}"))?;
+
     let payload = soso_update_core::Mailbox::format_probando(version);
     escribir_buzon(&payload).map_err(|e| format!("escribir PROBANDO: {e}"))
 }
 
 fn revertir_kernel(version: &str) -> Result<(), String> {
+    let meta = leer_kernel_meta().unwrap_or_default();
+    revertir_desde_meta(&meta).map_err(|e| e.to_string())?;
+    let ver = if version.is_empty() {
+        meta.version.as_str()
+    } else {
+        version
+    };
+    let ver = if ver.is_empty() { "?" } else { ver };
+    let payload = soso_update_core::Mailbox::format_revertido(ver);
+    escribir_buzon(&payload).map_err(|e| format!("escribir REVERTIDO: {e}"))
+}
+
+fn revertir_desde_meta(meta: &KernelMeta) -> Result<(), String> {
+    if meta.backup_size > 0 && meta.backup_hash.len() == 64 {
+        let slot = leer_fichero_bytes(SLOT, UPD_KERNEL_SLOT_SIZE)
+            .ok_or_else(|| "no pude leer SOSOKRN.BIN".to_string())?;
+        let backup = meta
+            .verify_backup(&slot)
+            .map_err(|e| format!("backup inválido: {e:?}"))?;
+        escribir_fichero_exacto(KERNEL, backup)
+            .map_err(|e| format!("restaurar kernel-x86_64: {e}"))?;
+        let _ = escribir_kernel_meta(&KernelMeta::idle());
+        return Ok(());
+    }
+    revertir_kernel_legacy()
+}
+
+fn revertir_kernel_legacy() -> Result<(), String> {
     let backup = leer_fichero_bytes(SLOT, UPD_KERNEL_SLOT_SIZE)
         .ok_or_else(|| "no pude leer copia en SOSOKRN.BIN".to_string())?;
     if backup.iter().all(|&b| b == 0) {
         return Err("hueco vacío; nada que restaurar".into());
     }
-    // El backup puede ser más corto que el slot; escribir solo bytes no nulos al final ELF.
     let len = backup
         .iter()
         .rposition(|&b| b != 0)
         .map(|i| i + 1)
         .unwrap_or(0);
-    escribir_fichero(KERNEL, &backup[..len])
-        .map_err(|e| format!("restaurar kernel-x86_64: {e}"))?;
-    let ver = if version.is_empty() {
-        "?"
-    } else {
-        version
-    };
-    let payload = soso_update_core::Mailbox::format_revertido(ver);
-    escribir_buzon(&payload).map_err(|e| format!("escribir REVERTIDO: {e}"))
+    escribir_fichero_exacto(KERNEL, &backup[..len])
+        .map_err(|e| format!("restaurar kernel-x86_64 (legacy): {e}"))
 }
 
-fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(data);
-    h.finalize().into()
+fn leer_kernel_meta() -> Option<KernelMeta> {
+    let raw = leer_fichero_bytes(META, KERNEL_META_SIZE)?;
+    let text = core::str::from_utf8(&raw).ok()?;
+    KernelMeta::parse(text).ok()
+}
+
+fn escribir_kernel_meta(meta: &KernelMeta) -> Result<(), &'static str> {
+    escribir_fichero_exacto(META, &meta.format())
 }
 
 fn escribir_buzon(payload: &[u8]) -> Result<(), &'static str> {
-    escribir_fichero(BUZON, payload)
+    escribir_fichero_exacto(BUZON, payload)
 }
 
 fn leer_fichero(path: &CStr16) -> Option<String> {
@@ -109,7 +169,7 @@ fn leer_fichero(path: &CStr16) -> Option<String> {
     Some(String::from_utf8_lossy(&data).into_owned())
 }
 
-fn leer_fichero_bytes(path: &CStr16, max: usize) -> Option<Vec<u8>> {
+fn leer_fichero_completo(path: &CStr16, max: usize) -> Option<Vec<u8>> {
     let mut fs = boot::get_image_file_system(boot::image_handle()).ok()?;
     let mut root = fs.open_volume().ok()?;
     let handle = root.open(path, FileMode::Read, FileAttribute::empty()).ok()?;
@@ -130,7 +190,11 @@ fn leer_fichero_bytes(path: &CStr16, max: usize) -> Option<Vec<u8>> {
     Some(data)
 }
 
-fn escribir_fichero(path: &CStr16, data: &[u8]) -> Result<(), &'static str> {
+fn leer_fichero_bytes(path: &CStr16, max: usize) -> Option<Vec<u8>> {
+    leer_fichero_completo(path, max)
+}
+
+fn escribir_fichero_exacto(path: &CStr16, data: &[u8]) -> Result<(), &'static str> {
     let mut fs = boot::get_image_file_system(boot::image_handle())
         .map_err(|_| "sin filesystem")?;
     let mut root = fs.open_volume().map_err(|_| "open_volume")?;
@@ -140,5 +204,26 @@ fn escribir_fichero(path: &CStr16, data: &[u8]) -> Result<(), &'static str> {
     let mut f: RegularFile = handle.into_regular_file().ok_or("not regular")?;
     let _ = f.set_position(0);
     f.write(data).map_err(|_| "write")?;
-    f.flush().map_err(|_| "flush")
+    f.flush().map_err(|_| "flush")?;
+    truncar_fichero(&mut f, data.len() as u64)
+}
+
+fn truncar_fichero(f: &mut RegularFile, size: u64) -> Result<(), &'static str> {
+    let info = f.get_boxed_info::<FileInfo>().map_err(|_| "get_info")?;
+    if info.file_size() == size {
+        return Ok(());
+    }
+    let mut buf = alloc::vec![0u8; 512];
+    let new_info = FileInfo::new(
+        &mut buf,
+        size,
+        info.physical_size(),
+        *info.create_time(),
+        *info.last_access_time(),
+        *info.modification_time(),
+        info.attribute(),
+        info.file_name(),
+    )
+    .map_err(|_| "new_info")?;
+    f.set_info(new_info).map_err(|_| "set_info")
 }

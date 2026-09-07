@@ -159,8 +159,9 @@ pub fn present_slot(slot: usize) -> bool {
 }
 
 pub fn init() {
-    let devs: alloc::vec::Vec<_> = pci::enumerate()
-        .into_iter()
+    let devs: alloc::vec::Vec<_> = pci::devices()
+        .iter()
+        .copied()
         .filter(|d| d.class == NVME_CLASS && d.subclass == NVME_SUBCLASS)
         .collect();
     for (slot, dev) in devs.into_iter().take(MAX_SLOTS).enumerate() {
@@ -181,7 +182,9 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
     cmd |= 0x6; // mem + bus master
     pci::write16(dev.bus, dev.device, dev.function, 0x04, cmd);
 
-    let Some((bar, bar_size)) = pci::bar_info(dev.bus, dev.device, dev.function, 0) else {
+    let (bar, bar_size) = if dev.bar0 != 0 && dev.bar0_size != 0 {
+        (dev.bar0, dev.bar0_size)
+    } else {
         println!("nvme[{slot}]: sin BAR0");
         return Err(());
     };

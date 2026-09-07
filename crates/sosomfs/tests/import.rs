@@ -215,3 +215,22 @@ fn catalog_demasiado_grande_falla() {
         Err(sosomfs::ImportError::CatalogTooLarge)
     ));
 }
+
+#[test]
+fn shrink_superblock_sin_datos_en_cola() {
+    let model = tiny_model_dir();
+    let img = PathBuf::from("target/test-import-shrink.img");
+    let large = (64 * 1024 * 1024 / BLOCK_SIZE) as u64;
+    let mut dev = FileBlockDevice::create(&img, large).unwrap();
+    build_from_dir(&mut dev, &model, 1).unwrap();
+    let mut fs = mount(dev).unwrap();
+    let sb = *fs.superblock();
+    let used = import::next_free_lba(&sb, &fs.catalog);
+    let nuevo = used + 64;
+    assert!(nuevo < sb.total_blocks);
+    let mut sb2 = sb;
+    import::shrink_superblock(&mut sb2, &fs.catalog, nuevo).unwrap();
+    import::commit_grow(fs.cache.volume_mut().inner_mut(), &sb2).unwrap();
+    fs.reload_from_disk().unwrap();
+    assert_eq!(fs.total_blocks(), nuevo);
+}

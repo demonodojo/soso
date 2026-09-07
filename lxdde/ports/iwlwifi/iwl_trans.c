@@ -119,6 +119,24 @@ static int iwl_gen2_apm_init(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
+static void iwl_finish_nic_init(struct iwl_ax211_priv *iwl)
+{
+    /* iwl_finish_nic_init: reloj DMA APMG antes de arrancar firmware. */
+    iwl_write_prph(iwl, APMG_CLK_EN_REG, APMG_CLK_VAL_DMA_CLK_RQT);
+    lx_udelay(20);
+}
+
+static int iwl_pcie_check_hw_rf_kill(struct iwl_ax211_priv *iwl)
+{
+    uint32_t gp = iwl_read32(iwl, CSR_GP_CNTRL);
+
+    if (!(gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW)) {
+        lx_printk("iwl_trans: RF-kill hardware activo (GP_CNTRL=0x%08x)\n", gp);
+        return -1;
+    }
+    return 0;
+}
+
 static int iwl_apm_init(struct iwl_ax211_priv *iwl)
 {
     iwl_reset(iwl);
@@ -239,6 +257,9 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
         return -1;
     if (iwl_gen2_apm_init(iwl) != 0)
         return -1;
+    iwl_finish_nic_init(iwl);
+    if (iwl_pcie_check_hw_rf_kill(iwl) != 0)
+        return -1;
     if (iwl_alloc_queues(iwl) != 0)
         return -1;
 
@@ -275,12 +296,27 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
     iwl_write_prph(iwl, UREG_CPU_INIT_RUN, 1);
 
     for (int t = 0; t < 500; t++) {
-        drain_rx_gen2(iwl);
+        uint32_t inta = iwl_read32(iwl, CSR_INT);
+
+        if (inta & CSR_INT_BIT_ALIVE) {
+            iwl_write32(iwl, RFH_Q0_FRBDCB_WIDX_TRG,
+                        (uint32_t)(iwl->rx_write & ~7u));
+        }
+        if (inta & (CSR_INT_BIT_FH_RX | CSR_INT_BIT_ALIVE))
+            drain_rx_gen2(iwl);
         if (iwl->alive)
             return 0;
         lx_mdelay(10);
     }
-    lx_printk("iwl_trans: timeout ALIVE (AX200 gen2)\n");
+    {
+        uint32_t inta = iwl_read32(iwl, CSR_INT);
+        uint32_t gp = iwl_read32(iwl, CSR_GP_CNTRL);
+
+        lx_printk("iwl_trans: timeout ALIVE (AX200 gen2) INT=0x%08x GP=0x%08x%s%s\n",
+                  inta, gp,
+                  (inta & CSR_INT_BIT_SW_ERR) ? " SW_ERR" : "",
+                  !(gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW) ? " RF_KILL" : "");
+    }
     return -1;
 }
 

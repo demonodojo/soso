@@ -122,10 +122,34 @@ pub const SYS_MPROTECT: u64 = 80;
 pub const SYS_MREMAP: u64 = 81;
 /// Escribe en fd a offset fijo sin mover el cursor: `(fd, buf, len, offset)`.
 pub const SYS_PWRITE: u64 = 82;
+/// Lee variable de entorno del proceso: `(key_ptr, key_len, val_ptr, val_len)`.
+pub const SYS_GETENV: u64 = 83;
+/// Redimensiona sosofs/sosomfs en disco GPT live/instalado.
+/// `(op, arg, out_ptr)`: `FS_RESIZE_GROW_ROOT` + bloques 4K, o `FS_RESIZE_QUERY` + `FsSpaceInfo`.
+pub const SYS_FS_RESIZE: u64 = 84;
+
+pub const FS_RESIZE_GROW_ROOT: u64 = 0;
+pub const FS_RESIZE_QUERY: u64 = 1;
+
+/// Informe de espacio para `FS_RESIZE_QUERY`.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct FsSpaceInfo {
+    pub root_fs_blocks: u64,
+    pub root_free_blocks: u64,
+    pub root_part_blocks: u64,
+    pub models_fs_blocks: u64,
+    pub models_used_blocks: u64,
+    pub models_part_blocks: u64,
+    /// Cuántos bloques 4K se pueden robar del final de modelos.
+    pub max_grow_blocks: u64,
+}
 
 pub const UPD_WHICH_MAILBOX: u64 = 0;
 pub const UPD_WHICH_KERNEL: u64 = 1;
+pub const UPD_WHICH_META: u64 = 2;
 pub const UPD_MAILBOX_SIZE: usize = 4096;
+pub const UPD_KERNEL_META_SIZE: usize = 512;
 pub const UPD_KERNEL_SLOT_SIZE: u64 = 64 * 1024 * 1024;
 /// Tamaño fijo de `SOSOBOOT.TXT`.
 pub const BOOTREQ_SIZE: usize = 4096;

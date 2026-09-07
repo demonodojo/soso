@@ -9,6 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
 
 use rustls::client::UnbufferedClientConnection;
@@ -41,27 +42,89 @@ pub trait TcpTransport {
     fn close(&self, fd: u64);
 }
 
-#[derive(Debug, Clone, Copy)]
-struct FixedTimeProvider;
+type WallClockFn = fn() -> Option<u64>;
 
-impl TimeProvider for FixedTimeProvider {
+static WALL_CLOCK: AtomicU64 = AtomicU64::new(0);
+
+/// Instala una fuente de epoch UTC (segundos). `f` debe devolver `None` si el
+/// reloj del guest no es utilizable.
+pub fn set_wall_clock(f: WallClockFn) {
+    WALL_CLOCK.store(f as usize as u64, Ordering::Release);
+}
+
+fn wall_clock_secs() -> Option<u64> {
+    let ptr = WALL_CLOCK.load(Ordering::Acquire);
+    if ptr == 0 {
+        return None;
+    }
+    let f: WallClockFn = unsafe { core::mem::transmute(ptr as usize) };
+    f()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GuestTimeProvider;
+
+impl TimeProvider for GuestTimeProvider {
     fn current_time(&self) -> Option<UnixTime> {
-        // Guest sin RTC: fecha fija reciente para validar certs HF (2025-01-01 UTC).
-        Some(UnixTime::since_unix_epoch(Duration::from_secs(1_735_689_600)))
+        wall_clock_secs().map(|s| UnixTime::since_unix_epoch(Duration::from_secs(s)))
     }
 }
 
-fn client_config() -> Arc<ClientConfig> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpError {
+    Parse,
+    Tls,
+    Io,
+    Dns,
+    /// Reloj del guest ausente o fuera de rango para validar certificados.
+    Clock,
+}
+
+fn client_config() -> Result<Arc<ClientConfig>, HttpError> {
+    let secs = wall_clock_secs().ok_or(HttpError::Clock)?;
+    // Rechazar epoch claramente inválida (RTC sin inicializar o fija antigua).
+    if secs < 1_000_000_000 {
+        return Err(HttpError::Clock);
+    }
+    let _anchor = UnixTime::since_unix_epoch(Duration::from_secs(secs));
     let provider = rustls::crypto::ring::default_provider();
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Arc::new(
-        ClientConfig::builder_with_details(Arc::new(provider), Arc::new(FixedTimeProvider))
+    Ok(Arc::new(
+        ClientConfig::builder_with_details(Arc::new(provider), Arc::new(GuestTimeProvider))
             .with_safe_default_protocol_versions()
-            .expect("protocol versions")
+            .map_err(|_| HttpError::Tls)?
             .with_root_certificates(roots)
             .with_no_client_auth(),
-    )
+    ))
+}
+
+struct FdGuard<'a, T: TcpTransport> {
+    transport: &'a T,
+    fd: u64,
+    closed: bool,
+}
+
+impl<'a, T: TcpTransport> FdGuard<'a, T> {
+    fn new(transport: &'a T, fd: u64) -> Self {
+        Self {
+            transport,
+            fd,
+            closed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.closed = true;
+    }
+}
+
+impl<'a, T: TcpTransport> Drop for FdGuard<'a, T> {
+    fn drop(&mut self) {
+        if !self.closed {
+            self.transport.close(self.fd);
+        }
+    }
 }
 
 struct TlsSession<'a, T: TcpTransport> {
@@ -73,9 +136,9 @@ struct TlsSession<'a, T: TcpTransport> {
 }
 
 impl<'a, T: TcpTransport> TlsSession<'a, T> {
-    fn new(transport: &'a T, fd: u64, host: &str) -> Result<Self, HttpError> {
+    fn new(transport: &'a T, fd: u64, host: &str, config: Arc<ClientConfig>) -> Result<Self, HttpError> {
         let name = ServerName::try_from(host.to_string()).map_err(|_| HttpError::Tls)?;
-        let conn = UnbufferedClientConnection::new(client_config(), name).map_err(|_| HttpError::Tls)?;
+        let conn = UnbufferedClientConnection::new(config, name).map_err(|_| HttpError::Tls)?;
         Ok(Self {
             conn,
             fd,
@@ -332,14 +395,6 @@ impl HttpStreamState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpError {
-    Parse,
-    Tls,
-    Io,
-    Dns,
-}
-
 /// GET HTTPS con redirects (hasta 8). `auth` opcional: token Bearer HF.
 pub fn https_get<T: TcpTransport>(
     transport: &T,
@@ -408,6 +463,31 @@ impl HttpReqKind {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthOrigin {
+    host: String,
+    port: u16,
+}
+
+fn auth_for_origin<'a>(
+    auth: Option<&'a str>,
+    host: &str,
+    port: u16,
+    origin: Option<&AuthOrigin>,
+) -> Option<&'a str> {
+    let Some(tok) = auth else {
+        return None;
+    };
+    let Some(orig) = origin else {
+        return Some(tok);
+    };
+    if orig.host == host && orig.port == port {
+        Some(tok)
+    } else {
+        None
+    }
+}
+
 fn https_request<T: TcpTransport, S: BodySink>(
     transport: &T,
     url: &str,
@@ -416,13 +496,22 @@ fn https_request<T: TcpTransport, S: BodySink>(
     sink: &mut S,
     read_timeout_ms: u64,
 ) -> Result<(u16, Vec<(String, String)>), HttpError> {
+    let config = client_config()?;
     let mut current = url.to_string();
-    let kind = kind;
+    let mut auth_origin: Option<AuthOrigin> = None;
+    if auth.is_some() {
+        let (_, host, port, _) = parse_url(&current)?;
+        auth_origin = Some(AuthOrigin {
+            host: host.to_string(),
+            port,
+        });
+    }
     for _ in 0..8 {
         let (scheme, host, port, path) = parse_url(&current)?;
         if scheme != "https" {
             return Err(HttpError::Parse);
         }
+        let redirect_auth = auth_for_origin(auth, host, port, auth_origin.as_ref());
         let mut ip = [0u8; 4];
         transport.dns_resolve(host, &mut ip).map_err(|_| HttpError::Dns)?;
         let fd = transport
@@ -435,17 +524,27 @@ fn https_request<T: TcpTransport, S: BodySink>(
                 30_000,
             )
             .map_err(|_| HttpError::Io)?;
-        let mut tls = TlsSession::new(transport, fd, host)?;
+        let mut guard = FdGuard::new(transport, fd);
+        let mut tls = TlsSession::new(transport, fd, host, config.clone())?;
         tls.handshake()?;
-        let req = kind.build(host, &path, auth);
+        let req = kind.build(host, &path, redirect_auth);
         tls.write(req.as_bytes())?;
         let mut stream = HttpStreamState::new();
         tls.read_plain_to(&mut stream, sink, read_timeout_ms)?;
+        guard.disarm();
+        drop(guard);
         transport.close(fd);
         let (status, headers) = stream.finish()?;
         if (300..400).contains(&status) {
             if let Some(loc) = header_value(&headers, "location") {
                 current = resolve_redirect(&current, loc);
+                if auth.is_some() {
+                    let (_, new_host, new_port, _) = parse_url(&current)?;
+                    auth_origin = Some(AuthOrigin {
+                        host: new_host.to_string(),
+                        port: new_port,
+                    });
+                }
                 continue;
             }
         }
@@ -563,8 +662,19 @@ fn resolve_redirect(base: &str, loc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
-    struct MockTransport;
+    struct MockTransport {
+        closes: AtomicU32,
+    }
+
+    impl MockTransport {
+        fn new() -> Self {
+            Self {
+                closes: AtomicU32::new(0),
+            }
+        }
+    }
 
     impl TcpTransport for MockTransport {
         fn dns_resolve(&self, _host: &str, out: &mut [u8; 4]) -> Result<(), i64> {
@@ -584,7 +694,13 @@ mod tests {
             Ok(())
         }
 
-        fn close(&self, _fd: u64) {}
+        fn close(&self, _fd: u64) {
+            self.closes.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    fn test_wall_clock() -> Option<u64> {
+        Some(1_735_689_600)
     }
 
     #[test]
@@ -646,10 +762,58 @@ mod tests {
 
     #[test]
     fn mock_transport_dns_and_connect() {
-        let t = MockTransport;
+        let t = MockTransport::new();
         let mut ip = [0u8; 4];
         t.dns_resolve("example.com", &mut ip).unwrap();
         assert_eq!(ip, [127, 0, 0, 1]);
         assert_eq!(t.tcp_connect(SockAddr { addr: ip, port: 443, _pad: 0 }, 1000).unwrap(), 1);
+    }
+
+    #[test]
+    fn auth_stays_on_same_origin_redirect() {
+        let hf = AuthOrigin {
+            host: String::from("huggingface.co"),
+            port: 443,
+        };
+        assert_eq!(
+            auth_for_origin(Some("tok"), "huggingface.co", 443, Some(&hf)),
+            Some("tok")
+        );
+        assert_eq!(
+            auth_for_origin(Some("tok"), "evil.example", 443, Some(&hf)),
+            None
+        );
+    }
+
+    #[test]
+    fn fd_guard_closes_once() {
+        let t = MockTransport::new();
+        {
+            let mut g = FdGuard::new(&t, 7);
+            g.disarm();
+        }
+        assert_eq!(t.closes.load(AtomicOrdering::SeqCst), 0);
+        {
+            let _g = FdGuard::new(&t, 7);
+        }
+        assert_eq!(t.closes.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn client_config_requires_wall_clock() {
+        WALL_CLOCK.store(0, Ordering::Release);
+        assert_eq!(client_config().unwrap_err(), HttpError::Clock);
+        set_wall_clock(test_wall_clock);
+        assert!(client_config().is_ok());
+    }
+
+    #[test]
+    fn client_config_rejects_stale_epoch() {
+        fn stale() -> Option<u64> {
+            Some(1)
+        }
+        set_wall_clock(stale);
+        assert_eq!(client_config().unwrap_err(), HttpError::Clock);
+        set_wall_clock(test_wall_clock);
     }
 }

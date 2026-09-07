@@ -1,58 +1,58 @@
 # Self-hosting de soso — ruta A
 
-Documentación del plan implementado.
+## Hito 0 — Bucle remoto ✓
 
-## Hito 0 — Bucle remoto
+Ver sección anterior. `soso-forja all --host 10.0.2.2` + revert del shim.
 
-- `soso-ed`: editor mínimo (`/bin/soso-ed RUTA`)
-- Coreutils: `cp`, `mv`, `grep`, `diff`, `find`, `wc`, `head`, `tail`, `stat`
-- Syscalls: `SYS_RENAME`, `SYS_TRUNCATE`, `O_TRUNC`, `O_EXCL`, `SYS_CLOCK_GETTIME`, RTC CMOS
-- `/src/soso`: fuentes locales (excluidas del OTA via `PACK_SKIP_DIRS`)
-- `soso-forja`: cliente (`sync`, `build`, `install`, `all`, `local`)
-- `tools/soso-forja-server`: servidor host en `:8740` (tests HTTP mockeados)
+## Hito 1 — ABI ✓
 
-```sh
-cargo run -p soso-forja-server
-soso-ed /src/soso/kernel/src/main.rs
-soso-forja all --host 10.0.2.2
-```
-
-## Hito 1 — ABI para std
-
-Syscalls 70–82: `dup2`, `fstat`, `utime`, `fsync`, `sched_yield`, `getrandom`,
-`set_tls`, `mprotect`, `mremap`, `pwrite`. `SpawnIo` con `argv`/`envp`.
-Escritura incremental (`StreamWrite`). ELF perezoso + `PT_TLS`. `NAME_MAX` 255
-(formato `SOSOFS11`). Join de hilos por futex (`join_uaddr`).
+Syscalls 70–82, `SpawnIo` argv/envp, ELF perezoso + PT_TLS, `SOSOFS11`.
 
 ## Hito 2 — soso-std
 
-- Crate [`crates/soso-std`](../crates/soso-std)
-- Demo [`user/hola-std`](../user/hola-std)
-- Target JSON [`targets/x86_64-unknown-soso.json`](../targets/x86_64-unknown-soso.json)
-- PAL scaffolding [`config/rust-soso/sys/pal/soso/`](../config/rust-soso/sys/pal/soso/)
+- [`crates/soso-std`](../crates/soso-std): `fs`, `io`, `net`, `pipe`, `process`, `sync`, `thread`, `time`, `env`
+- [`user/hola-std`](../user/hola-std), [`user/soso-std-test`](../user/soso-std-test)
+- `init test` ejecuta humo de `hola-std`, `soso-std-test`, `soso-forja local`, `soso-rustc --version`
+- PAL: [`config/rust-soso/`](../config/rust-soso/) + [`scripts/soso-rust-bootstrap.sh`](../scripts/soso-rust-bootstrap.sh)
+- **`cargo xtask rust-bootstrap`** / **`rust-build-std`**: parches + `./x.py build library/std`
+- **`crates/soso-rt`**: ABI syscalls para libstd
+- **`cargo xtask sync-src`**: copia fuentes editables a `/src/soso` en la imagen (PACK_SKIP)
+- Pendiente: fork real de `rust-lang/rust`, `mkfs-soso` nativo en guest
+- **`/bin/soso-test-sosofs`**: tests rename/truncate/O_EXCL vía VFS (equivalente guest de `cargo test -p sosofs rename`)
 
-## Hito 3 — Toolchain nativa (scaffolding)
+## Hito 3 — Toolchain
 
-- [`config/rust-soso/config.toml`](../config/rust-soso/config.toml): bootstrap rustc + Cranelift
-- [`tools/sosoas`](../tools/sosoas): ensamblador GAS (stub)
+- **`soso-forja local`**: cache incremental por hash (`/var/forja-cache`)
+- **`soso-forja build-local`**: copia `/var/forja-out/*` → staging OTA
+- **`soso-forja all-local`**: build-local + `soso-update aplicar --local`
+- **`cargo xtask forja-out`**: host → `rootfs/var/forja-out/` tras `release`
+- **`soso-update --channel dev`**: URL canal desarrollo (`UPD_CHANNEL_DEV`)
+- **`SYS_GETENV` (83)**: entorno por proceso; herencia en spawn; `PATH`/`HOME` en init
+- **`spawn_io_ex`**: argv/envp desde userspace (libsoso)
+- [`tools/sosoas`](../tools/sosoas): GAS `.byte` → ELF64 ET_REL
+- [`config/rust-soso/sys/pal/soso/dl.rs`](../config/rust-soso/sys/pal/soso/dl.rs): parse ELF + stub dlopen
 - [`tools/wild-soso`](../tools/wild-soso): passthrough a `wild`
-- [`config/rust-soso/sys/pal/soso/dl.rs`](../config/rust-soso/sys/pal/soso/dl.rs): dlopen (stub)
-- `soso-forja local`: plan de unidades sin cargo
+- **`/bin/soso-rustc`**: stub guest (`--version`, comprueba sysroot)
+- Canal OTA **`dev`**: `UPD_CHANNEL_DEV` en `soso-update-core`
+- Pendiente: rustc cruzado, relocations en dlopen, iced-x86 completo, sysroot en `/usr/lib/rustlib/`
 
 ## Hito 4 — Cierre
 
-- `soso-forja install` encadena OTA local + reinicio (revert automático del shim)
-- Tests host: `cargo test -p sosofs --features std`, `cargo test -p soso-forja-server`
-- Tests guest: `/bin/init test` (bloque self-hosting)
-- Control de versiones: pendiente integración **gix** (gitoxide)
-- Docs: `MANUAL-USUARIO.md`, skills `soso-dev`, `soso-architecture`
+- **`soso-git status|log|diff|commit`**: hashes de `/src/soso` (puente hasta gix)
+- **`soso-forja build-local` + `install`**: bucle OTA local
+- Pendiente: gix + push HTTPS, tests host nativos completos en guest
 
-## Verificación rápida
+## Verificación
 
 ```sh
+cargo test -p sosoas
 cargo test -p sosofs --features std
 cargo test -p soso-forja-server
 cd user && cargo build --release
 cargo xtask build
-cargo xtask mkfs   # tras SOSOFS11
+cargo xtask sync-src
+cargo xtask release && cargo xtask forja-out && cargo xtask mkfs
+# imagen de datos: 32 GiB por defecto (`SOSO_ROOTFS_SIZE=64G` para más espacio)
+# guest: /bin/init test
+# bucle local: soso-forja all-local  (tras forja-out en imagen)
 ```

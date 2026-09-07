@@ -41,7 +41,7 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     let _ = super::build_image_with_profile(&profile, true);
 
     let uefi = root.join("target/soso-uefi.img");
-    let mut data = super::mkfs_rootfs_with_profile(true, &profile);
+    let mut data = super::mkfs_rootfs_with_profile(true, &profile, super::RootfsImgMode::PackOnly);
 
     let align = 1024 * 1024;
     let data_len = std::fs::metadata(&data).expect("data").len();
@@ -64,7 +64,7 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     let mut total = live_image_bytes(&data, &models, &uefi);
     for _ in 0..2 {
         write_rootfs_install_meta(&root, total);
-        data = super::mkfs_rootfs_with_profile(true, &profile);
+        data = super::mkfs_rootfs_with_profile(true, &profile, super::RootfsImgMode::PackOnly);
         total = live_image_bytes(&data, &models, &uefi);
     }
 
@@ -561,12 +561,14 @@ fn chrono_now() -> String {
 
 /// Huecos 8.3 pre-creados en la ESP (log, hwscan, install, WiFi, OTA).
 pub(crate) fn create_esp_slots(live: &Path) {
+    create_esp_file(live, b"SOSORES ", b"TXT", 4096);
     create_esp_file(live, b"SOSOLOG ", b"TXT", 256 * 1024);
     create_esp_file(live, b"SOSODRV ", b"TXT", 16 * 1024);
     create_esp_file(live, b"SOSOBOOT", b"TXT", 4096);
     create_esp_file(live, b"SOSOWIFI", b"TXT", 4096);
     create_esp_file(live, b"SOSOUPD ", b"TXT", 4096);
     create_esp_file(live, b"SOSOKRN ", b"BIN", 64 * 1024 * 1024);
+    create_esp_file(live, b"SOSOKRN ", b"MET", 512);
 }
 
 fn esp_wifi_name11() -> [u8; 11] {

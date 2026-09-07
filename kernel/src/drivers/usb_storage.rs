@@ -141,7 +141,7 @@ pub fn init() {
     set_delay_us(soso_delay_us);
 
     pci::init_ecam();
-    let xhcs: Vec<_> = pci::enumerate().into_iter().filter(is_xhci).collect();
+    let xhcs: Vec<_> = pci::devices().iter().copied().filter(is_xhci).collect();
     if xhcs.is_empty() {
         println!("usb: sin controlador xHCI en PCI");
         return;
@@ -150,7 +150,9 @@ pub fn init() {
     let mut hosts = Vec::new();
     for xdev in &xhcs {
         pci_enable(xdev.bus, xdev.device, xdev.function);
-        let Some((bar, size)) = pci::bar_info(xdev.bus, xdev.device, xdev.function, 0) else {
+        let (bar, size) = if xdev.bar0 != 0 && xdev.bar0_size != 0 {
+            (xdev.bar0, xdev.bar0_size)
+        } else {
             continue;
         };
         // Mapear el BAR completo (puertos/runtime pueden quedar fuera de 256 KiB).

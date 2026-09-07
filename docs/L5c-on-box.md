@@ -8,7 +8,7 @@ con un segundo disco dedicado.
 | Componente | Estado |
 |------------|--------|
 | Imagen live GPT (`soso-live.img`) | `cargo xtask package-usb-live` |
-| USB live + instalador (`install-soso.sh`) | `sudo cargo xtask flash-usb-live /dev/sdX --yes` |
+| USB live + instalador (`install-soso.sh`) | `sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes` |
 | Instalación desde soso live | `soso-install` (lista discos y pide cuál) / `soso-install <id|nombre> --yes` |
 | Reparticionado del destino | `crates/gptdisk` — respaldo al final, p3 llena el disco, GUID nuevos |
 | Entrada de arranque UEFI | La registra el shim en el arranque siguiente (`SOSOBOOT.TXT` → `Boot####`) |
@@ -46,10 +46,10 @@ aparte del Linux:
 lsblk   # identificar el disco, p. ej. /dev/nvme1n1 — NO /dev/nvme0n1
 
 # Con cargo en la máquina de desarrollo:
-sudo cargo xtask install-disk /dev/nvme1n1 --yes
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask install-disk /dev/nvme1n1 --yes
 
 # O con USB live que incluye instalador (sin cargo en el PC destino):
-sudo cargo xtask flash-usb-live /dev/sdX --yes   # flashear pendrive
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes   # flashear pendrive
 # … Linux en marcha, USB conectado …
 sudo /media/$USER/SOSOINSTALL/install-soso.sh /dev/nvme1n1 --yes
 
@@ -99,7 +99,7 @@ El disco NVMe/SSD con Linux **no se toca**.
 # Imagen live con perfil live-usb (nouveau + drv-gpu-nvidia + firmware Ampere y Blackwell)
 cargo xtask package-usb-live          # Qwen3.8-27B (sin medir pendrive)
 # o flashear midiendo el stick (elige el mejor modelo que quepa):
-sudo cargo xtask flash-usb-live /dev/sdX --yes
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes
 
 ls -lh target/usb-live/
 #   soso-live.img

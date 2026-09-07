@@ -1,11 +1,32 @@
 //! HTTPS para descargas de actualización.
 
 use alloc::vec::Vec;
-use libsoso::sys;
+use libsoso::{abi, sys};
 use soso_abi::SockAddr;
 use soso_http::TcpTransport;
 
 struct Net;
+
+fn guest_wall_clock() -> Option<u64> {
+    let mut ts = abi::Timespec::default();
+    if sys::clock_gettime(abi::CLOCK_REALTIME, &mut ts) != 0 {
+        return None;
+    }
+    let secs = ts.tv_sec as u64;
+    if secs < 1_000_000_000 {
+        None
+    } else {
+        Some(secs)
+    }
+}
+
+fn ensure_wall_clock() {
+    static INSTALLED: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+    if !INSTALLED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        soso_http::set_wall_clock(guest_wall_clock);
+    }
+}
 
 impl TcpTransport for Net {
     fn dns_resolve(&self, host: &str, out: &mut [u8; 4]) -> Result<(), i64> {
@@ -35,7 +56,8 @@ impl TcpTransport for Net {
 }
 
 pub fn https_get_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, &'static str> {
-    let resp = soso_http::https_get(&Net, url, token).map_err(|_| "descarga HTTP")?;
+    ensure_wall_clock();
+    let resp = soso_http::https_get(&Net, url, token).map_err(map_http_err)?;
     if resp.status != 200 {
         return Err("HTTP != 200");
     }
@@ -73,7 +95,7 @@ pub fn https_download_span(
     while off < fin {
         let end = (off + MAX_RANGE).min(fin) - 1;
         let (status, chunk) =
-            soso_http::https_get_range(&Net, url, token, off, end).map_err(|_| "range HTTP")?;
+            soso_http::https_get_range(&Net, url, token, off, end).map_err(map_http_err)?;
         // 200 sólo vale si el servidor ignoró el Range y nos dio el fichero
         // entero, y eso únicamente sirve cuando pedíamos desde el principio.
         if status != 206 {
@@ -93,4 +115,14 @@ pub fn https_download_span(
         return Err("tamaño inesperado");
     }
     Ok(out)
+}
+
+fn map_http_err(e: soso_http::HttpError) -> &'static str {
+    match e {
+        soso_http::HttpError::Clock => "reloj del sistema no utilizable",
+        soso_http::HttpError::Dns => "DNS",
+        soso_http::HttpError::Tls => "TLS",
+        soso_http::HttpError::Parse => "HTTP parse",
+        soso_http::HttpError::Io => "descarga HTTP",
+    }
 }

@@ -46,6 +46,7 @@ sosomfs = { path = "../crates/sosomfs" }
 # que da cobertura numérica al camino de pesos cuantizados en GPU sin silicio.
 sosomodel = { path = "../crates/sosomodel" }
 block-dev = { path = "../crates/block-dev" }
+gptdisk = { path = "../crates/gptdisk" }
 soso-abi = { path = "../crates/soso-abi" }
 xmas-elf = "0.10"
 smoltcp = { version = "0.13.1", default-features = false, features = [

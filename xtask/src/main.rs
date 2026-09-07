@@ -89,6 +89,10 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             g3_check::run(&args);
         }
+        "hw-matrix" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            hw_matrix::run(&args);
+        }
         "test-distributed-llm" => {
             test_distributed::run();
         }
@@ -104,9 +108,24 @@ fn main() {
         "test-update" => {
             test_update::run();
         }
+        "check" => {
+            check::run();
+        }
         "release" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             release::run(&args);
+        }
+        "forja-out" => {
+            forja_out();
+        }
+        "sync-src" => {
+            sync_src();
+        }
+        "rust-bootstrap" => {
+            rust_bootstrap(false);
+        }
+        "rust-build-std" => {
+            rust_bootstrap(true);
         }
         "sosomfs-check" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
@@ -115,7 +134,7 @@ fn main() {
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-update | release | sosomfs-check | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | fetch-whisper | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check)"
+                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-update | check | release | forja-out | sync-src | rust-bootstrap | rust-build-std | sosomfs-check | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | fetch-whisper | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check | hw-matrix)"
             );
             exit(2);
         }
@@ -123,6 +142,7 @@ fn main() {
 }
 
 mod bench;
+mod check;
 mod drivers;
 mod fat32_write;
 mod fetch_hf;
@@ -130,6 +150,7 @@ mod fetch_whisper;
 mod flash_usb_live;
 mod g1_check;
 mod g3_check;
+mod hw_matrix;
 mod install_disk;
 mod live_models;
 mod lx_build;
@@ -160,6 +181,135 @@ fn convert_gguf(args: &[String]) {
 fn project_root() -> PathBuf {
     // xtask vive en <root>/xtask
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+}
+
+/// Copia el último `cargo xtask release` a `rootfs/var/forja-out/` (bucle OTA local).
+fn forja_out() {
+    let root = project_root();
+    let ver = version::read_version(&root);
+    let src = root.join(format!("target/release-soso/v{ver}"));
+    if !src.join("manifest.txt").is_file() {
+        eprintln!("forja-out: no hay release en {} — ejecuta `cargo xtask release`", src.display());
+        exit(1);
+    }
+    let dst = root.join("rootfs/var/forja-out");
+    std::fs::create_dir_all(&dst).expect("mkdir forja-out");
+    for name in ["rootfs.pack", "kernel-x86_64", "manifest.txt"] {
+        std::fs::copy(src.join(name), dst.join(name))
+            .unwrap_or_else(|e| panic!("copiar {name}: {e}"));
+    }
+    println!("forja-out: {} → rootfs/var/forja-out/", src.display());
+}
+
+/// Copia fuentes de desarrollo a `rootfs/src/soso/` (excluidas del pack OTA).
+fn sync_src() {
+    let root = project_root();
+    let dst_base = root.join("rootfs/src/soso");
+    const PATHS: &[&str] = &[
+        "user/init",
+        "user/libsoso",
+        "user/coreutils",
+        "user/soso-forja",
+        "user/soso-git",
+        "user/hola-std",
+        "user/soso-std-test",
+        "user/soso-test-sosofs",
+        "crates/soso-abi",
+        "crates/soso-std",
+        "crates/soso-update-core",
+        "config/rust-soso",
+        "tools/sosoas",
+        "tools/wild-soso",
+    ];
+    let mut files = 0usize;
+    for rel in PATHS {
+        let src = root.join(rel);
+        if !src.exists() {
+            eprintln!("sync-src: omitido (no existe) {}", src.display());
+            continue;
+        }
+        let dst = dst_base.join(rel);
+        files += copy_tree_filtered(&src, &dst);
+    }
+    let targets = dst_base.join("targets");
+    std::fs::create_dir_all(&targets).expect("mkdir targets");
+    std::fs::copy(
+        root.join("targets/x86_64-unknown-soso.json"),
+        targets.join("x86_64-unknown-soso.json"),
+    )
+    .expect("copiar target JSON");
+    files += 1;
+    println!(
+        "sync-src: {files} ficheros → {}",
+        dst_base.display()
+    );
+}
+
+fn copy_tree_filtered(src: &Path, dst: &Path) -> usize {
+    let mut n = 0usize;
+    if src.is_file() {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::copy(src, dst).expect("copiar");
+        return 1;
+    }
+    std::fs::create_dir_all(dst).expect("mkdir");
+    let Ok(rd) = std::fs::read_dir(src) else {
+        return 0;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let s = name.to_string_lossy();
+        if s == "target" || s == ".git" || s.starts_with('.') {
+            continue;
+        }
+        n += copy_tree_filtered(&e.path(), &dst.join(name));
+    }
+    n
+}
+
+fn rust_bootstrap(build_std: bool) {
+    let root = project_root();
+    let script = root.join("scripts/soso-rust-bootstrap.sh");
+    let st = Command::new("bash")
+        .arg(&script)
+        .status()
+        .unwrap_or_else(|e| panic!("rust-bootstrap: {e}"));
+    if !st.success() {
+        exit(st.code().unwrap_or(1));
+    }
+    if !build_std {
+        return;
+    }
+    let vendor = std::env::var("SOSO_RUST_VENDOR").map(PathBuf::from).unwrap_or_else(|_| {
+        std::env::var("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            })
+            .join("soso-rust-vendor")
+    });
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    path = format!(
+        "{}:{}:{}",
+        root.join("tools/sosoas/target/release").display(),
+        root.join("tools/wild-soso/target/release").display(),
+        path
+    );
+    let st = Command::new("./x.py")
+        .current_dir(&vendor)
+        .env("PATH", path)
+        .env("SOSO_RUST_VENDOR", &vendor)
+        .args(["build", "library/std", "--target", "x86_64-unknown-soso"])
+        .status()
+        .unwrap_or_else(|e| panic!("x.py: {e}"));
+    if !st.success() {
+        eprintln!("rust-build-std: falló — revisa {}/build-soso/", vendor.display());
+        exit(st.code().unwrap_or(1));
+    }
 }
 
 /// Firmware de arranque: `SOSO_FIRMWARE=bios|uefi` (default bios).
@@ -289,8 +439,12 @@ pub(crate) fn build_image_with_profile(
             "SOSOKRN.BIN".into(),
             vec![0u8; soso_update_core::UPD_KERNEL_SLOT_SIZE],
         );
+        builder.set_file_contents(
+            "SOSOKRN.MET".into(),
+            vec![b'\n'; soso_update_core::KERNEL_META_SIZE],
+        );
         println!(
-            "ESP: huecos de actualización (SOSOUPD.TXT + SOSOKRN.BIN {} MiB)",
+            "ESP: huecos de actualización (SOSOUPD.TXT + SOSOKRN.BIN {} MiB + SOSOKRN.MET)",
             soso_update_core::UPD_KERNEL_SLOT_SIZE / (1024 * 1024)
         );
     }
@@ -330,7 +484,7 @@ pub(crate) fn build_image_with_profile(
 
 /// Compila `boot-shim/` para x86_64-unknown-uefi y devuelve la ruta del .efi.
 /// Best-effort: sin el target instalado avisa y la imagen queda estándar.
-fn build_boot_shim(root: &Path) -> Option<PathBuf> {
+pub(crate) fn build_boot_shim(root: &Path) -> Option<PathBuf> {
     let target_dir = root.join("target/boot-shim");
     let status = Command::new("cargo")
         .args([
@@ -486,6 +640,10 @@ pub(crate) fn build_user() -> bool {
         "tail",
         "stat",
         "hola-std",
+        "soso-std-test",
+        "soso-git",
+        "soso-test-sosofs",
+        "soso-rustc",
     ] {
         let src = out.join(prog);
         let dst = bin.join(prog);
@@ -514,14 +672,82 @@ fn newest_mtime(dir: &Path) -> std::time::SystemTime {
     newest
 }
 
+/// Tamaño total en bytes de un árbol (para dimensionar sosofs).
+fn dir_size_bytes(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                total += dir_size_bytes(&p);
+            } else if let Ok(m) = e.metadata() {
+                total += m.len();
+            }
+        }
+    }
+    total
+}
+
+/// MiB mínimo para empaquetar sosofs (contenido + margen CoW + suelo firmware).
+pub(crate) fn rootfs_pack_mib(root: &Path) -> u64 {
+    let content_mib = rootfs_content_mib(root);
+    let fw_min = rootfs_firmware_min_mib(root);
+    content_mib.max(fw_min)
+}
+
+/// MiB de espacio de trabajo en QEMU (`SOSO_ROOTFS_SIZE`, sparse tras mkfs).
+pub(crate) fn rootfs_workspace_mib() -> u64 {
+    rootfs_workspace_mib_inner()
+}
+
+fn rootfs_workspace_mib_inner() -> u64 {
+    let raw = std::env::var("SOSO_ROOTFS_SIZE").unwrap_or_else(|_| "32G".into());
+    let bytes = live_models::parse_capacity_env(&raw).unwrap_or_else(|e| {
+        eprintln!("mkfs: SOSO_ROOTFS_SIZE inválido ({e}); uso 32G");
+        32 * 1024 * 1024 * 1024
+    });
+    ((bytes + 1024 * 1024 - 1) / (1024 * 1024)).max(64)
+}
+
+/// Modo de tamaño al generar `soso-data.img`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RootfsImgMode {
+    /// Solo el tamaño empaquetado (USB live / flash incremental).
+    PackOnly,
+    /// Empaquetado + `ftruncate` sparse a `SOSO_ROOTFS_SIZE` (QEMU).
+    Workspace,
+}
+
+fn rootfs_content_mib(root: &Path) -> u64 {
+    let content = dir_size_bytes(&root.join("rootfs"));
+    // Metadatos sosofs + margen CoW: ~25 % + 16 MiB.
+    let need_bytes = content.saturating_mul(5) / 4 + 16 * 1024 * 1024;
+    let need_mib = (need_bytes + 1024 * 1024 - 1) / (1024 * 1024);
+    ((need_mib + 63) / 64) * 64
+}
+
+fn rootfs_firmware_min_mib(root: &Path) -> u64 {
+    let fw_gb205 = root.join("rootfs/lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin");
+    let fw_ga102 = root.join("rootfs/lib/firmware/nvidia/ga102/gsp/bootloader-570.144.bin");
+    let fw_ga107 = root.join("rootfs/lib/firmware/nvidia/ga107/gsp/bootloader-570.144.bin");
+    let ampere = fw_ga102.exists() || fw_ga107.exists();
+    let blackwell = fw_gb205.exists();
+    match (ampere, blackwell) {
+        (true, true) => 256,
+        (true, false) | (false, true) => 128,
+        (false, false) => 64,
+    }
+}
+
 /// Disco de datos persistente (virtio-blk 0) con sosofs desde rootfs/.
 pub(crate) fn mkfs_rootfs(force: bool) -> PathBuf {
-    mkfs_rootfs_with_profile(force, &drivers::profile_from_env_or_args())
+    mkfs_rootfs_with_profile(force, &drivers::profile_from_env_or_args(), RootfsImgMode::Workspace)
 }
 
 pub(crate) fn mkfs_rootfs_with_profile(
     force: bool,
     profile: &drivers::DriverProfile,
+    mode: RootfsImgMode,
 ) -> PathBuf {
     let root = project_root();
     if profile.kernel_features.iter().any(|f| f == "drv-gpu-nvidia")
@@ -540,28 +766,39 @@ pub(crate) fn mkfs_rootfs_with_profile(
         return path;
     }
     let pubkey = client_pubkey();
-    let fw_gb205 = root.join("rootfs/lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin");
-    let fw_ga102 = root.join("rootfs/lib/firmware/nvidia/ga102/gsp/bootloader-570.144.bin");
-    let fw_ga107 = root.join("rootfs/lib/firmware/nvidia/ga107/gsp/bootloader-570.144.bin");
-    let ampere = fw_ga102.exists() || fw_ga107.exists();
-    let blackwell = fw_gb205.exists();
-    // ga102 + gb205 duplican ~60 MiB de ucode; 128 MiB no basta para las dos familias.
-    let disk_mib: u64 = match (ampere, blackwell) {
-        (true, true) => 256,
-        (true, false) | (false, true) => 128,
-        (false, false) => 64,
-    };
+    let pack_mib = rootfs_pack_mib(&root);
+    let workspace_mib = rootfs_workspace_mib_inner();
+    eprintln!(
+        "mkfs: empaquetado {} MiB (contenido ~{} MiB, suelo firmware {} MiB)",
+        pack_mib,
+        rootfs_content_mib(&root),
+        rootfs_firmware_min_mib(&root)
+    );
+    if mode == RootfsImgMode::Workspace && workspace_mib > pack_mib {
+        eprintln!("mkfs: espacio QEMU {} MiB (sparse tras formatear)", workspace_mib);
+    }
     let status = Command::new("cargo")
         .current_dir(&root)
         .args(["run", "-q", "-p", "mkfs-soso", "--"])
         .arg(root.join("rootfs"))
         .arg(&path)
-        .arg(disk_mib.to_string())
+        .arg(pack_mib.to_string())
         .arg(&pubkey)
         .status()
         .expect("no se pudo ejecutar mkfs-soso");
     if !status.success() {
         exit(status.code().unwrap_or(1));
+    }
+    if mode == RootfsImgMode::Workspace && workspace_mib > pack_mib {
+        let bytes = workspace_mib * 1024 * 1024;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_len(bytes))
+            .unwrap_or_else(|e| {
+                eprintln!("mkfs: no pude ampliar {} a {workspace_mib} MiB: {e}", path.display());
+                exit(1);
+            });
     }
     path
 }
@@ -907,6 +1144,49 @@ pub(crate) fn test_jobs_default() -> usize {
     }
 }
 
+/// Perfil de dispositivos/QEMU para una instancia concreta (evita mutar el entorno).
+#[derive(Clone, Debug)]
+pub(crate) struct QemuGuestConfig {
+    pub live: bool,
+    pub live_usb: bool,
+    pub xhci_model: String,
+    pub usb_kbd: bool,
+    pub usb_hub: bool,
+    pub trace_usb: bool,
+    pub nvme: bool,
+    pub nvme_root: bool,
+}
+
+impl Default for QemuGuestConfig {
+    fn default() -> Self {
+        Self {
+            live: false,
+            live_usb: false,
+            xhci_model: String::from("qemu"),
+            usb_kbd: false,
+            usb_hub: false,
+            trace_usb: false,
+            nvme: false,
+            nvme_root: false,
+        }
+    }
+}
+
+impl QemuGuestConfig {
+    pub fn from_env() -> Self {
+        Self {
+            live: qemu_live(),
+            live_usb: qemu_live_usb(),
+            xhci_model: qemu_xhci_model(),
+            usb_kbd: qemu_usb_kbd(),
+            usb_hub: qemu_usb_hub(),
+            trace_usb: qemu_trace_usb(),
+            nvme: qemu_nvme(),
+            nvme_root: qemu_nvme_root(),
+        }
+    }
+}
+
 /// `SOSO_QEMU_NVME=1`: añade un NVMe con la imagen de modelos (además de virtio).
 /// `SOSO_QEMU_NVME_IMG=<ruta>`: imagen raw para ese NVMe (p. ej. disco fake Linux).
 pub(crate) fn qemu_nvme() -> bool {
@@ -1035,28 +1315,57 @@ fn pack_nvidia_firmware(root: &Path) {
     }
 }
 
+/// Copia una imagen de disco preservando agujeros sparse.
+///
+/// `std::fs::copy` lee los ceros y los escribe, así que un `soso-data.img` de
+/// 32 GiB hueco (~300 MiB reales) pasa a ocupar 32 GiB en el destino. `cp
+/// --sparse=always` deja los agujeros; `--reflink=auto` comparte bloques si el
+/// FS lo permite (btrfs/xfs) y si no cae al copiado sparse.
+pub(crate) fn copy_sparse(src: &Path, dst: &Path) {
+    let status = Command::new("cp")
+        .args(["--sparse=always", "--reflink=auto", "--force", "--"])
+        .arg(src)
+        .arg(dst)
+        .status()
+        .unwrap_or_else(|e| {
+            panic!("cp {} → {}: {e}", src.display(), dst.display())
+        });
+    if !status.success() {
+        panic!(
+            "cp --sparse=always {} → {} falló ({status})",
+            src.display(),
+            dst.display()
+        );
+    }
+}
+
 fn nvme_copy(src: &Path, dst_name: &str) -> PathBuf {
     let dst = project_root().join("target").join(dst_name);
-    std::fs::copy(src, &dst).unwrap_or_else(|e| panic!("copiar {} → {}: {e}", src.display(), dst.display()));
+    copy_sparse(src, &dst);
     dst
 }
 
 /// Discos de QEMU: virtio (default), NVMe extra para modelos, o solo NVMe para root+models.
-pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
-    if qemu_live() {
+pub(crate) fn apply_qemu_disks(
+    qemu: &mut Command,
+    data: &Path,
+    models: &Path,
+    cfg: &QemuGuestConfig,
+) {
+    if cfg.live {
         package_live::ensure_live_image();
         let live = package_live::live_image_path();
         qemu.args([
             "-drive",
             &format!("file={},format=raw,if=none,id=live0", live.display()),
         ]);
-        if qemu_live_usb() {
+        if cfg.live_usb {
             println!("xtask: modo live USB (drive) → {}", live.display());
         } else {
             qemu.args(["-device", "virtio-blk-pci,drive=live0"]);
             println!("xtask: modo live virtio → {}", live.display());
         }
-        if qemu_nvme() {
+        if cfg.nvme {
             let nvme_img = std::env::var("SOSO_QEMU_NVME_IMG")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| nvme_copy(models, "soso-models-nvme.img"));
@@ -1070,7 +1379,7 @@ pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
         return;
     }
 
-    if qemu_nvme_root() {
+    if cfg.nvme_root {
         let nvme_root = nvme_copy(data, "soso-data-nvme.img");
         let nvme_models = nvme_copy(models, "soso-models-nvme.img");
         qemu.args([
@@ -1091,7 +1400,7 @@ pub(crate) fn apply_qemu_disks(qemu: &mut Command, data: &Path, models: &Path) {
         .args(["-drive", &format!("file={},format=raw,if=none,id=data1", models.display())])
         .args(["-device", "virtio-blk-pci,drive=data1"]);
 
-    if qemu_nvme() {
+    if cfg.nvme {
         let nvme_img = std::env::var("SOSO_QEMU_NVME_IMG")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| nvme_copy(models, "soso-models-nvme.img"));
@@ -1155,15 +1464,15 @@ pub(crate) fn apply_qemu_nic_with_ports(
 }
 
 /// Controlador xHCI y dispositivos USB (storage live, teclado, passthrough, trazas).
-pub(crate) fn apply_qemu_usb(qemu: &mut Command) {
-    let live_storage = qemu_live_usb() && qemu_live();
+pub(crate) fn apply_qemu_usb(qemu: &mut Command, cfg: &QemuGuestConfig) {
+    let live_storage = cfg.live_usb && cfg.live;
     let host = qemu_usb_host();
-    let kbd = qemu_usb_kbd();
-    let hub = qemu_usb_hub();
+    let kbd = cfg.usb_kbd;
+    let hub = cfg.usb_hub;
     let need_xhci = live_storage || kbd || host.is_some();
 
     if need_xhci {
-        let model = qemu_xhci_model().to_ascii_lowercase();
+        let model = cfg.xhci_model.to_ascii_lowercase();
         let dev = match model.as_str() {
             "nec" | "nec-usb-xhci" => "nec-usb-xhci,id=xhci",
             _ => "qemu-xhci,id=xhci",
@@ -1209,7 +1518,7 @@ pub(crate) fn apply_qemu_usb(qemu: &mut Command) {
         }
     }
 
-    if qemu_trace_usb() {
+    if cfg.trace_usb {
         let trace_log = project_root().join("target/qemu-usb-trace.log");
         if let Some(parent) = trace_log.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1274,9 +1583,7 @@ fn package_usb() {
         (&models, "soso-models.img"),
     ] {
         let dst = out.join(name);
-        std::fs::copy(src, &dst).unwrap_or_else(|e| {
-            panic!("copiar {} → {}: {e}", src.display(), dst.display());
-        });
+        copy_sparse(src, &dst);
         println!("package-usb: {}", dst.display());
     }
 
@@ -1342,8 +1649,8 @@ pub(crate) fn run_qemu(img: &Path, gdb: bool) {
     apply_qemu_accel(&mut qemu);
     apply_firmware(&mut qemu, img);
     qemu.args(["-drive", &format!("format=raw,file={}", img.display())]);
-    apply_qemu_disks(&mut qemu, &data, &models);
-    apply_qemu_usb(&mut qemu);
+    apply_qemu_disks(&mut qemu, &data, &models, &QemuGuestConfig::from_env());
+    apply_qemu_usb(&mut qemu, &QemuGuestConfig::from_env());
     apply_qemu_nic(&mut qemu);
     apply_qemu_gpu(&mut qemu);
     apply_qemu_audio(&mut qemu);

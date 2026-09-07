@@ -16,9 +16,10 @@ before or during that step. At runtime the guest mounts this image as `/`.
 2. **Firmware (optional)** — if gb205 GSP blobs are missing, xtask tries
    `./scripts/l6-pack-firmware.sh` automatically.
 3. **mkfs-soso** — walk `rootfs/` and write `target/soso-data.img`:
-   - default **64 MiB** when no gb205 firmware is present;
-   - **128 MiB** when `lib/firmware/nvidia/gb205/gsp/bootloader-570.144.bin`
-     exists.
+   - **USB live:** imagen compacta (contenido ×1.25 + suelo firmware NVIDIA);
+   - **QEMU / `cargo xtask run`:** tras el mkfs, `ftruncate` sparse a
+     `SOSO_ROOTFS_SIZE` (default **32 GiB**); sosofs **crece al montar**;
+   - override: `SOSO_ROOTFS_SIZE=64G cargo xtask mkfs`, `512M` para CI rápido.
 4. **SSH keys** — `mkfs-soso` injects into `rootfs/etc/` before packing:
    - `ssh_host_key` — 32-byte ed25519 seed (created once, kept stable across
      rebuilds);

@@ -59,4 +59,13 @@ int gsp_top_pmc_enable_mask(uint8_t type, uint8_t inst, uint32_t *mask_out);
 /* Activa motores en PMC (ga100_mc_device_enable). */
 void gsp_mc_device_enable(uint32_t mask);
 
+/* Desactiva motores en PMC (simétrico a enable). */
+void gsp_mc_device_disable(uint32_t mask);
+
+/* Init mínimo PMC Ampere (ga100_mc_init) antes de FWSEC. */
+void gsp_mc_init_ampere(void);
+
+/* Reset de motor vía PMC disable+enable (gp102_flcn_reset_eng). */
+void gsp_mc_engine_reset(uint8_t type, uint8_t inst);
+
 #endif

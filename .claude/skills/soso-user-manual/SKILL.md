@@ -14,6 +14,8 @@ Documentación para **usuarios finales** (no desarrolladores). Lenguaje claro en
 
 - **Ruta:** [`MANUAL-USUARIO.md`](../../../MANUAL-USUARIO.md) (raíz del repo)
 - **No duplicar** en README ni en otras skills: enlazar a este fichero.
+- **Desarrollo / operativa:** [`docs/GUIA-OPERATIVA.md`](../../../docs/GUIA-OPERATIVA.md)
+- **Estado, versión, límites OTA:** [`docs/ESTADO.md`](../../../docs/ESTADO.md)
 
 ## Cuándo actualizar (obligatorio)
 
@@ -26,6 +28,7 @@ Actualiza `MANUAL-USUARIO.md` en la **misma tarea** que cambia la funcionalidad 
 | Nuevo fichero en rootfs visible al usuario | Actualizar estructura del disco |
 | Cambio de cwd, rutas relativas o redirecciones | Actualizar sosh y ejemplos |
 | Modelos LLM o `soso-llm` | Sección `/models`, planificador/streaming, conversión GGUF |
+| OTA / kernel / ESP | `SOSOKRN.MET`, límites rootfs, reflasheo live antiguo |
 | Etapa de `/loop` que cambie strings o UX de `soso-llm` | Actualizar en **esa misma etapa** (no aplazar) |
 | Solo refactor interno sin cambio de UX | No tocar el manual |
 | Cambio solo de kernel-shell de depuración | Solo si afecta comandos que el usuario final usa |
@@ -44,6 +47,7 @@ Actualiza `MANUAL-USUARIO.md` en la **misma tarea** que cambia la funcionalidad 
 - Bloques de código con comandos completos (sin `...`).
 - Sin jerga de desarrollo (CoW, ring 3, sunset, etc.) salvo en la introducción breve.
 - Mencionar limitaciones conocidas cuando afecten al usuario (monousuario, etc.).
+- Flash/install desde Linux: **`sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask …`**, nunca `sudo cargo`.
 
 ## Comandos documentados hoy
 
@@ -53,7 +57,7 @@ Referencia rápida — ampliar el manual si cambian:
 - **`ask`:** modelo residente en `soso-llm askd` (`127.0.0.1:7420`); persiste entre SSH
 - **`voz` / `soso-voz`:** dictado vía `vozd` (`127.0.0.1:7421`); F4 push-to-talk; `/etc/voz.conf`
 - **`soso-web`:** HTTPS o `--local`; `--grafico` con framebuffer
-- **`soso-update`:** `estado`, `comprobar`, `aplicar`, `revertir`; `/etc/actualiza.conf`, `/etc/soso-release`
+- **`soso-update`:** `estado`, `comprobar`, `aplicar`, `revertir`; `/etc/actualiza.conf`, `/etc/soso-release`; kernel con backup `SOSOKRN.BIN` + meta `SOSOKRN.MET`; rootfs sin rollback automático (`/etc/actualiza.estado` para reintentar)
 - **`soso-install`:** sin args elige disco; `list`, `<id|nombre> --yes`, `status`; buzón `SOSOBOOT.TXT`
 - **`soso-hf`:** `search`, `list`, `pull` (modelos en `/models/` desde el guest)
 - **Arranque:** QEMU `cargo xtask run`; live `flash-usb-live`; salida `Ctrl-A X`
@@ -66,12 +70,12 @@ Referencia rápida — ampliar el manual si cambian:
 
 ## Skills compartidas
 
-Las skills viven en `.claude/skills/`. Cursor las descubre vía `.cursor/skills`. Editar bajo `.claude/skills/`. Índice: `.claude/skills/README.md`.
+Copias en `.claude/skills/`, `.cursor/skills/` y `.agents/skills/` — mantenerlas alineadas.
 
 | Skill | Cuándo |
 |-------|--------|
-| `soso-dev` | build, QEMU, tests, `sosolog` |
+| `soso-dev` | build, QEMU, `check`, tests, `sosolog`, hw-matrix |
 | `soso-architecture` | kernel, FS, syscalls, LLM |
 | `soso-gpu` | nouveau/GSP, VFIO |
 | `soso-wifi` | iwlwifi, `SOSOWIFI.TXT` |
-| `soso-live` | USB live, ESP, install, OTA |
+| `soso-live` | USB live, ESP, install, OTA (`SOSOKRN.MET`) |

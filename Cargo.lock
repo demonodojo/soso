@@ -723,6 +723,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "soso-rt"
+version = "0.1.0"
+dependencies = [
+ "soso-abi",
+]
+
+[[package]]
 name = "soso-std"
 version = "0.1.0"
 dependencies = [
@@ -1130,6 +1137,7 @@ version = "0.1.0"
 dependencies = [
  "bootloader",
  "chrono",
+ "serde",
  "serde_json",
  "sha2",
  "soso-abi",

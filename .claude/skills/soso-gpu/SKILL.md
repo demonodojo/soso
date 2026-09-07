@@ -1104,3 +1104,23 @@ QEMU sin passthrough: `nvidia: sin GPU NVIDIA en PCI` — normal. `GSP booted (s
   Ampere `ga102` (escrito, sin HW aquí).
 - Enlace PCIe Gen5 en FMC bajo VFIO inestable: cap Gen3 + bump post-GSP (`SOSO_G1_PCIE_BUMP`).
 - No soltar la GPU con GSP vivo (gotcha 6): siempre `halt` → `gsp_fini`.
+
+## Matriz hardware (A8)
+
+Evidencia por placa en [`docs/hw-matrix.json`](../../docs/hw-matrix.json) — ver
+[`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).
+
+| ID matriz | PCI | Etapas GPU |
+|-----------|-----|------------|
+| `gb205-dgpu` | `10de:2f18` | G1–G5 (parser host + VFIO + live) |
+| `ga107-igpu` | Ampere móvil | FWSEC-FRTS, booter_load |
+
+```bash
+cargo xtask hw-matrix init
+./scripts/l6-a8-collect.sh --id gb205-dgpu --equipo "..." --pci 10de:2f18 --boot-ok
+./scripts/l6-g3-gsp-hostcheck.sh   # host, sin GPU
+sudo ./scripts/l6-g1-vfio-test.sh    # ciclo VFIO (notas: docs/historico/notas-placa.md)
+cargo xtask hw-matrix show
+```
+
+Estado agregado y límites: [`docs/ESTADO.md`](../../docs/ESTADO.md).

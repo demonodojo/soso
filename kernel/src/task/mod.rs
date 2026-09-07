@@ -212,6 +212,8 @@ pub struct Process {
     pub sid: u64,
     /// Base TLS (`FS_BASE`) del hilo/proceso.
     pub tls_base: u64,
+    /// Variables de entorno (`KEY=VAL` separadas por `\n`) del spawn.
+    pub env: String,
     /// Hilo ligero (comparte AddrSpace con el padre).
     pub is_thread: bool,
     /// Dirección de usuario (futex) para `join`; 0 si no aplica.
@@ -684,7 +686,22 @@ pub fn spawn_console(
     parent: u64,
     console: Console,
 ) -> Result<u64, i64> {
-    spawn_console_io(path, args, parent, console, [soso_abi::FD_INHERIT_TTY; 3])
+    let env = {
+        let procs = PROCS.lock();
+        procs
+            .iter()
+            .find(|p| p.pid == parent)
+            .map(|p| p.env.clone())
+            .unwrap_or_default()
+    };
+    spawn_console_io(
+        path,
+        args,
+        parent,
+        console,
+        [soso_abi::FD_INHERIT_TTY; 3],
+        &env,
+    )
 }
 
 /// Como `spawn_console` pero con stdio opcional (`FD_INHERIT_TTY` /
@@ -695,11 +712,17 @@ pub fn spawn_console_io(
     parent: u64,
     console: Console,
     stdio: [u64; 3],
+    env: &str,
 ) -> Result<u64, i64> {
     use soso_abi as abi;
     if args.len() > 3000 {
         return Err(-abi::EINVAL);
     }
+    let env_block = if env.is_empty() && parent == 0 {
+        String::from("HOME=/\nPATH=/bin:/sbin")
+    } else {
+        String::from(env)
+    };
     let stdio_fds = if stdio.iter().all(|&f| abi::stdio_es_tty(f)) {
         [None, None, None]
     } else if current_pid() == 0 {
@@ -788,6 +811,7 @@ pub fn spawn_console_io(
         pgid,
         sid,
         tls_base,
+        env: env_block,
         is_thread: false,
         join_uaddr: 0,
     });
@@ -806,7 +830,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
     if parent == 0 {
         return Err(-abi::EINVAL);
     }
-    let (space, console, cwd, brk, brk_min, name, pgid, sid) = with_current(|p| {
+    let (space, console, cwd, brk, brk_min, name, pgid, sid, env) = with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::ENOMEM)?.clone();
         Ok::<_, i64>((
             space,
@@ -817,6 +841,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
             p.name.clone(),
             p.pgid,
             p.sid,
+            p.env.clone(),
         ))
     })?;
     let tid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
@@ -850,6 +875,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
         pgid,
         sid,
         tls_base: 0,
+        env,
         is_thread: true,
         join_uaddr,
     });
@@ -1277,11 +1303,9 @@ extern "C" fn schedule_inner() -> ! {
                 // a usuario (después de esto, nada de SSE en este camino).
                 unsafe { crate::arch::fpu::restore(&procs[i].fpu) };
                 if procs[i].tls_base != 0 {
-                    unsafe {
-                        x86_64::registers::model_specific::FsBase::write(
-                            x86_64::VirtAddr::new(procs[i].tls_base),
-                        );
-                    }
+                    x86_64::registers::model_specific::FsBase::write(
+                        x86_64::VirtAddr::new(procs[i].tls_base),
+                    );
                 }
                 drop(procs);
                 unsafe { resume_user(&ctx) }

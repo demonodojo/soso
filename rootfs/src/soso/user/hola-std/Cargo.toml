@@ -1,0 +1,12 @@
+[package]
+name = "hola-std"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "hola-std"
+path = "src/main.rs"
+
+[dependencies]
+libsoso = { workspace = true }
+soso-std = { path = "../../crates/soso-std" }

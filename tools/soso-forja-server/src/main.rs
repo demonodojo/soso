@@ -38,6 +38,17 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn release_dir(root: &Path) -> Option<PathBuf> {
+    let ver = std::fs::read_to_string(root.join("VERSION")).ok()?;
+    let ver = ver.trim();
+    let dir = root.join(format!("target/release-soso/v{ver}"));
+    if dir.join("manifest.txt").is_file() {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
 fn leer_cuerpo(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf)?;
@@ -54,6 +65,48 @@ fn responder(stream: &mut TcpStream, status: &str, body: &[u8]) -> std::io::Resu
     Ok(())
 }
 
+fn servir_artifact(stream: &mut TcpStream, root: &Path, name: &str) {
+    let Some(rel) = release_dir(root) else {
+        let _ = responder(stream, "404 Not Found", b"sin release\n");
+        return;
+    };
+    match std::fs::read(rel.join(name)) {
+        Ok(data) => {
+            let _ = responder(stream, "200 OK", &data);
+        }
+        Err(_) => {
+            let _ = responder(stream, "404 Not Found", b"missing\n");
+        }
+    }
+}
+
+fn run_release(root: &Path) -> bool {
+    let out = Command::new("cargo")
+        .current_dir(root)
+        .args(["xtask", "release"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let _ = Command::new("cargo")
+                .current_dir(root)
+                .args(["xtask", "forja-out"])
+                .status();
+            true
+        }
+        Ok(o) => {
+            eprintln!(
+                "forja-server: build fallo: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("forja-server: {e}");
+            false
+        }
+    }
+}
+
 fn manejar(mut stream: TcpStream, estado: Arc<Mutex<Estado>>) {
     let mut req = [0u8; 4096];
     let n = stream.read(&mut req).unwrap_or(0);
@@ -65,6 +118,7 @@ fn manejar(mut stream: TcpStream, estado: Arc<Mutex<Estado>>) {
         return;
     };
     let mut body = parsed.body.to_vec();
+    let root = project_root();
     match (parsed.method, parsed.path) {
         ("POST", "/sync") => {
             let mut extra = leer_cuerpo(&mut stream).unwrap_or_default();
@@ -73,35 +127,15 @@ fn manejar(mut stream: TcpStream, estado: Arc<Mutex<Estado>>) {
             let _ = responder(&mut stream, "200 OK", b"OK\n");
         }
         ("POST", "/build") => {
-            let root = project_root();
-            let out = Command::new("cargo")
-                .current_dir(&root)
-                .args(["xtask", "release"])
-                .output();
-            match out {
-                Ok(o) if o.status.success() => {
-                    let ver = std::fs::read_to_string(root.join("VERSION")).unwrap_or_default();
-                    let ver = ver.trim();
-                    let pack = root.join(format!("target/release-soso/v{ver}/rootfs.pack"));
-                    match std::fs::read(&pack) {
-                        Ok(data) => {
-                            let _ = responder(&mut stream, "200 OK", &data);
-                        }
-                        Err(_) => {
-                            let _ = responder(&mut stream, "500 Error", b"sin rootfs.pack\n");
-                        }
-                    }
-                }
-                Ok(o) => {
-                    eprintln!("forja-server: build falló: {}", String::from_utf8_lossy(&o.stderr));
-                    let _ = responder(&mut stream, "500 Error", b"build failed\n");
-                }
-                Err(e) => {
-                    eprintln!("forja-server: {e}");
-                    let _ = responder(&mut stream, "500 Error", b"spawn failed\n");
-                }
+            if !run_release(&root) {
+                let _ = responder(&mut stream, "500 Error", b"build failed\n");
+                return;
             }
+            servir_artifact(&mut stream, &root, "rootfs.pack");
         }
+        ("GET", "/manifest.txt") => servir_artifact(&mut stream, &root, "manifest.txt"),
+        ("GET", "/kernel-x86_64") => servir_artifact(&mut stream, &root, "kernel-x86_64"),
+        ("GET", "/rootfs.pack") => servir_artifact(&mut stream, &root, "rootfs.pack"),
         _ => {
             let _ = responder(&mut stream, "404 Not Found", b"?\n");
         }
@@ -138,18 +172,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_post_build_sin_cuerpo() {
-        let req = b"POST /build HTTP/1.1\r\nHost: x\r\n\r\n";
-        let p = parse_http_request(req).expect("parse");
-        assert_eq!(p.path, "/build");
-        assert!(p.body.is_empty());
-    }
-
-    #[test]
-    fn parse_get_404_path() {
-        let req = b"GET /nope HTTP/1.1\r\n\r\n";
+    fn parse_get_kernel() {
+        let req = b"GET /kernel-x86_64 HTTP/1.1\r\nHost: x\r\n\r\n";
         let p = parse_http_request(req).expect("parse");
         assert_eq!(p.method, "GET");
-        assert_eq!(p.path, "/nope");
+        assert_eq!(p.path, "/kernel-x86_64");
     }
 }

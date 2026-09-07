@@ -4,10 +4,14 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use soso_update_core::backup_digest;
 use soso_update_core::hash::hex_sha256;
+use soso_update_core::kernel_meta::{KernelMeta, KernelPhase, KERNEL_META_SIZE};
 use soso_update_core::manifest::Manifest;
+use soso_update_core::mailbox::Mailbox;
 use soso_update_core::pack::pack_rootfs_con;
 use soso_update_core::semver::parse as parse_semver;
+use soso_update_core::UPD_KERNEL_SLOT_SIZE;
 
 use crate::test::{esperar_en_fichero, ssh_guion};
 
@@ -30,6 +34,8 @@ pub fn run() {
     }
     crate::package_live::run();
     let live = crate::package_live::live_image_path();
+    let live_base = dir.join("live-base.img");
+    crate::copy_sparse(&live, &live_base);
 
     let Some((ovmf_code, ovmf_vars_src)) = crate::ovmf_paths() else {
         eprintln!("test-update: necesita OVMF (cargo xtask test-install)");
@@ -62,11 +68,29 @@ pub fn run() {
         }
     }
 
+    let serial3 = dir.join("boot-recovery.log");
+    match fase_recuperacion_corte(&ovmf_code, &vars, &live_base, &serial3, &key) {
+        Ok(()) => marca("arranque 3: recuperación tras corte (meta applying)", true),
+        Err(e) => {
+            marca(&format!("arranque 3: recuperación — {e}"), false);
+            fallos += 1;
+        }
+    }
+
+    let serial4 = dir.join("boot-manifest.log");
+    match fase_manifiesto_invalido(&ovmf_code, &vars, &live, &serial4, &key) {
+        Ok(()) => marca("arranque 4: manifiesto inválido rechazado", true),
+        Err(e) => {
+            marca(&format!("arranque 4: manifiesto — {e}"), false);
+            fallos += 1;
+        }
+    }
+
     if fallos > 0 {
         eprintln!("\ntest-update: {fallos} fallo(s)");
         std::process::exit(1);
     }
-    println!("\ntest-update: actualización local OK");
+    println!("\ntest-update: actualización local OK (+ recuperación OTA)");
 }
 
 fn preparar_release_prueba(root: &Path) {
@@ -202,6 +226,158 @@ fn fase_comprobar_version(
         return Err(format!("estado no reconoce el medio de arranque USB: {salida:?}"));
     }
     Ok(())
+}
+
+/// Simula un corte tras escribir el backup: meta `applying`, kernel activo corrupto.
+fn fase_recuperacion_corte(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    serial: &Path,
+    key: &Path,
+) -> Result<(), String> {
+    let ver_base = crate::version::read_version(&crate::project_root());
+    inyectar_corte_backup(live)?;
+
+    let _ = std::fs::remove_file(serial);
+    let qemu = lanzar_live(code, vars, live, serial)?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
+
+    let log = std::fs::read_to_string(serial).unwrap_or_default();
+    let p1 = esp_p1(live);
+    let mark = crate::fat32_write::read_root_file(live, p1, b"BOOTMARKTXT")
+        .unwrap_or_default();
+    let mark_s = String::from_utf8_lossy(&mark);
+    let ok_serial = log.contains("recuperado tras corte") || log.contains("actualiza: recuperado");
+    let ok_mark = mark_s.contains("recuperado tras corte");
+    if !ok_serial && !ok_mark {
+        return Err(format!(
+            "sin recuperación en serial ni BOOTMARK; mark={mark_s:?} serial={:?}",
+            log.lines()
+                .filter(|l| l.contains("actualiza") || l.contains("soso-shim"))
+                .take(8)
+                .collect::<Vec<_>>()
+        ));
+    }
+
+    let salida = ssh_guion(
+        key,
+        SSH_PORT,
+        &format!("soso-update estado\nhalt\n"),
+        Duration::from_secs(120),
+    )?;
+    if !salida.contains(&format!("rootfs: {ver_base}")) {
+        return Err(format!(
+            "tras recuperar, rootfs debería seguir en {ver_base}: {salida:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Manifiesto con path `..` debe fallar antes de mutar el rootfs.
+fn fase_manifiesto_invalido(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    serial: &Path,
+    key: &Path,
+) -> Result<(), String> {
+    let _ = std::fs::remove_file(serial);
+    let qemu = lanzar_live(code, vars, live, serial)?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
+
+    let bad_manifest = format!(
+        "{}\nversion=9.9.9\nbuild=x\nfecha=2026-01-01\n\
+         kernel {} 10\npack {} 20\nf {} 0 5 ../etc/passwd\n",
+        soso_update_core::manifest::MANIFEST_MAGIC,
+        "a".repeat(64),
+        "b".repeat(64),
+        "c".repeat(64),
+    );
+    let guion = format!(
+        "cat > /var/actualiza-prueba/manifest.txt <<'EOF'\n{bad_manifest}EOF\n\
+         soso-update aplicar --local /var/actualiza-prueba --forzar\n\
+         cat /etc/actualiza-marca.txt\nhalt\n"
+    );
+    let salida = ssh_guion(key, SSH_PORT, &guion, Duration::from_secs(180))?;
+    if !salida.contains("manifest") {
+        return Err(format!("aplicar no rechazó el manifiesto: {salida:?}"));
+    }
+    if !salida.contains(MARCA_NUEVA.trim()) {
+        return Err(format!(
+            "el manifiesto inválido mutó el rootfs (marca cambió): {salida:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn inyectar_corte_backup(live: &Path) -> Result<(), String> {
+    let p1 = esp_p1(live);
+    let ((kname8, kext3), kernel) = esp_read_kernel(live, p1)?;
+    let (backup_size, backup_hash) = backup_digest(&kernel);
+
+    let mut slot = kernel.clone();
+    slot.resize(UPD_KERNEL_SLOT_SIZE, 0);
+    esp_write_root(live, p1, b"SOSOKRN ", b"BIN", &slot)?;
+
+    let meta = KernelMeta {
+        phase: KernelPhase::Applying,
+        version: String::from(TEST_VER),
+        new_size: 0,
+        new_hash: String::new(),
+        backup_size,
+        backup_hash,
+    };
+    let mut meta_bytes = meta.format();
+    meta_bytes.resize(KERNEL_META_SIZE, b'\n');
+    esp_write_root(live, p1, b"SOSOKRN ", b"MET", &meta_bytes)?;
+
+    let mut corrupt = kernel.clone();
+    let n = corrupt.len().min(4096);
+    corrupt[..n].fill(0xA5);
+    esp_write_root(live, p1, &kname8, &kext3, &corrupt)?;
+
+    let idle = Mailbox::format_idle();
+    esp_write_root(live, p1, b"SOSOUPD ", b"TXT", &idle)?;
+    Ok(())
+}
+
+fn esp_p1(live: &Path) -> u64 {
+    crate::package_live::partition_first_sector(live, 1)
+        .expect("ESP p1 del live")
+}
+
+fn esp_write_root(live: &Path, p1: u64, name: &[u8; 8], ext: &[u8; 3], data: &[u8]) -> Result<(), String> {
+    crate::fat32_write::write_root_file(live, p1, name, ext, data)
+}
+
+fn esp_read_kernel(live: &Path, p1: u64) -> Result<(([u8; 8], [u8; 3]), Vec<u8>), String> {
+    let files = crate::fat32_write::list_root_files(live, p1)?;
+    let mut best: Option<([u8; 8], [u8; 3], u32)> = None;
+    for (name11, size) in files {
+        let label = String::from_utf8_lossy(&name11);
+        if label.starts_with("SOSO") || label.starts_with("BOOTMARK") {
+            continue;
+        }
+        if size < 1024 * 1024 {
+            continue;
+        }
+        let mut n = [0u8; 8];
+        let mut e = [0u8; 3];
+        n.copy_from_slice(&name11[..8]);
+        e.copy_from_slice(&name11[8..11]);
+        if best.as_ref().map(|b| size > b.2).unwrap_or(true) {
+            best = Some((n, e, size));
+        }
+    }
+    let (n, e, _) = best.ok_or_else(|| "no encontré kernel-x86_64 en la ESP".to_string())?;
+    let mut name11 = [0u8; 11];
+    name11[..8].copy_from_slice(&n);
+    name11[8..11].copy_from_slice(&e);
+    let data = crate::fat32_write::read_root_file(live, p1, &name11)?;
+    Ok(((n, e), data))
 }
 
 struct QemuProc {

@@ -5,13 +5,15 @@ description: >-
   boot-shim, USB/xHCI mass storage, soso-install and soso-update. Use when
   modifying package-usb-live, flash-usb-live, boot-shim, updslot, bootreq,
   espfat, usb_storage, xhci-nostd, gptdisk, soso-update-core, or ESP files
-  SOSOLOG/SOSODRV/SOSOBOOT/SOSOUPD/SOSOKRN/SOSOWIFI.
+  SOSOLOG/SOSODRV/SOSOBOOT/SOSOUPD/SOSOKRN/SOSOKRN.MET/SOSOWIFI.
 ---
 
 # soso — Live USB, instalación y actualizaciones
 
 El camino de placa: **un GPT** (`soso-live.img`), no tres imágenes sueltas.
 Docs de usuario: `MANUAL-USUARIO.md`. Bring-up on-box: `docs/L5c-on-box.md`.
+Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
+Estado/límites OTA: [`docs/ESTADO.md`](../../docs/ESTADO.md).
 
 ## Particiones (orden real en el stick)
 
@@ -42,6 +44,8 @@ tamaño fijo y escribe sectores. Si falta el hueco, esa vía queda desactivada
 | `SOSOWIFI.TXT` | 4 KiB | usuario en host | `ssid=` / `psk=` |
 | `SOSOUPD.TXT` | 4 KiB | `soso-update` / shim / init | buzón OTA kernel |
 | `SOSOKRN.BIN` | 64 MiB | `soso-update` / shim | hueco kernel (nuevo o backup) |
+| `SOSOKRN.MET` | 512 B | `soso-update` / shim | meta durable OTA (fases staged/backup/applying/probando) |
+| `SOSORES.TXT` | 4 KiB | kernel `fs-resize` | journal de redimensionado rootfs |
 | `kernel-x86_64` | — | shim al aplicar | kernel UEFI activo |
 
 Pass 1 de `package-usb-live` reserva huecos; pass 2 **reutiliza** la misma
@@ -55,12 +59,14 @@ entrada FAT (no duplicar `SOSOUPD`/`SOSOKRN`).
 - **Install:** `bootentry.rs` lee `SOSOBOOT.TXT`, crea `Boot####` «soso».
   El kernel no puede tocar NVRAM (`ExitBootServices`). Si falla, **no aborta**
   el arranque. Deja `DONE Boot#### soso`.
-- **Update:** `actualiza.rs` lee `SOSOUPD.TXT`:
+- **Update:** `actualiza.rs` lee `SOSOUPD.TXT` y `SOSOKRN.MET`:
   - `KERNEL <tam> <sha256> <ver>` → verifica hueco, copia kernel viejo a
-    `SOSOKRN.BIN`, escribe el nuevo, deja `PROBANDO`.
+    `SOSOKRN.BIN`, escribe el nuevo, deja `PROBANDO` (meta `applying`/`probando`).
+  - Corte en applying/backup → recuperación con backup verificado (tamaño/hash).
   - `PROBANDO` en el *siguiente* arranque = el anterior falló → revertir.
   - `OK` / `REVERTIR` / idle: ver `crates/soso-update-core/src/mailbox.rs`.
-- Init confirma el kernel nuevo (`OK`) si el userspace llega.
+- Init confirma el kernel nuevo (`OK`) solo tras rootfs accesible y arranque de
+  `/bin/sosh`.
 
 Diagnóstico: `BOOTMARK` vacío → firmware; `BOOTMARK` escrito y `SOSOLOG`
 vacío → kernel (checkpoints `boot:` en pantalla).
@@ -95,12 +101,14 @@ Userspace + `crates/soso-update-core`. Release: `manifest.txt` + `rootfs.pack`
 + `kernel-x86_64` (`cargo xtask release [--publish]`).
 
 - Rootfs: pack concatenado; `PackWriter::should_pack` salta rutas en `PACK_SKIP`.
-- Kernel: `SYS_UPD_WRITE`/`READ` (68/69) sobre huecos ESP.
+  Sin rollback automático de binarios; progreso en `/etc/actualiza.estado`.
+- Kernel: `SYS_UPD_WRITE`/`READ` (68/69) sobre huecos ESP + `SOSOKRN.MET`.
 - Comandos: `estado` / `comprobar` / `aplicar` / `revertir`; `--local` apunta
   a un directorio (p. ej. `/var/actualiza-prueba`).
 - Versión: `VERSION` → `/etc/soso-release` + banner kernel.
 
-E2E: `cargo xtask test-update`.
+E2E: `cargo xtask test-update` (apply, corte simulado + recovery, manifiesto inválido).
+Host: `cargo test -p soso-update-core --features std --tests`.
 
 ## USB / xHCI (`crates/xhci-nostd` + `drivers/usb_storage.rs`)
 
@@ -133,9 +141,14 @@ cargo xtask sosolog [--drv] [/dev/sdX]
 cargo xtask test-install
 cargo xtask test-update
 cargo xtask test-usb
+cargo xtask check
+cargo xtask hw-matrix show
 ```
 
 No `sudo cargo`: root no tiene rustup. `sudo env "PATH=$PATH" "HOME=$HOME" …`
+
+Notas de sesión VFIO/kdump archivadas: [`docs/historico/notas-placa.md`](../../docs/historico/notas-placa.md)
+(puntero desde [`board.txt`](../../board.txt)).
 
 Perfil default live: `live-usb` (virtio + e1000e + rtl8169 + nvme + usb +
 live-disk + nouveau + iwlwifi). Override: `SOSO_DRIVERS`.

@@ -222,7 +222,16 @@ pub fn entry<'a>(entries: &'a [u8], hdr: &Header, i: usize) -> Option<&'a [u8]> 
     entries.get(off..off + sz)
 }
 
-fn entry_mut<'a>(entries: &'a mut [u8], hdr: &Header, i: usize) -> Option<&'a mut [u8]> {
+pub fn set_entry_first_lba(e: &mut [u8], lba: u64) {
+    wr64(e, 32, lba);
+}
+
+pub fn set_entry_last_lba(e: &mut [u8], lba: u64) {
+    wr64(e, 40, lba);
+}
+
+/// Entrada mutable `i` del array GPT.
+pub fn entry_mut<'a>(entries: &'a mut [u8], hdr: &Header, i: usize) -> Option<&'a mut [u8]> {
     let sz = hdr.entry_size as usize;
     let off = i.checked_mul(sz)?;
     entries.get_mut(off..off + sz)

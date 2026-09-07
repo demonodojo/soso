@@ -48,7 +48,9 @@ cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
    -o "$out/hostcheck" \
    "$root/tools/gsp-hostcheck/main.c" \
    "$src/saxpy_sass_embed.c" "$src/matvec_sass_embed.c" \
-   "$src/matvec_q4k_sass_embed.c" "$src/matvec_q80_sass_embed.c"
+   "$src/matvec_q4k_sass_embed.c" "$src/matvec_q80_sass_embed.c" \
+   "$src/matmul_sass_embed.c" "$src/softmax_rows_sass_embed.c" \
+   "$src/layernorm_rows_sass_embed.c"
 
 echo "=== L6 — pasos 3 a 6 de la cadena FSP/COT + recepción de RPC ==="
 "$out/hostcheck" "$ucode" "$boot" "$fmc"

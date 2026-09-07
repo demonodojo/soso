@@ -17,6 +17,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -98,6 +99,7 @@ struct QemuSlot {
     smp: Option<String>,
     /// Socket UNIX del monitor QEMU (`sendkey` tras I/O USB).
     monitor: Option<PathBuf>,
+    guest: super::QemuGuestConfig,
 }
 
 struct Report {
@@ -278,6 +280,30 @@ fn run_host_tests(root: &Path, report: &Arc<Report>) {
                 false,
             );
         });
+
+        let root_c = root.to_path_buf();
+        let report_c = Arc::clone(report);
+        scope.spawn(move || {
+            run_cargo_test_batch(
+                &root_c,
+                &report_c,
+                "host (soso-update-core)",
+                &["soso-update-core"],
+                true,
+            );
+        });
+
+        let root_d = root.to_path_buf();
+        let report_d = Arc::clone(report);
+        scope.spawn(move || {
+            run_cargo_test_batch(
+                &root_d,
+                &report_d,
+                "host (soso-audio+gguf2som)",
+                &["soso-audio", "gguf2som"],
+                true,
+            );
+        });
     });
 }
 
@@ -373,6 +399,7 @@ fn make_slot(shard: ShardId, img: &Path, data: &Path, models: &Path) -> QemuSlot
             _ => None,
         },
         monitor: None,
+        guest: super::QemuGuestConfig::from_env(),
     }
 }
 
@@ -380,13 +407,7 @@ fn copiar_imagen(src: &Path, shard_id: &str, kind: &str) -> PathBuf {
     let dst = super::project_root()
         .join("target")
         .join(format!("test-{shard_id}-{kind}.img"));
-    std::fs::copy(src, &dst).unwrap_or_else(|e| {
-        panic!(
-            "copiar {} → {}: {e}",
-            src.display(),
-            dst.display()
-        );
-    });
+    super::copy_sparse(src, &dst);
     dst
 }
 
@@ -429,6 +450,11 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report) {
         let _ = report.paso_con_reintento(sid, "sigue viva tras dos pools de hilos", || {
             ssh_vive(key, port)
         });
+        let _ = report.paso_con_reintento(
+            sid,
+            "soso-llm: 20 ciclos carga/generación/cambio (A7)",
+            || ssh_llm_ciclos(key, port),
+        );
         let _ = report.paso_con_reintento(
             sid,
             "ask: modelo residente (carga una vez, reconexión SSH)",
@@ -598,8 +624,8 @@ fn lanzar_qemu(slot: &QemuSlot) -> std::io::Result<Child> {
         "-drive",
         &format!("format=raw,file={}", slot.bios.display()),
     ]);
-    super::apply_qemu_disks(&mut qemu, &slot.data, &slot.models);
-    super::apply_qemu_usb(&mut qemu);
+    super::apply_qemu_disks(&mut qemu, &slot.data, &slot.models, &slot.guest);
+    super::apply_qemu_usb(&mut qemu, &slot.guest);
     super::apply_qemu_nic_with_ports(&mut qemu, slot.ssh_port, slot.echo_port, Some(&slot.mac));
     super::apply_qemu_gpu(&mut qemu);
     if let Some(mon) = &slot.monitor {
@@ -649,6 +675,7 @@ fn lanzar_qemu_legacy_ports(
         mem: None,
         smp: None,
         monitor: None,
+        guest: super::QemuGuestConfig::from_env(),
     };
     lanzar_qemu(&slot)
 }
@@ -785,7 +812,7 @@ fn ssh_guion_inner(
     limite: Duration,
     tty: bool,
 ) -> Result<String, String> {
-    let fifo = super::project_root().join("target/.ssh-guion.fifo");
+    let fifo = ssh_fifo_path("guion");
     let _ = fs::remove_file(&fifo);
     if !Command::new("mkfifo")
         .arg(&fifo)
@@ -797,10 +824,11 @@ fn ssh_guion_inner(
     }
 
     let holgura = limite.as_secs().saturating_add(60);
-    let mut holder = Command::new("sh")
+    let holder = Command::new("sh")
         .args(["-c", &format!("exec sleep {holgura} > {}", fifo.display())])
         .spawn()
         .map_err(|e| format!("sleep holder: {e}"))?;
+    let mut guard = SshSessionGuard::new(fifo.clone(), holder);
 
     let key_s = key.display().to_string();
     let fifo_s = fifo.display().to_string();
@@ -817,7 +845,7 @@ fn ssh_guion_inner(
         .spawn()
         .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
 
-    let pid = hijo.id();
+    guard.track_ssh(hijo.id());
     let stdout = hijo.stdout.take().unwrap();
     let stderr = hijo.stderr.take();
 
@@ -847,6 +875,22 @@ fn ssh_guion_inner(
         Ok(())
     });
 
+    let stderr_acum = Arc::new(Mutex::new(Vec::new()));
+    if let Some(stderr) = stderr {
+        let stderr_acum_hilo = stderr_acum.clone();
+        std::thread::spawn(move || {
+            let mut stderr = stderr;
+            let mut buf = [0u8; 512];
+            loop {
+                match stderr.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => stderr_acum_hilo.lock().unwrap().extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
     let fin_prompt = Instant::now() + Duration::from_secs(45);
     loop {
         let mut visto = prompt.0.lock().unwrap();
@@ -855,14 +899,9 @@ fn ssh_guion_inner(
         }
         let resto = fin_prompt.saturating_duration_since(Instant::now());
         if resto.is_zero() {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
-            let _ = holder.kill();
-            let _ = holder.wait();
-            let _ = fs::remove_file(&fifo);
-            let datos = acum.lock().unwrap();
-            let parcial = String::from_utf8_lossy(&datos);
             return Err(format!(
-                "no apareció el prompt en 45s; stdout parcial: {parcial:?}"
+                "no apareció el prompt en 45s; stdout parcial: {:?}",
+                String::from_utf8_lossy(&acum.lock().unwrap())
             ));
         }
         visto = prompt.1.wait_timeout(visto, resto).unwrap().0;
@@ -883,7 +922,6 @@ fn ssh_guion_inner(
             break;
         }
         if Instant::now() >= fin {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -897,18 +935,10 @@ fn ssh_guion_inner(
         let _ = lector.join();
     }
     let mut salida = String::from_utf8_lossy(&acum.lock().unwrap()).into_owned();
-    if let Some(mut err) = stderr {
-        let mut extra = String::new();
-        let _ = err.read_to_string(&mut extra);
-        if !extra.is_empty() {
-            salida.push_str(&extra);
-        }
-    }
+    salida.push_str(&String::from_utf8_lossy(&stderr_acum.lock().unwrap()));
     let salida = normalizar_salida_ssh(salida);
     let status = hijo.wait().map_err(|e| format!("wait ssh: {e}"))?;
-    let _ = holder.kill();
-    let _ = holder.wait();
-    let _ = fs::remove_file(&fifo);
+    guard.finish();
     if Instant::now() >= fin && !status.success() {
         return Err(format!(
             "la sesión SSH no terminó en {}s; stdout: {salida:?}",
@@ -991,6 +1021,42 @@ fn ssh_llm(key: &Path, ssh_port: u16) -> Result<(), String> {
     if uploads >= calls {
         return Err(format!(
             "los pesos se resuben en cada matvec ({uploads} subidas / {calls} matvec):              el cacheo no está funcionando — {linea:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// A7: veinte ciclos de carga/generación con salida limpia del proceso y askd.
+///
+/// Cada cuarto ciclo pasa por `ask` (askd residente); a mitad forzamos `:modelo
+/// tiny` para ejercitar recarga. Al final la shell debe seguir respondiendo.
+const LLM_CICLOS_A7: usize = 20;
+
+fn ssh_llm_ciclos(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let mut guion = String::from("ask :max 1\n");
+    for i in 0..LLM_CICLOS_A7 {
+        if i == LLM_CICLOS_A7 / 2 {
+            guion.push_str("ask :modelo tiny\n");
+        }
+        if i % 4 == 3 {
+            guion.push_str("ask x\n");
+        } else {
+            guion.push_str("soso-llm run tiny --prompt x --max 1\n");
+        }
+    }
+    guion.push_str("echo ciclos_ok\nexit\n");
+    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(1200))?;
+    let runs = texto.matches("soso-llm: generado").count();
+    let asks = LLM_CICLOS_A7 / 4;
+    let expected_run = LLM_CICLOS_A7 - asks;
+    if runs < expected_run {
+        return Err(format!(
+            "esperaba al menos {expected_run} líneas «generado», vi {runs}; stdout: {texto:?}"
+        ));
+    }
+    if !texto.contains("ciclos_ok") {
+        return Err(format!(
+            "la shell no respondió tras {LLM_CICLOS_A7} ciclos; stdout: {texto:?}"
         ));
     }
     Ok(())
@@ -1252,146 +1318,9 @@ fn ssh_soso_web_local(key: &Path, ssh_port: u16) -> Result<(), String> {
 /// devuelta carácter por carácter con la enviada.
 fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
     let payload = r#"¿2 > 1? | sí, "así" & <ñ>"#;
-    let fifo = super::project_root().join("target/.ssh-ask.fifo");
-    let _ = fs::remove_file(&fifo);
-    if !Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .map_err(|e| format!("mkfifo: {e}"))?
-        .success()
-    {
-        return Err("mkfifo falló".into());
-    }
-    let holgura = 300u64;
-    let mut holder = Command::new("sh")
-        .args(["-c", &format!("exec sleep {holgura} > {}", fifo.display())])
-        .spawn()
-        .map_err(|e| format!("sleep holder: {e}"))?;
-
-    let key_s = key.display().to_string();
-    let fifo_s = fifo.display().to_string();
-    let ssh_cmd = format!(
-        "exec ssh -T -i '{key_s}' -p {ssh_port} \
-         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-         -o LogLevel=ERROR -o ConnectTimeout=10 soso@localhost < '{fifo_s}'"
-    );
-    let mut hijo = Command::new("sh")
-        .args(["-c", &ssh_cmd])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("no se pudo lanzar ssh: {e}"))?;
-    let pid = hijo.id();
-    let stdout = hijo.stdout.take().unwrap();
-    let stderr = hijo.stderr.take();
-
-    let acum = Arc::new(Mutex::new(Vec::new()));
-    let prompt = Arc::new((Mutex::new(false), Condvar::new()));
-    let acum_hilo = acum.clone();
-    let prompt_hilo = prompt.clone();
-    let lector = std::thread::spawn(move || -> Result<(), String> {
-        let mut stdout = stdout;
-        let mut buf = [0u8; 512];
-        loop {
-            let n = stdout
-                .read(&mut buf)
-                .map_err(|e| format!("leyendo stdout SSH: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            let mut datos = acum_hilo.lock().unwrap();
-            datos.extend_from_slice(&buf[..n]);
-            let texto = String::from_utf8_lossy(&datos);
-            let mut visto = prompt_hilo.0.lock().unwrap();
-            if !*visto && prompt_listo(&texto) {
-                *visto = true;
-                prompt_hilo.1.notify_all();
-            }
-        }
-        Ok(())
-    });
-
-    let fin_prompt = Instant::now() + Duration::from_secs(45);
-    loop {
-        let mut visto = prompt.0.lock().unwrap();
-        if *visto {
-            break;
-        }
-        let resto = fin_prompt.saturating_duration_since(Instant::now());
-        if resto.is_zero() {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
-            let _ = holder.kill();
-            let _ = holder.wait();
-            let _ = fs::remove_file(&fifo);
-            return Err("no apareció el prompt en 45s".into());
-        }
-        visto = prompt.1.wait_timeout(visto, resto).unwrap().0;
-    }
-
-    let pregunta = format!("ask :eco {payload}\n");
-    {
-        let mut w = OpenOptions::new()
-            .write(true)
-            .open(&fifo)
-            .map_err(|e| format!("escribir fifo: {e}"))?;
-        w.write_all(pregunta.as_bytes()).map_err(|e| e.to_string())?;
-        w.flush().ok();
-    }
-
-    let fin_payload = Instant::now() + Duration::from_secs(30);
-    let mut visto_payload = false;
-    while Instant::now() < fin_payload {
-        {
-            let datos = acum.lock().unwrap();
-            let texto = String::from_utf8_lossy(&datos);
-            if texto.lines().any(|l| l == payload) {
-                visto_payload = true;
-                break;
-            }
-        }
-        if lector.is_finished() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    {
-        let mut w = OpenOptions::new()
-            .write(true)
-            .open(&fifo)
-            .map_err(|e| format!("escribir fifo: {e}"))?;
-        w.write_all(b"exit\n").map_err(|e| e.to_string())?;
-        w.flush().ok();
-    }
-
-    let fin = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < fin && !lector.is_finished() {
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    if lector.is_finished() {
-        lector
-            .join()
-            .map_err(|_| "hilo lector ssh".to_string())?
-            .map_err(|e: String| e)?;
-    } else {
-        let _ = Command::new("kill").arg(pid.to_string()).status();
-        let _ = lector.join();
-    }
-    let mut texto =
-        normalizar_salida_ssh(String::from_utf8_lossy(&acum.lock().unwrap()).into_owned());
-    if let Some(mut err) = stderr {
-        let mut extra = String::new();
-        let _ = err.read_to_string(&mut extra);
-        if !extra.is_empty() {
-            texto.push_str(&extra);
-        }
-    }
-    let _ = hijo.wait();
-    let _ = holder.kill();
-    let _ = holder.wait();
-    let _ = fs::remove_file(&fifo);
-
-    if visto_payload || texto.lines().any(|l| l == payload) {
+    let guion = format!("ask :eco {payload}\nexit\n");
+    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(90))?;
+    if texto.lines().any(|l| l == payload) {
         Ok(())
     } else {
         Err(format!(
@@ -1528,7 +1457,62 @@ struct UsbTestScenario {
     extra_serial: Option<&'static str>,
 }
 
-static USB_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+static SSH_SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn ssh_fifo_path(tag: &str) -> PathBuf {
+    let id = SSH_SESSION_SEQ.fetch_add(1, AtomicOrdering::Relaxed);
+    super::project_root().join(format!(
+        "target/.ssh-{tag}-{}-{id}.fifo",
+        std::process::id()
+    ))
+}
+
+struct SshSessionGuard {
+    fifo: PathBuf,
+    holder: Option<Child>,
+    ssh_pid: Option<u32>,
+}
+
+impl SshSessionGuard {
+    fn new(fifo: PathBuf, holder: Child) -> Self {
+        Self {
+            fifo,
+            holder: Some(holder),
+            ssh_pid: None,
+        }
+    }
+
+    fn track_ssh(&mut self, pid: u32) {
+        self.ssh_pid = Some(pid);
+    }
+
+    fn finish(mut self) {
+        if let Some(pid) = self.ssh_pid.take() {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+        if let Some(mut holder) = self.holder.take() {
+            let _ = holder.kill();
+            let _ = holder.wait();
+        }
+        let _ = fs::remove_file(&self.fifo);
+    }
+}
+
+impl Drop for SshSessionGuard {
+    fn drop(&mut self) {
+        if self.ssh_pid.is_some() || self.holder.is_some() {
+            if let Some(pid) = self.ssh_pid {
+                let _ = Command::new("kill").arg(pid.to_string()).status();
+            }
+            if let Some(mut holder) = self.holder.take() {
+                let _ = holder.kill();
+                let _ = holder.wait();
+            }
+            let _ = fs::remove_file(&self.fifo);
+        }
+    }
+}
 
 /// Batería USB/xHCI en QEMU (`cargo xtask test-usb`).
 pub fn run_usb() {
@@ -1639,21 +1623,14 @@ fn run_usb_scenario(
     esc: UsbTestScenario,
 ) -> Result<(), String> {
     let (ssh_port, echo_port, mac) = usb_ports(esc.index);
-    let _env_guard = USB_ENV_LOCK.lock().unwrap();
-    clear_usb_qemu_env();
-    unsafe {
-        std::env::set_var("SOSO_QEMU_LIVE", "1");
-        std::env::set_var("SOSO_QEMU_LIVE_USB", "1");
-        if let Some(model) = esc.xhci {
-            std::env::set_var("SOSO_QEMU_XHCI", model);
-        }
-        if esc.usb_kbd {
-            std::env::set_var("SOSO_QEMU_USB_KBD", "1");
-        }
-        if esc.usb_hub {
-            std::env::set_var("SOSO_QEMU_USB_HUB", "1");
-        }
-    }
+    let guest = super::QemuGuestConfig {
+        live: true,
+        live_usb: true,
+        xhci_model: esc.xhci.unwrap_or("qemu").into(),
+        usb_kbd: esc.usb_kbd,
+        usb_hub: esc.usb_hub,
+        ..Default::default()
+    };
 
     let root = super::project_root();
     let monitor = if esc.usb_kbd {
@@ -1674,11 +1651,10 @@ fn run_usb_scenario(
         mem: None,
         smp: None,
         monitor: monitor.clone(),
+        guest,
     };
 
     let mut qemu = lanzar_qemu(&slot).map_err(|e| e.to_string())?;
-    drop(_env_guard);
-    clear_usb_qemu_env();
 
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(180))?;
 
@@ -1703,18 +1679,3 @@ fn run_usb_scenario(
     Ok(())
 }
 
-fn clear_usb_qemu_env() {
-    unsafe {
-        for key in [
-            "SOSO_QEMU_LIVE",
-            "SOSO_QEMU_LIVE_USB",
-            "SOSO_QEMU_XHCI",
-            "SOSO_QEMU_USB_KBD",
-            "SOSO_QEMU_USB_HUB",
-            "SOSO_QEMU_USB_HOST",
-            "SOSO_QEMU_TRACE_USB",
-        ] {
-            std::env::remove_var(key);
-        }
-    }
-}

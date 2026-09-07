@@ -555,13 +555,15 @@ fn run_distributed_head(
             par,
         )
     };
-    match run {
+    let rc = match run {
         Ok(()) => 0,
         Err(()) => {
             println!("soso-llm: inferencia distribuida falló");
             1
         }
-    }
+    };
+    bundle.source.shutdown_worker();
+    rc
 }
 
 fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[&str]) -> u8 {
@@ -605,13 +607,15 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
         standby: false,
         standby_retry_ms: standby_retry,
     };
-    match distributed::run_node(&mut bundle.rt, &mut bundle.source, &cfg, par) {
+    let rc = match distributed::run_node(&mut bundle.rt, &mut bundle.source, &cfg, par) {
         Ok(()) => 0,
         Err(()) => {
             println!("soso-llm: nodo terminó con error");
             1
         }
-    }
+    };
+    bundle.source.shutdown_worker();
+    rc
 }
 
 /// Modelo cargado y listo para generar.
@@ -636,20 +640,29 @@ fn run_model(
         Ok(s) => s,
         Err(c) => return c,
     };
-    if !chat {
+    let rc = if !chat {
         // Sin `--chat` el prompt va crudo, y eso es lo que hace útil a `run`:
         // poder comparar con y sin plantilla sobre el mismo modelo.
-        return generar(&mut sesion, prompt, max_new, &mut sampler, true, Some(&io0));
-    }
-    let conf = ask::leer_conf();
-    let plantilla = ask::plantilla_efectiva(&conf, &sesion);
-    if plantilla.is_empty() {
-        println!("soso-llm: --chat sin plantilla (ni el modelo ni /etc/llm.conf traen una)");
+        generar(&mut sesion, prompt, max_new, &mut sampler, true, Some(&io0))
     } else {
-        println!("soso-llm: plantilla de chat aplicada");
-    }
-    let tokens = soso_llm_core::chat::render(plantilla, prompt, &sesion.bundle.tokenizer);
-    generar_tokens(&mut sesion, &tokens, max_new, &mut sampler, true, Some(&io0), None, false)
+        let conf = ask::leer_conf();
+        let plantilla = ask::plantilla_efectiva(&conf, &sesion);
+        if plantilla.is_empty() {
+            println!("soso-llm: --chat sin plantilla (ni el modelo ni /etc/llm.conf traen una)");
+        } else {
+            println!("soso-llm: plantilla de chat aplicada");
+        }
+        let tokens = soso_llm_core::chat::render(plantilla, prompt, &sesion.bundle.tokenizer);
+        generar_tokens(&mut sesion, &tokens, max_new, &mut sampler, true, Some(&io0), None, false)
+    };
+    liberar_sesion(&mut sesion);
+    rc
+}
+
+/// Apaga workers de inferencia antes de salir del proceso.
+fn liberar_sesion(sesion: &mut Sesion) {
+    sesion.bundle.source.shutdown_worker();
+    sesion.pool = None;
 }
 
 /// Carga el modelo y decide planificador, backend y workers.

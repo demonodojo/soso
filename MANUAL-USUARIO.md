@@ -11,7 +11,9 @@ o **instalado en un disco NVMe** junto a Linux (dual-boot UEFI).
 
 Este manual describe cómo arrancar el sistema, conectarte y usar la shell y los
 comandos disponibles. Para compilar el proyecto desde el código fuente, consulta
-el [`README.md`](README.md) (en inglés).
+el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
+[`docs/GUIA-OPERATIVA.md`](docs/GUIA-OPERATIVA.md). Estado y límites de soporte:
+[`docs/ESTADO.md`](docs/ESTADO.md).
 
 ---
 
@@ -31,7 +33,7 @@ el [`README.md`](README.md) (en inglés).
 | Red | **wifi** (builtin) | Escanear y conectar redes WiFi Intel en placa real |
 | Sistema | **halt**, **exit** | Apagar o salir de la shell |
 
-Al arrancar verás una línea como `soso 0.2.0 (6641119fd)` — versión del kernel
+Al arrancar verás una línea como `soso 0.2.2 (6641119fd)` — versión del kernel
 y build. La versión del disco está en `/etc/soso-release` (`soso-update estado`
 la muestra junto al estado del buzón de actualización).
 
@@ -606,6 +608,21 @@ soso-install status        # estado de la entrada de arranque UEFI
 Solo tiene sentido arrancando desde el pendrive live. Ver
 [Instalar soso en un disco](#instalar-soso-en-un-disco-dual-boot-uefi).
 
+### soso-resize — ampliar el disco de sistema
+
+La imagen live empaqueta sosofs **compacto** (solo contenido + margen). Al
+instalar, el espacio sobrante del NVMe va a la partición de **modelos**; el
+rootfs sigue pequeño hasta que lo amplíes:
+
+```sh
+soso-resize              # cuánto ocupa rootfs/modelos y cuánto se puede mover
+soso-resize rootfs +8G   # roba 8 GiB del margen libre de modelos
+```
+
+Solo funciona en pendrive live o instalación GPT (no en QEMU virtio sin tabla
+GPT: ahí el rootfs ya crece solo al arrancar si `SOSO_ROOTFS_SIZE` es mayor que
+el empaquetado).
+
 ### soso-update — actualizar soso instalado
 
 Comprueba y aplica releases publicadas en GitHub (`demonodojo/soso`):
@@ -644,12 +661,17 @@ descarga total: 1,3 MB
 de la actualización antes de lanzarla.
 
 Tras `aplicar`, **reinicia** para que el shim UEFI aplique el kernel nuevo.
-Si el arranque falla, el shim revierte solo al reiniciar otra vez.
-Las instalaciones hechas **antes** de tener hueco `SOSOKRN.BIN` en la ESP
-solo pueden actualizar rootfs hasta reflashear/reinstalar el live una vez.
+Si el arranque falla, el shim revierte al kernel anterior en el siguiente
+reinicio (backup en `SOSOKRN.BIN`, estado durable en `SOSOKRN.MET` en la ESP).
+Las imágenes live **anteriores** a tener esos huecos solo pueden actualizar
+rootfs hasta reflashear/reinstalar el live una vez.
+
+**Rootfs:** la actualización es por fichero (solo baja lo que cambia). Si
+`aplicar` se interrumpe, el progreso queda en `/etc/actualiza.estado` para
+reintentar; **no** hay copia automática de los binarios anteriores del rootfs.
 
 La versión del sistema está en `/etc/soso-release`; el kernel la muestra al
-arrancar (`soso 0.2.0 (build)`).
+arrancar (`soso 0.2.2 (build)`).
 
 Ver también [Instalar soso en un disco](#instalar-soso-en-un-disco-dual-boot-uefi)
 (sección «Actualizaciones de kernel»).
@@ -1431,8 +1453,9 @@ por Linux en ningún momento**.
 | Origen | Pendrive live generado con `cargo xtask package-usb-live` |
 
 **Actualizaciones de kernel:** las instalaciones hechas con un live **anterior** a
-0.2.0 pueden no tener el hueco `SOSOKRN.BIN` en la ESP; reflashea o reinstala
-una vez para poder usar `soso-update aplicar` con kernel.
+0.2.0 pueden no tener los huecos `SOSOKRN.BIN` / `SOSOKRN.MET` en la ESP;
+reflashea o reinstala una vez para poder usar `soso-update aplicar` con kernel
+y recuperación verificable.
 
 soso solo sabe escribir en discos NVMe (`raw_disk::writable`) y el kernel
 rechaza cualquier escritura sobre el disco desde el que arrancó. El disco de
@@ -1495,7 +1518,7 @@ mientras está pendiente y `DONE Boot0007 soso` cuando el shim la ha atendido.
 
 ```sh
 lsblk                                        # identifica el disco vacío
-sudo cargo xtask install-disk /dev/nvme1n1 --yes
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask install-disk /dev/nvme1n1 --yes
 ```
 
 Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
@@ -1505,7 +1528,7 @@ Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
 
 ```sh
 # En la máquina de desarrollo:
-sudo cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
 
 # Escalera automática (Q4_K_M):
 #   8 GB  → tinyllama
@@ -1513,7 +1536,7 @@ sudo cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el 
 #  32 GB+ → qwen3.8-27b
 # La primera vez descarga desde Hugging Face (puede tardar horas en modelos grandes).
 # Sin descargas: el mayor ya materializado que quepa en el stick:
-# SOSO_LIVE_OFFLINE=1 sudo cargo xtask flash-usb-live /dev/sdX --yes
+# sudo env SOSO_LIVE_OFFLINE=1 "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes
 
 # Sin pendrive conectado (qwen3.8-27b) o simular capacidad:
 cargo xtask package-usb-live

@@ -11,6 +11,9 @@ Use it in **QEMU** for development, on a **live USB** on real machines, or
 
 End-user guide (Spanish): [`MANUAL-USUARIO.md`](MANUAL-USUARIO.md)
 
+Operational docs (Spanish): [`docs/GUIA-OPERATIVA.md`](docs/GUIA-OPERATIVA.md),
+[`docs/ESTADO.md`](docs/ESTADO.md). Hardware matrix: [`docs/HW-MATRIX.md`](docs/HW-MATRIX.md).
+
 ## At a glance
 
 | Area | What you get |
@@ -25,7 +28,7 @@ End-user guide (Spanish): [`MANUAL-USUARIO.md`](MANUAL-USUARIO.md)
 | **Network** | DHCP, SSH-2, WiFi (Intel AX211/AX200), Realtek r8169 on live USB |
 | **GPU** | lxdde + nouveau/nvkm; matvec on GB205; optional CUDA hybrid (L6-H) |
 
-Version: [`VERSION`](VERSION) (e.g. `0.2.0`); shown at boot and in `/etc/soso-release`.
+Version: [`VERSION`](VERSION) (e.g. `0.2.2`); shown at boot and in `/etc/soso-release`.
 
 ## Requirements
 
@@ -40,6 +43,7 @@ Version: [`VERSION`](VERSION) (e.g. `0.2.0`); shown at boot and in `/etc/soso-re
 
 ```sh
 cargo xtask build          # compile kernel → target/soso-bios.img
+cargo xtask check            # host tests + builds + iwl/GSP hostchecks + hw-matrix parser
 cargo xtask run            # build + QEMU q35, serial console on stdio
 cargo xtask gdb            # like run, frozen at boot; gdb -ex 'target remote :1234'
 cargo xtask test           # integration: FS, boot, TCP, SSH, soso-llm, halt
@@ -133,11 +137,11 @@ Guest network: DHCP at boot, fallback **10.0.2.15/24** in QEMU slirp. Port forwa
 
 - [x] **Classic USB package** — `cargo xtask package-usb` (UEFI + separate data/models images)
 - [x] **Live USB image** — `cargo xtask package-usb-live` (single GPT stick: ESP + sosofs + sosomfs); see [`docs/L5c-on-box.md`](docs/L5c-on-box.md)
-- [x] **Flash live USB** — `sudo cargo xtask flash-usb-live /dev/sdX --yes` (auto-picks largest GGUF that fits)
+- [x] **Flash live USB** — `sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes` (auto-picks largest GGUF that fits)
 - [x] **Native installer** — `soso-install` from live stick: safety checks, block clone, GPT relayout, UEFI `Boot####` via boot-shim
 - [x] **OTA updates** — `soso-update` from installed system; releases via `cargo xtask release [--publish]`
 - [x] **Versioning** — `VERSION` file → `/etc/soso-release` + kernel banner; semver compare in updates
-- [x] **Dual-boot UEFI + Linux** — `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` (host-side), or native install
+- [x] **Dual-boot UEFI + Linux** — `sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask install-disk /dev/nvmeXn1 --yes` (host-side), or native install
 - [x] **QEMU live mode** — `SOSO_QEMU_LIVE=1 cargo xtask run`; install flow: `cargo xtask test-install`; update flow: `cargo xtask test-update`
 - [x] **Persistent logs** — `cargo xtask sosolog` reads `SOSOLOG.TXT` / `SOSODRV.TXT` from live ESP
 
@@ -188,13 +192,15 @@ Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G
 |---------|--------|
 | `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
 | `cargo xtask package-usb-live` | Single GPT image (ESP + sosofs + sosomfs) for USB or install |
-| `sudo cargo xtask flash-usb-live /dev/sdX --yes` | Flash live USB (model sized to stick) |
+| `sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes` | Flash live USB (model sized to stick) |
 | `sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models` | Incremental: ESP + rootfs only (models unchanged) |
 | `cargo xtask release [--publish]` | Pack release (`manifest.txt`, `rootfs.pack`, `kernel-x86_64`); `--publish` → GitHub Releases |
 | `cargo xtask test-install` | E2E native install (OVMF, 3 boots) |
-| `cargo xtask test-update` | E2E local update (`soso-update aplicar --local`) |
+| `cargo xtask test-update` | E2E OTA: apply, kernel rollback on cut, invalid manifest |
+| `cargo xtask check` | Pre-commit: host FS tests, builds, hostchecks, hw-matrix parser |
+| `cargo xtask hw-matrix show` | Hardware validation matrix (A8) |
 | `cargo xtask sosolog [--drv]` | Read `SOSOLOG.TXT` / `SOSODRV.TXT` from live USB ESP |
-| `sudo cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot: write live image to empty disk + GRUB entry |
+| `sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot: write live image to empty disk + GRUB entry |
 | `cargo xtask lx-build [port\|all]` | Build `liblxdde.a` (spike, testdrv, e1000e, nouveau) |
 | `cargo xtask g1-check` | Host checklist: IOMMU/VFIO, firmware, BAR0 |
 | `cargo xtask g3-check` | GSP bring-up checklist (firmware, modules, phases) |
@@ -220,13 +226,22 @@ SOSO_QEMU_NIC=lx-e1000e            # use lxdde e1000e instead of virtio-net
 
 | Layer | Command |
 |-------|---------|
+| All host checks + builds | `cargo xtask check` |
 | sosofs crash-safety (host) | `cargo test -p sosofs --features std` |
 | sosomfs (host) | `cargo test -p sosomfs --features std` |
+| OTA recovery (host) | `cargo test -p soso-update-core --features std --tests` |
 | Syscall regression (guest) | `/bin/init test` in QEMU |
 | Full system E2E | `cargo xtask test` |
+| OTA E2E (OVMF) | `cargo xtask test-update` |
+| USB/xHCI | `cargo xtask test-usb` |
+| Native install E2E | `cargo xtask test-install` |
 
 `cargo xtask test` verifies: host FS tests, QEMU boot to sosh, TCP echo, SSH
-authenticated session, `soso-llm run tiny`, and clean shutdown via `halt`.
+authenticated session, `soso-llm run tiny`, LLM shutdown cycles, and clean
+shutdown via `halt`. The suite should be fully green; investigate any failure.
+
+Do not run `sudo cargo` — root lacks rustup. Use
+`sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask …` for flash/install.
 
 ## License
 

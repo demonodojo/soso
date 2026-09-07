@@ -216,19 +216,60 @@ impl StagingWorker {
     }
 
     fn wait(&self) {
-        let shared = unsafe { &*(&raw const STAGE) };
-        // Giro corto para el caso común (el prefetch ya terminó): una syscall
-        // cuesta más que unas cuantas vueltas. Si no, dormir — con un solo core,
-        // girar aquí le roba al worker justo el CPU que necesita para acabar.
-        for _ in 0..256 {
-            if shared.done.load(Ordering::Acquire) != 0 {
-                return;
-            }
-            core::hint::spin_loop();
+        wait_staging_done();
+    }
+}
+
+/// Espera a que termine el prefetch en curso (si hay worker).
+pub fn wait_staging_done() {
+    let shared = unsafe { &*(&raw const STAGE) };
+    if WORKER_VIVO.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    for _ in 0..256 {
+        if shared.done.load(Ordering::Acquire) != 0 {
+            return;
         }
-        while shared.done.load(Ordering::Acquire) == 0 {
-            sys::futex_wait(&shared.done as *const AtomicU32 as *const u32, 0);
+        core::hint::spin_loop();
+    }
+    while shared.done.load(Ordering::Acquire) == 0 {
+        sys::futex_wait(&shared.done as *const AtomicU32 as *const u32, 0);
+    }
+}
+
+/// Suelta la fuente compartida sin matar el hilo (reutilizable en el proceso).
+pub fn detach_staging_source() {
+    wait_staging_done();
+    unsafe {
+        SOURCE_PTR = 0;
+    }
+}
+
+/// Apaga el worker de staging y espera a que salga (fin de proceso o test).
+pub fn shutdown_staging_worker() {
+    if WORKER_VIVO.load(Ordering::Acquire) == 0 {
+        detach_staging_source();
+        return;
+    }
+    wait_staging_done();
+    let shared = unsafe { &mut *(&raw mut STAGE) };
+    shared.shutdown.store(1, Ordering::Release);
+    let _ = shared.generation.fetch_add(1, Ordering::AcqRel);
+    sys::futex_wake(
+        &shared.generation as *const AtomicU32 as *const u32,
+        1,
+    );
+    for _ in 0..10_000 {
+        if WORKER_VIVO.load(Ordering::Acquire) == 0 {
+            break;
         }
+        let _ = sys::sleep_ms(1);
+    }
+    shared.shutdown.store(0, Ordering::Release);
+    shared.generation.store(0, Ordering::Release);
+    shared.done.store(1, Ordering::Release);
+    unsafe {
+        SOURCE_PTR = 0;
     }
 }
 
@@ -257,8 +298,38 @@ impl StagedSource {
     /// worker de staging no llega a correr y `wait_prefetch` espera `done`
     /// para siempre (2026-08-31: serial «tiny listo», SSH 600 s).
     pub fn disable_worker(&mut self) {
+        if self.worker.spawned {
+            wait_staging_done();
+        }
         self.worker.spawned = false;
         self.inner.async_staging = false;
+    }
+
+    /// Espera prefetch en curso y suelta el puntero compartido.
+    pub fn detach(&mut self) {
+        if self.worker.spawned {
+            wait_staging_done();
+        }
+        unsafe {
+            SOURCE_PTR = 0;
+        }
+    }
+
+    /// Apaga el worker de staging del proceso (al salir de `run`).
+    pub fn shutdown_worker(&mut self) {
+        if self.worker.spawned {
+            shutdown_staging_worker();
+            self.worker.spawned = false;
+        } else {
+            detach_staging_source();
+        }
+        self.inner.async_staging = false;
+    }
+}
+
+impl Drop for StagedSource {
+    fn drop(&mut self) {
+        self.detach();
     }
 }
 

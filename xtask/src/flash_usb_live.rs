@@ -187,7 +187,7 @@ fn run_incremental(usb: &Path, parts: &[FlashPart]) {
     if want_rootfs {
         println!("flash-usb-live: empaquetando rootfs…");
         super::build_user();
-        let _ = super::mkfs_rootfs_with_profile(true, &profile);
+        let _ = super::mkfs_rootfs_with_profile(true, &profile, super::RootfsImgMode::PackOnly);
     }
 
     if want_kernel {

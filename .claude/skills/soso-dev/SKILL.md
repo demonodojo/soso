@@ -5,13 +5,16 @@ description: >-
   mkfs, SSH access, serial console, gdb and integration tests. Use when
   starting soso, compiling the kernel or userspace, running QEMU, connecting
   by SSH, troubleshooting boot/network, reading SOSOLOG.TXT or the hwscan
-  report SOSODRV.TXT from the live USB (`cargo xtask sosolog [--drv]`), or
-  running cargo xtask test.
+  report SOSODRV.TXT from the live USB (`cargo xtask sosolog [--drv]`),
+  `cargo xtask check`, `cargo xtask hw-matrix`, or running cargo xtask test.
 ---
 
 # soso — Development workflow
 
 Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
+
+Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
+Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).
 
 ## Requirements
 
@@ -24,6 +27,7 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | Command | Action |
 |---------|--------|
 | `cargo xtask build` | Compile kernel → `target/soso-bios.img` |
+| `cargo xtask check` | Pre-commit/CI: host tests, builds, iwl/GSP hostchecks, hw-matrix parser |
 | `cargo xtask build --drivers qemu` | Kernel mínimo (virtio-blk + virtio-net) |
 | `cargo xtask fit-drivers target/SOSODRV.TXT` | Reempaqueta kernel según informe hwscan |
 | `cargo xtask driver-add <git-url>` | Clona port lxdde externo a `lxdde/ports-extern/` |
@@ -38,7 +42,9 @@ Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
 | `cargo xtask sosolog --drv [/dev/sdX]` | Igual pero muestra `SOSODRV.TXT`: el informe hwscan del último arranque (alias `--hwscan`) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
-| `cargo xtask test-update` | Actualización local E2E: release en `/var/actualiza-prueba`, `soso-update aplicar --local`, reinicio y comprobación de versión (OVMF) |
+| `cargo xtask test-update` | OTA E2E OVMF: apply, corte simulado + recovery, manifiesto inválido |
+| `cargo xtask hw-matrix show` | Matriz validación hardware (A8); `init`, `collect`, `record-boot` |
+| `./scripts/l6-a8-collect.sh` | Recoger boot/bench en placa → `docs/hw-matrix.json` |
 | `cargo xtask release [--publish]` | Empaqueta release en `target/release-soso/v<VERSION>/`; `--publish` sube a GitHub Releases |
 | `cargo xtask fetch-hf` | Descargar GGUF de Hugging Face, convertir a `.som` y preparar `SOSO_MODELS_DIR` |
 | `cargo xtask fetch-whisper` | Descargar `ggml-tiny.bin` (curl reanudable) y convertir a `target/whisper-tiny-model` |
@@ -150,7 +156,8 @@ Implementación: `xtask/src/sosolog.rs`. El kernel vuelca el ring cada ~2 s
 ## What `run` does
 
 1. Compiles userspace (`user/`) and copies ELFs to `rootfs/bin/`
-2. Runs `mkfs-soso` on `rootfs/` → data disk image (64 MiB default)
+2. Runs `mkfs-soso` on `rootfs/` → data disk image (empaquetado compacto; QEMU
+   amplía sparse a `SOSO_ROOTFS_SIZE`, default 32 GiB, y sosofs crece al montar)
 3. Generates models disk (`target/soso-models.img`) with synthetic **tiny** (denso) and **tiny-moe** (MoE Mixtral-style) models
 4. Injects SSH keys into the image:
    - Authorized key: `~/.ssh/id_ed25519.pub` if present, else `target/soso_test_key`
@@ -203,12 +210,11 @@ cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 
 # End-to-end (host tests ∥ build user/kernel, luego 4 shards QEMU en paralelo)
 cargo xtask test
-# LÍNEA BASE (2026-08-31): sobre main limpio fallan siempre estos dos, y sólo estos:
-#   [sys]        ask: el texto llega literal
-#   [llm-dense]  ask: modelo residente (carga una vez, reconexión SSH)
-# Los dos por el gotcha de stdin por SSH del arnés — en su stdout se ve que el
-# comando SÍ se ejecutó. Si sólo fallan esos, la pasada está limpia; cualquier
-# otro es tuyo. Ante la duda: `git stash` y correr la suite sobre el árbol base.
+# La suite debe quedar en verde (stdin/SSH aislado por sesión desde A1).
+# Ante regresiones: target/test-{llm-dense,llm-moe,sys,reclaim}-serial.log
+
+# Pre-commit / CI equivalente:
+cargo xtask check
 
 # QEMU: auto `-accel kvm` si /dev/kvm legible; forzar TCG para comparar:
 SOSO_QEMU_ACCEL=tcg cargo xtask test
@@ -218,6 +224,14 @@ SOSO_TEST_JOBS=1 cargo xtask test
 
 # USB/xHCI: 4 escenarios en paralelo (mismo SOSO_TEST_JOBS, imágenes copiadas)
 cargo xtask test-usb
+
+# OTA recovery (host, sin QEMU):
+cargo test -p soso-update-core --features std --tests
+
+# Matriz hardware A8 (tras arranque en placa):
+cargo xtask hw-matrix init    # primera vez
+./scripts/l6-a8-collect.sh --id mi-placa --equipo "..." --pci 10de:2f18 --boot-ok
+cargo xtask hw-matrix show
 
 # Logs por shard: target/test-{llm-dense,llm-moe,sys,reclaim}-serial.log
 # Imágenes copiadas: target/test-{shard}-{bios,data,models}.img
@@ -330,6 +344,7 @@ comportamiento distinto (skill `soso-user-manual`).
 | `GSP=fallo` / `pool VRAM=no` en GA107 | Bring-up Ampere: FWSEC-FRTS (VBIOS PROM 0x300000) + booter_load + `GSP_INIT_DONE`; `./scripts/l6-fwsec-hostcheck.sh` en host; ver **`soso-gpu`**. Reflashear o `soso-update aplicar --local` tras Ethernet vivo |
 | WiFi sin ALIVE / «ALIVE degradado» | Hostcheck `./scripts/l6-iwl-fw-hostcheck.sh`; VFIO exige `UCODE_ALIVE_NTFY` real — **`soso-wifi`** |
 | `SOSOUPD.TXT` / `SOSOKRN.BIN` duplicados en ESP | Pass 1 reserva huecos; pass 2 reutiliza la misma entrada FAT (no duplica). Regenerar con `cargo xtask package-usb-live` |
+| OTA kernel atascado tras corte | `SOSOKRN.MET` + backup en `SOSOKRN.BIN`; reflashear si la ESP no tiene `.MET` (live < 0.2.2) — **`soso-live`** |
 | No se ve `SOSOLOG.TXT` en el USB | Está en la ESP (p1), que Linux no monta; `cargo xtask sosolog` |
 | El live se queda en bucle «no encuentra la red» | `net::poll()` resondeaba el bus entero por vuelta al no haber NIC. Ya está: `try_attach` va limitada a 1/s y las sondas cachean. Si vuelve a pasar, mira qué `println!` se repite antes de teorizar |
 | La suite se cuelga (QEMU vivo, log de serie parado hace minutos) | `kill <pid>` de ese QEMU concreto; el arnés recoge y sigue. Suele ser el shard `llm-dense` |

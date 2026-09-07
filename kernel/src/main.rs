@@ -7,6 +7,7 @@ extern crate alloc;
 mod arch;
 mod drivers;
 mod fs;
+mod fs_resize;
 mod vfs;
 mod kshell;
 mod mm;

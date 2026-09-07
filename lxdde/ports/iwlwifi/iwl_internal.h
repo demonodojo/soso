@@ -52,7 +52,12 @@
 #define CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX (0x00800000u)
 #define CSR_DBG_HPET_MEM_REG_VAL              (0xFFFF0000u)
 #define CSR_INT_BIT_ALIVE                     (1u << 0)
+#define CSR_INT_BIT_RF_KILL                   (1u << 7)
+#define CSR_INT_BIT_SW_ERR                    (1u << 25)
 #define CSR_INT_BIT_FH_RX                     (1u << 31)
+#define CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW   (1u << 9)
+#define APMG_CLK_EN_REG                       0x3004u
+#define APMG_CLK_VAL_DMA_CLK_RQT              0x200u
 #define CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ      0x80000000u
 #define CSR_LTR_LONG_VAL_AD_NO_SNOOP_SCALE    0x1c000000u
 #define CSR_LTR_LONG_VAL_AD_NO_SNOOP_VAL      0x03ff0000u

@@ -1,0 +1,14 @@
+[package]
+name = "soso-rt"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "Runtime ABI for libstd on x86_64-unknown-soso (Hito 3)"
+
+[dependencies]
+soso-abi = { path = "../soso-abi" }
+
+[features]
+default = []
+# Habilitar cuando std enlace este crate como hermit-abi.
+dep-of-std = []

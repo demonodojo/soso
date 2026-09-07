@@ -13,8 +13,9 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 use libsoso::{println, sys};
-use soso_abi::{O_RDONLY, O_WRONLY, UPD_WHICH_KERNEL, UPD_WHICH_MAILBOX};
+use soso_abi::{O_RDONLY, O_WRONLY, UPD_WHICH_KERNEL, UPD_WHICH_MAILBOX, UPD_WHICH_META};
 use soso_update_core::hash::{hex_sha256, Hasher};
+use soso_update_core::kernel_meta::KernelMeta;
 use soso_update_core::manifest::{self, FileEntry, Manifest};
 use soso_update_core::mailbox::Mailbox;
 use soso_update_core::plan::{self, Span};
@@ -52,8 +53,8 @@ fn main(args: &str) -> u8 {
 fn print_usage() {
     println!("uso:");
     println!("  soso-update estado");
-    println!("  soso-update comprobar [--local DIR]");
-    println!("  soso-update aplicar [--forzar] [--sin-kernel] [--local DIR]");
+    println!("  soso-update comprobar [--local DIR] [--channel dev|stable]");
+    println!("  soso-update aplicar [--forzar] [--sin-kernel] [--local DIR] [--channel dev|stable]");
     println!("  soso-update revertir");
 }
 
@@ -230,14 +231,31 @@ fn cmd_aplicar(args: &[String]) -> u8 {
 
     if !opts.sin_kernel {
         if let Err(e) = apply_kernel(&opts, &man) {
-            println!("soso-update: aviso kernel: {e}");
+            println!("soso-update: kernel: {e}");
+            let _ = write_file(
+                "/etc/actualiza.estado",
+                &format!("KERNEL_FALLO {}\n", man.version_raw),
+            );
+            return 1;
         }
     }
+
+    let kernel_hash = if opts.sin_kernel {
+        read_release()
+            .map(|r| r.kernel)
+            .filter(|h| !h.is_empty())
+            .unwrap_or(man.kernel_hash.clone())
+    } else {
+        man.kernel_hash.clone()
+    };
     let release = format!(
         "version={}\nbuild={}\nfecha={}\nkernel={}\n",
-        man.version_raw, man.build, man.fecha, man.kernel_hash
+        man.version_raw, man.build, man.fecha, kernel_hash
     );
-    write_file("/etc/soso-release", &release);
+    if !write_file("/etc/soso-release", &release) {
+        println!("soso-update: no pude escribir /etc/soso-release");
+        return 1;
+    }
     let _ = sys::unlink("/etc/actualiza.estado");
     println!("soso-update: listo — reinicia para arrancar soso {}", man.version_raw);
     0
@@ -263,6 +281,10 @@ fn apply_span(opts: &Opts, pendientes: &[FileEntry], span: &Span) -> Result<(), 
             println!("soso-update: {path}: {fase} falló ({e})");
             return Err("no pude escribir el fichero");
         }
+        let _ = write_file(
+            "/etc/actualiza.estado",
+            &format!("APLICANDO\nrootfs {}\n", f.path),
+        );
         println!("  ok {} ({})", f.path, humano(f.size));
     }
     Ok(())
@@ -293,6 +315,7 @@ struct Opts {
     local: Option<String>,
     forzar: bool,
     sin_kernel: bool,
+    channel: Option<String>,
 }
 
 fn parse_opts(args: &[String]) -> Opts {
@@ -300,6 +323,7 @@ fn parse_opts(args: &[String]) -> Opts {
         local: None,
         forzar: false,
         sin_kernel: false,
+        channel: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -310,6 +334,10 @@ fn parse_opts(args: &[String]) -> Opts {
             }
             "--forzar" => opts.forzar = true,
             "--sin-kernel" => opts.sin_kernel = true,
+            "--channel" => {
+                i += 1;
+                opts.channel = args.get(i).cloned();
+            }
             _ => {}
         }
         i += 1;
@@ -321,7 +349,7 @@ struct ReleaseInfo {
     kernel: String,
     version: String,
     build: String,
-    fecha: String,
+    _fecha: String,
 }
 
 impl ReleaseInfo {
@@ -357,24 +385,43 @@ fn read_release() -> Option<ReleaseInfo> {
     Some(ReleaseInfo {
         version,
         build,
-        fecha,
+        _fecha: fecha,
         kernel,
     })
 }
 
-fn read_config_url() -> String {
-    let default = "https://github.com/demonodojo/soso/releases/latest/download".to_string();
-    let Some(text) = read_file("/etc/actualiza.conf", 512) else {
-        return default;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
-            continue;
+fn read_config_url(opts: &Opts) -> String {
+    let default =
+        "https://github.com/demonodojo/soso/releases/latest/download".to_string();
+    let mut file_channel: Option<String> = None;
+    let mut file_url: Option<String> = None;
+    if let Some(text) = read_file("/etc/actualiza.conf", 512) {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            if let Some(c) = line.strip_prefix("channel=") {
+                file_channel = Some(c.trim().into());
+            }
+            if let Some(u) = line.strip_prefix("url=") {
+                file_url = Some(u.trim().into());
+            }
         }
-        if let Some(u) = line.strip_prefix("url=") {
-            return u.trim().into();
-        }
+    }
+    if let Some(u) = file_url {
+        return u;
+    }
+    let ch = opts
+        .channel
+        .as_deref()
+        .or(file_channel.as_deref())
+        .unwrap_or(soso_update_core::UPD_CHANNEL_STABLE);
+    if ch == soso_update_core::UPD_CHANNEL_DEV {
+        return format!(
+            "https://github.com/demonodojo/soso/releases/download/{}/download",
+            soso_update_core::UPD_CHANNEL_DEV
+        );
     }
     default
 }
@@ -383,11 +430,13 @@ fn load_manifest(opts: &Opts) -> Result<Manifest, &'static str> {
     let data = if let Some(dir) = &opts.local {
         read_file(&format!("{dir}/manifest.txt"), 256 * 1024).ok_or("manifest local")?
     } else {
-        let url = format!("{}/manifest.txt", read_config_url().trim_end_matches('/'));
+        let url = format!("{}/manifest.txt", read_config_url(opts).trim_end_matches('/'));
         let bytes = net::https_get_bytes(&url, None)?;
         String::from_utf8(bytes).map_err(|_| "manifest UTF-8")?
     };
-    Manifest::parse(&data).map_err(|_| "manifest inválido")
+    let m = Manifest::parse(&data).map_err(|_| "manifest inválido")?;
+    m.validate().map_err(|_| "manifest no válido")?;
+    Ok(m)
 }
 
 /// Trae `[start, start+len)` del pack, de la copia local o por HTTP `Range`.
@@ -396,7 +445,7 @@ fn fetch_pack_span(opts: &Opts, start: u64, len: u64) -> Result<Vec<u8>, &'stati
         return read_file_span(&format!("{dir}/rootfs.pack"), start, len)
             .ok_or("rootfs.pack local");
     }
-    let url = format!("{}/rootfs.pack", read_config_url().trim_end_matches('/'));
+    let url = format!("{}/rootfs.pack", read_config_url(opts).trim_end_matches('/'));
     net::https_download_span(&url, None, start, len)
 }
 
@@ -447,7 +496,7 @@ fn apply_kernel(opts: &Opts, man: &Manifest) -> Result<(), &'static str> {
     } else {
         let url = format!(
             "{}/kernel-x86_64",
-            read_config_url().trim_end_matches('/')
+            read_config_url(opts).trim_end_matches('/')
         );
         net::https_download_all(&url, None, man.kernel_size)?
     };
@@ -475,6 +524,11 @@ fn apply_kernel(opts: &Opts, man: &Manifest) -> Result<(), &'static str> {
             return Err("upd_write falló");
         }
         off = end;
+    }
+    let meta = KernelMeta::staged(&man.version_raw, man.kernel_size, &man.kernel_hash);
+    let r = sys::upd_write(UPD_WHICH_META, 0, &meta.format());
+    if r < 0 && r != -libsoso::abi::ENOTSUP {
+        return Err("meta kernel falló");
     }
     let hash = hex_sha256(&data);
     let payload = Mailbox::format_kernel(man.kernel_size, &hash, &man.version_raw);

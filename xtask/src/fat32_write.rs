@@ -192,6 +192,47 @@ pub fn overwrite_in_dir(
     Ok(size)
 }
 
+/// Lista ficheros 8.3 del directorio raíz (sin LFN): `(nombre 11 bytes, tamaño)`.
+pub fn list_root_files(img: &Path, part_first_lba: u64) -> Result<Vec<([u8; 11], u32)>, String> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .open(img)
+        .map_err(|e| format!("open: {e}"))?;
+    let vol = read_vol(&mut f, part_first_lba)?;
+
+    let fat_bytes = (vol.spf * vol.bps) as usize;
+    let mut fat = vec![0u8; fat_bytes];
+    read_at(&mut f, vol.base + vol.reserved * vol.bps, &mut fat)?;
+
+    let root_cluster = if vol.fat16 {
+        None
+    } else {
+        Some(((vol.root_lba - vol.data_start) / (vol.spc * vol.bps)) as u32 + 2)
+    };
+    let offsets = dir_sector_offsets(&vol, &fat, root_cluster);
+    let mut out = Vec::new();
+    for &off in &offsets {
+        let mut sec = [0u8; 512];
+        read_at(&mut f, off, &mut sec)?;
+        for i in 0..16 {
+            let e = &sec[i * 32..i * 32 + 32];
+            if e[0] == 0x00 {
+                return Ok(out);
+            }
+            if e[0] == 0xE5 || e[11] & 0x0F == 0x0F || e[11] & 0x08 != 0 {
+                continue;
+            }
+            if e[11] & 0x10 != 0 {
+                continue;
+            }
+            let size = u32::from_le_bytes([e[28], e[29], e[30], e[31]]);
+            let name11: [u8; 11] = e[0..11].try_into().map_err(|_| "entry name")?;
+            out.push((name11, size));
+        }
+    }
+    Ok(out)
+}
+
 /// Lee un fichero contiguo del directorio raíz. Sirve para inspeccionar desde
 /// el host lo que el guest dejó en la ESP (`SOSOBOOT.TXT`, `SOSOLOG.TXT`).
 pub fn read_root_file(

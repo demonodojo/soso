@@ -118,6 +118,8 @@ int falcon_lx_enable(unsigned falcon_base, uint8_t top_type, uint8_t top_inst)
     uint32_t pmc_mask = 0;
 
     if (gsp_top_pmc_enable_mask(top_type, top_inst, &pmc_mask) == 0) {
+        lx_printk("nouveau-lx: falcon enable PMC mask=0x%x enable=0x%08x\n",
+                  pmc_mask, gsp_mmio_rd32(0x000600u));
         gsp_mc_device_enable(pmc_mask);
     }
     if (flcn_reset_wait_mem_scrubbing(falcon_base) != 0) {

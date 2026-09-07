@@ -22,7 +22,7 @@ fn pci_enable_mem_master(gpu: &pci::PciDevice) {
 }
 
 pub fn init() {
-    let devs = pci::enumerate();
+    let devs = pci::devices();
     let Some(gpu) = devs.iter().find(|d| d.vendor_id == VENDOR_NVIDIA && d.class == 0x03)
     else {
         crate::println!("nvidia: sin GPU NVIDIA en PCI");

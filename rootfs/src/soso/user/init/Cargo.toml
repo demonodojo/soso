@@ -1,0 +1,10 @@
+[package]
+name = "init"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[dependencies]
+libsoso = { workspace = true }
+soso-update-core = { path = "../../crates/soso-update-core" }
+soso-abi = { workspace = true }

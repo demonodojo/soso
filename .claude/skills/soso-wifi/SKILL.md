@@ -81,3 +81,17 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
 
 Detalle de red/SSH/hwscan: skill **`soso-architecture`**. Empaquetado live:
 **`soso-live`**.
+
+## Matriz hardware (A8)
+
+Entradas seed: `ax211-wifi` (`8086:7f70`), `ax200-wifi` (`8086:2723`) en
+[`docs/hw-matrix.json`](../../docs/hw-matrix.json).
+
+```bash
+./scripts/l6-iwl-fw-hostcheck.sh          # host, ~1 s
+sudo ./scripts/l6-wifi-vfio-test.sh       # VFIO → ALIVE real
+./scripts/l6-a8-collect.sh --id ax211-wifi --pci 8086:7f70 --boot-ok
+cargo xtask hw-matrix show
+```
+
+Guía: [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md). Estado: [`docs/ESTADO.md`](../../docs/ESTADO.md).

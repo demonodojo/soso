@@ -1,0 +1,11 @@
+[package]
+name = "soso-test-sosofs"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "soso-test-sosofs"
+path = "src/main.rs"
+
+[dependencies]
+libsoso = { workspace = true }

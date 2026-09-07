@@ -79,6 +79,11 @@ impl MemBlockDevice {
     pub fn data_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
+
+    /// Amplía la imagen en memoria (tests de grow).
+    pub fn grow_to_blocks(&mut self, blocks: u64) {
+        self.data.resize(blocks as usize * BLOCK_SIZE, 0);
+    }
 }
 
 impl BlockDevice for MemBlockDevice {

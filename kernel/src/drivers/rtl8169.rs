@@ -131,7 +131,7 @@ struct Nic {
     mmio: u64,
     mac: [u8; 6],
     xid: u16,
-    mac_ver: u16,
+    _mac_ver: u16,
     ocp_base: u32,
     rx_phys: dma::PhysAddr,
     tx_phys: dma::PhysAddr,
@@ -455,7 +455,7 @@ fn read_link(nic: &mut Nic) -> (bool, u8, u16) {
     (up, phy, bmsr)
 }
 
-fn log_link(nic: &mut Nic, phy: u8, bmsr: u16, up: bool) {
+fn log_link(_nic: &mut Nic, phy: u8, bmsr: u16, up: bool) {
     let tbi = if phy & PHY_TBI != 0 { " TBI" } else { "" };
     println!(
         "rtl8169: phystatus {phy:#04x} bmsr {bmsr:#06x}{tbi} → enlace {} {} {}",
@@ -645,7 +645,7 @@ pub fn init() -> Option<[u8; 6]> {
         mmio: bar,
         mac,
         xid: xid_raw,
-        mac_ver: ver,
+        _mac_ver: ver,
         ocp_base: OCP_STD_PHY,
         rx_phys,
         tx_phys,

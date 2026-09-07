@@ -363,7 +363,7 @@ pub fn run_fit_drivers(args: &[String]) {
 
     let _ = super::build_image_with_profile(&merged, false);
     super::build_user();
-    let _ = super::mkfs_rootfs_with_profile(true, &merged);
+    let _ = super::mkfs_rootfs_with_profile(true, &merged, super::RootfsImgMode::Workspace);
 
     if let Some(esp_path) = esp {
         update_esp_kernel(&esp_path, &root.join("target/soso-uefi.img"));

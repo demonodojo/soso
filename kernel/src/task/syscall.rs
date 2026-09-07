@@ -305,6 +305,8 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_MPROTECT => sys_mprotect(a1, a2, a3),
         abi::SYS_MREMAP => sys_mremap(a1, a2, a3, a4),
         abi::SYS_PWRITE => sys_pwrite(a1, a2, a3, a4),
+        abi::SYS_GETENV => sys_getenv(a1, a2, a3, a4),
+        abi::SYS_FS_RESIZE => sys_fs_resize(a1, a2, a3),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -1077,7 +1079,7 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
         opts.args_ptr,
         opts.args_len,
     )?;
-    let _envp = opts.envp_ptr; // reservado para std (Hito 2)
+    let env = read_spawn_env(opts.envp_ptr, opts.envp_count)?;
     let stdio = [opts.stdin_fd, opts.stdout_fd, opts.stderr_fd];
     // Un centinela `FD_SERIAL_TTY` despega al hijo de la sesión SSH del padre:
     // fd 0/1/2 quedan en `Fd::Tty` atados a la consola serie. Sin esto, el
@@ -1089,7 +1091,21 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
     } else {
         super::with_current(|p| p.console)
     };
-    super::spawn_console_io(path, &args, super::current_pid(), console, stdio)
+    super::spawn_console_io(path, &args, super::current_pid(), console, stdio, &env)
+}
+
+fn read_spawn_env(envp_ptr: u64, envp_count: u64) -> Result<alloc::string::String, i64> {
+    if envp_ptr == 0 || envp_count == 0 {
+        return Ok(alloc::string::String::new());
+    }
+    let mut lines: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    for i in 0..envp_count {
+        let pair = envp_ptr + i * 16;
+        let s_ptr = user_read_u64(pair)?;
+        let s_len = user_read_u64(pair + 8)?;
+        lines.push(user_str(s_ptr, s_len)?.into());
+    }
+    Ok(lines.join("\n"))
 }
 
 fn read_spawn_args(
@@ -2250,9 +2266,7 @@ fn sys_set_tls(base: u64) -> Result<u64, i64> {
         p.tls_base = base;
     });
     if base != 0 {
-        unsafe {
-            x86_64::registers::model_specific::FsBase::write(x86_64::VirtAddr::new(base));
-        }
+        x86_64::registers::model_specific::FsBase::write(x86_64::VirtAddr::new(base));
     }
     Ok(0)
 }
@@ -2308,4 +2322,51 @@ fn sys_pwrite(fd: u64, buf: u64, len: u64, offset: u64) -> Result<u64, i64> {
         }
         _ => Err(-abi::EBADF),
     })
+}
+
+fn sys_getenv(key_ptr: u64, key_len: u64, val_ptr: u64, val_len: u64) -> Result<u64, i64> {
+    if val_len == 0 {
+        return Ok(0);
+    }
+    let key = user_str(key_ptr, key_len)?;
+    if !user_range_ok(val_ptr, val_len, true) {
+        return Err(-abi::EFAULT);
+    }
+    super::with_current(|p| {
+        for line in p.env.lines() {
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            if k == key {
+                let n = v.len().min(val_len as usize);
+                let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+                space.write(val_ptr, &v.as_bytes()[..n]).ok_or(-abi::EFAULT)?;
+                return Ok(n as u64);
+            }
+        }
+        Ok(0)
+    })
+}
+
+fn sys_fs_resize(op: u64, arg: u64, out: u64) -> Result<u64, i64> {
+    use abi::{FsSpaceInfo, FS_RESIZE_GROW_ROOT, FS_RESIZE_QUERY};
+    match op {
+        FS_RESIZE_QUERY => {
+            let info = crate::fs_resize::space_info()?;
+            let n = core::mem::size_of::<FsSpaceInfo>() as u64;
+            if !user_range_ok(out, n, true) {
+                return Err(-abi::EFAULT);
+            }
+            let bytes = unsafe {
+                core::slice::from_raw_parts((&info as *const FsSpaceInfo).cast::<u8>(), n as usize)
+            };
+            super::with_current(|p| {
+                let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+                space.write(out, bytes).ok_or(-abi::EFAULT)?;
+                Ok(0)
+            })
+        }
+        FS_RESIZE_GROW_ROOT => crate::fs_resize::grow_root(arg),
+        _ => Err(-abi::EINVAL),
+    }
 }

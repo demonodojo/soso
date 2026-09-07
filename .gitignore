@@ -37,3 +37,4 @@ lxdde/ports-extern/
 lxdde/shim/src/generated_dummies.c
 drivers-extern.toml
 board.txt
+/vendor/rust/

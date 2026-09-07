@@ -1,0 +1,25 @@
+name: check
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  host-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-none x86_64-unknown-uefi || true
+
+      - name: Dependencias del sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 gcc
+
+      - name: cargo xtask check
+        run: cargo xtask check

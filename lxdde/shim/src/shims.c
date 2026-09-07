@@ -316,3 +316,12 @@ int scnprintf(char *buf, unsigned long size, const char *fmt, ...)
         return 0;
     return (unsigned long)r < size ? r : (int)size - 1;
 }
+
+/* Puertos lxdde opcionales: el kernel referencia e1000e en poll_rx aunque el
+ * perfil live sólo linkee nouveau+iwlwifi. Los .o del puerto real pisan estos weak. */
+__attribute__((weak)) void lx_spike_run(void) {}
+__attribute__((weak)) void lx_testdrv_run(void) {}
+__attribute__((weak)) int lx_e1000e_init_module(void) { return 0; }
+__attribute__((weak)) void lx_e1000e_exit_module(void) {}
+__attribute__((weak)) void *lx_e1000e_adapter(void) { return 0; }
+__attribute__((weak)) void lx_e1000_poll(void *ad) { (void)ad; }

@@ -1,6 +1,6 @@
 #![cfg(feature = "std")]
 
-use block_dev::{MemBlockDevice, BLOCK_SIZE};
+use block_dev::MemBlockDevice;
 use sosofs::builder::build_image;
 use sosofs::layout::ROOT_INODE;
 use sosofs::Sosofs;

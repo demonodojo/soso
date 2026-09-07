@@ -96,6 +96,20 @@ fn cache_blocks_modelos() -> usize {
     (libres / 32).clamp(64, 2048)
 }
 
+fn grow_root_if_needed(fs: &mut Fs, part_blocks: u64) {
+    if part_blocks <= fs.block_count() {
+        return;
+    }
+    match fs.grow_to(part_blocks) {
+        Ok(()) => println!(
+            "fs: sosofs grow → {} bloques (partición {})",
+            fs.block_count(),
+            part_blocks
+        ),
+        Err(e) => println!("fs: sosofs grow falló ({e:?})"),
+    }
+}
+
 fn grow_models_if_needed(mfs: &mut ModelsFs, part_blocks: u64) {
     if part_blocks <= mfs.total_blocks() {
         return;
@@ -311,9 +325,11 @@ fn mount_live() {
         println!("fs: live sin partición root");
         return;
     };
+    let part_blocks = root.block_count();
     let cached = CachedBlockDevice::with_capacity(RootDev::Live(root), 512);
     match Sosofs::mount(cached) {
-        Ok(fs) => {
+        Ok(mut fs) => {
+            grow_root_if_needed(&mut fs, part_blocks);
             println!(
                 "fs: sosofs live (generación {}, {} bloques)",
                 fs.generation(),
@@ -394,8 +410,10 @@ pub fn init() {
     };
 
     let cached = CachedBlockDevice::with_capacity(root_backend, 512);
+    let part_blocks = cached.block_count();
     match Sosofs::mount(cached) {
-        Ok(fs) => {
+        Ok(mut fs) => {
+            grow_root_if_needed(&mut fs, part_blocks);
             println!(
                 "fs: sosofs montado (generación {}, {} bloques, caché 512)",
                 fs.generation(),

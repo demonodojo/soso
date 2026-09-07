@@ -1,0 +1,325 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "qemu-test",
+      "equipo": "QEMU q35 (cargo xtask test)",
+      "pci_ids": [],
+      "firmware": {},
+      "git": {
+        "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
+        "commit_corto": "0ed3deea1",
+        "version": "0.2.2",
+        "dirty": true,
+        "cambios_locales": "82 ficheros modificados"
+      },
+      "perfil_drivers": "test-shards",
+      "arranques_consecutivos_ok": 0,
+      "sesion_sostenida": {
+        "status": "pendiente"
+      },
+      "wifi": {
+        "alive": {
+          "status": "pendiente"
+        },
+        "scan": {
+          "status": "pendiente"
+        },
+        "assoc_wpa2": {
+          "status": "pendiente"
+        },
+        "dhcp": {
+          "status": "pendiente"
+        },
+        "ssh": {
+          "status": "pendiente"
+        },
+        "reconexion": {
+          "status": "pendiente"
+        }
+      },
+      "gpu": {
+        "gsp_rpc": {
+          "status": "pendiente"
+        },
+        "vram_pool": {
+          "status": "pendiente"
+        },
+        "ce_readback": {
+          "status": "pendiente"
+        },
+        "compute_cpu_gpu": {
+          "status": "pendiente"
+        },
+        "carga_real": {
+          "status": "pendiente"
+        },
+        "apagado_limpio": {
+          "status": "pendiente"
+        }
+      },
+      "bench": {},
+      "logs": [],
+      "notas": "Suite automatizada llm-dense/sys; WiFi/GPU reales pendientes",
+      "actualizado": "2026-09-07"
+    },
+    {
+      "id": "gb205-dgpu",
+      "equipo": "NVIDIA GB205 (RTX 5070 Ti Mobile)",
+      "pci_ids": [
+        "10de:2f18"
+      ],
+      "firmware": {},
+      "git": {
+        "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
+        "commit_corto": "0ed3deea1",
+        "version": "0.2.2",
+        "dirty": true,
+        "cambios_locales": "82 ficheros modificados"
+      },
+      "perfil_drivers": "live-usb + nouveau",
+      "arranques_consecutivos_ok": 0,
+      "sesion_sostenida": {
+        "status": "pendiente"
+      },
+      "wifi": {
+        "alive": {
+          "status": "pendiente"
+        },
+        "scan": {
+          "status": "pendiente"
+        },
+        "assoc_wpa2": {
+          "status": "pendiente"
+        },
+        "dhcp": {
+          "status": "pendiente"
+        },
+        "ssh": {
+          "status": "pendiente"
+        },
+        "reconexion": {
+          "status": "pendiente"
+        }
+      },
+      "gpu": {
+        "gsp_rpc": {
+          "status": "pendiente"
+        },
+        "vram_pool": {
+          "status": "pendiente"
+        },
+        "ce_readback": {
+          "status": "pendiente"
+        },
+        "compute_cpu_gpu": {
+          "status": "pendiente"
+        },
+        "carga_real": {
+          "status": "pendiente"
+        },
+        "apagado_limpio": {
+          "status": "pendiente"
+        }
+      },
+      "bench": {},
+      "logs": [],
+      "notas": "G1–G5 en placa; validar tras cambios FWSEC/falcon",
+      "actualizado": "2026-09-07"
+    },
+    {
+      "id": "ga107-igpu",
+      "equipo": "NVIDIA GA107 (iGPU / Ampere)",
+      "pci_ids": [
+        "10de:????"
+      ],
+      "firmware": {},
+      "git": {
+        "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
+        "commit_corto": "0ed3deea1",
+        "version": "0.2.2",
+        "dirty": true,
+        "cambios_locales": "82 ficheros modificados"
+      },
+      "perfil_drivers": "live-usb + nouveau",
+      "arranques_consecutivos_ok": 0,
+      "sesion_sostenida": {
+        "status": "pendiente"
+      },
+      "wifi": {
+        "alive": {
+          "status": "pendiente"
+        },
+        "scan": {
+          "status": "pendiente"
+        },
+        "assoc_wpa2": {
+          "status": "pendiente"
+        },
+        "dhcp": {
+          "status": "pendiente"
+        },
+        "ssh": {
+          "status": "pendiente"
+        },
+        "reconexion": {
+          "status": "pendiente"
+        }
+      },
+      "gpu": {
+        "gsp_rpc": {
+          "status": "pendiente"
+        },
+        "vram_pool": {
+          "status": "pendiente"
+        },
+        "ce_readback": {
+          "status": "pendiente"
+        },
+        "compute_cpu_gpu": {
+          "status": "pendiente"
+        },
+        "carga_real": {
+          "status": "pendiente"
+        },
+        "apagado_limpio": {
+          "status": "pendiente"
+        }
+      },
+      "bench": {},
+      "logs": [],
+      "notas": "Cadena Ampere pendiente de cierre",
+      "actualizado": "2026-09-07"
+    },
+    {
+      "id": "ax211-wifi",
+      "equipo": "Intel AX211 (CNVi gen3)",
+      "pci_ids": [
+        "8086:7f70",
+        "8086:51f0",
+        "8086:54f0"
+      ],
+      "firmware": {},
+      "git": {
+        "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
+        "commit_corto": "0ed3deea1",
+        "version": "0.2.2",
+        "dirty": true,
+        "cambios_locales": "82 ficheros modificados"
+      },
+      "perfil_drivers": "live-usb + iwlwifi",
+      "arranques_consecutivos_ok": 0,
+      "sesion_sostenida": {
+        "status": "pendiente"
+      },
+      "wifi": {
+        "alive": {
+          "status": "pendiente"
+        },
+        "scan": {
+          "status": "pendiente"
+        },
+        "assoc_wpa2": {
+          "status": "pendiente"
+        },
+        "dhcp": {
+          "status": "pendiente"
+        },
+        "ssh": {
+          "status": "pendiente"
+        },
+        "reconexion": {
+          "status": "pendiente"
+        }
+      },
+      "gpu": {
+        "gsp_rpc": {
+          "status": "pendiente"
+        },
+        "vram_pool": {
+          "status": "pendiente"
+        },
+        "ce_readback": {
+          "status": "pendiente"
+        },
+        "compute_cpu_gpu": {
+          "status": "pendiente"
+        },
+        "carga_real": {
+          "status": "pendiente"
+        },
+        "apagado_limpio": {
+          "status": "pendiente"
+        }
+      },
+      "bench": {},
+      "logs": [],
+      "notas": "Secuencia: ALIVE → scan → WPA2 → DHCP → SSH",
+      "actualizado": "2026-09-07"
+    },
+    {
+      "id": "ax200-wifi",
+      "equipo": "Intel AX200 (gen2)",
+      "pci_ids": [
+        "8086:2723"
+      ],
+      "firmware": {},
+      "git": {
+        "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
+        "commit_corto": "0ed3deea1",
+        "version": "0.2.2",
+        "dirty": true,
+        "cambios_locales": "82 ficheros modificados"
+      },
+      "perfil_drivers": "live-usb + iwlwifi",
+      "arranques_consecutivos_ok": 0,
+      "sesion_sostenida": {
+        "status": "pendiente"
+      },
+      "wifi": {
+        "alive": {
+          "status": "pendiente"
+        },
+        "scan": {
+          "status": "pendiente"
+        },
+        "assoc_wpa2": {
+          "status": "pendiente"
+        },
+        "dhcp": {
+          "status": "pendiente"
+        },
+        "ssh": {
+          "status": "pendiente"
+        },
+        "reconexion": {
+          "status": "pendiente"
+        }
+      },
+      "gpu": {
+        "gsp_rpc": {
+          "status": "pendiente"
+        },
+        "vram_pool": {
+          "status": "pendiente"
+        },
+        "ce_readback": {
+          "status": "pendiente"
+        },
+        "compute_cpu_gpu": {
+          "status": "pendiente"
+        },
+        "carga_real": {
+          "status": "pendiente"
+        },
+        "apagado_limpio": {
+          "status": "pendiente"
+        }
+      },
+      "bench": {},
+      "logs": [],
+      "notas": "Context-info gen2; sin PNVM",
+      "actualizado": "2026-09-07"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[package]
+name = "soso-std-test"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "soso-std-test"
+path = "src/main.rs"
+
+[dependencies]
+libsoso = { workspace = true }
+soso-std = { path = "../../crates/soso-std" }

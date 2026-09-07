@@ -298,6 +298,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gptdisk"
+version = "0.1.0"
+
+[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -349,6 +353,7 @@ dependencies = [
  "ed25519-dalek",
  "font8x8",
  "getrandom",
+ "gptdisk",
  "hmac",
  "log",
  "pbkdf2",
