@@ -12,13 +12,8 @@ const LINUX_VERSION: &str = "6.6.32";
 const LINUX_URL: &str =
     "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.32.tar.xz";
 
-pub fn run(args: &[String]) {
-    let root = super::project_root();
-    let port = args.first().map(|s| s.as_str()).unwrap_or("all");
-    let out_dir = root.join("target/lxdde");
-    fs::create_dir_all(&out_dir).expect("crear target/lxdde");
-
-    let ports: Vec<String> = match port {
+fn resolve_port_arg(root: &Path, port: &str) -> Vec<String> {
+    match port {
         "spike" => vec!["spike".into()],
         "testdrv" => vec!["testdrv".into()],
         "e1000e" => vec!["e1000e".into()],
@@ -32,7 +27,7 @@ pub fn run(args: &[String]) {
                 "nouveau".into(),
                 "iwlwifi".into(),
             ];
-            for ext in external_port_names(&root) {
+            for ext in external_port_names(root) {
                 if !names.iter().any(|n| n == &ext) {
                     names.push(ext);
                 }
@@ -40,14 +35,34 @@ pub fn run(args: &[String]) {
             names
         }
         other => {
-            if port_dir(&root, other).is_some() {
+            if port_dir(root, other).is_some() {
                 vec![other.into()]
             } else {
                 eprintln!("lx-build: puerto desconocido {other}");
                 exit(2);
             }
         }
+    }
+}
+
+pub fn run(args: &[String]) {
+    let root = super::project_root();
+    let requested: Vec<&str> = if args.is_empty() {
+        vec!["all"]
+    } else {
+        args.iter().map(|s| s.as_str()).collect()
     };
+    let out_dir = root.join("target/lxdde");
+    fs::create_dir_all(&out_dir).expect("crear target/lxdde");
+
+    let mut ports = Vec::new();
+    for port in requested {
+        for name in resolve_port_arg(&root, port) {
+            if !ports.iter().any(|p| p == &name) {
+                ports.push(name);
+            }
+        }
+    }
 
     // Descargar Linux solo si algún source.list referencia el árbol pinneado.
     if port_needs_linux(&root, &ports) {

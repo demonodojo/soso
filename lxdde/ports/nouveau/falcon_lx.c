@@ -12,7 +12,7 @@ void *memset(void *dst, int c, unsigned long n);
 
 struct flcn_fw_ctx {
     const unsigned char *img;
-    unsigned dma_handle;
+    uint64_t dma_handle;
     unsigned imem_base_img;
     unsigned imem_base;
     unsigned imem_size;
@@ -45,7 +45,11 @@ static void flcn_mask(unsigned base, unsigned off, unsigned mask, unsigned val)
 static int flcn_select(unsigned base)
 {
     unsigned v = flcn_rd32(base, LX_FLCN_ADDR2 + 0x668u);
-    if ((v & 0x10u) != 0u) {
+
+    /* nova-core `select_core_ga102`: si el núcleo no es Falcon, escribir 0
+     * (PeregrineCoreSelect::Falcon) y esperar VALID (bit 0). Linux solo
+     * actúa si bit 4 (RISC-V); en GA104 vimos bcr=0x1 y el falcon sordo. */
+    if ((v & 0x10u) != 0u || (v & 1u) == 0u) {
         flcn_wr32(base, LX_FLCN_ADDR2 + 0x668u, 0u);
         {
             unsigned t = 10u;
@@ -56,23 +60,35 @@ static int flcn_select(unsigned base)
                 lx_mdelay(1);
             }
         }
+        lx_printk("nouveau-lx: falcon select timeout bcr=0x%x→0x%x\n",
+                  v, flcn_rd32(base, LX_FLCN_ADDR2 + 0x668u));
         return -1;
     }
     return 0;
 }
 
-/* Reset del falcon antes de cada carga (`nvkm_falcon_reset` / ga102 HAL). */
+static int flcn_reset_wait_mem_scrubbing(unsigned base)
+{
+    unsigned t = 20u;
+
+    while (t--) {
+        if (!(flcn_rd32(base, 0x0f4u) & 0x1000u)) {
+            return 0;
+        }
+        lx_mdelay(1);
+    }
+    return -1;
+}
+
+/* Reset del falcon antes de cada carga (`ga102_flcn_reset_eng` + select). */
 int falcon_lx_reset(unsigned base)
 {
     unsigned t;
-    unsigned hwcfg2;
 
-    hwcfg2 = flcn_rd32(base, 0x10cu);
-    (void)hwcfg2;
-
+    (void)flcn_rd32(base, 0x0f4u);
     t = 150u;
     while (t--) {
-        if (flcn_rd32(base, 0x10cu) & 0x1u) {
+        if (flcn_rd32(base, 0x0f4u) & 0x80000000u) {
             break;
         }
         lx_udelay(1);
@@ -82,35 +98,10 @@ int falcon_lx_reset(unsigned base)
     lx_udelay(10);
     flcn_mask(base, 0x3c0u, 0x1u, 0x0u);
 
-    t = 2000u;
-    while (t--) {
-        hwcfg2 = flcn_rd32(base, 0x10cu);
-        if ((hwcfg2 & 0x6u) == 0u) {
-            break;
-        }
-        lx_mdelay(1);
-    }
-    if ((hwcfg2 & 0x6u) != 0u) {
+    if (flcn_reset_wait_mem_scrubbing(base) != 0) {
         return -1;
     }
-
-    flcn_wr32(base, 0x10cu, 0u);
     return flcn_select(base);
-}
-
-static int flcn_reset_wait_mem_scrubbing(unsigned base)
-{
-    unsigned t;
-
-    flcn_wr32(base, 0x040u, 0u);
-    t = 20u;
-    while (t--) {
-        if (!(flcn_rd32(base, 0x0f4u) & 0x1000u)) {
-            return 0;
-        }
-        lx_mdelay(1);
-    }
-    return -1;
 }
 
 int falcon_lx_enable(unsigned falcon_base, uint8_t top_type, uint8_t top_inst)
@@ -122,26 +113,22 @@ int falcon_lx_enable(unsigned falcon_base, uint8_t top_type, uint8_t top_inst)
                   pmc_mask, gsp_mmio_rd32(0x000600u));
         gsp_mc_device_enable(pmc_mask);
     }
-    if (flcn_reset_wait_mem_scrubbing(falcon_base) != 0) {
-        lx_printk("nouveau-lx: falcon enable mem scrub timeout\n");
+    if (falcon_lx_reset(falcon_base) != 0) {
+        lx_printk("nouveau-lx: falcon enable reset falló\n");
         return -1;
     }
     flcn_wr32(falcon_base, 0x084u, gsp_mmio_rd32(0u));
     return 0;
 }
 
-static int flcn_dma_done(unsigned base)
-{
-    return (flcn_rd32(base, 0x118u) & 2u) ? 1 : 0;
-}
-
-static int flcn_dma_wr(unsigned base, const unsigned char *img, unsigned dma_handle,
+static int flcn_dma_wr(unsigned base, const unsigned char *img, uint64_t dma_handle,
                        unsigned dma_base, int mem_type, unsigned mem_base, unsigned len, int sec)
 {
     unsigned cmd;
     unsigned dst, src;
     const unsigned dmalen = 256u;
-    unsigned dma_addr = dma_handle;
+    uint64_t dma_addr = dma_handle;
+    int first = 1;
 
     if (len == 0u || (len & (dmalen - 1u)) != 0u) {
         return -1;
@@ -159,27 +146,51 @@ static int flcn_dma_wr(unsigned base, const unsigned char *img, unsigned dma_han
         dma_addr += dma_base;
     }
 
-    flcn_wr32(base, 0x110u, dma_addr >> 8);
+    flcn_wr32(base, 0x110u, (unsigned)(dma_addr >> 8));
     flcn_wr32(base, 0x128u, 0u);
 
     dst = mem_base;
     src = dma_base;
     while (len >= dmalen) {
+        unsigned t;
+        unsigned cmd_reg;
+        unsigned saw_busy = 0u;
+
         flcn_wr32(base, 0x114u, dst);
         flcn_wr32(base, 0x11cu, src - (mem_type == FLCN_DMEM ? dma_base : 0u));
+        /* Un readback barre el write posted; si no, el bit IDLE (1) del
+         * xfer anterior sigue a 1 y damos el bloque por copiado con IMEM vacío. */
         flcn_wr32(base, 0x118u, cmd);
+        (void)flcn_rd32(base, 0x118u);
 
         {
-            unsigned t = 2000u;
-            while (t--) {
-                if (flcn_dma_done(base)) {
+            unsigned tb = 200u;
+
+            while (tb--) {
+                cmd_reg = flcn_rd32(base, 0x118u);
+                if (!(cmd_reg & 2u)) {
+                    saw_busy = 1u;
                     break;
                 }
-                lx_mdelay(1);
+                lx_udelay(1);
             }
-            if (t == 0u) {
-                return -1;
+        }
+        t = 2000u;
+        while (t--) {
+            cmd_reg = flcn_rd32(base, 0x118u);
+            if (cmd_reg & 2u) {
+                break;
             }
+            lx_mdelay(1);
+        }
+        if (t == 0u) {
+            return -1;
+        }
+        if (first) {
+            lx_printk("nouveau-lx: falcon DMA primer xfer cmd=0x%x reg=0x%x "
+                      "busy=%u\n",
+                      cmd, cmd_reg, saw_busy);
+            first = 0;
         }
 
         (void)img;
@@ -226,6 +237,24 @@ static int flcn_parse_hs_v2(const struct acr_fw_blob *blob, struct flcn_fw_ctx *
     return 0;
 }
 
+static unsigned rd_le32(const unsigned char *p)
+{
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) |
+           ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+static unsigned flcn_pio_rd_dmem(unsigned base, unsigned off)
+{
+    flcn_wr32(base, 0x1c0u, (1u << 25) | off);
+    return flcn_rd32(base, 0x1c4u);
+}
+
+static unsigned flcn_pio_rd_imem(unsigned base, unsigned off)
+{
+    flcn_wr32(base, 0x180u, (1u << 25) | off);
+    return flcn_rd32(base, 0x184u);
+}
+
 static int flcn_fw_load(unsigned base, struct flcn_fw_ctx *fw)
 {
     flcn_mask(base, 0x624u, 0x80u, 0x80u);
@@ -248,33 +277,77 @@ static int flcn_fw_boot_ga102(unsigned base, struct flcn_fw_ctx *fw,
                               int check_mbox0, unsigned mbox0_ok, unsigned timeout_ms)
 {
     unsigned mbox0, mbox1;
+    unsigned mbox_start = mbox0_in;
+    unsigned cpuctl_pre, cpuctl_post, cpuctl_alias, riscv, bcr, hwcfg1, hwcfg2;
     unsigned t;
+
+    /* gm200_flcn_fw_boot: si el llamante pide mbox0==0, el valor inicial NO
+     * puede ser 0 —si el falcon no arranca el mbox se queda como lo escribimos
+     * y un 0 de éxito es indistinguible de «nunca corrió». Linux usa 0xcafebeef
+     * cuando no hay valor de entrada. */
+    if (check_mbox0 && mbox0_in == mbox0_ok) {
+        mbox_start = 0xcafebeefu;
+    }
 
     flcn_wr32(base, LX_FLCN_ADDR2 + 0x210u, fw->dmem_sign);
     flcn_wr32(base, LX_FLCN_ADDR2 + 0x19cu, fw->engine_id);
     flcn_wr32(base, LX_FLCN_ADDR2 + 0x198u, fw->ucode_id);
     flcn_wr32(base, LX_FLCN_ADDR2 + 0x180u, 1u);
 
-    flcn_wr32(base, 0x040u, mbox0_in);
+    flcn_wr32(base, 0x040u, mbox_start);
     flcn_wr32(base, 0x044u, mbox1_in);
     flcn_wr32(base, 0x104u, fw->boot_addr);
-    flcn_wr32(base, 0x100u, 2u);
+    cpuctl_pre = flcn_rd32(base, 0x100u);
+    cpuctl_alias = flcn_rd32(base, 0x130u);
+    riscv = flcn_rd32(base, LX_FLCN_ADDR2 + 0x388u);
+    bcr = flcn_rd32(base, LX_FLCN_ADDR2 + 0x668u);
+    hwcfg1 = flcn_rd32(base, 0x12cu);
+    hwcfg2 = flcn_rd32(base, 0x0f4u);
+
+    /* nova-core Falcon::start — alias_en (bit 6) elige CPUCTL vs CPUCTL_ALIAS. */
+    if (cpuctl_pre & 0x40u)
+        flcn_wr32(base, 0x130u, 2u);
+    else
+        flcn_wr32(base, 0x100u, 2u);
 
     t = timeout_ms ? timeout_ms : 2000u;
+    if (cpuctl_pre & 0x10u) {
+        unsigned tclear = 50u;
+
+        while (tclear--) {
+            if (!(flcn_rd32(base, 0x100u) & 0x10u)) {
+                break;
+            }
+            lx_mdelay(1);
+        }
+    }
     while (t--) {
         if (flcn_rd32(base, 0x100u) & 0x10u) {
             break;
         }
         lx_mdelay(1);
     }
+    cpuctl_post = flcn_rd32(base, 0x100u);
     if (t == 0u) {
+        lx_printk("nouveau-lx: falcon boot timeout cpuctl 0x%x→0x%x riscv=0x%x "
+                  "alias=0x%x bcr=0x%x hwcfg1=0x%x hwcfg2=0x%x\n",
+                  cpuctl_pre, cpuctl_post, riscv, cpuctl_alias, bcr, hwcfg1, hwcfg2);
         return -1;
     }
 
     mbox0 = flcn_rd32(base, 0x040u);
     mbox1 = flcn_rd32(base, 0x044u);
-    lx_printk("nouveau-lx: falcon %s mbox0=0x%x mbox1=0x%x (expect 0x%x)\n",
-              "boot", mbox0, mbox1, mbox0_ok);
+    lx_printk("nouveau-lx: falcon boot mbox0=0x%x mbox1=0x%x (expect 0x%x) "
+              "cpuctl 0x%x→0x%x riscv=0x%x alias=0x%x bcr=0x%x hwcfg1=0x%x "
+              "hwcfg2=0x%x dma=0x%llx\n",
+              mbox0, mbox1, mbox0_ok, cpuctl_pre, cpuctl_post, riscv,
+              cpuctl_alias, bcr, hwcfg1, hwcfg2,
+              (unsigned long long)fw->dma_handle);
+    if (check_mbox0 && mbox0 == mbox_start && mbox_start != mbox0_ok) {
+        lx_printk("nouveau-lx: falcon no ejecutó (mbox sentinela 0x%x intacto)\n",
+                  mbox_start);
+        return -1;
+    }
     if (check_mbox0 && mbox0 != mbox0_ok) {
         return -1;
     }
@@ -359,12 +432,31 @@ int falcon_lx_raw_boot(unsigned falcon_base, const struct falcon_lx_raw *raw)
         return -1;
     }
 
-    lx_printk("nouveau-lx: falcon %s raw imem=%u dmem=%u engine=0x%x ucode=%u boot=0x%x\n",
-              name, fw.imem_size, fw.dmem_size, fw.engine_id, fw.ucode_id, fw.boot_addr);
+    lx_printk("nouveau-lx: falcon %s raw imem=%u@0x%x dmem=%u@0x%x engine=0x%x "
+              "ucode=%u boot=0x%x\n",
+              name, fw.imem_size, fw.imem_base, fw.dmem_size, fw.dmem_base,
+              fw.engine_id, fw.ucode_id, fw.boot_addr);
 
+    /* GA102+: nova-core enmascara el PIO de IMEM al CPU; el camino es DMA
+     * (ga102_flcn_fw_load). El PIO queda como readback de diagnóstico. */
     if (flcn_fw_load(falcon_base, &fw) != 0) {
         lx_printk("nouveau-lx: falcon %s raw DMA load falló\n", name);
         return -1;
+    }
+    {
+        unsigned want_d = rd_le32(fw.img + fw.dmem_base_img);
+        unsigned got_d = flcn_pio_rd_dmem(falcon_base, fw.dmem_base);
+        unsigned want_i = rd_le32(fw.img + fw.imem_base_img);
+        unsigned got_i = flcn_pio_rd_imem(falcon_base, fw.imem_base);
+
+        lx_printk("nouveau-lx: falcon DMA verify dmem 0x%x→0x%x imem 0x%x→0x%x "
+                  "src=0x%x/0x%x hwcfg2=0x%x\n",
+                  want_d, got_d, want_i, got_i, fw.imem_base_img,
+                  fw.dmem_base_img, flcn_rd32(falcon_base, 0x0f4u));
+    }
+    if (flcn_reset_wait_mem_scrubbing(falcon_base) != 0) {
+        lx_printk("nouveau-lx: falcon %s mem-scrub tras DMA hwcfg2=0x%x\n",
+                  name, flcn_rd32(falcon_base, 0x0f4u));
     }
 
     if (flcn_fw_boot_ga102(falcon_base, &fw, raw->mbox0, raw->mbox1,

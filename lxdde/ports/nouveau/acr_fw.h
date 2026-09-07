@@ -1,6 +1,8 @@
 #ifndef ACR_FW_H
 #define ACR_FW_H
 
+#include <stdint.h>
+
 enum acr_fw_kind {
     ACR_FW_AHESASC = 0,
     ACR_FW_ASB,
@@ -11,7 +13,7 @@ struct acr_fw_blob {
     const char *path;
     unsigned char *data;
     unsigned long len;
-    unsigned dma_handle;
+    uint64_t dma_handle;
     unsigned char *dma_cpu;
     int valid;
 };

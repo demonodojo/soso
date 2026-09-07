@@ -7,6 +7,29 @@ use xmas_elf::ElfFile;
 use xmas_elf::header;
 use xmas_elf::program::Type;
 
+/// ET_EXEC x86_64 con la tabla de program headers dentro de `elf.input`.
+/// No exige la tabla de secciones: en un ELF típico vive al final del fichero
+/// y `load_lazy` solo tiene los primeros 64 KiB.
+fn check_exec(elf: &ElfFile<'_>) -> Result<(), &'static str> {
+    if elf.header.pt1.magic != header::MAGIC {
+        return Err("bad magic number");
+    }
+    if elf.header.pt2.type_().as_type() != header::Type::Executable {
+        return Err("no es un ejecutable estático (ET_EXEC)");
+    }
+    if elf.header.pt2.machine().as_machine() != header::Machine::X86_64 {
+        return Err("no es x86_64");
+    }
+    let pt2 = &elf.header.pt2;
+    let ph_end = pt2
+        .ph_offset()
+        .saturating_add((pt2.ph_entry_size() as u64).saturating_mul(pt2.ph_count() as u64));
+    if ph_end > elf.input.len() as u64 {
+        return Err("program header table out of range");
+    }
+    Ok(())
+}
+
 /// Carga los segmentos PT_LOAD y PT_TLS. Devuelve (entry, brk, tls_base).
 pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64, u64), &'static str> {
     let elf = ElfFile::new(data)?;
@@ -76,13 +99,7 @@ pub fn load_lazy(
     file_size: u64,
 ) -> Result<(u64, u64, u64), &'static str> {
     let elf = ElfFile::new(head)?;
-    header::sanity_check(&elf)?;
-    if elf.header.pt2.type_().as_type() != header::Type::Executable {
-        return Err("no es un ejecutable estático (ET_EXEC)");
-    }
-    if elf.header.pt2.machine().as_machine() != header::Machine::X86_64 {
-        return Err("no es x86_64");
-    }
+    check_exec(&elf)?;
     let mut brk = USER_BASE;
     let mut tls_base = 0u64;
     for ph in elf.program_iter() {
@@ -104,15 +121,23 @@ pub fn load_lazy(
         if vaddr < USER_BASE || vaddr.checked_add(memsz).is_none_or(|end| end > BRK_MAX) {
             return Err("segmento fuera del rango de usuario");
         }
-        let len = memsz.next_multiple_of(4096);
+        // p_vaddr ≡ p_offset (mod página). La página de solape text/data es
+        // habitual: find_region se queda con el último PT_LOAD (el RW).
+        let page_delta = vaddr & 0xfff;
+        if page_delta > offset {
+            return Err("segmento no alineado");
+        }
+        let virt_start = vaddr - page_delta;
+        let file_offset = offset - page_delta;
+        let len = (vaddr + memsz - virt_start).next_multiple_of(4096);
         space.with_mmap_mut(|book| {
             book.regions.push(super::mmap::MmapRegion {
-                virt_start: vaddr,
+                virt_start,
                 len,
                 inode,
-                file_offset: offset,
-                file_len: file_size,
-                writable: false,
+                file_offset,
+                file_len: core::cmp::min(offset.saturating_add(filesz), file_size),
+                writable: ph.flags().is_write(),
             });
         });
         // BSS: páginas más allá de filesz (ya a cero vía fault anónimo).

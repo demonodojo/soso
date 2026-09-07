@@ -55,7 +55,9 @@ fn first_overlap(regions: &[MmapRegion], start: u64, len: u64) -> Option<u64> {
 }
 
 pub fn find_region(regions: &[MmapRegion], addr: u64) -> Option<&MmapRegion> {
-    regions.iter().find(|r| {
+    // El último mapeo gana: en un ELF la última página de texto y la primera
+    // de datos se solapan; si gana el RX, el primer write a .data mata init.
+    regions.iter().rev().find(|r| {
         addr >= r.virt_start && addr < r.virt_start.saturating_add(r.len)
     })
 }

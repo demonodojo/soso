@@ -12,11 +12,13 @@
 #define CSR_HW_IF_CONFIG_REG         (CSR_BASE + 0x000)
 #define CSR_INT                      (CSR_BASE + 0x008)
 #define CSR_INT_MASK                 (CSR_BASE + 0x00c)
+#define CSR_INT_COALESCING           (CSR_BASE + 0x004)
 #define CSR_RESET                    (CSR_BASE + 0x020)
 #define CSR_GP_CNTRL                 (CSR_BASE + 0x024)
 #define CSR_HW_REV                   (CSR_BASE + 0x028)
 #define CSR_GPIO_IN                  (CSR_BASE + 0x018)
 #define CSR_GIO_REG                  (CSR_BASE + 0x03C)
+#define CSR_UCODE_DRV_GP1_CLR        (CSR_BASE + 0x05c)
 #define CSR_MAC_SHADOW_REG_CTRL      (CSR_BASE + 0x0A8)
 #define CSR_LTR_LONG_VAL_AD          (CSR_BASE + 0x0D4)
 #define CSR_GIO_CHICKEN_BITS         (CSR_BASE + 0x100)
@@ -27,9 +29,15 @@
 #define CSR_IML_DATA_ADDR            0x120
 #define CSR_IML_SIZE_ADDR            0x128
 #define HBUS_TARG_WRPTR              0x460
+/* iwl-csr.h: HBUS_BASE=0x400 → WADDR +0x044, RADDR +0x048, WDAT +0x04c, RDAT +0x050. */
 #define HBUS_TARG_PRPH_WADDR         0x444
-#define HBUS_TARG_PRPH_WDATA         0x448
-#define UREG_CPU_INIT_RUN            0xd03c
+#define HBUS_TARG_PRPH_RADDR         0x448
+#define HBUS_TARG_PRPH_WDATA         0x44c
+#define HBUS_TARG_PRPH_RDAT          0x450
+/* iwl-prph.h: familia 22000 — no confundir con offsets legacy (0xd03c). */
+#define UREG_CPU_INIT_RUN            0xa05c44
+#define HPM_DEBUG                    0xa03440
+#define PREG_PRPH_WPROT_22000        0xa04d00
 #define RFH_Q0_FRBDCB_WIDX_TRG       0x1C80
 #define IWL_PCI_AX200                0x2723u
 #define IWL_MVM_DQA_CMD_QUEUE        9
@@ -44,8 +52,16 @@
 
 #define CSR_RESET_REG_FLAG_SW_RESET       (1u << 7)
 #define CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY (1u << 0)
+#define CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP  (1u << 4)
 #define CSR_GP_CNTRL_REG_FLAG_INIT_DONE   (1u << 2)
 #define CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ (1u << 3)
+#define CSR_GP_CNTRL_REG_VAL_MAC_ACCESS_EN    (1u << 0)
+#define CSR_UCODE_SW_BIT_RFKILL               (1u << 1)
+#define CSR_UCODE_DRV_GP1_BIT_CMD_BLOCKED     (1u << 2)
+#define IWL_HOST_INT_TIMEOUT_DEF              0x40u
+#define PERSISTENCE_BIT                       (1u << 12)
+#define PREG_WFPM_ACCESS                      (1u << 12)
+#define IWL_PRPH_HW_TIMEOUT                   0x5a5a5a5au
 #define CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A (1u << 19)
 #define CSR_HW_IF_CONFIG_REG_BIT_NIC_READY    (1u << 22)
 #define CSR_GIO_REG_VAL_L0S_DISABLED          (1u << 1)
@@ -55,7 +71,8 @@
 #define CSR_INT_BIT_RF_KILL                   (1u << 7)
 #define CSR_INT_BIT_SW_ERR                    (1u << 25)
 #define CSR_INT_BIT_FH_RX                     (1u << 31)
-#define CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW   (1u << 9)
+/* iwl-csr.h: bit 27 = estado del switch RF-kill (1 = radio ON). El 9 es SYS_CONFIG. */
+#define CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW   (1u << 27)
 #define APMG_CLK_EN_REG                       0x3004u
 #define APMG_CLK_VAL_DMA_CLK_RQT              0x200u
 #define CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ      0x80000000u

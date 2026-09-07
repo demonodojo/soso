@@ -53,9 +53,10 @@ static int load_one_path(enum acr_fw_kind kind, const char *path)
     b->data = copy;
     b->len = tmp_len;
     b->dma_cpu = dma_cpu;
-    b->dma_handle = (unsigned)dma_handle;
+    b->dma_handle = dma_handle;
     b->valid = 1;
-    lx_printk("nouveau-lx: acr fw %s (%lu bytes, dma=0x%x)\n", path, tmp_len, b->dma_handle);
+    lx_printk("nouveau-lx: acr fw %s (%lu bytes, dma=0x%llx)\n",
+              path, tmp_len, (unsigned long long)b->dma_handle);
     return 0;
 }
 

@@ -1,355 +1,309 @@
-# Plan de mejoras a corto plazo de soso
+# Próximo ciclo de mejoras de soso
 
-Fecha: 7 de septiembre de 2026. Versión revisada: **0.2.2**.
-Base: commit `744945dd4` y árbol de trabajo local, incluidos los cambios todavía
-sin commit en ocho archivos de iwlwifi/nouveau. Estos cambios no se han modificado.
-Horizonte: **2–4 semanas**, suponiendo una persona dedicada al desarrollo.
+Fecha: **7 de septiembre de 2026**. Versión: **0.2.2**.
+Base revisada: commit **`9048b12f4`** y árbol local, con 13 archivos modificados
+previamente en ELF/mmap, iwlwifi, nouveau, hostcheck, empaquetado y build.
+Horizonte: **3–4 semanas**, suponiendo una persona dedicada.
 
-## Objetivo y criterio de prioridad
+## Objetivo
 
-Conseguir una versión que arranque, permita trabajar y se actualice de forma
-predecible en QEMU y en los equipos físicos disponibles. La amplitud funcional
-ya es considerable: kernel propio, sosofs CoW, inferencia, GPU, WiFi, USB,
-instalación y OTA. La mejora inmediata con más valor es reducir fallos de
-integración y hacer que las comprobaciones detecten los problemas reales.
+Consolidar las capacidades añadidas recientemente para poder trabajar desde
+soso sin comprometer los datos ni confundir una operación iniciada con una
+operación terminada. Priorizar almacenamiento, contratos de memoria/procesos
+y el bucle de desarrollo remoto antes de ampliar arquitecturas de modelos o
+intentar portar todo rustc.
 
-Este documento propone trabajo; no declara implementadas las mejoras. Distingue
-hallazgos del código, resultados ejecutados y validaciones pendientes. Las
-estimaciones son días de trabajo, no garantías de calendario.
+Este documento **sustituye el plan A1–A9 anterior**, cuya implementación queda
+como base del ciclo. Ya existen el aislamiento de sesiones SSH del arnés,
+el cliente HTTPS con reloj y control de origen, la enumeración PCI cacheada,
+`cargo xtask check`, el workflow de CI, metadatos de recuperación del kernel,
+cierre explícito de staging y la matriz hardware. No se propone crearlos otra vez.
+Las entregas siguientes se identifican como **B1–B6** para distinguirlas de ese
+trabajo. Las referencias a A1–A9 que queden en documentación son históricas.
 
-| Orden | Entrega | Prioridad | Esfuerzo orientativo |
-|---|---|---|---|
-| 1 | A1. Pruebas aisladas y hostcheck GPU reparado | P0 | 1–2 días |
-| 2 | A2. OTA: errores, versiones y confirmación correctos | P0 | 1–2 días |
-| 3 | A3. HTTPS: reloj, redirecciones y liberación de conexiones | P0 | 2–3 días |
-| 4 | A4. Una única enumeración PCI con medición de BAR | P1 | 0,5–1 día |
-| 5 | A5. Comprobaciones automáticas y builds reproducibles | P1 | 1–2 días |
-| 6 | A6. Recuperación OTA tras interrupciones | P1; requisito antes de ampliar su distribución | 4–6 días, revisar tras diseño |
-| 7 | A7. Cierre verificable de hilos de inferencia | P1 | 2–4 días |
-| 8 | A8. Validación por equipo y métricas de referencia | P1 | 1–2 días de banco, más disponibilidad de hardware |
-| 9 | A9. Documentación operativa coherente | P2 | 0,5–1 día, repartido entre entregas |
+## Prioridades y alcance
 
-**Compromiso inicial recomendado:** A1–A5 y documentación asociada. Después,
-abordar A6 si la prioridad es instalar/actualizar equipos, o A7 si el uso principal
-es `ask` y modelos grandes. Recomiendo A6 primero para máquinas instaladas.
-Completar toda la lista podría superar cuatro semanas; A8 se limita a los equipos
-disponibles y las optimizaciones de rendimiento quedan condicionadas a sus medidas.
+| Orden | Entrega | Prioridad | Esfuerzo estimado | Dependencias |
+|---|---|---|---|---|
+| 1 | B1. Redimensionado recuperable y persistencia real | P0 | 4–6 días; contención inicial ≤1 día | Ninguna |
+| 2 | B2. Contratos de memoria, ELF y argumentos | P1 | 4–6 días | Ninguna; integrar los cambios locales de ELF |
+| 3 | B3. Bucle Forja que compile los fuentes del guest | P1 | 3–5 días | B2 para argumentos sin pérdidas; B1 si exige ampliar disco |
+| 4 | B4. CI que compruebe los componentes obligatorios | P1 | 1–2 días | Se amplía con las pruebas de B1–B3 |
+| 5 | B5. Evidencia hardware sin falsos positivos | P1 | 1–2 días de herramientas/banco | Hardware disponible para cerrar etapas físicas |
+| 6 | B6. Quitar lecturas GPT del camino de datos | P2 | 1–2 días | B1: contrato de actualización de geometría |
 
-## Base observada y límites del análisis
+El conjunto suma **14–23 días de trabajo**, sin contar bring-up nuevo ni esperas
+por hardware. El compromiso de cuatro semanas es B1–B4 y el parser de B5; B6 y
+la campaña completa de placa entran si queda margen. La primera entrega de B1
+debe impedir operaciones inseguras aunque la recuperación completa requiera
+más tiempo. No condicionar esa contención al final del ciclo.
 
-Se revisaron README, VERSION, el plan de modelos grandes, `board.txt`, las skills
-de arquitectura/desarrollo/live/WiFi y los apartados pertinentes de GPU. Se
-contrastaron con el código de pruebas, PCI, procesos e hilos, HTTPS, actualizador
-y boot-shim. Es una revisión dirigida de los caminos críticos, no una auditoría
-exhaustiva de todo el kernel y del código Linux incorporado.
+## B1. Redimensionar sin dejar el disco a medio mover
 
-Aspectos que conviene conservar:
+**Hallazgos en el código.**
 
-- sosofs ya tiene pruebas de cortes de escritura y corrupción; sosomfs dispone
-  de pruebas de importación y caché. Hay una base útil para probar OTA por fallos.
-- El banco QEMU separa inferencia densa, MoE, syscalls y presión de memoria.
-  El shard denso usa SMP para ejercitar workers; no sustituirlo por uno de un core.
-- Existen pruebas específicas de USB, instalación y actualización. USB ya inyecta
-  teclado mediante el monitor: hay que ampliar esa cobertura, no crearla de cero.
-- GPU ya informa de disponibilidad real del pool VRAM y distingue caminos CPU/GPU.
-  No sustituir esa evidencia por un simple mensaje de firmware cargado.
+- [kernel/src/fs_resize.rs](kernel/src/fs_resize.rs), `grow_root`, reduce el
+  superbloque de modelos y desplaza p3/p4 antes de actualizar GPT. Los registros
+  de fase se escriben después de esas operaciones. `journal_write` devuelve
+  éxito si falta `SOSORES.TXT`; no se encontró un lector de ese journal ni una
+  recuperación al arrancar en kernel o boot-shim.
+- [kernel/src/drivers/live_disk.rs](kernel/src/drivers/live_disk.rs),
+  `disk_slide_sectors`, copia hacia atrás sector a sector. Una fase global y el
+  desplazamiento no bastan para reanudar una copia solapada interrumpida:
+  parte del origen puede haber sido sobrescrita por el destino.
+- `LiveRootDev::flush` y `LiveModelsDev::flush` devuelven `Ok(())` sin actuar.
+  Virtio sí hace flush en su escritura de sector, pero esa propiedad no se
+  puede extender al resto de backends. Los tests con dispositivos de memoria
+  no demuestran persistencia ante pérdida de alimentación en USB/NVMe.
 
-### Comprobaciones realizadas durante esta revisión
+**Trabajo acotado.**
 
-Los resultados corresponden al árbol local, no a un checkout limpio del commit.
+1. Validar toda la geometría, el espacio libre y la disponibilidad del journal
+   antes de la primera escritura. Rechazar el redimensionado mientras no se
+   pueda garantizar su recuperación. Detectar importaciones o usuarios activos
+   de modelos y definir una exclusión que abarque toda la operación.
+2. Extraer planificación y recuperación a código comprobable en host. Elegir
+   entre traslado fuera de línea o copia reanudable con progreso durable y
+   espacio auxiliar. Documentar el orden real **p1 → p2 → p4 → p3**, los límites
+   de cada partición y los puntos en que se puede continuar o volver atrás.
+3. Persistir intención y progreso antes de las mutaciones que los necesitan;
+   recuperar antes de montar volúmenes afectados. No repetir una copia
+   solapada completa como si fuera idempotente.
+4. Dar un contrato explícito de persistencia a cada backend y propagar sus
+   errores. Conectar las barreras necesarias a datos, superbloques, GPT y
+   journal. Si un dispositivo no puede cumplirlo, devolver una limitación
+   explícita para esta operación.
 
-| Comprobación | Resultado |
-|---|---|
-| Pruebas host de siete paquetes, comando debajo | Resultado pendiente de cierre de la ejecución |
-| `./scripts/l6-iwl-fw-hostcheck.sh` | Correcto con los firmwares AX200 `cc-a0-77` y AX211 `so-a0-gf-a0-89`; verifica parser, no asociación WiFi |
-| `./scripts/l6-g3-gsp-hostcheck.sh` | Falla al enlazar símbolos `gsp_matmul_*`, `gsp_softmax_rows_*` y `gsp_layernorm_rows_*` |
-| `./scripts/l6-fwsec-hostcheck.sh` | Compila el comprobador, pero no ejecuta la validación: falta una VBIOS `.rom` accesible |
-| Suite QEMU, USB, instalación, OTA y VFIO | No ejecutadas en esta revisión; no se afirma que estén en verde |
+**Aceptación.** Usar imágenes pequeñas desechables con patrones distintos en
+rootfs, SOSOINSTALL y modelos. Inyectar cortes durante la copia, escrituras
+parciales, errores de flush y cambios de GPT; tras recuperar, comprobar los
+hashes de los tres contenidos y la coherencia de ambas tablas GPT. Cubrir
+journal ausente/corrupto, espacio insuficiente y una importación activa.
+Antes del diseño completo, todos los casos no soportados deben fallar sin
+escribir. Validar después el ciclo completo en QEMU live; la prueba de pérdida
+de alimentación real se registra por backend, sin deducirla del resultado host.
 
-Comando host ejecutado sin descargar dependencias:
+## B2. Hacer efectivos los contratos de memoria y procesos
+
+**Hallazgos en el código.**
+
+- [AddrSpace::set_prot](kernel/src/task/addrspace.rs) no modifica páginas:
+  solo comprueba el rango. `sys_mprotect` puede devolver éxito sin retirar
+  permiso de escritura; tampoco representa `PROT_NONE` ni permisos de
+  ejecución en esa ruta.
+- `grow_anon` cambia la longitud registrada antes de completar el mapeo y no
+  comprueba allí colisiones con otras regiones. `sys_mremap` ignora flags y
+  devuelve éxito para una reducción sin reducir el mapeo.
+- [read_spawn_args](kernel/src/task/syscall.rs) convierte `argv` en
+  `parts.join(" ")`: pierde argumentos vacíos y los límites de argumentos que
+  contienen espacios. `envp` también se transforma en texto separado por
+  saltos de línea. Ambos recorridos necesitan límites globales y aritmética
+  comprobada para sus tablas de punteros.
+- [load_lazy](kernel/src/task/elf.rs) ya está cambiando localmente para
+  resolver cabeceras y páginas compartidas de segmentos. Queda por comprobar
+  explícitamente `filesz <= memsz`, los límites de fichero, la congruencia de
+  offset/dirección y el punto de entrada. Recortar un segmento al tamaño del
+  fichero no equivale a rechazar un ELF truncado.
+
+**Trabajo acotado.**
+
+Separar la entrega en dos pasos revisables. Primero, memoria: implementar el
+subconjunto soportado de `mprotect`/`mremap`, mantener coherentes PTE y regiones
+perezosas, invalidar TLB en los cores que comparten el espacio y deshacer una
+reserva fallida. Rechazar explícitamente flags o modos todavía no soportados.
+Conservar los ajustes locales de ELF y añadir validación previa a la creación
+de regiones, con una política clara para BSS, permisos y páginas compartidas.
+
+Después, procesos: conservar `argv`/`envp` como datos delimitados hasta la
+entrada al programa. Mantener un adaptador para la ABI histórica de argumentos
+en texto, sin volver a introducir esa pérdida en la nueva. Establecer límites
+de cantidad y bytes; revisar el contrato de TLS de proceso/hilo antes de usarlo
+como base de libstd.
+
+**Aceptación.** En QEMU con SMP, una escritura tras retirar permiso mata solo
+al proceso de prueba, y un cambio permitido vuelve a funcionar. Ejercitar
+páginas ya presentes y todavía perezosas, colisión, reducción y falta de RAM
+en `mremap`, comprobando que un fallo conserva el mapa anterior. Un hijo debe
+recibir exactamente `['', 'a b', 'ñ', 'x=y']` y el entorno previsto. ELFs
+truncados o malformados se rechazan sin panic del kernel; un ELF válido con
+tabla de secciones fuera de la cabecera inicial sigue arrancando. Añadir las
+regresiones a `init test` y mantener el shard con presión de memoria.
+
+## B3. Cerrar un bucle de desarrollo remoto demostrable
+
+**Hallazgos en el código.**
+
+- [user/soso-forja/src/main.rs](user/soso-forja/src/main.rs), `cmd_sync`,
+  envía rutas y hashes, pero no contenidos. El servidor guarda ese manifiesto
+  en memoria y `run_release` compila su propio checkout: una edición del guest
+  no se convierte por ese camino en un cambio de los fuentes del build.
+- [tools/soso-forja-server/src/main.rs](tools/soso-forja-server/src/main.rs)
+  lee una primera porción de 4096 bytes y, para `/sync`, espera EOF con
+  `read_to_end`. El cliente espera la respuesta manteniendo abierta la
+  conexión: hay una espera circular potencial independiente de la compilación.
+  Tampoco se encuadran las peticiones por `Content-Length`.
+- El cliente elimina cabeceras sin validar el estado HTTP; `cmd_install`
+  ignora el resultado del hijo y llama a `halt`. El servidor puede lanzar
+  builds simultáneos sobre el mismo árbol y publica por `VERSION`, sin
+  identificar una petición concreta.
+- `cmd_local` calcula hashes; `cmd_build_local` copia artefactos previamente
+  compilados. [soso-rustc](user/soso-rustc/src/main.rs) declara que es un stub.
+  Esa infraestructura es útil, pero todavía no compila Rust dentro de soso.
+
+**Trabajo acotado.**
+
+Hacer fiable primero la ruta remota: protocolo incremental de manifiesto →
+contenido necesario → verificación de hashes → build identificado. Trabajar
+en un directorio separado por sesión, con rutas normalizadas y sin escribir
+sobre el checkout de desarrollo. Definir altas, cambios y borrados, y qué
+ocurre si se corta una sincronización.
+
+Leer cabeceras y cuerpos completos con límites, timeout y tratamiento binario;
+responder al terminar el cuerpo, sin esperar el cierre del cliente. Propagar
+errores HTTP, de escritura/cierre y del actualizador. Serializar builds o
+aislar sus salidas y entregar un conjunto consistente de pack, manifiesto y
+kernel con identidad de fuentes. El servidor escucha hoy en `0.0.0.0`:
+ofrecer bind configurable y autenticar las operaciones que suben fuentes o
+arrancan builds antes de usarlas en una red compartida.
+
+**Aceptación.** Modificar desde el guest un mensaje de `hola-std`, sincronizar,
+compilar en host, aplicar y arrancar el binario que muestra el nuevo mensaje.
+Su artefacto debe estar ligado al hash de los fuentes enviados. Probar con
+transporte simulado peticiones fragmentadas, cuerpos mayores de 4096 bytes,
+datos no UTF-8, HTTP 500, timeout, rutas inválidas y clientes concurrentes.
+Un fallo de build o instalación no anuncia éxito ni apaga la máquina.
+
+Mantener documentada la distinción entre planificación local, copia de
+artefactos y compilación remota. El primer compilador nativo real queda como
+hito posterior a B2/B3, con una prueba que compile y ejecute un programa;
+`--version` no sirve como criterio de cierre.
+
+## B4. Completar la puerta de integración existente
+
+**Hallazgos en el código.** El workflow
+[.github/workflows/check.yml](.github/workflows/check.yml) ya llama a
+`cargo xtask check`, pero no ejecuta QEMU ni publica los logs. En
+[xtask/src/check.rs](xtask/src/check.rs), un fallo de `build_boot_shim` se
+convierte en aviso y no incrementa los fallos. La instalación de targets en
+el workflow termina con `|| true`. Los tests de Forja y otras herramientas
+nuevas no están incluidos en las listas host de `check`.
+
+**Trabajo.** Mantener el comando común y hacer obligatorios los componentes
+necesarios para cada perfil, incluido el shim en live/release. Separar un
+prerrequisito ausente de un error de compilación. Incorporar las pruebas de
+Forja y de las entregas B1/B2; ejecutar los shards QEMU en CI y conservar logs
+incluso al fallar. Añadir una ejecución programada o manual para
+`test-usb`, `test-install` y `test-update`, con OVMF y sus demás requisitos
+declarados. Usar lockfiles y evitar alterar dependencias durante la validación.
+
+La recuperación OTA ya tiene helpers y pruebas: ampliar la cobertura para
+ejercitar el **orden de operaciones del shim real**. Actualmente
+[aplicar_kernel](boot-shim/src/actualiza.rs) escribe meta `Applying` antes de
+completar el backup; los tests de
+[recovery.rs](crates/soso-update-core/tests/recovery.rs) construyen backups
+completos en memoria. Añadir cortes antes/durante ese backup y entre la meta
+`Probando` y el buzón, además del fallo de una shell perezosa después de que
+`spawn` haya devuelto PID. Corregir las transiciones que fallen esos escenarios.
+
+**Aceptación.** Un error de shim, una regresión Forja y un fallo QEMU hacen
+fallar sus jobs. Los resultados indican qué perfil se probó y qué quedó sin
+ejecutar. La candidata a release tiene logs de instalación y actualización
+con sus escenarios de fallo, sin convertir un aviso en una comprobación
+superada. La disponibilidad de WiFi/GPU física no bloquea los jobs host/QEMU.
+
+## B5. Evitar que la matriz hardware certifique un fallo
+
+**Hallazgos en el código.** La matriz ya existe; hace falta mejorar la evidencia
+que registra. En [xtask/src/hw_matrix.rs](xtask/src/hw_matrix.rs):
+
+- `parse_gpu_stages` acepta `vram` + `pool`, incluso en `pool VRAM=no`.
+- Considera `unload=fallo` junto a `dma=off` un apagado correcto.
+- Un comando `soso-llm run` basta para marcar carga real, y el dispositivo
+  software puede marcar la comparación CPU/GPU como correcta.
+- `parse_wifi_stages` acepta palabras como `wpa2` o `reconnect` sin distinguir
+  intento de resultado; el banner de sosh basta para marcar SSH.
+- [docs/hw-matrix.json](docs/hw-matrix.json) conserva etapas pendientes,
+  firmware sin hashes y un PCI ID provisional. No acredita una nueva pasada
+  de hardware sobre el commit actual.
+
+**Trabajo.** Parsear resultados explícitos por línea y por arranque, con estados
+`ok`, `fail`, `pendiente` y `no_aplica`. Dar prioridad a fallos de la misma etapa;
+no mezclar mensajes de intentos o dispositivos distintos. Vincular cada
+resultado a log, commit, identificación de cambios locales, chip y firmware.
+No sobrescribir evidencia anterior con el estado de otro arranque.
+
+**Aceptación.** Fixtures negativos para todos los ejemplos anteriores y para
+logs truncados o con intentos fallidos seguidos de recuperación. Ninguno marca
+éxito sin el evento correspondiente. Usar la herramienta corregida para
+revalidar los equipos disponibles: tres arranques y una sesión sostenida,
+con tráfico WiFi o resultado numérico GPU según el dispositivo. Corregir los
+datos provisionales solo a partir de inventario real. El trabajo de bring-up
+que aparezca se estima aparte; una etapa no probada queda pendiente.
+
+## B6. Reducir el coste de E/S del disco live
+
+**Hallazgo en el código.** `LiveRootDev::part` y `LiveModelsDev::part` llaman a
+`current_part` en [live_disk.rs](kernel/src/drivers/live_disk.rs). Cada llamada
+lee de nuevo la cabecera GPT y cuatro sectores de entradas, incluso en
+consultas de capacidad y operaciones ordinarias de bloques. Esto añade E/S
+de metadatos al camino de lectura de modelos y de escritura del rootfs.
+
+**Trabajo.** Mantener una geometría validada en memoria con actualización
+explícita tras un cambio GPT confirmado. Integrarla con B1 para que ningún
+lector use una geometría intermedia. Medir antes de introducir otras cachés.
+
+**Aceptación.** Un backend instrumentado verifica que las lecturas ordinarias
+no vuelven a leer GPT y que, tras actualizar la geometría, usan los límites
+correctos. Comparar lecturas físicas, MiB/s y tiempo hasta primer token en
+frío/caliente con la misma imagen y modelo; guardar los resultados. No fijar
+un objetivo de tok/s sin una línea base ni atribuir a GPU una mejora de disco.
+
+## Secuencia propuesta
+
+- **Semana 1:** contención de B1, contrato de persistencia y pruebas de cortes;
+  hacer estricto el resultado de shim en B4.
+- **Semana 2:** B2, empezando por memoria y carga ELF; terminar o mantener
+  deshabilitadas explícitamente las modalidades de resize aún inseguras.
+- **Semana 3:** B3, con una demostración completa desde una edición del guest;
+  integrar sus pruebas en B4 y corregir el parser de B5.
+- **Semana 4:** margen para integración, validación por equipo y B6 si las
+  entregas prioritarias están cerradas.
+
+Cada entrega actualiza las secciones afectadas del manual y las guías de
+arquitectura/desarrollo/live. `docs/ESTADO.md` debe apuntar al ciclo B y reflejar
+los límites verificados. No esperar al cierre del mes para documentar un
+comando deshabilitado o un cambio de ABI.
+
+## Fuera del compromiso de este ciclo
+
+Port completo de rustc/cargo/gix, enlazador dinámico general, multiusuario,
+IPv6, nuevas familias GPU, nuevas arquitecturas de modelos y optimización de
+modelos de 70B sin medidas. El rollback integral del rootfs sigue siendo una
+limitación publicada: este ciclo no promete resolverlo ni amplía por ello la
+compatibilidad OTA entre kernels y userspace arbitrarios.
+
+## Evidencia y límites de esta revisión
+
+Revisión dirigida de código y documentación locales: plan anterior e historial,
+arquitectura/desarrollo/live, memoria y syscalls, Forja/self-hosting, disco live,
+actualización, CI y matriz hardware. Los problemas descritos son hallazgos de
+lectura estática salvo que se indique una ejecución. No son una auditoría
+exhaustiva ni una afirmación de fallo reproducido en placa.
+
+Se ejecutó la siguiente selección de pruebas host, sin descargar dependencias:
 
 ```sh
 cargo test --offline \
-  -p sosofs -p sosomfs -p soso-update-core -p gptdisk \
-  -p soso-http -p soso-audio -p gguf2som --features std
+  -p soso-update-core -p sosofs -p sosomfs -p gptdisk \
+  -p soso-forja-server --features std
 ```
 
-La skill de desarrollo documenta dos fallos de `ask` en su línea base del
-31 de agosto. Son antecedentes, no fallos reproducidos aquí. La colisión de FIFO
-descrita en A1 es un hallazgo independiente del código; hay que comprobar cuánto
-explica esos fallos antes de atribuirlos todos al arnés.
+Resultado: **correcto en los cinco paquetes; comando terminado con código 0**.
+Esto valida las pruebas existentes, no los escenarios nuevos propuestos arriba.
+El log de esta sesión está en `/tmp/soso-astra-host-tests.log` y no es un
+artefacto versionado. También se comprobaron los enlaces locales del plan y
+`git diff --check -- PLAN_ASTRA.md`.
 
-## A1. Recuperar una señal fiable de las pruebas
-
-**Evidencia.** [xtask/src/test.rs](xtask/src/test.rs), `ssh_guion_inner`, utiliza
-siempre `target/.ssh-guion.fifo`, aunque varios shards llaman al helper en
-paralelo. Cada llamada elimina y recrea esa ruta. La sincronización de stdin
-y el cierre de procesos están duplicados en `ssh_ask_literal`. Además,
-`run_usb_scenario` borra variables de entorno globales después de soltar
-`USB_ENV_LOCK`, mientras otro escenario puede estar configurando su arranque.
-
-El [hostcheck GSP](scripts/l6-g3-gsp-hostcheck.sh) enlaza cuatro archivos SASS
-embebidos, pero [source.list](lxdde/ports/nouveau/source.list) contiene también
-`matmul_sass_embed.c`, `softmax_rows_sass_embed.c` y
-`layernorm_rows_sass_embed.c`. El fallo de enlace se reprodujo en esta revisión.
-
-**Trabajo.** Aislar FIFO, sockets y archivos temporales por ejecución y sesión;
-unificar el helper SSH manteniendo stdin abierto hasta completar el protocolo;
-drenar stdout/stderr durante la ejecución; garantizar recogida de SSH, holder y
-QEMU al fallar. Pasar la configuración USB al `Command` concreto en vez de mutar
-el entorno compartido. Sincronizar los objetos del hostcheck con los kernels SASS
-que realmente usa compute, sin sustituirlos por stubs que oculten el problema.
-
-**Aceptación.** Ejecutar sesiones SSH simultáneas contra guests distintos sin
-cruzar entrada ni salida; timeout y error de arranque no dejan procesos propios
-vivos. Los dos casos de `ask` deben exigir respuesta real, no solo eco del comando.
-Para el residente, comprobar que cada pregunta termina y que la reconexión recibe
-respuesta sin recarga. Tras el arreglo, tres pasadas QEMU con la configuración
-paralela habitual sin reintentos que oculten fallos, una secuencial de comparación,
-los cuatro escenarios USB y hostcheck GSP completos.
-
-## A2. No anunciar una actualización que no ha terminado
-
-**Evidencia.** En [user/soso-update/src/main.rs](user/soso-update/src/main.rs),
-`cmd_aplicar` imprime un aviso si `apply_kernel` falla, pero continúa escribiendo
-la versión y el hash nuevos en `/etc/soso-release`, elimina `actualiza.estado`
-y devuelve éxito. `apply_kernel` usa ese hash para decidir si puede omitir futuras
-descargas: un fallo puede dejar además una indicación incorrecta de «sin cambios».
-El mismo hash se publica con `--sin-kernel`.
-
-En [user/init/src/main.rs](user/init/src/main.rs), `lanzar_shell` llama a
-`confirmar_actualizacion` **antes** de intentar `spawn("/bin/sosh")`; se puede
-marcar `OK` aunque la shell no arranque. El retorno de la escritura de confirmación
-se ignora. La prueba actual [test_update.rs](xtask/src/test_update.rs) cubre
-aplicación y comprobación tras reinicio, pero no esa matriz de fallos.
-
-**Trabajo.** Separar versión del rootfs, kernel preparado y kernel confirmado;
-preservar el hash real con `--sin-kernel`. Propagar los errores de datos, estado y
-buzón; dejar un estado recuperable y devolver error si una fase necesaria falla.
-Confirmar después de una comprobación mínima de funcionamiento: rootfs accesible
-y shell capaz de arrancar y comunicar que está lista. La ausencia de WiFi/GPU
-opcional no debe impedir esa confirmación.
-
-**Aceptación.** Probar kernel ausente/corrupto, slot no disponible, escritura
-fallida, `--sin-kernel` y shell que no puede arrancar. Ningún caso publica un hash
-no instalado ni borra el estado pendiente indebidamente. Un reintento vuelve a
-preparar el kernel que faltaba. `PROBANDO` sin confirmación activa la recuperación
-prevista en el siguiente arranque. Esta entrega mejora la semántica; la tolerancia
-a cortes en mitad de una escritura se aborda en A6.
-
-## A3. Hacer fiable el transporte HTTPS compartido
-
-**Evidencia.** [crates/soso-http/src/lib.rs](crates/soso-http/src/lib.rs):
-
-- `FixedTimeProvider` devuelve siempre el 1 de enero de 2025. Se valida la cadena
-  de certificados, pero contra un instante que puede rechazar certificados
-  actuales o aceptar certificados vencidos respecto al reloj real.
-- `https_request` reutiliza `auth` al seguir redirecciones, aunque cambie el host.
-  Un token de Hugging Face puede enviarse a otro origen indicado por `Location`.
-- Después de conectar, varios retornos con `?` preceden a `transport.close(fd)`;
-  no hay un guardia de conexión que asegure el cierre en errores TLS/E/S.
-- Los tests actuales se centran en cabeceras, parseo y un transporte simulado
-  básico; no cubren esos tres comportamientos.
-
-**Trabajo.** Inyectar una fuente de tiempo en el cliente TLS y proporcionar hora
-UTC desde el guest —por ejemplo RTC, con validación y error explícito si no hay
-hora utilizable— manteniendo la verificación de certificados. Restringir el
-Bearer al origen autorizado, retirarlo al cambiar esquema/host/puerto y resolver
-correctamente redirecciones relativas. Introducir propiedad de la conexión con
-cierre garantizado en todos los caminos. Separar errores de reloj, TLS y red en
-los mensajes de las aplicaciones que lo consumen.
-
-**Aceptación.** Tests deterministas con reloj y transporte simulados: certificado
-válido, futuro y expirado; redirección al mismo origen y a otro; fallo durante
-handshake/lectura/escritura; una única liberación por conexión abierta. Comprobar
-después los flujos de `soso-hf`, `soso-web` y `soso-update`. Las pruebas automáticas
-no dependerán de servidores externos ni de tokens reales.
-
-## A4. Evitar reprogramar BAR al consultar dispositivos PCI
-
-**Evidencia.** [kernel/src/drivers/pci.rs](kernel/src/drivers/pci.rs), `bar_size`,
-escribe `0xffff_ffff` para medir BAR. Ya existe `devices()` con una foto cacheada,
-pero seis consumidores siguen llamando a `enumerate()`:
-
-`drivers/{usb_storage,nvme,gpu,nvidia_probe,e1000e}.rs` y `lxdde/pci.rs`, bajo
-`kernel/src/`. Aunque se llamen durante el arranque, vuelven a medir dispositivos
-que otro controlador puede haber inicializado antes.
-
-**Trabajo.** Migrar esos consumidores a la foto inicial conservando filtros y
-propiedad de los datos. Restringir la función de enumeración con efectos de
-escritura al módulo de arranque. Revisar el orden de `pci::init()` y los probes.
-
-**Aceptación.** Ninguna llamada externa a la enumeración que mide BAR. Arranque,
-lectura/escritura de disco, tráfico y `hwscan` repetido sin nuevos sondeos ni
-pérdida de dispositivos, en perfiles QEMU y live. El inventario de dispositivos
-y los tamaños de BAR deben coincidir con la base anterior.
-
-## A5. Automatizar la cobertura que hoy exige memoria del desarrollador
-
-**Evidencia.** No se encontró configuración de CI versionada en `.github/` ni
-GitLab/Jenkins. `run_host_tests` en [xtask/src/test.rs](xtask/src/test.rs) no incluye
-directamente `soso-update-core`, `soso-audio` ni `gguf2som`; que otro paquete dependa
-de ellos no ejecuta sus pruebas propias. Kernel, userspace y boot-shim son árboles
-separados del workspace raíz, por lo que probar solo la raíz no valida sus builds.
-
-[crates/soso-http/build.rs](crates/soso-http/build.rs) busca el primer
-`ring-0.17.*` bajo una ruta fija de `~/.cargo/registry/src`. Eso liga el enlace al
-contenido y orden de la caché local, no necesariamente a la versión resuelta.
-
-**Trabajo.** Incorporar primero un comando local de comprobación común y después
-un workflow que lo invoque. Dividirlo en host, builds bare-metal y QEMU; reservar
-USB/instalación/OTA para una ejecución periódica o candidata a release. Incluir
-los paquetes omitidos con sus features correctas y los hostchecks cuyos fixtures
-estén disponibles. Fijar dependencias con lockfiles y resolver los ensambladores
-de `ring` de forma determinista, respetando `CARGO_HOME`. Mantener el nightly
-fijado; actualizarlo no es un objetivo de este ciclo.
-
-**Aceptación.** Una copia nueva puede ejecutar el procedimiento documentado;
-la CI usa el mismo comando local, guarda resultado y log por shard y distingue
-fallo de código de prerrequisito ausente. Un fallo de OTA/gguf2som/audio hace fallar
-la comprobación. Los jobs de hardware quedan explícitamente separados de los
-que puede ejecutar cualquier runner. Depende de A1 para una señal QEMU fiable.
-
-## A6. Recuperación OTA verificable, además de checksums
-
-**Evidencia.** En [boot-shim/src/actualiza.rs](boot-shim/src/actualiza.rs),
-`aplicar_kernel` reemplaza el único slot con la copia antigua, escribe el kernel
-activo y solo después registra `PROBANDO`. Existen puntos intermedios de corte
-que el estado actual no describe. `revertir_kernel` estima la longitud antigua
-buscando el último byte no nulo, sin tamaño/hash de backup persistidos; el helper
-de escritura tampoco trunca el archivo a la longitud nueva.
-
-El rootfs se sustituye fichero a fichero en `apply_span`. El CoW del filesystem
-no convierte esa secuencia completa en una transacción de release, y el rollback
-del kernel no restaura automáticamente los binarios de userspace anteriores.
-
-**Trabajo.** Diseñar primero el protocolo durable: estados de preparación,
-backup, aplicación, prueba y confirmación; tamaño y hash exactos del backup;
-orden de flush y recuperación tras cada punto de corte. Elegir un mecanismo
-explícito para conservar la generación anterior del rootfs y su compatibilidad
-con el kernel, o limitar el alcance admitido hasta tenerlo. Si requiere otro slot
-ESP, incluir detección y migración de imágenes 0.2.x; no asumir que existe espacio.
-
-Validar el manifiesto antes de escribir: hashes completos, rutas relativas
-normalizadas sin `..`, duplicados, límites de tamaños y sumas comprobadas contra
-`pack_size`. `Manifest::parse` admite actualmente campos numéricos y rutas sin
-esas comprobaciones globales. Evitar anunciar soporte de ficheros arbitrariamente
-grandes mientras `apply_span` los descarga completos a memoria.
-
-**Aceptación.** Banco host con inyección de fallos tras cada operación persistente
-y pruebas OVMF de reinicio. Recuperar una pareja compatible de kernel/rootfs;
-rechazar backup corrupto; restaurar exactamente un kernel que termine en ceros o
-sea más corto que el nuevo. Un manifiesto inválido se rechaza antes de mutar el
-sistema. Publicar la matriz de puntos de corte probados y los límites que resten.
-Depende de A2 y del arnés A1; estimar de nuevo tras decidir el formato persistente.
-
-## A7. Cerrar y recoger los hilos antes de liberar su estado
-
-**Evidencia.** [kernel/src/task/mod.rs](kernel/src/task/mod.rs), `thread_spawn`,
-crea entradas que comparten `AddrSpace`; `exit_current` deja hijos vivos huérfanos.
-Eso es útil para procesos independientes como demonios, pero exige distinguirlos
-de los hilos que dependen del estado del creador.
-
-[user/soso-llm/src/staging.rs](user/soso-llm/src/staging.rs) tiene `shutdown`,
-pero el camino revisado no lo activa al terminar. `disable_worker` cambia flags
-sin recoger un worker que ya se hubiera creado. `ThreadPool` sí tiene `Drop`,
-pero sus esperas tienen topes; hay que verificar que no se reutiliza el estado
-global mientras queden workers. [ask.rs](user/soso-llm/src/ask.rs) mantiene el
-staging asíncrono desactivado por un bloqueo SMP documentado.
-
-**Trabajo.** Reproducir terminación normal, cambio de modelo y muerte por señal
-con workers activos. Añadir cierre explícito, despertar y recogida verificable
-del staging; garantizar la vida del estado compartido y de `SOURCE_PTR` hasta
-esa recogida. Definir qué ocurre si un worker falla. Diseñar por separado la
-pertenencia de los hilos en el kernel si es necesaria: no matar indiscriminadamente
-todos los hijos, pues rompería el arranque independiente de `askd`/`vozd`.
-
-**Aceptación.** Repetir al menos veinte ciclos de carga/generación/cambio/salida,
-con 2 y 8 vCPU y presión de memoria; estabilizar número de tareas y memoria tras
-el calentamiento. Interrumpir generación y reconectar sin bloqueo. Conservar
-staging síncrono en `askd` hasta reproducir y resolver el bloqueo con un test;
-no activar la optimización solo porque compile.
-
-## A8. Validar soporte y rendimiento por equipo
-
-**Evidencia.** Las skills registran G1–G5 funcionales en GB205, pero señalan
-validaciones pendientes de kernels/VRAM posteriores y de la cadena Ampere GA107.
-WiFi distingue AX200 gen2 y AX211 gen3. Los cambios locales actuales afectan
-precisamente al arranque gen2 y a FWSEC/falcon/GSP. El parser host de firmware no
-demuestra que haya ALIVE, asociación, DHCP o tráfico en esos dispositivos.
-
-**Trabajo.** Crear una matriz versionada: equipo, PCI ID, firmware y hash,
-commit más identificación de cambios locales, perfil de drivers, resultado,
-fecha y log. Secuencia WiFi: ALIVE real → scan → asociación/WPA2 → DHCP → SSH →
-reconexión. Secuencia GPU: GSP/RPC → pool VRAM → CE/readback → resultado numérico
-CPU/GPU → carga real → apagado limpio. Registrar como pendiente cada etapa no
-ejecutada; limitar los reintentos de firmware y conservar un arranque útil por
-CPU/Ethernet cuando falle un componente opcional.
-
-**Aceptación.** Tres arranques consecutivos por equipo probado y una sesión
-sostenida con consola, almacenamiento y red. GPU: apagado con liberación de
-objetos y DMA, además del cómputo correcto. Las pruebas VFIO quedan para una
-sesión de hardware preparada; el análisis de este documento no las ha ejecutado.
-
-Para rendimiento, usar primero modelos sintéticos existentes y un modelo real
-pequeño ya disponible, con prompt/seed/contexto y número de tokens fijos. Guardar
-mediana de tres ejecuciones, tiempo hasta primer token, decode, E/S, memoria y
-contadores de uso real de GPU; separar frío/caliente y CPU/GPU. Usar reloj host o
-contadores TSC para E/S, porque el uptime basado en ticks puede subcontar durante
-polling. Solo entonces elegir una optimización. No fijar un objetivo de tok/s
-para modelos de 70B sin una medida del equipo objetivo.
-
-## A9. Reducir instrucciones contradictorias
-
-**Evidencia.** [README.md](README.md) mezcla instrucciones `sudo cargo` con el
-procedimiento de la skill que conserva el entorno de Rust; `board.txt` contiene
-rutas de disco concretas, notas de sesiones y texto mal codificado. Las skills
-incluyen conclusiones históricas —por ejemplo, aceptar dos fallos conocidos en
-la suite— que deberán cambiar al corregir el arnés. El plan de modelos grandes
-conserva como diagnóstico inicial limitaciones que ya se resolvieron.
-
-**Trabajo.** Mantener una entrada breve de estado actual y una guía operativa en
-español. Archivar notas de sesiones como histórico; sustituir ejemplos de disco
-por parámetros que el operador identifique. Explicar límites de soporte por chip
-y de recuperación OTA. Editar skills en `.claude/skills`, compartidas por los
-enlaces de Codex y Cursor, y actualizar `MANUAL-USUARIO.md` con cada cambio visible.
-No reescribir todas las notas históricas ni duplicar el manual en cada skill.
-
-**Aceptación.** Un recorrido documentado de compilar → QEMU → diagnóstico → live
-usa comandos coherentes con `xtask`. La versión y el estado de soporte se derivan
-de fuentes identificadas. A1 elimina la recomendación de considerar «limpia» una
-suite con fallos, cuando exista evidencia de su corrección.
-
-## Secuencia de ejecución propuesta
-
-| Periodo | Resultado esperado |
-|---|---|
-| Semana 1 | A1 y A2 cerrados; A4; iniciar A3. Las pruebas vuelven a aportar una señal interpretable y OTA deja de ocultar fallos |
-| Semana 2 | A3 y A5; manual/skills actualizados; diseño y estimación revisada de A6 |
-| Semana 3 | A6 como prioridad para equipos instalados, o A7 si prima inferencia; primeras pruebas A8 |
-| Semana 4 | Completar la entrega seleccionada, validar en hardware disponible y dejar la siguiente preparada con pruebas de reproducción |
-
-Antes de empezar cada entrega, registrar el estado de los cambios locales que
-afecten a su dominio. No atribuir un fallo a esos cambios sin comparar evidencia.
-Cada entrega termina con pruebas apropiadas y documentación; las ejecuciones
-repetidas se reservan para carreras, recuperación o hardware que lo requieran.
-
-## Trabajo que aplazaría
-
-- Nuevas familias de modelos, kernels GPU adicionales y más offload sin una base
-  de corrección y medidas comparables del camino actual.
-- Ampliación general a más GPUs/NIC antes de cerrar la matriz GB205/GA107 y
-  AX200/AX211 disponible.
-- Refactorización masiva de `task/mod.rs` o `xtask/src/main.rs`: extraer solo las
-  piezas necesarias para propiedad de recursos, estados y pruebas de este plan.
-- Multiusuario, permisos Unix, IPv6, fork, SFTP o snapshots públicos de sosofs:
-  no forman parte del alcance inmediato declarado por el proyecto.
-
-## Condición de cierre del ciclo
-
-Una candidata a release debe tener A1–A5 verificadas, limitaciones de OTA
-publicadas y resultados de los escenarios QEMU relevantes archivados. Si se
-presenta como recuperable ante cortes, A6 también debe estar cerrada. Solo se
-declara soporte probado para las combinaciones de hardware con evidencia A8.
-Los pendientes quedan identificados por escenario y prueba, no por un «funciona»
-genérico ni por la mera presencia del código.
+No se ejecutaron `cargo xtask check`, suites QEMU/USB/instalación/OTA, VFIO ni
+pruebas físicas en esta revisión. No se modificó código de implementación ni
+los cambios locales preexistentes para preparar el plan.

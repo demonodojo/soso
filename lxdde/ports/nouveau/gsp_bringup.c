@@ -370,7 +370,7 @@ static int run_ampere_booter(void)
     wrap.path = blob->path;
     wrap.data = dma.va;
     wrap.len = dma.size;
-    wrap.dma_handle = (unsigned)dma.phys;
+    wrap.dma_handle = dma.phys;
     wrap.dma_cpu = dma.va;
     wrap.valid = 1;
 

@@ -17,7 +17,7 @@ struct gsp_dma_buf {
 
 struct falcon_lx_raw {
     const unsigned char *img;
-    unsigned dma_handle;
+    uint64_t dma_handle;
     unsigned imem_src;
     unsigned imem_dst;
     unsigned imem_len;
@@ -124,6 +124,10 @@ int falcon_lx_raw_boot(unsigned falcon_base, const struct falcon_lx_raw *raw)
     (void)falcon_base;
     (void)raw;
     return 0;
+}
+
+void gsp_mc_init_ampere(void)
+{
 }
 
 #define LX_FLCN_GSP_BASE 0x00110000u

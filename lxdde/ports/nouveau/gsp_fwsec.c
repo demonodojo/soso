@@ -220,13 +220,14 @@ static unsigned popcount16(uint16_t v)
     return n;
 }
 
-static unsigned fuse_leading_bit(uint16_t data)
+static unsigned fuse_reg_version(uint16_t data)
 {
     unsigned i;
+
+    /* ga100_flcn_fw_signature / nova-core: fls (1-based). */
     for (i = 16u; i > 0u; i--) {
-        if (data & (1u << (i - 1u))) {
-            return i - 1u;
-        }
+        if (data & (1u << (i - 1u)))
+            return i;
     }
     return 0;
 }
@@ -700,14 +701,19 @@ static int patch_fwsec_signature(unsigned char *ucode, unsigned ulen,
     }
 
     fuse_data = read_fuse_ucode_version(info->engine_id_mask, info->ucode_id);
-    fuse_ver = fuse_leading_bit(fuse_data);
+    fuse_ver = fuse_reg_version(fuse_data);
+    if (fuse_ver == 0u || fuse_ver >= 16u) {
+        lx_printk("nouveau-lx: FWSEC fuse inválido data=0x%x\n", fuse_data);
+        return -1;
+    }
     mask = (uint16_t)(1u << fuse_ver);
 
     lx_printk("nouveau-lx: FWSEC fuse data=0x%x ver=%u sig_versions=0x%x\n",
               fuse_data, fuse_ver, info->signature_versions);
 
     if (!(info->signature_versions & mask)) {
-        lx_printk("nouveau-lx: FWSEC sin firma para fuse ver %u\n", fuse_ver);
+        lx_printk("nouveau-lx: FWSEC sin firma para fuse ver %u (mask=0x%x)\n",
+                  fuse_ver, mask);
         return -1;
     }
 
@@ -876,23 +882,16 @@ static void gsp_fwsec_prepare_hw(void)
     gsp_mc_init_ampere();
     pmc = gsp_mmio_rd32(NV_PMC_ENABLE);
     lx_printk("nouveau-lx: FWSEC prepare PMC enable=0x%08x\n", pmc);
-    gsp_mc_engine_reset(GSP_TOP_TYPE_GSP, 0);
 }
 
 static void gsp_fwsec_wait_engine_idle(unsigned falcon_base, unsigned budget_ms)
 {
-    unsigned t;
-    uint32_t eng;
+    /* 0x100 es CPUCTL: bit 4 SET = HALTED (el falcon ya paró en raw_boot). */
+    uint32_t eng = gsp_mmio_rd32(falcon_base + LX_FLCN_ENG_IDLE);
+    uint32_t riscv = gsp_mmio_rd32(falcon_base + 0x1000u + 0x388u);
 
-    for (t = 0; t < budget_ms; t++) {
-        eng = gsp_mmio_rd32(falcon_base + LX_FLCN_ENG_IDLE);
-        if (!(eng & 0x10u)) {
-            break;
-        }
-        lx_mdelay(1);
-    }
-    eng = gsp_mmio_rd32(falcon_base + LX_FLCN_ENG_IDLE);
-    lx_printk("nouveau-lx: FWSEC falcon eng=0x%08x\n", eng);
+    (void)budget_ms;
+    lx_printk("nouveau-lx: FWSEC falcon eng=0x%08x riscv=0x%08x\n", eng, riscv);
 }
 
 int gsp_fwsec_probe(uint64_t frts_addr, uint64_t frts_size)
@@ -997,7 +996,7 @@ int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
 
     memset(&raw, 0, sizeof(raw));
     raw.img = ucode;
-    raw.dma_handle = (unsigned)dma.phys;
+    raw.dma_handle = dma.phys;
     raw.imem_src = info.imem_src;
     raw.imem_dst = info.imem_phys_base;
     raw.imem_len = info.imem_load_size;

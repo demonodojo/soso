@@ -16,21 +16,29 @@ static void iwl_write32(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t val)
     iwl->mmio[off / 4] = val;
 }
 
+static void iwl_write8(struct iwl_ax211_priv *iwl, uint32_t off, uint8_t val)
+{
+    volatile uint8_t *p = (volatile uint8_t *)&iwl->mmio[off / 4];
+
+    p[off & 3u] = val;
+}
+
 static void iwl_write64(struct iwl_ax211_priv *iwl, uint32_t off, uint64_t val)
 {
     iwl_write32(iwl, off, (uint32_t)(val & 0xffffffffu));
     iwl_write32(iwl, off + 4, (uint32_t)(val >> 32));
 }
 
-static void iwl_write_prph(struct iwl_ax211_priv *iwl, uint32_t addr, uint32_t val)
+static void iwl_write_prph_no_grab(struct iwl_ax211_priv *iwl, uint32_t addr, uint32_t val)
 {
     iwl_write32(iwl, HBUS_TARG_PRPH_WADDR, (addr & 0x000fffffu) | (3u << 24));
     iwl_write32(iwl, HBUS_TARG_PRPH_WDATA, val);
 }
 
-static void iwl_set_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask)
+static uint32_t iwl_read_prph_no_grab(struct iwl_ax211_priv *iwl, uint32_t addr)
 {
-    iwl_write32(iwl, off, iwl_read32(iwl, off) | mask);
+    iwl_write32(iwl, HBUS_TARG_PRPH_RADDR, (addr & 0x000fffffu) | (3u << 24));
+    return iwl_read32(iwl, HBUS_TARG_PRPH_RDAT);
 }
 
 static int iwl_poll_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask,
@@ -42,6 +50,56 @@ static int iwl_poll_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask,
         lx_mdelay(1);
     }
     return -1;
+}
+
+static void iwl_set_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask)
+{
+    iwl_write32(iwl, off, iwl_read32(iwl, off) | mask);
+}
+
+static void iwl_clear_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask)
+{
+    iwl_write32(iwl, off, iwl_read32(iwl, off) & ~mask);
+}
+
+static int iwl_grab_nic_access(struct iwl_ax211_priv *iwl)
+{
+    uint32_t mask = CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY |
+                    CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP;
+    uint32_t poll = CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY;
+
+    iwl_set_bit(iwl, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+    lx_udelay(2);
+    if (iwl_poll_bit(iwl, CSR_GP_CNTRL, mask, poll, 15) != 0) {
+        lx_printk("iwl_trans: grab_nic_access timeout GP=0x%08x\n",
+                  iwl_read32(iwl, CSR_GP_CNTRL));
+        return -1;
+    }
+    return 0;
+}
+
+static void iwl_release_nic_access(struct iwl_ax211_priv *iwl)
+{
+    iwl_clear_bit(iwl, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+}
+
+static void iwl_write_prph(struct iwl_ax211_priv *iwl, uint32_t addr, uint32_t val)
+{
+    if (iwl_grab_nic_access(iwl) != 0)
+        return;
+    iwl_write_prph_no_grab(iwl, addr, val);
+    iwl_release_nic_access(iwl);
+}
+
+static uint32_t iwl_read_prph(struct iwl_ax211_priv *iwl, uint32_t addr)
+{
+    uint32_t v;
+
+    if (iwl_grab_nic_access(iwl) != 0)
+        return IWL_PRPH_HW_TIMEOUT;
+    v = iwl_read_prph_no_grab(iwl, addr);
+    iwl_release_nic_access(iwl);
+    return v;
 }
 
 static int iwl_prepare_card_hw(struct iwl_ax211_priv *iwl)
@@ -93,37 +151,63 @@ static int iwl_wait_mac_ready(struct iwl_ax211_priv *iwl, int ms)
     return -1;
 }
 
-static void iwl_reset(struct iwl_ax211_priv *iwl)
+static void iwl_sw_reset(struct iwl_ax211_priv *iwl)
 {
-    iwl_write32(iwl, CSR_RESET, CSR_RESET_REG_FLAG_SW_RESET);
-    lx_mdelay(10);
-    iwl_write32(iwl, CSR_RESET, 0);
-    lx_mdelay(10);
+    /* iwl_trans_pcie_sw_reset: pulso SW_RESET, sin escribir 0 después. */
+    iwl_set_bit(iwl, CSR_RESET, CSR_RESET_REG_FLAG_SW_RESET);
+    lx_udelay(5000);
 }
 
-static int iwl_gen2_apm_init(struct iwl_ax211_priv *iwl)
+static int iwl_finish_nic_init(struct iwl_ax211_priv *iwl)
 {
-    iwl_reset(iwl);
-
-    iwl_set_bit(iwl, CSR_GIO_CHICKEN_BITS, CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX);
-    iwl_set_bit(iwl, CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL);
-    iwl_set_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A);
-    iwl_set_bit(iwl, CSR_GIO_REG, CSR_GIO_REG_VAL_L0S_DISABLED);
-
-    iwl_write32(iwl, CSR_GP_CNTRL,
-                CSR_GP_CNTRL_REG_FLAG_INIT_DONE | CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
-    if (iwl_wait_mac_ready(iwl, 2000) != 0) {
-        lx_printk("iwl_trans: MAC no listo\n");
+    /* iwl_finish_nic_init: set_bit INIT_DONE, poll MAC_CLOCK_READY 25 s. */
+    iwl_set_bit(iwl, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
+    if (iwl_poll_bit(iwl, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY,
+                     CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY, 25000) != 0) {
+        lx_printk("iwl_trans: MAC no despertó (finish_nic_init GP=0x%08x)\n",
+                  iwl_read32(iwl, CSR_GP_CNTRL));
         return -1;
     }
     return 0;
 }
 
-static void iwl_finish_nic_init(struct iwl_ax211_priv *iwl)
+static int iwl_gen2_apm_init(struct iwl_ax211_priv *iwl)
 {
-    /* iwl_finish_nic_init: reloj DMA APMG antes de arrancar firmware. */
-    iwl_write_prph(iwl, APMG_CLK_EN_REG, APMG_CLK_VAL_DMA_CLK_RQT);
-    lx_udelay(20);
+    /* iwl_pcie_gen2_apm_init + iwl_finish_nic_init (22000: sin APMG_CLK). */
+    iwl_set_bit(iwl, CSR_GIO_CHICKEN_BITS, CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX);
+    iwl_set_bit(iwl, CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL);
+    iwl_set_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A);
+    iwl_set_bit(iwl, CSR_GIO_REG, CSR_GIO_REG_VAL_L0S_DISABLED);
+    return iwl_finish_nic_init(iwl);
+}
+
+static int iwl_clear_persistence_bit(struct iwl_ax211_priv *iwl)
+{
+    uint32_t hpm;
+    uint32_t wprot;
+
+    /* Linux `iwl_clear_persistence_bit`: PRPH sin grab. El MAC aún no tiene
+     * reloj (INIT_DONE va en APM, después); grab_nic_access espera
+     * MAC_CLOCK_READY y abortaba todo el start (GP=0x08040008). */
+    hpm = iwl_read_prph_no_grab(iwl, HPM_DEBUG);
+    if (hpm == IWL_PRPH_HW_TIMEOUT || hpm == 0xa5a5a5a2u) {
+        return 0;
+    }
+    if (!(hpm & PERSISTENCE_BIT)) {
+        return 0;
+    }
+    wprot = iwl_read_prph_no_grab(iwl, PREG_PRPH_WPROT_22000);
+    if (wprot & PREG_WFPM_ACCESS) {
+        lx_printk("iwl_trans: persistence bit bloqueado (WPROT=0x%x)\n", wprot);
+        return 0;
+    }
+    iwl_write_prph_no_grab(iwl, HPM_DEBUG, hpm & ~PERSISTENCE_BIT);
+    return 0;
+}
+
+static void iwl_reset(struct iwl_ax211_priv *iwl)
+{
+    iwl_sw_reset(iwl);
 }
 
 static int iwl_pcie_check_hw_rf_kill(struct iwl_ax211_priv *iwl)
@@ -153,9 +237,10 @@ static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
 {
     uint64_t *bd;
     unsigned i;
+    unsigned used_sz = iwl->gen3 ? (IWL_GEN2_RX_N * 2u) : (IWL_GEN2_RX_N * 4u);
 
     iwl->rx_bd_cpu = lx_dma_alloc_coherent(0, IWL_GEN2_RX_N * 8, &iwl->rx_bd_dma, GFP_KERNEL);
-    iwl->used_bd_cpu = lx_dma_alloc_coherent(0, IWL_GEN2_RX_N * 2, &iwl->used_bd_dma, GFP_KERNEL);
+    iwl->used_bd_cpu = lx_dma_alloc_coherent(0, used_sz, &iwl->used_bd_dma, GFP_KERNEL);
     iwl->rb_stts = (volatile uint16_t *)lx_dma_alloc_coherent(0, 16, &iwl->rb_stts_dma, GFP_KERNEL);
     iwl->rx_page_cpu = lx_dma_alloc_coherent(0, IWL_GEN2_RX_N * IWL_GEN2_RX_SZ,
                                              &iwl->rx_page_dma, GFP_KERNEL);
@@ -166,14 +251,21 @@ static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
         !iwl->rx_page_cpu || !iwl->mtr_cpu || !iwl->mcr_cpu)
         return -1;
     memset(iwl->rx_bd_cpu, 0, IWL_GEN2_RX_N * 8);
-    memset(iwl->used_bd_cpu, 0, IWL_GEN2_RX_N * 2);
+    memset(iwl->used_bd_cpu, 0, used_sz);
     memset((void *)iwl->rb_stts, 0, 16);
     memset(iwl->mtr_cpu, 0, IWL_CMD_QUEUE_SIZE * IWL_TFH_TFD_SIZE);
     memset(iwl->mcr_cpu, 0, IWL_CMD_QUEUE_SIZE * 256);
     bd = (uint64_t *)iwl->rx_bd_cpu;
-    for (i = 0; i < IWL_GEN2_RX_N - 1; i++)
-        bd[i] = iwl->rx_page_dma + (uint64_t)i * IWL_GEN2_RX_SZ;
-    iwl->rx_write = IWL_GEN2_RX_N - 1;
+    if (iwl->gen3) {
+        for (i = 0; i < IWL_GEN2_RX_N - 1; i++)
+            bd[i] = iwl->rx_page_dma + (uint64_t)i * IWL_GEN2_RX_SZ;
+        iwl->rx_write = IWL_GEN2_RX_N - 1;
+    } else {
+        /* iwl_pcie_restock_bd (22000): RBD = page_dma | vid, vid = i + 1. */
+        for (i = 0; i < IWL_GEN2_RX_N; i++)
+            bd[i] = (iwl->rx_page_dma + (uint64_t)i * IWL_GEN2_RX_SZ) | (uint64_t)(i + 1u);
+        iwl->rx_write = 0;
+    }
     iwl->rx_read = 0;
     iwl->cmd_write = 0;
     return 0;
@@ -226,23 +318,44 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf)
 
 static void drain_rx_gen2(struct iwl_ax211_priv *iwl)
 {
-    uint16_t *used;
     uint64_t *bd;
     uint16_t hw;
     int n = 0;
+
     if (!iwl->rb_stts || !iwl->used_bd_cpu || !iwl->rx_page_cpu || !iwl->rx_bd_cpu)
         return;
-    used = (uint16_t *)iwl->used_bd_cpu;
     bd = (uint64_t *)iwl->rx_bd_cpu;
     hw = iwl->rb_stts[0] & 0x0fff;
     while (iwl->rx_read != hw && n++ < IWL_GEN2_RX_N) {
-        uint16_t idx = used[iwl->rx_read % IWL_GEN2_RX_N] & 0x0fff;
-        if (idx < IWL_GEN2_RX_N) {
-            handle_gen2_rx(iwl, (const uint8_t *)iwl->rx_page_cpu + (size_t)idx * IWL_GEN2_RX_SZ);
+        if (iwl->gen3) {
+            uint16_t *used = (uint16_t *)iwl->used_bd_cpu;
+            uint16_t idx = used[iwl->rx_read % IWL_GEN2_RX_N] & 0x0fff;
+
+            if (idx < IWL_GEN2_RX_N) {
+                handle_gen2_rx(iwl,
+                               (const uint8_t *)iwl->rx_page_cpu +
+                                   (size_t)idx * IWL_GEN2_RX_SZ);
+                bd[iwl->rx_write % IWL_GEN2_RX_N] =
+                    iwl->rx_page_dma + (uint64_t)idx * IWL_GEN2_RX_SZ;
+                iwl->rx_write = (uint16_t)((iwl->rx_write + 1) % IWL_GEN2_RX_N);
+            }
+        } else {
+            uint32_t *used32 = (uint32_t *)iwl->used_bd_cpu;
+            uint32_t cd = used32[iwl->rx_read % IWL_GEN2_RX_N];
+            uint16_t vid = (uint16_t)(cd & 0x0fffu);
+            uint16_t idx;
+
+            if (vid == 0 || vid > IWL_GEN2_RX_N)
+                goto next_slot;
+            idx = (uint16_t)(vid - 1u);
+            handle_gen2_rx(iwl,
+                           (const uint8_t *)iwl->rx_page_cpu +
+                               (size_t)idx * IWL_GEN2_RX_SZ);
             bd[iwl->rx_write % IWL_GEN2_RX_N] =
-                iwl->rx_page_dma + (uint64_t)idx * IWL_GEN2_RX_SZ;
+                (iwl->rx_page_dma + (uint64_t)idx * IWL_GEN2_RX_SZ) | (uint64_t)vid;
             iwl->rx_write = (uint16_t)((iwl->rx_write + 1) % IWL_GEN2_RX_N);
         }
+next_slot:
         iwl->rx_read = (uint16_t)((iwl->rx_read + 1) % IWL_GEN2_RX_N);
         hw = iwl->rb_stts[0] & 0x0fff;
     }
@@ -253,11 +366,27 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
 {
     struct iwl_context_info *ctxt;
 
+    /* iwl_trans_pcie_gen2_start_fw */
     if (iwl_prepare_card_hw(iwl) != 0)
         return -1;
+    iwl_sw_reset(iwl);
+    if (iwl_prepare_card_hw(iwl) != 0)
+        return -1;
+    if (iwl_clear_persistence_bit(iwl) != 0)
+        return -1;
+
+    iwl_write32(iwl, CSR_INT, 0xffffffffu);
+    if (iwl_pcie_check_hw_rf_kill(iwl) != 0)
+        return -1;
+
+    iwl_write32(iwl, CSR_UCODE_DRV_GP1_CLR, CSR_UCODE_SW_BIT_RFKILL);
+    iwl_write32(iwl, CSR_UCODE_DRV_GP1_CLR, CSR_UCODE_DRV_GP1_BIT_CMD_BLOCKED);
+    iwl_write32(iwl, CSR_INT, 0xffffffffu);
+
     if (iwl_gen2_apm_init(iwl) != 0)
         return -1;
-    iwl_finish_nic_init(iwl);
+    lx_printk("iwl_trans: APM ok GP=0x%08x\n", iwl_read32(iwl, CSR_GP_CNTRL));
+    iwl_write8(iwl, CSR_INT_COALESCING, IWL_HOST_INT_TIMEOUT_DEF);
     if (iwl_pcie_check_hw_rf_kill(iwl) != 0)
         return -1;
     if (iwl_alloc_queues(iwl) != 0)
@@ -294,6 +423,8 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
 
     iwl_pcie_set_ltr(iwl);
     iwl_write_prph(iwl, UREG_CPU_INIT_RUN, 1);
+    lx_printk("iwlwifi: UREG_CPU_INIT_RUN=0x%x\n",
+              iwl_read_prph(iwl, UREG_CPU_INIT_RUN));
 
     for (int t = 0; t < 500; t++) {
         uint32_t inta = iwl_read32(iwl, CSR_INT);
@@ -302,8 +433,8 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
             iwl_write32(iwl, RFH_Q0_FRBDCB_WIDX_TRG,
                         (uint32_t)(iwl->rx_write & ~7u));
         }
-        if (inta & (CSR_INT_BIT_FH_RX | CSR_INT_BIT_ALIVE))
-            drain_rx_gen2(iwl);
+        /* ALIVE vive en el anillo RX; drenar aunque CSR_INT siga a 0. */
+        drain_rx_gen2(iwl);
         if (iwl->alive)
             return 0;
         lx_mdelay(10);

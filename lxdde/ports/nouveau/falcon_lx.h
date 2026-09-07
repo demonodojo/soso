@@ -17,7 +17,7 @@ int falcon_lx_hsfw_boot_mbox(unsigned falcon_base, const struct acr_fw_blob *blo
 
 struct falcon_lx_raw {
     const unsigned char *img;
-    unsigned dma_handle;
+    uint64_t dma_handle;
     unsigned imem_src;
     unsigned imem_dst;
     unsigned imem_len;
