@@ -8,7 +8,7 @@ use crate::driver::DevPath;
 use crate::driver::XhciController;
 use crate::registers::{PORTSC_CCS, PORTSC_SPEED_MASK, PORTSC_SPEED_SHIFT};
 use crate::ring::{
-    completion_name, Trb, TRB_COMPLETION_SHORT_PACKET, TRB_COMPLETION_SUCCESS,
+    completion_name, Trb, TRB_CHAIN, TRB_COMPLETION_SHORT_PACKET, TRB_COMPLETION_SUCCESS,
 };
 
 /// CDB de 10 bytes para READ(10)/WRITE(10).
@@ -24,9 +24,12 @@ fn rw10_cdb(opcode: u8, lba: u32, count: u16) -> [u8; 10] {
     cdb
 }
 
-/// Bytes por transacción BOT. El límite duro es el campo de longitud del
-/// Normal TRB (17 bits); 64 KiB deja margen y es lo que QEMU acepta escribir.
+/// Bytes por transacción BOT en **escritura** (y troceo interno de cada TRB).
+/// El límite duro es el campo de longitud del Normal TRB (17 bits); 64 KiB
+/// deja margen y es lo que QEMU acepta escribir.
 const MAX_XFER: usize = 64 * 1024;
+/// Tope por READ(10) en lectura: varios Normal TRB encadenados en un solo TD.
+const MAX_READ_XFER: usize = 512 * 1024;
 
 const CBW_SIG: u32 = 0x4342_5355;
 const CSW_SIG: u32 = 0x5342_5355;
@@ -289,15 +292,13 @@ impl XhciController {
             return false;
         }
         // Un Normal TRB lleva la longitud en 17 bits: 0x20000 se desborda a
-        // cero, el dispositivo manda datos que nadie recoge y el endpoint se
-        // queda en Stall («CSW inválido sig=0»). Se trocea igual que la
-        // escritura, y así 128 KiB —el tamaño de petición de sosomfs— dejan de
-        // ser una bomba de relojería en el camino live.
-        if buf.len() > MAX_XFER {
+        // cero. Por encima de 64 KiB encadenamos varios TRB en un solo TD
+        // (solo lectura); la escritura sigue troceando a READ/WRITE separados.
+        if buf.len() > MAX_READ_XFER {
             let mut off = 0usize;
             let mut cur_lba = lba;
             while off < buf.len() {
-                let chunk = (buf.len() - off).min(MAX_XFER);
+                let chunk = (buf.len() - off).min(MAX_READ_XFER);
                 if !self.read_sectors10(ms, cur_lba, &mut buf[off..off + chunk]) {
                     return false;
                 }
@@ -512,7 +513,7 @@ impl XhciController {
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), va, data.len());
         }
-        self.bulk_xfer(slot_id, dci, phys, data.len() as u32, false)
+        self.bulk_xfer_single(slot_id, dci, phys, data.len() as u32)
             .is_some()
     }
 
@@ -521,15 +522,49 @@ impl XhciController {
     /// de distinguirlo de una lectura buena.
     pub(crate) fn bulk_in_len(&mut self, slot_id: u8, dci: u8, buf: &mut [u8]) -> Option<usize> {
         let (va, phys) = self.bounce_buffer(buf.len());
-        let n = self.bulk_xfer(slot_id, dci, phys, buf.len() as u32, true)? as usize;
+        let n = self.bulk_xfer_in(slot_id, dci, phys, buf.len() as u32)? as usize;
         let n = n.min(buf.len());
         let got = unsafe { read_dma_buffer(va, buf.len()) };
         buf[..n].copy_from_slice(&got[..n]);
         Some(n)
     }
 
-    /// Devuelve los bytes transferidos (`len` menos el residual del evento).
-    fn bulk_xfer(&mut self, slot_id: u8, dci: u8, phys: u64, len: u32, _dir_in: bool) -> Option<u32> {
+    /// Bulk IN: un TRB si `len ≤ 64 KiB`; si no, TD encadenado hasta 512 KiB.
+    fn bulk_xfer_in(&mut self, slot_id: u8, dci: u8, phys: u64, len: u32) -> Option<u32> {
+        if len <= MAX_XFER as u32 {
+            return self.bulk_xfer_single(slot_id, dci, phys, len);
+        }
+        let ring = self.transfer_ring(slot_id, dci)?;
+        let mut remaining = len;
+        let mut offset = 0u64;
+        let mut last_trb_phys = 0u64;
+        while remaining > 0 {
+            let chunk = remaining.min(MAX_XFER as u32);
+            remaining -= chunk;
+            let chain = remaining > 0;
+            let mut trb = Trb::normal(phys + offset, chunk, !chain, false);
+            if chain {
+                trb.control |= TRB_CHAIN;
+                trb.control &= !crate::ring::TRB_IOC;
+            }
+            last_trb_phys = ring.enqueue(trb);
+            offset += chunk as u64;
+        }
+        self.ring_ep(slot_id, dci);
+        let evt = self.wait_transfer_on(slot_id, dci, Some(last_trb_phys))?;
+        let code = evt.completion_code();
+        if code != TRB_COMPLETION_SUCCESS && code != TRB_COMPLETION_SHORT_PACKET {
+            log::warn!(
+                "xhci: bulk IN chain slot={slot_id} dci={dci} len={len}: code={code} ({})",
+                completion_name(code),
+            );
+            return None;
+        }
+        Some(len.saturating_sub(evt.transfer_length()))
+    }
+
+    /// Un solo Normal TRB (lectura o escritura).
+    fn bulk_xfer_single(&mut self, slot_id: u8, dci: u8, phys: u64, len: u32) -> Option<u32> {
         let ring = match self.transfer_ring(slot_id, dci) {
             Some(r) => r,
             None => return None,
@@ -546,7 +581,6 @@ impl XhciController {
             );
             return None;
         }
-        // En un Transfer Event el campo de longitud es el **residual**.
         Some(len.saturating_sub(evt.transfer_length()))
     }
 }

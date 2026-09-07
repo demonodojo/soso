@@ -8,11 +8,10 @@ use sosofs::layout::MAGIC as SOSOFS_MAGIC;
 
 const SECTOR: usize = 512;
 const NVME_SLOTS: usize = 2;
-/// Bytes por transferencia al dispositivo. Clonar el live son ~8 GiB: sector a
-/// sector eso son 16 millones de comandos BOT y el instalador no termina nunca.
-/// 128 KiB es el tope que el camino de lectura USB tiene validado (el de
-/// escritura trocea solo a 64 KiB) y coincide con `sosomfs::MAX_REQ_BLOCKS`.
-const MAX_XFER: usize = 128 * 1024;
+/// Bytes por transferencia al dispositivo. Clonar el live son lecturas USB
+/// largas: 512 KiB por syscall, troceadas en el mass storage con TRBs
+/// encadenados (escritura NVMe sin límite BOT).
+const MAX_XFER: usize = 512 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -64,7 +63,7 @@ pub fn list(out: &mut [DiskInfo]) -> usize {
                 } else {
                     RawId::Nvme1
                 };
-                out[n] = info_nvme(slot);
+                out[n] = info_nvme(slot, boot == Some(id));
                 out[n].flags |= probe_content(id);
                 n += 1;
             }
@@ -89,6 +88,16 @@ fn boot_source() -> Option<RawId> {
     if crate::drivers::virtio_blk::BLK0.get().is_some() && probe_gpt_virtio() {
         return Some(RawId::Virtio0);
     }
+    // Instalación dual-boot: el rootfs live vive en un NVMe dedicado, no en USB
+    // ni virtio (`live_disk::init()` prueba NVMe como tercer backend). Sin esto,
+    // `is_boot()`/`writable()` nunca reconocían el NVMe de arranque como tal, y
+    // `sys_disk_write` dejaba escribir sectores crudos del propio disco en marcha.
+    #[cfg(all(feature = "drv-live-disk", feature = "drv-nvme"))]
+    for slot in 0..NVME_SLOTS {
+        if crate::drivers::nvme::present_slot(slot) && probe_gpt_nvme(slot) {
+            return Some(if slot == 0 { RawId::Nvme0 } else { RawId::Nvme1 });
+        }
+    }
     None
 }
 
@@ -102,6 +111,12 @@ fn probe_gpt_usb() -> bool {
 fn probe_gpt_virtio() -> bool {
     let mut sec = [0u8; SECTOR];
     crate::drivers::virtio_blk::read_sector(1, &mut sec).is_ok() && &sec[0..8] == b"EFI PART"
+}
+
+#[cfg(all(feature = "drv-live-disk", feature = "drv-nvme"))]
+fn probe_gpt_nvme(slot: usize) -> bool {
+    let mut sec = [0u8; SECTOR];
+    nvme_read_512_range(slot, 1, &mut sec).is_ok() && &sec[0..8] == b"EFI PART"
 }
 
 #[cfg(feature = "drv-usb")]
@@ -135,7 +150,7 @@ fn info_virtio0(boot: bool) -> DiskInfo {
 }
 
 #[cfg(feature = "drv-nvme")]
-fn info_nvme(slot: usize) -> DiskInfo {
+fn info_nvme(slot: usize, boot: bool) -> DiskInfo {
     let lba_size = crate::drivers::nvme::lba_size_slot(slot).unwrap_or(512);
     let n = crate::drivers::nvme::capacity_lba_slot(slot).unwrap_or(0);
     let sectors = n * lba_size as u64 / SECTOR as u64;
@@ -151,7 +166,7 @@ fn info_nvme(slot: usize) -> DiskInfo {
         kind: DISK_KIND_NVME,
         slot: slot as u32,
         sectors,
-        flags: 0,
+        flags: if boot { DISK_FLAG_BOOT } else { 0 },
         name,
     }
 }

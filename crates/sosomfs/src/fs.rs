@@ -63,9 +63,13 @@ fn crc32c(data: &[u8]) -> u32 {
     CRC32C.checksum(data)
 }
 
-pub(crate) fn read_super_raw<V: VolumeSet>(vol: &mut V, slot: u64) -> Result<Superblock, ()> {
-    let mut buf = [0u8; BLOCK_SIZE];
-    vol.read_lba(slot, &mut buf).map_err(|_| ())?;
+/// Parsea un superbloque sosomfs desde un bloque de 4 KiB (p. ej. leído del
+/// disco con `disk_read` sobre la partición de modelos).
+pub fn parse_superblock(buf: &[u8]) -> Result<Superblock, ()> {
+    if buf.len() < BLOCK_SIZE {
+        return Err(());
+    }
+    let buf = &buf[..BLOCK_SIZE];
     if buf[..8] != MAGIC {
         return Err(());
     }
@@ -112,6 +116,12 @@ pub(crate) fn read_super_raw<V: VolumeSet>(vol: &mut V, slot: u64) -> Result<Sup
         catalog_blocks,
         volumes,
     })
+}
+
+pub(crate) fn read_super_raw<V: VolumeSet>(vol: &mut V, slot: u64) -> Result<Superblock, ()> {
+    let mut buf = [0u8; BLOCK_SIZE];
+    vol.read_lba(slot, &mut buf).map_err(|_| ())?;
+    parse_superblock(&buf)
 }
 
 pub(crate) fn write_super_raw<D: BlockDevice>(dev: &mut D, slot: u64, sb: &Superblock) -> Result<(), BlockError> {

@@ -35,10 +35,15 @@
 #define TFD_QUEUE_CB_SIZE_32          2
 
 #define CSR_RESET_REG_FLAG_SW_RESET       (1u << 7)
-#define CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ (1u << 2)
 #define CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY (1u << 0)
-#define CSR_GP_CNTRL_REG_FLAG_INIT_DONE   (1u << 30)
+#define CSR_GP_CNTRL_REG_FLAG_INIT_DONE   (1u << 2)
+#define CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ (1u << 3)
 #define CSR_AUTO_FUNC_BOOT_ENA            (1u << 1)
+#define CSR_AUTO_FUNC_INIT                (1u << 7)
+#define IWL_PRPH_INFO_ALLOC               4096u
+#define RX_QUEUE_CB_SIZE_32               5
+#define IWL_PRPH_SCRATCH_MTR_MODE         (1u << 17)
+#define IWL_PRPH_MTR_FORMAT_256B          0xC0000u
 
 #define IWL_TLV_UCODE_MAGIC        0x0a4c5749u
 #define IWL_UCODE_TLV_INST         1
@@ -50,6 +55,8 @@
 #define IWL_UCODE_TLV_SEC_INIT     20
 #define IWL_UCODE_TLV_SEC_WOWLAN   21
 #define IWL_UCODE_TLV_PAGING       32
+#define IWL_UCODE_TLV_IML          52
+#define IWL_UCODE_TLV_HW_TYPE      58
 #define IWL_UCODE_TLV_PNVM_SKU     64
 
 #define IWL_FW_RT_MAX              128

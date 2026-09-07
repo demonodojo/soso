@@ -304,6 +304,25 @@ fn ejecutar_wifi(args: &str) {
         let mut bss = [abi::WifiBss::default(); abi::WIFI_SCAN_MAX];
         let r = sys::wifi_scan(&mut bss);
         if r < 0 {
+            if r == -abi::ENOTSUP {
+                let mut st = abi::WifiStatus::default();
+                if sys::wifi_status(&mut st) >= 0 {
+                    if st.flags & abi::WIFI_FLAG_PRESENT == 0 {
+                        println!("wifi: no hay adaptador");
+                        return;
+                    }
+                    if st.flags & abi::WIFI_FLAG_ALIVE == 0 {
+                        let phase_n = st
+                            .phase
+                            .iter()
+                            .position(|&b| b == 0)
+                            .unwrap_or(st.phase.len());
+                        let phase = core::str::from_utf8(&st.phase[..phase_n]).unwrap_or("?");
+                        println!("wifi: firmware no arrancó (phase={phase})");
+                        return;
+                    }
+                }
+            }
             println!("sosh: wifi scan: {}", errno_str(r));
             return;
         }

@@ -24,6 +24,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-dev"
+version = "0.1.0"
+
+[[package]]
 name = "cc"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -54,6 +58,7 @@ version = "0.1.0"
 dependencies = [
  "gptdisk",
  "libsoso",
+ "sosomfs",
 ]
 
 [[package]]
@@ -497,6 +502,16 @@ name = "soso-web-core"
 version = "0.1.0"
 dependencies = [
  "miniz_oxide",
+]
+
+[[package]]
+name = "sosomfs"
+version = "0.1.0"
+dependencies = [
+ "block-dev",
+ "crc",
+ "sosomodel",
+ "zerocopy",
 ]
 
 [[package]]

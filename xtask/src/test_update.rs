@@ -196,6 +196,11 @@ fn fase_comprobar_version(
     if !salida.contains(MARCA_NUEVA.trim()) {
         return Err(format!("el fichero actualizado no sobrevivió al reinicio: {salida:?}"));
     }
+    // El USB de este test es un `usb-storage` real de QEMU (no virtio): el
+    // disco de arranque debe reconocerse como tal por DISK_KIND_USB.
+    if !salida.contains("arranque: USB live") {
+        return Err(format!("estado no reconoce el medio de arranque USB: {salida:?}"));
+    }
     Ok(())
 }
 

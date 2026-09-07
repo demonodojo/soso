@@ -374,7 +374,10 @@ pub const DISK_KIND_NVME: u32 = 2;
 
 /// Flags de `DiskInfo.flags`.
 pub const DISK_FLAG_READONLY: u32 = 1;
-/// Disco de arranque live (origen de clonación).
+/// El disco desde el que arrancó el sistema (USB live, virtio o NVMe
+/// dual-boot). `soso-install` lo usa como origen de clonación; también marca
+/// qué disco protege `sys_disk_write` (nunca deja escribir el propio disco
+/// de arranque).
 pub const DISK_FLAG_BOOT: u32 = 2;
 /// GPT con magic SOSOFS10 en la partición 2: soso previo, reinstalar es seguro.
 pub const DISK_FLAG_SOSO: u32 = 4;

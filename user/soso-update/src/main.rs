@@ -57,7 +57,28 @@ fn print_usage() {
     println!("  soso-update revertir");
 }
 
+/// De qué disco arrancó el sistema — mismo `sys::disk_list` + `DISK_FLAG_BOOT`
+/// que usa `soso-install` para clasificar discos, aquí sólo para informar.
+fn medio_arranque() -> &'static str {
+    let mut discos = [soso_abi::DiskInfo::default(); 8];
+    let n = sys::disk_list(&mut discos);
+    if n <= 0 {
+        return "desconocido";
+    }
+    discos[..n as usize]
+        .iter()
+        .find(|d| d.flags & soso_abi::DISK_FLAG_BOOT != 0)
+        .map(|d| match d.kind {
+            soso_abi::DISK_KIND_USB => "USB live (pendrive)",
+            soso_abi::DISK_KIND_NVME => "disco instalado",
+            soso_abi::DISK_KIND_VIRTIO => "virtio (prueba QEMU)",
+            _ => "desconocido",
+        })
+        .unwrap_or("desconocido")
+}
+
 fn cmd_estado() -> u8 {
+    println!("arranque: {}", medio_arranque());
     let rel = read_release();
     if let Some(r) = &rel {
         println!("rootfs: {} ({})", r.version, r.build);
@@ -441,7 +462,15 @@ fn apply_kernel(opts: &Opts, man: &Manifest) -> Result<(), &'static str> {
         let r = sys::upd_write(UPD_WHICH_KERNEL, off, &pad);
         if r < 0 {
             if r == -libsoso::abi::ENOTSUP {
-                return Err("reflashea/reinstala el live para habilitar actualización de kernel");
+                return Err(match medio_arranque() {
+                    "USB live (pendrive)" => {
+                        "sin hueco de kernel en la ESP: reflashea este pendrive (cargo xtask flash-usb-live) con una imagen ≥0.2.0"
+                    }
+                    "disco instalado" => {
+                        "sin hueco de kernel en la ESP: arranca el live y ejecuta soso-install de nuevo para renovar la instalación"
+                    }
+                    _ => "reflashea/reinstala el live para habilitar actualización de kernel",
+                });
             }
             return Err("upd_write falló");
         }

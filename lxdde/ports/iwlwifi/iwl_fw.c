@@ -95,6 +95,16 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
             if (append_rt(&iwl->fw, pos, length))
                 return -1;
             break;
+        case IWL_UCODE_TLV_IML: {
+            uint8_t *buf = lx_kmalloc(length, GFP_KERNEL);
+            if (!buf)
+                return -1;
+            memcpy(buf, pos, length);
+            iwl->iml = buf;
+            iwl->iml_len = length;
+            lx_printk("iwl_fw: IML %u bytes\n", length);
+            break;
+        }
         default:
             break;
         }
@@ -116,27 +126,46 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
 
 int iwl_fw_parse_pnvm(struct iwl_ax211_priv *iwl, const uint8_t *pnvm, unsigned long pnvm_len)
 {
+    const uint8_t *pos;
+    const uint8_t *end;
+    int collecting = 0;
+    uint8_t *acc = 0;
+    unsigned long acc_len = 0;
+
     if (!pnvm || pnvm_len < 8)
         return 0;
-    const uint8_t *pos = pnvm;
-    const uint8_t *end = pnvm + pnvm_len;
+    pos = pnvm;
+    end = pnvm + pnvm_len;
     while (pos + 8 <= end) {
         uint32_t type = le32(pos);
         uint32_t length = le32(pos + 4);
         pos += 8;
         if (pos + length > end)
             break;
-        if (type == IWL_UCODE_TLV_PNVM_SKU || type == 64) {
-            uint8_t *buf = lx_kmalloc(length, GFP_KERNEL);
-            if (!buf)
+        if (type == IWL_UCODE_TLV_PNVM_SKU) {
+            if (collecting && acc_len)
+                break;
+            collecting = 1;
+        } else if (collecting && type == IWL_UCODE_TLV_SEC_RT && length > 4) {
+            const uint8_t *payload = pos + 4;
+            uint32_t plen = length - 4;
+            uint8_t *nbuf = lx_kmalloc(acc_len + plen, GFP_KERNEL);
+            if (!nbuf)
                 return -1;
-            memcpy(buf, pos, length);
-            iwl->pnvm_data = buf;
-            iwl->pnvm_len = length;
-            lx_printk("iwl_fw: pnvm %u bytes\n", length);
-            break;
+            if (acc && acc_len)
+                memcpy(nbuf, acc, acc_len);
+            memcpy(nbuf + acc_len, payload, plen);
+            if (acc)
+                lx_kfree(acc);
+            acc = nbuf;
+            acc_len += plen;
         }
         pos += (length + 3) & ~3u;
+    }
+    if (acc && acc_len) {
+        iwl->pnvm_data = acc;
+        iwl->pnvm_len = acc_len;
+        lx_printk("iwl_fw: pnvm %lu bytes\n", acc_len);
     }
     return 0;
 }

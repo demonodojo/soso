@@ -32,13 +32,17 @@ use libsoso::abi::{
 };
 use libsoso::linea::Lector;
 use libsoso::{print, println, sys};
+use sosomfs::{parse_superblock, next_free_lba, Catalog, BLOCK_SIZE as MFS_BLOCK};
 
 libsoso::entry!(main);
 
 /// Coincide con `raw_disk::MAX_XFER`: cada syscall es una transferencia al
 /// dispositivo, ni troceada de más ni partida por el kernel.
-const CHUNK: usize = 128 * 1024;
+const CHUNK: usize = 512 * 1024;
 const SECTOR: usize = 512;
+const SECTORS_PER_MFS_BLOCK: u64 = MFS_BLOCK as u64 / SECTOR as u64;
+const PROGRESS_INTERVAL_MS: u64 = 2000;
+const PROGRESS_STEP_MIB: u64 = 64;
 
 fn main(args: &str) -> u8 {
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -515,14 +519,15 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         }
     }
 
-    let bytes = match read_live_bytes() {
+    let live_bytes = match read_live_bytes() {
         Some(b) => b,
         None => {
             println!("soso-install: falta /etc/soso-live.bytes");
             return 1;
         }
     };
-    let sectors = bytes.div_ceil(512);
+    let copy_bytes = bytes_a_copiar(src.id, live_bytes);
+    let sectors = copy_bytes.div_ceil(512);
     if dst.sectors < sectors {
         println!(
             "soso-install: destino pequeño ({} sectores, hacen falta {})",
@@ -537,8 +542,15 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         src.id,
         disk_name(dst),
         dst.id,
-        bytes / (1024 * 1024)
+        copy_bytes / (1024 * 1024)
     );
+    if copy_bytes < live_bytes {
+        println!(
+            "  imagen live {} MiB — omitiendo {} MiB de cola vacía en modelos",
+            live_bytes / (1024 * 1024),
+            (live_bytes - copy_bytes) / (1024 * 1024)
+        );
+    }
     println!("  destino: {} [{}]", uso_disco(dst), nota_destino(dst));
 
     if !yes {
@@ -557,7 +569,7 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         }
     }
 
-    if !clonar(src.id, dst.id, bytes) {
+    if !clonar(src.id, dst.id, copy_bytes) {
         return 1;
     }
     println!("soso-install: copia terminada");
@@ -590,7 +602,9 @@ fn clonar(src_id: u32, dst_id: u32, bytes: u64) -> bool {
     let mut buf = vec![0u8; CHUNK];
     let mut lba = 0u64;
     let mut left = bytes as usize;
-    let mut last_pct = u64::MAX;
+    let start_ms = sys::uptime_ms();
+    let mut last_report_ms = start_ms;
+    let mut last_report_done = 0u64;
     while left > 0 {
         let chunk = left.min(CHUNK) / SECTOR * SECTOR;
         if chunk == 0 {
@@ -606,13 +620,121 @@ fn clonar(src_id: u32, dst_id: u32, bytes: u64) -> bool {
         }
         lba += (chunk / SECTOR) as u64;
         left -= chunk;
-        let pct = (bytes - left as u64) * 100 / bytes;
-        if pct != last_pct && pct % 5 == 0 {
-            println!("  {pct}%");
-            last_pct = pct;
+        let done = bytes - left as u64;
+        let now = sys::uptime_ms();
+        let step_bytes = PROGRESS_STEP_MIB * 1024 * 1024;
+        if now.saturating_sub(last_report_ms) >= PROGRESS_INTERVAL_MS as i64
+            || done.saturating_sub(last_report_done) >= step_bytes
+        {
+            imprimir_progreso(done, bytes, start_ms);
+            last_report_ms = now;
+            last_report_done = done;
         }
     }
+    imprimir_progreso(bytes, bytes, start_ms);
     true
+}
+
+fn imprimir_progreso(done: u64, total: u64, start_ms: i64) {
+    let mib_done = done / (1024 * 1024);
+    let mib_total = total / (1024 * 1024);
+    let elapsed_ms = sys::uptime_ms().saturating_sub(start_ms).max(1) as u64;
+    let speed = (done as f64 / (1024.0 * 1024.0)) / (elapsed_ms as f64 / 1000.0);
+    let pct = if total > 0 { done * 100 / total } else { 100 };
+    println!("  {pct}%  {mib_done} / {mib_total} MiB  ({speed:.1} MiB/s)");
+}
+
+/// Cuántos bytes copiar desde LBA 0: prefijo hasta el fin de los modelos
+/// empaquetados (sin la cola vacía de p3 ni la GPT de respaldo de la imagen).
+/// Si no puede leer sosomfs, usa `fallback` (`/etc/soso-live.bytes`).
+fn bytes_a_copiar(src_id: u32, fallback: u64) -> u64 {
+    let Some((hdr, entries)) = read_gpt(src_id) else {
+        return fallback;
+    };
+    let Some(p3_first) = models_part_first_lba(&hdr, &entries) else {
+        return fallback;
+    };
+    let Some(sb) = read_mfs_superblock(src_id, p3_first) else {
+        return fallback;
+    };
+    let Some(catalog) = read_mfs_catalog(src_id, p3_first, &sb) else {
+        return fallback;
+    };
+    let used_in_part = next_free_lba(&sb, &catalog) * MFS_BLOCK as u64;
+    let total = p3_first * SECTOR as u64 + used_in_part;
+    if total == 0 || total > fallback {
+        fallback
+    } else {
+        total
+    }
+}
+
+/// Primera LBA (512 B) de la partición de modelos: en el live es la de mayor
+/// `first_lba` (p3 va detrás de ESP, rootfs y SOSOINSTALL).
+fn models_part_first_lba(hdr: &Header, entries: &[u8]) -> Option<u64> {
+    let mut best = None;
+    for i in 0..hdr.num_entries as usize {
+        let Some(e) = gptdisk::entry(entries, hdr, i) else {
+            break;
+        };
+        if !gptdisk::entry_used(e) {
+            continue;
+        }
+        let first = gptdisk::entry_first_lba(e);
+        if best.is_none_or(|b| first > b) {
+            best = Some(first);
+        }
+    }
+    best
+}
+
+fn read_mfs_superblock(disk_id: u32, part_first: u64) -> Option<sosomfs::Superblock> {
+    let mut best: Option<sosomfs::Superblock> = None;
+    for slot in 0..sosomfs::SUPERBLOCK_SLOTS {
+        let mut block = [0u8; MFS_BLOCK];
+        let lba = part_first + slot * SECTORS_PER_MFS_BLOCK;
+        if disk_read_exact(disk_id, lba, &mut block).is_err() {
+            continue;
+        }
+        if let Ok(sb) = parse_superblock(&block) {
+            if best.as_ref().is_none_or(|b| sb.generation > b.generation) {
+                best = Some(sb);
+            }
+        }
+    }
+    best
+}
+
+fn read_mfs_catalog(
+    disk_id: u32,
+    part_first: u64,
+    sb: &sosomfs::Superblock,
+) -> Option<Catalog> {
+    let nblocks = sb.catalog_blocks as usize;
+    if nblocks == 0 || nblocks > 256 {
+        return None;
+    }
+    let mut cat_bytes = vec![0u8; nblocks * MFS_BLOCK];
+    for i in 0..nblocks {
+        let block_lba = sb.catalog_bucket_root + i as u64;
+        let gpt_lba = part_first + block_lba * SECTORS_PER_MFS_BLOCK;
+        let off = i * MFS_BLOCK;
+        if disk_read_exact(disk_id, gpt_lba, &mut cat_bytes[off..off + MFS_BLOCK]).is_err() {
+            return None;
+        }
+    }
+    Catalog::parse(&cat_bytes).ok()
+}
+
+fn disk_read_exact(disk_id: u32, lba: u64, buf: &mut [u8]) -> Result<(), ()> {
+    if buf.len() % SECTOR != 0 || buf.is_empty() {
+        return Err(());
+    }
+    if sys::disk_read(disk_id, lba, buf) < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------------ arranque UEFI

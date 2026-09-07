@@ -30,6 +30,8 @@ struct iwl_ax211_priv {
     uint8_t channel;
 
     struct iwl_fw_image fw;
+    const uint8_t *iml;
+    unsigned long iml_len;
     const uint8_t *pnvm_data;
     unsigned long pnvm_len;
 

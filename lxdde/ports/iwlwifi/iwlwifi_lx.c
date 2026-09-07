@@ -36,6 +36,11 @@ int lx_iwlwifi_fw_alive(void)
     return iwl_ax211_alive();
 }
 
+int lx_iwlwifi_probed(void)
+{
+    return iwl_ax211_probed();
+}
+
 const char *lx_iwlwifi_fw_phase(void)
 {
     return iwl_ax211_phase();

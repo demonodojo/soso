@@ -24,9 +24,11 @@ use crate::test::{esperar_en_fichero, ssh_guion};
 
 const SSH_PORT: u16 = 2242;
 const MAC: &str = "52:54:00:12:34:42";
-/// Sectores del NVMe destino: bastante más que el live, para que se note que
-/// `relayout` estira la última partición.
-const TARGET_GIB: u64 = 4;
+/// Margen sobre el tamaño real del live al dimensionar el NVMe destino: sirve
+/// para que se note que `relayout` estira la última partición sin necesitar
+/// un tamaño fijo — el live crece con los modelos que se empaqueten
+/// (`SOSO_LIVE_MODELS`), y una constante fija queda obsoleta en cuanto crece.
+const TARGET_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
 
 pub fn run() {
     let root = crate::project_root();
@@ -53,7 +55,8 @@ pub fn run() {
     std::fs::copy(&ovmf_vars_src, &vars).expect("copiar OVMF_VARS");
 
     let target = dir.join("nvme-target.img");
-    crear_vacia(&target, TARGET_GIB * 1024 * 1024 * 1024);
+    let target_bytes = std::fs::metadata(&live).expect("tamaño del live").len() + TARGET_MARGIN_BYTES;
+    crear_vacia(&target, target_bytes);
     // Segundo NVMe haciéndose pasar por el disco de Linux: el instalador tiene
     // que negarse a tocarlo, que es justo lo que no puede fallar nunca.
     let ajeno = dir.join("nvme-linux.img");
@@ -107,7 +110,7 @@ pub fn run() {
 
     // --- 4. arrancar solo del disco instalado ------------------------------
     let serial3 = dir.join("boot3.log");
-    match fase_arranque_solo(&ovmf_code, &vars, &target, &serial3) {
+    match fase_arranque_solo(&ovmf_code, &vars, &target, &serial3, &key) {
         Ok(()) => marca("arranque 3: soso arranca del NVMe sin USB", true),
         Err(e) => {
             marca(&format!("arranque 3: soso arranca del NVMe sin USB — {e}"), false);
@@ -220,6 +223,7 @@ fn fase_arranque_solo(
     vars: &Path,
     target: &Path,
     serial: &Path,
+    key: &Path,
 ) -> Result<(), String> {
     let _ = std::fs::remove_file(serial);
     let qemu = lanzar(code, vars, serial, Discos::SoloDestino { target })?;
@@ -228,6 +232,20 @@ fn fase_arranque_solo(
     let log = std::fs::read_to_string(serial).map_err(|e| e.to_string())?;
     if !log.contains("fs: sosofs") {
         return Err("arrancó pero no montó el rootfs instalado".into());
+    }
+    // Sin USB conectado (a propósito, esta fase sólo lleva el NVMe): antes del
+    // fix de `boot_source()`, ningún disco quedaba marcado DISK_FLAG_BOOT y
+    // `soso-update estado` no podía decir de dónde había arrancado.
+    let salida = ssh_guion(
+        key,
+        SSH_PORT,
+        "soso-update estado\nhalt\n",
+        Duration::from_secs(120),
+    )?;
+    if !salida.contains("arranque: disco instalado") {
+        return Err(format!(
+            "estado no reconoce el NVMe como disco de arranque: {salida:?}"
+        ));
     }
     Ok(())
 }
@@ -335,7 +353,9 @@ fn comprobar_gpt(target: &Path, guids_usb: &[String]) -> Vec<(String, Result<(),
         }
     };
 
-    let total = TARGET_GIB * 1024 * 1024 * 1024 / 512;
+    let total = std::fs::metadata(target)
+        .map(|m| m.len() / 512)
+        .unwrap_or(0);
     out.push((
         "la última partición llena el disco".to_string(),
         ultima_llega_al_final(&tabla, total),

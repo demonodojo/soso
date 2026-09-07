@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build *)",
+      "Bash(cargo xtask *)",
+      "Bash(/tmp/claude-1000/-home-jmdiez-Trabajo-demonodojo-soso/59613bf6-169b-4521-9332-40d2b08db5a7/scratchpad/reaper2.sh test-update *)"
+    ]
+  }
+}

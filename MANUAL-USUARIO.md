@@ -609,7 +609,7 @@ Solo tiene sentido arrancando desde el pendrive live. Ver
 Comprueba y aplica releases publicadas en GitHub (`demonodojo/soso`):
 
 ```sh
-soso-update estado              # versión rootfs, kernel y buzón ESP
+soso-update estado              # medio de arranque, versión rootfs, kernel y buzón ESP
 soso-update comprobar           # compara con la última release
 soso-update aplicar             # descarga e instala (rootfs + kernel)
 soso-update revertir            # restaura el kernel anterior (reinicia después)
@@ -1473,7 +1473,11 @@ Qué hace `soso-install`:
    Windows, raíces Linux con GUID propio); las lista y dice para qué se usa
    cada uno antes de negarse. Para sobrescribirlo de todos modos hace falta
    `--force` **y** teclear el nombre del disco.
-2. **Clona** el pendrive entero sobre el destino.
+2. **Clona** el live sobre el destino (ESP, rootfs, SOSOINSTALL y los modelos
+   empaquetados). Omite la cola vacía de la partición de modelos y la GPT de
+   respaldo de la imagen; al arrancar, `relayout` estira p3 y sosomfs crece el
+   superbloque. Mientras copia enseña progreso en MiB/s (lecturas USB de hasta
+   512 KiB por transferencia).
 3. **Repara la GPT** del destino: el clon describe el pendrive, así que se
    recoloca la cabecera de respaldo al final del disco, la partición de modelos
    se estira hasta llenarlo y se reparten GUID nuevos (si no, el disco sería
@@ -1567,7 +1571,7 @@ cargo xtask run
 ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 
 # --- Dentro de sosh ---
-soso-update estado          # versión rootfs, kernel, buzón
+soso-update estado          # medio de arranque, versión rootfs, kernel, buzón
 pwd
 cd /tmp
 echo hola > nota.txt

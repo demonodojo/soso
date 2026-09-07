@@ -19,6 +19,7 @@ unsafe extern "C" {
     fn lx_iwlwifi_init_module() -> c_int;
     fn lx_iwlwifi_start_module() -> c_int;
     fn lx_iwlwifi_fw_alive() -> c_int;
+    fn lx_iwlwifi_probed() -> c_int;
     fn lx_iwlwifi_fw_phase() -> *const c_char;
     fn lx_iwlwifi_scan(out: *mut LxWifiBss, max: c_int, count: *mut c_int) -> c_int;
     fn lx_iwlwifi_connect_open(ssid: *const c_char) -> c_int;
@@ -43,7 +44,7 @@ pub fn init() -> i32 {
 }
 
 pub fn start_firmware() -> i32 {
-    if !wifi_present() {
+    if unsafe { !WIFI_REGISTERED } {
         return -1;
     }
     unsafe { lx_iwlwifi_start_module() }
@@ -56,7 +57,7 @@ pub fn poll() {
 }
 
 pub fn wifi_present() -> bool {
-    unsafe { WIFI_REGISTERED }
+    unsafe { lx_iwlwifi_probed() != 0 }
 }
 
 pub fn alive() -> bool {
