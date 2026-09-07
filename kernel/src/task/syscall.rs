@@ -1306,7 +1306,7 @@ fn sys_disk_list(out: u64, max: u64) -> Result<u64, i64> {
 }
 
 fn sys_disk_read(id: u64, lba: u64, buf: u64, len: u64) -> Result<u64, i64> {
-    if len == 0 || len > 256 * 1024 || len % 512 != 0 {
+    if len == 0 || len > 512 * 1024 || len % 512 != 0 {
         return Err(-abi::EINVAL);
     }
     if !user_range_ok(buf, len, true) {
@@ -1322,7 +1322,7 @@ fn sys_disk_read(id: u64, lba: u64, buf: u64, len: u64) -> Result<u64, i64> {
 }
 
 fn sys_disk_write(id: u64, lba: u64, buf: u64, len: u64) -> Result<u64, i64> {
-    if len == 0 || len > 256 * 1024 || len % 512 != 0 {
+    if len == 0 || len > 512 * 1024 || len % 512 != 0 {
         return Err(-abi::EINVAL);
     }
     if !user_range_ok(buf, len, false) {

@@ -22,6 +22,10 @@
 #define CSR_IML_DATA_ADDR            0x120
 #define CSR_IML_SIZE_ADDR            0x128
 #define HBUS_TARG_WRPTR              0x460
+#define HBUS_TARG_PRPH_WADDR         0x444
+#define HBUS_TARG_PRPH_WDATA         0x448
+#define CSR_LTR_LONG_VAL_AD          0x0d4c
+#define UREG_CPU_INIT_RUN            0xd03c
 #define RFH_Q0_FRBDCB_WIDX_TRG       0x1C80
 #define IWL_PCI_AX200                0x2723u
 #define IWL_MVM_DQA_CMD_QUEUE        9

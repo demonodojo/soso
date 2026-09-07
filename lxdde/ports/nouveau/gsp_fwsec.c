@@ -140,6 +140,7 @@ struct fwsec_ucode_info {
 };
 
 static unsigned rom_data_len;
+static int fwsec_last_patch_appif;
 
 static uint8_t rom_rd8(unsigned off)
 {
@@ -516,9 +517,15 @@ static int parse_fwsec_desc(unsigned fwsec_off, unsigned fwsec_len,
     }
 
     info->ucode_len = info->imem_load_size + info->dmem_load_size;
-    info->sig_rom_off = abs + info->desc_size;
-    info->ucode_rom_off = info->sig_rom_off +
-                          (unsigned)info->signature_count * BCRT30_RSA3K_SIG_SIZE;
+    if (ver == 3u) {
+        /* nvkm: firmas en ROM justo tras el struct v3 (0x2c); ucode en desc+desc_size. */
+        info->sig_rom_off = abs + (unsigned)sizeof(struct falcon_ucode_desc_v3);
+        info->ucode_rom_off = abs + info->desc_size;
+    } else {
+        info->sig_rom_off = abs + info->desc_size;
+        info->ucode_rom_off = info->sig_rom_off +
+                              (unsigned)info->signature_count * BCRT30_RSA3K_SIG_SIZE;
+    }
 
     if (!info->ucode_len ||
         info->ucode_rom_off + info->ucode_len > fwsec_off + fwsec_len) {
@@ -666,6 +673,16 @@ static uint16_t read_fuse_ucode_version(uint16_t engine_id_mask, uint8_t ucode_i
     return (uint16_t)(gsp_mmio_rd32(base + idx * 4u) & 0xffffu);
 }
 
+static unsigned align_up256(unsigned v)
+{
+    return (v + 255u) & ~255u;
+}
+
+static unsigned fwsec_dmem_base(const struct fwsec_ucode_info *info)
+{
+    return info->dmem_src;
+}
+
 static int patch_fwsec_signature(unsigned char *ucode, unsigned ulen,
                                  const struct fwsec_ucode_info *info)
 {
@@ -697,7 +714,7 @@ static int patch_fwsec_signature(unsigned char *ucode, unsigned ulen,
         return -1;
     }
 
-    patch_off = info->imem_load_size + info->pkc_data_offset;
+    patch_off = fwsec_dmem_base(info) + info->pkc_data_offset;
     sig_off = info->sig_rom_off + sig_idx * BCRT30_RSA3K_SIG_SIZE;
 
     if (patch_off + BCRT30_RSA3K_SIG_SIZE > ulen) {
@@ -726,7 +743,7 @@ static int patch_frts_cmd_prepare(unsigned char *ucode, unsigned ulen,
         return -1;
     }
     map->init_cmd = NVFW_FALCON_APPIF_DMEMMAPPER_CMD_FRTS;
-    cmd = (struct frts_cmd *)(ucode + info->imem_load_size +
+    cmd = (struct frts_cmd *)(ucode + fwsec_dmem_base(info) +
                               map->cmd_in_buffer_offset);
     cmd->read_vbios.ver = 1;
     cmd->read_vbios.hdr = (uint32_t)sizeof(cmd->read_vbios);
@@ -759,6 +776,11 @@ static struct falcon_appif_dmemmapper_v3 *find_dmap_mapper(unsigned char *ucode,
     return NULL;
 }
 
+int gsp_fwsec_patch_via_appif(void)
+{
+    return fwsec_last_patch_appif;
+}
+
 static int patch_fwsec_frts(unsigned char *ucode, unsigned ulen,
                             const struct fwsec_ucode_info *info,
                             uint64_t frts_addr, uint64_t frts_size)
@@ -768,7 +790,10 @@ static int patch_fwsec_frts(unsigned char *ucode, unsigned ulen,
     unsigned i;
     struct falcon_appif_dmemmapper_v3 *map;
 
-    hdr_off = info->imem_load_size + info->interface_offset;
+    unsigned dmem_base = fwsec_dmem_base(info);
+
+    fwsec_last_patch_appif = 0;
+    hdr_off = dmem_base + info->interface_offset;
     if (hdr_off + sizeof(hdr) > ulen) {
         lx_printk("nouveau-lx: FWSEC appif fuera de ucode (off=0x%x ulen=0x%x)\n",
                   hdr_off, ulen);
@@ -795,22 +820,23 @@ static int patch_fwsec_frts(unsigned char *ucode, unsigned ulen,
         if (app.id != NVFW_FALCON_APPIF_ID_DMEMMAPPER) {
             continue;
         }
-        if (info->imem_load_size + app.dmem_base + sizeof(*map) > ulen) {
+        if (dmem_base + app.dmem_base + sizeof(*map) > ulen) {
             lx_printk("nouveau-lx: FWSEC mapper off=0x%x fuera de ucode\n",
                       app.dmem_base);
             goto scan_dmap;
         }
-        map = (struct falcon_appif_dmemmapper_v3 *)(ucode + info->imem_load_size +
+        map = (struct falcon_appif_dmemmapper_v3 *)(ucode + dmem_base +
                                                       app.dmem_base);
         if (patch_frts_cmd_prepare(ucode, ulen, info, map, frts_addr, frts_size) == 0) {
             lx_printk("nouveau-lx: FWSEC DMEMMAPPER vía appif dmem=0x%x\n",
                       app.dmem_base);
+            fwsec_last_patch_appif = 1;
             return 0;
         }
     }
 
 scan_dmap:
-    map = find_dmap_mapper(ucode, ulen, info->imem_load_size);
+    map = find_dmap_mapper(ucode, ulen, dmem_base);
     if (map && patch_frts_cmd_prepare(ucode, ulen, info, map, frts_addr, frts_size) == 0) {
         lx_printk("nouveau-lx: FWSEC DMEMMAPPER vía firma DMAP @0x%x\n",
                   (unsigned)((unsigned char *)map - ucode));
@@ -818,6 +844,24 @@ scan_dmap:
     }
     lx_printk("nouveau-lx: FWSEC-FRTS sin DMEMMAPPER (if=0x%x imem=0x%x dmem=0x%x)\n",
               info->interface_offset, info->imem_load_size, info->dmem_load_size);
+    return -1;
+}
+
+static int gsp_fwsec_wait_wpr2(uint64_t *lo_out, unsigned budget_ms)
+{
+    unsigned t;
+
+    for (t = 0; t < budget_ms; t++) {
+        uint64_t lo;
+
+        if (gsp_fwsec_wpr2_present(&lo, NULL)) {
+            if (lo_out) {
+                *lo_out = lo;
+            }
+            return 0;
+        }
+        lx_mdelay(1);
+    }
     return -1;
 }
 
@@ -843,13 +887,13 @@ int gsp_fwsec_probe(uint64_t frts_addr, uint64_t frts_size)
         lx_kfree(ucode);
         return -1;
     }
-    if (patch_fwsec_frts(ucode, info.ucode_len, &info, frts_addr, frts_size) != 0) {
-        lx_printk("nouveau-lx: FWSEC-FRTS parche DMEMMAPPER falló\n");
+    if (patch_fwsec_signature(ucode, info.ucode_len, &info) != 0) {
+        lx_printk("nouveau-lx: FWSEC-FRTS parche firma falló\n");
         lx_kfree(ucode);
         return -1;
     }
-    if (patch_fwsec_signature(ucode, info.ucode_len, &info) != 0) {
-        lx_printk("nouveau-lx: FWSEC-FRTS parche firma falló\n");
+    if (patch_fwsec_frts(ucode, info.ucode_len, &info, frts_addr, frts_size) != 0) {
+        lx_printk("nouveau-lx: FWSEC-FRTS parche DMEMMAPPER falló\n");
         lx_kfree(ucode);
         return -1;
     }
@@ -899,13 +943,13 @@ int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
         lx_kfree(ucode);
         return -1;
     }
-    if (patch_fwsec_frts(ucode, info.ucode_len, &info, frts_addr, frts_size) != 0) {
-        lx_printk("nouveau-lx: FWSEC-FRTS parche DMEMMAPPER falló\n");
+    if (patch_fwsec_signature(ucode, info.ucode_len, &info) != 0) {
+        lx_printk("nouveau-lx: FWSEC-FRTS parche firma falló\n");
         lx_kfree(ucode);
         return -1;
     }
-    if (patch_fwsec_signature(ucode, info.ucode_len, &info) != 0) {
-        lx_printk("nouveau-lx: FWSEC-FRTS parche firma falló\n");
+    if (patch_fwsec_frts(ucode, info.ucode_len, &info, frts_addr, frts_size) != 0) {
+        lx_printk("nouveau-lx: FWSEC-FRTS parche DMEMMAPPER falló\n");
         lx_kfree(ucode);
         return -1;
     }
@@ -929,7 +973,7 @@ int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
     raw.imem_len = info.imem_load_size;
     raw.dmem_src = info.dmem_src;
     raw.dmem_dst = info.dmem_phys_base;
-    raw.dmem_len = info.dmem_load_size;
+    raw.dmem_len = align_up256(info.dmem_load_size);
     raw.pkc_data_offset = info.pkc_data_offset;
     raw.engine_id_mask = info.engine_id_mask;
     raw.ucode_id = info.ucode_id;
@@ -953,7 +997,7 @@ int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
         lx_printk("nouveau-lx: FWSEC-FRTS error scratch=0x%08x\n", scratch);
         return -1;
     }
-    if (!gsp_fwsec_wpr2_present(&wpr2_lo, NULL)) {
+    if (gsp_fwsec_wait_wpr2(&wpr2_lo, 100u) != 0) {
         lx_printk("nouveau-lx: FWSEC-FRTS terminó pero WPR2 sigue vacío\n");
         return -1;
     }

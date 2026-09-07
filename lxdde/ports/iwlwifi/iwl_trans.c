@@ -22,6 +22,12 @@ static void iwl_write64(struct iwl_ax211_priv *iwl, uint32_t off, uint64_t val)
     iwl_write32(iwl, off + 4, (uint32_t)(val >> 32));
 }
 
+static void iwl_write_prph(struct iwl_ax211_priv *iwl, uint32_t addr, uint32_t val)
+{
+    iwl_write32(iwl, HBUS_TARG_PRPH_WADDR, (addr & 0x000fffffu) | (3u << 24));
+    iwl_write32(iwl, HBUS_TARG_PRPH_WDATA, val);
+}
+
 static int iwl_wait_mac_ready(struct iwl_ax211_priv *iwl, int ms)
 {
     while (ms-- > 0) {
@@ -187,6 +193,7 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
     iwl_write32(iwl, CSR_INT, 0xffffffffu);
     iwl_write64(iwl, CSR_CTXT_INFO_BA, iwl->ctxt_dma);
     lx_printk("iwlwifi: context-info gen2 BA=0x%llx\n", (unsigned long long)iwl->ctxt_dma);
+    iwl_write_prph(iwl, UREG_CPU_INIT_RUN, 1);
 
     for (int t = 0; t < 500; t++) {
         drain_rx_gen2(iwl);

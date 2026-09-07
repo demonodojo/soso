@@ -48,6 +48,11 @@ static int lx_printk(const char *fmt, ...)
     return n;
 }
 
+static void lx_mdelay(unsigned ms)
+{
+    (void)ms;
+}
+
 static void *lx_kmalloc(unsigned long size, unsigned gfp)
 {
     (void)gfp;
@@ -179,7 +184,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "FAIL: gsp_fwsec_probe\n");
         return 1;
     }
-    printf("OK: parseo + parche FWSEC-FRTS\n");
+    if (!gsp_fwsec_patch_via_appif()) {
+        fprintf(stderr, "FAIL: parche FRTS sin appif v1 (fallback DMAP)\n");
+        return 1;
+    }
+    printf("OK: parseo + parche FWSEC-FRTS (appif v1)\n");
     free(rom_buf);
     return 0;
 }
