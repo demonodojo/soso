@@ -5,24 +5,36 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Tamaño por defecto de la pila de un hilo (mmap anónimo).
 pub const DEFAULT_STACK: usize = 256 * 1024;
+const GUARD: u64 = 4096;
 
-/// Arranca `f(arg)` en un hilo nuevo. Devuelve el tid o errno negativo.
-///
-/// `f` debe ser `extern "C" fn(*mut u8) -> !` o terminar con `sys::exit`.
-pub fn spawn(entry: extern "C" fn(u64) -> !, arg: u64) -> Result<u64, i64> {
+/// Arranca `f(arg)` en un hilo nuevo. Devuelve el handle o errno negativo.
+pub fn spawn(entry: extern "C" fn(u64) -> !, arg: u64) -> Result<JoinHandle, i64> {
     let stack_len = DEFAULT_STACK as u64;
     let base = sys::mmap(0, stack_len, u64::MAX, 0);
     if base < 0 {
         return Err(base);
     }
-    // Tope alineado a 16; el kernel resta 8 para ABI SysV (rsp%16==8).
+    let join = alloc::boxed::Box::new(AtomicU32::new(0));
+    let join_ptr = alloc::boxed::Box::into_raw(join);
     let top = (base as u64 + stack_len) & !0xFu64;
-    let tid = sys::thread_spawn(entry as *const () as u64, arg, top);
+    let tid = sys::thread_spawn(
+        entry as *const () as u64,
+        arg,
+        top,
+        join_ptr as u64,
+    );
     if tid < 0 {
+        unsafe {
+            let _ = alloc::boxed::Box::from_raw(join_ptr);
+        }
         let _ = sys::munmap(base as u64, stack_len);
         return Err(tid);
     }
-    Ok(tid as u64)
+    let _ = sys::mprotect(base as u64, GUARD, 0);
+    Ok(JoinHandle {
+        tid: tid as u64,
+        join: join_ptr,
+    })
 }
 
 /// Barrera de generación: el líder incrementa `gen` y hace wake; los
@@ -42,7 +54,6 @@ impl Barrier {
         }
     }
 
-    /// Espera a que los `n` participantes lleguen; el último despierta al resto.
     pub fn wait(&self) {
         let g = self.generation.load(Ordering::Acquire);
         let a = self.arrived.fetch_add(1, Ordering::AcqRel) + 1;
@@ -61,5 +72,23 @@ impl Barrier {
                 );
             }
         }
+    }
+}
+
+/// Handle para join de hilos (futex en el kernel al salir del hilo).
+pub struct JoinHandle {
+    pub tid: u64,
+    join: *const AtomicU32,
+}
+
+impl JoinHandle {
+    pub fn join(self) -> Result<(), i64> {
+        unsafe {
+            while (*self.join).load(Ordering::Acquire) == 0 {
+                let _ = sys::futex_wait(self.join as *const u32, 0);
+            }
+            let _ = alloc::boxed::Box::from_raw(self.join as *mut AtomicU32);
+        }
+        Ok(())
     }
 }

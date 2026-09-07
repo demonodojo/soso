@@ -210,6 +210,12 @@ pub struct Process {
     /// Grupo de procesos y sesión (job control mínimo).
     pub pgid: u64,
     pub sid: u64,
+    /// Base TLS (`FS_BASE`) del hilo/proceso.
+    pub tls_base: u64,
+    /// Hilo ligero (comparte AddrSpace con el padre).
+    pub is_thread: bool,
+    /// Dirección de usuario (futex) para `join`; 0 si no aplica.
+    pub join_uaddr: u64,
 }
 
 pub static PROCS: Mutex<Vec<Process>> = Mutex::new(Vec::new());
@@ -717,57 +723,81 @@ pub fn spawn_console_io(
             .map(|p| (p.pgid, p.sid))
             .unwrap_or((0, 0))
     };
-    let data = {
+    let (ino, file_size) = {
         let ino = crate::vfs::resolve(path).map_err(crate::task::syscall::fs_errno)?;
-        crate::vfs::read_file(ino).map_err(crate::task::syscall::fs_errno)?
+        let st = crate::vfs::stat_inode(ino).map_err(crate::task::syscall::fs_errno)?;
+        (ino, st.size.get())
     };
     let space = AddrSpace::new().ok_or(-abi::ENOMEM)?;
-    match spawn_into(&space, &data, args) {
-        Ok((ctx, brk)) => {
-            let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
-            let (pgid, sid) = if parent == 0 {
-                (pid, pid)
-            } else {
-                (parent_pgid, parent_sid)
-            };
-            let mut fds = vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)];
-            for (slot, fd) in stdio_fds.into_iter().enumerate() {
-                if let Some(f) = fd {
-                    fds[slot] = Some(f);
-                }
-            }
-            PROCS.lock().push(Process {
-                pid,
-                parent,
-                name: String::from(path),
-                state: State::Runnable,
-                ctx,
-                space: Some(space),
-                fds,
-                brk,
-                brk_min: brk,
-                console,
-                cwd,
-                fpu: crate::arch::fpu::FpuArea::inicial(),
-                kill_pending: false,
-                kill_code: 255,
-                kill_orphan: false,
-                pgid,
-                sid,
-            });
-            crate::arch::apic::kick_idle_cpus();
-            Ok(pid)
+    let (ctx, brk, tls_base) = if file_size > abi::LAZY_FILE_THRESHOLD {
+        let head_len = core::cmp::min(file_size as usize, 65536);
+        let mut head = alloc::vec![0u8; head_len];
+        crate::vfs::read_file_range(ino, 0, head_len, &mut head)
+            .map_err(crate::task::syscall::fs_errno)?;
+        let r = elf::load_lazy(&space, &head, ino, file_size).map_err(|e| {
+            crate::println!("spawn: elf inválido: {e}");
+            -abi::EINVAL
+        })?;
+        let (entry, brk, tls) = r;
+        for va in (STACK_TOP - STACK_SIZE..STACK_TOP).step_by(4096) {
+            space.ensure_mapped(va).ok_or(-abi::ENOMEM)?;
         }
-        Err(e) => {
-            drop(space);
-            Err(e)
+        let args_va = STACK_TOP - 4096;
+        space.write(args_va, args.as_bytes()).ok_or(-abi::ENOMEM)?;
+        let ctx = Context {
+            rip: entry,
+            rsp: args_va - 16,
+            rflags: 0x202,
+            rdi: args_va,
+            rsi: args.len() as u64,
+            ..Context::default()
+        };
+        (ctx, brk, tls)
+    } else {
+        let data = crate::vfs::read_file(ino).map_err(crate::task::syscall::fs_errno)?;
+        spawn_into(&space, &data, args)?
+    };
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let (pgid, sid) = if parent == 0 {
+        (pid, pid)
+    } else {
+        (parent_pgid, parent_sid)
+    };
+    let mut fds = vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)];
+    for (slot, fd) in stdio_fds.into_iter().enumerate() {
+        if let Some(f) = fd {
+            fds[slot] = Some(f);
         }
     }
+    PROCS.lock().push(Process {
+        pid,
+        parent,
+        name: String::from(path),
+        state: State::Runnable,
+        ctx,
+        space: Some(space),
+        fds,
+        brk,
+        brk_min: brk,
+        console,
+        cwd,
+        fpu: crate::arch::fpu::FpuArea::inicial(),
+        kill_pending: false,
+        kill_code: 255,
+        kill_orphan: false,
+        pgid,
+        sid,
+        tls_base,
+        is_thread: false,
+        join_uaddr: 0,
+    });
+    crate::arch::apic::kick_idle_cpus();
+    Ok(pid)
 }
 
 /// Crea un hilo: mismo AddrSpace (Arc), pila y entry proporcionados por
 /// el usuario. Devuelve el tid (= pid).
-pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64) -> Result<u64, i64> {
+pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Result<u64, i64> {
     use soso_abi as abi;
     if entry == 0 || stack_top == 0 || stack_top > addrspace::USER_MAX {
         return Err(-abi::EINVAL);
@@ -819,14 +849,17 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64) -> Result<u64, i64> {
         kill_orphan: false,
         pgid,
         sid,
+        tls_base: 0,
+        is_thread: true,
+        join_uaddr,
     });
     crate::arch::apic::kick_idle_cpus();
     Ok(tid)
 }
 
-fn spawn_into(space: &AddrSpace, data: &[u8], args: &str) -> Result<(Context, u64), i64> {
+fn spawn_into(space: &AddrSpace, data: &[u8], args: &str) -> Result<(Context, u64, u64), i64> {
     use soso_abi as abi;
-    let (entry, brk) = elf::load(space, data).map_err(|e| {
+    let (entry, brk, tls_base) = elf::load(space, data).map_err(|e| {
         crate::println!("spawn: elf inválido: {e}");
         -abi::EINVAL
     })?;
@@ -845,7 +878,7 @@ fn spawn_into(space: &AddrSpace, data: &[u8], args: &str) -> Result<(Context, u6
         rsi: args.len() as u64,
         ..Context::default()
     };
-    Ok((ctx, brk))
+    Ok((ctx, brk, tls_base))
 }
 
 // ---- salida y bloqueo ----
@@ -871,6 +904,27 @@ pub fn exit_current(code: u8) -> ! {
             }
         }
         let idx = procs.iter().position(|p| p.pid == pid).expect("exit sin proceso");
+        let is_thread = procs[idx].is_thread;
+        let join_uaddr = procs[idx].join_uaddr;
+        let join_pml4 = procs[idx].space.as_ref().map(|s| s.pml4_phys());
+        if is_thread {
+            futex::forget_pid(pid);
+            syscall::close_all_fds(&mut procs[idx].fds);
+            space = procs.remove(idx).space;
+            crate::arch::percpu::set_current_pid(0);
+            drop(procs);
+            if join_uaddr != 0 {
+                if let Some(ref sp) = space {
+                    let one = 1u32.to_le_bytes();
+                    let _ = sp.write(join_uaddr, &one);
+                    if let Some(pml4) = join_pml4 {
+                        futex::wake(pml4, join_uaddr, 1);
+                    }
+                }
+            }
+            drop(space);
+            schedule();
+        }
         futex::forget_pid(pid);
         syscall::close_all_fds(&mut procs[idx].fds);
         let parent = procs[idx].parent;
@@ -1222,6 +1276,13 @@ extern "C" fn schedule_inner() -> ! {
                 // Restaurar el estado FPU del proceso justo antes de saltar
                 // a usuario (después de esto, nada de SSE en este camino).
                 unsafe { crate::arch::fpu::restore(&procs[i].fpu) };
+                if procs[i].tls_base != 0 {
+                    unsafe {
+                        x86_64::registers::model_specific::FsBase::write(
+                            x86_64::VirtAddr::new(procs[i].tls_base),
+                        );
+                    }
+                }
                 drop(procs);
                 unsafe { resume_user(&ctx) }
             }

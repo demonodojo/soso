@@ -100,7 +100,7 @@ fn exec(line: &str) {
                 match split_path(ruta) {
                     Some((padre, nombre)) => with_vfs(|| {
                         let dir = crate::vfs::resolve(padre)?;
-                        let mtime = crate::arch::pit::uptime_ms() / 1000;
+                        let mtime = crate::time::wall_secs();
                         crate::vfs::create_file(dir, nombre, texto.as_bytes(), mtime)?;
                         println!("{} bytes -> {ruta}", texto.len());
                         Ok(())

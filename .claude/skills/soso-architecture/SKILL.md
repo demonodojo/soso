@@ -327,17 +327,19 @@ el shim. Transferencias USB: Normal TRB 17 bits → **no enviar 128 KiB en un TR
 (`mass_storage` trocea a 64 KiB). Bounce xHCI persistente. Tests:
 `test-install`, `test-update`, `test-usb`. `VERSION` → `/etc/soso-release`.
 
-## Hilos de usuario: nadie los recoge
+## Hilos de usuario: join por futex
 
-`thread_spawn` crea **procesos** del scheduler que comparten el `AddrSpace`, y
-`exit` mata sólo al que lo llama: **los hilos sobreviven al proceso que los creó**.
-`soso_llm::pool::worker_entry` duerme en futex entre trabajos; el spin al 100 %
-queda **dentro** del matvec (esperar `done`, sin syscall). Un pool sin `Drop`
-sigue dejando hilos vivos para siempre — en placa de 8 cores eso ahogaba el
-segundo `ask`. `ThreadPool::Drop` pone `shutdown`, despierta el futex y
-**espera** a que salgan (`vivos`). Regla: cualquier cosa que
-lance hilos los apaga y los espera antes de morir. **En QEMU con `-smp 1` esto no
-existe** (`want == 0`): por eso el shard `llm-dense` corre con `-smp 2`.
+`thread_spawn` crea **procesos** del scheduler que comparten el `AddrSpace`.
+Al salir, el kernel escribe `1` en la palabra `join_uaddr` y hace `futex_wake`
+(`libsoso::thread::JoinHandle::join`). Los hilos ya no pasan por `wait()` del
+padre. `ThreadPool::Drop` sigue poniendo `shutdown` y esperando `vivos`.
+Regla: cualquier cosa que lance hilos los apaga antes de morir.
+
+## Self-hosting (ruta A)
+
+Ver [`docs/SELF-HOSTING.md`](../../docs/SELF-HOSTING.md). Syscalls 70–82,
+`sosofs` v11 (`NAME_MAX` 255), `soso-ed`, `soso-forja`, `soso-std`, scaffolding
+`config/rust-soso/` + `tools/sosoas` + `tools/wild-soso`.
 
 ## Estado FPU y excepciones de CPU
 

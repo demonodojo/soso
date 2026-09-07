@@ -474,6 +474,18 @@ pub(crate) fn build_user() -> bool {
         "soso-web",
         "ask-modelo",
         "soso-update",
+        "soso-ed",
+        "soso-forja",
+        "cp",
+        "mv",
+        "grep",
+        "diff",
+        "find",
+        "wc",
+        "head",
+        "tail",
+        "stat",
+        "hola-std",
     ] {
         let src = out.join(prog);
         let dst = bin.join(prog);

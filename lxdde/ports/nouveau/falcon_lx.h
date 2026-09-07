@@ -38,6 +38,9 @@ struct falcon_lx_raw {
 /* Reset del falcon antes de cada carga (ga102 HAL). */
 int falcon_lx_reset(unsigned base);
 
+/* Habilita el motor en PMC + espera mem scrub (gm200_flcn_enable). */
+int falcon_lx_enable(unsigned falcon_base, uint8_t top_type, uint8_t top_inst);
+
 /* Ucode crudo con parámetros BROM (FWSEC-FRTS en falcon GSP). */
 int falcon_lx_raw_boot(unsigned falcon_base, const struct falcon_lx_raw *raw);
 

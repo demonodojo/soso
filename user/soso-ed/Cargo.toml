@@ -1,0 +1,14 @@
+# Editor de texto mínimo para soso (estilo kilo/kibi, sin deps).
+
+[package]
+name = "soso-ed"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "soso-ed"
+path = "src/main.rs"
+
+[dependencies]
+libsoso = { workspace = true }

@@ -20,8 +20,12 @@ members = [
     "crates/soso-http",
     "crates/soso-web-core",
     "crates/soso-update-core",
+    "crates/soso-std",
     "crates/xhci-nostd",
     "tools/cuda-proxy",
+    "tools/soso-forja-server",
+    "tools/sosoas",
+    "tools/wild-soso",
 ]
 # El kernel y el userspace se compilan para x86_64-unknown-none (y el shim de
 # arranque para x86_64-unknown-uefi) con su propio árbol de dependencias; los

@@ -5,9 +5,9 @@ use block_dev::BLOCK_SIZE;
 use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-pub const MAGIC: [u8; 8] = *b"SOSOFS10";
+pub const MAGIC: [u8; 8] = *b"SOSOFS11";
 pub const ROOT_INODE: u64 = 1;
-pub const NAME_MAX: usize = 55;
+pub const NAME_MAX: usize = 255;
 /// Tamaño máximo de un extent en bloques (128 KiB): acota la memoria
 /// necesaria para verificar su checksum de una pieza.
 pub const EXTENT_MAX_BLOCKS: u64 = 32;
@@ -123,9 +123,9 @@ pub struct NodeHeader {
 
 pub const NODE_HEADER_SIZE: usize = 32;
 /// Hoja: DiskKey (24) + payload (64).
-pub const ITEM_PAYLOAD: usize = 64;
-pub const LEAF_ENTRY: usize = DiskKey::SIZE + ITEM_PAYLOAD; // 88
-pub const LEAF_CAP: usize = (BLOCK_SIZE - NODE_HEADER_SIZE) / LEAF_ENTRY; // 46
+pub const ITEM_PAYLOAD: usize = 272;
+pub const LEAF_ENTRY: usize = DiskKey::SIZE + ITEM_PAYLOAD; // 296
+pub const LEAF_CAP: usize = (BLOCK_SIZE - NODE_HEADER_SIZE) / LEAF_ENTRY; // 13
 /// Interno: DiskKey (24) + hijo (8).
 pub const INT_ENTRY: usize = DiskKey::SIZE + 8; // 32
 pub const INT_CAP: usize = (BLOCK_SIZE - NODE_HEADER_SIZE) / INT_ENTRY; // 127
@@ -147,6 +147,7 @@ pub struct InodeItem {
 pub struct DirentItem {
     pub child: U64,
     pub name_len: u8,
+    pub _pad: [u8; 7],
     pub name: [u8; NAME_MAX],
 }
 

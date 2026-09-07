@@ -134,6 +134,10 @@ pub fn spawn_io(path: &str, args: &str, stdin: u64, stdout: u64, stderr: u64) ->
         stdin_fd: stdin,
         stdout_fd: stdout,
         stderr_fd: stderr,
+        argv_ptr: 0,
+        argv_count: 0,
+        envp_ptr: 0,
+        envp_count: 0,
     };
     syscall4(
         abi::SYS_SPAWN_IO,
@@ -238,8 +242,8 @@ pub fn gpu_wait(fence: u64) -> i64 {
 }
 
 /// Crea un hilo: `entry(arg)` con pila en `stack_top` (tope, alineado).
-pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64) -> i64 {
-    syscall4(abi::SYS_THREAD_SPAWN, entry, arg, stack_top, 0)
+pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> i64 {
+    syscall4(abi::SYS_THREAD_SPAWN, entry, arg, stack_top, join_uaddr)
 }
 
 pub fn futex_wait(addr: *const u32, expected: u32) -> i64 {
@@ -580,4 +584,92 @@ pub fn input_poll(out: &mut [abi::InputEvent]) -> i64 {
         0,
         0,
     )
+}
+
+pub fn rename(old: &str, new: &str) -> i64 {
+    syscall4(
+        abi::SYS_RENAME,
+        old.as_ptr() as u64,
+        old.len() as u64,
+        new.as_ptr() as u64,
+        new.len() as u64,
+    )
+}
+
+pub fn truncate(path: &str, size: u64) -> i64 {
+    syscall4(
+        abi::SYS_TRUNCATE,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        size,
+        0,
+    )
+}
+
+pub fn clock_gettime(clock_id: u64, out: &mut abi::Timespec) -> i64 {
+    syscall4(
+        abi::SYS_CLOCK_GETTIME,
+        clock_id,
+        out as *mut abi::Timespec as u64,
+        0,
+        0,
+    )
+}
+
+pub fn dup2(oldfd: u64, newfd: u64) -> i64 {
+    syscall4(abi::SYS_DUP2, oldfd, newfd, 0, 0)
+}
+
+pub fn fstat(fd: u64, out: &mut abi::Stat) -> i64 {
+    syscall4(abi::SYS_FSTAT, fd, out as *mut abi::Stat as u64, 0, 0)
+}
+
+pub fn utime(path: &str, mtime: u64) -> i64 {
+    syscall4(
+        abi::SYS_UTIME,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        mtime,
+        0,
+    )
+}
+
+pub fn fsync(fd: u64) -> i64 {
+    syscall1(abi::SYS_FSYNC, fd)
+}
+
+pub fn sched_yield() -> i64 {
+    syscall1(abi::SYS_SCHED_YIELD, 0)
+}
+
+pub fn pwrite(fd: u64, buf: &[u8], offset: u64) -> i64 {
+    syscall4(
+        abi::SYS_PWRITE,
+        fd,
+        buf.as_ptr() as u64,
+        buf.len() as u64,
+        offset,
+    )
+}
+
+pub fn getrandom(buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_GETRANDOM,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+        0,
+    )
+}
+
+pub fn set_tls(base: u64) -> i64 {
+    syscall1(abi::SYS_SET_TLS, base)
+}
+
+pub fn mprotect(addr: u64, len: u64, prot: u64) -> i64 {
+    syscall4(abi::SYS_MPROTECT, addr, len, prot, 0)
+}
+
+pub fn mremap(addr: u64, old_len: u64, new_len: u64, flags: u64) -> i64 {
+    syscall4(abi::SYS_MREMAP, addr, old_len, new_len, flags)
 }

@@ -421,14 +421,14 @@ static int run_ampere_boot(void)
         return -1;
     }
 
-    g_phase = GSP_LIBOS_ARGS;
-    if (gsp_libos_prepare(&g_wpr, &g_libos) != 0) {
-        lx_printk("nouveau-lx: Ampere libos no preparado\n");
+    if (gsp_fwsec_run_frts(g_wpr.meta->frtsOffset, g_wpr.meta->frtsSize) != 0) {
+        lx_printk("nouveau-lx: Ampere FWSEC-FRTS falló\n");
         return -1;
     }
 
-    if (gsp_fwsec_run_frts(g_wpr.meta->frtsOffset, g_wpr.meta->frtsSize) != 0) {
-        lx_printk("nouveau-lx: Ampere FWSEC-FRTS falló\n");
+    g_phase = GSP_LIBOS_ARGS;
+    if (gsp_libos_prepare(&g_wpr, &g_libos) != 0) {
+        lx_printk("nouveau-lx: Ampere libos no preparado\n");
         return -1;
     }
 

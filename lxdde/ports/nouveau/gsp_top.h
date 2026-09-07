@@ -53,4 +53,10 @@ int gsp_top_runlist_of(uint8_t type, uint8_t inst, uint32_t *runlist,
  * devolver el 0, que es justo GR. */
 int gsp_top_type_of_engine(uint32_t engine, uint8_t *type, uint8_t *inst);
 
+/* Máscara PMC (NV_PMC_ENABLE 0x600) para `type`/`inst` vía PTOP reset bit. */
+int gsp_top_pmc_enable_mask(uint8_t type, uint8_t inst, uint32_t *mask_out);
+
+/* Activa motores en PMC (ga100_mc_device_enable). */
+void gsp_mc_device_enable(uint32_t mask);
+
 #endif

@@ -431,11 +431,11 @@ fn suite() -> u8 {
 
         COUNTER.store(0, Ordering::Relaxed);
         DONE.store(0, Ordering::Relaxed);
-        let mut tids = [0u64; N as usize];
+        let mut handles = alloc::vec::Vec::new();
         let mut spawn_err: i64 = 0;
         for i in 0..N as usize {
             match thread::spawn(thr_entry, i as u64) {
-                Ok(t) => tids[i] = t,
+                Ok(h) => handles.push(h),
                 Err(e) => {
                     spawn_err = e;
                     break;
@@ -447,9 +447,8 @@ fn suite() -> u8 {
             let d = DONE.load(Ordering::Acquire);
             let _ = sys::futex_wait(&DONE as *const AtomicU32 as *const u32, d);
         }
-        // Reclamar zombis de los hilos.
-        for _ in 0..N {
-            let _ = sys::wait();
+        for h in handles {
+            let _ = h.join();
         }
         check!(
             COUNTER.load(Ordering::Relaxed) == N * PER,
@@ -487,7 +486,6 @@ fn suite() -> u8 {
             ALLOC_MAL.load(Ordering::Relaxed),
             N
         );
-        let _ = tids;
     }
 
     // Pipes: una escritura grande NO se recorta a un temporal del kernel.
@@ -639,11 +637,15 @@ fn suite() -> u8 {
 
         FS_LISTOS.store(0, Ordering::Relaxed);
         FS_MAL.store(0, Ordering::Relaxed);
+        let mut handles = alloc::vec::Vec::new();
         let mut err: i64 = 0;
         for i in 0..FS_HILOS as usize {
-            if let Err(e) = thread::spawn(fs_entry, i as u64) {
-                err = e;
-                break;
+            match thread::spawn(fs_entry, i as u64) {
+                Ok(h) => handles.push(h),
+                Err(e) => {
+                    err = e;
+                    break;
+                }
             }
         }
         check!(err == 0, "thread_spawn para fs ×{FS_HILOS} (errno {err})");
@@ -651,8 +653,8 @@ fn suite() -> u8 {
             let d = FS_LISTOS.load(Ordering::Acquire);
             let _ = sys::futex_wait(&FS_LISTOS as *const AtomicU32 as *const u32, d);
         }
-        for _ in 0..FS_HILOS {
-            let _ = sys::wait();
+        for h in handles {
+            let _ = h.join();
         }
         check!(
             FS_MAL.load(Ordering::Relaxed) == 0,
@@ -1221,6 +1223,42 @@ fn suite() -> u8 {
             "listen duplicado da EADDRINUSE (rc={l2})"
         );
         let _ = sys::close(l1 as u64);
+    }
+
+    // Self-hosting (ruta A): rename, reloj, aleatorio, dup2/fstat.
+    {
+        let _ = sys::mkdir("/tmp/sh-test");
+        let fd = sys::open("/tmp/sh-test/a", abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
+        check!(fd >= 0, "open escribir self-host (fd={fd})");
+        let _ = sys::write_all(fd as u64, b"abc");
+        let _ = sys::close(fd as u64);
+        let rc = sys::rename("/tmp/sh-test/a", "/tmp/sh-test/b");
+        check!(rc == 0, "SYS_RENAME (rc={rc})");
+        let mut ts = abi::Timespec::default();
+        check!(
+            sys::clock_gettime(abi::CLOCK_REALTIME, &mut ts) == 0,
+            "SYS_CLOCK_GETTIME"
+        );
+        let mut rnd = [0u8; 8];
+        check!(sys::getrandom(&mut rnd) == 8, "SYS_GETRANDOM");
+        let fd2 = sys::open("/tmp/sh-test/b", abi::O_RDONLY);
+        check!(fd2 >= 0, "open tras rename (fd={fd2})");
+        let dup = sys::dup2(fd2 as u64, 9);
+        check!(dup == 9, "SYS_DUP2 (rc={dup})");
+        let mut st = abi::Stat::default();
+        check!(sys::fstat(9, &mut st) == 0, "SYS_FSTAT");
+        check!(st.size == 3, "fstat size tras rename");
+        let mtime = ts.tv_sec as u64;
+        check!(sys::utime("/tmp/sh-test/b", mtime) == 0, "SYS_UTIME");
+        let _ = sys::sched_yield();
+        let fdw = sys::open("/tmp/sh-test/c", abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
+        check!(fdw >= 0, "open pwrite test");
+        check!(sys::pwrite(fdw as u64, b"xy", 0) == 2, "SYS_PWRITE");
+        check!(sys::fsync(fdw as u64) == 0, "SYS_FSYNC");
+        let _ = sys::close(fdw as u64);
+        let _ = sys::close(9);
+        let _ = sys::close(fd2 as u64);
+        let _ = sys::unlink("/tmp/sh-test/b");
     }
 
     println!("init: TODO OK — syscalls desde ring 3 (incl. pipe, spawn_io, hilos y GPU)");

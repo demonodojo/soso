@@ -410,6 +410,31 @@ impl<D: BlockDevice> Sosofs<D> {
         self.finish(r)
     }
 
+    /// Renombra o mueve un dirent (mismo volumen).
+    pub fn rename(
+        &mut self,
+        old_dir: u64,
+        old_name: &str,
+        new_dir: u64,
+        new_name: &str,
+        mtime: u64,
+    ) -> Result<(), FsError> {
+        let r = self.rename_inner(old_dir, old_name, new_dir, new_name, mtime);
+        self.finish(r)
+    }
+
+    /// Trunca un fichero a `new_size` bytes.
+    pub fn truncate_file(&mut self, ino: u64, new_size: u64, mtime: u64) -> Result<(), FsError> {
+        let r = self.truncate_inner(ino, new_size, mtime);
+        self.finish(r).map(|_| ())
+    }
+
+    /// Actualiza solo el mtime de un inode.
+    pub fn set_mtime(&mut self, ino: u64, mtime: u64) -> Result<(), FsError> {
+        let r = self.set_mtime_inner(ino, mtime);
+        self.finish(r)
+    }
+
     fn check_dir(&mut self, dir: u64) -> Result<(), FsError> {
         if self.stat_inode(dir)?.file_type != FT_DIR {
             return Err(FsError::NotADir);
@@ -422,7 +447,12 @@ impl<D: BlockDevice> Sosofs<D> {
             return Err(FsError::NameTooLong);
         }
         let mut de =
-            DirentItem { child: child.into(), name_len: name.len() as u8, name: [0; NAME_MAX] };
+            DirentItem {
+                child: child.into(),
+                name_len: name.len() as u8,
+                _pad: [0; 7],
+                name: [0; NAME_MAX],
+            };
         de.name[..name.len()].copy_from_slice(name.as_bytes());
         // Sondeo lineal si el hash colisiona con otro nombre.
         let mut off = name_hash(name.as_bytes());
@@ -643,6 +673,131 @@ impl<D: BlockDevice> Sosofs<D> {
         }
         self.tree_delete(Key::inode(ino))?;
         self.tree_delete(dirent_key)?;
+        Ok(())
+    }
+
+    fn rename_inner(
+        &mut self,
+        old_dir: u64,
+        old_name: &str,
+        new_dir: u64,
+        new_name: &str,
+        mtime: u64,
+    ) -> Result<(), FsError> {
+        self.check_dir(old_dir)?;
+        self.check_dir(new_dir)?;
+        if new_name.is_empty() || old_name.is_empty() {
+            return Err(FsError::NameTooLong);
+        }
+        if self.lookup(new_dir, new_name).is_ok() {
+            return Err(FsError::Exists);
+        }
+        let ino = self.lookup(old_dir, old_name)?;
+        let old_key = self.dirent_key(old_dir, old_name)?;
+        self.tree_delete(old_key)?;
+        self.insert_dirent(new_dir, new_name, ino)?;
+        let st = self.stat_inode(ino)?;
+        let inode = InodeItem {
+            file_type: st.file_type,
+            _pad: [0; 7],
+            size: st.size,
+            mtime: mtime.into(),
+        };
+        let mut payload = [0u8; ITEM_PAYLOAD];
+        payload[..core::mem::size_of::<InodeItem>()].copy_from_slice(inode.as_bytes());
+        self.tree_insert(Key::inode(ino), &payload)?;
+        Ok(())
+    }
+
+    fn truncate_inner(&mut self, ino: u64, new_size: u64, mtime: u64) -> Result<(), FsError> {
+        let st = self.stat_inode(ino)?;
+        if st.file_type != FT_FILE {
+            return Err(FsError::NotAFile);
+        }
+        let old_size = st.size.get();
+        if new_size >= old_size {
+            let inode = InodeItem {
+                file_type: FT_FILE,
+                _pad: [0; 7],
+                size: new_size.into(),
+                mtime: mtime.into(),
+            };
+            let mut payload = [0u8; ITEM_PAYLOAD];
+            payload[..core::mem::size_of::<InodeItem>()].copy_from_slice(inode.as_bytes());
+            self.tree_insert(Key::inode(ino), &payload)?;
+            return Ok(());
+        }
+        let new_size_usize = new_size as usize;
+        let (min, max) = Key::range(ino, KIND_EXTENT);
+        let mut extents = Vec::new();
+        self.scan_range(min, max, &mut extents)?;
+        for (key, payload) in &extents {
+            let off = key.offset as usize;
+            let (ext, _) = ExtentItem::read_from_prefix(payload).map_err(|_| FsError::Corrupt)?;
+            let ext_end = off + ext.block_count.get() as usize * BLOCK_SIZE;
+            if off >= new_size_usize {
+                for i in 0..ext.block_count.get() as u64 {
+                    self.free_block(ext.start_block.get() + i);
+                }
+                self.tree_delete(*key)?;
+            } else if ext_end > new_size_usize {
+                let keep = new_size_usize - off;
+                let want = (keep.div_ceil(BLOCK_SIZE) as u64).min(EXTENT_MAX_BLOCKS);
+                let (start, got) = self.alloc_extent(want)?;
+                let chunk_len = keep.min(got as usize * BLOCK_SIZE);
+                let mut padded = vec![0u8; got as usize * BLOCK_SIZE];
+                if chunk_len > 0 {
+                    self.read_file_range(ino, off, chunk_len, &mut padded[..chunk_len])?;
+                }
+                for (j, bloque) in padded.chunks(BLOCK_SIZE).enumerate() {
+                    self.dev
+                        .write_block(start + j as u64, bloque.try_into().unwrap())
+                        .map_err(|_| FsError::Io)?;
+                }
+                for i in 0..ext.block_count.get() as u64 {
+                    self.free_block(ext.start_block.get() + i);
+                }
+                self.tree_delete(*key)?;
+                let ext_new = ExtentItem {
+                    start_block: start.into(),
+                    block_count: (got as u32).into(),
+                    crc: crate::crc32c(&padded).into(),
+                };
+                let mut pl = [0u8; ITEM_PAYLOAD];
+                pl[..core::mem::size_of::<ExtentItem>()].copy_from_slice(ext_new.as_bytes());
+                self.tree_insert(
+                    Key {
+                        inode: ino,
+                        kind: KIND_EXTENT,
+                        offset: off as u64,
+                    },
+                    &pl,
+                )?;
+            }
+        }
+        let inode = InodeItem {
+            file_type: FT_FILE,
+            _pad: [0; 7],
+            size: new_size.into(),
+            mtime: mtime.into(),
+        };
+        let mut payload = [0u8; ITEM_PAYLOAD];
+        payload[..core::mem::size_of::<InodeItem>()].copy_from_slice(inode.as_bytes());
+        self.tree_insert(Key::inode(ino), &payload)?;
+        Ok(())
+    }
+
+    fn set_mtime_inner(&mut self, ino: u64, mtime: u64) -> Result<(), FsError> {
+        let st = self.stat_inode(ino)?;
+        let inode = InodeItem {
+            file_type: st.file_type,
+            _pad: [0; 7],
+            size: st.size,
+            mtime: mtime.into(),
+        };
+        let mut payload = [0u8; ITEM_PAYLOAD];
+        payload[..core::mem::size_of::<InodeItem>()].copy_from_slice(inode.as_bytes());
+        self.tree_insert(Key::inode(ino), &payload)?;
         Ok(())
     }
 }

@@ -311,6 +311,38 @@ pub fn unlink(dir: u64, name: &str) -> Result<(), SosoFsError> {
     fs.lock().unlink(dir, name)
 }
 
+pub fn rename(
+    old_dir: u64,
+    old_name: &str,
+    new_dir: u64,
+    new_name: &str,
+    mtime: u64,
+) -> Result<(), SosoFsError> {
+    if is_sosomfs(old_dir) || is_sosomfs(new_dir) {
+        return Err(SosoFsError::Io);
+    }
+    let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
+    fs.lock().rename(old_dir, old_name, new_dir, new_name, mtime)
+}
+
+pub fn truncate_path(path: &str, size: u64, mtime: u64) -> Result<(), SosoFsError> {
+    let ino = resolve(path)?;
+    if is_sosomfs(ino) {
+        return Err(SosoFsError::Io);
+    }
+    let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
+    fs.lock().truncate_file(ino, size, mtime)
+}
+
+pub fn utime_path(path: &str, mtime: u64) -> Result<(), SosoFsError> {
+    let ino = resolve(path)?;
+    if is_sosomfs(ino) {
+        return Err(SosoFsError::Io);
+    }
+    let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
+    fs.lock().set_mtime(ino, mtime)
+}
+
 pub fn lookup(dir: u64, name: &str) -> Result<u64, SosoFsError> {
     let entries = read_dir(dir)?;
     entries

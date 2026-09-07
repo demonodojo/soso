@@ -26,6 +26,8 @@ el [`README.md`](README.md) (en inglés).
 | Web | **soso-web** | Leer páginas HTTPS o HTML local (consola o pantalla gráfica) |
 | Instalación | **soso-install** | Copiar el live a un disco NVMe desde soso, sin Linux |
 | Actualización | **soso-update** | Bajar e instalar releases nuevas (programas + kernel) |
+| Desarrollo | **soso-ed**, **soso-forja** | Editar fuentes en `/src/soso`; bucle remoto o plan local (`docs/SELF-HOSTING.md`) |
+| Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
 | Red | **wifi** (builtin) | Escanear y conectar redes WiFi Intel en placa real |
 | Sistema | **halt**, **exit** | Apagar o salir de la shell |
 

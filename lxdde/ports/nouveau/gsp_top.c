@@ -171,3 +171,35 @@ int gsp_top_type_of_engine(uint32_t engine, uint8_t *type, uint8_t *inst)
     }
     return -1;
 }
+
+int gsp_top_pmc_enable_mask(uint8_t type, uint8_t inst, uint32_t *mask_out)
+{
+    unsigned i;
+
+    if (!g_top_ready || !mask_out) {
+        return -1;
+    }
+    for (i = 0; i < g_top_cnt; i++) {
+        if (g_top[i].type != type || g_top[i].inst != inst) {
+            continue;
+        }
+        *mask_out = 1u << g_top[i].reset;
+        return 0;
+    }
+    return -1;
+}
+
+#define NV_PMC_ENABLE 0x000600u
+
+void gsp_mc_device_enable(uint32_t mask)
+{
+    uint32_t cur;
+
+    if (!mask) {
+        return;
+    }
+    cur = gsp_mmio_rd32(NV_PMC_ENABLE);
+    gsp_mmio_wr32(NV_PMC_ENABLE, cur | mask);
+    (void)gsp_mmio_rd32(NV_PMC_ENABLE);
+    (void)gsp_mmio_rd32(NV_PMC_ENABLE);
+}

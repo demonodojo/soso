@@ -235,7 +235,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_SPAWN_IO => sys_spawn_io(a1),
         abi::SYS_CHDIR => sys_chdir(a1, a2),
         abi::SYS_GETCWD => sys_getcwd(a1, a2),
-        abi::SYS_THREAD_SPAWN => sys_thread_spawn(a1, a2, a3),
+        abi::SYS_THREAD_SPAWN => sys_thread_spawn(a1, a2, a3, a4),
         abi::SYS_FUTEX => sys_futex(f, a1, a2, a3, a4),
         abi::SYS_NCPU => Ok(crate::arch::smp::CPUS_ONLINE.load(
             core::sync::atomic::Ordering::Relaxed,
@@ -292,6 +292,19 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_VERSION => sys_version(a1, a2),
         abi::SYS_UPD_WRITE => sys_upd_write(a1, a2, a3, a4),
         abi::SYS_UPD_READ => sys_upd_read(a1, a2, a3, a4),
+        abi::SYS_RENAME => sys_rename(a1, a2, a3, a4),
+        abi::SYS_TRUNCATE => sys_truncate(a1, a2, a3),
+        abi::SYS_CLOCK_GETTIME => sys_clock_gettime(a1, a2),
+        abi::SYS_DUP2 => sys_dup2(a1, a2),
+        abi::SYS_FSTAT => sys_fstat(a1, a2),
+        abi::SYS_UTIME => sys_utime(a1, a2, a3),
+        abi::SYS_FSYNC => sys_fsync(a1),
+        abi::SYS_SCHED_YIELD => sys_sched_yield(f),
+        abi::SYS_GETRANDOM => sys_getrandom(a1, a2, a3),
+        abi::SYS_SET_TLS => sys_set_tls(a1),
+        abi::SYS_MPROTECT => sys_mprotect(a1, a2, a3),
+        abi::SYS_MREMAP => sys_mremap(a1, a2, a3, a4),
+        abi::SYS_PWRITE => sys_pwrite(a1, a2, a3, a4),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -506,7 +519,7 @@ fn flush_stream_write(
     if buf.is_empty() {
         return Ok(());
     }
-    let mtime = crate::arch::pit::uptime_ms() / 1000;
+    let mtime = crate::time::wall_secs();
     if let Some(ino) = *inode {
         with_vfs(|| crate::vfs::append_file(ino, buf, mtime))?;
     } else {
@@ -554,7 +567,7 @@ pub fn take_stdio_fds(stdio: [u64; 3]) -> Result<[Option<Fd>; 3], i64> {
 pub fn drop_fd(fd: Fd) -> Result<(), i64> {
     match fd {
         Fd::WriteBuf { dir, name, data, .. } => {
-            let mtime = crate::arch::pit::uptime_ms() / 1000;
+            let mtime = crate::time::wall_secs();
             with_vfs(|| crate::vfs::create_file(dir, &name, &data, mtime))?;
         }
         Fd::StreamWrite {
@@ -685,7 +698,7 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
             buf.extend_from_slice(data);
             while buf.len() >= STREAM_FLUSH {
                 let chunk: Vec<u8> = buf.drain(..STREAM_FLUSH).collect();
-                let mtime = crate::arch::pit::uptime_ms() / 1000;
+                let mtime = crate::time::wall_secs();
                 if let Some(ino) = *inode {
                     with_vfs(|| crate::vfs::append_file(ino, &chunk, mtime))?;
                 } else {
@@ -811,31 +824,42 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
     let path = resolve_user_path(path_ptr, path_len)?;
     let nuevo = if flags & abi::O_WRONLY != 0 {
         let (dir, name) = resolve_parent(&path)?;
-        // Si existe y es un directorio, no se puede sobreescribir.
-        if let Ok(ino) = with_vfs(|| crate::vfs::lookup(dir, &name))
-            && with_vfs(|| crate::vfs::stat_inode(ino))?.file_type == sosofs::layout::FT_DIR
-        {
-            return Err(-abi::EISDIR);
+        let lookup = with_vfs(|| crate::vfs::lookup(dir, &name));
+        let exists = lookup.is_ok();
+        if flags & abi::O_EXCL != 0 && flags & abi::O_CREAT != 0 && exists {
+            return Err(-abi::EEXIST);
+        }
+        if exists {
+            let ino = lookup.unwrap();
+            if with_vfs(|| crate::vfs::stat_inode(ino))?.file_type == sosofs::layout::FT_DIR {
+                return Err(-abi::EISDIR);
+            }
         }
         let mut data = Vec::new();
         let mut append_ino = None;
         let mut append_pos = 0usize;
-        if flags & abi::O_APPEND != 0
-            && let Ok(ino) = with_vfs(|| crate::vfs::lookup(dir, &name))
-            && with_vfs(|| crate::vfs::stat_inode(ino))?.file_type == sosofs::layout::FT_FILE
-        {
-            append_ino = Some(ino);
-            append_pos = with_vfs(|| crate::vfs::stat_inode(ino))?.size.get() as usize;
-            if !path.starts_with("/var/") && !path.starts_with("/tmp/") {
-                data = with_vfs(|| crate::vfs::read_file(ino))?;
+        if exists && flags & abi::O_APPEND != 0 {
+            let ino = lookup.unwrap();
+            if with_vfs(|| crate::vfs::stat_inode(ino))?.file_type == sosofs::layout::FT_FILE {
+                append_ino = Some(ino);
+                append_pos = with_vfs(|| crate::vfs::stat_inode(ino))?.size.get() as usize;
+                if !path.starts_with("/var/") && !path.starts_with("/tmp/") {
+                    data = with_vfs(|| crate::vfs::read_file(ino))?;
+                }
             }
+        }
+        if flags & abi::O_TRUNC != 0 {
+            data.clear();
+            append_pos = 0;
         }
         let pos = if append_ino.is_some() && (path.starts_with("/var/") || path.starts_with("/tmp/")) {
             append_pos
+        } else if flags & abi::O_TRUNC != 0 || !exists {
+            0
         } else {
             data.len()
         };
-        let stream = path.starts_with("/var/") || path.starts_with("/tmp/");
+        let stream = true;
         if stream {
             Fd::StreamWrite {
                 dir,
@@ -990,7 +1014,7 @@ fn sys_getdents(fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
 fn sys_mkdir(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
     let path = resolve_user_path(path_ptr, path_len)?;
     let (dir, name) = resolve_parent(&path)?;
-    let mtime = crate::arch::pit::uptime_ms() / 1000;
+    let mtime = crate::time::wall_secs();
     with_vfs(|| crate::vfs::mkdir(dir, &name, mtime))?;
     Ok(0)
 }
@@ -1047,11 +1071,13 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
     let opts = user_slice(opts_ptr, core::mem::size_of::<abi::SpawnIo>() as u64)?;
     let opts = unsafe { *(opts.as_ptr() as *const abi::SpawnIo) };
     let path = user_str(opts.path_ptr, opts.path_len)?;
-    let args = if opts.args_len == 0 {
-        ""
-    } else {
-        user_str(opts.args_ptr, opts.args_len)?
-    };
+    let args = read_spawn_args(
+        opts.argv_ptr,
+        opts.argv_count,
+        opts.args_ptr,
+        opts.args_len,
+    )?;
+    let _envp = opts.envp_ptr; // reservado para std (Hito 2)
     let stdio = [opts.stdin_fd, opts.stdout_fd, opts.stderr_fd];
     // Un centinela `FD_SERIAL_TTY` despega al hijo de la sesión SSH del padre:
     // fd 0/1/2 quedan en `Fd::Tty` atados a la consola serie. Sin esto, el
@@ -1063,7 +1089,35 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
     } else {
         super::with_current(|p| p.console)
     };
-    super::spawn_console_io(path, args, super::current_pid(), console, stdio)
+    super::spawn_console_io(path, &args, super::current_pid(), console, stdio)
+}
+
+fn read_spawn_args(
+    argv_ptr: u64,
+    argv_count: u64,
+    fallback_ptr: u64,
+    fallback_len: u64,
+) -> Result<alloc::string::String, i64> {
+    if argv_ptr != 0 && argv_count > 0 {
+        let mut parts: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        for i in 0..argv_count {
+            let pair = argv_ptr + i * 16;
+            let s_ptr = user_read_u64(pair)?;
+            let s_len = user_read_u64(pair + 8)?;
+            parts.push(user_str(s_ptr, s_len)?.into());
+        }
+        return Ok(parts.join(" "));
+    }
+    if fallback_len == 0 {
+        Ok(alloc::string::String::new())
+    } else {
+        Ok(user_str(fallback_ptr, fallback_len)?.into())
+    }
+}
+
+fn user_read_u64(addr: u64) -> Result<u64, i64> {
+    let s = user_slice(addr, 8)?;
+    Ok(u64::from_le_bytes(s.try_into().unwrap()))
 }
 
 fn sys_pipe() -> Result<u64, i64> {
@@ -1357,7 +1411,7 @@ fn convert_writebuf_to_stream(f: &mut Fd, data: &[u8]) -> Result<(), i64> {
     let written = *pos;
     let mut prefix = core::mem::take(out);
     prefix.truncate(written);
-    let mtime = crate::arch::pit::uptime_ms() / 1000;
+    let mtime = crate::time::wall_secs();
     let inode = if prefix.is_empty() {
         None
     } else {
@@ -1383,7 +1437,7 @@ fn convert_writebuf_to_stream(f: &mut Fd, data: &[u8]) -> Result<(), i64> {
     {
         while buf.len() >= STREAM_FLUSH {
             let chunk: Vec<u8> = buf.drain(..STREAM_FLUSH).collect();
-            let mtime = crate::arch::pit::uptime_ms() / 1000;
+            let mtime = crate::time::wall_secs();
             if let Some(ino) = *inode {
                 with_vfs(|| crate::vfs::append_file(ino, &chunk, mtime))?;
             } else {
@@ -1554,7 +1608,7 @@ fn sys_gpu_submit(cmd_ptr: u64, cmd_len: u64) -> Result<u64, i64> {
     crate::drivers::gpu::submit(cmd).map_err(|e| -e)
 }
 
-fn sys_thread_spawn(entry: u64, arg: u64, stack_top: u64) -> Result<u64, i64> {
+fn sys_thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Result<u64, i64> {
     // La pila suele ser mmap anónimo (fault bajo demanda): no exigir PTE
     // presente, solo región mmap escribible o páginas ya mapeadas.
     let stack_lo = stack_top.saturating_sub(16);
@@ -1589,7 +1643,10 @@ fn sys_thread_spawn(entry: u64, arg: u64, stack_top: u64) -> Result<u64, i64> {
     if !user_range_ok(entry, 1, false) {
         return Err(-abi::EFAULT);
     }
-    super::thread_spawn(entry, arg, stack_top)
+    if join_uaddr != 0 && !user_range_ok(join_uaddr, 4, true) {
+        return Err(-abi::EFAULT);
+    }
+    super::thread_spawn(entry, arg, stack_top, join_uaddr)
 }
 
 fn sys_futex(
@@ -1970,5 +2027,285 @@ fn sys_input_poll(out: u64, max: u64) -> Result<u64, i64> {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
         space.write(out, slice).ok_or(-abi::EFAULT)?;
         Ok(got as u64)
+    })
+}
+
+fn sys_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64) -> Result<u64, i64> {
+    let old = resolve_user_path(old_ptr, old_len)?;
+    let new = resolve_user_path(new_ptr, new_len)?;
+    let (old_dir, old_name) = resolve_parent(&old)?;
+    let (new_dir, new_name) = resolve_parent(&new)?;
+    let mtime = crate::time::wall_secs();
+    with_vfs(|| crate::vfs::rename(old_dir, &old_name, new_dir, &new_name, mtime))?;
+    Ok(0)
+}
+
+fn sys_truncate(path_ptr: u64, path_len: u64, size: u64) -> Result<u64, i64> {
+    let path = resolve_user_path(path_ptr, path_len)?;
+    let mtime = crate::time::wall_secs();
+    with_vfs(|| crate::vfs::truncate_path(&path, size, mtime))?;
+    Ok(0)
+}
+
+fn sys_clock_gettime(clock_id: u64, out: u64) -> Result<u64, i64> {
+    if !user_range_ok(out, core::mem::size_of::<abi::Timespec>() as u64, true) {
+        return Err(-abi::EFAULT);
+    }
+    let (sec, nsec) = match clock_id {
+        abi::CLOCK_REALTIME => {
+            let s = crate::time::wall_secs() as i64;
+            (s, 0i64)
+        }
+        abi::CLOCK_MONOTONIC => {
+            let ns = crate::time::monotonic_ns() as i64;
+            (ns / 1_000_000_000, ns % 1_000_000_000)
+        }
+        _ => return Err(-abi::EINVAL),
+    };
+    let ts = abi::Timespec {
+        tv_sec: sec,
+        tv_nsec: nsec,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&ts as *const abi::Timespec).cast::<u8>(),
+            core::mem::size_of::<abi::Timespec>(),
+        )
+    };
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(0)
+    })
+}
+
+fn sys_dup2(oldfd: u64, newfd: u64) -> Result<u64, i64> {
+    if newfd > 255 {
+        return Err(-abi::EBADF);
+    }
+    super::with_current(|p| {
+        let old = p
+            .fds
+            .get(oldfd as usize)
+            .and_then(|s| s.as_ref())
+            .ok_or(-abi::EBADF)?;
+        let cloned = clone_fd(old);
+        while p.fds.len() <= newfd as usize {
+            p.fds.push(None);
+        }
+        if let Some(prev) = p.fds.get_mut(newfd as usize).and_then(|s| s.take()) {
+            drop_fd(prev)?;
+        }
+        p.fds[newfd as usize] = Some(cloned);
+        Ok(newfd)
+    })
+}
+
+fn clone_fd(f: &Fd) -> Fd {
+    match f {
+        Fd::File { inode, data, pos } => Fd::File {
+            inode: *inode,
+            data: data.clone(),
+            pos: *pos,
+        },
+        Fd::LazyFile { inode, size, pos } => Fd::LazyFile {
+            inode: *inode,
+            size: *size,
+            pos: *pos,
+        },
+        Fd::WriteBuf { dir, name, data, pos } => Fd::WriteBuf {
+            dir: *dir,
+            name: name.clone(),
+            data: data.clone(),
+            pos: *pos,
+        },
+        Fd::StreamWrite {
+            dir,
+            name,
+            inode,
+            pos,
+            buf,
+        } => Fd::StreamWrite {
+            dir: *dir,
+            name: name.clone(),
+            inode: *inode,
+            pos: *pos,
+            buf: buf.clone(),
+        },
+        Fd::Dir { entries, pos } => Fd::Dir {
+            entries: entries.clone(),
+            pos: *pos,
+        },
+        Fd::PipeRead(id) => Fd::PipeRead(*id),
+        Fd::PipeWrite(id) => Fd::PipeWrite(*id),
+        Fd::Tcp { slot } => Fd::Tcp { slot: *slot },
+        Fd::Tty => Fd::Tty,
+    }
+}
+
+fn sys_fstat(fd: u64, out: u64) -> Result<u64, i64> {
+    if !user_range_ok(out, core::mem::size_of::<abi::Stat>() as u64, true) {
+        return Err(-abi::EFAULT);
+    }
+    with_fd(fd, |slot| {
+        let stat = match slot {
+            Fd::File { inode, data, .. } => {
+                let st = with_vfs(|| crate::vfs::stat_inode(*inode))?;
+                abi::Stat {
+                    ino: *inode,
+                    size: data.len() as u64,
+                    mtime: st.mtime.get(),
+                    file_type: st.file_type,
+                    _pad: [0; 7],
+                }
+            }
+            Fd::LazyFile { inode, size, .. } => {
+                let st = with_vfs(|| crate::vfs::stat_inode(*inode))?;
+                abi::Stat {
+                    ino: *inode,
+                    size: *size as u64,
+                    mtime: st.mtime.get(),
+                    file_type: st.file_type,
+                    _pad: [0; 7],
+                }
+            }
+            Fd::WriteBuf { data, .. } | Fd::StreamWrite { buf: data, .. } => abi::Stat {
+                ino: 0,
+                size: data.len() as u64,
+                mtime: crate::time::wall_secs(),
+                file_type: abi::FT_FILE,
+                _pad: [0; 7],
+            },
+            Fd::Dir { .. } => {
+                return Err(-abi::EISDIR);
+            }
+            _ => return Err(-abi::EBADF),
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&stat as *const abi::Stat).cast::<u8>(),
+                core::mem::size_of::<abi::Stat>(),
+            )
+        };
+        super::with_current(|p| {
+            let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+            space.write(out, bytes).ok_or(-abi::EFAULT)?;
+            Ok(0u64)
+        })
+    })
+}
+
+fn sys_utime(path_ptr: u64, path_len: u64, mtime: u64) -> Result<u64, i64> {
+    let path = resolve_user_path(path_ptr, path_len)?;
+    with_vfs(|| crate::vfs::utime_path(&path, mtime))?;
+    Ok(0)
+}
+
+fn sys_fsync(fd: u64) -> Result<u64, i64> {
+    with_fd(fd, |slot| {
+        match slot {
+            Fd::WriteBuf { dir, name, data, .. } => {
+                let mtime = crate::time::wall_secs();
+                with_vfs(|| crate::vfs::create_file(*dir, name, data, mtime))?;
+            }
+            Fd::StreamWrite {
+                dir,
+                name,
+                inode,
+                buf,
+                ..
+            } => {
+                flush_stream_write(*dir, name, inode, buf)?;
+            }
+            _ => {}
+        }
+        Ok(0)
+    })
+}
+
+fn sys_sched_yield(f: &SyscallFrame) -> Result<u64, i64> {
+    super::block_current(ctx_from_frame(f), State::Runnable);
+}
+
+fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> Result<u64, i64> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let dst = user_slice_mut(buf, len)?;
+    for chunk in dst.chunks_mut(8) {
+        let mut v: u64 = 0;
+        let ok = unsafe { core::arch::x86_64::_rdrand64_step(&mut v) };
+        if ok == 0 {
+            return Err(-abi::EIO);
+        }
+        for (i, b) in chunk.iter_mut().enumerate() {
+            *b = (v >> (i * 8)) as u8;
+        }
+    }
+    Ok(len)
+}
+
+fn sys_set_tls(base: u64) -> Result<u64, i64> {
+    super::with_current(|p| {
+        p.tls_base = base;
+    });
+    if base != 0 {
+        unsafe {
+            x86_64::registers::model_specific::FsBase::write(x86_64::VirtAddr::new(base));
+        }
+    }
+    Ok(0)
+}
+
+fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
+    let writable = prot & abi::PROT_WRITE != 0;
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space
+            .set_prot(addr, len, writable)
+            .ok_or(-abi::EINVAL)?;
+        Ok(0)
+    })
+}
+
+fn sys_mremap(addr: u64, old_len: u64, new_len: u64, _flags: u64) -> Result<u64, i64> {
+    if new_len <= old_len {
+        return Ok(addr);
+    }
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space
+            .grow_anon(addr, old_len, new_len)
+            .ok_or(-abi::ENOMEM)
+    })
+}
+
+fn sys_pwrite(fd: u64, buf: u64, len: u64, offset: u64) -> Result<u64, i64> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let data = user_slice(buf, len)?;
+    with_fd(fd, |f| match f {
+        Fd::WriteBuf { data: out, .. } | Fd::StreamWrite { buf: out, .. } => {
+            let end = offset
+                .checked_add(len)
+                .ok_or(-abi::EINVAL)? as usize;
+            if end > out.len() {
+                out.resize(end, 0);
+            }
+            out[offset as usize..end].copy_from_slice(data);
+            Ok(len)
+        }
+        Fd::File { data: out, .. } => {
+            let end = offset
+                .checked_add(len)
+                .ok_or(-abi::EINVAL)? as usize;
+            if end > out.len() {
+                out.resize(end, 0);
+            }
+            out[offset as usize..end].copy_from_slice(data);
+            Ok(len)
+        }
+        _ => Err(-abi::EBADF),
     })
 }

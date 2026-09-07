@@ -96,6 +96,33 @@ pub const SYS_UPD_WRITE: u64 = 68;
 /// Lee del hueco: `(which, offset, buf, len)`. Devuelve bytes leídos.
 pub const SYS_UPD_READ: u64 = 69;
 
+/// Renombra o mueve: `(old_ptr, old_len, new_ptr, new_len)`.
+pub const SYS_RENAME: u64 = 70;
+/// Trunca un fichero: `(path_ptr, path_len, size)`.
+pub const SYS_TRUNCATE: u64 = 71;
+/// Reloj de pared: `(clock_id, out: *mut Timespec)`.
+pub const SYS_CLOCK_GETTIME: u64 = 72;
+/// Duplica un descriptor: `(oldfd, newfd)`.
+pub const SYS_DUP2: u64 = 73;
+/// Stat por fd: `(fd, out: *mut Stat)`.
+pub const SYS_FSTAT: u64 = 74;
+/// Toca mtime: `(path_ptr, path_len, mtime_secs)`.
+pub const SYS_UTIME: u64 = 75;
+/// Sincroniza un fd abierto para escritura.
+pub const SYS_FSYNC: u64 = 76;
+/// Cede la CPU al scheduler.
+pub const SYS_SCHED_YIELD: u64 = 77;
+/// Rellena bytes aleatorios (`buf`, `len`) vía RDRAND.
+pub const SYS_GETRANDOM: u64 = 78;
+/// Establece FS_BASE del hilo actual (`tls_base`).
+pub const SYS_SET_TLS: u64 = 79;
+/// Cambia permisos de un rango mmap: `(addr, len, prot)`.
+pub const SYS_MPROTECT: u64 = 80;
+/// Redimensiona un mmap: `(addr, old_len, new_len, flags)`.
+pub const SYS_MREMAP: u64 = 81;
+/// Escribe en fd a offset fijo sin mover el cursor: `(fd, buf, len, offset)`.
+pub const SYS_PWRITE: u64 = 82;
+
 pub const UPD_WHICH_MAILBOX: u64 = 0;
 pub const UPD_WHICH_KERNEL: u64 = 1;
 pub const UPD_MAILBOX_SIZE: usize = 4096;
@@ -444,6 +471,15 @@ pub const O_WRONLY: u64 = 1;
 pub const O_APPEND: u64 = 2;
 /// Con `O_WRONLY`: crea el fichero si no existe.
 pub const O_CREAT: u64 = 4;
+/// Con `O_WRONLY`: trunca el fichero existente al abrir.
+pub const O_TRUNC: u64 = 8;
+/// Con `O_CREAT`: falla si el fichero ya existe.
+pub const O_EXCL: u64 = 16;
+
+/// Reloj de pared (epoch Unix).
+pub const CLOCK_REALTIME: u64 = 0;
+/// Reloj monótono desde el arranque.
+pub const CLOCK_MONOTONIC: u64 = 1;
 
 /// Valor de stdio en `SpawnIo` para usar la tty del proceso (fd 0/1/2).
 pub const FD_INHERIT_TTY: u64 = u64::MAX;
@@ -468,7 +504,14 @@ pub const SEEK_END: u64 = 2;
 pub const FT_FILE: u8 = 1;
 pub const FT_DIR: u8 = 2;
 
-pub const NAME_MAX: usize = 55;
+pub const NAME_MAX: usize = 255;
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
 
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
@@ -489,7 +532,6 @@ pub struct Dirent {
     pub file_type: u8,
     pub name_len: u8,
     pub name: [u8; NAME_MAX],
-    pub _pad: u8,
 }
 
 impl Dirent {
@@ -500,7 +542,7 @@ impl Dirent {
 
 impl Default for Dirent {
     fn default() -> Self {
-        Self { ino: 0, file_type: 0, name_len: 0, name: [0; NAME_MAX], _pad: 0 }
+        Self { ino: 0, file_type: 0, name_len: 0, name: [0; NAME_MAX] }
     }
 }
 
@@ -517,6 +559,12 @@ pub struct SpawnIo {
     pub stdin_fd: u64,
     pub stdout_fd: u64,
     pub stderr_fd: u64,
+    /// Puntero a tabla `[(*const u8, len); ...]`; 0 = usar `args_ptr`/`args_len`.
+    pub argv_ptr: u64,
+    pub argv_count: u64,
+    /// Puntero a tabla de cadenas `KEY=VAL`; puede ser 0.
+    pub envp_ptr: u64,
+    pub envp_count: u64,
 }
 
 /// wait() devuelve (pid << 8) | (código de salida & 0xff).

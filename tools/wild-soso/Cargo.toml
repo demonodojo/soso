@@ -1,0 +1,10 @@
+[package]
+name = "wild-soso"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Wrapper del enlazador wild para soso (Hito 3d)"
+
+[[bin]]
+name = "wild"
+path = "src/main.rs"

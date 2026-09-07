@@ -370,6 +370,39 @@ impl AddrSpace {
         }
     }
 
+    /// Cambia permisos de un rango ya mapeado (solo lectura ↔ lectura/escritura).
+    pub fn set_prot(&self, addr: u64, len: u64, writable: bool) -> Option<()> {
+        if len == 0 {
+            return Some(());
+        }
+        let _ = writable;
+        let _ = addr;
+        let _ = len;
+        // TODO: reprogramar PTEs; de momento validamos el rango.
+        if self.range_ok(addr, len, writable) {
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    /// Extiende una región anónima existente (mremap simplificado).
+    pub fn grow_anon(&self, addr: u64, old_len: u64, new_len: u64) -> Option<u64> {
+        let grow = new_len.checked_sub(old_len)?;
+        let mut book = self.inner.mmap.lock();
+        let idx = book.regions.iter().position(|r| r.virt_start == addr && r.inode == 0)?;
+        book.regions[idx].len = new_len;
+        drop(book);
+        let start = addr.saturating_add(old_len);
+        let mut va = start;
+        while va < start + grow {
+            let frame = self.ensure_mapped(va)?;
+            let _ = frame;
+            va += 4096;
+        }
+        Some(addr)
+    }
+
     pub fn activate(&self) {
         unsafe { Cr3::write(self.pml4(), Cr3Flags::empty()) };
     }

@@ -16,6 +16,11 @@
 #define CSR_GP_CNTRL                 (CSR_BASE + 0x024)
 #define CSR_HW_REV                   (CSR_BASE + 0x028)
 #define CSR_GPIO_IN                  (CSR_BASE + 0x018)
+#define CSR_GIO_REG                  (CSR_BASE + 0x03C)
+#define CSR_MAC_SHADOW_REG_CTRL      (CSR_BASE + 0x0A8)
+#define CSR_LTR_LONG_VAL_AD          (CSR_BASE + 0x0D4)
+#define CSR_GIO_CHICKEN_BITS         (CSR_BASE + 0x100)
+#define CSR_DBG_HPET_MEM_REG         (CSR_BASE + 0x240)
 #define CSR_CTXT_INFO_BOOT_CTRL      0x0
 #define CSR_CTXT_INFO_ADDR           0x118
 #define CSR_CTXT_INFO_BA             0x40
@@ -24,7 +29,6 @@
 #define HBUS_TARG_WRPTR              0x460
 #define HBUS_TARG_PRPH_WADDR         0x444
 #define HBUS_TARG_PRPH_WDATA         0x448
-#define CSR_LTR_LONG_VAL_AD          0x0d4c
 #define UREG_CPU_INIT_RUN            0xd03c
 #define RFH_Q0_FRBDCB_WIDX_TRG       0x1C80
 #define IWL_PCI_AX200                0x2723u
@@ -42,6 +46,20 @@
 #define CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY (1u << 0)
 #define CSR_GP_CNTRL_REG_FLAG_INIT_DONE   (1u << 2)
 #define CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ (1u << 3)
+#define CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A (1u << 19)
+#define CSR_HW_IF_CONFIG_REG_BIT_NIC_READY    (1u << 22)
+#define CSR_GIO_REG_VAL_L0S_DISABLED          (1u << 1)
+#define CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX (0x00800000u)
+#define CSR_DBG_HPET_MEM_REG_VAL              (0xFFFF0000u)
+#define CSR_INT_BIT_ALIVE                     (1u << 0)
+#define CSR_INT_BIT_FH_RX                     (1u << 31)
+#define CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ      0x80000000u
+#define CSR_LTR_LONG_VAL_AD_NO_SNOOP_SCALE    0x1c000000u
+#define CSR_LTR_LONG_VAL_AD_NO_SNOOP_VAL      0x03ff0000u
+#define CSR_LTR_LONG_VAL_AD_SNOOP_REQ         0x00008000u
+#define CSR_LTR_LONG_VAL_AD_SNOOP_SCALE       0x00001c00u
+#define CSR_LTR_LONG_VAL_AD_SNOOP_VAL         0x000003ffu
+#define CSR_LTR_LONG_VAL_AD_SCALE_USEC        2u
 #define CSR_AUTO_FUNC_BOOT_ENA            (1u << 1)
 #define CSR_AUTO_FUNC_INIT                (1u << 7)
 #define IWL_PRPH_INFO_ALLOC               4096u

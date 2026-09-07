@@ -34,6 +34,7 @@ pub const UPD_KERNEL_SLOT_SIZE: usize = 64 * 1024 * 1024;
 /// cada pasada.
 pub const PACK_SKIP_DIRS: &[&str] = &[
     "var/actualiza-prueba/",
+    "src/soso/",
     // `/models` es el volumen sosomfs, de sólo lectura: `create_file` devuelve
     // EIO ahí sin más. Los modelos no viajan en el pack del OS, vienen en su
     // propio volumen, así que incluirlos sólo servía para abortar la

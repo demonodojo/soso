@@ -990,17 +990,24 @@ int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
         return -1;
     }
 #endif
-    gsp_dma_free(&dma);
 
     scratch = gsp_mmio_rd32(NV_PBUS_SW_SCRATCH_0E);
     if (scratch & 0xffff0000u) {
         lx_printk("nouveau-lx: FWSEC-FRTS error scratch=0x%08x\n", scratch);
+        gsp_dma_free(&dma);
         return -1;
     }
-    if (gsp_fwsec_wait_wpr2(&wpr2_lo, 100u) != 0) {
-        lx_printk("nouveau-lx: FWSEC-FRTS terminó pero WPR2 sigue vacío\n");
+    if (gsp_fwsec_wait_wpr2(&wpr2_lo, 4000u) != 0) {
+        uint32_t wpr2_raw_lo = gsp_mmio_rd32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
+        uint32_t wpr2_raw_hi = gsp_mmio_rd32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
+        lx_printk("nouveau-lx: FWSEC-FRTS terminó pero WPR2 sigue vacío "
+                  "(raw lo=0x%08x hi=0x%08x scratch=0x%08x)\n",
+                  wpr2_raw_lo, wpr2_raw_hi, scratch);
+        gsp_dma_free(&dma);
         return -1;
     }
+    gsp_dma_free(&dma);
+
     if (wpr2_lo != frts_addr) {
         lx_printk("nouveau-lx: FWSEC WPR2 @0x%llx esperaba 0x%llx\n",
                   (unsigned long long)wpr2_lo, (unsigned long long)frts_addr);

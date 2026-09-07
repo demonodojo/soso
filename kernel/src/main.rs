@@ -14,6 +14,7 @@ mod net;
 mod qemu;
 mod som_import;
 mod task;
+mod time;
 mod version;
 
 #[cfg(feature = "lxdde")]
@@ -109,6 +110,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // residente salía a 137 ms/capa (2026-08-02).
     println!("boot: tsc");
     arch::tsc::calibrate();
+    arch::rtc::init();
 
     println!("boot: pci");
     drivers::pci::init_ecam();

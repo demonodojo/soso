@@ -1,6 +1,7 @@
 /* G3 ola 2: falcon MMIO + DMA ga102 (HS v2 ucode, sin WPR nvkm). */
 #include "falcon_lx.h"
 #include "gsp_mmio.h"
+#include "gsp_top.h"
 #include "nvfw_lx.h"
 #include "lx_emul.h"
 
@@ -95,6 +96,36 @@ int falcon_lx_reset(unsigned base)
 
     flcn_wr32(base, 0x10cu, 0u);
     return flcn_select(base);
+}
+
+static int flcn_reset_wait_mem_scrubbing(unsigned base)
+{
+    unsigned t;
+
+    flcn_wr32(base, 0x040u, 0u);
+    t = 20u;
+    while (t--) {
+        if (!(flcn_rd32(base, 0x0f4u) & 0x1000u)) {
+            return 0;
+        }
+        lx_mdelay(1);
+    }
+    return -1;
+}
+
+int falcon_lx_enable(unsigned falcon_base, uint8_t top_type, uint8_t top_inst)
+{
+    uint32_t pmc_mask = 0;
+
+    if (gsp_top_pmc_enable_mask(top_type, top_inst, &pmc_mask) == 0) {
+        gsp_mc_device_enable(pmc_mask);
+    }
+    if (flcn_reset_wait_mem_scrubbing(falcon_base) != 0) {
+        lx_printk("nouveau-lx: falcon enable mem scrub timeout\n");
+        return -1;
+    }
+    flcn_wr32(falcon_base, 0x084u, gsp_mmio_rd32(0u));
+    return 0;
 }
 
 static int flcn_dma_done(unsigned base)
@@ -264,6 +295,11 @@ int falcon_lx_hsfw_boot_mbox(unsigned falcon_base, const struct acr_fw_blob *blo
         return -1;
     }
 
+    if (falcon_lx_enable(falcon_base, GSP_TOP_TYPE_SEC2, 0) != 0) {
+        lx_printk("nouveau-lx: falcon %s enable falló\n", name);
+        return -1;
+    }
+
     lx_printk("nouveau-lx: falcon %s load imem=%u dmem=%u engine=%u ucode=%u\n",
               name, fw.imem_size, fw.dmem_size, fw.engine_id, fw.ucode_id);
 
@@ -313,6 +349,11 @@ int falcon_lx_raw_boot(unsigned falcon_base, const struct falcon_lx_raw *raw)
 
     if (falcon_lx_reset(falcon_base) != 0) {
         lx_printk("nouveau-lx: falcon %s reset falló\n", name);
+        return -1;
+    }
+
+    if (falcon_lx_enable(falcon_base, GSP_TOP_TYPE_GSP, 0) != 0) {
+        lx_printk("nouveau-lx: falcon %s enable falló\n", name);
         return -1;
     }
 

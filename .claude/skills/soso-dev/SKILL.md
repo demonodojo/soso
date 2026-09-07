@@ -334,3 +334,15 @@ comportamiento distinto (skill `soso-user-manual`).
 | El live se queda en bucle «no encuentra la red» | `net::poll()` resondeaba el bus entero por vuelta al no haber NIC. Ya está: `try_attach` va limitada a 1/s y las sondas cachean. Si vuelve a pasar, mira qué `println!` se repite antes de teorizar |
 | La suite se cuelga (QEMU vivo, log de serie parado hace minutos) | `kill <pid>` de ese QEMU concreto; el arnés recoge y sigue. Suele ser el shard `llm-dense` |
 | Un cambio en el arranque cuelga un shard minutos después | ¿Has metido un `pci::enumerate()` post-init? Reescribe los BAR de dispositivos vivos. Usa `pci::devices()` (ver `soso-architecture`) |
+
+## Self-hosting (ruta A)
+
+| Comando | Acción |
+|---------|--------|
+| `cargo run -p soso-forja-server` | Servidor host en `:8740` (sync/build remoto) |
+| `soso-forja all --host 10.0.2.2` | Guest: sync + build + `soso-update aplicar --local` |
+| `soso-forja local` | Plan de unidades en `/src/soso/forja-unit-graph.txt` |
+| `cargo test -p sosofs --features std` | sosofs host-first (rename, roundtrip) |
+| `docs/SELF-HOSTING.md` | Hitos 0–4 y verificación |
+
+Tras cambiar el formato sosofs (`SOSOFS11`), regenerar imagen: `cargo xtask mkfs`.

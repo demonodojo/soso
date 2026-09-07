@@ -28,6 +28,60 @@ static void iwl_write_prph(struct iwl_ax211_priv *iwl, uint32_t addr, uint32_t v
     iwl_write32(iwl, HBUS_TARG_PRPH_WDATA, val);
 }
 
+static void iwl_set_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask)
+{
+    iwl_write32(iwl, off, iwl_read32(iwl, off) | mask);
+}
+
+static int iwl_poll_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask,
+                        uint32_t want, int ms)
+{
+    while (ms-- > 0) {
+        if ((iwl_read32(iwl, off) & mask) == want)
+            return 0;
+        lx_mdelay(1);
+    }
+    return -1;
+}
+
+static int iwl_prepare_card_hw(struct iwl_ax211_priv *iwl)
+{
+    if (iwl_poll_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
+                     CSR_HW_IF_CONFIG_REG_BIT_NIC_READY, 200) == 0)
+        return 0;
+    iwl_set_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_NIC_READY);
+    if (iwl_poll_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
+                     CSR_HW_IF_CONFIG_REG_BIT_NIC_READY, 200) != 0) {
+        lx_printk("iwl_trans: NIC no listo\n");
+        return -1;
+    }
+    return 0;
+}
+
+static void iwl_enable_fw_load_int_ctx_info(struct iwl_ax211_priv *iwl)
+{
+    uint32_t mask = CSR_INT_BIT_ALIVE | CSR_INT_BIT_FH_RX;
+
+    iwl_write32(iwl, CSR_INT_MASK, mask);
+}
+
+static void iwl_pcie_set_ltr(struct iwl_ax211_priv *iwl)
+{
+    uint32_t ltr_val;
+
+    /* iwl_trans_pcie_set_ltr: familia 22000 (AX200 PCIe), no integrada. */
+    if (iwl->gen3)
+        return;
+
+    ltr_val = CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ |
+              (CSR_LTR_LONG_VAL_AD_SCALE_USEC << 26) |
+              (250u << 16) |
+              CSR_LTR_LONG_VAL_AD_SNOOP_REQ |
+              (CSR_LTR_LONG_VAL_AD_SCALE_USEC << 10) |
+              250u;
+    iwl_write32(iwl, CSR_LTR_LONG_VAL_AD, ltr_val);
+}
+
 static int iwl_wait_mac_ready(struct iwl_ax211_priv *iwl, int ms)
 {
     while (ms-- > 0) {
@@ -45,6 +99,24 @@ static void iwl_reset(struct iwl_ax211_priv *iwl)
     lx_mdelay(10);
     iwl_write32(iwl, CSR_RESET, 0);
     lx_mdelay(10);
+}
+
+static int iwl_gen2_apm_init(struct iwl_ax211_priv *iwl)
+{
+    iwl_reset(iwl);
+
+    iwl_set_bit(iwl, CSR_GIO_CHICKEN_BITS, CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX);
+    iwl_set_bit(iwl, CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL);
+    iwl_set_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A);
+    iwl_set_bit(iwl, CSR_GIO_REG, CSR_GIO_REG_VAL_L0S_DISABLED);
+
+    iwl_write32(iwl, CSR_GP_CNTRL,
+                CSR_GP_CNTRL_REG_FLAG_INIT_DONE | CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+    if (iwl_wait_mac_ready(iwl, 2000) != 0) {
+        lx_printk("iwl_trans: MAC no listo\n");
+        return -1;
+    }
+    return 0;
 }
 
 static int iwl_apm_init(struct iwl_ax211_priv *iwl)
@@ -163,10 +235,14 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
 {
     struct iwl_context_info *ctxt;
 
-    if (iwl_apm_init(iwl) != 0)
+    if (iwl_prepare_card_hw(iwl) != 0)
+        return -1;
+    if (iwl_gen2_apm_init(iwl) != 0)
         return -1;
     if (iwl_alloc_queues(iwl) != 0)
         return -1;
+
+    iwl_set_bit(iwl, CSR_MAC_SHADOW_REG_CTRL, 0x800fffffu);
 
     ctxt = lx_dma_alloc_coherent(0, sizeof(*ctxt), &iwl->ctxt_dma, GFP_KERNEL);
     if (!ctxt)
@@ -191,8 +267,11 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
         return -1;
 
     iwl_write32(iwl, CSR_INT, 0xffffffffu);
+    iwl_enable_fw_load_int_ctx_info(iwl);
     iwl_write64(iwl, CSR_CTXT_INFO_BA, iwl->ctxt_dma);
     lx_printk("iwlwifi: context-info gen2 BA=0x%llx\n", (unsigned long long)iwl->ctxt_dma);
+
+    iwl_pcie_set_ltr(iwl);
     iwl_write_prph(iwl, UREG_CPU_INIT_RUN, 1);
 
     for (int t = 0; t < 500; t++) {

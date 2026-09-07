@@ -178,6 +178,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hola-std"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+ "soso-std",
+]
+
+[[package]]
 name = "init"
 version = "0.1.0"
 dependencies = [
@@ -404,6 +412,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "soso-ed"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+]
+
+[[package]]
+name = "soso-forja"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+ "soso-update-core",
+]
+
+[[package]]
 name = "soso-gpu"
 version = "0.1.0"
 dependencies = [
@@ -454,6 +477,15 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "sosomodel",
+]
+
+[[package]]
+name = "soso-std"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+ "soso-abi",
+ "spin",
 ]
 
 [[package]]

@@ -103,7 +103,12 @@ impl<'d, D: BlockDevice> Builder<'d, D> {
         if name.len() > NAME_MAX {
             return Err(BuildError::NameTooLong(name.into()));
         }
-        let mut de = DirentItem { child: child.into(), name_len: name.len() as u8, name: [0; NAME_MAX] };
+        let mut de = DirentItem {
+            child: child.into(),
+            name_len: name.len() as u8,
+            _pad: [0; 7],
+            name: [0; NAME_MAX],
+        };
         de.name[..name.len()].copy_from_slice(name.as_bytes());
         // Sondeo lineal por si dos nombres colisionan en el hash.
         let mut off = name_hash(name.as_bytes());

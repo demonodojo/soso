@@ -7,6 +7,7 @@ pub mod ioapic;
 pub mod irq;
 pub mod percpu;
 pub mod pit;
+pub mod rtc;
 pub mod smp;
 pub mod tsc;
 pub mod sse;
