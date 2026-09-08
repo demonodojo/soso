@@ -102,6 +102,8 @@ pub fn load_lazy(
     check_exec(&elf)?;
     let mut brk = USER_BASE;
     let mut tls_base = 0u64;
+    let mut load_lo = u64::MAX;
+    let mut load_hi = 0u64;
     for ph in elf.program_iter() {
         let ty = ph.get_type()?;
         if ty == Type::Tls {
@@ -117,6 +119,12 @@ pub fn load_lazy(
         let offset = ph.offset();
         if memsz == 0 {
             continue;
+        }
+        if filesz > memsz {
+            return Err("filesz > memsz");
+        }
+        if offset.checked_add(filesz).is_none_or(|end| end > file_size) {
+            return Err("segmento truncado");
         }
         if vaddr < USER_BASE || vaddr.checked_add(memsz).is_none_or(|end| end > BRK_MAX) {
             return Err("segmento fuera del rango de usuario");
@@ -147,9 +155,15 @@ pub fn load_lazy(
             page += 4096;
         }
         brk = brk.max(vaddr + memsz);
+        load_lo = load_lo.min(vaddr);
+        load_hi = load_hi.max(vaddr + memsz);
+    }
+    let entry = elf.header.pt2.entry_point();
+    if load_lo == u64::MAX || entry < load_lo || entry >= load_hi {
+        return Err("entry fuera de segmentos cargados");
     }
     Ok((
-        elf.header.pt2.entry_point(),
+        entry,
         brk.next_multiple_of(4096),
         tls_base,
     ))

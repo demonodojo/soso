@@ -29,8 +29,8 @@ static int append_rt(struct iwl_fw_image *fw, const uint8_t *data, uint32_t len)
 {
     if (fw->rt_n >= IWL_FW_RT_MAX)
         return -1;
-    if (!len)
-        return 0;
+    if (len < 4)
+        return -1;
     uint8_t *buf = lx_kmalloc(len, GFP_KERNEL);
     if (!buf)
         return -1;
@@ -43,7 +43,7 @@ static int append_rt(struct iwl_fw_image *fw, const uint8_t *data, uint32_t len)
 
 static int is_separator(const struct iwl_fw_rt_section *sec, uint32_t magic)
 {
-    return sec->len == 8 && le32(sec->data) == magic;
+    return sec->len >= 4 && le32(sec->data) == magic;
 }
 
 int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned long fw_len)
@@ -66,8 +66,8 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
         uint32_t type = le32(pos);
         uint32_t length = le32(pos + 4);
         pos += 8;
-        if (pos + length > end)
-            break;
+        if (length > (unsigned long)(end - pos))
+            return -1;
         switch (type) {
         case IWL_UCODE_TLV_INST:
             if (copy_section(&iwl->fw.inst, pos, length))
@@ -90,8 +90,6 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
                 return -1;
             break;
         case IWL_UCODE_TLV_SEC_RT:
-        case IWL_UCODE_TLV_SEC_INIT:
-        case IWL_UCODE_TLV_SEC_WOWLAN:
             if (append_rt(&iwl->fw, pos, length))
                 return -1;
             break;
@@ -108,11 +106,18 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
         default:
             break;
         }
-        pos += (length + 3) & ~3u;
+        {
+            unsigned long padded = ((unsigned long)length + 3ul) & ~3ul;
+            if (padded > (unsigned long)(end - pos))
+                return -1;
+            pos += padded;
+        }
     }
+    if (pos != end)
+        return -1;
 
     if (iwl->fw.rt_n > 0) {
-        lx_printk("iwl_fw: SEC_RT/INIT %d secciones\n", iwl->fw.rt_n);
+        lx_printk("iwl_fw: SEC_RT %d secciones\n", iwl->fw.rt_n);
         return 0;
     }
     if (!iwl->fw.inst.len || !iwl->fw.data.len) {
@@ -199,21 +204,24 @@ static int upload_rt(struct iwl_fw_image *fw, struct iwl_context_info_dram *dram
             phase = PHASE_PAGING;
             continue;
         }
-        if (sec->len == 8)
-            continue;
+        /* iwl_store_ucode_sec: el primer u32 es el offset SRAM, no ucode.
+         * ctxt-info apunta al payload igual que iwl_pcie_init_fw_sec. Copiar
+         * el offset al DMA desplazaba cuatro bytes cada sección firmada. */
+        if (sec->len <= 4)
+            return -1;
         switch (phase) {
         case PHASE_LMAC:
-            lmac = dram_push(dram->lmac_img, lmac, sec->data, sec->len);
+            lmac = dram_push(dram->lmac_img, lmac, sec->data + 4, sec->len - 4);
             if (lmac < 0)
                 return -1;
             break;
         case PHASE_UMAC:
-            umac = dram_push(dram->umac_img, umac, sec->data, sec->len);
+            umac = dram_push(dram->umac_img, umac, sec->data + 4, sec->len - 4);
             if (umac < 0)
                 return -1;
             break;
         case PHASE_PAGING:
-            paging = dram_push(dram->virtual_img, paging, sec->data, sec->len);
+            paging = dram_push(dram->virtual_img, paging, sec->data + 4, sec->len - 4);
             if (paging < 0)
                 return -1;
             break;

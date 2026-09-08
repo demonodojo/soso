@@ -261,10 +261,11 @@ static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
             bd[i] = iwl->rx_page_dma + (uint64_t)i * IWL_GEN2_RX_SZ;
         iwl->rx_write = IWL_GEN2_RX_N - 1;
     } else {
-        /* iwl_pcie_restock_bd (22000): RBD = page_dma | vid, vid = i + 1. */
+        /* iwl_pcie_restock_bd (22000): RBD = page_dma | vid, vid = i + 1.
+         * WIDX empieza en N-1 como gen3 — con 0 el FW no recibe RBD y no ALIVE. */
         for (i = 0; i < IWL_GEN2_RX_N; i++)
             bd[i] = (iwl->rx_page_dma + (uint64_t)i * IWL_GEN2_RX_SZ) | (uint64_t)(i + 1u);
-        iwl->rx_write = 0;
+        iwl->rx_write = IWL_GEN2_RX_N - 1;
     }
     iwl->rx_read = 0;
     iwl->cmd_write = 0;
@@ -442,9 +443,13 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
     {
         uint32_t inta = iwl_read32(iwl, CSR_INT);
         uint32_t gp = iwl_read32(iwl, CSR_GP_CNTRL);
+        uint16_t rb_hw = iwl->rb_stts ? (iwl->rb_stts[0] & 0x0fffu) : 0;
 
-        lx_printk("iwl_trans: timeout ALIVE (AX200 gen2) INT=0x%08x GP=0x%08x%s%s\n",
-                  inta, gp,
+        lx_printk("iwl_trans: timeout ALIVE (AX200 gen2) INT=0x%08x GP=0x%08x "
+                  "rb_hw=0x%03x rx_read=%u rx_write=%u WIDX=0x%x%s%s\n",
+                  inta, gp, rb_hw, (unsigned)iwl->rx_read,
+                  (unsigned)iwl->rx_write,
+                  (unsigned)(iwl->rx_write & ~7u),
                   (inta & CSR_INT_BIT_SW_ERR) ? " SW_ERR" : "",
                   !(gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW) ? " RF_KILL" : "");
     }

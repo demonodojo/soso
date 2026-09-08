@@ -723,6 +723,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "soso-resize-core"
+version = "0.1.0"
+dependencies = [
+ "gptdisk",
+ "sha2",
+]
+
+[[package]]
 name = "soso-rt"
 version = "0.1.0"
 dependencies = [
@@ -1141,6 +1149,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "soso-abi",
+ "soso-resize-core",
  "soso-update-core",
 ]
 

@@ -9,6 +9,7 @@
 //! marcos abandonados no importan.
 
 pub mod addrspace;
+pub mod argv;
 pub mod elf;
 pub mod futex;
 pub mod mmap;
@@ -563,6 +564,12 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
             return false;
         }
         if space.is_mapped(addr & !0xfff) {
+            // Tras mprotect la PTE puede ser RO mientras la región sigue
+            // marcada writable; devolver true aquí reintentaría la store
+            // en bucle (colgaba mprotect-test en init).
+            if is_write && !space.range_ok(addr, 1, true) {
+                return false;
+            }
             return true;
         }
         // Presión de memoria: evictar pesos mmap RO antes de pedir frames nuevos.
@@ -686,6 +693,14 @@ pub fn spawn_console(
     parent: u64,
     console: Console,
 ) -> Result<u64, i64> {
+    // Convención del crt0 (`libsoso::args_for_main`): argv[0] es siempre el
+    // path del binario y `main()` recibe argv[1..]. Sin el path aquí, un
+    // `spawn("/bin/init", "sleep 5000")` llegaba como argv=["sleep 5000"] y el
+    // hijo se quedaba sin argumentos.
+    let mut argv = vec![String::from(path)];
+    if !args.is_empty() {
+        argv.push(String::from(args));
+    }
     let env = {
         let procs = PROCS.lock();
         procs
@@ -694,32 +709,38 @@ pub fn spawn_console(
             .map(|p| p.env.clone())
             .unwrap_or_default()
     };
-    spawn_console_io(
-        path,
-        args,
-        parent,
-        console,
-        [soso_abi::FD_INHERIT_TTY; 3],
-        &env,
-    )
+    spawn_console_io(path, &argv, parent, console, [soso_abi::FD_INHERIT_TTY; 3], &env)
 }
 
 /// Como `spawn_console` pero con stdio opcional (`FD_INHERIT_TTY` /
 /// `FD_SERIAL_TTY` = tty; el segundo ata al hijo a la consola serie).
 pub fn spawn_console_io(
     path: &str,
-    args: &str,
+    argv: &[String],
     parent: u64,
     console: Console,
     stdio: [u64; 3],
     env: &str,
 ) -> Result<u64, i64> {
     use soso_abi as abi;
-    if args.len() > 3000 {
+    let total_argv: usize = argv.iter().map(|s| s.len()).sum();
+    if total_argv > 3000 || argv.len() > 256 {
         return Err(-abi::EINVAL);
     }
-    let env_block = if env.is_empty() && parent == 0 {
-        String::from("HOME=/\nPATH=/bin:/sbin")
+    let env_block = if env.is_empty() {
+        let inherited = {
+            let procs = PROCS.lock();
+            procs
+                .iter()
+                .find(|p| p.pid == parent)
+                .map(|p| p.env.clone())
+                .unwrap_or_default()
+        };
+        if inherited.is_empty() {
+            String::from("HOME=/\nPATH=/bin:/sbin")
+        } else {
+            inherited
+        }
     } else {
         String::from(env)
     };
@@ -765,20 +786,19 @@ pub fn spawn_console_io(
         for va in (STACK_TOP - STACK_SIZE..STACK_TOP).step_by(4096) {
             space.ensure_mapped(va).ok_or(-abi::ENOMEM)?;
         }
-        let args_va = STACK_TOP - 4096;
-        space.write(args_va, args.as_bytes()).ok_or(-abi::ENOMEM)?;
+        let args_va = argv::write_stack(&space, argv).ok_or(-abi::ENOMEM)?;
         let ctx = Context {
             rip: entry,
-            rsp: args_va - 16,
+            rsp: args_va.0 - 16,
             rflags: 0x202,
-            rdi: args_va,
-            rsi: args.len() as u64,
+            rdi: args_va.0,
+            rsi: args_va.1,
             ..Context::default()
         };
         (ctx, brk, tls)
     } else {
         let data = crate::vfs::read_file(ino).map_err(crate::task::syscall::fs_errno)?;
-        spawn_into(&space, &data, args)?
+        spawn_into(&space, &data, argv)?
     };
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
     let (pgid, sid) = if parent == 0 {
@@ -883,7 +903,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
     Ok(tid)
 }
 
-fn spawn_into(space: &AddrSpace, data: &[u8], args: &str) -> Result<(Context, u64, u64), i64> {
+fn spawn_into(space: &AddrSpace, data: &[u8], argv: &[String]) -> Result<(Context, u64, u64), i64> {
     use soso_abi as abi;
     let (entry, brk, tls_base) = elf::load(space, data).map_err(|e| {
         crate::println!("spawn: elf inválido: {e}");
@@ -892,16 +912,13 @@ fn spawn_into(space: &AddrSpace, data: &[u8], args: &str) -> Result<(Context, u6
     for va in (STACK_TOP - STACK_SIZE..STACK_TOP).step_by(4096) {
         space.ensure_mapped(va).ok_or(-abi::ENOMEM)?;
     }
-    // Los argumentos van en la última página de la pila; rsp queda debajo,
-    // alineado a 16.
-    let args_va = STACK_TOP - 4096;
-    space.write(args_va, args.as_bytes()).ok_or(-abi::ENOMEM)?;
+    let (args_va, args_len) = argv::write_stack(space, argv).ok_or(-abi::ENOMEM)?;
     let ctx = Context {
         rip: entry,
         rsp: args_va - 16,
         rflags: 0x202, // IF=1: sin ella no habría preempción
         rdi: args_va,
-        rsi: args.len() as u64,
+        rsi: args_len,
         ..Context::default()
     };
     Ok((ctx, brk, tls_base))

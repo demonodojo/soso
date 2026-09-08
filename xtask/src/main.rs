@@ -108,6 +108,9 @@ fn main() {
         "test-update" => {
             test_update::run();
         }
+        "test-resize" => {
+            test_resize::run();
+        }
         "check" => {
             check::run();
         }
@@ -134,7 +137,7 @@ fn main() {
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-update | check | release | forja-out | sync-src | rust-bootstrap | rust-build-std | sosomfs-check | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | fetch-whisper | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check | hw-matrix)"
+                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-update | test-resize | check | release | forja-out | sync-src | rust-bootstrap | rust-build-std | sosomfs-check | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | fetch-whisper | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check | hw-matrix)"
             );
             exit(2);
         }
@@ -156,11 +159,13 @@ mod live_models;
 mod lx_build;
 mod package_live;
 mod release;
+mod rtc_host;
 mod sosolog;
 mod test;
 mod test_distributed;
 mod sosomfs_check;
 mod test_install;
+mod test_resize;
 mod test_update;
 mod version;
 
@@ -628,6 +633,7 @@ pub(crate) fn build_user() -> bool {
         "soso-web",
         "ask-modelo",
         "soso-update",
+        "soso-resize",
         "soso-ed",
         "soso-forja",
         "cp",

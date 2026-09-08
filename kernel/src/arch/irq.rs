@@ -134,9 +134,23 @@ pub(crate) fn dispatch(vector: u8, desde_ring3: bool) {
     apic::eoi();
     prof.fetch_sub(1, Ordering::Relaxed);
     // Ya fuera del contexto de IRQ dura: aquí sí se puede tocar la pila de red.
+    // No llamar a `net::poll` a pelo: sunset (chacha/curve25519) clobbea XMM
+    // y MXCSR, y este stub `x86-interrupt` no es `timer_isr` — aquel hace
+    // xsave a `TIMER_FPU` en asm. Sin preservar, el proceso ring 3
+    // interrumpido hereda el estado SIMD de la cripto. Misma disciplina que
+    // `mmap_fault_shim`: área local (no `TIMER_FPU`: un AP y la BSP no
+    // pueden compartirla) y trampolín de alineación (cripto SSE).
     if desde_ring3 && crate::net::trabajo_pendiente() {
-        crate::net::poll();
+        let _ = crate::arch::interrupts::con_rsp_alineado(net_poll_shim, 0, 0);
     }
+}
+
+extern "sysv64" fn net_poll_shim(_a: u64, _b: u64) -> u64 {
+    let mut fpu = crate::arch::fpu::FpuArea::empty();
+    unsafe { crate::arch::fpu::save(&mut fpu) };
+    crate::net::poll();
+    unsafe { crate::arch::fpu::restore(&fpu) };
+    0
 }
 
 macro_rules! irq_stubs {

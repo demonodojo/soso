@@ -11,6 +11,9 @@
 //! - `timer_isr` hace xsave a `TIMER_FPU` antes de `net::poll` (cripto SSE)
 //!   y xrstor al volver sin desalojo; si desaloja, `timer_tick` copia el
 //!   estado a `Process.fpu` y `schedule_inner` lo restaura al reanudar.
+//! - `irq::dispatch` (MSI-X y el resto de stubs 0x42..=0x61) preserva en
+//!   `net_poll_shim` si bomba la red al salir hacia ring 3: no comparte
+//!   `TIMER_FPU` (BSP y AP a la vez la pisarían).
 //! - El page fault handler preserva alrededor de `handle_mmap_fault`.
 //! - Las syscalls NO preservan: la ABI declara los registros vectoriales
 //!   caller-saved y los wrappers de libsoso llevan `clobber_abi("C")`.

@@ -83,6 +83,14 @@ Antes del diseño completo, todos los casos no soportados deben fallar sin
 escribir. Validar después el ciclo completo en QEMU live; la prueba de pérdida
 de alimentación real se registra por backend, sin deducirla del resultado host.
 
+**Estado (sept 2026).** Implementado: crate `soso-resize-core` (journal, slides
+reanudables, recovery GPT), recovery en arranque (`fs_resize::recover_before_mount`),
+preflight (journal, import activo, flush durable, geometría), `soso-resize` userspace,
+17 tests host en `cuts.rs`, `cargo xtask test-resize` (recovery QEMU + inyección
+INTENT). **Pendiente:** fase grow en `test-resize` vía QEMU (shrink de modelos ~20
+GiB en TCG sin KVM; requiere `/dev/kvm` o tiempo largo). Flush durable USB/NVMe
+sigue `ENOTSUP`; prueba de corte de alimentación por backend en placa.
+
 ## B2. Hacer efectivos los contratos de memoria y procesos
 
 **Hallazgos en el código.**
@@ -128,6 +136,13 @@ recibir exactamente `['', 'a b', 'ñ', 'x=y']` y el entorno previsto. ELFs
 truncados o malformados se rechazan sin panic del kernel; un ELF válido con
 tabla de secciones fuera de la cabecera inicial sigue arrancando. Añadir las
 regresiones a `init test` y mantener el shard con presión de memoria.
+
+**Estado (sept 2026).** En árbol: `mprotect`/`mremap` con PTE+TLB, `read_spawn_args`
+y `read_spawn_env` con tablas delimitadas (límites 256×4096 B), codificación
+`SOSA` en pila, validación ELF en `load`/`load_lazy`. Regresiones B2 en
+`init test`: mprotect, mremap (grow/shrink/colisión), argv, envp (`x=y`), ELF
+malformado y truncado (cabecera parcial de `/bin/init`). **Pendiente:** validar
+`init test` en QEMU (`cargo xtask test`, shard sys; preferible KVM).
 
 ## B3. Cerrar un bucle de desarrollo remoto demostrable
 

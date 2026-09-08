@@ -129,6 +129,7 @@ struct fwsec_ucode_info {
     unsigned dmem_load_size;
     unsigned imem_phys_base;
     unsigned dmem_phys_base;
+    unsigned imem_virt_base;
     unsigned imem_src;
     unsigned dmem_src;
     unsigned pkc_data_offset;
@@ -143,6 +144,7 @@ struct fwsec_ucode_info {
 
 static unsigned rom_data_len;
 static int fwsec_last_patch_appif;
+static unsigned fwsec_probe_boot_addr;
 
 static uint8_t rom_rd8(unsigned off)
 {
@@ -488,6 +490,7 @@ static int parse_fwsec_desc(unsigned fwsec_off, unsigned fwsec_len,
         info->dmem_load_size = d.dmem_load_size;
         info->imem_phys_base = d.imem_phys_base;
         info->dmem_phys_base = d.dmem_phys_base;
+        info->imem_virt_base = d.imem_virt_base;
         info->pkc_data_offset = d.pkc_data_offset;
         info->engine_id_mask = d.engine_id_mask;
         info->ucode_id = d.ucode_id;
@@ -507,6 +510,7 @@ static int parse_fwsec_desc(unsigned fwsec_off, unsigned fwsec_len,
         info->dmem_load_size = d.dmem_load_size;
         info->imem_phys_base = d.imem_phys_base;
         info->dmem_phys_base = d.dmem_phys_base;
+        info->imem_virt_base = d.imem_virt_base;
         info->pkc_data_offset = 0;
         info->engine_id_mask = 0;
         info->ucode_id = 0;
@@ -789,6 +793,11 @@ int gsp_fwsec_patch_via_appif(void)
     return fwsec_last_patch_appif;
 }
 
+unsigned gsp_fwsec_probe_boot_addr(void)
+{
+    return fwsec_probe_boot_addr;
+}
+
 static int patch_fwsec_frts(unsigned char *ucode, unsigned ulen,
                             const struct fwsec_ucode_info *info,
                             uint64_t frts_addr, uint64_t frts_size)
@@ -933,8 +942,9 @@ int gsp_fwsec_probe(uint64_t frts_addr, uint64_t frts_size)
     }
     lx_kfree(ucode);
     gsp_dma_free(&dma);
-    lx_printk("nouveau-lx: FWSEC probe OK (imem=%u dmem=%u)\n",
-              info.imem_load_size, info.dmem_load_size);
+    fwsec_probe_boot_addr = info.imem_virt_base;
+    lx_printk("nouveau-lx: FWSEC probe OK (imem=%u dmem=%u boot=0x%x)\n",
+              info.imem_load_size, info.dmem_load_size, fwsec_probe_boot_addr);
     return 0;
 }
 
@@ -1006,7 +1016,7 @@ int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
     raw.pkc_data_offset = info.pkc_data_offset;
     raw.engine_id_mask = info.engine_id_mask;
     raw.ucode_id = info.ucode_id;
-    raw.boot_addr = 0;
+    raw.boot_addr = info.imem_virt_base;
     raw.mbox0 = 0;
     raw.mbox1 = 0;
     raw.check_mbox0 = 1;

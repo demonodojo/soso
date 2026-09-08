@@ -15,4 +15,7 @@ int gsp_fwsec_wpr2_present(uint64_t *lo_out, uint64_t *hi_out);
 /* 1 si el último parche FRTS usó la cabecera appif v1 (no el fallback DMAP). */
 int gsp_fwsec_patch_via_appif(void);
 
+/* imem_virt_base del último gsp_fwsec_probe (hostcheck). */
+unsigned gsp_fwsec_probe_boot_addr(void);
+
 #endif

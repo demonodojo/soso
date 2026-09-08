@@ -192,6 +192,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "FAIL: parche FRTS sin appif v1 (fallback DMAP)\n");
         return 1;
     }
+    {
+        /* IMEMVirtBase=0 es válido (VBIOS ROG GA102: boot=0x0; nouveau usa 0
+         * siempre y RM programa BOOTVEC=imemVa). No es un fallo. */
+        unsigned boot = gsp_fwsec_probe_boot_addr();
+        printf("OK: boot_addr=0x%x (imem_virt_base)\n", boot);
+    }
     printf("OK: parseo + parche FWSEC-FRTS (appif v1)\n");
     free(rom_buf);
     return 0;

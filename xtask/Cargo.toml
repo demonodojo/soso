@@ -11,4 +11,5 @@ serde_json = "1"
 chrono = "0.4"
 soso-abi = { path = "../crates/soso-abi" }
 soso-update-core = { path = "../crates/soso-update-core", features = ["std"] }
+soso-resize-core = { path = "../crates/soso-resize-core" }
 sha2 = "0.10"

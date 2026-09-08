@@ -320,7 +320,32 @@ pub static FS: Once<Mutex<Fs>> = Once::new();
 pub static MODELS: Once<Mutex<ModelsFs>> = Once::new();
 
 #[cfg(feature = "drv-live-disk")]
+pub fn mount_models_for_recovery() -> bool {
+    if MODELS.get().is_some() {
+        return true;
+    }
+    let Some(models) = crate::drivers::live_disk::models_dev() else {
+        return false;
+    };
+    match Sosomfs::mount_with_cache(
+        sosomfs::SingleDev::new(ModelsDev::Live(models)),
+        64,
+    ) {
+        Ok(mfs) => {
+            MODELS.call_once(|| Mutex::new(mfs));
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(feature = "drv-live-disk")]
 fn mount_live() {
+    if !crate::fs_resize::recover_before_mount() {
+        println!("fs: live abortado — recovery de resize incompleto");
+        return;
+    }
+    let models_already = MODELS.get().is_some();
     let Some(root) = crate::drivers::live_disk::root_dev() else {
         println!("fs: live sin partición root");
         return;
@@ -340,29 +365,34 @@ fn mount_live() {
         Err(e) => println!("fs: live sosofs falló ({e:?})"),
     }
 
-    if let Some(models) = crate::drivers::live_disk::models_dev() {
-        let part_blocks = models.block_count();
-        let cache_blocks = cache_blocks_modelos();
-        match Sosomfs::mount_with_cache(
-            sosomfs::SingleDev::new(ModelsDev::Live(models)),
-            cache_blocks,
-        ) {
-            Ok(mut mfs) => {
-                grow_models_if_needed(&mut mfs, part_blocks);
-                println!(
-                    "fs: sosomfs live (generación {}, {} bloques, caché {})",
-                    mfs.generation(),
-                    mfs.total_blocks(),
-                    cache_blocks
-                );
-                for m in &mfs.catalog.models {
-                    println!("fs:   modelo {} ({} shards)", m.name, m.shards.len());
+    if !models_already {
+        if let Some(models) = crate::drivers::live_disk::models_dev() {
+            let part_blocks = models.block_count();
+            let cache_blocks = cache_blocks_modelos();
+            match Sosomfs::mount_with_cache(
+                sosomfs::SingleDev::new(ModelsDev::Live(models)),
+                cache_blocks,
+            ) {
+                Ok(mut mfs) => {
+                    grow_models_if_needed(&mut mfs, part_blocks);
+                    println!(
+                        "fs: sosomfs live (generación {}, {} bloques, caché {})",
+                        mfs.generation(),
+                        mfs.total_blocks(),
+                        cache_blocks
+                    );
+                    for m in &mfs.catalog.models {
+                        println!("fs:   modelo {} ({} shards)", m.name, m.shards.len());
+                    }
+                    MODELS.call_once(|| Mutex::new(mfs));
                 }
-                MODELS.call_once(|| Mutex::new(mfs));
+                Err(e) => println!("fs: live sosomfs falló ({e:?})"),
             }
-            Err(e) => println!("fs: live sosomfs falló ({e:?})"),
         }
+    } else {
+        println!("fs: sosomfs ya montado (recovery shrink)");
     }
+    crate::fs_resize::finalize_after_mount();
 }
 
 fn pick_root_backend() -> Option<RootDev> {

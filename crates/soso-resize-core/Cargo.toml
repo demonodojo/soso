@@ -1,0 +1,17 @@
+[package]
+name = "soso-resize-core"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "Journal y slide reanudable para redimensionado GPT live (host + kernel)"
+
+[features]
+default = []
+std = []
+
+[dependencies]
+gptdisk = { path = "../gptdisk" }
+
+[dev-dependencies]
+sha2 = "0.10"
+gptdisk = { path = "../gptdisk" }

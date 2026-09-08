@@ -136,7 +136,11 @@ y reconexiones; sólo recarga al cambiar de modelo, si `refresh_mem` lo exige, o
 generate a la vez; el listen sigue aceptando. `:eco` va local sin askd. Arranque
 perezoso: el cliente conecta y, si falla, `spawn_io(..., FD_SERIAL_TTY)` sin
 `wait` — el askd queda atado a la consola serie (y a `SOSOLOG.TXT`), no a la
-sesión SSH de quien lo lanzó. Kernel: `tcp_connect(127.0.0.1:port)` empareja con un listener userspace sin
+sesión SSH de quien lo lanzó. **`spawn_io` → SOSA:** el kernel escribe argv
+completo en la pila; el crt0 de libsoso entrega a `main(&str)` solo `argv[1..]`
+(argv[0] = path del binario). Si no, askd/vozd ven `/bin/soso-llm askd` e
+imprimen el usage en vez de arrancar el demonio. Kernel:
+`tcp_connect(127.0.0.1:port)` empareja con un listener userspace sin
 NIC loopback (`kernel/src/net/loopback.rs`). `soso-llm run` no usa askd (carga en
 frío). Config en `/etc/llm.conf`, que **no fija modelo por defecto**: se
 usa el primero de `/models`, y el empaquetado live (`package-usb-live` /
@@ -294,7 +298,7 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 | Offload GPU trunk-first + pool MoE | — | `plan.rs` pack `TRUNK_GPU_PROJ` + `gpu_experts`, VRAM Q4_K crudo |
 
 - **Cierre de etapa `/loop` (obligatorio):** al terminar cada pase, actualizar el skill de dominio (esta tabla si es inferencia; `soso-gpu`/`soso-wifi`/`soso-live` si tocan esos stacks), `soso-dev` si cambian tests/comandos, y `MANUAL-USUARIO.md` si hay strings o UX visible. Mantener en sync `.claude/skills/`, `.cursor/skills/` y `.agents/skills/`. No dejar docs aplazados al “final del loop”.
-- **SIMD**: userspace compila con target propio `user/x86_64-soso-user.json` (SSE..AVX2+FMA, build-std); kernels AVX2 en `gemm.rs::avx2` con dispatch por `target_feature` (escalar = referencia para tests). **Estado FPU**: el kernel preserva x87/XMM/YMM con **xsave64** (`arch/fpu.rs`; fxsave NO basta — pierde las mitades altas YMM entre procesos): timer_isr guarda a `TIMER_FPU` antes de net::poll, `timer_tick` lo copia a `Process.fpu` al desalojar, `schedule_inner` restaura al reanudar, el page fault handler preserva en `mmap_fault_shim`; syscalls no preservan (los wrappers de libsoso llevan `clobber_abi("C")`). `init test` estresa YMM con dos hijos "fpu" concurrentes
+- **SIMD**: userspace compila con target propio `user/x86_64-soso-user.json` (SSE..AVX2+FMA, build-std); kernels AVX2 en `gemm.rs::avx2` con dispatch por `target_feature` (escalar = referencia para tests). **Estado FPU**: el kernel preserva x87/XMM/YMM con **xsave64** (`arch/fpu.rs`; fxsave NO basta — pierde las mitades altas YMM entre procesos): timer_isr guarda a `TIMER_FPU` antes de net::poll, `timer_tick` lo copia a `Process.fpu` al desalojar, `schedule_inner` restaura al reanudar, `irq::dispatch` preserva en `net_poll_shim` si bomba la red al salir a ring 3 (no usa `TIMER_FPU`), el page fault handler preserva en `mmap_fault_shim`; syscalls no preservan (los wrappers de libsoso llevan `clobber_abi("C")`). `init test` estresa YMM con dos hijos "fpu" concurrentes
 - Harness rápido de calidad en host: `cargo run --release -p soso-llm-core --features std --example hostrun -- <modelo-dir> "<prompt>" <n>` (velocidad nativa, SOSO_DEBUG=1 para estadísticas por capa)
 - `Runtime::validate_shapes()` comprueba index↔manifest antes de inferir
 - Host: `cargo xtask convert-gguf` (GGUF **llama**, **deepseek2** MLA o **qwen35/qwen38** → `.som` v4; `--pack-trunk` empaqueta attn+FFN por capa; trocea `ffn_*_exps` por experto; `ffn_*_shexp` → `Sxx` con `num_shared_experts`; Qwen: capas `attn_q` → Gated, el resto GDN; GGUF `blk.N.post_attention_norm` → `Lxx.ffn_norm`, aborta si falta), `mkfs-sosomfs` (multi-modelo: `mkfs-sosomfs dir1 dir2 … imagen.img`), `mkmodel-soso` (`tiny` denso + `--moe` → `tiny-moe` + `--attn mla` → `tiny-mla` + `--moe --ffn-kind latent-moe` → `tiny-latent-moe` en imagen por defecto; flags `--attn mla|kda`, `--ffn-kind latent-moe`, `--shared-experts`, `--pack-trunk`, …). Offload GPU userspace: F32/Q8_0/Q4_K/**MXFP4** dequant-on-upload en `user/soso-llm/src/gpu.rs`

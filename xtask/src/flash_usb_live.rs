@@ -23,6 +23,10 @@ pub fn run(args: &[String]) {
         usage();
     };
 
+    if let Err(e) = install_disk::unmount_partitions(&usb) {
+        eprintln!("flash-usb-live: {e}");
+        exit(1);
+    }
     install_disk::validate_device(&usb, parsed.yes, None);
 
     let disk_bytes = blockdev_bytes(&usb).unwrap_or_else(|| {
@@ -160,6 +164,7 @@ fn run_full(usb: &Path, disk_bytes: u64) {
     install_disk::repair_gpt_backup(usb);
 
     print_flash_summary(usb, &out_dir);
+    install_disk::release_removable(usb);
     let _ = root;
 }
 
@@ -244,6 +249,7 @@ fn run_incremental(usb: &Path, parts: &[FlashPart]) {
         labels.join(" + "),
         usb.display()
     );
+    install_disk::release_removable(usb);
 }
 
 fn usage() -> ! {
@@ -478,5 +484,14 @@ mod tests {
         assert_eq!(parts, vec![FlashPart::Kernel, FlashPart::Rootfs]);
         let parts = parse_only_spec("esp,data");
         assert_eq!(parts, vec![FlashPart::Kernel, FlashPart::Rootfs]);
+    }
+
+    #[test]
+    fn release_removable_ignores_image_file() {
+        let path = std::env::temp_dir().join(format!("soso-release-{}", std::process::id()));
+        fs::write(&path, b"x").unwrap();
+        install_disk::release_removable(&path);
+        assert!(path.exists(), "no debe borrar una imagen-fichero");
+        let _ = fs::remove_file(&path);
     }
 }

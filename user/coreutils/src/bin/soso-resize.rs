@@ -29,11 +29,11 @@ fn main(args: &str) -> u8 {
     if parts.is_empty() || parts[0] == "estado" {
         return cmd_estado();
     }
-    if parts.len() >= 3 && parts[0] == "rootfs" {
-        let delta = match parse_delta(parts[2]) {
+    if parts.len() >= 2 && parts[0] == "rootfs" {
+        let delta = match parse_delta(parts[1]) {
             Some(b) => b,
             None => {
-                println!("soso-resize: tamaño inválido «{}»", parts[2]);
+                println!("soso-resize: tamaño inválido «{}»", parts[1]);
                 return 2;
             }
         };

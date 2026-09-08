@@ -703,6 +703,31 @@ mod tests {
         Some(1_735_689_600)
     }
 
+    /// `WALL_CLOCK` es global: los tests que lo cambian no pueden correr en
+    /// paralelo entre sí (fallaba ~1/6 en `cargo xtask check`). Crate no_std:
+    /// candado de giro sobre un atómico.
+    static CLOCK_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    struct ClockGuard;
+
+    impl ClockGuard {
+        fn lock() -> Self {
+            while CLOCK_LOCK
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+            ClockGuard
+        }
+    }
+
+    impl Drop for ClockGuard {
+        fn drop(&mut self) {
+            CLOCK_LOCK.store(false, Ordering::Release);
+        }
+    }
+
     #[test]
     fn parse_url_simple() {
         let (_, host, port, path) = parse_url("https://huggingface.co/api/models/x/tree/main").unwrap();
@@ -801,6 +826,7 @@ mod tests {
 
     #[test]
     fn client_config_requires_wall_clock() {
+        let _g = ClockGuard::lock();
         WALL_CLOCK.store(0, Ordering::Release);
         assert_eq!(client_config().unwrap_err(), HttpError::Clock);
         set_wall_clock(test_wall_clock);
@@ -812,6 +838,7 @@ mod tests {
         fn stale() -> Option<u64> {
             Some(1)
         }
+        let _g = ClockGuard::lock();
         set_wall_clock(stale);
         assert_eq!(client_config().unwrap_err(), HttpError::Clock);
         set_wall_clock(test_wall_clock);

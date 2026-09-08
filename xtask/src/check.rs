@@ -10,6 +10,10 @@ pub fn run() {
 
     println!("check: tests host…");
     run_host(&root, &fallos);
+    if let Err(e) = crate::rtc_host::run_rtc_host_tests() {
+        eprintln!("check: falló rtc host ({e})");
+        *fallos.lock().unwrap() += 1;
+    }
 
     println!("check: builds bare-metal…");
     crate::build_user();
@@ -19,7 +23,8 @@ pub fn run() {
         *fallos.lock().unwrap() += 1;
     }
     if crate::build_boot_shim(&root).is_none() {
-        eprintln!("check: aviso — boot-shim no compiló (¿target uefi?)");
+        eprintln!("check: boot-shim no compiló (¿target x86_64-unknown-uefi?)");
+        *fallos.lock().unwrap() += 1;
     }
 
     println!("check: hostchecks opcionales…");
@@ -68,7 +73,9 @@ fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
             false,
         ),
         ("soso-update-core", &["soso-update-core"], true),
+        ("soso-resize-core", &["soso-resize-core"], false),
         ("soso-audio+gguf2som", &["soso-audio", "gguf2som"], true),
+        ("soso-forja-server", &["soso-forja-server"], false),
     ];
     for (nombre, pkgs, std) in batches {
         if !cargo_test(root, pkgs, *std) {

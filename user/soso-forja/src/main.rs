@@ -137,16 +137,33 @@ fn cmd_sync(ip: [u8; 4], port: u16) -> u8 {
     let _ = sys::mkdir(SRC);
     let mut manifest = Vec::new();
     listar_dir(SRC, &mut manifest);
-    let mut body = String::new();
+    let mut body: Vec<u8> = Vec::new();
     for (rel, h) in &manifest {
-        body.push_str(rel);
-        body.push('\t');
-        body.push_str(h);
-        body.push('\n');
+        body.extend_from_slice(rel.as_bytes());
+        body.push(b'\t');
+        body.extend_from_slice(h.as_bytes());
+        body.push(b'\n');
     }
-    match http_post(ip, port, "/sync", body.as_bytes()) {
-        Ok(_) => {
-            println!("forja: sync OK ({} ficheros)", manifest.len());
+    body.extend_from_slice(b"\n---DATA---\n");
+    for (rel, _) in &manifest {
+        let path = format!("{SRC}/{rel}");
+        let data = match leer_fichero(&path) {
+            Ok(d) => d,
+            Err(_) => {
+                println!("forja: sync: no leí {path}");
+                return 1;
+            }
+        };
+        body.extend_from_slice(rel.as_bytes());
+        body.push(b'\n');
+        body.extend_from_slice(format!("{}", data.len()).as_bytes());
+        body.push(b'\n');
+        body.extend_from_slice(&data);
+    }
+    match http_post(ip, port, "/sync", &body) {
+        Ok(resp) => {
+            let txt = core::str::from_utf8(&resp).unwrap_or("");
+            println!("forja: sync OK ({} ficheros) {txt}", manifest.len());
             0
         }
         Err(e) => {
@@ -220,6 +237,11 @@ fn cmd_local() -> u8 {
         if prev.as_deref() != Some(cur.as_bytes()) {
             stale += 1;
             println!("forja-local: rebuild → {unit}");
+            // Las unidades llevan barra (`user/coreutils`), así que el stamp
+            // cae en un subdirectorio de CACHE que `mkdir(CACHE)` no crea; sin
+            // esto `open(O_CREAT)` fallaba y `forja local` salía con 1 (lo
+            // cazaba `init test`). Mismo helper que usa soso-git.
+            ensure_parent(&stamp);
             if escribir(&stamp, cur.as_bytes()).is_err() {
                 return 1;
             }
@@ -229,6 +251,23 @@ fn cmd_local() -> u8 {
     }
     println!("forja-local: {n} unidades, {stale} stale");
     0
+}
+
+/// Crea los directorios intermedios de `path` (todos menos el último
+/// componente). `mkdir` sobre uno que ya existe se ignora.
+fn ensure_parent(path: &str) {
+    let Some(i) = path.rfind('/') else {
+        return;
+    };
+    let mut cur = String::new();
+    for comp in path[..i].split('/') {
+        if comp.is_empty() {
+            continue;
+        }
+        cur.push('/');
+        cur.push_str(comp);
+        let _ = sys::mkdir(&cur);
+    }
 }
 
 fn hash_unit(unit: &str) -> String {
@@ -288,10 +327,21 @@ fn cmd_install() -> u8 {
         println!("forja: soso-update falló ({pid})");
         return 1;
     }
-    let _ = sys::wait();
-    println!("forja: reiniciando…");
-    sys::halt();
-    0
+    match sys::wait() {
+        Ok((_, 0)) => {
+            println!("forja: reiniciando…");
+            sys::halt();
+            0
+        }
+        Ok((_, code)) => {
+            println!("forja: soso-update salió con {code}");
+            1
+        }
+        Err(e) => {
+            println!("forja: wait soso-update ({e})");
+            1
+        }
+    }
 }
 
 fn parse_ip(s: &str) -> Option<[u8; 4]> {

@@ -40,16 +40,73 @@ pub fn heap_init() {
     *ready = true;
 }
 
+/// argv completo (argv[0] = path del binario) tal como lo mandó el kernel.
+static ARGV: Mutex<Option<alloc::vec::Vec<alloc::string::String>>> = Mutex::new(None);
+
+/// Decodifica el blob `SOSA` del kernel (`kernel/src/task/argv.rs`):
+/// `"SOSA" u32 count { u32 len, bytes }*`. `None` si no lleva el magic.
+pub fn decode_argv(blob: &[u8]) -> Option<alloc::vec::Vec<alloc::string::String>> {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    const MAGIC: &[u8; 4] = b"SOSA";
+    if blob.len() < 8 || &blob[..4] != MAGIC {
+        return None;
+    }
+    let count = u32::from_le_bytes(blob[4..8].try_into().unwrap()) as usize;
+    let mut argv: Vec<String> = Vec::with_capacity(count.min(256));
+    let mut off = 8usize;
+    for _ in 0..count {
+        if off + 4 > blob.len() {
+            break;
+        }
+        let slen = u32::from_le_bytes(blob[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        if off + slen > blob.len() {
+            break;
+        }
+        if let Ok(s) = core::str::from_utf8(&blob[off..off + slen]) {
+            argv.push(String::from(s));
+        }
+        off += slen;
+    }
+    Some(argv)
+}
+
+/// argv exacto del proceso (sin unir por espacios): `argv[0]` es el path del
+/// binario. Vacío si el crt0 aún no ha corrido o el kernel no mandó blob.
+pub fn argv() -> alloc::vec::Vec<alloc::string::String> {
+    ARGV.lock().clone().unwrap_or_default()
+}
+
+/// Decodifica el blob SOSA del kernel (argv completo) y devuelve los argumentos
+/// del programa (argv[1..]), unidos con espacio — argv[0] es el path del binario.
+pub fn args_for_main(blob: &[u8]) -> alloc::string::String {
+    use alloc::string::String;
+
+    if let Some(argv) = decode_argv(blob) {
+        // Blob válido: sin más elementos que argv[0] no hay argumentos. Nunca
+        // devolver aquí los bytes crudos «SOSA…».
+        let args = if argv.len() > 1 {
+            argv[1..].join(" ")
+        } else {
+            String::new()
+        };
+        *ARGV.lock() = Some(argv);
+        return args;
+    }
+    String::from(core::str::from_utf8(blob).unwrap_or(""))
+}
+
 #[macro_export]
 macro_rules! entry {
     ($main:ident) => {
         #[unsafe(no_mangle)]
         extern "C" fn __soso_main(ptr: *const u8, len: usize) -> u8 {
             $crate::heap_init();
-            let args = unsafe {
-                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len))
-            };
-            $main(args)
+            let blob = unsafe { core::slice::from_raw_parts(ptr, len) };
+            let args = $crate::args_for_main(blob);
+            $main(&args)
         }
     };
 }

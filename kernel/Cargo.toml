@@ -47,6 +47,7 @@ sosomfs = { path = "../crates/sosomfs" }
 sosomodel = { path = "../crates/sosomodel" }
 block-dev = { path = "../crates/block-dev" }
 gptdisk = { path = "../crates/gptdisk" }
+soso-resize-core = { path = "../crates/soso-resize-core" }
 soso-abi = { path = "../crates/soso-abi" }
 xmas-elf = "0.10"
 smoltcp = { version = "0.13.1", default-features = false, features = [

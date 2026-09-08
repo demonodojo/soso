@@ -74,6 +74,9 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
 - **No hay fallback slirp en WiFi ni rtl8169 de placa.** Sin lease DHCP no hay
   10.0.2.15.
 - **PNVM solo gen3.** AX200 no lo pide; AX211 sí (`iwl_fw_parse_pnvm`).
+- **AX200 gen2 timeout ALIVE (INT=0):** restockear el anillo RX con
+  `rx_write = IWL_GEN2_RX_N - 1` antes de `UREG_CPU_INIT_RUN` (como gen3). Con
+  WIDX=0 el firmware no recibe RBD y no manda `UCODE_ALIVE_NTFY`.
 - **Hostcheck antes de gastar un ciclo VFIO.** Compila `iwl_fw.c` en host contra
   los `.ucode` del rootfs; afirma lmac/umac de `SEC_RT`.
 - Credenciales: ESP primero (`wificonf`), luego `/etc/wifi.conf`. El hueco ESP

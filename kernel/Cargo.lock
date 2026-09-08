@@ -361,6 +361,7 @@ dependencies = [
  "sha1",
  "smoltcp",
  "soso-abi",
+ "soso-resize-core",
  "sosofs",
  "sosomfs",
  "sosomodel",
@@ -584,6 +585,13 @@ dependencies = [
 [[package]]
 name = "soso-abi"
 version = "0.1.0"
+
+[[package]]
+name = "soso-resize-core"
+version = "0.1.0"
+dependencies = [
+ "gptdisk",
+]
 
 [[package]]
 name = "sosofs"

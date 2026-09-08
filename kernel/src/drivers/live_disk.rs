@@ -295,6 +295,12 @@ pub fn backend() -> Option<LiveBackend> {
     LIVE_BACKEND.get().copied().flatten()
 }
 
+/// Solo virtio-blk hace flush tras cada escritura; USB/NVMe aún no garantizan
+/// persistencia ante pérdida de alimentación.
+pub fn backend_supports_durable_flush() -> bool {
+    matches!(backend(), Some(LiveBackend::Virtio0))
+}
+
 /// Lee un sector LBA 512 B del disco GPT (cabecera, MBR, datos de particiones).
 pub fn disk_read_sector(lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), BlockError> {
     let backend = backend().ok_or(BlockError::Io)?;

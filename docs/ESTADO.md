@@ -7,14 +7,24 @@ Fuentes de verdad (no duplicar números en otros sitios sin citarlas):
 | Versión | [`VERSION`](../VERSION) → `/etc/soso-release` y banner del kernel |
 | Soporte probado por equipo | [`docs/hw-matrix.json`](hw-matrix.json) + [`docs/HW-MATRIX.md`](HW-MATRIX.md) |
 | Plan de entregas A1–A9 | [`PLAN_ASTRA.md`](../PLAN_ASTRA.md) |
+| Ciclo B (B1–B6) | [`PLAN_ASTRA.md`](../PLAN_ASTRA.md) — ver estado por entrega |
 
 Versión en árbol: **0.2.2** (septiembre 2026).
+
+## Ciclo B (sept 2026)
+
+| Entrega | Estado | Notas |
+|---------|--------|-------|
+| **B1** Redimensionado recuperable | Casi cerrado | Host + recovery QEMU OK (`cargo xtask test-resize`). **Pendiente:** grow QEMU en test-resize (TCG lento; usar KVM). USB/NVMe sin flush durable. |
+| **B2** Memoria, ELF, argv | Casi cerrado | Kernel + `init test` (mprotect/mremap/argv/env/ELF). **Pendiente:** validar en QEMU (`cargo xtask test`). |
+| **B3–B6** | Pendiente | Forja, CI, hw-matrix, caché GPT. |
 
 ## Comprobaciones automáticas
 
 ```sh
 cargo xtask check          # host + builds + hostchecks iwl/GSP + hw-matrix parser
 cargo xtask test           # integración QEMU (4 shards; señal fiable tras A1)
+cargo xtask test-resize    # B1: host cuts + recovery QEMU (grow QEMU: pendiente sin KVM)
 cargo xtask test-update    # OTA E2E + recuperación simulada + manifiesto inválido
 ```
 

@@ -67,8 +67,96 @@ fn main(args: &str) -> u8 {
         let seed = s.bytes().next().unwrap_or(b'1');
         return fpu_stress(seed);
     }
+    if args.starts_with("argv-check") {
+        // `main` recibe argv[1..] unido por espacios; el argv exacto (con
+        // vacíos y espacios internos) lo conserva el crt0 en `libsoso::argv()`.
+        return argv_check(&libsoso::argv());
+    }
+    if args == "mprotect-test" {
+        return modo_mprotect_test();
+    }
+    if args == "mprotect-ok" {
+        return modo_mprotect_ok();
+    }
+    if args == "mremap-test" {
+        return modo_mremap_test();
+    }
+    if args.starts_with("env-check") {
+        return env_check();
+    }
     println!("init: args desconocidos {args:?} (usa: test)");
     2
+}
+
+fn argv_check(argv: &[String]) -> u8 {
+    const EXPECT: &[&str] = &["init", "argv-check", "", "a b", "ñ"];
+    if argv.len() != EXPECT.len() {
+        return 1;
+    }
+    for (got, want) in argv.iter().zip(EXPECT.iter()) {
+        if got != want {
+            return 2;
+        }
+    }
+    0
+}
+
+fn env_check() -> u8 {
+    let mut val = [0u8; 16];
+    let n = sys::getenv("x", &mut val);
+    if n != 1 || val[0] != b'y' {
+        return 1;
+    }
+    0
+}
+
+fn modo_mprotect_test() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    unsafe {
+        *(base as *mut u8) = 42;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ) != 0 {
+        return 2;
+    }
+    unsafe {
+        *(base as *mut u8) = 43;
+    }
+    3
+}
+
+fn modo_mprotect_ok() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ) != 0 {
+        return 2;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ | abi::PROT_WRITE) != 0 {
+        return 3;
+    }
+    unsafe {
+        *(base as *mut u8) = 1;
+    }
+    0
+}
+
+fn modo_mremap_test() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    let grown = sys::mremap(base as u64, 4096, 8192, 0);
+    if grown != base {
+        return 2;
+    }
+    unsafe {
+        *((grown as u64 + 5000) as *mut u8) = 99;
+    }
+    0
 }
 
 /// Bucle cpu-bound que mantiene un patrón en ymm3 y lo compara contra
@@ -367,6 +455,126 @@ fn suite() -> u8 {
     );
     sys::unlink("/tmp/append.txt");
 
+    // B2: mprotect, mremap y argv sin pérdida.
+    {
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mprotect-test"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mprotect-test (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 255)),
+            "mprotect write tras RO mata al hijo (255)"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mprotect-ok"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mprotect-ok (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "mprotect RW restaurado funciona"
+        );
+        let base = sys::mmap(0, 4096, u64::MAX, 0);
+        check!(base > 0, "mmap anónimo para mremap");
+        let grown = sys::mremap(base as u64, 4096, 8192, 0);
+        check!(grown == base, "mremap grow in-place");
+        unsafe {
+            *((grown as u64 + 6000) as *mut u8) = 7;
+        }
+        check!(
+            sys::mremap(grown as u64, 8192, 4096, 0) < 0,
+            "mremap shrink rechazado"
+        );
+        let a = sys::mmap(0, 4096, u64::MAX, 0);
+        check!(a > 0, "mmap región A");
+        let b = sys::mmap(a as u64 + 4096, 4096, u64::MAX, 0);
+        check!(b == a + 4096, "mmap región B adyacente (b={b})");
+        check!(
+            sys::mremap(a as u64, 4096, 8192, 0) < 0,
+            "mremap grow con colisión rechazado"
+        );
+        unsafe {
+            *((b as u64) as *mut u8) = 55;
+        }
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mremap-test"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mremap-test (pid={pid})");
+        check!(sys::wait() == Ok((pid as u64, 0)), "mremap hijo OK");
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "argv-check", "", "a b", "ñ"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn argv-check (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "argv exactos ['', 'a b', 'ñ']"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "env-check"],
+            &["x=y"],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn env-check (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "envp x=y visible en hijo"
+        );
+        let fd = sys::open(
+            "/tmp/bad.elf",
+            abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC,
+        );
+        check!(fd >= 0, "open bad.elf");
+        let junk: &[u8] = b"not-an-elf";
+        check!(
+            sys::write(fd as u64, junk) == junk.len() as i64,
+            "write bad.elf"
+        );
+        sys::close(fd as u64);
+        let pid = sys::spawn("/tmp/bad.elf", "");
+        check!(pid < 0, "spawn ELF malformado rechazado (pid={pid})");
+        sys::unlink("/tmp/bad.elf");
+        let fd = sys::open("/bin/init", abi::O_RDONLY);
+        check!(fd >= 0, "open /bin/init para trunc ELF");
+        let n = sys::read(fd as u64, &mut buf);
+        sys::close(fd as u64);
+        check!(n > 128, "cabecera ELF legible ({n} B)");
+        let fd = sys::open(
+            "/tmp/trunc.elf",
+            abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC,
+        );
+        check!(fd >= 0, "open trunc.elf");
+        check!(
+            sys::write(fd as u64, &buf[..128]) == 128,
+            "write trunc.elf (128 B)"
+        );
+        sys::close(fd as u64);
+        let pid = sys::spawn("/tmp/trunc.elf", "");
+        check!(pid < 0, "spawn ELF truncado rechazado (pid={pid})");
+        sys::unlink("/tmp/trunc.elf");
+    }
+
     // spawn_io: redirige stdout de echo a un fichero.
     let fd = sys::open("/tmp/spawn_io.txt", abi::O_WRONLY);
     check!(fd >= 0, "open para spawn_io");
@@ -385,6 +593,12 @@ fn suite() -> u8 {
     check!(
         n > 0 && core::str::from_utf8(&buf[..n as usize]).unwrap_or("").contains("spawn_io_ok"),
         "spawn_io escribió al fichero"
+    );
+    check!(
+        !core::str::from_utf8(&buf[..n as usize])
+            .unwrap_or("")
+            .contains("/bin/echo"),
+        "spawn_io no debe pasar argv[0] al hijo"
     );
     sys::unlink("/tmp/spawn_io.txt");
 
@@ -1251,6 +1465,9 @@ fn suite() -> u8 {
         check!(n > 0, "SYS_GETENV PATH (n={n})");
         let path = core::str::from_utf8(&path_buf[..n as usize]).unwrap_or("");
         check!(path.contains("/bin"), "PATH contiene /bin ({path})");
+        let _ = sys::unlink("/tmp/sh-test/b");
+        let _ = sys::unlink("/tmp/sh-test/a");
+        let _ = sys::unlink("/tmp/sh-test/c");
         let _ = sys::mkdir("/tmp/sh-test");
         let fd = sys::open("/tmp/sh-test/a", abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
         check!(fd >= 0, "open escribir self-host (fd={fd})");
@@ -1263,6 +1480,9 @@ fn suite() -> u8 {
             sys::clock_gettime(abi::CLOCK_REALTIME, &mut ts) == 0,
             "SYS_CLOCK_GETTIME"
         );
+        if ts.tv_sec >= 1_000_000_000 {
+            check!(ts.tv_sec >= 1_000_000_000, "RTC epoch plausible");
+        }
         let mut rnd = [0u8; 8];
         check!(sys::getrandom(&mut rnd) == 8, "SYS_GETRANDOM");
         let fd2 = sys::open("/tmp/sh-test/b", abi::O_RDONLY);

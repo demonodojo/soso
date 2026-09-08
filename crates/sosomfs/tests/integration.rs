@@ -1,21 +1,30 @@
 use block_dev::{BlockDevice, FileBlockDevice, SparseBlockDevice, BLOCK_SIZE};
 use sosomfs::layout::{CACHE_PIN, CACHE_STREAM, SEGMENT_SIZE};
 use sosomfs::{build_from_dir, mount, Sosomfs};
-use std::process::Command;
 use std::path::PathBuf;
+use std::process::Command;
+use std::sync::OnceLock;
 
+/// Un solo `mkmodel-soso` por proceso de test. Sin esto, los 6 tests de este
+/// binario arrancan en paralelo, ven que no hay `manifest.som` y reescriben el
+/// mismo árbol: `build_from_dir` hace `read_exact` sobre un shard que otro
+/// proceso acaba de truncar (`failed to fill whole buffer`).
 fn tiny_model_dir() -> PathBuf {
-    let dir = PathBuf::from("target/test-tiny-model");
-    if !dir.join("manifest.som").exists() {
-        std::fs::create_dir_all(&dir).unwrap();
-        let status = Command::new("cargo")
-            .args(["run", "-q", "-p", "mkmodel-soso", "--"])
-            .arg(&dir)
-            .status()
-            .expect("mkmodel-soso");
-        assert!(status.success());
-    }
-    dir
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = PathBuf::from("target/test-tiny-model");
+        if !dir.join("manifest.som").exists() {
+            std::fs::create_dir_all(&dir).unwrap();
+            let status = Command::new("cargo")
+                .args(["run", "-q", "-p", "mkmodel-soso", "--"])
+                .arg(&dir)
+                .status()
+                .expect("mkmodel-soso");
+            assert!(status.success());
+        }
+        dir
+    })
+    .clone()
 }
 
 #[test]

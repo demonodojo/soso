@@ -3,22 +3,48 @@
 //! Solo en layout GPT live/instalado (`drv-live-disk`). QEMU virtio sin GPT
 //! crece sosofs al montar vía `ftruncate` + `grow_to`.
 
-use crate::drivers::live_disk::{self, GPT_INSTALL, GPT_MODELS, GPT_ROOT};
+use crate::drivers::live_disk::{self, GPT_MODELS, GPT_ROOT};
 use crate::fs;
 use crate::println;
 use block_dev::BLOCK_SIZE;
-use gptdisk::{Header, entry, entry_first_lba, entry_last_lba, entry_mut, set_entry_first_lba,
-              set_entry_last_lba};
-use sosomfs::import;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use soso_resize_core::{
+    self, Disk512, Error as ResizeError, Journal, JOURNAL_INTENT,
+    JOURNAL_SHRINK_MODELS, apply_gpt_and_slides, validate_geometry,
+};
 
 const SECTOR: usize = 512;
-const GPT_HDR_LBA: u64 = 1;
 
-const JOURNAL_IDLE: u8 = 0;
-const JOURNAL_SHRINK_MODELS: u8 = 1;
-const JOURNAL_SLIDE_P3: u8 = 2;
-const JOURNAL_SLIDE_P4: u8 = 3;
-const JOURNAL_GPT: u8 = 4;
+static RESIZE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PENDING_ROOT_GROW: AtomicU64 = AtomicU64::new(0);
+
+struct ResizeGuard;
+impl ResizeGuard {
+    fn acquire() -> Result<Self, i64> {
+        if RESIZE_ACTIVE.swap(true, Ordering::SeqCst) {
+            println!("fs-resize: rechazado — otra operación en curso");
+            return Err(-soso_abi::EBUSY);
+        }
+        Ok(Self)
+    }
+}
+impl Drop for ResizeGuard {
+    fn drop(&mut self) {
+        RESIZE_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+struct LiveDisk512;
+
+impl Disk512 for LiveDisk512 {
+    fn read_sector(&self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), ResizeError> {
+        live_disk::disk_read_sector(lba, buf).map_err(|_| ResizeError::Io)
+    }
+
+    fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), ResizeError> {
+        live_disk::disk_write_sector(lba, buf).map_err(|_| ResizeError::Io)
+    }
+}
 
 #[cfg(feature = "drv-live-disk")]
 pub fn space_info() -> Result<soso_abi::FsSpaceInfo, i64> {
@@ -39,7 +65,7 @@ pub fn space_info() -> Result<soso_abi::FsSpaceInfo, i64> {
         .map(|mfs| {
             let mfs = mfs.lock();
             let sb = mfs.superblock();
-            let used = import::next_free_lba(sb, &mfs.catalog);
+            let used = sosomfs::import::next_free_lba(sb, &mfs.catalog);
             (mfs.total_blocks(), used)
         })
         .unwrap_or((0, 0));
@@ -60,6 +86,106 @@ pub fn space_info() -> Result<soso_abi::FsSpaceInfo, i64> {
     Err(-soso_abi::ENOSYS)
 }
 
+/// Recuperación en disco **antes** de montar root/modelos (slide + GPT).
+#[cfg(feature = "drv-live-disk")]
+pub fn recover_before_mount() -> bool {
+    if !live_disk::active() {
+        return true;
+    }
+    let mut journal = match journal_read() {
+        Err(code) if code == -soso_abi::ENOENT => {
+            // Sin hueco no pudo haberse iniciado un resize durable.
+            return true;
+        }
+        Err(code) if code == -soso_abi::EIO => {
+            println!("fs-resize: no se pudo leer SOSORES.TXT — no se montará live");
+            return false;
+        }
+        Err(_) => {
+            println!("fs-resize: journal corrupto — no se montará live");
+            return false;
+        }
+        Ok(j) => j,
+    };
+    if !journal.needs_recovery() {
+        return true;
+    }
+    if !journal.valid_phase() {
+        println!("fs-resize: journal corrupto — no se montará live");
+        return false;
+    }
+    if !live_disk::backend_supports_durable_flush() {
+        println!("fs-resize: recovery requiere backend con flush durable");
+        return false;
+    }
+    println!(
+        "fs-resize: recuperando fase {} ({} sectores)…",
+        journal.phase, journal.delta_sectors
+    );
+    let delta_blocks = journal
+        .delta_sectors
+        .checked_div((BLOCK_SIZE / SECTOR) as u64)
+        .unwrap_or(0);
+    if journal.phase == JOURNAL_INTENT {
+        if !fs::mount_models_for_recovery() {
+            println!("fs-resize: no se pudo montar modelos para shrink");
+            return false;
+        }
+        if shrink_models(delta_blocks).is_err() {
+            println!("fs-resize: shrink en recovery falló");
+            return false;
+        }
+        journal.phase = JOURNAL_SHRINK_MODELS;
+        journal.slide_done = 0;
+        if journal_write(&journal).is_err() {
+            return false;
+        }
+    }
+    let mut disk = LiveDisk512;
+    if soso_resize_core::recover_slides_and_gpt(&mut disk, &mut journal, |j| {
+        let _ = journal_write(j);
+    })
+    .is_err()
+    {
+        println!("fs-resize: slide/GPT en recovery falló (fase {})", journal.phase);
+        return false;
+    }
+    PENDING_ROOT_GROW.store(delta_blocks, Ordering::SeqCst);
+    println!("fs-resize: disco recuperado; pendiente grow root ({} bloques)", delta_blocks);
+    true
+}
+
+#[cfg(not(feature = "drv-live-disk"))]
+pub fn recover_before_mount() -> bool {
+    true
+}
+
+/// Tras montar sosofs: aplica grow pendiente de recovery.
+#[cfg(feature = "drv-live-disk")]
+pub fn finalize_after_mount() {
+    let delta_blocks = PENDING_ROOT_GROW.swap(0, Ordering::SeqCst);
+    if delta_blocks == 0 {
+        return;
+    }
+    let Some(fs_mutex) = fs::FS.get() else {
+        println!("fs-resize: finalize sin sosofs montado");
+        return;
+    };
+    let mut fs = fs_mutex.lock();
+    let target = fs.block_count().saturating_add(delta_blocks);
+    if fs.grow_to(target).is_err() {
+        println!("fs-resize: grow root en finalize falló");
+        return;
+    }
+    drop(fs);
+    let _ = reload_models();
+    let _ = journal_write(&Journal::idle());
+    println!("fs-resize: recovery completa — rootfs ampliado");
+}
+
+#[cfg(not(feature = "drv-live-disk"))]
+pub fn finalize_after_mount() {}
+
 #[cfg(feature = "drv-live-disk")]
 pub fn grow_root(delta_blocks: u64) -> Result<u64, i64> {
     if !live_disk::active() {
@@ -76,36 +202,32 @@ pub fn grow_root(delta_blocks: u64) -> Result<u64, i64> {
         .checked_mul((BLOCK_SIZE / SECTOR) as u64)
         .ok_or(-soso_abi::EINVAL)?;
 
+    preflight_resize(delta_blocks, delta_sectors)?;
+    let _guard = ResizeGuard::acquire()?;
+
     println!(
         "fs-resize: rootfs +{} MiB ({} bloques) desde modelos",
         delta_blocks * BLOCK_SIZE as u64 / (1024 * 1024),
         delta_blocks
     );
 
+    let mut journal = Journal {
+        phase: JOURNAL_INTENT,
+        delta_sectors,
+        slide_done: 0,
+    };
+    journal_write(&journal)?;
+
     shrink_models(delta_blocks)?;
-    journal_write(JOURNAL_SHRINK_MODELS, delta_sectors)?;
+    journal.phase = JOURNAL_SHRINK_MODELS;
+    journal.slide_done = 0;
+    journal_write(&journal)?;
 
-    let p2 = part_geometry(GPT_ROOT)?;
-    let p3 = part_geometry(GPT_MODELS)?;
-    let p4 = part_geometry(GPT_INSTALL)?;
-
-    let p3_sectors_after = p3.sectors.saturating_sub(delta_sectors);
-    if p3_sectors_after == 0 {
-        return Err(-soso_abi::ENOSPC);
-    }
-
-    live_disk::disk_slide_sectors(p3.first, p3.first + delta_sectors, p3_sectors_after)
-        .map_err(|_| -soso_abi::EIO)?;
-    journal_write(JOURNAL_SLIDE_P3, delta_sectors)?;
-
-    if p4.sectors > 0 {
-        live_disk::disk_slide_sectors(p4.first, p4.first + delta_sectors, p4.sectors)
-            .map_err(|_| -soso_abi::EIO)?;
-    }
-    journal_write(JOURNAL_SLIDE_P4, delta_sectors)?;
-
-    update_gpt(delta_sectors, p2, p3, p4)?;
-    journal_write(JOURNAL_GPT, delta_sectors)?;
+    let mut disk = LiveDisk512;
+    apply_gpt_and_slides(&mut disk, delta_sectors, &mut journal, |j| {
+        let _ = journal_write(j);
+    })
+    .map_err(|_| -soso_abi::EIO)?;
 
     let new_root_blocks = {
         let fs_mutex = fs::FS.get().ok_or(-soso_abi::EIO)?;
@@ -116,7 +238,7 @@ pub fn grow_root(delta_blocks: u64) -> Result<u64, i64> {
     };
 
     reload_models()?;
-    journal_write(JOURNAL_IDLE, 0)?;
+    journal_write(&Journal::idle())?;
 
     println!(
         "fs-resize: rootfs ahora {} bloques ({} MiB libres)",
@@ -135,111 +257,39 @@ pub fn grow_root(_delta_blocks: u64) -> Result<u64, i64> {
 }
 
 #[cfg(feature = "drv-live-disk")]
-struct PartGeom {
-    first: u64,
-    last: u64,
-    sectors: u64,
-}
-
-#[cfg(feature = "drv-live-disk")]
-fn part_geometry(entry_index: usize) -> Result<PartGeom, i64> {
-    let (first, last) = read_gpt_entry(entry_index)?;
-    Ok(PartGeom {
-        first,
-        sectors: last.saturating_sub(first) + 1,
-        last,
-    })
+fn preflight_resize(delta_blocks: u64, delta_sectors: u64) -> Result<(), i64> {
+    use crate::drivers::espfat;
+    const JOURNAL_SIZE: usize = 4096;
+    if espfat::locate(b"SOSORES ", b"TXT", JOURNAL_SIZE).is_none() {
+        println!("fs-resize: rechazado — journal SOSORES.TXT ausente");
+        return Err(-soso_abi::EIO);
+    }
+    if crate::som_import::import_active() {
+        println!("fs-resize: rechazado — importación de modelos en curso");
+        return Err(-soso_abi::EBUSY);
+    }
+    if !live_disk::backend_supports_durable_flush() {
+        let be = live_disk::backend()
+            .map(|b| alloc::format!("{b:?}"))
+            .unwrap_or_else(|| "?".into());
+        println!(
+            "fs-resize: rechazado — backend {be} sin flush durable (redimensionado no soportado)"
+        );
+        return Err(-soso_abi::ENOTSUP);
+    }
+    let disk = LiveDisk512;
+    validate_geometry(&disk, delta_sectors).map_err(|_| -soso_abi::EINVAL)?;
+    let info = space_info()?;
+    if delta_blocks > info.max_grow_blocks {
+        return Err(-soso_abi::ENOSPC);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "drv-live-disk")]
 fn part_blocks(entry_index: usize) -> Result<u64, i64> {
-    Ok(part_geometry(entry_index)?.sectors / (BLOCK_SIZE / SECTOR) as u64)
-}
-
-#[cfg(feature = "drv-live-disk")]
-fn read_gpt_entry(entry_index: usize) -> Result<(u64, u64), i64> {
-    let mut hdr_sec = [0u8; SECTOR];
-    live_disk::disk_read_sector(GPT_HDR_LBA, &mut hdr_sec).map_err(|_| -soso_abi::EIO)?;
-    let hdr = Header::parse(&hdr_sec).map_err(|_| -soso_abi::EIO)?;
-    let bytes = hdr.entries_bytes();
-    let padded = bytes.div_ceil(SECTOR) * SECTOR;
-    let mut entries = alloc::vec![0u8; padded];
-    for i in 0..hdr.entries_sectors() {
-        let mut sec = [0u8; SECTOR];
-        live_disk::disk_read_sector(hdr.entries_lba + i, &mut sec).map_err(|_| -soso_abi::EIO)?;
-        entries[i as usize * SECTOR..(i as usize + 1) * SECTOR].copy_from_slice(&sec);
-    }
-    entries.truncate(bytes);
-    let ent = entry(&entries, &hdr, entry_index).ok_or(-soso_abi::EIO)?;
-    Ok((entry_first_lba(ent), entry_last_lba(ent)))
-}
-
-#[cfg(feature = "drv-live-disk")]
-fn disk_sectors() -> Result<u64, i64> {
-    let mut hdr_sec = [0u8; SECTOR];
-    live_disk::disk_read_sector(GPT_HDR_LBA, &mut hdr_sec).map_err(|_| -soso_abi::EIO)?;
-    let hdr = Header::parse(&hdr_sec).map_err(|_| -soso_abi::EIO)?;
-    Ok(hdr.alternate_lba + 1)
-}
-
-#[cfg(feature = "drv-live-disk")]
-fn update_gpt(
-    delta: u64,
-    p2: PartGeom,
-    p3: PartGeom,
-    p4: PartGeom,
-) -> Result<(), i64> {
-    let mut hdr_sec = [0u8; SECTOR];
-    live_disk::disk_read_sector(GPT_HDR_LBA, &mut hdr_sec).map_err(|_| -soso_abi::EIO)?;
-    let mut hdr = Header::parse(&hdr_sec).map_err(|_| -soso_abi::EIO)?;
-    let bytes = hdr.entries_bytes();
-    let padded = bytes.div_ceil(SECTOR) * SECTOR;
-    let mut entries = alloc::vec![0u8; padded];
-    for i in 0..hdr.entries_sectors() {
-        let mut sec = [0u8; SECTOR];
-        live_disk::disk_read_sector(hdr.entries_lba + i, &mut sec).map_err(|_| -soso_abi::EIO)?;
-        entries[i as usize * SECTOR..(i as usize + 1) * SECTOR].copy_from_slice(&sec);
-    }
-    entries.truncate(bytes);
-
-    if let Some(e) = entry_mut(&mut entries, &hdr, GPT_ROOT) {
-        set_entry_last_lba(e, p2.last + delta);
-    }
-    if let Some(e) = entry_mut(&mut entries, &hdr, GPT_INSTALL) {
-        set_entry_first_lba(e, p4.first + delta);
-        set_entry_last_lba(e, p4.last + delta);
-    }
-    if let Some(e) = entry_mut(&mut entries, &hdr, GPT_MODELS) {
-        set_entry_first_lba(e, p3.first + delta);
-        set_entry_last_lba(e, p3.last);
-    }
-
-    let disk = disk_sectors()?;
-    let plan = gptdisk::relayout(&mut hdr, &mut entries, disk).map_err(|_| -soso_abi::EIO)?;
-
-    let backup = gptdisk::render_backup(&hdr, &entries, &plan);
-    write_gpt_sectors(plan.backup_entries_lba, &entries)?;
-    write_gpt_sector(plan.backup_header_lba, &backup)?;
-
-    write_gpt_sectors(plan.primary_entries_lba, &entries)?;
-    let primary = gptdisk::render_primary(&hdr, &entries, &plan);
-    write_gpt_sector(plan.primary_header_lba, &primary)?;
-    Ok(())
-}
-
-#[cfg(feature = "drv-live-disk")]
-fn write_gpt_sectors(lba: u64, buf: &[u8]) -> Result<(), i64> {
-    for (i, chunk) in buf.chunks(SECTOR).enumerate() {
-        let mut sec = [0u8; SECTOR];
-        sec[..chunk.len()].copy_from_slice(chunk);
-        live_disk::disk_write_sector(lba + i as u64, &sec).map_err(|_| -soso_abi::EIO)?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "drv-live-disk")]
-fn write_gpt_sector(lba: u64, sec: &[u8; SECTOR]) -> Result<(), i64> {
-    live_disk::disk_write_sector(lba, sec).map_err(|_| -soso_abi::EIO)
+    let g = soso_resize_core::read_part(&LiveDisk512, entry_index).map_err(|_| -soso_abi::EIO)?;
+    Ok(g.sectors / (BLOCK_SIZE / SECTOR) as u64)
 }
 
 #[cfg(feature = "drv-live-disk")]
@@ -248,8 +298,10 @@ fn shrink_models(delta_blocks: u64) -> Result<(), i64> {
     let mut mfs = mfs_mutex.lock();
     let mut sb = *mfs.superblock();
     let new_total = sb.total_blocks.saturating_sub(delta_blocks);
-    import::shrink_superblock(&mut sb, &mfs.catalog, new_total).map_err(|_| -soso_abi::ENOSPC)?;
-    import::commit_grow(mfs.cache.volume_mut().inner_mut(), &sb).map_err(|_| -soso_abi::EIO)?;
+    sosomfs::import::shrink_superblock(&mut sb, &mfs.catalog, new_total)
+        .map_err(|_| -soso_abi::ENOSPC)?;
+    sosomfs::import::commit_grow(mfs.cache.volume_mut().inner_mut(), &sb)
+        .map_err(|_| -soso_abi::EIO)?;
     mfs.reload_from_disk().map_err(|_| -soso_abi::EIO)?;
     Ok(())
 }
@@ -264,24 +316,31 @@ fn reload_models() -> Result<(), i64> {
         .unwrap_or(0);
     if part_blocks > mfs.total_blocks() {
         let mut sb = *mfs.superblock();
-        import::grow_superblock(&mut sb, part_blocks);
-        import::commit_grow(mfs.cache.volume_mut().inner_mut(), &sb).map_err(|_| -soso_abi::EIO)?;
+        sosomfs::import::grow_superblock(&mut sb, part_blocks);
+        sosomfs::import::commit_grow(mfs.cache.volume_mut().inner_mut(), &sb)
+            .map_err(|_| -soso_abi::EIO)?;
         mfs.reload_from_disk().map_err(|_| -soso_abi::EIO)?;
     }
     Ok(())
 }
 
 #[cfg(feature = "drv-live-disk")]
-fn journal_write(phase: u8, delta_sectors: u64) -> Result<(), i64> {
+fn journal_read() -> Result<Journal, i64> {
     use crate::drivers::espfat::{self, SECTOR as ESP_SEC};
     const JOURNAL_SIZE: usize = 4096;
-    let slot = match espfat::locate(b"SOSORES ", b"TXT", JOURNAL_SIZE) {
-        Some(s) => s,
-        None => return Ok(()),
-    };
+    let slot = espfat::locate(b"SOSORES ", b"TXT", JOURNAL_SIZE).ok_or(-soso_abi::ENOENT)?;
     let mut buf = [0u8; ESP_SEC];
-    buf[0] = phase;
-    buf[8..16].copy_from_slice(&delta_sectors.to_le_bytes());
+    espfat::read(slot.data_lba, &mut buf).map_err(|_| -soso_abi::EIO)?;
+    Journal::decode(&buf).map_err(|_| -soso_abi::EINVAL)
+}
+
+#[cfg(feature = "drv-live-disk")]
+fn journal_write(journal: &Journal) -> Result<(), i64> {
+    use crate::drivers::espfat::{self, SECTOR as ESP_SEC};
+    const JOURNAL_SIZE: usize = 4096;
+    let slot = espfat::locate(b"SOSORES ", b"TXT", JOURNAL_SIZE).ok_or(-soso_abi::EIO)?;
+    let mut buf = [0u8; ESP_SEC];
+    journal.encode(&mut buf);
     espfat::write(slot.data_lba, &buf).map_err(|_| -soso_abi::EIO)?;
     Ok(())
 }

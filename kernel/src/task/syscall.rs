@@ -519,6 +519,20 @@ fn flush_stream_write(
     buf: &mut Vec<u8>,
 ) -> Result<(), i64> {
     if buf.is_empty() {
+        // Sin bytes pendientes no hay nada que volcar… salvo que el fichero
+        // todavía no exista: `open(O_CREAT)` no toca el disco (la entrada se
+        // materializa aquí, al cerrar o hacer fsync), así que crear y cerrar
+        // sin escribir tiene que dejar un fichero vacío. Sin esto, un segundo
+        // `open(O_CREAT|O_EXCL)` sobre él triunfaba en vez de dar EEXIST
+        // (lo cazaba `soso-test-sosofs`). Se comprueba la existencia con un
+        // lookup, y no con `inode`, porque `inode` es None también al abrir un
+        // fichero EXISTENTE con O_WRONLY sin O_APPEND — ahí cerrar sin escribir
+        // debe dejarlo intacto, no truncarlo a cero.
+        if inode.is_none() && with_vfs(|| crate::vfs::lookup(dir, name)).is_err() {
+            let mtime = crate::time::wall_secs();
+            let ino = with_vfs(|| crate::vfs::create_file(dir, name, &[], mtime))?;
+            *inode = Some(ino);
+        }
         return Ok(());
     }
     let mtime = crate::time::wall_secs();
@@ -1074,6 +1088,7 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
     let opts = unsafe { *(opts.as_ptr() as *const abi::SpawnIo) };
     let path = user_str(opts.path_ptr, opts.path_len)?;
     let args = read_spawn_args(
+        path,
         opts.argv_ptr,
         opts.argv_count,
         opts.args_ptr,
@@ -1095,40 +1110,72 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
 }
 
 fn read_spawn_env(envp_ptr: u64, envp_count: u64) -> Result<alloc::string::String, i64> {
+    const MAX_ENVP: u64 = 256;
+    const MAX_ENV_BYTES: u64 = 4096;
     if envp_ptr == 0 || envp_count == 0 {
         return Ok(alloc::string::String::new());
     }
+    if envp_count > MAX_ENVP {
+        return Err(-abi::EINVAL);
+    }
+    envp_ptr
+        .checked_add(envp_count.saturating_mul(16))
+        .filter(|&end| end <= super::addrspace::USER_MAX)
+        .ok_or(-abi::EFAULT)?;
+    let mut total = 0u64;
     let mut lines: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     for i in 0..envp_count {
         let pair = envp_ptr + i * 16;
         let s_ptr = user_read_u64(pair)?;
         let s_len = user_read_u64(pair + 8)?;
+        total = total.checked_add(s_len).ok_or(-abi::EINVAL)?;
+        if total > MAX_ENV_BYTES {
+            return Err(-abi::EINVAL);
+        }
         lines.push(user_str(s_ptr, s_len)?.into());
     }
     Ok(lines.join("\n"))
 }
 
+/// Sin tabla argv (cliente antiguo con `args_ptr`), el kernel construye
+/// `[path, args]`: el crt0 descarta siempre argv[0], así que sin el path el
+/// hijo perdería su único argumento.
 fn read_spawn_args(
+    path: &str,
     argv_ptr: u64,
     argv_count: u64,
     fallback_ptr: u64,
     fallback_len: u64,
-) -> Result<alloc::string::String, i64> {
+) -> Result<alloc::vec::Vec<alloc::string::String>, i64> {
+    const MAX_ARGV: u64 = 256;
+    const MAX_ARG_BYTES: u64 = 4096;
     if argv_ptr != 0 && argv_count > 0 {
+        if argv_count > MAX_ARGV {
+            return Err(-abi::EINVAL);
+        }
+        argv_ptr
+            .checked_add(argv_count.saturating_mul(16))
+            .filter(|&end| end <= super::addrspace::USER_MAX)
+            .ok_or(-abi::EFAULT)?;
+        let mut total = 0u64;
         let mut parts: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
         for i in 0..argv_count {
             let pair = argv_ptr + i * 16;
             let s_ptr = user_read_u64(pair)?;
             let s_len = user_read_u64(pair + 8)?;
+            total = total.checked_add(s_len).ok_or(-abi::EINVAL)?;
+            if total > MAX_ARG_BYTES {
+                return Err(-abi::EINVAL);
+            }
             parts.push(user_str(s_ptr, s_len)?.into());
         }
-        return Ok(parts.join(" "));
+        return Ok(parts);
     }
-    if fallback_len == 0 {
-        Ok(alloc::string::String::new())
-    } else {
-        Ok(user_str(fallback_ptr, fallback_len)?.into())
+    let mut argv: alloc::vec::Vec<alloc::string::String> = alloc::vec![path.into()];
+    if fallback_len != 0 {
+        argv.push(user_str(fallback_ptr, fallback_len)?.into());
     }
+    Ok(argv)
 }
 
 fn user_read_u64(addr: u64) -> Result<u64, i64> {
@@ -2163,7 +2210,14 @@ fn sys_fstat(fd: u64, out: u64) -> Result<u64, i64> {
     if !user_range_ok(out, core::mem::size_of::<abi::Stat>() as u64, true) {
         return Err(-abi::EFAULT);
     }
-    with_fd(fd, |slot| {
+    // El `Stat` se calcula bajo `with_fd` (que sostiene PROCS) y se copia al
+    // proceso FUERA de él. Antes la copia iba dentro, con `with_current`
+    // anidado: `spin::Mutex` no es reentrante, así que la syscall giraba para
+    // siempre en ring 0 con IF=1. Como `net::poll` sólo corre desde ring 3 o el
+    // bucle ocioso, eso dejaba la red muerta (eco y SSH nuevos sin respuesta) y
+    // el `init test` congelado justo después de «SYS_DUP2», con la cola TX del
+    // SSH a medio drenar — parecía una avería de virtio y era un interbloqueo.
+    let stat = with_fd(fd, |slot| {
         let stat = match slot {
             Fd::File { inode, data, .. } => {
                 let st = with_vfs(|| crate::vfs::stat_inode(*inode))?;
@@ -2197,17 +2251,18 @@ fn sys_fstat(fd: u64, out: u64) -> Result<u64, i64> {
             }
             _ => return Err(-abi::EBADF),
         };
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&stat as *const abi::Stat).cast::<u8>(),
-                core::mem::size_of::<abi::Stat>(),
-            )
-        };
-        super::with_current(|p| {
-            let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
-            space.write(out, bytes).ok_or(-abi::EFAULT)?;
-            Ok(0u64)
-        })
+        Ok(stat)
+    })?;
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&stat as *const abi::Stat).cast::<u8>(),
+            core::mem::size_of::<abi::Stat>(),
+        )
+    };
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(0u64)
     })
 }
 
@@ -2272,19 +2327,51 @@ fn sys_set_tls(base: u64) -> Result<u64, i64> {
 }
 
 fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
+    if prot == 0 {
+        return Err(-abi::EINVAL);
+    }
+    if prot & !(abi::PROT_READ | abi::PROT_WRITE) != 0 {
+        return Err(-abi::EINVAL);
+    }
+    if prot & abi::PROT_READ == 0 {
+        return Err(-abi::EINVAL);
+    }
     let writable = prot & abi::PROT_WRITE != 0;
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        let end = addr.saturating_add(len);
+        let mut va = addr & !0xfff;
+        while va < end {
+            let in_mmap = space.find_mmap_region(va).is_some();
+            if !in_mmap && !space.is_mapped(va) {
+                return Err(-abi::EINVAL);
+            }
+            va += 4096;
+        }
         space
             .set_prot(addr, len, writable)
             .ok_or(-abi::EINVAL)?;
+        space.with_mmap_mut(|book| {
+            for r in &mut book.regions {
+                let rend = r.virt_start.saturating_add(r.len);
+                if r.virt_start >= addr && rend <= end {
+                    r.writable = writable;
+                }
+            }
+        });
         Ok(0)
     })
 }
 
-fn sys_mremap(addr: u64, old_len: u64, new_len: u64, _flags: u64) -> Result<u64, i64> {
-    if new_len <= old_len {
+fn sys_mremap(addr: u64, old_len: u64, new_len: u64, flags: u64) -> Result<u64, i64> {
+    if new_len < old_len {
+        return Err(-abi::EINVAL);
+    }
+    if new_len == old_len {
         return Ok(addr);
+    }
+    if flags != 0 {
+        return Err(-abi::EINVAL);
     }
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;

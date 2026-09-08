@@ -272,20 +272,25 @@ static int flcn_fw_load(unsigned base, struct flcn_fw_ctx *fw)
     return 0;
 }
 
+/* `sentinel`: si el llamante pide mbox0==mbox0_ok, sustituir la entrada por
+ * 0xcafebeef para distinguir «terminó con 0» de «nunca corrió». Sólo vale para
+ * ucodes que escriben MAILBOX0 al acabar (booter/ACR). FWSEC-FRTS no lo hace
+ * necesariamente: RM (`kgspExecuteHsFalcon_GA102`) lo lanza con mailboxes a
+ * NULL y nouveau con mbox0=0 esperando 0; el veredicto es el scratch FRTS y
+ * WPR2. Con el sentinela, un FRTS correcto salía como «no ejecutó». */
 static int flcn_fw_boot_ga102(unsigned base, struct flcn_fw_ctx *fw,
                               unsigned mbox0_in, unsigned mbox1_in,
-                              int check_mbox0, unsigned mbox0_ok, unsigned timeout_ms)
+                              int check_mbox0, unsigned mbox0_ok, int sentinel,
+                              unsigned timeout_ms)
 {
     unsigned mbox0, mbox1;
     unsigned mbox_start = mbox0_in;
     unsigned cpuctl_pre, cpuctl_post, cpuctl_alias, riscv, bcr, hwcfg1, hwcfg2;
     unsigned t;
+    unsigned i;
+    int ran = 0;
 
-    /* gm200_flcn_fw_boot: si el llamante pide mbox0==0, el valor inicial NO
-     * puede ser 0 —si el falcon no arranca el mbox se queda como lo escribimos
-     * y un 0 de éxito es indistinguible de «nunca corrió». Linux usa 0xcafebeef
-     * cuando no hay valor de entrada. */
-    if (check_mbox0 && mbox0_in == mbox0_ok) {
+    if (sentinel && check_mbox0 && mbox0_in == mbox0_ok) {
         mbox_start = 0xcafebeefu;
     }
 
@@ -310,25 +315,39 @@ static int flcn_fw_boot_ga102(unsigned base, struct flcn_fw_ctx *fw,
     else
         flcn_wr32(base, 0x100u, 2u);
 
-    t = timeout_ms ? timeout_ms : 2000u;
-    if (cpuctl_pre & 0x10u) {
-        unsigned tclear = 50u;
+    /* Tras START, HALTED (bit 4) baja mientras corre y vuelve al halt. El
+     * falcon arrancaba parado (cpuctl=0x10), así que esperar «HALTED» sin más
+     * podía salir en la primera lectura. Sondeo apretado primero: un HS que
+     * BROM rechaza se para en microsegundos y una espera de 1 ms se lo pierde.
+     * Es diagnóstico, no veredicto (ni RM ni nouveau lo miran): el juez es el
+     * mbox/scratch/WPR2 del llamante. (La versión anterior hacía `while
+     * (t_run--)` y comparaba con 0: al agotarse valía ~0u y nunca fallaba.) */
+    for (i = 0; i < 200u && !ran; i++) {
+        unsigned spin;
 
-        while (tclear--) {
+        for (spin = 0; spin < 512u; spin++) {
             if (!(flcn_rd32(base, 0x100u) & 0x10u)) {
+                ran = 1;
                 break;
             }
-            lx_mdelay(1);
         }
+        if (!ran)
+            lx_mdelay(1);
     }
-    while (t--) {
+    if (!ran) {
+        lx_printk("nouveau-lx: falcon HALTED no bajó tras START (cpuctl=0x%x)\n",
+                  flcn_rd32(base, 0x100u));
+    }
+
+    t = timeout_ms ? timeout_ms : 2000u;
+    for (i = 0; i < t; i++) {
         if (flcn_rd32(base, 0x100u) & 0x10u) {
             break;
         }
         lx_mdelay(1);
     }
     cpuctl_post = flcn_rd32(base, 0x100u);
-    if (t == 0u) {
+    if (!(cpuctl_post & 0x10u)) {
         lx_printk("nouveau-lx: falcon boot timeout cpuctl 0x%x→0x%x riscv=0x%x "
                   "alias=0x%x bcr=0x%x hwcfg1=0x%x hwcfg2=0x%x\n",
                   cpuctl_pre, cpuctl_post, riscv, cpuctl_alias, bcr, hwcfg1, hwcfg2);
@@ -338,12 +357,12 @@ static int flcn_fw_boot_ga102(unsigned base, struct flcn_fw_ctx *fw,
     mbox0 = flcn_rd32(base, 0x040u);
     mbox1 = flcn_rd32(base, 0x044u);
     lx_printk("nouveau-lx: falcon boot mbox0=0x%x mbox1=0x%x (expect 0x%x) "
-              "cpuctl 0x%x→0x%x riscv=0x%x alias=0x%x bcr=0x%x hwcfg1=0x%x "
-              "hwcfg2=0x%x dma=0x%llx\n",
-              mbox0, mbox1, mbox0_ok, cpuctl_pre, cpuctl_post, riscv,
+              "cpuctl 0x%x→0x%x ran=%d riscv=0x%x alias=0x%x bcr=0x%x "
+              "hwcfg1=0x%x hwcfg2=0x%x dma=0x%llx\n",
+              mbox0, mbox1, mbox0_ok, cpuctl_pre, cpuctl_post, ran, riscv,
               cpuctl_alias, bcr, hwcfg1, hwcfg2,
               (unsigned long long)fw->dma_handle);
-    if (check_mbox0 && mbox0 == mbox_start && mbox_start != mbox0_ok) {
+    if (sentinel && check_mbox0 && mbox0 == mbox_start && mbox_start != mbox0_ok) {
         lx_printk("nouveau-lx: falcon no ejecutó (mbox sentinela 0x%x intacto)\n",
                   mbox_start);
         return -1;
@@ -383,8 +402,8 @@ int falcon_lx_hsfw_boot_mbox(unsigned falcon_base, const struct acr_fw_blob *blo
         return -1;
     }
 
-    if (flcn_fw_boot_ga102(falcon_base, &fw, mbox0, mbox1, check_mbox0, 0u,
-                          check_mbox0 ? 2000u : 4000u) != 0) {
+    if (flcn_fw_boot_ga102(falcon_base, &fw, mbox0, mbox1, check_mbox0, 0u, 1,
+                            check_mbox0 ? 2000u : 4000u) != 0) {
         lx_printk("nouveau-lx: falcon %s boot falló\n", name);
         return -1;
     }
@@ -459,8 +478,11 @@ int falcon_lx_raw_boot(unsigned falcon_base, const struct falcon_lx_raw *raw)
                   name, flcn_rd32(falcon_base, 0x0f4u));
     }
 
+    /* Sin sentinela: FWSEC-FRTS no escribe MAILBOX0 al terminar (RM lo lanza
+     * con mailboxes NULL); mbox0=0 de entrada y 0 de salida es lo correcto.
+     * El fallo real se lee en el scratch FRTS y en WPR2 (gsp_fwsec.c). */
     if (flcn_fw_boot_ga102(falcon_base, &fw, raw->mbox0, raw->mbox1,
-                            raw->check_mbox0, 0u,
+                            raw->check_mbox0, 0u, 0,
                             raw->timeout_ms ? raw->timeout_ms : 4000u) != 0) {
         lx_printk("nouveau-lx: falcon %s raw boot falló\n", name);
         return -1;

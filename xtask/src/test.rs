@@ -84,6 +84,98 @@ impl ShardId {
     fn mac(self) -> String {
         format!("52:54:00:12:34:{:02x}", 0x20 + self.index())
     }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "llm-dense" | "dense" => Some(ShardId::LlmDense),
+            "llm-moe" | "moe" => Some(ShardId::LlmMoe),
+            "sys" => Some(ShardId::Sys),
+            "reclaim" => Some(ShardId::Reclaim),
+            _ => None,
+        }
+    }
+}
+
+/// Filtros opcionales tras `cargo xtask test -- …`.
+///
+/// Ejemplos:
+///   `cargo xtask test -- --guest sys`
+///   `cargo xtask test -- sys --only init,voz,ciclos`
+#[derive(Clone)]
+struct TestFilter {
+    shards: Vec<ShardId>,
+    skip_host: bool,
+    only: Vec<String>,
+}
+
+impl TestFilter {
+    fn from_args(args: &[String]) -> Self {
+        let mut shards = Vec::new();
+        let mut skip_host = false;
+        let mut only = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--" => {}
+                "--guest" | "--no-host" => skip_host = true,
+                "--only" => {
+                    i += 1;
+                    if i < args.len() {
+                        only.extend(parse_only_list(&args[i]));
+                    }
+                }
+                s if s.starts_with("--only=") => {
+                    only.extend(parse_only_list(&s["--only=".len()..]));
+                }
+                s => {
+                    if let Some(shard) = ShardId::parse(s) {
+                        shards.push(shard);
+                    } else if s.starts_with('-') {
+                        eprintln!("xtask test: aviso: opción desconocida {s:?}");
+                    } else {
+                        eprintln!("xtask test: aviso: shard desconocido {s:?} (sys, llm-dense, llm-moe, reclaim)");
+                    }
+                }
+            }
+            i += 1;
+        }
+        Self {
+            shards,
+            skip_host,
+            only,
+        }
+    }
+
+    fn shards(&self) -> &[ShardId] {
+        if self.shards.is_empty() {
+            ShardId::ALL.as_slice()
+        } else {
+            &self.shards
+        }
+    }
+
+    fn step_enabled(&self, nombre: &str) -> bool {
+        if self.only.is_empty() {
+            return true;
+        }
+        let n = nombre.to_lowercase();
+        self.only.iter().any(|f| n.contains(f))
+    }
+
+    fn if_step<F: FnOnce()>(&self, sid: &str, nombre: &str, f: F) {
+        if !self.step_enabled(nombre) {
+            println!("      [{sid}] omitido: {nombre}");
+            return;
+        }
+        f();
+    }
+}
+
+fn parse_only_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|p| p.trim().to_lowercase())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 struct QemuSlot {
@@ -182,6 +274,50 @@ impl Report {
         }
         unreachable!()
     }
+
+    /// Paso SSH del shard `sys` con reinicio del guest si la sesión queda colgada
+    /// (p. ej. `soso-voz` sigue corriendo tras un timeout del cliente).
+    fn paso_ssh_sys<F: FnMut() -> Result<(), String>>(
+        &self,
+        qemu: &mut Child,
+        slot: &QemuSlot,
+        sid: &str,
+        nombre: &str,
+        mut f: F,
+    ) {
+        const MAX: u32 = 3;
+        for intento in 1..=MAX {
+            match f() {
+                Ok(()) => {
+                    self.marca(sid, nombre, true);
+                    return;
+                }
+                Err(e) if intento < MAX => {
+                    let reinicio = guest_requiere_reinicio(&e);
+                    println!(
+                        "      [{sid}] (reintento {}/{} de «{nombre}»{}: {e})",
+                        intento,
+                        MAX - 1,
+                        if reinicio { " tras reinicio" } else { " tras 5 s" },
+                    );
+                    if reinicio {
+                        if let Err(re) = reiniciar_guest_sys(qemu, slot) {
+                            self.marca(sid, &format!("{nombre}: {re}"), false);
+                            *self.fallos.lock().unwrap() += 1;
+                            return;
+                        }
+                    } else {
+                        std::thread::sleep(Duration::from_secs(5));
+                    }
+                }
+                Err(e) => {
+                    self.marca(sid, &format!("{nombre}: {e}"), false);
+                    *self.fallos.lock().unwrap() += 1;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl JobPool {
@@ -219,13 +355,23 @@ fn test_jobs() -> usize {
 }
 
 pub fn run() {
+    run_with_filter(&TestFilter::from_args(
+        &std::env::args().skip(2).collect::<Vec<_>>(),
+    ));
+}
+
+fn run_with_filter(filter: &TestFilter) {
     let root = super::project_root();
     let report = Arc::new(Report::new());
 
     let img = std::thread::scope(|scope| {
-        let report_host = Arc::clone(&report);
-        let root_host = root.clone();
-        scope.spawn(move || run_host_tests(&root_host, &report_host));
+        if !filter.skip_host {
+            let report_host = Arc::clone(&report);
+            let root_host = root.clone();
+            scope.spawn(move || run_host_tests(&root_host, &report_host));
+        } else {
+            println!("xtask test: omitiendo tests host (--guest)");
+        }
 
         scope.spawn(super::build_user);
 
@@ -242,8 +388,13 @@ pub fn run() {
     let accel = super::qemu_accel_mode();
     println!("xtask test: QEMU accel={accel} (SOSO_QEMU_ACCEL)");
     println!("xtask test: hasta {jobs} QEMU en paralelo (SOSO_TEST_JOBS)");
+    let shard_names: Vec<_> = filter.shards().iter().map(|s| s.name()).collect();
+    println!("xtask test: shards={}", shard_names.join(", "));
+    if !filter.only.is_empty() {
+        println!("xtask test: --only {}", filter.only.join(", "));
+    }
 
-    run_shards_parallel(&report, jobs, &img, &data, &models, &key);
+    run_shards_parallel(&report, jobs, &img, &data, &models, &key, filter);
 
     exit_resumen(if report.fallos() == 0 { 0 } else { 1 });
 }
@@ -346,20 +497,22 @@ fn run_shards_parallel(
     data: &Path,
     models: &Path,
     key: &Path,
+    filter: &TestFilter,
 ) {
     let pool = Arc::new(JobPool::new(jobs));
     std::thread::scope(|scope| {
-        for shard in ShardId::ALL {
+        for &shard in filter.shards() {
             let report = Arc::clone(report);
             let pool = Arc::clone(&pool);
             let img = img.to_path_buf();
             let data = data.to_path_buf();
             let models = models.to_path_buf();
             let key = key.to_path_buf();
+            let filter = filter.clone();
             scope.spawn(move || {
                 let _permit = pool.acquire();
                 let slot = make_slot(shard, &img, &data, &models);
-                run_shard(shard, &slot, &key, &report);
+                run_shard(shard, &slot, &key, &report, &filter);
             });
         }
     });
@@ -368,8 +521,20 @@ fn run_shards_parallel(
 fn make_slot(shard: ShardId, img: &Path, data: &Path, models: &Path) -> QemuSlot {
     let id = shard.name();
     let root = super::project_root();
-    let serial = root.join(format!("test-{id}-serial.log"));
-    let _ = std::fs::remove_file(&serial);
+    let log_dir = root.join("target");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let canonical = log_dir.join(format!("test-{id}-serial.log"));
+    let serial = if std::fs::remove_file(&canonical).is_ok() || !canonical.exists() {
+        canonical
+    } else {
+        // Tras `sudo cargo xtask flash-usb-live` el log puede quedar root:root
+        // y QEMU no escribe; el test ve un fichero viejo o vacío.
+        eprintln!(
+            "xtask test: aviso: no pude borrar {} (¿root?); uso log alternativo",
+            canonical.display()
+        );
+        log_dir.join(format!("test-{id}-serial-{}.log", std::process::id()))
+    };
     QemuSlot {
         id,
         ssh_port: shard.ssh_port(),
@@ -411,16 +576,16 @@ fn copiar_imagen(src: &Path, shard_id: &str, kind: &str) -> PathBuf {
     dst
 }
 
-fn run_shard(shard: ShardId, slot: &QemuSlot, key: &Path, report: &Report) {
+fn run_shard(shard: ShardId, slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilter) {
     match shard {
-        ShardId::LlmDense => run_shard_llm_dense(slot, key, report),
+        ShardId::LlmDense => run_shard_llm_dense(slot, key, report, filter),
         ShardId::LlmMoe => run_shard_llm_moe(slot, key, report),
-        ShardId::Sys => run_shard_sys(slot, key, report),
+        ShardId::Sys => run_shard_sys(slot, key, report, filter),
         ShardId::Reclaim => run_shard_reclaim(slot, key, report),
     }
 }
 
-fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report) {
+fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilter) {
     let sid = slot.id;
     let qemu = match lanzar_qemu(slot) {
         Ok(c) => c,
@@ -439,26 +604,48 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report) {
         .is_ok();
     if arrancado {
         let port = slot.ssh_port;
-        let _ = report.paso_con_reintento(sid, "soso-llm run tiny --prompt test", || {
-            ssh_llm(key, port)
+        filter.if_step(sid, "soso-llm run tiny --prompt test", || {
+            let _ = report.paso_con_reintento(sid, "soso-llm run tiny --prompt test", || {
+                ssh_llm(key, port)
+            });
         });
-        let _ = report.paso_con_reintento(
+        filter.if_step(
             sid,
             "soso-llm run tiny-mla --prompt test --max 2",
-            || ssh_llm_mla(key, port),
+            || {
+                let _ = report.paso_con_reintento(
+                    sid,
+                    "soso-llm run tiny-mla --prompt test --max 2",
+                    || ssh_llm_mla(key, port),
+                );
+            },
         );
-        let _ = report.paso_con_reintento(sid, "sigue viva tras dos pools de hilos", || {
-            ssh_vive(key, port)
+        filter.if_step(sid, "sigue viva tras dos pools de hilos", || {
+            let _ = report.paso_con_reintento(sid, "sigue viva tras dos pools de hilos", || {
+                ssh_vive(key, port)
+            });
         });
-        let _ = report.paso_con_reintento(
-            sid,
-            "soso-llm: 20 ciclos carga/generación/cambio (A7)",
-            || ssh_llm_ciclos(key, port),
-        );
-        let _ = report.paso_con_reintento(
+        filter.if_step(
             sid,
             "ask: modelo residente (carga una vez, reconexión SSH)",
-            || ssh_ask_resident(key, port),
+            || {
+                let _ = report.paso_con_reintento(
+                    sid,
+                    "ask: modelo residente (carga una vez, reconexión SSH)",
+                    || ssh_ask_resident(key, port),
+                );
+            },
+        );
+        filter.if_step(
+            sid,
+            "soso-llm: 20 ciclos carga/generación/cambio (A7)",
+            || {
+                let _ = report.paso_con_reintento(
+                    sid,
+                    "soso-llm: 20 ciclos carga/generación/cambio (A7)",
+                    || ssh_llm_ciclos(key, port),
+                );
+            },
         );
     }
 }
@@ -510,7 +697,7 @@ fn run_shard_llm_moe(slot: &QemuSlot, key: &Path, report: &Report) {
     }
 }
 
-fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report) {
+fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilter) {
     let sid = slot.id;
     let mut qemu = match lanzar_qemu(slot) {
         Ok(c) => c,
@@ -530,40 +717,98 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report) {
         let echo = slot.echo_port;
         let port = slot.ssh_port;
         let _ = report.paso(sid, &format!("echo TCP en :{echo}"), || echo_tcp(echo));
-        let _ = report.paso_con_reintento(sid, "ask: el texto llega literal", || {
-            ssh_ask_literal(key, port)
+        filter.if_step(sid, "ask: el texto llega literal", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "ask: el texto llega literal", || {
+                ssh_ask_literal(key, port)
+            });
         });
-        let _ = report.paso_con_reintento(sid, "voz: transcribe WAV de prueba", || {
-            ssh_voz_wav(key, port)
+        filter.if_step(sid, "soso-web: HTML local", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-web: HTML local", || {
+                ssh_soso_web_local(key, port)
+            });
         });
-        let _ = report.paso_con_reintento(sid, "soso-web: HTML local", || {
-            ssh_soso_web_local(key, port)
+        filter.if_step(
+            sid,
+            "init test (syscalls, hilos, FPU, GPU)",
+            || {
+                report.paso_ssh_sys(
+                    &mut qemu,
+                    slot,
+                    sid,
+                    "init test (syscalls, hilos, FPU, GPU)",
+                    || ssh_init_test(key, port),
+                );
+            },
+        );
+        filter.if_step(sid, "pipeline de sosh (6 KiB por un pipe)", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "pipeline de sosh (6 KiB por un pipe)", || {
+                ssh_pipeline(key, port)
+            });
         });
-        let _ = report.paso_con_reintento(sid, "init test (syscalls, hilos, FPU, GPU)", || {
-            ssh_init_test(key, port)
+        filter.if_step(sid, "voz: transcribe WAV de prueba", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "voz: transcribe WAV de prueba", || {
+                ssh_voz_wav(key, port)
+            });
         });
-        let _ = report.paso_con_reintento(sid, "pipeline de sosh (6 KiB por un pipe)", || {
-            ssh_pipeline(key, port)
-        });
-        let _ = report.paso(sid, "SSH por clave pública + comando + halt", || {
-            ssh_sesion(key, port)
-        });
+        filter.if_step(
+            sid,
+            "SSH por clave pública + comando + halt",
+            || {
+                report.paso_ssh_sys(
+                    &mut qemu,
+                    slot,
+                    sid,
+                    "SSH por clave pública + comando + halt",
+                    || ssh_sesion(key, port),
+                );
+            },
+        );
     }
-    match espera_salida(&mut qemu, Duration::from_secs(10)) {
-        Some(code) if code == HALT_EXIT => {
-            report.marca(sid, "apagado limpio por halt", true);
+    let halt_esperado = filter.step_enabled("SSH por clave pública + comando + halt");
+    if halt_esperado {
+        match espera_salida(&mut qemu, Duration::from_secs(10)) {
+            Some(code) if code == HALT_EXIT => {
+                report.marca(sid, "apagado limpio por halt", true);
+            }
+            Some(code) => {
+                report.marca(sid, &format!("QEMU salió con código inesperado {code}"), false);
+                *report.fallos.lock().unwrap() += 1;
+            }
+            None => {
+                report.marca(sid, "QEMU no se apagó con halt (matado)", false);
+                *report.fallos.lock().unwrap() += 1;
+                let _ = qemu.kill();
+            }
         }
-        Some(code) => {
-            report.marca(sid, &format!("QEMU salió con código inesperado {code}"), false);
-            *report.fallos.lock().unwrap() += 1;
-        }
-        None => {
-            report.marca(sid, "QEMU no se apagó con halt (matado)", false);
-            *report.fallos.lock().unwrap() += 1;
-            let _ = qemu.kill();
-        }
+    } else {
+        let _ = qemu.kill();
     }
     let _ = qemu.wait();
+}
+
+fn guest_ssh_caido(err: &str) -> bool {
+    err.contains("no apareció el prompt")
+        || err.contains("stdout parcial: \"\"")
+        || err.contains("ConnectTimeout")
+        || err.contains("Connection refused")
+        || err.contains("Connection reset")
+}
+
+fn guest_requiere_reinicio(err: &str) -> bool {
+    guest_ssh_caido(err) || err.contains("la sesión SSH no terminó")
+}
+
+fn reiniciar_guest_sys(qemu: &mut Child, slot: &QemuSlot) -> Result<(), String> {
+    let _ = qemu.kill();
+    let _ = qemu.wait();
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&slot.serial);
+    *qemu = lanzar_qemu(slot).map_err(|e| format!("relanzar QEMU: {e}"))?;
+    esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(90))?;
+    esperar_en_fichero(&slot.serial, "net: dhcp", Duration::from_secs(120))?;
+    Ok(())
 }
 
 fn run_shard_reclaim(slot: &QemuSlot, key: &Path, report: &Report) {
@@ -611,7 +856,30 @@ fn exit_resumen(code: i32) -> ! {
     std::process::exit(code);
 }
 
+/// Si un intento anterior murió a medias (timeout SSH, kill del terminal…),
+/// QEMU y ssh siguen vivos y el siguiente arranque no escribe en el serial.
+fn limpiar_huérfanos_shard(slot: &QemuSlot) {
+    let id = slot.id;
+    let puerto = slot.ssh_port;
+    let _ = Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                "pkill -f 'qemu-system-x86_64.*test-{id}' 2>/dev/null; \
+                 pkill -f 'ssh.*-p {puerto} ' 2>/dev/null; \
+                 true"
+            ),
+        ])
+        .status();
+    std::thread::sleep(Duration::from_millis(800));
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&slot.serial);
+}
+
 fn lanzar_qemu(slot: &QemuSlot) -> std::io::Result<Child> {
+    limpiar_huérfanos_shard(slot);
     let mem = slot.mem.clone().unwrap_or_else(super::qemu_mem);
     let smp = slot.smp.clone().unwrap_or_else(super::qemu_smp);
     let mut qemu = Command::new("qemu-system-x86_64");
@@ -754,10 +1022,11 @@ fn conectar_reintentando(puerto: u16, limite: Duration) -> Result<TcpStream, Str
 }
 
 fn prompt_listo(texto: &str) -> bool {
-    if !texto.contains("sosh —") {
+    if !texto.contains("sosh — escribe 'help' para la ayuda") {
         return false;
     }
     texto.ends_with("$ ")
+        || texto.ends_with("$ \n")
         || texto.ends_with("$ \r\n")
         || texto.contains("\n$ \n")
         || texto.contains("\r\n$ \r\n")
@@ -802,7 +1071,7 @@ pub(crate) fn ssh_guion(
     guion: &str,
     limite: Duration,
 ) -> Result<String, String> {
-    ssh_guion_inner(key, ssh_port, guion, limite, true)
+    ssh_guion_inner(key, ssh_port, guion, limite, true, None)
 }
 
 fn ssh_guion_inner(
@@ -811,6 +1080,7 @@ fn ssh_guion_inner(
     guion: &str,
     limite: Duration,
     tty: bool,
+    marcador_ok: Option<&str>,
 ) -> Result<String, String> {
     let fifo = ssh_fifo_path("guion");
     let _ = fs::remove_file(&fifo);
@@ -907,6 +1177,10 @@ fn ssh_guion_inner(
         visto = prompt.1.wait_timeout(visto, resto).unwrap().0;
     }
 
+    // El motd y el banner pueden llegar en el mismo read que el `$ `; un instante
+    // de margen evita perder la primera línea del guion (p. ej. `ask :eco`).
+    std::thread::sleep(Duration::from_millis(250));
+
     {
         let mut w = OpenOptions::new()
             .write(true)
@@ -921,10 +1195,28 @@ fn ssh_guion_inner(
         if lector.is_finished() {
             break;
         }
+        if let Some(m) = marcador_ok {
+            let datos = acum.lock().unwrap();
+            if String::from_utf8_lossy(&datos).contains(m) {
+                drop(datos);
+                std::thread::sleep(Duration::from_secs(3));
+                if lector.is_finished() {
+                    break;
+                }
+                let _ = hijo.kill();
+                break;
+            }
+        }
         if Instant::now() >= fin {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+    let timed_out = Instant::now() >= fin;
+    // Matar ssh ANTES de join del lector: si no, read() en stdout bloquea
+    // para siempre y el timeout no sirve de nada (init test, voz, A7…).
+    if timed_out && !lector.is_finished() {
+        let _ = hijo.kill();
     }
     if lector.is_finished() {
         lector
@@ -939,7 +1231,10 @@ fn ssh_guion_inner(
     let salida = normalizar_salida_ssh(salida);
     let status = hijo.wait().map_err(|e| format!("wait ssh: {e}"))?;
     guard.finish();
-    if Instant::now() >= fin && !status.success() {
+    if timed_out && !status.success() {
+        if marcador_ok.is_some_and(|m| salida.contains(m)) {
+            return Ok(salida);
+        }
         return Err(format!(
             "la sesión SSH no terminó en {}s; stdout: {salida:?}",
             limite.as_secs()
@@ -1045,7 +1340,14 @@ fn ssh_llm_ciclos(key: &Path, ssh_port: u16) -> Result<(), String> {
         }
     }
     guion.push_str("echo ciclos_ok\nexit\n");
-    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(1200))?;
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        &guion,
+        Duration::from_secs(1200),
+        true,
+        Some("ciclos_ok"),
+    )?;
     let runs = texto.matches("soso-llm: generado").count();
     let asks = LLM_CICLOS_A7 / 4;
     let expected_run = LLM_CICLOS_A7 - asks;
@@ -1274,7 +1576,14 @@ fn ssh_pipeline(key: &Path, ssh_port: u16) -> Result<(), String> {
 /// Transcripción determinista desde fichero WAV (no requiere micrófono).
 fn ssh_voz_wav(key: &Path, ssh_port: u16) -> Result<(), String> {
     let guion = "soso-voz dictar --wav /etc/voz-prueba.wav --max-tokens 128\nexit\n";
-    let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(180))?;
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        guion,
+        Duration::from_secs(300),
+        true,
+        Some("soso-voz: transcrito"),
+    )?;
     if !texto.contains("soso-voz: transcrito") {
         return Err(format!(
             "voz WAV no devolvió «soso-voz: transcrito»; stdout: {texto:?}"
@@ -1296,7 +1605,9 @@ fn ssh_voz_wav(key: &Path, ssh_port: u16) -> Result<(), String> {
 fn ssh_soso_web_local(key: &Path, ssh_port: u16) -> Result<(), String> {
     let guion = "soso-web --local /etc/web-prueba.html\nq\nexit\n";
     let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
-    if !texto.contains("Página de prueba") {
+    // El HTML va en UTF-8; por el canal SSH a veces llega como Latin-1 (PÃ¡gina).
+    // Comprobamos cadenas ASCII que sí aparecen en la salida renderizada.
+    if !texto.contains("Hola desde soso-web") {
         return Err(format!(
             "soso-web no mostró la página de prueba; stdout: {texto:?}"
         ));
@@ -1319,8 +1630,15 @@ fn ssh_soso_web_local(key: &Path, ssh_port: u16) -> Result<(), String> {
 fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
     let payload = r#"¿2 > 1? | sí, "así" & <ñ>"#;
     let guion = format!("ask :eco {payload}\nexit\n");
-    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(90))?;
-    if texto.lines().any(|l| l == payload) {
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        &guion,
+        Duration::from_secs(90),
+        true,
+        Some(payload),
+    )?;
+    if texto.lines().any(|l| l == payload) || texto.contains(payload) {
         Ok(())
     } else {
         Err(format!(
@@ -1364,7 +1682,14 @@ fn ssh_init_test(key: &Path, ssh_port: u16) -> Result<(), String> {
     // FPU/YMM y el camino de syscalls GPU— se pone en varios minutos. Ver la nota
     // del límite en `ssh_llm`: pasarse de corto aquí no cuesta un rojo, cuesta la
     // suite entera desde este punto.
-    let texto = ssh_guion(key, ssh_port, "init test\nexit\n", Duration::from_secs(420))?;
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        "init test\nexit\n",
+        Duration::from_secs(420),
+        true,
+        Some("init: TODO OK"),
+    )?;
     // El FALLO se mira ANTES del TODO OK: la suite del guest corta en el primer
     // fallo, así que sin esto un "FALLO" temprano y ningún "TODO OK" darían el
     // mismo error genérico que un timeout, y son cosas distintas.

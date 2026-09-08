@@ -226,7 +226,12 @@ firma por fuse + DMEMMAPPER cmd FRTS (`0x15`) y lo ejecuta en el falcon GSP
 `NV_PBUS_SW_SCRATCH_0E` @ `0x1438`). Si WPR2 ya está programado, se omite. Sin
 WPR2 el booter no puede alojar GSP-RM → `pool VRAM=no` / `GSP=fallo` en GA107.
 Hostcheck sin GPU: `./scripts/l6-fwsec-hostcheck.sh [/ruta/vbios.rom]`
-(vuelca `/sys/bus/pci/devices/…/rom` si no se pasa fichero). Log de éxito:
+(vuelca `/sys/bus/pci/devices/…/rom` si no se pasa fichero). Comprueba también
+`imem_virt_base`/`boot_addr` ≠ 0. **Gotcha FWSEC:** si CPUCTL ya está HALTED
+antes de START, hay que ver que bit 4 **baje** tras arrancar — no reutilizar
+HALTED previo como éxito (`falcon_lx.c`). `boot_addr` = `imem_virt_base` del
+desc v3 (`gsp_fwsec.c`). Readback PIO de IMEM en GA102+ (`0xdead…`) no prueba
+carga; juez = DMA DMEM + mbox/sentinela. Log de éxito:
 `GSP booted (hw, booter_load Ampere + RPC, … MiB VRAM)`.
 `g3-check` exige `gsp_fwsec.c` en `source.list`. **HW de validación: GA107
 (ROG 3050 Mobile)**; no hay 3060 en estas máquinas. Blobs `ga107` = mismos

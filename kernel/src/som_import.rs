@@ -11,6 +11,11 @@ struct ActiveImport {
 
 static IMPORT: Mutex<Option<ActiveImport>> = Mutex::new(None);
 
+/// Hay una importación atómica de modelos en curso (bloquea redimensionado).
+pub fn import_active() -> bool {
+    IMPORT.lock().is_some()
+}
+
 fn import_err(e: ImportError) -> i64 {
     e.to_errno()
 }

@@ -235,6 +235,104 @@ fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Desmonta particiones del disco (p. ej. SOSOINSTALL que Linux remonta solo).
+pub(crate) fn unmount_partitions(dev: &Path) -> Result<(), String> {
+    let Some(mounted) = mounted_partitions(dev) else {
+        return Ok(());
+    };
+    for line in &mounted {
+        let Some((part, mp)) = line.split_once(" → ") else {
+            continue;
+        };
+        let ok = run_ok(Command::new("umount").arg(mp))
+            || run_ok(Command::new("umount").arg(part))
+            || run_ok(
+                Command::new("udisksctl")
+                    .args(["unmount", "-b", part, "--no-user-interaction"]),
+            );
+        if !ok {
+            return Err(format!("no pude desmontar {part} ({mp})"));
+        }
+        println!("desmontado {part} ({mp})");
+    }
+    if let Some(still) = mounted_partitions(dev) {
+        return Err(format!("siguen montadas: {}", still.join(", ")));
+    }
+    Ok(())
+}
+
+/// Tras el `dd`, Linux remonta p4 y udisks no puede expulsar (EBUSY al fsync).
+/// Desmonta, vacía caché y apaga el USB; si udisks falla, lo quita del kernel.
+pub(crate) fn release_removable(dev: &Path) {
+    if !is_real_block(dev) {
+        return;
+    }
+    let _ = Command::new("udevadm")
+        .args(["settle", "--timeout=8"])
+        .status();
+    if let Err(e) = unmount_partitions(dev) {
+        eprintln!("aviso: {e}");
+    }
+    let _ = Command::new("sync").status();
+    let _ = Command::new("blockdev")
+        .args(["--flushbufs"])
+        .arg(dev)
+        .status();
+    if let Err(e) = unmount_partitions(dev) {
+        eprintln!("aviso: {e}");
+    }
+
+    if run_ok(
+        Command::new("udisksctl")
+            .args(["power-off", "-b"])
+            .arg(dev)
+            .args(["--no-user-interaction"]),
+    ) {
+        println!("USB apagado — ya puedes desenchufarlo");
+        return;
+    }
+    let _ = Command::new("eject").arg(dev).status();
+    if !dev.exists() {
+        println!("USB expulsado — ya puedes desenchufarlo");
+        return;
+    }
+
+    let Some(name) = dev.file_name() else {
+        warn_eject(dev);
+        return;
+    };
+    let sys = PathBuf::from(format!(
+        "/sys/block/{}/device/delete",
+        name.to_string_lossy()
+    ));
+    if sys.exists() && std::fs::write(&sys, b"1\n").is_ok() && !dev.exists() {
+        println!("USB liberado — ya puedes desenchufarlo");
+        return;
+    }
+    warn_eject(dev);
+}
+
+fn warn_eject(dev: &Path) {
+    let name = dev.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    eprintln!(
+        "aviso: no pude expulsar {}. Datos sincronizados.\n\
+         Si el escritorio no lo suelta:\n\
+           echo 1 | sudo tee /sys/block/{name}/device/delete",
+        dev.display()
+    );
+}
+
+fn is_real_block(dev: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(dev)
+        .map(|m| m.file_type().is_block_device())
+        .unwrap_or(false)
+}
+
+fn run_ok(cmd: &mut Command) -> bool {
+    cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
 fn mounted_partitions(dev: &Path) -> Option<Vec<String>> {
     let out = Command::new("lsblk")
         .args(["-rn", "-o", "NAME,MOUNTPOINT"])
@@ -245,10 +343,16 @@ fn mounted_partitions(dev: &Path) -> Option<Vec<String>> {
         return None;
     }
     let base = dev.file_name()?.to_string_lossy();
+    parse_lsblk_mounts(&String::from_utf8_lossy(&out.stdout), &base)
+}
+
+fn parse_lsblk_mounts(stdout: &str, base: &str) -> Option<Vec<String>> {
     let mut mounted = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    for line in stdout.lines() {
         let mut parts = line.split_whitespace();
-        let name = parts.next()?;
+        let Some(name) = parts.next() else {
+            continue;
+        };
         let mp = parts.next().unwrap_or("");
         if !mp.is_empty() && name != base {
             mounted.push(format!("/dev/{name} → {mp}"));
@@ -436,5 +540,24 @@ pub(crate) fn run_cmd(cmd: &mut Command, label: &str) {
     if !st.success() {
         eprintln!("install-disk: {label} falló");
         exit(st.code().unwrap_or(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_lsblk_finds_sosoinstall() {
+        let out = "sdd\n\
+sdd1\n\
+sdd4 /media/jmdiez/SOSOINSTALL\n";
+        let mounted = parse_lsblk_mounts(out, "sdd").unwrap();
+        assert_eq!(mounted, vec!["/dev/sdd4 → /media/jmdiez/SOSOINSTALL"]);
+    }
+
+    #[test]
+    fn parse_lsblk_ignores_disk_without_mounts() {
+        assert!(parse_lsblk_mounts("sdd\nsdd1\nsdd4\n", "sdd").is_none());
     }
 }

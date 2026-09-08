@@ -8,8 +8,10 @@ use sosofs::layout::ROOT_INODE;
 use sosofs::{FsError, Sosofs};
 use std::path::PathBuf;
 
-fn fixture() -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sosofs-grow-fixture");
+/// Un directorio por test: los tests corren en paralelo y compartir el
+/// fixture (remove_dir_all + create_dir_all) fallaba de forma intermitente.
+fn fixture(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("sosofs-grow-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("etc")).unwrap();
     std::fs::write(dir.join("etc/motd"), "grow test\n").unwrap();
@@ -18,7 +20,7 @@ fn fixture() -> PathBuf {
 
 #[test]
 fn grow_ampliar_y_escribir() {
-    let src = fixture();
+    let src = fixture("grow_ampliar_y_escribir");
     let pack_blocks = 2048u64;
     let large = pack_blocks * 4;
     let mut dev = MemBlockDevice::new(pack_blocks);
@@ -50,7 +52,7 @@ fn grow_ampliar_y_escribir() {
 
 #[test]
 fn grow_rechaza_mas_grande_que_dispositivo() {
-    let src = fixture();
+    let src = fixture("grow_rechaza_mas_grande_que_dispositivo");
     let mut dev = MemBlockDevice::new(1024);
     build_image(&src, &mut dev).unwrap();
     let mut fs = Sosofs::mount(dev).unwrap();

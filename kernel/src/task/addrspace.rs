@@ -375,31 +375,64 @@ impl AddrSpace {
         if len == 0 {
             return Some(());
         }
-        let _ = writable;
-        let _ = addr;
-        let _ = len;
-        // TODO: reprogramar PTEs; de momento validamos el rango.
-        if self.range_ok(addr, len, writable) {
-            Some(())
-        } else {
-            None
+        if addr == 0 || addr.checked_add(len).is_none_or(|e| e > USER_MAX) {
+            return None;
         }
+        let flags = if writable { USER_FLAGS } else { USER_RDONLY };
+        let end = addr.saturating_add(len);
+        let mut va = addr & !0xfff;
+        let mut mapper = self.mapper();
+        while va < end {
+            if !self.is_mapped(va) {
+                // mmap perezoso: los permisos se aplican al fault-in vía
+                // MmapRegion::writable (actualizado en sys_mprotect).
+                va += 4096;
+                continue;
+            }
+            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+            let flush = unsafe { mapper.update_flags(page, flags).ok()? };
+            flush.flush();
+            va += 4096;
+        }
+        crate::arch::apic::tlb_shootdown_all();
+        Some(())
     }
 
     /// Extiende una región anónima existente (mremap simplificado).
     pub fn grow_anon(&self, addr: u64, old_len: u64, new_len: u64) -> Option<u64> {
         let grow = new_len.checked_sub(old_len)?;
-        let mut book = self.inner.mmap.lock();
-        let idx = book.regions.iter().position(|r| r.virt_start == addr && r.inode == 0)?;
-        book.regions[idx].len = new_len;
-        drop(book);
-        let start = addr.saturating_add(old_len);
+        let start = addr.checked_add(old_len)?;
+        let grow_end = start.checked_add(grow)?;
+        {
+            let book = self.inner.mmap.lock();
+            let idx = book
+                .regions
+                .iter()
+                .position(|r| r.virt_start == addr && r.inode == 0)?;
+            for (i, r) in book.regions.iter().enumerate() {
+                if i == idx {
+                    continue;
+                }
+                let rend = r.virt_start.saturating_add(r.len);
+                if start < rend && r.virt_start < grow_end {
+                    return None;
+                }
+            }
+        }
         let mut va = start;
-        while va < start + grow {
-            let frame = self.ensure_mapped(va)?;
-            let _ = frame;
+        while va < grow_end {
+            if self.ensure_mapped(va).is_none() {
+                self.unmap_range(start, va - start);
+                return None;
+            }
             va += 4096;
         }
+        let mut book = self.inner.mmap.lock();
+        let idx = book
+            .regions
+            .iter()
+            .position(|r| r.virt_start == addr && r.inode == 0)?;
+        book.regions[idx].len = new_len;
         Some(addr)
     }
 

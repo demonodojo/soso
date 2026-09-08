@@ -43,6 +43,7 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask sosolog --drv [/dev/sdX]` | Igual pero muestra `SOSODRV.TXT`: el informe hwscan del último arranque (alias `--hwscan`) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
 | `cargo xtask test-update` | OTA E2E OVMF: apply, corte simulado + recovery, manifiesto inválido |
+| `cargo xtask test-resize` | B1: host `soso-resize-core` + recovery QEMU; grow QEMU pendiente sin KVM |
 | `cargo xtask hw-matrix show` | Matriz validación hardware (A8); `init`, `collect`, `record-boot` |
 | `./scripts/l6-a8-collect.sh` | Recoger boot/bench en placa → `docs/hw-matrix.json` |
 | `cargo xtask release [--publish]` | Empaqueta release en `target/release-soso/v<VERSION>/`; `--publish` sube a GitHub Releases |
@@ -326,7 +327,8 @@ comportamiento distinto (skill `soso-user-manual`).
 | Teclado muerto tras la primera tecla (placa) | Algo del camino IRQ 1 toma un `lock()` o imprime; ver «Candados y contexto de interrupción» en `soso-architecture` |
 | Teclas no coinciden (QWERTY vs ñ/¿) | Mapa por defecto **es**; `kbd us` en kernel-shell para teclado americano/QEMU |
 | La máquina se arrastra tras usar `soso-llm`/`ask` | En askd el `ThreadPool` se suelta tras cada respuesta (`drop_pool`); si giran al 100 %, revisar `pool.rs` (deben dormir en futex entre matvecs) |
-| `ask` recarga en cada pregunta | Debe haber un solo askd en `:7420`; la segunda pregunta no debe mostrar «ask: cargando» salvo cambio de modelo o presión de RAM |
+| `ask` no arranca / imprime usage de `soso-llm` | El crt0 debe pasar a `main()` solo `argv[1..]` del blob SOSA; si llega `/bin/soso-llm askd`, askd no reconoce el subcomando. Ver `user/libsoso/src/lib.rs` |
+| Fecha 1970 / `soso-hf` «reloj no utilizable» | RTC CMOS: Status B bit 2 = BCD vs binario (no siglo); century en reg `0x32`. Ver `kernel/src/arch/rtc.rs`; test `cargo test -p xtask rtc_decode` |
 | `voz` / `soso-voz dictar` falla | Comprobar `tiny-asr` en `/models`; `soso-voz vozd` en `:7421`; test host: `cargo test -p soso-llm-core --features std --test asr` |
 | Micrófono en QEMU | `SOSO_QEMU_AUDIO=1 cargo xtask run` (Intel HDA); sin flag el shard `sys` usa `--wav` determinista |
 | `ask hola` con Mixtral se queda en puntos | Sin pool de VRAM (`pool VRAM=no`) Mixtral va a CPU. No está colgado; minutos/token. `ask :modelo tiny` o esperar. Tras reflashear, un punto por capa |
