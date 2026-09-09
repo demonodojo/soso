@@ -255,6 +255,19 @@ int main(int argc, char **argv)
     }
     puts("OK: NVM_ACCESS_CMD/resp API v2 (8 B cabecera)");
     {
+        /* Init unificado: grp=12 solo NVM_ACCESS_COMPLETE (0) y NVM_GET_INFO (2). */
+        if (NVM_ACCESS_CMD == NVM_GET_INFO || NVM_ACCESS_CMD == NVM_ACCESS_COMPLETE) {
+            fprintf(stderr, "NVM_ACCESS_CMD=0x%02x colisiona con grp12\n",
+                    NVM_ACCESS_CMD);
+            return 1;
+        }
+        if (NVM_GET_INFO != 0x02u) {
+            fprintf(stderr, "NVM_GET_INFO=0x%02x (esperaba 0x02)\n", NVM_GET_INFO);
+            return 1;
+        }
+        puts("OK: init unificado usa NVM_ACCESS_COMPLETE/NVM_GET_INFO (grp12), no 0x88");
+    }
+    {
         unsigned pay17 = iwl_scan_req_umac_v17_size(21);
         if (pay17 <= sizeof(struct iwl_scan_probe_params_v4)) {
             fprintf(stderr, "scan v17 sin hueco probe (%u)\n", pay17);

@@ -74,6 +74,12 @@ struct iwl_ax211_priv {
     int init_complete;
     int radio_ready;
     uint32_t phy_sku;
+    uint8_t fw_valid_tx_ant;
+    uint8_t fw_valid_rx_ant;
+    uint8_t valid_tx_ant;
+    uint8_t valid_rx_ant;
+    uint8_t lar_enabled;
+    uint8_t mcc_done;
     uint8_t n_scan_channels;
     struct iwl_fw_cmd_version cmd_ver[64];
     unsigned cmd_ver_count;

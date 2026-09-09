@@ -20,6 +20,10 @@
 #define CSR_GIO_REG                  (CSR_BASE + 0x03C)
 #define CSR_UCODE_DRV_GP1_CLR        (CSR_BASE + 0x05c)
 #define CSR_MAC_SHADOW_REG_CTRL      (CSR_BASE + 0x0A8)
+#define CSR_MAC_ADDR0_OTP            (CSR_BASE + 0x000)
+#define CSR_MAC_ADDR1_OTP            (CSR_BASE + 0x004)
+#define CSR_MAC_ADDR0_STRAP          (CSR_BASE + 0x008)
+#define CSR_MAC_ADDR1_STRAP          (CSR_BASE + 0x00C)
 #define CSR_LTR_LONG_VAL_AD          (CSR_BASE + 0x0D4)
 #define CSR_GIO_CHICKEN_BITS         (CSR_BASE + 0x100)
 #define CSR_DBG_HPET_MEM_REG         (CSR_BASE + 0x240)
@@ -137,9 +141,17 @@
 #define REGULATORY_AND_NVM_GROUP   0xc
 
 #define INIT_EXTENDED_CFG_CMD      0x03
-#define NVM_ACCESS_CMD             0x88
+#define NVM_ACCESS_CMD             0x88 /* LEGACY_GROUP — no usar en init unificado */
 #define NVM_ACCESS_COMPLETE        0x00
+#define NVM_GET_INFO               0x02
 #define PHY_CONFIGURATION_CMD      0x0b
+#define TX_ANT_CONFIGURATION_CMD   0x98 /* LEGACY_GROUP */
+#define MCC_UPDATE_CMD             0xc8 /* LEGACY_GROUP */
+
+#define FW_PHY_CFG_TX_CHAIN_POS    16
+#define FW_PHY_CFG_TX_CHAIN        (0xfu << FW_PHY_CFG_TX_CHAIN_POS)
+#define FW_PHY_CFG_RX_CHAIN_POS    20
+#define FW_PHY_CFG_RX_CHAIN        (0xfu << FW_PHY_CFG_RX_CHAIN_POS)
 
 #define IWL_NVM_READ               0u
 #define IWL_NVM_WRITE              1u
@@ -513,6 +525,79 @@ struct iwl_nvm_access_complete_cmd {
     uint32_t reserved;
 } __attribute__((packed));
 
+struct iwl_nvm_get_info {
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_nvm_get_info_general {
+    uint32_t flags;
+    uint16_t nvm_version;
+    uint8_t board_type;
+    uint8_t n_hw_addrs;
+} __attribute__((packed));
+
+struct iwl_nvm_get_info_sku {
+    uint32_t mac_sku_flags;
+} __attribute__((packed));
+
+struct iwl_nvm_get_info_phy {
+    uint32_t tx_chains;
+    uint32_t rx_chains;
+} __attribute__((packed));
+
+#define IWL_NUM_CHANNELS_V1        51
+#define IWL_NUM_CHANNELS           110
+
+struct iwl_nvm_get_info_regulatory_v1 {
+    uint32_t lar_enabled;
+    uint16_t channel_profile[IWL_NUM_CHANNELS_V1];
+    uint16_t reserved;
+} __attribute__((packed));
+
+struct iwl_nvm_get_info_regulatory {
+    uint32_t lar_enabled;
+    uint32_t n_channels;
+    uint32_t channel_profile[IWL_NUM_CHANNELS];
+} __attribute__((packed));
+
+struct iwl_nvm_get_info_rsp_v3 {
+    struct iwl_nvm_get_info_general general;
+    struct iwl_nvm_get_info_sku mac_sku;
+    struct iwl_nvm_get_info_phy phy_sku;
+    struct iwl_nvm_get_info_regulatory_v1 regulatory;
+} __attribute__((packed));
+
+struct iwl_nvm_get_info_rsp {
+    struct iwl_nvm_get_info_general general;
+    struct iwl_nvm_get_info_sku mac_sku;
+    struct iwl_nvm_get_info_phy phy_sku;
+    struct iwl_nvm_get_info_regulatory regulatory;
+} __attribute__((packed));
+
+struct iwl_tx_ant_cfg_cmd {
+    uint32_t valid;
+} __attribute__((packed));
+
+struct iwl_mcc_update_cmd {
+    uint16_t mcc;
+    uint8_t source_id;
+    uint8_t reserved;
+    uint32_t key;
+    uint8_t reserved2[20];
+} __attribute__((packed));
+
+/* Cabecera común v8 — basta para status/mcc tras MCC_UPDATE. */
+struct iwl_mcc_update_resp_v8 {
+    uint32_t status;
+    uint16_t mcc;
+    uint8_t padding[2];
+} __attribute__((packed));
+
+#define MCC_SOURCE_OLD_FW       0
+#define MCC_SOURCE_GET_CURRENT  0x10
+#define MCC_RESP_NEW_CHAN_PROFILE 0
+#define MCC_RESP_SAME_CHAN_PROFILE 1
+
 struct iwl_scan_config_v2 {
     uint8_t enable_cam_mode;
     uint8_t enable_promiscouos_mode;
@@ -628,6 +713,11 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
                             const void *payload, uint16_t pay_len, int wait_ms);
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl);
 int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl);
+int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl);
+int iwl_mvm_send_tx_ant_cfg(struct iwl_ax211_priv *iwl);
+int iwl_mvm_init_mcc(struct iwl_ax211_priv *iwl);
+uint8_t iwl_mvm_valid_tx_ant(struct iwl_ax211_priv *iwl);
+uint8_t iwl_mvm_valid_rx_ant(struct iwl_ax211_priv *iwl);
 void iwl_mvm_fill_probe_req(struct iwl_ax211_priv *iwl, struct iwl_scan_probe_params_v4 *probe);
 int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
                           const uint8_t *bssid);

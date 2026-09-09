@@ -79,6 +79,9 @@ int gsp_rpc_start(uint32_t app_version);
  * registran y se descartan. Devuelve 0 si llegó el esperado. */
 int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms);
 
+/* Tras `GSP_INIT_DONE`: intr enable en falcon GSP (`r535_gsp_postinit`). */
+void gsp_rpc_postinit(void);
+
 /* Igual, pero copiando el payload del mensaje esperado a `out` (hasta `out_len`
  * bytes) — es la mitad receptora de una llamada síncrona a GSP-RM, que empareja
  * la respuesta **por `function`**, no por secuencia (`r535_gsp_msg_recv`).

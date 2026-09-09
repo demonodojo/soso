@@ -36,10 +36,9 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
-    /* Linux: NVM opcional; MAC desde BDF si la lectura falla. */
-    if (iwl_mvm_nvm_read_mac(iwl) != 0) {
-        lx_printk("iwl_mvm: MAC NVM no disponible (se mantiene BDF)\n");
-    }
+    /* Linux `iwl_run_unified_mvm_ucode`: ucode unificado no manda NVM_ACCESS_CMD
+     * (0x88 es LEGACY, no grp=12); solo NVM_ACCESS_COMPLETE. MAC vía CSR/NVM_GET_INFO
+     * tras INIT_COMPLETE. */
 
     memset(&nvm_done, 0, sizeof(nvm_done));
     if (iwl_trans_send_cmd_wait(iwl, REGULATORY_AND_NVM_GROUP, NVM_ACCESS_COMPLETE,
@@ -76,7 +75,24 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
     }
 
     iwl->radio_ready = 1;
-    lx_printk("iwl_mvm: radio lista (phy=0x%08x n_scan=%u)\n",
-              phy_cfg.phy_cfg, (unsigned)iwl->n_scan_channels);
+
+    /* Tras INIT_COMPLETE Linux llama `iwl_get_nvm()` (NVM_GET_INFO + CSR MAC). */
+    if (iwl_mvm_nvm_get_info_mac(iwl) != 0) {
+        lx_printk("iwl_mvm: MAC NVM no disponible (se mantiene BDF)\n");
+    }
+
+    /* `iwl_mvm_up`: TX ant antes de scan/config (unificado incluido). */
+    if (iwl_mvm_send_tx_ant_cfg(iwl) != 0) {
+        lx_printk("iwl_mvm: TX ant no configurada — sigue\n");
+    }
+
+    if (iwl_mvm_init_mcc(iwl) != 0) {
+        lx_printk("iwl_mvm: MCC no aplicado — sigue\n");
+    }
+
+    lx_printk("iwl_mvm: radio lista (phy=0x%08x n_scan=%u tx=0x%x rx=0x%x)\n",
+              phy_cfg.phy_cfg, (unsigned)iwl->n_scan_channels,
+              (unsigned)iwl_mvm_valid_tx_ant(iwl),
+              (unsigned)iwl_mvm_valid_rx_ant(iwl));
     return 0;
 }

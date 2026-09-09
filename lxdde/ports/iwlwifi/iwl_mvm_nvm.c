@@ -6,6 +6,11 @@
 extern void *memcpy(void *dst, const void *src, unsigned long n);
 extern void *memset(void *dst, int c, unsigned long n);
 
+static uint32_t iwl_mmio_rd32(struct iwl_ax211_priv *iwl, uint32_t off)
+{
+    return iwl->mmio[off / 4];
+}
+
 static int mac_valid(const uint8_t mac[6])
 {
     int i;
@@ -83,6 +88,180 @@ int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl)
 
     lx_printk("iwl_mvm: NVM sin MAC válida\n");
     return -1;
+}
+
+/* `iwl_flip_hw_address` + `iwl_set_hw_address_from_csr` (iwl-nvm-parse.c). */
+static void iwl_flip_hw_address(uint32_t mac_addr0, uint32_t mac_addr1, uint8_t *dest)
+{
+    const uint8_t *hw;
+
+    hw = (const uint8_t *)&mac_addr0;
+    dest[0] = hw[3];
+    dest[1] = hw[2];
+    dest[2] = hw[1];
+    dest[3] = hw[0];
+
+    hw = (const uint8_t *)&mac_addr1;
+    dest[4] = hw[1];
+    dest[5] = hw[0];
+}
+
+static void iwl_mac_from_csr(struct iwl_ax211_priv *iwl, uint8_t mac[6])
+{
+    uint32_t mac_addr0;
+    uint32_t mac_addr1;
+
+    mac_addr0 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR0_STRAP);
+    mac_addr1 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR1_STRAP);
+    iwl_flip_hw_address(mac_addr0, mac_addr1, mac);
+    if (mac_valid(mac))
+        return;
+
+    mac_addr0 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR0_OTP);
+    mac_addr1 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR1_OTP);
+    iwl_flip_hw_address(mac_addr0, mac_addr1, mac);
+}
+
+uint8_t iwl_mvm_valid_tx_ant(struct iwl_ax211_priv *iwl)
+{
+    uint8_t nvm = iwl->valid_tx_ant;
+    uint8_t fw = iwl->fw_valid_tx_ant;
+
+    if (nvm && fw) {
+        return fw & nvm;
+    }
+    if (nvm) {
+        return nvm;
+    }
+    if (fw) {
+        return fw;
+    }
+    return 0x3; /* ANT_AB — fallback 2x2 AX200 */
+}
+
+uint8_t iwl_mvm_valid_rx_ant(struct iwl_ax211_priv *iwl)
+{
+    uint8_t nvm = iwl->valid_rx_ant;
+    uint8_t fw = iwl->fw_valid_rx_ant;
+
+    if (nvm && fw) {
+        return fw & nvm;
+    }
+    if (nvm) {
+        return nvm;
+    }
+    if (fw) {
+        return fw;
+    }
+    return 0x3;
+}
+
+int iwl_mvm_init_mcc(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_mcc_update_cmd cmd;
+    const struct iwl_mcc_update_resp_v8 *rsp;
+
+    if (!iwl->lar_enabled || iwl->mcc_done) {
+        return 0;
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+    /* `iwl_mvm_get_current_regdomain`: ZZ + GET_CURRENT → perfil NVM en FW. */
+    cmd.mcc = (uint16_t)(('Z' << 8) | 'Z');
+    cmd.source_id = MCC_SOURCE_GET_CURRENT;
+
+    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, MCC_UPDATE_CMD,
+                                &cmd, (uint16_t)sizeof(cmd), 2000) != 0) {
+        lx_printk("iwl_mvm: MCC_UPDATE falló\n");
+        return -1;
+    }
+
+    if (iwl->cmd_resp_len < (uint16_t)sizeof(*rsp)) {
+        lx_printk("iwl_mvm: MCC_UPDATE resp corta (%u B)\n",
+                  (unsigned)iwl->cmd_resp_len);
+        return -1;
+    }
+
+    rsp = (const struct iwl_mcc_update_resp_v8 *)iwl->cmd_resp;
+    iwl->mcc_done = 1;
+    lx_printk("iwl_mvm: MCC_UPDATE ok status=%u mcc=%c%c\n",
+              (unsigned)rsp->status,
+              (char)(rsp->mcc >> 8), (char)(rsp->mcc & 0xff));
+    return 0;
+}
+
+int iwl_mvm_send_tx_ant_cfg(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_tx_ant_cfg_cmd cmd;
+    uint8_t ant = iwl_mvm_valid_tx_ant(iwl);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.valid = ant;
+    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, TX_ANT_CONFIGURATION_CMD,
+                                &cmd, (uint16_t)sizeof(cmd), 500) != 0) {
+        lx_printk("iwl_mvm: TX_ANT_CONFIGURATION falló\n");
+        return -1;
+    }
+    lx_printk("iwl_mvm: TX_ANT_CONFIGURATION ok (ant=0x%x)\n", (unsigned)ant);
+    return 0;
+}
+
+static void nvm_apply_get_info_rsp(struct iwl_ax211_priv *iwl,
+                                   const struct iwl_nvm_get_info_phy *phy,
+                                   uint32_t lar_enabled)
+{
+    iwl->valid_tx_ant = (uint8_t)phy->tx_chains;
+    iwl->valid_rx_ant = (uint8_t)phy->rx_chains;
+    iwl->lar_enabled = lar_enabled ? 1u : 0u;
+    lx_printk("iwl_mvm: NVM phy tx=0x%x rx=0x%x lar=%u\n",
+              (unsigned)iwl->valid_tx_ant, (unsigned)iwl->valid_rx_ant,
+              (unsigned)iwl->lar_enabled);
+}
+
+int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_nvm_get_info cmd;
+    uint8_t mac[6];
+    uint16_t rsp_len = iwl->cmd_resp_len;
+
+    memset(&cmd, 0, sizeof(cmd));
+    if (iwl_trans_send_cmd_wait(iwl, REGULATORY_AND_NVM_GROUP, NVM_GET_INFO,
+                                &cmd, (uint16_t)sizeof(cmd), 2000) != 0) {
+        lx_printk("iwl_mvm: NVM_GET_INFO falló\n");
+        return -1;
+    }
+
+    rsp_len = iwl->cmd_resp_len;
+    if (rsp_len >= (uint16_t)sizeof(struct iwl_nvm_get_info_rsp)) {
+        const struct iwl_nvm_get_info_rsp *rsp =
+            (const struct iwl_nvm_get_info_rsp *)iwl->cmd_resp;
+
+        nvm_apply_get_info_rsp(iwl, &rsp->phy_sku, rsp->regulatory.lar_enabled);
+        lx_printk("iwl_mvm: NVM_GET_INFO v4 nvm_ver=0x%04x\n",
+                  (unsigned)rsp->general.nvm_version);
+    } else if (rsp_len >= (uint16_t)sizeof(struct iwl_nvm_get_info_rsp_v3)) {
+        const struct iwl_nvm_get_info_rsp_v3 *rsp =
+            (const struct iwl_nvm_get_info_rsp_v3 *)iwl->cmd_resp;
+
+        nvm_apply_get_info_rsp(iwl, &rsp->phy_sku, rsp->regulatory.lar_enabled);
+        lx_printk("iwl_mvm: NVM_GET_INFO v3 nvm_ver=0x%04x\n",
+                  (unsigned)rsp->general.nvm_version);
+    } else {
+        lx_printk("iwl_mvm: NVM_GET_INFO resp corta (%u B)\n", (unsigned)rsp_len);
+    }
+
+    memset(mac, 0, sizeof(mac));
+    iwl_mac_from_csr(iwl, mac);
+    if (!mac_valid(mac)) {
+        lx_printk("iwl_mvm: CSR sin MAC válida tras NVM_GET_INFO\n");
+        return -1;
+    }
+
+    memcpy(iwl->mac, mac, 6);
+    lx_printk("iwl_mvm: MAC NVM 0x%02x:%02x:%02x:%02x:%02x:%02x\n",
+              iwl->mac[0], iwl->mac[1], iwl->mac[2],
+              iwl->mac[3], iwl->mac[4], iwl->mac[5]);
+    return 0;
 }
 
 void iwl_mvm_fill_probe_req(struct iwl_ax211_priv *iwl, struct iwl_scan_probe_params_v4 *probe)

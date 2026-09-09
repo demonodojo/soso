@@ -21,16 +21,17 @@ typedef char gsp_wpr_meta_ver_check[offsetof(struct gsp_wpr_meta, verified) == 0
  * Blackwell (gb202_fb también lo usa). Está dentro de los 16 MiB de BAR0. */
 #define NV_FB_VIDMEM_SIZE_MB 0x001183a4u
 
-/* Parámetros de heap de `r570_wpr_libos3_gb20x` (nvkm/subdev/gsp/rm/r570/rm.c)
- * y `GSP_FW_HEAP_PARAM_*` de los headers nvrm. GB20x y GA10x r570 comparten
- * LIBOS3 + 14 MiB de base RM; el non-WPR heap sí cambia (1 MiB en Ampere). */
-#define WPR_OS_CARVEOUT_SIZE   (22u << 20)          /* LIBOS3 baremetal */
-#define WPR_BASE_RM_SIZE       (14u << 20)          /* Hopper+ */
-#define WPR_SIZE_PER_GB_FB     (96u << 10)
-#define WPR_CLIENT_ALLOC_SIZE  ((48ull << 10) * 2048ull)
-#define WPR_HEAP_NON_WPR       0x220000u            /* gb20x */
-#define WPR_HEAP_NON_WPR_AMPERE 0x100000u           /* tu102: 1 MiB bajo WPR2 */
-#define WPR_RSVD_SIZE_PMU      0x1820000u           /* ALIGN(0x800000+0x1000000+0x1000, 0x20000) */
+/* Parámetros WPR: `r570_rm_ga102` (Ampere) vs `r570_rm_gb20x` (Blackwell).
+ * GA102: LIBOS3 + BASE_RM TU10X 8 MiB, sin pmuReservedSize en meta.
+ * GB20x: LIBOS3 + BASE_RM GH100 14 MiB + carveout PMU en meta. */
+#define WPR_OS_CARVEOUT_SIZE        (22u << 20)     /* LIBOS3 baremetal */
+#define WPR_BASE_RM_SIZE_TU10X      (8u << 20)      /* Turing–Ada (r570_rm_ga102) */
+#define WPR_BASE_RM_SIZE_GH100      (14u << 20)     /* Hopper+ / gb20x */
+#define WPR_SIZE_PER_GB_FB          (96u << 10)
+#define WPR_CLIENT_ALLOC_SIZE       ((48ull << 10) * 2048ull)
+#define WPR_HEAP_NON_WPR            0x220000u       /* gb20x */
+#define WPR_HEAP_NON_WPR_AMPERE     0x100000u       /* tu102: 1 MiB bajo WPR2 */
+#define WPR_RSVD_SIZE_PMU           0x1820000u      /* gb20x meta; Ampere = 0 */
 #define WPR_FRTS_SIZE          0x100000u
 #define WPR_VGA_WORKSPACE_SIZE (128u * 1024u)
 #define NV_PDISP_VGA_WORKSPACE 0x00625f04u
@@ -87,14 +88,24 @@ uint64_t gsp_wpr_vidmem_size(void)
 /* `tu102_gsp_wpr_heap_size`. El `max()` con heap_size_min de upstream se queda
  * fuera a propósito: allí vale 170 (MiB sin convertir) contra un total en bytes,
  * así que nunca gana; replicarlo aquí solo confundiría. */
-uint64_t gsp_wpr_heap_size(uint64_t fb_bytes)
+static uint64_t gsp_wpr_heap_size_with_base(uint64_t fb_bytes, uint64_t base_rm)
 {
     uint64_t fb_gb = (fb_bytes + (1ull << 30) - 1ull) >> 30;
 
     return (uint64_t)WPR_OS_CARVEOUT_SIZE +
-           (uint64_t)WPR_BASE_RM_SIZE +
+           base_rm +
            align_up_u64((uint64_t)WPR_SIZE_PER_GB_FB * fb_gb, 1ull << 20) +
            align_up_u64(WPR_CLIENT_ALLOC_SIZE, 1ull << 20);
+}
+
+uint64_t gsp_wpr_heap_size(uint64_t fb_bytes)
+{
+    return gsp_wpr_heap_size_with_base(fb_bytes, (uint64_t)WPR_BASE_RM_SIZE_GH100);
+}
+
+uint64_t gsp_wpr_heap_size_ampere(uint64_t fb_bytes)
+{
+    return gsp_wpr_heap_size_with_base(fb_bytes, (uint64_t)WPR_BASE_RM_SIZE_TU10X);
 }
 
 /* Copia la imagen RISC-V del bootloader a memoria coherente y saca sus offsets.
@@ -416,9 +427,8 @@ int gsp_wpr_prepare_ampere(const struct gsp_rm_fw *rm, struct gsp_wpr *out)
                   NV_FB_VIDMEM_SIZE_MB);
         return -1;
     }
-    out->heap_size = gsp_wpr_heap_size(out->fb_bytes);
-    out->rsvd_size = (uint32_t)align_up_u64((uint64_t)WPR_HEAP_NON_WPR_AMPERE +
-                                            (uint64_t)WPR_RSVD_SIZE_PMU, 0x200000ull);
+    out->heap_size = gsp_wpr_heap_size_ampere(out->fb_bytes);
+    out->rsvd_size = (uint32_t)align_up_u64((uint64_t)WPR_HEAP_NON_WPR_AMPERE, 0x200000ull);
 
     if (boot_fw_prepare(&out->boot) != 0) {
         gsp_wpr_release(out);
@@ -472,7 +482,8 @@ int gsp_wpr_prepare_ampere(const struct gsp_rm_fw *rm, struct gsp_wpr *out)
     m->fbSize = out->fb_bytes;
     m->vgaWorkspaceOffset = L.vga_addr;
     m->vgaWorkspaceSize = L.vga_size;
-    m->pmuReservedSize = WPR_RSVD_SIZE_PMU;
+    /* `tu102_gsp_wpr_meta_init`: Ampere no escribe pmuReservedSize (queda 0). */
+    m->pmuReservedSize = 0;
 
     if (wpr_meta_verify_ampere(out, rm, &L) != 0) {
         gsp_wpr_release(out);

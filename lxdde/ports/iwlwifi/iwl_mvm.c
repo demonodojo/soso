@@ -46,8 +46,8 @@ static int iwl_send_scan_cfg(struct iwl_ax211_priv *iwl)
 
         memset(&cfg, 0, sizeof(cfg));
         cfg.bcast_sta_id = 0xff;
-        cfg.tx_chains = 1;
-        cfg.rx_chains = 1;
+        cfg.tx_chains = iwl_mvm_valid_tx_ant(iwl);
+        cfg.rx_chains = iwl_mvm_valid_rx_ant(iwl);
         pay_len = (uint16_t)sizeof(cfg);
         if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len, 500) != 0) {
             lx_printk("iwl_mvm: SCAN_CFG_CMD v%u falló\n", ver);
@@ -58,8 +58,8 @@ static int iwl_send_scan_cfg(struct iwl_ax211_priv *iwl)
 
         memset(&cfg, 0, sizeof(cfg));
         cfg.bcast_sta_id = 0xff;
-        cfg.tx_chains = 1;
-        cfg.rx_chains = 1;
+        cfg.tx_chains = iwl_mvm_valid_tx_ant(iwl);
+        cfg.rx_chains = iwl_mvm_valid_rx_ant(iwl);
         pay_len = (uint16_t)sizeof(cfg);
         if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len, 500) != 0) {
             lx_printk("iwl_mvm: SCAN_CFG_CMD falló\n");
@@ -68,7 +68,9 @@ static int iwl_send_scan_cfg(struct iwl_ax211_priv *iwl)
     }
 
     iwl->scan_cfg_sent = 1;
-    lx_printk("iwl_mvm: SCAN_CFG_CMD v%u ok\n", ver);
+    lx_printk("iwl_mvm: SCAN_CFG_CMD v%u ok tx=0x%x rx=0x%x\n", ver,
+              (unsigned)iwl_mvm_valid_tx_ant(iwl),
+              (unsigned)iwl_mvm_valid_rx_ant(iwl));
     return 0;
 }
 

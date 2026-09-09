@@ -335,6 +335,7 @@ static void run_acr_sec2(void)
 
 #define NV_PGSP_FALCON_MBOX0  0x00110040u
 #define NV_PGSP_FALCON_MBOX1  0x00110044u
+#define NV_PGSP_FALCON_OS     0x00110080u
 #define NV_PRISCV_CPUCTL      0x00111388u
 #define CPUCTL_ACTIVE_STAT    (1u << 7)
 
@@ -411,6 +412,11 @@ static int run_ampere_booter(void)
     }
     gsp_dma_free(&dma);
 
+    /* Linux `r535_gsp_booter_load`: publicar app_version antes de comprobar RISC-V. */
+    if (g_wpr.boot.app_version) {
+        gsp_mmio_wr32(NV_PGSP_FALCON_OS, g_wpr.boot.app_version);
+    }
+
     /* Linux tu102_gsp_init() no exige cpuctl bit7 aquí: tras booter_load pasa
      * a r535_gsp_init() y valida GSP-RM vía RPC (GSP_INIT_DONE). */
     t = 4000u;
@@ -426,13 +432,20 @@ static int run_ampere_booter(void)
     } else {
         uint32_t sec2_m0 = gsp_mmio_rd32(sec2_base + 0x040u);
         uint32_t sec2_m1 = gsp_mmio_rd32(sec2_base + 0x044u);
+        uint32_t gsp_m0 = gsp_mmio_rd32(NV_PGSP_FALCON_MBOX0);
+        uint32_t gsp_m1 = gsp_mmio_rd32(NV_PGSP_FALCON_MBOX1);
+        uint32_t gsp_os = gsp_mmio_rd32(NV_PGSP_FALCON_OS);
         uint32_t bcr = gsp_mmio_rd32(LX_FLCN_GSP_BASE + LX_FLCN_ADDR2 + 0x668u);
         uint32_t wpr2_lo = gsp_mmio_rd32(0x001fa824u);
         uint32_t wpr2_hi = gsp_mmio_rd32(0x001fa828u);
         lx_printk("nouveau-lx: Ampere booter ok, RISC-V aún inactivo "
                   "(cpuctl=0x%08x sec2@0x%x mbox=0x%x/0x%x bcr@0x1668=0x%x "
-                  "WPR2=0x%08x%08x) — sigue RPC\n",
-                  cpuctl, sec2_base, sec2_m0, sec2_m1, bcr, wpr2_hi, wpr2_lo);
+                  "GSP mbox=0x%x/0x%x os=0x%08x WPR2=0x%08x%08x meta=0x%llx "
+                  "heap=%u MiB) — sigue RPC\n",
+                  cpuctl, sec2_base, sec2_m0, sec2_m1, bcr,
+                  gsp_m0, gsp_m1, gsp_os, wpr2_hi, wpr2_lo,
+                  (unsigned long long)g_wpr.meta_phys,
+                  (unsigned)(g_wpr.heap_size >> 20));
     }
     return 0;
 }
@@ -868,6 +881,7 @@ static int run_gsp_rm_chain(void)
         lx_printk("nouveau-lx: GSP arrancado pero GSP-RM no responde por RPC\n");
         return -1;
     }
+    gsp_rpc_postinit();
     g_phase = GSP_RM_READY;
     lx_printk("nouveau-lx: GSP-RM listo (RPC en marcha)\n");
 

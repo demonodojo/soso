@@ -106,7 +106,15 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
         case IWL_UCODE_TLV_PHY_SKU:
             if (length >= 4) {
                 iwl->phy_sku = le32(pos);
-                lx_printk("iwl_fw: PHY_SKU 0x%08x\n", iwl->phy_sku);
+                iwl->fw_valid_tx_ant =
+                    (uint8_t)((iwl->phy_sku & FW_PHY_CFG_TX_CHAIN) >>
+                              FW_PHY_CFG_TX_CHAIN_POS);
+                iwl->fw_valid_rx_ant =
+                    (uint8_t)((iwl->phy_sku & FW_PHY_CFG_RX_CHAIN) >>
+                              FW_PHY_CFG_RX_CHAIN_POS);
+                lx_printk("iwl_fw: PHY_SKU 0x%08x tx=0x%x rx=0x%x\n",
+                          iwl->phy_sku, (unsigned)iwl->fw_valid_tx_ant,
+                          (unsigned)iwl->fw_valid_rx_ant);
             }
             break;
         case IWL_UCODE_TLV_N_SCAN:

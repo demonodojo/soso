@@ -1,6 +1,7 @@
 /* G4 paso 1: recepción por la cola de mensajes de GSP-RM. Ver gsp_rpc.h. */
 #include "gsp_rpc.h"
 #include "gsp_mmio.h"
+#include "gsp_cpu_seq.h"
 #include "nvrm_r570.h"   /* NV_VGPU_MSG_FUNCTION_*, para nombrar lo que mandamos */
 
 /* Definido en el shim (lxdde/shim/src/shims.c). */
@@ -278,6 +279,18 @@ static int nocat_is_new(const unsigned char *p, uint32_t len)
 /* Estático y no en la pila: el registro son ~1,2 KiB y la pila del bring-up no
  * está para eso. Aquí sólo hay una fibra tocando el RPC. */
 static unsigned char g_nocat_buf[1536];
+static unsigned char g_cpu_seq_buf[4096];
+
+static void cpu_seq_capture(const struct gsp_rpc *rpc, uint32_t rptr, uint32_t length)
+{
+    uint32_t plen = length - GSP_RPC_HDR_SIZE;
+
+    if (plen > (uint32_t)sizeof(g_cpu_seq_buf)) {
+        plen = (uint32_t)sizeof(g_cpu_seq_buf);
+    }
+    ring_copy(rpc, rptr, GSP_MSG_HDR_SIZE + GSP_RPC_HDR_SIZE, g_cpu_seq_buf, plen);
+    (void)gsp_cpu_seq_run(g_cpu_seq_buf, plen);
+}
 
 /* El registro NOCAT es un `NV2080_NOCAT_JOURNAL_ENTRY` y su layout NO está en
  * nuestras cabeceras. Bautizar campos a ojo es cómo se acaba leyendo un offset
@@ -591,6 +604,9 @@ int gsp_rpc_recv(struct gsp_rpc *rpc, uint32_t fn, void *out, uint32_t out_len,
         if (hdr.function == NV_VGPU_MSG_EVENT_RC_TRIGGERED) {
             rc_capture(rpc, rptr, hdr.length);
         }
+        if (hdr.function == NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER) {
+            cpu_seq_capture(rpc, rptr, hdr.length);
+        }
 
         /* Copiar ANTES de mover el puntero: en cuanto lo publicamos, el GSP
          * puede reutilizar esas páginas. */
@@ -698,6 +714,9 @@ unsigned gsp_rpc_drain(struct gsp_rpc *rpc, unsigned ms)
         if (hdr.function == NV_VGPU_MSG_EVENT_RC_TRIGGERED) {
             rc_capture(rpc, rptr, hdr.length);
         }
+        if (hdr.function == NV_VGPU_MSG_EVENT_GSP_RUN_CPU_SEQUENCER) {
+            cpu_seq_capture(rpc, rptr, hdr.length);
+        }
 
         pages = (hdr.length + GSP_MSG_HDR_SIZE + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
         rptr = (rptr + pages) % rpc->cnt;
@@ -720,4 +739,12 @@ unsigned gsp_rpc_drain(struct gsp_rpc *rpc, unsigned ms)
 int gsp_rpc_wait_event(struct gsp_rpc *rpc, uint32_t fn, unsigned timeout_ms)
 {
     return gsp_rpc_recv(rpc, fn, NULL, 0, NULL, NULL, timeout_ms);
+}
+
+/* `r535_gsp_postinit` mínimo: habilitar interrupciones del falcon GSP. Sin MSI
+ * en soso usamos polling, pero RM espera este bit tras el init. */
+void gsp_rpc_postinit(void)
+{
+    gsp_mmio_wr32(NV_PGSP_FALCON + 0x4u, 0x40u);
+    lx_printk("nouveau-lx: GSP postinit (0x110004=0x40)\n");
 }

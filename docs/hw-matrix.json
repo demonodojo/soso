@@ -139,11 +139,11 @@
         "gsp_ga102_fallback": "a8c3ebeed280323aedb51c061f321e73379cce7a9ae643a33dd03915df027f7f 63571696B"
       },
       "git": {
-        "commit": "669afd2c15e00f76dcd8a60804a674964646f5eb",
-        "commit_corto": "669afd2c1",
+        "commit": "4a40cbca7",
+        "commit_corto": "4a40cbca7",
         "version": "0.2.2",
-        "dirty": true,
-        "cambios_locales": "Estado dirty registrado por el kernel del USB; diff exacto de esa compilación no disponible"
+        "dirty": false,
+        "cambios_locales": "USB run4; correcciones NVM/GSP en repo local pendientes de reflashear"
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 0,
@@ -155,7 +155,7 @@
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY AX200 (misma placa); INIT_EXTENDED_CFG ok, NVM timeout",
+          "nota": "UCODE_ALIVE_NTFY AX200 (misma placa); INIT_EXTENDED_CFG ok",
           "fecha": "2026-09-09"
         },
         "scan": {
@@ -181,12 +181,12 @@
       "gpu": {
         "gsp_rpc": {
           "status": "fail",
-          "nota": "FWSEC-FRTS OK; booter_load SEC2@0x840000 ok; cpuctl=0x10 sin bit7 → aborta antes de RPC",
+          "nota": "FWSEC-FRTS OK; booter_load SEC2@0x840000 ok; cpuctl=0x10 sin bit7; GSP-RM no responde RPC (run4)",
           "fecha": "2026-09-09"
         },
         "vram_pool": {
           "status": "fail",
-          "nota": "GSP=fallo, pool VRAM=no; 16384 MiB reportados",
+          "nota": "GSP=fallo, pool VRAM=no; heap WPR 134 MiB (GB20x) vs Linux GA102 128 MiB",
           "fecha": "2026-09-09"
         },
         "ce_readback": {
@@ -211,9 +211,11 @@
         "target/usb-diagnostic-2026-09-09-run2/SOSOLOG.TXT.txt",
         "target/usb-diagnostic-2026-09-09-run2/SOSODRV.TXT.txt",
         "target/usb-diagnostic-2026-09-09-run3/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-09-09-run3/SOSODRV.txt"
+        "target/usb-diagnostic-2026-09-09-run3/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run4/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run4/SOSODRV.txt"
       ],
-      "notas": "ROG run3, live 669afd2c1-dirty, flush 10, uptime 364s. Progreso GPU: SEC2 0x840000, staging DMA, parche HS, reset RISC-V 0x111, booter falcon ok. Bloqueante: run_ampere_booter exige CPUCTL bit7 antes de run_gsp_rm_chain; Linux tu102.c:205-209 no. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
+      "notas": "ROG run4 USB 4a40cbca7, flush 8, uptime 280s. Corrección código: heap Ampere TU10X 8 MiB + pmu=0; WiFi init sin NVM_ACCESS_CMD grp12. Pendiente reflashear y validar GSP_INIT_DONE / INIT_COMPLETE. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
       "actualizado": "2026-09-09"
     },
     {
@@ -294,23 +296,23 @@
         "ax200_ucode": "d23a382871e6e638957845b47424ab98dca5e68e022ab73eeeebb0b6f751d7e9 1368096B"
       },
       "git": {
-        "commit": "669afd2c15e00f76dcd8a60804a674964646f5eb",
-        "commit_corto": "669afd2c1",
+        "commit": "4a40cbca7",
+        "commit_corto": "4a40cbca7",
         "version": "0.2.2",
-        "dirty": true,
-        "cambios_locales": "Estado dirty registrado por el kernel del USB; diff exacto de esa compilación no disponible"
+        "dirty": false,
+        "cambios_locales": "USB run4; correcciones NVM en repo local pendientes de reflashear"
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh viva; ethernet rtl8169 enlace DOWN, sin DHCP",
+        "nota": "sosh viva (misma placa); sin red WiFi",
         "fecha": "2026-09-09"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY; INIT_EXTENDED_CFG rsp grp=2 id=0x03; NVM_ACCESS timeout grp=12",
+          "nota": "UCODE_ALIVE_NTFY; INIT_EXTENDED_CFG rsp grp=2 id=0x03; NVM timeout grp=12 id=0x88",
           "fecha": "2026-09-09"
         },
         "scan": {
@@ -362,9 +364,11 @@
         "target/usb-diagnostic-2026-09-09-run2/SOSOLOG.TXT.txt",
         "target/usb-diagnostic-2026-09-09-run2/SOSODRV.TXT.txt",
         "target/usb-diagnostic-2026-09-09-run3/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-09-09-run3/SOSODRV.txt"
+        "target/usb-diagnostic-2026-09-09-run3/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run4/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run4/SOSODRV.txt"
       ],
-      "notas": "ROG AX200 run3, flush 10. Progreso: cola HCMD=0, doorbell qid<<16, INIT_EXTENDED_CFG responde. Bloqueante: struct iwl_nvm_access_cmd incorrecta (falta op_code/target; type uint32 vs le16). Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
+      "notas": "ROG AX200 run4. Bloqueante corregido en código: no enviar NVM_ACCESS_CMD 0x88 en grp12; usar NVM_ACCESS_COMPLETE + NVM_GET_INFO/CSR MAC. Pendiente reflashear. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
       "actualizado": "2026-09-09"
     }
   ]

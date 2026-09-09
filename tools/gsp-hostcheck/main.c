@@ -606,7 +606,7 @@ static int check_wpr_ampere(const struct gsp_rm_fw *rm)
     uint64_t heap4;
     const struct gsp_wpr_meta *m;
 
-    heap4 = gsp_wpr_heap_size(fb4);
+    heap4 = gsp_wpr_heap_size_ampere(fb4);
     if (gsp_wpr_layout_ampere(fb4, 0x31000ull, 0x3c99000ull, heap4, 0, &L) != 0) {
         printf("FALLO: layout Ampere 4 GiB\n");
         return -1;
@@ -659,9 +659,16 @@ static int check_wpr_ampere(const struct gsp_rm_fw *rm)
         gsp_wpr_release(&w);
         return -1;
     }
+    if (m->pmuReservedSize != 0) {
+        printf("FALLO: Ampere pmuReservedSize=0x%llx (esperaba 0)\n",
+               (unsigned long long)m->pmuReservedSize);
+        gsp_wpr_release(&w);
+        return -1;
+    }
     /* La ruta FMC tiene que seguir con ceros: este meta es otro bloque. */
-    printf("OK: WPR Ampere offsets en FB (%u MiB) wpr=[0x%llx,0x%llx)\n",
+    printf("OK: WPR Ampere offsets en FB (%u MiB) heap=%llu MiB wpr=[0x%llx,0x%llx)\n",
            (unsigned)(m->fbSize >> 20),
+           (unsigned long long)(m->gspFwHeapSize >> 20),
            (unsigned long long)m->gspFwWprStart,
            (unsigned long long)m->gspFwWprEnd);
     gsp_wpr_release(&w);

@@ -104,8 +104,9 @@ struct gsp_wpr_fb_layout {
  * 0 si el registro no responde. Requiere BAR0 mapeada. */
 uint64_t gsp_wpr_vidmem_size(void);
 
-/* `tu102_gsp_wpr_heap_size`: carveout libos3 + base RM + 96 KiB/GiB + 96 MiB. */
+/* Blackwell/FMC: base RM GH100 14 MiB. Ampere: `gsp_wpr_heap_size_ampere` (TU10X 8 MiB). */
 uint64_t gsp_wpr_heap_size(uint64_t fb_bytes);
+uint64_t gsp_wpr_heap_size_ampere(uint64_t fb_bytes);
 
 /* Aritmética pura del layout Ampere. `vga_addr == 0` → `fb - 1 MiB`. */
 int gsp_wpr_layout_ampere(uint64_t fb_bytes, uint64_t boot_size, uint64_t elf_size,
