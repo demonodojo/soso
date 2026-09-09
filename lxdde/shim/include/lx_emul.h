@@ -32,6 +32,9 @@ uint64_t lx_virt_to_phys(const void *ptr);
 int lx_printk(const char *fmt, ...);
 int lx_vprintk(const char *fmt, va_list ap);
 
+/* Volcado inmediato de SOSOLOG.TXT (checkpoints de arranque). */
+void lx_fatlog_flush(void);
+
 /* --- Tiempo --- */
 unsigned long lx_jiffies(void);
 unsigned long lx_msecs_to_jiffies(unsigned int m);

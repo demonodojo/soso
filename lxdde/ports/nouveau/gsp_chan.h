@@ -33,6 +33,8 @@
 /* Ventana por canal: GPFIFO 32 KiB + USERD/PB/notifier 12 KiB ≈ 44 KiB; 64 KiB
  * de stride separa canales para que un desborde no pise al vecino. */
 #define GSP_CHAN_VA_STRIDE       0x10000ull
+/* r570 `rsvd_chids = 1` (rm/r570/fifo.c); el primer chid usable no es 0. */
+#define GSP_CHAN_RSVD_CHIDS      1u
 
 struct gsp_chan {
     struct gsp_rm *rm;

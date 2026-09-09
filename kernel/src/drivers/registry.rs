@@ -61,6 +61,17 @@ pub const DRIVERS: &[DriverInfo] = &[
         lxdde_port: Some("iwlwifi"),
     },
     DriverInfo {
+        name: "lx-ath11k",
+        feature: "lxdde",
+        rule: MatchRule::PciIds {
+            vendor: 0x17cb,
+            // WCN6855 (Steam Deck OLED, `17cb:1103`), y sus hermanos que
+            // comparten transporte MHI/QMI en `ath11k/pci.c:27`.
+            devices: &[0x1103, 0x1101, 0x1104],
+        },
+        lxdde_port: Some("ath11k"),
+    },
+    DriverInfo {
         name: "lx-nouveau",
         feature: "lxdde",
         rule: MatchRule::NvidiaGpu,
@@ -253,6 +264,25 @@ fn clase_texto(dev: &PciDevice) -> &'static str {
     }
 }
 
+/// Chips que sabemos identificar aunque no tengamos (todavía) driver.
+///
+/// En una máquina sin puerto serie el informe hwscan del USB es la única
+/// descripción del hardware, y un `1002:163f` a secas no dice nada. Los IDs de
+/// la Steam Deck salen de `lxdde/linux/drivers/net/wireless/ath/ath11k/pci.c`
+/// y de la enumeración PCI de la propia máquina.
+fn chip_conocido(vid: u16, did: u16) -> Option<&'static str> {
+    Some(match (vid, did) {
+        (0x1002, 0x163f) => "AMD Van Gogh/Sephiroth (APU Steam Deck)",
+        (0x1002, 0x1435) => "AMD Van Gogh ACP (audio I2S)",
+        (0x17cb, 0x1103) => "Qualcomm WCN6855 / QCNFA765 (WiFi 6E)",
+        (0x17cb, 0x1101) => "Qualcomm QCA6390 (WiFi)",
+        (0x17cb, 0x1104) => "Qualcomm QCN9074 (WiFi)",
+        (0x1022, 0x163a) => "AMD xHCI (FCH Van Gogh)",
+        (0x1022, 0x7906) => "AMD SD/eMMC (FCH)",
+        _ => return None,
+    })
+}
+
 /// ¿Es un controlador de red (clase 0x02) sin driver que lo reclame?
 fn red_sin_driver(dev: &PciDevice) -> bool {
     dev.class == 0x02 && driver_for(dev).is_none()
@@ -289,9 +319,29 @@ pub fn hwscan_lines() -> Vec<String> {
             dev.prog_if,
             clase_texto(dev)
         );
+        // Campo extra al final: el parser de xtask lee por posición los
+        // cuatro primeros, así que ampliar por la derecha es seguro.
+        if let Some(chip) = chip_conocido(dev.vendor_id, dev.device_id) {
+            let _ = write!(line, " [{chip}]");
+        }
         out.push(line);
     }
+    out.extend(usb_lines());
     out
+}
+
+/// Líneas del inventario USB (vacío sin driver USB compilado).
+///
+/// Van con las del hwscan porque comparten destino: consola y `SOSODRV.TXT`.
+fn usb_lines() -> Vec<String> {
+    #[cfg(feature = "drv-usb")]
+    {
+        crate::drivers::usb_storage::inventory_lines()
+    }
+    #[cfg(not(feature = "drv-usb"))]
+    {
+        Vec::new()
+    }
 }
 
 /// Controladores de red presentes que ningún driver reclama.

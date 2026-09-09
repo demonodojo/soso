@@ -19,6 +19,7 @@ fn resolve_port_arg(root: &Path, port: &str) -> Vec<String> {
         "e1000e" => vec!["e1000e".into()],
         "nouveau" => vec!["nouveau".into()],
         "iwlwifi" => vec!["iwlwifi".into()],
+        "ath11k" => vec!["ath11k".into()],
         "all" => {
             let mut names = vec![
                 "spike".into(),
@@ -26,6 +27,7 @@ fn resolve_port_arg(root: &Path, port: &str) -> Vec<String> {
                 "e1000e".into(),
                 "nouveau".into(),
                 "iwlwifi".into(),
+                "ath11k".into(),
             ];
             for ext in external_port_names(root) {
                 if !names.iter().any(|n| n == &ext) {
@@ -424,7 +426,7 @@ fn provided_symbols() -> HashSet<&'static str> {
         "lx_e1000e_adapter", "lx_e1000_poll",
         "lx_kmalloc", "lx_kzalloc", "lx_krealloc", "lx_kfree", "lx_vmalloc", "lx_vfree",
         "lx_alloc_pages_exact", "lx_free_pages_exact", "lx_virt_to_phys",
-        "lx_puts", "lx_putchar", "lx_vprintk", "lx_printk",
+        "lx_puts", "lx_putchar", "lx_vprintk", "lx_printk", "lx_fatlog_flush",
         "lx_emul_trace_and_stop", "lx_emul_trace",
         "lx_jiffies", "lx_msecs_to_jiffies", "lx_jiffies_to_msecs", "lx_udelay", "lx_mdelay",
         "lx_ktime_get_ns", "lx_schedule", "lx_yield", "lx_msleep",
@@ -458,6 +460,9 @@ fn provided_symbols() -> HashSet<&'static str> {
         "lx_iwlwifi_connected", "lx_iwlwifi_rx", "lx_iwlwifi_tx", "lx_iwlwifi_mac",
         "lx_iwlwifi_poll", "lx_iwlwifi_set_alive", "lx_iwlwifi_set_phase",
         "iwl_ax211_deliver_rx", "iwl_ax211_add_bss",
+        "lx_ath11k_init_module", "lx_ath11k_exit_module", "lx_ath11k_start",
+        "lx_ath11k_probed", "lx_ath11k_phase", "lx_ath11k_alive",
+        "ath11k_read32", "ath11k_write32",
         "memcpy", "memset", "memmove", "memcmp", "strlen", "strcmp", "strncmp", "strncpy", "strnlen",
         "snprintf", "scnprintf", "vsnprintf",
         "alloc_page", "__free_page", "page_address", "page_to_pfn",

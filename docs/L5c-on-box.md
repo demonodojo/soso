@@ -109,6 +109,15 @@ ls -lh target/usb-live/
 `package-usb-live` y `flash-usb-live` usan el perfil **`live-usb`** por defecto
 (lxdde **nouveau + iwlwifi** + firmware ga107/ga102 y gb205). Override: `SOSO_DRIVERS=…`.
 
+Para la **Steam Deck OLED** hay un perfil propio, `deck`: lxdde **ath11k**, sin
+NVIDIA ni Intel WiFi (su firmware sólo engordaría la imagen) y con el de
+WCN6855 empaquetado antes por `./scripts/l6-pack-ath11k-fw.sh`:
+
+```bash
+./scripts/l6-pack-ath11k-fw.sh
+SOSO_DRIVERS=deck cargo xtask package-usb-live
+```
+
 **WiFi en placa:** el live arranca nouveau (GPU) e iwlwifi (AX211) a la vez.
 Credenciales en `SOSOWIFI.TXT` (ESP, 4 KiB) o `/etc/wifi.conf`. Tras asociación,
 DHCP y SSH en **:22** (no el 2222 de QEMU slirp).

@@ -23,6 +23,10 @@ fn main() {
             let img = build_image();
             run_qemu(&img, true);
         }
+        "fb-shot" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            fb_shot::run(&args);
+        }
         "mkfs" => {
             build_user();
             mkfs(true);
@@ -144,6 +148,7 @@ fn main() {
     }
 }
 
+mod fb_shot;
 mod bench;
 mod as_user;
 mod check;
@@ -422,6 +427,10 @@ pub(crate) fn build_image_with_profile(
     }
     cmd.env("SOSO_VERSION", version::read_version(&root));
     cmd.env("SOSO_BUILD", version::git_build(&root));
+    // `SOSO_FB_ROT=0|90|180|270|auto`: rotación de la consola framebuffer.
+    if let Ok(rot) = std::env::var("SOSO_FB_ROT") {
+        cmd.env("SOSO_FB_ROT", rot);
+    }
     let status = cmd.status().expect("no se pudo ejecutar cargo");
     if !status.success() {
         exit(status.code().unwrap_or(1));
@@ -769,6 +778,9 @@ pub(crate) fn mkfs_rootfs_with_profile(
         || profile.kernel_features.iter().any(|f| f == "drv-all")
     {
         pack_nvidia_firmware(&root);
+    }
+    if profile.lxdde_ports.iter().any(|p| p == "ath11k") {
+        pack_ath11k_firmware(&root);
     }
     drivers::filter_rootfs_firmware(&root.join("rootfs"), profile);
     let path = root.join("target/soso-data.img");
@@ -1311,6 +1323,32 @@ pub(crate) fn lxdde_mode_env() -> Option<String> {
     match qemu_nic().to_ascii_lowercase().as_str() {
         "lx-e1000e" | "lx_e1000e" => Some("e1000e".into()),
         _ => None,
+    }
+}
+
+/// Repuebla el firmware de ath11k si el perfil lo va a necesitar.
+///
+/// Simétrico a `pack_nvidia_firmware`: los perfiles que no usan WiFi Qualcomm
+/// **borran** `rootfs/lib/firmware/ath11k` del árbol de trabajo al filtrar, así
+/// que sin esto un build con otro perfil dejaría al de la Steam Deck sin
+/// firmware hasta volver a ejecutar el script a mano.
+fn pack_ath11k_firmware(root: &Path) {
+    let script = root.join("scripts/l6-pack-ath11k-fw.sh");
+    if !script.exists() {
+        return;
+    }
+    if root
+        .join("rootfs/lib/firmware/ath11k/WCN6855/hw2.1/amss.bin")
+        .exists()
+    {
+        return;
+    }
+    let status = Command::new("bash").arg(&script).current_dir(root).status();
+    match status {
+        Ok(s) if s.success() => {}
+        _ => println!(
+            "xtask: aviso — ejecutar ./scripts/l6-pack-ath11k-fw.sh para el WiFi de la Steam Deck"
+        ),
     }
 }
 

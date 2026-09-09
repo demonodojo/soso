@@ -224,9 +224,11 @@ static const uint32_t fake_ptop[FAKE_PTOP_WORDS] = {
     0x9301001cu, 0x80105004u, FAKE_TOP_CE1_RUNL | 1u,
 };
 
-/* PRAMIN: ventana 0x10fd40 → lectura FB en 0x700000+off (nouveau instmem). */
-#define FAKE_PRAMIN_WINDOW  0x0010fd40u
-#define FAKE_PRAMIN_BASE    0x00700000u
+/* PRAMIN: nv50 (Ampere) 0x001700 o gh100 (Blackwell) 0x10fd40 → FB 0x700000+off. */
+#define FAKE_PRAMIN_WINDOW_NV50  0x001700u
+#define FAKE_PRAMIN_WINDOW_GB    0x0010fd40u
+#define FAKE_PRAMIN_BASE         0x00700000u
+#define FAKE_PRAMIN_MMIO_SIZE    0x00100000u
 #define FAKE_USERD_OFF_GPPUT 0x8cu
 static uint8_t fake_vram[0x400000];
 
@@ -321,12 +323,15 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
         unsigned w = fake_ptop_active_words ? fake_ptop_active_words : FAKE_PTOP_WORDS;
         return w << 20;
     }
-    case FAKE_PRAMIN_WINDOW: return fake_pramin_win;
+    case FAKE_PRAMIN_WINDOW_NV50:
+    case FAKE_PRAMIN_WINDOW_GB:
+        return fake_pramin_win;
     case FAKE_MMU_INVAL_PDB: return fake_mmu_inval_pdb;
     case FAKE_MMU_INVAL_UPPER_PDB: return fake_mmu_inval_upper;
     case FAKE_MMU_INVAL: return fake_mmu_inval;
     default:
-        if (off >= FAKE_PRAMIN_BASE && off + 4u <= FAKE_PRAMIN_BASE + 0x10000u) {
+        if (off >= FAKE_PRAMIN_BASE &&
+            off + 4u <= FAKE_PRAMIN_BASE + FAKE_PRAMIN_MMIO_SIZE) {
             return fake_pramin_mmio_rd(off - FAKE_PRAMIN_BASE);
         }
         if (off >= FAKE_PTOP_INFO) {
@@ -371,7 +376,8 @@ static void gsp_mmio_wr32(uint32_t off, uint32_t val)
         fake_doorbell_writes++;
         fake_doorbell_last = val;
         break;
-    case FAKE_PRAMIN_WINDOW:
+    case FAKE_PRAMIN_WINDOW_NV50:
+    case FAKE_PRAMIN_WINDOW_GB:
         fake_pramin_win = val;
         break;
     case FAKE_MMU_INVAL_PDB:
@@ -384,7 +390,8 @@ static void gsp_mmio_wr32(uint32_t off, uint32_t val)
         fake_mmu_inval = val & ~0x80000000u;
         break;
     default:
-        if (off >= FAKE_PRAMIN_BASE && off + 4u <= FAKE_PRAMIN_BASE + 0x10000u) {
+        if (off >= FAKE_PRAMIN_BASE &&
+            off + 4u <= FAKE_PRAMIN_BASE + FAKE_PRAMIN_MMIO_SIZE) {
             fake_pramin_mmio_wr(off - FAKE_PRAMIN_BASE, val);
             break;
         }
@@ -432,6 +439,12 @@ typedef char fake_usermode_reg_check[
 #define LX_FLCN_ADDR2     0x00001000u
 #endif
 
+static int falcon_lx_reset(unsigned base)
+{
+    (void)base;
+    return 0;
+}
+
 static int falcon_lx_gsp_reset_riscv(unsigned base)
 {
     (void)base;
@@ -449,10 +462,10 @@ static int falcon_lx_start(unsigned base)
 #include "gsp_cmdq_body.inc"
 #include "gsp_rm_obj_body.inc"
 #include "gsp_vram_body.inc"
-#include "gsp_vmm_body.inc"
-#include "gsp_top_body.inc"
 #include "gsp_chip_body.inc"
 #include "gsp_pramin_body.inc"
+#include "gsp_vmm_body.inc"
+#include "gsp_top_body.inc"
 #include "gsp_chan_body.inc"
 #include "gsp_ce_body.inc"
 #include "gsp_bar1_body.inc"
@@ -1226,6 +1239,133 @@ static int check_rm_objects(const struct gsp_libos *lo)
 #define VMM_T_PDE_SYS_LOW    0x0cull
 #define VMM_T_ADDR_MASK      0x000ffffffffff000ull
 
+/* gp100 Ampere: (phys>>4)|type; VRAM solo VALID=1; sysmem HOST|VOL → 0x0d en bajos. */
+#define VMM_T_GP100_PTE_VRAM_LOW  0x01ull
+#define VMM_T_GP100_PTE_SYS_LOW   0x0dull
+#define VMM_T_GP100_PTE_VRAM_RO   0x41ull
+#define VMM_T_GP100_ADDR_MASK     0x000000fffffffff0ull
+
+/* GA107 Ampere: numEntries=4 (gp100), raíz en VRAM + aperture VIDMEM. */
+static int check_vmm_ampere(const struct gsp_libos *lo)
+{
+    struct gsp_rpc rpc;
+    struct gsp_cmdq q;
+    struct gsp_vmm v;
+    struct gsp_vram pool;
+    struct gsp_static_info si;
+    struct gsp_dma_buf scratch;
+    struct gsp_msgq_headers *msgq =
+        (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->msgq_offset);
+    unsigned char *cmdq_base = (unsigned char *)lo->shm.va + lo->cmdq_offset;
+    rpc_gsp_rm_alloc alloc_ok;
+    unsigned char ctrl_ok[sizeof(rpc_gsp_rm_control)];
+    uint32_t base, wptr0;
+    uint64_t root_phys, pte = 0;
+
+    gsp_nv_family_set(0xb74000a1u, 0x249cu);
+
+    if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (vmm ampere)\n"); return -1; }
+    if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (vmm ampere)\n"); return -1; }
+
+    memset(&si, 0, sizeof(si));
+    si.ready = 1;
+    si.region_nr = 1;
+    si.region[0].base = 0ull;
+    si.region[0].size = 16ull * 1024ull * 1024ull;
+    if (gsp_vram_init(&pool, &si) != 0) {
+        printf("FALLO: gsp_vram_init (vmm ampere)\n");
+        return -1;
+    }
+
+    memset(&alloc_ok, 0, sizeof(alloc_ok));
+    memset(ctrl_ok, 0, sizeof(ctrl_ok));
+    base = *rpc.rptr;
+    for (unsigned i = 0; i < 4; i++) {
+        fake_rpc_post_payload(lo, (base + i) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                              0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    }
+    fake_rpc_post_payload(lo, (base + 4) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    msgq->tx.writePtr = (base + 5) % 63;
+
+    wptr0 = *q.wptr;
+    if (gsp_vmm_init(&q, &rpc, &v, &pool) != 0) {
+        printf("FALLO: gsp_vmm_init (Ampere)\n");
+        return -1;
+    }
+    if (v.fmt != GSP_VMM_FMT_GP100 || v.root_entries != 4 || !v.pt[0].in_vram) {
+        printf("FALLO: VMM Ampere fmt=%u root_entries=%u in_vram=%d "
+               "(esperaba gp100/4/1)\n",
+               (unsigned)v.fmt, v.root_entries, v.pt[0].in_vram);
+        return -1;
+    }
+    root_phys = v.pt[0].mem.phys;
+    {
+        const unsigned char *entry = cmdq_base + 4096 +
+                                     (unsigned long)((wptr0 + 4) % 63) * 4096;
+        const struct gsp_rpc_hdr *hdr =
+            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        const rpc_gsp_rm_control *c = (const rpc_gsp_rm_control *)(hdr + 1);
+        const NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS *p =
+            (const NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS *)(c + 1);
+
+        if (p->numEntries != 4) {
+            printf("FALLO: Ampere numEntries=%u (esperaba 4)\n", p->numEntries);
+            return -1;
+        }
+        if (p->flags != NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_FLAGS_APERTURE_VIDMEM) {
+            printf("FALLO: Ampere aperture=%u (esperaba VIDMEM=0)\n", p->flags);
+            return -1;
+        }
+        if (p->physAddress != root_phys) {
+            printf("FALLO: Ampere directorio 0x%llx raíz 0x%llx\n",
+                   (unsigned long long)p->physAddress,
+                   (unsigned long long)root_phys);
+            return -1;
+        }
+    }
+    if (gsp_vmm_pte_encode(0x240000000ull, GSP_VMM_VRAM, 0) !=
+        (VMM_T_GP100_PTE_VRAM_LOW | (0x240000000ull >> 4))) {
+        printf("FALLO: gp100 PTE VRAM codificación\n");
+        return -1;
+    }
+    if (gsp_vmm_pte_encode(0x2000000ull, GSP_VMM_SYSMEM, 0) !=
+        (VMM_T_GP100_PTE_SYS_LOW | (0x2000000ull >> 4))) {
+        printf("FALLO: gp100 PTE sysmem codificación\n");
+        return -1;
+    }
+    if (gsp_dma_alloc(&scratch, 4096, "scratch ampere") != 0) {
+        printf("FALLO: scratch ampere\n");
+        return -1;
+    }
+    if (gsp_vmm_map(&v, VMM_T_VA, VMM_T_VRAM_PA, VMM_T_VRAM_SZ, GSP_VMM_VRAM) != 0 ||
+        gsp_vmm_map(&v, VMM_T_VA + VMM_T_VRAM_SZ, scratch.phys, 4096,
+                    GSP_VMM_SYSMEM) != 0) {
+        printf("FALLO: gsp_vmm_map (Ampere)\n");
+        return -1;
+    }
+    {
+        uint32_t want_pdb = (uint32_t)(root_phys >> 8);
+
+        if (fake_mmu_inval_pdb != want_pdb) {
+            printf("FALLO: Ampere MMU INVALIDATE_PDB=0x%08x (esperaba 0x%08x, "
+                   "sin aperture SYS)\n",
+                   fake_mmu_inval_pdb, want_pdb);
+            return -1;
+        }
+    }
+    if (gsp_vmm_translate(&v, VMM_T_VA, NULL, &pte) != 0 ||
+        (pte & ~VMM_T_GP100_ADDR_MASK) != VMM_T_GP100_PTE_VRAM_LOW) {
+        printf("FALLO: gp100 translate VRAM pte=0x%llx\n", (unsigned long long)pte);
+        return -1;
+    }
+    gsp_dma_free(&scratch);
+    gsp_vmm_fini(&v);
+    printf("OK: SET_PAGE_DIRECTORY Ampere raíz=0x%llx VIDMEM 4 entradas gp100\n",
+           (unsigned long long)root_phys);
+    return 0;
+}
+
 static int check_vmm(const struct gsp_libos *lo)
 {
     struct gsp_rpc rpc;
@@ -1247,6 +1387,9 @@ static int check_vmm(const struct gsp_libos *lo)
            sizeof(NV_VASPACE_ALLOCATION_PARAMETERS),
            sizeof(NV0080_CTRL_DMA_SET_PAGE_DIRECTORY_PARAMS));
 
+    /* Blackwell VER3: raíz con 2 entradas. */
+    gsp_nv_family_set(0x1b5000a1u, 0x2f18u);
+
     if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (vmm)\n"); return -1; }
     if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (vmm)\n"); return -1; }
 
@@ -1263,7 +1406,7 @@ static int check_vmm(const struct gsp_libos *lo)
     msgq->tx.writePtr = (base + 5) % 63;
 
     wptr0 = *q.wptr;
-    if (gsp_vmm_init(&q, &rpc, &v) != 0) {
+    if (gsp_vmm_init(&q, &rpc, &v, NULL) != 0) {
         printf("FALLO: gsp_vmm_init\n");
         return -1;
     }
@@ -1378,7 +1521,7 @@ static int check_vmm(const struct gsp_libos *lo)
         return -1;
     }
     {
-        uint32_t want_pdb = (uint32_t)((root_phys >> 8) | 0x2u);
+        uint32_t want_pdb = (uint32_t)(root_phys >> 8);
         uint32_t want_upper = (uint32_t)(root_phys >> 40);
 
         if (fake_mmu_inval_pdb != want_pdb) {
@@ -1492,8 +1635,8 @@ static int check_vmm(const struct gsp_libos *lo)
             printf("FALLO: no hay tabla de PD0 para la página grande\n");
             return -1;
         }
-        bajo = pt_read_big(pd0, lvl_index(1u, va_big));
-        alto = pt_read(pd0, lvl_index(1u, va_big));
+        bajo = pt_read_big(&v, pd0, lvl_index(&v, 1u, va_big));
+        alto = pt_read(&v, pd0, lvl_index(&v, 1u, va_big));
         if ((bajo & ~VMM_T_ADDR_MASK) != VMM_T_PTE_VRAM_LOW ||
             (bajo & VMM_T_ADDR_MASK) != pa_big) {
             printf("FALLO: PTE grande 0x%llx (esperaba banderas 0x%llx y phys 0x%llx)\n",
@@ -1616,7 +1759,7 @@ static int check_vmm(const struct gsp_libos *lo)
         if (pt->level == 0) {
             continue;
         }
-        idx = lvl_index(pt->level, VMM_T_VA);
+        idx = lvl_index(&v, pt->level, VMM_T_VA);
         if (pt->level == 1) {
             if (raw[(unsigned long)idx * 2u] != 0) {
                 printf("FALLO: la mitad de páginas grandes de la PDE doble no "
@@ -2368,6 +2511,7 @@ static int check_g6_resident(void)
  * número es pequeño. */
 #define FAKE_DOORBELL_TOKEN  0x00070000u
 #define FAKE_DOORBELL_KICK   (FAKE_DOORBELL_TOKEN | NV_VF_DOORBELL_RUNLIST_DOORBELL_ENABLE)
+#define FAKE_DOORBELL_KICK_CHID(chid) (FAKE_DOORBELL_KICK | ((chid) & NV_VF_DOORBELL_VECTOR_MASK))
 
 /* Catálogo de clases: que se pida bien y que lo contestado mande de verdad.
  *
@@ -2863,39 +3007,67 @@ static int check_ampere_sec2_falcon_base(void)
     return 0;
 }
 
-static int check_pramin(void)
+static int check_pramin_family(uint32_t boot0, uint16_t devid, const char *label)
 {
+    uint32_t win_reg;
+
+    gsp_nv_family_set(boot0, devid);
     gsp_pramin_invalidate();
 
-    gsp_mmio_wr32(FAKE_PRAMIN_WINDOW, 0x10u);
-    if (gsp_mmio_rd32(FAKE_PRAMIN_WINDOW) != 0x10u) {
-        printf("FALLO: PRAMIN ventana readback (escribí 0x10, leí 0x%x)\n",
-               gsp_mmio_rd32(FAKE_PRAMIN_WINDOW));
+    win_reg = (gsp_nv_family_current() == NV_FAM_BLACKWELL) ?
+              FAKE_PRAMIN_WINDOW_GB : FAKE_PRAMIN_WINDOW_NV50;
+
+    gsp_mmio_wr32(win_reg, 0x10u);
+    if (gsp_mmio_rd32(win_reg) != 0x10u) {
+        printf("FALLO: PRAMIN %s ventana readback (escribí 0x10, leí 0x%x)\n",
+               label, gsp_mmio_rd32(win_reg));
         return -1;
     }
 
     gsp_pramin_wr32(0x1234ull, 0xdeadbeefu);
     if (gsp_pramin_rd32(0x1234ull) != 0xdeadbeefu) {
-        printf("FALLO: PRAMIN rd/wr (escribí deadbeef, leí %08x)\n",
-               gsp_pramin_rd32(0x1234ull));
+        printf("FALLO: PRAMIN %s rd/wr (escribí deadbeef, leí %08x)\n",
+               label, gsp_pramin_rd32(0x1234ull));
         return -1;
     }
 
-    gsp_pramin_wr32(0xfffcull, 0xaaaau);
-    gsp_pramin_wr32(0x10000ull, 0xbbbau);
-    if (gsp_pramin_rd32(0xfffcull) != 0xaaaau ||
-        gsp_pramin_rd32(0x10000ull) != 0xbbbau) {
-        printf("FALLO: PRAMIN cruce 64K (0xfffc=%08x 0x10000=%08x)\n",
-               gsp_pramin_rd32(0xfffcull), gsp_pramin_rd32(0x10000ull));
-        return -1;
+    if (gsp_nv_family_current() == NV_FAM_BLACKWELL) {
+        gsp_pramin_wr32(0xfffcull, 0xaaaau);
+        gsp_pramin_wr32(0x10000ull, 0xbbbau);
+        if (gsp_pramin_rd32(0xfffcull) != 0xaaaau ||
+            gsp_pramin_rd32(0x10000ull) != 0xbbbau) {
+            printf("FALLO: PRAMIN %s cruce 64K (0xfffc=%08x 0x10000=%08x)\n",
+                   label, gsp_pramin_rd32(0xfffcull),
+                   gsp_pramin_rd32(0x10000ull));
+            return -1;
+        }
+    } else {
+        gsp_pramin_wr32(0x000ffffcull, 0xaaaau);
+        gsp_pramin_wr32(0x00100000ull, 0xbbbau);
+        if (gsp_pramin_rd32(0x000ffffcull) != 0xaaaau ||
+            gsp_pramin_rd32(0x00100000ull) != 0xbbbau) {
+            printf("FALLO: PRAMIN %s cruce 1MiB (0xffffc=%08x 0x100000=%08x)\n",
+                   label, gsp_pramin_rd32(0x000ffffcull),
+                   gsp_pramin_rd32(0x00100000ull));
+            return -1;
+        }
     }
 
     if (!gsp_pramin_alive()) {
-        printf("FALLO: gsp_pramin_alive\n");
+        printf("FALLO: gsp_pramin_alive (%s)\n", label);
         return -1;
     }
 
-    printf("OK: PRAMIN ventana BAR0 + rd/wr + cruce 64K\n");
+    printf("OK: PRAMIN %s ventana BAR0 + rd/wr\n", label);
+    return 0;
+}
+
+static int check_pramin(void)
+{
+    if (check_pramin_family(0xb74000a1u, 0x249cu, "Ampere GA107") != 0)
+        return -1;
+    if (check_pramin_family(0x1b5000a1u, 0x2f18u, "Blackwell GB205") != 0)
+        return -1;
     return 0;
 }
 
@@ -3291,7 +3463,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                 (ctrl_token + sizeof(rpc_gsp_rm_control));
 
         memset(ctrl_token, 0, sizeof(ctrl_token));
-        tk->workSubmitToken = FAKE_DOORBELL_TOKEN;
+        tk->workSubmitToken = FAKE_DOORBELL_TOKEN | 1u;
         fake_rpc_post_payload(lo, (base + 9) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                               0, ctrl_token, (uint32_t)sizeof(ctrl_token));
     }
@@ -3309,16 +3481,13 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     fake_rpc_post_payload(lo, (base + 14) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                           0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
     {
-        /* El token del segundo canal trae **otro chid**, el 1: es lo que RM
-         * contesta si el chid se pide por los índices de USERD, que es lo que este
-         * canal declara. Dos canales con el mismo token serían dos canales pateando
-         * el mismo, y el port lo dice en cuanto el token no cuadra con lo pedido. */
+        /* Tras rsvd_chids=1: COPY0 chid=1, GR0 chid=2 — tokens distintos. */
         NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS *tk =
             (NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS *)
                 (ctrl_token_gr + sizeof(rpc_gsp_rm_control));
 
         memset(ctrl_token_gr, 0, sizeof(ctrl_token_gr));
-        tk->workSubmitToken = FAKE_DOORBELL_TOKEN | 1u;
+        tk->workSubmitToken = FAKE_DOORBELL_TOKEN | 2u;
         fake_rpc_post_payload(lo, (base + 15) % 63,
                               NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                               0, ctrl_token_gr, (uint32_t)sizeof(ctrl_token_gr));
@@ -3352,7 +3521,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     msgq->tx.writePtr = (base + 19) % 63;
 
     wptr0 = *q.wptr;
-    if (gsp_vmm_init(&q, &rpc, &v) != 0) {
+    if (gsp_vmm_init(&q, &rpc, &v, NULL) != 0) {
         printf("FALLO: gsp_vmm_init (g4e)\n");
         return -1;
     }
@@ -3477,12 +3646,11 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                    p->subDeviceId, p->flags);
             return -1;
         }
-        /* El `flags` que manda upstream con chid=0 y priv=true es exactamente
-         * PRIVILEGED_CHANNEL (bit 5) | USERD_INDEX_PAGE_FIXED (bit 21) = todos
-         * los demás subcampos son FALSE=0. El número crudo es el ancla. */
-        if (p->flags != 0x00200020u) {
-            printf("FALLO: flags=0x%08x, upstream manda 0x00200020 (PRIVILEGED |"
-                   " USERD_INDEX_PAGE_FIXED)\n", p->flags);
+        /* Con rsvd_chids=1 el primer canal pide chid=1 → USERD_INDEX=1. */
+        if (p->flags != (0x00200020u | NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(1))) {
+            printf("FALLO: flags=0x%08x, esperaba 0x%08x (PRIVILEGED | PAGE_FIXED |"
+                   " USERD idx=1, rsvd_chids=1)\n", p->flags,
+                   0x00200020u | NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(1));
             return -1;
         }
         /* Y el privilegio tiene que decir lo mismo en los dos sitios. */
@@ -3523,7 +3691,8 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     }
     printf("OK: canal contra r535_chan_alloc — flags 0x%08x, GPFIFO por VA, "
            "USERD 0x200, method buffer propio de %u B\n",
-           0x00200020u, chan.mthdbuf_size);
+           0x00200020u | NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(1),
+           chan.mthdbuf_size);
     printf("OK: BLACKWELL_CHANNEL_GPFIFO_B alloc params (layout r570, inst+ramfc en VRAM)\n");
 
     /* Los tres pasos de arranque, en orden y sobre el objeto del CANAL. Faltaban
@@ -3590,12 +3759,13 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         }
     }
     /* Y que el token que contestó RM haya llegado entero al canal. */
-    if (!chan.doorbell_ok || chan.doorbell_token != FAKE_DOORBELL_TOKEN ||
-        chan.doorbell_kick != FAKE_DOORBELL_KICK) {
+    if (!chan.doorbell_ok ||
+        chan.doorbell_token != (FAKE_DOORBELL_TOKEN | 1u) ||
+        chan.doorbell_kick != FAKE_DOORBELL_KICK_CHID(1)) {
         printf("FALLO: token del doorbell ok=%d RPC=0x%08x kick=0x%08x "
                "(esperaba RPC=0x%08x kick=0x%08x)\n",
                chan.doorbell_ok, chan.doorbell_token, chan.doorbell_kick,
-               FAKE_DOORBELL_TOKEN, FAKE_DOORBELL_KICK);
+               FAKE_DOORBELL_TOKEN | 1u, FAKE_DOORBELL_KICK_CHID(1));
         return -1;
     }
     printf("OK: canal arrancado — BIND(9) + SCHEDULE(bEnable=1, 3 B) + token "
@@ -3730,10 +3900,11 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
      * desde dentro se ve idéntico a un submit correcto, así que hay que
      * comprobarlo aquí: una escritura, en el registro de usermode, con el token
      * ENTERO que devolvió RM. */
-    if (fake_doorbell_writes != 1 || fake_doorbell_last != FAKE_DOORBELL_KICK) {
+    if (fake_doorbell_writes != 1 ||
+        fake_doorbell_last != FAKE_DOORBELL_KICK_CHID(1)) {
         printf("FALLO: doorbell escrituras=%u último=0x%08x (esperaba 1 y 0x%08x "
                "en 0x%06x)\n", fake_doorbell_writes, fake_doorbell_last,
-               FAKE_DOORBELL_KICK, NV_VFN_DOORBELL);
+               FAKE_DOORBELL_KICK_CHID(1), NV_VFN_DOORBELL);
         return -1;
     }
     {
@@ -4044,14 +4215,14 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
          * canales pedían el mismo teniéndolo declarado fijo, y el segundo se llevó
          * un NO_MEMORY en hardware. El valor esperado es el del chid 1: índice 1
          * (bit 8), página 0, PAGE_FIXED y PRIVILEGED. */
-        if (p->flags != (0x00200020u | NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(1))) {
+        if (p->flags != (0x00200020u | NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(2))) {
             printf("FALLO: flags del canal GR0 = 0x%08x, esperaba 0x%08x "
-                   "(índice de USERD 1, no el del primer canal)\n",
+                   "(índice de USERD 2, chid=2 tras rsvd_chids=1)\n",
                    p->flags,
-                   0x00200020u | NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(1));
+                   0x00200020u | NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(2));
             return -1;
         }
-        if (chan_gr.doorbell_token != (FAKE_DOORBELL_TOKEN | 1u) ||
+        if (chan_gr.doorbell_token != (FAKE_DOORBELL_TOKEN | 2u) ||
             chan_gr.doorbell_token == chan.doorbell_token) {
             printf("FALLO: token del canal GR0 = 0x%08x (el del CE es 0x%08x)\n",
                    chan_gr.doorbell_token, chan.doorbell_token);
@@ -4390,6 +4561,16 @@ static int check_fini(const struct gsp_libos *lo)
 
     if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (fini)\n"); return -1; }
     if (gsp_cmdq_init(lo, &q) != 0) { printf("FALLO: cmdq_init (fini)\n"); return -1; }
+    /* Tests anteriores dejan la cmdq casi llena; fini necesita hueco libre. */
+    {
+        struct gsp_msgq_headers *cmdq =
+            (struct gsp_msgq_headers *)((unsigned char *)lo->shm.va + lo->cmdq_offset);
+
+        cmdq->tx.writePtr = 0;
+        cmdq->rx.readPtr = 0;
+        msgq->tx.writePtr = 0;
+        msgq->rx.readPtr = 0;
+    }
 
     memset(&rm, 0, sizeof(rm));
     rm.q = &q;
@@ -4607,6 +4788,32 @@ static int check_cmdq(const struct gsp_libos *lo)
     return 0;
 }
 
+/* GSP_RUN_CPU_SEQUENCER: buffer grande y CORE_RESET (falcon reset, no RISC-V). */
+static int check_cpu_seq(void)
+{
+    unsigned char buf[8192];
+    uint32_t *w = (uint32_t *)buf;
+
+    memset(buf, 0, sizeof(buf));
+    w[0] = 16354u;
+    w[1] = 0u;
+    if (gsp_cpu_seq_run(buf, 6296u) != 0) {
+        printf("FALLO: cpu_seq payload 6296 B (cmdIndex=0)\n");
+        return -1;
+    }
+
+    memset(buf, 0, sizeof(buf));
+    w[0] = 100u;
+    w[1] = 1u;
+    w[10] = 6u; /* GSP_SEQ_BUF_OPCODE_CORE_RESET */
+    if (gsp_cpu_seq_run(buf, 44u) != 0) {
+        printf("FALLO: cpu_seq CORE_RESET\n");
+        return -1;
+    }
+    printf("OK: cpu_seq payload 6296 B y CORE_RESET (falcon reset)\n");
+    return 0;
+}
+
 /* Paso 6: el paquete COT, contra un FSP simulado. */
 static int check_cot(const struct gsp_wpr *wpr)
 {
@@ -4751,6 +4958,8 @@ static int check_cot(const struct gsp_wpr *wpr)
         return -1;
     if (check_classlist(&lo) != 0)
         return -1;
+    if (check_vmm_ampere(&lo) != 0)
+        return -1;
     if (check_vmm(&lo) != 0)
         return -1;
     if (check_ptop() != 0)
@@ -4772,6 +4981,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_doorbell_kick_by_family() != 0)
         return -1;
     if (check_ga107_dead_boot0() != 0)
+        return -1;
+    if (check_cpu_seq() != 0)
         return -1;
     if (check_g4e_chan_ce(&lo) != 0)
         return -1;

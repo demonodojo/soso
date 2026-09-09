@@ -792,8 +792,10 @@ de IDs de un driver existente o si hay que portar uno nuevo.
 El informe se imprime por serie **en cada arranque del pendrive live**, y se
 guarda además en **`SOSODRV.TXT`** en la ESP (junto a `SOSOLOG.TXT`). En un
 **disco instalado** (NVMe), soso guarda el inventario en **`/etc/soso-hw`** al
-final del primer escaneo; en arranques siguientes **no repite** el informe ni
-reescribe `SOSODRV.TXT` mientras el hardware no cambie. Si cambias tarjeta,
+escanear (también en el live, y el clon lo lleva al disco); en arranques
+siguientes **no repite** el informe ni reescribe `SOSODRV.TXT` mientras no
+aparezcan dispositivos PCI nuevos ni cambie el número de CPUs (quitar el
+pendrive o un disco extra no cuenta como cambio). Si cambias tarjeta,
 GPU o CPU, o quieres forzar un nuevo escaneo:
 
 ```sh
@@ -916,6 +918,7 @@ soso es un sistema con alcance deliberadamente reducido en algunas áreas:
 | Web | Sin JavaScript ni CSS avanzado; modo gráfico básico |
 | Ficheros | Sin permisos Unix, hardlinks ni snapshots |
 | Comandos | Conjunto acotado de coreutils y utilidades propias |
+| Pantalla | Consola de texto sobre el framebuffer del firmware; sin cambio de resolución |
 
 Un page fault en userspace mata al proceso afectado, no al kernel. Si sosh muere con
 error, `init` la relanza automáticamente.
@@ -923,6 +926,22 @@ error, `init` la relanza automáticamente.
 ---
 
 ## Solución de problemas
+
+### La consola se ve girada 90°
+
+Algunos portátiles y consolas de mano llevan el panel montado de lado: el
+firmware entrega un framebuffer vertical (por ejemplo 800×1280) y el texto sale
+tumbado. soso lo detecta por la forma de la pantalla y rota la consola sin que
+tengas que hacer nada.
+
+Si el sentido sale al revés, se fija al compilar:
+
+```sh
+SOSO_FB_ROT=90 cargo xtask build      # 0 | 90 | 180 | 270 | auto
+```
+
+La línea `fb: rot=…` del arranque dice qué rotación se aplicó y con qué tamaño
+de consola queda.
 
 ### «Permission denied» al conectar por SSH
 

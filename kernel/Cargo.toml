@@ -8,6 +8,12 @@ build = "build.rs"
 [features]
 default = ["drv-all"]
 lxdde = []
+# Port nouveau enlazado (símbolos `lx_nouveau_*`). Sin esta feature la capa
+# lxdde usa un doble sin GPU: hace falta para perfiles como el de la Steam
+# Deck, que compilan lxdde sólo para el WiFi.
+lxdde-nouveau = ["lxdde"]
+# Port iwlwifi enlazado (símbolos `lx_iwlwifi_*`).
+lxdde-iwlwifi = ["lxdde"]
 # Meta-feature: todos los drivers nativos (compatibilidad con cargo xtask test).
 drv-all = [
     "drv-virtio-blk",
@@ -49,6 +55,7 @@ block-dev = { path = "../crates/block-dev" }
 gptdisk = { path = "../crates/gptdisk" }
 soso-resize-core = { path = "../crates/soso-resize-core" }
 soso-abi = { path = "../crates/soso-abi" }
+soso-hw = { path = "../crates/soso-hw" }
 xmas-elf = "0.10"
 smoltcp = { version = "0.13.1", default-features = false, features = [
     "medium-ethernet",
@@ -84,6 +91,10 @@ font8x8 = { version = "0.3", default-features = false }
 # vendor/README.md.
 [patch.crates-io]
 sunset = { path = "../vendor/sunset-0.5.0" }
+
+[build-dependencies]
+embedded-bitmap-fonts = { version = "0.1.1", features = ["terminus"] }
+embedded-graphics = "0.8.2"
 
 [profile.dev]
 panic = "abort"

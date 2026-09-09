@@ -188,6 +188,62 @@ pub fn init() {
     }
 }
 
+/// Inventario USB para el informe de hardware.
+///
+/// En una máquina sin puerto serie (Steam Deck) el informe del USB es la única
+/// descripción del bus, y de un HID que no habla el protocolo boot hace falta
+/// el report descriptor entero para saber interpretarlo.
+pub fn inventory_lines() -> Vec<alloc::string::String> {
+    use core::fmt::Write;
+    // Un report descriptor de teclado real no llega a 200 bytes; el tope evita
+    // que un dispositivo hablador se coma el SOSODRV entero.
+    const MAX_REPORT: usize = 512;
+    let mut out = Vec::new();
+    let hosts = HOSTS.lock();
+    for host in hosts.iter() {
+        for dev in host.ctrl.inventory() {
+            let mut l = alloc::string::String::new();
+            let _ = write!(
+                l,
+                "usb: dev slot={} port={} {:04x}:{:04x} clase {:02x}:{:02x}:{:02x}",
+                dev.slot,
+                dev.root_port,
+                dev.vendor_id,
+                dev.product_id,
+                dev.class,
+                dev.subclass,
+                dev.protocol
+            );
+            out.push(l);
+            for i in &dev.ifaces {
+                let mut l = alloc::string::String::new();
+                let _ = write!(
+                    l,
+                    "usb: if slot={} n={} alt={} clase {:02x}:{:02x}:{:02x} report={}",
+                    dev.slot,
+                    i.number,
+                    i.alt,
+                    i.class,
+                    i.subclass,
+                    i.protocol,
+                    i.report_desc.len()
+                );
+                out.push(l);
+                let n = i.report_desc.len().min(MAX_REPORT);
+                for (k, trozo) in i.report_desc[..n].chunks(32).enumerate() {
+                    let mut l = alloc::string::String::new();
+                    let _ = write!(l, "usb: rep slot={} n={} {:03x} ", dev.slot, i.number, k * 32);
+                    for b in trozo {
+                        let _ = write!(l, "{b:02x}");
+                    }
+                    out.push(l);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[allow(dead_code)]
 pub fn present() -> bool {
     HOSTS.lock().iter().any(|h| h.ms.is_some())

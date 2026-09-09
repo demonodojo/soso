@@ -51,49 +51,80 @@ struct DriverReg {
 static DRIVERS: Mutex<Vec<DriverReg>> = Mutex::new(Vec::new());
 static DEVICES: Mutex<Vec<LxPciDev>> = Mutex::new(Vec::new());
 
+struct ProbeJob {
+    name: String,
+    probe: extern "C" fn(*mut LxPciDev, *const LxPciDeviceId) -> i32,
+    dev: LxPciDev,
+    id: LxPciDeviceId,
+}
+
 pub fn init() {
-    for drv in DRIVERS.lock().iter() {
+    let jobs: Vec<ProbeJob> = {
+        let drivers = DRIVERS.lock();
         let devs = pci::devices();
-        for d in devs {
-            if !match_id(&drv.ids, d.vendor_id, d.device_id, d.class) {
-                continue;
-            }
-            let (bar0, bar0_size) = (d.bar0, d.bar0_size);
-            let (bar1, bar1_size) = (d.bar1, d.bar1_size);
-            let mut lx = LxPciDev {
-                bus: d.bus,
-                device: d.device,
-                function: d.function,
-                vendor_id: d.vendor_id,
-                device_id: d.device_id,
-                bar0,
-                bar0_size,
-                bar1,
-                bar1_size,
-                data: 0,
-                mmio: 0,
-                irq_vectors: Vec::new(),
-            };
-            let id = LxPciDeviceId {
-                vendor: d.vendor_id as u32,
-                device: d.device_id as u32,
-                subvendor: 0,
-                subdevice: 0,
-                class: 0,
-                class_mask: 0,
-                driver_data: 0,
-            };
-            let ptr = &mut lx as *mut LxPciDev;
-            DEVICES.lock().push(lx);
-            let dev_ptr = DEVICES.lock().last_mut().unwrap() as *mut LxPciDev;
-            let r = (drv.probe)(dev_ptr, &id);
-            if r != 0 {
-                DEVICES.lock().pop();
-            } else {
-                let _ = ptr;
-                crate::println!("lxdde-pci: {} probe {:04x}:{:04x} ok", drv.name, d.vendor_id, d.device_id);
+        let mut jobs = Vec::new();
+        for drv in drivers.iter() {
+            for d in devs {
+                if !match_id(&drv.ids, d.vendor_id, d.device_id, d.class) {
+                    continue;
+                }
+                jobs.push(ProbeJob {
+                    name: drv.name.clone(),
+                    probe: drv.probe,
+                    dev: LxPciDev {
+                        bus: d.bus,
+                        device: d.device,
+                        function: d.function,
+                        vendor_id: d.vendor_id,
+                        device_id: d.device_id,
+                        bar0: d.bar0,
+                        bar0_size: d.bar0_size,
+                        bar1: d.bar1,
+                        bar1_size: d.bar1_size,
+                        data: 0,
+                        mmio: 0,
+                        irq_vectors: Vec::new(),
+                    },
+                    id: LxPciDeviceId {
+                        vendor: d.vendor_id as u32,
+                        device: d.device_id as u32,
+                        subvendor: 0,
+                        subdevice: 0,
+                        class: 0,
+                        class_mask: 0,
+                        driver_data: 0,
+                    },
+                });
             }
         }
+        jobs
+    };
+
+    for job in jobs {
+        let vendor = job.dev.vendor_id;
+        let device = job.dev.device_id;
+
+        crate::drivers::fatlog::flush_checkpoint();
+        crate::println!(
+            "lxdde-pci: probe {} {:04x}:{:04x}",
+            job.name, vendor, device
+        );
+        DEVICES.lock().push(job.dev);
+        let dev_ptr = DEVICES.lock().last_mut().unwrap() as *mut LxPciDev;
+        let r = (job.probe)(dev_ptr, &job.id);
+        if r != 0 {
+            DEVICES.lock().pop();
+            crate::println!(
+                "lxdde-pci: {} probe {:04x}:{:04x} fail rc={}",
+                job.name, vendor, device, r
+            );
+        } else {
+            crate::println!(
+                "lxdde-pci: {} probe {:04x}:{:04x} ok",
+                job.name, vendor, device
+            );
+        }
+        crate::drivers::fatlog::flush_checkpoint();
     }
 }
 

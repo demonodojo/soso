@@ -167,11 +167,12 @@ int iwl_mvm_init_mcc(struct iwl_ax211_priv *iwl)
 
     memset(&cmd, 0, sizeof(cmd));
     /* `iwl_mvm_get_current_regdomain`: ZZ + GET_CURRENT → perfil NVM en FW. */
-    cmd.mcc = (uint16_t)(('Z' << 8) | 'Z');
+    cmd.mcc = iwl_cpu_to_le16((uint16_t)(('Z' << 8) | 'Z'));
     cmd.source_id = MCC_SOURCE_GET_CURRENT;
 
     if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, MCC_UPDATE_CMD,
-                                &cmd, (uint16_t)sizeof(cmd), 2000) != 0) {
+                                &cmd, (uint16_t)sizeof(cmd),
+                                IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
         lx_printk("iwl_mvm: MCC_UPDATE falló\n");
         return -1;
     }
@@ -196,9 +197,10 @@ int iwl_mvm_send_tx_ant_cfg(struct iwl_ax211_priv *iwl)
     uint8_t ant = iwl_mvm_valid_tx_ant(iwl);
 
     memset(&cmd, 0, sizeof(cmd));
-    cmd.valid = ant;
+    cmd.valid = iwl_cpu_to_le32(ant);
     if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, TX_ANT_CONFIGURATION_CMD,
-                                &cmd, (uint16_t)sizeof(cmd), 500) != 0) {
+                                &cmd, (uint16_t)sizeof(cmd),
+                                IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
         lx_printk("iwl_mvm: TX_ANT_CONFIGURATION falló\n");
         return -1;
     }

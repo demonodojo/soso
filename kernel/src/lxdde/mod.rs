@@ -5,6 +5,13 @@ mod dma;
 mod drm;
 mod fiber;
 mod firmware;
+// El port nouveau sólo se enlaza en perfiles que lo compilan; sin él, un doble
+// con la misma superficie evita que el kernel referencie sus símbolos (la
+// Steam Deck usa lxdde para el WiFi y no tiene nada de NVIDIA).
+#[cfg(feature = "lxdde-nouveau")]
+mod gpu;
+#[cfg(not(feature = "lxdde-nouveau"))]
+#[path = "gpu_ausente.rs"]
 mod gpu;
 mod irq;
 mod mem;
@@ -14,6 +21,12 @@ mod printk;
 mod timer;
 mod workqueue;
 #[cfg(feature = "lxdde")]
+// Igual que el módulo GPU: los símbolos `lx_iwlwifi_*` sólo existen si su port
+// se enlaza.
+#[cfg(feature = "lxdde-iwlwifi")]
+pub mod wifi;
+#[cfg(not(feature = "lxdde-iwlwifi"))]
+#[path = "wifi_ausente.rs"]
 pub mod wifi;
 
 use spin::Mutex;
@@ -24,7 +37,10 @@ unsafe extern "C" {
     fn lx_spike_run();
     fn lx_testdrv_run();
     fn lx_e1000e_init_module() -> i32;
-    fn lx_nouveau_init_module() -> i32;
+    fn lx_ath11k_init_module() -> i32;
+    fn lx_ath11k_start() -> i32;
+    fn lx_ath11k_phase() -> *const core::ffi::c_char;
+    fn lx_ath11k_alive() -> i32;
 }
 
 /// Puertos lxdde activos (compile-time vía `SOSO_LXDDE_MODE`, coma-separado).
@@ -35,6 +51,8 @@ pub struct LxddeModes {
     pub e1000e: bool,
     pub nouveau: bool,
     pub iwlwifi: bool,
+    /// WiFi Qualcomm WCN6855 (Steam Deck OLED). Fase W1: sólo transporte MHI.
+    pub ath11k: bool,
 }
 
 impl LxddeModes {
@@ -46,11 +64,17 @@ impl LxddeModes {
             e1000e: s.contains("e1000e"),
             nouveau: s.contains("nouveau"),
             iwlwifi: s.contains("iwlwifi"),
+            ath11k: s.contains("ath11k"),
         }
     }
 
     pub fn is_off(self) -> bool {
-        !self.spike && !self.testdrv && !self.e1000e && !self.nouveau && !self.iwlwifi
+        !self.spike
+            && !self.testdrv
+            && !self.e1000e
+            && !self.nouveau
+            && !self.iwlwifi
+            && !self.ath11k
     }
 }
 
@@ -78,12 +102,18 @@ pub fn init(modes: LxddeModes) {
             let _ = lx_e1000e_init_module();
         }
         if modes.nouveau {
-            let rc = lx_nouveau_init_module();
+            let rc = gpu::init_module();
             crate::println!("lxdde: nouveau init rc={rc} phase={}", gpu::gsp_phase());
+            crate::drivers::fatlog::flush_checkpoint();
         }
         if modes.iwlwifi {
             let rc = wifi::init();
             crate::println!("lxdde: iwlwifi register rc={rc}");
+            crate::drivers::fatlog::flush_checkpoint();
+        }
+        if modes.ath11k {
+            let rc = lx_ath11k_init_module();
+            crate::println!("lxdde: ath11k register rc={rc}");
         }
     }
 
@@ -95,6 +125,18 @@ pub fn init(modes: LxddeModes) {
             "lxdde: iwlwifi start rc={rc} phase={} alive={}",
             wifi::phase(),
             wifi::alive()
+        );
+        crate::drivers::fatlog::flush_checkpoint();
+    }
+
+    // El transporte MHI necesita el bus ya enumerado: va después de pci::init.
+    if modes.ath11k {
+        let rc = unsafe { lx_ath11k_start() };
+        let fase = unsafe { core::ffi::CStr::from_ptr(lx_ath11k_phase()) };
+        crate::println!(
+            "lxdde: ath11k start rc={rc} fase={} alive={}",
+            fase.to_str().unwrap_or("?"),
+            unsafe { lx_ath11k_alive() }
         );
     }
 

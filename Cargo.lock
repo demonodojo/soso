@@ -717,6 +717,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "soso-hw"
+version = "0.1.0"
+
+[[package]]
 name = "soso-llm-core"
 version = "0.1.0"
 dependencies = [

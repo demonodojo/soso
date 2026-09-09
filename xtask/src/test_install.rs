@@ -36,9 +36,17 @@ pub fn run() {
     std::fs::create_dir_all(&dir).expect("target/test-install");
 
     // El live tiene que existir y llevar SOSOBOOT.TXT: siempre se reempaqueta.
+    // Imagen mínima (256M modelos): tiny + whisper caben; qwen3.8-27b no.
+    let _tiny = crate::live_models::ensure_tiny(&root);
     unsafe {
         std::env::set_var("SOSO_QEMU_LIVE", "1");
         std::env::set_var("SOSO_QEMU_LIVE_USB", "1");
+        if std::env::var_os("SOSO_MODELS_DIR").is_none() {
+            std::env::set_var("SOSO_MODELS_DIR", root.join("target/tiny-model"));
+        }
+        if std::env::var_os("SOSO_MODELS_SIZE").is_none() {
+            std::env::set_var("SOSO_MODELS_SIZE", "256M");
+        }
     }
     crate::package_live::run();
     let live = crate::package_live::live_image_path();

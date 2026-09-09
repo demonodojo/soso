@@ -53,8 +53,9 @@
 
 #include "gsp_dma.h"
 #include "gsp_rm_obj.h"
+#include "gsp_vram.h"
 
-#define GSP_VMM_LEVELS   6u
+#define GSP_VMM_LEVELS   6u   /* máximo (VER3); Ampere usa 5 */
 /* Tablas vivas a la vez. Con PTEs de 4 KiB cada hoja cubre 2 MiB. G4d/G4e
  * bastaban con ~13 tablas; la promoción del grctx de gb205 (~56 MiB, solo
  * ATTRIBUTE_CB ~51552 KiB ≈ 26 hojas) suma ~29 más → ~42 en total. El pool de
@@ -96,6 +97,12 @@ struct gsp_vmm_pt {
     uint64_t cover;         /* VA que cubre la entrada 0 de esta tabla */
     unsigned level;
     int used;
+    int in_vram;            /* mem.phys es offset FB; CPU accede vía PRAMIN */
+};
+
+enum gsp_vmm_fmt {
+    GSP_VMM_FMT_GP100 = 0,  /* Ampere/Ada: tu102_vmm, raíz 4 entradas */
+    GSP_VMM_FMT_VER3  = 1,  /* Hopper/Blackwell: gh100, raíz 2 entradas */
 };
 
 struct gsp_vmm {
@@ -104,8 +111,13 @@ struct gsp_vmm {
     struct gsp_vmm_pt pt[GSP_VMM_MAX_PT];
     unsigned pt_nr;
     unsigned pages_mapped;
+    enum gsp_vmm_fmt fmt;
+    unsigned num_levels;    /* 5 gp100, 6 VER3 */
+    unsigned va_bits;       /* 49 Ampere, 57 Blackwell */
+    unsigned root_entries;  /* numEntries de SET_PAGE_DIRECTORY */
     int bound;              /* RM aceptó el directorio */
     int ready;
+    struct gsp_vram *vram_pool; /* no es dueño; libera raíz en VRAM al fini */
 };
 
 /* Cliente + device + subdevice + `FERMI_VASPACE_A` + directorio raíz, y el
@@ -113,7 +125,8 @@ struct gsp_vmm {
  * cliente **propio** (`r535_mmu_vaspace_new` llama a `nvkm_gsp_client_device_ctor`
  * en vez de reutilizar el del GSP); los handles van por cliente, así que el
  * device vuelve a ser 0xde1d0000 sin chocar con el de G4c. */
-int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v);
+int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v,
+                 struct gsp_vram *vram_pool);
 
 /* Vaspace sin RM: sólo el directorio raíz. Para BAR1, que entrega su directorio
  * por el bloque de instancia de la apertura y no por `SET_PAGE_DIRECTORY`. */

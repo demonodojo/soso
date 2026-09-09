@@ -690,29 +690,22 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     iwl->cmd_resp_len = 0;
     iwl->cmd_pending_seq = (uint16_t)(QUEUE_TO_SEQ(iwl->cmd_qid) | INDEX_TO_SEQ(slot));
 
-    if (group != LEGACY_GROUP) {
+    /* Gen2/Gen3: siempre cabecera wide (Linux `pcie/tx-gen2.c`), también grupo 0
+     * (TX_ANT, SF, PHY_CONTEXT). La ruta legacy de 4 B dejaba al FW sordo tras SF. */
+    {
         struct iwl_cmd_header_wide *whdr = (struct iwl_cmd_header_wide *)buf;
+
         total = (uint16_t)(sizeof(*whdr) + pay_len);
         if (total > IWL_CMD_SLOT_SIZE)
             return -1;
         whdr->cmd = id;
         whdr->group_id = group;
         whdr->sequence = iwl->cmd_pending_seq;
-        whdr->length = pay_len;
+        whdr->length = iwl_cpu_to_le16(pay_len);
+        whdr->reserved = 0;
         whdr->version = (uint8_t)iwl_fw_cmd_ver(iwl, group, id);
         if (pay_len)
             memcpy(buf + sizeof(*whdr), payload, pay_len);
-    } else {
-        struct iwl_cmd_header *hdr = (struct iwl_cmd_header *)buf;
-        total = (uint16_t)(sizeof(*hdr) + pay_len);
-        if (total > 240)
-            return -1;
-        hdr->cmd = id;
-        hdr->group_id = group;
-        hdr->sequence = iwl->cmd_pending_seq;
-        hdr->length = (uint8_t)pay_len;
-        if (pay_len)
-            memcpy(buf + sizeof(*hdr), payload, pay_len);
     }
 
     tfd->num_tbs = 1;

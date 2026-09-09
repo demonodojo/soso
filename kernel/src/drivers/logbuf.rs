@@ -42,8 +42,10 @@ impl LogBuf {
         (self.pos + CAP - self.len) % CAP
     }
 
-    /// Copia hasta `max` bytes desde `offset` lógico (0 = más antiguo) a `out`.
-    /// Devuelve cuántos bytes se copiaron.
+    pub(crate) fn byte_len(&self) -> usize {
+        self.len
+    }
+
     fn copy_from(&self, offset: usize, out: &mut [u8]) -> usize {
         if offset >= self.len || out.is_empty() {
             return 0;
@@ -81,13 +83,43 @@ pub fn len() -> usize {
     BUF.lock().len
 }
 
+/// Copia el ring completo en `dest` bajo un solo lock.
+/// Devuelve `(bytes_en_ring, bytes_escritos_en_dest)`.
+pub fn copy_log_into(dest: &mut [u8]) -> (usize, usize) {
+    with_read(|log| {
+        let log_len = log.byte_len();
+        let mut off = 0usize;
+        let mut pos = 0usize;
+        let mut chunk = [0u8; 4096];
+        while off < log_len && pos < dest.len() {
+            let want = chunk.len().min(log_len - off).min(dest.len() - pos);
+            let nc = log.copy_from(off, &mut chunk[..want]);
+            if nc == 0 {
+                break;
+            }
+            dest[pos..pos + nc].copy_from_slice(&chunk[..nc]);
+            pos += nc;
+            off += nc;
+        }
+        (log_len, pos)
+    })
+}
+
+/// Lee el ring bajo un solo lock (sin capturar `print!` durante la copia).
+fn with_read<R>(f: impl FnOnce(&LogBuf) -> R) -> R {
+    // Igual que `_print`: evita que una IRQ intercale bytes mientras copiamos.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        QUIET.store(true, Ordering::Relaxed);
+        let b = BUF.lock();
+        let r = f(&b);
+        QUIET.store(false, Ordering::Relaxed);
+        r
+    })
+}
+
 /// Copia una ventana del log a `out` (offset 0 = byte más antiguo).
-/// No mantiene el lock fuera de la copia; el llamante escribe a consola después.
 pub fn copy_from(offset: usize, out: &mut [u8]) -> usize {
-    QUIET.store(true, Ordering::Relaxed);
-    let n = BUF.lock().copy_from(offset, out);
-    QUIET.store(false, Ordering::Relaxed);
-    n
+    with_read(|log| log.copy_from(offset, out))
 }
 
 /// Ejecuta `f` sin capturar sus `print!` en el ring (p. ej. volcado FAT).

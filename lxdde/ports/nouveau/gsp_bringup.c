@@ -623,7 +623,7 @@ static int run_vmm_stage(void)
     if (gsp_dma_alloc(&g_scratch, 4096, "página de rebote de G4d") != 0) {
         return -1;
     }
-    if (gsp_vmm_init(&g_cmdq, &g_rpc, &g_vmm) != 0) {
+    if (gsp_vmm_init(&g_cmdq, &g_rpc, &g_vmm, &g_vram_pool) != 0) {
         return -1;
     }
     if (gsp_vmm_map(&g_vmm, G4D_VA_BASE, g_vram_block, G4D_VRAM_BYTES,
@@ -954,6 +954,7 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
               boot0, gsp_nv_family_device_id(),
               gsp_nv_family_name(gsp_nv_family_of(boot0, gsp_nv_family_device_id())),
               (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
+    lx_fatlog_flush();
 
     if (!gsp_mmio_alive()) {
         g_phase = GSP_GONE;

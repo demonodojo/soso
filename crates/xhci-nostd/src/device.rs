@@ -603,7 +603,12 @@ impl ParsedConfiguration {
 
     /// Find the first HID keyboard interface (class=3, subclass=1, protocol=1).
     /// Returns (interface_number, interrupt IN endpoint).
-    pub fn find_hid_keyboard(&self) -> Option<(u8, &EndpointDescriptor)> {
+    /// Primera interfaz HID que puede dar teclas, con su endpoint interrupt IN.
+    ///
+    /// Devuelve además si declara la subclase Boot: quien la configure debe
+    /// saberlo para no mandar SET_PROTOCOL a un HID que sólo habla report
+    /// protocol.
+    pub fn find_hid_keyboard(&self) -> Option<(u8, bool, &EndpointDescriptor)> {
         for iface in &self.interfaces {
             if iface.b_alternate_setting != 0 || !iface.is_hid_keyboard_candidate() {
                 continue;
@@ -631,7 +636,11 @@ impl ParsedConfiguration {
                         ep.w_max_packet_size,
                         ep.b_interval,
                     );
-                    return Some((iface.b_interface_number, ep));
+                    return Some((
+                        iface.b_interface_number,
+                        iface.is_hid_boot_keyboard(),
+                        ep,
+                    ));
                 }
             }
 

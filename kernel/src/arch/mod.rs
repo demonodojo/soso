@@ -4,6 +4,7 @@ pub mod fpu;
 pub mod gdt;
 pub mod interrupts;
 pub mod ioapic;
+pub mod iommu;
 pub mod irq;
 pub mod percpu;
 pub mod pit;

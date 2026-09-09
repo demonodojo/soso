@@ -67,8 +67,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     if let Some((start, info)) = fb {
         drivers::fb::init(start, info);
-        if let Some((w, h, mapped_h, stride, bpp, scale)) = drivers::fb::info_log() {
-            println!("fb: {w}x{h} mapped_h={mapped_h} stride={stride} bpp={bpp} scale={scale}");
+        if let Some((w, h, mapped_h, stride, bpp, cell)) = drivers::fb::info_log() {
+            println!("fb: {w}x{h} mapped_h={mapped_h} stride={stride} bpp={bpp} cell={cell}px");
+        }
+        if let Some((grados, lw, lh)) = drivers::fb::rot_log() {
+            println!("fb: rot={grados} consola {lw}x{lh}");
         }
     }
 
@@ -120,6 +123,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     arch::rtc::init();
 
+    // Antes de PCI y de cualquier DMA: si el firmware dejó el IOMMU AMD-Vi
+    // traduciendo, los descriptores que programemos se abortarían en silencio.
+    println!("boot: iommu");
+    arch::iommu::init();
+
     println!("boot: pci");
     drivers::pci::init_ecam();
     drivers::pci::init();
@@ -151,6 +159,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("boot: kbd");
     drivers::kbd::init();
     drivers::mouse::init();
+    #[cfg(feature = "drv-live-disk")]
+    drivers::fatlog::flush_checkpoint();
     #[cfg(feature = "drv-hda")]
     {
         println!("boot: hda");
@@ -160,6 +170,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // (`lx_request_firmware` → `/lib/firmware/…`) y sin montar falla en fw_loading.
     println!("boot: fs");
     fs::init();
+    #[cfg(feature = "drv-live-disk")]
+    drivers::fatlog::flush_checkpoint();
     println!("boot: ethernet");
     #[cfg(feature = "lxdde")]
     {
@@ -180,6 +192,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     #[cfg(all(not(feature = "lxdde"), feature = "drv-e1000e"))]
     let _ = drivers::e1000e::init();
+    #[cfg(feature = "drv-live-disk")]
+    drivers::fatlog::flush_checkpoint();
     #[cfg(feature = "drv-gpu-nvidia")]
     {
         println!("boot: gpu");
@@ -187,10 +201,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         drivers::nvidia_probe::init();
         drivers::nvidia_compute::init();
     }
+    #[cfg(feature = "drv-live-disk")]
+    drivers::fatlog::flush_checkpoint();
     #[cfg(feature = "drv-rtl8169")]
     let _ = drivers::rtl8169::init();
     println!("boot: red");
     net::init();
+    #[cfg(feature = "drv-live-disk")]
+    drivers::fatlog::flush_checkpoint();
     #[cfg(feature = "lxdde")]
     if lxdde_modes().iwlwifi && crate::lxdde::wifi_alive() {
         let rc = net::wifi_wpa::autoconnect();
@@ -214,6 +232,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     #[cfg(not(feature = "drv-live-disk"))]
     drivers::registry::print_hwscan();
     println!("boot: task");
+    #[cfg(feature = "drv-live-disk")]
+    drivers::fatlog::flush_checkpoint();
     task::init();
 
     // Si hay un init de usuario, arranca en ring 3; si no, kernel-shell.

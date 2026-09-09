@@ -14,7 +14,7 @@ use crate::context::{
 use crate::device::{
     alloc_dma_buffer, read_dma_buffer, DeviceDescriptor, EndpointDescriptor,
     ParsedConfiguration, UsbDevice, UsbSpeed,
-    USB_DESC_CONFIGURATION, USB_DESC_DEVICE, USB_DESC_HUB,
+    USB_DESC_CONFIGURATION, USB_DESC_DEVICE, USB_DESC_HID_REPORT, USB_DESC_HUB,
     USB_DIR_IN, USB_DIR_OUT, USB_RECIP_DEVICE, USB_RECIP_INTERFACE,
     USB_REQ_GET_DESCRIPTOR, USB_REQ_GET_STATUS, USB_REQ_SET_CONFIGURATION,
     USB_TYPE_CLASS, USB_TYPE_STANDARD,
@@ -109,6 +109,37 @@ pub struct XhciController {
     ignored_ports: u32,
     /// Slot activo por puerto root (0 = libre).
     root_port_slot: Vec<u8>,
+    /// Inventario de lo enumerado, para el informe de hardware.
+    inventory: Vec<UsbDevInfo>,
+}
+
+/// Una interfaz vista durante la enumeración.
+#[derive(Clone, Debug)]
+pub struct UsbIfaceInfo {
+    pub number: u8,
+    pub alt: u8,
+    pub class: u8,
+    pub subclass: u8,
+    pub protocol: u8,
+    /// Report descriptor crudo de una interfaz HID, si se pudo leer.
+    ///
+    /// Es el dato que hace falta para entender un HID que no habla el
+    /// protocolo boot — el mando de la Steam Deck, por ejemplo. Sin puerto
+    /// serie, volcarlo al informe del USB es la única forma de verlo.
+    pub report_desc: Vec<u8>,
+}
+
+/// Un dispositivo USB enumerado.
+#[derive(Clone, Debug)]
+pub struct UsbDevInfo {
+    pub slot: u8,
+    pub root_port: u8,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub class: u8,
+    pub subclass: u8,
+    pub protocol: u8,
+    pub ifaces: Vec<UsbIfaceInfo>,
 }
 
 /// Keyboard-specific state bundled together.
@@ -295,6 +326,7 @@ impl XhciController {
             devices,
             transfer_rings,
             keyboards: Vec::new(),
+            inventory: Vec::new(),
             pending_transfers: Vec::new(),
             boot_ccs_mask,
             mass_storage: None,
@@ -924,7 +956,7 @@ impl XhciController {
 
         let keyboard_info = parsed_config
             .find_hid_keyboard()
-            .map(|(iface_num, ep)| (iface_num, ep.clone()));
+            .map(|(iface_num, boot, ep)| (iface_num, boot, ep.clone()));
 
         let config_val = parsed_config.config.b_configuration_value;
         let needs_config = parsed_config.needs_full_config(&dev_desc, keyboard_info.is_some());
@@ -958,12 +990,17 @@ impl XhciController {
             return;
         }
 
-        if let Some((iface_num, ref ep_desc)) = keyboard_info {
+        // Inventario + report descriptors: sólo tiene sentido con el
+        // dispositivo ya configurado, y es lo que hará legible un HID ajeno al
+        // protocolo boot cuando se lea el informe del USB.
+        self.registrar_inventario(slot_id, path.root_port, &dev_desc, &parsed_config);
+
+        if let Some((iface_num, boot, ref ep_desc)) = keyboard_info {
             log::info!(
-                "xhci: setting up HID keyboard on slot={} interface={}",
-                slot_id, iface_num
+                "xhci: setting up HID keyboard on slot={} interface={} boot={}",
+                slot_id, iface_num, boot
             );
-            self.setup_keyboard(slot_id, iface_num, ep_desc);
+            self.setup_keyboard(slot_id, iface_num, boot, ep_desc);
         }
 
         if parsed_config.is_mass_storage()
@@ -1543,21 +1580,135 @@ impl XhciController {
     }
 
     // -----------------------------------------------------------------------
+    // Inventario USB
+    // -----------------------------------------------------------------------
+
+    /// Lo enumerado en este controlador, con los report descriptors leídos.
+    pub fn inventory(&self) -> &[UsbDevInfo] {
+        &self.inventory
+    }
+
+    /// Anota un dispositivo ya configurado y le pide los report descriptors.
+    fn registrar_inventario(
+        &mut self,
+        slot_id: u8,
+        root_port: u8,
+        dev_desc: &DeviceDescriptor,
+        config: &ParsedConfiguration,
+    ) {
+        let mut ifaces = Vec::new();
+        for iface in &config.interfaces {
+            let report_desc = if iface.is_hid() && iface.b_alternate_setting == 0 {
+                let len = config
+                    .hid_descriptors
+                    .iter()
+                    .find(|(n, _)| *n == iface.b_interface_number)
+                    .map(|(_, h)| h.report_descriptor_length)
+                    .unwrap_or(0);
+                if len > 0 {
+                    self.get_hid_report_descriptor(slot_id, iface.b_interface_number, len)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            ifaces.push(UsbIfaceInfo {
+                number: iface.b_interface_number,
+                alt: iface.b_alternate_setting,
+                class: iface.b_interface_class,
+                subclass: iface.b_interface_sub_class,
+                protocol: iface.b_interface_protocol,
+                report_desc,
+            });
+        }
+        self.inventory.push(UsbDevInfo {
+            slot: slot_id,
+            root_port,
+            vendor_id: dev_desc.id_vendor,
+            product_id: dev_desc.id_product,
+            class: dev_desc.b_device_class,
+            subclass: dev_desc.b_device_sub_class,
+            protocol: dev_desc.b_device_protocol,
+            ifaces,
+        });
+    }
+
+    /// GET_DESCRIPTOR(Report) de una interfaz HID.
+    ///
+    /// Petición estándar dirigida a la interfaz (USB HID 1.11, 7.1.1), la misma
+    /// que `hid_read_report_descriptor` en `usbhid/hid-core.c`.
+    fn get_hid_report_descriptor(
+        &mut self,
+        slot_id: u8,
+        iface: u8,
+        len: u16,
+    ) -> Option<Vec<u8>> {
+        // Un report descriptor honesto no pasa de unos cientos de bytes; el
+        // tope evita que un valor absurdo del dispositivo pida un DMA enorme.
+        let len = len.min(4096);
+        let (va, phys) = unsafe { alloc_dma_buffer(len as usize) };
+        let ring = self.transfer_rings[slot_id as usize][1].as_mut()?;
+        let handles = ring.enqueue_control_transfer(
+            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE,
+            USB_REQ_GET_DESCRIPTOR,
+            (USB_DESC_HID_REPORT as u16) << 8,
+            iface as u16,
+            phys,
+            len,
+        );
+        self.db.ring_endpoint(slot_id, 1);
+
+        let evt = self.wait_transfer_event(slot_id, Some(handles.status_trb_phys))?;
+        if evt.completion_code() != TRB_COMPLETION_SUCCESS
+            && evt.completion_code() != TRB_COMPLETION_SHORT_PACKET
+        {
+            log::info!(
+                "xhci: GET_DESCRIPTOR(Report) iface={iface} slot={slot_id} code={}",
+                evt.completion_code()
+            );
+            return None;
+        }
+        let datos = unsafe { read_dma_buffer(va, len as usize) };
+        log::info!(
+            "xhci: report descriptor slot={slot_id} iface={iface}: {} bytes",
+            datos.len()
+        );
+        Some(datos)
+    }
+
     // HID Keyboard setup
     // -----------------------------------------------------------------------
 
     /// Set up a HID keyboard: SET_PROTOCOL(Boot), SET_IDLE, start interrupt transfers.
-    fn setup_keyboard(&mut self, slot_id: u8, iface_num: u8, ep_desc: &EndpointDescriptor) {
+    ///
+    /// `boot` indica si la interfaz declara la subclase Boot (bInterfaceSubClass
+    /// == 1). Linux sólo manda SET_PROTOCOL en ese caso (`usbhid_start` en
+    /// `drivers/hid/usbhid/hid-core.c`): un HID que sólo habla report protocol
+    /// —el mando de la Steam Deck emulando teclado, por ejemplo— puede
+    /// contestar STALL, y ese STALL deja el endpoint 0 en un estado del que no
+    /// merece la pena salir por una petición que además no le hace falta.
+    fn setup_keyboard(
+        &mut self,
+        slot_id: u8,
+        iface_num: u8,
+        boot: bool,
+        ep_desc: &EndpointDescriptor,
+    ) {
         let dci = ep_desc.dci();
 
         log::info!(
-            "xhci: keyboard setup: slot={} iface={} ep_addr={:#x} dci={} max_pkt={}",
-            slot_id, iface_num, ep_desc.b_endpoint_address, dci, ep_desc.w_max_packet_size
+            "xhci: keyboard setup: slot={} iface={} ep_addr={:#x} dci={} max_pkt={} boot={}",
+            slot_id, iface_num, ep_desc.b_endpoint_address, dci, ep_desc.w_max_packet_size, boot
         );
 
-        // SET_PROTOCOL(Boot Protocol = 0)
+        // SET_PROTOCOL(Boot Protocol = 0) — sólo si la interfaz lo soporta.
         log::debug!("xhci: SET_PROTOCOL(Boot) on interface {}", iface_num);
-        if let Some(ring) = self.transfer_rings[slot_id as usize][1].as_mut() {
+        if let Some(ring) = self.transfer_rings[slot_id as usize][1]
+            .as_mut()
+            .filter(|_| boot)
+        {
             let handles = ring.enqueue_control_transfer(
                 USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
                 HID_REQ_SET_PROTOCOL,

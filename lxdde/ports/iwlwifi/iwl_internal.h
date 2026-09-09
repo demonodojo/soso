@@ -49,6 +49,8 @@
 #define RFH_Q0_FRBDCB_WIDX_TRG       0x1C80
 #define IWL_PCI_AX200                0x2723u
 #define IWL_MVM_DQA_CMD_QUEUE        0
+#define DQA_ENABLE_CMD               0x0
+#define IWL_MVM_HCMD_TIMEOUT_MS      2000
 #define IWL_GEN2_RX_N                32
 #define IWL_GEN2_RX_SZ               4096
 #define IWL_TFH_TFD_SIZE             256
@@ -131,6 +133,16 @@
 #define SCAN_REQ_UMAC              0xd
 #define SCAN_COMPLETE_UMAC         0x0f
 #define OFFLOAD_MATCH_INFO_NOTIF   0xfc
+
+static inline uint32_t iwl_cpu_to_le32(uint32_t v)
+{
+    return v;
+}
+
+static inline uint16_t iwl_cpu_to_le16(uint16_t v)
+{
+    return v;
+}
 
 #define LEGACY_GROUP               0x0
 #define LONG_GROUP                 0x1
@@ -578,6 +590,12 @@ struct iwl_tx_ant_cfg_cmd {
     uint32_t valid;
 } __attribute__((packed));
 
+struct iwl_dqa_enable_cmd {
+    uint32_t cmd_queue;
+} __attribute__((packed));
+
+#define PHY_CONTEXT_CMD            0x08
+
 struct iwl_mcc_update_cmd {
     uint16_t mcc;
     uint8_t source_id;
@@ -712,9 +730,12 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
 int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                             const void *payload, uint16_t pay_len, int wait_ms);
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl);
+int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl);
+uint8_t iwl_mvm_scan_rx_ant(struct iwl_ax211_priv *iwl);
 int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl);
 int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl);
 int iwl_mvm_send_tx_ant_cfg(struct iwl_ax211_priv *iwl);
+int iwl_mvm_send_scan_cfg(struct iwl_ax211_priv *iwl);
 int iwl_mvm_init_mcc(struct iwl_ax211_priv *iwl);
 uint8_t iwl_mvm_valid_tx_ant(struct iwl_ax211_priv *iwl);
 uint8_t iwl_mvm_valid_rx_ant(struct iwl_ax211_priv *iwl);

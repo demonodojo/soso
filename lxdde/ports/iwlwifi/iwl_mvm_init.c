@@ -21,7 +21,6 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
 {
     struct iwl_init_extended_cfg_cmd init_cfg;
     struct iwl_nvm_access_complete_cmd nvm_done;
-    struct iwl_phy_cfg_cmd_v1 phy_cfg;
     int t;
 
     if (!iwl->alive) {
@@ -51,19 +50,9 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
-    /* Linux `iwl_run_unified_mvm_ucode`: ucode unificado no manda PHY_CONFIGURATION
-     * salvo tx_with_siso_diversity; AX200 (gen2) omite PHY_CFG. */
-    if (iwl->gen3) {
-        memset(&phy_cfg, 0, sizeof(phy_cfg));
-        phy_cfg.phy_cfg = iwl->phy_sku ? iwl->phy_sku : 0x330018u;
-        if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_CONFIGURATION_CMD, &phy_cfg,
-                                    (uint16_t)sizeof(phy_cfg), 500) != 0) {
-            lx_printk("iwl_mvm: PHY_CONFIGURATION falló\n");
-            return -1;
-        }
-    } else {
-        phy_cfg.phy_cfg = iwl->phy_sku ? iwl->phy_sku : 0x330018u;
-    }
+    /* Linux `iwl_send_phy_cfg_cmd` (fw.c:539): ucode unificado sin SISO no manda
+     * PHY_CFG — AX200/AX211 son familia 22000. Tras NVM_ACCESS_COMPLETE el FW
+     * puede haber enviado INIT_COMPLETE ya (RX drenado en send_cmd_wait). */
 
     if (!iwl->init_complete) {
         for (t = 0; t < 600; t++) {
@@ -86,17 +75,9 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
         lx_printk("iwl_mvm: MAC NVM no disponible (se mantiene BDF)\n");
     }
 
-    /* `iwl_mvm_up`: TX ant antes de scan/config (unificado incluido). */
-    if (iwl_mvm_send_tx_ant_cfg(iwl) != 0) {
-        lx_printk("iwl_mvm: TX ant no configurada — sigue\n");
-    }
-
-    if (iwl_mvm_init_mcc(iwl) != 0) {
-        lx_printk("iwl_mvm: MCC no aplicado — sigue\n");
-    }
-
-    lx_printk("iwl_mvm: radio lista (phy=0x%08x n_scan=%u tx=0x%x rx=0x%x)\n",
-              phy_cfg.phy_cfg, (unsigned)iwl->n_scan_channels,
+    /* TX_ANT / MCC / SCAN_CFG van en `iwl_mvm_up_minimal` (post shared mem + SF). */
+    lx_printk("iwl_mvm: init NVM listo (phy_sku=0x%08x n_scan=%u tx=0x%x rx=0x%x)\n",
+              (unsigned)iwl->phy_sku, (unsigned)iwl->n_scan_channels,
               (unsigned)iwl_mvm_valid_tx_ant(iwl),
               (unsigned)iwl_mvm_valid_rx_ant(iwl));
     return 0;

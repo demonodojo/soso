@@ -13,28 +13,23 @@ use crate::vfs;
 const PATH: &str = "/etc/soso-hw";
 const MAGIC: &str = "soso-hw 1";
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct PciEntry {
-    bus: u8,
-    device: u8,
-    function: u8,
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PciId {
     vid: u16,
     did: u16,
 }
 
-fn pci_entries() -> Vec<PciEntry> {
-    let mut out: Vec<PciEntry> = pci::devices()
-        .iter()
-        .map(|d| PciEntry {
-            bus: d.bus,
-            device: d.device,
-            function: d.function,
+fn pci_id_counts() -> alloc::vec::Vec<(PciId, u32)> {
+    use alloc::collections::BTreeMap;
+    let mut map: BTreeMap<PciId, u32> = BTreeMap::new();
+    for d in pci::devices() {
+        *map.entry(PciId {
             vid: d.vendor_id,
             did: d.device_id,
         })
-        .collect();
-    out.sort();
-    out
+        .or_insert(0) += 1;
+    }
+    map.into_iter().collect()
 }
 
 fn ncpu_actual() -> u32 {
@@ -44,14 +39,15 @@ fn ncpu_actual() -> u32 {
 /// Texto del inventario actual (PCI + ncpu).
 pub fn serializar() -> String {
     let ncpu = ncpu_actual();
-    let entries = pci_entries();
+    let mut devs: Vec<_> = pci::devices().iter().collect();
+    devs.sort_by_key(|d| (d.bus, d.device, d.function));
     let mut out = String::new();
     let _ = write!(out, "{MAGIC}\nncpu {ncpu}\n");
-    for e in entries {
+    for d in devs {
         let _ = write!(
             out,
             "pci {:02x}:{:02x}.{} {:04x}:{:04x}\n",
-            e.bus, e.device, e.function, e.vid, e.did
+            d.bus, d.device, d.function, d.vendor_id, d.device_id
         );
     }
     out
@@ -60,7 +56,7 @@ pub fn serializar() -> String {
 #[derive(Default)]
 struct Parsed {
     ncpu: Option<u32>,
-    pci: Vec<PciEntry>,
+    pci: alloc::collections::BTreeMap<PciId, u32>,
     force: bool,
 }
 
@@ -105,25 +101,23 @@ fn parse(text: &str) -> Option<Parsed> {
             let mut parts = rest.split_whitespace();
             let bdf = parts.next()?;
             let ids = parts.next()?;
-            let (bus, device, function) = parse_bdf(bdf)?;
+            let (_bus, _device, _function) = parse_bdf(bdf)?;
             let (vid, did) = parse_vid_did(ids)?;
-            p.pci.push(PciEntry {
-                bus,
-                device,
-                function,
-                vid,
-                did,
-            });
+            *p.pci
+                .entry(PciId { vid, did })
+                .or_insert(0) += 1;
         }
     }
     if saw_magic {
-        p.pci.sort();
         Some(p)
     } else {
         None
     }
 }
 
+/// El bus actual encaja con el inventario guardado: mismos `ncpu` y, por cada
+/// `(vid,did)`, no más apariciones que en el fichero. Quita el pendrive o un
+/// disco de prueba no fuerza hwscan; un dispositivo nuevo sí.
 fn coincide(text: &str) -> bool {
     let Some(parsed) = parse(text) else {
         return false;
@@ -137,7 +131,12 @@ fn coincide(text: &str) -> bool {
     if ncpu != ncpu_actual() {
         return false;
     }
-    pci_entries() == parsed.pci
+    for (id, n) in pci_id_counts() {
+        if parsed.pci.get(&id).copied().unwrap_or(0) < n {
+            return false;
+        }
+    }
+    true
 }
 
 fn leer() -> Option<String> {

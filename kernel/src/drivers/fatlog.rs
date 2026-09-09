@@ -9,6 +9,8 @@ use spin::Once;
 const FILE_SIZE: usize = 256 * 1024;
 const CHUNK: usize = 128 * 1024;
 const POLL_MS: u64 = 2000;
+/// Reserva fija para la cabecera de flush (ver `format_header`).
+const HDR_SLOT: usize = 160;
 
 static SLOT: Once<Option<Slot>> = Once::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -46,6 +48,13 @@ pub fn init() {
 fn flush_or_warn() {
     if flush().is_err() {
         crate::println!("fatlog: aviso: flush a SOSOLOG.TXT falló");
+    }
+}
+
+/// Volcado inmediato si fatlog está activo (checkpoints de arranque).
+pub fn flush_checkpoint() {
+    if ACTIVE.load(Ordering::Relaxed) {
+        flush_or_warn();
     }
 }
 
@@ -107,7 +116,6 @@ pub fn flush() -> Result<(), ()> {
         return Err(());
     }
     let slot = SLOT.get().and_then(|s| *s).ok_or(())?;
-    let log_len = crate::drivers::logbuf::len();
     let n = FLUSH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     let uptime = crate::arch::tsc::uptime_ms();
 
@@ -115,23 +123,22 @@ pub fn flush() -> Result<(), ()> {
     let buf =
         unsafe { core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(BUF).cast(), FILE_SIZE) };
 
-    let mut hdr = [0u8; 160];
-    let hlen = format_header(&mut hdr, n, uptime, log_len);
-    let copy = hlen.min(buf.len());
-    buf[..copy].copy_from_slice(&hdr[..copy]);
-    let mut pos = copy;
+    // Una sola toma del lock: evita perder el final de la última línea si una IRQ
+    // escribe en logbuf entre lecturas sueltas (checkpoints de arranque).
+    let (log_len, body_copied) = crate::drivers::logbuf::copy_log_into(&mut buf[HDR_SLOT..]);
 
-    let mut off = 0usize;
-    let mut tmp = [0u8; 4096];
-    while off < log_len && pos < FILE_SIZE {
-        let n = crate::drivers::logbuf::copy_from(off, &mut tmp);
-        if n == 0 {
-            break;
-        }
-        let take = n.min(FILE_SIZE - pos);
-        buf[pos..pos + take].copy_from_slice(&tmp[..take]);
-        pos += take;
-        off += n;
+    let mut hdr = [0u8; HDR_SLOT];
+    let hlen = format_header(&mut hdr, n, uptime, log_len).min(HDR_SLOT);
+    buf[..hlen].copy_from_slice(&hdr[..hlen]);
+    if hlen < HDR_SLOT {
+        buf[hlen..HDR_SLOT].fill(b'\n');
+    }
+
+    let pos = HDR_SLOT + body_copied;
+    // Sin esto quedan restos del volcado anterior y parece que la última línea
+    // está cortada o hay texto fantasma tras un checkpoint.
+    if pos < FILE_SIZE {
+        buf[pos..FILE_SIZE].fill(b'\n');
     }
 
     let write_ok = crate::drivers::logbuf::run_without_capture(|| {
@@ -181,4 +188,9 @@ fn format_header(out: &mut [u8], flush_n: u32, uptime_ms: u64, log_len: usize) -
          kbd sc={sc} ultimo={ultimo:#04x} enc={enc} ent={ent} ===\n"
     );
     w.pos
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lx_fatlog_flush() {
+    flush_checkpoint();
 }

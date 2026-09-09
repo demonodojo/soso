@@ -2,7 +2,21 @@
 //!
 //! Buffer de texto de hasta 240×135 celdas (recortado a la resolución real).
 //! Decodifica UTF-8 con estado (eco byte a byte desde userspace) y pinta un
-//! glifo 8×8 por carácter Unicode (ASCII + Latin-1 + €).
+//! glifo 8×8 o 12×12 por carácter Unicode (ASCII + Latin-1 + €), según
+//! resolución.
+//!
+//! # Rotación
+//!
+//! Hay dos sistemas de coordenadas. El *lógico* es donde vive la consola: es
+//! el que usan las celdas de texto y donde el shadow buffer guarda los píxeles.
+//! El *físico* es el buffer del GOP. En un panel normal coinciden; en uno
+//! montado girado (Steam Deck: 800×1280 vertical nativo) el volcado aplica la
+//! rotación de `soso_hw::fbrot`.
+//!
+//! El volcado recorre **líneas físicas**, no lógicas: leer del shadow con
+//! salto es barato porque está en RAM cacheada, mientras que escribir al GOP
+//! salteado sería carísimo sobre memoria WC/UC. Con esa orientación, una
+//! pantalla rotada cuesta lo mismo que el `memcpy` que ya hacía el scroll.
 
 use alloc::vec::Vec;
 use bootloader_api::info::{FrameBufferInfo, PixelFormat};
@@ -10,7 +24,11 @@ use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 use font8x8::legacy::{BASIC_LEGACY, LATIN_LEGACY};
 use soso_abi::{FbInfo, FB_FMT_BGR, FB_FMT_RGB, FB_FMT_U8};
+use soso_hw::fbrot::{self, Rot};
 use spin::Mutex;
+
+#[path = "font12x12.rs"]
+mod font12x12;
 
 const CELL_SPACE: u16 = b' ' as u16;
 
@@ -106,18 +124,27 @@ fn decode_utf8(bytes: &[u8]) -> u16 {
 
 struct FbState {
     ptr: *mut u8,
-    /// Copia en RAM del FB visible: el scroll hace memmove aquí y luego
-    /// escribe al GOP (sin leer la VRAM del firmware AMD/UEFI).
+    /// Copia en RAM de la consola, en **coordenadas lógicas**: aquí se pinta
+    /// todo y de aquí sale el volcado al GOP (nunca se lee la VRAM del
+    /// firmware AMD/UEFI). El scroll es un memmove sobre este buffer.
     shadow: Vec<u8>,
     info: FrameBufferInfo,
     mapped_height: usize,
+    /// Rotación aplicada al volcar el shadow al GOP.
+    rot: Rot,
+    /// Dimensiones lógicas: `info.width`×`mapped_height` traspuestas si rota.
+    log_w: usize,
+    log_h: usize,
     row: usize,
     col: usize,
-    scale: usize,
     cell_w: usize,
     cell_h: usize,
+    glyph_w: usize,
+    glyph_h: usize,
     text: Vec<[u16; COLS]>,
     rowbuf: Vec<u8>,
+    /// Una línea física, para volcar rotado con escrituras secuenciales.
+    linebuf: Vec<u8>,
     utf8: Utf8Acc,
 }
 
@@ -163,6 +190,108 @@ unsafe fn copy_to_gop(dst: *mut u8, src: *const u8, mut n: usize) {
     }
 }
 
+/// Bytes por línea **lógica** del shadow (sin el stride del panel: el shadow
+/// es compacto).
+fn bytes_per_logical_line(st: &FbState) -> usize {
+    st.log_w * st.info.bytes_per_pixel
+}
+
+/// Vuelca al GOP el rectángulo lógico `(x0, y0, w, h)` aplicando la rotación.
+///
+/// Recorre las líneas del **destino físico** para que las escrituras al GOP
+/// sean secuenciales; el salto se paga leyendo el shadow, que está en RAM.
+fn flush_rect(st: &mut FbState, x0: usize, y0: usize, w: usize, h: usize) {
+    let bpp = st.info.bytes_per_pixel;
+    let bpl_f = bytes_per_scanline(&st.info);
+    let bpl_l = bytes_per_logical_line(st);
+    let x1 = (x0 + w).min(st.log_w);
+    let y1 = (y0 + h).min(st.log_h);
+    if x0 >= x1 || y0 >= y1 || bpp == 0 {
+        return;
+    }
+
+    // Sin rotación el shadow y el panel tienen la misma orientación: cada
+    // línea lógica es una línea física y basta copiarla entera.
+    if st.rot.lineal() {
+        let row_bytes = (x1 - x0) * bpp;
+        for y in y0..y1 {
+            let src = y * bpl_l + x0 * bpp;
+            let dst = y * bpl_f + x0 * bpp;
+            if dst + row_bytes > st.info.byte_len || src + row_bytes > st.shadow.len() {
+                break;
+            }
+            unsafe {
+                copy_to_gop(st.ptr.add(dst), st.shadow.as_ptr().add(src), row_bytes);
+            }
+        }
+        return;
+    }
+
+    let phys_w = st.info.width;
+    let phys_h = st.mapped_height;
+    let mut line = core::mem::take(&mut st.linebuf);
+
+    // Cada línea física del destino es una fila o una columna del shadow, en
+    // un sentido u otro. `paso` es el desplazamiento en el shadow entre dos
+    // píxeles consecutivos de esa línea física.
+    let (n_lineas, n_px, paso): (usize, usize, isize) = match st.rot {
+        Rot::R90 | Rot::R270 => (x1 - x0, y1 - y0, bpl_l as isize),
+        _ => (y1 - y0, x1 - x0, bpp as isize),
+    };
+    let paso = match st.rot {
+        // El píxel físico avanza mientras el lógico retrocede.
+        Rot::R270 | Rot::R180 => -paso,
+        _ => paso,
+    };
+
+    for i in 0..n_lineas {
+        // Origen en el shadow del primer píxel de esta línea física, y su
+        // esquina en el panel.
+        let (src0, px, py) = match st.rot {
+            Rot::R90 => {
+                let x = x0 + i;
+                (y0 * bpl_l + x * bpp, y0, phys_h - 1 - x)
+            }
+            Rot::R270 => {
+                let x = x0 + i;
+                ((y1 - 1) * bpl_l + x * bpp, phys_w - y1, x)
+            }
+            _ => {
+                let y = y0 + i;
+                (y * bpl_l + (x1 - 1) * bpp, phys_w - x1, phys_h - 1 - y)
+            }
+        };
+        let bytes = n_px * bpp;
+        if line.len() < bytes {
+            continue;
+        }
+        let mut src = src0 as isize;
+        let mut off = 0usize;
+        for _ in 0..n_px {
+            if src < 0 || src as usize + bpp > st.shadow.len() {
+                break;
+            }
+            let s = src as usize;
+            line[off..off + bpp].copy_from_slice(&st.shadow[s..s + bpp]);
+            off += bpp;
+            src += paso;
+        }
+        let dst = py * bpl_f + px * bpp;
+        if dst + off > st.info.byte_len {
+            continue;
+        }
+        unsafe {
+            copy_to_gop(st.ptr.add(dst), line.as_ptr(), off);
+        }
+    }
+    st.linebuf = line;
+}
+
+/// Vuelca la consola entera.
+fn flush_all(st: &mut FbState) {
+    flush_rect(st, 0, 0, st.log_w, st.log_h);
+}
+
 fn mapped_height(info: &FrameBufferInfo) -> usize {
     let bpl = bytes_per_scanline(info);
     if bpl == 0 {
@@ -171,59 +300,97 @@ fn mapped_height(info: &FrameBufferInfo) -> usize {
     (info.byte_len / bpl).min(info.height)
 }
 
-fn choose_scale(width: usize, height: usize) -> usize {
+/// Tamaño de celda en píxeles (glifo base 8×8 escalado proporcionalmente).
+fn choose_cell_size(width: usize, height: usize) -> (usize, usize, usize) {
+    // Paneles HD+: fuente Terminus 12×12 nativa (generada en build.rs).
     if width >= 1280 && height >= 720 {
-        2
+        (12, font12x12::GLYPH_W, font12x12::GLYPH_H)
     } else {
-        1
+        (GLYPH_W, GLYPH_W, GLYPH_H)
     }
 }
 
-fn glyph_row_cp(cp: u16, row: usize) -> u8 {
-    if row >= GLYPH_H {
+/// Rango dentro de la celda para la fila/columna `g` del glifo 8×8.
+fn glyph_cell_span(g: usize, cell: usize) -> (usize, usize) {
+    let a = g * cell / GLYPH_W;
+    let b = (g + 1) * cell / GLYPH_W;
+    (a, b.max(a + 1))
+}
+
+fn glyph_row_cp(st: &FbState, cp: u16, row: usize) -> u16 {
+    if row >= st.glyph_h {
         return 0;
     }
+    if st.glyph_w == font12x12::GLYPH_W {
+        return font12x12::row(cp, row);
+    }
     if cp == 0x20AC {
-        return GLYPH_EURO[row];
+        return GLYPH_EURO[row] as u16;
     }
     if cp < 0x80 {
         let idx = cp as usize;
         if idx < BASIC_LEGACY.len() {
-            return BASIC_LEGACY[idx][row];
+            return BASIC_LEGACY[idx][row] as u16;
         }
     } else if (0xA0..=0xFF).contains(&cp) {
         let idx = (cp - 0xA0) as usize;
         if idx < LATIN_LEGACY.len() {
-            return LATIN_LEGACY[idx][row];
+            return LATIN_LEGACY[idx][row] as u16;
         }
     }
-    BASIC_LEGACY[b'?' as usize][row]
+    BASIC_LEGACY[b'?' as usize][row] as u16
+}
+
+fn glyph_native(st: &FbState) -> bool {
+    st.cell_w == st.glyph_w && st.cell_h == st.glyph_h
+}
+
+/// Rotación pedida en el build (`SOSO_FB_ROT=0|90|180|270|auto`), o
+/// automática por la forma del panel.
+///
+/// Un panel vertical se asume montado girado, que es el caso de la Steam Deck;
+/// la anulación existe porque el sentido correcto (270 frente a 90) sólo se
+/// confirma mirando la pantalla.
+fn rot_inicial(phys_w: usize, phys_h: usize) -> Rot {
+    match option_env!("SOSO_FB_ROT") {
+        Some(spec) => Rot::parse(spec, phys_w, phys_h).unwrap_or(Rot::R0),
+        None => Rot::automatica(phys_w, phys_h),
+    }
 }
 
 pub fn init(buffer_start: u64, info: FrameBufferInfo) {
     let ptr = buffer_start as *mut u8;
     let mapped_height = mapped_height(&info);
-    let scale = choose_scale(info.width, mapped_height);
-    let cell_w = GLYPH_W * scale;
-    let cell_h = GLYPH_H * scale;
-    let rowbuf = alloc::vec![0u8; bytes_per_scanline(&info) * cell_h];
-    let shadow_len = bytes_per_scanline(&info) * mapped_height;
-    let shadow = alloc::vec![0u8; shadow_len];
+    let rot = rot_inicial(info.width, mapped_height);
+    let (log_w, log_h) = fbrot::dim_logica(rot, info.width, mapped_height);
+    let (cell_w, glyph_w, glyph_h) = choose_cell_size(log_w, log_h);
+    let cell_h = cell_w;
+    let bpl_log = log_w * info.bytes_per_pixel;
+    let rowbuf = alloc::vec![0u8; bpl_log * cell_h];
+    // Una línea física completa: el volcado rotado la compone en RAM y la
+    // escribe al GOP de una vez.
+    let linebuf = alloc::vec![0u8; bytes_per_scanline(&info).max(bpl_log)];
+    let shadow = alloc::vec![0u8; bpl_log * log_h];
     unsafe {
-        core::ptr::write_bytes(ptr, 0, shadow_len);
+        core::ptr::write_bytes(ptr, 0, bytes_per_scanline(&info) * mapped_height);
     }
     *FB.lock() = Some(FbState {
         ptr,
         shadow,
         info,
         mapped_height,
+        rot,
+        log_w,
+        log_h,
         row: 0,
         col: 0,
-        scale,
         cell_w,
         cell_h,
+        glyph_w,
+        glyph_h,
         text: alloc::vec![[CELL_SPACE; COLS]; ROWS],
         rowbuf,
+        linebuf,
         utf8: Utf8Acc::new(),
     });
 }
@@ -241,9 +408,16 @@ pub fn info_log() -> Option<(usize, usize, usize, usize, usize, usize)> {
             s.mapped_height,
             s.info.stride,
             s.info.bytes_per_pixel,
-            s.scale,
+            s.cell_w,
         )
     })
+}
+
+/// Rotación activa y dimensiones lógicas, para el log de arranque.
+pub fn rot_log() -> Option<(u16, usize, usize)> {
+    FB.lock()
+        .as_ref()
+        .map(|s| (s.rot.grados(), s.log_w, s.log_h))
 }
 
 fn pack_pixel(st: &FbState, r: u8, g: u8, b: u8) -> [u8; 4] {
@@ -275,39 +449,37 @@ fn pack_pixel(st: &FbState, r: u8, g: u8, b: u8) -> [u8; 4] {
 }
 
 fn max_cols(st: &FbState) -> usize {
-    COLS.min(st.info.width / st.cell_w)
+    COLS.min(st.log_w / st.cell_w)
 }
 
 fn max_rows(st: &FbState) -> usize {
-    ROWS.min(st.mapped_height / st.cell_h)
+    ROWS.min(st.log_h / st.cell_h)
 }
 
 fn fill_rect(st: &mut FbState, x0: usize, y0: usize, w: usize, h: usize, r: u8, g: u8, b: u8) {
     if w == 0 || h == 0 {
         return;
     }
-    let x0 = x0.min(st.info.width);
-    let y0 = y0.min(st.mapped_height);
-    let w = w.min(st.info.width.saturating_sub(x0));
-    let h = h.min(st.mapped_height.saturating_sub(y0));
+    let x0 = x0.min(st.log_w);
+    let y0 = y0.min(st.log_h);
+    let w = w.min(st.log_w.saturating_sub(x0));
+    let h = h.min(st.log_h.saturating_sub(y0));
     if w == 0 || h == 0 {
         return;
     }
     let bpp = st.info.bytes_per_pixel;
-    let bpl = bytes_per_scanline(&st.info);
+    let bpl = bytes_per_logical_line(st);
     let row_bytes = w * bpp;
     let start = y0 * bpl + x0 * bpp;
-    if start + (h - 1) * bpl + row_bytes > st.info.byte_len {
+    if start + (h - 1) * bpl + row_bytes > st.shadow.len() {
         return;
     }
     if r == 0 && g == 0 && b == 0 {
         unsafe {
-            if x0 == 0 && w == st.info.width && bpl * h <= st.info.byte_len.saturating_sub(start) {
-                core::ptr::write_bytes(st.ptr.add(start), 0, bpl * h);
+            if x0 == 0 && w == st.log_w && bpl * h <= st.shadow.len().saturating_sub(start) {
                 core::ptr::write_bytes(st.shadow.as_mut_ptr().add(start), 0, bpl * h);
             } else {
                 for dy in 0..h {
-                    core::ptr::write_bytes(st.ptr.add(start + dy * bpl), 0, row_bytes);
                     core::ptr::write_bytes(
                         st.shadow.as_mut_ptr().add(start + dy * bpl),
                         0,
@@ -316,21 +488,20 @@ fn fill_rect(st: &mut FbState, x0: usize, y0: usize, w: usize, h: usize, r: u8, 
                 }
             }
         }
+        flush_rect(st, x0, y0, w, h);
         return;
     }
     let px = pack_pixel(st, r, g, b);
     unsafe {
         for dy in 0..h {
-            let mut p = st.ptr.add(start + dy * bpl);
             let mut s = st.shadow.as_mut_ptr().add(start + dy * bpl);
             for _ in 0..w {
-                core::ptr::copy_nonoverlapping(px.as_ptr(), p, bpp);
                 core::ptr::copy_nonoverlapping(px.as_ptr(), s, bpp);
-                p = p.add(bpp);
                 s = s.add(bpp);
             }
         }
     }
+    flush_rect(st, x0, y0, w, h);
 }
 
 fn paint_glyph(st: &mut FbState, row: usize, col: usize, cp: u16) {
@@ -340,35 +511,45 @@ fn paint_glyph(st: &mut FbState, row: usize, col: usize, cp: u16) {
     let x0 = col * st.cell_w;
     let y0 = row * st.cell_h;
     let bpp = st.info.bytes_per_pixel;
-    let bpl = bytes_per_scanline(&st.info);
-    let scale = st.scale;
+    let bpl = bytes_per_logical_line(st);
     let px = pack_pixel(st, FG.0, FG.1, FG.2);
+    let native = glyph_native(st);
     unsafe {
-        for gy in 0..GLYPH_H {
-            let bits = glyph_row_cp(cp, gy);
-            for gx in 0..GLYPH_W {
+        for gy in 0..st.glyph_h {
+            let bits = glyph_row_cp(st, cp, gy);
+            for gx in 0..st.glyph_w {
                 if bits & (1 << gx) == 0 {
                     continue;
                 }
-                let px0 = x0 + gx * scale;
-                let py0 = y0 + gy * scale;
-                for dy in 0..scale {
+                let (px0, py0, pw, ph) = if native {
+                    (x0 + gx, y0 + gy, 1, 1)
+                } else {
+                    let (sy0, sy1) = glyph_cell_span(gy, st.cell_h);
+                    let (sx0, sx1) = glyph_cell_span(gx, st.cell_w);
+                    (
+                        x0 + sx0,
+                        y0 + sy0,
+                        sx1 - sx0,
+                        sy1 - sy0,
+                    )
+                };
+                let pw = pw.min(st.log_w.saturating_sub(px0));
+                let ph = ph.min(st.log_h.saturating_sub(py0));
+                if pw == 0 || ph == 0 {
+                    continue;
+                }
+                for dy in 0..ph {
                     let y = py0 + dy;
-                    if y >= st.mapped_height {
-                        break;
-                    }
-                    let mut p = st.ptr.add(y * bpl + px0 * bpp);
                     let mut s = st.shadow.as_mut_ptr().add(y * bpl + px0 * bpp);
-                    for _ in 0..scale {
-                        core::ptr::copy_nonoverlapping(px.as_ptr(), p, bpp);
+                    for _ in 0..pw {
                         core::ptr::copy_nonoverlapping(px.as_ptr(), s, bpp);
-                        p = p.add(bpp);
                         s = s.add(bpp);
                     }
                 }
             }
         }
     }
+    flush_rect(st, x0, y0, st.cell_w, st.cell_h);
 }
 
 fn clear_cell(st: &mut FbState, row: usize, col: usize) {
@@ -393,16 +574,15 @@ fn refresh_cell(st: &mut FbState, row: usize, col: usize) {
 }
 
 fn paint_row(st: &mut FbState, row: usize) {
-    let bpl = bytes_per_scanline(&st.info);
+    let bpl = bytes_per_logical_line(st);
     let y0 = row * st.cell_h;
-    let h = st.cell_h.min(st.mapped_height.saturating_sub(y0));
-    let bytes = (h * bpl).min(st.info.byte_len.saturating_sub(y0 * bpl));
+    let h = st.cell_h.min(st.log_h.saturating_sub(y0));
+    let bytes = (h * bpl).min(st.shadow.len().saturating_sub(y0 * bpl));
     if bytes == 0 || st.rowbuf.len() < bytes {
         return;
     }
     let cols = max_cols(st);
     let bpp = st.info.bytes_per_pixel;
-    let scale = st.scale;
     let px = pack_pixel(st, FG.0, FG.1, FG.2);
 
     let mut buf = core::mem::take(&mut st.rowbuf);
@@ -413,22 +593,31 @@ fn paint_row(st: &mut FbState, row: usize) {
             continue;
         }
         let x0 = c * st.cell_w;
-        for gy in 0..GLYPH_H {
-            let bits = glyph_row_cp(cp, gy);
+        let native = glyph_native(st);
+        for gy in 0..st.glyph_h {
+            let bits = glyph_row_cp(st, cp, gy);
             if bits == 0 {
                 continue;
             }
-            for gx in 0..GLYPH_W {
+            for gx in 0..st.glyph_w {
                 if bits & (1 << gx) == 0 {
                     continue;
                 }
-                for dy in 0..scale {
-                    let y = gy * scale + dy;
-                    if y >= h {
-                        break;
-                    }
-                    let mut off = y * bpl + (x0 + gx * scale) * bpp;
-                    for _ in 0..scale {
+                let (cx0, cy0, pw, ph) = if native {
+                    (gx, gy, 1, 1)
+                } else {
+                    let (sy0, sy1) = glyph_cell_span(gy, st.cell_h);
+                    let (sx0, sx1) = glyph_cell_span(gx, st.cell_w);
+                    (sx0, sy0, sx1 - sx0, sy1 - sy0)
+                };
+                for dy in cy0..(cy0 + ph).min(h) {
+                    let y = dy;
+                    let pw = pw.min(st.cell_w.saturating_sub(cx0));
+                    let mut off = y * bpl + (x0 + cx0) * bpp;
+                    for _ in 0..pw {
+                        if off + bpp > bytes {
+                            break;
+                        }
                         buf[off..off + bpp].copy_from_slice(&px[..bpp]);
                         off += bpp;
                     }
@@ -438,19 +627,19 @@ fn paint_row(st: &mut FbState, row: usize) {
     }
     unsafe {
         let off = y0 * bpl;
-        copy_to_gop(st.ptr.add(off), buf.as_ptr(), bytes);
         core::ptr::copy_nonoverlapping(buf.as_ptr(), st.shadow.as_mut_ptr().add(off), bytes);
     }
     st.rowbuf = buf;
+    flush_rect(st, 0, y0, st.log_w, h);
 }
 
 fn scroll_framebuffer_pixels(st: &mut FbState, scroll_lines: usize) {
     if scroll_lines == 0 {
         return;
     }
-    let bpl = bytes_per_scanline(&st.info);
+    let bpl = bytes_per_logical_line(st);
     let band = st.cell_h.saturating_mul(scroll_lines);
-    let h = st.mapped_height;
+    let h = st.log_h;
     if band == 0 || band >= h {
         return;
     }
@@ -458,18 +647,29 @@ fn scroll_framebuffer_pixels(st: &mut FbState, scroll_lines: usize) {
     unsafe {
         let sh = st.shadow.as_mut_ptr();
         core::ptr::copy(sh.add(band * bpl), sh, move_bytes);
-        copy_to_gop(st.ptr, sh, move_bytes);
     }
-    fill_rect(st, 0, h.saturating_sub(band), st.info.width, band, 0, 0, 0);
+    // `fill_rect` vuelca la banda inferior; el resto se vuelca entero porque
+    // el desplazamiento afecta a toda la pantalla.
+    fill_rect(st, 0, h.saturating_sub(band), st.log_w, band, 0, 0, 0);
+    flush_rect(st, 0, 0, st.log_w, h - band);
 }
 
 fn sync_rows_after_scroll(st: &mut FbState, scroll_lines: usize) {
-    scroll_framebuffer_pixels(st, scroll_lines);
     let rows = max_rows(st);
     if rows == 0 {
         return;
     }
-    let start = rows.saturating_sub(scroll_lines);
+    let band = st.cell_h.saturating_mul(scroll_lines);
+    if band < st.log_h {
+        scroll_framebuffer_pixels(st, scroll_lines);
+    }
+    // Si en un solo write hubo más scrolls que filas visibles, el memmove no
+    // cubre todo el shadow: hay que repintar desde arriba.
+    let start = if band >= st.log_h {
+        0
+    } else {
+        rows.saturating_sub(scroll_lines)
+    };
     for r in start..rows {
         paint_row(st, r);
     }
@@ -492,10 +692,11 @@ fn erase_cursor(st: &mut FbState) {
 
 fn draw_cursor(st: &mut FbState) {
     let y0 = st.row * st.cell_h;
-    let bar_y = y0 + st.cell_h.saturating_sub(st.scale);
+    let bar_h = (st.cell_h / 6).max(1);
+    let bar_y = y0 + st.cell_h.saturating_sub(bar_h);
     let x = st.col * st.cell_w;
-    if bar_y < st.mapped_height {
-        fill_rect(st, x, bar_y, st.cell_w, st.scale, FG.0, FG.1, FG.2);
+    if bar_y < st.log_h {
+        fill_rect(st, x, bar_y, st.cell_w, bar_h, FG.0, FG.1, FG.2);
     }
 }
 
@@ -535,9 +736,8 @@ fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> bool {
                 st,
                 0,
                 st.row * st.cell_h,
-                st.info.width,
-                st.cell_h
-                    .min(st.mapped_height.saturating_sub(st.row * st.cell_h)),
+                st.log_w,
+                st.cell_h.min(st.log_h.saturating_sub(st.row * st.cell_h)),
                 0,
                 0,
                 0,
@@ -645,25 +845,27 @@ pub fn user_info(out: &mut FbInfo) -> bool {
         *out = FbInfo::default();
         return false;
     };
+    // Geometría lógica: userspace pinta en la misma orientación que la
+    // consola y es `present_from_user` quien aplica la rotación.
     out.present = 1;
     out.pixel_format = pixel_format_tag(st.info.pixel_format);
     out.bytes_per_pixel = st.info.bytes_per_pixel as u8;
-    out.width = st.info.width as u32;
-    out.height = st.info.height as u32;
-    out.stride = st.info.stride as u32;
-    out.byte_len = st.info.byte_len as u64;
+    out.width = st.log_w as u32;
+    out.height = st.log_h as u32;
+    out.stride = st.log_w as u32;
+    out.byte_len = st.shadow.len() as u64;
     true
 }
 
-/// Copia un búfer de píxeles (mismo tamaño que `byte_len`) al framebuffer físico.
+/// Copia un búfer de píxeles (geometría lógica, `byte_len` de `user_info`) a
+/// la pantalla, aplicando la rotación del panel.
 pub fn present_from_user(buf: &[u8]) -> Result<(), ()> {
     let mut guard = FB.lock();
     let Some(st) = guard.as_mut() else {
         return Err(());
     };
-    let want = st.info.byte_len.min(buf.len());
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), st.ptr, want);
-    }
+    let want = st.shadow.len().min(buf.len());
+    st.shadow[..want].copy_from_slice(&buf[..want]);
+    flush_all(st);
     Ok(())
 }

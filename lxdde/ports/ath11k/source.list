@@ -1,0 +1,7 @@
+# ath11k — Qualcomm WCN6855 / QCNFA765 (Steam Deck OLED) vía capa lx_emul.
+# Fase W1: transporte MHI hasta mission mode.
+# Fase W2 (parcial): codificación de los mensajes QMI de arranque.
+lxdde/ports/ath11k/ath11k_lx.c
+lxdde/ports/ath11k/ath11k_mmio.c
+lxdde/ports/ath11k/ath11k_mhi.c
+lxdde/ports/ath11k/ath11k_qmi.c

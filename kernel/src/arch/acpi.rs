@@ -47,9 +47,11 @@ pub struct McfgAllocation {
 
 static MADT: Once<MadtInfo> = Once::new();
 static MCFG: Once<Option<McfgAllocation>> = Once::new();
+static RSDP: Once<u64> = Once::new();
 
 /// Recorre RSDT/XSDT y cachea MADT + MCFG. Idempotente.
 pub fn init(rsdp_phys: u64) {
+    RSDP.call_once(|| rsdp_phys);
     MADT.call_once(|| {
         let mut info = MadtInfo {
             apic_ids: Vec::new(),
@@ -101,6 +103,19 @@ pub fn apic_ids(rsdp_phys: u64) -> Vec<u32> {
         init(rsdp_phys);
     }
     madt().apic_ids.clone()
+}
+
+/// Contenido de una tabla ACPI cualquiera, para los consumidores que no
+/// necesitan un parser propio aquí (IVRS lo parsea `soso-hw`).
+/// Requiere `init` previo: sin RSDP no hay dónde buscar.
+pub fn tabla_bytes(sig: &[u8; 4]) -> Option<&'static [u8]> {
+    let rsdp_phys = *RSDP.get()?;
+    let table = find_table(rsdp_phys, sig)?;
+    let len = leer::<u32>(table + 4) as usize;
+    if len < 36 {
+        return None;
+    }
+    Some(bytes(table, len))
 }
 
 fn find_table(rsdp_phys: u64, sig: &[u8; 4]) -> Option<u64> {

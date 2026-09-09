@@ -282,17 +282,23 @@ static int nocat_is_new(const unsigned char *p, uint32_t len)
 /* Estático y no en la pila: el registro son ~1,2 KiB y la pila del bring-up no
  * está para eso. Aquí sólo hay una fibra tocando el RPC. */
 static unsigned char g_nocat_buf[1536];
-static unsigned char g_cpu_seq_buf[4096];
+/* GSP_RUN_CPU_SEQUENCER puede traer ~6296 B (2 páginas msgq); upstream lee in-situ. */
+#define GSP_CPU_SEQ_BUF_SIZE 65536u
+static unsigned char g_cpu_seq_buf[GSP_CPU_SEQ_BUF_SIZE];
 
 static void cpu_seq_capture(const struct gsp_rpc *rpc, uint32_t rptr, uint32_t length)
 {
     uint32_t plen = length - GSP_RPC_HDR_SIZE;
 
-    if (plen > (uint32_t)sizeof(g_cpu_seq_buf)) {
-        plen = (uint32_t)sizeof(g_cpu_seq_buf);
+    if (plen > GSP_CPU_SEQ_BUF_SIZE) {
+        lx_printk("nouveau-lx: cpu_seq payload demasiado grande (%u > %u)\n",
+                  plen, GSP_CPU_SEQ_BUF_SIZE);
+        return;
     }
     ring_copy(rpc, rptr, GSP_MSG_HDR_SIZE + GSP_RPC_HDR_SIZE, g_cpu_seq_buf, plen);
-    (void)gsp_cpu_seq_run(g_cpu_seq_buf, plen);
+    if (gsp_cpu_seq_run(g_cpu_seq_buf, plen) != 0) {
+        lx_printk("nouveau-lx: cpu_seq_run falló\n");
+    }
 }
 
 /* El registro NOCAT es un `NV2080_NOCAT_JOURNAL_ENTRY` y su layout NO está en

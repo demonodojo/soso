@@ -5,6 +5,7 @@ lxdde/ports/iwlwifi/iwl_fw.c
 lxdde/ports/iwlwifi/iwl_trans.c
 lxdde/ports/iwlwifi/iwl_mvm.c
 lxdde/ports/iwlwifi/iwl_mvm_init.c
+lxdde/ports/iwlwifi/iwl_mvm_up.c
 lxdde/ports/iwlwifi/iwl_mvm_nvm.c
 lxdde/ports/iwlwifi/iwl_mvm_assoc.c
 lxdde/shim/src/iwlwifi_shim.c

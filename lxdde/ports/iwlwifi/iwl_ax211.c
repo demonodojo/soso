@@ -166,6 +166,10 @@ int iwl_ax211_start_firmware(void)
         lx_printk("iwlwifi: init MVM incompleto\n");
         return -1;
     }
+    if (iwl_mvm_up_minimal(iwl) != 0) {
+        lx_printk("iwlwifi: up MVM incompleto\n");
+        return -1;
+    }
     iwl_set_phase(iwl, "ready");
     return 0;
 }

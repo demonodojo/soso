@@ -15,10 +15,21 @@ grep -v '^#include' "$src/iwl_fw.c" |
 
 cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
    -Wno-incompatible-pointer-types -Wno-address-of-packed-member \
-   -I"$out" -I"$src" \
+   -I"$root/tools/iwl-hostcheck" -I"$out" -I"$src" \
    -o "$out/hostcheck" \
    "$root/tools/iwl-hostcheck/main.c" \
-   "$root/tools/iwl-hostcheck/cmd_wait_test.c"
+   "$root/tools/iwl-hostcheck/cmd_wait_test.c" \
+   "$root/tools/iwl-hostcheck/mvm_init_test.c" \
+   "$src/iwl_mvm_init.c"
+
+cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
+   -Wno-incompatible-pointer-types -Wno-address-of-packed-member \
+   -I"$root/tools/iwl-hostcheck" -I"$out" -I"$src" \
+   -o "$out/hcmd_wide" \
+   "$root/tools/iwl-hostcheck/hcmd_wide_test.c" \
+   "$src/iwl_trans.c"
+echo "=== iwl HCMD wide hostcheck ==="
+"$out/hcmd_wide"
 
 for ucode in \
     "$fwdir/iwlwifi-cc-a0-77.ucode" \

@@ -243,11 +243,16 @@ int gsp_cpu_seq_run(const void *payload, uint32_t len)
                     gsp_mmio_rd32(cmd->payload.reg_store.addr);
             }
             break;
-        case GSP_SEQ_BUF_OPCODE_CORE_RESET:
-            (void)falcon_lx_gsp_reset_riscv(LX_FLCN_GSP_BASE);
-            gsp_mmio_wr32(NV_PGSP_FALCON + 0x624u, 0x80u);
+        case GSP_SEQ_BUF_OPCODE_CORE_RESET: {
+            uint32_t v;
+
+            /* r535/gsp.c: nvkm_falcon_reset + mask 0x624 — no RISC-V reset. */
+            (void)falcon_lx_reset(LX_FLCN_GSP_BASE);
+            v = gsp_mmio_rd32(NV_PGSP_FALCON + 0x624u);
+            gsp_mmio_wr32(NV_PGSP_FALCON + 0x624u, (v & ~0x80u) | 0x80u);
             gsp_mmio_wr32(NV_PGSP_FALCON + 0x10cu, 0u);
             break;
+        }
         case GSP_SEQ_BUF_OPCODE_CORE_START:
             if (gsp_mmio_rd32(NV_PGSP_FALCON + 0x100u) & 0x40u) {
                 gsp_mmio_wr32(NV_PGSP_FALCON + 0x130u, 0x2u);

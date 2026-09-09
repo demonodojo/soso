@@ -33,7 +33,7 @@ static int iwl_hw_rf_kill(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
-static int iwl_send_scan_cfg(struct iwl_ax211_priv *iwl)
+int iwl_mvm_send_scan_cfg(struct iwl_ax211_priv *iwl)
 {
     uint8_t ver = (uint8_t)iwl_fw_cmd_ver(iwl, LONG_GROUP, SCAN_CFG_CMD);
     uint16_t pay_len;
@@ -41,15 +41,30 @@ static int iwl_send_scan_cfg(struct iwl_ax211_priv *iwl)
     if (iwl->scan_cfg_sent)
         return 0;
 
-    if (ver >= 2) {
+    if (ver >= 5) {
+        /* Linux scan.c:1238 — API reducida, struct iwl_scan_config (12 B). */
+        struct iwl_scan_config cfg;
+
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.bcast_sta_id = 0xff;
+        cfg.tx_chains = iwl_cpu_to_le32(iwl_mvm_valid_tx_ant(iwl));
+        cfg.rx_chains = iwl_cpu_to_le32(iwl_mvm_scan_rx_ant(iwl));
+        pay_len = (uint16_t)sizeof(cfg);
+        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len,
+                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
+            lx_printk("iwl_mvm: SCAN_CFG_CMD v%u falló\n", ver);
+            return -1;
+        }
+    } else if (ver >= 2) {
         struct iwl_scan_config_v2 cfg;
 
         memset(&cfg, 0, sizeof(cfg));
         cfg.bcast_sta_id = 0xff;
-        cfg.tx_chains = iwl_mvm_valid_tx_ant(iwl);
-        cfg.rx_chains = iwl_mvm_valid_rx_ant(iwl);
+        cfg.tx_chains = iwl_cpu_to_le32(iwl_mvm_valid_tx_ant(iwl));
+        cfg.rx_chains = iwl_cpu_to_le32(iwl_mvm_scan_rx_ant(iwl));
         pay_len = (uint16_t)sizeof(cfg);
-        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len, 500) != 0) {
+        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len,
+                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
             lx_printk("iwl_mvm: SCAN_CFG_CMD v%u falló\n", ver);
             return -1;
         }
@@ -58,10 +73,11 @@ static int iwl_send_scan_cfg(struct iwl_ax211_priv *iwl)
 
         memset(&cfg, 0, sizeof(cfg));
         cfg.bcast_sta_id = 0xff;
-        cfg.tx_chains = iwl_mvm_valid_tx_ant(iwl);
-        cfg.rx_chains = iwl_mvm_valid_rx_ant(iwl);
+        cfg.tx_chains = iwl_cpu_to_le32(iwl_mvm_valid_tx_ant(iwl));
+        cfg.rx_chains = iwl_cpu_to_le32(iwl_mvm_scan_rx_ant(iwl));
         pay_len = (uint16_t)sizeof(cfg);
-        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len, 500) != 0) {
+        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len,
+                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
             lx_printk("iwl_mvm: SCAN_CFG_CMD falló\n");
             return -1;
         }
@@ -70,7 +86,7 @@ static int iwl_send_scan_cfg(struct iwl_ax211_priv *iwl)
     iwl->scan_cfg_sent = 1;
     lx_printk("iwl_mvm: SCAN_CFG_CMD v%u ok tx=0x%x rx=0x%x\n", ver,
               (unsigned)iwl_mvm_valid_tx_ant(iwl),
-              (unsigned)iwl_mvm_valid_rx_ant(iwl));
+              (unsigned)iwl_mvm_scan_rx_ant(iwl));
     return 0;
 }
 
@@ -244,6 +260,10 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
         lx_printk("iwl_mvm: scan sin INIT_COMPLETE\n");
         return -1;
     }
+    if (!iwl->mvm_up_done && iwl_mvm_up_minimal(iwl) != 0) {
+        lx_printk("iwl_mvm: scan sin up MVM\n");
+        return -1;
+    }
     if (iwl_hw_rf_kill(iwl) != 0)
         return -1;
 
@@ -251,7 +271,7 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
     iwl->scan_complete = 0;
     iwl->scan_active = 1;
 
-    if (iwl_send_scan_cfg(iwl) != 0) {
+    if (iwl_mvm_send_scan_cfg(iwl) != 0) {
         iwl->scan_active = 0;
         return -1;
     }

@@ -40,6 +40,12 @@ pub fn run() {
         &fallos,
         "GSP hostcheck",
     );
+    run_script_if_present(
+        &root,
+        "scripts/l6-ath11k-hostcheck.sh",
+        &fallos,
+        "ath11k hostcheck",
+    );
 
     println!("check: hw-matrix…");
     run_hw_matrix(&root, &fallos);
@@ -74,6 +80,7 @@ fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
         ),
         ("soso-update-core", &["soso-update-core"], true),
         ("soso-resize-core", &["soso-resize-core"], false),
+        ("soso-hw", &["soso-hw"], false),
         ("xhci-nostd", &["xhci-nostd"], false),
         ("soso-audio+gguf2som", &["soso-audio", "gguf2som"], true),
         ("soso-forja-server", &["soso-forja-server"], false),

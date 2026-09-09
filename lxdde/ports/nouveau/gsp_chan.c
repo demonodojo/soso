@@ -103,12 +103,27 @@ static int chan_fill_alloc(struct gsp_chan *c, NV_CHANNEL_ALLOC_PARAMS *p,
      * NVOS04_FLAGS en nvrm_r570.h. Estaban clavados a 0/0 y por eso el segundo
      * canal —el de GR0— pedía el mismo slot que el primero teniéndolo declarado
      * fijo, y RM contestaba NO_MEMORY (2026-07-28). */
+    /* Verbatim de `r535_chan_alloc` (runq=0 en GA107 mobile). */
     p->flags = NVOS04_FLAGS_CHANNEL_TYPE_PHYSICAL |
+               NVOS04_FLAGS_VPR_FALSE |
+               NVOS04_FLAGS_CHANNEL_SKIP_MAP_REFCOUNTING_FALSE |
+               NVOS04_FLAGS_GROUP_CHANNEL_RUNQUEUE_VALUE(0u) |
                NVOS04_FLAGS_PRIVILEGED_CHANNEL_TRUE |
+               NVOS04_FLAGS_DELAY_CHANNEL_SCHEDULING_FALSE |
+               NVOS04_FLAGS_CHANNEL_DENY_PHYSICAL_MODE_CE_FALSE |
                NVOS04_FLAGS_CHANNEL_USERD_INDEX_VALUE(c->chid % NV_CHID_PER_USERD) |
                NVOS04_FLAGS_CHANNEL_USERD_INDEX_FIXED_FALSE |
                NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_VALUE(c->chid / NV_CHID_PER_USERD) |
-               NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED_TRUE;
+               NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED_TRUE |
+               NVOS04_FLAGS_CHANNEL_DENY_AUTH_LEVEL_PRIV_FALSE |
+               NVOS04_FLAGS_CHANNEL_SKIP_SCRUBBER_FALSE |
+               NVOS04_FLAGS_CHANNEL_CLIENT_MAP_FIFO_FALSE |
+               NVOS04_FLAGS_SET_EVICT_LAST_CE_PREFETCH_CHANNEL_FALSE |
+               NVOS04_FLAGS_CHANNEL_VGPU_PLUGIN_CONTEXT_FALSE |
+               NVOS04_FLAGS_CHANNEL_PBDMA_ACQUIRE_TIMEOUT_FALSE |
+               NVOS04_FLAGS_GROUP_CHANNEL_THREAD_DEFAULT |
+               NVOS04_FLAGS_MAP_CHANNEL_FALSE |
+               NVOS04_FLAGS_SKIP_CTXBUFFER_ALLOC_FALSE;
     p->hVASpace = vaspace;
     p->engineType = c->engine;
     /* `subDeviceId` se queda a 0 (upstream no lo toca): el 1 que había aquí
@@ -325,11 +340,10 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
     c->rm = rm;
     c->vmm = vmm;
     c->handle = NVKM_RM_CHAN(idx);
-    /* Un chid por canal, en el mismo orden que los handles. Upstream lo saca de su
-     * propio asignador (`nvkm_chid_get`) saltándose los `rsvd_chids` que RM se
-     * queda; aquí no sabemos ese número para gb20x, pero el chid 0 lo aceptó en
-     * hardware, así que empezar en 0 no pisa a RM. */
-    c->chid = idx;
+    /* Upstream (`r535_fifo_runl_ctor`) empieza en `rsvd_chids`; en 570.144 vale 1
+     * (r570/fifo.c). Pedir chid=0 deja USERD_INDEX=0 fijo y RM contesta NO_MEMORY
+     * en GA107 (run12). */
+    c->chid = idx + GSP_CHAN_RSVD_CHIDS;
     c->engine = engine;
     /* De más nueva a más vieja. `rm/gb20x.c` de nouveau usa la B de Blackwell
      * para este chip; el catálogo del chip decide y esta lista solo ordena. */
@@ -394,9 +408,17 @@ int gsp_chan_init(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
     chan_userd_clear(c);
     chan_fill_alloc(c, &params, vaspace);
 
+    lx_printk("nouveau-lx: RM_ALLOC canal cls=0x%04x chid=%u inst=0x%llx "
+              "userd=0x%llx mthdbuf=0x%llx/%u B flags=0x%08x\n",
+              c->cls, c->chid, (unsigned long long)c->inst_addr,
+              (unsigned long long)c->userd.phys,
+              (unsigned long long)c->mthdbuf.phys, c->mthdbuf_size,
+              params.flags);
+
     if (gsp_rm_alloc(c->rm, c->rm->device, c->handle, c->cls,
                      &params, (uint32_t)sizeof(params), 0) != 0) {
-        lx_printk("nouveau-lx: RM_ALLOC canal GPFIFO falló\n");
+        lx_printk("nouveau-lx: RM_ALLOC canal GPFIFO falló (flags=0x%08x chid=%u)\n",
+                  params.flags, c->chid);
         gsp_chan_fini(c);
         return -1;
     }

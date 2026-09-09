@@ -30,6 +30,7 @@ const LX_PORT_BY_DRIVER: &[(&str, &str)] = &[
     ("lx-e1000e", "e1000e"),
     ("lx-iwlwifi", "iwlwifi"),
     ("lx-nouveau", "nouveau"),
+    ("lx-ath11k", "ath11k"),
 ];
 
 const DRIVER_BY_FEATURE: &[(&str, &str)] = &[
@@ -50,6 +51,7 @@ pub fn profile_from_arg(spec: &str) -> DriverProfile {
         "" | "all" => preset_all(),
         "qemu" | "minimal" => preset_qemu(),
         "live-usb" | "live" => preset_live_usb(),
+        "deck" | "steamdeck" => preset_deck(),
         other => profile_from_list(other),
     }
 }
@@ -75,6 +77,7 @@ pub fn preset_qemu() -> DriverProfile {
         firmware_exclude: vec![
             "lib/firmware/iwlwifi-*".into(),
             "lib/firmware/nvidia/**".into(),
+            "lib/firmware/ath11k/**".into(),
         ],
     }
 }
@@ -96,7 +99,32 @@ pub fn preset_live_usb() -> DriverProfile {
         ],
         lxdde_ports: vec!["nouveau".into(), "iwlwifi".into()],
         lxdde_mode: Some("nouveau,iwlwifi".into()),
-        firmware_exclude: vec![],
+        // El firmware de ath11k son ~17 MiB que sólo sirven en la Steam Deck;
+        // ahí se usa el preset `deck`.
+        firmware_exclude: vec!["lib/firmware/ath11k/**".into()],
+    }
+}
+
+/// Steam Deck OLED: sin NVIDIA ni Intel WiFi, con ath11k.
+///
+/// La consola de Valve no lleva nada de NVIDIA ni iwlwifi, así que su firmware
+/// (63 MiB del GSP y 3 MiB del ucode Intel) sólo engordaría la imagen.
+pub fn preset_deck() -> DriverProfile {
+    DriverProfile {
+        kernel_features: vec![
+            "drv-virtio-blk".into(),
+            "drv-virtio-net".into(),
+            "drv-nvme".into(),
+            "drv-usb".into(),
+            "drv-live-disk".into(),
+            "drv-hda".into(),
+        ],
+        lxdde_ports: vec!["ath11k".into()],
+        lxdde_mode: Some("ath11k".into()),
+        firmware_exclude: vec![
+            "lib/firmware/nvidia/**".into(),
+            "lib/firmware/iwlwifi-*".into(),
+        ],
     }
 }
 
@@ -163,6 +191,21 @@ pub fn kernel_feature_args(profile: &DriverProfile) -> Vec<String> {
     }
     if super::lxdde_enabled() && !feats.iter().any(|f| f == "lxdde") {
         feats.push("lxdde".into());
+    }
+    // El módulo GPU de la capa lxdde referencia los símbolos del port nouveau,
+    // así que sólo se compila cuando ese port va a estar enlazado. Un perfil
+    // con lxdde pero sin nouveau (el de la Steam Deck) usa el doble sin GPU.
+    let nouveau = lx_ports_for_build(profile)
+        .iter()
+        .any(|p| p == "nouveau" || p == "all");
+    if nouveau && !feats.iter().any(|f| f == "lxdde-nouveau") {
+        feats.push("lxdde-nouveau".into());
+    }
+    let iwlwifi = lx_ports_for_build(profile)
+        .iter()
+        .any(|p| p == "iwlwifi" || p == "all");
+    if iwlwifi && !feats.iter().any(|f| f == "lxdde-iwlwifi") {
+        feats.push("lxdde-iwlwifi".into());
     }
     feats.sort();
     feats.dedup();

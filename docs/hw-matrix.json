@@ -139,28 +139,28 @@
         "gsp_ga102_fallback": "a8c3ebeed280323aedb51c061f321e73379cce7a9ae643a33dd03915df027f7f 63571696B"
       },
       "git": {
-        "commit": "d91bc18f9",
-        "commit_corto": "d91bc18f9",
+        "commit": "1df51e817",
+        "commit_corto": "1df51e817",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "INIT_COMPLETE race, RPC sin abort cpuctl, CORE_RESUME; pendiente reflashear"
+        "cambios_locales": "run12: chid rsvd+HCMD wide+mvm_up; placa pendiente post-reflash"
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh viva (run5); ethernet rtl8169 enlace DOWN, sin DHCP",
+        "nota": "run12: sosh + wifi scan + halt (flush #43 1024s); no record-boot",
         "fecha": "2026-09-09"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY AX200; INIT_EXTENDED_CFG ok (run5)",
+          "nota": "run12: UCODE_ALIVE + INIT_COMPLETE + SHARED_MEM_CFG ok",
           "fecha": "2026-09-09"
         },
         "scan": {
           "status": "fail",
-          "nota": "run5: carrera INIT_COMPLETE (NOTIF+timeout); sosh wifi scan: error de E/S",
+          "nota": "run12: TX_ANT/PHY/MCC/SCAN_CFG timeout; sosh wifi scan E/S",
           "fecha": "2026-09-09"
         },
         "assoc_wpa2": {
@@ -168,11 +168,13 @@
         },
         "dhcp": {
           "status": "pendiente",
-          "nota": "Sin evidencia de DHCP WiFi; net: dhcp corresponde a rtl8169 con enlace DOWN",
+          "nota": "Sin DHCP WiFi; rtl8169 DOWN en run12",
           "fecha": "2026-09-09"
         },
         "ssh": {
-          "status": "pendiente"
+          "status": "pendiente",
+          "nota": "run12: servicio SSH iniciado; sin sesión remota probada",
+          "fecha": "2026-09-09"
         },
         "reconexion": {
           "status": "pendiente"
@@ -180,17 +182,19 @@
       },
       "gpu": {
         "gsp_rpc": {
-          "status": "fail",
-          "nota": "run5: booter ok heap 128 MiB; cpuctl=0x10; gsp_rpc_start aborta sin RPC fn=; fix RPC/CORE_RESUME en d91bc18f9",
+          "status": "ok",
+          "nota": "run12: GSP_INIT_DONE + vaspace gp100 VRAM + PRAMIN 0x001700",
           "fecha": "2026-09-09"
         },
         "vram_pool": {
           "status": "fail",
-          "nota": "run5: GSP=fallo, pool VRAM=no; heap Ampere 128 MiB OK",
+          "nota": "run12: RM_ALLOC cls=0xc56f NO_MEMORY chid=0 flags=0x00200020 → pool VRAM=no",
           "fecha": "2026-09-09"
         },
         "ce_readback": {
-          "status": "pendiente"
+          "status": "pendiente",
+          "nota": "run11: sin canal COPY0 — CE no validado",
+          "fecha": "2026-09-09"
         },
         "compute_cpu_gpu": {
           "status": "pendiente"
@@ -199,7 +203,9 @@
           "status": "pendiente"
         },
         "apagado_limpio": {
-          "status": "pendiente"
+          "status": "pendiente",
+          "nota": "run11: halt manual desde sosh; apagado GSP parcial en log",
+          "fecha": "2026-09-09"
         }
       },
       "bench": {},
@@ -215,10 +221,24 @@
         "target/usb-diagnostic-2026-09-09-run4/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-09-run4/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-09-run5/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-09-09-run5/SOSODRV.txt"
+        "target/usb-diagnostic-2026-09-09-run5/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run6/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run6/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run7/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run7/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run8/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run8/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run9/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run9/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run10/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run10/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run11/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run11/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run12/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run12/SOSODRV.txt"
       ],
-      "notas": "ROG run5 USB 4a40cbca7-dirty, flush 13, uptime 297s. USB ya tenía heap 128 MiB e init WiFi sin NVM_ACCESS_CMD. Bloqueos run5: carrera INIT_COMPLETE; RISC-V halt+msgq sin drenar. Fix d91bc18f9: INIT_COMPLETE antes NVM, RPC poll sin cpuctl, CORE_RESUME. Pendiente reflashear. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
-      "actualizado": "2026-09-09"
+      "notas": "run12 ROG: GSP ok; canal GPFIFO chid=0 NO_MEMORY; WiFi alive+SF ok, HCMD legacy timeout; fixes chid/wide/mvm_up en árbol",
+      "actualizado": "2026-09-10"
     },
     {
       "id": "ax211-wifi",
@@ -298,28 +318,28 @@
         "ax200_ucode": "d23a382871e6e638957845b47424ab98dca5e68e022ab73eeeebb0b6f751d7e9 1368096B"
       },
       "git": {
-        "commit": "d91bc18f9",
-        "commit_corto": "d91bc18f9",
+        "commit": "1df51e817",
+        "commit_corto": "1df51e817",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "INIT_COMPLETE race fix; pendiente reflashear"
+        "cambios_locales": "run12: HCMD wide gen2 + mvm_up DQA; placa pendiente post-reflash"
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh viva (run5); sin red WiFi",
+        "nota": "run12: sosh en misma placa ROG (flush #43); no record-boot",
         "fecha": "2026-09-09"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY; INIT_EXTENDED_CFG rsp grp=2 id=0x03 (run5; NVM grp12 ok en USB)",
+          "nota": "run12: UCODE_ALIVE + INIT_COMPLETE + SHARED_MEM_CFG ok + SF_INIT_OFF",
           "fecha": "2026-09-09"
         },
         "scan": {
           "status": "fail",
-          "nota": "run5: carrera INIT_COMPLETE (NOTIF+timeout); sosh wifi scan: error de E/S",
+          "nota": "run12: timeout TX_ANT 0x98/PHY 0x08/MCC 0xc8/SCAN_CFG 0x0c; wifi scan E/S",
           "fecha": "2026-09-09"
         },
         "assoc_wpa2": {
@@ -327,7 +347,7 @@
         },
         "dhcp": {
           "status": "pendiente",
-          "nota": "Sin evidencia de DHCP WiFi; net: dhcp corresponde a rtl8169 con enlace DOWN",
+          "nota": "Sin DHCP WiFi en run11",
           "fecha": "2026-09-09"
         },
         "ssh": {
@@ -359,20 +379,87 @@
       },
       "bench": {},
       "logs": [
-        "/tmp/soso-placa/SOSOLOG.TXT",
-        "/tmp/soso-placa/SOSODRV.TXT",
-        "target/usb-diagnostic-2026-09-09/SOSOLOG.TXT.txt",
-        "target/usb-diagnostic-2026-09-09/SOSODRV.TXT.txt",
-        "target/usb-diagnostic-2026-09-09-run2/SOSOLOG.TXT.txt",
-        "target/usb-diagnostic-2026-09-09-run2/SOSODRV.TXT.txt",
-        "target/usb-diagnostic-2026-09-09-run3/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-09-09-run3/SOSODRV.txt",
-        "target/usb-diagnostic-2026-09-09-run4/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-09-09-run4/SOSODRV.txt",
-        "target/usb-diagnostic-2026-09-09-run5/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-09-09-run5/SOSODRV.txt"
+        "target/usb-diagnostic-2026-09-09-run6/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run6/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run7/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run7/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run8/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run8/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run9/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run9/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run10/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run10/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run11/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run11/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run12/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run12/SOSODRV.txt"
       ],
-      "notas": "ROG AX200 run5 USB 4a40cbca7-dirty, flush 13. NVM grp12 ya OK en USB; bloqueante run5: carrera INIT_COMPLETE (flag borrado tras NVM_ACCESS_COMPLETE). Fix d91bc18f9: armar init_complete antes de NVM. Pendiente reflashear y wifi scan. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
+      "notas": "run12 ROG AX200: alive+SF ok; FW sordo tras SF (HCMD legacy 4B); fix wide+DQA+mvm_up en árbol",
+      "actualizado": "2026-09-10"
+    },
+    {
+      "id": "deck-oled",
+      "equipo": "Valve Steam Deck OLED (Galileo, APU Sephiroth)",
+      "pci_ids": [
+        "1002:163f",
+        "17cb:1103"
+      ],
+      "firmware": {},
+      "git": {
+        "commit": "",
+        "commit_corto": "",
+        "version": "0.2.2",
+        "dirty": true,
+        "cambios_locales": "fase D: iommu IVRS, rotación fb, inventario USB"
+      },
+      "perfil_drivers": "live-usb + ath11k (pendiente)",
+      "arranques_consecutivos_ok": 0,
+      "sesion_sostenida": {
+        "status": "pendiente"
+      },
+      "wifi": {
+        "alive": {
+          "status": "pendiente"
+        },
+        "scan": {
+          "status": "pendiente"
+        },
+        "assoc_wpa2": {
+          "status": "pendiente"
+        },
+        "dhcp": {
+          "status": "pendiente"
+        },
+        "ssh": {
+          "status": "pendiente"
+        },
+        "reconexion": {
+          "status": "pendiente"
+        }
+      },
+      "gpu": {
+        "gsp_rpc": {
+          "status": "pendiente"
+        },
+        "vram_pool": {
+          "status": "pendiente"
+        },
+        "ce_readback": {
+          "status": "pendiente"
+        },
+        "compute_cpu_gpu": {
+          "status": "pendiente"
+        },
+        "carga_real": {
+          "status": "pendiente"
+        },
+        "apagado_limpio": {
+          "status": "pendiente"
+        }
+      },
+      "bench": {},
+      "logs": [],
+      "notas": "Fase D (docs/PLAN-STEAMDECK.md). WiFi QCNFA765/WCN6855 hw2.1 (ath11k, MHI+QMI) sin portar. GPU RDNA2 fuera de alcance: las etapas gpu quedan pendientes por diseño. Panel 800x1280 vertical: rot=270 automática. Sin puerto serie: la evidencia es SOSOLOG/SOSODRV de la ESP.",
       "actualizado": "2026-09-09"
     }
   ]

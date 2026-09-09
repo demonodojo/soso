@@ -10,6 +10,8 @@
 
 void lx_printk(const char *fmt, ...) { (void)fmt; }
 
+void lx_mdelay(unsigned int ms) { (void)ms; }
+
 void *lx_kmalloc(unsigned long size, unsigned gfp) {
     (void)gfp;
     return malloc(size);
@@ -37,6 +39,7 @@ void lx_dma_free_coherent(void *dev, size_t size, void *cpu, uint64_t dma) {
 #include "iwl_fw_body.inc"
 
 int cmd_wait_hostcheck(void);
+int mvm_init_hostcheck(void);
 
 static int count_nonzero(uint64_t *map, int max) {
     int n = 0;
@@ -132,6 +135,9 @@ int main(int argc, char **argv)
         return 1;
     }
     if (cmd_wait_hostcheck() != 0) {
+        return 1;
+    }
+    if (mvm_init_hostcheck() != 0) {
         return 1;
     }
     f = fopen(argv[1], "rb");
@@ -275,5 +281,11 @@ int main(int argc, char **argv)
         }
         puts("OK: scan v17 incluye probe_params");
     }
+    if (sizeof(struct iwl_scan_config) != 12) {
+        fprintf(stderr, "iwl_scan_config=%zu (esperaba 12 para SCAN_CFG v5)\n",
+                sizeof(struct iwl_scan_config));
+        return 1;
+    }
+    puts("OK: SCAN_CFG v5 payload iwl_scan_config 12 B");
     return 0;
 }
