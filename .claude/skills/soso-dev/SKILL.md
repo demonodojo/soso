@@ -38,14 +38,14 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **qwen3.8-27b**; ver `docs/L5c-on-box.md`) |
-| `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa. **`--skip-models`**: solo ESP+rootfs (bucle diario); **`--only kernel|rootfs`** |
+| `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa. **`--skip-models`**: solo ESP+rootfs (bucle diario); **`--only kernel|rootfs`**. **El agente no puede ejecutarlo:** sudo pide contraseña y no hay TTY; deja el comando al usuario (skill **soso-live**). |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
 | `cargo xtask sosolog --drv [/dev/sdX]` | Igual pero muestra `SOSODRV.TXT`: el informe hwscan del último arranque (alias `--hwscan`) |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
 | `cargo xtask test-update` | OTA E2E OVMF: apply, corte simulado + recovery, manifiesto inválido |
-| `cargo xtask test-resize` | B1: host `soso-resize-core` + recovery QEMU; grow QEMU pendiente sin KVM |
+| `cargo xtask test-resize` | B1: host + grow/recovery QEMU live (`drv-live-disk`, tiny 256 MiB; no uses el preset `qemu`) |
 | `cargo xtask hw-matrix show` | Matriz validación hardware (A8); `init`, `collect`, `record-boot` |
-| `./scripts/l6-a8-collect.sh` | Recoger boot/bench en placa → `docs/hw-matrix.json` |
+| `./scripts/l6-a8-collect.sh` | Recoger boot/bench en placa → `docs/hw-matrix.json`. Tras SOSOLOG de placa: `parse-logs` a `gb205-dgpu` y `ax211-wifi`; no `--boot-ok` ni etapas `ok` sin sosh / `UCODE_ALIVE_NTFY` / GSP RPC. |
 | `cargo xtask release [--publish]` | Empaqueta release en `target/release-soso/v<VERSION>/`; `--publish` sube a GitHub Releases |
 | `cargo xtask fetch-hf` | Descargar GGUF de Hugging Face, convertir a `.som` y preparar `SOSO_MODELS_DIR` |
 | `cargo xtask fetch-whisper` | Descargar `ggml-tiny.bin` (curl reanudable) y convertir a `target/whisper-tiny-model` |
@@ -91,10 +91,12 @@ QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
 ## WiFi (Intel AX211/AX200, hardware real)
 
 ```sh
-# Live USB ya incluye nouveau+iwlwifi; solo flash:
-cargo xtask flash-usb-live /dev/sdX --yes
-# Tras el primer flash (solo kernel/rootfs, modelos intactos):
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
+# Live USB ya incluye nouveau+iwlwifi; el usuario flashea (el agente no:
+# sudo pide contraseña y no hay TTY). Compila y deja este comando:
+sudo rm -f target/lxdde/generated_dummies-*.o
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
+# Primer flash completo / sin tocar modelos:
+# sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
 # WiFi: edita SOSOWIFI.TXT en ESP p1 o /etc/wifi.conf antes de flashear
 # SSH en placa: ssh -i target/soso_test_key soso@<ip>  (puerto 22)
 ./scripts/l6-iwl-fw-hostcheck.sh          # parser TLV, sin hardware
@@ -197,6 +199,15 @@ cargo test -q -p soso-http
 # Host: parser HTML/reflow de soso-web (sin red)
 cargo test -q -p soso-web-core
 
+# Host: Forja (HTTP fragmentado, cuerpo >4 KiB, binario, 400/401/500/503, timeout)
+cargo test -q -p soso-forja-server -- --test-threads=1
+
+# Host: parser hw-matrix (fixtures negativos B5)
+cargo test -q -p xtask hw_matrix::
+
+# Host: resize + caché GPT (B1/B6; lookup no relee la tabla)
+cargo test -q -p soso-resize-core
+
 # Host: soso-llm-core (planificador, kv KIVI/H2O, attn sparse, PLD, MoE, Qwen Gated/GDN), sosomodel, convert-gguf
 cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 # Subconjuntos útiles tras tocar inferencia:
@@ -216,6 +227,7 @@ cargo xtask test
 
 # Pre-commit / CI equivalente:
 cargo xtask check
+# CI: host-and-build + qemu-sys (init) + qemu-shards (4 shards TCG) en cada PR/push. e2e-live: workflow_dispatch o cron lunes.
 
 # QEMU: auto `-accel kvm` si /dev/kvm legible; forzar TCG para comparar:
 SOSO_QEMU_ACCEL=tcg cargo xtask test
@@ -229,10 +241,16 @@ cargo xtask test-usb
 # OTA recovery (host, sin QEMU):
 cargo test -p soso-update-core --features std --tests
 
-# Matriz hardware A8 (tras arranque en placa):
-cargo xtask hw-matrix init    # primera vez
-./scripts/l6-a8-collect.sh --id mi-placa --equipo "..." --pci 10de:2f18 --boot-ok
+# Matriz hardware A8 (tras arranque en placa con SOSOLOG/SOSODRV):
+# El agente SÍ actualiza docs/hw-matrix.json (no pide sudo). No marques
+# etapas `ok` a mano ni uses --boot-ok si no llegó a sosh.
+# Esta placa: GPU gb205-dgpu 10de:2f18, WiFi ax211-wifi 8086:7f70.
+cargo xtask hw-matrix parse-logs --id gb205-dgpu --sosolog SOSOLOG.TXT --sosodrv SOSODRV.TXT
+cargo xtask hw-matrix parse-logs --id ax211-wifi --sosolog SOSOLOG.TXT --sosodrv SOSODRV.TXT
+# ./scripts/l6-a8-collect.sh --id gb205-dgpu --pci 10de:2f18   # collect + parse si hay USB
+# cargo xtask hw-matrix record-boot --id gb205-dgpu            # solo si sosh; 3 seguidos = aceptación
 cargo xtask hw-matrix show
+# ALIVE `ok` solo con UCODE_ALIVE_NTFY. `timeout ALIVE` / GSP=fallo → fail, no ok.
 
 # Logs por shard: target/test-{llm-dense,llm-moe,sys,reclaim}-serial.log
 # Imágenes copiadas: target/test-{shard}-{bios,data,models}.img
@@ -356,8 +374,8 @@ comportamiento distinto (skill `soso-user-manual`).
 
 | Comando | Acción |
 |---------|--------|
-| `cargo run -p soso-forja-server` | Servidor host en `:8740` (sync/build remoto) |
-| `soso-forja all --host 10.0.2.2` | Guest: sync + build + `soso-update aplicar --local` |
+| `cargo run -p soso-forja-server` | Servidor host en `:8740` (sync/build remoto; `SOSO_FORJA_RELEASE=hola-std` para la demo B3) |
+| `soso-forja all --host 10.0.2.2` | Guest: sync + build; ELF (`hola-std`) → `apply` a `/bin/hola-std`; release completo → `soso-update` + halt |
 | `soso-forja local` | Plan de unidades en `/src/soso/forja-unit-graph.txt` |
 | `cargo test -p sosofs --features std` | sosofs host-first (rename, roundtrip) |
 | `docs/SELF-HOSTING.md` | Hitos 0–4 y verificación |

@@ -4,8 +4,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use soso_update_core::hash::decode_hex_sha256;
-use soso_update_core::kernel_apply::verify_staged_kernel;
+use soso_update_core::kernel_apply::{after_interrupt, verify_staged_kernel, AfterInterrupt};
 use soso_update_core::kernel_meta::{KernelMeta, KernelPhase, KERNEL_META_SIZE};
 use soso_update_core::mailbox::{Mailbox, MailboxCmd};
 use soso_update_core::UPD_KERNEL_SLOT_SIZE;
@@ -20,7 +19,28 @@ const KERNEL: &CStr16 = cstr16!("kernel-x86_64");
 
 /// Atiende el buzón de actualización. Devuelve una línea para el log.
 pub fn atender() -> Option<String> {
-    if let Some(msg) = recuperar_interrumpido() {
+    let mb = leer_fichero(BUZON)
+        .as_deref()
+        .map(Mailbox::parse)
+        .unwrap_or_default();
+    if let Some(meta) = leer_kernel_meta() {
+        match after_interrupt(&meta, &mb) {
+            AfterInterrupt::RecoverBackup => {
+                if let Some(msg) = recuperar_interrumpido() {
+                    return Some(msg);
+                }
+            }
+            AfterInterrupt::CompleteProbandoMailbox { version } => {
+                return match escribir_buzon(&Mailbox::format_probando(&version)) {
+                    Ok(()) => Some(format!(
+                        "actualiza: buzón PROBANDO recuperado (v{version})"
+                    )),
+                    Err(e) => Some(format!("actualiza: ERROR buzón PROBANDO: {e}")),
+                };
+            }
+            AfterInterrupt::ContinueMailbox => {}
+        }
+    } else if let Some(msg) = recuperar_interrumpido() {
         return Some(msg);
     }
     let texto = leer_fichero(BUZON)?;
@@ -85,18 +105,18 @@ fn aplicar_kernel(size: u64, hash_hex: &str, version: &str) -> Result<(), String
     let (backup_size, backup_hash) = soso_update_core::backup_digest(&viejo);
 
     let mut meta = KernelMeta::staged(version, size, hash_hex);
-    meta.phase = KernelPhase::Applying;
     meta.backup_size = backup_size;
     meta.backup_hash = backup_hash.clone();
-    escribir_kernel_meta(&meta).map_err(|e| format!("meta applying: {e}"))?;
-
+    // El hueco pasa de kernel nuevo a backup. No marcar Applying hasta que
+    // la copia esté en disco: un corte a medias dejaría el slot ilegible y
+    // `needs_recovery` intentaría restaurar basura.
     escribir_fichero_exacto(SLOT, &viejo).map_err(|e| format!("copia backup en hueco: {e}"))?;
 
     meta.phase = KernelPhase::BackupReady;
     escribir_kernel_meta(&meta).map_err(|e| format!("meta backup: {e}"))?;
 
     meta.phase = KernelPhase::Applying;
-    escribir_kernel_meta(&meta).map_err(|e| format!("meta applying2: {e}"))?;
+    escribir_kernel_meta(&meta).map_err(|e| format!("meta applying: {e}"))?;
 
     escribir_fichero_exacto(KERNEL, &nuevo).map_err(|e| format!("escribir kernel nuevo: {e}"))?;
 

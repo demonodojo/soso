@@ -15,7 +15,10 @@ pub mod plan;
 pub mod semver;
 
 pub use hash::{hex_sha256, sha256, Hash256, Hasher};
-pub use kernel_apply::{plan_apply, restore_from_slot, verify_staged_kernel, ApplyError, ApplyPlan};
+pub use kernel_apply::{
+    after_interrupt, plan_apply, restore_from_slot, verify_staged_kernel, AfterInterrupt,
+    ApplyError, ApplyPlan,
+};
 pub use kernel_meta::{backup_digest, KernelMeta, KernelPhase, MetaError, KERNEL_META_MAGIC, KERNEL_META_SIZE};
 pub use mailbox::{Mailbox, MailboxCmd};
 pub use manifest::{FileEntry, Manifest, MANIFEST_MAGIC, ValidateError};

@@ -3,7 +3,6 @@
 //! Si no hay mass storage, el controlador puede quedar activo para teclado HID.
 //! Se conservan todos los xHCI (como Linux: un HCD por controlador).
 
-use crate::arch::pit;
 use crate::arch::tsc;
 use crate::drivers::dma;
 use crate::drivers::pci;
@@ -68,16 +67,7 @@ fn soso_dma_alloc(size: usize, _align: usize) -> (*mut u8, u64) {
 }
 
 fn soso_delay_us(us: u32) {
-    if tsc::ready() {
-        tsc::spin_us(us as u64);
-        return;
-    }
-    // Fallback burdo si el TSC aún no está calibrado.
-    let ms = (us as u64).div_ceil(1000).max(1);
-    let fin = pit::uptime_ms() + ms;
-    while pit::uptime_ms() < fin {
-        core::hint::spin_loop();
-    }
+    tsc::delay_us(us as u64);
 }
 
 /// MEM + Bus Master (como `pci_enable_device` mínimo de Linux).
@@ -110,7 +100,16 @@ fn try_probe_ctrl(
         tsc::spin_us(20_000);
     }
 
-    let mut ctrl = unsafe { XhciController::init(bar_va) };
+    let mut ctrl = match unsafe { XhciController::init(bar_va) } {
+        Ok(c) => c,
+        Err(e) => {
+            println!(
+                "usb: xHCI {:04x}:{:04x} PCI {:02x}:{:02x}.{} omitido ({e})",
+                xdev.vendor_id, xdev.device_id, xdev.bus, xdev.device, xdev.function
+            );
+            return None;
+        }
+    };
     if !ctrl.any_root_port_connected() {
         ctrl.recover_root_ports();
     }
@@ -268,6 +267,30 @@ pub fn write_sectors(lba: u64, buf: &[u8]) -> Result<(), &'static str> {
         write_sector(lba + i as u64, sec)?;
     }
     Ok(())
+}
+
+pub fn supports_durable_flush() -> bool {
+    HOSTS
+        .lock()
+        .iter()
+        .any(|h| h.ms.as_ref().is_some_and(|m| m.sync_cache))
+}
+
+pub fn flush() -> Result<(), &'static str> {
+    let mut guard = HOSTS.lock();
+    let host = guard
+        .iter_mut()
+        .find(|h| h.ms.is_some())
+        .ok_or("sin usb")?;
+    let ms = host.ms.as_ref().ok_or("sin mass storage")?;
+    if !ms.sync_cache {
+        return Err("usb sync cache no soportado");
+    }
+    if host.ctrl.synchronize_cache10(ms) {
+        Ok(())
+    } else {
+        Err("usb flush")
+    }
 }
 
 pub fn active() -> bool {

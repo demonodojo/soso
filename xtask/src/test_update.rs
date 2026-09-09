@@ -13,7 +13,7 @@ use soso_update_core::pack::pack_rootfs_con;
 use soso_update_core::semver::parse as parse_semver;
 use soso_update_core::UPD_KERNEL_SLOT_SIZE;
 
-use crate::test::{esperar_en_fichero, ssh_guion};
+use crate::test::{esperar_en_fichero, ssh_guion_hasta};
 
 const SSH_PORT: u16 = 2243;
 const MAC: &str = "52:54:00:12:34:43";
@@ -152,6 +152,18 @@ fn preparar_release_prueba(root: &Path) {
         files,
     };
     std::fs::write(rel_dir.join("manifest.txt"), manifest.format()).expect("manifest");
+    std::fs::write(
+        rel_dir.join("manifest-malo.txt"),
+        format!(
+            "{}\nversion=9.9.9\nbuild=x\nfecha=2026-01-01\n\
+             kernel {} 10\npack {} 20\nf {} 0 5 ../etc/passwd\n",
+            soso_update_core::manifest::MANIFEST_MAGIC,
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+        ),
+    )
+    .expect("manifest-malo");
     println!("test-update: release de prueba en rootfs/var/actualiza-prueba/");
 }
 
@@ -166,11 +178,12 @@ fn fase_aplicar(
     let qemu = lanzar_live(code, vars, live, serial)?;
     let _guard = Matar(qemu.child);
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
-    let salida = ssh_guion(
+    let salida = ssh_guion_hasta(
         key,
         SSH_PORT,
         "soso-update aplicar --local /var/actualiza-prueba --forzar\nhalt\n",
-        Duration::from_secs(600),
+        Duration::from_secs(180),
+        "soso-update: listo",
     )?;
     if !salida.contains("listo") {
         return Err(format!("aplicar no terminó bien: {salida:?}"));
@@ -201,15 +214,15 @@ fn fase_comprobar_version(
     let qemu = lanzar_live(code, vars, live, serial)?;
     let _guard = Matar(qemu.child);
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
-    let salida = ssh_guion(
+    let salida = ssh_guion_hasta(
         key,
         SSH_PORT,
         // El `cat` va primero: la última línea del guion se pierde a veces al
         // cerrar la sesión SSH, y la salida de `estado` sirve de barrera.
-        // Termina en `halt`, no en `exit`: `exit` cierra sosh pero deja la
-        // sesión SSH abierta y el guion se come el timeout entero.
+        // `halt` apaga el guest y SSH se cuelga: cortar al ver `rootfs:`.
         "cat /etc/actualiza-marca.txt\nsoso-update estado\nhalt\n",
         Duration::from_secs(120),
+        &format!("rootfs: {ver}"),
     )?;
     // Ojo: `estado` también imprime el fichero de progreso "APLICANDO <ver>"
     // que queda si `aplicar` se cortó a medias, así que exigimos la línea del
@@ -261,11 +274,12 @@ fn fase_recuperacion_corte(
         ));
     }
 
-    let salida = ssh_guion(
+    let salida = ssh_guion_hasta(
         key,
         SSH_PORT,
         &format!("soso-update estado\nhalt\n"),
         Duration::from_secs(120),
+        &format!("rootfs: {ver_base}"),
     )?;
     if !salida.contains(&format!("rootfs: {ver_base}")) {
         return Err(format!(
@@ -288,21 +302,17 @@ fn fase_manifiesto_invalido(
     let _guard = Matar(qemu.child);
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
 
-    let bad_manifest = format!(
-        "{}\nversion=9.9.9\nbuild=x\nfecha=2026-01-01\n\
-         kernel {} 10\npack {} 20\nf {} 0 5 ../etc/passwd\n",
-        soso_update_core::manifest::MANIFEST_MAGIC,
-        "a".repeat(64),
-        "b".repeat(64),
-        "c".repeat(64),
-    );
-    let guion = format!(
-        "cat > /var/actualiza-prueba/manifest.txt <<'EOF'\n{bad_manifest}EOF\n\
+    // sosh no tiene heredoc; el manifiesto malo va en el rootfs de prueba.
+    let salida = ssh_guion_hasta(
+        key,
+        SSH_PORT,
+        "cp /var/actualiza-prueba/manifest-malo.txt /var/actualiza-prueba/manifest.txt\n\
          soso-update aplicar --local /var/actualiza-prueba --forzar\n\
-         cat /etc/actualiza-marca.txt\nhalt\n"
-    );
-    let salida = ssh_guion(key, SSH_PORT, &guion, Duration::from_secs(180))?;
-    if !salida.contains("manifest") {
+         cat /etc/actualiza-marca.txt\nhalt\n",
+        Duration::from_secs(180),
+        "manifest no válido",
+    )?;
+    if !salida.contains("manifest no válido") {
         return Err(format!("aplicar no rechazó el manifiesto: {salida:?}"));
     }
     if !salida.contains(MARCA_NUEVA.trim()) {

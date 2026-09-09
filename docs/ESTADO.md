@@ -15,9 +15,12 @@ Versión en árbol: **0.2.2** (septiembre 2026).
 
 | Entrega | Estado | Notas |
 |---------|--------|-------|
-| **B1** Redimensionado recuperable | Casi cerrado | Host + recovery QEMU OK (`cargo xtask test-resize`). **Pendiente:** grow QEMU en test-resize (TCG lento; usar KVM). USB/NVMe sin flush durable. |
-| **B2** Memoria, ELF, argv | Casi cerrado | Kernel + `init test` (mprotect/mremap/argv/env/ELF). **Pendiente:** validar en QEMU (`cargo xtask test`). |
-| **B3–B6** | Pendiente | Forja, CI, hw-matrix, caché GPT. |
+| **B1** Redimensionado recuperable | Cerrado en QEMU | Grow/recovery virtio OK. USB flush + `test-usb` 4/4. Flush fallido no confirma slide (host). Corte de alimentación en placa pendiente. |
+| **B2** Memoria, ELF, argv | Cerrado en init | Validado `init` (KVM). `llm-dense`/`reclaim`/`llm-moe` (tiny-moe, latent-moe, q4k) OK el 2026-09-09. |
+| **B3** Forja remota | Cerrado | Token fuera de loopback; POST y GET con Bearer. Demo guest `hola-std`. |
+| **B4** CI | Cerrado | OTA: sosh prefaulta PT_LOAD. `qemu-sys` (init) y `qemu-shards` (4 shards TCG) en cada PR/push. `e2e-live` en cron/`workflow_dispatch`. |
+| **B5** Matriz hardware | Parser + PCI | Merge no pisa `ok`. Hashes FW del árbol. GA107 `10de:249c`. Huecos `????` rechazados. **Pendiente:** revalidar placa. |
+| **B6** Caché GPT | Medido host+guest | Live p3 8 MiB: 35.9 → 1283 MiB/s. Guest `tiny` 40/30 ms. Guest `bench` 161 MiB: 8 tok 580 ms frío / 860 ms caliente; ~202 MiB de pesos por run (CPU, no GPU). |
 
 ## Comprobaciones automáticas
 
@@ -36,7 +39,7 @@ declarar release.
 | Componente | Evidencia en placa | Pendiente |
 |--------------|-------------------|-----------|
 | GPU GB205 (`10de:2f18`) | G1–G5 GO documentado en README/skills | Revalidar tras cambios FWSEC/falcon |
-| GPU GA107 (Ampere) | Código FWSEC-FRTS | Matriz A8 sin `ok` en etapas GPU |
+| GPU GA107 (Ampere) | Código FWSEC-FRTS; PCI `10de:249c` | Matriz A8 sin `ok` en etapas GPU |
 | WiFi AX211 gen3 | Parser host + VFIO script | ALIVE/assoc/DHCP en placa real |
 | WiFi AX200 gen2 | Parser host | Context-info gen2 en placa |
 | QEMU test shards | `cargo xtask test` | Sustituto de placa, no certifica WiFi/GPU real |
@@ -50,7 +53,8 @@ Detalle por etapa: `cargo xtask hw-matrix show`.
   `SOSOKRN.MET`: revert legacy limitado; reflashear para meta durable.
 - **Rootfs:** actualización parcial por fichero; **no** hay rollback automático
   de binarios anteriores (progreso en `/etc/actualiza.estado` para reintentar).
-- **Confirmación:** init solo marca `OK` tras rootfs accesible y arranque de
-  `/bin/sosh`.
+- **Confirmación:** init solo marca `OK` tras rootfs accesible, `/tmp/sosh-ready`
+  (sosh prefaultó su ELF y llegó a `main`) y `kill(pid, 0)` (~400 ms más
+  de sondeo; el hijo sigue vivo).
 
 Manual de usuario: [`MANUAL-USUARIO.md`](../MANUAL-USUARIO.md) (sección soso-update).

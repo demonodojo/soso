@@ -281,6 +281,7 @@ fn ctrl_byte(out: keymap::KeyOutput) -> keymap::KeyOutput {
 fn emit_tty_byte(b: u8) {
     if b == 0x03 {
         crate::task::note_serial_sigint();
+        crate::task::kick_scheduler();
         return;
     }
     let mut rx = RX.lock();

@@ -2,7 +2,7 @@
 //!
 //! Solo sobrescribe los sectores de datos del fichero; no toca FAT ni directorio.
 
-use crate::drivers::espfat::{self, SECTOR, Slot};
+use crate::drivers::espfat::{self, Slot, SECTOR};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use spin::Once;
 
@@ -54,7 +54,7 @@ pub fn poll() {
     if !ACTIVE.load(Ordering::Relaxed) {
         return;
     }
-    let now = crate::arch::pit::uptime_ms() as usize;
+    let now = crate::arch::tsc::uptime_ms() as usize;
     let prev = LAST_POLL_MS.load(Ordering::Relaxed);
     if now.saturating_sub(prev) < POLL_MS as usize {
         return;
@@ -81,7 +81,7 @@ pub fn poll() {
 fn flush_cabecera() -> Result<(), ()> {
     let slot = SLOT.get().and_then(|s| *s).ok_or(())?;
     let n = FLUSH_COUNT.load(Ordering::Relaxed);
-    let uptime = crate::arch::pit::uptime_ms();
+    let uptime = crate::arch::tsc::uptime_ms();
     let log_len = LAST_FLUSH_LEN.load(Ordering::Relaxed);
 
     // SAFETY: mismo BUF y mismo llamante único que `flush`.
@@ -95,7 +95,11 @@ fn flush_cabecera() -> Result<(), ()> {
     let ok = crate::drivers::logbuf::run_without_capture(|| {
         espfat::write(slot.data_lba, &buf[..SECTOR]).is_ok()
     });
-    if ok { Ok(()) } else { Err(()) }
+    if ok {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 pub fn flush() -> Result<(), ()> {
@@ -105,12 +109,11 @@ pub fn flush() -> Result<(), ()> {
     let slot = SLOT.get().and_then(|s| *s).ok_or(())?;
     let log_len = crate::drivers::logbuf::len();
     let n = FLUSH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    let uptime = crate::arch::pit::uptime_ms();
+    let uptime = crate::arch::tsc::uptime_ms();
 
     // SAFETY: solo la BSP llama a flush (scheduler/kshell/panic); no reentrante.
-    let buf = unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(BUF).cast(), FILE_SIZE)
-    };
+    let buf =
+        unsafe { core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(BUF).cast(), FILE_SIZE) };
 
     let mut hdr = [0u8; 160];
     let hlen = format_header(&mut hdr, n, uptime, log_len);

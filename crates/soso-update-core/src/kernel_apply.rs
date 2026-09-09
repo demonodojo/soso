@@ -2,6 +2,37 @@
 
 use crate::hash::decode_hex_sha256;
 use crate::kernel_meta::{KernelMeta, KernelPhase, MetaError};
+use crate::mailbox::{Mailbox, MailboxCmd};
+
+/// Qué hacer al arrancar si el apply se cortó entre fases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterInterrupt {
+    RecoverBackup,
+    /// Meta `Probando` pero el buzón sigue en KERNEL/Idle: no reaplicar.
+    CompleteProbandoMailbox { version: alloc::string::String },
+    ContinueMailbox,
+}
+
+/// Corte entre meta `Probando` y el buzón: completar el buzón, no volver a aplicar.
+pub fn after_interrupt(meta: &KernelMeta, mb: &Mailbox) -> AfterInterrupt {
+    if meta.needs_recovery() {
+        return AfterInterrupt::RecoverBackup;
+    }
+    if meta.phase == KernelPhase::Probando {
+        match &mb.cmd {
+            MailboxCmd::Kernel { .. } | MailboxCmd::Idle => {
+                return AfterInterrupt::CompleteProbandoMailbox {
+                    version: meta.version.clone(),
+                };
+            }
+            MailboxCmd::Probando { .. }
+            | MailboxCmd::Ok { .. }
+            | MailboxCmd::Revertir
+            | MailboxCmd::Revertido { .. } => {}
+        }
+    }
+    AfterInterrupt::ContinueMailbox
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyError {
@@ -92,5 +123,49 @@ mod tests {
         let new = b"new".to_vec();
         let err = plan_apply(&old, &new, new.len() as u64, &"f".repeat(64), "0.2.3");
         assert_eq!(err, Err(ApplyError::HashMismatch));
+    }
+
+    #[test]
+    fn cut_probando_before_mailbox_completes_mailbox() {
+        let mut meta = KernelMeta::staged("0.2.9", 10, &"a".repeat(64));
+        meta.phase = KernelPhase::Probando;
+        meta.backup_size = 8;
+        meta.backup_hash = "b".repeat(64);
+        let mb = Mailbox {
+            cmd: MailboxCmd::Kernel {
+                size: 10,
+                hash: "a".repeat(64),
+                version: "0.2.9".into(),
+            },
+        };
+        assert_eq!(
+            after_interrupt(&meta, &mb),
+            AfterInterrupt::CompleteProbandoMailbox {
+                version: "0.2.9".into()
+            }
+        );
+        let idle = Mailbox::default();
+        assert!(matches!(
+            after_interrupt(&meta, &idle),
+            AfterInterrupt::CompleteProbandoMailbox { .. }
+        ));
+        let ya = Mailbox {
+            cmd: MailboxCmd::Probando {
+                version: "0.2.9".into(),
+            },
+        };
+        assert_eq!(after_interrupt(&meta, &ya), AfterInterrupt::ContinueMailbox);
+    }
+
+    #[test]
+    fn applying_still_recovers_backup() {
+        let mut meta = KernelMeta::staged("0.2.9", 10, &"a".repeat(64));
+        meta.phase = KernelPhase::Applying;
+        meta.backup_size = 8;
+        meta.backup_hash = "b".repeat(64);
+        assert_eq!(
+            after_interrupt(&meta, &Mailbox::default()),
+            AfterInterrupt::RecoverBackup
+        );
     }
 }

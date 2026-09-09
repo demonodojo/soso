@@ -86,10 +86,20 @@ de alimentación real se registra por backend, sin deducirla del resultado host.
 **Estado (sept 2026).** Implementado: crate `soso-resize-core` (journal, slides
 reanudables, recovery GPT), recovery en arranque (`fs_resize::recover_before_mount`),
 preflight (journal, import activo, flush durable, geometría), `soso-resize` userspace,
-17 tests host en `cuts.rs`, `cargo xtask test-resize` (recovery QEMU + inyección
-INTENT). **Pendiente:** fase grow en `test-resize` vía QEMU (shrink de modelos ~20
-GiB en TCG sin KVM; requiere `/dev/kvm` o tiempo largo). Flush durable USB/NVMe
-sigue `ENOTSUP`; prueba de corte de alimentación por backend en placa.
+21 tests host en `cuts.rs`. `cargo xtask test-resize` OK en QEMU live (KVM,
+`drv-live-disk`, tiny 256 MiB): grow `rootfs +32K` y recovery tras corte
+`SHRINK_MODELS` (slide+GPT; finalize no re-crece si el montaje ya estiró
+sosofs). USB: `SYNCHRONIZE CACHE(10)` (IMMED=0) al enumerar; si CSW OK,
+`backend_supports_durable_flush` es cierto y `disk_flush` lo reenvía. NVMe:
+opcode Flush del namespace. Sin sonda USB o sin CSW OK, resize sigue
+`ENOTSUP`. QEMU `test-usb` (KVM, 2026-09-09): `qemu-xhci` y `nec-usb-xhci`
+llegan a `sync_cache=true` (imagen live por escenario, no compartida).
+`test-usb` kbd/hub: una sola sesión HMP para `sendkey` (antes se
+reconectaba por tecla). Los cuatro escenarios OK (KVM, 2026-09-09).
+Si `flush` falla al terminar un slide, `slide_done` no avanza (host
+`slide_flush_error_does_not_commit_progress` / GPT
+`apply_gpt_flush_error_keeps_journal_phase`). No sustituye un corte de
+alimentación en placa.
 
 ## B2. Hacer efectivos los contratos de memoria y procesos
 
@@ -141,8 +151,10 @@ regresiones a `init test` y mantener el shard con presión de memoria.
 y `read_spawn_env` con tablas delimitadas (límites 256×4096 B), codificación
 `SOSA` en pila, validación ELF en `load`/`load_lazy`. Regresiones B2 en
 `init test`: mprotect, mremap (grow/shrink/colisión), argv, envp (`x=y`), ELF
-malformado y truncado (cabecera parcial de `/bin/init`). **Pendiente:** validar
-`init test` en QEMU (`cargo xtask test`, shard sys; preferible KVM).
+malformado y truncado (cabecera parcial de `/bin/init`). **Validado en QEMU**
+(`cargo xtask test -- --guest sys --only init`, KVM, 2026-09-09). Shard sys
+completo y los demás shards de `cargo xtask test` siguen como puerta de
+integración (B4).
 
 ## B3. Cerrar un bucle de desarrollo remoto demostrable
 
@@ -193,6 +205,23 @@ artefactos y compilación remota. El primer compilador nativo real queda como
 hito posterior a B2/B3, con una prueba que compile y ejecute un programa;
 `--version` no sirve como criterio de cierre.
 
+**Estado (sept 2026).** Servidor: HTTP con `Content-Length` (cuerpos binarios,
+timeout, fragmentación), sync con hashes SHA-256, rutas normalizadas (rechazo
+de `..`), borrados respecto al manifiesto previo, builds serializados (`503`),
+árbol en `target/forja-work` o `SOSO_FORJA_WORK`, bind `SOSO_FORJA_BIND`,
+token `SOSO_FORJA_TOKEN` (obligatorio si el bind no es loopback; Bearer).
+Cliente: `--token`; no trata 4xx/5xx como éxito; un
+fallo de `soso-update` no hace `halt`. Artefacto identificado: `forja-id` /
+`X-Forja-Build-Id` / `GET /build-id` ligados al hash de los fuentes. Demo
+host `hola-std`: sync de un mensaje nuevo → pack con esa identidad; con
+`SOSO_FORJA_RELEASE=hola-std` el pack es el ELF y contiene el mensaje
+(`hola_std_demo_identified_artifact`, `hola_std_compiles_synced_message`).
+15 tests host. **Demo guest en QEMU** (`cargo xtask test -- --guest sys --only forja`):
+`write-hola` → sync → build identificado → `apply` del ELF → `/bin/hola-std`
+muestra el mensaje nuevo. Un pack ELF no llama a `soso-update` ni hace `halt`.
+`0.0.0.0` sin `SOSO_FORJA_TOKEN` no arranca. Con token, POST y GET
+(incluidos pack/manifest/kernel/`/build-id`) exigen Bearer.
+
 ## B4. Completar la puerta de integración existente
 
 **Hallazgos en el código.** El workflow
@@ -212,19 +241,54 @@ incluso al fallar. Añadir una ejecución programada o manual para
 declarados. Usar lockfiles y evitar alterar dependencias durante la validación.
 
 La recuperación OTA ya tiene helpers y pruebas: ampliar la cobertura para
-ejercitar el **orden de operaciones del shim real**. Actualmente
-[aplicar_kernel](boot-shim/src/actualiza.rs) escribe meta `Applying` antes de
-completar el backup; los tests de
-[recovery.rs](crates/soso-update-core/tests/recovery.rs) construyen backups
-completos en memoria. Añadir cortes antes/durante ese backup y entre la meta
-`Probando` y el buzón, además del fallo de una shell perezosa después de que
-`spawn` haya devuelto PID. Corregir las transiciones que fallen esos escenarios.
+ejercitar el **orden de operaciones del shim real**.
+[aplicar_kernel](boot-shim/src/actualiza.rs) copia el backup y marca
+`BackupReady` antes de `Applying`. Los tests de
+[recovery.rs](crates/soso-update-core/tests/recovery.rs) cubren corte antes
+y a medias del backup (no restauran). Queda el corte entre la meta
+`Probando` y el buzón, y el fallo de una shell perezosa después de que
+`spawn` haya devuelto PID.
 
 **Aceptación.** Un error de shim, una regresión Forja y un fallo QEMU hacen
 fallar sus jobs. Los resultados indican qué perfil se probó y qué quedó sin
 ejecutar. La candidata a release tiene logs de instalación y actualización
 con sus escenarios de fallo, sin convertir un aviso en una comprobación
 superada. La disponibilidad de WiFi/GPU física no bloquea los jobs host/QEMU.
+
+**Estado (sept 2026).** `cargo xtask check` falla si falta el shim o los tests
+de Forja/`soso-resize-core`. El workflow ya no usa `|| true` en los targets.
+Jobs aparte: `qemu-sys` (init en QEMU, timeout 90 min) y `qemu-shards`
+(4 shards TCG, `SOSO_TEST_JOBS=1`, timeout 360 min) en cada PR y push;
+`e2e-live` (`test-usb`/`test-install`/`test-update`) en `workflow_dispatch`
+y cron semanal; logs como artefactos. `workflow_dispatch`/`shards` y el
+cron también corren los 4 shards.
+El shim ya no escribe `Applying` antes de completar el backup del kernel
+(un corte a medias no marca recuperación sobre el hueco del kernel nuevo).
+Tests host: `fault_before_backup_must_not_restore`,
+`fault_during_partial_backup_must_not_restore` y corte `Probando`→buzón
+(`after_interrupt`: completa el buzón, no reaplica). Init no marca `OK` hasta que sosh deja `/tmp/sosh-ready` y `kill(pid, 0)`
+sigue vivo (no basta el PID de `spawn` ni 50 ms). sosh falta las páginas
+PT_LOAD y construye el lector **antes** de la marca; init espera ~400 ms
+más de sondeo por si el proceso muere al instante. Si el hijo vive sin
+marca, la shell sigue y el buzón no pasa a `OK`. Un page-fault de un
+binario **lanzado después** (no de sosh) sigue fuera de esta confirmación.
+`kill(pid, 0)` es sondeo
+(`SIGPROBE`); cubierto en `init test`. `qemu-sys` (`cargo xtask test -- --guest sys --only init`) corre en
+cada PR y push (timeout 90 min, TCG en Actions) y comprueba
+`/tmp/sosh-ready` por SSH. `cargo xtask check`
+incluye `xhci-nostd` (CDB SYNC CACHE) y corre `hw_matrix::` con
+`-p xtask` desde la raíz. `e2e-live` sigue en `workflow_dispatch` y cron
+semanal. `cargo xtask test-update` (KVM, 2026-09-09): aplicar, versión,
+recuperación `applying` y manifiesto `..` OK; SSH corta al ver la marca
+(`ssh_guion_hasta`) porque `halt` no cierra la sesión. El paso sys
+«SSH + halt» (`ssh_sesion`) usa el mismo corte (token `soso_ssh_ok_42`)
+en vez de esperar 60 s a que el cliente se cuelgue. `test-install` (KVM):
+copia + shim `Boot0009` + arranque solo NVMe OK. Las comprobaciones host
+miran el fin **más alto** de la GPT (p3 detrás de p4) y magic `SOSOFS11`.
+`DISK_FLAG_SOSO` acepta también `SOSOFS10` (reinstalar un disco viejo).
+`cargo xtask check` corre `test_install::ultima_llega_al_final` (p3 detrás de p4).
+`e2e-live` sigue en `workflow_dispatch` y cron semanal (OVMF, timeout 360 min; no bloquea
+el merge si WiFi/GPU física no está).
 
 ## B5. Evitar que la matriz hardware certifique un fallo
 
@@ -255,6 +319,20 @@ con tráfico WiFi o resultado numérico GPU según el dispositivo. Corregir los
 datos provisionales solo a partir de inventario real. El trabajo de bring-up
 que aparezca se estima aparte; una etapa no probada queda pendiente.
 
+**Estado (sept 2026).** Parser estricto: `pool VRAM=no`, `unload=fallo`,
+`soso-llm run` solo, dispositivo software, `wpa2`/`reconnect`/`wifi scan` y
+el banner `sosh —` ya no marcan `ok`. Estados `fail` / `no_aplica`. Fixtures
+negativos y log truncado en `xtask` (`hw_matrix::`). `parse-logs` fusiona
+por etapa: un arranque truncado no baja un `ok`/`fail` a `pendiente`; un
+`fail` o `ok` nuevo sí actualiza. Hashes SHA-256 del firmware **del árbol**
+(`rootfs/lib/firmware`) en `hw-matrix.json` (ucode AX211/AX200; GSP gb205;
+ga107 usa el blob ga102 de fallback). No acreditan una pasada en placa.
+PCI de GA107: `10de:249c` (ROG 3050 Mobile, inventario de
+[`docs/L5c-on-box.md`](docs/L5c-on-box.md)); `collect --pci` y los tests
+rechazan huecos `????`. `g1-check --vfio-hint` no imprime `echo 10de ????`
+si `lspci -n` no da un id concreto. Las etapas de placa siguen `pendiente` hasta
+revalidar: tres arranques y una sesión sostenida.
+
 ## B6. Reducir el coste de E/S del disco live
 
 **Hallazgo en el código.** `LiveRootDev::part` y `LiveModelsDev::part` llaman a
@@ -272,6 +350,25 @@ no vuelven a leer GPT y que, tras actualizar la geometría, usan los límites
 correctos. Comparar lecturas físicas, MiB/s y tiempo hasta primer token en
 frío/caliente con la misma imagen y modelo; guardar los resultados. No fijar
 un objetivo de tok/s sin una línea base ni atribuir a GPU una mejora de disco.
+
+**Estado (sept 2026).** `LiveRootDev`/`LiveModelsDev` usan geometría en RAM
+(`refresh_geometry` tras GPT de resize/recovery). `GeomCache` en
+`soso-resize-core` (21 tests host: lookup no relee GPT; reload ve límites
+nuevos). `space_info` lee la caché, no la tabla. Medido en la misma
+`soso-live.img` (8 MiB de p3, 2026-09-09): releer GPT por sector
+557056 lecturas / 35.9 MiB/s; con caché 16384 lecturas / 1283 MiB/s.
+Disco en RAM 4 MiB: 211 vs 11056 MiB/s. Guest sobre la **misma**
+`soso-live.img` (OVMF + virtio-blk + `live-disk`, KVM, 2026-09-09, CPU, no
+GPU): `tiny` en p3. Frío: carga 0 ms / 2 peticiones; generado 8 tokens /
+40 ms; disco 44 pet / 13 ms. Caliente (otro proceso): carga 10 ms / 0
+peticiones; 8 tokens / 30 ms; disco 42 pet / 5 ms. Mismo protocolo con
+`bench` (161 MiB, hidden=1024, 4 capas) en p3 de 256 MiB, CPU, no GPU
+(logs `target/test-b6/ssh-*-bench.txt`). Frío: carga 0 ms / 2 pet; 8
+tokens / 580 ms; disco 1626 pet / 207368 KiB / 285 ms (caché 0 %).
+Caliente: carga 0 ms / 0 pet; 8 tokens / 860 ms; disco 1616 pet /
+206848 KiB / 462 ms (caché 100 %). La carga no relee GPT; el generate
+sigue leyendo ~202 MiB de pesos. No fijar objetivo de tok/s ni atribuir
+el tiempo a GPU.
 
 ## Secuencia propuesta
 

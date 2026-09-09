@@ -140,17 +140,6 @@ static void iwl_pcie_set_ltr(struct iwl_ax211_priv *iwl)
     iwl_write32(iwl, CSR_LTR_LONG_VAL_AD, ltr_val);
 }
 
-static int iwl_wait_mac_ready(struct iwl_ax211_priv *iwl, int ms)
-{
-    while (ms-- > 0) {
-        uint32_t gp = iwl_read32(iwl, CSR_GP_CNTRL);
-        if (gp & CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY)
-            return 0;
-        lx_mdelay(1);
-    }
-    return -1;
-}
-
 static void iwl_sw_reset(struct iwl_ax211_priv *iwl)
 {
     /* iwl_trans_pcie_sw_reset: pulso SW_RESET, sin escribir 0 después. */
@@ -205,29 +194,12 @@ static int iwl_clear_persistence_bit(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
-static void iwl_reset(struct iwl_ax211_priv *iwl)
-{
-    iwl_sw_reset(iwl);
-}
-
 static int iwl_pcie_check_hw_rf_kill(struct iwl_ax211_priv *iwl)
 {
     uint32_t gp = iwl_read32(iwl, CSR_GP_CNTRL);
 
     if (!(gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW)) {
         lx_printk("iwl_trans: RF-kill hardware activo (GP_CNTRL=0x%08x)\n", gp);
-        return -1;
-    }
-    return 0;
-}
-
-static int iwl_apm_init(struct iwl_ax211_priv *iwl)
-{
-    iwl_reset(iwl);
-    iwl_write32(iwl, CSR_GP_CNTRL,
-                CSR_GP_CNTRL_REG_FLAG_INIT_DONE | CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
-    if (iwl_wait_mac_ready(iwl, 2000) != 0) {
-        lx_printk("iwl_trans: MAC no listo\n");
         return -1;
     }
     return 0;
@@ -466,7 +438,25 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
     void *iml_cpu;
     uint32_t gp;
 
-    if (iwl_apm_init(iwl) != 0)
+    /* El mismo preámbulo que gen2: `iwl_apm_init` reescribía GP_CNTRL entero
+     * (sin chicken bits / HAP_WAKE) y el IML no arrancaba (INT=0, rb_hw=0). */
+    if (iwl_prepare_card_hw(iwl) != 0)
+        return -1;
+    iwl_sw_reset(iwl);
+    if (iwl_prepare_card_hw(iwl) != 0)
+        return -1;
+    if (iwl_clear_persistence_bit(iwl) != 0)
+        return -1;
+    iwl_write32(iwl, CSR_INT, 0xffffffffu);
+    if (iwl_pcie_check_hw_rf_kill(iwl) != 0)
+        return -1;
+    iwl_write32(iwl, CSR_UCODE_DRV_GP1_CLR, CSR_UCODE_SW_BIT_RFKILL);
+    iwl_write32(iwl, CSR_UCODE_DRV_GP1_CLR, CSR_UCODE_DRV_GP1_BIT_CMD_BLOCKED);
+    iwl_write32(iwl, CSR_INT, 0xffffffffu);
+    if (iwl_gen2_apm_init(iwl) != 0)
+        return -1;
+    iwl_write8(iwl, CSR_INT_COALESCING, IWL_HOST_INT_TIMEOUT_DEF);
+    if (iwl_pcie_check_hw_rf_kill(iwl) != 0)
         return -1;
     if (iwl_alloc_queues(iwl) != 0)
         return -1;
@@ -505,6 +495,10 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
 
     memset(info, 0, IWL_PRPH_INFO_ALLOC);
     memset(ctxt, 0, sizeof(*ctxt));
+    ctxt->version = 0;
+    ctxt->size = (uint16_t)(sizeof(*ctxt) / 4);
+    ctxt->cr_idx_arr_size = 1;
+    ctxt->tr_idx_arr_size = 1;
     ctxt->prph_info_base_addr = iwl->info_dma;
     ctxt->prph_scratch_base_addr = iwl->scratch_dma;
     ctxt->prph_scratch_size = sizeof(*scratch);
@@ -518,6 +512,7 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
 
     memcpy(iml_cpu, iwl->iml, iwl->iml_len);
     iwl_write32(iwl, CSR_INT, 0xffffffffu);
+    iwl_enable_fw_load_int_ctx_info(iwl);
     iwl_write32(iwl, RFH_Q0_FRBDCB_WIDX_TRG, (uint32_t)(iwl->rx_write & ~7u));
     iwl_write64(iwl, CSR_CTXT_INFO_ADDR, iwl->ctxt_dma);
     iwl_write64(iwl, CSR_IML_DATA_ADDR, iml_dma);
@@ -536,7 +531,21 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
             return 0;
         lx_mdelay(10);
     }
-    lx_printk("iwl_trans: timeout ALIVE\n");
+    {
+        uint32_t inta = iwl_read32(iwl, CSR_INT);
+        uint32_t gp = iwl_read32(iwl, CSR_GP_CNTRL);
+        uint16_t rb_hw = iwl->rb_stts ? (iwl->rb_stts[0] & 0x0fffu) : 0;
+        struct iwl_prph_info *pi = (struct iwl_prph_info *)info;
+
+        lx_printk("iwl_trans: timeout ALIVE INT=0x%08x GP=0x%08x "
+                  "rb_hw=0x%03x rx_read=%u rx_write=%u boot=0x%x ipc=0x%x%s%s\n",
+                  inta, gp, rb_hw, (unsigned)iwl->rx_read,
+                  (unsigned)iwl->rx_write,
+                  pi ? pi->boot_stage_mirror : 0,
+                  pi ? pi->ipc_status_mirror : 0,
+                  (inta & CSR_INT_BIT_SW_ERR) ? " SW_ERR" : "",
+                  !(gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW) ? " RF_KILL" : "");
+    }
     return -1;
 }
 

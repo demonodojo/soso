@@ -69,12 +69,21 @@ pub extern "C" fn lx_mdelay(ms: u32) {
 /// del lockdown del GSP el 2026-07-25 y también el `gsp_mmio_poll_ready(2000)`.
 pub fn sleep_ms(ms: u32) {
     use core::sync::atomic::{AtomicBool, Ordering};
-    /// Si el PIT no avanza (interrupciones cerradas), esperar por reloj colgaría
-    /// el arranque. Se detecta una vez y a partir de ahí los retardos no esperan.
+    /// Si el PIT no avanza (x2APIC en placa) y aún no hay TSC, esperar por
+    /// reloj colgaría. Tras calibrar el TSC, `lx_mdelay` usa eso: si no, el
+    /// atajo CLOCK_DEAD convertía la espera ALIVE del AX211 (~5 s) en un
+    /// sondeo vacío y el firmware nunca llegaba a UCODE_ALIVE_NTFY.
     static CLOCK_DEAD: AtomicBool = AtomicBool::new(false);
     const STUCK_SPINS: u64 = 5_000_000;
 
-    if ms == 0 || CLOCK_DEAD.load(Ordering::Relaxed) {
+    if ms == 0 {
+        return;
+    }
+    if crate::arch::tsc::ready() {
+        crate::arch::tsc::delay_ms(ms as u64);
+        return;
+    }
+    if CLOCK_DEAD.load(Ordering::Relaxed) {
         return;
     }
     let start = pit::uptime_ms();

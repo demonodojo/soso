@@ -4,8 +4,9 @@
 //! (QEMU `SOSO_QEMU_LIVE`).
 
 use block_dev::{Block, BlockDevice, BlockError, BLOCK_SIZE};
+use core::sync::atomic::{AtomicU64, Ordering};
 use sosofs::layout::MAGIC as SOSOFS_MAGIC;
-use spin::Once;
+use spin::{Mutex, Once};
 
 const SECTOR: usize = 512;
 const GPT_HDR_LBA: u64 = 1;
@@ -33,9 +34,10 @@ pub const GPT_MODELS: usize = 2;
 pub const GPT_INSTALL: usize = 3;
 
 static LIVE_BACKEND: Once<Option<LiveBackend>> = Once::new();
-static LIVE_ESP: Once<Option<LivePart>> = Once::new();
-static LIVE_ROOT: Once<Option<LivePart>> = Once::new();
-static LIVE_MODELS: Once<Option<LivePart>> = Once::new();
+static LIVE_ESP: Mutex<Option<LivePart>> = Mutex::new(None);
+static LIVE_ROOT: Mutex<Option<LivePart>> = Mutex::new(None);
+static LIVE_MODELS: Mutex<Option<LivePart>> = Mutex::new(None);
+static GPT_RELOADS: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
     crate::drivers::usb_storage::rescan();
@@ -75,7 +77,7 @@ fn register_log_esp() {
         "live: sin root, pero hay ESP en {backend:?} LBA {} — el log de arranque va ahí",
         esp.first_lba
     );
-    LIVE_ESP.call_once(|| Some(esp));
+    *LIVE_ESP.lock() = Some(esp);
 }
 
 /// Lee la cabecera GPT y las 4 primeras entradas. Con `quiet` no imprime nada
@@ -124,7 +126,7 @@ fn try_backend(backend: LiveBackend) -> Option<()> {
     };
     if !partition_has_sosofs(backend, p2.first_lba) {
         crate::println!(
-            "live: {backend:?}: sin magic SOSOFS10 en la LBA {} (partición 2)",
+            "live: {backend:?}: sin magic SOSOFS11 en la LBA {} (partición 2)",
             p2.first_lba
         );
         return None;
@@ -138,22 +140,11 @@ fn try_backend(backend: LiveBackend) -> Option<()> {
     );
     LIVE_BACKEND.call_once(|| Some(backend));
     if let Some(esp) = p1 {
-        LIVE_ESP.call_once(|| Some(esp));
+        *LIVE_ESP.lock() = Some(esp);
     }
-    LIVE_ROOT.call_once(|| {
-        Some(LivePart {
-            backend,
-            first_lba: p2.first_lba,
-            sectors: p2.sectors,
-        })
-    });
-    LIVE_MODELS.call_once(|| {
-        Some(LivePart {
-            backend,
-            first_lba: p3.first_lba,
-            sectors: p3.sectors,
-        })
-    });
+    *LIVE_ROOT.lock() = Some(p2);
+    *LIVE_MODELS.lock() = Some(p3);
+    GPT_RELOADS.fetch_add(1, Ordering::Relaxed);
     Some(())
 }
 
@@ -286,19 +277,57 @@ impl LivePart {
 }
 
 fn current_part(entry_index: usize) -> Option<LivePart> {
-    let backend = (*LIVE_BACKEND.get()?)?;
-    let ents = read_gpt_entries(backend, true)?;
-    parse_entry(&ents, entry_index, backend)
+    match entry_index {
+        GPT_ESP => *LIVE_ESP.lock(),
+        GPT_ROOT => *LIVE_ROOT.lock(),
+        GPT_MODELS => *LIVE_MODELS.lock(),
+        GPT_INSTALL => None,
+        _ => None,
+    }
+}
+
+/// Relee la GPT y sustituye la geometría en RAM. Llamar solo tras un
+/// cambio GPT confirmado (resize/recovery), no en el camino de datos.
+pub fn refresh_geometry() -> bool {
+    let Some(backend) = backend() else {
+        return false;
+    };
+    let Some(ents) = read_gpt_entries(backend, true) else {
+        return false;
+    };
+    if let Some(esp) = parse_entry(&ents, GPT_ESP, backend) {
+        *LIVE_ESP.lock() = Some(esp);
+    }
+    *LIVE_ROOT.lock() = parse_entry(&ents, GPT_ROOT, backend);
+    *LIVE_MODELS.lock() = parse_entry(&ents, GPT_MODELS, backend);
+    GPT_RELOADS.fetch_add(1, Ordering::Relaxed);
+    LIVE_ROOT.lock().is_some()
+}
+
+/// Recargas de la tabla GPT (arranque + refresh explícito). Diagnóstico B6.
+#[allow(dead_code)]
+pub fn gpt_reloads() -> u64 {
+    GPT_RELOADS.load(Ordering::Relaxed)
+}
+
+/// Sectores de una partición cacheada (sin releer GPT).
+pub fn cached_part_sectors(entry_index: usize) -> Option<u64> {
+    current_part(entry_index).map(|p| p.sectors)
 }
 
 pub fn backend() -> Option<LiveBackend> {
     LIVE_BACKEND.get().copied().flatten()
 }
 
-/// Solo virtio-blk hace flush tras cada escritura; USB/NVMe aún no garantizan
-/// persistencia ante pérdida de alimentación.
+/// Virtio y NVMe: flush de protocolo. USB: solo si SYNCHRONIZE CACHE(10)
+/// contestó al enumerar.
 pub fn backend_supports_durable_flush() -> bool {
-    matches!(backend(), Some(LiveBackend::Virtio0))
+    match backend() {
+        Some(LiveBackend::Virtio0) => true,
+        Some(LiveBackend::Usb) => crate::drivers::usb_storage::supports_durable_flush(),
+        Some(LiveBackend::Nvme(_)) => true,
+        None => false,
+    }
 }
 
 /// Lee un sector LBA 512 B del disco GPT (cabecera, MBR, datos de particiones).
@@ -308,11 +337,18 @@ pub fn disk_read_sector(lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), BlockErr
 }
 
 /// Escribe un sector LBA 512 B del disco GPT.
+#[allow(dead_code)]
 pub fn disk_write_sector(lba: u64, buf: &[u8; SECTOR]) -> Result<(), BlockError> {
+    disk_write_sector_nosync(lba, buf)?;
+    disk_flush()
+}
+
+/// Escritura sin barrera. El resize agrupa el `disk_flush` al final del slide.
+pub fn disk_write_sector_nosync(lba: u64, buf: &[u8; SECTOR]) -> Result<(), BlockError> {
     let backend = backend().ok_or(BlockError::Io)?;
     match backend {
         LiveBackend::Virtio0 => {
-            crate::drivers::virtio_blk::write_sector(lba, buf).map_err(|_| BlockError::Io)
+            crate::drivers::virtio_blk::write_sector_nosync(lba, buf).map_err(|_| BlockError::Io)
         }
         LiveBackend::Usb => {
             crate::drivers::usb_storage::write_sector(lba, buf).map_err(|_| BlockError::Io)
@@ -321,7 +357,23 @@ pub fn disk_write_sector(lba: u64, buf: &[u8; SECTOR]) -> Result<(), BlockError>
     }
 }
 
+pub fn disk_flush() -> Result<(), BlockError> {
+    match backend() {
+        Some(LiveBackend::Virtio0) => {
+            crate::drivers::virtio_blk::flush().map_err(|_| BlockError::Io)
+        }
+        Some(LiveBackend::Usb) => {
+            crate::drivers::usb_storage::flush().map_err(|_| BlockError::Io)
+        }
+        Some(LiveBackend::Nvme(slot)) => {
+            crate::drivers::nvme::flush_slot(slot as usize).map_err(|_| BlockError::Io)
+        }
+        None => Err(BlockError::Io),
+    }
+}
+
 /// Copia `len` sectores dentro del disco (mismo backend), de atrás hacia delante.
+#[allow(dead_code)]
 pub fn disk_slide_sectors(src_lba: u64, dst_lba: u64, sectors: u64) -> Result<(), BlockError> {
     if sectors == 0 {
         return Ok(());
@@ -347,13 +399,13 @@ pub struct LiveModelsDev {
 
 impl LiveRootDev {
     fn part(&self) -> Option<LivePart> {
-        current_part(GPT_ROOT)
+        current_part(GPT_ROOT).filter(|p| p.backend == self.backend)
     }
 }
 
 impl LiveModelsDev {
     fn part(&self) -> Option<LivePart> {
-        current_part(GPT_MODELS)
+        current_part(GPT_MODELS).filter(|p| p.backend == self.backend)
     }
 }
 
@@ -375,7 +427,7 @@ impl BlockDevice for LiveRootDev {
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
-        Ok(())
+        disk_flush()
     }
 
     fn max_blocks_per_request(&self) -> usize {
@@ -406,7 +458,7 @@ impl BlockDevice for LiveModelsDev {
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
-        Ok(())
+        disk_flush()
     }
 
     fn max_blocks_per_request(&self) -> usize {
@@ -467,22 +519,22 @@ pub fn models_dev() -> Option<LiveModelsDev> {
 }
 
 pub fn active() -> bool {
-    LIVE_ROOT.get().is_some_and(|p| p.is_some())
+    LIVE_ROOT.lock().is_some()
 }
 
 /// ¿Hay una ESP donde escribir los logs? Puede haberla sin live montado.
 pub fn esp_available() -> bool {
-    LIVE_ESP.get().is_some_and(|p| p.is_some())
+    LIVE_ESP.lock().is_some()
 }
 
 /// Lee sectores de la partición 1 (ESP FAT).
 pub fn esp_read_sectors(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-    let part = LIVE_ESP.get().and_then(|p| *p).ok_or(BlockError::Io)?;
+    let part = LIVE_ESP.lock().ok_or(BlockError::Io)?;
     part.read_sectors(lba, buf)
 }
 
 /// Escribe sectores de la partición 1 (ESP FAT).
 pub fn esp_write_sectors(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
-    let part = LIVE_ESP.get().and_then(|p| *p).ok_or(BlockError::Io)?;
+    let part = LIVE_ESP.lock().ok_or(BlockError::Io)?;
     part.write_sectors(lba, buf)
 }

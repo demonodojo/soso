@@ -69,7 +69,9 @@
       "pci_ids": [
         "10de:2f18"
       ],
-      "firmware": {},
+      "firmware": {
+        "gsp_gb205": "a8c3ebeed280323aedb51c061f321e73379cce7a9ae643a33dd03915df027f7f 63571696B"
+      },
       "git": {
         "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
         "commit_corto": "0ed3deea1",
@@ -131,9 +133,11 @@
       "id": "ga107-igpu",
       "equipo": "NVIDIA GA107 (iGPU / Ampere)",
       "pci_ids": [
-        "10de:????"
+        "10de:249c"
       ],
-      "firmware": {},
+      "firmware": {
+        "gsp_ga102_fallback": "a8c3ebeed280323aedb51c061f321e73379cce7a9ae643a33dd03915df027f7f 63571696B"
+      },
       "git": {
         "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
         "commit_corto": "0ed3deea1",
@@ -188,8 +192,8 @@
       },
       "bench": {},
       "logs": [],
-      "notas": "Cadena Ampere pendiente de cierre",
-      "actualizado": "2026-09-07"
+      "notas": "PCI 10de:249c (ROG 3050 Mobile). Cadena Ampere pendiente de revalidar en placa",
+      "actualizado": "2026-09-09"
     },
     {
       "id": "ax211-wifi",
@@ -199,7 +203,9 @@
         "8086:51f0",
         "8086:54f0"
       ],
-      "firmware": {},
+      "firmware": {
+        "ax211_ucode": "019e1f2f6e7f35e241bbbb2889e8ba314db1b1860c6374f715958535aedfa2e2 1735904B"
+      },
       "git": {
         "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
         "commit_corto": "0ed3deea1",
@@ -263,7 +269,9 @@
       "pci_ids": [
         "8086:2723"
       ],
-      "firmware": {},
+      "firmware": {
+        "ax200_ucode": "d23a382871e6e638957845b47424ab98dca5e68e022ab73eeeebb0b6f751d7e9 1368096B"
+      },
       "git": {
         "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
         "commit_corto": "0ed3deea1",

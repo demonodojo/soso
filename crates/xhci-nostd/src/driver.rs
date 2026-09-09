@@ -193,7 +193,7 @@ impl XhciController {
     ///
     /// # Safety
     /// `pci_bar0` must be a valid, identity-mapped MMIO address for an xHCI controller.
-    pub unsafe fn init(pci_bar0: usize) -> Self {
+    pub unsafe fn init(pci_bar0: usize) -> Result<Self, &'static str> {
         log::info!("xhci: initializing controller at BAR0={:#x}", pci_bar0);
 
         let cap = CapabilityRegs::new(pci_bar0);
@@ -204,6 +204,14 @@ impl XhciController {
         let max_intrs = cap.max_intrs();
         let ctx_size = cap.context_size();
         let scratchpad = cap.max_scratchpad_buffers();
+        // MMIO apagado o no xHCI (0 / 0xffff): no hacer HCRST 10 s y panic.
+        if caplength < 0x20 || max_ports == 0 || hciversion < 0x0100 || hciversion > 0x0200 {
+            log::warn!(
+                "xhci: CAP inválido CAPLENGTH={:#x} HCIVERSION={:#x} MaxPorts={}",
+                caplength, hciversion, max_ports
+            );
+            return Err("registros CAP inválidos");
+        }
 
         log::info!(
             "xhci: CAPLENGTH={:#x} HCIVERSION={:#x} MaxSlots={} MaxPorts={} MaxIntrs={} CtxSize={} Scratchpad={}",
@@ -236,7 +244,7 @@ impl XhciController {
         }
 
         linux_bios_handoff(pci_bar0, &cap, &op);
-        do_hcrst(&op, max_ports);
+        do_hcrst(&op, max_ports)?;
 
         op.set_config(max_slots as u32);
 
@@ -258,10 +266,11 @@ impl XhciController {
         log::info!("xhci: controller started (USBCMD={:#x})", op.usbcmd());
 
         if op.is_halted() {
-            panic!(
-                "xhci: controller still halted after setting RS (USBSTS={:#x})",
+            log::warn!(
+                "xhci: sigue en halt tras RS (USBSTS={:#x})",
                 op.usbsts()
             );
+            return Err("sigue en halt tras RS");
         }
 
         let mut devices = Vec::with_capacity(max_slots as usize + 1);
@@ -302,7 +311,7 @@ impl XhciController {
         ctrl.recover_root_ports();
         ctrl.log_ports();
         log::info!("xhci: initialization complete, {} ports available", max_ports);
-        ctrl
+        Ok(ctrl)
     }
 
     pub fn any_root_port_connected(&self) -> bool {
@@ -2193,7 +2202,7 @@ fn wait_root_port_resets_idle(op: &OperationalRegs, max_ports: u8) {
 }
 
 /// Linux `xhci_reset`: HCRST + esperar CNR=0 + PR/WPR idle.
-fn do_hcrst(op: &OperationalRegs, max_ports: u8) {
+fn do_hcrst(op: &OperationalRegs, max_ports: u8) -> Result<(), &'static str> {
     log::info!("xhci: HCRST");
     op.set_usbcmd(op.usbcmd() | USBCMD_HCRST);
     // Intel quirk (Linux udelay(1000)): no tocar regs ~1 ms tras HCRST.
@@ -2203,7 +2212,8 @@ fn do_hcrst(op: &OperationalRegs, max_ports: u8) {
         delay_us(100);
         timeout_ms += 1;
         if timeout_ms > 10_000 {
-            panic!("xhci: HCRST did not clear");
+            log::warn!("xhci: HCRST no se despejó");
+            return Err("HCRST no se despejó");
         }
     }
     timeout_ms = 0;
@@ -2211,11 +2221,13 @@ fn do_hcrst(op: &OperationalRegs, max_ports: u8) {
         delay_us(100);
         timeout_ms += 1;
         if timeout_ms > 50_000 {
-            panic!("xhci: controller not ready after reset");
+            log::warn!("xhci: no listo tras HCRST");
+            return Err("no listo tras HCRST");
         }
     }
     wait_root_port_resets_idle(op, max_ports);
     log::info!("xhci: controller reset complete");
+    Ok(())
 }
 
 /// Equivalente a Linux `quirk_usb_handoff_xhci`: ownership + SMI off + halt.

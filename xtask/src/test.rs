@@ -717,6 +717,9 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
         let echo = slot.echo_port;
         let port = slot.ssh_port;
         let _ = report.paso(sid, &format!("echo TCP en :{echo}"), || echo_tcp(echo));
+        let _ = report.paso_ssh_sys(&mut qemu, slot, sid, "marca /tmp/sosh-ready", || {
+            ssh_sosh_ready(key, port)
+        });
         filter.if_step(sid, "ask: el texto llega literal", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "ask: el texto llega literal", || {
                 ssh_ask_literal(key, port)
@@ -740,6 +743,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 );
             },
         );
+        filter.if_step(sid, "forja: hola-std remoto", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "forja: hola-std remoto", || {
+                ssh_forja_hola(key, port)
+            });
+        });
         filter.if_step(sid, "pipeline de sosh (6 KiB por un pipe)", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "pipeline de sosh (6 KiB por un pipe)", || {
                 ssh_pipeline(key, port)
@@ -948,7 +956,7 @@ fn lanzar_qemu_legacy_ports(
     lanzar_qemu(&slot)
 }
 
-fn qemu_monitor_cmd(mon: &Path, cmd: &str) -> Result<(), String> {
+fn qemu_monitor_session(mon: &Path) -> Result<std::os::unix::net::UnixStream, String> {
     use std::os::unix::net::UnixStream;
 
     for _ in 0..100 {
@@ -958,13 +966,27 @@ fn qemu_monitor_cmd(mon: &Path, cmd: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(50));
     }
     let mut s = UnixStream::connect(mon).map_err(|e| format!("monitor {mon:?}: {e}"))?;
-    s.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    s.set_read_timeout(Some(Duration::from_millis(400))).ok();
+    s.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    let mut banner = [0u8; 512];
+    let _ = s.read(&mut banner);
+    Ok(s)
+}
+
+fn qemu_monitor_cmd(
+    s: &mut std::os::unix::net::UnixStream,
+    cmd: &str,
+) -> Result<(), String> {
     s.write_all(format!("{cmd}\n").as_bytes())
         .map_err(|e| e.to_string())?;
+    let mut buf = [0u8; 256];
+    let _ = s.read(&mut buf);
     Ok(())
 }
 
-/// Tras I/O del BOT en xHCI, el teclado HID debe seguir respondiendo en serie.
+/// Tras I/O del BOT en xHCI, el teclado (PS/2 vía `sendkey`, HID en el bus)
+/// debe seguir llegando al sosh de la serie. Una conexión de monitor por
+/// tecla dejaba el socket HMP a medias y QEMU tragaba el resto.
 fn usb_kbd_vivo_despues_io(
     key: &Path,
     ssh_port: u16,
@@ -972,12 +994,15 @@ fn usb_kbd_vivo_despues_io(
     monitor: &Path,
 ) -> Result<(), String> {
     ssh_guion(key, ssh_port, "ls /models\nexit\n", Duration::from_secs(120))?;
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_secs(2));
+    let mut mon = qemu_monitor_session(monitor)?;
+    qemu_monitor_cmd(&mut mon, "sendkey ret")?;
+    std::thread::sleep(Duration::from_millis(200));
     for k in ["h", "e", "l", "p", "ret"] {
-        qemu_monitor_cmd(monitor, &format!("sendkey {k}"))?;
-        std::thread::sleep(Duration::from_millis(80));
+        qemu_monitor_cmd(&mut mon, &format!("sendkey {k}"))?;
+        std::thread::sleep(Duration::from_millis(200));
     }
-    esperar_en_fichero(serial, "builtins:", Duration::from_secs(30))
+    esperar_en_fichero(serial, "builtins:", Duration::from_secs(45))
 }
 
 /// Espera a que aparezca `patron` en el fichero de serie.
@@ -1072,6 +1097,18 @@ pub(crate) fn ssh_guion(
     limite: Duration,
 ) -> Result<String, String> {
     ssh_guion_inner(key, ssh_port, guion, limite, true, None)
+}
+
+/// Como `ssh_guion`, pero si aparece `marcador` se da por buena la sesión
+/// aunque `halt` no cierre SSH (el guest se apaga y el cliente se cuelga).
+pub(crate) fn ssh_guion_hasta(
+    key: &Path,
+    ssh_port: u16,
+    guion: &str,
+    limite: Duration,
+    marcador: &str,
+) -> Result<String, String> {
+    ssh_guion_inner(key, ssh_port, guion, limite, true, Some(marcador))
 }
 
 fn ssh_guion_inner(
@@ -1241,6 +1278,19 @@ fn ssh_guion_inner(
         ));
     }
     Ok(salida)
+}
+
+fn ssh_sosh_ready(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "cat /tmp/sosh-ready\nexit\n",
+        Duration::from_secs(60),
+    )?;
+    if !salida.contains("ok") {
+        return Err(format!("sin /tmp/sosh-ready: {salida:?}"));
+    }
+    Ok(())
 }
 
 fn ssh_llm(key: &Path, ssh_port: u16) -> Result<(), String> {
@@ -1529,6 +1579,155 @@ fn ssh_llm_latent_moe(key: &Path, ssh_port: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// B3: editar `hola-std` en el guest, sync+build en host, aplicar el ELF y ejecutarlo.
+fn ssh_forja_hola(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let root = super::project_root();
+    let work = root.join("target/forja-work-test");
+    let _ = fs::remove_dir_all(&work);
+    seed_forja_hola_work(&root, &work)?;
+    let bin = build_forja_server(&root)?;
+    ssh_forja_hola_run(key, ssh_port, &root, &work, &bin)
+}
+
+fn ssh_forja_hola_run(
+    key: &Path,
+    ssh_port: u16,
+    root: &Path,
+    work: &Path,
+    bin: &Path,
+) -> Result<(), String> {
+    const MSG: &str = "hola-astra-B3-guest";
+    let mut srv = Command::new(bin)
+        .env("SOSO_FORJA_RELEASE", "hola-std")
+        .env("SOSO_FORJA_BIND", "0.0.0.0:8740")
+        .env("SOSO_FORJA_TOKEN", "soso-b3")
+        .env("SOSO_FORJA_WORK", work)
+        .current_dir(root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("forja-server: {e}"))?;
+    if let Err(e) = esperar_tcp("127.0.0.1:8740", Duration::from_secs(15)) {
+        let _ = srv.kill();
+        return Err(e);
+    }
+    let guion = format!(
+        "soso-forja write-hola --msg {MSG}\n\
+         soso-forja all --host 10.0.2.2 --token soso-b3\n\
+         /bin/hola-std\n\
+         exit\n"
+    );
+    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(180));
+    let _ = srv.kill();
+    let _ = srv.wait();
+    let texto = texto?;
+    if !texto.contains("forja: sync OK") {
+        return Err(format!("forja sync no OK: {texto}"));
+    }
+    if !texto.contains("forja: aplicado /bin/hola-std") {
+        return Err(format!("forja apply no OK: {texto}"));
+    }
+    if !texto.contains(MSG) {
+        return Err(format!("hola-std no mostró {MSG}: {texto}"));
+    }
+    Ok(())
+}
+
+fn build_forja_server(root: &Path) -> Result<PathBuf, String> {
+    let status = Command::new("cargo")
+        .current_dir(root)
+        .args(["build", "-q", "-p", "soso-forja-server"])
+        .status()
+        .map_err(|e| format!("cargo build forja-server: {e}"))?;
+    if !status.success() {
+        return Err("cargo build -p soso-forja-server falló".into());
+    }
+    let dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"));
+    let bin = dir.join("debug/soso-forja-server");
+    if !bin.is_file() {
+        return Err(format!("no está {}", bin.display()));
+    }
+    Ok(bin)
+}
+
+fn seed_forja_hola_work(root: &Path, work: &Path) -> Result<(), String> {
+    fs::create_dir_all(work.join("user")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(work.join("crates")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(work.join("user/.cargo")).map_err(|e| e.to_string())?;
+    let ver = fs::read_to_string(root.join("VERSION")).unwrap_or_else(|_| "0.2.2\n".into());
+    fs::write(work.join("VERSION"), ver).map_err(|e| e.to_string())?;
+    let _ = fs::copy(root.join("rust-toolchain.toml"), work.join("rust-toolchain.toml"));
+    fs::write(
+        work.join("user/Cargo.toml"),
+        r#"[workspace]
+resolver = "2"
+members = ["libsoso", "hola-std"]
+
+[workspace.dependencies]
+soso-abi = { path = "../crates/soso-abi" }
+libsoso = { path = "libsoso" }
+getrandom = { version = "0.2", features = ["rdrand"] }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+strip = "debuginfo"
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+    for (src, dst) in [
+        ("user/libsoso", "user/libsoso"),
+        ("user/hola-std", "user/hola-std"),
+        ("crates/soso-abi", "crates/soso-abi"),
+        ("crates/soso-std", "crates/soso-std"),
+    ] {
+        copy_dir_skip_target(&root.join(src), &work.join(dst))?;
+    }
+    for rel in [
+        "user/Cargo.lock",
+        "user/link.ld",
+        "user/x86_64-soso-user.json",
+        "user/.cargo/config.toml",
+    ] {
+        let _ = fs::copy(root.join(rel), work.join(rel));
+    }
+    Ok(())
+}
+
+fn copy_dir_skip_target(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for e in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let e = e.map_err(|e| e.to_string())?;
+        let name = e.file_name();
+        let s = name.to_string_lossy();
+        if s == "target" || s == ".git" || s.starts_with('.') {
+            continue;
+        }
+        let to = dst.join(&name);
+        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            copy_dir_skip_target(&e.path(), &to)?;
+        } else {
+            fs::copy(e.path(), to).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn esperar_tcp(addr: &str, limite: Duration) -> Result<(), String> {
+    let t0 = Instant::now();
+    loop {
+        if TcpStream::connect(addr).is_ok() {
+            return Ok(());
+        }
+        if t0.elapsed() > limite {
+            return Err(format!("timeout esperando {addr}"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Un pipeline de sosh moviendo MÁS datos que la capacidad del pipe (4 KiB).
 ///
 /// Es la prueba de punta a punta del camino que se arregló: el pipe transfería 256
@@ -1710,7 +1909,7 @@ fn ssh_sesion(key: &Path, ssh_port: u16) -> Result<(), String> {
     // porque el guest se apaga y se lleva la conexión por delante. Vale igual para
     // esperar al cliente, y de paso deja de ser una carrera contra un sleep de 4 s.
     let guion = format!("echo {token} > /tmp/xtask.txt\ncat /tmp/xtask.txt\nhalt\n");
-    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(60))?;
+    let texto = ssh_guion_hasta(key, ssh_port, &guion, Duration::from_secs(60), token)?;
     if texto.contains(token) {
         Ok(())
     } else {
@@ -1916,10 +2115,13 @@ pub fn run_usb() {
                 let bios = copiar_imagen(&img, esc.id, "bios");
                 let data_img = copiar_imagen(&data, esc.id, "data");
                 let models_img = copiar_imagen(&models, esc.id, "models");
+                let live_src = super::package_live::live_image_path();
+                super::package_live::ensure_live_image();
+                let live_img = copiar_imagen(&live_src, esc.id, "live");
                 let nombre = format!("USB: {}", esc.name);
                 let ok = report
                     .paso("usb", &nombre, || {
-                        run_usb_scenario(&bios, &data_img, &models_img, &serial, esc)
+                        run_usb_scenario(&bios, &data_img, &models_img, &live_img, &serial, esc)
                     })
                     .is_ok();
                 if !ok {
@@ -1944,6 +2146,7 @@ fn run_usb_scenario(
     img: &std::path::Path,
     data: &std::path::Path,
     models: &std::path::Path,
+    live: &std::path::Path,
     serial: &std::path::Path,
     esc: UsbTestScenario,
 ) -> Result<(), String> {
@@ -1954,6 +2157,7 @@ fn run_usb_scenario(
         xhci_model: esc.xhci.unwrap_or("qemu").into(),
         usb_kbd: esc.usb_kbd,
         usb_hub: esc.usb_hub,
+        live_path: Some(live.to_path_buf()),
         ..Default::default()
     };
 
@@ -1982,6 +2186,10 @@ fn run_usb_scenario(
     let mut qemu = lanzar_qemu(&slot).map_err(|e| e.to_string())?;
 
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(180))?;
+    let serie = std::fs::read_to_string(serial).map_err(|e| e.to_string())?;
+    if !serie.contains("sync_cache=true") {
+        return Err("USB sin SYNCHRONIZE CACHE(10) (falta sync_cache=true)".into());
+    }
 
     if let Some(patron) = esc.extra_serial {
         let contenido = std::fs::read_to_string(serial).map_err(|e| e.to_string())?;

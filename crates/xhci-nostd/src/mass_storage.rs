@@ -24,6 +24,14 @@ fn rw10_cdb(opcode: u8, lba: u32, count: u16) -> [u8; 10] {
     cdb
 }
 
+/// SYNCHRONIZE CACHE(10) de todo el medio. IMMED=0: espera a que el caché
+/// esté en el medio (si IMMED=1 el comando vuelve antes y no es durable).
+pub fn sync_cache10_cdb() -> [u8; 10] {
+    let mut cdb = [0u8; 10];
+    cdb[0] = SCSI_SYNC_CACHE10;
+    cdb
+}
+
 /// Bytes por transacción BOT en **escritura** (y troceo interno de cada TRB).
 /// El límite duro es el campo de longitud del Normal TRB (17 bits); 64 KiB
 /// deja margen y es lo que QEMU acepta escribir.
@@ -43,6 +51,7 @@ const SCSI_REQUEST_SENSE: u8 = 0x03;
 const SCSI_READ_CAPACITY10: u8 = 0x25;
 const SCSI_READ10: u8 = 0x28;
 const SCSI_WRITE10: u8 = 0x2A;
+const SCSI_SYNC_CACHE10: u8 = 0x35;
 
 /// Único tamaño de bloque que entiende el resto del kernel (`SECTOR` = 512).
 const BLOCK_SIZE: u32 = 512;
@@ -74,6 +83,8 @@ pub struct MassStorage {
     pub bulk_out_dci: u8,
     pub bulk_in_dci: u8,
     pub sectors: u64,
+    /// SYNCHRONIZE CACHE(10) contestó CSW OK al enumerar.
+    pub sync_cache: bool,
 }
 
 impl XhciController {
@@ -104,8 +115,13 @@ impl XhciController {
             log::warn!("xhci: mass storage slot={slot_id} READ CAPACITY falló");
             return;
         };
+        let sync_cache =
+            self.synchronize_cache10_raw(slot_id, bulk_out.dci(), bulk_in.dci());
+        if !sync_cache {
+            log::info!("xhci: slot={slot_id} SYNCHRONIZE CACHE(10) no disponible");
+        }
         log::info!(
-            "xhci: mass storage slot={slot_id} iface={iface} sectors={sectors}"
+            "xhci: mass storage slot={slot_id} iface={iface} sectors={sectors} sync_cache={sync_cache}"
         );
         self.mass_storage = Some(MassStorage {
             slot_id,
@@ -113,6 +129,7 @@ impl XhciController {
             bulk_out_dci: bulk_out.dci(),
             bulk_in_dci: bulk_in.dci(),
             sectors,
+            sync_cache,
         });
     }
 
@@ -380,6 +397,30 @@ impl XhciController {
         false
     }
 
+    /// SYNCHRONIZE CACHE(10) — barrera durable si el medio la admite.
+    pub fn synchronize_cache10(&mut self, ms: &MassStorage) -> bool {
+        self.synchronize_cache10_raw(ms.slot_id, ms.bulk_out_dci, ms.bulk_in_dci)
+    }
+
+    fn synchronize_cache10_raw(&mut self, slot_id: u8, out_dci: u8, in_dci: u8) -> bool {
+        let cdb = sync_cache10_cdb();
+        for intento in 0..2 {
+            match self.bot_in(slot_id, out_dci, in_dci, &cdb, None) {
+                Bot::Ok(_) => return true,
+                Bot::Failed if intento == 0 => {
+                    log::info!("xhci: SYNCHRONIZE CACHE(10) falló; pido sense y reintento");
+                    self.request_sense(slot_id, out_dci, in_dci);
+                }
+                Bot::Failed => {
+                    log::warn!("xhci: SYNCHRONIZE CACHE(10) no soportado o falló");
+                    return false;
+                }
+                Bot::Error => return false,
+            }
+        }
+        false
+    }
+
     fn setup_mass_storage(&mut self, slot_id: u8, path: DevPath, speed: UsbSpeed) -> Option<MassStorage> {
         self.set_device(slot_id, path, speed);
         if !self.address_device(slot_id, path, speed) {
@@ -424,8 +465,13 @@ impl XhciController {
             return None;
         }
         let sectors = self.read_capacity10(slot_id, bulk_out.dci(), bulk_in.dci())?;
+        let sync_cache =
+            self.synchronize_cache10_raw(slot_id, bulk_out.dci(), bulk_in.dci());
+        if !sync_cache {
+            log::info!("xhci: slot={slot_id} SYNCHRONIZE CACHE(10) no disponible");
+        }
         log::info!(
-            "xhci: mass storage slot={} iface={} sectors={}",
+            "xhci: mass storage slot={} iface={} sectors={} sync_cache={sync_cache}",
             slot_id,
             iface,
             sectors
@@ -436,6 +482,7 @@ impl XhciController {
             bulk_out_dci: bulk_out.dci(),
             bulk_in_dci: bulk_in.dci(),
             sectors,
+            sync_cache,
         })
     }
 
@@ -616,5 +663,18 @@ impl ParsedConfiguration {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_cache10_cdb_full_medium_no_immed() {
+        let cdb = sync_cache10_cdb();
+        assert_eq!(cdb[0], SCSI_SYNC_CACHE10);
+        assert_eq!(cdb[1], 0, "IMMED debe estar apagado");
+        assert_eq!(&cdb[2..], &[0; 8]);
     }
 }

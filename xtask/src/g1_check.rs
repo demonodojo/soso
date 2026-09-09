@@ -203,13 +203,13 @@ pub fn run(args: &[String]) {
         {
             let full = format!("0000:{bdf}");
             let pci_n = run_capture("lspci", &["-n", "-s", bdf]);
-            let ids = pci_n
+            if let Some(ids) = pci_n
                 .split_whitespace()
-                .find(|t| t.contains("10de:"))
-                .unwrap_or("10de:????");
-            let (ven, dev) = ids.split_once(':').unwrap_or(("10de", "????"));
-            println!(
-                r#"
+                .find(|t| crate::hw_matrix::pci_id_concreto(t))
+            {
+                let (ven, dev) = ids.split_once(':').expect("pci_id_concreto");
+                println!(
+                    r#"
 # Prerrequisito: IOMMU activo (cargo xtask g1-check debe mostrar grupos > 0)
 sudo modprobe vfio-pci
 echo "{full}" | sudo tee /sys/bus/pci/drivers/nvidia/unbind
@@ -218,7 +218,12 @@ echo "{full}" | sudo tee /sys/bus/pci/drivers/vfio-pci/bind
 SOSO_QEMU_GPU=vfio:{bdf} cargo xtask run
 # Log serie esperado: nvidia: GPU 10de:.... NV_PMC_BOOT_0=0x........
 "#
-            );
+                );
+            } else {
+                println!(
+                    "g1-check: sin PCI 10de:dddd para {bdf}; no sugiero bind con id inventado"
+                );
+            }
         }
     } else {
         println!("\nTip: ./scripts/l6-g1-preflight.sh  → diagnóstico BIOS + GRUB");

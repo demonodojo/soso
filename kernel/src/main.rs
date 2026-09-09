@@ -111,6 +111,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // residente salía a 137 ms/capa (2026-08-02).
     println!("boot: tsc");
     arch::tsc::calibrate();
+    // Los APs ya tienen timer LAPIC. La BSP seguía atada al IRQ0; si el PIT
+    // no avanza no hay preempción ni `pit::tick` y Ctrl-C no corta un `ask`
+    // en marcha. El timer LAPIC no pasa por IOAPIC (x2APIC sin remap).
+    if arch::pit::ticks() == 0 {
+        arch::apic::timer_periodico(100);
+        println!("apic: timer BSP (IRQ0 mudo)");
+    }
     arch::rtc::init();
 
     println!("boot: pci");

@@ -290,6 +290,8 @@ pub const FUTEX_WAKE: u64 = 1;
 
 // ---- señales (modelo mínimo) ----
 
+/// `kill(pid, 0)`: sondeo. El proceso existe y no es zombi; no entrega señal.
+pub const SIGPROBE: u64 = 0;
 pub const SIGINT: u64 = 2;
 pub const SIGKILL: u64 = 9;
 pub const SIGTERM: u64 = 15;
@@ -430,7 +432,8 @@ pub const DISK_FLAG_READONLY: u32 = 1;
 /// qué disco protege `sys_disk_write` (nunca deja escribir el propio disco
 /// de arranque).
 pub const DISK_FLAG_BOOT: u32 = 2;
-/// GPT con magic SOSOFS10 en la partición 2: soso previo, reinstalar es seguro.
+/// GPT con magic SOSOFS11 o SOSOFS10 en la partición 2: soso previo,
+/// reinstalar es seguro (el montaje exige `SOSOFS11`).
 pub const DISK_FLAG_SOSO: u32 = 4;
 /// Sin tabla de particiones y primer sector a cero.
 pub const DISK_FLAG_EMPTY: u32 = 8;

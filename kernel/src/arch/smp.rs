@@ -173,8 +173,7 @@ pub fn init(rsdp_phys: u64) {
     crate::mm::ensure_identity_mapped(TRAMP_PHYS, 4096);
 
     // Copiar el trampolín a la página reservada y montar su GDT/GDTR.
-    let tramp_len =
-        (&raw const ap_tramp_end) as usize - (&raw const ap_tramp_start) as usize;
+    let tramp_len = (&raw const ap_tramp_end) as usize - (&raw const ap_tramp_start) as usize;
     assert!(tramp_len < GDT_OFF, "trampolín demasiado grande");
     let dst = crate::mm::phys_to_virt(TRAMP_PHYS).as_mut_ptr::<u8>();
     unsafe {
@@ -189,7 +188,10 @@ pub fn init(rsdp_phys: u64) {
         (dst.add(GDTR_OFF) as *mut u16).write_unaligned(4 * 8 - 1);
         (dst.add(GDTR_OFF + 2) as *mut u32).write_unaligned((TRAMP_PHYS as u32) + GDT_OFF as u32);
     }
-    let cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    let cr3 = x86_64::registers::control::Cr3::read()
+        .0
+        .start_address()
+        .as_u64();
 
     let mut arrancadas = 1u32;
     for (i, &apic_id) in ids.iter().filter(|&&id| id != bsp).enumerate() {
@@ -209,12 +211,11 @@ pub fn init(rsdp_phys: u64) {
         let antes = CPUS_ONLINE.load(Ordering::SeqCst);
         crate::println!("smp: arrancando apic {apic_id}…");
         apic::arrancar_ap(apic_id, (TRAMP_PHYS >> 12) as u8);
-        // esperar a que se anuncie (con timeout)
-        let fin = crate::arch::pit::uptime_ms() + 200;
-        while CPUS_ONLINE.load(Ordering::SeqCst) == antes
-            && crate::arch::pit::uptime_ms() < fin
-        {
-            core::hint::spin_loop();
+        // Timeout por TSC (no PIT): ver `tsc::delay_ms`.
+        let mut espera = 0u32;
+        while CPUS_ONLINE.load(Ordering::SeqCst) == antes && espera < 200 {
+            crate::arch::tsc::delay_ms(1);
+            espera += 1;
         }
         if CPUS_ONLINE.load(Ordering::SeqCst) == antes {
             crate::println!("smp: apic {apic_id} no respondió");

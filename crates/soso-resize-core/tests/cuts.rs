@@ -8,7 +8,9 @@ use std::cell::Cell;
 struct MemDisk {
     data: Vec<u8>,
     fail_after: Cell<Option<u64>>,
+    fail_flush: Cell<bool>,
     writes: Cell<u64>,
+    reads: Cell<u64>,
 }
 
 impl MemDisk {
@@ -16,7 +18,9 @@ impl MemDisk {
         Self {
             data: vec![0; sectors as usize * SECTOR],
             fail_after: Cell::new(None),
+            fail_flush: Cell::new(false),
             writes: Cell::new(0),
+            reads: Cell::new(0),
         }
     }
 
@@ -40,6 +44,7 @@ impl MemDisk {
 
 impl Disk512 for MemDisk {
     fn read_sector(&self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), Error> {
+        self.reads.set(self.reads.get() + 1);
         let off = Self::sector_offset(lba);
         if off + SECTOR > self.data.len() {
             return Err(Error::OutOfRange);
@@ -59,6 +64,13 @@ impl Disk512 for MemDisk {
             return Err(Error::OutOfRange);
         }
         self.data[off..off + SECTOR].copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        if self.fail_flush.get() {
+            return Err(Error::Io);
+        }
         Ok(())
     }
 }
@@ -190,6 +202,63 @@ fn slide_resumes_after_cut() {
         disk.hash_range(p4.first + delta, p4.sectors),
         hash_p4_before
     );
+}
+
+#[test]
+fn slide_flush_error_does_not_commit_progress() {
+    let delta = 16u64;
+    let p3 = PartGeom::from_lba(1000, 1099);
+    let p3_after = p3.sectors - delta;
+    let mut disk = MemDisk::new(5000);
+    disk.paint_range(p3.first, p3.sectors, 0xA3);
+    let mut done = 0u64;
+    disk.fail_flush.set(true);
+    assert_eq!(
+        slide_sectors(&mut disk, p3.first, p3.first + delta, p3_after, &mut done),
+        Err(Error::Io)
+    );
+    assert_eq!(done, 0);
+    disk.fail_flush.set(false);
+    slide_sectors(&mut disk, p3.first, p3.first + delta, p3_after, &mut done).unwrap();
+    assert_eq!(done, p3_after);
+}
+
+#[test]
+fn apply_gpt_flush_error_keeps_journal_phase() {
+    let (mut disk, _p2, p3, p4, delta) = setup_painted_disk();
+    let mut journal = Journal {
+        phase: JOURNAL_GPT,
+        delta_sectors: delta,
+        slide_done: 0,
+    };
+    let p3_after = p3.sectors - delta;
+    slide_sectors(
+        &mut disk,
+        p3.first,
+        p3.first + delta,
+        p3_after,
+        &mut journal.slide_done,
+    )
+    .unwrap();
+    journal.slide_done = 0;
+    slide_sectors(
+        &mut disk,
+        p4.first,
+        p4.first + delta,
+        p4.sectors,
+        &mut journal.slide_done,
+    )
+    .unwrap();
+    journal.slide_done = 0;
+    disk.fail_flush.set(true);
+    assert_eq!(
+        apply_gpt_and_slides(&mut disk, delta, &mut journal, |_| {}),
+        Err(Error::Io)
+    );
+    assert_eq!(journal.phase, JOURNAL_GPT);
+    disk.fail_flush.set(false);
+    apply_gpt_and_slides(&mut disk, delta, &mut journal, |_| {}).unwrap();
+    assert_eq!(journal.phase, JOURNAL_IDLE);
 }
 
 #[test]
@@ -468,4 +537,170 @@ fn apply_resumes_after_cut_mid_gpt() {
 fn phase_rank_orders_intent_before_shrink() {
     assert!(phase_rank(JOURNAL_INTENT).unwrap() < phase_rank(JOURNAL_SHRINK_MODELS).unwrap());
     assert!(phase_rank(JOURNAL_SHRINK_MODELS).unwrap() < phase_rank(JOURNAL_SLIDE_P3).unwrap());
+}
+
+#[test]
+fn geom_cache_skips_gpt_on_ordinary_lookup() {
+    let (disk, p2, p3, _p4, _) = setup_painted_disk();
+    let mut cache = GeomCache::default();
+    cache.reload(&disk).unwrap();
+    let after_load = disk.reads.get();
+    assert_eq!(cache.reloads(), 1);
+    assert_eq!(cache.get(GPT_ROOT).unwrap(), p2);
+    assert_eq!(cache.get(GPT_MODELS).unwrap(), p3);
+    for _ in 0..32 {
+        let _ = cache.get(GPT_ROOT);
+        let _ = cache.get(GPT_MODELS);
+        let _ = cache.get(GPT_INSTALL);
+    }
+    assert_eq!(disk.reads.get(), after_load, "lookup no debe releer GPT");
+}
+
+#[test]
+fn geom_cache_sees_new_limits_after_reload() {
+    let (mut disk, p2, p3, p4, _) = setup_painted_disk();
+    let mut cache = GeomCache::default();
+    cache.reload(&disk).unwrap();
+    let delta = 8;
+    let mut journal = Journal {
+        phase: JOURNAL_SHRINK_MODELS,
+        delta_sectors: delta,
+        slide_done: 0,
+    };
+    apply_gpt_and_slides(&mut disk, delta, &mut journal, |_| {}).unwrap();
+    assert_eq!(cache.get(GPT_ROOT).unwrap().last, p2.last, "sin reload sigue la geometría vieja");
+    cache.reload(&disk).unwrap();
+    let root = cache.get(GPT_ROOT).unwrap();
+    let models = cache.get(GPT_MODELS).unwrap();
+    assert_eq!(root.last, p2.last + delta);
+    assert_eq!(models.first, p3.first + delta);
+    assert_eq!(cache.get(GPT_INSTALL).unwrap().first, p4.first + delta);
+    assert_eq!(cache.reloads(), 2);
+}
+
+fn seq_read(disk: &impl Disk512, first: u64, sectors: u64) {
+    let mut buf = [0u8; SECTOR];
+    for i in 0..sectors {
+        disk.read_sector(first + i, &mut buf).unwrap();
+    }
+}
+
+fn mib_s(bytes: u64, dt: std::time::Duration) -> f64 {
+    let secs = dt.as_secs_f64().max(1e-9);
+    (bytes as f64 / (1024.0 * 1024.0)) / secs
+}
+
+/// B6: releer GPT en cada sector vs geometría en RAM (disco en memoria, 4 MiB).
+#[test]
+fn geom_cache_seq_read_mibs() {
+    let models_sectors = 8192u64;
+    let p3 = PartGeom::from_lba(2000, 2000 + models_sectors - 1);
+    let p4 = PartGeom::from_lba(p3.last + 1, p3.last + 32);
+    let p2 = PartGeom::from_lba(34, 1999);
+    let mut disk = MemDisk::new(p4.last + 40);
+    disk.paint_range(p3.first, p3.sectors, 0x5A);
+    write_test_gpt(&mut disk, p2, p3, p4);
+
+    disk.reads.set(0);
+    let t0 = std::time::Instant::now();
+    for i in 0..models_sectors {
+        let g = read_part(&disk, GPT_MODELS).unwrap();
+        let mut buf = [0u8; SECTOR];
+        disk.read_sector(g.first + i, &mut buf).unwrap();
+    }
+    let naive_dt = t0.elapsed();
+    let naive_reads = disk.reads.get();
+
+    disk.reads.set(0);
+    let mut cache = GeomCache::default();
+    cache.reload(&disk).unwrap();
+    let g = cache.get(GPT_MODELS).unwrap();
+    let t1 = std::time::Instant::now();
+    seq_read(&disk, g.first, models_sectors);
+    let cached_dt = t1.elapsed();
+    let cached_reads = disk.reads.get();
+
+    let bytes = models_sectors * SECTOR as u64;
+    eprintln!(
+        "B6 host 4MiB: naive {} lecturas {:.1} MiB/s; cache {} lecturas {:.1} MiB/s (reload={})",
+        naive_reads,
+        mib_s(bytes, naive_dt),
+        cached_reads,
+        mib_s(bytes, cached_dt),
+        cache.reloads()
+    );
+    assert!(
+        naive_reads > cached_reads * 4,
+        "releer GPT por sector debe multiplicar las lecturas"
+    );
+    assert_eq!(cache.reloads(), 1);
+}
+
+struct FileDisk {
+    file: std::sync::Mutex<std::fs::File>,
+    reads: Cell<u64>,
+}
+
+impl Disk512 for FileDisk {
+    fn read_sector(&self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), Error> {
+        use std::io::{Read, Seek, SeekFrom};
+        self.reads.set(self.reads.get() + 1);
+        let mut f = self.file.lock().unwrap();
+        f.seek(SeekFrom::Start(lba * SECTOR as u64))
+            .map_err(|_| Error::Io)?;
+        f.read_exact(buf).map_err(|_| Error::Io)?;
+        Ok(())
+    }
+
+    fn write_sector(&mut self, _lba: u64, _buf: &[u8; SECTOR]) -> Result<(), Error> {
+        Err(Error::Io)
+    }
+}
+
+/// B6: misma imagen live; 8 MiB de p3 con y sin caché GPT.
+#[test]
+fn geom_cache_live_image_mibs() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/usb-live/soso-live.img");
+    if !path.is_file() {
+        eprintln!("B6 live: sin {} — omitido", path.display());
+        return;
+    }
+    let file = std::fs::File::open(&path).unwrap();
+    let disk = FileDisk {
+        file: std::sync::Mutex::new(file),
+        reads: Cell::new(0),
+    };
+    let mut cache = GeomCache::default();
+    cache.reload(&disk).unwrap();
+    let models = cache.get(GPT_MODELS).expect("p3 modelos");
+    let take = models.sectors.min(16384); // 8 MiB
+    let bytes = take * SECTOR as u64;
+
+    disk.reads.set(0);
+    let t0 = std::time::Instant::now();
+    for i in 0..take {
+        let g = read_part(&disk, GPT_MODELS).unwrap();
+        let mut buf = [0u8; SECTOR];
+        disk.read_sector(g.first + i, &mut buf).unwrap();
+    }
+    let naive_dt = t0.elapsed();
+    let naive_reads = disk.reads.get();
+
+    disk.reads.set(0);
+    let t1 = std::time::Instant::now();
+    seq_read(&disk, models.first, take);
+    let cached_dt = t1.elapsed();
+    let cached_reads = disk.reads.get();
+
+    eprintln!(
+        "B6 live {}: naive {} lecturas {:.1} MiB/s; cache {} lecturas {:.1} MiB/s",
+        path.display(),
+        naive_reads,
+        mib_s(bytes, naive_dt),
+        cached_reads,
+        mib_s(bytes, cached_dt)
+    );
+    assert!(naive_reads > cached_reads * 4);
+    assert_eq!(cached_reads, take);
 }

@@ -1,6 +1,7 @@
 //! `cargo xtask test-resize` — redimensionado GPT recuperable (host + QEMU live).
 //!
-//! Pendiente: fase grow en QEMU sin KVM (shrink modelos ~20 GiB en TCG).
+//! Grow QEMU: modelo sintético + 256 MiB (slide corto). Hace falta
+//! `drv-live-disk` (el preset `qemu` no lo lleva).
 
 use std::cell::Cell;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -35,7 +36,18 @@ pub fn run() {
 
     unsafe {
         std::env::set_var("SOSO_QEMU_LIVE", "1");
-        std::env::set_var("SOSO_DRIVERS", "qemu");
+        // Preset `qemu` no incluye live-disk → ENOSYS en soso-resize.
+        std::env::set_var(
+            "SOSO_DRIVERS",
+            "drv-virtio-blk,drv-virtio-net,drv-live-disk,drv-hda",
+        );
+        std::env::set_var("SOSO_LIVE_OFFLINE", "1");
+        if std::env::var_os("SOSO_MODELS_DIR").is_none() {
+            std::env::set_var("SOSO_MODELS_DIR", root.join("target/tiny-model"));
+        }
+        if std::env::var_os("SOSO_MODELS_SIZE").is_none() {
+            std::env::set_var("SOSO_MODELS_SIZE", "256M");
+        }
     }
     if std::env::var("SOSO_TEST_RESIZE_SKIP_PACKAGE").is_ok_and(|v| v == "1") {
         println!("test-resize: omitiendo package-usb-live (SOSO_TEST_RESIZE_SKIP_PACKAGE=1)");
@@ -69,7 +81,7 @@ pub fn run() {
         fallos += 1;
     } else {
     match inyectar_corte_slide(&recovery_img) {
-        Ok(()) => marca("host: journal en fase INTENT (corte simulado)", true),
+        Ok(()) => marca("host: journal en fase SHRINK_MODELS (corte slide)", true),
         Err(e) => {
             marca(&format!("host: inyección corte — {e}"), false);
             fallos += 1;
@@ -231,8 +243,11 @@ fn inyectar_corte_slide(img: &Path) -> Result<(), String> {
     let delta = DELTA_SECTORS;
     validate_delta_fits(img, delta)?;
 
+    // Corte tras shrink, antes/durante el slide: es el caso que hay que
+    // reanudar sin repetir una copia solapada. INTENT (shrink al arrancar)
+    // se cubre en host; en QEMU colgaba el montaje de modelos antes de FS.
     let journal = Journal {
-        phase: soso_resize_core::JOURNAL_INTENT,
+        phase: soso_resize_core::JOURNAL_SHRINK_MODELS,
         delta_sectors: delta,
         slide_done: 0,
     };
@@ -357,8 +372,19 @@ fn lanzar_live(code: &Path, vars: &Path, live: &Path, serial: &Path) -> Result<Q
     cmd.args(["-device", "virtio-blk-pci,drive=live0"]);
     crate::apply_qemu_nic_with_ports(&mut cmd, SSH_PORT, SSH_PORT + 1, Some(&MAC.to_string()));
     cmd.args(["-serial", &format!("file:{}", serial.display())])
-        .stderr(Stdio::null());
-    let child = cmd.spawn().map_err(|e| e.to_string())?;
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    std::thread::sleep(Duration::from_millis(800));
+    if let Some(code) = child.try_wait().map_err(|e| e.to_string())? {
+        let mut err = String::new();
+        if let Some(mut s) = child.stderr.take() {
+            let _ = s.read_to_string(&mut err);
+        }
+        return Err(format!(
+            "QEMU salió al arrancar ({code}): {}",
+            err.trim()
+        ));
+    }
     Ok(QemuProc { child })
 }
 

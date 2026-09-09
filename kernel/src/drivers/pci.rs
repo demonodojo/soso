@@ -74,6 +74,20 @@ pub struct PciDevice {
     pub bar1_size: u64,
 }
 
+/// Índice del segundo BAR de memoria. Si BAR0 es de 64 bits ocupa dos
+/// registros (0 y 1); el siguiente es 2. `bar_info(..., 4)` leía BAR4, que
+/// en NVIDIA es la mitad alta de BAR3 o basura — la apertura de FB (GB205
+/// `0xa000000000`) nunca llegaba a `lx_pci_bar1` y el selftest de BAR1
+/// mapeaba una PA imposible → #PF en `0xfffffd00…`.
+fn next_mem_bar_index(bus: u8, dev: u8, func: u8) -> u8 {
+    let lo = read32(bus, dev, func, 0x10);
+    if (lo >> 1) & 0b11 == 0b10 {
+        2
+    } else {
+        1
+    }
+}
+
 fn ecam_offset(bus: u8, dev: u8, func: u8, off: u8) -> u64 {
     let e = ecam();
     e.base
@@ -202,7 +216,8 @@ pub(crate) fn enumerate() -> Vec<PciDevice> {
                 }
                 let class_rev = read32(bus, dev, func, 0x08);
                 let (bar0, bar0_size) = bar_info(bus, dev, func, 0).unwrap_or((0, 0));
-                let (bar1, bar1_size) = bar_info(bus, dev, func, 4).unwrap_or((0, 0));
+                let bar1_idx = next_mem_bar_index(bus, dev, func);
+                let (bar1, bar1_size) = bar_info(bus, dev, func, bar1_idx).unwrap_or((0, 0));
                 out.push(PciDevice {
                     bus,
                     device: dev,
@@ -244,11 +259,13 @@ pub fn init() {
     for d in devs {
         if d.class == 0x03 {
             println!(
-                "pci: GPU {:04x}:{:04x} bar0={:#x} ({} KiB)",
+                "pci: GPU {:04x}:{:04x} bar0={:#x} ({} KiB) bar1={:#x} ({} MiB)",
                 d.vendor_id,
                 d.device_id,
                 d.bar0,
-                d.bar0_size / 1024
+                d.bar0_size / 1024,
+                d.bar1,
+                d.bar1_size / (1024 * 1024)
             );
         }
     }

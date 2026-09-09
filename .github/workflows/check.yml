@@ -4,6 +4,15 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite extra (qemu-sys, e2e, shards o ambas)"
+        default: qemu-sys
+        type: choice
+        options: [qemu-sys, e2e, shards, ambas]
+  schedule:
+    - cron: "17 4 * * 1"
 
 jobs:
   host-and-build:
@@ -14,12 +23,103 @@ jobs:
       - name: Instalar toolchain
         run: |
           rustup show active-toolchain || rustup toolchain install
-          rustup target add x86_64-unknown-none x86_64-unknown-uefi || true
+          rustup target add x86_64-unknown-none x86_64-unknown-uefi
 
       - name: Dependencias del sistema
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 gcc
+          sudo apt-get install -y qemu-system-x86 gcc ovmf gdisk
 
       - name: cargo xtask check
         run: cargo xtask check
+
+  qemu-sys:
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' &&
+        (github.event.inputs.suite == 'qemu-sys' || github.event.inputs.suite == 'ambas')
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-none x86_64-unknown-uefi
+      - name: Dependencias
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 gcc
+      - name: cargo xtask test sys init
+        run: cargo xtask test -- --guest sys --only init
+      - name: Conservar logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-sys-logs
+          path: |
+            target/test-*-serial.log
+            target/test-*-run.log
+          if-no-files-found: warn
+
+  qemu-shards:
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' &&
+        (github.event.inputs.suite == 'shards')
+    timeout-minutes: 360
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-none x86_64-unknown-uefi
+      - name: Dependencias
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 gcc
+      - name: cargo xtask test (4 shards, TCG)
+        env:
+          SOSO_QEMU_ACCEL: tcg
+          SOSO_TEST_JOBS: "1"
+        run: cargo xtask test -- --guest
+      - name: Conservar logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-shards-logs
+          path: |
+            target/test-*-serial.log
+            target/test-*-run.log
+          if-no-files-found: warn
+
+  e2e-live:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' &&
+        (github.event.inputs.suite == 'e2e' || github.event.inputs.suite == 'ambas')
+    timeout-minutes: 360
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-none x86_64-unknown-uefi
+      - name: Dependencias (OVMF + sgdisk)
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 gcc ovmf gdisk
+      - name: test-usb / test-install / test-update
+        run: |
+          cargo xtask test-usb
+          cargo xtask test-install
+          cargo xtask test-update
+      - name: Conservar logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-live-logs
+          path: |
+            target/test-*-serial.log
+            target/*.log
+          if-no-files-found: warn

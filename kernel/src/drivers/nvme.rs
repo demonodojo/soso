@@ -35,6 +35,7 @@ const OPC_CREATE_CQ: u8 = 0x05;
 const OPC_IDENTIFY: u8 = 0x06;
 const OPC_IO_WRITE: u8 = 0x01;
 const OPC_IO_READ: u8 = 0x02;
+const OPC_IO_FLUSH: u8 = 0x00;
 
 struct Queue {
     sq_phys: dma::PhysAddr,
@@ -621,6 +622,17 @@ pub fn write_lba_slot(slot: usize, lba: u64, buf: &[u8]) -> Result<(), &'static 
         submit_sync(&mut ctrl, false, &mut sqe)?;
         done += chunk;
     }
+    Ok(())
+}
+
+/// Flush del namespace (no-op si el controlador no tiene caché volátil).
+pub fn flush_slot(slot: usize) -> Result<(), &'static str> {
+    let ctrl_m = slot_ctrl(slot).ok_or("nvme no init")?;
+    let mut ctrl = ctrl_m.lock();
+    let mut sqe = [0u8; SQE_SIZE];
+    sqe[0] = OPC_IO_FLUSH;
+    sqe[4..8].copy_from_slice(&ctrl.nsid.to_le_bytes());
+    submit_sync(&mut ctrl, false, &mut sqe)?;
     Ok(())
 }
 

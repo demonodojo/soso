@@ -175,13 +175,18 @@ pub fn slide_sectors<D: Disk512>(
         return Err(Error::OutOfRange);
     }
     let mut sec = [0u8; SECTOR];
+    let start = *done;
     while *done < sectors {
         let idx = sectors - 1 - *done;
         disk.read_sector(src_lba + idx, &mut sec)?;
         disk.write_sector(dst_lba + idx, &sec)?;
         *done += 1;
     }
-    disk.flush()?;
+    if let Err(e) = disk.flush() {
+        // Sin flush durable el progreso no cuenta: reanudar reescribe.
+        *done = start;
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -412,4 +417,31 @@ fn write_gpt_sectors<D: Disk512>(disk: &mut D, lba: u64, buf: &[u8]) -> Result<(
 
 fn write_gpt_sector<D: Disk512>(disk: &mut D, lba: u64, sec: &[u8; SECTOR]) -> Result<(), Error> {
     disk.write_sector(lba, sec)
+}
+
+/// Geometría GPT en memoria. Las consultas no tocan el disco; hay que
+/// `reload` de forma explícita tras un cambio GPT confirmado.
+#[derive(Debug, Clone, Default)]
+pub struct GeomCache {
+    parts: [Option<PartGeom>; 4],
+    reloads: u64,
+}
+
+impl GeomCache {
+    pub fn reload(&mut self, disk: &impl Disk512) -> Result<(), Error> {
+        self.parts[GPT_ROOT] = Some(read_part(disk, GPT_ROOT)?);
+        self.parts[GPT_MODELS] = Some(read_part(disk, GPT_MODELS)?);
+        self.parts[GPT_ESP] = read_part(disk, GPT_ESP).ok();
+        self.parts[GPT_INSTALL] = read_part(disk, GPT_INSTALL).ok();
+        self.reloads = self.reloads.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn get(&self, index: usize) -> Option<PartGeom> {
+        self.parts.get(index).copied().flatten()
+    }
+
+    pub fn reloads(&self) -> u64 {
+        self.reloads
+    }
 }

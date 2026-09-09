@@ -65,8 +65,12 @@ entrada FAT (no duplicar `SOSOUPD`/`SOSOKRN`).
   - Corte en applying/backup → recuperación con backup verificado (tamaño/hash).
   - `PROBANDO` en el *siguiente* arranque = el anterior falló → revertir.
   - `OK` / `REVERTIR` / idle: ver `crates/soso-update-core/src/mailbox.rs`.
-- Init confirma el kernel nuevo (`OK`) solo tras rootfs accesible y arranque de
-  `/bin/sosh`.
+- Init confirma el kernel nuevo (`OK`) solo tras rootfs accesible, `spawn` de
+  `/bin/sosh`, `/tmp/sosh-ready` (sosh prefaultó su PT_LOAD y construyó el
+  lector) y `kill(pid, 0)` (~400 ms más de sondeo).
+  Si sosh vive sin marca, no se confirma OTA y la shell no se mata.
+  ELF perezoso: el PID de `spawn` no basta. Un page-fault de un binario
+  lanzado después de la marca (no de sosh) no revierte el buzón.
 
 Diagnóstico: `BOOTMARK` vacío → firmware; `BOOTMARK` escrito y `SOSOLOG`
 vacío → kernel (checkpoints `boot:` en pantalla).
@@ -114,6 +118,11 @@ Host: `cargo test -p soso-update-core --features std --tests`.
 
 Live en placa: GPT por **USB BOT** (`live: GPT backend=Usb`) o NVMe.
 
+La geometría GPT (p2/p3) se cachea en RAM tras el primer parse. Las lecturas
+y escrituras de bloques **no** releen la tabla. Tras un resize/recovery que
+reescriba GPT, `live_disk::refresh_geometry()` actualiza la caché; hasta
+entonces los lectores siguen los límites anteriores (no una GPT a medias).
+
 - DMA del event ring en **uncacheable** (`dma::alloc_zeroed_uc`). Write-back
   dejaba `EINT=1` y el software veía el anillo vacío (timeout + dump de puertos).
 - **Longitud de Normal TRB = 17 bits:** `0x20000` (128 KiB) se desborda a 0 →
@@ -146,6 +155,19 @@ cargo xtask hw-matrix show
 ```
 
 No `sudo cargo`: root no tiene rustup. `sudo env "PATH=$PATH" "HOME=$HOME" …`
+
+**El agente no graba el USB.** `flash-usb-live` (y `sudo rm` de
+`target/lxdde/generated_dummies-*.o` si clang no puede escribirlo) piden
+contraseña de sudo; en Cursor no hay TTY (`sudo: a terminal is required to
+read the password`). Compila el kernel, deja el comando exacto al usuario y
+no reintentes `sudo`. Leer SOSOLOG: `udisksctl mount -b /dev/sda1` suele
+bastar sin sudo; `cargo xtask sosolog` a veces sí lo pide.
+
+**Tras un arranque de placa**, con el pendrive de vuelta: actualizar la
+matriz A8 (`docs/hw-matrix.json`) con `parse-logs` — skill **soso-dev**.
+El agente puede editar ese JSON. No pongas etapas en `ok` sin evidencia
+en SOSOLOG (`UCODE_ALIVE_NTFY`, GSP RPC). Un arranque a sosh no es
+aceptación (hacen falta 3 seguidos + sesión).
 
 Notas de sesión VFIO/kdump archivadas: [`docs/historico/notas-placa.md`](../../docs/historico/notas-placa.md)
 (puntero desde [`board.txt`](../../board.txt)).

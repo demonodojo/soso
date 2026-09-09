@@ -42,7 +42,11 @@ impl Disk512 for LiveDisk512 {
     }
 
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), ResizeError> {
-        live_disk::disk_write_sector(lba, buf).map_err(|_| ResizeError::Io)
+        live_disk::disk_write_sector_nosync(lba, buf).map_err(|_| ResizeError::Io)
+    }
+
+    fn flush(&mut self) -> Result<(), ResizeError> {
+        live_disk::disk_flush().map_err(|_| ResizeError::Io)
     }
 }
 
@@ -127,10 +131,12 @@ pub fn recover_before_mount() -> bool {
         .checked_div((BLOCK_SIZE / SECTOR) as u64)
         .unwrap_or(0);
     if journal.phase == JOURNAL_INTENT {
+        println!("fs-resize: recovery INTENT — montando modelos");
         if !fs::mount_models_for_recovery() {
             println!("fs-resize: no se pudo montar modelos para shrink");
             return false;
         }
+        println!("fs-resize: recovery INTENT — shrink {} bloques", delta_blocks);
         if shrink_models(delta_blocks).is_err() {
             println!("fs-resize: shrink en recovery falló");
             return false;
@@ -138,9 +144,12 @@ pub fn recover_before_mount() -> bool {
         journal.phase = JOURNAL_SHRINK_MODELS;
         journal.slide_done = 0;
         if journal_write(&journal).is_err() {
+            println!("fs-resize: no se pudo escribir journal tras shrink");
             return false;
         }
+        println!("fs-resize: recovery INTENT — shrink hecho");
     }
+    println!("fs-resize: recovery slide/GPT (fase {})", journal.phase);
     let mut disk = LiveDisk512;
     if soso_resize_core::recover_slides_and_gpt(&mut disk, &mut journal, |j| {
         let _ = journal_write(j);
@@ -148,6 +157,10 @@ pub fn recover_before_mount() -> bool {
     .is_err()
     {
         println!("fs-resize: slide/GPT en recovery falló (fase {})", journal.phase);
+        return false;
+    }
+    if !live_disk::refresh_geometry() {
+        println!("fs-resize: no se pudo refrescar geometría GPT tras recovery");
         return false;
     }
     PENDING_ROOT_GROW.store(delta_blocks, Ordering::SeqCst);
@@ -172,8 +185,17 @@ pub fn finalize_after_mount() {
         return;
     };
     let mut fs = fs_mutex.lock();
-    let target = fs.block_count().saturating_add(delta_blocks);
-    if fs.grow_to(target).is_err() {
+    let current = fs.block_count();
+    let part = live_disk::cached_part_sectors(GPT_ROOT)
+        .map(|s| s / (BLOCK_SIZE / SECTOR) as u64)
+        .unwrap_or(0);
+    // Tras slide+GPT el montaje ya pudo hacer grow_to(partición).
+    let target = if part > current {
+        part
+    } else {
+        current
+    };
+    if target > current && fs.grow_to(target).is_err() {
         println!("fs-resize: grow root en finalize falló");
         return;
     }
@@ -228,6 +250,10 @@ pub fn grow_root(delta_blocks: u64) -> Result<u64, i64> {
         let _ = journal_write(j);
     })
     .map_err(|_| -soso_abi::EIO)?;
+    if !live_disk::refresh_geometry() {
+        println!("fs-resize: no se pudo refrescar geometría GPT");
+        return Err(-soso_abi::EIO);
+    }
 
     let new_root_blocks = {
         let fs_mutex = fs::FS.get().ok_or(-soso_abi::EIO)?;
@@ -288,8 +314,8 @@ fn preflight_resize(delta_blocks: u64, delta_sectors: u64) -> Result<(), i64> {
 
 #[cfg(feature = "drv-live-disk")]
 fn part_blocks(entry_index: usize) -> Result<u64, i64> {
-    let g = soso_resize_core::read_part(&LiveDisk512, entry_index).map_err(|_| -soso_abi::EIO)?;
-    Ok(g.sectors / (BLOCK_SIZE / SECTOR) as u64)
+    let sectors = live_disk::cached_part_sectors(entry_index).ok_or(-soso_abi::EIO)?;
+    Ok(sectors / (BLOCK_SIZE / SECTOR) as u64)
 }
 
 #[cfg(feature = "drv-live-disk")]

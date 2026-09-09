@@ -37,16 +37,65 @@ impl StageStatus {
         }
     }
 
+    #[allow(dead_code)]
     fn from_bool(ok: bool, ok_note: &str, fail_note: &str) -> Self {
         if ok {
             Self::ok(Some(ok_note))
         } else {
-            Self {
-                status: "fail".into(),
-                nota: Some(fail_note.into()),
-                fecha: Some(today()),
-            }
+            Self::fail(fail_note)
         }
+    }
+
+    fn fail(nota: &str) -> Self {
+        Self {
+            status: "fail".into(),
+            nota: Some(nota.into()),
+            fecha: Some(today()),
+        }
+    }
+
+    fn no_aplica(nota: &str) -> Self {
+        Self {
+            status: "no_aplica".into(),
+            nota: Some(nota.into()),
+            fecha: Some(today()),
+        }
+    }
+
+    fn is_pendiente(&self) -> bool {
+        self.status == "pendiente"
+    }
+}
+
+/// Un log truncado o de otro arranque no borra un `ok`/`fail` anterior.
+/// Un resultado concluyente nuevo (incluido un fallo) sí actualiza.
+pub fn merge_stage(prev: &StageStatus, incoming: StageStatus) -> StageStatus {
+    if incoming.is_pendiente() {
+        prev.clone()
+    } else {
+        incoming
+    }
+}
+
+fn merge_wifi(prev: &WifiStages, incoming: WifiStages) -> WifiStages {
+    WifiStages {
+        alive: merge_stage(&prev.alive, incoming.alive),
+        scan: merge_stage(&prev.scan, incoming.scan),
+        assoc_wpa2: merge_stage(&prev.assoc_wpa2, incoming.assoc_wpa2),
+        dhcp: merge_stage(&prev.dhcp, incoming.dhcp),
+        ssh: merge_stage(&prev.ssh, incoming.ssh),
+        reconexion: merge_stage(&prev.reconexion, incoming.reconexion),
+    }
+}
+
+fn merge_gpu(prev: &GpuStages, incoming: GpuStages) -> GpuStages {
+    GpuStages {
+        gsp_rpc: merge_stage(&prev.gsp_rpc, incoming.gsp_rpc),
+        vram_pool: merge_stage(&prev.vram_pool, incoming.vram_pool),
+        ce_readback: merge_stage(&prev.ce_readback, incoming.ce_readback),
+        compute_cpu_gpu: merge_stage(&prev.compute_cpu_gpu, incoming.compute_cpu_gpu),
+        carga_real: merge_stage(&prev.carga_real, incoming.carga_real),
+        apagado_limpio: merge_stage(&prev.apagado_limpio, incoming.apagado_limpio),
     }
 }
 
@@ -239,7 +288,10 @@ fn git_info() -> GitInfo {
     let dirty = !run_capture_in(&root, "git", &["status", "--porcelain"]).is_empty();
     let version = crate::version::read_version(&root);
     let cambios = if dirty {
-        run_capture_in(&root, "git", &["status", "--short"]).lines().count().to_string()
+        run_capture_in(&root, "git", &["status", "--short"])
+            .lines()
+            .count()
+            .to_string()
             + " ficheros modificados"
     } else {
         String::new()
@@ -286,10 +338,10 @@ fn default_matrix() -> HwMatrix {
             seed_entry(
                 "ga107-igpu",
                 "NVIDIA GA107 (iGPU / Ampere)",
-                vec!["10de:????".into()],
+                vec!["10de:249c".into()],
                 "live-usb + nouveau",
                 &git,
-                "Cadena Ampere pendiente de cierre",
+                "PCI 10de:249c (ROG 3050 Mobile). Cadena Ampere pendiente de revalidar en placa",
             ),
             seed_entry(
                 "ax211-wifi",
@@ -340,7 +392,10 @@ fn seed_entry(
 fn init() {
     let path = matrix_path();
     if path.exists() {
-        eprintln!("hw-matrix: {} ya existe (usa collect/parse-logs para actualizar)", path.display());
+        eprintln!(
+            "hw-matrix: {} ya existe (usa collect/parse-logs para actualizar)",
+            path.display()
+        );
         return;
     }
     save_matrix(&default_matrix());
@@ -374,6 +429,12 @@ fn collect(args: &[String]) {
         entry.equipo = eq;
     }
     if let Some(pci) = flag(args, "--pci") {
+        if !pci_id_concreto(&pci) {
+            eprintln!(
+                "hw-matrix collect: PCI '{pci}' no es un id concreto (vvvv:dddd hex, sin ????)"
+            );
+            std::process::exit(2);
+        }
         if !entry.pci_ids.contains(&pci) {
             entry.pci_ids.push(pci);
         }
@@ -391,19 +452,27 @@ fn collect(args: &[String]) {
     println!("hw-matrix: actualizado {id} ({equipo})");
 }
 
+fn firmware_files_for(id: &str) -> &'static [(&'static str, &'static str)] {
+    match id {
+        "ax211-wifi" => &[("iwlwifi-so-a0-gf-a0-89.ucode", "ax211_ucode")],
+        "ax200-wifi" => &[("iwlwifi-cc-a0-77.ucode", "ax200_ucode")],
+        "gb205-dgpu" => &[("nvidia/gb205/gsp/gsp-570.144.bin", "gsp_gb205")],
+        // En árbol: fallback ga102, no blob nativo ga107.
+        "ga107-igpu" => &[("nvidia/ga102/gsp/gsp-570.144.bin", "gsp_ga102_fallback")],
+        _ => &[],
+    }
+}
+
 fn collect_firmware_hashes(entry: &mut HwEntry) {
     let root = crate::project_root().join("rootfs/lib/firmware");
-    let patterns = [
-        ("iwlwifi-so-a0-gf-a0-89.ucode", "ax211_ucode"),
-        ("iwlwifi-cc-a0-77.ucode", "ax200_ucode"),
-        ("nvidia/ad103/gsp/gsp.bin", "gsp_ad103"),
-    ];
-    for (rel, key) in patterns {
+    for (rel, key) in firmware_files_for(&entry.id) {
         let p = root.join(rel);
         if p.is_file() {
             if let Ok(bytes) = std::fs::read(&p) {
                 let hash = sha256_hex(&bytes);
-                entry.firmware.insert(key.into(), format!("{hash} {}B", bytes.len()));
+                entry
+                    .firmware
+                    .insert((*key).into(), format!("{hash} {}B", bytes.len()));
             }
         }
     }
@@ -452,9 +521,9 @@ fn parse_logs_cmd(args: &[String]) {
             entry.logs.push(s);
         }
     }
-    entry.wifi = parse_wifi_stages(&blob);
-    entry.gpu = parse_gpu_stages(&blob);
-    entry.sesion_sostenida = parse_sesion(&blob);
+    entry.wifi = merge_wifi(&entry.wifi, parse_wifi_stages(&blob));
+    entry.gpu = merge_gpu(&entry.gpu, parse_gpu_stages(&blob));
+    entry.sesion_sostenida = merge_stage(&entry.sesion_sostenida, parse_sesion(&blob));
     if let Some(drv) = flag_path(args, "--sosodrv") {
         apply_hwscan(entry, &drv);
     }
@@ -480,35 +549,55 @@ fn apply_hwscan(entry: &mut HwEntry, sosodrv: &Path) {
 pub fn parse_wifi_stages(text: &str) -> WifiStages {
     let t = text.to_ascii_lowercase();
     WifiStages {
-        alive: if t.contains("ucode_alive_ntfy") || t.contains("firmware alive") {
+        alive: if t.contains("alive degradado") || t.contains("alive=fallo") {
+            StageStatus::fail("ALIVE degradado o fallido")
+        } else if t.contains("ucode_alive_ntfy") || t.contains("firmware alive") {
             StageStatus::ok(Some("UCODE_ALIVE_NTFY"))
-        } else if t.contains("alive degradado") {
-            StageStatus::from_bool(false, "", "ALIVE degradado no válido")
         } else {
             StageStatus::pendiente()
         },
-        scan: if t.contains("wifi scan") || t.contains("scan:") && t.contains("ssid") {
+        scan: if t.contains("scan=fallo") || t.contains("wifi scan fallo") {
+            StageStatus::fail("scan fallido")
+        } else if t.contains("scan:") && t.contains("ssid") {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        assoc_wpa2: if t.contains("asociad") || t.contains("wpa2") || t.contains("4-way") {
-            StageStatus::ok(None)
-        } else {
-            StageStatus::pendiente()
-        },
-        dhcp: if t.contains("dhcp") && (t.contains("lease") || t.contains("ok") || t.contains("192."))
+        assoc_wpa2: if t.contains("assoc=fallo") || t.contains("wpa2 fallo") {
+            StageStatus::fail("asociación WPA2 fallida")
+        } else if t.contains("asociad")
+            || t.contains("assoc=ok")
+            || (t.contains("4-way") && t.contains("ok"))
         {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        ssh: if t.contains("ssh") && t.contains("ok") || t.contains("sosh —") {
-            StageStatus::ok(Some("consola/SSH"))
+        dhcp: if t.contains("dhcp") && t.contains("fallo") {
+            StageStatus::fail("DHCP fallido")
+        } else if t.contains("dhcp")
+            && (t.contains("lease") || t.contains("ok") || t.contains("192."))
+        {
+            StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        reconexion: if t.contains("reconex") || t.contains("reconnect") {
+        ssh: if t.contains("ssh: sesión")
+            || t.contains("ssh: sesion")
+            || t.contains("ssh conectado")
+            || (t.contains("ssh:") && t.contains("ok") && !t.contains("sosh"))
+        {
+            StageStatus::ok(Some("SSH"))
+        } else if t.contains("ssh") && t.contains("fallo") {
+            StageStatus::fail("SSH fallido")
+        } else {
+            StageStatus::pendiente()
+        },
+        reconexion: if (t.contains("reconex") || t.contains("reconnect")) && t.contains("fallo") {
+            StageStatus::fail("reconexión fallida")
+        } else if (t.contains("reconex") || t.contains("reconnect"))
+            && (t.contains("ok") || t.contains("éxito") || t.contains("exito"))
+        {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
@@ -519,34 +608,42 @@ pub fn parse_wifi_stages(text: &str) -> WifiStages {
 pub fn parse_gpu_stages(text: &str) -> GpuStages {
     let t = text.to_ascii_lowercase();
     GpuStages {
-        gsp_rpc: if (t.contains("gsp") && t.contains("ok")) || t.contains("gsp-rm") {
+        gsp_rpc: if t.contains("gsp=fallo") || t.contains("gsp fallo") || t.contains("gsp: fallo") {
+            StageStatus::fail("GSP fallido")
+        } else if (t.contains("gsp") && t.contains("ok")) || t.contains("gsp_init_done") {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        vram_pool: if t.contains("vram") && (t.contains("pool") || t.contains("libre")) {
+        vram_pool: if t.contains("pool vram=no") || t.contains("vram=no") {
+            StageStatus::fail("pool VRAM=no")
+        } else if t.contains("pool vram=") || (t.contains("vram") && t.contains("mib")) {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        ce_readback: if t.contains("readback") && t.contains("go") {
+        ce_readback: if t.contains("readback") && t.contains("fallo") {
+            StageStatus::fail("CE readback fallido")
+        } else if t.contains("readback") && t.contains("go") {
             StageStatus::ok(Some("CE readback GO"))
         } else {
             StageStatus::pendiente()
         },
-        compute_cpu_gpu: if t.contains("matvec") && t.contains("gpu") {
-            StageStatus::ok(None)
-        } else if t.contains("dispositivo «soft") {
-            StageStatus::ok(Some("dispositivo software (QEMU)"))
-        } else {
-            StageStatus::pendiente()
-        },
-        carga_real: if t.contains("soso-llm: generado") || t.contains("soso-llm run") {
+        compute_cpu_gpu: if t.contains("dispositivo «soft") || t.contains("dispositivo \"soft") {
+            StageStatus::no_aplica("dispositivo software (QEMU)")
+        } else if t.contains("matvec") && t.contains("gpu") && t.contains("tok/s") {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        apagado_limpio: if (t.contains("unload=ok") || t.contains("unload=fallo"))
+        carga_real: if t.contains("soso-llm: generado") {
+            StageStatus::ok(None)
+        } else {
+            StageStatus::pendiente()
+        },
+        apagado_limpio: if t.contains("unload=fallo") {
+            StageStatus::fail("unload=fallo")
+        } else if t.contains("unload=ok")
             && (t.contains("dma=off") || t.contains("bus master quitado"))
         {
             StageStatus::ok(Some("unload/halt/dma"))
@@ -602,10 +699,10 @@ fn record_bench(args: &[String]) {
     let entry = find_entry(&mut m, &id).expect("entrada desconocida");
     entry.bench.modelo = flag(args, "--modelo").or(Some("tiny".into()));
     entry.bench.prompt = flag(args, "--prompt").or(Some("test".into()));
-    entry.bench.seed = flag(args, "--seed").and_then(|s| s.parse().ok()).or(Some(42));
-    entry.bench.max_tokens = flag(args, "--max")
+    entry.bench.seed = flag(args, "--seed")
         .and_then(|s| s.parse().ok())
-        .or(Some(8));
+        .or(Some(42));
+    entry.bench.max_tokens = flag(args, "--max").and_then(|s| s.parse().ok()).or(Some(8));
     entry.bench.tok_s_mediana = Some(tok_s);
     entry.bench.tok_s_frio = flag(args, "--frio").and_then(|s| s.parse().ok());
     entry.bench.tok_s_caliente = flag(args, "--caliente").and_then(|s| s.parse().ok());
@@ -656,7 +753,11 @@ fn host_check() {
 
 fn show() {
     let m = load_matrix();
-    println!("hw-matrix v{} — {} entradas\n", m.schema_version, m.entries.len());
+    println!(
+        "hw-matrix v{} — {} entradas\n",
+        m.schema_version,
+        m.entries.len()
+    );
     for e in &m.entries {
         show_entry_summary(e);
         println!();
@@ -676,24 +777,33 @@ fn show_entry_summary(e: &HwEntry) {
         "  perfil={} pci={:?} arranques_ok={}/3",
         e.perfil_drivers, e.pci_ids, e.arranques_consecutivos_ok
     );
-    print_stages("  wifi", &[
-        ("alive", &e.wifi.alive),
-        ("scan", &e.wifi.scan),
-        ("wpa2", &e.wifi.assoc_wpa2),
-        ("dhcp", &e.wifi.dhcp),
-        ("ssh", &e.wifi.ssh),
-        ("recon", &e.wifi.reconexion),
-    ]);
-    print_stages("  gpu ", &[
-        ("gsp", &e.gpu.gsp_rpc),
-        ("vram", &e.gpu.vram_pool),
-        ("ce", &e.gpu.ce_readback),
-        ("cpu/gpu", &e.gpu.compute_cpu_gpu),
-        ("carga", &e.gpu.carga_real),
-        ("apagado", &e.gpu.apagado_limpio),
-    ]);
+    print_stages(
+        "  wifi",
+        &[
+            ("alive", &e.wifi.alive),
+            ("scan", &e.wifi.scan),
+            ("wpa2", &e.wifi.assoc_wpa2),
+            ("dhcp", &e.wifi.dhcp),
+            ("ssh", &e.wifi.ssh),
+            ("recon", &e.wifi.reconexion),
+        ],
+    );
+    print_stages(
+        "  gpu ",
+        &[
+            ("gsp", &e.gpu.gsp_rpc),
+            ("vram", &e.gpu.vram_pool),
+            ("ce", &e.gpu.ce_readback),
+            ("cpu/gpu", &e.gpu.compute_cpu_gpu),
+            ("carga", &e.gpu.carga_real),
+            ("apagado", &e.gpu.apagado_limpio),
+        ],
+    );
     if let Some(t) = e.bench.tok_s_mediana {
-        println!("  bench: {t:.2} tok/s ({})", e.bench.backend.as_deref().unwrap_or("?"));
+        println!(
+            "  bench: {t:.2} tok/s ({})",
+            e.bench.backend.as_deref().unwrap_or("?")
+        );
     }
     if !e.notas.is_empty() {
         println!("  notas: {}", e.notas.trim());
@@ -706,6 +816,18 @@ fn print_stages(prefix: &str, stages: &[(&str, &StageStatus)]) {
         .map(|(n, st)| format!("{n}={}", st.status))
         .collect();
     println!("{prefix}: {}", s.join(" "));
+}
+
+/// PCI ID concreto `vvvv:dddd` en hex. Rechaza huecos tipo `10de:????`.
+pub(crate) fn pci_id_concreto(id: &str) -> bool {
+    let id = id.trim();
+    let Some((vid, did)) = id.split_once(':') else {
+        return false;
+    };
+    vid.len() == 4
+        && did.len() == 4
+        && vid.chars().all(|c| c.is_ascii_hexdigit())
+        && did.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -735,5 +857,121 @@ mod tests {
         let g = parse_gpu_stages("nouveau-lx: unload=ok halt=ok dma=off readback GO");
         assert_eq!(g.ce_readback.status, "ok");
         assert_eq!(g.apagado_limpio.status, "ok");
+    }
+
+    #[test]
+    fn parse_gpu_rejects_false_positives() {
+        let g = parse_gpu_stages("pool VRAM=no soso-llm run dispositivo «soft»");
+        assert_eq!(g.vram_pool.status, "fail");
+        assert_eq!(g.carga_real.status, "pendiente");
+        assert_eq!(g.compute_cpu_gpu.status, "no_aplica");
+        let g = parse_gpu_stages("unload=fallo dma=off");
+        assert_eq!(g.apagado_limpio.status, "fail");
+        let g = parse_gpu_stages("soso-llm: generado 16 tokens");
+        assert_eq!(g.carga_real.status, "ok");
+    }
+
+    #[test]
+    fn parse_wifi_rejects_banner_and_words() {
+        let w = parse_wifi_stages("sosh — escribe 'help' wpa2 reconnect wifi scan");
+        assert_eq!(w.ssh.status, "pendiente");
+        assert_eq!(w.assoc_wpa2.status, "pendiente");
+        assert_eq!(w.reconexion.status, "pendiente");
+        assert_eq!(w.scan.status, "pendiente");
+        let w = parse_wifi_stages("wifi scan: ssid Casa assoc=ok ssh: sesión ok reconexion ok");
+        assert_eq!(w.scan.status, "ok");
+        assert_eq!(w.assoc_wpa2.status, "ok");
+        assert_eq!(w.ssh.status, "ok");
+        assert_eq!(w.reconexion.status, "ok");
+    }
+
+    #[test]
+    fn parse_truncated_log_stays_pending() {
+        let g = parse_gpu_stages("gsp\nvram\n");
+        assert_eq!(g.gsp_rpc.status, "pendiente");
+        assert_eq!(g.vram_pool.status, "pendiente");
+        let w = parse_wifi_stages("iwl: start");
+        assert_eq!(w.alive.status, "pendiente");
+    }
+
+    #[test]
+    fn merge_stage_keeps_ok_when_next_boot_is_truncated() {
+        let prev = StageStatus::ok(Some("UCODE_ALIVE_NTFY"));
+        let incoming = parse_wifi_stages("iwl: start").alive;
+        assert_eq!(incoming.status, "pendiente");
+        let merged = merge_stage(&prev, incoming);
+        assert_eq!(merged.status, "ok");
+        assert_eq!(merged.nota.as_deref(), Some("UCODE_ALIVE_NTFY"));
+    }
+
+    #[test]
+    fn merge_stage_records_new_fail() {
+        let prev = StageStatus::ok(Some("shell"));
+        let incoming = StageStatus::fail("ALIVE degradado o fallido");
+        let merged = merge_stage(&prev, incoming);
+        assert_eq!(merged.status, "fail");
+    }
+
+    #[test]
+    fn firmware_files_for_known_boards() {
+        assert_eq!(firmware_files_for("ax211-wifi")[0].1, "ax211_ucode");
+        assert_eq!(firmware_files_for("qemu-test").len(), 0);
+        assert_eq!(firmware_files_for("ga107-igpu")[0].1, "gsp_ga102_fallback");
+    }
+
+    #[test]
+    fn pci_id_rejects_placeholder() {
+        assert!(!pci_id_concreto("10de:????"));
+        assert!(!pci_id_concreto("????:249c"));
+        assert!(!pci_id_concreto("10de:249"));
+        assert!(!pci_id_concreto("10de249c"));
+        assert!(pci_id_concreto("10de:249c"));
+        assert!(pci_id_concreto("8086:7f70"));
+    }
+
+    #[test]
+    fn default_and_committed_matrix_have_no_placeholder_pci() {
+        let seed = default_matrix();
+        for e in &seed.entries {
+            for pci in &e.pci_ids {
+                assert!(
+                    pci_id_concreto(pci),
+                    "semilla {}: PCI provisional {pci}",
+                    e.id
+                );
+            }
+        }
+        let ga = seed
+            .entries
+            .iter()
+            .find(|e| e.id == "ga107-igpu")
+            .expect("ga107-igpu");
+        assert_eq!(ga.pci_ids, vec!["10de:249c".to_string()]);
+
+        let json = include_str!("../../docs/hw-matrix.json");
+        let committed: HwMatrix = serde_json::from_str(json).expect("hw-matrix.json");
+        for e in &committed.entries {
+            for pci in &e.pci_ids {
+                assert!(pci_id_concreto(pci), "{}: PCI provisional {pci}", e.id);
+            }
+        }
+        let ga = committed
+            .entries
+            .iter()
+            .find(|e| e.id == "ga107-igpu")
+            .expect("ga107-igpu");
+        assert_eq!(ga.pci_ids, vec!["10de:249c".to_string()]);
+    }
+
+    #[test]
+    fn merge_wifi_truncated_does_not_wipe_scan() {
+        let prev = WifiStages {
+            scan: StageStatus::ok(Some("ssid")),
+            ..WifiStages::default()
+        };
+        let incoming = parse_wifi_stages("sosh — wpa2 reconnect");
+        let merged = merge_wifi(&prev, incoming);
+        assert_eq!(merged.scan.status, "ok");
+        assert_eq!(merged.assoc_wpa2.status, "pendiente");
     }
 }

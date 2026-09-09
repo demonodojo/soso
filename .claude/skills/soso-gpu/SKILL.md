@@ -1113,18 +1113,18 @@ QEMU sin passthrough: `nvidia: sin GPU NVIDIA en PCI` — normal. `GSP booted (s
 ## Matriz hardware (A8)
 
 Evidencia por placa en [`docs/hw-matrix.json`](../../docs/hw-matrix.json) — ver
-[`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).
+[`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md). Tras SOSOLOG de live USB, el
+agente **sí** hace `parse-logs --id gb205-dgpu`. No `--boot-ok` ni `gsp_rpc: ok`
+si el log dice `GSP=fallo` / `pool VRAM=no`.
 
 | ID matriz | PCI | Etapas GPU |
 |-----------|-----|------------|
 | `gb205-dgpu` | `10de:2f18` | G1–G5 (parser host + VFIO + live) |
-| `ga107-igpu` | Ampere móvil | FWSEC-FRTS, booter_load |
+| `ga107-igpu` | `10de:249c` | FWSEC-FRTS, booter_load |
 
 ```bash
-cargo xtask hw-matrix init
-./scripts/l6-a8-collect.sh --id gb205-dgpu --equipo "..." --pci 10de:2f18 --boot-ok
+cargo xtask hw-matrix parse-logs --id gb205-dgpu --sosolog SOSOLOG.TXT --sosodrv SOSODRV.TXT
 ./scripts/l6-g3-gsp-hostcheck.sh   # host, sin GPU
-sudo ./scripts/l6-g1-vfio-test.sh    # ciclo VFIO (notas: docs/historico/notas-placa.md)
 cargo xtask hw-matrix show
 ```
 

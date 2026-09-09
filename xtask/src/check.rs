@@ -74,6 +74,7 @@ fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
         ),
         ("soso-update-core", &["soso-update-core"], true),
         ("soso-resize-core", &["soso-resize-core"], false),
+        ("xhci-nostd", &["xhci-nostd"], false),
         ("soso-audio+gguf2som", &["soso-audio", "gguf2som"], true),
         ("soso-forja-server", &["soso-forja-server"], false),
     ];
@@ -94,7 +95,7 @@ fn cargo_test(root: &Path, pkgs: &[&str], con_std: bool) -> bool {
     if con_std {
         cmd.args(["--features", "std"]);
     }
-    if pkgs == &["soso-http"] {
+    if pkgs == &["soso-http"] || pkgs == &["soso-forja-server"] {
         cmd.args(["--", "--test-threads=1"]);
     }
     match cmd.status() {
@@ -132,8 +133,17 @@ fn run_hw_matrix(root: &Path, fallos: &Arc<Mutex<u32>>) {
         println!("check: hw-matrix.json ausente — ejecuta `cargo xtask hw-matrix init`");
     }
     let ok = Command::new("cargo")
-        .current_dir(root.join("xtask"))
-        .args(["test", "-q", "hw_matrix::", "--", "--nocapture"])
+        .current_dir(root)
+        .args([
+            "test",
+            "-q",
+            "-p",
+            "xtask",
+            "--",
+            "hw_matrix::",
+            "test_install::",
+            "--nocapture",
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);

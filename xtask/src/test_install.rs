@@ -20,7 +20,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use crate::test::{esperar_en_fichero, ssh_guion};
+use crate::test::{esperar_en_fichero, ssh_guion, ssh_guion_hasta};
 
 const SSH_PORT: u16 = 2242;
 const MAC: &str = "52:54:00:12:34:42";
@@ -236,11 +236,12 @@ fn fase_arranque_solo(
     // Sin USB conectado (a propósito, esta fase sólo lleva el NVMe): antes del
     // fix de `boot_source()`, ningún disco quedaba marcado DISK_FLAG_BOOT y
     // `soso-update estado` no podía decir de dónde había arrancado.
-    let salida = ssh_guion(
+    let salida = ssh_guion_hasta(
         key,
         SSH_PORT,
         "soso-update estado\nhalt\n",
         Duration::from_secs(120),
+        "arranque: disco instalado",
     )?;
     if !salida.contains("arranque: disco instalado") {
         return Err(format!(
@@ -398,8 +399,8 @@ fn sgdisk_print(img: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `sgdisk -p` lista `número inicio fin …`; la última línea de partición debe
-/// acabar en el último sector utilizable (total - 34).
+/// `sgdisk -p` lista `número inicio fin …`. p4 (SOSOINSTALL) va **antes**
+/// que p3 en el disco; hay que tomar el fin más alto, no la última línea.
 fn ultima_llega_al_final(tabla: &str, total_sectores: u64) -> Result<(), String> {
     let mut ultimo = None;
     for line in tabla.lines() {
@@ -408,7 +409,7 @@ fn ultima_llega_al_final(tabla: &str, total_sectores: u64) -> Result<(), String>
             continue;
         }
         if let Ok(fin) = campos[2].parse::<u64>() {
-            ultimo = Some(fin);
+            ultimo = Some(ultimo.map_or(fin, |u: u64| u.max(fin)));
         }
     }
     let fin = ultimo.ok_or("sgdisk -p no listó ninguna partición")?;
@@ -423,7 +424,7 @@ fn ultima_llega_al_final(tabla: &str, total_sectores: u64) -> Result<(), String>
 fn sosofs_en_p2(img: &Path) -> Result<(), String> {
     let lba = gpt_part_lba(img, 2).ok_or("sin partición 2")?;
     let datos = leer_en(img, lba * 512, 8)?;
-    if &datos == b"SOSOFS10" {
+    if &datos == b"SOSOFS11" {
         Ok(())
     } else {
         Err(format!("magic inesperado: {:?}", String::from_utf8_lossy(&datos)))
@@ -515,4 +516,21 @@ fn sangrar(texto: &str) -> String {
         .map(|l| format!("      {}", l.trim_end()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ultima_llega_al_final;
+
+    #[test]
+    fn ultima_llega_al_final_usa_fin_mas_alto_no_ultima_linea() {
+        let tabla = "\
+Number  Start (sector)    End (sector)  Size       Code  Name\n\
+   1              34          194593   95.0 MiB    EF00  boot\n\
+   2          194594          981025   384.0 MiB   8300\n\
+   3         1112098         2688990   770.0 MiB   8300\n\
+   4          981026         1112097   64.0 MiB    0700  SOSOINSTALL\n";
+        assert!(ultima_llega_al_final(tabla, 2688990 + 34).is_ok());
+        assert!(ultima_llega_al_final(tabla, 2688990 + 100).is_err());
+    }
 }

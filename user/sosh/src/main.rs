@@ -29,12 +29,74 @@ const PROTO_FIN: u8 = 0xFF;
 const LINE_MAX: usize = 1024;
 const CONF: &str = "/etc/llm.conf";
 
+/// ET_EXEC de soso: cabecera y PT_LOAD en 0x400000 (p_offset 0).
+const ELF_BASE: usize = 0x400000;
+const PT_LOAD: u32 = 1;
+const PAGE: usize = 4096;
+
+fn load_u16(p: *const u8) -> u16 {
+    unsafe { core::ptr::read_unaligned(p.cast()) }
+}
+fn load_u32(p: *const u8) -> u32 {
+    unsafe { core::ptr::read_unaligned(p.cast()) }
+}
+fn load_u64(p: *const u8) -> u64 {
+    unsafe { core::ptr::read_unaligned(p.cast()) }
+}
+
+/// Falta cada página de los PT_LOAD **antes** de `/tmp/sosh-ready`.
+/// Si el ELF perezoso no puede resolver una página, morimos sin marca y
+/// init no confirma OTA.
+fn prefault_imagen() {
+    let base = ELF_BASE as *const u8;
+    unsafe {
+        if *base != 0x7f || *base.add(1) != b'E' || *base.add(2) != b'L' || *base.add(3) != b'F' {
+            return;
+        }
+        let phoff = load_u64(base.add(32)) as usize;
+        let phentsize = load_u16(base.add(54)) as usize;
+        let phnum = load_u16(base.add(56)) as usize;
+        if phentsize < 56 || phnum == 0 || phnum > 16 || phoff > 64 * 1024 {
+            return;
+        }
+        for i in 0..phnum {
+            let ph = base.add(phoff + i * phentsize);
+            if load_u32(ph) != PT_LOAD {
+                continue;
+            }
+            let vaddr = load_u64(ph.add(16)) as usize;
+            let memsz = load_u64(ph.add(40)) as usize;
+            if memsz == 0 || memsz > 32 * 1024 * 1024 {
+                continue;
+            }
+            let end = vaddr.saturating_add(memsz);
+            let mut page = vaddr & !(PAGE - 1);
+            while page < end {
+                let _ = core::ptr::read_volatile(page as *const u8);
+                match page.checked_add(PAGE) {
+                    Some(n) => page = n,
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
 fn main(_args: &str) -> u8 {
     let shell_pgid = sys::getpid();
     let _ = sys::setsid();
     let _ = sys::tcsetpgrp(shell_pgid);
     println!("sosh — escribe 'help' para la ayuda");
+    prefault_imagen();
     let mut lector = Lector::new().con_hook_ptt(hook_ptt);
+    // Marca para init: PT_LOAD ya faltado y lector construido (OTA no confirma
+    // solo con spawn ni con llegar a `main`).
+    let _ = sys::mkdir("/tmp");
+    let fd = sys::open("/tmp/sosh-ready", abi::O_WRONLY);
+    if fd >= 0 {
+        let _ = sys::write(fd as u64, b"ok\n");
+        let _ = sys::close(fd as u64);
+    }
     loop {
         print!("{PROMPT}");
         let Some(cmd) = lector.siguiente() else {
@@ -476,6 +538,9 @@ fn copiar_respuesta_ask(fd: u64) {
     // dura más que cualquier timeout razonable).
     loop {
         let n = sys::read_timeout(fd, &mut buf, 120_000);
+        if n == -(abi::EINTR as i64) {
+            return;
+        }
         if n == -(abi::EAGAIN as i64) {
             continue;
         }
@@ -496,6 +561,7 @@ fn copiar_respuesta_ask(fd: u64) {
 fn preguntar_via_askd(texto: &str) -> u8 {
     let fd = match connect_askd() {
         Ok(f) => f,
+        Err(e) if e == -(abi::EINTR as i64) => return 130,
         Err(_) => {
             if let Err(e) = spawn_askd() {
                 println!("ask: no pude lanzar {ASKD} (errno {e})");
@@ -504,12 +570,16 @@ fn preguntar_via_askd(texto: &str) -> u8 {
             let mut fd = None;
             let mut ultimo = 0i64;
             for _ in 0..100 {
-                let _ = sys::sleep_ms(50);
+                let s = sys::sleep_ms(50);
+                if s == -(abi::EINTR as i64) {
+                    return 130;
+                }
                 match connect_askd() {
                     Ok(f) => {
                         fd = Some(f);
                         break;
                     }
+                    Err(e) if e == -(abi::EINTR as i64) => return 130,
                     Err(e) => ultimo = e,
                 }
             }

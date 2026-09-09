@@ -2,7 +2,15 @@
 
 ## Hito 0 — Bucle remoto ✓
 
-Ver sección anterior. `soso-forja all --host 10.0.2.2` + revert del shim.
+Tres caminos distintos (no mezclarlos):
+
+| Comando | Qué hace |
+|---------|----------|
+| `soso-forja local` | Planifica unidades por hash (`/var/forja-cache`); **no** compila. |
+| `soso-forja build-local` / `all-local` | Copia artefactos ya hechos en `/var/forja-out` y opcionalmente `soso-update`. |
+| `soso-forja sync\|build\|all --host IP` | Sube fuentes al servidor host (`soso-forja-server`); el build corre en un árbol aislado (`target/forja-work`). Un HTTP 4xx/5xx no se anuncia como éxito; un fallo de `aplicar` no hace `halt`. |
+
+`soso-forja all --host 10.0.2.2 --token …` + revert del shim. Token: `SOSO_FORJA_TOKEN` (Bearer en POST y GET); obligatorio si `SOSO_FORJA_BIND` no es loopback (`127.0.0.1`/`::1`/`localhost`). Cliente: `--token`. `SOSO_FORJA_RELEASE=hola-std` compila solo ese binario y entrega el ELF como pack con `X-Forja-Build-Id`. Demo B3: `soso-forja write-hola --msg …` + `all --host 10.0.2.2 --token …` aplica `/bin/hola-std` sin halt (`cargo xtask test -- --guest sys --only forja`).
 
 ## Hito 1 — ABI ✓
 

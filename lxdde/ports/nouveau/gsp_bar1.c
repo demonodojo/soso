@@ -606,6 +606,14 @@ int gsp_bar1_selftest(struct gsp_bar1 *b, struct gsp_ce *ce, uint64_t vram_phys,
     if (!off) {
         return -1;
     }
+    if (!b->aperture_size || off >= b->aperture_size ||
+        (uint64_t)bytes > b->aperture_size - off) {
+        lx_printk("nouveau-lx: BAR1 selftest — offset 0x%llx fuera de la apertura "
+                  "PCI (%llu B); se omite\n",
+                  (unsigned long long)off, (unsigned long long)b->aperture_size);
+        gsp_bar1_unmap(b);
+        return -1;
+    }
     win = (volatile uint32_t *)lx_map_wc(
         (unsigned long)(b->aperture_phys + off), (unsigned long)bytes);
     if (!win) {

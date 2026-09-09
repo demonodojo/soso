@@ -58,8 +58,9 @@ sosh / kshell: `wifi scan|status|connect <ssid> [psk]`.
 cargo xtask lx-build iwlwifi
 ./scripts/l6-iwl-fw-hostcheck.sh          # parser SEC_RT vs ucode del rootfs (~1 s)
 sudo ./scripts/l6-wifi-vfio-test.sh       # VFIO AX211 → QEMU; GO = ALIVE real
-# Live (nouveau+iwlwifi ya van): editar SOSOWIFI.TXT en ESP p1, luego
-cargo xtask flash-usb-live /dev/sdX --yes
+# Live (nouveau+iwlwifi ya van): editar SOSOWIFI.TXT en ESP p1.
+# El agente no graba el USB (sudo pide contraseña, no hay TTY); deja el comando:
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
 ```
 
 VFIO: `SOSO_WIFI_BDF` (default `80:14.3`), log `target/wifi-vfio-serial.log`.
@@ -90,10 +91,14 @@ Detalle de red/SSH/hwscan: skill **`soso-architecture`**. Empaquetado live:
 Entradas seed: `ax211-wifi` (`8086:7f70`), `ax200-wifi` (`8086:2723`) en
 [`docs/hw-matrix.json`](../../docs/hw-matrix.json).
 
+Tras SOSOLOG de placa, el agente **sí** actualiza la matriz (`parse-logs`
+`--id ax211-wifi`). No uses `--boot-ok` ni marques `alive: ok` sin
+`UCODE_ALIVE_NTFY` en el log. `timeout ALIVE` / `alive=false` = fail.
+
 ```bash
 ./scripts/l6-iwl-fw-hostcheck.sh          # host, ~1 s
 sudo ./scripts/l6-wifi-vfio-test.sh       # VFIO → ALIVE real
-./scripts/l6-a8-collect.sh --id ax211-wifi --pci 8086:7f70 --boot-ok
+cargo xtask hw-matrix parse-logs --id ax211-wifi --sosolog SOSOLOG.TXT --sosodrv SOSODRV.TXT
 cargo xtask hw-matrix show
 ```
 

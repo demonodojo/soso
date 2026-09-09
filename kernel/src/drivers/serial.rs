@@ -83,6 +83,7 @@ impl RxQueue {
     fn push(&mut self, byte: u8) {
         if byte == 0x03 {
             crate::task::note_serial_sigint();
+            crate::task::kick_scheduler();
             return;
         }
         let next = (self.head + 1) % self.buf.len();

@@ -226,6 +226,32 @@ fn rootfs_accesible() -> bool {
     sys::stat("/etc/soso-release", &mut st) >= 0
 }
 
+fn sosh_ready_existe() -> bool {
+    let mut st = abi::Stat::default();
+    sys::stat("/tmp/sosh-ready", &mut st) >= 0
+}
+
+/// Hasta ~2 s a la marca; luego ~400 ms de sondeo por si el siguiente
+/// page-fault mata a sosh antes de confirmar OTA.
+fn esperar_sosh_lista(pid: i64) -> bool {
+    for _ in 0..40 {
+        if sys::kill(pid, abi::SIGPROBE) < 0 {
+            return false;
+        }
+        if sosh_ready_existe() {
+            for _ in 0..8 {
+                let _ = sys::sleep_ms(50);
+                if sys::kill(pid, abi::SIGPROBE) < 0 {
+                    return false;
+                }
+            }
+            return true;
+        }
+        let _ = sys::sleep_ms(50);
+    }
+    false
+}
+
 /// Bucle de PID 1: sosh en marcha siempre. Si la shell sale limpia
 /// (exit 0), init termina y el kernel vuelve a su shell de emergencia.
 fn lanzar_shell() -> u8 {
@@ -233,12 +259,23 @@ fn lanzar_shell() -> u8 {
         println!("init: rootfs no accesible (/etc/soso-release)");
         return 1;
     }
+    let _ = sys::mkdir("/tmp");
+    let _ = sys::unlink("/tmp/sosh-ready");
     let pid = sys::spawn("/bin/sosh", "");
     if pid < 0 {
         println!("init: no puedo lanzar /bin/sosh (errno {pid})");
         return 1;
     }
-    if !confirmar_actualizacion() {
+    // ELF perezoso: `spawn` ya devolvió PID. OTA solo si sosh dejó
+    // /tmp/sosh-ready (tras prefault de su PT_LOAD) y sigue vivo un rato.
+    // Si el hijo vive sin marca, no confirmes; no mates la shell.
+    if !esperar_sosh_lista(pid) {
+        if sys::kill(pid, abi::SIGPROBE) < 0 {
+            println!("init: sosh murió al arrancar (pid {pid}); no confirmo OTA");
+            return 1;
+        }
+        println!("init: sosh viva sin /tmp/sosh-ready; no confirmo OTA");
+    } else if !confirmar_actualizacion() {
         println!("init: no pude confirmar actualización en buzón");
         return 1;
     }
@@ -356,6 +393,9 @@ fn suite() -> u8 {
 
     let sleeper = sys::spawn("/bin/init", "sleep 5000");
     check!(sleeper > 0, "spawn sleeper (pid {sleeper})");
+    check!(sys::kill(sleeper, abi::SIGPROBE) > 0, "kill(0) sondea sleeper vivo");
+    check!(sys::kill(1, abi::SIGPROBE) > 0, "kill(0) a PID 1 existe");
+    check!(sys::kill(99_999, abi::SIGPROBE) < 0, "kill(0) ESRCH si no existe");
     check!(sys::kill(sleeper, abi::SIGINT) > 0, "kill SIGINT al sleeper");
     check!(
         sys::wait() == Ok((sleeper as u64, abi::exit_by_signal(abi::SIGINT as u8))),

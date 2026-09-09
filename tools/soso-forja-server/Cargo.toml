@@ -7,3 +7,6 @@ publish = false
 [[bin]]
 name = "soso-forja-server"
 path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"

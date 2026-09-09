@@ -42,6 +42,9 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+extern crate std;
+
 pub mod dma;
 pub mod registers;
 pub mod ring;

@@ -273,6 +273,7 @@ pub fn session_leader(pid: u64, console: Console) {
 
 fn valid_signal(sig: u64) -> Option<u8> {
     match sig {
+        soso_abi::SIGPROBE => Some(0),
         soso_abi::SIGINT | soso_abi::SIGKILL | soso_abi::SIGTERM => Some(sig as u8),
         _ => None,
     }
@@ -294,14 +295,22 @@ fn signal_one(procs: &mut Vec<Process>, pid: u64, sig: u8) -> bool {
     if matches!(procs[idx].state, State::Zombie(_)) {
         return false;
     }
+    if sig == 0 {
+        return true;
+    }
     if sig == soso_abi::SIGKILL as u8 {
         deliver_death(procs, pid, soso_abi::exit_by_signal(sig), false);
         return true;
     }
     if sig == soso_abi::SIGINT as u8 || sig == soso_abi::SIGTERM as u8 {
-        if matches!(procs[idx].state, State::WaitingTty { .. })
-            && procs[idx].pgid == procs[idx].sid
-        {
+        let lider = procs[idx].pgid == procs[idx].sid;
+        let bloqueado = matches!(
+            procs[idx].state,
+            State::WaitingTty { .. }
+                | State::WaitingSocket { .. }
+                | State::Sleeping(_)
+        );
+        if lider && bloqueado {
             procs[idx].ctx.rax = (-soso_abi::EINTR) as u64;
             procs[idx].state = State::Runnable;
             return true;
@@ -1037,6 +1046,14 @@ pub fn kick_if_tty_waiting() {
     }
 }
 
+/// Despierta al scheduler de este core (Ctrl-C, etc.). El IPI de resched
+/// solo saca del `hlt`; con un proceso en ring 3 hace falta el timer LAPIC
+/// para desalojarlo y entonces `poll_pending_tty_signals` entrega el SIGINT.
+pub fn kick_scheduler() {
+    crate::arch::apic::send_ipi(crate::arch::apic::id(), crate::arch::apic::RESCHED_VECTOR);
+    crate::arch::apic::kick_idle_cpus();
+}
+
 // ---- scheduler ----
 
 /// Punto de entrada del scheduler: resetea la pila (la de ESTE core) y no
@@ -1573,6 +1590,8 @@ extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
             .lock()
             .notify_end_of_interrupt(crate::arch::interrupts::InterruptIndex::Timer as u8);
     }
+    // IRQ0 por IOAPIC (placa x2APIC) exige EOI del LAPIC; el del 8259 no basta.
+    crate::arch::apic::eoi();
     // Solo se desaloja al usuario (ring 3); el kernel corre hasta acabar.
     if f.cs & 3 != 3 {
         return 0;
@@ -1589,11 +1608,18 @@ extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
     desalojar_si_toca(f, cur, /*bsp_fpu*/ true)
 }
 
-/// Igual que `timer_tick` pero para el timer LAPIC de un AP: EOI del LAPIC
-/// en vez del PIC, sin `pit::tick()` (el reloj global lo lleva solo la BSP,
-/// que es la única con el PIT/PIC) y sin `net::poll()` (solo la BSP la
-/// atiende, ver `schedule_inner`).
+/// Timer LAPIC. En un AP solo desalojia. En la BSP, si IRQ0 está mudo,
+/// este mismo vector es el reloj del sistema: avanza `pit::ticks`, atiende
+/// la red y puede cortar un `ask` con Ctrl-C.
 extern "C" fn ap_timer_tick(f: &mut TrapFrame) -> u64 {
+    if crate::arch::percpu::cpu_index() == 0 {
+        crate::arch::pit::tick();
+        if f.cs & 3 == 3 {
+            crate::net::poll();
+            #[cfg(feature = "lxdde")]
+            crate::lxdde::poll();
+        }
+    }
     crate::arch::apic::eoi();
     if f.cs & 3 != 3 {
         return 0;
@@ -1610,6 +1636,7 @@ extern "C" fn ap_timer_tick(f: &mut TrapFrame) -> u64 {
 /// Runnable.
 fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
     let mut procs = PROCS.lock();
+    poll_pending_tty_signals(&mut procs);
     let force_kill = procs
         .iter()
         .any(|p| p.pid == cur && (p.kill_pending || matches!(p.state, State::Zombie(_))));

@@ -6,6 +6,13 @@ use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub const MAGIC: [u8; 8] = *b"SOSOFS11";
+/// Generación anterior: `DISK_FLAG_SOSO` / reinstalar, no montar.
+pub const MAGIC_V10: [u8; 8] = *b"SOSOFS10";
+
+/// Primer sector de p2: soso actual o v10 (clonar/reinstalar es seguro).
+pub fn looks_like_sosofs(sector: &[u8]) -> bool {
+    sector.starts_with(&MAGIC) || sector.starts_with(&MAGIC_V10)
+}
 pub const ROOT_INODE: u64 = 1;
 pub const NAME_MAX: usize = 255;
 /// Tamaño máximo de un extent en bloques (128 KiB): acota la memoria
@@ -174,4 +181,17 @@ pub fn name_hash(name: &[u8]) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_sosofs_accepts_v10_and_v11() {
+        assert!(looks_like_sosofs(&MAGIC));
+        assert!(looks_like_sosofs(&MAGIC_V10));
+        assert!(!looks_like_sosofs(b"XXXXXXXX"));
+        assert!(!looks_like_sosofs(b""));
+    }
 }

@@ -26,4 +26,8 @@ Docs operativos compartidos: [`docs/GUIA-OPERATIVA.md`](../docs/GUIA-OPERATIVA.m
 - Propagar el mismo diff a `.claude/`, `.cursor/` y `.agents/` (no asumir symlink).
 - Tras cambios visibles al usuario: actualizar `MANUAL-USUARIO.md` (`soso-user-manual`).
 - Tras cambios de tests/comandos: `soso-dev` + tabla de verificación en `soso-architecture`.
+- Tras arranque live en placa con SOSOLOG: actualizar `docs/hw-matrix.json` (`parse-logs`);
+  no etapas `ok` ni `--boot-ok` sin sosh / `UCODE_ALIVE_NTFY` / GSP RPC — **soso-dev**.
 - Flash/install: `sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask …` — nunca `sudo cargo`.
+  El agente **no** ejecuta ese sudo: pide contraseña y Cursor no tiene TTY;
+  compilas y dejas el comando al usuario (detalle en **soso-live**).

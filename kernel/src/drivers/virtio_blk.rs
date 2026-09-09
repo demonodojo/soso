@@ -69,15 +69,32 @@ fn read_sector_slot(slot: u32, sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Resu
 }
 
 fn write_sector_slot(slot: u32, sector: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+    write_sector_slot_nosync(slot, sector, buf)?;
+    flush_slot(slot)
+}
+
+fn write_sector_slot_nosync(
+    slot: u32,
+    sector: u64,
+    buf: &[u8; SECTOR_SIZE],
+) -> Result<(), &'static str> {
     let blk = match slot {
         0 => BLK0.get().ok_or("no hay disco 0")?,
         1 => BLK1.get().ok_or("no hay disco 1")?,
         _ => return Err("slot inválido"),
     };
-    let mut blk = blk.lock();
-    blk.write_blocks(sector as usize, buf)
-        .map_err(|_| "error de escritura")?;
-    blk.flush().map_err(|_| "error de flush")
+    blk.lock()
+        .write_blocks(sector as usize, buf)
+        .map_err(|_| "error de escritura")
+}
+
+fn flush_slot(slot: u32) -> Result<(), &'static str> {
+    let blk = match slot {
+        0 => BLK0.get().ok_or("no hay disco 0")?,
+        1 => BLK1.get().ok_or("no hay disco 1")?,
+        _ => return Err("slot inválido"),
+    };
+    blk.lock().flush().map_err(|_| "error de flush")
 }
 
 pub fn read_sector(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {
@@ -100,6 +117,15 @@ pub fn read_sectors(sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
 
 pub fn write_sector(sector: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
     write_sector_slot(0, sector, buf)
+}
+
+/// Escritura sin flush (slides GPT: el caller hace `flush` al terminar).
+pub fn write_sector_nosync(sector: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+    write_sector_slot_nosync(0, sector, buf)
+}
+
+pub fn flush() -> Result<(), &'static str> {
+    flush_slot(0)
 }
 
 #[allow(dead_code)]

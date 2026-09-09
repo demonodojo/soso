@@ -4,8 +4,6 @@ use soso_abi::{
     DiskInfo, DISK_FLAG_BOOT, DISK_FLAG_EMPTY, DISK_FLAG_READONLY, DISK_FLAG_SOSO,
     DISK_KIND_NVME, DISK_KIND_USB, DISK_KIND_VIRTIO,
 };
-use sosofs::layout::MAGIC as SOSOFS_MAGIC;
-
 const SECTOR: usize = 512;
 const NVME_SLOTS: usize = 2;
 /// Bytes por transferencia al dispositivo. Clonar el live son lecturas USB
@@ -217,7 +215,7 @@ fn gpt_part2_flags(id: RawId, entry_lba: u64) -> u32 {
     if read_sector(id, first, &mut sec).is_err() {
         return 0;
     }
-    if sec.starts_with(&SOSOFS_MAGIC) {
+    if sosofs::layout::looks_like_sosofs(&sec) {
         DISK_FLAG_SOSO
     } else {
         0

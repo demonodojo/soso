@@ -130,13 +130,24 @@ pub fn map_dma_uc(phys: u64, size: u64) -> VirtAddr {
     VirtAddr::new(virt_base + (phys & 0xfff))
 }
 
-/// Mapeo write-combining para BARs de GPU (G2).
-#[allow(dead_code)]
+/// ¿Cabe `phys` en las direcciones físicas que esta CPU traduce? Un PTE con
+/// bits por encima de MAXPHYADDR está reservado: el acceso es #PF, no un
+/// error de `map_to`.
+fn phys_cabe(phys: u64) -> bool {
+    let w = (core::arch::x86_64::__cpuid(0x8000_0008).eax & 0xff) as u32;
+    let bits = if (32..53).contains(&w) { w } else { 46 };
+    let max = 1u64.checked_shl(bits).unwrap_or(u64::MAX);
+    phys < max
+}
+
 pub fn map_dma_wc(phys: u64, size: u64) -> VirtAddr {
     use core::sync::atomic::{AtomicU64, Ordering};
     use x86_64::structures::paging::PageTableFlags as F;
     static DMA_WC_NEXT: AtomicU64 = AtomicU64::new(0xFFFF_FD00_0000_0000);
 
+    if size == 0 || !phys_cabe(phys) {
+        return VirtAddr::new(0);
+    }
     let size = size.next_multiple_of(4096);
     let virt_base = DMA_WC_NEXT.fetch_add(size, Ordering::SeqCst);
     let mut mapper = MAPPER.get().unwrap().lock();

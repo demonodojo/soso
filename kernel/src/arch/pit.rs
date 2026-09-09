@@ -30,5 +30,12 @@ pub fn ticks() -> u64 {
 }
 
 pub fn uptime_ms() -> u64 {
-    ticks() * (1000 / HZ)
+    // En placa x2APIC el IRQ0 no llega (PIT/IOAPIC mudos). El TSC sí:
+    // sin esto `sleep_ms`, connect y read_timeout nunca vencen y `ask` se
+    // queda colgado. `tsc::now_ns` no llama aquí cuando el TSC está listo.
+    if crate::arch::tsc::ready() {
+        crate::arch::tsc::now_ns() / 1_000_000
+    } else {
+        ticks() * (1000 / HZ)
+    }
 }

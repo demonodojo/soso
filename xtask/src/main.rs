@@ -773,7 +773,7 @@ pub(crate) fn mkfs_rootfs_with_profile(
     }
     let pubkey = client_pubkey();
     let pack_mib = rootfs_pack_mib(&root);
-    let workspace_mib = rootfs_workspace_mib_inner();
+    let workspace_mib = rootfs_workspace_mib();
     eprintln!(
         "mkfs: empaquetado {} MiB (contenido ~{} MiB, suelo firmware {} MiB)",
         pack_mib,
@@ -1161,6 +1161,8 @@ pub(crate) struct QemuGuestConfig {
     pub trace_usb: bool,
     pub nvme: bool,
     pub nvme_root: bool,
+    /// Disco GPT live; `None` → `target/usb-live/soso-live.img`.
+    pub live_path: Option<std::path::PathBuf>,
 }
 
 impl Default for QemuGuestConfig {
@@ -1174,6 +1176,7 @@ impl Default for QemuGuestConfig {
             trace_usb: false,
             nvme: false,
             nvme_root: false,
+            live_path: None,
         }
     }
 }
@@ -1189,6 +1192,7 @@ impl QemuGuestConfig {
             trace_usb: qemu_trace_usb(),
             nvme: qemu_nvme(),
             nvme_root: qemu_nvme_root(),
+            live_path: None,
         }
     }
 }
@@ -1360,7 +1364,10 @@ pub(crate) fn apply_qemu_disks(
 ) {
     if cfg.live {
         package_live::ensure_live_image();
-        let live = package_live::live_image_path();
+        let live = cfg
+            .live_path
+            .clone()
+            .unwrap_or_else(package_live::live_image_path);
         qemu.args([
             "-drive",
             &format!("file={},format=raw,if=none,id=live0", live.display()),
@@ -1499,7 +1506,11 @@ pub(crate) fn apply_qemu_usb(qemu: &mut Command, cfg: &QemuGuestConfig) {
                 "-device",
                 &format!("usb-storage,bus={storage_bus},port={storage_port},drive=live0"),
             ]);
-            let live = package_live::live_image_path();
+            let live = cfg
+                .live_path
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(package_live::live_image_path);
             println!("xtask: usb-storage BOT → {}", live.display());
         }
         if kbd {

@@ -72,7 +72,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 - **Audio:** `audio_open=59`, `audio_read=60`, `audio_close=61` (HDA, `drv-hda`)
 
 - **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`; hijos heredan cwd del padre
-- **Señales (mínimo):** SIGINT/SIGKILL/SIGTERM vía `kill`; grupos con `setpgid`/`setsid`/`tcsetpgrp`; Ctrl-C (ISIG) al grupo en primer plano de la consola. Sin handlers (`sigaction`). El líder de sesión en el prompt recibe `-EINTR` en `read` en vez de morir
+- **Señales (mínimo):** SIGINT/SIGKILL/SIGTERM vía `kill`; `kill(pid, 0)` sondea existencia (no entrega). Grupos con `setpgid`/`setsid`/`tcsetpgrp`; Ctrl-C (ISIG) al grupo en primer plano de la consola. Sin handlers (`sigaction`). El líder de sesión en el prompt recibe `-EINTR` en `read` en vez de morir
 - **Escritura:** `open(O_WRONLY)` → buffer en kernel; `create_file` en sosofs al `close()`
 - **Rutas:** `task/path.rs` resuelve relativas contra `Process.cwd` (default `/`)
 - Sin permisos Unix
@@ -336,7 +336,8 @@ Detalle (particiones, ESP 8.3, shim, TRB 17 bits, buzón `SOSOUPD`, meta
 `SOSOKRN.MET`): skill **`soso-live`**. Límites publicados: [`docs/ESTADO.md`](../../docs/ESTADO.md).
 Resumen: `soso-install` clona + `gptdisk::relayout` + GUID nuevos; NVRAM la toca
 el shim. Kernel OTA: backup en `SOSOKRN.BIN`, fases durable en `SOSOKRN.MET`
-(staged/backup/applying/probando); init confirma `OK` tras rootfs + `/bin/sosh`.
+(staged/backup/applying/probando); init confirma `OK` tras rootfs + `/tmp/sosh-ready`
+(sosh prefaultó su ELF).
 Rootfs OTA: parcial por hash, reintento vía `/etc/actualiza.estado`, sin rollback
 automático de binarios viejos. Transferencias USB: Normal TRB 17 bits → **no enviar 128 KiB en un TRB**
 (`mass_storage` trocea a 64 KiB). Bounce xHCI persistente. Tests:
@@ -355,7 +356,10 @@ Regla: cualquier cosa que lance hilos los apaga antes de morir.
 
 Ver [`docs/SELF-HOSTING.md`](../../docs/SELF-HOSTING.md). Syscalls 70–82,
 `sosofs` v11 (`NAME_MAX` 255), `soso-ed`, `soso-forja`, `soso-std`, scaffolding
-`config/rust-soso/` + `tools/sosoas` + `tools/wild-soso`.
+`config/rust-soso/` + `tools/sosoas` + `tools/wild-soso`. Forja remota: el
+cliente exige HTTP 2xx; el servidor lee cuerpos binarios por `Content-Length`
+y construye en `target/forja-work` (no en el checkout). `local` solo planifica;
+`build-local` copia `/var/forja-out`.
 
 ## Estado FPU y excepciones de CPU
 
@@ -426,7 +430,7 @@ tráfico, pero son la misma clase de bug.
 | Instalación nativa live→disco | `cargo xtask test-install` (3 arranques OVMF) — **`soso-live`** |
 | OTA E2E | `cargo xtask test-update` (apply + recovery + manifiesto inválido) |
 | USB/xHCI | `cargo xtask test-usb` |
-| Matriz hardware A8 | `cargo xtask hw-matrix show`; placa: `./scripts/l6-a8-collect.sh` |
+| Matriz hardware A8 | Tras SOSOLOG de placa: `parse-logs` (`gb205-dgpu`, `ax211-wifi`); no `ok` sin evidencia. `hw-matrix show`. **`soso-dev`** |
 | Teclado/tty, hilos con SMP | Sólo con `-smp >1` y `sendkey` por el monitor de QEMU; ver `soso-dev` → Debugging |
 | Parser firmware iwl | `./scripts/l6-iwl-fw-hostcheck.sh` |
 
