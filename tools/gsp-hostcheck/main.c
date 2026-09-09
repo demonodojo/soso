@@ -84,6 +84,11 @@ static void lx_mdelay(unsigned ms)
     }
 }
 
+static void lx_udelay(unsigned us)
+{
+    (void)us;
+}
+
 uint64_t lx_ktime_get_ns(void)
 {
     return 0;
@@ -420,6 +425,26 @@ typedef char fake_usermode_reg_check[
 #include "gsp_libos_body.inc"
 #include "fmc_lx_body.inc"
 #include "fsp_lx_body.inc"
+
+#ifndef LX_FLCN_SEC2_BASE
+#define LX_FLCN_SEC2_BASE 0x00840000u
+#define LX_FLCN_GSP_BASE  0x00110000u
+#define LX_FLCN_ADDR2     0x00001000u
+#endif
+
+static int falcon_lx_gsp_reset_riscv(unsigned base)
+{
+    (void)base;
+    return 0;
+}
+
+static int falcon_lx_start(unsigned base)
+{
+    (void)base;
+    return 0;
+}
+
+#include "gsp_cpu_seq_body.inc"
 #include "gsp_rpc_body.inc"
 #include "gsp_cmdq_body.inc"
 #include "gsp_rm_obj_body.inc"

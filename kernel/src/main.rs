@@ -200,12 +200,19 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
     // Autodescubrimiento: informe parseable en serie; en live también en ESP.
-    // Incondicional desde 2026-08-31: sólo salía cuando faltaba un driver
-    // *conocido*, así que el hardware que no encaja con ninguna regla —el caso
-    // que hay que diagnosticar— no dejaba rastro en ninguna parte.
-    drivers::registry::print_hwscan();
+    // En NVMe instalado se omite si `/etc/soso-hw` coincide con el bus actual.
     #[cfg(feature = "drv-live-disk")]
-    let _ = drivers::drvlog::flush();
+    {
+        if drivers::hw_inv::debe_informar() {
+            drivers::registry::print_hwscan();
+            let _ = drivers::drvlog::flush();
+            drivers::hw_inv::guardar();
+        } else {
+            println!("hwscan: inventario sin cambios");
+        }
+    }
+    #[cfg(not(feature = "drv-live-disk"))]
+    drivers::registry::print_hwscan();
     println!("boot: task");
     task::init();
 

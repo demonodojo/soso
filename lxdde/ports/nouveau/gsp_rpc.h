@@ -72,7 +72,8 @@ const char *nv_status_name(uint32_t st);
 
 int gsp_rpc_init(const struct gsp_libos *lo, struct gsp_rpc *out);
 
-/* Publica `app_version` y comprueba que el núcleo RISC-V está activo. */
+/* Publica `app_version`. No aborta si RISC-V aún está en halt: el poll RPC
+ * despacha GSP_RUN_CPU_SEQUENCER (CORE_RESUME). */
 int gsp_rpc_start(uint32_t app_version);
 
 /* Consume mensajes hasta ver `fn` o agotar el tiempo. Los que llegan antes se

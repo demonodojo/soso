@@ -50,6 +50,9 @@ int falcon_lx_gsp_reset_riscv(unsigned base);
 /* Habilita el motor en PMC + espera mem scrub (gm200_flcn_enable). */
 int falcon_lx_enable(unsigned falcon_base, uint8_t top_type, uint8_t top_inst);
 
+/* Arranca el falcon ya cargado (CPUCTL START, sin recargar ucode). */
+int falcon_lx_start(unsigned base);
+
 /* Ucode crudo con parámetros BROM (FWSEC-FRTS en falcon GSP). */
 int falcon_lx_raw_boot(unsigned falcon_base, const struct falcon_lx_raw *raw);
 

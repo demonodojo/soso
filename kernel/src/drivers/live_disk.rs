@@ -522,6 +522,11 @@ pub fn active() -> bool {
     LIVE_ROOT.lock().is_some()
 }
 
+/// Arranque nativo desde NVMe instalado (puede omitir hwscan si hay inventario).
+pub fn es_instalado() -> bool {
+    matches!(backend(), Some(LiveBackend::Nvme(_)))
+}
+
 /// ¿Hay una ESP donde escribir los logs? Puede haberla sin live montado.
 pub fn esp_available() -> bool {
     LIVE_ESP.lock().is_some()

@@ -4,7 +4,13 @@
 #include "falcon_lx.h"
 #include "lx_emul.h"
 
-#define NV_PGSP_FALCON  0x00110000u
+#define NV_PGSP_FALCON      0x00110000u
+#define NV_PGSP_FALCON_OS   (NV_PGSP_FALCON + 0x080u)
+#define NV_PRISCV_CPUCTL    (NV_PGSP_FALCON + LX_FLCN_ADDR2 + 0x388u)
+#define CPUCTL_ACTIVE_STAT  (1u << 7)
+#define NV_SEC2_RESUME_REG  0x001180f8u
+
+static struct gsp_cpu_seq_ctx g_seq_ctx;
 
 enum gsp_seq_opcode {
     GSP_SEQ_BUF_OPCODE_REG_WRITE = 0,
@@ -82,6 +88,70 @@ static unsigned seq_payload_dwords(unsigned op)
     default:
         return 0;
     }
+}
+
+void gsp_cpu_seq_set_ctx(const struct gsp_cpu_seq_ctx *ctx)
+{
+    if (ctx) {
+        g_seq_ctx = *ctx;
+    } else {
+        g_seq_ctx.libos_phys = 0;
+        g_seq_ctx.app_version = 0;
+    }
+}
+
+static int seq_core_resume(void)
+{
+    unsigned sec2_base = LX_FLCN_SEC2_BASE;
+    unsigned t;
+    uint32_t mbox0;
+    uint32_t cpuctl;
+
+    if (falcon_lx_gsp_reset_riscv(LX_FLCN_GSP_BASE) != 0) {
+        lx_printk("nouveau-lx: cpu_seq CORE_RESUME reset GSP falló\n");
+        return -1;
+    }
+
+    gsp_mmio_wr32(NV_PGSP_FALCON + 0x040u, (uint32_t)g_seq_ctx.libos_phys);
+    gsp_mmio_wr32(NV_PGSP_FALCON + 0x044u,
+                  (uint32_t)(g_seq_ctx.libos_phys >> 32));
+
+    if (falcon_lx_start(sec2_base) != 0) {
+        lx_printk("nouveau-lx: cpu_seq CORE_RESUME start SEC2 falló\n");
+        return -1;
+    }
+
+    t = 2000u;
+    while (t--) {
+        if (gsp_mmio_rd32(NV_SEC2_RESUME_REG) & 0x04000000u) {
+            break;
+        }
+        lx_mdelay(1);
+    }
+    if (t == 0u) {
+        lx_printk("nouveau-lx: cpu_seq CORE_RESUME timeout 0x1180f8=0x%08x\n",
+                  gsp_mmio_rd32(NV_SEC2_RESUME_REG));
+        return -1;
+    }
+
+    mbox0 = gsp_mmio_rd32(sec2_base + 0x040u);
+    if (mbox0) {
+        lx_printk("nouveau-lx: cpu_seq CORE_RESUME SEC2 mbox0=0x%x\n", mbox0);
+        return -1;
+    }
+
+    gsp_mmio_wr32(NV_PGSP_FALCON_OS, g_seq_ctx.app_version);
+
+    cpuctl = gsp_mmio_rd32(NV_PRISCV_CPUCTL);
+    if (!(cpuctl & CPUCTL_ACTIVE_STAT)) {
+        lx_printk("nouveau-lx: cpu_seq CORE_RESUME RISC-V inactivo cpuctl=0x%08x\n",
+                  cpuctl);
+        return -1;
+    }
+
+    lx_printk("nouveau-lx: cpu_seq CORE_RESUME ok (cpuctl=0x%08x app=0x%08x)\n",
+              cpuctl, g_seq_ctx.app_version);
+    return 0;
 }
 
 static void seq_reg_poll(uint32_t addr, uint32_t mask, uint32_t val, uint32_t usec)
@@ -197,7 +267,9 @@ int gsp_cpu_seq_run(const void *payload, uint32_t len)
             break;
         }
         case GSP_SEQ_BUF_OPCODE_CORE_RESUME:
-            lx_printk("nouveau-lx: cpu_seq CORE_RESUME omitido (sin SEC2 resume)\n");
+            if (seq_core_resume() != 0) {
+                return -1;
+            }
             break;
         default:
             lx_printk("nouveau-lx: cpu_seq opcode %u desconocido\n",

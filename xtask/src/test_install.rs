@@ -233,6 +233,12 @@ fn fase_arranque_solo(
     if !log.contains("fs: sosofs") {
         return Err("arrancó pero no montó el rootfs instalado".into());
     }
+    if !log.contains("hwscan: inventario sin cambios") {
+        return Err(format!(
+            "arranque nativo debería omitir hwscan (falta «inventario sin cambios»); \
+             ¿falta /etc/soso-hw en el clon?"
+        ));
+    }
     // Sin USB conectado (a propósito, esta fase sólo lleva el NVMe): antes del
     // fix de `boot_source()`, ningún disco quedaba marcado DISK_FLAG_BOOT y
     // `soso-update estado` no podía decir de dónde había arrancado.

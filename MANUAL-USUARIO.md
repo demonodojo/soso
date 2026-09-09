@@ -789,8 +789,19 @@ hwscan: RED SIN DRIVER 00:1f.6 8086:15fc (ethernet)
 Ese `VVVV:DDDD` es lo que hace falta para decidir si basta con ampliar la lista
 de IDs de un driver existente o si hay que portar uno nuevo.
 
-El informe se imprime por serie **en cada arranque**, y en live se guarda además
-en **`SOSODRV.TXT`** en la ESP (junto a `SOSOLOG.TXT`). Desde el PC de
+El informe se imprime por serie **en cada arranque del pendrive live**, y se
+guarda además en **`SOSODRV.TXT`** en la ESP (junto a `SOSOLOG.TXT`). En un
+**disco instalado** (NVMe), soso guarda el inventario en **`/etc/soso-hw`** al
+final del primer escaneo; en arranques siguientes **no repite** el informe ni
+reescribe `SOSODRV.TXT` mientras el hardware no cambie. Si cambias tarjeta,
+GPU o CPU, o quieres forzar un nuevo escaneo:
+
+```sh
+echo force > /etc/soso-hw
+halt
+```
+
+También puedes usar `hwscan` en la kernel-shell (`soso>`). Desde el PC de
 desarrollo, con el pendrive puesto:
 
 ```sh

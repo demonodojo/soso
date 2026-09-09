@@ -22,7 +22,11 @@ pub fn init() {
                 slot.data_lba,
                 FILE_SIZE / 1024
             );
-            let _ = flush();
+            // En NVMe instalado no pisar SOSODRV antes de saber si hace falta
+            // hwscan; el flush queda para después de `fs::init()` en main.
+            if !crate::drivers::live_disk::es_instalado() {
+                let _ = flush();
+            }
         }
         None => crate::println!("drvlog: SOSODRV.TXT no encontrado; desactivado"),
     }

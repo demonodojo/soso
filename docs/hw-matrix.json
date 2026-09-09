@@ -139,28 +139,28 @@
         "gsp_ga102_fallback": "a8c3ebeed280323aedb51c061f321e73379cce7a9ae643a33dd03915df027f7f 63571696B"
       },
       "git": {
-        "commit": "4a40cbca7",
-        "commit_corto": "4a40cbca7",
+        "commit": "d91bc18f9",
+        "commit_corto": "d91bc18f9",
         "version": "0.2.2",
-        "dirty": false,
-        "cambios_locales": "USB run4; correcciones NVM/GSP en repo local pendientes de reflashear"
+        "dirty": true,
+        "cambios_locales": "INIT_COMPLETE race, RPC sin abort cpuctl, CORE_RESUME; pendiente reflashear"
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh viva; ethernet rtl8169 enlace DOWN, sin DHCP",
+        "nota": "sosh viva (run5); ethernet rtl8169 enlace DOWN, sin DHCP",
         "fecha": "2026-09-09"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY AX200 (misma placa); INIT_EXTENDED_CFG ok",
+          "nota": "UCODE_ALIVE_NTFY AX200; INIT_EXTENDED_CFG ok (run5)",
           "fecha": "2026-09-09"
         },
         "scan": {
           "status": "fail",
-          "nota": "sin INIT_COMPLETE; sosh wifi scan: error de E/S",
+          "nota": "run5: carrera INIT_COMPLETE (NOTIF+timeout); sosh wifi scan: error de E/S",
           "fecha": "2026-09-09"
         },
         "assoc_wpa2": {
@@ -181,12 +181,12 @@
       "gpu": {
         "gsp_rpc": {
           "status": "fail",
-          "nota": "FWSEC-FRTS OK; booter_load SEC2@0x840000 ok; cpuctl=0x10 sin bit7; GSP-RM no responde RPC (run4)",
+          "nota": "run5: booter ok heap 128 MiB; cpuctl=0x10; gsp_rpc_start aborta sin RPC fn=; fix RPC/CORE_RESUME en d91bc18f9",
           "fecha": "2026-09-09"
         },
         "vram_pool": {
           "status": "fail",
-          "nota": "GSP=fallo, pool VRAM=no; heap WPR 134 MiB (GB20x) vs Linux GA102 128 MiB",
+          "nota": "run5: GSP=fallo, pool VRAM=no; heap Ampere 128 MiB OK",
           "fecha": "2026-09-09"
         },
         "ce_readback": {
@@ -213,9 +213,11 @@
         "target/usb-diagnostic-2026-09-09-run3/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-09-run3/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-09-run4/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-09-09-run4/SOSODRV.txt"
+        "target/usb-diagnostic-2026-09-09-run4/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run5/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run5/SOSODRV.txt"
       ],
-      "notas": "ROG run4 USB 4a40cbca7, flush 8, uptime 280s. Corrección código: heap Ampere TU10X 8 MiB + pmu=0; WiFi init sin NVM_ACCESS_CMD grp12. Pendiente reflashear y validar GSP_INIT_DONE / INIT_COMPLETE. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
+      "notas": "ROG run5 USB 4a40cbca7-dirty, flush 13, uptime 297s. USB ya tenía heap 128 MiB e init WiFi sin NVM_ACCESS_CMD. Bloqueos run5: carrera INIT_COMPLETE; RISC-V halt+msgq sin drenar. Fix d91bc18f9: INIT_COMPLETE antes NVM, RPC poll sin cpuctl, CORE_RESUME. Pendiente reflashear. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
       "actualizado": "2026-09-09"
     },
     {
@@ -296,28 +298,28 @@
         "ax200_ucode": "d23a382871e6e638957845b47424ab98dca5e68e022ab73eeeebb0b6f751d7e9 1368096B"
       },
       "git": {
-        "commit": "4a40cbca7",
-        "commit_corto": "4a40cbca7",
+        "commit": "d91bc18f9",
+        "commit_corto": "d91bc18f9",
         "version": "0.2.2",
-        "dirty": false,
-        "cambios_locales": "USB run4; correcciones NVM en repo local pendientes de reflashear"
+        "dirty": true,
+        "cambios_locales": "INIT_COMPLETE race fix; pendiente reflashear"
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh viva (misma placa); sin red WiFi",
+        "nota": "sosh viva (run5); sin red WiFi",
         "fecha": "2026-09-09"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY; INIT_EXTENDED_CFG rsp grp=2 id=0x03; NVM timeout grp=12 id=0x88",
+          "nota": "UCODE_ALIVE_NTFY; INIT_EXTENDED_CFG rsp grp=2 id=0x03 (run5; NVM grp12 ok en USB)",
           "fecha": "2026-09-09"
         },
         "scan": {
           "status": "fail",
-          "nota": "sin INIT_COMPLETE; sosh wifi scan: error de E/S",
+          "nota": "run5: carrera INIT_COMPLETE (NOTIF+timeout); sosh wifi scan: error de E/S",
           "fecha": "2026-09-09"
         },
         "assoc_wpa2": {
@@ -366,9 +368,11 @@
         "target/usb-diagnostic-2026-09-09-run3/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-09-run3/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-09-run4/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-09-09-run4/SOSODRV.txt"
+        "target/usb-diagnostic-2026-09-09-run4/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-09-run5/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run5/SOSODRV.txt"
       ],
-      "notas": "ROG AX200 run4. Bloqueante corregido en código: no enviar NVM_ACCESS_CMD 0x88 en grp12; usar NVM_ACCESS_COMPLETE + NVM_GET_INFO/CSR MAC. Pendiente reflashear. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
+      "notas": "ROG AX200 run5 USB 4a40cbca7-dirty, flush 13. NVM grp12 ya OK en USB; bloqueante run5: carrera INIT_COMPLETE (flag borrado tras NVM_ACCESS_COMPLETE). Fix d91bc18f9: armar init_complete antes de NVM. Pendiente reflashear y wifi scan. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
       "actualizado": "2026-09-09"
     }
   ]

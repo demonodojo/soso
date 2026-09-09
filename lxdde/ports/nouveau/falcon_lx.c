@@ -265,6 +265,16 @@ static int flcn_hs_v2_patch_sig(const struct acr_fw_blob *blob, struct flcn_fw_c
     return 0;
 }
 
+int falcon_lx_start(unsigned base)
+{
+    if (flcn_rd32(base, 0x100u) & 0x40u) {
+        flcn_wr32(base, 0x130u, 2u);
+    } else {
+        flcn_wr32(base, 0x100u, 2u);
+    }
+    return 0;
+}
+
 int falcon_lx_enable(unsigned falcon_base, uint8_t top_type, uint8_t top_inst)
 {
     uint32_t pmc_mask = 0;

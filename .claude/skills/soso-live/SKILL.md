@@ -128,6 +128,10 @@ Userspace: `user/coreutils/src/bin/soso-install.rs`.
 4. `SYS_BOOTREQ_WRITE` → `INSTALL <guid>` en `SOSOBOOT.TXT`.
 5. Reiniciar **con el USB**: el shim registra `Boot####`. Quitar USB.
 
+Tras el primer hwscan en live, el kernel escribe `/etc/soso-hw` (PCI+ncpu); el
+clon lo lleva al NVMe. Arranques nativos omiten hwscan/`SOSODRV` si coincide;
+`echo force > /etc/soso-hw` fuerza reescaneo.
+
 Syscalls: `disk_list=37`, `disk_read=38`, `disk_write=39` (512 B/LBA;
 `raw_disk` solo deja escribir NVMe y **nunca** el disco de arranque),
 `bootreq_write=41` / `bootreq_read=42` (solo el fichero pre-creado).

@@ -22,6 +22,8 @@ pub mod espfat;
 #[cfg(feature = "drv-live-disk")]
 pub mod fatlog;
 #[cfg(feature = "drv-live-disk")]
+pub mod hw_inv;
+#[cfg(feature = "drv-live-disk")]
 pub mod live_disk;
 pub mod logbuf;
 #[cfg(feature = "drv-usb")]

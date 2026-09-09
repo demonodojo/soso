@@ -70,4 +70,5 @@ pub const PACK_SKIP: &[&str] = &[
     "etc/grub-linux.txt",
     "etc/soso-release",
     "etc/actualiza.estado",
+    "etc/soso-hw",
 ];

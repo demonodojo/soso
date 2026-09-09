@@ -28,6 +28,10 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
+    /* Como `iwl_init_notification_wait` en Linux: armar antes de mandar comandos.
+     * `send_cmd_wait` drena RX y puede marcar init_complete durante NVM_ACCESS. */
+    iwl->init_complete = 0;
+
     memset(&init_cfg, 0, sizeof(init_cfg));
     init_cfg.init_flags = (uint32_t)(1u << IWL_INIT_NVM);
     if (iwl_trans_send_cmd_wait(iwl, SYSTEM_GROUP, INIT_EXTENDED_CFG_CMD, &init_cfg,
@@ -61,13 +65,14 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
         phy_cfg.phy_cfg = iwl->phy_sku ? iwl->phy_sku : 0x330018u;
     }
 
-    iwl->init_complete = 0;
-    for (t = 0; t < 600; t++) {
-        iwl_trans_poll(iwl);
-        if (iwl->init_complete) {
-            break;
+    if (!iwl->init_complete) {
+        for (t = 0; t < 600; t++) {
+            iwl_trans_poll(iwl);
+            if (iwl->init_complete) {
+                break;
+            }
+            lx_mdelay(10);
         }
-        lx_mdelay(10);
     }
     if (!iwl->init_complete) {
         lx_printk("iwl_mvm: timeout INIT_COMPLETE_NOTIF\n");

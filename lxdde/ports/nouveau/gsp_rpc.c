@@ -57,16 +57,19 @@ int gsp_rpc_start(uint32_t app_version)
 {
     uint32_t cpuctl;
 
-    /* `r535_gsp_init`: publicar la versión del bootloader y exigir RISC-V vivo. */
+    /* `r535_gsp_init`: publicar app_version; el juez es GSP_INIT_DONE (puede
+     * pedir CORE_RESUME por msgq si RISC-V aún está en halt). */
     gsp_mmio_wr32(NV_PFALCON_OS, app_version);
 
     cpuctl = gsp_mmio_rd32(NV_PRISCV_RISCV_CPUCTL);
-    if (!(cpuctl & CPUCTL_ACTIVE_STAT)) {
-        lx_printk("nouveau-lx: el RISC-V del GSP no está activo (cpuctl=0x%08x)\n", cpuctl);
-        return -1;
+    if (cpuctl & CPUCTL_ACTIVE_STAT) {
+        lx_printk("nouveau-lx: RISC-V activo (cpuctl=0x%08x), app_version=0x%08x\n",
+                  cpuctl, app_version);
+    } else {
+        lx_printk("nouveau-lx: RISC-V inactivo (cpuctl=0x%08x), app_version=0x%08x "
+                  "— poll RPC/msgq\n",
+                  cpuctl, app_version);
     }
-    lx_printk("nouveau-lx: RISC-V activo (cpuctl=0x%08x), app_version=0x%08x\n",
-              cpuctl, app_version);
     return 0;
 }
 

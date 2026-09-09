@@ -26,6 +26,7 @@
 #include "gsp_chip.h"
 #include "gsp_dma.h"
 #include "falcon_lx.h"
+#include "gsp_cpu_seq.h"
 #include "nvfw_lx.h"
 #include "lx_emul.h"
 
@@ -347,8 +348,7 @@ static int run_ampere_booter(void)
     struct gsp_dma_buf dma;
     struct acr_fw_blob wrap;
     uint32_t m0, m1;
-    unsigned t;
-    uint32_t cpuctl = 0;
+    uint32_t cpuctl;
     unsigned sec2_base = LX_FLCN_SEC2_BASE;
 
     if (!blob || !blob->valid || !blob->data || !blob->len) {
@@ -412,24 +412,11 @@ static int run_ampere_booter(void)
     }
     gsp_dma_free(&dma);
 
-    /* Linux `r535_gsp_booter_load`: publicar app_version antes de comprobar RISC-V. */
-    if (g_wpr.boot.app_version) {
-        gsp_mmio_wr32(NV_PGSP_FALCON_OS, g_wpr.boot.app_version);
-    }
-
-    /* Linux tu102_gsp_init() no exige cpuctl bit7 aquí: tras booter_load pasa
-     * a r535_gsp_init() y valida GSP-RM vía RPC (GSP_INIT_DONE). */
-    t = 4000u;
-    while (t--) {
-        cpuctl = gsp_mmio_rd32(NV_PRISCV_CPUCTL);
-        if (cpuctl & CPUCTL_ACTIVE_STAT) {
-            break;
-        }
-        lx_mdelay(1);
-    }
-    if (cpuctl & CPUCTL_ACTIVE_STAT) {
-        lx_printk("nouveau-lx: Ampere RISC-V activo (cpuctl=0x%08x)\n", cpuctl);
-    } else {
+    /* Linux `r535_gsp_init`: publicar app_version y pasar a poll RPC (no abortar
+     * aquí si cpuctl bit7=0; CORE_RESUME puede llegar por GSP_RUN_CPU_SEQUENCER). */
+    gsp_mmio_wr32(NV_PGSP_FALCON_OS, g_wpr.boot.app_version);
+    cpuctl = gsp_mmio_rd32(NV_PRISCV_CPUCTL);
+    {
         uint32_t sec2_m0 = gsp_mmio_rd32(sec2_base + 0x040u);
         uint32_t sec2_m1 = gsp_mmio_rd32(sec2_base + 0x044u);
         uint32_t gsp_m0 = gsp_mmio_rd32(NV_PGSP_FALCON_MBOX0);
@@ -438,14 +425,31 @@ static int run_ampere_booter(void)
         uint32_t bcr = gsp_mmio_rd32(LX_FLCN_GSP_BASE + LX_FLCN_ADDR2 + 0x668u);
         uint32_t wpr2_lo = gsp_mmio_rd32(0x001fa824u);
         uint32_t wpr2_hi = gsp_mmio_rd32(0x001fa828u);
-        lx_printk("nouveau-lx: Ampere booter ok, RISC-V aún inactivo "
-                  "(cpuctl=0x%08x sec2@0x%x mbox=0x%x/0x%x bcr@0x1668=0x%x "
-                  "GSP mbox=0x%x/0x%x os=0x%08x WPR2=0x%08x%08x meta=0x%llx "
-                  "heap=%u MiB) — sigue RPC\n",
-                  cpuctl, sec2_base, sec2_m0, sec2_m1, bcr,
-                  gsp_m0, gsp_m1, gsp_os, wpr2_hi, wpr2_lo,
-                  (unsigned long long)g_wpr.meta_phys,
-                  (unsigned)(g_wpr.heap_size >> 20));
+        uint32_t sec2_resume = gsp_mmio_rd32(0x001180f8u);
+        uint32_t msgq_wptr = 0;
+
+        if (g_libos.ready && g_libos.shm.va) {
+            struct gsp_msgq_headers *msgq =
+                (struct gsp_msgq_headers *)((unsigned char *)g_libos.shm.va +
+                                            g_libos.msgq_offset);
+            msgq_wptr = msgq->tx.writePtr;
+        }
+
+        if (cpuctl & CPUCTL_ACTIVE_STAT) {
+            lx_printk("nouveau-lx: Ampere booter ok, RISC-V activo "
+                      "(cpuctl=0x%08x app=0x%08x msgq_wptr=%u)\n",
+                      cpuctl, gsp_os, (unsigned)msgq_wptr);
+        } else {
+            lx_printk("nouveau-lx: Ampere booter ok, RISC-V inactivo "
+                      "(cpuctl=0x%08x sec2@0x%x mbox=0x%x/0x%x bcr@0x1668=0x%x "
+                      "GSP mbox=0x%x/0x%x os=0x%08x 1180f8=0x%08x msgq_wptr=%u "
+                      "WPR2=0x%08x%08x meta=0x%llx heap=%u MiB) — sigue RPC\n",
+                      cpuctl, sec2_base, sec2_m0, sec2_m1, bcr,
+                      gsp_m0, gsp_m1, gsp_os, sec2_resume, (unsigned)msgq_wptr,
+                      wpr2_hi, wpr2_lo,
+                      (unsigned long long)g_wpr.meta_phys,
+                      (unsigned)(g_wpr.heap_size >> 20));
+        }
     }
     return 0;
 }
@@ -875,6 +879,12 @@ static int run_compute_stage(void)
  * Devuelve 0 solo si GSP_INIT_DONE llegó y la cadena RM avanzó. */
 static int run_gsp_rm_chain(void)
 {
+    struct gsp_cpu_seq_ctx seq_ctx;
+
+    seq_ctx.libos_phys = g_libos.libos.phys;
+    seq_ctx.app_version = g_wpr.boot.app_version;
+    gsp_cpu_seq_set_ctx(&seq_ctx);
+
     if (gsp_rpc_init(&g_libos, &g_rpc) != 0 ||
         gsp_rpc_start(g_wpr.boot.app_version) != 0 ||
         gsp_rpc_wait_event(&g_rpc, NV_VGPU_MSG_EVENT_GSP_INIT_DONE, 4000) != 0) {
