@@ -1,4 +1,4 @@
-//! Driver mínimo Intel e1000e (82574 / QEMU `-device e1000e`).
+//! Driver Intel e1000e — 82574/82540 (QEMU) e I217/I219 (MDIO copper).
 //!
 //! Rings RX/TX en DMA; MSI-X si existe, si no INTx vía IOAPIC.
 
@@ -6,15 +6,35 @@ use crate::arch::{apic, ioapic, irq};
 use crate::drivers::{dma, pci};
 use crate::mm;
 use crate::println;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::{Mutex, Once};
 
 const VENDOR_INTEL: u16 = 0x8086;
-/// Device IDs: 82574L (QEMU e1000e), 82540EM (QEMU e1000).
-const DEVICE_IDS: &[u16] = &[0x10d3, 0x100e, 0x10f5, 0x10a4];
+/// QEMU emulados: fallback slirp 10.0.2.x permitido.
+const DEVICE_IDS_QEMU: &[u16] = &[0x10d3, 0x100e];
+/// Placa: I217/I219 y familia PCH — PHY copper vía MDIC, sin slirp.
+const DEVICE_IDS_ICH: &[u16] = &[
+    0x10f5, 0x10a4, 0x15fc, 0x15f8, 0x15b8, 0x15b7, 0x15d8, 0x0d4f, 0x15e3,
+];
 
 const REG_CTRL: u32 = 0x0000;
 const REG_STATUS: u32 = 0x0008;
+const REG_MDIC: u32 = 0x0020;
+const STATUS_LU: u32 = 1 << 1;
+const MDIC_PHY: u32 = 1;
+const MDIC_READY: u32 = 1 << 28;
+const MDIC_ERROR: u32 = 1 << 30;
+const MDIC_OP_READ: u32 = 1 << 27;
+const MDIC_OP_WRITE: u32 = 1 << 26;
+
+const MII_BMCR: u32 = 0;
+const MII_BMSR: u32 = 1;
+const MII_ADVERTISE: u32 = 4;
+const MII_CTRL1000: u32 = 9;
+const BMCR_RESET: u16 = 0x8000;
+const BMCR_ANENABLE: u16 = 0x1000;
+const BMCR_ANRESTART: u16 = 0x0200;
+const BMCR_POWERDOWN: u16 = 0x0800;
 const REG_EECD: u32 = 0x0010;
 const REG_EERD: u32 = 0x0014;
 const REG_ICR: u32 = 0x00c0;
@@ -93,6 +113,9 @@ struct TxDesc {
 struct Nic {
     mmio: u64,
     mac: [u8; 6],
+    device_id: u16,
+    qemu: bool,
+    link_up: bool,
     rx_phys: dma::PhysAddr,
     tx_phys: dma::PhysAddr,
     rx_buf_phys: dma::PhysAddr,
@@ -103,6 +126,7 @@ struct Nic {
 
 static NIC: Once<Mutex<Nic>> = Once::new();
 static PRESENT: AtomicBool = AtomicBool::new(false);
+static LAST_LINK_POLL: AtomicU64 = AtomicU64::new(0);
 
 fn rr(base: u64, off: u32) -> u32 {
     unsafe { core::ptr::read_volatile(mm::phys_to_virt(base + off as u64).as_ptr()) }
@@ -130,12 +154,101 @@ pub fn present() -> bool {
     PRESENT.load(Ordering::Acquire)
 }
 
+pub fn is_qemu_emulated() -> bool {
+    NIC.get()
+        .map(|n| n.lock().qemu)
+        .unwrap_or(false)
+}
+
+fn device_supported(id: u16) -> bool {
+    DEVICE_IDS_QEMU.contains(&id) || DEVICE_IDS_ICH.contains(&id)
+}
+
+fn mdic_wait(bar: u64) -> bool {
+    for _ in 0..20_000 {
+        if rr(bar, REG_MDIC) & MDIC_READY != 0 {
+            return rr(bar, REG_MDIC) & MDIC_ERROR == 0;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+fn mdic_read(bar: u64, reg: u32) -> u16 {
+    let cmd = (MDIC_PHY << 21) | ((reg & 0x1f) << 16) | MDIC_OP_READ;
+    rw(bar, REG_MDIC, cmd);
+    if !mdic_wait(bar) {
+        return 0;
+    }
+    (rr(bar, REG_MDIC) & 0xffff) as u16
+}
+
+fn mdic_write(bar: u64, reg: u32, val: u16) {
+    let cmd = (MDIC_PHY << 21) | ((reg & 0x1f) << 16) | MDIC_OP_WRITE | u32::from(val);
+    rw(bar, REG_MDIC, cmd);
+    let _ = mdic_wait(bar);
+}
+
+fn ich_phy_bringup(bar: u64) {
+    let bmcr = mdic_read(bar, MII_BMCR);
+    if bmcr != 0 {
+        mdic_write(bar, MII_BMCR, bmcr & !BMCR_POWERDOWN);
+    }
+    mdic_write(bar, MII_BMCR, BMCR_RESET);
+    for _ in 0..80_000 {
+        if mdic_read(bar, MII_BMCR) & BMCR_RESET == 0 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    mdic_write(bar, MII_ADVERTISE, 0x01e1);
+    mdic_write(bar, MII_CTRL1000, 0x0200);
+    mdic_write(bar, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
+}
+
+fn read_link(bar: u64, ich: bool) -> (bool, u32, u16) {
+    let status = rr(bar, REG_STATUS);
+    let lu = status & STATUS_LU != 0;
+    if ich {
+        let bmsr = mdic_read(bar, MII_BMSR);
+        return (lu && bmsr != 0, status, bmsr);
+    }
+    (lu || true, status, 0)
+}
+
+/// Sondeo periódico del enlace (I217/I219); devuelve true si pasó de DOWN a UP.
+pub fn poll_link() -> bool {
+    let Some(nic_m) = NIC.get() else {
+        return false;
+    };
+    let mut nic = nic_m.lock();
+    if nic.qemu {
+        return false;
+    }
+    let now = crate::arch::pit::uptime_ms();
+    let last = LAST_LINK_POLL.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 1000 {
+        return false;
+    }
+    LAST_LINK_POLL.store(now, Ordering::Relaxed);
+    let (up, status, bmsr) = read_link(nic.mmio, true);
+    let was = nic.link_up;
+    nic.link_up = up;
+    if up && !was {
+        println!(
+            "e1000e: enlace UP status={status:#010x} bmsr={bmsr:#06x}"
+        );
+        return true;
+    }
+    false
+}
+
 /// Inicializa la NIC si hay un e1000e; devuelve la MAC.
 pub fn init() -> Option<[u8; 6]> {
     let devs = pci::devices();
-    let dev = devs.iter().find(|d| {
-        d.vendor_id == VENDOR_INTEL && DEVICE_IDS.contains(&d.device_id)
-    })?;
+    let dev = devs
+        .iter()
+        .find(|d| d.vendor_id == VENDOR_INTEL && device_supported(d.device_id))?;
 
     println!(
         "e1000e: {:04x}:{:04x} en {:02x}:{:02x}.{}",
@@ -178,8 +291,15 @@ pub fn init() -> Option<[u8; 6]> {
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
-    // Link up
-    rw(bar, REG_CTRL, rr(bar, REG_CTRL) | CTRL_SLU | CTRL_ASDE);
+    let qemu = DEVICE_IDS_QEMU.contains(&dev.device_id);
+    if qemu {
+        rw(bar, REG_CTRL, rr(bar, REG_CTRL) | CTRL_SLU | CTRL_ASDE);
+    } else {
+        ich_phy_bringup(bar);
+        for _ in 0..200_000 {
+            core::hint::spin_loop();
+        }
+    }
 
     // Clear MTA
     for i in 0..128 {
@@ -253,9 +373,20 @@ pub fn init() -> Option<[u8; 6]> {
     }
     rw(bar, REG_IMS, IMS_TXDW | IMS_TXQE | IMS_LSC | IMS_RXO | IMS_RXT0);
 
+    let (link_up, status, bmsr) = read_link(bar, !qemu);
+    if !qemu {
+        println!(
+            "e1000e: ich phy status={status:#010x} bmsr={bmsr:#06x} → {}",
+            if link_up { "UP" } else { "DOWN" }
+        );
+    }
+
     let nic = Nic {
         mmio: bar,
         mac,
+        device_id: dev.device_id,
+        qemu,
+        link_up: qemu || link_up,
         rx_phys,
         tx_phys,
         rx_buf_phys,
@@ -333,6 +464,9 @@ fn read_mac(bar: u64, device_id: u16) -> [u8; 6] {
 pub fn receive(out: &mut [u8]) -> Option<usize> {
     let nic_m = NIC.get()?;
     let mut nic = nic_m.lock();
+    if !nic.qemu && !nic.link_up {
+        return None;
+    }
     let rx = unsafe {
         core::slice::from_raw_parts_mut(
             dma::virt(nic.rx_phys).as_ptr() as *mut RxDesc,
@@ -375,6 +509,9 @@ pub fn can_send() -> bool {
         return false;
     };
     let nic = nic_m.lock();
+    if !nic.qemu && !nic.link_up {
+        return false;
+    }
     let i = nic.tx_tail as usize;
     let tx = unsafe {
         core::slice::from_raw_parts(
@@ -389,6 +526,9 @@ pub fn can_send() -> bool {
 pub fn send(packet: &[u8]) -> Result<(), ()> {
     let nic_m = NIC.get().ok_or(())?;
     let mut nic = nic_m.lock();
+    if !nic.qemu && !nic.link_up {
+        return Err(());
+    }
     let len = packet.len().min(BUF_LEN);
     let i = nic.tx_tail as usize;
     let tx = unsafe {

@@ -79,8 +79,38 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
 - **AX200 gen2 timeout ALIVE (INT=0):** restockear el anillo RX con
   `rx_write = IWL_GEN2_RX_N - 1` antes de `UREG_CPU_INIT_RUN` (como gen3). Con
   WIDX=0 el firmware no recibe RBD y no manda `UCODE_ALIVE_NTFY`.
+- **Nunca dejar `memcmp`/`memcpy`/… como dummy.** `lx-build` stubbea lo
+  undefined con `lx_emul_trace_and_stop`. Ese símbolo se enlaza al kernel y
+  pisa el de `compiler_builtins`: el live se clava en `boot: live-disk` con
+  `lx: lxdde: stub trace: memcmp` al comparar el GPT. Implementar en
+  `lxdde/shim/src/shims.c` y listar en `provided_symbols()`.
+- **Nunca dejar `memcmp`/`memcpy`/… como dummy.** `lx-build` stubbea lo
+  undefined con `lx_emul_trace_and_stop`. Ese símbolo se enlaza al kernel y
+  pisa el de `compiler_builtins`: el live se clava en `boot: live-disk` con
+  `lx: lxdde: stub trace: memcmp` al comparar el GPT. Implementar en
+  `lxdde/shim/src/shims.c` y listar en `provided_symbols()`.
+- **Nunca dejar `memcmp`/`memcpy`/… como dummy.** `lx-build` stubbea lo
+  undefined con `lx_emul_trace_and_stop`. Ese símbolo se enlaza al kernel y
+  pisa el de `compiler_builtins`: el live se clava en `boot: live-disk` con
+  `lx: lxdde: stub trace: memcmp` al comparar el GPT. Implementar en
+  `lxdde/shim/src/shims.c` y listar en `provided_symbols()`.
 - **Hostcheck antes de gastar un ciclo VFIO.** Compila `iwl_fw.c` en host contra
-  los `.ucode` del rootfs; afirma lmac/umac de `SEC_RT`.
+  los `.ucode` del rootfs; afirma lmac/umac de `SEC_RT`, CMD_VERSIONS/PHY_SKU,
+  doorbell `qid<<16` (`0x00000001`, cola HCMD=0), secuencia `QUEUE_TO_SEQ|INDEX_TO_SEQ`, y
+  tamaño SCAN_REQ_UMAC v17 con 21 canales (`iwl_scan_req_umac_v17_size`).
+- **Doorbell HBUS_TARG_WRPTR (2026-09-09).** `write_ptr | (qid << 16)`, no
+  `qid << 8`. Cabecera wide: `QUEUE_TO_SEQ(qid) | INDEX_TO_SEQ(slot)`; versión
+  del cmd desde TLV CMD_VERSIONS.
+- **Cola HCMD (2026-09-09).** `IWL_MVM_DQA_CMD_QUEUE=0` (Linux 6.6). El 9 es
+  `IWL_MVM_DQA_AP_PROBE_RESP_QUEUE`; doorbell erróneo deja al FW sordo tras ALIVE.
+- **Init MVM tras ALIVE (2026-09-09).** `iwl_mvm_run_init()`: INIT_EXTENDED_CFG
+  (`init_flags=1<<IWL_INIT_NVM` = 2) → NVM_ACCESS_COMPLETE → PHY_CFG sólo gen3 →
+  esperar `INIT_COMPLETE_NOTIF` antes de scan. Sin INIT_COMPLETE no marcar radio lista.
+- **Scan UMAC v14–17 (2026-09-09).** Payload variable (`iwl_scan_req_umac_v17_size(n)`),
+  no `sizeof` del struct con 67 canales. AX200=15, AX211=17.
+- **RX post-ALIVE (2026-09-09).** AX200 (`!gen3`): saltar `IWL_RX_DESC_SIZE_V1`
+  (48 B) en MPDUs; AX211 usa `iwl_rx_mpdu_desc`. `SCAN_COMPLETE_UMAC` acepta grupo
+  legacy además de LONG. Log RX: `(grp,id,seq,len)`.
 - Credenciales: ESP primero (`wificonf`), luego `/etc/wifi.conf`. El hueco ESP
   es 4 KiB pre-creado y contiguo (mismo patrón `espfat` que SOSOLOG).
 

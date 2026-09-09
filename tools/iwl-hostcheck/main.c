@@ -36,6 +36,8 @@ void lx_dma_free_coherent(void *dev, size_t size, void *cpu, uint64_t dma) {
 
 #include "iwl_fw_body.inc"
 
+int cmd_wait_hostcheck(void);
+
 static int count_nonzero(uint64_t *map, int max) {
     int n = 0;
     for (int i = 0; i < max; i++) {
@@ -129,6 +131,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "regresión SEC_RT/payload/truncado\n");
         return 1;
     }
+    if (cmd_wait_hostcheck() != 0) {
+        return 1;
+    }
     f = fopen(argv[1], "rb");
     if (!f) {
         perror(argv[1]);
@@ -174,21 +179,88 @@ int main(int argc, char **argv)
         return 1;
     }
     {
-        unsigned nch = 22u;
-        unsigned pay = IWL_SCAN_REQ_UMAC_SIZE_V6 +
-                       nch * (unsigned)sizeof(struct iwl_scan_channel_cfg_umac) +
-                       (unsigned)sizeof(struct iwl_scan_req_umac_tail_v1);
-        if (pay > IWL_CMD_SLOT_SIZE) {
-            fprintf(stderr, "SCAN_REQ_UMAC no cabe en slot MCR (%u > %u)\n",
-                    pay, IWL_CMD_SLOT_SIZE);
+        const unsigned scan_nch = 21u;
+        unsigned pay_v17 = iwl_scan_req_umac_v17_size(scan_nch);
+        uint8_t scan_ver = 0;
+        unsigned i;
+
+        for (i = 0; i < iwl.cmd_ver_count; i++) {
+            if (iwl.cmd_ver[i].group == LONG_GROUP &&
+                iwl.cmd_ver[i].cmd == SCAN_REQ_UMAC) {
+                scan_ver = iwl.cmd_ver[i].version;
+                break;
+            }
+        }
+        if (scan_ver < 14) {
+            fprintf(stderr, "SCAN_REQ_UMAC ver=%u (esperaba >=14)\n", scan_ver);
             return 1;
         }
-        if (240u >= IWL_CMD_SLOT_SIZE) {
-            fprintf(stderr, "tope legacy 240 B no debe bloquear slot nuevo\n");
+        if (pay_v17 > IWL_CMD_SLOT_SIZE) {
+            fprintf(stderr, "SCAN_REQ_UMAC v17 (%u ch) no cabe (%u > %u)\n",
+                    scan_nch, pay_v17, IWL_CMD_SLOT_SIZE);
             return 1;
         }
-        printf("OK: SCAN_REQ_UMAC empaquetado %u B (< %u slot MCR)\n", pay,
-               IWL_CMD_SLOT_SIZE);
+        if (iwl.phy_sku == 0 || iwl.n_scan_channels == 0) {
+            fprintf(stderr, "PHY_SKU o N_SCAN ausentes en TLV\n");
+            return 1;
+        }
+        {
+            uint32_t doorbell = (1u & 0xffu) | ((uint32_t)IWL_MVM_DQA_CMD_QUEUE << 16);
+            if (doorbell != 0x00000001u) {
+                fprintf(stderr, "doorbell=0x%08x (esperaba 0x00000001)\n", doorbell);
+                return 1;
+            }
+            uint16_t seq = (uint16_t)(QUEUE_TO_SEQ(IWL_MVM_DQA_CMD_QUEUE) |
+                                      INDEX_TO_SEQ(1));
+            if (seq != 0x0001) {
+                fprintf(stderr, "seq=0x%04x (esperaba 0x0001)\n", seq);
+                return 1;
+            }
+        }
+        {
+            uint8_t init_ver = 0;
+            unsigned j;
+            uint32_t init_flags = (uint32_t)(1u << IWL_INIT_NVM);
+
+            for (j = 0; j < iwl.cmd_ver_count; j++) {
+                if (iwl.cmd_ver[j].group == SYSTEM_GROUP &&
+                    iwl.cmd_ver[j].cmd == INIT_EXTENDED_CFG_CMD) {
+                    init_ver = iwl.cmd_ver[j].version;
+                    break;
+                }
+            }
+            if (init_flags != 2u) {
+                fprintf(stderr, "IWL_INIT_NVM init_flags=0x%x (esperaba 2)\n",
+                        init_flags);
+                return 1;
+            }
+            printf("OK: INIT_EXTENDED_CFG init_flags=0x%x (BIT(IWL_INIT_NVM))%s\n",
+                   init_flags,
+                   init_ver ? "" : " (CMD_VERSION ausente → ver=0)");
+            if (init_ver)
+                printf("OK: INIT_EXTENDED_CFG TLV ver=%u\n", init_ver);
+        }
+        printf("OK: SCAN_REQ_UMAC v%u %u B, PHY_SKU=0x%08x n_scan=%u, doorbell ok\n",
+               scan_ver, pay_v17, iwl.phy_sku, (unsigned)iwl.n_scan_channels);
+    }
+    if (sizeof(struct iwl_nvm_access_cmd) != 8) {
+        fprintf(stderr, "iwl_nvm_access_cmd=%zu (esperaba 8)\n",
+                sizeof(struct iwl_nvm_access_cmd));
+        return 1;
+    }
+    if (sizeof(struct iwl_nvm_access_resp) != 8) {
+        fprintf(stderr, "iwl_nvm_access_resp header=%zu (esperaba 8)\n",
+                sizeof(struct iwl_nvm_access_resp));
+        return 1;
+    }
+    puts("OK: NVM_ACCESS_CMD/resp API v2 (8 B cabecera)");
+    {
+        unsigned pay17 = iwl_scan_req_umac_v17_size(21);
+        if (pay17 <= sizeof(struct iwl_scan_probe_params_v4)) {
+            fprintf(stderr, "scan v17 sin hueco probe (%u)\n", pay17);
+            return 1;
+        }
+        puts("OK: scan v17 incluye probe_params");
     }
     return 0;
 }

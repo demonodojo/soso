@@ -7,6 +7,11 @@ use alloc::string::{String, ToString};
 
 const ETH_P_EAPOL: u16 = 0x888e;
 const EAPOL_KEY: u8 = 3;
+const WPA_KEY_INFO_MIC: u16 = 0x0100;
+const WPA_KEY_INFO_ACK: u16 = 0x0080;
+const WPA_KEY_INFO_INSTALL: u16 = 0x0040;
+const WPA_KEY_INFO_KEY_TYPE: u16 = 0x0008;
+const WPA_KEY_INFO_SECURE: u16 = 0x0200;
 
 /// Deriva la PSK de 32 bytes (PMK) desde passphrase ASCII y SSID.
 pub fn pbkdf2_psk(passphrase: &str, ssid: &str) -> [u8; 32] {
@@ -90,14 +95,13 @@ fn four_way_handshake(_ssid: &str, pmk: &[u8; 32]) -> i32 {
             continue;
         }
         let key_info = u16::from_be_bytes([eapol[5], eapol[6]]);
-        if key_info & 0x008 == 0 {
-            continue; /* no pairwise */
+        if key_info & WPA_KEY_INFO_KEY_TYPE == 0 {
+            continue;
         }
-        if key_info & 0x010 != 0 {
-            continue; /* already ack from us */
+        if key_info & WPA_KEY_INFO_ACK != 0 {
+            continue;
         }
-        /* M1: MIC clear, install=0, ack=0, secure=0 */
-        if eapol.len() < 95 {
+        if eapol.len() < 99 {
             continue;
         }
         let anonce = &eapol[17..49];
@@ -131,12 +135,21 @@ fn four_way_handshake(_ssid: &str, pmk: &[u8; 32]) -> i32 {
                 continue;
             }
             let m3 = &buf[14..n2];
-            if m3.len() < 95 || m3[1] != EAPOL_KEY {
+            if m3.len() < 99 || m3[1] != EAPOL_KEY {
                 continue;
             }
-            let gtk = &m3[67..83];
+            let mut m3v = [0u8; 512];
+            let ml = m3.len().min(m3v.len());
+            m3v[..ml].copy_from_slice(&m3[..ml]);
+            if !verify_eapol_mic(&ptk, &mut m3v[..ml]) {
+                continue;
+            }
+            let mut gtk = [0u8; 16];
+            if extract_gtk(&m3v[..ml], &mut gtk).is_err() {
+                gtk.fill(0);
+            }
             let mut m4 = [0u8; 128];
-            let m4_len = build_eapol_m4(m3, &ptk, &mut m4);
+            let m4_len = build_eapol_m4(&m3v[..ml], &ptk, &mut m4);
             let mut frame4 = [0u8; 256];
             let flen4 = wrap_eapol_tx(&mut frame4, &m4[..m4_len]);
             let _ = crate::lxdde::wifi_send(&frame4[..flen4]);
@@ -144,9 +157,9 @@ fn four_way_handshake(_ssid: &str, pmk: &[u8; 32]) -> i32 {
             let mut ccmp_ptk = [0u8; 16];
             ccmp_ptk.copy_from_slice(&ptk[..16]);
             crate::lxdde::wifi::install_key(&ccmp_ptk, 0);
-            let mut ccmp_gtk = [0u8; 16];
-            ccmp_gtk.copy_from_slice(&gtk[..16]);
-            crate::lxdde::wifi::install_key(&ccmp_gtk, 1);
+            if gtk != [0u8; 16] {
+                crate::lxdde::wifi::install_key(&gtk, 1);
+            }
             return 0;
         }
         return -1;
@@ -170,17 +183,17 @@ fn derive_ptk(pmk: &[u8; 32], anonce: &[u8], snonce: &[u8], out: &mut [u8; 48]) 
     use sha1::Sha1;
     type HmacSha1 = Hmac<Sha1>;
 
-    let mac = crate::lxdde::wifi_mac().unwrap_or([0; 6]);
-    let bssid = [0xffu8; 6];
+    let sta = crate::lxdde::wifi_mac().unwrap_or([0; 6]);
+    let bssid = crate::lxdde::wifi_bssid().unwrap_or([0xff; 6]);
 
     let mut prefix = [0u8; 128];
     let mut pos = 0usize;
     prefix[pos..pos + 23].copy_from_slice(b"Pairwise key expansion\0");
     pos += 23;
-    let (a, b) = if cmp_bytes(&mac, &bssid) != core::cmp::Ordering::Greater {
-        (mac, bssid)
+    let (a, b) = if cmp_bytes(&sta, &bssid) != core::cmp::Ordering::Greater {
+        (sta, bssid)
     } else {
-        (bssid, mac)
+        (bssid, sta)
     };
     prefix[pos..pos + 6].copy_from_slice(&a);
     pos += 6;
@@ -207,15 +220,78 @@ fn derive_ptk(pmk: &[u8; 32], anonce: &[u8], snonce: &[u8], out: &mut [u8; 48]) 
     out[20..40].copy_from_slice(&t2[..20]);
 }
 
+fn eapol_key_mic(ptk: &[u8; 48], eapol: &[u8]) -> [u8; 16] {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+    let mut mac = Hmac::<Sha1>::new_from_slice(&ptk[0..16]).expect("hmac");
+    mac.update(eapol);
+    let t = mac.finalize().into_bytes();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&t[..16]);
+    out
+}
+
+fn set_eapol_mic(ptk: &[u8; 48], eapol: &mut [u8]) {
+    if eapol.len() < 97 {
+        return;
+    }
+    eapol[81..97].fill(0);
+    let mic = eapol_key_mic(ptk, eapol);
+    eapol[81..97].copy_from_slice(&mic);
+}
+
+fn verify_eapol_mic(ptk: &[u8; 48], eapol: &mut [u8]) -> bool {
+    if eapol.len() < 97 {
+        return false;
+    }
+    let mut saved = [0u8; 16];
+    saved.copy_from_slice(&eapol[81..97]);
+    eapol[81..97].fill(0);
+    let calc = eapol_key_mic(ptk, eapol);
+    eapol[81..97].copy_from_slice(&saved);
+    calc == saved
+}
+
+fn extract_gtk(m3: &[u8], out: &mut [u8; 16]) -> Result<(), ()> {
+    if m3.len() < 99 {
+        return Err(());
+    }
+    let kd_len = u16::from_be_bytes([m3[97], m3[98]]) as usize;
+    if kd_len == 0 || 99 + kd_len > m3.len() {
+        return Err(());
+    }
+    let kd = &m3[99..99 + kd_len];
+    let mut i = 0usize;
+    while i + 2 <= kd.len() {
+        let id = kd[i];
+        let elen = kd[i + 1] as usize;
+        if i + 2 + elen > kd.len() {
+            break;
+        }
+        if id == 0xdd && elen >= 6 && kd[i + 2] == 0x00 && kd[i + 3] == 0x0f && kd[i + 4] == 0xac
+        {
+            if kd[i + 5] == 1 && elen >= 7 {
+                let gtk_len = elen - 6;
+                if gtk_len >= 16 {
+                    out.copy_from_slice(&kd[i + 7..i + 7 + 16]);
+                    return Ok(());
+                }
+            }
+        }
+        i += 2 + elen;
+    }
+    Err(())
+}
+
 fn wrap_eapol_tx(out: &mut [u8], eapol: &[u8]) -> usize {
     let len = 14 + eapol.len();
     if len > out.len() {
         return 0;
     }
-    if let Some(mac) = crate::lxdde::wifi_mac() {
-        out[0..6].copy_from_slice(&mac);
-    }
-    out[6..12].fill(0xff);
+    let sta = crate::lxdde::wifi_mac().unwrap_or([0; 6]);
+    let bssid = crate::lxdde::wifi_bssid().unwrap_or([0xff; 6]);
+    out[0..6].copy_from_slice(&bssid);
+    out[6..12].copy_from_slice(&sta);
     out[12] = 0x88;
     out[13] = 0x8e;
     out[14..14 + eapol.len()].copy_from_slice(eapol);
@@ -227,28 +303,34 @@ fn build_eapol_m2(m1: &[u8], snonce: &[u8; 32], ptk: &[u8; 48], out: &mut [u8]) 
         return 0;
     }
     out[..95].copy_from_slice(&m1[..95]);
-    out[0] = 0x02; /* v2 */
-    out[1] = EAPOL_KEY;
-    out[5] = 0x03;
-    out[6] = 0x01; /* key_info: pairwise + ack */
-    out[17..49].copy_from_slice(snonce);
-    out[93] = 0;
-    out[94] = 0;
-    /* MIC zero — instalación real vía driver tras M4 */
-    let _ = ptk;
-    95
-}
-
-fn build_eapol_m4(m3: &[u8], _ptk: &[u8; 48], out: &mut [u8]) -> usize {
-    if m3.len() < 95 {
-        return 0;
-    }
-    out[..95].copy_from_slice(&m3[..95]);
     out[0] = 0x02;
     out[1] = EAPOL_KEY;
     out[5] = 0x03;
-    out[6] = 0x03; /* pairwise + ack + secure */
-    95
+    let key_info = WPA_KEY_INFO_KEY_TYPE | WPA_KEY_INFO_ACK | WPA_KEY_INFO_MIC;
+    out[6] = (key_info & 0xff) as u8;
+    out[7] = (key_info >> 8) as u8;
+    out[17..49].copy_from_slice(snonce);
+    out[97] = 0;
+    out[98] = 0;
+    set_eapol_mic(ptk, &mut out[..99]);
+    99
+}
+
+fn build_eapol_m4(m3: &[u8], ptk: &[u8; 48], out: &mut [u8]) -> usize {
+    if m3.len() < 99 {
+        return 0;
+    }
+    out[..99].copy_from_slice(&m3[..99]);
+    out[0] = 0x02;
+    out[1] = EAPOL_KEY;
+    out[5] = 0x03;
+    let key_info = WPA_KEY_INFO_KEY_TYPE | WPA_KEY_INFO_ACK | WPA_KEY_INFO_MIC | WPA_KEY_INFO_SECURE;
+    out[6] = (key_info & 0xff) as u8;
+    out[7] = (key_info >> 8) as u8;
+    out[97] = 0;
+    out[98] = 0;
+    set_eapol_mic(ptk, &mut out[..99]);
+    99
 }
 
 /// Parsea `wifi.conf` desde buffer (tests / kshell).

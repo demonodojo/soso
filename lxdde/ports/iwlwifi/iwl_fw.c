@@ -103,6 +103,33 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
             lx_printk("iwl_fw: IML %u bytes\n", length);
             break;
         }
+        case IWL_UCODE_TLV_PHY_SKU:
+            if (length >= 4) {
+                iwl->phy_sku = le32(pos);
+                lx_printk("iwl_fw: PHY_SKU 0x%08x\n", iwl->phy_sku);
+            }
+            break;
+        case IWL_UCODE_TLV_N_SCAN:
+            if (length >= 1) {
+                iwl->n_scan_channels = pos[0];
+                lx_printk("iwl_fw: N_SCAN_CHANNELS %u\n",
+                          (unsigned)iwl->n_scan_channels);
+            }
+            break;
+        case IWL_UCODE_TLV_CMD_VERSIONS: {
+            unsigned n = length / sizeof(struct iwl_fw_cmd_version);
+            unsigned i;
+
+            iwl->cmd_ver_count = 0;
+            for (i = 0; i < n && iwl->cmd_ver_count < 64u; i++) {
+                const struct iwl_fw_cmd_version *cv =
+                    (const struct iwl_fw_cmd_version *)(pos +
+                                                        i * sizeof(*cv));
+                iwl->cmd_ver[iwl->cmd_ver_count++] = *cv;
+            }
+            lx_printk("iwl_fw: CMD_VERSIONS %u entradas\n", iwl->cmd_ver_count);
+            break;
+        }
         default:
             break;
         }

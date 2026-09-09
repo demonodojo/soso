@@ -551,6 +551,8 @@ pub fn parse_wifi_stages(text: &str) -> WifiStages {
     WifiStages {
         alive: if t.contains("alive degradado") || t.contains("alive=fallo") {
             StageStatus::fail("ALIVE degradado o fallido")
+        } else if t.contains("init_complete_notif") {
+            StageStatus::ok(Some("INIT_COMPLETE_NOTIF"))
         } else if t.contains("ucode_alive_ntfy") || t.contains("firmware alive") {
             StageStatus::ok(Some("UCODE_ALIVE_NTFY"))
         } else {
@@ -582,8 +584,8 @@ pub fn parse_wifi_stages(text: &str) -> WifiStages {
             && !t.contains("gsp fallo")
         {
             StageStatus::fail("DHCP fallido")
-        } else if t.contains("dhcp")
-            && (t.contains("lease") || t.contains("ok") || t.contains("192."))
+        } else if t.contains("net: dhcp ")
+            && (t.contains("192.") || t.contains("10.") || t.contains("172."))
         {
             StageStatus::ok(None)
         } else {
@@ -854,7 +856,7 @@ mod tests {
 
     #[test]
     fn parse_wifi_alive_ok() {
-        let w = parse_wifi_stages("iwl: UCODE_ALIVE_NTFY dhcp lease 192.168.1.2");
+        let w = parse_wifi_stages("iwl: UCODE_ALIVE_NTFY net: dhcp 192.168.1.2/24 gw 192.168.1.1");
         assert_eq!(w.alive.status, "ok");
         assert_eq!(w.dhcp.status, "ok");
     }

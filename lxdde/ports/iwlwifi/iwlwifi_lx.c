@@ -91,6 +91,11 @@ int lx_iwlwifi_mac(unsigned char mac[6])
     return iwl_ax211_mac(mac);
 }
 
+int lx_iwlwifi_bssid(unsigned char bssid[6])
+{
+    return iwl_ax211_bssid(bssid);
+}
+
 void lx_iwlwifi_poll(void)
 {
     iwl_ax211_poll();

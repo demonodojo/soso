@@ -109,6 +109,17 @@ void *memmove(void *dst, const void *src, unsigned long n)
     return dst;
 }
 
+int memcmp(const void *a, const void *b, unsigned long n)
+{
+    const unsigned char *p = (const unsigned char *)a;
+    const unsigned char *q = (const unsigned char *)b;
+    for (unsigned long i = 0; i < n; i++) {
+        if (p[i] != q[i])
+            return (int)p[i] - (int)q[i];
+    }
+    return 0;
+}
+
 /* --- Página física para nvkm (flush_page de fb): memoria real de PAGE_SIZE. --- */
 extern void *lx_kzalloc(unsigned long size, unsigned flags);
 extern void lx_kfree(void *ptr);

@@ -139,31 +139,37 @@
         "gsp_ga102_fallback": "a8c3ebeed280323aedb51c061f321e73379cce7a9ae643a33dd03915df027f7f 63571696B"
       },
       "git": {
-        "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
-        "commit_corto": "0ed3deea1",
+        "commit": "669afd2c15e00f76dcd8a60804a674964646f5eb",
+        "commit_corto": "669afd2c1",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "82 ficheros modificados"
+        "cambios_locales": "Estado dirty registrado por el kernel del USB; diff exacto de esa compilación no disponible"
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
-        "status": "pendiente"
+        "status": "ok",
+        "nota": "sosh viva; ethernet rtl8169 enlace DOWN, sin DHCP",
+        "fecha": "2026-09-09"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY (AX200 8086:2723 en esta placa)",
+          "nota": "UCODE_ALIVE_NTFY AX200 (misma placa); INIT_EXTENDED_CFG ok, NVM timeout",
           "fecha": "2026-09-09"
         },
         "scan": {
-          "status": "pendiente"
+          "status": "fail",
+          "nota": "sin INIT_COMPLETE; sosh wifi scan: error de E/S",
+          "fecha": "2026-09-09"
         },
         "assoc_wpa2": {
           "status": "pendiente"
         },
         "dhcp": {
-          "status": "pendiente"
+          "status": "pendiente",
+          "nota": "Sin evidencia de DHCP WiFi; net: dhcp corresponde a rtl8169 con enlace DOWN",
+          "fecha": "2026-09-09"
         },
         "ssh": {
           "status": "pendiente"
@@ -175,12 +181,12 @@
       "gpu": {
         "gsp_rpc": {
           "status": "fail",
-          "nota": "booter_load ok, RISC-V inactivo cpuctl=0x10 → GSP=fallo",
+          "nota": "FWSEC-FRTS OK; booter_load SEC2@0x840000 ok; cpuctl=0x10 sin bit7 → aborta antes de RPC",
           "fecha": "2026-09-09"
         },
         "vram_pool": {
           "status": "fail",
-          "nota": "pool VRAM=no (VRAM física 16384 MiB; sin GSP-RM)",
+          "nota": "GSP=fallo, pool VRAM=no; 16384 MiB reportados",
           "fecha": "2026-09-09"
         },
         "ce_readback": {
@@ -199,9 +205,15 @@
       "bench": {},
       "logs": [
         "/tmp/soso-placa/SOSOLOG.TXT",
-        "/tmp/soso-placa/SOSODRV.TXT"
+        "/tmp/soso-placa/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-09-09/SOSOLOG.TXT.txt",
+        "target/usb-diagnostic-2026-09-09/SOSODRV.TXT.txt",
+        "target/usb-diagnostic-2026-09-09-run2/SOSOLOG.TXT.txt",
+        "target/usb-diagnostic-2026-09-09-run2/SOSODRV.TXT.txt",
+        "target/usb-diagnostic-2026-09-09-run3/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run3/SOSODRV.txt"
       ],
-      "notas": "Live 2026-09-09 ROG: 10de:249c GA107. FWSEC-FRTS OK; fix SEC2 PTOP 0x087000 pendiente reflash. RISC-V GSP inactivo (cpuctl=0x10) → sin ok hasta pool VRAM=sí. iGPU AMD 1002:1638 sin driver (GOP). rtl8169 enlace DOWN.",
+      "notas": "ROG run3, live 669afd2c1-dirty, flush 10, uptime 364s. Progreso GPU: SEC2 0x840000, staging DMA, parche HS, reset RISC-V 0x111, booter falcon ok. Bloqueante: run_ampere_booter exige CPUCTL bit7 antes de run_gsp_rm_chain; Linux tu102.c:205-209 no. Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
       "actualizado": "2026-09-09"
     },
     {
@@ -282,33 +294,37 @@
         "ax200_ucode": "d23a382871e6e638957845b47424ab98dca5e68e022ab73eeeebb0b6f751d7e9 1368096B"
       },
       "git": {
-        "commit": "0ed3deea10ed4c419370d8a2c22b1be3399e0f1e",
-        "commit_corto": "0ed3deea1",
+        "commit": "669afd2c15e00f76dcd8a60804a674964646f5eb",
+        "commit_corto": "669afd2c1",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "82 ficheros modificados"
+        "cambios_locales": "Estado dirty registrado por el kernel del USB; diff exacto de esa compilación no disponible"
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
-        "status": "pendiente"
+        "status": "ok",
+        "nota": "sosh viva; ethernet rtl8169 enlace DOWN, sin DHCP",
+        "fecha": "2026-09-09"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY",
+          "nota": "UCODE_ALIVE_NTFY; INIT_EXTENDED_CFG rsp grp=2 id=0x03; NVM_ACCESS timeout grp=12",
           "fecha": "2026-09-09"
         },
         "scan": {
           "status": "fail",
-          "nota": "wifi: ninguna red (ALIVE ok; SCAN_REQ_UMAC stub, 0 BSS)",
+          "nota": "sin INIT_COMPLETE; sosh wifi scan: error de E/S",
           "fecha": "2026-09-09"
         },
         "assoc_wpa2": {
           "status": "pendiente"
         },
         "dhcp": {
-          "status": "pendiente"
+          "status": "pendiente",
+          "nota": "Sin evidencia de DHCP WiFi; net: dhcp corresponde a rtl8169 con enlace DOWN",
+          "fecha": "2026-09-09"
         },
         "ssh": {
           "status": "pendiente"
@@ -340,9 +356,15 @@
       "bench": {},
       "logs": [
         "/tmp/soso-placa/SOSOLOG.TXT",
-        "/tmp/soso-placa/SOSODRV.TXT"
+        "/tmp/soso-placa/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-09-09/SOSOLOG.TXT.txt",
+        "target/usb-diagnostic-2026-09-09/SOSODRV.TXT.txt",
+        "target/usb-diagnostic-2026-09-09-run2/SOSOLOG.TXT.txt",
+        "target/usb-diagnostic-2026-09-09-run2/SOSODRV.TXT.txt",
+        "target/usb-diagnostic-2026-09-09-run3/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-09-run3/SOSODRV.txt"
       ],
-      "notas": "Live 2026-09-09 ROG: 8086:2723 ALIVE real (cc-a0-77). wifi scan ×2 → 0 redes. SCAN_REQ_UMAC es stub (flags=1, channel=0); parser SSID heurístico. SOSOWIFI.TXT vacío.",
+      "notas": "ROG AX200 run3, flush 10. Progreso: cola HCMD=0, doorbell qid<<16, INIT_EXTENDED_CFG responde. Bloqueante: struct iwl_nvm_access_cmd incorrecta (falta op_code/target; type uint32 vs le16). Véase docs/DIAGNOSTICO-ROG-2026-09-09.md.",
       "actualizado": "2026-09-09"
     }
   ]

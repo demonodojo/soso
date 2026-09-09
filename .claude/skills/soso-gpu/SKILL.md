@@ -217,7 +217,9 @@ ucode **no** se copia a un GEM y su blob en bruto se suelta con
 
 **Ampere (GA10x / GA107 — `run_ampere_boot` en `gsp_bringup.c`).** Cadena:
 WPR meta (`gsp_wpr_prepare_ampere`) → libos/cmdq → **FWSEC-FRTS** (`gsp_fwsec.c`)
-→ `enqueue_boot_rpcs` → `booter_load` en SEC2 → `run_gsp_rm_chain()`.
+→ `enqueue_boot_rpcs` → `falcon_lx_sec2_prepare` + `booter_load` en SEC2 →
+`run_gsp_rm_chain()`. **No** ejecutar ACR/AHESASC antes del booter: un fallo
+(`mbox0=0x7`, DMA in use) envenena SEC2 y el booter no arranca.
 FWSEC extrae el ucode de la VBIOS (PROM @BAR0 `0x300000`: cadena PCIR/NPDE,
 BIT token `0x70` → PmuLookupTable app `0x85` → imagen FwSec `0xE0`), parchea
 firma por fuse + DMEMMAPPER cmd FRTS (`0x15`) y lo ejecuta en el falcon GSP
@@ -236,6 +238,21 @@ carga; juez = DMA DMEM + mbox/sentinela. Log de éxito:
 `g3-check` exige `gsp_fwsec.c` en `source.list`. **HW de validación: GA107
 (ROG 3050 Mobile)**; no hay 3060 en estas máquinas. Blobs `ga107` = mismos
 bytes que `ga102` (no duplicar en rootfs).
+
+**Gotcha Ampere SEC2 (2026-09-09, GA107 ROG).** PTOP reporta SEC2 en `0x087000`
+pero el booter Ampere debe usar `LX_FLCN_SEC2_BASE` (`0x840000`), como Linux
+`ga102_sec2_new()` y el ACR en `acr_lx.c`. No cambiar el parser PTOP: sigue
+sirviendo runlists/CE. Hostcheck: PTOP=`0x087000`, booter=`0x840000`.
+
+**Gotcha HS v2 DMA (2026-09-09).** `flcn_parse_hs_v2()` ajusta el puntero CPU
+pero `flcn_dma_wr()` transfiere desde `dma_handle`. Usar `acr_fw_stage_payload()`
+(copia `data + hdr->data_offset` a DMA dedicado) para `booter_load` y
+`ucode_ahesasc.bin`. No sumar el offset a la física existente. Parche de firma
+(`flcn_hs_v2_patch_sig`) **después** del staging, **antes** de `flcn_fw_load`.
+
+**Gotcha reset GSP RISC-V (2026-09-09).** `falcon_lx_reset(LX_FLCN_GSP_BASE)`
+selecciona Falcon (`base+0x1668=0`). Ampere booter usa
+`falcon_lx_gsp_reset_riscv()` (máscara `0x111` en `0x1668`, sin select).
 
 **Ruta por familia en el bring-up.** `gsp_bringup.c` bifurca: Ampere →
 `run_ampere_boot()` (WPR + FWSEC-FRTS + booter SEC2); Blackwell →

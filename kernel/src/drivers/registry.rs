@@ -83,7 +83,10 @@ pub const DRIVERS: &[DriverInfo] = &[
         feature: "drv-e1000e",
         rule: MatchRule::PciIds {
             vendor: 0x8086,
-            devices: &[0x10d3, 0x100e, 0x10f5, 0x10a4],
+            devices: &[
+                0x10d3, 0x100e, 0x10f5, 0x10a4, 0x15fc, 0x15f8, 0x15b8, 0x15b7, 0x15d8,
+                0x0d4f, 0x15e3,
+            ],
         },
         lxdde_port: None,
     },

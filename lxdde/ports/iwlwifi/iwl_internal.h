@@ -44,7 +44,7 @@
 #define IWL_UMAC_PRPH_OFFSET         0x300000u
 #define RFH_Q0_FRBDCB_WIDX_TRG       0x1C80
 #define IWL_PCI_AX200                0x2723u
-#define IWL_MVM_DQA_CMD_QUEUE        9
+#define IWL_MVM_DQA_CMD_QUEUE        0
 #define IWL_GEN2_RX_N                32
 #define IWL_GEN2_RX_SZ               4096
 #define IWL_TFH_TFD_SIZE             256
@@ -134,6 +134,39 @@
 #define DATA_PATH_GROUP            0x5
 #define MAC_CONF_GROUP             0x3
 #define SYSTEM_GROUP               0x2
+#define REGULATORY_AND_NVM_GROUP   0xc
+
+#define INIT_EXTENDED_CFG_CMD      0x03
+#define NVM_ACCESS_CMD             0x88
+#define NVM_ACCESS_COMPLETE        0x00
+#define PHY_CONFIGURATION_CMD      0x0b
+
+#define IWL_NVM_READ               0u
+#define IWL_NVM_WRITE              1u
+#define NVM_ACCESS_TARGET_CACHE    0u
+#define READ_NVM_CHUNK_SUCCEED     0u
+#define IWL_NVM_SECTION_TYPE_HW    1u /* NVM_SECTION_TYPE_SW en Linux */
+#define NVM_MAC_ADDR_OFFSET        0x64u
+
+#define IWL_UCODE_TLV_PHY_SKU      23
+#define IWL_UCODE_TLV_N_SCAN       31
+#define IWL_UCODE_TLV_CMD_VERSIONS 48
+
+#define IWL_INIT_NVM               1
+
+#define QUEUE_TO_SEQ(q)            (((uint16_t)(q) & 0x1fu) << 8)
+#define INDEX_TO_SEQ(i)            ((uint16_t)(i) & 0xffu)
+#define SEQ_RX_FRAME               0x8000u
+#define SEQ_TO_QUEUE(s)            (((s) >> 8) & 0x1fu)
+#define SEQ_TO_INDEX(s)            ((s) & 0xffu)
+
+#define SCAN_MAX_NUM_CHANS_V3      67
+#define SCAN_TWO_LMACS             2
+#define IWL_MAX_SCHED_SCAN_PLANS   10
+#define PROBE_OPTION_MAX           20
+#define SCAN_SHORT_SSID_MAX_SIZE   20
+#define SCAN_BSSID_MAX_SIZE        32
+#define IWL_RX_DESC_SIZE_V1        48u
 
 #define ADD_STA                    0x18
 #define TX_CMD                     0x1
@@ -455,6 +488,129 @@ struct iwl_rx_mpdu_res_start {
     uint16_t assist;
 } __attribute__((packed));
 
+struct iwl_init_extended_cfg_cmd {
+    uint32_t init_flags;
+} __attribute__((packed));
+
+/* fw/api/nvm-reg.h NVM_ACCESS_CMD_API_S_VER_2 */
+struct iwl_nvm_access_cmd {
+    uint8_t op_code;
+    uint8_t target;
+    uint16_t type;
+    uint16_t offset;
+    uint16_t length;
+} __attribute__((packed));
+
+struct iwl_nvm_access_resp {
+    uint16_t offset;
+    uint16_t length;
+    uint16_t type;
+    uint16_t status;
+    uint8_t data[];
+} __attribute__((packed));
+
+struct iwl_nvm_access_complete_cmd {
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_scan_config_v2 {
+    uint8_t enable_cam_mode;
+    uint8_t enable_promiscouos_mode;
+    uint8_t bcast_sta_id;
+    uint8_t reserved;
+    uint32_t tx_chains;
+    uint32_t rx_chains;
+    uint32_t reserved2;
+    uint32_t flags;
+    uint32_t reserved3[2];
+} __attribute__((packed));
+
+struct iwl_calib_ctrl {
+    uint32_t ucode_control;
+    uint32_t flow_trigger;
+    uint32_t flow_block;
+} __attribute__((packed));
+
+struct iwl_phy_cfg_cmd_v1 {
+    uint32_t phy_cfg;
+    struct iwl_calib_ctrl calib_control;
+} __attribute__((packed));
+
+struct iwl_fw_cmd_version {
+    uint8_t cmd;
+    uint8_t group;
+    uint8_t version;
+    uint8_t reserved;
+} __attribute__((packed));
+
+struct iwl_scan_general_params_v11 {
+    uint16_t flags;
+    uint8_t reserved;
+    uint8_t scan_start_mac_or_link_id;
+    uint8_t active_dwell[SCAN_TWO_LMACS];
+    uint8_t adwell_default_2g;
+    uint8_t adwell_default_5g;
+    uint8_t adwell_default_social_chn;
+    uint8_t flags2;
+    uint16_t adwell_max_budget;
+    uint32_t max_out_of_time[SCAN_TWO_LMACS];
+    uint32_t suspend_time[SCAN_TWO_LMACS];
+    uint32_t scan_priority;
+    uint8_t passive_dwell[SCAN_TWO_LMACS];
+    uint8_t num_of_fragments[SCAN_TWO_LMACS];
+} __attribute__((packed));
+
+struct iwl_scan_channel_params_v7 {
+    uint8_t flags;
+    uint8_t count;
+    uint8_t n_aps_override[2];
+    struct iwl_scan_channel_cfg_umac channel_config[SCAN_MAX_NUM_CHANS_V3];
+} __attribute__((packed));
+
+struct iwl_scan_periodic_parms_v1 {
+    struct iwl_scan_umac_schedule schedule[IWL_MAX_SCHED_SCAN_PLANS];
+    uint16_t delay;
+    uint16_t reserved;
+} __attribute__((packed));
+
+struct iwl_scan_probe_req {
+    struct iwl_scan_probe_segment mac_header;
+    struct iwl_scan_probe_segment band_data[2];
+    struct iwl_scan_probe_segment common_data;
+    uint8_t buf[512];
+} __attribute__((packed));
+
+struct iwl_scan_probe_params_v4 {
+    struct iwl_scan_probe_req preq;
+    uint8_t short_ssid_num;
+    uint8_t bssid_num;
+    uint16_t reserved;
+    struct iwl_ssid_ie direct_scan[PROBE_OPTION_MAX];
+    uint32_t short_ssid[SCAN_SHORT_SSID_MAX_SIZE];
+    uint8_t bssid_array[SCAN_BSSID_MAX_SIZE][6];
+} __attribute__((packed));
+
+struct iwl_scan_req_params_v17 {
+    struct iwl_scan_general_params_v11 general_params;
+    struct iwl_scan_channel_params_v7 channel_params;
+    struct iwl_scan_periodic_parms_v1 periodic_params;
+    struct iwl_scan_probe_params_v4 probe_params;
+} __attribute__((packed));
+
+struct iwl_scan_req_umac_v17 {
+    uint32_t uid;
+    uint32_t ooc_priority;
+    struct iwl_scan_req_params_v17 scan_params;
+} __attribute__((packed));
+
+static inline unsigned iwl_scan_req_umac_v17_size(unsigned n_channels)
+{
+    return 8u + (unsigned)sizeof(struct iwl_scan_general_params_v11) + 4u +
+           n_channels * (unsigned)sizeof(struct iwl_scan_channel_cfg_umac) +
+           (unsigned)sizeof(struct iwl_scan_periodic_parms_v1) +
+           (unsigned)sizeof(struct iwl_scan_probe_params_v4);
+}
+
 #define IWL_SCAN_REQ_UMAC_SIZE_V6 44u
 #define IWL_UMAC_SCAN_GEN_FLAGS_PASS_ALL  (1u << 2)
 #define IWL_UMAC_SCAN_GEN_FLAGS_ITER_COMPLETE (1u << 5)
@@ -466,7 +622,17 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
 int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl);
 int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl);
 void iwl_trans_poll(struct iwl_ax211_priv *iwl);
+int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
+                       const void *payload, uint16_t pay_len);
+int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
+                            const void *payload, uint16_t pay_len, int wait_ms);
+int iwl_mvm_run_init(struct iwl_ax211_priv *iwl);
+int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl);
+void iwl_mvm_fill_probe_req(struct iwl_ax211_priv *iwl, struct iwl_scan_probe_params_v4 *probe);
+int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
+                          const uint8_t *bssid);
 int iwl_mvm_scan(struct iwl_ax211_priv *iwl);
+int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd);
 void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len);
 int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid);
 int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid, const uint8_t psk[32]);

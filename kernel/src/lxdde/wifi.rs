@@ -31,6 +31,7 @@ unsafe extern "C" {
     fn lx_iwlwifi_rx(buf: *mut u8, buflen: c_int) -> c_int;
     fn lx_iwlwifi_tx(buf: *const u8, len: c_int) -> c_int;
     fn lx_iwlwifi_mac(mac: *mut u8) -> c_int;
+    fn lx_iwlwifi_bssid(bssid: *mut u8) -> c_int;
     fn lx_iwlwifi_poll();
 }
 
@@ -81,6 +82,14 @@ pub fn mac() -> Option<[u8; 6]> {
         return None;
     }
     Some(mac)
+}
+
+pub fn bssid() -> Option<[u8; 6]> {
+    let mut bssid = [0u8; 6];
+    if unsafe { lx_iwlwifi_bssid(bssid.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    Some(bssid)
 }
 
 pub fn connected() -> bool {

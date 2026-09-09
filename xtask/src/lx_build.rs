@@ -458,7 +458,7 @@ fn provided_symbols() -> HashSet<&'static str> {
         "lx_iwlwifi_connected", "lx_iwlwifi_rx", "lx_iwlwifi_tx", "lx_iwlwifi_mac",
         "lx_iwlwifi_poll", "lx_iwlwifi_set_alive", "lx_iwlwifi_set_phase",
         "iwl_ax211_deliver_rx", "iwl_ax211_add_bss",
-        "memcpy", "memset", "memmove", "strlen", "strcmp", "strncmp", "strncpy", "strnlen",
+        "memcpy", "memset", "memmove", "memcmp", "strlen", "strcmp", "strncmp", "strncpy", "strnlen",
         "snprintf", "scnprintf", "vsnprintf",
         "alloc_page", "__free_page", "page_address", "page_to_pfn",
     ]

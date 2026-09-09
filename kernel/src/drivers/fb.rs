@@ -9,8 +9,8 @@ use bootloader_api::info::{FrameBufferInfo, PixelFormat};
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 use font8x8::legacy::{BASIC_LEGACY, LATIN_LEGACY};
-use spin::Mutex;
 use soso_abi::{FbInfo, FB_FMT_BGR, FB_FMT_RGB, FB_FMT_U8};
+use spin::Mutex;
 
 const CELL_SPACE: u16 = b' ' as u16;
 
@@ -83,9 +83,7 @@ fn decode_utf8(bytes: &[u8]) -> u16 {
             cp
         }
         [b0, b1, b2] if b0 & 0xF0 == 0xE0 => {
-            ((b0 & 0x0F) as u32) << 12
-                | ((b1 & 0x3F) as u32) << 6
-                | (b2 & 0x3F) as u32
+            ((b0 & 0x0F) as u32) << 12 | ((b1 & 0x3F) as u32) << 6 | (b2 & 0x3F) as u32
         }
         [b0, b1, b2, b3] if b0 & 0xF8 == 0xF0 => {
             let cp = ((b0 & 0x07) as u32) << 18
@@ -136,18 +134,33 @@ const FG: (u8, u8, u8) = (0xc8, 0xd0, 0xb0);
 
 /// Glifo 8×8 para U+20AC (€), ausente en LATIN_LEGACY.
 const GLYPH_EURO: [u8; 8] = [
-    0b00111100,
-    0b01100110,
-    0b01100000,
-    0b00111100,
-    0b01100000,
-    0b01100110,
-    0b00111100,
-    0b00000000,
+    0b00111100, 0b01100110, 0b01100000, 0b00111100, 0b01100000, 0b01100110, 0b00111100, 0b00000000,
 ];
 
 fn bytes_per_scanline(info: &FrameBufferInfo) -> usize {
     info.stride * info.bytes_per_pixel
+}
+
+/// El GOP UEFI suele estar mapeado UC/WC. Un `memcpy` de varios MiB usa
+/// `movaps` y en silicio (AMD GOP en concreto) eso es #GP: el arranque se
+/// clava al primer scroll, antes de `fatlog`.
+unsafe fn copy_to_gop(dst: *mut u8, src: *const u8, mut n: usize) {
+    unsafe {
+        let mut d = dst;
+        let mut s = src;
+        while n >= 4 {
+            core::ptr::write_volatile(d.cast::<u32>(), core::ptr::read_unaligned(s.cast::<u32>()));
+            d = d.add(4);
+            s = s.add(4);
+            n -= 4;
+        }
+        while n > 0 {
+            core::ptr::write_volatile(d, core::ptr::read(s));
+            d = d.add(1);
+            s = s.add(1);
+            n -= 1;
+        }
+    }
 }
 
 fn mapped_height(info: &FrameBufferInfo) -> usize {
@@ -289,14 +302,17 @@ fn fill_rect(st: &mut FbState, x0: usize, y0: usize, w: usize, h: usize, r: u8, 
     }
     if r == 0 && g == 0 && b == 0 {
         unsafe {
-            if x0 == 0 && w == st.info.width && bpl * h <= st.info.byte_len.saturating_sub(start)
-            {
+            if x0 == 0 && w == st.info.width && bpl * h <= st.info.byte_len.saturating_sub(start) {
                 core::ptr::write_bytes(st.ptr.add(start), 0, bpl * h);
                 core::ptr::write_bytes(st.shadow.as_mut_ptr().add(start), 0, bpl * h);
             } else {
                 for dy in 0..h {
                     core::ptr::write_bytes(st.ptr.add(start + dy * bpl), 0, row_bytes);
-                    core::ptr::write_bytes(st.shadow.as_mut_ptr().add(start + dy * bpl), 0, row_bytes);
+                    core::ptr::write_bytes(
+                        st.shadow.as_mut_ptr().add(start + dy * bpl),
+                        0,
+                        row_bytes,
+                    );
                 }
             }
         }
@@ -422,7 +438,7 @@ fn paint_row(st: &mut FbState, row: usize) {
     }
     unsafe {
         let off = y0 * bpl;
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), st.ptr.add(off), bytes);
+        copy_to_gop(st.ptr.add(off), buf.as_ptr(), bytes);
         core::ptr::copy_nonoverlapping(buf.as_ptr(), st.shadow.as_mut_ptr().add(off), bytes);
     }
     st.rowbuf = buf;
@@ -442,7 +458,7 @@ fn scroll_framebuffer_pixels(st: &mut FbState, scroll_lines: usize) {
     unsafe {
         let sh = st.shadow.as_mut_ptr();
         core::ptr::copy(sh.add(band * bpl), sh, move_bytes);
-        core::ptr::copy_nonoverlapping(sh, st.ptr, move_bytes);
+        copy_to_gop(st.ptr, sh, move_bytes);
     }
     fill_rect(st, 0, h.saturating_sub(band), st.info.width, band, 0, 0, 0);
 }

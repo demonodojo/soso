@@ -104,6 +104,167 @@ int falcon_lx_reset(unsigned base)
     return flcn_select(base);
 }
 
+int falcon_lx_gsp_reset_riscv(unsigned base)
+{
+    unsigned t;
+    unsigned bcr;
+
+    (void)flcn_rd32(base, 0x0f4u);
+    t = 150u;
+    while (t--) {
+        if (flcn_rd32(base, 0x0f4u) & 0x80000000u) {
+            break;
+        }
+        lx_udelay(1);
+    }
+
+    flcn_mask(base, 0x3c0u, 0x1u, 0x1u);
+    lx_udelay(10);
+    flcn_mask(base, 0x3c0u, 0x1u, 0x0u);
+
+    if (flcn_reset_wait_mem_scrubbing(base) != 0) {
+        return -1;
+    }
+
+    bcr = flcn_rd32(base, LX_FLCN_ADDR2 + 0x668u);
+    flcn_mask(base, LX_FLCN_ADDR2 + 0x668u, 0x00000111u, 0x00000111u);
+    lx_printk("nouveau-lx: GSP RISC-V reset bcr=0x%x→0x%x\n",
+              bcr, flcn_rd32(base, LX_FLCN_ADDR2 + 0x668u));
+    return 0;
+}
+
+static unsigned flcn_fls32(uint32_t v)
+{
+    unsigned i;
+
+    for (i = 32u; i > 0u; i--) {
+        if (v & (1u << (i - 1u))) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+uint32_t falcon_lx_read_fuse(unsigned engine_id, unsigned ucode_id)
+{
+    unsigned base;
+    unsigned idx;
+
+    if (ucode_id < 1u || ucode_id > 16u) {
+        return 0;
+    }
+    idx = ucode_id - 1u;
+
+    if (engine_id & 0x0001u) {
+        base = 0x00824140u;
+    } else if (engine_id & 0x0004u) {
+        base = 0x00824100u;
+    } else if (engine_id & 0x0400u) {
+        base = 0x008241c0u;
+    } else {
+        return 0;
+    }
+    return gsp_mmio_rd32(base + idx * 4u);
+}
+
+int falcon_lx_sec2_prepare(unsigned sec2_base)
+{
+    unsigned t;
+    unsigned cmd_reg;
+
+    if (falcon_lx_reset(sec2_base) != 0) {
+        lx_printk("nouveau-lx: SEC2 prepare reset falló\n");
+        return -1;
+    }
+
+    flcn_mask(sec2_base, 0x624u, 0x80u, 0x80u);
+    flcn_wr32(sec2_base, 0x10cu, 0u);
+    flcn_mask(sec2_base, 0x600u, 0x00010007u, (0u << 16) | (1u << 2) | 1u);
+    flcn_wr32(sec2_base, 0x118u, 0u);
+    (void)flcn_rd32(sec2_base, 0x118u);
+
+    t = 2000u;
+    while (t--) {
+        cmd_reg = flcn_rd32(sec2_base, 0x118u);
+        if (cmd_reg & 2u) {
+            lx_printk("nouveau-lx: SEC2 prepare idle (cmd=0x%x)\n", cmd_reg);
+            return 0;
+        }
+        lx_udelay(1);
+    }
+    lx_printk("nouveau-lx: SEC2 prepare DMA no idle (cmd=0x%x)\n", cmd_reg);
+    return -1;
+}
+
+static int flcn_hs_v2_patch_sig(const struct acr_fw_blob *blob, struct flcn_fw_ctx *fw)
+{
+    const unsigned char *data;
+    const struct nvfw_bin_hdr *hdr;
+    const struct nvfw_hs_header_v2 *hshdr;
+    unsigned loc;
+    unsigned sig_off;
+    unsigned cnt;
+    unsigned sig_size;
+    unsigned idx;
+    unsigned src;
+    unsigned dst;
+    unsigned n;
+    uint32_t reg_fuse;
+    unsigned char *payload;
+
+    if (!blob || !blob->data || !blob->dma_cpu || !blob->payload_len) {
+        return -1;
+    }
+
+    data = blob->data;
+    hdr = (const struct nvfw_bin_hdr *)data;
+    hshdr = (const struct nvfw_hs_header_v2 *)(data + hdr->header_offset);
+
+    loc = *(const unsigned *)(data + hshdr->patch_loc);
+    sig_off = *(const unsigned *)(data + hshdr->patch_sig);
+    cnt = *(const unsigned *)(data + hshdr->num_sig);
+    if (!cnt) {
+        return 0;
+    }
+
+    sig_size = hshdr->sig_prod_size / cnt;
+    if (!sig_size) {
+        return -1;
+    }
+
+    reg_fuse = falcon_lx_read_fuse(fw->engine_id, fw->ucode_id);
+    if (reg_fuse) {
+        unsigned reg_ver = flcn_fls32(reg_fuse);
+
+        if (fw->fuse_ver < reg_ver) {
+            lx_printk("nouveau-lx: falcon sig fuse fw=%u reg=%u\n",
+                      fw->fuse_ver, reg_ver);
+            return -1;
+        }
+        idx = fw->fuse_ver - reg_ver;
+    } else {
+        idx = cnt - 1u;
+    }
+    if (idx >= cnt) {
+        return -1;
+    }
+
+    payload = blob->dma_cpu;
+    dst = loc;
+    src = hshdr->sig_prod_offset + sig_off + idx * sig_size;
+    if (dst + sig_size > blob->payload_len || src + sig_size > blob->len) {
+        return -1;
+    }
+
+    for (n = 0; n < sig_size; n++) {
+        payload[dst + n] = data[src + n];
+    }
+
+    lx_printk("nouveau-lx: falcon sig patch idx=%u dst=0x%x src=0x%x size=%u\n",
+              idx, dst, src, sig_size);
+    return 0;
+}
+
 int falcon_lx_enable(unsigned falcon_base, uint8_t top_type, uint8_t top_inst)
 {
     uint32_t pmc_mask = 0;
@@ -221,8 +382,13 @@ static int flcn_parse_hs_v2(const struct acr_fw_blob *blob, struct flcn_fw_ctx *
     meta = (const unsigned *)(data + hshdr->meta_data_offset);
     lhdr = (const struct nvfw_hs_load_header_v2 *)(data + hshdr->header_offset);
 
-    fw->img = data + hdr->data_offset;
-    fw->dma_handle = blob->dma_handle;
+    if (blob->dma_cpu && blob->payload_len) {
+        fw->img = blob->dma_cpu;
+        fw->dma_handle = blob->dma_handle;
+    } else {
+        fw->img = data + hdr->data_offset;
+        fw->dma_handle = blob->dma_handle;
+    }
     fw->imem_base_img = lhdr->app[0].offset;
     fw->imem_base = 0u;
     fw->imem_size = lhdr->app[0].size;
@@ -381,6 +547,11 @@ int falcon_lx_hsfw_boot_mbox(unsigned falcon_base, const struct acr_fw_blob *blo
 
     if (flcn_parse_hs_v2(blob, &fw) != 0) {
         lx_printk("nouveau-lx: falcon %s parse HS v2 falló\n", name);
+        return -1;
+    }
+
+    if (flcn_hs_v2_patch_sig(blob, &fw) != 0) {
+        lx_printk("nouveau-lx: falcon %s patch firma HS v2 falló\n", name);
         return -1;
     }
 

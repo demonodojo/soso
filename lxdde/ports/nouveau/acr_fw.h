@@ -13,6 +13,7 @@ struct acr_fw_blob {
     const char *path;
     unsigned char *data;
     unsigned long len;
+    unsigned long payload_len;
     uint64_t dma_handle;
     unsigned char *dma_cpu;
     int valid;

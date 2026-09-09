@@ -26,6 +26,7 @@
 #include "gsp_chip.h"
 #include "gsp_dma.h"
 #include "falcon_lx.h"
+#include "nvfw_lx.h"
 #include "lx_emul.h"
 
 #define NV_PMC_BOOT_0_OFF 0x0000u
@@ -356,12 +357,22 @@ static int run_ampere_booter(void)
     if (!g_wpr.ready || !g_wpr.meta_phys || !g_libos.ready) {
         return -1;
     }
-    if (gsp_dma_alloc_copy(&dma, blob->data, blob->len, "booter_load") != 0) {
-        return -1;
+    {
+        const struct nvfw_bin_hdr *bhdr = (const struct nvfw_bin_hdr *)blob->data;
+
+        if (blob->len < sizeof(*bhdr) || bhdr->bin_magic != NVFW_BIN_MAGIC ||
+            bhdr->data_offset + bhdr->data_size > blob->len) {
+            lx_printk("nouveau-lx: Ampere booter_load cabecera inválida\n");
+            return -1;
+        }
+        if (gsp_dma_alloc_copy(&dma, blob->data + bhdr->data_offset,
+                               bhdr->data_size, "booter_load") != 0) {
+            return -1;
+        }
     }
 
-    if (falcon_lx_reset(LX_FLCN_GSP_BASE) != 0) {
-        lx_printk("nouveau-lx: Ampere reset falcon GSP falló\n");
+    if (falcon_lx_gsp_reset_riscv(LX_FLCN_GSP_BASE) != 0) {
+        lx_printk("nouveau-lx: Ampere reset GSP RISC-V falló\n");
         return -1;
     }
 
@@ -369,20 +380,29 @@ static int run_ampere_booter(void)
     gsp_mmio_wr32(NV_PGSP_FALCON_MBOX1, (uint32_t)(g_libos.libos.phys >> 32));
 
     wrap.path = blob->path;
-    wrap.data = dma.va;
-    wrap.len = dma.size;
+    wrap.data = blob->data;
+    wrap.len = blob->len;
+    wrap.payload_len = dma.size;
     wrap.dma_handle = dma.phys;
     wrap.dma_cpu = dma.va;
     wrap.valid = 1;
 
     m0 = (uint32_t)g_wpr.meta_phys;
     m1 = (uint32_t)(g_wpr.meta_phys >> 32);
-    sec2_base = gsp_top_falcon_base(GSP_TOP_TYPE_SEC2, 0, LX_FLCN_SEC2_BASE);
-    lx_printk("nouveau-lx: Ampere booter_load SEC2 base=0x%x (PTOP fallback "
-              "0x%x) WPR meta @0x%llx libos @0x%llx\n",
-              sec2_base, LX_FLCN_SEC2_BASE,
+    /* ga102_sec2_new fuerza 0x840000: el campo addr de PTOP no refleja la
+     * ventana PRI actual de SEC2 en Ampere. No usar gsp_top_falcon_base aquí. */
+    sec2_base = LX_FLCN_SEC2_BASE;
+    lx_printk("nouveau-lx: Ampere booter_load SEC2 base=0x%x WPR meta @0x%llx "
+              "libos @0x%llx fuse@0x824148=0x%08x\n",
+              sec2_base,
               (unsigned long long)g_wpr.meta_phys,
-              (unsigned long long)g_libos.libos.phys);
+              (unsigned long long)g_libos.libos.phys,
+              falcon_lx_read_fuse(0x0001u, 3u));
+
+    if (falcon_lx_sec2_prepare(sec2_base) != 0) {
+        gsp_dma_free(&dma);
+        return -1;
+    }
 
     if (falcon_lx_hsfw_boot_mbox(sec2_base, &wrap, "booter_load", m0, m1, 1) !=
         0) {
@@ -391,6 +411,8 @@ static int run_ampere_booter(void)
     }
     gsp_dma_free(&dma);
 
+    /* Linux tu102_gsp_init() no exige cpuctl bit7 aquí: tras booter_load pasa
+     * a r535_gsp_init() y valida GSP-RM vía RPC (GSP_INIT_DONE). */
     t = 4000u;
     while (t--) {
         cpuctl = gsp_mmio_rd32(NV_PRISCV_CPUCTL);
@@ -399,17 +421,19 @@ static int run_ampere_booter(void)
         }
         lx_mdelay(1);
     }
-    if (!(cpuctl & CPUCTL_ACTIVE_STAT)) {
+    if (cpuctl & CPUCTL_ACTIVE_STAT) {
+        lx_printk("nouveau-lx: Ampere RISC-V activo (cpuctl=0x%08x)\n", cpuctl);
+    } else {
         uint32_t sec2_m0 = gsp_mmio_rd32(sec2_base + 0x040u);
         uint32_t sec2_m1 = gsp_mmio_rd32(sec2_base + 0x044u);
+        uint32_t bcr = gsp_mmio_rd32(LX_FLCN_GSP_BASE + LX_FLCN_ADDR2 + 0x668u);
         uint32_t wpr2_lo = gsp_mmio_rd32(0x001fa824u);
         uint32_t wpr2_hi = gsp_mmio_rd32(0x001fa828u);
-        lx_printk("nouveau-lx: Ampere booter ok pero RISC-V inactivo "
-                  "(cpuctl=0x%08x sec2@0x%x mbox=0x%x/0x%x WPR2=0x%08x%08x)\n",
-                  cpuctl, sec2_base, sec2_m0, sec2_m1, wpr2_hi, wpr2_lo);
-        return -1;
+        lx_printk("nouveau-lx: Ampere booter ok, RISC-V aún inactivo "
+                  "(cpuctl=0x%08x sec2@0x%x mbox=0x%x/0x%x bcr@0x1668=0x%x "
+                  "WPR2=0x%08x%08x) — sigue RPC\n",
+                  cpuctl, sec2_base, sec2_m0, sec2_m1, bcr, wpr2_hi, wpr2_lo);
     }
-    lx_printk("nouveau-lx: Ampere RISC-V activo (cpuctl=0x%08x)\n", cpuctl);
     return 0;
 }
 
@@ -444,9 +468,8 @@ static int run_ampere_boot(void)
 
     enqueue_boot_rpcs();
 
-    /* Ampere en Linux corre ACR (AHESASC+ASB) en SEC2 antes del booter_load;
-     * en la ruta Blackwell no aplica. Best-effort: un fallo no aborta. */
-    run_acr_sec2();
+    /* Ampere: FWSEC-FRTS → booter SEC2 virgen. ACR (AHESASC) envenena SEC2 si
+     * falla (NV_ERR_DMA_IN_USE); no ejecutar antes del booter. Post-GSP: P2. */
 
     g_phase = GSP_KICK;
     if (run_ampere_booter() != 0) {

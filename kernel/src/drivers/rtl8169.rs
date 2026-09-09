@@ -391,8 +391,37 @@ fn phy_power_up(nic: &mut Nic) {
     }
 }
 
+fn load_phy_firmware(nic: &mut Nic) -> bool {
+    let path = if is_8168h(nic._mac_ver) {
+        "/lib/firmware/rtl_nic/rtl8168h-2.fw"
+    } else {
+        "/lib/firmware/rtl_nic/rtl8168g-3.fw"
+    };
+    let Ok(ino) = crate::vfs::resolve(path) else {
+        println!("rtl8169: firmware PHY ausente ({path})");
+        return false;
+    };
+    let Ok(fw) = crate::vfs::read_file(ino) else {
+        return false;
+    };
+    if fw.len() < 4 || fw.len() % 4 != 0 {
+        println!("rtl8169: firmware PHY tamaño inválido ({})", fw.len());
+        return false;
+    }
+    for chunk in fw.chunks_exact(4) {
+        let reg = u16::from_le_bytes([chunk[0], chunk[1]]);
+        let val = u16::from_le_bytes([chunk[2], chunk[3]]);
+        phy_ocp_write(nic.mmio, 0xa400 + u32::from(reg) * 2, val);
+    }
+    println!("rtl8169: firmware PHY cargado ({} pares)", fw.len() / 4);
+    true
+}
+
 fn rtl8168h_hw_phy_config(nic: &mut Nic) {
-    // Tabla ephy mínima (rtl8168h_2_hw_phy_config, sin firmware rtl8168h-2.fw).
+    if load_phy_firmware(nic) {
+        return;
+    }
+    // Tabla ephy mínima si no hay rtl8168h-2.fw en rootfs.
     const EPHY: &[(u16, u16)] = &[
         (0x06, 0x001f),
         (0x08, 0x0000),
@@ -661,6 +690,12 @@ pub fn init() -> Option<[u8; 6]> {
     phy_power_up(&mut nic);
     phy_autoneg(&mut nic);
     spin_n(200_000);
+    let bmcr = phy_read(&mut nic, MII_BMCR);
+    let adv = phy_read(&mut nic, MII_ADVERTISE);
+    println!(
+        "rtl8169: autoneg bmcr={bmcr:#06x} advertise={adv:#06x} ocp={:#x}",
+        nic.ocp_base
+    );
     let (link_up, phy, bmsr) = read_link(&mut nic);
     nic.link_up = link_up;
     log_link(&mut nic, phy, bmsr, link_up);
@@ -684,6 +719,9 @@ pub fn init() -> Option<[u8; 6]> {
 pub fn receive(out: &mut [u8]) -> Option<usize> {
     let nic_m = NIC.get()?;
     let mut nic = nic_m.lock();
+    if !nic.link_up {
+        return None;
+    }
     let rx = unsafe {
         core::slice::from_raw_parts_mut(dma::virt(nic.rx_phys).as_ptr() as *mut Desc, RX_DESC)
     };
@@ -725,6 +763,9 @@ pub fn can_send() -> bool {
         return false;
     };
     let nic = nic_m.lock();
+    if !nic.link_up {
+        return false;
+    }
     let tx = unsafe {
         core::slice::from_raw_parts(dma::virt(nic.tx_phys).as_ptr() as *const Desc, TX_DESC)
     };
@@ -734,6 +775,9 @@ pub fn can_send() -> bool {
 pub fn send(packet: &[u8]) -> Result<(), ()> {
     let nic_m = NIC.get().ok_or(())?;
     let mut nic = nic_m.lock();
+    if !nic.link_up {
+        return Err(());
+    }
     let len = packet.len().min(BUF_LEN).max(14);
     let i = nic.tx_i as usize;
     let tx = unsafe {

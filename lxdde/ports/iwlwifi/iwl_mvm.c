@@ -9,12 +9,6 @@ extern int memcmp(const void *a, const void *b, unsigned long n);
 extern char *strncpy(char *dst, const char *src, unsigned long n);
 extern int strncmp(const char *a, const char *b, unsigned long n);
 
-struct add_sta {
-    uint8_t mac[6];
-    uint8_t reserved[2];
-    uint32_t flags;
-} __attribute__((packed));
-
 static const struct {
     uint8_t ch;
     uint8_t band;
@@ -41,24 +35,93 @@ static int iwl_hw_rf_kill(struct iwl_ax211_priv *iwl)
 
 static int iwl_send_scan_cfg(struct iwl_ax211_priv *iwl)
 {
-    struct iwl_scan_config cfg;
+    uint8_t ver = (uint8_t)iwl_fw_cmd_ver(iwl, LONG_GROUP, SCAN_CFG_CMD);
+    uint16_t pay_len;
 
     if (iwl->scan_cfg_sent)
         return 0;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.bcast_sta_id = 0xff;
-    cfg.tx_chains = 1;
-    cfg.rx_chains = 1;
-    if (iwl_trans_send_cmd(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, sizeof(cfg)) != 0) {
-        lx_printk("iwl_mvm: SCAN_CFG_CMD falló\n");
-        return -1;
+
+    if (ver >= 2) {
+        struct iwl_scan_config_v2 cfg;
+
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.bcast_sta_id = 0xff;
+        cfg.tx_chains = 1;
+        cfg.rx_chains = 1;
+        pay_len = (uint16_t)sizeof(cfg);
+        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len, 500) != 0) {
+            lx_printk("iwl_mvm: SCAN_CFG_CMD v%u falló\n", ver);
+            return -1;
+        }
+    } else {
+        struct iwl_scan_config cfg;
+
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.bcast_sta_id = 0xff;
+        cfg.tx_chains = 1;
+        cfg.rx_chains = 1;
+        pay_len = (uint16_t)sizeof(cfg);
+        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len, 500) != 0) {
+            lx_printk("iwl_mvm: SCAN_CFG_CMD falló\n");
+            return -1;
+        }
     }
+
     iwl->scan_cfg_sent = 1;
+    lx_printk("iwl_mvm: SCAN_CFG_CMD v%u ok\n", ver);
     return 0;
+}
+
+static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf, unsigned cap)
+{
+    unsigned nch = sizeof(scan_channels) / sizeof(scan_channels[0]);
+    unsigned pay = iwl_scan_req_umac_v17_size(nch);
+    unsigned off;
+    struct iwl_scan_general_params_v11 *gen;
+    struct iwl_scan_channel_cfg_umac *chcfg;
+    struct iwl_scan_periodic_parms_v1 *periodic;
+    unsigned i;
+
+    if (pay > cap)
+        return 0;
+
+    memset(buf, 0, pay);
+    off = 8u;
+    gen = (struct iwl_scan_general_params_v11 *)(buf + off);
+    gen->flags = (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_PASS_ALL |
+                            IWL_UMAC_SCAN_GEN_FLAGS_ITER_COMPLETE);
+    gen->active_dwell[0] = 30;
+    gen->passive_dwell[0] = 30;
+    off += (unsigned)sizeof(*gen);
+    buf[off + 1] = (uint8_t)nch;
+    off += 4u;
+    chcfg = (struct iwl_scan_channel_cfg_umac *)(buf + off);
+    for (i = 0; i < nch; i++) {
+        chcfg[i].v2.channel_num = scan_channels[i].ch;
+        chcfg[i].v2.band = scan_channels[i].band;
+        chcfg[i].v2.iter_count = 1;
+    }
+    off += nch * (unsigned)sizeof(*chcfg);
+    periodic = (struct iwl_scan_periodic_parms_v1 *)(buf + off);
+    periodic->schedule[0].iter_count = 1;
+    periodic->schedule[1].iter_count = 0xff;
+    off += (unsigned)sizeof(*periodic);
+    if (off + (unsigned)sizeof(struct iwl_scan_probe_params_v4) <= pay) {
+        struct iwl_scan_probe_params_v4 *probe =
+            (struct iwl_scan_probe_params_v4 *)(buf + off);
+        iwl_mvm_fill_probe_req(iwl, probe);
+    }
+    return (uint16_t)pay;
 }
 
 static uint16_t iwl_build_scan_req(struct iwl_ax211_priv *iwl, uint8_t *buf, unsigned cap)
 {
+    uint8_t scan_ver = (uint8_t)iwl_fw_cmd_ver(iwl, LONG_GROUP, SCAN_REQ_UMAC);
+
+    if (scan_ver >= 14) {
+        return iwl_build_scan_req_v17(iwl, buf, cap);
+    }
+
     unsigned nch = sizeof(scan_channels) / sizeof(scan_channels[0]);
     unsigned pay = IWL_SCAN_REQ_UMAC_SIZE_V6 + nch * sizeof(struct iwl_scan_channel_cfg_umac) +
                    sizeof(struct iwl_scan_req_umac_tail_v1);
@@ -70,14 +133,12 @@ static uint16_t iwl_build_scan_req(struct iwl_ax211_priv *iwl, uint8_t *buf, uns
         return 0;
 
     memset(buf, 0, pay);
-
-    /* SCAN_REQUEST_CMD_UMAC_API v6 — 44 B hasta channel.count */
     *(uint16_t *)(buf + 12) =
         (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_PASS_ALL | IWL_UMAC_SCAN_GEN_FLAGS_ITER_COMPLETE);
-    buf[17] = 30; /* active_dwell */
-    buf[18] = 30; /* passive_dwell */
-    buf[19] = 10; /* fragmented_dwell */
-    buf[41] = (uint8_t)nch; /* channel.count */
+    buf[17] = 30;
+    buf[18] = 30;
+    buf[19] = 10;
+    buf[41] = (uint8_t)nch;
 
     data = buf + IWL_SCAN_REQ_UMAC_SIZE_V6;
     for (i = 0; i < nch; i++) {
@@ -111,20 +172,16 @@ static int frame_is_beacon_or_probe_resp(const uint8_t *frame, int len)
 
 static int parse_mgmt_ssid(const uint8_t *frame, int len, uint8_t *ssid, int ssid_max)
 {
-    int hdrlen;
-    int fixed;
     int pos;
     int end;
 
     if (!frame_is_beacon_or_probe_resp(frame, len))
         return -1;
 
-    hdrlen = 24;
-    if (len < hdrlen + 12)
+    if (len < 24 + 12)
         return -1;
 
-    fixed = (frame[0] & 0xf0) == 0x50 ? 14 : 12; /* probe resp vs beacon */
-    pos = hdrlen + fixed;
+    pos = 24 + 12;
     end = len;
     while (pos + 2 <= end) {
         uint8_t id = frame[pos];
@@ -144,6 +201,8 @@ void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
 {
     uint8_t ssid[32];
     int slen;
+
+    memset(ssid, 0, sizeof(ssid));
     struct iwl_ax211_bss bss;
     const uint8_t *bssid;
 
@@ -152,6 +211,8 @@ void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
     slen = parse_mgmt_ssid(frame, len, ssid, 32);
     if (slen <= 0)
         return;
+    if (slen < 32)
+        ssid[slen] = '\0';
     if (len < 24)
         return;
     bssid = frame + 16;
@@ -177,6 +238,10 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
     int last_count = 0;
     int notifs = 0;
 
+    if (!iwl->radio_ready) {
+        lx_printk("iwl_mvm: scan sin INIT_COMPLETE\n");
+        return -1;
+    }
     if (iwl_hw_rf_kill(iwl) != 0)
         return -1;
 
@@ -199,7 +264,7 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
     lx_printk("iwl_mvm: SCAN_REQ_UMAC %u B, %u canales\n", pay,
               (unsigned)(sizeof(scan_channels) / sizeof(scan_channels[0])));
 
-    if (iwl_trans_send_cmd(iwl, LONG_GROUP, SCAN_REQ_UMAC, req, pay) != 0) {
+    if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_REQ_UMAC, req, pay, 1000) != 0) {
         lx_printk("iwl_mvm: SCAN_REQ_UMAC rechazado\n");
         iwl->scan_active = 0;
         return -1;
@@ -234,21 +299,9 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
 
 static int iwl_mvm_assoc(struct iwl_ax211_priv *iwl, const char *ssid, const uint8_t *bssid)
 {
-    struct add_sta sta;
-    memset(&sta, 0, sizeof(sta));
-    if (bssid)
-        memcpy(sta.mac, bssid, 6);
-    else
-        memset(sta.mac, 0xff, 6);
-    sta.flags = 1;
-    if (iwl_trans_send_cmd(iwl, MAC_CONF_GROUP, ADD_STA, &sta, sizeof(sta)) != 0)
+    if (!bssid)
         return -1;
-    strncpy(iwl->ssid, ssid, IWL_AX211_SSID_MAX);
-    iwl->ssid[IWL_AX211_SSID_MAX] = '\0';
-    if (bssid)
-        memcpy(iwl->bssid, bssid, 6);
-    iwl->associated = 1;
-    return 0;
+    return iwl_mvm_assoc_prepare(iwl, ssid, bssid);
 }
 
 int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid)
@@ -273,14 +326,6 @@ int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid, const uin
 {
     (void)psk;
     return iwl_mvm_connect_open(iwl, ssid);
-}
-
-int iwl_mvm_install_key(struct iwl_ax211_priv *iwl, const uint8_t key[16], int key_idx)
-{
-    (void)iwl;
-    (void)key;
-    (void)key_idx;
-    return 0;
 }
 
 int iwl_mvm_tx_8023(struct iwl_ax211_priv *iwl, const uint8_t *buf, int len)

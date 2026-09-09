@@ -290,7 +290,7 @@ impl NicDev {
             #[cfg(feature = "drv-virtio-net")]
             NicDev::Virtio(_) => true,
             #[cfg(feature = "drv-e1000e")]
-            NicDev::E1000e(_) => true,
+            NicDev::E1000e(_) => crate::drivers::e1000e::is_qemu_emulated(),
             #[cfg(feature = "lxdde")]
             NicDev::LxE1000e(_) => true,
             _ => false,

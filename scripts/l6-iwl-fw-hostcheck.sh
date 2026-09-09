@@ -16,7 +16,9 @@ grep -v '^#include' "$src/iwl_fw.c" |
 cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
    -Wno-incompatible-pointer-types -Wno-address-of-packed-member \
    -I"$out" -I"$src" \
-   -o "$out/hostcheck" "$root/tools/iwl-hostcheck/main.c"
+   -o "$out/hostcheck" \
+   "$root/tools/iwl-hostcheck/main.c" \
+   "$root/tools/iwl-hostcheck/cmd_wait_test.c"
 
 for ucode in \
     "$fwdir/iwlwifi-cc-a0-77.ucode" \

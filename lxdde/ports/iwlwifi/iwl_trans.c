@@ -312,14 +312,32 @@ static void parse_rx_phy(struct iwl_ax211_priv *iwl, const uint8_t *data, int le
 
 static void parse_rx_mpdu(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
 {
-    if (len < (int)sizeof(struct iwl_rx_mpdu_res_start))
+    unsigned desc_size = iwl->gen3 ? (unsigned)sizeof(struct iwl_rx_mpdu_res_start)
+                                   : IWL_RX_DESC_SIZE_V1;
+    int flen;
+    const uint8_t *frame;
+
+    if (len < (int)desc_size)
         return;
-    const struct iwl_rx_mpdu_res_start *res = (const struct iwl_rx_mpdu_res_start *)data;
-    int flen = (int)res->byte_count;
-    const uint8_t *frame = data + sizeof(*res);
-    if (flen <= 0 || sizeof(*res) + (size_t)flen > (size_t)len)
+    if (iwl->gen3) {
+        const struct iwl_rx_mpdu_res_start *res =
+            (const struct iwl_rx_mpdu_res_start *)data;
+        flen = (int)res->byte_count;
+    } else {
+        flen = (int)(data[0] | ((uint16_t)data[1] << 8));
+    }
+    frame = data + desc_size;
+    if (flen <= 0 || desc_size + (size_t)flen > (size_t)len)
         return;
     iwl_mvm_rx_scan_frame(iwl, frame, flen);
+}
+
+static void log_rx(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd,
+                   uint16_t seq, int pay, int status)
+{
+    lx_printk("iwl_rx: grp=%u id=0x%02x seq=0x%04x len=%d st=%d\n",
+              (unsigned)group, (unsigned)cmd, (unsigned)seq, pay, status);
+    (void)iwl;
 }
 
 static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf)
@@ -329,17 +347,48 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf)
     uint16_t len = (uint16_t)(len_n_flags & 0x3fff);
     uint8_t cmd = buf[4];
     uint8_t group = buf[5];
+    uint16_t seq = (uint16_t)buf[6] | ((uint16_t)buf[7] << 8);
     const uint8_t *data = buf + 8;
     int pay = (int)len - 4;
     if (pay < 0)
         pay = 0;
+
+    log_rx(iwl, group, cmd, seq, pay, 0);
+
+    if (iwl->cmd_pending) {
+        uint16_t rx_seq = (uint16_t)(seq & ~SEQ_RX_FRAME);
+
+        if (rx_seq != iwl->cmd_pending_seq &&
+            !(SEQ_TO_INDEX(rx_seq) == SEQ_TO_INDEX(iwl->cmd_pending_seq) &&
+              SEQ_TO_QUEUE(rx_seq) == iwl->cmd_qid)) {
+            goto rx_done;
+        }
+        iwl->cmd_status = 1;
+        iwl->cmd_pending = 0;
+        if (pay > 0) {
+            if (pay > (int)sizeof(iwl->cmd_resp))
+                pay = (int)sizeof(iwl->cmd_resp);
+            memcpy(iwl->cmd_resp, data, (size_t)pay);
+            iwl->cmd_resp_len = (uint16_t)pay;
+        } else {
+            iwl->cmd_resp_len = 0;
+        }
+    }
+rx_done:
+
     if (group == 0 && cmd == UCODE_ALIVE_NTFY) {
         iwl->alive = 1;
         lx_iwlwifi_set_alive(1);
         lx_printk("iwl_ax211: firmware ALIVE (UCODE_ALIVE_NTFY)\n");
         return;
     }
-    if (group == LONG_GROUP && cmd == SCAN_COMPLETE_UMAC)
+    if (group == LEGACY_GROUP && cmd == INIT_COMPLETE_NOTIF) {
+        iwl->init_complete = 1;
+        lx_printk("iwl_mvm: INIT_COMPLETE_NOTIF\n");
+        return;
+    }
+    if (cmd == SCAN_COMPLETE_UMAC &&
+        (group == LEGACY_GROUP || group == LONG_GROUP))
         parse_scan_complete(iwl, data, pay);
     if (group == SCAN_GROUP && cmd == OFFLOAD_MATCH_INFO_NOTIF)
         parse_offload_match(iwl, data, pay);
@@ -636,6 +685,11 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     memset(buf, 0, IWL_CMD_SLOT_SIZE);
     memset(tfd, 0, sizeof(*tfd));
 
+    iwl->cmd_pending = 1;
+    iwl->cmd_status = 0;
+    iwl->cmd_resp_len = 0;
+    iwl->cmd_pending_seq = (uint16_t)(QUEUE_TO_SEQ(iwl->cmd_qid) | INDEX_TO_SEQ(slot));
+
     if (group != LEGACY_GROUP) {
         struct iwl_cmd_header_wide *whdr = (struct iwl_cmd_header_wide *)buf;
         total = (uint16_t)(sizeof(*whdr) + pay_len);
@@ -643,9 +697,9 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
             return -1;
         whdr->cmd = id;
         whdr->group_id = group;
-        whdr->sequence = iwl->cmd_seq++;
+        whdr->sequence = iwl->cmd_pending_seq;
         whdr->length = pay_len;
-        whdr->version = 0;
+        whdr->version = (uint8_t)iwl_fw_cmd_ver(iwl, group, id);
         if (pay_len)
             memcpy(buf + sizeof(*whdr), payload, pay_len);
     } else {
@@ -655,7 +709,7 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
             return -1;
         hdr->cmd = id;
         hdr->group_id = group;
-        hdr->sequence = iwl->cmd_seq++;
+        hdr->sequence = iwl->cmd_pending_seq;
         hdr->length = (uint8_t)pay_len;
         if (pay_len)
             memcpy(buf + sizeof(*hdr), payload, pay_len);
@@ -665,8 +719,42 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     tfd->tbs[0].tb_len = total;
     tfd->tbs[0].addr = iwl->mcr_dma + (uint64_t)slot * IWL_CMD_SLOT_SIZE;
     iwl->cmd_write = (uint16_t)((iwl->cmd_write + 1) % IWL_CMD_QUEUE_SIZE);
-    iwl_write32(iwl, HBUS_TARG_WRPTR,
-                ((uint32_t)iwl->cmd_write & 0xffu) | ((uint32_t)iwl->cmd_qid << 8));
+    {
+        uint32_t doorbell = ((uint32_t)iwl->cmd_write & 0xffu) |
+                            ((uint32_t)iwl->cmd_qid << 16);
+        static int cmd_doorbell_logged;
+
+        if (!cmd_doorbell_logged) {
+            lx_printk("iwl_trans: send_cmd qid=%u doorbell=0x%08x seq=0x%04x "
+                      "grp=%u id=0x%02x\n",
+                      (unsigned)iwl->cmd_qid, doorbell,
+                      (unsigned)iwl->cmd_pending_seq,
+                      (unsigned)group, (unsigned)id);
+            cmd_doorbell_logged = 1;
+        }
+        iwl_write32(iwl, HBUS_TARG_WRPTR, doorbell);
+    }
     drain_rx_gen2(iwl);
+    iwl->cmd_seq++;
     return 0;
+}
+
+int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
+                            const void *payload, uint16_t pay_len, int wait_ms)
+{
+    int t;
+
+    if (iwl_trans_send_cmd(iwl, group, id, payload, pay_len) != 0)
+        return -1;
+
+    for (t = 0; t < wait_ms; t++) {
+        iwl_trans_poll(iwl);
+        if (iwl->cmd_status)
+            return 0;
+        lx_mdelay(1);
+    }
+    iwl->cmd_pending = 0;
+    lx_printk("iwl_trans: timeout cmd grp=%u id=0x%02x\n",
+              (unsigned)group, (unsigned)id);
+    return -1;
 }

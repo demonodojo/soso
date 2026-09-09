@@ -162,6 +162,11 @@ int iwl_ax211_start_firmware(void)
         return -1;
     }
     iwl_set_phase(iwl, "alive");
+    if (iwl_mvm_run_init(iwl) != 0) {
+        lx_printk("iwlwifi: init MVM incompleto\n");
+        return -1;
+    }
+    iwl_set_phase(iwl, "ready");
     return 0;
 }
 
@@ -249,6 +254,14 @@ int iwl_ax211_mac(uint8_t mac[6])
     if (!mac)
         return -1;
     memcpy(mac, g_iwl.mac, 6);
+    return 0;
+}
+
+int iwl_ax211_bssid(uint8_t bssid[6])
+{
+    if (!bssid || !g_iwl.associated)
+        return -1;
+    memcpy(bssid, g_iwl.bssid, 6);
     return 0;
 }
 

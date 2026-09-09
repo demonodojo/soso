@@ -448,7 +448,11 @@ pub fn poll() {
     );
     try_attach();
     #[cfg(feature = "drv-rtl8169")]
-    if crate::drivers::rtl8169::poll_link() {
+    if rtl8169::poll_link() {
+        on_wired_link_up();
+    }
+    #[cfg(feature = "drv-e1000e")]
+    if e1000e::poll_link() {
         on_wired_link_up();
     }
     let Some(net) = NET.get() else { return };

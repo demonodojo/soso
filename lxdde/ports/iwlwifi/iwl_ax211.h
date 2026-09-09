@@ -71,6 +71,17 @@ struct iwl_ax211_priv {
     int scan_active;
     int scan_complete;
     int scan_cfg_sent;
+    int init_complete;
+    int radio_ready;
+    uint32_t phy_sku;
+    uint8_t n_scan_channels;
+    struct iwl_fw_cmd_version cmd_ver[64];
+    unsigned cmd_ver_count;
+    int cmd_pending;
+    uint16_t cmd_pending_seq;
+    int cmd_status;
+    uint8_t cmd_resp[512];
+    uint16_t cmd_resp_len;
     uint8_t last_rx_channel;
     int8_t last_rx_rssi;
     uint8_t last_rx_band24;
@@ -103,6 +114,7 @@ int iwl_ax211_connected(void);
 int iwl_ax211_rx(uint8_t *buf, int buflen);
 int iwl_ax211_tx(const uint8_t *buf, int len);
 int iwl_ax211_mac(uint8_t mac[6]);
+int iwl_ax211_bssid(uint8_t bssid[6]);
 
 void iwl_ax211_deliver_rx(const uint8_t *data, int len);
 void iwl_ax211_add_bss(const struct iwl_ax211_bss *bss);
@@ -111,5 +123,7 @@ int iwl_fw_parse_pnvm(struct iwl_ax211_priv *iwl, const uint8_t *pnvm, unsigned 
 int iwl_fw_upload_sections(struct iwl_ax211_priv *iwl, struct iwl_context_info_dram *dram);
 int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                        const void *payload, uint16_t pay_len);
+int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
+                            const void *payload, uint16_t pay_len, int wait_ms);
 
 #endif

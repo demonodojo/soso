@@ -2692,10 +2692,115 @@ static int check_ptop(void)
     return 0;
 }
 
-/* GA107: el booter Ampere debe usar SEC2 @0x087000 (PTOP), no 0x840000. */
+struct nvfw_bin_hdr_hc {
+    uint32_t bin_magic;
+    uint32_t bin_ver;
+    uint32_t bin_size;
+    uint32_t header_offset;
+    uint32_t data_offset;
+    uint32_t data_size;
+};
+
+struct nvfw_hs_header_v2_hc {
+    uint32_t sig_prod_offset;
+    uint32_t sig_prod_size;
+    uint32_t patch_loc;
+    uint32_t patch_sig;
+    uint32_t meta_data_offset;
+    uint32_t meta_data_size;
+    uint32_t num_sig;
+    uint32_t header_offset;
+    uint32_t header_size;
+};
+
+static int check_hs_v2_blob(const char *path, unsigned expect_data_off)
+{
+    FILE *f = fopen(path, "rb");
+    uint8_t *data;
+    long sz;
+    const struct nvfw_bin_hdr_hc *hdr;
+    const struct nvfw_hs_header_v2_hc *hshdr;
+    unsigned loc;
+    unsigned cnt;
+    unsigned sig_size;
+    unsigned patch_off;
+
+    if (!f)
+        return -1;
+    fseek(f, 0, SEEK_END);
+    sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    data = malloc((size_t)sz);
+    if (!data || fread(data, 1, (size_t)sz, f) != (size_t)sz) {
+        fclose(f);
+        free(data);
+        return -1;
+    }
+    fclose(f);
+
+    hdr = (const struct nvfw_bin_hdr_hc *)data;
+    if (hdr->bin_magic != 0x000010deu || hdr->data_offset != expect_data_off) {
+        printf("FALLO: %s data_offset=0x%x (esperaba 0x%x)\n", path,
+               hdr->data_offset, expect_data_off);
+        free(data);
+        return -1;
+    }
+    hshdr = (const struct nvfw_hs_header_v2_hc *)(data + hdr->header_offset);
+    loc = *(const unsigned *)(data + hshdr->patch_loc);
+    cnt = *(const unsigned *)(data + hshdr->num_sig);
+    sig_size = cnt ? hshdr->sig_prod_size / cnt : 0;
+    patch_off = loc;
+    if (patch_off + sig_size > hdr->data_size) {
+        printf("FALLO: %s patch fuera del payload\n", path);
+        free(data);
+        return -1;
+    }
+    {
+        unsigned i;
+        int zero = 1;
+        for (i = 0; i < 16 && i < sig_size; i++) {
+            if (data[hdr->data_offset + patch_off + i]) {
+                zero = 0;
+                break;
+            }
+        }
+        if (!zero) {
+            printf("FALLO: %s hueco firma no está vacío en contenedor\n", path);
+            free(data);
+            return -1;
+        }
+    }
+    printf("OK: HS v2 %s payload@0x%x patch=0x%x sigs=%u\n", path,
+           hdr->data_offset, patch_off, cnt);
+    free(data);
+    return 0;
+}
+
+static int check_hs_v2_ampere_payload(void)
+{
+    const char *root = getenv("SOSO_ROOT");
+    char path[512];
+
+    if (!root)
+        root = ".";
+    snprintf(path, sizeof(path), "%s/rootfs/lib/firmware/nvidia/ga102/gsp/"
+                               "booter_load-570.144.bin", root);
+    if (check_hs_v2_blob(path, 0x378u) != 0)
+        return -1;
+    snprintf(path, sizeof(path), "%s/rootfs/lib/firmware/nvidia/ga102/acr/"
+                               "ucode_ahesasc.bin", root);
+    if (check_hs_v2_blob(path, 0x600u) != 0)
+        return -1;
+    return 0;
+}
+
+/* GA107: PTOP sigue reportando 0x087000; el booter Ampere usa 0x840000
+ * (ga102_sec2_new). Orden boot: FWSEC-FRTS → booter (sin ACR/AHESASC previo;
+ * ver l6-g3-gsp-hostcheck.sh). */
 static int check_ampere_sec2_falcon_base(void)
 {
-    unsigned base;
+    unsigned ptop_base;
+    unsigned booter_base = LX_FLCN_SEC2_BASE_LEGACY;
 
     fake_ptop_active = fake_ptop_ga107;
     fake_ptop_active_words = GA107_PTOP_WORDS;
@@ -2705,20 +2810,24 @@ static int check_ampere_sec2_falcon_base(void)
         fake_ptop_active_words = 0;
         return -1;
     }
-    base = gsp_top_falcon_base(GSP_TOP_TYPE_SEC2, 0, LX_FLCN_SEC2_BASE_LEGACY);
+    ptop_base = gsp_top_falcon_base(GSP_TOP_TYPE_SEC2, 0, LX_FLCN_SEC2_BASE_LEGACY);
     fake_ptop_active = NULL;
     fake_ptop_active_words = 0;
-    if (base != 0x087000u) {
-        printf("FALLO: SEC2 GA107 falcon base=0x%x (esperaba 0x087000, legacy "
-               "0x%x)\n",
-               base, LX_FLCN_SEC2_BASE_LEGACY);
+    if (ptop_base != 0x087000u) {
+        printf("FALLO: PTOP GA107 SEC2 addr=0x%x (esperaba 0x087000)\n",
+               ptop_base);
         return -1;
     }
-    if (base == LX_FLCN_SEC2_BASE_LEGACY) {
-        printf("FALLO: SEC2 GA107 sigue en la base legacy 0x840000\n");
+    if (booter_base != LX_FLCN_SEC2_BASE_LEGACY) {
+        printf("FALLO: booter Ampere SEC2=0x%x (esperaba 0x840000)\n",
+               booter_base);
         return -1;
     }
-    printf("OK: Ampere SEC2 — PTOP GA107 elige 0x087000 (no 0x840000)\n");
+    if (booter_base == ptop_base) {
+        printf("FALLO: booter no debe usar la dirección PTOP de SEC2\n");
+        return -1;
+    }
+    printf("OK: Ampere SEC2 — PTOP=0x087000, booter=0x840000 (override Linux)\n");
     return 0;
 }
 
@@ -4613,6 +4722,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_vmm(&lo) != 0)
         return -1;
     if (check_ptop() != 0)
+        return -1;
+    if (check_hs_v2_ampere_payload() != 0)
         return -1;
     if (check_ampere_sec2_falcon_base() != 0)
         return -1;

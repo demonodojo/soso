@@ -38,6 +38,15 @@ struct falcon_lx_raw {
 /* Reset del falcon antes de cada carga (ga102 HAL). */
 int falcon_lx_reset(unsigned base);
 
+/* SEC2 limpio antes del booter Ampere: reset + transcfg + DMA idle. */
+int falcon_lx_sec2_prepare(unsigned sec2_base);
+
+/* Fuse ucode (ga102 `flcn_read_fuse_reg`). */
+uint32_t falcon_lx_read_fuse(unsigned engine_id, unsigned ucode_id);
+
+/* Reset GSP para RISC-V (ga102_gsp_reset): no selecciona Falcon. */
+int falcon_lx_gsp_reset_riscv(unsigned base);
+
 /* Habilita el motor en PMC + espera mem scrub (gm200_flcn_enable). */
 int falcon_lx_enable(unsigned falcon_base, uint8_t top_type, uint8_t top_inst);
 

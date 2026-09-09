@@ -197,6 +197,10 @@ pub fn wifi_mac() -> Option<[u8; 6]> {
     wifi::mac()
 }
 
+pub fn wifi_bssid() -> Option<[u8; 6]> {
+    wifi::bssid()
+}
+
 pub fn wifi_connected() -> bool {
     wifi::connected()
 }

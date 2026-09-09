@@ -52,5 +52,13 @@ cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
    "$src/matmul_sass_embed.c" "$src/softmax_rows_sass_embed.c" \
    "$src/layernorm_rows_sass_embed.c"
 
+echo "=== Ampere boot: FWSEC → booter (sin ACR previo) ==="
+if awk '/^static int run_ampere_boot\(\)/,/^static int run_gsp_rm_chain|^static int run_fmc|^}/' \
+    "$src/gsp_bringup.c" | grep -q 'run_acr_sec2'; then
+    echo "FALLO: run_ampere_boot aún llama run_acr_sec2 antes del booter" >&2
+    exit 1
+fi
+echo "OK: run_ampere_boot no invoca ACR antes del booter"
+
 echo "=== L6 — pasos 3 a 6 de la cadena FSP/COT + recepción de RPC ==="
-"$out/hostcheck" "$ucode" "$boot" "$fmc"
+SOSO_ROOT="$root" "$out/hostcheck" "$ucode" "$boot" "$fmc"

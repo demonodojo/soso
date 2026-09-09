@@ -1,7 +1,10 @@
 /* G3 ola 2: firmware ACR ga107/ga102 (AHESASC + ASB) en heap lx + DMA. */
 #include "acr_fw.h"
 #include "gsp_chip.h"
+#include "nvfw_lx.h"
 #include "lx_emul.h"
+
+void *memcpy(void *dst, const void *src, unsigned long n);
 
 static struct acr_fw_blob g_acr[ACR_FW_COUNT];
 static int g_acr_loaded;
@@ -12,13 +15,43 @@ static const char *const g_acr_leaf[ACR_FW_COUNT] = {
     "ucode_asb.bin",
 };
 
+static int acr_fw_stage_payload(struct acr_fw_blob *b, unsigned char *file_copy,
+                                unsigned long file_len)
+{
+    const struct nvfw_bin_hdr *hdr = (const struct nvfw_bin_hdr *)file_copy;
+    unsigned char *dma_cpu;
+    uint64_t dma_handle = 0;
+
+    if (file_len < sizeof(*hdr) || hdr->bin_magic != NVFW_BIN_MAGIC) {
+        return -1;
+    }
+    if (hdr->data_offset + hdr->data_size > file_len || hdr->data_size == 0) {
+        return -1;
+    }
+
+    dma_cpu = lx_dma_alloc_coherent(NULL, hdr->data_size, &dma_handle, GFP_KERNEL);
+    if (!dma_cpu) {
+        return -1;
+    }
+    memcpy(dma_cpu, file_copy + hdr->data_offset, hdr->data_size);
+
+    b->data = file_copy;
+    b->len = file_len;
+    b->payload_len = hdr->data_size;
+    b->dma_cpu = dma_cpu;
+    b->dma_handle = dma_handle;
+    b->valid = 1;
+    lx_printk("nouveau-lx: acr fw %s (%lu bytes, payload=%lu dma=0x%llx)\n",
+              b->path, file_len, b->payload_len,
+              (unsigned long long)b->dma_handle);
+    return 0;
+}
+
 static int load_one_path(enum acr_fw_kind kind, const char *path)
 {
     const unsigned char *tmp = NULL;
     unsigned long tmp_len = 0;
     unsigned char *copy;
-    uint64_t dma_handle = 0;
-    unsigned char *dma_cpu;
     struct acr_fw_blob *b = &g_acr[kind];
 
     if (lx_request_firmware(path, &tmp, &tmp_len) != 0 || !tmp || tmp_len < 64) {
@@ -29,34 +62,14 @@ static int load_one_path(enum acr_fw_kind kind, const char *path)
         lx_release_firmware(tmp);
         return -1;
     }
-    {
-        unsigned long i;
-        for (i = 0; i < tmp_len; i++) {
-            copy[i] = tmp[i];
-        }
-    }
+    memcpy(copy, tmp, tmp_len);
     lx_release_firmware(tmp);
 
-    dma_cpu = lx_dma_alloc_coherent(NULL, tmp_len, &dma_handle, GFP_KERNEL);
-    if (!dma_cpu) {
+    b->path = path;
+    if (acr_fw_stage_payload(b, copy, tmp_len) != 0) {
         lx_kfree(copy);
         return -1;
     }
-    {
-        unsigned long i;
-        for (i = 0; i < tmp_len; i++) {
-            dma_cpu[i] = copy[i];
-        }
-    }
-
-    b->path = path;
-    b->data = copy;
-    b->len = tmp_len;
-    b->dma_cpu = dma_cpu;
-    b->dma_handle = dma_handle;
-    b->valid = 1;
-    lx_printk("nouveau-lx: acr fw %s (%lu bytes, dma=0x%llx)\n",
-              path, tmp_len, (unsigned long long)b->dma_handle);
     return 0;
 }
 
@@ -148,13 +161,15 @@ void acr_fw_release_all(void)
     unsigned i;
     for (i = 0; i < ACR_FW_COUNT; i++) {
         if (g_acr[i].dma_cpu) {
-            lx_dma_free_coherent(NULL, g_acr[i].len, g_acr[i].dma_cpu, g_acr[i].dma_handle);
+            lx_dma_free_coherent(NULL, g_acr[i].payload_len, g_acr[i].dma_cpu,
+                                 g_acr[i].dma_handle);
         }
         if (g_acr[i].data) {
             lx_kfree(g_acr[i].data);
         }
         g_acr[i].data = NULL;
         g_acr[i].dma_cpu = NULL;
+        g_acr[i].payload_len = 0;
         g_acr[i].valid = 0;
     }
     g_acr_loaded = 0;
