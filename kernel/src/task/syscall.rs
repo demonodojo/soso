@@ -1212,28 +1212,40 @@ fn sys_tcsetpgrp(pgid: u64) -> Result<u64, i64> {
 
 fn sys_wait(f: &mut SyscallFrame) -> Result<u64, i64> {
     let pid = super::current_pid();
-    let listo = {
-        let mut procs = super::PROCS.lock();
-        if !procs.iter().any(|p| p.parent == pid) {
-            return Err(-abi::ECHILD);
-        }
-        match procs
-            .iter()
-            .position(|p| p.parent == pid && matches!(p.state, State::Zombie(_)))
-        {
-            Some(i) => {
-                let hijo = procs.remove(i);
-                let State::Zombie(code) = hijo.state else { unreachable!() };
-                Some(super::wait_pack(hijo.pid, code))
-            }
-            None => None,
-        }
-    };
-    match listo {
-        Some(v) => Ok(v),
-        // Sin zombis todavía: a dormir; exit() del hijo pone el rax.
-        None => super::block_current(ctx_from_frame(f), State::WaitingChild),
+    // `WaitingChild` tiene que armarse con PROCS cogido. Si se suelta el
+    // candado, se mira que no hay zombi, y luego se duerme, el hijo puede
+    // morir en ese hueco, convertirse en zombi y no despertar a nadie:
+    // sosh se queda en wait() para siempre (A7 en TCG, 2026-09-09). Con
+    // askd vivo como hermano, ECHILD nunca llega a desbloquear.
+    x86_64::instructions::interrupts::disable();
+    let mut procs = super::PROCS.lock();
+    if !procs.iter().any(|p| p.parent == pid) {
+        drop(procs);
+        x86_64::instructions::interrupts::enable();
+        return Err(-abi::ECHILD);
     }
+    if let Some(i) = procs
+        .iter()
+        .position(|p| p.parent == pid && matches!(p.state, State::Zombie(_)))
+    {
+        let hijo = procs.remove(i);
+        let State::Zombie(code) = hijo.state else {
+            unreachable!()
+        };
+        let v = super::wait_pack(hijo.pid, code);
+        drop(procs);
+        x86_64::instructions::interrupts::enable();
+        return Ok(v);
+    }
+    let idx = procs
+        .iter()
+        .position(|p| p.pid == pid)
+        .expect("wait sin proceso");
+    procs[idx].ctx = ctx_from_frame(f);
+    procs[idx].state = State::WaitingChild;
+    drop(procs);
+    crate::arch::percpu::set_current_pid(0);
+    super::schedule();
 }
 
 fn sys_sbrk(delta: i64) -> Result<u64, i64> {

@@ -627,11 +627,15 @@ static int run_chan_ce_stage(void)
             uint64_t pdb = 0, limite = 0;
 
             if (gsp_bar1_inst_probe(&g_bar1, &pdb, &limite) != 0) {
-                /* RM no ató BAR1 (0xb80f40 a cero, medido el 2026-08-02): la
-                 * apertura no tiene vaspace y por eso rechazaba TODO acceso, sin
-                 * importar qué tablas parcheáramos. Lo atamos nosotros, que es lo
-                 * que hace el camino sin GSP de nouveau. */
-                (void)gsp_bar1_bind(&g_bar1, &g_vram_pool);
+                /* RM no ató BAR1 (0xb80f40 a cero). Bajo GSP lockdown esa
+                 * escritura se descarta (relee 0; 2026-08-02). Linux en ruta GSP
+                 * no hace `tu102_bar_bar1_init`: instala la PDE con
+                 * `UPDATE_BAR_PDE` (`r535_bar`). Atarlo desde el host +
+                 * invalidate HUB_ONLY|ALL_PDB es el camino nvkm *sin* GSP, y
+                 * ALL_PDB barre también el PDB del CE. Sin BAR1 el CE sigue
+                 * siendo la ruta a VRAM. */
+                lx_printk("nouveau-lx: BAR1 — RM no ató 0xb80f40; no se escribe "
+                          "(Linux GSP no hace tu102_bar_bar1_init)\n");
             } else {
                 if (pdb && pdb != g_bar1.pd3) {
                     lx_printk("nouveau-lx: BAR1 — usando la raíz del bloque de "
@@ -655,43 +659,49 @@ static int run_chan_ce_stage(void)
                     g_bar1.window_va = nueva;
                 }
                 gsp_bar1_dump(&g_bar1, g_bar1.window_va);
-            }
-        }
-        if (gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block, G4D_VA_BASE,
-                              G4D_SCRATCH_VA, g_scratch.va) != 0 &&
-            g_bar1.window_va != GSP_BAR1_WINDOW_BYTES) {
-            lx_printk("nouveau-lx: BAR1 — reintento con ventana BAJA (0x%llx)\n",
-                      (unsigned long long)GSP_BAR1_WINDOW_BYTES);
-            g_bar1.window_va = GSP_BAR1_WINDOW_BYTES;
-            if (gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block, G4D_VA_BASE,
-                                  G4D_SCRATCH_VA, g_scratch.va) != 0) {
-                /* Las dos ventanas fallan igual y las escrituras a las tablas SÍ
-                 * se quedan (el readback pasa): entonces la MMU de BAR1 no está
-                 * mirando la raíz que estamos parcheando.
-                 *
-                 * La sospecha es la cola de `GspStaticConfigInfo`: `fb_length` y
-                 * `gpuNameString` validan el principio y el medio del struct,
-                 * pero entre el nombre y `bar1PdeBase` hay una tira de NvBool y
-                 * dos NvU16 de RTD3 transcritos de r570 SIN contraste, y un solo
-                 * campo de más o de menos ahí desplaza la raíz al campo vecino.
-                 * `bar2PdeBase` también es una raíz válida y su recorrido sale
-                 * igual de coherente, así que por el valor no se distinguen.
-                 *
-                 * Se prueba, que es más barato que discutirlo: si con la otra
-                 * raíz la apertura empieza a funcionar, el struct está desplazado
-                 * y hay que corregir la transcripción (no dejar esto así). */
-                lx_printk("nouveau-lx: BAR1 — las dos ventanas fallan y las tablas "
-                          "sí se escriben: probando con la OTRA raíz "
-                          "(bar2Pde=0x%llx) por si el struct está desplazado\n",
-                          (unsigned long long)g_static.bar2_pde_base);
-                if (gsp_bar1_init(&g_bar1, g_bar1.aperture_phys,
-                                  g_bar1.aperture_size,
-                                  g_static.bar2_pde_base) == 0) {
+                if (gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block, G4D_VA_BASE,
+                                      G4D_SCRATCH_VA, g_scratch.va) != 0 &&
+                    g_bar1.window_va != GSP_BAR1_WINDOW_BYTES) {
+                    lx_printk("nouveau-lx: BAR1 — reintento con ventana BAJA "
+                              "(0x%llx)\n",
+                              (unsigned long long)GSP_BAR1_WINDOW_BYTES);
                     g_bar1.window_va = GSP_BAR1_WINDOW_BYTES;
-                    gsp_bar1_dump(&g_bar1, g_bar1.window_va);
-                    (void)gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block,
-                                            G4D_VA_BASE, G4D_SCRATCH_VA,
-                                            g_scratch.va);
+                    if (gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block,
+                                          G4D_VA_BASE, G4D_SCRATCH_VA,
+                                          g_scratch.va) != 0) {
+                        /* Las dos ventanas fallan igual y las escrituras a las
+                         * tablas SÍ se quedan (el readback pasa): entonces la MMU
+                         * de BAR1 no está mirando la raíz que estamos parcheando.
+                         *
+                         * La sospecha es la cola de `GspStaticConfigInfo`:
+                         * `fb_length` y `gpuNameString` validan el principio y el
+                         * medio del struct, pero entre el nombre y `bar1PdeBase`
+                         * hay una tira de NvBool y dos NvU16 de RTD3 transcritos
+                         * de r570 SIN contraste, y un solo campo de más o de
+                         * menos ahí desplaza la raíz al campo vecino.
+                         * `bar2PdeBase` también es una raíz válida y su recorrido
+                         * sale igual de coherente, así que por el valor no se
+                         * distinguen.
+                         *
+                         * Se prueba, que es más barato que discutirlo: si con la
+                         * otra raíz la apertura empieza a funcionar, el struct
+                         * está desplazado y hay que corregir la transcripción
+                         * (no dejar esto así). */
+                        lx_printk("nouveau-lx: BAR1 — las dos ventanas fallan y "
+                                  "las tablas sí se escriben: probando con la "
+                                  "OTRA raíz (bar2Pde=0x%llx) por si el struct "
+                                  "está desplazado\n",
+                                  (unsigned long long)g_static.bar2_pde_base);
+                        if (gsp_bar1_init(&g_bar1, g_bar1.aperture_phys,
+                                          g_bar1.aperture_size,
+                                          g_static.bar2_pde_base) == 0) {
+                            g_bar1.window_va = GSP_BAR1_WINDOW_BYTES;
+                            gsp_bar1_dump(&g_bar1, g_bar1.window_va);
+                            (void)gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block,
+                                                    G4D_VA_BASE, G4D_SCRATCH_VA,
+                                                    g_scratch.va);
+                        }
+                    }
                 }
             }
         }
@@ -721,25 +731,10 @@ static int run_compute_stage(void)
     }
     g_phase = GSP_RM_COMPUTE;
 
-    /* Y el contexto del canal de GR, en este orden porque es el de upstream:
-     * `r535_gr_oneinit` reserva el canal, le cuelga la clase y **después**
-     * promociona (`chan.alloc` → `RM_ALLOC` de la clase → `promote_ctx`). Sin
-     * contexto promocionado el canal existe y el primer QMD no puede correr.
-     *
-     * Best-effort como todo lo de esta fase: si falla, el CE y el resto del
-     * arranque siguen en pie y el log dice dónde paró. */
-    if (gsp_grctx_query(&g_vmm.rm, 0u, &g_grctx) < 0) {
-        lx_printk("nouveau-lx: sin tamaños de contexto de GR — no se promociona\n");
-    } else if (gsp_grctx_promote(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan_gr,
-                                 &g_grctx) != 0) {
-        lx_printk("nouveau-lx: contexto de GR sin promocionar — el QMD no puede "
-                  "correr todavía\n");
-    }
-
-    /* Los cuatro blobs, cada uno en su hueco: no se stagean en el primer
-     * lanzamiento sino aquí, para que un fallo de copia salga en el arranque y no
-     * en medio de una inferencia. Los cuantizados NO abortan si fallan: sin ellos
-     * se pierde el matvec sobre pesos sin expandir, pero el f32 sigue entero. */
+    /* SASS no necesita el contexto de GR: es un blob en VRAM que copia el CE.
+     * En silicio la primera copia CE *después* de PROMOTE_CTX no señalizaba
+     * (PBDMA sí consumió el PB; GSP-RM sin RC). Linux no mete un blit de cliente
+     * entre el golden ctx de FECS y el siguiente uso del COPY. Se stagea antes. */
     if (gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.saxpy,
                                G4D_SCRATCH_VA, g_scratch.va, 4096u) != 0) {
         lx_printk("nouveau-lx: SASS de saxpy no llegó a VRAM (el CE no señalizó)\n");
@@ -757,6 +752,31 @@ static int run_compute_stage(void)
                   g_compute.saxpy.sass_len, g_compute.matvec.sass_len,
                   g_compute.matvec_q4k.sass_len, q4k == 0 ? "ok" : "FALLO",
                   g_compute.matvec_q80.sass_len, q80 == 0 ? "ok" : "FALLO");
+    }
+
+    /* El contexto del canal de GR, en el orden de upstream: `r535_gr_oneinit`
+     * reserva el canal, le cuelga la clase y **después** promociona
+     * (`chan.alloc` → `RM_ALLOC` de la clase → `promote_ctx`). Sin contexto
+     * promocionado el canal existe y el primer QMD no puede correr.
+     *
+     * Best-effort como todo lo de esta fase: si falla, el CE y el resto del
+     * arranque siguen en pie y el log dice dónde paró. */
+    if (gsp_grctx_query(&g_vmm.rm, 0u, &g_grctx) < 0) {
+        lx_printk("nouveau-lx: sin tamaños de contexto de GR — no se promociona\n");
+    } else if (gsp_grctx_promote(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan_gr,
+                                 &g_grctx) != 0) {
+        lx_printk("nouveau-lx: contexto de GR sin promocionar — el QMD no puede "
+                  "correr todavía\n");
+    } else if (!g_ce.stuck) {
+        /* Misma copia 4 KiB que G4e: si esto no señaliza, el CE murió en el
+         * promote (FECS / COPY0 compartido), no en el tamaño del SASS. */
+        if (gsp_ce_copy_sync(&g_ce, G4D_VA_BASE, G4D_SCRATCH_VA, 4096u,
+                             GSP_CE_WAIT_MS) != 0) {
+            lx_printk("nouveau-lx: CE muerto tras PROMOTE_CTX (copia 4 KiB a la "
+                      "VA que G4e sí movió)\n");
+        } else {
+            lx_printk("nouveau-lx: CE vivo tras PROMOTE_CTX\n");
+        }
     }
     /* El rebote grande es un lujo, no un requisito: si no hay 1 MiB contiguo o
      * no se puede mapear, G6 sigue con la página de 4 KiB de G4d y lo dice. Lo
@@ -1109,7 +1129,12 @@ uint64_t lx_nouveau_buf_alloc(uint64_t size)
  * su bucle de CPU mientras todo decía «offload»). */
 int lx_nouveau_buf_ready(void)
 {
-    return g_buf.ready ? 1 : 0;
+    /* Pool montado no basta: si el CE se atascó, `GPU_ALLOC_VRAM` seguiría
+     * diciendo que sí y askd subiría el 27B a un canal muerto (parece colgado). */
+    if (!g_buf.ready || g_ce.stuck) {
+        return 0;
+    }
+    return 1;
 }
 
 int lx_nouveau_buf_upload(uint64_t va, const void *src, uint64_t size)
@@ -1173,7 +1198,7 @@ static int g_compute_rendido;
 
 static int compute_usable(void)
 {
-    if (g_compute_rendido) {
+    if (g_compute_rendido || g_ce.stuck) {
         return 0;
     }
     return g_ce_verified && g_compute.ready && g_ce.ready && g_chan.ready &&

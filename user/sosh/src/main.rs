@@ -530,7 +530,8 @@ fn connect_askd() -> Result<u64, i64> {
     if fd < 0 { Err(fd) } else { Ok(fd as u64) }
 }
 
-fn copiar_respuesta_ask(fd: u64) {
+/// `Ok(true)` = respuesta completa; `Ok(false)` = Ctrl-C (EINTR).
+fn copiar_respuesta_ask(fd: u64) -> Result<bool, ()> {
     let mut buf = [0u8; 512];
     // EAGAIN = el askd sigue vivo y no ha escrito (carga larga). EOF (n==0)
     // = el par cerró: el kernel lo señala cuando el otro extremo hace close,
@@ -539,7 +540,7 @@ fn copiar_respuesta_ask(fd: u64) {
     loop {
         let n = sys::read_timeout(fd, &mut buf, 120_000);
         if n == -(abi::EINTR as i64) {
-            return;
+            return Ok(false);
         }
         if n == -(abi::EAGAIN as i64) {
             continue;
@@ -550,12 +551,13 @@ fn copiar_respuesta_ask(fd: u64) {
         let n = n as usize;
         if let Some(i) = buf[..n].iter().position(|&b| b == PROTO_FIN) {
             if i > 0 {
-                let _ = sys::write(1, &mut buf[..i]);
+                let _ = sys::write(1, &buf[..i]);
             }
-            return;
+            return Ok(true);
         }
-        let _ = sys::write(1, &mut buf[..n]);
+        let _ = sys::write(1, &buf[..n]);
     }
+    Ok(true)
 }
 
 fn preguntar_via_askd(texto: &str) -> u8 {
@@ -604,9 +606,13 @@ fn preguntar_via_askd(texto: &str) -> u8 {
         println!("ask: error al enviar la pregunta");
         return 1;
     }
-    copiar_respuesta_ask(fd);
+    let interrumpido = copiar_respuesta_ask(fd) == Ok(false);
     let _ = sys::close(fd);
-    0
+    if interrumpido {
+        130
+    } else {
+        0
+    }
 }
 
 fn leer_conf_modelo() -> (String, usize) {

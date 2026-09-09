@@ -33,6 +33,7 @@ pub fn run() {
 /// Empaqueta el live USB. `usb_bytes` fija el presupuesto de modelos (p. ej. tamaño del pendrive).
 pub fn run_with_capacity(usb_bytes: Option<u64>) {
     let root = super::project_root();
+    let _as_user = crate::as_user::as_invoking_user_for_build(&root);
     let profile = live_driver_profile();
     preflight_gpu_firmware(&root, &profile);
     print_profile_summary(&profile);

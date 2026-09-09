@@ -29,15 +29,26 @@ static void iwl_write64(struct iwl_ax211_priv *iwl, uint32_t off, uint64_t val)
     iwl_write32(iwl, off + 4, (uint32_t)(val >> 32));
 }
 
+static uint32_t iwl_prph_msk(struct iwl_ax211_priv *iwl)
+{
+    /* AX210/SO (gen3): 24 bits; 22000/AX200 (gen2): 20 bits. */
+    return iwl->gen3 ? IWL_PRPH_MSK_GEN3 : IWL_PRPH_MSK_GEN2;
+}
+
+static uint32_t iwl_umac_prph(struct iwl_ax211_priv *iwl, uint32_t addr)
+{
+    return iwl->gen3 ? addr + IWL_UMAC_PRPH_OFFSET : addr;
+}
+
 static void iwl_write_prph_no_grab(struct iwl_ax211_priv *iwl, uint32_t addr, uint32_t val)
 {
-    iwl_write32(iwl, HBUS_TARG_PRPH_WADDR, (addr & 0x000fffffu) | (3u << 24));
+    iwl_write32(iwl, HBUS_TARG_PRPH_WADDR, (addr & iwl_prph_msk(iwl)) | (3u << 24));
     iwl_write32(iwl, HBUS_TARG_PRPH_WDATA, val);
 }
 
 static uint32_t iwl_read_prph_no_grab(struct iwl_ax211_priv *iwl, uint32_t addr)
 {
-    iwl_write32(iwl, HBUS_TARG_PRPH_RADDR, (addr & 0x000fffffu) | (3u << 24));
+    iwl_write32(iwl, HBUS_TARG_PRPH_RADDR, (addr & iwl_prph_msk(iwl)) | (3u << 24));
     return iwl_read32(iwl, HBUS_TARG_PRPH_RDAT);
 }
 
@@ -175,9 +186,13 @@ static int iwl_clear_persistence_bit(struct iwl_ax211_priv *iwl)
     uint32_t hpm;
     uint32_t wprot;
 
-    /* Linux `iwl_clear_persistence_bit`: PRPH sin grab. El MAC aún no tiene
-     * reloj (INIT_DONE va en APM, después); grab_nic_access espera
-     * MAC_CLOCK_READY y abortaba todo el start (GP=0x08040008). */
+    /* Linux `iwl_trans_pcie_clear_persistence_bit` solo toca familias 9000 y
+     * 22000. AX210/SO (gen3) sale al instante. */
+    if (iwl->gen3)
+        return 0;
+
+    /* Linux: PRPH sin grab. El MAC aún no tiene reloj (INIT_DONE va en APM);
+     * grab_nic_access espera MAC_CLOCK_READY y abortaba (GP=0x08040008). */
     hpm = iwl_read_prph_no_grab(iwl, HPM_DEBUG);
     if (hpm == IWL_PRPH_HW_TIMEOUT || hpm == 0xa5a5a5a2u) {
         return 0;
@@ -460,6 +475,7 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
         return -1;
     if (iwl_alloc_queues(iwl) != 0)
         return -1;
+    iwl_set_bit(iwl, CSR_MAC_SHADOW_REG_CTRL, 0x800fffffu);
     if (!iwl->iml || !iwl->iml_len) {
         lx_printk("iwlwifi: sin IML en el firmware\n");
         return -1;
@@ -495,10 +511,7 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
 
     memset(info, 0, IWL_PRPH_INFO_ALLOC);
     memset(ctxt, 0, sizeof(*ctxt));
-    ctxt->version = 0;
-    ctxt->size = (uint16_t)(sizeof(*ctxt) / 4);
-    ctxt->cr_idx_arr_size = 1;
-    ctxt->tr_idx_arr_size = 1;
+    /* Linux deja version/size/config/idx_arr_size a 0 (dma_alloc_coherent). */
     ctxt->prph_info_base_addr = iwl->info_dma;
     ctxt->prph_scratch_base_addr = iwl->scratch_dma;
     ctxt->prph_scratch_size = sizeof(*scratch);
@@ -513,17 +526,19 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
     memcpy(iml_cpu, iwl->iml, iwl->iml_len);
     iwl_write32(iwl, CSR_INT, 0xffffffffu);
     iwl_enable_fw_load_int_ctx_info(iwl);
-    iwl_write32(iwl, RFH_Q0_FRBDCB_WIDX_TRG, (uint32_t)(iwl->rx_write & ~7u));
     iwl_write64(iwl, CSR_CTXT_INFO_ADDR, iwl->ctxt_dma);
     iwl_write64(iwl, CSR_IML_DATA_ADDR, iml_dma);
     iwl_write32(iwl, CSR_IML_SIZE_ADDR, (uint32_t)iwl->iml_len);
-    iwl_write32(iwl, CSR_CTXT_INFO_BOOT_CTRL, CSR_AUTO_FUNC_BOOT_ENA);
+    /* CSR_CTXT_INFO_BOOT_CTRL == CSR_HW_IF_CONFIG_REG. Linux hace set_bit;
+     * un write32 de solo BOOT_ENA borra NIC_READY y HAP_WAKE_L1A. */
+    iwl_set_bit(iwl, CSR_CTXT_INFO_BOOT_CTRL, CSR_AUTO_FUNC_BOOT_ENA);
+    /* Linux `iwl_trans_pcie_gen2_start_fw` (familia AX210): UREG_CPU_INIT_RUN
+     * vía umac_prph (+0x300000). No escribe AUTO_FUNC_INIT en GP_CNTRL. */
+    iwl_write_prph(iwl, iwl_umac_prph(iwl, UREG_CPU_INIT_RUN), 1);
     gp = iwl_read32(iwl, CSR_GP_CNTRL);
-    iwl_write32(iwl, CSR_GP_CNTRL,
-                gp | CSR_GP_CNTRL_REG_FLAG_INIT_DONE |
-                    CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ | CSR_AUTO_FUNC_INIT);
-    lx_printk("iwlwifi: context-info gen3 BA=0x%llx iml=%lu\n",
-              (unsigned long long)iwl->ctxt_dma, iwl->iml_len);
+    lx_printk("iwlwifi: context-info gen3 BA=0x%llx iml=%lu HW_IF=0x%08x GP=0x%08x\n",
+              (unsigned long long)iwl->ctxt_dma, iwl->iml_len,
+              iwl_read32(iwl, CSR_HW_IF_CONFIG_REG), gp);
 
     for (int i = 0; i < 500; i++) {
         drain_rx_gen2(iwl);

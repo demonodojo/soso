@@ -93,7 +93,6 @@ QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
 ```sh
 # Live USB ya incluye nouveau+iwlwifi; el usuario flashea (el agente no:
 # sudo pide contraseña y no hay TTY). Compila y deja este comando:
-sudo rm -f target/lxdde/generated_dummies-*.o
 sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
 # Primer flash completo / sin tocar modelos:
 # sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models

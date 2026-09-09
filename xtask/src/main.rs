@@ -145,6 +145,7 @@ fn main() {
 }
 
 mod bench;
+mod as_user;
 mod check;
 mod drivers;
 mod fat32_write;
@@ -393,6 +394,7 @@ pub(crate) fn build_image_with_profile(
     reserve_update_slots: bool,
 ) -> PathBuf {
     let root = project_root();
+    let _as_user = as_user::as_invoking_user_for_build(&root);
     let ports = drivers::lx_ports_for_build(profile);
     if !ports.is_empty() {
         lx_build::run(&ports);
@@ -402,6 +404,7 @@ pub(crate) fn build_image_with_profile(
     let target = root.join("kernel/x86_64-soso.json");
     let feats = drivers::kernel_feature_args(profile);
     let mut cmd = Command::new("cargo");
+    as_user::apply_invoking_user(&mut cmd);
     cmd.current_dir(root.join("kernel"))
         .args([
             "build",
@@ -491,7 +494,9 @@ pub(crate) fn build_image_with_profile(
 /// Best-effort: sin el target instalado avisa y la imagen queda estándar.
 pub(crate) fn build_boot_shim(root: &Path) -> Option<PathBuf> {
     let target_dir = root.join("target/boot-shim");
-    let status = Command::new("cargo")
+    let mut cmd = Command::new("cargo");
+    as_user::apply_invoking_user(&mut cmd);
+    let status = cmd
         .args([
             "build",
             "--manifest-path",
@@ -602,8 +607,11 @@ pub(crate) fn apply_firmware(qemu: &mut Command, img: &Path) {
 /// Compila el workspace user/ (release) y copia los ELF a rootfs/bin.
 pub(crate) fn build_user() -> bool {
     let root = project_root();
+    let _as_user = as_user::as_invoking_user_for_build(&root);
     version::write_soso_release(&root);
-    let status = Command::new("cargo")
+    let mut cmd = Command::new("cargo");
+    as_user::apply_invoking_user(&mut cmd);
+    let status = cmd
         .current_dir(root.join("user"))
         .args(["build", "--release", "--target-dir"])
         .arg(root.join("target/user"))
@@ -756,6 +764,7 @@ pub(crate) fn mkfs_rootfs_with_profile(
     mode: RootfsImgMode,
 ) -> PathBuf {
     let root = project_root();
+    let _as_user = as_user::as_invoking_user_for_build(&root);
     if profile.kernel_features.iter().any(|f| f == "drv-gpu-nvidia")
         || profile.kernel_features.iter().any(|f| f == "drv-all")
     {
@@ -783,7 +792,9 @@ pub(crate) fn mkfs_rootfs_with_profile(
     if mode == RootfsImgMode::Workspace && workspace_mib > pack_mib {
         eprintln!("mkfs: espacio QEMU {} MiB (sparse tras formatear)", workspace_mib);
     }
-    let status = Command::new("cargo")
+    let mut cmd = Command::new("cargo");
+    as_user::apply_invoking_user(&mut cmd);
+    let status = cmd
         .current_dir(&root)
         .args(["run", "-q", "-p", "mkfs-soso", "--"])
         .arg(root.join("rootfs"))

@@ -458,6 +458,13 @@ fn tratar_linea_askd(
         match n.trim().parse() {
             Ok(v) => {
                 conf.max = v;
+                // Cargar ya: el test de modelo residente hace `:max 4` para no
+                // generar 128 tokens, y espera «ask: cargando» en esa sesión.
+                // Sin esto el primer `ask` posterior puede reutilizar una
+                // sesión que el cliente no vio cargar.
+                if asegurar_modelo(sesion, conf, modelo, fd).is_err() {
+                    return 1;
+                }
                 socket_reply(fd, &format!("ask: máx {v} tokens\n"));
             }
             Err(_) => socket_reply(fd, "ask: :max necesita un número\n"),
@@ -484,7 +491,9 @@ fn tratar_linea_askd(
     }
     let mut sampler = Sampler::new(conf.temp, conf.top_p, conf.seed);
     let m = &ses.bundle.rt.manifest;
-    if ses.sys_gpu.is_none() && m.num_experts > 0 && m.num_layers >= 16 {
+    /* No sólo Mixtral: un denso de 27B en CPU (CE atascado, pool caído) se
+     * queda en «generando…» minutos sin decir por qué. */
+    if ses.sys_gpu.is_none() && (m.num_experts > 0 || m.num_layers >= 16) {
         let atajo = if modelos().iter().any(|n| n == "tiny") {
             " Para una respuesta ahora: ask :modelo tiny"
         } else {
@@ -493,7 +502,7 @@ fn tratar_linea_askd(
         socket_write_str(
             fd,
             &format!(
-                "ask: {modelo} en CPU (GPU sin VRAM); minutos por token.{atajo}\n"
+                "ask: {modelo} en CPU (GPU sin cómputo usable); minutos por token.{atajo}\n"
             ),
         );
     }

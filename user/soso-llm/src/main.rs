@@ -945,7 +945,12 @@ pub(crate) fn generar_tokens(
                 |t| {
                     let s = decoder.push(&bundle.tokenizer, t);
                     if !s.is_empty() {
-                        libsoso::print!("{s}");
+                        // NUL/C0/� por el canal SSH tumban la sesión (A7:
+                        // veinte `soso-llm run` en el mismo SSH).
+                        let limpio = texto_ask_seguro(&s);
+                        if !limpio.is_empty() {
+                            libsoso::print!("{limpio}");
+                        }
                     }
                 },
                 par,
@@ -965,18 +970,18 @@ pub(crate) fn generar_tokens(
             let elapsed_ms = (sys::uptime_ms() - t0).max(1) as u64;
             let resto = decoder.finish();
             if !resto.is_empty() {
+                let limpio = texto_ask_seguro(&resto);
                 if fd_out.is_some() {
-                    let limpio = texto_ask_seguro(&resto);
                     streamed.push_str(&limpio);
                     if let Some(fd) = fd_out {
                         emitir_ask(fd, &limpio);
                     }
-                } else {
-                    libsoso::print!("{resto}");
+                } else if !limpio.is_empty() {
+                    libsoso::print!("{limpio}");
                 }
             }
             if let Some(fd) = fd_out {
-                if !streamed.is_empty() && !streamed.ends_with('\n') {
+                if streamed.is_empty() || !streamed.ends_with('\n') {
                     emitir_ask(fd, "\n");
                 }
                 let _ = sys::write_all(fd, &[crate::ask::PROTO_FIN]);

@@ -55,6 +55,10 @@ pub fn run(args: &[String]) {
     let out_dir = root.join("target/lxdde");
     fs::create_dir_all(&out_dir).expect("crear target/lxdde");
 
+    // `sudo cargo xtask …` necesita root para el USB; clang no. Se reclama
+    // target/lxdde y clang/ar arrancan como SUDO_UID (el padre sigue root).
+    let _as_user = crate::as_user::as_invoking_user_for_build(&root);
+
     let mut ports = Vec::new();
     for port in requested {
         for name in resolve_port_arg(&root, port) {
@@ -88,6 +92,7 @@ pub fn run(args: &[String]) {
 
     let archive = out_dir.join("liblxdde.a");
     let mut ar = Command::new("ar");
+    crate::as_user::apply_invoking_user(&mut ar);
     ar.arg("rcs").arg(&archive);
     for o in &objects {
         ar.arg(o);
@@ -384,6 +389,7 @@ fn compile_c(root: &Path, out_dir: &Path, src: &Path, flags: &[String], dep_mtim
     }
     let compiler = std::env::var("LX_CC").unwrap_or_else(|_| "clang".into());
     let mut cmd = Command::new(&compiler);
+    crate::as_user::apply_invoking_user(&mut cmd);
     // `-MMD -MF`: deja al lado del objeto la lista de cabeceras de las que
     // depende, que es lo que lee `deps_from_makefile` en la pasada siguiente.
     // `-MMD` (y no `-MD`) omite las del sistema, que aquí no las hay.

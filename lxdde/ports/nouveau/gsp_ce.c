@@ -114,21 +114,20 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
     }
     c = ce->chan;
 
-    /* Una copia contigua se puede encodear de dos formas y las dos son legales:
-     * una línea de `size` bytes, o `size/4096` líneas de página con el pitch a
-     * 4096 (que deja las líneas pegadas). Upstream mueve un buffer entero con la
-     * segunda —`nve0_bo_move_copy`: PITCH=PAGE_SIZE, LINE_COUNT=PFN_UP(size),
-     * MULTI_LINE_ENABLE— y por eso un BO de 64 MiB es UN launch y una valla. La
-     * de una línea sólo está probada aquí hasta 4 KiB, así que se reserva para
-     * el rabo que no llega a página. */
-    if (size > GSP_CE_LINE_BYTES && (size % GSP_CE_LINE_BYTES) == 0u) {
+    /* Upstream (`nve0_bo_move_copy` en `nouveau_boa0b5.c`) fija PITCH y
+     * LINE_LENGTH a PAGE_SIZE y LINE_COUNT a PFN_UP(size), con MULTI_LINE.
+     * Un rabo de menos de página no puede copiar PAGE_SIZE extra: pisaría el
+     * vecino (SASS a 4 KiB, tensores G6). Ahí la línea sigue siendo `size`, pero
+     * el pitch es PAGE_SIZE — Linux nunca pone PITCH=512, y en silicio la
+     * primera copia CE que no era 4 KiB (saxpy ~512 B) fue la que no señalizó. */
+    if (size >= GSP_CE_LINE_BYTES && (size % GSP_CE_LINE_BYTES) == 0u) {
         line_len = GSP_CE_LINE_BYTES;
         lines = size / GSP_CE_LINE_BYTES;
         pitch = GSP_CE_LINE_BYTES;
     } else {
         line_len = size;
         lines = 1u;
-        pitch = size;
+        pitch = GSP_CE_LINE_BYTES;
     }
 
     off = gsp_chan_pb_reserve(c, 160);

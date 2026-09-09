@@ -156,11 +156,11 @@ cargo xtask hw-matrix show
 
 No `sudo cargo`: root no tiene rustup. `sudo env "PATH=$PATH" "HOME=$HOME" …`
 
-**El agente no graba el USB.** `flash-usb-live` (y `sudo rm` de
-`target/lxdde/generated_dummies-*.o` si clang no puede escribirlo) piden
-contraseña de sudo; en Cursor no hay TTY (`sudo: a terminal is required to
-read the password`). Compila el kernel, deja el comando exacto al usuario y
-no reintentes `sudo`. Leer SOSOLOG: `udisksctl mount -b /dev/sda1` suele
+**El agente no graba el USB.** `flash-usb-live` pide contraseña de sudo; en
+Cursor no hay TTY (`sudo: a terminal is required to read the password`).
+Compila el kernel, deja el comando exacto al usuario y no reintentes `sudo`.
+`lx-build` y el cargo del kernel/userspace bajo sudo escriben `target/` como
+el invocador (`SUDO_UID`), no como root. El `dd` al USB sigue siendo root. Leer SOSOLOG: `udisksctl mount -b /dev/sda1` suele
 bastar sin sudo; `cargo xtask sosolog` a veces sí lo pide.
 
 **Tras un arranque de placa**, con el pendrive de vuelta: actualizar la

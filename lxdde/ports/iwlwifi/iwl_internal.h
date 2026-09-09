@@ -38,6 +38,10 @@
 #define UREG_CPU_INIT_RUN            0xa05c44
 #define HPM_DEBUG                    0xa03440
 #define PREG_PRPH_WPROT_22000        0xa04d00
+/* Linux `iwl_trans_pcie_prph_msk` + `iwl_so_trans_cfg.umac_prph_offset`. */
+#define IWL_PRPH_MSK_GEN2            0x000fffffu
+#define IWL_PRPH_MSK_GEN3            0x00ffffffu
+#define IWL_UMAC_PRPH_OFFSET         0x300000u
 #define RFH_Q0_FRBDCB_WIDX_TRG       0x1C80
 #define IWL_PCI_AX200                0x2723u
 #define IWL_MVM_DQA_CMD_QUEUE        9
