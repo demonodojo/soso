@@ -1892,11 +1892,15 @@ fn sys_wifi_scan(out: u64, max: u64) -> Result<u64, i64> {
         if !crate::lxdde::wifi_present() || !crate::lxdde::wifi_alive() {
             return Err(-abi::ENOTSUP);
         }
-        crate::lxdde::wifi_scan();
+        let scan_rc = crate::lxdde::wifi_scan();
         let results = crate::lxdde::wifi_scan_results();
         let count = results.len().min(max as usize);
         if count == 0 {
-            return Ok(0);
+            return Err(if scan_rc == -2 {
+                -abi::ETIMEDOUT
+            } else {
+                -abi::EIO
+            });
         }
         let n = count * core::mem::size_of::<abi::WifiBss>();
         if !user_range_ok(out, n as u64, true) {

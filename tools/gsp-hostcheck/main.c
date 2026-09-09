@@ -197,6 +197,18 @@ static uint32_t fake_clock;
 #define FAKE_TOP_GR_RUNL   0x00d00000u
 #define FAKE_TOP_CE0_RUNL  0x00d00000u
 #define FAKE_TOP_CE1_RUNL  0x00d00400u
+#define LX_FLCN_SEC2_BASE_LEGACY 0x00840000u
+
+/* PTOP de la ROG GA107 (SOSOLOG 2026-09-09): SEC20 addr=0x087000, GSP0 0x110000. */
+#define GA107_PTOP_WORDS 6u
+static const uint32_t fake_ptop_ga107[GA107_PTOP_WORDS] = {
+    0x8d00000eu, 0x80087001u, 0x00c02000u,
+    0x80140002u, 0x80110000u, 0x00000000u,
+};
+
+static const uint32_t *fake_ptop_active = NULL;
+static unsigned fake_ptop_active_words;
+
 static const uint32_t fake_ptop[FAKE_PTOP_WORDS] = {
     /* GR0: tipo 0x00, inst 0, fault 0x1a | addr 0x400000 reset 2 | runlist */
     0x8000001au, 0x80400002u, FAKE_TOP_GR_RUNL | 0u,
@@ -300,7 +312,10 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
      * bit 0 de 0x118128 y 0xff en 0x118234. */
     case 0x118128u: return 1u;
     case 0x118234u: return 0xffu;
-    case FAKE_PTOP_SCAL: return FAKE_PTOP_WORDS << 20;
+    case FAKE_PTOP_SCAL: {
+        unsigned w = fake_ptop_active_words ? fake_ptop_active_words : FAKE_PTOP_WORDS;
+        return w << 20;
+    }
     case FAKE_PRAMIN_WINDOW: return fake_pramin_win;
     case FAKE_MMU_INVAL_PDB: return fake_mmu_inval_pdb;
     case FAKE_MMU_INVAL_UPPER_PDB: return fake_mmu_inval_upper;
@@ -309,9 +324,13 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
         if (off >= FAKE_PRAMIN_BASE && off + 4u <= FAKE_PRAMIN_BASE + 0x10000u) {
             return fake_pramin_mmio_rd(off - FAKE_PRAMIN_BASE);
         }
-        if (off >= FAKE_PTOP_INFO &&
-            off < FAKE_PTOP_INFO + FAKE_PTOP_WORDS * 4u) {
-            return fake_ptop[(off - FAKE_PTOP_INFO) / 4u];
+        if (off >= FAKE_PTOP_INFO) {
+            const uint32_t *tab = fake_ptop_active ? fake_ptop_active : fake_ptop;
+            unsigned w = fake_ptop_active_words ? fake_ptop_active_words : FAKE_PTOP_WORDS;
+            unsigned idx = (off - FAKE_PTOP_INFO) / 4u;
+            if (idx < w) {
+                return tab[idx];
+            }
         }
         return 0;
     }
@@ -2673,6 +2692,36 @@ static int check_ptop(void)
     return 0;
 }
 
+/* GA107: el booter Ampere debe usar SEC2 @0x087000 (PTOP), no 0x840000. */
+static int check_ampere_sec2_falcon_base(void)
+{
+    unsigned base;
+
+    fake_ptop_active = fake_ptop_ga107;
+    fake_ptop_active_words = GA107_PTOP_WORDS;
+    if (gsp_top_probe() < 1) {
+        printf("FALLO: PTOP GA107 sin motores\n");
+        fake_ptop_active = NULL;
+        fake_ptop_active_words = 0;
+        return -1;
+    }
+    base = gsp_top_falcon_base(GSP_TOP_TYPE_SEC2, 0, LX_FLCN_SEC2_BASE_LEGACY);
+    fake_ptop_active = NULL;
+    fake_ptop_active_words = 0;
+    if (base != 0x087000u) {
+        printf("FALLO: SEC2 GA107 falcon base=0x%x (esperaba 0x087000, legacy "
+               "0x%x)\n",
+               base, LX_FLCN_SEC2_BASE_LEGACY);
+        return -1;
+    }
+    if (base == LX_FLCN_SEC2_BASE_LEGACY) {
+        printf("FALLO: SEC2 GA107 sigue en la base legacy 0x840000\n");
+        return -1;
+    }
+    printf("OK: Ampere SEC2 — PTOP GA107 elige 0x087000 (no 0x840000)\n");
+    return 0;
+}
+
 static int check_pramin(void)
 {
     gsp_pramin_invalidate();
@@ -4564,6 +4613,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_vmm(&lo) != 0)
         return -1;
     if (check_ptop() != 0)
+        return -1;
+    if (check_ampere_sec2_falcon_base() != 0)
         return -1;
     if (check_grctx() != 0)
         return -1;

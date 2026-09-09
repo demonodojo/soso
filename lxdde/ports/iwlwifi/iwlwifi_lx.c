@@ -51,6 +51,11 @@ int lx_iwlwifi_scan(struct iwl_ax211_bss *out, int max, int *count)
     return iwl_ax211_scan(out, max, count);
 }
 
+int lx_iwlwifi_get_scan_results(struct iwl_ax211_bss *out, int max, int *count)
+{
+    return iwl_ax211_get_scan_results(out, max, count);
+}
+
 int lx_iwlwifi_connect_open(const char *ssid)
 {
     return iwl_ax211_connect_open(ssid);

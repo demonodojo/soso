@@ -233,7 +233,8 @@ static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
                                              &iwl->rx_page_dma, GFP_KERNEL);
     iwl->mtr_cpu = lx_dma_alloc_coherent(0, IWL_CMD_QUEUE_SIZE * IWL_TFH_TFD_SIZE,
                                          &iwl->mtr_dma, GFP_KERNEL);
-    iwl->mcr_cpu = lx_dma_alloc_coherent(0, IWL_CMD_QUEUE_SIZE * 256, &iwl->mcr_dma, GFP_KERNEL);
+    iwl->mcr_cpu = lx_dma_alloc_coherent(0, IWL_CMD_QUEUE_SIZE * IWL_CMD_SLOT_SIZE,
+                                         &iwl->mcr_dma, GFP_KERNEL);
     if (!iwl->rx_bd_cpu || !iwl->used_bd_cpu || !iwl->rb_stts ||
         !iwl->rx_page_cpu || !iwl->mtr_cpu || !iwl->mcr_cpu)
         return -1;
@@ -241,7 +242,7 @@ static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
     memset(iwl->used_bd_cpu, 0, used_sz);
     memset((void *)iwl->rb_stts, 0, 16);
     memset(iwl->mtr_cpu, 0, IWL_CMD_QUEUE_SIZE * IWL_TFH_TFD_SIZE);
-    memset(iwl->mcr_cpu, 0, IWL_CMD_QUEUE_SIZE * 256);
+    memset(iwl->mcr_cpu, 0, IWL_CMD_QUEUE_SIZE * IWL_CMD_SLOT_SIZE);
     bd = (uint64_t *)iwl->rx_bd_cpu;
     if (iwl->gen3) {
         for (i = 0; i < IWL_GEN2_RX_N - 1; i++)
@@ -259,26 +260,66 @@ static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
-static void parse_scan_notify(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
+static void parse_scan_complete(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
 {
-    /* Notificación UMAC scan: SSID ASCII tras cabecera mínima */
-    if (len < 40)
+    if (len < (int)sizeof(struct iwl_umac_scan_complete))
         return;
-    for (int off = 20; off + 4 < len && off < 200; off++) {
-        if (data[off] == 0 || data[off] > 32)
-            continue;
-        int ssid_len = (int)data[off];
-        if (ssid_len <= 0 || ssid_len > IWL_AX211_SSID_MAX || off + 1 + ssid_len >= len)
-            continue;
-        struct iwl_ax211_bss bss;
-        memset(&bss, 0, sizeof(bss));
-        memcpy(bss.ssid, &data[off + 1], (size_t)ssid_len);
-        bss.rssi = -60;
-        bss.channel = 6;
-        bss.open = 1;
-        iwl_ax211_add_bss(&bss);
+    const struct iwl_umac_scan_complete *n = (const struct iwl_umac_scan_complete *)data;
+    iwl->scan_complete = 1;
+    lx_printk("iwl_trans: SCAN_COMPLETE status=%u uid=0x%x count=%d\n",
+              n->status, (unsigned)n->uid, iwl->scan_count);
+}
+
+static void parse_offload_match(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
+{
+    /* Perfil match: BSSID @0, canal @8 en match v1 */
+    if (len < 24)
         return;
+    struct iwl_ax211_bss bss;
+    memset(&bss, 0, sizeof(bss));
+    memcpy(bss.bssid, data, 6);
+    bss.channel = data[8];
+    bss.rssi = (int8_t)(0 - (int)data[9]);
+    bss.open = 1;
+    bss.ssid[0] = '?';
+    bss.ssid[1] = '\0';
+    iwl_ax211_add_bss(&bss);
+    (void)iwl;
+}
+
+static void parse_rx_phy(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
+{
+    if (len < 20)
+        return;
+    iwl->last_rx_band24 = data[0] & 1u;
+    iwl->last_rx_channel = (uint8_t)(data[1] | (data[2] << 8));
+    if (len >= 48) {
+        uint32_t energy = (uint32_t)data[44] | ((uint32_t)data[45] << 8) |
+                          ((uint32_t)data[46] << 16) | ((uint32_t)data[47] << 24);
+        int a = (int)((energy >> 0) & 0xffu);
+        int b = (int)((energy >> 8) & 0xffu);
+        if (a)
+            a = -a;
+        else
+            a = -100;
+        if (b)
+            b = -b;
+        else
+            b = -100;
+        iwl->last_rx_rssi = (int8_t)(a > b ? a : b);
     }
+}
+
+static void parse_rx_mpdu(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
+{
+    if (len < (int)sizeof(struct iwl_rx_mpdu_res_start))
+        return;
+    const struct iwl_rx_mpdu_res_start *res = (const struct iwl_rx_mpdu_res_start *)data;
+    int flen = (int)res->byte_count;
+    const uint8_t *frame = data + sizeof(*res);
+    if (flen <= 0 || sizeof(*res) + (size_t)flen > (size_t)len)
+        return;
+    iwl_mvm_rx_scan_frame(iwl, frame, flen);
 }
 
 static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf)
@@ -298,8 +339,14 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf)
         lx_printk("iwl_ax211: firmware ALIVE (UCODE_ALIVE_NTFY)\n");
         return;
     }
-    if (group == SCAN_GROUP)
-        parse_scan_notify(iwl, data, pay);
+    if (group == LONG_GROUP && cmd == SCAN_COMPLETE_UMAC)
+        parse_scan_complete(iwl, data, pay);
+    if (group == SCAN_GROUP && cmd == OFFLOAD_MATCH_INFO_NOTIF)
+        parse_offload_match(iwl, data, pay);
+    if (group == LEGACY_GROUP && cmd == REPLY_RX_PHY_CMD)
+        parse_rx_phy(iwl, data, pay);
+    if (group == LEGACY_GROUP && cmd == REPLY_RX_MPDU_CMD)
+        parse_rx_mpdu(iwl, data, pay);
     if (group == DATA_PATH_GROUP && cmd == 0x1 && pay > 14)
         iwl_ax211_deliver_rx(data, pay);
 }
@@ -577,29 +624,46 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
 {
     uint16_t slot;
     uint8_t *buf;
-    struct iwl_cmd_header *hdr;
     struct iwl_tfh_tfd_long *tfd;
+    uint16_t total;
 
     if (!iwl->alive || !iwl->mtr_cpu || !iwl->mcr_cpu)
         return -1;
-    if (pay_len + sizeof(struct iwl_cmd_header) > 240)
-        return -1;
 
     slot = iwl->cmd_write % IWL_CMD_QUEUE_SIZE;
-    buf = (uint8_t *)iwl->mcr_cpu + slot * 256;
-    hdr = (struct iwl_cmd_header *)buf;
+    buf = (uint8_t *)iwl->mcr_cpu + (size_t)slot * IWL_CMD_SLOT_SIZE;
     tfd = (struct iwl_tfh_tfd_long *)((uint8_t *)iwl->mtr_cpu + (size_t)slot * IWL_TFH_TFD_SIZE);
-    memset(buf, 0, 256);
+    memset(buf, 0, IWL_CMD_SLOT_SIZE);
     memset(tfd, 0, sizeof(*tfd));
-    hdr->cmd = id;
-    hdr->group_id = group;
-    hdr->sequence = iwl->cmd_seq++;
-    hdr->length = (uint8_t)pay_len;
-    if (pay_len)
-        memcpy(buf + sizeof(*hdr), payload, pay_len);
+
+    if (group != LEGACY_GROUP) {
+        struct iwl_cmd_header_wide *whdr = (struct iwl_cmd_header_wide *)buf;
+        total = (uint16_t)(sizeof(*whdr) + pay_len);
+        if (total > IWL_CMD_SLOT_SIZE)
+            return -1;
+        whdr->cmd = id;
+        whdr->group_id = group;
+        whdr->sequence = iwl->cmd_seq++;
+        whdr->length = pay_len;
+        whdr->version = 0;
+        if (pay_len)
+            memcpy(buf + sizeof(*whdr), payload, pay_len);
+    } else {
+        struct iwl_cmd_header *hdr = (struct iwl_cmd_header *)buf;
+        total = (uint16_t)(sizeof(*hdr) + pay_len);
+        if (total > 240)
+            return -1;
+        hdr->cmd = id;
+        hdr->group_id = group;
+        hdr->sequence = iwl->cmd_seq++;
+        hdr->length = (uint8_t)pay_len;
+        if (pay_len)
+            memcpy(buf + sizeof(*hdr), payload, pay_len);
+    }
+
     tfd->num_tbs = 1;
-    tfd->tbs[0].tb_len = (uint16_t)(sizeof(*hdr) + pay_len);
-    tfd->tbs[0].addr = iwl->mcr_dma + (uint64_t)slot * 256;
+    tfd->tbs[0].tb_len = total;
+    tfd->tbs[0].addr = iwl->mcr_dma + (uint64_t)slot * IWL_CMD_SLOT_SIZE;
     iwl->cmd_write = (uint16_t)((iwl->cmd_write + 1) % IWL_CMD_QUEUE_SIZE);
     iwl_write32(iwl, HBUS_TARG_WRPTR,
                 ((uint32_t)iwl->cmd_write & 0xffu) | ((uint32_t)iwl->cmd_qid << 8));

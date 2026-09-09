@@ -556,8 +556,12 @@ pub fn parse_wifi_stages(text: &str) -> WifiStages {
         } else {
             StageStatus::pendiente()
         },
-        scan: if t.contains("scan=fallo") || t.contains("wifi scan fallo") {
-            StageStatus::fail("scan fallido")
+        scan: if t.contains("scan=fallo")
+            || t.contains("wifi scan fallo")
+            || t.contains("wifi: ninguna red")
+            || t.contains("sosh: wifi scan:")
+        {
+            StageStatus::fail("scan fallido o sin BSS")
         } else if t.contains("scan:") && t.contains("ssid") {
             StageStatus::ok(None)
         } else {
@@ -573,7 +577,10 @@ pub fn parse_wifi_stages(text: &str) -> WifiStages {
         } else {
             StageStatus::pendiente()
         },
-        dhcp: if t.contains("dhcp") && t.contains("fallo") {
+        dhcp: if (t.contains("dhcp") && t.contains("fallo"))
+            && !t.contains("gsp=fallo")
+            && !t.contains("gsp fallo")
+        {
             StageStatus::fail("DHCP fallido")
         } else if t.contains("dhcp")
             && (t.contains("lease") || t.contains("ok") || t.contains("192."))
@@ -588,7 +595,7 @@ pub fn parse_wifi_stages(text: &str) -> WifiStages {
             || (t.contains("ssh:") && t.contains("ok") && !t.contains("sosh"))
         {
             StageStatus::ok(Some("SSH"))
-        } else if t.contains("ssh") && t.contains("fallo") {
+        } else if t.contains("ssh") && t.contains("fallo") && !t.contains("gsp=fallo") {
             StageStatus::fail("SSH fallido")
         } else {
             StageStatus::pendiente()
@@ -869,6 +876,19 @@ mod tests {
         assert_eq!(g.apagado_limpio.status, "fail");
         let g = parse_gpu_stages("soso-llm: generado 16 tokens");
         assert_eq!(g.carga_real.status, "ok");
+    }
+
+    #[test]
+    fn parse_wifi_scan_empty_is_fail() {
+        let w = parse_wifi_stages("wifi: ninguna red UCODE_ALIVE_NTFY");
+        assert_eq!(w.alive.status, "ok");
+        assert_eq!(w.scan.status, "fail");
+    }
+
+    #[test]
+    fn parse_wifi_dhcp_ignores_gsp_fallo() {
+        let w = parse_wifi_stages("GSP=fallo pool VRAM=no dhcp fallo");
+        assert_eq!(w.dhcp.status, "pendiente");
     }
 
     #[test]

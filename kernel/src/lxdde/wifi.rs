@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn lx_iwlwifi_probed() -> c_int;
     fn lx_iwlwifi_fw_phase() -> *const c_char;
     fn lx_iwlwifi_scan(out: *mut LxWifiBss, max: c_int, count: *mut c_int) -> c_int;
+    fn lx_iwlwifi_get_scan_results(out: *mut LxWifiBss, max: c_int, count: *mut c_int) -> c_int;
     fn lx_iwlwifi_connect_open(ssid: *const c_char) -> c_int;
     #[allow(dead_code)]
     fn lx_iwlwifi_connect_wpa2(ssid: *const c_char, psk: *const u8) -> c_int;
@@ -95,7 +96,9 @@ pub fn scan_results() -> alloc::vec::Vec<(alloc::string::String, i8, u8, bool)> 
         open: 0,
     }; MAX_SCAN];
     let mut count = 0i32;
-    let rc = unsafe { lx_iwlwifi_scan(out.as_mut_ptr(), MAX_SCAN as c_int, &mut count) };
+    let rc = unsafe {
+        lx_iwlwifi_get_scan_results(out.as_mut_ptr(), MAX_SCAN as c_int, &mut count)
+    };
     if rc != 0 || count <= 0 {
         return alloc::vec::Vec::new();
     }
@@ -109,8 +112,7 @@ pub fn scan_results() -> alloc::vec::Vec<(alloc::string::String, i8, u8, bool)> 
 }
 
 pub fn scan() -> i32 {
-    let _ = scan_results();
-    0
+    unsafe { lx_iwlwifi_scan(core::ptr::null_mut(), 0, core::ptr::null_mut()) }
 }
 
 pub fn connect_open(ssid: &str) -> i32 {

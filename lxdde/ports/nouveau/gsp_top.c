@@ -145,6 +145,16 @@ int gsp_top_runlist_of(uint8_t type, uint8_t inst, uint32_t *runlist,
     return -1;
 }
 
+unsigned gsp_top_falcon_base(uint8_t type, uint8_t inst, unsigned fallback)
+{
+    uint32_t addr = 0;
+
+    if (gsp_top_runlist_of(type, inst, NULL, &addr) == 0 && addr) {
+        return addr;
+    }
+    return fallback;
+}
+
 int gsp_top_type_of_engine(uint32_t engine, uint8_t *type, uint8_t *inst)
 {
     /* Sólo los dos que usa el port. Un `default` que devolviera 0 sería peor que

@@ -180,26 +180,48 @@ void iwl_ax211_poll(void)
     iwl_trans_poll(&g_iwl);
 }
 
-int iwl_ax211_scan(struct iwl_ax211_bss *out, int max, int *count)
+static int iwl_ax211_copy_scan(struct iwl_ax211_bss *out, int max, int *count)
 {
     struct iwl_ax211_priv *iwl = &g_iwl;
-    if (!iwl->alive)
-        return -1;
-
-    iwl_set_phase(iwl, "scan");
-    iwl->scan_count = 0;
-    if (iwl_mvm_scan(iwl) != 0 && iwl->scan_count == 0)
-        return -1;
-
     int n = iwl->scan_count;
+
     if (n > max)
         n = max;
     if (out && n > 0)
         memcpy(out, iwl->scan, (size_t)n * sizeof(struct iwl_ax211_bss));
     if (count)
         *count = n;
-    iwl_set_phase(iwl, "scan_done");
     return 0;
+}
+
+int iwl_ax211_scan(struct iwl_ax211_bss *out, int max, int *count)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    int rc;
+
+    if (!iwl->alive)
+        return -1;
+
+    if (!out && !count) {
+        iwl_set_phase(iwl, "scan");
+        rc = iwl_mvm_scan(iwl);
+        iwl_set_phase(iwl, rc == 0 ? "scan_done" : "scan_fail");
+        return rc;
+    }
+
+    iwl_set_phase(iwl, "scan");
+    rc = iwl_mvm_scan(iwl);
+    iwl_set_phase(iwl, rc == 0 ? "scan_done" : "scan_fail");
+    if (rc != 0 && iwl->scan_count == 0)
+        return rc;
+    return iwl_ax211_copy_scan(out, max, count);
+}
+
+int iwl_ax211_get_scan_results(struct iwl_ax211_bss *out, int max, int *count)
+{
+    if (!g_iwl.alive)
+        return -1;
+    return iwl_ax211_copy_scan(out, max, count);
 }
 
 int iwl_ax211_connect_open(const char *ssid)

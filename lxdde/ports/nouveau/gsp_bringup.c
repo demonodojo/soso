@@ -347,6 +347,7 @@ static int run_ampere_booter(void)
     uint32_t m0, m1;
     unsigned t;
     uint32_t cpuctl = 0;
+    unsigned sec2_base = LX_FLCN_SEC2_BASE;
 
     if (!blob || !blob->valid || !blob->data || !blob->len) {
         lx_printk("nouveau-lx: Ampere sin blob booter_load\n");
@@ -376,11 +377,15 @@ static int run_ampere_booter(void)
 
     m0 = (uint32_t)g_wpr.meta_phys;
     m1 = (uint32_t)(g_wpr.meta_phys >> 32);
-    lx_printk("nouveau-lx: Ampere booter_load en SEC2, WPR meta @0x%llx libos @0x%llx\n",
+    sec2_base = gsp_top_falcon_base(GSP_TOP_TYPE_SEC2, 0, LX_FLCN_SEC2_BASE);
+    lx_printk("nouveau-lx: Ampere booter_load SEC2 base=0x%x (PTOP fallback "
+              "0x%x) WPR meta @0x%llx libos @0x%llx\n",
+              sec2_base, LX_FLCN_SEC2_BASE,
               (unsigned long long)g_wpr.meta_phys,
               (unsigned long long)g_libos.libos.phys);
 
-    if (falcon_lx_hsfw_boot_mbox(LX_FLCN_SEC2_BASE, &wrap, "booter_load", m0, m1, 0) != 0) {
+    if (falcon_lx_hsfw_boot_mbox(sec2_base, &wrap, "booter_load", m0, m1, 1) !=
+        0) {
         gsp_dma_free(&dma);
         return -1;
     }
@@ -395,8 +400,13 @@ static int run_ampere_booter(void)
         lx_mdelay(1);
     }
     if (!(cpuctl & CPUCTL_ACTIVE_STAT)) {
-        lx_printk("nouveau-lx: Ampere booter ok pero RISC-V inactivo (cpuctl=0x%08x)\n",
-                  cpuctl);
+        uint32_t sec2_m0 = gsp_mmio_rd32(sec2_base + 0x040u);
+        uint32_t sec2_m1 = gsp_mmio_rd32(sec2_base + 0x044u);
+        uint32_t wpr2_lo = gsp_mmio_rd32(0x001fa824u);
+        uint32_t wpr2_hi = gsp_mmio_rd32(0x001fa828u);
+        lx_printk("nouveau-lx: Ampere booter ok pero RISC-V inactivo "
+                  "(cpuctl=0x%08x sec2@0x%x mbox=0x%x/0x%x WPR2=0x%08x%08x)\n",
+                  cpuctl, sec2_base, sec2_m0, sec2_m1, wpr2_hi, wpr2_lo);
         return -1;
     }
     lx_printk("nouveau-lx: Ampere RISC-V activo (cpuctl=0x%08x)\n", cpuctl);
@@ -433,6 +443,10 @@ static int run_ampere_boot(void)
     }
 
     enqueue_boot_rpcs();
+
+    /* Ampere en Linux corre ACR (AHESASC+ASB) en SEC2 antes del booter_load;
+     * en la ruta Blackwell no aplica. Best-effort: un fallo no aborta. */
+    run_acr_sec2();
 
     g_phase = GSP_KICK;
     if (run_ampere_booter() != 0) {

@@ -24,10 +24,48 @@ Estado/límites OTA: [`docs/ESTADO.md`](../../docs/ESTADO.md).
 | 4 | `SOSOINSTALL` (FAT) | `install-soso.sh` para Linux; **tras el rootfs, no al final** |
 | 3 | sosomfs | modelos (se estira al flashear; grow del superbloque al montar) |
 
-Linux monta p4, no la ESP. El log **no** está en p4: usa `cargo xtask sosolog`.
+Linux monta p4, no la ESP. El log **no** está en p4. El agente monta p1 con
+`udisksctl` (abajo); el usuario puede usar `cargo xtask sosolog`.
 
 Al final del pendrive Linux no montaba p4 (LBA que leía ceros). Por eso
 `SOSOINSTALL` va entre rootfs y modelos.
+
+## ESP en el host (agente: sin el usuario)
+
+Linux **no** monta sola la ESP (p1 EFI). El volumen que sí aparece es p4
+`SOSOINSTALL`; ahí no hay `SOSOLOG.TXT` ni `SOSOWIFI.TXT`.
+
+`cargo xtask sosolog` llama a `sudo mount`. En Cursor **no hay TTY** (`sudo: a
+terminal is required to read the password`): el agente **no** lo lanza, igual
+que `flash-usb-live`. El usuario sí puede.
+
+El agente monta p1 con **udisks** (polkit en extraíble: sin sudo ni
+contraseña). `--no-user-interaction` evita el diálogo polkit.
+
+```bash
+lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,PARTTYPENAME,RM
+# Candidato: RM=1, partición 1, vfat / EFI. Etiqueta típica `kernel`.
+# No uses p4 (`SOSOINSTALL`).
+
+# ¿Ya montada? (p. ej. /media/<user>/kernel)
+findmnt -n -o TARGET /dev/sda1
+
+# Si no:
+udisksctl mount -b /dev/sda1 --no-user-interaction
+# → Mounted /dev/sda1 at /media/<user>/kernel
+
+ESP=$(findmnt -n -o TARGET /dev/sda1)
+cat "$ESP/SOSOLOG.TXT"
+cat "$ESP/SOSODRV.TXT"
+# Escritura (SOSOWIFI.TXT, …): el VFAT queda con uid del usuario de sesión.
+
+udisksctl unmount -b /dev/sda1 --no-user-interaction
+```
+
+Si `udisksctl` falla (auth, no extraíble, sin D-Bus), deja el comando al
+usuario. **No** uses `sudo mount` ni `sudo cargo xtask sosolog`.
+
+Tras leer o editar, **desmonta**: un `dd` posterior necesita p1 libre.
 
 ## Ficheros ESP (8.3, contiguos, pre-creados)
 
@@ -146,7 +184,7 @@ SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
 sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
 SOSO_QEMU_LIVE=1 cargo xtask run
-cargo xtask sosolog [--drv] [/dev/sdX]
+cargo xtask sosolog [--drv] [/dev/sdX]    # usuario (sudo/TTY); agente: udisksctl, sección ESP
 cargo xtask test-install
 cargo xtask test-update
 cargo xtask test-usb
@@ -160,8 +198,8 @@ No `sudo cargo`: root no tiene rustup. `sudo env "PATH=$PATH" "HOME=$HOME" …`
 Cursor no hay TTY (`sudo: a terminal is required to read the password`).
 Compila el kernel, deja el comando exacto al usuario y no reintentes `sudo`.
 `lx-build` y el cargo del kernel/userspace bajo sudo escriben `target/` como
-el invocador (`SUDO_UID`), no como root. El `dd` al USB sigue siendo root. Leer SOSOLOG: `udisksctl mount -b /dev/sda1` suele
-bastar sin sudo; `cargo xtask sosolog` a veces sí lo pide.
+el invocador (`SUDO_UID`), no como root. El `dd` al USB sigue siendo root.
+Leer/editar la ESP: sección **ESP en el host** (`udisksctl`, sin sudo).
 
 **Tras un arranque de placa**, con el pendrive de vuelta: actualizar la
 matriz A8 (`docs/hw-matrix.json`) con `parse-logs` — skill **soso-dev**.

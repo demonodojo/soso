@@ -5,7 +5,7 @@ description: >-
   mkfs, SSH access, serial console, gdb and integration tests. Use when
   starting soso, compiling the kernel or userspace, running QEMU, connecting
   by SSH, troubleshooting boot/network, reading SOSOLOG.TXT or the hwscan
-  report SOSODRV.TXT from the live USB (`cargo xtask sosolog [--drv]`),
+  report SOSODRV.TXT from the live USB (udisksctl on ESP p1; `cargo xtask sosolog` needs sudo/TTY),
   `cargo xtask check`, `cargo xtask hw-matrix`, or running cargo xtask test.
 ---
 
@@ -39,8 +39,8 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **qwen3.8-27b**; ver `docs/L5c-on-box.md`) |
 | `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa. **`--skip-models`**: solo ESP+rootfs (bucle diario); **`--only kernel|rootfs`**. **El agente no puede ejecutarlo:** sudo pide contraseña y no hay TTY; deja el comando al usuario (skill **soso-live**). |
-| `cargo xtask sosolog [/dev/sdX]` | Monta la ESP del USB live, imprime `SOSOLOG.TXT` y desmonta (`sudo` solo para mount) |
-| `cargo xtask sosolog --drv [/dev/sdX]` | Igual pero muestra `SOSODRV.TXT`: el informe hwscan del último arranque (alias `--hwscan`) |
+| `cargo xtask sosolog [/dev/sdX]` | Monta la ESP, imprime `SOSOLOG.TXT` y desmonta. **Pide sudo/TTY:** el agente no lo lanza; usa `udisksctl` (skill **soso-live**) |
+| `cargo xtask sosolog --drv [/dev/sdX]` | Igual con `SOSODRV.TXT` (hwscan). Mismo límite de sudo; el agente lee el fichero montando p1 con udisks |
 | `cargo xtask test-install` | Instalación nativa de punta a punta: 3 arranques OVMF (instalar por SSH → GPT del destino → `Boot####` del shim → arrancar solo del NVMe). Necesita `ovmf` y `sgdisk`; `SOSO_MODELS_SIZE=256M` para que sea rápido |
 | `cargo xtask test-update` | OTA E2E OVMF: apply, corte simulado + recovery, manifiesto inválido |
 | `cargo xtask test-resize` | B1: host + grow/recovery QEMU live (`drv-live-disk`, tiny 256 MiB; no uses el preset `qemu`) |
@@ -124,8 +124,8 @@ drv: 00:1f.0 8086:2918 sin-driver desconocido clase 06:01:00 puente
 hwscan: RED SIN DRIVER 00:1f.6 8086:15fc (ethernet)
 ```
 
-Sale por serie en cada arranque y, en live, a `SOSODRV.TXT` (léelo con
-`cargo xtask sosolog --drv`). En host: `cargo xtask fit-drivers
+Sale por serie en cada arranque y, en live, a `SOSODRV.TXT` (el agente lo lee
+montando p1 con `udisksctl`; skill **soso-live**). En host: `cargo xtask fit-drivers
 /media/.../SOSODRV.TXT` (o `--esp /dev/sdX1`) regenera el kernel con los drivers
 necesarios. Si tu NIC sale como `sin-driver`, ese `VVVV:DDDD` es lo que decide si
 basta con ampliar la lista de IDs de `drivers/registry.rs` (el `e1000e` nativo
@@ -136,22 +136,28 @@ Ports lxdde externos: repo con `source.list` (+ opcional `driver.toml`,
 `firmware/`). `cargo xtask driver-add <url>` los registra en
 `drivers-extern.toml` y `lx-build all` los incluye.
 
-## Log del USB live (`cargo xtask sosolog`)
+## Log del USB live (ESP p1)
 
-`SOSOLOG.TXT` está en la **ESP (partición 1, FAT)**. Linux no la monta sola
-(oculta las EFI); el volumen que sí aparece es p4 `SOSOINSTALL` (FAT tras el
-rootfs, no al final del stick), que no tiene el log.
+`SOSOLOG.TXT` / `SOSODRV.TXT` están en la **ESP (partición 1, FAT)**. Linux no
+la monta sola (oculta las EFI); el volumen que sí aparece es p4 `SOSOINSTALL`,
+que **no** tiene el log.
+
+**Agente:** no lances `cargo xtask sosolog` (pide `sudo mount`, no hay TTY).
+Monta p1 con udisks, lee, desmonta — receta completa en skill **soso-live**
+(sección *ESP en el host*):
 
 ```sh
-cargo xtask sosolog              # auto-detecta el USB live
-cargo xtask sosolog /dev/sdX     # disco entero → p1
-cargo xtask sosolog /dev/sdX1    # ESP concreta
-cargo xtask sosolog | less
-cargo xtask sosolog --drv        # SOSODRV.TXT (hwscan) en vez del log
+lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,PARTTYPENAME,RM   # p1 vfat/EFI, RM=1; no p4
+findmnt -n -o TARGET /dev/sda1                          # ¿ya montada?
+udisksctl mount -b /dev/sda1 --no-user-interaction
+ESP=$(findmnt -n -o TARGET /dev/sda1)
+cat "$ESP/SOSOLOG.TXT"
+cat "$ESP/SOSODRV.TXT"
+udisksctl unmount -b /dev/sda1 --no-user-interaction
 ```
 
-No uses `sudo cargo`: root no tiene rustup. La xtask pide `sudo` solo para
-`mount`/`umount` (y monta con `uid`/`gid` del usuario para poder leer).
+**Usuario** (tiene TTY): `cargo xtask sosolog [--drv] [/dev/sdX]`. Pide sudo
+solo para `mount`/`umount`; no `sudo cargo` (root no tiene rustup).
 Implementación: `xtask/src/sosolog.rs`. El kernel vuelca el ring cada ~2 s
 (`drivers/fatlog.rs`) sobre el hueco pre-creado en `package-usb-live`.
 
@@ -364,7 +370,7 @@ comportamiento distinto (skill `soso-user-manual`).
 | WiFi sin ALIVE / «ALIVE degradado» | Hostcheck `./scripts/l6-iwl-fw-hostcheck.sh`; VFIO exige `UCODE_ALIVE_NTFY` real — **`soso-wifi`** |
 | `SOSOUPD.TXT` / `SOSOKRN.BIN` duplicados en ESP | Pass 1 reserva huecos; pass 2 reutiliza la misma entrada FAT (no duplica). Regenerar con `cargo xtask package-usb-live` |
 | OTA kernel atascado tras corte | `SOSOKRN.MET` + backup en `SOSOKRN.BIN`; reflashear si la ESP no tiene `.MET` (live < 0.2.2) — **`soso-live`** |
-| No se ve `SOSOLOG.TXT` en el USB | Está en la ESP (p1), que Linux no monta; `cargo xtask sosolog` |
+| No se ve `SOSOLOG.TXT` en el USB | Está en la ESP (p1), no en p4. Agente: `udisksctl mount -b /dev/sdX1` (**soso-live**). Usuario: `cargo xtask sosolog` |
 | El live se queda en bucle «no encuentra la red» | `net::poll()` resondeaba el bus entero por vuelta al no haber NIC. Ya está: `try_attach` va limitada a 1/s y las sondas cachean. Si vuelve a pasar, mira qué `println!` se repite antes de teorizar |
 | La suite se cuelga (QEMU vivo, log de serie parado hace minutos) | `kill <pid>` de ese QEMU concreto; el arnés recoge y sigue. Suele ser el shard `llm-dense` |
 | Un cambio en el arranque cuelga un shard minutos después | ¿Has metido un `pci::enumerate()` post-init? Reescribe los BAR de dispositivos vivos. Usa `pci::devices()` (ver `soso-architecture`) |

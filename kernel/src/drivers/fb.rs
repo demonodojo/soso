@@ -108,6 +108,9 @@ fn decode_utf8(bytes: &[u8]) -> u16 {
 
 struct FbState {
     ptr: *mut u8,
+    /// Copia en RAM del FB visible: el scroll hace memmove aquí y luego
+    /// escribe al GOP (sin leer la VRAM del firmware AMD/UEFI).
+    shadow: Vec<u8>,
     info: FrameBufferInfo,
     mapped_height: usize,
     row: usize,
@@ -191,11 +194,14 @@ pub fn init(buffer_start: u64, info: FrameBufferInfo) {
     let cell_w = GLYPH_W * scale;
     let cell_h = GLYPH_H * scale;
     let rowbuf = alloc::vec![0u8; bytes_per_scanline(&info) * cell_h];
+    let shadow_len = bytes_per_scanline(&info) * mapped_height;
+    let shadow = alloc::vec![0u8; shadow_len];
     unsafe {
-        core::ptr::write_bytes(ptr, 0, bytes_per_scanline(&info) * mapped_height);
+        core::ptr::write_bytes(ptr, 0, shadow_len);
     }
     *FB.lock() = Some(FbState {
         ptr,
+        shadow,
         info,
         mapped_height,
         row: 0,
@@ -263,7 +269,7 @@ fn max_rows(st: &FbState) -> usize {
     ROWS.min(st.mapped_height / st.cell_h)
 }
 
-fn fill_rect(st: &FbState, x0: usize, y0: usize, w: usize, h: usize, r: u8, g: u8, b: u8) {
+fn fill_rect(st: &mut FbState, x0: usize, y0: usize, w: usize, h: usize, r: u8, g: u8, b: u8) {
     if w == 0 || h == 0 {
         return;
     }
@@ -286,9 +292,11 @@ fn fill_rect(st: &FbState, x0: usize, y0: usize, w: usize, h: usize, r: u8, g: u
             if x0 == 0 && w == st.info.width && bpl * h <= st.info.byte_len.saturating_sub(start)
             {
                 core::ptr::write_bytes(st.ptr.add(start), 0, bpl * h);
+                core::ptr::write_bytes(st.shadow.as_mut_ptr().add(start), 0, bpl * h);
             } else {
                 for dy in 0..h {
                     core::ptr::write_bytes(st.ptr.add(start + dy * bpl), 0, row_bytes);
+                    core::ptr::write_bytes(st.shadow.as_mut_ptr().add(start + dy * bpl), 0, row_bytes);
                 }
             }
         }
@@ -298,15 +306,18 @@ fn fill_rect(st: &FbState, x0: usize, y0: usize, w: usize, h: usize, r: u8, g: u
     unsafe {
         for dy in 0..h {
             let mut p = st.ptr.add(start + dy * bpl);
+            let mut s = st.shadow.as_mut_ptr().add(start + dy * bpl);
             for _ in 0..w {
                 core::ptr::copy_nonoverlapping(px.as_ptr(), p, bpp);
+                core::ptr::copy_nonoverlapping(px.as_ptr(), s, bpp);
                 p = p.add(bpp);
+                s = s.add(bpp);
             }
         }
     }
 }
 
-fn paint_glyph(st: &FbState, row: usize, col: usize, cp: u16) {
+fn paint_glyph(st: &mut FbState, row: usize, col: usize, cp: u16) {
     if cp == CELL_SPACE || cp == 0 {
         return;
     }
@@ -331,9 +342,12 @@ fn paint_glyph(st: &FbState, row: usize, col: usize, cp: u16) {
                         break;
                     }
                     let mut p = st.ptr.add(y * bpl + px0 * bpp);
+                    let mut s = st.shadow.as_mut_ptr().add(y * bpl + px0 * bpp);
                     for _ in 0..scale {
                         core::ptr::copy_nonoverlapping(px.as_ptr(), p, bpp);
+                        core::ptr::copy_nonoverlapping(px.as_ptr(), s, bpp);
                         p = p.add(bpp);
+                        s = s.add(bpp);
                     }
                 }
             }
@@ -341,7 +355,7 @@ fn paint_glyph(st: &FbState, row: usize, col: usize, cp: u16) {
     }
 }
 
-fn clear_cell(st: &FbState, row: usize, col: usize) {
+fn clear_cell(st: &mut FbState, row: usize, col: usize) {
     fill_rect(
         st,
         col * st.cell_w,
@@ -354,7 +368,7 @@ fn clear_cell(st: &FbState, row: usize, col: usize) {
     );
 }
 
-fn refresh_cell(st: &FbState, row: usize, col: usize) {
+fn refresh_cell(st: &mut FbState, row: usize, col: usize) {
     clear_cell(st, row, col);
     let cp = st.text[row][col];
     if cp != CELL_SPACE {
@@ -407,13 +421,40 @@ fn paint_row(st: &mut FbState, row: usize) {
         }
     }
     unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), st.ptr.add(y0 * bpl), bytes);
+        let off = y0 * bpl;
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), st.ptr.add(off), bytes);
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), st.shadow.as_mut_ptr().add(off), bytes);
     }
     st.rowbuf = buf;
 }
 
-fn sync_rows_after_scroll(st: &mut FbState) {
-    for r in 0..max_rows(st) {
+fn scroll_framebuffer_pixels(st: &mut FbState, scroll_lines: usize) {
+    if scroll_lines == 0 {
+        return;
+    }
+    let bpl = bytes_per_scanline(&st.info);
+    let band = st.cell_h.saturating_mul(scroll_lines);
+    let h = st.mapped_height;
+    if band == 0 || band >= h {
+        return;
+    }
+    let move_bytes = (h - band) * bpl;
+    unsafe {
+        let sh = st.shadow.as_mut_ptr();
+        core::ptr::copy(sh.add(band * bpl), sh, move_bytes);
+        core::ptr::copy_nonoverlapping(sh, st.ptr, move_bytes);
+    }
+    fill_rect(st, 0, h.saturating_sub(band), st.info.width, band, 0, 0, 0);
+}
+
+fn sync_rows_after_scroll(st: &mut FbState, scroll_lines: usize) {
+    scroll_framebuffer_pixels(st, scroll_lines);
+    let rows = max_rows(st);
+    if rows == 0 {
+        return;
+    }
+    let start = rows.saturating_sub(scroll_lines);
+    for r in start..rows {
         paint_row(st, r);
     }
 }
@@ -429,11 +470,11 @@ fn scroll_text(st: &mut FbState) {
     st.text[rows - 1] = [CELL_SPACE; COLS];
 }
 
-fn erase_cursor(st: &FbState) {
+fn erase_cursor(st: &mut FbState) {
     refresh_cell(st, st.row, st.col);
 }
 
-fn draw_cursor(st: &FbState) {
+fn draw_cursor(st: &mut FbState) {
     let y0 = st.row * st.cell_h;
     let bar_y = y0 + st.cell_h.saturating_sub(st.scale);
     let x = st.col * st.cell_w;
@@ -543,7 +584,7 @@ pub fn write_bytes(s: &[u8]) {
     }
 
     if scroll_lines > 0 {
-        sync_rows_after_scroll(st);
+        sync_rows_after_scroll(st, scroll_lines);
     }
     draw_cursor(st);
 }

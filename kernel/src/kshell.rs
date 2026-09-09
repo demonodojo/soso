@@ -237,7 +237,7 @@ fn exec(line: &str) {
                                 crate::lxdde::wifi_phase()
                             );
                         } else {
-                            crate::lxdde::wifi_scan();
+                            let rc = crate::lxdde::wifi_scan();
                             let mut n = 0u32;
                             for (ssid, rssi, ch, open) in crate::lxdde::wifi_scan_results() {
                                 let sec = if open { "abierta" } else { "WPA" };
@@ -245,7 +245,11 @@ fn exec(line: &str) {
                                 n += 1;
                             }
                             if n == 0 {
-                                println!("wifi: ninguna red");
+                                if rc != 0 {
+                                    println!("wifi: scan fallo (rc={rc})");
+                                } else {
+                                    println!("wifi: ninguna red");
+                                }
                             }
                         }
                     }

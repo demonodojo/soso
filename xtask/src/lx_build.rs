@@ -453,6 +453,7 @@ fn provided_symbols() -> HashSet<&'static str> {
         "lx_nouveau_set_boot0",
         "lx_iwlwifi_init_module", "lx_iwlwifi_start_module", "lx_iwlwifi_exit_module",
         "lx_iwlwifi_fw_alive", "lx_iwlwifi_fw_phase", "lx_iwlwifi_probed", "lx_iwlwifi_scan",
+        "lx_iwlwifi_get_scan_results",
         "lx_iwlwifi_connect_open", "lx_iwlwifi_connect_wpa2", "lx_iwlwifi_install_key",
         "lx_iwlwifi_connected", "lx_iwlwifi_rx", "lx_iwlwifi_tx", "lx_iwlwifi_mac",
         "lx_iwlwifi_poll", "lx_iwlwifi_set_alive", "lx_iwlwifi_set_phase",

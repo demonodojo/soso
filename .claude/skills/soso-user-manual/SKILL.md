@@ -61,7 +61,7 @@ Referencia rápida — ampliar el manual si cambian:
 - **`soso-install`:** sin args elige disco; `list`, `<id|nombre> --yes`, `status`; buzón `SOSOBOOT.TXT`
 - **`soso-hf`:** `search`, `list`, `pull` (modelos en `/models/` desde el guest)
 - **Arranque:** QEMU `cargo xtask run`; live `flash-usb-live`; salida `Ctrl-A X`
-- **Log USB live:** `cargo xtask sosolog` / `--drv` (ESP p1; no `sudo cargo`)
+- **Log USB live:** usuario `cargo xtask sosolog` / `--drv`; el agente monta p1 con `udisksctl` (skill **soso-live**), no `sudo cargo`
 - **SSH:** `ssh -tt -i target/soso_test_key -p 2222 soso@localhost` (QEMU); puerto 22 en placa
 - **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, `wifi`, `ask`, `voz`, pipes, redirecciones)
 - **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `halt`

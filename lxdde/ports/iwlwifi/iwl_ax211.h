@@ -68,6 +68,12 @@ struct iwl_ax211_priv {
 
     struct iwl_ax211_bss scan[IWL_AX211_MAX_SCAN];
     int scan_count;
+    int scan_active;
+    int scan_complete;
+    int scan_cfg_sent;
+    uint8_t last_rx_channel;
+    int8_t last_rx_rssi;
+    uint8_t last_rx_band24;
 
     uint8_t rxq[8][2048];
     int rxq_head;
@@ -89,6 +95,7 @@ int iwl_ax211_alive(void);
 const char *iwl_ax211_phase(void);
 
 int iwl_ax211_scan(struct iwl_ax211_bss *out, int max, int *count);
+int iwl_ax211_get_scan_results(struct iwl_ax211_bss *out, int max, int *count);
 int iwl_ax211_connect_open(const char *ssid);
 int iwl_ax211_connect_wpa2(const char *ssid, const uint8_t psk[32]);
 int iwl_ax211_install_key(const uint8_t key[16], int key_idx);

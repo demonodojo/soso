@@ -456,6 +456,7 @@ pub const ENOENT: i64 = 2;
 pub const ESRCH: i64 = 3;
 pub const EINTR: i64 = 4;
 pub const EIO: i64 = 5;
+pub const ETIMEDOUT: i64 = 110;
 pub const EBADF: i64 = 9;
 pub const ECHILD: i64 = 10;
 pub const ENOMEM: i64 = 12;

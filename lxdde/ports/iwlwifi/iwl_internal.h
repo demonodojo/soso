@@ -113,21 +113,28 @@
 
 #define IWL_MAX_DRAM_ENTRY         64
 #define IWL_CMD_QUEUE_SIZE         32
+#define IWL_CMD_SLOT_SIZE          2048
 #define IWL_MTR_SIZE               256
-#define IWL_MCR_SIZE               256
+#define IWL_MCR_SIZE               IWL_CMD_SLOT_SIZE
 #define IWL_RX_QUEUE_SIZE          256
 #define IWL_TX_QUEUE_DATA          8
 
 #define UCODE_ALIVE_NTFY           0x1
 #define INIT_COMPLETE_NOTIF        0x4
-#define SCAN_COMPLETE_UMAC         0xFC
+#define REPLY_RX_PHY_CMD           0xc0
+#define REPLY_RX_MPDU_CMD          0xc1
+#define SCAN_CFG_CMD               0xc
+#define SCAN_REQ_UMAC              0xd
+#define SCAN_COMPLETE_UMAC         0x0f
+#define OFFLOAD_MATCH_INFO_NOTIF   0xfc
 
+#define LEGACY_GROUP               0x0
+#define LONG_GROUP                 0x1
 #define SCAN_GROUP                 0x6
 #define DATA_PATH_GROUP            0x5
 #define MAC_CONF_GROUP             0x3
 #define SYSTEM_GROUP               0x2
 
-#define SCAN_REQ_UMAC              0x0
 #define ADD_STA                    0x18
 #define TX_CMD                     0x1
 
@@ -365,6 +372,94 @@ struct iwl_cmd_header {
     uint8_t length;
 } __attribute__((packed));
 
+struct iwl_cmd_header_wide {
+    uint8_t cmd;
+    uint8_t group_id;
+    uint16_t sequence;
+    uint16_t length;
+    uint8_t reserved;
+    uint8_t version;
+} __attribute__((packed));
+
+struct iwl_scan_config {
+    uint8_t enable_cam_mode;
+    uint8_t enable_promiscouos_mode;
+    uint8_t bcast_sta_id;
+    uint8_t reserved;
+    uint32_t tx_chains;
+    uint32_t rx_chains;
+} __attribute__((packed));
+
+struct iwl_scan_umac_schedule {
+    uint16_t interval;
+    uint8_t iter_count;
+    uint8_t reserved;
+} __attribute__((packed));
+
+struct iwl_scan_probe_segment {
+    uint16_t offset;
+    uint16_t len;
+} __attribute__((packed));
+
+struct iwl_scan_probe_req_v1 {
+    struct iwl_scan_probe_segment mac_header;
+    struct iwl_scan_probe_segment band_data[2];
+    struct iwl_scan_probe_segment common_data;
+    uint8_t buf[512];
+} __attribute__((packed));
+
+struct iwl_ssid_ie {
+    uint8_t id;
+    uint8_t len;
+    uint8_t ssid[32];
+} __attribute__((packed));
+
+struct iwl_scan_umac_chan_param {
+    uint8_t flags;
+    uint8_t count;
+    uint16_t reserved;
+} __attribute__((packed));
+
+struct iwl_scan_channel_cfg_umac {
+    uint32_t flags;
+    union {
+        struct {
+            uint8_t channel_num;
+            uint8_t band;
+            uint8_t iter_count;
+            uint8_t iter_interval;
+        } v2;
+    };
+} __attribute__((packed));
+
+struct iwl_scan_req_umac_tail_v1 {
+    struct iwl_scan_umac_schedule schedule[2];
+    uint16_t delay;
+    uint16_t reserved;
+    struct iwl_scan_probe_req_v1 preq;
+    struct iwl_ssid_ie direct_scan[20];
+} __attribute__((packed));
+
+struct iwl_umac_scan_complete {
+    uint32_t uid;
+    uint8_t last_schedule;
+    uint8_t last_iter;
+    uint8_t status;
+    uint8_t ebs_status;
+    uint32_t time_from_last_iter;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_rx_mpdu_res_start {
+    uint16_t byte_count;
+    uint16_t assist;
+} __attribute__((packed));
+
+#define IWL_SCAN_REQ_UMAC_SIZE_V6 44u
+#define IWL_UMAC_SCAN_GEN_FLAGS_PASS_ALL  (1u << 2)
+#define IWL_UMAC_SCAN_GEN_FLAGS_ITER_COMPLETE (1u << 5)
+#define IWL_SCAN_OFFLOAD_COMPLETED 1u
+
 struct iwl_ax211_priv;
 
 int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned long fw_len);
@@ -372,6 +467,7 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl);
 int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl);
 void iwl_trans_poll(struct iwl_ax211_priv *iwl);
 int iwl_mvm_scan(struct iwl_ax211_priv *iwl);
+void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len);
 int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid);
 int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid, const uint8_t psk[32]);
 int iwl_mvm_install_key(struct iwl_ax211_priv *iwl, const uint8_t key[16], int key_idx);

@@ -48,6 +48,9 @@ int gsp_top_probe(void);
 int gsp_top_runlist_of(uint8_t type, uint8_t inst, uint32_t *runlist,
                        uint32_t *addr);
 
+/* Base BAR0 del falcon (campo addr de PTOP) o `fallback` si no hay entrada. */
+unsigned gsp_top_falcon_base(uint8_t type, uint8_t inst, unsigned fallback);
+
 /* Traduce un `NV2080_ENGINE_TYPE_*` a tipo+instancia de PTOP. Devuelve 0 si sabe
  * hacerlo — hay motores de RM que no tienen equivalente y decirlo es mejor que
  * devolver el 0, que es justo GR. */

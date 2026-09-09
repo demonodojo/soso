@@ -131,7 +131,7 @@
     },
     {
       "id": "ga107-igpu",
-      "equipo": "NVIDIA GA107 (iGPU / Ampere)",
+      "equipo": "NVIDIA GA107 (dGPU Ampere, ROG 3050 Mobile)",
       "pci_ids": [
         "10de:249c"
       ],
@@ -152,7 +152,9 @@
       },
       "wifi": {
         "alive": {
-          "status": "pendiente"
+          "status": "ok",
+          "nota": "UCODE_ALIVE_NTFY (AX200 8086:2723 en esta placa)",
+          "fecha": "2026-09-09"
         },
         "scan": {
           "status": "pendiente"
@@ -172,10 +174,14 @@
       },
       "gpu": {
         "gsp_rpc": {
-          "status": "pendiente"
+          "status": "fail",
+          "nota": "booter_load ok, RISC-V inactivo cpuctl=0x10 → GSP=fallo",
+          "fecha": "2026-09-09"
         },
         "vram_pool": {
-          "status": "pendiente"
+          "status": "fail",
+          "nota": "pool VRAM=no (VRAM física 16384 MiB; sin GSP-RM)",
+          "fecha": "2026-09-09"
         },
         "ce_readback": {
           "status": "pendiente"
@@ -191,8 +197,11 @@
         }
       },
       "bench": {},
-      "logs": [],
-      "notas": "PCI 10de:249c (ROG 3050 Mobile). Cadena Ampere pendiente de revalidar en placa",
+      "logs": [
+        "/tmp/soso-placa/SOSOLOG.TXT",
+        "/tmp/soso-placa/SOSODRV.TXT"
+      ],
+      "notas": "Live 2026-09-09 ROG: 10de:249c GA107. FWSEC-FRTS OK; fix SEC2 PTOP 0x087000 pendiente reflash. RISC-V GSP inactivo (cpuctl=0x10) → sin ok hasta pool VRAM=sí. iGPU AMD 1002:1638 sin driver (GOP). rtl8169 enlace DOWN.",
       "actualizado": "2026-09-09"
     },
     {
@@ -286,10 +295,14 @@
       },
       "wifi": {
         "alive": {
-          "status": "pendiente"
+          "status": "ok",
+          "nota": "UCODE_ALIVE_NTFY",
+          "fecha": "2026-09-09"
         },
         "scan": {
-          "status": "pendiente"
+          "status": "fail",
+          "nota": "wifi: ninguna red (ALIVE ok; SCAN_REQ_UMAC stub, 0 BSS)",
+          "fecha": "2026-09-09"
         },
         "assoc_wpa2": {
           "status": "pendiente"
@@ -325,9 +338,12 @@
         }
       },
       "bench": {},
-      "logs": [],
-      "notas": "Context-info gen2; sin PNVM",
-      "actualizado": "2026-09-07"
+      "logs": [
+        "/tmp/soso-placa/SOSOLOG.TXT",
+        "/tmp/soso-placa/SOSODRV.TXT"
+      ],
+      "notas": "Live 2026-09-09 ROG: 8086:2723 ALIVE real (cc-a0-77). wifi scan ×2 → 0 redes. SCAN_REQ_UMAC es stub (flags=1, channel=0); parser SSID heurístico. SOSOWIFI.TXT vacío.",
+      "actualizado": "2026-09-09"
     }
   ]
 }

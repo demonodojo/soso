@@ -1114,7 +1114,8 @@ QEMU sin passthrough: `nvidia: sin GPU NVIDIA en PCI` — normal. `GSP booted (s
 
 Evidencia por placa en [`docs/hw-matrix.json`](../../docs/hw-matrix.json) — ver
 [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md). Tras SOSOLOG de live USB, el
-agente **sí** hace `parse-logs --id gb205-dgpu`. No `--boot-ok` ni `gsp_rpc: ok`
+agente **sí** hace `parse-logs --id gb205-dgpu`. Monta la ESP con `udisksctl`
+(skill **soso-live**), no `cargo xtask sosolog`. No `--boot-ok` ni `gsp_rpc: ok`
 si el log dice `GSP=fallo` / `pool VRAM=no`.
 
 | ID matriz | PCI | Etapas GPU |

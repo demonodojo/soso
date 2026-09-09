@@ -173,5 +173,22 @@ int main(int argc, char **argv)
                 sizeof(struct iwl_context_info));
         return 1;
     }
+    {
+        unsigned nch = 22u;
+        unsigned pay = IWL_SCAN_REQ_UMAC_SIZE_V6 +
+                       nch * (unsigned)sizeof(struct iwl_scan_channel_cfg_umac) +
+                       (unsigned)sizeof(struct iwl_scan_req_umac_tail_v1);
+        if (pay > IWL_CMD_SLOT_SIZE) {
+            fprintf(stderr, "SCAN_REQ_UMAC no cabe en slot MCR (%u > %u)\n",
+                    pay, IWL_CMD_SLOT_SIZE);
+            return 1;
+        }
+        if (240u >= IWL_CMD_SLOT_SIZE) {
+            fprintf(stderr, "tope legacy 240 B no debe bloquear slot nuevo\n");
+            return 1;
+        }
+        printf("OK: SCAN_REQ_UMAC empaquetado %u B (< %u slot MCR)\n", pay,
+               IWL_CMD_SLOT_SIZE);
+    }
     return 0;
 }
