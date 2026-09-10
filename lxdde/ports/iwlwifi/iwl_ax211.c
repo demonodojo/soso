@@ -182,18 +182,33 @@ int iwl_ax211_alive(void)
 /* R4: un timeout deja la cola bloqueada a propósito. Antes de cualquier
  * operación nueva se reinicia el transporte (que suelta el DMA envenenado) y
  * se rehace la secuencia completa de carga: FW → init → up. */
+/* Tope de recuperaciones seguidas que fallan. Recargar el firmware cuesta
+ * segundos: sin tope, insistir con `wifi scan` sobre una tarjeta que no
+ * rearranca convierte cada intento en otra recarga. */
+#define IWL_RECOVER_MAX_FALLOS 3
+
 static int iwl_ax211_ensure_ready(struct iwl_ax211_priv *iwl)
 {
+    static int fallos;
+
     if (!iwl_trans_needs_recover(iwl))
         return 0;
+    if (fallos >= IWL_RECOVER_MAX_FALLOS) {
+        lx_printk("iwlwifi: %d recuperaciones seguidas fallidas; no se insiste "
+                  "(reinicia el equipo o recarga el módulo)\n", fallos);
+        return -1;
+    }
     lx_printk("iwlwifi: cola bloqueada tras timeout; reiniciando transporte\n");
     iwl_set_phase(iwl, "recover");
     iwl_trans_recover(iwl);
     if (iwl_ax211_start_firmware() != 0) {
-        lx_printk("iwlwifi: recuperación falló (firmware no rearrancó)\n");
+        fallos++;
+        lx_printk("iwlwifi: recuperación falló (firmware no rearrancó, %d de "
+                  "%d)\n", fallos, IWL_RECOVER_MAX_FALLOS);
         iwl_set_phase(iwl, "recover_fail");
         return -1;
     }
+    fallos = 0;
     lx_printk("iwlwifi: transporte recuperado (%u reinicios)\n",
               (unsigned)iwl->cmd_recover);
     return 0;
