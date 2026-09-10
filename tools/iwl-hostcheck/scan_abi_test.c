@@ -62,6 +62,17 @@ int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
     return 0;
 }
 
+int iwl_fw_notif_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
+{
+    unsigned i;
+
+    for (i = 0; i < iwl->cmd_ver_count; i++) {
+        if (iwl->cmd_ver[i].group == group && iwl->cmd_ver[i].cmd == cmd)
+            return iwl->cmd_ver[i].notif_version;
+    }
+    return 0;
+}
+
 uint8_t iwl_mvm_scan_rx_ant(struct iwl_ax211_priv *iwl)
 {
     (void)iwl;
@@ -111,6 +122,13 @@ static int check_v17_layout(void)
 
     memset(&iwl, 0, sizeof(iwl));
     set_scan_ver(&iwl, 15);
+    /* Perfil con canales activos: sin él la lista es el fallback pasivo y el
+     * scan se declara FORCE_PASSIVE (R6). */
+    iwl.nvm_n_channels = 4;
+    iwl.nvm_chan_flags[0] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    iwl.nvm_chan_flags[1] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    iwl.nvm_chan_flags[2] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    iwl.nvm_chan_flags[3] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
     iwl.mac[0] = 0x02;
     iwl.mac[1] = 0x00;
     iwl.mac[2] = 0x00;
@@ -181,6 +199,8 @@ static int check_versions(void)
     for (i = 0; i < sizeof(ok); i++) {
         memset(&iwl, 0, sizeof(iwl));
         set_scan_ver(&iwl, ok[i]);
+        iwl.nvm_n_channels = 1;
+        iwl.nvm_chan_flags[0] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
         if (!iwl_mvm_scan_umac_supported(ok[i]) ||
             iwl_mvm_build_scan_req(&iwl, buf, sizeof(buf)) == 0) {
             fprintf(stderr, "versión %u debería construirse\n", ok[i]);
@@ -223,8 +243,16 @@ static int check_nvm_channels(void)
                 buf[REF_CHAN0 + 4], buf[REF_CHAN0 + 12]);
         return -1;
     }
-    if (buf[REF_CHAN0 + 8] == 0) {
-        fprintf(stderr, "canal radar debería marcarse pasivo\n");
+    /* Pasivo = IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE (bit 26), no el bit 0:
+     * los bits bajos son el mapa de SSID directos (fw/api/scan.h). */
+    if (!(buf[REF_CHAN0 + 11] & 0x04u)) {
+        fprintf(stderr, "canal radar debería marcarse pasivo (flags=0x%02x%02x%02x%02x)\n",
+                buf[REF_CHAN0 + 11], buf[REF_CHAN0 + 10],
+                buf[REF_CHAN0 + 9], buf[REF_CHAN0 + 8]);
+        return -1;
+    }
+    if (buf[REF_CHAN0 + 8] & 1u) {
+        fprintf(stderr, "bit 0 (SSID directo) usado como pasivo\n");
         return -1;
     }
     puts("OK: canales desde perfil NVM (activo/pasivo)");

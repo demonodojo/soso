@@ -99,16 +99,35 @@ static const uint8_t nvm_chan_num[] = {
     183, 184, 185, 187, 188, 189, 192, 196,
 };
 
-static unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
-                                              uint8_t *ch, uint8_t *band,
-                                              uint8_t *passive, unsigned max)
+/* R6: única selección de canales para todas las versiones de SCAN_REQ_UMAC.
+ *
+ * Tres situaciones distintas que antes se confundían en «lista fija activa»:
+ *   - sin perfil (NVM no leído)      → lista mínima conocida, solo pasiva
+ *   - perfil válido con cero canales → nada que escanear (no scan activo)
+ *   - perfil válido (NVM o MCC)      → filtrado, respetando activo/pasivo
+ */
+unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
+                                       uint8_t *ch, uint8_t *band,
+                                       uint8_t *passive, unsigned max,
+                                       int *origen)
 {
     unsigned n = 0;
     unsigned i;
     unsigned nvm_n = iwl->nvm_n_channels;
     unsigned table_n = sizeof(nvm_chan_num) / sizeof(nvm_chan_num[0]);
+    int src = IWL_CHAN_SRC_NONE;
 
-    if (nvm_n > 0) {
+    if (origen)
+        *origen = IWL_CHAN_SRC_NONE;
+    if (!ch || !band || !passive || max == 0)
+        return 0;
+
+    if (iwl->chan_src == IWL_CHAN_SRC_MCC || iwl->chan_src == IWL_CHAN_SRC_NVM ||
+        nvm_n > 0) {
+        /* Perfil presente: puede quedarse en cero canales usables, y eso
+         * es un resultado legítimo, no un motivo para inventar una lista. */
+        src = (iwl->chan_src == IWL_CHAN_SRC_MCC) ? IWL_CHAN_SRC_MCC
+                                                  : IWL_CHAN_SRC_NVM;
         if (nvm_n > table_n)
             nvm_n = table_n;
         for (i = 0; i < nvm_n && n < max; i++) {
@@ -120,14 +139,24 @@ static unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
             num = nvm_chan_num[i];
             ch[n] = num;
             band[n] = (num >= 36) ? 1 : 0;
-            passive[n] = (!(flags & NVM_CHANNEL_ACTIVE) || (flags & NVM_CHANNEL_RADAR))
+            /* Sin ACTIVE, con radar o solo interior: nada de probe request. */
+            passive[n] = (!(flags & NVM_CHANNEL_ACTIVE) ||
+                          (flags & NVM_CHANNEL_RADAR) ||
+                          (flags & NVM_CHANNEL_INDOOR_ONLY))
                              ? 1
                              : 0;
             n++;
         }
+        if (n == 0)
+            src = IWL_CHAN_SRC_EMPTY;
+        if (origen)
+            *origen = src;
+        return n;
     }
 
-    if (n == 0) {
+    /* Sin perfil regulatorio: solo escucha. Un scan activo sin regdominio no
+     * está permitido (Linux directamente lo rechaza, ver mvm/scan.c). */
+    {
         unsigned fallback = sizeof(scan_channels) / sizeof(scan_channels[0]);
 
         if (fallback > max)
@@ -135,10 +164,12 @@ static unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
         for (i = 0; i < fallback; i++) {
             ch[i] = scan_channels[i].ch;
             band[i] = scan_channels[i].band;
-            passive[i] = 0;
+            passive[i] = 1;
         }
         n = fallback;
     }
+    if (origen)
+        *origen = IWL_CHAN_SRC_FALLBACK;
     return n;
 }
 
@@ -147,11 +178,14 @@ int iwl_mvm_scan_umac_supported(uint8_t ver)
     return ver == 6 || ver == 14 || ver == 15 || ver == 16 || ver == 17;
 }
 
-static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf, unsigned cap)
+static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf,
+                                       unsigned cap, uint8_t scan_ver)
 {
     struct iwl_scan_req_umac_v17 *req;
     unsigned nch;
     unsigned i;
+    unsigned n_passive = 0;
+    int origen = IWL_CHAN_SRC_NONE;
     uint8_t ch[SCAN_MAX_NUM_CHANS_V3];
     uint8_t band[SCAN_MAX_NUM_CHANS_V3];
     uint8_t passive[SCAN_MAX_NUM_CHANS_V3];
@@ -159,9 +193,14 @@ static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf,
     if (cap < sizeof(*req))
         return 0;
 
-    nch = iwl_mvm_collect_scan_channels(iwl, ch, band, passive, SCAN_MAX_NUM_CHANS_V3);
-    if (nch == 0)
+    nch = iwl_mvm_collect_scan_channels(iwl, ch, band, passive,
+                                        SCAN_MAX_NUM_CHANS_V3, &origen);
+    if (nch == 0) {
+        lx_printk("iwl_mvm: sin canales escaneables (origen=%d)\n", origen);
         return 0;
+    }
+    for (i = 0; i < nch; i++)
+        n_passive += passive[i] ? 1u : 0u;
 
     memset(buf, 0, sizeof(*req));
     req = (struct iwl_scan_req_umac_v17 *)buf;
@@ -170,18 +209,37 @@ static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf,
         iwl->scan_uid = 1;
     req->uid = iwl_cpu_to_le32(iwl->scan_uid);
     req->ooc_priority = iwl_cpu_to_le32(1);
-    req->scan_params.general_params.flags =
-        (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL |
-                   IWL_UMAC_SCAN_GEN_FLAGS_V2_NTFY_ITER_COMPLETE);
+    {
+        uint16_t gflags = (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL |
+                                     IWL_UMAC_SCAN_GEN_FLAGS_V2_NTFY_ITER_COMPLETE);
+
+        /* Todos los canales pasivos → scan pasivo declarado también arriba
+         * (`iwl_mvm_scan_umac_flags_v2`: sin SSID directos, FORCE_PASSIVE). */
+        if (n_passive == nch)
+            gflags |= IWL_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE;
+        req->scan_params.general_params.flags = gflags;
+        iwl->scan_passive_only = (n_passive == nch) ? 1u : 0u;
+    }
     req->scan_params.general_params.active_dwell[0] = 30;
     req->scan_params.general_params.passive_dwell[0] = 110;
     req->scan_params.channel_params.count = (uint8_t)nch;
     for (i = 0; i < nch; i++) {
-        req->scan_params.channel_params.channel_config[i].v2.channel_num = ch[i];
-        req->scan_params.channel_params.channel_config[i].v2.band = band[i];
-        req->scan_params.channel_params.channel_config[i].v2.iter_count = 1;
+        struct iwl_scan_channel_cfg_umac *cfg =
+            &req->scan_params.channel_params.channel_config[i];
+        uint32_t flags = 0;
+
+        cfg->v2.channel_num = ch[i];
+        cfg->v2.iter_count = 1;
+        /* v17 mueve la banda a flags[31:30] y reutiliza el byte de `band`
+         * como psd_20 (`iwl_mvm_umac_scan_cfg_channels_v7`). */
+        if (scan_ver >= 17)
+            flags |= (uint32_t)band[i] << IWL_CHAN_CFG_FLAGS_BAND_POS;
+        else
+            cfg->v2.band = band[i];
+        /* Pasivo = FORCE_PASSIVE; el bit 0 es «probe dirigido al SSID 0». */
         if (passive[i])
-            req->scan_params.channel_params.channel_config[i].flags = 1;
+            flags |= IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE;
+        cfg->flags = flags;
     }
     req->scan_params.periodic_params.schedule[0].iter_count = 1;
     req->scan_params.periodic_params.schedule[1].iter_count = 0xff;
@@ -196,21 +254,42 @@ uint16_t iwl_mvm_build_scan_req(struct iwl_ax211_priv *iwl, uint8_t *buf, unsign
     if (!iwl_mvm_scan_umac_supported(scan_ver))
         return 0;
     if (scan_ver >= 14)
-        return iwl_build_scan_req_v17(iwl, buf, cap);
+        return iwl_build_scan_req_v17(iwl, buf, cap, scan_ver);
 
-    unsigned nch = sizeof(scan_channels) / sizeof(scan_channels[0]);
-    unsigned pay = IWL_SCAN_REQ_UMAC_SIZE_V6 + nch * sizeof(struct iwl_scan_channel_cfg_umac) +
-                   sizeof(struct iwl_scan_req_umac_tail_v1);
+    /* v6 usa la misma política de canales: sin lista fija propia. */
+    uint8_t chs[SCAN_MAX_NUM_CHANS_V3];
+    uint8_t bands[SCAN_MAX_NUM_CHANS_V3];
+    uint8_t passives[SCAN_MAX_NUM_CHANS_V3];
+    int origen = IWL_CHAN_SRC_NONE;
+    unsigned nch = iwl_mvm_collect_scan_channels(iwl, chs, bands, passives,
+                                                 SCAN_MAX_NUM_CHANS_V3, &origen);
+    unsigned n_passive = 0;
+    unsigned pay;
     uint8_t *data;
     struct iwl_scan_req_umac_tail_v1 *tail;
     unsigned i;
 
+    if (nch == 0) {
+        lx_printk("iwl_mvm: v6 sin canales escaneables (origen=%d)\n", origen);
+        return 0;
+    }
+    pay = IWL_SCAN_REQ_UMAC_SIZE_V6 + nch * sizeof(struct iwl_scan_channel_cfg_umac) +
+          sizeof(struct iwl_scan_req_umac_tail_v1);
     if (pay > cap)
         return 0;
+    for (i = 0; i < nch; i++)
+        n_passive += passives[i] ? 1u : 0u;
 
     memset(buf, 0, pay);
-    *(uint16_t *)(buf + 12) =
-        (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_PASS_ALL | IWL_UMAC_SCAN_GEN_FLAGS_ITER_COMPLETE);
+    {
+        uint16_t gflags = (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_PASS_ALL |
+                                     IWL_UMAC_SCAN_GEN_FLAGS_ITER_COMPLETE);
+
+        if (n_passive == nch)
+            gflags |= IWL_UMAC_SCAN_GEN_FLAGS_PASSIVE;
+        *(uint16_t *)(buf + 12) = gflags;
+        iwl->scan_passive_only = (n_passive == nch) ? 1u : 0u;
+    }
     buf[17] = 30;
     buf[18] = 30;
     buf[19] = 10;
@@ -218,12 +297,14 @@ uint16_t iwl_mvm_build_scan_req(struct iwl_ax211_priv *iwl, uint8_t *buf, unsign
 
     data = buf + IWL_SCAN_REQ_UMAC_SIZE_V6;
     for (i = 0; i < nch; i++) {
-        struct iwl_scan_channel_cfg_umac *ch =
-            (struct iwl_scan_channel_cfg_umac *)(data + i * sizeof(*ch));
-        ch->v2.channel_num = scan_channels[i].ch;
-        ch->v2.band = scan_channels[i].band;
-        ch->v2.iter_count = 1;
-        ch->v2.iter_interval = 0;
+        struct iwl_scan_channel_cfg_umac *cfg =
+            (struct iwl_scan_channel_cfg_umac *)(data + i * sizeof(*cfg));
+        cfg->v2.channel_num = chs[i];
+        cfg->v2.band = bands[i];
+        cfg->v2.iter_count = 1;
+        cfg->v2.iter_interval = 0;
+        if (passives[i])
+            cfg->flags = IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE;
     }
 
     tail = (struct iwl_scan_req_umac_tail_v1 *)(data + nch * sizeof(struct iwl_scan_channel_cfg_umac));
@@ -359,12 +440,23 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
 
     pay = iwl_mvm_build_scan_req(iwl, req, sizeof(req));
     if (pay == 0) {
-        lx_printk("iwl_mvm: SCAN_REQ versión no soportada o no cabe\n");
+        lx_printk("iwl_mvm: SCAN_REQ versión no soportada, sin canales o no cabe\n");
         iwl->scan_active = 0;
-        return -1;
+        return IWL_SCAN_RC_NO_CHANNELS;
     }
 
-    lx_printk("iwl_mvm: SCAN_REQ_UMAC %u B uid=0x%x\n", pay, (unsigned)iwl->scan_uid);
+    /* LAR sin regdominio aplicado: Linux rechaza el scan (mvm/scan.c). Aquí
+     * se deja continuar solo si es pasivo, que sí está permitido en cualquier
+     * dominio; así el diagnóstico distingue «sin MCC» de «sin radio». */
+    if (iwl->lar_enabled && !iwl->lar_regdom_set && !iwl->scan_passive_only) {
+        lx_printk("iwl_mvm: LAR sin regdominio aplicado; scan activo no permitido\n");
+        iwl->scan_active = 0;
+        return IWL_SCAN_RC_NO_REGDOM;
+    }
+
+    lx_printk("iwl_mvm: SCAN_REQ_UMAC %u B uid=0x%x origen=%u pasivo=%u\n", pay,
+              (unsigned)iwl->scan_uid, (unsigned)iwl->chan_src,
+              (unsigned)iwl->scan_passive_only);
 
     if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_REQ_UMAC, req, pay, 1000) != 0) {
         lx_printk("iwl_mvm: SCAN_REQ_UMAC rechazado\n");
@@ -396,8 +488,8 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
     if (iwl->scan_end == IWL_SCAN_END_NORMAL)
         return 0;
     if (iwl->scan_end == IWL_SCAN_END_ABORTED)
-        return -1;
-    return -2;
+        return IWL_SCAN_RC_ABORTED;
+    return IWL_SCAN_RC_TIMEOUT;
 }
 
 static int iwl_mvm_assoc(struct iwl_ax211_priv *iwl, const char *ssid, const uint8_t *bssid)

@@ -52,6 +52,7 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
         return -1;
 
     memset(&iwl->fw, 0, sizeof(iwl->fw));
+    memset(iwl->fw_capa, 0, sizeof(iwl->fw_capa));
 
     const struct iwl_tlv_ucode_header *hdr = (const struct iwl_tlv_ucode_header *)fw;
     if (le32((const uint8_t *)&hdr->magic) != IWL_TLV_UCODE_MAGIC) {
@@ -138,6 +139,18 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
             lx_printk("iwl_fw: CMD_VERSIONS %u entradas\n", iwl->cmd_ver_count);
             break;
         }
+        case IWL_UCODE_TLV_ENABLED_CAPABILITIES: {
+            if (length == sizeof(struct iwl_ucode_capa)) {
+                const struct iwl_ucode_capa *uc =
+                    (const struct iwl_ucode_capa *)pos;
+                uint32_t idx = le32((const uint8_t *)&uc->api_index);
+                uint32_t flags = le32((const uint8_t *)&uc->api_capa);
+
+                if (idx < IWL_FW_CAPA_SETS)
+                    iwl->fw_capa[idx] |= flags;
+            }
+            break;
+        }
         default:
             break;
         }
@@ -161,6 +174,48 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
     }
     lx_printk("iwl_fw: inst=%u data=%u init=%u\n",
               iwl->fw.inst.len, iwl->fw.data.len, iwl->fw.init.len);
+    return 0;
+}
+
+int iwl_fw_has_capa(const struct iwl_ax211_priv *iwl, unsigned capa_bit)
+{
+    unsigned set = capa_bit / 32u;
+    unsigned bit = capa_bit % 32u;
+
+    if (!iwl || set >= IWL_FW_CAPA_SETS)
+        return 0;
+    return (iwl->fw_capa[set] & (1u << bit)) != 0;
+}
+
+/* `iwl_fw_lookup_notif_ver`: versión del *layout de notificación/respuesta*. */
+int iwl_fw_notif_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
+{
+    unsigned i;
+    uint8_t grp = group;
+
+    if (group == LEGACY_GROUP)
+        grp = LONG_GROUP;
+    for (i = 0; i < iwl->cmd_ver_count; i++) {
+        if (iwl->cmd_ver[i].group == grp && iwl->cmd_ver[i].cmd == cmd) {
+            return iwl->cmd_ver[i].notif_version;
+        }
+    }
+    return 0;
+}
+
+int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
+{
+    unsigned i;
+    /* Linux `iwl_fw_lookup_cmd_ver` (fw/img.c): grp 0 → LONG_GROUP (DEF_ID). */
+    uint8_t grp = group;
+
+    if (group == LEGACY_GROUP)
+        grp = LONG_GROUP;
+    for (i = 0; i < iwl->cmd_ver_count; i++) {
+        if (iwl->cmd_ver[i].group == grp && iwl->cmd_ver[i].cmd == cmd) {
+            return iwl->cmd_ver[i].version;
+        }
+    }
     return 0;
 }
 

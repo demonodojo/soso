@@ -179,6 +179,26 @@ int iwl_ax211_alive(void)
     return g_iwl.alive;
 }
 
+/* R4: un timeout deja la cola bloqueada a propósito. Antes de cualquier
+ * operación nueva se reinicia el transporte (que suelta el DMA envenenado) y
+ * se rehace la secuencia completa de carga: FW → init → up. */
+static int iwl_ax211_ensure_ready(struct iwl_ax211_priv *iwl)
+{
+    if (!iwl_trans_needs_recover(iwl))
+        return 0;
+    lx_printk("iwlwifi: cola bloqueada tras timeout; reiniciando transporte\n");
+    iwl_set_phase(iwl, "recover");
+    iwl_trans_recover(iwl);
+    if (iwl_ax211_start_firmware() != 0) {
+        lx_printk("iwlwifi: recuperación falló (firmware no rearrancó)\n");
+        iwl_set_phase(iwl, "recover_fail");
+        return -1;
+    }
+    lx_printk("iwlwifi: transporte recuperado (%u reinicios)\n",
+              (unsigned)iwl->cmd_recover);
+    return 0;
+}
+
 const char *iwl_ax211_phase(void)
 {
     return g_iwl.phase;
@@ -208,6 +228,8 @@ int iwl_ax211_scan(struct iwl_ax211_bss *out, int max, int *count)
     struct iwl_ax211_priv *iwl = &g_iwl;
     int rc;
 
+    if (iwl_ax211_ensure_ready(iwl) != 0)
+        return -1;
     if (!iwl->alive)
         return -1;
 
@@ -221,9 +243,11 @@ int iwl_ax211_scan(struct iwl_ax211_bss *out, int max, int *count)
     iwl_set_phase(iwl, "scan");
     rc = iwl_mvm_scan(iwl);
     iwl_set_phase(iwl, rc == 0 ? "scan_done" : "scan_fail");
-    if (rc != 0 && iwl->scan_count == 0)
-        return rc;
-    return iwl_ax211_copy_scan(out, max, count);
+    /* R6: los BSS parciales se entregan, pero el resultado del scan se
+     * propaga tal cual. Antes devolvía 0 y un fallo parecía éxito. */
+    if (iwl_ax211_copy_scan(out, max, count) != 0)
+        return -1;
+    return rc;
 }
 
 int iwl_ax211_get_scan_results(struct iwl_ax211_bss *out, int max, int *count)
@@ -235,11 +259,15 @@ int iwl_ax211_get_scan_results(struct iwl_ax211_bss *out, int max, int *count)
 
 int iwl_ax211_connect_open(const char *ssid)
 {
+    if (iwl_ax211_ensure_ready(&g_iwl) != 0)
+        return -1;
     return iwl_mvm_connect_open(&g_iwl, ssid);
 }
 
 int iwl_ax211_connect_wpa2(const char *ssid, const uint8_t psk[32])
 {
+    if (iwl_ax211_ensure_ready(&g_iwl) != 0)
+        return -1;
     return iwl_mvm_connect_wpa2(&g_iwl, ssid, psk);
 }
 
@@ -276,6 +304,8 @@ int iwl_ax211_rx(uint8_t *buf, int buflen)
 
 int iwl_ax211_tx(const uint8_t *buf, int len)
 {
+    if (iwl_trans_needs_recover(&g_iwl))
+        return -1;
     return iwl_mvm_tx_8023(&g_iwl, buf, len);
 }
 

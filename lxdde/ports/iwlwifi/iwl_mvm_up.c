@@ -244,9 +244,13 @@ int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
-    if (iwl_mvm_send_dqa(iwl) != 0) {
-        lx_printk("iwl_mvm: DQA no habilitado — abort up\n");
-        return -1;
+    if (iwl_fw_has_capa(iwl, IWL_UCODE_TLV_CAPA_DQA_SUPPORT)) {
+        if (iwl_mvm_send_dqa(iwl) != 0) {
+            lx_printk("iwl_mvm: DQA no habilitado — abort up\n");
+            return -1;
+        }
+    } else {
+        lx_printk("iwl_mvm: DQA omitido (sin CAPA_DQA_SUPPORT)\n");
     }
 
     if (iwl_mvm_phy_ctxt_add_minimal(iwl) != 0) {

@@ -67,6 +67,11 @@ int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl)
         lx_printk("iwl_mvm: NVM resp corta (%u)\n", (unsigned)iwl->cmd_resp_len);
         return -1;
     }
+    if (iwl->cmd_resp_trunc) {
+        lx_printk("iwl_mvm: NVM resp recortada (%u de %u B); no se interpreta\n",
+                  (unsigned)iwl->cmd_resp_len, (unsigned)iwl->cmd_resp_wire_len);
+        return -1;
+    }
 
     resp = (const struct iwl_nvm_access_resp *)iwl->cmd_resp;
     status = resp->status;
@@ -171,10 +176,103 @@ uint8_t iwl_mvm_valid_rx_ant(struct iwl_ax211_priv *iwl)
     return 0x3;
 }
 
+/* R6: aplica la respuesta de MCC_UPDATE.
+ *
+ * Linux (`iwl_mvm_update_mcc`, mvm/nvm.c) elige el layout con la versión de
+ * *notificación* y exige que el payload mida exactamente cabecera + 4·n_canales;
+ * después `iwl_parse_nvm_mcc_info` construye el regdominio con esa lista, que
+ * está indexada igual que el perfil de canales del NVM. Aquí se hace lo mismo:
+ * sin validación completa no se aplica nada y `lar_regdom_set` sigue en 0.
+ */
+int iwl_mvm_apply_mcc_resp(struct iwl_ax211_priv *iwl, int notif_ver,
+                           const uint8_t *resp, unsigned len)
+{
+    unsigned hdr;
+    uint32_t status;
+    uint32_t n_channels;
+    uint16_t mcc;
+    const uint32_t *channels;
+    unsigned i;
+    unsigned validos = 0;
+
+    if (!iwl || !resp)
+        return -1;
+
+    if (notif_ver >= 8) {
+        hdr = (unsigned)sizeof(struct iwl_mcc_update_resp_v8);
+    } else if (notif_ver >= 4) {
+        hdr = (unsigned)sizeof(struct iwl_mcc_update_resp_v4);
+    } else {
+        hdr = (unsigned)sizeof(struct iwl_mcc_update_resp_v3);
+    }
+    if (len < hdr) {
+        lx_printk("iwl_mvm: MCC v%d resp corta (%u < %u B)\n", notif_ver, len, hdr);
+        return -1;
+    }
+
+    /* status y mcc están en el mismo sitio en v3/v4/v8; n_channels no. */
+    status = *(const uint32_t *)(const void *)resp;
+    mcc = *(const uint16_t *)(const void *)(resp + 4);
+    if (notif_ver >= 8) {
+        n_channels = ((const struct iwl_mcc_update_resp_v8 *)(const void *)resp)->n_channels;
+    } else if (notif_ver >= 4) {
+        n_channels = ((const struct iwl_mcc_update_resp_v4 *)(const void *)resp)->n_channels;
+    } else {
+        n_channels = ((const struct iwl_mcc_update_resp_v3 *)(const void *)resp)->n_channels;
+    }
+
+    if (n_channels > IWL_NUM_CHANNELS) {
+        lx_printk("iwl_mvm: MCC anuncia %u canales (máx %u); descartado\n",
+                  (unsigned)n_channels, (unsigned)IWL_NUM_CHANNELS);
+        return -1;
+    }
+    /* Igualdad exacta, como Linux: ni de más ni de menos. */
+    if (len != hdr + n_channels * 4u) {
+        lx_printk("iwl_mvm: MCC tamaño %u ≠ %u (%u canales); descartado\n",
+                  len, hdr + n_channels * 4u, (unsigned)n_channels);
+        return -1;
+    }
+
+    iwl->mcc_status = status;
+    switch (status) {
+    case MCC_RESP_NEW_CHAN_PROFILE:
+    case MCC_RESP_SAME_CHAN_PROFILE:
+    case MCC_RESP_ILLEGAL:
+    case MCC_RESP_LOW_PRIORITY:
+        break;
+    default:
+        /* INVALID / NVM_DISABLED / modos de test: no hay perfil que aplicar. */
+        lx_printk("iwl_mvm: MCC status=%u sin perfil aplicable\n", (unsigned)status);
+        return -1;
+    }
+
+    /* W/A de Linux: 0x0000 es el dominio mundial "00". */
+    if (mcc == 0)
+        mcc = 0x3030;
+
+    channels = (const uint32_t *)(const void *)(resp + hdr);
+    for (i = 0; i < n_channels; i++) {
+        iwl->nvm_chan_flags[i] = channels[i];
+        if (channels[i] & NVM_CHANNEL_VALID)
+            validos++;
+    }
+    for (i = n_channels; i < IWL_NUM_CHANNELS; i++)
+        iwl->nvm_chan_flags[i] = 0;
+    iwl->nvm_n_channels = n_channels;
+    iwl->mcc_applied = mcc;
+    iwl->lar_regdom_set = 1;
+    iwl->mcc_done = 1;
+    iwl->chan_src = IWL_CHAN_SRC_MCC;
+    lx_printk("iwl_mvm: MCC aplicado %c%c status=%u canales=%u válidos=%u\n",
+              (char)(mcc >> 8), (char)(mcc & 0xff), (unsigned)status,
+              (unsigned)n_channels, validos);
+    return 0;
+}
+
 int iwl_mvm_init_mcc(struct iwl_ax211_priv *iwl)
 {
     struct iwl_mcc_update_cmd cmd;
-    const struct iwl_mcc_update_resp_v8 *rsp;
+    int notif_ver;
 
     if (!iwl->lar_enabled || iwl->mcc_done) {
         return 0;
@@ -191,19 +289,15 @@ int iwl_mvm_init_mcc(struct iwl_ax211_priv *iwl)
         lx_printk("iwl_mvm: MCC_UPDATE falló\n");
         return -1;
     }
-
-    if (iwl->cmd_resp_len < (uint16_t)sizeof(*rsp)) {
-        lx_printk("iwl_mvm: MCC_UPDATE resp corta (%u B)\n",
-                  (unsigned)iwl->cmd_resp_len);
+    if (iwl->cmd_resp_trunc) {
+        lx_printk("iwl_mvm: MCC_UPDATE recortada (%u de %u B)\n",
+                  (unsigned)iwl->cmd_resp_len, (unsigned)iwl->cmd_resp_wire_len);
         return -1;
     }
 
-    rsp = (const struct iwl_mcc_update_resp_v8 *)iwl->cmd_resp;
-    iwl->mcc_done = 1;
-    lx_printk("iwl_mvm: MCC_UPDATE ok status=%u mcc=%c%c\n",
-              (unsigned)rsp->status,
-              (char)(rsp->mcc >> 8), (char)(rsp->mcc & 0xff));
-    return 0;
+    notif_ver = iwl_fw_notif_ver(iwl, LEGACY_GROUP, MCC_UPDATE_CMD);
+    return iwl_mvm_apply_mcc_resp(iwl, notif_ver, iwl->cmd_resp,
+                                  iwl->cmd_resp_len);
 }
 
 int iwl_mvm_send_tx_ant_cfg(struct iwl_ax211_priv *iwl)
@@ -248,6 +342,11 @@ int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
+    if (iwl->cmd_resp_trunc) {
+        lx_printk("iwl_mvm: NVM_GET_INFO recortada (%u de %u B)\n",
+                  (unsigned)iwl->cmd_resp_len, (unsigned)iwl->cmd_resp_wire_len);
+        return -1;
+    }
     rsp_len = iwl->cmd_resp_len;
     if (rsp_len >= (uint16_t)sizeof(struct iwl_nvm_get_info_rsp)) {
         const struct iwl_nvm_get_info_rsp *rsp =
@@ -259,6 +358,7 @@ int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl)
             n = IWL_NUM_CHANNELS;
         iwl->nvm_n_channels = n;
         memcpy(iwl->nvm_chan_flags, rsp->regulatory.channel_profile, n * sizeof(uint32_t));
+        iwl->chan_src = IWL_CHAN_SRC_NVM;
         lx_printk("iwl_mvm: NVM_GET_INFO v4 nvm_ver=0x%04x nch=%u\n",
                   (unsigned)rsp->general.nvm_version, (unsigned)n);
     } else if (rsp_len >= (uint16_t)sizeof(struct iwl_nvm_get_info_rsp_v3)) {
@@ -271,6 +371,7 @@ int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl)
         iwl->nvm_n_channels = n;
         for (i = 0; i < n; i++)
             iwl->nvm_chan_flags[i] = rsp->regulatory.channel_profile[i];
+        iwl->chan_src = IWL_CHAN_SRC_NVM;
         lx_printk("iwl_mvm: NVM_GET_INFO v3 nvm_ver=0x%04x\n",
                   (unsigned)rsp->general.nvm_version);
     } else {

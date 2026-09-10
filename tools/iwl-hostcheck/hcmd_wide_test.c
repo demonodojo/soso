@@ -1,4 +1,4 @@
-/* Host: HCMD gen2 usa cabecera wide (8 B) también en LEGACY_GROUP. */
+/* Host: HCMD gen2 usa cabecera wide (8 B); LEGACY_GROUP API → wire LONG_GROUP (DEF_ID). */
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -121,8 +121,9 @@ static int check_wide_legacy(uint8_t id, const void *payload, uint16_t pay_len)
         fprintf(stderr, "iwl_cmd_header_wide != 8 B\n");
         return -1;
     }
-    if (g_mcr_pool[0] != id || g_mcr_pool[1] != LEGACY_GROUP) {
-        fprintf(stderr, "cabecera cmd/grp incorrecta para 0x%02x\n", id);
+    if (g_mcr_pool[0] != id || g_mcr_pool[1] != LONG_GROUP) {
+        fprintf(stderr, "cabecera cmd/grp incorrecta para 0x%02x (DEF_ID → grp=1)\n",
+                id);
         return -1;
     }
     if (*(uint16_t *)(g_mcr_pool + 4) != pay_len) {
@@ -159,6 +160,6 @@ int main(void)
         return -1;
     }
 
-    puts("OK: LEGACY HCMD (TX_ANT/SF/PHY) cabecera wide gen2 (8 B)");
+    puts("OK: LEGACY HCMD (TX_ANT/SF/PHY) wide 8 B + DEF_ID grp=1");
     return 0;
 }

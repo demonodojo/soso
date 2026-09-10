@@ -245,11 +245,17 @@ fn exec(line: &str) {
                                 n += 1;
                             }
                             if n == 0 {
-                                if rc != 0 {
-                                    println!("wifi: scan fallo (rc={rc})");
-                                } else {
-                                    println!("wifi: ninguna red");
+                                match rc {
+                                    0 => println!("wifi: ninguna red"),
+                                    -2 => println!("wifi: scan sin fin (timeout)"),
+                                    -3 => println!("wifi: sin canales escaneables"),
+                                    -4 => println!(
+                                        "wifi: sin perfil regulatorio (MCC); solo scan pasivo"
+                                    ),
+                                    _ => println!("wifi: scan abortado (rc={rc})"),
                                 }
+                            } else if rc != 0 {
+                                println!("wifi: resultado parcial (rc={rc})");
                             }
                         }
                     }

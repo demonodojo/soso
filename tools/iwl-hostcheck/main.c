@@ -287,5 +287,36 @@ int main(int argc, char **argv)
         return 1;
     }
     puts("OK: SCAN_CFG v5 payload iwl_scan_config 12 B");
+    {
+        const char *base = strrchr(argv[1], '/');
+        int is_ax200 = 0;
+
+        base = base ? base + 1 : argv[1];
+        if (strstr(base, "cc-a0-77") != NULL)
+            is_ax200 = 1;
+        if (is_ax200) {
+            int ver_tx;
+            int ver_phy;
+
+            if (iwl_fw_has_capa(&iwl, IWL_UCODE_TLV_CAPA_DQA_SUPPORT)) {
+                fprintf(stderr, "cc-a0-77 no debe declarar CAPA_DQA_SUPPORT\n");
+                return 1;
+            }
+            ver_tx = iwl_fw_cmd_ver(&iwl, LEGACY_GROUP, TX_ANT_CONFIGURATION_CMD);
+            if (ver_tx != 1) {
+                fprintf(stderr, "TX_ANT cmd_ver=%d (esperaba 1 vía DEF_ID grp=1)\n",
+                        ver_tx);
+                return 1;
+            }
+            ver_phy = iwl_fw_cmd_ver(&iwl, LEGACY_GROUP, PHY_CONTEXT_CMD);
+            if (ver_phy != 4) {
+                fprintf(stderr, "PHY_CONTEXT cmd_ver=%d (esperaba 4 vía DEF_ID grp=1)\n",
+                        ver_phy);
+                return 1;
+            }
+            printf("OK: DEF_ID cmd_ver TX_ANT=%d PHY_CONTEXT=%d, sin CAPA_DQA\n",
+                   ver_tx, ver_phy);
+        }
+    }
     return 0;
 }

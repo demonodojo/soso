@@ -5,18 +5,6 @@
 
 extern void *memset(void *dst, int c, unsigned long n);
 
-int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
-{
-    unsigned i;
-
-    for (i = 0; i < iwl->cmd_ver_count; i++) {
-        if (iwl->cmd_ver[i].group == group && iwl->cmd_ver[i].cmd == cmd) {
-            return iwl->cmd_ver[i].version;
-        }
-    }
-    return 0;
-}
-
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
 {
     struct iwl_init_extended_cfg_cmd init_cfg;

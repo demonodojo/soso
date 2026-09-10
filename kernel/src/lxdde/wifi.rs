@@ -37,6 +37,15 @@ unsafe extern "C" {
 
 static mut WIFI_REGISTERED: bool = false;
 
+/// Propietario único del transporte iwlwifi (R4).
+///
+/// El anillo de comandos, el drenaje RX y el sondeo comparten estado en
+/// `g_iwl`: sin este candado un `scan` desde una syscall en otro core podía
+/// reservar el mismo slot que el drenaje de `poll()` estaba liberando. El
+/// driver C rechaza además la reentrada (`in_trans`), que es lo que se puede
+/// comprobar en el banco host; esto es la exclusión real entre cores.
+static TRANS_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 pub fn init() -> i32 {
     let rc = unsafe { lx_iwlwifi_init_module() };
     if rc == 0 {
@@ -49,13 +58,20 @@ pub fn start_firmware() -> i32 {
     if unsafe { !WIFI_REGISTERED } {
         return -1;
     }
+    let _g = TRANS_LOCK.lock();
     unsafe { lx_iwlwifi_start_module() }
 }
 
 pub fn poll() {
-    if wifi_present() {
-        unsafe { lx_iwlwifi_poll() };
+    if !wifi_present() {
+        return;
     }
+    // El sondeo cede si otro camino ya es el propietario: volverá al próximo
+    // tick en vez de girar detrás de un scan de varios segundos.
+    let Some(_g) = TRANS_LOCK.try_lock() else {
+        return;
+    };
+    unsafe { lx_iwlwifi_poll() };
 }
 
 pub fn wifi_present() -> bool {
@@ -105,8 +121,9 @@ pub fn scan_results() -> alloc::vec::Vec<(alloc::string::String, i8, u8, bool)> 
         open: 0,
     }; MAX_SCAN];
     let mut count = 0i32;
-    let rc = unsafe {
-        lx_iwlwifi_get_scan_results(out.as_mut_ptr(), MAX_SCAN as c_int, &mut count)
+    let rc = {
+        let _g = TRANS_LOCK.lock();
+        unsafe { lx_iwlwifi_get_scan_results(out.as_mut_ptr(), MAX_SCAN as c_int, &mut count) }
     };
     if rc != 0 || count <= 0 {
         return alloc::vec::Vec::new();
@@ -121,6 +138,7 @@ pub fn scan_results() -> alloc::vec::Vec<(alloc::string::String, i8, u8, bool)> 
 }
 
 pub fn scan() -> i32 {
+    let _g = TRANS_LOCK.lock();
     unsafe { lx_iwlwifi_scan(core::ptr::null_mut(), 0, core::ptr::null_mut()) }
 }
 
@@ -129,6 +147,7 @@ pub fn connect_open(ssid: &str) -> i32 {
     let bytes = ssid.as_bytes();
     let n = bytes.len().min(SSID_MAX);
     buf[..n].copy_from_slice(&bytes[..n]);
+    let _g = TRANS_LOCK.lock();
     unsafe { lx_iwlwifi_connect_open(buf.as_ptr() as *const c_char) }
 }
 
@@ -138,14 +157,17 @@ pub fn connect_wpa2(ssid: &str, psk: &[u8; 32]) -> i32 {
     let bytes = ssid.as_bytes();
     let n = bytes.len().min(SSID_MAX);
     buf[..n].copy_from_slice(&bytes[..n]);
+    let _g = TRANS_LOCK.lock();
     unsafe { lx_iwlwifi_connect_wpa2(buf.as_ptr() as *const c_char, psk.as_ptr()) }
 }
 
 pub fn install_key(key: &[u8; 16], key_idx: i32) -> i32 {
+    let _g = TRANS_LOCK.lock();
     unsafe { lx_iwlwifi_install_key(key.as_ptr(), key_idx) }
 }
 
 pub fn receive(buf: &mut [u8]) -> Option<usize> {
+    let _g = TRANS_LOCK.lock();
     let n = unsafe { lx_iwlwifi_rx(buf.as_mut_ptr(), buf.len() as c_int) };
     if n > 0 {
         Some(n as usize)
@@ -155,6 +177,7 @@ pub fn receive(buf: &mut [u8]) -> Option<usize> {
 }
 
 pub fn send(data: &[u8]) -> Result<(), ()> {
+    let _g = TRANS_LOCK.lock();
     let rc = unsafe { lx_iwlwifi_tx(data.as_ptr(), data.len() as c_int) };
     if rc >= 0 {
         Ok(())

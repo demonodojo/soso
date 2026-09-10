@@ -88,18 +88,45 @@ struct iwl_ax211_priv {
     uint8_t valid_rx_ant;
     uint8_t lar_enabled;
     uint8_t mcc_done;
+    /* Perfil regulatorio realmente aplicado (no solo «MCC contestó»). */
+    uint8_t lar_regdom_set;
+    uint16_t mcc_applied;
+    uint32_t mcc_status;
+    /* Origen de la última lista de canales: IWL_CHAN_SRC_*. */
+    uint8_t chan_src;
+    uint8_t scan_passive_only;
     uint8_t n_scan_channels;
     struct iwl_fw_cmd_version cmd_ver[64];
     unsigned cmd_ver_count;
+    uint32_t fw_capa[IWL_FW_CAPA_SETS];
     int cmd_pending;
     uint16_t cmd_pending_seq;
     uint8_t cmd_pending_group;
     uint8_t cmd_pending_id;
-    uint32_t cmd_slot_poison;
+    /* Propiedad de slots de la cola de comandos (R4). El anillo es FIFO
+     * estricto: [cmd_read, cmd_write) son los slots en vuelo y ninguno se
+     * reutiliza hasta que el FW responde o se reinicia el transporte. */
+    uint8_t cmd_slot_state[IWL_CMD_QUEUE_SIZE];
+    uint8_t cmd_slot_group[IWL_CMD_QUEUE_SIZE];
+    uint8_t cmd_slot_id[IWL_CMD_QUEUE_SIZE];
+    uint16_t cmd_slot_seq[IWL_CMD_QUEUE_SIZE];
+    uint16_t cmd_read;
+    uint16_t cmd_poisoned;
+    uint32_t cmd_backpressure;
+    uint32_t cmd_reentry_reject;
+    uint32_t cmd_recover;
+    uint8_t cmd_needs_recover;
+    /* Guardia de reentrada: envío/RX/poll tienen un único propietario. */
+    uint8_t in_trans;
     int cmd_status;
     int cmd_fw_err;
     uint8_t cmd_resp[512];
     uint16_t cmd_resp_len;
+    /* Longitud anunciada por el FW antes de recortar a cmd_resp[]. */
+    uint16_t cmd_resp_wire_len;
+    uint8_t cmd_resp_trunc;
+    /* Paquetes RX descartados por anunciar más bytes de los recibidos. */
+    uint32_t rx_trunc_drop;
     uint8_t last_rx_channel;
     int8_t last_rx_rssi;
     uint8_t last_rx_band24;

@@ -121,6 +121,15 @@
 
 #define IWL_MAX_DRAM_ENTRY         64
 #define IWL_CMD_QUEUE_SIZE         32
+
+/* Estado de propiedad de un slot de la cola de comandos (R4). */
+#define IWL_SLOT_FREE              0
+#define IWL_SLOT_SYNC              1
+#define IWL_SLOT_ASYNC             2
+/* Envenenado: expiró la espera y el FW aún puede escribir su DMA. */
+#define IWL_SLOT_POISON            3
+/* Respondido: liberable, pero solo cuando le toque por orden de cola. */
+#define IWL_SLOT_DONE              4
 #define IWL_CMD_SLOT_SIZE          4096
 #define IWL_MTR_SIZE               256
 #define IWL_MCR_SIZE               IWL_CMD_SLOT_SIZE
@@ -174,12 +183,32 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define IWL_NVM_SECTION_TYPE_HW    1u /* NVM_SECTION_TYPE_SW en Linux */
 #define NVM_MAC_ADDR_OFFSET        0x64u
 #define NVM_CHANNEL_VALID          (1u << 0)
+#define NVM_CHANNEL_IBSS           (1u << 1)
 #define NVM_CHANNEL_ACTIVE         (1u << 3)
 #define NVM_CHANNEL_RADAR          (1u << 4)
+#define NVM_CHANNEL_INDOOR_ONLY    (1u << 5)
+#define NVM_CHANNEL_GO_CONCURRENT  (1u << 6)
 
-#define IWL_UCODE_TLV_PHY_SKU      23
-#define IWL_UCODE_TLV_N_SCAN       31
-#define IWL_UCODE_TLV_CMD_VERSIONS 48
+/* Origen de la lista de canales de scan (iwl_mvm_collect_scan_channels). */
+#define IWL_CHAN_SRC_NONE          0 /* sin perfil: no se puede escanear */
+#define IWL_CHAN_SRC_FALLBACK      1 /* NVM ausente: lista mínima conocida */
+#define IWL_CHAN_SRC_NVM           2 /* perfil NVM filtrado */
+#define IWL_CHAN_SRC_MCC           3 /* perfil regulatorio MCC aplicado */
+#define IWL_CHAN_SRC_EMPTY         4 /* perfil válido, cero canales usables */
+
+#define IWL_UCODE_TLV_PHY_SKU                  23
+#define IWL_UCODE_TLV_ENABLED_CAPABILITIES       30
+#define IWL_UCODE_TLV_N_SCAN                     31
+#define IWL_UCODE_TLV_CMD_VERSIONS               48
+
+/* Linux `enum iwl_ucode_tlv_capa` — bit 12 = DQA_SUPPORT (file.h). */
+#define IWL_UCODE_TLV_CAPA_DQA_SUPPORT           12
+#define IWL_FW_CAPA_SETS                         4
+
+struct iwl_ucode_capa {
+    uint32_t api_index;
+    uint32_t api_capa;
+} __attribute__((packed));
 
 #define IWL_INIT_NVM               1
 
@@ -609,17 +638,50 @@ struct iwl_mcc_update_cmd {
     uint8_t reserved2[20];
 } __attribute__((packed));
 
-/* Cabecera común v8 — basta para status/mcc tras MCC_UPDATE. */
+/* Layouts completos de `nvm-reg.h`: la lista de canales es variable y su
+ * tamaño es parte de la validación (payload == struct + 4*n_channels). */
 struct iwl_mcc_update_resp_v8 {
     uint32_t status;
     uint16_t mcc;
     uint8_t padding[2];
+    uint32_t cap;
+    uint16_t time;
+    uint16_t geo_info;
+    uint8_t source_id;
+    uint8_t reserved[3];
+    uint32_t n_channels;
+    /* uint32_t channels[n_channels]; */
+} __attribute__((packed));
+
+struct iwl_mcc_update_resp_v4 {
+    uint32_t status;
+    uint16_t mcc;
+    uint16_t cap;
+    uint16_t time;
+    uint16_t geo_info;
+    uint8_t source_id;
+    uint8_t reserved[3];
+    uint32_t n_channels;
+} __attribute__((packed));
+
+struct iwl_mcc_update_resp_v3 {
+    uint32_t status;
+    uint16_t mcc;
+    uint8_t cap;
+    uint8_t source_id;
+    uint16_t time;
+    uint16_t geo_info;
+    uint32_t n_channels;
 } __attribute__((packed));
 
 #define MCC_SOURCE_OLD_FW       0
 #define MCC_SOURCE_GET_CURRENT  0x10
 #define MCC_RESP_NEW_CHAN_PROFILE 0
 #define MCC_RESP_SAME_CHAN_PROFILE 1
+#define MCC_RESP_INVALID          2
+#define MCC_RESP_NVM_DISABLED     3
+#define MCC_RESP_ILLEGAL          4
+#define MCC_RESP_LOW_PRIORITY     5
 
 struct iwl_scan_config_v2 {
     uint8_t enable_cam_mode;
@@ -644,11 +706,13 @@ struct iwl_phy_cfg_cmd_v1 {
     struct iwl_calib_ctrl calib_control;
 } __attribute__((packed));
 
+/* `struct iwl_fw_cmd_version` (fw/api/cmdhdr.h): el cuarto byte es la versión
+ * de *notificación*, no relleno. MCC_UPDATE elige layout de respuesta con él. */
 struct iwl_fw_cmd_version {
     uint8_t cmd;
     uint8_t group;
     uint8_t version;
-    uint8_t reserved;
+    uint8_t notif_version;
 } __attribute__((packed));
 
 struct iwl_scan_general_params_v11 {
@@ -718,19 +782,34 @@ static inline unsigned iwl_scan_req_umac_v17_size(unsigned n_channels)
     return (unsigned)sizeof(struct iwl_scan_req_umac_v17);
 }
 
+/* Flags por canal (`enum iwl_uhb_chan_cfg_flags`, fw/api/scan.h): los bits
+ * bajos son el mapa de SSID directos, NO «pasivo». */
+#define IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE (1u << 26)
+/* v17: la banda viaja en flags[31:30]; `v2.band` pasa a ser `v5.psd_20`. */
+#define IWL_CHAN_CFG_FLAGS_BAND_POS 30
+
 #define IWL_SCAN_REQ_UMAC_SIZE_V6 44u
 #define IWL_UMAC_SCAN_GEN_FLAGS_PASS_ALL  (1u << 2)
+#define IWL_UMAC_SCAN_GEN_FLAGS_PASSIVE   (1u << 3)
 #define IWL_UMAC_SCAN_GEN_FLAGS_ITER_COMPLETE (1u << 5)
 #define IWL_UMAC_SCAN_GEN_FLAGS_V2_PERIODIC (1u << 0)
 #define IWL_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL (1u << 1)
 #define IWL_UMAC_SCAN_GEN_FLAGS_V2_NTFY_ITER_COMPLETE (1u << 2)
 #define IWL_UMAC_SCAN_GEN_FLAGS_V2_MATCH (1u << 5)
+#define IWL_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE (1u << 11)
 #define IWL_SCAN_OFFLOAD_COMPLETED 1u
 #define IWL_SCAN_OFFLOAD_ABORTED   2u
 #define IWL_SCAN_END_NONE          0
 #define IWL_SCAN_END_NORMAL        1
 #define IWL_SCAN_END_ABORTED       2
 #define IWL_SCAN_END_TIMEOUT       3
+
+/* Resultado de iwl_mvm_scan: se distinguen para el usuario final. */
+#define IWL_SCAN_RC_OK             0
+#define IWL_SCAN_RC_ABORTED       (-1)
+#define IWL_SCAN_RC_TIMEOUT       (-2)
+#define IWL_SCAN_RC_NO_CHANNELS   (-3)
+#define IWL_SCAN_RC_NO_REGDOM     (-4)
 #define IWL_CMD_FAILED_MSK         0x40u
 
 struct iwl_ax211_priv;
@@ -745,6 +824,12 @@ int iwl_trans_send_cmd_async(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t 
                              const void *payload, uint16_t pay_len);
 int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                             const void *payload, uint16_t pay_len, int wait_ms);
+/* Slots libres en la cola de comandos (backpressure cuando llega a 0). */
+unsigned iwl_trans_cmd_space(struct iwl_ax211_priv *iwl);
+/* 1 si un timeout dejó la cola bloqueada y hace falta reiniciar transporte. */
+int iwl_trans_needs_recover(struct iwl_ax211_priv *iwl);
+/* Libera la cola y marca MVM abajo: el llamador debe repetir init/up. */
+int iwl_trans_recover(struct iwl_ax211_priv *iwl);
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl);
 int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl);
 uint8_t iwl_mvm_scan_rx_ant(struct iwl_ax211_priv *iwl);
@@ -753,6 +838,17 @@ int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl);
 int iwl_mvm_send_tx_ant_cfg(struct iwl_ax211_priv *iwl);
 int iwl_mvm_send_scan_cfg(struct iwl_ax211_priv *iwl);
 int iwl_mvm_init_mcc(struct iwl_ax211_priv *iwl);
+/* Aplica una respuesta MCC ya recibida en cmd_resp[]; separada para poder
+ * validarla en el banco host sin transporte. */
+int iwl_mvm_apply_mcc_resp(struct iwl_ax211_priv *iwl, int notif_ver,
+                           const uint8_t *resp, unsigned len);
+/* Selección de canales de scan: devuelve el número de entradas rellenadas y
+ * escribe en `origen` de dónde salen (NVM/MCC, fallback o vacío). */
+unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
+                                       uint8_t *ch, uint8_t *band,
+                                       uint8_t *passive, unsigned max,
+                                       int *origen);
+int iwl_fw_notif_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd);
 uint8_t iwl_mvm_valid_tx_ant(struct iwl_ax211_priv *iwl);
 uint8_t iwl_mvm_valid_rx_ant(struct iwl_ax211_priv *iwl);
 void iwl_mvm_fill_probe_req(struct iwl_ax211_priv *iwl, struct iwl_scan_probe_params_v4 *probe);
@@ -767,6 +863,7 @@ int iwl_mac_valid_unicast(const uint8_t mac[6]);
 void iwl_mac_from_csr(struct iwl_ax211_priv *iwl, uint8_t mac[6]);
 void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigned len);
 int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd);
+int iwl_fw_has_capa(const struct iwl_ax211_priv *iwl, unsigned capa_bit);
 void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len);
 int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid);
 int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid, const uint8_t psk[32]);

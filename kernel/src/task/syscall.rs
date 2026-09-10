@@ -1896,11 +1896,14 @@ fn sys_wifi_scan(out: u64, max: u64) -> Result<u64, i64> {
         let results = crate::lxdde::wifi_scan_results();
         let count = results.len().min(max as usize);
         if count == 0 {
-            return Err(if scan_rc == -2 {
-                -abi::ETIMEDOUT
-            } else {
-                -abi::EIO
-            });
+            // Vacío normal, aborto, timeout y falta de perfil regulatorio se
+            // distinguen: un scan que acaba bien sin redes no es un error.
+            return match scan_rc {
+                0 => Ok(0),
+                -2 => Err(-abi::ETIMEDOUT),
+                -3 | -4 => Err(-abi::ENOTSUP),
+                _ => Err(-abi::EIO),
+            };
         }
         let n = count * core::mem::size_of::<abi::WifiBss>();
         if !user_range_ok(out, n as u64, true) {

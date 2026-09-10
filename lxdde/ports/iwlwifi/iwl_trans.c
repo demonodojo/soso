@@ -332,6 +332,89 @@ static void parse_rx_mpdu(struct iwl_ax211_priv *iwl, const uint8_t *data, int l
     iwl_mvm_rx_scan_frame(iwl, frame, flen);
 }
 
+/* --- Propiedad de slots de la cola de comandos (R4) ---------------------
+ *
+ * Modelo de `pcie/tx-gen2.c`: anillo FIFO estricto con productor
+ * (`cmd_write`) y consumidor (`cmd_read`). Los slots [cmd_read, cmd_write)
+ * están en vuelo; el FW consume TFDs en orden, así que la liberación es
+ * también en orden. Un slot no vuelve a usarse hasta que se libera: nada
+ * de saltar huecos, porque el hardware procesaría los TFD intermedios.
+ */
+
+static unsigned cmd_q_used(const struct iwl_ax211_priv *iwl)
+{
+    return (unsigned)((iwl->cmd_write - iwl->cmd_read) & (IWL_CMD_QUEUE_SIZE - 1u));
+}
+
+unsigned iwl_trans_cmd_space(struct iwl_ax211_priv *iwl)
+{
+    /* Se deja un hueco para distinguir vacío de lleno, como iwl_txq_space. */
+    return (unsigned)(IWL_CMD_QUEUE_SIZE - 1u) - cmd_q_used(iwl);
+}
+
+int iwl_trans_needs_recover(struct iwl_ax211_priv *iwl)
+{
+    return iwl->cmd_needs_recover ? 1 : 0;
+}
+
+/* Marca el slot como respondido y libera desde la cabeza los que ya lo estén.
+ * Solo se recicla DMA en orden: un slot en vuelo o envenenado por delante
+ * detiene la liberación, aunque su respuesta llegue más tarde. */
+static void cmd_slot_done(struct iwl_ax211_priv *iwl, unsigned slot)
+{
+    unsigned guard = 0;
+
+    iwl->cmd_slot_state[slot] = IWL_SLOT_DONE;
+    while (cmd_q_used(iwl) > 0 && guard++ < IWL_CMD_QUEUE_SIZE) {
+        unsigned r = iwl->cmd_read % IWL_CMD_QUEUE_SIZE;
+
+        if (iwl->cmd_slot_state[r] != IWL_SLOT_DONE)
+            break;
+        iwl->cmd_slot_state[r] = IWL_SLOT_FREE;
+        iwl->cmd_read = (uint16_t)((iwl->cmd_read + 1u) & (IWL_CMD_QUEUE_SIZE - 1u));
+    }
+}
+
+int iwl_trans_recover(struct iwl_ax211_priv *iwl)
+{
+    unsigned i;
+
+    if (!iwl)
+        return -1;
+    for (i = 0; i < IWL_CMD_QUEUE_SIZE; i++) {
+        iwl->cmd_slot_state[i] = IWL_SLOT_FREE;
+        iwl->cmd_slot_seq[i] = 0;
+        iwl->cmd_slot_group[i] = 0;
+        iwl->cmd_slot_id[i] = 0;
+    }
+    iwl->cmd_read = 0;
+    iwl->cmd_write = 0;
+    iwl->cmd_poisoned = 0;
+    iwl->cmd_pending = 0;
+    iwl->cmd_status = 0;
+    iwl->cmd_fw_err = 0;
+    iwl->cmd_resp_len = 0;
+    iwl->cmd_resp_wire_len = 0;
+    iwl->cmd_resp_trunc = 0;
+    iwl->cmd_needs_recover = 0;
+    iwl->cmd_recover++;
+    /* MVM abajo: sin ALIVE la próxima llamada rehace carga de FW e init.
+     * Reutilizar el anillo sin reiniciar el FW desincronizaría los índices. */
+    iwl->alive = 0;
+    iwl->init_complete = 0;
+    iwl->radio_ready = 0;
+    iwl->mvm_up_done = 0;
+    iwl->phy_ctxt_added = 0;
+    iwl->scan_cfg_sent = 0;
+    iwl->scan_active = 0;
+    iwl->mcc_done = 0;
+    iwl->nvm_ready = 0;
+    lx_iwlwifi_set_alive(0);
+    lx_printk("iwl_trans: recuperación #%u — cola liberada, MVM abajo\n",
+              (unsigned)iwl->cmd_recover);
+    return 0;
+}
+
 static void log_rx(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd,
                    uint16_t seq, int pay, int status)
 {
@@ -340,60 +423,102 @@ static void log_rx(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd,
     (void)iwl;
 }
 
-static int rx_is_pending_hcmd(struct iwl_ax211_priv *iwl, uint8_t group,
-                              uint8_t cmd, uint16_t seq)
+/* Devuelve el slot propietario de esta respuesta, o -1 si no es respuesta a
+ * un comando en vuelo (notificación, opcode ajeno, secuencia rancia o slot
+ * envenenado). La identidad se comprueba contra el slot, no contra un único
+ * `cmd_pending`: así conviven sync y async intercalados. */
+static int rx_owner_slot(struct iwl_ax211_priv *iwl, uint8_t group,
+                         uint8_t cmd, uint16_t seq)
 {
     unsigned slot;
 
-    if (!iwl->cmd_pending)
-        return 0;
     if (seq & SEQ_RX_FRAME)
-        return 0;
-    if (group != iwl->cmd_pending_group || cmd != iwl->cmd_pending_id)
-        return 0;
-    if (seq != iwl->cmd_pending_seq)
-        return 0;
+        return -1;
+    if (SEQ_TO_QUEUE(seq) != (unsigned)(iwl->cmd_qid & 0x1fu))
+        return -1;
     slot = SEQ_TO_INDEX(seq) % IWL_CMD_QUEUE_SIZE;
-    if (iwl->cmd_slot_poison & (1u << slot))
-        return 0;
-    return 1;
+    if (iwl->cmd_slot_state[slot] != IWL_SLOT_SYNC &&
+        iwl->cmd_slot_state[slot] != IWL_SLOT_ASYNC)
+        return -1;
+    if (iwl->cmd_slot_seq[slot] != seq)
+        return -1;
+    if (iwl->cmd_slot_group[slot] != group || iwl->cmd_slot_id[slot] != cmd)
+        return -1;
+    return (int)slot;
 }
 
-static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf)
+/* `avail` = bytes válidos realmente recibidos en `buf` (incluida la cabecera
+ * de 8 B). El RB de hardware siempre trae IWL_GEN2_RX_SZ; una inyección corta
+ * (banco de pruebas, DMA parcial) no debe leerse más allá de `avail`. */
+static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigned avail)
 {
-    uint32_t len_n_flags = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
-                           ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
-    uint16_t len = (uint16_t)(len_n_flags & 0x3fff);
-    uint8_t cmd = buf[4];
-    uint8_t group = buf[5];
-    uint16_t seq = (uint16_t)buf[6] | ((uint16_t)buf[7] << 8);
-    const uint8_t *data = buf + 8;
-    int pay = (int)len - 4;
+    uint32_t len_n_flags;
+    uint16_t len;
+    uint8_t cmd;
+    uint8_t group;
+    uint16_t seq;
+    const uint8_t *data;
+    int pay;
     int copy;
+
+    if (avail < 8u) {
+        iwl->rx_trunc_drop++;
+        return;
+    }
+    len_n_flags = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+                  ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    len = (uint16_t)(len_n_flags & 0x3fff);
+    cmd = buf[4];
+    group = buf[5];
+    seq = (uint16_t)buf[6] | ((uint16_t)buf[7] << 8);
+    data = buf + 8;
+    pay = (int)len - 4;
 
     if (pay < 0)
         pay = 0;
-    if ((unsigned)pay > IWL_GEN2_RX_SZ - 8u)
-        pay = (int)(IWL_GEN2_RX_SZ - 8u);
+    /* Longitud anunciada mayor que la recibida: no se recorta en silencio, se
+     * descarta. Recortar dejaba pasar respuestas incompletas como válidas. */
+    if ((unsigned)pay > avail - 8u) {
+        iwl->rx_trunc_drop++;
+        log_rx(iwl, group, cmd, seq, pay, -1);
+        lx_printk("iwl_rx: truncado grp=%u id=0x%02x len=%d recibidos=%u; descartado\n",
+                  (unsigned)group, (unsigned)cmd, pay, avail - 8u);
+        return;
+    }
 
     log_rx(iwl, group, cmd, seq, pay, 0);
 
-    if (rx_is_pending_hcmd(iwl, group, cmd, seq)) {
+    {
+    int owner = rx_owner_slot(iwl, group, cmd, seq);
+
+    if (owner >= 0 && iwl->cmd_slot_state[owner] == IWL_SLOT_ASYNC) {
+        /* Async: nadie espera la respuesta, pero el slot solo se libera aquí
+         * y no toca cmd_resp[], que pertenece al comando sincrónico. */
+        cmd_slot_done(iwl, (unsigned)owner);
+    } else if (owner >= 0) {
         iwl->cmd_status = 1;
         iwl->cmd_pending = 0;
         /* Gen2 iwlwifi: tamaño en bits 13:0; no hay bit FAILED en len_n_flags
          * (iwlegacy usaba hdr.flags). NVM_GET_INFO v4 = 468 B → len=472 y
          * 472&0x40≠0 si se interpretaba como rechazo — falso positivo run14. */
         iwl->cmd_fw_err = 0;
+        iwl->cmd_resp_wire_len = (uint16_t)pay;
         copy = pay;
         if (copy > (int)sizeof(iwl->cmd_resp))
             copy = (int)sizeof(iwl->cmd_resp);
+        iwl->cmd_resp_trunc = (copy < pay) ? 1 : 0;
+        if (iwl->cmd_resp_trunc)
+            lx_printk("iwl_rx: respuesta grp=%u id=0x%02x de %d B > buffer %u B\n",
+                      (unsigned)group, (unsigned)cmd, pay,
+                      (unsigned)sizeof(iwl->cmd_resp));
         if (copy > 0) {
             memcpy(iwl->cmd_resp, data, (size_t)copy);
             iwl->cmd_resp_len = (uint16_t)copy;
         } else {
             iwl->cmd_resp_len = 0;
         }
+        cmd_slot_done(iwl, (unsigned)owner);
+    }
     }
 
     if (group == 0 && cmd == UCODE_ALIVE_NTFY) {
@@ -438,7 +563,8 @@ static void drain_rx_gen2(struct iwl_ax211_priv *iwl)
             if (idx < IWL_GEN2_RX_N) {
                 handle_gen2_rx(iwl,
                                (const uint8_t *)iwl->rx_page_cpu +
-                                   (size_t)idx * IWL_GEN2_RX_SZ);
+                                   (size_t)idx * IWL_GEN2_RX_SZ,
+                               IWL_GEN2_RX_SZ);
                 bd[iwl->rx_write % IWL_GEN2_RX_N] =
                     iwl->rx_page_dma + (uint64_t)idx * IWL_GEN2_RX_SZ;
                 iwl->rx_write = (uint16_t)((iwl->rx_write + 1) % IWL_GEN2_RX_N);
@@ -454,7 +580,8 @@ static void drain_rx_gen2(struct iwl_ax211_priv *iwl)
             idx = (uint16_t)(vid - 1u);
             handle_gen2_rx(iwl,
                            (const uint8_t *)iwl->rx_page_cpu +
-                               (size_t)idx * IWL_GEN2_RX_SZ);
+                               (size_t)idx * IWL_GEN2_RX_SZ,
+                           IWL_GEN2_RX_SZ);
             bd[iwl->rx_write % IWL_GEN2_RX_N] =
                 (iwl->rx_page_dma + (uint64_t)idx * IWL_GEN2_RX_SZ) | (uint64_t)vid;
             iwl->rx_write = (uint16_t)((iwl->rx_write + 1) % IWL_GEN2_RX_N);
@@ -692,14 +819,19 @@ void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigne
 {
     uint8_t tmp[IWL_GEN2_RX_SZ];
 
-    if (!iwl || !buf || len < 8)
+    if (!iwl || !buf)
         return;
+    if (len < 8) {
+        iwl->rx_trunc_drop++;
+        return;
+    }
     if (len > IWL_GEN2_RX_SZ)
         len = IWL_GEN2_RX_SZ;
     memcpy(tmp, buf, len);
     if (len < IWL_GEN2_RX_SZ)
         memset(tmp + len, 0, IWL_GEN2_RX_SZ - len);
-    handle_gen2_rx(iwl, tmp);
+    /* Se pasa `len`, no el tamaño del RB: el relleno a cero no es payload. */
+    handle_gen2_rx(iwl, tmp, len);
 }
 
 static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
@@ -713,7 +845,23 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
 
     if (!iwl->alive || !iwl->mtr_cpu || !iwl->mcr_cpu)
         return -1;
-    if (iwl->cmd_pending)
+    /* Un único propietario para envío/RX/poll: una llamada anidada (desde el
+     * drenaje RX o una IRQ) no reserva slot, se rechaza. */
+    if (iwl->in_trans) {
+        iwl->cmd_reentry_reject++;
+        lx_printk("iwl_trans: envío reentrante rechazado (grp=%u id=0x%02x)\n",
+                  (unsigned)group, (unsigned)id);
+        return -1;
+    }
+    /* Tras un timeout la cola queda bloqueada a propósito: hasta recuperar el
+     * transporte no se admiten comandos nuevos ni se recicla el DMA en uso. */
+    if (iwl->cmd_needs_recover) {
+        lx_printk("iwl_trans: cola bloqueada; hace falta iwl_trans_recover()\n");
+        return -1;
+    }
+    /* Solo un comando sincrónico en vuelo: cmd_resp[] tiene un dueño. Los
+     * async sí pueden intercalarse, cada uno con su propio slot. */
+    if (!async && iwl->cmd_pending)
         return -1;
     {
         uint32_t total32 = (uint32_t)sizeof(struct iwl_cmd_header_wide) + (uint32_t)pay_len;
@@ -723,17 +871,23 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
         total = (uint16_t)total32;
     }
 
+    /* Reserva: comprobar espacio y tomar el slot ocurre sin ceder el control
+     * (ni retardos ni RX en medio), con el propietario ya marcado. */
+    iwl->in_trans = 1;
+    if (iwl_trans_cmd_space(iwl) == 0) {
+        iwl->cmd_backpressure++;
+        iwl->in_trans = 0;
+        lx_printk("iwl_trans: cola llena (%u en vuelo); backpressure\n",
+                  cmd_q_used(iwl));
+        return -1;
+    }
     slot = iwl->cmd_write % IWL_CMD_QUEUE_SIZE;
-    if (iwl->cmd_slot_poison & (1u << slot)) {
-        int skipped = 0;
-
-        while ((iwl->cmd_slot_poison & (1u << slot)) && skipped < IWL_CMD_QUEUE_SIZE) {
-            iwl->cmd_write = (uint16_t)((iwl->cmd_write + 1) % IWL_CMD_QUEUE_SIZE);
-            slot = iwl->cmd_write % IWL_CMD_QUEUE_SIZE;
-            skipped++;
-        }
-        if (iwl->cmd_slot_poison & (1u << slot))
-            return -1;
+    if (iwl->cmd_slot_state[slot] != IWL_SLOT_FREE) {
+        iwl->cmd_backpressure++;
+        iwl->in_trans = 0;
+        lx_printk("iwl_trans: slot %u aún en uso (estado %u)\n",
+                  (unsigned)slot, (unsigned)iwl->cmd_slot_state[slot]);
+        return -1;
     }
     buf = (uint8_t *)iwl->mcr_cpu + (size_t)slot * IWL_CMD_SLOT_SIZE;
     tfd = (struct iwl_tfh_tfd_long *)((uint8_t *)iwl->mtr_cpu + (size_t)slot * IWL_TFH_TFD_SIZE);
@@ -741,22 +895,36 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     memset(tfd, 0, sizeof(*tfd));
 
     seq = (uint16_t)(QUEUE_TO_SEQ(iwl->cmd_qid) | INDEX_TO_SEQ(slot));
-    if (!async) {
-        iwl->cmd_pending = 1;
-        iwl->cmd_status = 0;
-        iwl->cmd_fw_err = 0;
-        iwl->cmd_resp_len = 0;
-        iwl->cmd_pending_group = group;
-        iwl->cmd_pending_id = id;
-        iwl->cmd_pending_seq = seq;
-    }
+    /* Linux `iwl_trans_send_cmd` (`iwl-trans.c`): con cabecera wide, los HCMD del
+     * LEGACY_GROUP (API grp=0) salen con group_id=LONG_GROUP (DEF_ID). */
+    {
+        uint8_t wire_group = group;
+
+        if (group == LEGACY_GROUP) {
+            wire_group = LONG_GROUP;
+        }
+        /* Propiedad del slot: vale igual para async (nadie espera la
+         * respuesta, pero el DMA sigue siendo suyo hasta liberarlo). */
+        iwl->cmd_slot_state[slot] = async ? IWL_SLOT_ASYNC : IWL_SLOT_SYNC;
+        iwl->cmd_slot_group[slot] = wire_group;
+        iwl->cmd_slot_id[slot] = id;
+        iwl->cmd_slot_seq[slot] = seq;
+        if (!async) {
+            iwl->cmd_pending = 1;
+            iwl->cmd_status = 0;
+            iwl->cmd_fw_err = 0;
+            iwl->cmd_resp_len = 0;
+            iwl->cmd_pending_group = wire_group;
+            iwl->cmd_pending_id = id;
+            iwl->cmd_pending_seq = seq;
+        }
 
     /* Gen2/Gen3: siempre cabecera wide (Linux `pcie/tx-gen2.c`), también grupo 0
      * (TX_ANT, SF, PHY_CONTEXT). La ruta legacy de 4 B dejaba al FW sordo tras SF. */
-    {
+        {
         struct iwl_cmd_header_wide *whdr = (struct iwl_cmd_header_wide *)buf;
         whdr->cmd = id;
-        whdr->group_id = group;
+        whdr->group_id = wire_group;
         whdr->sequence = seq;
         whdr->length = iwl_cpu_to_le16(pay_len);
         whdr->reserved = 0;
@@ -767,12 +935,13 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
             lx_printk("iwl_trans: TX_ANT wide ver=%u len=%u (hdr 8 B + payload %u B)\n",
                       (unsigned)whdr->version, (unsigned)total, (unsigned)pay_len);
         }
+        }
     }
 
     tfd->num_tbs = 1;
     tfd->tbs[0].tb_len = total;
     tfd->tbs[0].addr = iwl->mcr_dma + (uint64_t)slot * IWL_CMD_SLOT_SIZE;
-    iwl->cmd_write = (uint16_t)((iwl->cmd_write + 1) % IWL_CMD_QUEUE_SIZE);
+    iwl->cmd_write = (uint16_t)((iwl->cmd_write + 1u) & (IWL_CMD_QUEUE_SIZE - 1u));
     {
         uint32_t doorbell = ((uint32_t)iwl->cmd_write & 0xffu) |
                             ((uint32_t)iwl->cmd_qid << 16);
@@ -790,6 +959,7 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     }
     drain_rx_gen2(iwl);
     iwl->cmd_seq++;
+    iwl->in_trans = 0;
     return 0;
 }
 
@@ -824,13 +994,25 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
     }
     {
         unsigned slot = SEQ_TO_INDEX(iwl->cmd_pending_seq) % IWL_CMD_QUEUE_SIZE;
+        uint8_t log_grp = iwl->cmd_pending_group;
 
-        iwl->cmd_slot_poison |= (1u << slot);
+        /* El slot queda envenenado: el FW puede escribir su DMA en cualquier
+         * momento, así que no se recicla ni se salta. La cola se bloquea y
+         * solo iwl_trans_recover() (reinicio de transporte) la libera. */
+        if (iwl->cmd_slot_state[slot] == IWL_SLOT_SYNC ||
+            iwl->cmd_slot_state[slot] == IWL_SLOT_ASYNC) {
+            iwl->cmd_slot_state[slot] = IWL_SLOT_POISON;
+            iwl->cmd_poisoned++;
+        }
+        iwl->cmd_pending = 0;
+        iwl->cmd_needs_recover = 1;
+        /* MVM parado: no se encadenan más etapas sobre una cola bloqueada. */
+        iwl->mvm_up_done = 0;
+        iwl->scan_active = 0;
+        if (iwl->mmio)
+            drain_rx_gen2(iwl);
+        lx_printk("iwl_trans: timeout cmd grp=%u id=0x%02x slot=%u; MVM parado\n",
+                  (unsigned)log_grp, (unsigned)id, slot);
     }
-    iwl->cmd_pending = 0;
-    if (iwl->mmio)
-        drain_rx_gen2(iwl);
-    lx_printk("iwl_trans: timeout cmd grp=%u id=0x%02x\n",
-              (unsigned)group, (unsigned)id);
     return -1;
 }
