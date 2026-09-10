@@ -189,6 +189,20 @@ wifi connect MiRed MiClaveWPA2
 
 Tras asociar, soso pide DHCP. SSH queda en el **puerto 22**.
 
+`wifi scan` marca cada red como `abierta` o `WPA` según lo que anuncia su
+beacon (bit Privacy y RSN), y `wifi connect` sin clave se niega a entrar en una
+red protegida: si la red pide WPA2, hay que darle la clave. Cuando el scan no
+devuelve nada, el motivo se dice en claro y no todos son un error:
+
+| Mensaje | Qué significa |
+|---|---|
+| `wifi: ninguna red` | El scan terminó bien y no había nada a la escucha |
+| `wifi: scan sin fin (timeout)` | El firmware no cerró el scan |
+| `wifi: scan abortado` | El firmware lo cortó |
+| `wifi: sin canales escaneables` | El perfil regulatorio no deja ninguno |
+| `wifi: sin perfil regulatorio (MCC); solo scan pasivo` | Sin regdominio no se emiten probes; solo se escucha |
+| `wifi: resultado parcial` | Hay redes, pero el scan no acabó bien |
+
 2. **En el pendrive, antes de arrancar:** edita `SOSOWIFI.TXT` en la ESP (partición 1
    FAT). El kernel se conecta solo al boot. No hace falta regenerar la imagen.
 3. **En rootfs:** `/etc/wifi.conf` (se empaqueta al flashear).
@@ -852,6 +866,21 @@ sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --o
 
 `--skip-models` actualiza ESP (p1) y rootfs (p2) sin tocar sosomfs. Preserva
 `SOSOWIFI.TXT` si ya lo tenías en la ESP.
+
+### Identidad de lo flasheado (`SOSOHASH.TXT`)
+
+`package-usb-live` deja en la ESP un **`SOSOHASH.TXT`** con la versión, el
+commit, el perfil de drivers y el sha256 de kernel, ESP, rootfs y modelos. Es
+lo que permite decir de qué árbol salió un arranque: la versión anunciada en el
+log (`soso 0.2.2 (abc-dirty)`) no distingue dos árboles con cambios locales
+distintos.
+
+Cópialo junto a `SOSOLOG.TXT` al recoger un arranque y pásalo al importarlo:
+
+```sh
+cargo xtask hw-matrix parse-logs --id ga107-igpu \
+    --sosolog SOSOLOG.txt --sosodrv SOSODRV.txt --sosohash SOSOHASH.TXT
+```
 
 ### Buzón de instalación (`SOSOBOOT.TXT`)
 

@@ -89,6 +89,22 @@ if ! grep -q "gsp_chan_dump(&g_chan, \"sonda CE" "$src/gsp_bringup.c" ||
 fi
 echo "OK: tres medidas de CE en orden, con volcado de estado en el primer fallo"
 
+# R5.3: el árbol solo trae `cla0c0qmd.h` (hasta V01_07, era Pascal), así que el
+# descriptor QMD de Ampere/Ada/Hopper no está y el driver se niega a lanzar en
+# esas familias. Si alguien añade el header que falta, esto FALLA a propósito:
+# es el recordatorio de implementar el encoder en vez de seguir rechazando.
+echo "=== R5.3: cabeceras de QMD disponibles en el árbol ==="
+qmd_hdrs=$(find "$root/lxdde/reference" -iname '*qmd*.h' | wc -l | tr -d ' ')
+qmd_vers=$(grep -ho 'QMDV[0-9][0-9]_[0-9][0-9]'     "$root/lxdde/reference/open-gpu-kernel-modules-570.144/src/common/sdk/nvidia/inc/class/cla0c0qmd.h" |
+    sort -u | tr '\n' ' ')
+if [[ "$qmd_hdrs" != 1 || "$qmd_vers" != "QMDV00_06 QMDV01_06 QMDV01_07 " ]]; then
+    echo "FALLO: han cambiado las cabeceras de QMD ($qmd_hdrs fichero(s): $qmd_vers)." >&2
+    echo "       Si ya está el QMD de Ampere, implementa su encoder y actualiza" >&2
+    echo "       gsp_family_caps (qmd_version deja de ser 0)." >&2
+    exit 1
+fi
+echo "OK: solo cla0c0qmd.h ($qmd_vers) — Ampere sigue sin descriptor y se rechaza"
+
 echo "=== L6 — pasos 3 a 6 de la cadena FSP/COT + recepción de RPC ==="
 SOSO_ROOT="$root" "$out/hostcheck" "$ucode" "$boot" "$fmc"
 
