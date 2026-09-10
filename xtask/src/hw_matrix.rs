@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::drivers::{parse_hwscan_file, ScanLine};
 
 const MATRIX_PATH: &str = "docs/hw-matrix.json";
+/// v2: identidad de arranque por banner, artefactos y campañas separadas (R2).
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,7 +92,6 @@ fn merge_wifi(prev: &WifiStages, incoming: WifiStages) -> WifiStages {
     }
 }
 
-#[allow(dead_code)]
 fn merge_gpu(prev: &GpuStages, incoming: GpuStages) -> GpuStages {
     GpuStages {
         gsp_rpc: merge_stage(&prev.gsp_rpc, incoming.gsp_rpc),
@@ -205,6 +206,9 @@ pub struct HwEntry {
     pub pci_ids: Vec<String>,
     #[serde(default)]
     pub firmware: std::collections::BTreeMap<String, String>,
+    /// Hashes de lo realmente desplegado: kernel, binarios del rootfs, perfil.
+    #[serde(default)]
+    pub artefactos: std::collections::BTreeMap<String, String>,
     pub git: GitInfo,
     #[serde(default)]
     pub perfil_drivers: String,
@@ -229,18 +233,38 @@ pub struct HwEntry {
 
 /// Una ejecución concreta: no se presenta como evidencia del kernel actual
 /// si el log/hash ya no coincide.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `log_hash` identifica los bytes del arranque (integridad del fichero); la
+/// identidad de *lo desplegado* son `kernel` + `artefactos`. Sin banner de
+/// versión la identidad es explícitamente desconocida.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RunEvidence {
     pub log_hash: String,
     #[serde(default)]
     pub kernel: String,
     #[serde(default)]
+    pub identidad_conocida: bool,
+    #[serde(default)]
+    pub artefactos: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     pub pci: Vec<String>,
     #[serde(default)]
     pub wifi: WifiStages,
     #[serde(default)]
     pub gpu: GpuStages,
+    /// Llegó a userspace (init/sosh vivos, sin panic).
+    #[serde(default)]
+    pub userspace: bool,
+    /// Superó la campaña WiFi completa (ALIVE→scan→assoc→DHCP atribuido).
+    #[serde(default)]
+    pub campana_wifi: bool,
+    /// Superó la campaña GPU completa (GSP→VRAM→CE→compute comparado).
+    #[serde(default)]
+    pub campana_gpu: bool,
+    /// Instantáneas del log dentro de este mismo arranque.
+    #[serde(default)]
+    pub flushes: u32,
     #[serde(default)]
     pub fecha: String,
 }
@@ -260,6 +284,8 @@ pub fn run(args: &[String]) {
         "collect" => collect(&args[1..]),
         "parse-logs" => parse_logs_cmd(&args[1..]),
         "record-boot" => record_boot(&args[1..]),
+        "artefactos" => record_artefactos(&args[1..]),
+        "migrar" => migrar(&args[1..]),
         "record-bench" => record_bench(&args[1..]),
         "host-check" => host_check(),
         "help" | "--help" | "-h" => usage(),
@@ -278,7 +304,9 @@ fn usage() {
          cargo xtask hw-matrix init\n\
          cargo xtask hw-matrix collect --id ID [--equipo N] [--pci 8086:2723] [--perfil live-usb]\n\
          cargo xtask hw-matrix parse-logs --id ID [--sosolog F] [--sosodrv F] [--serial F]\n\
-         cargo xtask hw-matrix record-boot --id ID [--fail]\n\
+         cargo xtask hw-matrix migrar [--id ID] [--seco]\n\
+         cargo xtask hw-matrix artefactos --id ID [--kernel F] [--rootfs D] [--bin F] [--perfil P]\n\
+         cargo xtask hw-matrix record-boot --id ID [--fail] [--nota T]\n\
          cargo xtask hw-matrix record-bench --id ID --tok-s 1.23 [--frio 1.1] [--caliente 1.3]\n\
          cargo xtask hw-matrix host-check"
     );
@@ -346,7 +374,7 @@ fn run_capture_in(cwd: &Path, bin: &str, args: &[&str]) -> String {
 fn default_matrix() -> HwMatrix {
     let git = git_info();
     HwMatrix {
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         entries: vec![
             seed_entry(
                 "qemu-test",
@@ -405,6 +433,7 @@ fn seed_entry(
         equipo: equipo.into(),
         pci_ids: pci,
         firmware: std::collections::BTreeMap::new(),
+        artefactos: std::collections::BTreeMap::new(),
         git: git.clone(),
         perfil_drivers: perfil.into(),
         arranques_consecutivos_ok: 0,
@@ -515,6 +544,258 @@ fn sha256_hex(data: &[u8]) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// Hash agregado de un directorio: cada fichero aporta ruta + sha256, en
+/// orden estable, y el resultado se vuelve a hashear. Detecta cambios de
+/// contenido, altas y bajas.
+pub fn hash_directorio(dir: &Path) -> Option<(String, usize)> {
+    let mut ficheros: Vec<PathBuf> = Vec::new();
+    recorrer(dir, &mut ficheros)?;
+    ficheros.sort();
+    let mut acc = String::new();
+    for f in &ficheros {
+        let rel = f.strip_prefix(dir).unwrap_or(f);
+        let bytes = std::fs::read(f).ok()?;
+        acc.push_str(&format!("{} {}\n", rel.display(), sha256_hex(&bytes)));
+    }
+    Some((sha256_hex(acc.as_bytes()), ficheros.len()))
+}
+
+fn recorrer(dir: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
+    for e in std::fs::read_dir(dir).ok()? {
+        let e = e.ok()?;
+        let p = e.path();
+        if p.is_dir() {
+            recorrer(&p, out)?;
+        } else if p.is_file() {
+            out.push(p);
+        }
+    }
+    Some(())
+}
+
+/// `hw-matrix artefactos`: registra la identidad de lo desplegado.
+///
+/// El hash del log acredita la integridad del fichero, no qué binarios
+/// corrieron. Estos hashes son lo que permite decir «esta ejecución es de
+/// este kernel y este rootfs» en vez de deducirlo de la versión anunciada.
+fn record_artefactos(args: &[String]) {
+    let id = flag(args, "--id").unwrap_or_else(|| {
+        eprintln!("hw-matrix artefactos: falta --id");
+        std::process::exit(2);
+    });
+    let root = crate::project_root();
+    let mut m = load_matrix();
+    if !m.entries.iter().any(|e| e.id == id) {
+        eprintln!("hw-matrix artefactos: entrada {id} desconocida; ejecuta collect primero");
+        std::process::exit(2);
+    }
+    let entry = find_entry(&mut m, &id).expect("entrada");
+    let mut registrados = 0u32;
+
+    let kernel = flag_path(args, "--kernel").unwrap_or_else(|| {
+        root.join("target/kernel/x86_64-soso/debug/kernel")
+    });
+    if kernel.is_file() {
+        if let Ok(bytes) = std::fs::read(&kernel) {
+            entry.artefactos.insert(
+                "kernel".into(),
+                format!("{} {}B {}", sha256_hex(&bytes), bytes.len(),
+                        kernel.file_name().unwrap_or_default().to_string_lossy()),
+            );
+            registrados += 1;
+        }
+    } else {
+        eprintln!("hw-matrix artefactos: sin kernel en {}", kernel.display());
+    }
+
+    for bin in flags(args, "--bin") {
+        let p = PathBuf::from(&bin);
+        if let Ok(bytes) = std::fs::read(&p) {
+            let nombre = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            entry.artefactos.insert(
+                format!("bin:{nombre}"),
+                format!("{} {}B", sha256_hex(&bytes), bytes.len()),
+            );
+            registrados += 1;
+        } else {
+            eprintln!("hw-matrix artefactos: no pude leer {bin}");
+        }
+    }
+
+    let rootfs = flag_path(args, "--rootfs").unwrap_or_else(|| root.join("rootfs"));
+    if rootfs.is_dir() {
+        if let Some((hash, n)) = hash_directorio(&rootfs) {
+            entry
+                .artefactos
+                .insert("rootfs".into(), format!("{hash} {n} ficheros"));
+            registrados += 1;
+        }
+    }
+
+    if let Some(perfil) = flag(args, "--perfil") {
+        entry.perfil_drivers = perfil.clone();
+        entry.artefactos.insert("perfil".into(), perfil);
+        registrados += 1;
+    } else if !entry.perfil_drivers.is_empty() {
+        entry
+            .artefactos
+            .insert("perfil".into(), entry.perfil_drivers.clone());
+    }
+
+    collect_firmware_hashes(entry);
+    for (k, v) in entry.firmware.clone() {
+        entry.artefactos.insert(format!("fw:{k}"), v);
+    }
+    entry.actualizado = today();
+    let resumen = entry.artefactos.clone();
+    save_matrix(&m);
+    println!("hw-matrix: {registrados} artefacto(s) registrados en {id}");
+    for (k, v) in resumen {
+        println!("  {k} = {v}");
+    }
+}
+
+/// `hw-matrix migrar`: rehace el historial desde los logs originales.
+///
+/// Las entradas importadas con el parser anterior tienen una ejecución por la
+/// cabecera y otra por el cuerpo del mismo arranque, y como «kernel» la línea
+/// `updslot: SOSOKRN.BIN…`. Se vuelven a derivar de los ficheros que siguen
+/// existiendo; las ejecuciones cuyo log ya no está se conservan con la
+/// identidad marcada como desconocida, para no perder la traza.
+fn migrar(args: &[String]) {
+    let solo = flag(args, "--id");
+    let seco = args.iter().any(|a| a == "--seco");
+    let mut m = load_matrix();
+    let mut total_antes = 0usize;
+    let mut total_despues = 0usize;
+
+    for entry in m.entries.iter_mut() {
+        if let Some(id) = &solo {
+            if &entry.id != id {
+                continue;
+            }
+        }
+        let antes = entry.historial.len();
+        total_antes += antes;
+        let grupos = agrupar_logs(&entry.logs);
+        let mut nuevo: Vec<RunEvidence> = Vec::new();
+        for (logs, informes) in &grupos {
+            let logs: Vec<(String, String)> = logs
+                .iter()
+                .filter_map(|(et, p)| {
+                    std::fs::read_to_string(p).ok().map(|t| (et.clone(), t))
+                })
+                .collect();
+            let informes: Vec<(String, String)> = informes
+                .iter()
+                .filter_map(|(et, p)| {
+                    std::fs::read_to_string(p).ok().map(|t| (et.clone(), t))
+                })
+                .collect();
+            if logs.is_empty() && informes.is_empty() {
+                continue;
+            }
+            let (runs, avisos) = correlacionar_fuentes(&logs, &informes, &entry.artefactos);
+            for a in &avisos {
+                eprintln!("hw-matrix migrar [{}]: {a}", entry.id);
+            }
+            for r in &runs {
+                anadir_o_fusionar(&mut nuevo, r);
+            }
+        }
+        // Ejecuciones sin log recuperable: se mantienen, sin identidad falsa.
+        let heredadas: Vec<RunEvidence> = entry
+            .historial
+            .iter()
+            .filter(|h| !nuevo.iter().any(|n| n.log_hash == h.log_hash))
+            .filter(|h| banner_version(&h.kernel).is_some())
+            .map(|h| {
+                let mut h = h.clone();
+                h.identidad_conocida = banner_version(&h.kernel).is_some();
+                h
+            })
+            .collect();
+        if grupos.is_empty() {
+            nuevo = heredadas;
+        }
+        entry.historial = nuevo;
+        recalcular_racha(entry);
+        if let Some(last) = entry.historial.last().cloned() {
+            entry.wifi = last.wifi.clone();
+            entry.gpu = last.gpu.clone();
+        }
+        total_despues += entry.historial.len();
+        if antes != entry.historial.len() {
+            entry.notas = format!(
+                "{} ; historial remigrado {}: {antes}→{} ejecuciones (identidad por banner)",
+                entry.notas.trim_end_matches(' '),
+                today(),
+                entry.historial.len()
+            )
+            .trim_start_matches(" ; ")
+            .to_string();
+            entry.actualizado = today();
+        }
+        println!(
+            "hw-matrix migrar: {} {antes} → {} ejecuciones (racha={})",
+            entry.id,
+            entry.historial.len(),
+            entry.arranques_consecutivos_ok
+        );
+    }
+    if seco {
+        println!("hw-matrix migrar: --seco, no se escribe ({total_antes} → {total_despues})");
+        return;
+    }
+    m.schema_version = SCHEMA_VERSION;
+    save_matrix(&m);
+    println!("hw-matrix migrar: {total_antes} → {total_despues} ejecuciones; schema v{SCHEMA_VERSION}");
+}
+
+/// Agrupa las rutas registradas por directorio: cada carpeta de diagnóstico
+/// es una sesión con su SOSOLOG y sus informes.
+fn agrupar_logs(
+    logs: &[String],
+) -> Vec<(Vec<(String, PathBuf)>, Vec<(String, PathBuf)>)> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for l in logs {
+        let p = PathBuf::from(l);
+        let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    let mut out = Vec::new();
+    for dir in dirs {
+        let mut arranque = Vec::new();
+        let mut informe = Vec::new();
+        for l in logs {
+            let p = PathBuf::from(l);
+            if p.parent().map(|d| d.to_path_buf()).unwrap_or_default() != dir || !p.is_file() {
+                continue;
+            }
+            let nombre = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_ascii_uppercase();
+            if nombre.starts_with("SOSOLOG") {
+                arranque.push(("SOSOLOG".to_string(), p));
+            } else if nombre.contains("SERIAL") {
+                arranque.push(("serial".to_string(), p));
+            } else if nombre.starts_with("SOSODRV") {
+                informe.push(("SOSODRV".to_string(), p));
+            } else if nombre.starts_with("SOSOWIFI") {
+                informe.push(("SOSOWIFI".to_string(), p));
+            }
+        }
+        if !arranque.is_empty() || !informe.is_empty() {
+            out.push((arranque, informe));
+        }
+    }
+    out
+}
+
 fn parse_logs_cmd(args: &[String]) {
     let id = flag(args, "--id").unwrap_or_else(|| {
         eprintln!("hw-matrix parse-logs: falta --id");
@@ -525,22 +806,38 @@ fn parse_logs_cmd(args: &[String]) {
         eprintln!("hw-matrix parse-logs: entrada {id} desconocida; ejecuta collect primero");
         std::process::exit(2);
     }
-    let mut blob = String::new();
+    // Logs de arranque frente a informes: solo los primeros definen
+    // ejecuciones. Antes iban todos a un único blob y cada sección con banner
+    // se convertía en un arranque más.
+    let mut logs_arranque: Vec<(String, String)> = Vec::new();
+    let mut informes: Vec<(String, String)> = Vec::new();
     let mut log_paths: Vec<PathBuf> = Vec::new();
-    for (flag, label) in [
-        ("--sosolog", "SOSOLOG"),
-        ("--sosodrv", "SOSODRV"),
-        ("--sosowifi", "SOSOWIFI"),
-        ("--serial", "serial"),
+    for (flag, label, es_log) in [
+        ("--sosolog", "SOSOLOG", true),
+        ("--serial", "serial", true),
+        ("--sosodrv", "SOSODRV", false),
+        ("--sosowifi", "SOSOWIFI", false),
     ] {
         if let Some(p) = flag_path(args, flag) {
-            if let Ok(t) = std::fs::read_to_string(&p) {
-                blob.push_str(&format!("\n--- {label} ---\n{t}"));
-                log_paths.push(p);
+            match std::fs::read_to_string(&p) {
+                Ok(t) => {
+                    if es_log {
+                        logs_arranque.push((label.into(), t));
+                    } else {
+                        informes.push((label.into(), t));
+                    }
+                    log_paths.push(p);
+                }
+                Err(e) => {
+                    eprintln!("hw-matrix parse-logs: no pude leer {}: {e}", p.display());
+                    std::process::exit(2);
+                }
             }
         }
     }
-    if blob.trim().is_empty() {
+    if logs_arranque.iter().all(|(_, t)| t.trim().is_empty())
+        && informes.iter().all(|(_, t)| t.trim().is_empty())
+    {
         eprintln!("hw-matrix parse-logs: indica al menos un --sosolog|--sosodrv|--serial");
         std::process::exit(2);
     }
@@ -551,26 +848,36 @@ fn parse_logs_cmd(args: &[String]) {
             entry.logs.push(s);
         }
     }
-    let runs = parse_log_runs(&blob);
+    let artefactos = entry.artefactos.clone();
+    let (runs, avisos) = correlacionar_fuentes(&logs_arranque, &informes, &artefactos);
+    for aviso in &avisos {
+        eprintln!("hw-matrix parse-logs: {aviso}");
+    }
     for run in &runs {
-        if !entry
-            .historial
-            .iter()
-            .any(|h| h.log_hash == run.log_hash && h.kernel == run.kernel)
-        {
-            entry.historial.push(run.clone());
-        }
+        anadir_o_fusionar(&mut entry.historial, run);
     }
     if let Some(last) = runs.last() {
+        let last = entry
+            .historial
+            .iter()
+            .find(|h| h.log_hash == last.log_hash)
+            .cloned()
+            .unwrap_or_else(|| last.clone());
         entry.wifi = last.wifi.clone();
         entry.gpu = last.gpu.clone();
-        entry.sesion_sostenida = parse_sesion(last_boot_text(&blob));
-        if boot_ok_criterio(last_boot_text(&blob)) {
-            entry.arranques_consecutivos_ok = entry.arranques_consecutivos_ok.saturating_add(1);
-        } else if last_boot_text(&blob).contains("boot: memtest") {
-            entry.arranques_consecutivos_ok = 0;
+        entry.sesion_sostenida = if last.userspace {
+            parse_sesion(&last_boot_de_fuentes(&logs_arranque))
+        } else {
+            StageStatus::pendiente()
+        };
+        if !last.identidad_conocida {
+            eprintln!(
+                "hw-matrix parse-logs: el último arranque no trae banner de versión;                  identidad desconocida"
+            );
         }
     }
+    // Contadores derivados del historial, no incrementales.
+    recalcular_racha(entry);
     if let Some(drv) = flag_path(args, "--sosodrv") {
         apply_hwscan(entry, &drv);
     }
@@ -579,6 +886,12 @@ fn parse_logs_cmd(args: &[String]) {
     save_matrix(&m);
     println!("hw-matrix: etapas parseadas para {id}");
     show_entry_summary(&summary);
+}
+
+fn last_boot_de_fuentes(logs: &[(String, String)]) -> String {
+    logs.first()
+        .map(|(_, t)| last_boot_text(t).to_string())
+        .unwrap_or_default()
 }
 
 fn apply_hwscan(entry: &mut HwEntry, sosodrv: &Path) {
@@ -601,43 +914,117 @@ fn any_line(lines: &[String], pred: impl Fn(&str) -> bool) -> bool {
     lines.iter().any(|l| pred(l))
 }
 
-/// Parte logs concatenados por el marcador de arranque `boot: memtest`.
-pub fn split_boots(text: &str) -> Vec<&str> {
-    let mut idxs = Vec::new();
-    let mut pos = 0;
-    while let Some(rel) = text[pos..].find("boot: memtest") {
-        idxs.push(pos + rel);
-        pos += rel + 1;
+/// Reconoce el banner de versión que imprime el kernel al arrancar
+/// (`kernel/src/main.rs`: `soso {version} ({build})`).
+///
+/// Es la **identidad del arranque**. Cualquier otra mención a SOSOKRN —
+/// `updslot: SOSOKRN.BIN LBA 417`, por ejemplo — habla del slot de la ESP, no
+/// de lo que se está ejecutando.
+pub fn banner_version(line: &str) -> Option<&str> {
+    let l = line.trim();
+    let resto = l.strip_prefix("soso ")?;
+    let (ver, resto) = resto.split_once(' ')?;
+    if ver.is_empty() || !ver.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
     }
-    if idxs.is_empty() {
+    if !ver
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    if !resto.starts_with('(') || !resto.trim_end().ends_with(')') {
+        return None;
+    }
+    Some(l)
+}
+
+/// Marcador de instantánea del log en la ESP: no es un arranque nuevo.
+fn es_flush(line: &str) -> bool {
+    let l = line.trim();
+    l.starts_with("=== soso log flush") || l.starts_with("=== soso log")
+}
+
+fn es_memtest(line: &str) -> bool {
+    line.contains("boot: memtest")
+}
+
+/// Offsets donde empieza cada arranque.
+///
+/// Un arranque empieza en su banner de versión; si no hay banner, en
+/// `boot: memtest`. Así la cabecera y el cuerpo del mismo arranque quedan
+/// juntos: antes el corte en `boot: memtest` dejaba la versión —seis líneas
+/// más arriba en run15— en una «ejecución» aparte.
+fn inicios_de_arranque(text: &str) -> Vec<usize> {
+    let mut inicios: Vec<usize> = Vec::new();
+    let mut memtest_en_curso = false;
+    let mut off = 0usize;
+    for line in text.split_inclusive('\n') {
+        if banner_version(line).is_some() {
+            inicios.push(off);
+            memtest_en_curso = false;
+        } else if es_memtest(line) {
+            if inicios.is_empty() || memtest_en_curso {
+                inicios.push(off);
+            }
+            memtest_en_curso = true;
+        }
+        off += line.len();
+    }
+    inicios
+}
+
+/// Parte un log concatenado en arranques. El texto anterior al primer inicio
+/// es la cola de un arranque anterior sin cabecera: no se presenta como
+/// ejecución propia (era el origen de las entradas duplicadas).
+pub fn split_boots(text: &str) -> Vec<&str> {
+    let inicios = inicios_de_arranque(text);
+    if inicios.is_empty() {
         return vec![text];
     }
     let mut out = Vec::new();
-    if idxs[0] > 0 {
-        let prefix = text[..idxs[0]].trim();
-        if !prefix.is_empty() {
-            out.push(&text[..idxs[0]]);
+    for (i, start) in inicios.iter().enumerate() {
+        let mut start = *start;
+        // Una cabecera de instantánea (y líneas en blanco) delante del banner
+        // es del mismo arranque: el volcado de la ESP escribe el marcador y
+        // después el buffer. Solo se descarta la cola con contenido real.
+        if i == 0 && start > 0 && solo_cabeceras(&text[..start]) {
+            start = 0;
         }
-    }
-    for (i, start) in idxs.iter().enumerate() {
-        let end = idxs.get(i + 1).copied().unwrap_or(text.len());
-        out.push(&text[*start..end]);
+        let end = inicios.get(i + 1).copied().unwrap_or(text.len());
+        out.push(&text[start..end]);
     }
     out
+}
+
+fn solo_cabeceras(prefijo: &str) -> bool {
+    prefijo
+        .lines()
+        .all(|l| l.trim().is_empty() || es_flush(l))
 }
 
 pub fn last_boot_text(text: &str) -> &str {
     split_boots(text).last().copied().unwrap_or(text)
 }
 
-fn extract_kernel_id(text: &str) -> String {
+/// Identidad del arranque: banner de versión, o `None` si el log no la trae.
+fn extract_kernel_id(text: &str) -> Option<String> {
     for line in text.lines() {
+        if let Some(b) = banner_version(line) {
+            return Some(b.chars().take(80).collect());
+        }
         let l = line.trim();
-        if l.starts_with("soso ") || l.contains("SOSOKRN") || l.starts_with("version=") {
-            return l.chars().take(80).collect();
+        if let Some(v) = l.strip_prefix("version=") {
+            if !v.is_empty() {
+                return Some(l.chars().take(80).collect());
+            }
         }
     }
-    String::new()
+    None
+}
+
+fn contar_flushes(text: &str) -> u32 {
+    text.lines().filter(|l| es_flush(l)).count() as u32
 }
 
 fn extract_pci(text: &str) -> Vec<String> {
@@ -652,24 +1039,206 @@ fn extract_pci(text: &str) -> Vec<String> {
     out
 }
 
+#[allow(dead_code)]
 pub fn parse_log_runs(text: &str) -> Vec<RunEvidence> {
+    parse_log_runs_con_artefactos(text, &std::collections::BTreeMap::new())
+}
+
+/// Cada arranque del log se convierte en una ejecución, con la identidad de
+/// los artefactos desplegados que se conozca en ese momento.
+pub fn parse_log_runs_con_artefactos(
+    text: &str,
+    artefactos: &std::collections::BTreeMap<String, String>,
+) -> Vec<RunEvidence> {
     split_boots(text)
         .into_iter()
-        .map(|boot| RunEvidence {
-            log_hash: sha256_hex(boot.as_bytes()),
-            kernel: extract_kernel_id(boot),
-            pci: extract_pci(boot),
-            wifi: parse_wifi_stages(boot),
-            gpu: parse_gpu_stages(boot),
-            fecha: today(),
+        .map(|boot| {
+            let ident = extract_kernel_id(boot);
+            let wifi = parse_wifi_stages(boot);
+            let gpu = parse_gpu_stages(boot);
+            RunEvidence {
+                log_hash: sha256_hex(boot.as_bytes()),
+                identidad_conocida: ident.is_some(),
+                kernel: ident.unwrap_or_else(|| "desconocida".into()),
+                artefactos: artefactos.clone(),
+                pci: extract_pci(boot),
+                userspace: boot_ok_criterio(boot),
+                campana_wifi: campana_wifi_ok(&wifi),
+                campana_gpu: campana_gpu_ok(&gpu),
+                flushes: contar_flushes(boot),
+                wifi,
+                gpu,
+                fecha: today(),
+            }
         })
         .collect()
 }
 
+/// Fusiona en `dst` lo que aporte `src` del **mismo** arranque: una etapa
+/// pendiente nunca borra una acreditada, y la identidad conocida gana.
+pub fn fusionar_run(dst: &mut RunEvidence, src: &RunEvidence) {
+    dst.wifi = merge_wifi(&dst.wifi, src.wifi.clone());
+    dst.gpu = merge_gpu(&dst.gpu, src.gpu.clone());
+    if !dst.identidad_conocida && src.identidad_conocida {
+        dst.kernel = src.kernel.clone();
+        dst.identidad_conocida = true;
+    }
+    for pci in &src.pci {
+        if !dst.pci.contains(pci) {
+            dst.pci.push(pci.clone());
+        }
+    }
+    for (k, v) in &src.artefactos {
+        dst.artefactos.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    dst.userspace |= src.userspace;
+    dst.flushes = dst.flushes.max(src.flushes);
+    // Las campañas se recalculan sobre las etapas ya fusionadas.
+    dst.campana_wifi = campana_wifi_ok(&dst.wifi);
+    dst.campana_gpu = campana_gpu_ok(&dst.gpu);
+}
+
+/// Añade la ejecución al historial o la fusiona con la que ya tenga su hash.
+/// Reimportar no crea entradas nuevas ni mueve contadores.
+fn anadir_o_fusionar(historial: &mut Vec<RunEvidence>, run: &RunEvidence) {
+    if let Some(prev) = historial.iter_mut().find(|h| h.log_hash == run.log_hash) {
+        fusionar_run(prev, run);
+        return;
+    }
+    historial.push(run.clone());
+}
+
+/// Correlaciona las fuentes de una importación en ejecuciones.
+///
+/// SOSOLOG y el log de serie son *logs de arranque*: se parten en arranques y
+/// se emparejan por posición cuando traen el mismo número de arranques con
+/// identidades compatibles (son el mismo arranque visto por otro canal).
+/// SOSODRV/SOSOWIFI son *informes* del último arranque: no son ejecuciones
+/// nuevas, se fusionan en el último.
+pub fn correlacionar_fuentes(
+    logs_arranque: &[(String, String)],
+    informes: &[(String, String)],
+    artefactos: &std::collections::BTreeMap<String, String>,
+) -> (Vec<RunEvidence>, Vec<String>) {
+    let mut runs: Vec<RunEvidence> = Vec::new();
+    let mut avisos: Vec<String> = Vec::new();
+
+    for (etiqueta, texto) in logs_arranque {
+        let nuevos = parse_log_runs_con_artefactos(texto, artefactos);
+        if runs.is_empty() {
+            runs = nuevos;
+            continue;
+        }
+        let emparejable = nuevos.len() == runs.len()
+            && runs.iter().zip(nuevos.iter()).all(|(a, b)| {
+                !a.identidad_conocida || !b.identidad_conocida || a.kernel == b.kernel
+            });
+        if emparejable {
+            for (dst, src) in runs.iter_mut().zip(nuevos.iter()) {
+                fusionar_run(dst, src);
+            }
+        } else {
+            avisos.push(format!(
+                "{etiqueta}: {} arranque(s) no correlacionables con los {} de la fuente previa; \
+                 se registran aparte",
+                nuevos.len(),
+                runs.len()
+            ));
+            for r in &nuevos {
+                anadir_o_fusionar(&mut runs, r);
+            }
+        }
+    }
+
+    if runs.is_empty() && !informes.is_empty() {
+        runs.push(RunEvidence {
+            log_hash: sha256_hex(informes[0].1.as_bytes()),
+            kernel: "desconocida".into(),
+            identidad_conocida: false,
+            artefactos: artefactos.clone(),
+            fecha: today(),
+            ..Default::default()
+        });
+    }
+    for (etiqueta, texto) in informes {
+        let Some(ultimo) = runs.last_mut() else {
+            continue;
+        };
+        let informe = RunEvidence {
+            log_hash: ultimo.log_hash.clone(),
+            kernel: String::new(),
+            identidad_conocida: false,
+            wifi: parse_wifi_stages(texto),
+            gpu: parse_gpu_stages(texto),
+            pci: extract_pci(texto),
+            fecha: today(),
+            ..Default::default()
+        };
+        let _ = etiqueta;
+        fusionar_run(ultimo, &informe);
+    }
+    (runs, avisos)
+}
+
+/// «Llegó a userspace» ≠ «superó la campaña»: son criterios distintos y se
+/// registran por separado.
 fn boot_ok_criterio(text: &str) -> bool {
     let lines = line_lc(text);
     any_line(&lines, |l| l.contains("boot: task") || l.contains("sosh —"))
         && !any_line(&lines, |l| l.contains("panic") || l.contains("double fault"))
+}
+
+fn campana_wifi_ok(w: &WifiStages) -> bool {
+    ["ok"].contains(&w.alive.status.as_str())
+        && w.init_complete.status == "ok"
+        && w.mvm_ready.status == "ok"
+        && w.scan.status == "ok"
+        && w.assoc_wpa2.status == "ok"
+        && w.dhcp.status == "ok"
+}
+
+fn campana_gpu_ok(g: &GpuStages) -> bool {
+    g.gsp_rpc.status == "ok"
+        && g.vram_pool.status == "ok"
+        && g.ce_readback.status == "ok"
+        && g.compute_cpu_gpu.status == "ok"
+}
+
+/// Racha derivada del historial ordenado: cuenta arranques únicos con
+/// userspace al final de la lista. Reimportar el mismo log no la mueve porque
+/// no añade ejecuciones nuevas.
+fn recalcular_racha(entry: &mut HwEntry) {
+    let mut racha: u8 = 0;
+    for run in entry.historial.iter().rev() {
+        if run.userspace {
+            racha = racha.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    entry.arranques_consecutivos_ok = racha;
+}
+
+/// Atribución por interfaz: una etapa WiFi necesita una línea de WiFi.
+fn es_iface_wifi(l: &str) -> bool {
+    l.contains("wifi") || l.contains("lxwifi") || l.contains("lx-wifi") || l.contains("iwl")
+}
+
+fn es_iface_ethernet(l: &str) -> bool {
+    l.contains("eth") || l.contains("e1000") || l.contains("cable")
+}
+
+fn tiene_ip_privada(l: &str) -> bool {
+    l.contains("192.") || l.contains("10.") || l.contains("172.")
+}
+
+fn iface_de_linea(l: &str) -> String {
+    for tok in ["lxwifi", "lx-wifi", "iwlwifi", "iwl", "wifi"] {
+        if l.contains(tok) {
+            return tok.into();
+        }
+    }
+    "?".into()
 }
 
 fn wifi_link_up(lines: &[String]) -> bool {
@@ -741,25 +1310,25 @@ pub fn parse_wifi_stages(text: &str) -> WifiStages {
             let wifi_dhcp_fail = any_line(&lines, |l| {
                 l.contains("dhcp")
                     && l.contains("fallo")
-                    && (l.contains("wifi") || l.contains("lxwifi") || l.contains("lx-wifi"))
+                    && es_iface_wifi(l)
                     && !l.contains("gsp")
             });
-            let wifi_dhcp_ok = any_line(&lines, |l| {
-                l.contains("net: dhcp ")
-                    && (l.contains("192.") || l.contains("10.") || l.contains("172."))
-                    && (l.contains("wifi")
-                        || l.contains("lxwifi")
-                        || l.contains("lx-wifi")
-                        || l.contains("iwl"))
-            }) || (wifi_link_up(&lines)
+            // Un lease atribuido explícitamente al WiFi acredita WiFi. Con el
+            // enlace arriba se acepta un lease sin interfaz nombrada, pero
+            // nunca uno que diga Ethernet: eso es la otra interfaz.
+            let explicito = lines.iter().find(|l| {
+                l.contains("net: dhcp ") && tiene_ip_privada(l) && es_iface_wifi(l)
+            });
+            let implicito = wifi_link_up(&lines)
                 && any_line(&lines, |l| {
-                    l.contains("net: dhcp ")
-                        && (l.contains("192.") || l.contains("10.") || l.contains("172."))
-                }));
+                    l.contains("net: dhcp ") && tiene_ip_privada(l) && !es_iface_ethernet(l)
+                });
             if wifi_dhcp_fail {
                 StageStatus::fail("DHCP fallido")
-            } else if wifi_dhcp_ok {
-                StageStatus::ok(None)
+            } else if let Some(l) = explicito {
+                StageStatus::ok(Some(&format!("lease en {}", iface_de_linea(l))))
+            } else if implicito {
+                StageStatus::ok(Some("lease con enlace WiFi arriba (interfaz no nombrada)"))
             } else {
                 StageStatus::pendiente()
             }
@@ -832,8 +1401,20 @@ pub fn parse_gpu_stages(text: &str) -> GpuStages {
             l.contains("dispositivo «soft") || l.contains("dispositivo \"soft")
         }) {
             StageStatus::no_aplica("dispositivo software (QEMU)")
-        } else if any_line(&lines, |l| l.contains("matvec") && l.contains("gpu") && l.contains("tok/s"))
-        {
+        } else if any_line(&lines, |l| {
+            // Solo una comparación ejecutada en GPU acredita cálculo: ni el
+            // pool de VRAM, ni GSP_INIT_DONE, ni una ruta CPU con «gpu» en la
+            // línea. Han de aparecer el kernel medido y su resultado.
+            l.contains("matvec")
+                && l.contains("gpu")
+                && l.contains("tok/s")
+                && !l.contains("cpu")
+                && !l.contains("soft")
+        }) || any_line(&lines, |l| {
+            (l.contains("saxpy") || l.contains("matvec"))
+                && l.contains("gpu")
+                && (l.contains("coincide") || l.contains("ok vs cpu") || l.contains("max_err"))
+        }) {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
@@ -872,14 +1453,26 @@ fn record_boot(args: &[String]) {
         std::process::exit(2);
     });
     let fail = args.iter().any(|a| a == "--fail");
+    let nota = flag(args, "--nota").unwrap_or_else(|| "arranque anotado a mano".into());
     let mut m = load_matrix();
     let entry = find_entry(&mut m, &id).expect("entrada desconocida");
+    // Un arranque anotado a mano también es una ejecución del historial: la
+    // racha sigue derivándose de él, no de un contador incremental aparte.
+    let sello = format!("manual:{id}:{}:{}:{}", today(), entry.historial.len(), nota);
+    let run = RunEvidence {
+        log_hash: sha256_hex(sello.as_bytes()),
+        kernel: "desconocida (anotado a mano)".into(),
+        identidad_conocida: false,
+        artefactos: entry.artefactos.clone(),
+        userspace: !fail,
+        fecha: today(),
+        ..Default::default()
+    };
+    entry.historial.push(run);
     if fail {
-        entry.arranques_consecutivos_ok = 0;
         entry.notas = format!("{}; arranque fallido {}", entry.notas, today());
-    } else {
-        entry.arranques_consecutivos_ok = entry.arranques_consecutivos_ok.saturating_add(1);
     }
+    recalcular_racha(entry);
     entry.actualizado = today();
     let n = entry.arranques_consecutivos_ok;
     save_matrix(&m);
@@ -1032,6 +1625,22 @@ pub(crate) fn pci_id_concreto(id: &str) -> bool {
         && did.len() == 4
         && vid.chars().all(|c| c.is_ascii_hexdigit())
         && did.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Todas las apariciones de una bandera repetible.
+fn flags(args: &[String], name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == name {
+            if let Some(v) = args.get(i + 1) {
+                out.push(v.clone());
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -1221,6 +1830,210 @@ boot: memtest\niwl: start\n";
             .find(|e| e.id == "ga107-igpu")
             .expect("ga107-igpu");
         assert_eq!(ga.pci_ids, vec!["10de:249c".to_string()]);
+    }
+
+    // --- R2: identidad de arranque e importación fiable -------------------
+
+    const RUN15: &str = include_str!("../fixtures/run15-reducido.log");
+
+    #[test]
+    fn r2_run15_es_un_solo_arranque_con_su_version() {
+        let boots = split_boots(RUN15);
+        assert_eq!(boots.len(), 1, "run15 debe ser un único arranque");
+        let runs = parse_log_runs(RUN15);
+        assert_eq!(runs.len(), 1);
+        let r = &runs[0];
+        assert!(r.identidad_conocida, "la versión está en el mismo arranque");
+        assert_eq!(r.kernel, "soso 0.2.2 (276404696-dirty)");
+        assert_eq!(r.flushes, 2, "dos instantáneas del mismo arranque");
+        // Etapas del mismo arranque, no repartidas entre cabecera y cuerpo.
+        assert_eq!(r.wifi.alive.status, "ok");
+        assert_eq!(r.wifi.init_complete.status, "ok");
+        assert_eq!(r.gpu.gsp_rpc.status, "ok");
+        assert_eq!(r.gpu.ce_readback.status, "ok");
+        assert_eq!(r.gpu.vram_pool.status, "fail");
+        assert!(r.userspace, "llegó a sosh sin panic");
+        assert!(!r.campana_wifi, "TX_ANT falló: la campaña WiFi no se supera");
+        assert!(!r.campana_gpu, "sin compute comparado no hay campaña GPU");
+        assert!(r.pci.contains(&"10de:249c".to_string()));
+    }
+
+    #[test]
+    fn r2_updslot_no_es_identidad_de_kernel() {
+        // El slot de la ESP habla del fichero, no de lo que se ejecuta.
+        let solo_updslot = "boot: memtest\nupdslot: SOSOKRN.BIN LBA 417 (64 MiB)\nboot: task\n";
+        let runs = parse_log_runs(solo_updslot);
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].identidad_conocida);
+        assert_eq!(runs[0].kernel, "desconocida");
+        assert!(banner_version("updslot: SOSOKRN.BIN LBA 417 (64 MiB)").is_none());
+        assert!(banner_version("soso 0.2.2 (276404696-dirty)").is_some());
+        assert!(banner_version("sosh — escribe 'help' para la ayuda").is_none());
+        assert!(banner_version("=== soso log flush #45 uptime=1071560ms ===").is_none());
+    }
+
+    #[test]
+    fn r2_dos_arranques_conservan_su_cabecera() {
+        let dos = "\
+soso 0.2.2 (aaaaaaaaa)\nboot: memtest\nUCODE_ALIVE_NTFY\nboot: task\nsosh — hola\n\
+soso 0.2.3 (bbbbbbbbb)\nboot: memtest\niwl: start\n";
+        let runs = parse_log_runs(dos);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].kernel, "soso 0.2.2 (aaaaaaaaa)");
+        assert_eq!(runs[1].kernel, "soso 0.2.3 (bbbbbbbbb)");
+        assert!(runs[0].userspace);
+        assert!(!runs[1].userspace);
+        assert_ne!(runs[0].log_hash, runs[1].log_hash);
+    }
+
+    #[test]
+    fn r2_reimportar_no_infla_la_racha() {
+        let mut entry = seed_entry("t", "t", vec![], "p", &vacia_git(), "");
+        let runs = parse_log_runs(RUN15);
+        for _ in 0..3 {
+            for r in &runs {
+                anadir_o_fusionar(&mut entry.historial, r);
+            }
+            recalcular_racha(&mut entry);
+        }
+        assert_eq!(entry.historial.len(), 1, "tres importaciones, un arranque");
+        assert_eq!(entry.arranques_consecutivos_ok, 1);
+
+        // Un intento fallido posterior corta la racha.
+        let fallido = parse_log_runs("soso 0.2.2 (276404696-dirty)\nboot: memtest\nKERNEL panic\n");
+        for r in &fallido {
+            anadir_o_fusionar(&mut entry.historial, r);
+        }
+        recalcular_racha(&mut entry);
+        assert_eq!(entry.historial.len(), 2);
+        assert_eq!(entry.arranques_consecutivos_ok, 0);
+    }
+
+    #[test]
+    fn r2_flushes_repetidos_no_crean_ejecuciones() {
+        let mut blob = String::from("soso 0.2.2 (ccc)\nboot: memtest\nUCODE_ALIVE_NTFY\n");
+        for i in 0..5 {
+            blob.push_str(&format!("=== soso log flush #{i} uptime={}ms ===\n", i * 1000));
+            blob.push_str("iwl_mvm: INIT_COMPLETE_NOTIF\n");
+        }
+        blob.push_str("boot: task\nsosh — hola\n");
+        let runs = parse_log_runs(&blob);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].flushes, 5);
+        assert!(runs[0].userspace);
+    }
+
+    #[test]
+    fn r2_truncamiento_no_acredita_ni_borra() {
+        // Log cortado a mitad: identidad desconocida y etapas pendientes.
+        let cortado = "INIT_COMPLETE_NOTIF a medias";
+        let runs = parse_log_runs(cortado);
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].identidad_conocida);
+        assert!(!runs[0].userspace);
+
+        // La cola de un arranque anterior (sin cabecera) no es ejecución nueva.
+        let con_cola = "…iwl: bytes de un arranque previo\nsoso 0.2.2 (ddd)\nboot: memtest\nboot: task\nsosh — hola\n";
+        let runs = parse_log_runs(con_cola);
+        assert_eq!(runs.len(), 1, "la cola no cuenta como arranque");
+        assert_eq!(runs[0].kernel, "soso 0.2.2 (ddd)");
+    }
+
+    #[test]
+    fn r2_correlaciona_serial_y_sosodrv_sin_duplicar() {
+        let sosolog = "soso 0.2.2 (eee)\nboot: memtest\nUCODE_ALIVE_NTFY\nboot: task\nsosh — hola\n"
+            .to_string();
+        // El serial ve el mismo arranque y aporta una etapa más.
+        let serial = "soso 0.2.2 (eee)\nboot: memtest\nINIT_COMPLETE_NOTIF\nup mínimo listo\n"
+            .to_string();
+        // SOSODRV es un informe, no un arranque.
+        let sosodrv = "driver=iwlwifi status=ok\nGSP_INIT_DONE recibido\n".to_string();
+        let arts = std::collections::BTreeMap::from([("kernel".to_string(), "abc123 1B".to_string())]);
+        let (runs, avisos) = correlacionar_fuentes(
+            &[("SOSOLOG".into(), sosolog), ("serial".into(), serial)],
+            &[("SOSODRV".into(), sosodrv)],
+            &arts,
+        );
+        assert!(avisos.is_empty(), "mismo arranque en ambos logs: {avisos:?}");
+        assert_eq!(runs.len(), 1, "una ejecución, tres fuentes");
+        assert_eq!(runs[0].wifi.alive.status, "ok");
+        assert_eq!(runs[0].wifi.init_complete.status, "ok");
+        assert_eq!(runs[0].wifi.mvm_ready.status, "ok");
+        assert_eq!(runs[0].gpu.gsp_rpc.status, "ok");
+        assert_eq!(runs[0].artefactos.get("kernel").map(String::as_str), Some("abc123 1B"));
+    }
+
+    #[test]
+    fn r2_serial_no_correlacionable_avisa_y_no_pisa() {
+        let sosolog = "soso 0.2.2 (fff)\nboot: memtest\nUCODE_ALIVE_NTFY\nboot: task\nsosh — hola\n"
+            .to_string();
+        let serial = "soso 0.2.2 (fff)\nboot: memtest\niwl: start\nsoso 0.2.2 (fff)\nboot: memtest\niwl: start\n"
+            .to_string();
+        let (runs, avisos) = correlacionar_fuentes(
+            &[("SOSOLOG".into(), sosolog), ("serial".into(), serial)],
+            &[],
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(avisos.len(), 1, "debe avisar de que no cuadran");
+        assert!(runs.len() >= 2);
+        assert_eq!(runs[0].wifi.alive.status, "ok", "el primero conserva su etapa");
+    }
+
+    #[test]
+    fn r2_dhcp_ethernet_no_acredita_wifi() {
+        let w = parse_wifi_stages(
+            "assoc=ok\nnet: dhcp 192.168.1.44/24 gw 192.168.1.1 (eth0 e1000e)\n",
+        );
+        assert_eq!(w.assoc_wpa2.status, "ok");
+        assert_eq!(w.dhcp.status, "pendiente", "el lease es de Ethernet");
+        let w = parse_wifi_stages("net: dhcp 192.168.1.44/24 lxwifi0\n");
+        assert_eq!(w.dhcp.status, "ok");
+        assert!(w.dhcp.nota.as_deref().unwrap_or("").contains("lxwifi"));
+    }
+
+    #[test]
+    fn r2_pool_y_rpc_no_acreditan_compute() {
+        let g = parse_gpu_stages(
+            "GSP_INIT_DONE recibido\npool VRAM=256MiB\nreadback GO\n\
+             soso-llm: matvec cpu 3.2 tok/s (gpu ausente)\n",
+        );
+        assert_eq!(g.gsp_rpc.status, "ok");
+        assert_eq!(g.vram_pool.status, "ok");
+        assert_eq!(g.compute_cpu_gpu.status, "pendiente");
+        let g = parse_gpu_stages(
+            "GSP_INIT_DONE recibido\npool VRAM=256MiB\nreadback GO\n\
+             soso-llm: matvec gpu 9.1 tok/s\n",
+        );
+        assert_eq!(g.compute_cpu_gpu.status, "ok");
+        assert!(campana_gpu_ok(&g));
+    }
+
+    #[test]
+    fn r2_artefactos_hashean_el_arbol() {
+        let dir = std::env::temp_dir().join(format!("soso-r2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/init"), b"uno").unwrap();
+        let (h1, n1) = hash_directorio(&dir).expect("hash");
+        assert_eq!(n1, 1);
+        std::fs::write(dir.join("bin/init"), b"dos").unwrap();
+        let (h2, _) = hash_directorio(&dir).expect("hash");
+        assert_ne!(h1, h2, "cambiar contenido cambia el hash");
+        std::fs::write(dir.join("bin/sosh"), b"uno").unwrap();
+        let (h3, n3) = hash_directorio(&dir).expect("hash");
+        assert_ne!(h2, h3, "añadir un fichero cambia el hash");
+        assert_eq!(n3, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn vacia_git() -> GitInfo {
+        GitInfo {
+            commit: "0".into(),
+            commit_corto: "0".into(),
+            version: "0".into(),
+            dirty: false,
+            cambios_locales: String::new(),
+        }
     }
 
     #[test]
