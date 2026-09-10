@@ -500,7 +500,34 @@ static int check_pasivos_y_banda(void)
             return -1;
         }
     }
-    puts("OK: activo/pasivo y banda por versión (v6/v15/v17) unificados");
+    /* Con el perfil NVM entero (51 entradas de tabla) la petición v6 sigue
+     * cabiendo en un slot de comando: antes la lista era fija de 21 canales y
+     * nadie comprobaba el tamaño con la lista larga. */
+    memset(&iwl, 0, sizeof(iwl));
+    set_scan_ver(&iwl, 6);
+    iwl.nvm_n_channels = IWL_NUM_CHANNELS;
+    {
+        unsigned i;
+
+        for (i = 0; i < IWL_NUM_CHANNELS; i++) {
+            iwl.nvm_chan_flags[i] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+        }
+    }
+    {
+        uint16_t pay = iwl_mvm_build_scan_req(&iwl, buf, sizeof(buf));
+
+        if (pay == 0 || pay + 8u > IWL_CMD_SLOT_SIZE) {
+            fprintf(stderr, "v6 con el perfil completo: pay=%u (slot %u)\n",
+                    pay, IWL_CMD_SLOT_SIZE);
+            return -1;
+        }
+        if (buf[41] == 0 || buf[41] > SCAN_MAX_NUM_CHANS_V3) {
+            fprintf(stderr, "v6 count=%u fuera de rango\n", buf[41]);
+            return -1;
+        }
+    }
+    puts("OK: activo/pasivo y banda por versión (v6/v15/v17) unificados, y v6 "
+         "con el perfil completo cabe en un slot");
     return 0;
 }
 

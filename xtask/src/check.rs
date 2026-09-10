@@ -41,11 +41,16 @@ pub fn run() {
     let minimo = check_profile_minimo();
     let requeridos = hostchecks_requeridos(&ports, minimo);
     println!(
-        "check: hostchecks del perfil [{}]{}…",
+        "check: hostchecks — perfil [{}], obligatorios [{}]{}…",
         if ports.is_empty() {
-            "sin lxdde".to_string()
+            format!("por defecto: {}", PORTS_POR_DEFECTO.join(","))
         } else {
             ports.join(",")
+        },
+        if requeridos.is_empty() {
+            "ninguno".to_string()
+        } else {
+            requeridos.join(", ")
         },
         if minimo { " (perfil mínimo)" } else { "" }
     );

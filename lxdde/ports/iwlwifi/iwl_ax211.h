@@ -34,6 +34,13 @@ struct iwl_ax211_priv {
     unsigned long iml_len;
     const uint8_t *pnvm_data;
     unsigned long pnvm_len;
+    /* Mapa DMA de las secciones ya subidas, para no reenviarlas al reiniciar. */
+    struct iwl_context_info_dram dram_cache;
+    const uint8_t *dram_fw_src;
+    int dram_cached;
+    /* PNVM ya copiado a DMA. */
+    void *pnvm_cpu;
+    uint64_t pnvm_dma;
 
     uint64_t scratch_dma;
     uint64_t info_dma;
@@ -46,6 +53,13 @@ struct iwl_ax211_priv {
     uint64_t tr_tail;
     void *mtr_cpu;
     void *mcr_cpu;
+    /* Buffers del context-info, reutilizados al reiniciar el transporte. */
+    void *scratch_cpu;
+    void *info_cpu;
+    void *ctxt_cpu;
+    void *iml_cpu;
+    uint64_t iml_dma;
+    unsigned long iml_cpu_len;
 
     void *rx_bd_cpu;
     void *used_bd_cpu;

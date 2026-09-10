@@ -822,7 +822,11 @@ fn parse_logs_cmd(args: &[String]) {
         if let Some(p) = flag_path(args, flag) {
             match std::fs::read_to_string(&p) {
                 Ok(t) => {
-                    if es_log {
+                    // Un hueco de la ESP sin escribir es todo '\n': no es un
+                    // arranque, y colarlo creaba una ejecución fantasma.
+                    if t.trim().is_empty() {
+                        println!("hw-matrix parse-logs: {label} vacío; se ignora");
+                    } else if es_log {
                         logs_arranque.push((label.into(), t));
                     } else {
                         informes.push((label.into(), t));
@@ -836,9 +840,7 @@ fn parse_logs_cmd(args: &[String]) {
             }
         }
     }
-    if logs_arranque.iter().all(|(_, t)| t.trim().is_empty())
-        && informes.iter().all(|(_, t)| t.trim().is_empty())
-    {
+    if logs_arranque.is_empty() && informes.is_empty() {
         eprintln!("hw-matrix parse-logs: indica al menos un --sosolog|--sosodrv|--serial");
         std::process::exit(2);
     }

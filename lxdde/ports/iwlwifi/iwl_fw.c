@@ -332,11 +332,31 @@ static int fill_dram_map(uint64_t *map, const struct iwl_fw_section *sec)
     return dram_push(map, 0, sec->data, sec->len);
 }
 
+/* Sube las secciones del firmware a DMA y devuelve el mapa para context-info.
+ *
+ * El mapa se cachea: en un reinicio de transporte (R4) las mismas secciones
+ * ya están en DMA y nadie las ha tocado. Sin esto, cada recuperación volvía a
+ * copiar el firmware entero —megabytes— en buffers nuevos que nadie liberaba. */
 int iwl_fw_upload_sections(struct iwl_ax211_priv *iwl, struct iwl_context_info_dram *dram)
 {
+    const uint8_t *src = iwl->fw.rt_n > 0 ? iwl->fw.rt[0].data : iwl->fw.inst.data;
+
+    if (iwl->dram_cached && iwl->dram_fw_src == src) {
+        memcpy(dram, &iwl->dram_cache, sizeof(*dram));
+        lx_printk("iwl_fw: secciones ya en DMA; se reutiliza el mapa\n");
+        return 0;
+    }
     memset(dram, 0, sizeof(*dram));
-    if (iwl->fw.rt_n > 0)
-        return upload_rt(&iwl->fw, dram);
+    if (iwl->fw.rt_n > 0) {
+        int rc = upload_rt(&iwl->fw, dram);
+
+        if (rc == 0) {
+            memcpy(&iwl->dram_cache, dram, sizeof(iwl->dram_cache));
+            iwl->dram_fw_src = src;
+            iwl->dram_cached = 1;
+        }
+        return rc;
+    }
     if (fill_dram_map(dram->umac_img, &iwl->fw.inst) < 0)
         return -1;
     if (fill_dram_map(dram->lmac_img, &iwl->fw.data) < 0)
@@ -344,5 +364,8 @@ int iwl_fw_upload_sections(struct iwl_ax211_priv *iwl, struct iwl_context_info_d
     if (iwl->fw.init.len &&
         fill_dram_map(dram->virtual_img, &iwl->fw.init) < 0)
         return -1;
+    memcpy(&iwl->dram_cache, dram, sizeof(iwl->dram_cache));
+    iwl->dram_fw_src = src;
+    iwl->dram_cached = 1;
     return 0;
 }

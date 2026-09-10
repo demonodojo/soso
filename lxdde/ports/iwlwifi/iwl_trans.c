@@ -220,12 +220,23 @@ static int iwl_pcie_check_hw_rf_kill(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
+/* Anillos RX/comandos del transporte.
+ *
+ * Idempotente: en un reinicio de transporte (R4) se reutilizan los mismos
+ * buffers en vez de pedir otros. Pedirlos de nuevo perdía ~400 KiB de DMA
+ * coherente por recuperación y dejaba los antiguos aún mapeados para el
+ * dispositivo. */
 static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
 {
     uint64_t *bd;
     unsigned i;
     unsigned used_sz = iwl->gen3 ? (IWL_GEN2_RX_N * 2u) : (IWL_GEN2_RX_N * 4u);
 
+    if (iwl->rx_bd_cpu && iwl->used_bd_cpu && iwl->rb_stts && iwl->rx_page_cpu &&
+        iwl->mtr_cpu && iwl->mcr_cpu) {
+        lx_printk("iwlwifi: anillos ya reservados; se reinician en su sitio\n");
+        goto reiniciar;
+    }
     iwl->rx_bd_cpu = lx_dma_alloc_coherent(0, IWL_GEN2_RX_N * 8, &iwl->rx_bd_dma, GFP_KERNEL);
     iwl->used_bd_cpu = lx_dma_alloc_coherent(0, used_sz, &iwl->used_bd_dma, GFP_KERNEL);
     iwl->rb_stts = (volatile uint16_t *)lx_dma_alloc_coherent(0, 16, &iwl->rb_stts_dma, GFP_KERNEL);
@@ -238,6 +249,7 @@ static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
     if (!iwl->rx_bd_cpu || !iwl->used_bd_cpu || !iwl->rb_stts ||
         !iwl->rx_page_cpu || !iwl->mtr_cpu || !iwl->mcr_cpu)
         return -1;
+reiniciar:
     memset(iwl->rx_bd_cpu, 0, IWL_GEN2_RX_N * 8);
     memset(iwl->used_bd_cpu, 0, used_sz);
     memset((void *)iwl->rb_stts, 0, 16);
@@ -257,6 +269,7 @@ static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
     }
     iwl->rx_read = 0;
     iwl->cmd_write = 0;
+    iwl->cmd_read = 0;
     return 0;
 }
 
@@ -450,6 +463,36 @@ static int rx_owner_slot(struct iwl_ax211_priv *iwl, uint8_t group,
 /* `avail` = bytes válidos realmente recibidos en `buf` (incluida la cabecera
  * de 8 B). El RB de hardware siempre trae IWL_GEN2_RX_SZ; una inyección corta
  * (banco de pruebas, DMA parcial) no debe leerse más allá de `avail`. */
+/* Cierra el comando sincrónico con su respuesta. */
+static void rx_complete_sync(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd,
+                             const uint8_t *data, int pay)
+{
+    int copy = pay;
+
+    iwl->cmd_status = 1;
+    iwl->cmd_pending = 0;
+    /* Gen2 iwlwifi: tamaño en bits 13:0; no hay bit FAILED en len_n_flags
+     * (iwlegacy usaba hdr.flags). NVM_GET_INFO v4 = 468 B → len=472 y
+     * 472&0x40≠0 si se interpretaba como rechazo — falso positivo run14. */
+    iwl->cmd_fw_err = 0;
+    iwl->cmd_resp_wire_len = (uint16_t)pay;
+    if (copy > (int)sizeof(iwl->cmd_resp)) {
+        copy = (int)sizeof(iwl->cmd_resp);
+    }
+    iwl->cmd_resp_trunc = (copy < pay) ? 1 : 0;
+    if (iwl->cmd_resp_trunc) {
+        lx_printk("iwl_rx: respuesta grp=%u id=0x%02x de %d B > buffer %u B\n",
+                  (unsigned)group, (unsigned)cmd, pay,
+                  (unsigned)sizeof(iwl->cmd_resp));
+    }
+    if (copy > 0) {
+        memcpy(iwl->cmd_resp, data, (size_t)copy);
+        iwl->cmd_resp_len = (uint16_t)copy;
+    } else {
+        iwl->cmd_resp_len = 0;
+    }
+}
+
 static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigned avail)
 {
     uint32_t len_n_flags;
@@ -459,7 +502,7 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
     uint16_t seq;
     const uint8_t *data;
     int pay;
-    int copy;
+    int owner;
 
     if (avail < 8u) {
         iwl->rx_trunc_drop++;
@@ -488,37 +531,14 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
 
     log_rx(iwl, group, cmd, seq, pay, 0);
 
-    {
-    int owner = rx_owner_slot(iwl, group, cmd, seq);
-
-    if (owner >= 0 && iwl->cmd_slot_state[owner] == IWL_SLOT_ASYNC) {
-        /* Async: nadie espera la respuesta, pero el slot solo se libera aquí
-         * y no toca cmd_resp[], que pertenece al comando sincrónico. */
-        cmd_slot_done(iwl, (unsigned)owner);
-    } else if (owner >= 0) {
-        iwl->cmd_status = 1;
-        iwl->cmd_pending = 0;
-        /* Gen2 iwlwifi: tamaño en bits 13:0; no hay bit FAILED en len_n_flags
-         * (iwlegacy usaba hdr.flags). NVM_GET_INFO v4 = 468 B → len=472 y
-         * 472&0x40≠0 si se interpretaba como rechazo — falso positivo run14. */
-        iwl->cmd_fw_err = 0;
-        iwl->cmd_resp_wire_len = (uint16_t)pay;
-        copy = pay;
-        if (copy > (int)sizeof(iwl->cmd_resp))
-            copy = (int)sizeof(iwl->cmd_resp);
-        iwl->cmd_resp_trunc = (copy < pay) ? 1 : 0;
-        if (iwl->cmd_resp_trunc)
-            lx_printk("iwl_rx: respuesta grp=%u id=0x%02x de %d B > buffer %u B\n",
-                      (unsigned)group, (unsigned)cmd, pay,
-                      (unsigned)sizeof(iwl->cmd_resp));
-        if (copy > 0) {
-            memcpy(iwl->cmd_resp, data, (size_t)copy);
-            iwl->cmd_resp_len = (uint16_t)copy;
-        } else {
-            iwl->cmd_resp_len = 0;
+    owner = rx_owner_slot(iwl, group, cmd, seq);
+    if (owner >= 0) {
+        /* Async: nadie espera la respuesta y no toca cmd_resp[], que pertenece
+         * al comando sincrónico; pero su slot solo se libera aquí. */
+        if (iwl->cmd_slot_state[owner] != IWL_SLOT_ASYNC) {
+            rx_complete_sync(iwl, group, cmd, data, pay);
         }
         cmd_slot_done(iwl, (unsigned)owner);
-    }
     }
 
     if (group == 0 && cmd == UCODE_ALIVE_NTFY) {
@@ -724,12 +744,29 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
-    scratch = lx_dma_alloc_coherent(0, sizeof(*scratch), &iwl->scratch_dma, GFP_KERNEL);
-    info = lx_dma_alloc_coherent(0, IWL_PRPH_INFO_ALLOC, &iwl->info_dma, GFP_KERNEL);
-    ctxt = lx_dma_alloc_coherent(0, sizeof(*ctxt), &iwl->ctxt_dma, GFP_KERNEL);
-    iml_cpu = lx_dma_alloc_coherent(0, iwl->iml_len, &iml_dma, GFP_KERNEL);
-    if (!scratch || !info || !ctxt || !iml_cpu)
-        return -1;
+    /* Igual que los anillos: en un reinicio se reutilizan. El IML solo si su
+     * tamaño no ha cambiado (otro fichero de firmware). */
+    if (iwl->scratch_cpu && iwl->info_cpu && iwl->ctxt_cpu && iwl->iml_cpu &&
+        iwl->iml_cpu_len == iwl->iml_len) {
+        scratch = iwl->scratch_cpu;
+        info = iwl->info_cpu;
+        ctxt = iwl->ctxt_cpu;
+        iml_cpu = iwl->iml_cpu;
+        iml_dma = iwl->iml_dma;
+    } else {
+        scratch = lx_dma_alloc_coherent(0, sizeof(*scratch), &iwl->scratch_dma, GFP_KERNEL);
+        info = lx_dma_alloc_coherent(0, IWL_PRPH_INFO_ALLOC, &iwl->info_dma, GFP_KERNEL);
+        ctxt = lx_dma_alloc_coherent(0, sizeof(*ctxt), &iwl->ctxt_dma, GFP_KERNEL);
+        iml_cpu = lx_dma_alloc_coherent(0, iwl->iml_len, &iml_dma, GFP_KERNEL);
+        if (!scratch || !info || !ctxt || !iml_cpu)
+            return -1;
+        iwl->scratch_cpu = scratch;
+        iwl->info_cpu = info;
+        iwl->ctxt_cpu = ctxt;
+        iwl->iml_cpu = iml_cpu;
+        iwl->iml_dma = iml_dma;
+        iwl->iml_cpu_len = iwl->iml_len;
+    }
 
     memset(scratch, 0, sizeof(*scratch));
     scratch->ctrl_cfg.version.mac_id = (uint16_t)iwl_read32(iwl, CSR_HW_REV);
@@ -741,10 +778,15 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
     scratch->ctrl_cfg.rbd_cfg.free_rbd_addr = iwl->rx_bd_dma;
 
     if (iwl->pnvm_data && iwl->pnvm_len) {
-        void *pnvm_cpu = lx_dma_alloc_coherent(0, iwl->pnvm_len, &dma, GFP_KERNEL);
-        if (pnvm_cpu) {
-            memcpy(pnvm_cpu, iwl->pnvm_data, iwl->pnvm_len);
-            scratch->ctrl_cfg.pnvm_cfg.pnvm_base_addr = dma;
+        if (!iwl->pnvm_cpu) {
+            iwl->pnvm_cpu = lx_dma_alloc_coherent(0, iwl->pnvm_len, &dma, GFP_KERNEL);
+            iwl->pnvm_dma = dma;
+            if (iwl->pnvm_cpu) {
+                memcpy(iwl->pnvm_cpu, iwl->pnvm_data, iwl->pnvm_len);
+            }
+        }
+        if (iwl->pnvm_cpu) {
+            scratch->ctrl_cfg.pnvm_cfg.pnvm_base_addr = iwl->pnvm_dma;
             scratch->ctrl_cfg.pnvm_cfg.pnvm_size = (uint32_t)iwl->pnvm_len;
         }
     }
