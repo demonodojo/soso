@@ -4,21 +4,23 @@
 
 Lectura ESP `/dev/sda1` (`kernel`, vfat) con `udisksctl`. Copias:
 
-- run14: `target/usb-diagnostic-2026-09-10-run2/` (SOSOWIFI vacío; sin PSK)
+- run16: `target/usb-diagnostic-2026-09-10-run4/` (SOSOWIFI vacío; sin PSK)
+- run15: `target/usb-diagnostic-2026-09-10-run3/`
+- run14: `target/usb-diagnostic-2026-09-10-run2/`
 - run13: `target/usb-diagnostic-2026-09-10/`
 
 ESP desmontada al terminar.
 
-| Campo | run14 (último) | run13 | run12 |
+| Campo | run16 (último) | run15 | run14 |
 |---|---|---|---|
-| Kernel USB | **0.2.2 (276404696)** | 0.2.2 (1df51e817-dirty) | igual (refl.) |
-| Flush / uptime | **#41, 787 s** | #33, 475 s | #43, 1024 s |
+| Kernel USB | **0.2.2 (e6f491ec9-dirty)** | 0.2.2 (276404696-dirty) | 0.2.2 (276404696) |
+| Flush / uptime | **#28, 454 s** | #45, 1071 s | #41, 787 s |
 | Hardware | 10de:249c + 8086:2723 + 10ec:8168 | igual | igual |
-| sosh | **SÍ** (+ `wifi scan` + halt) | SÍ (+ `wifi scan` + `ask hola`) | SÍ (+ halt) |
-| GSP / CE | **GSP_INIT_DONE**; CE G4e GO; **G6 buffers listos** | GSP ok; CE G4e GO | NO_MEMORY chid=0 |
-| GR0 / pool | **GR0 chid=2 ok**; compute `0xc7c0` ok; **pool VRAM=no** (CE stuck SASS) | RPC muerto `0x20802a08`; pool=no | no alcanzado |
-| WiFi | ALIVE + INIT; **NVM_GET_INFO falló**; scan E/S | SF ok; **timeout TX_ANT 0x98** | TX_ANT/PHY/MCC timeout |
-| Apagado | **GSP-RM apagado … dma=off** | no registrado | — |
+| sosh | **SÍ** (+ `wifi scan` + `ask hola`) | SÍ (+ `wifi scan` + halt) | SÍ (+ `wifi scan` + halt) |
+| GSP / CE | **GSP_INIT_DONE**; CE G4e GO; **pool VRAM=sí** | GSP ok; CE G4e GO; pool=no | GSP ok; CE G4e GO |
+| GR0 / pool | **SASS en VRAM**; GR0 chid=2; grctx 9 entradas; **pool VRAM=sí** | GR0 ok; pool=no (CE stuck) | GR0 ok; pool=no |
+| WiFi | ALIVE + INIT + NVM; **TX_ANT ok**; **timeout DQA grp=5 id=0**; scan E/S | TX_ANT timeout grp=0 | NVM falló; scan E/S |
+| Apagado | no registrado (log truncado) | GSP-RM apagado dma=off | GSP-RM apagado |
 | fatlog | sí | sí | sí |
 
 Árboles Linux (solo lectura):
@@ -28,9 +30,55 @@ ESP desmontada al terminar.
 | `lxdde/linux/` | **6.6.32** — `mvm/fw.c`, `mvm/sf.c`, `pcie/tx-gen2.c`, `iwl-csr.h`, `iwl-nvm-parse.c` |
 | `lxdde/reference/linux-master-nouveau/` | **`fc02acf`** — `r535/fifo.c`, `r535/bar.c`, `r570/fifo.c` |
 
-Hostchecks (host, sin silicio): `l6-iwl-fw-hostcheck.sh` OK (wide/scan/contrato/TLV + NVM v4 468 B),
-`l6-g3-gsp-hostcheck.sh` OK (segundo canal USERD chid=2 + CE saxpy 512 B page-aligned + grctx map).
-Tras fixes run14: hostchecks verdes; **validación en placa pendiente** (reflash kernel).
+Hostchecks (host, sin silicio): `l6-iwl-fw-hostcheck.sh` OK (DEF_ID cmd_ver TX_ANT=1 PHY=4,
+omit DQA sin CAPA_DQA, up_minimal sin grp=5),
+`l6-g3-gsp-hostcheck.sh` OK (SASS staging antes GR0 + grctx map + CE page-aligned).
+Tras fixes run16 (omit DQA + cmd_ver DEF_ID): hostchecks verdes; **validación PHY/SCAN en placa pendiente**.
+
+## Tabla de etapas (run16)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Userspace | `sosh —` + `wifi scan` + `ask hola` | **OK** |
+| fatlog | flush **#28** @ 454 s | OK |
+| lxdde pci / GSP | `GSP_INIT_DONE`, vaspace gp100 | **OK** |
+| Canal COPY0 / CE G4e | `CE readback verificado (G4e GO)` | **OK** |
+| G6 / pool | `SASS en VRAM`; `pool VRAM=sí` | **OK** |
+| Canal GR0 | `RM_ALLOC chid=2`; compute `0xc7c0` | **OK** |
+| grctx | `contexto de GR promocionado: 9 entradas` | **OK** |
+| WiFi alive | `UCODE_ALIVE_NTFY`, `INIT_COMPLETE_NOTIF` | **OK** |
+| WiFi NVM | `NVM_GET_INFO v4 nvm_ver=0x1235` | **OK** |
+| WiFi TX_ANT | `TX_ANT_CONFIGURATION ok (ant=0x3)` | **OK** (vs run15) |
+| WiFi DQA | `timeout cmd grp=5 id=0x00` → `DQA no habilitado` | **FAIL** |
+| WiFi scan | `wifi scan: error de E/S` | **FAIL** |
+
+**Interpretación run16:** fixes run15 (DEF_ID wire + SASS pre-GR0) **validados en placa** (TX_ANT ok, pool VRAM=sí).
+Bloqueo WiFi: `DQA_ENABLE` mandado sin `CAPA_DQA_SUPPORT` — ucode `cc-a0-77` no declara bit 12 ni CMD_VERSIONS grp=5/cmd=0.
+Linux [`mvm/fw.c:1601`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/mvm/fw.c) omite DQA si falta capa.
+Segundo fix: `iwl_fw_cmd_ver` buscaba grupo 0 en TLV (PHY v4 en grp=1) — Linux [`fw/img.c:13`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/fw/img.c).
+
+## Tabla de etapas (run15)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Userspace | `sosh —` + `wifi scan` + halt | **OK** |
+| fatlog | flush **#45** @ 1071 s | OK |
+| lxdde pci / GSP | `GSP_INIT_DONE`, vaspace gp100 | **OK** |
+| Canal COPY0 / CE G4e | `CE readback verificado (G4e GO)` | **OK** |
+| G6 / pool | `G6 — buffers VRAM listos`; luego `pool VRAM=no` (`ce.stuck`) | **FAIL** |
+| SASS saxpy | Tras GR0 en runlist 0xc00000: `SASS de saxpy no llegó a VRAM` | **FAIL** |
+| Canal GR0 | `RM_ALLOC chid=2`; compute `0xc7c0` | **OK** |
+| grctx | `contexto de GR promocionado: 9 entradas` | **OK** (vs run14) |
+| WiFi alive | `UCODE_ALIVE_NTFY`, `INIT_COMPLETE_NOTIF` | **OK** |
+| WiFi NVM | `NVM_GET_INFO v4 nvm_ver=0x1235`; MAC NVM real | **OK** (vs run14) |
+| WiFi TX_ANT | `timeout cmd grp=0 id=0x98` tras SF async | **FAIL** |
+| WiFi scan | `wifi scan: error de E/S` | **FAIL** |
+| Apagado | `GSP-RM apagado (objetos=ok unload=ok halt=ok dma=off)` | **OK** |
+
+**Interpretación run15:** run14 fixes (NVM len_flags, CE page, grctx map) **ya en el USB**.
+Bloqueos restantes: (1) HCMD legacy con `group_id=0` — Linux 6.6 usa `DEF_ID` → `LONG_GROUP=1` para TX_ANT/SF;
+(2) primera copia CE de SASS **después** de programar GR0 en la runlist 0xc00000 deja el CE atascado
+(aunque G4e fue GO y grctx promociona).
 
 ## Tabla de etapas (run14)
 
@@ -208,13 +256,27 @@ timeout de 0x98; conviene loguear STRAP vs OTP crudos y no anunciar «MAC NVM» 
 | 3 | Cachear method buffer; chid=2 | `gsp_chan.c` | Placa run14: GR0 + compute ok |
 | 4 | SF async + TX_ANT sync | `iwl_mvm_up.c`, `iwl_trans.c` | Pendiente placa (run14 no llegó a TX_ANT) |
 
-### run14 (NVM / CE / grctx) — **implementado en árbol; placa pendiente**
+### run14 (NVM / CE / grctx) — **en USB run15**
 
 | # | Cambio | Archivos | Hecho host / placa |
 |---|---|---|---|
-| 1 | No tratar bit 6 de `len_n_flags` como rechazo FW | `iwl_trans.c`, `hcmd_contract_test.c` | Hostcheck OK. Placa: NVM_GET_INFO v4 |
-| 2 | CE copias siempre a página (boa0b5) | `gsp_ce.c`, `gsp_compute.c`, `gsp-hostcheck` | Hostcheck OK. Placa: SASS + pool VRAM=sí |
-| 3 | Mapeo grctx alineado a página | `gsp_grctx.c` | Hostcheck OK (0x851200→0xA00000). Placa: GR promocionado |
+| 1 | No tratar bit 6 de `len_n_flags` como rechazo FW | `iwl_trans.c`, `hcmd_contract_test.c` | Placa run15: NVM_GET_INFO v4 ok |
+| 2 | CE copias siempre a página (boa0b5) | `gsp_ce.c`, `gsp_compute.c`, `gsp-hostcheck` | Placa run15: G4e GO; SASS post-GR0 sigue stuck |
+| 3 | Mapeo grctx alineado a página | `gsp_grctx.c` | Placa run15: GR promocionado (9 entradas) |
+
+### run15 (DEF_ID / SASS pre-GR0) — **validado en placa run16**
+
+| # | Cambio | Archivos | Hecho host / placa |
+|---|---|---|---|
+| 1 | `LEGACY_GROUP` → `LONG_GROUP` (DEF_ID) en `send_hcmd` | `iwl_trans.c`, `hcmd_contract_test.c`, `hcmd_wide_test.c` | Placa run16: TX_ANT ok + `iwl_rx` 0x98 |
+| 2 | CE copia SASS tras G4e/G6, **antes** de GR0 | `gsp_bringup.c`, `gsp_compute.c` | Placa run16: `SASS en VRAM` + `pool VRAM=sí` |
+
+### run16 (omit DQA / cmd_ver DEF_ID) — **implementado en árbol; placa pendiente**
+
+| # | Cambio | Archivos | Hecho host / placa |
+|---|---|---|---|
+| 1 | Parsear TLV 30; omitir `DQA_ENABLE` sin `CAPA_DQA_SUPPORT` (bit 12) | `iwl_fw.c`, `iwl_mvm_up.c`, `capa_dqa_test.c` | Hostcheck OK. Placa: `DQA omitido` + PHY/SCAN_CFG |
+| 2 | `iwl_fw_cmd_ver`: LEGACY_GROUP → LONG_GROUP en lookup | `iwl_fw.c`, `main.c` hostcheck | Hostcheck OK. Placa: PHY_CONTEXT v4 |
 
 Reflash kernel (usuario):
 
@@ -224,7 +286,44 @@ sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sda --yes --o
 
 ## Qué no se ha hecho
 
-- No se ha reflasheado el USB con los fixes run14.
+- No se ha reflasheado el USB con los fixes run16 (omit DQA + cmd_ver DEF_ID).
 - No `record-boot` / `--boot-ok` (`arranques_consecutivos_ok` = 0 en hw-matrix).
-- Hostchecks verdes no sustituyen validación en placa (NVM, CE SASS, grctx, TX_ANT).
-- No se ha validado `ask` con pool VRAM ni asociación WPA2.
+- No se ha validado scan con BSS ni asociación WPA2 tras omit DQA.
+- `ask hola` en run16 sigue en CPU (sin `saxpy en GPU OK` en log).
+
+## Ciclo del 10/09 (tarde): todo lo comprobable sin placa
+
+No se ha flasheado nada en este ciclo. Lo que sigue es lo que cambia **antes**
+del próximo arranque, con lo que hay que mirar en él.
+
+### Lo que este ciclo deja medible en el siguiente arranque
+
+| Qué mirar en el log | Por qué |
+|---|---|
+| `sonda CE — antes de GR0=…, tras crear GR0=…, tras PROMOTE_CTX=…` | Dice si el CE muere al crear el canal de GR o en el promote. Run15 solo permitía ver «murió en algún momento después». |
+| `compute — familia X, SASS sm_YY, QMD …` | En GA107 debe salir `familia Ampere, SASS sm_86` y QMD «SIN layout en el árbol». Antes se lanzaba un descriptor de Blackwell con código sm_120. |
+| `iwl_trans: timeout … slot=N; MVM parado` + `recuperación #1` | Un timeout ya no deja la cola en un estado del que no se sale: bloquea y el siguiente scan reinicia el transporte. |
+| `SCAN_REQ_UMAC … origen=N pasivo=M` | `origen` distingue NVM, MCC, fallback y perfil vacío; `pasivo` dice si el scan es solo de escucha. |
+| `MCC aplicado XX status=… canales=N válidos=M` | Antes MCC solo imprimía status y marcaba `mcc_done` sin aplicar la lista. |
+| `wifi scan` con causa | Vacío normal, aborto, timeout, sin canales y sin regdominio se distinguen. |
+| `SOSOHASH.TXT` en la ESP | Identidad de lo flasheado (kernel/rootfs/perfil por sha256). Copiarlo junto a SOSOLOG e importarlo con `--sosohash`. |
+
+### Cambios de este ciclo (host/QEMU verde, placa pendiente)
+
+| # | Cambio | Archivos | Comprobado |
+|---|---|---|---|
+| 1 | RX descarta el paquete cuyo `len` anunciado supera lo recibido; `cmd_resp_trunc` | `iwl_trans.c`, `iwl_mvm_nvm.c`, `hcmd_contract_test.c` | Host + ASan/UBSan |
+| 2 | Cola HCMD FIFO con propiedad por slot, backpressure y recuperación | `iwl_trans.c`, `iwl_ax211.c`, `wifi.rs`, `hcmd_queue_test.c` | Host: 31 async, orden, reentrada, recover |
+| 3 | MCC completo + política única de canales + banda v17 en `flags[31:30]` | `iwl_mvm.c`, `iwl_mvm_nvm.c`, `mcc_chan_test.c` | Host |
+| 4 | BSS clasificado por beacon (Privacy/RSN/AKM/CCMP) y SSID exacto | `iwl_mvm.c`, `bss_select_test.c` | Host |
+| 5 | Juegos de SASS por arquitectura + rechazo pre-submit por familia | `gsp_compute.c/h`, `gsp_sass.h`, `sass_sm86.c`, `sass_sm120.c` | Host (banco GSP) |
+| 6 | Tres medidas de CE con volcado de estado en el primer fallo | `gsp_bringup.c` | Comprobado sobre el fuente en el banco |
+| 7 | Identidad de arranque por banner; racha derivada del historial | `xtask/src/hw_matrix.rs` | 27 tests; matriz remigrada 14 → 28 |
+| 8 | `SOSOHASH.TXT` + `parse-logs --sosohash` | `package_live.rs`, `hw_matrix.rs` | Test de xtask |
+| 9 | Contrato de mremap con reserva y rollback | `addrspace.rs`, `syscall.rs`, `init` | QEMU: `init test` |
+
+### Qué no se ha hecho (sigue igual)
+
+- No se ha reflasheado el USB: nada de esto se ha visto en placa.
+- Scan con BSS, asociación 802.11 y WPA2 siguen sin AP controlado.
+- Compute en GA107 seguirá rechazado hasta tener el descriptor QMD de Ampere.

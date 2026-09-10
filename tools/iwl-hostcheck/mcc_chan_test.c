@@ -349,7 +349,42 @@ static int check_cero_canales(void)
             return -1;
         }
     }
-    puts("OK: cero canales válidos, NVM ausente y scan pasivo se distinguen");
+    /* LAR habilitado sin regdominio: el perfil está, pero solo escucha. */
+    memset(&iwl, 0, sizeof(iwl));
+    set_scan_ver(&iwl, 17);
+    iwl.lar_enabled = 1;
+    iwl.nvm_n_channels = 3;
+    iwl.nvm_chan_flags[0] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    iwl.nvm_chan_flags[1] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    iwl.nvm_chan_flags[2] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    origen = -1;
+    n = iwl_mvm_collect_scan_channels(&iwl, ch, band, passive,
+                                      SCAN_MAX_NUM_CHANS_V3, &origen);
+    if (n != 3 || origen != IWL_CHAN_SRC_NVM) {
+        fprintf(stderr, "LAR sin regdominio: n=%u origen=%d\n", n, origen);
+        return -1;
+    }
+    {
+        unsigned i;
+
+        for (i = 0; i < n; i++) {
+            if (!passive[i]) {
+                fprintf(stderr, "LAR sin regdominio dejó activo el canal %u\n",
+                        ch[i]);
+                return -1;
+            }
+        }
+    }
+    /* Con el regdominio aplicado, los mismos canales vuelven a ser activos. */
+    iwl.lar_regdom_set = 1;
+    n = iwl_mvm_collect_scan_channels(&iwl, ch, band, passive,
+                                      SCAN_MAX_NUM_CHANS_V3, &origen);
+    if (n != 3 || passive[0] || passive[1] || passive[2]) {
+        fprintf(stderr, "con regdominio aplicado el scan debe ser activo\n");
+        return -1;
+    }
+    puts("OK: cero canales válidos, NVM ausente, LAR sin regdominio y scan "
+         "pasivo se distinguen");
     return 0;
 }
 

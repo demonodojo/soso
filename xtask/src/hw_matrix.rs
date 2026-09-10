@@ -304,6 +304,7 @@ fn usage() {
          cargo xtask hw-matrix init\n\
          cargo xtask hw-matrix collect --id ID [--equipo N] [--pci 8086:2723] [--perfil live-usb]\n\
          cargo xtask hw-matrix parse-logs --id ID [--sosolog F] [--sosodrv F] [--serial F]\n\
+                                            [--sosohash SOSOHASH.TXT]\n\
          cargo xtask hw-matrix migrar [--id ID] [--seco]\n\
          cargo xtask hw-matrix artefactos --id ID [--kernel F] [--rootfs D] [--bin F] [--perfil P]\n\
          cargo xtask hw-matrix record-boot --id ID [--fail] [--nota T]\n\
@@ -848,7 +849,23 @@ fn parse_logs_cmd(args: &[String]) {
             entry.logs.push(s);
         }
     }
-    let artefactos = entry.artefactos.clone();
+    // R3: si el USB trae su manifiesto, la identidad de la ejecución sale de
+    // ahí (lo que se flasheó) y no de lo que haya en el árbol ahora.
+    let mut artefactos = entry.artefactos.clone();
+    if let Some(p) = flag_path(args, "--sosohash") {
+        match leer_manifiesto_esp(&p) {
+            Ok(m) => {
+                for (k, v) in m {
+                    artefactos.insert(k, v);
+                }
+                println!("hw-matrix parse-logs: artefactos desde {}", p.display());
+            }
+            Err(e) => {
+                eprintln!("hw-matrix parse-logs: {} ilegible: {e}", p.display());
+                std::process::exit(2);
+            }
+        }
+    }
     let (runs, avisos) = correlacionar_fuentes(&logs_arranque, &informes, &artefactos);
     for aviso in &avisos {
         eprintln!("hw-matrix parse-logs: {aviso}");
@@ -886,6 +903,36 @@ fn parse_logs_cmd(args: &[String]) {
     save_matrix(&m);
     println!("hw-matrix: etapas parseadas para {id}");
     show_entry_summary(&summary);
+}
+
+/// Lee `SOSOHASH.TXT` de la ESP: `clave=valor` por línea, `#` es comentario.
+///
+/// Las claves de artefacto (kernel/esp/rootfs/modelos) llevan `hash bytes`; el
+/// resto (version/build/perfil/features/fecha) se guardan como texto para
+/// poder decir con qué se construyó.
+pub fn leer_manifiesto_esp(
+    path: &Path,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let texto = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut out = std::collections::BTreeMap::new();
+    for linea in texto.lines() {
+        let l = linea.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = l.split_once('=') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        if k.is_empty() || v.is_empty() || v == "desconocido" {
+            continue;
+        }
+        out.insert(k.to_string(), v.to_string());
+    }
+    if !out.contains_key("kernel") && !out.contains_key("version") {
+        return Err("no parece un SOSOHASH.TXT (sin kernel ni version)".into());
+    }
+    Ok(out)
 }
 
 fn last_boot_de_fuentes(logs: &[(String, String)]) -> String {
@@ -2023,6 +2070,43 @@ soso 0.2.3 (bbbbbbbbb)\nboot: memtest\niwl: start\n";
         let (h3, n3) = hash_directorio(&dir).expect("hash");
         assert_ne!(h2, h3, "añadir un fichero cambia el hash");
         assert_eq!(n3, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn r3_manifiesto_esp_identifica_lo_flasheado() {
+        let dir = std::env::temp_dir().join(format!("soso-r3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("SOSOHASH.TXT");
+        std::fs::write(
+            &p,
+            "# soso: artefactos flasheados\n\
+             version=0.2.2\n\
+             build=abc1234-dirty\n\
+             perfil=nouveau,iwlwifi\n\
+             kernel=deadbeef 32080696\n\
+             rootfs=cafe1234 402653184\n\
+             modelos=desconocido\n",
+        )
+        .unwrap();
+        let m = leer_manifiesto_esp(&p).expect("manifiesto");
+        assert_eq!(m.get("kernel").map(String::as_str), Some("deadbeef 32080696"));
+        assert_eq!(m.get("perfil").map(String::as_str), Some("nouveau,iwlwifi"));
+        assert!(
+            !m.contains_key("modelos"),
+            "un artefacto desconocido no se registra como conocido"
+        );
+
+        // La ejecución importada se queda con esos hashes, no con los del árbol.
+        let runs = parse_log_runs_con_artefactos(RUN15, &m);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].artefactos.get("kernel").map(String::as_str),
+            Some("deadbeef 32080696")
+        );
+
+        std::fs::write(&p, "cualquier cosa\n").unwrap();
+        assert!(leer_manifiesto_esp(&p).is_err(), "sin claves no es manifiesto");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

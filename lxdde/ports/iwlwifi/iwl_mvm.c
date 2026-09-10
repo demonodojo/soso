@@ -122,6 +122,11 @@ unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
     if (!ch || !band || !passive || max == 0)
         return 0;
 
+    /* LAR habilitado y regdominio sin aplicar: solo escucha. Linux rechaza el
+     * scan entero (mvm/scan.c); aquí se degrada a pasivo, que está permitido
+     * en cualquier dominio, en vez de dejar el WiFi sin nada. */
+    unsigned solo_pasivo = (iwl->lar_enabled && !iwl->lar_regdom_set) ? 1u : 0u;
+
     if (iwl->chan_src == IWL_CHAN_SRC_MCC || iwl->chan_src == IWL_CHAN_SRC_NVM ||
         nvm_n > 0) {
         /* Perfil presente: puede quedarse en cero canales usables, y eso
@@ -140,7 +145,8 @@ unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
             ch[n] = num;
             band[n] = (num >= 36) ? 1 : 0;
             /* Sin ACTIVE, con radar o solo interior: nada de probe request. */
-            passive[n] = (!(flags & NVM_CHANNEL_ACTIVE) ||
+            passive[n] = (solo_pasivo ||
+                          !(flags & NVM_CHANNEL_ACTIVE) ||
                           (flags & NVM_CHANNEL_RADAR) ||
                           (flags & NVM_CHANNEL_INDOOR_ONLY))
                              ? 1

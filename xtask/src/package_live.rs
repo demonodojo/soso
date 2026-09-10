@@ -161,6 +161,10 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     );
 
     create_esp_slots(&live);
+    // R3: identidad de lo que se acaba de empaquetar, dentro de la propia ESP.
+    // Sin esto, un arranque solo se puede atribuir por la versión anunciada, y
+    // «0.2.2 (abc-dirty)» no distingue dos árboles distintos.
+    write_esp_manifest(&root, &live, &profile, &data, &models, &uefi);
 
     write_flash(
         &out_dir,
@@ -558,6 +562,82 @@ fn chrono_now() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".into())
+}
+
+/// Hash de un fichero, o None si no se puede leer.
+fn sha256_file(path: &Path) -> Option<(String, u64)> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Some((format!("{:x}", h.finalize()), bytes.len() as u64))
+}
+
+/// `SOSOHASH.TXT` en la ESP: qué kernel, qué rootfs y qué perfil se flashearon.
+///
+/// La lee `cargo xtask hw-matrix parse-logs --sosohash` para atar una
+/// ejecución a artefactos concretos (R2/R3): el hash del log acredita el
+/// fichero, no lo que corrió.
+pub(crate) fn write_esp_manifest(
+    root: &Path,
+    live: &Path,
+    profile: &crate::drivers::DriverProfile,
+    data: &Path,
+    models: &Path,
+    uefi: &Path,
+) {
+    let kernel = root.join("target/kernel/x86_64-soso/debug/kernel");
+    let mut cuerpo = String::new();
+    cuerpo.push_str("# soso: artefactos flasheados (generado por package-usb-live)
+");
+    cuerpo.push_str(&format!("version={}
+", crate::version::read_version(root)));
+    cuerpo.push_str(&format!("build={}
+", crate::version::git_build(root)));
+    cuerpo.push_str(&format!("perfil={}
+", profile.lxdde_mode.clone().unwrap_or_default()));
+    cuerpo.push_str(&format!(
+        "features={}
+",
+        crate::drivers::kernel_feature_args(profile).join(",")
+    ));
+    cuerpo.push_str(&format!("fecha={}
+", chrono_now()));
+    for (etiqueta, ruta) in [
+        ("kernel", kernel.as_path()),
+        ("esp", uefi),
+        ("rootfs", data),
+        ("modelos", models),
+    ] {
+        match sha256_file(ruta) {
+            Some((hash, len)) => {
+                cuerpo.push_str(&format!("{etiqueta}={hash} {len}
+"));
+            }
+            None => {
+                cuerpo.push_str(&format!("{etiqueta}=desconocido
+"));
+                eprintln!(
+                    "package-usb-live: aviso: sin hash de {etiqueta} ({})",
+                    ruta.display()
+                );
+            }
+        }
+    }
+    let p1_start = match partition_first_sector(live, 1) {
+        Some(s) => s,
+        None => {
+            eprintln!("package-usb-live: aviso: sin ESP para SOSOHASH.TXT");
+            return;
+        }
+    };
+    // Se rellena a 4 KiB: el hueco es fijo y así reflashear no deja cola.
+    let mut data_out = cuerpo.into_bytes();
+    data_out.resize(4096, b'\n');
+    match crate::fat32_write::write_root_file(live, p1_start, b"SOSOHASH", b"TXT", &data_out) {
+        Ok(()) => println!("package-usb-live: SOSOHASH.TXT en ESP part1 LBA {p1_start}"),
+        Err(e) => eprintln!("package-usb-live: aviso: no pude escribir SOSOHASH.TXT: {e}"),
+    }
 }
 
 /// Huecos 8.3 pre-creados en la ESP (log, hwscan, install, WiFi, OTA).

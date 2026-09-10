@@ -259,8 +259,10 @@ int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl)
     }
 
     if (iwl->lar_enabled && iwl_mvm_init_mcc(iwl) != 0) {
-        lx_printk("iwl_mvm: MCC no aplicado — abort up\n");
-        return -1;
+        /* Sin regdominio aplicado el scan sale solo pasivo (R6). Antes esto
+         * abortaba el up: con la validación completa de MCC, una respuesta que
+         * no cuadra habría dejado el WiFi sin nada en vez de sin scan activo. */
+        lx_printk("iwl_mvm: MCC no aplicado — el scan irá solo pasivo\n");
     }
 
     if (iwl_mvm_send_scan_cfg(iwl) != 0) {
