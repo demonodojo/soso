@@ -381,7 +381,10 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf)
     if (rx_is_pending_hcmd(iwl, group, cmd, seq)) {
         iwl->cmd_status = 1;
         iwl->cmd_pending = 0;
-        iwl->cmd_fw_err = (len_n_flags & IWL_CMD_FAILED_MSK) ? 1 : 0;
+        /* Gen2 iwlwifi: tamaño en bits 13:0; no hay bit FAILED en len_n_flags
+         * (iwlegacy usaba hdr.flags). NVM_GET_INFO v4 = 468 B → len=472 y
+         * 472&0x40≠0 si se interpretaba como rechazo — falso positivo run14. */
+        iwl->cmd_fw_err = 0;
         copy = pay;
         if (copy > (int)sizeof(iwl->cmd_resp))
             copy = (int)sizeof(iwl->cmd_resp);

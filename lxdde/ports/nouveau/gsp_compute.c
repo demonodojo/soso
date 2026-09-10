@@ -433,11 +433,22 @@ int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
             c = scratch_bytes;
         }
         memcpy(scratch_cpu, k->sass + off, c);
+        if (c < scratch_bytes) {
+            memset((unsigned char *)scratch_cpu + c, 0, scratch_bytes - c);
+        }
         __asm__ __volatile__("mfence" ::: "memory");
 
-        if (gsp_ce_copy_sync(ce, k->sass_va + off, scratch_va, c,
-                             GSP_CE_WAIT_MS) != 0) {
-            return -1;
+        {
+            unsigned ce_bytes = c;
+
+            if (ce_bytes < GSP_CE_LINE_BYTES &&
+                scratch_bytes >= GSP_CE_LINE_BYTES) {
+                ce_bytes = GSP_CE_LINE_BYTES;
+            }
+            if (gsp_ce_copy_sync(ce, k->sass_va + off, scratch_va, ce_bytes,
+                                 GSP_CE_WAIT_MS) != 0) {
+                return -1;
+            }
         }
     }
     k->staged = 1;

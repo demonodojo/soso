@@ -2,20 +2,24 @@
 
 ## Evidencia y alcance
 
-Lectura ESP `/dev/sda1` (`kernel`, vfat) con `udisksctl`. Copia:
-`target/usb-diagnostic-2026-09-10/` (SOSOWIFI vacío; sin PSK). ESP desmontada al terminar.
+Lectura ESP `/dev/sda1` (`kernel`, vfat) con `udisksctl`. Copias:
 
-| Campo | run13 (este USB) | run12 |
-|---|---|---|
-| Kernel USB | **0.2.2 (1df51e817-dirty)** | igual (sin commit; sí reflasheado) |
-| Flush / uptime | **#33, 475 s** | #43, 1024 s |
-| Hardware | 10de:249c + 8086:2723 + 10ec:8168 | igual |
-| sosh | **SÍ** (+ `wifi scan` + `ask hola`) | SÍ (+ halt) |
-| GSP | **GSP_INIT_DONE** + vaspace gp100 | igual |
-| Canal COPY0 | **`RM_ALLOC 0xc56f chid=1` ok + CE G4e GO** | NO_MEMORY chid=0 |
-| GR0 / pool | **RPC muerto** en `0x20802a08`; `pool VRAM=no` | no alcanzado (sin canal) |
-| WiFi | ALIVE + SF ok; **timeout TX_ANT 0x98** | TX_ANT/PHY/MCC/SCAN_CFG timeout |
-| fatlog | sí | sí |
+- run14: `target/usb-diagnostic-2026-09-10-run2/` (SOSOWIFI vacío; sin PSK)
+- run13: `target/usb-diagnostic-2026-09-10/`
+
+ESP desmontada al terminar.
+
+| Campo | run14 (último) | run13 | run12 |
+|---|---|---|---|
+| Kernel USB | **0.2.2 (276404696)** | 0.2.2 (1df51e817-dirty) | igual (refl.) |
+| Flush / uptime | **#41, 787 s** | #33, 475 s | #43, 1024 s |
+| Hardware | 10de:249c + 8086:2723 + 10ec:8168 | igual | igual |
+| sosh | **SÍ** (+ `wifi scan` + halt) | SÍ (+ `wifi scan` + `ask hola`) | SÍ (+ halt) |
+| GSP / CE | **GSP_INIT_DONE**; CE G4e GO; **G6 buffers listos** | GSP ok; CE G4e GO | NO_MEMORY chid=0 |
+| GR0 / pool | **GR0 chid=2 ok**; compute `0xc7c0` ok; **pool VRAM=no** (CE stuck SASS) | RPC muerto `0x20802a08`; pool=no | no alcanzado |
+| WiFi | ALIVE + INIT; **NVM_GET_INFO falló**; scan E/S | SF ok; **timeout TX_ANT 0x98** | TX_ANT/PHY/MCC timeout |
+| Apagado | **GSP-RM apagado … dma=off** | no registrado | — |
+| fatlog | sí | sí | sí |
 
 Árboles Linux (solo lectura):
 
@@ -24,9 +28,31 @@ Lectura ESP `/dev/sda1` (`kernel`, vfat) con `udisksctl`. Copia:
 | `lxdde/linux/` | **6.6.32** — `mvm/fw.c`, `mvm/sf.c`, `pcie/tx-gen2.c`, `iwl-csr.h`, `iwl-nvm-parse.c` |
 | `lxdde/reference/linux-master-nouveau/` | **`fc02acf`** — `r535/fifo.c`, `r535/bar.c`, `r570/fifo.c` |
 
-Hostchecks (host, sin silicio): `l6-iwl-fw-hostcheck.sh` OK (wide/scan/contrato/TLV),
-`l6-g3-gsp-hostcheck.sh` OK (incluye segundo canal USERD chid=2).
-**No cubren** transporte Ampere post-CE, walk BAR1 en placa, ni TX_ANT en el AX200.
+Hostchecks (host, sin silicio): `l6-iwl-fw-hostcheck.sh` OK (wide/scan/contrato/TLV + NVM v4 468 B),
+`l6-g3-gsp-hostcheck.sh` OK (segundo canal USERD chid=2 + CE saxpy 512 B page-aligned + grctx map).
+Tras fixes run14: hostchecks verdes; **validación en placa pendiente** (reflash kernel).
+
+## Tabla de etapas (run14)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Userspace | `sosh —` + `wifi scan` + halt | **OK** |
+| fatlog | flush **#41** @ 787 s | OK |
+| lxdde pci / GSP | `GSP_INIT_DONE`, vaspace gp100 | **OK** |
+| Canal COPY0 / CE G4e | `RM_ALLOC cls=0xc56f chid=1`; `CE selftest OK`; `CE readback verificado (G4e GO)` | **OK** |
+| G6 / pool | `G6 — buffers VRAM listos`; luego `pool VRAM=no` (`ce.stuck`) | **FAIL** |
+| SASS saxpy | `gsp_compute_stage_sass` 512 B → semáforo vale 2 (esperado 3) | **FAIL** |
+| Canal GR0 | `RM_ALLOC 0xc56f chid=2` ok; compute `0xc7c0` ok | **OK** (vs run13) |
+| grctx ATTRIBUTE_CB | mapeo `size=0x851200` (no múltiplo 4 KiB) → sin promocionar | **FAIL** |
+| WiFi alive | `UCODE_ALIVE_NTFY`, `INIT_COMPLETE_NOTIF` | **OK** |
+| WiFi NVM | `iwl_rx grp=12 id=0x02 len=468 st=0` → `NVM_GET_INFO falló` (sin timeout) | **FAIL** |
+| WiFi scan | `scan sin INIT_COMPLETE` / E/S | **FAIL** |
+| Apagado | `GSP-RM apagado (objetos=ok unload=ok halt=ok dma=off)` | **OK** |
+
+**Interpretación run14:** run13 fixes (BAR1 no escribe, G6, chid=2 GR0) **ya en el USB**.
+Nuevos bloqueos: (1) falso rechazo FW en `len_n_flags & 0x40` para NVM v4 468 B;
+(2) CE copia SASS 512 B sin encoding boa0b5 → `ce.stuck` aunque G4e fue GO;
+(3) mapeo grctx con tamaño RM crudo 0x851200 sin alinear a página.
 
 ## Tabla de etapas (run13)
 
@@ -50,7 +76,50 @@ WiFi: HCMD wide está en el USB; TX_ANT sigue sordo tras SF (Linux manda SF `CMD
 
 ## Hallazgos
 
-### GPU-1. Parche BAR1 con PDB PRI-error mata el RPC — **confirmado**
+### WiFi-3. NVM_GET_INFO v4: `len_n_flags & 0x40` no es rechazo FW — **confirmado (run14)**
+
+**Síntoma:** `iwl_rx: grp=12 id=0x02 seq=0x0002 len=468 st=0` seguido de `NVM_GET_INFO falló`
+sin `timeout cmd`. `radio_ready` baja → init MVM incompleto → `scan sin INIT_COMPLETE`.
+
+**soso:** [`iwl_trans.c`](lxdde/ports/iwlwifi/iwl_trans.c) interpretaba
+`cmd_fw_err = (len_n_flags & IWL_CMD_FAILED_MSK)` con `IWL_CMD_FAILED_MSK = 0x40`.
+Payload 468 B ⇒ `len = 472`; el bit 0x40 es parte del **tamaño** (bits 13:0), no un flag de error.
+
+**Linux 6.6:** `IWL_CMD_FAILED_MSK` vive en **iwlegacy** (`hdr.flags`), no en `len_n_flags` de iwlwifi.
+[`iwl_get_nvm`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/iwl-nvm-parse.c) acepta rsp v4 = 468 B.
+
+**Fix aplicado:** quitar test sobre `len_n_flags`; test hostcheck `NVM_GET_INFO v4 (468 B, len=472)`.
+**Placa pendiente:** `NVM_GET_INFO v4` ok → puerta TX_ANT/SF (run13).
+
+### GPU-5. CE saxpy 512 B sin encoding boa0b5 — **confirmado (run14)**
+
+**Síntoma:** tras G4e GO y G6 listo, `gsp_compute_stage_sass` (512 B) → semáforo no llega a 3
+(vale 2) → `ce.stuck` → [`lx_nouveau_buf_ready`](lxdde/ports/nouveau/gsp_bringup.c) fuerza `pool VRAM=no`.
+
+**soso:** [`gsp_ce.c`](lxdde/ports/nouveau/gsp_ce.c) usaba `LINE_LENGTH_IN = size` (512) sin `MULTI_LINE`
+si size ≠ 4 KiB. [`gsp_compute.c`](lxdde/ports/nouveau/gsp_compute.c) copiaba 512 B crudos.
+
+**Linux:** [`nouveau_boa0b5.c:58-70`](lxdde/reference/linux-master-nouveau/drivers/gpu/drm/nouveau/nouveau_boa0b5.c)
+— `LINE_LENGTH = PAGE_SIZE`, `LINE_COUNT = PFN_UP(size)`, `MULTI_LINE_ENABLE`.
+
+**Fix aplicado:** mismo encoding boa0b5; `stage_sass` pad + CE 4 KiB. Hostcheck saxpy 512 B verde.
+**Placa pendiente:** `SASS en VRAM` + `pool VRAM=sí`.
+
+### GPU-6. grctx ATTRIBUTE_CB: tamaño de mapeo sin alinear — **confirmado (run14)**
+
+**Síntoma:** `mapeo sin alinear va=0x8041000000 phys=0x5000000 size=0x851200` →
+`contexto de GR sin promocionar`. `0x851200 & 0xfff = 0x200`.
+
+**soso:** [`gsp_grctx.c`](lxdde/ports/nouveau/gsp_grctx.c) mapeaba `b->size` crudo de RM;
+[`gsp_vmm_map_flags`](lxdde/ports/nouveau/gsp_vmm.c) exige alineación 4 KiB.
+
+**Linux:** [`r535/gr.c`](lxdde/reference/linux-master-nouveau/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gr.c)
+mapea `nvkm_memory_size(pmem)` (objeto ya alineado).
+
+**Fix aplicado:** `grctx_map_bytes()` redondea a `2^page_shift` (0x851200 → 0xA00000). Hostcheck verde.
+**Placa pendiente:** `contexto de GR promocionado`.
+
+### GPU-1. Parche BAR1 con PDB PRI-error mata el RPC — **confirmado (run13; corregido en run14 USB)**
 
 **Síntoma:** tras `CE readback verificado (G4e GO)` el log camina BAR1 con
 `PDB=0x31b233f89e94b000`, lee `0xbad0fb2fbad0fb2e`, escribe tablas, reintenta `bar2Pde`.
@@ -130,16 +199,32 @@ timeout de 0x98; conviene loguear STRAP vs OTP crudos y no anunciar «MAC NVM» 
 
 ## Orden de corrección
 
-| # | Cambio | Archivos | Discrepancia Linux | Hecho host / placa |
-|---|---|---|---|---|
-| 1 | No escribir PTEs BAR1 si el PDB es PRI-error (`0xbad0…`) o ≠ `bar1PdeBase`; no selftest que parche tras CE | `gsp_bar1.c`, `gsp_bringup.c` | `r535_bar_bar1_init` solo envuelve `rm_bar1_pdb` | Hostcheck: PDB `0xbad0` ⇒ 0 writes. Placa: RPC vivo **después** de CE (siguiente `RM_CONTROL` con respuesta) |
-| 2 | Montar pool VRAM con CE solo: `gsp_buf_init` tras G4e, **antes** de BAR1/GR0; no `return -1` que lo salte | `gsp_bringup.c` | pool/FB no depende de GR0 | Hostcheck: `gsp_buf_init` se llama con CE y sin canal GR. Placa: `pool VRAM=sí` con o sin GR0 |
-| 3 | Cachear `GET_FAULT_METHOD_BUFFER_SIZE` una vez (fifo); GR0 reutiliza tamaño; chid=2 | `gsp_chan.c` | `r535_fifo_ctor` L565–575 | Hostcheck ya tiene 2.º canal. Placa: `RM_ALLOC` GR0 ok, no timeout `0x20802a08` |
-| 4 | SF `CMD_ASYNC` (no esperar `0xd1`); luego TX_ANT sync; loguear ver/len del wide 0x98; no abortar up con un ACK inventado | `iwl_mvm_up.c`, `iwl_trans.c` | `sf.c:211` async; `fw.c:1544` TX_ANT sync | Hostcheck: SF no cierra pending; TX_ANT 8 B header + 4 B payload. Placa: `TX_ANT_CONFIGURATION ok` → DQA/PHY/MCC/SCAN_CFG → `wifi scan` con fin normal |
+### run13 (BAR1 / pool / GR0 / TX_ANT) — en USB antes de run14
+
+| # | Cambio | Archivos | Hecho host / placa |
+|---|---|---|---|
+| 1 | No escribir PTEs BAR1 si PDB PRI-error | `gsp_bar1.c`, `gsp_bringup.c` | Placa run14: BAR1 no escribe; GR0 chid=2 ok |
+| 2 | `gsp_buf_init` tras G4e, antes de GR0 | `gsp_bringup.c` | Placa run14: G6 listo (pool aún no por CE stuck) |
+| 3 | Cachear method buffer; chid=2 | `gsp_chan.c` | Placa run14: GR0 + compute ok |
+| 4 | SF async + TX_ANT sync | `iwl_mvm_up.c`, `iwl_trans.c` | Pendiente placa (run14 no llegó a TX_ANT) |
+
+### run14 (NVM / CE / grctx) — **implementado en árbol; placa pendiente**
+
+| # | Cambio | Archivos | Hecho host / placa |
+|---|---|---|---|
+| 1 | No tratar bit 6 de `len_n_flags` como rechazo FW | `iwl_trans.c`, `hcmd_contract_test.c` | Hostcheck OK. Placa: NVM_GET_INFO v4 |
+| 2 | CE copias siempre a página (boa0b5) | `gsp_ce.c`, `gsp_compute.c`, `gsp-hostcheck` | Hostcheck OK. Placa: SASS + pool VRAM=sí |
+| 3 | Mapeo grctx alineado a página | `gsp_grctx.c` | Hostcheck OK (0x851200→0xA00000). Placa: GR promocionado |
+
+Reflash kernel (usuario):
+
+```bash
+sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sda --yes --only kernel
+```
 
 ## Qué no se ha hecho
 
-- No se ha tocado código de drivers en esta lectura.
-- No se ha reflasheado. No `record-boot` / `--boot-ok` (`arranques_consecutivos_ok` se dejó en 0).
-- Hostchecks verdes no sustituyen el RPC post-CE ni TX_ANT en silicio.
+- No se ha reflasheado el USB con los fixes run14.
+- No `record-boot` / `--boot-ok` (`arranques_consecutivos_ok` = 0 en hw-matrix).
+- Hostchecks verdes no sustituyen validación en placa (NVM, CE SASS, grctx, TX_ANT).
 - No se ha validado `ask` con pool VRAM ni asociación WPA2.

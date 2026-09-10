@@ -105,25 +105,34 @@ static void rx_resp(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     iwl_trans_rx_packet(iwl, buf, 8u + pay_len);
 }
 
-static int check_fw_reject(void)
+static int check_nvm_get_info_v4_len(void)
 {
     struct iwl_ax211_priv iwl;
-    uint8_t dummy = 0;
+    struct iwl_nvm_get_info cmd;
+    uint8_t rsp[512];
+    uint16_t seq;
 
     init_priv(&iwl);
-    if (iwl_trans_send_cmd(&iwl, SYSTEM_GROUP, INIT_EXTENDED_CFG_CMD, &dummy, 1) != 0)
-        return -1;
-    rx_resp(&iwl, SYSTEM_GROUP, INIT_EXTENDED_CFG_CMD, iwl.cmd_pending_seq,
-            IWL_CMD_FAILED_MSK, NULL, 0);
-    if (!iwl.cmd_status || !iwl.cmd_fw_err) {
-        fprintf(stderr, "rechazo FW no marcado\n");
+    memset(&cmd, 0, sizeof(cmd));
+    memset(rsp, 0xaa, sizeof(rsp));
+    if (iwl_trans_send_cmd(&iwl, REGULATORY_AND_NVM_GROUP, NVM_GET_INFO,
+                           &cmd, (uint16_t)sizeof(cmd)) != 0) {
+        fprintf(stderr, "NVM_GET_INFO no encoló\n");
         return -1;
     }
-    if (iwl_trans_send_cmd_wait(&iwl, SYSTEM_GROUP, INIT_EXTENDED_CFG_CMD,
-                                &dummy, 1, 1) == 0) {
-        /* pending ya 0; este wait envía otro y no recibe resp → timeout */
+    seq = iwl.cmd_pending_seq;
+    /* Payload 468 B → len=472; bit 6 del tamaño NO es rechazo FW (run14). */
+    rx_resp(&iwl, REGULATORY_AND_NVM_GROUP, NVM_GET_INFO, seq, 0, rsp, 468);
+    if (!iwl.cmd_status || iwl.cmd_fw_err) {
+        fprintf(stderr, "NVM_GET_INFO 468 B marcado como error FW\n");
+        return -1;
     }
-    puts("OK: rechazo FW no completa como éxito");
+    if (iwl.cmd_resp_len != 468) {
+        fprintf(stderr, "NVM_GET_INFO resp=%u (esperaba 468)\n",
+                (unsigned)iwl.cmd_resp_len);
+        return -1;
+    }
+    puts("OK: NVM_GET_INFO v4 (468 B, len=472) no es falso rechazo FW");
     return 0;
 }
 
@@ -303,7 +312,7 @@ static int check_sf_async_then_tx_ant(void)
 
 int main(void)
 {
-    if (check_fw_reject() != 0)
+    if (check_nvm_get_info_v4_len() != 0)
         return 1;
     if (check_foreign_and_notif() != 0)
         return 1;

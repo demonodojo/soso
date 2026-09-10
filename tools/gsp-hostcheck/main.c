@@ -2777,12 +2777,25 @@ static int check_grctx(void)
         printf("FALLO: el plan acepta un índice de motor fuera de rango\n");
         goto fallo;
     }
+    /* GA107 run14: RM devuelve ATTRIBUTE_CB=0x851200 (no múltiplo de 4 KiB).
+     * El mapeo debe redondear a 2^page_shift (21 → 0xA00000). */
+    {
+        uint64_t raw = 0x851200u;
+        uint64_t gran = 1ull << 21;
+        uint64_t map = (raw + gran - 1ull) & ~(gran - 1ull);
+
+        if (map != 0xA00000u || (map & 0xfffu) != 0u) {
+            printf("FALLO: map ATTRIBUTE_CB 0x%llx → 0x%llx\n",
+                   (unsigned long long)raw, (unsigned long long)map);
+            goto fallo;
+        }
+    }
 #undef ENG0
 #undef ENG1
     free(info);
     printf("OK: plan del contexto de GR — 8 búferes, MAIN +64 páginas, "
            "ATTRIBUTE_CB alineado a 32 MiB, tamaño 0 saltado, PRIV_ACCESS_MAP "
-           "duplicado\n");
+           "duplicado, map 0x851200→0xA00000\n");
     return 0;
 /* Un solo sitio donde soltar `info`: el `free` + `return -1` estaba repetido ocho
  * veces, y la novena comprobación que se añadiera se lo dejaría. */
@@ -4042,26 +4055,26 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                    pitch_in, pitch_out, line_len, lines, launch);
             return -1;
         }
-        /* Y el rabo de menos de una página sigue siendo de una línea: con pitch
-         * de página, una línea corta escribiría 4 KiB donde hay 300 B. */
+        /* Rabo < página: boa0b5 usa LINE_LENGTH=PAGE_SIZE, LINE_COUNT=1
+         * (stage_sass rellena el rebote). Saxpy 512 B fue el fallo run14. */
         if (gsp_ce_encode_copy(&ce, GSP_CHAN_VA_BASE + 8192ull,
-                               GSP_CHAN_VA_BASE + 16384ull, 300u,
+                               GSP_CHAN_VA_BASE + 16384ull, 512u,
                                &mpb_off, &mpb_len) != 0) {
-            printf("FALLO: gsp_ce_encode_copy del rabo\n");
+            printf("FALLO: gsp_ce_encode_copy saxpy 512 B\n");
             return -1;
         }
         pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + mpb_off);
         if (pb_method_value(pb, mpb_len / 4u, NVC6B5_LINE_COUNT, &lines) != 0 ||
             pb_method_value(pb, mpb_len / 4u, NVC6B5_LINE_LENGTH_IN, &line_len) != 0 ||
             pb_method_value(pb, mpb_len / 4u, NVC6B5_LAUNCH_DMA, &launch) != 0 ||
-            lines != 1u || line_len != 300u ||
+            lines != 1u || line_len != GSP_CE_LINE_BYTES ||
             (launch & NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE)) {
-            printf("FALLO: el rabo de 300 B no salió de una línea (count=%u "
-                   "len=%u launch=0x%08x)\n", lines, line_len, launch);
+            printf("FALLO: saxpy 512 B no salió PAGE×1 (count=%u len=%u "
+                   "launch=0x%08x)\n", lines, line_len, launch);
             return -1;
         }
-        printf("OK: copia de %u B = %u líneas de página con MULTI_LINE; 300 B = "
-               "una línea\n", size, size / GSP_CE_LINE_BYTES);
+        printf("OK: copia de %u B = %u líneas de página con MULTI_LINE; "
+               "512 B = PAGE×1 (boa0b5)\n", size, size / GSP_CE_LINE_BYTES);
     }
 
     /* --- G6: subida a un offset del búfer y subida por DMA sin copia de CPU ---

@@ -28,6 +28,14 @@ static const struct {
 /* FECS construye el golden context la primera vez; en silicio tardó >2 s (2026-07-29). */
 #define GRCTX_PROMOTE_TIMEOUT_MS 15000u
 
+/* Tamaño mapeado en el VMM: alineado a 2^page_shift como `nvkm_memory_size`. */
+static uint64_t grctx_map_bytes(const struct gsp_grctx_buf *b)
+{
+    uint64_t gran = 1ull << b->page_shift;
+
+    return (b->size + gran - 1ull) & ~(gran - 1ull);
+}
+
 static const char *grctx_buf_name(uint32_t buffer_id)
 {
     switch (buffer_id) {
@@ -250,26 +258,28 @@ int gsp_grctx_promote(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *v
         e->bNonmapped = b->nonmapped;
 
         if (!b->nonmapped) {
+            uint64_t map_bytes = grctx_map_bytes(b);
+
             va = align_up_u64(ctx->va_next, b->align);
-            if (va + b->size > GSP_GRCTX_VA_BASE + GSP_GRCTX_VA_SIZE) {
+            if (va + map_bytes > GSP_GRCTX_VA_BASE + GSP_GRCTX_VA_SIZE) {
                 lx_printk("nouveau-lx: grctx: %s no cabe en la ventana de VAs "
                           "(0x%llx + %llu KiB)\n", grctx_buf_name(b->buffer_id),
                           (unsigned long long)va,
-                          (unsigned long long)(b->size / 1024ull));
+                          (unsigned long long)(map_bytes / 1024ull));
                 goto out;
             }
             /* `ro` como upstream (`.ro = ctxbuf[i].ro` en sus args de mapeo): el PCF
              * del PTE pasa a `REGULAR_RO_*`. Queda una desviación, dicha en
              * `pte_encode`: upstream mapea además con `priv = 1` y aquí el PCF es
              * REGULAR, que es más permisivo y por tanto no rompe. */
-            if (gsp_vmm_map_flags(vmm, va, b->phys, b->size, GSP_VMM_VRAM,
+            if (gsp_vmm_map_flags(vmm, va, b->phys, map_bytes, GSP_VMM_VRAM,
                                   b->ro ? GSP_VMM_RO : 0u) != 0) {
                 lx_printk("nouveau-lx: grctx: no se pudo mapear %s en 0x%llx\n",
                           grctx_buf_name(b->buffer_id), (unsigned long long)va);
                 goto out;
             }
             b->va = va;
-            ctx->va_next = va + b->size;
+            ctx->va_next = va + map_bytes;
             e->gpuVirtAddr = va;
         }
 

@@ -114,21 +114,12 @@ int gsp_ce_encode_copy(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
     }
     c = ce->chan;
 
-    /* Upstream (`nve0_bo_move_copy` en `nouveau_boa0b5.c`) fija PITCH y
-     * LINE_LENGTH a PAGE_SIZE y LINE_COUNT a PFN_UP(size), con MULTI_LINE.
-     * Un rabo de menos de página no puede copiar PAGE_SIZE extra: pisaría el
-     * vecino (SASS a 4 KiB, tensores G6). Ahí la línea sigue siendo `size`, pero
-     * el pitch es PAGE_SIZE — Linux nunca pone PITCH=512, y en silicio la
-     * primera copia CE que no era 4 KiB (saxpy ~512 B) fue la que no señalizó. */
-    if (size >= GSP_CE_LINE_BYTES && (size % GSP_CE_LINE_BYTES) == 0u) {
-        line_len = GSP_CE_LINE_BYTES;
-        lines = size / GSP_CE_LINE_BYTES;
-        pitch = GSP_CE_LINE_BYTES;
-    } else {
-        line_len = size;
-        lines = 1u;
-        pitch = GSP_CE_LINE_BYTES;
-    }
+    /* Como `nve0_bo_move_copy` (`nouveau_boa0b5.c`): PITCH y LINE_LENGTH =
+     * PAGE_SIZE, LINE_COUNT = PFN_UP(size). El origen/destino deben tener al
+     * menos una página válida (stage_sass rellena el rebote). */
+    line_len = GSP_CE_LINE_BYTES;
+    lines = (size + GSP_CE_LINE_BYTES - 1u) / GSP_CE_LINE_BYTES;
+    pitch = GSP_CE_LINE_BYTES;
 
     off = gsp_chan_pb_reserve(c, 160);
     if (off < 0) {
