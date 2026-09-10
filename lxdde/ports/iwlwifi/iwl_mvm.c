@@ -327,64 +327,131 @@ static int frame_is_beacon_or_probe_resp(const uint8_t *frame, int len)
     return type == 0 && (subtype == 8 || subtype == 5);
 }
 
-static int parse_mgmt_ssid(const uint8_t *frame, int len, uint8_t *ssid, int ssid_max)
+/* R7: qué dice el beacon/probe response de este BSS.
+ *
+ * Antes todo lo que se veía se marcaba `open = 1`, así que una red WPA2 se
+ * presentaba como abierta y `connect_open` se lanzaba contra ella. La
+ * clasificación sale de dos sitios, como en `mac80211`:
+ *   - el bit Privacy de las capacidades (offset 34 del cuerpo de gestión),
+ *   - el RSN IE (id 48), del que además se leen AKM y cifrados.
+ *
+ * `iwl_mvm_parse_bss` se expone para poder comprobarla con tramas reales en el
+ * banco del host, sin transporte ni GPU.
+ */
+int iwl_mvm_parse_bss(const uint8_t *frame, int len, struct iwl_ax211_bss *out)
 {
+    uint16_t caps;
     int pos;
-    int end;
+    int ssid_len = -1;
 
-    if (!frame_is_beacon_or_probe_resp(frame, len))
+    if (!frame || !out || len < 24 + 12) {
         return -1;
-
-    if (len < 24 + 12)
+    }
+    if (!frame_is_beacon_or_probe_resp(frame, len)) {
         return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    memcpy(out->bssid, frame + 16, 6);
+    /* timestamp(8) + beacon interval(2) + capability(2) = 12 B tras la MAC. */
+    caps = (uint16_t)frame[34] | ((uint16_t)frame[35] << 8);
+    out->open = (caps & WLAN_CAPABILITY_PRIVACY) ? 0u : 1u;
 
     pos = 24 + 12;
-    end = len;
-    while (pos + 2 <= end) {
+    while (pos + 2 <= len) {
         uint8_t id = frame[pos];
         uint8_t elen = frame[pos + 1];
-        if (pos + 2 + elen > end)
+        const uint8_t *body = &frame[pos + 2];
+
+        if (pos + 2 + (int)elen > len) {
+            /* IE truncado: lo que ya se leyó vale, lo que falta no se inventa. */
             break;
-        if (id == 0 && elen > 0 && elen <= ssid_max) {
-            memcpy(ssid, &frame[pos + 2], elen);
-            return elen;
+        }
+        if (id == WLAN_EID_SSID && elen > 0 && elen <= IWL_AX211_SSID_MAX) {
+            memcpy(out->ssid, body, elen);
+            out->ssid[elen] = '\0';
+            ssid_len = (int)elen;
+        } else if (id == WLAN_EID_DS_PARAMS && elen >= 1) {
+            out->channel = body[0];
+            out->band24 = 1u;
+        } else if (id == WLAN_EID_RSN && elen >= 8) {
+            /* version(2) group cipher(4) pairwise count(2) … */
+            uint16_t ver = (uint16_t)body[0] | ((uint16_t)body[1] << 8);
+            unsigned off = 2;
+            unsigned n;
+            unsigned i;
+            int group_ccmp;
+            int pair_ccmp = 0;
+            int akm_psk = 0;
+
+            if (ver != 1u) {
+                pos += 2 + elen;
+                continue;
+            }
+            out->rsn = 1u;
+            out->open = 0u;
+            group_ccmp = (body[off + 3] == WLAN_CIPHER_CCMP128) ? 1 : 0;
+            off += 4;
+            if (off + 2 > elen) {
+                pos += 2 + elen;
+                continue;
+            }
+            n = (unsigned)body[off] | ((unsigned)body[off + 1] << 8);
+            off += 2;
+            for (i = 0; i < n; i++) {
+                if (off + 4 > elen) {
+                    break;
+                }
+                if (body[off + 3] == WLAN_CIPHER_CCMP128) {
+                    pair_ccmp = 1;
+                }
+                off += 4;
+            }
+            if (off + 2 <= elen) {
+                n = (unsigned)body[off] | ((unsigned)body[off + 1] << 8);
+                off += 2;
+                for (i = 0; i < n; i++) {
+                    if (off + 4 > elen) {
+                        break;
+                    }
+                    if (body[off + 3] == WLAN_AKM_PSK ||
+                        body[off + 3] == WLAN_AKM_PSK_SHA256) {
+                        akm_psk = 1;
+                    }
+                    off += 4;
+                }
+            }
+            out->akm_psk = akm_psk ? 1u : 0u;
+            out->ccmp = (group_ccmp && pair_ccmp) ? 1u : 0u;
         }
         pos += 2 + elen;
     }
-    return -1;
+    return ssid_len;
 }
 
 void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len)
 {
-    uint8_t ssid[32];
-    int slen;
-
-    memset(ssid, 0, sizeof(ssid));
     struct iwl_ax211_bss bss;
-    const uint8_t *bssid;
+    int slen;
+    int i;
 
-    if (!iwl->scan_active || len <= 0)
+    if (!iwl->scan_active || len <= 0) {
         return;
-    slen = parse_mgmt_ssid(frame, len, ssid, 32);
-    if (slen <= 0)
-        return;
-    if (slen < 32)
-        ssid[slen] = '\0';
-    if (len < 24)
-        return;
-    bssid = frame + 16;
-    for (int i = 0; i < iwl->scan_count; i++) {
-        if (!memcmp(iwl->scan[i].bssid, bssid, 6) &&
-            !strncmp(iwl->scan[i].ssid, (const char *)ssid, IWL_AX211_SSID_MAX))
-            return;
     }
-    memset(&bss, 0, sizeof(bss));
-    memcpy(bss.bssid, bssid, 6);
-    memcpy(bss.ssid, ssid, (size_t)slen);
-    bss.ssid[slen] = '\0';
+    slen = iwl_mvm_parse_bss(frame, len, &bss);
+    if (slen <= 0) {
+        return;
+    }
+    for (i = 0; i < iwl->scan_count; i++) {
+        if (!memcmp(iwl->scan[i].bssid, bss.bssid, 6) &&
+            !strncmp(iwl->scan[i].ssid, bss.ssid, IWL_AX211_SSID_MAX)) {
+            return;
+        }
+    }
     bss.rssi = iwl->last_rx_rssi ? iwl->last_rx_rssi : -70;
-    bss.channel = iwl->last_rx_channel;
-    bss.open = 1;
+    /* El canal del DS Params manda; si no venía, el del RX. */
+    if (!bss.channel) {
+        bss.channel = iwl->last_rx_channel;
+    }
     iwl_ax211_add_bss(&bss);
 }
 
@@ -499,28 +566,81 @@ static int iwl_mvm_assoc(struct iwl_ax211_priv *iwl, const char *ssid, const uin
     return iwl_mvm_assoc_prepare(iwl, ssid, bssid);
 }
 
-int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid)
+/* El BSS con ese SSID exacto y mejor señal. NULL si no está: conectarse «al
+ * primero que haya» es asociarse a una red que nadie pidió (R7). */
+const struct iwl_ax211_bss *iwl_mvm_pick_bss(struct iwl_ax211_priv *iwl,
+                                             const char *ssid)
 {
-    if (!iwl->alive || !ssid)
-        return -1;
     const struct iwl_ax211_bss *pick = 0;
-    for (int i = 0; i < iwl->scan_count; i++) {
-        if (!strncmp(iwl->scan[i].ssid, ssid, IWL_AX211_SSID_MAX)) {
-            pick = &iwl->scan[i];
-            break;
+    int i;
+
+    if (!iwl || !ssid || !ssid[0]) {
+        return 0;
+    }
+    for (i = 0; i < iwl->scan_count; i++) {
+        const struct iwl_ax211_bss *b = &iwl->scan[i];
+
+        if (strncmp(b->ssid, ssid, IWL_AX211_SSID_MAX) != 0) {
+            continue;
+        }
+        /* Mismo SSID en varios BSS (repetidores, 2,4 y 5 GHz): el de más
+         * señal, no el primero que aparezca en el array. */
+        if (!pick || b->rssi > pick->rssi) {
+            pick = b;
         }
     }
-    if (!pick && iwl->scan_count > 0)
-        pick = &iwl->scan[0];
-    if (!pick)
+    return pick;
+}
+
+int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid)
+{
+    const struct iwl_ax211_bss *pick;
+
+    if (!iwl->alive || !ssid) {
         return -1;
+    }
+    pick = iwl_mvm_pick_bss(iwl, ssid);
+    if (!pick) {
+        lx_printk("iwl_mvm: '%s' no está entre los %d BSS del scan\n",
+                  ssid ? ssid : "", iwl->scan_count);
+        return -1;
+    }
+    if (!pick->open) {
+        lx_printk("iwl_mvm: '%s' está protegida (rsn=%u akm_psk=%u ccmp=%u); "
+                  "usa la conexión WPA2\n", ssid, pick->rsn, pick->akm_psk,
+                  pick->ccmp);
+        return -1;
+    }
+    iwl->channel = pick->channel;
     return iwl_mvm_assoc(iwl, ssid, pick->bssid);
 }
 
-int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid, const uint8_t psk[32])
+int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid,
+                         const uint8_t psk[32])
 {
-    (void)psk;
-    return iwl_mvm_connect_open(iwl, ssid);
+    const struct iwl_ax211_bss *pick;
+
+    if (!iwl->alive || !ssid || !psk) {
+        return -1;
+    }
+    pick = iwl_mvm_pick_bss(iwl, ssid);
+    if (!pick) {
+        lx_printk("iwl_mvm: '%s' no está entre los %d BSS del scan\n", ssid,
+                  iwl->scan_count);
+        return -1;
+    }
+    /* R8 pendiente: aquí falta el 4-way con el supplicant. Lo que sí se puede
+     * decidir ya es si esta red admite WPA2-PSK con CCMP; si no, no hay nada
+     * que intentar y decirlo es mejor que caer a la ruta abierta. */
+    if (!pick->rsn || !pick->akm_psk || !pick->ccmp) {
+        lx_printk("iwl_mvm: '%s' no ofrece WPA2-PSK/CCMP (rsn=%u akm_psk=%u "
+                  "ccmp=%u)\n", ssid, pick->rsn, pick->akm_psk, pick->ccmp);
+        return -1;
+    }
+    iwl->channel = pick->channel;
+    lx_printk("iwl_mvm: '%s' ofrece WPA2-PSK/CCMP en el canal %u; falta el "
+              "4-way (R8)\n", ssid, pick->channel);
+    return iwl_mvm_assoc(iwl, ssid, pick->bssid);
 }
 
 int iwl_mvm_tx_8023(struct iwl_ax211_priv *iwl, const uint8_t *buf, int len)

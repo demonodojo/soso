@@ -89,6 +89,13 @@ build hcmd_queue \
 echo "=== iwl HCMD queue/recuperación hostcheck ==="
 run hcmd_queue
 
+build bss_select \
+    "$root/tools/iwl-hostcheck/bss_select_test.c" \
+    "$src/iwl_mvm.c" \
+    "$src/iwl_mvm_nvm.c"
+echo "=== iwl selección de BSS / RSN hostcheck ==="
+run bss_select
+
 build mcc_chan \
     "$root/tools/iwl-hostcheck/mcc_chan_test.c" \
     "$src/iwl_mvm.c" \

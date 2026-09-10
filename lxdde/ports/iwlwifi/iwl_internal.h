@@ -231,13 +231,34 @@ struct iwl_ucode_capa {
 
 #define IWL_PRPH_SCRATCH_RB_SIZE_4K (1u << 16)
 
+/* Un BSS del scan. `open` sale de las capacidades del beacon y del RSN IE, no
+ * de una suposición: antes se marcaba abierto TODO lo que se veía (R7).
+ *
+ * El espejo en Rust es `LxWifiBss` (kernel/src/lxdde/wifi.rs) y se copia con
+ * memcpy, así que los dos han de tener el mismo layout. */
 struct iwl_ax211_bss {
     char ssid[IWL_AX211_SSID_MAX + 1];
     uint8_t bssid[6];
     int8_t rssi;
     uint8_t channel;
     uint8_t open;
+    /* RSN IE (id 48) presente. */
+    uint8_t rsn;
+    /* AKM 00-0F-AC:2 (PSK) o :6 (PSK-SHA256) entre los ofrecidos. */
+    uint8_t akm_psk;
+    /* Cifrado por pares y de grupo = CCMP-128 (00-0F-AC:4). */
+    uint8_t ccmp;
+    uint8_t band24;
 };
+
+/* Elementos y bits de 802.11 que hacen falta para clasificar un BSS. */
+#define WLAN_EID_SSID              0
+#define WLAN_EID_DS_PARAMS         3
+#define WLAN_EID_RSN               48
+#define WLAN_CAPABILITY_PRIVACY    (1u << 4)
+#define WLAN_AKM_PSK               2u
+#define WLAN_AKM_PSK_SHA256        6u
+#define WLAN_CIPHER_CCMP128        4u
 
 struct iwl_ucode_tlv {
     uint32_t type;
@@ -865,6 +886,12 @@ void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigne
 int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd);
 int iwl_fw_has_capa(const struct iwl_ax211_priv *iwl, unsigned capa_bit);
 void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len);
+/* Clasifica un beacon/probe response: SSID, canal, capacidades y RSN.
+ * Devuelve la longitud del SSID o -1 si la trama no sirve. */
+int iwl_mvm_parse_bss(const uint8_t *frame, int len, struct iwl_ax211_bss *out);
+/* El BSS con ese SSID exacto y mejor RSSI, o NULL. */
+const struct iwl_ax211_bss *iwl_mvm_pick_bss(struct iwl_ax211_priv *iwl,
+                                             const char *ssid);
 int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid);
 int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid, const uint8_t psk[32]);
 int iwl_mvm_install_key(struct iwl_ax211_priv *iwl, const uint8_t key[16], int key_idx);

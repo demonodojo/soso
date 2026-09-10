@@ -5,6 +5,8 @@ use core::ffi::{c_char, c_int};
 const MAX_SCAN: usize = 32;
 const SSID_MAX: usize = 32;
 
+/// Espejo de `struct iwl_ax211_bss` (lxdde/ports/iwlwifi/iwl_internal.h).
+/// El driver copia el array con memcpy: mismo orden y mismo tamaño.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LxWifiBss {
@@ -13,6 +15,13 @@ pub struct LxWifiBss {
     pub rssi: i8,
     pub channel: u8,
     pub open: u8,
+    /// RSN IE presente en el beacon.
+    pub rsn: u8,
+    /// Ofrece AKM PSK (WPA2-Personal).
+    pub akm_psk: u8,
+    /// Cifrado por pares y de grupo CCMP-128.
+    pub ccmp: u8,
+    pub band24: u8,
 }
 
 unsafe extern "C" {
@@ -24,7 +33,6 @@ unsafe extern "C" {
     fn lx_iwlwifi_scan(out: *mut LxWifiBss, max: c_int, count: *mut c_int) -> c_int;
     fn lx_iwlwifi_get_scan_results(out: *mut LxWifiBss, max: c_int, count: *mut c_int) -> c_int;
     fn lx_iwlwifi_connect_open(ssid: *const c_char) -> c_int;
-    #[allow(dead_code)]
     fn lx_iwlwifi_connect_wpa2(ssid: *const c_char, psk: *const u8) -> c_int;
     fn lx_iwlwifi_install_key(key: *const u8, key_idx: c_int) -> c_int;
     fn lx_iwlwifi_connected() -> c_int;
@@ -119,6 +127,10 @@ pub fn scan_results() -> alloc::vec::Vec<(alloc::string::String, i8, u8, bool)> 
         rssi: 0,
         channel: 0,
         open: 0,
+        rsn: 0,
+        akm_psk: 0,
+        ccmp: 0,
+        band24: 0,
     }; MAX_SCAN];
     let mut count = 0i32;
     let rc = {
@@ -151,7 +163,6 @@ pub fn connect_open(ssid: &str) -> i32 {
     unsafe { lx_iwlwifi_connect_open(buf.as_ptr() as *const c_char) }
 }
 
-#[allow(dead_code)]
 pub fn connect_wpa2(ssid: &str, psk: &[u8; 32]) -> i32 {
     let mut buf = [0u8; SSID_MAX + 1];
     let bytes = ssid.as_bytes();

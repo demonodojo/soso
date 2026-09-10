@@ -63,8 +63,11 @@ pub fn connect_wpa2(ssid: &str, passphrase: &str) -> i32 {
     crate::println!("wifi-wpa: PSK derivada para '{ssid}'");
 
     crate::lxdde::wifi_scan();
-    if crate::lxdde::wifi::connect_open(ssid) != 0 {
-        crate::println!("wifi-wpa: fallo assoc MLME");
+    // La ruta WPA2 va por `connect_wpa2` del driver, que exige que el BSS
+    // ofrezca RSN con AKM PSK y CCMP. `connect_open` ahora rechaza las redes
+    // protegidas (R7), así que pasar por ahí era quedarse sin conexión.
+    if crate::lxdde::wifi::connect_wpa2(ssid, &pmk) != 0 {
+        crate::println!("wifi-wpa: fallo assoc MLME (¿la red ofrece WPA2-PSK/CCMP?)");
         return -1;
     }
 
