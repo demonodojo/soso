@@ -67,8 +67,8 @@ impl StageStatus {
     }
 }
 
-/// Un log truncado o de otro arranque no borra un `ok`/`fail` anterior.
-/// Un resultado concluyente nuevo (incluido un fallo) sí actualiza.
+/// Conserva el valor anterior solo para el historial agregado.
+/// El estado *actual* de una ejecución nueva no usa esta fusión.
 pub fn merge_stage(prev: &StageStatus, incoming: StageStatus) -> StageStatus {
     if incoming.is_pendiente() {
         prev.clone()
@@ -80,6 +80,8 @@ pub fn merge_stage(prev: &StageStatus, incoming: StageStatus) -> StageStatus {
 fn merge_wifi(prev: &WifiStages, incoming: WifiStages) -> WifiStages {
     WifiStages {
         alive: merge_stage(&prev.alive, incoming.alive),
+        init_complete: merge_stage(&prev.init_complete, incoming.init_complete),
+        mvm_ready: merge_stage(&prev.mvm_ready, incoming.mvm_ready),
         scan: merge_stage(&prev.scan, incoming.scan),
         assoc_wpa2: merge_stage(&prev.assoc_wpa2, incoming.assoc_wpa2),
         dhcp: merge_stage(&prev.dhcp, incoming.dhcp),
@@ -88,6 +90,7 @@ fn merge_wifi(prev: &WifiStages, incoming: WifiStages) -> WifiStages {
     }
 }
 
+#[allow(dead_code)]
 fn merge_gpu(prev: &GpuStages, incoming: GpuStages) -> GpuStages {
     GpuStages {
         gsp_rpc: merge_stage(&prev.gsp_rpc, incoming.gsp_rpc),
@@ -109,6 +112,10 @@ impl Default for StageStatus {
 #[serde(rename_all = "snake_case")]
 pub struct WifiStages {
     pub alive: StageStatus,
+    #[serde(default)]
+    pub init_complete: StageStatus,
+    #[serde(default)]
+    pub mvm_ready: StageStatus,
     pub scan: StageStatus,
     pub assoc_wpa2: StageStatus,
     pub dhcp: StageStatus,
@@ -120,6 +127,8 @@ impl Default for WifiStages {
     fn default() -> Self {
         Self {
             alive: StageStatus::pendiente(),
+            init_complete: StageStatus::pendiente(),
+            mvm_ready: StageStatus::pendiente(),
             scan: StageStatus::pendiente(),
             assoc_wpa2: StageStatus::pendiente(),
             dhcp: StageStatus::pendiente(),
@@ -212,8 +221,28 @@ pub struct HwEntry {
     #[serde(default)]
     pub logs: Vec<String>,
     #[serde(default)]
+    pub historial: Vec<RunEvidence>,
+    #[serde(default)]
     pub notas: String,
     pub actualizado: String,
+}
+
+/// Una ejecución concreta: no se presenta como evidencia del kernel actual
+/// si el log/hash ya no coincide.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RunEvidence {
+    pub log_hash: String,
+    #[serde(default)]
+    pub kernel: String,
+    #[serde(default)]
+    pub pci: Vec<String>,
+    #[serde(default)]
+    pub wifi: WifiStages,
+    #[serde(default)]
+    pub gpu: GpuStages,
+    #[serde(default)]
+    pub fecha: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -384,6 +413,7 @@ fn seed_entry(
         gpu: GpuStages::default(),
         bench: BenchRecord::default(),
         logs: Vec::new(),
+        historial: Vec::new(),
         notas: notas.into(),
         actualizado: today(),
     }
@@ -521,9 +551,26 @@ fn parse_logs_cmd(args: &[String]) {
             entry.logs.push(s);
         }
     }
-    entry.wifi = merge_wifi(&entry.wifi, parse_wifi_stages(&blob));
-    entry.gpu = merge_gpu(&entry.gpu, parse_gpu_stages(&blob));
-    entry.sesion_sostenida = merge_stage(&entry.sesion_sostenida, parse_sesion(&blob));
+    let runs = parse_log_runs(&blob);
+    for run in &runs {
+        if !entry
+            .historial
+            .iter()
+            .any(|h| h.log_hash == run.log_hash && h.kernel == run.kernel)
+        {
+            entry.historial.push(run.clone());
+        }
+    }
+    if let Some(last) = runs.last() {
+        entry.wifi = last.wifi.clone();
+        entry.gpu = last.gpu.clone();
+        entry.sesion_sostenida = parse_sesion(last_boot_text(&blob));
+        if boot_ok_criterio(last_boot_text(&blob)) {
+            entry.arranques_consecutivos_ok = entry.arranques_consecutivos_ok.saturating_add(1);
+        } else if last_boot_text(&blob).contains("boot: memtest") {
+            entry.arranques_consecutivos_ok = 0;
+        }
+    }
     if let Some(drv) = flag_path(args, "--sosodrv") {
         apply_hwscan(entry, &drv);
     }
@@ -546,67 +593,200 @@ fn apply_hwscan(entry: &mut HwEntry, sosodrv: &Path) {
     }
 }
 
+fn line_lc(text: &str) -> Vec<String> {
+    text.lines().map(|l| l.to_ascii_lowercase()).collect()
+}
+
+fn any_line(lines: &[String], pred: impl Fn(&str) -> bool) -> bool {
+    lines.iter().any(|l| pred(l))
+}
+
+/// Parte logs concatenados por el marcador de arranque `boot: memtest`.
+pub fn split_boots(text: &str) -> Vec<&str> {
+    let mut idxs = Vec::new();
+    let mut pos = 0;
+    while let Some(rel) = text[pos..].find("boot: memtest") {
+        idxs.push(pos + rel);
+        pos += rel + 1;
+    }
+    if idxs.is_empty() {
+        return vec![text];
+    }
+    let mut out = Vec::new();
+    if idxs[0] > 0 {
+        let prefix = text[..idxs[0]].trim();
+        if !prefix.is_empty() {
+            out.push(&text[..idxs[0]]);
+        }
+    }
+    for (i, start) in idxs.iter().enumerate() {
+        let end = idxs.get(i + 1).copied().unwrap_or(text.len());
+        out.push(&text[*start..end]);
+    }
+    out
+}
+
+pub fn last_boot_text(text: &str) -> &str {
+    split_boots(text).last().copied().unwrap_or(text)
+}
+
+fn extract_kernel_id(text: &str) -> String {
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with("soso ") || l.contains("SOSOKRN") || l.starts_with("version=") {
+            return l.chars().take(80).collect();
+        }
+    }
+    String::new()
+}
+
+fn extract_pci(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        for token in line.split(|c: char| !c.is_ascii_hexdigit() && c != ':') {
+            if pci_id_concreto(token) && !out.iter().any(|p| p == token) {
+                out.push(token.to_ascii_lowercase());
+            }
+        }
+    }
+    out
+}
+
+pub fn parse_log_runs(text: &str) -> Vec<RunEvidence> {
+    split_boots(text)
+        .into_iter()
+        .map(|boot| RunEvidence {
+            log_hash: sha256_hex(boot.as_bytes()),
+            kernel: extract_kernel_id(boot),
+            pci: extract_pci(boot),
+            wifi: parse_wifi_stages(boot),
+            gpu: parse_gpu_stages(boot),
+            fecha: today(),
+        })
+        .collect()
+}
+
+fn boot_ok_criterio(text: &str) -> bool {
+    let lines = line_lc(text);
+    any_line(&lines, |l| l.contains("boot: task") || l.contains("sosh —"))
+        && !any_line(&lines, |l| l.contains("panic") || l.contains("double fault"))
+}
+
+fn wifi_link_up(lines: &[String]) -> bool {
+    any_line(lines, |l| {
+        (l.contains("assoc=ok") || l.contains("associated=1") || l.contains("wifi asociado"))
+            && !l.contains("no asociado")
+    })
+}
+
 pub fn parse_wifi_stages(text: &str) -> WifiStages {
-    let t = text.to_ascii_lowercase();
+    let text = last_boot_text(text);
+    let lines = line_lc(text);
     WifiStages {
-        alive: if t.contains("alive degradado") || t.contains("alive=fallo") {
+        alive: if any_line(&lines, |l| {
+            l.contains("alive degradado")
+                || l.contains("alive=fallo")
+                || l.contains("timeout alive")
+                || l.contains("alive=false")
+        }) {
             StageStatus::fail("ALIVE degradado o fallido")
-        } else if t.contains("init_complete_notif") {
-            StageStatus::ok(Some("INIT_COMPLETE_NOTIF"))
-        } else if t.contains("ucode_alive_ntfy") || t.contains("firmware alive") {
+        } else if any_line(&lines, |l| {
+            l.contains("ucode_alive_ntfy") || l.contains("firmware alive")
+        }) {
             StageStatus::ok(Some("UCODE_ALIVE_NTFY"))
         } else {
             StageStatus::pendiente()
         },
-        scan: if t.contains("scan=fallo")
-            || t.contains("wifi scan fallo")
-            || t.contains("wifi: ninguna red")
-            || t.contains("sosh: wifi scan:")
+        init_complete: if any_line(&lines, |l| l.contains("init_complete_notif")) {
+            StageStatus::ok(Some("INIT_COMPLETE_NOTIF"))
+        } else {
+            StageStatus::pendiente()
+        },
+        mvm_ready: if any_line(&lines, |l| l.contains("up mínimo listo") || l.contains("up minimo listo"))
         {
+            StageStatus::ok(Some("MVM up"))
+        } else {
+            StageStatus::pendiente()
+        },
+        scan: if any_line(&lines, |l| {
+            l.contains("scan=fallo")
+                || l.contains("wifi scan fallo")
+                || l.contains("wifi: ninguna red")
+                || l.contains("scan_req_umac rechazado")
+        }) {
             StageStatus::fail("scan fallido o sin BSS")
-        } else if t.contains("scan:") && t.contains("ssid") {
+        } else if any_line(&lines, |l| {
+            l.contains("scan fin") && (l.contains("end=1") || l.contains("complete=1"))
+        }) {
+            StageStatus::ok(Some("fin normal"))
+        } else if any_line(&lines, |l| l.contains("wifi scan:") && l.contains("ssid")) {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        assoc_wpa2: if t.contains("assoc=fallo") || t.contains("wpa2 fallo") {
+        assoc_wpa2: if any_line(&lines, |l| {
+            l.contains("assoc=fallo")
+                || l.contains("wpa2 fallo")
+                || l.contains("no asociado")
+        }) {
             StageStatus::fail("asociación WPA2 fallida")
-        } else if t.contains("asociad")
-            || t.contains("assoc=ok")
-            || (t.contains("4-way") && t.contains("ok"))
+        } else if any_line(&lines, |l| l.contains("assoc=ok"))
+            || any_line(&lines, |l| l.contains("4-way") && l.contains("ok"))
         {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        dhcp: if (t.contains("dhcp") && t.contains("fallo"))
-            && !t.contains("gsp=fallo")
-            && !t.contains("gsp fallo")
-        {
-            StageStatus::fail("DHCP fallido")
-        } else if t.contains("net: dhcp ")
-            && (t.contains("192.") || t.contains("10.") || t.contains("172."))
-        {
-            StageStatus::ok(None)
-        } else {
-            StageStatus::pendiente()
+        dhcp: {
+            let wifi_dhcp_fail = any_line(&lines, |l| {
+                l.contains("dhcp")
+                    && l.contains("fallo")
+                    && (l.contains("wifi") || l.contains("lxwifi") || l.contains("lx-wifi"))
+                    && !l.contains("gsp")
+            });
+            let wifi_dhcp_ok = any_line(&lines, |l| {
+                l.contains("net: dhcp ")
+                    && (l.contains("192.") || l.contains("10.") || l.contains("172."))
+                    && (l.contains("wifi")
+                        || l.contains("lxwifi")
+                        || l.contains("lx-wifi")
+                        || l.contains("iwl"))
+            }) || (wifi_link_up(&lines)
+                && any_line(&lines, |l| {
+                    l.contains("net: dhcp ")
+                        && (l.contains("192.") || l.contains("10.") || l.contains("172."))
+                }));
+            if wifi_dhcp_fail {
+                StageStatus::fail("DHCP fallido")
+            } else if wifi_dhcp_ok {
+                StageStatus::ok(None)
+            } else {
+                StageStatus::pendiente()
+            }
         },
-        ssh: if t.contains("ssh: sesión")
-            || t.contains("ssh: sesion")
-            || t.contains("ssh conectado")
-            || (t.contains("ssh:") && t.contains("ok") && !t.contains("sosh"))
-        {
+        ssh: if any_line(&lines, |l| {
+            l.contains("ssh: sesión") || l.contains("ssh: sesion") || l.contains("ssh conectado")
+        }) {
             StageStatus::ok(Some("SSH"))
-        } else if t.contains("ssh") && t.contains("fallo") && !t.contains("gsp=fallo") {
+        } else if any_line(&lines, |l| {
+            l.contains("ssh:") && l.contains("ok") && !l.contains("sosh")
+        }) {
+            StageStatus::ok(Some("SSH"))
+        } else if any_line(&lines, |l| {
+            l.contains("ssh") && l.contains("fallo") && !l.contains("gsp=fallo")
+        }) {
             StageStatus::fail("SSH fallido")
         } else {
             StageStatus::pendiente()
         },
-        reconexion: if (t.contains("reconex") || t.contains("reconnect")) && t.contains("fallo") {
+        reconexion: if any_line(&lines, |l| {
+            (l.contains("reconex") || l.contains("reconnect")) && l.contains("fallo")
+        }) {
             StageStatus::fail("reconexión fallida")
-        } else if (t.contains("reconex") || t.contains("reconnect"))
-            && (t.contains("ok") || t.contains("éxito") || t.contains("exito"))
-        {
+        } else if any_line(&lines, |l| {
+            (l.contains("reconex") || l.contains("reconnect"))
+                && (l.contains("ok") || l.contains("éxito") || l.contains("exito"))
+        }) {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
@@ -615,45 +795,58 @@ pub fn parse_wifi_stages(text: &str) -> WifiStages {
 }
 
 pub fn parse_gpu_stages(text: &str) -> GpuStages {
-    let t = text.to_ascii_lowercase();
+    let text = last_boot_text(text);
+    let lines = line_lc(text);
+    let gpu_backend = any_line(&lines, |l| {
+        l.contains("pool vram=") && !l.contains("pool vram=no") && !l.contains("vram=no")
+    }) || any_line(&lines, |l| l.contains("matvec") && l.contains("gpu"));
     GpuStages {
-        gsp_rpc: if t.contains("gsp=fallo") || t.contains("gsp fallo") || t.contains("gsp: fallo") {
+        gsp_rpc: if any_line(&lines, |l| {
+            l.contains("gsp=fallo") || l.contains("gsp fallo") || l.contains("gsp: fallo")
+        }) {
             StageStatus::fail("GSP fallido")
-        } else if (t.contains("gsp") && t.contains("ok")) || t.contains("gsp_init_done") {
-            StageStatus::ok(None)
+        } else if any_line(&lines, |l| {
+            l.contains("gsp_init_done") || l.contains("gsp-rm listo")
+        }) {
+            StageStatus::ok(Some("GSP_INIT_DONE"))
         } else {
             StageStatus::pendiente()
         },
-        vram_pool: if t.contains("pool vram=no") || t.contains("vram=no") {
+        vram_pool: if any_line(&lines, |l| l.contains("pool vram=no") || l.contains("vram=no")) {
             StageStatus::fail("pool VRAM=no")
-        } else if t.contains("pool vram=") || (t.contains("vram") && t.contains("mib")) {
+        } else if any_line(&lines, |l| {
+            l.contains("pool vram=") && !l.contains("pool vram=no")
+        }) {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        ce_readback: if t.contains("readback") && t.contains("fallo") {
+        ce_readback: if any_line(&lines, |l| l.contains("readback") && l.contains("fallo")) {
             StageStatus::fail("CE readback fallido")
-        } else if t.contains("readback") && t.contains("go") {
+        } else if any_line(&lines, |l| l.contains("readback") && l.contains("go")) {
             StageStatus::ok(Some("CE readback GO"))
         } else {
             StageStatus::pendiente()
         },
-        compute_cpu_gpu: if t.contains("dispositivo «soft") || t.contains("dispositivo \"soft") {
+        compute_cpu_gpu: if any_line(&lines, |l| {
+            l.contains("dispositivo «soft") || l.contains("dispositivo \"soft")
+        }) {
             StageStatus::no_aplica("dispositivo software (QEMU)")
-        } else if t.contains("matvec") && t.contains("gpu") && t.contains("tok/s") {
+        } else if any_line(&lines, |l| l.contains("matvec") && l.contains("gpu") && l.contains("tok/s"))
+        {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        carga_real: if t.contains("soso-llm: generado") {
+        carga_real: if any_line(&lines, |l| l.contains("soso-llm: generado")) && gpu_backend {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
         },
-        apagado_limpio: if t.contains("unload=fallo") {
+        apagado_limpio: if any_line(&lines, |l| l.contains("unload=fallo")) {
             StageStatus::fail("unload=fallo")
-        } else if t.contains("unload=ok")
-            && (t.contains("dma=off") || t.contains("bus master quitado"))
+        } else if any_line(&lines, |l| l.contains("unload=ok"))
+            && any_line(&lines, |l| l.contains("dma=off") || l.contains("bus master quitado"))
         {
             StageStatus::ok(Some("unload/halt/dma"))
         } else {
@@ -790,6 +983,8 @@ fn show_entry_summary(e: &HwEntry) {
         "  wifi",
         &[
             ("alive", &e.wifi.alive),
+            ("init", &e.wifi.init_complete),
+            ("mvm", &e.wifi.mvm_ready),
             ("scan", &e.wifi.scan),
             ("wpa2", &e.wifi.assoc_wpa2),
             ("dhcp", &e.wifi.dhcp),
@@ -877,7 +1072,48 @@ mod tests {
         let g = parse_gpu_stages("unload=fallo dma=off");
         assert_eq!(g.apagado_limpio.status, "fail");
         let g = parse_gpu_stages("soso-llm: generado 16 tokens");
+        assert_eq!(g.carga_real.status, "pendiente");
+    }
+
+    #[test]
+    fn parse_c4_false_positives_and_boots() {
+        let g = parse_gpu_stages("GSP firmware cargado\nmemtest OK\nnvkm device graph OK — subdev='gsp0'");
+        assert_eq!(g.gsp_rpc.status, "pendiente");
+        let g = parse_gpu_stages("VRAM 4096 MiB detectada");
+        assert_eq!(g.vram_pool.status, "pendiente");
+        let g = parse_gpu_stages("GSP_INIT_DONE recibido\npool VRAM=256MiB\nsoso-llm: generado 8 tokens");
+        assert_eq!(g.gsp_rpc.status, "ok");
+        assert_eq!(g.vram_pool.status, "ok");
         assert_eq!(g.carga_real.status, "ok");
+
+        let w = parse_wifi_stages("wifi: no asociado\nnet: dhcp 192.168.1.10/24");
+        assert_eq!(w.assoc_wpa2.status, "fail");
+        assert_eq!(w.dhcp.status, "pendiente");
+
+        let two = "\
+boot: memtest\niwl: UCODE_ALIVE_NTFY\nINIT_COMPLETE_NOTIF\nup mínimo listo\n\
+boot: memtest\niwl: start\n";
+        let runs = parse_log_runs(two);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].wifi.alive.status, "ok");
+        assert_eq!(runs[0].wifi.init_complete.status, "ok");
+        assert_eq!(runs[0].wifi.mvm_ready.status, "ok");
+        assert_eq!(runs[1].wifi.alive.status, "pendiente");
+        let current = parse_wifi_stages(two);
+        assert_eq!(current.alive.status, "pendiente");
+        assert_ne!(runs[0].log_hash, runs[1].log_hash);
+    }
+
+    #[test]
+    fn parse_truncated_after_green_is_current_pending() {
+        let blob = "\
+boot: memtest\nUCODE_ALIVE_NTFY\nINIT_COMPLETE_NOTIF\nup mínimo listo\nscan fin end=1 count=0\n\
+boot: memtest\niwl: start\n";
+        let w = parse_wifi_stages(blob);
+        assert_eq!(w.alive.status, "pendiente");
+        assert_eq!(w.scan.status, "pendiente");
+        let hist = parse_log_runs(blob);
+        assert_eq!(hist[0].wifi.scan.status, "ok");
     }
 
     #[test]
@@ -900,7 +1136,9 @@ mod tests {
         assert_eq!(w.assoc_wpa2.status, "pendiente");
         assert_eq!(w.reconexion.status, "pendiente");
         assert_eq!(w.scan.status, "pendiente");
-        let w = parse_wifi_stages("wifi scan: ssid Casa assoc=ok ssh: sesión ok reconexion ok");
+        let w = parse_wifi_stages(
+            "wifi scan: ssid Casa\nassoc=ok\nssh: sesión ok\nreconexion ok",
+        );
         assert_eq!(w.scan.status, "ok");
         assert_eq!(w.assoc_wpa2.status, "ok");
         assert_eq!(w.ssh.status, "ok");

@@ -14,15 +14,15 @@ lectura de código se distinguen de los resultados observados en placa.
 
 | Orden | Entrega pendiente | Prioridad | Depende de | Cierre verificable |
 |---|---|---|---|---|
-| 1 | C1. Corregir MAC y ABI de scan Intel | P0 | Ninguna | Bytes contra referencia y scan terminado en AX200 |
-| 2 | C2. Completar el contrato de comandos WiFi | P0 | Ninguna; antes de validar C1 | Rechazos, timeouts y wrap sin éxitos falsos |
-| 3 | C3. Validar canal Ampere y adaptar compute por familia | P0 canal / P1 compute | Nueva ejecución ROG | CE y cálculo numérico en GA107 |
-| 4 | C4. Evidencia hardware por ejecución y dispositivo | P1 | Ninguna | Parser sin contaminación entre etapas/arranques |
-| 5 | C5. Estabilizar la identidad de dispositivos PCI | P1 | Ninguna | Punteros conservados después de ampliar el registro |
-| 6 | C6. Cerrar los casos parciales de memoria y ELF | P1 | Ninguna | Permisos tras fault y ELFs inválidos sin mutaciones |
-| 7 | C7. Resolver la confirmación de sosh en live | P1 | Reproducir con artefactos identificados | Marca y confirmación OTA observadas en live |
-| 8 | C8. Completar asociación y datos WiFi | P1 | C1 + C2 | AP → WPA2 → DHCP → SSH con tráfico real |
-| 9 | C9. Cerrar validación e integración del ciclo | P1 | Según perfil y dispositivo | Evidencias de la candidata exacta |
+| 1 | C1 host: MAC CSR 0x380, scan v14–17 fijo, UID/fin | hecho | — | `./scripts/l6-iwl-fw-hostcheck.sh` (scan_abi) |
+| 2 | C2 host: contrato HCMD | hecho | — | hostcheck hcmd_contract |
+| 3 | C3. Validar canal Ampere en placa (no metal en este ciclo) | P0 canal | Nueva ejecución ROG | CE y cálculo numérico en GA107 |
+| 4 | C4 host: parser por arranque/hash | hecho | — | `cargo test -p xtask hw_matrix::` |
+| 5 | C5 host: registro PCI `Box` | hecho | — | `cargo test -p xtask pci_stable::` |
+| 6 | C6 host+QEMU: split mprotect, mremap, preflight ELF | hecho | — | `elf_mmap_rules` + `xtask test -- --guest sys --only init` (SMP=2) |
+| 7 | C7 host+QEMU: marca `pid=N` y sondeo init | hecho (live pendiente) | — | `ssh_sosh_ready` exige `pid=`; arranque QEMU OK |
+| 8 | C8. Asociación y datos WiFi reales | P1 | C1 + C2 + placa | AP → WPA2 → DHCP → SSH |
+| 9 | C9. Perfil check + campaña | parcial | live vs minimo | `SOSO_CHECK_PROFILE`; QEMU/E2E |
 
 Primera iteración: C1/C2 y prueba del canal de C3. C4 debe estar listo antes de
 registrar nuevos resultados como validación. C5–C7 son correcciones independientes.
@@ -274,7 +274,7 @@ ni vuelto a ejecutar la placa. Solo se modifica este plan. Comprobaciones ejecut
 - `cargo test -p xtask hw_matrix::`: **13 tests pasan**; log
   `/tmp/soso-astra-plan-matrix.log`.
 
-Estos resultados validan las pruebas existentes, no los escenarios pendientes
-descritos arriba. No se han ejecutado `cargo xtask check` completo ni QEMU en esta
-revisión. La comparación de ABI usa los fuentes Linux locales; las consultas web
-no estuvieron disponibles y no aportan evidencia adicional.
+Estos resultados validan las pruebas existentes, no los escenarios de placa.
+`SOSO_QEMU_SMP=2 cargo xtask test -- --guest sys --only init` pasó (marca
+`pid=` + init test con mprotect interior y `old_len` inventada). Quedan C3/C8
+y la parte live de C7/C9. La comparación de ABI usa los fuentes Linux locales.

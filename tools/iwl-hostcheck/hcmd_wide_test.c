@@ -85,6 +85,13 @@ void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
     (void)len;
 }
 
+void iwl_mvm_on_scan_complete(struct iwl_ax211_priv *iwl, uint32_t uid, uint8_t status)
+{
+    (void)iwl;
+    (void)uid;
+    (void)status;
+}
+
 int iwl_fw_upload_sections(struct iwl_ax211_priv *iwl,
                            struct iwl_context_info_dram *dram)
 {
@@ -105,8 +112,10 @@ static int check_wide_legacy(uint8_t id, const void *payload, uint16_t pay_len)
     iwl.mcr_dma = 0x1000;
     iwl.mmio = g_mmio_stub;
 
+    iwl.cmd_pending = 0;
     if (iwl_trans_send_cmd(&iwl, LEGACY_GROUP, id, payload, pay_len) != 0)
         return -1;
+    iwl.cmd_pending = 0;
 
     if (sizeof(struct iwl_cmd_header_wide) != 8) {
         fprintf(stderr, "iwl_cmd_header_wide != 8 B\n");

@@ -43,6 +43,20 @@ static uint64_t vram_rd64(uint64_t addr)
     return lo | (hi << 32);
 }
 
+int gsp_bar1_pri_poison(uint64_t v)
+{
+    uint32_t lo = (uint32_t)v;
+    uint32_t hi = (uint32_t)(v >> 32);
+
+    /* `0xbadfxxxx`: anillo PRI. `0xbad0xxxx`: acceso rechazado (GA107, PD3
+     * `0xbad0fb2fbad0fb2e` al caminar el PDB del bloque de instancia). */
+    if ((lo & 0xffff0000u) == 0xbadf0000u || (lo & 0xffff0000u) == 0xbad00000u)
+        return 1;
+    if ((hi & 0xffff0000u) == 0xbadf0000u || (hi & 0xffff0000u) == 0xbad00000u)
+        return 1;
+    return 0;
+}
+
 int gsp_bar1_init(struct gsp_bar1 *b, uint64_t aperture_phys,
                   uint64_t aperture_size, uint64_t pd3_vram)
 {
@@ -57,7 +71,7 @@ int gsp_bar1_init(struct gsp_bar1 *b, uint64_t aperture_phys,
     /* Una raíz a cero no es "todavía no": es que RM no la ha dado o que el
      * struct de la config estática está desplazado, y en los dos casos lo que
      * salga del recorrido sería inventado. */
-    if (!pd3_vram || (pd3_vram & 0xfffull)) {
+    if (!pd3_vram || (pd3_vram & 0xfffull) || gsp_bar1_pri_poison(pd3_vram)) {
         lx_printk("nouveau-lx: BAR1 — bar1PdeBase=0x%llx no es una tabla "
                   "alineada a página\n", (unsigned long long)pd3_vram);
         return -1;
@@ -105,6 +119,13 @@ int gsp_bar1_walk(const struct gsp_bar1 *b, uint64_t bar1_va,
         s->index = idx;
         s->entry = raw;
         s->next = raw & BAR1_ADDR_MASK;
+        if (gsp_bar1_pri_poison(raw)) {
+            /* No seguir: PRAMIN estaría leyendo un destino que no existe y
+             * `map` escribiría encima. Se deja el veneno en `entry` para el dump. */
+            s->aperture = 0;
+            n++;
+            break;
+        }
         if (lvl == 0u) {
             /* Hoja: el bit 0 es VALID de verdad y la APERTURE se codifica al
              * revés que en un PDE (VRAM = 0). Se deja el campo crudo y quien
@@ -251,6 +272,12 @@ int gsp_bar1_inst_probe(const struct gsp_bar1 *b, uint64_t *pdb_out, uint64_t *l
     }
     if (limit_out) {
         *limit_out = limit;
+    }
+    if (gsp_bar1_pri_poison(pdb) || gsp_bar1_pri_poison(limit)) {
+        lx_printk("nouveau-lx: BAR1 — PDB/límite del bloque de instancia es "
+                  "veneno PRI (0x%llx / 0x%llx); no se usa como raíz\n",
+                  (unsigned long long)pdb, (unsigned long long)limit);
+        return -1;
     }
     return 0;
 }
@@ -433,6 +460,11 @@ uint64_t gsp_bar1_map(struct gsp_bar1 *b, uint64_t phys, uint64_t bytes)
     if (!b || !b->ready || !b->window_va || !bytes) {
         return 0;
     }
+    if (gsp_bar1_pri_poison(b->pd3)) {
+        lx_printk("nouveau-lx: BAR1 — PDB 0x%llx es veneno PRI; no se escribe\n",
+                  (unsigned long long)b->pd3);
+        return 0;
+    }
     if (bytes > GSP_BAR1_WINDOW_BYTES || (phys & 0xfffull)) {
         lx_printk("nouveau-lx: BAR1 — %llu B en phys 0x%llx no cabe alineado en la "
                   "ventana de %llu KiB\n", (unsigned long long)bytes,
@@ -466,6 +498,19 @@ uint64_t gsp_bar1_map(struct gsp_bar1 *b, uint64_t phys, uint64_t bytes)
     n = gsp_bar1_walk(b, va, steps, GSP_BAR1_LEVELS);
     if (n <= 0) {
         return 0;
+    }
+    {
+        int i;
+
+        for (i = 0; i < n; i++) {
+            if (gsp_bar1_pri_poison(steps[i].entry)) {
+                lx_printk("nouveau-lx: BAR1 — entrada PRI-veneno en nivel %u "
+                          "(0x%llx); no se escribe\n",
+                          steps[i].level,
+                          (unsigned long long)steps[i].entry);
+                return 0;
+            }
+        }
     }
     punto = &steps[n - 1];
 

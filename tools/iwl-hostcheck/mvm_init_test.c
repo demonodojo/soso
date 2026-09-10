@@ -70,9 +70,15 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
     return -1;
 }
 
+int g_nvm_fail;
+
 int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl)
 {
-    (void)iwl;
+    if (g_nvm_fail) {
+        (void)iwl;
+        return -1;
+    }
+    iwl->nvm_ready = 1;
     return 0;
 }
 
@@ -141,5 +147,17 @@ int mvm_init_hostcheck(void)
     }
 
     puts("OK: init unificado sin PHY_CFG ni TX_ANT (van en up_minimal)");
+
+    memset(&g_test, 0, sizeof(g_test));
+    g_test.alive = 1;
+    g_sent_n = 0;
+    g_fast_ack = 1;
+    g_nvm_fail = 1;
+    if (iwl_mvm_run_init(&g_test) == 0 || g_test.radio_ready || g_test.nvm_ready) {
+        fprintf(stderr, "NVM fallido no debe dejar radio/NVM listo\n");
+        return -1;
+    }
+    g_nvm_fail = 0;
+    puts("OK: init no anuncia NVM listo si NVM/MAC falla");
     return 0;
 }

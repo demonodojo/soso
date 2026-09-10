@@ -160,6 +160,10 @@ mod flash_usb_live;
 mod g1_check;
 mod g3_check;
 mod hw_matrix;
+#[cfg(test)]
+mod pci_stable;
+#[cfg(test)]
+mod elf_mmap_rules;
 mod install_disk;
 mod live_models;
 mod lx_build;

@@ -90,55 +90,113 @@ int iwl_mvm_send_scan_cfg(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
-static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf, unsigned cap)
+/* Índices NVM → número/banda (iwl-nvm-parse.c, primeros 51). */
+static const uint8_t nvm_chan_num[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177, 181,
+    183, 184, 185, 187, 188, 189, 192, 196,
+};
+
+static unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
+                                              uint8_t *ch, uint8_t *band,
+                                              uint8_t *passive, unsigned max)
 {
-    unsigned nch = sizeof(scan_channels) / sizeof(scan_channels[0]);
-    unsigned pay = iwl_scan_req_umac_v17_size(nch);
-    unsigned off;
-    struct iwl_scan_general_params_v11 *gen;
-    struct iwl_scan_channel_cfg_umac *chcfg;
-    struct iwl_scan_periodic_parms_v1 *periodic;
+    unsigned n = 0;
     unsigned i;
+    unsigned nvm_n = iwl->nvm_n_channels;
+    unsigned table_n = sizeof(nvm_chan_num) / sizeof(nvm_chan_num[0]);
 
-    if (pay > cap)
-        return 0;
+    if (nvm_n > 0) {
+        if (nvm_n > table_n)
+            nvm_n = table_n;
+        for (i = 0; i < nvm_n && n < max; i++) {
+            uint32_t flags = iwl->nvm_chan_flags[i];
+            uint8_t num;
 
-    memset(buf, 0, pay);
-    off = 8u;
-    gen = (struct iwl_scan_general_params_v11 *)(buf + off);
-    gen->flags = (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_PASS_ALL |
-                            IWL_UMAC_SCAN_GEN_FLAGS_ITER_COMPLETE);
-    gen->active_dwell[0] = 30;
-    gen->passive_dwell[0] = 30;
-    off += (unsigned)sizeof(*gen);
-    buf[off + 1] = (uint8_t)nch;
-    off += 4u;
-    chcfg = (struct iwl_scan_channel_cfg_umac *)(buf + off);
-    for (i = 0; i < nch; i++) {
-        chcfg[i].v2.channel_num = scan_channels[i].ch;
-        chcfg[i].v2.band = scan_channels[i].band;
-        chcfg[i].v2.iter_count = 1;
+            if (!(flags & NVM_CHANNEL_VALID))
+                continue;
+            num = nvm_chan_num[i];
+            ch[n] = num;
+            band[n] = (num >= 36) ? 1 : 0;
+            passive[n] = (!(flags & NVM_CHANNEL_ACTIVE) || (flags & NVM_CHANNEL_RADAR))
+                             ? 1
+                             : 0;
+            n++;
+        }
     }
-    off += nch * (unsigned)sizeof(*chcfg);
-    periodic = (struct iwl_scan_periodic_parms_v1 *)(buf + off);
-    periodic->schedule[0].iter_count = 1;
-    periodic->schedule[1].iter_count = 0xff;
-    off += (unsigned)sizeof(*periodic);
-    if (off + (unsigned)sizeof(struct iwl_scan_probe_params_v4) <= pay) {
-        struct iwl_scan_probe_params_v4 *probe =
-            (struct iwl_scan_probe_params_v4 *)(buf + off);
-        iwl_mvm_fill_probe_req(iwl, probe);
+
+    if (n == 0) {
+        unsigned fallback = sizeof(scan_channels) / sizeof(scan_channels[0]);
+
+        if (fallback > max)
+            fallback = max;
+        for (i = 0; i < fallback; i++) {
+            ch[i] = scan_channels[i].ch;
+            band[i] = scan_channels[i].band;
+            passive[i] = 0;
+        }
+        n = fallback;
     }
-    return (uint16_t)pay;
+    return n;
 }
 
-static uint16_t iwl_build_scan_req(struct iwl_ax211_priv *iwl, uint8_t *buf, unsigned cap)
+int iwl_mvm_scan_umac_supported(uint8_t ver)
+{
+    return ver == 6 || ver == 14 || ver == 15 || ver == 16 || ver == 17;
+}
+
+static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf, unsigned cap)
+{
+    struct iwl_scan_req_umac_v17 *req;
+    unsigned nch;
+    unsigned i;
+    uint8_t ch[SCAN_MAX_NUM_CHANS_V3];
+    uint8_t band[SCAN_MAX_NUM_CHANS_V3];
+    uint8_t passive[SCAN_MAX_NUM_CHANS_V3];
+
+    if (cap < sizeof(*req))
+        return 0;
+
+    nch = iwl_mvm_collect_scan_channels(iwl, ch, band, passive, SCAN_MAX_NUM_CHANS_V3);
+    if (nch == 0)
+        return 0;
+
+    memset(buf, 0, sizeof(*req));
+    req = (struct iwl_scan_req_umac_v17 *)buf;
+    iwl->scan_uid++;
+    if (iwl->scan_uid == 0)
+        iwl->scan_uid = 1;
+    req->uid = iwl_cpu_to_le32(iwl->scan_uid);
+    req->ooc_priority = iwl_cpu_to_le32(1);
+    req->scan_params.general_params.flags =
+        (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL |
+                   IWL_UMAC_SCAN_GEN_FLAGS_V2_NTFY_ITER_COMPLETE);
+    req->scan_params.general_params.active_dwell[0] = 30;
+    req->scan_params.general_params.passive_dwell[0] = 110;
+    req->scan_params.channel_params.count = (uint8_t)nch;
+    for (i = 0; i < nch; i++) {
+        req->scan_params.channel_params.channel_config[i].v2.channel_num = ch[i];
+        req->scan_params.channel_params.channel_config[i].v2.band = band[i];
+        req->scan_params.channel_params.channel_config[i].v2.iter_count = 1;
+        if (passive[i])
+            req->scan_params.channel_params.channel_config[i].flags = 1;
+    }
+    req->scan_params.periodic_params.schedule[0].iter_count = 1;
+    req->scan_params.periodic_params.schedule[1].iter_count = 0xff;
+    iwl_mvm_fill_probe_req(iwl, &req->scan_params.probe_params);
+    return (uint16_t)sizeof(*req);
+}
+
+uint16_t iwl_mvm_build_scan_req(struct iwl_ax211_priv *iwl, uint8_t *buf, unsigned cap)
 {
     uint8_t scan_ver = (uint8_t)iwl_fw_cmd_ver(iwl, LONG_GROUP, SCAN_REQ_UMAC);
 
-    if (scan_ver >= 14) {
+    if (!iwl_mvm_scan_umac_supported(scan_ver))
+        return 0;
+    if (scan_ver >= 14)
         return iwl_build_scan_req_v17(iwl, buf, cap);
-    }
 
     unsigned nch = sizeof(scan_channels) / sizeof(scan_channels[0]);
     unsigned pay = IWL_SCAN_REQ_UMAC_SIZE_V6 + nch * sizeof(struct iwl_scan_channel_cfg_umac) +
@@ -244,9 +302,25 @@ void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
     memcpy(bss.ssid, ssid, (size_t)slen);
     bss.ssid[slen] = '\0';
     bss.rssi = iwl->last_rx_rssi ? iwl->last_rx_rssi : -70;
-    bss.channel = iwl->last_rx_channel ? iwl->last_rx_channel : 6;
+    bss.channel = iwl->last_rx_channel;
     bss.open = 1;
     iwl_ax211_add_bss(&bss);
+}
+
+void iwl_mvm_on_scan_complete(struct iwl_ax211_priv *iwl, uint32_t uid, uint8_t status)
+{
+    if (!iwl->scan_active)
+        return;
+    if (uid != iwl->scan_uid)
+        return;
+    if (status == IWL_SCAN_OFFLOAD_COMPLETED)
+        iwl->scan_end = IWL_SCAN_END_NORMAL;
+    else if (status == IWL_SCAN_OFFLOAD_ABORTED)
+        iwl->scan_end = IWL_SCAN_END_ABORTED;
+    else
+        iwl->scan_end = IWL_SCAN_END_ABORTED;
+    iwl->scan_complete = 1;
+    iwl->scan_active = 0;
 }
 
 int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
@@ -254,7 +328,6 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
     uint8_t req[IWL_CMD_SLOT_SIZE];
     uint16_t pay;
     int last_count = 0;
-    int notifs = 0;
 
     if (!iwl->radio_ready) {
         lx_printk("iwl_mvm: scan sin INIT_COMPLETE\n");
@@ -267,8 +340,16 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
     if (iwl_hw_rf_kill(iwl) != 0)
         return -1;
 
+    if (iwl->scan_active) {
+        iwl->scan_end = IWL_SCAN_END_ABORTED;
+        iwl->scan_active = 0;
+        lx_printk("iwl_mvm: scan previo abortado uid=0x%x\n",
+                  (unsigned)iwl->scan_uid);
+    }
+
     iwl->scan_count = 0;
     iwl->scan_complete = 0;
+    iwl->scan_end = IWL_SCAN_END_NONE;
     iwl->scan_active = 1;
 
     if (iwl_mvm_send_scan_cfg(iwl) != 0) {
@@ -276,19 +357,19 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
-    pay = iwl_build_scan_req(iwl, req, sizeof(req));
+    pay = iwl_mvm_build_scan_req(iwl, req, sizeof(req));
     if (pay == 0) {
-        lx_printk("iwl_mvm: SCAN_REQ demasiado grande\n");
+        lx_printk("iwl_mvm: SCAN_REQ versión no soportada o no cabe\n");
         iwl->scan_active = 0;
         return -1;
     }
 
-    lx_printk("iwl_mvm: SCAN_REQ_UMAC %u B, %u canales\n", pay,
-              (unsigned)(sizeof(scan_channels) / sizeof(scan_channels[0])));
+    lx_printk("iwl_mvm: SCAN_REQ_UMAC %u B uid=0x%x\n", pay, (unsigned)iwl->scan_uid);
 
     if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_REQ_UMAC, req, pay, 1000) != 0) {
         lx_printk("iwl_mvm: SCAN_REQ_UMAC rechazado\n");
         iwl->scan_active = 0;
+        iwl->scan_end = IWL_SCAN_END_NONE;
         return -1;
     }
 
@@ -298,23 +379,23 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
             lx_printk("iwl_mvm: scan_count=%d\n", iwl->scan_count);
             last_count = iwl->scan_count;
         }
-        if (iwl->scan_complete)
-            notifs++;
-        if (iwl->scan_complete && iwl->scan_count > 0)
-            break;
-        if (iwl->scan_complete && i > 20)
+        if (iwl->scan_end != IWL_SCAN_END_NONE)
             break;
         lx_mdelay(20);
     }
 
-    iwl->scan_active = 0;
-    lx_printk("iwl_mvm: scan fin count=%d complete=%d notif=%d GP=0x%08x\n",
-              iwl->scan_count, iwl->scan_complete, notifs,
+    if (iwl->scan_end == IWL_SCAN_END_NONE) {
+        iwl->scan_end = IWL_SCAN_END_TIMEOUT;
+        iwl->scan_active = 0;
+    }
+
+    lx_printk("iwl_mvm: scan fin count=%d end=%d uid=0x%x GP=0x%08x\n",
+              iwl->scan_count, iwl->scan_end, (unsigned)iwl->scan_uid,
               iwl_read32(iwl, CSR_GP_CNTRL));
 
-    if (iwl->scan_count > 0)
+    if (iwl->scan_end == IWL_SCAN_END_NORMAL)
         return 0;
-    if (iwl->scan_complete)
+    if (iwl->scan_end == IWL_SCAN_END_ABORTED)
         return -1;
     return -2;
 }

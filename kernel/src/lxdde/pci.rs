@@ -2,6 +2,7 @@
 
 use crate::drivers::pci;
 use crate::mm;
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::c_void;
@@ -49,7 +50,8 @@ struct DriverReg {
 }
 
 static DRIVERS: Mutex<Vec<DriverReg>> = Mutex::new(Vec::new());
-static DEVICES: Mutex<Vec<LxPciDev>> = Mutex::new(Vec::new());
+/// `Box` para que un `push` posterior no mueva los `LxPciDev` ya entregados a C.
+static DEVICES: Mutex<Vec<Box<LxPciDev>>> = Mutex::new(Vec::new());
 
 struct ProbeJob {
     name: String,
@@ -109,11 +111,28 @@ pub fn init() {
             "lxdde-pci: probe {} {:04x}:{:04x}",
             job.name, vendor, device
         );
-        DEVICES.lock().push(job.dev);
-        let dev_ptr = DEVICES.lock().last_mut().unwrap() as *mut LxPciDev;
+        let dev_ptr = {
+            let mut table = DEVICES.lock();
+            table.push(Box::new(job.dev));
+            &mut **table.last_mut().unwrap() as *mut LxPciDev
+        };
         let r = (job.probe)(dev_ptr, &job.id);
         if r != 0 {
-            DEVICES.lock().pop();
+            if let Some(remove) = {
+                let drivers = DRIVERS.lock();
+                drivers
+                    .iter()
+                    .find(|d| d.name == job.name)
+                    .and_then(|d| d.remove)
+            } {
+                remove(dev_ptr);
+            }
+            {
+                let mut table = DEVICES.lock();
+                if let Some(pos) = table.iter().position(|d| core::ptr::eq(&**d, dev_ptr)) {
+                    table.remove(pos);
+                }
+            }
             crate::println!(
                 "lxdde-pci: {} probe {:04x}:{:04x} fail rc={}",
                 job.name, vendor, device, r
@@ -387,4 +406,16 @@ pub extern "C" fn lx_pci_device_id(dev: *mut LxPciDev) -> u16 {
         return 0;
     }
     unsafe { (*dev).device_id }
+}
+
+/// Retira un dispositivo sin realojar a los restantes (`Box` estable).
+#[unsafe(no_mangle)]
+pub extern "C" fn lx_pci_remove_device(dev: *mut LxPciDev) {
+    if dev.is_null() {
+        return;
+    }
+    let mut table = DEVICES.lock();
+    if let Some(pos) = table.iter().position(|d| core::ptr::eq(&**d, dev)) {
+        table.remove(pos);
+    }
 }

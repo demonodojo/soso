@@ -82,21 +82,49 @@ fn prefault_imagen() {
     }
 }
 
+/// Marca ligada a *esta* instancia (`pid=N`). init no confirma OTA con
+/// un fichero viejo, un banner, ni un write ignorado.
+fn escribir_marca_listo(prefault_ms: i64) {
+    let t0 = sys::uptime_ms();
+    let mkdir_r = sys::mkdir("/tmp");
+    if mkdir_r < 0 {
+        let mut st = abi::Stat::default();
+        if sys::stat("/tmp", &mut st) < 0 {
+            println!("sosh: mkdir /tmp falló ({mkdir_r}); sin marca OTA");
+            return;
+        }
+    }
+    let fd = sys::open("/tmp/sosh-ready", abi::O_WRONLY);
+    if fd < 0 {
+        println!("sosh: open /tmp/sosh-ready falló ({fd}); sin marca OTA");
+        return;
+    }
+    let pid = sys::getpid();
+    let linea = format!("pid={pid}\n");
+    let n = sys::write(fd as u64, linea.as_bytes());
+    let close_r = sys::close(fd as u64);
+    if n < linea.len() as i64 {
+        println!("sosh: write marca falló ({n}); sin marca OTA");
+        return;
+    }
+    if close_r < 0 {
+        println!("sosh: close marca falló ({close_r}); sin marca OTA");
+        return;
+    }
+    let marca_ms = sys::uptime_ms().saturating_sub(t0);
+    println!("sosh: marca lista pid={pid} prefault={prefault_ms}ms write={marca_ms}ms");
+}
+
 fn main(_args: &str) -> u8 {
     let shell_pgid = sys::getpid();
     let _ = sys::setsid();
     let _ = sys::tcsetpgrp(shell_pgid);
     println!("sosh — escribe 'help' para la ayuda");
+    let t0 = sys::uptime_ms();
     prefault_imagen();
+    let prefault_ms = sys::uptime_ms().saturating_sub(t0);
     let mut lector = Lector::new().con_hook_ptt(hook_ptt);
-    // Marca para init: PT_LOAD ya faltado y lector construido (OTA no confirma
-    // solo con spawn ni con llegar a `main`).
-    let _ = sys::mkdir("/tmp");
-    let fd = sys::open("/tmp/sosh-ready", abi::O_WRONLY);
-    if fd >= 0 {
-        let _ = sys::write(fd as u64, b"ok\n");
-        let _ = sys::close(fd as u64);
-    }
+    escribir_marca_listo(prefault_ms);
     loop {
         print!("{PROMPT}");
         let Some(cmd) = lector.siguiente() else {

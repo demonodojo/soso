@@ -27,24 +27,31 @@ pub fn run() {
         *fallos.lock().unwrap() += 1;
     }
 
-    println!("check: hostchecks opcionales…");
-    run_script_if_present(
+    let minimo = check_profile_minimo();
+    println!(
+        "check: hostchecks {}…",
+        if minimo { "perfil minimo" } else { "live (obligatorios)" }
+    );
+    run_script(
         &root,
         "scripts/l6-iwl-fw-hostcheck.sh",
         &fallos,
         "iwl hostcheck",
+        !minimo,
     );
-    run_script_if_present(
+    run_script(
         &root,
         "scripts/l6-g3-gsp-hostcheck.sh",
         &fallos,
         "GSP hostcheck",
+        !minimo,
     );
-    run_script_if_present(
+    run_script(
         &root,
         "scripts/l6-ath11k-hostcheck.sh",
         &fallos,
         "ath11k hostcheck",
+        false,
     );
 
     println!("check: hw-matrix…");
@@ -95,7 +102,7 @@ fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
 
 fn cargo_test(root: &Path, pkgs: &[&str], con_std: bool) -> bool {
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(root).args(["test", "-q"]);
+    cmd.current_dir(root).args(["test", "-q", "--locked"]);
     for pkg in pkgs {
         cmd.args(["-p", pkg]);
     }
@@ -114,10 +121,22 @@ fn cargo_test(root: &Path, pkgs: &[&str], con_std: bool) -> bool {
     }
 }
 
-fn run_script_if_present(root: &Path, rel: &str, fallos: &Arc<Mutex<u32>>, nombre: &str) {
+fn check_profile_minimo() -> bool {
+    matches!(
+        std::env::var("SOSO_CHECK_PROFILE").as_deref(),
+        Ok("minimo") | Ok("mínimo")
+    )
+}
+
+fn run_script(root: &Path, rel: &str, fallos: &Arc<Mutex<u32>>, nombre: &str, required: bool) {
     let script = root.join(rel);
     if !script.is_file() {
-        println!("check: omitido {nombre} (sin {rel})");
+        if required {
+            eprintln!("check: FALLO {nombre} (falta {rel})");
+            *fallos.lock().unwrap() += 1;
+        } else {
+            println!("check: omitido {nombre} (sin {rel})");
+        }
         return;
     }
     let ok = Command::new("bash")

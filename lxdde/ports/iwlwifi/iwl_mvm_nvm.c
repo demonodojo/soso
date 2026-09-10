@@ -11,20 +11,34 @@ static uint32_t iwl_mmio_rd32(struct iwl_ax211_priv *iwl, uint32_t off)
     return iwl->mmio[off / 4];
 }
 
-static int mac_valid(const uint8_t mac[6])
+int iwl_mac_valid_unicast(const uint8_t mac[6])
 {
     int i;
     int nz = 0;
+    int not_ff = 0;
 
+    if (mac[0] & 1u)
+        return 0;
     for (i = 0; i < 6; i++) {
         if (mac[i] != 0)
             nz = 1;
+        if (mac[i] != 0xff)
+            not_ff = 1;
     }
-    if (!nz)
-        return 0;
-    if (mac[0] == 0xff)
-        return 0;
-    return 1;
+    return nz && not_ff;
+}
+
+uint32_t iwl_mac_addr_from_csr(uint16_t device_id)
+{
+    switch (device_id) {
+    case IWL_PCI_AX200:
+    case 0x7f70:
+    case 0x51f0:
+    case 0x54f0:
+        return CSR_MAC_ADDR_FROM_CSR_22000;
+    default:
+        return CSR_MAC_ADDR_FROM_CSR_22000;
+    }
 }
 
 int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl)
@@ -72,7 +86,7 @@ int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl)
 
     if (data_len >= NVM_MAC_ADDR_OFFSET + 6u) {
         memcpy(iwl->mac, hw + NVM_MAC_ADDR_OFFSET, 6);
-        if (mac_valid(iwl->mac)) {
+        if (iwl_mac_valid_unicast(iwl->mac)) {
             lx_printk("iwl_mvm: MAC NVM 0x%02x:%02x:%02x:%02x:%02x:%02x\n",
                       iwl->mac[0], iwl->mac[1], iwl->mac[2],
                       iwl->mac[3], iwl->mac[4], iwl->mac[5]);
@@ -80,7 +94,7 @@ int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl)
         }
     }
 
-    if (data_len >= 6u && mac_valid(hw)) {
+    if (data_len >= 6u && iwl_mac_valid_unicast(hw)) {
         memcpy(iwl->mac, hw, 6);
         lx_printk("iwl_mvm: MAC NVM (offset 0)\n");
         return 0;
@@ -106,19 +120,20 @@ static void iwl_flip_hw_address(uint32_t mac_addr0, uint32_t mac_addr1, uint8_t 
     dest[5] = hw[0];
 }
 
-static void iwl_mac_from_csr(struct iwl_ax211_priv *iwl, uint8_t mac[6])
+void iwl_mac_from_csr(struct iwl_ax211_priv *iwl, uint8_t mac[6])
 {
+    uint32_t base = iwl_mac_addr_from_csr(iwl->device_id);
     uint32_t mac_addr0;
     uint32_t mac_addr1;
 
-    mac_addr0 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR0_STRAP);
-    mac_addr1 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR1_STRAP);
+    mac_addr0 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR0_STRAP(base));
+    mac_addr1 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR1_STRAP(base));
     iwl_flip_hw_address(mac_addr0, mac_addr1, mac);
-    if (mac_valid(mac))
+    if (iwl_mac_valid_unicast(mac))
         return;
 
-    mac_addr0 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR0_OTP);
-    mac_addr1 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR1_OTP);
+    mac_addr0 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR0_OTP(base));
+    mac_addr1 = iwl_mmio_rd32(iwl, CSR_MAC_ADDR1_OTP(base));
     iwl_flip_hw_address(mac_addr0, mac_addr1, mac);
 }
 
@@ -237,25 +252,36 @@ int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl)
     if (rsp_len >= (uint16_t)sizeof(struct iwl_nvm_get_info_rsp)) {
         const struct iwl_nvm_get_info_rsp *rsp =
             (const struct iwl_nvm_get_info_rsp *)iwl->cmd_resp;
+        uint32_t n = rsp->regulatory.n_channels;
 
         nvm_apply_get_info_rsp(iwl, &rsp->phy_sku, rsp->regulatory.lar_enabled);
-        lx_printk("iwl_mvm: NVM_GET_INFO v4 nvm_ver=0x%04x\n",
-                  (unsigned)rsp->general.nvm_version);
+        if (n > IWL_NUM_CHANNELS)
+            n = IWL_NUM_CHANNELS;
+        iwl->nvm_n_channels = n;
+        memcpy(iwl->nvm_chan_flags, rsp->regulatory.channel_profile, n * sizeof(uint32_t));
+        lx_printk("iwl_mvm: NVM_GET_INFO v4 nvm_ver=0x%04x nch=%u\n",
+                  (unsigned)rsp->general.nvm_version, (unsigned)n);
     } else if (rsp_len >= (uint16_t)sizeof(struct iwl_nvm_get_info_rsp_v3)) {
         const struct iwl_nvm_get_info_rsp_v3 *rsp =
             (const struct iwl_nvm_get_info_rsp_v3 *)iwl->cmd_resp;
+        unsigned i;
+        unsigned n = IWL_NUM_CHANNELS_V1;
 
         nvm_apply_get_info_rsp(iwl, &rsp->phy_sku, rsp->regulatory.lar_enabled);
+        iwl->nvm_n_channels = n;
+        for (i = 0; i < n; i++)
+            iwl->nvm_chan_flags[i] = rsp->regulatory.channel_profile[i];
         lx_printk("iwl_mvm: NVM_GET_INFO v3 nvm_ver=0x%04x\n",
                   (unsigned)rsp->general.nvm_version);
     } else {
-        lx_printk("iwl_mvm: NVM_GET_INFO resp corta (%u B)\n", (unsigned)rsp_len);
+        lx_printk("iwl_mvm: NVM_GET_INFO resp truncada (%u B)\n", (unsigned)rsp_len);
+        return -1;
     }
 
     memset(mac, 0, sizeof(mac));
     iwl_mac_from_csr(iwl, mac);
-    if (!mac_valid(mac)) {
-        lx_printk("iwl_mvm: CSR sin MAC válida tras NVM_GET_INFO\n");
+    if (!iwl_mac_valid_unicast(mac)) {
+        lx_printk("iwl_mvm: CSR sin MAC unicast tras NVM_GET_INFO\n");
         return -1;
     }
 
@@ -305,7 +331,7 @@ void iwl_mvm_fill_probe_req(struct iwl_ax211_priv *iwl, struct iwl_scan_probe_pa
     f[pos++] = 0x24;
     f[pos++] = 0x03;
     f[pos++] = 0x01;
-    f[pos++] = 0x06;
+    f[pos++] = iwl->channel ? iwl->channel : 1;
     band_end = pos;
 
     probe->preq.mac_header.offset = 0;

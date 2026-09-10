@@ -104,9 +104,12 @@ entrada FAT (no duplicar `SOSOUPD`/`SOSOKRN`).
   - `PROBANDO` en el *siguiente* arranque = el anterior falló → revertir.
   - `OK` / `REVERTIR` / idle: ver `crates/soso-update-core/src/mailbox.rs`.
 - Init confirma el kernel nuevo (`OK`) solo tras rootfs accesible, `spawn` de
-  `/bin/sosh`, `/tmp/sosh-ready` (sosh prefaultó su PT_LOAD y construyó el
-  lector) y `kill(pid, 0)` (~400 ms más de sondeo).
-  Si sosh vive sin marca, no se confirma OTA y la shell no se mata.
+  `/bin/sosh`, marca `/tmp/sosh-ready` con `pid=<pid>` de *esa* instancia
+  (sosh registra fallo de mkdir/write/close y tiempos de prefault) y
+  `kill(pid, 0)`. Si la marca tarda, init sigue sondeándola en el bucle de
+  PID 1; no confirma por banner ni por un timeout más largo. Una marca vieja
+  (`ok\n` u otro pid) no vale. Si sosh vive sin marca válida, no se confirma
+  OTA y la shell no se mata.
   ELF perezoso: el PID de `spawn` no basta. Un page-fault de un binario
   lanzado después de la marca (no de sosh) no revierte el buzón.
 

@@ -635,6 +635,49 @@ static int run_vmm_stage(void)
     return vmm_selfcheck();
 }
 
+/* Pool G6: CE + VMM bastan. No esperar al canal GR0. */
+static void run_g6_pool_stage(void)
+{
+    uint64_t bounce_va = G4D_SCRATCH_VA;
+    void *bounce_cpu = g_scratch.va;
+    unsigned bounce_len = 4096u;
+
+    if (!g_ce_verified || !g_ce.ready || g_buf.ready) {
+        return;
+    }
+    /* El rebote grande es un lujo, no un requisito: si no hay 1 MiB contiguo o
+     * no se puede mapear, G6 sigue con la página de 4 KiB de G4d y lo dice. Lo
+     * que no vale es quedarse a medias, con memoria reservada y sin mapear. */
+    if (gsp_dma_alloc_wb(&g_bounce, G6_BOUNCE_BYTES, "rebote de subidas G6") == 0) {
+        if (gsp_vmm_map(&g_vmm, G6_BOUNCE_VA, g_bounce.phys, G6_BOUNCE_BYTES,
+                        GSP_VMM_SYSMEM) == 0) {
+            bounce_va = G6_BOUNCE_VA;
+            bounce_cpu = g_bounce.va;
+            bounce_len = G6_BOUNCE_BYTES;
+        } else {
+            lx_printk("nouveau-lx: G6 — rebote de %u KiB sin mapear; se sube "
+                      "de 4 KiB en 4 KiB\n", G6_BOUNCE_BYTES >> 10);
+            gsp_dma_free(&g_bounce);
+        }
+    }
+    if (gsp_buf_init(&g_buf, &g_vram_pool, &g_vmm, &g_ce, bounce_va,
+                     bounce_cpu, bounce_len) != 0) {
+        lx_printk("nouveau-lx: G6 — pool de buffers VRAM no inicializado\n");
+    } else {
+        /* El techo se dice aquí y no sólo el pool: son cifras distintas (pool
+         * 11 902 MiB, techo ~108 MiB en la GB205) y confundirlas es lo que hacía
+         * que «sin sitio» fuese un misterio. Ver `gsp_buf_vram_free`. */
+        lx_printk("nouveau-lx: G6 — buffers VRAM listos (techo residente "
+                  "~%llu MiB de %llu MiB de pool; ventana VA %llu MiB, "
+                  "tablas libres %u; rebote %u KiB)\n",
+                  (unsigned long long)(gsp_buf_vram_free(&g_buf) >> 20),
+                  (unsigned long long)((g_vram_pool.total - g_vram_pool.used) >> 20),
+                  (unsigned long long)((G6_VA_LIMIT - G6_VA_BASE) >> 20),
+                  GSP_VMM_MAX_PT - g_vmm.pt_nr,
+                  bounce_len >> 10);
+    }
+}
+
 static int run_chan_ce_stage(void)
 {
     if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan, g_vmm.vaspace,
@@ -656,108 +699,38 @@ static int run_chan_ce_stage(void)
     if (gsp_ce_selftest(&g_ce, G4D_SCRATCH_VA, G4D_VA_BASE, g_scratch.va, 4096) == 0) {
         g_ce_verified = 1;
         lx_printk("nouveau-lx: CE readback verificado (G4e GO)\n");
-        /* Con el CE ya verificado se puede probar BAR1, que necesita justo eso
-         * para ser falsable: escribir por la apertura y releer por el otro
-         * camino. Best-effort — si BAR1 no va, el CE sigue siendo la ruta.
-         *
-         * DOS ventanas, y en este orden, porque separan dos averías distintas
-         * con un solo ciclo de placa (la alta falló el 2026-08-01 con
-         * `0xbad0ac00`, que es el centinela de acceso rechazado del chip):
-         *
-         *  - la alta (final de la apertura) no puede chocar con RM, pero puede
-         *    caer FUERA del vaspace que RM abrió de verdad: los 16 GiB son el
-         *    tamaño del BAR, no una promesa de que RM haya construido tanto.
-         *  - la baja (segunda ventana de 2 MiB) está dentro de cualquier límite
-         *    razonable y cuelga del PD0 que RM ya tiene, pero es territorio
-         *    suyo: si esa entrada está ocupada el mapeo se niega y lo dice.
-         *
-         * Si la baja va y la alta no, el problema es el límite del vaspace. Si
-         * fallan las dos igual, no es la VA. */
-        /* ANTES de mapear nada: preguntarle al hardware qué raíz recorre BAR1 y
-         * hasta dónde llega su vaspace, en vez de fiarnos de lo que RM contó en
-         * `GspStaticConfigInfo`. Tres ciclos de placa se fueron en parchear
-         * tablas que la MMU de BAR1 podía no estar mirando siquiera. */
+        /* El pool de VRAM sólo necesita CE + VMM. Antes vivía al final de
+         * `run_compute_stage` y un fallo de GR0 (`return -1`) lo saltaba con el
+         * CE ya verificado (GA107 run13: `pool VRAM=no`). Linux no ata FB al
+         * canal GR. Va aquí, antes del dump de BAR1 y de GR0. */
+        run_g6_pool_stage();
+        /* Tras el CE: sólo se MIRA BAR1. Linux GSP (`r535_bar_bar1_init`) envuelve
+         * `gsp->bar.rm_bar1_pdb` y no recorre el bloque de instancia ni parchea
+         * PTEs. En GA107 run13 el PDB de instancia ≠ `bar1PdeBase` y caminarlo
+         * devolvía `0xbad0fb2fbad0fb2e`; el selftest (y el reintento con
+         * `bar2Pde`) escribía tablas ajenas y el RPC posterior se quedaba mudo.
+         * El CE sigue siendo la ruta a VRAM. */
         {
             uint64_t pdb = 0, limite = 0;
 
             if (gsp_bar1_inst_probe(&g_bar1, &pdb, &limite) != 0) {
-                /* RM no ató BAR1 (0xb80f40 a cero). Bajo GSP lockdown esa
-                 * escritura se descarta (relee 0; 2026-08-02). Linux en ruta GSP
-                 * no hace `tu102_bar_bar1_init`: instala la PDE con
-                 * `UPDATE_BAR_PDE` (`r535_bar`). Atarlo desde el host +
-                 * invalidate HUB_ONLY|ALL_PDB es el camino nvkm *sin* GSP, y
-                 * ALL_PDB barre también el PDB del CE. Sin BAR1 el CE sigue
-                 * siendo la ruta a VRAM. */
-                lx_printk("nouveau-lx: BAR1 — RM no ató 0xb80f40; no se escribe "
-                          "(Linux GSP no hace tu102_bar_bar1_init)\n");
-            } else {
-                if (pdb && pdb != g_bar1.pd3) {
-                    lx_printk("nouveau-lx: BAR1 — usando la raíz del bloque de "
-                              "instancia (0x%llx) en vez de la de RM\n",
+                if (gsp_bar1_pri_poison(pdb) || gsp_bar1_pri_poison(limite)) {
+                    lx_printk("nouveau-lx: BAR1 — PDB de instancia 0x%llx es "
+                              "veneno PRI; Linux envuelve rm_bar1_pdb, no se "
+                              "escribe\n",
                               (unsigned long long)pdb);
-                    (void)gsp_bar1_init(&g_bar1, g_bar1.aperture_phys,
-                                        g_bar1.aperture_size, pdb);
+                } else {
+                    lx_printk("nouveau-lx: BAR1 — RM no ató 0xb80f40; no se "
+                              "escribe (Linux GSP no hace tu102_bar_bar1_init)\n");
                 }
-                /* El límite es `vmm->limit - 1`, o sea la última VA válida. Una
-                 * ventana por encima no puede traducir por muy bien escrito que
-                 * esté el PTE. */
-                if (limite && g_bar1.window_va > limite) {
-                    uint64_t nueva = ((limite + 1ull) - GSP_BAR1_WINDOW_BYTES) &
-                                     ~(GSP_BAR1_WINDOW_BYTES - 1ull);
-
-                    lx_printk("nouveau-lx: BAR1 — la ventana 0x%llx se sale del "
-                              "límite 0x%llx; bajándola a 0x%llx\n",
-                              (unsigned long long)g_bar1.window_va,
-                              (unsigned long long)limite,
-                              (unsigned long long)nueva);
-                    g_bar1.window_va = nueva;
-                }
-                gsp_bar1_dump(&g_bar1, g_bar1.window_va);
-                if (gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block, G4D_VA_BASE,
-                                      G4D_SCRATCH_VA, g_scratch.va) != 0 &&
-                    g_bar1.window_va != GSP_BAR1_WINDOW_BYTES) {
-                    lx_printk("nouveau-lx: BAR1 — reintento con ventana BAJA "
-                              "(0x%llx)\n",
-                              (unsigned long long)GSP_BAR1_WINDOW_BYTES);
-                    g_bar1.window_va = GSP_BAR1_WINDOW_BYTES;
-                    if (gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block,
-                                          G4D_VA_BASE, G4D_SCRATCH_VA,
-                                          g_scratch.va) != 0) {
-                        /* Las dos ventanas fallan igual y las escrituras a las
-                         * tablas SÍ se quedan (el readback pasa): entonces la MMU
-                         * de BAR1 no está mirando la raíz que estamos parcheando.
-                         *
-                         * La sospecha es la cola de `GspStaticConfigInfo`:
-                         * `fb_length` y `gpuNameString` validan el principio y el
-                         * medio del struct, pero entre el nombre y `bar1PdeBase`
-                         * hay una tira de NvBool y dos NvU16 de RTD3 transcritos
-                         * de r570 SIN contraste, y un solo campo de más o de
-                         * menos ahí desplaza la raíz al campo vecino.
-                         * `bar2PdeBase` también es una raíz válida y su recorrido
-                         * sale igual de coherente, así que por el valor no se
-                         * distinguen.
-                         *
-                         * Se prueba, que es más barato que discutirlo: si con la
-                         * otra raíz la apertura empieza a funcionar, el struct
-                         * está desplazado y hay que corregir la transcripción
-                         * (no dejar esto así). */
-                        lx_printk("nouveau-lx: BAR1 — las dos ventanas fallan y "
-                                  "las tablas sí se escriben: probando con la "
-                                  "OTRA raíz (bar2Pde=0x%llx) por si el struct "
-                                  "está desplazado\n",
-                                  (unsigned long long)g_static.bar2_pde_base);
-                        if (gsp_bar1_init(&g_bar1, g_bar1.aperture_phys,
-                                          g_bar1.aperture_size,
-                                          g_static.bar2_pde_base) == 0) {
-                            g_bar1.window_va = GSP_BAR1_WINDOW_BYTES;
-                            gsp_bar1_dump(&g_bar1, g_bar1.window_va);
-                            (void)gsp_bar1_selftest(&g_bar1, &g_ce, g_vram_block,
-                                                    G4D_VA_BASE, G4D_SCRATCH_VA,
-                                                    g_scratch.va);
-                        }
-                    }
-                }
+            } else if (pdb && pdb != g_bar1.pd3) {
+                lx_printk("nouveau-lx: BAR1 — PDB de instancia 0x%llx ≠ "
+                          "bar1PdeBase 0x%llx; Linux envuelve rm_bar1_pdb, no "
+                          "se escribe\n",
+                          (unsigned long long)pdb,
+                          (unsigned long long)g_bar1.pd3);
             }
+            gsp_bar1_dump(&g_bar1, g_bar1.window_va);
         }
     } else {
         lx_printk("nouveau-lx: CE sin readback — canal vivo pero no movió datos\n");
@@ -830,43 +803,6 @@ static int run_compute_stage(void)
                       "VA que G4e sí movió)\n");
         } else {
             lx_printk("nouveau-lx: CE vivo tras PROMOTE_CTX\n");
-        }
-    }
-    /* El rebote grande es un lujo, no un requisito: si no hay 1 MiB contiguo o
-     * no se puede mapear, G6 sigue con la página de 4 KiB de G4d y lo dice. Lo
-     * que no vale es quedarse a medias, con memoria reservada y sin mapear. */
-    {
-        uint64_t bounce_va = G4D_SCRATCH_VA;
-        void *bounce_cpu = g_scratch.va;
-        unsigned bounce_len = 4096u;
-
-        if (gsp_dma_alloc_wb(&g_bounce, G6_BOUNCE_BYTES, "rebote de subidas G6") == 0) {
-            if (gsp_vmm_map(&g_vmm, G6_BOUNCE_VA, g_bounce.phys, G6_BOUNCE_BYTES,
-                            GSP_VMM_SYSMEM) == 0) {
-                bounce_va = G6_BOUNCE_VA;
-                bounce_cpu = g_bounce.va;
-                bounce_len = G6_BOUNCE_BYTES;
-            } else {
-                lx_printk("nouveau-lx: G6 — rebote de %u KiB sin mapear; se sube "
-                          "de 4 KiB en 4 KiB\n", G6_BOUNCE_BYTES >> 10);
-                gsp_dma_free(&g_bounce);
-            }
-        }
-        if (gsp_buf_init(&g_buf, &g_vram_pool, &g_vmm, &g_ce, bounce_va,
-                         bounce_cpu, bounce_len) != 0) {
-            lx_printk("nouveau-lx: G6 — pool de buffers VRAM no inicializado\n");
-        } else {
-            /* El techo se dice aquí y no sólo el pool: son cifras distintas (pool
-             * 11 902 MiB, techo ~108 MiB en la GB205) y confundirlas es lo que hacía
-             * que «sin sitio» fuese un misterio. Ver `gsp_buf_vram_free`. */
-            lx_printk("nouveau-lx: G6 — buffers VRAM listos (techo residente "
-                      "~%llu MiB de %llu MiB de pool; ventana VA %llu MiB, "
-                      "tablas libres %u; rebote %u KiB)\n",
-                      (unsigned long long)(gsp_buf_vram_free(&g_buf) >> 20),
-                      (unsigned long long)((g_vram_pool.total - g_vram_pool.used) >> 20),
-                      (unsigned long long)((G6_VA_LIMIT - G6_VA_BASE) >> 20),
-                      GSP_VMM_MAX_PT - g_vmm.pt_nr,
-                      bounce_len >> 10);
         }
     }
     /* El lanzamiento del QMD NO se hace aquí: el bring-up deja el compute

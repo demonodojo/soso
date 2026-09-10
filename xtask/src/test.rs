@@ -1287,8 +1287,8 @@ fn ssh_sosh_ready(key: &Path, ssh_port: u16) -> Result<(), String> {
         "cat /tmp/sosh-ready\nexit\n",
         Duration::from_secs(60),
     )?;
-    if !salida.contains("ok") {
-        return Err(format!("sin /tmp/sosh-ready: {salida:?}"));
+    if !salida.contains("pid=") {
+        return Err(format!("sin marca pid= en /tmp/sosh-ready: {salida:?}"));
     }
     Ok(())
 }

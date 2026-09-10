@@ -97,7 +97,9 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
 - **Hostcheck antes de gastar un ciclo VFIO.** Compila `iwl_fw.c` en host contra
   los `.ucode` del rootfs; afirma lmac/umac de `SEC_RT`, CMD_VERSIONS/PHY_SKU,
   doorbell `qid<<16` (`0x00000001`, cola HCMD=0), secuencia `QUEUE_TO_SEQ|INDEX_TO_SEQ`, y
-  tamaño SCAN_REQ_UMAC v17 con 21 canales (`iwl_scan_req_umac_v17_size`).
+  tamaño fijo SCAN_REQ_UMAC v14–17 (`sizeof` 2112 B, `channel_config[67]`;
+  `count` no desplaza periodic/probe). Flags V2: PASS_ALL=BIT(1),
+  ITER_COMPLETE=BIT(2). MAC CSR en `mac_addr_from_csr=0x380`, no 0x000/008.
 - **Doorbell HBUS_TARG_WRPTR (2026-09-09).** `write_ptr | (qid << 16)`, no
   `qid << 8`. Cabecera wide: `QUEUE_TO_SEQ(qid) | INDEX_TO_SEQ(slot)`; versión
   del cmd desde TLV CMD_VERSIONS.
@@ -106,8 +108,12 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
 - **Init MVM tras ALIVE (2026-09-09).** `iwl_mvm_run_init()`: INIT_EXTENDED_CFG
   (`init_flags=1<<IWL_INIT_NVM` = 2) → NVM_ACCESS_COMPLETE → PHY_CFG sólo gen3 →
   esperar `INIT_COMPLETE_NOTIF` antes de scan. Sin INIT_COMPLETE no marcar radio lista.
-- **Scan UMAC v14–17 (2026-09-09).** Payload variable (`iwl_scan_req_umac_v17_size(n)`),
-  no `sizeof` del struct con 67 canales. AX200=15, AX211=17.
+- **Scan UMAC v14–17.** Estructura completa v17 (2112 B). Versiones
+  explícitas 6 y 14–17; el resto se rechaza. Flags V2, no los BIT(2)/BIT(5)
+  viejos. Canales desde perfil NVM/MCC (activo/pasivo); fallback 2.4+5.
+  Fin de scan por UID: vacío+COMPLETE es resultado vacío; BSS sin fin no
+  acredita scan. HCMD: match grupo+id+seq, no notif (`SEQ_RX_FRAME`), no
+  pisar pending, timeout envenena el slot.
 - **RX post-ALIVE (2026-09-09).** AX200 (`!gen3`): saltar `IWL_RX_DESC_SIZE_V1`
   (48 B) en MPDUs; AX211 usa `iwl_rx_mpdu_desc`. `SCAN_COMPLETE_UMAC` acepta grupo
   legacy además de LONG. Log RX: `(grp,id,seq,len)`.

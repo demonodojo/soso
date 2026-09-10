@@ -67,8 +67,12 @@ struct gsp_bar1 {
     int ready;
 };
 
+/* 1 si `v` es un error PRI (`0xbadfxxxx` / `0xbad0xxxx` en cualquier dword),
+ * no una dirección de tabla. GA107 run13: PD3 leído `0xbad0fb2fbad0fb2e`. */
+int gsp_bar1_pri_poison(uint64_t v);
+
 /* Recoge lo que ya sabemos de otras fases. Devuelve 0 si hay raíz y apertura
- * creíbles; no toca la tarjeta. */
+ * creíbles; no toca la tarjeta. Rechaza un `pd3` PRI-veneno. */
 int gsp_bar1_init(struct gsp_bar1 *b, uint64_t aperture_phys,
                   uint64_t aperture_size, uint64_t pd3_vram);
 

@@ -72,8 +72,12 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
 
     /* Tras INIT_COMPLETE Linux llama `iwl_get_nvm()` (NVM_GET_INFO + CSR MAC). */
     if (iwl_mvm_nvm_get_info_mac(iwl) != 0) {
-        lx_printk("iwl_mvm: MAC NVM no disponible (se mantiene BDF)\n");
+        iwl->radio_ready = 0;
+        iwl->nvm_ready = 0;
+        lx_printk("iwl_mvm: NVM/MAC falló — no listo\n");
+        return -1;
     }
+    iwl->nvm_ready = 1;
 
     /* TX_ANT / MCC / SCAN_CFG van en `iwl_mvm_up_minimal` (post shared mem + SF). */
     lx_printk("iwl_mvm: init NVM listo (phy_sku=0x%08x n_scan=%u tx=0x%x rx=0x%x)\n",

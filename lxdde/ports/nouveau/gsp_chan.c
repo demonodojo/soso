@@ -52,15 +52,22 @@ static int chan_map_buf(struct gsp_chan *c, struct gsp_dma_buf *b, uint64_t va)
     return gsp_vmm_map(c->vmm, va, b->phys, b->size, GSP_VMM_SYSMEM);
 }
 
-/* Tamaño del method buffer, preguntado a RM sobre el subdevice igual que hace
- * `r535_fifo_ctor`. No hay valor por defecto razonable: si RM no contesta, no
- * sabemos qué poner en el descriptor y un número inventado es justo el error que
- * este cambio viene a quitar. Así que se falla y se dice por qué. */
+/* Tamaño del method buffer. Linux lo pregunta UNA vez en `r535_fifo_ctor`
+ * (`fifo->rm.mthdbuf_size`) y todos los canales reutilizan el valor. Preguntar
+ * otra vez en el segundo `gsp_chan_init` (GR0) era el primer RPC tras el CE, y
+ * en GA107 run13 se quedó sin respuesta (`0x20802a08`). */
+static uint32_t g_fifo_mthdbuf_size;
+static int g_fifo_mthdbuf_ok;
+
 static int chan_query_mthdbuf_size(struct gsp_chan *c, uint32_t *size)
 {
     NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS ctrl;
     uint32_t status = 0;
 
+    if (g_fifo_mthdbuf_ok) {
+        *size = g_fifo_mthdbuf_size;
+        return 0;
+    }
     memset(&ctrl, 0, sizeof(ctrl));
     lx_printk("nouveau-lx: preguntando el tamaño del method buffer "
               "(sub=0x%08x, %u B de params)\n",
@@ -77,6 +84,8 @@ static int chan_query_mthdbuf_size(struct gsp_chan *c, uint32_t *size)
                   ctrl.size);
         return -1;
     }
+    g_fifo_mthdbuf_size = ctrl.size;
+    g_fifo_mthdbuf_ok = 1;
     *size = ctrl.size;
     return 0;
 }

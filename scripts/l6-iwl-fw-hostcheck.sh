@@ -31,6 +31,25 @@ cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
 echo "=== iwl HCMD wide hostcheck ==="
 "$out/hcmd_wide"
 
+cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
+   -Wno-incompatible-pointer-types -Wno-address-of-packed-member \
+   -I"$root/tools/iwl-hostcheck" -I"$out" -I"$src" \
+   -o "$out/scan_abi" \
+   "$root/tools/iwl-hostcheck/scan_abi_test.c" \
+   "$src/iwl_mvm.c" \
+   "$src/iwl_mvm_nvm.c"
+echo "=== iwl scan ABI / MAC hostcheck ==="
+"$out/scan_abi"
+
+cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
+   -Wno-incompatible-pointer-types -Wno-address-of-packed-member \
+   -I"$root/tools/iwl-hostcheck" -I"$out" -I"$src" \
+   -o "$out/hcmd_contract" \
+   "$root/tools/iwl-hostcheck/hcmd_contract_test.c" \
+   "$src/iwl_trans.c"
+echo "=== iwl HCMD contract hostcheck ==="
+"$out/hcmd_contract"
+
 for ucode in \
     "$fwdir/iwlwifi-cc-a0-77.ucode" \
     "$fwdir/iwlwifi-so-a0-gf-a0-89.ucode"; do

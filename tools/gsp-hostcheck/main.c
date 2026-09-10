@@ -3278,6 +3278,73 @@ static int check_bar1_map(void)
     return 0;
 }
 
+/* GA107 run13: caminar un PDB que no es bar1PdeBase devolvía
+ * `0xbad0fb2fbad0fb2e` y el selftest (más el reintento con bar2Pde) escribía
+ * encima. Linux GSP envuelve `rm_bar1_pdb` y no parchea. */
+static int check_bar1_refuse_poison(void)
+{
+    struct gsp_bar1 b;
+    struct gsp_bar1_step steps[GSP_BAR1_LEVELS];
+    const uint64_t pd3 = 0x30000ull;
+    const uint64_t poison = 0xbad0fb2fbad0fb2eull;
+    uint64_t va;
+    uint32_t lo, hi;
+    int n;
+
+    if (!gsp_bar1_pri_poison(poison)) {
+        printf("FALLO: 0xbad0fb2fbad0fb2e no se reconoce como veneno PRI\n");
+        return -1;
+    }
+    if (!gsp_bar1_pri_poison(0x00000000badf5040ull)) {
+        printf("FALLO: 0xbadf5040 no se reconoce como veneno PRI\n");
+        return -1;
+    }
+    if (gsp_bar1_pri_poison(0x00000003f3c2a000ull)) {
+        printf("FALLO: bar1PdeBase 0x3f3c2a000 marcado como veneno PRI\n");
+        return -1;
+    }
+
+    memset(&b, 0, sizeof(b));
+    if (gsp_bar1_init(&b, 0xf0000000ull, 256ull << 20, 0xbad0fb2fbad0f000ull) == 0) {
+        printf("FALLO: gsp_bar1_init aceptó un PDB PRI-veneno\n");
+        return -1;
+    }
+
+    gsp_pramin_invalidate();
+    (void)gsp_pramin_alive();
+    gsp_pramin_wr32(pd3, (uint32_t)poison);
+    gsp_pramin_wr32(pd3 + 4u, (uint32_t)(poison >> 32));
+    lo = gsp_pramin_rd32(pd3);
+    hi = gsp_pramin_rd32(pd3 + 4u);
+
+    memset(&b, 0, sizeof(b));
+    if (gsp_bar1_init(&b, 0xf0000000ull, 256ull << 20, pd3) != 0) {
+        printf("FALLO: gsp_bar1_init con PDB bueno y PD3[0] veneno\n");
+        return -1;
+    }
+    n = gsp_bar1_walk(&b, GSP_BAR1_WINDOW_BYTES, steps, GSP_BAR1_LEVELS);
+    if (n < 1 || !gsp_bar1_pri_poison(steps[0].entry)) {
+        printf("FALLO: walk no se paró en PD3 veneno (n=%d entry=0x%llx)\n",
+               n, n >= 1 ? (unsigned long long)steps[0].entry : 0ull);
+        return -1;
+    }
+
+    b.window_va = GSP_BAR1_WINDOW_BYTES;
+    va = gsp_bar1_map(&b, 0x7000000ull, 4096);
+    if (va != 0) {
+        printf("FALLO: gsp_bar1_map escribió sobre PD3 veneno (va=0x%llx)\n",
+               (unsigned long long)va);
+        return -1;
+    }
+    if (gsp_pramin_rd32(pd3) != lo || gsp_pramin_rd32(pd3 + 4u) != hi) {
+        printf("FALLO: gsp_bar1_map cambió PD3 veneno (era 0x%08x%08x)\n", hi, lo);
+        return -1;
+    }
+
+    printf("OK: BAR1 — PDB/entrada PRI-veneno no se escribe\n");
+    return 0;
+}
+
 static int check_rc_triggered(void)
 {
     rpc_rc_triggered_v17_02 msg;
@@ -3469,16 +3536,13 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     }
     fake_rpc_post_payload(lo, (base + 10) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
-    /* Y otra vez todo lo del canal, para el de GR0: tamaño del method buffer,
-     * alloc, BIND, SCHEDULE y token. El compute cuelga de ESE canal, no del del
-     * CE, así que su alloc va detrás de estos cinco. */
-    fake_rpc_post_payload(lo, (base + 11) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
-                          0, ctrl_mthdbuf, (uint32_t)sizeof(ctrl_mthdbuf));
-    fake_rpc_post_payload(lo, (base + 12) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+    /* Canal GR0: el tamaño del method buffer ya está en cache de fifo
+     * (`r535_fifo_ctor`); no hay segundo CE_GET_FAULT_METHOD_BUFFER_SIZE. */
+    fake_rpc_post_payload(lo, (base + 11) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
-    fake_rpc_post_payload(lo, (base + 13) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+    fake_rpc_post_payload(lo, (base + 12) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                           0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
-    fake_rpc_post_payload(lo, (base + 14) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+    fake_rpc_post_payload(lo, (base + 13) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                           0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
     {
         /* Tras rsvd_chids=1: COPY0 chid=1, GR0 chid=2 — tokens distintos. */
@@ -3488,11 +3552,11 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
 
         memset(ctrl_token_gr, 0, sizeof(ctrl_token_gr));
         tk->workSubmitToken = FAKE_DOORBELL_TOKEN | 2u;
-        fake_rpc_post_payload(lo, (base + 15) % 63,
+        fake_rpc_post_payload(lo, (base + 14) % 63,
                               NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                               0, ctrl_token_gr, (uint32_t)sizeof(ctrl_token_gr));
     }
-    fake_rpc_post_payload(lo, (base + 16) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+    fake_rpc_post_payload(lo, (base + 15) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
     /* Y las dos del contexto de GR: los tamaños de los búferes y la promoción. Los
      * tamaños son los mismos que usa `check_grctx` para que los números del plan se
@@ -3512,13 +3576,13 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         GI(NV0080_CTX_PROP_GRAPHICS_FECS_EVENT) = 0x1000u;
         GI(NV0080_CTX_PROP_GRAPHICS_PRIV_ACCESS_MAP) = 0x10000u;
 #undef GI
-        fake_rpc_post_payload(lo, (base + 17) % 63,
+        fake_rpc_post_payload(lo, (base + 16) % 63,
                               NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                               0, ctrl_grctx, (uint32_t)sizeof(ctrl_grctx));
     }
-    fake_rpc_post_payload(lo, (base + 18) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+    fake_rpc_post_payload(lo, (base + 17) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                           0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
-    msgq->tx.writePtr = (base + 19) % 63;
+    msgq->tx.writePtr = (base + 18) % 63;
 
     wptr0 = *q.wptr;
     if (gsp_vmm_init(&q, &rpc, &v, NULL) != 0) {
@@ -4035,6 +4099,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             printf("FALLO: gsp_buf_init\n");
             return -1;
         }
+        printf("OK: G6 pool con CE y sin canal GR\n");
         va = gsp_buf_alloc(&buf, 3u * 4096u);
         if (!va) {
             printf("FALLO: gsp_buf_alloc\n");
@@ -4188,12 +4253,13 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         return -1;
     }
     {
-        /* El canal de GR0 va en el índice 12 de las peticiones (el del CE en el 6
-         * y su alloc de CE en el 10). Lo que hay que demostrar aquí es que el
-         * SEGUNDO canal pide de verdad otro motor y no una copia del primero: RM
-         * contesta INVALID_CLASS al objeto de compute sobre un canal de COPY0. */
+        /* El canal de GR0 va en el índice 11 de las peticiones (el del CE en el 6
+         * y su alloc de CE en el 10; sin segundo GET_FAULT_METHOD_BUFFER_SIZE). Lo
+         * que hay que demostrar aquí es que el SEGUNDO canal pide de verdad otro
+         * motor y no una copia del primero: RM contesta INVALID_CLASS al objeto
+         * de compute sobre un canal de COPY0. */
         const unsigned char *entry = cmdq_base + 4096 +
-                                     (unsigned long)((wptr0 + 12) % 63) * 4096;
+                                     (unsigned long)((wptr0 + 11) % 63) * 4096;
         const struct gsp_rpc_hdr *hdr =
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
@@ -4254,14 +4320,44 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         printf("OK: segundo canal en GR0 (motor %u, VAs +0x%llx)\n",
                p->engineType,
                (unsigned long long)(chan_gr.gpfifo_va - chan.gpfifo_va));
+        if (chan_gr.mthdbuf_size != FAKE_MTHDBUF_SIZE ||
+            chan_gr.mthdbuf_size != chan.mthdbuf_size) {
+            printf("FALLO: GR0 mthdbuf=%u (COPY0 %u, cache fifo %u)\n",
+                   chan_gr.mthdbuf_size, chan.mthdbuf_size, FAKE_MTHDBUF_SIZE);
+            return -1;
+        }
+        {
+            unsigned n = 0;
+            uint32_t i, end = *q.wptr;
+
+            for (i = wptr0; i != end; i = (i + 1u) % 63u) {
+                const unsigned char *e = cmdq_base + 4096 +
+                                         (unsigned long)(i % 63u) * 4096;
+                const struct gsp_rpc_hdr *h =
+                    (const struct gsp_rpc_hdr *)(e + sizeof(struct gsp_msg_elem));
+                const rpc_gsp_rm_control *ct = (const rpc_gsp_rm_control *)(h + 1);
+
+                if (h->function == NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL &&
+                    ct->cmd == NV2080_CTRL_CMD_CE_GET_FAULT_METHOD_BUFFER_SIZE)
+                    n++;
+            }
+            if (n != 1u) {
+                printf("FALLO: GET_FAULT_METHOD_BUFFER_SIZE se mandó %u veces "
+                       "(Linux fifo: una)\n", n);
+                return -1;
+            }
+        }
+        printf("OK: method buffer cacheado — una query fifo, GR0 reutiliza %u B\n",
+               chan_gr.mthdbuf_size);
     }
     {
         struct gsp_compute cp;
         GspQmdV05 qmd;
         unsigned qmd_off = 0, qmd_len = 0;
-        /* +16: cinco peticiones más que antes, las del canal de GR0. */
+        /* +15: cuatro peticiones más que antes, las del canal de GR0 (sin
+         * repetir GET_FAULT_METHOD_BUFFER_SIZE). */
         const unsigned char *entry = cmdq_base + 4096 +
-                                     (unsigned long)((wptr0 + 16) % 63) * 4096;
+                                     (unsigned long)((wptr0 + 15) % 63) * 4096;
         const struct gsp_rpc_hdr *hdr =
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
@@ -4402,8 +4498,8 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                 printf("FALLO: gsp_grctx_promote\n");
                 return -1;
             }
-            /* La consulta va en el índice 17 y la promoción en el 18. */
-            entry = cmdq_base + 4096 + (unsigned long)((wptr0 + 18) % 63) * 4096;
+            /* La consulta va en el índice 16 y la promoción en el 17. */
+            entry = cmdq_base + 4096 + (unsigned long)((wptr0 + 17) % 63) * 4096;
             hdr = (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
             c = (const rpc_gsp_rm_control *)(hdr + 1);
             p = (const NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS *)(c + 1);
@@ -4975,6 +5071,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_bar1_walk() != 0)
         return -1;
     if (check_bar1_map() != 0)
+        return -1;
+    if (check_bar1_refuse_poison() != 0)
         return -1;
     if (check_rc_triggered() != 0)
         return -1;

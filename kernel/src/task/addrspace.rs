@@ -399,16 +399,25 @@ impl AddrSpace {
     }
 
     /// Extiende una región anónima existente (mremap simplificado).
+    /// `old_len` debe coincidir con la región; `new_len == old_len` también se valida.
     pub fn grow_anon(&self, addr: u64, old_len: u64, new_len: u64) -> Option<u64> {
-        let grow = new_len.checked_sub(old_len)?;
-        let start = addr.checked_add(old_len)?;
-        let grow_end = start.checked_add(grow)?;
+        let grow_end = addr.checked_add(new_len)?;
+        if grow_end > soso_abi::MMAP_LIMIT {
+            return None;
+        }
         {
             let book = self.inner.mmap.lock();
             let idx = book
                 .regions
                 .iter()
                 .position(|r| r.virt_start == addr && r.inode == 0)?;
+            if book.regions[idx].len != old_len {
+                return None;
+            }
+            if new_len < old_len {
+                return None;
+            }
+            let start = addr.checked_add(old_len)?;
             for (i, r) in book.regions.iter().enumerate() {
                 if i == idx {
                     continue;
@@ -419,6 +428,10 @@ impl AddrSpace {
                 }
             }
         }
+        if new_len == old_len {
+            return Some(addr);
+        }
+        let start = addr.checked_add(old_len)?;
         let mut va = start;
         while va < grow_end {
             if self.ensure_mapped(va).is_none() {
@@ -431,7 +444,7 @@ impl AddrSpace {
         let idx = book
             .regions
             .iter()
-            .position(|r| r.virt_start == addr && r.inode == 0)?;
+            .position(|r| r.virt_start == addr && r.inode == 0 && r.len == old_len)?;
         book.regions[idx].len = new_len;
         Some(addr)
     }

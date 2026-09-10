@@ -337,7 +337,7 @@ Detalle (particiones, ESP 8.3, shim, TRB 17 bits, buzón `SOSOUPD`, meta
 Resumen: `soso-install` clona + `gptdisk::relayout` + GUID nuevos; NVRAM la toca
 el shim. Kernel OTA: backup en `SOSOKRN.BIN`, fases durable en `SOSOKRN.MET`
 (staged/backup/applying/probando); init confirma `OK` tras rootfs + `/tmp/sosh-ready`
-(sosh prefaultó su ELF).
+con `pid=<pid>` de esa instancia de sosh (prefault + write/close ok).
 Rootfs OTA: parcial por hash, reintento vía `/etc/actualiza.estado`, sin rollback
 automático de binarios viejos. Transferencias USB: Normal TRB 17 bits → **no enviar 128 KiB en un TRB**
 (`mass_storage` trocea a 64 KiB). Bounce xHCI persistente. Tests:

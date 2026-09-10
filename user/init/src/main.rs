@@ -81,6 +81,9 @@ fn main(args: &str) -> u8 {
     if args == "mremap-test" {
         return modo_mremap_test();
     }
+    if args == "mprotect-interior" {
+        return modo_mprotect_interior();
+    }
     if args.starts_with("env-check") {
         return env_check();
     }
@@ -142,6 +145,29 @@ fn modo_mprotect_ok() -> u8 {
         *(base as *mut u8) = 1;
     }
     0
+}
+
+fn modo_mprotect_interior() -> u8 {
+    let base = sys::mmap(0, 3 * 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    unsafe {
+        *(base as *mut u8) = 1;
+        *((base as u64 + 8192) as *mut u8) = 3;
+    }
+    if sys::mprotect((base as u64) + 4096, 4096, abi::PROT_READ) != 0 {
+        return 2;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ) != 0 {
+        return 3;
+    }
+    let mid = unsafe { *((base as u64 + 4096) as *const u8) };
+    let _ = mid;
+    unsafe {
+        *((base as u64 + 4096) as *mut u8) = 2;
+    }
+    4
 }
 
 fn modo_mremap_test() -> u8 {
@@ -226,26 +252,46 @@ fn rootfs_accesible() -> bool {
     sys::stat("/etc/soso-release", &mut st) >= 0
 }
 
-fn sosh_ready_existe() -> bool {
-    let mut st = abi::Stat::default();
-    sys::stat("/tmp/sosh-ready", &mut st) >= 0
+fn parse_sosh_ready(text: &str) -> Option<i64> {
+    let line = text.lines().next()?.trim();
+    let rest = line.strip_prefix("pid=")?;
+    rest.parse().ok()
 }
 
-/// Hasta ~2 s a la marca; luego ~400 ms de sondeo por si el siguiente
-/// page-fault mata a sosh antes de confirmar OTA.
+fn sosh_ready_de(pid: i64) -> bool {
+    let fd = sys::open("/tmp/sosh-ready", abi::O_RDONLY);
+    if fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    let n = sys::read(fd as u64, &mut buf);
+    let _ = sys::close(fd as u64);
+    if n <= 0 {
+        return false;
+    }
+    let text = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
+    parse_sosh_ready(text) == Some(pid)
+}
+
+fn sosh_sigue_viva(pid: i64) -> bool {
+    sys::kill(pid, abi::SIGPROBE) >= 0
+}
+
+/// Espera la marca de *esta* instancia. Si el hijo vive sin marca, no
+/// confirma; el bucle de PID 1 sigue sondeando.
 fn esperar_sosh_lista(pid: i64) -> bool {
     for _ in 0..40 {
-        if sys::kill(pid, abi::SIGPROBE) < 0 {
+        if !sosh_sigue_viva(pid) {
             return false;
         }
-        if sosh_ready_existe() {
+        if sosh_ready_de(pid) {
             for _ in 0..8 {
                 let _ = sys::sleep_ms(50);
-                if sys::kill(pid, abi::SIGPROBE) < 0 {
+                if !sosh_sigue_viva(pid) {
                     return false;
                 }
             }
-            return true;
+            return sosh_ready_de(pid) && sosh_sigue_viva(pid);
         }
         let _ = sys::sleep_ms(50);
     }
@@ -261,43 +307,57 @@ fn lanzar_shell() -> u8 {
     }
     let _ = sys::mkdir("/tmp");
     let _ = sys::unlink("/tmp/sosh-ready");
-    let pid = sys::spawn("/bin/sosh", "");
+    let mut pid = sys::spawn("/bin/sosh", "");
     if pid < 0 {
         println!("init: no puedo lanzar /bin/sosh (errno {pid})");
         return 1;
     }
-    // ELF perezoso: `spawn` ya devolvió PID. OTA solo si sosh dejó
-    // /tmp/sosh-ready (tras prefault de su PT_LOAD) y sigue vivo un rato.
-    // Si el hijo vive sin marca, no confirmes; no mates la shell.
-    if !esperar_sosh_lista(pid) {
-        if sys::kill(pid, abi::SIGPROBE) < 0 {
-            println!("init: sosh murió al arrancar (pid {pid}); no confirmo OTA");
+    let mut ota_hecho = false;
+    if esperar_sosh_lista(pid) {
+        if !confirmar_actualizacion() {
+            println!("init: no pude confirmar actualización en buzón");
             return 1;
         }
-        println!("init: sosh viva sin /tmp/sosh-ready; no confirmo OTA");
-    } else if !confirmar_actualizacion() {
-        println!("init: no pude confirmar actualización en buzón");
+        ota_hecho = true;
+    } else if !sosh_sigue_viva(pid) {
+        println!("init: sosh murió al arrancar (pid {pid}); no confirmo OTA");
         return 1;
+    } else {
+        println!("init: sosh viva sin marca válida; seguiré comprobando");
     }
     loop {
-        match sys::wait() {
-            Ok((_, 0)) => {
-                println!("init: shell cerrada; adiós");
-                return 0;
-            }
-            Ok((_, code)) => {
-                println!("init: sosh murió con código {code}; relanzando");
-                let pid = sys::spawn("/bin/sosh", "");
-                if pid < 0 {
-                    println!("init: no puedo relanzar /bin/sosh (errno {pid})");
-                    return 1;
-                }
-            }
-            Err(e) => {
-                println!("init: wait falló (errno {e})");
+        if !ota_hecho && sosh_sigue_viva(pid) && sosh_ready_de(pid) {
+            if confirmar_actualizacion() {
+                ota_hecho = true;
+            } else {
+                println!("init: no pude confirmar actualización en buzón");
                 return 1;
             }
         }
+        if !sosh_sigue_viva(pid) {
+            match sys::wait() {
+                Ok((_, 0)) => {
+                    println!("init: shell cerrada; adiós");
+                    return 0;
+                }
+                Ok((_, code)) => {
+                    println!("init: sosh murió con código {code}; relanzando");
+                    let _ = sys::unlink("/tmp/sosh-ready");
+                    ota_hecho = false;
+                    pid = sys::spawn("/bin/sosh", "");
+                    if pid < 0 {
+                        println!("init: no puedo relanzar /bin/sosh (errno {pid})");
+                        return 1;
+                    }
+                }
+                Err(e) => {
+                    println!("init: wait falló (errno {e})");
+                    return 1;
+                }
+            }
+            continue;
+        }
+        let _ = sys::sleep_ms(50);
     }
 }
 
@@ -523,10 +583,31 @@ fn suite() -> u8 {
             sys::wait() == Ok((pid as u64, 0)),
             "mprotect RW restaurado funciona"
         );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mprotect-interior"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mprotect-interior (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 255)),
+            "mprotect interior (fault+presente) RO mata al write"
+        );
         let base = sys::mmap(0, 4096, u64::MAX, 0);
         check!(base > 0, "mmap anónimo para mremap");
         let grown = sys::mremap(base as u64, 4096, 8192, 0);
         check!(grown == base, "mremap grow in-place");
+        check!(
+            sys::mremap(base as u64, 9999, 8192, 0) < 0,
+            "mremap old_len inventada rechazada"
+        );
+        check!(
+            sys::mremap(base as u64, 8192, 8192, 0) == base,
+            "mremap misma longitud valida la región"
+        );
         unsafe {
             *((grown as u64 + 6000) as *mut u8) = 7;
         }

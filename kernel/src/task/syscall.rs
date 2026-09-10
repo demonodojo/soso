@@ -2368,12 +2368,7 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
             .set_prot(addr, len, writable)
             .ok_or(-abi::EINVAL)?;
         space.with_mmap_mut(|book| {
-            for r in &mut book.regions {
-                let rend = r.virt_start.saturating_add(r.len);
-                if r.virt_start >= addr && rend <= end {
-                    r.writable = writable;
-                }
-            }
+            crate::task::mmap::split_prot(&mut book.regions, addr, len, writable);
         });
         Ok(0)
     })
@@ -2382,9 +2377,6 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
 fn sys_mremap(addr: u64, old_len: u64, new_len: u64, flags: u64) -> Result<u64, i64> {
     if new_len < old_len {
         return Err(-abi::EINVAL);
-    }
-    if new_len == old_len {
-        return Ok(addr);
     }
     if flags != 0 {
         return Err(-abi::EINVAL);

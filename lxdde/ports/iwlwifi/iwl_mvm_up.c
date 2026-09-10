@@ -111,7 +111,7 @@ static int iwl_get_shared_mem_conf(struct iwl_ax211_priv *iwl)
     /* Linux `fw/smem.c`: pedir offsets; payload vacío. */
     if (iwl_trans_send_cmd_wait(iwl, SYSTEM_GROUP, SHARED_MEM_CFG_CMD,
                                 NULL, 0, IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
-        lx_printk("iwl_mvm: SHARED_MEM_CFG falló — sigue\n");
+        lx_printk("iwl_mvm: SHARED_MEM_CFG falló\n");
         return -1;
     }
     lx_printk("iwl_mvm: SHARED_MEM_CFG ok\n");
@@ -123,12 +123,15 @@ static int iwl_mvm_sf_init_off(struct iwl_ax211_priv *iwl)
     struct iwl_sf_cfg_cmd sf;
 
     sf_fill_defaults(&sf);
-    if (iwl_trans_send_cmd(iwl, LEGACY_GROUP, REPLY_SF_CFG_CMD, &sf,
-                           (uint16_t)sizeof(sf)) != 0) {
-        lx_printk("iwl_mvm: REPLY_SF_CFG falló\n");
+    /* Linux `iwl_mvm_sf_update` (`mvm/sf.c`): `CMD_ASYNC`. No se espera 0xd1:
+     * el wait síncrono podía cerrar pending sin RX y TX_ANT salía mientras el
+     * FW aún procesaba SF (AX200 run13). */
+    if (iwl_trans_send_cmd_async(iwl, LEGACY_GROUP, REPLY_SF_CFG_CMD, &sf,
+                                 (uint16_t)sizeof(sf)) != 0) {
+        lx_printk("iwl_mvm: REPLY_SF_CFG enqueue falló\n");
         return -1;
     }
-    lx_printk("iwl_mvm: Smart Fifo SF_INIT_OFF\n");
+    lx_printk("iwl_mvm: Smart Fifo SF_INIT_OFF (async)\n");
     return 0;
 }
 
@@ -223,9 +226,13 @@ int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl)
     if (iwl->mvm_up_done)
         return 0;
 
-    iwl_get_shared_mem_conf(iwl);
-    if (iwl_mvm_sf_init_off(iwl) != 0)
+    if (iwl_get_shared_mem_conf(iwl) != 0) {
+        lx_printk("iwl_mvm: SHARED_MEM_CFG obligatorio — abort up\n");
         return -1;
+    }
+    /* SF async: un enqueue fallido se loguea; no se aborta el up con un ACK
+     * inventado. TX_ANT sí es síncrono (Linux `iwl_send_tx_ant_cfg`). */
+    (void)iwl_mvm_sf_init_off(iwl);
 
     if (iwl_mvm_send_tx_ant_cfg(iwl) != 0) {
         lx_printk("iwl_mvm: TX ant no configurada — abort up\n");

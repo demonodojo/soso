@@ -265,9 +265,9 @@ static void parse_scan_complete(struct iwl_ax211_priv *iwl, const uint8_t *data,
     if (len < (int)sizeof(struct iwl_umac_scan_complete))
         return;
     const struct iwl_umac_scan_complete *n = (const struct iwl_umac_scan_complete *)data;
-    iwl->scan_complete = 1;
-    lx_printk("iwl_trans: SCAN_COMPLETE status=%u uid=0x%x count=%d\n",
-              n->status, (unsigned)n->uid, iwl->scan_count);
+    iwl_mvm_on_scan_complete(iwl, n->uid, n->status);
+    lx_printk("iwl_trans: SCAN_COMPLETE status=%u uid=0x%x count=%d end=%d\n",
+              n->status, (unsigned)n->uid, iwl->scan_count, iwl->scan_end);
 }
 
 static void parse_offload_match(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
@@ -340,6 +340,25 @@ static void log_rx(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd,
     (void)iwl;
 }
 
+static int rx_is_pending_hcmd(struct iwl_ax211_priv *iwl, uint8_t group,
+                              uint8_t cmd, uint16_t seq)
+{
+    unsigned slot;
+
+    if (!iwl->cmd_pending)
+        return 0;
+    if (seq & SEQ_RX_FRAME)
+        return 0;
+    if (group != iwl->cmd_pending_group || cmd != iwl->cmd_pending_id)
+        return 0;
+    if (seq != iwl->cmd_pending_seq)
+        return 0;
+    slot = SEQ_TO_INDEX(seq) % IWL_CMD_QUEUE_SIZE;
+    if (iwl->cmd_slot_poison & (1u << slot))
+        return 0;
+    return 1;
+}
+
 static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf)
 {
     uint32_t len_n_flags = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
@@ -350,31 +369,29 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf)
     uint16_t seq = (uint16_t)buf[6] | ((uint16_t)buf[7] << 8);
     const uint8_t *data = buf + 8;
     int pay = (int)len - 4;
+    int copy;
+
     if (pay < 0)
         pay = 0;
+    if ((unsigned)pay > IWL_GEN2_RX_SZ - 8u)
+        pay = (int)(IWL_GEN2_RX_SZ - 8u);
 
     log_rx(iwl, group, cmd, seq, pay, 0);
 
-    if (iwl->cmd_pending) {
-        uint16_t rx_seq = (uint16_t)(seq & ~SEQ_RX_FRAME);
-
-        if (rx_seq != iwl->cmd_pending_seq &&
-            !(SEQ_TO_INDEX(rx_seq) == SEQ_TO_INDEX(iwl->cmd_pending_seq) &&
-              SEQ_TO_QUEUE(rx_seq) == iwl->cmd_qid)) {
-            goto rx_done;
-        }
+    if (rx_is_pending_hcmd(iwl, group, cmd, seq)) {
         iwl->cmd_status = 1;
         iwl->cmd_pending = 0;
-        if (pay > 0) {
-            if (pay > (int)sizeof(iwl->cmd_resp))
-                pay = (int)sizeof(iwl->cmd_resp);
-            memcpy(iwl->cmd_resp, data, (size_t)pay);
-            iwl->cmd_resp_len = (uint16_t)pay;
+        iwl->cmd_fw_err = (len_n_flags & IWL_CMD_FAILED_MSK) ? 1 : 0;
+        copy = pay;
+        if (copy > (int)sizeof(iwl->cmd_resp))
+            copy = (int)sizeof(iwl->cmd_resp);
+        if (copy > 0) {
+            memcpy(iwl->cmd_resp, data, (size_t)copy);
+            iwl->cmd_resp_len = (uint16_t)copy;
         } else {
             iwl->cmd_resp_len = 0;
         }
     }
-rx_done:
 
     if (group == 0 && cmd == UCODE_ALIVE_NTFY) {
         iwl->alive = 1;
@@ -668,44 +685,85 @@ void iwl_trans_poll(struct iwl_ax211_priv *iwl)
     (void)iwl_read32(iwl, CSR_INT);
 }
 
-int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
-                       const void *payload, uint16_t pay_len)
+void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigned len)
+{
+    uint8_t tmp[IWL_GEN2_RX_SZ];
+
+    if (!iwl || !buf || len < 8)
+        return;
+    if (len > IWL_GEN2_RX_SZ)
+        len = IWL_GEN2_RX_SZ;
+    memcpy(tmp, buf, len);
+    if (len < IWL_GEN2_RX_SZ)
+        memset(tmp + len, 0, IWL_GEN2_RX_SZ - len);
+    handle_gen2_rx(iwl, tmp);
+}
+
+static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
+                     const void *payload, uint16_t pay_len, int async)
 {
     uint16_t slot;
     uint8_t *buf;
     struct iwl_tfh_tfd_long *tfd;
     uint16_t total;
+    uint16_t seq;
 
     if (!iwl->alive || !iwl->mtr_cpu || !iwl->mcr_cpu)
         return -1;
+    if (iwl->cmd_pending)
+        return -1;
+    {
+        uint32_t total32 = (uint32_t)sizeof(struct iwl_cmd_header_wide) + (uint32_t)pay_len;
+
+        if (total32 > IWL_CMD_SLOT_SIZE)
+            return -1;
+        total = (uint16_t)total32;
+    }
 
     slot = iwl->cmd_write % IWL_CMD_QUEUE_SIZE;
+    if (iwl->cmd_slot_poison & (1u << slot)) {
+        int skipped = 0;
+
+        while ((iwl->cmd_slot_poison & (1u << slot)) && skipped < IWL_CMD_QUEUE_SIZE) {
+            iwl->cmd_write = (uint16_t)((iwl->cmd_write + 1) % IWL_CMD_QUEUE_SIZE);
+            slot = iwl->cmd_write % IWL_CMD_QUEUE_SIZE;
+            skipped++;
+        }
+        if (iwl->cmd_slot_poison & (1u << slot))
+            return -1;
+    }
     buf = (uint8_t *)iwl->mcr_cpu + (size_t)slot * IWL_CMD_SLOT_SIZE;
     tfd = (struct iwl_tfh_tfd_long *)((uint8_t *)iwl->mtr_cpu + (size_t)slot * IWL_TFH_TFD_SIZE);
     memset(buf, 0, IWL_CMD_SLOT_SIZE);
     memset(tfd, 0, sizeof(*tfd));
 
-    iwl->cmd_pending = 1;
-    iwl->cmd_status = 0;
-    iwl->cmd_resp_len = 0;
-    iwl->cmd_pending_seq = (uint16_t)(QUEUE_TO_SEQ(iwl->cmd_qid) | INDEX_TO_SEQ(slot));
+    seq = (uint16_t)(QUEUE_TO_SEQ(iwl->cmd_qid) | INDEX_TO_SEQ(slot));
+    if (!async) {
+        iwl->cmd_pending = 1;
+        iwl->cmd_status = 0;
+        iwl->cmd_fw_err = 0;
+        iwl->cmd_resp_len = 0;
+        iwl->cmd_pending_group = group;
+        iwl->cmd_pending_id = id;
+        iwl->cmd_pending_seq = seq;
+    }
 
     /* Gen2/Gen3: siempre cabecera wide (Linux `pcie/tx-gen2.c`), también grupo 0
      * (TX_ANT, SF, PHY_CONTEXT). La ruta legacy de 4 B dejaba al FW sordo tras SF. */
     {
         struct iwl_cmd_header_wide *whdr = (struct iwl_cmd_header_wide *)buf;
-
-        total = (uint16_t)(sizeof(*whdr) + pay_len);
-        if (total > IWL_CMD_SLOT_SIZE)
-            return -1;
         whdr->cmd = id;
         whdr->group_id = group;
-        whdr->sequence = iwl->cmd_pending_seq;
+        whdr->sequence = seq;
         whdr->length = iwl_cpu_to_le16(pay_len);
         whdr->reserved = 0;
         whdr->version = (uint8_t)iwl_fw_cmd_ver(iwl, group, id);
         if (pay_len)
             memcpy(buf + sizeof(*whdr), payload, pay_len);
+        if (id == TX_ANT_CONFIGURATION_CMD) {
+            lx_printk("iwl_trans: TX_ANT wide ver=%u len=%u (hdr 8 B + payload %u B)\n",
+                      (unsigned)whdr->version, (unsigned)total, (unsigned)pay_len);
+        }
     }
 
     tfd->num_tbs = 1;
@@ -719,10 +777,10 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
 
         if (!cmd_doorbell_logged) {
             lx_printk("iwl_trans: send_cmd qid=%u doorbell=0x%08x seq=0x%04x "
-                      "grp=%u id=0x%02x\n",
-                      (unsigned)iwl->cmd_qid, doorbell,
-                      (unsigned)iwl->cmd_pending_seq,
-                      (unsigned)group, (unsigned)id);
+                      "grp=%u id=0x%02x%s\n",
+                      (unsigned)iwl->cmd_qid, doorbell, (unsigned)seq,
+                      (unsigned)group, (unsigned)id,
+                      async ? " async" : "");
             cmd_doorbell_logged = 1;
         }
         iwl_write32(iwl, HBUS_TARG_WRPTR, doorbell);
@@ -730,6 +788,18 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     drain_rx_gen2(iwl);
     iwl->cmd_seq++;
     return 0;
+}
+
+int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
+                       const void *payload, uint16_t pay_len)
+{
+    return send_hcmd(iwl, group, id, payload, pay_len, 0);
+}
+
+int iwl_trans_send_cmd_async(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
+                             const void *payload, uint16_t pay_len)
+{
+    return send_hcmd(iwl, group, id, payload, pay_len, 1);
 }
 
 int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
@@ -742,11 +812,21 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
 
     for (t = 0; t < wait_ms; t++) {
         iwl_trans_poll(iwl);
-        if (iwl->cmd_status)
+        if (iwl->cmd_status) {
+            if (iwl->cmd_fw_err)
+                return -1;
             return 0;
+        }
         lx_mdelay(1);
     }
+    {
+        unsigned slot = SEQ_TO_INDEX(iwl->cmd_pending_seq) % IWL_CMD_QUEUE_SIZE;
+
+        iwl->cmd_slot_poison |= (1u << slot);
+    }
     iwl->cmd_pending = 0;
+    if (iwl->mmio)
+        drain_rx_gen2(iwl);
     lx_printk("iwl_trans: timeout cmd grp=%u id=0x%02x\n",
               (unsigned)group, (unsigned)id);
     return -1;

@@ -20,10 +20,12 @@
 #define CSR_GIO_REG                  (CSR_BASE + 0x03C)
 #define CSR_UCODE_DRV_GP1_CLR        (CSR_BASE + 0x05c)
 #define CSR_MAC_SHADOW_REG_CTRL      (CSR_BASE + 0x0A8)
-#define CSR_MAC_ADDR0_OTP            (CSR_BASE + 0x000)
-#define CSR_MAC_ADDR1_OTP            (CSR_BASE + 0x004)
-#define CSR_MAC_ADDR0_STRAP          (CSR_BASE + 0x008)
-#define CSR_MAC_ADDR1_STRAP          (CSR_BASE + 0x00C)
+/* Linux cfg/22000.c: mac_addr_from_csr=0x380; OTP/STRAP son +0/+4/+8/+0xc. */
+#define CSR_MAC_ADDR_FROM_CSR_22000  0x380
+#define CSR_MAC_ADDR0_OTP(base)      ((uint32_t)(base) + 0x00u)
+#define CSR_MAC_ADDR1_OTP(base)      ((uint32_t)(base) + 0x04u)
+#define CSR_MAC_ADDR0_STRAP(base)    ((uint32_t)(base) + 0x08u)
+#define CSR_MAC_ADDR1_STRAP(base)    ((uint32_t)(base) + 0x0cu)
 #define CSR_LTR_LONG_VAL_AD          (CSR_BASE + 0x0D4)
 #define CSR_GIO_CHICKEN_BITS         (CSR_BASE + 0x100)
 #define CSR_DBG_HPET_MEM_REG         (CSR_BASE + 0x240)
@@ -119,7 +121,7 @@
 
 #define IWL_MAX_DRAM_ENTRY         64
 #define IWL_CMD_QUEUE_SIZE         32
-#define IWL_CMD_SLOT_SIZE          2048
+#define IWL_CMD_SLOT_SIZE          4096
 #define IWL_MTR_SIZE               256
 #define IWL_MCR_SIZE               IWL_CMD_SLOT_SIZE
 #define IWL_RX_QUEUE_SIZE          256
@@ -171,6 +173,9 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define READ_NVM_CHUNK_SUCCEED     0u
 #define IWL_NVM_SECTION_TYPE_HW    1u /* NVM_SECTION_TYPE_SW en Linux */
 #define NVM_MAC_ADDR_OFFSET        0x64u
+#define NVM_CHANNEL_VALID          (1u << 0)
+#define NVM_CHANNEL_ACTIVE         (1u << 3)
+#define NVM_CHANNEL_RADAR          (1u << 4)
 
 #define IWL_UCODE_TLV_PHY_SKU      23
 #define IWL_UCODE_TLV_N_SCAN       31
@@ -706,18 +711,27 @@ struct iwl_scan_req_umac_v17 {
     struct iwl_scan_req_params_v17 scan_params;
 } __attribute__((packed));
 
+/* Tamaño fijo: channel_config[67] no se recorta; count solo enumera válidos. */
 static inline unsigned iwl_scan_req_umac_v17_size(unsigned n_channels)
 {
-    return 8u + (unsigned)sizeof(struct iwl_scan_general_params_v11) + 4u +
-           n_channels * (unsigned)sizeof(struct iwl_scan_channel_cfg_umac) +
-           (unsigned)sizeof(struct iwl_scan_periodic_parms_v1) +
-           (unsigned)sizeof(struct iwl_scan_probe_params_v4);
+    (void)n_channels;
+    return (unsigned)sizeof(struct iwl_scan_req_umac_v17);
 }
 
 #define IWL_SCAN_REQ_UMAC_SIZE_V6 44u
 #define IWL_UMAC_SCAN_GEN_FLAGS_PASS_ALL  (1u << 2)
 #define IWL_UMAC_SCAN_GEN_FLAGS_ITER_COMPLETE (1u << 5)
+#define IWL_UMAC_SCAN_GEN_FLAGS_V2_PERIODIC (1u << 0)
+#define IWL_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL (1u << 1)
+#define IWL_UMAC_SCAN_GEN_FLAGS_V2_NTFY_ITER_COMPLETE (1u << 2)
+#define IWL_UMAC_SCAN_GEN_FLAGS_V2_MATCH (1u << 5)
 #define IWL_SCAN_OFFLOAD_COMPLETED 1u
+#define IWL_SCAN_OFFLOAD_ABORTED   2u
+#define IWL_SCAN_END_NONE          0
+#define IWL_SCAN_END_NORMAL        1
+#define IWL_SCAN_END_ABORTED       2
+#define IWL_SCAN_END_TIMEOUT       3
+#define IWL_CMD_FAILED_MSK         0x40u
 
 struct iwl_ax211_priv;
 
@@ -727,6 +741,8 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl);
 void iwl_trans_poll(struct iwl_ax211_priv *iwl);
 int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                        const void *payload, uint16_t pay_len);
+int iwl_trans_send_cmd_async(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
+                             const void *payload, uint16_t pay_len);
 int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                             const void *payload, uint16_t pay_len, int wait_ms);
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl);
@@ -743,6 +759,13 @@ void iwl_mvm_fill_probe_req(struct iwl_ax211_priv *iwl, struct iwl_scan_probe_pa
 int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
                           const uint8_t *bssid);
 int iwl_mvm_scan(struct iwl_ax211_priv *iwl);
+int iwl_mvm_scan_umac_supported(uint8_t ver);
+uint16_t iwl_mvm_build_scan_req(struct iwl_ax211_priv *iwl, uint8_t *buf, unsigned cap);
+void iwl_mvm_on_scan_complete(struct iwl_ax211_priv *iwl, uint32_t uid, uint8_t status);
+uint32_t iwl_mac_addr_from_csr(uint16_t device_id);
+int iwl_mac_valid_unicast(const uint8_t mac[6]);
+void iwl_mac_from_csr(struct iwl_ax211_priv *iwl, uint8_t mac[6]);
+void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigned len);
 int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd);
 void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len);
 int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid);

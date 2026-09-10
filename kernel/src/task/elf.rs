@@ -10,6 +10,90 @@ use xmas_elf::program::Type;
 /// ET_EXEC x86_64 con la tabla de program headers dentro de `elf.input`.
 /// No exige la tabla de secciones: en un ELF típico vive al final del fichero
 /// y `load_lazy` solo tiene los primeros 64 KiB.
+struct LoadPh {
+    vaddr: u64,
+    memsz: u64,
+    filesz: u64,
+    offset: u64,
+    #[allow(dead_code)]
+    write: bool,
+    exec: bool,
+}
+
+/// Preflight común a `load` y `load_lazy` antes de mutar el mapa.
+fn check_load_ph(
+    vaddr: u64,
+    memsz: u64,
+    filesz: u64,
+    offset: u64,
+    file_limit: u64,
+) -> Result<(), &'static str> {
+    if memsz == 0 {
+        return Ok(());
+    }
+    if filesz > memsz {
+        return Err("filesz > memsz");
+    }
+    if offset.checked_add(filesz).is_none_or(|end| end > file_limit) {
+        return Err("segmento truncado");
+    }
+    if vaddr < USER_BASE || vaddr.checked_add(memsz).is_none_or(|end| end > BRK_MAX) {
+        return Err("segmento fuera del rango de usuario");
+    }
+    let page_delta = vaddr & 0xfff;
+    if page_delta > offset {
+        return Err("segmento no alineado");
+    }
+    if (vaddr & 0xfff) != (offset & 0xfff) {
+        return Err("segmento incongruente");
+    }
+    Ok(())
+}
+
+fn collect_load_phs(elf: &ElfFile<'_>, file_limit: u64) -> Result<alloc::vec::Vec<LoadPh>, &'static str> {
+    let mut out = alloc::vec::Vec::new();
+    let mut spans: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
+    for ph in elf.program_iter() {
+        let ty = ph.get_type()?;
+        if ty != Type::Load && ty != Type::Tls {
+            continue;
+        }
+        let vaddr = ph.virtual_addr();
+        let memsz = ph.mem_size();
+        let filesz = ph.file_size();
+        let offset = ph.offset();
+        if memsz == 0 {
+            continue;
+        }
+        check_load_ph(vaddr, memsz, filesz, offset, file_limit)?;
+        if ty == Type::Load {
+            let start = vaddr;
+            let end = vaddr + memsz;
+            for &(s, e) in &spans {
+                if start < e && s < end && !(start == s && end == e) {
+                    /* solape de página text/data es habitual; rechazar hueco no aplica aquí */
+                }
+            }
+            spans.push((start, end));
+            out.push(LoadPh {
+                vaddr,
+                memsz,
+                filesz,
+                offset,
+                write: ph.flags().is_write(),
+                exec: ph.flags().is_execute(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn entry_in_exec_load(entry: u64, loads: &[LoadPh]) -> bool {
+    loads
+        .iter()
+        .any(|p| p.exec && entry >= p.vaddr && entry < p.vaddr.saturating_add(p.memsz))
+}
+
 fn check_exec(elf: &ElfFile<'_>) -> Result<(), &'static str> {
     if elf.header.pt1.magic != header::MAGIC {
         return Err("bad magic number");
@@ -33,12 +117,11 @@ fn check_exec(elf: &ElfFile<'_>) -> Result<(), &'static str> {
 /// Carga los segmentos PT_LOAD y PT_TLS. Devuelve (entry, brk, tls_base).
 pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64, u64), &'static str> {
     let elf = ElfFile::new(data)?;
-    header::sanity_check(&elf)?;
-    if elf.header.pt2.type_().as_type() != header::Type::Executable {
-        return Err("no es un ejecutable estático (ET_EXEC)");
-    }
-    if elf.header.pt2.machine().as_machine() != header::Machine::X86_64 {
-        return Err("no es x86_64");
+    check_exec(&elf)?;
+    let loads = collect_load_phs(&elf, data.len() as u64)?;
+    let entry = elf.header.pt2.entry_point();
+    if !entry_in_exec_load(entry, &loads) {
+        return Err("entry fuera de segmentos cargados");
     }
 
     let mut brk = USER_BASE;
@@ -54,12 +137,6 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64, u64), &'static 
         let offset = ph.offset();
         if memsz == 0 {
             continue;
-        }
-        if vaddr < USER_BASE || vaddr.checked_add(memsz).is_none_or(|end| end > BRK_MAX) {
-            return Err("segmento fuera del rango de usuario");
-        }
-        if (offset + filesz) as usize > data.len() {
-            return Err("segmento truncado");
         }
 
         let first_page = vaddr & !0xfff;
@@ -84,11 +161,7 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64, u64), &'static 
         }
     }
 
-    Ok((
-        elf.header.pt2.entry_point(),
-        brk.next_multiple_of(4096),
-        tls_base,
-    ))
+    Ok((entry, brk.next_multiple_of(4096), tls_base))
 }
 
 /// Carga perezosa: registra regiones mmap sobre `inode` en lugar de copiar el ELF.
@@ -100,10 +173,13 @@ pub fn load_lazy(
 ) -> Result<(u64, u64, u64), &'static str> {
     let elf = ElfFile::new(head)?;
     check_exec(&elf)?;
+    let loads = collect_load_phs(&elf, file_size)?;
+    let entry = elf.header.pt2.entry_point();
+    if !entry_in_exec_load(entry, &loads) {
+        return Err("entry fuera de segmentos cargados");
+    }
     let mut brk = USER_BASE;
     let mut tls_base = 0u64;
-    let mut load_lo = u64::MAX;
-    let mut load_hi = 0u64;
     for ph in elf.program_iter() {
         let ty = ph.get_type()?;
         if ty == Type::Tls {
@@ -120,21 +196,7 @@ pub fn load_lazy(
         if memsz == 0 {
             continue;
         }
-        if filesz > memsz {
-            return Err("filesz > memsz");
-        }
-        if offset.checked_add(filesz).is_none_or(|end| end > file_size) {
-            return Err("segmento truncado");
-        }
-        if vaddr < USER_BASE || vaddr.checked_add(memsz).is_none_or(|end| end > BRK_MAX) {
-            return Err("segmento fuera del rango de usuario");
-        }
-        // p_vaddr ≡ p_offset (mod página). La página de solape text/data es
-        // habitual: find_region se queda con el último PT_LOAD (el RW).
         let page_delta = vaddr & 0xfff;
-        if page_delta > offset {
-            return Err("segmento no alineado");
-        }
         let virt_start = vaddr - page_delta;
         let file_offset = offset - page_delta;
         let len = (vaddr + memsz - virt_start).next_multiple_of(4096);
@@ -148,23 +210,12 @@ pub fn load_lazy(
                 writable: ph.flags().is_write(),
             });
         });
-        // BSS: páginas más allá de filesz (ya a cero vía fault anónimo).
         let mut page = (vaddr + filesz).next_multiple_of(4096);
         while page < vaddr + memsz {
-            let _ = space.ensure_mapped(page);
+            space.ensure_mapped(page).ok_or("sin memoria")?;
             page += 4096;
         }
         brk = brk.max(vaddr + memsz);
-        load_lo = load_lo.min(vaddr);
-        load_hi = load_hi.max(vaddr + memsz);
     }
-    let entry = elf.header.pt2.entry_point();
-    if load_lo == u64::MAX || entry < load_lo || entry >= load_hi {
-        return Err("entry fuera de segmentos cargados");
-    }
-    Ok((
-        entry,
-        brk.next_multiple_of(4096),
-        tls_base,
-    ))
+    Ok((entry, brk.next_multiple_of(4096), tls_base))
 }

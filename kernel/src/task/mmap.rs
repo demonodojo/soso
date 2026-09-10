@@ -62,6 +62,58 @@ pub fn find_region(regions: &[MmapRegion], addr: u64) -> Option<&MmapRegion> {
     })
 }
 
+/// Parte regiones que solapan `[addr, addr+len)` y aplica `writable` solo al
+/// subrango. Así un mprotect interior no deja el fault-in con el permiso viejo.
+pub fn split_prot(regions: &mut Vec<MmapRegion>, addr: u64, len: u64, writable: bool) -> bool {
+    let Some(end) = addr.checked_add(len) else {
+        return false;
+    };
+    let mut out = Vec::with_capacity(regions.len() + 2);
+    let mut hit = false;
+    for r in regions.drain(..) {
+        let rend = r.virt_start.saturating_add(r.len);
+        if rend <= addr || r.virt_start >= end {
+            out.push(r);
+            continue;
+        }
+        hit = true;
+        if r.virt_start < addr {
+            out.push(MmapRegion {
+                virt_start: r.virt_start,
+                len: addr - r.virt_start,
+                inode: r.inode,
+                file_offset: r.file_offset,
+                file_len: r.file_len,
+                writable: r.writable,
+            });
+        }
+        let mid_start = r.virt_start.max(addr);
+        let mid_end = rend.min(end);
+        if mid_end > mid_start {
+            out.push(MmapRegion {
+                virt_start: mid_start,
+                len: mid_end - mid_start,
+                inode: r.inode,
+                file_offset: r.file_offset.saturating_add(mid_start - r.virt_start),
+                file_len: r.file_len,
+                writable,
+            });
+        }
+        if rend > end {
+            out.push(MmapRegion {
+                virt_start: end,
+                len: rend - end,
+                inode: r.inode,
+                file_offset: r.file_offset.saturating_add(end - r.virt_start),
+                file_len: r.file_len,
+                writable: r.writable,
+            });
+        }
+    }
+    *regions = out;
+    hit
+}
+
 pub fn remove_region(regions: &mut Vec<MmapRegion>, addr: u64, len: u64) -> bool {
     let Some(end) = addr.checked_add(len) else {
         return false;
