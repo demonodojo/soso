@@ -227,7 +227,19 @@ reconexión; DHCP/SSH atribuidos a WiFi y tráfico sostenido 30 minutos.
 | `./scripts/l6-ath11k-hostcheck.sh` (con ASan+UBSan) | Pasa: 74 comprobaciones |
 | `cargo test -p xtask` | Pasa: 69 tests (27 de `hw_matrix::`, 7 de `check::`) |
 | `cargo xtask test sys --only "init test"` | Pasa: batería de syscalls con los 9 casos de mremap |
+| `cargo xtask check` | **TODO OK** (host, builds, tres hostchecks, tests xtask) |
+| `cargo xtask test` (4 shards) | 23 OK, 3 FALLO: los dos `ask` de la línea base y `A7` |
 | `cargo xtask build` (perfil por defecto y `live-usb`) | Compila |
+
+Sobre los tres fallos de la suite: los dos de `ask` son la línea base conocida
+(la sesión SSH no cierra; el comando sí se ejecuta y su salida se ve en el
+stdout del fallo). El tercero, `soso-llm: 20 ciclos carga/generación/cambio
+(A7)`, falla por lo mismo —«la sesión SSH no terminó en 1200 s» con los ciclos
+completados dentro del guest— y es un paso **añadido el 2026-09-07**
+(`9048b12f4`), posterior a la línea base registrada, sin ninguna ejecución
+verde conocida. El perfil por defecto de la suite no compila lxdde, así que
+nada de WiFi/GPU de esta revisión entra en ese kernel; de lo que sí entra,
+`mremap` solo lo usa `init test`, que pasa.
 
 No se ha flasheado ni ejecutado la placa. Las comparaciones usan los fuentes
 Linux/NVIDIA locales; los bancos host no acreditan funcionamiento físico de
