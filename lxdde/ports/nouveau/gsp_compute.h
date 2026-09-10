@@ -4,6 +4,8 @@
 
 #include "gsp_ce.h"
 #include "gsp_chan.h"
+#include "gsp_chip.h"
+#include "gsp_sass.h"
 
 /* Derivadas de `GSP_VA_BASE` (gsp_vmm.h). Estaban escritas enteras con la base
  * repetida, y cuando la base tuvo que bajar de 1 TiB a 512 GiB por el límite de
@@ -90,6 +92,9 @@
  * los símbolos generados; nadie lo escribe a mano. */
 struct gsp_kernel {
     const char *name;
+    /* Arquitectura del blob: la del juego elegido por familia. Un kernel de
+     * sm_120 en un Ampere no es «casi compatible», es código de otra ISA. */
+    const char *arch;
     const unsigned char *sass;
     unsigned sass_len;
     unsigned regcount;      /* EIATTR_REGCOUNT */
@@ -115,6 +120,13 @@ struct gsp_kernel {
 
 struct gsp_compute {
     struct gsp_rm *rm;
+    /* Familia detectada y lo que se sabe hacer con ella (R5). */
+    unsigned family;
+    const struct gsp_family_caps *caps;
+    const struct gsp_sass_set *sass;
+    /* 1 si se puede lanzar de verdad: hay descriptor QMD para esta familia y
+     * el SASS enlazado es de su arquitectura. */
+    int launch_ok;
     /* Canal de GR0: un objeto de compute NO se puede colgar del canal del CE
      * (ver NV2080_ENGINE_TYPE_GR0 en nvrm_r570.h). */
     struct gsp_chan *chan;
@@ -140,74 +152,23 @@ struct gsp_compute {
     int ready;
 };
 
-/* Blob SASS y los metadatos que el cubin declara sobre él (saxpy: a, x, y, n). */
-extern const unsigned char gsp_saxpy_sass[];
-extern const unsigned gsp_saxpy_sass_len;
-extern const unsigned gsp_saxpy_regcount;
-extern const unsigned gsp_saxpy_param_base;
-extern const unsigned gsp_saxpy_param_size;
-extern const unsigned gsp_saxpy_cbank_size;
-extern const unsigned gsp_saxpy_param_off[4];
-extern const unsigned gsp_saxpy_param_count;
+/* --- R5: capacidades por familia -------------------------------------- */
 
-/* Ídem para matvec (w, x, y, rows, cols). El `param_count` generado se compara
- * con estos 5: un .cu con un parámetro más y este header sin tocar es un
- * lanzamiento que lee basura y no da ningún error. */
-extern const unsigned char gsp_matvec_sass[];
-extern const unsigned gsp_matvec_sass_len;
-extern const unsigned gsp_matvec_regcount;
-extern const unsigned gsp_matvec_param_base;
-extern const unsigned gsp_matvec_param_size;
-extern const unsigned gsp_matvec_cbank_size;
-extern const unsigned gsp_matvec_param_off[5];
-extern const unsigned gsp_matvec_param_count;
-
-/* Ídem para los dos kernels cuantizados (w, x, y, rows, cols — misma forma que
- * matvec, así que comparten el escritor de parámetros). */
-extern const unsigned char gsp_matvec_q4k_sass[];
-extern const unsigned gsp_matvec_q4k_sass_len;
-extern const unsigned gsp_matvec_q4k_regcount;
-extern const unsigned gsp_matvec_q4k_param_base;
-extern const unsigned gsp_matvec_q4k_param_size;
-extern const unsigned gsp_matvec_q4k_cbank_size;
-extern const unsigned gsp_matvec_q4k_param_off[5];
-extern const unsigned gsp_matvec_q4k_param_count;
-
-extern const unsigned char gsp_matvec_q80_sass[];
-extern const unsigned gsp_matvec_q80_sass_len;
-extern const unsigned gsp_matvec_q80_regcount;
-extern const unsigned gsp_matvec_q80_param_base;
-extern const unsigned gsp_matvec_q80_param_size;
-extern const unsigned gsp_matvec_q80_cbank_size;
-extern const unsigned gsp_matvec_q80_param_off[5];
-extern const unsigned gsp_matvec_q80_param_count;
-
-extern const unsigned char gsp_matmul_sass[];
-extern const unsigned gsp_matmul_sass_len;
-extern const unsigned gsp_matmul_regcount;
-extern const unsigned gsp_matmul_param_base;
-extern const unsigned gsp_matmul_param_size;
-extern const unsigned gsp_matmul_cbank_size;
-extern const unsigned gsp_matmul_param_off[6];
-extern const unsigned gsp_matmul_param_count;
-
-extern const unsigned char gsp_softmax_rows_sass[];
-extern const unsigned gsp_softmax_rows_sass_len;
-extern const unsigned gsp_softmax_rows_regcount;
-extern const unsigned gsp_softmax_rows_param_base;
-extern const unsigned gsp_softmax_rows_param_size;
-extern const unsigned gsp_softmax_rows_cbank_size;
-extern const unsigned gsp_softmax_rows_param_off[3];
-extern const unsigned gsp_softmax_rows_param_count;
-
-extern const unsigned char gsp_layernorm_rows_sass[];
-extern const unsigned gsp_layernorm_rows_sass_len;
-extern const unsigned gsp_layernorm_rows_regcount;
-extern const unsigned gsp_layernorm_rows_param_base;
-extern const unsigned gsp_layernorm_rows_param_size;
-extern const unsigned gsp_layernorm_rows_cbank_size;
-extern const unsigned gsp_layernorm_rows_param_off[6];
-extern const unsigned gsp_layernorm_rows_param_count;
+/* Familia a partir de la clase de compute que aceptó RM. */
+unsigned gsp_family_from_class(uint32_t cls);
+/* Familia a partir de `enum nv_family` (gsp_chip.h), por si no hay clase. */
+unsigned gsp_family_from_nv(int nv_family);
+/* Qué se sabe hacer con esa familia; NULL si no está en la tabla. */
+const struct gsp_family_caps *gsp_family_caps_of(unsigned family);
+/* El juego de SASS de esa familia entre los enlazados, o NULL. */
+const struct gsp_sass_set *gsp_sass_pick(const struct gsp_sass_set *const *sets,
+                                         unsigned n, unsigned family);
+/* Un kernel por nombre dentro de un juego, o NULL. */
+const struct gsp_sass_variant *gsp_sass_variant_of(const struct gsp_sass_set *set,
+                                                   const char *name);
+/* 0 si se puede enviar este kernel a esta GPU; -1 con el motivo impreso. */
+int gsp_compute_launch_ready(const struct gsp_compute *cp,
+                             const struct gsp_kernel *k, const char *what);
 
 int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
                      struct gsp_compute *cp);
@@ -226,6 +187,15 @@ int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
                            struct gsp_kernel *k,
                            uint64_t scratch_va, void *scratch_cpu,
                            unsigned scratch_bytes);
+
+/* Copia los blobs SASS a VRAM con el CE **antes** de levantar GR0 (misma
+ * runlist que COPY0). Evita que el primer blit tras PROMOTE_CTX deje el CE
+ * atascado en GA107. */
+int gsp_compute_stage_sass_bringup(struct gsp_ce *ce, uint64_t scratch_va,
+                                   void *scratch_cpu, unsigned scratch_bytes);
+
+/* Tras `gsp_compute_init`, marca staged=1 si el bring-up ya subió los blobs. */
+void gsp_compute_mark_sass_staged(struct gsp_compute *cp);
 
 /* Codifica SET_OBJECT + WFI + SEND_PCAS en el pushbuffer; el QMD va a sysmem. */
 int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,

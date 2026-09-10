@@ -3,11 +3,17 @@
 use crate::drivers::nvidia_probe;
 use spin::Mutex;
 
-const SAXPY_SASS: &[u8] = include_bytes!("../../../lxdde/ports/nouveau/saxpy.sass.bin");
-/// El kernel de G5. Se incluye aquí solo para poder decir en el arranque que
-/// existe: quien lo lanza es el port en C, que lo lleva embebido por su lado. Un
-/// blob a cero es el único fallo de `l6-g4f-build-sass.sh` que no da error.
-const MATVEC_SASS: &[u8] = include_bytes!("../../../lxdde/ports/nouveau/matvec.sass.bin");
+/// Los blobs por arquitectura (R5). Se incluyen aquí solo para poder decir en
+/// el arranque que existen y de qué arquitectura son: quien los lanza es el
+/// port en C, que lleva un juego por familia y elige el que toca. Un blob a
+/// cero es el único fallo de `l6-g4f-build-sass.sh` que no da error.
+const SAXPY_SM86: &[u8] = include_bytes!("../../../lxdde/ports/nouveau/sass/sm_86/saxpy.sass.bin");
+const MATVEC_SM86: &[u8] =
+    include_bytes!("../../../lxdde/ports/nouveau/sass/sm_86/matvec.sass.bin");
+const SAXPY_SM120: &[u8] =
+    include_bytes!("../../../lxdde/ports/nouveau/sass/sm_120/saxpy.sass.bin");
+const MATVEC_SM120: &[u8] =
+    include_bytes!("../../../lxdde/ports/nouveau/sass/sm_120/matvec.sass.bin");
 
 struct ComputeState {
     channel_ready: bool,
@@ -28,10 +34,13 @@ pub fn init() {
         last_result: 0.0,
     });
     crate::println!(
-        "nvidia-compute: GSP={} blobs SASS saxpy {} B / matvec {} B",
+        "nvidia-compute: GSP={} SASS sm_86 saxpy {} B / matvec {} B; \
+         sm_120 saxpy {} B / matvec {} B",
         gsp_status(),
-        SAXPY_SASS.len(),
-        MATVEC_SASS.len()
+        SAXPY_SM86.len(),
+        MATVEC_SM86.len(),
+        SAXPY_SM120.len(),
+        MATVEC_SM120.len()
     );
 }
 

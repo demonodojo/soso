@@ -1,5 +1,6 @@
 /* G4f/G5: objeto compute Blackwell + QMD en sysmem + SEND_PCAS. Ver gsp_compute.h. */
 #include "gsp_compute.h"
+#include "sass_sets.h"
 /* Constantes de bloque de los formatos cuantizados, compartidas con los .cu. */
 #include "q4k_decode.h"
 
@@ -95,6 +96,163 @@ static unsigned char *cp_mv(struct gsp_compute *cp, unsigned off)
 static unsigned char *cp_res(struct gsp_compute *cp, unsigned off)
 {
     return (unsigned char *)cp->res.va + off;
+}
+
+/* Comparación de cadenas sin libc: el port no enlaza strcmp. */
+static int str_igual(const char *a, const char *b)
+{
+    if (!a || !b) {
+        return 0;
+    }
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+/* --- R5: capacidades por familia ---------------------------------------
+ *
+ * Aceptar una clase de compute no demuestra nada sobre el descriptor ni sobre
+ * el código máquina. Aquí se junta lo que hace falta para lanzar de verdad:
+ *
+ *   - la versión de QMD, que es distinta por familia y de la que solo se tiene
+ *     transcrito el layout de Blackwell (`QMDV05_*` en nvrm_r570.h, de
+ *     `clcec0qmd.h`). El árbol solo trae `cla0c0qmd.h`, que llega a V01_07
+ *     (era Pascal): NO es el QMD de Ampere/Ada/Hopper, así que para esas
+ *     familias `qmd_version` es 0 = «no sé escribir el descriptor», y el
+ *     lanzamiento se rechaza ANTES de enviar nada.
+ *   - la arquitectura del SASS. Los blobs no son intercambiables: el mismo
+ *     .cu compilado a sm_86 y a sm_120 cambia hasta de sitio los parámetros
+ *     (param_base 352 frente a 896), así que lanzar el juego equivocado es
+ *     leer basura en el constant bank.
+ */
+static const struct gsp_family_caps g_family_caps[] = {
+    { GSP_FAM_AMPERE,    "Ampere",    0u, 0u,   "sm_86"  },
+    { GSP_FAM_ADA,       "Ada",       0u, 0u,   "sm_89"  },
+    { GSP_FAM_HOPPER,    "Hopper",    0u, 0u,   "sm_90"  },
+    { GSP_FAM_BLACKWELL, "Blackwell", 5u, 384u, "sm_120" },
+};
+
+unsigned gsp_family_from_class(uint32_t cls)
+{
+    switch (cls) {
+    case AMPERE_COMPUTE_A:
+    case AMPERE_COMPUTE_B:
+        return GSP_FAM_AMPERE;
+    case ADA_COMPUTE_A:
+        return GSP_FAM_ADA;
+    case HOPPER_COMPUTE_A:
+        return GSP_FAM_HOPPER;
+    case BLACKWELL_COMPUTE_A:
+    case BLACKWELL_COMPUTE_B:
+        return GSP_FAM_BLACKWELL;
+    default:
+        return GSP_FAM_DESCONOCIDA;
+    }
+}
+
+unsigned gsp_family_from_nv(int nv_family)
+{
+    switch (nv_family) {
+    case NV_FAM_AMPERE:
+        return GSP_FAM_AMPERE;
+    case NV_FAM_ADA:
+        return GSP_FAM_ADA;
+    case NV_FAM_BLACKWELL:
+        return GSP_FAM_BLACKWELL;
+    default:
+        return GSP_FAM_DESCONOCIDA;
+    }
+}
+
+const struct gsp_family_caps *gsp_family_caps_of(unsigned family)
+{
+    unsigned i;
+
+    for (i = 0; i < sizeof(g_family_caps) / sizeof(g_family_caps[0]); i++) {
+        if (g_family_caps[i].family == family) {
+            return &g_family_caps[i];
+        }
+    }
+    return 0;
+}
+
+const struct gsp_sass_set *gsp_sass_pick(const struct gsp_sass_set *const *sets,
+                                         unsigned n, unsigned family)
+{
+    unsigned i;
+
+    if (!sets || family == GSP_FAM_DESCONOCIDA) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        if (sets[i] && sets[i]->family == family) {
+            return sets[i];
+        }
+    }
+    return 0;
+}
+
+const struct gsp_sass_variant *gsp_sass_variant_of(const struct gsp_sass_set *set,
+                                                   const char *name)
+{
+    unsigned i;
+
+    if (!set || !name) {
+        return 0;
+    }
+    for (i = 0; i < set->count; i++) {
+        const char *a = set->vars[i].name;
+        const char *b = name;
+
+        while (*a && *a == *b) {
+            a++;
+            b++;
+        }
+        if (*a == '\0' && *b == '\0') {
+            return &set->vars[i];
+        }
+    }
+    return 0;
+}
+
+int gsp_compute_launch_ready(const struct gsp_compute *cp,
+                             const struct gsp_kernel *k, const char *what)
+{
+    const char *quien = what ? what : "compute";
+
+    if (!cp || !cp->ready || !k) {
+        return -1;
+    }
+    if (!cp->caps || cp->caps->qmd_version == 0u) {
+        lx_printk("nouveau-lx: %s — sin descriptor QMD para la familia %s: el "
+                  "árbol solo trae el layout de Blackwell (QMDV05); hace falta "
+                  "el clc?c0qmd.h de esta familia. No se envía nada.\n",
+                  quien, cp->caps ? cp->caps->nombre : "desconocida");
+        return -1;
+    }
+    if (cp->caps->qmd_version != GSP_QMD_VERSION_CURRENT ||
+        cp->caps->qmd_bytes != (unsigned)sizeof(GspQmdV05)) {
+        lx_printk("nouveau-lx: %s — la familia %s pide QMD v%u de %u B y el "
+                  "port escribe v%u de %u B\n", quien, cp->caps->nombre,
+                  cp->caps->qmd_version, cp->caps->qmd_bytes,
+                  GSP_QMD_VERSION_CURRENT, (unsigned)sizeof(GspQmdV05));
+        return -1;
+    }
+    if (!k->arch || !cp->caps->sass_arch || !str_igual(k->arch, cp->caps->sass_arch)) {
+        lx_printk("nouveau-lx: %s — SASS de %s es %s y la familia %s necesita "
+                  "%s: recompila con SOSO_SASS_ARCHS\n", quien, k->name,
+                  k->arch ? k->arch : "?", cp->caps->nombre,
+                  cp->caps->sass_arch ? cp->caps->sass_arch : "?");
+        return -1;
+    }
+    if (!k->staged) {
+        lx_printk("nouveau-lx: %s — el SASS de %s no está en VRAM\n", quien,
+                  k->name);
+        return -1;
+    }
+    return 0;
 }
 
 /* Que el constant bank quepa donde se le reservó y que los parámetros estén
@@ -205,94 +363,84 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
     cp->data_va = G4F_DATA_VA;
     cp->mv_va = G5_MV_VA;
 
-    cp->saxpy.name = "saxpy";
-    cp->saxpy.sass = gsp_saxpy_sass;
-    cp->saxpy.sass_len = gsp_saxpy_sass_len;
-    cp->saxpy.regcount = gsp_saxpy_regcount;
-    cp->saxpy.param_base = gsp_saxpy_param_base;
-    cp->saxpy.param_size = gsp_saxpy_param_size;
-    cp->saxpy.cbank_size = gsp_saxpy_cbank_size;
-    cp->saxpy.param_off = gsp_saxpy_param_off;
-    cp->saxpy.param_count = gsp_saxpy_param_count;
-    cp->saxpy.sass_va = G4F_SASS_VA;
+    /* R5: los kernels salen del juego de SASS de la familia detectada, no de
+     * unos símbolos fijos. La familia se decide con la clase de compute del
+     * catálogo del chip; si no hay catálogo, con la familia del chip. */
+    {
+        static const struct gsp_sass_set *const sets[] = GSP_SASS_SETS;
+        static const struct { const char *name; uint64_t va; unsigned params; }
+        tabla[] = {
+            { "saxpy",          G4F_SASS_VA, 4u },
+            { "matvec",         G5_SASS_VA,  5u },
+            { "matvec_q4k",     G7_SASS_VA,  5u },
+            { "matvec_q80",     G8_SASS_VA,  5u },
+            { "matmul",         G9_SASS_VA,  6u },
+            { "softmax_rows",   G10_SASS_VA, 3u },
+            { "layernorm_rows", G11_SASS_VA, 6u },
+        };
+        struct gsp_kernel *destinos[7] = {
+            &cp->saxpy, &cp->matvec, &cp->matvec_q4k, &cp->matvec_q80,
+            &cp->matmul, &cp->softmax_rows, &cp->layernorm_rows,
+        };
+        unsigned n = (unsigned)(sizeof(tabla) / sizeof(tabla[0]));
+        unsigned i;
 
-    cp->matvec.name = "matvec";
-    cp->matvec.sass = gsp_matvec_sass;
-    cp->matvec.sass_len = gsp_matvec_sass_len;
-    cp->matvec.regcount = gsp_matvec_regcount;
-    cp->matvec.param_base = gsp_matvec_param_base;
-    cp->matvec.param_size = gsp_matvec_param_size;
-    cp->matvec.cbank_size = gsp_matvec_cbank_size;
-    cp->matvec.param_off = gsp_matvec_param_off;
-    cp->matvec.param_count = gsp_matvec_param_count;
-    cp->matvec.sass_va = G5_SASS_VA;
+        {
+            static const uint32_t cand[] = {
+                BLACKWELL_COMPUTE_B, BLACKWELL_COMPUTE_A, HOPPER_COMPUTE_A,
+                ADA_COMPUTE_A, AMPERE_COMPUTE_B, AMPERE_COMPUTE_A,
+            };
 
-    cp->matvec_q4k.name = "matvec_q4k";
-    cp->matvec_q4k.sass = gsp_matvec_q4k_sass;
-    cp->matvec_q4k.sass_len = gsp_matvec_q4k_sass_len;
-    cp->matvec_q4k.regcount = gsp_matvec_q4k_regcount;
-    cp->matvec_q4k.param_base = gsp_matvec_q4k_param_base;
-    cp->matvec_q4k.param_size = gsp_matvec_q4k_param_size;
-    cp->matvec_q4k.cbank_size = gsp_matvec_q4k_cbank_size;
-    cp->matvec_q4k.param_off = gsp_matvec_q4k_param_off;
-    cp->matvec_q4k.param_count = gsp_matvec_q4k_param_count;
-    cp->matvec_q4k.sass_va = G7_SASS_VA;
+            cp->cls = gsp_rm_class_pick("compute", cand,
+                                        (unsigned)(sizeof(cand) / sizeof(cand[0])));
+        }
+        cp->family = gsp_family_from_class(cp->cls);
+        if (cp->family == GSP_FAM_DESCONOCIDA) {
+            cp->family = gsp_family_from_nv((int)gsp_nv_family_current());
+        }
+        cp->caps = gsp_family_caps_of(cp->family);
+        cp->sass = gsp_sass_pick(sets, GSP_SASS_SET_COUNT, cp->family);
+        if (!cp->sass) {
+            lx_printk("nouveau-lx: compute — no hay SASS para la familia %s "
+                      "(cls=0x%04x); compila con SOSO_SASS_ARCHS\n",
+                      cp->caps ? cp->caps->nombre : "desconocida", cp->cls);
+            return -1;
+        }
+        lx_printk("nouveau-lx: compute — familia %s, SASS %s, QMD %s\n",
+                  cp->caps ? cp->caps->nombre : "desconocida", cp->sass->arch,
+                  (cp->caps && cp->caps->qmd_version)
+                      ? "escribible"
+                      : "SIN layout en el árbol (no se lanzará)");
 
-    cp->matvec_q80.name = "matvec_q80";
-    cp->matvec_q80.sass = gsp_matvec_q80_sass;
-    cp->matvec_q80.sass_len = gsp_matvec_q80_sass_len;
-    cp->matvec_q80.regcount = gsp_matvec_q80_regcount;
-    cp->matvec_q80.param_base = gsp_matvec_q80_param_base;
-    cp->matvec_q80.param_size = gsp_matvec_q80_param_size;
-    cp->matvec_q80.cbank_size = gsp_matvec_q80_cbank_size;
-    cp->matvec_q80.param_off = gsp_matvec_q80_param_off;
-    cp->matvec_q80.param_count = gsp_matvec_q80_param_count;
-    cp->matvec_q80.sass_va = G8_SASS_VA;
+        for (i = 0; i < n; i++) {
+            const struct gsp_sass_variant *v =
+                gsp_sass_variant_of(cp->sass, tabla[i].name);
+            struct gsp_kernel *k = destinos[i];
 
-    cp->matmul.name = "matmul";
-    cp->matmul.sass = gsp_matmul_sass;
-    cp->matmul.sass_len = gsp_matmul_sass_len;
-    cp->matmul.regcount = gsp_matmul_regcount;
-    cp->matmul.param_base = gsp_matmul_param_base;
-    cp->matmul.param_size = gsp_matmul_param_size;
-    cp->matmul.cbank_size = gsp_matmul_cbank_size;
-    cp->matmul.param_off = gsp_matmul_param_off;
-    cp->matmul.param_count = gsp_matmul_param_count;
-    cp->matmul.sass_va = G9_SASS_VA;
-
-    cp->softmax_rows.name = "softmax_rows";
-    cp->softmax_rows.sass = gsp_softmax_rows_sass;
-    cp->softmax_rows.sass_len = gsp_softmax_rows_sass_len;
-    cp->softmax_rows.regcount = gsp_softmax_rows_regcount;
-    cp->softmax_rows.param_base = gsp_softmax_rows_param_base;
-    cp->softmax_rows.param_size = gsp_softmax_rows_param_size;
-    cp->softmax_rows.cbank_size = gsp_softmax_rows_cbank_size;
-    cp->softmax_rows.param_off = gsp_softmax_rows_param_off;
-    cp->softmax_rows.param_count = gsp_softmax_rows_param_count;
-    cp->softmax_rows.sass_va = G10_SASS_VA;
-
-    cp->layernorm_rows.name = "layernorm_rows";
-    cp->layernorm_rows.sass = gsp_layernorm_rows_sass;
-    cp->layernorm_rows.sass_len = gsp_layernorm_rows_sass_len;
-    cp->layernorm_rows.regcount = gsp_layernorm_rows_regcount;
-    cp->layernorm_rows.param_base = gsp_layernorm_rows_param_base;
-    cp->layernorm_rows.param_size = gsp_layernorm_rows_param_size;
-    cp->layernorm_rows.cbank_size = gsp_layernorm_rows_cbank_size;
-    cp->layernorm_rows.param_off = gsp_layernorm_rows_param_off;
-    cp->layernorm_rows.param_count = gsp_layernorm_rows_param_count;
-    cp->layernorm_rows.sass_va = G11_SASS_VA;
-
-    /* El constant bank tiene que caber entero: el kernel lee sus parámetros en
-     * `param_base`, que está al final de .nv.constant0. */
-    if (kernel_check(&cp->saxpy, 4u) != 0 ||
-        kernel_check(&cp->matvec, 5u) != 0 ||
-        kernel_check(&cp->matvec_q4k, 5u) != 0 ||
-        kernel_check(&cp->matvec_q80, 5u) != 0 ||
-        kernel_check(&cp->matmul, 6u) != 0 ||
-        kernel_check(&cp->softmax_rows, 3u) != 0 ||
-        kernel_check(&cp->layernorm_rows, 6u) != 0) {
-        return -1;
+            if (!v) {
+                lx_printk("nouveau-lx: compute — el juego %s no trae %s\n",
+                          cp->sass->arch, tabla[i].name);
+                return -1;
+            }
+            k->name = v->name;
+            k->arch = cp->sass->arch;
+            k->sass = v->sass;
+            k->sass_len = v->sass_len;
+            k->regcount = v->regcount;
+            k->param_base = v->param_base;
+            k->param_size = v->param_size;
+            k->cbank_size = v->cbank_size;
+            k->param_off = v->param_off;
+            k->param_count = v->param_count;
+            k->sass_va = tabla[i].va;
+            if (kernel_check(k, tabla[i].params) != 0) {
+                return -1;
+            }
+        }
+        cp->launch_ok = (cp->caps && cp->caps->qmd_version != 0u &&
+                         str_igual(cp->sass->arch, cp->caps->sass_arch)) ? 1 : 0;
     }
+
     /* Cada blob tiene que caber en el hueco que va hasta la VA del siguiente. */
     {
         const struct gsp_kernel *ks[7] = { &cp->saxpy, &cp->matvec, &cp->matvec_q4k,
@@ -351,18 +499,6 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
     }
 
     {
-        /* GB20x lleva `BLACKWELL_COMPUTE_B`; la A que había aquí es de GB100.
-         * Igual que el canal y el CE: lo dice el catálogo, no un #define. */
-        static const uint32_t cand[] = {
-            BLACKWELL_COMPUTE_B, BLACKWELL_COMPUTE_A, HOPPER_COMPUTE_A,
-            ADA_COMPUTE_A, AMPERE_COMPUTE_B, AMPERE_COMPUTE_A,
-        };
-
-        cp->cls = gsp_rm_class_pick("compute", cand,
-                                    (unsigned)(sizeof(cand) / sizeof(cand[0])));
-    }
-
-    {
         uint32_t status = 0;
 
         if (gsp_rm_alloc(rm, chan->handle, cp->handle, cp->cls,
@@ -408,24 +544,18 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
     return 0;
 }
 
-int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
-                           struct gsp_kernel *k,
-                           uint64_t scratch_va, void *scratch_cpu,
-                           unsigned scratch_bytes)
+static int stage_sass_kernel(struct gsp_ce *ce, struct gsp_kernel *k,
+                            uint64_t scratch_va, void *scratch_cpu,
+                            unsigned scratch_bytes)
 {
     unsigned off;
 
-    if (!cp || !cp->ready || !ce || !k || !scratch_cpu || !k->sass_len ||
-        scratch_bytes == 0u) {
+    if (!ce || !k || !scratch_cpu || !k->sass_len || scratch_bytes == 0u) {
         return -1;
     }
     if (k->staged) {
         return 0;
     }
-    /* Se trocea contra el rebote en vez de exigir que el blob quepa en él. Los
-     * trozos van de `scratch_bytes` (una página con el rebote de G4d), así que cada
-     * copia del CE es de una línea: el camino probado en silicio por debajo de
-     * 4 KiB. El destino avanza en múltiplos del trozo, luego sigue alineado. */
     for (off = 0; off < k->sass_len; off += scratch_bytes) {
         unsigned c = k->sass_len - off;
 
@@ -453,6 +583,88 @@ int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
     }
     k->staged = 1;
     return 0;
+}
+
+int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
+                           struct gsp_kernel *k,
+                           uint64_t scratch_va, void *scratch_cpu,
+                           unsigned scratch_bytes)
+{
+    if (!cp || !cp->ready) {
+        return -1;
+    }
+    return stage_sass_kernel(ce, k, scratch_va, scratch_cpu, scratch_bytes);
+}
+
+/* Sube a VRAM los blobs del juego que corresponde a la familia del chip,
+ * antes de que exista el objeto de compute (y antes de GR0). Usa la familia
+ * del chip porque el catálogo de clases aún no se ha consultado. */
+int gsp_compute_stage_sass_bringup(struct gsp_ce *ce, uint64_t scratch_va,
+                                   void *scratch_cpu, unsigned scratch_bytes)
+{
+    static const struct gsp_sass_set *const sets[] = GSP_SASS_SETS;
+    static const uint64_t vas[] = {
+        G4F_SASS_VA, G5_SASS_VA, G7_SASS_VA, G8_SASS_VA,
+        G9_SASS_VA, G10_SASS_VA, G11_SASS_VA,
+    };
+    static const char *const nombres[] = {
+        "saxpy", "matvec", "matvec_q4k", "matvec_q80",
+        "matmul", "softmax_rows", "layernorm_rows",
+    };
+    unsigned familia = gsp_family_from_nv((int)gsp_nv_family_current());
+    const struct gsp_sass_set *set = gsp_sass_pick(sets, GSP_SASS_SET_COUNT, familia);
+    unsigned n = (unsigned)(sizeof(nombres) / sizeof(nombres[0]));
+    unsigned subidos = 0;
+    unsigned bytes = 0;
+    unsigned i;
+
+    if (!ce || !ce->ready || ce->stuck || !scratch_cpu || scratch_bytes == 0u) {
+        return -1;
+    }
+    if (!set) {
+        lx_printk("nouveau-lx: SASS de bring-up — sin juego para la familia %u\n",
+                  familia);
+        return -1;
+    }
+    /* Solo los cuatro primeros hacen falta en el bring-up; el resto se suben
+     * cuando compute esté listo (misma función idempotente). */
+    for (i = 0; i < n && i < 4u; i++) {
+        const struct gsp_sass_variant *v = gsp_sass_variant_of(set, nombres[i]);
+        struct gsp_kernel k;
+
+        if (!v) {
+            lx_printk("nouveau-lx: SASS de bring-up — %s no está en %s\n",
+                      nombres[i], set->arch);
+            return -1;
+        }
+        memset(&k, 0, sizeof(k));
+        k.name = v->name;
+        k.arch = set->arch;
+        k.sass = v->sass;
+        k.sass_len = v->sass_len;
+        k.sass_va = vas[i];
+        if (stage_sass_kernel(ce, &k, scratch_va, scratch_cpu, scratch_bytes) != 0) {
+            lx_printk("nouveau-lx: SASS de bring-up — %s (%u B) no llegó a "
+                      "VRAM\n", v->name, v->sass_len);
+            return -1;
+        }
+        subidos++;
+        bytes += v->sass_len;
+    }
+    lx_printk("nouveau-lx: SASS %s en VRAM — %u kernels, %u B\n", set->arch,
+              subidos, bytes);
+    return 0;
+}
+
+void gsp_compute_mark_sass_staged(struct gsp_compute *cp)
+{
+    if (!cp) {
+        return;
+    }
+    cp->saxpy.staged = 1;
+    cp->matvec.staged = 1;
+    cp->matvec_q4k.staged = 1;
+    cp->matvec_q80.staged = 1;
 }
 
 /* El prólogo del banco 0 (todo lo anterior a `param_base`) lo rellena el driver
@@ -640,6 +852,11 @@ static int launch_wait_sem(struct gsp_compute *cp, const struct gsp_kernel *k,
     extern uint64_t lx_ktime_get_ns(void);
 
     if (sem_slot >= G4F_SEM_COUNT) {
+        return -1;
+    }
+    /* R5: nada de escribir un QMD que no es de esta familia ni de lanzar SASS
+     * de otra arquitectura. Se comprueba aquí, antes del submit. */
+    if (gsp_compute_launch_ready(cp, k, what) != 0) {
         return -1;
     }
     gsp_compute_fill_qmd_grid(cp, k, &qmd, grid_x, grid_y, sem_slot);
@@ -1208,6 +1425,9 @@ int gsp_compute_launch_enqueue(struct gsp_compute *cp, const struct gsp_kernel *
     unsigned pb_off = 0, pb_len = 0;
 
     if (!cp || !k || sem_slot >= G4F_SEM_COUNT) {
+        return -1;
+    }
+    if (gsp_compute_launch_ready(cp, k, what) != 0) {
         return -1;
     }
     *(uint32_t *)cp_data(cp, G4F_SEM_SLOT(sem_slot)) = 0;

@@ -16,13 +16,9 @@ lxdde/ports/nouveau/gsp_ce.c
 lxdde/ports/nouveau/gsp_grctx.c
 lxdde/ports/nouveau/gsp_buf.c
 lxdde/ports/nouveau/gsp_compute.c
-lxdde/ports/nouveau/saxpy_sass_embed.c
-lxdde/ports/nouveau/matvec_sass_embed.c
-lxdde/ports/nouveau/matvec_q4k_sass_embed.c
-lxdde/ports/nouveau/matvec_q80_sass_embed.c
-lxdde/ports/nouveau/matmul_sass_embed.c
-lxdde/ports/nouveau/softmax_rows_sass_embed.c
-lxdde/ports/nouveau/layernorm_rows_sass_embed.c
+# Un juego de SASS por arquitectura (generados por l6-g4f-build-sass.sh).
+lxdde/ports/nouveau/sass_sm86.c
+lxdde/ports/nouveau/sass_sm120.c
 lxdde/ports/nouveau/gsp_fini.c
 lxdde/ports/nouveau/gsp_mmio.c
 lxdde/ports/nouveau/gsp_pramin.c

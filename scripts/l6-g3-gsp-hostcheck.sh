@@ -41,17 +41,14 @@ for m in gsp_dma gsp_rm gsp_wpr gsp_libos fmc_lx fsp_lx gsp_cpu_seq gsp_rpc gsp_
         > "$out/${m}_body.inc"
 done
 
+# Un fichero por arquitectura (R5): el banco comprueba los dos juegos y que
+# no son intercambiables.
 GSP_SRCS=(
     "$root/tools/gsp-hostcheck/main.c"
-    "$src/saxpy_sass_embed.c" "$src/matvec_sass_embed.c"
-    "$src/matvec_q4k_sass_embed.c" "$src/matvec_q80_sass_embed.c"
-    "$src/matmul_sass_embed.c" "$src/softmax_rows_sass_embed.c"
-    "$src/layernorm_rows_sass_embed.c"
+    "$src/sass_sm86.c" "$src/sass_sm120.c"
 )
 GSP_CFLAGS=(-O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
-    -I"$out" -I"$src"
-    -DSOSO_SASS_BIN="\"$src/saxpy.sass.bin\""
-    -DSOSO_MV_SASS_BIN="\"$src/matvec.sass.bin\"")
+    -I"$out" -I"$src")
 
 cc "${GSP_CFLAGS[@]}" -o "$out/hostcheck" "${GSP_SRCS[@]}"
 
@@ -72,6 +69,25 @@ if awk '/^static int run_ampere_boot\(\)/,/^static int run_gsp_rm_chain|^static 
     exit 1
 fi
 echo "OK: run_ampere_boot no invoca ACR antes del booter"
+
+# R5.1: las tres medidas del CE tienen que seguir ahí y en orden. El bring-up
+# no entra en el banco (necesita MMIO real), así que esto se comprueba sobre el
+# fuente: una de las tres se perdió una vez y el diagnóstico se quedó ciego.
+echo "=== R5.1: sondas de CE antes/después de GR0 y del promote ==="
+orden=$(grep -n "run_ce_probe(CE_PROBE_\|gsp_compute_stage_sass_bringup(" "$src/gsp_bringup.c" |
+    grep -oE "CE_PROBE_[A-Z0-9_]+|gsp_compute_stage_sass_bringup" | tr '\n' ' ')
+esperado="CE_PROBE_ANTES_GR0 gsp_compute_stage_sass_bringup CE_PROBE_TRAS_GR0 CE_PROBE_TRAS_PROMO "
+if [[ "$orden" != "$esperado" ]]; then
+    echo "FALLO: sondas de CE en «$orden»; se esperaba «$esperado»" >&2
+    echo "       (la medida va antes de la precarga de SASS, que es la mitigación)" >&2
+    exit 1
+fi
+if ! grep -q "gsp_chan_dump(&g_chan, \"sonda CE" "$src/gsp_bringup.c" ||
+   ! grep -q "gsp_ce_drain_events(&g_ce)" "$src/gsp_bringup.c"; then
+    echo "FALLO: el primer fallo de la sonda no conserva canal ni fault/RC" >&2
+    exit 1
+fi
+echo "OK: tres medidas de CE en orden, con volcado de estado en el primer fallo"
 
 echo "=== L6 — pasos 3 a 6 de la cadena FSP/COT + recepción de RPC ==="
 SOSO_ROOT="$root" "$out/hostcheck" "$ucode" "$boot" "$fmc"

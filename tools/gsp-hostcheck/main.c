@@ -471,6 +471,10 @@ static int falcon_lx_start(unsigned base)
 #include "gsp_bar1_body.inc"
 #include "gsp_grctx_body.inc"
 #include "gsp_buf_body.inc"
+/* R5: los cuerpos van sin sus `#include`, así que las definiciones de los
+ * juegos de SASS y de las familias se traen aquí (autónomas a propósito). */
+#include "gsp_sass.h"
+#include "sass_sets.h"
 #include "gsp_compute_body.inc"
 #include "gsp_fini_body.inc"
 
@@ -524,7 +528,7 @@ static int check_one_sass(const char *path, const char *what,
         return -1;
     }
     if (embed_len % 16 != 0) {
-        printf("FALLO: %s — %u B no es múltiplo de 16 (instrucción SASS sm_120)\n",
+        printf("FALLO: %s — %u B no es múltiplo de 16 (instrucción SASS)\n",
                what, embed_len);
         return -1;
     }
@@ -538,30 +542,191 @@ static int check_one_sass(const char *path, const char *what,
     return 0;
 }
 
-static int check_sass_embed(void)
+/* R5: un juego de SASS por arquitectura, y cada blob igual a su .bin. */
+static int check_sass_sets(void)
 {
-    if (check_one_sass(SOSO_SASS_BIN, "saxpy", gsp_saxpy_sass,
-                       gsp_saxpy_sass_len) != 0 ||
-        check_one_sass(SOSO_MV_SASS_BIN, "matvec", gsp_matvec_sass,
-                       gsp_matvec_sass_len) != 0) {
+    static const struct gsp_sass_set *const sets[] = GSP_SASS_SETS;
+    static const char *const nombres[] = {
+        "saxpy", "matvec", "matvec_q4k", "matvec_q80",
+        "matmul", "softmax_rows", "layernorm_rows",
+    };
+    unsigned n = (unsigned)(sizeof(nombres) / sizeof(nombres[0]));
+    unsigned s_i, k_i;
+
+    if (GSP_SASS_SET_COUNT < 2u) {
+        printf("FALLO: solo %u juego(s) de SASS; hacen falta Ampere y "
+               "Blackwell\n", GSP_SASS_SET_COUNT);
         return -1;
     }
-    /* Los dos blobs son kernels DISTINTOS. Un fallo de copia-pega en el script
-     * (los dos embeds generados desde el mismo cubin) daría verde en todo lo de
-     * arriba y lanzaría saxpy creyendo lanzar matvec. */
-    if (gsp_saxpy_sass_len == gsp_matvec_sass_len &&
-        memcmp(gsp_saxpy_sass, gsp_matvec_sass, gsp_saxpy_sass_len) == 0) {
-        printf("FALLO: saxpy y matvec son el mismo blob\n");
+    for (s_i = 0; s_i < GSP_SASS_SET_COUNT; s_i++) {
+        const struct gsp_sass_set *set = sets[s_i];
+
+        if (!set || !set->arch || set->count != n) {
+            printf("FALLO: juego %u incompleto (%u kernels, esperados %u)\n",
+                   s_i, set ? set->count : 0u, n);
+            return -1;
+        }
+        if (set->family == GSP_FAM_DESCONOCIDA) {
+            printf("FALLO: el juego %s no dice a qué familia sirve\n", set->arch);
+            return -1;
+        }
+        for (k_i = 0; k_i < n; k_i++) {
+            const struct gsp_sass_variant *v = gsp_sass_variant_of(set, nombres[k_i]);
+            char path[512];
+
+            if (!v) {
+                printf("FALLO: %s no trae %s\n", set->arch, nombres[k_i]);
+                return -1;
+            }
+            snprintf(path, sizeof(path), "%s/lxdde/ports/nouveau/sass/%s/%s.sass.bin",
+                     getenv("SOSO_ROOT") ? getenv("SOSO_ROOT") : ".",
+                     set->arch, nombres[k_i]);
+            if (check_one_sass(path, nombres[k_i], v->sass, v->sass_len) != 0) {
+                return -1;
+            }
+        }
+        /* Kernels distintos dentro del mismo juego: un copia-pega en el
+         * generador daría verde en todo lo anterior. */
+        {
+            const struct gsp_sass_variant *a = gsp_sass_variant_of(set, "saxpy");
+            const struct gsp_sass_variant *b = gsp_sass_variant_of(set, "matvec");
+
+            if (a->sass_len == b->sass_len &&
+                memcmp(a->sass, b->sass, a->sass_len) == 0) {
+                printf("FALLO: %s — saxpy y matvec son el mismo blob\n", set->arch);
+                return -1;
+            }
+            if (a->param_count != 4u || b->param_count != 5u) {
+                printf("FALLO: %s — params del cubin: saxpy %u (4), matvec %u (5)\n",
+                       set->arch, a->param_count, b->param_count);
+                return -1;
+            }
+        }
+        printf("OK: juego %s (familia %u) con %u kernels\n", set->arch,
+               set->family, set->count);
+    }
+    /* Los juegos NO son intercambiables: si dos arquitecturas dieran el mismo
+     * blob o el mismo `param_base`, elegir por familia no serviría de nada. */
+    {
+        const struct gsp_sass_variant *a = gsp_sass_variant_of(sets[0], "matvec");
+        const struct gsp_sass_variant *b = gsp_sass_variant_of(sets[1], "matvec");
+
+        if (a->sass_len == b->sass_len &&
+            memcmp(a->sass, b->sass, a->sass_len) == 0) {
+            printf("FALLO: %s y %s traen el mismo matvec\n", sets[0]->arch,
+                   sets[1]->arch);
+            return -1;
+        }
+        if (a->param_base == b->param_base) {
+            printf("aviso: %s y %s comparten param_base=%u\n", sets[0]->arch,
+                   sets[1]->arch, a->param_base);
+        } else {
+            printf("OK: param_base distinto por arquitectura (%s=%u, %s=%u): "
+                   "lanzar el juego equivocado leería basura\n",
+                   sets[0]->arch, a->param_base, sets[1]->arch, b->param_base);
+        }
+    }
+    return 0;
+}
+
+/* R5: la familia decide clase, QMD y SASS, y un desajuste se rechaza ANTES
+ * de enviar. Aceptar la clase en RM no basta. */
+static int check_family_caps(void)
+{
+    static const struct gsp_sass_set *const sets[] = GSP_SASS_SETS;
+    const struct gsp_family_caps *amp = gsp_family_caps_of(GSP_FAM_AMPERE);
+    const struct gsp_family_caps *bw = gsp_family_caps_of(GSP_FAM_BLACKWELL);
+    const struct gsp_sass_set *set_amp;
+    const struct gsp_sass_set *set_bw;
+
+    if (gsp_family_from_class(AMPERE_COMPUTE_B) != GSP_FAM_AMPERE ||
+        gsp_family_from_class(AMPERE_COMPUTE_A) != GSP_FAM_AMPERE ||
+        gsp_family_from_class(BLACKWELL_COMPUTE_B) != GSP_FAM_BLACKWELL ||
+        gsp_family_from_class(ADA_COMPUTE_A) != GSP_FAM_ADA ||
+        gsp_family_from_class(0x1234u) != GSP_FAM_DESCONOCIDA) {
+        printf("FALLO: familia mal deducida de la clase de compute\n");
         return -1;
     }
-    if (gsp_saxpy_param_count != 4u || gsp_matvec_param_count != 5u) {
-        printf("FALLO: params declarados por el cubin: saxpy %u (esperado 4), "
-               "matvec %u (esperado 5)\n",
-               gsp_saxpy_param_count, gsp_matvec_param_count);
+    if (!amp || !bw) {
+        printf("FALLO: falta la tabla de capacidades de Ampere o Blackwell\n");
         return -1;
     }
-    printf("OK: dos kernels distintos, %u y %u parámetros según el cubin\n",
-           gsp_saxpy_param_count, gsp_matvec_param_count);
+    if (bw->qmd_version != GSP_QMD_VERSION_CURRENT ||
+        bw->qmd_bytes != sizeof(GspQmdV05)) {
+        printf("FALLO: Blackwell debería usar el QMD v%u de %zu B\n",
+               GSP_QMD_VERSION_CURRENT, sizeof(GspQmdV05));
+        return -1;
+    }
+    if (amp->qmd_version != 0u) {
+        printf("FALLO: Ampere declara QMD v%u y el árbol no trae su layout "
+               "(cla0c0qmd.h llega a V01_07, era Pascal)\n", amp->qmd_version);
+        return -1;
+    }
+    set_amp = gsp_sass_pick(sets, GSP_SASS_SET_COUNT, GSP_FAM_AMPERE);
+    set_bw = gsp_sass_pick(sets, GSP_SASS_SET_COUNT, GSP_FAM_BLACKWELL);
+    if (!set_amp || !set_bw || set_amp == set_bw) {
+        printf("FALLO: cada familia debe elegir su propio juego de SASS\n");
+        return -1;
+    }
+    if (strcmp(set_amp->arch, amp->sass_arch) != 0 ||
+        strcmp(set_bw->arch, bw->sass_arch) != 0) {
+        printf("FALLO: el juego elegido (%s/%s) no es el que pide la tabla "
+               "(%s/%s)\n", set_amp->arch, set_bw->arch, amp->sass_arch,
+               bw->sass_arch);
+        return -1;
+    }
+    if (gsp_sass_pick(sets, GSP_SASS_SET_COUNT, GSP_FAM_HOPPER) != 0) {
+        printf("FALLO: no hay SASS de Hopper y se ha elegido uno\n");
+        return -1;
+    }
+
+    /* El rechazo antes de submit, con un `gsp_compute` de mentira. */
+    {
+        struct gsp_compute cp;
+        struct gsp_kernel k;
+
+        memset(&cp, 0, sizeof(cp));
+        memset(&k, 0, sizeof(k));
+        cp.ready = 1;
+        k.name = "matvec";
+        k.staged = 1;
+
+        cp.family = GSP_FAM_BLACKWELL;
+        cp.caps = bw;
+        cp.sass = set_bw;
+        k.arch = set_bw->arch;
+        if (gsp_compute_launch_ready(&cp, &k, "prueba") != 0) {
+            printf("FALLO: Blackwell con su SASS debería poder lanzar\n");
+            return -1;
+        }
+        k.arch = set_amp->arch;
+        if (gsp_compute_launch_ready(&cp, &k, "prueba") == 0) {
+            printf("FALLO: se admitió SASS de %s en Blackwell\n", set_amp->arch);
+            return -1;
+        }
+        k.arch = set_bw->arch;
+        k.staged = 0;
+        if (gsp_compute_launch_ready(&cp, &k, "prueba") == 0) {
+            printf("FALLO: se admitió un kernel que no está en VRAM\n");
+            return -1;
+        }
+        k.staged = 1;
+        cp.family = GSP_FAM_AMPERE;
+        cp.caps = amp;
+        cp.sass = set_amp;
+        k.arch = set_amp->arch;
+        if (gsp_compute_launch_ready(&cp, &k, "prueba") == 0) {
+            printf("FALLO: Ampere lanzó con un QMD que no es el suyo\n");
+            return -1;
+        }
+        cp.caps = 0;
+        if (gsp_compute_launch_ready(&cp, &k, "prueba") == 0) {
+            printf("FALLO: familia sin capacidades y aun así lanza\n");
+            return -1;
+        }
+    }
+    printf("OK: por familia — clase, QMD y SASS; Ampere se rechaza antes de "
+           "enviar (sin layout de QMD en el árbol)\n");
     return 0;
 }
 
@@ -2055,23 +2220,23 @@ static int check_compute_params(struct gsp_compute *cp)
     const uint64_t xv = 0x1111222233334444ull, yv = 0x5555666677778888ull;
 
     gsp_compute_set_params(cp, 2.5f, xv, yv, 77);
-    p = (const unsigned char *)cp->data.va + G4F_CBANK_OFF + gsp_saxpy_param_base;
+    p = (const unsigned char *)cp->data.va + G4F_CBANK_OFF + cp->saxpy.param_base;
 
-    if (gsp_saxpy_param_base + gsp_saxpy_param_size != gsp_saxpy_cbank_size) {
+    if (cp->saxpy.param_base + cp->saxpy.param_size != cp->saxpy.cbank_size) {
         printf("FALLO: params en %u+%u no acaban en el final del cbank (%u)\n",
-               gsp_saxpy_param_base, gsp_saxpy_param_size, gsp_saxpy_cbank_size);
+               cp->saxpy.param_base, cp->saxpy.param_size, cp->saxpy.cbank_size);
         return -1;
     }
-    if (*(const float *)(p + gsp_saxpy_param_off[0]) != 2.5f ||
-        *(const uint64_t *)(p + gsp_saxpy_param_off[1]) != xv ||
-        *(const uint64_t *)(p + gsp_saxpy_param_off[2]) != yv ||
-        *(const uint32_t *)(p + gsp_saxpy_param_off[3]) != 77u) {
+    if (*(const float *)(p + cp->saxpy.param_off[0]) != 2.5f ||
+        *(const uint64_t *)(p + cp->saxpy.param_off[1]) != xv ||
+        *(const uint64_t *)(p + cp->saxpy.param_off[2]) != yv ||
+        *(const uint32_t *)(p + cp->saxpy.param_off[3]) != 77u) {
         printf("FALLO: parámetros mal colocados en el constant bank\n");
         return -1;
     }
     printf("OK: params a/x/y/n en cbank0+0x%x (+%u/+%u/+%u/+%u)\n",
-           gsp_saxpy_param_base, gsp_saxpy_param_off[0], gsp_saxpy_param_off[1],
-           gsp_saxpy_param_off[2], gsp_saxpy_param_off[3]);
+           cp->saxpy.param_base, cp->saxpy.param_off[0], cp->saxpy.param_off[1],
+           cp->saxpy.param_off[2], cp->saxpy.param_off[3]);
     return 0;
 }
 
@@ -2082,23 +2247,23 @@ static int check_compute_params(struct gsp_compute *cp)
 static int check_mv_params(struct gsp_compute *cp)
 {
     const unsigned char *cb = (const unsigned char *)cp->data.va + G4F_CBANK_OFF;
-    const unsigned char *p = cb + gsp_matvec_param_base;
+    const unsigned char *p = cb + cp->matvec.param_base;
     const uint64_t wv = 0xaaaabbbbccccddddull, xv = 0x1111222233334444ull;
     const uint64_t yv = 0x5555666677778888ull;
 
     gsp_compute_set_mv_params(cp, &cp->matvec, wv, xv, yv, 33u, 1024u);
 
-    if (gsp_matvec_param_base + gsp_matvec_param_size != gsp_matvec_cbank_size) {
+    if (cp->matvec.param_base + cp->matvec.param_size != cp->matvec.cbank_size) {
         printf("FALLO: params de matvec en %u+%u no acaban en el final del cbank "
-               "(%u)\n", gsp_matvec_param_base, gsp_matvec_param_size,
-               gsp_matvec_cbank_size);
+               "(%u)\n", cp->matvec.param_base, cp->matvec.param_size,
+               cp->matvec.cbank_size);
         return -1;
     }
-    if (*(const uint64_t *)(p + gsp_matvec_param_off[0]) != wv ||
-        *(const uint64_t *)(p + gsp_matvec_param_off[1]) != xv ||
-        *(const uint64_t *)(p + gsp_matvec_param_off[2]) != yv ||
-        *(const uint32_t *)(p + gsp_matvec_param_off[3]) != 33u ||
-        *(const uint32_t *)(p + gsp_matvec_param_off[4]) != 1024u) {
+    if (*(const uint64_t *)(p + cp->matvec.param_off[0]) != wv ||
+        *(const uint64_t *)(p + cp->matvec.param_off[1]) != xv ||
+        *(const uint64_t *)(p + cp->matvec.param_off[2]) != yv ||
+        *(const uint32_t *)(p + cp->matvec.param_off[3]) != 33u ||
+        *(const uint32_t *)(p + cp->matvec.param_off[4]) != 1024u) {
         printf("FALLO: parámetros de matvec mal colocados en el constant bank\n");
         return -1;
     }
@@ -2114,9 +2279,9 @@ static int check_mv_params(struct gsp_compute *cp)
     }
     printf("OK: params w/x/y/rows/cols de matvec en cbank0+0x%x "
            "(+%u/+%u/+%u/+%u/+%u) y ntid=%u\n",
-           gsp_matvec_param_base, gsp_matvec_param_off[0], gsp_matvec_param_off[1],
-           gsp_matvec_param_off[2], gsp_matvec_param_off[3],
-           gsp_matvec_param_off[4], G4F_CTA_THREADS);
+           cp->matvec.param_base, cp->matvec.param_off[0], cp->matvec.param_off[1],
+           cp->matvec.param_off[2], cp->matvec.param_off[3],
+           cp->matvec.param_off[4], G4F_CTA_THREADS);
     return 0;
 }
 
@@ -4375,7 +4540,9 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
 
-        if (check_sass_embed() != 0)
+        if (check_sass_sets() != 0)
+            return -1;
+        if (check_family_caps() != 0)
             return -1;
 
         if (gsp_compute_init(&v.rm, &chan_gr, &cp) != 0) {

@@ -111,6 +111,7 @@ static struct gsp_buf g_buf;             /* buffers de usuario en VRAM (G6) */
 static struct gsp_bar1 g_bar1;           /* apertura de CPU a VRAM: sólo mirar */
 static struct gsp_grctx g_grctx;          /* contexto del canal de GR (G4f) */
 static int g_ce_verified;                /* el CE movió bytes de verdad (G4e) */
+static int g_sass_pre_staged;            /* SASS en VRAM antes de GR0 (GA107) */
 static uint64_t g_vram_block;            /* bloque de VRAM mapeado en G4d */
 static struct lx_pci_dev *g_pdev;   /* para leer BARs y BDF del espacio de config */
 static uint64_t g_vram_bytes;
@@ -678,6 +679,96 @@ static void run_g6_pool_stage(void)
     }
 }
 
+/* Etiqueta legible del resultado de una sonda de CE. */
+static const char *ce_probe_txt(int v)
+{
+    return v > 0 ? "mueve" : (v < 0 ? "NO señaliza" : "sin medir");
+}
+
+/* R5.1: el CE medido en los tres puntos que importan.
+ *
+ * En GA107 run15 el CE verificaba (G4e GO) y la primera copia *después* de
+ * crear GR0 y promocionar contexto no señalizaba. Con una sola medida no se
+ * puede decir si murió al crear el canal de GR, al colgarle la clase o en el
+ * promote — y precargar el SASS antes de GR0 es una mitigación, no la medida.
+ *
+ * Así que se mide lo mismo (una copia de 4 KiB a la VA que G4e ya movió, con
+ * readback) en tres puntos, y en el PRIMER fallo se conserva el estado: dump
+ * del canal (GET/PUT del PBDMA, doorbell, errores), fault/RC del GSP y el
+ * valor del semáforo. Después el bring-up sigue: esto diagnostica, no decide.
+ */
+#define CE_PROBE_ANTES_GR0   0
+#define CE_PROBE_TRAS_GR0    1
+#define CE_PROBE_TRAS_PROMO  2
+#define CE_PROBE_N           3
+
+static const char *const g_ce_probe_nombre[CE_PROBE_N] = {
+    "antes de GR0", "tras crear GR0", "tras PROMOTE_CTX",
+};
+/* 0 = no medido, 1 = movió bytes, -1 = no señalizó. */
+static int g_ce_probe[CE_PROBE_N];
+static int g_ce_probe_primer_fallo = -1;
+
+static void run_ce_probe(int punto)
+{
+    int rc;
+
+    if (punto < 0 || punto >= CE_PROBE_N) {
+        return;
+    }
+    if (!g_ce_verified || !g_ce.ready) {
+        lx_printk("nouveau-lx: sonda CE (%s) — sin CE verificado, no se mide\n",
+                  g_ce_probe_nombre[punto]);
+        return;
+    }
+    if (g_ce.stuck) {
+        g_ce_probe[punto] = -1;
+        lx_printk("nouveau-lx: sonda CE (%s) — el CE ya estaba atascado\n",
+                  g_ce_probe_nombre[punto]);
+        return;
+    }
+    /* Misma copia que el selftest de G4e: mismo tamaño y misma VA destino, para
+     * que la única variable sea el punto del bring-up. */
+    rc = gsp_ce_copy_sync(&g_ce, G4D_VA_BASE, G4D_SCRATCH_VA, 4096u,
+                          GSP_CE_WAIT_MS);
+    g_ce_probe[punto] = (rc == 0) ? 1 : -1;
+    if (rc == 0) {
+        lx_printk("nouveau-lx: sonda CE (%s): mueve 4 KiB\n",
+                  g_ce_probe_nombre[punto]);
+        return;
+    }
+    lx_printk("nouveau-lx: sonda CE (%s): NO señaliza\n",
+              g_ce_probe_nombre[punto]);
+    if (g_ce_probe_primer_fallo < 0) {
+        g_ce_probe_primer_fallo = punto;
+        /* Estado del primer fallo, antes de que nada más lo pise. */
+        gsp_chan_dump(&g_chan, "sonda CE (canal COPY0)");
+        if (g_chan_gr.ready) {
+            gsp_chan_dump(&g_chan_gr, "sonda CE (canal GR0)");
+        }
+        lx_printk("nouveau-lx: sonda CE — semáforo=%u esperaba %u (seq %u), "
+                  "notifier VA 0x%llx\n",
+                  g_chan.notifier.va
+                      ? *(const volatile uint32_t *)g_chan.notifier.va
+                      : 0u,
+                  g_ce.pending, g_ce.seq,
+                  (unsigned long long)g_chan.notifier_va);
+        /* Fault/RC del GSP: RM los cuenta por evento y si nadie escucha se
+         * quedan en la cola (ver GSP_CE_RC_DRAIN_MS). */
+        gsp_ce_drain_events(&g_ce);
+    }
+}
+
+static void run_ce_probe_resumen(void)
+{
+    lx_printk("nouveau-lx: sonda CE — %s=%s, %s=%s, %s=%s%s\n",
+              g_ce_probe_nombre[0], ce_probe_txt(g_ce_probe[0]),
+              g_ce_probe_nombre[1], ce_probe_txt(g_ce_probe[1]),
+              g_ce_probe_nombre[2], ce_probe_txt(g_ce_probe[2]),
+              g_ce_probe_primer_fallo >= 0 ? " (primer fallo con estado volcado)"
+                                           : "");
+}
+
 static int run_chan_ce_stage(void)
 {
     if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan, g_vmm.vaspace,
@@ -704,6 +795,20 @@ static int run_chan_ce_stage(void)
          * CE ya verificado (GA107 run13: `pool VRAM=no`). Linux no ata FB al
          * canal GR. Va aquí, antes del dump de BAR1 y de GR0. */
         run_g6_pool_stage();
+        /* Medida 1 de 3: el CE aquí ya está verificado; esto fija la línea
+         * base con la que se comparan las otras dos. */
+        run_ce_probe(CE_PROBE_ANTES_GR0);
+        /* SASS a VRAM antes de GR0: en GA107 run15 el CE deja de señalizar en el
+         * primer blit *después* de programar el canal GR en la runlist 0xc00000.
+         * Es una mitigación del orden de operaciones, no la medida. */
+        if (!g_ce.stuck &&
+            gsp_compute_stage_sass_bringup(&g_ce, G4D_SCRATCH_VA, g_scratch.va,
+                                           4096u) == 0) {
+            g_sass_pre_staged = 1;
+        } else {
+            lx_printk("nouveau-lx: SASS de bring-up no llegó a VRAM (se reintentará "
+                      "sin marcar pool)\n");
+        }
         /* Tras el CE: sólo se MIRA BAR1. Linux GSP (`r535_bar_bar1_init`) envuelve
          * `gsp->bar.rm_bar1_pdb` y no recorre el bloque de instancia ni parchea
          * PTEs. En GA107 run13 el PDB de instancia ≠ `bar1PdeBase` y caminarlo
@@ -758,28 +863,13 @@ static int run_compute_stage(void)
     }
     g_phase = GSP_RM_COMPUTE;
 
-    /* SASS no necesita el contexto de GR: es un blob en VRAM que copia el CE.
-     * En silicio la primera copia CE *después* de PROMOTE_CTX no señalizaba
-     * (PBDMA sí consumió el PB; GSP-RM sin RC). Linux no mete un blit de cliente
-     * entre el golden ctx de FECS y el siguiente uso del COPY. Se stagea antes. */
-    if (gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.saxpy,
-                               G4D_SCRATCH_VA, g_scratch.va, 4096u) != 0) {
-        lx_printk("nouveau-lx: SASS de saxpy no llegó a VRAM (el CE no señalizó)\n");
-    } else if (gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.matvec,
-                                      G4D_SCRATCH_VA, g_scratch.va, 4096u) != 0) {
-        lx_printk("nouveau-lx: SASS de matvec no llegó a VRAM (el CE no señalizó)\n");
-    } else {
-        int q4k = gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.matvec_q4k,
-                                         G4D_SCRATCH_VA, g_scratch.va, 4096u);
-        int q80 = gsp_compute_stage_sass(&g_compute, &g_ce, &g_compute.matvec_q80,
-                                         G4D_SCRATCH_VA, g_scratch.va, 4096u);
-
-        lx_printk("nouveau-lx: SASS en VRAM — saxpy %u B, matvec %u B, "
-                  "matvec_q4k %u B (%s), matvec_q80 %u B (%s)\n",
-                  g_compute.saxpy.sass_len, g_compute.matvec.sass_len,
-                  g_compute.matvec_q4k.sass_len, q4k == 0 ? "ok" : "FALLO",
-                  g_compute.matvec_q80.sass_len, q80 == 0 ? "ok" : "FALLO");
+    if (g_sass_pre_staged) {
+        gsp_compute_mark_sass_staged(&g_compute);
     }
+
+    /* Medida 2 de 3: el canal de GR0 existe y tiene su clase colgada, pero
+     * todavía no hay contexto promocionado. */
+    run_ce_probe(CE_PROBE_TRAS_GR0);
 
     /* El contexto del canal de GR, en el orden de upstream: `r535_gr_oneinit`
      * reserva el canal, le cuelga la clase y **después** promociona
@@ -794,17 +884,11 @@ static int run_compute_stage(void)
                                  &g_grctx) != 0) {
         lx_printk("nouveau-lx: contexto de GR sin promocionar — el QMD no puede "
                   "correr todavía\n");
-    } else if (!g_ce.stuck) {
-        /* Misma copia 4 KiB que G4e: si esto no señaliza, el CE murió en el
-         * promote (FECS / COPY0 compartido), no en el tamaño del SASS. */
-        if (gsp_ce_copy_sync(&g_ce, G4D_VA_BASE, G4D_SCRATCH_VA, 4096u,
-                             GSP_CE_WAIT_MS) != 0) {
-            lx_printk("nouveau-lx: CE muerto tras PROMOTE_CTX (copia 4 KiB a la "
-                      "VA que G4e sí movió)\n");
-        } else {
-            lx_printk("nouveau-lx: CE vivo tras PROMOTE_CTX\n");
-        }
     }
+    /* Medida 3 de 3: la que faltaba. Si el CE muere aquí y no en la 2, el
+     * culpable es el promote (golden ctx de FECS), no crear el canal. */
+    run_ce_probe(CE_PROBE_TRAS_PROMO);
+    run_ce_probe_resumen();
     /* El lanzamiento del QMD NO se hace aquí: el bring-up deja el compute
      * armado y sale. Un kernel que se lance en el arranque y falle deja la
      * tarjeta en un estado del que sólo se sale reseteando el equipo. */
