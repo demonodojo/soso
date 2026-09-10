@@ -43,6 +43,10 @@ unsafe extern "C" {
     fn lx_iwlwifi_poll();
 }
 
+/// Mismo tamaño que `struct iwl_ax211_bss`, que se copia con memcpy sobre este
+/// array. El driver tiene el assert simétrico.
+const _: () = assert!(core::mem::size_of::<LxWifiBss>() == 46);
+
 static mut WIFI_REGISTERED: bool = false;
 
 /// Propietario único del transporte iwlwifi (R4).

@@ -251,6 +251,10 @@ struct iwl_ax211_bss {
     uint8_t band24;
 };
 
+/* El espejo en Rust se copia con memcpy: si esto cambia de tamaño hay que
+ * cambiar `LxWifiBss` a la vez, y así el compilador lo recuerda. */
+typedef char iwl_ax211_bss_size_check[sizeof(struct iwl_ax211_bss) == 46 ? 1 : -1];
+
 /* Elementos y bits de 802.11 que hacen falta para clasificar un BSS. */
 #define WLAN_EID_SSID              0
 #define WLAN_EID_DS_PARAMS         3
