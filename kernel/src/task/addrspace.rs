@@ -398,26 +398,46 @@ impl AddrSpace {
         Some(())
     }
 
-    /// Extiende una región anónima existente (mremap simplificado).
-    /// `old_len` debe coincidir con la región; `new_len == old_len` también se valida.
+    /// Extiende una región anónima existente (mremap sin mover).
+    ///
+    /// Contrato (R9), igual que el de `mmap`/`munmap`: `addr` alineado a
+    /// página, longitudes distintas de cero y ya redondeadas al alza por
+    /// `sys_mremap`, `old_len` **exactamente** la longitud de la región y
+    /// `new_len >= old_len` (encoger no está soportado).
+    ///
+    /// El intervalo se reserva bajo el candado del libro de regiones *antes*
+    /// de materializarlo, y las páginas se piden con el candado suelto: el
+    /// fault-in vuelve a entrar en el gestor de memoria y sostenerlo aquí
+    /// era una reentrada esperando a ocurrir. Si algo falla a medias, el
+    /// rollback devuelve la longitud anterior y retira solo las páginas que
+    /// mapeó esta operación.
     pub fn grow_anon(&self, addr: u64, old_len: u64, new_len: u64) -> Option<u64> {
+        if addr == 0 || addr & 0xfff != 0 {
+            return None;
+        }
+        if old_len == 0 || new_len == 0 {
+            return None;
+        }
+        if old_len & 0xfff != 0 || new_len & 0xfff != 0 {
+            return None;
+        }
+        if new_len < old_len {
+            return None;
+        }
         let grow_end = addr.checked_add(new_len)?;
         if grow_end > soso_abi::MMAP_LIMIT {
             return None;
         }
+        let start = addr.checked_add(old_len)?;
+
+        // Fase 1 — validar y reservar. Mientras la región mida `new_len`,
+        // `next_addr` no puede repartir nada del intervalo.
         {
-            let book = self.inner.mmap.lock();
+            let mut book = self.inner.mmap.lock();
             let idx = book
                 .regions
                 .iter()
-                .position(|r| r.virt_start == addr && r.inode == 0)?;
-            if book.regions[idx].len != old_len {
-                return None;
-            }
-            if new_len < old_len {
-                return None;
-            }
-            let start = addr.checked_add(old_len)?;
+                .position(|r| r.virt_start == addr && r.inode == 0 && r.len == old_len)?;
             for (i, r) in book.regions.iter().enumerate() {
                 if i == idx {
                     continue;
@@ -427,26 +447,44 @@ impl AddrSpace {
                     return None;
                 }
             }
+            if new_len == old_len {
+                // No-op válido: la región existe y mide lo que dice.
+                return Some(addr);
+            }
+            book.regions[idx].len = new_len;
+            if book.next < grow_end {
+                book.next = grow_end;
+            }
         }
-        if new_len == old_len {
-            return Some(addr);
-        }
-        let start = addr.checked_add(old_len)?;
+
+        // Fase 2 — materializar sin candado.
         let mut va = start;
         while va < grow_end {
-            if self.ensure_mapped(va).is_none() {
-                self.unmap_range(start, va - start);
+            // Una página ya presente en el hueco significa que el mapa y el
+            // libro no concuerdan: se aborta sin adoptarla ni liberarla.
+            if self.is_mapped(va) || self.ensure_mapped(va).is_none() {
+                self.rollback_grow(addr, start, va, old_len, new_len);
                 return None;
             }
             va += 4096;
         }
-        let mut book = self.inner.mmap.lock();
-        let idx = book
-            .regions
-            .iter()
-            .position(|r| r.virt_start == addr && r.inode == 0 && r.len == old_len)?;
-        book.regions[idx].len = new_len;
         Some(addr)
+    }
+
+    /// Deshace un `grow_anon` a medias: longitud anterior y solo las páginas
+    /// de `[start, hasta)`, que son las que mapeó esta operación.
+    fn rollback_grow(&self, addr: u64, start: u64, hasta: u64, old_len: u64, new_len: u64) {
+        if hasta > start {
+            self.unmap_range(start, hasta - start);
+        }
+        let mut book = self.inner.mmap.lock();
+        if let Some(r) = book
+            .regions
+            .iter_mut()
+            .find(|r| r.virt_start == addr && r.inode == 0 && r.len == new_len)
+        {
+            r.len = old_len;
+        }
     }
 
     pub fn activate(&self) {

@@ -149,7 +149,8 @@ static void sim_procesa_descarga(void)
     uint32_t base = SIM_BHIE_OFF;
     if (sim.fw_falla) {
         sim.reg[(base + BHIE_TXVECSTATUS_OFFS) / 4] =
-            (BHIE_TXVECSTATUS_STATUS_ERROR << BHIE_TXVECSTATUS_STATUS_SHIFT) | sim.fw_seq;
+            ((uint32_t)BHIE_TXVECSTATUS_STATUS_ERROR << BHIE_TXVECSTATUS_STATUS_SHIFT) |
+            sim.fw_seq;
         return;
     }
     const struct bhi_vec_entry *vec = (const struct bhi_vec_entry *)(uintptr_t)sim.vec_addr;
@@ -162,7 +163,8 @@ static void sim_procesa_descarga(void)
     sim.fw_bytes_vistos = total;
     sim.fw_descargado = 1;
     sim.reg[(base + BHIE_TXVECSTATUS_OFFS) / 4] =
-        (BHIE_TXVECSTATUS_STATUS_XFER_COMPL << BHIE_TXVECSTATUS_STATUS_SHIFT) | sim.fw_seq;
+        ((uint32_t)BHIE_TXVECSTATUS_STATUS_XFER_COMPL << BHIE_TXVECSTATUS_STATUS_SHIFT) |
+        sim.fw_seq;
     /* Tras cargar amss.bin el dispositivo cambia de entorno. */
     sim.ee = MHI_EE_AMSS;
     sim.reg[(SIM_BHI_OFF + BHI_EXECENV) / 4] = MHI_EE_AMSS;

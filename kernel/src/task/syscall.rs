@@ -2377,18 +2377,34 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
     })
 }
 
+/// mremap sin mover (R9).
+///
+/// Contrato: `flags` ha de ser 0 (mover, MREMAP_FIXED y compañía siguen sin
+/// soportarse), `addr` alineado a página, longitudes distintas de cero y
+/// redondeadas al alza a página igual que en `mmap`/`munmap`, y encoger es
+/// EINVAL. Una longitud desalineada no se rechaza por sí misma: se normaliza,
+/// como hace el resto del ABI de memoria.
 fn sys_mremap(addr: u64, old_len: u64, new_len: u64, flags: u64) -> Result<u64, i64> {
-    if new_len < old_len {
+    if flags != 0 {
         return Err(-abi::EINVAL);
     }
-    if flags != 0 {
+    if addr == 0 || addr & 0xfff != 0 {
+        return Err(-abi::EINVAL);
+    }
+    if old_len == 0 || new_len == 0 {
+        return Err(-abi::EINVAL);
+    }
+    let old = old_len.checked_next_multiple_of(4096).ok_or(-abi::EINVAL)?;
+    let new = new_len.checked_next_multiple_of(4096).ok_or(-abi::EINVAL)?;
+    if new < old {
+        return Err(-abi::EINVAL);
+    }
+    if addr.checked_add(new).is_none() {
         return Err(-abi::EINVAL);
     }
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
-        space
-            .grow_anon(addr, old_len, new_len)
-            .ok_or(-abi::ENOMEM)
+        space.grow_anon(addr, old, new).ok_or(-abi::ENOMEM)
     })
 }
 

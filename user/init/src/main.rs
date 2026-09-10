@@ -81,6 +81,9 @@ fn main(args: &str) -> u8 {
     if args == "mremap-test" {
         return modo_mremap_test();
     }
+    if args == "mremap-oom" {
+        return modo_mremap_oom();
+    }
     if args == "mprotect-interior" {
         return modo_mprotect_interior();
     }
@@ -181,6 +184,49 @@ fn modo_mremap_test() -> u8 {
     }
     unsafe {
         *((grown as u64 + 5000) as *mut u8) = 99;
+    }
+    0
+}
+
+/// R9: un mremap que se queda sin memoria a mitad tiene que dejar el mapa
+/// como estaba. El tamaño se calcula con `meminfo`, así que falla sea cual sea
+/// la RAM de la máquina, y va en un hijo aparte para que la presión de memoria
+/// no salpique al resto de la batería.
+fn modo_mremap_oom() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base <= 0 {
+        return 1;
+    }
+    unsafe {
+        *((base as u64) as *mut u8) = 0xa5;
+    }
+    let mut mi = abi::MemInfo::default();
+    if sys::meminfo(&mut mi) < 0 {
+        return 2;
+    }
+    // Más de lo que hay, con margen para que ni el reclaim lo salve.
+    let paginas = mi.free_frames + mi.free_frames / 4 + 1024;
+    let grande = paginas.saturating_mul(4096);
+    if sys::mremap(base as u64, 4096, grande, 0) >= 0 {
+        return 3;
+    }
+    // El contenido y los permisos de la región original siguen ahí…
+    if unsafe { *((base as u64) as *const u8) } != 0xa5 {
+        return 4;
+    }
+    unsafe {
+        *((base as u64) as *mut u8) = 0x5a;
+    }
+    // …y la región sigue midiendo 4096: si el rollback no hubiera devuelto la
+    // longitud, este crecer con old_len=4096 sería rechazado.
+    if sys::mremap(base as u64, 4096, 8192, 0) != base {
+        return 5;
+    }
+    unsafe {
+        *((base as u64 + 4096) as *mut u8) = 1;
+    }
+    if unsafe { *((base as u64) as *const u8) } != 0x5a {
+        return 6;
     }
     0
 }
@@ -608,24 +654,91 @@ fn suite() -> u8 {
             sys::mremap(base as u64, 8192, 8192, 0) == base,
             "mremap misma longitud valida la región"
         );
+        // R9: contrato de longitudes y modos. Cero es error, no un no-op; la
+        // dirección va alineada; los flags distintos de 0 siguen sin existir.
+        check!(
+            sys::mremap(base as u64, 0, 8192, 0) < 0,
+            "mremap old_len=0 rechazado"
+        );
+        check!(
+            sys::mremap(base as u64, 8192, 0, 0) < 0,
+            "mremap new_len=0 rechazado"
+        );
+        check!(
+            sys::mremap(base as u64 + 1, 8192, 12288, 0) < 0,
+            "mremap addr desalineada rechazada"
+        );
+        check!(
+            sys::mremap(base as u64 + 4096, 4096, 8192, 0) < 0,
+            "mremap desde el interior de la región rechazado"
+        );
+        check!(
+            sys::mremap(base as u64, 8192, 12288, 1) < 0,
+            "mremap con flags no soportados rechazado"
+        );
+        check!(
+            sys::mremap(base as u64, 4096, 4096, 0) < 0,
+            "mremap no-op con old_len que no es la región rechazado"
+        );
+        unsafe {
+            *((base as u64 + 4100) as *mut u8) = 0x33;
+        }
+        // Longitudes desalineadas se normalizan al alza, como en mmap/munmap.
+        check!(
+            sys::mremap(base as u64, 8000, 12000, 0) == base,
+            "mremap normaliza longitudes desalineadas"
+        );
+        unsafe {
+            *((base as u64 + 12000) as *mut u8) = 0x44;
+        }
+        check!(
+            unsafe { *((base as u64 + 4100) as *const u8) } == 0x33
+                && unsafe { *((base as u64 + 12000) as *const u8) } == 0x44,
+            "el contenido sobrevive al crecimiento"
+        );
         unsafe {
             *((grown as u64 + 6000) as *mut u8) = 7;
         }
         check!(
-            sys::mremap(grown as u64, 8192, 4096, 0) < 0,
+            sys::mremap(grown as u64, 12288, 4096, 0) < 0,
             "mremap shrink rechazado"
         );
         let a = sys::mmap(0, 4096, u64::MAX, 0);
         check!(a > 0, "mmap región A");
         let b = sys::mmap(a as u64 + 4096, 4096, u64::MAX, 0);
         check!(b == a + 4096, "mmap región B adyacente (b={b})");
+        unsafe {
+            *((b as u64) as *mut u8) = 0x77;
+        }
         check!(
             sys::mremap(a as u64, 4096, 8192, 0) < 0,
             "mremap grow con colisión rechazado"
         );
+        // El solape falla antes de tocar nada: B conserva contenido y permisos.
+        check!(
+            unsafe { *((b as u64) as *const u8) } == 0x77,
+            "la región vecina sobrevive al solape"
+        );
         unsafe {
             *((b as u64) as *mut u8) = 55;
         }
+        check!(
+            sys::mremap(a as u64, 4096, 4096, 0) == a,
+            "tras el solape, A sigue midiendo 4096"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mremap-oom"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mremap-oom (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "mremap sin memoria: rollback conserva mapa y contenido"
+        );
         let pid = sys::spawn_io_ex(
             "/bin/init",
             &["init", "mremap-test"],

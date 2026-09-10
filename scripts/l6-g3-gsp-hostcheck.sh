@@ -41,16 +41,29 @@ for m in gsp_dma gsp_rm gsp_wpr gsp_libos fmc_lx fsp_lx gsp_cpu_seq gsp_rpc gsp_
         > "$out/${m}_body.inc"
 done
 
-cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
-   -I"$out" -I"$src" \
-   -DSOSO_SASS_BIN="\"$src/saxpy.sass.bin\"" \
-   -DSOSO_MV_SASS_BIN="\"$src/matvec.sass.bin\"" \
-   -o "$out/hostcheck" \
-   "$root/tools/gsp-hostcheck/main.c" \
-   "$src/saxpy_sass_embed.c" "$src/matvec_sass_embed.c" \
-   "$src/matvec_q4k_sass_embed.c" "$src/matvec_q80_sass_embed.c" \
-   "$src/matmul_sass_embed.c" "$src/softmax_rows_sass_embed.c" \
-   "$src/layernorm_rows_sass_embed.c"
+GSP_SRCS=(
+    "$root/tools/gsp-hostcheck/main.c"
+    "$src/saxpy_sass_embed.c" "$src/matvec_sass_embed.c"
+    "$src/matvec_q4k_sass_embed.c" "$src/matvec_q80_sass_embed.c"
+    "$src/matmul_sass_embed.c" "$src/softmax_rows_sass_embed.c"
+    "$src/layernorm_rows_sass_embed.c"
+)
+GSP_CFLAGS=(-O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
+    -I"$out" -I"$src"
+    -DSOSO_SASS_BIN="\"$src/saxpy.sass.bin\""
+    -DSOSO_MV_SASS_BIN="\"$src/matvec.sass.bin\"")
+
+cc "${GSP_CFLAGS[@]}" -o "$out/hostcheck" "${GSP_SRCS[@]}"
+
+# Segunda pasada con sanitizadores (R1/R10): el banco maneja punteros a
+# firmware real y aritmética de páginas; ASan/UBSan cazan ahí lo que el
+# resultado «OK» no ve. `alignment` fuera: las structs de protocolo son packed.
+# SOSO_GSP_NO_SAN=1 lo salta (bootstrap sin ASan).
+if [[ "${SOSO_GSP_NO_SAN:-0}" != 1 ]]; then
+    cc "${GSP_CFLAGS[@]}" -g -fsanitize=address,undefined -fno-sanitize=alignment \
+       -fno-omit-frame-pointer -fno-sanitize-recover=undefined \
+       -o "$out/hostcheck-san" "${GSP_SRCS[@]}"
+fi
 
 echo "=== Ampere boot: FWSEC → booter (sin ACR previo) ==="
 if awk '/^static int run_ampere_boot\(\)/,/^static int run_gsp_rm_chain|^static int run_fmc|^}/' \
@@ -62,3 +75,15 @@ echo "OK: run_ampere_boot no invoca ACR antes del booter"
 
 echo "=== L6 — pasos 3 a 6 de la cadena FSP/COT + recepción de RPC ==="
 SOSO_ROOT="$root" "$out/hostcheck" "$ucode" "$boot" "$fmc"
+
+if [[ -x "$out/hostcheck-san" ]]; then
+    echo "=== L6 — misma cadena con ASan+UBSan ==="
+    if ! SOSO_ROOT="$root" ASAN_OPTIONS="detect_leaks=0" \
+         UBSAN_OPTIONS="print_stacktrace=1" \
+         "$out/hostcheck-san" "$ucode" "$boot" "$fmc" > "$out/hostcheck-san.log" 2>&1; then
+        echo "FALLO sanitizadores en el banco GSP:" >&2
+        cat "$out/hostcheck-san.log" >&2
+        exit 1
+    fi
+    echo "OK: banco GSP sin hallazgos de ASan/UBSan"
+fi

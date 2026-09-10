@@ -35,11 +35,22 @@ void lx_dma_free_coherent(struct lx_pci_dev *dev, size_t size, void *cpu_addr, u
 #endif
 HDR
 
-cc -O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
-   -I"$out" -I"$src" \
-   -o "$out/hostcheck" \
-   "$root/tools/ath11k-hostcheck/main.c" \
-   "$src/ath11k_mhi.c" \
-   "$src/ath11k_qmi.c"
+SRCS=("$root/tools/ath11k-hostcheck/main.c" "$src/ath11k_mhi.c" "$src/ath11k_qmi.c")
+CFLAGS=(-O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -I"$out" -I"$src")
 
+cc "${CFLAGS[@]}" -o "$out/hostcheck" "${SRCS[@]}"
 "$out/hostcheck" "$@"
+
+# Igual que los bancos de iwlwifi y GSP: una pasada con sanitizadores.
+if [[ "${SOSO_ATH11K_NO_SAN:-0}" != 1 ]]; then
+    cc "${CFLAGS[@]}" -g -fsanitize=address,undefined -fno-sanitize=alignment \
+       -fno-omit-frame-pointer -fno-sanitize-recover=undefined \
+       -o "$out/hostcheck-san" "${SRCS[@]}"
+    if ! ASAN_OPTIONS="detect_leaks=0" UBSAN_OPTIONS="print_stacktrace=1" \
+         "$out/hostcheck-san" "$@" > "$out/hostcheck-san.log" 2>&1; then
+        echo "FALLO sanitizadores en el banco ath11k:" >&2
+        cat "$out/hostcheck-san.log" >&2
+        exit 1
+    fi
+    echo "OK: banco ath11k sin hallazgos de ASan/UBSan"
+fi
