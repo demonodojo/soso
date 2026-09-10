@@ -235,11 +235,16 @@ Sobre los tres fallos de la suite: los dos de `ask` son la línea base conocida
 (la sesión SSH no cierra; el comando sí se ejecuta y su salida se ve en el
 stdout del fallo). El tercero, `soso-llm: 20 ciclos carga/generación/cambio
 (A7)`, falla por lo mismo —«la sesión SSH no terminó en 1200 s» con los ciclos
-completados dentro del guest— y es un paso **añadido el 2026-09-07**
-(`9048b12f4`), posterior a la línea base registrada, sin ninguna ejecución
-verde conocida. El perfil por defecto de la suite no compila lxdde, así que
-nada de WiFi/GPU de esta revisión entra en ese kernel; de lo que sí entra,
-`mremap` solo lo usa `init test`, que pasa.
+completados dentro del guest— y **falla igual en el árbol base**: se ejecutó
+`e6f491ec9` en un worktree aparte, solo ese paso y con los puertos libres, y dio
+el mismo mensaje al mismo ritmo (6 generaciones antes del timeout). No es una
+regresión de esta revisión. Es un paso añadido el 2026-09-07 (`9048b12f4`),
+posterior a la línea base registrada, sin ninguna pasada verde conocida.
+
+Dos cosas que confunden al medir esto y conviene no repetir: el shard
+`llm-dense` usa los puertos fijos 2200/7700, así que relanzarlo mientras el
+QEMU de la pasada anterior sigue vivo mide la máquina equivocada; y compilar o
+ejecutar bancos en paralelo alarga los pasos con presupuesto de tiempo.
 
 No se ha flasheado ni ejecutado la placa. Las comparaciones usan los fuentes
 Linux/NVIDIA locales; los bancos host no acreditan funcionamiento físico de
