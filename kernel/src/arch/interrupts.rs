@@ -408,7 +408,38 @@ extern "sysv64" fn kernel_pf_panic_shim(addr: u64, _: u64) -> u64 {
     let rip = EXC_RIP.load(Ordering::Relaxed);
     let rsp = EXC_RSP.load(Ordering::Relaxed);
     let ret = EXC_EXTRA.load(Ordering::Relaxed);
+    rastro_de_pila(rsp);
     panic!("EXCEPTION: page fault at {addr:#x} rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x}");
+}
+
+/// Backtrace de pobre para una excepción en ring 0: recorre la pila de kernel
+/// hacia arriba e imprime los valores que caen dentro del propio kernel, que
+/// son (casi siempre) las direcciones de retorno de la cadena de llamadas.
+///
+/// Existe porque un `rip=0` no dice nada por sí solo: la pregunta útil es
+/// QUIÉN saltó ahí, y eso está en la pila, no en el marco de la excepción.
+/// Las direcciones se resuelven en el host con
+/// `addr2line -e target/kernel/x86_64-soso/debug/kernel <addr - base>`.
+fn rastro_de_pila(rsp: u64) {
+    if rsp == 0 || rsp % 8 != 0 {
+        return;
+    }
+    // El kernel lo carga el bootloader en una base alineada a 4 GiB; el
+    // símbolo de esta misma función la delata sin depender del enlazador.
+    let base = (rastro_de_pila as usize as u64) & !0xffff_ffffu64;
+    let tope = base.saturating_add(0x4000_0000);
+    crate::println!("rastro: base={base:#x}");
+    let mut p = rsp;
+    let fin = rsp.saturating_add(4096);
+    let mut vistos = 0;
+    while p < fin && vistos < 24 {
+        let v = unsafe { core::ptr::read_volatile(p as *const u64) };
+        if v > base && v < tope {
+            crate::println!("rastro: [{:+#06x}] {v:#x} (+{:#x})", p - rsp, v - base);
+            vistos += 1;
+        }
+        p += 8;
+    }
 }
 
 /// IRQ 1 (teclado) por el **PIC legacy**. En placa la IRQ 1 va por el IOAPIC

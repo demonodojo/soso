@@ -22,6 +22,7 @@
 //! máquina justo después del prompt de una sesión nueva. La regla ahora la
 //! comprueba el aserto de `net::poll` en vez de un comentario.
 
+use crate::arch::pit;
 use crate::task::{self, Console};
 use alloc::collections::VecDeque;
 use smoltcp::socket::tcp;
@@ -124,6 +125,12 @@ pub struct SshSession {
     shell_pid: Option<u64>,
     /// La shell llegó a lanzarse (para cerrar el socket cuando muera).
     tuvo_shell: bool,
+    /// `uptime_ms` de la muerte de la shell: falta vaciar TX antes de cerrar
+    /// el canal, pero no indefinidamente (ver `GRACIA_TX_MS`).
+    muerte_ms: Option<u64>,
+    /// `uptime_ms` del `socket.close()` que iniciamos nosotros. Marca el
+    /// comienzo del plazo de gracia del cierre ordenado.
+    cierre_ms: Option<u64>,
     /// Buffer de entrada persistente (ver lección del prototipo: `input`
     /// puede aceptar parcialmente y devolver 0).
     netbuf: [u8; 4096],
@@ -138,12 +145,23 @@ impl SshSession {
             chan: None,
             shell_pid: None,
             tuvo_shell: false,
+            muerte_ms: None,
+            cierre_ms: None,
             netbuf: [0; 4096],
             pos: 0,
             have: 0,
         }
     }
 }
+
+/// Plazo máximo que esperamos al apretón de manos FIN antes de abortar y
+/// volver a escuchar. Solo protege contra un cliente que no cierre nunca.
+const GRACIA_CIERRE_MS: u64 = 3_000;
+
+/// Plazo máximo para vaciar TX hacia el canal tras morir la shell. Si el
+/// cliente deja de abrir ventana, se cierra igual y se pierde lo que quede:
+/// peor que perder unos bytes es no cerrar la sesión nunca.
+const GRACIA_TX_MS: u64 = 2_000;
 
 static SESSION: Mutex<Option<SshSession>> = Mutex::new(None);
 
@@ -202,18 +220,25 @@ pub fn poll(socket: &mut tcp::Socket) {
         return;
     }
 
-    // Cierre iniciado por nosotros (shell terminada): cuando no quede
-    // salida pendiente, abortar y volver a escuchar otra conexión.
-    let should_reset = {
+    // Cierre iniciado por nosotros (shell terminada). NO abortar aquí aunque
+    // ya no quede nada pendiente: `abort()` manda un RST y un RST descarta lo
+    // que el cliente todavía no haya leído de su cola de recepción — medido,
+    // era la causa de que la salida de `ask` no llegara nunca (el guest la
+    // escribía entera en el canal y el cliente solo veía el banner). Lo
+    // correcto es dejar que el apretón de manos FIN termine solo: el cliente
+    // lee todo, cierra, y el socket llega a TimeWait/Closed, donde las ramas
+    // de arriba reciclan la escucha. El plazo de gracia solo existe para que
+    // un cliente que nunca cierre no deje el servidor sin escuchar.
+    let vencido = {
         let s = guard.as_mut().unwrap();
         matches!(
             socket.state(),
             State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck
-        ) && s.shell_pid.is_none()
-            && s.runner.output_buf().is_empty()
-            && TX.lock().is_empty()
+        ) && s
+            .cierre_ms
+            .is_some_and(|t| pit::uptime_ms().saturating_sub(t) >= GRACIA_CIERRE_MS)
     };
-    if should_reset {
+    if vencido {
         reset_socket(socket, &mut guard);
     }
 }
@@ -316,26 +341,15 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
         }
     }
 
-    // 4) ¿Terminó la shell? Cerrar el canal.
-    //
-    // LIMITACIÓN CONOCIDA (medida, no especulada): lo que quedara en TX al
-    // morir la shell se pierde aquí — 8 bytes en una sesión trivial ("$ " más
-    // el eco de "exit"). Es cosmético: la salida sustantiva ya salió en
-    // vueltas anteriores del paso 5 (comprobado: llegan "init: TODO OK" y la
-    // línea "soso-llm: generado … tok/s", que es el criterio GO del ciclo de
-    // GPU). Se intentó vaciar TX antes de `channel_done` y NO vale: los bytes
-    // recién metidos en el buffer de envío de smoltcp hacen que `close()` no
-    // pase a FinWait, `poll` no llega a resetear, y el cliente se queda
-    // esperando un FIN que no llega — la sesión no termina nunca. Cambiar
-    // 8 bytes cosméticos por un cuelgue es peor; si algún día se arregla,
-    // hay que tocar también el criterio de cierre de `poll`.
+    // 4) ¿Terminó la shell? Anotarlo, pero NO cerrar el canal todavía: lo que
+    // quede en TX (el "$ " y el eco de `exit`, y a veces la última línea de
+    // salida) aún tiene que pasar al canal en el paso 5. El canal se cierra
+    // en el paso 5b, cuando TX ya está vacía.
     if let Some(pid) = sess.shell_pid
         && !task::exists(pid)
     {
         sess.shell_pid = None;
-        if let Some(ch) = sess.chan.take() {
-            sess.runner.channel_done(ch)?;
-        }
+        sess.muerte_ms = Some(pit::uptime_ms());
     }
 
     // 5) E/S del canal: recibido → RX (stdin de la shell); TX → canal.
@@ -401,6 +415,16 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
         }
     }
 
+    // 5b) La shell murió y TX ya está vacía (o se agotó el plazo): cerrar el
+    // canal. El plazo importa porque si el cliente deja de abrir ventana, TX
+    // no se vacía nunca y sin él la sesión no terminaría jamás.
+    if let Some(t) = sess.muerte_ms
+        && (TX.lock().is_empty() || pit::uptime_ms().saturating_sub(t) >= GRACIA_TX_MS)
+        && let Some(ch) = sess.chan.take()
+    {
+        sess.runner.channel_done(ch)?;
+    }
+
     // 6) Volcar la salida del runner al socket.
     while socket.can_send() {
         let out = sess.runner.output_buf();
@@ -422,6 +446,9 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
         && sess.chan.is_none()
         && sess.runner.output_buf().is_empty()
     {
+        if sess.cierre_ms.is_none() {
+            sess.cierre_ms = Some(pit::uptime_ms());
+        }
         socket.close();
     }
     Ok(())

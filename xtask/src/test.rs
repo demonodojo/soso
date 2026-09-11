@@ -1119,6 +1119,8 @@ fn ssh_guion_inner(
     tty: bool,
     marcador_ok: Option<&str>,
 ) -> Result<String, String> {
+    let mut traza = SshTrace::new("guion");
+    traza.ev(&format!("inicio: guion de {} B, límite {:?}", guion.len(), limite));
     let fifo = ssh_fifo_path("guion");
     let _ = fs::remove_file(&fifo);
     if !Command::new("mkfifo")
@@ -1214,6 +1216,10 @@ fn ssh_guion_inner(
         visto = prompt.1.wait_timeout(visto, resto).unwrap().0;
     }
 
+    traza.ev(&format!(
+        "prompt visto; parcial: {:?}",
+        String::from_utf8_lossy(&acum.lock().unwrap())
+    ));
     // El motd y el banner pueden llegar en el mismo read que el `$ `; un instante
     // de margen evita perder la primera línea del guion (p. ej. `ask :eco`).
     std::thread::sleep(Duration::from_millis(250));
@@ -1226,6 +1232,7 @@ fn ssh_guion_inner(
         w.write_all(guion.as_bytes()).map_err(|e| e.to_string())?;
         w.flush().ok();
     }
+    traza.ev("guion escrito en la fifo");
 
     let fin = Instant::now() + limite;
     loop {
@@ -1250,6 +1257,10 @@ fn ssh_guion_inner(
         std::thread::sleep(Duration::from_millis(200));
     }
     let timed_out = Instant::now() >= fin;
+    traza.ev(&format!(
+        "fin del bucle (timeout={timed_out}); acumulado: {:?}",
+        String::from_utf8_lossy(&acum.lock().unwrap())
+    ));
     // Matar ssh ANTES de join del lector: si no, read() en stdout bloquea
     // para siempre y el timeout no sirve de nada (init test, voz, A7…).
     if timed_out && !lector.is_finished() {
@@ -1983,6 +1994,40 @@ struct UsbTestScenario {
 
 
 static SSH_SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Traza opcional de una sesión SSH del arnés (`SOSO_SSH_TRACE=<dir>`).
+///
+/// Un paso que falla con «stdout: "…$"» no dice si el guion llegó a escribirse,
+/// si el prompt se vio tarde o si el guest no contestó. Con la traza cada
+/// evento lleva su instante y los bytes que se vieron.
+struct SshTrace {
+    fichero: Option<std::fs::File>,
+    t0: Instant,
+}
+
+impl SshTrace {
+    fn new(tag: &str) -> Self {
+        let fichero = std::env::var("SOSO_SSH_TRACE").ok().and_then(|dir| {
+            let _ = fs::create_dir_all(&dir);
+            let id = SSH_SESSION_SEQ.load(AtomicOrdering::Relaxed);
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(PathBuf::from(dir).join(format!("ssh-{tag}-{id}.trace")))
+                .ok()
+        });
+        Self {
+            fichero,
+            t0: Instant::now(),
+        }
+    }
+
+    fn ev(&mut self, que: &str) {
+        if let Some(f) = self.fichero.as_mut() {
+            let _ = writeln!(f, "[{:8.3}] {que}", self.t0.elapsed().as_secs_f64());
+        }
+    }
+}
 
 fn ssh_fifo_path(tag: &str) -> PathBuf {
     let id = SSH_SESSION_SEQ.fetch_add(1, AtomicOrdering::Relaxed);

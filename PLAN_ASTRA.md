@@ -228,18 +228,46 @@ reconexión; DHCP/SSH atribuidos a WiFi y tráfico sostenido 30 minutos.
 | `cargo test -p xtask` | Pasa: 69 tests (27 de `hw_matrix::`, 7 de `check::`) |
 | `cargo xtask test sys --only "init test"` | Pasa: batería de syscalls con los 9 casos de mremap |
 | `cargo xtask check` | **TODO OK** (host, builds, tres hostchecks, tests xtask) |
-| `cargo xtask test` (4 shards) | 23 OK, 3 FALLO: los dos `ask` de la línea base y `A7` |
+| `cargo xtask test` (4 shards) | Ver «Los tres fallos de la suite, resueltos» más abajo |
 | `cargo xtask build` (perfil por defecto y `live-usb`) | Compila |
 
-Sobre los tres fallos de la suite: los dos de `ask` son la línea base conocida
-(la sesión SSH no cierra; el comando sí se ejecuta y su salida se ve en el
-stdout del fallo). El tercero, `soso-llm: 20 ciclos carga/generación/cambio
-(A7)`, falla por lo mismo —«la sesión SSH no terminó en 1200 s» con los ciclos
-completados dentro del guest— y **falla igual en el árbol base**: se ejecutó
-`e6f491ec9` en un worktree aparte, solo ese paso y con los puertos libres, y dio
-el mismo mensaje al mismo ritmo (6 generaciones antes del timeout). No es una
-regresión de esta revisión. Es un paso añadido el 2026-09-07 (`9048b12f4`),
-posterior a la línea base registrada, sin ninguna pasada verde conocida.
+### Los tres fallos de la suite, resueltos
+
+**Causa común: un RST del servidor SSH borraba la salida ya enviada.** Al morir
+la shell, `kernel/src/net/ssh.rs` cerraba el socket y acto seguido, en cuanto no
+le quedaba nada pendiente, hacía `abort()` para volver a escuchar. `abort()`
+manda un RST, y un RST hace que el TCP del cliente **descarte lo que la
+aplicación aún no haya leído de su cola de recepción**. Por eso el síntoma era
+siempre el mismo y siempre desconcertante: el guest escribía la respuesta entera
+en el canal —medido con sondas: `write_channel` devolvía `escrito=40` y
+`escrito=33`— y el cliente sólo veía el banner y el `$ `. Como depende de si el
+cliente llegó a leer antes del RST, fallaba de forma intermitente.
+
+El arreglo es dejar que termine el apretón de manos FIN: se cierra y se espera a
+que el socket llegue a TimeWait/Closed por sí solo (donde reciclar la escucha ya
+es inofensivo), con un plazo de gracia de 3 s por si el cliente no cierra nunca.
+De paso deja de perderse lo que quedara en TX al morir la shell: el canal ya no
+se cierra en el acto, sino cuando TX está vacía (con su propio plazo de 2 s).
+
+Eso cierra `ask: el texto llega literal` y `ask: modelo residente`. A7 era otra
+cosa —el hilo de staging de `soso-llm` no marcaba su salida y costaba ~98 s por
+invocación— y quedó arreglado en `ae9aca2af`.
+
+### Un pánico de kernel aparte, en `voz` (preexistente, intermitente)
+
+Medido en el árbol base: `voz: transcribe WAV de prueba` puede tumbar la máquina
+con `EXCEPTION: page fault at 0x0 rip=0x0` justo después de que `vozd` haga
+`listen(127.0.0.1:7421)`. Un `rip=0` no dice nada por sí solo, así que el
+handler de #PF de ring 0 ahora imprime un **rastro de pila** (las direcciones de
+la propia imagen que quedan en la pila de kernel; se resuelven con `addr2line`).
+Con él la cadena queda localizada: `net::poll_dhcp` →
+`SocketSet::get_mut::<dhcpv4::Socket>` → `ManagedSlice::deref_mut` →
+`Vec::as_mut_ptr` → `RawVecInner::non_null`, y ahí se salta a 0 con la ranura de
+retorno a cero. Apunta a corrupción del `SocketSet` de smoltcp, no al camino de
+voz en sí. **No está arreglado**: es raro (1 de cada ~4 pasadas completas), el
+reintento del arnés lo absorbe, y falla igual sin ninguno de los cambios de esta
+revisión. Reproducción barata: `cargo xtask test sys --guest --only
+"pipeline,voz"` en bucle.
 
 Dos cosas que confunden al medir esto y conviene no repetir: el shard
 `llm-dense` usa los puertos fijos 2200/7700, así que relanzarlo mientras el
