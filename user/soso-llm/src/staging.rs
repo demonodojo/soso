@@ -97,6 +97,19 @@ fn load_shards(out: &mut Vec<String>) {
     }
 }
 
+/// Sale del worker dejando constancia de que ya no está vivo.
+///
+/// AVERÍA (medida el 2026-09-11): el worker salía con `sys::exit(0)` a secas y
+/// **nadie ponía `WORKER_VIVO` a 0**, así que `shutdown_staging_worker` agotaba
+/// su tope entero esperando a un hilo que ya había muerto. Con `sleep_ms(1)`
+/// despertando en el siguiente tick de 10 ms, esas 10 000 vueltas son ~100 s
+/// **por cada ejecución de `soso-llm`**: es lo que hacía que el paso A7 de la
+/// suite (20 ciclos) no cupiera jamás en sus 1200 s.
+fn worker_sale() -> ! {
+    WORKER_VIVO.store(0, Ordering::Release);
+    sys::exit(0)
+}
+
 extern "C" fn worker_entry(_arg: u64) -> ! {
     let shared = unsafe { &*(&raw const STAGE) };
     let mut last = 0u32;
@@ -113,7 +126,7 @@ extern "C" fn worker_entry(_arg: u64) -> ! {
         // esperando tiene que estar bloqueado, no listo para ejecutar.
         while shared.generation.load(Ordering::Acquire) == last {
             if shared.shutdown.load(Ordering::Acquire) != 0 {
-                sys::exit(0);
+                worker_sale();
             }
             sys::futex_wait(
                 &shared.generation as *const AtomicU32 as *const u32,
@@ -122,7 +135,7 @@ extern "C" fn worker_entry(_arg: u64) -> ! {
         }
         last = shared.generation.load(Ordering::Acquire);
         if shared.shutdown.load(Ordering::Acquire) != 0 {
-            sys::exit(0);
+            worker_sale();
         }
         load_shards(&mut buf);
         let ptr = unsafe { SOURCE_PTR as *mut MmapTensorSource<SyscallMapper> };
@@ -259,10 +272,17 @@ pub fn shutdown_staging_worker() {
         &shared.generation as *const AtomicU32 as *const u32,
         1,
     );
-    for _ in 0..10_000 {
-        if WORKER_VIVO.load(Ordering::Acquire) == 0 {
+    // `sleep_ms(1)` despierta en el siguiente tick (10 ms), así que el tope se
+    // cuenta en ticks y no en milisegundos: 200 vueltas ≈ 2 s, de sobra para un
+    // hilo que solo tiene que ver una bandera. Si se agota, el hilo está
+    // colgado y hay que decirlo: callarlo fue lo que escondió los ~100 s.
+    let mut vueltas = 0;
+    while WORKER_VIVO.load(Ordering::Acquire) != 0 {
+        if vueltas >= 200 {
+            libsoso::println!("soso-llm: el hilo de staging no salió en ~2 s; sigo sin él");
             break;
         }
+        vueltas += 1;
         let _ = sys::sleep_ms(1);
     }
     shared.shutdown.store(0, Ordering::Release);
