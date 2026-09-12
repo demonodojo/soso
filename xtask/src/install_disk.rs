@@ -15,6 +15,16 @@ pub struct InstallOpts {
     pub exclude_disk: Option<PathBuf>,
 }
 
+/// Texto de confirmación antes de escribir en un disco de bloques.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeviceConfirm {
+    #[default]
+    WipeDisk,
+    LiveUpdateEsp,
+    LiveUpdateRootfs,
+    LiveUpdateEspRootfs,
+}
+
 pub fn run(args: &[String]) {
     let mut device: Option<PathBuf> = None;
     let mut yes = false;
@@ -66,14 +76,25 @@ pub fn run(args: &[String]) {
 }
 
 pub fn install_from_image(live: &Path, dev: &Path, root: &Path, opts: InstallOpts) {
-    validate_device(dev, opts.yes, opts.exclude_disk.as_deref());
+    validate_device(
+        dev,
+        opts.yes,
+        opts.exclude_disk.as_deref(),
+        DeviceConfirm::WipeDisk,
+    );
 
     println!("install-disk: escribiendo {} → {}", live.display(), dev.display());
     run_cmd(
         Command::new("dd")
             .arg(format!("if={}", live.display()))
             .arg(format!("of={}", dev.display()))
-            .args(["bs=4M", "status=progress", "conv=fsync"]),
+            .args([
+                "bs=1M",
+                "status=progress",
+                "iflag=direct",
+                "oflag=direct",
+                "conv=fsync",
+            ]),
         "dd",
     );
     run_cmd(&mut Command::new("sync"), "sync");
@@ -118,7 +139,12 @@ fn usage() -> ! {
     exit(2);
 }
 
-pub(crate) fn validate_device(dev: &Path, yes: bool, exclude: Option<&Path>) {
+pub(crate) fn validate_device(
+    dev: &Path,
+    yes: bool,
+    exclude: Option<&Path>,
+    confirm: DeviceConfirm,
+) {
     if !dev.exists() {
         eprintln!("install-disk: no existe {}", dev.display());
         exit(1);
@@ -157,10 +183,37 @@ pub(crate) fn validate_device(dev: &Path, yes: bool, exclude: Option<&Path>) {
     }
 
     if !yes {
-        eprintln!(
-            "install-disk: ATENCIÓN — se borrará TODO el contenido de {}",
-            dev.display()
-        );
+        let (tool, msg) = match confirm {
+            DeviceConfirm::WipeDisk => (
+                "install-disk",
+                format!(
+                    "ATENCIÓN — se borrará TODO el contenido de {}",
+                    dev.display()
+                ),
+            ),
+            DeviceConfirm::LiveUpdateEsp => (
+                "flash-usb-live",
+                format!(
+                    "actualizar solo la ESP (kernel) en {} — rootfs y modelos (p3) no se tocan",
+                    dev.display()
+                ),
+            ),
+            DeviceConfirm::LiveUpdateRootfs => (
+                "flash-usb-live",
+                format!(
+                    "actualizar solo rootfs (p2) en {} — ESP y modelos (p3) no se tocan",
+                    dev.display()
+                ),
+            ),
+            DeviceConfirm::LiveUpdateEspRootfs => (
+                "flash-usb-live",
+                format!(
+                    "actualizar ESP y rootfs en {} — modelos (p3) no se tocan",
+                    dev.display()
+                ),
+            ),
+        };
+        eprintln!("{tool}: {msg}");
         eprint!("¿Continuar? [y/N] ");
         let _ = io::stdout().flush();
         let mut line = String::new();
@@ -169,7 +222,7 @@ pub(crate) fn validate_device(dev: &Path, yes: bool, exclude: Option<&Path>) {
         }
         let ok = matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes" | "s" | "si");
         if !ok {
-            eprintln!("install-disk: cancelado");
+            eprintln!("{tool}: cancelado");
             exit(1);
         }
     }

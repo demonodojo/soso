@@ -659,7 +659,7 @@ int gsp_vmm_translate(const struct gsp_vmm *v, uint64_t va, uint64_t *phys,
 
 /* --- El lado de RM ----------------------------------------------------------- */
 
-static int vaspace_alloc(struct gsp_vmm *v)
+static int vaspace_alloc(struct gsp_vmm *v, uint32_t handle)
 {
     NV_VASPACE_ALLOCATION_PARAMETERS args;
     uint32_t status = 0;
@@ -668,12 +668,13 @@ static int vaspace_alloc(struct gsp_vmm *v)
     args.index = NV_VASPACE_ALLOCATION_INDEX_GPU_NEW;
     args.flags = NV_VASPACE_ALLOCATION_FLAGS_IS_EXTERNALLY_OWNED;
 
-    if (gsp_rm_alloc(&v->rm, v->rm.device, NVKM_RM_VASPACE, FERMI_VASPACE_A,
+    if (gsp_rm_alloc(&v->rm, v->rm.device, handle, FERMI_VASPACE_A,
                      &args, (uint32_t)sizeof(args), &status) != 0) {
-        lx_printk("nouveau-lx: FERMI_VASPACE_A rechazado (status=0x%x)\n", status);
+        lx_printk("nouveau-lx: FERMI_VASPACE_A 0x%08x rechazado (status=0x%x)\n",
+                  handle, status);
         return -1;
     }
-    v->vaspace = NVKM_RM_VASPACE;
+    v->vaspace = handle;
     return 0;
 }
 
@@ -732,26 +733,11 @@ int gsp_vmm_init_bare(struct gsp_vmm *v)
     return 0;
 }
 
-int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v,
-                 struct gsp_vram *vram_pool)
+/* Directorio raíz + SET_PAGE_DIRECTORY. Compartido por init e init_on_rm. */
+static int vmm_bind_root(struct gsp_vmm *v, struct gsp_vram *vram_pool)
 {
     struct gsp_vmm_pt *root;
     int root_in_vram = 0;
-
-    if (!q || !rpc || !v) {
-        return -1;
-    }
-    memset(v, 0, sizeof(*v));
-    vmm_set_format(v);
-    v->vram_pool = vram_pool;
-
-    if (gsp_rm_client_new(q, rpc, &v->rm, 1) != 0) {
-        lx_printk("nouveau-lx: sin cliente para el espacio de direcciones\n");
-        return -1;
-    }
-    if (vaspace_alloc(v) != 0) {
-        goto fail;
-    }
 
     v->ready = 1;
     if (v->fmt == GSP_VMM_FMT_GP100 && vram_pool && vram_pool->ready) {
@@ -759,14 +745,14 @@ int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v,
 
         if (v->pt_nr >= GSP_VMM_MAX_PT) {
             v->ready = 0;
-            goto fail;
+            return -1;
         }
         root = &v->pt[v->pt_nr++];
         phys = gsp_vram_alloc(vram_pool, VMM_PT_BYTES, VMM_PAGE);
         if (!phys) {
             lx_printk("nouveau-lx: sin VRAM para directorio raíz gp100\n");
             v->ready = 0;
-            goto fail;
+            return -1;
         }
         root->mem.phys = phys;
         root->mem.va = NULL;
@@ -793,12 +779,12 @@ int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v,
         root = pt_get(v, vmm_root(v), 0, &created);
         if (!root) {
             v->ready = 0;
-            goto fail;
+            return -1;
         }
     }
     if (page_directory_set(v, root->mem.phys, root_in_vram) != 0) {
         v->ready = 0;
-        goto fail;
+        return -1;
     }
 
     lx_printk("nouveau-lx: vaspace 0x%08x listo (externo, raíz=0x%llx en %s, "
@@ -808,17 +794,79 @@ int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v,
               v->root_entries,
               v->fmt == GSP_VMM_FMT_VER3 ? "VER3" : "gp100");
     return 0;
+}
+
+int gsp_vmm_init_on_rm(struct gsp_vmm *v, const struct gsp_rm *rm,
+                       struct gsp_vram *vram_pool, uint32_t vaspace_handle)
+{
+    if (!v || !rm || !rm->ready || !vaspace_handle) {
+        return -1;
+    }
+    memset(v, 0, sizeof(*v));
+    vmm_set_format(v);
+    v->vram_pool = vram_pool;
+    v->rm = *rm;
+
+    if (vaspace_alloc(v, vaspace_handle) != 0) {
+        return -1;
+    }
+    if (vmm_bind_root(v, vram_pool) != 0) {
+        gsp_vmm_fini_vaspace(v);
+        return -1;
+    }
+    return 0;
+}
+
+int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v,
+                 struct gsp_vram *vram_pool, unsigned client_id)
+{
+    if (!q || !rpc || !v) {
+        return -1;
+    }
+    memset(v, 0, sizeof(*v));
+    vmm_set_format(v);
+    v->vram_pool = vram_pool;
+
+    if (gsp_rm_client_new(q, rpc, &v->rm, client_id) != 0) {
+        lx_printk("nouveau-lx: sin cliente para el espacio de direcciones\n");
+        return -1;
+    }
+    if (vaspace_alloc(v, NVKM_RM_VASPACE) != 0) {
+        goto fail;
+    }
+    if (vmm_bind_root(v, vram_pool) != 0) {
+        goto fail;
+    }
+    return 0;
 
 fail:
     gsp_vmm_fini(v);
     return -1;
 }
 
-void gsp_vmm_fini(struct gsp_vmm *v)
+static void vmm_free_tables(struct gsp_vmm *v)
 {
     unsigned i;
 
-    if (!v) {
+    for (i = 0; i < v->pt_nr; i++) {
+        if (v->pt[i].used) {
+            if (v->pt[i].in_vram && v->vram_pool) {
+                gsp_vram_return(v->vram_pool, v->pt[i].mem.phys, VMM_PT_BYTES);
+            } else {
+                gsp_dma_free(&v->pt[i].mem);
+            }
+            v->pt[i].used = 0;
+            v->pt[i].in_vram = 0;
+        }
+    }
+    v->pt_nr = 0;
+    v->pages_mapped = 0;
+    v->ready = 0;
+}
+
+static void vmm_unbind_vaspace(struct gsp_vmm *v)
+{
+    if (!v || !v->vaspace) {
         return;
     }
     if (v->bound) {
@@ -835,28 +883,30 @@ void gsp_vmm_fini(struct gsp_vmm *v)
         }
         v->bound = 0;
     }
-    if (v->vaspace) {
-        gsp_rm_free(&v->rm, v->vaspace);
-        v->vaspace = 0;
+    gsp_rm_free(&v->rm, v->vaspace);
+    v->vaspace = 0;
+}
+
+void gsp_vmm_fini_vaspace(struct gsp_vmm *v)
+{
+    if (!v) {
+        return;
     }
+    vmm_unbind_vaspace(v);
+    vmm_free_tables(v);
+}
+
+void gsp_vmm_fini(struct gsp_vmm *v)
+{
+    if (!v) {
+        return;
+    }
+    vmm_unbind_vaspace(v);
     if (v->rm.ready) {
         gsp_rm_free(&v->rm, v->rm.subdevice);
         gsp_rm_free(&v->rm, v->rm.device);
         gsp_rm_free(&v->rm, v->rm.client);
         v->rm.ready = 0;
     }
-    for (i = 0; i < v->pt_nr; i++) {
-        if (v->pt[i].used) {
-            if (v->pt[i].in_vram && v->vram_pool) {
-                gsp_vram_return(v->vram_pool, v->pt[i].mem.phys, VMM_PT_BYTES);
-            } else {
-                gsp_dma_free(&v->pt[i].mem);
-            }
-            v->pt[i].used = 0;
-            v->pt[i].in_vram = 0;
-        }
-    }
-    v->pt_nr = 0;
-    v->pages_mapped = 0;
-    v->ready = 0;
+    vmm_free_tables(v);
 }

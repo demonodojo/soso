@@ -28,6 +28,33 @@ static const struct {
 /* FECS construye el golden context la primera vez; en silicio tardó >2 s (2026-07-29). */
 #define GRCTX_PROMOTE_TIMEOUT_MS 15000u
 
+static struct gsp_grctx g_golden_grctx;
+static int g_golden_grctx_ready;
+
+void gsp_grctx_golden_publish(const struct gsp_grctx *ctx)
+{
+    if (!ctx || !ctx->promoted) {
+        return;
+    }
+    g_golden_grctx = *ctx;
+    g_golden_grctx_ready = 1;
+}
+
+static const struct gsp_grctx_buf *grctx_golden_lookup(uint32_t buffer_id)
+{
+    unsigned i;
+
+    if (!g_golden_grctx_ready) {
+        return NULL;
+    }
+    for (i = 0; i < g_golden_grctx.nr; i++) {
+        if (g_golden_grctx.buf[i].buffer_id == buffer_id) {
+            return &g_golden_grctx.buf[i];
+        }
+    }
+    return NULL;
+}
+
 /* Tamaño mapeado en el VMM: alineado a 2^page_shift como `nvkm_memory_size`. */
 static uint64_t grctx_map_bytes(const struct gsp_grctx_buf *b)
 {
@@ -196,7 +223,7 @@ int gsp_grctx_query(struct gsp_rm *rm, unsigned engine_idx, struct gsp_grctx *ct
 }
 
 int gsp_grctx_promote(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
-                      struct gsp_chan *chan, struct gsp_grctx *ctx)
+                      struct gsp_chan *chan, struct gsp_grctx *ctx, int golden)
 {
     NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS *p;
     uint32_t status = 0;
@@ -220,10 +247,18 @@ int gsp_grctx_promote(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *v
     p->hChanClient = rm->client;
     p->hObject = chan->handle;
 
+    if (!golden && !g_golden_grctx_ready) {
+        lx_printk("nouveau-lx: grctx: promote sin golden y sin contexto dorado "
+                  "publicado\n");
+        goto out;
+    }
+
     ctx->va_next = GSP_GRCTX_VA_BASE;
     for (i = 0; i < ctx->nr; i++) {
         struct gsp_grctx_buf *b = &ctx->buf[i];
         NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY *e = &p->promoteEntry[p->entryCount];
+        const struct gsp_grctx_buf *gb;
+        int alloc;
         uint64_t va;
 
         if (p->entryCount >= NV2080_CTRL_GPU_PROMOTE_CONTEXT_MAX_ENTRIES) {
@@ -232,29 +267,50 @@ int gsp_grctx_promote(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *v
             goto out;
         }
 
-        /* Aquí somos el primer canal y no hay contexto dorado del que heredar, así
-         * que se reserva TODO —incluidos los globales—, que es el camino
-         * `golden = true` de upstream. Cuando haya un segundo canal habrá que
-         * reusar los globales en vez de reservarlos otra vez, y entonces la
-         * entrada de UNRESTRICTED_PRIV_ACCESS_MAP no viaja. */
-        b->phys = gsp_vram_alloc(vram, b->size, b->align);
-        if (b->phys == 0u) {
-            lx_printk("nouveau-lx: grctx: sin VRAM para %s (%llu KiB, alineación "
-                      "0x%llx)\n", grctx_buf_name(b->buffer_id),
-                      (unsigned long long)(b->size / 1024ull),
-                      (unsigned long long)b->align);
-            goto out;
+        /* `r535_gr_promote_ctx`: el segundo canal hereda globales y omite el
+         * UNRESTRICTED_PRIV_ACCESS_MAP. */
+        if (!golden &&
+            b->buffer_id ==
+                NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_UNRESTRICTED_PRIV_ACCESS_MAP) {
+            continue;
         }
-        ctx->vram_bytes += b->size;
 
-        /* El propio PRIV_ACCESS_MAP se promociona sin mapear (upstream pone
-         * `bNonmapped` cuando lo reserva él); su duplicado sin restricciones sí va
-         * mapeado. */
-        b->nonmapped =
-            b->buffer_id == NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PRIV_ACCESS_MAP;
+        alloc = golden || !b->global;
+        if (alloc) {
+            b->phys = gsp_vram_alloc(vram, b->size, b->align);
+            if (b->phys == 0u) {
+                lx_printk("nouveau-lx: grctx: sin VRAM para %s (%llu KiB, "
+                          "alineación 0x%llx)\n", grctx_buf_name(b->buffer_id),
+                          (unsigned long long)(b->size / 1024ull),
+                          (unsigned long long)b->align);
+                goto out;
+            }
+            ctx->vram_bytes += b->size;
+        } else {
+            gb = grctx_golden_lookup(b->buffer_id);
+            if (!gb || gb->phys == 0u) {
+                lx_printk("nouveau-lx: grctx: global %s sin golden publicado\n",
+                          grctx_buf_name(b->buffer_id));
+                goto out;
+            }
+            b->phys = gb->phys;
+            /* Linux r535_gr_promote_ctx: bNonmapped=1 sólo en alloc (golden).
+             * El canal de usuario reutiliza la física global pero mapea en su
+             * VMM — heredar nonmapped del golden dejaba PRIV_ACCESS_MAP sin VA
+             * y RM devolvía INVALID_ARGUMENT (0x1f). */
+            b->nonmapped = 0;
+        }
+
+        /* El propio PRIV_ACCESS_MAP se promociona sin mapear sólo en golden
+         * (upstream pone `bNonmapped` cuando lo reserva él). */
+        if (alloc) {
+            b->nonmapped =
+                b->buffer_id ==
+                NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PRIV_ACCESS_MAP;
+        }
 
         e->bufferId = (uint16_t)b->buffer_id;
-        e->bInitialize = b->init ? 1u : 0u;
+        e->bInitialize = (b->init && alloc) ? 1u : 0u;
         e->bNonmapped = b->nonmapped;
 
         if (!b->nonmapped) {

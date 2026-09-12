@@ -418,31 +418,33 @@ static int check_pasivos_y_banda(void)
                 chan_num_at(buf, 0), chan_num_at(buf, 1), chan_num_at(buf, 2));
         return -1;
     }
-    /* v17: banda en flags[31:30]; el byte 5 es psd_20 y debe quedar a cero. */
+    /* v17: banda en flags[31:30] (PHY_BAND_24=1, PHY_BAND_5=0); pasivo global. */
     f = chan_flags_at(buf, 0);
-    if ((f >> IWL_CHAN_CFG_FLAGS_BAND_POS) != 0 ||
+    if ((f >> IWL_CHAN_CFG_FLAGS_BAND_POS) != PHY_BAND_24 ||
         (f & IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE)) {
-        fprintf(stderr, "ch1 v17 flags=0x%08x (banda 0, activo)\n", f);
+        fprintf(stderr, "ch1 v17 flags=0x%08x (banda %u, activo)\n", f, PHY_BAND_24);
         return -1;
     }
     f = chan_flags_at(buf, 1);
-    if ((f >> IWL_CHAN_CFG_FLAGS_BAND_POS) != 1 ||
-        !(f & IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE)) {
-        fprintf(stderr, "ch36 v17 flags=0x%08x (banda 1, pasivo por interior)\n", f);
+    if ((f >> IWL_CHAN_CFG_FLAGS_BAND_POS) != PHY_BAND_5 ||
+        (f & IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE)) {
+        fprintf(stderr, "ch36 v17 flags=0x%08x (banda %u, pasivo por interior)\n", f,
+                PHY_BAND_5);
         return -1;
     }
     f = chan_flags_at(buf, 2);
-    if ((f >> IWL_CHAN_CFG_FLAGS_BAND_POS) != 1 ||
+    if ((f >> IWL_CHAN_CFG_FLAGS_BAND_POS) != PHY_BAND_5 ||
         (f & IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE)) {
-        fprintf(stderr, "ch40 v17 flags=0x%08x (banda 1, activo)\n", f);
+        fprintf(stderr, "ch40 v17 flags=0x%08x (banda %u, activo)\n", f, PHY_BAND_5);
         return -1;
     }
     if (chan_byte5_at(buf, 0) != 0 || chan_byte5_at(buf, 1) != 0) {
         fprintf(stderr, "v17 escribió el byte de banda (psd_20)\n");
         return -1;
     }
-    if (iwl.scan_passive_only) {
-        fprintf(stderr, "lista con canales activos marcada como pasiva\n");
+    /* Linux: n_ssids==0 → FORCE_PASSIVE en flags_v2 aunque el NVM marque ACTIVE. */
+    if (!iwl.scan_passive_only) {
+        fprintf(stderr, "descubrimiento sin SSIDs directos debe marcar scan_passive_only\n");
         return -1;
     }
 
@@ -455,9 +457,11 @@ static int check_pasivos_y_banda(void)
                              NVM_CHANNEL_RADAR;
     if (iwl_mvm_build_scan_req(&iwl, buf, sizeof(buf)) == 0)
         return -1;
-    if (chan_byte5_at(buf, 0) != 0 || chan_byte5_at(buf, 1) != 1) {
-        fprintf(stderr, "v15 banda en v2.band = %u/%u (esperaba 0/1)\n",
-                chan_byte5_at(buf, 0), chan_byte5_at(buf, 1));
+    if (chan_byte5_at(buf, 0) != PHY_BAND_24 ||
+        chan_byte5_at(buf, 1) != PHY_BAND_5) {
+        fprintf(stderr, "v15 banda en v2.band = %u/%u (esperaba %u/%u)\n",
+                chan_byte5_at(buf, 0), chan_byte5_at(buf, 1), PHY_BAND_24,
+                PHY_BAND_5);
         return -1;
     }
     f = chan_flags_at(buf, 1);
@@ -465,8 +469,8 @@ static int check_pasivos_y_banda(void)
         fprintf(stderr, "v15 metió la banda en flags (0x%08x)\n", f);
         return -1;
     }
-    if (!(f & IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE)) {
-        fprintf(stderr, "canal con radar no marcado pasivo en v15\n");
+    if (f & IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE) {
+        fprintf(stderr, "v15 no debe usar bit 26 en 2,4/5 GHz (0x%08x)\n", f);
         return -1;
     }
     if (chan_flags_at(buf, 0) & 1u) {

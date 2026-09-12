@@ -2,8 +2,9 @@
 
 ## Evidencia y alcance
 
-Lectura ESP `/dev/sda1` (`kernel`, vfat) con `udisksctl`. Copias:
+Lectura ESP `/dev/sda1` (`kernel`, vfat) con `udisksctl` + `DBUS_SESSION_BUS_ADDRESS`. Copias:
 
+- run17: `target/usb-diagnostic-2026-09-10-run5/` (SOSOLOG/SOSODRV = hueco virgen `0x0A`)
 - run16: `target/usb-diagnostic-2026-09-10-run4/` (SOSOWIFI vacío; sin PSK)
 - run15: `target/usb-diagnostic-2026-09-10-run3/`
 - run14: `target/usb-diagnostic-2026-09-10-run2/`
@@ -11,17 +12,15 @@ Lectura ESP `/dev/sda1` (`kernel`, vfat) con `udisksctl`. Copias:
 
 ESP desmontada al terminar.
 
-| Campo | run16 (último) | run15 | run14 |
+| Campo | run17 (último) | run16 | run15 |
 |---|---|---|---|
-| Kernel USB | **0.2.2 (e6f491ec9-dirty)** | 0.2.2 (276404696-dirty) | 0.2.2 (276404696) |
-| Flush / uptime | **#28, 454 s** | #45, 1071 s | #41, 787 s |
-| Hardware | 10de:249c + 8086:2723 + 10ec:8168 | igual | igual |
-| sosh | **SÍ** (+ `wifi scan` + `ask hola`) | SÍ (+ `wifi scan` + halt) | SÍ (+ `wifi scan` + halt) |
-| GSP / CE | **GSP_INIT_DONE**; CE G4e GO; **pool VRAM=sí** | GSP ok; CE G4e GO; pool=no | GSP ok; CE G4e GO |
-| GR0 / pool | **SASS en VRAM**; GR0 chid=2; grctx 9 entradas; **pool VRAM=sí** | GR0 ok; pool=no (CE stuck) | GR0 ok; pool=no |
-| WiFi | ALIVE + INIT + NVM; **TX_ANT ok**; **timeout DQA grp=5 id=0**; scan E/S | TX_ANT timeout grp=0 | NVM falló; scan E/S |
-| Apagado | no registrado (log truncado) | GSP-RM apagado dma=off | GSP-RM apagado |
-| fatlog | sí | sí | sí |
+| Kernel USB | ELF `e6f491ec9-dirty` / 0.2.2 (strings) | **0.2.2 (e6f491ec9-dirty)** | 0.2.2 (276404696-dirty) |
+| Flush / uptime | **ninguno** (SOSOLOG 256 KiB de `\n`) | **#28, 454 s** | #45, 1071 s |
+| Hardware | sin SOSODRV (hueco virgen) | 10de:249c + 8086:2723 + 10ec:8168 | igual |
+| sosh | **NO** | **SÍ** (+ `wifi scan` + `ask hola`) | SÍ |
+| GSP / WiFi | no se alcanzó fatlog | GSP+pool ok; DQA timeout | GSP ok; TX_ANT timeout |
+| BOOTMARK | **sí** (shim AMI 2.70; `bootsoso.efi` 156672 B) | (no copiado) | — |
+| fatlog | **no escribió** | sí | sí |
 
 Árboles Linux (solo lectura):
 
@@ -33,7 +32,35 @@ ESP desmontada al terminar.
 Hostchecks (host, sin silicio): `l6-iwl-fw-hostcheck.sh` OK (DEF_ID cmd_ver TX_ANT=1 PHY=4,
 omit DQA sin CAPA_DQA, up_minimal sin grp=5),
 `l6-g3-gsp-hostcheck.sh` OK (SASS staging antes GR0 + grctx map + CE page-aligned).
-Tras fixes run16 (omit DQA + cmd_ver DEF_ID): hostchecks verdes; **validación PHY/SCAN en placa pendiente**.
+Tras fixes run16 (omit DQA + cmd_ver DEF_ID): hostchecks verdes; **placa run17 no llegó a sosh** (no valida DQA).
+
+## Tabla de etapas (run17)
+
+| Etapa | Evidencia | Resultado |
+|---|---|---|
+| Shim UEFI | `BOOTMARK.TXT`: `soso-shim: UEFI alcanzado`; AMI rev 0x50013; `bootsoso.efi leído (156672 bytes); saltando al bootloader` | **OK** |
+| Kernel / fatlog | `SOSOLOG.TXT` 262144 B, único byte `0x0A`; `strings` vacío | **FAIL** |
+| hwscan | `SOSODRV.TXT` igual (hueco virgen) | **FAIL** |
+| Userspace | no `sosh —` | **FAIL** |
+| GSP / WiFi | sin líneas | no se ejecutó (o no se volcó) |
+
+`fatlog::init()` está **después** de `boot: live-disk` ([`kernel/src/main.rs`](kernel/src/main.rs)). Un SOSOLOG virgen significa: el kernel no llegó a `fatlog::init()`, o `espfat::locate` falló (fichero no contiguo / tamaño distinto), o el bootloader no entregó el kernel.
+
+**No es un defecto iwl/DQA confirmado:** ese código corre en `lxdde` / `boot: ethernet`, después de varios `flush_checkpoint`. Si el hang fuera ahí, el SOSOLOG tendría al menos `boot: memtest`…`live-disk`.
+
+## Hallazgo run17 — `--only kernel` pisa la ESP live con la FAT de 31 MiB
+
+**Síntoma:** tras `flash-usb-live --only kernel`, el shim corre y el kernel no deja rastro en SOSOLOG. run16 con el mismo `e6f491ec9-dirty` sí llegó a sosh.
+
+**soso:** [`flash_usb_live.rs:198-212`](xtask/src/flash_usb_live.rs) hace `dd_partition(soso-uefi.img, p1 → USB p1)` y luego `create_esp_slots`. `target/soso-uefi.img` es un GPT de **31.1 MiB** (`sgdisk`: p1 34–63521 = **31.0 MiB**, 63488 sectores). El USB live tiene p1 **96 MiB** (`lsblk`). `dd_partition` **permite** destino más grande ([`package_live.rs:713-717`](xtask/src/package_live.rs) solo rechaza destino *más pequeño*). Copia 31 MiB de FAT (BPB de volumen ~31 MiB) sobre el inicio de una ESP de 96 MiB que ya tenía huecos 8.3 (`kernel-x86_64` 32 MiB, `SOSOKRN.BIN` 64 MiB).
+
+El empaquetado live correcto ([`package_live.rs:91-97`](xtask/src/package_live.rs)) pega `soso-uefi.img` *al inicio de la imagen GPT* y luego `sgdisk` añade p2/p3/p4; la ESP live de este stick se había **estirado a 96 MiB**. `--only kernel` no actualiza `kernel-x86_64` in situ: sustituye el filesystem.
+
+Ya existe la API correcta: [`fat32_write::overwrite_in_dir`](xtask/src/fat32_write.rs) (la usa `install_boot_shim` para `BOOTX64.EFI`). El test [`incremental_p1_preserves_p3`](xtask/src/flash_usb_live.rs) cubre src=dst del mismo tamaño (32 MiB), no el caso 31→96.
+
+**Linux:** no hay árbol fat en `lxdde/linux/`. Un BPB de 31 MiB sobre partición de 96 MiB es un volumen inconsistente: el montaje host (vfat) puede listar entradas del directorio nuevo mezcladas con clusters viejos; UEFI `LoadImage` usa el tamaño FAT del fichero. Compatible con: shim OK (está en los primeros 31 MiB) + kernel que no arranca o fatlog que no localiza el hueco contiguo de 256 KiB.
+
+**Confirmado** (tamaños + código + SOSOLOG virgen + BOOTMARK). Los cambios DQA/TLV 30 **no** explican un SOSOLOG vacío.
 
 ## Tabla de etapas (run16)
 
@@ -271,14 +298,20 @@ timeout de 0x98; conviene loguear STRAP vs OTP crudos y no anunciar «MAC NVM» 
 | 1 | `LEGACY_GROUP` → `LONG_GROUP` (DEF_ID) en `send_hcmd` | `iwl_trans.c`, `hcmd_contract_test.c`, `hcmd_wide_test.c` | Placa run16: TX_ANT ok + `iwl_rx` 0x98 |
 | 2 | CE copia SASS tras G4e/G6, **antes** de GR0 | `gsp_bringup.c`, `gsp_compute.c` | Placa run16: `SASS en VRAM` + `pool VRAM=sí` |
 
-### run16 (omit DQA / cmd_ver DEF_ID) — **implementado en árbol; placa pendiente**
+### run16 (omit DQA / cmd_ver DEF_ID) — **en árbol; placa no validada (run17 no arrancó)**
 
 | # | Cambio | Archivos | Hecho host / placa |
 |---|---|---|---|
-| 1 | Parsear TLV 30; omitir `DQA_ENABLE` sin `CAPA_DQA_SUPPORT` (bit 12) | `iwl_fw.c`, `iwl_mvm_up.c`, `capa_dqa_test.c` | Hostcheck OK. Placa: `DQA omitido` + PHY/SCAN_CFG |
-| 2 | `iwl_fw_cmd_ver`: LEGACY_GROUP → LONG_GROUP en lookup | `iwl_fw.c`, `main.c` hostcheck | Hostcheck OK. Placa: PHY_CONTEXT v4 |
+| 1 | Parsear TLV 30; omitir `DQA_ENABLE` sin `CAPA_DQA_SUPPORT` (bit 12) | `iwl_fw.c`, `iwl_mvm_up.c`, `capa_dqa_test.c` | Hostcheck OK. Placa: bloqueada por run17 |
+| 2 | `iwl_fw_cmd_ver`: LEGACY_GROUP → LONG_GROUP en lookup | `iwl_fw.c`, `main.c` hostcheck | Hostcheck OK. Placa: bloqueada por run17 |
 
-Reflash kernel (usuario):
+### run17 (`--only kernel` no debe dd la FAT de 31 MiB) — **implementado en árbol; placa pendiente**
+
+| # | Cambio | Archivos | Hecho host / placa |
+|---|---|---|---|
+| 1 | `--only kernel`: sobrescribir in situ `KERNEL~1` + `efi/boot/{bootsoso,bootx64}.efi` con `overwrite_in_dir`; **no** `dd_partition` de `soso-uefi.img` p1 | `flash_usb_live.rs`, `package_live.rs` (`update_esp_from_uefi`), `fat32_write.rs` | Host: `only_kernel_in_place_preserves_96m_esp` verde. Placa: SOSOLOG con `boot:` + `sosh —` |
+
+Este stick quedó con la FAT de 31 MiB pisada. `--only kernel` ahora actualiza el ELF que haya (`KERNEL~1`); si el volumen sigue siendo el de 31 MiB, fatlog puede fallar. Si tras el reflasheo no hay `boot:` en SOSOLOG, hace falta un flash completo (sin `--only`).
 
 ```bash
 sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sda --yes --only kernel
@@ -286,10 +319,11 @@ sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sda --yes --o
 
 ## Qué no se ha hecho
 
-- No se ha reflasheado el USB con los fixes run16 (omit DQA + cmd_ver DEF_ID).
-- No `record-boot` / `--boot-ok` (`arranques_consecutivos_ok` = 0 en hw-matrix).
-- No se ha validado scan con BSS ni asociación WPA2 tras omit DQA.
-- `ask hola` en run16 sigue en CPU (sin `saxpy en GPU OK` en log).
+- `--only kernel` in situ está en el árbol; **placa pendiente** (reflash).
+- omit DQA / cmd_ver DEF_ID **no** se ha visto en placa (run17 no llegó a sosh).
+- No `record-boot` / `--boot-ok` (`arranques_consecutivos_ok` = 0).
+- No scan BSS ni WPA2.
+- `ask hola` en run16 seguía en CPU (sin `saxpy en GPU OK`).
 
 ## Ciclo del 10/09 (tarde): todo lo comprobable sin placa
 

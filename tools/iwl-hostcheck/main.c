@@ -316,6 +316,24 @@ int main(int argc, char **argv)
             }
             printf("OK: DEF_ID cmd_ver TX_ANT=%d PHY_CONTEXT=%d, sin CAPA_DQA\n",
                    ver_tx, ver_phy);
+            {
+                int ver_add_sta = iwl_fw_cmd_ver(&iwl, LEGACY_GROUP, ADD_STA);
+                int ver_scan_cfg = iwl_fw_cmd_ver(&iwl, LEGACY_GROUP, SCAN_CFG_CMD);
+
+                if (ver_add_sta < 12) {
+                    fprintf(stderr,
+                            "ADD_STA cmd_ver=%d vía LEGACY→LONG (esperaba ≥12 en cc-a0-77)\n",
+                            ver_add_sta);
+                    return 1;
+                }
+                if (ver_scan_cfg < 5) {
+                    fprintf(stderr, "SCAN_CFG cmd_ver=%d (esperaba ≥5)\n",
+                            ver_scan_cfg);
+                    return 1;
+                }
+                printf("OK: ADD_STA v%d SCAN_CFG v%d vía LONG_GROUP (bcast=0 en send)\n",
+                       ver_add_sta, ver_scan_cfg);
+            }
         }
     }
     return 0;

@@ -127,6 +127,8 @@ pub const SYS_GETENV: u64 = 83;
 /// Redimensiona sosofs/sosomfs en disco GPT live/instalado.
 /// `(op, arg, out_ptr)`: `FS_RESIZE_GROW_ROOT` + bloques 4K, o `FS_RESIZE_QUERY` + `FsSpaceInfo`.
 pub const SYS_FS_RESIZE: u64 = 84;
+/// Volcado inmediato del log de consola a `SOSOLOG.TXT` en la ESP live.
+pub const SYS_FATLOG_FLUSH: u64 = 85;
 
 pub const FS_RESIZE_GROW_ROOT: u64 = 0;
 pub const FS_RESIZE_QUERY: u64 = 1;

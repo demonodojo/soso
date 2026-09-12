@@ -48,7 +48,7 @@ struct gsp_sass_set {
 struct gsp_family_caps {
     unsigned family;
     const char *nombre;
-    unsigned qmd_version;   /* 1 → QMDV01_07 (Ampere/Turing), 5 → QMDV05 */
+    unsigned qmd_version;   /* 2 → QMDV01_07 Ampere (256 B), 5 → QMDV05 */
     unsigned qmd_bytes;
     const char *sass_arch;
 };

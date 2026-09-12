@@ -491,7 +491,14 @@ static int check_recover_then_scan(void)
         return -1;
     }
 
+    iwl.mac_ctxt_added = 1;
+    iwl.binding_added = 1;
+    iwl.lar_regdom_set = 1;
     iwl_trans_recover(&iwl);
+    if (iwl.mac_ctxt_added || iwl.binding_added || iwl.lar_regdom_set) {
+        fprintf(stderr, "recover no reseteó mac/binding/lar_regdom\n");
+        return -1;
+    }
     iwl.alive = 1; /* recarga de firmware */
     if (iwl_trans_send_cmd(&iwl, LONG_GROUP, SCAN_REQ_UMAC, &pay, 1) != 0) {
         fprintf(stderr, "scan no repetible tras recover\n");

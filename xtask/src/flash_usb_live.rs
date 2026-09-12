@@ -27,7 +27,12 @@ pub fn run(args: &[String]) {
         eprintln!("flash-usb-live: {e}");
         exit(1);
     }
-    install_disk::validate_device(&usb, parsed.yes, None);
+    let confirm = if parsed.incremental {
+        incremental_confirm(&parsed.parts)
+    } else {
+        install_disk::DeviceConfirm::WipeDisk
+    };
+    install_disk::validate_device(&usb, parsed.yes, None, confirm);
 
     let disk_bytes = blockdev_bytes(&usb).unwrap_or_else(|| {
         eprintln!("flash-usb-live: no pude leer el tamaño de {}", usb.display());
@@ -113,6 +118,17 @@ fn parse_args(args: &[String]) -> ParsedArgs {
     }
 }
 
+fn incremental_confirm(parts: &[FlashPart]) -> install_disk::DeviceConfirm {
+    let kernel = parts.contains(&FlashPart::Kernel);
+    let rootfs = parts.contains(&FlashPart::Rootfs);
+    match (kernel, rootfs) {
+        (true, false) => install_disk::DeviceConfirm::LiveUpdateEsp,
+        (false, true) => install_disk::DeviceConfirm::LiveUpdateRootfs,
+        (true, true) => install_disk::DeviceConfirm::LiveUpdateEspRootfs,
+        (false, false) => unreachable!("incremental flash with empty parts"),
+    }
+}
+
 fn parse_only_spec(spec: &str) -> Vec<FlashPart> {
     let mut parts = Vec::new();
     for token in spec.split(',') {
@@ -155,9 +171,16 @@ fn run_full(usb: &Path, disk_bytes: u64) {
         Command::new("dd")
             .arg(format!("if={}", live.display()))
             .arg(format!("of={}", usb.display()))
-            .args(["bs=4M", "status=progress", "conv=fsync"]),
+            .args([
+                "bs=1M",
+                "status=progress",
+                "iflag=direct",
+                "oflag=direct",
+                "conv=fsync",
+            ]),
         "dd",
     );
+    crate::fat32_write::drop_path_cache(usb);
     install_disk::run_cmd(&mut Command::new("sync"), "sync");
 
     install_disk::expand_models_partition(usb, &live);
@@ -179,15 +202,10 @@ fn run_incremental(usb: &Path, parts: &[FlashPart]) {
     let want_kernel = parts.contains(&FlashPart::Kernel);
     let want_rootfs = parts.contains(&FlashPart::Rootfs);
 
-    let wificonf = if want_kernel {
-        package_live::read_esp_wificonf(usb)
-    } else {
-        None
-    };
-
     if want_kernel {
         println!("flash-usb-live: compilando kernel (ESP)…");
-        let _ = super::build_image_with_profile(&profile, true);
+        // Live no mete SOSOKRN.BIN en soso-uefi.img (64 MiB × fatfs en RAM).
+        let _ = super::build_image_with_profile(&profile, false);
     }
     if want_rootfs {
         println!("flash-usb-live: empaquetando rootfs…");
@@ -202,21 +220,20 @@ fn run_incremental(usb: &Path, parts: &[FlashPart]) {
             exit(1);
         }
         println!(
-            "flash-usb-live: actualizando ESP (p1) desde {}…",
+            "flash-usb-live: actualizando kernel in situ desde {}…",
             uefi.display()
         );
-        if let Err(e) = package_live::dd_partition(&uefi, 1, usb, 1) {
+        if let Err(e) = package_live::update_esp_from_uefi(&uefi, usb) {
             eprintln!("flash-usb-live: {e}");
+            eprintln!(
+                "flash-usb-live: no pude actualizar el kernel in situ (¿ESP \
+                 sin kernel-x86_64 / KERNEL~1?). Un dd de soso-uefi.img p1 \
+                 (~31 MiB) sobre una ESP live más grande la deja muda. \
+                 Recupera con un flash completo (sin --only)."
+            );
             exit(1);
         }
-        package_live::create_esp_slots(usb);
-        if let Some(ref saved) = wificonf {
-            if let Err(e) = package_live::write_esp_wificonf(usb, saved) {
-                eprintln!("flash-usb-live: aviso: no pude restaurar SOSOWIFI.TXT: {e}");
-            } else {
-                println!("flash-usb-live: SOSOWIFI.TXT restaurado");
-            }
-        }
+        crate::fat32_write::drop_path_cache(usb);
     }
 
     if want_rootfs {
@@ -233,6 +250,7 @@ fn run_incremental(usb: &Path, parts: &[FlashPart]) {
             eprintln!("flash-usb-live: {e}");
             exit(1);
         }
+        crate::fat32_write::drop_path_cache(usb);
     }
 
     install_disk::run_cmd(&mut Command::new("sync"), "sync");
@@ -325,6 +343,42 @@ mod tests {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    fn require_mkfs_vfat() -> bool {
+        Command::new("mkfs.vfat")
+            .arg("-h")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn format_p1_vfat(img: &Path) {
+        let (first, last) = package_live::partition_range(img, 1).unwrap();
+        let sectors = last - first + 1;
+        let fat = img.with_extension("p1fat");
+        {
+            let f = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&fat)
+                .unwrap();
+            f.set_len(sectors * 512).unwrap();
+        }
+        package_live::run_cmd(
+            Command::new("mkfs.vfat").args(["-F", "32", "-n", "KERNEL"]).arg(&fat),
+            "mkfs.vfat p1",
+        );
+        package_live::run_cmd(
+            Command::new("dd")
+                .arg(format!("if={}", fat.display()))
+                .arg(format!("of={}", img.display()))
+                .args(["bs=512", "conv=notrunc"])
+                .arg(format!("seek={first}")),
+            "dd fat→p1",
+        );
+        let _ = fs::remove_file(&fat);
     }
 
     fn create_test_live_img(path: &Path, p1_mb: u64, p2_mb: u64, p3_mb: u64) {
@@ -479,11 +533,96 @@ mod tests {
     }
 
     #[test]
+    fn only_kernel_in_place_preserves_96m_esp() {
+        if !require_sgdisk() || !require_mkfs_vfat() {
+            eprintln!("only_kernel_in_place_preserves_96m_esp: sin sgdisk/mkfs.vfat, omito");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "soso-flash-inplace-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let dest = dir.join("live96.img");
+        let src = dir.join("uefi31.img");
+        create_test_live_img(&dest, 96, 8, 8);
+        create_test_live_img(&src, 31, 8, 8);
+        format_p1_vfat(&dest);
+        format_p1_vfat(&src);
+
+        let dest_p1 = package_live::partition_first_sector(&dest, 1).unwrap();
+        let src_p1 = package_live::partition_first_sector(&src, 1).unwrap();
+        let bpb_before = crate::fat32_write::bpb_total_sectors(&dest, dest_p1).unwrap();
+        assert!(
+            bpb_before > 90 * 2048,
+            "BPB destino debería ser ~96 MiB, fue {bpb_before} sectores"
+        );
+
+        let mut old_kernel = vec![0x7f, b'E', b'L', b'F'];
+        old_kernel.resize(64 * 1024, 0xCC);
+        let mut new_kernel = vec![0x7f, b'E', b'L', b'F'];
+        new_kernel.resize(32 * 1024, 0xDD);
+        let solog = vec![0xAAu8; 256 * 1024];
+        let sokrn = vec![0xBBu8; 64 * 1024];
+
+        crate::fat32_write::write_root_file(
+            &dest,
+            dest_p1,
+            b"KERNEL~1",
+            b"   ",
+            &old_kernel,
+        )
+        .unwrap();
+        crate::fat32_write::write_root_file(&dest, dest_p1, b"SOSOLOG ", b"TXT", &solog)
+            .unwrap();
+        crate::fat32_write::write_root_file(&dest, dest_p1, b"SOSOKRN ", b"BIN", &sokrn)
+            .unwrap();
+        crate::fat32_write::write_root_file(&src, src_p1, b"KERNEL~1", b"   ", &new_kernel)
+            .unwrap();
+
+        package_live::update_esp_from_uefi(&src, &dest).unwrap();
+
+        let bpb_after = crate::fat32_write::bpb_total_sectors(&dest, dest_p1).unwrap();
+        assert_eq!(bpb_before, bpb_after, "el BPB de 96 MiB no debe cambiar");
+
+        let log = crate::fat32_write::read_root_file(&dest, dest_p1, b"SOSOLOG TXT").unwrap();
+        assert!(log.iter().all(|&b| b == 0xAA), "SOSOLOG pisado");
+        let krn = crate::fat32_write::read_root_file(&dest, dest_p1, b"SOSOKRN BIN").unwrap();
+        assert!(krn.iter().all(|&b| b == 0xBB), "SOSOKRN pisado");
+
+        let kern = crate::fat32_write::read_root_file(&dest, dest_p1, &crate::fat32_write::KERNEL_8_3)
+            .unwrap();
+        assert_eq!(&kern[..4], b"\x7fELF");
+        assert_eq!(kern[4], 0xDD, "el kernel no se actualizó");
+        assert!(kern[32 * 1024..].iter().all(|&b| b == 0), "hueco no rellenado");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn parse_only_spec_accepts_aliases() {
         let parts = parse_only_spec("kernel,rootfs");
         assert_eq!(parts, vec![FlashPart::Kernel, FlashPart::Rootfs]);
         let parts = parse_only_spec("esp,data");
         assert_eq!(parts, vec![FlashPart::Kernel, FlashPart::Rootfs]);
+    }
+
+    #[test]
+    fn incremental_confirm_matches_parts() {
+        assert_eq!(
+            incremental_confirm(&[FlashPart::Kernel]),
+            install_disk::DeviceConfirm::LiveUpdateEsp
+        );
+        assert_eq!(
+            incremental_confirm(&[FlashPart::Rootfs]),
+            install_disk::DeviceConfirm::LiveUpdateRootfs
+        );
+        assert_eq!(
+            incremental_confirm(&[FlashPart::Kernel, FlashPart::Rootfs]),
+            install_disk::DeviceConfirm::LiveUpdateEspRootfs
+        );
     }
 
     #[test]

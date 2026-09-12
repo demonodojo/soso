@@ -30,9 +30,12 @@
  * base viva por debajo de 2^40: aquí dentro está el pushbuffer, y su VA va en una
  * entrada de GPFIFO, que sólo llega al bit 39. */
 #define GSP_CHAN_VA_BASE         (GSP_VA_BASE + 0x20000000ull)
-/* Ventana por canal: GPFIFO 32 KiB + USERD/PB/notifier 12 KiB ≈ 44 KiB; 64 KiB
- * de stride separa canales para que un desborde no pise al vecino. */
-#define GSP_CHAN_VA_STRIDE       0x10000ull
+/* Bytes mapeados en el vaspace por canal: GPFIFO + pushbuffer + notifier CE
+ * (USERD va en VRAM). Con stride 64 KiB idx=1 solapaba PB/notifier de idx=0. */
+#define GSP_CHAN_VA_USED         (GSP_CHAN_GPFIFO_SIZE + GSP_CHAN_PB_SIZE + \
+                                  GSP_CHAN_NOTIFIER_SIZE)
+/* Ventana por canal: al menos GSP_CHAN_VA_USED (0x19000); 128 KiB de margen. */
+#define GSP_CHAN_VA_STRIDE       0x20000ull
 /* r570 `rsvd_chids = 1` (rm/r570/fifo.c); el primer chid usable no es 0. */
 #define GSP_CHAN_RSVD_CHIDS      1u
 

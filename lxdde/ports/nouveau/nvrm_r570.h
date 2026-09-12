@@ -258,6 +258,7 @@ typedef struct rpc_unloading_guest_driver_v1F_07
 #define NVKM_RM_DEVICE       0xde1d0000u
 #define NVKM_RM_SUBDEVICE    0x5d1d0000u
 #define NVKM_RM_VASPACE      0x90f10000u
+#define NVKM_RM_VASPACE_GOLDEN 0x90f10001u  /* vaspace temporal del golden oneinit */
 #define NVKM_RM_CHAN(chid)  (0xf1f00000u | (chid))
 
 /* Clases y sus parámetros de reserva. */
@@ -721,6 +722,12 @@ typedef char nv0080_set_pd_size_check[
 
 #define AMPERE_DMA_COPY_A          0x0000c6b5u
 #define AMPERE_DMA_COPY_B          0x0000c7b5u
+
+/* r535/ce.c + nvrm/ce.h (OGKM 570.144): RM_ALLOC de DMA_COPY exige engineType. */
+typedef struct NVC0B5_ALLOCATION_PARAMETERS {
+    uint32_t version;
+    uint32_t engineType;
+} NVC0B5_ALLOCATION_PARAMETERS;
 #define HOPPER_DMA_COPY_A          0x0000c8b5u
 #define BLACKWELL_DMA_COPY_A       0x0000c9b5u
 #define BLACKWELL_DMA_COPY_B       0x0000cab5u
@@ -737,6 +744,16 @@ typedef char nv0080_set_pd_size_check[
  * `RM_ENGINE_TYPE_COPY0` del enum interno vale 9 también, así que aquí las dos
  * numeraciones coinciden y no hay trampa que valga. */
 #define NV2080_ENGINE_TYPE_COPY0   9u
+#define NV2080_ENGINE_TYPE_COPY2   11u
+
+#define AMPERE_A                   0x0000c697u
+#define AMPERE_B                   0x0000c797u
+#define NVKM_RM_THREED_GOLDEN      0x3d000000u
+
+#define NVC7C0_SET_OBJECT                    0x00000000u
+#define NVC7C0_SEND_PCAS_A                   0x000002b4u
+#define NVC7C0_SEND_SIGNALING_PCAS2_B        0x000002c0u
+#define NVC7C0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE 0x3u
 
 /* Y GR0 es el 1, la primera entrada útil de esa misma tabla (el 0 es NULL). Hace
  * falta porque un objeto de compute NO se puede colgar de un canal de copia: RM
@@ -1135,7 +1152,9 @@ typedef char nvc56f_control_size_check[sizeof(Nvc56fControl) == 512 ? 1 : -1];
 #define NVKM_RM_COMPUTE0          0xcdc00000u
 
 #define GSP_QMD_VERSION_CURRENT   5u
+#define GSP_QMD_VERSION_AMPERE    2u    /* QMDV01_07 (Ampere/Ada/Turing grid) */
 #define GSP_QMD_INLINE_WORDS      96u   /* 384 B QMD v05 (Blackwell) */
+#define GSP_QMD_V02_WORDS         64u   /* 256 B QMD v01_07 (Ampere) */
 
 #define NVCEC0_SET_OBJECT                    0x00000000u
 #define NVCEC0_SEND_PCAS_A                   0x000002b4u
@@ -1201,6 +1220,46 @@ typedef struct GspQmdV05 {
 } GspQmdV05;
 
 typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 4 ? 1 : -1];
+
+/* QMD v01_07 (Ampere compute), transcrito de cla0c0qmd.h (OGKM 570.144). */
+#define QMDV02_SEMAPHORE_RELEASE_ENABLE0           202u, 202u
+#define QMDV02_REQUIRE_SCHEDULING_PCAS             204u, 204u
+#define QMDV02_PROGRAM_OFFSET                      256u, 287u
+#define QMDV02_RELEASE_MEMBAR_TYPE                 366u, 366u
+#define QMDV02_API_VISIBLE_CALL_LIMIT              378u, 378u
+#define QMDV02_CTA_RASTER_WIDTH                    384u, 415u
+#define QMDV02_CTA_RASTER_HEIGHT                   416u, 431u
+#define QMDV02_CTA_RASTER_DEPTH                    432u, 447u
+#define QMDV02_SHARED_MEMORY_SIZE                  544u, 561u
+#define QMDV02_QMD_MAJOR_VERSION                   580u, 583u
+#define QMDV02_CTA_THREAD_DIMENSION0                 592u, 607u
+#define QMDV02_CTA_THREAD_DIMENSION1                 608u, 623u
+#define QMDV02_CTA_THREAD_DIMENSION2                 624u, 639u
+#define QMDV02_CONSTANT_BUFFER_VALID0              640u, 640u
+#define QMDV02_RELEASE0_ADDRESS_LOWER              736u, 767u
+#define QMDV02_RELEASE0_ADDRESS_UPPER              768u, 775u
+#define QMDV02_RELEASE0_STRUCTURE_SIZE             799u, 799u
+#define QMDV02_RELEASE0_PAYLOAD                      800u, 831u
+#define QMDV02_CONSTANT_BUFFER_ADDR_LOWER0         928u, 959u
+#define QMDV02_CONSTANT_BUFFER_ADDR_UPPER0         960u, 967u
+#define QMDV02_CONSTANT_BUFFER_INVALIDATE0         974u, 974u
+#define QMDV02_CONSTANT_BUFFER_SIZE0               975u, 991u
+#define QMDV02_BARRIER_COUNT                      1467u, 1471u
+#define QMDV02_REGISTER_COUNT                     1496u, 1503u
+
+#define NVA0C0_QMDV01_07_SEMAPHORE_RELEASE_ENABLE0_TRUE           0x00000001u
+#define NVA0C0_QMDV01_07_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR          0x00000001u
+#define NVA0C0_QMDV01_07_API_VISIBLE_CALL_LIMIT_NO_CHECK          0x00000001u
+#define NVA0C0_QMDV01_07_CONSTANT_BUFFER_VALID_TRUE               0x00000001u
+#define NVA0C0_QMDV01_07_CONSTANT_BUFFER_INVALIDATE_TRUE          0x00000001u
+#define NVA0C0_QMDV01_07_RELEASE0_STRUCTURE_SIZE_ONE_WORD        0x00000001u
+#define NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01                    0x00000001u
+
+typedef struct GspQmdV02 {
+    NvU32 words[GSP_QMD_V02_WORDS];
+} GspQmdV02;
+
+typedef char gsp_qmd_v02_size_check[sizeof(GspQmdV02) == GSP_QMD_V02_WORDS * 4 ? 1 : -1];
 
 /* ---- Contexto de GR: consulta y promoción (G4f) ---------------------------
  *

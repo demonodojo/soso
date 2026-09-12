@@ -83,7 +83,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 |--------|------|
 | `arch/` | GDT/TSS, IDT, PIC+PIT 100 Hz, paging |
 | `drivers/kbd.rs` | PS/2 + USB HID → cola tty; mapa **es** por defecto (`keymap.rs`), AltGr, teclas muertas |
-| `drivers/fb.rs` | Consola GOP: buffer UTF-8 con glifos Latin-1 + € |
+| `drivers/fb.rs` | Consola GOP: buffer UTF-8 con glifos Latin-1 + €. Shadow en RAM → GOP **WC** (`arch/pat.rs` entrada 1 + `mm::set_write_combining`), copia `movntdq` + `sfence`, *jump scroll* de `rows/4` en ráfagas (<200 ms entre scrolls) con un solo `flush_all`. Ver «Consola GOP» abajo |
 | `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
 | `drivers/pci.rs` | ECAM + MSI-X. `devices()` = foto cacheada del bus (usar esta); `enumerate()` reescribe BARs, sólo en arranque |
 | `drivers/espfat.rs` | Ficheros 8.3 contiguos en la ESP live (SOSOLOG, SOSODRV, SOSOBOOT, SOSOWIFI, SOSOUPD, SOSOKRN, SOSOKRN.MET) |
@@ -390,6 +390,36 @@ primera tecla (2026-08-16): `kick_if_tty_waiting` (PROCS), `usb_storage::poll_ke
 de `fatlog` cada 2 s) y `log_scancode_raw` (consola). **QEMU no lo ve**: las pruebas
 entran por SSH y la IRQ 1 nunca se dispara. Los scancodes de diagnóstico se leen ahora
 con `kbd` en la kernel-shell.
+
+## Consola GOP: el coste es el tipo de memoria, no el rasterizado
+
+El bootloader mapea el framebuffer con PTEs limpios (PAT 0 = WB) y la MTRR de
+la apertura de la GPU en placa es **UC**: cada store es una transacción de bus
+serializada. En la ROG (GOP AMD `1002:1638`, 1920×1080×4 = 8 MiB por pantalla,
+sin serie) un scroll eran dos millones de stores `u32` UC ≈ 100 ms, y las trazas
+de arranque se arrastraban línea a línea (2026-09-11). Tres capas, en orden de
+impacto:
+
+1. **PAT WC** (`arch/pat.rs`): sólo la entrada 1 (PWT=1) pasa de WT a WC —
+   nadie la usaba, e `ensure_mmio_mapped`/`map_dma_uc` (índice 3 = UC) siguen
+   igual. PAT WC + MTRR UC → WC en Intel y AMD (es lo que hace `ioremap_wc` en
+   Linux). BSP en `fb::init`, cada AP en `ap_entry` (el SDM exige el mismo PAT
+   en todos los cores). `mm::set_write_combining(va, len)` cambia sólo los bits
+   de tipo de los PTEs ya mapeados (4 KiB o 2 MiB) y hace `wbinvd`. Log:
+   `fb: fís=0x… WC N páginas`; si dice `sin WC`, la CPU no anuncia PAT.
+2. **`copy_to_gop`**: alinea el destino a 16 a mano y va con `movntdq`
+   (`_mm_stream_si128`) + `sfence` al cerrar cada `flush_rect`. Un `memcpy`
+   normal mete `movaps` y en el GOP AMD era #GP por alineación (el cuelgue en
+   el primer scroll antes de `fatlog`); el `u32` volátil que lo sustituyó era
+   correcto pero lento.
+3. **Jump scroll** (`filas_salto`): si el scroll anterior fue hace <200 ms
+   (`RAFAGA_NS`, ráfaga: arranque, `ls`, `dmesg`) se saltan `rows/4` filas y
+   las siguientes líneas sólo pintan su fila; interactivo sigue de una en una.
+   `sync_rows_after_scroll` hace el memmove, rasteriza sólo las filas con
+   texto y vuelca **una vez** (`flush_all`), no banda + fila a fila. Cada
+   `write` sigue volcándose en el acto: el último `boot:` visible sigue
+   acotando dónde se colgó el arranque. QEMU no mide nada de esto (KVM ignora
+   el tipo de memoria del guest); la prueba visual es `cargo xtask fb-shot`.
 
 ## PCI: enumerar el bus no es una lectura pasiva
 

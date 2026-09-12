@@ -36,6 +36,7 @@ const REG_PHYAR: u32 = 0x60;
 const REG_PHYSTATUS: u32 = 0x6c;
 const REG_ERIDR: u32 = 0x70;
 const REG_ERIAR: u32 = 0x74;
+const REG_OCPDR: u32 = 0xb0;
 const REG_GPHY_OCP: u32 = 0xb8;
 const REG_MCU: u32 = 0xd3;
 const REG_RXMAXSIZE: u32 = 0xda;
@@ -391,6 +392,213 @@ fn phy_power_up(nic: &mut Nic) {
     }
 }
 
+fn delay_ms(ms: u32) {
+    let end = crate::arch::pit::uptime_ms().saturating_add(u64::from(ms));
+    while crate::arch::pit::uptime_ms() < end {
+        core::hint::spin_loop();
+    }
+}
+
+fn mac_ocp_write(mmio: u64, reg: u32, data: u16) {
+    if reg & 1 != 0 {
+        return;
+    }
+    w32(mmio, REG_OCPDR, OCP_FLAG | (reg << 15) | u32::from(data));
+}
+
+fn mac_ocp_read(mmio: u64, reg: u32) -> u16 {
+    if reg & 1 != 0 {
+        return 0;
+    }
+    w32(mmio, REG_OCPDR, reg << 15);
+    (r32(mmio, REG_OCPDR) & 0xffff) as u16
+}
+
+const RTL_FW_OPCODE_SIZE: usize = 4;
+const RTL_VER_SIZE: usize = 32;
+
+const PHY_FW_READ: u32 = 0x0;
+const PHY_FW_DATA_OR: u32 = 0x1;
+const PHY_FW_DATA_AND: u32 = 0x2;
+const PHY_FW_BJMPN: u32 = 0x3;
+const PHY_FW_MDIO_CHG: u32 = 0x4;
+const PHY_FW_CLEAR_READCOUNT: u32 = 0x7;
+const PHY_FW_WRITE: u32 = 0x8;
+const PHY_FW_READCOUNT_EQ_SKIP: u32 = 0x9;
+const PHY_FW_COMP_EQ_SKIPN: u32 = 0xa;
+const PHY_FW_COMP_NEQ_SKIPN: u32 = 0xb;
+const PHY_FW_WRITE_PREVIOUS: u32 = 0xc;
+const PHY_FW_SKIPN: u32 = 0xd;
+const PHY_FW_DELAY_MS: u32 = 0xe;
+
+struct RtlPhyAction<'a> {
+    code: &'a [u8],
+}
+
+fn fw_word_at(code: &[u8], index: usize) -> u32 {
+    let off = index * RTL_FW_OPCODE_SIZE;
+    u32::from_le_bytes([
+        code[off],
+        code[off + 1],
+        code[off + 2],
+        code[off + 3],
+    ])
+}
+
+fn rtl_fw_format_ok(fw: &[u8]) -> Option<RtlPhyAction<'_>> {
+    if fw.len() < RTL_FW_OPCODE_SIZE {
+        return None;
+    }
+    if fw.len() >= 45 {
+        let magic = u32::from_le_bytes([fw[0], fw[1], fw[2], fw[3]]);
+        if magic == 0 {
+            let mut checksum: u8 = 0;
+            for &b in fw {
+                checksum = checksum.wrapping_add(b);
+            }
+            if checksum != 0 {
+                return None;
+            }
+            let start = u32::from_le_bytes([fw[36], fw[37], fw[38], fw[39]]) as usize;
+            let size = u32::from_le_bytes([fw[40], fw[41], fw[42], fw[43]]) as usize;
+            if start > fw.len() || size > (fw.len() - start) / RTL_FW_OPCODE_SIZE {
+                return None;
+            }
+            let end = start + size * RTL_FW_OPCODE_SIZE;
+            return Some(RtlPhyAction { code: &fw[start..end] });
+        }
+    }
+    if fw.len() % RTL_FW_OPCODE_SIZE != 0 {
+        return None;
+    }
+    Some(RtlPhyAction { code: fw })
+}
+
+fn rtl_fw_data_ok(pa: &RtlPhyAction<'_>) -> bool {
+    let nwords = pa.code.len() / RTL_FW_OPCODE_SIZE;
+    for index in 0..nwords {
+        let action = fw_word_at(pa.code, index);
+        let val = action & 0xffff;
+        let regno = (action & 0x0fff_0000) >> 16;
+        match action >> 28 {
+            PHY_FW_READ
+            | PHY_FW_DATA_OR
+            | PHY_FW_DATA_AND
+            | PHY_FW_CLEAR_READCOUNT
+            | PHY_FW_WRITE
+            | PHY_FW_WRITE_PREVIOUS
+            | PHY_FW_DELAY_MS => {}
+            PHY_FW_MDIO_CHG => {
+                if val > 1 {
+                    return false;
+                }
+            }
+            PHY_FW_BJMPN => {
+                if regno > index as u32 {
+                    return false;
+                }
+            }
+            PHY_FW_READCOUNT_EQ_SKIP => {
+                if index + 2 >= nwords {
+                    return false;
+                }
+            }
+            PHY_FW_COMP_EQ_SKIPN | PHY_FW_COMP_NEQ_SKIPN | PHY_FW_SKIPN => {
+                if index + 1 + regno as usize >= nwords {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn fw_phy_write(nic: &mut Nic, reg: u32, val: u16) {
+    phy_write(nic, reg, val);
+}
+
+fn fw_phy_read(nic: &mut Nic, reg: u32) -> u16 {
+    phy_read(nic, reg)
+}
+
+fn fw_mac_mcu_write(nic: &mut Nic, reg: u32, val: u16) {
+    if reg == 0x1f {
+        nic.ocp_base = u32::from(val) << 4;
+        return;
+    }
+    mac_ocp_write(nic.mmio, nic.ocp_base + reg, val);
+}
+
+fn fw_mac_mcu_read(nic: &mut Nic, reg: u32) -> u16 {
+    mac_ocp_read(nic.mmio, nic.ocp_base + reg)
+}
+
+fn rtl_fw_apply(nic: &mut Nic, pa: &RtlPhyAction<'_>) {
+    let mut fw_write: fn(&mut Nic, u32, u16) = fw_phy_write;
+    let mut fw_read: fn(&mut Nic, u32) -> u16 = fw_phy_read;
+    let mut predata: u16 = 0;
+    let mut count: u32 = 0;
+    let mut index: usize = 0;
+
+    let nwords = pa.code.len() / RTL_FW_OPCODE_SIZE;
+    while index < nwords {
+        let action = fw_word_at(pa.code, index);
+        let data = action & 0xffff;
+        let regno = (action & 0x0fff_0000) >> 16;
+        let opcode = action >> 28;
+
+        if action == 0 {
+            break;
+        }
+
+        match opcode {
+            PHY_FW_READ => {
+                predata = fw_read(nic, regno);
+                count += 1;
+            }
+            PHY_FW_DATA_OR => predata |= data as u16,
+            PHY_FW_DATA_AND => predata &= data as u16,
+            PHY_FW_BJMPN => {
+                index = index.saturating_sub(regno as usize + 1);
+                continue;
+            }
+            PHY_FW_MDIO_CHG => {
+                if data == 0 {
+                    fw_write = fw_phy_write;
+                    fw_read = fw_phy_read;
+                } else {
+                    fw_write = fw_mac_mcu_write;
+                    fw_read = fw_mac_mcu_read;
+                }
+            }
+            PHY_FW_CLEAR_READCOUNT => count = 0,
+            PHY_FW_WRITE => fw_write(nic, regno, data as u16),
+            PHY_FW_READCOUNT_EQ_SKIP => {
+                if count == data {
+                    index += 1;
+                }
+            }
+            PHY_FW_COMP_EQ_SKIPN => {
+                if predata == data as u16 {
+                    index += regno as usize;
+                }
+            }
+            PHY_FW_COMP_NEQ_SKIPN => {
+                if predata != data as u16 {
+                    index += regno as usize;
+                }
+            }
+            PHY_FW_WRITE_PREVIOUS => fw_write(nic, regno, predata),
+            PHY_FW_SKIPN => index += regno as usize,
+            PHY_FW_DELAY_MS => delay_ms(data),
+            _ => break,
+        }
+        index += 1;
+    }
+    nic.ocp_base = OCP_STD_PHY;
+}
+
 fn load_phy_firmware(nic: &mut Nic) -> bool {
     let path = if is_8168h(nic._mac_ver) {
         "/lib/firmware/rtl_nic/rtl8168h-2.fw"
@@ -404,35 +612,121 @@ fn load_phy_firmware(nic: &mut Nic) -> bool {
     let Ok(fw) = crate::vfs::read_file(ino) else {
         return false;
     };
-    if fw.len() < 4 || fw.len() % 4 != 0 {
-        println!("rtl8169: firmware PHY tamaño inválido ({})", fw.len());
+    let Some(pa) = rtl_fw_format_ok(&fw) else {
+        println!("rtl8169: firmware PHY formato inválido ({path})");
+        return false;
+    };
+    if !rtl_fw_data_ok(&pa) {
+        println!("rtl8169: firmware PHY bytecode inválido ({path})");
         return false;
     }
-    for chunk in fw.chunks_exact(4) {
-        let reg = u16::from_le_bytes([chunk[0], chunk[1]]);
-        let val = u16::from_le_bytes([chunk[2], chunk[3]]);
-        phy_ocp_write(nic.mmio, 0xa400 + u32::from(reg) * 2, val);
-    }
-    println!("rtl8169: firmware PHY cargado ({} pares)", fw.len() / 4);
+    rtl_fw_apply(nic, &pa);
+    wait_bmcr_reset_clear(nic);
+    println!(
+        "rtl8169: firmware PHY cargado ({}, {} opcodes)",
+        path,
+        pa.code.len() / RTL_FW_OPCODE_SIZE
+    );
     true
 }
 
+/// Linux `phy_select_page`: MDIO 0x1f. En GPHY OCP, 0 → `OCP_STD_PHY`.
+fn phy_select_page(nic: &mut Nic, page: u16) -> u16 {
+    let old = if nic.ocp_base == OCP_STD_PHY {
+        0
+    } else {
+        (nic.ocp_base >> 4) as u16
+    };
+    phy_write(nic, 0x1f, page);
+    old
+}
+
+fn phy_restore_page(nic: &mut Nic, old: u16) {
+    phy_write(nic, 0x1f, old);
+}
+
+fn phy_read_paged(nic: &mut Nic, page: u16, reg: u32) -> u16 {
+    let old = phy_select_page(nic, page);
+    let v = phy_read(nic, reg);
+    phy_restore_page(nic, old);
+    v
+}
+
+fn phy_write_paged(nic: &mut Nic, page: u16, reg: u32, val: u16) {
+    let old = phy_select_page(nic, page);
+    phy_write(nic, reg, val);
+    phy_restore_page(nic, old);
+}
+
+fn phy_modify_paged(nic: &mut Nic, page: u16, reg: u32, mask: u16, set: u16) {
+    let old = phy_select_page(nic, page);
+    let v = phy_read(nic, reg);
+    phy_write(nic, reg, (v & !mask) | set);
+    phy_restore_page(nic, old);
+}
+
+/// Linux `r8168g_phy_param` (`r8169_phy_config.c:42`): página 0x0a43, parm@0x13, modify 0x14.
+fn r8168g_phy_param(nic: &mut Nic, parm: u16, mask: u16, val: u16) {
+    let old = phy_select_page(nic, 0x0a43);
+    phy_write(nic, 0x13, parm);
+    let v = phy_read(nic, 0x14);
+    phy_write(nic, 0x14, (v & !mask) | val);
+    phy_restore_page(nic, old);
+}
+
+/// Linux `r8169_apply_firmware`: el blob puede dejar BMCR_RESET; espera ≤600 ms.
+fn wait_bmcr_reset_clear(nic: &mut Nic) {
+    let end = crate::arch::pit::uptime_ms().saturating_add(600);
+    loop {
+        if phy_read(nic, MII_BMCR) & BMCR_RESET == 0 {
+            return;
+        }
+        if crate::arch::pit::uptime_ms() >= end {
+            return;
+        }
+        delay_ms(1);
+    }
+}
+
+/// Linux `rtl8168h_2_get_adc_bias_ioffset` (`r8169_main.c:2241`).
+fn rtl8168h_2_get_adc_bias_ioffset(nic: &Nic) -> u16 {
+    mac_ocp_write(nic.mmio, 0xdd02, 0x807d);
+    let data1 = mac_ocp_read(nic.mmio, 0xdd02);
+    let data2 = mac_ocp_read(nic.mmio, 0xdd00);
+    let mut ioffset = (data2 >> 1) & 0x7ff8;
+    ioffset |= data2 & 0x0007;
+    if data1 & (1 << 7) != 0 {
+        ioffset |= 1 << 15;
+    }
+    ioffset
+}
+
+/// Linux `rtl8168h_2_hw_phy_config` (`r8169_phy_config.c:796`). El fw es
+/// opcional (`r8169_apply_firmware` no-op si falta); la cola paged sigue.
 fn rtl8168h_hw_phy_config(nic: &mut Nic) {
-    if load_phy_firmware(nic) {
-        return;
+    let _ = load_phy_firmware(nic);
+
+    r8168g_phy_param(nic, 0x808a, 0x003f, 0x000a);
+    r8168g_phy_param(nic, 0x0811, 0x0000, 0x0800);
+    phy_modify_paged(nic, 0x0a42, 0x16, 0x0000, 0x0002);
+    phy_modify_paged(nic, 0x0a44, 0x11, 0, 1 << 11);
+
+    let ioffset = rtl8168h_2_get_adc_bias_ioffset(nic);
+    if ioffset != 0xffff {
+        phy_write_paged(nic, 0x0bcf, 0x16, ioffset);
     }
-    // Tabla ephy mínima si no hay rtl8168h-2.fw en rootfs.
-    const EPHY: &[(u16, u16)] = &[
-        (0x06, 0x001f),
-        (0x08, 0x0000),
-        (0x11, 0x9600),
-        (0x12, 0x0000),
-        (0x1d, 0x0000),
-        (0x1e, 0x0000),
-    ];
-    for &(reg, val) in EPHY {
-        phy_ocp_write(nic.mmio, 0xa400 + u32::from(reg) * 2, val);
-    }
+
+    let nibble = phy_read_paged(nic, 0x0bcd, 0x16) & 0x000f;
+    let rlen: u16 = if nibble > 3 { nibble - 3 } else { 0 };
+    let packed = rlen | (rlen << 4) | (rlen << 8) | (rlen << 12);
+    phy_write_paged(nic, 0x0bcd, 0x17, packed);
+
+    phy_modify_paged(nic, 0x0a44, 0x11, 1 << 7, 0);
+    phy_modify_paged(nic, 0x0a43, 0x10, 1 << 0, 0);
+    phy_modify_paged(nic, 0x0a43, 0x10, 1 << 2, 0);
+    phy_modify_paged(nic, 0x0a43, 0x11, 0, 1 << 4);
+
+    println!("rtl8169: PHY 8168H config Linux (ioffset={ioffset:#06x} rlen={rlen})");
 }
 
 fn rtl_hw_init_8168g(bar: u64) {

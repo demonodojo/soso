@@ -103,6 +103,62 @@ pub fn ensure_mmio_mapped(phys: u64, size: u64) {
     }
 }
 
+/// Pasa a **write-combining** un rango VA ya mapeado (el framebuffer GOP, que
+/// el bootloader deja como WB → UC efectivo por la MTRR de la apertura).
+/// Devuelve cuántas páginas cambió; `Err` si el PAT no tiene entrada WC.
+///
+/// Sólo cambia los bits de tipo de memoria del PTE: el resto de flags se
+/// conserva. Acepta páginas de 4 KiB y 2 MiB (PWT es el mismo bit en ambas).
+/// Tras el cambio hace `wbinvd`: el bootloader y el primer borrado pudieron
+/// dejar líneas sucias en caché que, desalojadas más tarde, pisarían lo ya
+/// volcado por el camino WC.
+pub fn set_write_combining(virt: u64, size: u64) -> Result<usize, ()> {
+    use x86_64::structures::paging::mapper::{MappedFrame, TranslateResult};
+    use x86_64::structures::paging::{PageSize, PageTableFlags as F, Size2MiB};
+
+    if !crate::arch::pat::wc_disponible() {
+        return Err(());
+    }
+    let mut mapper = MAPPER.get().unwrap().lock();
+    let start = virt & !0xfff;
+    let end = (virt + size).next_multiple_of(4096);
+    let mut cambiadas = 0usize;
+    let mut va = start;
+    while va < end {
+        let (frame, flags) = match mapper.translate(VirtAddr::new(va)) {
+            TranslateResult::Mapped { frame, flags, .. } => (frame, flags),
+            _ => {
+                va += 4096;
+                continue;
+            }
+        };
+        let nuevos = (flags & !(F::NO_CACHE | F::WRITE_THROUGH)) | crate::arch::pat::WC_FLAGS;
+        match frame {
+            MappedFrame::Size4KiB(_) => {
+                let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+                if let Ok(fl) = unsafe { mapper.update_flags(page, nuevos) } {
+                    fl.flush();
+                    cambiadas += 1;
+                }
+                va += 4096;
+            }
+            MappedFrame::Size2MiB(_) => {
+                let page = Page::<Size2MiB>::containing_address(VirtAddr::new(va));
+                if let Ok(fl) = unsafe { mapper.update_flags(page, nuevos) } {
+                    fl.flush();
+                    cambiadas += 1;
+                }
+                va = page.start_address().as_u64() + Size2MiB::SIZE;
+            }
+            MappedFrame::Size1GiB(_) => return Err(()),
+        }
+    }
+    if cambiadas > 0 {
+        unsafe { core::arch::asm!("wbinvd", options(nostack, preserves_flags)) };
+    }
+    Ok(cambiadas)
+}
+
 /// Mapea frames físicos en un VA dedicado sin caché (no toca el mapeo
 /// phys_to_virt del bootloader, que puede ser de 2 MiB).
 /// Devuelve el VA del primer byte.

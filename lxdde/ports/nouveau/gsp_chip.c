@@ -99,3 +99,15 @@ uint32_t gsp_chan_doorbell_kick(enum nv_family fam, uint32_t rpc_token)
         kick |= NV_VF_DOORBELL_RUNLIST_DOORBELL_ENABLE;
     return kick;
 }
+
+uint32_t gsp_chan_doorbell_kick_resolved(enum nv_family fam, uint32_t rpc_token,
+                                         uint32_t dbcfg)
+{
+    uint32_t kick = gsp_chan_doorbell_kick(fam, rpc_token);
+    uint32_t chid = rpc_token & NV_VF_DOORBELL_VECTOR_MASK;
+    uint32_t hw_db = dbcfg >> 16;
+
+    if (fam == NV_FAM_AMPERE && hw_db != ((rpc_token >> 16) & 0xffffu))
+        kick = (hw_db << 16) | chid;
+    return kick;
+}

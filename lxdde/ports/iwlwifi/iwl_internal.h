@@ -196,6 +196,20 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define IWL_CHAN_SRC_MCC           3 /* perfil regulatorio MCC aplicado */
 #define IWL_CHAN_SRC_EMPTY         4 /* perfil válido, cero canales usables */
 
+/* Linux fw/api/phy-ctxt.h — bandas PHY del firmware. */
+#define PHY_BAND_5                 0
+#define PHY_BAND_24                1
+#define PHY_BAND_6                 2
+
+/* iwl-nvm-parse.c — orden de canales en el perfil regulatorio NVM. */
+#define IWL_NVM_NUM_CHANNELS       39
+#define IWL_NVM_NUM_CHANNELS_EXT   51
+#define IWL_NVM_NUM_CHANNELS_UHB   110
+#define NUM_2GHZ_CHANNELS          14
+#define NUM_5GHZ_CHANNELS          37
+
+#define IWL_SCAN_CHANNEL_FLAG_ENABLE_CHAN_ORDER (1u << 5)
+
 #define IWL_UCODE_TLV_PHY_SKU                  23
 #define IWL_UCODE_TLV_ENABLED_CAPABILITIES       30
 #define IWL_UCODE_TLV_N_SCAN                     31
@@ -203,7 +217,60 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 
 /* Linux `enum iwl_ucode_tlv_capa` — bit 12 = DQA_SUPPORT (file.h). */
 #define IWL_UCODE_TLV_CAPA_DQA_SUPPORT           12
+#define IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT   39
 #define IWL_FW_CAPA_SETS                         4
+
+#define BINDING_CONTEXT_CMD                      0x2b
+#define POWER_TABLE_CMD                          0x77
+#define MAC_PM_POWER_TABLE                       0xa9
+#define FW_CTXT_INVALID                          0xffffffffu
+#define MAX_MACS_IN_BINDING                      3
+#define IWL_BINDING_CMD_SIZE_V1                  24
+#define POWER_KEEP_ALIVE_PERIOD_SEC              25
+
+struct iwl_binding_cmd_v1 {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t macs[MAX_MACS_IN_BINDING];
+    uint32_t phy;
+} __attribute__((packed));
+
+struct iwl_binding_cmd {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t macs[MAX_MACS_IN_BINDING];
+    uint32_t phy;
+    uint32_t lmac_id;
+} __attribute__((packed));
+
+struct iwl_device_power_cmd {
+    uint16_t flags;
+    uint16_t reserved;
+} __attribute__((packed));
+
+struct iwl_mac_power_cmd {
+    uint32_t id_and_color;
+    uint16_t flags;
+    uint16_t keep_alive_seconds;
+    uint32_t rx_data_timeout;
+    uint32_t tx_data_timeout;
+    uint32_t rx_data_timeout_uapsd;
+    uint32_t tx_data_timeout_uapsd;
+    uint8_t lprx_rssi_threshold;
+    uint8_t skip_dtim_periods;
+    uint16_t snooze_interval;
+    uint16_t snooze_window;
+    uint8_t snooze_step;
+    uint8_t qndp_tid;
+    uint8_t uapsd_ac_flags;
+    uint8_t uapsd_max_sp;
+    uint8_t heavy_tx_thld_packets;
+    uint8_t heavy_rx_thld_packets;
+    uint8_t heavy_tx_thld_percentage;
+    uint8_t heavy_rx_thld_percentage;
+    uint8_t limited_ps_threshold;
+    uint8_t reserved;
+} __attribute__((packed));
 
 struct iwl_ucode_capa {
     uint32_t api_index;
@@ -220,14 +287,74 @@ struct iwl_ucode_capa {
 
 #define SCAN_MAX_NUM_CHANS_V3      67
 #define SCAN_TWO_LMACS             2
-#define IWL_MAX_SCHED_SCAN_PLANS   10
+#define SCAN_LB_LMAC_IDX           0
+#define SCAN_HB_LMAC_IDX           1
+
+/* Linux mvm/scan.c — dwell/adwell/priority de scan UMAC unassoc. */
+#define IWL_SCAN_DWELL_ACTIVE                  10
+#define IWL_SCAN_DWELL_PASSIVE                 110
+#define IWL_SCAN_ADWELL_DEFAULT_LB_N_APS       2
+#define IWL_SCAN_ADWELL_DEFAULT_HB_N_APS       8
+#define IWL_SCAN_ADWELL_DEFAULT_N_APS_SOCIAL   10
+#define IWL_SCAN_ADWELL_MAX_BUDGET_FULL_SCAN   300
+#define IWL_SCAN_ADWELL_N_APS_GO_FRIENDLY      10
+#define IWL_SCAN_ADWELL_N_APS_SOCIAL_CHS       2
+#define IWL_SCAN_PRIORITY_EXT_6                6
+#define IWL_MAX_SCHED_SCAN_PLANS   2
 #define PROBE_OPTION_MAX           20
-#define SCAN_SHORT_SSID_MAX_SIZE   20
-#define SCAN_BSSID_MAX_SIZE        32
+#define SCAN_SHORT_SSID_MAX_SIZE   8
+#define SCAN_BSSID_MAX_SIZE        16
+#define SCAN_NUM_BAND_PROBE_DATA_V_2 3
 #define IWL_RX_DESC_SIZE_V1        48u
 
 #define ADD_STA                    0x18
 #define TX_CMD                     0x1
+
+#define FW_CTXT_ID_POS             0
+#define FW_CTXT_COLOR_POS          8
+#define FW_CMD_ID_AND_COLOR(id, color) \
+    (((uint32_t)(id) << FW_CTXT_ID_POS) | ((uint32_t)(color) << FW_CTXT_COLOR_POS))
+#define FW_CTXT_ACTION_ADD         1u
+#define FW_CTXT_ACTION_MODIFY      2u
+
+#define IWL_STA_LINK               0u
+#define IWL_STA_GENERAL_PURPOSE    1u
+#define IWL_MVM_AP_STA_ID          1u
+
+#define STA_FLG_CLASS_AUTH         (1u << 14)
+#define STA_FLG_CLASS_ASSOC        (1u << 15)
+#define STA_FLG_FAT_EN_20MHZ       (0u << 26)
+#define STA_FLG_FAT_EN_40MHZ       (1u << 26)
+#define STA_FLG_FAT_EN_MSK         (3u << 26)
+#define STA_FLG_MIMO_EN_SISO       (0u << 28)
+#define STA_FLG_MIMO_EN_MSK        (3u << 28)
+
+/* Linux fw/api/sta.h ADD_STA_CMD_API_S_VER_10 (48 B). */
+struct iwl_mvm_add_sta_cmd {
+    uint8_t add_modify;
+    uint8_t awake_acs;
+    uint16_t tid_disable_tx;
+    uint32_t mac_id_n_color;
+    uint8_t addr[6];
+    uint16_t reserved2;
+    uint8_t sta_id;
+    uint8_t modify_mask;
+    uint16_t reserved3;
+    uint32_t station_flags;
+    uint32_t station_flags_msk;
+    uint8_t add_immediate_ba_tid;
+    uint8_t remove_immediate_ba_tid;
+    uint16_t add_immediate_ba_ssn;
+    uint16_t sleep_tx_count;
+    uint8_t sleep_state_flags;
+    uint8_t station_type;
+    uint16_t assoc_id;
+    uint16_t beamform_flags;
+    uint32_t tfd_queue_msk;
+    uint16_t rx_ba_window;
+    uint8_t sp_length;
+    uint8_t uapsd_acs;
+} __attribute__((packed));
 
 #define IWL_PRPH_SCRATCH_RB_SIZE_4K (1u << 16)
 
@@ -772,7 +899,7 @@ struct iwl_scan_periodic_parms_v1 {
 
 struct iwl_scan_probe_req {
     struct iwl_scan_probe_segment mac_header;
-    struct iwl_scan_probe_segment band_data[2];
+    struct iwl_scan_probe_segment band_data[SCAN_NUM_BAND_PROBE_DATA_V_2];
     struct iwl_scan_probe_segment common_data;
     uint8_t buf[512];
 } __attribute__((packed));
@@ -821,6 +948,7 @@ static inline unsigned iwl_scan_req_umac_v17_size(unsigned n_channels)
 #define IWL_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL (1u << 1)
 #define IWL_UMAC_SCAN_GEN_FLAGS_V2_NTFY_ITER_COMPLETE (1u << 2)
 #define IWL_UMAC_SCAN_GEN_FLAGS_V2_MATCH (1u << 5)
+#define IWL_UMAC_SCAN_GEN_FLAGS_V2_ADAPTIVE_DWELL (1u << 7)
 #define IWL_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE (1u << 11)
 #define IWL_SCAN_OFFLOAD_COMPLETED 1u
 #define IWL_SCAN_OFFLOAD_ABORTED   2u
@@ -838,6 +966,75 @@ static inline unsigned iwl_scan_req_umac_v17_size(unsigned n_channels)
 #define IWL_CMD_FAILED_MSK         0x40u
 
 struct iwl_ax211_priv;
+
+#define IWL_FW_AC_NUM              4u
+#define IWL_FW_MAC_TYPE_BSS_STA     5u
+#define IWL_MAC_FILTER_ACCEPT_GRP  (1u << 2)
+#define IWL_MAC_FILTER_IN_BEACON   (1u << 6)
+
+struct iwl_ac_qos {
+    uint16_t cw_min;
+    uint16_t cw_max;
+    uint8_t aifsn;
+    uint8_t fifos_mask;
+    uint16_t edca_txop;
+} __attribute__((packed));
+
+struct iwl_mac_data_sta {
+    uint32_t is_assoc;
+    uint32_t dtim_time;
+    uint64_t dtim_tsf;
+    uint32_t bi;
+    uint32_t reserved1;
+    uint32_t dtim_interval;
+    uint32_t data_policy;
+    uint32_t listen_interval;
+    uint32_t assoc_id;
+    uint32_t assoc_beacon_arrive_time;
+} __attribute__((packed));
+
+struct iwl_mac_data_p2p_sta {
+    struct iwl_mac_data_sta sta;
+    uint32_t ctwin;
+} __attribute__((packed));
+
+union iwl_mac_ctx_data {
+    struct iwl_mac_data_sta sta;
+    struct iwl_mac_data_p2p_sta p2p_sta;
+};
+
+struct iwl_mac_ctx_cmd {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t mac_type;
+    uint32_t tsf_id;
+    uint8_t node_addr[6];
+    uint16_t reserved_for_node_addr;
+    uint8_t bssid_addr[6];
+    uint16_t reserved_for_bssid_addr;
+    uint32_t cck_rates;
+    uint32_t ofdm_rates;
+    uint32_t protection_flags;
+    uint32_t cck_short_preamble;
+    uint32_t short_slot;
+    uint32_t filter_flags;
+    uint32_t qos_flags;
+    struct iwl_ac_qos ac[IWL_FW_AC_NUM + 1];
+    union iwl_mac_ctx_data u;
+} __attribute__((packed));
+
+static inline void iwl_mvm_mac_qos_defaults(struct iwl_ac_qos ac[IWL_FW_AC_NUM + 1])
+{
+    unsigned i;
+
+    for (i = 0; i <= IWL_FW_AC_NUM; i++) {
+        ac[i].cw_min = 0x0fu;
+        ac[i].cw_max = 0x3fu;
+        ac[i].aifsn = 1u;
+        ac[i].fifos_mask = 0u;
+        ac[i].edca_txop = 0u;
+    }
+}
 
 int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned long fw_len);
 int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl);
@@ -869,6 +1066,9 @@ int iwl_mvm_apply_mcc_resp(struct iwl_ax211_priv *iwl, int notif_ver,
                            const uint8_t *resp, unsigned len);
 /* Selección de canales de scan: devuelve el número de entradas rellenadas y
  * escribe en `origen` de dónde salen (NVM/MCC, fallback o vacío). */
+/* Tabla NVM (legacy/ext/uhb) según nvm_n_channels; expuesta para hostcheck. */
+const uint8_t *iwl_mvm_nvm_chan_table(unsigned nvm_n, unsigned *table_n);
+uint8_t iwl_mvm_phy_band_from_channel_idx(unsigned ch_idx, unsigned nvm_n);
 unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
                                        uint8_t *ch, uint8_t *band,
                                        uint8_t *passive, unsigned max,
@@ -901,5 +1101,12 @@ int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid, const uin
 int iwl_mvm_install_key(struct iwl_ax211_priv *iwl, const uint8_t key[16], int key_idx);
 int iwl_mvm_tx_8023(struct iwl_ax211_priv *iwl, const uint8_t *buf, int len);
 int iwl_mvm_rx_8023(struct iwl_ax211_priv *iwl, uint8_t *buf, int buflen);
+
+static inline unsigned iwl_mvm_add_sta_cmd_size(struct iwl_ax211_priv *iwl)
+{
+    if (iwl_fw_cmd_ver(iwl, LEGACY_GROUP, ADD_STA) >= 12)
+        return (unsigned)sizeof(struct iwl_mvm_add_sta_cmd);
+    return 24u;
+}
 
 #endif

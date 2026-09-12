@@ -629,6 +629,10 @@ static int check_sass_sets(void)
     return 0;
 }
 
+static int check_qmd_v02_fields(const struct gsp_compute *cp,
+                                const struct gsp_kernel *k, unsigned grid,
+                                const GspQmdV02 *q);
+
 /* R5: la familia decide clase, QMD y SASS, y un desajuste se rechaza ANTES
  * de enviar. Aceptar la clase en RM no basta. */
 static int check_family_caps(void)
@@ -657,9 +661,10 @@ static int check_family_caps(void)
                GSP_QMD_VERSION_CURRENT, sizeof(GspQmdV05));
         return -1;
     }
-    if (amp->qmd_version != 0u) {
-        printf("FALLO: Ampere declara QMD v%u y el árbol no trae su layout "
-               "(cla0c0qmd.h llega a V01_07, era Pascal)\n", amp->qmd_version);
+    if (amp->qmd_version != GSP_QMD_VERSION_AMPERE ||
+        amp->qmd_bytes != sizeof(GspQmdV02)) {
+        printf("FALLO: Ampere debería usar QMD v2 de %zu B\n",
+               sizeof(GspQmdV02));
         return -1;
     }
     set_amp = gsp_sass_pick(sets, GSP_SASS_SET_COUNT, GSP_FAM_AMPERE);
@@ -715,9 +720,42 @@ static int check_family_caps(void)
         cp.caps = amp;
         cp.sass = set_amp;
         k.arch = set_amp->arch;
-        if (gsp_compute_launch_ready(&cp, &k, "prueba") == 0) {
-            printf("FALLO: Ampere lanzó con un QMD que no es el suyo\n");
+        if (gsp_compute_launch_ready(&cp, &k, "prueba") != 0) {
+            printf("FALLO: Ampere con sm_86 debería poder lanzar (QMD v2)\n");
             return -1;
+        }
+        k.arch = set_bw->arch;
+        if (gsp_compute_launch_ready(&cp, &k, "prueba") == 0) {
+            printf("FALLO: se admitió SASS de %s en Ampere\n", set_bw->arch);
+            return -1;
+        }
+        {
+            GspQmdV02 q2;
+            struct gsp_compute cp_amp;
+            struct gsp_kernel k_amp;
+            const struct gsp_sass_variant *sv =
+                gsp_sass_variant_of(set_amp, "saxpy");
+
+            if (!sv) {
+                printf("FALLO: sin saxpy sm_86 para QMD v2\n");
+                return -1;
+            }
+            memset(&cp_amp, 0, sizeof(cp_amp));
+            memset(&k_amp, 0, sizeof(k_amp));
+            cp_amp.ready = 1;
+            cp_amp.data_va = G4F_DATA_VA;
+            cp_amp.family = GSP_FAM_AMPERE;
+            cp_amp.caps = amp;
+            cp_amp.sass = set_amp;
+            k_amp.name = sv->name;
+            k_amp.arch = set_amp->arch;
+            k_amp.regcount = sv->regcount;
+            k_amp.cbank_size = sv->cbank_size;
+            k_amp.sass_va = G4F_SASS_VA;
+            k_amp.staged = 1;
+            gsp_compute_fill_qmd_grid(&cp_amp, &k_amp, (GspQmdV05 *)&q2, 4, 1, 0);
+            if (check_qmd_v02_fields(&cp_amp, &k_amp, 4, &q2) != 0)
+                return -1;
         }
         cp.caps = 0;
         if (gsp_compute_launch_ready(&cp, &k, "prueba") == 0) {
@@ -725,8 +763,7 @@ static int check_family_caps(void)
             return -1;
         }
     }
-    printf("OK: por familia — clase, QMD y SASS; Ampere se rechaza antes de "
-           "enviar (sin layout de QMD en el árbol)\n");
+    printf("OK: por familia — clase, QMD y SASS; Ampere usa QMD v2 (256 B)\n");
     return 0;
 }
 
@@ -1454,7 +1491,7 @@ static int check_vmm_ampere(const struct gsp_libos *lo)
     msgq->tx.writePtr = (base + 5) % 63;
 
     wptr0 = *q.wptr;
-    if (gsp_vmm_init(&q, &rpc, &v, &pool) != 0) {
+    if (gsp_vmm_init(&q, &rpc, &v, &pool, 1u) != 0) {
         printf("FALLO: gsp_vmm_init (Ampere)\n");
         return -1;
     }
@@ -1571,7 +1608,7 @@ static int check_vmm(const struct gsp_libos *lo)
     msgq->tx.writePtr = (base + 5) % 63;
 
     wptr0 = *q.wptr;
-    if (gsp_vmm_init(&q, &rpc, &v, NULL) != 0) {
+    if (gsp_vmm_init(&q, &rpc, &v, NULL, 1u) != 0) {
         printf("FALLO: gsp_vmm_init\n");
         return -1;
     }
@@ -2210,6 +2247,51 @@ static int check_qmd_fields(const struct gsp_compute *cp,
     printf("OK: QMD v05 de %s — prog 0x%llx, %u regs, malla %ux1x1 de CTA %ux1x1, "
            "cbank0 y semáforo\n", k->name, (unsigned long long)k->sass_va,
            k->regcount, grid, G4F_CTA_THREADS);
+    return 0;
+}
+
+static int check_qmd_v02_fields(const struct gsp_compute *cp,
+                                const struct gsp_kernel *k, unsigned grid,
+                                const GspQmdV02 *q)
+{
+    const uint32_t *w = q->words;
+    uint64_t prog, cbank, sem;
+
+    if (qmd_get_bits(w, QMDV02_QMD_MAJOR_VERSION) !=
+            NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01 ||
+        qmd_get_bits(w, QMDV02_SEMAPHORE_RELEASE_ENABLE0) != 1) {
+        printf("FALLO: QMD v2 major/semaphore\n");
+        return -1;
+    }
+    prog = qmd_get_bits(w, QMDV02_PROGRAM_OFFSET);
+    if (prog != ((k->sass_va - GSP_VA_BASE) >> 4)) {
+        printf("FALLO: PROGRAM_OFFSET=0x%llx, esperaba 0x%llx rel (%s)\n",
+               (unsigned long long)prog,
+               (unsigned long long)((k->sass_va - GSP_VA_BASE) >> 4),
+               k->name);
+        return -1;
+    }
+    if (qmd_get_bits(w, QMDV02_REGISTER_COUNT) != k->regcount ||
+        qmd_get_bits(w, QMDV02_CTA_RASTER_WIDTH) != grid ||
+        qmd_get_bits(w, QMDV02_CTA_THREAD_DIMENSION0) != G4F_CTA_THREADS) {
+        printf("FALLO: QMD v2 regs/malla/CTA de %s\n", k->name);
+        return -1;
+    }
+    cbank = (qmd_get_bits(w, QMDV02_CONSTANT_BUFFER_ADDR_UPPER0) << 32) |
+            qmd_get_bits(w, QMDV02_CONSTANT_BUFFER_ADDR_LOWER0);
+    if (GSP_VA_BASE + (cbank << 6) != cp->data_va + G4F_CBANK_OFF) {
+        printf("FALLO: CBANK0 addr rel=0x%llx\n", (unsigned long long)(cbank << 6));
+        return -1;
+    }
+    sem = (qmd_get_bits(w, QMDV02_RELEASE0_ADDRESS_UPPER) << 32) |
+          qmd_get_bits(w, QMDV02_RELEASE0_ADDRESS_LOWER);
+    if (sem != cp->data_va + G4F_SEM_OFF ||
+        qmd_get_bits(w, QMDV02_RELEASE0_PAYLOAD) != G4F_SEM_PAYLOAD) {
+        printf("FALLO: semáforo QMD v2\n");
+        return -1;
+    }
+    printf("OK: QMD v2 de %s — prog>>4, %u regs, malla %ux1x1\n",
+           k->name, k->regcount, grid);
     return 0;
 }
 
@@ -2930,6 +3012,30 @@ static int check_grctx(void)
         goto fallo;
     }
 
+    {
+        unsigned inherit_entries = 0;
+        unsigned inherit_allocs = 0;
+
+        for (i = 0; i < (unsigned)ctx.nr; i++) {
+            if (ctx.buf[i].buffer_id ==
+                    NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_UNRESTRICTED_PRIV_ACCESS_MAP) {
+                continue;
+            }
+            inherit_entries++;
+            if (!ctx.buf[i].global) {
+                inherit_allocs++;
+            }
+        }
+        if (inherit_entries != (unsigned)ctx.nr - 1u || inherit_allocs != 2u) {
+            printf("FALLO: 2º promote hereda %u entradas / %u allocs "
+                   "(esperaba %u / 2 MAIN+PATCH)\n", inherit_entries, inherit_allocs,
+                   (unsigned)ctx.nr - 1u);
+            goto fallo;
+        }
+        printf("OK: 2º PROMOTE_CTX hereda globales — %u entradas, %u VRAM nuevas "
+               "(sin UNRESTRICTED_PRIV)\n", inherit_entries, inherit_allocs);
+    }
+
     /* El otro motor, para demostrar que `engine_idx` se usa. */
     n = gsp_grctx_plan(info, 1, &ctx);
     if (n != 2 || ctx.buf[0].size != 0x400000u + 64u * 0x1000u) {
@@ -3040,8 +3146,17 @@ static int check_ptop(void)
         printf("FALLO: un engineType desconocido traduce a 0x%02x/%u\n", type, inst);
         return -1;
     }
+    {
+        uint32_t pick = gsp_top_pick_ce_engine();
+
+        if (pick != NV2080_ENGINE_TYPE_COPY0 + 1u) {
+            printf("FALLO: pick_ce_engine=%u (esperaba COPY1=%u, runlist ≠ GR0)\n",
+                   pick, NV2080_ENGINE_TYPE_COPY0 + 1u);
+            return -1;
+        }
+    }
     printf("OK: PTOP — 3 motores (GR0, CE0, CE1 con runlists 0x%06x/0x%06x), "
-           "hueco saltado, y sin GPU no inventa tabla\n",
+           "hueco saltado, picker COPY1, y sin GPU no inventa tabla\n",
            FAKE_TOP_CE0_RUNL, FAKE_TOP_CE1_RUNL);
     return 0;
 }
@@ -3574,6 +3689,20 @@ static int check_doorbell_kick_by_family(void)
     return 0;
 }
 
+static int check_doorbell_ampere_copy2_resolved(void)
+{
+    uint32_t token = 0x00000001u;
+    uint32_t dbcfg = 0x00010000u;
+    uint32_t kick = gsp_chan_doorbell_kick_resolved(NV_FAM_AMPERE, token, dbcfg);
+
+    if (kick != 0x00010001u) {
+        printf("FALLO: COPY2 kick=0x%08x (esperaba 0x00010001)\n", kick);
+        return -1;
+    }
+    printf("OK: Ampere COPY2 dbcfg doorbell=1 token runlist=0 → kick 0x00010001\n");
+    return 0;
+}
+
 /* RTX 3050 Mobile: boot0 muerto no puede clasificarse como Blackwell/FMC. */
 static int check_ga107_dead_boot0(void)
 {
@@ -3645,10 +3774,18 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
      * dos canales con tokens distintos necesitan dos búferes vivos a la vez. */
     unsigned char ctrl_token_gr[sizeof(rpc_gsp_rm_control) +
                                 sizeof(NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS)];
+    unsigned char ctrl_token_golden[sizeof(rpc_gsp_rm_control) +
+                                    sizeof(NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS)];
     /* 1664 B de tamaños de búferes de contexto + el wrapper: 1688, que sigue
      * cabiendo en la página de un elemento de cola. */
     unsigned char ctrl_grctx[sizeof(rpc_gsp_rm_control) +
                              sizeof(NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS)];
+    /* RPCs del golden oneinit (r535_gr_oneinit) insertados antes del query/promote
+     * de usuario: vaspace×2, canal×4, query, promote. */
+#define G4E_GOLDEN_RPC_NR        8u
+#define G4E_SLOT_GRCTX_QUERY     (15u + G4E_GOLDEN_RPC_NR)
+#define G4E_SLOT_USER_PROMOTE    (16u + G4E_GOLDEN_RPC_NR)
+#define G4E_SLOT_COMPUTE_ALLOC   (17u + G4E_GOLDEN_RPC_NR)
     uint32_t base, wptr0;
     unsigned pb_off = 0, pb_len = 0;
     unsigned i;
@@ -3734,11 +3871,28 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                               NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                               0, ctrl_token_gr, (uint32_t)sizeof(ctrl_token_gr));
     }
+    /* Golden oneinit (r535_gr_oneinit): vaspace, canal GR, query y promote. */
     fake_rpc_post_payload(lo, (base + 15) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
                           0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
-    /* Y las dos del contexto de GR: los tamaños de los búferes y la promoción. Los
-     * tamaños son los mismos que usa `check_grctx` para que los números del plan se
-     * puedan seguir de una prueba a la otra. */
+    fake_rpc_post_payload(lo, (base + 16) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    fake_rpc_post_payload(lo, (base + 17) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                          0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    fake_rpc_post_payload(lo, (base + 18) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    fake_rpc_post_payload(lo, (base + 19) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    {
+        NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS *tk =
+            (NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS *)
+                (ctrl_token_golden + sizeof(rpc_gsp_rm_control));
+
+        memset(ctrl_token_golden, 0, sizeof(ctrl_token_golden));
+        tk->workSubmitToken = FAKE_DOORBELL_TOKEN | 3u;
+        fake_rpc_post_payload(lo, (base + 20) % 63,
+                              NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                              0, ctrl_token_golden, (uint32_t)sizeof(ctrl_token_golden));
+    }
     {
         NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS *gi =
             (NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS *)
@@ -3754,16 +3908,26 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         GI(NV0080_CTX_PROP_GRAPHICS_FECS_EVENT) = 0x1000u;
         GI(NV0080_CTX_PROP_GRAPHICS_PRIV_ACCESS_MAP) = 0x10000u;
 #undef GI
-        fake_rpc_post_payload(lo, (base + 16) % 63,
+        fake_rpc_post_payload(lo, (base + 21) % 63,
                               NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                               0, ctrl_grctx, (uint32_t)sizeof(ctrl_grctx));
     }
-    fake_rpc_post_payload(lo, (base + 17) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+    fake_rpc_post_payload(lo, (base + 22) % 63, NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
                           0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
-    msgq->tx.writePtr = (base + 18) % 63;
+    /* r535_gr_chan_new: query + promote de usuario antes de RM_ALLOC compute. */
+    fake_rpc_post_payload(lo, (base + G4E_SLOT_GRCTX_QUERY) % 63,
+                          NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_grctx, (uint32_t)sizeof(ctrl_grctx));
+    fake_rpc_post_payload(lo, (base + G4E_SLOT_USER_PROMOTE) % 63,
+                          NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL,
+                          0, ctrl_ok, (uint32_t)sizeof(ctrl_ok));
+    fake_rpc_post_payload(lo, (base + G4E_SLOT_COMPUTE_ALLOC) % 63,
+                          NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC,
+                          0, (const unsigned char *)&alloc_ok, sizeof(alloc_ok));
+    msgq->tx.writePtr = (base + G4E_SLOT_COMPUTE_ALLOC + 1u) % 63;
 
     wptr0 = *q.wptr;
-    if (gsp_vmm_init(&q, &rpc, &v, NULL) != 0) {
+    if (gsp_vmm_init(&q, &rpc, &v, NULL, 1u) != 0) {
         printf("FALLO: gsp_vmm_init (g4e)\n");
         return -1;
     }
@@ -4071,14 +4235,28 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
         const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
 
+        const NVC0B5_ALLOCATION_PARAMETERS *ce_args =
+            (const NVC0B5_ALLOCATION_PARAMETERS *)(a + 1);
+
         if (a->hClass != BLACKWELL_DMA_COPY_B || a->hObject != NVKM_RM_CE0 ||
             a->hParent != NVKM_RM_CHAN(0)) {
             printf("FALLO: CE cls=0x%x obj=0x%08x padre=0x%08x\n",
                    a->hClass, a->hObject, a->hParent);
             return -1;
         }
+        if (a->paramsSize != sizeof(*ce_args)) {
+            printf("FALLO: CE paramsSize=%u (esperaba %zu)\n",
+                   a->paramsSize, sizeof(*ce_args));
+            return -1;
+        }
+        if (ce_args->version != 1u || ce_args->engineType != chan.engine) {
+            printf("FALLO: CE alloc version=%u engineType=%u (esperaba 1 y %u)\n",
+                   ce_args->version, ce_args->engineType, chan.engine);
+            return -1;
+        }
     }
-    printf("OK: BLACKWELL_DMA_COPY_B colgado del canal\n");
+    printf("OK: BLACKWELL_DMA_COPY_B colgado del canal (NVC0B5 engineType=%u)\n",
+           chan.engine);
 
     if (gsp_ce_encode_copy(&ce, GSP_CHAN_VA_BASE + 8192ull,
                            GSP_CHAN_VA_BASE + 12288ull, 4096,
@@ -4490,6 +4668,38 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                    (unsigned long long)chan_gr.inst_addr);
             return -1;
         }
+        {
+            /* idx=0 mapea gpfifo+PB+notifier (104 KiB). Con stride 64 KiB el GR0
+             * pisaba el notifier del CE y el semáforo se quedaba en 10/11. */
+            uint64_t end0 = chan.gpfifo_va + (uint64_t)GSP_CHAN_VA_USED;
+
+            if (chan_gr.gpfifo_va < end0) {
+                printf("FALLO: solape VA CE idx=0 [0x%llx..0x%llx) con GR0 "
+                       "idx=1 gpfifo=0x%llx (stride=0x%llx used=0x%x)\n",
+                       (unsigned long long)chan.gpfifo_va,
+                       (unsigned long long)end0,
+                       (unsigned long long)chan_gr.gpfifo_va,
+                       (unsigned long long)GSP_CHAN_VA_STRIDE,
+                       (unsigned)GSP_CHAN_VA_USED);
+                return -1;
+            }
+            if (GSP_CHAN_VA_STRIDE < (uint64_t)GSP_CHAN_VA_USED) {
+                printf("FALLO: GSP_CHAN_VA_STRIDE=0x%llx < used=0x%x\n",
+                       (unsigned long long)GSP_CHAN_VA_STRIDE,
+                       (unsigned)GSP_CHAN_VA_USED);
+                return -1;
+            }
+            if ((chan_gr.gpfifo_va - chan.gpfifo_va) != GSP_CHAN_VA_STRIDE) {
+                printf("FALLO: delta gpfifo idx=1 = 0x%llx (esperaba stride "
+                       "0x%llx)\n",
+                       (unsigned long long)(chan_gr.gpfifo_va - chan.gpfifo_va),
+                       (unsigned long long)GSP_CHAN_VA_STRIDE);
+                return -1;
+            }
+            printf("OK: ventanas VA idx=0/1 disjuntas (stride 0x%llx, "
+                   "used=0x%x)\n", (unsigned long long)GSP_CHAN_VA_STRIDE,
+                   (unsigned)GSP_CHAN_VA_USED);
+        }
         if (chan_gr.pushbuf_va > GSP_GPFIFO_VA_MAX) {
             printf("FALLO: el pushbuffer del canal GR0 (0x%llx) no cabe en una "
                    "entrada de GPFIFO\n", (unsigned long long)chan_gr.pushbuf_va);
@@ -4530,20 +4740,87 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
     }
     {
         struct gsp_compute cp;
+        struct gsp_grctx ctx;
         GspQmdV05 qmd;
         unsigned qmd_off = 0, qmd_len = 0;
-        /* +15: cuatro peticiones más que antes, las del canal de GR0 (sin
-         * repetir GET_FAULT_METHOD_BUFFER_SIZE). */
-        const unsigned char *entry = cmdq_base + 4096 +
-                                     (unsigned long)((wptr0 + 15) % 63) * 4096;
-        const struct gsp_rpc_hdr *hdr =
-            (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
-        const rpc_gsp_rm_alloc *a = (const rpc_gsp_rm_alloc *)(hdr + 1);
+        const unsigned char *entry;
+        const struct gsp_rpc_hdr *hdr;
+        const rpc_gsp_rm_alloc *a;
+        const rpc_gsp_rm_control *c;
+        const NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS *p;
 
         if (check_sass_sets() != 0)
             return -1;
         if (check_family_caps() != 0)
             return -1;
+
+        /* r535_gr_oneinit: golden antes del promote de usuario (canal GR0). */
+        {
+            struct gsp_grctx golden_ctx;
+            struct gsp_vmm golden_vmm;
+            struct gsp_chan golden_chan;
+
+            if (gsp_vmm_init_on_rm(&golden_vmm, &v.rm, &pool, NVKM_RM_VASPACE_GOLDEN) != 0) {
+                printf("FALLO: gsp_vmm_init_on_rm golden\n");
+                return -1;
+            }
+            if (gsp_chan_init(&v.rm, &golden_vmm, &pool, &golden_chan,
+                              golden_vmm.vaspace, 2u, NV2080_ENGINE_TYPE_GR0) != 0) {
+                printf("FALLO: gsp_chan_init golden\n");
+                gsp_vmm_fini_vaspace(&golden_vmm);
+                return -1;
+            }
+            if (gsp_grctx_query(&v.rm, 0u, &golden_ctx) < 0) {
+                printf("FALLO: gsp_grctx_query golden\n");
+                gsp_chan_fini(&golden_chan);
+                gsp_vmm_fini_vaspace(&golden_vmm);
+                return -1;
+            }
+            if (gsp_grctx_promote(&v.rm, &golden_vmm, &pool, &golden_chan,
+                                  &golden_ctx, 1) != 0) {
+                printf("FALLO: gsp_grctx_promote golden\n");
+                gsp_chan_fini(&golden_chan);
+                gsp_vmm_fini_vaspace(&golden_vmm);
+                return -1;
+            }
+            gsp_grctx_golden_publish(&golden_ctx);
+            /* No hacer fini del canal/vaspace golden: UNSET_PAGE_DIRECTORY y FREE
+             * desplazarían el wptr respecto a los fakes preencolados (+23..+25). */
+            (void)golden_chan;
+            (void)golden_vmm;
+        }
+
+        /* r535_gr_chan_new: promote_ctx de usuario antes de RM_ALLOC compute. */
+        if (gsp_grctx_query(&v.rm, 0u, &ctx) < 0) {
+            printf("FALLO: gsp_grctx_query\n");
+            return -1;
+        }
+        if (gsp_grctx_promote(&v.rm, &v, &pool, &chan_gr, &ctx, 0) != 0) {
+            printf("FALLO: gsp_grctx_promote usuario\n");
+            return -1;
+        }
+        entry = cmdq_base + 4096 +
+                (unsigned long)((wptr0 + G4E_SLOT_USER_PROMOTE) % 63) * 4096;
+        hdr = (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        c = (const rpc_gsp_rm_control *)(hdr + 1);
+        p = (const NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS *)(c + 1);
+        if (c->cmd != NV2080_CTRL_CMD_GPU_PROMOTE_CTX ||
+            c->hObject != v.rm.subdevice ||
+            c->paramsSize != sizeof(*p) ||
+            p->engineType != 1u || p->hChanClient != v.rm.client ||
+            p->hObject != chan_gr.handle) {
+            printf("FALLO: PROMOTE_CTX antes de compute (cmd=0x%08x obj=0x%08x)\n",
+                   c->cmd, p->hObject);
+            return -1;
+        }
+        printf("OK: PROMOTE_CTX usuario en índice %u antes de RM_ALLOC compute\n",
+               G4E_SLOT_USER_PROMOTE);
+
+        /* RM_ALLOC compute tras promote (r535_gr_chan_new). */
+        entry = cmdq_base + 4096 +
+                (unsigned long)((wptr0 + G4E_SLOT_COMPUTE_ALLOC) % 63) * 4096;
+        hdr = (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
+        a = (const rpc_gsp_rm_alloc *)(hdr + 1);
 
         if (gsp_compute_init(&v.rm, &chan_gr, &cp) != 0) {
             printf("FALLO: gsp_compute_init\n");
@@ -4655,67 +4932,55 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         }
         printf("OK: pushbuffer compute SEND_PCAS (%u B)\n", qmd_len);
 
-        /* Y la promoción del contexto de GR **tal como viaja**. `check_grctx` prueba la
-         * aritmética del plan; esto prueba lo otro: que la petición sale con el layout
-         * y el contenido correctos. Es donde ya se perdió un ciclo de hardware (el
-         * `hHandleVASpace` que no existe desplazaba todo el struct del canal y RM
-         * contestaba un error que hablaba de otra cosa), y donde un `promoteEntry` que
-         * empezara en el offset 44 en vez del 48 pasaría desapercibido. */
+        /* Payload PROMOTE_CTX (índice 16): layout y entradas del plan. */
         {
-            struct gsp_grctx ctx;
-            const unsigned char *entry;
-            const struct gsp_rpc_hdr *hdr;
-            const rpc_gsp_rm_control *c;
-            const NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS *p;
             const NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY *e;
             unsigned nmapped = 0, nonmapped = 0, j;
 
-            if (gsp_grctx_query(&v.rm, 0u, &ctx) < 0) {
-                printf("FALLO: gsp_grctx_query\n");
-                return -1;
-            }
-            if (gsp_grctx_promote(&v.rm, &v, &pool, &chan_gr, &ctx) != 0) {
-                printf("FALLO: gsp_grctx_promote\n");
-                return -1;
-            }
-            /* La consulta va en el índice 16 y la promoción en el 17. */
-            entry = cmdq_base + 4096 + (unsigned long)((wptr0 + 17) % 63) * 4096;
+            entry = cmdq_base + 4096 +
+                    (unsigned long)((wptr0 + G4E_SLOT_USER_PROMOTE) % 63) * 4096;
             hdr = (const struct gsp_rpc_hdr *)(entry + sizeof(struct gsp_msg_elem));
             c = (const rpc_gsp_rm_control *)(hdr + 1);
             p = (const NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS *)(c + 1);
+            {
+                unsigned want_entries = 0;
 
-            if (c->cmd != NV2080_CTRL_CMD_GPU_PROMOTE_CTX ||
-                c->hObject != v.rm.subdevice ||
-                c->paramsSize != sizeof(*p)) {
-                printf("FALLO: PROMOTE_CTX cmd=0x%08x obj=0x%08x params=%u (esperaba "
-                       "0x%08x/0x%08x/%u)\n", c->cmd, c->hObject, c->paramsSize,
-                       NV2080_CTRL_CMD_GPU_PROMOTE_CTX, v.rm.subdevice,
-                       (unsigned)sizeof(*p));
-                return -1;
-            }
-            /* `engineType` es el 1 del control (GR), no el engineType del canal, que
-             * para GR0 también vale 1 y por eso hay que decirlo: si el canal fuera otro
-             * y aquí se colase el suyo, el error sería invisible en este test. */
-            if (p->engineType != 1u || p->hChanClient != v.rm.client ||
-                p->hObject != chan_gr.handle) {
-                printf("FALLO: PROMOTE_CTX engineType=%u hChanClient=0x%08x "
-                       "hObject=0x%08x\n", p->engineType, p->hChanClient, p->hObject);
-                return -1;
-            }
-            /* Los campos que upstream deja a cero. Rellenar `virtAddress`/`size` con el
-             * contexto entero sería describirlo dos veces y de dos formas distintas. */
-            if (p->hClient != 0u || p->ChID != 0u || p->hVirtMemory != 0u ||
-                p->virtAddress != 0u || p->size != 0u) {
-                printf("FALLO: PROMOTE_CTX trae campos que upstream deja a cero\n");
-                return -1;
-            }
-            if (p->entryCount != ctx.nr) {
-                printf("FALLO: entryCount=%u y el plan tiene %u búferes\n",
-                       p->entryCount, ctx.nr);
-                return -1;
+                for (j = 0; j < ctx.nr; j++) {
+                    if (ctx.buf[j].buffer_id ==
+                            NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_UNRESTRICTED_PRIV_ACCESS_MAP) {
+                        continue;
+                    }
+                    want_entries++;
+                }
+
+                if (c->cmd != NV2080_CTRL_CMD_GPU_PROMOTE_CTX ||
+                    c->hObject != v.rm.subdevice ||
+                    c->paramsSize != sizeof(*p)) {
+                    printf("FALLO: PROMOTE_CTX cmd=0x%08x obj=0x%08x params=%u (esperaba "
+                           "0x%08x/0x%08x/%u)\n", c->cmd, c->hObject, c->paramsSize,
+                           NV2080_CTRL_CMD_GPU_PROMOTE_CTX, v.rm.subdevice,
+                           (unsigned)sizeof(*p));
+                    return -1;
+                }
+                if (p->engineType != 1u || p->hChanClient != v.rm.client ||
+                    p->hObject != chan_gr.handle) {
+                    printf("FALLO: PROMOTE_CTX engineType=%u hChanClient=0x%08x "
+                           "hObject=0x%08x\n", p->engineType, p->hChanClient, p->hObject);
+                    return -1;
+                }
+                if (p->hClient != 0u || p->ChID != 0u || p->hVirtMemory != 0u ||
+                    p->virtAddress != 0u || p->size != 0u) {
+                    printf("FALLO: PROMOTE_CTX trae campos que upstream deja a cero\n");
+                    return -1;
+                }
+                if (p->entryCount != want_entries) {
+                    printf("FALLO: entryCount=%u y el plan de usuario tiene %u entradas "
+                           "(plan %u, sin UNRESTRICTED)\n",
+                           p->entryCount, want_entries, ctx.nr);
+                    return -1;
+                }
             }
 
-            /* El principal: inicializado, con física y tamaño, y con `physAttr` a 4. */
             e = &p->promoteEntry[0];
             if (e->bufferId != NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_MAIN ||
                 !e->bInitialize || e->gpuPhysAddr == 0u || e->size != 0x49000u ||
@@ -4733,16 +4998,9 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
 
                 if (e->bNonmapped) {
                     nonmapped++;
-                    /* Sin mapear **es** sin VA: una VA aquí sería decirle a RM que hay
-                     * traducción para algo que no se ha mapeado. */
                     if (e->gpuVirtAddr != 0u) {
                         printf("FALLO: la entrada %u dice bNonmapped y trae VA 0x%llx\n",
                                j, (unsigned long long)e->gpuVirtAddr);
-                        return -1;
-                    }
-                    if (e->bufferId != NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PRIV_ACCESS_MAP) {
-                        printf("FALLO: bNonmapped en el bufferId %u, sólo lo lleva el "
-                               "PRIV_ACCESS_MAP\n", e->bufferId);
                         return -1;
                     }
                     continue;
@@ -4763,30 +5021,30 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                            "32 MiB\n", (unsigned long long)e->gpuVirtAddr);
                     return -1;
                 }
-                /* El único `ro` del contexto tiene que haber llegado al PTE como
-                 * tal. Esto cierra el círculo: el plan lo marca, el mapeo lo aplica
-                 * y la traducción lo confirma — tres sitios para un solo bit. */
                 if (e->bufferId ==
                         NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_UNRESTRICTED_PRIV_ACCESS_MAP) {
-                    uint64_t ro_pa = 0, ro_pte = 0;
+                    printf("FALLO: UNRESTRICTED_PRIV_ACCESS_MAP no debe ir en promote "
+                           "de canal usuario\n");
+                    return -1;
+                }
+                if (e->bufferId ==
+                        NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ID_PRIV_ACCESS_MAP) {
+                    uint64_t pam_pa = 0, pam_pte = 0;
 
-                    if (gsp_vmm_translate(&v, e->gpuVirtAddr, &ro_pa, &ro_pte) != 0 ||
-                        (ro_pte & ~VMM_T_ADDR_MASK) != VMM_T_PTE_VRAM_RO_LOW) {
-                        printf("FALLO: el UNRESTRICTED_PRIV_ACCESS_MAP no está "
-                               "mapeado de sólo lectura (PTE 0x%llx)\n",
-                               (unsigned long long)(ro_pte & ~VMM_T_ADDR_MASK));
+                    if (gsp_vmm_translate(&v, e->gpuVirtAddr, &pam_pa, &pam_pte) != 0) {
+                        printf("FALLO: PRIV_ACCESS_MAP sin traducción en VMM usuario\n");
                         return -1;
                     }
                 }
             }
-            if (nonmapped != 1u || nmapped != ctx.nr - 1u) {
-                printf("FALLO: %u entradas sin mapear y %u mapeadas de %u\n",
-                       nonmapped, nmapped, ctx.nr);
+            if (nonmapped != 0u || nmapped != p->entryCount) {
+                printf("FALLO: %u entradas sin mapear y %u mapeadas de %u (entryCount=%u)\n",
+                       nonmapped, nmapped, p->entryCount, p->entryCount);
                 return -1;
             }
-            printf("OK: PROMOTE_CTX sobre el subdevice — %u entradas (%u B), MAIN con "
-                   "física y physAttr=4, PRIV_ACCESS_MAP sin mapear, ATTRIBUTE_CB "
-                   "alineado a 32 MiB\n", p->entryCount, c->paramsSize);
+            printf("OK: PROMOTE_CTX usuario — %u entradas (%u B), MAIN con física, "
+                   "PRIV_ACCESS_MAP mapeado, ATTRIBUTE_CB alineado a 32 MiB\n",
+                   p->entryCount, c->paramsSize);
         }
 
         gsp_compute_fini(&cp);
@@ -5257,6 +5515,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_rc_triggered() != 0)
         return -1;
     if (check_doorbell_kick_by_family() != 0)
+        return -1;
+    if (check_doorbell_ampere_copy2_resolved() != 0)
         return -1;
     if (check_ga107_dead_boot0() != 0)
         return -1;

@@ -418,6 +418,9 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
     iwl->radio_ready = 0;
     iwl->mvm_up_done = 0;
     iwl->phy_ctxt_added = 0;
+    iwl->mac_ctxt_added = 0;
+    iwl->binding_added = 0;
+    iwl->lar_regdom_set = 0;
     iwl->scan_cfg_sent = 0;
     iwl->scan_active = 0;
     iwl->mcc_done = 0;

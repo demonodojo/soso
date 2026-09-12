@@ -71,9 +71,14 @@ int gsp_grctx_plan(const NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO
 /* Pide los tamaños a RM (sobre el subdevice) y llama a `gsp_grctx_plan`. */
 int gsp_grctx_query(struct gsp_rm *rm, unsigned engine_idx, struct gsp_grctx *ctx);
 
+/* Publica el contexto del golden oneinit para que un segundo canal herede globales
+ * (`r535_gr_promote_ctx`: `alloc = golden || !global`). */
+void gsp_grctx_golden_publish(const struct gsp_grctx *ctx);
+
 /* Reserva cada búfer en VRAM, lo mapea en el vaspace y promociona el contexto del
- * canal `chan`. Devuelve 0 si RM aceptó la promoción. */
+ * canal `chan`. Con `golden=false` los búferes globales reusan VRAM del golden y no
+ * se promociona UNRESTRICTED_PRIV_ACCESS_MAP. Devuelve 0 si RM aceptó. */
 int gsp_grctx_promote(struct gsp_rm *rm, struct gsp_vmm *vmm, struct gsp_vram *vram,
-                      struct gsp_chan *chan, struct gsp_grctx *ctx);
+                      struct gsp_chan *chan, struct gsp_grctx *ctx, int golden);
 
 #endif

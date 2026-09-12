@@ -6,6 +6,11 @@ use std::process::{Command, exit};
 use crate::drivers::{self, DriverProfile};
 use crate::live_models;
 
+/// Hueco de `kernel-x86_64` en la ESP live (el mismo tope que SOSOKRN / OTA).
+pub const LIVE_KERNEL_SLOT: usize = soso_update_core::UPD_KERNEL_SLOT_SIZE;
+/// p1 live: kernel 64 + SOSOKRN 64 + FAT/EFI/huecos.
+pub const LIVE_ESP_BYTES: u64 = 192 * 1024 * 1024;
+
 /// Perfil live: `SOSO_DRIVERS` si está definido; si no, `live-usb` (GPU GA107 incluida).
 pub(crate) fn live_driver_profile() -> DriverProfile {
     if std::env::var("SOSO_DRIVERS")
@@ -39,15 +44,16 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     print_profile_summary(&profile);
 
     super::build_user();
-    let _ = super::build_image_with_profile(&profile, true);
+    // Sin SOSOKRN.BIN de 64 MiB en el DiskImageBuilder: fatfs lo duplica en RAM
+    // (BIOS+UEFI) y tumba el host. Los huecos van en create_esp_slots del live.
+    let _ = super::build_image_with_profile(&profile, false);
 
     let uefi = root.join("target/soso-uefi.img");
     let mut data = super::mkfs_rootfs_with_profile(true, &profile, super::RootfsImgMode::PackOnly);
 
     let align = 1024 * 1024;
     let data_len = std::fs::metadata(&data).expect("data").len();
-    let uefi_len = std::fs::metadata(&uefi).expect("uefi").len();
-    let esp_aligned = (uefi_len + align - 1) / align * align;
+    let esp_aligned = LIVE_ESP_BYTES;
     let rootfs_aligned = (data_len + align - 1) / align * align;
 
     let selection = resolve_live_models(&root, usb_bytes, esp_aligned, rootfs_aligned);
@@ -98,6 +104,36 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
 
     run_cmd(Command::new("sgdisk").arg("-e").arg(&live), "sgdisk -e");
 
+    let esp_mb = LIVE_ESP_BYTES / (1024 * 1024);
+    let p1_start = partition_first_sector(&live, 1).unwrap_or(34);
+    run_cmd(
+        Command::new("sgdisk")
+            .arg("-d")
+            .arg("1")
+            .arg("-n")
+            .arg(format!("1:{p1_start}:+{esp_mb}M"))
+            .arg("-t")
+            .arg("1:EF00")
+            .arg("-c")
+            .arg("1:kernel")
+            .arg(&live),
+        "sgdisk grow p1",
+    );
+    let esp_fat = out_dir.join("soso-esp.fat");
+    if let Err(e) = build_live_esp_fat(&uefi, &esp_fat) {
+        eprintln!("package-usb-live: no pude construir ESP {esp_mb} MiB: {e}");
+        exit(1);
+    }
+    let p1 = partition_first_sector(&live, 1).expect("p1 lba");
+    run_cmd(
+        Command::new("dd")
+            .arg(format!("if={}", esp_fat.display()))
+            .arg(format!("of={}", live.display()))
+            .args(["bs=512", "conv=notrunc"])
+            .arg(format!("seek={p1}")),
+        "dd ESP",
+    );
+
     let p2_mb = (p2_size / (1024 * 1024)).max(1);
     let p4_mb = (live_models::P4_INSTALL_BYTES / (1024 * 1024)).max(1);
     // p4 SOSOINSTALL va *entre* rootfs y modelos (primeros ~350 MiB del stick).
@@ -138,15 +174,7 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
             .arg("conv=notrunc"),
         "dd data",
     );
-    run_cmd(
-        Command::new("dd")
-            .arg(format!("if={}", models.display()))
-            .arg(format!("of={}", live.display()))
-            .arg("bs=512")
-            .arg(format!("seek={p3_start}"))
-            .arg("conv=notrunc"),
-        "dd models",
-    );
+    crate::fat32_write::drop_path_cache(&live);
 
     write_installer_bundle(&out_dir, total);
     let fat = build_install_fat(&out_dir);
@@ -160,11 +188,15 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
         "dd SOSOINSTALL",
     );
 
+    // Huecos ESP antes de dd de modelos: agrandar kernel/SOSOKRN con la
+    // imagen aún pequeña en cache. Después de los GGUF la page cache ya va llena.
     create_esp_slots(&live);
-    // R3: identidad de lo que se acaba de empaquetar, dentro de la propia ESP.
-    // Sin esto, un arranque solo se puede atribuir por la versión anunciada, y
-    // «0.2.2 (abc-dirty)» no distingue dos árboles distintos.
+    pad_live_kernel_slot(&live);
     write_esp_manifest(&root, &live, &profile, &data, &models, &uefi);
+    crate::fat32_write::drop_path_cache(&live);
+
+    dd_seek_maybe_direct(&models, &live, p3_start, "dd models");
+    crate::fat32_write::drop_path_cache(&live);
 
     write_flash(
         &out_dir,
@@ -408,12 +440,11 @@ impl Drop for LiveLlmConf {
     }
 }
 
-fn live_image_bytes(data: &Path, models: &Path, uefi: &Path) -> u64 {
+fn live_image_bytes(data: &Path, models: &Path, _uefi: &Path) -> u64 {
     let data_len = std::fs::metadata(data).expect("data").len();
     let models_len = std::fs::metadata(models).expect("models").len();
-    let uefi_len = std::fs::metadata(uefi).expect("uefi").len();
     let align = 1024 * 1024;
-    let header = (uefi_len + align - 1) / align * align;
+    let header = LIVE_ESP_BYTES;
     let p2_size = (data_len + align - 1) / align * align;
     let p3_size = (models_len + align - 1) / align * align;
     header + p2_size + live_models::P4_INSTALL_BYTES + p3_size + align
@@ -564,13 +595,26 @@ fn chrono_now() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-/// Hash de un fichero, o None si no se puede leer.
+/// Hash de un fichero, o None si no se puede leer. Lee en bloques de 1 MiB:
+/// la imagen de modelos son varios GB y `std::fs::read` entera reventaba la
+/// RAM del host (OOM que se llevaba a Cursor al reflashear).
 fn sha256_file(path: &Path) -> Option<(String, u64)> {
     use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path).ok()?;
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
     let mut h = Sha256::new();
-    h.update(&bytes);
-    Some((format!("{:x}", h.finalize()), bytes.len() as u64))
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+        total += n as u64;
+    }
+    crate::fat32_write::drop_path_cache(path);
+    Some((format!("{:x}", h.finalize()), total))
 }
 
 /// `SOSOHASH.TXT` en la ESP: qué kernel, qué rootfs y qué perfil se flashearon.
@@ -640,6 +684,125 @@ pub(crate) fn write_esp_manifest(
     }
 }
 
+/// FAT32 de `LIVE_ESP_BYTES` con el árbol de `soso-uefi.img` p1 (LFN incluido).
+fn build_live_esp_fat(uefi: &Path, fat: &Path) -> Result<(), String> {
+    {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(fat)
+            .map_err(|e| format!("crear {}: {e}", fat.display()))?;
+        f.set_len(LIVE_ESP_BYTES)
+            .map_err(|e| format!("tamaño ESP: {e}"))?;
+    }
+    run_cmd(
+        Command::new("mkfs.vfat")
+            .args(["-F", "32", "-n", "KERNEL"])
+            .arg(fat),
+        "mkfs.vfat ESP",
+    );
+    if copy_uefi_esp_losetup(uefi, fat) || copy_uefi_esp_mtools(uefi, fat) {
+        return Ok(());
+    }
+    Err("no pude copiar la ESP de soso-uefi.img (¿losetup/mtools?)".into())
+}
+
+fn copy_uefi_esp_losetup(uefi: &Path, fat: &Path) -> bool {
+    let Some(src_p1) = partition_first_sector(uefi, 1) else {
+        return false;
+    };
+    let Some((_, src_last)) = partition_range(uefi, 1) else {
+        return false;
+    };
+    let offset = src_p1 * 512;
+    let sizelimit = (src_last - src_p1 + 1) * 512;
+    let src_loop = Command::new("losetup")
+        .args([
+            "-f",
+            "--show",
+            "--offset",
+            &offset.to_string(),
+            "--sizelimit",
+            &sizelimit.to_string(),
+        ])
+        .arg(uefi)
+        .output();
+    let Ok(src_loop) = src_loop else {
+        return false;
+    };
+    if !src_loop.status.success() {
+        return false;
+    }
+    let src_dev = String::from_utf8_lossy(&src_loop.stdout).trim().to_string();
+    let dst_loop = Command::new("losetup")
+        .args(["-f", "--show"])
+        .arg(fat)
+        .output();
+    let ok = if let Ok(dst_loop) = dst_loop {
+        if dst_loop.status.success() {
+            let dst_dev = String::from_utf8_lossy(&dst_loop.stdout).trim().to_string();
+            let copied = mount_copy_esp(&src_dev, &dst_dev);
+            let _ = Command::new("losetup").args(["-d", &dst_dev]).status();
+            copied
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let _ = Command::new("losetup").args(["-d", &src_dev]).status();
+    ok
+}
+
+fn mount_copy_esp(src_dev: &str, dst_dev: &str) -> bool {
+    let tmp = std::env::temp_dir().join(format!("soso-esp-{}", std::process::id()));
+    let src_mnt = tmp.join("src");
+    let dst_mnt = tmp.join("dst");
+    let _ = std::fs::create_dir_all(&src_mnt);
+    let _ = std::fs::create_dir_all(&dst_mnt);
+    let mounted = Command::new("mount")
+        .args(["-t", "vfat", "-o", "ro"])
+        .arg(src_dev)
+        .arg(&src_mnt)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        && Command::new("mount")
+            .args(["-t", "vfat"])
+            .arg(dst_dev)
+            .arg(&dst_mnt)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    let ok = mounted
+        && Command::new("cp")
+            .args(["-a", &format!("{}/.", src_mnt.display())])
+            .arg(&dst_mnt)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    let _ = Command::new("umount").arg(&src_mnt).status();
+    let _ = Command::new("umount").arg(&dst_mnt).status();
+    let _ = std::fs::remove_dir_all(&tmp);
+    ok
+}
+
+fn copy_uefi_esp_mtools(uefi: &Path, fat: &Path) -> bool {
+    let Some(src_p1) = partition_first_sector(uefi, 1) else {
+        return false;
+    };
+    let offset = src_p1 * 512;
+    let src_spec = format!("{}@@{}", uefi.display(), offset);
+    let status = Command::new("mcopy")
+        .env("MTOOLS_SKIP_CHECK", "1")
+        .args(["-s", "-n", "-i", &src_spec, "::", "-i"])
+        .arg(fat)
+        .arg("::")
+        .status();
+    status.map(|s| s.success()).unwrap_or(false)
+}
+
 /// Huecos 8.3 pre-creados en la ESP (log, hwscan, install, WiFi, OTA).
 pub(crate) fn create_esp_slots(live: &Path) {
     create_esp_file(live, b"SOSORES ", b"TXT", 4096);
@@ -648,10 +811,31 @@ pub(crate) fn create_esp_slots(live: &Path) {
     create_esp_file(live, b"SOSOBOOT", b"TXT", 4096);
     create_esp_file(live, b"SOSOWIFI", b"TXT", 4096);
     create_esp_file(live, b"SOSOUPD ", b"TXT", 4096);
-    create_esp_file(live, b"SOSOKRN ", b"BIN", 64 * 1024 * 1024);
+    create_esp_file(live, b"SOSOKRN ", b"BIN", LIVE_KERNEL_SLOT);
     create_esp_file(live, b"SOSOKRN ", b"MET", 512);
 }
 
+pub(crate) fn pad_live_kernel_slot(live: &Path) {
+    let Some(p1) = partition_first_sector(live, 1) else {
+        return;
+    };
+    let Ok(name) = crate::fat32_write::find_root_kernel_name(live, p1) else {
+        eprintln!("package-usb-live: aviso: sin kernel-x86_64 para reservar hueco");
+        return;
+    };
+    match crate::fat32_write::grow_root_file(live, p1, &name, LIVE_KERNEL_SLOT as u32) {
+        Ok(sz) if sz as usize >= LIVE_KERNEL_SLOT => {
+            println!(
+                "package-usb-live: kernel-x86_64 hueco {} MiB",
+                LIVE_KERNEL_SLOT / (1024 * 1024)
+            );
+        }
+        Ok(sz) => println!("package-usb-live: kernel-x86_64 {sz} B (menor que el hueco)"),
+        Err(e) => eprintln!("package-usb-live: aviso: no reservé hueco de kernel: {e}"),
+    }
+}
+
+#[allow(dead_code)] // SOSOWIFI.TXT; el camino in situ ya no reescribe la FAT
 fn esp_wifi_name11() -> [u8; 11] {
     let mut name11 = [0u8; 11];
     name11[..8].copy_from_slice(b"SOSOWIFI");
@@ -660,12 +844,14 @@ fn esp_wifi_name11() -> [u8; 11] {
 }
 
 /// Lee `SOSOWIFI.TXT` de la ESP si existe (para preservarlo al reflashear p1).
+#[allow(dead_code)]
 pub(crate) fn read_esp_wificonf(dev: &Path) -> Option<Vec<u8>> {
     let p1 = partition_first_sector(dev, 1)?;
     crate::fat32_write::read_root_file(dev, p1, &esp_wifi_name11()).ok()
 }
 
 /// Restaura credenciales WiFi en la ESP tras actualizar p1.
+#[allow(dead_code)]
 pub(crate) fn write_esp_wificonf(dev: &Path, data: &[u8]) -> Result<(), String> {
     let p1 = partition_first_sector(dev, 1)
         .ok_or_else(|| String::from("sin partición ESP (p1)"))?;
@@ -696,8 +882,76 @@ pub(crate) fn validate_live_usb(dev: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Actualiza kernel + loaders UEFI de `uefi` (GPT p1) sobre la ESP live de
+/// `dest` **in situ**. No pisa el BPB ni los huecos SOSOLOG/SOSOKRN.
+///
+/// `--only kernel` no puede hacer `dd` de `soso-uefi.img` p1 (~31 MiB) sobre
+/// una ESP live más grande (p. ej. 96 MiB): deja el shim OK y el kernel/fatlog
+/// mudos (ROG run17).
+pub(crate) fn update_esp_from_uefi(uefi: &Path, dest: &Path) -> Result<(), String> {
+    let src_p1 = partition_first_sector(uefi, 1)
+        .ok_or_else(|| format!("sin ESP en {}", uefi.display()))?;
+    let dst_p1 = partition_first_sector(dest, 1)
+        .ok_or_else(|| format!("sin ESP en {}", dest.display()))?;
+
+    let src_name = crate::fat32_write::find_root_kernel_name(uefi, src_p1)?;
+    let ksize = crate::fat32_write::find_root_entry(uefi, src_p1, &src_name)?
+        .map(|(_, sz)| sz)
+        .unwrap_or(0);
+    let head = crate::fat32_write::read_in_dir_prefix(uefi, src_p1, &[], &src_name, 4)?;
+    if ksize < 4 || head != *b"\x7fELF" {
+        return Err(format!("kernel en {} no es ELF", uefi.display()));
+    }
+    let dst_name = crate::fat32_write::find_root_kernel_name(dest, dst_p1)?;
+    if let Ok(Some((_, hole))) = crate::fat32_write::find_root_entry(dest, dst_p1, &dst_name) {
+        let want = (LIVE_KERNEL_SLOT as u32).max(ksize);
+        if hole < want {
+            match crate::fat32_write::grow_root_file(dest, dst_p1, &dst_name, want) {
+                Ok(sz) => println!("flash-usb-live: hueco kernel ampliado a {sz} B"),
+                Err(e) => {
+                    if ksize > hole {
+                        return Err(format!(
+                            "kernel ({ksize} B) no cabe en el hueco ({hole} B) y no pude agrandarlo: {e}"
+                        ));
+                    }
+                    eprintln!("flash-usb-live: aviso: hueco kernel {hole} B (sin ampliar: {e})");
+                }
+            }
+        }
+    }
+    let (wrote, orig) = crate::fat32_write::overwrite_in_dir_from(
+        dest, dst_p1, &[], &dst_name, uefi, src_p1, &[], &src_name,
+    )?;
+    println!(
+        "flash-usb-live: kernel-x86_64 {wrote} B → hueco {orig} B (in situ, sin dd de p1)",
+    );
+
+    let efi_path = [*b"EFI        ", *b"BOOT       "];
+    for (label, name11) in [
+        ("bootsoso.efi", *b"BOOTSOSOEFI"),
+        ("bootx64.efi", *b"BOOTX64 EFI"),
+    ] {
+        match crate::fat32_write::read_in_dir(uefi, src_p1, &efi_path, &name11) {
+            Ok(data) => match crate::fat32_write::overwrite_in_dir(
+                dest, dst_p1, &efi_path, &name11, &data,
+            ) {
+                Ok(sz) => println!(
+                    "flash-usb-live: {label} {} B → hueco {sz} B",
+                    data.len()
+                ),
+                Err(e) => eprintln!("flash-usb-live: aviso: no pude actualizar {label}: {e}"),
+            },
+            Err(e) => {
+                eprintln!("flash-usb-live: aviso: no leí {label} de la imagen UEFI: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Copia una partición entera de `src` a `dst` (mismo número). Aborta si la
 /// fuente no cabe en el destino.
+#[allow(dead_code)] // tests de flash incremental; el kernel live ya no usa dd de p1
 pub(crate) fn dd_partition(
     src: &Path,
     src_part: u32,
@@ -760,7 +1014,34 @@ pub(crate) fn dd_to_partition(
             .arg(format!("count={need_sectors}")),
         &format!("dd → p{dst_part}"),
     );
+    crate::fat32_write::drop_path_cache(dst);
     Ok(())
+}
+
+fn dd_seek_maybe_direct(src: &Path, dst: &Path, seek_512: u64, label: &str) {
+    let off = seek_512 * 512;
+    if off.is_multiple_of(1024 * 1024) {
+        let seek_m = off / (1024 * 1024);
+        let st = Command::new("dd")
+            .arg(format!("if={}", src.display()))
+            .arg(format!("of={}", dst.display()))
+            .args(["bs=1M", "oflag=direct", "conv=notrunc"])
+            .arg(format!("seek={seek_m}"))
+            .status();
+        if st.map(|s| s.success()).unwrap_or(false) {
+            return;
+        }
+        eprintln!("{label}: O_DIRECT falló, reintento con caché");
+    }
+    run_cmd(
+        Command::new("dd")
+            .arg(format!("if={}", src.display()))
+            .arg(format!("of={}", dst.display()))
+            .arg("bs=512")
+            .arg(format!("seek={seek_512}"))
+            .arg("conv=notrunc"),
+        label,
+    );
 }
 
 /// Pre-crea un fichero contiguo en la raíz de la ESP, relleno de `\n`.
@@ -785,8 +1066,14 @@ fn create_esp_file(live: &Path, name: &[u8; 8], ext: &[u8; 3], size: usize) {
             return;
         }
     }
-    let data = vec![b'\n'; size];
-    if let Err(e) = crate::fat32_write::write_root_file(live, p1_start, name, ext, &data) {
+    if let Err(e) = crate::fat32_write::write_root_file_fill(
+        live,
+        p1_start,
+        name,
+        ext,
+        size as u32,
+        b'\n',
+    ) {
         eprintln!("package-usb-live: aviso: no pude crear {label}: {e}");
         eprintln!("package-usb-live: regenera con espacio libre en la ESP");
         return;

@@ -56,6 +56,10 @@ unsigned gsp_top_falcon_base(uint8_t type, uint8_t inst, unsigned fallback);
  * devolver el 0, que es justo GR. */
 int gsp_top_type_of_engine(uint32_t engine, uint8_t *type, uint8_t *inst);
 
+/* Elige un motor COPY cuya runlist PTOP ≠ GR0 (evita PBDMA compartido con GR0).
+ * Sin PTOP o sin candidato devuelve NV2080_ENGINE_TYPE_COPY2. */
+uint32_t gsp_top_pick_ce_engine(void);
+
 /* Máscara PMC (NV_PMC_ENABLE 0x600) para `type`/`inst` vía PTOP reset bit. */
 int gsp_top_pmc_enable_mask(uint8_t type, uint8_t inst, uint32_t *mask_out);
 

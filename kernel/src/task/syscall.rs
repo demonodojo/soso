@@ -307,6 +307,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_PWRITE => sys_pwrite(a1, a2, a3, a4),
         abi::SYS_GETENV => sys_getenv(a1, a2, a3, a4),
         abi::SYS_FS_RESIZE => sys_fs_resize(a1, a2, a3),
+        abi::SYS_FATLOG_FLUSH => sys_fatlog_flush(),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -1630,6 +1631,16 @@ fn sys_bootreq_write(_buf: u64, _len: u64) -> Result<u64, i64> {
 
 #[cfg(not(feature = "drv-live-disk"))]
 fn sys_bootreq_read(_buf: u64, _len: u64) -> Result<u64, i64> {
+    Err(-abi::ENOTSUP)
+}
+
+#[cfg(feature = "drv-live-disk")]
+fn sys_fatlog_flush() -> Result<u64, i64> {
+    crate::drivers::fatlog::flush().map(|_| 0).map_err(|_| -abi::EIO)
+}
+
+#[cfg(not(feature = "drv-live-disk"))]
+fn sys_fatlog_flush() -> Result<u64, i64> {
     Err(-abi::ENOTSUP)
 }
 

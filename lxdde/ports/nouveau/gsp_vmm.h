@@ -126,7 +126,13 @@ struct gsp_vmm {
  * en vez de reutilizar el del GSP); los handles van por cliente, así que el
  * device vuelve a ser 0xde1d0000 sin chocar con el de G4c. */
 int gsp_vmm_init(struct gsp_cmdq *q, struct gsp_rpc *rpc, struct gsp_vmm *v,
-                 struct gsp_vram *vram_pool);
+                 struct gsp_vram *vram_pool, unsigned client_id);
+
+/* Segundo vaspace sobre un cliente RM ya vivo (`r535_gr_oneinit`: golden.vmm con
+ * handle distinto, mismo cliente que el canal de compute). Solo `vaspace_alloc` +
+ * directorio; no reserva cliente/device. */
+int gsp_vmm_init_on_rm(struct gsp_vmm *v, const struct gsp_rm *rm,
+                       struct gsp_vram *vram_pool, uint32_t vaspace_handle);
 
 /* Vaspace sin RM: sólo el directorio raíz. Para BAR1, que entrega su directorio
  * por el bloque de instancia de la apertura y no por `SET_PAGE_DIRECTORY`. */
@@ -189,5 +195,9 @@ int gsp_vmm_translate(const struct gsp_vmm *v, uint64_t va, uint64_t *phys,
  * Se llama ANTES de `gsp_fini`: mientras RM tenga apuntado nuestro directorio,
  * esas páginas de sysmem no se pueden devolver al heap. */
 void gsp_vmm_fini(struct gsp_vmm *v);
+
+/* Como `gsp_vmm_fini` pero sin FREE de client/device/subdevice: libera solo el
+ * vaspace temporal (golden oneinit) y sus tablas. */
+void gsp_vmm_fini_vaspace(struct gsp_vmm *v);
 
 #endif

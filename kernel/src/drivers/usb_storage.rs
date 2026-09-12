@@ -339,8 +339,10 @@ pub fn flush() -> Result<(), &'static str> {
         .find(|h| h.ms.is_some())
         .ok_or("sin usb")?;
     let ms = host.ms.as_ref().ok_or("sin mass storage")?;
+    /* Linux sd_sync_cache: ILLEGAL_REQUEST / asc 0x20 → éxito; sin WCE no
+     * emite flushes. Write-through asumido (sd.c:2974-2979 asc 0x24). */
     if !ms.sync_cache {
-        return Err("usb sync cache no soportado");
+        return Ok(());
     }
     if host.ctrl.synchronize_cache10(ms) {
         Ok(())

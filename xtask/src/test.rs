@@ -638,6 +638,18 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report, filter: &Te
         );
         filter.if_step(
             sid,
+            "ask: mmap huge (tiny-huge shard ≥2 MiB)",
+            || {
+                let serial = slot.serial.clone();
+                let _ = report.paso_con_reintento(
+                    sid,
+                    "ask: mmap huge (tiny-huge shard ≥2 MiB)",
+                    || ssh_ask_huge_mmap(key, port, &serial),
+                );
+            },
+        );
+        filter.if_step(
+            sid,
             "soso-llm: 20 ciclos carga/generación/cambio (A7)",
             || {
                 let _ = report.paso_con_reintento(
@@ -1855,6 +1867,49 @@ fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
             "ask :eco no devolvió la línea literal; stdout: {texto:?}"
         ))
     }
+}
+
+/// `ask` con `tiny-huge`: al menos un shard ≥2 MiB (attn_q 768×768 f32) fuerza
+/// el camino de página grande en `handle_mmap_fault`. Comprueba que la carga no
+/// mata askd y que la inferencia arranca (smoke del bug del 27B en placa).
+fn ssh_ask_huge_mmap(key: &Path, ssh_port: u16, serial: &Path) -> Result<(), String> {
+    let guion = "ask :modelo tiny-huge\nask :max 1\nask hola\nexit\n";
+    let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(600))?;
+    if texto.contains("ask: no pude cargar") || texto.contains("ask: error\n") {
+        return Err(format!(
+            "ask no cargó tiny-huge; stdout: {texto:?}"
+        ));
+    }
+    if !texto.contains("ask: cargando tiny-huge") {
+        return Err(format!(
+            "falta «ask: cargando tiny-huge»; stdout: {texto:?}"
+        ));
+    }
+    if !texto.contains("ask: generando") {
+        return Err(format!(
+            "ask no llegó a generar tras mmap huge; stdout: {texto:?}"
+        ));
+    }
+    let serie = fs::read_to_string(serial).unwrap_or_default();
+    if serie.contains("page fault de usuario") || serie.contains("matado: page fault") {
+        return Err(format!(
+            "page fault de usuario en serial durante ask huge; ver {}",
+            serial.display()
+        ));
+    }
+    if serie.contains("mmap-fault:") {
+        return Err(format!(
+            "mmap-fault en serial (camino huge falló); ver {}",
+            serial.display()
+        ));
+    }
+    if !serie.contains("askd: tiny-huge listo") {
+        return Err(format!(
+            "askd no terminó de cargar tiny-huge; serial sin «listo»; ver {}",
+            serial.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Dos `ask` en la misma sesión SSH cargan el modelo una sola vez; una sesión

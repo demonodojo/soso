@@ -155,6 +155,27 @@ unsigned gsp_top_falcon_base(uint8_t type, uint8_t inst, unsigned fallback)
     return fallback;
 }
 
+uint32_t gsp_top_pick_ce_engine(void)
+{
+    uint32_t gr_runl = 0;
+    unsigned inst;
+
+    if (gsp_top_runlist_of(GSP_TOP_TYPE_GR, 0, &gr_runl, NULL) != 0) {
+        return NV2080_ENGINE_TYPE_COPY2;
+    }
+    for (inst = 0; inst < 16u; inst++) {
+        uint32_t ce_runl = 0;
+
+        if (gsp_top_runlist_of(GSP_TOP_TYPE_CE, (uint8_t)inst, &ce_runl, NULL) != 0) {
+            continue;
+        }
+        if (ce_runl != 0 && ce_runl != gr_runl) {
+            return NV2080_ENGINE_TYPE_COPY0 + inst;
+        }
+    }
+    return NV2080_ENGINE_TYPE_COPY2;
+}
+
 int gsp_top_type_of_engine(uint32_t engine, uint8_t *type, uint8_t *inst)
 {
     /* Sólo los dos que usa el port. Un `default` que devolviera 0 sería peor que

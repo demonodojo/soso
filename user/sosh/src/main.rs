@@ -478,8 +478,18 @@ fn ejecutar_wifi(args: &str) {
     wifi_uso();
 }
 
+fn ejecutar_sosolog() {
+    let r = sys::fatlog_flush();
+    if r < 0 {
+        println!("sosh: sosolog: {}", errno_str(r));
+    } else {
+        println!("sosh: volcado a SOSOLOG.TXT");
+    }
+}
+
 fn ayuda() {
-    println!("builtins: exit [código], help, cd, pwd, wifi, ask, voz");
+    println!("builtins: exit [código], help, cd, pwd, wifi, ask, voz, sosolog");
+    println!("sosolog:  volcar el log de consola a SOSOLOG.TXT (ESP del USB live)");
     println!("wifi:     wifi scan | status | connect <ssid> [psk]");
     println!("ask:      ask <pregunta>  — el texto va literal al modelo");
     println!("          ask             — modo interactivo (Ctrl-D o «salir»)");
@@ -907,6 +917,10 @@ fn ejecutar(line: &str) -> Option<u8> {
                 ejecutar_wifi(cmds[0].args.trim());
                 return None;
             }
+            "sosolog" if cmds[0].args.is_empty() => {
+                ejecutar_sosolog();
+                return None;
+            }
             _ => {}
         }
     }
@@ -916,6 +930,10 @@ fn ejecutar(line: &str) -> Option<u8> {
             "exit" => return Some(0),
             "help" => {
                 ayuda();
+                return None;
+            }
+            "sosolog" => {
+                ejecutar_sosolog();
                 return None;
             }
             _ => {}

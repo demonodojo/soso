@@ -73,6 +73,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         if let Some((grados, lw, lh)) = drivers::fb::rot_log() {
             println!("fb: rot={grados} consola {lw}x{lh}");
         }
+        // Tipo de memoria del GOP: sin WC cada scroll en placa son millones
+        // de stores UC serializados (ROG 2026-09-11).
+        match drivers::fb::mem_log() {
+            Some((phys, Some(n))) => println!("fb: fís=0x{phys:x} WC {n} páginas"),
+            Some((phys, None)) => println!("fb: fís=0x{phys:x} sin WC (PAT no disponible)"),
+            None => {}
+        }
     }
 
     // En placa sin COM1 la consola es sólo el framebuffer y el teclado PS/2.

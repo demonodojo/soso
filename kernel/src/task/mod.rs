@@ -552,6 +552,20 @@ fn racimo(space: &AddrSpace, region: &mmap::MmapRegion, addr: u64) -> bool {
     servida
 }
 
+/// Diagnóstico cuando `handle_mmap_fault` no puede servir la falta (el PFH
+/// mata al proceso justo después). Sin esto en placa sólo queda la VA.
+fn mmap_fault_fail(addr: u64, is_write: bool, reason: &str) {
+    let pid = current_pid();
+    let (free, evict) = crate::mm::FRAME_ALLOC
+        .get()
+        .map(|a| (a.lock().free_frames(), crate::mm::reclaim::reclaimable_frames()))
+        .unwrap_or((0, 0));
+    crate::println!(
+        "mmap-fault: pid={pid} va={addr:#x} wr={} {reason} (frames={free} evict={evict})",
+        is_write as u8
+    );
+}
+
 /// Intenta resolver un page fault de usuario en una región mmap.
 ///
 /// Si la región respalda un fichero y el fault cae en un tramo de 2 MiB
@@ -567,9 +581,13 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
         let space = p.space.as_ref().unwrap().clone();
         let region = match space.find_mmap_region(addr) {
             Some(r) => r,
-            None => return false,
+            None => {
+                mmap_fault_fail(addr, is_write, "sin región mmap");
+                return false;
+            }
         };
         if is_write && !region.writable {
+            mmap_fault_fail(addr, is_write, "escritura en región RO");
             return false;
         }
         if space.is_mapped(addr & !0xfff) {
@@ -577,6 +595,7 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
             // marcada writable; devolver true aquí reintentaría la store
             // en bucle (colgaba mprotect-test en init).
             if is_write && !space.range_ok(addr, 1, true) {
+                mmap_fault_fail(addr, is_write, "mprotect sin permiso de escritura");
                 return false;
             }
             return true;
@@ -584,6 +603,7 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
         // Presión de memoria: evictar pesos mmap RO antes de pedir frames nuevos.
         if !region.writable && region.inode != 0 {
             if !crate::mm::reclaim::ensure_free_frames(1) {
+                mmap_fault_fail(addr, is_write, "sin frames tras reclaim");
                 return false;
             }
         }
@@ -613,9 +633,20 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
             }
             let frame2m = crate::mm::FRAME_ALLOC.get().unwrap().lock().allocate_2m();
             if let Some(frame) = frame2m {
+                let phys_base = frame.start_address().as_u64();
+                let virt_ok = (0..HUGE).step_by(4096).all(|off| {
+                    crate::mm::virt_to_phys(crate::mm::phys_to_virt(phys_base + off).as_u64())
+                        .is_some()
+                });
+                if !virt_ok {
+                    unsafe {
+                        crate::mm::FRAME_ALLOC.get().unwrap().lock().deallocate_2m(frame);
+                    }
+                    // fall through → 4 KiB
+                } else {
                 let dst = unsafe {
                     core::slice::from_raw_parts_mut(
-                        crate::mm::phys_to_virt(frame.start_address().as_u64()).as_mut_ptr::<u8>(),
+                        crate::mm::phys_to_virt(phys_base).as_mut_ptr::<u8>(),
                         HUGE as usize,
                     )
                 };
@@ -631,6 +662,7 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
                     crate::mm::FRAME_ALLOC.get().unwrap().lock().deallocate_2m(frame);
                 }
                 // fall through → 4 KiB
+                }
             }
             // sin bloque contiguo libre: se sirve con páginas de 4 KiB
         }
@@ -652,7 +684,10 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
             let mut fa = crate::mm::FRAME_ALLOC.get().unwrap().lock();
             match fa.allocate_frame() {
                 Some(f) => f,
-                None => return false,
+                None => {
+                    mmap_fault_fail(addr, is_write, "allocate_frame vacío");
+                    return false;
+                }
             }
         };
         // rellenar el frame directamente (sin buffer de 4 KiB en la pila);
@@ -665,16 +700,35 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
         dst.fill(0);
         if region.inode != 0 {
             let avail = (region.file_len as usize).saturating_sub(file_off).min(4096);
-            if avail == 0
-                || crate::vfs::read_file_range_mmap(region.inode, file_off, avail, &mut dst[..avail])
-                    .is_err()
+            if avail == 0 {
+                free_frame(frame);
+                crate::println!(
+                    "mmap-fault: pid={} va={addr:#x} offset de fichero fuera de rango \
+                     (ino={} file_off={file_off} file_len={})",
+                    current_pid(),
+                    region.inode,
+                    region.file_len
+                );
+                mmap_fault_fail(addr, is_write, "offset fuera del fichero");
+                return false;
+            }
+            if crate::vfs::read_file_range_mmap(region.inode, file_off, avail, &mut dst[..avail])
+                .is_err()
             {
                 free_frame(frame);
+                crate::println!(
+                    "mmap-fault: pid={} va={addr:#x} lectura FS falló (ino={} file_off={file_off} \
+                     avail={avail})",
+                    current_pid(),
+                    region.inode
+                );
+                mmap_fault_fail(addr, is_write, "lectura FS falló");
                 return false;
             }
         }
         if space.map_page(page_va, frame, region.writable).is_none() {
             free_frame(frame);
+            mmap_fault_fail(addr, is_write, "map_page falló");
             return false;
         }
         if !region.writable && region.inode != 0 {
@@ -1002,11 +1056,26 @@ pub fn exit_current(code: u8) -> ! {
     schedule();
 }
 
+/// Volcado del log al disco live antes de matar un proceso de usuario (el panic
+/// ya hace flush; kill_current no lo hacía y el SOSOLOG perdía mmap-fault/PF).
+fn flush_fatlog_on_task_death() {
+    unsafe { crate::drivers::serial::SERIAL1.force_unlock() };
+    unsafe { crate::drivers::fb::force_unlock() };
+    unsafe { crate::drivers::logbuf::force_unlock() };
+    #[cfg(feature = "drv-usb")]
+    unsafe {
+        crate::drivers::usb_storage::force_unlock();
+    };
+    #[cfg(feature = "drv-live-disk")]
+    let _ = crate::drivers::fatlog::flush();
+}
+
 /// Mata el proceso actual por una falta (page fault, GP...).
 pub fn kill_current(reason: &str) -> ! {
     let pid = current_pid();
     let name = with_current(|p| p.name.clone());
     crate::println!("task: [{pid}] {name} matado: {reason}");
+    flush_fatlog_on_task_death();
     exit_current(255);
 }
 

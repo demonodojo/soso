@@ -39,8 +39,21 @@ static void pb_set_object(struct gsp_chan *c, unsigned *pos, unsigned subc,
     pb_write(c, pos, oclass);
 }
 
+static int gsp_ce_rm_alloc(struct gsp_rm *rm, struct gsp_chan *chan,
+                           struct gsp_ce *ce, uint32_t *rm_status)
+{
+    NVC0B5_ALLOCATION_PARAMETERS args;
+
+    args.version = 1u;
+    args.engineType = chan->engine;
+    return gsp_rm_alloc(rm, chan->handle, ce->handle, ce->cls,
+                        &args, (uint32_t)sizeof(args), rm_status);
+}
+
 int gsp_ce_init(struct gsp_rm *rm, struct gsp_chan *chan, struct gsp_ce *ce)
 {
+    uint32_t rm_status = 0;
+
     if (!rm || !chan || !ce || !rm->ready || !chan->ready) {
         return -1;
     }
@@ -63,15 +76,15 @@ int gsp_ce_init(struct gsp_rm *rm, struct gsp_chan *chan, struct gsp_ce *ce)
                                     (unsigned)(sizeof(cand) / sizeof(cand[0])));
     }
 
-    if (gsp_rm_alloc(rm, chan->handle, ce->handle, ce->cls,
-                     NULL, 0, NULL) != 0) {
-        lx_printk("nouveau-lx: RM_ALLOC CE falló (cls=0x%04x)\n", ce->cls);
+    if (gsp_ce_rm_alloc(rm, chan, ce, &rm_status) != 0) {
+        lx_printk("nouveau-lx: RM_ALLOC CE falló (cls=0x%04x motor=%u status=0x%x)\n",
+                  ce->cls, chan->engine, rm_status);
         return -1;
     }
 
     ce->ready = 1;
-    lx_printk("nouveau-lx: CE listo cls=0x%04x handle=0x%08x\n",
-              ce->cls, ce->handle);
+    lx_printk("nouveau-lx: CE listo cls=0x%04x handle=0x%08x motor=%u\n",
+              ce->cls, ce->handle, chan->engine);
     return 0;
 }
 

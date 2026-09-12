@@ -103,6 +103,17 @@ build mcc_chan \
 echo "=== iwl MCC / política de canales hostcheck ==="
 run mcc_chan
 
+build binding_power \
+    "$root/tools/iwl-hostcheck/binding_power_test.c" \
+    "$src/iwl_mvm_up.c" \
+    "$src/iwl_mvm_nvm.c"
+
+build assoc_abi \
+    "$root/tools/iwl-hostcheck/assoc_abi_test.c" \
+    "$src/iwl_mvm_assoc.c"
+echo "=== iwl assoc ABI hostcheck ==="
+run assoc_abi
+
 for ucode in \
     "$fwdir/iwlwifi-cc-a0-77.ucode" \
     "$fwdir/iwlwifi-so-a0-gf-a0-89.ucode"; do
@@ -115,6 +126,8 @@ for ucode in \
     if [[ "$(basename "$ucode")" == iwlwifi-cc-a0-77.ucode ]]; then
         echo "=== iwl DQA capa hostcheck: $(basename "$ucode") ==="
         run capa_dqa "$ucode"
+        echo "=== iwl BINDING/POWER hostcheck: $(basename "$ucode") ==="
+        run binding_power "$ucode"
     fi
 done
 

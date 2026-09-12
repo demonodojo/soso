@@ -391,6 +391,11 @@ pub fn bootreq_read(buf: &mut [u8]) -> i64 {
     )
 }
 
+/// Volcado inmediato del log de consola a `SOSOLOG.TXT` en la ESP live.
+pub fn fatlog_flush() -> i64 {
+    syscall4(abi::SYS_FATLOG_FLUSH, 0, 0, 0, 0)
+}
+
 /// Versión del kernel (`version build`). Devuelve bytes escritos o errno.
 pub fn version(buf: &mut [u8]) -> i64 {
     syscall4(

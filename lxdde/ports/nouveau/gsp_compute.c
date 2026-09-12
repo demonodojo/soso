@@ -53,9 +53,9 @@ static void cp_pb_immd(struct gsp_chan *c, unsigned *pos, unsigned subc,
 /* Paridad nouveau/UVM: `SET_OBJECT` lleva la clase (bits 15:0) por el subcanal
  * de compute (1), no el handle de RM por el subcanal 0 (= GR). */
 static void cp_pb_set_object(struct gsp_chan *c, unsigned *pos, unsigned subc,
-                             uint32_t oclass)
+                             uint32_t method, uint32_t oclass)
 {
-    cp_pb_method(c, pos, subc, NVCEC0_SET_OBJECT, 1);
+    cp_pb_method(c, pos, subc, method, 1);
     cp_pb_write(c, pos, oclass);
 }
 
@@ -128,10 +128,10 @@ static int str_igual(const char *a, const char *b)
  *     leer basura en el constant bank.
  */
 static const struct gsp_family_caps g_family_caps[] = {
-    { GSP_FAM_AMPERE,    "Ampere",    0u, 0u,   "sm_86"  },
+    { GSP_FAM_AMPERE,    "Ampere",    GSP_QMD_VERSION_AMPERE, 256u, "sm_86"  },
     { GSP_FAM_ADA,       "Ada",       0u, 0u,   "sm_89"  },
     { GSP_FAM_HOPPER,    "Hopper",    0u, 0u,   "sm_90"  },
-    { GSP_FAM_BLACKWELL, "Blackwell", 5u, 384u, "sm_120" },
+    { GSP_FAM_BLACKWELL, "Blackwell", GSP_QMD_VERSION_CURRENT, 384u, "sm_120" },
 };
 
 unsigned gsp_family_from_class(uint32_t cls)
@@ -226,14 +226,18 @@ int gsp_compute_launch_ready(const struct gsp_compute *cp,
         return -1;
     }
     if (!cp->caps || cp->caps->qmd_version == 0u) {
-        lx_printk("nouveau-lx: %s — sin descriptor QMD para la familia %s: el "
-                  "árbol solo trae el layout de Blackwell (QMDV05); hace falta "
-                  "el clc?c0qmd.h de esta familia. No se envía nada.\n",
-                  quien, cp->caps ? cp->caps->nombre : "desconocida");
+        lx_printk("nouveau-lx: %s — sin descriptor QMD para la familia %s: no se "
+                  "envía nada.\n", quien, cp->caps ? cp->caps->nombre : "desconocida");
         return -1;
     }
-    if (cp->caps->qmd_version != GSP_QMD_VERSION_CURRENT ||
-        cp->caps->qmd_bytes != (unsigned)sizeof(GspQmdV05)) {
+    if (cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
+        if (cp->caps->qmd_bytes != (unsigned)sizeof(GspQmdV02)) {
+            lx_printk("nouveau-lx: %s — Ampere pide QMD v2 de %u B (struct %zu)\n",
+                      quien, cp->caps->qmd_bytes, sizeof(GspQmdV02));
+            return -1;
+        }
+    } else if (cp->caps->qmd_version != GSP_QMD_VERSION_CURRENT ||
+               cp->caps->qmd_bytes != (unsigned)sizeof(GspQmdV05)) {
         lx_printk("nouveau-lx: %s — la familia %s pide QMD v%u de %u B y el "
                   "port escribe v%u de %u B\n", quien, cp->caps->nombre,
                   cp->caps->qmd_version, cp->caps->qmd_bytes,
@@ -732,10 +736,72 @@ void gsp_compute_set_matmul_params(struct gsp_compute *cp, const struct gsp_kern
     __asm__ __volatile__("mfence" ::: "memory");
 }
 
+static void gsp_compute_fill_qmd_v02_grid(struct gsp_compute *cp,
+                                          const struct gsp_kernel *k,
+                                          GspQmdV02 *qmd, unsigned grid_x,
+                                          unsigned grid_y, unsigned sem_slot)
+{
+    /* QMDV01_07 PROGRAM_OFFSET son 32 bits: offset relativo a GSP_VA_BASE (>>4),
+     * no la VA absoluta de 40 bits que usa v05. */
+    uint64_t prog_shift = (k->sass_va - GSP_VA_BASE) >> 4;
+    uint64_t cb_va = cp->data_va + G4F_CBANK_OFF;
+    uint64_t cb_shift = (cb_va - GSP_VA_BASE) >> 6;
+    uint64_t sem_va = cp->data_va + G4F_SEM_SLOT(sem_slot);
+    uint32_t cb_size = (k->cbank_size + 15u) & ~15u;
+
+    memset(qmd, 0, sizeof(*qmd));
+    qmd_set_bits(qmd->words, QMDV02_SEMAPHORE_RELEASE_ENABLE0,
+                 NVA0C0_QMDV01_07_SEMAPHORE_RELEASE_ENABLE0_TRUE);
+    qmd_set_bits(qmd->words, QMDV02_RELEASE_MEMBAR_TYPE,
+                 NVA0C0_QMDV01_07_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR);
+    qmd_set_bits(qmd->words, QMDV02_API_VISIBLE_CALL_LIMIT,
+                 NVA0C0_QMDV01_07_API_VISIBLE_CALL_LIMIT_NO_CHECK);
+    qmd_set_bits(qmd->words, QMDV02_QMD_MAJOR_VERSION,
+                 NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01);
+
+    qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_WIDTH, grid_x ? grid_x : 1u);
+    qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_HEIGHT, grid_y ? grid_y : 1u);
+    qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_DEPTH, 1u);
+    qmd_set_bits(qmd->words, QMDV02_CTA_THREAD_DIMENSION0, G4F_CTA_THREADS);
+    qmd_set_bits(qmd->words, QMDV02_CTA_THREAD_DIMENSION1, 1u);
+    qmd_set_bits(qmd->words, QMDV02_CTA_THREAD_DIMENSION2, 1u);
+
+    qmd_set_bits(qmd->words, QMDV02_PROGRAM_OFFSET, (uint32_t)prog_shift);
+
+    qmd_set_bits(qmd->words, QMDV02_REGISTER_COUNT, k->regcount);
+    qmd_set_bits(qmd->words, QMDV02_BARRIER_COUNT, 0u);
+    qmd_set_bits(qmd->words, QMDV02_SHARED_MEMORY_SIZE, 0u);
+
+    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_VALID0,
+                 NVA0C0_QMDV01_07_CONSTANT_BUFFER_VALID_TRUE);
+    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_INVALIDATE0,
+                 NVA0C0_QMDV01_07_CONSTANT_BUFFER_INVALIDATE_TRUE);
+    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_ADDR_LOWER0,
+                 (uint32_t)(cb_shift & 0xffffffffu));
+    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_ADDR_UPPER0,
+                 (uint32_t)((cb_shift >> 32) & 0xffu));
+    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_SIZE0, cb_size);
+
+    qmd_set_bits(qmd->words, QMDV02_RELEASE0_STRUCTURE_SIZE,
+                 NVA0C0_QMDV01_07_RELEASE0_STRUCTURE_SIZE_ONE_WORD);
+    qmd_set_bits(qmd->words, QMDV02_RELEASE0_ADDRESS_LOWER,
+                 (uint32_t)(sem_va & 0xffffffffu));
+    qmd_set_bits(qmd->words, QMDV02_RELEASE0_ADDRESS_UPPER,
+                 (uint32_t)((sem_va >> 32) & 0xffu));
+    qmd_set_bits(qmd->words, QMDV02_RELEASE0_PAYLOAD, G4F_SEM_PAYLOAD);
+    (void)cp;
+}
+
 void gsp_compute_fill_qmd_grid(struct gsp_compute *cp, const struct gsp_kernel *k,
                                GspQmdV05 *qmd, unsigned grid_x, unsigned grid_y,
                                unsigned sem_slot)
 {
+    if (cp && cp->caps && cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
+        gsp_compute_fill_qmd_v02_grid(cp, k, (GspQmdV02 *)qmd, grid_x, grid_y,
+                                      sem_slot);
+        return;
+    }
+
     uint64_t prog_shift = k->sass_va >> 4;
     uint64_t cb_va = cp->data_va + G4F_CBANK_OFF;
     uint64_t cb_shift = cb_va >> 6;
@@ -803,6 +869,11 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
     unsigned pos;
     unsigned start;
     uint64_t qmd_va;
+    unsigned qmd_bytes;
+    uint32_t set_object;
+    uint32_t send_pcas;
+    uint32_t send_sig;
+    uint32_t sig_action;
 
     if (!cp || !cp->ready || !qmd) {
         return -1;
@@ -815,16 +886,28 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
     pos = start;
 
     qmd_va = cp->data_va + G4F_QMD_OFF;
-    memcpy(cp_data(cp, G4F_QMD_OFF), qmd->words, sizeof(qmd->words));
+    if (cp->caps && cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
+        qmd_bytes = (unsigned)sizeof(GspQmdV02);
+        memcpy(cp_data(cp, G4F_QMD_OFF), qmd->words, qmd_bytes);
+        set_object = NVC7C0_SET_OBJECT;
+        send_pcas = NVC7C0_SEND_PCAS_A;
+        send_sig = NVC7C0_SEND_SIGNALING_PCAS2_B;
+        sig_action = NVC7C0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE;
+    } else {
+        qmd_bytes = (unsigned)sizeof(GspQmdV05);
+        memcpy(cp_data(cp, G4F_QMD_OFF), qmd->words, qmd_bytes);
+        set_object = NVCEC0_SET_OBJECT;
+        send_pcas = NVCEC0_SEND_PCAS_A;
+        send_sig = NVCEC0_SEND_SIGNALING_PCAS2_B;
+        sig_action = NVCEC0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE;
+    }
     __asm__ __volatile__("mfence" ::: "memory");
 
-    cp_pb_set_object(c, &pos, GSP_COMPUTE_SUBCHANNEL, cp->cls);
-    /* Mesa/nvk: WFI del canal antes del dispatch en Blackwell. */
+    cp_pb_set_object(c, &pos, GSP_COMPUTE_SUBCHANNEL, set_object, cp->cls);
     cp_pb_immd(c, &pos, 0u, NVC86F_WFI, 0u);
-    cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVCEC0_SEND_PCAS_A, 1);
+    cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_pcas, 1);
     cp_pb_write(c, &pos, (uint32_t)(qmd_va >> 8));
-    cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVCEC0_SEND_SIGNALING_PCAS2_B,
-               NVCEC0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE);
+    cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_sig, sig_action);
 
     if (pb_off) {
         *pb_off = start;

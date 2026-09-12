@@ -42,10 +42,30 @@ que `flash-usb-live`. El usuario sí puede.
 El agente monta p1 con **udisks** (polkit en extraíble: sin sudo ni
 contraseña). `--no-user-interaction` evita el diálogo polkit.
 
+> **Sandbox de Cursor sin D-Bus:** dentro del sandbox `udisksctl` falla con
+> `Error connecting to the udisks daemon` / `Failed to connect to bus` y
+> `/dev/sda1` ni siquiera aparece (`No such file or directory`). Este entorno
+> no arranca con systemd como PID 1, así que **no hay bus de sesión visible**.
+> `sudo mount` tampoco vale: pide contraseña y no hay TTY.
+> **Solución (lo que sí funciona):** ejecuta el comando **fuera del sandbox**
+> (`required_permissions: ["all"]`) y **exporta el bus de sesión** del usuario
+> antes de `udisksctl`:
+>
+> ```bash
+> export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
+> udisksctl mount -b /dev/sda1 --no-user-interaction   # → /media/jmdiez/kernel
+> ```
+>
+> (uid 1000 = usuario de sesión; ajústalo si difiere). Con eso el agente monta,
+> copia y desmonta sin dejarle el comando al usuario. `sudo` sigue vetado.
+
 ```bash
 lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,PARTTYPENAME,RM
 # Candidato: RM=1, partición 1, vfat / EFI. Etiqueta típica `kernel`.
 # No uses p4 (`SOSOINSTALL`).
+
+# Fuera del sandbox (required_permissions ["all"]) + bus de sesión:
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
 
 # ¿Ya montada? (p. ej. /media/<user>/kernel)
 findmnt -n -o TARGET /dev/sda1
@@ -62,8 +82,8 @@ cat "$ESP/SOSODRV.TXT"
 udisksctl unmount -b /dev/sda1 --no-user-interaction
 ```
 
-Si `udisksctl` falla (auth, no extraíble, sin D-Bus), deja el comando al
-usuario. **No** uses `sudo mount` ni `sudo cargo xtask sosolog`.
+Si aun con el bus exportado `udisksctl` falla (auth, no extraíble), deja el
+comando al usuario. **No** uses `sudo mount` ni `sudo cargo xtask sosolog`.
 
 Tras leer o editar, **desmonta**: un `dd` posterior necesita p1 libre.
 
@@ -84,7 +104,7 @@ tamaño fijo y escribe sectores. Si falta el hueco, esa vía queda desactivada
 | `SOSOKRN.BIN` | 64 MiB | `soso-update` / shim | hueco kernel (nuevo o backup) |
 | `SOSOKRN.MET` | 512 B | `soso-update` / shim | meta durable OTA (fases staged/backup/applying/probando) |
 | `SOSORES.TXT` | 4 KiB | kernel `fs-resize` | journal de redimensionado rootfs |
-| `kernel-x86_64` | — | shim al aplicar | kernel UEFI activo |
+| `kernel-x86_64` | **64 MiB** | `package-usb-live` (hueco) / `--only kernel` in situ | kernel UEFI activo; holgura para crecer sin flash completo |
 
 Pass 1 de `package-usb-live` reserva huecos; pass 2 **reutiliza** la misma
 entrada FAT (no duplicar `SOSOUPD`/`SOSOKRN`).
@@ -198,6 +218,13 @@ cargo xtask test-usb
 cargo xtask check
 cargo xtask hw-matrix show
 ```
+
+> **`--only kernel`:** actualiza `kernel-x86_64` (y `efi/boot/{bootsoso,bootx64}.efi`)
+> **in situ**. El empaquetado live deja p1 **192 MiB** y un hueco de kernel
+> **64 MiB** (como SOSOKRN). Si el hueco del stick es más pequeño, intenta
+> agrandarlo; si no hay clusters, el ELF tiene que caber o hace falta un
+> flash completo. No hace `dd` de `soso-uefi.img` p1 (~31 MiB) sobre la ESP
+> live (run17). Ver `docs/DIAGNOSTICO-ROG-2026-09-10.md` run17.
 
 No `sudo cargo`: root no tiene rustup. `sudo env "PATH=$PATH" "HOME=$HOME" …`
 

@@ -866,6 +866,30 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
         if !status.success() {
             exit(status.code().unwrap_or(1));
         }
+        // tiny-huge: attn_q ≥2 MiB → sosomfs ALIGN_HUGE_2M; smoke del camino
+        // huge en handle_mmap_fault vía ask (el tiny normal no lo ejercita).
+        let huge_src = root.join("target/tiny-huge-model");
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args(["run", "-q", "--release", "-p", "mkmodel-soso", "--"])
+            .args([
+                "--name",
+                "tiny-huge",
+                "--layers",
+                "1",
+                "--hidden",
+                "768",
+                "--ffn",
+                "512",
+                "--vocab",
+                "512",
+                huge_src.to_str().unwrap(),
+            ])
+            .status()
+            .expect("mkmodel-soso tiny-huge");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
         // tiny-moe en la misma imagen de modelos (Mixtral-style MoE para E2E).
         let moe_src = root.join("target/tiny-moe-model");
         let status = Command::new("cargo")
@@ -975,6 +999,7 @@ pub(crate) fn mkfs_models(force: bool) -> PathBuf {
         model_src.to_string_lossy().into_owned(),
     ];
     if custom.is_none() {
+        mkfs_args.push(root.join("target/tiny-huge-model").to_string_lossy().into_owned());
         mkfs_args.push(root.join("target/tiny-moe-model").to_string_lossy().into_owned());
         mkfs_args.push(root.join("target/tiny-mla-model").to_string_lossy().into_owned());
         mkfs_args.push(

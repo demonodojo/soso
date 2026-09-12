@@ -21,7 +21,7 @@
 use alloc::vec::Vec;
 use bootloader_api::info::{FrameBufferInfo, PixelFormat};
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use font8x8::legacy::{BASIC_LEGACY, LATIN_LEGACY};
 use soso_abi::{FbInfo, FB_FMT_BGR, FB_FMT_RGB, FB_FMT_U8};
 use soso_hw::fbrot::{self, Rot};
@@ -146,12 +146,19 @@ struct FbState {
     /// Una línea física, para volcar rotado con escrituras secuenciales.
     linebuf: Vec<u8>,
     utf8: Utf8Acc,
+    /// Instante (`tsc::now_ns`) del último scroll: decide si el siguiente es
+    /// de una fila o un salto de ráfaga (`filas_salto`).
+    last_scroll_ns: u64,
 }
 
 unsafe impl Send for FbState {}
 
 static FB: Mutex<Option<FbState>> = Mutex::new(None);
 static GRAPHICS_MODE: AtomicBool = AtomicBool::new(false);
+/// Páginas del GOP remapeadas a write-combining (`usize::MAX` = no se pudo).
+static WC_PAGES: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Dirección física del GOP, para el log de arranque.
+static FB_PHYS: AtomicU64 = AtomicU64::new(0);
 
 const COLS: usize = 240;
 const ROWS: usize = 135;
@@ -168,13 +175,49 @@ fn bytes_per_scanline(info: &FrameBufferInfo) -> usize {
     info.stride * info.bytes_per_pixel
 }
 
-/// El GOP UEFI suele estar mapeado UC/WC. Un `memcpy` de varios MiB usa
-/// `movaps` y en silicio (AMD GOP en concreto) eso es #GP: el arranque se
-/// clava al primer scroll, antes de `fatlog`.
+/// Copia al GOP con stores **non-temporal de 16 bytes** (`movntdq`).
+///
+/// El GOP es memoria UC o, tras `arch::pat`, WC: nunca pasa por la caché, así
+/// que lo que cuesta es el número de transacciones. Un `memcpy` normal usa
+/// `movaps` y en silicio (AMD GOP en concreto) eso es #GP por alineación: el
+/// arranque se clavaba al primer scroll, antes de `fatlog`. La versión que
+/// lo sustituyó (stores `u32` volátiles) no fallaba, pero en la ROG eran dos
+/// millones de escrituras UC serializadas por pantalla (~100 ms por scroll).
+///
+/// Aquí el destino se alinea a 16 a mano con stores de 4/1 bytes (por eso
+/// `movntdq`, que exige alineación, no puede fallar), el grueso va en
+/// ráfagas de 16 bytes que el WC agrupa en líneas de 64, y la cola vuelve a
+/// 4/1. El origen (shadow en RAM) se lee sin alinear. Quien llame debe cerrar
+/// con `sfence` (`fin_copia_gop`): los stores NT son débilmente ordenados.
 unsafe fn copy_to_gop(dst: *mut u8, src: *const u8, mut n: usize) {
+    use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_stream_si128};
     unsafe {
         let mut d = dst;
         let mut s = src;
+        // Cabecera: hasta que el destino quede alineado a 16.
+        while n > 0 && (d as usize) & 15 != 0 {
+            if n >= 4 && (d as usize) & 3 == 0 {
+                core::ptr::write_volatile(
+                    d.cast::<u32>(),
+                    core::ptr::read_unaligned(s.cast::<u32>()),
+                );
+                d = d.add(4);
+                s = s.add(4);
+                n -= 4;
+            } else {
+                core::ptr::write_volatile(d, core::ptr::read(s));
+                d = d.add(1);
+                s = s.add(1);
+                n -= 1;
+            }
+        }
+        while n >= 16 {
+            let v = _mm_loadu_si128(s.cast::<__m128i>());
+            _mm_stream_si128(d.cast::<__m128i>(), v);
+            d = d.add(16);
+            s = s.add(16);
+            n -= 16;
+        }
         while n >= 4 {
             core::ptr::write_volatile(d.cast::<u32>(), core::ptr::read_unaligned(s.cast::<u32>()));
             d = d.add(4);
@@ -188,6 +231,13 @@ unsafe fn copy_to_gop(dst: *mut u8, src: *const u8, mut n: usize) {
             n -= 1;
         }
     }
+}
+
+/// Cierra una ronda de `copy_to_gop`: drena los búferes WC / stores NT para
+/// que el panel vea los píxeles ahora y no cuando la CPU los desaloje.
+#[inline]
+fn fin_copia_gop() {
+    unsafe { core::arch::x86_64::_mm_sfence() };
 }
 
 /// Bytes por línea **lógica** del shadow (sin el stride del panel: el shadow
@@ -224,6 +274,7 @@ fn flush_rect(st: &mut FbState, x0: usize, y0: usize, w: usize, h: usize) {
                 copy_to_gop(st.ptr.add(dst), st.shadow.as_ptr().add(src), row_bytes);
             }
         }
+        fin_copia_gop();
         return;
     }
 
@@ -285,6 +336,7 @@ fn flush_rect(st: &mut FbState, x0: usize, y0: usize, w: usize, h: usize) {
         }
     }
     st.linebuf = line;
+    fin_copia_gop();
 }
 
 /// Vuelca la consola entera.
@@ -371,6 +423,15 @@ pub fn init(buffer_start: u64, info: FrameBufferInfo) {
     // escribe al GOP de una vez.
     let linebuf = alloc::vec![0u8; bytes_per_scanline(&info).max(bpl_log)];
     let shadow = alloc::vec![0u8; bpl_log * log_h];
+    // Tipo de memoria del GOP: el bootloader lo deja WB, que sobre la MTRR UC
+    // de la apertura es UC puro. Pasarlo a WC antes de escribir nada en él.
+    crate::arch::pat::init_cpu();
+    let wc = crate::mm::set_write_combining(buffer_start, info.byte_len as u64).ok();
+    WC_PAGES.store(wc.unwrap_or(usize::MAX), Ordering::Relaxed);
+    FB_PHYS.store(
+        crate::mm::virt_to_phys(buffer_start).unwrap_or(0),
+        Ordering::Relaxed,
+    );
     unsafe {
         core::ptr::write_bytes(ptr, 0, bytes_per_scanline(&info) * mapped_height);
     }
@@ -392,6 +453,7 @@ pub fn init(buffer_start: u64, info: FrameBufferInfo) {
         rowbuf,
         linebuf,
         utf8: Utf8Acc::new(),
+        last_scroll_ns: 0,
     });
 }
 
@@ -411,6 +473,19 @@ pub fn info_log() -> Option<(usize, usize, usize, usize, usize, usize)> {
             s.cell_w,
         )
     })
+}
+
+/// Dirección física del GOP y páginas pasadas a WC (`None` si el PAT no lo
+/// permitió), para el log de arranque.
+pub fn mem_log() -> Option<(u64, Option<usize>)> {
+    if !available() {
+        return None;
+    }
+    let wc = match WC_PAGES.load(Ordering::Relaxed) {
+        usize::MAX => None,
+        n => Some(n),
+    };
+    Some((FB_PHYS.load(Ordering::Relaxed), wc))
 }
 
 /// Rotación activa y dimensiones lógicas, para el log de arranque.
@@ -573,6 +648,9 @@ fn refresh_cell(st: &mut FbState, row: usize, col: usize) {
     }
 }
 
+/// Rasteriza la fila `row` en el shadow. **No vuelca** al GOP: quien la llame
+/// agrupa el volcado (tras un scroll se repintan varias filas y basta un
+/// `flush_all`).
 fn paint_row(st: &mut FbState, row: usize) {
     let bpl = bytes_per_logical_line(st);
     let y0 = row * st.cell_h;
@@ -630,60 +708,97 @@ fn paint_row(st: &mut FbState, row: usize) {
         core::ptr::copy_nonoverlapping(buf.as_ptr(), st.shadow.as_mut_ptr().add(off), bytes);
     }
     st.rowbuf = buf;
-    flush_rect(st, 0, y0, st.log_w, h);
 }
 
-fn scroll_framebuffer_pixels(st: &mut FbState, scroll_lines: usize) {
-    if scroll_lines == 0 {
+fn fila_vacia(st: &FbState, row: usize) -> bool {
+    st.text[row].iter().all(|&c| c == CELL_SPACE || c == 0)
+}
+
+/// Aplica al shadow un scroll de `scroll_lines` filas de texto y lo vuelca
+/// **una sola vez**.
+///
+/// El desplazamiento es un `memmove` en RAM; la banda que queda libre se pone
+/// a negro y sólo se rasterizan las filas de esa banda que tienen texto (tras
+/// un salto de varias filas casi todas están vacías). Antes cada fila
+/// repintada y la banda se volcaban por separado: con 22 filas de salto eran
+/// 23 volcados donde ahora hay uno.
+fn sync_rows_after_scroll(st: &mut FbState, scroll_lines: usize) {
+    let rows = max_rows(st);
+    if rows == 0 || scroll_lines == 0 {
         return;
     }
     let bpl = bytes_per_logical_line(st);
     let band = st.cell_h.saturating_mul(scroll_lines);
-    let h = st.log_h;
-    if band == 0 || band >= h {
-        return;
-    }
-    let move_bytes = (h - band) * bpl;
-    unsafe {
-        let sh = st.shadow.as_mut_ptr();
-        core::ptr::copy(sh.add(band * bpl), sh, move_bytes);
-    }
-    // `fill_rect` vuelca la banda inferior; el resto se vuelca entero porque
-    // el desplazamiento afecta a toda la pantalla.
-    fill_rect(st, 0, h.saturating_sub(band), st.log_w, band, 0, 0, 0);
-    flush_rect(st, 0, 0, st.log_w, h - band);
-}
-
-fn sync_rows_after_scroll(st: &mut FbState, scroll_lines: usize) {
-    let rows = max_rows(st);
-    if rows == 0 {
-        return;
-    }
-    let band = st.cell_h.saturating_mul(scroll_lines);
-    if band < st.log_h {
-        scroll_framebuffer_pixels(st, scroll_lines);
-    }
-    // Si en un solo write hubo más scrolls que filas visibles, el memmove no
-    // cubre todo el shadow: hay que repintar desde arriba.
-    let start = if band >= st.log_h {
-        0
-    } else {
+    let start = if band < st.log_h {
+        let move_bytes = (st.log_h - band) * bpl;
+        unsafe {
+            let sh = st.shadow.as_mut_ptr();
+            core::ptr::copy(sh.add(band * bpl), sh, move_bytes);
+            core::ptr::write_bytes(sh.add(move_bytes), 0, st.shadow.len() - move_bytes);
+        }
         rows.saturating_sub(scroll_lines)
+    } else {
+        // Más scrolls que filas visibles en un solo write: el memmove no
+        // cubre nada, se parte de pantalla negra y se repinta todo.
+        st.shadow.fill(0);
+        0
     };
     for r in start..rows {
-        paint_row(st, r);
+        if !fila_vacia(st, r) {
+            paint_row(st, r);
+        }
+    }
+    flush_all(st);
+}
+
+/// Desplaza el texto `n` filas hacia arriba y deja las `n` últimas en blanco.
+fn scroll_text(st: &mut FbState, n: usize) {
+    let rows = max_rows(st);
+    if rows == 0 || n == 0 {
+        return;
+    }
+    let n = n.min(rows);
+    for r in 0..rows - n {
+        st.text[r] = st.text[r + n];
+    }
+    for r in rows - n..rows {
+        st.text[r] = [CELL_SPACE; COLS];
     }
 }
 
-fn scroll_text(st: &mut FbState) {
-    let rows = max_rows(st);
-    if rows == 0 {
-        return;
+/// Ventana de «ráfaga»: dos scrolls separados por menos que esto son salida
+/// continua (trazas de arranque, `ls`, `dmesg`), no alguien tecleando.
+const RAFAGA_NS: u64 = 200_000_000;
+
+/// Filas que salta un scroll. Uno a uno en uso interactivo; en ráfaga, un
+/// cuarto de pantalla (*jump scroll*, como xterm `-j`).
+///
+/// Cada scroll cuesta volcar la pantalla entera al GOP (8 MiB en 1920×1080),
+/// gane lo que gane el WC, y las trazas de arranque son cientos de líneas
+/// seguidas. Saltando `rows/4` filas, las siguientes `rows/4 - 1` líneas sólo
+/// pintan su fila (1/90 de pantalla) y el volcado completo se paga una vez
+/// de cada ~22. Cada línea sigue volcándose en su `write`: si el arranque se
+/// cuelga, el último marcador `boot:` está en pantalla, igual que antes.
+fn filas_salto(st: &FbState, rows: usize) -> usize {
+    let ahora = crate::arch::tsc::now_ns();
+    if ahora.wrapping_sub(st.last_scroll_ns) < RAFAGA_NS {
+        (rows / 4).max(1)
+    } else {
+        1
     }
-    for r in 0..rows.saturating_sub(1) {
-        st.text[r] = st.text[r + 1];
+}
+
+/// Baja el cursor una fila. Si se sale por abajo desplaza el texto y devuelve
+/// cuántas filas se movieron (0 si no hubo scroll).
+fn avanzar_fila(st: &mut FbState, rows: usize) -> usize {
+    st.row += 1;
+    if st.row < rows {
+        return 0;
     }
-    st.text[rows - 1] = [CELL_SPACE; COLS];
+    let n = filas_salto(st, rows);
+    scroll_text(st, n);
+    st.row = rows - n;
+    n
 }
 
 fn erase_cursor(st: &mut FbState) {
@@ -700,13 +815,14 @@ fn draw_cursor(st: &mut FbState) {
     }
 }
 
-fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> bool {
+/// Procesa un carácter. Devuelve las filas de scroll que provocó (0 = ninguna).
+fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> usize {
     let cols = max_cols(st);
     let rows = max_rows(st);
     if cols == 0 || rows == 0 {
-        return false;
+        return 0;
     }
-    let mut scrolled = false;
+    let mut scrolled = 0usize;
 
     if cp == 0x08 || cp == 0x7f {
         if st.col > 0 {
@@ -716,17 +832,11 @@ fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> bool {
                 clear_cell(st, st.row, st.col);
             }
         }
-        return false;
+        return 0;
     }
     if cp == b'\n' as u16 {
         st.col = 0;
-        st.row += 1;
-        if st.row >= rows {
-            scroll_text(st);
-            st.row = rows - 1;
-            scrolled = true;
-        }
-        return scrolled;
+        return avanzar_fila(st, rows);
     }
     if cp == b'\r' as u16 {
         st.col = 0;
@@ -743,34 +853,24 @@ fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> bool {
                 0,
             );
         }
-        return false;
+        return 0;
     }
 
     if st.col >= cols {
         st.col = 0;
-        st.row += 1;
-        if st.row >= rows {
-            scroll_text(st);
-            st.row = rows - 1;
-            scrolled = true;
-        }
+        scrolled += avanzar_fila(st, rows);
     }
     let row = st.row;
     let col = st.col;
     st.text[row][col] = cp;
-    if !defer_paint && !scrolled {
+    if !defer_paint && scrolled == 0 {
         clear_cell(st, row, col);
         paint_glyph(st, row, col, cp);
     }
     st.col += 1;
     if st.col >= cols {
         st.col = 0;
-        st.row += 1;
-        if st.row >= rows {
-            scroll_text(st);
-            st.row = rows - 1;
-            scrolled = true;
-        }
+        scrolled += avanzar_fila(st, rows);
     }
     scrolled
 }
@@ -793,14 +893,13 @@ pub fn write_bytes(s: &[u8]) {
     let mut scroll_lines = 0usize;
     for &b in s {
         if let Some(cp) = st.utf8.feed(b) {
-            if draw_codepoint(st, cp, scroll_lines > 0) {
-                scroll_lines += 1;
-            }
+            scroll_lines += draw_codepoint(st, cp, scroll_lines > 0);
         }
     }
 
     if scroll_lines > 0 {
         sync_rows_after_scroll(st, scroll_lines);
+        st.last_scroll_ns = crate::arch::tsc::now_ns();
     }
     draw_cursor(st);
 }

@@ -13,14 +13,121 @@ static const struct {
     uint8_t ch;
     uint8_t band;
 } scan_channels[] = {
-    {1, 0}, {2, 0}, {3, 0}, {4, 0}, {5, 0}, {6, 0}, {7, 0},
-    {8, 0}, {9, 0}, {10, 0}, {11, 0}, {12, 0}, {13, 0},
-    {36, 1}, {40, 1}, {44, 1}, {48, 1}, {149, 1}, {153, 1}, {157, 1}, {161, 1},
+    {1, PHY_BAND_24}, {2, PHY_BAND_24}, {3, PHY_BAND_24}, {4, PHY_BAND_24},
+    {5, PHY_BAND_24}, {6, PHY_BAND_24}, {7, PHY_BAND_24},
+    {8, PHY_BAND_24}, {9, PHY_BAND_24}, {10, PHY_BAND_24}, {11, PHY_BAND_24},
+    {12, PHY_BAND_24}, {13, PHY_BAND_24},
+    {36, PHY_BAND_5}, {40, PHY_BAND_5}, {44, PHY_BAND_5}, {48, PHY_BAND_5},
+    {149, PHY_BAND_5}, {153, PHY_BAND_5}, {157, PHY_BAND_5}, {161, PHY_BAND_5},
 };
+
+static uint8_t iwl_mvm_phy_band_from_channel(uint8_t num)
+{
+    if (num >= 36 && num <= 196)
+        return PHY_BAND_5;
+    return PHY_BAND_24;
+}
+
+/* iwl-nvm-parse.c — orden de índices NVM → número de canal. */
+static const uint8_t iwl_nvm_channels_legacy[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165,
+};
+
+static const uint8_t iwl_ext_nvm_channels[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92,
+    96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177, 181,
+};
+
+static const uint8_t iwl_uhb_nvm_channels[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92,
+    96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177, 181,
+    1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61, 65, 69,
+    73, 77, 81, 85, 89, 93, 97, 101, 105, 109, 113, 117, 121, 125, 129,
+    133, 137, 141, 145, 149, 153, 157, 161, 165, 169, 173, 177, 181, 185,
+    189, 193, 197, 201, 205, 209, 213, 217, 221, 225, 229, 233,
+};
+
+const uint8_t *iwl_mvm_nvm_chan_table(unsigned nvm_n, unsigned *table_n)
+{
+    if (table_n)
+        *table_n = IWL_NVM_NUM_CHANNELS;
+    if (nvm_n >= IWL_NVM_NUM_CHANNELS_UHB) {
+        if (table_n)
+            *table_n = IWL_NVM_NUM_CHANNELS_UHB;
+        return iwl_uhb_nvm_channels;
+    }
+    if (nvm_n >= IWL_NVM_NUM_CHANNELS_EXT) {
+        if (table_n)
+            *table_n = IWL_NVM_NUM_CHANNELS_EXT;
+        return iwl_ext_nvm_channels;
+    }
+    return iwl_nvm_channels_legacy;
+}
+
+uint8_t iwl_mvm_phy_band_from_channel_idx(unsigned ch_idx, unsigned nvm_n)
+{
+    unsigned table_n = 0;
+
+    (void)iwl_mvm_nvm_chan_table(nvm_n, &table_n);
+    if (table_n >= IWL_NVM_NUM_CHANNELS_UHB &&
+        ch_idx >= NUM_2GHZ_CHANNELS + NUM_5GHZ_CHANNELS)
+        return PHY_BAND_6;
+    if (ch_idx >= NUM_2GHZ_CHANNELS)
+        return PHY_BAND_5;
+    return PHY_BAND_24;
+}
 
 static uint32_t iwl_read32(struct iwl_ax211_priv *iwl, uint32_t off)
 {
     return iwl->mmio[off / 4];
+}
+
+/* Linux mvm.h + fw/img.c: ADD_STA se busca con groupid=0 → LONG_GROUP. */
+static int iwl_mvm_has_new_station_api(struct iwl_ax211_priv *iwl)
+{
+    return iwl_fw_cmd_ver(iwl, LEGACY_GROUP, ADD_STA) >= 12;
+}
+
+static void iwl_mvm_scan_cfg_bcast(struct iwl_ax211_priv *iwl, uint8_t scan_cfg_ver,
+                                   uint8_t *bcast_sta_id)
+{
+    if (!iwl_mvm_has_new_station_api(iwl)) {
+        /* Sin aux STA en el port mínimo: 0xff como antes (no aplica a AX200). */
+        *bcast_sta_id = 0xff;
+    } else if (scan_cfg_ver < 5) {
+        /* Deprecado en SCAN_CFG v5: 0xff si API nueva y versión antigua. */
+        *bcast_sta_id = 0xff;
+    }
+    /* SCAN_CFG ≥ 5 + ADD_STA ≥ 12: memset deja bcast_sta_id=0 (Linux scan.c:1253). */
+}
+
+static void iwl_mvm_scan_umac_fill_general_v11(
+    struct iwl_ax211_priv *iwl, struct iwl_scan_general_params_v11 *gp,
+    uint8_t scan_ver, uint8_t flags2)
+{
+    gp->scan_start_mac_or_link_id = iwl->scan_mac_id;
+    gp->adwell_default_social_chn = IWL_SCAN_ADWELL_DEFAULT_N_APS_SOCIAL;
+    gp->adwell_default_2g = IWL_SCAN_ADWELL_DEFAULT_LB_N_APS;
+    gp->adwell_default_5g = IWL_SCAN_ADWELL_DEFAULT_HB_N_APS;
+    gp->adwell_max_budget = iwl_cpu_to_le16(IWL_SCAN_ADWELL_MAX_BUDGET_FULL_SCAN);
+    gp->scan_priority = iwl_cpu_to_le32(IWL_SCAN_PRIORITY_EXT_6);
+    gp->max_out_of_time[SCAN_LB_LMAC_IDX] = 0;
+    gp->max_out_of_time[SCAN_HB_LMAC_IDX] = 0;
+    gp->suspend_time[SCAN_LB_LMAC_IDX] = 0;
+    gp->suspend_time[SCAN_HB_LMAC_IDX] = 0;
+    gp->active_dwell[SCAN_LB_LMAC_IDX] = IWL_SCAN_DWELL_ACTIVE;
+    gp->active_dwell[SCAN_HB_LMAC_IDX] = IWL_SCAN_DWELL_ACTIVE;
+    gp->passive_dwell[SCAN_LB_LMAC_IDX] = IWL_SCAN_DWELL_PASSIVE;
+    gp->passive_dwell[SCAN_HB_LMAC_IDX] = IWL_SCAN_DWELL_PASSIVE;
+    if (scan_ver >= 15)
+        gp->flags2 = flags2;
 }
 
 static int iwl_hw_rf_kill(struct iwl_ax211_priv *iwl)
@@ -41,63 +148,63 @@ int iwl_mvm_send_scan_cfg(struct iwl_ax211_priv *iwl)
     if (iwl->scan_cfg_sent)
         return 0;
 
-    if (ver >= 5) {
-        /* Linux scan.c:1238 — API reducida, struct iwl_scan_config (12 B). */
-        struct iwl_scan_config cfg;
+    {
+        uint8_t add_sta_ver = (uint8_t)iwl_fw_cmd_ver(iwl, LEGACY_GROUP, ADD_STA);
+        uint8_t bcast = 0;
 
-        memset(&cfg, 0, sizeof(cfg));
-        cfg.bcast_sta_id = 0xff;
-        cfg.tx_chains = iwl_cpu_to_le32(iwl_mvm_valid_tx_ant(iwl));
-        cfg.rx_chains = iwl_cpu_to_le32(iwl_mvm_scan_rx_ant(iwl));
-        pay_len = (uint16_t)sizeof(cfg);
-        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len,
-                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
-            lx_printk("iwl_mvm: SCAN_CFG_CMD v%u falló\n", ver);
-            return -1;
-        }
-    } else if (ver >= 2) {
-        struct iwl_scan_config_v2 cfg;
+        if (ver >= 5) {
+            /* Linux scan.c:1238 — API reducida, struct iwl_scan_config (12 B). */
+            struct iwl_scan_config cfg;
 
-        memset(&cfg, 0, sizeof(cfg));
-        cfg.bcast_sta_id = 0xff;
-        cfg.tx_chains = iwl_cpu_to_le32(iwl_mvm_valid_tx_ant(iwl));
-        cfg.rx_chains = iwl_cpu_to_le32(iwl_mvm_scan_rx_ant(iwl));
-        pay_len = (uint16_t)sizeof(cfg);
-        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len,
-                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
-            lx_printk("iwl_mvm: SCAN_CFG_CMD v%u falló\n", ver);
-            return -1;
-        }
-    } else {
-        struct iwl_scan_config cfg;
+            memset(&cfg, 0, sizeof(cfg));
+            iwl_mvm_scan_cfg_bcast(iwl, ver, &cfg.bcast_sta_id);
+            bcast = cfg.bcast_sta_id;
+            cfg.tx_chains = iwl_cpu_to_le32(iwl_mvm_valid_tx_ant(iwl));
+            cfg.rx_chains = iwl_cpu_to_le32(iwl_mvm_scan_rx_ant(iwl));
+            pay_len = (uint16_t)sizeof(cfg);
+            if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len,
+                                        IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
+                lx_printk("iwl_mvm: SCAN_CFG_CMD v%u falló\n", ver);
+                return -1;
+            }
+        } else if (ver >= 2) {
+            struct iwl_scan_config_v2 cfg;
 
-        memset(&cfg, 0, sizeof(cfg));
-        cfg.bcast_sta_id = 0xff;
-        cfg.tx_chains = iwl_cpu_to_le32(iwl_mvm_valid_tx_ant(iwl));
-        cfg.rx_chains = iwl_cpu_to_le32(iwl_mvm_scan_rx_ant(iwl));
-        pay_len = (uint16_t)sizeof(cfg);
-        if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len,
-                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
-            lx_printk("iwl_mvm: SCAN_CFG_CMD falló\n");
-            return -1;
+            memset(&cfg, 0, sizeof(cfg));
+            iwl_mvm_scan_cfg_bcast(iwl, ver, &cfg.bcast_sta_id);
+            bcast = cfg.bcast_sta_id;
+            cfg.tx_chains = iwl_cpu_to_le32(iwl_mvm_valid_tx_ant(iwl));
+            cfg.rx_chains = iwl_cpu_to_le32(iwl_mvm_scan_rx_ant(iwl));
+            pay_len = (uint16_t)sizeof(cfg);
+            if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len,
+                                        IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
+                lx_printk("iwl_mvm: SCAN_CFG_CMD v%u falló\n", ver);
+                return -1;
+            }
+        } else {
+            struct iwl_scan_config cfg;
+
+            memset(&cfg, 0, sizeof(cfg));
+            iwl_mvm_scan_cfg_bcast(iwl, ver, &cfg.bcast_sta_id);
+            bcast = cfg.bcast_sta_id;
+            cfg.tx_chains = iwl_cpu_to_le32(iwl_mvm_valid_tx_ant(iwl));
+            cfg.rx_chains = iwl_cpu_to_le32(iwl_mvm_scan_rx_ant(iwl));
+            pay_len = (uint16_t)sizeof(cfg);
+            if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_CFG_CMD, &cfg, pay_len,
+                                        IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
+                lx_printk("iwl_mvm: SCAN_CFG_CMD falló\n");
+                return -1;
+            }
         }
+
+        iwl->scan_cfg_sent = 1;
+        lx_printk("iwl_mvm: SCAN_CFG v%u ok bcast=%u add_sta_ver=%u tx=0x%x rx=0x%x\n",
+                  ver, (unsigned)bcast, (unsigned)add_sta_ver,
+                  (unsigned)iwl_mvm_valid_tx_ant(iwl),
+                  (unsigned)iwl_mvm_scan_rx_ant(iwl));
+        return 0;
     }
-
-    iwl->scan_cfg_sent = 1;
-    lx_printk("iwl_mvm: SCAN_CFG_CMD v%u ok tx=0x%x rx=0x%x\n", ver,
-              (unsigned)iwl_mvm_valid_tx_ant(iwl),
-              (unsigned)iwl_mvm_scan_rx_ant(iwl));
-    return 0;
 }
-
-/* Índices NVM → número/banda (iwl-nvm-parse.c, primeros 51). */
-static const uint8_t nvm_chan_num[] = {
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
-    36, 40, 44, 48, 52, 56, 60, 64,
-    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
-    149, 153, 157, 161, 165, 169, 173, 177, 181,
-    183, 184, 185, 187, 188, 189, 192, 196,
-};
 
 /* R6: única selección de canales para todas las versiones de SCAN_REQ_UMAC.
  *
@@ -114,7 +221,8 @@ unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
     unsigned n = 0;
     unsigned i;
     unsigned nvm_n = iwl->nvm_n_channels;
-    unsigned table_n = sizeof(nvm_chan_num) / sizeof(nvm_chan_num[0]);
+    unsigned table_n;
+    const uint8_t *nvm_chan = iwl_mvm_nvm_chan_table(nvm_n, &table_n);
     int src = IWL_CHAN_SRC_NONE;
 
     if (origen)
@@ -141,9 +249,9 @@ unsigned iwl_mvm_collect_scan_channels(struct iwl_ax211_priv *iwl,
 
             if (!(flags & NVM_CHANNEL_VALID))
                 continue;
-            num = nvm_chan_num[i];
+            num = nvm_chan[i];
             ch[n] = num;
-            band[n] = (num >= 36) ? 1 : 0;
+            band[n] = iwl_mvm_phy_band_from_channel_idx(i, nvm_n);
             /* Sin ACTIVE, con radar o solo interior: nada de probe request. */
             passive[n] = (solo_pasivo ||
                           !(flags & NVM_CHANNEL_ACTIVE) ||
@@ -184,6 +292,22 @@ int iwl_mvm_scan_umac_supported(uint8_t ver)
     return ver == 6 || ver == 14 || ver == 15 || ver == 16 || ver == 17;
 }
 
+/* Linux `iwl_mvm_scan_umac_flags_v2` (mvm/scan.c): descubrimiento sin SSIDs
+ * directos → FORCE_PASSIVE aunque el NVM marque canales ACTIVE; ADAPTIVE_DWELL
+ * siempre (IWL_MVM_ADWELL_ENABLE). */
+static uint16_t iwl_mvm_scan_umac_flags_v2(struct iwl_ax211_priv *iwl,
+                                           unsigned n_direct_ssids)
+{
+    uint16_t flags = (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL |
+                                IWL_UMAC_SCAN_GEN_FLAGS_V2_NTFY_ITER_COMPLETE |
+                                IWL_UMAC_SCAN_GEN_FLAGS_V2_ADAPTIVE_DWELL);
+
+    (void)iwl;
+    if (n_direct_ssids == 0)
+        flags |= IWL_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE;
+    return flags;
+}
+
 static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf,
                                        unsigned cap, uint8_t scan_ver)
 {
@@ -214,20 +338,21 @@ static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf,
     if (iwl->scan_uid == 0)
         iwl->scan_uid = 1;
     req->uid = iwl_cpu_to_le32(iwl->scan_uid);
-    req->ooc_priority = iwl_cpu_to_le32(1);
+    req->ooc_priority = iwl_cpu_to_le32(IWL_SCAN_PRIORITY_EXT_6);
     {
-        uint16_t gflags = (uint16_t)(IWL_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL |
-                                     IWL_UMAC_SCAN_GEN_FLAGS_V2_NTFY_ITER_COMPLETE);
+        uint16_t gflags = iwl_mvm_scan_umac_flags_v2(iwl, 0);
 
-        /* Todos los canales pasivos → scan pasivo declarado también arriba
-         * (`iwl_mvm_scan_umac_flags_v2`: sin SSID directos, FORCE_PASSIVE). */
-        if (n_passive == nch)
-            gflags |= IWL_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE;
         req->scan_params.general_params.flags = gflags;
-        iwl->scan_passive_only = (n_passive == nch) ? 1u : 0u;
+        iwl->scan_passive_only =
+            (gflags & IWL_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE) ? 1u : 0u;
+        (void)n_passive;
     }
-    req->scan_params.general_params.active_dwell[0] = 30;
-    req->scan_params.general_params.passive_dwell[0] = 110;
+    iwl_mvm_scan_umac_fill_general_v11(iwl, &req->scan_params.general_params, scan_ver, 0);
+    req->scan_params.channel_params.flags = IWL_SCAN_CHANNEL_FLAG_ENABLE_CHAN_ORDER;
+    req->scan_params.channel_params.n_aps_override[0] =
+        IWL_SCAN_ADWELL_N_APS_GO_FRIENDLY;
+    req->scan_params.channel_params.n_aps_override[1] =
+        IWL_SCAN_ADWELL_N_APS_SOCIAL_CHS;
     req->scan_params.channel_params.count = (uint8_t)nch;
     for (i = 0; i < nch; i++) {
         struct iwl_scan_channel_cfg_umac *cfg =
@@ -242,13 +367,13 @@ static uint16_t iwl_build_scan_req_v17(struct iwl_ax211_priv *iwl, uint8_t *buf,
             flags |= (uint32_t)band[i] << IWL_CHAN_CFG_FLAGS_BAND_POS;
         else
             cfg->v2.band = band[i];
-        /* Pasivo = FORCE_PASSIVE; el bit 0 es «probe dirigido al SSID 0». */
-        if (passive[i])
-            flags |= IWL_UHB_CHAN_CFG_FLAG_FORCE_PASSIVE;
+        /* Pasivo global vía FORCE_PASSIVE en general_params; bit 26 solo 6 GHz
+         * (Linux iwl_mvm_umac_scan_cfg_channels_v7, no v7_6g). */
         cfg->flags = flags;
+        (void)passive;
     }
     req->scan_params.periodic_params.schedule[0].iter_count = 1;
-    req->scan_params.periodic_params.schedule[1].iter_count = 0xff;
+    /* schedule[1] queda en cero: scan regular = un plan (Linux fill_scan_sched). */
     iwl_mvm_fill_probe_req(iwl, &req->scan_params.probe_params);
     return (uint16_t)sizeof(*req);
 }
@@ -316,7 +441,6 @@ uint16_t iwl_mvm_build_scan_req(struct iwl_ax211_priv *iwl, uint8_t *buf, unsign
     tail = (struct iwl_scan_req_umac_tail_v1 *)(data + nch * sizeof(struct iwl_scan_channel_cfg_umac));
     tail->schedule[0].interval = 0;
     tail->schedule[0].iter_count = 1;
-    tail->schedule[1].iter_count = 0xff;
     tail->delay = 0;
 
     (void)iwl;
@@ -527,9 +651,21 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
         return IWL_SCAN_RC_NO_REGDOM;
     }
 
-    lx_printk("iwl_mvm: SCAN_REQ_UMAC %u B uid=0x%x origen=%u pasivo=%u\n", pay,
-              (unsigned)iwl->scan_uid, (unsigned)iwl->chan_src,
-              (unsigned)iwl->scan_passive_only);
+    {
+        uint8_t scan_ver = (uint8_t)iwl_fw_cmd_ver(iwl, LONG_GROUP, SCAN_REQ_UMAC);
+        uint8_t sch[SCAN_MAX_NUM_CHANS_V3];
+        uint8_t sb[SCAN_MAX_NUM_CHANS_V3];
+        uint8_t sp[SCAN_MAX_NUM_CHANS_V3];
+        int sorig = IWL_CHAN_SRC_NONE;
+        unsigned snch = iwl_mvm_collect_scan_channels(iwl, sch, sb, sp,
+                                                      SCAN_MAX_NUM_CHANS_V3, &sorig);
+
+        lx_printk("iwl_mvm: SCAN_REQ_UMAC v%u %u B uid=0x%x origen=%u pasivo=%u nch=%u ch=%u..%u\n",
+                  scan_ver, pay, (unsigned)iwl->scan_uid, (unsigned)iwl->chan_src,
+                  (unsigned)iwl->scan_passive_only, snch,
+                  snch ? (unsigned)sch[0] : 0u,
+                  snch ? (unsigned)sch[snch - 1] : 0u);
+    }
 
     if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, SCAN_REQ_UMAC, req, pay, 1000) != 0) {
         lx_printk("iwl_mvm: SCAN_REQ_UMAC rechazado\n");

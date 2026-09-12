@@ -76,7 +76,7 @@ echo "OK: run_ampere_boot no invoca ACR antes del booter"
 echo "=== R5.1: sondas de CE antes/después de GR0 y del promote ==="
 orden=$(grep -n "run_ce_probe(CE_PROBE_\|gsp_compute_stage_sass_bringup(" "$src/gsp_bringup.c" |
     grep -oE "CE_PROBE_[A-Z0-9_]+|gsp_compute_stage_sass_bringup" | tr '\n' ' ')
-esperado="CE_PROBE_ANTES_GR0 gsp_compute_stage_sass_bringup CE_PROBE_TRAS_GR0 CE_PROBE_TRAS_PROMO "
+esperado="CE_PROBE_ANTES_GR0 gsp_compute_stage_sass_bringup CE_PROBE_TRAS_GOLDEN CE_PROBE_TRAS_GR0 CE_PROBE_TRAS_PROMO "
 if [[ "$orden" != "$esperado" ]]; then
     echo "FALLO: sondas de CE en «$orden»; se esperaba «$esperado»" >&2
     echo "       (la medida va antes de la precarga de SASS, que es la mitigación)" >&2
@@ -88,6 +88,19 @@ if ! grep -q "gsp_chan_dump(&g_chan, \"sonda CE" "$src/gsp_bringup.c" ||
     exit 1
 fi
 echo "OK: tres medidas de CE en orden, con volcado de estado en el primer fallo"
+
+echo "=== R5.2: PROMOTE_CTX antes de RM_ALLOC compute ==="
+compute_ln=$(awk '/static int run_compute_stage/,/^}/ {
+    if ($0 ~ /gsp_compute_init/) { print NR; exit }
+}' "$src/gsp_bringup.c")
+promo_ln=$(awk '/static int run_compute_stage/,/^}/ {
+    if ($0 ~ /gsp_grctx_promote/) { print NR; exit }
+}' "$src/gsp_bringup.c")
+if [[ -z "$promo_ln" || -z "$compute_ln" || "$promo_ln" -ge "$compute_ln" ]]; then
+    echo "FALLO: gsp_grctx_promote (L$promo_ln) debe ir antes de gsp_compute_init (L$compute_ln)" >&2
+    exit 1
+fi
+echo "OK: promote L$promo_ln antes de compute_init L$compute_ln (r535_gr_chan_new)"
 
 # R5.3: el árbol solo trae `cla0c0qmd.h` (hasta V01_07, era Pascal), así que el
 # descriptor QMD de Ampere/Ada/Hopper no está y el driver se niega a lanzar en
@@ -103,7 +116,7 @@ if [[ "$qmd_hdrs" != 1 || "$qmd_vers" != "QMDV00_06 QMDV01_06 QMDV01_07 " ]]; th
     echo "       gsp_family_caps (qmd_version deja de ser 0)." >&2
     exit 1
 fi
-echo "OK: solo cla0c0qmd.h ($qmd_vers) — Ampere sigue sin descriptor y se rechaza"
+echo "OK: cla0c0qmd.h ($qmd_vers); Ampere usa QMDV01_07 transcrito en nvrm_r570.h"
 
 echo "=== L6 — pasos 3 a 6 de la cadena FSP/COT + recepción de RPC ==="
 SOSO_ROOT="$root" "$out/hostcheck" "$ucode" "$boot" "$fmc"

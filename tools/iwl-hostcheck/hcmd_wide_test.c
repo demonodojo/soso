@@ -1,6 +1,7 @@
 /* Host: HCMD gen2 usa cabecera wide (8 B); LEGACY_GROUP API → wire LONG_GROUP (DEF_ID). */
 #include <stdio.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "lx_emul.h"
@@ -9,6 +10,7 @@
 #include <stdlib.h>
 
 #define REPLY_SF_CFG_CMD 0xd1
+#define MAC_CONTEXT_CMD  0x28
 
 struct iwl_sf_cfg_cmd {
     uint32_t state;
@@ -142,10 +144,26 @@ int main(void)
     struct iwl_tx_ant_cfg_cmd ant;
     struct iwl_sf_cfg_cmd sf;
     struct iwl_phy_context_cmd_v1 phy;
+    struct iwl_mac_ctx_cmd mac_cmd;
 
     memset(&ant, 0, sizeof(ant));
     memset(&sf, 0, sizeof(sf));
     memset(&phy, 0, sizeof(phy));
+    memset(&mac_cmd, 0, sizeof(mac_cmd));
+    mac_cmd.mac_type = IWL_FW_MAC_TYPE_BSS_STA;
+    mac_cmd.filter_flags = IWL_MAC_FILTER_ACCEPT_GRP | IWL_MAC_FILTER_IN_BEACON;
+    iwl_mvm_mac_qos_defaults(mac_cmd.ac);
+    if (sizeof(mac_cmd) != 148u) {
+        fprintf(stderr, "MAC_CONTEXT payload=%zu (esperaba 148)\n", sizeof(mac_cmd));
+        return -1;
+    }
+    if (offsetof(struct iwl_mac_ctx_cmd, filter_flags) != 52u ||
+        offsetof(struct iwl_mac_ctx_cmd, qos_flags) != 56u) {
+        fprintf(stderr, "MAC_CONTEXT filter @%zu qos @%zu (esperaba 52/56)\n",
+                offsetof(struct iwl_mac_ctx_cmd, filter_flags),
+                offsetof(struct iwl_mac_ctx_cmd, qos_flags));
+        return -1;
+    }
 
     if (check_wide_legacy(TX_ANT_CONFIGURATION_CMD, &ant, (uint16_t)sizeof(ant)) != 0) {
         fprintf(stderr, "TX_ANT no usa cabecera wide\n");
@@ -159,7 +177,12 @@ int main(void)
         fprintf(stderr, "PHY_CONTEXT no usa cabecera wide\n");
         return -1;
     }
+    if (check_wide_legacy(MAC_CONTEXT_CMD, &mac_cmd, (uint16_t)sizeof(mac_cmd)) != 0) {
+        fprintf(stderr, "MAC_CONTEXT no usa cabecera wide\n");
+        return -1;
+    }
 
-    puts("OK: LEGACY HCMD (TX_ANT/SF/PHY) wide 8 B + DEF_ID grp=1");
+    puts("OK: LEGACY HCMD (TX_ANT/SF/PHY/MAC) wide 8 B + DEF_ID grp=1, "
+         "MAC 148 B filter@52 qos@56");
     return 0;
 }

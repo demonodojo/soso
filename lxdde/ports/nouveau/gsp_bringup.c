@@ -624,7 +624,7 @@ static int run_vmm_stage(void)
     if (gsp_dma_alloc(&g_scratch, 4096, "página de rebote de G4d") != 0) {
         return -1;
     }
-    if (gsp_vmm_init(&g_cmdq, &g_rpc, &g_vmm, &g_vram_pool) != 0) {
+    if (gsp_vmm_init(&g_cmdq, &g_rpc, &g_vmm, &g_vram_pool, 1u) != 0) {
         return -1;
     }
     if (gsp_vmm_map(&g_vmm, G4D_VA_BASE, g_vram_block, G4D_VRAM_BYTES,
@@ -698,12 +698,13 @@ static const char *ce_probe_txt(int v)
  * valor del semáforo. Después el bring-up sigue: esto diagnostica, no decide.
  */
 #define CE_PROBE_ANTES_GR0   0
-#define CE_PROBE_TRAS_GR0    1
-#define CE_PROBE_TRAS_PROMO  2
-#define CE_PROBE_N           3
+#define CE_PROBE_TRAS_GOLDEN 1
+#define CE_PROBE_TRAS_GR0    2
+#define CE_PROBE_TRAS_PROMO  3
+#define CE_PROBE_N           4
 
 static const char *const g_ce_probe_nombre[CE_PROBE_N] = {
-    "antes de GR0", "tras crear GR0", "tras PROMOTE_CTX",
+    "antes de GR0", "tras golden GR", "tras crear GR0", "tras PROMOTE_CTX",
 };
 /* 0 = no medido, 1 = movió bytes, -1 = no señalizó. */
 static int g_ce_probe[CE_PROBE_N];
@@ -761,25 +762,43 @@ static void run_ce_probe(int punto)
 
 static void run_ce_probe_resumen(void)
 {
-    lx_printk("nouveau-lx: sonda CE — %s=%s, %s=%s, %s=%s%s\n",
+    lx_printk("nouveau-lx: sonda CE — %s=%s, %s=%s, %s=%s, %s=%s%s\n",
               g_ce_probe_nombre[0], ce_probe_txt(g_ce_probe[0]),
               g_ce_probe_nombre[1], ce_probe_txt(g_ce_probe[1]),
               g_ce_probe_nombre[2], ce_probe_txt(g_ce_probe[2]),
+              g_ce_probe_nombre[3], ce_probe_txt(g_ce_probe[3]),
               g_ce_probe_primer_fallo >= 0 ? " (primer fallo con estado volcado)"
                                            : "");
 }
 
 static int run_chan_ce_stage(void)
 {
+    uint32_t ce_engine = gsp_top_pick_ce_engine();
+
+    lx_printk("nouveau-lx: CE bring-up motor %u (PTOP runlist ≠ GR0 si aplica)\n",
+              ce_engine);
     if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan, g_vmm.vaspace,
-                      0u, NV2080_ENGINE_TYPE_COPY0) != 0) {
+                      0u, ce_engine) != 0) {
         return -1;
     }
     g_phase = GSP_RM_CHAN;
 
     if (gsp_ce_init(&g_vmm.rm, &g_chan, &g_ce) != 0) {
-        gsp_chan_fini(&g_chan);
-        return -1;
+        if (ce_engine != NV2080_ENGINE_TYPE_COPY0) {
+            lx_printk("nouveau-lx: CE motor %u falló — reintentando COPY0\n",
+                      ce_engine);
+            gsp_chan_fini(&g_chan);
+            ce_engine = NV2080_ENGINE_TYPE_COPY0;
+            if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan,
+                              g_vmm.vaspace, 0u, ce_engine) != 0 ||
+                gsp_ce_init(&g_vmm.rm, &g_chan, &g_ce) != 0) {
+                gsp_chan_fini(&g_chan);
+                return -1;
+            }
+        } else {
+            gsp_chan_fini(&g_chan);
+            return -1;
+        }
     }
     g_phase = GSP_RM_CE;
 
@@ -847,8 +866,100 @@ static int run_chan_ce_stage(void)
     return 0;
 }
 
+/* r535_gr_oneinit: canal golden → promote → RM_ALLOC 3D → free (RM cachea ctx). */
+static int gsp_gr_golden_oneinit(void)
+{
+    struct gsp_vmm golden_vmm = {0};
+    struct gsp_chan golden = {0};
+    struct gsp_grctx golden_ctx = {0};
+    uint32_t threed_cls;
+    uint32_t status;
+    int rc = -1;
+
+    lx_printk("nouveau-lx: golden GR oneinit (r535)\n");
+    /* Mismo cliente RM que g_vmm, vaspace distinto: las VAs del golden no
+     * consumen el espacio del canal de compute (r535/gr.c: nvkm_vmm_unref del
+     * golden.vmm tras publicar ctxbuf globales). */
+    if (gsp_vmm_init_on_rm(&golden_vmm, &g_vmm.rm, &g_vram_pool,
+                           NVKM_RM_VASPACE_GOLDEN) != 0) {
+        lx_printk("nouveau-lx: golden — sin vaspace temporal\n");
+        return -1;
+    }
+    if (gsp_chan_init(&g_vmm.rm, &golden_vmm, &g_vram_pool, &golden,
+                      golden_vmm.vaspace, 2u, NV2080_ENGINE_TYPE_GR0) != 0) {
+        lx_printk("nouveau-lx: golden — sin canal temporal de GR\n");
+        goto out;
+    }
+    if (gsp_grctx_query(&g_vmm.rm, 0u, &golden_ctx) < 0) {
+        lx_printk("nouveau-lx: golden — sin tamaños de contexto de GR\n");
+        goto out;
+    }
+    if (gsp_grctx_promote(&g_vmm.rm, &golden_vmm, &g_vram_pool, &golden,
+                          &golden_ctx, 1) != 0) {
+        lx_printk("nouveau-lx: golden — PROMOTE_CTX falló\n");
+        goto out;
+    }
+    gsp_grctx_golden_publish(&golden_ctx);
+    {
+        static const uint32_t cand[] = { AMPERE_B, AMPERE_A };
+
+        threed_cls = gsp_rm_class_pick("3D golden", cand,
+                                       (unsigned)(sizeof(cand) / sizeof(cand[0])));
+    }
+    if (gsp_rm_alloc(&g_vmm.rm, golden.handle, NVKM_RM_THREED_GOLDEN, threed_cls,
+                     NULL, 0, &status) != 0) {
+        lx_printk("nouveau-lx: golden — RM_ALLOC 3D cls=0x%04x rechazado (0x%x)\n",
+                  threed_cls, status);
+        goto out;
+    }
+    gsp_rm_free(&g_vmm.rm, NVKM_RM_THREED_GOLDEN);
+    lx_printk("nouveau-lx: golden GR listo (3D cls=0x%04x, vaspace liberado)\n",
+              threed_cls);
+    rc = 0;
+out:
+    gsp_chan_fini(&golden);
+    gsp_vmm_fini_vaspace(&golden_vmm);
+    return rc;
+}
+
+/* Si el CE quedó atascado (p. ej. COPY0 comparte runlist con GR0), rebindea. */
+static int ce_rebind_engine(uint32_t engine)
+{
+    if (!g_ce_verified) {
+        return -1;
+    }
+    lx_printk("nouveau-lx: CE atascado — reintentando motor %u\n", engine);
+    gsp_ce_fini(&g_ce);
+    gsp_chan_fini(&g_chan);
+    g_ce.stuck = 0;
+    g_ce_verified = 0;
+    if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan, g_vmm.vaspace,
+                      0u, engine) != 0 ||
+        gsp_ce_init(&g_vmm.rm, &g_chan, &g_ce) != 0) {
+        lx_printk("nouveau-lx: CE motor %u — no se pudo crear canal/objeto\n",
+                  engine);
+        return -1;
+    }
+    if (gsp_ce_selftest(&g_ce, G4D_SCRATCH_VA, G4D_VA_BASE, g_scratch.va, 4096) != 0) {
+        lx_printk("nouveau-lx: CE motor %u — sin readback\n", engine);
+        return -1;
+    }
+    g_ce_verified = 1;
+    lx_printk("nouveau-lx: CE readback verificado en motor %u\n", engine);
+    return 0;
+}
+
+static int ce_rebind_copy2(void)
+{
+    return ce_rebind_engine(NV2080_ENGINE_TYPE_COPY2);
+}
+
 static int run_compute_stage(void)
 {
+    /* Golden ctx antes del GR0 de usuario: r535_gr_oneinit. Best-effort. */
+    (void)gsp_gr_golden_oneinit();
+    run_ce_probe(CE_PROBE_TRAS_GOLDEN);
+
     /* El canal de GR0 va primero: sin él el `RM_ALLOC` del objeto de compute
      * vuelve a chocar con el INVALID_CLASS que dio en hardware. */
     if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan_gr, g_vmm.vaspace,
@@ -857,6 +968,31 @@ static int run_compute_stage(void)
                   "en pie)\n");
         return -1;
     }
+
+    /* Medida 2 de 3: el canal de GR0 existe; aún no hay clase compute ni ctx. */
+    run_ce_probe(CE_PROBE_TRAS_GR0);
+    if (g_ce_probe[CE_PROBE_TRAS_GR0] < 0 && g_ce_probe[CE_PROBE_ANTES_GR0] > 0 &&
+        ce_rebind_copy2() == 0) {
+        int rc;
+
+        g_ce_probe_primer_fallo = -1;
+        rc = gsp_ce_copy_sync(&g_ce, G4D_VA_BASE, G4D_SCRATCH_VA, 4096u,
+                              GSP_CE_WAIT_MS);
+        g_ce_probe[CE_PROBE_TRAS_GR0] = (rc == 0) ? 1 : -1;
+        lx_printk("nouveau-lx: sonda CE (tras crear GR0, COPY2): %s\n",
+                  ce_probe_txt(g_ce_probe[CE_PROBE_TRAS_GR0]));
+    }
+
+    /* Linux `r535_gr_chan_new`: promote_ctx **antes** de cualquier clase hija.
+     * Sin contexto promocionado, RM_ALLOC compute (0xc7c0) devolvía 0x1f. */
+    if (gsp_grctx_query(&g_vmm.rm, 0u, &g_grctx) < 0) {
+        lx_printk("nouveau-lx: sin tamaños de contexto de GR — no se promociona\n");
+    } else if (gsp_grctx_promote(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan_gr,
+                                 &g_grctx, 0) != 0) {
+        lx_printk("nouveau-lx: contexto de GR sin promocionar — el QMD no puede "
+                  "correr todavía\n");
+    }
+
     if (gsp_compute_init(&g_vmm.rm, &g_chan_gr, &g_compute) != 0) {
         gsp_chan_fini(&g_chan_gr);
         return -1;
@@ -865,25 +1001,6 @@ static int run_compute_stage(void)
 
     if (g_sass_pre_staged) {
         gsp_compute_mark_sass_staged(&g_compute);
-    }
-
-    /* Medida 2 de 3: el canal de GR0 existe y tiene su clase colgada, pero
-     * todavía no hay contexto promocionado. */
-    run_ce_probe(CE_PROBE_TRAS_GR0);
-
-    /* El contexto del canal de GR, en el orden de upstream: `r535_gr_oneinit`
-     * reserva el canal, le cuelga la clase y **después** promociona
-     * (`chan.alloc` → `RM_ALLOC` de la clase → `promote_ctx`). Sin contexto
-     * promocionado el canal existe y el primer QMD no puede correr.
-     *
-     * Best-effort como todo lo de esta fase: si falla, el CE y el resto del
-     * arranque siguen en pie y el log dice dónde paró. */
-    if (gsp_grctx_query(&g_vmm.rm, 0u, &g_grctx) < 0) {
-        lx_printk("nouveau-lx: sin tamaños de contexto de GR — no se promociona\n");
-    } else if (gsp_grctx_promote(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan_gr,
-                                 &g_grctx) != 0) {
-        lx_printk("nouveau-lx: contexto de GR sin promocionar — el QMD no puede "
-                  "correr todavía\n");
     }
     /* Medida 3 de 3: la que faltaba. Si el CE muere aquí y no en la 2, el
      * culpable es el promote (golden ctx de FECS), no crear el canal. */

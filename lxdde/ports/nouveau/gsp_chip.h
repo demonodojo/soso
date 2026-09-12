@@ -30,4 +30,10 @@ const char *gsp_nv_chip_name(uint16_t device_id, enum nv_family fam);
  * (30) que ese RPC no incluye — ver gb202/dev_vm.h y gb202_chan_doorbell_handle. */
 uint32_t gsp_chan_doorbell_kick(enum nv_family fam, uint32_t rpc_token);
 
+/* Ajusta el kick con el doorbell de la runlist (dbcfg >> 16). En Ampere GSP el
+ * token de GET_WORK_SUBMIT_TOKEN suele traer runlist=0 aunque COPY2 use
+ * doorbell=1 (`ga100_chan_doorbell_handle` / `tu102_chan_doorbell_handle`). */
+uint32_t gsp_chan_doorbell_kick_resolved(enum nv_family fam, uint32_t rpc_token,
+                                         uint32_t dbcfg);
+
 #endif

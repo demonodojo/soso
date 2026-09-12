@@ -221,6 +221,10 @@ static int chan_schedule(struct gsp_chan *c)
     return 0;
 }
 
+static int chan_runlist_base(struct gsp_chan *c, const char *why, uint32_t *out,
+                             uint32_t *chram_tab);
+static void chan_refresh_doorbell_kick(struct gsp_chan *c);
+
 /* Sin token no hay forma de patear el canal, así que esto NO es best-effort: si
  * falla, el canal se queda a medias y es mejor decirlo aquí que dejar que el CE
  * se coma un timeout de 2 s sin explicación. */
@@ -259,6 +263,7 @@ static int chan_get_doorbell_token(struct gsp_chan *c)
                   "el %u — el chid no se pide por ahí\n",
                   c->chid, c->doorbell_token & NV_VF_DOORBELL_VECTOR_MASK);
     }
+    chan_refresh_doorbell_kick(c);
     return 0;
 }
 
@@ -580,6 +585,7 @@ int gsp_chan_submit(struct gsp_chan *c, unsigned pb_off, unsigned pb_len)
      * mapeada. El orden lo garantiza mfence antes del doorbell. */
     gsp_chan_barrier();
     if (c->doorbell_ok) {
+        chan_refresh_doorbell_kick(c);
         gsp_mmio_wr32(NV_VFN_DOORBELL, c->doorbell_kick);
     }
     return 0;
@@ -691,6 +697,38 @@ static int chan_runlist_base(struct gsp_chan *c, const char *why, uint32_t *out,
     return -1;
 }
 
+static void chan_refresh_doorbell_kick(struct gsp_chan *c)
+{
+    uint32_t runl = 0;
+    uint32_t chram_tab = 0;
+    uint32_t dbcfg;
+    uint32_t kick_before;
+    enum nv_family fam;
+
+    if (!c || !c->doorbell_ok) {
+        return;
+    }
+    fam = gsp_nv_family_current();
+    kick_before = c->doorbell_kick;
+    c->doorbell_kick = gsp_chan_doorbell_kick(fam, c->doorbell_token);
+    if (fam != NV_FAM_AMPERE) {
+        return;
+    }
+    if (chan_runlist_base(c, "doorbell", &runl, &chram_tab) != 0) {
+        return;
+    }
+    dbcfg = gsp_mmio_rd32(runl + RUNL_DBCFG);
+    if (gsp_mmio_pri_error(dbcfg)) {
+        return;
+    }
+    c->doorbell_kick = gsp_chan_doorbell_kick_resolved(fam, c->doorbell_token,
+                                                       dbcfg);
+    if (c->doorbell_kick != kick_before) {
+        lx_printk("nouveau-lx: doorbell ajustado 0x%08x → 0x%08x (dbcfg doorbell=%u)\n",
+                  kick_before, c->doorbell_kick, dbcfg >> 16);
+    }
+}
+
 static void chan_dump_ramfc(struct gsp_chan *c, const char *why)
 {
     uint32_t w;
@@ -726,18 +764,19 @@ static void chan_dump_ramfc(struct gsp_chan *c, const char *why)
                   why, i, a, b, d, e);
     }
 
-    w = gsp_pramin_rd32(c->inst_addr + 0x020u);
-    userd_inst = (uint64_t)w;
-    w = gsp_pramin_rd32(c->inst_addr + 0x090u);
-    gpfifo_inst = (uint64_t)w;
-    w = gsp_pramin_rd32(c->inst_addr + 0x094u);
-    gpfifo_inst |= (uint64_t)w << 32;
+    /* ga100/gv100 RAMFC: USERD en +0x008/+0x00c, GPFIFO en +0x048/+0x04c
+     * (`ga100_chan_ramfc_write`, `gv100_chan_ramfc_write`). */
+    userd_inst = (uint64_t)gsp_pramin_rd32(c->inst_addr + 0x008u);
+    userd_inst |= (uint64_t)gsp_pramin_rd32(c->inst_addr + 0x00cu) << 32;
+    gpfifo_inst = (uint64_t)gsp_pramin_rd32(c->inst_addr + 0x048u);
+    gpfifo_inst |= (uint64_t)((uint64_t)gsp_pramin_rd32(c->inst_addr + 0x04cu) &
+                                0xffffu) << 32;
 
-    userd_ok = userd_inst == (c->userd.phys >> 12);
+    userd_ok = userd_inst == c->userd.phys;
     gpfifo_ok = gpfifo_inst == c->gpfifo_va;
-    lx_printk("nouveau-lx: canal (%s): RAMFC USERD pág inst=0x%llx enviado=0x%llx "
+    lx_printk("nouveau-lx: canal (%s): RAMFC USERD inst=0x%llx enviado=0x%llx "
               "(phys 0x%llx) %s\n", why, (unsigned long long)userd_inst,
-              (unsigned long long)(c->userd.phys >> 12),
+              (unsigned long long)c->userd.phys,
               (unsigned long long)c->userd.phys, userd_ok ? "OK" : "NO_COINCIDE");
     lx_printk("nouveau-lx: canal (%s): RAMFC GPFIFO inst=0x%llx enviado=0x%llx "
               "entries=%u %s\n", why, (unsigned long long)gpfifo_inst,

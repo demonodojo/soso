@@ -6,6 +6,7 @@ pub mod interrupts;
 pub mod ioapic;
 pub mod iommu;
 pub mod irq;
+pub mod pat;
 pub mod percpu;
 pub mod pit;
 pub mod rtc;

@@ -136,6 +136,9 @@ extern "C" fn ap_entry() -> ! {
     };
     // SSE/AVX, GDT/TSS y GS (datos per-CPU) propios son estado por-CPU.
     sse::enable();
+    // Mismo PAT que la BSP (entrada WC del framebuffer): el SDM exige que
+    // todos los cores lo lleven igual, y este AP imprime por pantalla abajo.
+    crate::arch::pat::init_cpu();
     crate::arch::gdt::init_cpu(cpu);
     crate::arch::percpu::init(cpu, crate::arch::gdt::kstack_top_for(cpu).as_u64());
     apic::enable_cpu();

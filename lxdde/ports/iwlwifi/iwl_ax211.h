@@ -94,6 +94,10 @@ struct iwl_ax211_priv {
     int radio_ready;
     int mvm_up_done;
     int phy_ctxt_added;
+    int mac_ctxt_added;
+    int binding_added;
+    uint8_t scan_mac_id;
+    uint8_t ap_sta_id;
     uint8_t scan_rx_ant;
     uint32_t phy_sku;
     uint8_t fw_valid_tx_ant;
