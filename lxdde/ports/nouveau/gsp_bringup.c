@@ -1582,3 +1582,61 @@ int lx_nouveau_compute_wait_fence(unsigned sem_slot)
     }
     return gsp_compute_wait_fence(&g_compute, sem_slot);
 }
+
+void lx_nouveau_compute_batch_begin(void)
+{
+    if (g_compute.ready && g_compute.chan) {
+        gsp_chan_batch_begin(g_compute.chan);
+    }
+}
+
+void lx_nouveau_compute_batch_end(void)
+{
+    if (g_compute.ready && g_compute.chan) {
+        gsp_chan_batch_end(g_compute.chan);
+    }
+}
+
+int lx_nouveau_compute_rmsnorm_rows(float *x, const float *weight,
+                                    unsigned rows, unsigned cols, float eps)
+{
+    (void)x;
+    (void)weight;
+    (void)rows;
+    (void)cols;
+    (void)eps;
+    /* SASS `rmsnorm_rows` pendiente de `l6-g4f-build-sass.sh`; el kernel hace RMSNorm en CPU. */
+    return -1;
+}
+
+int lx_nouveau_enqueue_matvec_resident(uint64_t w_va, unsigned rows, unsigned cols,
+                                       const float *x, uint64_t y_va,
+                                       unsigned sem_slot)
+{
+    if (!compute_usable() || !g_compute.res_mapped || !g_buf.ready) {
+        return -1;
+    }
+    if (gsp_compute_matvec_resident_enqueue(&g_compute, &g_ce, w_va, rows, cols,
+                                            x, y_va, sem_slot, G4D_SCRATCH_VA,
+                                            g_scratch.va) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int lx_nouveau_enqueue_matvec_q_resident(uint64_t w_va, unsigned dtype,
+                                         unsigned rows, unsigned cols,
+                                         const float *x, uint64_t y_va,
+                                         unsigned sem_slot)
+{
+    if (!compute_usable() || !g_compute.res_mapped || !g_buf.ready) {
+        return -1;
+    }
+    if (gsp_compute_matvec_q_resident_enqueue(&g_compute, &g_ce, w_va, dtype, rows,
+                                              cols, x, y_va, sem_slot,
+                                              G4D_SCRATCH_VA, g_scratch.va,
+                                              4096u) != 0) {
+        return -1;
+    }
+    return 0;
+}

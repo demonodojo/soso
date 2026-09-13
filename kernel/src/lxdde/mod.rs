@@ -340,6 +340,47 @@ pub fn submit_layernorm_rows(
     gpu::submit_layernorm_rows(x, weight, bias, rows, cols, eps)
 }
 
+pub fn submit_rmsnorm_rows(
+    x: &mut [f32],
+    weight: &[f32],
+    rows: usize,
+    cols: usize,
+    eps: f32,
+) -> Result<bool, ()> {
+    gpu::submit_rmsnorm_rows(x, weight, rows, cols, eps)
+}
+
 pub fn wait_fence(sem_slot: u32) -> Result<(), ()> {
     gpu::wait_fence(sem_slot)
+}
+
+pub fn batch_begin() {
+    gpu::batch_begin();
+}
+
+pub fn batch_end() {
+    gpu::batch_end();
+}
+
+pub fn enqueue_matvec_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y_va: u64,
+    sem_slot: u32,
+) -> Result<(), ()> {
+    gpu::enqueue_matvec_resident(w_va, rows, cols, x, y_va, sem_slot)
+}
+
+pub fn enqueue_matvec_q_resident(
+    w_va: u64,
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y_va: u64,
+    sem_slot: u32,
+) -> Result<(), ()> {
+    gpu::enqueue_matvec_q_resident(w_va, rows, cols, x, y_va, sem_slot)
 }

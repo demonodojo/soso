@@ -1500,6 +1500,87 @@ int gsp_compute_layernorm_rows(struct gsp_compute *cp, struct gsp_ce *ce,
     return 0;
 }
 
+int gsp_compute_matvec_resident_enqueue(struct gsp_compute *cp, struct gsp_ce *ce,
+                                        uint64_t w_va, unsigned rows, unsigned cols,
+                                        const float *x, uint64_t y_va,
+                                        unsigned sem_slot,
+                                        uint64_t scratch_va, void *scratch_cpu)
+{
+    unsigned grid;
+    float *gx;
+    uint64_t x_va;
+
+    if (!cp || !cp->ready || !ce || !x || rows == 0u || cols == 0u ||
+        w_va == 0 || y_va == 0 || sem_slot >= G4F_SEM_COUNT) {
+        return -1;
+    }
+    if (!cp->res_mapped || cols > G5_MAX_COLS || rows > G6_MAX_ROWS) {
+        return -1;
+    }
+    if ((unsigned long)cols * 4ul > G6_RES_X_BYTES) {
+        return -1;
+    }
+    if (gsp_compute_stage_sass(cp, ce, &cp->matvec, scratch_va, scratch_cpu,
+                               G4F_STAGE_CHUNK) != 0) {
+        return -1;
+    }
+    gx = (float *)cp_res(cp, G6_RES_X_OFF);
+    memcpy(gx, x, (unsigned long)cols * 4ul);
+    x_va = cp->res_va + G6_RES_X_OFF;
+    gsp_compute_set_mv_params(cp, &cp->matvec, w_va, x_va, y_va, rows, cols);
+    grid = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
+    if (gsp_compute_launch_enqueue(cp, &cp->matvec, grid, 1u, sem_slot,
+                                   "matvec-res-enq") != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int gsp_compute_matvec_q_resident_enqueue(struct gsp_compute *cp, struct gsp_ce *ce,
+                                          uint64_t w_va, unsigned dtype,
+                                          unsigned rows, unsigned cols,
+                                          const float *x, uint64_t y_va,
+                                          unsigned sem_slot,
+                                          uint64_t scratch_va, void *scratch_cpu,
+                                          unsigned scratch_bytes)
+{
+    struct gsp_kernel *k;
+    unsigned grid;
+    float *gx;
+    uint64_t x_va;
+
+    if (!cp || !cp->ready || !ce || !x || rows == 0u || cols == 0u ||
+        w_va == 0 || y_va == 0 || sem_slot >= G4F_SEM_COUNT) {
+        return -1;
+    }
+    if (!cp->res_mapped) {
+        return -1;
+    }
+    k = q_kernel(cp, dtype);
+    if (!k || k->sass_len == 0u || q_row_bytes(dtype, cols) == 0ul) {
+        return -1;
+    }
+    if (cols > G5_MAX_COLS || rows > G6_MAX_ROWS) {
+        return -1;
+    }
+    if ((unsigned long)cols * 4ul > G6_RES_X_BYTES) {
+        return -1;
+    }
+    if (gsp_compute_stage_sass(cp, ce, k, scratch_va, scratch_cpu,
+                               scratch_bytes) != 0) {
+        return -1;
+    }
+    gx = (float *)cp_res(cp, G6_RES_X_OFF);
+    memcpy(gx, x, (unsigned long)cols * 4ul);
+    x_va = cp->res_va + G6_RES_X_OFF;
+    gsp_compute_set_mv_params(cp, k, w_va, x_va, y_va, rows, cols);
+    grid = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;
+    if (gsp_compute_launch_enqueue(cp, k, grid, 1u, sem_slot, k->name) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 int gsp_compute_launch_enqueue(struct gsp_compute *cp, const struct gsp_kernel *k,
                                unsigned grid_x, unsigned grid_y,
                                unsigned sem_slot, const char *what)

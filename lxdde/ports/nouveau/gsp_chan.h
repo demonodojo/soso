@@ -90,6 +90,8 @@ struct gsp_chan {
     uint32_t doorbell_token;
     uint32_t doorbell_kick;
     int doorbell_ok;
+    /* Durante un lote: encolar GPFIFO sin patear doorbell hasta batch_end. */
+    int batch_nodoorbell;
     int ready;
 };
 
@@ -115,6 +117,10 @@ void gsp_chan_ack_progress(struct gsp_chan *c);
 
 /* Encola un segmento del pushbuffer en el GPFIFO y publica Put/GPPut. */
 int gsp_chan_submit(struct gsp_chan *c, unsigned pb_off, unsigned pb_len);
+
+/* Lote: encolar sin doorbell; un solo kick al cerrar. */
+void gsp_chan_batch_begin(struct gsp_chan *c);
+void gsp_chan_batch_end(struct gsp_chan *c);
 
 /* Vuelca USERD + progreso SW. En Blackwell el GPGet del USERD es cosmético. */
 void gsp_chan_dump(struct gsp_chan *c, const char *why);

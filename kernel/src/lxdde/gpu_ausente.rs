@@ -123,6 +123,43 @@ pub fn wait_fence(_sem_slot: u32) -> Result<(), ()> {
     Err(())
 }
 
+pub fn batch_begin() {}
+
+pub fn batch_end() {}
+
+pub fn enqueue_matvec_resident(
+    _w_va: u64,
+    _rows: usize,
+    _cols: usize,
+    _x: &[f32],
+    _y_va: u64,
+    _sem_slot: u32,
+) -> Result<(), ()> {
+    Err(())
+}
+
+pub fn submit_rmsnorm_rows(
+    _x: &mut [f32],
+    _weight: &[f32],
+    _rows: usize,
+    _cols: usize,
+    _eps: f32,
+) -> Result<bool, ()> {
+    Ok(false)
+}
+
+pub fn enqueue_matvec_q_resident(
+    _w_va: u64,
+    _dtype: u8,
+    _rows: usize,
+    _cols: usize,
+    _x: &[f32],
+    _y_va: u64,
+    _sem_slot: u32,
+) -> Result<(), ()> {
+    Err(())
+}
+
 pub fn init_module() -> i32 {
     -1
 }

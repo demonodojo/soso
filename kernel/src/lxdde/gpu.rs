@@ -45,7 +45,33 @@ unsafe extern "C" {
         cols: u32,
         eps: f32,
     ) -> i32;
+    fn lx_nouveau_compute_rmsnorm_rows(
+        x: *mut f32,
+        weight: *const f32,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> i32;
     fn lx_nouveau_compute_wait(sem_slot: u32) -> i32;
+    fn lx_nouveau_compute_batch_begin();
+    fn lx_nouveau_compute_batch_end();
+    fn lx_nouveau_enqueue_matvec_resident(
+        w_va: u64,
+        rows: u32,
+        cols: u32,
+        x: *const f32,
+        y_va: u64,
+        sem_slot: u32,
+    ) -> i32;
+    fn lx_nouveau_enqueue_matvec_q_resident(
+        w_va: u64,
+        dtype: u32,
+        rows: u32,
+        cols: u32,
+        x: *const f32,
+        y_va: u64,
+        sem_slot: u32,
+    ) -> i32;
     fn lx_nouveau_vram_total() -> u64;
     fn lx_nouveau_device_buf_alloc(size: u64) -> u64;
     fn lx_nouveau_device_bufs_ready() -> i32;
@@ -323,6 +349,86 @@ pub fn submit_layernorm_rows(
 
 pub fn wait_fence(sem_slot: u32) -> Result<(), ()> {
     let rc = unsafe { lx_nouveau_compute_wait(sem_slot) };
+    if rc < 0 { Err(()) } else { Ok(()) }
+}
+
+pub fn batch_begin() {
+    unsafe { lx_nouveau_compute_batch_begin() };
+}
+
+pub fn batch_end() {
+    unsafe { lx_nouveau_compute_batch_end() };
+}
+
+pub fn submit_rmsnorm_rows(
+    x: &mut [f32],
+    weight: &[f32],
+    rows: usize,
+    cols: usize,
+    eps: f32,
+) -> Result<bool, ()> {
+    if x.len() != rows * cols || weight.len() != cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_rmsnorm_rows(
+            x.as_mut_ptr(),
+            weight.as_ptr(),
+            rows as u32,
+            cols as u32,
+            eps,
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn enqueue_matvec_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y_va: u64,
+    sem_slot: u32,
+) -> Result<(), ()> {
+    if w_va == 0 || y_va == 0 || x.len() != cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_enqueue_matvec_resident(
+            w_va,
+            rows as u32,
+            cols as u32,
+            x.as_ptr(),
+            y_va,
+            sem_slot,
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(()) }
+}
+
+pub fn enqueue_matvec_q_resident(
+    w_va: u64,
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y_va: u64,
+    sem_slot: u32,
+) -> Result<(), ()> {
+    if w_va == 0 || y_va == 0 || x.len() != cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_enqueue_matvec_q_resident(
+            w_va,
+            dtype as u32,
+            rows as u32,
+            cols as u32,
+            x.as_ptr(),
+            y_va,
+            sem_slot,
+        )
+    };
     if rc < 0 { Err(()) } else { Ok(()) }
 }
 

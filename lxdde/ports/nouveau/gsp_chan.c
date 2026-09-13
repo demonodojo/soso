@@ -584,11 +584,30 @@ int gsp_chan_submit(struct gsp_chan *c, unsigned pb_off, unsigned pb_len)
      * El USERD vive en VRAM (GPGet/GPPut por PRAMIN); el ring GPFIFO en sysmem
      * mapeada. El orden lo garantiza mfence antes del doorbell. */
     gsp_chan_barrier();
-    if (c->doorbell_ok) {
+    if (c->doorbell_ok && !c->batch_nodoorbell) {
         chan_refresh_doorbell_kick(c);
         gsp_mmio_wr32(NV_VFN_DOORBELL, c->doorbell_kick);
     }
     return 0;
+}
+
+void gsp_chan_batch_begin(struct gsp_chan *c)
+{
+    if (c) {
+        c->batch_nodoorbell = 1;
+    }
+}
+
+void gsp_chan_batch_end(struct gsp_chan *c)
+{
+    if (!c) {
+        return;
+    }
+    c->batch_nodoorbell = 0;
+    if (c->doorbell_ok) {
+        chan_refresh_doorbell_kick(c);
+        gsp_mmio_wr32(NV_VFN_DOORBELL, c->doorbell_kick);
+    }
 }
 
 /* Registros del FIFO que se leen para el volcado. Todos salen de nouveau por el
@@ -677,10 +696,19 @@ static int chan_runlist_base(struct gsp_chan *c, const char *why, uint32_t *out,
                    gsp_top_runlist_of(type, inst, &from_top, NULL) == 0;
 
     if (have_top && have_rm) {
-        lx_printk("nouveau-lx: canal (%s): runlist del motor %u — PTOP dice "
-                  "0x%06x, la tabla del FIFO 0x%06x%s\n", why, c->engine,
-                  from_top, from_rm,
-                  from_top == from_rm ? " (coinciden)" : " (NO coinciden)");
+        static unsigned logged_engine;
+        static uint32_t logged_top;
+        static uint32_t logged_rm;
+        if (logged_engine != c->engine || logged_top != from_top ||
+            logged_rm != from_rm) {
+            lx_printk("nouveau-lx: canal (%s): runlist del motor %u — PTOP dice "
+                      "0x%06x, la tabla del FIFO 0x%06x%s\n", why, c->engine,
+                      from_top, from_rm,
+                      from_top == from_rm ? " (coinciden)" : " (NO coinciden)");
+            logged_engine = c->engine;
+            logged_top = from_top;
+            logged_rm = from_rm;
+        }
     }
     if (have_top && from_top != 0u && from_top < BAR0_LIMIT) {
         *out = from_top;

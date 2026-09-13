@@ -62,6 +62,69 @@ fn tiny_model() -> (Manifest, TensorIndex, MemFileMapper) {
     (manifest, index, mapper)
 }
 
+/// GQA: num_kv_heads < num_heads y attn_k/v con forma [kv_dim, h] (no [h, h]).
+fn tiny_model_gqa() -> (Manifest, TensorIndex, MemFileMapper) {
+    let mut manifest = Manifest::tiny("tiny-gqa");
+    manifest.num_heads = 4;
+    manifest.num_kv_heads = 2;
+    let h = manifest.hidden_dim;
+    let kv_dim = (manifest.num_kv_heads * (h / manifest.num_heads)) as u32;
+    let ffn = manifest.ffn_dim;
+    let vocab = manifest.vocab_size;
+
+    let mut mapper = MemFileMapper::new();
+    let mut index = TensorIndex::default();
+    let mut id = 0u32;
+    let add = |index: &mut TensorIndex,
+                   mapper: &mut MemFileMapper,
+                   id: &mut u32,
+                   name: &str,
+                   shape: &[u32]| {
+        let elems: usize = shape.iter().map(|&d| d as usize).product();
+        let shard = format!("{name}.tensor");
+        mapper
+            .files
+            .insert(format!("{BASE}/{shard}"), f32_shard(elems, *id));
+        index
+            .entries
+            .push(make_f32_entry(*id, name, &shard, 0, shape));
+        *id += 1;
+    };
+
+    for layer in 0..manifest.num_layers {
+        let p = format!("L{layer:02}");
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.attn_norm"), &[h]);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.attn_q"), &[h, h]);
+        add(
+            &mut index,
+            &mut mapper,
+            &mut id,
+            &format!("{p}.attn_k"),
+            &[kv_dim, h],
+        );
+        add(
+            &mut index,
+            &mut mapper,
+            &mut id,
+            &format!("{p}.attn_v"),
+            &[kv_dim, h],
+        );
+        add(
+            &mut index,
+            &mut mapper,
+            &mut id,
+            &format!("{p}.attn_output"),
+            &[h, h],
+        );
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.ffn_norm"), &[h]);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.ffn_up"), &[ffn, h]);
+        add(&mut index, &mut mapper, &mut id, &format!("{p}.ffn_down"), &[h, ffn]);
+    }
+    add(&mut index, &mut mapper, &mut id, "embed", &[vocab, h]);
+
+    (manifest, index, mapper)
+}
+
 #[test]
 fn generate_con_pesos_q8_0() {
     let (manifest, index, mapper) = tiny_model_q8_0();
@@ -227,6 +290,21 @@ fn generate_completo_modelo_tiny() {
     assert!(tokens.len() <= prompt.len() + 4);
     assert!(tokens.iter().all(|&t| t < vocab));
     assert!(tokens.starts_with(&prompt));
+}
+
+#[test]
+fn generate_modelo_gqa() {
+    let (manifest, index, mapper) = tiny_model_gqa();
+    let vocab = manifest.vocab_size;
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    rt.validate_shapes().expect("shapes GQA válidas");
+
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    let tokens = rt
+        .generate(&mut source, &[5, 10], 3, None)
+        .expect("generate con GQA debe funcionar");
+    assert!(tokens.len() >= 2);
+    assert!(tokens.iter().all(|&t| t < vocab));
 }
 
 #[test]

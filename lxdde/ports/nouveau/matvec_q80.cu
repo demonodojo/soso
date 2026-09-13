@@ -21,16 +21,32 @@ extern "C" __device__ float q80_warp_reduce_sum(float v)
     return v;
 }
 
+/* `x` cacheado en shared una vez por CTA (idea del `mmvq` de llama.cpp): los 8
+ * warps de un CTA comparten la activación desde shared en vez de releerla de
+ * global por fila. Ver el comentario en matvec_q4k.cu. */
+#define Q80_X_SHARED_FLOATS 4096
+
 extern "C" __global__ void matvec_q80(const unsigned char *w, const float *x,
                                       float *y, int rows, int cols)
 {
+    __shared__ __align__(16) float xs[Q80_X_SHARED_FLOATS];
     int tid = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     int warp_id = tid >> 5;
     int lane = tid & 31;
     int nb;
     const unsigned char *row;
+    const float *xp = x;
     float sum = 0.0f;
     int b;
+
+    if (cols <= Q80_X_SHARED_FLOATS) {
+        int i;
+        for (i = (int)threadIdx.x; i < cols; i += (int)blockDim.x) {
+            xs[i] = x[i];
+        }
+        __syncthreads();
+        xp = xs;
+    }
 
     if (warp_id >= rows) {
         return;
@@ -40,7 +56,7 @@ extern "C" __global__ void matvec_q80(const unsigned char *w, const float *x,
 
     for (b = lane; b < nb; b += 32) {
         sum += q80_dot_block(row + (long)b * Q80_BLOCK_BYTES,
-                             x + (long)b * Q80_BLOCK_ELEMS);
+                             xp + (long)b * Q80_BLOCK_ELEMS);
     }
 
     sum = q80_warp_reduce_sum(sum);

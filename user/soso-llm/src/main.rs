@@ -405,7 +405,6 @@ fn load_model(
     let manifest_path = format!("{base}/manifest.som");
     let index_path = format!("{base}/index.som");
 
-    println!("soso-llm: leyendo {manifest_path}");
     let manifest_data = read_file(&manifest_path).map_err(|e| {
         println!("soso-llm: no puedo leer {manifest_path} (errno {e})");
         1u8
@@ -416,7 +415,6 @@ fn load_model(
     })?;
     let manifest_crc = crc_bytes(&manifest_data);
 
-    println!("soso-llm: leyendo {index_path}");
     let index_data = read_file(&index_path).map_err(|e| {
         println!("soso-llm: no puedo leer {index_path} (errno {e})");
         1u8
@@ -427,17 +425,12 @@ fn load_model(
     })?;
     let index_crc = crc_bytes(&index_data);
 
-    println!(
-        "soso-llm: runtime (capas={} hidden={} vocab={})",
-        manifest.num_layers, manifest.hidden_dim, manifest.vocab_size
-    );
     let rt = Runtime::new(manifest, index.clone(), 32 * 1024 * 1024, 0);
     if let Err(why) = rt.validate_shapes_for_role(role, layer_start, layer_end) {
         println!("soso-llm: shapes del index no casan con el rol ({why})");
         return Err(1);
     }
 
-    println!("soso-llm: tokenizer");
     let tokenizer = match read_file(&format!("{base}/tokenizer.som")) {
         Ok(data) => Tokenizer::parse(&data).map_err(|_| {
             println!("soso-llm: tokenizer.som inválido");
@@ -446,7 +439,6 @@ fn load_model(
         Err(_) => Tokenizer::byte_level(),
     };
 
-    println!("soso-llm: fuente mmap lista");
     let inner = MmapTensorSource::new(format!("{base}/shards"), index, staging::SyscallMapper);
     let inner = if staging {
         inner
@@ -686,10 +678,8 @@ pub(crate) fn preparar_sesion(
 ) -> Result<Sesion, u8> {
     let io0 = read_iostat();
     let t_carga = sys::uptime_ms();
-    println!("soso-llm: preparando {name}");
     let num_layers = read_num_layers(name).unwrap_or(4);
     let mut bundle = load_model(name, PipelineRole::Full, 0, num_layers, with_pool)?;
-    println!("soso-llm: modelo en RAM, planificando");
     // La carga en frío va aparte de tok/s: `generado` sólo cronometra el
     // decode, y el disco se gasta casi entero antes de que ese reloj arranque.
     // Medirlas juntas es lo que hacía invisible el coste de E/S.
@@ -761,7 +751,7 @@ pub(crate) fn preparar_sesion(
             );
         }
     }
-    let sys_gpu = if force_cpu { None } else { soso_gpu::SysGpu::new() };
+    let mut sys_gpu = if force_cpu { None } else { soso_gpu::SysGpu::new() };
     println!(
         "soso-llm: backend {}",
         if sys_gpu.is_some() { "GPU" } else { "CPU" }
@@ -775,7 +765,7 @@ pub(crate) fn preparar_sesion(
             println!("soso-llm: backend CPU (--cpu)");
         }
         bundle.rt.set_backend(Backend::Cpu);
-    } else if let Some(ref g) = sys_gpu {
+    } else if let Some(ref mut g) = sys_gpu {
         if verboso {
             println!(
                 "soso-llm: dispositivo de cómputo «{}» (fase {}), VRAM libre {} bytes",
@@ -788,6 +778,10 @@ pub(crate) fn preparar_sesion(
         bundle.rt.tiers.vram_budget = gpu.vram_free as usize;
         if let Some(pl) = bundle.rt.planner.as_mut() {
             pl.set_vram_free(gpu.vram_free);
+        }
+        let model_vram = soso_llm_core::plan::total_model_vram_bytes(&bundle.rt.index);
+        if model_vram > 0 && model_vram <= gpu.vram_free {
+            g.fijar_pesos_residentes();
         }
     } else if gpu.present != 0 {
         if verboso {
@@ -1003,10 +997,13 @@ pub(crate) fn generar_tokens(
             if fd_out.is_none() {
                 println!();
             }
+            let n = tokens.len();
+            if let Some(ref g) = sesion.sys_gpu {
+                g.print_diagnostics_run(n, elapsed_ms);
+            }
             if !verboso {
                 return 0;
             }
-            let n = tokens.len();
             let tok_s = n as f64 * 1000.0 / elapsed_ms as f64;
             println!(
                 "soso-llm: generado ({} tokens, {} ms, {:.2} tok/s)",
@@ -1067,12 +1064,6 @@ pub(crate) fn generar_tokens(
                         st.pld_accepted, st.pld_attempts, st.pld_prefer_n, st.pld_max_draft
                     );
                 }
-            }
-            // Los pesos SUBIDOS frente a las llamadas es la cifra que dice si el
-            // cacheo funciona: sin él eran una subida de la matriz entera por
-            // llamada, y en el log no se veía nada raro.
-            if let Some(ref g) = sesion.sys_gpu {
-                g.print_diagnostics();
             }
             0
         }

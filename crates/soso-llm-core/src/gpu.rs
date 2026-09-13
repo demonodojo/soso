@@ -101,6 +101,12 @@ pub trait GpuDispatch {
         let _ = (x, weight, bias, rows, cols, eps);
         Ok(false)
     }
+
+    /// RMSNorm in-place (1 fila): x *= rsqrt(mean(x²)+eps) * weight.
+    fn rmsnorm(&mut self, x: &mut [f32], weight: &[f32], eps: f32) -> Result<bool, ()> {
+        let _ = (x, weight, eps);
+        Ok(false)
+    }
 }
 
 /// Sin GPU: siempre CPU.
@@ -149,6 +155,44 @@ pub fn try_gpu_matvec(
         return Ok(false);
     }
     match gpu.matvec(key, view, rows, cols, x, out) {
+        Ok(v) => Ok(v),
+        Err(()) => Ok(false),
+    }
+}
+
+/// Intenta varios matvec en un solo submit BATCH; `true` si todos en GPU.
+pub fn try_gpu_matvec_batch(
+    gpu: &mut dyn GpuDispatch,
+    ops: &mut [MatvecOp<'_>],
+) -> Result<bool, ()> {
+    if !gpu.available() || ops.is_empty() {
+        return Ok(false);
+    }
+    for op in ops.iter() {
+        if !dtype_ofrecible(op.view.dtype) {
+            return Ok(false);
+        }
+        if op.view.dtype == DTYPE_F32 && op.view.f32().is_none() {
+            return Ok(false);
+        }
+    }
+    match gpu.matvec_batch(ops) {
+        Ok(v) => Ok(v),
+        Err(()) => Ok(false),
+    }
+}
+
+/// Intenta RMSNorm en GPU; `true` si `x` ya está normalizado.
+pub fn try_gpu_rmsnorm(
+    gpu: &mut dyn GpuDispatch,
+    x: &mut [f32],
+    weight: &[f32],
+    eps: f32,
+) -> Result<bool, ()> {
+    if !gpu.available() || x.len() != weight.len() || x.is_empty() {
+        return Ok(false);
+    }
+    match gpu.rmsnorm(x, weight, eps) {
         Ok(v) => Ok(v),
         Err(()) => Ok(false),
     }

@@ -297,6 +297,19 @@ int gsp_compute_launch_enqueue(struct gsp_compute *cp, const struct gsp_kernel *
 /* Espera al semáforo del slot indicado. */
 int gsp_compute_wait_fence(struct gsp_compute *cp, unsigned sem_slot);
 
+int gsp_compute_matvec_resident_enqueue(struct gsp_compute *cp, struct gsp_ce *ce,
+                                        uint64_t w_va, unsigned rows, unsigned cols,
+                                        const float *x, uint64_t y_va,
+                                        unsigned sem_slot,
+                                        uint64_t scratch_va, void *scratch_cpu);
+int gsp_compute_matvec_q_resident_enqueue(struct gsp_compute *cp, struct gsp_ce *ce,
+                                          uint64_t w_va, unsigned dtype,
+                                          unsigned rows, unsigned cols,
+                                          const float *x, uint64_t y_va,
+                                          unsigned sem_slot,
+                                          uint64_t scratch_va, void *scratch_cpu,
+                                          unsigned scratch_bytes);
+
 void gsp_compute_fini(struct gsp_compute *cp);
 
 #endif

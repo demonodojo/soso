@@ -489,7 +489,14 @@ impl<'a> LayerExecutor<'a> {
         } else {
         s.residual.copy_from_slice(hidden);
         source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w)?;
-        rmsnorm(hidden, &s.norm_w, eps);
+        let gpu_rms = use_gpu
+            && gpu
+                .as_deref_mut()
+                .and_then(|g| crate::gpu::try_gpu_rmsnorm(g, hidden, &s.norm_w, eps).ok())
+                .unwrap_or(false);
+        if !gpu_rms {
+            rmsnorm(hidden, &s.norm_w, eps);
+        }
 
         let t_mv0 = tick(clock_ms);
         matvec_step(
@@ -513,7 +520,7 @@ impl<'a> LayerExecutor<'a> {
             kv_dim,
             h,
             hidden,
-            &mut s.k,
+            &mut s.k[..kv_dim],
             par,
             planner_ro,
             layer,
@@ -526,7 +533,7 @@ impl<'a> LayerExecutor<'a> {
             kv_dim,
             h,
             hidden,
-            &mut s.v,
+            &mut s.v[..kv_dim],
             par,
             planner_ro,
             layer,
@@ -540,7 +547,7 @@ impl<'a> LayerExecutor<'a> {
             rope_inplace(&mut s.k[head * head_dim..(head + 1) * head_dim], pos, theta);
         }
 
-        kv.append_f16(&s.k, &s.v);
+        kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);
         let seq = kv.tokens(kv_dim);
         let _ = pos;
         let sparse = planner_ro.is_some_and(|p| p.use_sparse_attn(seq));
@@ -619,7 +626,14 @@ impl<'a> LayerExecutor<'a> {
         // --- FFN (denso, MoE o LatentMoE) ---
         s.residual.copy_from_slice(hidden);
         source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w)?;
-        rmsnorm(hidden, &s.norm_w, eps);
+        let gpu_rms_ffn = use_gpu
+            && gpu
+                .as_deref_mut()
+                .and_then(|g| crate::gpu::try_gpu_rmsnorm(g, hidden, &s.norm_w, eps).ok())
+                .unwrap_or(false);
+        if !gpu_rms_ffn {
+            rmsnorm(hidden, &s.norm_w, eps);
+        }
 
         let t_ffn0 = tick(clock_ms);
         if spec.ffn_kind == FfnKind::LatentMoe {

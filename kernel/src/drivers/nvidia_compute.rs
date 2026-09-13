@@ -244,6 +244,76 @@ pub fn wait_fence(sem_slot: u32) -> Result<(), ()> {
     Err(())
 }
 
+pub fn batch_begin() {
+    #[cfg(feature = "lxdde")]
+    crate::lxdde::batch_begin();
+}
+
+pub fn batch_end() {
+    #[cfg(feature = "lxdde")]
+    crate::lxdde::batch_end();
+}
+
+pub fn enqueue_matvec_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y_va: u64,
+    sem_slot: u32,
+) -> Result<bool, ()> {
+    #[cfg(feature = "lxdde")]
+    {
+        if crate::lxdde::enqueue_matvec_resident(w_va, rows, cols, x, y_va, sem_slot).is_ok() {
+            return Ok(true);
+        }
+    }
+    Err(())
+}
+
+pub fn submit_rmsnorm_rows(
+    x: &mut [f32],
+    weight: &[f32],
+    rows: usize,
+    cols: usize,
+    eps: f32,
+) -> Result<bool, ()> {
+    let mut st = COMPUTE.lock();
+    let Some(s) = st.as_mut() else {
+        return Err(());
+    };
+    #[cfg(feature = "lxdde")]
+    {
+        if let Ok(on_gpu) =
+            crate::lxdde::submit_rmsnorm_rows(x, weight, rows, cols, eps)
+        {
+            s.gpu_path = on_gpu;
+            s.channel_ready = crate::lxdde::gsp_ready();
+            return Ok(on_gpu);
+        }
+    }
+    let _ = (rows, cols, eps, s);
+    Ok(false)
+}
+
+pub fn enqueue_matvec_q_resident(
+    w_va: u64,
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y_va: u64,
+    sem_slot: u32,
+) -> Result<bool, ()> {
+    #[cfg(feature = "lxdde")]
+    {
+        if crate::lxdde::enqueue_matvec_q_resident(w_va, rows, cols, x, y_va, sem_slot).is_ok() {
+            return Ok(true);
+        }
+    }
+    Err(())
+}
+
 #[allow(dead_code)]
 pub fn channel_ready() -> bool {
     COMPUTE.lock().as_ref().is_some_and(|s| s.channel_ready)

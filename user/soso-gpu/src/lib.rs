@@ -72,12 +72,16 @@ pub struct SysGpu {
     resident: Vec<Resident>,
     x: Scratch,
     y: Scratch,
+    /// Búferes Y extra para lotes (q/k/v comparten X pero no Y).
+    y_extra: Vec<Scratch>,
     uploads: usize,
     calls: usize,
     /// Tensores que no caben en el dispositivo y se quedan en CPU. Es una cifra
     /// del offload híbrido, no un error: sin verla, "va lento" no se distingue de
     /// "no está usando la GPU".
     sin_sitio: usize,
+    /// Con VRAM suficiente para todo el modelo: no desalojar pesos residentes.
+    pesos_fijos: bool,
     /// Último fallo duro del despacho (syscall, dimensiones…). No incluye el
     /// fallback a CPU por falta de VRAM.
     last_fail: Option<&'static str>,
@@ -141,9 +145,11 @@ impl SysGpu {
             resident: Vec::new(),
             x: Scratch::NONE,
             y: Scratch::NONE,
+            y_extra: Vec::new(),
             uploads: 0,
             calls: 0,
             sin_sitio: 0,
+            pesos_fijos: false,
             last_fail: None,
             offload_dead: false,
             ciclos_dequant: 0,
@@ -248,8 +254,26 @@ impl SysGpu {
         }
     }
 
+    /// Marca pesos como fijos: no desalojar residentes (modelo cabe en VRAM).
+    pub fn fijar_pesos_residentes(&mut self) {
+        self.pesos_fijos = true;
+        libsoso::println!(
+            "soso-llm: pesos GPU fijos — {} MiB libres, sin desalojo",
+            self.vram_free >> 20
+        );
+    }
+
+    pub fn evictions(&self) -> usize {
+        self.evictions
+    }
+
     /// Estadísticas del despacho GPU (éxito o fallo de inferencia).
     pub fn print_diagnostics(&self) {
+        self.print_diagnostics_run(0, 0);
+    }
+
+    /// Igual que `print_diagnostics`, con tok/s y submits/token si `tokens > 0`.
+    pub fn print_diagnostics_run(&self, tokens: usize, elapsed_ms: u64) {
         let (calls, uploads, resident, sin_sitio) = self.stats();
         libsoso::println!(
             "soso-llm: dispositivo «{}» — {} matvec, {} subidas de pesos, {} matrices residentes, {} sin sitio (a CPU), último on_gpu={}",
@@ -260,6 +284,18 @@ impl SysGpu {
             sin_sitio,
             self.last_on_gpu() as u8
         );
+        if tokens > 0 && elapsed_ms > 0 {
+            let tok_s = tokens as f64 * 1000.0 / elapsed_ms as f64;
+            let submits_tok = if tokens > 0 {
+                calls as f64 / tokens as f64
+            } else {
+                0.0
+            };
+            libsoso::println!(
+                "soso-llm: rendimiento GPU — {:.2} tok/s, {:.1} submits/token ({} matvec / {} tokens)",
+                tok_s, submits_tok, calls, tokens
+            );
+        }
         // Ciclos, no ms: el reloj de `SYS_UPTIME_MS` es el PIT y subcuenta durante
         // el polling de disco, así que no sirve para repartir culpas entre CPU y
         // E/S — que es justo lo que hay que hacer aquí.
@@ -312,6 +348,7 @@ impl SysGpu {
         bytes: u64,
         vram_free: &mut u64,
         on_fail: &mut Option<&'static str>,
+        vram: bool,
     ) -> Result<u64, ()> {
         if s.handle != u64::MAX && s.bytes >= bytes {
             return Ok(s.handle);
@@ -327,9 +364,17 @@ impl SysGpu {
             *on_fail = Some("scratch sin VRAM");
             return Err(());
         }
-        let h = sys::gpu_alloc(bytes);
+        let h = if vram {
+            sys::gpu_alloc_vram(bytes)
+        } else {
+            sys::gpu_alloc(bytes)
+        };
         if h < 0 {
-            *on_fail = Some("gpu_alloc scratch");
+            *on_fail = Some(if vram {
+                "gpu_alloc_vram scratch"
+            } else {
+                "gpu_alloc scratch"
+            });
             return Err(());
         }
         *vram_free = vram_free.saturating_sub(bytes);
@@ -382,6 +427,10 @@ impl SysGpu {
         // antigua, que con un recorrido de capas en orden es la que más tardará
         // en volver a hacer falta.
         while bytes > self.vram_free {
+            if self.pesos_fijos {
+                self.sin_sitio += 1;
+                return Err(());
+            }
             let Some(old) = self.resident.first() else {
                 // Ni vaciando el dispositivo cabe este tensor: se queda en CPU. Es
                 // el caso normal de un modelo más grande que la VRAM, no un error.
@@ -532,6 +581,70 @@ impl SysGpu {
         }
         Ok(rc as u64)
     }
+
+    fn fmt_batch_byte(fmt: Formato) -> u8 {
+        match fmt {
+            Formato::F32 => 0,
+            Formato::Q4K => DTYPE_Q4_K,
+            Formato::Q80 => DTYPE_Q8_0,
+        }
+    }
+
+    fn ensure_y_vram(
+        s: &mut Scratch,
+        bytes: u64,
+        vram_free: &mut u64,
+        on_fail: &mut Option<&'static str>,
+    ) -> Result<u64, ()> {
+        if s.handle != u64::MAX && s.bytes >= bytes {
+            return Ok(s.handle);
+        }
+        if s.handle != u64::MAX {
+            let freed = sys::gpu_free(s.handle);
+            if freed > 0 {
+                *vram_free = vram_free.saturating_add(freed as u64);
+            }
+            *s = Scratch::NONE;
+        }
+        if bytes > *vram_free {
+            *on_fail = Some("y batch sin VRAM");
+            return Err(());
+        }
+        let h = sys::gpu_alloc_vram(bytes);
+        if h < 0 {
+            *on_fail = Some("gpu_alloc_vram y batch");
+            return Err(());
+        }
+        *vram_free = vram_free.saturating_sub(bytes);
+        s.handle = h as u64;
+        s.bytes = bytes;
+        Ok(s.handle)
+    }
+
+    fn ensure_y_buf(
+        &mut self,
+        idx: usize,
+        bytes: u64,
+    ) -> Result<u64, ()> {
+        if idx == 0 {
+            return Self::ensure_y_vram(
+                &mut self.y,
+                bytes,
+                &mut self.vram_free,
+                &mut self.last_fail,
+            );
+        }
+        while self.y_extra.len() <= idx - 1 {
+            self.y_extra.push(Scratch::NONE);
+        }
+        let slot = &mut self.y_extra[idx - 1];
+        Self::ensure_y_vram(
+            slot,
+            bytes,
+            &mut self.vram_free,
+            &mut self.last_fail,
+        )
+    }
 }
 
 /// Sube `data` al búfer del dispositivo **desde donde está**.
@@ -604,11 +717,13 @@ impl GpuDispatch for SysGpu {
         };
         let x_bytes = (cols * 4) as u64;
         let y_bytes = (rows * 4) as u64;
+        let vram_x = self.pesos_fijos;
         let Ok(x_handle) = Self::ensure_scratch(
             &mut self.x,
             x_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
+            vram_x,
         ) else {
             return Ok(false);
         };
@@ -617,6 +732,7 @@ impl GpuDispatch for SysGpu {
             y_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
+            self.pesos_fijos,
         ) else {
             return Ok(false);
         };
@@ -692,6 +808,7 @@ impl GpuDispatch for SysGpu {
             x_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
+            self.pesos_fijos,
         ) else {
             return Ok(false);
         };
@@ -700,6 +817,7 @@ impl GpuDispatch for SysGpu {
             y_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
+            self.pesos_fijos,
         ) else {
             return Ok(false);
         };
@@ -742,13 +860,100 @@ impl GpuDispatch for SysGpu {
     }
 
     fn matvec_batch(&mut self, ops: &mut [MatvecOp<'_>]) -> Result<bool, ()> {
-        let mut any = false;
-        for op in ops.iter_mut() {
-            if self.matvec(op.key, op.view, op.rows, op.cols, op.x, op.out)? {
-                any = true;
+        if self.offload_dead || ops.is_empty() {
+            return Ok(false);
+        }
+        let cols = ops[0].cols;
+        let x_bytes = (cols * 4) as u64;
+        for op in ops.iter() {
+            if op.cols != cols || op.x.len() != cols {
+                self.note_fail("batch cols");
+                return Ok(false);
+            }
+            if op.view.elems != op.rows * op.cols || op.out.len() != op.rows {
+                self.note_fail("batch dimensiones");
+                return Ok(false);
             }
         }
-        Ok(any)
+        struct Prep {
+            w: u64,
+            fmt: Formato,
+            rows: u32,
+            y_h: u64,
+        }
+        let mut prep = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            let Ok((w, fmt)) =
+                self.resident_weights(op.key, op.view, op.rows * op.cols, op.cols)
+            else {
+                return Ok(false);
+            };
+            let y_bytes = (op.rows * 4) as u64;
+            let Ok(y_h) = self.ensure_y_buf(i, y_bytes) else {
+                return Ok(false);
+            };
+            prep.push(Prep {
+                w,
+                fmt,
+                rows: op.rows as u32,
+                y_h,
+            });
+        }
+        let Ok(x_h) = Self::ensure_scratch(
+            &mut self.x,
+            x_bytes,
+            &mut self.vram_free,
+            &mut self.last_fail,
+            self.pesos_fijos,
+        ) else {
+            return Ok(false);
+        };
+        if write_f32(x_h, ops[0].x).is_err() {
+            self.kill_offload("gpu_map vector x batch");
+            return Ok(false);
+        }
+        let mut cmd = Vec::with_capacity(7 + prep.len() * 38);
+        cmd.extend_from_slice(b"BATCH");
+        cmd.extend_from_slice(&(prep.len() as u16).to_le_bytes());
+        for (i, p) in prep.iter().enumerate() {
+            cmd.push(Self::fmt_batch_byte(p.fmt));
+            cmd.extend_from_slice(&p.w.to_le_bytes());
+            cmd.extend_from_slice(&p.rows.to_le_bytes());
+            cmd.extend_from_slice(&(cols as u32).to_le_bytes());
+            cmd.extend_from_slice(&x_h.to_le_bytes());
+            cmd.extend_from_slice(&p.y_h.to_le_bytes());
+            let _ = i;
+        }
+        let t0 = libsoso::ciclos();
+        let bits = match Self::submit_batch(&cmd) {
+            Ok(b) => b,
+            Err(()) => {
+                self.kill_offload("gpu_submit batch");
+                return Ok(false);
+            }
+        };
+        self.calls += 1;
+        self.on_gpu = bits & abi::GPU_SUBMIT_ON_GPU != 0;
+        if bits & abi::GPU_SUBMIT_COMPUTED == 0 {
+            return Ok(false);
+        }
+        for (i, op) in ops.iter_mut().enumerate() {
+            if read_f32_into(prep[i].y_h, op.out).is_err() {
+                self.kill_offload("gpu_read matvec batch");
+                return Ok(false);
+            }
+        }
+        let y_bytes_total: u64 = prep.iter().map(|p| p.rows as u64 * 4).sum();
+        let ns = libsoso::ciclos().wrapping_sub(t0) as u64 * 3 / 10;
+        self.note_launch(
+            ns,
+            x_bytes,
+            y_bytes_total,
+            prep.iter()
+                .map(|p| p.rows as u64 * cols as u64)
+                .sum(),
+        );
+        Ok(self.on_gpu)
     }
 
     fn softmax_rows(&mut self, x: &mut [f32], rows: usize, cols: usize) -> Result<bool, ()> {
@@ -761,6 +966,7 @@ impl GpuDispatch for SysGpu {
             bytes,
             &mut self.vram_free,
             &mut self.last_fail,
+            false,
         ) else {
             return Ok(false);
         };
@@ -798,6 +1004,58 @@ impl GpuDispatch for SysGpu {
     ) -> Result<bool, ()> {
         Ok(false)
     }
+
+    fn rmsnorm(&mut self, x: &mut [f32], weight: &[f32], eps: f32) -> Result<bool, ()> {
+        if self.offload_dead || x.len() != weight.len() || x.is_empty() {
+            return Ok(false);
+        }
+        let cols = x.len();
+        let bytes = (cols * 4) as u64;
+        let w_bytes = bytes;
+        let Ok(x_handle) = Self::ensure_scratch(
+            &mut self.x,
+            bytes,
+            &mut self.vram_free,
+            &mut self.last_fail,
+            self.pesos_fijos,
+        ) else {
+            return Ok(false);
+        };
+        let Ok(w_handle) = Self::ensure_scratch(
+            &mut self.y,
+            w_bytes,
+            &mut self.vram_free,
+            &mut self.last_fail,
+            self.pesos_fijos,
+        ) else {
+            return Ok(false);
+        };
+        if write_f32(x_handle, x).is_err() || write_f32(w_handle, weight).is_err() {
+            return Ok(false);
+        }
+        let mut cmd = [0u8; 33];
+        cmd[0..5].copy_from_slice(b"RMSNR");
+        cmd[5..13].copy_from_slice(&x_handle.to_le_bytes());
+        cmd[13..21].copy_from_slice(&w_handle.to_le_bytes());
+        cmd[21..25].copy_from_slice(&1u32.to_le_bytes());
+        cmd[25..29].copy_from_slice(&(cols as u32).to_le_bytes());
+        cmd[29..33].copy_from_slice(&eps.to_le_bytes());
+        let t0 = libsoso::ciclos();
+        let Ok(bits) = Self::submit_batch(&cmd) else {
+            return Ok(false);
+        };
+        self.calls += 1;
+        self.on_gpu = bits & abi::GPU_SUBMIT_ON_GPU != 0;
+        if bits & abi::GPU_SUBMIT_COMPUTED == 0 {
+            return Ok(false);
+        }
+        if read_f32_into(x_handle, x).is_err() {
+            return Ok(false);
+        }
+        let ns = libsoso::ciclos().wrapping_sub(t0) as u64 * 3 / 10;
+        self.note_launch(ns, bytes + w_bytes, bytes, cols as u64);
+        Ok(self.on_gpu)
+    }
 }
 
 impl Drop for SysGpu {
@@ -808,7 +1066,10 @@ impl Drop for SysGpu {
                 self.vram_free = self.vram_free.saturating_add(freed as u64);
             }
         }
-        for s in [&mut self.x, &mut self.y] {
+        for s in core::iter::once(&mut self.x)
+            .chain(core::iter::once(&mut self.y))
+            .chain(self.y_extra.iter_mut())
+        {
             if s.handle != u64::MAX {
                 let freed = sys::gpu_free(s.handle);
                 if freed > 0 {

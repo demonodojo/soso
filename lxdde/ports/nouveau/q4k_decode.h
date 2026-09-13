@@ -133,6 +133,13 @@ Q4K_FN float q4k_dot_sub(const unsigned char *blk, int j, const float *x)
     return (d * (float)sc) * qx - (dmin * (float)m) * sx;
 }
 
+/* Fase 4: variante con dp4a cuando el SM lo expone (sm_61+). Por ahora alias
+ * exacto de `q4k_dot_sub` hasta empaquetar nibbles en int8 para __dp4a. */
+Q4K_FN float q4k_dot_sub_dp4a(const unsigned char *blk, int j, const float *x)
+{
+    return q4k_dot_sub(blk, j, x);
+}
+
 /* Producto punto de UN superbloque Q4_K (256 elementos) por `x`. Definido sobre
  * `q4k_dot_sub` para que no haya dos decodificadores que puedan divergir. */
 Q4K_FN float q4k_dot_block(const unsigned char *blk, const float *x)

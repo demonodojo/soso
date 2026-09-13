@@ -29,17 +29,39 @@ extern "C" __device__ float q4k_warp_reduce_sum(float v)
     return v;
 }
 
+/* Techo de `x` cacheado en shared (16 KiB f32). Cubre hidden=4096 (Mistral): las
+ * proyecciones q/k/v/o y gate/up leen `x` de tamaño hidden, así que 6 de los 7
+ * matvec por capa lo aprovechan. `down` (cols=ffn) lo supera y relee de global,
+ * como antes. Es la idea del `mmvq` de llama.cpp: la activación se lee una vez por
+ * CTA y todos los warps (filas) la comparten desde shared en vez de releerla de
+ * memoria global una vez por fila. Numéricamente idéntico: mismos floats. */
+#define Q4K_X_SHARED_FLOATS 4096
+
 extern "C" __global__ void matvec_q4k(const unsigned char *w, const float *x,
                                       float *y, int rows, int cols)
 {
+    __shared__ __align__(16) float xs[Q4K_X_SHARED_FLOATS];
     int tid = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     int warp_id = tid >> 5;
     int lane = tid & 31;
     int nsub;
     long row_bytes;
     const unsigned char *row;
+    const float *xp = x;
     float sum = 0.0f;
     int k;
+
+    /* `cols` es uniforme en el CTA, así que el barrier lo cruzan todos los hilos o
+     * ninguno: no hay divergencia posible sobre `__syncthreads`. El guard de fila
+     * va DESPUÉS del barrier — si un warp saliera antes, colgaría al resto. */
+    if (cols <= Q4K_X_SHARED_FLOATS) {
+        int i;
+        for (i = (int)threadIdx.x; i < cols; i += (int)blockDim.x) {
+            xs[i] = x[i];
+        }
+        __syncthreads();
+        xp = xs;
+    }
 
     if (warp_id >= rows) {
         return;
@@ -49,10 +71,15 @@ extern "C" __global__ void matvec_q4k(const unsigned char *w, const float *x,
     row_bytes = (long)(cols / Q4K_BLOCK_ELEMS) * (long)Q4K_BLOCK_BYTES;
     row = w + (long)warp_id * row_bytes;
 
+    /* Fase 4: un sub-bloque por lane; dp4a en q4k_decode cuando el SM lo expone. */
     for (k = lane; k < nsub; k += 32) {
         int blk = k >> 3;  /* superbloque */
         int j = k & 7;     /* sub-bloque dentro de él */
-        sum += q4k_dot_sub(row + (long)blk * Q4K_BLOCK_BYTES, j, x + (long)k * 32);
+#if __CUDA_ARCH__ >= 610
+        sum += q4k_dot_sub_dp4a(row + (long)blk * Q4K_BLOCK_BYTES, j, xp + (long)k * 32);
+#else
+        sum += q4k_dot_sub(row + (long)blk * Q4K_BLOCK_BYTES, j, xp + (long)k * 32);
+#endif
     }
 
     sum = q4k_warp_reduce_sum(sum);

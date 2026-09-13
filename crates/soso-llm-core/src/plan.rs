@@ -362,6 +362,11 @@ pub fn total_model_weight_bytes(index: &TensorIndex) -> u64 {
     index.entries.iter().map(|e| e.byte_len).sum()
 }
 
+/// Bytes que ocuparían todos los tensores del modelo en VRAM (Q4_K/Q8_0 en crudo).
+pub fn total_model_vram_bytes(index: &TensorIndex) -> u64 {
+    index.entries.iter().map(vram_bytes_for_entry).sum()
+}
+
 /// Bytes del tensor de embedding (tabla de lookup).
 pub fn bytes_for_embed(index: &TensorIndex) -> u64 {
     index.find("embed").map(|e| e.byte_len).unwrap_or(0)
@@ -1128,23 +1133,31 @@ impl ResourcePlanner {
             .saturating_mul(self.resident_layers as u64)
             .max(self.weight_budget.min(self.avg_layer_bytes.saturating_mul(2)));
 
+        // Modelo cabe residente: todas las capas a GPU (caso Mistral Q4_K en 12–16 GiB).
+        let model_vram = total_model_vram_bytes(index);
+        let resident_model = model_vram > 0 && model_vram <= self.vram_free;
+
         // Pase 1: destino + tronco en VRAM (atención, router, FFN denso, Sxx).
         // El *8 a f32 estaba mal: Q4_K/Q8_0 se suben en crudo.
         for layer in 0..manifest.num_layers {
             let lb = bytes_for_layer(layer, index);
-            let dest0 = choose_dest(
-                lb,
-                stream_budget,
-                self.model_weight_bytes,
-                vram_left,
-                self.remote_available,
-                self.remote_degraded,
-                self.layer_ms_cpu.get(layer as usize).copied().unwrap_or(0.0),
-                self.layer_ms_gpu.get(layer as usize).copied().unwrap_or(0.0),
-                self.layer_ms_remote.get(layer as usize).copied().unwrap_or(0.0),
-                self.remote_rtt_ms,
-                self.io_bound,
-            );
+            let dest0 = if resident_model {
+                ExecDest::Gpu
+            } else {
+                choose_dest(
+                    lb,
+                    stream_budget,
+                    self.model_weight_bytes,
+                    vram_left,
+                    self.remote_available,
+                    self.remote_degraded,
+                    self.layer_ms_cpu.get(layer as usize).copied().unwrap_or(0.0),
+                    self.layer_ms_gpu.get(layer as usize).copied().unwrap_or(0.0),
+                    self.layer_ms_remote.get(layer as usize).copied().unwrap_or(0.0),
+                    self.remote_rtt_ms,
+                    self.io_bound,
+                )
+            };
             let mut gpu_tensors = Vec::new();
             let dest = if dest0 == ExecDest::Gpu {
                 gpu_tensors = pack_trunk_gpu(layer, manifest, index, &mut vram_left);

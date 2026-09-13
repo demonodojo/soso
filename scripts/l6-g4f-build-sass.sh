@@ -24,7 +24,7 @@ read -r -a ARCHS <<< "${SOSO_SASS_ARCHS:-$ARCHS_DEFAULT}"
 
 # name:prefijo de símbolo. El fichero es <name>.cu y el kernel de dentro puede
 # llamarse de otra forma (el nombre real se lee del cubin, no de aquí).
-KERNELS=("saxpy:saxpy" "matvec:matvec" "matvec_q4k:matvec_q4k" "matvec_q80:matvec_q80" "matmul:matmul" "softmax_rows:softmax_rows" "layernorm_rows:layernorm_rows")
+KERNELS=("saxpy:saxpy" "matvec:matvec" "matvec_q4k:matvec_q4k" "matvec_q80:matvec_q80" "matmul:matmul" "softmax_rows:softmax_rows" "layernorm_rows:layernorm_rows" "rmsnorm_rows:rmsnorm_rows" "rope_rows:rope_rows" "attn_decode_rows:attn_decode_rows")
 
 compile_host() {
     local arch="$1" out="$2" k name
