@@ -221,6 +221,7 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 /* Linux `enum iwl_ucode_tlv_capa` — bit 12 = DQA_SUPPORT (file.h). */
 #define IWL_UCODE_TLV_CAPA_DQA_SUPPORT           12
 #define IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT   39
+#define IWL_UCODE_TLV_CAPA_CDB_SUPPORT           40
 #define IWL_FW_CAPA_SETS                         4
 
 #define BINDING_CONTEXT_CMD                      0x2b

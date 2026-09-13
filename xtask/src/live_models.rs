@@ -75,8 +75,8 @@ pub const CATALOG: &[LiveModelSpec] = &[
 pub fn default_live_spec() -> LiveModelSpec {
     *CATALOG
         .iter()
-        .find(|s| s.name == "qwen3.8-27b")
-        .expect("qwen3.8-27b en CATALOG")
+        .find(|s| s.name == "mistral-7b")
+        .expect("mistral-7b en CATALOG")
 }
 
 impl LiveModelSpec {
@@ -150,6 +150,29 @@ pub fn pick_for_usb(
         }
     }
     CATALOG[0]
+}
+
+/// `SOSO_LIVE_AUTO_MODEL=1|true|yes`: al flashear, escalar modelo según tamaño real del USB.
+pub fn auto_model_from_usb() -> bool {
+    matches!(
+        std::env::var("SOSO_LIVE_AUTO_MODEL").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+/// Capacidad para `pick_for_usb` al flashear: `SOSO_LIVE_CAPACITY`, auto con
+/// `SOSO_LIVE_AUTO_MODEL`, o `None` → `default_live_spec` (mistral-7b).
+pub fn model_pick_bytes_for_flash(disk_bytes: u64) -> Option<u64> {
+    if let Ok(raw) = std::env::var("SOSO_LIVE_CAPACITY") {
+        return Some(parse_capacity_env(&raw).unwrap_or_else(|e| {
+            eprintln!("flash-usb-live: {e}");
+            exit(1);
+        }));
+    }
+    if auto_model_from_usb() {
+        return Some(disk_bytes);
+    }
+    None
 }
 
 /// `SOSO_LIVE_OFFLINE=1|true|yes`: no descargar desde Hugging Face al empaquetar/flashear.
@@ -390,8 +413,8 @@ mod tests {
     }
 
     #[test]
-    fn default_live_es_qwen38() {
-        assert_eq!(default_live_spec().name, "qwen3.8-27b");
+    fn default_live_es_mistral_7b() {
+        assert_eq!(default_live_spec().name, "mistral-7b");
     }
 
     #[test]

@@ -731,7 +731,6 @@ static void chan_refresh_doorbell_kick(struct gsp_chan *c)
 
 static void chan_dump_ramfc(struct gsp_chan *c, const char *why)
 {
-    uint32_t w;
     uint64_t userd_inst, gpfifo_inst;
     unsigned i;
     int userd_ok, gpfifo_ok;

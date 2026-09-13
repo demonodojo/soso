@@ -179,7 +179,7 @@ int gsp_cpu_seq_run(const void *payload, uint32_t len)
 {
     const struct gsp_run_cpu_sequencer *seq = payload;
     const uint32_t *cmd_buf;
-    uint32_t reg_save[8];
+    uint32_t *reg_save;
     unsigned ptr;
     unsigned cmds = 0;
 
@@ -189,9 +189,8 @@ int gsp_cpu_seq_run(const void *payload, uint32_t len)
 
     cmd_buf = (const uint32_t *)(const void *)((const unsigned char *)seq +
                                              sizeof(*seq));
-    for (unsigned i = 0; i < 8u; i++) {
-        reg_save[i] = seq->reg_save_area[i];
-    }
+    /* Linux r535: REG_STORE escribe en seq->regSaveArea del RPC, no en copia. */
+    reg_save = (uint32_t *)(uintptr_t)seq->reg_save_area;
 
     lx_printk("nouveau-lx: cpu_seq buffer=%u index=%u\n",
               (unsigned)seq->buffer_size_dword, (unsigned)seq->cmd_index);

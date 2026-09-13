@@ -21,12 +21,6 @@ extern void *memcpy(void *dst, const void *src, unsigned long n);
 #define SF_W_MARK_MIMO2            8192
 #define SF_LONG_DELAY_AGING_TIMER  1000000
 
-#define FW_CTXT_ID_POS             0
-#define FW_CTXT_COLOR_POS          8
-#define FW_CMD_ID_AND_COLOR(id, color) \
-    (((uint32_t)(id) << FW_CTXT_ID_POS) | ((uint32_t)(color) << FW_CTXT_COLOR_POS))
-#define FW_CTXT_ACTION_ADD         1
-
 #define MAC_CONTEXT_CMD            0x28
 
 #define PHY_RX_CHAIN_VALID_POS     1
@@ -147,7 +141,9 @@ static uint8_t phy_band_from_chan(uint8_t channel)
 
 static uint32_t phy_lmac_id(struct iwl_ax211_priv *iwl, uint8_t band)
 {
-    if (!iwl_fw_has_capa(iwl, IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT) ||
+    /* Linux iwl_mvm_get_lmac_id (binding.c:168): LMAC 5G solo con CDB (40),
+     * no con BINDING_CDB (39). cc-a0-77 declara 39 sí / 40 no. */
+    if (!iwl_fw_has_capa(iwl, IWL_UCODE_TLV_CAPA_CDB_SUPPORT) ||
         band == PHY_BAND_24)
         return IWL_LMAC_24G_INDEX;
     return IWL_LMAC_5G_INDEX;

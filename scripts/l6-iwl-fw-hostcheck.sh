@@ -115,6 +115,11 @@ build assoc_abi \
 echo "=== iwl assoc ABI hostcheck ==="
 run assoc_abi
 
+build cdb_lmac \
+    "$root/tools/iwl-hostcheck/cdb_lmac_test.c" \
+    "$src/iwl_mvm_assoc.c" \
+    "$src/iwl_mvm_up.c"
+
 for ucode in \
     "$fwdir/iwlwifi-cc-a0-77.ucode" \
     "$fwdir/iwlwifi-so-a0-gf-a0-89.ucode"; do
@@ -129,6 +134,8 @@ for ucode in \
         run capa_dqa "$ucode"
         echo "=== iwl BINDING/POWER hostcheck: $(basename "$ucode") ==="
         run binding_power "$ucode"
+        echo "=== iwl CDB/LMAC assoc hostcheck: $(basename "$ucode") ==="
+        run cdb_lmac "$ucode"
     fi
 done
 

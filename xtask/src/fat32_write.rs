@@ -317,6 +317,142 @@ fn find_entry_loc(
 
 /// Nombre 8.3 que fatfs/bootloader deja para `kernel-x86_64`.
 pub const KERNEL_8_3: [u8; 11] = *b"KERNEL~1   ";
+/// Nombre que el bootloader UEFI abre (`bootloader-x86_64-uefi` `load_kernel`).
+const KERNEL_LFN: &str = "kernel-x86_64";
+
+fn lfn_checksum(name11: &[u8; 11]) -> u8 {
+    let mut sum: u8 = 0;
+    for &b in name11 {
+        sum = ((sum & 1) << 7).wrapping_add(sum >> 1).wrapping_add(b);
+    }
+    sum
+}
+
+fn lfn_units(e: &[u8]) -> [u16; 13] {
+    let mut c = [0u16; 13];
+    let mut j = 0;
+    for off in [1usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30] {
+        c[j] = u16::from_le_bytes([e[off], e[off + 1]]);
+        j += 1;
+    }
+    c
+}
+
+fn encode_lfn(long: &str, name11: &[u8; 11]) -> Vec<[u8; 32]> {
+    let mut units: Vec<u16> = long.encode_utf16().collect();
+    if units.len() % 13 != 0 {
+        units.push(0);
+        while units.len() % 13 != 0 {
+            units.push(0xFFFF);
+        }
+    }
+    if units.is_empty() {
+        units.resize(13, 0xFFFF);
+        units[0] = 0;
+    }
+    let nents = units.len() / 13;
+    let chk = lfn_checksum(name11);
+    let mut out = Vec::with_capacity(nents);
+    for i in (0..nents).rev() {
+        let mut e = [0u8; 32];
+        let seq = (i as u8) + 1;
+        e[0] = if i + 1 == nents { seq | 0x40 } else { seq };
+        e[11] = 0x0F;
+        e[13] = chk;
+        let chunk = &units[i * 13..i * 13 + 13];
+        let mut k = 0;
+        for off in [1usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30] {
+            e[off..off + 2].copy_from_slice(&chunk[k].to_le_bytes());
+            k += 1;
+        }
+        out.push(e);
+    }
+    out
+}
+
+fn kernel_lfn(name11: &[u8; 11]) -> Option<&'static str> {
+    (*name11 == KERNEL_8_3).then_some(KERNEL_LFN)
+}
+
+/// Si `KERNEL~1` no tiene LFN `kernel-x86_64`, lo reescribe (el bootloader UEFI
+/// no abre el 8.3 `KERNEL~1`).
+pub fn ensure_kernel_lfn(img: &Path, part_first_lba: u64) -> Result<(), String> {
+    let Ok(name) = find_root_kernel_name(img, part_first_lba) else {
+        return Ok(());
+    };
+    let ents = list_dir_entries(img, part_first_lba, &[])?;
+    if ents
+        .iter()
+        .any(|e| e.name11 == name && e.lfn.as_deref() == Some(KERNEL_LFN))
+    {
+        return Ok(());
+    }
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(img)
+        .map_err(|e| format!("open: {e}"))?;
+    let vol = read_vol(&mut f, part_first_lba)?;
+    let fat_bytes = (vol.spf * vol.bps) as usize;
+    let mut fat = vec![0u8; fat_bytes];
+    read_at(&mut f, vol.base + vol.reserved * vol.bps, &mut fat)?;
+    let root_cluster = if vol.fat16 {
+        None
+    } else {
+        Some(((vol.root_lba - vol.data_start) / (vol.spc * vol.bps)) as u32 + 2)
+    };
+    let offsets = dir_sector_offsets(&vol, &fat, root_cluster);
+    let (cluster, size) = delete_named_with_lfn(&mut f, &offsets, &name)?;
+    install_entry_in_dir(
+        &mut f,
+        &offsets,
+        &name,
+        cluster,
+        size,
+        0x20,
+        Some(KERNEL_LFN),
+    )
+}
+
+fn delete_named_with_lfn(
+    f: &mut std::fs::File,
+    offsets: &[u64],
+    name11: &[u8; 11],
+) -> Result<(u32, u32), String> {
+    let chk = lfn_checksum(name11);
+    let mut found = None;
+    for &off in offsets {
+        let mut sec = [0u8; 512];
+        read_at(f, off, &mut sec)?;
+        let mut dirty = false;
+        for i in 0..16 {
+            let e = &mut sec[i * 32..i * 32 + 32];
+            if e[0] == 0x00 {
+                break;
+            }
+            if e[0] == 0xE5 {
+                continue;
+            }
+            if e[11] == 0x0F && e[13] == chk {
+                e[0] = 0xE5;
+                dirty = true;
+                continue;
+            }
+            if &e[0..11] == name11 && e[11] & 0x10 == 0 {
+                let hi = u16::from_le_bytes([e[20], e[21]]) as u32;
+                let lo = u16::from_le_bytes([e[26], e[27]]) as u32;
+                let size = u32::from_le_bytes([e[28], e[29], e[30], e[31]]);
+                found = Some(((hi << 16) | lo, size));
+                e[0] = 0xE5;
+                dirty = true;
+            }
+        }
+        if dirty {
+            write_at(f, off, &sec)?;
+        }
+    }
+    found.ok_or_else(|| format!("fichero {:?} no encontrado", ascii(name11)))
+}
 
 /// Localiza el kernel en la raíz: `KERNEL~1` o el primer fichero ELF.
 pub fn find_root_kernel_name(img: &Path, part_first_lba: u64) -> Result<[u8; 11], String> {
@@ -895,6 +1031,299 @@ pub(crate) fn drop_path_cache(path: &Path) {
     }
 }
 
+/// Copia recursiva de un árbol FAT (16/32, 8.3 + subdirs) sin montar ni root.
+/// El destino debe ser FAT32 (p. ej. ESP live de 192 MiB).
+pub fn copy_fat_partition(
+    src: &Path,
+    src_lba: u64,
+    dst: &Path,
+    dst_lba: u64,
+) -> Result<(), String> {
+    let mut probe = OpenOptions::new()
+        .read(true)
+        .open(dst)
+        .map_err(|e| format!("open {}: {e}", dst.display()))?;
+    let dst_vol = read_vol(&mut probe, dst_lba)?;
+    if dst_vol.fat16 {
+        return Err("copy_fat_partition: destino FAT16 no soportado".into());
+    }
+    copy_dir_tree(src, src_lba, dst, dst_lba, &[])
+}
+
+fn copy_dir_tree(
+    src: &Path,
+    src_lba: u64,
+    dst: &Path,
+    dst_lba: u64,
+    dir_path: &[[u8; 11]],
+) -> Result<(), String> {
+    for ent in list_dir_entries(src, src_lba, dir_path)? {
+        if ent.is_dir {
+            mkdir_in_dir(dst, dst_lba, dir_path, &ent.name11)?;
+            let mut sub = dir_path.to_vec();
+            sub.push(ent.name11);
+            copy_dir_tree(src, src_lba, dst, dst_lba, &sub)?;
+        } else {
+            let data = read_in_dir(src, src_lba, dir_path, &ent.name11)?;
+            let lfn = ent.lfn.as_deref().or_else(|| kernel_lfn(&ent.name11));
+            write_in_dir(dst, dst_lba, dir_path, &ent.name11, &data, lfn)?;
+        }
+    }
+    Ok(())
+}
+
+struct DirEnt {
+    name11: [u8; 11],
+    is_dir: bool,
+    lfn: Option<String>,
+}
+
+fn list_dir_entries(
+    img: &Path,
+    part_first_lba: u64,
+    dir_path: &[[u8; 11]],
+) -> Result<Vec<DirEnt>, String> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .open(img)
+        .map_err(|e| format!("open: {e}"))?;
+    let vol = read_vol(&mut f, part_first_lba)?;
+    let fat_bytes = (vol.spf * vol.bps) as usize;
+    let mut fat = vec![0u8; fat_bytes];
+    read_at(&mut f, vol.base + vol.reserved * vol.bps, &mut fat)?;
+    let dir_cluster = resolve_dir_cluster(&mut f, &vol, &fat, dir_path)?;
+    let offsets = dir_sector_offsets(&vol, &fat, dir_cluster);
+    let mut out = Vec::new();
+    let mut pending: Vec<(u8, u8, [u16; 13])> = Vec::new();
+    for &off in &offsets {
+        let mut sec = [0u8; 512];
+        read_at(&mut f, off, &mut sec)?;
+        for i in 0..16 {
+            let e = &sec[i * 32..i * 32 + 32];
+            if e[0] == 0x00 {
+                return Ok(out);
+            }
+            if e[0] == 0xE5 {
+                pending.clear();
+                continue;
+            }
+            if e[11] == 0x0F {
+                pending.push((e[0] & 0x1F, e[13], lfn_units(e)));
+                continue;
+            }
+            if e[11] & 0x08 != 0 {
+                pending.clear();
+                continue;
+            }
+            if &e[0..8] == b".       " || &e[0..8] == b"..      " {
+                pending.clear();
+                continue;
+            }
+            let name11: [u8; 11] = e[0..11].try_into().map_err(|_| "entry name")?;
+            let lfn = take_lfn(&mut pending, &name11);
+            out.push(DirEnt {
+                name11,
+                is_dir: e[11] & 0x10 != 0,
+                lfn,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn take_lfn(pending: &mut Vec<(u8, u8, [u16; 13])>, name11: &[u8; 11]) -> Option<String> {
+    let chk = lfn_checksum(name11);
+    if pending.is_empty() || pending.iter().any(|(_, c, _)| *c != chk) {
+        pending.clear();
+        return None;
+    }
+    pending.sort_by_key(|(s, _, _)| *s);
+    let mut units = Vec::new();
+    for (_, _, ch) in pending.drain(..) {
+        for u in ch {
+            if u == 0 {
+                return Some(String::from_utf16_lossy(&units));
+            }
+            if u != 0xFFFF {
+                units.push(u);
+            }
+        }
+    }
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// `None` = raíz FAT16; `Some(c)` = raíz FAT32 o subdirectorio.
+fn resolve_dir_cluster(
+    f: &mut std::fs::File,
+    vol: &Vol,
+    fat: &[u8],
+    dir_path: &[[u8; 11]],
+) -> Result<Option<u32>, String> {
+    let mut cluster = if vol.fat16 {
+        None
+    } else {
+        Some(((vol.root_lba - vol.data_start) / (vol.spc * vol.bps)) as u32 + 2)
+    };
+    for comp in dir_path {
+        let offsets = dir_sector_offsets(vol, fat, cluster);
+        cluster = Some(
+            find_entry(f, &offsets, comp, true)?
+                .map(|(c, _)| c)
+                .ok_or_else(|| format!("directorio {:?} no encontrado", ascii(comp)))?,
+        );
+    }
+    Ok(cluster)
+}
+
+fn write_in_dir(
+    img: &Path,
+    part_first_lba: u64,
+    dir_path: &[[u8; 11]],
+    name11: &[u8; 11],
+    data: &[u8],
+    lfn: Option<&str>,
+) -> Result<(), String> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(img)
+        .map_err(|e| format!("open: {e}"))?;
+    let vol = read_vol(&mut f, part_first_lba)?;
+    let fat_bytes = (vol.spf * vol.bps) as usize;
+    let mut fat = vec![0u8; fat_bytes];
+    read_at(&mut f, vol.base + vol.reserved * vol.bps, &mut fat)?;
+
+    let dir_cluster = resolve_dir_cluster(&mut f, &vol, &fat, dir_path)?;
+    let offsets = dir_sector_offsets(&vol, &fat, dir_cluster);
+    if find_entry(&mut f, &offsets, name11, false)?.is_some() {
+        return Err(format!("fichero {:?} ya existe", ascii(name11)));
+    }
+
+    let cluster_bytes = vol.bps * vol.spc;
+    let n = clusters_needed(data.len() as u64, cluster_bytes);
+    if n == 0 {
+        return Err("fichero vacío".into());
+    }
+    let start = find_run(&vol, &fat, n).ok_or_else(|| format!("sin {n} clusters libres"))?;
+    mark_run(&vol, &mut fat, start, n);
+    write_fats(&mut f, &vol, &fat)?;
+    write_at(&mut f, cluster_off(&vol, start), data)?;
+    install_entry_in_dir(
+        &mut f,
+        &offsets,
+        name11,
+        start,
+        data.len() as u32,
+        0x20,
+        lfn.or_else(|| kernel_lfn(name11)),
+    )
+}
+
+fn mkdir_in_dir(
+    img: &Path,
+    part_first_lba: u64,
+    parent_path: &[[u8; 11]],
+    name11: &[u8; 11],
+) -> Result<(), String> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(img)
+        .map_err(|e| format!("open: {e}"))?;
+    let vol = read_vol(&mut f, part_first_lba)?;
+    let fat_bytes = (vol.spf * vol.bps) as usize;
+    let mut fat = vec![0u8; fat_bytes];
+    read_at(&mut f, vol.base + vol.reserved * vol.bps, &mut fat)?;
+
+    let parent_cluster = resolve_dir_cluster(&mut f, &vol, &fat, parent_path)?;
+    let parent_offsets = dir_sector_offsets(&vol, &fat, parent_cluster);
+    if find_entry(&mut f, &parent_offsets, name11, true)?.is_some() {
+        return Ok(());
+    }
+
+    let start = find_run(&vol, &fat, 1).ok_or_else(|| "sin cluster para directorio".to_string())?;
+    mark_run(&vol, &mut fat, start, 1);
+    write_fats(&mut f, &vol, &fat)?;
+    write_fill(
+        &mut f,
+        cluster_off(&vol, start),
+        (vol.spc * vol.bps) as usize,
+        0,
+    )?;
+
+    let dot = *b".          ";
+    let dotdot = *b"..         ";
+    let parent_num = parent_cluster.unwrap_or_else(|| {
+        ((vol.root_lba - vol.data_start) / (vol.spc * vol.bps)) as u32 + 2
+    });
+    let new_offsets = dir_sector_offsets(&vol, &fat, Some(start));
+    install_entry_in_dir(&mut f, &new_offsets, &dot, start, 0, 0x10, None)?;
+    install_entry_in_dir(&mut f, &new_offsets, &dotdot, parent_num, 0, 0x10, None)?;
+    install_entry_in_dir(
+        &mut f,
+        &parent_offsets,
+        name11,
+        start,
+        0,
+        0x10,
+        None,
+    )
+}
+
+fn install_entry_in_dir(
+    f: &mut std::fs::File,
+    sector_offsets: &[u64],
+    name11: &[u8; 11],
+    cluster: u32,
+    size: u32,
+    attr: u8,
+    lfn: Option<&str>,
+) -> Result<(), String> {
+    let lfn_ents = lfn.map(|s| encode_lfn(s, name11)).unwrap_or_default();
+    let need = lfn_ents.len() + 1;
+    let mut secs: Vec<(u64, [u8; 512])> = Vec::new();
+    for &off in sector_offsets {
+        let mut sec = [0u8; 512];
+        read_at(f, off, &mut sec)?;
+        secs.push((off, sec));
+    }
+    let nslots = secs.len() * 16;
+    let is_free = |secs: &[(u64, [u8; 512])], i: usize| {
+        let b = secs[i / 16].1[(i % 16) * 32];
+        b == 0x00 || b == 0xE5
+    };
+    let mut start = 0usize;
+    while start + need <= nslots {
+        if (0..need).all(|k| is_free(&secs, start + k)) {
+            for (k, ent) in lfn_ents.iter().enumerate() {
+                let i = start + k;
+                let eo = (i % 16) * 32;
+                secs[i / 16].1[eo..eo + 32].copy_from_slice(ent);
+            }
+            let i = start + lfn_ents.len();
+            let si = i / 16;
+            let eo = (i % 16) * 32;
+            let e = &mut secs[si].1;
+            e[eo..eo + 11].copy_from_slice(name11);
+            e[eo + 11] = attr;
+            e[eo + 12..eo + 32].fill(0);
+            e[eo + 20..eo + 22].copy_from_slice(&(cluster >> 16).to_le_bytes()[..2]);
+            e[eo + 26..eo + 28].copy_from_slice(&(cluster as u16).to_le_bytes());
+            e[eo + 28..eo + 32].copy_from_slice(&size.to_le_bytes());
+            let mut written = std::collections::BTreeSet::new();
+            for k in 0..need {
+                written.insert((start + k) / 16);
+            }
+            for si in written {
+                write_at(f, secs[si].0, &secs[si].1)?;
+            }
+            return Ok(());
+        }
+        start += 1;
+    }
+    Err(format!("directorio lleno al crear {:?}", ascii(name11)))
+}
+
 fn copy_bytes(f: &mut std::fs::File, src: u64, dst: u64, len: usize) -> Result<(), String> {
     if len == 0 || src == dst {
         return Ok(());
@@ -1052,6 +1481,7 @@ fn install_dir_entry(
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
     use std::process::Command;
 
     fn write_min_fat16(img: &mut std::fs::File) {
@@ -1106,6 +1536,48 @@ mod tests {
     }
 
     #[test]
+    fn copy_fat_partition_uefi_a_standalone() {
+        let uefi = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/soso-uefi.img");
+        if !uefi.exists() {
+            eprintln!("copy_fat_partition: sin soso-uefi.img, omito");
+            return;
+        }
+        let mkfs = ["mkfs.vfat", "/usr/sbin/mkfs.vfat"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("-V").output().is_ok());
+        let Some(mkfs) = mkfs else {
+            eprintln!("copy_fat_partition: sin mkfs.vfat, omito");
+            return;
+        };
+        let dst = std::env::temp_dir().join(format!("soso-esp-copy-{}", std::process::id()));
+        {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&dst)
+                .unwrap();
+            f.set_len(192 * 1024 * 1024).unwrap();
+        }
+        assert!(Command::new(mkfs)
+            .args(["-F", "32", "-n", "KERNEL"])
+            .arg(&dst)
+            .status()
+            .unwrap()
+            .success());
+        copy_fat_partition(&uefi, 34, &dst, 0).expect("copy ESP uefi");
+        find_root_kernel_name(&dst, 0).expect("kernel en dest");
+        ensure_kernel_lfn(&dst, 0).expect("LFN kernel-x86_64");
+        let ents = list_dir_entries(&dst, 0, &[]).unwrap();
+        assert!(
+            ents.iter()
+                .any(|e| e.lfn.as_deref() == Some("kernel-x86_64")),
+            "copy_fat_partition debe dejar LFN kernel-x86_64, no solo KERNEL~1"
+        );
+        let _ = std::fs::remove_file(&dst);
+    }
+
+    #[test]
     fn grow_root_file_relocate_contiguous() {
         let mkfs = ["mkfs.vfat", "/usr/sbin/mkfs.vfat"]
             .into_iter()
@@ -1144,6 +1616,52 @@ mod tests {
         let slot = read_root_file(&path, 0, b"SOSOKRN BIN").unwrap();
         assert_eq!(slot.len(), 128 * 1024);
         assert!(slot.iter().all(|&b| b == b'\n'));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ensure_kernel_lfn_on_8_3_only() {
+        let mkfs = ["mkfs.vfat", "/usr/sbin/mkfs.vfat"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("-V").output().is_ok());
+        let Some(mkfs) = mkfs else {
+            eprintln!("ensure_kernel_lfn: sin mkfs.vfat, omito");
+            return;
+        };
+        let path = std::env::temp_dir().join(format!("soso-fat-lfn-{}", std::process::id()));
+        {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            f.set_len(8 * 1024 * 1024).unwrap();
+        }
+        assert!(Command::new(mkfs)
+            .args(["-F", "32"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let mut small = vec![0x7f, b'E', b'L', b'F'];
+        small.resize(4096, 0xAA);
+        write_root_file(&path, 0, b"KERNEL~1", b"   ", &small).unwrap();
+        let before = list_dir_entries(&path, 0, &[]).unwrap();
+        assert!(
+            before.iter().any(|e| e.name11 == KERNEL_8_3 && e.lfn.is_none()),
+            "write_root_file no debe crear LFN"
+        );
+        ensure_kernel_lfn(&path, 0).unwrap();
+        let after = list_dir_entries(&path, 0, &[]).unwrap();
+        assert!(
+            after
+                .iter()
+                .any(|e| e.name11 == KERNEL_8_3 && e.lfn.as_deref() == Some("kernel-x86_64")),
+            "ensure_kernel_lfn debe dejar LFN kernel-x86_64"
+        );
+        let got = read_root_file(&path, 0, &KERNEL_8_3).unwrap();
+        assert_eq!(&got[..4], b"\x7fELF");
         let _ = std::fs::remove_file(&path);
     }
 }

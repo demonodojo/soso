@@ -102,21 +102,42 @@ if [[ -z "$promo_ln" || -z "$compute_ln" || "$promo_ln" -ge "$compute_ln" ]]; th
 fi
 echo "OK: promote L$promo_ln antes de compute_init L$compute_ln (r535_gr_chan_new)"
 
-# R5.3: el árbol solo trae `cla0c0qmd.h` (hasta V01_07, era Pascal), así que el
-# descriptor QMD de Ampere/Ada/Hopper no está y el driver se niega a lanzar en
-# esas familias. Si alguien añade el header que falta, esto FALLA a propósito:
-# es el recordatorio de implementar el encoder en vez de seguir rechazando.
-echo "=== R5.3: cabeceras de QMD disponibles en el árbol ==="
-qmd_hdrs=$(find "$root/lxdde/reference" -iname '*qmd*.h' | wc -l | tr -d ' ')
-qmd_vers=$(grep -ho 'QMDV[0-9][0-9]_[0-9][0-9]'     "$root/lxdde/reference/open-gpu-kernel-modules-570.144/src/common/sdk/nvidia/inc/class/cla0c0qmd.h" |
-    sort -u | tr '\n' ' ')
-if [[ "$qmd_hdrs" != 1 || "$qmd_vers" != "QMDV00_06 QMDV01_06 QMDV01_07 " ]]; then
-    echo "FALLO: han cambiado las cabeceras de QMD ($qmd_hdrs fichero(s): $qmd_vers)." >&2
-    echo "       Si ya está el QMD de Ampere, implementa su encoder y actualiza" >&2
-    echo "       gsp_family_caps (qmd_version deja de ser 0)." >&2
+# R5.3: el encoder Ampere (QMDV01_07, 256 B) está transcrito en nvrm_r570.h.
+# lxdde/reference/ es gitignored y no existe en CI; el check obligatorio va
+# contra fuentes versionadas. Si el árbol de referencia está presente, se
+# conserva el sentinel sobre cla0c0qmd.h por si aparecen cabeceras QMD nuevas.
+echo "=== R5.3: encoder QMD Ampere en el árbol versionado ==="
+nvrm="$src/nvrm_r570.h"
+compute="$src/gsp_compute.c"
+if ! grep -q 'GSP_QMD_VERSION_AMPERE' "$nvrm" ||
+   ! grep -q 'QMDV02_PROGRAM_OFFSET' "$nvrm" ||
+   ! grep -q 'GspQmdV02' "$nvrm"; then
+    echo "FALLO: nvrm_r570.h no tiene el layout QMD v01_07 de Ampere (QMDV02_*)" >&2
     exit 1
 fi
-echo "OK: cla0c0qmd.h ($qmd_vers); Ampere usa QMDV01_07 transcrito en nvrm_r570.h"
+if ! grep -q 'GSP_FAM_AMPERE.*GSP_QMD_VERSION_AMPERE' "$compute"; then
+    echo "FALLO: gsp_compute.c no declara qmd_version=GSP_QMD_VERSION_AMPERE para Ampere" >&2
+    exit 1
+fi
+if [[ -d "$root/lxdde/reference" ]]; then
+    qmd_hdrs=$(find "$root/lxdde/reference" -iname '*qmd*.h' 2>/dev/null | wc -l | tr -d ' ')
+    cla0c0="$root/lxdde/reference/open-gpu-kernel-modules-570.144/src/common/sdk/nvidia/inc/class/cla0c0qmd.h"
+    if [[ -f "$cla0c0" ]]; then
+        qmd_vers=$(grep -ho 'QMDV[0-9][0-9]_[0-9][0-9]' "$cla0c0" |
+            sort -u | tr '\n' ' ')
+        if [[ "$qmd_hdrs" != 1 || "$qmd_vers" != "QMDV00_06 QMDV01_06 QMDV01_07 " ]]; then
+            echo "FALLO: han cambiado las cabeceras de QMD en lxdde/reference ($qmd_hdrs fichero(s): $qmd_vers)." >&2
+            echo "       Si ya está el QMD de Ampere, implementa su encoder y actualiza" >&2
+            echo "       gsp_family_caps (qmd_version deja de ser 0)." >&2
+            exit 1
+        fi
+        echo "OK: encoder Ampere en nvrm_r570.h; referencia cla0c0qmd.h ($qmd_vers)"
+    else
+        echo "OK: encoder Ampere en nvrm_r570.h; lxdde/reference sin cla0c0qmd.h"
+    fi
+else
+    echo "OK: encoder Ampere en nvrm_r570.h (lxdde/reference ausente — CI)"
+fi
 
 echo "=== L6 — pasos 3 a 6 de la cadena FSP/COT + recepción de RPC ==="
 SOSO_ROOT="$root" "$out/hostcheck" "$ucode" "$boot" "$fmc"

@@ -37,7 +37,7 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask test` | Full integration: sosofs, boot, TCP, SSH, soso-llm, halt |
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
-| `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **qwen3.8-27b**; ver `docs/L5c-on-box.md`) |
+| `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **mistral-7b**; ver `docs/L5c-on-box.md`) |
 | `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa. **`--skip-models`**: solo ESP+rootfs (bucle diario); **`--only kernel|rootfs`**. **El agente no puede ejecutarlo:** sudo pide contraseña y no hay TTY; deja el comando al usuario (skill **soso-live**). |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP, imprime `SOSOLOG.TXT` y desmonta. **Pide sudo/TTY:** el agente no lo lanza; usa `udisksctl` (skill **soso-live**) |
 | `cargo xtask sosolog --drv [/dev/sdX]` | Igual con `SOSODRV.TXT` (hwscan). Mismo límite de sudo; el agente lee el fichero montando p1 con udisks |

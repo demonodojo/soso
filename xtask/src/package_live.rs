@@ -35,8 +35,13 @@ pub fn run() {
     run_with_capacity(capacity);
 }
 
-/// Empaqueta el live USB. `usb_bytes` fija el presupuesto de modelos (p. ej. tamaño del pendrive).
-pub fn run_with_capacity(usb_bytes: Option<u64>) {
+/// Empaqueta el live USB. `model_pick_bytes`: presupuesto para elegir modelo; `None` → demo default.
+pub fn run_with_capacity(model_pick_bytes: Option<u64>) {
+    run_with_capacity_measured(model_pick_bytes, model_pick_bytes);
+}
+
+/// Como [`run_with_capacity`], con tamaño real del pendrive solo para mensajes / FLASH-LIVE.txt.
+pub fn run_with_capacity_measured(model_pick_bytes: Option<u64>, measured_usb_bytes: Option<u64>) {
     let root = super::project_root();
     let _as_user = crate::as_user::as_invoking_user_for_build(&root);
     let profile = live_driver_profile();
@@ -56,7 +61,7 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
     let esp_aligned = LIVE_ESP_BYTES;
     let rootfs_aligned = (data_len + align - 1) / align * align;
 
-    let selection = resolve_live_models(&root, usb_bytes, esp_aligned, rootfs_aligned);
+    let selection = resolve_live_models(&root, model_pick_bytes, esp_aligned, rootfs_aligned);
     crate::fetch_hf::require_valid_model(&root, &selection.primary_dir);
     if let Some(tiny) = selection.tiny_dir.as_deref() {
         crate::fetch_hf::require_valid_model(&root, tiny);
@@ -204,7 +209,7 @@ pub fn run_with_capacity(usb_bytes: Option<u64>) {
         data_len,
         models_len,
         total,
-        usb_bytes,
+        measured_usb_bytes,
         &selection,
     );
     write_installer_bundle(&out_dir, total);
@@ -488,7 +493,8 @@ fn write_flash(
         .unwrap_or_default();
     let model_demo = format!(
         "Modelo demo empaquetado: `{}` (Q4_K_M). También `tiny` sintético.\n\
-         Escalera automática al flashear: tinyllama → mistral-7b → qwen3.8-27b (32 GB+).",
+         Por defecto al flashear: mistral-7b. Escalera por tamaño: SOSO_LIVE_AUTO_MODEL=1 \
+         (tinyllama → mistral-7b → qwen3.8-27b en 32 GB+) o SOSO_LIVE_CAPACITY=32G.",
         selection.llm_name
     );
     let body = format!(
@@ -702,10 +708,16 @@ fn build_live_esp_fat(uefi: &Path, fat: &Path) -> Result<(), String> {
             .arg(fat),
         "mkfs.vfat ESP",
     );
+    if let Some(src_p1) = partition_first_sector(uefi, 1) {
+        match crate::fat32_write::copy_fat_partition(uefi, src_p1, fat, 0) {
+            Ok(()) => return Ok(()),
+            Err(e) => eprintln!("package-usb-live: aviso: copy_fat_partition: {e}"),
+        }
+    }
     if copy_uefi_esp_losetup(uefi, fat) || copy_uefi_esp_mtools(uefi, fat) {
         return Ok(());
     }
-    Err("no pude copiar la ESP de soso-uefi.img (¿losetup/mtools?)".into())
+    Err("no pude copiar la ESP de soso-uefi.img".into())
 }
 
 fn copy_uefi_esp_losetup(uefi: &Path, fat: &Path) -> bool {
@@ -794,11 +806,10 @@ fn copy_uefi_esp_mtools(uefi: &Path, fat: &Path) -> bool {
     };
     let offset = src_p1 * 512;
     let src_spec = format!("{}@@{}", uefi.display(), offset);
+    let dst_spec = fat.display().to_string();
     let status = Command::new("mcopy")
         .env("MTOOLS_SKIP_CHECK", "1")
-        .args(["-s", "-n", "-i", &src_spec, "::", "-i"])
-        .arg(fat)
-        .arg("::")
+        .args(["-s", "-n", "-i", &src_spec, "::", "-i", &dst_spec, "::"])
         .status();
     status.map(|s| s.success()).unwrap_or(false)
 }
@@ -832,6 +843,9 @@ pub(crate) fn pad_live_kernel_slot(live: &Path) {
         }
         Ok(sz) => println!("package-usb-live: kernel-x86_64 {sz} B (menor que el hueco)"),
         Err(e) => eprintln!("package-usb-live: aviso: no reservé hueco de kernel: {e}"),
+    }
+    if let Err(e) = crate::fat32_write::ensure_kernel_lfn(live, p1) {
+        eprintln!("package-usb-live: aviso: LFN kernel-x86_64: {e}");
     }
 }
 
@@ -925,6 +939,7 @@ pub(crate) fn update_esp_from_uefi(uefi: &Path, dest: &Path) -> Result<(), Strin
     println!(
         "flash-usb-live: kernel-x86_64 {wrote} B → hueco {orig} B (in situ, sin dd de p1)",
     );
+    crate::fat32_write::ensure_kernel_lfn(dest, dst_p1)?;
 
     let efi_path = [*b"EFI        ", *b"BOOT       "];
     for (label, name11) in [

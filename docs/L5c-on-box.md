@@ -97,8 +97,8 @@ El disco NVMe/SSD con Linux **no se toca**.
 ./scripts/l6-pack-firmware.sh
 
 # Imagen live con perfil live-usb (nouveau + drv-gpu-nvidia + firmware Ampere y Blackwell)
-cargo xtask package-usb-live          # Qwen3.8-27B (sin medir pendrive)
-# o flashear midiendo el stick (elige el mejor modelo que quepa):
+cargo xtask package-usb-live          # mistral-7b (sin medir pendrive)
+# flashear (por defecto mistral-7b; p3 se estira al tamaño del stick):
 sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes
 
 ls -lh target/usb-live/
@@ -128,16 +128,16 @@ sudo ./scripts/l6-wifi-vfio-test.sh
 # Criterio GO: «firmware ALIVE (UCODE_ALIVE_NTFY)» — no «ALIVE degradado»
 ```
 
-**Modelo demo según tamaño del USB** (al flashear; descarga/convierte Q4_K_M si falta):
+**Modelo demo** (descarga/convierte Q4_K_M si falta):
 
-| Pendrive | Modelo |
-|----------|--------|
-| 8 GB | `tinyllama` |
-| 16 GB | `mistral-7b` |
-| 32 GB+ | `qwen3.8-27b` |
+| Comando | Modelo |
+|---------|--------|
+| `package-usb-live` / `flash-usb-live` (default) | `mistral-7b` |
+| `SOSO_LIVE_AUTO_MODEL=1 flash-usb-live …` | escalera por tamaño del stick |
+| `SOSO_LIVE_CAPACITY=32G …` | el mejor que quepa (p. ej. `qwen3.8-27b`) |
 
-Sin pendrive: `cargo xtask package-usb-live` empaqueta **qwen3.8-27b**.
-Simular otro tamaño: `SOSO_LIVE_CAPACITY=16G cargo xtask package-usb-live`.
+Con `SOSO_LIVE_AUTO_MODEL=1`, pendrive ≥32 GB → `qwen3.8-27b`; 16 GB → `mistral-7b`; 8 GB → `tinyllama`.
+Simular tamaño sin stick: `SOSO_LIVE_CAPACITY=16G cargo xtask package-usb-live`.
 Sin descargas HF: `SOSO_LIVE_OFFLINE=1` — elige el mayor modelo ya en `target/*-model/` que quepa (al flashear mide el stick).
 Override: `SOSO_MODELS_DIR=…`. En placa, `ask` o `soso-llm run <modelo> --prompt "hola" --max 32 --chat`.
 

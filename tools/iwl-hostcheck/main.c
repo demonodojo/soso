@@ -302,6 +302,15 @@ int main(int argc, char **argv)
                 fprintf(stderr, "cc-a0-77 no debe declarar CAPA_DQA_SUPPORT\n");
                 return 1;
             }
+            if (!iwl_fw_has_capa(&iwl, IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT)) {
+                fprintf(stderr, "cc-a0-77 debe declarar BINDING_CDB (39)\n");
+                return 1;
+            }
+            if (iwl_fw_has_capa(&iwl, IWL_UCODE_TLV_CAPA_CDB_SUPPORT)) {
+                fprintf(stderr, "cc-a0-77 no debe declarar CDB (40)\n");
+                return 1;
+            }
+            puts("OK: capa BINDING_CDB=39 sí, CDB=40 no (AX200)");
             ver_tx = iwl_fw_cmd_ver(&iwl, LEGACY_GROUP, TX_ANT_CONFIGURATION_CMD);
             if (ver_tx != 1) {
                 fprintf(stderr, "TX_ANT cmd_ver=%d (esperaba 1 vía DEF_ID grp=1)\n",

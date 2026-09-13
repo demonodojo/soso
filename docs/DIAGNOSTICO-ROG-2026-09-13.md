@@ -178,3 +178,72 @@ cargo xtask flash-usb-live /dev/sda --yes --only kernel
 
 Esperado tras `wifi connect`: sin `timeout … id=0x2b`; siguiente HCMD = MAC/ADD_STA;
 no AUTH timeout inmediato; ethernet `rtl_hw_start_8168h_1 ok` y enlace UP con cable.
+
+---
+
+# ROG run4 — PHY_CONTEXT LMAC CDB (13 sep 2026, flush #32)
+
+## Evidencia
+
+Lectura ESP `/dev/sda1` (`KERNEL`), kernel **0.2.2 (`3b88125cb-dirty`)**, flush **#32 @
+151769 ms**. Copias en `target/usb-diagnostic-2026-09-13/` (no al git).
+
+| Campo | Valor |
+|---|---|
+| Hardware | `10de:249c` GA107 + `8086:2723` AX200 + `10ec:8168` rtl8169 |
+| Userspace | **`sosh —`** + OTA `pid=2 write=181ms` |
+| Teclado | **`kbd sc=113 enc=56 ent=56`**; `keyboard ready on slot=3 (0x0b05:0x18c6)` |
+| GSP | `GSP_INIT_DONE`, `pool VRAM=sí`, `compute listo cls=0xc7c0` |
+| WiFi scan | `UCODE_ALIVE_NTFY`, scan `count=24` / 21 / 19 |
+| WiFi assoc | BINDING REMOVE `action=3 ok` → **`timeout cmd grp=1 id=0x08`** → `PHY_CONTEXT REMOVE ch40 falló` |
+| Ethernet | `rtl_hw_start_8168h_1 ok`; `phystatus 0x84` DOWN (sin cable) |
+
+Árboles Linux (solo lectura):
+
+| Árbol | Referencia |
+|---|---|
+| `lxdde/linux/` | **6.6.32** — `mvm/binding.c:168–173` (`iwl_mvm_get_lmac_id`), `mvm/phy-ctxt.c:300–314` |
+
+Firmware `iwlwifi-cc-a0-77.ucode`: capa **39** (BINDING_CDB) = sí, capa **40** (CDB) = no.
+
+Hostchecks: `./scripts/l6-iwl-fw-hostcheck.sh` OK (incl. `cdb_lmac_test`).
+
+## Tabla de etapas (run4)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Userspace | `sosh —`, OTA ok | **OK** |
+| Teclado USB 18c6 | `kbd sc=113`, SET_PROTOCOL Boot | **OK** |
+| GSP / RPC | `GSP_INIT_DONE`, pool VRAM, compute | **OK** |
+| WiFi scan | `scan fin count=24` | **OK** |
+| WiFi assoc | `timeout … id=0x08` tras BINDING REMOVE | **FAIL** |
+| Ethernet | `phystatus 0x84` DOWN | **FAIL** (sin cable) |
+
+## Hallazgo confirmado
+
+**soso** [`phy_lmac_id`](lxdde/ports/iwlwifi/iwl_mvm_up.c) usaba
+`IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT` (39) → LMAC 1 en 5 GHz.
+
+**Linux** [`iwl_mvm_get_lmac_id`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/mvm/binding.c)
+(`binding.c:168–173`) exige `IWL_UCODE_TLV_CAPA_CDB_SUPPORT` (40). AX200 cc-a0-77
+no lo declara → LMAC 0 también en 5 GHz.
+
+El REMOVE de PHY ch40 con `lmac_id=1` no alcanza el contexto creado en ch6 con
+LMAC 0 → timeout y `MVM parado`.
+
+## Orden de corrección (implementado)
+
+1. **`phy_lmac_id`:** LMAC 5 GHz solo con capa **40** (CDB), no 39 (BINDING_CDB).
+   BINDING_CDB (39) sigue gobernando payload CDB y REMOVE+ADD de banda.
+2. **Hostcheck `cdb_lmac_test.c`:** bits 39/40 en cc-a0-77; assoc ch6→ch40 con
+   `lmac_id=0` en BINDING/PHY REMOVE+ADD.
+3. **Este informe + `hw-matrix.json`** (run4; assoc `fail` id=0x08 hasta validar fix).
+
+## Validación en placa (usuario)
+
+```bash
+cargo xtask flash-usb-live /dev/sda --yes --only kernel
+```
+
+Esperado tras `wifi connect Rutilo`: sin `timeout … id=0x08`; siguiente HCMD =
+MAC_CONTEXT / ADD_STA / AUTH TX.

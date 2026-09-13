@@ -8,11 +8,6 @@
 #include "iwl_internal.h"
 #include "iwl_ax211.h"
 
-#define FW_CTXT_ID_POS             0
-#define FW_CTXT_COLOR_POS          8
-#define FW_CMD_ID_AND_COLOR(id, color) \
-    (((uint32_t)(id) << FW_CTXT_ID_POS) | ((uint32_t)(color) << FW_CTXT_COLOR_POS))
-#define FW_CTXT_ACTION_ADD         1
 #define MAC_CONTEXT_CMD            0x28
 
 struct cmd_rec {

@@ -226,7 +226,7 @@ Tests: `cargo xtask test-usb` (4 escenarios en paralelo).
 ## Comandos host
 
 ```bash
-cargo xtask package-usb-live              # qwen3.8-27b demo (sin medir stick)
+cargo xtask package-usb-live              # mistral-7b demo (sin medir stick)
 cargo xtask flash-usb-live /dev/sdX --yes # mide, elige GGUF, dd, estira p3
 SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 # incremental (pendrive ya flasheado; no toca p3 modelos):

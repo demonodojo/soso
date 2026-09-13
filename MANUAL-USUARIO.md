@@ -1597,7 +1597,7 @@ cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor
 # Sin descargas: el mayor ya materializado que quepa en el stick:
 # sudo env SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 
-# Sin pendrive conectado (qwen3.8-27b) o simular capacidad:
+# Sin pendrive conectado (mistral-7b) o simular capacidad:
 cargo xtask package-usb-live
 SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
 

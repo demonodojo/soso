@@ -183,7 +183,14 @@ fn prepare_full(usb: &Path) {
     );
 
     super::build_user();
-    package_live::run_with_capacity(Some(disk_bytes));
+    let model_pick = crate::live_models::model_pick_bytes_for_flash(disk_bytes);
+    if model_pick.is_none() {
+        println!(
+            "flash-usb-live: modelo demo {} (escalado por USB: SOSO_LIVE_AUTO_MODEL=1 o SOSO_LIVE_CAPACITY=…)",
+            crate::live_models::default_live_spec().name
+        );
+    }
+    package_live::run_with_capacity_measured(model_pick, Some(disk_bytes));
 }
 
 fn write_full(usb: &Path) {
@@ -338,22 +345,45 @@ fn blockdev_sectors(dev: &Path) -> Option<u64> {
         .ok()
 }
 
+fn parse_first_u64(stdout: &str) -> Option<u64> {
+    stdout.lines().find_map(|l| {
+        let t = l.trim();
+        if t.is_empty() {
+            None
+        } else {
+            t.parse().ok()
+        }
+    })
+}
+
+fn sysfs_block_bytes(dev: &Path) -> Option<u64> {
+    let name = dev.file_name()?.to_str()?;
+    let sectors: u64 = std::fs::read_to_string(format!("/sys/block/{name}/size"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(sectors.saturating_mul(512))
+}
+
 fn blockdev_bytes(dev: &Path) -> Option<u64> {
     if let Some(s) = blockdev_sectors(dev) {
         return Some(s.saturating_mul(512));
     }
+    // `-d`: solo el disco; sin eso SIZE incluye particiones y no parsea.
     let out = Command::new("lsblk")
-        .args(["-bno", "SIZE"])
+        .args(["-bdno", "SIZE"])
         .arg(dev)
         .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+        .ok();
+    if let Some(out) = out {
+        if out.status.success() {
+            if let Some(n) = parse_first_u64(&String::from_utf8_lossy(&out.stdout)) {
+                return Some(n);
+            }
+        }
     }
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse()
-        .ok()
+    sysfs_block_bytes(dev)
 }
 
 fn print_flash_summary(usb: &Path, out_dir: &Path) {
@@ -644,6 +674,14 @@ mod tests {
         assert!(kern[32 * 1024..].iter().all(|&b| b == 0), "hueco no rellenado");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_first_u64_toma_disco_no_particiones() {
+        let lsblk = "536870912000\n   201326592\n   402653184\n536199789056\n    67108864\n";
+        assert_eq!(parse_first_u64(lsblk), Some(536870912000));
+        assert_eq!(parse_first_u64("536870912000\n"), Some(536870912000));
+        assert_eq!(parse_first_u64(""), None);
     }
 
     #[test]
