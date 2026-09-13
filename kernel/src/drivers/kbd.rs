@@ -656,8 +656,8 @@ pub fn init() {
         route_irq1();
         #[cfg(feature = "drv-usb")]
         {
-            let n = crate::drivers::usb_storage::usb_keyboard_count();
-            if n > 0 {
+            if crate::drivers::usb_storage::has_usb_keyboard() {
+                let n = crate::drivers::usb_storage::usb_keyboard_count();
                 println!("kbd: usb hid activo ({n})");
             }
         }
@@ -680,8 +680,8 @@ pub fn init() {
     println!("kbd: ps2 listo");
     #[cfg(feature = "drv-usb")]
     {
-        let n = crate::drivers::usb_storage::usb_keyboard_count();
-        if n > 0 {
+        if crate::drivers::usb_storage::has_usb_keyboard() {
+            let n = crate::drivers::usb_storage::usb_keyboard_count();
             println!("kbd: usb hid activo ({n})");
         }
     }

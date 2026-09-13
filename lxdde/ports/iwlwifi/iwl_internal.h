@@ -403,7 +403,8 @@ struct iwl_tx_cmd_gen3 {
 
 #define IWL_STA_LINK               0u
 #define IWL_STA_GENERAL_PURPOSE    1u
-#define IWL_MVM_AP_STA_ID          1u
+/* Linux mvm/sta.c: el AP de un vif STA ocupa sta_id 0. ADD_STA v12 no crea aux. */
+#define IWL_MVM_AP_STA_ID          0u
 
 #define STA_FLG_CLASS_AUTH         (1u << 14)
 #define STA_FLG_CLASS_ASSOC        (1u << 15)

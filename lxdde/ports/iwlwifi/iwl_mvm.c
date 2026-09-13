@@ -21,13 +21,6 @@ static const struct {
     {149, PHY_BAND_5}, {153, PHY_BAND_5}, {157, PHY_BAND_5}, {161, PHY_BAND_5},
 };
 
-static uint8_t iwl_mvm_phy_band_from_channel(uint8_t num)
-{
-    if (num >= 36 && num <= 196)
-        return PHY_BAND_5;
-    return PHY_BAND_24;
-}
-
 /* iwl-nvm-parse.c — orden de índices NVM → número de canal. */
 static const uint8_t iwl_nvm_channels_legacy[] = {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,

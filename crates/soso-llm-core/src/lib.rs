@@ -31,6 +31,7 @@ pub use asr::{AsrPhase, AsrProfile, AsrTokenProfile};
 pub use sched::{CostModel, Dest, OpDesc, OpSched};
 pub use attn::{prompt_lookup_draft, prompt_lookup_draft_hinted};
 pub use kv::{KvDtype, LayerKv};
+pub use layer::{clear_infer_op, last_infer_op, note_infer_op};
 pub use plan::{
     classify_weight_bytes, compute_trunk_first_split, is_shared_expert_tensor,
     shared_expert_shard_names, ExecDest, MemoryPlanConfig, MemoryPreset,

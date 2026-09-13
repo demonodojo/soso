@@ -113,7 +113,6 @@ struct TxDesc {
 struct Nic {
     mmio: u64,
     mac: [u8; 6],
-    device_id: u16,
     qemu: bool,
     link_up: bool,
     rx_phys: dma::PhysAddr,
@@ -384,7 +383,6 @@ pub fn init() -> Option<[u8; 6]> {
     let nic = Nic {
         mmio: bar,
         mac,
-        device_id: dev.device_id,
         qemu,
         link_up: qemu || link_up,
         rx_phys,

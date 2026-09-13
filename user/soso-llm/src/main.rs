@@ -1063,13 +1063,24 @@ pub(crate) fn generar_tokens(
             0
         }
         Err(()) => {
-            if fd_out.is_none() {
-                println!("soso-llm: inferencia falló");
+            let (layer, key) = soso_llm_core::last_infer_op();
+            let gpu_fail = sesion.sys_gpu.as_ref().and_then(|g| g.last_fail());
+            let mut msg = String::from("soso-llm: inferencia falló");
+            if let Some(l) = layer {
+                msg.push_str(&format!(" capa {l}"));
             }
-            if verboso {
-                if let Some(ref g) = sesion.sys_gpu {
-                    g.print_diagnostics();
-                }
+            if !key.is_empty() {
+                msg.push_str(&format!(" tensor {key}"));
+            }
+            if let Some(r) = gpu_fail {
+                msg.push_str(&format!(" gpu={r}"));
+            }
+            println!("{msg}");
+            if let Some(fd) = fd_out {
+                emitir_ask(fd, &format!("{msg}\n"));
+            }
+            if let Some(ref g) = sesion.sys_gpu {
+                g.print_diagnostics();
             }
             1
         }

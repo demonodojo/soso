@@ -156,17 +156,17 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "3b88125cb",
-        "commit_corto": "3b88125cb",
+        "commit": "7483ccd71",
+        "commit_corto": "7483ccd71",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "13-sep run4 flush #32 @151769ms: teclado OK (18c6 kbd sc=113); assoc fail PHY id=0x08; fix CDB lmac_id; DIAGNOSTICO-ROG-2026-09-13.md"
+        "cambios_locales": "13-sep run5 flush #35 @290181ms: teclado OK; PHY ch3 ok; ADD_STA timeout id=0x18; ask generar rc=1; DIAGNOSTICO-ROG-2026-09-13.md"
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 15,
       "sesion_sostenida": {
         "status": "pendiente",
-        "nota": "run4: sosh sí; teclado OK; assoc fail id=0x08; sin lease DHCP",
+        "nota": "run5: sosh sí; teclado OK; assoc ADD_STA timeout; ask generar rc=1; sin lease DHCP",
         "fecha": "2026-09-13"
       },
       "wifi": {
@@ -187,12 +187,12 @@
         },
         "scan": {
           "status": "ok",
-          "nota": "SCAN_REQ v15 → scan fin count=24 (run4)",
+          "nota": "SCAN_REQ v15 → scan fin count=21 (run5)",
           "fecha": "2026-09-13"
         },
         "assoc_wpa2": {
           "status": "fail",
-          "nota": "run4: BINDING REMOVE ok → timeout PHY_CONTEXT id=0x08 ch40; fix lmac CDB=40 en código",
+          "nota": "run5: PHY_CONTEXT ch3 action=2 ok → timeout ADD_STA id=0x18 slot=18; MVM parado",
           "fecha": "2026-09-13"
         },
         "dhcp": {
@@ -209,33 +209,38 @@
       "gpu": {
         "gsp_rpc": {
           "status": "ok",
-          "nota": "GSP_INIT_DONE (run4)",
+          "nota": "GSP_INIT_DONE",
           "fecha": "2026-09-13"
         },
         "vram_pool": {
           "status": "ok",
-          "nota": "pool VRAM=sí (run4)",
           "fecha": "2026-09-13"
         },
         "ce_readback": {
           "status": "ok",
-          "nota": "CE readback verificado (run4)",
+          "nota": "CE readback verificado (run5)",
           "fecha": "2026-09-13"
         },
         "compute_cpu_gpu": {
           "status": "ok",
-          "nota": "compute listo cls=0xc7c0",
+          "nota": "compute listo cls=0xc7c0 sm_86",
           "fecha": "2026-09-13"
         },
         "carga_real": {
-          "status": "pendiente"
+          "status": "fail",
+          "nota": "ask mistral-7b: generar rc=1 tras doorbell CE motor 11; sin QMD timeout ni offload-killed",
+          "fecha": "2026-09-13"
         },
         "apagado_limpio": {
-          "status": "pendiente"
+          "status": "ok",
+          "nota": "GSP-RM apagado (objetos=ok unload=ok halt=ok dma=off)",
+          "fecha": "2026-09-13"
         }
       },
       "bench": {},
       "logs": [
+        "target/usb-diagnostic-2026-09-13-run5/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-13-run5/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-13/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-13/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-13-run3/SOSOLOG.txt",
@@ -2896,9 +2901,112 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-09-13"
+        },
+        {
+          "log_hash": "4e0abcb0b214d429038943fe69a04dc491e6cc436a1e90be6e5c00b1792cdd9b",
+          "kernel": "soso 0.2.2 (7483ccd71-dirty)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "048d:1234",
+            "0b05:18c6"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-09-13"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-09-13"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-09-13"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "fin normal",
+              "fecha": "2026-09-13"
+            },
+            "assoc_wpa2": {
+              "status": "pendiente"
+            },
+            "dhcp": {
+              "status": "pendiente"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-09-13"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-09-13"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-09-13"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "ok",
+              "nota": "unload/halt/dma",
+              "fecha": "2026-09-13"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-09-13"
         }
       ],
-      "notas": "13-sep run4 flush #32 @151769ms: teclado OK (0b05:18c6 kbd sc=113); GSP/CE/compute ok; scan 24; assoc fail timeout id=0x08 (PHY lmac_id); fix CDB=40 en código. docs/DIAGNOSTICO-ROG-2026-09-13.md",
+      "notas": "run5 kernel 7483ccd71-dirty flush #35 @290s: GSP/CE/compute OK; ask generar rc=1; teclado OK; docs/DIAGNOSTICO-ROG-2026-09-13.md",
       "actualizado": "2026-09-13"
     },
     {
@@ -2988,17 +3096,17 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "3b88125cb",
-        "commit_corto": "3b88125cb",
+        "commit": "7483ccd71",
+        "commit_corto": "7483ccd71",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "13-sep run4 flush #32 @151769ms: scan 24; assoc fail id=0x08; fix CDB lmac_id; DIAGNOSTICO-ROG-2026-09-13.md"
+        "cambios_locales": "13-sep run5 flush #35 @290181ms: scan 21; PHY ch3 ok; ADD_STA timeout id=0x18; DIAGNOSTICO-ROG-2026-09-13.md"
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 16,
       "sesion_sostenida": {
         "status": "pendiente",
-        "nota": "run4: sosh sí; teclado OK; assoc fail id=0x08; sin lease DHCP; no racha",
+        "nota": "run5: sosh sí; assoc ADD_STA timeout; sin lease DHCP; no racha",
         "fecha": "2026-09-13"
       },
       "wifi": {
@@ -3019,12 +3127,12 @@
         },
         "scan": {
           "status": "ok",
-          "nota": "SCAN_REQ v15 → scan fin count=24 (run4)",
+          "nota": "SCAN_REQ v15 → scan fin count=21 (run5)",
           "fecha": "2026-09-13"
         },
         "assoc_wpa2": {
           "status": "fail",
-          "nota": "run4: BINDING REMOVE ok → timeout PHY_CONTEXT id=0x08 ch40; fix lmac CDB=40 en código",
+          "nota": "run5: PHY_CONTEXT ch3 action=2 ok → timeout ADD_STA id=0x18 slot=18; MVM parado",
           "fecha": "2026-09-13"
         },
         "dhcp": {
@@ -3060,11 +3168,15 @@
           "status": "pendiente"
         },
         "apagado_limpio": {
-          "status": "pendiente"
+          "status": "ok",
+          "nota": "GSP-RM apagado (unload/halt/dma)",
+          "fecha": "2026-09-13"
         }
       },
       "bench": {},
       "logs": [
+        "target/usb-diagnostic-2026-09-13-run5/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-13-run5/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-13/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-13/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-13-run3/SOSOLOG.txt",
@@ -5264,9 +5376,112 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-09-13"
+        },
+        {
+          "log_hash": "4e0abcb0b214d429038943fe69a04dc491e6cc436a1e90be6e5c00b1792cdd9b",
+          "kernel": "soso 0.2.2 (7483ccd71-dirty)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "048d:1234",
+            "0b05:18c6"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-09-13"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-09-13"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-09-13"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "fin normal",
+              "fecha": "2026-09-13"
+            },
+            "assoc_wpa2": {
+              "status": "pendiente"
+            },
+            "dhcp": {
+              "status": "pendiente"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-09-13"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-09-13"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-09-13"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "ok",
+              "nota": "unload/halt/dma",
+              "fecha": "2026-09-13"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-09-13"
         }
       ],
-      "notas": "13-sep run4 flush #32 @151769ms: UCODE_ALIVE + scan count=24; teclado OK (18c6); assoc fail timeout id=0x08 (PHY lmac_id BINDING_CDB≠CDB); fix en código. docs/DIAGNOSTICO-ROG-2026-09-13.md",
+      "notas": "run5 kernel 7483ccd71-dirty: ALIVE+scan 21; ADD_STA timeout id=0x18; docs/DIAGNOSTICO-ROG-2026-09-13.md",
       "actualizado": "2026-09-13"
     },
     {

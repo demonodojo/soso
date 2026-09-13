@@ -148,7 +148,10 @@ pub fn try_gpu_matvec(
     if view.elems != rows * cols {
         return Ok(false);
     }
-    gpu.matvec(key, view, rows, cols, x, out)
+    match gpu.matvec(key, view, rows, cols, x, out) {
+        Ok(v) => Ok(v),
+        Err(()) => Ok(false),
+    }
 }
 
 /// Intenta matmul batched; `true` si el resultado ya está en `out`.
@@ -171,5 +174,8 @@ pub fn try_gpu_matmul(
     if view.elems != rows * cols || x.len() != cols * n || out.len() != rows * n {
         return Ok(false);
     }
-    gpu.matmul(key, view, rows, cols, n, x, out)
+    match gpu.matmul(key, view, rows, cols, n, x, out) {
+        Ok(v) => Ok(v),
+        Err(()) => Ok(false),
+    }
 }

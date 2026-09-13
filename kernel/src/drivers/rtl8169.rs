@@ -567,7 +567,6 @@ fn rtl_hw_start_8168h_1(nic: &mut Nic, bus: u8, dev: u8, func: u8) {
 }
 
 const RTL_FW_OPCODE_SIZE: usize = 4;
-const RTL_VER_SIZE: usize = 32;
 
 const PHY_FW_READ: u32 = 0x0;
 const PHY_FW_DATA_OR: u32 = 0x1;

@@ -148,6 +148,10 @@ fn four_way_handshake(_ssid: &str, pmk: &[u8; 32]) -> i32 {
             if !verify_eapol_mic(&ptk, &mut m3v[..ml]) {
                 continue;
             }
+            let m3_info = u16::from_be_bytes([m3v[5], m3v[6]]);
+            if m3_info & WPA_KEY_INFO_INSTALL == 0 {
+                continue;
+            }
             let mut gtk = [0u8; 16];
             if extract_gtk(&m3v[..ml], &mut gtk).is_err() {
                 gtk.fill(0);

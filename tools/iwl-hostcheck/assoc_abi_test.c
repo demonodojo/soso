@@ -329,10 +329,26 @@ int main(void)
         fprintf(stderr, "ADD_STA tid_disable_tx=0x%04x\n", sta->tid_disable_tx);
         return 1;
     }
-    if ((sta->station_flags & iwl_cpu_to_le32(STA_FLG_CLASS_AUTH | STA_FLG_CLASS_ASSOC)) !=
-        iwl_cpu_to_le32(STA_FLG_CLASS_AUTH | STA_FLG_CLASS_ASSOC)) {
-        fprintf(stderr, "ADD_STA station_flags=0x%08x sin CLASS_AUTH|ASSOC\n",
+    if ((sta->station_flags & iwl_cpu_to_le32(STA_FLG_CLASS_AUTH | STA_FLG_CLASS_ASSOC)) != 0) {
+        fprintf(stderr, "ADD_STA station_flags=0x%08x con CLASS_AUTH|ASSOC (Linux no los pone)\n",
                 sta->station_flags);
+        return 1;
+    }
+    if ((sta->station_flags_msk & iwl_cpu_to_le32(STA_FLG_CLASS_AUTH | STA_FLG_CLASS_ASSOC)) != 0) {
+        fprintf(stderr, "ADD_STA station_flags_msk=0x%08x con CLASS_AUTH|ASSOC\n",
+                sta->station_flags_msk);
+        return 1;
+    }
+    if ((sta->station_flags & iwl_cpu_to_le32(STA_FLG_FAT_EN_MSK)) !=
+        iwl_cpu_to_le32(STA_FLG_FAT_EN_20MHZ)) {
+        fprintf(stderr, "ADD_STA station_flags=0x%08x FAT no es 20 MHz\n",
+                sta->station_flags);
+        return 1;
+    }
+    if ((sta->station_flags_msk & iwl_cpu_to_le32(STA_FLG_FAT_EN_MSK | STA_FLG_MIMO_EN_MSK)) !=
+        iwl_cpu_to_le32(STA_FLG_FAT_EN_MSK | STA_FLG_MIMO_EN_MSK)) {
+        fprintf(stderr, "ADD_STA station_flags_msk=0x%08x sin FAT|MIMO\n",
+                sta->station_flags_msk);
         return 1;
     }
 

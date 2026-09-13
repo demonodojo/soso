@@ -426,7 +426,7 @@ fn rastro_de_pila(rsp: u64) {
     }
     // El kernel lo carga el bootloader en una base alineada a 4 GiB; el
     // símbolo de esta misma función la delata sin depender del enlazador.
-    let base = (rastro_de_pila as usize as u64) & !0xffff_ffffu64;
+    let base = (rastro_de_pila as *const () as usize as u64) & !0xffff_ffffu64;
     let tope = base.saturating_add(0x4000_0000);
     crate::println!("rastro: base={base:#x}");
     let mut p = rsp;

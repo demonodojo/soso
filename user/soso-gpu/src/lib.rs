@@ -593,7 +593,7 @@ impl GpuDispatch for SysGpu {
         }
         if view.elems != rows * cols || x.len() != cols || out.len() != rows {
             self.note_fail("dimensiones matvec");
-            return Err(());
+            return Ok(false);
         }
         // Que no quepa NO es un error: devolver Err aquí abortaría la inferencia
         // entera en vez de calcular esa capa en CPU, que es lo que hay que hacer
@@ -676,7 +676,8 @@ impl GpuDispatch for SysGpu {
             return Ok(false);
         }
         if view.elems != rows * cols || x.len() != cols * n || out.len() != rows * n {
-            return Err(());
+            self.note_fail("dimensiones matmul");
+            return Ok(false);
         }
         let Ok((w_handle, fmt)) = self.resident_weights(key, view, rows * cols, cols) else {
             return Ok(false);

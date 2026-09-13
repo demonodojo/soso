@@ -401,6 +401,10 @@ pub fn print_hwscan() {
     for nic in nics_sin_driver() {
         println!("hwscan: RED SIN DRIVER {nic}");
     }
+    println!(
+        "hwscan: iommu {}",
+        crate::arch::iommu::estado().texto()
+    );
 }
 
 /// ¿Falta algún driver compilado para el hardware presente?

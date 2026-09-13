@@ -13,8 +13,6 @@ use xmas_elf::program::Type;
 struct LoadPh {
     vaddr: u64,
     memsz: u64,
-    filesz: u64,
-    offset: u64,
     #[allow(dead_code)]
     write: bool,
     exec: bool,
@@ -78,8 +76,6 @@ fn collect_load_phs(elf: &ElfFile<'_>, file_limit: u64) -> Result<alloc::vec::Ve
             out.push(LoadPh {
                 vaddr,
                 memsz,
-                filesz,
-                offset,
                 write: ph.flags().is_write(),
                 exec: ph.flags().is_execute(),
             });

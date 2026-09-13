@@ -2,7 +2,10 @@
 
 use crate::gemm::rmsnorm;
 use crate::kv::LayerKv;
-use crate::layer::{matvec_view_par, LayerExecutor, LayerScratch, TensorSource, TensorView};
+use crate::layer::{
+    clear_infer_op, matvec_view_par, note_infer_op, LayerExecutor, LayerScratch, TensorSource,
+    TensorView,
+};
 use crate::parallel::{RowParallel, Sequential};
 use crate::plan::{ExecDest, ResourcePlanner};
 use crate::tier::TierManager;
@@ -326,8 +329,10 @@ impl Runtime {
     pub fn embed_token(&mut self, token: u32, source: &mut impl TensorSource) -> Result<(), ()> {
         let h = self.manifest.hidden_dim as usize;
         if token >= self.manifest.vocab_size {
+            note_infer_op(None, "embed");
             return Err(());
         }
+        note_infer_op(None, "embed");
         source.load_f32_range("embed", token as usize * h, &mut self.hidden)
     }
 
@@ -515,6 +520,7 @@ impl Runtime {
             if let Some(pl) = self.planner.as_mut() {
                 pl.note_trunk_layer(layer, &self.index);
             }
+            note_infer_op(Some(layer), "");
             let t0 = clock_ms.map(|c| c());
             let timing = exec.forward_layer(
                 layer,
@@ -604,6 +610,7 @@ impl Runtime {
         let h = self.manifest.hidden_dim as usize;
         let vocab = self.manifest.vocab_size as usize;
         let name = if self.has_lm_head { "lm_head" } else { "embed" };
+        note_infer_op(None, name);
 
         // norma final (si el modelo la trae) sobre una copia del hidden
         self.scratch.attn_out.copy_from_slice(&self.hidden);
@@ -632,6 +639,7 @@ impl Runtime {
         let h = self.manifest.hidden_dim as usize;
         let vocab = self.manifest.vocab_size as usize;
         let name = if self.has_lm_head { "lm_head" } else { "embed" };
+        note_infer_op(None, name);
         self.scratch.attn_out.copy_from_slice(&self.hidden);
         if self.has_output_norm {
             source.load_f32("output_norm", &mut self.scratch.norm_w)?;
@@ -698,7 +706,9 @@ impl Runtime {
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         on_prefill: &mut dyn FnMut(usize, usize),
     ) -> Result<Vec<u32>, ()> {
+        clear_infer_op();
         if prompt.is_empty() {
+            note_infer_op(None, "prompt vacío");
             return Err(());
         }
         self.reset_sequence();
@@ -764,7 +774,9 @@ impl Runtime {
         clock_ms: fn() -> u64,
         mut refresh_mem: impl FnMut() -> crate::plan::MemSnapshot,
     ) -> Result<Vec<u32>, ()> {
+        clear_infer_op();
         if prompt.is_empty() {
+            note_infer_op(None, "prompt vacío");
             return Err(());
         }
         self.reset_sequence();

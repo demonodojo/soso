@@ -247,3 +247,139 @@ cargo xtask flash-usb-live /dev/sda --yes --only kernel
 
 Esperado tras `wifi connect Rutilo`: sin `timeout … id=0x08`; siguiente HCMD =
 MAC_CONTEXT / ADD_STA / AUTH TX.
+
+---
+
+# ROG run5 — ADD_STA y `ask` (13 sep 2026, ~17:30)
+
+## Evidencia y alcance
+
+Lectura ESP `/dev/sda1` (`KERNEL`) con `udisksctl`. Copias en
+`target/usb-diagnostic-2026-09-13/` y `target/usb-diagnostic-2026-09-13-run5/`
+(no al git). Consola de la foto cruzada con el SOSOLOG (el PSK de
+`wifi connect` no se copia aquí).
+
+| Campo | Valor |
+|---|---|
+| Kernel USB | **0.2.2 (`7483ccd71-dirty`)** (`SOSOHASH` 13-sep 15:18) |
+| Hardware | `10de:249c` GA107 + `8086:2723` AX200 + `10ec:8168` rtl8169 |
+| Userspace | **`sosh —`** + OTA `pid=2 write=182ms` |
+| Teclado | **`kbd sc=127 enc=63 ent=63`**; `keyboard ready on slot=2 (0x0b05:0x18c6)` + `SET_PROTOCOL(Boot)` |
+| GPU bring-up | `GSP_INIT_DONE`, `pool VRAM=sí`, CE readback, `compute listo cls=0xc7c0` sm_86 |
+| WiFi scan | `UCODE_ALIVE_NTFY`, `INIT_COMPLETE`, `SCAN_CFG v5` `add_sta_ver=12`, scan `count=21` |
+| WiFi assoc | PHY ch3 **ok** → MAC `id=0x28` ok → **`timeout cmd grp=1 id=0x18`** (`ADD_STA`) |
+| `ask hola` | mistral-7b **listo** → `generar rc=1` (doorbell CE motor 11; no es el fallo) |
+| Halt | `GSP-RM apagado (objetos=ok unload=ok halt=ok dma=off)` |
+| SOSOWIFI | vacío (credenciales por sosh) |
+
+Árboles Linux (solo lectura):
+
+| Árbol | Referencia |
+|---|---|
+| `lxdde/linux/` | **6.6.32** — `mvm/sta.c:128–157` (`iwl_mvm_sta_send_to_fw`), `fw/api/sta.h:18–64`, `mvm/fw.c:1781–1793` |
+| `lxdde/reference/linux-master-nouveau/` | `fc02acf` (doorbell/CE; no causal de `ask`) |
+| `lxdde/reference/open-gpu-kernel-modules-570.144/` | tag **570.144** |
+
+Hostchecks (no validan ADD_STA en silicio ni `ask` en placa): `l6-iwl-fw-hostcheck.sh` OK
+(incl. `assoc_abi_test` y `cdb_lmac_test`), `l6-g3-gsp-hostcheck.sh` OK.
+
+Fix CDB LMAC del run4 **validado**: ya no hay `timeout … id=0x08`.
+
+## Tabla de etapas (run5 = flush #35 @ 290181 ms)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Userspace | `sosh —`, OTA `pid=2 write=182ms` | **OK** |
+| Teclado USB 18c6 | `kbd sc=127 enc=63 ent=63`, SET_PROTOCOL Boot slot=2 | **OK** |
+| GSP / RPC | `GSP_INIT_DONE`, `pool VRAM=sí` | **OK** |
+| CE / compute | `CE readback verificado`, `compute listo cls=0xc7c0` | **OK** (bring-up) |
+| `ask` mistral-7b | `mistral-7b listo` → `askd: generar rc=1` | **FAIL** |
+| GSP fini | `GSP-RM apagado (… dma=off)` | **OK** |
+| WiFi scan | `scan fin count=21` | **OK** |
+| WiFi assoc | `timeout … id=0x18` (`ADD_STA`) | **FAIL** |
+| Ethernet | `rtl_hw_start_8168h_1 ok`; `phystatus 0x84` DOWN | **FAIL** (sin cable) |
+| DHCP | `net: dhcp…` sin lease | **pendiente** |
+
+## Hallazgos
+
+### WIFI-1. CDB LMAC del run4 ya no bloquea (confirmado, cerrado)
+
+**Evidencia:** `PHY_CONTEXT ch3 band=1 action=2 ok` y RX `grp=1 id=0x08 seq=0x0010`.
+El timeout pasó de PHY `id=0x08` (run4) a ADD_STA `id=0x18`.
+
+### WIFI-2. `ADD_STA` pone `CLASS_AUTH|ASSOC` en el ADD, Linux no (confirmado)
+
+**Síntoma:** `timeout cmd grp=1 id=0x18 slot=18; MVM parado` → `ADD_STA falló`.
+MAC_CONTEXT (`id=0x28`) acababa de responder. El firmware no contesta el HCMD.
+
+**soso** [`iwl_mvm_add_sta_ap`](lxdde/ports/iwlwifi/iwl_mvm_assoc.c) (`iwl_mvm_assoc.c:150–169`):
+`station_flags` = `STA_FLG_FAT_EN_40MHZ | MIMO_SISO | CLASS_AUTH | CLASS_ASSOC`
+con la máscara incluyendo AUTH+ASSOC; `sta_id=1`; payload 48 B (v12).
+
+**Linux** [`iwl_mvm_sta_send_to_fw`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/mvm/sta.c)
+(`sta.c:128–157`):
+`station_flags_msk` = `FAT_EN | MIMO_EN | RTS_MIMO_PROT` **sin** CLASS.
+`STA_FLG_CLASS_AUTH` / `ASSOC` (`sta.h:18–19`, `sta.h:63–64`) significan
+«la estación **ya** está autenticada/asociada». En 6.6.32 **ningún** `.c` de
+iwlwifi las escribe en el ADD. El AP de un vif STA recibe `sta_id=0`
+(`sta.c:37–40`); FAT 40 MHz solo si el STA declara ≥40 MHz (`sta.c:162–177`).
+
+Compatible con el síntoma: el FW puede ignorar o no completar un ADD con
+CLASS_ASSOC antes del 4-way. El hostcheck `assoc_abi_test.c` **exige** hoy esas
+flags: hay que alinearlo a Linux al quitarlas.
+
+### WIFI-3. `sta_id=1` y FAT 40 MHz fijos (hipótesis, secundario)
+
+Linux reserva el AP en **sta_id 0**. soso usa `IWL_MVM_AP_STA_ID=1`.
+`SCAN_CFG v5 bcast=0 add_sta_ver=12` (SOSOLOG) coincide con Linux
+(`fw.c:1781–1793`: con API v12 **no** se añade aux STA). FAT_EN_40MHZ en un BSS
+2.4 GHz canal 3 (20 MHz típico) no lo pone Linux.
+
+No basta para explicar el timeout por sí solo; se corrige con WIFI-2.
+
+### ASK-1. `ask: error` no es el doorbell nouveau (confirmado)
+
+**Foto y SOSOLOG:** `askd: mistral-7b listo` → `generando (11 tokens… máx 128)` →
+`canal (doorbell): runlist del motor 11 — PTOP … 0xc00400 (coinciden)` →
+`askd: generar rc=1`.
+
+Esa línea de doorbell la imprime `chan_refresh_doorbell_kick`
+([`gsp_chan.c:680`](lxdde/ports/nouveau/gsp_chan.c)) en **cada** submit. Motor 11
+es COPY0/CE (subida de pesos), no GR0 (motor 1). En el arranque aparece muchas
+veces **con** CE readback OK. No hay `el QMD no señalizó`, ni
+`offload GPU desactivado`, ni `mmap-fault` / babble.
+
+`generar_tokens` ([`user/soso-llm/src/main.rs:1065–1074`](user/soso-llm/src/main.rs))
+devuelve 1 en `Err(())` **sin** `print_diagnostics` (askd llama con
+`verboso=false`). La causa exacta del `Err` (tensor, capa, GPU) **no está en el
+log**.
+
+### ASK-2. Primera subida CE de mistral y `Err` mudo (hipótesis)
+
+Bring-up Ampere llegó a compute sm_86 y el modelo cargó. El único kick durante
+`ask` es CE. Hipótesis: `gpu_map`/subida del primer tensor arranca el CE y
+después `generate_stream_par` falla en CPU/GPU sin mensaje. Hay que imprimir
+capa/tensor/`last_fail` antes de teorizar QMD Ampere.
+
+## Orden de corrección
+
+1. **`iwl_mvm_add_sta_ap`:** quitar `CLASS_AUTH|ASSOC` del ADD (Linux `sta.c:136–138`).
+   `sta_id=0` como el AP de un vif STA. FAT/MIMO: 20 MHz SISO salvo HT40 en el
+   beacon. Hostcheck `assoc_abi_test`: no exigir CLASS en el ADD.
+   *Host:* `./scripts/l6-iwl-fw-hostcheck.sh`. *Placa:* `wifi connect` sin
+   `timeout … id=0x18`; siguiente HCMD = TIME_EVENT / AUTH TX.
+2. **Log de `ask`:** en `generar_tokens` / askd imprimir el `Err` (capa, tensor,
+   `SysGpu::last_fail`). Sin eso el siguiente ciclo sigue ciego.
+   *Host:* `cargo xtask test` shard llm no debe perder el mensaje. *Placa:*
+   `ask hola` deja una línea de causa en SOSOLOG, no solo `generar rc=1`.
+3. **Tras el log, Ampere CE/matvec de mistral-7b** si la causa es subida/submit:
+   `gsp_buf_upload` / QMD sm_86 vs el `Err` nuevo. No tocar GSP bring-up (GO).
+4. **Este informe + `hw-matrix.json`** (run5; assoc `fail` id=0x18; `carga_real`
+   `fail`; racha de arranques **no** incrementada).
+
+## Qué no se ha hecho
+
+- No se ha tocado el driver ni reflasheado.
+- No hay lease DHCP ni SSH en placa (assoc no completa; ethernet DOWN).
+- El doorbell de la foto no se ha silenciado (es diagnóstico de submit, no el bug).
+

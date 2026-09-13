@@ -11,8 +11,11 @@ use crate::gemm::{
 pub use crate::kv::{KvDtype, LayerKv};
 use crate::parallel::{RowParallel, Sequential};
 use alloc::format;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 use sosomodel::index::TensorIndex;
 use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
 use sosomodel::manifest::{AttnKind, FfnKind, Manifest};
@@ -63,6 +66,52 @@ pub trait TensorSource {
     fn release_shards_except(&mut self, _keep: &[alloc::string::String]) {}
     /// Prefetch de la fila de `embed` del token (page-fault adelantado).
     fn prefetch_embed_row(&mut self, _token: u32, _hidden: usize) {}
+}
+
+/// Última capa/tensor del camino de inferencia (el control es de un solo hilo).
+struct LastInferOp {
+    layer: AtomicU32,
+    key_len: AtomicU32,
+    key: UnsafeCell<[u8; 48]>,
+}
+
+unsafe impl Sync for LastInferOp {}
+
+static LAST_INFER_OP: LastInferOp = LastInferOp {
+    layer: AtomicU32::new(u32::MAX),
+    key_len: AtomicU32::new(0),
+    key: UnsafeCell::new([0; 48]),
+};
+
+/// Recuerda capa y nombre de tensor para el log si `generate` devuelve `Err`.
+pub fn note_infer_op(layer: Option<u32>, key: &str) {
+    LAST_INFER_OP
+        .layer
+        .store(layer.unwrap_or(u32::MAX), Ordering::Relaxed);
+    let n = key.len().min(47);
+    unsafe {
+        let buf = &mut *LAST_INFER_OP.key.get();
+        buf[..n].copy_from_slice(&key.as_bytes()[..n]);
+    }
+    LAST_INFER_OP.key_len.store(n as u32, Ordering::Release);
+}
+
+pub fn last_infer_op() -> (Option<u32>, String) {
+    let layer = LAST_INFER_OP.layer.load(Ordering::Relaxed);
+    let n = LAST_INFER_OP.key_len.load(Ordering::Acquire) as usize;
+    let key = unsafe {
+        let buf = &*LAST_INFER_OP.key.get();
+        String::from_utf8_lossy(&buf[..n.min(48)]).into_owned()
+    };
+    (
+        if layer == u32::MAX { None } else { Some(layer) },
+        key,
+    )
+}
+
+pub fn clear_infer_op() {
+    LAST_INFER_OP.layer.store(u32::MAX, Ordering::Relaxed);
+    LAST_INFER_OP.key_len.store(0, Ordering::Relaxed);
 }
 
 /// matvec despachado por dtype directamente sobre la vista (sin copiar pesos).
@@ -273,14 +322,17 @@ pub(crate) fn matvec_step(
     planner: Option<&crate::plan::ResourcePlanner>,
     layer: u32,
 ) -> Result<(), ()> {
+    note_infer_op(Some(layer), key);
     let gpu_ok = use_gpu
         && planner
             .map(|p| p.gpu_tensor_allowed(layer, key))
             .unwrap_or(true);
     if gpu_ok {
         if let Some(g) = gpu.as_deref_mut() {
-            if crate::gpu::try_gpu_matvec(g, key, &v, rows, cols, x, out)? {
-                return Ok(());
+            // Un Err de GPU no debe abortar la inferencia: CPU calcula esa capa.
+            match crate::gpu::try_gpu_matvec(g, key, &v, rows, cols, x, out) {
+                Ok(true) => return Ok(()),
+                Ok(false) | Err(()) => {}
             }
         }
     }
@@ -816,5 +868,21 @@ impl<'a> LayerExecutor<'a> {
         }
         hidden.copy_from_slice(&s.moe_acc);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod last_op_tests {
+    use super::*;
+
+    #[test]
+    fn last_infer_op_recuerda_capa_y_tensor() {
+        clear_infer_op();
+        note_infer_op(Some(3), "L03.attn_q");
+        let (l, k) = last_infer_op();
+        assert_eq!(l, Some(3));
+        assert_eq!(k, "L03.attn_q");
+        clear_infer_op();
+        assert_eq!(last_infer_op(), (None, String::new()));
     }
 }

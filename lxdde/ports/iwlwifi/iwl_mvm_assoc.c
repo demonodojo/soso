@@ -150,10 +150,11 @@ static int iwl_mvm_mac_context_assoc(struct iwl_ax211_priv *iwl,
 static int iwl_mvm_add_sta_ap(struct iwl_ax211_priv *iwl, const uint8_t *bssid)
 {
     struct iwl_mvm_add_sta_cmd sta;
-    uint32_t flags = STA_FLG_FAT_EN_40MHZ | STA_FLG_MIMO_EN_SISO |
-                     STA_FLG_CLASS_AUTH | STA_FLG_CLASS_ASSOC;
-    uint32_t flags_msk = STA_FLG_FAT_EN_MSK | STA_FLG_MIMO_EN_MSK |
-                         STA_FLG_CLASS_AUTH | STA_FLG_CLASS_ASSOC;
+    /* Linux mvm/sta.c:136–138: FAT|MIMO (y RTS_MIMO_PROT). CLASS_AUTH/ASSOC
+     * significan «ya autenticada/asociada»; ningún .c de iwlwifi las pone en
+     * el ADD. Sin IE HT almacenado, 20 MHz SISO (canal 2.4 típico). */
+    uint32_t flags = STA_FLG_FAT_EN_20MHZ | STA_FLG_MIMO_EN_SISO;
+    uint32_t flags_msk = STA_FLG_FAT_EN_MSK | STA_FLG_MIMO_EN_MSK;
     unsigned pay_len = iwl_mvm_add_sta_cmd_size(iwl);
 
     memset(&sta, 0, sizeof(sta));
@@ -465,7 +466,8 @@ int iwl_mvm_install_key(struct iwl_ax211_priv *iwl, const uint8_t key[16], int k
                            STA_KEY_FLG_KEYID_MSK);
     key_flags |= STA_KEY_FLG_WEP_KEY_MAP;
     key_flags |= STA_KEY_FLG_CCM;
-    k.common.sta_id = iwl->ap_sta_id ? iwl->ap_sta_id : IWL_MVM_AP_STA_ID;
+    /* sta_id 0 es el AP; el ternario `ap_sta_id ? …` lo trataba como ausente. */
+    k.common.sta_id = iwl->ap_sta_id;
     k.common.key_offset = (uint8_t)key_idx;
     k.common.key_flags = iwl_cpu_to_le16(key_flags);
     memcpy(k.common.key, key, 16);
