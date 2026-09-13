@@ -310,7 +310,11 @@ int main(int argc, char **argv)
                 fprintf(stderr, "cc-a0-77 no debe declarar CDB (40)\n");
                 return 1;
             }
-            puts("OK: capa BINDING_CDB=39 sí, CDB=40 no (AX200)");
+            if (!iwl_fw_has_capa(&iwl, IWL_UCODE_TLV_CAPA_SESSION_PROT_CMD)) {
+                fprintf(stderr, "cc-a0-77 debe declarar SESSION_PROT (54)\n");
+                return 1;
+            }
+            puts("OK: capa BINDING_CDB=39 sí, CDB=40 no, SESSION_PROT=54 sí (AX200)");
             ver_tx = iwl_fw_cmd_ver(&iwl, LEGACY_GROUP, TX_ANT_CONFIGURATION_CMD);
             if (ver_tx != 1) {
                 fprintf(stderr, "TX_ANT cmd_ver=%d (esperaba 1 vía DEF_ID grp=1)\n",
@@ -342,6 +346,26 @@ int main(int argc, char **argv)
                 }
                 printf("OK: ADD_STA v%d SCAN_CFG v%d vía LONG_GROUP (bcast=0 en send)\n",
                        ver_add_sta, ver_scan_cfg);
+            }
+            {
+                int ver_sess =
+                    iwl_fw_cmd_ver(&iwl, MAC_CONF_GROUP, SESSION_PROTECTION_CMD);
+                int ver_te = iwl_fw_cmd_ver(&iwl, LEGACY_GROUP, TIME_EVENT_CMD);
+
+                if (ver_sess != 1) {
+                    fprintf(stderr,
+                            "SESSION_PROTECTION cmd_ver=%d (esperaba 1 grp=3 id=0x5)\n",
+                            ver_sess);
+                    return 1;
+                }
+                if (ver_te != 0) {
+                    fprintf(stderr,
+                            "TIME_EVENT 0x29 cmd_ver=%d (cc-a0-77 no lo implementa)\n",
+                            ver_te);
+                    return 1;
+                }
+                printf("OK: SESSION_PROTECTION v%d, TIME_EVENT ausente (AX200)\n",
+                       ver_sess);
             }
         }
     }

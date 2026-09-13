@@ -222,10 +222,13 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define IWL_UCODE_TLV_CAPA_DQA_SUPPORT           12
 #define IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT   39
 #define IWL_UCODE_TLV_CAPA_CDB_SUPPORT           40
+#define IWL_UCODE_TLV_CAPA_SESSION_PROT_CMD      54
 #define IWL_FW_CAPA_SETS                         4
 
 #define BINDING_CONTEXT_CMD                      0x2b
 #define TIME_EVENT_CMD                           0x29
+#define SESSION_PROTECTION_CMD                   0x05
+#define SESSION_PROTECT_CONF_ASSOC               0
 #define ADD_STA_KEY                              0x17
 
 #define TE_BSS_STA_AGGRESSIVE_ASSOC              0
@@ -241,6 +244,9 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 
 #define IWL_MVM_TE_SESSION_PROTECTION_MAX_TIME_MS 600u
 #define IWL_MVM_TE_ASSOC_MAX_DELAY_MS             500u
+/* Linux mvm.h: MSEC_TO_TU; mac80211.c usa 900 ms para session protection. */
+#define MSEC_TO_TU(_msec)                        (((uint32_t)(_msec) * 1000u) / 1024u)
+#define IWL_MVM_SESSION_PROTECTION_ASSOC_MS        900u
 #define POWER_TABLE_CMD                          0x77
 #define MAC_PM_POWER_TABLE                       0xa9
 #define FW_CTXT_INVALID                          0xffffffffu
@@ -267,6 +273,15 @@ struct iwl_time_event_cmd {
     uint8_t repeat;
     uint8_t max_frags;
     uint16_t policy;
+} __attribute__((packed));
+
+struct iwl_mvm_session_prot_cmd {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t conf_id;
+    uint32_t duration_tu;
+    uint32_t repetition_count;
+    uint32_t interval;
 } __attribute__((packed));
 
 struct iwl_mvm_add_sta_key_common {

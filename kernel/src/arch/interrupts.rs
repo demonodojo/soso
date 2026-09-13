@@ -263,6 +263,8 @@ fn desde_usuario(stack_frame: &InterruptStackFrame) -> bool {
 static EXC_RIP: AtomicU64 = AtomicU64::new(0);
 static EXC_RSP: AtomicU64 = AtomicU64::new(0);
 static EXC_EXTRA: AtomicU64 = AtomicU64::new(0);
+static EXC_CS: AtomicU64 = AtomicU64::new(0);
+static EXC_ERR: AtomicU64 = AtomicU64::new(0);
 
 fn stash_exc(rip: u64, rsp: u64, extra: u64) {
     EXC_RIP.store(rip, Ordering::Relaxed);
@@ -367,6 +369,8 @@ extern "x86-interrupt" fn page_fault_handler(
         0
     };
     stash_exc(rip, rsp, ret);
+    EXC_CS.store(stack_frame.code_segment.0 as u64, Ordering::Relaxed);
+    EXC_ERR.store(error_code.bits(), Ordering::Relaxed);
     let _ = con_rsp_alineado(kernel_pf_panic_shim, addr, 0);
     loop {}
 }
@@ -408,8 +412,12 @@ extern "sysv64" fn kernel_pf_panic_shim(addr: u64, _: u64) -> u64 {
     let rip = EXC_RIP.load(Ordering::Relaxed);
     let rsp = EXC_RSP.load(Ordering::Relaxed);
     let ret = EXC_EXTRA.load(Ordering::Relaxed);
+    let cs = EXC_CS.load(Ordering::Relaxed);
+    let err = EXC_ERR.load(Ordering::Relaxed);
     rastro_de_pila(rsp);
-    panic!("EXCEPTION: page fault at {addr:#x} rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x}");
+    panic!(
+        "EXCEPTION: page fault at {addr:#x} rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x} cs={cs:#x} err={err:#x}"
+    );
 }
 
 /// Backtrace de pobre para una excepción en ring 0: recorre la pila de kernel

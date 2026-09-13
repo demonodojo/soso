@@ -1,5 +1,5 @@
-/* Host: PHY (sin BINDING extra), MAC is_assoc=0, ADD_STA, TIME_EVENT, TX AUTH/ASSOC
- * y MAC is_assoc=1 con DTIM (Linux 6.6.32 phy-ctxt.c:285, mac80211.c:2453). */
+/* Host: PHY (sin BINDING extra), MAC is_assoc=0, ADD_STA, SESSION_PROTECTION (AX200)
+ * o TIME_EVENT (legacy), TX AUTH/ASSOC y MAC is_assoc=1 (Linux 6.6.32). */
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -103,7 +103,8 @@ int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
 int iwl_fw_has_capa(const struct iwl_ax211_priv *iwl, unsigned capa_bit)
 {
     (void)iwl;
-    (void)capa_bit;
+    if (capa_bit == IWL_UCODE_TLV_CAPA_SESSION_PROT_CMD)
+        return 1;
     return 0;
 }
 
@@ -163,6 +164,23 @@ static const struct cmd_rec *find_cmd(uint8_t id)
     return i < 0 ? NULL : &g_sent[i];
 }
 
+static int find_idx_group_id(uint8_t group, uint8_t id)
+{
+    int i;
+
+    for (i = 0; i < g_sent_n; i++) {
+        if (g_sent[i].group == group && g_sent[i].id == id)
+            return i;
+    }
+    return -1;
+}
+
+static const struct cmd_rec *find_cmd_group_id(uint8_t group, uint8_t id)
+{
+    int i = find_idx_group_id(group, id);
+    return i < 0 ? NULL : &g_sent[i];
+}
+
 int main(void)
 {
     struct iwl_ax211_priv iwl;
@@ -170,20 +188,21 @@ int main(void)
     static const uint8_t ptk[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
     const struct cmd_rec *mac;
     const struct cmd_rec *add;
-    const struct cmd_rec *te;
+    const struct cmd_rec *sess;
     const struct cmd_rec *key;
     const struct iwl_mac_ctx_cmd *mc;
     const struct iwl_mvm_add_sta_cmd *sta;
     const struct cmd_rec *phy;
     const struct iwl_phy_context_cmd *pc;
-    const struct iwl_time_event_cmd *tec;
+    const struct iwl_mvm_session_prot_cmd *spc;
     const struct iwl_mvm_add_sta_key_cmd *sk;
     int idx_phy;
     int idx_bind;
     int idx_mac;
     int idx_add;
-    int idx_te;
+    int idx_sess;
     int idx_key;
+    int idx_te_legacy;
 
     memset(&iwl, 0, sizeof(iwl));
     memcpy(iwl.mac, (const uint8_t[]){0x84, 0x1b, 0x77, 0xe1, 0x20, 0x71}, 6);
@@ -211,6 +230,11 @@ int main(void)
                 sizeof(struct iwl_time_event_cmd));
         return 1;
     }
+    if (sizeof(struct iwl_mvm_session_prot_cmd) != 24) {
+        fprintf(stderr, "SESSION_PROTECTION_CMD debe ser 24 B, tiene %zu\n",
+                sizeof(struct iwl_mvm_session_prot_cmd));
+        return 1;
+    }
 
     g_sent_n = 0;
     if (iwl_mvm_assoc_prepare(&iwl, "Casa", bssid) != 0) {
@@ -221,15 +245,22 @@ int main(void)
     phy = find_cmd(PHY_CONTEXT_CMD);
     mac = find_cmd(MAC_CONTEXT_CMD);
     add = find_cmd(ADD_STA);
-    te = find_cmd(TIME_EVENT_CMD);
+    sess = find_cmd_group_id(MAC_CONF_GROUP, SESSION_PROTECTION_CMD);
     idx_phy = find_idx(PHY_CONTEXT_CMD);
     idx_bind = find_idx(BINDING_CONTEXT_CMD);
     idx_mac = find_idx(MAC_CONTEXT_CMD);
     idx_add = find_idx(ADD_STA);
-    idx_te = find_idx(TIME_EVENT_CMD);
-    if (!phy || !mac || !add || !te) {
-        fprintf(stderr, "faltan HCMD PHY=%d BIND=%d MAC=%d ADD=%d TE=%d\n",
-                idx_phy, idx_bind, idx_mac, idx_add, idx_te);
+    idx_sess = find_idx_group_id(MAC_CONF_GROUP, SESSION_PROTECTION_CMD);
+    idx_te_legacy = find_idx(TIME_EVENT_CMD);
+    if (!phy || !mac || !add || !sess) {
+        fprintf(stderr,
+                "faltan HCMD PHY=%d BIND=%d MAC=%d ADD=%d SESS=%d TE=%d\n",
+                idx_phy, idx_bind, idx_mac, idx_add, idx_sess, idx_te_legacy);
+        return 1;
+    }
+    if (idx_te_legacy >= 0) {
+        fprintf(stderr, "TIME_EVENT 0x29 no debe emitirse con capa SESSION_PROT (idx=%d)\n",
+                idx_te_legacy);
         return 1;
     }
     if (idx_bind >= 0) {
@@ -237,9 +268,9 @@ int main(void)
                 idx_bind);
         return 1;
     }
-    if (!(idx_phy < idx_mac && idx_mac < idx_add && idx_add < idx_te)) {
-        fprintf(stderr, "orden HCMD PHY(%d) MAC(%d) ADD(%d) TE(%d)\n",
-                idx_phy, idx_mac, idx_add, idx_te);
+    if (!(idx_phy < idx_mac && idx_mac < idx_add && idx_add < idx_sess)) {
+        fprintf(stderr, "orden HCMD PHY(%d) MAC(%d) ADD(%d) SESS(%d)\n",
+                idx_phy, idx_mac, idx_add, idx_sess);
         return 1;
     }
     if (phy->len != sizeof(struct iwl_phy_context_cmd)) {
@@ -266,14 +297,23 @@ int main(void)
         fprintf(stderr, "ADD_STA len=%u esperado 48\n", add->len);
         return 1;
     }
-    if (te->group != LEGACY_GROUP || te->len != sizeof(struct iwl_time_event_cmd)) {
-        fprintf(stderr, "TIME_EVENT group=%u len=%u\n", te->group, te->len);
+    if (sess->group != MAC_CONF_GROUP ||
+        sess->len != sizeof(struct iwl_mvm_session_prot_cmd)) {
+        fprintf(stderr, "SESSION_PROTECTION group=%u len=%u\n",
+                sess->group, sess->len);
         return 1;
     }
-    tec = (const struct iwl_time_event_cmd *)te->payload;
-    if (tec->id != iwl_cpu_to_le32(TE_BSS_STA_AGGRESSIVE_ASSOC) ||
-        tec->action != iwl_cpu_to_le32(FW_CTXT_ACTION_ADD)) {
-        fprintf(stderr, "TIME_EVENT id/action incorrectos\n");
+    spc = (const struct iwl_mvm_session_prot_cmd *)sess->payload;
+    if (spc->action != iwl_cpu_to_le32(FW_CTXT_ACTION_ADD) ||
+        spc->conf_id != iwl_cpu_to_le32(SESSION_PROTECT_CONF_ASSOC)) {
+        fprintf(stderr, "SESSION_PROTECTION action/conf_id incorrectos\n");
+        return 1;
+    }
+    if (spc->duration_tu !=
+        iwl_cpu_to_le32(MSEC_TO_TU(IWL_MVM_SESSION_PROTECTION_ASSOC_MS))) {
+        fprintf(stderr, "SESSION_PROTECTION duration_tu=0x%08x (esperado %u)\n",
+                spc->duration_tu,
+                (unsigned)MSEC_TO_TU(IWL_MVM_SESSION_PROTECTION_ASSOC_MS));
         return 1;
     }
 
@@ -367,9 +407,9 @@ int main(void)
                     idx_tx0, idx_tx1, idx_mac1);
             return 1;
         }
-        if (!(idx_te < idx_tx0 && idx_tx0 < idx_tx1 && idx_tx1 < idx_mac1)) {
-            fprintf(stderr, "orden TE(%d) TX(%d/%d) MAC1(%d)\n",
-                    idx_te, idx_tx0, idx_tx1, idx_mac1);
+        if (!(idx_sess < idx_tx0 && idx_tx0 < idx_tx1 && idx_tx1 < idx_mac1)) {
+            fprintf(stderr, "orden SESS(%d) TX(%d/%d) MAC1(%d)\n",
+                    idx_sess, idx_tx0, idx_tx1, idx_mac1);
             return 1;
         }
         tx0 = &g_sent[idx_tx0];
@@ -450,6 +490,6 @@ int main(void)
         return 1;
     }
 
-    puts("OK: assoc PHY + MAC is_assoc=0 + ADD_STA + TE + AUTH/ASSOC + MAC is_assoc=1 + ADD_STA_KEY");
+    puts("OK: assoc PHY + MAC is_assoc=0 + ADD_STA + SESSION_PROT + AUTH/ASSOC + MAC is_assoc=1 + ADD_STA_KEY");
     return 0;
 }

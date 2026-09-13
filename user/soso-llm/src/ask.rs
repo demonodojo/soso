@@ -531,6 +531,25 @@ fn tratar_linea_askd(
         Some(fd),
         true,
     );
+    if rc != 0 {
+        let (layer, key) = soso_llm_core::last_infer_op();
+        let gpu_fail = ses.sys_gpu.as_ref().and_then(|g| g.last_fail());
+        let mut msg = String::from("askd: inferencia falló");
+        if let Some(l) = layer {
+            msg.push_str(&format!(" capa {l}"));
+        }
+        if !key.is_empty() {
+            msg.push_str(&format!(" tensor {key}"));
+        }
+        if let Some(r) = gpu_fail {
+            msg.push_str(&format!(" gpu={r}"));
+        }
+        println!("{msg}");
+        socket_write_str(fd, &format!("ask: error — {msg}\n"));
+        if let Some(ref g) = ses.sys_gpu {
+            g.print_diagnostics();
+        }
+    }
     println!("askd: generar rc={rc}");
     rc
 }

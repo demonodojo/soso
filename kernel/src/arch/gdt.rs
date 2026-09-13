@@ -22,7 +22,13 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 /// Pila de kernel para entradas desde ring 3 (syscall e interrupciones) de
 /// la BSP (CPU 0).
-pub const KSTACK_SIZE: usize = 64 * 1024;
+///
+/// 64 KiB se quedaba corto en el kernel debug: `sys_read` de un `.som` de
+/// sosomfs baja a virtio con el CRC de segmento de 8 MiB aún vivo, y un
+/// `call` a 0 (`rip=0` `[rsp]=0`) es lo que deja un desbordamiento que pisa
+/// las direcciones de retorno. Mistral dispara ese camino al cargar
+/// tokenizer+runtime; el `tiny` casi nunca lo profundiza tanto.
+pub const KSTACK_SIZE: usize = 256 * 1024;
 
 #[repr(C, align(16))]
 pub struct KStack(pub [u8; KSTACK_SIZE]);

@@ -311,30 +311,55 @@ static uint8_t assoc_phy_band(uint8_t channel)
 
 static int iwl_mvm_protect_assoc(struct iwl_ax211_priv *iwl)
 {
-    struct iwl_time_event_cmd te;
-    uint16_t policy;
+    /* Linux mac80211.c:2471 — AX200/cc-a0-77 declara SESSION_PROT (54) y no
+     * implementa TIME_EVENT 0x29. */
+    if (iwl_fw_has_capa(iwl, IWL_UCODE_TLV_CAPA_SESSION_PROT_CMD)) {
+        struct iwl_mvm_session_prot_cmd sp;
 
-    memset(&te, 0, sizeof(te));
-    te.id_and_color =
-        iwl_cpu_to_le32(FW_CMD_ID_AND_COLOR(iwl->scan_mac_id, 0));
-    te.action = iwl_cpu_to_le32(FW_CTXT_ACTION_ADD);
-    te.id = iwl_cpu_to_le32(TE_BSS_STA_AGGRESSIVE_ASSOC);
-    te.max_delay = iwl_cpu_to_le32(IWL_MVM_TE_ASSOC_MAX_DELAY_MS);
-    te.interval = iwl_cpu_to_le32(1);
-    te.duration = iwl_cpu_to_le32(IWL_MVM_TE_SESSION_PROTECTION_MAX_TIME_MS);
-    te.repeat = 1;
-    te.max_frags = TE_V2_FRAG_NONE;
-    policy = (uint16_t)(TE_V2_NOTIF_HOST_EVENT_START |
-                        TE_V2_NOTIF_HOST_EVENT_END |
-                        TE_V2_START_IMMEDIATELY);
-    te.policy = iwl_cpu_to_le16(policy);
-    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, TIME_EVENT_CMD, &te,
-                                (uint16_t)sizeof(te),
-                                IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
-        lx_printk("iwl_mvm: TIME_EVENT assoc falló\n");
-        return -1;
+        memset(&sp, 0, sizeof(sp));
+        sp.id_and_color =
+            iwl_cpu_to_le32(FW_CMD_ID_AND_COLOR(iwl->scan_mac_id, 0));
+        sp.action = iwl_cpu_to_le32(FW_CTXT_ACTION_ADD);
+        sp.conf_id = iwl_cpu_to_le32(SESSION_PROTECT_CONF_ASSOC);
+        sp.duration_tu =
+            iwl_cpu_to_le32(MSEC_TO_TU(IWL_MVM_SESSION_PROTECTION_ASSOC_MS));
+        if (iwl_trans_send_cmd_wait(iwl, MAC_CONF_GROUP, SESSION_PROTECTION_CMD,
+                                    &sp, (uint16_t)sizeof(sp),
+                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
+            lx_printk("iwl_mvm: SESSION_PROTECTION assoc falló\n");
+            return -1;
+        }
+        lx_printk("iwl_mvm: SESSION_PROTECTION CONF_ASSOC ok (%u TU)\n",
+                  (unsigned)MSEC_TO_TU(IWL_MVM_SESSION_PROTECTION_ASSOC_MS));
+        return 0;
     }
-    lx_printk("iwl_mvm: TIME_EVENT TE_BSS_STA_AGGRESSIVE_ASSOC ok\n");
+
+    {
+        struct iwl_time_event_cmd te;
+        uint16_t policy;
+
+        memset(&te, 0, sizeof(te));
+        te.id_and_color =
+            iwl_cpu_to_le32(FW_CMD_ID_AND_COLOR(iwl->scan_mac_id, 0));
+        te.action = iwl_cpu_to_le32(FW_CTXT_ACTION_ADD);
+        te.id = iwl_cpu_to_le32(TE_BSS_STA_AGGRESSIVE_ASSOC);
+        te.max_delay = iwl_cpu_to_le32(IWL_MVM_TE_ASSOC_MAX_DELAY_MS);
+        te.interval = iwl_cpu_to_le32(1);
+        te.duration = iwl_cpu_to_le32(IWL_MVM_TE_SESSION_PROTECTION_MAX_TIME_MS);
+        te.repeat = 1;
+        te.max_frags = TE_V2_FRAG_NONE;
+        policy = (uint16_t)(TE_V2_NOTIF_HOST_EVENT_START |
+                            TE_V2_NOTIF_HOST_EVENT_END |
+                            TE_V2_START_IMMEDIATELY);
+        te.policy = iwl_cpu_to_le16(policy);
+        if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, TIME_EVENT_CMD, &te,
+                                    (uint16_t)sizeof(te),
+                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
+            lx_printk("iwl_mvm: TIME_EVENT assoc falló\n");
+            return -1;
+        }
+        lx_printk("iwl_mvm: TIME_EVENT TE_BSS_STA_AGGRESSIVE_ASSOC ok\n");
+    }
     return 0;
 }
 

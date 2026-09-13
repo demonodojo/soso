@@ -383,3 +383,81 @@ capa/tensor/`last_fail` antes de teorizar QMD Ampere.
 - No hay lease DHCP ni SSH en placa (assoc no completa; ethernet DOWN).
 - El doorbell de la foto no se ha silenciado (es diagnóstico de submit, no el bug).
 
+---
+
+# ROG run6 — SESSION_PROTECTION AX200 (13 sep 2026, ~18:30)
+
+## Evidencia y alcance
+
+Lectura ESP `/dev/sda1` (`KERNEL`) con `udisksctl`. Copias en
+`target/usb-diagnostic-2026-09-13-run6/` (mismo SOSOLOG que
+`target/usb-diagnostic-2026-09-13/`).
+
+| Campo | Valor |
+|---|---|
+| Kernel USB | **0.2.2 (`34eff4aa1-dirty`)** |
+| Hardware | `10de:249c` GA107 + `8086:2723` AX200 + `10ec:8168` rtl8169 |
+| Userspace | **`sosh —`** + OTA `pid=2 write=164ms` |
+| Teclado | **`kbd sc=167 enc=83 ent=83`** |
+| GSP | `GSP_INIT_DONE`, `pool VRAM=sí`, CE readback, `compute listo cls=0xc7c0` sm_86 |
+| WiFi scan | `UCODE_ALIVE_NTFY`, scan `count=23` |
+| WiFi assoc | PHY ch3 ok → MAC ok → **ADD_STA ok** → **`timeout cmd grp=1 id=0x29`** |
+| `ask hola` | mistral-7b listo → `generar rc=1` (sin línea de causa en SOSOLOG) |
+| Ethernet | `phystatus 0x84` DOWN (sin cable) |
+
+Árboles Linux: **`lxdde/linux/` 6.6.32** — `mac80211.c:2471–2477`,
+`time-event.c:1185–1237`, `fw/file.h:418` (capa 54).
+
+Hostchecks: `./scripts/l6-iwl-fw-hostcheck.sh` OK (SESSION_PROT v1, TIME_EVENT ausente en cc-a0-77).
+
+## Tabla de etapas (run6 = flush #39 @ 295682 ms)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Userspace | `sosh —`, OTA ok | **OK** |
+| Teclado | `kbd sc=167 enc=83 ent=83` | **OK** |
+| GSP / RPC | `GSP_INIT_DONE`, pool VRAM, compute sm_86 | **OK** |
+| WiFi scan | `scan fin count=23` | **OK** |
+| WiFi assoc | ADD_STA ok → `timeout … id=0x29` (TIME_EVENT) | **FAIL** |
+| `ask` | `generar rc=1` sin capa/tensor en log | **FAIL** |
+| Ethernet | `phystatus 0x84` DOWN | **FAIL** (sin cable) |
+
+## Hallazgo confirmado — TIME_EVENT vs SESSION_PROTECTION
+
+**Síntoma:** tras ADD_STA (`grp=1 id=0x18` ok), `timeout cmd grp=1 id=0x29`.
+
+**soso** [`iwl_mvm_protect_assoc`](lxdde/ports/iwlwifi/iwl_mvm_assoc.c): mandaba
+`TIME_EVENT_CMD` 0x29 LEGACY.
+
+**Linux** [`iwl_mvm_protect_assoc`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/mvm/mac80211.c):
+con `IWL_UCODE_TLV_CAPA_SESSION_PROT_CMD` (54) usa
+`SESSION_PROTECTION_CMD` grp=3 id=0x5, no TIME_EVENT.
+
+**Ucode cc-a0-77:** capa 54 sí; CMD_VERSIONS grp=3 cmd=0x5 ver=1; **no** TIME_EVENT 0x29.
+
+Fix run5 (ADD_STA sin CLASS_AUTH|ASSOC) **validado** en run6.
+
+## Fixes aplicados (código)
+
+1. **`iwl_mvm_protect_assoc`:** si capa 54 → `SESSION_PROTECTION_CMD` (24 B,
+   `SESSION_PROTECT_CONF_ASSOC`, 900 ms → TU); si no → TIME_EVENT legacy.
+2. **Hostcheck:** `assoc_abi_test` + parse cc-a0-77 (capa 54, no 0x29).
+3. **`askd`:** log explícito capa/tensor/gpu en fallo de inferencia.
+
+## Validación en placa (usuario)
+
+```bash
+cargo xtask flash-usb-live /dev/sda --yes --only kernel
+# Para ask con log nuevo también rootfs (soso-llm/askd):
+# cargo xtask flash-usb-live /dev/sda --yes --skip-models
+```
+
+Esperado: `wifi connect` sin `timeout … id=0x29`; log
+`SESSION_PROTECTION CONF_ASSOC ok`; siguiente HCMD = TX AUTH.
+`ask hola` debe dejar `askd: inferencia falló capa …` si sigue fallando.
+
+## Qué no se ha hecho
+
+- No reflasheado ni validado en placa en este ciclo.
+- CE/QMD mistral Ampere: pendiente de la línea de log en placa.
+
