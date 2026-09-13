@@ -46,6 +46,16 @@ const REG_RX_DESC_LO: u32 = 0xe4;
 const REG_RX_DESC_HI: u32 = 0xe8;
 const REG_MAXTXPKT: u32 = 0xec;
 const REG_MISC: u32 = 0xf0;
+const REG_EPHYAR: u32 = 0x80;
+const REG_DLLPR: u32 = 0xd0;
+const REG_MISC_1: u32 = 0xf2;
+const REG_EEE_LED: u32 = 0x1b;
+
+const EPHYAR_FLAG: u32 = 0x8000_0000;
+const EPHYAR_WRITE_CMD: u32 = 0x8000_0000;
+const PFM_EN: u8 = 1 << 6;
+const PFM_D3COLD_EN: u8 = 1 << 6;
+const TX_10M_PS_EN: u8 = 1 << 7;
 
 const CMD_RESET: u8 = 0x10;
 const CMD_RX_EN: u8 = 0x08;
@@ -80,6 +90,7 @@ const TX_PKT_MAX: u8 = (8064 / 128) as u8;
 const ERIAR_FLAG: u32 = 0x8000_0000;
 const ERIAR_EXGMAC: u32 = 0;
 const ERIAR_MASK_0001: u32 = 0x1 << 12;
+const ERIAR_MASK_0011: u32 = 0x3 << 12;
 const ERIAR_MASK_1111: u32 = 0xf << 12;
 const OCP_FLAG: u32 = 0x8000_0000;
 const OCP_STD_PHY: u32 = 0xa400;
@@ -412,6 +423,147 @@ fn mac_ocp_read(mmio: u64, reg: u32) -> u16 {
     }
     w32(mmio, REG_OCPDR, reg << 15);
     (r32(mmio, REG_OCPDR) & 0xffff) as u16
+}
+
+fn mac_ocp_modify(mmio: u64, reg: u32, mask: u16, set: u16) {
+    let data = mac_ocp_read(mmio, reg);
+    mac_ocp_write(mmio, reg, (data & !mask) | set);
+}
+
+struct EphyInfo {
+    offset: u32,
+    mask: u16,
+    bits: u16,
+}
+
+fn ephy_wait(mmio: u64) -> bool {
+    for _ in 0..100 {
+        if r32(mmio, REG_EPHYAR) & EPHYAR_FLAG != 0 {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+fn ephy_write(mmio: u64, reg: u32, val: u16) {
+    w32(
+        mmio,
+        REG_EPHYAR,
+        EPHYAR_WRITE_CMD | (u32::from(val) & 0xffff) | ((reg & 0x1f) << 16),
+    );
+    let _ = ephy_wait(mmio);
+    spin_n(10_000);
+}
+
+fn ephy_read(mmio: u64, reg: u32) -> u16 {
+    w32(mmio, REG_EPHYAR, (reg & 0x1f) << 16);
+    if ephy_wait(mmio) {
+        (r32(mmio, REG_EPHYAR) & 0xffff) as u16
+    } else {
+        0xffff
+    }
+}
+
+fn ephy_init(mmio: u64, table: &[EphyInfo]) {
+    for e in table {
+        let w = (ephy_read(mmio, e.offset) & !e.mask) | e.bits;
+        ephy_write(mmio, e.offset, w);
+    }
+}
+
+fn pci_write_ext_config_byte(bus: u8, dev: u8, func: u8, off: u16, val: u8) {
+    let aligned = off & !3;
+    let shift = (off & 3) * 8;
+    let e = pci::ecam();
+    let addr = e.base
+        + ((bus as u64) << 20 | (dev as u64) << 15 | (func as u64) << 12 | aligned as u64);
+    mm::ensure_mmio_mapped(addr, 4);
+    let old: u32 =
+        unsafe { core::ptr::read_volatile(mm::phys_to_virt(addr).as_ptr()) };
+    let mask: u32 = !(0xffu32 << shift);
+    unsafe {
+        core::ptr::write_volatile(
+            mm::phys_to_virt(addr).as_mut_ptr(),
+            (old & mask) | ((val as u32) << shift),
+        );
+    }
+}
+
+/// Linux `rtl_set_def_aspm_entry_latency` — L0 7 µs, L1 16 µs (0x27 @ 0x70f).
+fn rtl_set_def_aspm_entry_latency(bus: u8, dev: u8, func: u8) {
+    pci_write_ext_config_byte(bus, dev, func, 0x070f, 0x27);
+}
+
+/// Linux `rtl_hw_start_8168h_1` (`r8169_main.c:3288`).
+fn rtl_hw_start_8168h_1(nic: &mut Nic, bus: u8, dev: u8, func: u8) {
+    const EPHY_8168H_1: [EphyInfo; 6] = [
+        EphyInfo {
+            offset: 0x1e,
+            mask: 0x0800,
+            bits: 0x0001,
+        },
+        EphyInfo {
+            offset: 0x1d,
+            mask: 0x0000,
+            bits: 0x0800,
+        },
+        EphyInfo {
+            offset: 0x05,
+            mask: 0xffff,
+            bits: 0x2089,
+        },
+        EphyInfo {
+            offset: 0x06,
+            mask: 0xffff,
+            bits: 0x5881,
+        },
+        EphyInfo {
+            offset: 0x04,
+            mask: 0xffff,
+            bits: 0x854a,
+        },
+        EphyInfo {
+            offset: 0x01,
+            mask: 0xffff,
+            bits: 0x068b,
+        },
+    ];
+
+    ephy_init(nic.mmio, &EPHY_8168H_1);
+    eri_write(nic.mmio, 0xc8, ERIAR_MASK_1111, (0x08 << 16) | 0x02);
+    eri_write(nic.mmio, 0xe8, ERIAR_MASK_1111, (0x10 << 16) | 0x06);
+    eri_write(nic.mmio, 0xcc, ERIAR_MASK_0001, 0x38);
+    eri_write(nic.mmio, 0xd0, ERIAR_MASK_0001, 0x48);
+    rtl_set_def_aspm_entry_latency(bus, dev, func);
+    eri_clear_bits(nic.mmio, 0xdc, ERIAR_MASK_0001, 1);
+    eri_set_bits(nic.mmio, 0xdc, ERIAR_MASK_0001, 1);
+    eri_write(nic.mmio, 0x5f0, ERIAR_MASK_0011, 0x4f87);
+    w32(nic.mmio, REG_MISC, r32(nic.mmio, REG_MISC) & !RXDV_GATED_EN);
+    eri_write(nic.mmio, 0xc0, ERIAR_MASK_0011, 0);
+    eri_write(nic.mmio, 0xb8, ERIAR_MASK_0011, 0);
+    w8(nic.mmio, REG_EEE_LED, r8(nic.mmio, REG_EEE_LED) & !0x07);
+    eri_set_bits(nic.mmio, 0x1b0, ERIAR_MASK_0011, 0x0003);
+    w8(nic.mmio, REG_DLLPR, r8(nic.mmio, REG_DLLPR) & !PFM_EN);
+    w8(nic.mmio, REG_MISC_1, r8(nic.mmio, REG_MISC_1) & !PFM_D3COLD_EN);
+    w8(nic.mmio, REG_DLLPR, r8(nic.mmio, REG_DLLPR) & !TX_10M_PS_EN);
+    eri_clear_bits(nic.mmio, 0x1b0, ERIAR_MASK_0011, 1 << 12);
+    w8(nic.mmio, REG_CONFIG3, r8(nic.mmio, REG_CONFIG3) & !RDY_TO_L23);
+
+    let rg_saw_cnt = u32::from(phy_read_paged(nic, 0x0c42, 0x13) & 0x3fff);
+    if rg_saw_cnt > 0 {
+        let sw_cnt_1ms_ini = (16_000_000u32 / rg_saw_cnt) & 0x0fff;
+        mac_ocp_modify(nic.mmio, 0xd412, 0x0fff, sw_cnt_1ms_ini as u16);
+    }
+    mac_ocp_modify(nic.mmio, 0xe056, 0x00f0, 0x0070);
+    mac_ocp_modify(nic.mmio, 0xe052, 0x6000, 0x8008);
+    mac_ocp_modify(nic.mmio, 0xe0d6, 0x01ff, 0x017f);
+    mac_ocp_modify(nic.mmio, 0xd420, 0x0fff, 0x047f);
+    mac_ocp_write(nic.mmio, 0xe63e, 0x0001);
+    mac_ocp_write(nic.mmio, 0xe63e, 0x0000);
+    mac_ocp_write(nic.mmio, 0xc094, 0x0000);
+    mac_ocp_write(nic.mmio, 0xc09e, 0x0000);
+    println!("rtl8169: rtl_hw_start_8168h_1 (VER_46) ok");
 }
 
 const RTL_FW_OPCODE_SIZE: usize = 4;
@@ -778,8 +930,12 @@ fn read_link(nic: &mut Nic) -> (bool, u8, u16) {
     (up, phy, bmsr)
 }
 
-fn log_link(_nic: &mut Nic, phy: u8, bmsr: u16, up: bool) {
-    let tbi = if phy & PHY_TBI != 0 { " TBI" } else { "" };
+fn log_link(nic: &Nic, phy: u8, bmsr: u16, up: bool) {
+    let tbi = if phy & PHY_TBI != 0 && !is_8168h(nic._mac_ver) {
+        " TBI"
+    } else {
+        ""
+    };
     println!(
         "rtl8169: phystatus {phy:#04x} bmsr {bmsr:#06x}{tbi} → enlace {} {} {}",
         if up { "UP" } else { "DOWN" },
@@ -804,7 +960,7 @@ pub fn poll_link() -> bool {
     let was = nic.link_up;
     nic.link_up = up;
     if up && !was {
-        log_link(&mut nic, phy, bmsr, up);
+        log_link(&nic, phy, bmsr, up);
         return true;
     }
     false
@@ -820,7 +976,7 @@ fn rtl_irq() {
                 let was = nic.link_up;
                 nic.link_up = up;
                 if up != was {
-                    log_link(&mut nic, phy, bmsr, up);
+                    log_link(&nic, phy, bmsr, up);
                 }
             }
         }
@@ -979,6 +1135,7 @@ pub fn init() -> Option<[u8; 6]> {
         link_up: false,
     };
     if is_8168h(ver) {
+        rtl_hw_start_8168h_1(&mut nic, dev.bus, dev.device, dev.function);
         rtl8168h_hw_phy_config(&mut nic);
     }
     phy_power_up(&mut nic);
@@ -992,7 +1149,7 @@ pub fn init() -> Option<[u8; 6]> {
     );
     let (link_up, phy, bmsr) = read_link(&mut nic);
     nic.link_up = link_up;
-    log_link(&mut nic, phy, bmsr, link_up);
+    log_link(&nic, phy, bmsr, link_up);
 
     w16(bar, REG_INTRSTATUS, 0xffff);
     if let Some(msix) = pci::find_msix(dev.bus, dev.device, dev.function) {

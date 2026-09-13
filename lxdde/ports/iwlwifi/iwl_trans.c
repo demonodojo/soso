@@ -300,27 +300,29 @@ static void parse_offload_match(struct iwl_ax211_priv *iwl, const uint8_t *data,
     (void)iwl;
 }
 
+static void apply_rx_rssi(struct iwl_ax211_priv *iwl, uint8_t a, uint8_t b)
+{
+    int ea = a ? -(int)a : -100;
+    int eb = b ? -(int)b : -100;
+
+    iwl->last_rx_rssi = (int8_t)(ea > eb ? ea : eb);
+}
+
 static void parse_rx_phy(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
 {
-    if (len < 20)
-        return;
-    iwl->last_rx_band24 = data[0] & 1u;
-    iwl->last_rx_channel = (uint8_t)(data[1] | (data[2] << 8));
-    if (len >= 48) {
-        uint32_t energy = (uint32_t)data[44] | ((uint32_t)data[45] << 8) |
-                          ((uint32_t)data[46] << 16) | ((uint32_t)data[47] << 24);
-        int a = (int)((energy >> 0) & 0xffu);
-        int b = (int)((energy >> 8) & 0xffu);
-        if (a)
-            a = -a;
-        else
-            a = -100;
-        if (b)
-            b = -b;
-        else
-            b = -100;
-        iwl->last_rx_rssi = (int8_t)(a > b ? a : b);
-    }
+    uint8_t ch;
+    uint8_t a = 0;
+    uint8_t b = 0;
+
+    ch = iwl_rx_phy_info_channel(data, len);
+    if (ch)
+        iwl->last_rx_channel = ch;
+    if (len >= (int)(offsetof(struct iwl_rx_phy_info, phy_flags) + 2))
+        iwl->last_rx_band24 = (iwl_rx_phy_info_flags(data, len) & RX_RES_PHY_FLAGS_BAND_24)
+                                  ? 1u
+                                  : 0u;
+    if (iwl_rx_phy_info_energy(data, len, &a, &b) == 0 && (a || b))
+        apply_rx_rssi(iwl, a, b);
 }
 
 static void parse_rx_mpdu(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
@@ -337,12 +339,26 @@ static void parse_rx_mpdu(struct iwl_ax211_priv *iwl, const uint8_t *data, int l
             (const struct iwl_rx_mpdu_res_start *)data;
         flen = (int)res->byte_count;
     } else {
+        uint8_t ch;
+        uint8_t a = 0;
+        uint8_t b = 0;
+
         flen = (int)(data[0] | ((uint16_t)data[1] << 8));
+        /* Linux mvm/rxmq.c: AX200 usa desc->v1.channel / energy_a/b. */
+        ch = iwl_rx_mpdu_v1_channel(data, len);
+        if (ch) {
+            iwl->last_rx_channel = ch;
+            iwl->last_rx_band24 = (ch > 14u) ? 0u : 1u;
+        }
+        iwl_rx_mpdu_v1_energy(data, len, &a, &b);
+        if (a || b)
+            apply_rx_rssi(iwl, a, b);
     }
     frame = data + desc_size;
     if (flen <= 0 || desc_size + (size_t)flen > (size_t)len)
         return;
     iwl_mvm_rx_scan_frame(iwl, frame, flen);
+    iwl_mvm_rx_mlme_frame(iwl, frame, flen);
 }
 
 /* --- Propiedad de slots de la cola de comandos (R4) ---------------------
@@ -420,6 +436,13 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
     iwl->phy_ctxt_added = 0;
     iwl->mac_ctxt_added = 0;
     iwl->binding_added = 0;
+    iwl->phy_channel = 0;
+    iwl->phy_band = 0;
+    iwl->mlme_auth_ok = 0;
+    iwl->mlme_assoc_ok = 0;
+    iwl->dtim_period = 0;
+    iwl->beacon_int = 0;
+    iwl->assoc_id = 0;
     iwl->lar_regdom_set = 0;
     iwl->scan_cfg_sent = 0;
     iwl->scan_active = 0;

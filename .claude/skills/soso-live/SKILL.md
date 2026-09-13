@@ -195,6 +195,28 @@ entonces los lectores siguen los límites anteriores (no una GPT a medias).
   `raw_disk` usa 128 KiB y **debe** trocear antes del TRB.
 - Bounce DMA **persistente** (`XhciController::bounce`): el asignador DMA del
   kernel no libera; uno por comando tiraba tanta RAM como datos movidos.
+- **Babble en lecturas grandes de modelo (ABIERTO, placa ROG, qwen3.8-27b).**
+  Síntoma: `bulk slot=1 dci=3 len=13 … (Babble Detected)` — babea el **CSW de
+  13 B**, no la fase de datos — tras un READ(10) profundo en p3 (LBA válida, dentro
+  de capacidad). La lectura del shard falla → `mmap-fault: lectura FS falló` →
+  **page fault** de `/bin/soso-llm` (askd, pid 3) → y luego el flush del log a la
+  ESP del mismo USB expira a 5 s en bucle (`transfer event timeout … dci=2` /
+  `EP recovered`). **QEMU no lo reproduce** (nunca babea).
+  - `mass_storage::bot_reset` (USB MS Bulk-Only §5.3.4 / Linux `usb_stor_Bulk_reset`):
+    Bulk-Only Mass Storage Reset + `CLEAR_FEATURE(HALT)` en ambos endpoints bulk +
+    `reset_and_requeue_ep`, con **reintento acotado** en `Bot::Error` de
+    READ(10)/WRITE(10). Necesario (antes sólo EP0 se recuperaba) pero **NO
+    suficiente**: en placa el `BOT reset` sale `recuperado` (control OK) y la
+    **misma LBA vuelve a fallar**; a veces el propio EP0 (dci=1) expira, y
+    `USBSTS=0x18` trae el bit **PCD** (Port Change Detect) → el dispositivo se
+    atasca/cae por debajo del BOT (posible re-enum/brown-out en lecturas
+    sostenidas grandes).
+  - Diagnóstico añadido para el próximo arranque en placa: `residuo=` en el warn de
+    bulk, `fase de datos corta n/want` en `bot_in`, `count=` y `log_ports()`
+    (PORTSC/CCS/PLS) en el error de transporte. Decidirá: fase de datos corta →
+    bug de residuo; `CCS=0` → desconexión (necesita re-enumeración); `CCS=1`+PLS en
+    error → wedge de enlace. Hipótesis pendiente de datos: lecturas encadenadas
+    (>64 KiB, TD multi-TRB) o brown-out → probar `MAX_READ_XFER = MAX_XFER`.
 - `HOSTS` es `spin::Mutex` **no reentrante**. IRQ 1 / `poll_keyboard` no puede
   `lock()` (teclado muerto en placa; QEMU SSH no lo ve). Ver architecture.
 - Se conservan todos los xHCI (un HCD por controlador, como Linux).
@@ -208,8 +230,8 @@ cargo xtask package-usb-live              # qwen3.8-27b demo (sin medir stick)
 cargo xtask flash-usb-live /dev/sdX --yes # mide, elige GGUF, dd, estira p3
 SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 # incremental (pendrive ya flasheado; no toca p3 modelos):
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
+cargo xtask flash-usb-live /dev/sdX --yes --skip-models
+cargo xtask flash-usb-live /dev/sdX --yes --only kernel
 SOSO_QEMU_LIVE=1 cargo xtask run
 cargo xtask sosolog [--drv] [/dev/sdX]    # usuario (sudo/TTY); agente: udisksctl, sección ESP
 cargo xtask test-install
@@ -226,11 +248,12 @@ cargo xtask hw-matrix show
 > flash completo. No hace `dd` de `soso-uefi.img` p1 (~31 MiB) sobre la ESP
 > live (run17). Ver `docs/DIAGNOSTICO-ROG-2026-09-10.md` run17.
 
-No `sudo cargo`: root no tiene rustup. `sudo env "PATH=$PATH" "HOME=$HOME" …`
+No `sudo cargo`: root no tiene rustup. `cargo xtask flash-usb-live …` pide
+sudo solo para grabar el disco (HOME/PATH salen de `SUDO_UID` si ya eres root).
 
-**El agente no graba el USB.** `flash-usb-live` pide contraseña de sudo; en
-Cursor no hay TTY (`sudo: a terminal is required to read the password`).
-Compila el kernel, deja el comando exacto al usuario y no reintentes `sudo`.
+**El agente no graba el USB.** El sudo del `dd` pide contraseña y en Cursor no
+hay TTY (`sudo: a terminal is required to read the password`). Compila el
+kernel, deja el comando exacto al usuario y no reintentes `sudo`.
 `lx-build` y el cargo del kernel/userspace bajo sudo escriben `target/` como
 el invocador (`SUDO_UID`), no como root. El `dd` al USB sigue siendo root.
 Leer/editar la ESP: sección **ESP en el host** (`udisksctl`, sin sudo).

@@ -61,7 +61,7 @@ sudo ./scripts/l6-wifi-vfio-test.sh       # VFIO AX211 → QEMU; GO = ALIVE real
 # Live (nouveau+iwlwifi ya van): editar SOSOWIFI.TXT en ESP p1.
 # Agente: monta p1 con udisksctl (skill soso-live, sin sudo/TTY); no uses cargo xtask sosolog.
 # El agente no graba el USB (sudo pide contraseña, no hay TTY); deja el comando:
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
+cargo xtask flash-usb-live /dev/sdX --yes --only kernel
 ```
 
 VFIO: `SOSO_WIFI_BDF` (default `80:14.3`), log `target/wifi-vfio-serial.log`.

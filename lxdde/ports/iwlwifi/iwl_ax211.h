@@ -96,8 +96,15 @@ struct iwl_ax211_priv {
     int phy_ctxt_added;
     int mac_ctxt_added;
     int binding_added;
+    uint8_t phy_channel;
+    uint8_t phy_band;
     uint8_t scan_mac_id;
     uint8_t ap_sta_id;
+    uint8_t mlme_auth_ok;
+    uint8_t mlme_assoc_ok;
+    uint8_t dtim_period;
+    uint16_t beacon_int;
+    uint16_t assoc_id;
     uint8_t scan_rx_ant;
     uint32_t phy_sku;
     uint8_t fw_valid_tx_ant;

@@ -443,8 +443,8 @@ fn rastro_de_pila(rsp: u64) {
 }
 
 /// IRQ 1 (teclado) por el **PIC legacy**. En placa la IRQ 1 va por el IOAPIC
-/// (`irq::dispatch`, vector 0x42) y este handler no llega a usarse; la regla de
-/// «solo sondear desde ring 3» está en `kbd::handle_irq`, común a ambos.
+/// (`irq::dispatch`, vector 0x42) y este handler no llega a usarse; ambos
+/// caminos llaman a `kbd::handle_irq`, que siempre vacía OBF (Linux i8042.c).
 extern "x86-interrupt" fn kbd_pic_handler(stack_frame: InterruptStackFrame) {
     // La guarda vive dentro de `kbd::handle_irq`, común a este camino y al del
     // IOAPIC; aquí solo se le pasa el privilegio del contexto interrumpido.

@@ -15,13 +15,13 @@ use crate::device::{
     alloc_dma_buffer, read_dma_buffer, DeviceDescriptor, EndpointDescriptor,
     ParsedConfiguration, UsbDevice, UsbSpeed,
     USB_DESC_CONFIGURATION, USB_DESC_DEVICE, USB_DESC_HID_REPORT, USB_DESC_HUB,
-    USB_DIR_IN, USB_DIR_OUT, USB_RECIP_DEVICE, USB_RECIP_INTERFACE,
-    USB_REQ_GET_DESCRIPTOR, USB_REQ_GET_STATUS, USB_REQ_SET_CONFIGURATION,
-    USB_TYPE_CLASS, USB_TYPE_STANDARD,
+    USB_DIR_IN, USB_DIR_OUT, USB_RECIP_DEVICE, USB_RECIP_ENDPOINT, USB_RECIP_INTERFACE,
+    USB_REQ_CLEAR_FEATURE, USB_REQ_GET_DESCRIPTOR, USB_REQ_GET_STATUS,
+    USB_REQ_SET_CONFIGURATION, USB_TYPE_CLASS, USB_TYPE_STANDARD,
 };
 use crate::hid::{
-    BootKeyboardReport, KeyEvent, KeyboardState,
-    HID_PROTOCOL_BOOT, HID_REQ_SET_IDLE, HID_REQ_SET_PROTOCOL,
+    KeyEvent, KeyboardReportLayout, KeyboardState, HID_PROTOCOL_BOOT, HID_REQ_SET_IDLE,
+    HID_REQ_SET_PROTOCOL,
 };
 use crate::mass_storage::MassStorage;
 use crate::dma::delay_us;
@@ -34,8 +34,10 @@ const EVENT_POLL_INTERVAL_US: u32 = 10;
 const CMD_TIMEOUT_US: u32 = 5_000_000;
 /// Timeout de transfer events.
 const TRANSFER_TIMEOUT_US: u32 = 5_000_000;
-/// Timeout de sondeo EP0 (GET_DESCRIPTOR); el de BOT sigue siendo 5 s.
-const EP0_TRANSFER_TIMEOUT_US: u32 = 1_000_000;
+/// Timeout EP0 (SET_CONFIGURATION, GET_DESCRIPTOR). Linux USB_CTRL_SET_TIMEOUT = 5 s.
+const EP0_TRANSFER_TIMEOUT_US: u32 = 5_000_000;
+/// Reintentos con reset de puerto si SET_CONFIGURATION falla (Linux hub.c PORT_INIT_TRIES).
+const PORT_INIT_TRIES: u32 = 4;
 /// Debounce de conexión antes de reset (Linux hub_port_debounce).
 const PORT_DEBOUNCE_US: u32 = 100_000;
 /// TRSTRCY USB2 full/low-speed (≥10 ms).
@@ -932,7 +934,7 @@ impl XhciController {
             }
         }
 
-        let dev_desc = match dev_desc {
+        let mut dev_desc = match dev_desc {
             Some(d) => d,
             None => {
                 log::warn!("xhci: failed to get device descriptor for slot {}", slot_id);
@@ -945,7 +947,7 @@ impl XhciController {
             dev.device_desc = Some(dev_desc.clone());
         }
 
-        let parsed_config = match self.get_configuration_descriptor(slot_id, 0) {
+        let mut parsed_config = match self.get_configuration_descriptor(slot_id, 0) {
             Some(c) => c,
             None => {
                 log::warn!("xhci: failed to get config descriptor for slot {}", slot_id);
@@ -954,27 +956,12 @@ impl XhciController {
             }
         };
 
-        let keyboard_info = parsed_config
+        let mut keyboard_info = parsed_config
             .find_hid_keyboard()
             .map(|(iface_num, boot, ep)| (iface_num, boot, ep.clone()));
 
-        let config_val = parsed_config.config.b_configuration_value;
         let needs_config = parsed_config.needs_full_config(&dev_desc, keyboard_info.is_some());
-        if needs_config {
-            if !self.set_configuration(slot_id, config_val, &parsed_config, &dev_desc) {
-                log::warn!("xhci: SET_CONFIGURATION failed for slot {}", slot_id);
-                if dev_desc.is_hub() || keyboard_info.is_some() || parsed_config.is_mass_storage()
-                {
-                    // Sin liberar el slot, cada dispositivo que falla se come uno
-                    // de los MaxSlots para siempre y acaba ahogando la enumeración.
-                    self.disable_slot(slot_id);
-                    return;
-                }
-            } else if let Some(ref mut dev) = self.devices[slot_id as usize] {
-                dev.config = Some(parsed_config.clone());
-                dev.configured = true;
-            }
-        } else {
+        if !needs_config {
             log::info!(
                 "xhci: omitiendo SET_CONFIGURATION slot={} VID={:#06x} (no hub/hid/ms)",
                 slot_id,
@@ -990,6 +977,90 @@ impl XhciController {
             return;
         }
 
+        let critical = dev_desc.is_hub()
+            || keyboard_info.is_some()
+            || parsed_config.is_mass_storage();
+        let mut configured = false;
+        for config_try in 0..PORT_INIT_TRIES {
+            if config_try > 0 {
+                log::info!(
+                    "xhci: reintento {}/{} puerto {} tras SET_CONFIGURATION",
+                    config_try + 1,
+                    PORT_INIT_TRIES,
+                    path.root_port
+                );
+                self.disable_slot(slot_id);
+                if path.route == 0 {
+                    self.reset_port(path.root_port);
+                } else if !self.hub_reset_child_port(path.tt_hub_slot, path.tt_port) {
+                    log::warn!(
+                        "xhci: hub child reset failed hub_slot={} port={}",
+                        path.tt_hub_slot,
+                        path.tt_port
+                    );
+                }
+                delay_us(ADDR_RETRY_DELAY_US);
+                slot_id = match self.enable_slot() {
+                    Some(s) => s,
+                    None => {
+                        log::warn!("xhci: Enable Slot failed on SET_CONFIGURATION retry");
+                        return;
+                    }
+                };
+                self.devices[slot_id as usize] = Some(UsbDevice::new(
+                    slot_id,
+                    path.root_port,
+                    speed,
+                    path.route,
+                    path.tt_hub_slot,
+                    path.tt_port,
+                ));
+                if !self.address_device(slot_id, path, speed) {
+                    continue;
+                }
+                dev_desc = match self.get_device_descriptor(slot_id) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                if let Some(ref mut dev) = self.devices[slot_id as usize] {
+                    dev.device_desc = Some(dev_desc.clone());
+                }
+                parsed_config = match self.get_configuration_descriptor(slot_id, 0) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                keyboard_info = parsed_config
+                    .find_hid_keyboard()
+                    .map(|(iface_num, boot, ep)| (iface_num, boot, ep.clone()));
+            }
+
+            let config_val = parsed_config.config.b_configuration_value;
+            if self.set_configuration(slot_id, config_val, &parsed_config, &dev_desc) {
+                if let Some(ref mut dev) = self.devices[slot_id as usize] {
+                    dev.config = Some(parsed_config.clone());
+                    dev.configured = true;
+                }
+                configured = true;
+                break;
+            }
+            log::warn!(
+                "xhci: SET_CONFIGURATION failed slot={} intento {}/{}",
+                slot_id,
+                config_try + 1,
+                PORT_INIT_TRIES
+            );
+            if !critical {
+                break;
+            }
+        }
+
+        if !configured {
+            if critical {
+                self.disable_slot(slot_id);
+            }
+            return;
+        }
+
         // Inventario + report descriptors: sólo tiene sentido con el
         // dispositivo ya configurado, y es lo que hará legible un HID ajeno al
         // protocolo boot cuando se lea el informe del USB.
@@ -1000,7 +1071,7 @@ impl XhciController {
                 "xhci: setting up HID keyboard on slot={} interface={} boot={}",
                 slot_id, iface_num, boot
             );
-            self.setup_keyboard(slot_id, iface_num, boot, ep_desc);
+            self.setup_keyboard(slot_id, iface_num, boot, ep_desc, &parsed_config);
         }
 
         if parsed_config.is_mass_storage()
@@ -1172,7 +1243,7 @@ impl XhciController {
         }
     }
 
-    fn reset_and_requeue_ep(&mut self, slot_id: u8, dci: u8) -> bool {
+    pub(crate) fn reset_and_requeue_ep(&mut self, slot_id: u8, dci: u8) -> bool {
         let trb = Trb::reset_endpoint(slot_id, dci, false);
         match self.send_command(trb) {
             Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {}
@@ -1189,6 +1260,62 @@ impl XhciController {
             }
         }
         self.set_ep_dequeue(slot_id, dci)
+    }
+
+    /// Bulk-Only Mass Storage Reset (clase 0xFF sobre EP0): reinicia la máquina
+    /// de estados del dispositivo tras un fallo de transporte, sin cambiar la
+    /// configuración. Es el paso 1 del «Reset Recovery» del USB Mass Storage
+    /// Bulk-Only §5.3.4 (Linux `usb_stor_Bulk_reset`).
+    pub(crate) fn bulk_only_reset(&mut self, slot_id: u8, iface: u8) -> bool {
+        let ring = match self.transfer_rings[slot_id as usize][1].as_mut() {
+            Some(r) => r,
+            None => return false,
+        };
+        let handles = ring.enqueue_control_transfer(
+            USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+            0xFF, // Bulk-Only Mass Storage Reset
+            0,
+            iface as u16,
+            0,
+            0,
+        );
+        self.db.ring_endpoint(slot_id, 1);
+        matches!(
+            self.wait_transfer_event_timeout(
+                slot_id,
+                Some(handles.status_trb_phys),
+                EP0_TRANSFER_TIMEOUT_US,
+            ),
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS
+        )
+    }
+
+    /// CLEAR_FEATURE(ENDPOINT_HALT) estándar sobre EP0 para el endpoint cuya
+    /// dirección USB (con bit 0x80 en los IN) va en `ep_addr`. Limpia el HALT
+    /// del lado dispositivo tras un Babble/Stall; el reajuste del anillo del HC
+    /// va aparte con `reset_and_requeue_ep`.
+    pub(crate) fn clear_endpoint_halt(&mut self, slot_id: u8, ep_addr: u16) -> bool {
+        let ring = match self.transfer_rings[slot_id as usize][1].as_mut() {
+            Some(r) => r,
+            None => return false,
+        };
+        let handles = ring.enqueue_control_transfer(
+            USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
+            USB_REQ_CLEAR_FEATURE,
+            0, // ENDPOINT_HALT
+            ep_addr,
+            0,
+            0,
+        );
+        self.db.ring_endpoint(slot_id, 1);
+        matches!(
+            self.wait_transfer_event_timeout(
+                slot_id,
+                Some(handles.status_trb_phys),
+                EP0_TRANSFER_TIMEOUT_US,
+            ),
+            Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS
+        )
     }
 
     fn drop_pending_ep(&mut self, slot_id: u8, dci: u8) {
@@ -1417,7 +1544,11 @@ impl XhciController {
         );
         self.db.ring_endpoint(slot_id, 1);
 
-        match self.wait_transfer_event(slot_id, Some(handles.status_trb_phys)) {
+        match self.wait_transfer_event_timeout(
+            slot_id,
+            Some(handles.status_trb_phys),
+            EP0_TRANSFER_TIMEOUT_US,
+        ) {
             Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
                 log::debug!("xhci: SET_CONFIGURATION USB request succeeded");
             }
@@ -1429,7 +1560,10 @@ impl XhciController {
                 return false;
             }
             None => {
-                log::warn!("xhci: SET_CONFIGURATION timeout");
+                log::warn!(
+                    "xhci: SET_CONFIGURATION timeout ({} ms)",
+                    EP0_TRANSFER_TIMEOUT_US / 1000
+                );
                 return false;
             }
         }
@@ -1681,56 +1815,80 @@ impl XhciController {
     // HID Keyboard setup
     // -----------------------------------------------------------------------
 
-    /// Set up a HID keyboard: SET_PROTOCOL(Boot), SET_IDLE, start interrupt transfers.
+    /// Set up a HID keyboard: parse report descriptor, SET_IDLE, interrupt IN.
     ///
-    /// `boot` indica si la interfaz declara la subclase Boot (bInterfaceSubClass
-    /// == 1). Linux sólo manda SET_PROTOCOL en ese caso (`usbhid_start` en
-    /// `drivers/hid/usbhid/hid-core.c`): un HID que sólo habla report protocol
-    /// —el mando de la Steam Deck emulando teclado, por ejemplo— puede
-    /// contestar STALL, y ese STALL deja el endpoint 0 en un estado del que no
-    /// merece la pena salir por una petición que además no le hace falta.
+    /// Interfaces boot (03:01:01): SET_PROTOCOL(Boot) + layout boot (ROG 18c6).
+    /// Report protocol sólo si `boot == false` (Linux usbhid_start no manda SET_PROTOCOL).
     fn setup_keyboard(
         &mut self,
         slot_id: u8,
         iface_num: u8,
         boot: bool,
         ep_desc: &EndpointDescriptor,
+        config: &ParsedConfiguration,
     ) {
         let dci = ep_desc.dci();
 
+        let (vendor, product) = self.devices[slot_id as usize]
+            .as_ref()
+            .and_then(|d| d.device_desc.as_ref())
+            .map(|d| (d.id_vendor, d.id_product))
+            .unwrap_or((0, 0));
+
         log::info!(
-            "xhci: keyboard setup: slot={} iface={} ep_addr={:#x} dci={} max_pkt={} boot={}",
-            slot_id, iface_num, ep_desc.b_endpoint_address, dci, ep_desc.w_max_packet_size, boot
+            "xhci: keyboard setup: slot={} iface={} ep_addr={:#x} dci={} max_pkt={} boot={} vid={:#06x} pid={:#06x}",
+            slot_id,
+            iface_num,
+            ep_desc.b_endpoint_address,
+            dci,
+            ep_desc.w_max_packet_size,
+            boot,
+            vendor,
+            product
         );
 
-        // SET_PROTOCOL(Boot Protocol = 0) — sólo si la interfaz lo soporta.
-        log::debug!("xhci: SET_PROTOCOL(Boot) on interface {}", iface_num);
-        if let Some(ring) = self.transfer_rings[slot_id as usize][1]
-            .as_mut()
-            .filter(|_| boot)
-        {
-            let handles = ring.enqueue_control_transfer(
-                USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-                HID_REQ_SET_PROTOCOL,
-                HID_PROTOCOL_BOOT,
-                iface_num as u16,
-                0,
-                0,
-            );
-            self.db.ring_endpoint(slot_id, 1);
+        let rdesc_len = config
+            .hid_descriptors
+            .iter()
+            .find(|(n, _)| *n == iface_num)
+            .map(|(_, h)| h.report_descriptor_length)
+            .unwrap_or(0);
 
-            match self.wait_transfer_event(slot_id, Some(handles.status_trb_phys)) {
-                Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
-                    log::info!("xhci: SET_PROTOCOL(Boot) succeeded");
-                }
-                Some(evt) => {
-                    log::warn!("xhci: SET_PROTOCOL(Boot) failed: code={}", evt.completion_code());
-                }
-                None => {
-                    log::warn!("xhci: SET_PROTOCOL(Boot) timeout");
+        let layout = if boot {
+            log::debug!("xhci: SET_PROTOCOL(Boot) on interface {}", iface_num);
+            if let Some(ring) = self.transfer_rings[slot_id as usize][1].as_mut() {
+                let handles = ring.enqueue_control_transfer(
+                    USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                    HID_REQ_SET_PROTOCOL,
+                    HID_PROTOCOL_BOOT,
+                    iface_num as u16,
+                    0,
+                    0,
+                );
+                self.db.ring_endpoint(slot_id, 1);
+                match self.wait_transfer_event(slot_id, Some(handles.status_trb_phys)) {
+                    Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
+                        log::info!("xhci: SET_PROTOCOL(Boot) succeeded");
+                    }
+                    Some(evt) => {
+                        log::warn!(
+                            "xhci: SET_PROTOCOL(Boot) code={} (continuing with boot layout)",
+                            evt.completion_code()
+                        );
+                    }
+                    None => {
+                        log::warn!("xhci: SET_PROTOCOL(Boot) timeout (continuing with boot layout)");
+                    }
                 }
             }
-        }
+            KeyboardReportLayout::boot()
+        } else if rdesc_len > 0 {
+            self.get_hid_report_descriptor(slot_id, iface_num, rdesc_len)
+                .map(|rdesc| KeyboardReportLayout::from_descriptor(&rdesc, vendor, product))
+                .unwrap_or_else(KeyboardReportLayout::boot)
+        } else {
+            KeyboardReportLayout::boot()
+        };
 
         // SET_IDLE(0) — don't wait for changes, report constantly
         log::debug!("xhci: SET_IDLE(0) on interface {}", iface_num);
@@ -1787,11 +1945,17 @@ impl XhciController {
             report_buf_va: report_va,
             report_buf_phys: report_phys,
             report_buf_len: report_len,
-            state: KeyboardState::new(),
+            state: KeyboardState::new(layout),
             transfer_pending: true,
         });
 
-        log::info!("xhci: keyboard ready on slot={} dci={}", slot_id, dci);
+        log::info!(
+            "xhci: keyboard ready on slot={} dci={} ({:#06x}:{:#06x})",
+            slot_id,
+            dci,
+            vendor,
+            product
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1852,19 +2016,7 @@ impl XhciController {
 
         if code == TRB_COMPLETION_SUCCESS || code == TRB_COMPLETION_SHORT_PACKET {
             let report_data = unsafe { read_dma_buffer(report_va, report_len) };
-            if let Some(report) = BootKeyboardReport::parse(&report_data) {
-                log::trace!(
-                    "xhci: keyboard report: mods={:#x} keys=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
-                    report.modifiers,
-                    report.keycodes[0],
-                    report.keycodes[1],
-                    report.keycodes[2],
-                    report.keycodes[3],
-                    report.keycodes[4],
-                    report.keycodes[5],
-                );
-                self.keyboards[idx].state.process_report(&report);
-            }
+            self.keyboards[idx].state.process_raw_report(&report_data);
         } else {
             log::warn!("xhci: keyboard transfer error: code={}", code);
         }
@@ -2024,6 +2176,11 @@ impl XhciController {
     /// Check if a keyboard has been found and initialized.
     pub fn has_keyboard(&self) -> bool {
         !self.keyboards.is_empty()
+    }
+
+    /// Número de teclados HID inicializados en este controlador.
+    pub fn keyboard_count(&self) -> usize {
+        self.keyboards.len()
     }
 
     // -----------------------------------------------------------------------

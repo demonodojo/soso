@@ -506,7 +506,7 @@ Archivo: soso-live.img ({:.1} GiB)
 
    O con instalador y modelo según tamaño del stick:
 
-   sudo cargo xtask flash-usb-live /dev/sdX --yes
+   cargo xtask flash-usb-live /dev/sdX --yes
 
 2) UEFI → arrancar una vez desde USB (F12 / Boot menu).
 
@@ -534,7 +534,7 @@ Archivo: soso-live.img ({:.1} GiB)
 
    sudo ./install-soso.sh /dev/nvme1n1 --yes
 
-6) Flashear USB con instalador: sudo cargo xtask flash-usb-live /dev/sdX --yes
+6) Flashear USB con instalador: cargo xtask flash-usb-live /dev/sdX --yes
    (mide el pendrive, elige el mejor modelo GGUF llama que quepa, estira p3 al
    sobrante del stick; p4 SOSOINSTALL va en la imagen, tras el rootfs)
 
@@ -1187,7 +1187,7 @@ Archivos en este directorio:
 
 Alternativa con cargo (misma máquina de desarrollo):
 
-   sudo cargo xtask install-disk /dev/nvme1n1 --yes
+   cargo xtask install-disk /dev/nvme1n1 --yes
 
 Desinstalar entrada GRUB:
 

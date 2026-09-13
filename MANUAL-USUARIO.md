@@ -859,9 +859,9 @@ Regenera la imagen live tras actualizar el kernel:
 cambiaste kernel o rootfs, no hace falta reescribir los modelos (p3):
 
 ```sh
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only rootfs
+cargo xtask flash-usb-live /dev/sdX --yes --skip-models
+cargo xtask flash-usb-live /dev/sdX --yes --only kernel
+cargo xtask flash-usb-live /dev/sdX --yes --only rootfs
 ```
 
 `--skip-models` actualiza ESP (p1) y rootfs (p2) sin tocar sosomfs. Preserva
@@ -1577,7 +1577,7 @@ mientras está pendiente y `DONE Boot0007 soso` cuando el shim la ha atendido.
 
 ```sh
 lsblk                                        # identifica el disco vacío
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask install-disk /dev/nvme1n1 --yes
+cargo xtask install-disk /dev/nvme1n1 --yes
 ```
 
 Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
@@ -1587,7 +1587,7 @@ Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
 
 ```sh
 # En la máquina de desarrollo:
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
+cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
 
 # Escalera automática (Q4_K_M):
 #   8 GB  → tinyllama
@@ -1595,7 +1595,7 @@ sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes   #
 #  32 GB+ → qwen3.8-27b
 # La primera vez descarga desde Hugging Face (puede tardar horas en modelos grandes).
 # Sin descargas: el mayor ya materializado que quepa en el stick:
-# sudo env SOSO_LIVE_OFFLINE=1 "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes
+# sudo env SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 
 # Sin pendrive conectado (qwen3.8-27b) o simular capacidad:
 cargo xtask package-usb-live
@@ -1608,7 +1608,7 @@ SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
 # SOSO_MODELS_DIR=target/mi-modelo cargo xtask flash-usb-live /dev/sdX --yes
 
 # Tras el primer flash: actualizar solo kernel/rootfs (sin reescribir modelos):
-# sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
+# cargo xtask flash-usb-live /dev/sdX --yes --skip-models
 
 # Instalar en disco interno desde Linux (USB conectado):
 lsblk

@@ -47,7 +47,7 @@ Actualiza `MANUAL-USUARIO.md` en la **misma tarea** que cambia la funcionalidad 
 - Bloques de código con comandos completos (sin `...`).
 - Sin jerga de desarrollo (CoW, ring 3, sunset, etc.) salvo en la introducción breve.
 - Mencionar limitaciones conocidas cuando afecten al usuario (monousuario, etc.).
-- Flash/install desde Linux: **`sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask …`**, nunca `sudo cargo`.
+- Flash/install desde Linux: **`cargo xtask flash-usb-live` / `install-disk`** (sudo solo para el disco), nunca `sudo cargo`.
 
 ## Comandos documentados hoy
 

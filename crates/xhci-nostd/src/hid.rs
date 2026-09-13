@@ -185,6 +185,254 @@ impl BootKeyboardReport {
 }
 
 // ---------------------------------------------------------------------------
+// Report descriptor layout (report protocol)
+// ---------------------------------------------------------------------------
+
+/// Layout de un informe HID de teclado (boot o report protocol).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyboardReportLayout {
+    /// Report ID si el descriptor lo declara.
+    pub report_id: Option<u8>,
+    /// Longitud total del informe en el bus (incluye byte de ID).
+    pub report_len: usize,
+    pub modifier_offset: usize,
+    pub reserved_offset: usize,
+    pub keys_offset: usize,
+    pub key_count: usize,
+}
+
+impl KeyboardReportLayout {
+    /// Layout boot de 8 bytes sin Report ID.
+    pub fn boot() -> Self {
+        Self {
+            report_id: None,
+            report_len: 8,
+            modifier_offset: 0,
+            reserved_offset: 1,
+            keys_offset: 2,
+            key_count: 6,
+        }
+    }
+
+    /// Parsea el report descriptor HID y localiza la colección teclado.
+    pub fn from_descriptor(rdesc: &[u8], vendor_id: u16, product_id: u16) -> Self {
+        let mut fixed = rdesc.to_vec();
+        fix_asus_nkey_descriptor(&mut fixed, vendor_id, product_id);
+        if let Some(layout) = parse_keyboard_layout(&fixed) {
+            log::info!(
+                "xhci: keyboard report layout id={:?} len={} keys={}",
+                layout.report_id,
+                layout.report_len,
+                layout.key_count
+            );
+            return layout;
+        }
+        log::debug!("xhci: keyboard layout fallback to boot protocol");
+        Self::boot()
+    }
+
+    /// Extrae un informe boot-compatible desde datos crudos (con o sin Report ID).
+    pub fn extract_report(&self, data: &[u8]) -> Option<BootKeyboardReport> {
+        let payload = if let Some(id) = self.report_id {
+            if data.first().copied()? != id {
+                return None;
+            }
+            &data[1..]
+        } else {
+            data
+        };
+
+        if payload.len() < self.report_len.saturating_sub(self.report_id.map(|_| 1).unwrap_or(0)) {
+            return None;
+        }
+
+        let modifiers = payload.get(self.modifier_offset).copied()?;
+        let reserved = payload.get(self.reserved_offset).copied().unwrap_or(0);
+        let mut keycodes = [0u8; 6];
+        for (i, slot) in keycodes.iter_mut().enumerate() {
+            *slot = payload.get(self.keys_offset + i).copied().unwrap_or(0);
+        }
+        if self.key_count < 6 {
+            for slot in &mut keycodes[self.key_count..] {
+                *slot = 0;
+            }
+        }
+
+        Some(BootKeyboardReport {
+            modifiers,
+            reserved,
+            keycodes,
+        })
+    }
+}
+
+/// Quirk Linux `hid-asus`: Report Count erróneo en la parte 0x5a del descriptor N-Key.
+pub fn fix_asus_nkey_descriptor(rdesc: &mut [u8], vendor_id: u16, product_id: u16) {
+    if vendor_id != 0x0b05 {
+        return;
+    }
+    let nkey = product_id == 0x1866;
+    if nkey && rdesc.len() == 331 && rdesc.len() > 205 && rdesc[190] == 0x85 && rdesc[191] == 0x5a
+        && rdesc[204] == 0x95 && rdesc[205] == 0x05
+    {
+        log::debug!("xhci: fixing ASUS N-KEY report descriptor (331 B)");
+        rdesc[205] = 0x01;
+    }
+    if nkey && rdesc.len() > 15 {
+        for i in 0..rdesc.len().saturating_sub(15) {
+            if rdesc[i] == 0x85
+                && rdesc[i + 1] == 0x5a
+                && rdesc[i + 14] == 0x95
+                && rdesc[i + 15] == 0x05
+            {
+                log::debug!("xhci: fixing ASUS N-KEY report descriptor at offset {}", i);
+                rdesc[i + 15] = 0x01;
+                break;
+            }
+        }
+    }
+}
+
+const HID_USAGE_PAGE_GENERIC_DESKTOP: u16 = 0x01;
+const HID_USAGE_PAGE_KEYBOARD: u16 = 0x07;
+const HID_USAGE_KEYBOARD: u16 = 0x06;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FieldLayout {
+    modifier_offset: usize,
+    modifier_bytes: usize,
+    reserved_offset: Option<usize>,
+    keys_offset: usize,
+    key_count: usize,
+    report_len: usize,
+}
+
+fn parse_keyboard_layout(rdesc: &[u8]) -> Option<KeyboardReportLayout> {
+    let mut best: Option<(u8, FieldLayout)> = None;
+    let mut i = 0usize;
+    let mut report_id: Option<u8> = None;
+    let mut usage_page: u16 = 0;
+    let mut report_size: u32 = 0;
+    let mut report_count: u32 = 0;
+    let mut usage_min: u32 = 0;
+    let mut usage_max: u32 = 0;
+    let mut collection_depth: u32 = 0;
+    let mut in_keyboard_app = false;
+    let mut bit_offset: usize = 0;
+    let mut field = FieldLayout::default();
+
+    while i < rdesc.len() {
+        let head = rdesc[i];
+        i += 1;
+        let data_size = match head & 0x03 {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            _ => 0,
+        };
+        if i + data_size > rdesc.len() {
+            break;
+        }
+        let mut data = 0u32;
+        for b in 0..data_size {
+            data |= (rdesc[i + b] as u32) << (8 * b);
+        }
+        i += data_size;
+
+        let item_type = (head >> 2) & 0x03;
+        let tag = head >> 4;
+
+        match (item_type, tag) {
+            (1, 0) => usage_page = data as u16,                 // Usage Page
+            (1, 8) => {
+                report_id = Some(data as u8);
+                bit_offset = 0;
+                field = FieldLayout::default();
+            }
+            (1, 7) => report_size = data, // Report Size
+            (1, 9) => report_count = data, // Report Count
+            (2, 0) => {
+                usage_min = data;
+                usage_max = data;
+            }
+            (2, 1) => usage_min = data,                          // Usage Minimum
+            (2, 2) => usage_max = data,                          // Usage Maximum
+            (0, 10) => {
+                // Collection
+                collection_depth += 1;
+                if collection_depth == 1
+                    && usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP
+                    && usage_min == HID_USAGE_KEYBOARD as u32
+                {
+                    in_keyboard_app = true;
+                    bit_offset = 0;
+                    field = FieldLayout::default();
+                }
+            }
+            (0, 12) => {
+                // End Collection
+                if in_keyboard_app && collection_depth == 1 {
+                    let report_len = (bit_offset + 7) / 8;
+                    if field.key_count > 0 && report_len > 0 {
+                        let id = report_id.unwrap_or(0);
+                        let score = field.key_count;
+                        let replace = best
+                            .as_ref()
+                            .map(|(_, f)| score > f.key_count)
+                            .unwrap_or(true);
+                        if replace {
+                            best = Some((
+                                id,
+                                FieldLayout {
+                                    report_len,
+                                    ..field
+                                },
+                            ));
+                        }
+                    }
+                    in_keyboard_app = false;
+                    field = FieldLayout::default();
+                    bit_offset = 0;
+                }
+                collection_depth = collection_depth.saturating_sub(1);
+            }
+            (0, 8) if in_keyboard_app => {
+                // Input
+                let byte_off = bit_offset / 8;
+                if usage_page == HID_USAGE_PAGE_KEYBOARD {
+                    if report_size == 1
+                        && report_count == 8
+                        && usage_min == 0xE0
+                        && usage_max == 0xE7
+                    {
+                        field.modifier_offset = byte_off;
+                        field.modifier_bytes = 1;
+                    } else if report_size == 8 && report_count == 1 && (data & 0x01) != 0 {
+                        field.reserved_offset = Some(byte_off);
+                    } else if report_size == 8 && report_count >= 1 && (data & 0x01) == 0 {
+                        field.keys_offset = byte_off;
+                        field.key_count = report_count as usize;
+                    }
+                }
+                bit_offset += (report_size * report_count) as usize;
+            }
+            _ => {}
+        }
+    }
+
+    let (id, f) = best?;
+    Some(KeyboardReportLayout {
+        report_id: if report_id.is_some() { Some(id) } else { None },
+        report_len: f.report_len + if report_id.is_some() { 1 } else { 0 },
+        modifier_offset: f.modifier_offset,
+        reserved_offset: f.reserved_offset.unwrap_or(f.modifier_offset + 1),
+        keys_offset: f.keys_offset,
+        key_count: f.key_count,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Keyboard state tracker
 // ---------------------------------------------------------------------------
 
@@ -195,11 +443,13 @@ pub struct KeyboardState {
     prev_report: BootKeyboardReport,
     /// Queue of events to be consumed by the kernel
     event_queue: VecDeque<KeyEvent>,
+    /// Layout parseado del report descriptor (boot o report protocol).
+    layout: KeyboardReportLayout,
 }
 
 impl KeyboardState {
     /// Create a new keyboard state tracker.
-    pub fn new() -> Self {
+    pub fn new(layout: KeyboardReportLayout) -> Self {
         log::debug!("xhci: keyboard state tracker initialized");
         Self {
             prev_report: BootKeyboardReport {
@@ -208,6 +458,14 @@ impl KeyboardState {
                 keycodes: [0; 6],
             },
             event_queue: VecDeque::new(),
+            layout,
+        }
+    }
+
+    /// Procesa un informe crudo según el layout parseado del descriptor.
+    pub fn process_raw_report(&mut self, data: &[u8]) {
+        if let Some(report) = self.layout.extract_report(data) {
+            self.process_report(&report);
         }
     }
 
@@ -324,5 +582,119 @@ impl KeyboardState {
     /// Get the current modifier state.
     pub fn modifiers(&self) -> u8 {
         self.prev_report.modifiers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Descriptor mínimo con Report ID 0x04 (System Control en 0b05:1866, no teclado).
+    fn sample_report_id4_descriptor() -> Vec<u8> {
+        vec![
+            0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x04, 0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7,
+            0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x75, 0x08, 0x95, 0x01,
+            0x81, 0x01, 0x75, 0x08, 0x95, 0x06, 0x81, 0x00, 0xc0,
+        ]
+    }
+
+    /// Report descriptor real del teclado ROG 0b05:18c6 (231 B, SOSODRV run5).
+    fn sample_18c6_descriptor() -> Vec<u8> {
+        vec![
+            0x06, 0x89, 0xff, 0x09, 0x10, 0xa1, 0x01, 0x85, 0xa5, 0x09, 0x01, 0x15, 0x00, 0x26,
+            0xff, 0x00, 0x75, 0x08, 0x95, 0x10, 0xb1, 0x00, 0xc0, 0x06, 0x82, 0xff, 0x09, 0xcf,
+            0xa1, 0x01, 0x85, 0xc1, 0x09, 0x62, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95,
+            0x3c, 0xb1, 0x02, 0x09, 0x66, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x10,
+            0x81, 0x02, 0x09, 0x61, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x3c, 0x91,
+            0x02, 0x85, 0xc2, 0x09, 0x8a, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x10,
+            0x81, 0x02, 0x09, 0x8e, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x10, 0x91,
+            0x02, 0xc0, 0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x01, 0x75, 0x01, 0x95, 0x08,
+            0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x81, 0x02, 0x95, 0x01,
+            0x75, 0x08, 0x81, 0x03, 0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05,
+            0x91, 0x02, 0x95, 0x01, 0x75, 0x03, 0x91, 0x03, 0x05, 0x07, 0x19, 0x00, 0x29, 0xff,
+            0x15, 0x00, 0x25, 0x00, 0x95, 0x1e, 0x75, 0x08, 0x81, 0x00, 0x05, 0x07, 0x19, 0x00,
+            0x29, 0xdf, 0x15, 0x00, 0x25, 0x01, 0x95, 0xe0, 0x75, 0x01, 0x81, 0x02, 0xc0, 0x05,
+            0x0c, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x02, 0x19, 0x00, 0x2a, 0x3c, 0x02, 0x15, 0x00,
+            0x26, 0x3c, 0x02, 0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xc0, 0x05, 0x01, 0x09, 0x80,
+            0xa1, 0x01, 0x85, 0x04, 0x19, 0x81, 0x29, 0x83, 0x15, 0x00, 0x25, 0x01, 0x95, 0x08,
+            0x75, 0x01, 0x81, 0x02, 0xc0,
+        ]
+    }
+
+    #[test]
+    fn report_id4_1866_no_es_coleccion_teclado() {
+        // System Control (Usage 0x80) con Report ID 0x04 — como en el 1866 real, no teclado.
+        let rdesc = vec![
+            0x05, 0x01, 0x09, 0x80, 0xa1, 0x01, 0x85, 0x04, 0x19, 0x81, 0x29, 0x83, 0x15, 0x00,
+            0x25, 0x01, 0x95, 0x08, 0x75, 0x01, 0x81, 0x02, 0xc0,
+        ];
+        let layout = KeyboardReportLayout::from_descriptor(&rdesc, 0x0b05, 0x1866);
+        assert_eq!(layout, KeyboardReportLayout::boot());
+    }
+
+    #[test]
+    fn rog_18c6_descriptor_layout() {
+        let layout =
+            KeyboardReportLayout::from_descriptor(&sample_18c6_descriptor(), 0x0b05, 0x18c6);
+        assert_eq!(layout.report_id, Some(0x01));
+        // Offsets relativos al payload tras el byte de Report ID.
+        assert_eq!(layout.modifier_offset, 0);
+        assert_eq!(layout.keys_offset, 2);
+        assert_eq!(layout.key_count, 30);
+    }
+
+    #[test]
+    fn rog_18c6_shift_a_report_protocol() {
+        let layout =
+            KeyboardReportLayout::from_descriptor(&sample_18c6_descriptor(), 0x0b05, 0x18c6);
+        let mut report = vec![0u8; layout.report_len];
+        report[0] = 0x01;
+        report[1] = 0x02;
+        report[3] = 0x04;
+        let boot = layout.extract_report(&report).expect("extract");
+        assert_eq!(boot.modifiers, 0x02);
+        assert_eq!(boot.keycodes[0], 0x04);
+        assert_eq!(hid_usage_to_scancode(0x04), 0x1e);
+    }
+
+    #[test]
+    fn rog_18c6_boot_protocol_shift_a() {
+        let layout = KeyboardReportLayout::boot();
+        let report = [0x02, 0x00, 0x04, 0, 0, 0, 0, 0];
+        let mut state = KeyboardState::new(layout);
+        state.process_raw_report(&report);
+        let mut key_a = None;
+        while let Some(evt) = state.next_event() {
+            if evt.usage_id == 0x04 && evt.pressed {
+                key_a = Some(evt);
+                break;
+            }
+        }
+        let evt = key_a.expect("key a pressed");
+        assert_eq!(evt.scancode, 0x1e);
+    }
+
+    #[test]
+    fn boot_layout_sin_report_id() {
+        let layout = KeyboardReportLayout::boot();
+        let report = [0x00, 0x00, 0x1e, 0, 0, 0, 0, 0];
+        let boot = layout.extract_report(&report).expect("extract");
+        assert_eq!(boot.keycodes[0], 0x1e);
+    }
+
+    #[test]
+    fn asus_nkey_quirk_fixes_0x5a_count() {
+        let mut rdesc = sample_report_id4_descriptor();
+        let base = rdesc.len();
+        rdesc.extend_from_slice(&[
+            0x85, 0x5a, 0x09, 0x00, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x81, 0x00, 0x00,
+            0x95, 0x05,
+        ]);
+        assert_eq!(rdesc[base + 14], 0x95);
+        assert_eq!(rdesc[base + 15], 0x05);
+        fix_asus_nkey_descriptor(&mut rdesc, 0x0b05, 0x1866);
+        assert_eq!(rdesc[base + 15], 0x01);
     }
 }

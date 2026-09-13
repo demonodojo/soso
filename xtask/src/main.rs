@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 fn main() {
+    as_user::restore_invoking_env();
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "run".into());
     match cmd.as_str() {
         "build" => {

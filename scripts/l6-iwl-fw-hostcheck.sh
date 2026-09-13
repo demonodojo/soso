@@ -110,7 +110,8 @@ build binding_power \
 
 build assoc_abi \
     "$root/tools/iwl-hostcheck/assoc_abi_test.c" \
-    "$src/iwl_mvm_assoc.c"
+    "$src/iwl_mvm_assoc.c" \
+    "$src/iwl_mvm_up.c"
 echo "=== iwl assoc ABI hostcheck ==="
 run assoc_abi
 

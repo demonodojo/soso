@@ -26,6 +26,7 @@ pub enum DeviceConfirm {
 }
 
 pub fn run(args: &[String]) {
+    crate::as_user::restore_invoking_env();
     let mut device: Option<PathBuf> = None;
     let mut yes = false;
     let mut no_grub = false;
@@ -52,11 +53,19 @@ pub fn run(args: &[String]) {
         usage();
     };
 
-    let root = super::project_root();
-    super::build_user();
-    let _ = super::build_image();
-    package_live::run();
+    let write_only = crate::as_user::device_io_phase();
+    if !crate::as_user::is_root() {
+        validate_device(&dev, yes, None, DeviceConfirm::WipeDisk, false);
+        prepare_live_image();
+        crate::as_user::exec_elevated();
+    }
 
+    crate::as_user::restore_invoking_env();
+    if !write_only {
+        prepare_live_image();
+    }
+
+    let root = super::project_root();
     let live = package_live::live_image_path();
     if !live.exists() {
         eprintln!("install-disk: falta {}", live.display());
@@ -75,12 +84,23 @@ pub fn run(args: &[String]) {
     );
 }
 
+fn prepare_live_image() {
+    super::build_user();
+    let _ = super::build_image();
+    package_live::run();
+}
+
 pub fn install_from_image(live: &Path, dev: &Path, root: &Path, opts: InstallOpts) {
+    if let Err(e) = unmount_partitions(dev) {
+        eprintln!("install-disk: {e}");
+        exit(1);
+    }
     validate_device(
         dev,
         opts.yes,
         opts.exclude_disk.as_deref(),
         DeviceConfirm::WipeDisk,
+        true,
     );
 
     println!("install-disk: escribiendo {} → {}", live.display(), dev.display());
@@ -131,7 +151,7 @@ fn usage() -> ! {
          \n\
          Ejemplo:\n\
            lsblk\n\
-           sudo cargo xtask install-disk /dev/nvme1n1 --yes\n\
+           cargo xtask install-disk /dev/nvme1n1 --yes\n\
          \n\
          Escribe soso-live.img en el disco indicado y añade una entrada GRUB \"soso\".\n\
          Requiere UEFI, sgdisk, dd, blkid y permisos root para GRUB."
@@ -144,6 +164,7 @@ pub(crate) fn validate_device(
     yes: bool,
     exclude: Option<&Path>,
     confirm: DeviceConfirm,
+    check_mounted: bool,
 ) {
     if !dev.exists() {
         eprintln!("install-disk: no existe {}", dev.display());
@@ -174,12 +195,14 @@ pub(crate) fn validate_device(
         exit(1);
     }
 
-    if let Some(mounted) = mounted_partitions(dev) {
-        eprintln!("install-disk: particiones montadas en {}:", dev.display());
-        for m in mounted {
-            eprintln!("  {m}");
+    if check_mounted {
+        if let Some(mounted) = mounted_partitions(dev) {
+            eprintln!("install-disk: particiones montadas en {}:", dev.display());
+            for m in mounted {
+                eprintln!("  {m}");
+            }
+            exit(1);
         }
-        exit(1);
     }
 
     if !yes {

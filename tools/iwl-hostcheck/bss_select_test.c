@@ -9,6 +9,7 @@
  */
 #include <stdio.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -144,6 +145,15 @@ static void beacon_ssid(struct beacon *b, const char *ssid)
 static void beacon_ds(struct beacon *b, uint8_t chan)
 {
     beacon_ie(b, WLAN_EID_DS_PARAMS, &chan, 1);
+}
+
+static void beacon_ht(struct beacon *b, uint8_t primary)
+{
+    uint8_t ie[sizeof(struct ieee80211_ht_operation)];
+
+    memset(ie, 0, sizeof(ie));
+    ie[0] = primary;
+    beacon_ie(b, WLAN_EID_HT_OPERATION, ie, (unsigned)sizeof(ie));
 }
 
 /* RSN IE con un cifrado por pares y un AKM. */
@@ -384,6 +394,87 @@ static int check_seleccion(void)
     return 0;
 }
 
+static int check_canal_ht(void)
+{
+    struct beacon b;
+    struct iwl_ax211_bss bss;
+    struct iwl_ax211_priv iwl;
+    const uint8_t bssid[6] = { 0x02, 0, 0, 0, 0, 0x40 };
+    uint8_t phy[offsetof(struct iwl_rx_phy_info, non_cfg_phy) + 8];
+    uint8_t mpdu[IWL_RX_DESC_SIZE_V1];
+
+    /* 5 GHz sin DS Params: Linux toma primary_chan del HT Operation. */
+    beacon_init(&b, bssid, WLAN_CAPABILITY_PRIVACY);
+    beacon_ssid(&b, "Rutilo");
+    beacon_ht(&b, 40);
+    if (iwl_mvm_parse_bss(b.buf, (int)b.len, &bss) <= 0) {
+        fprintf(stderr, "beacon 5 GHz con HT no parseado\n");
+        return -1;
+    }
+    if (bss.channel != 40 || bss.band24) {
+        fprintf(stderr, "HT 5 GHz: ch=%u band24=%u\n", bss.channel, bss.band24);
+        return -1;
+    }
+
+    /* DS Params manda sobre HT (Linux scan.c cfg80211_get_ies_channel_number). */
+    beacon_init(&b, bssid, 0);
+    beacon_ssid(&b, "Casa");
+    beacon_ds(&b, 6);
+    beacon_ht(&b, 40);
+    if (iwl_mvm_parse_bss(b.buf, (int)b.len, &bss) <= 0)
+        return -1;
+    if (bss.channel != 6 || !bss.band24) {
+        fprintf(stderr, "DS+HT: ch=%u band24=%u (DS debe ganar)\n",
+                bss.channel, bss.band24);
+        return -1;
+    }
+
+    /* last_rx_channel basura (el bug de RX_PHY) no pisa el HT. */
+    memset(&iwl, 0, sizeof(iwl));
+    iwl.scan_active = 1;
+    iwl.last_rx_channel = 3;
+    iwl.last_rx_rssi = -50;
+    g_iwl_target = &iwl;
+    beacon_init(&b, bssid, WLAN_CAPABILITY_PRIVACY);
+    beacon_ssid(&b, "Rutilo");
+    beacon_ht(&b, 40);
+    iwl_mvm_rx_scan_frame(&iwl, b.buf, (int)b.len);
+    if (iwl.scan_count != 1 || iwl.scan[0].channel != 40) {
+        fprintf(stderr, "scan HT: count=%d ch=%u\n",
+                iwl.scan_count, iwl.scan_count ? iwl.scan[0].channel : 0);
+        return -1;
+    }
+
+    if (offsetof(struct iwl_rx_phy_info, channel) != 22) {
+        fprintf(stderr, "RX_PHY channel off %zu\n",
+                offsetof(struct iwl_rx_phy_info, channel));
+        return -1;
+    }
+    memset(phy, 0, sizeof(phy));
+    phy[22] = 40;
+    if (iwl_rx_phy_info_channel(phy, (int)sizeof(phy)) != 40) {
+        fprintf(stderr, "RX_PHY channel mal leído\n");
+        return -1;
+    }
+
+    if (offsetof(struct iwl_rx_mpdu_desc, v1.channel) != 34 ||
+        sizeof(struct iwl_rx_mpdu_desc) != IWL_RX_DESC_SIZE_V1) {
+        fprintf(stderr, "RX_MPDU v1 layout: ch@%zu sz=%zu\n",
+                offsetof(struct iwl_rx_mpdu_desc, v1.channel),
+                sizeof(struct iwl_rx_mpdu_desc));
+        return -1;
+    }
+    memset(mpdu, 0, sizeof(mpdu));
+    mpdu[34] = 40;
+    if (iwl_rx_mpdu_v1_channel(mpdu, (int)sizeof(mpdu)) != 40) {
+        fprintf(stderr, "RX_MPDU v1.channel mal leído\n");
+        return -1;
+    }
+
+    puts("OK: canal HT Operation, DS manda, RX_PHY@22 y MPDU v1.channel");
+    return 0;
+}
+
 int main(void)
 {
     if (check_abierta() != 0)
@@ -391,6 +482,8 @@ int main(void)
     if (check_protegidas() != 0)
         return 1;
     if (check_seleccion() != 0)
+        return 1;
+    if (check_canal_ht() != 0)
         return 1;
     return 0;
 }

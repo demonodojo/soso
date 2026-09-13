@@ -19,23 +19,6 @@ struct iwl_sf_cfg_cmd {
     uint32_t full_on_timeouts[5][2];
 } __attribute__((packed));
 
-struct iwl_phy_context_cmd_v1 {
-    uint32_t id_and_color;
-    uint32_t action;
-    uint32_t apply_time;
-    uint32_t tx_param_color;
-    struct {
-        uint8_t band;
-        uint8_t channel;
-        uint8_t width;
-        uint8_t ctrl_pos;
-    } ci;
-    uint32_t txchain_info;
-    uint32_t rxchain_info;
-    uint32_t acquisition_data;
-    uint32_t dsp_cfg_flags;
-} __attribute__((packed));
-
 static uint8_t g_mcr_pool[IWL_CMD_SLOT_SIZE * IWL_CMD_QUEUE_SIZE];
 static uint8_t g_mtr_pool[IWL_TFH_TFD_SIZE * IWL_CMD_QUEUE_SIZE];
 static uint32_t g_mmio_stub[0x500];
@@ -81,6 +64,13 @@ void lx_iwlwifi_set_alive(int alive) { (void)alive; }
 void iwl_ax211_add_bss(const struct iwl_ax211_bss *bss) { (void)bss; }
 
 void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len)
+{
+    (void)iwl;
+    (void)frame;
+    (void)len;
+}
+
+void iwl_mvm_rx_mlme_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len)
 {
     (void)iwl;
     (void)frame;

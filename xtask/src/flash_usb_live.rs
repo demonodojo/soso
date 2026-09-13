@@ -18,36 +18,50 @@ enum FlashPart {
 }
 
 pub fn run(args: &[String]) {
+    crate::as_user::restore_invoking_env();
     let parsed = parse_args(args);
-    let Some(usb) = parsed.device else {
+    let Some(ref usb) = parsed.device else {
         usage();
     };
 
-    if let Err(e) = install_disk::unmount_partitions(&usb) {
-        eprintln!("flash-usb-live: {e}");
-        exit(1);
-    }
     let confirm = if parsed.incremental {
         incremental_confirm(&parsed.parts)
     } else {
         install_disk::DeviceConfirm::WipeDisk
     };
-    install_disk::validate_device(&usb, parsed.yes, None, confirm);
+    let write_only = crate::as_user::device_io_phase();
 
-    let disk_bytes = blockdev_bytes(&usb).unwrap_or_else(|| {
-        eprintln!("flash-usb-live: no pude leer el tamaño de {}", usb.display());
+    if !crate::as_user::is_root() {
+        install_disk::validate_device(&usb, parsed.yes, None, confirm, false);
+        prepare(&usb, &parsed);
+        crate::as_user::exec_elevated();
+    }
+
+    crate::as_user::restore_invoking_env();
+    if let Err(e) = install_disk::unmount_partitions(&usb) {
+        eprintln!("flash-usb-live: {e}");
         exit(1);
-    });
-    println!(
-        "flash-usb-live: pendrive {} ({})",
-        usb.display(),
-        crate::live_models::format_bytes(disk_bytes)
-    );
+    }
+    install_disk::validate_device(&usb, parsed.yes, None, confirm, true);
+    if !write_only {
+        prepare(&usb, &parsed);
+    }
+    write_usb(&usb, &parsed);
+}
 
+fn prepare(usb: &Path, parsed: &ParsedArgs) {
     if parsed.incremental {
-        run_incremental(&usb, &parsed.parts);
+        prepare_incremental(usb, &parsed.parts);
     } else {
-        run_full(&usb, disk_bytes);
+        prepare_full(usb);
+    }
+}
+
+fn write_usb(usb: &Path, parsed: &ParsedArgs) {
+    if parsed.incremental {
+        write_incremental(usb, &parsed.parts);
+    } else {
+        write_full(usb);
     }
 }
 
@@ -157,12 +171,22 @@ fn parse_only_spec(spec: &str) -> Vec<FlashPart> {
     parts
 }
 
-fn run_full(usb: &Path, disk_bytes: u64) {
-    let root = super::project_root();
+fn prepare_full(usb: &Path) {
+    let disk_bytes = blockdev_bytes(usb).unwrap_or_else(|| {
+        eprintln!("flash-usb-live: no pude leer el tamaño de {}", usb.display());
+        exit(1);
+    });
+    println!(
+        "flash-usb-live: pendrive {} ({})",
+        usb.display(),
+        crate::live_models::format_bytes(disk_bytes)
+    );
 
     super::build_user();
     package_live::run_with_capacity(Some(disk_bytes));
+}
 
+fn write_full(usb: &Path) {
     let live = package_live::live_image_path();
     let out_dir = package_live::out_dir();
 
@@ -188,16 +212,11 @@ fn run_full(usb: &Path, disk_bytes: u64) {
 
     print_flash_summary(usb, &out_dir);
     install_disk::release_removable(usb);
-    let _ = root;
 }
 
-fn run_incremental(usb: &Path, parts: &[FlashPart]) {
-    if let Err(e) = package_live::validate_live_usb(usb) {
-        eprintln!("flash-usb-live: {e}");
-        exit(1);
-    }
-
-    let root = super::project_root();
+fn prepare_incremental(_usb: &Path, parts: &[FlashPart]) {
+    // La GPT de /dev/sdX no se lee aquí: sin root `sgdisk -v` falla y parece
+    // un stick vacío. La comprobación va en write_incremental, ya elevado.
     let profile = package_live::live_driver_profile();
     let want_kernel = parts.contains(&FlashPart::Kernel);
     let want_rootfs = parts.contains(&FlashPart::Rootfs);
@@ -212,6 +231,17 @@ fn run_incremental(usb: &Path, parts: &[FlashPart]) {
         super::build_user();
         let _ = super::mkfs_rootfs_with_profile(true, &profile, super::RootfsImgMode::PackOnly);
     }
+}
+
+fn write_incremental(usb: &Path, parts: &[FlashPart]) {
+    if let Err(e) = package_live::validate_live_usb(usb) {
+        eprintln!("flash-usb-live: {e}");
+        exit(1);
+    }
+
+    let root = super::project_root();
+    let want_kernel = parts.contains(&FlashPart::Kernel);
+    let want_rootfs = parts.contains(&FlashPart::Rootfs);
 
     if want_kernel {
         let uefi = root.join("target/soso-uefi.img");
@@ -276,18 +306,19 @@ fn usage() -> ! {
          \n\
          Ejemplo (flash completo):\n\
            lsblk\n\
-           sudo cargo xtask flash-usb-live /dev/sde --yes\n\
+           cargo xtask flash-usb-live /dev/sde --yes\n\
          \n\
          Actualización incremental (sin reescribir modelos):\n\
-           sudo env \"PATH=$PATH\" \"HOME=$HOME\" cargo xtask flash-usb-live /dev/sde --yes --skip-models\n\
-           sudo env \"PATH=$PATH\" \"HOME=$HOME\" cargo xtask flash-usb-live /dev/sde --yes --only kernel\n\
-           sudo env \"PATH=$PATH\" \"HOME=$HOME\" cargo xtask flash-usb-live /dev/sde --yes --only rootfs\n\
+           cargo xtask flash-usb-live /dev/sde --yes --skip-models\n\
+           cargo xtask flash-usb-live /dev/sde --yes --only kernel\n\
+           cargo xtask flash-usb-live /dev/sde --yes --only rootfs\n\
          \n\
          Graba soso-live.img (modelo según tamaño del stick), estira p3 (modelos).\n\
          p4 SOSOINSTALL (install-soso.sh) va en la imagen, tras el rootfs.\n\
+         xtask pide sudo solo para escribir el disco (no hace falta PATH/HOME).\n\
          \n\
          Sin descargar modelos (el mayor ya en target/*-model/ que quepa):\n\
-           SOSO_LIVE_OFFLINE=1 sudo cargo xtask flash-usb-live /dev/sde --yes"
+           SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sde --yes"
     );
     exit(2);
 }
@@ -308,7 +339,21 @@ fn blockdev_sectors(dev: &Path) -> Option<u64> {
 }
 
 fn blockdev_bytes(dev: &Path) -> Option<u64> {
-    blockdev_sectors(dev).map(|s| s.saturating_mul(512))
+    if let Some(s) = blockdev_sectors(dev) {
+        return Some(s.saturating_mul(512));
+    }
+    let out = Command::new("lsblk")
+        .args(["-bno", "SIZE"])
+        .arg(dev)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn print_flash_summary(usb: &Path, out_dir: &Path) {

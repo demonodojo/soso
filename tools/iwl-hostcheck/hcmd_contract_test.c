@@ -61,6 +61,13 @@ void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
     (void)len;
 }
 
+void iwl_mvm_rx_mlme_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len)
+{
+    (void)iwl;
+    (void)frame;
+    (void)len;
+}
+
 void iwl_mvm_on_scan_complete(struct iwl_ax211_priv *iwl, uint32_t uid, uint8_t status)
 {
     (void)iwl;

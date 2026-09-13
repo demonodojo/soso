@@ -503,6 +503,11 @@ int iwl_mvm_parse_bss(const uint8_t *frame, int len, struct iwl_ax211_bss *out)
         } else if (id == WLAN_EID_DS_PARAMS && elen >= 1) {
             out->channel = body[0];
             out->band24 = 1u;
+        } else if (id == WLAN_EID_HT_OPERATION &&
+                   elen >= (uint8_t)sizeof(struct ieee80211_ht_operation)) {
+            /* Linux cfg80211_get_ies_channel_number: DS manda; si no, HT. */
+            if (!out->channel)
+                out->channel = body[0];
         } else if (id == WLAN_EID_RSN && elen >= 8) {
             /* version(2) group cipher(4) pairwise count(2) … */
             uint16_t ver = (uint16_t)body[0] | ((uint16_t)body[1] << 8);
@@ -555,6 +560,8 @@ int iwl_mvm_parse_bss(const uint8_t *frame, int len, struct iwl_ax211_bss *out)
         }
         pos += 2 + elen;
     }
+    if (out->channel && !out->band24)
+        out->band24 = (out->channel <= 14u) ? 1u : 0u;
     return ssid_len;
 }
 
@@ -578,9 +585,10 @@ void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
         }
     }
     bss.rssi = iwl->last_rx_rssi ? iwl->last_rx_rssi : -70;
-    /* El canal del DS Params manda; si no venía, el del RX. */
+    /* IEs (DS, si no HT) mandan; si no hay canal en el beacon, el del RX. */
     if (!bss.channel) {
         bss.channel = iwl->last_rx_channel;
+        bss.band24 = iwl->last_rx_band24;
     }
     iwl_ax211_add_bss(&bss);
 }

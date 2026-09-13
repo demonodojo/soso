@@ -28,6 +28,6 @@ Docs operativos compartidos: [`docs/GUIA-OPERATIVA.md`](../docs/GUIA-OPERATIVA.m
 - Tras cambios de tests/comandos: `soso-dev` + tabla de verificación en `soso-architecture`.
 - Tras arranque live en placa con SOSOLOG: actualizar `docs/hw-matrix.json` (`parse-logs`);
   no etapas `ok` ni `--boot-ok` sin sosh / `UCODE_ALIVE_NTFY` / GSP RPC — **soso-dev**.
-- Flash/install: `sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask …` — nunca `sudo cargo`.
+- Flash/install: `cargo xtask flash-usb-live` / `install-disk` (sudo solo para el disco) — nunca `sudo cargo`.
   El agente **no** ejecuta ese sudo: pide contraseña y Cursor no tiene TTY;
   compilas y dejas el comando al usuario (detalle en **soso-live**).

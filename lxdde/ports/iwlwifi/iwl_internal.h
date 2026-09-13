@@ -200,6 +200,9 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define PHY_BAND_5                 0
 #define PHY_BAND_24                1
 #define PHY_BAND_6                 2
+#define IWL_PHY_CHANNEL_MODE20     0
+#define IWL_LMAC_24G_INDEX         0u
+#define IWL_LMAC_5G_INDEX          1u
 
 /* iwl-nvm-parse.c — orden de canales en el perfil regulatorio NVM. */
 #define IWL_NVM_NUM_CHANNELS       39
@@ -221,6 +224,22 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define IWL_FW_CAPA_SETS                         4
 
 #define BINDING_CONTEXT_CMD                      0x2b
+#define TIME_EVENT_CMD                           0x29
+#define ADD_STA_KEY                              0x17
+
+#define TE_BSS_STA_AGGRESSIVE_ASSOC              0
+#define TE_V2_FRAG_NONE                          0
+#define TE_V2_NOTIF_HOST_EVENT_START             (1u << 0)
+#define TE_V2_NOTIF_HOST_EVENT_END               (1u << 1)
+#define TE_V2_START_IMMEDIATELY                  (1u << 11)
+
+#define STA_KEY_FLG_CCM                          (2u << 0)
+#define STA_KEY_FLG_WEP_KEY_MAP                  (1u << 3)
+#define STA_KEY_FLG_KEYID_POS                    8
+#define STA_KEY_FLG_KEYID_MSK                    (3u << STA_KEY_FLG_KEYID_POS)
+
+#define IWL_MVM_TE_SESSION_PROTECTION_MAX_TIME_MS 600u
+#define IWL_MVM_TE_ASSOC_MAX_DELAY_MS             500u
 #define POWER_TABLE_CMD                          0x77
 #define MAC_PM_POWER_TABLE                       0xa9
 #define FW_CTXT_INVALID                          0xffffffffu
@@ -233,6 +252,35 @@ struct iwl_binding_cmd_v1 {
     uint32_t action;
     uint32_t macs[MAX_MACS_IN_BINDING];
     uint32_t phy;
+} __attribute__((packed));
+
+struct iwl_time_event_cmd {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t id;
+    uint32_t apply_time;
+    uint32_t max_delay;
+    uint32_t depends_on;
+    uint32_t interval;
+    uint32_t duration;
+    uint8_t repeat;
+    uint8_t max_frags;
+    uint16_t policy;
+} __attribute__((packed));
+
+struct iwl_mvm_add_sta_key_common {
+    uint8_t sta_id;
+    uint8_t key_offset;
+    uint16_t key_flags;
+    uint8_t key[32];
+    uint8_t rx_secur_seq_cnt[16];
+} __attribute__((packed));
+
+struct iwl_mvm_add_sta_key_cmd {
+    struct iwl_mvm_add_sta_key_common common;
+    uint64_t rx_mic_key;
+    uint64_t tx_mic_key;
+    uint64_t transmit_seq_cnt;
 } __attribute__((packed));
 
 struct iwl_binding_cmd {
@@ -309,6 +357,40 @@ struct iwl_ucode_capa {
 
 #define ADD_STA                    0x18
 #define TX_CMD                     0x1
+#define IWL_TX_FLAGS_CMD_RATE      (1u << 0)
+#define IWL_TX_FLAGS_ENCRYPT_DIS   (1u << 1)
+#define IWL_TX_FLAGS_HIGH_PRI      (1u << 2)
+#define RATE_MCS_LEGACY_OFDM_MSK  (1u << 8)
+#define RATE_MCS_ANT_A_MSK         (1u << 14)
+#define RATE_LEGACY_OFDM_6M       0u
+#define RATE_LEGACY_PLCP_6M       0x0du
+
+struct iwl_dram_sec_info {
+    uint32_t pn_low;
+    uint16_t pn_high;
+    uint16_t aux_info;
+} __attribute__((packed));
+
+/* AX200 / device_family < AX210: TX_CMD_API_S_VER_7/9. */
+struct iwl_tx_cmd_gen2 {
+    uint16_t len;
+    uint16_t offload_assist;
+    uint32_t flags;
+    struct iwl_dram_sec_info dram_info;
+    uint32_t rate_n_flags;
+    uint8_t hdr[];
+} __attribute__((packed));
+
+/* AX210+: TX_CMD_API_S_VER_8/10. */
+struct iwl_tx_cmd_gen3 {
+    uint16_t len;
+    uint16_t flags;
+    uint32_t offload_assist;
+    struct iwl_dram_sec_info dram_info;
+    uint32_t rate_n_flags;
+    uint8_t reserved[8];
+    uint8_t hdr[];
+} __attribute__((packed));
 
 #define FW_CTXT_ID_POS             0
 #define FW_CTXT_COLOR_POS          8
@@ -316,6 +398,7 @@ struct iwl_ucode_capa {
     (((uint32_t)(id) << FW_CTXT_ID_POS) | ((uint32_t)(color) << FW_CTXT_COLOR_POS))
 #define FW_CTXT_ACTION_ADD         1u
 #define FW_CTXT_ACTION_MODIFY      2u
+#define FW_CTXT_ACTION_REMOVE      3u
 
 #define IWL_STA_LINK               0u
 #define IWL_STA_GENERAL_PURPOSE    1u
@@ -385,8 +468,29 @@ typedef char iwl_ax211_bss_size_check[sizeof(struct iwl_ax211_bss) == 46 ? 1 : -
 /* Elementos y bits de 802.11 que hacen falta para clasificar un BSS. */
 #define WLAN_EID_SSID              0
 #define WLAN_EID_DS_PARAMS         3
+#define WLAN_EID_TIM               5
+#define WLAN_EID_SUPP_RATES        1
+#define WLAN_EID_HT_OPERATION       61
 #define WLAN_EID_RSN               48
+#define WLAN_CAPABILITY_ESS        1u
 #define WLAN_CAPABILITY_PRIVACY    (1u << 4)
+#define IEEE80211_FTYPE_MGMT      0x0000u
+#define IEEE80211_STYPE_ASSOC_REQ  0x0000u
+#define IEEE80211_STYPE_ASSOC_RESP 0x0010u
+#define IEEE80211_STYPE_BEACON     0x0080u
+#define IEEE80211_STYPE_AUTH       0x00b0u
+#define IEEE80211_FC_STYPE_MASK    0x00fcu
+
+/* Linux ieee80211_ht_operation: el primer byte es primary_chan. */
+struct ieee80211_ht_operation {
+    uint8_t primary_chan;
+    uint8_t ht_param;
+    uint16_t operation_mode;
+    uint16_t stbc_param;
+    uint8_t basic_set[16];
+} __attribute__((packed));
+
+typedef char ieee80211_ht_operation_sz[sizeof(struct ieee80211_ht_operation) == 22 ? 1 : -1];
 #define WLAN_AKM_PSK               2u
 #define WLAN_AKM_PSK_SHA256        6u
 #define WLAN_CIPHER_CCMP128        4u
@@ -698,6 +802,123 @@ struct iwl_rx_mpdu_res_start {
     uint16_t assist;
 } __attribute__((packed));
 
+/* Linux fw/api/rx.h iwl_rx_phy_info (REPLY_RX_PHY_CMD = 0xc0).
+ * `channel` va a offset 22; phy_flags BIT(0) = 2.4 GHz. */
+#define RX_RES_PHY_FLAGS_BAND_24       1u
+#define IWL_RX_INFO_PHY_CNT            8
+#define IWL_RX_INFO_ENERGY_ANT_ABC_IDX 1
+
+struct iwl_rx_phy_info {
+    uint8_t non_cfg_phy_cnt;
+    uint8_t cfg_phy_cnt;
+    uint8_t stat_id;
+    uint8_t reserved1;
+    uint32_t system_timestamp;
+    uint64_t timestamp;
+    uint32_t beacon_time_stamp;
+    uint16_t phy_flags;
+    uint16_t channel;
+    uint32_t non_cfg_phy[IWL_RX_INFO_PHY_CNT];
+} __attribute__((packed));
+
+typedef char iwl_rx_phy_channel_off[
+    offsetof(struct iwl_rx_phy_info, channel) == 22 ? 1 : -1];
+
+/* Prefijo DW2–DW6 + v1 de iwl_rx_mpdu_desc (AX200 / device_family < AX210).
+ * Linux IWL_RX_DESC_SIZE_V1 = offsetofend(..., v1) = 48. */
+struct iwl_rx_mpdu_desc_v1 {
+    uint32_t rss_hash;
+    uint32_t filter_match;
+    uint32_t rate_n_flags;
+    uint8_t energy_a;
+    uint8_t energy_b;
+    uint8_t channel;
+    uint8_t mac_context;
+    uint32_t gp2_on_air_rise;
+    uint64_t tsf_on_air_rise;
+} __attribute__((packed));
+
+struct iwl_rx_mpdu_desc {
+    uint16_t mpdu_len;
+    uint8_t mac_flags1;
+    uint8_t mac_flags2;
+    uint8_t amsdu_info;
+    uint16_t phy_info;
+    uint8_t mac_phy_idx;
+    uint32_t dw4;
+    uint32_t status;
+    uint32_t reorder_data;
+    struct iwl_rx_mpdu_desc_v1 v1;
+} __attribute__((packed));
+
+typedef char iwl_rx_mpdu_desc_v1_sz[
+    sizeof(struct iwl_rx_mpdu_desc) == IWL_RX_DESC_SIZE_V1 ? 1 : -1];
+typedef char iwl_rx_mpdu_v1_channel_off[
+    offsetof(struct iwl_rx_mpdu_desc, v1.channel) == 34 ? 1 : -1];
+
+static inline uint8_t iwl_rx_phy_info_channel(const uint8_t *data, int len)
+{
+    const struct iwl_rx_phy_info *phy;
+
+    if (!data || len < (int)(offsetof(struct iwl_rx_phy_info, channel) + 2))
+        return 0;
+    phy = (const struct iwl_rx_phy_info *)data;
+    return (uint8_t)phy->channel;
+}
+
+static inline uint16_t iwl_rx_phy_info_flags(const uint8_t *data, int len)
+{
+    const struct iwl_rx_phy_info *phy;
+
+    if (!data || len < (int)(offsetof(struct iwl_rx_phy_info, phy_flags) + 2))
+        return 0;
+    phy = (const struct iwl_rx_phy_info *)data;
+    return phy->phy_flags;
+}
+
+static inline int iwl_rx_phy_info_energy(const uint8_t *data, int len,
+                                         uint8_t *a, uint8_t *b)
+{
+    const struct iwl_rx_phy_info *phy;
+    uint32_t energy;
+    size_t need = offsetof(struct iwl_rx_phy_info, non_cfg_phy) +
+                  (size_t)(IWL_RX_INFO_ENERGY_ANT_ABC_IDX + 1) * sizeof(uint32_t);
+
+    if (!data || !a || !b || len < (int)need)
+        return -1;
+    phy = (const struct iwl_rx_phy_info *)data;
+    energy = phy->non_cfg_phy[IWL_RX_INFO_ENERGY_ANT_ABC_IDX];
+    *a = (uint8_t)energy;
+    *b = (uint8_t)(energy >> 8);
+    return 0;
+}
+
+static inline uint8_t iwl_rx_mpdu_v1_channel(const uint8_t *data, int len)
+{
+    const struct iwl_rx_mpdu_desc *desc;
+
+    if (!data || len < (int)IWL_RX_DESC_SIZE_V1)
+        return 0;
+    desc = (const struct iwl_rx_mpdu_desc *)data;
+    return desc->v1.channel;
+}
+
+static inline void iwl_rx_mpdu_v1_energy(const uint8_t *data, int len,
+                                          uint8_t *a, uint8_t *b)
+{
+    const struct iwl_rx_mpdu_desc *desc;
+
+    if (!a || !b)
+        return;
+    *a = 0;
+    *b = 0;
+    if (!data || len < (int)IWL_RX_DESC_SIZE_V1)
+        return;
+    desc = (const struct iwl_rx_mpdu_desc *)data;
+    *a = desc->v1.energy_a;
+    *b = desc->v1.energy_b;
+}
+
 struct iwl_init_extended_cfg_cmd {
     uint32_t init_flags;
 } __attribute__((packed));
@@ -781,6 +1002,42 @@ struct iwl_dqa_enable_cmd {
 } __attribute__((packed));
 
 #define PHY_CONTEXT_CMD            0x08
+
+/* Linux fw/api/phy-ctxt.h CHANNEL_CONFIG_API_S_VER_2 + PHY_CONTEXT_CMD v3/v4. */
+struct iwl_fw_channel_info {
+    uint32_t channel;
+    uint8_t band;
+    uint8_t width;
+    uint8_t ctrl_pos;
+    uint8_t reserved;
+} __attribute__((packed));
+
+struct iwl_phy_context_cmd {
+    uint32_t id_and_color;
+    uint32_t action;
+    struct iwl_fw_channel_info ci;
+    uint32_t lmac_id;
+    uint32_t rxchain_info;
+    uint32_t dsp_cfg_flags;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_phy_context_cmd_v1 {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t apply_time;
+    uint32_t tx_param_color;
+    struct {
+        uint8_t band;
+        uint8_t channel;
+        uint8_t width;
+        uint8_t ctrl_pos;
+    } ci;
+    uint32_t txchain_info;
+    uint32_t rxchain_info;
+    uint32_t acquisition_data;
+    uint32_t dsp_cfg_flags;
+} __attribute__((packed));
 
 struct iwl_mcc_update_cmd {
     uint16_t mcc;
@@ -1054,6 +1311,9 @@ int iwl_trans_needs_recover(struct iwl_ax211_priv *iwl);
 int iwl_trans_recover(struct iwl_ax211_priv *iwl);
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl);
 int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl);
+int iwl_mvm_phy_ctxt_changed(struct iwl_ax211_priv *iwl, uint8_t channel);
+int iwl_mvm_binding_update(struct iwl_ax211_priv *iwl);
+int iwl_mvm_binding_send(struct iwl_ax211_priv *iwl, uint32_t action);
 uint8_t iwl_mvm_scan_rx_ant(struct iwl_ax211_priv *iwl);
 int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl);
 int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl);
@@ -1090,6 +1350,7 @@ void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigne
 int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd);
 int iwl_fw_has_capa(const struct iwl_ax211_priv *iwl, unsigned capa_bit);
 void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len);
+void iwl_mvm_rx_mlme_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len);
 /* Clasifica un beacon/probe response: SSID, canal, capacidades y RSN.
  * Devuelve la longitud del SSID o -1 si la trama no sirve. */
 int iwl_mvm_parse_bss(const uint8_t *frame, int len, struct iwl_ax211_bss *out);

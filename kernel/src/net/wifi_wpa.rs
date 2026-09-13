@@ -67,9 +67,10 @@ pub fn connect_wpa2(ssid: &str, passphrase: &str) -> i32 {
     // ofrezca RSN con AKM PSK y CCMP. `connect_open` ahora rechaza las redes
     // protegidas (R7), así que pasar por ahí era quedarse sin conexión.
     if crate::lxdde::wifi::connect_wpa2(ssid, &pmk) != 0 {
-        crate::println!("wifi-wpa: fallo assoc MLME (¿la red ofrece WPA2-PSK/CCMP?)");
+        crate::println!("wifi-wpa: fallo AUTH+ASSOC 802.11 (¿la red ofrece WPA2-PSK/CCMP?)");
         return -1;
     }
+    crate::println!("wifi-wpa: AUTH+ASSOC 802.11 ok, 4-way EAPOL");
 
     if four_way_handshake(ssid, &pmk) != 0 {
         return -1;

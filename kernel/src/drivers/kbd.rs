@@ -289,6 +289,21 @@ fn emit_tty_byte(b: u8) {
     CH_ENCOLADOS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Variante IRQ-safe: nunca bloquea en `RX` ni en el scheduler.
+fn emit_tty_byte_try(b: u8) -> bool {
+    if b == 0x03 {
+        crate::task::note_serial_sigint();
+        crate::task::kick_if_tty_waiting();
+        return true;
+    }
+    let Some(mut rx) = RX.try_lock() else {
+        return false;
+    };
+    rx.push(b);
+    CH_ENCOLADOS.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
 fn enqueue_output(km: &mut KeymapState, out: keymap::KeyOutput) {
     let out = if km.ctrl() { ctrl_byte(out) } else { out };
     let mut buf = [0u8; 4];
@@ -319,10 +334,52 @@ fn enqueue_output(km: &mut KeymapState, out: keymap::KeyOutput) {
     crate::task::kick_if_tty_waiting();
 }
 
+fn enqueue_output_try(km: &mut KeymapState, out: keymap::KeyOutput) {
+    let out = if km.ctrl() { ctrl_byte(out) } else { out };
+    let mut buf = [0u8; 4];
+    let n = keymap::output_bytes(out, &mut buf);
+    if n == 0 {
+        return;
+    }
+    for &b in &buf[..n] {
+        if !emit_tty_byte_try(b) {
+            return;
+        }
+        if crate::drivers::fb::graphics_mode() {
+            crate::drivers::input::push_key(b as u32, true);
+        }
+    }
+    while let Some(pending) = km.take_pending() {
+        let pending = if km.ctrl() {
+            ctrl_byte(pending)
+        } else {
+            pending
+        };
+        let n2 = keymap::output_bytes(pending, &mut buf);
+        for &b in &buf[..n2] {
+            if !emit_tty_byte_try(b) {
+                return;
+            }
+            if crate::drivers::fb::graphics_mode() {
+                crate::drivers::input::push_key(b as u32, true);
+            }
+        }
+    }
+    crate::task::kick_if_tty_waiting();
+}
+
 fn handle_make_scancode(sc: u8) {
     let mut km = KM.lock();
     let out = km.translate(sc);
     enqueue_output(&mut km, out);
+}
+
+fn handle_make_scancode_try(sc: u8) {
+    let Some(mut km) = KM.try_lock() else {
+        return;
+    };
+    let out = km.translate(sc);
+    enqueue_output_try(&mut km, out);
 }
 
 fn handle_scancode(sc: u8) {
@@ -377,6 +434,59 @@ fn handle_scancode(sc: u8) {
     handle_make_scancode(sc);
 }
 
+/// Igual que [`handle_scancode`] pero con `try_lock` (IRQ 1 / IOAPIC).
+fn handle_scancode_try(sc: u8) {
+    log_scancode_raw(sc);
+
+    if sc == 0xE0 {
+        EXTENDED.store(true, Ordering::Relaxed);
+        return;
+    }
+
+    let extended = EXTENDED.swap(false, Ordering::Relaxed);
+
+    if sc & 0x80 != 0 {
+        let code = sc & 0x7F;
+        let Some(mut km) = KM.try_lock() else {
+            return;
+        };
+        match code {
+            0x2A | 0x36 => km.shift_press(false),
+            0x1D => km.ctrl_press(false),
+            0x38 if extended => km.altgr_press(false),
+            _ => {}
+        }
+        return;
+    }
+
+    let Some(mut km) = KM.try_lock() else {
+        return;
+    };
+    match sc {
+        0x2A | 0x36 => {
+            km.shift_press(true);
+            return;
+        }
+        0x1D => {
+            km.ctrl_press(true);
+            return;
+        }
+        0x38 if extended => {
+            km.altgr_press(true);
+            return;
+        }
+        0x38 => return,
+        0x3A => {
+            km.caps_toggle();
+            return;
+        }
+        _ => {}
+    }
+    drop(km);
+
+    handle_make_scancode_try(sc);
+}
+
 #[cfg(feature = "drv-usb")]
 fn handle_usb_event(evt: crate::drivers::usb_storage::UsbKbdEvent) {
     if evt.scancode == 0 && evt.usage_id < 0xE0 {
@@ -403,38 +513,79 @@ fn handle_usb_event(evt: crate::drivers::usb_storage::UsbKbdEvent) {
     enqueue_output(&mut km, out);
 }
 
-fn poll_hw() {
-    if I8042_OK.load(Ordering::Relaxed) {
-        while i8042_present() && status() & ST_OUT_FULL != 0 {
-            let st = status();
-            if st & ST_AUX_DATA != 0 {
-                let b = read_data();
-                crate::drivers::mouse::on_byte(b);
-                continue;
-            }
-            let sc = read_data();
-            if sc == PS2_ACK || sc == 0xAA || sc == PS2_RESEND {
-                continue;
-            }
+#[cfg(feature = "drv-usb")]
+fn handle_usb_event_try(evt: crate::drivers::usb_storage::UsbKbdEvent) {
+    if evt.scancode == 0 && evt.usage_id < 0xE0 {
+        return;
+    }
+    log_scancode_raw(evt.scancode);
+    let Some(mut km) = KM.try_lock() else {
+        return;
+    };
+
+    if evt.usage_id >= 0xE0 && evt.usage_id <= 0xE7 {
+        match evt.usage_id {
+            0xE1 | 0xE5 => km.shift_press(evt.pressed),
+            0xE0 | 0xE4 => km.ctrl_press(evt.pressed),
+            0xE6 => km.altgr_press(evt.pressed),
+            _ => {}
+        }
+        return;
+    }
+
+    if !evt.pressed || evt.scancode == 0 {
+        return;
+    }
+
+    let out = km.translate_scancode(evt.scancode, evt.shift, evt.altgr);
+    enqueue_output_try(&mut km, out);
+}
+
+fn poll_i8042(from_irq: bool) {
+    if !I8042_OK.load(Ordering::Relaxed) {
+        return;
+    }
+    // Linux `i8042_interrupt` siempre vacía OBF aunque el dueño esté en ring 0.
+    while i8042_present() && status() & ST_OUT_FULL != 0 {
+        let st = status();
+        if st & ST_AUX_DATA != 0 {
+            let b = read_data();
+            crate::drivers::mouse::on_byte(b);
+            continue;
+        }
+        let sc = read_data();
+        if sc == PS2_ACK || sc == 0xAA || sc == PS2_RESEND {
+            continue;
+        }
+        if from_irq {
+            handle_scancode_try(sc);
+        } else {
             handle_scancode(sc);
         }
     }
+}
+
+fn poll_hw(from_irq: bool) {
+    poll_i8042(from_irq);
     #[cfg(feature = "drv-usb")]
-    while let Some(evt) = crate::drivers::usb_storage::poll_keyboard_event() {
-        handle_usb_event(evt);
+    if from_irq {
+        while let Some(evt) = crate::drivers::usb_storage::poll_keyboard_event() {
+            handle_usb_event_try(evt);
+        }
+    } else {
+        while let Some(evt) = crate::drivers::usb_storage::poll_keyboard_event() {
+            handle_usb_event(evt);
+        }
     }
 }
 
 pub fn handle_irq() {
-    if !crate::arch::irq::desde_ring3() {
-        return;
-    }
-    poll_hw();
+    poll_hw(true);
 }
 
 pub fn read_byte() -> Option<u8> {
     let b = without_interrupts(|| {
-        poll_hw();
+        poll_hw(false);
         RX.lock().pop()
     });
     if b.is_some() {
@@ -445,7 +596,7 @@ pub fn read_byte() -> Option<u8> {
 
 pub fn has_input() -> bool {
     without_interrupts(|| {
-        poll_hw();
+        poll_hw(false);
         RX.lock().has_data()
     })
 }
@@ -504,8 +655,11 @@ pub fn init() {
         println!("kbd: sin i8042");
         route_irq1();
         #[cfg(feature = "drv-usb")]
-        if crate::drivers::usb_storage::has_usb_keyboard() {
-            println!("kbd: usb hid activo");
+        {
+            let n = crate::drivers::usb_storage::usb_keyboard_count();
+            if n > 0 {
+                println!("kbd: usb hid activo ({n})");
+            }
         }
         return;
     }
@@ -525,8 +679,11 @@ pub fn init() {
     route_irq1();
     println!("kbd: ps2 listo");
     #[cfg(feature = "drv-usb")]
-    if crate::drivers::usb_storage::has_usb_keyboard() {
-        println!("kbd: usb hid activo");
+    {
+        let n = crate::drivers::usb_storage::usb_keyboard_count();
+        if n > 0 {
+            println!("kbd: usb hid activo ({n})");
+        }
     }
 }
 

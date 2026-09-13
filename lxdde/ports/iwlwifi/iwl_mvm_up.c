@@ -27,8 +27,6 @@ extern void *memcpy(void *dst, const void *src, unsigned long n);
     (((uint32_t)(id) << FW_CTXT_ID_POS) | ((uint32_t)(color) << FW_CTXT_COLOR_POS))
 #define FW_CTXT_ACTION_ADD         1
 
-#define IWL_PHY_CHANNEL_MODE20     0
-
 #define MAC_CONTEXT_CMD            0x28
 
 #define PHY_RX_CHAIN_VALID_POS     1
@@ -40,41 +38,6 @@ struct iwl_sf_cfg_cmd {
     uint32_t watermark[SF_TRANSIENT_STATES_NUMBER];
     uint32_t long_delay_timeouts[SF_NUM_SCENARIO][SF_NUM_TIMEOUT_TYPES];
     uint32_t full_on_timeouts[SF_NUM_SCENARIO][SF_NUM_TIMEOUT_TYPES];
-} __attribute__((packed));
-
-struct iwl_fw_channel_info {
-    uint32_t channel;
-    uint8_t band;
-    uint8_t width;
-    uint8_t ctrl_pos;
-    uint8_t reserved;
-} __attribute__((packed));
-
-struct iwl_phy_context_cmd {
-    uint32_t id_and_color;
-    uint32_t action;
-    struct iwl_fw_channel_info ci;
-    uint32_t lmac_id;
-    uint32_t rxchain_info;
-    uint32_t dsp_cfg_flags;
-    uint32_t reserved;
-} __attribute__((packed));
-
-struct iwl_phy_context_cmd_v1 {
-    uint32_t id_and_color;
-    uint32_t action;
-    uint32_t apply_time;
-    uint32_t tx_param_color;
-    struct {
-        uint8_t band;
-        uint8_t channel;
-        uint8_t width;
-        uint8_t ctrl_pos;
-    } ci;
-    uint32_t txchain_info;
-    uint32_t rxchain_info;
-    uint32_t acquisition_data;
-    uint32_t dsp_cfg_flags;
 } __attribute__((packed));
 
 static uint32_t phy_rxchain_info(uint8_t valid_rx, uint8_t idle, uint8_t active)
@@ -175,7 +138,22 @@ static int iwl_mvm_power_update_device(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
-static int iwl_mvm_binding_add_scan(struct iwl_ax211_priv *iwl)
+static uint8_t phy_band_from_chan(uint8_t channel)
+{
+    if (channel >= 36 && channel <= 196)
+        return PHY_BAND_5;
+    return PHY_BAND_24;
+}
+
+static uint32_t phy_lmac_id(struct iwl_ax211_priv *iwl, uint8_t band)
+{
+    if (!iwl_fw_has_capa(iwl, IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT) ||
+        band == PHY_BAND_24)
+        return IWL_LMAC_24G_INDEX;
+    return IWL_LMAC_5G_INDEX;
+}
+
+int iwl_mvm_binding_send(struct iwl_ax211_priv *iwl, uint32_t action)
 {
     struct iwl_binding_cmd_v1 cmd_v1;
     struct iwl_binding_cmd cmd;
@@ -183,14 +161,9 @@ static int iwl_mvm_binding_add_scan(struct iwl_ax211_priv *iwl)
     uint16_t pay_len;
     unsigned i;
 
-    if (iwl->binding_added)
-        return 0;
-    if (!iwl->mac_ctxt_added || !iwl->phy_ctxt_added)
-        return 0;
-
     memset(&cmd_v1, 0, sizeof(cmd_v1));
     cmd_v1.id_and_color = iwl_cpu_to_le32(FW_CMD_ID_AND_COLOR(0, 0));
-    cmd_v1.action = iwl_cpu_to_le32(FW_CTXT_ACTION_ADD);
+    cmd_v1.action = iwl_cpu_to_le32(action);
     cmd_v1.phy = cmd_v1.id_and_color;
     for (i = 0; i < MAX_MACS_IN_BINDING; i++)
         cmd_v1.macs[i] = iwl_cpu_to_le32(FW_CTXT_INVALID);
@@ -199,7 +172,7 @@ static int iwl_mvm_binding_add_scan(struct iwl_ax211_priv *iwl)
     if (iwl_fw_has_capa(iwl, IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT)) {
         memset(&cmd, 0, sizeof(cmd));
         memcpy(&cmd, &cmd_v1, sizeof(cmd_v1));
-        cmd.lmac_id = iwl_cpu_to_le32(0);
+        cmd.lmac_id = iwl_cpu_to_le32(phy_lmac_id(iwl, iwl->phy_band));
         payload = &cmd;
         pay_len = (uint16_t)sizeof(cmd);
     } else {
@@ -212,10 +185,31 @@ static int iwl_mvm_binding_add_scan(struct iwl_ax211_priv *iwl)
         lx_printk("iwl_mvm: BINDING_CONTEXT falló\n");
         return -1;
     }
-    iwl->binding_added = 1;
-    lx_printk("iwl_mvm: BINDING PHY0↔MAC%u ok\n",
-              (unsigned)iwl->scan_mac_id);
+    iwl->binding_added = (action == FW_CTXT_ACTION_REMOVE) ? 0 : 1;
+    lx_printk("iwl_mvm: BINDING PHY0↔MAC%u action=%u ok\n",
+              (unsigned)iwl->scan_mac_id, (unsigned)action);
     return 0;
+}
+
+int iwl_mvm_binding_update(struct iwl_ax211_priv *iwl)
+{
+    uint32_t action;
+
+    if (!iwl->mac_ctxt_added || !iwl->phy_ctxt_added) {
+        lx_printk("iwl_mvm: BINDING sin MAC/PHY\n");
+        return -1;
+    }
+    action = iwl->binding_added ? FW_CTXT_ACTION_MODIFY : FW_CTXT_ACTION_ADD;
+    return iwl_mvm_binding_send(iwl, action);
+}
+
+static int iwl_mvm_binding_add_scan(struct iwl_ax211_priv *iwl)
+{
+    if (iwl->binding_added)
+        return 0;
+    if (!iwl->mac_ctxt_added || !iwl->phy_ctxt_added)
+        return 0;
+    return iwl_mvm_binding_update(iwl);
 }
 
 static int iwl_mvm_power_update_mac_scan(struct iwl_ax211_priv *iwl)
@@ -269,56 +263,96 @@ static int iwl_mvm_mac_ctxt_add_scan(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
-static int iwl_mvm_phy_ctxt_add_minimal(struct iwl_ax211_priv *iwl)
+static int iwl_mvm_phy_ctxt_apply(struct iwl_ax211_priv *iwl, uint8_t channel,
+                                  uint32_t action)
 {
+    uint8_t band = phy_band_from_chan(channel);
     uint8_t tx = iwl_mvm_valid_tx_ant(iwl);
     uint8_t rx = iwl_mvm_valid_rx_ant(iwl);
     uint32_t rxchain = phy_rxchain_info(rx, 2, 2);
     int ver = iwl_fw_cmd_ver(iwl, LEGACY_GROUP, PHY_CONTEXT_CMD);
-
-    if (iwl->phy_ctxt_added)
-        return 0;
+    uint32_t lmac = phy_lmac_id(iwl, band);
 
     if (ver >= 3) {
         struct iwl_phy_context_cmd cmd;
 
         memset(&cmd, 0, sizeof(cmd));
         cmd.id_and_color = iwl_cpu_to_le32(FW_CMD_ID_AND_COLOR(0, 0));
-        cmd.action = iwl_cpu_to_le32(FW_CTXT_ACTION_ADD);
-        cmd.ci.channel = iwl_cpu_to_le32(6);
-        cmd.ci.band = PHY_BAND_24;
+        cmd.action = iwl_cpu_to_le32(action);
+        cmd.ci.channel = iwl_cpu_to_le32(channel);
+        cmd.ci.band = band;
         cmd.ci.width = IWL_PHY_CHANNEL_MODE20;
-        cmd.lmac_id = iwl_cpu_to_le32(0);
+        cmd.lmac_id = iwl_cpu_to_le32(lmac);
         cmd.rxchain_info = rxchain;
         if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_CONTEXT_CMD, &cmd,
                                     (uint16_t)sizeof(cmd),
-                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
-            lx_printk("iwl_mvm: PHY_CONTEXT v%u falló\n", ver);
+                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0)
             return -1;
-        }
     } else {
         struct iwl_phy_context_cmd_v1 cmd;
 
         memset(&cmd, 0, sizeof(cmd));
         cmd.id_and_color = iwl_cpu_to_le32(FW_CMD_ID_AND_COLOR(0, 0));
-        cmd.action = iwl_cpu_to_le32(FW_CTXT_ACTION_ADD);
-        cmd.ci.band = PHY_BAND_24;
-        cmd.ci.channel = 6;
+        cmd.action = iwl_cpu_to_le32(action);
+        cmd.ci.band = band;
+        cmd.ci.channel = channel;
         cmd.ci.width = IWL_PHY_CHANNEL_MODE20;
         cmd.txchain_info = iwl_cpu_to_le32(tx);
         cmd.rxchain_info = rxchain;
         if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_CONTEXT_CMD, &cmd,
                                     (uint16_t)sizeof(cmd),
-                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
-            lx_printk("iwl_mvm: PHY_CONTEXT v1 falló\n");
+                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0)
             return -1;
-        }
     }
 
-    iwl->phy_ctxt_added = 1;
-    lx_printk("iwl_mvm: PHY_CONTEXT ch6 2.4GHz ok (tx=0x%x rx=0x%x)\n",
-              (unsigned)tx, (unsigned)rx);
+    if (action == FW_CTXT_ACTION_REMOVE) {
+        iwl->phy_ctxt_added = 0;
+        iwl->phy_channel = 0;
+        iwl->phy_band = 0;
+    } else {
+        iwl->phy_ctxt_added = 1;
+        iwl->phy_channel = channel;
+        iwl->phy_band = band;
+    }
+    (void)tx;
     return 0;
+}
+
+int iwl_mvm_phy_ctxt_changed(struct iwl_ax211_priv *iwl, uint8_t channel)
+{
+    uint8_t band;
+    uint32_t action = FW_CTXT_ACTION_MODIFY;
+
+    if (!channel)
+        return 0;
+    band = phy_band_from_chan(channel);
+    if (!iwl->phy_ctxt_added) {
+        action = FW_CTXT_ACTION_ADD;
+    } else if (iwl_fw_has_capa(iwl, IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT) &&
+               iwl->phy_band != band) {
+        /* Linux phy-ctxt.c:300: CDB y cambio de banda → REMOVE + ADD. */
+        if (iwl_mvm_phy_ctxt_apply(iwl, channel, FW_CTXT_ACTION_REMOVE) != 0) {
+            lx_printk("iwl_mvm: PHY_CONTEXT REMOVE ch%u falló\n", channel);
+            return -1;
+        }
+        action = FW_CTXT_ACTION_ADD;
+    }
+    if (iwl_mvm_phy_ctxt_apply(iwl, channel, action) != 0) {
+        lx_printk("iwl_mvm: PHY_CONTEXT ch%u falló\n", (unsigned)channel);
+        return -1;
+    }
+    lx_printk("iwl_mvm: PHY_CONTEXT ch%u band=%u action=%u ok (tx=0x%x rx=0x%x)\n",
+              (unsigned)channel, (unsigned)band, (unsigned)action,
+              (unsigned)iwl_mvm_valid_tx_ant(iwl),
+              (unsigned)iwl_mvm_valid_rx_ant(iwl));
+    return 0;
+}
+
+static int iwl_mvm_phy_ctxt_add_minimal(struct iwl_ax211_priv *iwl)
+{
+    if (iwl->phy_ctxt_added)
+        return 0;
+    return iwl_mvm_phy_ctxt_changed(iwl, 6);
 }
 
 uint8_t iwl_mvm_scan_rx_ant(struct iwl_ax211_priv *iwl)

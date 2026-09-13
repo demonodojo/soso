@@ -49,14 +49,13 @@ cargo xtask flash-usb-live /dev/sdX --yes
 Actualización incremental (kernel/rootfs, conserva modelos en p3):
 
 ```sh
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
+cargo xtask flash-usb-live /dev/sdX --yes --skip-models
 ```
 
 Offline / sin red al empaquetar:
 
 ```sh
-sudo env SOSO_LIVE_OFFLINE=1 "PATH=$PATH" "HOME=$HOME" \
-  cargo xtask flash-usb-live /dev/sdX --yes
+SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 ```
 
 WiFi antes del primer arranque: editar `SOSOWIFI.TXT` en la ESP (partición 1) o
@@ -69,7 +68,7 @@ Desde soso live: `soso-install` (ver manual de usuario).
 Desde Linux anfitrión (dual-boot):
 
 ```sh
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask install-disk /dev/nvmeXn1 --yes
+cargo xtask install-disk /dev/nvmeXn1 --yes
 ```
 
 ## 6. Validación en hardware (A8)

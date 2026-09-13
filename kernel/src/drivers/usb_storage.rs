@@ -20,7 +20,9 @@ const AMD_VENDOR: u16 = 0x1022;
 const AMD_RENOIR_XHCI: u16 = 0x1639;
 
 struct UsbHost {
-    ctrl: XhciController,
+    /// Candado propio: el teclado HID puede sondearse con `try_lock` aunque
+    /// otro hilo tenga cogido el vector `HOSTS` para un write BOT largo.
+    ctrl: Mutex<XhciController>,
     ms: Option<MassStorage>,
 }
 
@@ -171,12 +173,15 @@ pub fn init() {
                 ms.sectors * SECTOR as u64 / (1024 * 1024)
             );
         }
-        hosts.push(UsbHost { ctrl, ms });
+        hosts.push(UsbHost {
+            ctrl: Mutex::new(ctrl),
+            ms,
+        });
     }
 
     let n = hosts.len();
     let has_ms = hosts.iter().any(|h| h.ms.is_some());
-    let has_kbd = hosts.iter().any(|h| h.ctrl.has_keyboard());
+    let has_kbd = hosts.iter().any(|h| h.ctrl.lock().has_keyboard());
     *HOSTS.lock() = hosts;
 
     if !has_ms && !has_kbd {
@@ -201,7 +206,8 @@ pub fn inventory_lines() -> Vec<alloc::string::String> {
     let mut out = Vec::new();
     let hosts = HOSTS.lock();
     for host in hosts.iter() {
-        for dev in host.ctrl.inventory() {
+        let ctrl = host.ctrl.lock();
+        for dev in ctrl.inventory() {
             let mut l = alloc::string::String::new();
             let _ = write!(
                 l,
@@ -259,7 +265,8 @@ pub fn read_sector(lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), &'static str>
     if lba >= ms.sectors {
         return Err("lba");
     }
-    if host.ctrl.read_sector10(ms, lba as u32, buf) {
+    let mut ctrl = host.ctrl.lock();
+    if ctrl.read_sector10(ms, lba as u32, buf) {
         Ok(())
     } else {
         Err("usb read")
@@ -278,7 +285,8 @@ pub fn read_sectors(lba: u64, buf: &mut [u8]) -> Result<(), &'static str> {
     if lba.saturating_add(n) > ms.sectors {
         return Err("lba");
     }
-    if host.ctrl.read_sectors10(ms, lba as u32, buf) {
+    let mut ctrl = host.ctrl.lock();
+    if ctrl.read_sectors10(ms, lba as u32, buf) {
         Ok(())
     } else {
         Err("usb read")
@@ -295,7 +303,8 @@ pub fn write_sector(lba: u64, buf: &[u8; SECTOR]) -> Result<(), &'static str> {
     if lba >= ms.sectors {
         return Err("lba");
     }
-    if host.ctrl.write_sectors10(ms, lba as u32, buf) {
+    let mut ctrl = host.ctrl.lock();
+    if ctrl.write_sectors10(ms, lba as u32, buf) {
         Ok(())
     } else {
         Err("usb write")
@@ -314,9 +323,11 @@ pub fn write_sectors(lba: u64, buf: &[u8]) -> Result<(), &'static str> {
     if lba.saturating_add(n) > ms.sectors {
         return Err("lba");
     }
-    if host.ctrl.write_sectors10(ms, lba as u32, buf) {
+    let mut ctrl = host.ctrl.lock();
+    if ctrl.write_sectors10(ms, lba as u32, buf) {
         return Ok(());
     }
+    drop(ctrl);
     drop(guard);
     for (i, chunk) in buf.chunks(SECTOR).enumerate() {
         let sec: &[u8; SECTOR] = chunk.try_into().map_err(|_| "usb write")?;
@@ -344,7 +355,8 @@ pub fn flush() -> Result<(), &'static str> {
     if !ms.sync_cache {
         return Ok(());
     }
-    if host.ctrl.synchronize_cache10(ms) {
+    let mut ctrl = host.ctrl.lock();
+    if ctrl.synchronize_cache10(ms) {
         Ok(())
     } else {
         Err("usb flush")
@@ -371,13 +383,15 @@ pub struct UsbKbdEvent {
     pub altgr: bool,
 }
 
-/// Sondea el teclado HID. **`try_lock`**: ver comentario en el bloque anterior.
+/// Sondea el teclado HID. No necesita el candado del vector si otro hilo está
+/// en un write BOT: solo `try_lock` por controlador (Linux `hid_irq_in`).
 pub fn poll_keyboard_event() -> Option<UsbKbdEvent> {
     use xhci_nostd::hid::{MOD_LEFT_SHIFT, MOD_RIGHT_ALT, MOD_RIGHT_SHIFT};
 
-    let mut guard = HOSTS.try_lock()?;
-    for host in guard.iter_mut() {
-        if let Some(evt) = host.ctrl.poll_keyboard() {
+    let guard = HOSTS.try_lock()?;
+    for host in guard.iter() {
+        let mut ctrl = host.ctrl.try_lock()?;
+        if let Some(evt) = ctrl.poll_keyboard() {
             let shift = evt.modifiers & (MOD_LEFT_SHIFT | MOD_RIGHT_SHIFT) != 0;
             let altgr = evt.modifiers & MOD_RIGHT_ALT != 0;
             return Some(UsbKbdEvent {
@@ -418,7 +432,15 @@ pub unsafe fn force_unlock() {
 }
 
 pub fn has_usb_keyboard() -> bool {
-    HOSTS.lock().iter().any(|h| h.ctrl.has_keyboard())
+    usb_keyboard_count() > 0
+}
+
+pub fn usb_keyboard_count() -> u32 {
+    HOSTS
+        .lock()
+        .iter()
+        .map(|h| h.ctrl.lock().keyboard_count() as u32)
+        .sum()
 }
 
 /// Un único reintento tras `init` (live_disk); evita bucle de slots.
@@ -428,12 +450,13 @@ pub fn rescan() {
     }
     let mut guard = HOSTS.lock();
     for host in guard.iter_mut() {
-        host.ctrl.drain_port_events();
-        if !host.ctrl.any_root_port_connected() {
-            host.ctrl.recover_root_ports();
+        let mut ctrl = host.ctrl.lock();
+        ctrl.drain_port_events();
+        if !ctrl.any_root_port_connected() {
+            ctrl.recover_root_ports();
         }
-        if host.ms.is_none() && host.ctrl.any_root_port_connected() {
-            if let Some(ms) = host.ctrl.enumerate_usb_devices() {
+        if host.ms.is_none() && ctrl.any_root_port_connected() {
+            if let Some(ms) = ctrl.enumerate_usb_devices() {
                 println!(
                     "usb: mass storage (rescan) — {} sectores ({} MiB)",
                     ms.sectors,

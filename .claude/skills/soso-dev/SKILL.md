@@ -93,9 +93,9 @@ QEMU without passthrough shows `nvidia: sin GPU NVIDIA en PCI` — expected.
 ```sh
 # Live USB ya incluye nouveau+iwlwifi; el usuario flashea (el agente no:
 # sudo pide contraseña y no hay TTY). Compila y deja este comando:
-sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --only kernel
+cargo xtask flash-usb-live /dev/sdX --yes --only kernel
 # Primer flash completo / sin tocar modelos:
-# sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes --skip-models
+# cargo xtask flash-usb-live /dev/sdX --yes --skip-models
 # WiFi: edita SOSOWIFI.TXT en ESP p1 o /etc/wifi.conf antes de flashear
 # SSH en placa: ssh -i target/soso_test_key soso@<ip>  (puerto 22)
 ./scripts/l6-iwl-fw-hostcheck.sh          # parser TLV, sin hardware

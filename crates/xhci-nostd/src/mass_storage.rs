@@ -36,8 +36,12 @@ pub fn sync_cache10_cdb() -> [u8; 10] {
 /// El límite duro es el campo de longitud del Normal TRB (17 bits); 64 KiB
 /// deja margen y es lo que QEMU acepta escribir.
 const MAX_XFER: usize = 64 * 1024;
-/// Tope por READ(10) en lectura: varios Normal TRB encadenados en un solo TD.
-const MAX_READ_XFER: usize = 512 * 1024;
+/// Tope por READ(10) en lectura. **Experimento placa (2026-09-13):** igualado a
+/// `MAX_XFER` para NO encadenar Normal TRB en un solo TD (cada comando BOT lee
+/// ≤64 KiB en un único TRB). En placa (qwen3.8-27b) el TD multi-TRB babeaba el
+/// CSW y colgaba el USB; QEMU no lo reproduce. Si el diagnóstico descarta el
+/// encadenado, volver a `512 * 1024` para recuperar el rendimiento.
+const MAX_READ_XFER: usize = MAX_XFER;
 
 const CBW_SIG: u32 = 0x4342_5355;
 const CSW_SIG: u32 = 0x5342_5355;
@@ -223,8 +227,19 @@ impl XhciController {
         }
         let mut got = 0usize;
         if let Some(buf) = data {
+            let want = buf.len();
             match self.bulk_in_len(slot_id, in_dci, buf) {
-                Some(n) => got = n,
+                Some(n) => {
+                    got = n;
+                    if n != want {
+                        // Fase de datos corta: el dispositivo mandó menos de lo
+                        // pedido. Si aún le quedaban bytes, el CSW siguiente los
+                        // recoge y babea (síntoma en placa con qwen3.8-27b).
+                        log::warn!(
+                            "xhci: fase de datos corta slot={slot_id} dci={in_dci} {n}/{want}"
+                        );
+                    }
+                }
                 None => return Bot::Error,
             }
         }
@@ -292,6 +307,38 @@ impl XhciController {
         false
     }
 
+    /// Dirección USB del endpoint (bit 0x80 en los IN) a partir del DCI del
+    /// contexto: DCI = nº_endpoint·2 (+1 si IN); Clear-Feature quiere la
+    /// dirección, no el DCI.
+    fn ep_addr_from_dci(dci: u8) -> u16 {
+        let num = (dci >> 1) as u16;
+        if dci & 1 != 0 {
+            num | 0x80
+        } else {
+            num
+        }
+    }
+
+    /// «Reset Recovery» del BOT (USB Mass Storage Bulk-Only §5.3.4, como
+    /// `usb_stor_Bulk_reset` de Linux): Bulk-Only Mass Storage Reset, luego
+    /// CLEAR_FEATURE(HALT) en ambos endpoints bulk y reajuste del anillo del HC.
+    /// Sin esto, un Babble/Stall dejaba el pipe **halted para siempre**: la
+    /// lectura del shard fallaba (page fault del modelo) y cada flush posterior
+    /// del log a la ESP expiraba a 5 s en bucle.
+    fn bot_reset(&mut self, ms: &MassStorage) -> bool {
+        let ok = self.bulk_only_reset(ms.slot_id, ms.iface);
+        self.clear_endpoint_halt(ms.slot_id, Self::ep_addr_from_dci(ms.bulk_in_dci));
+        self.clear_endpoint_halt(ms.slot_id, Self::ep_addr_from_dci(ms.bulk_out_dci));
+        self.reset_and_requeue_ep(ms.slot_id, ms.bulk_in_dci);
+        self.reset_and_requeue_ep(ms.slot_id, ms.bulk_out_dci);
+        if ok {
+            log::info!("xhci: BOT reset slot={} recuperado", ms.slot_id);
+        } else {
+            log::warn!("xhci: BOT reset slot={} no confirmado", ms.slot_id);
+        }
+        ok
+    }
+
     /// BOT READ(10) — un sector 512 B.
     pub fn read_sector10(&mut self, ms: &MassStorage, lba: u32, buf: &mut [u8; 512]) -> bool {
         self.read_sectors10(ms, lba, buf)
@@ -345,7 +392,18 @@ impl XhciController {
                     log::warn!("xhci: READ(10) lba={lba} falló también en el reintento");
                     return false;
                 }
-                Bot::Error => return false,
+                Bot::Error if intento == 0 => {
+                    log::warn!(
+                        "xhci: READ(10) lba={lba} count={count} error de transporte; \
+                         BOT reset y reintento"
+                    );
+                    self.log_ports();
+                    self.bot_reset(ms);
+                }
+                Bot::Error => {
+                    log::warn!("xhci: READ(10) lba={lba} error de transporte tras BOT reset");
+                    return false;
+                }
             }
         }
         false
@@ -391,7 +449,16 @@ impl XhciController {
                     log::warn!("xhci: WRITE(10) lba={lba} falló también en el reintento");
                     return false;
                 }
-                Bot::Error => return false,
+                Bot::Error if intento == 0 => {
+                    log::warn!(
+                        "xhci: WRITE(10) lba={lba} error de transporte; BOT reset y reintento"
+                    );
+                    self.bot_reset(ms);
+                }
+                Bot::Error => {
+                    log::warn!("xhci: WRITE(10) lba={lba} error de transporte tras BOT reset");
+                    return false;
+                }
             }
         }
         false
@@ -602,7 +669,8 @@ impl XhciController {
         let code = evt.completion_code();
         if code != TRB_COMPLETION_SUCCESS && code != TRB_COMPLETION_SHORT_PACKET {
             log::warn!(
-                "xhci: bulk IN chain slot={slot_id} dci={dci} len={len}: code={code} ({})",
+                "xhci: bulk IN chain slot={slot_id} dci={dci} len={len} residuo={}: code={code} ({})",
+                evt.transfer_length(),
                 completion_name(code),
             );
             return None;
@@ -623,7 +691,8 @@ impl XhciController {
         let code = evt.completion_code();
         if code != TRB_COMPLETION_SUCCESS && code != TRB_COMPLETION_SHORT_PACKET {
             log::warn!(
-                "xhci: bulk slot={slot_id} dci={dci} len={len}: code={code} ({})",
+                "xhci: bulk slot={slot_id} dci={dci} len={len} residuo={}: code={code} ({})",
+                evt.transfer_length(),
                 completion_name(code),
             );
             return None;
