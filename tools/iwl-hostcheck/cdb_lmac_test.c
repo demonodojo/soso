@@ -94,7 +94,48 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
         g_sent_n++;
     }
     if (id == TX_CMD)
-        inject_mlme_rx(iwl, payload, pay_len);
+        return -1;
+    if (id == SCD_QUEUE_CFG) {
+        struct iwl_tx_queue_cfg_rsp rsp;
+
+        memset(&rsp, 0, sizeof(rsp));
+        rsp.queue_number = 5;
+        rsp.write_pointer = 0;
+        iwl->cmd_resp_len = (uint16_t)sizeof(rsp);
+        memcpy(iwl->cmd_resp, &rsp, sizeof(rsp));
+    }
+    return 0;
+}
+
+int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
+{
+    struct iwl_tx_queue_cfg_cmd cfg;
+
+    (void)sta_id;
+    if (!iwl || !iwl->alive)
+        return -1;
+    if (iwl->mgmt_txq_ready)
+        return (int)iwl->mgmt_txq_id;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.sta_id = IWL_MVM_AP_STA_ID;
+    cfg.tid = IWL_MGMT_TID;
+    cfg.flags = iwl_cpu_to_le16(TX_QUEUE_CFG_ENABLE_QUEUE);
+    cfg.cb_size = iwl_cpu_to_le32(tfd_queue_cb_size(IWL_MGMT_QUEUE_SIZE));
+    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, SCD_QUEUE_CFG, &cfg,
+                                (uint16_t)sizeof(cfg),
+                                IWL_MVM_HCMD_TIMEOUT_MS) != 0)
+        return -1;
+    iwl->mgmt_txq_id = 5;
+    iwl->mgmt_txq_write = 0;
+    iwl->mgmt_txq_ready = 1;
+    return 5;
+}
+
+int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
+                 const void *payload, uint16_t pay_len)
+{
+    (void)txq_id;
+    inject_mlme_rx(iwl, payload, pay_len);
     return 0;
 }
 

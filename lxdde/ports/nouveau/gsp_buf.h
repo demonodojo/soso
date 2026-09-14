@@ -37,7 +37,10 @@
  * (`GSP_GPFIFO_VA_MAX`): la base son 512 GiB (bits 39:32 = 0x80) y esto llega a
  * 0x82_8000_0000. */
 #define G6_VA_BASE   (GSP_VA_BASE + 0x80000000ull)
-#define G6_VA_LIMIT  (GSP_VA_BASE + 0x280000000ull) /* 8 GiB de ventana */
+/* 32 GiB de ventana VA (no reserva física). Cubre el pool FB tras reservas RM
+ * (~15,7 GiB en GA104/3080 Laptop) con margen de alineación y huecos. Sigue
+ * por debajo de GSP_GPFIFO_VA_MAX (bit 39). */
+#define G6_VA_LIMIT  (GSP_VA_BASE + 0x880000000ull)
 /* Desde este tamaño el slot se mapea con páginas de 2 MiB. Por debajo no vale la
  * pena: el desperdicio por granularidad se comería la VRAM con los `norm` de unos
  * KiB, que son la mitad de los tensores de un modelo. */
@@ -135,5 +138,8 @@ int gsp_buf_free(struct gsp_buf *b, uint64_t va);
 uint64_t gsp_buf_vram_free(const struct gsp_buf *b);
 
 void gsp_buf_fini(struct gsp_buf *b);
+
+/* Descarta huecos de VA por debajo de `floor` (hostcheck / reserva explícita alta). */
+void gsp_buf_purge_va_below(struct gsp_buf *b, uint64_t floor);
 
 #endif

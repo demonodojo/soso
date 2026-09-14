@@ -12,7 +12,8 @@ enum nv_family {
 };
 
 #define GB205_DEVICE_ID  0x2f18u  /* RTX 5070 Ti Mobile — también en gsp_chip.c */
-#define GA107_DEVICE_ID  0x249cu  /* RTX 3050 Mobile */
+#define GA104_DEVICE_ID  0x249cu  /* RTX 3080 Laptop (GA104; antes GA107/3050) */
+#define GA107_DEVICE_ID  GA104_DEVICE_ID /* alias histórico */
 
 int gsp_nv_boot0_valid(uint32_t boot0);
 void gsp_nv_family_set(uint32_t boot0, uint16_t device_id);
@@ -21,7 +22,7 @@ uint16_t gsp_nv_family_device_id(void);
 enum nv_family gsp_nv_family_of(uint32_t boot0, uint16_t device_id);
 enum nv_family gsp_nv_family_current(void);
 const char *gsp_nv_family_name(enum nv_family f);
-/* Directorio linux-firmware del die Ampere (ga107 en 3050 Mobile, ga102 por defecto). */
+/* Directorio linux-firmware del die Ampere (ga104 en 3080 Laptop, ga102 fallback). */
 const char *gsp_nv_ampere_chip_name(uint16_t device_id);
 const char *gsp_nv_chip_name(uint16_t device_id, enum nv_family fam);
 

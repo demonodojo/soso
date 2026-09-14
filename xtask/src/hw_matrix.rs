@@ -395,11 +395,11 @@ fn default_matrix() -> HwMatrix {
             ),
             seed_entry(
                 "ga107-igpu",
-                "NVIDIA GA107 (iGPU / Ampere)",
+                "NVIDIA GA104 (RTX 3080 Laptop, Ampere)",
                 vec!["10de:249c".into()],
                 "live-usb + nouveau",
                 &git,
-                "PCI 10de:249c (ROG 3050 Mobile). Cadena Ampere pendiente de revalidar en placa",
+                "PCI 10de:249c (ROG dGPU GA104, 16 GiB VRAM). ID matriz ga107-igpu = alias histórico",
             ),
             seed_entry(
                 "ax211-wifi",

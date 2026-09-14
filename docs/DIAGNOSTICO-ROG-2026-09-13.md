@@ -461,3 +461,214 @@ Esperado: `wifi connect` sin `timeout … id=0x29`; log
 - No reflasheado ni validado en placa en este ciclo.
 - CE/QMD mistral Ampere: pendiente de la línea de log en placa.
 
+---
+
+## Run7 — AUTH TVQM y doorbell Ampere (flush #763 @ 4319649 ms)
+
+Copias: `target/usb-diagnostic-2026-09-13-run7/`. Kernel **0.2.2 (`5e48a396c-dirty`)**.
+
+| Etapa | SOSOLOG | Resultado |
+|---|---|---|
+| Userspace | `sosh —`, OTA ok | **OK** |
+| Teclado | `keyboard ready` 1866 + 18c6; `kbd sc=206 enc=101 ent=101` | **OK** |
+| GSP | `GSP_INIT_DONE`, pool VRAM, CE readback, compute sm_86 | **OK** |
+| `ask mistral` | **`generar rc=0`** | **OK** |
+| WiFi scan | `UCODE_ALIVE_NTFY`, scan count=25/21 | **OK** |
+| WiFi assoc | `SESSION_PROTECTION CONF_ASSOC ok (878 TU)` → **`AUTH timeout`** | **FAIL** |
+| SOSOLOG | **364** líneas `canal (doorbell)… motor 11` durante `ask` | **FAIL** |
+
+### Hallazgo — AUTH por cola HCMD
+
+Tras ADD_STA y SESSION_PROT, **cero RX AUTH**. `iwl_mvm_tx_mgmt` enviaba
+`TX_CMD` por `iwl_trans_send_cmd_async` → cola HCMD q0. Linux AX200 (gen2)
+usa cola mgmt TVQM (`SCD_QUEUE_CFG` 0x1d, tid=15) + `iwl_trans_tx`.
+
+### Hallazgo — doorbell Ampere en hot path
+
+`chan_refresh_doorbell_kick` releía PTOP y logueaba en **cada** submit CE/QMD
+(364× en un `ask`), llenando el ring de 256 KiB.
+
+### Fixes aplicados (código, pendiente placa)
+
+1. **`iwl_trans_txq_alloc_mgmt` + `iwl_trans_tx`:** DMA TFD/BC, `SCD_QUEUE_CFG`
+   tras ADD_STA; AUTH/ASSOC por cola de datos (`doorbell qid≠0`).
+2. **`gsp_chan.c`:** resolución PTOP Ampere solo en `chan_start`; submit usa
+   kick cacheado.
+3. **Hostcheck:** `assoc_abi_test` exige SCD_QUEUE_CFG y TX fuera de HCMD.
+4. **Matriz:** `ga107-igpu` / `ax200-wifi` actualizados con run7.
+
+### Validación en placa
+
+```bash
+cargo xtask flash-usb-live /dev/sda --yes --only kernel
+wifi connect Rutilo   # sin AUTH timeout; RX AUTH seq=2
+ask mistral-7b        # SOSOLOG sin spam doorbell
+```
+
+---
+
+## Run8 — SCD_QUEUE_CFG BC 32 B y inferencia lenta (flush #47 @ 875643 ms)
+
+Copias: `target/usb-diagnostic-2026-09-13/` (ESP `/dev/sda1`). Kernel **0.2.2
+(`c5cc1ff81-dirty`)**. Comparado con Linux **v6.6** (`queue/tx.c`, `iwl-fh.h`).
+
+| Etapa | SOSOLOG | Resultado |
+|---|---|---|
+| Userspace | `sosh —`, teclado `kbd sc=103` | **OK** |
+| GSP/CE | `GSP_INIT_DONE`, pool VRAM, compute sm_86 | **OK** |
+| WiFi scan | count=23 | **OK** |
+| WiFi assoc | ADD_STA ok → **`timeout cmd grp=1 id=0x1d`** → `SCD_QUEUE_CFG mgmt falló` | **FAIL** |
+| `ask hola` | mistral-7b listo, backend GPU, 16 puntos @ ~875 s; sin `QMD no señalizó`, sin spam doorbell | **FAIL** (lento; sin tok/s ni fin) |
+
+### Hallazgo — BC tabla TXQ mgmt 32 B vs 640 B
+
+Tras run7 (TVQM), el AUTH ya no va por HCMD pero **`SCD_QUEUE_CFG` (0x1d)**
+expira: soso asignaba `byte_cnt` de **32 B** (`16 × u16`); Linux con
+`queue_alloc_cmd_ver==0` usa **`iwlagn_scd_bc_tbl` = 640 B** (pool DMA alineado
+256). Firmware cc-a0-77: `0x1d` no está en LEGACY/DATA_PATH CMD_VERSIONS → ruta
+legado correcta, BC mal dimensionada.
+
+### Hallazgo — pesos lazy desde USB p3
+
+`fijar_pesos_residentes` solo fijaba el flag; cada capa del prefill subía
+shards mmap (294) en el primer matvec → minutos por punto de progreso aunque
+GSP/CE estuvieran bien.
+
+### Fixes aplicados (código, pendiente placa)
+
+1. **`iwl_trans.c` / `iwl_internal.h`:** BC **640 B** (`TFD_QUEUE_BC_SIZE`),
+   alineación DMA 256, duplicado BC en `TFD_QUEUE_SIZE_MAX+idx`.
+2. **`assoc_abi_test.c`:** payload 24 B, `cb_size` 16 TFD, `byte_cnt` 640 B.
+3. **`soso-gpu` / `soso-llm`:** subida eager Q4/Q8 a VRAM tras cargar modelo;
+   log `subida eager VRAM`; telemetría `capa i/n ms on_gpu=`; sin `sleep_ms(1)`
+   en `ask_layer_tick`.
+4. **CE/QMD Ampere (+64 / tiles G5):** no tocado — este SOSOLOG no muestra
+   `on_gpu=0` ni `bounce>0`; pendiente de la línea de log tras flash.
+
+### Validación en placa
+
+```bash
+cargo xtask flash-usb-live /dev/sda --yes --only kernel
+# ask con log nuevo también rootfs:
+# cargo xtask flash-usb-live /dev/sda --yes --skip-models
+wifi connect Rutilo   # sin timeout id=0x1d; log TXQ mgmt qid≠0
+ask hola              # línea subida eager antes del primer '.'; tok/s al terminar
+```
+
+---
+
+# ROG run9 — SCD_QUEUE_CFG TFD vacíos (13 sep 2026, flush #77 @ 1527382 ms)
+
+## Evidencia y alcance
+
+Lectura ESP `/dev/sda1` (`KERNEL`, vfat) con `udisksctl`. Copias:
+`target/usb-diagnostic-2026-09-13-run9/` (también
+`target/usb-diagnostic-2026-09-13/` de esta misma pasada). ESP desmontada.
+SOSOWIFI vacío (PSK no copiado; `wifi connect` interactivo).
+
+| Campo | Valor |
+|---|---|
+| Kernel USB | **0.2.2 (`c5cc1ff81-dirty`)** |
+| Hardware | `10de:249c` GA107 + `8086:2723` AX200 + `10ec:8168` rtl8169 |
+| Userspace | **`sosh —`** + OTA `pid=2 write=183ms` + `$ halt` |
+| Teclado | **`kbd sc=99 ultimo=0x1c enc=49 ent=49`**; `SET_PROTOCOL(Boot)` slot 2 `1866` y slot 3 `18c6` |
+| GPU | `GSP_INIT_DONE res=0x0`, `pool VRAM=sí`, CE readback, `ask hola` **`generar rc=0`** `backend GPU`, fini `unload=ok dma=off` |
+| WiFi scan | `UCODE_ALIVE_NTFY`, `INIT_COMPLETE`, scan `count=24` luego `25` |
+| WiFi assoc | PHY ch3 ok → MAC `0x28` ok → ADD_STA `0x18` ok → **`timeout cmd grp=1 id=0x1d`** → `SCD_QUEUE_CFG mgmt falló` |
+| Ethernet | `rtl_hw_start_8168h_1 ok`; `phystatus 0x84` DOWN (sin cable) |
+
+Árboles Linux (solo lectura):
+
+| Árbol | Referencia |
+|---|---|
+| `lxdde/linux/` | **6.6.32** — `queue/tx.c:123–129, 1047–1108, 1247–1262`, `pcie/trans.c:2028–2044`, `iwl-fh.h:663–729`, `fw/api/txq.h:82–115`, `mvm/sta.c:852–891`, `mvm/mvm.h:1450–1454` |
+
+Hostchecks (no validan SCD DMA en silicio): `l6-iwl-fw-hostcheck.sh` OK,
+`l6-g3-gsp-hostcheck.sh` OK. `assoc_abi_test` mockea HCMD; no cubre TFD
+`invalid_tx_cmd` ni el timeout de placa.
+
+---
+
+## Tabla de etapas (run9)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Userspace | `sosh —`, OTA, `$ halt` | **OK** |
+| Teclado USB 18c6 | `keyboard ready on slot=3 (0x0b05:0x18c6)`, `sc=99` | **OK** |
+| GSP / RPC | `GSP_INIT_DONE`, `pool VRAM=sí` | **OK** |
+| CE / compute | `CE readback verificado`, `compute listo cls=0xc7c0` | **OK** |
+| `ask hola` | `backend GPU`, `generar rc=0` | **OK** (sin tok/s en log) |
+| Apagado GSP | `GSP-RM apagado (objetos=ok unload=ok halt=ok dma=off)` | **OK** |
+| WiFi ALIVE | `UCODE_ALIVE_NTFY`, `alive=true` | **OK** |
+| WiFi scan | `scan fin count=24` / `25` | **OK** |
+| WiFi assoc | `timeout … id=0x1d` / `TXQ mgmt falló` | **FAIL** |
+| DHCP / SSH | ethernet DOWN; sin lease WiFi | **pendiente** |
+
+---
+
+## Hallazgos
+
+### WIFI-1. `SCD_QUEUE_CFG` (0x1d) sigue sin respuesta tras ADD_STA (confirmado)
+
+**Síntoma:** `iwl_rx: grp=1 id=0x18 seq=0x0011` (ADD_STA) → ningún RX de `0x1d` →
+`timeout cmd grp=1 id=0x1d slot=18; MVM parado` → `SCD_QUEUE_CFG mgmt falló` →
+`fallo AUTH+ASSOC`. El FW no NACKea: no contesta.
+
+**soso:** [`iwl_trans.c:957–1012`](lxdde/ports/iwlwifi/iwl_trans.c) asigna TFD 16×256 B,
+BC 640 B, `cb_size=TFD_QUEUE_CB_SIZE(16)`, payload 24 B
+`iwl_tx_queue_cfg_cmd`, HCMD LEGACY→LONG grupo 1. [`iwl_mvm_assoc.c:467`](lxdde/ports/iwlwifi/iwl_mvm_assoc.c)
+tras ADD_STA (`sta_id=0`, tid=15). `memset` de los TFD a **cero**.
+
+**Linux 6.6.32:** AX200 es gen2 → `iwl_mvm_has_new_tx_api` ([`mvm.h:1450`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/mvm/mvm.h))
+usa TVQM: `iwl_txq_dyn_alloc` con `queue_alloc_cmd_ver==0` envía el mismo
+`SCD_QUEUE_CFG` 24 B ([`queue/tx.c:1247–1262`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/queue/tx.c)).
+Mgmt: `IWL_MGMT_QUEUE_SIZE=16` ([`txq.h:82`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/fw/api/txq.h)).
+BC `iwlagn_scd_bc_tbl` = 640 B ([`iwl-fh.h:727`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/iwl-fh.h)).
+cc-a0-77 **sin** `CAPA_DQA` (hostcheck): Linux tampoco manda `DQA_ENABLE`.
+
+**Compatible con el síntoma:** sí. El 640 B del run8 no basta: el HCMD sigue
+expirando. Siguiente discrepancia causal (etapa ausente):
+
+Linux, **antes** de enviar `SCD_QUEUE_CFG`, rellena cada TFD con
+`invalid_tx_cmd` (DMA real, no dirección 0):
+
+- alloc: [`pcie/trans.c:2028–2044`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/pcie/trans.c)
+  (`INVALID_WR_PTR_CMD` / `DEBUG_GROUP`)
+- init TFD: [`queue/tx.c:1102–1108`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/queue/tx.c) +
+  [`queue/tx.c:123–129`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/queue/tx.c)
+  (`iwl_txq_set_tfd_invalid_gen2` → TB0 = `invalid_tx_cmd.dma`)
+
+soso no tiene `invalid_tx_cmd`. TFD a ceros ⇒ TB0 `addr=0`. Si el FW prefetcha
+el anillo al procesar `0x1d`, DMA desde 0 cuelga el HCMD (timeout, no NACK).
+
+### GPU-1. Inferencia Ampere en placa (confirmado OK)
+
+`soso-llm: backend GPU` + `askd: generar rc=0`. No hay línea `tok/s` ni
+`subida eager VRAM` (userspace del USB puede ser anterior al log nuevo). No es
+bloqueante para assoc.
+
+### ETH-1. 8168H DOWN (descartado como bug de este arranque)
+
+`rtl_hw_start_8168h_1 (VER_46) ok` + `phystatus 0x84` sin cable. No mezclar con
+DHCP WiFi.
+
+---
+
+## Orden de corrección
+
+1. **`iwl_trans.c`:** alocar `invalid_tx_cmd` (Linux `pcie/trans.c:2028`) e
+   inicializar los 16 TFD mgmt con TB0 a esa DMA **antes** de `SCD_QUEUE_CFG`
+   (`queue/tx.c:1102–1108`). Log `SCD_QUEUE_CFG tfd= bc= cb_size= n=`.
+   Host: `assoc_abi_test` exige TB0 ≠ 0. Placa: `TXQ mgmt qid≠0` sin timeout
+   `id=0x1d`; siguiente HCMD = `SESSION_PROTECTION`.
+2. **Si 0x1d sigue expirando:** volcar `tfdq_addr`/`byte_cnt_addr` físicos del
+   HCMD y contrastar con el anillo HCMD (`BA=0x21242000` en este log). No
+   cambiar el ABI 24 B / BC 640 B / cola 16 sin esa evidencia.
+3. **Este informe + `hw-matrix.json`** (`ga107-igpu` / `ax200-wifi`, run9).
+
+## Qué no se ha hecho
+
+- Ni `iwl_trans.c` ni `assoc_abi_test` tocados en este ciclo.
+- No reflasheado. No 4-way, DHCP WiFi ni SSH en placa.
+- Ethernet sin cable. GB205/AX211 ausentes en este hwscan.
+

@@ -223,6 +223,7 @@ static int chan_schedule(struct gsp_chan *c)
 
 static int chan_runlist_base(struct gsp_chan *c, const char *why, uint32_t *out,
                              uint32_t *chram_tab);
+static void chan_resolve_ampere_doorbell_once(struct gsp_chan *c);
 static void chan_refresh_doorbell_kick(struct gsp_chan *c);
 
 /* Sin token no hay forma de patear el canal, así que esto NO es best-effort: si
@@ -263,7 +264,7 @@ static int chan_get_doorbell_token(struct gsp_chan *c)
                   "el %u — el chid no se pide por ahí\n",
                   c->chid, c->doorbell_token & NV_VF_DOORBELL_VECTOR_MASK);
     }
-    chan_refresh_doorbell_kick(c);
+    chan_resolve_ampere_doorbell_once(c);
     return 0;
 }
 
@@ -725,36 +726,44 @@ static int chan_runlist_base(struct gsp_chan *c, const char *why, uint32_t *out,
     return -1;
 }
 
-static void chan_refresh_doorbell_kick(struct gsp_chan *c)
+/* Ampere: una sola resolución por PTOP en chan_start; no en cada submit. */
+static void chan_resolve_ampere_doorbell_once(struct gsp_chan *c)
 {
     uint32_t runl = 0;
     uint32_t chram_tab = 0;
     uint32_t dbcfg;
     uint32_t kick_before;
-    enum nv_family fam;
 
-    if (!c || !c->doorbell_ok) {
+    if (!c || !c->doorbell_ok)
         return;
-    }
-    fam = gsp_nv_family_current();
+    if (gsp_nv_family_current() != NV_FAM_AMPERE)
+        return;
     kick_before = c->doorbell_kick;
-    c->doorbell_kick = gsp_chan_doorbell_kick(fam, c->doorbell_token);
-    if (fam != NV_FAM_AMPERE) {
+    if (chan_runlist_base(c, "doorbell", &runl, &chram_tab) != 0)
         return;
-    }
-    if (chan_runlist_base(c, "doorbell", &runl, &chram_tab) != 0) {
-        return;
-    }
     dbcfg = gsp_mmio_rd32(runl + RUNL_DBCFG);
-    if (gsp_mmio_pri_error(dbcfg)) {
+    if (gsp_mmio_pri_error(dbcfg))
         return;
-    }
-    c->doorbell_kick = gsp_chan_doorbell_kick_resolved(fam, c->doorbell_token,
-                                                       dbcfg);
+    c->doorbell_kick = gsp_chan_doorbell_kick_resolved(NV_FAM_AMPERE,
+                                                         c->doorbell_token,
+                                                         dbcfg);
     if (c->doorbell_kick != kick_before) {
         lx_printk("nouveau-lx: doorbell ajustado 0x%08x → 0x%08x (dbcfg doorbell=%u)\n",
                   kick_before, c->doorbell_kick, dbcfg >> 16);
     }
+}
+
+static void chan_refresh_doorbell_kick(struct gsp_chan *c)
+{
+    enum nv_family fam;
+
+    if (!c || !c->doorbell_ok)
+        return;
+    fam = gsp_nv_family_current();
+    /* Kick ya resuelto en chan_get_doorbell_token; evitar PTOP/log en hot path. */
+    if (fam == NV_FAM_AMPERE)
+        return;
+    c->doorbell_kick = gsp_chan_doorbell_kick(fam, c->doorbell_token);
 }
 
 static void chan_dump_ramfc(struct gsp_chan *c, const char *why)

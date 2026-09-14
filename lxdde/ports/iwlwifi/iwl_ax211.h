@@ -74,6 +74,21 @@ struct iwl_ax211_priv {
     uint16_t cmd_write;
     uint16_t cmd_qid;
 
+    uint16_t mgmt_txq_id;
+    uint16_t mgmt_txq_write;
+    uint8_t mgmt_txq_ready;
+    void *mgmt_tfd_cpu;
+    uint64_t mgmt_tfd_dma;
+    void *mgmt_first_tb_cpu;
+    uint64_t mgmt_first_tb_dma;
+    void *mgmt_body_cpu;
+    uint64_t mgmt_body_dma;
+    void *mgmt_bc_cpu;
+    uint64_t mgmt_bc_dma;
+    void *invalid_tx_cmd_cpu;
+    uint64_t invalid_tx_cmd_dma;
+    uint16_t invalid_tx_cmd_size;
+
     struct iwl_ax211_tfd tfd[256];
     uint16_t mtr_write;
     uint16_t mcr_read;
@@ -197,5 +212,8 @@ int iwl_trans_send_cmd_async(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t 
                              const void *payload, uint16_t pay_len);
 int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                             const void *payload, uint16_t pay_len, int wait_ms);
+int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id);
+int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
+                 const void *payload, uint16_t pay_len);
 
 #endif

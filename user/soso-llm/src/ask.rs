@@ -14,7 +14,7 @@ use soso_llm_core::plan::MemoryPlanConfig;
 use soso_llm_core::sample::Sampler;
 
 use crate::net::{parse_sock_addr, TcpFd};
-use crate::{generar_tokens, preparar_sesion, Sesion};
+use crate::{generar_tokens, preparar_sesion_echo, Sesion};
 
 const CONF: &str = "/etc/llm.conf";
 pub const ASK_PORT: u16 = 7420;
@@ -394,7 +394,8 @@ fn asegurar_modelo(
     if recargar {
         socket_write_str(fd, &format!("ask: cargando {want}...\n"));
         println!("askd: cargando {want}");
-        match preparar_sesion(&want, false, MemoryPlanConfig::default(), false, false) {
+        match preparar_sesion_echo(&want, false, MemoryPlanConfig::default(), false, false, Some(fd))
+        {
             Ok(s) => {
                 println!("askd: {want} listo");
                 *sesion = Some(s);
@@ -520,7 +521,6 @@ fn tratar_linea_askd(
         ),
     );
     ses.bundle.source.disable_worker();
-    let _ = sys::sleep_ms(1);
     let rc = generar_tokens(
         ses,
         &tokens,

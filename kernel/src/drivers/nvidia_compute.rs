@@ -307,7 +307,9 @@ pub fn enqueue_matvec_q_resident(
 ) -> Result<bool, ()> {
     #[cfg(feature = "lxdde")]
     {
-        if crate::lxdde::enqueue_matvec_q_resident(w_va, rows, cols, x, y_va, sem_slot).is_ok() {
+        if crate::lxdde::enqueue_matvec_q_resident(w_va, dtype, rows, cols, x, y_va, sem_slot)
+            .is_ok()
+        {
             return Ok(true);
         }
     }

@@ -3357,7 +3357,7 @@ static int check_pramin_family(uint32_t boot0, uint16_t devid, const char *label
 
 static int check_pramin(void)
 {
-    if (check_pramin_family(0xb74000a1u, 0x249cu, "Ampere GA107") != 0)
+    if (check_pramin_family(0xb74000a1u, 0x249cu, "Ampere GA104") != 0)
         return -1;
     if (check_pramin_family(0x1b5000a1u, 0x2f18u, "Blackwell GB205") != 0)
         return -1;
@@ -3703,8 +3703,8 @@ static int check_doorbell_ampere_copy2_resolved(void)
     return 0;
 }
 
-/* RTX 3050 Mobile: boot0 muerto no puede clasificarse como Blackwell/FMC. */
-static int check_ga107_dead_boot0(void)
+/* RTX 3080 Laptop (GA104): boot0 muerto no puede clasificarse como Blackwell/FMC. */
+static int check_ga104_dead_boot0(void)
 {
     enum nv_family fam = gsp_nv_family_of(0xffffffffu, 0x249cu);
 
@@ -3714,15 +3714,15 @@ static int check_ga107_dead_boot0(void)
         return -1;
     }
     if (gsp_nv_ampere_chip_name(0x249cu)[0] != 'g' ||
-        strcmp(gsp_nv_ampere_chip_name(0x249cu), "ga107") != 0) {
-        printf("FALLO: chip 0x249c=%s (esperaba ga107)\n",
+        strcmp(gsp_nv_ampere_chip_name(0x249cu), "ga104") != 0) {
+        printf("FALLO: chip 0x249c=%s (esperaba ga104)\n",
                gsp_nv_ampere_chip_name(0x249cu));
         return -1;
     }
     if (!gsp_nv_boot0_valid(0xffffffffu)) {
         printf("OK: boot0 all-ones no es válido para arch\n");
     }
-    printf("OK: 0x249c + boot0 muerto → Ampere/ga107 (no Blackwell/FMC)\n");
+    printf("OK: 0x249c + boot0 muerto → Ampere/ga104 (no Blackwell/FMC)\n");
     return 0;
 }
 
@@ -4599,6 +4599,74 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         }
         printf("OK: el DMA rechaza src_off >= 4096, lista corta para src_off+size "
                "y ventana pasada por el src_off\n");
+
+        /* Ventana G6 ampliada (>8 GiB): reservar y traducir más allá del límite
+         * anterior (8 GiB). */
+        {
+            const uint64_t old_limit = GSP_VA_BASE + 0x280000000ull;
+            const uint64_t marks[] = {
+                G6_VA_BASE + (8ull << 30),
+                G6_VA_BASE + (12ull << 30),
+                G6_VA_LIMIT - G6_BIG_MIN,
+            };
+            unsigned m;
+
+            if ((G6_VA_LIMIT - G6_VA_BASE) != (32ull << 30)) {
+                printf("FALLO: ventana G6=%llu MiB (esperaba 32768)\n",
+                       (unsigned long long)((G6_VA_LIMIT - G6_VA_BASE) >> 20));
+                return -1;
+            }
+            gsp_buf_free(&buf, va);
+            for (m = 0; m < sizeof(marks) / sizeof(marks[0]); m++) {
+                uint64_t wide;
+
+                buf.va_next = marks[m];
+                wide = gsp_buf_alloc(&buf, G6_BIG_MIN);
+                if (!wide || wide < marks[m] || wide < old_limit) {
+                    printf("FALLO: G6 no reserva VA 0x%llx (marca %u, got 0x%llx)\n",
+                           (unsigned long long)marks[m], m,
+                           (unsigned long long)wide);
+                    return -1;
+                }
+                if (gsp_vmm_translate(&v, wide, &phys_leida, &pte) != 0 ||
+                    phys_leida == 0) {
+                    printf("FALLO: G6 VA alta 0x%llx no traduce\n",
+                           (unsigned long long)wide);
+                    return -1;
+                }
+                gsp_buf_free(&buf, wide);
+                if (m + 1u < sizeof(marks) / sizeof(marks[0])) {
+                    gsp_buf_purge_va_below(&buf, marks[m + 1u]);
+                }
+            }
+            printf("OK: G6 reserva y traduce VAs >8 GiB (ventana 32 GiB)\n");
+        }
+
+        /* Ciclos alloc/liberación: `used` vuelve y la misma VA se reutiliza. */
+        {
+            uint64_t a0, a1;
+            uint64_t used0;
+
+            gsp_buf_purge_va_below(&buf, ~0ull);
+            buf.va_next = G6_VA_BASE;
+            a0 = gsp_buf_alloc(&buf, 4u * 4096u);
+            if (!a0) {
+                printf("FALLO: G6 ciclo alloc inicial\n");
+                return -1;
+            }
+            used0 = pool.used;
+            gsp_buf_free(&buf, a0);
+            a1 = gsp_buf_alloc(&buf, 4u * 4096u);
+            if (!a1 || pool.used != used0) {
+                printf("FALLO: G6 ciclo — used=%llu (esperaba %llu) va=0x%llx\n",
+                       (unsigned long long)pool.used, (unsigned long long)used0,
+                       (unsigned long long)a1);
+                return -1;
+            }
+            gsp_buf_free(&buf, a1);
+            printf("OK: G6 alloc/liberación mantiene used y reutiliza VA\n");
+        }
+
         gsp_buf_fini(&buf);
     }
 
@@ -5518,7 +5586,7 @@ static int check_cot(const struct gsp_wpr *wpr)
         return -1;
     if (check_doorbell_ampere_copy2_resolved() != 0)
         return -1;
-    if (check_ga107_dead_boot0() != 0)
+    if (check_ga104_dead_boot0() != 0)
         return -1;
     if (check_cpu_seq() != 0)
         return -1;

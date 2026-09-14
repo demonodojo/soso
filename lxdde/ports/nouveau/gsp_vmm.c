@@ -314,6 +314,30 @@ static struct gsp_vmm_pt *pt_find(struct gsp_vmm *v, unsigned lvl, uint64_t va)
     return NULL;
 }
 
+static struct gsp_vmm_pt *pt_child_table(struct gsp_vmm *v, const struct gsp_vmm_pt *pt,
+                                          unsigned lvl, uint64_t va)
+{
+    uint64_t entry = pt_read(v, pt, lvl_index(v, lvl, va));
+    uint64_t want;
+    unsigned i;
+
+    if (pde_aperture(entry) == 0) {
+        return NULL;
+    }
+    if (v->fmt == GSP_VMM_FMT_GP100) {
+        want = (entry & VMM_ADDR_MASK_GP100) << 4;
+    } else {
+        want = pde_address(entry);
+    }
+    for (i = 0; i < v->pt_nr; i++) {
+        if (v->pt[i].used && v->pt[i].level == lvl - 1u &&
+            v->pt[i].mem.phys == want) {
+            return &v->pt[i];
+        }
+    }
+    return NULL;
+}
+
 /* Devuelve la tabla, creándola si hace falta. `*created` dice si es nueva, que
  * es cuando hay que enlazarla desde el nivel de arriba. */
 static struct gsp_vmm_pt *pt_get(struct gsp_vmm *v, unsigned lvl, uint64_t va,
@@ -578,6 +602,106 @@ int gsp_vmm_map_pages(struct gsp_vmm *v, uint64_t va, const uint64_t *phys,
         }
     }
 
+    gsp_vmm_invalidate(v);
+    return 0;
+}
+
+static int unmap_one(struct gsp_vmm *v, uint64_t at)
+{
+    struct gsp_vmm_pt *parent = pt_find(v, vmm_root(v), at);
+    unsigned lvl;
+    unsigned root = vmm_root(v);
+    uint32_t idx;
+    uint64_t entry;
+
+    if (!parent) {
+        return 0;
+    }
+    for (lvl = root; lvl > 0; lvl--) {
+        if (lvl == 1u && pt_read_big(v, parent, lvl_index(v, 1, at)) != 0) {
+            return -1;
+        }
+        parent = pt_child_table(v, parent, lvl, at);
+        if (!parent) {
+            return 0;
+        }
+    }
+    idx = lvl_index(v, 0, at);
+    entry = pt_read(v, parent, idx);
+    if (entry & 1ull) {
+        pt_write(v, parent, idx, 0);
+        if (v->pages_mapped) {
+            v->pages_mapped--;
+        }
+    }
+    return 0;
+}
+
+static int unmap_big_one(struct gsp_vmm *v, uint64_t at)
+{
+    struct gsp_vmm_pt *parent = pt_find(v, vmm_root(v), at);
+    unsigned lvl;
+    unsigned root = vmm_root(v);
+    uint32_t idx;
+    uint64_t entry;
+
+    if (!parent) {
+        return 0;
+    }
+    for (lvl = root; lvl > 1u; lvl--) {
+        parent = pt_child_table(v, parent, lvl, at);
+        if (!parent) {
+            return 0;
+        }
+    }
+    if (pt_read(v, parent, lvl_index(v, 1, at)) != 0) {
+        return -1;
+    }
+    idx = lvl_index(v, 1, at);
+    entry = pt_read_big(v, parent, idx);
+    if (entry & 1ull) {
+        pt_write_big(v, parent, idx, 0);
+        if (v->pages_mapped >= VMM_BIG_PAGE / VMM_PAGE) {
+            v->pages_mapped -= VMM_BIG_PAGE / VMM_PAGE;
+        }
+    }
+    return 0;
+}
+
+int gsp_vmm_unmap(struct gsp_vmm *v, uint64_t va, uint64_t size)
+{
+    uint64_t off;
+
+    if (!v || !v->ready || size == 0) {
+        return -1;
+    }
+    if ((va | size) & (VMM_PAGE - 1)) {
+        return -1;
+    }
+    for (off = 0; off < size; off += VMM_PAGE) {
+        if (unmap_one(v, va + off) != 0) {
+            return -1;
+        }
+    }
+    gsp_vmm_invalidate(v);
+    return 0;
+}
+
+int gsp_vmm_unmap_big(struct gsp_vmm *v, uint64_t va, uint64_t size)
+{
+    uint64_t off;
+
+    if (!v || !v->ready || size == 0) {
+        return -1;
+    }
+    if ((va | size) & (VMM_BIG_PAGE - 1)) {
+        return -1;
+    }
+    for (off = 0; off < size; off += VMM_BIG_PAGE) {
+        if (unmap_big_one(v, va + off) != 0) {
+            return -1;
+        }
+    }
     gsp_vmm_invalidate(v);
     return 0;
 }

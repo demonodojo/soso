@@ -52,8 +52,8 @@ enum nv_family gsp_nv_family_current(void)
 
 const char *gsp_nv_ampere_chip_name(uint16_t device_id)
 {
-    if (device_id == GA107_DEVICE_ID)
-        return "ga107";
+    if (device_id == GA104_DEVICE_ID)
+        return "ga104";
     return "ga102";
 }
 

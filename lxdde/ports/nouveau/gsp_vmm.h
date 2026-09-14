@@ -184,6 +184,14 @@ int gsp_vmm_map_pages(struct gsp_vmm *v, uint64_t va, const uint64_t *phys,
 int gsp_vmm_map_big(struct gsp_vmm *v, uint64_t va, uint64_t phys, uint64_t size,
                     enum gsp_vmm_target target);
 
+/* Invalida PTEs de 4 KiB en `va..va+size` (todo alineado a 4 KiB). Una sola
+ * invalidación de MMU al final. Sin esto, la free-list física puede reutilizar
+ * un frame mientras la VA antigua sigue traduciendo al mismo sitio. */
+int gsp_vmm_unmap(struct gsp_vmm *v, uint64_t va, uint64_t size);
+
+/* Igual con PTEs de 2 MiB (`gsp_vmm_map_big`). */
+int gsp_vmm_unmap_big(struct gsp_vmm *v, uint64_t va, uint64_t size);
+
 /* Recorre las tablas ya construidas como lo haría la MMU y devuelve a qué
  * física traduce `va`. -1 si algún nivel falta o está inválido. Existe para
  * poder comprobar el mapeo sin la GPU: se construye por un camino y se lee por

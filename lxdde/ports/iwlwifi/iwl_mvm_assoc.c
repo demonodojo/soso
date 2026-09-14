@@ -211,7 +211,9 @@ static int iwl_mvm_tx_mgmt(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
         return -1;
     memcpy(buf + hdr_off, frame, (unsigned)flen);
     pay = (uint16_t)(hdr_off + (unsigned)flen);
-    return iwl_trans_send_cmd_async(iwl, DATA_PATH_GROUP, TX_CMD, buf, pay);
+    if (!iwl->mgmt_txq_ready)
+        return -1;
+    return iwl_trans_tx(iwl, iwl->mgmt_txq_id, buf, pay);
 }
 
 static void fill_mgmt_hdr(uint8_t *f, uint16_t fc, const uint8_t *sta,
@@ -460,6 +462,10 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
     }
     if (iwl_mvm_add_sta_ap(iwl, bssid) != 0) {
         lx_printk("iwl_mvm: ADD_STA falló\n");
+        return -1;
+    }
+    if (iwl_trans_txq_alloc_mgmt(iwl, IWL_MVM_AP_STA_ID) < 0) {
+        lx_printk("iwl_mvm: TXQ mgmt falló\n");
         return -1;
     }
     if (iwl_mvm_protect_assoc(iwl) != 0)

@@ -21,8 +21,39 @@ struct cmd_rec {
 static struct cmd_rec g_sent[20];
 static int g_sent_n;
 
+struct tx_rec {
+    uint16_t txq_id;
+    uint16_t len;
+    uint8_t payload[256];
+};
+
+static struct tx_rec g_tx[4];
+static int g_tx_n;
+static const uint16_t g_mock_mgmt_qid = 5u;
+static size_t g_mgmt_bc_alloc_bytes;
+
 void lx_printk(const char *fmt, ...) { (void)fmt; }
 void lx_mdelay(unsigned int ms) { (void)ms; }
+
+void *lx_dma_alloc_coherent(void *dev, size_t size, uint64_t *dma, unsigned gfp)
+{
+    (void)dev;
+    (void)gfp;
+    if (size >= IWL_SCD_BC_TBL_BYTES)
+        g_mgmt_bc_alloc_bytes = size;
+    void *p = aligned_alloc(IWL_SCD_DMA_ALIGN, (size + 4095u) & ~(size_t)4095u);
+    if (p && dma)
+        *dma = (uint64_t)(uintptr_t)p;
+    return p;
+}
+
+void lx_dma_free_coherent(void *dev, size_t size, void *cpu, uint64_t dma)
+{
+    (void)dev;
+    (void)size;
+    (void)dma;
+    free(cpu);
+}
 
 void iwl_trans_poll(struct iwl_ax211_priv *iwl)
 {
@@ -70,8 +101,96 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
             memcpy(g_sent[g_sent_n].payload, payload, pay_len);
         g_sent_n++;
     }
-    if (id == TX_CMD)
-        inject_mlme_rx(iwl, payload, pay_len);
+    if (id == TX_CMD) {
+        fprintf(stderr, "TX_CMD no debe ir por cola HCMD (grp=%u id=0x%02x)\n",
+                group, id);
+        return -1;
+    }
+    if (id == SCD_QUEUE_CFG) {
+        struct iwl_tx_queue_cfg_rsp rsp;
+
+        memset(&rsp, 0, sizeof(rsp));
+        rsp.queue_number = g_mock_mgmt_qid;
+        rsp.write_pointer = 0;
+        iwl->cmd_resp_len = (uint16_t)sizeof(rsp);
+        memcpy(iwl->cmd_resp, &rsp, sizeof(rsp));
+    }
+    return 0;
+}
+
+int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
+{
+    struct iwl_tx_queue_cfg_cmd cfg;
+    unsigned tfd_bytes = IWL_MGMT_QUEUE_SIZE * IWL_TFH_TFD_SIZE;
+    unsigned first_tb_bytes = IWL_MGMT_QUEUE_SIZE * IWL_FIRST_TB_SIZE_ALIGN;
+    unsigned body_bytes = IWL_MGMT_QUEUE_SIZE * IWL_MGMT_TX_SLOT_SIZE;
+    unsigned bc_bytes = IWL_SCD_BC_TBL_BYTES;
+
+    if (!iwl || !iwl->alive)
+        return -1;
+    if (iwl->mgmt_txq_ready)
+        return (int)iwl->mgmt_txq_id;
+    if (!iwl->mgmt_tfd_cpu) {
+        iwl->invalid_tx_cmd_size = (uint16_t)sizeof(struct iwl_cmd_header_wide);
+        iwl->invalid_tx_cmd_cpu = lx_dma_alloc_coherent(
+            0, iwl->invalid_tx_cmd_size, &iwl->invalid_tx_cmd_dma, GFP_KERNEL);
+        iwl->mgmt_tfd_cpu =
+            lx_dma_alloc_coherent(0, tfd_bytes, &iwl->mgmt_tfd_dma, GFP_KERNEL);
+        iwl->mgmt_first_tb_cpu = lx_dma_alloc_coherent(
+            0, first_tb_bytes, &iwl->mgmt_first_tb_dma, GFP_KERNEL);
+        iwl->mgmt_body_cpu =
+            lx_dma_alloc_coherent(0, body_bytes, &iwl->mgmt_body_dma, GFP_KERNEL);
+        iwl->mgmt_bc_cpu =
+            lx_dma_alloc_coherent(0, bc_bytes, &iwl->mgmt_bc_dma, GFP_KERNEL);
+        if (iwl->invalid_tx_cmd_cpu && iwl->mgmt_tfd_cpu) {
+            unsigned i;
+
+            iwl_invalid_tx_cmd_init(
+                (struct iwl_cmd_header_wide *)iwl->invalid_tx_cmd_cpu);
+            memset(iwl->mgmt_tfd_cpu, 0, tfd_bytes);
+            for (i = 0; i < IWL_MGMT_QUEUE_SIZE; i++) {
+                struct iwl_tfh_tfd_gen2 *tfd =
+                    (struct iwl_tfh_tfd_gen2 *)((uint8_t *)iwl->mgmt_tfd_cpu +
+                                                (size_t)i * IWL_TFH_TFD_SIZE);
+
+                iwl_txq_set_tfd_invalid_gen2(tfd, iwl->invalid_tx_cmd_dma,
+                                            iwl->invalid_tx_cmd_size);
+            }
+        }
+    }
+    if (!iwl->invalid_tx_cmd_cpu || !iwl->mgmt_tfd_cpu || !iwl->mgmt_first_tb_cpu ||
+        !iwl->mgmt_body_cpu || !iwl->mgmt_bc_cpu)
+        return -1;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.sta_id = sta_id;
+    cfg.tid = IWL_MGMT_TID;
+    cfg.flags = iwl_cpu_to_le16(TX_QUEUE_CFG_ENABLE_QUEUE);
+    cfg.cb_size = iwl_cpu_to_le32(tfd_queue_cb_size(IWL_MGMT_QUEUE_SIZE));
+    cfg.byte_cnt_addr = iwl->mgmt_bc_dma;
+    cfg.tfdq_addr = iwl->mgmt_tfd_dma;
+    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, SCD_QUEUE_CFG, &cfg,
+                                (uint16_t)sizeof(cfg),
+                                IWL_MVM_HCMD_TIMEOUT_MS) != 0)
+        return -1;
+    iwl->mgmt_txq_id = g_mock_mgmt_qid;
+    iwl->mgmt_txq_write = 0;
+    iwl->mgmt_txq_ready = 1;
+    return (int)g_mock_mgmt_qid;
+}
+
+int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
+                 const void *payload, uint16_t pay_len)
+{
+    if (!iwl || !iwl->mgmt_txq_ready || txq_id != iwl->mgmt_txq_id)
+        return -1;
+    if (g_tx_n < (int)(sizeof(g_tx) / sizeof(g_tx[0]))) {
+        g_tx[g_tx_n].txq_id = txq_id;
+        g_tx[g_tx_n].len = pay_len;
+        if (payload && pay_len <= sizeof(g_tx[g_tx_n].payload))
+            memcpy(g_tx[g_tx_n].payload, payload, pay_len);
+        g_tx_n++;
+    }
+    inject_mlme_rx(iwl, payload, pay_len);
     return 0;
 }
 
@@ -203,6 +322,9 @@ int main(void)
     int idx_sess;
     int idx_key;
     int idx_te_legacy;
+    int idx_scd;
+    const struct cmd_rec *scd;
+    const struct iwl_tx_queue_cfg_cmd *sqc;
 
     memset(&iwl, 0, sizeof(iwl));
     memcpy(iwl.mac, (const uint8_t[]){0x84, 0x1b, 0x77, 0xe1, 0x20, 0x71}, 6);
@@ -235,8 +357,20 @@ int main(void)
                 sizeof(struct iwl_mvm_session_prot_cmd));
         return 1;
     }
+    if (sizeof(struct iwl_tx_queue_cfg_cmd) != 24) {
+        fprintf(stderr, "SCD_QUEUE_CFG payload debe ser 24 B, tiene %zu\n",
+                sizeof(struct iwl_tx_queue_cfg_cmd));
+        return 1;
+    }
+    if (IWL_SCD_BC_TBL_BYTES != 640) {
+        fprintf(stderr, "IWL_SCD_BC_TBL_BYTES=%u (esperado 640)\n",
+                IWL_SCD_BC_TBL_BYTES);
+        return 1;
+    }
 
     g_sent_n = 0;
+    g_mgmt_bc_alloc_bytes = 0;
+    g_tx_n = 0;
     if (iwl_mvm_assoc_prepare(&iwl, "Casa", bssid) != 0) {
         fprintf(stderr, "iwl_mvm_assoc_prepare falló\n");
         return 1;
@@ -252,10 +386,13 @@ int main(void)
     idx_add = find_idx(ADD_STA);
     idx_sess = find_idx_group_id(MAC_CONF_GROUP, SESSION_PROTECTION_CMD);
     idx_te_legacy = find_idx(TIME_EVENT_CMD);
-    if (!phy || !mac || !add || !sess) {
+    idx_scd = find_idx(SCD_QUEUE_CFG);
+    scd = find_cmd(SCD_QUEUE_CFG);
+    if (!phy || !mac || !add || !scd || !sess) {
         fprintf(stderr,
-                "faltan HCMD PHY=%d BIND=%d MAC=%d ADD=%d SESS=%d TE=%d\n",
-                idx_phy, idx_bind, idx_mac, idx_add, idx_sess, idx_te_legacy);
+                "faltan HCMD PHY=%d BIND=%d MAC=%d ADD=%d SCD=%d SESS=%d TE=%d\n",
+                idx_phy, idx_bind, idx_mac, idx_add, idx_scd, idx_sess,
+                idx_te_legacy);
         return 1;
     }
     if (idx_te_legacy >= 0) {
@@ -268,9 +405,88 @@ int main(void)
                 idx_bind);
         return 1;
     }
-    if (!(idx_phy < idx_mac && idx_mac < idx_add && idx_add < idx_sess)) {
-        fprintf(stderr, "orden HCMD PHY(%d) MAC(%d) ADD(%d) SESS(%d)\n",
-                idx_phy, idx_mac, idx_add, idx_sess);
+    if (!(idx_phy < idx_mac && idx_mac < idx_add && idx_add < idx_scd &&
+          idx_scd < idx_sess)) {
+        fprintf(stderr, "orden HCMD PHY(%d) MAC(%d) ADD(%d) SCD(%d) SESS(%d)\n",
+                idx_phy, idx_mac, idx_add, idx_scd, idx_sess);
+        return 1;
+    }
+    if (scd->group != LEGACY_GROUP ||
+        scd->len != sizeof(struct iwl_tx_queue_cfg_cmd)) {
+        fprintf(stderr, "SCD_QUEUE_CFG group=%u len=%u\n", scd->group, scd->len);
+        return 1;
+    }
+    sqc = (const struct iwl_tx_queue_cfg_cmd *)scd->payload;
+    if (sqc->sta_id != IWL_MVM_AP_STA_ID || sqc->tid != IWL_MGMT_TID) {
+        fprintf(stderr, "SCD_QUEUE_CFG sta_id=%u tid=%u\n",
+                sqc->sta_id, sqc->tid);
+        return 1;
+    }
+    if ((iwl_cpu_to_le16(sqc->flags) & TX_QUEUE_CFG_ENABLE_QUEUE) == 0) {
+        fprintf(stderr, "SCD_QUEUE_CFG sin ENABLE_QUEUE\n");
+        return 1;
+    }
+    if (sqc->cb_size != iwl_cpu_to_le32(tfd_queue_cb_size(IWL_MGMT_QUEUE_SIZE))) {
+        fprintf(stderr, "SCD_QUEUE_CFG cb_size=0x%08x\n", sqc->cb_size);
+        return 1;
+    }
+    if (sqc->byte_cnt_addr == 0 || sqc->tfdq_addr == 0) {
+        fprintf(stderr, "SCD_QUEUE_CFG sin DMA (bc=0x%llx tfd=0x%llx)\n",
+                (unsigned long long)sqc->byte_cnt_addr,
+                (unsigned long long)sqc->tfdq_addr);
+        return 1;
+    }
+    if (sqc->byte_cnt_addr != iwl.mgmt_bc_dma) {
+        fprintf(stderr, "SCD_QUEUE_CFG byte_cnt_addr distinto de mgmt_bc_dma\n");
+        return 1;
+    }
+    if (g_mgmt_bc_alloc_bytes < IWL_SCD_BC_TBL_BYTES) {
+        fprintf(stderr, "BC tbl alloc=%zu (esperado >= %u)\n",
+                g_mgmt_bc_alloc_bytes, IWL_SCD_BC_TBL_BYTES);
+        return 1;
+    }
+    if (!iwl.invalid_tx_cmd_cpu || iwl.invalid_tx_cmd_dma == 0 ||
+        iwl.invalid_tx_cmd_size != (uint16_t)sizeof(struct iwl_cmd_header_wide)) {
+        fprintf(stderr, "invalid_tx_cmd ausente (cpu=%p dma=0x%llx size=%u)\n",
+                iwl.invalid_tx_cmd_cpu,
+                (unsigned long long)iwl.invalid_tx_cmd_dma,
+                (unsigned)iwl.invalid_tx_cmd_size);
+        return 1;
+    }
+    {
+        unsigned i;
+        const struct iwl_cmd_header_wide *bad =
+            (const struct iwl_cmd_header_wide *)iwl.invalid_tx_cmd_cpu;
+
+        if (bad->cmd != INVALID_WR_PTR_CMD || bad->group_id != DEBUG_GROUP) {
+            fprintf(stderr, "invalid_tx_cmd cmd=0x%02x grp=0x%02x\n",
+                    bad->cmd, bad->group_id);
+            return 1;
+        }
+        for (i = 0; i < IWL_MGMT_QUEUE_SIZE; i++) {
+            const struct iwl_tfh_tfd_gen2 *tfd =
+                (const struct iwl_tfh_tfd_gen2 *)((const uint8_t *)iwl.mgmt_tfd_cpu +
+                                                   (size_t)i * IWL_TFH_TFD_SIZE);
+
+            if (tfd->tbs[0].addr == 0 ||
+                tfd->tbs[0].addr != iwl.invalid_tx_cmd_dma ||
+                tfd->tbs[0].tb_len != iwl.invalid_tx_cmd_size ||
+                tfd->num_tbs != 1) {
+                fprintf(stderr,
+                        "TFD[%u] TB0 addr=0x%llx len=%u n_tbs=%u (esperado invalid_tx_cmd)\n",
+                        i, (unsigned long long)tfd->tbs[0].addr,
+                        (unsigned)tfd->tbs[0].tb_len, (unsigned)tfd->num_tbs);
+                return 1;
+            }
+        }
+    }
+    if (!iwl.mgmt_txq_ready || iwl.mgmt_txq_id != g_mock_mgmt_qid) {
+        fprintf(stderr, "mgmt TXQ no lista (ready=%u qid=%u)\n",
+                iwl.mgmt_txq_ready, iwl.mgmt_txq_id);
+        return 1;
+    }
+    if (find_idx_n(TX_CMD, 0) >= 0) {
+        fprintf(stderr, "TX_CMD no debe aparecer en cola HCMD\n");
         return 1;
     }
     if (phy->len != sizeof(struct iwl_phy_context_cmd)) {
@@ -394,30 +610,32 @@ int main(void)
 
     {
         unsigned tx_off = (unsigned)sizeof(struct iwl_tx_cmd_gen2);
-        int idx_tx0 = find_idx_n(TX_CMD, 0);
-        int idx_tx1 = find_idx_n(TX_CMD, 1);
         int idx_mac1 = find_idx_n(MAC_CONTEXT_CMD, 1);
-        const struct cmd_rec *tx0;
-        const struct cmd_rec *tx1;
+        const struct tx_rec *tx0;
+        const struct tx_rec *tx1;
         const struct cmd_rec *mac1;
         const struct iwl_mac_ctx_cmd *mc1;
 
-        if (idx_tx0 < 0 || idx_tx1 < 0 || idx_mac1 < 0) {
-            fprintf(stderr, "faltan TX AUTH=%d TX ASSOC=%d MAC1=%d\n",
-                    idx_tx0, idx_tx1, idx_mac1);
+        if (g_tx_n < 2 || idx_mac1 < 0) {
+            fprintf(stderr, "faltan TX data AUTH/ASSOC=%d MAC1=%d\n",
+                    g_tx_n, idx_mac1);
             return 1;
         }
-        if (!(idx_sess < idx_tx0 && idx_tx0 < idx_tx1 && idx_tx1 < idx_mac1)) {
-            fprintf(stderr, "orden SESS(%d) TX(%d/%d) MAC1(%d)\n",
-                    idx_sess, idx_tx0, idx_tx1, idx_mac1);
+        if (!(idx_sess < idx_mac1)) {
+            fprintf(stderr, "orden SESS(%d) MAC1(%d)\n", idx_sess, idx_mac1);
             return 1;
         }
-        tx0 = &g_sent[idx_tx0];
-        tx1 = &g_sent[idx_tx1];
+        tx0 = &g_tx[0];
+        tx1 = &g_tx[1];
         mac1 = &g_sent[idx_mac1];
-        if (tx0->group != DATA_PATH_GROUP || tx1->group != DATA_PATH_GROUP) {
-            fprintf(stderr, "TX_CMD group=%u/%u (esperado DATA_PATH %u)\n",
-                    tx0->group, tx1->group, (unsigned)DATA_PATH_GROUP);
+        if (tx0->txq_id == 0 || tx1->txq_id == 0) {
+            fprintf(stderr, "TX mgmt qid=%u/%u (esperado != 0)\n",
+                    tx0->txq_id, tx1->txq_id);
+            return 1;
+        }
+        if (tx0->txq_id != g_mock_mgmt_qid || tx1->txq_id != g_mock_mgmt_qid) {
+            fprintf(stderr, "TX mgmt qid=%u/%u (esperado %u)\n",
+                    tx0->txq_id, tx1->txq_id, g_mock_mgmt_qid);
             return 1;
         }
         if (tx_off != 20u) {
@@ -490,6 +708,6 @@ int main(void)
         return 1;
     }
 
-    puts("OK: assoc PHY + MAC is_assoc=0 + ADD_STA + SESSION_PROT + AUTH/ASSOC + MAC is_assoc=1 + ADD_STA_KEY");
+    puts("OK: assoc PHY + MAC is_assoc=0 + ADD_STA + SCD_QUEUE_CFG + SESSION_PROT + TXQ AUTH/ASSOC + MAC is_assoc=1 + ADD_STA_KEY");
     return 0;
 }

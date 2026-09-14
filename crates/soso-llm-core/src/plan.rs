@@ -26,7 +26,7 @@ use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
 
 const FRAME_BYTES: u64 = 4096;
-const REPLAN_EVERY_TOKENS: u32 = 8;
+pub const REPLAN_EVERY_TOKENS: u32 = 8;
 const EWMA_ALPHA: f64 = 0.25;
 /// Reserva el 30 % de frames libres+reclaimable para el sistema.
 const MEM_RESERVE_PCT: u64 = 30;
@@ -272,6 +272,10 @@ pub struct ResourcePlanner {
     #[cfg(feature = "std")]
     /// Traza (layer, expert) para sim-moe-cache en host.
     moe_trace: Vec<(u32, u32)>,
+    /// Modelo entero en VRAM: no descontar VRAM capa a capa ni soltar shards mmap.
+    weights_vram_resident: bool,
+    /// El presupuesto host cabe el tronco: shards mmap se mantienen (sin USB por capa).
+    weights_host_resident: bool,
     stats: PlannerStats,
 }
 
@@ -553,6 +557,8 @@ impl ResourcePlanner {
             last_moe_cold: 0,
             #[cfg(feature = "std")]
             moe_trace: Vec::new(),
+            weights_vram_resident: false,
+            weights_host_resident: false,
             stats: PlannerStats {
                 weight_budget_bytes: weight_budget,
                 model_weight_bytes: weight_classes.total(),
@@ -601,6 +607,89 @@ impl ResourcePlanner {
             self.moe_cache_budget / 1024,
             self.weight_classes.always_resident_bytes / 1024,
         )
+    }
+
+    /// Líneas legibles del plan **antes** de mapear shards (serie / askd).
+    pub fn explain_load_plan(&self, manifest: &Manifest, index: &TensorIndex) -> Vec<String> {
+        let st = self.stats();
+        let model_vram = total_model_vram_bytes(index);
+        let wc = self.weight_classes();
+        let mut out = Vec::new();
+        out.push(format!(
+            "soso-llm: plan de carga — {} capas, hidden {}, pesos disco {} MiB",
+            manifest.num_layers,
+            manifest.hidden_dim,
+            st.model_weight_bytes >> 20,
+        ));
+        out.push(format!(
+            "soso-llm:   memoria host — libre {} MiB, reclaimable {} MiB, presupuesto pesos {} MiB",
+            self.mem.free_bytes() >> 20,
+            self.mem.reclaimable_bytes() >> 20,
+            st.weight_budget_bytes >> 20,
+        ));
+        out.push(format!(
+            "soso-llm:   VRAM — modelo {} MiB, libre {} MiB{}",
+            model_vram >> 20,
+            self.vram_free >> 20,
+            if self.weights_vram_resident {
+                ", cabe entero (residente)"
+            } else if model_vram > self.vram_free && self.vram_free > 0 {
+                ", no cabe entero (híbrido/streaming)"
+            } else if self.vram_free == 0 {
+                ", sin pool (CPU)"
+            } else {
+                ""
+            },
+        ));
+        out.push(format!(
+            "soso-llm:   ejecución — CPU {} / GPU {} / remoto {} capas",
+            st.cpu_layers, st.gpu_layers, st.remote_layers,
+        ));
+        out.push(format!("soso-llm:   capas: {}", layer_dest_ranges(&self.layer_plans)));
+        if self.weights_vram_resident {
+            out.push(
+                "soso-llm:   pesos: subida eager a VRAM; sin prefetch ni desmapeo entre capas"
+                    .into(),
+            );
+        } else if self.weights_host_resident {
+            out.push(
+                "soso-llm:   pesos: mmap residente en host; sin desmapeo entre capas".into(),
+            );
+        } else {
+            out.push(format!(
+                "soso-llm:   pesos: pin {} capas, anillo {} slots, {}",
+                self.pinned_layers,
+                self.ring_slots,
+                self.memory_plan_summary(),
+            ));
+            if self.embed_gather_only {
+                out.push("soso-llm:   embed: gather por fila (tabla demasiado grande)".into());
+            }
+        }
+        out.push(format!(
+            "soso-llm:   KV — ventana {} tokens, {} H2O={} sparse={}",
+            st.kv_window_tokens,
+            if st.kv_dtype_i8 != 0 {
+                "int8"
+            } else {
+                "f16"
+            },
+            st.h2o_enabled,
+            st.sparse_attn,
+        ));
+        if st.gpu_expert_slots > 0 || st.gpu_expert_layers > 0 {
+            out.push(format!(
+                "soso-llm:   MoE GPU — pool {} expertos, {} capas con offload experto",
+                st.gpu_expert_slots, st.gpu_expert_layers,
+            ));
+        }
+        out.push(format!(
+            "soso-llm:   clases peso — tronco {} MiB, expertos {} MiB, siempre-residente {} MiB",
+            wc.trunk_bytes >> 20,
+            wc.routed_expert_bytes >> 20,
+            wc.always_resident_bytes >> 20,
+        ));
+        out
     }
 
     pub fn refresh_mem(&mut self, mem: MemSnapshot) {
@@ -665,11 +754,13 @@ impl ResourcePlanner {
         self.stats.resident_layers = resident;
 
         // Si el modelo cabe entero, pin todas las capas (sin anillo).
+        self.weights_host_resident = false;
         if model_fits && self.weight_classes.routed_expert_bytes == 0 {
             self.pinned_layers = manifest.num_layers;
             self.resident_layers = manifest.num_layers;
             self.stats.pinned_layers = manifest.num_layers;
             self.stats.resident_layers = manifest.num_layers;
+            self.weights_host_resident = true;
         }
 
         // Mitad del presupuesto para KV (el resto son pesos streaming + scratch).
@@ -992,6 +1083,12 @@ impl ResourcePlanner {
         if p.dest != ExecDest::Gpu {
             return false;
         }
+        if self.weights_vram_resident {
+            if is_expert_tensor(tensor) {
+                return p.gpu_experts;
+            }
+            return true;
+        }
         if is_expert_tensor(tensor) {
             return p.gpu_experts;
         }
@@ -1114,6 +1211,17 @@ impl ResourcePlanner {
         self.vram_free = bytes;
     }
 
+    /// Pesos del modelo ya residentes en VRAM (Q4/Q8 en crudo); el mmap no debe
+    /// desmapearse entre capas ni re-leerse desde disco por matvec.
+    pub fn weights_vram_resident(&self) -> bool {
+        self.weights_vram_resident
+    }
+
+    /// No soltar mmap entre capas: VRAM residente o tronco que cabe en RAM.
+    pub fn keep_weights_mapped(&self) -> bool {
+        self.weights_vram_resident || self.weights_host_resident
+    }
+
     fn recompute_avg_stats(&mut self) {
         self.stats.avg_cpu_ms = avg_nonzero(&self.layer_ms_cpu);
         self.stats.avg_gpu_ms = avg_nonzero(&self.layer_ms_gpu);
@@ -1136,6 +1244,32 @@ impl ResourcePlanner {
         // Modelo cabe residente: todas las capas a GPU (caso Mistral Q4_K en 12–16 GiB).
         let model_vram = total_model_vram_bytes(index);
         let resident_model = model_vram > 0 && model_vram <= self.vram_free;
+        self.weights_vram_resident = resident_model;
+
+        if resident_model {
+            for layer in 0..manifest.num_layers {
+                let gpu_tensors = pack_trunk_gpu_unbudgeted(layer, manifest, index);
+                self.layer_plans.push(LayerPlan {
+                    layer,
+                    dest: ExecDest::Gpu,
+                    gpu_tensors,
+                    gpu_experts: manifest.is_moe(),
+                });
+                gpu_layers += 1;
+            }
+            self.stats.cpu_layers = 0;
+            self.stats.gpu_layers = gpu_layers;
+            self.stats.remote_layers = 0;
+            self.stats.gpu_expert_slots = if manifest.is_moe() {
+                (vram_left / vram_bytes_for_expert(0, 0, index).max(1)) as u32
+            } else {
+                0
+            };
+            self.stats.gpu_expert_layers = if manifest.is_moe() { gpu_layers } else { 0 };
+            self.stats.resident_layers = manifest.num_layers;
+            self.stats.kv_window_tokens = self.kv_window_tokens as u32;
+            return;
+        }
 
         // Pase 1: destino + tronco en VRAM (atención, router, FFN denso, Sxx).
         // El *8 a f32 estaba mal: Q4_K/Q8_0 se suben en crudo.
@@ -1258,6 +1392,69 @@ fn vram_bytes_for_expert(layer: u32, expert: u32, index: &TensorIndex) -> u64 {
         .iter()
         .map(|n| vram_bytes_for_named(index, n))
         .sum()
+}
+
+fn dest_label(dest: ExecDest) -> &'static str {
+    match dest {
+        ExecDest::Cpu => "CPU",
+        ExecDest::Gpu => "GPU",
+        ExecDest::Remote => "remoto",
+    }
+}
+
+/// Rangos compactos L00–L31 GPU, L16–L31 CPU, …
+fn layer_dest_ranges(plans: &[LayerPlan]) -> String {
+    if plans.is_empty() {
+        return String::from("(vacío)");
+    }
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < plans.len() {
+        let dest = plans[i].dest;
+        let start = plans[i].layer;
+        let mut j = i + 1;
+        while j < plans.len() && plans[j].dest == dest {
+            j += 1;
+        }
+        let end = plans[j - 1].layer;
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        if start == end {
+            out.push_str(&format!("L{start:02} {}", dest_label(dest)));
+        } else {
+            out.push_str(&format!("L{start:02}–L{end:02} {}", dest_label(dest)));
+        }
+        i = j;
+    }
+    out
+}
+
+fn pack_trunk_gpu_unbudgeted(
+    layer: u32,
+    manifest: &Manifest,
+    index: &TensorIndex,
+) -> Vec<String> {
+    let prefix = layer_tensor_prefix(layer);
+    let mut out = Vec::new();
+    for suffix in TRUNK_GPU_PROJ {
+        let name = format!("{prefix}{suffix}");
+        if index.find(&name).is_some() {
+            out.push(String::from(suffix));
+        }
+    }
+    let n_shared = manifest
+        .layer(layer)
+        .map(|sp| sp.num_shared_experts)
+        .unwrap_or(0);
+    for shared in 0..n_shared {
+        for n in shared_expert_shard_names(layer, shared) {
+            if let Some(suf) = n.strip_prefix(prefix.as_str()) {
+                out.push(String::from(suf));
+            }
+        }
+    }
+    out
 }
 
 fn pack_trunk_gpu(
@@ -1703,6 +1900,33 @@ mod tests {
         assert!(t.iter().any(|s| s == "ffn_up"), "{t:?}");
         assert!(planner.gpu_tensor_allowed(0, "L00.ffn_gate"));
         assert!(!planner.gpu_tensor_allowed(0, "L00.E00.ffn_up"));
+    }
+
+    #[test]
+    fn explain_load_plan_lists_layer_ranges() {
+        let manifest = Manifest::tiny("t");
+        let index = TensorIndex::default();
+        let planner = ResourcePlanner::new(&manifest, &index, MemSnapshot::default(), 0, false);
+        let lines = planner.explain_load_plan(&manifest, &index);
+        assert!(!lines.is_empty());
+        assert!(lines[0].contains("plan de carga"));
+        assert!(lines.iter().any(|l| l.contains("capas:")));
+    }
+
+    #[test]
+    fn host_ram_pins_dense_model_without_vram() {
+        let manifest = Manifest::tiny("t");
+        let index = TensorIndex::default();
+        let mem = MemSnapshot {
+            total_frames: 1_000_000,
+            free_frames: 500_000,
+            reclaimable_frames: 0,
+        };
+        let planner = ResourcePlanner::new(&manifest, &index, mem, 0, false);
+        assert!(planner.keep_weights_mapped());
+        assert!(!planner.weights_vram_resident());
+        let lines = planner.explain_load_plan(&manifest, &index);
+        assert!(lines.iter().any(|l| l.contains("mmap residente")));
     }
 
     #[test]

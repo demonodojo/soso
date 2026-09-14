@@ -16,12 +16,13 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use ask::{resto_tras, run_ask};
 use distributed::{crc_bytes, default_keepalive, default_timeouts, DistributedConfig};
 use libsoso::{println, sys};
 use pool::ThreadPool;
 use soso_abi::{self as abi, O_RDONLY};
+use soso_llm_core::layer::TensorSource;
 use soso_llm_core::parallel::RowParallel;
 use soso_llm_core::plan::{MemSnapshot, MemoryPlanConfig, MemoryPreset, ResourcePlanner};
 use soso_llm_core::pipeline::{PipelinePlan, PipelineRole};
@@ -394,13 +395,7 @@ fn model_base(name: &str) -> String {
     format!("/models/{name}")
 }
 
-fn load_model(
-    name: &str,
-    role: PipelineRole,
-    layer_start: u32,
-    layer_end: u32,
-    staging: bool,
-) -> Result<ModelBundle, u8> {
+fn read_model_catalog(name: &str) -> Result<(Manifest, TensorIndex, u32, u32), u8> {
     let base = model_base(name);
     let manifest_path = format!("{base}/manifest.som");
     let index_path = format!("{base}/index.som");
@@ -424,7 +419,21 @@ fn load_model(
         1u8
     })?;
     let index_crc = crc_bytes(&index_data);
+    Ok((manifest, index, manifest_crc, index_crc))
+}
 
+fn load_model_from_catalog(
+    name: &str,
+    manifest: Manifest,
+    index: TensorIndex,
+    manifest_crc: u32,
+    index_crc: u32,
+    role: PipelineRole,
+    layer_start: u32,
+    layer_end: u32,
+    staging: bool,
+) -> Result<ModelBundle, u8> {
+    let base = model_base(name);
     let rt = Runtime::new(manifest, index.clone(), 32 * 1024 * 1024, 0);
     if let Err(why) = rt.validate_shapes_for_role(role, layer_start, layer_end) {
         println!("soso-llm: shapes del index no casan con el rol ({why})");
@@ -458,6 +467,37 @@ fn load_model(
         manifest_crc,
         index_crc,
     })
+}
+
+fn load_model(
+    name: &str,
+    role: PipelineRole,
+    layer_start: u32,
+    layer_end: u32,
+    staging: bool,
+) -> Result<ModelBundle, u8> {
+    let (manifest, index, manifest_crc, index_crc) = read_model_catalog(name)?;
+    load_model_from_catalog(
+        name,
+        manifest,
+        index,
+        manifest_crc,
+        index_crc,
+        role,
+        layer_start,
+        layer_end,
+        staging,
+    )
+}
+
+fn emit_plan_lines(lines: &[String], echo_fd: Option<u64>) {
+    for line in lines {
+        println!("{line}");
+        if let Some(fd) = echo_fd {
+            let _ = sys::write_all(fd, line.as_bytes());
+            let _ = sys::write_all(fd, b"\n");
+        }
+    }
 }
 
 fn run_distributed_head(
@@ -676,10 +716,46 @@ pub(crate) fn preparar_sesion(
     verboso: bool,
     with_pool: bool,
 ) -> Result<Sesion, u8> {
+    preparar_sesion_echo(name, force_cpu, mem_plan, verboso, with_pool, None)
+}
+
+pub(crate) fn preparar_sesion_echo(
+    name: &str,
+    force_cpu: bool,
+    mem_plan: MemoryPlanConfig,
+    verboso: bool,
+    with_pool: bool,
+    echo_fd: Option<u64>,
+) -> Result<Sesion, u8> {
     let io0 = read_iostat();
+    let (manifest, index, manifest_crc, index_crc) = read_model_catalog(name)?;
+    let num_layers = manifest.num_layers;
+
+    let mut gpu = abi::GpuInfo::default();
+    let _ = sys::gpu_info(&mut gpu);
+    let mem = read_mem_snapshot();
+    let planner = ResourcePlanner::with_config(
+        &manifest,
+        &index,
+        mem,
+        gpu.vram_free,
+        false,
+        mem_plan,
+    );
+    emit_plan_lines(&planner.explain_load_plan(&manifest, &index), echo_fd);
+
     let t_carga = sys::uptime_ms();
-    let num_layers = read_num_layers(name).unwrap_or(4);
-    let mut bundle = load_model(name, PipelineRole::Full, 0, num_layers, with_pool)?;
+    let mut bundle = load_model_from_catalog(
+        name,
+        manifest,
+        index,
+        manifest_crc,
+        index_crc,
+        PipelineRole::Full,
+        0,
+        num_layers,
+        with_pool,
+    )?;
     // La carga en frío va aparte de tok/s: `generado` sólo cronometra el
     // decode, y el disco se gasta casi entero antes de que ese reloj arranque.
     // Medirlas juntas es lo que hacía invisible el coste de E/S.
@@ -699,55 +775,13 @@ pub(crate) fn preparar_sesion(
         );
     }
 
-    let mut gpu = abi::GpuInfo::default();
-    let _ = sys::gpu_info(&mut gpu);
-    let mem = read_mem_snapshot();
-    let planner = ResourcePlanner::with_config(
-        &bundle.rt.manifest,
-        &bundle.rt.index,
-        mem,
-        gpu.vram_free,
-        false,
-        mem_plan,
-    );
     bundle.rt.set_planner(planner);
     if verboso {
         if let Some(pl) = bundle.rt.planner.as_ref() {
-            let st = pl.stats();
             println!(
-                "soso-llm: planificador — presupuesto pesos {} KiB, modelo {} KiB, capas CPU/GPU/remoto {}/{}/{}",
-                st.weight_budget_bytes / 1024,
-                st.model_weight_bytes / 1024,
-                st.cpu_layers,
-                st.gpu_layers,
-                st.remote_layers,
-            );
-            if st.gpu_expert_slots > 0 || st.gpu_expert_layers > 0 {
-                println!(
-                    "soso-llm: GPU MoE — {} expertos caben en VRAM, offload en {} capas",
-                    st.gpu_expert_slots, st.gpu_expert_layers,
-                );
-            }
-            println!(
-                "soso-llm: streaming — working-set {} capas, ventana KV {} tokens (LayerKV+StreamingLLM), KV {} H2O={} sparse={}",
-                st.resident_layers,
-                st.kv_window_tokens,
-                if st.kv_dtype_i8 != 0 { "int8" } else { "f16" },
-                st.h2o_enabled,
-                st.sparse_attn,
-            );
-            println!(
-                "soso-llm: memoria — libre {} KiB, reclaimable {} KiB",
-                mem.free_bytes() / 1024,
-                mem.reclaimable_bytes() / 1024,
-            );
-            println!("soso-llm: plan memoria — {}", pl.memory_plan_summary());
-            let wc = pl.weight_classes();
-            println!(
-                "soso-llm: pesos — tronco {} KiB, expertos {} KiB, siempre-residente {} KiB",
-                wc.trunk_bytes / 1024,
-                wc.routed_expert_bytes / 1024,
-                wc.always_resident_bytes / 1024,
+                "soso-llm: planificador (detalle) — preset {:?}, replan cada {} tokens",
+                pl.plan_config().preset,
+                soso_llm_core::plan::REPLAN_EVERY_TOKENS,
             );
         }
     }
@@ -780,8 +814,71 @@ pub(crate) fn preparar_sesion(
             pl.set_vram_free(gpu.vram_free);
         }
         let model_vram = soso_llm_core::plan::total_model_vram_bytes(&bundle.rt.index);
-        if model_vram > 0 && model_vram <= gpu.vram_free {
+        let keep_mapped = bundle
+            .rt
+            .planner
+            .as_ref()
+            .is_some_and(|p| p.keep_weights_mapped());
+        if keep_mapped {
+            let index = &bundle.rt.index;
+            let mut shards = Vec::new();
+            for e in &index.entries {
+                if !shards.iter().any(|s| s == &e.shard) {
+                    shards.push(e.shard.clone());
+                }
+            }
+            bundle.source.prefetch_shards(&shards);
+        }
+        let full_vram = model_vram > 0 && model_vram <= gpu.vram_free;
+        if full_vram {
             g.fijar_pesos_residentes();
+        }
+        if gpu.vram_bufs != 0 && gpu.vram_free > 0 {
+            if !keep_mapped {
+                let index = &bundle.rt.index;
+                let mut shards = Vec::new();
+                for e in &index.entries {
+                    if !shards.iter().any(|s| s == &e.shard) {
+                        shards.push(e.shard.clone());
+                    }
+                }
+                bundle.source.prefetch_shards(&shards);
+            }
+            let mut gpu_info = abi::GpuInfo::default();
+            let (dma0, bounce0) = if sys::gpu_info(&mut gpu_info) == 0 {
+                (gpu_info.uploads_dma, gpu_info.uploads_bounce)
+            } else {
+                (0, 0)
+            };
+            let t_up = sys::uptime_ms().max(0);
+            let uploads0 = g.stats().1;
+            let mut bytes_subidos = 0u64;
+            let to_upload: Vec<(String, Vec<u32>)> = bundle
+                .rt
+                .index
+                .entries
+                .iter()
+                .map(|e| (e.name.clone(), e.shape.clone()))
+                .collect();
+            for (name, shape) in &to_upload {
+                if let Ok(view) = bundle.source.tensor_view(name) {
+                    if g.subir_tensor(name, &view, shape) {
+                        bytes_subidos =
+                            bytes_subidos.saturating_add(view.bytes.len() as u64);
+                    }
+                }
+            }
+            let uploaded = g.stats().1.saturating_sub(uploads0);
+            let ms_up = (sys::uptime_ms() - t_up).max(0) as u64;
+            let (dma, bounce) = if sys::gpu_info(&mut gpu_info) == 0 {
+                (
+                    gpu_info.uploads_dma.saturating_sub(dma0),
+                    gpu_info.uploads_bounce.saturating_sub(bounce0),
+                )
+            } else {
+                (0, 0)
+            };
+            g.log_subida_eager(uploaded, bytes_subidos, ms_up, dma, bounce);
         }
     } else if gpu.present != 0 {
         if verboso {
@@ -858,18 +955,41 @@ fn emitir_ask(fd: u64, s: &str) {
         return;
     }
     let _ = sys::write_all(fd, limpio.as_bytes());
-    let _ = sys::sleep_ms(1);
 }
 
 /// Socket del cliente de askd mientras se genera. El hook de capa no puede
 /// capturar el `fd` (es un `fn` en el runtime).
 static ASK_TICK_FD: AtomicU64 = AtomicU64::new(u64::MAX);
+static ASK_LAYER_T0: AtomicU64 = AtomicU64::new(0);
+static ASK_GPU_FOR_TICK: AtomicU64 = AtomicU64::new(0);
+static ASK_TICK_N: AtomicU32 = AtomicU32::new(0);
 
-fn ask_layer_tick(_layer: u32, _n: u32) {
+fn ask_layer_tick(layer: u32, n: u32) {
+    let now = sys::uptime_ms().max(0) as u64;
+    let t0 = ASK_LAYER_T0.swap(now, Ordering::Relaxed);
+    let ms = if t0 == 0 {
+        0
+    } else {
+        now.saturating_sub(t0)
+    };
+    let seq = ASK_TICK_N.fetch_add(1, Ordering::Relaxed);
+    let ptr = ASK_GPU_FOR_TICK.load(Ordering::Relaxed);
+    // Prefill (primer recorrido de capas) o capa lenta: el resto a 32×N líneas
+    // de serie/SOSOLOG se come el tok/s.
+    let prefill = n > 0 && seq < n;
+    if ptr != 0 && (prefill || ms >= 80) {
+        let on_gpu = unsafe { (*(ptr as *const soso_gpu::SysGpu)).last_on_gpu() as u8 };
+        println!(
+            "soso-llm: capa {}/{} {} ms on_gpu={}",
+            layer.saturating_add(1),
+            n,
+            ms,
+            on_gpu
+        );
+    }
     let fd = ASK_TICK_FD.load(Ordering::Relaxed);
     if fd != u64::MAX {
         let _ = sys::write_all(fd, b".");
-        let _ = sys::sleep_ms(1);
     }
 }
 
@@ -904,6 +1024,11 @@ pub(crate) fn generar_tokens(
             .as_ref()
             .filter(|p| p.workers() > 1)
             .map(|p| p as &dyn RowParallel);
+        let gpu_tick_ptr = sesion
+            .sys_gpu
+            .as_ref()
+            .map(|g| g as *const soso_gpu::SysGpu as u64)
+            .unwrap_or(0);
         let mut gpu_ref: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = sesion
             .sys_gpu
             .as_mut()
@@ -912,6 +1037,9 @@ pub(crate) fn generar_tokens(
         let eos = bundle.tokenizer.eos();
         if let Some(fd) = fd_out {
             ASK_TICK_FD.store(fd, Ordering::Relaxed);
+            ASK_LAYER_T0.store(sys::uptime_ms().max(0) as u64, Ordering::Relaxed);
+            ASK_GPU_FOR_TICK.store(gpu_tick_ptr, Ordering::Relaxed);
+            ASK_TICK_N.store(0, Ordering::Relaxed);
             bundle.rt.layer_hook = Some(ask_layer_tick);
         }
         // askd: sin clock_ms/refresh_mem (syscall en el matvec AVX2) y sin
@@ -969,6 +1097,7 @@ pub(crate) fn generar_tokens(
         }
     };
     ASK_TICK_FD.store(u64::MAX, Ordering::Relaxed);
+    ASK_GPU_FOR_TICK.store(0, Ordering::Relaxed);
     sesion.bundle.rt.layer_hook = None;
     if drop_pool {
         sesion.pool = None;
@@ -1001,14 +1130,14 @@ pub(crate) fn generar_tokens(
             if let Some(ref g) = sesion.sys_gpu {
                 g.print_diagnostics_run(n, elapsed_ms);
             }
-            if !verboso {
-                return 0;
-            }
             let tok_s = n as f64 * 1000.0 / elapsed_ms as f64;
             println!(
                 "soso-llm: generado ({} tokens, {} ms, {:.2} tok/s)",
                 n, elapsed_ms, tok_s
             );
+            if !verboso {
+                return 0;
+            }
             if let Some(io0) = io0 {
                 print_iostat(io0);
             }

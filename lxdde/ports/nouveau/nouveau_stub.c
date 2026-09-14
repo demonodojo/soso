@@ -23,6 +23,7 @@ extern int lx_nouveau_submit_layernorm_rows(float *x, const float *weight,
                                             unsigned cols, float eps);
 extern int lx_nouveau_compute_wait_fence(unsigned sem_slot);
 extern uint64_t lx_nouveau_vram_bytes(void);
+extern const char *lx_nouveau_gpu_name(void);
 extern uint64_t lx_nouveau_buf_alloc(uint64_t size);
 extern int lx_nouveau_buf_ready(void);
 extern int lx_nouveau_buf_upload(uint64_t va, const void *src, uint64_t size);

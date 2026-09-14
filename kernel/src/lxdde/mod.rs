@@ -193,6 +193,10 @@ pub fn nouveau_vram_total() -> u64 {
     gpu::vram_total()
 }
 
+pub fn nouveau_gpu_name() -> &'static str {
+    gpu::gpu_name()
+}
+
 pub fn device_vram_free() -> u64 {
     gpu::device_vram_free()
 }
@@ -382,5 +386,5 @@ pub fn enqueue_matvec_q_resident(
     y_va: u64,
     sem_slot: u32,
 ) -> Result<(), ()> {
-    gpu::enqueue_matvec_q_resident(w_va, rows, cols, x, y_va, sem_slot)
+    gpu::enqueue_matvec_q_resident(w_va, dtype, rows, cols, x, y_va, sem_slot)
 }

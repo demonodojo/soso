@@ -8,7 +8,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use libsoso::sys;
 use soso_abi as abi;
-use soso_llm_core::gpu::{GpuDispatch, GpuStats, MatvecOp};
+use soso_llm_core::gpu::{dtype_ofrecible, GpuDispatch, GpuStats, MatvecOp};
 use soso_llm_core::layer::TensorView;
 use soso_llm_core::quant::{dequant_mxfp4, dequant_q4_k, dequant_q8_0};
 use soso_llm_core::gemm::matvec_f32;
@@ -260,6 +260,46 @@ impl SysGpu {
         libsoso::println!(
             "soso-llm: pesos GPU fijos — {} MiB libres, sin desalojo",
             self.vram_free >> 20
+        );
+    }
+
+    /// Sube un tensor cuantizado (o f32) a VRAM si cabe y el offload sigue vivo.
+    pub fn subir_tensor(
+        &mut self,
+        key: &str,
+        view: &TensorView<'_>,
+        shape: &[u32],
+    ) -> bool {
+        if self.offload_dead {
+            return false;
+        }
+        let (rows, cols) = tensor_mat_dims(shape);
+        if rows == 0 || cols == 0 || !dtype_ofrecible(view.dtype) {
+            return false;
+        }
+        self.resident_weights(key, view, rows * cols, cols)
+            .is_ok()
+    }
+
+    /// Registra la telemetría de una tanda de subidas eager ya ejecutada.
+    pub fn log_subida_eager(
+        &self,
+        uploaded: usize,
+        bytes_subidos: u64,
+        ms: u64,
+        dma_delta: u32,
+        bounce_delta: u32,
+    ) {
+        if uploaded == 0 {
+            return;
+        }
+        libsoso::println!(
+            "soso-llm: subida eager VRAM — {} MiB, {} tensores, {} ms (dma={} bounce={})",
+            bytes_subidos >> 20,
+            uploaded,
+            ms,
+            dma_delta,
+            bounce_delta
         );
     }
 
@@ -677,6 +717,22 @@ fn read_f32_into(handle: u64, out: &mut [f32]) -> Result<(), ()> {
         return Err(());
     }
     Ok(())
+}
+
+fn tensor_mat_dims(shape: &[u32]) -> (usize, usize) {
+    match shape.len() {
+        0 => (0, 0),
+        1 => (1, shape[0] as usize),
+        2 => (shape[0] as usize, shape[1] as usize),
+        _ => {
+            let cols = shape[shape.len() - 1] as usize;
+            let rows: usize = shape[..shape.len() - 1]
+                .iter()
+                .map(|&d| d as usize)
+                .product();
+            (rows, cols)
+        }
+    }
 }
 
 impl GpuDispatch for SysGpu {

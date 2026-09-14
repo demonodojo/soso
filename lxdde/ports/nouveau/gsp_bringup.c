@@ -130,23 +130,21 @@ void lx_nouveau_set_boot0(unsigned boot0, unsigned device_id)
     }
 }
 
-/* VRAM heurística por SKU (en HW real la da nvkm_ram del fb). El RTX 3060 tiene
- * 12 GiB (GA106) o 8 GiB (3060 Ti/GA104); la 3050 Mobile (GA107) = 4 GiB. */
+/* VRAM heurística por SKU (fallback si falta registro 0x1183a4). En HW real la
+ * da `gsp_wpr_vidmem_size()`. Sin fuente fiable devolvemos 0 y el bring-up lo
+ * dice; no inventar 4/16 GiB por PCI id (249c = GA104/3080 Laptop, no GA107). */
 static uint64_t vram_for_device(uint16_t dev_id)
 {
     enum nv_family fam = gsp_nv_family_of(gsp_nv_family_boot0(), dev_id);
     if (dev_id == 0x2f18u) {
         return 12ull * 1024ull * 1024ull * 1024ull;   /* 5070 Ti Mobile */
     }
-    if (dev_id == GA107_DEVICE_ID) {
-        return 4ull * 1024ull * 1024ull * 1024ull;    /* 3050 Mobile */
-    }
     if (fam == NV_FAM_AMPERE) {
-        if (dev_id == 0x2486u || dev_id == 0x2489u) /* 3060 Ti (GA104) */
+        if (dev_id == 0x2486u || dev_id == 0x2489u) /* 3060 Ti (GA104 die) */
             return 8ull * 1024ull * 1024ull * 1024ull;
         return 12ull * 1024ull * 1024ull * 1024ull;   /* 3060 (GA106) 12 GiB */
     }
-    return 8ull * 1024ull * 1024ull * 1024ull;
+    return 0;
 }
 
 /* Mapa de BARs de una GPU NVIDIA en el espacio de configuración:
@@ -1310,6 +1308,14 @@ const char *lx_nouveau_gsp_status(void)
 uint64_t lx_nouveau_vram_bytes(void)
 {
     return g_vram_bytes ? g_vram_bytes : (8ull * 1024ull * 1024ull * 1024ull);
+}
+
+const char *lx_nouveau_gpu_name(void)
+{
+    if (g_static.ready && g_static.name[0]) {
+        return g_static.name;
+    }
+    return "";
 }
 
 uint64_t lx_nouveau_buf_alloc(uint64_t size)

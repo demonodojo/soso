@@ -73,6 +73,7 @@ unsafe extern "C" {
         sem_slot: u32,
     ) -> i32;
     fn lx_nouveau_vram_total() -> u64;
+    fn lx_nouveau_gpu_name() -> *const u8;
     fn lx_nouveau_device_buf_alloc(size: u64) -> u64;
     fn lx_nouveau_device_bufs_ready() -> i32;
     // `lx_nouveau_device_buf_upload` (sin offset) existe en la capa C y la usa el
@@ -123,6 +124,20 @@ pub fn gsp_phase() -> &'static str {
 
 pub fn vram_total() -> u64 {
     unsafe { lx_nouveau_vram_total() }
+}
+
+pub fn gpu_name() -> &'static str {
+    unsafe {
+        let p = lx_nouveau_gpu_name();
+        if p.is_null() || *p == 0 {
+            return "";
+        }
+        let mut len = 0usize;
+        while *p.add(len) != 0 && len < 64 {
+            len += 1;
+        }
+        core::str::from_utf8(core::slice::from_raw_parts(p, len)).unwrap_or("")
+    }
 }
 
 pub fn device_vram_free() -> u64 {

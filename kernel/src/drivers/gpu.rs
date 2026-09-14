@@ -146,8 +146,18 @@ pub fn init() {
 
     let state = if nvidia.is_some() || nvidia_probe::present() {
         let mut name = [0u8; 32];
-        let label = b"NVIDIA GB205 (soso/lxdde)";
-        name[..label.len()].copy_from_slice(label);
+        #[cfg(feature = "lxdde")]
+        {
+            let rm = crate::lxdde::nouveau_gpu_name();
+            if !rm.is_empty() {
+                let n = core::cmp::min(rm.len(), name.len() - 1);
+                name[..n].copy_from_slice(&rm.as_bytes()[..n]);
+            }
+        }
+        if name[0] == 0 {
+            let label = b"NVIDIA (soso/lxdde)";
+            name[..label.len()].copy_from_slice(label);
+        }
         let vram = nvidia_vram();
         // El estado del pool va en la línea de arranque a propósito: queda en la
         // consola y en `SOSOLOG.TXT` sin que nadie tenga que lanzar una
@@ -296,10 +306,7 @@ fn vram_free_bytes(g: &GpuState) -> u64 {
     if device_bufs_available(g) {
         #[cfg(feature = "lxdde")]
         {
-            let free = crate::lxdde::device_vram_free();
-            if free > 0 {
-                return free;
-            }
+            return crate::lxdde::device_vram_free();
         }
     }
     g.vram_total.saturating_sub(g.vram_used)

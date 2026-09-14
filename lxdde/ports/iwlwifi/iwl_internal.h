@@ -61,6 +61,31 @@
 #define IWL_CTXT_INFO_RB_CB_SIZE_32   0x0050u
 #define IWL_CTXT_INFO_RB_SIZE_4K      0x0800u
 #define TFD_QUEUE_CB_SIZE_32          2
+#define SCD_QUEUE_CFG                 0x1d
+#define IWL_MGMT_TID                  15
+#define IWL_MGMT_QUEUE_SIZE           16
+/* Linux iwl-fh.h: tabla BC gen2 = TFD_QUEUE_SIZE_MAX + TFD_QUEUE_SIZE_BC_DUP. */
+#define TFD_QUEUE_SIZE_MAX            256
+#define TFD_QUEUE_SIZE_BC_DUP         64
+#define TFD_QUEUE_BC_SIZE             (TFD_QUEUE_SIZE_MAX + TFD_QUEUE_SIZE_BC_DUP)
+#define IWL_SCD_BC_TBL_BYTES          (TFD_QUEUE_BC_SIZE * (unsigned)sizeof(uint16_t))
+#define IWL_SCD_DMA_ALIGN             256
+#define IWL_FIRST_TB_SIZE             20
+#define IWL_FIRST_TB_SIZE_ALIGN       64
+#define IWL_MGMT_TX_SLOT_SIZE         512
+#define TX_QUEUE_CFG_ENABLE_QUEUE     (1u << 0)
+
+static inline uint32_t tfd_queue_cb_size(unsigned qsize)
+{
+    unsigned l2 = 0;
+    unsigned s = qsize;
+
+    while (s > 1u) {
+        s >>= 1;
+        l2++;
+    }
+    return l2 >= 3u ? l2 - 3u : 0u;
+}
 
 #define CSR_RESET_REG_FLAG_SW_RESET       (1u << 7)
 #define CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY (1u << 0)
@@ -162,6 +187,9 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define MAC_CONF_GROUP             0x3
 #define SYSTEM_GROUP               0x2
 #define REGULATORY_AND_NVM_GROUP   0xc
+#define DEBUG_GROUP                0xf
+/* fw/api/debug.h: TFD idle; DMA real, no dirección 0. */
+#define INVALID_WR_PTR_CMD         0x6
 
 #define INIT_EXTENDED_CFG_CMD      0x03
 #define NVM_ACCESS_CMD             0x88 /* LEGACY_GROUP — no usar en init unificado */
@@ -653,6 +681,43 @@ struct iwl_tfh_tfd {
     uint8_t reserved[6];
 } __attribute__((packed));
 
+struct iwl_tfh_tb {
+    uint16_t tb_len;
+    uint64_t addr;
+} __attribute__((packed));
+
+struct iwl_tfh_tfd_gen2 {
+    uint16_t num_tbs;
+    struct iwl_tfh_tb tbs[IWL_TFH_NUM_TBS];
+    uint32_t pad;
+} __attribute__((packed));
+
+/* Linux queue/tx.c: iwl_txq_set_tfd_invalid_gen2 — TB0 = invalid_tx_cmd. */
+static inline void iwl_txq_set_tfd_invalid_gen2(struct iwl_tfh_tfd_gen2 *tfd,
+                                                uint64_t dma, uint16_t size)
+{
+    tfd->num_tbs = 0;
+    tfd->tbs[0].addr = dma;
+    tfd->tbs[0].tb_len = size;
+    tfd->num_tbs = 1;
+}
+
+struct iwl_tx_queue_cfg_cmd {
+    uint8_t sta_id;
+    uint8_t tid;
+    uint16_t flags;
+    uint32_t cb_size;
+    uint64_t byte_cnt_addr;
+    uint64_t tfdq_addr;
+} __attribute__((packed));
+
+struct iwl_tx_queue_cfg_rsp {
+    uint16_t queue_number;
+    uint16_t flags;
+    uint16_t write_pointer;
+    uint16_t reserved;
+} __attribute__((packed));
+
 struct iwl_tfh_tb_long {
     uint16_t tb_len;
     uint64_t addr;
@@ -744,6 +809,17 @@ struct iwl_cmd_header_wide {
     uint8_t reserved;
     uint8_t version;
 } __attribute__((packed));
+
+/* Linux pcie/trans.c: iwl_pcie_alloc_invalid_tx_cmd. */
+static inline void iwl_invalid_tx_cmd_init(struct iwl_cmd_header_wide *hdr)
+{
+    hdr->cmd = INVALID_WR_PTR_CMD;
+    hdr->group_id = DEBUG_GROUP;
+    hdr->sequence = iwl_cpu_to_le16(0xffff);
+    hdr->length = iwl_cpu_to_le16(0);
+    hdr->reserved = 0;
+    hdr->version = 0;
+}
 
 struct iwl_scan_config {
     uint8_t enable_cam_mode;

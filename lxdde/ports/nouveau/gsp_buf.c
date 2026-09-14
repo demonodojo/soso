@@ -8,6 +8,14 @@ void *memset(void *dst, int c, unsigned long n);
 
 static struct gsp_buf_slot g_slots[G6_MAX_SLOTS];
 
+struct g6_va_hole {
+    uint64_t va;
+    uint64_t size;
+};
+
+static struct g6_va_hole g_va_holes[G6_MAX_SLOTS];
+static unsigned g_va_hole_nr;
+
 static struct gsp_buf_slot *slot_find_va(uint64_t va)
 {
     unsigned i;
@@ -43,6 +51,105 @@ static uint64_t align_up(uint64_t v, uint64_t a)
     return (v + a - 1ull) & ~(a - 1ull);
 }
 
+static void va_hole_insert(uint64_t va, uint64_t size)
+{
+    unsigned i, j;
+
+    if (va == 0 || size == 0) {
+        return;
+    }
+    for (i = 0; i < g_va_hole_nr; i++) {
+        if (g_va_holes[i].va + g_va_holes[i].size == va) {
+            g_va_holes[i].size += size;
+            goto coalesce;
+        }
+        if (va + size == g_va_holes[i].va) {
+            g_va_holes[i].va = va;
+            g_va_holes[i].size += size;
+            goto coalesce;
+        }
+    }
+    if (g_va_hole_nr >= G6_MAX_SLOTS) {
+        return;
+    }
+    g_va_holes[g_va_hole_nr].va = va;
+    g_va_holes[g_va_hole_nr].size = size;
+    g_va_hole_nr++;
+coalesce:
+    for (;;) {
+        int merged = 0;
+        for (i = 0; i < g_va_hole_nr; i++) {
+            for (j = i + 1; j < g_va_hole_nr; j++) {
+                if (g_va_holes[i].va + g_va_holes[i].size == g_va_holes[j].va) {
+                    g_va_holes[i].size += g_va_holes[j].size;
+                    g_va_holes[j] = g_va_holes[g_va_hole_nr - 1];
+                    g_va_hole_nr--;
+                    merged = 1;
+                    break;
+                }
+                if (g_va_holes[j].va + g_va_holes[j].size == g_va_holes[i].va) {
+                    g_va_holes[i].va = g_va_holes[j].va;
+                    g_va_holes[i].size += g_va_holes[j].size;
+                    g_va_holes[j] = g_va_holes[g_va_hole_nr - 1];
+                    g_va_hole_nr--;
+                    merged = 1;
+                    break;
+                }
+            }
+            if (merged) {
+                break;
+            }
+        }
+        if (!merged) {
+            break;
+        }
+    }
+}
+
+static uint64_t va_hole_take(uint64_t need, uint64_t align, uint64_t va_next)
+{
+    unsigned i, best = G6_MAX_SLOTS;
+    uint64_t best_waste = ~0ull;
+    uint64_t floor = align_up(va_next, align);
+
+    for (i = 0; i < g_va_hole_nr; i++) {
+        uint64_t at = align_up(g_va_holes[i].va, align);
+        uint64_t waste;
+
+        if (at < floor) {
+            continue;
+        }
+        if (at >= g_va_holes[i].va + g_va_holes[i].size ||
+            need > g_va_holes[i].va + g_va_holes[i].size - at) {
+            continue;
+        }
+        waste = (at - g_va_holes[i].va) + (g_va_holes[i].size - need - (at - g_va_holes[i].va));
+        if (waste < best_waste) {
+            best_waste = waste;
+            best = i;
+        }
+    }
+    if (best >= g_va_hole_nr) {
+        return 0;
+    }
+
+    {
+        struct g6_va_hole *h = &g_va_holes[best];
+        uint64_t at = align_up(h->va, align);
+        uint64_t tail_off = at + need - h->va;
+        uint64_t tail_sz = h->size - tail_off;
+
+        if (at > h->va) {
+            va_hole_insert(h->va, at - h->va);
+        }
+        if (tail_sz > 0) {
+            va_hole_insert(at + need, tail_sz);
+        }
+        *h = g_va_holes[--g_va_hole_nr];
+        return at;
+    }
+}
+
 int gsp_buf_init(struct gsp_buf *b, struct gsp_vram *vram, struct gsp_vmm *vmm,
                  struct gsp_ce *ce, uint64_t scratch_va, void *scratch_cpu,
                  unsigned scratch_bytes)
@@ -58,6 +165,7 @@ int gsp_buf_init(struct gsp_buf *b, struct gsp_vram *vram, struct gsp_vmm *vmm,
     b->scratch_cpu = scratch_cpu;
     b->scratch_bytes = scratch_bytes;
     b->va_next = G6_VA_BASE;
+    g_va_hole_nr = 0;
     b->ready = 1;
     return 0;
 }
@@ -120,14 +228,6 @@ uint64_t gsp_buf_alloc(struct gsp_buf *b, uint64_t size)
     big = size >= G6_BIG_MIN;
     need = align_up(size, big ? G6_BIG_MIN : VRAM_PAGE);
 
-    /* Primero reutilizar un slot liberado del mismo tamaño. */
-    for (i = 0; i < G6_MAX_SLOTS; i++) {
-        if (!g_slots[i].in_use && g_slots[i].va != 0 && g_slots[i].size >= need) {
-            g_slots[i].in_use = 1;
-            return g_slots[i].va;
-        }
-    }
-
     s = slot_alloc_entry();
     if (!s) {
         lx_printk("nouveau-lx: G6 — sin entradas de slot (%u)\n", G6_MAX_SLOTS);
@@ -139,7 +239,10 @@ uint64_t gsp_buf_alloc(struct gsp_buf *b, uint64_t size)
         return 0;
     }
 
-    va = align_up(b->va_next, big ? G6_BIG_MIN : VRAM_PAGE);
+    va = va_hole_take(need, big ? G6_BIG_MIN : VRAM_PAGE, b->va_next);
+    if (!va) {
+        va = align_up(b->va_next, big ? G6_BIG_MIN : VRAM_PAGE);
+    }
     if (va >= G6_VA_LIMIT || need > G6_VA_LIMIT - va) {
         lx_printk("nouveau-lx: G6 — ventana de VA agotada\n");
         gsp_vram_return(b->vram, phys, need);
@@ -154,7 +257,9 @@ uint64_t gsp_buf_alloc(struct gsp_buf *b, uint64_t size)
         return 0;
     }
 
-    b->va_next = va + need;
+    if (va + need > b->va_next) {
+        b->va_next = va + need;
+    }
     s->va = va;
     s->phys = phys;
     s->size = need;
@@ -336,9 +441,39 @@ int gsp_buf_free(struct gsp_buf *b, uint64_t va)
     if (!s) {
         return -1;
     }
+    if (s->size >= G6_BIG_MIN) {
+        if (gsp_vmm_unmap_big(b->vmm, s->va, s->size) != 0) {
+            lx_printk("nouveau-lx: G6 — fallo al desmapear VA 0x%llx\n",
+                      (unsigned long long)s->va);
+            return -1;
+        }
+    } else if (gsp_vmm_unmap(b->vmm, s->va, s->size) != 0) {
+        lx_printk("nouveau-lx: G6 — fallo al desmapear VA 0x%llx\n",
+                  (unsigned long long)s->va);
+        return -1;
+    }
     gsp_vram_return(b->vram, s->phys, s->size);
+    va_hole_insert(s->va, s->size);
+    s->va = 0;
+    s->phys = 0;
+    s->size = 0;
     s->in_use = 0;
     return 0;
+}
+
+void gsp_buf_purge_va_below(struct gsp_buf *b, uint64_t floor)
+{
+    unsigned i;
+
+    (void)b;
+    for (i = 0; i < g_va_hole_nr; ) {
+        if (g_va_holes[i].va + g_va_holes[i].size <= floor) {
+            g_va_holes[i] = g_va_holes[g_va_hole_nr - 1];
+            g_va_hole_nr--;
+        } else {
+            i++;
+        }
+    }
 }
 
 void gsp_buf_fini(struct gsp_buf *b)
@@ -359,5 +494,6 @@ void gsp_buf_fini(struct gsp_buf *b)
         g_slots[i].size = 0;
         g_slots[i].in_use = 0;
     }
+    g_va_hole_nr = 0;
     b->ready = 0;
 }

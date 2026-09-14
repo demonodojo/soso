@@ -24,6 +24,10 @@ pub fn vram_total() -> u64 {
     0
 }
 
+pub fn gpu_name() -> &'static str {
+    ""
+}
+
 pub fn device_vram_free() -> u64 {
     0
 }

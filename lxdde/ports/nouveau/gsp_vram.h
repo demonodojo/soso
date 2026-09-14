@@ -6,11 +6,8 @@
  * acaba la intervención de RM). Por eso G4d 1/2 se molestó en quedarse con la
  * lista de regiones utilizables: son el mapa del que sale todo lo demás.
  *
- * Lo de aquí es deliberadamente un asignador de puntero que avanza y **no sabe
- * liberar**. G4d y G4e reservan un puñado de bloques al arrancar y los tienen
- * hasta el apagado; un `nvkm_mm` de verdad —bloques, huecos, coalescencia— es
- * trabajo de cuando haya que meter y sacar pesos de un modelo, no ahora. Está
- * escrito para que se note: `gsp_vram_free` no existe.
+ * G4d/G4e reservan bloques al arrancar; G6 libera y reutiliza vía free-list
+ * (`gsp_vram_return` + coalescencia). El bump `next` sigue para bloques nuevos.
  */
 #ifndef GSP_VRAM_H
 #define GSP_VRAM_H

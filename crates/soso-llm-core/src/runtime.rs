@@ -475,29 +475,37 @@ impl Runtime {
             has_gate: self.has_gate,
             parallel,
         };
+        let keep_mapped = self
+            .planner
+            .as_ref()
+            .is_some_and(|p| p.keep_weights_mapped());
         // Kick capa inicial (prefetch adelantado antes del bucle).
-        if let Some(pf) = self.manifest.prefetch.get(layer_start as usize) {
-            source.kick_prefetch_shards(&pf.shards);
-            if let Some(pl) = self.planner.as_mut() {
-                pl.note_prefetch();
+        if !keep_mapped {
+            if let Some(pf) = self.manifest.prefetch.get(layer_start as usize) {
+                source.kick_prefetch_shards(&pf.shards);
+                if let Some(pl) = self.planner.as_mut() {
+                    pl.note_prefetch();
+                }
             }
         }
         for layer in layer_start..layer_end {
             // Esperar capa N (prefetchada mientras se calculó N-1).
-            let wait0 = clock_ms.map(|c| c());
-            source.wait_prefetch();
-            if let (Some(c), Some(t0)) = (clock_ms, wait0) {
-                let ms = c().saturating_sub(t0);
-                if let Some(pl) = self.planner.as_mut() {
-                    pl.note_stage_wait_ms(ms);
+            if !keep_mapped {
+                let wait0 = clock_ms.map(|c| c());
+                source.wait_prefetch();
+                if let (Some(c), Some(t0)) = (clock_ms, wait0) {
+                    let ms = c().saturating_sub(t0);
+                    if let Some(pl) = self.planner.as_mut() {
+                        pl.note_stage_wait_ms(ms);
+                    }
                 }
-            }
-            // Kick capa N+1 antes del cómputo (solape I/O ∥ matvec/attn).
-            if let Some(next) = self.manifest.prefetch.get((layer + 1) as usize) {
-                self.tiers.schedule_prefetch(&next.shards);
-                self.tiers.kick_pending(source);
-                if let Some(pl) = self.planner.as_mut() {
-                    pl.note_prefetch();
+                // Kick capa N+1 antes del cómputo (solape I/O ∥ matvec/attn).
+                if let Some(next) = self.manifest.prefetch.get((layer + 1) as usize) {
+                    self.tiers.schedule_prefetch(&next.shards);
+                    self.tiers.kick_pending(source);
+                    if let Some(pl) = self.planner.as_mut() {
+                        pl.note_prefetch();
+                    }
                 }
             }
             let use_gpu = base_gpu
@@ -544,21 +552,23 @@ impl Runtime {
                 hook(layer, layer_end);
             }
             // Liberar shards fuera del working set (streaming FlexGen).
-            let keep = self
-                .planner
-                .as_ref()
-                .map(|pl| pl.keep_all_shards_after(layer, layer_end, &self.manifest));
-            if let Some(keep) = keep {
-                if !keep.is_empty() {
-                    let tr0 = clock_ms.map(|c| c());
-                    source.release_shards_except(&keep);
-                    let ms = match (clock_ms, tr0) {
-                        (Some(c), Some(t)) => c().saturating_sub(t),
-                        _ => 0,
-                    };
-                    if let Some(pl) = self.planner.as_mut() {
-                        pl.note_shard_release();
-                        pl.note_release_ms(ms);
+            if !keep_mapped {
+                let keep = self
+                    .planner
+                    .as_ref()
+                    .map(|pl| pl.keep_all_shards_after(layer, layer_end, &self.manifest));
+                if let Some(keep) = keep {
+                    if !keep.is_empty() {
+                        let tr0 = clock_ms.map(|c| c());
+                        source.release_shards_except(&keep);
+                        let ms = match (clock_ms, tr0) {
+                            (Some(c), Some(t)) => c().saturating_sub(t),
+                            _ => 0,
+                        };
+                        if let Some(pl) = self.planner.as_mut() {
+                            pl.note_shard_release();
+                            pl.note_release_ms(ms);
+                        }
                     }
                 }
             }

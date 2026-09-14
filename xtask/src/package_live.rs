@@ -551,9 +551,9 @@ Prueba GPU (mismo stick, varias placas)
 El live lleva nouveau + firmware Ampere (ga107/ga102) y Blackwell (gb205).
 El bring-up elige el juego según el PCI id / boot0; no hay que reflashear.
 
-  Ampere  10de:249c (RTX 3050 Mobile):
+  Ampere  10de:249c (RTX 3080 Laptop, GA104):
     nvidia: GPU 10de:249c NV_PMC_BOOT_0=0x........   # ≠ ffffffff
-    nouveau-lx: familia=ga107  fw nvidia/ga107/gsp/…  (o fallback ga102)
+    nouveau-lx: familia=ga104  fw nvidia/ga104/gsp/…  (o fallback ga102)
 
   Blackwell 10de:2f18 (RTX 5070 Ti Mobile):
     nouveau-lx: familia=Blackwell  fw nvidia/gb205/gsp/…
