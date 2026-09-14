@@ -62,6 +62,8 @@
 #define IWL_CTXT_INFO_RB_SIZE_4K      0x0800u
 #define TFD_QUEUE_CB_SIZE_32          2
 #define SCD_QUEUE_CFG                 0x1d
+#define SCD_QUEUE_CONFIG_CMD          0x17
+#define IWL_SCD_QUEUE_ADD             0
 #define IWL_MGMT_TID                  15
 #define IWL_MGMT_QUEUE_SIZE           16
 /* Linux iwl-fh.h: tabla BC gen2 = TFD_QUEUE_SIZE_MAX + TFD_QUEUE_SIZE_BC_DUP. */
@@ -716,6 +718,22 @@ struct iwl_tx_queue_cfg_rsp {
     uint16_t flags;
     uint16_t write_pointer;
     uint16_t reserved;
+} __attribute__((packed));
+
+/* Linux fw/api/datapath.h — queue_alloc_cmd_ver==3 (cc-a0-77, so-a0-gf-a0). */
+struct iwl_scd_queue_cfg_cmd {
+    uint32_t operation;
+    union {
+        struct {
+            uint32_t sta_mask;
+            uint8_t tid;
+            uint8_t reserved[3];
+            uint32_t flags;
+            uint32_t cb_size;
+            uint64_t bc_dram_addr;
+            uint64_t tfdq_dram_addr;
+        } __attribute__((packed)) add;
+    } u;
 } __attribute__((packed));
 
 struct iwl_tfh_tb_long {

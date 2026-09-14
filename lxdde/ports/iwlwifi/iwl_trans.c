@@ -998,11 +998,12 @@ static int mgmt_txq_alloc_dma(struct iwl_ax211_priv *iwl)
 
 int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
 {
-    struct iwl_tx_queue_cfg_cmd cfg;
     struct iwl_tx_queue_cfg_rsp rsp;
     uint16_t qid;
     uint16_t wr;
     static int logged;
+    int scd_ver;
+    int ret;
 
     if (!iwl || !iwl->alive)
         return -1;
@@ -1011,20 +1012,54 @@ int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
     if (mgmt_txq_alloc_dma(iwl) != 0)
         return -1;
 
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.sta_id = sta_id;
-    cfg.tid = IWL_MGMT_TID;
-    cfg.flags = iwl_cpu_to_le16(TX_QUEUE_CFG_ENABLE_QUEUE);
-    cfg.cb_size = iwl_cpu_to_le32(tfd_queue_cb_size(IWL_MGMT_QUEUE_SIZE));
-    cfg.byte_cnt_addr = iwl->mgmt_bc_dma;
-    cfg.tfdq_addr = iwl->mgmt_tfd_dma;
-    lx_printk("iwl_trans: SCD_QUEUE_CFG tfd=0x%llx bc=0x%llx cb_size=%u n=%u sta=%u\n",
-              (unsigned long long)cfg.tfdq_addr,
-              (unsigned long long)cfg.byte_cnt_addr, (unsigned)cfg.cb_size,
-              (unsigned)IWL_MGMT_QUEUE_SIZE, (unsigned)sta_id);
-    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, SCD_QUEUE_CFG, &cfg,
-                                (uint16_t)sizeof(cfg),
-                                IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
+    scd_ver = iwl_fw_cmd_ver(iwl, DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD);
+    if (scd_ver == 3) {
+        struct iwl_scd_queue_cfg_cmd scd;
+
+        memset(&scd, 0, sizeof(scd));
+        scd.operation = iwl_cpu_to_le32(IWL_SCD_QUEUE_ADD);
+        scd.u.add.sta_mask = iwl_cpu_to_le32(1u << sta_id);
+        scd.u.add.tid = IWL_MGMT_TID;
+        scd.u.add.flags = 0;
+        scd.u.add.cb_size =
+            iwl_cpu_to_le32(tfd_queue_cb_size(IWL_MGMT_QUEUE_SIZE));
+        scd.u.add.bc_dram_addr = iwl->mgmt_bc_dma;
+        scd.u.add.tfdq_dram_addr = iwl->mgmt_tfd_dma;
+        lx_printk("iwl_trans: SCD_QUEUE_CONFIG grp=%u id=0x%02x ver=%u len=%zu "
+                  "tfd=0x%llx bc=0x%llx cb_size=%u n=%u sta=%u\n",
+                  (unsigned)DATA_PATH_GROUP, (unsigned)SCD_QUEUE_CONFIG_CMD,
+                  scd_ver, sizeof(scd),
+                  (unsigned long long)scd.u.add.tfdq_dram_addr,
+                  (unsigned long long)scd.u.add.bc_dram_addr,
+                  (unsigned)scd.u.add.cb_size, (unsigned)IWL_MGMT_QUEUE_SIZE,
+                  (unsigned)sta_id);
+        ret = iwl_trans_send_cmd_wait(iwl, DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD,
+                                      &scd, (uint16_t)sizeof(scd),
+                                      IWL_MVM_HCMD_TIMEOUT_MS);
+    } else if (scd_ver == 0) {
+        struct iwl_tx_queue_cfg_cmd cfg;
+
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.sta_id = sta_id;
+        cfg.tid = IWL_MGMT_TID;
+        cfg.flags = iwl_cpu_to_le16(TX_QUEUE_CFG_ENABLE_QUEUE);
+        cfg.cb_size = iwl_cpu_to_le32(tfd_queue_cb_size(IWL_MGMT_QUEUE_SIZE));
+        cfg.byte_cnt_addr = iwl->mgmt_bc_dma;
+        cfg.tfdq_addr = iwl->mgmt_tfd_dma;
+        lx_printk("iwl_trans: SCD_QUEUE_CFG grp=%u id=0x%02x ver=0 len=%zu "
+                  "tfd=0x%llx bc=0x%llx cb_size=%u n=%u sta=%u\n",
+                  (unsigned)LEGACY_GROUP, (unsigned)SCD_QUEUE_CFG,
+                  sizeof(cfg), (unsigned long long)cfg.tfdq_addr,
+                  (unsigned long long)cfg.byte_cnt_addr, (unsigned)cfg.cb_size,
+                  (unsigned)IWL_MGMT_QUEUE_SIZE, (unsigned)sta_id);
+        ret = iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, SCD_QUEUE_CFG, &cfg,
+                                      (uint16_t)sizeof(cfg),
+                                      IWL_MVM_HCMD_TIMEOUT_MS);
+    } else {
+        lx_printk("iwl_trans: SCD queue alloc ver=%d no soportada\n", scd_ver);
+        return -1;
+    }
+    if (ret != 0) {
         lx_printk("iwl_trans: SCD_QUEUE_CFG mgmt falló\n");
         return -1;
     }
