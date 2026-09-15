@@ -9,8 +9,11 @@ y acumular mejoras verificadas del propio sistema.
 **Subplanes para implementación:** [índice de 44 fichas](docs/self-improvement/README.md),
 [contratos compartidos](docs/self-improvement/CONTRATO.md) y
 [catálogo de dependencias](docs/self-improvement/tasks.json). Cada ficha fija
-contexto mínimo, archivos, pasos, pruebas y cierre; empezar por
-[T01 — Base reproducible](docs/self-improvement/T01-base.md). Las fichas de
+contexto mínimo, archivos, pasos, pruebas y cierre.
+[T01 — Base reproducible](docs/self-improvement/T01-base.md) está completada
+(`scripts/self-improvement/baseline.py`); seguir por
+[T02](docs/self-improvement/T02-banco.md) y
+[T03](docs/self-improvement/T03-perfil-modelo.md). Las fichas de
 ports nativos distinguen investigación, implementación por capacidad e
 integración; redactar un inventario no acredita completar un port.
 

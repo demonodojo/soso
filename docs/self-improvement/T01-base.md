@@ -1,6 +1,6 @@
 # T01 — Capturar una base reproducible sin alterar el checkout
 
-**Hito:** SI-0 · **Tipo:** Implementación host · **Estado:** pendiente.  
+**Hito:** SI-0 · **Tipo:** Implementación host · **Estado:** completada (15 de septiembre de 2026; resumen en [seguimiento/T01.md](seguimiento/T01.md), evidencia en `target/self-improvement/tasks/T01/resultado.md`).  
 **Dependencias:** Ninguna; puede iniciarse ahora.
 
 ## Objetivo y entrega
@@ -43,9 +43,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Si la copia no reproduce los archivos, corregir la captura antes de editar el runtime. La falta de hardware se registra por separado.
 

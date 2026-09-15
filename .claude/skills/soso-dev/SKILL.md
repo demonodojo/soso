@@ -27,6 +27,21 @@ próximo paso, además de logs en `target/`. Una prueba host o QEMU no cierra un
 validación física. Al terminar una sesión con trabajo pendiente, dejar el
 punto exacto de reanudación; no volver a ejecutar pruebas vigentes sin motivo.
 
+Para fijar la base de una sesión de automejora sin tocar el checkout:
+
+```sh
+python3 scripts/self-improvement/baseline.py --repo . --out target/self-improvement/base
+python3 scripts/self-improvement/baseline.py reconstruct \
+    --capture target/self-improvement/base --into target/self-improvement/copia --with-excluded
+python3 scripts/self-improvement/baseline.py suites \
+    --capture target/self-improvement/base --tree target/self-improvement/copia --timeout 5400
+```
+
+La captura solo lee (sale con 3 si el checkout cambia mientras lee); la copia
+es el árbol donde ejecutar las suites. `--with-excluded` repone del origen los
+blobs que la captura no guarda —el firmware de iwlwifi que exige
+`cargo xtask check`— comprobando su hash.
+
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
 Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).
 
@@ -206,6 +221,9 @@ Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp).
 ## Testing
 
 ```sh
+# Host: base reproducible de automejora (T01; git real en temporales)
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/self-improvement -p test_baseline.py
+
 # Host-only sosofs crash-safety
 cargo test -q -p sosofs --features std
 

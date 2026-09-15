@@ -11,7 +11,7 @@
       "title": "Capturar una base reproducible sin alterar el checkout",
       "milestone": "SI-0",
       "kind": "Implementación host",
-      "status": "pending",
+      "status": "done",
       "depends_on": [],
       "entry_conditions": [],
       "contract_sections": "C5–C6",
@@ -19,7 +19,15 @@
         "SELF_IMPROVEMENT.md",
         "rust-toolchain.toml",
         "xtask/src/check.rs"
-      ]
+      ],
+      "tracking": {
+        "updated_at": "2026-09-15",
+        "base": "9b281e1974dd52a5dae4fd63f5912eb45eb5966f",
+        "summary": "docs/self-improvement/seguimiento/T01.md",
+        "evidence": "target/self-improvement/tasks/T01/resultado.md",
+        "blocker": null,
+        "next_step": "T02 y T03 habilitadas; ramas del checkout ya resueltas (main = 5a7be1388)"
+      }
     },
     {
       "id": "T02",

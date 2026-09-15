@@ -380,17 +380,29 @@ def diffs_de(repo, head, registro):
 
 
 def parsear_name_status(crudo):
+    """Lista (estado, ruta) de un `--name-status -z`.
+
+    `R`/`C` traen tres campos: estado, origen y destino. Aquí los diffs se
+    piden con `diff.renames=false`, pero el formato se respeta igual para que
+    cambiar esa opción no desalinee el parseo.
+    """
     campos = [c for c in crudo.split(b"\0") if c]
     salida, i = [], 0
-    while i + 1 < len(campos) or (i < len(campos) and len(campos[i]) <= 3):
+    while i + 1 < len(campos):
         estado = campos[i].decode("ascii", "replace")
         i += 1
-        if i >= len(campos):
-            break
+        origen = None
+        if estado[:1] in ("R", "C"):
+            if i + 1 >= len(campos):
+                break
+            origen = campos[i]
+            i += 1
         texto, extra = ruta_json(campos[i])
         i += 1
         entrada = {"estado": estado, "ruta": texto}
         entrada.update(extra)
+        if origen is not None:
+            entrada["origen"] = ruta_json(origen)[0]
         salida.append(entrada)
     return salida
 

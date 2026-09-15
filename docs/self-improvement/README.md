@@ -6,9 +6,13 @@ de implementación se declara realizada por crear estas fichas.
 
 ## Por dónde empezar
 
-**Primera tarea: [T01 — Base reproducible](T01-base.md).** Entregar al modelo
-una ficha por sesión, las secciones indicadas del [contrato](CONTRATO.md) y el
-contexto de código que la ficha enumera. No necesita leer las otras 43 fichas.
+**[T01 — Base reproducible](T01-base.md) está completada** (15 de septiembre de
+2026, `scripts/self-improvement/baseline.py`; resumen en
+[seguimiento/T01.md](seguimiento/T01.md)). Las siguientes son
+**[T02](T02-banco.md)** y **[T03](T03-perfil-modelo.md)**, que ya la tienen como
+dependencia. Entregar al modelo una ficha por sesión, las secciones indicadas
+del [contrato](CONTRATO.md) y el contexto de código que la ficha enumera. No
+necesita leer las otras 43 fichas.
 
 Cada subplan define alcance, archivos, decisiones, pasos, pruebas, salida y
 condiciones de bloqueo. Los nombres propuestos de módulos y comandos se crean
@@ -22,7 +26,7 @@ varias fichas modifican los mismos manifiestos o módulos de integración.
 ### Prompt listo para copiar
 
 ```text
-Implementa docs/self-improvement/T01-base.md.
+Implementa docs/self-improvement/T02-banco.md.
 
 Lee las secciones del CONTRATO.md que indique la ficha y las instrucciones
 locales aplicables. Revisa el estado del checkout antes de editar.
@@ -76,7 +80,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 
 | ID | Entrega | Hito | Dependencias | Estado |
 |---|---|---|---|---|
-| [T01](T01-base.md) | Capturar una base reproducible sin alterar el checkout | SI-0 | — | Pendiente |
+| [T01](T01-base.md) | Capturar una base reproducible sin alterar el checkout | SI-0 | — | Completada |
 | [T02](T02-banco.md) | Definir los casos y sus verificadores | SI-0 | T01 | Pendiente |
 | [T03](T03-perfil-modelo.md) | Fijar un modelo y obtener fixtures independientes de su chat | SI-0 / SI-1 | T01 | Pendiente |
 | [T04](T04-dominio-chat.md) | Añadir tipos de conversación compartidos | SI-1 | — | Pendiente |

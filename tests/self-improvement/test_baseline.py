@@ -10,6 +10,7 @@ Las pruebas verifican las dos propiedades que dan valor a la captura:
   - el checkout de origen queda byte a byte igual después de capturarlo;
   - la captura reconstruye la base declarada y sus hashes coinciden.
 """
+import base64
 import hashlib
 import importlib.util
 import json
@@ -132,6 +133,32 @@ class BaseTemporal(unittest.TestCase):
         salida = salida or self.destino()
         kwargs.setdefault("omitir_herramientas", True)
         return baseline.capturar(self.repo, salida, **kwargs), salida
+
+
+class TestParseo(unittest.TestCase):
+    """El formato -z: un campo por ruta, tres cuando hay renombrado."""
+
+    def test_estado_con_renombrado_y_espacios(self):
+        crudo = b"R  nuevo con espacios.txt\0viejo.txt\0 M otro.rs\0?? nuevo.txt\0"
+        entradas = baseline.parsear_estado(crudo)
+        self.assertEqual([e["xy"] for e in entradas], ["R ", " M", "??"])
+        self.assertEqual(entradas[0]["ruta"], "nuevo con espacios.txt")
+        self.assertEqual(entradas[0]["origen"], "viejo.txt")
+        self.assertEqual(entradas[2]["ruta"], "nuevo.txt")
+
+    def test_name_status_con_renombrado(self):
+        crudo = b"R100\0viejo.rs\0nuevo.rs\0M\0otro.rs\0"
+        entradas = baseline.parsear_name_status(crudo)
+        self.assertEqual(entradas, [
+            {"estado": "R100", "ruta": "nuevo.rs", "origen": "viejo.rs"},
+            {"estado": "M", "ruta": "otro.rs"},
+        ])
+
+    def test_ruta_no_utf8_se_guarda_en_base64(self):
+        crudo = b"?? ra\xffro.txt\0"
+        entradas = baseline.parsear_estado(crudo)
+        self.assertIn("ruta_b64", entradas[0])
+        self.assertEqual(base64.b64decode(entradas[0]["ruta_b64"]), b"ra\xffro.txt")
 
 
 class TestCaptura(BaseTemporal):
