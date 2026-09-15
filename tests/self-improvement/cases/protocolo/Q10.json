@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "Q10",
+  "clase": "protocolo",
+  "particion": "desarrollo",
+  "titulo": "Contexto por encima del límite",
+  "etiqueta": "contexto-excesivo",
+  "entrada": {
+    "enunciado": "visible/Q10/enunciado.md",
+    "archivos": [
+      "visible/Q10/peticion.json",
+      "visible/Q10/relleno.txt"
+    ]
+  },
+  "resultado_observable": "El exceso de contexto se rechaza con 422 y código específico, sin truncar el historial en silencio.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q10",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q10/esperado.json",
+    "reservado/Q10/correcta.json",
+    "reservado/Q10/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q10/enunciado.md": "13fe4299193003e87e9a039c6e83021d3cbbca05a678d3ca356423475936fc9d",
+    "visible/Q10/peticion.json": "428364f0cc663764c25f64ac43e41369cd1edd228a238008bceddea0db893cb0",
+    "visible/Q10/relleno.txt": "18fa94ae08e092a46ba0a38f64442744acc032015dd727659a934bb171b42ff8"
+  }
+}

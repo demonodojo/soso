@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "P07",
+  "clase": "programacion",
+  "particion": "desarrollo",
+  "titulo": "Un iterador agotado se queda agotado",
+  "etiqueta": "fin-iterador",
+  "entrada": {
+    "enunciado": "visible/P07/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "El programa candidato, compilado con rustc y ejecutado con cada vector reservado, escribe en stdout exactamente la salida esperada y termina con el código indicado.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_programa.py",
+      "--caso",
+      "P07",
+      "--candidato",
+      "{candidato}"
+    ],
+    "timeout_s": 180
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 1024,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": [
+      "rustc"
+    ]
+  },
+  "reservado": [
+    "reservado/P07/vectores.json",
+    "reservado/P07/referencia.rs",
+    "reservado/P07/incorrecta.rs"
+  ],
+  "hashes_entrada": {
+    "visible/P07/enunciado.md": "b13a84e63384729dec5911c35d2dc4a976ddc43de7210339173f28aadcd7e370"
+  }
+}

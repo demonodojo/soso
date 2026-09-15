@@ -1,0 +1,29 @@
+{
+  "vectores": [
+    {
+      "nombre": "comillas y barra",
+      "stdin": "a\"b\\c\n",
+      "stdout": "\"a\\\"b\\\\c\"\n"
+    },
+    {
+      "nombre": "control y tabulador",
+      "stdin": "a\tb\u0001c\n",
+      "stdout": "\"a\\tb\\u0001c\"\n"
+    },
+    {
+      "nombre": "salto de línea interior",
+      "stdin": "uno\ndos\n",
+      "stdout": "\"uno\\ndos\"\n"
+    },
+    {
+      "nombre": "no ascii literal",
+      "stdin": "café ☕\n",
+      "stdout": "\"café ☕\"\n"
+    },
+    {
+      "nombre": "vacía",
+      "stdin": "\n",
+      "stdout": "\"\"\n"
+    }
+  ]
+}

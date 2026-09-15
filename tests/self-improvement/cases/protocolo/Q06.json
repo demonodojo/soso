@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "Q06",
+  "clase": "protocolo",
+  "particion": "reservado",
+  "titulo": "Unicode fragmentado entre trozos del flujo",
+  "etiqueta": "unicode-fragmentado",
+  "entrada": {
+    "enunciado": "visible/Q06/enunciado.md",
+    "archivos": [
+      "visible/Q06/peticion.json"
+    ]
+  },
+  "resultado_observable": "Los trozos recibidos se concatenan, decodifican en UTF-8 y el texto coincide literalmente con el pedido.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q06",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q06/esperado.json",
+    "reservado/Q06/correcta.json",
+    "reservado/Q06/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q06/enunciado.md": "15ceb9e5962b23c9ed38eb0fa602d282c3ddbd5ae0271e54b6b10bab65728816",
+    "visible/Q06/peticion.json": "1829749f0493d437de23b7ed5c9dad102e0c205699182cb73dfc5eb309f92053"
+  }
+}

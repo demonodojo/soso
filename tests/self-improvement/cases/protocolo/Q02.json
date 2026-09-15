@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "Q02",
+  "clase": "protocolo",
+  "particion": "desarrollo",
+  "titulo": "System + user: la instrucción de sistema manda",
+  "etiqueta": "system-user",
+  "entrada": {
+    "enunciado": "visible/Q02/enunciado.md",
+    "archivos": [
+      "visible/Q02/peticion.json"
+    ]
+  },
+  "resultado_observable": "La respuesta grabada es 200 y su texto respeta la instrucción de sistema.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q02",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q02/esperado.json",
+    "reservado/Q02/correcta.json",
+    "reservado/Q02/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q02/enunciado.md": "b775ff20b6f23d9eac8e3801d37da6c9c46ef515bcf4ec0ca53342189eedf2f4",
+    "visible/Q02/peticion.json": "2ad70a490048fc58427c285c4205b571185192639491c0569f2d730563719c82"
+  }
+}

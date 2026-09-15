@@ -1,0 +1,37 @@
+diff --git a/crates/soso-update-core/src/plan.rs b/crates/soso-update-core/src/plan.rs
+index 4fe995a87..29564c76a 100644
+--- a/crates/soso-update-core/src/plan.rs
++++ b/crates/soso-update-core/src/plan.rs
+@@ -38,6 +38,32 @@ impl Span {
+     pub fn oversized(&self, span_max: u64) -> bool {
+         self.len() > span_max
+     }
++
++    /// Trocea el tramo en pedazos contiguos de como mucho `span_max` bytes.
++    ///
++    /// Detectar con [`Span::oversized`] que un tramo no cabe en RAM no sirve de
++    /// nada si luego hay que pedirlo entero: esto da los `Range` que sí caben,
++    /// sin huecos ni solapes. Cada trozo conserva los ficheros del tramo, que
++    /// es lo que hace falta para saber qué se está descargando. Un tramo que ya
++    /// cabe se devuelve tal cual, igual que `span_max` 0, que no trocea nada.
++    pub fn split(&self, span_max: u64) -> Vec<Span> {
++        let mut trozos = Vec::new();
++        if span_max == 0 || self.len() <= span_max {
++            trozos.push(self.clone());
++            return trozos;
++        }
++        let mut inicio = self.start;
++        while inicio < self.end {
++            let fin = (inicio + span_max).min(self.end);
++            trozos.push(Span {
++                start: inicio,
++                end: fin,
++                files: self.files.clone(),
++            });
++            inicio = fin;
++        }
++        trozos
++    }
+ }
+ 
+ /// Agrupa las entradas pendientes en tramos de descarga.

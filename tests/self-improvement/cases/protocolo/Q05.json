@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "Q05",
+  "clase": "protocolo",
+  "particion": "desarrollo",
+  "titulo": "Contenido null en el historial",
+  "etiqueta": "contenido-null",
+  "entrada": {
+    "enunciado": "visible/Q05/enunciado.md",
+    "archivos": [
+      "visible/Q05/peticion.json"
+    ]
+  },
+  "resultado_observable": "El historial con content null se acepta y produce respuesta, no un error de petición.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q05",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q05/esperado.json",
+    "reservado/Q05/correcta.json",
+    "reservado/Q05/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q05/enunciado.md": "8dbe9bea4a1810124c8286be6436fc69a4f4e09996d06d9daa7fa7add66f1b39",
+    "visible/Q05/peticion.json": "c7508b56886604a42eec9e423ae402702aee037166273a7f785137af0e074025"
+  }
+}

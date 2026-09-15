@@ -1,0 +1,28 @@
+{
+  "vectores": [
+    {
+      "nombre": "archivo, ausente y directorio",
+      "stdin": "datos.txt\nno-esta.txt\nsubdir\n",
+      "stdout": "LEIDO 5\nNOEXISTE\nERROR\n",
+      "archivos": {
+        "datos.txt": "hola\n"
+      },
+      "directorios": [
+        "subdir"
+      ]
+    },
+    {
+      "nombre": "archivo vacío",
+      "stdin": "vacio.txt\n",
+      "stdout": "LEIDO 0\n",
+      "archivos": {
+        "vacio.txt": ""
+      }
+    },
+    {
+      "nombre": "ruta dentro de un subdirectorio ausente",
+      "stdin": "sin/ruta.txt\n",
+      "stdout": "NOEXISTE\n"
+    }
+  ]
+}

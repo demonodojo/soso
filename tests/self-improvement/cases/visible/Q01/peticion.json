@@ -1,0 +1,12 @@
+{
+  "model": "qwen2.5-coder-3b-instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Di la palabra LISTO y nada más."
+    }
+  ],
+  "max_tokens": 32,
+  "temperature": 0,
+  "stream": false
+}

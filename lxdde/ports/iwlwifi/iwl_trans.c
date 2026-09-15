@@ -574,14 +574,29 @@ static void log_rx(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd,
     }
 }
 
-static uint32_t tx_resp_status_word(const struct iwl_ax211_priv *iwl,
+static int iwl_mvm_has_new_tx_api(struct iwl_ax211_priv *iwl)
+{
+    if (!iwl)
+        return 0;
+    /* SCD ver 3 (TVQM): struct iwl_mvm_tx_resp status @40, no v3 @36. */
+    return iwl_fw_cmd_ver(iwl, DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD) == 3;
+}
+
+static unsigned tx_resp_status_off(struct iwl_ax211_priv *iwl)
+{
+    if (iwl_mvm_has_new_tx_api(iwl) || iwl->gen3)
+        return IWL_MVM_TX_RESP_STATUS_OFF;
+    return IWL_MVM_TX_RESP_V3_STATUS_OFF;
+}
+
+static uint32_t tx_resp_status_word(struct iwl_ax211_priv *iwl,
                                     const uint8_t *data, int pay)
 {
     unsigned off;
 
-    if (!data || pay < 40)
+    if (!data || pay < (int)IWL_MVM_TX_RESP_MIN_PAY)
         return 0xffffffffu;
-    off = iwl->gen3 ? IWL_MVM_TX_RESP_STATUS_OFF : IWL_MVM_TX_RESP_V3_STATUS_OFF;
+    off = tx_resp_status_off(iwl);
     if (pay < (int)(off + (int)sizeof(struct agg_tx_status)))
         return 0xffffffffu;
     return (uint32_t)(data[off] | ((uint32_t)data[off + 1] << 8));
@@ -617,21 +632,40 @@ void iwl_trans_tx_reclaim(struct iwl_ax211_priv *iwl, uint16_t seq)
     iwl->mgmt_txq_read = (uint16_t)next;
 }
 
-static void parse_tx_resp(struct iwl_ax211_priv *iwl, const uint8_t *data, int pay,
-                          uint16_t seq)
+static void parse_tx_resp(struct iwl_ax211_priv *iwl, uint8_t group,
+                          const uint8_t *data, int pay, uint16_t seq)
 {
     uint32_t raw;
     uint32_t st;
+    uint16_t resp_qid = 0;
+    unsigned off;
 
-    if (!iwl || !data || pay < 40)
+    if (!iwl || !data || pay < (int)IWL_MVM_TX_RESP_MIN_PAY) {
+        lx_printk("iwl_trans: TX resp corta grp=%u len=%d\n",
+                  (unsigned)group, pay);
         return;
+    }
+    if (iwl_mvm_has_new_tx_api(iwl) && pay >= 38) {
+        resp_qid = (uint16_t)(data[36] | ((uint16_t)data[37] << 8));
+        if (resp_qid && resp_qid != iwl->mgmt_txq_id) {
+            lx_printk("iwl_trans: TX resp qid=%u (mgmt=%u)\n",
+                      (unsigned)resp_qid, (unsigned)iwl->mgmt_txq_id);
+        }
+    }
     iwl_trans_tx_reclaim(iwl, seq);
     raw = tx_resp_status_word(iwl, data, pay);
+    if (raw == 0xffffffffu) {
+        off = tx_resp_status_off(iwl);
+        lx_printk("iwl_trans: TX resp status inválido off=%u len=%d\n",
+                  off, pay);
+        return;
+    }
     st = raw & TX_STATUS_MSK;
     iwl->last_mgmt_tx_status = (uint8_t)st;
-    lx_printk("iwl_trans: TX resp frame_count=%u status=0x%02x (raw=0x%04x) "
-              "rd=%u wr=%u\n",
-              (unsigned)data[0], (unsigned)st, (unsigned)raw,
+    lx_printk("iwl_trans: TX resp grp=%u frame_count=%u status=0x%02x "
+              "(raw=0x%04x off=%u) rd=%u wr=%u\n",
+              (unsigned)group, (unsigned)data[0], (unsigned)st, (unsigned)raw,
+              tx_resp_status_off(iwl),
               (unsigned)iwl->mgmt_txq_read, (unsigned)iwl->mgmt_txq_write);
 }
 
@@ -797,6 +831,16 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
 
     log_rx(iwl, group, cmd, seq, pay, 0);
 
+    /* TX_CMD (0x1c) es notificación de cola de datos, no respuesta HCMD. */
+    if (cmd == TX_CMD) {
+        if (group == LEGACY_GROUP || group == LONG_GROUP)
+            parse_tx_resp(iwl, group, data, pay, seq);
+        else
+            lx_printk("iwl_trans: TX_CMD grp=%u inesperado len=%d\n",
+                      (unsigned)group, pay);
+        return;
+    }
+
     owner = rx_owner_slot(iwl, group, cmd, seq);
     if (owner < 0 && iwl->cmd_pending) {
         lx_printk("iwl_rx: sin emparejar (esperando grp=%u id=0x%02x seq=0x%04x)\n",
@@ -851,8 +895,6 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
         parse_rx_phy(iwl, data, pay);
     if (group == LEGACY_GROUP && cmd == REPLY_RX_MPDU_CMD)
         parse_rx_mpdu(iwl, data, pay);
-    if (group == LEGACY_GROUP && cmd == TX_CMD)
-        parse_tx_resp(iwl, data, pay, seq);
     if (group == MAC_CONF_GROUP && cmd == SESSION_PROTECTION_NOTIF)
         parse_session_prot_notif(iwl, data, pay);
     /* `DATA_PATH_GROUP` id 1 es UPDATE_MU_GROUPS_CMD, no una notificación de
@@ -1287,6 +1329,35 @@ void iwl_trans_poll(struct iwl_ax211_priv *iwl)
     (void)iwl_read32(iwl, CSR_INT);
 }
 
+void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl)
+{
+    unsigned i;
+
+    if (!iwl || !iwl->mgmt_txq_ready)
+        return;
+    for (i = 0; i < 32u; i++)
+        iwl_trans_poll(iwl);
+}
+
+int iwl_trans_wait_mgmt_tx_resp(struct iwl_ax211_priv *iwl, unsigned iters)
+{
+    unsigned i;
+    unsigned p;
+
+    if (!iwl)
+        return -1;
+    for (i = 0; i < iters; i++) {
+        if (iwl->last_mgmt_tx_status != 0)
+            return 0;
+        for (p = 0; p < 8u; p++)
+            iwl_trans_poll(iwl);
+        if (iwl->last_mgmt_tx_status != 0)
+            return 0;
+        lx_mdelay(5);
+    }
+    return -1;
+}
+
 void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigned len)
 {
     uint8_t tmp[IWL_GEN2_RX_SZ];
@@ -1483,11 +1554,14 @@ int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
     iwl->mgmt_txq_read = wr;
     iwl->mgmt_txq_ready = 1;
     if (!logged) {
-        lx_printk("iwl_trans: TXQ mgmt qid=%u tid=%u slots=%u wr=%u\n",
+        lx_printk("iwl_trans: TXQ mgmt qid=%u tid=%u slots=%u wr=%u "
+                  "tx_api=%s\n",
                   (unsigned)qid, (unsigned)IWL_MGMT_TID,
-                  (unsigned)IWL_MGMT_QUEUE_SIZE, (unsigned)wr);
+                  (unsigned)IWL_MGMT_QUEUE_SIZE, (unsigned)wr,
+                  iwl_mvm_has_new_tx_api(iwl) ? "tvqm" : "legacy");
         logged = 1;
     }
+    iwl_trans_txq_drain_mgmt(iwl);
     return (int)qid;
 }
 
@@ -1573,8 +1647,9 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
               (unsigned)txq_id, doorbell, (unsigned)hdr->sequence,
               (unsigned)pay_len);
     iwl_write32(iwl, HBUS_TARG_WRPTR, doorbell);
-    for (poll = 0; poll < 8; poll++)
+    for (poll = 0; poll < 16; poll++)
         drain_rx_gen2(iwl);
+    poll_hcmd_first_tb(iwl);
     return 0;
 }
 

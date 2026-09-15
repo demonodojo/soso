@@ -1,0 +1,10 @@
+{
+  "http_status": 422,
+  "cuerpo": {
+    "error": {
+      "message": "el render completo más la reserva de salida superan el límite del modelo",
+      "type": "invalid_request_error",
+      "code": "context_length_exceeded"
+    }
+  }
+}

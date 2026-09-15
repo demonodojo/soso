@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "P06",
+  "clase": "programacion",
+  "particion": "reservado",
+  "titulo": "Distinguir «no existe» de otros errores de E/S",
+  "etiqueta": "error-eo",
+  "entrada": {
+    "enunciado": "visible/P06/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "El programa candidato, compilado con rustc y ejecutado con cada vector reservado, escribe en stdout exactamente la salida esperada y termina con el código indicado.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_programa.py",
+      "--caso",
+      "P06",
+      "--candidato",
+      "{candidato}"
+    ],
+    "timeout_s": 180
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 1024,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": [
+      "rustc"
+    ]
+  },
+  "reservado": [
+    "reservado/P06/vectores.json",
+    "reservado/P06/referencia.rs",
+    "reservado/P06/incorrecta.rs"
+  ],
+  "hashes_entrada": {
+    "visible/P06/enunciado.md": "e86b58a01e1ed4d4d46d7cd6157d18919b35fa4096c87f75cb04798e45455886"
+  }
+}

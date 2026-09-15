@@ -1,0 +1,52 @@
+{
+  "model": "qwen2.5-coder-3b-instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Lee el archivo notas.txt"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_9",
+          "type": "function",
+          "function": {
+            "name": "leer_archivo",
+            "arguments": "{\"ruta\": \"notas.txt\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_9",
+      "content": "lista de la compra"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "leer_archivo",
+        "description": "Lee un archivo de texto",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "ruta": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ruta"
+          ]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "max_tokens": 48,
+  "temperature": 0,
+  "stream": false
+}

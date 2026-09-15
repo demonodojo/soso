@@ -1,0 +1,16 @@
+{
+  "vectores": [
+    {
+      "nombre": "camino normal",
+      "stdin": "ok\n",
+      "stdout": "hecho\nliberado\n",
+      "exit": 0
+    },
+    {
+      "nombre": "camino de error",
+      "stdin": "fallo\n",
+      "stdout": "liberado\n",
+      "exit": 1
+    }
+  ]
+}

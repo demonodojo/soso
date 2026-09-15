@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "R01",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "El texto no ASCII sobrevive a decode_entities",
+  "etiqueta": "utf8-web",
+  "origen": "reproduccion",
+  "entrada": {
+    "enunciado": "visible/R01/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_repo.py",
+      "--caso",
+      "R01",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R01/aceptacion.rs",
+    "reservado/R01/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R01/enunciado.md": "714546d5ff0329d9700a57a97059b684860766279ae37648cdb0d751b430ae65"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-web-core/src/decode.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Pasa la suite de soso-web-core con la prueba de aceptación reservada añadida: el texto no ASCII llega intacto, las entidades siguen resolviéndose y el reflow conserva el texto de la página.",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-web-core"
+    ],
+    "prueba_reservada": "reservado/R01/aceptacion.rs",
+    "destino_prueba": "crates/soso-web-core/tests/aceptacion_R01.rs",
+    "referencia": "reservado/R01/referencia.patch"
+  }
+}

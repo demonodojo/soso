@@ -1,0 +1,19 @@
+diff --git a/crates/soso-web-core/src/decode.rs b/crates/soso-web-core/src/decode.rs
+index 5e8998b41..1b2c6013f 100644
+--- a/crates/soso-web-core/src/decode.rs
++++ b/crates/soso-web-core/src/decode.rs
+@@ -43,8 +43,12 @@ pub fn decode_entities(input: &str) -> String {
+                 continue;
+             }
+         }
+-        out.push(bytes[i] as char);
+-        i += 1;
++        // Fuera de una entidad se copia el carácter entero. Empujar el byte
++        // suelto como `char` lo trata como Latin-1 y convierte cualquier texto
++        // no ASCII en mojibake.
++        let c = input[i..].chars().next().expect("i queda en frontera de carácter");
++        out.push(c);
++        i += c.len_utf8();
+     }
+     out
+ }

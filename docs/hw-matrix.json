@@ -361,14 +361,14 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "dfec53f84",
-        "commit_corto": "dfec53f84",
+        "commit": "5a7be1388",
+        "commit_corto": "5a7be1388",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "15-sep flush#115: MATVF usable=0 (g_phase booted); SCD ver_hdr=0 timeout slot=20"
+        "cambios_locales": "flush#32: GPU compute sm_86 ok; WiFi SCD/TLC ok; AUTH timeout sin TX_CMD 0x1c"
       },
       "perfil_drivers": "live-usb + nouveau",
-      "arranques_consecutivos_ok": 115,
+      "arranques_consecutivos_ok": 32,
       "sesion_sostenida": {
         "status": "ok",
         "nota": "shell + red",
@@ -397,7 +397,7 @@
         },
         "assoc_wpa2": {
           "status": "fail",
-          "nota": "flush#115: SCD wide ver_hdr=0 ver_tlv=3 → timeout grp=5 id=0x17 seq=0x0014 slot=20",
+          "nota": "flush#32: SCD/TLC/SESSION_PROT ok; AUTH timeout ch3 sin TX resp 0x1c (tx status=0x00)",
           "fecha": "2026-09-15"
         },
         "dhcp": {
@@ -428,21 +428,24 @@
           "fecha": "2026-09-15"
         },
         "compute_cpu_gpu": {
-          "status": "fail",
-          "nota": "flush#115: MATVF usable=0 res_mapped=1 buf=1; g_phase=booted tras RM_COMPUTE",
+          "status": "ok",
+          "nota": "flush#32: compute sm_86 saxpy/matvec listo",
           "fecha": "2026-09-15"
         },
         "carga_real": {
-          "status": "fail",
-          "nota": "flush#115: ask on_gpu=0 (compute_usable=0)",
+          "status": "pendiente",
+          "nota": "flush#115 MATVF usable=0; flush#32 compute path ok sin carga real",
           "fecha": "2026-09-15"
         },
         "apagado_limpio": {
-          "status": "pendiente"
+          "status": "ok",
+          "nota": "GSP-RM apagado unload/halt/dma=off",
+          "fecha": "2026-09-15"
         }
       },
       "bench": {},
       "logs": [
+        "target/usb-diagnostic-2026-09-15/SOSOLOG-clean.txt",
         "target/usb-diagnostic-2026-09-15/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-15/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-14/SOSOLOG.txt",
@@ -4057,9 +4060,90 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-09-15"
+        },
+        {
+          "log_hash": "de5e53db31740f012c57ac588174889768be27149992ea45a619e1cad008823a",
+          "kernel": "soso 0.2.2 (5a7be1388-dirty)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "8086:2723",
+            "10ec:8168"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-09-15"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-09-15"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-09-15"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "23 BSS Rutilo ch3",
+              "fecha": "2026-09-15"
+            },
+            "assoc_wpa2": {
+              "status": "fail",
+              "nota": "AUTH timeout; sin TX resp 0x1c",
+              "fecha": "2026-09-15"
+            },
+            "dhcp": {
+              "status": "pendiente"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-09-15"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-09-15"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-09-15"
+            },
+            "compute_cpu_gpu": {
+              "status": "ok",
+              "nota": "sm_86 saxpy/matvec",
+              "fecha": "2026-09-15"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "ok",
+              "nota": "GSP-RM dma=off",
+              "fecha": "2026-09-15"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 32,
+          "fecha": "2026-09-15"
         }
       ],
-      "notas": "flush#115 @1216576ms: GSP/CE/compute listo pero g_phase=booted → MATVF usable=0; WiFi scan OK, SCD timeout (WIFI-8 insuficiente). Ver docs/DIAGNOSTICO-ROG-2026-09-15.md",
+      "notas": "flush#32 @162569ms: GPU GSP+compute sm_86+apagado ok; WiFi SCD/TLC ok pero AUTH timeout ch3 sin TX_CMD 0x1c. Fase 3 pendiente. docs/DIAGNOSTICO-ROG-2026-09-15.md",
       "actualizado": "2026-09-15"
     },
     {
@@ -4454,17 +4538,17 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "dfec53f84",
-        "commit_corto": "dfec53f84",
+        "commit": "5a7be1388",
+        "commit_corto": "5a7be1388",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "TLC offload + ADD_STA status; RLC_CONFIG tras PHY; TX mgmt offload_assist MH_SIZE; hostcheck OK"
+        "cambios_locales": "flush#32: SCD ver_tlv=3+TLC ok; AUTH timeout sin TX resp 0x1c; fase 3 TX queue pendiente"
       },
       "perfil_drivers": "live-usb + iwlwifi",
-      "arranques_consecutivos_ok": 0,
+      "arranques_consecutivos_ok": 32,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh pid=2; sin IP WiFi (AUTH timeout flush#31)",
+        "nota": "sosh pid=2; sin IP WiFi (AUTH timeout flush#32 ch3)",
         "fecha": "2026-09-15"
       },
       "wifi": {
@@ -4485,12 +4569,12 @@
         },
         "scan": {
           "status": "ok",
-          "nota": "flush#31: 26 BSS, Rutilo WPA2 ch40",
+          "nota": "flush#32: 23 BSS, Rutilo WPA2 ch3",
           "fecha": "2026-09-15"
         },
         "assoc_wpa2": {
           "status": "fail",
-          "nota": "flush#31: SCD/TXQ OK (TLC); AUTH timeout sin MPDU ch40. Fix RLC+offload_assist en árbol; reflash pendiente. docs/DIAGNOSTICO-ROG-2026-09-15.md",
+          "nota": "flush#32: SCD/TLC/SESSION_PROT ok; doorbell AUTH ok pero cero TX_CMD 0x1c → tx status=0x00 → AUTH timeout ch3. Fase 3 en docs/DIAGNOSTICO-ROG-2026-09-15.md",
           "fecha": "2026-09-15"
         },
         "dhcp": {
@@ -4536,6 +4620,7 @@
       },
       "bench": {},
       "logs": [
+        "target/usb-diagnostic-2026-09-15/SOSOLOG-clean.txt",
         "target/usb-diagnostic-2026-09-15-wifi/SOSOLOG.body.txt",
         "target/usb-diagnostic-2026-09-15-wifi/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-15/SOSOLOG.txt",
@@ -8005,9 +8090,88 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-09-15"
+        },
+        {
+          "log_hash": "de5e53db31740f012c57ac588174889768be27149992ea45a619e1cad008823a",
+          "kernel": "soso 0.2.2 (5a7be1388-dirty)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "8086:2723",
+            "10ec:8168"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY familia 22000 gen2",
+              "fecha": "2026-09-15"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-09-15"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-09-15"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "count=23 Rutilo ch3",
+              "fecha": "2026-09-15"
+            },
+            "assoc_wpa2": {
+              "status": "fail",
+              "nota": "SCD ver_tlv=3 TXQ qid=1; sin TX resp 0x1c; AUTH timeout",
+              "fecha": "2026-09-15"
+            },
+            "dhcp": {
+              "status": "pendiente"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-09-15"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-09-15"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "fecha": "2026-09-15"
+            },
+            "compute_cpu_gpu": {
+              "status": "ok",
+              "nota": "sm_86",
+              "fecha": "2026-09-15"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "ok",
+              "fecha": "2026-09-15"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 32,
+          "fecha": "2026-09-15"
         }
       ],
-      "notas": "flush#31 @147436ms: ALIVE+scan 26 BSS; SCD/TLC OK; AUTH timeout ch40 (sin RLC_CONFIG ni TX MH_SIZE en ese kernel). Fix RLC+offload_assist aplicado; reflash pendiente. docs/DIAGNOSTICO-ROG-2026-09-15.md",
+      "notas": "flush#32 @162569ms: SCD ver_tlv=3+TLC+SESSION_PROT ok; bloqueo AUTH sin TX_CMD 0x1c (tx status=0x00). Fases 1-2 validadas; fase 3 TX queue pendiente. docs/DIAGNOSTICO-ROG-2026-09-15.md",
       "actualizado": "2026-09-15"
     },
     {

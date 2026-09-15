@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "Q07",
+  "clase": "protocolo",
+  "particion": "desarrollo",
+  "titulo": "Argumentos de la llamada partidos en varios deltas",
+  "etiqueta": "argumentos-fragmentados",
+  "entrada": {
+    "enunciado": "visible/Q07/enunciado.md",
+    "archivos": [
+      "visible/Q07/peticion.json"
+    ]
+  },
+  "resultado_observable": "Los deltas concatenados dan una única llamada con argumentos JSON completos y las claves exigidas.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q07",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q07/esperado.json",
+    "reservado/Q07/correcta.json",
+    "reservado/Q07/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q07/enunciado.md": "1fb309ecdec3282ed669e96d30990d85c1be917d8d5291fa6af18b4ab0bd3d86",
+    "visible/Q07/peticion.json": "8052a52335d2bc7d5e7642e9fc7584f0e3f99ba26ec57c713a5f3bc90aa56632"
+  }
+}

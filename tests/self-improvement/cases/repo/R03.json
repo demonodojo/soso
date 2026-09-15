@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "R03",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "header_value sin distinguir mayúsculas",
+  "etiqueta": "cabeceras-http",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R03/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_repo.py",
+      "--caso",
+      "R03",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R03/aceptacion.rs",
+    "reservado/R03/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R03/enunciado.md": "43f70e83e34afa582eae33f581758165eb997c7438f115eb8e6dae8b8c31eb9e"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-http/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Pasa la suite de soso-http con la prueba reservada: el nombre se busca sin distinguir mayúsculas y se conserva la primera aparición.",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-http"
+    ],
+    "prueba_reservada": "reservado/R03/aceptacion.rs",
+    "destino_prueba": "crates/soso-http/tests/aceptacion_R03.rs",
+    "referencia": "reservado/R03/referencia.patch"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "aserciones": [
+    {
+      "tipo": "estado_http",
+      "valor": 400
+    },
+    {
+      "tipo": "error_presente",
+      "codigo": "invalid_json"
+    },
+    {
+      "tipo": "sin_texto_de_asistente"
+    }
+  ]
+}

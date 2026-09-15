@@ -1,0 +1,21 @@
+{
+  "aserciones": [
+    {
+      "tipo": "estado_http",
+      "valor": 200
+    },
+    {
+      "tipo": "contenido_no_vacio"
+    },
+    {
+      "tipo": "sin_llamadas"
+    },
+    {
+      "tipo": "finish_reason",
+      "valor": "stop"
+    },
+    {
+      "tipo": "usage_coherente"
+    }
+  ]
+}

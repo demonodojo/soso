@@ -1,0 +1,20 @@
+diff --git a/crates/soso-http/src/lib.rs b/crates/soso-http/src/lib.rs
+index dc60a4661..2c9b5056b 100644
+--- a/crates/soso-http/src/lib.rs
++++ b/crates/soso-http/src/lib.rs
+@@ -638,10 +638,14 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), H
+     Ok((status, headers, body))
+ }
+ 
++/// Valor de una cabecera por nombre, **sin distinguir mayúsculas** (RFC 9110
++/// §5.1). El parser de respuestas guarda los nombres en minúscula, pero quien
++/// llama escribe `Content-Length` como en la especificación; comparar exacto
++/// hacía que esa consulta no encontrara nada.
+ pub fn header_value<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a str> {
+     headers
+         .iter()
+-        .find(|(k, _)| k == key)
++        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+         .map(|(_, v)| v.as_str())
+ }
+ 

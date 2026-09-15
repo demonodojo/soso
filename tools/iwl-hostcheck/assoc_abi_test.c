@@ -60,6 +60,17 @@ void iwl_trans_poll(struct iwl_ax211_priv *iwl)
     (void)iwl;
 }
 
+void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl)
+{
+    (void)iwl;
+}
+
+int iwl_trans_wait_mgmt_tx_resp(struct iwl_ax211_priv *iwl, unsigned iters)
+{
+    (void)iters;
+    return iwl->last_mgmt_tx_status != 0 ? 0 : -1;
+}
+
 static void inject_mlme_rx(struct iwl_ax211_priv *iwl, const void *payload,
                             uint16_t pay_len)
 {

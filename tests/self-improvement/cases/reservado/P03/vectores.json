@@ -1,0 +1,44 @@
+{
+  "vectores": [
+    {
+      "nombre": "minúsculas",
+      "stdin": "Host: x\ncontent-length: 12\n",
+      "stdout": "OK 12\n"
+    },
+    {
+      "nombre": "repetida igual",
+      "stdin": "Content-Length: 12\ncontent-length: 12\n",
+      "stdout": "OK 12\n"
+    },
+    {
+      "nombre": "repetida distinta",
+      "stdin": "Content-Length: 12\nContent-Length: 13\n",
+      "stdout": "ERROR duplicado\n"
+    },
+    {
+      "nombre": "ausente",
+      "stdin": "Host: x\nAccept: */*\n",
+      "stdout": "ERROR ausente\n"
+    },
+    {
+      "nombre": "espacio interior",
+      "stdin": "Content-Length: 1 2\n",
+      "stdout": "ERROR invalido\n"
+    },
+    {
+      "nombre": "negativo",
+      "stdin": "Content-Length: -1\n",
+      "stdout": "ERROR invalido\n"
+    },
+    {
+      "nombre": "espacios alrededor",
+      "stdin": "content-length:   7  \n",
+      "stdout": "OK 7\n"
+    },
+    {
+      "nombre": "vacío",
+      "stdin": "Content-Length:\n",
+      "stdout": "ERROR invalido\n"
+    }
+  ]
+}

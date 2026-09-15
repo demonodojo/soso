@@ -1,0 +1,20 @@
+{
+  "model": "qwen2.5-coder-3b-instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Mi número favorito es el 7. Apúntalo."
+    },
+    {
+      "role": "assistant",
+      "content": "Apuntado."
+    },
+    {
+      "role": "user",
+      "content": "¿Cuál es mi número favorito? Responde solo con la cifra."
+    }
+  ],
+  "max_tokens": 16,
+  "temperature": 0,
+  "stream": false
+}

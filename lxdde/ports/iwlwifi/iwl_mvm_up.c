@@ -268,9 +268,13 @@ static int iwl_mvm_phy_send_rlc(struct iwl_ax211_priv *iwl)
     cmd.phy_id = iwl_cpu_to_le32(0);
     cmd.rlc.rx_chain_info =
         iwl_cpu_to_le32(phy_rxchain_info(rx, 2, 2));
-    return iwl_trans_send_cmd_wait(iwl, DATA_PATH_GROUP, RLC_CONFIG_CMD, &cmd,
-                                   (uint16_t)sizeof(cmd),
-                                   IWL_MVM_HCMD_TIMEOUT_MS);
+    if (iwl_trans_send_cmd_wait(iwl, DATA_PATH_GROUP, RLC_CONFIG_CMD, &cmd,
+                                (uint16_t)sizeof(cmd),
+                                IWL_MVM_HCMD_TIMEOUT_MS) != 0)
+        return -1;
+    lx_printk("iwl_mvm: RLC_CONFIG ok phy_id=0 rx_chain=0x%x\n",
+              (unsigned)cmd.rlc.rx_chain_info);
+    return 0;
 }
 
 static int iwl_mvm_phy_ctxt_apply(struct iwl_ax211_priv *iwl, uint8_t channel,

@@ -35,7 +35,7 @@
       "title": "Definir los casos y sus verificadores",
       "milestone": "SI-0",
       "kind": "Implementación host",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T01"
       ],
@@ -46,6 +46,15 @@
         "crates/soso-llm-core/tests/arch_ext.rs",
         "xtask/src/test.rs"
       ]
+      ,
+      "tracking": {
+        "updated_at": "2026-09-15",
+        "base": "6f558f072bcc3ce46763994c377f1161d6411698",
+        "summary": "docs/self-improvement/seguimiento/T02.md",
+        "evidence": "target/self-improvement/tasks/T02/resultado.md",
+        "blocker": null,
+        "next_step": "T03 habilitada; T14 consumirá el banco cuando existan T03 y T13"
+      }
     },
     {
       "id": "T03",

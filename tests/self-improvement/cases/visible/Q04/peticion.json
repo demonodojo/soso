@@ -1,0 +1,52 @@
+{
+  "model": "qwen2.5-coder-3b-instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "¿Qué hora marca el reloj del equipo?"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "obtener_hora",
+            "arguments": "{\"zona\": \"local\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "content": "13:45"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "obtener_hora",
+        "description": "Devuelve la hora del equipo",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "zona": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "zona"
+          ]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "max_tokens": 32,
+  "temperature": 0,
+  "stream": false
+}

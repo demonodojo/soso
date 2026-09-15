@@ -1,0 +1,37 @@
+diff --git a/crates/gptdisk/src/lib.rs b/crates/gptdisk/src/lib.rs
+index 3837218a2..1117cc670 100644
+--- a/crates/gptdisk/src/lib.rs
++++ b/crates/gptdisk/src/lib.rs
+@@ -26,6 +26,8 @@ pub enum Error {
+     BadSignature,
+     /// Cabecera con campos imposibles (tamaño, número de entradas…).
+     BadHeader,
++    /// El CRC32 de la cabecera no cuadra con su contenido.
++    BadCrc,
+     /// El búfer de entradas no cubre `num_entries * entry_size`.
+     ShortEntries,
+     /// El disco destino no da para la tabla más las particiones que ya hay.
+@@ -37,6 +39,7 @@ impl fmt::Display for Error {
+         let s = match self {
+             Error::BadSignature => "sin firma EFI PART",
+             Error::BadHeader => "cabecera GPT inválida",
++            Error::BadCrc => "CRC de cabecera GPT incorrecto",
+             Error::ShortEntries => "búfer de entradas incompleto",
+             Error::TooSmall => "disco destino demasiado pequeño",
+         };
+@@ -159,6 +162,15 @@ impl Header {
+         if !(MIN_HEADER_SIZE..=SECTOR as u32).contains(&header_size) {
+             return Err(Error::BadHeader);
+         }
++        // El CRC cubre los primeros `header_size` bytes con su propio campo a
++        // cero (UEFI 2.10 §5.3). Sin comprobarlo, una tabla corrupta se lee
++        // como buena y el error aparece mucho más tarde, en otro sitio.
++        let mut copia = [0u8; SECTOR];
++        copia[..header_size as usize].copy_from_slice(&sec[..header_size as usize]);
++        copia[16..20].fill(0);
++        if crc32_ieee(&copia[..header_size as usize]) != rd32(sec, 16) {
++            return Err(Error::BadCrc);
++        }
+         let num_entries = rd32(sec, 80);
+         let entry_size = rd32(sec, 84);
+         if num_entries == 0 || num_entries > 512 || entry_size < 128 || entry_size % 8 != 0 {

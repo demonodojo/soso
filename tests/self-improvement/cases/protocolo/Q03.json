@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "Q03",
+  "clase": "protocolo",
+  "particion": "desarrollo",
+  "titulo": "Dos turnos: el historial se usa",
+  "etiqueta": "dos-turnos",
+  "entrada": {
+    "enunciado": "visible/Q03/enunciado.md",
+    "archivos": [
+      "visible/Q03/peticion.json"
+    ]
+  },
+  "resultado_observable": "La respuesta grabada recupera el dato que solo aparecía en un turno anterior.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q03",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q03/esperado.json",
+    "reservado/Q03/correcta.json",
+    "reservado/Q03/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q03/enunciado.md": "cd1290bf2fddfe0db63eb48644ae80b3f264554faf8d9df4860ac20caffb8489",
+    "visible/Q03/peticion.json": "e85dc44e4b49b41e0cf9c75e7b3519cc8583776fcbb2d64ccfd3018e1d29a51a"
+  }
+}

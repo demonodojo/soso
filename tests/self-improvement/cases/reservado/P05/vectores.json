@@ -1,0 +1,49 @@
+{
+  "vectores": [
+    {
+      "nombre": "simple",
+      "stdin": "/raiz\na/b/c\n",
+      "stdout": "OK a/b/c\n"
+    },
+    {
+      "nombre": "puntos simples",
+      "stdin": "/raiz\n./a/./b\n",
+      "stdout": "OK a/b\n"
+    },
+    {
+      "nombre": "subida interior",
+      "stdin": "/raiz\na/../b\n",
+      "stdout": "OK b\n"
+    },
+    {
+      "nombre": "se escapa",
+      "stdin": "/raiz\n../b\n",
+      "stdout": "RECHAZADA\n"
+    },
+    {
+      "nombre": "absoluta",
+      "stdin": "/raiz\n/etc/passwd\n",
+      "stdout": "RECHAZADA\n"
+    },
+    {
+      "nombre": "nombre con dos puntos",
+      "stdin": "/raiz\na..b/c\n",
+      "stdout": "OK a..b/c\n"
+    },
+    {
+      "nombre": "se escapa al final",
+      "stdin": "/raiz\na/b/../../..\n",
+      "stdout": "RECHAZADA\n"
+    },
+    {
+      "nombre": "queda en la raíz",
+      "stdin": "/raiz\na/..\n",
+      "stdout": "OK .\n"
+    },
+    {
+      "nombre": "barras repetidas",
+      "stdin": "/raiz\na//b\n",
+      "stdout": "OK a/b\n"
+    }
+  ]
+}

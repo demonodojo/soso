@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "P08",
+  "clase": "programacion",
+  "particion": "desarrollo",
+  "titulo": "Ordenar por clave conservando el orden de llegada",
+  "etiqueta": "orden-estable",
+  "entrada": {
+    "enunciado": "visible/P08/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "El programa candidato, compilado con rustc y ejecutado con cada vector reservado, escribe en stdout exactamente la salida esperada y termina con el código indicado.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_programa.py",
+      "--caso",
+      "P08",
+      "--candidato",
+      "{candidato}"
+    ],
+    "timeout_s": 180
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 1024,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": [
+      "rustc"
+    ]
+  },
+  "reservado": [
+    "reservado/P08/vectores.json",
+    "reservado/P08/referencia.rs",
+    "reservado/P08/incorrecta.rs"
+  ],
+  "hashes_entrada": {
+    "visible/P08/enunciado.md": "73e4b227067fe9805414d68fbd73c0bcdb3eb6c7f49feea3ae05114805558d6a"
+  }
+}

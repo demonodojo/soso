@@ -1,0 +1,10 @@
+{
+  "http_status": 400,
+  "cuerpo": {
+    "error": {
+      "message": "content no puede ser null",
+      "type": "invalid_request_error",
+      "code": "invalid_message"
+    }
+  }
+}

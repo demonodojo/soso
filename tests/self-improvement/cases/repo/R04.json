@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "R04",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "resolve_url resuelve los segmentos . y ..",
+  "etiqueta": "url-relativa",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R04/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_repo.py",
+      "--caso",
+      "R04",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R04/aceptacion.rs",
+    "reservado/R04/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R04/enunciado.md": "3bec000e3b7112b3ba5ecb65179c5df32c92840cc30aa2a2089f0ee4c0f9e760"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-web-core/src/html.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Pasa la suite de soso-web-core con la prueba reservada: los segmentos de punto se resuelven y no queda ningún `/./` ni `/../` en la salida.",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-web-core"
+    ],
+    "prueba_reservada": "reservado/R04/aceptacion.rs",
+    "destino_prueba": "crates/soso-web-core/tests/aceptacion_R04.rs",
+    "referencia": "reservado/R04/referencia.patch"
+  }
+}

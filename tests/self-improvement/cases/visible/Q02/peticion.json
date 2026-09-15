@@ -1,0 +1,16 @@
+{
+  "model": "qwen2.5-coder-3b-instruct",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Responde siempre con una sola palabra en mayúsculas."
+    },
+    {
+      "role": "user",
+      "content": "¿Estás preparado? Contesta LISTO."
+    }
+  ],
+  "max_tokens": 32,
+  "temperature": 0,
+  "stream": false
+}

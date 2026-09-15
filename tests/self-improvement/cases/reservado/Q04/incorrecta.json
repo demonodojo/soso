@@ -1,0 +1,33 @@
+{
+  "http_status": 200,
+  "cuerpo": {
+    "id": "chatcmpl-banco",
+    "object": "chat.completion",
+    "model": "qwen2.5-coder-3b-instruct",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "type": "function",
+              "function": {
+                "name": "obtener_hora",
+                "arguments": "{\"zona\": \"local\"}"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 51,
+      "completion_tokens": 12,
+      "total_tokens": 63
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "aserciones": [
+    {
+      "tipo": "estado_http",
+      "valor": 200
+    },
+    {
+      "tipo": "flujo_utf8_completo"
+    },
+    {
+      "tipo": "llamada_unica",
+      "nombre": "leer_archivo",
+      "claves_argumentos": [
+        "ruta",
+        "lineas"
+      ]
+    },
+    {
+      "tipo": "finish_reason",
+      "valor": "tool_calls"
+    }
+  ]
+}

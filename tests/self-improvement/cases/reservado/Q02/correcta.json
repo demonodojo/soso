@@ -1,0 +1,23 @@
+{
+  "http_status": 200,
+  "cuerpo": {
+    "id": "chatcmpl-banco",
+    "object": "chat.completion",
+    "model": "qwen2.5-coder-3b-instruct",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "LISTO"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 42,
+      "completion_tokens": 7,
+      "total_tokens": 49
+    }
+  }
+}

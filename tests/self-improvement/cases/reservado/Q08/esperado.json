@@ -1,0 +1,16 @@
+{
+  "aserciones": [
+    {
+      "tipo": "estado_http",
+      "valor": 400
+    },
+    {
+      "tipo": "error_presente",
+      "tipo_error": "invalid_request_error",
+      "codigo": "unknown_tool"
+    },
+    {
+      "tipo": "sin_texto_de_asistente"
+    }
+  ]
+}

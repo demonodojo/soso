@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "P05",
+  "clase": "programacion",
+  "particion": "desarrollo",
+  "titulo": "Normalizar una ruta relativa sin dejarla escapar",
+  "etiqueta": "ruta-relativa",
+  "entrada": {
+    "enunciado": "visible/P05/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "El programa candidato, compilado con rustc y ejecutado con cada vector reservado, escribe en stdout exactamente la salida esperada y termina con el código indicado.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_programa.py",
+      "--caso",
+      "P05",
+      "--candidato",
+      "{candidato}"
+    ],
+    "timeout_s": 180
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 1024,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": [
+      "rustc"
+    ]
+  },
+  "reservado": [
+    "reservado/P05/vectores.json",
+    "reservado/P05/referencia.rs",
+    "reservado/P05/incorrecta.rs"
+  ],
+  "hashes_entrada": {
+    "visible/P05/enunciado.md": "8470370c707dbfa3a5df70e42caac4644988f3ff1d1788b1d1a8d1af7f599ffc"
+  }
+}

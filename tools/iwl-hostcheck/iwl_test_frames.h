@@ -73,11 +73,13 @@ static inline unsigned iwl_test_rx_packet(uint8_t *pkt, int gen3, const uint8_t 
 /* Respuesta TX_CMD del firmware para el TFD `idx` de la cola `qid`.
  * El `agg_tx_status` va en un offset distinto por generación (36 en gen2, 40
  * en gen3), así que el cuerpo mide 48 B para que quepan los dos. */
-static inline unsigned iwl_test_tx_resp(uint8_t *pkt, int gen3, uint16_t qid,
+static inline unsigned iwl_test_tx_resp(uint8_t *pkt, int new_tx_api, uint16_t qid,
                                         unsigned idx, uint8_t status)
 {
     unsigned pay = 48;
-    unsigned off = gen3 ? IWL_MVM_TX_RESP_STATUS_OFF : IWL_MVM_TX_RESP_V3_STATUS_OFF;
+    /* TVQM (SCD v3) y gen3: iwl_mvm_tx_resp @40; legacy v3 @36. */
+    unsigned off = new_tx_api ? IWL_MVM_TX_RESP_STATUS_OFF
+                              : IWL_MVM_TX_RESP_V3_STATUS_OFF;
     uint16_t seq = (uint16_t)(QUEUE_TO_SEQ(qid) | INDEX_TO_SEQ(idx));
 
     memset(pkt, 0, 8 + pay);

@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "Q01",
+  "clase": "protocolo",
+  "particion": "reservado",
+  "titulo": "Texto simple: una pregunta, una respuesta",
+  "etiqueta": "texto-simple",
+  "entrada": {
+    "enunciado": "visible/Q01/enunciado.md",
+    "archivos": [
+      "visible/Q01/peticion.json"
+    ]
+  },
+  "resultado_observable": "La respuesta grabada es 200, trae texto de asistente sin llamadas, para por token de fin y su usage suma.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q01",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q01/esperado.json",
+    "reservado/Q01/correcta.json",
+    "reservado/Q01/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q01/enunciado.md": "5fcf863186eac6a3001ec623df96e879c36f910da953927b4d60d743cdb0fac5",
+    "visible/Q01/peticion.json": "66f569c1870c54b9d8d7f7d14635866663079e923a340bb40c1c53980e927155"
+  }
+}

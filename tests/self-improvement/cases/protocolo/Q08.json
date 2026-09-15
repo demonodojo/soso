@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "Q08",
+  "clase": "protocolo",
+  "particion": "reservado",
+  "titulo": "tool_choice con un nombre que no existe",
+  "etiqueta": "nombre-desconocido",
+  "entrada": {
+    "enunciado": "visible/Q08/enunciado.md",
+    "archivos": [
+      "visible/Q08/peticion.json"
+    ]
+  },
+  "resultado_observable": "La petición se rechaza con 400 y objeto error; no se fabrica una respuesta de asistente.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q08",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q08/esperado.json",
+    "reservado/Q08/correcta.json",
+    "reservado/Q08/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q08/enunciado.md": "a054e044e96e74dfa1712384bcf7784f988c33924497d1dfb2c3461b8261a215",
+    "visible/Q08/peticion.json": "fc1b42957e7b8efa57c67cb83645c78a441e5df73e4ff6197865188abcdab7d8"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "vectores": [
+    {
+      "nombre": "empates",
+      "stdin": "2 b\n1 a\n2 a\n1 b\n",
+      "stdout": "1 a\n1 b\n2 b\n2 a\n"
+    },
+    {
+      "nombre": "todas iguales",
+      "stdin": "7 uno\n7 dos\n7 tres\n",
+      "stdout": "7 uno\n7 dos\n7 tres\n"
+    },
+    {
+      "nombre": "ya ordenado",
+      "stdin": "1 x\n2 y\n",
+      "stdout": "1 x\n2 y\n"
+    },
+    {
+      "nombre": "una sola",
+      "stdin": "5 z\n",
+      "stdout": "5 z\n"
+    }
+  ]
+}

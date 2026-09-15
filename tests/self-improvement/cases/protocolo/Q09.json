@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "Q09",
+  "clase": "protocolo",
+  "particion": "reservado",
+  "titulo": "Cuerpo JSON incompleto",
+  "etiqueta": "json-incompleto",
+  "entrada": {
+    "enunciado": "visible/Q09/enunciado.md",
+    "archivos": [
+      "visible/Q09/peticion.json",
+      "visible/Q09/cuerpo.txt"
+    ]
+  },
+  "resultado_observable": "El cuerpo truncado se rechaza con 400 y objeto error, sin generar respuesta.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q09",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q09/esperado.json",
+    "reservado/Q09/correcta.json",
+    "reservado/Q09/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q09/enunciado.md": "a8864f1196b3ebee25d7eae1535d9881fee62be34ac489bea06db36061d31626",
+    "visible/Q09/peticion.json": "dfbf2edf79177f67a6a57437c8a1d452307ac25f80f5348081cfbbb0b121e4f9",
+    "visible/Q09/cuerpo.txt": "27931be788a3bbddfff9f79e6ccc971a011c05e70e38f41f33dd6315a5ef2816"
+  }
+}

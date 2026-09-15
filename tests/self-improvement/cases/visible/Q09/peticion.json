@@ -1,0 +1,11 @@
+{
+  "model": "qwen2.5-coder-3b-instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "hola"
+    }
+  ],
+  "_nota": "el lanzador envía cuerpo.txt en crudo; este JSON solo documenta la intención",
+  "stream": false
+}

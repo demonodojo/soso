@@ -395,9 +395,20 @@ static void soak_rx(int gen3, uint32_t semilla, unsigned vueltas)
 
 /* --- Modelo de firmware para el anillo TX ------------------------------ */
 
+static void soak_seed_ax200_tvqm(struct iwl_ax211_priv *iwl)
+{
+    if (iwl->cmd_ver_count >= IWL_CMD_VER_MAX)
+        return;
+    iwl->cmd_ver[iwl->cmd_ver_count].group = DATA_PATH_GROUP;
+    iwl->cmd_ver[iwl->cmd_ver_count].cmd = SCD_QUEUE_CONFIG_CMD;
+    iwl->cmd_ver[iwl->cmd_ver_count].version = 3;
+    iwl->cmd_ver_count++;
+}
+
 static void soak_tx(int gen3, uint32_t semilla, unsigned vueltas)
 {
     struct iwl_ax211_priv iwl;
+    int new_tx_api;
     uint32_t rnd = semilla;
     uint8_t payload[128];
     uint8_t pkt[8 + 48];
@@ -426,6 +437,9 @@ static void soak_tx(int gen3, uint32_t semilla, unsigned vueltas)
 
     memset(&iwl, 0, sizeof(iwl));
     iwl.gen3 = gen3;
+    if (!gen3)
+        soak_seed_ax200_tvqm(&iwl);
+    new_tx_api = gen3 || iwl_fw_cmd_ver(&iwl, DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD) == 3;
     iwl.mmio = g_mmio_stub;
     iwl.alive = 1;
     iwl.mgmt_txq_ready = 1;
@@ -483,7 +497,8 @@ static void soak_tx(int gen3, uint32_t semilla, unsigned vueltas)
             unsigned viejo = hist[iwl_test_rand(&rnd) % n_hist];
 
             if (!ocupado[viejo]) {
-                unsigned n = iwl_test_tx_resp(pkt, gen3, QID, viejo, TX_STATUS_SUCCESS);
+                unsigned n = iwl_test_tx_resp(pkt, new_tx_api, QID, viejo,
+                                              TX_STATUS_SUCCESS);
 
                 handle_gen2_rx(&iwl, pkt, n);
                 repetidas++;
@@ -497,7 +512,7 @@ static void soak_tx(int gen3, uint32_t semilla, unsigned vueltas)
             for (k = 1; k < n_vuelo; k++)
                 vuelo[k - 1] = vuelo[k];
             n_vuelo--;
-            n = iwl_test_tx_resp(pkt, gen3, QID, idx, TX_STATUS_SUCCESS);
+            n = iwl_test_tx_resp(pkt, new_tx_api, QID, idx, TX_STATUS_SUCCESS);
             handle_gen2_rx(&iwl, pkt, n);
             if (iwl.last_mgmt_tx_status != TX_STATUS_SUCCESS) {
                 error = "la respuesta del firmware no se interpretó";

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "P03",
+  "clase": "programacion",
+  "particion": "desarrollo",
+  "titulo": "Leer Content-Length de un bloque de cabeceras",
+  "etiqueta": "longitud-http",
+  "entrada": {
+    "enunciado": "visible/P03/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "El programa candidato, compilado con rustc y ejecutado con cada vector reservado, escribe en stdout exactamente la salida esperada y termina con el código indicado.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_programa.py",
+      "--caso",
+      "P03",
+      "--candidato",
+      "{candidato}"
+    ],
+    "timeout_s": 180
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 1024,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": [
+      "rustc"
+    ]
+  },
+  "reservado": [
+    "reservado/P03/vectores.json",
+    "reservado/P03/referencia.rs",
+    "reservado/P03/incorrecta.rs"
+  ],
+  "hashes_entrada": {
+    "visible/P03/enunciado.md": "2789b6cfa5b1de987cc71bdcb661b399d1ff6e3b987a330c92fae9f1e66db52b"
+  }
+}

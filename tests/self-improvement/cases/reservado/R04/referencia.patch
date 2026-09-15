@@ -1,0 +1,65 @@
+diff --git a/crates/soso-web-core/src/html.rs b/crates/soso-web-core/src/html.rs
+index 017948090..43e925e38 100644
+--- a/crates/soso-web-core/src/html.rs
++++ b/crates/soso-web-core/src/html.rs
+@@ -222,14 +222,42 @@ pub fn resolve_url(base: &str, href: &str) -> String {
+     if href.starts_with('#') || href.is_empty() {
+         return base.to_string();
+     }
+-    if href.starts_with('/') {
+-        if let Some(host) = base.strip_prefix("https://").and_then(|r| r.split('/').next()) {
+-            return format!("https://{host}{href}");
++    let (esquema, resto) = base.split_once("://").unwrap_or(("https", base));
++    let (host, ruta_base) = match resto.split_once('/') {
++        Some((h, r)) => (h, r),
++        None => (resto, ""),
++    };
++    let ruta = if let Some(absoluta) = href.strip_prefix('/') {
++        String::from(absoluta)
++    } else {
++        let dir = ruta_base.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
++        if dir.is_empty() {
++            String::from(href)
++        } else {
++            format!("{dir}/{href}")
++        }
++    };
++    format!("{esquema}://{host}/{}", quitar_segmentos_punto(&ruta))
++}
++
++/// Elimina los segmentos `.` y `..` de una ruta (RFC 3986 §5.2.4).
++///
++/// Dejarlos pasa el problema al servidor: `https://x/a/../c` y `https://x/c`
++/// son la misma página, pero como cadenas no coinciden, así que el enlace se
++/// pide dos veces y la caché no acierta ninguna. Los `..` que sobran se
++/// descartan: la ruta no sube por encima de la raíz.
++fn quitar_segmentos_punto(ruta: &str) -> String {
++    let mut pila: Vec<&str> = Vec::new();
++    for seg in ruta.split('/') {
++        match seg {
++            "" | "." => continue,
++            ".." => {
++                pila.pop();
++            }
++            otro => pila.push(otro),
+         }
+-        return href.to_string();
+     }
+-    let base_dir = base.rsplit_once('/').map(|(d, _)| d).unwrap_or(base);
+-    format!("{base_dir}/{href}")
++    pila.join("/")
+ }
+ 
+ enum Token {
+@@ -399,9 +427,7 @@ mod tests {
+ 
+     #[test]
+     fn resolve_url_relativa() {
+-        assert_eq!(
+-            resolve_url("https://host/a/b", "../c"),
+-            "https://host/a/../c"
+-        );
++        assert_eq!(resolve_url("https://host/a/b", "../c"), "https://host/c");
++        assert_eq!(resolve_url("https://host/a/b/c", "../d"), "https://host/a/d");
+     }
+ }

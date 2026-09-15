@@ -224,6 +224,10 @@ Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp).
 # Host: base reproducible de automejora (T01; git real en temporales)
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/self-improvement -p test_baseline.py
 
+# Host: banco de casos de automejora (T02; compila candidatos con rustc)
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/self-improvement -p test_cases.py
+python3 tests/self-improvement/cases/banco.py validar
+
 # Host-only sosofs crash-safety
 cargo test -q -p sosofs --features std
 

@@ -3,17 +3,22 @@
 ## Evidencia y alcance
 
 Lectura ESP `/dev/sda1` (`KERNEL`, vfat, extraíble) con `udisksctl`. Copias en
-`target/usb-diagnostic-2026-09-15/` (ESP desmontada). Sin PSK en este
-informe (`SOSOWIFI.TXT` vacío; el connect fue manual).
+`target/usb-diagnostic-2026-09-15/` (ESP desmontada). Log útil recortado en
+`SOSOLOG-clean.txt` (~957 líneas; el `.TXT` de 256 KiB tiene relleno de
+newlines). Sin PSK en este informe (`SOSOWIFI.TXT` vacío; el connect fue manual).
 
-| Campo | Valor |
+| Campo | Valor (flush **#32**, último arranque) |
 |---|---|
-| Kernel USB | **0.2.2 (`dfec53f84-dirty`)** |
-| Flush | **#31 @ 147436 ms** (bloqueo AUTH; SCD/TLC ya OK) |
-| Hardware | `10de:249c` + `8086:2723` (AX200) + `10ec:8168` rtl8169 DOWN |
+| Kernel empaquetado (SOSOHASH) | **0.2.2 (`dfec53f84-dirty`)** |
+| Kernel en placa (SOSOLOG) | **0.2.2 (`5a7be1388-dirty`)** — más nuevo que el USB |
+| Flush | **#32 @ 162569 ms** (~163 s) |
+| Hardware | `10de:249c` + `8086:2723` (AX200 gen2) + `10ec:8168` rtl8169 DOWN |
 | Userspace | **`sosh —`** OK (pid=2) |
-| WiFi | ALIVE + MVM + scan 26 BSS; **assoc FAIL** (AUTH timeout ch40) |
+| WiFi | ALIVE + MVM + scan **23 BSS**; **assoc FAIL** (AUTH timeout **ch3**) |
+| GPU | GSP_INIT_DONE + VRAM pool + compute sm_86 + apagado limpio |
 | Ethernet | rtl8169 enlace DOWN (sin cable) → sin DHCP/SSH por cable |
+
+Flush anterior documentado: **#31 @ 147436 ms** (`dfec53f84-dirty`), AUTH timeout ch40.
 
 Árboles Linux (solo lectura):
 
@@ -25,6 +30,43 @@ Hostcheck `./scripts/l6-iwl-fw-hostcheck.sh` **OK** (incluye RLC tras PHY y
 TX AUTH `offload_assist=0x0c00`). Firmware `iwlwifi-cc-a0-77.ucode`:
 `IWL_UCODE_TLV_CAPA_TLC_OFFLOAD` **bit 43 = 1**; `RLC_CONFIG_CMD` **ver 3**;
 `PHY_CONTEXT` **ver 4**.
+
+---
+
+## Tabla de etapas (flush #32 — kernel `5a7be1388`)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Boot / sosh | `soso 0.2.2 (5a7be1388-dirty)` → `sosh —` pid=2 | **OK** |
+| fatlog | flush **#32** @ 162 s | OK |
+| GPU GSP | `GSP_INIT_DONE`; pool VRAM=sí; compute sm_86; `GSP-RM apagado … dma=off` | **OK** |
+| WiFi ALIVE | `UCODE_ALIVE_NTFY`; familia 22000 gen2 | **OK** |
+| WiFi init | `INIT_COMPLETE_NOTIF`; NVM/MCC; `up mínimo listo` | **OK** |
+| Scan userspace | `SCAN_COMPLETE count=23`; Rutilo WPA2 **ch3** | **OK** |
+| Connect | `wifi connect Rutilo …`; PHY ch3 band=1 MODIFY | parcial |
+| ADD_STA | `ADD_STA status=0x00000001` | **OK** |
+| TLC / SCD / TXQ | `TLC_MNG_CONFIG`; `SCD wide ver_hdr=0 ver_tlv=3` → `TXQ mgmt qid=1` | **OK** |
+| SESSION_PROT | `SESSION_PROTECTION CONF_ASSOC ok (878 TU)` | **OK** |
+| PHY ch3 | `PHY_CONTEXT ch3 band=1 action=2 ok` (sin log RLC posterior) | parcial |
+| TX AUTH | `tx qid=1 doorbell=0x00010001 seq=0x0100 len=50` | enviado |
+| TX resp | **cero** `iwl_trans: TX resp …` ni `iwl_rx … id=0x1c` en todo el log | **FAIL** |
+| RX datapath | **cero `REPLY_RX_MPDU`** tras PHY ch3 | **FAIL** |
+| AUTH / 4-way / DHCP | `AUTH sin retry (tx status=0x00)` → `AUTH timeout` | **FAIL** / pendiente |
+
+Secuencia:
+
+```
+CMD_VERSIONS + ALIVE → INIT_COMPLETE → MVM up
+→ scan 23 BSS (Rutilo WPA2 ch3)
+→ ADD_STA status=0x1 → TLC_MNG_CONFIG → SCD ver_tlv=3 → TXQ mgmt qid=1
+→ PHY_CONTEXT ch3 → SESSION_PROTECTION CONF_ASSOC ok
+→ tx qid=1 len=50 (doorbell ok)
+→ sin TX_CMD 0x1c / last_mgmt_tx_status=0x00 → AUTH timeout
+```
+
+Cabecera del flush: `ultimo=0x1c enc=40 ent=40` — el ring de log registró un
+opcode 0x1c al cerrar, pero **no** aparece en la traza `lx:` parseada; el driver
+nunca imprimió `TX resp` ni actualizó `last_mgmt_tx_status` a `0x01`.
 
 ---
 
@@ -55,6 +97,43 @@ CMD_VERSIONS +192 → ALIVE → INIT_COMPLETE → MVM up
 → AUTH TX status=0x01 (offload_assist=0)
 → cero REPLY_RX_MPDU → AUTH timeout
 ```
+
+---
+
+## Hallazgos (flush #32)
+
+### WIFI-7. Respuesta TX_CMD ausente (bloqueante AUTH)
+
+**Síntoma:** tras doorbell AUTH (`tx qid=1 … len=50`) no hay ninguna línea
+`iwl_trans: TX resp frame_count=… status=0x01`. `last_mgmt_tx_status` queda en
+**0x00**; el retry ctl-filter aborta (`AUTH sin retry ctl-filter`).
+
+**Contraste flush #31:** en #31 sí había `TX resp status=0x01` pero cero RX;
+en #32 el FW **no confirma** la transmisión (o la notificación no llega al parser).
+
+**soso:** [`iwl_trans.c`](../lxdde/ports/iwlwifi/iwl_trans.c) `parse_tx_resp` solo
+si `group == LEGACY_GROUP && cmd == TX_CMD` (0x1c). Tras doorbell solo se drenan
+8 iteraciones RX (`iwl_trans_tx`); `wait_mlme_flag` hace 4×poll + 20 ms × N.
+
+**Linux 6.6:** [`ops.c:309`](../lxdde/linux/drivers/net/wireless/intel/iwlwifi/mvm/ops.c)
+handler `RX_HANDLER(TX_CMD, iwl_mvm_rx_tx_cmd)` en LEGACY_GROUP; el op_mode espera
+la respuesta antes de continuar MLME.
+
+**Hipótesis ordenadas:**
+
+1. Notificación `TX_CMD` en grupo distinto de LEGACY (0) — ampliar filtro y log.
+2. Cola mgmt no totalmente operativa tras SCD ADD (falta paso enable/drenaje
+   equivalente a `iwl_mvm_tvqm_enable_txq` post-ADD_STA en Linux [`sta.c:2220-2229`](../lxdde/linux/drivers/net/wireless/intel/iwlwifi/mvm/sta.c)).
+3. Poll RX insuficiente entre doorbell y timeout AUTH.
+4. Offset status TX gen2: soso usa `IWL_MVM_TX_RESP_V3_STATUS_OFF=36` cuando
+   `!gen3` — verificar contra struct Linux para AX200 22000.
+
+### WIFI-8. RX sordo tras PHY ch3 (secundario hasta TX success)
+
+Tras `PHY_CONTEXT ch3` no hay `REPLY_RX_MPDU` (ni beacons Rutilo). Puede ser
+consecuencia de TX no confirmado o de RLC_CONFIG silencioso sin efecto. En
+kernel `5a7be1388` el código RLC ya está en árbol ([`iwl_mvm_up.c`](../lxdde/ports/iwlwifi/iwl_mvm_up.c)
+`iwl_mvm_phy_send_rlc`) pero **no loguea éxito**.
 
 ---
 
@@ -132,19 +211,37 @@ Evidencia A/B (`2026-09-14-run3` sin LQ → SCD OK pero AUTH timeout aparte).
 4. Hostcheck: PHY `rxchain_info==0`, RLC tras PHY, TX0 `offload_assist==0x0c00`.
    `./scripts/l6-iwl-fw-hostcheck.sh` verde.
 
-Validación placa pendiente (kernel con fase 1+2):
+Validación placa con kernel `5a7be1388` (fase 1+2 en árbol; flush #32 ya lo ejecutó
+sin empaquetar en SOSOHASH):
 
 ```bash
 cargo xtask flash-usb-live /dev/sda --yes --only kernel
 # en placa: wifi connect Rutilo …
-# esperado: REPLY_RX_MPDU (beacons) tras PHY ch40
-#           rx AUTH seq=2 status=0 → mlme_auth_ok → 4-way → DHCP
+# esperado: iwl_trans: TX resp … status=0x01
+#           REPLY_RX_MPDU (beacons) tras PHY ch3
+#           rx AUTH seq=2 → mlme_auth_ok → 4-way → DHCP LxWifi
 ```
+
+### Fase 3 — TX resp / cola mgmt (flush #32)
+
+1. **Parse TX_CMD en cualquier grupo:** en `iwl_trans.c` loguear todo
+   `cmd==0x1c` antes del filtro de grupo; aceptar también `LONG_GROUP (1)` si
+   el FW lo usa en gen2 TVQM.
+2. **Habilitar cola tras ADD_STA:** revisar orden Linux
+   `iwl_mvm_tvqm_enable_txq` → `iwl_trans_txq_alloc` post-estación; comparar con
+   `iwl_trans_txq_alloc_mgmt` en soso (SCD ADD puede no bastar sin enable).
+3. **Poll TX resp durante AUTH:** en `iwl_mvm_mlme_auth_assoc` / `wait_mlme_flag`,
+   drenar RX hasta recibir `TX_CMD` o timeout corto antes de juzgar
+   `last_mgmt_tx_status`.
+4. **Log RLC_CONFIG ok** tras PHY MODIFY en canal de assoc (confirmar en placa).
+5. **RX mgmt** si TX success pero sin `rx AUTH seq=2`: filtros MAC
+   `IN_CONTROL_AND_MGMT`, binding MAC↔PHY, `parse_rx_mpdu` → MLME.
+6. **Reflash + matriz:** criterios anteriores; actualizar `docs/hw-matrix.json`.
 
 ---
 
 ## Qué no se ha hecho
 
-Reflash del USB ni ciclo de placa con el kernel de fase 2. Sin `--boot-ok`.
-`target/` no va al git. GPU de estos flushes no se re-diagnostica aquí
-(GSP/VRAM/CE vistos OK).
+Implementación de fase 3. Hostchecks no re-ejecutados en esta sesión.
+`target/` no va al git. SOSOHASH del USB sigue en `dfec53f84` (desalineado del
+kernel de placa `5a7be1388`).

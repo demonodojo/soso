@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "P09",
+  "clase": "programacion",
+  "particion": "desarrollo",
+  "titulo": "Pertenencia a un rango semiabierto",
+  "etiqueta": "valor-limite",
+  "entrada": {
+    "enunciado": "visible/P09/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "El programa candidato, compilado con rustc y ejecutado con cada vector reservado, escribe en stdout exactamente la salida esperada y termina con el código indicado.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_programa.py",
+      "--caso",
+      "P09",
+      "--candidato",
+      "{candidato}"
+    ],
+    "timeout_s": 180
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 1024,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": [
+      "rustc"
+    ]
+  },
+  "reservado": [
+    "reservado/P09/vectores.json",
+    "reservado/P09/referencia.rs",
+    "reservado/P09/incorrecta.rs"
+  ],
+  "hashes_entrada": {
+    "visible/P09/enunciado.md": "ac547ea28cf39d0de9edbfdcb13b1bb22b3356218af336e851e43a47ad40e764"
+  }
+}

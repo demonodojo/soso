@@ -1,0 +1,14 @@
+{
+  "aserciones": [
+    {
+      "tipo": "estado_http",
+      "valor": 200
+    },
+    {
+      "tipo": "contenido_no_vacio"
+    },
+    {
+      "tipo": "usage_coherente"
+    }
+  ]
+}

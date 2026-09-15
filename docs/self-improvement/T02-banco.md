@@ -1,6 +1,6 @@
 # T02 — Definir los casos y sus verificadores
 
-**Hito:** SI-0 · **Tipo:** Implementación host · **Estado:** pendiente.  
+**Hito:** SI-0 · **Tipo:** Implementación host · **Estado:** completada (15 de septiembre de 2026; resumen en [seguimiento/T02.md](seguimiento/T02.md), evidencia en `target/self-improvement/tasks/T02/resultado.md`).  
 **Dependencias:** [T01](T01-base.md)
 
 ## Objetivo y entrega
@@ -43,9 +43,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Una tarea real sin reproducción o comportamiento especificado queda excluida y debe sustituirse antes de cerrar el banco.
 

@@ -1,0 +1,18 @@
+{
+  "aserciones": [
+    {
+      "tipo": "estado_http",
+      "valor": 200
+    },
+    {
+      "tipo": "contenido_contiene",
+      "valor": "7"
+    },
+    {
+      "tipo": "sin_llamadas"
+    },
+    {
+      "tipo": "usage_coherente"
+    }
+  ]
+}

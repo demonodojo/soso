@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "R02",
+  "clase": "repo",
+  "particion": "reservado",
+  "titulo": "Validar el CRC32 de la cabecera GPT al parsearla",
+  "etiqueta": "crc-gpt",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R02/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_repo.py",
+      "--caso",
+      "R02",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R02/aceptacion.rs",
+    "reservado/R02/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R02/enunciado.md": "f02c7445f53a03358616b7aaae25a71b308f6627a40713a72e983e90bd7777f7"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/gptdisk/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Pasa la suite de gptdisk con la prueba reservada: una cabecera intacta se parsea y una con un byte cambiado o el CRC a cero se rechaza.",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "gptdisk"
+    ],
+    "prueba_reservada": "reservado/R02/aceptacion.rs",
+    "destino_prueba": "crates/gptdisk/tests/aceptacion_R02.rs",
+    "referencia": "reservado/R02/referencia.patch"
+  }
+}

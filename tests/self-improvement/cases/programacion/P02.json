@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "P02",
+  "clase": "programacion",
+  "particion": "reservado",
+  "titulo": "Escapar una cadena para JSON",
+  "etiqueta": "escape-json",
+  "entrada": {
+    "enunciado": "visible/P02/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "El programa candidato, compilado con rustc y ejecutado con cada vector reservado, escribe en stdout exactamente la salida esperada y termina con el código indicado.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_programa.py",
+      "--caso",
+      "P02",
+      "--candidato",
+      "{candidato}"
+    ],
+    "timeout_s": 180
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 1024,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": [
+      "rustc"
+    ]
+  },
+  "reservado": [
+    "reservado/P02/vectores.json",
+    "reservado/P02/referencia.rs",
+    "reservado/P02/incorrecta.rs"
+  ],
+  "hashes_entrada": {
+    "visible/P02/enunciado.md": "c6d38b2299bfb71e154e81f0d2739d533a37ad2dd7d83c8c4bae75f4c37ef5e8"
+  }
+}

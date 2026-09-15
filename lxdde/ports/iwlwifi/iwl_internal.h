@@ -1655,6 +1655,7 @@ struct iwl_ax211_priv;
 #define TX_STATUS_SUCCESS            0x01u
 #define IWL_MVM_TX_RESP_V3_STATUS_OFF 36u
 #define IWL_MVM_TX_RESP_STATUS_OFF     40u
+#define IWL_MVM_TX_RESP_MIN_PAY        42u
 
 struct agg_tx_status {
     uint16_t status;
@@ -1787,6 +1788,8 @@ int iwl_8000_plan_load_ex(const struct iwl_fw_image *fw, uint32_t chunk_sz,
 void iwl_8000_fh_program(uint32_t dst, uint64_t dma, uint32_t byte_cnt,
                          struct iwl_8000_fh_prog *out);
 void iwl_trans_poll(struct iwl_ax211_priv *iwl);
+void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl);
+int iwl_trans_wait_mgmt_tx_resp(struct iwl_ax211_priv *iwl, unsigned iters);
 int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                        const void *payload, uint16_t pay_len);
 int iwl_trans_send_cmd_async(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,

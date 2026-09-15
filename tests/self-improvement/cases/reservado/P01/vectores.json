@@ -1,0 +1,34 @@
+{
+  "vectores": [
+    {
+      "nombre": "cabe justo",
+      "stdin": "5\ncafé\n",
+      "stdout": "café\n"
+    },
+    {
+      "nombre": "el acento no cabe",
+      "stdin": "4\ncafé\n",
+      "stdout": "caf\n"
+    },
+    {
+      "nombre": "tres bytes de un carácter",
+      "stdin": "3\n☕\n",
+      "stdout": "☕\n"
+    },
+    {
+      "nombre": "no cabe ni el primero",
+      "stdin": "2\n☕\n",
+      "stdout": "\n"
+    },
+    {
+      "nombre": "límite mayor que el texto",
+      "stdin": "100\nhola\n",
+      "stdout": "hola\n"
+    },
+    {
+      "nombre": "límite cero",
+      "stdin": "0\nhola\n",
+      "stdout": "\n"
+    }
+  ]
+}

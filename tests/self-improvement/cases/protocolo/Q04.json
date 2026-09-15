@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "Q04",
+  "clase": "protocolo",
+  "particion": "desarrollo",
+  "titulo": "Llamada a herramienta y su resultado",
+  "etiqueta": "llamada-resultado",
+  "entrada": {
+    "enunciado": "visible/Q04/enunciado.md",
+    "archivos": [
+      "visible/Q04/peticion.json"
+    ]
+  },
+  "resultado_observable": "La respuesta grabada incorpora el resultado de la herramienta y no repite la llamada.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "--caso",
+      "Q04",
+      "--respuesta",
+      "{respuesta}"
+    ],
+    "timeout_s": 120
+  },
+  "recursos": {
+    "cpu": 1,
+    "memoria_mb": 256,
+    "red": false,
+    "escritura": [
+      "{trabajo}"
+    ],
+    "herramientas": []
+  },
+  "reservado": [
+    "reservado/Q04/esperado.json",
+    "reservado/Q04/correcta.json",
+    "reservado/Q04/incorrecta.json"
+  ],
+  "hashes_entrada": {
+    "visible/Q04/enunciado.md": "8699693029c68cf55d473d8518dc6f6bad54c60f852bfb072ea4f00128d4dd72",
+    "visible/Q04/peticion.json": "13c7cab773f80f7ecd96506af0e89718be0832d613c10da749d08f067d1c0b78"
+  }
+}

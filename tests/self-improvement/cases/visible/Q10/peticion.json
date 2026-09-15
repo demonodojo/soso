@@ -1,0 +1,15 @@
+{
+  "model": "qwen2.5-coder-3b-instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "{relleno}"
+    },
+    {
+      "role": "user",
+      "content": "Resume lo anterior en una línea."
+    }
+  ],
+  "max_tokens": 512,
+  "stream": false
+}

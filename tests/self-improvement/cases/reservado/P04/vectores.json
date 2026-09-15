@@ -1,0 +1,34 @@
+{
+  "vectores": [
+    {
+      "nombre": "sin saturar",
+      "stdin": "10\n3\n4\n",
+      "stdout": "7\n"
+    },
+    {
+      "nombre": "satura",
+      "stdin": "10\n6\n7\n",
+      "stdout": "10\n"
+    },
+    {
+      "nombre": "tope máximo de u32",
+      "stdin": "4294967295\n4294967295\n1\n",
+      "stdout": "4294967295\n"
+    },
+    {
+      "nombre": "tope cero",
+      "stdin": "0\n5\n",
+      "stdout": "0\n"
+    },
+    {
+      "nombre": "sin sumandos",
+      "stdin": "100\n",
+      "stdout": "0\n"
+    },
+    {
+      "nombre": "varias saturaciones",
+      "stdin": "100\n50\n50\n50\n",
+      "stdout": "100\n"
+    }
+  ]
+}

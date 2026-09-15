@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://soso.local/self-improvement/case.schema.json",
+  "title": "Caso del banco de automejora",
+  "description": "Un caso es una entrada con aceptación automatizable. Las rutas son relativas al directorio de casos; los marcadores {candidato}, {arbol} y {trabajo} los sustituye el lanzador.",
+  "type": "object",
+  "required": ["schema_version", "id", "clase", "particion", "titulo", "entrada", "resultado_observable", "comprobador", "recursos", "reservado", "hashes_entrada"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "id": {"type": "string", "pattern": "^[PQR][0-9]{2}$"},
+    "clase": {"type": "string", "enum": ["programacion", "protocolo", "repo"]},
+    "particion": {"type": "string", "enum": ["desarrollo", "reservado"]},
+    "titulo": {"type": "string", "minLength": 4},
+    "etiqueta": {"type": "string", "minLength": 2},
+    "origen": {"type": "string", "enum": ["reproduccion", "mejora_especificada"]},
+    "entrada": {
+      "type": "object",
+      "required": ["enunciado"],
+      "additionalProperties": false,
+      "properties": {
+        "enunciado": {"type": "string", "pattern": "^visible/"},
+        "archivos": {"type": "array", "items": {"type": "string", "pattern": "^visible/"}}
+      }
+    },
+    "resultado_observable": {"type": "string", "minLength": 20},
+    "comprobador": {
+      "type": "object",
+      "required": ["argv", "timeout_s"],
+      "additionalProperties": false,
+      "properties": {
+        "argv": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+        "timeout_s": {"type": "integer", "minimum": 1, "maximum": 3600}
+      }
+    },
+    "recursos": {
+      "type": "object",
+      "required": ["cpu", "memoria_mb", "red", "escritura"],
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {"type": "integer", "minimum": 1, "maximum": 8},
+        "memoria_mb": {"type": "integer", "minimum": 64},
+        "red": {"type": "boolean"},
+        "escritura": {"type": "array", "items": {"type": "string"}},
+        "herramientas": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "reservado": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^reservado/"}},
+    "hashes_entrada": {"type": "object"},
+    "base": {
+      "type": "object",
+      "required": ["commit"],
+      "additionalProperties": false,
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "rama": {"type": "string"},
+        "captura": {"type": "string"}
+      }
+    },
+    "rutas_editables": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "aceptacion": {
+      "type": "object",
+      "required": ["descripcion", "argv", "prueba_reservada", "destino_prueba"],
+      "additionalProperties": false,
+      "properties": {
+        "descripcion": {"type": "string", "minLength": 20},
+        "argv": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+        "prueba_reservada": {"type": "string", "pattern": "^reservado/"},
+        "destino_prueba": {"type": "string"},
+        "referencia": {"type": "string", "pattern": "^reservado/"}
+      }
+    }
+  }
+}

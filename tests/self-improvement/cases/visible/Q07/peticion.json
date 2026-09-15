@@ -1,0 +1,37 @@
+{
+  "model": "qwen2.5-coder-3b-instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Enséñame las primeras 20 líneas de kernel/src/main.rs"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "leer_archivo",
+        "description": "Lee las primeras líneas de un archivo",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "ruta": {
+              "type": "string"
+            },
+            "lineas": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ruta",
+            "lineas"
+          ]
+        }
+      }
+    }
+  ],
+  "tool_choice": "required",
+  "max_tokens": 64,
+  "temperature": 0,
+  "stream": true
+}

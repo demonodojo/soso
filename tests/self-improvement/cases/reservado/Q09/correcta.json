@@ -1,0 +1,10 @@
+{
+  "http_status": 400,
+  "cuerpo": {
+    "error": {
+      "message": "el cuerpo no es JSON completo",
+      "type": "invalid_request_error",
+      "code": "invalid_json"
+    }
+  }
+}

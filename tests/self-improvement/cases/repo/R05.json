@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "R05",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "Trocear un tramo de descarga que no cabe en RAM",
+  "etiqueta": "tramos-ota",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R05/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "python3",
+      "tests/self-improvement/cases/verificadores/verificar_repo.py",
+      "--caso",
+      "R05",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R05/aceptacion.rs",
+    "reservado/R05/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R05/enunciado.md": "b165f51a44c4798cf5c6c140aacdce5e8dbe8bd19c6865910eb2b4f7309782f7"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-update-core/src/plan.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Pasa la suite de soso-update-core con la prueba reservada: `split` cubre el tramo sin huecos ni solapes, respeta el máximo y conserva los ficheros.",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-update-core",
+      "--features",
+      "std"
+    ],
+    "prueba_reservada": "reservado/R05/aceptacion.rs",
+    "destino_prueba": "crates/soso-update-core/tests/aceptacion_R05.rs",
+    "referencia": "reservado/R05/referencia.patch"
+  }
+}

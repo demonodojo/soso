@@ -1,0 +1,19 @@
+{
+  "aserciones": [
+    {
+      "tipo": "estado_http",
+      "valor": 200
+    },
+    {
+      "tipo": "flujo_utf8_completo"
+    },
+    {
+      "tipo": "contenido_igual",
+      "valor": "Café ☕ para el señor Ñoño"
+    },
+    {
+      "tipo": "finish_reason",
+      "valor": "stop"
+    }
+  ]
+}

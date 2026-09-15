@@ -73,15 +73,31 @@ static void parse_tim_ie(struct iwl_ax211_priv *iwl, const uint8_t *frame, int l
     }
 }
 
+static int mlme_frame_for_us(struct iwl_ax211_priv *iwl, const uint8_t *frame,
+                             int len, uint16_t stype)
+{
+    if (!iwl || !frame || len < 24 || bssid_is_zero(iwl->bssid))
+        return 0;
+    if (stype == IEEE80211_STYPE_BEACON)
+        return memcmp(frame + 16, iwl->bssid, 6) == 0;
+    /* AUTH/ASSOC: addr1=STA, addr2/addr3=AP (Linux mac80211). */
+    if (memcmp(frame + 4, iwl->mac, 6) != 0)
+        return 0;
+    if (memcmp(frame + 10, iwl->bssid, 6) != 0 &&
+        memcmp(frame + 16, iwl->bssid, 6) != 0)
+        return 0;
+    return 1;
+}
+
 void iwl_mvm_rx_mlme_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len)
 {
     uint16_t stype;
 
-    if (!iwl || !frame || len < 24 || bssid_is_zero(iwl->bssid))
-        return;
-    if (memcmp(frame + 16, iwl->bssid, 6) != 0)
+    if (!iwl || !frame || len < 24)
         return;
     stype = mgmt_stype(frame);
+    if (!mlme_frame_for_us(iwl, frame, len, stype))
+        return;
     if (stype == IEEE80211_STYPE_BEACON) {
         parse_tim_ie(iwl, frame, len);
         return;
@@ -462,6 +478,10 @@ static int iwl_mvm_mlme_auth_assoc(struct iwl_ax211_priv *iwl, const char *ssid,
 
     for (attempt = 0; attempt < 2; attempt++) {
         if (attempt == 1) {
+            if (iwl->last_mgmt_tx_status == 0) {
+                lx_printk("iwl_mvm: AUTH sin retry ctl-filter (sin TX resp)\n");
+                break;
+            }
             if (iwl->last_mgmt_tx_status != TX_STATUS_SUCCESS) {
                 lx_printk("iwl_mvm: AUTH sin retry ctl-filter (tx status=0x%02x)\n",
                           (unsigned)iwl->last_mgmt_tx_status);
@@ -476,11 +496,13 @@ static int iwl_mvm_mlme_auth_assoc(struct iwl_ax211_priv *iwl, const char *ssid,
             iwl->auth_ctl_filter = 0;
             lx_printk("iwl_mvm: AUTH retry con IN_CONTROL_AND_MGMT\n");
         }
+        iwl->last_mgmt_tx_status = 0;
         flen = build_auth_req(frame, iwl->mac, bssid);
         if (iwl_mvm_tx_mgmt(iwl, frame, flen) != 0) {
             lx_printk("iwl_mvm: AUTH TX falló\n");
             return -1;
         }
+        (void)iwl_trans_wait_mgmt_tx_resp(iwl, 40);
         if (wait_mlme_flag(iwl, &iwl->mlme_auth_ok) == 0)
             goto auth_ok;
     }
@@ -489,11 +511,13 @@ static int iwl_mvm_mlme_auth_assoc(struct iwl_ax211_priv *iwl, const char *ssid,
 
 auth_ok:
 
+    iwl->last_mgmt_tx_status = 0;
     flen = build_assoc_req(iwl, frame, ssid, bssid);
     if (iwl_mvm_tx_mgmt(iwl, frame, flen) != 0) {
         lx_printk("iwl_mvm: ASSOC TX falló\n");
         return -1;
     }
+    (void)iwl_trans_wait_mgmt_tx_resp(iwl, 40);
     if (wait_mlme_flag(iwl, &iwl->mlme_assoc_ok) != 0) {
         lx_printk("iwl_mvm: ASSOC timeout\n");
         return -1;
@@ -559,6 +583,7 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
         lx_printk("iwl_mvm: TXQ mgmt falló\n");
         return -1;
     }
+    iwl_trans_txq_drain_mgmt(iwl);
     if (iwl_mvm_protect_assoc(iwl) != 0) {
         iwl->auth_ctl_filter = 0;
         return -1;

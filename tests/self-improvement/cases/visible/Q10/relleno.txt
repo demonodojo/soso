@@ -1,0 +1,1 @@
+Este párrafo existe solo para ocupar contexto. Se repite tal cual hasta superar el límite declarado por el perfil del modelo, sin caracteres especiales que cambien la tokenización.
