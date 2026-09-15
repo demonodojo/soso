@@ -181,6 +181,34 @@ def ahora():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def entorno_git(cwd):
+    """Entorno que impide a git subir por encima del directorio pedido.
+
+    Sin esto, un comando lanzado en un directorio que no es un repositorio
+    (por ejemplo un destino recién creado) encuentra el repositorio que lo
+    contiene y actúa sobre él. Un `checkout` así mueve el HEAD del checkout
+    del usuario, que es justo lo que esta herramienta promete no tocar.
+    """
+    env = os.environ.copy()
+    padre = os.path.dirname(os.path.abspath(cwd))
+    techos = [padre]
+    if env.get("GIT_CEILING_DIRECTORIES"):
+        techos.append(env["GIT_CEILING_DIRECTORIES"])
+    env["GIT_CEILING_DIRECTORIES"] = ":".join(techos)
+    env["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "0"
+    return env
+
+
+def argv_git_arbol(arbol, argumentos, base=None):
+    """Comando git atado a un árbol concreto: `--git-dir` corta el descubrimiento."""
+    arbol = os.path.abspath(arbol)
+    return (base or GIT_BASE)[:1] + [
+        "-C", arbol,
+        "--git-dir", os.path.join(arbol, ".git"),
+        "--work-tree", arbol,
+    ] + (base or GIT_BASE)[1:] + argumentos
+
+
 class Registro:
     """Escribe un log por comando: argv, cwd, código de salida y salidas."""
 
@@ -194,13 +222,13 @@ class Registro:
         self.usados[nombre] = n + 1
         return nombre if n == 0 else f"{nombre}-{n + 1}"
 
-    def ejecutar(self, nombre, argv, cwd, timeout=None):
+    def ejecutar(self, nombre, argv, cwd, timeout=None, env=None):
         """Ejecuta argv (sin shell) y deja su log. Nunca lanza por exit != 0."""
         nombre = self.nombre_libre(nombre)
         destino = os.path.join(self.directorio, f"{nombre}.log")
         try:
             p = subprocess.run(
-                argv, cwd=cwd, capture_output=True, timeout=timeout, check=False
+                argv, cwd=cwd, capture_output=True, timeout=timeout, check=False, env=env
             )
             codigo, salida, error, motivo = p.returncode, p.stdout, p.stderr, None
         except FileNotFoundError:
@@ -244,15 +272,16 @@ GIT_DIFF = GIT_BASE + ["-c", "diff.renames=false", "-c", "diff.noprefix=false"]
 
 def git(repo, argumentos, registro=None, nombre=None, base=None):
     argv = (base or GIT_BASE) + argumentos
+    entorno = entorno_git(repo)
     if registro is not None:
-        r = registro.ejecutar(nombre or "git", argv, repo)
+        r = registro.ejecutar(nombre or "git", argv, repo, env=entorno)
         if r["exit_code"] != 0:
             raise ErrorCaptura(
                 f"falló {' '.join(argv)} (exit {r['exit_code']}): "
                 f"{r['stderr'].decode('utf-8', 'replace').strip()}"
             )
         return r["stdout"]
-    p = subprocess.run(argv, cwd=repo, capture_output=True, check=False)
+    p = subprocess.run(argv, cwd=repo, capture_output=True, check=False, env=entorno)
     if p.returncode != 0:
         raise ErrorCaptura(
             f"falló {' '.join(argv)} (exit {p.returncode}): "
@@ -300,7 +329,8 @@ def parsear_estado(crudo):
 
 def head_de(repo):
     p = subprocess.run(
-        GIT_BASE + ["rev-parse", "HEAD"], cwd=repo, capture_output=True, check=False
+        GIT_BASE + ["rev-parse", "HEAD"], cwd=repo, capture_output=True, check=False,
+        env=entorno_git(repo),
     )
     if p.returncode != 0:
         return None
@@ -620,6 +650,7 @@ def validar_destino(repo, salida):
             cwd=repo,
             capture_output=True,
             check=False,
+            env=entorno_git(repo),
         )
         if p.returncode != 0:
             raise ErrorCaptura(
@@ -648,7 +679,7 @@ def capturar(repo, salida, omitir_herramientas=False):
     ):
         p = subprocess.run(
             GIT_BASE + ["rev-parse", "--is-inside-work-tree"],
-            cwd=repo, capture_output=True, check=False,
+            cwd=repo, capture_output=True, check=False, env=entorno_git(repo),
         )
         if p.returncode != 0:
             raise ErrorCaptura(f"{repo} no es un repositorio git")
@@ -772,7 +803,40 @@ def leer_manifiesto(captura):
     return manifiesto
 
 
-def reconstruir(captura, destino, origen=None):
+def recuperar_excluidos(manifiesto, origen, destino):
+    """Trae del origen los archivos declarados pero no almacenados.
+
+    La captura no guarda blobs grandes (firmware, modelos), pero algunos son
+    entradas que las suites necesitan: `cargo xtask check` exige el firmware
+    de iwlwifi en el rootfs. Se copian del repositorio de origen y se
+    comprueban contra el hash del manifiesto: si no coincide, el origen ya no
+    es el de la captura y no se acepta el archivo.
+    """
+    recuperados, problemas = [], []
+    for entrada in manifiesto["nuevos"]["excluidos"]:
+        if not entrada.get("sha256"):
+            continue  # artefactos sin hash: no forman parte de la base
+        relativa = entrada["ruta"]
+        if "ruta_b64" in entrada:
+            relativa = ruta_fs(base64.b64decode(entrada["ruta_b64"]))
+        fuente = os.path.join(origen, relativa)
+        if not os.path.isfile(fuente):
+            problemas.append({"campo": f"excluidos/{relativa}",
+                              "esperado": entrada["sha256"], "obtenido": "ausente en el origen"})
+            continue
+        real = sha256_archivo(fuente)
+        if real != entrada["sha256"]:
+            problemas.append({"campo": f"excluidos/{relativa}",
+                              "esperado": entrada["sha256"], "obtenido": real})
+            continue
+        ruta_destino = os.path.join(destino, relativa)
+        os.makedirs(os.path.dirname(ruta_destino), exist_ok=True)
+        shutil.copyfile(fuente, ruta_destino)
+        recuperados.append(relativa)
+    return recuperados, problemas
+
+
+def reconstruir(captura, destino, origen=None, con_excluidos=False):
     """Rehace la base declarada en un árbol nuevo y verifica sus hashes."""
     manifiesto = leer_manifiesto(captura)
     if os.path.lexists(destino) and (not os.path.isdir(destino) or os.listdir(destino)):
@@ -795,9 +859,15 @@ def reconstruir(captura, destino, origen=None):
                           os.path.dirname(destino) or ".")
     if r["exit_code"] != 0:
         raise ErrorCaptura(f"git clone falló: {r['stderr'].decode('utf-8', 'replace')}")
+    if not os.path.isdir(os.path.join(destino, ".git")):
+        raise ErrorCaptura(
+            f"el clone no dejó un repositorio en {destino}; no se ejecuta nada más "
+            "(un git sin repo aquí actuaría sobre el repositorio que lo contenga)"
+        )
     if head:
-        r = registro.ejecutar("checkout", GIT_BASE + ["checkout", "--detach", head["commit"]],
-                              destino)
+        r = registro.ejecutar("checkout",
+                              argv_git_arbol(destino, ["checkout", "--detach", head["commit"]]),
+                              destino, env=entorno_git(destino))
         if r["exit_code"] != 0:
             raise ErrorCaptura(f"checkout de {head['commit']} falló: "
                                f"{r['stderr'].decode('utf-8', 'replace')}")
@@ -818,8 +888,9 @@ def reconstruir(captura, destino, origen=None):
         parche = os.path.join(captura, seccion["archivo"])
         r = registro.ejecutar(
             f"apply-{nombre}",
-            GIT_BASE + ["apply", "--whitespace=nowarn"] + extra + [parche],
+            argv_git_arbol(destino, ["apply", "--whitespace=nowarn"] + extra + [parche]),
             destino,
+            env=entorno_git(destino),
         )
         if r["exit_code"] != 0:
             raise ErrorCaptura(
@@ -841,6 +912,14 @@ def reconstruir(captura, destino, origen=None):
         os.chmod(ruta_destino, int(entrada.get("modo", "0o644"), 8))
 
     verificacion = verificar(manifiesto, destino)
+    if con_excluidos:
+        recuperados, problemas = recuperar_excluidos(manifiesto, origen, destino)
+        verificacion["recuperados_del_origen"] = recuperados
+        verificacion["no_reproducidos"] = [
+            r for r in verificacion["no_reproducidos"] if r not in recuperados
+        ]
+        verificacion["problemas"].extend(problemas)
+        verificacion["ok"] = not verificacion["problemas"]
     escribir_json(os.path.join(captura, "reconstruccion.json"), verificacion)
     return verificacion
 
@@ -937,6 +1016,9 @@ def construir_parser():
     r.add_argument("--capture", required=True)
     r.add_argument("--into", required=True)
     r.add_argument("--from-repo", default=None, help="repo de origen (por defecto, el del manifiesto)")
+    r.add_argument("--with-excluded", action="store_true",
+                   help="copiar del origen los archivos declarados y no almacenados, "
+                        "comprobando su hash (firmware y demás entradas grandes)")
 
     s = sub.add_parser("suites", help="ejecuta las suites base sobre un árbol")
     s.add_argument("--capture", required=True)
@@ -960,7 +1042,7 @@ def main(argv=None):
                   f"{len(m['nuevos']['excluidos'])} excluido(s)")
             return 0
         if args.comando == "reconstruct":
-            v = reconstruir(args.capture, args.into, args.from_repo)
+            v = reconstruir(args.capture, args.into, args.from_repo, args.with_excluded)
             if v["ok"]:
                 print(f"reconstrucción verificada en {args.into}")
                 return 0

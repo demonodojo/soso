@@ -24,6 +24,9 @@
 # Logs de `cargo xtask test` (serial por shard en la raíz del repo)
 /test-*-serial.log
 
+# Bytecode de las pruebas Python (tests/self-improvement)
+__pycache__/
+
 # Editor / OS
 .DS_Store
 *~

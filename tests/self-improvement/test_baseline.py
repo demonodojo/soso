@@ -251,6 +251,37 @@ class TestCaptura(BaseTemporal):
         self.assertEqual(oct(os.stat(os.path.join(destino, "ejecutable.sh")).st_mode & 0o777),
                          "0o755")
 
+    def test_recuperar_excluidos_desde_el_origen(self):
+        """Los blobs declarados y no almacenados se recuperan verificando hash."""
+        grande = os.urandom(baseline.LIMITE_FUENTE + 64)
+        escribir(self.repo, "rootfs/lib/firmware/iwlwifi-prueba.ucode", grande)
+        _, salida = self.capturar()
+
+        destino = os.path.join(self.tmp, "arbol")
+        verificacion = baseline.reconstruir(salida, destino, con_excluidos=True)
+        self.assertTrue(verificacion["ok"], verificacion["problemas"])
+        self.assertEqual(verificacion["recuperados_del_origen"],
+                         ["rootfs/lib/firmware/iwlwifi-prueba.ucode"])
+        self.assertEqual(verificacion["no_reproducidos"], [])
+        recuperado = os.path.join(destino, "rootfs/lib/firmware/iwlwifi-prueba.ucode")
+        self.assertEqual(sha256_archivo(recuperado), hashlib.sha256(grande).hexdigest())
+
+    def test_recuperar_excluidos_rechaza_un_origen_movido(self):
+        """Si el origen ya no tiene el contenido capturado, no se acepta."""
+        escribir(self.repo, "rootfs/lib/firmware/iwlwifi-prueba.ucode",
+                 os.urandom(baseline.LIMITE_FUENTE + 64))
+        _, salida = self.capturar()
+        escribir(self.repo, "rootfs/lib/firmware/iwlwifi-prueba.ucode",
+                 os.urandom(baseline.LIMITE_FUENTE + 64))
+
+        destino = os.path.join(self.tmp, "arbol")
+        verificacion = baseline.reconstruir(salida, destino, con_excluidos=True)
+        self.assertFalse(verificacion["ok"])
+        self.assertEqual(verificacion["problemas"][0]["campo"],
+                         "excluidos/rootfs/lib/firmware/iwlwifi-prueba.ucode")
+        self.assertFalse(os.path.exists(
+            os.path.join(destino, "rootfs/lib/firmware/iwlwifi-prueba.ucode")))
+
     def test_modificacion_concurrente(self):
         """Fixture: modificación concurrente. La captura se declara inestable."""
         escribir(self.repo, "notas/apunte.md", "antes\n")
@@ -289,6 +320,38 @@ class TestCaptura(BaseTemporal):
         antes = huella_arbol(self.repo)
         self.capturar()
         self.assertEqual(huella_arbol(self.repo), antes)
+
+    def test_no_actua_sobre_el_repositorio_que_lo_contiene(self):
+        """Regresión: un git lanzado en un directorio sin repo subía al de fuera.
+
+        Así fue como una reconstrucción movió el HEAD del checkout real: el
+        `checkout --detach` corrió en un destino vacío y git encontró el
+        repositorio de encima.
+        """
+        dentro = os.path.join(self.repo, "sin-repo")
+        os.makedirs(dentro)
+        antes = git(self.repo, "rev-parse", "HEAD")
+        with self.assertRaises(baseline.ErrorCaptura):
+            baseline.capturar(dentro, self.destino(), omitir_herramientas=True)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), antes)
+
+        # Y una reconstrucción dentro de otro repositorio no lo toca.
+        _, salida = self.capturar()
+        exterior = os.path.join(self.tmp, "exterior")
+        os.makedirs(exterior)
+        git(exterior, "init", "--quiet", "-b", "main")
+        escribir(exterior, "a.txt", "a\n")
+        git(exterior, "add", "-A")
+        git(exterior, "commit", "--quiet", "-m", "exterior")
+        huella_exterior = huella_arbol(exterior)
+        head_exterior = git(exterior, "rev-parse", "HEAD")
+        reflog_exterior = git(exterior, "reflog")
+
+        verificacion = baseline.reconstruir(salida, os.path.join(exterior, "sub", "arbol"))
+        self.assertTrue(verificacion["ok"], verificacion["problemas"])
+        self.assertEqual(git(exterior, "rev-parse", "HEAD"), head_exterior)
+        self.assertEqual(git(exterior, "reflog"), reflog_exterior)
+        self.assertEqual(huella_arbol(exterior)["indice"], huella_exterior["indice"])
 
     def test_destino_nuevo_y_fuera_de_las_fuentes(self):
         ocupado = self.destino("ocupado")
