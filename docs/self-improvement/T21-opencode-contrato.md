@@ -17,11 +17,16 @@ se obtienen de las dependencias; todavía no existen en la base del plan.
 
 ## Archivos que se pueden cambiar
 
-Crear `scripts/self-improvement/opencode_contract.py`, `tests/self-improvement/test_opencode_contract.py` y fixtures wire en `tests/self-improvement/opencode/`.
+Añadir el contraste del contrato a `crates/soso-improve-core` con su orden en `tools/soso-improve`, pruebas en el mismo crate y fixtures wire en `tests/self-improvement/opencode/`.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
 con la reproducción; no ampliar esta tarea de forma silenciosa.
+
+> **Lenguaje:** esta ficha pedía Python; se reescribió el 16 de septiembre de 2026
+> a Rust, porque el objetivo del plan es que todo pueda correr **dentro de soso**
+> y soso no tiene intérprete de Python. Ver
+> [seguimiento/T01.md](seguimiento/T01.md).
 
 ## Pasos
 
@@ -33,7 +38,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 ## Comprobación
 
-`python3 -m unittest discover -s tests/self-improvement -p test_opencode_contract.py`; ejecución real del script con OpenCode y servidor falso. Probar respuesta malformada, error HTTP y herramienta fallida.
+`cargo test -p soso-improve-core -p soso-improve`; ejecución real con OpenCode y servidor falso. Probar respuesta malformada, error HTTP y herramienta fallida.
 
 Los comandos de crates, scripts o subcomandos nuevos se ejecutan **después de
 crearlos en esta tarea o en sus dependencias**. Guardar salida y exit code;

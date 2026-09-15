@@ -1,0 +1,17 @@
+[package]
+name = "soso-improve"
+version = "0.1.0"
+edition = "2021"
+
+# Mitad guest del coordinador: los traits de `soso-improve-core` implementados
+# con las llamadas de soso. La lógica no se duplica, se hospeda.
+[[bin]]
+name = "soso-improve"
+path = "src/main.rs"
+
+[dependencies]
+soso-abi = { workspace = true }
+libsoso = { workspace = true }
+soso-improve-core = { path = "../../crates/soso-improve-core" }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

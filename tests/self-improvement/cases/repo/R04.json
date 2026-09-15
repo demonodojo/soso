@@ -13,8 +13,9 @@
   "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_repo.py",
+      "soso-improve",
+      "verificar",
+      "repo",
       "--caso",
       "R04",
       "--arbol",

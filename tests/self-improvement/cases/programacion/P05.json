@@ -12,8 +12,9 @@
   "resultado_observable": "El programa candidato, compilado con rustc y ejecutado con cada vector reservado, escribe en stdout exactamente la salida esperada y termina con el código indicado.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_programa.py",
+      "soso-improve",
+      "verificar",
+      "programa",
       "--caso",
       "P05",
       "--candidato",

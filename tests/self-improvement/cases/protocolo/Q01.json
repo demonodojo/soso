@@ -14,8 +14,9 @@
   "resultado_observable": "La respuesta grabada es 200, trae texto de asistente sin llamadas, para por token de fin y su usage suma.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "soso-improve",
+      "verificar",
+      "protocolo",
       "--caso",
       "Q01",
       "--respuesta",

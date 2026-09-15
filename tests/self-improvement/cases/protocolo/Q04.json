@@ -14,8 +14,9 @@
   "resultado_observable": "La respuesta grabada incorpora el resultado de la herramienta y no repite la llamada.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "soso-improve",
+      "verificar",
+      "protocolo",
       "--caso",
       "Q04",
       "--respuesta",

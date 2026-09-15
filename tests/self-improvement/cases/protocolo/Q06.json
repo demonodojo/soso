@@ -14,8 +14,9 @@
   "resultado_observable": "Los trozos recibidos se concatenan, decodifican en UTF-8 y el texto coincide literalmente con el pedido.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "soso-improve",
+      "verificar",
+      "protocolo",
       "--caso",
       "Q06",
       "--respuesta",

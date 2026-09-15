@@ -26,7 +26,7 @@
         "summary": "docs/self-improvement/seguimiento/T01.md",
         "evidence": "target/self-improvement/tasks/T01/resultado.md",
         "blocker": null,
-        "next_step": "T02 y T03 habilitadas; ramas del checkout ya resueltas (main = 5a7be1388)"
+        "next_step": "T02 y T03 habilitadas; implementación portada a Rust el 2026-09-16 (tools/soso-improve + user/soso-improve)"
       }
     },
     {
@@ -53,7 +53,7 @@
         "summary": "docs/self-improvement/seguimiento/T02.md",
         "evidence": "target/self-improvement/tasks/T02/resultado.md",
         "blocker": null,
-        "next_step": "T03 habilitada; T14 consumirá el banco cuando existan T03 y T13"
+        "next_step": "T03 habilitada; banco portado a Rust el 2026-09-16, huella 74f325fcf5ca95dd; T14 lo consumirá cuando existan T03 y T13"
       }
     },
     {

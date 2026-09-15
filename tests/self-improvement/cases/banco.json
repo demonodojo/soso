@@ -1,5 +1,181 @@
 {
-  "schema_version": 1,
+  "casos": [
+    {
+      "archivo": "programacion/P01.json",
+      "clase": "programacion",
+      "id": "P01",
+      "particion": "desarrollo",
+      "titulo": "Truncar a N bytes sin partir un carácter"
+    },
+    {
+      "archivo": "programacion/P02.json",
+      "clase": "programacion",
+      "id": "P02",
+      "particion": "reservado",
+      "titulo": "Escapar una cadena para JSON"
+    },
+    {
+      "archivo": "programacion/P03.json",
+      "clase": "programacion",
+      "id": "P03",
+      "particion": "desarrollo",
+      "titulo": "Leer Content-Length de un bloque de cabeceras"
+    },
+    {
+      "archivo": "programacion/P04.json",
+      "clase": "programacion",
+      "id": "P04",
+      "particion": "reservado",
+      "titulo": "Acumular sin desbordar un contador"
+    },
+    {
+      "archivo": "programacion/P05.json",
+      "clase": "programacion",
+      "id": "P05",
+      "particion": "desarrollo",
+      "titulo": "Normalizar una ruta relativa sin dejarla escapar"
+    },
+    {
+      "archivo": "programacion/P06.json",
+      "clase": "programacion",
+      "id": "P06",
+      "particion": "reservado",
+      "titulo": "Distinguir «no existe» de otros errores de E/S"
+    },
+    {
+      "archivo": "programacion/P07.json",
+      "clase": "programacion",
+      "id": "P07",
+      "particion": "desarrollo",
+      "titulo": "Un iterador agotado se queda agotado"
+    },
+    {
+      "archivo": "programacion/P08.json",
+      "clase": "programacion",
+      "id": "P08",
+      "particion": "desarrollo",
+      "titulo": "Ordenar por clave conservando el orden de llegada"
+    },
+    {
+      "archivo": "programacion/P09.json",
+      "clase": "programacion",
+      "id": "P09",
+      "particion": "desarrollo",
+      "titulo": "Pertenencia a un rango semiabierto"
+    },
+    {
+      "archivo": "programacion/P10.json",
+      "clase": "programacion",
+      "id": "P10",
+      "particion": "desarrollo",
+      "titulo": "Liberar el recurso también en el camino de error"
+    },
+    {
+      "archivo": "protocolo/Q01.json",
+      "clase": "protocolo",
+      "id": "Q01",
+      "particion": "reservado",
+      "titulo": "Texto simple: una pregunta, una respuesta"
+    },
+    {
+      "archivo": "protocolo/Q02.json",
+      "clase": "protocolo",
+      "id": "Q02",
+      "particion": "desarrollo",
+      "titulo": "System + user: la instrucción de sistema manda"
+    },
+    {
+      "archivo": "protocolo/Q03.json",
+      "clase": "protocolo",
+      "id": "Q03",
+      "particion": "desarrollo",
+      "titulo": "Dos turnos: el historial se usa"
+    },
+    {
+      "archivo": "protocolo/Q04.json",
+      "clase": "protocolo",
+      "id": "Q04",
+      "particion": "desarrollo",
+      "titulo": "Llamada a herramienta y su resultado"
+    },
+    {
+      "archivo": "protocolo/Q05.json",
+      "clase": "protocolo",
+      "id": "Q05",
+      "particion": "desarrollo",
+      "titulo": "Contenido null en el historial"
+    },
+    {
+      "archivo": "protocolo/Q06.json",
+      "clase": "protocolo",
+      "id": "Q06",
+      "particion": "reservado",
+      "titulo": "Unicode fragmentado entre trozos del flujo"
+    },
+    {
+      "archivo": "protocolo/Q07.json",
+      "clase": "protocolo",
+      "id": "Q07",
+      "particion": "desarrollo",
+      "titulo": "Argumentos de la llamada partidos en varios deltas"
+    },
+    {
+      "archivo": "protocolo/Q08.json",
+      "clase": "protocolo",
+      "id": "Q08",
+      "particion": "reservado",
+      "titulo": "tool_choice con un nombre que no existe"
+    },
+    {
+      "archivo": "protocolo/Q09.json",
+      "clase": "protocolo",
+      "id": "Q09",
+      "particion": "reservado",
+      "titulo": "Cuerpo JSON incompleto"
+    },
+    {
+      "archivo": "protocolo/Q10.json",
+      "clase": "protocolo",
+      "id": "Q10",
+      "particion": "desarrollo",
+      "titulo": "Contexto por encima del límite"
+    },
+    {
+      "archivo": "repo/R01.json",
+      "clase": "repo",
+      "id": "R01",
+      "particion": "desarrollo",
+      "titulo": "El texto no ASCII sobrevive a decode_entities"
+    },
+    {
+      "archivo": "repo/R02.json",
+      "clase": "repo",
+      "id": "R02",
+      "particion": "reservado",
+      "titulo": "Validar el CRC32 de la cabecera GPT al parsearla"
+    },
+    {
+      "archivo": "repo/R03.json",
+      "clase": "repo",
+      "id": "R03",
+      "particion": "desarrollo",
+      "titulo": "header_value sin distinguir mayúsculas"
+    },
+    {
+      "archivo": "repo/R04.json",
+      "clase": "repo",
+      "id": "R04",
+      "particion": "desarrollo",
+      "titulo": "resolve_url resuelve los segmentos . y .."
+    },
+    {
+      "archivo": "repo/R05.json",
+      "clase": "repo",
+      "id": "R05",
+      "particion": "desarrollo",
+      "titulo": "Trocear un tramo de descarga que no cabe en RAM"
+    }
+  ],
   "distribucion": {
     "programacion": 10,
     "protocolo": 10,
@@ -10,8 +186,8 @@
     "protocolo": 10,
     "repo": 5
   },
+  "huella": "74f325fcf5ca95dd4d298d691421073cd7a2ca4c2315a6e2d64d36a329dea1c8",
   "particion": {
-    "regla": "sha256('soso-banco-v1|' + id)[:8] % 5 < 2 -> reservado",
     "conteo": {
       "programacion": {
         "desarrollo": 7,
@@ -25,8 +201,11 @@
         "desarrollo": 4,
         "reservado": 1
       }
-    }
+    },
+    "regla": "sha256('soso-banco-v1|' + id)[:8] % 5 < 2 -> reservado"
   },
+  "reservado": "tests/self-improvement/cases/reservado",
+  "schema_version": 1,
   "umbrales": {
     "estado": "no fijados",
     "fijar_en": "T14",
@@ -36,183 +215,5 @@
       "protocolo": null,
       "repo": null
     }
-  },
-  "huella": "452d9c5f4a3de4dbdfaffc783e118eda1e24edbcc7a1bb46c9f782cebabe46df",
-  "casos": [
-    {
-      "id": "P01",
-      "clase": "programacion",
-      "particion": "desarrollo",
-      "titulo": "Truncar a N bytes sin partir un carácter",
-      "archivo": "programacion/P01.json"
-    },
-    {
-      "id": "P02",
-      "clase": "programacion",
-      "particion": "reservado",
-      "titulo": "Escapar una cadena para JSON",
-      "archivo": "programacion/P02.json"
-    },
-    {
-      "id": "P03",
-      "clase": "programacion",
-      "particion": "desarrollo",
-      "titulo": "Leer Content-Length de un bloque de cabeceras",
-      "archivo": "programacion/P03.json"
-    },
-    {
-      "id": "P04",
-      "clase": "programacion",
-      "particion": "reservado",
-      "titulo": "Acumular sin desbordar un contador",
-      "archivo": "programacion/P04.json"
-    },
-    {
-      "id": "P05",
-      "clase": "programacion",
-      "particion": "desarrollo",
-      "titulo": "Normalizar una ruta relativa sin dejarla escapar",
-      "archivo": "programacion/P05.json"
-    },
-    {
-      "id": "P06",
-      "clase": "programacion",
-      "particion": "reservado",
-      "titulo": "Distinguir «no existe» de otros errores de E/S",
-      "archivo": "programacion/P06.json"
-    },
-    {
-      "id": "P07",
-      "clase": "programacion",
-      "particion": "desarrollo",
-      "titulo": "Un iterador agotado se queda agotado",
-      "archivo": "programacion/P07.json"
-    },
-    {
-      "id": "P08",
-      "clase": "programacion",
-      "particion": "desarrollo",
-      "titulo": "Ordenar por clave conservando el orden de llegada",
-      "archivo": "programacion/P08.json"
-    },
-    {
-      "id": "P09",
-      "clase": "programacion",
-      "particion": "desarrollo",
-      "titulo": "Pertenencia a un rango semiabierto",
-      "archivo": "programacion/P09.json"
-    },
-    {
-      "id": "P10",
-      "clase": "programacion",
-      "particion": "desarrollo",
-      "titulo": "Liberar el recurso también en el camino de error",
-      "archivo": "programacion/P10.json"
-    },
-    {
-      "id": "Q01",
-      "clase": "protocolo",
-      "particion": "reservado",
-      "titulo": "Texto simple: una pregunta, una respuesta",
-      "archivo": "protocolo/Q01.json"
-    },
-    {
-      "id": "Q02",
-      "clase": "protocolo",
-      "particion": "desarrollo",
-      "titulo": "System + user: la instrucción de sistema manda",
-      "archivo": "protocolo/Q02.json"
-    },
-    {
-      "id": "Q03",
-      "clase": "protocolo",
-      "particion": "desarrollo",
-      "titulo": "Dos turnos: el historial se usa",
-      "archivo": "protocolo/Q03.json"
-    },
-    {
-      "id": "Q04",
-      "clase": "protocolo",
-      "particion": "desarrollo",
-      "titulo": "Llamada a herramienta y su resultado",
-      "archivo": "protocolo/Q04.json"
-    },
-    {
-      "id": "Q05",
-      "clase": "protocolo",
-      "particion": "desarrollo",
-      "titulo": "Contenido null en el historial",
-      "archivo": "protocolo/Q05.json"
-    },
-    {
-      "id": "Q06",
-      "clase": "protocolo",
-      "particion": "reservado",
-      "titulo": "Unicode fragmentado entre trozos del flujo",
-      "archivo": "protocolo/Q06.json"
-    },
-    {
-      "id": "Q07",
-      "clase": "protocolo",
-      "particion": "desarrollo",
-      "titulo": "Argumentos de la llamada partidos en varios deltas",
-      "archivo": "protocolo/Q07.json"
-    },
-    {
-      "id": "Q08",
-      "clase": "protocolo",
-      "particion": "reservado",
-      "titulo": "tool_choice con un nombre que no existe",
-      "archivo": "protocolo/Q08.json"
-    },
-    {
-      "id": "Q09",
-      "clase": "protocolo",
-      "particion": "reservado",
-      "titulo": "Cuerpo JSON incompleto",
-      "archivo": "protocolo/Q09.json"
-    },
-    {
-      "id": "Q10",
-      "clase": "protocolo",
-      "particion": "desarrollo",
-      "titulo": "Contexto por encima del límite",
-      "archivo": "protocolo/Q10.json"
-    },
-    {
-      "id": "R01",
-      "clase": "repo",
-      "particion": "desarrollo",
-      "titulo": "El texto no ASCII sobrevive a decode_entities",
-      "archivo": "repo/R01.json"
-    },
-    {
-      "id": "R02",
-      "clase": "repo",
-      "particion": "reservado",
-      "titulo": "Validar el CRC32 de la cabecera GPT al parsearla",
-      "archivo": "repo/R02.json"
-    },
-    {
-      "id": "R03",
-      "clase": "repo",
-      "particion": "desarrollo",
-      "titulo": "header_value sin distinguir mayúsculas",
-      "archivo": "repo/R03.json"
-    },
-    {
-      "id": "R04",
-      "clase": "repo",
-      "particion": "desarrollo",
-      "titulo": "resolve_url resuelve los segmentos . y ..",
-      "archivo": "repo/R04.json"
-    },
-    {
-      "id": "R05",
-      "clase": "repo",
-      "particion": "desarrollo",
-      "titulo": "Trocear un tramo de descarga que no cabe en RAM",
-      "archivo": "repo/R05.json"
-    }
-  ]
+  }
 }

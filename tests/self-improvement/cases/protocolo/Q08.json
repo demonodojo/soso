@@ -14,8 +14,9 @@
   "resultado_observable": "La petición se rechaza con 400 y objeto error; no se fabrica una respuesta de asistente.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "soso-improve",
+      "verificar",
+      "protocolo",
       "--caso",
       "Q08",
       "--respuesta",

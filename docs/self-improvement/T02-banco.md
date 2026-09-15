@@ -19,11 +19,15 @@ se obtienen de las dependencias; todavía no existen en la base del plan.
 
 ## Archivos que se pueden cambiar
 
-Crear `tests/self-improvement/cases/`, `case.schema.json` y `test_cases.py` en ese directorio padre.
+Crear `tests/self-improvement/cases/` y `case.schema.json`; la lógica del banco y sus verificadores van en `crates/soso-improve-core`, con las pruebas en `tools/soso-improve/tests/banco.rs`.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
 con la reproducción; no ampliar esta tarea de forma silenciosa.
+
+> **Lenguaje:** igual que T01, el banco se implementó en Python y se portó a Rust
+> el 16 de septiembre de 2026. Los 25 casos JSON no cambiaron: eran datos neutros.
+> Ver [seguimiento/T02.md](seguimiento/T02.md).
 
 ## Pasos
 
@@ -35,7 +39,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 ## Comprobación
 
-`python3 -m unittest discover -s tests/self-improvement -p test_cases.py`. Afirmar 10/10/5 casos, IDs únicos, verificadores ejecutables y detección tanto de una solución correcta como de una incorrecta.
+`cargo test -p soso-improve-core -p soso-improve`. Afirmar 10/10/5 casos, IDs únicos, verificadores ejecutables y detección tanto de una solución correcta como de una incorrecta.
 
 Los comandos de crates, scripts o subcomandos nuevos se ejecutan **después de
 crearlos en esta tarea o en sus dependencias**. Guardar salida y exit code;

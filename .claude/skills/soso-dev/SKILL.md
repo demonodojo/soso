@@ -30,17 +30,25 @@ punto exacto de reanudación; no volver a ejecutar pruebas vigentes sin motivo.
 Para fijar la base de una sesión de automejora sin tocar el checkout:
 
 ```sh
-python3 scripts/self-improvement/baseline.py --repo . --out target/self-improvement/base
-python3 scripts/self-improvement/baseline.py reconstruct \
-    --capture target/self-improvement/base --into target/self-improvement/copia --with-excluded
-python3 scripts/self-improvement/baseline.py suites \
-    --capture target/self-improvement/base --tree target/self-improvement/copia --timeout 5400
+cargo run -q -p soso-improve -- capturar --repo . --out target/self-improvement/base
+cargo run -q -p soso-improve -- reconstruir \
+    --captura target/self-improvement/base --destino target/self-improvement/copia
+cargo run -q -p soso-improve -- suites \
+    --captura target/self-improvement/base --arbol target/self-improvement/copia
+cargo run -q -p soso-improve -- banco validar
+cargo run -q -p soso-improve -- verificar protocolo --caso Q01 --respuesta r.json
 ```
 
-La captura solo lee (sale con 3 si el checkout cambia mientras lee); la copia
-es el árbol donde ejecutar las suites. `--with-excluded` repone del origen los
-blobs que la captura no guarda —el firmware de iwlwifi que exige
-`cargo xtask check`— comprobando su hash.
+La captura solo lee (sale con 3 si el árbol cambia mientras lee) y guarda el
+**contenido** de la base en un almacén por hash, así que reconstruir no usa git:
+es copiar archivos. Lo que no es fuente se decide leyendo el `.gitignore` del
+árbol, no con una lista escrita a mano.
+
+El mismo binario existe dentro de soso (`/bin/soso-improve`): la lógica vive en
+`crates/soso-improve-core` (`no_std + alloc`) y cada lado pone su entorno —`std`
+en el host, `spawn_io`/`getdents` en el guest—. Dentro de soso funcionan
+`capturar`, `reconstruir`, `banco` y `protocolo`; `programa` necesita un
+compilador real (T40) y `repo`, cargo (T41).
 
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
 Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).
@@ -222,10 +230,8 @@ Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp).
 
 ```sh
 # Host: automejora (T01 base reproducible, T02 banco de casos).
-# `cargo xtask check` ya las ejecuta; esto es para iterar sobre una sola.
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/self-improvement -p test_baseline.py
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/self-improvement -p test_cases.py
-python3 tests/self-improvement/cases/banco.py validar
+# `cargo xtask check` ya las ejecuta con el resto de tests host.
+cargo test -p soso-improve-core -p soso-improve
 
 # Host-only sosofs crash-safety
 cargo test -q -p sosofs --features std

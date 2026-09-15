@@ -1,0 +1,16 @@
+[package]
+name = "soso-improve-core"
+version = "0.1.0"
+edition = "2021"
+
+# `no_std + alloc` por defecto: esta lógica tiene que poder compilarse para el
+# userspace de soso, no solo para el host. Todo lo que necesita el sistema
+# (leer archivos, lanzar procesos) entra por los traits de `entorno`.
+[dependencies]
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
+
+[features]
+default = []
+std = ["serde/std", "serde_json/std", "sha2/std"]

@@ -782,6 +782,24 @@ name = "soso-hw"
 version = "0.1.0"
 
 [[package]]
+name = "soso-improve"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soso-improve-core",
+]
+
+[[package]]
+name = "soso-improve-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "soso-llm-core"
 version = "0.1.0"
 dependencies = [

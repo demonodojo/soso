@@ -672,6 +672,7 @@ pub(crate) fn build_user() -> bool {
         "soso-git",
         "soso-test-sosofs",
         "soso-rustc",
+        "soso-improve",
     ] {
         let src = out.join(prog);
         let dst = bin.join(prog);

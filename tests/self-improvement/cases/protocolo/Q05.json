@@ -14,8 +14,9 @@
   "resultado_observable": "El historial con content null se acepta y produce respuesta, no un error de petición.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "soso-improve",
+      "verificar",
+      "protocolo",
       "--caso",
       "Q05",
       "--respuesta",

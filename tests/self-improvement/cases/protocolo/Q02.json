@@ -14,8 +14,9 @@
   "resultado_observable": "La respuesta grabada es 200 y su texto respeta la instrucción de sistema.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "soso-improve",
+      "verificar",
+      "protocolo",
       "--caso",
       "Q02",
       "--respuesta",

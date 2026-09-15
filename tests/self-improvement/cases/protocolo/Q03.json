@@ -14,8 +14,9 @@
   "resultado_observable": "La respuesta grabada recupera el dato que solo aparecía en un turno anterior.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "soso-improve",
+      "verificar",
+      "protocolo",
       "--caso",
       "Q03",
       "--respuesta",

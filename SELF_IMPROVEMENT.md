@@ -11,7 +11,7 @@ y acumular mejoras verificadas del propio sistema.
 [catálogo de dependencias](docs/self-improvement/tasks.json). Cada ficha fija
 contexto mínimo, archivos, pasos, pruebas y cierre.
 [T01 — Base reproducible](docs/self-improvement/T01-base.md) está completada
-(`scripts/self-improvement/baseline.py`); seguir por
+(`tools/soso-improve`); seguir por
 [T02](docs/self-improvement/T02-banco.md) y
 [T03](docs/self-improvement/T03-perfil-modelo.md). Las fichas de
 ports nativos distinguen investigación, implementación por capacidad e

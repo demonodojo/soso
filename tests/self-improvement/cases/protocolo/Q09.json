@@ -15,8 +15,9 @@
   "resultado_observable": "El cuerpo truncado se rechaza con 400 y objeto error, sin generar respuesta.",
   "comprobador": {
     "argv": [
-      "python3",
-      "tests/self-improvement/cases/verificadores/verificar_protocolo.py",
+      "soso-improve",
+      "verificar",
+      "protocolo",
       "--caso",
       "Q09",
       "--respuesta",

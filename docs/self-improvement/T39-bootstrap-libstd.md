@@ -20,11 +20,16 @@ se obtienen de las dependencias; todavía no existen en la base del plan.
 
 ## Archivos que se pueden cambiar
 
-Editar bootstrap/apply-patches y documentación asociada; añadir `tests/self-improvement/test_bootstrap.py` con vendor temporal.
+Editar bootstrap/apply-patches y documentación asociada; añadir las pruebas del bootstrap a `tools/soso-improve` (o a `xtask`, si encaja mejor con el flujo de build) con vendor temporal.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
 con la reproducción; no ampliar esta tarea de forma silenciosa.
+
+> **Lenguaje:** esta ficha pedía Python; se reescribió el 16 de septiembre de 2026
+> a Rust, porque el objetivo del plan es que todo pueda correr **dentro de soso**
+> y soso no tiene intérprete de Python. Ver
+> [seguimiento/T01.md](seguimiento/T01.md).
 
 ## Pasos
 
@@ -36,7 +41,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 ## Comprobación
 
-`python3 -m unittest discover -s tests/self-improvement -p test_bootstrap.py` para revisión incorrecta, preparación doble y vendor sucio. Después build real `cargo xtask rust-build-std` y humo guest.
+`cargo test -p soso-improve` para revisión incorrecta, preparación doble y vendor sucio. Después build real `cargo xtask rust-build-std` y humo guest.
 
 Los comandos de crates, scripts o subcomandos nuevos se ejecutan **después de
 crearlos en esta tarea o en sus dependencias**. Guardar salida y exit code;

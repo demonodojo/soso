@@ -65,9 +65,6 @@ pub fn run() {
     println!("check: tests xtask (parsers y modelos)…");
     run_xtask_tests(&root, &fallos, &arte);
 
-    println!("check: suites de automejora (host)…");
-    run_self_improvement(&root, &fallos, &arte);
-
     let n = *fallos.lock().unwrap();
     println!("check: artefactos en {}", arte.display());
     if n == 0 {
@@ -185,6 +182,13 @@ fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
         ("xhci-nostd", &["xhci-nostd"], false),
         ("soso-audio+gguf2som", &["soso-audio", "gguf2som"], true),
         ("soso-forja-server", &["soso-forja-server"], false),
+        // Automejora: base reproducible (T01) y banco de casos (T02). El banco
+        // compila con rustc los candidatos de sus 10 casos de programación.
+        (
+            "soso-improve-core+soso-improve",
+            &["soso-improve-core", "soso-improve"],
+            false,
+        ),
     ];
     for (nombre, pkgs, std) in batches {
         if !cargo_test(root, pkgs, *std) {
@@ -294,50 +298,6 @@ fn run_script(
     } else {
         eprintln!("check: FALLO {nombre}");
         *fallos.lock().unwrap() += 1;
-    }
-}
-
-/// Suites host del plan de automejora (`tests/self-improvement/`).
-///
-/// Son Python de biblioteca estándar —las fichas T01 y T02 lo fijan así para
-/// que la captura de base funcione aunque el build de Rust esté roto—, pero eso
-/// no las deja fuera de la verificación del proyecto: sin este paso, el único
-/// punto de entrada (`cargo xtask check`) no las ejecutaba y podían pudrirse
-/// sin que nadie se enterara.
-///
-/// `PYTHONDONTWRITEBYTECODE` evita que la propia comprobación ensucie el
-/// checkout con `__pycache__`, que es justo lo que T01 promete no hacer.
-const SUITES_AUTOMEJORA: &[(&str, &str)] = &[
-    ("automejora base (T01)", "test_baseline.py"),
-    ("automejora banco (T02)", "test_cases.py"),
-];
-
-fn run_self_improvement(root: &Path, fallos: &Arc<Mutex<u32>>, arte: &Path) {
-    let dir = root.join("tests/self-improvement");
-    for (nombre, patron) in SUITES_AUTOMEJORA {
-        if !dir.join(patron).is_file() {
-            println!("check: omitido {nombre} (no está tests/self-improvement/{patron})");
-            continue;
-        }
-        let log = arte.join(format!("{}.log", nombre_artefacto(nombre)));
-        let mut cmd = Command::new("python3");
-        cmd.args([
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
-            "tests/self-improvement",
-            "-p",
-            patron,
-        ])
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .current_dir(root);
-        if ejecutar_con_log(cmd, &log, nombre) {
-            println!("check: OK  {nombre}");
-        } else {
-            eprintln!("check: FALLO {nombre}");
-            *fallos.lock().unwrap() += 1;
-        }
     }
 }
 
