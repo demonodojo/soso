@@ -30,6 +30,7 @@ struct tx_rec {
 static struct tx_rec g_tx[4];
 static int g_tx_n;
 static const uint16_t g_mock_mgmt_qid = 5u;
+static const uint16_t g_mock_data_qid = 6u;
 static size_t g_mgmt_bc_alloc_bytes;
 
 void lx_printk(const char *fmt, ...) { (void)fmt; }
@@ -61,6 +62,11 @@ void iwl_trans_poll(struct iwl_ax211_priv *iwl)
 }
 
 void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl)
+{
+    (void)iwl;
+}
+
+void iwl_trans_txq_drain_data(struct iwl_ax211_priv *iwl)
 {
     (void)iwl;
 }
@@ -230,13 +236,33 @@ int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
     return (int)g_mock_mgmt_qid;
 }
 
+int iwl_trans_txq_alloc_data(struct iwl_ax211_priv *iwl, uint8_t sta_id, uint8_t tid)
+{
+    (void)sta_id;
+    if (!iwl || !iwl->alive)
+        return -1;
+    if (iwl->data_txq_ready)
+        return (int)iwl->data_txq_id;
+    if (tid != IWL_TID_NON_QOS)
+        return -1;
+    iwl->data_txq_id = g_mock_data_qid;
+    iwl->data_txq_write = 0;
+    iwl->data_txq_read = 0;
+    iwl->data_txq_ready = 1;
+    return (int)g_mock_data_qid;
+}
+
 int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
                  const void *payload, uint16_t pay_len)
 {
     uint8_t body[256];
     const struct iwl_cmd_header *hdr = (const struct iwl_cmd_header *)body;
 
-    if (!iwl || !iwl->mgmt_txq_ready || txq_id != iwl->mgmt_txq_id)
+    if (!iwl)
+        return -1;
+    if (iwl->data_txq_ready && txq_id == iwl->data_txq_id)
+        ;
+    else if (!iwl->mgmt_txq_ready || txq_id != iwl->mgmt_txq_id)
         return -1;
     if (sizeof(struct iwl_cmd_header) != 4) {
         fprintf(stderr, "iwl_cmd_header debe ser 4 B\n");

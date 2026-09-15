@@ -545,6 +545,10 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
     iwl->mgmt_txq_id = 0;
     iwl->mgmt_txq_write = 0;
     iwl->mgmt_txq_read = 0;
+    iwl->data_txq_ready = 0;
+    iwl->data_txq_id = 0;
+    iwl->data_txq_write = 0;
+    iwl->data_txq_read = 0;
     iwl->keys_installed = 0;
     iwl->authorized = 0;
     lx_iwlwifi_set_alive(0);
@@ -602,34 +606,79 @@ static uint32_t tx_resp_status_word(struct iwl_ax211_priv *iwl,
     return (uint32_t)(data[off] | ((uint32_t)data[off + 1] << 8));
 }
 
-/* Espacio libre del anillo TX; se deja un hueco para distinguir lleno de vacío,
- * igual que `iwl_txq_space`. */
-unsigned iwl_trans_tx_space(const struct iwl_ax211_priv *iwl)
+static uint16_t *txq_read_ptr(struct iwl_ax211_priv *iwl, uint16_t qid)
 {
-    unsigned used = (unsigned)((iwl->mgmt_txq_write - iwl->mgmt_txq_read) &
-                               (IWL_MGMT_QUEUE_SIZE - 1u));
+    if (iwl->data_txq_ready && qid == iwl->data_txq_id)
+        return &iwl->data_txq_read;
+    if (iwl->mgmt_txq_ready && qid == iwl->mgmt_txq_id)
+        return &iwl->mgmt_txq_read;
+    return 0;
+}
+
+static uint16_t *txq_write_ptr(struct iwl_ax211_priv *iwl, uint16_t qid)
+{
+    if (iwl->data_txq_ready && qid == iwl->data_txq_id)
+        return &iwl->data_txq_write;
+    if (iwl->mgmt_txq_ready && qid == iwl->mgmt_txq_id)
+        return &iwl->mgmt_txq_write;
+    return 0;
+}
+
+static unsigned txq_space_one(uint16_t write, uint16_t read)
+{
+    unsigned used = (unsigned)((write - read) & (IWL_MGMT_QUEUE_SIZE - 1u));
 
     return (IWL_MGMT_QUEUE_SIZE - 1u) - used;
+}
+
+static unsigned txq_space_id(struct iwl_ax211_priv *iwl, uint16_t qid)
+{
+    uint16_t *readp = txq_read_ptr(iwl, qid);
+    uint16_t *writep = txq_write_ptr(iwl, qid);
+
+    if (!readp || !writep)
+        return 0;
+    return txq_space_one(*writep, *readp);
+}
+
+/* Espacio libre del anillo TX mgmt (compat hostcheck). */
+unsigned iwl_trans_tx_space(const struct iwl_ax211_priv *iwl)
+{
+    if (!iwl || !iwl->mgmt_txq_ready)
+        return 0;
+    return txq_space_one(iwl->mgmt_txq_write, iwl->mgmt_txq_read);
 }
 
 /* Libera hasta el TFD que el firmware acaba de reconocer. La cola es FIFO y el
  * FW responde en orden, así que el índice de la secuencia marca la cabeza. */
 void iwl_trans_tx_reclaim(struct iwl_ax211_priv *iwl, uint16_t seq)
 {
-    unsigned idx = (unsigned)SEQ_TO_INDEX(seq) & (IWL_MGMT_QUEUE_SIZE - 1u);
-    unsigned next = (idx + 1u) & (IWL_MGMT_QUEUE_SIZE - 1u);
+    uint16_t qid = SEQ_TO_QUEUE(seq);
+    uint16_t *readp = txq_read_ptr(iwl, qid);
+    uint16_t *writep = txq_write_ptr(iwl, qid);
+    unsigned idx;
+    unsigned next;
 
-    /* Sólo avanza: una respuesta que apunte por detrás de la cabeza no debe
-     * retroceder el consumidor y volver a dar por libres TFDs en vuelo.
-     *
-     * Lo que **no** se puede filtrar es una respuesta repetida de un índice que
-     * entretanto se ha reutilizado: la secuencia lleva 8 bits de índice y ningún
-     * número de vuelta, así que es indistinguible de la legítima. `iwl_txq_reclaim`
-     * de Linux tampoco lo intenta; se confía en que el firmware no duplique. */
-    if (((next - iwl->mgmt_txq_read) & (IWL_MGMT_QUEUE_SIZE - 1u)) >
-        ((iwl->mgmt_txq_write - iwl->mgmt_txq_read) & (IWL_MGMT_QUEUE_SIZE - 1u)))
+    if (!readp || !writep)
         return;
-    iwl->mgmt_txq_read = (uint16_t)next;
+    idx = (unsigned)SEQ_TO_INDEX(seq) & (IWL_MGMT_QUEUE_SIZE - 1u);
+    next = (idx + 1u) & (IWL_MGMT_QUEUE_SIZE - 1u);
+    if (((next - *readp) & (IWL_MGMT_QUEUE_SIZE - 1u)) >
+        ((*writep - *readp) & (IWL_MGMT_QUEUE_SIZE - 1u)))
+        return;
+    *readp = (uint16_t)next;
+}
+
+static const char *tx_status_name(uint32_t st)
+{
+    switch (st) {
+    case TX_STATUS_SUCCESS:
+        return "SUCCESS";
+    case TX_STATUS_FAIL_LONG_LIMIT:
+        return "FAIL_LONG_LIMIT";
+    default:
+        return "";
+    }
 }
 
 static void parse_tx_resp(struct iwl_ax211_priv *iwl, uint8_t group,
@@ -645,13 +694,10 @@ static void parse_tx_resp(struct iwl_ax211_priv *iwl, uint8_t group,
                   (unsigned)group, pay);
         return;
     }
-    if (iwl_mvm_has_new_tx_api(iwl) && pay >= 38) {
+    if (iwl_mvm_has_new_tx_api(iwl) && pay >= 38)
         resp_qid = (uint16_t)(data[36] | ((uint16_t)data[37] << 8));
-        if (resp_qid && resp_qid != iwl->mgmt_txq_id) {
-            lx_printk("iwl_trans: TX resp qid=%u (mgmt=%u)\n",
-                      (unsigned)resp_qid, (unsigned)iwl->mgmt_txq_id);
-        }
-    }
+    if (resp_qid)
+        seq = (uint16_t)(QUEUE_TO_SEQ(resp_qid) | INDEX_TO_SEQ(seq));
     iwl_trans_tx_reclaim(iwl, seq);
     raw = tx_resp_status_word(iwl, data, pay);
     if (raw == 0xffffffffu) {
@@ -662,11 +708,25 @@ static void parse_tx_resp(struct iwl_ax211_priv *iwl, uint8_t group,
     }
     st = raw & TX_STATUS_MSK;
     iwl->last_mgmt_tx_status = (uint8_t)st;
-    lx_printk("iwl_trans: TX resp grp=%u frame_count=%u status=0x%02x "
-              "(raw=0x%04x off=%u) rd=%u wr=%u\n",
-              (unsigned)group, (unsigned)data[0], (unsigned)st, (unsigned)raw,
-              tx_resp_status_off(iwl),
-              (unsigned)iwl->mgmt_txq_read, (unsigned)iwl->mgmt_txq_write);
+    {
+        const char *name = tx_status_name(st);
+        uint16_t qid = resp_qid ? resp_qid : SEQ_TO_QUEUE(seq);
+        uint16_t *rd = txq_read_ptr(iwl, qid);
+        uint16_t *wr = txq_write_ptr(iwl, qid);
+
+        if (name[0])
+            lx_printk("iwl_trans: TX resp grp=%u qid=%u frame_count=%u "
+                      "status=0x%02x (%s) rd=%u wr=%u\n",
+                      (unsigned)group, (unsigned)qid, (unsigned)data[0],
+                      (unsigned)st, name,
+                      rd ? (unsigned)*rd : 0u, wr ? (unsigned)*wr : 0u);
+        else
+            lx_printk("iwl_trans: TX resp grp=%u qid=%u frame_count=%u "
+                      "status=0x%02x (raw=0x%04x off=%u) rd=%u wr=%u\n",
+                      (unsigned)group, (unsigned)qid, (unsigned)data[0],
+                      (unsigned)st, (unsigned)raw, tx_resp_status_off(iwl),
+                      rd ? (unsigned)*rd : 0u, wr ? (unsigned)*wr : 0u);
+    }
 }
 
 static void parse_session_prot_notif(struct iwl_ax211_priv *iwl,
@@ -1339,6 +1399,16 @@ void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl)
         iwl_trans_poll(iwl);
 }
 
+void iwl_trans_txq_drain_data(struct iwl_ax211_priv *iwl)
+{
+    unsigned i;
+
+    if (!iwl || !iwl->data_txq_ready)
+        return;
+    for (i = 0; i < 32u; i++)
+        iwl_trans_poll(iwl);
+}
+
 int iwl_trans_wait_mgmt_tx_resp(struct iwl_ax211_priv *iwl, unsigned iters)
 {
     unsigned i;
@@ -1396,17 +1466,17 @@ static int txq_gen2_set_tb(struct iwl_tfh_tfd_gen2 *tfd, uint64_t addr, uint16_t
     return 0;
 }
 
-static void txq_gen2_update_byte_tbl(struct iwl_ax211_priv *iwl, unsigned idx,
-                                     uint16_t byte_cnt, uint8_t num_tbs)
+static void txq_gen2_update_byte_tbl(void *bc_cpu, unsigned idx, uint16_t byte_cnt,
+                                     uint8_t num_tbs)
 {
     uint16_t *bc;
     unsigned filled;
     uint8_t num_fetch;
     uint16_t ent;
 
-    if (!iwl->mgmt_bc_cpu || idx >= IWL_MGMT_QUEUE_SIZE)
+    if (!bc_cpu || idx >= IWL_MGMT_QUEUE_SIZE)
         return;
-    bc = (uint16_t *)iwl->mgmt_bc_cpu;
+    bc = (uint16_t *)bc_cpu;
     filled = (unsigned)offsetof(struct iwl_tfh_tfd_gen2, tbs) +
              (unsigned)num_tbs * (unsigned)sizeof(struct iwl_tfh_tb);
     num_fetch = (uint8_t)((filled + 63u) / 64u - 1u);
@@ -1426,7 +1496,11 @@ static unsigned scd_dma_round(unsigned bytes)
     return (bytes + align - 1u) & ~(align - 1u);
 }
 
-static int mgmt_txq_alloc_dma(struct iwl_ax211_priv *iwl)
+static int txq_ring_alloc_dma(void **tfd_cpu, uint64_t *tfd_dma,
+                              void **first_tb_cpu, uint64_t *first_tb_dma,
+                              void **body_cpu, uint64_t *body_dma,
+                              void **bc_cpu, uint64_t *bc_dma,
+                              uint64_t invalid_dma, uint16_t invalid_size)
 {
     unsigned tfd_bytes = scd_dma_round(IWL_MGMT_QUEUE_SIZE * IWL_TFH_TFD_SIZE);
     unsigned first_tb_bytes =
@@ -1435,37 +1509,64 @@ static int mgmt_txq_alloc_dma(struct iwl_ax211_priv *iwl)
     unsigned bc_bytes = scd_dma_round(IWL_SCD_BC_TBL_BYTES);
     unsigned i;
 
+    if (*tfd_cpu && *first_tb_cpu && *body_cpu && *bc_cpu)
+        return 0;
+    *tfd_cpu = lx_dma_alloc_coherent(0, tfd_bytes, tfd_dma, GFP_KERNEL);
+    *first_tb_cpu =
+        lx_dma_alloc_coherent(0, first_tb_bytes, first_tb_dma, GFP_KERNEL);
+    *body_cpu = lx_dma_alloc_coherent(0, body_bytes, body_dma, GFP_KERNEL);
+    *bc_cpu = lx_dma_alloc_coherent(0, bc_bytes, bc_dma, GFP_KERNEL);
+    if (!*tfd_cpu || !*first_tb_cpu || !*body_cpu || !*bc_cpu)
+        return -1;
+    memset(*tfd_cpu, 0, tfd_bytes);
+    memset(*first_tb_cpu, 0, first_tb_bytes);
+    memset(*body_cpu, 0, body_bytes);
+    memset(*bc_cpu, 0, bc_bytes);
+    for (i = 0; i < IWL_MGMT_QUEUE_SIZE; i++) {
+        struct iwl_tfh_tfd_gen2 *tfd =
+            (struct iwl_tfh_tfd_gen2 *)((uint8_t *)*tfd_cpu +
+                                        (size_t)i * IWL_TFH_TFD_SIZE);
+
+        iwl_txq_set_tfd_invalid_gen2(tfd, invalid_dma, invalid_size);
+    }
+    return 0;
+}
+
+static int mgmt_txq_alloc_dma(struct iwl_ax211_priv *iwl)
+{
     if (iwl->mgmt_tfd_cpu && iwl->mgmt_first_tb_cpu && iwl->mgmt_body_cpu &&
         iwl->mgmt_bc_cpu && iwl->invalid_tx_cmd_cpu)
         return 0;
-    iwl->invalid_tx_cmd_size = (uint16_t)sizeof(struct iwl_cmd_header_wide);
-    iwl->invalid_tx_cmd_cpu = lx_dma_alloc_coherent(
-        0, iwl->invalid_tx_cmd_size, &iwl->invalid_tx_cmd_dma, GFP_KERNEL);
-    iwl->mgmt_tfd_cpu =
-        lx_dma_alloc_coherent(0, tfd_bytes, &iwl->mgmt_tfd_dma, GFP_KERNEL);
-    iwl->mgmt_first_tb_cpu =
-        lx_dma_alloc_coherent(0, first_tb_bytes, &iwl->mgmt_first_tb_dma, GFP_KERNEL);
-    iwl->mgmt_body_cpu =
-        lx_dma_alloc_coherent(0, body_bytes, &iwl->mgmt_body_dma, GFP_KERNEL);
-    iwl->mgmt_bc_cpu =
-        lx_dma_alloc_coherent(0, bc_bytes, &iwl->mgmt_bc_dma, GFP_KERNEL);
-    if (!iwl->invalid_tx_cmd_cpu || !iwl->mgmt_tfd_cpu || !iwl->mgmt_first_tb_cpu ||
-        !iwl->mgmt_body_cpu || !iwl->mgmt_bc_cpu)
-        return -1;
-    memset(iwl->mgmt_tfd_cpu, 0, tfd_bytes);
-    memset(iwl->mgmt_first_tb_cpu, 0, first_tb_bytes);
-    memset(iwl->mgmt_body_cpu, 0, body_bytes);
-    memset(iwl->mgmt_bc_cpu, 0, bc_bytes);
-    iwl_invalid_tx_cmd_init((struct iwl_cmd_header_wide *)iwl->invalid_tx_cmd_cpu);
-    for (i = 0; i < IWL_MGMT_QUEUE_SIZE; i++) {
-        struct iwl_tfh_tfd_gen2 *tfd =
-            (struct iwl_tfh_tfd_gen2 *)((uint8_t *)iwl->mgmt_tfd_cpu +
-                                        (size_t)i * IWL_TFH_TFD_SIZE);
-
-        iwl_txq_set_tfd_invalid_gen2(tfd, iwl->invalid_tx_cmd_dma,
-                                    iwl->invalid_tx_cmd_size);
+    if (!iwl->invalid_tx_cmd_cpu) {
+        iwl->invalid_tx_cmd_size = (uint16_t)sizeof(struct iwl_cmd_header_wide);
+        iwl->invalid_tx_cmd_cpu = lx_dma_alloc_coherent(
+            0, iwl->invalid_tx_cmd_size, &iwl->invalid_tx_cmd_dma, GFP_KERNEL);
+        if (!iwl->invalid_tx_cmd_cpu)
+            return -1;
+        iwl_invalid_tx_cmd_init((struct iwl_cmd_header_wide *)iwl->invalid_tx_cmd_cpu);
     }
-    return 0;
+    return txq_ring_alloc_dma(&iwl->mgmt_tfd_cpu, &iwl->mgmt_tfd_dma,
+                              &iwl->mgmt_first_tb_cpu, &iwl->mgmt_first_tb_dma,
+                              &iwl->mgmt_body_cpu, &iwl->mgmt_body_dma,
+                              &iwl->mgmt_bc_cpu, &iwl->mgmt_bc_dma,
+                              iwl->invalid_tx_cmd_dma, iwl->invalid_tx_cmd_size);
+}
+
+static int data_txq_alloc_dma(struct iwl_ax211_priv *iwl)
+{
+    if (!iwl->invalid_tx_cmd_cpu) {
+        iwl->invalid_tx_cmd_size = (uint16_t)sizeof(struct iwl_cmd_header_wide);
+        iwl->invalid_tx_cmd_cpu = lx_dma_alloc_coherent(
+            0, iwl->invalid_tx_cmd_size, &iwl->invalid_tx_cmd_dma, GFP_KERNEL);
+        if (!iwl->invalid_tx_cmd_cpu)
+            return -1;
+        iwl_invalid_tx_cmd_init((struct iwl_cmd_header_wide *)iwl->invalid_tx_cmd_cpu);
+    }
+    return txq_ring_alloc_dma(&iwl->data_tfd_cpu, &iwl->data_tfd_dma,
+                              &iwl->data_first_tb_cpu, &iwl->data_first_tb_dma,
+                              &iwl->data_body_cpu, &iwl->data_body_dma,
+                              &iwl->data_bc_cpu, &iwl->data_bc_dma,
+                              iwl->invalid_tx_cmd_dma, iwl->invalid_tx_cmd_size);
 }
 
 int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
@@ -1565,6 +1666,89 @@ int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
     return (int)qid;
 }
 
+int iwl_trans_txq_alloc_data(struct iwl_ax211_priv *iwl, uint8_t sta_id, uint8_t tid)
+{
+    struct iwl_tx_queue_cfg_rsp rsp;
+    uint16_t qid;
+    uint16_t wr;
+    static int logged;
+    int scd_ver;
+    int ret;
+
+    if (!iwl || !iwl->alive)
+        return -1;
+    if (iwl->data_txq_ready)
+        return (int)iwl->data_txq_id;
+    if (data_txq_alloc_dma(iwl) != 0)
+        return -1;
+
+    scd_ver = iwl_fw_cmd_ver(iwl, DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD);
+    if (scd_ver == 3) {
+        struct iwl_scd_queue_cfg_cmd scd;
+
+        memset(&scd, 0, sizeof(scd));
+        scd.operation = iwl_cpu_to_le32(IWL_SCD_QUEUE_ADD);
+        scd.u.add.sta_mask = iwl_cpu_to_le32(1u << sta_id);
+        scd.u.add.tid = tid;
+        scd.u.add.flags = 0;
+        scd.u.add.cb_size =
+            iwl_cpu_to_le32(tfd_queue_cb_size(IWL_MGMT_QUEUE_SIZE));
+        scd.u.add.bc_dram_addr = iwl->data_bc_dma;
+        scd.u.add.tfdq_dram_addr = iwl->data_tfd_dma;
+        lx_printk("iwl_trans: SCD_QUEUE_CONFIG data grp=%u id=0x%02x ver=%u "
+                  "sta=%u tid=%u\n",
+                  (unsigned)DATA_PATH_GROUP, (unsigned)SCD_QUEUE_CONFIG_CMD,
+                  scd_ver, (unsigned)sta_id, (unsigned)tid);
+        ret = iwl_trans_send_cmd_wait(iwl, DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD,
+                                      &scd, (uint16_t)sizeof(scd),
+                                      IWL_MVM_HCMD_TIMEOUT_MS);
+    } else if (scd_ver == 0) {
+        struct iwl_tx_queue_cfg_cmd cfg;
+
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.sta_id = sta_id;
+        cfg.tid = tid;
+        cfg.flags = iwl_cpu_to_le16(TX_QUEUE_CFG_ENABLE_QUEUE);
+        cfg.cb_size = iwl_cpu_to_le32(tfd_queue_cb_size(IWL_MGMT_QUEUE_SIZE));
+        cfg.byte_cnt_addr = iwl->data_bc_dma;
+        cfg.tfdq_addr = iwl->data_tfd_dma;
+        ret = iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, SCD_QUEUE_CFG, &cfg,
+                                      (uint16_t)sizeof(cfg),
+                                      IWL_MVM_HCMD_TIMEOUT_MS);
+    } else {
+        lx_printk("iwl_trans: SCD data queue alloc ver=%d no soportada\n", scd_ver);
+        return -1;
+    }
+    if (ret != 0) {
+        lx_printk("iwl_trans: SCD_QUEUE_CFG data falló\n");
+        return -1;
+    }
+    if (iwl->cmd_resp_len < (uint16_t)sizeof(rsp)) {
+        lx_printk("iwl_trans: SCD_QUEUE_CFG data resp corta (%u B)\n",
+                  (unsigned)iwl->cmd_resp_len);
+        return -1;
+    }
+    memcpy(&rsp, iwl->cmd_resp, sizeof(rsp));
+    qid = (uint16_t)(rsp.queue_number & 0x7fffu);
+    wr = (uint16_t)(rsp.write_pointer & (IWL_MGMT_QUEUE_SIZE - 1u));
+    if (!qid) {
+        lx_printk("iwl_trans: SCD_QUEUE_CFG data qid=0\n");
+        return -1;
+    }
+    iwl->data_txq_id = qid;
+    iwl->data_txq_write = wr;
+    iwl->data_txq_read = wr;
+    iwl->data_txq_ready = 1;
+    if (!logged) {
+        lx_printk("iwl_trans: TXQ data qid=%u tid=%u slots=%u wr=%u\n",
+                  (unsigned)qid, (unsigned)tid, (unsigned)IWL_MGMT_QUEUE_SIZE,
+                  (unsigned)wr);
+        logged = 1;
+    }
+    iwl_trans_txq_drain_data(iwl);
+    return (int)qid;
+}
+
 int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
                  const void *payload, uint16_t pay_len)
 {
@@ -1575,40 +1759,64 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
     struct iwl_cmd_header *hdr;
     uint64_t body_dma;
     uint64_t first_tb_dma;
+    void *tfd_cpu;
+    void *body_cpu;
+    void *first_tb_cpu;
+    void *bc_cpu;
+    uint16_t *writep;
     unsigned total;
     unsigned tb1_len;
     uint16_t frame_len;
     uint8_t num_tbs;
     uint32_t doorbell;
     unsigned poll;
+    int is_data;
 
-    if (!iwl || !iwl->alive || !iwl->mgmt_txq_ready || txq_id != iwl->mgmt_txq_id)
+    if (!iwl || !iwl->alive)
+        return -1;
+    is_data = iwl->data_txq_ready && txq_id == iwl->data_txq_id;
+    if (!is_data && (!iwl->mgmt_txq_ready || txq_id != iwl->mgmt_txq_id))
         return -1;
     if (!payload || pay_len == 0 ||
         pay_len + sizeof(struct iwl_cmd_header) > IWL_MGMT_TX_SLOT_SIZE)
         return -1;
     if (iwl->in_trans || iwl->cmd_needs_recover)
         return -1;
-    /* Sin esto el productor daba la vuelta cada 16 tramas y reescribía TFDs que
-     * el firmware aún no había consumido. */
-    if (iwl_trans_tx_space(iwl) == 0) {
+    writep = txq_write_ptr(iwl, txq_id);
+    if (!writep || txq_space_id(iwl, txq_id) == 0) {
         iwl->tx_full_drop++;
-        lx_printk("iwl_trans: cola TX llena (rd=%u wr=%u); trama descartada\n",
-                  (unsigned)iwl->mgmt_txq_read, (unsigned)iwl->mgmt_txq_write);
+        lx_printk("iwl_trans: cola TX qid=%u llena; trama descartada\n",
+                  (unsigned)txq_id);
         return -1;
     }
 
-    if (mgmt_txq_alloc_dma(iwl) != 0)
-        return -1;
+    if (is_data) {
+        if (data_txq_alloc_dma(iwl) != 0)
+            return -1;
+        tfd_cpu = iwl->data_tfd_cpu;
+        body_cpu = iwl->data_body_cpu;
+        first_tb_cpu = iwl->data_first_tb_cpu;
+        bc_cpu = iwl->data_bc_cpu;
+        body_dma = iwl->data_body_dma;
+        first_tb_dma = iwl->data_first_tb_dma;
+    } else {
+        if (mgmt_txq_alloc_dma(iwl) != 0)
+            return -1;
+        tfd_cpu = iwl->mgmt_tfd_cpu;
+        body_cpu = iwl->mgmt_body_cpu;
+        first_tb_cpu = iwl->mgmt_first_tb_cpu;
+        bc_cpu = iwl->mgmt_bc_cpu;
+        body_dma = iwl->mgmt_body_dma;
+        first_tb_dma = iwl->mgmt_first_tb_dma;
+    }
 
-    idx = (unsigned)(iwl->mgmt_txq_write & (IWL_MGMT_QUEUE_SIZE - 1u));
-    body = (uint8_t *)iwl->mgmt_body_cpu + idx * IWL_MGMT_TX_SLOT_SIZE;
-    first_tb = (uint8_t *)iwl->mgmt_first_tb_cpu + idx * IWL_FIRST_TB_SIZE_ALIGN;
-    tfd = (struct iwl_tfh_tfd_gen2 *)((uint8_t *)iwl->mgmt_tfd_cpu +
+    idx = (unsigned)(*writep & (IWL_MGMT_QUEUE_SIZE - 1u));
+    body = (uint8_t *)body_cpu + idx * IWL_MGMT_TX_SLOT_SIZE;
+    first_tb = (uint8_t *)first_tb_cpu + idx * IWL_FIRST_TB_SIZE_ALIGN;
+    tfd = (struct iwl_tfh_tfd_gen2 *)((uint8_t *)tfd_cpu +
                                       idx * IWL_TFH_TFD_SIZE);
-    body_dma = iwl->mgmt_body_dma + (uint64_t)idx * IWL_MGMT_TX_SLOT_SIZE;
-    first_tb_dma = iwl->mgmt_first_tb_dma +
-                   (uint64_t)idx * IWL_FIRST_TB_SIZE_ALIGN;
+    body_dma += (uint64_t)idx * IWL_MGMT_TX_SLOT_SIZE;
+    first_tb_dma += (uint64_t)idx * IWL_FIRST_TB_SIZE_ALIGN;
 
     memset(tfd, 0, sizeof(*tfd));
     memset(body, 0, IWL_MGMT_TX_SLOT_SIZE);
@@ -1638,11 +1846,10 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
         frame_len = (uint16_t)tc->len;
     }
     num_tbs = txq_gen2_num_tbs(tfd);
-    txq_gen2_update_byte_tbl(iwl, idx, frame_len, num_tbs);
+    txq_gen2_update_byte_tbl(bc_cpu, idx, frame_len, num_tbs);
 
-    iwl->mgmt_txq_write =
-        (uint16_t)((iwl->mgmt_txq_write + 1u) & (IWL_MGMT_QUEUE_SIZE - 1u));
-    doorbell = tx_doorbell(iwl, txq_id, iwl->mgmt_txq_write);
+    *writep = (uint16_t)((*writep + 1u) & (IWL_MGMT_QUEUE_SIZE - 1u));
+    doorbell = tx_doorbell(iwl, txq_id, *writep);
     lx_printk("iwl_trans: tx qid=%u doorbell=0x%08x seq=0x%04x len=%u\n",
               (unsigned)txq_id, doorbell, (unsigned)hdr->sequence,
               (unsigned)pay_len);

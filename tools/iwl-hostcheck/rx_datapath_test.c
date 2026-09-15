@@ -424,14 +424,50 @@ static void test_tx_ring(void)
           "sin respuestas del FW la cola se llena y deja de aceptar");
 
     /* La respuesta del firmware libera hasta ese índice. */
-    iwl_trans_tx_reclaim(&iwl, (uint16_t)INDEX_TO_SEQ(0));
+    iwl_trans_tx_reclaim(&iwl, (uint16_t)(QUEUE_TO_SEQ(5) | INDEX_TO_SEQ(0)));
     check(iwl_trans_tx_space(&iwl) == 1, "una respuesta libera un hueco");
     check(iwl_trans_tx(&iwl, 5, payload, sizeof(payload)) == 0,
           "con hueco libre vuelve a aceptar");
 
     /* Una respuesta repetida no puede devolver TFDs en vuelo. */
-    iwl_trans_tx_reclaim(&iwl, (uint16_t)INDEX_TO_SEQ(0));
+    iwl_trans_tx_reclaim(&iwl, (uint16_t)(QUEUE_TO_SEQ(5) | INDEX_TO_SEQ(0)));
     check(iwl_trans_tx_space(&iwl) == 0, "respuesta repetida no retrocede el consumidor");
+}
+
+static void test_tx_eapol_cmd(void)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t eth[128];
+    const struct iwl_tx_cmd_gen2 *cmd;
+    uint32_t tx_flags;
+    unsigned i;
+
+    priv_init(&iwl, 0);
+    iwl.alive = 1;
+    iwl.associated = 1;
+    iwl.data_txq_ready = 1;
+    iwl.data_txq_id = 6;
+    iwl.mgmt_txq_ready = 1;
+    iwl.mgmt_txq_id = 5;
+    memcpy(eth, PEER_MAC, 6);
+    memcpy(eth + 6, STA_MAC, 6);
+    eth[12] = 0x88;
+    eth[13] = 0x8e;
+    for (i = 14; i < 100; i++)
+        eth[i] = (uint8_t)i;
+
+    check(iwl_mvm_tx_8023(&iwl, eth, 100) == 0, "EAPOL TX en cola data qid=6");
+    check(iwl.data_txq_write == 1, "EAPOL usa cola data, no mgmt");
+    cmd = (const struct iwl_tx_cmd_gen2 *)((const uint8_t *)iwl.data_body_cpu +
+                                           sizeof(struct iwl_cmd_header));
+    tx_flags = cmd->flags;
+    check((tx_flags & IWL_TX_FLAGS_CMD_RATE) != 0,
+          "EAPOL TX CMD_RATE (sin LQ/rate scale)");
+    check((tx_flags & IWL_TX_FLAGS_ENCRYPT_DIS) != 0 &&
+              (tx_flags & IWL_TX_FLAGS_HIGH_PRI) != 0,
+          "EAPOL TX ENCRYPT_DIS|HIGH_PRI antes del 4-way");
+    check(cmd->offload_assist == (uint16_t)((24u / 2u) << TX_CMD_OFFLD_MH_SIZE),
+          "EAPOL TX offload_assist MH_SIZE=0x0c00");
 }
 
 int main(void)
@@ -446,6 +482,7 @@ int main(void)
     test_hdrlen();
     test_tx_conversion();
     test_tx_ring();
+    test_tx_eapol_cmd();
     puts(fails ? "contratos de formato: FALLOS" :
                  "contratos de formato y conversión OK (no acredita hardware)");
     return fails ? 1 : 0;

@@ -167,6 +167,25 @@ int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
     return 5;
 }
 
+int iwl_trans_txq_alloc_data(struct iwl_ax211_priv *iwl, uint8_t sta_id, uint8_t tid)
+{
+    (void)sta_id;
+    if (!iwl || !iwl->alive)
+        return -1;
+    if (tid != IWL_TID_NON_QOS)
+        return -1;
+    iwl->data_txq_id = 6;
+    iwl->data_txq_write = 0;
+    iwl->data_txq_read = 0;
+    iwl->data_txq_ready = 1;
+    return 6;
+}
+
+void iwl_trans_txq_drain_data(struct iwl_ax211_priv *iwl)
+{
+    (void)iwl;
+}
+
 int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
                  const void *payload, uint16_t pay_len)
 {

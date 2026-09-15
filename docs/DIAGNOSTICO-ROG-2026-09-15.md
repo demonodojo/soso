@@ -1,24 +1,26 @@
-# ROG AX200: AUTH timeout tras SCD/TLC OK (15 sep 2026)
+# ROG AX200: diagnóstico WiFi (15 sep 2026)
 
 ## Evidencia y alcance
 
 Lectura ESP `/dev/sda1` (`KERNEL`, vfat, extraíble) con `udisksctl`. Copias en
-`target/usb-diagnostic-2026-09-15/` (ESP desmontada). Log útil recortado en
-`SOSOLOG-clean.txt` (~957 líneas; el `.TXT` de 256 KiB tiene relleno de
-newlines). Sin PSK en este informe (`SOSOWIFI.TXT` vacío; el connect fue manual).
+`target/usb-diagnostic-2026-09-15/` (flush #31/#32) y
+`target/usb-diagnostic-2026-09-15-run3/` (flush **#50**). Sin PSK en este informe
+(`SOSOWIFI.TXT` vacío; el connect fue manual).
 
-| Campo | Valor (flush **#32**, último arranque) |
+| Campo | Valor (flush **#50**, último arranque) |
 |---|---|
 | Kernel empaquetado (SOSOHASH) | **0.2.2 (`dfec53f84-dirty`)** |
-| Kernel en placa (SOSOLOG) | **0.2.2 (`5a7be1388-dirty`)** — más nuevo que el USB |
-| Flush | **#32 @ 162569 ms** (~163 s) |
-| Hardware | `10de:249c` + `8086:2723` (AX200 gen2) + `10ec:8168` rtl8169 DOWN |
+| Kernel en placa (SOSOLOG) | **0.2.2 (`6f558f072-dirty`)** |
+| Fix EAPOL en árbol (sin reflash) | **`ffb7692c1-dirty`** |
+| Flush | **#50 @ 206266 ms** (~206 s) |
+| Hardware | `10de:249c` (GA107) + `8086:2723` (AX200 gen2) + `10ec:8168` rtl8169 DOWN |
 | Userspace | **`sosh —`** OK (pid=2) |
-| WiFi | ALIVE + MVM + scan **23 BSS**; **assoc FAIL** (AUTH timeout **ch3**) |
+| WiFi | ALIVE + MVM + scan **23 BSS**; **AUTH+ASSOC OK**; **4-way EAPOL FAIL** (`0x83`) |
 | GPU | GSP_INIT_DONE + VRAM pool + compute sm_86 + apagado limpio |
 | Ethernet | rtl8169 enlace DOWN (sin cable) → sin DHCP/SSH por cable |
 
-Flush anterior documentado: **#31 @ 147436 ms** (`dfec53f84-dirty`), AUTH timeout ch40.
+Flushes anteriores: **#32 @ 162569 ms** (AUTH timeout ch3); **#31 @ 147436 ms**
+(AUTH timeout ch40).
 
 Árboles Linux (solo lectura):
 
@@ -26,10 +28,45 @@ Flush anterior documentado: **#31 @ 147436 ms** (`dfec53f84-dirty`), AUTH timeou
 |---|---|---|
 | [`lxdde/linux/`](../lxdde/linux/) | **6.6.32** | `phy-ctxt.c` RLC_CONFIG, `tx.c` offload_assist, `time-event.h` SESSION_PROT |
 
-Hostcheck `./scripts/l6-iwl-fw-hostcheck.sh` **OK** (incluye RLC tras PHY y
-TX AUTH `offload_assist=0x0c00`). Firmware `iwlwifi-cc-a0-77.ucode`:
+Hostcheck `./scripts/l6-iwl-fw-hostcheck.sh` **OK** (RLC tras PHY, TX AUTH
+`offload_assist=0x0c00`, TX EAPOL simulado con cola data tid=0 + CMD_RATE).
+Firmware `iwlwifi-cc-a0-77.ucode`:
 `IWL_UCODE_TLV_CAPA_TLC_OFFLOAD` **bit 43 = 1**; `RLC_CONFIG_CMD` **ver 3**;
 `PHY_CONTEXT` **ver 4**.
+
+---
+
+## Tabla de etapas (flush #50 — kernel `6f558f072`)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Boot / sosh | `soso 0.2.2 (6f558f072-dirty)` → `sosh —` pid=2 | **OK** |
+| fatlog | flush **#50** @ 206 s | OK |
+| GPU GSP | `GSP_INIT_DONE`; pool VRAM; compute sm_86; apagado limpio | **OK** |
+| WiFi ALIVE | `UCODE_ALIVE_NTFY`; familia 22000 gen2 | **OK** |
+| WiFi init | `INIT_COMPLETE_NOTIF`; `up mínimo listo` | **OK** |
+| Scan userspace | `SCAN_COMPLETE count=23`; Rutilo WPA2 **ch40** | **OK** |
+| Connect | `wifi connect Rutilo …` | parcial |
+| ADD_STA | `ADD_STA status=0x00000001` | **OK** |
+| TLC / SCD / TXQ | `SCD wide ver_tlv=3` → `TXQ mgmt qid=1` | **OK** |
+| SESSION_PROT | `SESSION_PROTECTION CONF_ASSOC ok` | **OK** |
+| AUTH / ASSOC | `mlme_auth_ok`; `asociado a 'Rutilo' aid=8` | **OK** |
+| TX EAPOL (M2/M4) | `tx qid=1 … len=173` (4×) | enviado en cola **mgmt** |
+| TX resp EAPOL | `status=0x83` (`TX_STATUS_FAIL_LONG_LIMIT`) | **FAIL** |
+| 4-way / DHCP | sin `wifi-wpa: 4-way completado`; sin lease LxWifi | **FAIL** / pendiente |
+
+Secuencia:
+
+```
+… → AUTH+ASSOC 802.11 ok
+→ tx qid=1 len=173 (EAPOL data en cola mgmt tid=15)
+→ TX resp status=0x83 FAIL_LONG_LIMIT (×4)
+→ sin 4-way completado → sin DHCP WiFi
+```
+
+**Bloqueante:** tramas **802.11 datos** (EAPOL Ethernet empaquetado, len=173)
+salen por **cola mgmt** sin `offload_assist` MH_SIZE ni `IWL_TX_FLAGS_CMD_RATE`;
+el FW agota reintentos sin ACK del AP.
 
 ---
 
@@ -97,6 +134,31 @@ CMD_VERSIONS +192 → ALIVE → INIT_COMPLETE → MVM up
 → AUTH TX status=0x01 (offload_assist=0)
 → cero REPLY_RX_MPDU → AUTH timeout
 ```
+
+---
+
+## Hallazgos (flush #50)
+
+### WIFI-9. EAPOL en cola mgmt sin offload (bloqueante 4-way)
+
+**Síntoma:** AUTH/ASSOC mgmt (len=50/88) → `TX resp status=0x01`; EAPOL data
+(len=173) en `qid=1` (mgmt) → `status=0x83` (`TX_STATUS_FAIL_LONG_LIMIT`) ×4;
+no aparece `wifi-wpa: 4-way completado`.
+
+**soso (pre-fix):** [`iwl_mvm_tx_8023`](../lxdde/ports/iwlwifi/iwl_mvm_tx.c) no
+fijaba `offload_assist`, no usaba `IWL_TX_FLAGS_CMD_RATE`, y enviaba por
+`mgmt_txq_id` (tid=15).
+
+**Linux 6.6:**
+- [`tx.c:130-135`](../lxdde/linux/drivers/net/wireless/intel/iwlwifi/mvm/tx.c) —
+  `offload_assist |= (mh_len/2) << TX_CMD_OFFLD_MH_SIZE` (ToDS 24 B → `0x0c00`).
+- [`sta.c:845-906`](../lxdde/linux/drivers/net/wireless/intel/iwlwifi/mvm/sta.c) —
+  tras ADD_STA, cola de datos por TID (`iwl_mvm_tvqm_enable_txq`, tid=0..7).
+- [`tx.h:356`](../lxdde/linux/drivers/net/wireless/intel/iwlwifi/fw/api/tx.h) —
+  `0x83 = TX_STATUS_FAIL_LONG_LIMIT`.
+
+**Descartado:** fallo RX EAPOL — hay RX `0xc1` abundante; el supplicant llega a
+enviar respuesta (M2).
 
 ---
 
@@ -224,24 +286,40 @@ cargo xtask flash-usb-live /dev/sda --yes --only kernel
 
 ### Fase 3 — TX resp / cola mgmt (flush #32)
 
-1. **Parse TX_CMD en cualquier grupo:** en `iwl_trans.c` loguear todo
-   `cmd==0x1c` antes del filtro de grupo; aceptar también `LONG_GROUP (1)` si
-   el FW lo usa en gen2 TVQM.
-2. **Habilitar cola tras ADD_STA:** revisar orden Linux
-   `iwl_mvm_tvqm_enable_txq` → `iwl_trans_txq_alloc` post-estación; comparar con
-   `iwl_trans_txq_alloc_mgmt` en soso (SCD ADD puede no bastar sin enable).
-3. **Poll TX resp durante AUTH:** en `iwl_mvm_mlme_auth_assoc` / `wait_mlme_flag`,
-   drenar RX hasta recibir `TX_CMD` o timeout corto antes de juzgar
-   `last_mgmt_tx_status`.
-4. **Log RLC_CONFIG ok** tras PHY MODIFY en canal de assoc (confirmar en placa).
-5. **RX mgmt** si TX success pero sin `rx AUTH seq=2`: filtros MAC
-   `IN_CONTROL_AND_MGMT`, binding MAC↔PHY, `parse_rx_mpdu` → MLME.
-6. **Reflash + matriz:** criterios anteriores; actualizar `docs/hw-matrix.json`.
+1. **Parse TX_CMD en cualquier grupo** — aplicado en commits previos a flush #50.
+2. **Poll TX resp durante AUTH** — `iwl_trans_wait_mgmt_tx_resp` en assoc.
+3. **Log RLC_CONFIG ok** tras PHY MODIFY.
+4. **RX mgmt** — filtros MAC / MLME operativos (AUTH+ASSOC ok en flush #50).
+
+### Fase 4 — 4-way EAPOL (flush #50, commit `ffb7692c1`)
+
+1. **`iwl_mvm_tx_8023`** ([`iwl_mvm_tx.c`](../lxdde/ports/iwlwifi/iwl_mvm_tx.c)):
+   `offload_assist = 0x0c00` (MH 24 B ToDS), `IWL_TX_FLAGS_CMD_RATE`,
+   `ENCRYPT_DIS|HIGH_PRI` mientras `!keys_installed`; espera TX resp.
+2. **Cola datos TVQM tid=0** ([`iwl_trans.c`](../lxdde/ports/iwlwifi/iwl_trans.c),
+   [`iwl_mvm_assoc.c`](../lxdde/ports/iwlwifi/iwl_mvm_assoc.c)):
+   `iwl_trans_txq_alloc_data` tras ADD_STA; EAPOL por `data_txq_id` (no mgmt).
+3. **Hostcheck:** `test_tx_eapol_cmd` en `rx_datapath_test.c` — assert cola
+   data, CMD_RATE, `offload_assist==0x0c00`. `./scripts/l6-iwl-fw-hostcheck.sh` verde.
+4. **Matriz:** `ax200-wifi` / `ga107-igpu` — `assoc_wpa2: fail` (parcial 802.11);
+   logs en `target/usb-diagnostic-2026-09-15-run3/`.
+
+Validación placa (pendiente reflash con kernel `ffb7692c1`):
+
+```bash
+cargo xtask flash-usb-live /dev/sda --yes --only kernel
+# en placa: wifi connect Rutilo …
+# esperado:
+#   iwl_trans: TXQ data qid=N tid=0
+#   tx qid=N len=173 → TX resp status=0x01 (no 0x83)
+#   wifi-wpa: 4-way completado, enlace autorizado
+#   lease DHCP en backend LxWifi (no confundir con rtl8169 DOWN)
+```
 
 ---
 
 ## Qué no se ha hecho
 
-Implementación de fase 3. Hostchecks no re-ejecutados en esta sesión.
-`target/` no va al git. SOSOHASH del USB sigue en `dfec53f84` (desalineado del
-kernel de placa `5a7be1388`).
+Reflash USB / validación placa con fix EAPOL (`ffb7692c1`). SOSOHASH del USB
+sigue desalineado del kernel de placa. xHCI slot 2 timeout (teclado USB) — fuera
+de alcance WiFi.

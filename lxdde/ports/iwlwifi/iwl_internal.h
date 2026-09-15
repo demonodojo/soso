@@ -160,6 +160,7 @@ typedef char iwl_rx_completion_rbid_off[
  * En SCD v3 el payload lleva IWL_MGMT_TID=15 (iwl_mvm_tvqm_enable_txq convierte
  * 8→15 antes de iwl_trans_txq_alloc). Confundir ambos rompe el ADD en placa. */
 #define IWL_MAX_TID_COUNT             8
+#define IWL_TID_NON_QOS               0
 #define IWL_MGMT_TID                  15
 #define IWL_MGMT_QUEUE_SIZE           16
 /* Linux iwl-fh.h: tabla BC gen2 = TFD_QUEUE_SIZE_MAX + TFD_QUEUE_SIZE_BC_DUP. */
@@ -1653,6 +1654,7 @@ struct iwl_ax211_priv;
 
 #define TX_STATUS_MSK              0x000000ffu
 #define TX_STATUS_SUCCESS            0x01u
+#define TX_STATUS_FAIL_LONG_LIMIT    0x83u
 #define IWL_MVM_TX_RESP_V3_STATUS_OFF 36u
 #define IWL_MVM_TX_RESP_STATUS_OFF     40u
 #define IWL_MVM_TX_RESP_MIN_PAY        42u
@@ -1789,7 +1791,10 @@ void iwl_8000_fh_program(uint32_t dst, uint64_t dma, uint32_t byte_cnt,
                          struct iwl_8000_fh_prog *out);
 void iwl_trans_poll(struct iwl_ax211_priv *iwl);
 void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl);
+int iwl_trans_txq_alloc_data(struct iwl_ax211_priv *iwl, uint8_t sta_id, uint8_t tid);
+void iwl_trans_txq_drain_data(struct iwl_ax211_priv *iwl);
 int iwl_trans_wait_mgmt_tx_resp(struct iwl_ax211_priv *iwl, unsigned iters);
+uint32_t iwl_mvm_tx_rate_n_flags(struct iwl_ax211_priv *iwl);
 int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                        const void *payload, uint16_t pay_len);
 int iwl_trans_send_cmd_async(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,

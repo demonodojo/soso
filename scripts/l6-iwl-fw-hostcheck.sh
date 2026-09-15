@@ -86,7 +86,8 @@ run hcmd_wide
 
 build rx_datapath \
     "$root/tools/iwl-hostcheck/rx_datapath_test.c" \
-    "$src/iwl_mvm_data.c"
+    "$src/iwl_mvm_data.c" \
+    "$src/iwl_mvm_tx.c"
 echo "=== iwl RX DMA / camino de datos hostcheck ==="
 run rx_datapath
 
@@ -156,7 +157,9 @@ build assoc_abi \
     "$root/tools/iwl-hostcheck/assoc_abi_test.c" \
     "$src/iwl_mvm_assoc.c" \
     "$src/iwl_mvm_lq.c" \
-    "$src/iwl_mvm_up.c"
+    "$src/iwl_mvm_up.c" \
+    "$src/iwl_mvm_data.c" \
+    "$src/iwl_mvm_tx.c"
 echo "=== iwl assoc ABI hostcheck ==="
 run assoc_abi
 
@@ -164,7 +167,9 @@ build cdb_lmac \
     "$root/tools/iwl-hostcheck/cdb_lmac_test.c" \
     "$src/iwl_mvm_assoc.c" \
     "$src/iwl_mvm_lq.c" \
-    "$src/iwl_mvm_up.c"
+    "$src/iwl_mvm_up.c" \
+    "$src/iwl_mvm_data.c" \
+    "$src/iwl_mvm_tx.c"
 
 for ucode in \
     "$fwdir/iwlwifi-cc-a0-77.ucode" \

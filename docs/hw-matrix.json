@@ -361,11 +361,11 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "5a7be1388",
-        "commit_corto": "5a7be1388",
+        "commit": "ffb7692c1",
+        "commit_corto": "ffb7692c1",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "flush#32: GPU compute sm_86 ok; WiFi SCD/TLC ok; AUTH timeout sin TX_CMD 0x1c"
+        "cambios_locales": "flush#50: GPU ok; WiFi AUTH+ASSOC ok; EAPOL 0x83; fix EAPOL TX en árbol"
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 32,
@@ -392,17 +392,17 @@
         },
         "scan": {
           "status": "ok",
-          "nota": "Rutilo WPA2 ch3",
+          "nota": "flush#50: 23 BSS, Rutilo WPA2 ch40",
           "fecha": "2026-09-15"
         },
         "assoc_wpa2": {
           "status": "fail",
-          "nota": "flush#32: SCD/TLC/SESSION_PROT ok; AUTH timeout ch3 sin TX resp 0x1c (tx status=0x00)",
+          "nota": "flush#50: AUTH+ASSOC ok; EAPOL TX 0x83 FAIL_LONG_LIMIT; fix en árbol",
           "fecha": "2026-09-15"
         },
         "dhcp": {
           "status": "pendiente",
-          "nota": "sin assoc WiFi",
+          "nota": "sin 4-way WiFi",
           "fecha": "2026-09-15"
         },
         "ssh": {
@@ -429,7 +429,7 @@
         },
         "compute_cpu_gpu": {
           "status": "ok",
-          "nota": "flush#32: compute sm_86 saxpy/matvec listo",
+          "nota": "flush#50: compute sm_86 saxpy/matvec listo",
           "fecha": "2026-09-15"
         },
         "carga_real": {
@@ -4143,7 +4143,7 @@
           "fecha": "2026-09-15"
         }
       ],
-      "notas": "flush#32 @162569ms: GPU GSP+compute sm_86+apagado ok; WiFi SCD/TLC ok pero AUTH timeout ch3 sin TX_CMD 0x1c. Fase 3 pendiente. docs/DIAGNOSTICO-ROG-2026-09-15.md",
+      "notas": "flush#50 @206266ms: GPU GSP+compute sm_86+apagado ok; WiFi AUTH+ASSOC ok; EAPOL 0x83. Fix EAPOL en ffb7692c1. docs/DIAGNOSTICO-ROG-2026-09-15.md",
       "actualizado": "2026-09-15"
     },
     {
@@ -4538,17 +4538,17 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "5a7be1388",
-        "commit_corto": "5a7be1388",
+        "commit": "ffb7692c1",
+        "commit_corto": "ffb7692c1",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "flush#32: SCD ver_tlv=3+TLC ok; AUTH timeout sin TX resp 0x1c; fase 3 TX queue pendiente"
+        "cambios_locales": "fix EAPOL: cola data tid=0 + offload 0x0c00 + CMD_RATE (post flush#50)"
       },
       "perfil_drivers": "live-usb + iwlwifi",
-      "arranques_consecutivos_ok": 32,
+      "arranques_consecutivos_ok": 31,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh pid=2; sin IP WiFi (AUTH timeout flush#32 ch3)",
+        "nota": "sosh pid=2; sin IP WiFi (4-way EAPOL incompleto flush#50)",
         "fecha": "2026-09-15"
       },
       "wifi": {
@@ -4569,17 +4569,17 @@
         },
         "scan": {
           "status": "ok",
-          "nota": "flush#32: 23 BSS, Rutilo WPA2 ch3",
+          "nota": "flush#50: 23 BSS, Rutilo WPA2 ch40",
           "fecha": "2026-09-15"
         },
         "assoc_wpa2": {
           "status": "fail",
-          "nota": "flush#32: SCD/TLC/SESSION_PROT ok; doorbell AUTH ok pero cero TX_CMD 0x1c → tx status=0x00 → AUTH timeout ch3. Fase 3 en docs/DIAGNOSTICO-ROG-2026-09-15.md",
+          "nota": "flush#50: AUTH+ASSOC 802.11 ok; EAPOL TX status=0x83 FAIL_LONG_LIMIT (mgmt qid); fix en árbol pendiente reflash placa",
           "fecha": "2026-09-15"
         },
         "dhcp": {
           "status": "pendiente",
-          "nota": "sin assoc WiFi; rtl8169 DOWN",
+          "nota": "sin 4-way; rtl8169 DOWN",
           "fecha": "2026-09-15"
         },
         "ssh": {
@@ -4695,7 +4695,9 @@
         "target/usb-diagnostic-2026-09-14-run3/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-14-run3/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-15/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-09-15/SOSODRV.txt"
+        "target/usb-diagnostic-2026-09-15/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-15-run3/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-15-run3/SOSODRV.txt"
       ],
       "historial": [
         {
@@ -8169,9 +8171,151 @@
           "campana_gpu": false,
           "flushes": 32,
           "fecha": "2026-09-15"
+        },
+        {
+          "log_hash": "fbceef47f8ffc5942ac17ce1e2d1923a0c097938f5941a709e1d4efb6bdd03b6",
+          "kernel": "soso 0.2.2 (6f558f072-dirty)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "048d:1234",
+            "0b05:1866",
+            "0b05:18c6",
+            "8086:7d2d",
+            "8086:7d67",
+            "8086:ad03",
+            "8086:ae4d",
+            "8086:7eca",
+            "8086:ae4c",
+            "8086:ad0d",
+            "8086:ad1d",
+            "8086:ae7f",
+            "8086:ae10",
+            "8086:ae23",
+            "10de:2f18",
+            "10de:2f80",
+            "8086:5780",
+            "8086:5781",
+            "8086:5782",
+            "8086:7f6e",
+            "8086:7f70",
+            "8086:7f2f",
+            "8086:7f4c",
+            "8086:7f68",
+            "8086:7f40",
+            "8086:7f44",
+            "8086:7f30",
+            "8086:7f0c",
+            "8086:7f50",
+            "8086:7f23",
+            "8086:7f24",
+            "10ec:5264",
+            "10ec:8125",
+            "1344:5425",
+            "1462:1603"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-09-15"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-09-15"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-09-15"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "count=23 Rutilo WPA2 ch40",
+              "fecha": "2026-09-15"
+            },
+            "assoc_wpa2": {
+              "status": "fail",
+              "nota": "AUTH+ASSOC ok; EAPOL TX len=173 status=0x83 FAIL_LONG_LIMIT (mgmt qid=1)",
+              "fecha": "2026-09-15"
+            },
+            "dhcp": {
+              "status": "pendiente",
+              "nota": "sin 4-way",
+              "fecha": "2026-09-15"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-09-15"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-09-15"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-09-15"
+            },
+            "compute_cpu_gpu": {
+              "status": "ok",
+              "nota": "sm_86 saxpy/matvec",
+              "fecha": "2026-09-15"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "ok",
+              "nota": "unload/halt/dma",
+              "fecha": "2026-09-15"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 50,
+          "fecha": "2026-09-15"
         }
       ],
-      "notas": "flush#32 @162569ms: SCD ver_tlv=3+TLC+SESSION_PROT ok; bloqueo AUTH sin TX_CMD 0x1c (tx status=0x00). Fases 1-2 validadas; fase 3 TX queue pendiente. docs/DIAGNOSTICO-ROG-2026-09-15.md",
+      "notas": "flush#50 @206266ms (kernel 6f558f072): AUTH+ASSOC ok; EAPOL TX 0x83; fix cola data+offload en ffb7692c1. docs/DIAGNOSTICO-ROG-2026-09-15.md",
       "actualizado": "2026-09-15"
     },
     {

@@ -210,23 +210,13 @@ static int iwl_mvm_add_sta_ap(struct iwl_ax211_priv *iwl, const uint8_t *bssid)
     return 0;
 }
 
-static uint32_t mgmt_rate_n_flags(struct iwl_ax211_priv *iwl)
-{
-    uint32_t ant = RATE_MCS_ANT_A_MSK;
-    int ver = iwl_fw_cmd_ver(iwl, LEGACY_GROUP, TX_CMD);
-
-    if (ver > 8)
-        return RATE_MCS_LEGACY_OFDM_MSK | RATE_LEGACY_OFDM_6M | ant;
-    return RATE_LEGACY_PLCP_6M | ant;
-}
-
 static int iwl_mvm_tx_mgmt(struct iwl_ax211_priv *iwl, const uint8_t *frame, int flen)
 {
     uint8_t buf[256];
     /* Sin rate scale (rs.c): Linux usa CMD_RATE cuando no hay STA/LQ. */
     uint32_t flags = IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_HIGH_PRI |
                        IWL_TX_FLAGS_CMD_RATE;
-    uint32_t rate = mgmt_rate_n_flags(iwl);
+    uint32_t rate = iwl_mvm_tx_rate_n_flags(iwl);
     unsigned hdr_off;
     uint16_t pay;
     /* Linux tx.c: mh_len/2 << TX_CMD_OFFLD_MH_SIZE; AUTH/ASSOC sin QoS = 24 B. */
@@ -583,7 +573,13 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
         lx_printk("iwl_mvm: TXQ mgmt falló\n");
         return -1;
     }
+    if (iwl_trans_txq_alloc_data(iwl, IWL_MVM_AP_STA_ID, IWL_TID_NON_QOS) < 0) {
+        iwl->auth_ctl_filter = 0;
+        lx_printk("iwl_mvm: TXQ data falló\n");
+        return -1;
+    }
     iwl_trans_txq_drain_mgmt(iwl);
+    iwl_trans_txq_drain_data(iwl);
     if (iwl_mvm_protect_assoc(iwl) != 0) {
         iwl->auth_ctl_filter = 0;
         return -1;
