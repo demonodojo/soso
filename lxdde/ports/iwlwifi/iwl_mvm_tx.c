@@ -31,9 +31,16 @@ int iwl_mvm_tx_8023(struct iwl_ax211_priv *iwl, const uint8_t *buf, int len)
 
     if (!iwl->associated || !buf || len <= 0)
         return -1;
-    txq_id = iwl->data_txq_ready ? iwl->data_txq_id : iwl->mgmt_txq_id;
-    if (!iwl->mgmt_txq_ready && !iwl->data_txq_ready)
+    if (!iwl->data_txq_ready) {
+        if (iwl_trans_txq_alloc_data(iwl, IWL_MVM_AP_STA_ID, IWL_TID_NON_QOS) < 0) {
+            lx_printk("iwl_mvm: TXQ data (EAPOL) falló\n");
+            return -1;
+        }
+        iwl_trans_txq_drain_data(iwl);
+    }
+    if (!iwl->data_txq_ready)
         return -1;
+    txq_id = iwl->data_txq_id;
     if (len > (int)IWL_MAX_ETH_FRAME)
         return -1;
 

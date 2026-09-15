@@ -468,15 +468,16 @@ static int iwl_mvm_mlme_auth_assoc(struct iwl_ax211_priv *iwl, const char *ssid,
 
     for (attempt = 0; attempt < 2; attempt++) {
         if (attempt == 1) {
-            if (iwl->last_mgmt_tx_status == 0) {
-                lx_printk("iwl_mvm: AUTH sin retry ctl-filter (sin TX resp)\n");
-                break;
-            }
-            if (iwl->last_mgmt_tx_status != TX_STATUS_SUCCESS) {
+            if (iwl->last_mgmt_tx_status != 0 &&
+                iwl->last_mgmt_tx_status != TX_STATUS_SUCCESS) {
                 lx_printk("iwl_mvm: AUTH sin retry ctl-filter (tx status=0x%02x)\n",
                           (unsigned)iwl->last_mgmt_tx_status);
                 break;
             }
+            if (iwl->last_mgmt_tx_status == 0)
+                lx_printk("iwl_mvm: AUTH retry con IN_CONTROL_AND_MGMT (sin TX resp)\n");
+            else
+                lx_printk("iwl_mvm: AUTH retry con IN_CONTROL_AND_MGMT\n");
             iwl->auth_ctl_filter = 1;
             if (iwl_mvm_mac_context_assoc(iwl, bssid, 0) != 0) {
                 iwl->auth_ctl_filter = 0;
@@ -484,7 +485,6 @@ static int iwl_mvm_mlme_auth_assoc(struct iwl_ax211_priv *iwl, const char *ssid,
                 return -1;
             }
             iwl->auth_ctl_filter = 0;
-            lx_printk("iwl_mvm: AUTH retry con IN_CONTROL_AND_MGMT\n");
         }
         iwl->last_mgmt_tx_status = 0;
         flen = build_auth_req(frame, iwl->mac, bssid);
@@ -573,13 +573,7 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
         lx_printk("iwl_mvm: TXQ mgmt falló\n");
         return -1;
     }
-    if (iwl_trans_txq_alloc_data(iwl, IWL_MVM_AP_STA_ID, IWL_TID_NON_QOS) < 0) {
-        iwl->auth_ctl_filter = 0;
-        lx_printk("iwl_mvm: TXQ data falló\n");
-        return -1;
-    }
     iwl_trans_txq_drain_mgmt(iwl);
-    iwl_trans_txq_drain_data(iwl);
     if (iwl_mvm_protect_assoc(iwl) != 0) {
         iwl->auth_ctl_filter = 0;
         return -1;

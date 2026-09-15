@@ -32,6 +32,7 @@ static int g_tx_n;
 static const uint16_t g_mock_mgmt_qid = 5u;
 static const uint16_t g_mock_data_qid = 6u;
 static size_t g_mgmt_bc_alloc_bytes;
+static int g_data_alloc_tid = -1;
 
 void lx_printk(const char *fmt, ...) { (void)fmt; }
 void lx_mdelay(unsigned int ms) { (void)ms; }
@@ -245,6 +246,7 @@ int iwl_trans_txq_alloc_data(struct iwl_ax211_priv *iwl, uint8_t sta_id, uint8_t
         return (int)iwl->data_txq_id;
     if (tid != IWL_TID_NON_QOS)
         return -1;
+    g_data_alloc_tid = (int)tid;
     iwl->data_txq_id = g_mock_data_qid;
     iwl->data_txq_write = 0;
     iwl->data_txq_read = 0;
@@ -468,6 +470,25 @@ static int run_assoc_case(int expect_tlc, int expect_lq)
     if (iwl_mvm_assoc_prepare(&iwl, "Casa", bssid) != 0) {
         fprintf(stderr, "iwl_mvm_assoc_prepare falló\n");
         return 1;
+    }
+    {
+        unsigned scd_n = 0;
+        unsigned i;
+
+        for (i = 0; i < (unsigned)g_sent_n; i++) {
+            if (g_sent[i].group == DATA_PATH_GROUP &&
+                g_sent[i].id == SCD_QUEUE_CONFIG_CMD)
+                scd_n++;
+        }
+        if (scd_n != 1u) {
+            fprintf(stderr, "assoc_prepare debe emitir 1 SCD (mgmt), tiene %u\n",
+                    scd_n);
+            return 1;
+        }
+        if (iwl.data_txq_ready) {
+            fprintf(stderr, "data_txq_ready=1 tras assoc_prepare (debe ser perezoso)\n");
+            return 1;
+        }
     }
 
     phy = find_cmd(PHY_CONTEXT_CMD);
@@ -953,6 +974,64 @@ static int run_assoc_case(int expect_tlc, int expect_lq)
     return 0;
 }
 
+static int test_eapol_lazy_data_txq(void)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t eth[128];
+    unsigned i;
+
+    memset(&iwl, 0, sizeof(iwl));
+    memcpy(iwl.mac, (const uint8_t[]){0x84, 0x1b, 0x77, 0xe1, 0x20, 0x71}, 6);
+    iwl.alive = 1;
+    iwl.associated = 1;
+    iwl.mgmt_txq_ready = 1;
+    iwl.mgmt_txq_id = g_mock_mgmt_qid;
+    g_data_alloc_tid = -1;
+    g_tx_n = 0;
+    memcpy(eth, (const uint8_t[]){0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, 6);
+    memcpy(eth + 6, iwl.mac, 6);
+    eth[12] = 0x88;
+    eth[13] = 0x8e;
+    for (i = 14; i < 100; i++)
+        eth[i] = (uint8_t)i;
+
+    if (iwl_mvm_tx_8023(&iwl, eth, 100) != 0) {
+        fprintf(stderr, "iwl_mvm_tx_8023 EAPOL falló\n");
+        return 1;
+    }
+    if (g_data_alloc_tid != IWL_TID_NON_QOS) {
+        fprintf(stderr, "lazy alloc tid=%d (esperado %u)\n",
+                g_data_alloc_tid, (unsigned)IWL_TID_NON_QOS);
+        return 1;
+    }
+    if (!iwl.data_txq_ready || iwl.data_txq_id != g_mock_data_qid) {
+        fprintf(stderr, "data TXQ no reservada tras EAPOL\n");
+        return 1;
+    }
+    if (g_tx_n != 1 || g_tx[0].txq_id != g_mock_data_qid) {
+        fprintf(stderr, "EAPOL no salió por cola data qid=%u (tx_n=%d qid=%u)\n",
+                (unsigned)g_mock_data_qid, g_tx_n,
+                g_tx_n > 0 ? (unsigned)g_tx[0].txq_id : 0u);
+        return 1;
+    }
+    {
+        const struct iwl_tx_cmd_gen2 *cmd =
+            (const struct iwl_tx_cmd_gen2 *)g_tx[0].payload;
+
+        if ((cmd->flags & IWL_TX_FLAGS_CMD_RATE) == 0) {
+            fprintf(stderr, "EAPOL sin IWL_TX_FLAGS_CMD_RATE\n");
+            return 1;
+        }
+        if (cmd->offload_assist !=
+            (uint16_t)((24u / 2u) << TX_CMD_OFFLD_MH_SIZE)) {
+            fprintf(stderr, "EAPOL offload_assist=0x%04x (esperado 0x0c00)\n",
+                    cmd->offload_assist);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (sizeof(struct iwl_mvm_add_sta_cmd) != 48) {
@@ -998,5 +1077,9 @@ int main(void)
     if (run_assoc_case(0, 1) != 0)
         return 1;
     puts("OK: assoc legacy — LQ_CMD + SCD v3 + SESSION_PROT");
+
+    if (test_eapol_lazy_data_txq() != 0)
+        return 1;
+    puts("OK: EAPOL reserva tid=0 perezoso en cola data + CMD_RATE + offload 0x0c00");
     return 0;
 }
