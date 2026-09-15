@@ -60,13 +60,19 @@ declarar release.
 |--------------|-------------------|-----------|
 | GPU GB205 (`10de:2f18`) | G1–G5 GO documentado en README/skills | Revalidar tras cambios FWSEC/falcon |
 | GPU GA107 (Ampere) | Código FWSEC-FRTS; PCI `10de:249c` | Matriz A8 sin `ok` en etapas GPU |
-| WiFi AX211 gen3 | Parser host + VFIO script | ALIVE/assoc/DHCP en placa real |
-| WiFi AX200 gen2 | Parser host | Context-info gen2 en placa |
+| WiFi AX211 gen3 | Log de placa: timeout ALIVE (antes del arreglo de descriptores) | Rearrancar en placa: descriptores gen3 corregidos, falta ALIVE real |
+| WiFi AX200 gen2 | ALIVE, init, MVM y scan en ROG | Validar SCD y el camino de datos/WPA2 nuevos contra un AP |
 | WiFi WCN6855 (Deck OLED) | Hostcheck MHI+QMI contra modelo | Todo lo que exige silicio: W1 en placa y W2–W5 enteros |
 | Steam Deck OLED | Ninguna todavía | Primer arranque: volcado PCI, IOMMU, descriptores USB y foto de la pantalla |
 | QEMU test shards | `cargo xtask test` | Sustituto de placa, no certifica WiFi/GPU real |
 
 Detalle por etapa: `cargo xtask hw-matrix show`.
+
+Investigación, implementación y criterios de cierre para WiFi utilizable desde
+soso: [WIFI-OPERATIVA.md](WIFI-OPERATIVA.md) (15 sep 2026). Los puntos 1, 3 y 4
+del plan están implementados y cubiertos por bancos de host
+(`scripts/l6-iwl-fw-hostcheck.sh` y `cargo test -p soso-wpa2`); los puntos 2 y 5
+son validación física y siguen abiertos.
 
 ## OTA — límites publicados
 

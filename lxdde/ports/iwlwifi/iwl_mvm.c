@@ -755,7 +755,12 @@ int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid)
         return -1;
     }
     iwl->channel = pick->channel;
-    return iwl_mvm_assoc(iwl, ssid, pick->bssid);
+    iwl->keys_installed = 0;
+    if (iwl_mvm_assoc(iwl, ssid, pick->bssid) != 0)
+        return -1;
+    /* Red abierta: asociada ya es utilizable. */
+    iwl->authorized = 1;
+    return 0;
 }
 
 int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid,
@@ -781,16 +786,71 @@ int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid,
         return -1;
     }
     iwl->channel = pick->channel;
-    lx_printk("iwl_mvm: '%s' ofrece WPA2-PSK/CCMP en el canal %u; falta el "
-              "4-way (R8)\n", ssid, pick->channel);
+    /* Asociada pero no autorizada: el enlace no sirve para IP hasta que el
+     * supplicant termine el 4-way e instale las claves. */
+    iwl->authorized = 0;
+    iwl->keys_installed = 0;
+    lx_printk("iwl_mvm: '%s' ofrece WPA2-PSK/CCMP en el canal %u; queda el "
+              "4-way EAPOL\n", ssid, pick->channel);
     return iwl_mvm_assoc(iwl, ssid, pick->bssid);
 }
 
 int iwl_mvm_tx_8023(struct iwl_ax211_priv *iwl, const uint8_t *buf, int len)
 {
-    if (!iwl->associated || !buf || len <= 0)
+    /* 24 B de cabecera 802.11 + 8 de LLC/SNAP sobre una trama Ethernet de MTU. */
+    uint8_t frame[IWL_MAX_ETH_FRAME + 32];
+    uint8_t txbuf[IWL_MGMT_TX_SLOT_SIZE];
+    uint32_t flags = IWL_TX_FLAGS_HIGH_PRI;
+    uint32_t rate;
+    unsigned hdr_off;
+    uint16_t pay;
+    int flen;
+
+    if (!iwl->associated || !buf || len <= 0 || !iwl->mgmt_txq_ready)
         return -1;
-    return iwl_trans_send_cmd(iwl, DATA_PATH_GROUP, TX_CMD, buf, (uint16_t)len);
+    if (len > (int)IWL_MAX_ETH_FRAME)
+        return -1;
+
+    flen = iwl_mvm_eth_to_80211(iwl, buf, len, frame, (int)sizeof(frame));
+    if (flen <= 0)
+        return -1;
+
+    /* Linux `iwl_mvm_set_tx_cmd`: con la API nueva de TX, ENCRYPT_DIS sólo va
+     * cuando no hay clave. Dejarlo siempre mandaba en claro tráfico que el AP
+     * descarta en cuanto el 4-way termina. La cabecera CCMP y el PN los pone
+     * el firmware: aquí no se reserva hueco ni se marca Protected. */
+    if (!iwl->keys_installed)
+        flags |= IWL_TX_FLAGS_ENCRYPT_DIS;
+
+    rate = RATE_LEGACY_PLCP_6M | RATE_MCS_ANT_A_MSK;
+    {
+        int ver = iwl_fw_cmd_ver(iwl, LEGACY_GROUP, TX_CMD);
+
+        if (ver > 8)
+            rate = RATE_MCS_LEGACY_OFDM_MSK | RATE_LEGACY_OFDM_6M | RATE_MCS_ANT_A_MSK;
+    }
+
+    memset(txbuf, 0, sizeof(txbuf));
+    if (iwl->gen3) {
+        struct iwl_tx_cmd_gen3 *cmd = (struct iwl_tx_cmd_gen3 *)txbuf;
+
+        hdr_off = (unsigned)sizeof(struct iwl_tx_cmd_gen3);
+        cmd->len = iwl_cpu_to_le16((uint16_t)flen);
+        cmd->flags = iwl_cpu_to_le16((uint16_t)flags);
+        cmd->rate_n_flags = iwl_cpu_to_le32(rate);
+    } else {
+        struct iwl_tx_cmd_gen2 *cmd = (struct iwl_tx_cmd_gen2 *)txbuf;
+
+        hdr_off = (unsigned)sizeof(struct iwl_tx_cmd_gen2);
+        cmd->len = iwl_cpu_to_le16((uint16_t)flen);
+        cmd->flags = iwl_cpu_to_le32(flags);
+        cmd->rate_n_flags = iwl_cpu_to_le32(rate);
+    }
+    if (hdr_off + (unsigned)flen > sizeof(txbuf))
+        return -1;
+    memcpy(txbuf + hdr_off, frame, (unsigned)flen);
+    pay = (uint16_t)(hdr_off + (unsigned)flen);
+    return iwl_trans_tx(iwl, iwl->mgmt_txq_id, txbuf, pay);
 }
 
 int iwl_mvm_rx_8023(struct iwl_ax211_priv *iwl, uint8_t *buf, int buflen)

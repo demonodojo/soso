@@ -5,6 +5,36 @@
 
 extern void *memset(void *dst, int c, unsigned long n);
 
+/* Linux `iwl_pnvm_load` (fw/pnvm.c): si el ALIVE v5 trajo SKU, pisa el doorbell
+ * UMAC BIT20 y espera PNVM_INIT_COMPLETE_NTFY (0xFE) *antes* de INIT_EXTENDED_CFG. */
+static int iwl_pnvm_load(struct iwl_ax211_priv *iwl)
+{
+    int t;
+
+    if (iwl->family == IWL_DEVICE_FAMILY_8000)
+        return 0;
+    if (!iwl->sku_id[0] && !iwl->sku_id[1] && !iwl->sku_id[2]) {
+        return 0;
+    }
+
+    iwl->pnvm_complete = 0;
+    if (iwl_trans_pnvm_publish(iwl) != 0)
+        return -1;
+    iwl_trans_pnvm_doorbell(iwl);
+    for (t = 0; t < IWL_PNVM_TIMEOUT_MS; t++) {
+        iwl_trans_poll(iwl);
+        if (iwl->pnvm_complete) {
+            lx_printk("iwl_mvm: PNVM listo (sku=0x%x 0x%x 0x%x)\n",
+                      (unsigned)iwl->sku_id[0], (unsigned)iwl->sku_id[1],
+                      (unsigned)iwl->sku_id[2]);
+            return 0;
+        }
+        lx_mdelay(1);
+    }
+    lx_printk("iwl_mvm: timeout PNVM_INIT_COMPLETE_NTFY\n");
+    return -1;
+}
+
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
 {
     struct iwl_init_extended_cfg_cmd init_cfg;
@@ -12,6 +42,10 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
     int t;
 
     if (!iwl->alive) {
+        return -1;
+    }
+
+    if (iwl_pnvm_load(iwl) != 0) {
         return -1;
     }
 

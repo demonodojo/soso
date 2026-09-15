@@ -201,6 +201,14 @@ pub fn device_vram_free() -> u64 {
     gpu::device_vram_free()
 }
 
+pub fn device_vram_pool_free() -> u64 {
+    gpu::device_vram_pool_free()
+}
+
+pub fn device_g6_pt_free() -> u32 {
+    gpu::device_g6_pt_free()
+}
+
 pub fn device_bufs_ready() -> bool {
     gpu::device_bufs_ready()
 }
@@ -251,8 +259,18 @@ pub fn wifi_connected() -> bool {
     wifi::connected()
 }
 
+/// Enlace autorizado: asociada y, en red protegida, con el 4-way terminado.
+/// Es lo que debe mirar la red antes de pedir DHCP.
+pub fn wifi_authorized() -> bool {
+    wifi::authorized()
+}
+
 pub fn wifi_receive(buf: &mut [u8]) -> Option<usize> {
     wifi::receive(buf)
+}
+
+pub fn wifi_receive_eapol(buf: &mut [u8]) -> Option<usize> {
+    wifi::receive_eapol(buf)
 }
 
 pub fn wifi_send(data: &[u8]) -> Result<(), ()> {

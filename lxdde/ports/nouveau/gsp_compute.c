@@ -554,11 +554,14 @@ static int stage_sass_kernel(struct gsp_ce *ce, struct gsp_kernel *k,
 {
     unsigned off;
 
-    if (!ce || !k || !scratch_cpu || !k->sass_len || scratch_bytes == 0u) {
+    if (!ce || !k || !k->sass_len) {
         return -1;
     }
     if (k->staged) {
         return 0;
+    }
+    if (!scratch_cpu || scratch_bytes == 0u) {
+        return -1;
     }
     for (off = 0; off < k->sass_len; off += scratch_bytes) {
         unsigned c = k->sass_len - off;
@@ -752,6 +755,8 @@ static void gsp_compute_fill_qmd_v02_grid(struct gsp_compute *cp,
     memset(qmd, 0, sizeof(*qmd));
     qmd_set_bits(qmd->words, QMDV02_SEMAPHORE_RELEASE_ENABLE0,
                  NVA0C0_QMDV01_07_SEMAPHORE_RELEASE_ENABLE0_TRUE);
+    qmd_set_bits(qmd->words, QMDV02_REQUIRE_SCHEDULING_PCAS,
+                 NVA0C0_QMDV01_07_REQUIRE_SCHEDULING_PCAS_TRUE);
     qmd_set_bits(qmd->words, QMDV02_RELEASE_MEMBAR_TYPE,
                  NVA0C0_QMDV01_07_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR);
     qmd_set_bits(qmd->words, QMDV02_API_VISIBLE_CALL_LIMIT,

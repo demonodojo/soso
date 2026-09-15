@@ -268,6 +268,7 @@ pub fn enqueue_matvec_resident(
             return Ok(true);
         }
     }
+    let _ = (w_va, rows, cols, x, y_va, sem_slot);
     Err(())
 }
 
@@ -292,7 +293,7 @@ pub fn submit_rmsnorm_rows(
             return Ok(on_gpu);
         }
     }
-    let _ = (rows, cols, eps, s);
+    let _ = (x, weight, rows, cols, eps, s);
     Ok(false)
 }
 
@@ -313,6 +314,7 @@ pub fn enqueue_matvec_q_resident(
             return Ok(true);
         }
     }
+    let _ = (w_va, dtype, rows, cols, x, y_va, sem_slot);
     Err(())
 }
 

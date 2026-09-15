@@ -43,6 +43,16 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
     return 0;
 }
 
+int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
+                 const void *payload, uint16_t pay_len)
+{
+    (void)iwl;
+    (void)txq_id;
+    (void)payload;
+    (void)pay_len;
+    return -1;
+}
+
 void iwl_trans_poll(struct iwl_ax211_priv *iwl) { (void)iwl; }
 
 int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl)
@@ -401,7 +411,7 @@ static int check_canal_ht(void)
     struct iwl_ax211_priv iwl;
     const uint8_t bssid[6] = { 0x02, 0, 0, 0, 0, 0x40 };
     uint8_t phy[offsetof(struct iwl_rx_phy_info, non_cfg_phy) + 8];
-    uint8_t mpdu[IWL_RX_DESC_SIZE_V1];
+    uint8_t mpdu[IWL_RX_DESC_SIZE_V3];
 
     /* 5 GHz sin DS Params: Linux toma primary_chan del HT Operation. */
     beacon_init(&b, bssid, WLAN_CAPABILITY_PRIVACY);
@@ -457,10 +467,17 @@ static int check_canal_ht(void)
         return -1;
     }
 
+    /* Dos colas sobre el mismo prefijo: v1 cierra en 48 B (AX200) y v3 en 56
+     * (AX210/AX211). Exigir que el descriptor entero midiera 48 era dar por
+     * hecho que AX211 usa el formato viejo. */
     if (offsetof(struct iwl_rx_mpdu_desc, v1.channel) != 34 ||
-        sizeof(struct iwl_rx_mpdu_desc) != IWL_RX_DESC_SIZE_V1) {
-        fprintf(stderr, "RX_MPDU v1 layout: ch@%zu sz=%zu\n",
+        offsetof(struct iwl_rx_mpdu_desc, v1) + sizeof(struct iwl_rx_mpdu_desc_v1) !=
+            IWL_RX_DESC_SIZE_V1 ||
+        offsetof(struct iwl_rx_mpdu_desc, v3.channel) != 42 ||
+        sizeof(struct iwl_rx_mpdu_desc) != IWL_RX_DESC_SIZE_V3) {
+        fprintf(stderr, "RX_MPDU layout: v1.ch@%zu v3.ch@%zu sz=%zu\n",
                 offsetof(struct iwl_rx_mpdu_desc, v1.channel),
+                offsetof(struct iwl_rx_mpdu_desc, v3.channel),
                 sizeof(struct iwl_rx_mpdu_desc));
         return -1;
     }
@@ -471,7 +488,14 @@ static int check_canal_ht(void)
         return -1;
     }
 
-    puts("OK: canal HT Operation, DS manda, RX_PHY@22 y MPDU v1.channel");
+    memset(mpdu, 0, sizeof(mpdu));
+    mpdu[42] = 40;
+    if (iwl_rx_mpdu_v3_channel(mpdu, (int)sizeof(mpdu)) != 40) {
+        fprintf(stderr, "RX_MPDU v3.channel mal leído\n");
+        return -1;
+    }
+
+    puts("OK: canal HT Operation, DS manda, RX_PHY@22 y MPDU v1/v3.channel");
     return 0;
 }
 

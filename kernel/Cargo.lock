@@ -418,6 +418,7 @@ dependencies = [
  "soso-abi",
  "soso-hw",
  "soso-resize-core",
+ "soso-wpa2",
  "sosofs",
  "sosomfs",
  "sosomodel",
@@ -666,6 +667,16 @@ name = "soso-resize-core"
 version = "0.1.0"
 dependencies = [
  "gptdisk",
+]
+
+[[package]]
+name = "soso-wpa2"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "hmac",
+ "pbkdf2",
+ "sha1",
 ]
 
 [[package]]

@@ -15,6 +15,7 @@ struct g6_va_hole {
 
 static struct g6_va_hole g_va_holes[G6_MAX_SLOTS];
 static unsigned g_va_hole_nr;
+static unsigned g_g6_warn_map_fail;
 
 static struct gsp_buf_slot *slot_find_va(uint64_t va)
 {
@@ -165,6 +166,7 @@ int gsp_buf_init(struct gsp_buf *b, struct gsp_vram *vram, struct gsp_vmm *vmm,
     b->scratch_cpu = scratch_cpu;
     b->scratch_bytes = scratch_bytes;
     b->va_next = G6_VA_BASE;
+    b->va_small_next = G6_SMALL_VA_BASE;
     g_va_hole_nr = 0;
     b->ready = 1;
     return 0;
@@ -192,7 +194,12 @@ uint64_t gsp_buf_vram_free(const struct gsp_buf *b)
      * `soso-llm` creía tener 11,9 GiB, no desalojaba nada, y a partir del tercer
      * peso `GPU_ALLOC_VRAM` fallaba y las 21 capas restantes se iban a CPU
      * contadas como «sin sitio» — indistinguible de un offload híbrido legítimo. */
-    ventana = b->va_next < G6_VA_LIMIT ? G6_VA_LIMIT - b->va_next : 0ull;
+    ventana = b->va_next < G6_WEIGHT_VA_LIMIT ? G6_WEIGHT_VA_LIMIT - b->va_next : 0ull;
+    if (b->va_small_next < G6_VA_LIMIT) {
+        uint64_t small = G6_VA_LIMIT - b->va_small_next;
+
+        ventana += small;
+    }
 
     libres = b->vmm && b->vmm->pt_nr < GSP_VMM_MAX_PT
                  ? GSP_VMM_MAX_PT - b->vmm->pt_nr
@@ -212,11 +219,18 @@ uint64_t gsp_buf_vram_free(const struct gsp_buf *b)
     return pool;
 }
 
+uint64_t gsp_buf_pool_free(const struct gsp_buf *b)
+{
+    if (!b || !b->vram || !b->vram->ready) {
+        return 0;
+    }
+    return b->vram->total - b->vram->used;
+}
+
 uint64_t gsp_buf_alloc(struct gsp_buf *b, uint64_t size)
 {
     struct gsp_buf_slot *s;
     uint64_t phys, va, need;
-    unsigned i;
     int big;
 
     if (!b || !b->ready || size == 0) {
@@ -239,27 +253,44 @@ uint64_t gsp_buf_alloc(struct gsp_buf *b, uint64_t size)
         return 0;
     }
 
-    va = va_hole_take(need, big ? G6_BIG_MIN : VRAM_PAGE, b->va_next);
-    if (!va) {
-        va = align_up(b->va_next, big ? G6_BIG_MIN : VRAM_PAGE);
-    }
-    if (va >= G6_VA_LIMIT || need > G6_VA_LIMIT - va) {
-        lx_printk("nouveau-lx: G6 — ventana de VA agotada\n");
-        gsp_vram_return(b->vram, phys, need);
-        return 0;
+    if (big) {
+        va = va_hole_take(need, G6_BIG_MIN, b->va_next);
+        if (!va) {
+            va = align_up(b->va_next, G6_BIG_MIN);
+        }
+        if (va >= G6_WEIGHT_VA_LIMIT || need > G6_WEIGHT_VA_LIMIT - va) {
+            lx_printk("nouveau-lx: G6 — ventana de VA agotada (pesos grandes)\n");
+            gsp_vram_return(b->vram, phys, need);
+            return 0;
+        }
+    } else {
+        va = align_up(b->va_small_next, VRAM_PAGE);
+        if (va >= G6_VA_LIMIT || need > G6_VA_LIMIT - va) {
+            lx_printk("nouveau-lx: G6 — ventana de VA agotada (tensores pequeños)\n");
+            gsp_vram_return(b->vram, phys, need);
+            return 0;
+        }
     }
 
     if ((big ? gsp_vmm_map_big(b->vmm, va, phys, need, GSP_VMM_VRAM)
              : gsp_vmm_map(b->vmm, va, phys, need, GSP_VMM_VRAM)) != 0) {
-        lx_printk("nouveau-lx: G6 — fallo al mapear VRAM en VA 0x%llx\n",
-                  (unsigned long long)va);
+        if (!g_g6_warn_map_fail) {
+            g_g6_warn_map_fail = 1;
+            lx_printk("nouveau-lx: G6 — fallo al mapear VRAM en VA 0x%llx\n",
+                      (unsigned long long)va);
+        }
         gsp_vram_return(b->vram, phys, need);
         return 0;
     }
 
-    if (va + need > b->va_next) {
-        b->va_next = va + need;
+    if (big) {
+        if (va + need > b->va_next) {
+            b->va_next = va + need;
+        }
+    } else {
+        b->va_small_next = va + need;
     }
+
     s->va = va;
     s->phys = phys;
     s->size = need;
@@ -495,5 +526,7 @@ void gsp_buf_fini(struct gsp_buf *b)
         g_slots[i].in_use = 0;
     }
     g_va_hole_nr = 0;
+    b->va_next = G6_VA_BASE;
+    b->va_small_next = G6_SMALL_VA_BASE;
     b->ready = 0;
 }

@@ -1,4 +1,4 @@
-//! Convierte GGUF (llama, deepseek2, qwen35/qwen38) al layout sosomodel (.som).
+//! Convierte GGUF (llama, deepseek2, qwen2, qwen35/qwen38) al layout sosomodel (.som).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #[cfg(feature = "std")]
@@ -21,7 +21,9 @@ use sosomodel::layout::{
     DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0, INDEX_FILE, MANIFEST_FILE, Q4_K_BLOCK_BYTES,
     SHARDS_DIR, TOKENIZER_FILE,
 };
-use sosomodel::manifest::{AttnKind, AudioSpec, LayerPrefetch, Manifest, ModelKind, NormKind};
+use sosomodel::manifest::{
+    AttnKind, AudioSpec, LayerPrefetch, Manifest, ModelKind, NormKind, FLAG_ROPE_NEOX,
+};
 
 pub trait SomOut {
     fn mkdir(&mut self, path: &str) -> Result<(), String>;
@@ -142,15 +144,16 @@ pub fn convert_with_options<R: Read + Seek>(
         })
         .unwrap_or("llama");
     let is_mla = arch_name == "deepseek2";
+    let is_qwen2 = arch_name == "qwen2";
     let is_qwen35 = arch_name == "qwen35" || arch_name == "qwen38";
-    if arch_name != "llama" && !is_mla && !is_qwen35 {
+    if arch_name != "llama" && !is_mla && !is_qwen2 && !is_qwen35 {
         return Err(format!(
-            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen35 | qwen38)"
+            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen35 | qwen38)"
         ));
     }
     let meta_prefix = if is_mla {
         "deepseek2"
-    } else if is_qwen35 {
+    } else if is_qwen2 || is_qwen35 {
         arch_name
     } else {
         "llama"
@@ -518,6 +521,15 @@ pub fn convert_with_options<R: Read + Seek>(
                     out,
                 )?);
             }
+            if is_qwen2 {
+                for part in ["attn_q", "attn_k", "attn_v"] {
+                    let gguf_name = format!("blk.{layer}.{part}.bias");
+                    let som_name = format!("L{layer:02}.{part}.bias");
+                    if emit(file, &mut index, &mut id, &gguf_name, &som_name, out)? {
+                        shards.push(format!("{som_name}.tensor"));
+                    }
+                }
+            }
             if is_qwen35 && index.find(&format!("L{layer:02}.ffn_norm")).is_none() {
                 return Err(format!(
                     "capa {layer}: falta post_attention_norm (L{layer:02}.ffn_norm)"
@@ -557,6 +569,11 @@ pub fn convert_with_options<R: Read + Seek>(
         norm_kind: NormKind::Rms,
     };
     manifest.fill_layers_from_globals();
+    if is_qwen2 {
+        for spec in manifest.layers.iter_mut() {
+            spec.flags |= FLAG_ROPE_NEOX;
+        }
+    }
     if is_mla {
         for spec in manifest.layers.iter_mut() {
             spec.attn_kind = AttnKind::Mla;
@@ -576,7 +593,15 @@ pub fn convert_with_options<R: Read + Seek>(
     out.write(INDEX_FILE, &index.serialize())?;
 
     if let Some(pieces) = tokens {
-        let bos = gguf.meta_u32("tokenizer.ggml.bos_token_id").unwrap_or(NO_TOKEN);
+        let add_bos = match gguf.meta.get("tokenizer.ggml.add_bos_token") {
+            Some(MetaValue::Int(v)) => *v != 0,
+            _ => !is_qwen2,
+        };
+        let bos = if add_bos {
+            gguf.meta_u32("tokenizer.ggml.bos_token_id").unwrap_or(NO_TOKEN)
+        } else {
+            NO_TOKEN
+        };
         let eos = gguf.meta_u32("tokenizer.ggml.eos_token_id").unwrap_or(NO_TOKEN);
         out.write(
             TOKENIZER_FILE,
@@ -1894,5 +1919,74 @@ mod tests {
             err.contains("post_attention_norm"),
             "tenía que abortar sin ffn_norm, no convertir a medias: {err}"
         );
+    }
+
+    #[test]
+    fn convierte_gguf_qwen2() {
+        const H: u64 = 8;
+        const FFN: u64 = 16;
+        const KV: u64 = 4;
+        let tensors: Vec<(&str, Vec<u64>)> = vec![
+            ("token_embd.weight", vec![H, 6]),
+            ("output_norm.weight", vec![H]),
+            ("output.weight", vec![H, 6]),
+            ("blk.0.attn_norm.weight", vec![H]),
+            ("blk.0.attn_q.weight", vec![H, H]),
+            ("blk.0.attn_k.weight", vec![H, KV]),
+            ("blk.0.attn_v.weight", vec![H, KV]),
+            ("blk.0.attn_q.bias", vec![H]),
+            ("blk.0.attn_k.bias", vec![KV]),
+            ("blk.0.attn_v.bias", vec![KV]),
+            ("blk.0.attn_output.weight", vec![H, H]),
+            ("blk.0.ffn_norm.weight", vec![H]),
+            ("blk.0.ffn_up.weight", vec![H, FFN]),
+            ("blk.0.ffn_gate.weight", vec![H, FFN]),
+            ("blk.0.ffn_down.weight", vec![FFN, H]),
+        ];
+        let g = pack_gguf_v3(12, |g| {
+            gguf_kv_str(g, "general.architecture", "qwen2");
+            gguf_kv_u32(g, "qwen2.embedding_length", H as u32);
+            gguf_kv_u32(g, "qwen2.block_count", 1);
+            gguf_kv_u32(g, "qwen2.feed_forward_length", FFN as u32);
+            gguf_kv_u32(g, "qwen2.attention.head_count", 2);
+            gguf_kv_u32(g, "qwen2.attention.head_count_kv", 1);
+            gguf_kv_f32(g, "qwen2.attention.layer_norm_rms_epsilon", 1e-6);
+            gguf_kv_f32(g, "qwen2.rope.freq_base", 1_000_000.0);
+            gguf_kv_bool(g, "tokenizer.ggml.add_bos_token", false);
+            gguf_kv_str_array(
+                g,
+                "tokenizer.ggml.tokens",
+                &["<|im_start|>", "<|im_end|>", "hola", "\u{0120}mundo", "a", "b"],
+            );
+            gguf_kv_u32(g, "tokenizer.ggml.eos_token_id", 1);
+            gguf_kv_str(
+                g,
+                "tokenizer.chat_template",
+                "{% for message in messages %}{% if message['role'] == 'user' %}<|im_start|>user\n{{ message['content'] }}<|im_end|>\n<|im_start|>assistant\n{% endif %}{% endfor %}",
+            );
+        }, &tensors);
+        let dir = std::env::temp_dir().join("convert-gguf-qwen2");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("qwen2.gguf");
+        fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let out = dir.join("out");
+        convert_path(gguf_path.to_str().unwrap(), &out, Some("qwen2.5-coder-3b")).unwrap();
+        let manifest = Manifest::parse(&fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.name, "qwen2.5-coder-3b");
+        assert_eq!(manifest.layers[0].flags & FLAG_ROPE_NEOX, FLAG_ROPE_NEOX);
+        assert!(manifest.chat_template.contains("<|im_start|>"));
+        let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
+        assert!(index.find("L00.attn_q.bias").is_some());
+        assert!(index.find("L00.attn_k.bias").is_some());
+        assert!(index.find("L00.attn_v.bias").is_some());
+        let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
+        rt.validate_shapes().expect("shapes qwen2");
+        let tok = soso_llm_core::tokenizer::Tokenizer::parse(
+            &fs::read(out.join(TOKENIZER_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert!(tok.bos().is_none());
+        assert_eq!(tok.encode_trozo("hola mundo", false, true), vec![2, 3]);
     }
 }

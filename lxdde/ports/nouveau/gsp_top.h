@@ -56,8 +56,9 @@ unsigned gsp_top_falcon_base(uint8_t type, uint8_t inst, unsigned fallback);
  * devolver el 0, que es justo GR. */
 int gsp_top_type_of_engine(uint32_t engine, uint8_t *type, uint8_t *inst);
 
-/* Elige un motor COPY cuya runlist PTOP ≠ GR0 (evita PBDMA compartido con GR0).
- * Sin PTOP o sin candidato devuelve NV2080_ENGINE_TYPE_COPY2. */
+/* Linux r535_ce_alloc: COPY0+inst, camino habitual inst 0. Si PTOP tiene CE0
+ * se elige COPY0 aunque comparta runlist con GR0 (GB205 julio GO). Si no, el
+ * primer COPY con runlist ≠ GR0. Sin candidato: COPY2. */
 uint32_t gsp_top_pick_ce_engine(void);
 
 /* Máscara PMC (NV_PMC_ENABLE 0x600) para `type`/`inst` vía PTOP reset bit. */

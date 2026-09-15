@@ -1,6 +1,6 @@
 # Plan para aprovechar los 16 GiB de VRAM de la ROG
 
-Fecha: 2026-09-14. Estado: diagnóstico y plan; implementación pendiente.
+Fecha: 2026-09-14. Estado: implementado en host (2026-09-14); validación en placa pendiente.
 
 ## Conclusión
 
@@ -196,8 +196,23 @@ La velocidad final debe medirse, no deducirse de la capacidad.
 ## Alcance de esta revisión
 
 Se revisaron código, cambios locales existentes, referencias de NVIDIA/Linux,
-el log run9 y el índice Mistral local. No se ha arrancado la GPU ni ejecutado
-pruebas de hardware. Esta entrega añade únicamente este documento.
+el log run9 y el índice Mistral local.
+
+### Implementado (host, 2026-09-14)
+
+| Ítem | Cambio |
+|------|--------|
+| GA104/3080 | `gsp_chip.*`, hostcheck, matriz `ga107-igpu` |
+| Ventana G6 32 GiB | `gsp_buf.h`, hostcheck >8 GiB |
+| Tablas/slots | `GSP_VMM_MAX_PT=192`, banda pequeña G6 |
+| Asignador | free-list coalesce, cap 512, stress hostcheck |
+| Planner | `g6_reserve_bytes`, presupuesto G6 en `plan.rs` |
+| Telemetría | `GpuInfo::vram_pool_free`, `g6_pt_free` |
+| Userspace | `SysGpu` relee presupuesto del kernel |
+| Fallbacks | sin 8 GiB inventados en `gpu.rs` / `gsp_bringup.c` |
+
+Pendiente en placa: buffers >8 GiB, ask con `on_gpu=1`, `halt` limpio, matriz
+`carga_real` / `compute_cpu_gpu` / `apagado_limpio`.
 
 No hace falta implementar memoria compartida de Windows ni migración RAM↔VRAM
 para recuperar estos 16 GiB dedicados. Ese sería otro proyecto para modelos

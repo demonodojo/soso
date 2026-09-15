@@ -16,10 +16,23 @@ pub enum Tokenizer {
     Vocab(VocabTokenizer),
 }
 
+/// Prefijo de espacio SentencePiece (`▁` U+2581).
+const SPACE_SP: char = '\u{2581}';
+/// Prefijo de espacio GPT-2 / Qwen2 (`Ġ` U+0120).
+const SPACE_GPT2: char = '\u{0120}';
+/// GPT-2 bytes_to_unicode de controles habituales (el resto del texto va UTF-8).
+const GPT2_NL: char = '\u{010A}'; // Ċ ← \\n
+const GPT2_TAB: char = '\u{0109}'; // ĉ ← \\t
+const GPT2_CR: char = '\u{010D}'; // ċ ← \\r
+
 pub struct VocabTokenizer {
     pieces: Vec<String>,
     lookup: BTreeMap<String, u32>,
     max_piece_len: usize,
+    /// Marca de espacio del vocabulario (`▁` o `Ġ`).
+    space_mark: char,
+    /// SentencePiece pone la marca al empezar el texto; GPT-2/Qwen2 no.
+    leading_space: bool,
     pub bos: u32,
     pub eos: u32,
 }
@@ -102,14 +115,25 @@ impl VocabTokenizer {
     pub fn new(pieces: Vec<String>, bos: u32, eos: u32) -> Self {
         let mut lookup = BTreeMap::new();
         let mut max_piece_len = 1;
+        let mut n_sp = 0u32;
+        let mut n_gpt2 = 0u32;
         for (i, p) in pieces.iter().enumerate() {
             max_piece_len = max_piece_len.max(p.len());
             lookup.entry(p.clone()).or_insert(i as u32);
+            if p.contains(SPACE_SP) {
+                n_sp += 1;
+            }
+            if p.contains(SPACE_GPT2) {
+                n_gpt2 += 1;
+            }
         }
+        let gpt2 = n_gpt2 > n_sp;
         Self {
             pieces,
             lookup,
             max_piece_len,
+            space_mark: if gpt2 { SPACE_GPT2 } else { SPACE_SP },
+            leading_space: !gpt2,
             bos,
             eos,
         }
@@ -145,17 +169,23 @@ impl VocabTokenizer {
         Ok(Self::new(pieces, bos, eos))
     }
 
-    /// Greedy longest-match sobre el texto normalizado (espacios → `▁`,
-    /// `▁` inicial). Caracteres sin pieza caen al byte-fallback `<0xXX>`.
+    /// Greedy longest-match. SentencePiece: espacios → `▁` y `▁` inicial.
+    /// GPT-2 / Qwen2: espacios → `Ġ`, sin marca al empezar.
+    /// Caracteres sin pieza caen al byte-fallback `<0xXX>`.
     fn encode(&self, text: &str, bos: bool, prefijo: bool) -> Vec<u32> {
         let mut out = Vec::new();
         if bos && self.bos != NO_TOKEN {
             out.push(self.bos);
         }
-        let normalized = if prefijo {
-            format!("\u{2581}{}", text.replace(' ', "\u{2581}"))
+        let replaced = if self.space_mark == SPACE_GPT2 {
+            gpt2_prepare(text)
         } else {
-            text.replace(' ', "\u{2581}")
+            text.replace(' ', &String::from(self.space_mark))
+        };
+        let normalized = if prefijo && self.leading_space {
+            format!("{}{replaced}", self.space_mark)
+        } else {
+            replaced
         };
         let s = normalized.as_str();
         let mut i = 0;
@@ -198,8 +228,14 @@ impl VocabTokenizer {
             bytes.push(b);
         } else {
             for ch in piece.chars() {
-                if ch == '\u{2581}' {
+                if ch == SPACE_SP || ch == SPACE_GPT2 {
                     bytes.push(b' ');
+                } else if ch == GPT2_NL {
+                    bytes.push(b'\n');
+                } else if ch == GPT2_TAB {
+                    bytes.push(b'\t');
+                } else if ch == GPT2_CR {
+                    bytes.push(b'\r');
                 } else {
                     let mut buf = [0u8; 4];
                     bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
@@ -268,6 +304,21 @@ impl Default for StreamDecoder {
     }
 }
 
+/// Normaliza texto al alfabeto de tokens Qwen2/GPT-2 (espacio/`\\n`/`\\t`/`\\r`).
+fn gpt2_prepare(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            ' ' => out.push(SPACE_GPT2),
+            '\n' => out.push(GPT2_NL),
+            '\t' => out.push(GPT2_TAB),
+            '\r' => out.push(GPT2_CR),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Reconoce piezas byte-fallback `<0xXX>`.
 fn parse_byte_piece(piece: &str) -> Option<u8> {
     let hex = piece.strip_prefix("<0x")?.strip_suffix('>')?;
@@ -328,6 +379,35 @@ mod tests {
         let tok = Tokenizer::byte_level();
         let ids = tok.encode("año");
         assert_eq!(tok.decode(&ids), "año");
+    }
+
+    #[test]
+    fn gpt2_espacio_sin_prefijo_inicial() {
+        let pieces: Vec<String> = [
+            "<|im_start|>",
+            "hola",
+            "\u{0120}mundo",
+            "\u{0120}",
+        ]
+        .iter()
+        .map(|s| String::from(*s))
+        .collect();
+        let tok = Tokenizer::Vocab(VocabTokenizer::new(pieces, NO_TOKEN, NO_TOKEN));
+        let ids = tok.encode_trozo("hola mundo", false, true);
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(tok.decode(&ids), "hola mundo");
+    }
+
+    #[test]
+    fn gpt2_salto_de_linea() {
+        let pieces: Vec<String> = ["hola", "\u{010A}", "mundo", "\u{0120}x"]
+            .iter()
+            .map(|s| String::from(*s))
+            .collect();
+        let tok = Tokenizer::Vocab(VocabTokenizer::new(pieces, NO_TOKEN, NO_TOKEN));
+        let ids = tok.encode_trozo("hola\nmundo", false, true);
+        assert_eq!(ids, vec![0, 1, 2]);
+        assert_eq!(tok.decode(&ids), "hola\nmundo");
     }
 
     #[test]

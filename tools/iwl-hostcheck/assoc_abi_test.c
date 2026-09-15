@@ -106,6 +106,22 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
                 group, id);
         return -1;
     }
+    if (group == DATA_PATH_GROUP && id == 0x01) {
+        fprintf(stderr, "UPDATE_MU_GROUPS (5,0x01) no es TX\n");
+        return -1;
+    }
+    if (group == LEGACY_GROUP && id == ADD_STA) {
+        uint32_t status = ADD_STA_SUCCESS;
+
+        iwl->cmd_resp_len = (uint16_t)sizeof(status);
+        memcpy(iwl->cmd_resp, &status, sizeof(status));
+    }
+    if (group == LEGACY_GROUP && id == LQ_CMD) {
+        iwl->cmd_resp_len = 0;
+    }
+    if (group == DATA_PATH_GROUP && id == TLC_MNG_CONFIG_CMD) {
+        iwl->cmd_resp_len = 0;
+    }
     if ((group == DATA_PATH_GROUP && id == SCD_QUEUE_CONFIG_CMD) ||
         (group == LEGACY_GROUP && id == SCD_QUEUE_CFG)) {
         struct iwl_tx_queue_cfg_rsp rsp;
@@ -206,8 +222,32 @@ int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
 int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
                  const void *payload, uint16_t pay_len)
 {
+    uint8_t body[256];
+    const struct iwl_cmd_header *hdr = (const struct iwl_cmd_header *)body;
+
     if (!iwl || !iwl->mgmt_txq_ready || txq_id != iwl->mgmt_txq_id)
         return -1;
+    if (sizeof(struct iwl_cmd_header) != 4) {
+        fprintf(stderr, "iwl_cmd_header debe ser 4 B\n");
+        return -1;
+    }
+    if (TX_CMD != 0x1c) {
+        fprintf(stderr, "TX_CMD debe ser 0x1c\n");
+        return -1;
+    }
+    if (!payload || pay_len > sizeof(body) - sizeof(struct iwl_cmd_header))
+        return -1;
+    memset(body, 0, sizeof(body));
+    ((struct iwl_cmd_header *)body)->cmd = TX_CMD;
+    ((struct iwl_cmd_header *)body)->group_id = LEGACY_GROUP;
+    ((struct iwl_cmd_header *)body)->sequence = 0;
+    memcpy(body + sizeof(struct iwl_cmd_header), payload, pay_len);
+    hdr = (const struct iwl_cmd_header *)body;
+    if (hdr->cmd != 0x1c || hdr->group_id != 0) {
+        fprintf(stderr, "TFD hdr cmd=0x%02x grp=%u (esperado 0x1c/0)\n",
+                hdr->cmd, hdr->group_id);
+        return -1;
+    }
     if (g_tx_n < (int)(sizeof(g_tx) / sizeof(g_tx[0]))) {
         g_tx[g_tx_n].txq_id = txq_id;
         g_tx[g_tx_n].len = pay_len;
@@ -236,6 +276,10 @@ int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
     (void)iwl;
     if (group == DATA_PATH_GROUP && cmd == SCD_QUEUE_CONFIG_CMD)
         return 3;
+    if (group == DATA_PATH_GROUP && cmd == RLC_CONFIG_CMD)
+        return 3;
+    if (group == DATA_PATH_GROUP && cmd == TLC_MNG_CONFIG_CMD)
+        return 4;
     if (cmd == ADD_STA)
         return 12;
     if (cmd == PHY_CONTEXT_CMD)
@@ -247,10 +291,12 @@ int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
 
 int iwl_fw_has_capa(const struct iwl_ax211_priv *iwl, unsigned capa_bit)
 {
-    (void)iwl;
-    if (capa_bit == IWL_UCODE_TLV_CAPA_SESSION_PROT_CMD)
-        return 1;
-    return 0;
+    unsigned set = capa_bit / 32u;
+    unsigned bit = capa_bit % 32u;
+
+    if (!iwl || set >= IWL_FW_CAPA_SETS)
+        return 0;
+    return (iwl->fw_capa[set] & (1u << bit)) != 0;
 }
 
 uint8_t iwl_mvm_valid_tx_ant(struct iwl_ax211_priv *iwl)
@@ -326,7 +372,16 @@ static const struct cmd_rec *find_cmd_group_id(uint8_t group, uint8_t id)
     return i < 0 ? NULL : &g_sent[i];
 }
 
-int main(void)
+static void capa_set(struct iwl_ax211_priv *iwl, unsigned capa_bit)
+{
+    unsigned set = capa_bit / 32u;
+    unsigned bit = capa_bit % 32u;
+
+    if (iwl && set < IWL_FW_CAPA_SETS)
+        iwl->fw_capa[set] |= (1u << bit);
+}
+
+static int run_assoc_case(int expect_tlc, int expect_lq)
 {
     struct iwl_ax211_priv iwl;
     static const uint8_t bssid[6] = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
@@ -345,11 +400,15 @@ int main(void)
     int idx_bind;
     int idx_mac;
     int idx_add;
+    int idx_lq;
+    int idx_tlc;
     int idx_sess;
     int idx_key;
     int idx_te_legacy;
     int idx_scd;
+    int idx_rlc;
     const struct cmd_rec *scd;
+    const struct cmd_rec *rlc;
     const struct iwl_scd_queue_cfg_cmd *sqc_v3;
 
     memset(&iwl, 0, sizeof(iwl));
@@ -362,42 +421,9 @@ int main(void)
     iwl.phy_channel = 6;
     iwl.phy_band = PHY_BAND_24;
     iwl.channel = 40;
-
-    if (sizeof(struct iwl_mvm_add_sta_cmd) != 48) {
-        fprintf(stderr, "ADD_STA v10 debe ser 48 B, tiene %zu\n",
-                sizeof(struct iwl_mvm_add_sta_cmd));
-        return 1;
-    }
-    if (sizeof(struct iwl_mvm_add_sta_key_cmd) != 76) {
-        fprintf(stderr, "ADD_STA_KEY v2 debe ser 76 B, tiene %zu\n",
-                sizeof(struct iwl_mvm_add_sta_key_cmd));
-        return 1;
-    }
-    if (sizeof(struct iwl_time_event_cmd) != 36) {
-        fprintf(stderr, "TIME_EVENT_CMD debe ser 36 B, tiene %zu\n",
-                sizeof(struct iwl_time_event_cmd));
-        return 1;
-    }
-    if (sizeof(struct iwl_mvm_session_prot_cmd) != 24) {
-        fprintf(stderr, "SESSION_PROTECTION_CMD debe ser 24 B, tiene %zu\n",
-                sizeof(struct iwl_mvm_session_prot_cmd));
-        return 1;
-    }
-    if (sizeof(struct iwl_tx_queue_cfg_cmd) != 24) {
-        fprintf(stderr, "SCD_QUEUE_CFG legacy debe ser 24 B, tiene %zu\n",
-                sizeof(struct iwl_tx_queue_cfg_cmd));
-        return 1;
-    }
-    if (sizeof(struct iwl_scd_queue_cfg_cmd) != 36) {
-        fprintf(stderr, "SCD_QUEUE_CONFIG_CMD payload debe ser 36 B, tiene %zu\n",
-                sizeof(struct iwl_scd_queue_cfg_cmd));
-        return 1;
-    }
-    if (IWL_SCD_BC_TBL_BYTES != 640) {
-        fprintf(stderr, "IWL_SCD_BC_TBL_BYTES=%u (esperado 640)\n",
-                IWL_SCD_BC_TBL_BYTES);
-        return 1;
-    }
+    if (expect_tlc)
+        capa_set(&iwl, IWL_UCODE_TLV_CAPA_TLC_OFFLOAD);
+    capa_set(&iwl, IWL_UCODE_TLV_CAPA_SESSION_PROT_CMD);
 
     g_sent_n = 0;
     g_mgmt_bc_alloc_bytes = 0;
@@ -415,10 +441,14 @@ int main(void)
     idx_bind = find_idx(BINDING_CONTEXT_CMD);
     idx_mac = find_idx(MAC_CONTEXT_CMD);
     idx_add = find_idx(ADD_STA);
+    idx_lq = find_idx(LQ_CMD);
+    idx_tlc = find_idx_group_id(DATA_PATH_GROUP, TLC_MNG_CONFIG_CMD);
     idx_sess = find_idx_group_id(MAC_CONF_GROUP, SESSION_PROTECTION_CMD);
     idx_te_legacy = find_idx(TIME_EVENT_CMD);
     idx_scd = find_idx_group_id(DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD);
+    idx_rlc = find_idx_group_id(DATA_PATH_GROUP, RLC_CONFIG_CMD);
     scd = find_cmd_group_id(DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD);
+    rlc = find_cmd_group_id(DATA_PATH_GROUP, RLC_CONFIG_CMD);
     if (!phy || !mac || !add || !scd || !sess) {
         fprintf(stderr,
                 "faltan HCMD PHY=%d BIND=%d MAC=%d ADD=%d SCD=%d SESS=%d TE=%d\n",
@@ -440,11 +470,73 @@ int main(void)
                 idx_bind);
         return 1;
     }
-    if (!(idx_phy < idx_mac && idx_mac < idx_add && idx_add < idx_scd &&
-          idx_scd < idx_sess)) {
-        fprintf(stderr, "orden HCMD PHY(%d) MAC(%d) ADD(%d) SCD(%d) SESS(%d)\n",
-                idx_phy, idx_mac, idx_add, idx_scd, idx_sess);
-        return 1;
+    if (expect_tlc) {
+        if (idx_lq >= 0) {
+            fprintf(stderr, "LQ_CMD no debe emitirse con CAPA_TLC_OFFLOAD (idx=%d)\n",
+                    idx_lq);
+            return 1;
+        }
+        if (idx_tlc < 0) {
+            fprintf(stderr, "falta TLC_MNG_CONFIG tras ADD_STA (TLC offload)\n");
+            return 1;
+        }
+        if (!(idx_phy < idx_mac && idx_mac < idx_add && idx_add < idx_tlc &&
+              idx_tlc < idx_scd && idx_scd < idx_sess)) {
+            fprintf(stderr,
+                    "orden HCMD PHY(%d) MAC(%d) ADD(%d) TLC(%d) SCD(%d) SESS(%d)\n",
+                    idx_phy, idx_mac, idx_add, idx_tlc, idx_scd, idx_sess);
+            return 1;
+        }
+    } else if (expect_lq) {
+        if (idx_lq < 0) {
+            fprintf(stderr, "falta LQ_CMD tras ADD_STA (sin TLC offload)\n");
+            return 1;
+        }
+        if (idx_tlc >= 0) {
+            fprintf(stderr, "TLC_MNG_CONFIG no debe emitirse sin TLC offload\n");
+            return 1;
+        }
+        if (!(idx_phy < idx_mac && idx_mac < idx_add && idx_add < idx_lq &&
+              idx_lq < idx_scd && idx_scd < idx_sess)) {
+            fprintf(stderr,
+                    "orden HCMD PHY(%d) MAC(%d) ADD(%d) LQ(%d) SCD(%d) SESS(%d)\n",
+                    idx_phy, idx_mac, idx_add, idx_lq, idx_scd, idx_sess);
+            return 1;
+        }
+        {
+            const struct cmd_rec *lq = &g_sent[idx_lq];
+            const struct iwl_lq_cmd {
+                uint8_t sta_id;
+                uint8_t reduced_tpc;
+                uint16_t control;
+                uint8_t flags;
+                uint8_t mimo_delim;
+                uint8_t single_stream_ant_msk;
+                uint8_t dual_stream_ant_msk;
+                uint8_t initial_rate_index[4];
+                uint16_t agg_time_limit;
+                uint8_t agg_disable_start_th;
+                uint8_t agg_frame_cnt_limit;
+                uint32_t reserved2;
+                uint32_t rs_table[16];
+                uint32_t ss_params;
+            } *lqcmd;
+
+            if (lq->group != LEGACY_GROUP || lq->len != 88u) {
+                fprintf(stderr, "LQ_CMD group=%u len=%u (esperado LEGACY/88)\n",
+                        lq->group, lq->len);
+                return 1;
+            }
+            lqcmd = (const void *)lq->payload;
+            if (lqcmd->sta_id != IWL_MVM_AP_STA_ID) {
+                fprintf(stderr, "LQ_CMD sta_id=%u\n", lqcmd->sta_id);
+                return 1;
+            }
+            if (lqcmd->rs_table[0] == 0) {
+                fprintf(stderr, "LQ_CMD rs_table[0]=0\n");
+                return 1;
+            }
+        }
     }
     if (scd->group != DATA_PATH_GROUP ||
         scd->len != sizeof(struct iwl_scd_queue_cfg_cmd)) {
@@ -549,6 +641,34 @@ int main(void)
                 pc->ci.channel, pc->ci.band);
         return 1;
     }
+    if (pc->rxchain_info != 0) {
+        fprintf(stderr, "PHY rxchain_info=0x%08x (esperado 0 con RLC_CONFIG v3)\n",
+                pc->rxchain_info);
+        return 1;
+    }
+    if (!rlc || idx_rlc < 0) {
+        fprintf(stderr, "falta RLC_CONFIG tras PHY (idx=%d)\n", idx_rlc);
+        return 1;
+    }
+    if (rlc->group != DATA_PATH_GROUP ||
+        rlc->len != sizeof(struct iwl_rlc_config_cmd)) {
+        fprintf(stderr, "RLC_CONFIG group=%u len=%u\n", rlc->group, rlc->len);
+        return 1;
+    }
+    if (!(idx_phy < idx_rlc && idx_rlc < idx_mac)) {
+        fprintf(stderr, "orden PHY(%d) RLC(%d) MAC(%d)\n", idx_phy, idx_rlc, idx_mac);
+        return 1;
+    }
+    {
+        const struct iwl_rlc_config_cmd *rc =
+            (const struct iwl_rlc_config_cmd *)rlc->payload;
+
+        if (rc->phy_id != 0 || rc->rlc.rx_chain_info == 0) {
+            fprintf(stderr, "RLC_CONFIG phy_id=0x%08x rx_chain=0x%08x\n",
+                    rc->phy_id, rc->rlc.rx_chain_info);
+            return 1;
+        }
+    }
     if (mac->len != sizeof(struct iwl_mac_ctx_cmd)) {
         fprintf(stderr, "MAC_CONTEXT len=%u esperado %zu\n",
                 mac->len, sizeof(struct iwl_mac_ctx_cmd));
@@ -602,6 +722,11 @@ int main(void)
     }
     if ((mc->filter_flags & IWL_MAC_FILTER_ACCEPT_GRP) == 0) {
         fprintf(stderr, "MAC filter_flags=0x%x sin ACCEPT_GRP\n", mc->filter_flags);
+        return 1;
+    }
+    if ((mc->filter_flags & IWL_MAC_FILTER_IN_CONTROL_AND_MGMT) == 0) {
+        fprintf(stderr, "MAC filter_flags=0x%x sin IN_CONTROL_AND_MGMT\n",
+                mc->filter_flags);
         return 1;
     }
 
@@ -683,14 +808,49 @@ int main(void)
                     tx0->txq_id, tx1->txq_id, g_mock_mgmt_qid);
             return 1;
         }
+        if (sizeof(struct iwl_cmd_header) != 4u) {
+            fprintf(stderr, "iwl_cmd_header=%zu (esperado 4)\n",
+                    sizeof(struct iwl_cmd_header));
+            return 1;
+        }
+        if (TX_CMD != 0x1c) {
+            fprintf(stderr, "TX_CMD=0x%02x (esperado 0x1c)\n", TX_CMD);
+            return 1;
+        }
         if (tx_off != 20u) {
             fprintf(stderr, "TX_CMD gen2 prefix=%u (esperado 20)\n", tx_off);
+            return 1;
+        }
+        if ((unsigned)sizeof(struct iwl_cmd_header) + tx_off != 24u) {
+            fprintf(stderr, "AUTH en TFD offset=%u (esperado 24)\n",
+                    (unsigned)sizeof(struct iwl_cmd_header) + tx_off);
             return 1;
         }
         if (tx0->len <= tx_off || tx0->payload[tx_off] != (uint8_t)IEEE80211_STYPE_AUTH) {
             fprintf(stderr, "TX0 no es AUTH fc=0x%02x\n",
                     tx0->len > tx_off ? tx0->payload[tx_off] : 0);
             return 1;
+        }
+        {
+            const struct iwl_tx_cmd_gen2 *txcmd =
+                (const struct iwl_tx_cmd_gen2 *)tx0->payload;
+            uint32_t tx_flags = txcmd->flags;
+
+            if ((tx_flags & IWL_TX_FLAGS_CMD_RATE) == 0) {
+                fprintf(stderr, "TX0 flags=0x%08x sin CMD_RATE (sin LQ/rate scale)\n",
+                        tx_flags);
+                return 1;
+            }
+            if ((tx_flags & IWL_TX_FLAGS_ENCRYPT_DIS) == 0 ||
+                (tx_flags & IWL_TX_FLAGS_HIGH_PRI) == 0) {
+                fprintf(stderr, "TX0 flags=0x%08x sin ENCRYPT_DIS|HIGH_PRI\n", tx_flags);
+                return 1;
+            }
+            if (txcmd->offload_assist != (uint16_t)((24u / 2u) << TX_CMD_OFFLD_MH_SIZE)) {
+                fprintf(stderr, "TX0 offload_assist=0x%04x (esperado 0x0c00 MH_SIZE)\n",
+                        txcmd->offload_assist);
+                return 1;
+            }
         }
         if (tx1->len <= tx_off || tx1->payload[tx_off] != (uint8_t)IEEE80211_STYPE_ASSOC_REQ) {
             fprintf(stderr, "TX1 no es ASSOC req fc=0x%02x\n",
@@ -753,6 +913,53 @@ int main(void)
         return 1;
     }
 
-    puts("OK: assoc PHY + MAC is_assoc=0 + ADD_STA + SCD_QUEUE_CONFIG v3 + SESSION_PROT + TXQ AUTH/ASSOC + MAC is_assoc=1 + ADD_STA_KEY");
+    return 0;
+}
+
+int main(void)
+{
+    if (sizeof(struct iwl_mvm_add_sta_cmd) != 48) {
+        fprintf(stderr, "ADD_STA v10 debe ser 48 B, tiene %zu\n",
+                sizeof(struct iwl_mvm_add_sta_cmd));
+        return 1;
+    }
+    if (sizeof(struct iwl_mvm_add_sta_key_cmd) != 76) {
+        fprintf(stderr, "ADD_STA_KEY v2 debe ser 76 B, tiene %zu\n",
+                sizeof(struct iwl_mvm_add_sta_key_cmd));
+        return 1;
+    }
+    if (sizeof(struct iwl_time_event_cmd) != 36) {
+        fprintf(stderr, "TIME_EVENT_CMD debe ser 36 B, tiene %zu\n",
+                sizeof(struct iwl_time_event_cmd));
+        return 1;
+    }
+    if (sizeof(struct iwl_mvm_session_prot_cmd) != 24) {
+        fprintf(stderr, "SESSION_PROTECTION_CMD debe ser 24 B, tiene %zu\n",
+                sizeof(struct iwl_mvm_session_prot_cmd));
+        return 1;
+    }
+    if (sizeof(struct iwl_tx_queue_cfg_cmd) != 24) {
+        fprintf(stderr, "SCD_QUEUE_CFG legacy debe ser 24 B, tiene %zu\n",
+                sizeof(struct iwl_tx_queue_cfg_cmd));
+        return 1;
+    }
+    if (sizeof(struct iwl_scd_queue_cfg_cmd) != 36) {
+        fprintf(stderr, "SCD_QUEUE_CONFIG_CMD payload debe ser 36 B, tiene %zu\n",
+                sizeof(struct iwl_scd_queue_cfg_cmd));
+        return 1;
+    }
+    if (IWL_SCD_BC_TBL_BYTES != 640) {
+        fprintf(stderr, "IWL_SCD_BC_TBL_BYTES=%u (esperado 640)\n",
+                IWL_SCD_BC_TBL_BYTES);
+        return 1;
+    }
+
+    if (run_assoc_case(1, 0) != 0)
+        return 1;
+    puts("OK: assoc AX200 TLC offload — sin LQ_CMD, TLC_MNG_CONFIG + SCD v3 + SESSION_PROT");
+
+    if (run_assoc_case(0, 1) != 0)
+        return 1;
+    puts("OK: assoc legacy — LQ_CMD + SCD v3 + SESSION_PROT");
     return 0;
 }

@@ -474,6 +474,13 @@ fn runtime_rechaza_flags_reservados() {
 }
 
 #[test]
+fn runtime_acepta_rope_neox() {
+    let mut m = Manifest::tiny("qwen2");
+    m.layers[0].flags = sosomodel::FLAG_ROPE_NEOX;
+    assert!(m.supported_by_runtime().is_ok());
+}
+
+#[test]
 fn runtime_acepta_mla_con_ranks() {
     let mut m = Manifest::tiny("mla");
     m.layers = vec![LayerSpec {

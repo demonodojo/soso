@@ -1,4 +1,4 @@
-//! Convierte un fichero GGUF (llama o deepseek2 MLA) al layout sosomodel (.som).
+//! Convierte un fichero GGUF (llama, deepseek2 MLA, qwen2, qwen35/qwen38) al layout sosomodel (.som).
 
 use std::env;
 use std::path::{Path, PathBuf};

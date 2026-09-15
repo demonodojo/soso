@@ -141,6 +141,10 @@ pub const WIFI_PHASE_MAX: usize = 48;
 pub const WIFI_FLAG_PRESENT: u32 = 1;
 pub const WIFI_FLAG_ALIVE: u32 = 2;
 pub const WIFI_FLAG_CONNECTED: u32 = 4;
+/// Enlace autorizado: asociada y, si la red es protegida, con el 4-way WPA2
+/// terminado y las claves en el firmware. `CONNECTED` sin esto es una
+/// asociación que todavía no transporta nada.
+pub const WIFI_FLAG_AUTHORIZED: u32 = 8;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -366,6 +370,11 @@ pub struct GpuInfo {
     pub uploads_bounce: u32,
     /// Bytes que pasaron por el rebote (heap del kernel + rebote de 1 MiB del CE).
     pub bounce_bytes: u64,
+    /// Pool FB físico libre (`total - used`), sin techo G6/VA/tablas.
+    pub vram_pool_free: u64,
+    /// Tablas VMM libres (antes del margen de bring-up en G6).
+    pub g6_pt_free: u16,
+    pub _pad_budget: [u8; 6],
 }
 
 /// Umbral: ficheros mayores se abren en modo lazy (sin cargar todo).

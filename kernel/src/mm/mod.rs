@@ -189,6 +189,7 @@ pub fn map_dma_uc(phys: u64, size: u64) -> VirtAddr {
 /// ¿Cabe `phys` en las direcciones físicas que esta CPU traduce? Un PTE con
 /// bits por encima de MAXPHYADDR está reservado: el acceso es #PF, no un
 /// error de `map_to`.
+#[allow(dead_code)]
 fn phys_cabe(phys: u64) -> bool {
     let w = (core::arch::x86_64::__cpuid(0x8000_0008).eax & 0xff) as u32;
     let bits = if (32..53).contains(&w) { w } else { 46 };
@@ -196,6 +197,7 @@ fn phys_cabe(phys: u64) -> bool {
     phys < max
 }
 
+#[allow(dead_code)]
 pub fn map_dma_wc(phys: u64, size: u64) -> VirtAddr {
     use core::sync::atomic::{AtomicU64, Ordering};
     use x86_64::structures::paging::PageTableFlags as F;

@@ -705,6 +705,27 @@ fn liberar_sesion(sesion: &mut Sesion) {
     sesion.pool = None;
 }
 
+/// Prefetch con progreso en serie (evita minutos sin línea en SOSOLOG).
+fn prefetch_shards_logged(
+    source: &mut StagedSource,
+    shards: &[String],
+    echo_fd: Option<u64>,
+) {
+    let n = shards.len();
+    for (i, shard) in shards.iter().enumerate() {
+        let step = i + 1;
+        if step == 1 || step == n || step % 8 == 0 {
+            let line = format!("askd: prefetch {step}/{n} {shard}");
+            println!("{line}");
+            if let Some(fd) = echo_fd {
+                let _ = sys::write_all(fd, line.as_bytes());
+                let _ = sys::write_all(fd, b"\n");
+            }
+        }
+        source.prefetch_shards(&[shard.clone()]);
+    }
+}
+
 /// Carga el modelo y decide planificador, backend y workers.
 ///
 /// `verboso` apaga el diagnóstico entero: `ask` quiere la respuesta y nada
@@ -727,6 +748,7 @@ pub(crate) fn preparar_sesion_echo(
     with_pool: bool,
     echo_fd: Option<u64>,
 ) -> Result<Sesion, u8> {
+    let t_sess = sys::uptime_ms();
     let io0 = read_iostat();
     let (manifest, index, manifest_crc, index_crc) = read_model_catalog(name)?;
     let num_layers = manifest.num_layers;
@@ -760,6 +782,9 @@ pub(crate) fn preparar_sesion_echo(
     // decode, y el disco se gasta casi entero antes de que ese reloj arranque.
     // Medirlas juntas es lo que hacía invisible el coste de E/S.
     let carga_ms = (sys::uptime_ms() - t_carga).max(0) as u64;
+    if echo_fd.is_some() {
+        println!("askd: catálogo+disco {name} — {carga_ms} ms");
+    }
     let io_carga = read_iostat();
     if verboso {
         println!(
@@ -785,11 +810,17 @@ pub(crate) fn preparar_sesion_echo(
             );
         }
     }
+    let t_backend = sys::uptime_ms();
     let mut sys_gpu = if force_cpu { None } else { soso_gpu::SysGpu::new() };
+    let backend_ms = (sys::uptime_ms() - t_backend).max(0) as u64;
     println!(
-        "soso-llm: backend {}",
-        if sys_gpu.is_some() { "GPU" } else { "CPU" }
+        "soso-llm: backend {} (+{} ms)",
+        if sys_gpu.is_some() { "GPU" } else { "CPU" },
+        backend_ms
     );
+    if echo_fd.is_some() {
+        println!("askd: backend {} (+{backend_ms} ms)", if sys_gpu.is_some() { "GPU" } else { "CPU" });
+    }
     // El `present` del kernel no basta para decidir: un dispositivo puede aceptar
     // búferes y no ejecutar nada (iGPU Intel), y entonces `SysGpu::new` dice no.
     // Anunciar "GPU detectada" mirando sólo `present` era prometer un offload que
@@ -800,50 +831,61 @@ pub(crate) fn preparar_sesion_echo(
         }
         bundle.rt.set_backend(Backend::Cpu);
     } else if let Some(ref mut g) = sys_gpu {
+        // `gpu_info` inicial puede ver vram_bufs=0 antes de que GSP exponga el
+        // pool; `SysGpu::new` ya releyó. Sin esto, eager_vram queda en false y
+        // el prefetch por USB (~4,5 GiB) parece un cuelgue tras «backend GPU».
+        let _ = sys::gpu_info(&mut gpu);
+        let vram_free = gpu.vram_free;
         if verboso {
             println!(
                 "soso-llm: dispositivo de cómputo «{}» (fase {}), VRAM libre {} bytes",
                 g.device_name(),
                 g.phase(),
-                gpu.vram_free
+                vram_free
             );
         }
         bundle.rt.set_backend(Backend::Auto);
-        bundle.rt.tiers.vram_budget = gpu.vram_free as usize;
+        bundle.rt.tiers.vram_budget = vram_free as usize;
         if let Some(pl) = bundle.rt.planner.as_mut() {
-            pl.set_vram_free(gpu.vram_free);
+            pl.refresh_vram(&bundle.rt.manifest, &bundle.rt.index, vram_free);
         }
-        let model_vram = soso_llm_core::plan::total_model_vram_bytes(&bundle.rt.index);
+        let model_payload = soso_llm_core::plan::total_model_vram_bytes(&bundle.rt.index);
+        let model_g6 = soso_llm_core::plan::total_model_vram_g6_budget_bytes(&bundle.rt.index);
         let keep_mapped = bundle
             .rt
             .planner
             .as_ref()
             .is_some_and(|p| p.keep_weights_mapped());
-        if keep_mapped {
-            let index = &bundle.rt.index;
-            let mut shards = Vec::new();
-            for e in &index.entries {
-                if !shards.iter().any(|s| s == &e.shard) {
-                    shards.push(e.shard.clone());
-                }
-            }
-            bundle.source.prefetch_shards(&shards);
+        let eager_vram = gpu.vram_bufs != 0 && vram_free > 0;
+        let full_vram = model_g6 > 0 && model_g6 <= vram_free;
+        if echo_fd.is_some() {
+            println!(
+                "askd: VRAM — modelo {} MiB (G6 {} MiB), pool {} MiB, libre {} MiB, tablas {}, eager={}, residente={}",
+                model_payload >> 20,
+                model_g6 >> 20,
+                gpu.vram_pool_free >> 20,
+                vram_free >> 20,
+                gpu.g6_pt_free,
+                eager_vram,
+                full_vram
+            );
         }
-        let full_vram = model_vram > 0 && model_vram <= gpu.vram_free;
+        let index = &bundle.rt.index;
+        let mut shards = Vec::new();
+        for e in &index.entries {
+            if !shards.iter().any(|s| s == &e.shard) {
+                shards.push(e.shard.clone());
+            }
+        }
+        // Sin eager: prefetch para streaming CPU. Con eager: una pasada calienta
+        // el page cache antes de subir (sin ella cada tensor_view faultea el USB).
+        if keep_mapped && (!eager_vram || full_vram) && !shards.is_empty() {
+            prefetch_shards_logged(&mut bundle.source, &shards, echo_fd);
+        }
         if full_vram {
             g.fijar_pesos_residentes();
         }
-        if gpu.vram_bufs != 0 && gpu.vram_free > 0 {
-            if !keep_mapped {
-                let index = &bundle.rt.index;
-                let mut shards = Vec::new();
-                for e in &index.entries {
-                    if !shards.iter().any(|s| s == &e.shard) {
-                        shards.push(e.shard.clone());
-                    }
-                }
-                bundle.source.prefetch_shards(&shards);
-            }
+        if eager_vram {
             let mut gpu_info = abi::GpuInfo::default();
             let (dma0, bounce0) = if sys::gpu_info(&mut gpu_info) == 0 {
                 (gpu_info.uploads_dma, gpu_info.uploads_bounce)
@@ -860,7 +902,22 @@ pub(crate) fn preparar_sesion_echo(
                 .iter()
                 .map(|e| (e.name.clone(), e.shape.clone()))
                 .collect();
-            for (name, shape) in &to_upload {
+            let n_up = to_upload.len();
+            if let Some(fd) = echo_fd {
+                let _ = sys::write_all(fd, b"askd: subida GPU...\n");
+            }
+            println!("askd: subida GPU — {n_up} tensores");
+            for (i, (name, shape)) in to_upload.iter().enumerate() {
+                let step = i + 1;
+                if step == 1 || step == n_up || step % 8 == 0 {
+                    let ms = (sys::uptime_ms() - t_up).max(0) as u64;
+                    let line = format!("askd: subida GPU {step}/{n_up} (+{ms} ms) ({name})");
+                    println!("{line}");
+                    if let Some(fd) = echo_fd {
+                        let _ = sys::write_all(fd, line.as_bytes());
+                        let _ = sys::write_all(fd, b"\n");
+                    }
+                }
                 if let Ok(view) = bundle.source.tensor_view(name) {
                     if g.subir_tensor(name, &view, shape) {
                         bytes_subidos =
@@ -870,6 +927,9 @@ pub(crate) fn preparar_sesion_echo(
             }
             let uploaded = g.stats().1.saturating_sub(uploads0);
             let ms_up = (sys::uptime_ms() - t_up).max(0) as u64;
+            println!(
+                "askd: subida GPU fin — {uploaded} ok, {bytes_subidos} B en {ms_up} ms"
+            );
             let (dma, bounce) = if sys::gpu_info(&mut gpu_info) == 0 {
                 (
                     gpu_info.uploads_dma.saturating_sub(dma0),
@@ -904,6 +964,10 @@ pub(crate) fn preparar_sesion_echo(
     } else {
         None
     };
+    if echo_fd.is_some() {
+        let total_ms = (sys::uptime_ms() - t_sess).max(0) as u64;
+        println!("askd: sesión {name} preparada — {total_ms} ms total");
+    }
     Ok(Sesion {
         bundle,
         pool,
@@ -961,8 +1025,14 @@ fn emitir_ask(fd: u64, s: &str) {
 /// capturar el `fd` (es un `fn` en el runtime).
 static ASK_TICK_FD: AtomicU64 = AtomicU64::new(u64::MAX);
 static ASK_LAYER_T0: AtomicU64 = AtomicU64::new(0);
+static ASK_INFER_T0: AtomicU64 = AtomicU64::new(0);
 static ASK_GPU_FOR_TICK: AtomicU64 = AtomicU64::new(0);
 static ASK_TICK_N: AtomicU32 = AtomicU32::new(0);
+
+fn askd_elapsed_ms(t0: u64) -> u64 {
+    let now = sys::uptime_ms().max(0) as u64;
+    now.saturating_sub(t0)
+}
 
 fn ask_layer_tick(layer: u32, n: u32) {
     let now = sys::uptime_ms().max(0) as u64;
@@ -977,6 +1047,21 @@ fn ask_layer_tick(layer: u32, n: u32) {
     // Prefill (primer recorrido de capas) o capa lenta: el resto a 32×N líneas
     // de serie/SOSOLOG se come el tok/s.
     let prefill = n > 0 && seq < n;
+    if seq == 0 {
+        let infer0 = ASK_INFER_T0.load(Ordering::Relaxed);
+        let total = if infer0 != 0 {
+            askd_elapsed_ms(infer0)
+        } else {
+            0
+        };
+        println!(
+            "askd: primera capa completada ({}/{} capas, {} ms capa, {} ms inferencia)",
+            layer + 1,
+            n,
+            ms,
+            total
+        );
+    }
     if ptr != 0 && (prefill || ms >= 80) {
         let on_gpu = unsafe { (*(ptr as *const soso_gpu::SysGpu)).last_on_gpu() as u8 };
         println!(
@@ -986,6 +1071,23 @@ fn ask_layer_tick(layer: u32, n: u32) {
             ms,
             on_gpu
         );
+    }
+    let fd = ASK_TICK_FD.load(Ordering::Relaxed);
+    if fd != u64::MAX {
+        let _ = sys::write_all(fd, b".");
+    }
+}
+
+/// Punto al cliente y traza en serie al entrar en una capa (antes del matvec).
+fn ask_layer_enter(layer: u32, n: u32) {
+    if layer == 0 {
+        let infer0 = ASK_INFER_T0.load(Ordering::Relaxed);
+        let total = if infer0 != 0 {
+            askd_elapsed_ms(infer0)
+        } else {
+            0
+        };
+        println!("askd: forward capa 1/{n} (+{total} ms inferencia)");
     }
     let fd = ASK_TICK_FD.load(Ordering::Relaxed);
     if fd != u64::MAX {
@@ -1036,17 +1138,22 @@ pub(crate) fn generar_tokens(
         let bundle = &mut sesion.bundle;
         let eos = bundle.tokenizer.eos();
         if let Some(fd) = fd_out {
+            let infer0 = sys::uptime_ms().max(0) as u64;
             ASK_TICK_FD.store(fd, Ordering::Relaxed);
-            ASK_LAYER_T0.store(sys::uptime_ms().max(0) as u64, Ordering::Relaxed);
+            ASK_INFER_T0.store(infer0, Ordering::Relaxed);
+            ASK_LAYER_T0.store(infer0, Ordering::Relaxed);
             ASK_GPU_FOR_TICK.store(gpu_tick_ptr, Ordering::Relaxed);
             ASK_TICK_N.store(0, Ordering::Relaxed);
             bundle.rt.layer_hook = Some(ask_layer_tick);
+            bundle.rt.layer_enter_hook = Some(ask_layer_enter);
         }
         // askd: sin clock_ms/refresh_mem (syscall en el matvec AVX2) y sin
         // planificador por token. `run` sigue con el camino cronometrado.
         // Un punto por capa: Mixtral tarda minutos en el prefill y, si no
         // hay tráfico, el cliente corta a los 4 min de silencio.
         if let Some(fd) = fd_out {
+            let t_prefill = sys::uptime_ms();
+            let _ = sys::write_all(fd, b".");
             bundle.rt.generate_stream_par(
                 &mut bundle.source,
                 prompt_tokens,
@@ -1066,6 +1173,11 @@ pub(crate) fn generar_tokens(
                 par,
                 &mut gpu_ref,
                 &mut |i, total| {
+                    let ms = (sys::uptime_ms() - t_prefill).max(0) as u64;
+                    if i == 1 || i == total || (total > 4 && i % 4 == 0) {
+                        println!("askd: prefill token {i}/{total} (+{ms} ms)");
+                    }
+                    let _ = sys::write_all(fd, b".");
                     if i == total {
                         emitir_ask(fd, "\n");
                     }
@@ -1097,8 +1209,10 @@ pub(crate) fn generar_tokens(
         }
     };
     ASK_TICK_FD.store(u64::MAX, Ordering::Relaxed);
+    ASK_INFER_T0.store(0, Ordering::Relaxed);
     ASK_GPU_FOR_TICK.store(0, Ordering::Relaxed);
     sesion.bundle.rt.layer_hook = None;
+    sesion.bundle.rt.layer_enter_hook = None;
     if drop_pool {
         sesion.pool = None;
     }

@@ -8,6 +8,20 @@
 
 void *memset(void *dst, int c, unsigned long n);
 
+/* Una línea por tipo de error: cientos de matvec repetían lo mismo y llenaban SOSOLOG. */
+static unsigned g_vmm_warn_pt_full;
+static unsigned g_vmm_warn_leaf_big;
+static unsigned g_vmm_warn_leaf_table;
+static int vmm_printk_once(unsigned *ctr, const char *msg, uint64_t va)
+{
+    if (*ctr) {
+        return -1;
+    }
+    *ctr = 1;
+    lx_printk(msg, (unsigned long long)va);
+    return -1;
+}
+
 struct vmm_level_desc {
     uint8_t shift;
     uint8_t bits;
@@ -350,8 +364,11 @@ static struct gsp_vmm_pt *pt_get(struct gsp_vmm *v, unsigned lvl, uint64_t va,
         return pt;
     }
     if (v->pt_nr >= GSP_VMM_MAX_PT) {
-        lx_printk("nouveau-lx: sin sitio para más tablas de páginas (%u)\n",
-                  GSP_VMM_MAX_PT);
+        if (!g_vmm_warn_pt_full) {
+            g_vmm_warn_pt_full = 1;
+            lx_printk("nouveau-lx: sin sitio para más tablas de páginas (%u)\n",
+                      GSP_VMM_MAX_PT);
+        }
         return NULL;
     }
     pt = &v->pt[v->pt_nr];
@@ -432,9 +449,10 @@ static int map_one(struct gsp_vmm *v, uint64_t at, uint64_t phys,
          * colgar una tabla hoja de la misma entrada (las dos mitades válidas es
          * comportamiento indefinido de la MMU). */
         if (lvl == 1u && pt_read_big(v, parent, lvl_index(v, 1, at)) != 0) {
-            lx_printk("nouveau-lx: VA 0x%llx es página grande; no cabe hoja de 4 KiB\n",
-                      (unsigned long long)at);
-            return -1;
+            return vmm_printk_once(&g_vmm_warn_leaf_big,
+                                   "nouveau-lx: VA 0x%llx es página grande; "
+                                   "no cabe hoja de 4 KiB\n",
+                                   at);
         }
         child = pt_get(v, lvl - 1u, at, &created);
         if (!child) {
@@ -488,9 +506,10 @@ static int map_big_one(struct gsp_vmm *v, uint64_t at, uint64_t phys,
     }
     /* Si esos 2 MiB ya tienen tabla hoja, no puede haber además página grande. */
     if (pt_read(v, parent, lvl_index(v, 1, at)) != 0) {
-        lx_printk("nouveau-lx: VA 0x%llx ya tiene tabla hoja; no cabe página grande\n",
-                  (unsigned long long)at);
-        return -1;
+        return vmm_printk_once(&g_vmm_warn_leaf_table,
+                               "nouveau-lx: VA 0x%llx ya tiene tabla hoja; "
+                               "no cabe página grande\n",
+                               at);
     }
     pt_write_big(v, parent, lvl_index(v, 1, at),
                  gsp_vmm_pte_encode(phys, target, flags));

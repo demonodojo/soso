@@ -72,11 +72,15 @@ pub fn abort() -> ! {
 }
 
 pub unsafe fn write(fd: u64, buf: *const u8, len: usize) -> isize {
-    let n = syscall3(SYS_WRITE, fd, buf as u64, len as u64);
-    if n < 0 { -1 } else { n as isize }
+    unsafe {
+        let n = syscall3(SYS_WRITE, fd, buf as u64, len as u64);
+        if n < 0 { -1 } else { n as isize }
+    }
 }
 
 pub unsafe fn read(fd: u64, buf: *mut u8, len: usize) -> isize {
-    let n = syscall3(SYS_READ, fd, buf as u64, len as u64);
-    if n < 0 { -1 } else { n as isize }
+    unsafe {
+        let n = syscall3(SYS_READ, fd, buf as u64, len as u64);
+        if n < 0 { -1 } else { n as isize }
+    }
 }

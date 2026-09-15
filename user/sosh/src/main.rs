@@ -446,9 +446,10 @@ fn ejecutar_wifi(args: &str) {
             .unwrap_or(st.phase.len());
         let phase = core::str::from_utf8(&st.phase[..phase_n]).unwrap_or("?");
         println!(
-            "wifi: alive={} connected={} phase={}",
+            "wifi: alive={} asociada={} autorizada={} phase={}",
             st.flags & abi::WIFI_FLAG_ALIVE != 0,
             st.flags & abi::WIFI_FLAG_CONNECTED != 0,
+            st.flags & abi::WIFI_FLAG_AUTHORIZED != 0,
             phase
         );
         println!(

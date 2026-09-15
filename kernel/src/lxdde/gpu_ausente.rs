@@ -32,6 +32,14 @@ pub fn device_vram_free() -> u64 {
     0
 }
 
+pub fn device_vram_pool_free() -> u64 {
+    0
+}
+
+pub fn device_g6_pt_free() -> u32 {
+    0
+}
+
 pub fn device_bufs_ready() -> bool {
     false
 }

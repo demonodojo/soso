@@ -408,6 +408,19 @@ pub extern "C" fn lx_pci_device_id(dev: *mut LxPciDev) -> u16 {
     unsafe { (*dev).device_id }
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn lx_pci_for_each(
+    cb: Option<extern "C" fn(u16, u16, u8, u8, *mut c_void)>,
+    ctx: *mut c_void,
+) {
+    let Some(cb) = cb else {
+        return;
+    };
+    for d in pci::devices() {
+        cb(d.vendor_id, d.device_id, d.class, d.subclass, ctx);
+    }
+}
+
 /// Retira un dispositivo sin realojar a los restantes (`Box` estable).
 #[unsafe(no_mangle)]
 pub extern "C" fn lx_pci_remove_device(dev: *mut LxPciDev) {

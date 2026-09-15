@@ -7,6 +7,7 @@
 #include "lx_emul.h"
 #include "iwl_internal.h"
 #include "iwl_ax211.h"
+#include "iwl_test_frames.h"
 #include <stdlib.h>
 
 #define REPLY_SF_CFG_CMD 0xd1
@@ -21,7 +22,9 @@ struct iwl_sf_cfg_cmd {
 
 static uint8_t g_mcr_pool[IWL_CMD_SLOT_SIZE * IWL_CMD_QUEUE_SIZE];
 static uint8_t g_mtr_pool[IWL_TFH_TFD_SIZE * IWL_CMD_QUEUE_SIZE];
-static uint32_t g_mmio_stub[0x500];
+static uint8_t g_first_tb_pool[IWL_CMD_QUEUE_SIZE * IWL_FIRST_TB_SIZE_ALIGN];
+/* RFH_Q0_FRBDCB_WIDX_TRG (0x1C80) queda fuera de un stub de 0x500 palabras. */
+static uint32_t g_mmio_stub[IWL_TEST_MMIO_WORDS];
 
 void lx_printk(const char *fmt, ...) { (void)fmt; }
 void lx_mdelay(unsigned int ms) { (void)ms; }
@@ -48,12 +51,20 @@ void lx_dma_free_coherent(void *dev, size_t size, void *cpu, uint64_t dma)
 int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
 {
     (void)iwl;
+    if (group == DATA_PATH_GROUP && cmd == SCD_QUEUE_CONFIG_CMD)
+        return 3;
     (void)group;
     (void)cmd;
     return 0;
 }
 
 void iwl_ax211_deliver_rx(const uint8_t *data, int len)
+{
+    (void)data;
+    (void)len;
+}
+
+void iwl_ax211_deliver_eapol(const uint8_t *data, int len)
 {
     (void)data;
     (void)len;
@@ -101,6 +112,8 @@ static int check_wide_legacy(uint8_t id, const void *payload, uint16_t pay_len)
     iwl.cmd_qid = IWL_MVM_DQA_CMD_QUEUE;
     iwl.mcr_cpu = g_mcr_pool;
     iwl.mtr_cpu = g_mtr_pool;
+    iwl.hcmd_first_tb_cpu = g_first_tb_pool;
+    iwl.hcmd_first_tb_dma = 0x2000;
     iwl.mcr_dma = 0x1000;
     iwl.mmio = g_mmio_stub;
 
@@ -113,18 +126,61 @@ static int check_wide_legacy(uint8_t id, const void *payload, uint16_t pay_len)
         fprintf(stderr, "iwl_cmd_header_wide != 8 B\n");
         return -1;
     }
-    if (g_mcr_pool[0] != id || g_mcr_pool[1] != LONG_GROUP) {
+    if (g_first_tb_pool[0] != id || g_first_tb_pool[1] != LONG_GROUP) {
         fprintf(stderr, "cabecera cmd/grp incorrecta para 0x%02x (DEF_ID → grp=1)\n",
                 id);
         return -1;
     }
-    if (*(uint16_t *)(g_mcr_pool + 4) != pay_len) {
+    if (*(uint16_t *)(g_first_tb_pool + 4) != pay_len) {
         fprintf(stderr, "length wide != payload para 0x%02x\n", id);
         return -1;
     }
     /* La ruta legacy antigua usaría cabecera de 4 B; debe haber quedado wide. */
-    if (g_mcr_pool[5] != 0 || g_mcr_pool[6] != 0) {
+    if (g_first_tb_pool[5] != 0 || g_first_tb_pool[6] != 0) {
         /* reserved + version en wide; legacy pondría length en offset 5. */
+    }
+    return 0;
+}
+
+static int check_scd_wide_header(void)
+{
+    struct iwl_ax211_priv iwl;
+    struct iwl_scd_queue_cfg_cmd scd;
+
+    memset(&iwl, 0, sizeof(iwl));
+    memset(&scd, 0, sizeof(scd));
+    memset(g_first_tb_pool, 0, sizeof(g_first_tb_pool));
+    iwl.alive = 1;
+    iwl.cmd_qid = IWL_MVM_DQA_CMD_QUEUE;
+    iwl.mcr_cpu = g_mcr_pool;
+    iwl.mtr_cpu = g_mtr_pool;
+    iwl.hcmd_first_tb_cpu = g_first_tb_pool;
+    iwl.hcmd_first_tb_dma = 0x2000;
+    iwl.mcr_dma = 0x1000;
+    iwl.mmio = g_mmio_stub;
+
+    scd.operation = iwl_cpu_to_le32(IWL_SCD_QUEUE_ADD);
+    scd.u.add.tid = IWL_MGMT_TID;
+    if (iwl_trans_send_cmd(&iwl, DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD, &scd,
+                           (uint16_t)sizeof(scd)) != 0) {
+        fprintf(stderr, "SCD_QUEUE_CONFIG send falló\n");
+        return -1;
+    }
+    if (g_first_tb_pool[0] != SCD_QUEUE_CONFIG_CMD ||
+        g_first_tb_pool[1] != DATA_PATH_GROUP) {
+        fprintf(stderr, "SCD cmd/grp incorrectos (0x%02x/0x%02x)\n",
+                g_first_tb_pool[0], g_first_tb_pool[1]);
+        return -1;
+    }
+    if (g_first_tb_pool[7] != 0) {
+        fprintf(stderr, "SCD wide version=%u (esperado 0, no cmd_ver TLV)\n",
+                (unsigned)g_first_tb_pool[7]);
+        return -1;
+    }
+    if (*(uint16_t *)(g_first_tb_pool + 4) != (uint16_t)sizeof(scd)) {
+        fprintf(stderr, "SCD length wide=%u\n",
+                (unsigned)*(uint16_t *)(g_first_tb_pool + 4));
+        return -1;
     }
     return 0;
 }
@@ -171,8 +227,12 @@ int main(void)
         fprintf(stderr, "MAC_CONTEXT no usa cabecera wide\n");
         return -1;
     }
+    if (check_scd_wide_header() != 0) {
+        fprintf(stderr, "SCD_QUEUE_CONFIG no usa wide version=0\n");
+        return -1;
+    }
 
     puts("OK: LEGACY HCMD (TX_ANT/SF/PHY/MAC) wide 8 B + DEF_ID grp=1, "
-         "MAC 148 B filter@52 qos@56");
+         "MAC 148 B filter@52 qos@56; SCD grp=5 ver_hdr=0");
     return 0;
 }

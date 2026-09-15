@@ -114,6 +114,14 @@ pub struct SysGpu {
 }
 
 impl SysGpu {
+    /// Relee el presupuesto G6 del kernel (min pool, VA, tablas).
+    fn sync_vram_budget(&mut self) {
+        let mut info = abi::GpuInfo::default();
+        if sys::gpu_info(&mut info) >= 0 {
+            self.vram_free = info.vram_free;
+        }
+    }
+
     pub fn new() -> Option<Self> {
         let mut info = abi::GpuInfo::default();
         if sys::gpu_info(&mut info) < 0 || info.present == 0 {
@@ -373,7 +381,8 @@ impl SysGpu {
         }
         if self.offload_dead {
             libsoso::println!("soso-llm: offload estaba desactivado (fallo duro previo)");
-        } else if !self.last_on_gpu() && calls > 0 {
+        } else if !self.last_on_gpu() && calls > 0 && !self.device_name().starts_with("soft") {
+            // `on_gpu=0` en SOFTG es el contrato (CPU del kernel, sin silicio ni GSP).
             libsoso::println!(
                 "soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «{}»",
                 self.phase()
@@ -463,10 +472,15 @@ impl SysGpu {
         {
             return Ok((r.handle, r.fmt));
         }
+        let reserve = soso_llm_core::plan::g6_reserve_bytes(bytes);
         // Sitio: primero por número de entradas, luego por VRAM. Se echa la más
         // antigua, que con un recorrido de capas en orden es la que más tardará
         // en volver a hacer falta.
-        while bytes > self.vram_free {
+        while reserve > self.vram_free {
+            self.sync_vram_budget();
+            if reserve <= self.vram_free {
+                break;
+            }
             if self.pesos_fijos {
                 self.sin_sitio += 1;
                 return Err(());
@@ -480,6 +494,8 @@ impl SysGpu {
             let freed = sys::gpu_free(old.handle);
             if freed > 0 {
                 self.vram_free = self.vram_free.saturating_add(freed as u64);
+            } else {
+                self.sync_vram_budget();
             }
             self.resident.remove(0);
             // Se cuenta porque era mudo: con el desalojo en marcha, `uploads` sube
@@ -489,12 +505,13 @@ impl SysGpu {
         }
         let h = sys::gpu_alloc_vram(bytes);
         if h < 0 {
+            self.sync_vram_budget();
             // Sin VRAM contable o pool G6 vacío: híbrido, no canal roto.
             self.sin_sitio += 1;
             return Err(());
         }
         let handle = h as u64;
-        self.vram_free = self.vram_free.saturating_sub(bytes);
+        self.sync_vram_budget();
         let mut ciclos_deq = 0u64;
         let t_todo = libsoso::ciclos();
         let subido = match fmt {
@@ -525,7 +542,7 @@ impl SysGpu {
             .wrapping_add(ciclos_todo.saturating_sub(ciclos_deq));
         if subido.is_err() {
             sys::gpu_free(handle);
-            self.vram_free = self.vram_free.saturating_add(bytes);
+            self.sync_vram_budget();
             // CE/DMA roto: cortar offload. Reintentar por cada proyección llenaba
             // la serie con "pushbuffer lleno" (~150 líneas/matvec).
             self.kill_offload("subida de pesos");
@@ -630,60 +647,59 @@ impl SysGpu {
         }
     }
 
-    fn ensure_y_vram(
-        s: &mut Scratch,
-        bytes: u64,
-        vram_free: &mut u64,
-        on_fail: &mut Option<&'static str>,
-    ) -> Result<u64, ()> {
-        if s.handle != u64::MAX && s.bytes >= bytes {
-            return Ok(s.handle);
-        }
-        if s.handle != u64::MAX {
-            let freed = sys::gpu_free(s.handle);
-            if freed > 0 {
-                *vram_free = vram_free.saturating_add(freed as u64);
-            }
-            *s = Scratch::NONE;
-        }
-        if bytes > *vram_free {
-            *on_fail = Some("y batch sin VRAM");
-            return Err(());
-        }
-        let h = sys::gpu_alloc_vram(bytes);
-        if h < 0 {
-            *on_fail = Some("gpu_alloc_vram y batch");
-            return Err(());
-        }
-        *vram_free = vram_free.saturating_sub(bytes);
-        s.handle = h as u64;
-        s.bytes = bytes;
-        Ok(s.handle)
-    }
-
     fn ensure_y_buf(
         &mut self,
         idx: usize,
         bytes: u64,
     ) -> Result<u64, ()> {
         if idx == 0 {
-            return Self::ensure_y_vram(
+            return Self::ensure_scratch(
                 &mut self.y,
                 bytes,
                 &mut self.vram_free,
                 &mut self.last_fail,
+                false,
             );
         }
         while self.y_extra.len() <= idx - 1 {
             self.y_extra.push(Scratch::NONE);
         }
         let slot = &mut self.y_extra[idx - 1];
-        Self::ensure_y_vram(
+        Self::ensure_scratch(
             slot,
             bytes,
             &mut self.vram_free,
             &mut self.last_fail,
+            false,
         )
+    }
+
+    /// Matvec mínimo tras cargar pesos: comprueba que el silicio calcula (`on_gpu`).
+    pub fn probe_compute(&mut self) -> bool {
+        const ROWS: usize = 64;
+        const COLS: usize = 64;
+        let elems = ROWS * COLS;
+        let mut w = alloc::vec![0.01f32; elems];
+        let x = alloc::vec![0.01f32; COLS];
+        let mut y = alloc::vec![0.0f32; ROWS];
+        for (i, wi) in w.iter_mut().enumerate() {
+            *wi = (i as f32 * 0.001) % 0.1;
+        }
+        let v = TensorView {
+            bytes: unsafe {
+                core::slice::from_raw_parts(w.as_ptr().cast::<u8>(), elems * 4)
+            },
+            dtype: DTYPE_F32,
+            elems,
+        };
+        let ok = self
+            .matvec("_probe", &v, ROWS, COLS, &x, &mut y)
+            .unwrap_or(false)
+            && self.last_on_gpu();
+        if !ok && self.last_fail.is_none() {
+            self.note_fail("probe matvec sin GPU");
+        }
+        ok
     }
 }
 
@@ -773,13 +789,14 @@ impl GpuDispatch for SysGpu {
         };
         let x_bytes = (cols * 4) as u64;
         let y_bytes = (rows * 4) as u64;
-        let vram_x = self.pesos_fijos;
+        // x/y van al staging G6_RES en el kernel; aquí sólo son búferes GART para
+        // la syscall. Reservarlos en VRAM (gsp_buf 4 KiB) choca con pesos en 2 MiB.
         let Ok(x_handle) = Self::ensure_scratch(
             &mut self.x,
             x_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
-            vram_x,
+            false,
         ) else {
             return Ok(false);
         };
@@ -788,7 +805,7 @@ impl GpuDispatch for SysGpu {
             y_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
-            self.pesos_fijos,
+            false,
         ) else {
             return Ok(false);
         };
@@ -864,7 +881,7 @@ impl GpuDispatch for SysGpu {
             x_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
-            self.pesos_fijos,
+            false,
         ) else {
             return Ok(false);
         };
@@ -873,7 +890,7 @@ impl GpuDispatch for SysGpu {
             y_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
-            self.pesos_fijos,
+            false,
         ) else {
             return Ok(false);
         };
@@ -960,7 +977,7 @@ impl GpuDispatch for SysGpu {
             x_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
-            self.pesos_fijos,
+            false,
         ) else {
             return Ok(false);
         };
@@ -1073,7 +1090,7 @@ impl GpuDispatch for SysGpu {
             bytes,
             &mut self.vram_free,
             &mut self.last_fail,
-            self.pesos_fijos,
+            false,
         ) else {
             return Ok(false);
         };
@@ -1082,7 +1099,7 @@ impl GpuDispatch for SysGpu {
             w_bytes,
             &mut self.vram_free,
             &mut self.last_fail,
-            self.pesos_fijos,
+            false,
         ) else {
             return Ok(false);
         };

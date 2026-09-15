@@ -1499,6 +1499,25 @@ fn ssh_llm_mla(key: &Path, ssh_port: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// Texto emitido por el modelo justo antes de `soso-llm: generado`.
+///
+/// El resumen GPU (`dispositivo «soft»`, subidas, y el aviso de `on_gpu=0` del
+/// dispositivo software: «el silicio no calculó nada») se imprime **antes** de
+/// esa línea. Tomar la vecina era comparar diagnósticos, no tokens — así fallaba
+/// el shard `llm-moe` con cpu `""` y dev el aviso de GSP.
+fn texto_generado_antes_de_resumen<'a>(lineas: &'a [&'a str], idx_generado: usize) -> &'a str {
+    let mut i = idx_generado;
+    while i > 0 {
+        i -= 1;
+        let l = lineas[i].trim();
+        if l.starts_with("soso-llm:") || l.starts_with("askd:") || l.starts_with("gpu:") {
+            continue;
+        }
+        return l;
+    }
+    ""
+}
+
 /// Modelo Q4_K por los DOS caminos: CPU y dispositivo. Es lo único que ejercita en
 /// QEMU la subida de pesos **en crudo** y el comando `MATVQ`, y lo que exige es lo
 /// que de verdad importa: **los mismos tokens**. Un `row_bytes` mal calculado, un
@@ -1517,13 +1536,13 @@ fn ssh_llm_q4k(key: &Path, ssh_port: u16) -> Result<(), String> {
     )?;
     let lineas: Vec<&str> = texto.lines().collect();
     // El TEXTO generado, no la línea de tok/s: ésa lleva milisegundos y nunca
-    // coincidiría. `soso-llm` lo emite en streaming y lo cierra con un salto, así
-    // que es la línea justo antes del resumen.
+    // coincidiría. Tras el streaming hay un salto; el resumen GPU puede intercalarse
+    // antes de `generado`, así que se saltan líneas de diagnóstico.
     let salidas: Vec<&str> = lineas
         .iter()
         .enumerate()
         .filter(|(_, l)| l.contains("soso-llm: generado"))
-        .map(|(i, _)| if i > 0 { lineas[i - 1].trim() } else { "" })
+        .map(|(i, _)| texto_generado_antes_de_resumen(&lineas, i))
         .collect();
     if salidas.len() < 2 {
         return Err(format!(
@@ -2092,6 +2111,15 @@ fn ssh_fifo_path(tag: &str) -> PathBuf {
     ))
 }
 
+/// El SSH del guion ya ha salido cuando el arnés recoge; `kill` entonces imprime
+/// `kill: (pid): No such process` y parece un fallo del shard.
+fn kill_pid_quiet(pid: u32) {
+    let _ = Command::new("kill")
+        .arg(pid.to_string())
+        .stderr(Stdio::null())
+        .status();
+}
+
 struct SshSessionGuard {
     fifo: PathBuf,
     holder: Option<Child>,
@@ -2113,7 +2141,7 @@ impl SshSessionGuard {
 
     fn finish(mut self) {
         if let Some(pid) = self.ssh_pid.take() {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
+            kill_pid_quiet(pid);
         }
         if let Some(mut holder) = self.holder.take() {
             let _ = holder.kill();
@@ -2127,7 +2155,7 @@ impl Drop for SshSessionGuard {
     fn drop(&mut self) {
         if self.ssh_pid.is_some() || self.holder.is_some() {
             if let Some(pid) = self.ssh_pid {
-                let _ = Command::new("kill").arg(pid.to_string()).status();
+                kill_pid_quiet(pid);
             }
             if let Some(mut holder) = self.holder.take() {
                 let _ = holder.kill();
@@ -2310,5 +2338,62 @@ fn run_usb_scenario(
     let _ = qemu.kill();
     let _ = qemu.wait();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::texto_generado_antes_de_resumen;
+
+    #[test]
+    fn q4k_ignora_el_aviso_gsp_del_dispositivo_software() {
+        let texto = "\
+alpha\n\
+soso-llm: dispositivo «soft (CPU del kernel, pruebas)» — 10 matvec, 4 subidas de pesos, 4 matrices residentes, 0 sin sitio (a CPU), último on_gpu=0\n\
+soso-llm: subidas — 4 de 4 en crudo (sin expandir a f32), 0 Mciclos descuantizando, 0 Mciclos en gpu_map\n\
+soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «»\n\
+soso-llm: generado (3 tokens, 1 ms, 1.00 tok/s)\n\
+";
+        let lineas: Vec<&str> = texto.lines().collect();
+        let i = lineas
+            .iter()
+            .position(|l| l.contains("soso-llm: generado"))
+            .unwrap();
+        assert_eq!(texto_generado_antes_de_resumen(&lineas, i), "alpha");
+    }
+
+    #[test]
+    fn q4k_tokens_vacios_no_se_confunden_con_el_diagnostico() {
+        let texto = "\
+soso-llm: backend CPU (+0 ms)\n\
+\n\
+soso-llm: generado (3 tokens, 1 ms, 1.00 tok/s)\n\
+";
+        let lineas: Vec<&str> = texto.lines().collect();
+        let i = lineas
+            .iter()
+            .position(|l| l.contains("soso-llm: generado"))
+            .unwrap();
+        assert_eq!(texto_generado_antes_de_resumen(&lineas, i), "");
+    }
+
+    #[test]
+    fn q4k_cpu_y_gpu_soft_dan_el_mismo_texto() {
+        let texto = "\
+hola\n\
+soso-llm: generado (3 tokens, 10 ms, 0.30 tok/s)\n\
+hola\n\
+soso-llm: dispositivo «soft (CPU del kernel, pruebas)» — 8 matvec, 4 subidas de pesos\n\
+soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «»\n\
+soso-llm: generado (3 tokens, 40 ms, 0.08 tok/s)\n\
+";
+        let lineas: Vec<&str> = texto.lines().collect();
+        let salidas: Vec<&str> = lineas
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("soso-llm: generado"))
+            .map(|(i, _)| texto_generado_antes_de_resumen(&lineas, i))
+            .collect();
+        assert_eq!(salidas, ["hola", "hola"]);
+    }
 }
 

@@ -10,6 +10,16 @@ description: >-
 
 Documentación para **usuarios finales** (no desarrolladores). Lenguaje claro en **español**.
 
+## Relación con planes y subplanes
+
+Cuando una actualización del manual pertenece a un plan, seguir
+[Identificación y seguimiento de planes](../soso-architecture/references/planes.md)
+y enlazar la entrega con su ID. Documentar como disponible solo el comando o
+comportamiento implementado y comprobado; los comandos propuestos de una ficha
+pendiente permanecen en el plan. Registrar el cierre documental sin cerrar la
+implementación ni las pruebas que falten. El seguimiento del desarrollo vive
+en el plan, su catálogo y sus informes, no en el manual de usuario.
+
 ## Archivo canónico
 
 - **Ruta:** [`MANUAL-USUARIO.md`](../../../MANUAL-USUARIO.md) (raíz del repo)

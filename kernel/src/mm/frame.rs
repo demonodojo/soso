@@ -23,6 +23,11 @@ pub struct BootInfoFrameAllocator {
     total_usable: usize,
     /// Frames que el cursor ha dejado atrás (entregados o movidos a `free`).
     cursor_consumed: usize,
+    /// `free` está ordenada por dirección. Se mantiene sola mientras sólo
+    /// empuje el cursor (que va en orden); un `deallocate` suelto la rompe.
+    /// Sin esta marca habría que reordenar cientos de miles de frames en cada
+    /// petición contigua, y eso arrastra la máquina más que el propio fallo.
+    free_ordenada: bool,
 }
 
 impl BootInfoFrameAllocator {
@@ -42,7 +47,18 @@ impl BootInfoFrameAllocator {
             free: Vec::new(),
             total_usable,
             cursor_consumed: 0,
+            free_ordenada: true,
         }
+    }
+
+    /// Devuelve un frame a la lista de libres manteniendo la marca de orden.
+    fn push_free(&mut self, frame: PhysFrame) {
+        if let Some(last) = self.free.last()
+            && frame.start_address() < last.start_address()
+        {
+            self.free_ordenada = false;
+        }
+        self.free.push(frame);
     }
 
     pub fn free_frames(&self) -> usize {
@@ -73,8 +89,7 @@ impl BootInfoFrameAllocator {
             if aligned <= tramp && tramp < aligned + bytes {
                 let mut gap = base;
                 while gap < tramp {
-                    self.free
-                        .push(PhysFrame::containing_address(PhysAddr::new(gap)));
+                    self.push_free(PhysFrame::containing_address(PhysAddr::new(gap)));
                     self.cursor_consumed += 1;
                     gap += 4096;
                 }
@@ -86,8 +101,7 @@ impl BootInfoFrameAllocator {
                 // reciclar el hueco [base, aligned)
                 let mut gap = base;
                 while gap < aligned {
-                    self.free
-                        .push(PhysFrame::containing_address(PhysAddr::new(gap)));
+                    self.push_free(PhysFrame::containing_address(PhysAddr::new(gap)));
                     self.cursor_consumed += 1;
                     gap += 4096;
                 }
@@ -98,13 +112,56 @@ impl BootInfoFrameAllocator {
             // el resto de la región no sirve para esta petición: reciclarlo
             let mut rest = base;
             while rest + 4096 <= r.end {
-                self.free
-                    .push(PhysFrame::containing_address(PhysAddr::new(rest)));
+                self.push_free(PhysFrame::containing_address(PhysAddr::new(rest)));
                 self.cursor_consumed += 1;
                 rest += 4096;
             }
             self.region_idx += 1;
             self.next_addr = 0;
+        }
+        // Regiones vírgenes agotadas. Lo liberado sigue ahí: buscarlo.
+        self.take_contiguous_from_free(count, align_frames)
+    }
+
+    /// Busca `count` frames consecutivos y alineados dentro de `free`.
+    ///
+    /// El cursor sólo avanza, así que sin esto, en cuanto se agotan las
+    /// regiones vírgenes **ninguna petición contigua vuelve a salir adelante**
+    /// por mucha memoria que se libere. Era lo que tumbaba la máquina con «sin
+    /// memoria contigua para DMA» al cargar un modelo grande después de otros:
+    /// el reclamo devolvía cientos de frames a `free` y `allocate_contiguous`
+    /// ni los miraba. También es lo que hace reutilizable un bloque devuelto
+    /// por `deallocate_2m`, que son 512 frames seguidos.
+    fn take_contiguous_from_free(&mut self, count: u64, align_frames: u64) -> Option<PhysFrame> {
+        let count = count as usize;
+        if count == 0 || self.free.len() < count {
+            return None;
+        }
+        if !self.free_ordenada {
+            self.free
+                .sort_unstable_by_key(|f| f.start_address().as_u64());
+            self.free_ordenada = true;
+        }
+        let align = align_frames * 4096;
+        let mut i = 0usize;
+        while i + count <= self.free.len() {
+            let base = self.free[i].start_address().as_u64();
+            if align > 4096 && !base.is_multiple_of(align) {
+                i += 1;
+                continue;
+            }
+            let mut n = 1usize;
+            while n < count
+                && self.free[i + n].start_address().as_u64() == base + (n as u64) * 4096
+            {
+                n += 1;
+            }
+            if n == count {
+                self.free.drain(i..i + count);
+                return Some(PhysFrame::containing_address(PhysAddr::new(base)));
+            }
+            // El tramo se corta en i+n: antes de ahí no hay nada que probar.
+            i += n;
         }
         None
     }
@@ -126,8 +183,7 @@ impl BootInfoFrameAllocator {
     pub unsafe fn deallocate_2m(&mut self, frame: PhysFrame) {
         let start = frame.start_address().as_u64();
         for i in 0..512u64 {
-            self.free
-                .push(PhysFrame::containing_address(PhysAddr::new(start + i * 4096)));
+            self.push_free(PhysFrame::containing_address(PhysAddr::new(start + i * 4096)));
         }
     }
 }
@@ -143,6 +199,6 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
 
 impl FrameDeallocator<Size4KiB> for BootInfoFrameAllocator {
     unsafe fn deallocate_frame(&mut self, frame: PhysFrame) {
-        self.free.push(frame);
+        self.push_free(frame);
     }
 }

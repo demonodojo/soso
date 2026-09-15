@@ -4,13 +4,28 @@ description: >-
   soso OS architecture — kernel layout, sosofs CoW filesystem, syscalls,
   userspace ABI, networking, SSH stack and coding constraints. Use when
   modifying kernel/, crates/, user/, xtask/, adding features, syscalls,
-  drivers, or understanding how components interact. GPU NVIDIA: skill
+  drivers, understanding how components interact, or identifying and resuming
+  soso plans, SELF_IMPROVEMENT milestones and task dependencies. GPU NVIDIA: skill
   soso-gpu. WiFi iwlwifi: soso-wifi. Live USB, install and OTA: soso-live.
 ---
 
 # soso — Architecture
 
 Learning OS in Rust. **10/10 phases complete.** Bare-metal x86_64 on QEMU q35.
+
+## Planes, subplanes y seguimiento
+
+Al ejecutar, retomar o consultar un plan, leer
+[Identificación y seguimiento de planes](references/planes.md). Ahí están el
+mapa de planes del repositorio, la relación padre → índice → catálogo → ficha,
+los estados y el procedimiento de cierre con evidencia. Las fases históricas
+de arquitectura no determinan el estado de los planes actuales.
+
+Para automejora, entrar por
+[SELF_IMPROVEMENT.md](../../../SELF_IMPROVEMENT.md) y resolver el ID en
+[tasks.json](../../../docs/self-improvement/tasks.json). Leer solo la ficha y
+sus contratos pertinentes. Al reanudar, conservar el plan y la tarea activos;
+un archivo de diagnóstico abierto en el IDE no cambia el objetivo.
 
 ## Workspace layout
 
@@ -145,8 +160,9 @@ NIC loopback (`kernel/src/net/loopback.rs`). `soso-llm run` no usa askd (carga e
 frío). Config en `/etc/llm.conf`, que **no fija modelo por defecto**: se
 usa el primero de `/models`, y el empaquetado live (`package-usb-live` /
 `flash-usb-live`) pone el modelo demo delante de `tiny` sintético — sin
-pendrive `package-usb-live` usa **mistral-7b**; al flashear elige el mejor
-GGUF que quepa (tinyllama → mistral-7b → qwen3.8-27b en 32 GB+). Las imágenes
+pendrive `package-usb-live` usa **qwen2.5-coder-3b** (Qwen2.5-Coder-3B-Instruct
+Q4_K_M); al flashear elige el mejor GGUF que quepa (tinyllama → qwen2.5-coder-3b
+→ mistral-7b → qwen3.8-27b en 32 GB+). Las imágenes
 de prueba QEMU siguen con `synthetic tiny`. Fijar un nombre ahí lo hereda
 toda imagen que se genere, y avisa en cada respuesta si no viaja
 con ella — por eso `ask-modelo` escribe el fichero en el disco de la máquina, no en el
@@ -294,6 +310,8 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 | True-resident hits (tronco/MoE) | kimi-k3-in-c telemetría | `plan.rs` stats, líneas `soso-llm` |
 | Arquitecturas MLA/KDA/LatentMoE/shared/MXFP4 | Kimi K3 | `arch.rs`, `manifest.rs` v4, `mkmodel-soso --attn/--ffn-kind/--shared-experts`; MLA cache latente en `kv.rs` + `attention_decode_mla_latent` |
 | Gated attn + Gated DeltaNet (Qwen3.5/3.8) | Qwen3.8 | `arch.rs` `forward_gated_attn`/`forward_gdn_attn`, `AttnKind::Gated/Gdn`, `gguf2som` arch `qwen35`/`qwen38`; KV recurrente O(1) en `LayerKv::gdn_s` |
+| RoPE NeoX + bias QKV (Qwen2) | Qwen2.5-Coder | `gemm.rs::rope_inplace_neox`, `layer.rs` `add_optional_bias`, `FLAG_ROPE_NEOX`; `gguf2som` arch `qwen2` |
+| RoPE NeoX + bias QKV (Qwen2) | Qwen2.5-Coder | `gemm.rs::rope_inplace_neox`, `layer.rs` `add_optional_bias`, `FLAG_ROPE_NEOX`; `gguf2som` arch `qwen2` |
 | Shard cache lock (staging ∥ compute) | — | `source.rs::CacheLock` (TOCTOU-safe insert), `staging.rs` wait en release |
 | Offload GPU trunk-first + pool MoE | — | `plan.rs` pack `TRUNK_GPU_PROJ` + `gpu_experts`, VRAM Q4_K crudo |
 
@@ -301,7 +319,7 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 - **SIMD**: userspace compila con target propio `user/x86_64-soso-user.json` (SSE..AVX2+FMA, build-std); kernels AVX2 en `gemm.rs::avx2` con dispatch por `target_feature` (escalar = referencia para tests). **Estado FPU**: el kernel preserva x87/XMM/YMM con **xsave64** (`arch/fpu.rs`; fxsave NO basta — pierde las mitades altas YMM entre procesos): timer_isr guarda a `TIMER_FPU` antes de net::poll, `timer_tick` lo copia a `Process.fpu` al desalojar, `schedule_inner` restaura al reanudar, `irq::dispatch` preserva en `net_poll_shim` si bomba la red al salir a ring 3 (no usa `TIMER_FPU`), el page fault handler preserva en `mmap_fault_shim`; syscalls no preservan (los wrappers de libsoso llevan `clobber_abi("C")`). `init test` estresa YMM con dos hijos "fpu" concurrentes
 - Harness rápido de calidad en host: `cargo run --release -p soso-llm-core --features std --example hostrun -- <modelo-dir> "<prompt>" <n>` (velocidad nativa, SOSO_DEBUG=1 para estadísticas por capa)
 - `Runtime::validate_shapes()` comprueba index↔manifest antes de inferir
-- Host: `cargo xtask convert-gguf` (GGUF **llama**, **deepseek2** MLA o **qwen35/qwen38** → `.som` v4; `--pack-trunk` empaqueta attn+FFN por capa; trocea `ffn_*_exps` por experto; `ffn_*_shexp` → `Sxx` con `num_shared_experts`; Qwen: capas `attn_q` → Gated, el resto GDN; GGUF `blk.N.post_attention_norm` → `Lxx.ffn_norm`, aborta si falta), `mkfs-sosomfs` (multi-modelo: `mkfs-sosomfs dir1 dir2 … imagen.img`), `mkmodel-soso` (`tiny` denso + `--moe` → `tiny-moe` + `--attn mla` → `tiny-mla` + `--moe --ffn-kind latent-moe` → `tiny-latent-moe` en imagen por defecto; flags `--attn mla|kda`, `--ffn-kind latent-moe`, `--shared-experts`, `--pack-trunk`, …). Offload GPU userspace: F32/Q8_0/Q4_K/**MXFP4** dequant-on-upload en `user/soso-llm/src/gpu.rs`
+- Host: `cargo xtask convert-gguf` (GGUF **llama**, **deepseek2** MLA, **qwen2** o **qwen35/qwen38** → `.som` v4; `--pack-trunk` empaqueta attn+FFN por capa; trocea `ffn_*_exps` por experto; `ffn_*_shexp` → `Sxx` con `num_shared_experts`; Qwen: capas `attn_q` → Gated, el resto GDN; GGUF `blk.N.post_attention_norm` → `Lxx.ffn_norm`, aborta si falta), `mkfs-sosomfs` (multi-modelo: `mkfs-sosomfs dir1 dir2 … imagen.img`), `mkmodel-soso` (`tiny` denso + `--moe` → `tiny-moe` + `--attn mla` → `tiny-mla` + `--moe --ffn-kind latent-moe` → `tiny-latent-moe` en imagen por defecto; flags `--attn mla|kda`, `--ffn-kind latent-moe`, `--shared-experts`, `--pack-trunk`, …). Offload GPU userspace: F32/Q8_0/Q4_K/**MXFP4** dequant-on-upload en `user/soso-llm/src/gpu.rs`
 - Tests host arquitecturas: `cargo test -p soso-llm-core --features std --test arch_ext` (MLA/LatentMoE/shared/MXFP4/Gated/GDN)
 - Tests host MoE: `cargo test -p soso-llm-core --features std --test moe`
 - `SOSO_MODELS_DIR=<dir> cargo xtask run` empaqueta un modelo propio en vez de tiny

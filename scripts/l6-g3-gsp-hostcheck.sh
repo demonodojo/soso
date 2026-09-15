@@ -89,6 +89,20 @@ if ! grep -q "gsp_chan_dump(&g_chan, \"sonda CE" "$src/gsp_bringup.c" ||
 fi
 echo "OK: tres medidas de CE en orden, con volcado de estado en el primer fallo"
 
+echo "=== R5.1b: selftest CE fallido reintenta COPY0 ==="
+if ! awk '/^static int run_chan_ce_stage\(/,/^static int gsp_gr_golden_oneinit/' \
+        "$src/gsp_bringup.c" |
+     grep -q 'reintentando COPY0'; then
+    echo "FALLO: run_chan_ce_stage no reintenta COPY0 si el primer motor falla" >&2
+    exit 1
+fi
+if ! awk '/^static int ce_bind_and_verify\(/,/^static int run_chan_ce_stage/' \
+        "$src/gsp_bringup.c" | grep -q 'gsp_ce_selftest'; then
+    echo "FALLO: el reintento COPY0 no pasa por gsp_ce_selftest" >&2
+    exit 1
+fi
+echo "OK: CE selftest fallido (o init) reintenta COPY0"
+
 echo "=== R5.2: PROMOTE_CTX antes de RM_ALLOC compute ==="
 compute_ln=$(awk '/static int run_compute_stage/,/^}/ {
     if ($0 ~ /gsp_compute_init/) { print NR; exit }

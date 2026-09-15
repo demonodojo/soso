@@ -6,12 +6,26 @@ description: >-
   starting soso, compiling the kernel or userspace, running QEMU, connecting
   by SSH, troubleshooting boot/network, reading SOSOLOG.TXT or the hwscan
   report SOSODRV.TXT from the live USB (udisksctl on ESP p1; `cargo xtask sosolog` needs sudo/TTY),
-  `cargo xtask check`, `cargo xtask hw-matrix`, or running cargo xtask test.
+  `cargo xtask check`, `cargo xtask hw-matrix`, running cargo xtask test, or
+  tracking soso plan tasks, validation evidence and implementation progress.
 ---
 
 # soso — Development workflow
 
 Minimalist Rust OS (x86_64 bare-metal) running in QEMU q35. Monousuario.
+
+## Ejecutar y seguir tareas de un plan
+
+Para planes, subplanes Txx y peticiones de estado, leer el procedimiento común
+de [identificación y seguimiento](../soso-architecture/references/planes.md).
+Antes de ejecutar comandos de una ficha, comprobar sus dependencias, entradas
+y que el comando ya existe o se crea en esa entrega.
+
+Registrar plan/ID, base, perfil, comandos, exit codes y evidencia. Actualizar
+catálogo, ficha e índice cuando cambia el estado; mantener resumen durable y
+próximo paso, además de logs en `target/`. Una prueba host o QEMU no cierra una
+validación física. Al terminar una sesión con trabajo pendiente, dejar el
+punto exacto de reanudación; no volver a ejecutar pruebas vigentes sin motivo.
 
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
 Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).
@@ -37,7 +51,7 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask test` | Full integration: sosofs, boot, TCP, SSH, soso-llm, halt |
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
-| `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **mistral-7b**; ver `docs/L5c-on-box.md`) |
+| `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **qwen2.5-coder-3b** Q4_K_M; ver `docs/L5c-on-box.md`) |
 | `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa. **`--skip-models`**: solo ESP+rootfs (bucle diario); **`--only kernel|rootfs`**. **El agente no puede ejecutarlo:** sudo pide contraseña y no hay TTY; deja el comando al usuario (skill **soso-live**). |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP, imprime `SOSOLOG.TXT` y desmonta. **Pide sudo/TTY:** el agente no lo lanza; usa `udisksctl` (skill **soso-live**) |
 | `cargo xtask sosolog --drv [/dev/sdX]` | Igual con `SOSODRV.TXT` (hwscan). Mismo límite de sudo; el agente lee el fichero montando p1 con udisks |
@@ -220,7 +234,7 @@ cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 #   cargo test -p soso-llm-core --features std --test arch_ext
 #   cargo test -p soso-llm-core --features std --test asr
 #   cargo test -p soso-audio --features std
-#   cargo test -p gguf2som --features std -- convierte_gguf_qwen35
+#   cargo test -p gguf2som --features std -- convierte_gguf_qwen35 convierte_gguf_qwen2
 # Hostrun MoE sintético:
 #   cargo run -q --release -p mkmodel-soso -- --moe target/tiny-moe-model
 #   cargo run --release -p soso-llm-core --features std --example hostrun -- target/tiny-moe-model @bos 4
@@ -335,8 +349,11 @@ argumentos.
 
 ## Skills layout
 
-Skills live in `.claude/skills/`. `.cursor/skills` mirrors them — edit under `.claude/skills/`
-and sync the mirror. Tras cada etapa de un `/loop`: actualizar el skill de dominio
+La fuente es `.claude/skills/`; en este checkout `.cursor/skills` y
+`.agents/skills` son symlinks a ella. Comprobarlos antes de sincronizar: editar
+la fuente una sola vez y preservar los enlaces. Si son copias en otro checkout,
+comparar y sincronizar solo los archivos cambiados. Tras cada etapa de un
+`/loop`: actualizar seguimiento del plan y el skill de dominio
 (`soso-architecture`, `soso-gpu`, `soso-wifi`, `soso-live`), este skill si hay
 tests/comandos nuevos, y `MANUAL-USUARIO.md` si el usuario ve strings o
 comportamiento distinto (skill `soso-user-manual`).

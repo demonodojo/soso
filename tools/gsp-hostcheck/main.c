@@ -2259,8 +2259,10 @@ static int check_qmd_v02_fields(const struct gsp_compute *cp,
 
     if (qmd_get_bits(w, QMDV02_QMD_MAJOR_VERSION) !=
             NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01 ||
-        qmd_get_bits(w, QMDV02_SEMAPHORE_RELEASE_ENABLE0) != 1) {
-        printf("FALLO: QMD v2 major/semaphore\n");
+        qmd_get_bits(w, QMDV02_SEMAPHORE_RELEASE_ENABLE0) != 1 ||
+        qmd_get_bits(w, QMDV02_REQUIRE_SCHEDULING_PCAS) !=
+            NVA0C0_QMDV01_07_REQUIRE_SCHEDULING_PCAS_TRUE) {
+        printf("FALLO: QMD v2 major/semaphore/REQUIRE_SCHEDULING_PCAS\n");
         return -1;
     }
     prog = qmd_get_bits(w, QMDV02_PROGRAM_OFFSET);
@@ -3149,14 +3151,14 @@ static int check_ptop(void)
     {
         uint32_t pick = gsp_top_pick_ce_engine();
 
-        if (pick != NV2080_ENGINE_TYPE_COPY0 + 1u) {
-            printf("FALLO: pick_ce_engine=%u (esperaba COPY1=%u, runlist ≠ GR0)\n",
-                   pick, NV2080_ENGINE_TYPE_COPY0 + 1u);
+        if (pick != NV2080_ENGINE_TYPE_COPY0) {
+            printf("FALLO: pick_ce_engine=%u (esperaba COPY0=%u; Linux r535 inst 0)\n",
+                   pick, NV2080_ENGINE_TYPE_COPY0);
             return -1;
         }
     }
     printf("OK: PTOP — 3 motores (GR0, CE0, CE1 con runlists 0x%06x/0x%06x), "
-           "hueco saltado, picker COPY1, y sin GPU no inventa tabla\n",
+           "hueco saltado, picker COPY0, y sin GPU no inventa tabla\n",
            FAKE_TOP_CE0_RUNL, FAKE_TOP_CE1_RUNL);
     return 0;
 }
@@ -4607,7 +4609,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             const uint64_t marks[] = {
                 G6_VA_BASE + (8ull << 30),
                 G6_VA_BASE + (12ull << 30),
-                G6_VA_LIMIT - G6_BIG_MIN,
+                G6_WEIGHT_VA_LIMIT - G6_BIG_MIN,
             };
             unsigned m;
 
@@ -4639,7 +4641,34 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
                     gsp_buf_purge_va_below(&buf, marks[m + 1u]);
                 }
             }
-            printf("OK: G6 reserva y traduce VAs >8 GiB (ventana 32 GiB)\n");
+            printf("OK: G6 reserva y traduce VAs >8 GiB (banda pesos, ventana 32 GiB)\n");
+        }
+
+        /* Banda pequeña (PTE 4 KiB) cerca del extremo de la ventana. */
+        {
+            uint64_t tiny, floor;
+
+            gsp_buf_purge_va_below(&buf, ~0ull);
+            buf.va_next = G6_VA_BASE;
+            floor = G6_VA_LIMIT - 4u * 4096u;
+            buf.va_small_next = floor;
+            tiny = gsp_buf_alloc(&buf, 4096u);
+            if (!tiny || tiny < floor) {
+                printf("FALLO: G6 banda pequeña no reserva cerca del límite "
+                       "(got 0x%llx)\n", (unsigned long long)tiny);
+                return -1;
+            }
+            if (gsp_vmm_translate(&v, tiny, &phys_leida, &pte) != 0 ||
+                phys_leida == 0) {
+                printf("FALLO: G6 banda pequeña no traduce 0x%llx\n",
+                       (unsigned long long)tiny);
+                return -1;
+            }
+            gsp_buf_free(&buf, tiny);
+            printf("OK: G6 banda pequeña reserva y traduce cerca de G6_VA_LIMIT\n");
+            gsp_buf_purge_va_below(&buf, ~0ull);
+            buf.va_next = G6_VA_BASE;
+            buf.va_small_next = G6_SMALL_VA_BASE;
         }
 
         /* Ciclos alloc/liberación: `used` vuelve y la misma VA se reutiliza. */
@@ -4649,6 +4678,7 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
 
             gsp_buf_purge_va_below(&buf, ~0ull);
             buf.va_next = G6_VA_BASE;
+            buf.va_small_next = G6_SMALL_VA_BASE;
             a0 = gsp_buf_alloc(&buf, 4u * 4096u);
             if (!a0) {
                 printf("FALLO: G6 ciclo alloc inicial\n");
@@ -4665,6 +4695,38 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             }
             gsp_buf_free(&buf, a1);
             printf("OK: G6 alloc/liberación mantiene used y reutiliza VA\n");
+        }
+
+        /* Muchas reservas distintas: free-list física no pierde bloques. */
+        {
+            uint64_t addrs[64];
+            unsigned n = 0;
+            uint64_t used0 = pool.used;
+            uint64_t pool0 = gsp_buf_pool_free(&buf);
+
+            for (n = 0; n < 64u; n++) {
+                addrs[n] = gsp_buf_alloc(&buf, (n + 1u) * 4096u);
+                if (!addrs[n]) {
+                    break;
+                }
+            }
+            if (n < 8u) {
+                printf("FALLO: G6 stress free-list — pocas reservas (%u)\n", n);
+                return -1;
+            }
+            for (unsigned j = 0; j < n; j++) {
+                gsp_buf_free(&buf, addrs[j]);
+            }
+            if (pool.used != used0 || gsp_buf_pool_free(&buf) != pool0) {
+                printf("FALLO: G6 stress free-list — used=%llu pool=%llu "
+                       "(esperaba used=%llu pool=%llu)\n",
+                       (unsigned long long)pool.used,
+                       (unsigned long long)gsp_buf_pool_free(&buf),
+                       (unsigned long long)used0,
+                       (unsigned long long)pool0);
+                return -1;
+            }
+            printf("OK: G6 stress free-list (%u bloques) mantiene pool\n", n);
         }
 
         gsp_buf_fini(&buf);

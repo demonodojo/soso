@@ -9,6 +9,17 @@ description: >-
 
 # soso — WiFi Intel (iwlwifi)
 
+## Plan aplicable y seguimiento
+
+Para implementar o retomar una entrega, leer
+[Identificación y seguimiento de planes](../soso-architecture/references/planes.md).
+Localizarla en `docs/WIFI-OPERATIVA.md` o el plan señalado por el usuario y
+correlacionar el diagnóstico por chip, firmware y build. Si habilita una tarea
+de automejora, enlazar el bloqueo con su ID Txx sin cambiar al plan del archivo
+abierto en el IDE. Registrar por separado hostcheck, ALIVE, scan, asociación y
+tráfico real; pasar una etapa no completa las siguientes. Persistir el próximo
+paso y actualizar plan/matriz con sus respectivas evidencias.
+
 Driver **first-party** en `lxdde/ports/iwlwifi/` (no es un port de mac80211
 completo). Transporte PCIe + firmware TLV + MVM scan/assoc/TX mínimos.
 Supplicant WPA2 en kernel Rust (`kernel/src/net/wifi_wpa.rs`).
@@ -19,9 +30,10 @@ Supplicant WPA2 en kernel Rust (`kernel/src/net/wifi_wpa.rs`).
 |--------|------|--------------|----------|------|
 | `8086:7f70`, `51f0`, `54f0` | AX211 | gen3 | `iwlwifi-so-a0-gf-a0-{89,77}.ucode` | `iwlwifi-so-a0-gf-a0.pnvm` |
 | `8086:2723` | AX200 | gen2 | `iwlwifi-cc-a0-{77,74,73,72,66}.ucode` | no |
+| `8086:24fd` | 8265 (familia 8000) | no (FH/ICT) | `iwlwifi-8265-36.ucode` | no |
 
-`iwl->gen3 = device_id != 0x2723`. El live perfil `live-usb` ya incluye
-`SOSO_LXDDE_MODE=nouveau,iwlwifi`.
+`iwl->family` (8000 / 22000 / AX210); `gen3` solo si familia AX210. El live
+perfil `live-usb` ya incluye `SOSO_LXDDE_MODE=nouveau,iwlwifi`.
 
 Firmware en `rootfs/lib/firmware/`. `lx_request_firmware` prueba alternativas
 en silencio; el fallo lo canta el llamante (`iwl_ax211: firmware no encontrado`).
@@ -30,15 +42,21 @@ en silencio; el fallo lo canta el llamante (`iwl_ax211: firmware no encontrado`)
 
 | Path | Rol |
 |------|-----|
-| `iwl_ax211.c` | probe PCI, carga ucode/pnvm, arranque gen2/gen3 |
+| `iwl_ax211.c` | probe PCI, carga ucode/pnvm, arranque gen2/gen3/8000 |
 | `iwl_fw.c` | parser TLV (`SEC_RT` lmac/umac, paging, pnvm) |
 | `iwl_trans.c` | context-info, colas MTR/MCR/RX, espera ALIVE |
+| `iwl_trans_8000.c` | carga FH + ICT (8265); plan comprobable en host |
 | `iwl_mvm.c` | scan UMAC, assoc, TX |
+| `iwl_mvm_data.c` | 802.11 ↔ Ethernet (RX/TX), puro y comprobable en host |
 | `iwlwifi_lx.c` | exports C → Rust (`lx_iwlwifi_*`) |
 | `lxdde/shim/src/{iwlwifi,skbuff,netdev,cfg80211,mac80211}_lx.c` | shims mínimos |
-| `kernel/src/net/wifi_wpa.rs` | PBKDF2-PSK + 4-way EAPOL + CCMP |
+| `crates/soso-wpa2/` | máquina WPA2-PSK/CCMP `no_std`, con su banco de host |
+| `kernel/src/net/wifi_wpa.rs` | sólo E/S: credenciales y bucle del 4-way |
 | `kernel/src/drivers/wificonf.rs` | lee `SOSOWIFI.TXT` (ESP, 8.3) |
 | `tools/iwl-hostcheck/main.c` | parser TLV contra blobs reales |
+| `tools/iwl-hostcheck/rx_datapath_test.c` | descriptores RX por generación + datos + anillo TX |
+| `tools/iwl-hostcheck/ring_soak_test.c` | anillos RX/TX contra un modelo de firmware, bajo carga |
+| `scripts/l6-wifi-capture-4way.sh` | captura un 4-way real (hwsim + hostapd) como fixture |
 
 ## Pila en soso
 
@@ -57,6 +75,8 @@ sosh / kshell: `wifi scan|status|connect <ssid> [psk]`.
 ```bash
 cargo xtask lx-build iwlwifi
 ./scripts/l6-iwl-fw-hostcheck.sh          # parser SEC_RT vs ucode del rootfs (~1 s)
+cargo test -p soso-wpa2                   # supplicant WPA2: vectores + transcripciones
+sudo ./scripts/l6-wifi-capture-4way.sh    # una vez: 4-way real de hostapd → fixture
 sudo ./scripts/l6-wifi-vfio-test.sh       # VFIO AX211 → QEMU; GO = ALIVE real
 # Live (nouveau+iwlwifi ya van): editar SOSOWIFI.TXT en ESP p1.
 # Agente: monta p1 con udisksctl (skill soso-live, sin sudo/TTY); no uses cargo xtask sosolog.
@@ -76,6 +96,32 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
 - **No hay fallback slirp en WiFi ni rtl8169 de placa.** Sin lease DHCP no hay
   10.0.2.15.
 - **PNVM solo gen3.** AX200 no lo pide; AX211 sí (`iwl_fw_parse_pnvm`).
+- **Anillo RX: dos formatos, no uno (2026-09-15).** gen3 usa
+  `iwl_rx_transfer_desc` (16 B, `rbid` fuera de la dirección) y
+  `iwl_rx_completion_desc` (32 B, `rbid` en el offset 4); gen2 usa `__le64
+  (addr|vid)` y un `__le32`. El VID va de 1 a N y designa el buffer `VID-1`; el
+  0 es «ranura vacía». Con el formato de gen2 en gen3 el síntoma es `timeout
+  ALIVE` con recepciones vacías, no un fallo de firmware.
+- **Descriptor de MPDU: 48 B en AX200, 56 en AX211 (`IWL_RX_DESC_SIZE_V3`).**
+  Nunca los 4 de `iwl_rx_mpdu_res_start`: eso desplaza la trama 802.11 52 B.
+- **`DATA_PATH_GROUP` id 1 es `UPDATE_MU_GROUPS_CMD`**, no una notificación de
+  Ethernet. Los datos llegan por `REPLY_RX_MPDU_CMD` y hay que convertirlos
+  (`iwl_mvm_rx_to_eth`); entregar aquel cuerpo a smoltcp era inventar paquetes.
+- **TX de datos: ToDS y LLC/SNAP.** `frame[1]=0x02` es FromDS (lo que manda un
+  AP); una estación pone `0x01`. `addr3` es el **destino Ethernet**, no el
+  BSSID. La carga va tras LLC/SNAP, no es la trama 802.3 entera.
+  `IWL_TX_FLAGS_ENCRYPT_DIS` sólo mientras no haya claves: con la API nueva de
+  TX el firmware pone cabecera CCMP, PN y el bit Protected.
+- **Asociada ≠ autorizada.** `iwl_ax211_connected()` es la asociación;
+  `iwl_ax211_authorized()` es lo que puede usar IP. `net::wifi_link_up()` y
+  `WIFI_FLAG_AUTHORIZED` miran la segunda: con la primera, DHCP arrancaba antes
+  de que hubiera claves.
+- **EAPOL tiene cola propia** (`iwl_ax211_rx_eapol`). Compartirla con los datos
+  deja que smoltcp se lleve M1/M3 y el 4-way se cuelga sin decir nada.
+- **La GTK necesita `STA_KEY_MULTICAST`, su Key ID del KDE y ranura propia**
+  (`iwl_mvm_install_gtk`). Sin el bit, el firmware la registra como otra clave
+  de pares y el tráfico de difusión no se descifra. CCMP cifra con la **TK**
+  (`ptk[32..48]`), nunca con la KCK.
 - **AX200 gen2 timeout ALIVE (INT=0):** restockear el anillo RX con
   `rx_write = IWL_GEN2_RX_N - 1` antes de `UREG_CPU_INIT_RUN` (como gen3). Con
   WIDX=0 el firmware no recibe RBD y no manda `UCODE_ALIVE_NTFY`.
@@ -94,6 +140,21 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
   pisa el de `compiler_builtins`: el live se clava en `boot: live-disk` con
   `lx: lxdde: stub trace: memcmp` al comparar el GPT. Implementar en
   `lxdde/shim/src/shims.c` y listar en `provided_symbols()`.
+- **QEMU no emula ninguna tarjeta WiFi.** No hay modelo 802.11 upstream (QEMU
+  8.2 lista 0). `mac80211_hwsim` y `virt_wifi` simulan por encima de mac80211,
+  que soso no usa: no sirven para el driver. El único camino con silicio es
+  VFIO. Lo que **sí** aporta hwsim es un AP real (hostapd) para capturar un
+  4-way y contrastar el supplicant con una implementación ajena:
+  `scripts/l6-wifi-capture-4way.sh`.
+- **Un modelo de firmware no descubre formatos.** `ring_soak` caza que las dos
+  mitades del driver se contradigan bajo carga (buffer publicado dos veces,
+  reciclado antes de tiempo, TFD reutilizado sin confirmar), pero sale de la
+  misma lectura de la especificación que el driver: si el formato está mal, los
+  dos se equivocan igual. Por eso el arreglo de descriptores necesita placa.
+- **La secuencia TX sólo lleva 8 bits de índice.** Una respuesta repetida de un
+  TFD ya reutilizado es indistinguible de la legítima; `iwl_trans_tx_reclaim`
+  sólo puede ignorar las que apuntan por detrás de la cabeza, igual que
+  `iwl_txq_reclaim` de Linux. No pidas más al driver.
 - **Hostcheck antes de gastar un ciclo VFIO.** Compila `iwl_fw.c` en host contra
   los `.ucode` del rootfs; afirma lmac/umac de `SEC_RT`, CMD_VERSIONS/PHY_SKU,
   doorbell `qid<<16` (`0x00000001`, cola HCMD=0), secuencia `QUEUE_TO_SEQ|INDEX_TO_SEQ`, y

@@ -5,7 +5,8 @@ Fuente versionada: [`hw-matrix.json`](hw-matrix.json).
 Cada entrada registra equipo, PCI ID, hashes de firmware, commit git, perfil de
 drivers, etapas WiFi/GPU (ok / fail / pendiente), arranques consecutivos y
 métricas de bench. Los PCI deben ser concretos (`vvvv:dddd` hex); `collect --pci`
-rechaza huecos tipo `10de:????`. GA107: `10de:249c` (ROG 3050 Mobile).
+rechaza huecos tipo `10de:????`. GA104: `10de:249c` (ROG RTX 3080 Laptop 16 GiB;
+id histórico de matriz `ga107-igpu`).
 
 ## Comandos
 

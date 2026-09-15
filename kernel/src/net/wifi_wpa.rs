@@ -1,25 +1,25 @@
-//! Mini-supplicant WPA2-PSK para Intel AX211.
+//! Conexión WiFi: credenciales, asociación y 4-way EAPOL.
+//!
+//! Aquí sólo hay E/S. La máquina de estados WPA2-PSK/CCMP vive en el crate
+//! [`soso_wpa2`], que se compila y se prueba en el host contra vectores y
+//! transcripciones; este módulo le da tramas y ejecuta lo que decide.
 //!
 //! Lee credenciales de `SOSOWIFI.TXT` (ESP live) o `/etc/wifi.conf`.
-//! Completa el 4-way handshake EAPOL tras asociación MLME.
 
 use alloc::string::{String, ToString};
+use soso_wpa2::{Discard, State, Supplicant};
 
-const ETH_P_EAPOL: u16 = 0x888e;
-const EAPOL_KEY: u8 = 3;
-const WPA_KEY_INFO_MIC: u16 = 0x0100;
-const WPA_KEY_INFO_ACK: u16 = 0x0080;
-const WPA_KEY_INFO_INSTALL: u16 = 0x0040;
-const WPA_KEY_INFO_KEY_TYPE: u16 = 0x0008;
-const WPA_KEY_INFO_SECURE: u16 = 0x0200;
+/// Tiempo máximo sin avanzar el diálogo antes de darlo por perdido.
+const STEP_TIMEOUT_MS: u32 = 6_000;
+const POLL_US: u32 = 2_000;
+/// Tope de tramas EAPOL procesadas. El reloj solo corre cuando no llega nada,
+/// así que sin este tope un AP (o un vecino) que inunde con EAPOL descartables
+/// dejaría el bucle girando para siempre.
+const MAX_EAPOL_FRAMES: u32 = 64;
 
 /// Deriva la PSK de 32 bytes (PMK) desde passphrase ASCII y SSID.
 pub fn pbkdf2_psk(passphrase: &str, ssid: &str) -> [u8; 32] {
-    use pbkdf2::pbkdf2_hmac;
-    use sha1::Sha1;
-    let mut out = [0u8; 32];
-    pbkdf2_hmac::<Sha1>(passphrase.as_bytes(), ssid.as_bytes(), 4096, &mut out);
-    out
+    soso_wpa2::pbkdf2_psk(passphrase, ssid)
 }
 
 fn read_wifi_config_text() -> Option<String> {
@@ -72,273 +72,101 @@ pub fn connect_wpa2(ssid: &str, passphrase: &str) -> i32 {
     }
     crate::println!("wifi-wpa: AUTH+ASSOC 802.11 ok, 4-way EAPOL");
 
-    if four_way_handshake(ssid, &pmk) != 0 {
+    if four_way_handshake(&pmk) != 0 {
+        // Asociada pero sin autorizar: que nadie confunda el enlace con red.
+        crate::lxdde::wifi::set_authorized(false);
         return -1;
     }
-    crate::println!("wifi-wpa: 4-way handshake completado");
+    crate::lxdde::wifi::set_authorized(true);
+    crate::println!("wifi-wpa: 4-way completado, enlace autorizado");
     0
 }
 
-fn four_way_handshake(_ssid: &str, pmk: &[u8; 32]) -> i32 {
-    let mut buf = [0u8; 2048];
-    for _ in 0..500 {
-        crate::lxdde::wifi::poll();
-        let Some(n) = crate::lxdde::wifi_receive(&mut buf) else {
-            crate::arch::tsc::spin_us(10_000);
-            continue;
-        };
-        if n < 14 {
-            continue;
-        }
-        let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
-        if ethertype != ETH_P_EAPOL {
-            continue;
-        }
-        let eapol = &buf[14..n];
-        if eapol.len() < 4 || eapol[1] != EAPOL_KEY {
-            continue;
-        }
-        let key_info = u16::from_be_bytes([eapol[5], eapol[6]]);
-        if key_info & WPA_KEY_INFO_KEY_TYPE == 0 {
-            continue;
-        }
-        if key_info & WPA_KEY_INFO_ACK != 0 {
-            continue;
-        }
-        if eapol.len() < 99 {
-            continue;
-        }
-        let anonce = &eapol[17..49];
-        let mut snonce = [0u8; 32];
-        let _ = getrandom::getrandom(&mut snonce);
-
-        let mut ptk = [0u8; 48];
-        derive_ptk(pmk, anonce, &snonce, &mut ptk);
-
-        let mut m2 = [0u8; 256];
-        let m2_len = build_eapol_m2(eapol, &snonce, &ptk, &mut m2);
-        if m2_len == 0 {
-            return -1;
-        }
-        let mut frame = [0u8; 512];
-        let flen = wrap_eapol_tx(&mut frame, &m2[..m2_len]);
-        if crate::lxdde::wifi_send(&frame[..flen]).is_err() {
-            return -1;
-        }
-
-        for _ in 0..500 {
-            crate::lxdde::wifi::poll();
-            let Some(n2) = crate::lxdde::wifi_receive(&mut buf) else {
-                crate::arch::tsc::spin_us(10_000);
-                continue;
-            };
-            if n2 < 14 {
-                continue;
-            }
-            if u16::from_be_bytes([buf[12], buf[13]]) != ETH_P_EAPOL {
-                continue;
-            }
-            let m3 = &buf[14..n2];
-            if m3.len() < 99 || m3[1] != EAPOL_KEY {
-                continue;
-            }
-            let mut m3v = [0u8; 512];
-            let ml = m3.len().min(m3v.len());
-            m3v[..ml].copy_from_slice(&m3[..ml]);
-            if !verify_eapol_mic(&ptk, &mut m3v[..ml]) {
-                continue;
-            }
-            let m3_info = u16::from_be_bytes([m3v[5], m3v[6]]);
-            if m3_info & WPA_KEY_INFO_INSTALL == 0 {
-                continue;
-            }
-            let mut gtk = [0u8; 16];
-            if extract_gtk(&m3v[..ml], &mut gtk).is_err() {
-                gtk.fill(0);
-            }
-            let mut m4 = [0u8; 128];
-            let m4_len = build_eapol_m4(&m3v[..ml], &ptk, &mut m4);
-            let mut frame4 = [0u8; 256];
-            let flen4 = wrap_eapol_tx(&mut frame4, &m4[..m4_len]);
-            let _ = crate::lxdde::wifi_send(&frame4[..flen4]);
-
-            let mut ccmp_ptk = [0u8; 16];
-            ccmp_ptk.copy_from_slice(&ptk[..16]);
-            crate::lxdde::wifi::install_key(&ccmp_ptk, 0);
-            if gtk != [0u8; 16] {
-                crate::lxdde::wifi::install_key(&gtk, 1);
-            }
-            return 0;
-        }
+/// Ejecuta el 4-way contra el AP. Devuelve 0 sólo si quedan claves instaladas.
+fn four_way_handshake(pmk: &[u8; 32]) -> i32 {
+    let Some(sta) = crate::lxdde::wifi_mac() else {
+        crate::println!("wifi-wpa: sin MAC de la estación");
+        return -1;
+    };
+    let Some(bssid) = crate::lxdde::wifi_bssid() else {
+        crate::println!("wifi-wpa: sin BSSID; ¿de verdad está asociada?");
+        return -1;
+    };
+    let Some(rsn_ie) = crate::lxdde::wifi::rsn_ie() else {
+        crate::println!("wifi-wpa: el driver no expone el RSN IE anunciado");
+        return -1;
+    };
+    let mut snonce = [0u8; 32];
+    if getrandom::getrandom(&mut snonce).is_err() {
+        crate::println!("wifi-wpa: sin fuente de aleatoriedad para la SNonce");
         return -1;
     }
+
+    let mut sup = Supplicant::new(*pmk, sta, bssid, &rsn_ie, snonce);
+    let mut buf = [0u8; 2048];
+    let mut waited_us = 0u32;
+    let mut frames = 0u32;
+
+    while waited_us < STEP_TIMEOUT_MS * 1000 && frames < MAX_EAPOL_FRAMES {
+        crate::lxdde::wifi::poll();
+        let Some(n) = crate::lxdde::wifi_receive_eapol(&mut buf) else {
+            crate::arch::tsc::spin_us(POLL_US as u64);
+            waited_us += POLL_US;
+            continue;
+        };
+        frames += 1;
+        let out = sup.on_ethernet(&buf[..n]);
+        if let Some(d) = out.dropped {
+            // Un descarte silencioso era lo que dejaba el handshake colgado sin
+            // decir en qué punto.
+            crate::println!("wifi-wpa: EAPOL descartada ({})", motivo(d));
+        }
+        if out.send {
+            let frame = sup.tx();
+            if crate::lxdde::wifi_send(frame).is_err() {
+                crate::println!("wifi-wpa: no se pudo enviar la respuesta EAPOL");
+                return -1;
+            }
+            // El reloj se reinicia con cada avance real del diálogo.
+            waited_us = 0;
+        }
+        if let Some(tk) = out.install_tk
+            && crate::lxdde::wifi::install_key(&tk, 0) != 0
+        {
+            crate::println!("wifi-wpa: el firmware rechazó la clave de pares");
+            return -1;
+        }
+        if let Some(g) = out.install_gtk
+            && crate::lxdde::wifi::install_gtk(&g.key, g.key_id as i32, &g.rsc) != 0
+        {
+            crate::println!("wifi-wpa: el firmware rechazó la clave de grupo");
+            return -1;
+        }
+        if sup.state() == State::Authorized {
+            return 0;
+        }
+    }
+    crate::println!(
+        "wifi-wpa: 4-way sin terminar en estado {:?} ({frames} tramas EAPOL)",
+        sup.state()
+    );
     -1
 }
 
-fn cmp_bytes(a: &[u8], b: &[u8]) -> core::cmp::Ordering {
-    let n = a.len().min(b.len());
-    for i in 0..n {
-        match a[i].cmp(&b[i]) {
-            core::cmp::Ordering::Equal => {}
-            o => return o,
-        }
+fn motivo(d: Discard) -> &'static str {
+    match d {
+        Discard::NotEapol(_) => "no es un EAPOL-Key válido",
+        Discard::TooBig => "demasiado grande",
+        Discard::NotFromAp => "sin ACK: no viene del AP",
+        Discard::BadVersion => "descriptor que no es WPA2/CCMP",
+        Discard::Replay => "contador de reenvío repetido",
+        Discard::BadMic => "MIC incorrecto",
+        Discard::NonceMismatch => "ANonce distinta de la de M1",
+        Discard::KeyDataUnwrap => "Key Data que no se puede descifrar",
+        Discard::NoGtk => "M3 sin GTK utilizable",
+        Discard::Unexpected => "mensaje fuera de secuencia",
+        Discard::NoSpace => "respuesta que no cabe",
     }
-    a.len().cmp(&b.len())
-}
-
-fn derive_ptk(pmk: &[u8; 32], anonce: &[u8], snonce: &[u8], out: &mut [u8; 48]) {
-    use hmac::{Hmac, Mac};
-    use sha1::Sha1;
-    type HmacSha1 = Hmac<Sha1>;
-
-    let sta = crate::lxdde::wifi_mac().unwrap_or([0; 6]);
-    let bssid = crate::lxdde::wifi_bssid().unwrap_or([0xff; 6]);
-
-    let mut prefix = [0u8; 128];
-    let mut pos = 0usize;
-    prefix[pos..pos + 23].copy_from_slice(b"Pairwise key expansion\0");
-    pos += 23;
-    let (a, b) = if cmp_bytes(&sta, &bssid) != core::cmp::Ordering::Greater {
-        (sta, bssid)
-    } else {
-        (bssid, sta)
-    };
-    prefix[pos..pos + 6].copy_from_slice(&a);
-    pos += 6;
-    prefix[pos..pos + 6].copy_from_slice(&b);
-    pos += 6;
-    let (an, sn) = if cmp_bytes(anonce, snonce) != core::cmp::Ordering::Greater {
-        (anonce, snonce)
-    } else {
-        (snonce, anonce)
-    };
-    prefix[pos..pos + an.len()].copy_from_slice(an);
-    pos += an.len();
-    prefix[pos..pos + sn.len()].copy_from_slice(sn);
-    pos += sn.len();
-
-    let mut mac = HmacSha1::new_from_slice(pmk).expect("hmac");
-    mac.update(&prefix[..pos]);
-    let t = mac.finalize().into_bytes();
-    out[..20].copy_from_slice(&t);
-    let mut mac2 = HmacSha1::new_from_slice(pmk).expect("hmac");
-    mac2.update(&prefix[..pos]);
-    mac2.update(&[0u8]);
-    let t2 = mac2.finalize().into_bytes();
-    out[20..40].copy_from_slice(&t2[..20]);
-}
-
-fn eapol_key_mic(ptk: &[u8; 48], eapol: &[u8]) -> [u8; 16] {
-    use hmac::{Hmac, Mac};
-    use sha1::Sha1;
-    let mut mac = Hmac::<Sha1>::new_from_slice(&ptk[0..16]).expect("hmac");
-    mac.update(eapol);
-    let t = mac.finalize().into_bytes();
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&t[..16]);
-    out
-}
-
-fn set_eapol_mic(ptk: &[u8; 48], eapol: &mut [u8]) {
-    if eapol.len() < 97 {
-        return;
-    }
-    eapol[81..97].fill(0);
-    let mic = eapol_key_mic(ptk, eapol);
-    eapol[81..97].copy_from_slice(&mic);
-}
-
-fn verify_eapol_mic(ptk: &[u8; 48], eapol: &mut [u8]) -> bool {
-    if eapol.len() < 97 {
-        return false;
-    }
-    let mut saved = [0u8; 16];
-    saved.copy_from_slice(&eapol[81..97]);
-    eapol[81..97].fill(0);
-    let calc = eapol_key_mic(ptk, eapol);
-    eapol[81..97].copy_from_slice(&saved);
-    calc == saved
-}
-
-fn extract_gtk(m3: &[u8], out: &mut [u8; 16]) -> Result<(), ()> {
-    if m3.len() < 99 {
-        return Err(());
-    }
-    let kd_len = u16::from_be_bytes([m3[97], m3[98]]) as usize;
-    if kd_len == 0 || 99 + kd_len > m3.len() {
-        return Err(());
-    }
-    let kd = &m3[99..99 + kd_len];
-    let mut i = 0usize;
-    while i + 2 <= kd.len() {
-        let id = kd[i];
-        let elen = kd[i + 1] as usize;
-        if i + 2 + elen > kd.len() {
-            break;
-        }
-        if id == 0xdd && elen >= 6 && kd[i + 2] == 0x00 && kd[i + 3] == 0x0f && kd[i + 4] == 0xac
-        {
-            if kd[i + 5] == 1 && elen >= 7 {
-                let gtk_len = elen - 6;
-                if gtk_len >= 16 {
-                    out.copy_from_slice(&kd[i + 7..i + 7 + 16]);
-                    return Ok(());
-                }
-            }
-        }
-        i += 2 + elen;
-    }
-    Err(())
-}
-
-fn wrap_eapol_tx(out: &mut [u8], eapol: &[u8]) -> usize {
-    let len = 14 + eapol.len();
-    if len > out.len() {
-        return 0;
-    }
-    let sta = crate::lxdde::wifi_mac().unwrap_or([0; 6]);
-    let bssid = crate::lxdde::wifi_bssid().unwrap_or([0xff; 6]);
-    out[0..6].copy_from_slice(&bssid);
-    out[6..12].copy_from_slice(&sta);
-    out[12] = 0x88;
-    out[13] = 0x8e;
-    out[14..14 + eapol.len()].copy_from_slice(eapol);
-    len
-}
-
-fn build_eapol_m2(m1: &[u8], snonce: &[u8; 32], ptk: &[u8; 48], out: &mut [u8]) -> usize {
-    if m1.len() < 95 {
-        return 0;
-    }
-    out[..95].copy_from_slice(&m1[..95]);
-    out[0] = 0x02;
-    out[1] = EAPOL_KEY;
-    out[5] = 0x03;
-    let key_info = WPA_KEY_INFO_KEY_TYPE | WPA_KEY_INFO_ACK | WPA_KEY_INFO_MIC;
-    out[6] = (key_info & 0xff) as u8;
-    out[7] = (key_info >> 8) as u8;
-    out[17..49].copy_from_slice(snonce);
-    out[97] = 0;
-    out[98] = 0;
-    set_eapol_mic(ptk, &mut out[..99]);
-    99
-}
-
-fn build_eapol_m4(m3: &[u8], ptk: &[u8; 48], out: &mut [u8]) -> usize {
-    if m3.len() < 99 {
-        return 0;
-    }
-    out[..99].copy_from_slice(&m3[..99]);
-    out[0] = 0x02;
-    out[1] = EAPOL_KEY;
-    out[5] = 0x03;
-    let key_info = WPA_KEY_INFO_KEY_TYPE | WPA_KEY_INFO_ACK | WPA_KEY_INFO_MIC | WPA_KEY_INFO_SECURE;
-    out[6] = (key_info & 0xff) as u8;
-    out[7] = (key_info >> 8) as u8;
-    out[97] = 0;
-    out[98] = 0;
-    set_eapol_mic(ptk, &mut out[..99]);
-    99
 }
 
 /// Parsea `wifi.conf` desde buffer (tests / kshell).

@@ -1,122 +1,213 @@
-# ROG: assoc AX200 — SCD_QUEUE_CONFIG_CMD v3 (14 sep 2026)
+# ROG: WiFi SCD + ask G6 VMM (14 sep 2026)
 
 ## Evidencia y alcance
 
 Lectura ESP `/dev/sda1` (`KERNEL`, vfat) con `udisksctl`. Copias en
-`target/usb-diagnostic-2026-09-14/` (ESP desmontada). SOSOWIFI vacío en el
-arranque inicial (PSK introducida en sesión con `wifi connect`).
+`target/usb-diagnostic-2026-09-14/` (ESP desmontada).
 
 | Campo | Valor |
 |---|---|
-| Kernel USB | **0.2.2 (`c5cc1ff81-dirty`)** — no HEAD (`d3ab499c4`) |
-| BOOTMARK | 14-sep ~08:45 |
-| Hardware | `10de:249c` (RM GA107, 16 GiB) + `8086:2723` (AX200) + `10ec:8168` (rtl8169) |
-| Userspace | **`sosh —`** + OTA `pid=2 write=166ms` + `$ halt` |
-| Teclado | **`kbd sc=219 enc=108`**; `keyboard ready` slot 2 `1866` y slot 3 **`18c6`** |
-| GPU | `GSP_INIT_DONE res=0x0`, `pool VRAM=sí`, CE, `ask hola` **`generar rc=0`** `backend GPU` |
-| WiFi assoc | PHY/MAC/ADD_STA ok → **`timeout cmd grp=1 id=0x1d`** (×2) → `SCD_QUEUE_CFG mgmt falló` |
+| Kernel USB | **0.2.2 (`dfec53f84-dirty`)** |
+| Flush WiFi | **#101 @ ~1570 s uptime** (reval 14 sep) |
+| Flush ask | **#101** (misma sesión; log 256 KiB lleno) |
+| Hardware | `10de:249c` (GA104 RTX 3080 Laptop 16 GiB) + `8086:2723` (AX200) |
+| Userspace | **`sosh —`** OK |
+| GPU | `GSP_INIT_DONE`, pool VRAM OK, eager=true residente=true |
+| WiFi assoc (flush #101) | LQ ok → `SCD_QUEUE_CONFIG v3 tid=15` timeout slot=19 |
+| `ask hola` (flush #101) | Eager 291/3446 ms OK; prefetch USB ~23 min; `on_gpu=0` todas capas |
 
-Árboles Linux (solo lectura):
-
-| Árbol | Referencia |
-|---|---|
-| `lxdde/linux/` | **6.6.32** — `mvm/ops.c:1306–1312`, `queue/tx.c:1247–1276`, `fw/api/datapath.h:547–597`, `pcie/trans.c:2028–2044` |
-
-Hostchecks: `l6-iwl-fw-hostcheck.sh` OK (incl. `assoc_abi_test` exige DATA_PATH `0x17` 36 B).
+Árbol Linux WiFi: **torvalds/linux v6.6** (`mvm/sta.h`, `pcie/tx-gen2.c`).
+G6/ask: diseño interno [`gsp_compute.c`](../lxdde/ports/nouveau/gsp_compute.c),
+[`gsp_vmm.c`](../lxdde/ports/nouveau/gsp_vmm.c), [`PLAN-VRAM-16G-ROG.md`](PLAN-VRAM-16G-ROG.md).
 
 ---
 
-## Tabla de etapas (flush #94 @ 2908508 ms)
+## Tabla de etapas ask (flush #59 @ 3027479 ms)
 
 | Etapa | Evidencia SOSOLOG | Resultado |
 |---|---|---|
-| Userspace | `sosh —`, OTA `write=166ms`, `$ halt` | **OK** |
-| Teclado USB 18c6 | `SET_PROTOCOL(Boot)` ×2; `keyboard ready on slot=3 (0x0b05:0x18c6)`; `sc=219` | **OK** |
-| GSP / RPC | `GSP_INIT_DONE`, `pool VRAM=sí` | **OK** |
-| CE / compute | `CE readback verificado`, `compute listo cls=0xc7c0` | **OK** |
-| G6 (este USB) | `techo residente ~8192 MiB de 16068` (`familia=ga107`) | **pendiente HEAD** (32 GiB en `d3ab499c4`) |
-| `ask hola` | `backend GPU`, `generar rc=0` | **OK** |
-| Apagado GSP | `GSP-RM apagado (objetos=ok unload=ok halt=ok dma=off)` | **OK** |
-| WiFi ALIVE | `UCODE_ALIVE_NTFY`, `INIT_COMPLETE` | **OK** |
-| WiFi scan | `scan fin count=24` / `25` / `22` | **OK** |
-| WiFi assoc (×2) | `ADD_STA` `0x18` ok → `SCD_QUEUE_CFG tfd=…` → `timeout … id=0x1d` | **FAIL** |
-| DHCP / SSH | ethernet `phystatus 0x84` DOWN; sin lease WiFi | **pendiente** |
-
-Secuencia assoc (1.ª y 2.ª intento, idéntica):
-
-```
-PHY_CONTEXT ch3 ok → MAC 0x28 ok → ADD_STA 0x18 seq=0x0011 ok
-→ SCD_QUEUE_CFG tfd=0x213d6000 bc=0x213da000 cb_size=1 n=16 sta=0
-→ timeout cmd grp=1 id=0x1d slot=18; MVM parado
-→ SCD_QUEUE_CFG mgmt falló → fallo AUTH+ASSOC
-```
+| Catálogo | `askd: catálogo+disco mistral-7b — 149 ms` | **OK** |
+| Backend GPU | `askd: backend GPU (+0 ms)` | **OK** |
+| VRAM plan | `modelo 4495 MiB, libre 16056 MiB, eager=true, residente=true` | **OK** |
+| Subida eager | `283 ok`, `4427022336 B en 1384219 ms` (~23 min) | **FAIL** (lenta; 8 tensores) |
+| VMM G6 | `VA 0x819d800000 es página grande; no cabe hoja de 4 KiB`, `sin sitio tablas (96)` | **FAIL** |
+| Inferencia | `capa N/32 … on_gpu=0` (~80 ms/capa, CPU) | **FAIL** |
+| Respuesta | `prefill token 4/11`; log 256 KiB lleno; **sin `generar rc=0`** | **FAIL** |
 
 ---
 
-## Hallazgos
+## Hallazgos ask (confirmados)
 
-### WIFI-1. El FW cc-a0-77 no implementa `SCD_QUEUE_CFG` legacy `0x1d` (confirmado)
+### ASK-1. Scratch x/y en VRAM choca con pesos 2 MiB (confirmado)
 
-**Síntoma:** Tras ADD_STA el driver envía HCMD **grupo 1, id `0x1d`**, 24 B.
-No llega ningún RX; timeout sin NACK.
+**Síntoma:** `on_gpu=0` en todas las capas; spam G6 en cada matvec.
 
-**TLV `CMD_VERSIONS` en `iwlwifi-cc-a0-77.ucode`:** existe
-`(group=5, cmd=0x17, ver=3)` para `SCD_QUEUE_CONFIG_CMD`. **No** hay entrada
-`(group=1, cmd=0x1d)`.
+**soso:** [`user/soso-gpu/src/lib.rs`](../user/soso-gpu/src/lib.rs) — con
+`pesos_fijos`, `ensure_scratch(..., vram: true)` reservaba G6 con PTE 4 KiB
+encima de pesos en páginas grandes.
 
-**Linux 6.6.32:** cuando `queue_alloc_cmd_ver == 3`, envía
-`iwl_scd_queue_cfg_cmd` (36 B) por **`DATA_PATH_GROUP` + `SCD_QUEUE_CONFIG_CMD`**
-con `operation=ADD`, `sta_mask=BIT(sta_id)`, `tid=15`, `flags=0` — **no** el
-`0x1d` de 24 B ([`queue/tx.c:1264–1276`](lxdde/linux/drivers/net/wireless/intel/iwlwifi/queue/tx.c)).
+**Kernel:** [`gsp_compute_matvec_resident`](../lxdde/ports/nouveau/gsp_compute.c) —
+x/y en `G6_RES_VA` (sysmem, mapeado al init); el submit MATVF sólo pasa `w_va`.
 
-**soso (USB):** [`iwl_trans_txq_alloc_mgmt`](lxdde/ports/iwlwifi/iwl_trans.c)
-sigue mandando LEGACY `SCD_QUEUE_CFG` `0x1d`. El log muestra `cb_size=1`
-(coherente con el payload legacy) pero el FW no lo reconoce.
+**Fix implementado:** scratch x/y siempre GART (`vram: false`).
 
-**Nota run9:** La hipótesis «TFD a ceros sin `invalid_tx_cmd`» era necesaria
-pero **no suficiente**: en este arranque el log ya incluye direcciones DMA
-(`tfd=0x213d6000 bc=0x213da000`) y el timeout persiste porque el HCMD es el
-equivocado, no porque falte prefetch.
+### ASK-2. Tablas VMM y banda 4 KiB (confirmado)
 
-### WIFI-2. Misma entrada v3 en so-a0-89 (AX211)
+**Síntoma:** `sin sitio para más tablas (96)`; 8 tensores sin subir.
 
-El cambio a `SCD_QUEUE_CONFIG_CMD` v3 aplica también a AX211; el hostcheck
-parsea ambos UCODES.
+**Fix implementado:** `GSP_VMM_MAX_PT` 192; banda `G6_SMALL_VA_BASE` para
+tensores &lt; 2 MiB separada del bump de pesos grandes.
 
-### Descartados (no bloquean assoc en este ciclo)
+### ASK-3. Subida eager sin prefetch USB (confirmado)
 
-- Teclado 18c6: OK (regresión run2/run13 resuelta).
-- GSP / `ask hola`: OK.
-- G6 32 GiB / nombre GA104: ya en HEAD; este USB aún `familia=ga107`, techo 8192 MiB.
-- Ethernet DOWN: sin cable.
+**Síntoma:** ~23 min leyendo shards desde USB vía `tensor_view`.
+
+**Fix implementado:** `prefetch_shards_logged` antes del bucle eager; progreso
+socket cada 8 tensores.
+
+### ASK-4. UX silenciosa (confirmado)
+
+**Fix implementado:** `probe_compute()` tras cargar sesión; aviso si GPU no
+calcula; rate-limit `lx_printk` G6/VMM.
 
 ---
 
-## Orden de corrección (implementado en HEAD)
+## Orden de corrección (ask) — implementado
 
-1. **`iwl_internal.h`:** `SCD_QUEUE_CONFIG_CMD 0x17`, `struct iwl_scd_queue_cfg_cmd` (36 B).
-2. **`iwl_trans.c` `iwl_trans_txq_alloc_mgmt`:** `scd_ver = iwl_fw_cmd_ver(DATA_PATH, 0x17)`;
-   si `ver==3` → HCMD grupo 5 / `0x17` / 36 B (`ADD`, `sta_mask`, `flags=0`);
-   conservar `invalid_tx_cmd` + BC 640 B + TFD 16×256; legacy `0x1d` solo si `ver==0`.
-3. **`assoc_abi_test` / `cdb_lmac_test`:** exigen grupo 5, id `0x17`, 36 B; fallan si
-   aparece `0x1d` 24 B; `ADD_STA_KEY` buscado por `(LEGACY_GROUP, 0x17)` (colisión id con SCD v3).
-4. **Este informe + `hw-matrix.json`** (`ax200-wifi` / `ga107-igpu`, logs 14-sep).
+1. Scratch GART en `soso-gpu` — **hecho**
+2. Prefetch + progreso en `soso-llm/main.rs` — **hecho**
+3. VMM 192 pt + banda pequeña en `gsp_buf.c` / `gsp_vmm.h` — **hecho**
+4. Probe + rate-limit en `ask.rs` / `gsp_vmm.c` — **hecho**
+5. Validación placa — **pendiente**
 
----
-
-## Validación en placa (usuario)
+**Placa:** tras flash rootfs+kernel, `ask hola` debe mostrar prefetch, subida
+&lt; ~5 min, `on_gpu=1` en capa 1, respuesta o aviso explícito de CPU lenta.
 
 ```bash
-cargo xtask flash-usb-live /dev/sda --yes --only kernel
+cargo xtask build
+cargo xtask flash-usb-live /dev/sda --yes --only rootfs,kernel
 ```
 
-Tras `wifi connect SSID PSK`: SOSOLOG debe mostrar **`SCD_QUEUE_CONFIG`** (grp=5 id=0x17)
-sin `timeout … id=0x1d`; `TXQ mgmt qid≠0`; siguiente HCMD = **`SESSION_PROTECTION`**; luego AUTH.
+---
+
+## WiFi — revalidación placa (flush #59, 14 sep 2026)
+
+Logs: `target/usb-diagnostic-2026-09-14-wifi/` (ESP `/dev/sda1`, desmontada).
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| ALIVE / init / scan | `UCODE_ALIVE_NTFY`, scan autoconnect OK | **OK** |
+| `wifi connect Rutilo` | PSK derivada, BSS ch40 WPA2 | **OK** (scan) |
+| PHY assoc | `PHY_CONTEXT ch40 band=0 action=1 ok` | **OK** |
+| LQ_CMD | `LQ_CMD AP sta_id=0 (6 Mbps legacy)` | **OK** |
+| SCD mgmt | `SCD_QUEUE_CONFIG … id=0x17 ver=3` → `timeout slot=22; MVM parado` | **FAIL** |
+| AUTH / 4-way | `TXQ mgmt falló`; sin `rx AUTH` | **FAIL** |
+
+Secuencia:
+
+```
+wifi connect Rutilo → LQ_CMD async ok
+→ SCD_QUEUE_CONFIG v3 (tfd=0x213d7000 bc=0x213db000)
+→ timeout grp=5 id=0x17 slot=22
+→ wifi-wpa: fallo AUTH+ASSOC
+```
+
+### Hallazgo WIFI-6: tid=8 en SCD v3 es incorrecto (confirmado vs Linux v6.6)
+
+**soso (regresión):** `IWL_MGMT_TID = IWL_MAX_TID_COUNT (8)` en payload SCD.
+
+**Linux v6.6** `mvm/sta.c:852-853` — `iwl_mvm_tvqm_enable_txq`: si
+`tid == IWL_MAX_TID_COUNT (8)` → **`tid = IWL_MGMT_TID (15)`** antes de
+`iwl_trans_txq_alloc` / SCD v3.
+
+**Fix:** `IWL_MGMT_TID=15` en [`iwl_internal.h`](../lxdde/ports/iwlwifi/iwl_internal.h);
+log SCD incluye `tid=` para validar en placa.
+
+**Placa:** SOSOLOG muestra `tid=15` en SCD y `TXQ mgmt qid=N` sin timeout.
+
+Hostcheck: `./scripts/l6-iwl-fw-hostcheck.sh` OK tras corrección tid.
+
+---
+
+## Matriz (manual, sin `--boot-ok`)
+
+| id | ok | fail |
+|---|---|---|
+| `ga107-igpu` | gsp_rpc, vram_pool, ce_readback | carga_real, compute_cpu_gpu (flush#59) |
+| `ax200-wifi` | alive, init, mvm, scan | assoc_wpa2 (flush#40 SCD tid=15) |
+
+---
+
+## Revalidación flush #101 (14 sep 2026, post-fixes previos)
+
+Lo que **ya va** en esta lectura ESP:
+
+- GSP: `GSP_INIT_DONE`, pool VRAM, CE GO, familia GA104, ventana VA 32 GiB.
+- Pesos: prefetch 291/291 + subida eager **291 tensores / 3446 ms / dma=291 bounce=0**.
+- WiFi: `UCODE_ALIVE_NTFY`, scan 21 BSS, `tid=15` en wire SCD.
+
+Lo que **sigue roto** (flush #101):
+
+```
+wifi connect Rutilo → LQ_CMD async → SCD v3 tid=15 → timeout slot=19; MVM parado
+ask hola → GPU no calcula (VMM) → on_gpu=0; sin línea QMD ni MATVF
+prefetch USB ~23 min (1383 s) — ancho de banda BOT, no VMM
+```
+
+### Fix WIFI-7: LQ async + SCD no bloqueado (revert sync)
+
+**soso (regresión flush #28):** LQ_CMD **síncrono** hace timeout
+(`grp=1 id=0x4e seq=0x0012 slot=18; MVM parado`) y **impide** llegar a SCD.
+
+**Linux v6.6** `mvm/utils.c:253`: LQ es **CMD_ASYNC**; no se espera ACK antes de
+`iwl_trans_txq_alloc`. AUTH lleva CMD_RATE sin rate scale.
+
+**Fix:** LQ_CMD **async** otra vez; si no encola, **igual** SCD; log RX sin emparejar
+durante timeout HCMD (SCD pendiente de validar en placa).
+
+### Fix GPU-8: QMD Ampere sin REQUIRE_SCHEDULING_PCAS
+
+**soso:** `gsp_compute_fill_qmd_v02_grid` no ponía `QMDV02_REQUIRE_SCHEDULING_PCAS`;
+`stage_sass_kernel` exigía scratch antes de comprobar `k->staged`; MATVF fallaba
+sin printk; `ask` decía «VMM» genérico.
+
+**Fix:** bit PCAS en QMD v2; `staged` antes de scratch; printk único MATVF;
+`ask` muestra `last_fail` real.
+
+Host: `./scripts/l6-iwl-fw-hostcheck.sh`, `./scripts/l6-g3-gsp-hostcheck.sh`.
+
+**Placa:** `cargo xtask flash-usb-live /dev/sda --yes --only kernel` →
+`wifi connect` sin timeout SCD; `ask hola` con `on_gpu=1` capa 1 o línea kernel.
+
+---
+
+## Revalidación flush #28 (14 sep 2026, kernel dfec53f84-dirty)
+
+Lectura ESP `/media/jmdiez/KERNEL` → `target/usb-diagnostic-2026-09-14/SOSOLOG.TXT`.
+
+| Campo | Valor |
+|---|---|
+| Flush | **#28 @ 116 s uptime** |
+| Kernel | **0.2.2 (`dfec53f84-dirty`)** — incluye LQ sync + QMD PCAS |
+| WiFi | `wifi connect Rutilo puentelasierra` → ADD_STA ok → **LQ timeout** → MVM parado |
+| GPU | **sin `ask hola`** en el log (no validado en esta sesión) |
+
+Secuencia WiFi:
+
+```
+ADD_STA seq=0x0011 ok
+→ timeout cmd grp=1 id=0x4e (LQ_CMD sync) slot=18; MVM parado
+→ LQ_CMD falló; SCD igual   ← no hay línea SCD_QUEUE_CONFIG ni TXQ mgmt
+```
+
+**Conclusión:** el fix WIFI-7 (LQ sync) empeora el caso; revertido a async en código.
+SCD v3 sigue pendiente de revalidar (flush #101 tenía LQ ok + SCD timeout).
+
+GPU: QMD PCAS + MATVF printk en kernel; falta `ask hola` tras reflashear.
 
 ---
 
 ## Qué no se ha hecho
 
-- No reflasheado ni validado en placa en este ciclo.
-- No 4-way, DHCP WiFi ni SSH.
-- Ethernet sin cable. GB205/AX211 ausentes en este hwscan.
+- Reflashear USB con LQ async revertido y repetir `wifi connect` + `ask hola`.
+- No reflasheado USB en esta ejecución del agente.

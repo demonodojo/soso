@@ -176,6 +176,16 @@ int main(int argc, char **argv)
     if (!lmac || !umac) {
         return 1;
     }
+    {
+        const char *base = strrchr(argv[1], '/');
+        base = base ? base + 1 : argv[1];
+        if (strstr(base, "8265") != NULL) {
+            if (verify_payloads(fw, (size_t)sz, &dram) != 0)
+                return 1;
+            puts("OK: 8265 SEC_RT lmac/umac (familia 8000; ABI scan AX200/AX211 no aplica)");
+            return 0;
+        }
+    }
     if (verify_payloads(fw, (size_t)sz, &dram) != 0)
         return 1;
     puts("OK: payloads DMA idénticos a SEC_RT sin prefijo SRAM");
@@ -314,7 +324,11 @@ int main(int argc, char **argv)
                 fprintf(stderr, "cc-a0-77 debe declarar SESSION_PROT (54)\n");
                 return 1;
             }
-            puts("OK: capa BINDING_CDB=39 sí, CDB=40 no, SESSION_PROT=54 sí (AX200)");
+            if (!iwl_fw_has_capa(&iwl, IWL_UCODE_TLV_CAPA_TLC_OFFLOAD)) {
+                fprintf(stderr, "cc-a0-77 debe declarar TLC_OFFLOAD (43)\n");
+                return 1;
+            }
+            puts("OK: capa BINDING_CDB=39 sí, CDB=40 no, SESSION_PROT=54 sí, TLC_OFFLOAD=43 sí (AX200)");
             ver_tx = iwl_fw_cmd_ver(&iwl, LEGACY_GROUP, TX_ANT_CONFIGURATION_CMD);
             if (ver_tx != 1) {
                 fprintf(stderr, "TX_ANT cmd_ver=%d (esperaba 1 vía DEF_ID grp=1)\n",

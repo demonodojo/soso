@@ -107,6 +107,8 @@ pub struct Runtime {
     /// Tras cada capa (`layer` 0-based, `n_layers`). `askd` lo usa para no
     /// parecer colgado: Mixtral en CPU tarda minutos *por token*.
     pub layer_hook: Option<fn(u32, u32)>,
+    /// Antes de cada capa; `askd` emite un punto al entrar (p. ej. capa 0).
+    pub layer_enter_hook: Option<fn(u32, u32)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,6 +153,7 @@ impl Runtime {
             has_output_norm,
             planner: None,
             layer_hook: None,
+            layer_enter_hook: None,
         }
     }
 
@@ -529,6 +532,9 @@ impl Runtime {
                 pl.note_trunk_layer(layer, &self.index);
             }
             note_infer_op(Some(layer), "");
+            if let Some(hook) = self.layer_enter_hook {
+                hook(layer, layer_end);
+            }
             let t0 = clock_ms.map(|c| c());
             let timing = exec.forward_layer(
                 layer,

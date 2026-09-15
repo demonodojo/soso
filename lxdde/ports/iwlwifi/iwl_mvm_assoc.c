@@ -94,8 +94,12 @@ void iwl_mvm_rx_mlme_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
             return;
         seq = (uint16_t)frame[26] | ((uint16_t)frame[27] << 8);
         status = (uint16_t)frame[28] | ((uint16_t)frame[29] << 8);
-        if (seq == 2u && status == 0)
+        lx_printk("iwl_mvm: rx AUTH seq=%u status=%u\n",
+                  (unsigned)seq, (unsigned)status);
+        if (seq == 2u && status == 0) {
             iwl->mlme_auth_ok = 1;
+            lx_printk("iwl_mvm: mlme_auth_ok\n");
+        }
         return;
     }
     if (stype == IEEE80211_STYPE_ASSOC_RESP) {
@@ -141,6 +145,8 @@ static int iwl_mvm_mac_context_assoc(struct iwl_ax211_priv *iwl,
         cmd.u.sta.assoc_id = iwl_cpu_to_le32(iwl->assoc_id);
     } else {
         cmd.filter_flags = IWL_MAC_FILTER_ACCEPT_GRP | IWL_MAC_FILTER_IN_BEACON;
+        if (iwl->auth_ctl_filter)
+            cmd.filter_flags |= IWL_MAC_FILTER_IN_CONTROL_AND_MGMT;
         cmd.u.sta.is_assoc = 0u;
     }
     return iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, MAC_CONTEXT_CMD, &cmd,
@@ -166,14 +172,32 @@ static int iwl_mvm_add_sta_ap(struct iwl_ax211_priv *iwl, const uint8_t *bssid)
     sta.station_type = IWL_STA_LINK;
     sta.station_flags = iwl_cpu_to_le32(flags);
     sta.station_flags_msk = iwl_cpu_to_le32(flags_msk);
-    return iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, ADD_STA, &sta,
-                                   (uint16_t)pay_len, IWL_MVM_HCMD_TIMEOUT_MS);
+    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, ADD_STA, &sta,
+                                (uint16_t)pay_len, IWL_MVM_HCMD_TIMEOUT_MS) != 0)
+        return -1;
+    if (iwl->cmd_resp_len < (uint16_t)sizeof(uint32_t)) {
+        lx_printk("iwl_mvm: ADD_STA resp corta (%u B)\n",
+                  (unsigned)iwl->cmd_resp_len);
+        return -1;
+    }
+    {
+        uint32_t status;
+
+        memcpy(&status, iwl->cmd_resp, sizeof(status));
+
+        lx_printk("iwl_mvm: ADD_STA status=0x%08x\n", status);
+        if ((status & IWL_ADD_STA_STATUS_MASK) != ADD_STA_SUCCESS) {
+            lx_printk("iwl_mvm: ADD_STA rechazado (status=0x%08x)\n", status);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 static uint32_t mgmt_rate_n_flags(struct iwl_ax211_priv *iwl)
 {
     uint32_t ant = RATE_MCS_ANT_A_MSK;
-    int ver = iwl_fw_cmd_ver(iwl, DATA_PATH_GROUP, TX_CMD);
+    int ver = iwl_fw_cmd_ver(iwl, LEGACY_GROUP, TX_CMD);
 
     if (ver > 8)
         return RATE_MCS_LEGACY_OFDM_MSK | RATE_LEGACY_OFDM_6M | ant;
@@ -183,11 +207,14 @@ static uint32_t mgmt_rate_n_flags(struct iwl_ax211_priv *iwl)
 static int iwl_mvm_tx_mgmt(struct iwl_ax211_priv *iwl, const uint8_t *frame, int flen)
 {
     uint8_t buf[256];
-    uint32_t flags = IWL_TX_FLAGS_CMD_RATE | IWL_TX_FLAGS_ENCRYPT_DIS |
-                      IWL_TX_FLAGS_HIGH_PRI;
+    /* Sin rate scale (rs.c): Linux usa CMD_RATE cuando no hay STA/LQ. */
+    uint32_t flags = IWL_TX_FLAGS_ENCRYPT_DIS | IWL_TX_FLAGS_HIGH_PRI |
+                       IWL_TX_FLAGS_CMD_RATE;
     uint32_t rate = mgmt_rate_n_flags(iwl);
     unsigned hdr_off;
     uint16_t pay;
+    /* Linux tx.c: mh_len/2 << TX_CMD_OFFLD_MH_SIZE; AUTH/ASSOC sin QoS = 24 B. */
+    uint16_t offload_assist = (uint16_t)((24u / 2u) << TX_CMD_OFFLD_MH_SIZE);
 
     if (flen <= 0 || flen > 200)
         return -1;
@@ -198,12 +225,14 @@ static int iwl_mvm_tx_mgmt(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
         hdr_off = (unsigned)sizeof(struct iwl_tx_cmd_gen3);
         cmd->len = iwl_cpu_to_le16((uint16_t)flen);
         cmd->flags = iwl_cpu_to_le16((uint16_t)flags);
+        cmd->offload_assist = iwl_cpu_to_le32((uint32_t)offload_assist);
         cmd->rate_n_flags = iwl_cpu_to_le32(rate);
     } else {
         struct iwl_tx_cmd_gen2 *cmd = (struct iwl_tx_cmd_gen2 *)buf;
 
         hdr_off = (unsigned)sizeof(struct iwl_tx_cmd_gen2);
         cmd->len = iwl_cpu_to_le16((uint16_t)flen);
+        cmd->offload_assist = offload_assist;
         cmd->flags = iwl_cpu_to_le32(flags);
         cmd->rate_n_flags = iwl_cpu_to_le32(rate);
     }
@@ -251,6 +280,37 @@ static int append_ie(uint8_t *f, int pos, uint8_t id, const uint8_t *body, unsig
     return pos + (int)len;
 }
 
+/* Cuerpo del RSN IE (sin id ni longitud): versión 1, grupo y par CCMP-128,
+ * AKM PSK, capacidades a cero. */
+static unsigned rsn_ie_body(uint8_t *rsn, unsigned max)
+{
+    unsigned n = 0;
+
+    if (max < 20)
+        return 0;
+    rsn[n++] = 1;
+    rsn[n++] = 0;
+    rsn[n++] = 0x00;
+    rsn[n++] = 0x0f;
+    rsn[n++] = 0xac;
+    rsn[n++] = WLAN_CIPHER_CCMP128;
+    rsn[n++] = 1;
+    rsn[n++] = 0;
+    rsn[n++] = 0x00;
+    rsn[n++] = 0x0f;
+    rsn[n++] = 0xac;
+    rsn[n++] = WLAN_CIPHER_CCMP128;
+    rsn[n++] = 1;
+    rsn[n++] = 0;
+    rsn[n++] = 0x00;
+    rsn[n++] = 0x0f;
+    rsn[n++] = 0xac;
+    rsn[n++] = WLAN_AKM_PSK;
+    rsn[n++] = 0;
+    rsn[n++] = 0;
+    return n;
+}
+
 static int build_assoc_req(struct iwl_ax211_priv *iwl, uint8_t *f,
                            const char *ssid, const uint8_t *bssid)
 {
@@ -277,31 +337,31 @@ static int build_assoc_req(struct iwl_ax211_priv *iwl, uint8_t *f,
     else
         pos = append_ie(f, pos, WLAN_EID_SUPP_RATES, rates, 8);
     if (want_rsn) {
-        unsigned n = 0;
+        unsigned n = rsn_ie_body(rsn, sizeof(rsn));
 
-        rsn[n++] = 1;
-        rsn[n++] = 0;
-        rsn[n++] = 0x00;
-        rsn[n++] = 0x0f;
-        rsn[n++] = 0xac;
-        rsn[n++] = WLAN_CIPHER_CCMP128;
-        rsn[n++] = 1;
-        rsn[n++] = 0;
-        rsn[n++] = 0x00;
-        rsn[n++] = 0x0f;
-        rsn[n++] = 0xac;
-        rsn[n++] = WLAN_CIPHER_CCMP128;
-        rsn[n++] = 1;
-        rsn[n++] = 0;
-        rsn[n++] = 0x00;
-        rsn[n++] = 0x0f;
-        rsn[n++] = 0xac;
-        rsn[n++] = WLAN_AKM_PSK;
-        rsn[n++] = 0;
-        rsn[n++] = 0;
         pos = append_ie(f, pos, WLAN_EID_RSN, rsn, n);
     }
     return pos;
+}
+
+/* El RSN IE completo (con el 0x30 y la longitud) que esta estación anuncia.
+ * El supplicant lo repite en M2: si los bytes no coinciden con los de la
+ * Association Request, el AP corta el handshake. */
+int iwl_mvm_rsn_ie(const struct iwl_ax211_priv *iwl, uint8_t *out, int max)
+{
+    uint8_t body[20];
+    unsigned n;
+
+    (void)iwl;
+    if (!out)
+        return -1;
+    n = rsn_ie_body(body, sizeof(body));
+    if (max < (int)n + 2)
+        return -1;
+    out[0] = WLAN_EID_RSN;
+    out[1] = (uint8_t)n;
+    memcpy(out + 2, body, n);
+    return (int)n + 2;
 }
 
 static uint8_t assoc_phy_band(uint8_t channel)
@@ -370,9 +430,12 @@ static int wait_mlme_flag(struct iwl_ax211_priv *iwl, uint8_t *flag)
     int i;
 
     for (i = 0; i < IWL_MLME_WAIT_ITERS; i++) {
+        unsigned p;
+
         if (*flag)
             return 0;
-        iwl_trans_poll(iwl);
+        for (p = 0; p < 4; p++)
+            iwl_trans_poll(iwl);
         if (*flag)
             return 0;
         lx_mdelay(20);
@@ -385,24 +448,46 @@ static int iwl_mvm_mlme_auth_assoc(struct iwl_ax211_priv *iwl, const char *ssid,
 {
     uint8_t frame[256];
     int flen;
+    int attempt;
 
     iwl->mlme_auth_ok = 0;
     iwl->mlme_assoc_ok = 0;
     iwl->assoc_id = 0;
+    iwl->last_mgmt_tx_status = 0;
+    /* auth_ctl_filter queda como lo dejó assoc_prepare (IN_CONTROL_AND_MGMT). */
     if (!iwl->beacon_int)
         iwl->beacon_int = IWL_MLME_BI_DEFAULT;
     if (!iwl->dtim_period)
         iwl->dtim_period = IWL_MLME_DTIM_DEFAULT;
 
-    flen = build_auth_req(frame, iwl->mac, bssid);
-    if (iwl_mvm_tx_mgmt(iwl, frame, flen) != 0) {
-        lx_printk("iwl_mvm: AUTH TX falló\n");
-        return -1;
+    for (attempt = 0; attempt < 2; attempt++) {
+        if (attempt == 1) {
+            if (iwl->last_mgmt_tx_status != TX_STATUS_SUCCESS) {
+                lx_printk("iwl_mvm: AUTH sin retry ctl-filter (tx status=0x%02x)\n",
+                          (unsigned)iwl->last_mgmt_tx_status);
+                break;
+            }
+            iwl->auth_ctl_filter = 1;
+            if (iwl_mvm_mac_context_assoc(iwl, bssid, 0) != 0) {
+                iwl->auth_ctl_filter = 0;
+                lx_printk("iwl_mvm: MAC_CONTEXT ctl-filter falló\n");
+                return -1;
+            }
+            iwl->auth_ctl_filter = 0;
+            lx_printk("iwl_mvm: AUTH retry con IN_CONTROL_AND_MGMT\n");
+        }
+        flen = build_auth_req(frame, iwl->mac, bssid);
+        if (iwl_mvm_tx_mgmt(iwl, frame, flen) != 0) {
+            lx_printk("iwl_mvm: AUTH TX falló\n");
+            return -1;
+        }
+        if (wait_mlme_flag(iwl, &iwl->mlme_auth_ok) == 0)
+            goto auth_ok;
     }
-    if (wait_mlme_flag(iwl, &iwl->mlme_auth_ok) != 0) {
-        lx_printk("iwl_mvm: AUTH timeout\n");
-        return -1;
-    }
+    lx_printk("iwl_mvm: AUTH timeout\n");
+    return -1;
+
+auth_ok:
 
     flen = build_assoc_req(iwl, frame, ssid, bssid);
     if (iwl_mvm_tx_mgmt(iwl, frame, flen) != 0) {
@@ -456,22 +541,33 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
             }
         }
     }
+    /* IN_CONTROL_AND_MGMT desde el primer MAC_CONTEXT de assoc (Auth Response). */
+    iwl->auth_ctl_filter = 1;
     if (iwl_mvm_mac_context_assoc(iwl, bssid, 0) != 0) {
+        iwl->auth_ctl_filter = 0;
         lx_printk("iwl_mvm: MAC_CONTEXT falló\n");
         return -1;
     }
     if (iwl_mvm_add_sta_ap(iwl, bssid) != 0) {
+        iwl->auth_ctl_filter = 0;
         lx_printk("iwl_mvm: ADD_STA falló\n");
         return -1;
     }
+    (void)iwl_mvm_rate_init_ap_sta(iwl);
     if (iwl_trans_txq_alloc_mgmt(iwl, IWL_MVM_AP_STA_ID) < 0) {
+        iwl->auth_ctl_filter = 0;
         lx_printk("iwl_mvm: TXQ mgmt falló\n");
         return -1;
     }
-    if (iwl_mvm_protect_assoc(iwl) != 0)
+    if (iwl_mvm_protect_assoc(iwl) != 0) {
+        iwl->auth_ctl_filter = 0;
         return -1;
-    if (iwl_mvm_mlme_auth_assoc(iwl, ssid, bssid) != 0)
+    }
+    if (iwl_mvm_mlme_auth_assoc(iwl, ssid, bssid) != 0) {
+        iwl->auth_ctl_filter = 0;
         return -1;
+    }
+    iwl->auth_ctl_filter = 0;
     if (iwl_mvm_mac_context_assoc(iwl, bssid, 1) != 0) {
         lx_printk("iwl_mvm: MAC_CONTEXT is_assoc=1 falló\n");
         return -1;
@@ -483,10 +579,21 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
     return 0;
 }
 
-int iwl_mvm_install_key(struct iwl_ax211_priv *iwl, const uint8_t key[16], int key_idx)
+/* ADD_STA_KEY. `mcast` separa la clave de grupo de la de pares: sin ese bit el
+ * firmware trata la GTK como una segunda PTK y el tráfico de difusión —ARP y
+ * las respuestas DHCP de algunos AP— se queda sin descifrar.
+ *
+ * `key_idx` es el Key ID de 802.11 (0 en la PTK, 1 o 2 en la GTK, tal y como
+ * viene en el KDE). `key_offset` es la ranura del firmware, que debe ser
+ * distinta para cada clave. `rsc` es el contador de recepción desde el que el
+ * receptor valida el PN; sin él una GTK renovada rechaza las primeras tramas.
+ * Referencia: Linux mvm/sta.c `iwl_mvm_send_sta_key`. */
+static int iwl_mvm_send_sta_key(struct iwl_ax211_priv *iwl, const uint8_t key[16],
+                                int key_idx, int mcast, const uint8_t rsc[8])
 {
     struct iwl_mvm_add_sta_key_cmd k;
     uint16_t key_flags;
+    int rc;
 
     if (!iwl->associated || !key)
         return -1;
@@ -497,11 +604,39 @@ int iwl_mvm_install_key(struct iwl_ax211_priv *iwl, const uint8_t key[16], int k
                            STA_KEY_FLG_KEYID_MSK);
     key_flags |= STA_KEY_FLG_WEP_KEY_MAP;
     key_flags |= STA_KEY_FLG_CCM;
+    if (mcast)
+        key_flags |= STA_KEY_MULTICAST;
     /* sta_id 0 es el AP; el ternario `ap_sta_id ? …` lo trataba como ausente. */
     k.common.sta_id = iwl->ap_sta_id;
-    k.common.key_offset = (uint8_t)key_idx;
+    /* Ranuras separadas: la de pares en la 0 y la de grupo en la 1. Compartir
+     * offset dejaba la última instalación pisando a la anterior. */
+    k.common.key_offset = mcast ? 1u : 0u;
     k.common.key_flags = iwl_cpu_to_le16(key_flags);
     memcpy(k.common.key, key, 16);
-    return iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, ADD_STA_KEY, &k,
-                                   (uint16_t)sizeof(k), IWL_MVM_HCMD_TIMEOUT_MS);
+    if (rsc)
+        memcpy(k.common.rx_secur_seq_cnt, rsc, 8);
+    rc = iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, ADD_STA_KEY, &k,
+                                 (uint16_t)sizeof(k), IWL_MVM_HCMD_TIMEOUT_MS);
+    if (rc != 0) {
+        lx_printk("iwl_mvm: ADD_STA_KEY %s idx=%d falló\n",
+                  mcast ? "grupo" : "pares", key_idx);
+        return rc;
+    }
+    lx_printk("iwl_mvm: clave %s instalada idx=%d offset=%u\n",
+              mcast ? "grupo" : "pares", key_idx, (unsigned)k.common.key_offset);
+    /* A partir de la primera clave el firmware cifra: `iwl_mvm_tx_8023` deja de
+     * poner ENCRYPT_DIS y el camino RX exige tramas protegidas. */
+    iwl->keys_installed = 1;
+    return 0;
+}
+
+int iwl_mvm_install_key(struct iwl_ax211_priv *iwl, const uint8_t key[16], int key_idx)
+{
+    return iwl_mvm_send_sta_key(iwl, key, key_idx, 0, 0);
+}
+
+int iwl_mvm_install_gtk(struct iwl_ax211_priv *iwl, const uint8_t key[16], int key_idx,
+                        const uint8_t rsc[8])
+{
+    return iwl_mvm_send_sta_key(iwl, key, key_idx, 1, rsc);
 }

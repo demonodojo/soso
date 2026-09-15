@@ -41,6 +41,10 @@
  * (~15,7 GiB en GA104/3080 Laptop) con margen de alineación y huecos. Sigue
  * por debajo de GSP_GPFIFO_VA_MAX (bit 39). */
 #define G6_VA_LIMIT  (GSP_VA_BASE + 0x880000000ull)
+/* Banda alta reservada a tensores pequeños (PTE 4 KiB). Los pesos grandes van
+ * en páginas de 2 MiB por debajo; mezclar ambos en el mismo bump rompe PD0. */
+#define G6_SMALL_VA_BASE   (G6_VA_LIMIT - 0x10000000ull)
+#define G6_WEIGHT_VA_LIMIT G6_SMALL_VA_BASE
 /* Desde este tamaño el slot se mapea con páginas de 2 MiB. Por debajo no vale la
  * pena: el desperdicio por granularidad se comería la VRAM con los `norm` de unos
  * KiB, que son la mitad de los tensores de un modelo. */
@@ -77,6 +81,7 @@ struct gsp_buf {
     void *scratch_cpu;
     unsigned scratch_bytes;
     uint64_t va_next;
+    uint64_t va_small_next;
     int ready;
 };
 
@@ -136,6 +141,9 @@ int gsp_buf_free(struct gsp_buf *b, uint64_t va);
 
 /* Bytes repartibles aún sin reservar (total - used del pool). */
 uint64_t gsp_buf_vram_free(const struct gsp_buf *b);
+
+/* Pool FB físico libre, sin techo G6/VA/tablas. */
+uint64_t gsp_buf_pool_free(const struct gsp_buf *b);
 
 void gsp_buf_fini(struct gsp_buf *b);
 

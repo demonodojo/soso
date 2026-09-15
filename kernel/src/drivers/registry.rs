@@ -56,7 +56,7 @@ pub const DRIVERS: &[DriverInfo] = &[
         feature: "lxdde",
         rule: MatchRule::PciIds {
             vendor: 0x8086,
-            devices: &[0x7f70, 0x51f0, 0x54f0, 0x2723],
+            devices: &[0x7f70, 0x51f0, 0x54f0, 0x2723, 0x24fd],
         },
         lxdde_port: Some("iwlwifi"),
     },

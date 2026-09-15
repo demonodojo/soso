@@ -158,12 +158,20 @@ unsigned gsp_top_falcon_base(uint8_t type, uint8_t inst, unsigned fallback)
 uint32_t gsp_top_pick_ce_engine(void)
 {
     uint32_t gr_runl = 0;
+    uint32_t ce0_runl = 0;
     unsigned inst;
+
+    /* Linux r535: inst 0. En GB205 COPY0 está en la lista RM y el GO de julio
+     * usó ese motor; saltarlo porque comparte runlist con GR0 dejaba CE1
+     * (motor 10) sin semáforo y `pool VRAM=no`. */
+    if (gsp_top_runlist_of(GSP_TOP_TYPE_CE, 0, &ce0_runl, NULL) == 0 && ce0_runl) {
+        return NV2080_ENGINE_TYPE_COPY0;
+    }
 
     if (gsp_top_runlist_of(GSP_TOP_TYPE_GR, 0, &gr_runl, NULL) != 0) {
         return NV2080_ENGINE_TYPE_COPY2;
     }
-    for (inst = 0; inst < 16u; inst++) {
+    for (inst = 1; inst < 16u; inst++) {
         uint32_t ce_runl = 0;
 
         if (gsp_top_runlist_of(GSP_TOP_TYPE_CE, (uint8_t)inst, &ce_runl, NULL) != 0) {

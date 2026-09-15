@@ -170,6 +170,22 @@ fn socket_fin(fd: u64) {
     socket_write(fd, &[PROTO_FIN]);
 }
 
+fn askd_ms_desde(t0: i64) -> u64 {
+    (sys::uptime_ms() - t0).max(0) as u64
+}
+
+/// Diagnóstico en serie (SOSOLOG) y, si hay cliente, un trozo breve al socket.
+fn askd_trace(fd: u64, msg: &str) {
+    println!("askd: {msg}");
+    if fd != u64::MAX {
+        socket_write_str(fd, &format!("askd: {msg}\n"));
+    }
+}
+
+fn askd_trace_ms(fd: u64, msg: &str, t0: i64) {
+    askd_trace(fd, &format!("{msg} (+{} ms)", askd_ms_desde(t0)));
+}
+
 /// Respuesta completa al cliente en un solo `write` (texto + `PROTO_FIN`).
 fn socket_reply(fd: u64, s: &str) {
     let mut bytes = alloc::vec::Vec::with_capacity(s.len() + 2);
@@ -358,6 +374,14 @@ pub fn run_askd() -> u8 {
             socket_fin(conn.fd);
             continue;
         }
+        let preview: String = texto.chars().take(48).collect();
+        askd_trace(
+            conn.fd,
+            &format!(
+                "conexión — «{preview}{}»",
+                if texto.len() > 48 { "…" } else { "" }
+            ),
+        );
         let rc = tratar_linea_askd(
             &mut sesion,
             &mut conf,
@@ -392,12 +416,13 @@ fn asegurar_modelo(
         .map(|s| s.modelo != want)
         .unwrap_or(true);
     if recargar {
+        let t_carga = sys::uptime_ms();
         socket_write_str(fd, &format!("ask: cargando {want}...\n"));
-        println!("askd: cargando {want}");
+        askd_trace(fd, &format!("cargando {want} (catálogo + backend)"));
         match preparar_sesion_echo(&want, false, MemoryPlanConfig::default(), false, false, Some(fd))
         {
             Ok(s) => {
-                println!("askd: {want} listo");
+                askd_trace_ms(fd, &format!("{want} listo"), t_carga);
                 *sesion = Some(s);
                 *modelo = want;
                 // Sin hilo de staging: sosh está bloqueado en el socket y
@@ -405,14 +430,32 @@ fn asegurar_modelo(
                 // en generate; 2026-08-31). El prefetch va en este hilo.
                 if let Some(ses) = sesion.as_mut() {
                     ses.bundle.source.disable_worker();
+                    if let Some(ref mut g) = ses.sys_gpu {
+                        if !g.probe_compute() {
+                            let msg = g
+                                .last_fail()
+                                .map(|r| {
+                                    format!(
+                                        "ask: GPU no calcula ({r}); inferencia muy lenta en CPU\n"
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    "ask: GPU no calcula; inferencia muy lenta en CPU\n"
+                                        .to_string()
+                                });
+                            socket_write_str(fd, &msg);
+                        }
+                    }
                 }
             }
             Err(c) => {
-                println!("askd: no pude cargar {want} (código {c})");
+                askd_trace(fd, &format!("no pude cargar {want} (código {c})"));
                 socket_write_str(fd, &format!("ask: no pude cargar «{want}» (código {c})\n"));
                 return Err(c);
             }
         }
+    } else {
+        askd_trace(fd, &format!("reutilizo sesión {want}"));
     }
     Ok(())
 }
@@ -424,6 +467,7 @@ fn tratar_linea_askd(
     texto: &str,
     fd: u64,
 ) -> u8 {
+    let t_req = sys::uptime_ms();
     if let Some(t) = resto_tras(":eco", texto) {
         socket_reply(fd, t);
         return 0;
@@ -507,10 +551,19 @@ fn tratar_linea_askd(
             ),
         );
     }
-    println!(
-        "askd: generando ({} tokens de contexto, máx {})",
-        tokens.len(),
-        conf.max
+    let backend = if ses.sys_gpu.is_some() {
+        "GPU"
+    } else {
+        "CPU"
+    };
+    askd_trace_ms(
+        fd,
+        &format!(
+            "generando — prompt={} max={} backend={backend}",
+            tokens.len(),
+            conf.max
+        ),
+        t_req,
     );
     socket_write_str(
         fd,
@@ -521,6 +574,8 @@ fn tratar_linea_askd(
         ),
     );
     ses.bundle.source.disable_worker();
+    let t_infer = sys::uptime_ms();
+    askd_trace_ms(fd, "entrando inferencia (prefill + decode)", t_req);
     let rc = generar_tokens(
         ses,
         &tokens,
@@ -550,6 +605,8 @@ fn tratar_linea_askd(
             g.print_diagnostics();
         }
     }
-    println!("askd: generar rc={rc}");
+    let infer_ms = askd_ms_desde(t_infer);
+    let req_ms = askd_ms_desde(t_req);
+    println!("askd: generar rc={rc} (inferencia {infer_ms} ms, petición {req_ms} ms)");
     rc
 }

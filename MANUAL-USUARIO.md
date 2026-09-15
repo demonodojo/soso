@@ -187,7 +187,18 @@ wifi connect MiRed
 wifi connect MiRed MiClaveWPA2
 ```
 
-Tras asociar, soso pide DHCP. SSH queda en el **puerto 22**.
+Tras autorizar el enlace, soso pide DHCP. SSH queda en el **puerto 22**.
+
+`wifi status` distingue dos cosas que no son lo mismo:
+
+- `asociada=true` — el enlace 802.11 está hecho.
+- `autorizada=true` — además hay claves: en red abierta se da con la
+  asociación, y en WPA2 sólo cuando termina el 4-way. **DHCP no arranca hasta
+  aquí**, porque una red protegida a medias no transporta nada.
+
+Si se queda en `asociada=true autorizada=false`, el fallo está en el 4-way y el
+log dice dónde: `wifi-wpa: EAPOL descartada (…)` con el motivo (MIC incorrecto
+suele ser la clave equivocada), o `wifi-wpa: timeout del 4-way`.
 
 `wifi scan` marca cada red como `abierta` o `WPA` según lo que anuncia su
 beacon (bit Privacy y RSN), y `wifi connect` sin clave se niega a entrar en una
@@ -441,8 +452,11 @@ soso-voz dictar --wav /etc/voz-prueba.wav   # transcribe un WAV (PCM16 mono 16 k
 ```
 
 El reconocimiento corre en **`soso-voz vozd`** (`127.0.0.1:7421`), igual que `askd`
-en `:7420`. El texto **nunca se autoejecuta**: se inserta en la línea de sosh y
-confirmas con Enter. Push-to-talk: **F4** en la consola serie.
+en `:7420`. Si no está en marcha, el cliente lo arranca **una vez** y espera
+hasta 30 s a que abra el socket; si no lo abre, lo dice (`soso-voz: vozd no
+abrió el socket`) en vez de quedarse esperando. El texto **nunca se
+autoejecuta**: se inserta en la línea de sosh y confirmas con Enter.
+Push-to-talk: **F4** en la consola serie.
 
 Config en `/etc/voz.conf`:
 
@@ -1091,9 +1105,16 @@ Los expertos siguen la convención `L{i}.E{e}.ffn_{gate,up,down}` en el índice
 del modelo; el convertidor trocea automáticamente los tensores 3D `ffn_*_exps`
 del GGUF.
 
+### Modelo demo del live: Qwen2.5-Coder-3B
+
+El USB live empaqueta por defecto **Qwen2.5-Coder-3B-Instruct Q4_K_M**
+(`qwen2.5-coder-3b`). `ask` y `soso-llm run qwen2.5-coder-3b` lo usan igual
+que el resto. En pendrives de 16 GB+ con `SOSO_LIVE_AUTO_MODEL=1` puede
+escalar a mistral-7b o Qwen3.8-27B.
+
 ### Modelos Qwen3.8 (atención híbrida)
 
-Qwen3.8-27B (el default del live en pendrives de 32 GB+) mezcla **Gated
+Qwen3.8-27B (en pendrives de 32 GB+ con escalera automática) mezcla **Gated
 DeltaNet** (la mayoría de las capas, estado fijo) con **atención completa
 con puerta** cada cuatro capas. `ask` y `soso-llm run qwen3.8-27b` lo usan
 igual que el resto: no hay flags extra.
@@ -1417,7 +1438,6 @@ soso-llm: dispositivo de cómputo «soft (CPU del kernel, pruebas)» (fase ), VR
 soso-llm: generado (6 tokens, 5450 ms, 1.10 tok/s)
 soso-llm: dispositivo «soft (CPU del kernel, pruebas)» — 144 matvec, 24 subidas de pesos, 24 matrices residentes, 0 sin sitio (a CPU), último on_gpu=0
 soso-llm: subidas — 0 de 24 en crudo (sin expandir a f32), 0 Mciclos descuantizando, 21 Mciclos en gpu_map
-soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «»
 ```
 
 (`0 de 24 en crudo` porque el modelo `tiny` es F32: no hay nada que expandir. Con
@@ -1425,12 +1445,12 @@ soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «»
 
 `on_gpu=0` dice la verdad: **lo calculó la CPU**. Ese bit sólo vale 1 cuando el
 resultado viene del silicio de una GPU. El dispositivo se apaga al terminar el
-comando.
+comando. El aviso «el silicio no calculó nada — el GSP se quedó…» **no** sale
+aquí: en `--gpu-soft` no hay GSP, y `on_gpu=0` es el resultado esperado.
 
-La **fase** sale vacía aquí porque el dispositivo de software no tiene bring-up que
-recorrer. Con una GPU NVIDIA de verdad dice hasta dónde llegó (`booted`, `fallo`, `rm_ce`,
-`rm_compute`…), que es lo que convierte un `on_gpu=0` en un diagnóstico sin tener que
-leer el log de serie.
+Con una GPU NVIDIA de verdad, si `on_gpu` sigue a 0, sí aparece ese aviso con la
+**fase** del bring-up (`booted`, `fallo`, `rm_ce`, `rm_compute`…), que es lo que
+convierte un `on_gpu=0` en un diagnóstico sin tener que leer el log de serie.
 
 Para generar modelos sintéticos de prueba de cualquier tamaño:
 
@@ -1590,19 +1610,19 @@ Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
 cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
 
 # Escalera automática (Q4_K_M):
-#   8 GB  → tinyllama
+#   8 GB  → qwen2.5-coder-3b
 #  16 GB  → mistral-7b
 #  32 GB+ → qwen3.8-27b
 # La primera vez descarga desde Hugging Face (puede tardar horas en modelos grandes).
 # Sin descargas: el mayor ya materializado que quepa en el stick:
 # sudo env SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 
-# Sin pendrive conectado (mistral-7b) o simular capacidad:
+# Sin pendrive conectado (qwen2.5-coder-3b Q4_K_M) o simular capacidad:
 cargo xtask package-usb-live
 SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
 
 # En placa: ask  o  soso-llm run <modelo> --prompt "hola" --max 32
-# (<modelo> = el empaquetado: tinyllama, mistral-7b o qwen3.8-27b)
+# (<modelo> = el empaquetado: qwen2.5-coder-3b, tinyllama, mistral-7b o qwen3.8-27b)
 
 # Override manual:
 # SOSO_MODELS_DIR=target/mi-modelo cargo xtask flash-usb-live /dev/sdX --yes

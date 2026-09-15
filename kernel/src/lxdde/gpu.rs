@@ -94,6 +94,8 @@ unsafe extern "C" {
     ) -> i32;
     fn lx_nouveau_device_buf_free(va: u64) -> i32;
     fn lx_nouveau_device_vram_free() -> u64;
+    fn lx_nouveau_device_pool_free() -> u64;
+    fn lx_nouveau_device_pt_free() -> u32;
     fn lx_nouveau_set_boot0(boot0: u32, device_id: u32);
     fn lx_nouveau_gsp_fini() -> i32;
 }
@@ -142,6 +144,14 @@ pub fn gpu_name() -> &'static str {
 
 pub fn device_vram_free() -> u64 {
     unsafe { lx_nouveau_device_vram_free() }
+}
+
+pub fn device_vram_pool_free() -> u64 {
+    unsafe { lx_nouveau_device_pool_free() }
+}
+
+pub fn device_g6_pt_free() -> u32 {
+    unsafe { lx_nouveau_device_pt_free() }
 }
 
 /// ¿El pool de búferes en VRAM existe? Más estricto que `gsp_ready()`, que es

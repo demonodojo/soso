@@ -142,9 +142,12 @@ pub struct LayerSpec {
     pub num_experts_per_tok: u32,
     pub moe_ffn_dim: u32,
     pub num_shared_experts: u32,
-    /// Reservado: bit0 gated MLA, bit1 AttnRes, bit2 SiTU.
+    /// bit0 gated MLA, bit1 AttnRes, bit2 SiTU, bit3 RoPE NeoX (Qwen2).
     pub flags: u32,
 }
+
+/// RoPE estilo GPT-NeoX / Qwen2: parejas `(x[i], x[i+half])` en vez de intercaladas.
+pub const FLAG_ROPE_NEOX: u32 = 1 << 3;
 
 impl Default for LayerSpec {
     fn default() -> Self {
@@ -473,7 +476,7 @@ impl Manifest {
                 layer,
                 reason: "missing layer spec",
             })?;
-            if spec.flags != 0 {
+            if spec.flags & !FLAG_ROPE_NEOX != 0 {
                 return Err(UnsupportedLayer {
                     layer,
                     reason: "layer flags not supported",

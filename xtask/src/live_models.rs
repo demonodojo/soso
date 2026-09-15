@@ -17,7 +17,7 @@ pub const GPT_OVERHEAD_BYTES: u64 = 1024 * 1024;
 /// Tamaño estimado del modelo sintético `tiny` empaquetado junto al demo.
 pub const TINY_SOM_ESTIMATE: u64 = 64 * 1024 * 1024;
 
-/// Entrada del catálogo live (GGUF llama, tokenizer SentencePiece).
+/// Entrada del catálogo live (GGUF llama/qwen2, tokenizer SentencePiece o GPT-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveModelSpec {
     /// Nombre en `/models` y en `/etc/llm.conf`.
@@ -39,6 +39,13 @@ pub const CATALOG: &[LiveModelSpec] = &[
         repo: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         gguf_file: None,
         gguf_bytes_estimate: 700 * 1024 * 1024,
+        min_usb_bytes: 8 * 1024 * 1024 * 1024,
+    },
+    LiveModelSpec {
+        name: "qwen2.5-coder-3b",
+        repo: "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+        gguf_file: Some("qwen2.5-coder-3b-instruct-q4_k_m.gguf"),
+        gguf_bytes_estimate: 2100 * 1024 * 1024,
         min_usb_bytes: 8 * 1024 * 1024 * 1024,
     },
     LiveModelSpec {
@@ -75,8 +82,8 @@ pub const CATALOG: &[LiveModelSpec] = &[
 pub fn default_live_spec() -> LiveModelSpec {
     *CATALOG
         .iter()
-        .find(|s| s.name == "mistral-7b")
-        .expect("mistral-7b en CATALOG")
+        .find(|s| s.name == "qwen2.5-coder-3b")
+        .expect("qwen2.5-coder-3b en CATALOG")
 }
 
 impl LiveModelSpec {
@@ -161,7 +168,7 @@ pub fn auto_model_from_usb() -> bool {
 }
 
 /// Capacidad para `pick_for_usb` al flashear: `SOSO_LIVE_CAPACITY`, auto con
-/// `SOSO_LIVE_AUTO_MODEL`, o `None` → `default_live_spec` (mistral-7b).
+/// `SOSO_LIVE_AUTO_MODEL`, o `None` → `default_live_spec` (qwen2.5-coder-3b).
 pub fn model_pick_bytes_for_flash(disk_bytes: u64) -> Option<u64> {
     if let Ok(raw) = std::env::var("SOSO_LIVE_CAPACITY") {
         return Some(parse_capacity_env(&raw).unwrap_or_else(|e| {
@@ -413,15 +420,19 @@ mod tests {
     }
 
     #[test]
-    fn default_live_es_mistral_7b() {
-        assert_eq!(default_live_spec().name, "mistral-7b");
+    fn default_live_es_qwen25_coder_3b() {
+        assert_eq!(default_live_spec().name, "qwen2.5-coder-3b");
+        assert_eq!(
+            default_live_spec().gguf_file,
+            Some("qwen2.5-coder-3b-instruct-q4_k_m.gguf")
+        );
     }
 
     #[test]
-    fn pick_8g_tinyllama() {
+    fn pick_8g_qwen25_coder() {
         let usb = 8 * 1024 * 1024 * 1024;
         let spec = pick_for_usb(usb, 64 * 1024 * 1024, 512 * 1024 * 1024, &root());
-        assert_eq!(spec.name, "tinyllama");
+        assert_eq!(spec.name, "qwen2.5-coder-3b");
     }
 
     #[test]

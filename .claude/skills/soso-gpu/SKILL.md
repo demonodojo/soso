@@ -9,6 +9,17 @@ description: >-
 
 # soso — GPU nativa NVIDIA (fase L6)
 
+## Plan aplicable y evidencia
+
+Para avanzar gates o retomar trabajo planificado, leer
+[Identificación y seguimiento de planes](../soso-architecture/references/planes.md).
+Localizar el gate/subplan en `docs/L6-native-autonomy.md`,
+`PLAN-MODELOS-GRANDES.md` o `docs/PLAN-VRAM-16G-ROG.md` según el encargo; si es
+automejora, conservar también el ID Txx del catálogo. Registrar perfil, GPU,
+build y logs del equipo probado: un GO histórico de otra configuración no
+cierra la validación actual. Actualizar el estado del plan y la matriz solo
+con la evidencia que corresponde a cada uno.
+
 Objetivo: soso controla la GPU NVIDIA sin depender de Linux ni CUDA en el host.
 Inferencia acelerada vía lxdde + nvkm + kernels SASS. Motor CPU (L1–L4) = fallback.
 

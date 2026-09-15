@@ -16,6 +16,7 @@
 
 static uint8_t g_mcr_pool[IWL_CMD_SLOT_SIZE * IWL_CMD_QUEUE_SIZE];
 static uint8_t g_mtr_pool[IWL_TFH_TFD_SIZE * IWL_CMD_QUEUE_SIZE];
+static uint8_t g_first_tb_pool[IWL_CMD_QUEUE_SIZE * IWL_FIRST_TB_SIZE_ALIGN];
 static uint32_t g_mmio_stub[0x2000];
 
 /* Anillo RX simulado: permite que un drenaje entregue paquetes de verdad. */
@@ -61,6 +62,12 @@ int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
 }
 
 void iwl_ax211_deliver_rx(const uint8_t *data, int len)
+{
+    (void)data;
+    (void)len;
+}
+
+void iwl_ax211_deliver_eapol(const uint8_t *data, int len)
 {
     (void)data;
     (void)len;
@@ -115,6 +122,7 @@ static void init_priv(struct iwl_ax211_priv *iwl)
     memset(iwl, 0, sizeof(*iwl));
     memset(g_mcr_pool, 0, sizeof(g_mcr_pool));
     memset(g_mtr_pool, 0, sizeof(g_mtr_pool));
+    memset(g_first_tb_pool, 0, sizeof(g_first_tb_pool));
     memset(g_rx_used, 0, sizeof(g_rx_used));
     memset(g_rb_stts, 0, sizeof(g_rb_stts));
     g_rx_queued = 0;
@@ -125,6 +133,8 @@ static void init_priv(struct iwl_ax211_priv *iwl)
     iwl->cmd_qid = IWL_MVM_DQA_CMD_QUEUE;
     iwl->mcr_cpu = g_mcr_pool;
     iwl->mtr_cpu = g_mtr_pool;
+    iwl->hcmd_first_tb_cpu = g_first_tb_pool;
+    iwl->hcmd_first_tb_dma = 0x2000;
     iwl->mcr_dma = 0x1000;
     iwl->mmio = g_mmio_stub;
 }
@@ -187,7 +197,7 @@ static unsigned slot_of(uint16_t seq)
 
 static const uint8_t *slot_hdr(unsigned slot)
 {
-    return g_mcr_pool + (size_t)slot * IWL_CMD_SLOT_SIZE;
+    return g_first_tb_pool + (size_t)slot * IWL_FIRST_TB_SIZE_ALIGN;
 }
 
 /* >32 async sin consumir: backpressure y ninguna sobrescritura de DMA. */

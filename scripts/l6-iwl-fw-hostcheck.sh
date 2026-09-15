@@ -53,6 +53,18 @@ grep -v '^#include' "$src/iwl_fw.c" |
     grep -v '^void \*memcpy' | grep -v '^void \*memset' \
     > "$out/iwl_fw_body.inc"
 
+build unclaimed \
+    "$root/tools/iwl-hostcheck/unclaimed_test.c" \
+    "$src/iwl_unclaimed.c"
+echo "=== iwl unclaimed PCI hostcheck ==="
+run unclaimed
+
+build load_8000 \
+    "$root/tools/iwl-hostcheck/load_8000_test.c" \
+    "$src/iwl_trans_8000.c"
+echo "=== iwl carga FH 8000 hostcheck ==="
+run load_8000 "$fwdir/iwlwifi-8265-36.ucode"
+
 build hostcheck \
     "$root/tools/iwl-hostcheck/main.c" \
     "$root/tools/iwl-hostcheck/cmd_wait_test.c" \
@@ -66,42 +78,74 @@ build capa_dqa \
 
 build hcmd_wide \
     "$root/tools/iwl-hostcheck/hcmd_wide_test.c" \
-    "$src/iwl_trans.c"
+    "$root/tools/iwl-hostcheck/iwl_fw_pnvm_weak.c" \
+    "$src/iwl_trans.c" \
+    "$src/iwl_mvm_data.c"
 echo "=== iwl HCMD wide hostcheck ==="
 run hcmd_wide
+
+build rx_datapath \
+    "$root/tools/iwl-hostcheck/rx_datapath_test.c" \
+    "$src/iwl_mvm_data.c"
+echo "=== iwl RX DMA / camino de datos hostcheck ==="
+run rx_datapath
+
+# Anillos bajo carga. La semilla por defecto es fija para que el banco sea
+# reproducible; SOSO_IWL_SOAK_SEED explora otras sin tocar el script.
+build ring_soak \
+    "$root/tools/iwl-hostcheck/ring_soak_test.c" \
+    "$src/iwl_mvm_data.c"
+echo "=== iwl anillos RX/TX bajo carga hostcheck ==="
+run ring_soak ${SOSO_IWL_SOAK_SEED:-0x5e1f1a11} ${SOSO_IWL_SOAK_ITERS:-4000}
 
 build scan_abi \
     "$root/tools/iwl-hostcheck/scan_abi_test.c" \
     "$src/iwl_mvm.c" \
-    "$src/iwl_mvm_nvm.c"
+    "$src/iwl_mvm_nvm.c" \
+    "$src/iwl_mvm_data.c"
 echo "=== iwl scan ABI / MAC hostcheck ==="
 run scan_abi
 
 build hcmd_contract \
     "$root/tools/iwl-hostcheck/hcmd_contract_test.c" \
-    "$src/iwl_trans.c"
+    "$root/tools/iwl-hostcheck/iwl_fw_pnvm_weak.c" \
+    "$src/iwl_trans.c" \
+    "$src/iwl_mvm_data.c"
 echo "=== iwl HCMD contract hostcheck ==="
 run hcmd_contract
 
 build hcmd_queue \
     "$root/tools/iwl-hostcheck/hcmd_queue_test.c" \
-    "$src/iwl_trans.c"
+    "$root/tools/iwl-hostcheck/iwl_fw_pnvm_weak.c" \
+    "$src/iwl_trans.c" \
+    "$src/iwl_mvm_data.c"
 echo "=== iwl HCMD queue/recuperación hostcheck ==="
 run hcmd_queue
 
 build bss_select \
     "$root/tools/iwl-hostcheck/bss_select_test.c" \
     "$src/iwl_mvm.c" \
-    "$src/iwl_mvm_nvm.c"
+    "$src/iwl_mvm_nvm.c" \
+    "$src/iwl_mvm_data.c"
 echo "=== iwl selección de BSS / RSN hostcheck ==="
 run bss_select
 
 build mcc_chan \
     "$root/tools/iwl-hostcheck/mcc_chan_test.c" \
     "$src/iwl_mvm.c" \
-    "$src/iwl_mvm_nvm.c"
+    "$src/iwl_mvm_nvm.c" \
+    "$src/iwl_mvm_data.c"
 echo "=== iwl MCC / política de canales hostcheck ==="
 run mcc_chan
+
+build pnvm_publish \
+    "$root/tools/iwl-hostcheck/pnvm_publish_test.c" \
+    "$root/tools/iwl-hostcheck/iwl_fw_pnvm_weak.c" \
+    "$src/iwl_trans.c"
+echo "=== iwl PNVM SKU / publish fragmentado hostcheck ==="
+run pnvm_publish \
+    "$fwdir/iwlwifi-so-a0-gf-a0.pnvm" \
+    "$fwdir/iwlwifi-so-a0-gf-a0-89.ucode"
 
 build binding_power \
     "$root/tools/iwl-hostcheck/binding_power_test.c" \
@@ -111,6 +155,7 @@ build binding_power \
 build assoc_abi \
     "$root/tools/iwl-hostcheck/assoc_abi_test.c" \
     "$src/iwl_mvm_assoc.c" \
+    "$src/iwl_mvm_lq.c" \
     "$src/iwl_mvm_up.c"
 echo "=== iwl assoc ABI hostcheck ==="
 run assoc_abi
@@ -118,11 +163,13 @@ run assoc_abi
 build cdb_lmac \
     "$root/tools/iwl-hostcheck/cdb_lmac_test.c" \
     "$src/iwl_mvm_assoc.c" \
+    "$src/iwl_mvm_lq.c" \
     "$src/iwl_mvm_up.c"
 
 for ucode in \
     "$fwdir/iwlwifi-cc-a0-77.ucode" \
-    "$fwdir/iwlwifi-so-a0-gf-a0-89.ucode"; do
+    "$fwdir/iwlwifi-so-a0-gf-a0-89.ucode" \
+    "$fwdir/iwlwifi-8265-36.ucode"; do
     if [[ ! -f "$ucode" ]]; then
         echo "falta $ucode" >&2
         exit 1

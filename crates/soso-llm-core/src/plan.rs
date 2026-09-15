@@ -366,9 +366,58 @@ pub fn total_model_weight_bytes(index: &TensorIndex) -> u64 {
     index.entries.iter().map(|e| e.byte_len).sum()
 }
 
-/// Bytes que ocuparían todos los tensores del modelo en VRAM (Q4_K/Q8_0 en crudo).
+/// Alineación G6 (espejo de `gsp_buf.c`).
+pub const G6_BIG_MIN: u64 = 2 * 1024 * 1024;
+pub const G6_PAGE: u64 = 4096;
+
+fn align_up(v: u64, a: u64) -> u64 {
+    (v + a - 1) & !(a - 1)
+}
+
+/// Bytes que G6 reservaría en pool para un payload (redondeo 2 MiB / 4 KiB).
+pub fn g6_reserve_bytes(payload: u64) -> u64 {
+    let big = payload >= G6_BIG_MIN;
+    let align = if big { G6_BIG_MIN } else { G6_PAGE };
+    align_up(payload, align)
+}
+
+/// Suma de payloads en VRAM (Q4_K/Q8_0 en crudo), sin redondeo G6.
 pub fn total_model_vram_bytes(index: &TensorIndex) -> u64 {
     index.entries.iter().map(vram_bytes_for_entry).sum()
+}
+
+/// Suma de reservas G6 (equivalente a `pool.used` tras cargar todo el modelo).
+pub fn total_model_vram_g6_reserve_bytes(index: &TensorIndex) -> u64 {
+    index
+        .entries
+        .iter()
+        .map(|e| g6_reserve_bytes(vram_bytes_for_entry(e)))
+        .sum()
+}
+
+/// Simulación del bump VA en orden de índice (payload + huecos de alineación).
+pub fn total_model_vram_g6_va_bytes(index: &TensorIndex) -> u64 {
+    let mut weight_next = 0u64;
+    let mut small_next = 0u64;
+    for e in &index.entries {
+        let payload = vram_bytes_for_entry(e);
+        let need = g6_reserve_bytes(payload);
+        if payload >= G6_BIG_MIN {
+            let va = align_up(weight_next, G6_BIG_MIN);
+            weight_next = va.saturating_add(need);
+        } else {
+            let va = align_up(small_next, G6_PAGE);
+            small_next = va.saturating_add(need);
+        }
+    }
+    weight_next.saturating_add(small_next)
+}
+
+/// Presupuesto G6 para «cabe entero»: max(reserva física, huella VA simulada).
+pub fn total_model_vram_g6_budget_bytes(index: &TensorIndex) -> u64 {
+    let reserve = total_model_vram_g6_reserve_bytes(index);
+    let va = total_model_vram_g6_va_bytes(index);
+    reserve.max(va)
 }
 
 /// Bytes del tensor de embedding (tabla de lookup).
@@ -612,7 +661,8 @@ impl ResourcePlanner {
     /// Líneas legibles del plan **antes** de mapear shards (serie / askd).
     pub fn explain_load_plan(&self, manifest: &Manifest, index: &TensorIndex) -> Vec<String> {
         let st = self.stats();
-        let model_vram = total_model_vram_bytes(index);
+        let model_payload = total_model_vram_bytes(index);
+        let model_g6 = total_model_vram_g6_budget_bytes(index);
         let wc = self.weight_classes();
         let mut out = Vec::new();
         out.push(format!(
@@ -628,12 +678,13 @@ impl ResourcePlanner {
             st.weight_budget_bytes >> 20,
         ));
         out.push(format!(
-            "soso-llm:   VRAM — modelo {} MiB, libre {} MiB{}",
-            model_vram >> 20,
+            "soso-llm:   VRAM — modelo {} MiB (G6 {} MiB), libre {} MiB{}",
+            model_payload >> 20,
+            model_g6 >> 20,
             self.vram_free >> 20,
             if self.weights_vram_resident {
                 ", cabe entero (residente)"
-            } else if model_vram > self.vram_free && self.vram_free > 0 {
+            } else if model_g6 > self.vram_free && self.vram_free > 0 {
                 ", no cabe entero (híbrido/streaming)"
             } else if self.vram_free == 0 {
                 ", sin pool (CPU)"
@@ -1211,6 +1262,13 @@ impl ResourcePlanner {
         self.vram_free = bytes;
     }
 
+    /// Actualiza VRAM libre y replanifica (p. ej. tras `SysGpu::new` cuando el
+    /// pool GSP no estaba visible en la primera `gpu_info`).
+    pub fn refresh_vram(&mut self, manifest: &Manifest, index: &TensorIndex, vram_free: u64) {
+        self.vram_free = vram_free;
+        self.rebuild_plan(manifest, index);
+    }
+
     /// Pesos del modelo ya residentes en VRAM (Q4/Q8 en crudo); el mmap no debe
     /// desmapearse entre capas ni re-leerse desde disco por matvec.
     pub fn weights_vram_resident(&self) -> bool {
@@ -1242,7 +1300,7 @@ impl ResourcePlanner {
             .max(self.weight_budget.min(self.avg_layer_bytes.saturating_mul(2)));
 
         // Modelo cabe residente: todas las capas a GPU (caso Mistral Q4_K en 12–16 GiB).
-        let model_vram = total_model_vram_bytes(index);
+        let model_vram = total_model_vram_g6_budget_bytes(index);
         let resident_model = model_vram > 0 && model_vram <= self.vram_free;
         self.weights_vram_resident = resident_model;
 
@@ -2027,5 +2085,76 @@ mod tests {
         assert_eq!(planner_small.stats().embed_gather_only, 0);
         let keep_small = planner_small.keep_shards_after(0, manifest.num_layers, &manifest);
         assert!(keep_small.iter().any(|s| s.contains("embed")));
+    }
+
+    #[test]
+    fn g6_reserve_rounds_big_and_small() {
+        // `G6_PAGE` es la alineación de los pequeños, no lo que se reserva:
+        // lo reservado es el payload redondeado. Un byte por debajo del umbral
+        // se redondea a página (512 de ellas), no a un bloque grande.
+        assert_eq!(g6_reserve_bytes(100), G6_PAGE);
+        assert_eq!(g6_reserve_bytes(G6_PAGE + 1), 2 * G6_PAGE);
+        assert_eq!(
+            g6_reserve_bytes(G6_BIG_MIN - G6_PAGE - 1),
+            G6_BIG_MIN - G6_PAGE
+        );
+        assert_eq!(g6_reserve_bytes(G6_BIG_MIN - 1), G6_BIG_MIN);
+        // Desde el umbral, alineación de 2 MiB: un byte de más cuesta otro bloque.
+        assert_eq!(g6_reserve_bytes(G6_BIG_MIN), G6_BIG_MIN);
+        assert_eq!(g6_reserve_bytes(G6_BIG_MIN + 1), 2 * G6_BIG_MIN);
+    }
+
+    #[test]
+    fn g6_budget_includes_va_gaps_in_index_order() {
+        let mut index = TensorIndex::default();
+        // Pequeño + grande: el grande alinea a 2 MiB en la banda de pesos.
+        index.entries.push(make_f32_entry(
+            0,
+            "norm",
+            "norm.tensor",
+            0,
+            &[256],
+        ));
+        index.entries.push(make_f32_entry(
+            1,
+            "big",
+            "big.tensor",
+            0,
+            &[512, 512],
+        ));
+        let payload = total_model_vram_bytes(&index);
+        let reserve = total_model_vram_g6_reserve_bytes(&index);
+        let va = total_model_vram_g6_va_bytes(&index);
+        let budget = total_model_vram_g6_budget_bytes(&index);
+        assert!(reserve >= payload);
+        assert!(va >= reserve);
+        assert_eq!(budget, reserve.max(va));
+    }
+
+    #[test]
+    fn resident_model_uses_g6_budget_not_raw_payload() {
+        let manifest = Manifest::tiny("t");
+        let mut index = TensorIndex::default();
+        let h = manifest.hidden_dim;
+        // La columna de más es deliberada: `[h, h * 512]` da un payload que ya
+        // es múltiplo de 2 MiB, así que el redondeo G6 no costaría nada y el
+        // test no distinguiría el presupuesto del payload crudo.
+        index.entries.push(make_f32_entry(
+            0,
+            "L00.attn_q",
+            "L00.attn_q.tensor",
+            0,
+            &[h, h * 512 + 1],
+        ));
+        let payload = total_model_vram_bytes(&index);
+        let g6 = total_model_vram_g6_budget_bytes(&index);
+        assert!(g6 > payload, "g6={g6} payload={payload}");
+        // Con VRAM para el payload pero no para el presupuesto, no es residente:
+        // es justo el caso que el redondeo G6 hace fallar en la tarjeta.
+        let mem = MemSnapshot::default();
+        let mut planner = ResourcePlanner::new(&manifest, &index, mem, g6 - 1, false);
+        assert!(!planner.weights_vram_resident());
+        planner.refresh_vram(&manifest, &index, g6);
+        assert!(planner.weights_vram_resident());
     }
 }

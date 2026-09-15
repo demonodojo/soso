@@ -261,9 +261,10 @@ fn exec(line: &str) {
                     }
                     Some(&"status") => {
                         println!(
-                            "wifi: alive={} connected={} phase={}",
+                            "wifi: alive={} asociada={} autorizada={} phase={}",
                             crate::lxdde::wifi_alive(),
                             crate::lxdde::wifi_connected(),
+                            crate::lxdde::wifi_authorized(),
                             crate::lxdde::wifi_phase()
                         );
                         if let Some(mac) = crate::lxdde::wifi_mac() {

@@ -6,7 +6,7 @@
 
 use crate::gemm::{
     add_assign_f32, add_f32, matvec_f32, matvec_q4_k, matvec_q8_0, rmsnorm, rope_inplace,
-    silu_inplace, swiglu_inplace, topk_softmax,
+    rope_inplace_neox, silu_inplace, swiglu_inplace, topk_softmax,
 };
 pub use crate::kv::{KvDtype, LayerKv};
 use crate::parallel::{RowParallel, Sequential};
@@ -18,7 +18,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 use sosomodel::index::TensorIndex;
 use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
-use sosomodel::manifest::{AttnKind, FfnKind, Manifest};
+use sosomodel::manifest::{AttnKind, FfnKind, Manifest, FLAG_ROPE_NEOX};
 
 /// Vista zero-copy del payload de un tensor (bytes crudos del shard mapeado,
 /// alineados a 64 B en shards v2).
@@ -339,6 +339,22 @@ pub(crate) fn matvec_step(
     matvec_view_par(&v, rows, cols, x, out, par)
 }
 
+/// Suma `name.bias` a `out` si el tensor existe (Qwen2 Q/K/V).
+fn add_optional_bias<S: TensorSource>(
+    source: &mut S,
+    name: &str,
+    out: &mut [f32],
+    scratch: &mut [f32],
+) {
+    let n = out.len();
+    if scratch.len() < n {
+        return;
+    }
+    if source.load_f32(name, &mut scratch[..n]).is_ok() {
+        add_assign_f32(out, &scratch[..n]);
+    }
+}
+
 pub struct LayerExecutor<'a> {
     pub manifest: &'a Manifest,
     /// El modelo trae proyección ffn_gate (SwiGLU completo).
@@ -538,13 +554,38 @@ impl<'a> LayerExecutor<'a> {
             planner_ro,
             layer,
         )?;
+        add_optional_bias(
+            source,
+            &format!("{name_attn_q}.bias"),
+            &mut s.q,
+            &mut s.attn_out,
+        );
+        add_optional_bias(
+            source,
+            &format!("{name_attn_k}.bias"),
+            &mut s.k[..kv_dim],
+            &mut s.attn_out,
+        );
+        add_optional_bias(
+            source,
+            &format!("{name_attn_v}.bias"),
+            &mut s.v[..kv_dim],
+            &mut s.attn_out,
+        );
         let t_attn0 = tick(clock_ms);
 
+        let rope = |x: &mut [f32]| {
+            if spec.flags & FLAG_ROPE_NEOX != 0 {
+                rope_inplace_neox(x, pos, theta);
+            } else {
+                rope_inplace(x, pos, theta);
+            }
+        };
         for head in 0..heads {
-            rope_inplace(&mut s.q[head * head_dim..(head + 1) * head_dim], pos, theta);
+            rope(&mut s.q[head * head_dim..(head + 1) * head_dim]);
         }
         for head in 0..kv_heads {
-            rope_inplace(&mut s.k[head * head_dim..(head + 1) * head_dim], pos, theta);
+            rope(&mut s.k[head * head_dim..(head + 1) * head_dim]);
         }
 
         kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);

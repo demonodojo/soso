@@ -35,8 +35,13 @@ unsafe extern "C" {
     fn lx_iwlwifi_connect_open(ssid: *const c_char) -> c_int;
     fn lx_iwlwifi_connect_wpa2(ssid: *const c_char, psk: *const u8) -> c_int;
     fn lx_iwlwifi_install_key(key: *const u8, key_idx: c_int) -> c_int;
+    fn lx_iwlwifi_install_gtk(key: *const u8, key_idx: c_int, rsc: *const u8) -> c_int;
     fn lx_iwlwifi_connected() -> c_int;
+    fn lx_iwlwifi_authorized() -> c_int;
+    fn lx_iwlwifi_set_authorized(authorized: c_int);
+    fn lx_iwlwifi_rsn_ie(out: *mut u8, max: c_int) -> c_int;
     fn lx_iwlwifi_rx(buf: *mut u8, buflen: c_int) -> c_int;
+    fn lx_iwlwifi_rx_eapol(buf: *mut u8, buflen: c_int) -> c_int;
     fn lx_iwlwifi_tx(buf: *const u8, len: c_int) -> c_int;
     fn lx_iwlwifi_mac(mac: *mut u8) -> c_int;
     fn lx_iwlwifi_bssid(bssid: *mut u8) -> c_int;
@@ -120,8 +125,33 @@ pub fn bssid() -> Option<[u8; 6]> {
     Some(bssid)
 }
 
+/// Asociación 802.11 establecida. **No** implica que el enlace sirva para IP:
+/// en WPA2 hace falta además el 4-way, que es lo que dice [`authorized`].
 pub fn connected() -> bool {
     unsafe { lx_iwlwifi_connected() != 0 }
+}
+
+/// Enlace utilizable: asociada y, si la red es protegida, con claves puestas.
+pub fn authorized() -> bool {
+    unsafe { lx_iwlwifi_authorized() != 0 }
+}
+
+/// La marca el supplicant al terminar el 4-way.
+pub fn set_authorized(authorized: bool) {
+    unsafe { lx_iwlwifi_set_authorized(authorized as c_int) }
+}
+
+/// RSN IE que el driver anunció en la Association Request, para repetirlo en M2.
+pub fn rsn_ie() -> Option<alloc::vec::Vec<u8>> {
+    let mut buf = [0u8; 64];
+    let n = {
+        let _g = TRANS_LOCK.lock();
+        unsafe { lx_iwlwifi_rsn_ie(buf.as_mut_ptr(), buf.len() as c_int) }
+    };
+    if n <= 0 {
+        return None;
+    }
+    Some(buf[..n as usize].to_vec())
 }
 
 pub fn scan_results() -> alloc::vec::Vec<(alloc::string::String, i8, u8, bool)> {
@@ -181,9 +211,28 @@ pub fn install_key(key: &[u8; 16], key_idx: i32) -> i32 {
     unsafe { lx_iwlwifi_install_key(key.as_ptr(), key_idx) }
 }
 
+/// Clave de grupo: va al firmware con el bit multicast y su contador de
+/// recepción, no como una segunda clave de pares.
+pub fn install_gtk(key: &[u8; 16], key_idx: i32, rsc: &[u8; 8]) -> i32 {
+    let _g = TRANS_LOCK.lock();
+    unsafe { lx_iwlwifi_install_gtk(key.as_ptr(), key_idx, rsc.as_ptr()) }
+}
+
 pub fn receive(buf: &mut [u8]) -> Option<usize> {
     let _g = TRANS_LOCK.lock();
     let n = unsafe { lx_iwlwifi_rx(buf.as_mut_ptr(), buf.len() as c_int) };
+    if n > 0 {
+        Some(n as usize)
+    } else {
+        None
+    }
+}
+
+/// Cola propia de EAPOL. Va aparte de [`receive`] para que smoltcp no se lleve
+/// M1/M3 mientras la autenticación está en curso.
+pub fn receive_eapol(buf: &mut [u8]) -> Option<usize> {
+    let _g = TRANS_LOCK.lock();
+    let n = unsafe { lx_iwlwifi_rx_eapol(buf.as_mut_ptr(), buf.len() as c_int) };
     if n > 0 {
         Some(n as usize)
     } else {

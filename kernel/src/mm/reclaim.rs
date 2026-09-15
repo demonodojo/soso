@@ -208,8 +208,8 @@ pub fn ensure_free_frames(need: usize) -> bool {
     }
 }
 
-/// Evicta un lote explícito (p. ej. antes de un bloque 2 MiB grande).
-#[allow(dead_code)]
+/// Evicta un lote explícito. Lo usa `drivers::dma::alloc_pages` cuando se queda
+/// sin memoria contigua, que es el caso para el que se escribió.
 pub fn evict_batch(max_pages: usize) {
     let mut victims = alloc::vec::Vec::new();
     {

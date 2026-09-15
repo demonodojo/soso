@@ -493,8 +493,8 @@ fn write_flash(
         .unwrap_or_default();
     let model_demo = format!(
         "Modelo demo empaquetado: `{}` (Q4_K_M). También `tiny` sintético.\n\
-         Por defecto al flashear: mistral-7b. Escalera por tamaño: SOSO_LIVE_AUTO_MODEL=1 \
-         (tinyllama → mistral-7b → qwen3.8-27b en 32 GB+) o SOSO_LIVE_CAPACITY=32G.",
+         Por defecto al flashear: qwen2.5-coder-3b. Escalera por tamaño: SOSO_LIVE_AUTO_MODEL=1 \
+         (tinyllama → qwen2.5-coder-3b → mistral-7b → qwen3.8-27b en 32 GB+) o SOSO_LIVE_CAPACITY=32G.",
         selection.llm_name
     );
     let body = format!(

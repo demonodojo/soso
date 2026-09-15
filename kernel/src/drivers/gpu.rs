@@ -127,12 +127,10 @@ static GPU: Once<Mutex<GpuState>> = Once::new();
 fn nvidia_vram() -> u64 {
     #[cfg(feature = "lxdde")]
     {
-        let v = crate::lxdde::nouveau_vram_total();
-        if v > 0 {
-            return v;
-        }
+        return crate::lxdde::nouveau_vram_total();
     }
-    8_u64 * 1024 * 1024 * 1024
+    #[cfg(not(feature = "lxdde"))]
+    0
 }
 
 pub fn init() {
@@ -338,7 +336,30 @@ pub fn info() -> GpuInfo {
         uploads_dma: SUBIDAS_DMA.load(Ordering::Relaxed),
         uploads_bounce: SUBIDAS_REBOTE.load(Ordering::Relaxed),
         bounce_bytes: BYTES_REBOTE.load(Ordering::Relaxed),
+        vram_pool_free: vram_pool_free_bytes(&g),
+        g6_pt_free: g6_pt_free(&g) as u16,
+        _pad_budget: [0; 6],
     }
+}
+
+fn vram_pool_free_bytes(g: &GpuState) -> u64 {
+    if device_bufs_available(g) {
+        #[cfg(feature = "lxdde")]
+        {
+            return crate::lxdde::device_vram_pool_free();
+        }
+    }
+    g.vram_total.saturating_sub(g.vram_used)
+}
+
+fn g6_pt_free(g: &GpuState) -> u32 {
+    if device_bufs_available(g) {
+        #[cfg(feature = "lxdde")]
+        {
+            return crate::lxdde::device_g6_pt_free();
+        }
+    }
+    0
 }
 
 fn gpu() -> &'static Mutex<GpuState> {

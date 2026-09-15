@@ -109,6 +109,7 @@ fn firmware_requerido(port: &str) -> &'static [&'static str] {
         "iwlwifi" => &[
             "lib/firmware/iwlwifi-cc-a0-77.ucode",
             "lib/firmware/iwlwifi-so-a0-gf-a0-89.ucode",
+            "lib/firmware/iwlwifi-8265-36.ucode",
         ],
         "ath11k" => &[
             "lib/firmware/ath11k/WCN6855/hw2.1/amss.bin",
@@ -176,6 +177,8 @@ fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
         ("soso-update-core", &["soso-update-core"], true),
         ("soso-resize-core", &["soso-resize-core"], false),
         ("soso-hw", &["soso-hw"], false),
+        // Supplicant WPA2: vectores publicados y transcripciones del 4-way.
+        ("soso-wpa2", &["soso-wpa2"], false),
         ("xhci-nostd", &["xhci-nostd"], false),
         ("soso-audio+gguf2som", &["soso-audio", "gguf2som"], true),
         ("soso-forja-server", &["soso-forja-server"], false),
@@ -185,6 +188,22 @@ fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
             eprintln!("check: falló host ({nombre})");
             *fallos.lock().unwrap() += 1;
         }
+    }
+    aviso_transcripcion_4way(root);
+}
+
+/// `transcripcion_real` sale «ok» cuando se salta por falta de captura, así que
+/// sin este aviso la ausencia de la única referencia ajena del supplicant pasa
+/// desapercibida en un check verde.
+fn aviso_transcripcion_4way(root: &Path) {
+    let fixture = root.join("crates/soso-wpa2/tests/fixtures/4way-hostapd.txt");
+    if fixture.exists() {
+        println!("check: OK  supplicant WPA2 contrastado con hostapd (captura real)");
+    } else {
+        println!(
+            "check: AVISO  sin captura real del 4-way; el supplicant sólo está \
+contrastado consigo mismo (sudo ./scripts/l6-wifi-capture-4way.sh)"
+        );
     }
 }
 

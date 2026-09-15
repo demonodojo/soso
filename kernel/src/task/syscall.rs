@@ -1960,6 +1960,9 @@ fn sys_wifi_status(out: u64) -> Result<u64, i64> {
         if crate::lxdde::wifi_connected() {
             st.flags |= abi::WIFI_FLAG_CONNECTED;
         }
+        if crate::lxdde::wifi_authorized() {
+            st.flags |= abi::WIFI_FLAG_AUTHORIZED;
+        }
         if let Some(mac) = crate::lxdde::wifi_mac() {
             st.mac = mac;
         }

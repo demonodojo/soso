@@ -20,6 +20,7 @@ struct iwl_ax211_priv {
     struct lx_pci_dev *pdev;
     volatile uint32_t *mmio;
     uint16_t device_id;
+    int family;
     int gen3;
     uint8_t mac[6];
     int alive;
@@ -32,15 +33,28 @@ struct iwl_ax211_priv {
     struct iwl_fw_image fw;
     const uint8_t *iml;
     unsigned long iml_len;
-    const uint8_t *pnvm_data;
-    unsigned long pnvm_len;
+    /* Fichero PNVM crudo (TLV); la sección se elige tras ALIVE por sku_id. */
+    uint8_t *pnvm_file;
+    unsigned long pnvm_file_len;
+    uint32_t hw_rev;
+    uint32_t hw_rf_id;
+    int pnvm_published;
+    unsigned pnvm_n_chunks;
+    struct iwl_pnvm_dma_chunk {
+        void *cpu;
+        uint64_t dma;
+        uint32_t len;
+    } pnvm_chunks[IPC_DRAM_MAP_ENTRY_NUM_MAX];
+    void *pnvm_desc_cpu;
+    uint64_t pnvm_desc_dma;
+    /* Modo continuo (sin capa 32): un solo blob DMA. */
+    void *pnvm_cont_cpu;
+    uint64_t pnvm_cont_dma;
+    unsigned long pnvm_cont_len;
     /* Mapa DMA de las secciones ya subidas, para no reenviarlas al reiniciar. */
     struct iwl_context_info_dram dram_cache;
     const uint8_t *dram_fw_src;
     int dram_cached;
-    /* PNVM ya copiado a DMA. */
-    void *pnvm_cpu;
-    uint64_t pnvm_dma;
 
     uint64_t scratch_dma;
     uint64_t info_dma;
@@ -53,6 +67,12 @@ struct iwl_ax211_priv {
     uint64_t tr_tail;
     void *mtr_cpu;
     void *mcr_cpu;
+    void *hcmd_first_tb_cpu;
+    uint64_t hcmd_first_tb_dma;
+    void *scd_bc_cpu;
+    uint64_t scd_bc_dma;
+    uint32_t scd_base_addr;
+    uint8_t tx_8000_ready;
     /* Buffers del context-info, reutilizados al reiniciar el transporte. */
     void *scratch_cpu;
     void *info_cpu;
@@ -76,6 +96,10 @@ struct iwl_ax211_priv {
 
     uint16_t mgmt_txq_id;
     uint16_t mgmt_txq_write;
+    /* Consumidor de la cola TX: lo avanza la respuesta del firmware. Sin él,
+     * `mgmt_txq_write` daba la vuelta cada 16 tramas y pisaba TFDs en vuelo. */
+    uint16_t mgmt_txq_read;
+    uint32_t tx_full_drop;
     uint8_t mgmt_txq_ready;
     void *mgmt_tfd_cpu;
     uint64_t mgmt_tfd_dma;
@@ -106,6 +130,8 @@ struct iwl_ax211_priv {
     uint32_t nvm_chan_flags[IWL_NUM_CHANNELS];
     int scan_cfg_sent;
     int init_complete;
+    int pnvm_complete;
+    uint32_t sku_id[3];
     int radio_ready;
     int mvm_up_done;
     int phy_ctxt_added;
@@ -117,6 +143,8 @@ struct iwl_ax211_priv {
     uint8_t ap_sta_id;
     uint8_t mlme_auth_ok;
     uint8_t mlme_assoc_ok;
+    uint8_t last_mgmt_tx_status;
+    uint8_t auth_ctl_filter;
     uint8_t dtim_period;
     uint16_t beacon_int;
     uint16_t assoc_id;
@@ -136,7 +164,7 @@ struct iwl_ax211_priv {
     uint8_t chan_src;
     uint8_t scan_passive_only;
     uint8_t n_scan_channels;
-    struct iwl_fw_cmd_version cmd_ver[64];
+    struct iwl_fw_cmd_version cmd_ver[IWL_CMD_VER_MAX];
     unsigned cmd_ver_count;
     uint32_t fw_capa[IWL_FW_CAPA_SETS];
     int cmd_pending;
@@ -167,6 +195,12 @@ struct iwl_ax211_priv {
     uint8_t cmd_resp_trunc;
     /* Paquetes RX descartados por anunciar más bytes de los recibidos. */
     uint32_t rx_trunc_drop;
+    /* Descriptores completados con un VID que no designa ningún buffer. */
+    uint32_t rx_vid_drop;
+    /* MPDUs de datos descartadas: cifrado, direcciones o encapsulado. */
+    uint32_t rx_data_drop;
+    /* MPDUs de datos convertidas a Ethernet y entregadas. */
+    uint32_t rx_data_ok;
     uint8_t last_rx_channel;
     int8_t last_rx_rssi;
     uint8_t last_rx_band24;
@@ -174,6 +208,18 @@ struct iwl_ax211_priv {
     uint8_t rxq[8][2048];
     int rxq_head;
     int rxq_tail;
+
+    /* Cola propia para EAPOL. Si el supplicant y smoltcp comparten la de datos,
+     * el primero que lee se lleva M1/M3 y la autenticación se queda colgada. */
+    uint8_t eapolq[4][512];
+    int eapolq_head;
+    int eapolq_tail;
+
+    /* Claves CCMP ya en el firmware: mientras valga 0 se transmite en claro y
+     * se aceptan datos sin proteger (sólo el 4-way). */
+    uint8_t keys_installed;
+    /* Enlace utilizable para IP. Asociada no es autorizada. */
+    uint8_t authorized;
 
     char phase[48];
 };
@@ -186,6 +232,12 @@ void lx_iwlwifi_set_phase(const char *phase);
 int iwl_ax211_register(void);
 int iwl_ax211_start_firmware(void);
 int iwl_ax211_probed(void);
+int iwl_ax211_id_supported(uint16_t device_id);
+int iwl_ax211_family_from_id(uint16_t device_id);
+const char *iwl_ax211_family_name(int family);
+const char *iwl_ax211_unclaimed_family(uint16_t device_id);
+void iwl_ax211_log_unclaimed(uint16_t device_id);
+void iwl_ax211_log_missing_devices(void);
 void iwl_ax211_poll(void);
 int iwl_ax211_alive(void);
 const char *iwl_ax211_phase(void);
@@ -195,13 +247,19 @@ int iwl_ax211_get_scan_results(struct iwl_ax211_bss *out, int max, int *count);
 int iwl_ax211_connect_open(const char *ssid);
 int iwl_ax211_connect_wpa2(const char *ssid, const uint8_t psk[32]);
 int iwl_ax211_install_key(const uint8_t key[16], int key_idx);
+int iwl_ax211_install_gtk(const uint8_t key[16], int key_idx, const uint8_t rsc[8]);
 int iwl_ax211_connected(void);
+int iwl_ax211_authorized(void);
+void iwl_ax211_set_authorized(int authorized);
+int iwl_ax211_rsn_ie(uint8_t *out, int max);
 int iwl_ax211_rx(uint8_t *buf, int buflen);
+int iwl_ax211_rx_eapol(uint8_t *buf, int buflen);
 int iwl_ax211_tx(const uint8_t *buf, int len);
 int iwl_ax211_mac(uint8_t mac[6]);
 int iwl_ax211_bssid(uint8_t bssid[6]);
 
 void iwl_ax211_deliver_rx(const uint8_t *data, int len);
+void iwl_ax211_deliver_eapol(const uint8_t *data, int len);
 void iwl_ax211_add_bss(const struct iwl_ax211_bss *bss);
 
 int iwl_fw_parse_pnvm(struct iwl_ax211_priv *iwl, const uint8_t *pnvm, unsigned long pnvm_len);
@@ -215,5 +273,7 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
 int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id);
 int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
                  const void *payload, uint16_t pay_len);
+unsigned iwl_trans_tx_space(const struct iwl_ax211_priv *iwl);
+void iwl_trans_tx_reclaim(struct iwl_ax211_priv *iwl, uint16_t seq);
 
 #endif

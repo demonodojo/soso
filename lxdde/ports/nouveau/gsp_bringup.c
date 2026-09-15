@@ -457,6 +457,14 @@ static int run_ampere_booter(void)
  * Devuelve 0 solo si GSP_INIT_DONE llegó y la cadena RM avanzó. */
 static int run_gsp_rm_chain(void);
 
+/* Tras la cadena RM la fase puede ser rm_ce o rm_compute; no retroceder a booted. */
+static void gsp_phase_mark_booted(void)
+{
+    if (g_phase == GSP_RM_CE || g_phase == GSP_RM_COMPUTE)
+        return;
+    g_phase = GSP_BOOTED;
+}
+
 /* Ampere: layout WPR + FWSEC-FRTS + libos + cmdq, booter SEC2, RPC/GSP_INIT_DONE. */
 static int run_ampere_boot(void)
 {
@@ -497,7 +505,7 @@ static int run_ampere_boot(void)
         return -1;
     }
 
-    g_phase = GSP_BOOTED;
+    gsp_phase_mark_booted();
     lx_printk("nouveau-lx: GSP booted (hw, booter_load Ampere + RPC, %u MiB VRAM)\n",
               (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
     return 0;
@@ -769,98 +777,125 @@ static void run_ce_probe_resumen(void)
                                            : "");
 }
 
-static int run_chan_ce_stage(void)
+static int ce_bind_engine(uint32_t ce_engine)
 {
-    uint32_t ce_engine = gsp_top_pick_ce_engine();
-
-    lx_printk("nouveau-lx: CE bring-up motor %u (PTOP runlist ≠ GR0 si aplica)\n",
+    lx_printk("nouveau-lx: CE bring-up motor %u (PTOP; COPY0 primero si hay CE0)\n",
               ce_engine);
     if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan, g_vmm.vaspace,
                       0u, ce_engine) != 0) {
         return -1;
     }
     g_phase = GSP_RM_CHAN;
-
     if (gsp_ce_init(&g_vmm.rm, &g_chan, &g_ce) != 0) {
-        if (ce_engine != NV2080_ENGINE_TYPE_COPY0) {
-            lx_printk("nouveau-lx: CE motor %u falló — reintentando COPY0\n",
-                      ce_engine);
-            gsp_chan_fini(&g_chan);
-            ce_engine = NV2080_ENGINE_TYPE_COPY0;
-            if (gsp_chan_init(&g_vmm.rm, &g_vmm, &g_vram_pool, &g_chan,
-                              g_vmm.vaspace, 0u, ce_engine) != 0 ||
-                gsp_ce_init(&g_vmm.rm, &g_chan, &g_ce) != 0) {
-                gsp_chan_fini(&g_chan);
-                return -1;
-            }
-        } else {
-            gsp_chan_fini(&g_chan);
-            return -1;
-        }
+        gsp_chan_fini(&g_chan);
+        return -1;
     }
     g_phase = GSP_RM_CE;
+    return 0;
+}
 
-    /* Criterio GO de G4e: el selftest hace sysmem → VRAM → sysmem esperando el
-     * semáforo en cada tramo y comparando el patrón, con el origen borrado
-     * entre medias. Si esto pasa, la GPU tradujo nuestras tablas y movió bytes;
-     * es la primera prueba de que G4d funciona de verdad y no solo sobre papel. */
-    if (gsp_ce_selftest(&g_ce, G4D_SCRATCH_VA, G4D_VA_BASE, g_scratch.va, 4096) == 0) {
-        g_ce_verified = 1;
-        lx_printk("nouveau-lx: CE readback verificado (G4e GO)\n");
-        /* El pool de VRAM sólo necesita CE + VMM. Antes vivía al final de
-         * `run_compute_stage` y un fallo de GR0 (`return -1`) lo saltaba con el
-         * CE ya verificado (GA107 run13: `pool VRAM=no`). Linux no ata FB al
-         * canal GR. Va aquí, antes del dump de BAR1 y de GR0. */
-        run_g6_pool_stage();
-        /* Medida 1 de 3: el CE aquí ya está verificado; esto fija la línea
-         * base con la que se comparan las otras dos. */
-        run_ce_probe(CE_PROBE_ANTES_GR0);
-        /* SASS a VRAM antes de GR0: en GA107 run15 el CE deja de señalizar en el
-         * primer blit *después* de programar el canal GR en la runlist 0xc00000.
-         * Es una mitigación del orden de operaciones, no la medida. */
-        if (!g_ce.stuck &&
-            gsp_compute_stage_sass_bringup(&g_ce, G4D_SCRATCH_VA, g_scratch.va,
-                                           4096u) == 0) {
-            g_sass_pre_staged = 1;
-        } else {
-            lx_printk("nouveau-lx: SASS de bring-up no llegó a VRAM (se reintentará "
-                      "sin marcar pool)\n");
-        }
-        /* Tras el CE: sólo se MIRA BAR1. Linux GSP (`r535_bar_bar1_init`) envuelve
-         * `gsp->bar.rm_bar1_pdb` y no recorre el bloque de instancia ni parchea
-         * PTEs. En GA107 run13 el PDB de instancia ≠ `bar1PdeBase` y caminarlo
-         * devolvía `0xbad0fb2fbad0fb2e`; el selftest (y el reintento con
-         * `bar2Pde`) escribía tablas ajenas y el RPC posterior se quedaba mudo.
-         * El CE sigue siendo la ruta a VRAM. */
-        {
-            uint64_t pdb = 0, limite = 0;
-
-            if (gsp_bar1_inst_probe(&g_bar1, &pdb, &limite) != 0) {
-                if (gsp_bar1_pri_poison(pdb) || gsp_bar1_pri_poison(limite)) {
-                    lx_printk("nouveau-lx: BAR1 — PDB de instancia 0x%llx es "
-                              "veneno PRI; Linux envuelve rm_bar1_pdb, no se "
-                              "escribe\n",
-                              (unsigned long long)pdb);
-                } else {
-                    lx_printk("nouveau-lx: BAR1 — RM no ató 0xb80f40; no se "
-                              "escribe (Linux GSP no hace tu102_bar_bar1_init)\n");
-                }
-            } else if (pdb && pdb != g_bar1.pd3) {
-                lx_printk("nouveau-lx: BAR1 — PDB de instancia 0x%llx ≠ "
-                          "bar1PdeBase 0x%llx; Linux envuelve rm_bar1_pdb, no "
-                          "se escribe\n",
-                          (unsigned long long)pdb,
-                          (unsigned long long)g_bar1.pd3);
-            }
-            gsp_bar1_dump(&g_bar1, g_bar1.window_va);
-        }
-    } else {
-        lx_printk("nouveau-lx: CE sin readback — canal vivo pero no movió datos\n");
-        /* Los avisos de RM sobre el canal llegan por eventos, y si nadie escucha
-         * se quedan en la cola: la vez anterior sus dos NOCAT aparecieron páginas
-         * más abajo, dentro del alloc siguiente, y parecían de aquél. */
-        gsp_rpc_drain(&g_rpc, 200u);
+static void ce_unbind_engine(void)
+{
+    if (g_ce.ready) {
+        gsp_ce_fini(&g_ce);
     }
+    if (g_chan.ready) {
+        gsp_chan_fini(&g_chan);
+    }
+    g_ce.stuck = 0;
+    g_ce_verified = 0;
+}
+
+static void ce_on_verified(void)
+{
+    g_ce_verified = 1;
+    lx_printk("nouveau-lx: CE readback verificado (G4e GO)\n");
+    /* El pool de VRAM sólo necesita CE + VMM. Antes vivía al final de
+     * `run_compute_stage` y un fallo de GR0 (`return -1`) lo saltaba con el
+     * CE ya verificado (GA107 run13: `pool VRAM=no`). Linux no ata FB al
+     * canal GR. Va aquí, antes del dump de BAR1 y de GR0. */
+    run_g6_pool_stage();
+    /* Medida 1 de 3: el CE aquí ya está verificado; esto fija la línea
+     * base con la que se comparan las otras dos. */
+    run_ce_probe(CE_PROBE_ANTES_GR0);
+    /* SASS a VRAM antes de GR0: en GA107 run15 el CE deja de señalizar en el
+     * primer blit *después* de programar el canal GR en la runlist 0xc00000.
+     * Es una mitigación del orden de operaciones, no la medida. */
+    if (!g_ce.stuck &&
+        gsp_compute_stage_sass_bringup(&g_ce, G4D_SCRATCH_VA, g_scratch.va,
+                                       4096u) == 0) {
+        g_sass_pre_staged = 1;
+    } else {
+        lx_printk("nouveau-lx: SASS de bring-up no llegó a VRAM (se reintentará "
+                  "sin marcar pool)\n");
+    }
+    /* Tras el CE: sólo se MIRA BAR1. Linux GSP (`r535_bar_bar1_init`) envuelve
+     * `gsp->bar.rm_bar1_pdb` y no recorre el bloque de instancia ni parchea
+     * PTEs. En GA107 run13 el PDB de instancia ≠ `bar1PdeBase` y caminarlo
+     * devolvía `0xbad0fb2fbad0fb2e`; el selftest (y el reintento con
+     * `bar2Pde`) escribía tablas ajenas y el RPC posterior se quedaba mudo.
+     * El CE sigue siendo la ruta a VRAM. */
+    {
+        uint64_t pdb = 0, limite = 0;
+
+        if (gsp_bar1_inst_probe(&g_bar1, &pdb, &limite) != 0) {
+            if (gsp_bar1_pri_poison(pdb) || gsp_bar1_pri_poison(limite)) {
+                lx_printk("nouveau-lx: BAR1 — PDB de instancia 0x%llx es "
+                          "veneno PRI; Linux envuelve rm_bar1_pdb, no se "
+                          "escribe\n",
+                          (unsigned long long)pdb);
+            } else {
+                lx_printk("nouveau-lx: BAR1 — RM no ató 0xb80f40; no se "
+                          "escribe (Linux GSP no hace tu102_bar_bar1_init)\n");
+            }
+        } else if (pdb && pdb != g_bar1.pd3) {
+            lx_printk("nouveau-lx: BAR1 — PDB de instancia 0x%llx ≠ "
+                      "bar1PdeBase 0x%llx; Linux envuelve rm_bar1_pdb, no "
+                      "se escribe\n",
+                      (unsigned long long)pdb,
+                      (unsigned long long)g_bar1.pd3);
+        }
+        gsp_bar1_dump(&g_bar1, g_bar1.window_va);
+    }
+}
+
+/* Criterio GO de G4e: selftest sysmem → VRAM → sysmem. 0 = motor usable. */
+static int ce_bind_and_verify(uint32_t ce_engine)
+{
+    if (ce_bind_engine(ce_engine) != 0) {
+        return -1;
+    }
+    if (gsp_ce_selftest(&g_ce, G4D_SCRATCH_VA, G4D_VA_BASE, g_scratch.va,
+                        4096) != 0) {
+        lx_printk("nouveau-lx: CE selftest — la copia sysmem → VRAM no señalizó\n");
+        return -1;
+    }
+    ce_on_verified();
+    return 0;
+}
+
+static int run_chan_ce_stage(void)
+{
+    uint32_t ce_engine = gsp_top_pick_ce_engine();
+
+    if (ce_bind_and_verify(ce_engine) == 0) {
+        return 0;
+    }
+    /* El picker puede devolver CE1 si no hay CE0 en PTOP; si el blit no
+     * señaliza, Linux r535 sigue en COPY0+0 — no damos el stage por bueno. */
+    if (ce_engine != NV2080_ENGINE_TYPE_COPY0) {
+        lx_printk("nouveau-lx: CE motor %u falló — reintentando COPY0\n",
+                  ce_engine);
+        ce_unbind_engine();
+        if (ce_bind_and_verify(NV2080_ENGINE_TYPE_COPY0) == 0) {
+            return 0;
+        }
+    }
+    lx_printk("nouveau-lx: CE sin readback — canal vivo pero no movió datos\n");
+    /* Los avisos de RM sobre el canal llegan por eventos, y si nadie escucha
+     * se quedan en la cola: la vez anterior sus dos NOCAT aparecieron páginas
+     * más abajo, dentro del alloc siguiente, y parecían de aquél. */
+    gsp_rpc_drain(&g_rpc, 200u);
     return 0;
 }
 
@@ -1159,7 +1194,7 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
         if (fam == NV_FAM_BLACKWELL) {
             if (run_fmc_blackwell() == 0) {
                 if (run_gsp_rm_chain() == 0) {
-                    g_phase = GSP_BOOTED;
+                    gsp_phase_mark_booted();
                     lx_printk("nouveau-lx: GSP booted (hw, GSP-FMC vía FSP, %u MiB VRAM)\n",
                               (unsigned)(g_vram_bytes / (1024ull * 1024ull)));
                     return 0;
@@ -1307,7 +1342,7 @@ const char *lx_nouveau_gsp_status(void)
 
 uint64_t lx_nouveau_vram_bytes(void)
 {
-    return g_vram_bytes ? g_vram_bytes : (8ull * 1024ull * 1024ull * 1024ull);
+    return g_vram_bytes;
 }
 
 const char *lx_nouveau_gpu_name(void)
@@ -1384,6 +1419,25 @@ uint64_t lx_nouveau_buf_vram_free(void)
     return gsp_buf_vram_free(&g_buf);
 }
 
+uint64_t lx_nouveau_buf_pool_free(void)
+{
+    if (!g_buf.ready) {
+        return 0;
+    }
+    return gsp_buf_pool_free(&g_buf);
+}
+
+unsigned lx_nouveau_buf_pt_free(void)
+{
+    if (!g_buf.ready) {
+        return 0;
+    }
+    if (g_vmm.pt_nr >= GSP_VMM_MAX_PT) {
+        return 0;
+    }
+    return GSP_VMM_MAX_PT - g_vmm.pt_nr;
+}
+
 /* `g_ce_verified` es la puerta: si el CE no demostró en el arranque que mueve
  * bytes por nuestras tablas, lanzar un QMD es tirar trabajo a un canal que no
  * funciona, y eso en esta máquina se paga con un cuelgue sin traza. Sin esa
@@ -1400,6 +1454,7 @@ uint64_t lx_nouveau_buf_vram_free(void)
 #define G4F_MAX_FALLOS 3
 static unsigned g_compute_fallos;
 static int g_compute_rendido;
+static int g_matvf_fail_logged;
 
 static int compute_usable(void)
 {
@@ -1407,7 +1462,7 @@ static int compute_usable(void)
         return 0;
     }
     return g_ce_verified && g_compute.ready && g_ce.ready && g_chan.ready &&
-           g_chan_gr.ready && g_phase >= GSP_RM_COMPUTE;
+           g_chan_gr.ready && g_phase == GSP_RM_COMPUTE;
 }
 
 /* Contabilidad del cortacircuitos: `ok` = el dispositivo calculó de verdad. */
@@ -1467,6 +1522,13 @@ int lx_nouveau_submit_matvec_resident(uint64_t w_va, unsigned rows, unsigned col
         if (ok) {
             return 1;
         }
+    }
+    if (!g_matvf_fail_logged) {
+        g_matvf_fail_logged = 1;
+        lx_printk("nouveau-lx: MATVF falló — usable=%d res_mapped=%d buf=%d "
+                  "ce_stuck=%d rendido=%d\n",
+                  compute_usable(), g_compute.res_mapped, g_buf.ready,
+                  g_ce.stuck, g_compute_rendido);
     }
     return -1;
 }

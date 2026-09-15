@@ -10,6 +10,16 @@ description: >-
 
 # soso — Live USB, instalación y actualizaciones
 
+## Plan aplicable y seguimiento
+
+Al avanzar un plan de instalación, OTA, recuperación o automejora, leer
+[Identificación y seguimiento de planes](../soso-architecture/references/planes.md).
+Conservar el ID de entrega del plan activo y registrar imagen/build, destino
+y alcance de la comprobación. Las fichas T31/T43 de automejora exigen evidencia
+de recuperación de kernel y rootfs: no cerrarlas solo con rollback del kernel.
+Mantener estado, artefactos y siguiente paso; un paquete preparado no acredita
+haberlo instalado ni arrancado en placa.
+
 El camino de placa: **un GPT** (`soso-live.img`), no tres imágenes sueltas.
 Docs de usuario: `MANUAL-USUARIO.md`. Bring-up on-box: `docs/L5c-on-box.md`.
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
@@ -226,7 +236,7 @@ Tests: `cargo xtask test-usb` (4 escenarios en paralelo).
 ## Comandos host
 
 ```bash
-cargo xtask package-usb-live              # mistral-7b demo (sin medir stick)
+cargo xtask package-usb-live              # qwen2.5-coder-3b Q4_K_M (sin medir stick)
 cargo xtask flash-usb-live /dev/sdX --yes # mide, elige GGUF, dd, estira p3
 SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 # incremental (pendrive ya flasheado; no toca p3 modelos):

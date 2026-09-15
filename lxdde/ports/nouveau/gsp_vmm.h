@@ -61,7 +61,7 @@
  * ATTRIBUTE_CB ~51552 KiB ≈ 26 hojas) suma ~29 más → ~42 en total. El pool de
  * 24 del bring-up CE se agotaba justo al mapear ATTRIBUTE_CB (2026-07-29). 96
  * deja margen 2x; cada tabla sigue reservándose bajo demanda en sysmem. */
-#define GSP_VMM_MAX_PT  96u
+#define GSP_VMM_MAX_PT  192u
 
 /* Base de TODO el mapa de VAs del bring-up (G4d, canal, CE, compute). Estaba
  * repetida a mano en cinco constantes de tres ficheros, todas empezando por

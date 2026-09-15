@@ -13,22 +13,57 @@ pub type PhysAddr = usize;
 
 static DMA_FREE: Mutex<Vec<(PhysAddr, usize)>> = Mutex::new(Vec::new());
 
+/// Saca `pages` páginas contiguas de la free-list, si hay una entrada exacta.
+fn de_la_free_list(pages: usize) -> Option<PhysAddr> {
+    let mut free = DMA_FREE.lock();
+    let i = free.iter().position(|&(_, p)| p == pages)?;
+    Some(free.swap_remove(i).0)
+}
+
+/// Pide al asignador de frames. Suelta su candado antes de volver: quien
+/// reclame después lo necesita.
+fn del_frame_alloc(pages: usize) -> Option<PhysAddr> {
+    let frame = crate::mm::FRAME_ALLOC
+        .get()?
+        .lock()
+        .allocate_contiguous(pages)?;
+    Some(frame.start_address().as_u64() as PhysAddr)
+}
+
 /// Reserva `pages` páginas contiguas (reutiliza free-list si hay).
+///
+/// Si no queda memoria contigua, **reclama y reintenta** antes de rendirse.
+/// El camino de mmap ya evicta páginas respaldadas por fichero cuando aprieta;
+/// éste no lo hacía y moría con un `expect` en cuanto un modelo grande llenaba
+/// la RAM: cargar Whisper tras el resto de la suite tumbaba la máquina con
+/// «sin memoria contigua para DMA» justo cuando virtio-blk pedía un buffer.
+/// `mm::reclaim::evict_batch` existía exactamente para esto —su comentario dice
+/// «antes de un bloque 2 MiB grande»— y no estaba cableada en ningún sitio.
 pub fn alloc_pages(pages: usize) -> PhysAddr {
     let pages = pages.max(1);
-    let mut free = DMA_FREE.lock();
-    if let Some(i) = free.iter().position(|&(_, p)| p == pages) {
-        return free.swap_remove(i).0;
+    if let Some(p) = de_la_free_list(pages) {
+        return p;
     }
-    drop(free);
-    let frame = crate::mm::FRAME_ALLOC
-        .get()
-        .unwrap()
-        .lock()
-        .allocate_contiguous(pages)
-        .expect("sin memoria contigua para DMA");
-    frame.start_address().as_u64() as PhysAddr
+    if let Some(p) = del_frame_alloc(pages) {
+        return p;
+    }
+    // Reclamar sólo fuera de IRQ dura: `evict_batch` toma candados y manda un
+    // shootdown de TLB por IPI, y eso desde un handler clava la máquina.
+    if !crate::arch::irq::en_irq_dura() {
+        for ronda in 1..=DMA_RECLAIM_RONDAS {
+            crate::mm::reclaim::evict_batch(DMA_RECLAIM_LOTE * ronda);
+            if let Some(p) = del_frame_alloc(pages) {
+                return p;
+            }
+        }
+    }
+    panic!("sin memoria contigua para DMA: {pages} páginas tras reclamar");
 }
+
+/// Páginas a evictar en cada ronda. La contigüidad no se consigue liberando
+/// justo lo que falta: hay que soltar un lote y confiar en que caigan juntas.
+const DMA_RECLAIM_LOTE: usize = 512;
+const DMA_RECLAIM_RONDAS: usize = 3;
 
 /// Devuelve páginas a la free-list (no al frame allocator).
 pub fn free_pages(paddr: PhysAddr, pages: usize) {

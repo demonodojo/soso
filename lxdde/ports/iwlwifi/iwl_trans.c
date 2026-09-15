@@ -6,6 +6,8 @@
 extern void *memcpy(void *dst, const void *src, unsigned long n);
 extern void *memset(void *dst, int c, unsigned long n);
 
+static void iwl_trans_pnvm_free_dma(struct iwl_ax211_priv *iwl);
+
 static uint32_t iwl_read32(struct iwl_ax211_priv *iwl, uint32_t off)
 {
     return iwl->mmio[off / 4];
@@ -220,6 +222,57 @@ static int iwl_pcie_check_hw_rf_kill(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
+/* Tamaño de cada entrada del anillo RX, por generación (ver iwl_internal.h). */
+static unsigned iwl_rx_bd_size(const struct iwl_ax211_priv *iwl)
+{
+    return iwl->gen3 ? IWL_RX_BD_SIZE_GEN3 : IWL_RX_BD_SIZE_GEN2;
+}
+
+static unsigned iwl_rx_cd_size(const struct iwl_ax211_priv *iwl)
+{
+    return iwl->gen3 ? IWL_RX_CD_SIZE_GEN3 : IWL_RX_CD_SIZE_GEN2;
+}
+
+/* Publica el buffer `vid - 1` en la ranura `slot` del anillo de BD libres. */
+static void iwl_rx_post_bd(struct iwl_ax211_priv *iwl, unsigned slot, uint16_t vid)
+{
+    uint64_t addr;
+
+    if (vid == 0 || vid > IWL_GEN2_RX_N)
+        return;
+    addr = iwl->rx_page_dma + (uint64_t)(vid - 1u) * IWL_GEN2_RX_SZ;
+    slot %= IWL_GEN2_RX_N;
+    if (iwl->gen3) {
+        struct iwl_rx_transfer_desc *bd =
+            (struct iwl_rx_transfer_desc *)iwl->rx_bd_cpu;
+
+        memset(&bd[slot], 0, sizeof(bd[slot]));
+        bd[slot].rbid = vid;
+        bd[slot].addr = addr;
+    } else {
+        uint64_t *bd = (uint64_t *)iwl->rx_bd_cpu;
+
+        bd[slot] = addr | (uint64_t)vid;
+    }
+}
+
+/* VID del descriptor completado `slot`, o 0 si la ranura no designa buffer. */
+static uint16_t iwl_rx_completed_vid(const struct iwl_ax211_priv *iwl, unsigned slot)
+{
+    slot %= IWL_GEN2_RX_N;
+    if (iwl->gen3) {
+        const struct iwl_rx_completion_desc *cd =
+            (const struct iwl_rx_completion_desc *)iwl->used_bd_cpu;
+
+        return cd[slot].rbid;
+    }
+    {
+        const uint32_t *cd = (const uint32_t *)iwl->used_bd_cpu;
+
+        return (uint16_t)(cd[slot] & 0x0fffu);
+    }
+}
+
 /* Anillos RX/comandos del transporte.
  *
  * Idempotente: en un reinicio de transporte (R4) se reutilizan los mismos
@@ -228,16 +281,16 @@ static int iwl_pcie_check_hw_rf_kill(struct iwl_ax211_priv *iwl)
  * dispositivo. */
 static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
 {
-    uint64_t *bd;
     unsigned i;
-    unsigned used_sz = iwl->gen3 ? (IWL_GEN2_RX_N * 2u) : (IWL_GEN2_RX_N * 4u);
+    unsigned bd_sz = IWL_GEN2_RX_N * iwl_rx_bd_size(iwl);
+    unsigned used_sz = IWL_GEN2_RX_N * iwl_rx_cd_size(iwl);
 
     if (iwl->rx_bd_cpu && iwl->used_bd_cpu && iwl->rb_stts && iwl->rx_page_cpu &&
-        iwl->mtr_cpu && iwl->mcr_cpu) {
+        iwl->mtr_cpu && iwl->mcr_cpu && iwl->hcmd_first_tb_cpu) {
         lx_printk("iwlwifi: anillos ya reservados; se reinician en su sitio\n");
         goto reiniciar;
     }
-    iwl->rx_bd_cpu = lx_dma_alloc_coherent(0, IWL_GEN2_RX_N * 8, &iwl->rx_bd_dma, GFP_KERNEL);
+    iwl->rx_bd_cpu = lx_dma_alloc_coherent(0, bd_sz, &iwl->rx_bd_dma, GFP_KERNEL);
     iwl->used_bd_cpu = lx_dma_alloc_coherent(0, used_sz, &iwl->used_bd_dma, GFP_KERNEL);
     iwl->rb_stts = (volatile uint16_t *)lx_dma_alloc_coherent(0, 16, &iwl->rb_stts_dma, GFP_KERNEL);
     iwl->rx_page_cpu = lx_dma_alloc_coherent(0, IWL_GEN2_RX_N * IWL_GEN2_RX_SZ,
@@ -246,27 +299,27 @@ static int iwl_alloc_queues(struct iwl_ax211_priv *iwl)
                                          &iwl->mtr_dma, GFP_KERNEL);
     iwl->mcr_cpu = lx_dma_alloc_coherent(0, IWL_CMD_QUEUE_SIZE * IWL_CMD_SLOT_SIZE,
                                          &iwl->mcr_dma, GFP_KERNEL);
+    iwl->hcmd_first_tb_cpu = lx_dma_alloc_coherent(
+        0, IWL_CMD_QUEUE_SIZE * IWL_FIRST_TB_SIZE_ALIGN, &iwl->hcmd_first_tb_dma,
+        GFP_KERNEL);
     if (!iwl->rx_bd_cpu || !iwl->used_bd_cpu || !iwl->rb_stts ||
-        !iwl->rx_page_cpu || !iwl->mtr_cpu || !iwl->mcr_cpu)
+        !iwl->rx_page_cpu || !iwl->mtr_cpu || !iwl->mcr_cpu ||
+        !iwl->hcmd_first_tb_cpu)
         return -1;
 reiniciar:
-    memset(iwl->rx_bd_cpu, 0, IWL_GEN2_RX_N * 8);
+    memset(iwl->rx_bd_cpu, 0, bd_sz);
     memset(iwl->used_bd_cpu, 0, used_sz);
     memset((void *)iwl->rb_stts, 0, 16);
     memset(iwl->mtr_cpu, 0, IWL_CMD_QUEUE_SIZE * IWL_TFH_TFD_SIZE);
     memset(iwl->mcr_cpu, 0, IWL_CMD_QUEUE_SIZE * IWL_CMD_SLOT_SIZE);
-    bd = (uint64_t *)iwl->rx_bd_cpu;
-    if (iwl->gen3) {
-        for (i = 0; i < IWL_GEN2_RX_N - 1; i++)
-            bd[i] = iwl->rx_page_dma + (uint64_t)i * IWL_GEN2_RX_SZ;
-        iwl->rx_write = IWL_GEN2_RX_N - 1;
-    } else {
-        /* iwl_pcie_restock_bd (22000): RBD = page_dma | vid, vid = i + 1.
-         * WIDX empieza en N-1 como gen3 — con 0 el FW no recibe RBD y no ALIVE. */
-        for (i = 0; i < IWL_GEN2_RX_N; i++)
-            bd[i] = (iwl->rx_page_dma + (uint64_t)i * IWL_GEN2_RX_SZ) | (uint64_t)(i + 1u);
-        iwl->rx_write = IWL_GEN2_RX_N - 1;
-    }
+    memset(iwl->hcmd_first_tb_cpu, 0,
+           IWL_CMD_QUEUE_SIZE * IWL_FIRST_TB_SIZE_ALIGN);
+    /* `iwl_pcie_restock_bd`: el VID identifica el buffer y vale i + 1 en las dos
+     * generaciones; sólo cambia dónde se escribe. WIDX empieza en N-1 — con 0 el
+     * FW no recibe ningún RBD y no manda ALIVE. */
+    for (i = 0; i < IWL_GEN2_RX_N; i++)
+        iwl_rx_post_bd(iwl, i, (uint16_t)(i + 1u));
+    iwl->rx_write = IWL_GEN2_RX_N - 1;
     iwl->rx_read = 0;
     iwl->cmd_write = 0;
     iwl->cmd_read = 0;
@@ -325,40 +378,69 @@ static void parse_rx_phy(struct iwl_ax211_priv *iwl, const uint8_t *data, int le
         apply_rx_rssi(iwl, a, b);
 }
 
+/* Reparte una trama Ethernet ya convertida entre el supplicant y la pila IP. */
+static void deliver_eth(struct iwl_ax211_priv *iwl, const uint8_t *eth, int len)
+{
+    uint16_t ethertype;
+
+    if (!eth || len < 14)
+        return;
+    ethertype = (uint16_t)(((uint16_t)eth[12] << 8) | eth[13]);
+    iwl->rx_data_ok++;
+    if (ethertype == ETH_P_EAPOL)
+        iwl_ax211_deliver_eapol(eth, len);
+    else
+        iwl_ax211_deliver_rx(eth, len);
+}
+
 static void parse_rx_mpdu(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
 {
-    unsigned desc_size = iwl->gen3 ? (unsigned)sizeof(struct iwl_rx_mpdu_res_start)
-                                   : IWL_RX_DESC_SIZE_V1;
+    /* Linux mvm/rxmq.c `iwl_mvm_rx_mpdu_mq`: el descriptor que precede a la
+     * MPDU es `sizeof(struct iwl_rx_mpdu_desc)` en AX210+ y IWL_RX_DESC_SIZE_V1
+     * antes. No son 4 bytes en ninguna de las dos. */
+    unsigned desc_size = iwl->gen3 ? IWL_RX_DESC_SIZE_V3 : IWL_RX_DESC_SIZE_V1;
+    uint32_t status;
     int flen;
     const uint8_t *frame;
+    uint8_t ch;
+    uint8_t a = 0;
+    uint8_t b = 0;
 
     if (len < (int)desc_size)
         return;
+    flen = (int)(data[0] | ((uint16_t)data[1] << 8));
+    status = iwl_rx_mpdu_status(data, len);
     if (iwl->gen3) {
-        const struct iwl_rx_mpdu_res_start *res =
-            (const struct iwl_rx_mpdu_res_start *)data;
-        flen = (int)res->byte_count;
+        ch = iwl_rx_mpdu_v3_channel(data, len);
+        iwl_rx_mpdu_v3_energy(data, len, &a, &b);
     } else {
-        uint8_t ch;
-        uint8_t a = 0;
-        uint8_t b = 0;
-
-        flen = (int)(data[0] | ((uint16_t)data[1] << 8));
-        /* Linux mvm/rxmq.c: AX200 usa desc->v1.channel / energy_a/b. */
         ch = iwl_rx_mpdu_v1_channel(data, len);
-        if (ch) {
-            iwl->last_rx_channel = ch;
-            iwl->last_rx_band24 = (ch > 14u) ? 0u : 1u;
-        }
         iwl_rx_mpdu_v1_energy(data, len, &a, &b);
-        if (a || b)
-            apply_rx_rssi(iwl, a, b);
     }
+    if (ch) {
+        iwl->last_rx_channel = ch;
+        iwl->last_rx_band24 = (ch > 14u) ? 0u : 1u;
+    }
+    if (a || b)
+        apply_rx_rssi(iwl, a, b);
+
     frame = data + desc_size;
     if (flen <= 0 || desc_size + (size_t)flen > (size_t)len)
         return;
     iwl_mvm_rx_scan_frame(iwl, frame, flen);
     iwl_mvm_rx_mlme_frame(iwl, frame, flen);
+
+    /* Camino de datos: hasta ahora la MPDU sólo llegaba al scan y a MLME, así
+     * que ni EAPOL ni IP salían nunca del driver. */
+    if (iwl->associated) {
+        uint8_t eth[IWL_MAX_ETH_FRAME];
+        int n = iwl_mvm_rx_to_eth(iwl, frame, flen, status, eth, (int)sizeof(eth));
+
+        if (n > 0)
+            deliver_eth(iwl, eth, n);
+        else if (n == -2 || n == -3 || n == -4 || n == -5)
+            iwl->rx_data_drop++;
+    }
 }
 
 /* --- Propiedad de slots de la cola de comandos (R4) ---------------------
@@ -431,6 +513,17 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
      * Reutilizar el anillo sin reiniciar el FW desincronizaría los índices. */
     iwl->alive = 0;
     iwl->init_complete = 0;
+    iwl->pnvm_complete = 0;
+    iwl_trans_pnvm_free_dma(iwl);
+    if (iwl->scratch_cpu) {
+        struct iwl_prph_scratch *scratch = (struct iwl_prph_scratch *)iwl->scratch_cpu;
+
+        scratch->ctrl_cfg.pnvm_cfg.pnvm_base_addr = 0;
+        scratch->ctrl_cfg.pnvm_cfg.pnvm_size = 0;
+    }
+    iwl->sku_id[0] = 0;
+    iwl->sku_id[1] = 0;
+    iwl->sku_id[2] = 0;
     iwl->radio_ready = 0;
     iwl->mvm_up_done = 0;
     iwl->phy_ctxt_added = 0;
@@ -451,18 +544,108 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
     iwl->mgmt_txq_ready = 0;
     iwl->mgmt_txq_id = 0;
     iwl->mgmt_txq_write = 0;
+    iwl->mgmt_txq_read = 0;
+    iwl->keys_installed = 0;
+    iwl->authorized = 0;
     lx_iwlwifi_set_alive(0);
     lx_printk("iwl_trans: recuperación #%u — cola liberada, MVM abajo\n",
               (unsigned)iwl->cmd_recover);
     return 0;
 }
 
+static int hcmd_scd_pending(const struct iwl_ax211_priv *iwl)
+{
+    return iwl->cmd_pending &&
+           iwl->cmd_pending_group == DATA_PATH_GROUP &&
+           iwl->cmd_pending_id == SCD_QUEUE_CONFIG_CMD;
+}
+
 static void log_rx(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd,
                    uint16_t seq, int pay, int status)
 {
-    lx_printk("iwl_rx: grp=%u id=0x%02x seq=0x%04x len=%d st=%d\n",
-              (unsigned)group, (unsigned)cmd, (unsigned)seq, pay, status);
-    (void)iwl;
+    if (hcmd_scd_pending(iwl)) {
+        lx_printk("iwl_rx: [SCD-wait] grp=%u id=0x%02x seq=0x%04x len=%d st=%d "
+                  "(esperando seq=0x%04x)\n",
+                  (unsigned)group, (unsigned)cmd, (unsigned)seq, pay, status,
+                  (unsigned)iwl->cmd_pending_seq);
+    } else {
+        lx_printk("iwl_rx: grp=%u id=0x%02x seq=0x%04x len=%d st=%d\n",
+                  (unsigned)group, (unsigned)cmd, (unsigned)seq, pay, status);
+    }
+}
+
+static uint32_t tx_resp_status_word(const struct iwl_ax211_priv *iwl,
+                                    const uint8_t *data, int pay)
+{
+    unsigned off;
+
+    if (!data || pay < 40)
+        return 0xffffffffu;
+    off = iwl->gen3 ? IWL_MVM_TX_RESP_STATUS_OFF : IWL_MVM_TX_RESP_V3_STATUS_OFF;
+    if (pay < (int)(off + (int)sizeof(struct agg_tx_status)))
+        return 0xffffffffu;
+    return (uint32_t)(data[off] | ((uint32_t)data[off + 1] << 8));
+}
+
+/* Espacio libre del anillo TX; se deja un hueco para distinguir lleno de vacío,
+ * igual que `iwl_txq_space`. */
+unsigned iwl_trans_tx_space(const struct iwl_ax211_priv *iwl)
+{
+    unsigned used = (unsigned)((iwl->mgmt_txq_write - iwl->mgmt_txq_read) &
+                               (IWL_MGMT_QUEUE_SIZE - 1u));
+
+    return (IWL_MGMT_QUEUE_SIZE - 1u) - used;
+}
+
+/* Libera hasta el TFD que el firmware acaba de reconocer. La cola es FIFO y el
+ * FW responde en orden, así que el índice de la secuencia marca la cabeza. */
+void iwl_trans_tx_reclaim(struct iwl_ax211_priv *iwl, uint16_t seq)
+{
+    unsigned idx = (unsigned)SEQ_TO_INDEX(seq) & (IWL_MGMT_QUEUE_SIZE - 1u);
+    unsigned next = (idx + 1u) & (IWL_MGMT_QUEUE_SIZE - 1u);
+
+    /* Sólo avanza: una respuesta que apunte por detrás de la cabeza no debe
+     * retroceder el consumidor y volver a dar por libres TFDs en vuelo.
+     *
+     * Lo que **no** se puede filtrar es una respuesta repetida de un índice que
+     * entretanto se ha reutilizado: la secuencia lleva 8 bits de índice y ningún
+     * número de vuelta, así que es indistinguible de la legítima. `iwl_txq_reclaim`
+     * de Linux tampoco lo intenta; se confía en que el firmware no duplique. */
+    if (((next - iwl->mgmt_txq_read) & (IWL_MGMT_QUEUE_SIZE - 1u)) >
+        ((iwl->mgmt_txq_write - iwl->mgmt_txq_read) & (IWL_MGMT_QUEUE_SIZE - 1u)))
+        return;
+    iwl->mgmt_txq_read = (uint16_t)next;
+}
+
+static void parse_tx_resp(struct iwl_ax211_priv *iwl, const uint8_t *data, int pay,
+                          uint16_t seq)
+{
+    uint32_t raw;
+    uint32_t st;
+
+    if (!iwl || !data || pay < 40)
+        return;
+    iwl_trans_tx_reclaim(iwl, seq);
+    raw = tx_resp_status_word(iwl, data, pay);
+    st = raw & TX_STATUS_MSK;
+    iwl->last_mgmt_tx_status = (uint8_t)st;
+    lx_printk("iwl_trans: TX resp frame_count=%u status=0x%02x (raw=0x%04x) "
+              "rd=%u wr=%u\n",
+              (unsigned)data[0], (unsigned)st, (unsigned)raw,
+              (unsigned)iwl->mgmt_txq_read, (unsigned)iwl->mgmt_txq_write);
+}
+
+static void parse_session_prot_notif(struct iwl_ax211_priv *iwl,
+                                     const uint8_t *data, int pay)
+{
+    const struct iwl_mvm_session_prot_notif *n;
+
+    if (!iwl || !data || pay < (int)sizeof(*n))
+        return;
+    n = (const struct iwl_mvm_session_prot_notif *)(const void *)data;
+    lx_printk("iwl_mvm: SESSION_PROTECTION_NOTIF mac_id=0x%08x status=%u start=%u conf_id=%u\n",
+              (unsigned)n->mac_id, (unsigned)n->status, (unsigned)n->start,
+              (unsigned)n->conf_id);
 }
 
 /* Devuelve el slot propietario de esta respuesta, o -1 si no es respuesta a
@@ -522,6 +705,60 @@ static void rx_complete_sync(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t 
     }
 }
 
+/* Gen2: el FH escribe en first_tb (DMA bidireccional). Si el anillo RX no
+ * entrega la respuesta, completar cuando sequence lleva SEQ_RX_FRAME con el
+ * mismo índice/cola que el HCMD sincrónico en vuelo. */
+static void poll_hcmd_first_tb(struct iwl_ax211_priv *iwl)
+{
+    unsigned slot;
+    const struct iwl_cmd_header_wide *whdr;
+    uint16_t resp_seq;
+    uint16_t sent_seq;
+    int pay;
+    const uint8_t *data;
+
+    if (!iwl->cmd_pending)
+        return;
+
+    slot = (unsigned)SEQ_TO_INDEX(iwl->cmd_pending_seq) % IWL_CMD_QUEUE_SIZE;
+    sent_seq = iwl->cmd_pending_seq;
+    if (iwl->cmd_slot_state[slot] != IWL_SLOT_SYNC)
+        return;
+
+    whdr = NULL;
+    if (iwl->hcmd_first_tb_cpu) {
+        whdr = (const struct iwl_cmd_header_wide *)
+            ((const uint8_t *)iwl->hcmd_first_tb_cpu +
+             (size_t)slot * IWL_FIRST_TB_SIZE_ALIGN);
+    }
+    if (!whdr && iwl->mcr_cpu) {
+        whdr = (const struct iwl_cmd_header_wide *)
+            ((const uint8_t *)iwl->mcr_cpu + (size_t)slot * IWL_CMD_SLOT_SIZE);
+    }
+    if (!whdr)
+        return;
+
+    resp_seq = whdr->sequence;
+    if (!(resp_seq & SEQ_RX_FRAME))
+        return;
+    if ((resp_seq & 0x7fffu) != (sent_seq & 0x7fffu))
+        return;
+    if (whdr->cmd != iwl->cmd_pending_id ||
+        whdr->group_id != iwl->cmd_pending_group)
+        return;
+
+    pay = (int)whdr->length;
+    if (pay < 0)
+        pay = 0;
+    data = (const uint8_t *)whdr + sizeof(*whdr);
+    if (hcmd_scd_pending(iwl)) {
+        lx_printk("iwl_trans: SCD first_tb complete seq=0x%04x len=%d\n",
+                  (unsigned)resp_seq, pay);
+    }
+    rx_complete_sync(iwl, whdr->group_id, whdr->cmd, data, pay);
+    cmd_slot_done(iwl, slot);
+}
+
 static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigned avail)
 {
     uint32_t len_n_flags;
@@ -561,6 +798,11 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
     log_rx(iwl, group, cmd, seq, pay, 0);
 
     owner = rx_owner_slot(iwl, group, cmd, seq);
+    if (owner < 0 && iwl->cmd_pending) {
+        lx_printk("iwl_rx: sin emparejar (esperando grp=%u id=0x%02x seq=0x%04x)\n",
+                  (unsigned)iwl->cmd_pending_group, (unsigned)iwl->cmd_pending_id,
+                  (unsigned)iwl->cmd_pending_seq);
+    }
     if (owner >= 0) {
         /* Async: nadie espera la respuesta y no toca cmd_resp[], que pertenece
          * al comando sincrónico; pero su slot solo se libera aquí. */
@@ -573,7 +815,26 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
     if (group == 0 && cmd == UCODE_ALIVE_NTFY) {
         iwl->alive = 1;
         lx_iwlwifi_set_alive(1);
-        lx_printk("iwl_ax211: firmware ALIVE (UCODE_ALIVE_NTFY)\n");
+        if (pay >= (int)IWL_ALIVE_NTFY_V5_LEN) {
+            const uint8_t *sku = data + IWL_ALIVE_SKU_OFF;
+
+            iwl->sku_id[0] = (uint32_t)sku[0] | ((uint32_t)sku[1] << 8) |
+                             ((uint32_t)sku[2] << 16) | ((uint32_t)sku[3] << 24);
+            iwl->sku_id[1] = (uint32_t)sku[4] | ((uint32_t)sku[5] << 8) |
+                             ((uint32_t)sku[6] << 16) | ((uint32_t)sku[7] << 24);
+            iwl->sku_id[2] = (uint32_t)sku[8] | ((uint32_t)sku[9] << 8) |
+                             ((uint32_t)sku[10] << 16) | ((uint32_t)sku[11] << 24);
+            lx_printk("iwl_ax211: firmware ALIVE (UCODE_ALIVE_NTFY) sku=0x%x 0x%x 0x%x\n",
+                      (unsigned)iwl->sku_id[0], (unsigned)iwl->sku_id[1],
+                      (unsigned)iwl->sku_id[2]);
+        } else {
+            lx_printk("iwl_ax211: firmware ALIVE (UCODE_ALIVE_NTFY)\n");
+        }
+        return;
+    }
+    if (group == REGULATORY_AND_NVM_GROUP && cmd == PNVM_INIT_COMPLETE_NTFY) {
+        iwl->pnvm_complete = 1;
+        lx_printk("iwl_mvm: PNVM_INIT_COMPLETE_NTFY\n");
         return;
     }
     if (group == LEGACY_GROUP && cmd == INIT_COMPLETE_NOTIF) {
@@ -590,52 +851,72 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
         parse_rx_phy(iwl, data, pay);
     if (group == LEGACY_GROUP && cmd == REPLY_RX_MPDU_CMD)
         parse_rx_mpdu(iwl, data, pay);
-    if (group == DATA_PATH_GROUP && cmd == 0x1 && pay > 14)
-        iwl_ax211_deliver_rx(data, pay);
+    if (group == LEGACY_GROUP && cmd == TX_CMD)
+        parse_tx_resp(iwl, data, pay, seq);
+    if (group == MAC_CONF_GROUP && cmd == SESSION_PROTECTION_NOTIF)
+        parse_session_prot_notif(iwl, data, pay);
+    /* `DATA_PATH_GROUP` id 1 es UPDATE_MU_GROUPS_CMD, no una notificación de
+     * Ethernet: entregar su cuerpo a la pila IP era inventarse paquetes. Los
+     * datos llegan por REPLY_RX_MPDU_CMD, arriba. */
+}
+
+static void drain_rx_gen2(struct iwl_ax211_priv *iwl);
+static uint32_t tx_doorbell(const struct iwl_ax211_priv *iwl, uint16_t qid, uint16_t wr);
+static int gen1_tfd_set_tb(struct iwl_tfd *tfd, uint8_t idx, uint64_t addr, uint16_t len);
+
+static void drain_rx(struct iwl_ax211_priv *iwl)
+{
+    if (iwl->family == IWL_DEVICE_FAMILY_8000)
+        iwl_trans_8000_drain(iwl);
+    else
+        drain_rx_gen2(iwl);
+}
+
+static uint32_t tx_doorbell(const struct iwl_ax211_priv *iwl, uint16_t qid, uint16_t wr)
+{
+    if (iwl->family == IWL_DEVICE_FAMILY_8000)
+        return (uint32_t)(wr & 0xffu) | ((uint32_t)qid << 8);
+    return (uint32_t)(wr & 0xffu) | ((uint32_t)qid << 16);
+}
+
+static int gen1_tfd_set_tb(struct iwl_tfd *tfd, uint8_t idx, uint64_t addr, uint16_t len)
+{
+    struct iwl_tfd_tb *tb;
+
+    if (idx >= IWL_NUM_OF_TBS)
+        return -1;
+    tb = &tfd->tbs[idx];
+    tb->lo = iwl_cpu_to_le32((uint32_t)(addr & 0xffffffffu));
+    tb->hi_n_len = iwl_cpu_to_le16((uint16_t)((len & 0xfffu) << 4) |
+                                   (uint16_t)((addr >> 32) & 0xfu));
+    tfd->num_tbs = (uint8_t)(idx + 1u);
+    return 0;
 }
 
 static void drain_rx_gen2(struct iwl_ax211_priv *iwl)
 {
-    uint64_t *bd;
     uint16_t hw;
     int n = 0;
 
     if (!iwl->rb_stts || !iwl->used_bd_cpu || !iwl->rx_page_cpu || !iwl->rx_bd_cpu)
         return;
-    bd = (uint64_t *)iwl->rx_bd_cpu;
     hw = iwl->rb_stts[0] & 0x0fff;
     while (iwl->rx_read != hw && n++ < IWL_GEN2_RX_N) {
-        if (iwl->gen3) {
-            uint16_t *used = (uint16_t *)iwl->used_bd_cpu;
-            uint16_t idx = used[iwl->rx_read % IWL_GEN2_RX_N] & 0x0fff;
+        uint16_t vid = iwl_rx_completed_vid(iwl, iwl->rx_read);
 
-            if (idx < IWL_GEN2_RX_N) {
-                handle_gen2_rx(iwl,
-                               (const uint8_t *)iwl->rx_page_cpu +
-                                   (size_t)idx * IWL_GEN2_RX_SZ,
-                               IWL_GEN2_RX_SZ);
-                bd[iwl->rx_write % IWL_GEN2_RX_N] =
-                    iwl->rx_page_dma + (uint64_t)idx * IWL_GEN2_RX_SZ;
-                iwl->rx_write = (uint16_t)((iwl->rx_write + 1) % IWL_GEN2_RX_N);
-            }
-        } else {
-            uint32_t *used32 = (uint32_t *)iwl->used_bd_cpu;
-            uint32_t cd = used32[iwl->rx_read % IWL_GEN2_RX_N];
-            uint16_t vid = (uint16_t)(cd & 0x0fffu);
-            uint16_t idx;
-
-            if (vid == 0 || vid > IWL_GEN2_RX_N)
-                goto next_slot;
-            idx = (uint16_t)(vid - 1u);
+        /* VID 0 o fuera de rango: ranura sin buffer. Se salta sin reciclar,
+         * porque reciclar un índice inventado devolvería al FW una dirección
+         * que no es de ningún RB. */
+        if (vid != 0 && vid <= IWL_GEN2_RX_N) {
             handle_gen2_rx(iwl,
                            (const uint8_t *)iwl->rx_page_cpu +
-                               (size_t)idx * IWL_GEN2_RX_SZ,
+                               (size_t)(vid - 1u) * IWL_GEN2_RX_SZ,
                            IWL_GEN2_RX_SZ);
-            bd[iwl->rx_write % IWL_GEN2_RX_N] =
-                (iwl->rx_page_dma + (uint64_t)idx * IWL_GEN2_RX_SZ) | (uint64_t)vid;
+            iwl_rx_post_bd(iwl, iwl->rx_write, vid);
             iwl->rx_write = (uint16_t)((iwl->rx_write + 1) % IWL_GEN2_RX_N);
+        } else {
+            iwl->rx_vid_drop++;
         }
-next_slot:
         iwl->rx_read = (uint16_t)((iwl->rx_read + 1) % IWL_GEN2_RX_N);
         hw = iwl->rb_stts[0] & 0x0fff;
     }
@@ -737,7 +1018,6 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
 
 int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
 {
-    uint64_t dma = 0;
     uint64_t iml_dma = 0;
     struct iwl_prph_scratch *scratch;
     void *info;
@@ -806,19 +1086,7 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
                                               IWL_PRPH_MTR_FORMAT_256B;
     scratch->ctrl_cfg.rbd_cfg.free_rbd_addr = iwl->rx_bd_dma;
 
-    if (iwl->pnvm_data && iwl->pnvm_len) {
-        if (!iwl->pnvm_cpu) {
-            iwl->pnvm_cpu = lx_dma_alloc_coherent(0, iwl->pnvm_len, &dma, GFP_KERNEL);
-            iwl->pnvm_dma = dma;
-            if (iwl->pnvm_cpu) {
-                memcpy(iwl->pnvm_cpu, iwl->pnvm_data, iwl->pnvm_len);
-            }
-        }
-        if (iwl->pnvm_cpu) {
-            scratch->ctrl_cfg.pnvm_cfg.pnvm_base_addr = iwl->pnvm_dma;
-            scratch->ctrl_cfg.pnvm_cfg.pnvm_size = (uint32_t)iwl->pnvm_len;
-        }
-    }
+    /* Linux gen3: pnvm_cfg queda a cero hasta iwl_trans_pnvm_publish tras ALIVE. */
 
     if (iwl_fw_upload_sections(iwl, &scratch->dram) != 0)
         return -1;
@@ -878,11 +1146,144 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
     return -1;
 }
 
+static void iwl_trans_pnvm_free_dma(struct iwl_ax211_priv *iwl)
+{
+    unsigned i;
+
+    if (!iwl)
+        return;
+    for (i = 0; i < iwl->pnvm_n_chunks; i++) {
+        if (iwl->pnvm_chunks[i].cpu) {
+            lx_dma_free_coherent(0, iwl->pnvm_chunks[i].len,
+                                 iwl->pnvm_chunks[i].cpu, iwl->pnvm_chunks[i].dma);
+            iwl->pnvm_chunks[i].cpu = 0;
+            iwl->pnvm_chunks[i].dma = 0;
+            iwl->pnvm_chunks[i].len = 0;
+        }
+    }
+    iwl->pnvm_n_chunks = 0;
+    if (iwl->pnvm_desc_cpu) {
+        lx_dma_free_coherent(0, sizeof(struct iwl_prph_scrath_mem_desc_addr_array),
+                             iwl->pnvm_desc_cpu, iwl->pnvm_desc_dma);
+        iwl->pnvm_desc_cpu = 0;
+        iwl->pnvm_desc_dma = 0;
+    }
+    if (iwl->pnvm_cont_cpu) {
+        lx_dma_free_coherent(0, iwl->pnvm_cont_len, iwl->pnvm_cont_cpu,
+                             iwl->pnvm_cont_dma);
+        iwl->pnvm_cont_cpu = 0;
+        iwl->pnvm_cont_dma = 0;
+        iwl->pnvm_cont_len = 0;
+    }
+    iwl->pnvm_published = 0;
+}
+
+int iwl_trans_pnvm_publish(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_pnvm_image image;
+    struct iwl_prph_scratch *scratch;
+    unsigned i;
+    uint32_t total = 0;
+    int fragmented;
+
+    if (!iwl || !iwl->scratch_cpu)
+        return -1;
+    if (!iwl->pnvm_file || !iwl->pnvm_file_len)
+        return 0;
+
+    scratch = (struct iwl_prph_scratch *)iwl->scratch_cpu;
+    if (scratch->ctrl_cfg.pnvm_cfg.pnvm_size) {
+        lx_printk("iwl_trans: pnvm_cfg ya publicado\n");
+        return 0;
+    }
+
+    if (iwl_fw_pnvm_select(iwl, &image) != 0)
+        return -1;
+
+    iwl_trans_pnvm_free_dma(iwl);
+    fragmented = iwl_fw_has_capa(iwl, IWL_UCODE_TLV_CAPA_FRAGMENTED_PNVM_IMG);
+
+    if (fragmented) {
+        struct iwl_prph_scrath_mem_desc_addr_array *desc;
+
+        desc = lx_dma_alloc_coherent(0, sizeof(*desc), &iwl->pnvm_desc_dma, GFP_KERNEL);
+        if (!desc)
+            return -1;
+        iwl->pnvm_desc_cpu = desc;
+        memset(desc, 0, sizeof(*desc));
+
+        for (i = 0; i < image.n_chunks; i++) {
+            void *cpu;
+            uint64_t dma;
+
+            cpu = lx_dma_alloc_coherent(0, image.chunks[i].len, &dma, GFP_KERNEL);
+            if (!cpu) {
+                iwl_trans_pnvm_free_dma(iwl);
+                return -1;
+            }
+            memcpy(cpu, image.chunks[i].data, image.chunks[i].len);
+            iwl->pnvm_chunks[i].cpu = cpu;
+            iwl->pnvm_chunks[i].dma = dma;
+            iwl->pnvm_chunks[i].len = image.chunks[i].len;
+            desc->mem_descs[i] = dma;
+            total += image.chunks[i].len;
+        }
+        iwl->pnvm_n_chunks = image.n_chunks;
+        scratch->ctrl_cfg.pnvm_cfg.pnvm_base_addr = iwl->pnvm_desc_dma;
+        scratch->ctrl_cfg.pnvm_cfg.pnvm_size = total;
+        lx_printk("iwl_trans: pnvm fragmentado %u chunks %u bytes (ver=0x%x)\n",
+                  (unsigned)image.n_chunks, (unsigned)total,
+                  (unsigned)image.version);
+    } else {
+        void *cpu;
+        uint64_t dma;
+        uint32_t len0;
+        uint32_t len1;
+
+        if (image.n_chunks != UNFRAGMENTED_PNVM_PAYLOADS_NUMBER) {
+            lx_printk("iwl_trans: pnvm continuo esperaba 2 chunks, hay %u\n",
+                      (unsigned)image.n_chunks);
+            return -1;
+        }
+        len0 = image.chunks[0].len;
+        len1 = image.chunks[1].len;
+        total = len0 + len1;
+        cpu = lx_dma_alloc_coherent(0, total, &dma, GFP_KERNEL);
+        if (!cpu)
+            return -1;
+        memcpy(cpu, image.chunks[0].data, len0);
+        memcpy((uint8_t *)cpu + len0, image.chunks[1].data, len1);
+        iwl->pnvm_cont_cpu = cpu;
+        iwl->pnvm_cont_dma = dma;
+        iwl->pnvm_cont_len = total;
+        scratch->ctrl_cfg.pnvm_cfg.pnvm_base_addr = dma;
+        scratch->ctrl_cfg.pnvm_cfg.pnvm_size = total;
+        lx_printk("iwl_trans: pnvm continuo %u bytes (ver=0x%x)\n",
+                  (unsigned)total, (unsigned)image.version);
+    }
+
+    iwl->pnvm_published = 1;
+    return 0;
+}
+
+void iwl_trans_pnvm_doorbell(struct iwl_ax211_priv *iwl)
+{
+    uint32_t addr = iwl_umac_prph(iwl, UREG_DOORBELL_TO_ISR6);
+
+    lx_printk("iwl_trans: PNVM doorbell prph=0x%x val=0x%x\n",
+              (unsigned)addr, (unsigned)UREG_DOORBELL_TO_ISR6_PNVM);
+    iwl_write_prph(iwl, addr, UREG_DOORBELL_TO_ISR6_PNVM);
+}
+
 void iwl_trans_poll(struct iwl_ax211_priv *iwl)
 {
     if (!iwl->mmio)
         return;
-    drain_rx_gen2(iwl);
+    if (iwl->family == IWL_DEVICE_FAMILY_8000)
+        iwl_trans_8000_drain(iwl);
+    else
+        drain_rx_gen2(iwl);
+    poll_hcmd_first_tb(iwl);
     (void)iwl_read32(iwl, CSR_INT);
 }
 
@@ -1026,13 +1427,13 @@ int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
         scd.u.add.bc_dram_addr = iwl->mgmt_bc_dma;
         scd.u.add.tfdq_dram_addr = iwl->mgmt_tfd_dma;
         lx_printk("iwl_trans: SCD_QUEUE_CONFIG grp=%u id=0x%02x ver=%u len=%zu "
-                  "tfd=0x%llx bc=0x%llx cb_size=%u n=%u sta=%u\n",
+                  "tfd=0x%llx bc=0x%llx cb_size=%u n=%u sta=%u tid=%u\n",
                   (unsigned)DATA_PATH_GROUP, (unsigned)SCD_QUEUE_CONFIG_CMD,
                   scd_ver, sizeof(scd),
                   (unsigned long long)scd.u.add.tfdq_dram_addr,
                   (unsigned long long)scd.u.add.bc_dram_addr,
                   (unsigned)scd.u.add.cb_size, (unsigned)IWL_MGMT_QUEUE_SIZE,
-                  (unsigned)sta_id);
+                  (unsigned)sta_id, (unsigned)scd.u.add.tid);
         ret = iwl_trans_send_cmd_wait(iwl, DATA_PATH_GROUP, SCD_QUEUE_CONFIG_CMD,
                                       &scd, (uint16_t)sizeof(scd),
                                       IWL_MVM_HCMD_TIMEOUT_MS);
@@ -1077,6 +1478,9 @@ int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
     }
     iwl->mgmt_txq_id = qid;
     iwl->mgmt_txq_write = wr;
+    /* Cola recién creada: el consumidor arranca donde el productor, o el primer
+     * envío parecería que la deja llena. */
+    iwl->mgmt_txq_read = wr;
     iwl->mgmt_txq_ready = 1;
     if (!logged) {
         lx_printk("iwl_trans: TXQ mgmt qid=%u tid=%u slots=%u wr=%u\n",
@@ -1102,7 +1506,7 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
     uint16_t frame_len;
     uint8_t num_tbs;
     uint32_t doorbell;
-    static int tx_logged;
+    unsigned poll;
 
     if (!iwl || !iwl->alive || !iwl->mgmt_txq_ready || txq_id != iwl->mgmt_txq_id)
         return -1;
@@ -1111,6 +1515,14 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
         return -1;
     if (iwl->in_trans || iwl->cmd_needs_recover)
         return -1;
+    /* Sin esto el productor daba la vuelta cada 16 tramas y reescribía TFDs que
+     * el firmware aún no había consumido. */
+    if (iwl_trans_tx_space(iwl) == 0) {
+        iwl->tx_full_drop++;
+        lx_printk("iwl_trans: cola TX llena (rd=%u wr=%u); trama descartada\n",
+                  (unsigned)iwl->mgmt_txq_read, (unsigned)iwl->mgmt_txq_write);
+        return -1;
+    }
 
     if (mgmt_txq_alloc_dma(iwl) != 0)
         return -1;
@@ -1128,10 +1540,8 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
     memset(body, 0, IWL_MGMT_TX_SLOT_SIZE);
     hdr = (struct iwl_cmd_header *)body;
     hdr->cmd = TX_CMD;
-    hdr->group_id = DATA_PATH_GROUP;
+    hdr->group_id = LEGACY_GROUP;
     hdr->sequence = (uint16_t)(QUEUE_TO_SEQ(txq_id) | INDEX_TO_SEQ(idx));
-    hdr->reserved = 0;
-    hdr->length = 0;
     memcpy(body + sizeof(*hdr), payload, pay_len);
     total = (unsigned)sizeof(*hdr) + (unsigned)pay_len;
     memcpy(first_tb, body, IWL_FIRST_TB_SIZE);
@@ -1158,16 +1568,13 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
 
     iwl->mgmt_txq_write =
         (uint16_t)((iwl->mgmt_txq_write + 1u) & (IWL_MGMT_QUEUE_SIZE - 1u));
-    doorbell = ((uint32_t)iwl->mgmt_txq_write & 0xffu) |
-               ((uint32_t)txq_id << 16);
-    if (!tx_logged) {
-        lx_printk("iwl_trans: tx qid=%u doorbell=0x%08x seq=0x%04x len=%u\n",
-                  (unsigned)txq_id, doorbell, (unsigned)hdr->sequence,
-                  (unsigned)pay_len);
-        tx_logged = 1;
-    }
+    doorbell = tx_doorbell(iwl, txq_id, iwl->mgmt_txq_write);
+    lx_printk("iwl_trans: tx qid=%u doorbell=0x%08x seq=0x%04x len=%u\n",
+              (unsigned)txq_id, doorbell, (unsigned)hdr->sequence,
+              (unsigned)pay_len);
     iwl_write32(iwl, HBUS_TARG_WRPTR, doorbell);
-    drain_rx_gen2(iwl);
+    for (poll = 0; poll < 8; poll++)
+        drain_rx_gen2(iwl);
     return 0;
 }
 
@@ -1179,6 +1586,7 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     struct iwl_tfh_tfd_long *tfd;
     uint16_t total;
     uint16_t seq;
+    unsigned poll;
 
     if (!iwl->alive || !iwl->mtr_cpu || !iwl->mcr_cpu)
         return -1;
@@ -1227,9 +1635,17 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
         return -1;
     }
     buf = (uint8_t *)iwl->mcr_cpu + (size_t)slot * IWL_CMD_SLOT_SIZE;
-    tfd = (struct iwl_tfh_tfd_long *)((uint8_t *)iwl->mtr_cpu + (size_t)slot * IWL_TFH_TFD_SIZE);
     memset(buf, 0, IWL_CMD_SLOT_SIZE);
-    memset(tfd, 0, sizeof(*tfd));
+    if (iwl->family == IWL_DEVICE_FAMILY_8000) {
+        struct iwl_tfd *tfd8000 =
+            (struct iwl_tfd *)((uint8_t *)iwl->mtr_cpu +
+                               (size_t)(slot % IWL_8000_TFD_RING_N) * IWL_GEN1_TFD_SIZE);
+        memset(tfd8000, 0, sizeof(*tfd8000));
+    } else {
+        tfd = (struct iwl_tfh_tfd_long *)((uint8_t *)iwl->mtr_cpu +
+                                          (size_t)slot * IWL_TFH_TFD_SIZE);
+        memset(tfd, 0, sizeof(*tfd));
+    }
 
     seq = (uint16_t)(QUEUE_TO_SEQ(iwl->cmd_qid) | INDEX_TO_SEQ(slot));
     /* Linux `iwl_trans_send_cmd` (`iwl-trans.c`): con cabecera wide, los HCMD del
@@ -1265,23 +1681,78 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
         whdr->sequence = seq;
         whdr->length = iwl_cpu_to_le16(pay_len);
         whdr->reserved = 0;
-        whdr->version = (uint8_t)iwl_fw_cmd_ver(iwl, group, id);
+        /* Linux pcie/tx-gen2.c: version = iwl_cmd_version(cmd->id) (bits 16:23
+         * del WIDE_ID), no el cmd_ver del TLV CMD_VERSIONS. */
+        whdr->version = 0;
         if (pay_len)
             memcpy(buf + sizeof(*whdr), payload, pay_len);
-        if (id == TX_ANT_CONFIGURATION_CMD) {
-            lx_printk("iwl_trans: TX_ANT wide ver=%u len=%u (hdr 8 B + payload %u B)\n",
-                      (unsigned)whdr->version, (unsigned)total, (unsigned)pay_len);
+        if (group == DATA_PATH_GROUP && id == SCD_QUEUE_CONFIG_CMD) {
+            static int scd_ver_logged;
+
+            if (!scd_ver_logged) {
+                lx_printk("iwl_trans: SCD wide ver_hdr=0 ver_tlv=%u\n",
+                          (unsigned)iwl_fw_cmd_ver(iwl, group, id));
+                scd_ver_logged = 1;
+            }
+        } else if (id == TX_ANT_CONFIGURATION_CMD) {
+            lx_printk("iwl_trans: TX_ANT wide ver_hdr=0 len=%u (payload %u B)\n",
+                      (unsigned)total, (unsigned)pay_len);
         }
         }
     }
 
-    tfd->num_tbs = 1;
-    tfd->tbs[0].tb_len = total;
-    tfd->tbs[0].addr = iwl->mcr_dma + (uint64_t)slot * IWL_CMD_SLOT_SIZE;
+    if (iwl->family == IWL_DEVICE_FAMILY_8000) {
+        struct iwl_tfd *tfd8000 =
+            (struct iwl_tfd *)((uint8_t *)iwl->mtr_cpu +
+                               (size_t)(slot % IWL_8000_TFD_RING_N) * IWL_GEN1_TFD_SIZE);
+        uint16_t tb0_size = total <= IWL_FIRST_TB_SIZE ? total : IWL_FIRST_TB_SIZE;
+        uint8_t *first_tb =
+            (uint8_t *)iwl->hcmd_first_tb_cpu + (size_t)slot * IWL_FIRST_TB_SIZE_ALIGN;
+        uint64_t first_tb_dma =
+            iwl->hcmd_first_tb_dma + (uint64_t)slot * IWL_FIRST_TB_SIZE_ALIGN;
+
+        memcpy(first_tb, buf, tb0_size);
+        if (gen1_tfd_set_tb(tfd8000, 0, first_tb_dma, tb0_size) != 0) {
+            iwl->in_trans = 0;
+            return -1;
+        }
+        if (total > tb0_size &&
+            gen1_tfd_set_tb(tfd8000, 1,
+                            iwl->mcr_dma + (uint64_t)slot * IWL_CMD_SLOT_SIZE + tb0_size,
+                            (uint16_t)(total - tb0_size)) != 0) {
+            iwl->in_trans = 0;
+            return -1;
+        }
+    } else if (iwl->hcmd_first_tb_cpu) {
+        uint16_t tb0_size = total <= IWL_FIRST_TB_SIZE ? total : IWL_FIRST_TB_SIZE;
+        uint8_t *first_tb =
+            (uint8_t *)iwl->hcmd_first_tb_cpu + (size_t)slot * IWL_FIRST_TB_SIZE_ALIGN;
+        uint64_t first_tb_dma =
+            iwl->hcmd_first_tb_dma + (uint64_t)slot * IWL_FIRST_TB_SIZE_ALIGN;
+
+        tfd->num_tbs = 0;
+        memcpy(first_tb, buf, tb0_size);
+        if (txq_gen2_set_tb((struct iwl_tfh_tfd_gen2 *)tfd, first_tb_dma,
+                            tb0_size) != 0) {
+            iwl->in_trans = 0;
+            return -1;
+        }
+        if (total > tb0_size &&
+            txq_gen2_set_tb((struct iwl_tfh_tfd_gen2 *)tfd,
+                            iwl->mcr_dma + (uint64_t)slot * IWL_CMD_SLOT_SIZE +
+                                tb0_size,
+                            (uint16_t)(total - tb0_size)) != 0) {
+            iwl->in_trans = 0;
+            return -1;
+        }
+    } else {
+        tfd->num_tbs = 1;
+        tfd->tbs[0].tb_len = total;
+        tfd->tbs[0].addr = iwl->mcr_dma + (uint64_t)slot * IWL_CMD_SLOT_SIZE;
+    }
     iwl->cmd_write = (uint16_t)((iwl->cmd_write + 1u) & (IWL_CMD_QUEUE_SIZE - 1u));
     {
-        uint32_t doorbell = ((uint32_t)iwl->cmd_write & 0xffu) |
-                            ((uint32_t)iwl->cmd_qid << 16);
+        uint32_t doorbell = tx_doorbell(iwl, iwl->cmd_qid, iwl->cmd_write);
         static int cmd_doorbell_logged;
 
         if (!cmd_doorbell_logged) {
@@ -1294,7 +1765,8 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
         }
         iwl_write32(iwl, HBUS_TARG_WRPTR, doorbell);
     }
-    drain_rx_gen2(iwl);
+    for (poll = 0; poll < 8; poll++)
+        drain_rx(iwl);
     iwl->cmd_seq++;
     iwl->in_trans = 0;
     return 0;
@@ -1327,6 +1799,12 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
                 return -1;
             return 0;
         }
+        poll_hcmd_first_tb(iwl);
+        if (iwl->cmd_status) {
+            if (iwl->cmd_fw_err)
+                return -1;
+            return 0;
+        }
         lx_mdelay(1);
     }
     {
@@ -1347,9 +1825,11 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
         iwl->mvm_up_done = 0;
         iwl->scan_active = 0;
         if (iwl->mmio)
-            drain_rx_gen2(iwl);
-        lx_printk("iwl_trans: timeout cmd grp=%u id=0x%02x slot=%u; MVM parado\n",
-                  (unsigned)log_grp, (unsigned)id, slot);
+            drain_rx(iwl);
+        lx_printk("iwl_trans: timeout cmd grp=%u id=0x%02x seq=0x%04x slot=%u; "
+                  "MVM parado\n",
+                  (unsigned)log_grp, (unsigned)id,
+                  (unsigned)iwl->cmd_pending_seq, slot);
     }
     return -1;
 }

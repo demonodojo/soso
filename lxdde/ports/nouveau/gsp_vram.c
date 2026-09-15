@@ -4,7 +4,7 @@
 void *memset(void *dst, int c, unsigned long n);
 
 #define VRAM_PAGE 4096ull
-#define VRAM_FREE_MAX 128u
+#define VRAM_FREE_MAX 512u
 
 struct vram_free_blk {
     uint64_t phys;

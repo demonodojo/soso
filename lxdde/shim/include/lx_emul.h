@@ -178,6 +178,10 @@ void lx_set_netdev_ops(struct lx_net_device *dev,
 void lx_set_netdev_mac(struct lx_net_device *dev, const unsigned char *mac);
 uint16_t lx_pci_device_id(struct lx_pci_dev *pdev);
 uint32_t lx_pci_bdf(struct lx_pci_dev *pdev);
+/* Recorre el snapshot PCI (tras pci::init). class = byte de clase, no 24 bits. */
+typedef void (*lx_pci_each_fn)(uint16_t vendor, uint16_t device,
+                               uint8_t pci_class, uint8_t subclass, void *ctx);
+void lx_pci_for_each(lx_pci_each_fn fn, void *ctx);
 unsigned lx_tx_head(void *adapter);
 
 int lx_request_firmware(const char *name, const unsigned char **data, unsigned long *len);

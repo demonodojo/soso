@@ -280,7 +280,9 @@ fn sustituir_nic(
 
 #[cfg(feature = "lxdde")]
 fn wifi_link_up() -> bool {
-    crate::lxdde::wifi_connected()
+    // Autorizada, no sólo asociada: con WPA2 a medias el AP tira todo lo que
+    // salga y DHCP se queda reintentando contra un enlace que no transporta.
+    crate::lxdde::wifi_authorized()
 }
 
 #[cfg(not(feature = "lxdde"))]

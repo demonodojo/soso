@@ -16,7 +16,10 @@ pub mod index;
 pub mod validate;
 
 pub use layout::*;
-pub use manifest::{AttnKind, AudioSpec, FfnKind, LayerSpec, Manifest, ModelKind, NormKind, UnsupportedLayer};
+pub use manifest::{
+    AttnKind, AudioSpec, FfnKind, LayerSpec, Manifest, ModelKind, NormKind, UnsupportedLayer,
+    FLAG_ROPE_NEOX,
+};
 pub use index::{TensorEntry, TensorIndex};
 
 use crc::{CRC_32_ISCSI, Crc};

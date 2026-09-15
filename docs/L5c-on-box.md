@@ -97,8 +97,8 @@ El disco NVMe/SSD con Linux **no se toca**.
 ./scripts/l6-pack-firmware.sh
 
 # Imagen live con perfil live-usb (nouveau + drv-gpu-nvidia + firmware Ampere y Blackwell)
-cargo xtask package-usb-live          # mistral-7b (sin medir pendrive)
-# flashear (por defecto mistral-7b; p3 se estira al tamaño del stick):
+cargo xtask package-usb-live          # qwen2.5-coder-3b Q4_K_M (sin medir pendrive)
+# flashear (por defecto qwen2.5-coder-3b; p3 se estira al tamaño del stick):
 sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes
 
 ls -lh target/usb-live/
@@ -132,11 +132,11 @@ sudo ./scripts/l6-wifi-vfio-test.sh
 
 | Comando | Modelo |
 |---------|--------|
-| `package-usb-live` / `flash-usb-live` (default) | `mistral-7b` |
+| `package-usb-live` / `flash-usb-live` (default) | `qwen2.5-coder-3b` (Q4_K_M) |
 | `SOSO_LIVE_AUTO_MODEL=1 flash-usb-live …` | escalera por tamaño del stick |
 | `SOSO_LIVE_CAPACITY=32G …` | el mejor que quepa (p. ej. `qwen3.8-27b`) |
 
-Con `SOSO_LIVE_AUTO_MODEL=1`, pendrive ≥32 GB → `qwen3.8-27b`; 16 GB → `mistral-7b`; 8 GB → `tinyllama`.
+Con `SOSO_LIVE_AUTO_MODEL=1`, pendrive ≥32 GB → `qwen3.8-27b`; 16 GB → `mistral-7b`; 8 GB → `qwen2.5-coder-3b`.
 Simular tamaño sin stick: `SOSO_LIVE_CAPACITY=16G cargo xtask package-usb-live`.
 Sin descargas HF: `SOSO_LIVE_OFFLINE=1` — elige el mayor modelo ya en `target/*-model/` que quepa (al flashear mide el stick).
 Override: `SOSO_MODELS_DIR=…`. En placa, `ask` o `soso-llm run <modelo> --prompt "hola" --max 32 --chat`.

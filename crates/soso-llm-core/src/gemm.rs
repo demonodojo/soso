@@ -679,6 +679,25 @@ pub fn rope_inplace(x: &mut [f32], pos: usize, theta: f32) {
     rope_inplace_n(x, pos, theta, x.len());
 }
 
+/// RoPE estilo GPT-NeoX / Qwen2: parejas `(x[i], x[i+half])`.
+pub fn rope_inplace_neox(x: &mut [f32], pos: usize, theta: f32) {
+    let n = x.len();
+    if n < 2 {
+        return;
+    }
+    let half = n / 2;
+    let n_f = n as f32;
+    for i in 0..half {
+        let freq = libm::powf(theta, -2.0 * (i as f32) / n_f);
+        let angle = pos as f32 * freq;
+        let (sin, cos) = (libm::sinf(angle), libm::cosf(angle));
+        let a = x[i];
+        let b = x[i + half];
+        x[i] = a * cos - b * sin;
+        x[i + half] = a * sin + b * cos;
+    }
+}
+
 /// RoPE solo sobre los primeros `n_rot` elementos (Qwen partial rotary).
 pub fn rope_inplace_n(x: &mut [f32], pos: usize, theta: f32, n_rot: usize) {
     let n = n_rot.min(x.len());
@@ -695,5 +714,28 @@ pub fn rope_inplace_n(x: &mut [f32], pos: usize, theta: f32, n_rot: usize) {
         let b = x[2 * i + 1];
         x[2 * i] = a * cos - b * sin;
         x[2 * i + 1] = a * sin + b * cos;
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "std")]
+mod rope_tests {
+    use super::*;
+
+    #[test]
+    fn neox_pos0_es_identidad() {
+        let orig = [1.0f32, 2.0, 3.0, 4.0];
+        let mut x = orig;
+        rope_inplace_neox(&mut x, 0, 10000.0);
+        assert_eq!(x, orig);
+    }
+
+    #[test]
+    fn neox_no_es_llama() {
+        let mut llama = [1.0f32, 2.0, 3.0, 4.0];
+        let mut neox = llama;
+        rope_inplace(&mut llama, 3, 10000.0);
+        rope_inplace_neox(&mut neox, 3, 10000.0);
+        assert_ne!(llama, neox);
     }
 }

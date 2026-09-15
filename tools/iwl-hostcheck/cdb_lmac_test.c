@@ -95,6 +95,12 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
     }
     if (id == TX_CMD)
         return -1;
+    if (group == LEGACY_GROUP && id == ADD_STA) {
+        uint32_t status = ADD_STA_SUCCESS;
+
+        iwl->cmd_resp_len = (uint16_t)sizeof(status);
+        memcpy(iwl->cmd_resp, &status, sizeof(status));
+    }
     if ((group == DATA_PATH_GROUP && id == SCD_QUEUE_CONFIG_CMD) ||
         (group == LEGACY_GROUP && id == SCD_QUEUE_CFG)) {
         struct iwl_tx_queue_cfg_rsp rsp;

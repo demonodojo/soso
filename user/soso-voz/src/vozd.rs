@@ -484,28 +484,36 @@ pub fn run_vozd() -> u8 {
     }
 }
 
-pub fn preguntar_via_vozd(cmd: &str) -> Option<String> {
+/// Conecta con el demonio. `None` = no hay nadie escuchando.
+///
+/// Separado del diálogo a propósito. Reintentar *el diálogo entero* mientras se
+/// espera al demonio es carísimo: si conecta pero el demonio está cargando el
+/// modelo, `copiar_respuesta` se planta 120 s **por vuelta**, y el cliente no
+/// vuelve nunca. El bucle de espera sólo debe reintentar la conexión; la
+/// petición se hace una vez, cuando ya hay alguien al otro lado.
+pub fn conectar_vozd(connect_ms: u64) -> Option<TcpFd> {
     let addr = parse_sock_addr(VOZ_ADDR)?;
-    let mut client = loop {
-        match TcpFd::connect(&addr, 2_000) {
-            Ok(c) => break c,
-            Err(_) => {
-                let _ = spawn_vozd();
-                let _ = sys::sleep_ms(50);
-            }
-        }
-    };
-    for _ in 0..100 {
-        if TcpFd::connect(&addr, 100).is_ok() {
-            client = TcpFd::connect(&addr, 5_000).ok()?;
-            break;
-        }
-        let _ = sys::sleep_ms(50);
-    }
+    TcpFd::connect(&addr, connect_ms).ok()
+}
+
+/// Manda el comando por una conexión ya abierta y espera la respuesta.
+pub fn dialogar(client: &TcpFd, cmd: &str) -> Option<String> {
     let mut req = cmd.as_bytes().to_vec();
     req.push(b'\n');
     write_all(client.fd, &req).ok()?;
     copiar_respuesta(client.fd)
+}
+
+/// Un intento completo contra un demonio que ya debería estar escuchando.
+///
+/// Antes esto giraba en un bucle **sin límite** lanzando un `vozd` nuevo en
+/// cada vuelta: si el demonio no llegaba a abrir el socket, el cliente no
+/// volvía nunca —ni para decir «error»— y la máquina se iba llenando de
+/// procesos cargando el modelo hasta tumbarla. El mismo patrón, bien acotado,
+/// está en `sosh`.
+pub fn preguntar_via_vozd(cmd: &str) -> Option<String> {
+    let client = conectar_vozd(2_000)?;
+    dialogar(&client, cmd)
 }
 
 pub fn spawn_vozd() -> Result<u64, i64> {

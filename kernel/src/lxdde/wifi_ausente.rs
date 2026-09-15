@@ -46,6 +46,16 @@ pub fn connected() -> bool {
     false
 }
 
+pub fn authorized() -> bool {
+    false
+}
+
+pub fn set_authorized(_authorized: bool) {}
+
+pub fn rsn_ie() -> Option<Vec<u8>> {
+    None
+}
+
 pub fn scan_results() -> Vec<(String, i8, u8, bool)> {
     Vec::new()
 }
@@ -66,7 +76,15 @@ pub fn install_key(_key: &[u8; 16], _key_idx: i32) -> i32 {
     -1
 }
 
+pub fn install_gtk(_key: &[u8; 16], _key_idx: i32, _rsc: &[u8; 8]) -> i32 {
+    -1
+}
+
 pub fn receive(_buf: &mut [u8]) -> Option<usize> {
+    None
+}
+
+pub fn receive_eapol(_buf: &mut [u8]) -> Option<usize> {
     None
 }
 

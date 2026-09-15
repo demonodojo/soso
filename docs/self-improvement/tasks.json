@@ -1,0 +1,844 @@
+{
+  "schema_version": 1,
+  "kind": "planning_catalog",
+  "parent": "../../SELF_IMPROVEMENT.md",
+  "contract": "CONTRATO.md",
+  "status": "pending",
+  "tasks": [
+    {
+      "id": "T01",
+      "file": "T01-base.md",
+      "title": "Capturar una base reproducible sin alterar el checkout",
+      "milestone": "SI-0",
+      "kind": "Implementación host",
+      "status": "pending",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C5–C6",
+      "context": [
+        "SELF_IMPROVEMENT.md",
+        "rust-toolchain.toml",
+        "xtask/src/check.rs"
+      ]
+    },
+    {
+      "id": "T02",
+      "file": "T02-banco.md",
+      "title": "Definir los casos y sus verificadores",
+      "milestone": "SI-0",
+      "kind": "Implementación host",
+      "status": "pending",
+      "depends_on": [
+        "T01"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C6",
+      "context": [
+        "crates/soso-llm-core/src/chat.rs",
+        "crates/soso-llm-core/tests/arch_ext.rs",
+        "xtask/src/test.rs"
+      ]
+    },
+    {
+      "id": "T03",
+      "file": "T03-perfil-modelo.md",
+      "title": "Fijar un modelo y obtener fixtures independientes de su chat",
+      "milestone": "SI-0 / SI-1",
+      "kind": "Inspección y fixtures",
+      "status": "pending",
+      "depends_on": [
+        "T01"
+      ],
+      "entry_conditions": [
+        "Pesos, tokenizer y plantilla originales de una revisión identificada."
+      ],
+      "contract_sections": "C1–C2",
+      "context": [
+        "rootfs/etc/llm.conf",
+        "xtask/src/live_models.rs",
+        "crates/gguf2som/src/lib.rs",
+        "crates/soso-llm-core/src/tokenizer.rs"
+      ]
+    },
+    {
+      "id": "T04",
+      "file": "T04-dominio-chat.md",
+      "title": "Añadir tipos de conversación compartidos",
+      "milestone": "SI-1",
+      "kind": "Implementación Rust host/no_std",
+      "status": "pending",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C1",
+      "context": [
+        "crates/soso-llm-core/src/lib.rs",
+        "crates/soso-llm-core/Cargo.toml",
+        "user/soso-hf/Cargo.toml"
+      ]
+    },
+    {
+      "id": "T05",
+      "file": "T05-validacion-chat.md",
+      "title": "Validar historial y esquemas de herramientas",
+      "milestone": "SI-1",
+      "kind": "Implementación Rust host/no_std",
+      "status": "pending",
+      "depends_on": [
+        "T04"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C3",
+      "context": [
+        "crates/soso-llm-core/src/lib.rs"
+      ]
+    },
+    {
+      "id": "T06",
+      "file": "T06-render-chat.md",
+      "title": "Renderizar la familia elegida con historial completo",
+      "milestone": "SI-1",
+      "kind": "Implementación Rust host/no_std",
+      "status": "pending",
+      "depends_on": [
+        "T03",
+        "T05"
+      ],
+      "entry_conditions": [
+        "Las divergencias de tokenizer detectadas en T03 están corregidas y verificadas."
+      ],
+      "contract_sections": "C1–C2",
+      "context": [
+        "crates/soso-llm-core/src/chat.rs",
+        "crates/soso-llm-core/src/tokenizer.rs"
+      ]
+    },
+    {
+      "id": "T07",
+      "file": "T07-parse-herramientas.md",
+      "title": "Extraer llamadas válidas de la salida del modelo",
+      "milestone": "SI-1",
+      "kind": "Implementación Rust host/no_std",
+      "status": "pending",
+      "depends_on": [
+        "T03",
+        "T05"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C2–C3",
+      "context": [
+        "crates/soso-llm-core/src/tokenizer.rs"
+      ]
+    },
+    {
+      "id": "T08",
+      "file": "T08-resultado-generacion.md",
+      "title": "Devolver motivo de parada y consumo real del runtime",
+      "milestone": "SI-1 / SI-2",
+      "kind": "Implementación Rust de inferencia",
+      "status": "pending",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C2",
+      "context": [
+        "crates/soso-llm-core/src/runtime.rs",
+        "crates/soso-llm-core/src/sample.rs",
+        "crates/soso-llm-core/tests/arch_ext.rs"
+      ]
+    },
+    {
+      "id": "T09",
+      "file": "T09-cancelacion-runtime.md",
+      "title": "Añadir cancelación cooperativa a prefill y decode",
+      "milestone": "SI-2",
+      "kind": "Implementación Rust de inferencia",
+      "status": "pending",
+      "depends_on": [
+        "T08"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C2–C4",
+      "context": [
+        "crates/soso-llm-core/src/runtime.rs",
+        "crates/soso-llm-core/src/parallel.rs"
+      ]
+    },
+    {
+      "id": "T10",
+      "file": "T10-api-json.md",
+      "title": "Crear la crate API y adaptar peticiones JSON",
+      "milestone": "SI-2",
+      "kind": "Implementación Rust host/no_std",
+      "status": "pending",
+      "depends_on": [
+        "T05",
+        "T06",
+        "T08"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C3",
+      "context": [
+        "Cargo.toml",
+        "crates/soso-llm-core/Cargo.toml"
+      ]
+    },
+    {
+      "id": "T11",
+      "file": "T11-http.md",
+      "title": "Leer HTTP fragmentado con límites explícitos",
+      "milestone": "SI-2",
+      "kind": "Implementación Rust host/no_std",
+      "status": "pending",
+      "depends_on": [
+        "T10"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C3",
+      "context": [
+        "tools/soso-forja-server/src/main.rs",
+        "user/soso-llm/src/net.rs"
+      ]
+    },
+    {
+      "id": "T12",
+      "file": "T12-respuestas-sse.md",
+      "title": "Emitir respuestas completas y eventos SSE",
+      "milestone": "SI-2",
+      "kind": "Implementación Rust host/no_std",
+      "status": "pending",
+      "depends_on": [
+        "T07",
+        "T08",
+        "T10"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C2–C3",
+      "context": [
+        "crates/soso-llm-core/src/tokenizer.rs"
+      ]
+    },
+    {
+      "id": "T13",
+      "file": "T13-servidor-host.md",
+      "title": "Conectar el mismo runtime a un servidor de desarrollo en host",
+      "milestone": "SI-1 / SI-2",
+      "kind": "Implementación host",
+      "status": "pending",
+      "depends_on": [
+        "T09",
+        "T11",
+        "T12"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C4",
+      "context": [
+        "crates/soso-llm-core/examples/hostrun.rs",
+        "crates/soso-llm-core/src/source.rs"
+      ]
+    },
+    {
+      "id": "T14",
+      "file": "T14-evaluacion-modelo.md",
+      "title": "Medir calidad y fijar presupuestos antes de usar el agente",
+      "milestone": "SI-0 / SI-1",
+      "kind": "Implementación de evaluación e integración",
+      "status": "pending",
+      "depends_on": [
+        "T02",
+        "T03",
+        "T13"
+      ],
+      "entry_conditions": [
+        "Pesos reales disponibles; un informe no-go no habilita las tareas consumidoras."
+      ],
+      "contract_sections": "C2–C3, C5–C6",
+      "context": [
+        "SELF_IMPROVEMENT.md",
+        "crates/soso-llm-core/examples/hostrun.rs"
+      ]
+    },
+    {
+      "id": "T15",
+      "file": "T15-sesion-residente.md",
+      "title": "Extraer la sesión residente manteniendo ask",
+      "milestone": "SI-2",
+      "kind": "Refactor guest",
+      "status": "pending",
+      "depends_on": [
+        "T08",
+        "T09"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C2, C4",
+      "context": [
+        "user/soso-llm/src/main.rs",
+        "user/soso-llm/src/ask.rs",
+        "user/soso-llm/src/pool.rs",
+        "user/soso-llm/src/staging.rs"
+      ]
+    },
+    {
+      "id": "T16",
+      "file": "T16-servicio-guest.md",
+      "title": "Servir HTTP en guest con el modelo residente",
+      "milestone": "SI-2",
+      "kind": "Implementación guest",
+      "status": "pending",
+      "depends_on": [
+        "T10",
+        "T11",
+        "T12",
+        "T14",
+        "T15"
+      ],
+      "entry_conditions": [
+        "T14 tiene resultado go, además de informe terminado."
+      ],
+      "contract_sections": "C1–C4",
+      "context": [
+        "user/soso-llm/src/main.rs",
+        "user/soso-llm/src/net.rs",
+        "user/libsoso/src/sys.rs"
+      ]
+    },
+    {
+      "id": "T17",
+      "file": "T17-admisiones-cancelacion.md",
+      "title": "Atender ocupado, health y desconexión durante inferencia",
+      "milestone": "SI-2",
+      "kind": "Implementación guest acotada",
+      "status": "pending",
+      "depends_on": [
+        "T09",
+        "T16"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C3–C4",
+      "context": [
+        "user/soso-llm/src/net.rs",
+        "user/libsoso/src/sys.rs",
+        "kernel/src/net/mod.rs"
+      ]
+    },
+    {
+      "id": "T18",
+      "file": "T18-puertos-qemu.md",
+      "title": "Añadir reenvío HTTP configurable sin colisiones",
+      "milestone": "SI-2",
+      "kind": "Implementación xtask",
+      "status": "pending",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C3–C4, C6",
+      "context": [
+        "xtask/src/main.rs",
+        "xtask/src/test.rs",
+        "xtask/src/test_distributed.rs"
+      ]
+    },
+    {
+      "id": "T19",
+      "file": "T19-qemu-e2e.md",
+      "title": "Crear la prueba completa de API dentro de soso",
+      "milestone": "SI-2",
+      "kind": "Implementación de integración QEMU",
+      "status": "pending",
+      "depends_on": [
+        "T16",
+        "T17",
+        "T18"
+      ],
+      "entry_conditions": [
+        "Modo de integración con pesos reales y entorno QEMU disponible."
+      ],
+      "contract_sections": "C3–C4, C6",
+      "context": [
+        "xtask/src/test.rs",
+        "xtask/src/main.rs",
+        "xtask/src/test_distributed.rs"
+      ]
+    },
+    {
+      "id": "T20",
+      "file": "T20-opencode-config.md",
+      "title": "Configurar OpenCode para el proveedor soso",
+      "milestone": "SI-3",
+      "kind": "Configuración",
+      "status": "pending",
+      "depends_on": [
+        "T14",
+        "T19"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C3, C5–C6",
+      "context": [
+        "SELF_IMPROVEMENT.md"
+      ]
+    },
+    {
+      "id": "T21",
+      "file": "T21-opencode-contrato.md",
+      "title": "Capturar el contrato real de OpenCode sin depender del modelo",
+      "milestone": "SI-3",
+      "kind": "Implementación de integración host",
+      "status": "pending",
+      "depends_on": [
+        "T20"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C3, C5–C6",
+      "context": [
+        "SELF_IMPROVEMENT.md"
+      ]
+    },
+    {
+      "id": "T22",
+      "file": "T22-primera-mejora.md",
+      "title": "Resolver una tarea real usando la inferencia guest",
+      "milestone": "SI-3",
+      "kind": "Integración y evaluación",
+      "status": "pending",
+      "depends_on": [
+        "T02",
+        "T19",
+        "T21"
+      ],
+      "entry_conditions": [
+        "T14 mantiene resultado go para la misma identidad de modelo."
+      ],
+      "contract_sections": "C5–C6",
+      "context": [
+        "SELF_IMPROVEMENT.md",
+        "docs/SELF-HOSTING.md"
+      ]
+    },
+    {
+      "id": "T23",
+      "file": "T23-estado-coordinador.md",
+      "title": "Crear el formato de tareas y estados del coordinador",
+      "milestone": "SI-4",
+      "kind": "Implementación host",
+      "status": "pending",
+      "depends_on": [
+        "T01",
+        "T02"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5",
+      "context": [
+        "Cargo.toml",
+        "tools/soso-forja-server/Cargo.toml"
+      ]
+    },
+    {
+      "id": "T24",
+      "file": "T24-checkout.md",
+      "title": "Preparar una copia de tarea y exportar su parche",
+      "milestone": "SI-4",
+      "kind": "Implementación host",
+      "status": "pending",
+      "depends_on": [
+        "T23"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5",
+      "context": [
+        "tools/soso-forja-server/src/main.rs"
+      ]
+    },
+    {
+      "id": "T25",
+      "file": "T25-ejecutor.md",
+      "title": "Ejecutar OpenCode con límites y logs",
+      "milestone": "SI-4",
+      "kind": "Implementación host",
+      "status": "pending",
+      "depends_on": [
+        "T21",
+        "T24"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5",
+      "context": [
+        "tools/soso-forja-server/src/main.rs"
+      ]
+    },
+    {
+      "id": "T26",
+      "file": "T26-validador.md",
+      "title": "Validar candidatos y promover solo los aceptados",
+      "milestone": "SI-4",
+      "kind": "Implementación host",
+      "status": "pending",
+      "depends_on": [
+        "T24",
+        "T25"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C6",
+      "context": [
+        "xtask/src/check.rs",
+        "xtask/src/test.rs"
+      ]
+    },
+    {
+      "id": "T27",
+      "file": "T27-reanudacion.md",
+      "title": "Reanudar tras caída sin repetir efectos",
+      "milestone": "SI-4",
+      "kind": "Implementación host",
+      "status": "pending",
+      "depends_on": [
+        "T23",
+        "T25",
+        "T26"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5",
+      "context": [
+        "tools/soso-forja-server/src/main.rs"
+      ]
+    },
+    {
+      "id": "T28",
+      "file": "T28-conocimiento.md",
+      "title": "Guardar y recuperar aprendizaje verificado",
+      "milestone": "SI-4",
+      "kind": "Implementación host",
+      "status": "pending",
+      "depends_on": [
+        "T26"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5",
+      "context": [
+        "docs/ESTADO.md"
+      ]
+    },
+    {
+      "id": "T29",
+      "file": "T29-campana.md",
+      "title": "Ejecutar una campaña reproducible de diez tareas",
+      "milestone": "SI-4",
+      "kind": "Integración y evaluación",
+      "status": "pending",
+      "depends_on": [
+        "T22",
+        "T27",
+        "T28"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C6",
+      "context": [
+        "SELF_IMPROVEMENT.md"
+      ]
+    },
+    {
+      "id": "T30",
+      "file": "T30-hardware.md",
+      "title": "Medir servicio e inferencia en una máquina física identificada",
+      "milestone": "SI-5",
+      "kind": "Integración de hardware",
+      "status": "pending",
+      "depends_on": [
+        "T19",
+        "T29"
+      ],
+      "entry_conditions": [
+        "Máquina física identificada, accesible y con red validada."
+      ],
+      "contract_sections": "C3–C6",
+      "context": [
+        "docs/HW-MATRIX.md",
+        "docs/hw-matrix.json",
+        "docs/DIAGNOSTICO-GB205-2026-09-15.md",
+        "docs/DIAGNOSTICO-ROG-2026-09-15.md",
+        "docs/WIFI-OPERATIVA.md"
+      ]
+    },
+    {
+      "id": "T31",
+      "file": "T31-restauracion.md",
+      "title": "Demostrar recuperación completa de la instalación",
+      "milestone": "SI-5",
+      "kind": "Integración de recuperación",
+      "status": "pending",
+      "depends_on": [
+        "T30"
+      ],
+      "entry_conditions": [
+        "Destino de recuperación identificado y acceso de escritura autorizado."
+      ],
+      "contract_sections": "C5–C6",
+      "context": [
+        "docs/ESTADO.md",
+        "xtask/src/test_update.rs",
+        "crates/soso-update-core/src/lib.rs"
+      ]
+    },
+    {
+      "id": "T32",
+      "file": "T32-opencode-inventario.md",
+      "title": "Inventariar dependencias del OpenCode que se quiere portar",
+      "milestone": "SI-6",
+      "kind": "Inspección acotada",
+      "status": "pending",
+      "depends_on": [
+        "T01"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1, C5–C6",
+      "context": [
+        "docs/SELF-HOSTING.md",
+        "crates/soso-abi/src/lib.rs",
+        "user/Cargo.toml"
+      ]
+    },
+    {
+      "id": "T33",
+      "file": "T33-sondas-abi.md",
+      "title": "Crear sondas pequeñas para las capacidades requeridas",
+      "milestone": "SI-6",
+      "kind": "Implementación de pruebas guest",
+      "status": "pending",
+      "depends_on": [
+        "T32"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C6",
+      "context": [
+        "crates/soso-std/src/process.rs",
+        "crates/soso-std/src/fs.rs",
+        "crates/soso-std/src/net.rs",
+        "user/soso-std-test/src/main.rs",
+        "user/libsoso/src/thread.rs"
+      ]
+    },
+    {
+      "id": "T34",
+      "file": "T34-tickets-port.md",
+      "title": "Convertir huecos del port en fichas implementables",
+      "milestone": "SI-6",
+      "kind": "Especificación técnica basada en evidencia",
+      "status": "pending",
+      "depends_on": [
+        "T32",
+        "T33"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1, C5–C6",
+      "context": [
+        "docs/SELF-HOSTING.md",
+        "crates/soso-abi/src/lib.rs",
+        "config/rust-soso/sys/pal/soso/mod.rs"
+      ]
+    },
+    {
+      "id": "T35",
+      "file": "T35-opencode-nativo.md",
+      "title": "Probar OpenCode nativo en modo no interactivo",
+      "milestone": "SI-6",
+      "kind": "Integración condicionada al port",
+      "status": "pending",
+      "depends_on": [
+        "T19",
+        "T34"
+      ],
+      "entry_conditions": [
+        "Todas las fichas N-xxx obligatorias de T34 están implementadas y sus sondas pasan."
+      ],
+      "contract_sections": "C3–C6",
+      "context": [
+        "user/init/src/main.rs",
+        "user/soso-std-test/src/main.rs",
+        "xtask/src/test.rs"
+      ]
+    },
+    {
+      "id": "T36",
+      "file": "T36-forja-trazabilidad.md",
+      "title": "Vincular fuentes, build y artefacto de Forja",
+      "milestone": "SI-6",
+      "kind": "Implementación cliente-servidor",
+      "status": "pending",
+      "depends_on": [
+        "T01"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C6",
+      "context": [
+        "tools/soso-forja-server/src/main.rs",
+        "user/soso-forja/src/main.rs",
+        "docs/SELF-HOSTING.md"
+      ]
+    },
+    {
+      "id": "T37",
+      "file": "T37-mejora-nativa-forja.md",
+      "title": "Cerrar una mejora desde OpenCode nativo con build remoto",
+      "milestone": "SI-6",
+      "kind": "Integración",
+      "status": "pending",
+      "depends_on": [
+        "T22",
+        "T35",
+        "T36"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C6",
+      "context": [
+        "docs/SELF-HOSTING.md",
+        "user/soso-forja/src/main.rs"
+      ]
+    },
+    {
+      "id": "T38",
+      "file": "T38-toolchain-inventario.md",
+      "title": "Fijar revisiones y dependencias de la toolchain nativa",
+      "milestone": "SI-7",
+      "kind": "Inspección acotada",
+      "status": "pending",
+      "depends_on": [
+        "T01"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1, C6",
+      "context": [
+        "scripts/soso-rust-bootstrap.sh",
+        "config/rust-soso/README.md",
+        "targets/x86_64-unknown-soso.json",
+        "user/soso-rustc/src/main.rs",
+        "tools/wild-soso/src/main.rs",
+        "tools/sosoas/src/main.rs"
+      ]
+    },
+    {
+      "id": "T39",
+      "file": "T39-bootstrap-libstd.md",
+      "title": "Hacer reproducible el bootstrap de libstd para soso",
+      "milestone": "SI-7",
+      "kind": "Implementación de build",
+      "status": "pending",
+      "depends_on": [
+        "T38"
+      ],
+      "entry_conditions": [
+        "Revisión de toolchain de T38 y recursos de compilación disponibles."
+      ],
+      "contract_sections": "C6",
+      "context": [
+        "scripts/soso-rust-bootstrap.sh",
+        "config/rust-soso/apply-patches.sh",
+        "config/rust-soso/config.toml",
+        "config/rust-soso/sys/pal/soso/mod.rs"
+      ]
+    },
+    {
+      "id": "T40",
+      "file": "T40-compilador-nativo.md",
+      "title": "Descomponer y acreditar el port del compilador",
+      "milestone": "SI-7",
+      "kind": "Especificación e integración condicionada",
+      "status": "pending",
+      "depends_on": [
+        "T38",
+        "T39"
+      ],
+      "entry_conditions": [
+        "Fichas C-xxx necesarias implementadas antes del cierre de integración."
+      ],
+      "contract_sections": "C1, C6",
+      "context": [
+        "user/soso-rustc/src/main.rs",
+        "config/rust-soso/sys/pal/soso/dl.rs",
+        "crates/soso-rt/src/lib.rs",
+        "targets/x86_64-unknown-soso.json"
+      ]
+    },
+    {
+      "id": "T41",
+      "file": "T41-cargo-offline.md",
+      "title": "Validar Cargo y fuentes reproducibles dentro de soso",
+      "milestone": "SI-7",
+      "kind": "Integración condicionada",
+      "status": "pending",
+      "depends_on": [
+        "T40"
+      ],
+      "entry_conditions": [
+        "Cargo ejecutable en soso; las C-xxx adicionales se completan antes de la evaluación."
+      ],
+      "contract_sections": "C5–C6",
+      "context": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "user/Cargo.toml",
+        "user/soso-git/src/main.rs",
+        "docs/SELF-HOSTING.md"
+      ]
+    },
+    {
+      "id": "T42",
+      "file": "T42-c-link-imagen.md",
+      "title": "Cerrar C, ensamblador y empaquetado por perfil",
+      "milestone": "SI-7",
+      "kind": "Especificación e integración por componente",
+      "status": "pending",
+      "depends_on": [
+        "T38",
+        "T41"
+      ],
+      "entry_conditions": [
+        "Cada herramienta ausente se implementa mediante C-xxx antes del build de perfil."
+      ],
+      "contract_sections": "C1, C6",
+      "context": [
+        "xtask/src/lx_build.rs",
+        "xtask/src/release.rs",
+        "tools/sosoas/src/main.rs",
+        "tools/wild-soso/src/main.rs",
+        "tools/mkfs-soso/src/main.rs"
+      ]
+    },
+    {
+      "id": "T43",
+      "file": "T43-validacion-actualizacion-nativa.md",
+      "title": "Validar y recuperar candidatos construidos en soso",
+      "milestone": "SI-7",
+      "kind": "Integración",
+      "status": "pending",
+      "depends_on": [
+        "T31",
+        "T37",
+        "T42"
+      ],
+      "entry_conditions": [
+        "Destino de validación independiente y procedimiento de recuperación verificado."
+      ],
+      "contract_sections": "C5–C6",
+      "context": [
+        "xtask/src/test_update.rs",
+        "crates/soso-update-core/src/lib.rs",
+        "docs/SELF-HOSTING.md"
+      ]
+    },
+    {
+      "id": "T44",
+      "file": "T44-cierre-nativo.md",
+      "title": "Repetir tres mejoras con agente, modelo y build en soso",
+      "milestone": "SI-7",
+      "kind": "Evaluación final",
+      "status": "pending",
+      "depends_on": [
+        "T29",
+        "T43"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C6",
+      "context": [
+        "SELF_IMPROVEMENT.md",
+        "docs/SELF-HOSTING.md"
+      ]
+    }
+  ]
+}
+

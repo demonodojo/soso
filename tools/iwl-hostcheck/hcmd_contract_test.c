@@ -3,16 +3,20 @@
  * C2: rechazo FW, respuesta ajena, notif, timeout tardío, 32+ envíos, dos solicitantes. */
 #include <stdio.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
 
 #include "lx_emul.h"
 #include "iwl_internal.h"
 #include "iwl_ax211.h"
+#include "iwl_test_frames.h"
 
 static uint8_t g_mcr_pool[IWL_CMD_SLOT_SIZE * IWL_CMD_QUEUE_SIZE];
 static uint8_t g_mtr_pool[IWL_TFH_TFD_SIZE * IWL_CMD_QUEUE_SIZE];
-static uint32_t g_mmio_stub[0x500];
+static uint8_t g_first_tb_pool[IWL_CMD_QUEUE_SIZE * IWL_FIRST_TB_SIZE_ALIGN];
+/* RFH_Q0_FRBDCB_WIDX_TRG (0x1C80) queda fuera de un stub de 0x500 palabras. */
+static uint32_t g_mmio_stub[IWL_TEST_MMIO_WORDS];
 
 void lx_printk(const char *fmt, ...) { (void)fmt; }
 void lx_mdelay(unsigned int ms) { (void)ms; }
@@ -45,6 +49,12 @@ int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
 }
 
 void iwl_ax211_deliver_rx(const uint8_t *data, int len)
+{
+    (void)data;
+    (void)len;
+}
+
+void iwl_ax211_deliver_eapol(const uint8_t *data, int len)
 {
     (void)data;
     (void)len;
@@ -88,10 +98,13 @@ static void init_priv(struct iwl_ax211_priv *iwl)
     memset(iwl, 0, sizeof(*iwl));
     memset(g_mcr_pool, 0, sizeof(g_mcr_pool));
     memset(g_mtr_pool, 0, sizeof(g_mtr_pool));
+    memset(g_first_tb_pool, 0, sizeof(g_first_tb_pool));
     iwl->alive = 1;
     iwl->cmd_qid = IWL_MVM_DQA_CMD_QUEUE;
     iwl->mcr_cpu = g_mcr_pool;
     iwl->mtr_cpu = g_mtr_pool;
+    iwl->hcmd_first_tb_cpu = g_first_tb_pool;
+    iwl->hcmd_first_tb_dma = 0x2000;
     iwl->mcr_dma = 0x1000;
     iwl->mmio = g_mmio_stub;
 }
@@ -532,7 +545,7 @@ static int check_sf_async_then_tx_ant(void)
         fprintf(stderr, "TX_ANT sync no dejó pending\n");
         return -1;
     }
-    hdr = g_mcr_pool + IWL_CMD_SLOT_SIZE; /* segundo slot: SF usó el 0 */
+    hdr = g_first_tb_pool + IWL_FIRST_TB_SIZE_ALIGN; /* segundo slot: SF usó el 0 */
     if (hdr[0] != TX_ANT_CONFIGURATION_CMD || hdr[1] != LONG_GROUP) {
         fprintf(stderr, "TX_ANT cabecera cmd/grp incorrecta (DEF_ID → grp=1)\n");
         return -1;
@@ -547,6 +560,66 @@ static int check_sf_async_then_tx_ant(void)
         return -1;
     }
     puts("OK: SF async no cierra pending; TX_ANT DEF_ID grp=1 + 4 B payload");
+    return 0;
+}
+
+/* Linux alive.h v5: status+flags+2×lmac(48)+umac(16)+sku(12) = 128; sku @ 116. */
+struct iwl_alive_ntf_v5_layout {
+    uint16_t status;
+    uint16_t flags;
+    uint8_t lmac_data[96];
+    uint8_t umac_data[16];
+    uint32_t sku_id[3];
+} __attribute__((packed));
+
+static int check_pnvm_alive_and_doorbell(void)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t alive[IWL_ALIVE_NTFY_V5_LEN];
+    uint32_t sku[3] = { 0x11111111u, 0x22222222u, 0x33333333u };
+    uint32_t waddr, wdata, want_addr, want_data;
+
+    if (sizeof(struct iwl_alive_ntf_v5_layout) != IWL_ALIVE_NTFY_V5_LEN ||
+        offsetof(struct iwl_alive_ntf_v5_layout, sku_id) != IWL_ALIVE_SKU_OFF) {
+        fprintf(stderr, "layout ALIVE v5 no coincide con Linux (sz=%zu off=%zu)\n",
+                sizeof(struct iwl_alive_ntf_v5_layout),
+                offsetof(struct iwl_alive_ntf_v5_layout, sku_id));
+        return -1;
+    }
+
+    init_priv(&iwl);
+    iwl.gen3 = 1;
+    memset(alive, 0, sizeof(alive));
+    memcpy(alive + IWL_ALIVE_SKU_OFF, sku, sizeof(sku));
+    rx_resp(&iwl, LEGACY_GROUP, UCODE_ALIVE_NTFY, 0xc000, 0, alive, sizeof(alive));
+    if (!iwl.alive || iwl.sku_id[0] != sku[0] || iwl.sku_id[1] != sku[1] ||
+        iwl.sku_id[2] != sku[2]) {
+        fprintf(stderr, "ALIVE v5 no parseó sku_id\n");
+        return -1;
+    }
+
+    rx_resp(&iwl, REGULATORY_AND_NVM_GROUP, PNVM_INIT_COMPLETE_NTFY, 0xc010,
+            0, NULL, 0);
+    if (!iwl.pnvm_complete) {
+        fprintf(stderr, "0xFE no marcó pnvm_complete\n");
+        return -1;
+    }
+
+    memset(g_mmio_stub, 0, sizeof(g_mmio_stub));
+    g_mmio_stub[CSR_GP_CNTRL / 4] = CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY;
+    iwl_trans_pnvm_doorbell(&iwl);
+    waddr = g_mmio_stub[HBUS_TARG_PRPH_WADDR / 4];
+    wdata = g_mmio_stub[HBUS_TARG_PRPH_WDATA / 4];
+    want_addr = ((UREG_DOORBELL_TO_ISR6 + IWL_UMAC_PRPH_OFFSET) & IWL_PRPH_MSK_GEN3) |
+                (3u << 24);
+    want_data = UREG_DOORBELL_TO_ISR6_PNVM;
+    if (waddr != want_addr || wdata != want_data) {
+        fprintf(stderr,
+                "doorbell WADDR=0x%08x WDATA=0x%08x (queríamos 0x%08x / 0x%08x)\n",
+                waddr, wdata, want_addr, want_data);
+        return -1;
+    }
+    puts("OK: ALIVE sku_id + PNVM 0xFE + doorbell UREG BIT20");
     return 0;
 }
 
@@ -567,6 +640,8 @@ int main(void)
     if (check_extreme_sizes() != 0)
         return 1;
     if (check_sf_async_then_tx_ant() != 0)
+        return 1;
+    if (check_pnvm_alive_and_doorbell() != 0)
         return 1;
     if (g_fixture_err) {
         fprintf(stderr, "fixture: el banco construyó paquetes inválidos\n");

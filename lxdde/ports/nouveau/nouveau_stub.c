@@ -34,6 +34,8 @@ extern int lx_nouveau_buf_upload_dma(uint64_t va, uint64_t offset,
                                      unsigned src_off, uint64_t size);
 extern int lx_nouveau_buf_free(uint64_t va);
 extern uint64_t lx_nouveau_buf_vram_free(void);
+extern uint64_t lx_nouveau_buf_pool_free(void);
+extern unsigned lx_nouveau_buf_pt_free(void);
 
 static int nouveau_probe(struct lx_pci_dev *pdev, const struct lx_pci_device_id *id)
 {
@@ -170,4 +172,14 @@ int lx_nouveau_device_buf_free(uint64_t va)
 uint64_t lx_nouveau_device_vram_free(void)
 {
     return lx_nouveau_buf_vram_free();
+}
+
+uint64_t lx_nouveau_device_pool_free(void)
+{
+    return lx_nouveau_buf_pool_free();
+}
+
+unsigned lx_nouveau_device_pt_free(void)
+{
+    return lx_nouveau_buf_pt_free();
 }

@@ -40,6 +40,16 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
     return 0;
 }
 
+int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
+                 const void *payload, uint16_t pay_len)
+{
+    (void)iwl;
+    (void)txq_id;
+    (void)payload;
+    (void)pay_len;
+    return -1;
+}
+
 void iwl_trans_poll(struct iwl_ax211_priv *iwl) { (void)iwl; }
 
 int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl)

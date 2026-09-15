@@ -16,6 +16,9 @@
 #define CSR_RESET                    (CSR_BASE + 0x020)
 #define CSR_GP_CNTRL                 (CSR_BASE + 0x024)
 #define CSR_HW_REV                   (CSR_BASE + 0x028)
+#define CSR_HW_RF_ID                 (CSR_BASE + 0x09c)
+#define CSR_HW_REV_TYPE(_val)        (((_val) & 0x000fff0u) >> 4)
+#define CSR_HW_RFID_TYPE(_val)       (((_val) & 0x0fff000u) >> 12)
 #define CSR_GPIO_IN                  (CSR_BASE + 0x018)
 #define CSR_GIO_REG                  (CSR_BASE + 0x03C)
 #define CSR_UCODE_DRV_GP1_CLR        (CSR_BASE + 0x05c)
@@ -35,6 +38,10 @@
 #define CSR_IML_DATA_ADDR            0x120
 #define CSR_IML_SIZE_ADDR            0x128
 #define HBUS_TARG_WRPTR              0x460
+#define HBUS_TARG_MEM_RADDR          0x40c
+#define HBUS_TARG_MEM_WADDR          0x410
+#define HBUS_TARG_MEM_WDAT           0x418
+#define HBUS_TARG_MEM_RDAT           0x41c
 /* iwl-csr.h: HBUS_BASE=0x400 → WADDR +0x044, RADDR +0x048, WDAT +0x04c, RDAT +0x050. */
 #define HBUS_TARG_PRPH_WADDR         0x444
 #define HBUS_TARG_PRPH_RADDR         0x448
@@ -42,6 +49,9 @@
 #define HBUS_TARG_PRPH_RDAT          0x450
 /* iwl-prph.h: familia 22000 — no confundir con offsets legacy (0xd03c). */
 #define UREG_CPU_INIT_RUN            0xa05c44
+/* Linux iwl-prph.h: doorbell UMAC; BIT(20) = carga PNVM (AX211/gen3). */
+#define UREG_DOORBELL_TO_ISR6        0xa05c04
+#define UREG_DOORBELL_TO_ISR6_PNVM   (1u << 20)
 #define HPM_DEBUG                    0xa03440
 #define PREG_PRPH_WPROT_22000        0xa04d00
 /* Linux `iwl_trans_pcie_prph_msk` + `iwl_so_trans_cfg.umac_prph_offset`. */
@@ -50,20 +60,106 @@
 #define IWL_UMAC_PRPH_OFFSET         0x300000u
 #define RFH_Q0_FRBDCB_WIDX_TRG       0x1C80
 #define IWL_PCI_AX200                0x2723u
+#define IWL_PCI_8265                 0x24fdu
+
+/* Familias que el port distingue. No es el enum completo de Linux:
+ * 8000 no usa context-info gen2/gen3. */
+enum iwl_device_family {
+    IWL_DEVICE_FAMILY_UNKNOWN = 0,
+    IWL_DEVICE_FAMILY_8000,
+    IWL_DEVICE_FAMILY_22000,
+    IWL_DEVICE_FAMILY_AX210,
+};
 #define IWL_MVM_DQA_CMD_QUEUE        0
 #define DQA_ENABLE_CMD               0x0
 #define IWL_MVM_HCMD_TIMEOUT_MS      2000
 #define IWL_GEN2_RX_N                32
 #define IWL_GEN2_RX_SZ               4096
+
+/* Contrato DMA del anillo RX, distinto por generación (pcie/internal.h).
+ *
+ *  - 22000 / AX200 (`!gen3`): BD libre = `__le64 (addr | vid)`; el descriptor
+ *    completado es un `__le32` con el VID en los 12 bits bajos.
+ *  - AX210 / AX211 (`gen3`): BD libre = `struct iwl_rx_transfer_desc` de 16 B
+ *    con el `rbid` **fuera** de la dirección; el completado mide 32 B y lleva
+ *    el `rbid` en el offset 4.
+ *
+ * El VID va de 1 a N y designa el buffer `VID - 1`: el 0 no es un buffer, es
+ * «ranura vacía». Usar en gen3 el formato de gen2 hacía que el firmware
+ * escribiera direcciones y el consumidor leyera índices de otro sitio, que es
+ * exactamente el síntoma de `timeout ALIVE` con recepciones vacías. */
+struct iwl_rx_transfer_desc {
+    uint16_t rbid;
+    uint16_t reserved[3];
+    uint64_t addr;
+} __attribute__((packed));
+
+#define IWL_RX_BD_SIZE_GEN2          8u
+#define IWL_RX_BD_SIZE_GEN3          16u
+#define IWL_RX_CD_SIZE_GEN2          4u
+#define IWL_RX_CD_SIZE_GEN3          32u
+
+struct iwl_rx_completion_desc {
+    uint32_t reserved1;
+    uint16_t rbid;
+    uint8_t status;
+    uint8_t reserved2[25];
+} __attribute__((packed));
+
+typedef char iwl_rx_transfer_desc_sz[
+    sizeof(struct iwl_rx_transfer_desc) == IWL_RX_BD_SIZE_GEN3 ? 1 : -1];
+typedef char iwl_rx_completion_desc_sz[
+    sizeof(struct iwl_rx_completion_desc) == IWL_RX_CD_SIZE_GEN3 ? 1 : -1];
+typedef char iwl_rx_completion_rbid_off[
+    offsetof(struct iwl_rx_completion_desc, rbid) == 4 ? 1 : -1];
 #define IWL_TFH_TFD_SIZE             256
 #define IWL_TFH_NUM_TBS              25
+#define IWL_NUM_OF_TBS               20
+#define IWL_GEN1_TFD_SIZE            128
+#define IWL_8000_NUM_QUEUES          31
+#define IWL_8000_TFD_RING_N          256
+#define IWL_MVM_TX_FIFO_CMD          7
+#define SCD_WIN_SIZE                 64
+#define SCD_FRAME_LIMIT              64
+#define SCD_QUEUE_STTS_REG_POS_TXF   0
+#define SCD_QUEUE_STTS_REG_POS_ACTIVE 3
+#define SCD_QUEUE_STTS_REG_POS_WSL   4
+#define SCD_QUEUE_STTS_REG_POS_SCD_ACT_EN 19
+#define SCD_QUEUE_STTS_REG_MSK       0x017f0000u
+#define SCD_CONTEXT_MEM_LOWER_BOUND  0x600u
+#define SCD_TRANS_TBL_OFFSET_QUEUE(q) \
+    (((0x7e0u + ((unsigned)(q) * 2u)) & 0xfffcu))
+#define SCD_BASE                     0xa02c00u
+#define SCD_SRAM_BASE_ADDR           (SCD_BASE + 0x0u)
+#define SCD_DRAM_BASE_ADDR           (SCD_BASE + 0x8u)
+#define SCD_TXFACT                   (SCD_BASE + 0x10u)
+#define SCD_CHAINEXT_EN              (SCD_BASE + 0x244u)
+#define SCD_EN_CTRL                  (SCD_BASE + 0x254u)
+#define SCD_QUEUE_WRPTR(q)           (SCD_BASE + 0x18u + (unsigned)(q) * 4u)
+#define SCD_QUEUE_RDPTR(q)           (SCD_BASE + 0x68u + (unsigned)(q) * 4u)
+#define SCD_QUEUE_STATUS_BITS(q)     (SCD_BASE + 0x10cu + (unsigned)(q) * 4u)
+#define SCD_CONTEXT_QUEUE_OFFSET(q)  (SCD_CONTEXT_MEM_LOWER_BOUND + ((unsigned)(q) * 8u))
+#define FH_TCSR_CHNL_NUM             8
+#define FH_TCSR_TX_CONFIG_REG_VAL_DMA_CREDIT_ENABLE 0x00000008u
+#define FH_TX_CHICKEN_BITS_REG       (FH_MEM_LOWER_BOUND + 0xe98u)
+#define FH_TX_CHICKEN_BITS_SCD_AUTO_RETRY_EN 0x00000002u
+#define FH_MEM_CBBC_QUEUE(chnl)      (FH_MEM_LOWER_BOUND + 0x9d0u + 4u * (unsigned)(chnl))
 #define IWL_CTXT_INFO_TFD_FORMAT_LONG 0x0100u
 #define IWL_CTXT_INFO_RB_CB_SIZE_32   0x0050u
 #define IWL_CTXT_INFO_RB_SIZE_4K      0x0800u
 #define TFD_QUEUE_CB_SIZE_32          2
 #define SCD_QUEUE_CFG                 0x1d
 #define SCD_QUEUE_CONFIG_CMD          0x17
+#define TLC_MNG_CONFIG_CMD            0x0f
+#define RLC_CONFIG_CMD                0x08
+
+/* Linux fw/api/tx.h — tamaño cabecera MAC en palabras dentro de offload_assist. */
+#define TX_CMD_OFFLD_MH_SIZE          8
 #define IWL_SCD_QUEUE_ADD             0
+/* Linux iwl-trans.h: IWL_MAX_TID_COUNT=8 es el índice lógico mgmt en MVM.
+ * En SCD v3 el payload lleva IWL_MGMT_TID=15 (iwl_mvm_tvqm_enable_txq convierte
+ * 8→15 antes de iwl_trans_txq_alloc). Confundir ambos rompe el ADD en placa. */
+#define IWL_MAX_TID_COUNT             8
 #define IWL_MGMT_TID                  15
 #define IWL_MGMT_QUEUE_SIZE           16
 /* Linux iwl-fh.h: tabla BC gen2 = TFD_QUEUE_SIZE_MAX + TFD_QUEUE_SIZE_BC_DUP. */
@@ -74,7 +170,10 @@
 #define IWL_SCD_DMA_ALIGN             256
 #define IWL_FIRST_TB_SIZE             20
 #define IWL_FIRST_TB_SIZE_ALIGN       64
-#define IWL_MGMT_TX_SLOT_SIZE         512
+#define IWL_CMD_VER_MAX               256
+/* Cabecera de comando + tx_cmd + 802.11/SNAP sobre una trama Ethernet de MTU:
+ * con 512 no cabía ni la mitad de un paquete de datos. */
+#define IWL_MGMT_TX_SLOT_SIZE         2048
 #define TX_QUEUE_CFG_ENABLE_QUEUE     (1u << 0)
 
 static inline uint32_t tfd_queue_cb_size(unsigned qsize)
@@ -109,7 +208,67 @@ static inline uint32_t tfd_queue_cb_size(unsigned qsize)
 #define CSR_INT_BIT_ALIVE                     (1u << 0)
 #define CSR_INT_BIT_RF_KILL                   (1u << 7)
 #define CSR_INT_BIT_SW_ERR                    (1u << 25)
+#define CSR_INT_BIT_FH_TX                     (1u << 27)
 #define CSR_INT_BIT_FH_RX                     (1u << 31)
+#define CSR_FH_INT_STATUS                     (CSR_BASE + 0x010)
+#define CSR_FH_INT_BIT_TX_CHNL0               (1u << 0)
+#define CSR_FH_INT_BIT_TX_CHNL1               (1u << 1)
+#define CSR_FH_INT_TX_MASK                    (CSR_FH_INT_BIT_TX_CHNL0 | CSR_FH_INT_BIT_TX_CHNL1)
+#define CSR_DRAM_INT_TBL_REG                  (CSR_BASE + 0x0A0)
+#define CSR_DRAM_INT_TBL_ENABLE               (1u << 31)
+#define CSR_DRAM_INIT_TBL_WRITE_POINTER       (1u << 28)
+#define CSR_DRAM_INIT_TBL_WRAP_CHECK          (1u << 27)
+#define IWL_ICT_SIZE                          4096u
+#define IWL_ICT_SHIFT                         12
+
+/* FH legado (familia 8000): carga por canal de servicio + RX de un anillo. */
+#define FH_MEM_LOWER_BOUND                    0x1000u
+#define FH_MEM_TB_MAX_LENGTH                  0x00020000u
+#define FH_SRVC_CHNL                          9
+#define FH_SRVC_LOWER_BOUND                   (FH_MEM_LOWER_BOUND + 0x9C8u)
+#define FH_SRVC_CHNL_SRAM_ADDR_REG(ch)        (FH_SRVC_LOWER_BOUND + ((unsigned)(ch) - 9u) * 4u)
+#define FH_TFDIB_LOWER_BOUND                  (FH_MEM_LOWER_BOUND + 0x900u)
+#define FH_TFDIB_CTRL0_REG(ch)                (FH_TFDIB_LOWER_BOUND + 8u * (unsigned)(ch))
+#define FH_TFDIB_CTRL1_REG(ch)                (FH_TFDIB_LOWER_BOUND + 8u * (unsigned)(ch) + 4u)
+#define FH_MEM_TFDIB_REG1_ADDR_BITSHIFT       28
+#define FH_TCSR_LOWER_BOUND                   (FH_MEM_LOWER_BOUND + 0xD00u)
+#define FH_TCSR_CHNL_TX_CONFIG_REG(ch)        (FH_TCSR_LOWER_BOUND + 0x20u * (unsigned)(ch))
+#define FH_TCSR_CHNL_TX_BUF_STS_REG(ch)       (FH_TCSR_LOWER_BOUND + 0x20u * (unsigned)(ch) + 8u)
+#define FH_TCSR_TX_CONFIG_REG_VAL_DMA_CHNL_PAUSE      0u
+#define FH_TCSR_TX_CONFIG_REG_VAL_DMA_CHNL_ENABLE     0x80000000u
+#define FH_TCSR_TX_CONFIG_REG_VAL_DMA_CREDIT_DISABLE  0u
+#define FH_TCSR_TX_CONFIG_REG_VAL_CIRQ_HOST_ENDTFD    0x00100000u
+#define FH_TCSR_CHNL_TX_BUF_STS_REG_POS_TB_NUM        20
+#define FH_TCSR_CHNL_TX_BUF_STS_REG_POS_TB_IDX        12
+#define FH_TCSR_CHNL_TX_BUF_STS_REG_VAL_TFDB_VALID    0x00000003u
+#define FH_TSSR_TX_STATUS_REG                 (FH_MEM_LOWER_BOUND + 0xEA0u + 0x010u)
+#define FH_TSSR_TX_STATUS_REG_MSK_CHNL_IDLE(ch) ((1u << (unsigned)(ch)) << 16)
+#define FH_KW_MEM_ADDR_REG                    (FH_MEM_LOWER_BOUND + 0x97Cu)
+#define FH_RSCSR_CHNL0_STTS_WPTR_REG          (FH_MEM_LOWER_BOUND + 0xBC0u)
+#define FH_RSCSR_CHNL0_RBDCB_BASE_REG         (FH_MEM_LOWER_BOUND + 0xBC4u)
+#define FH_RSCSR_CHNL0_WPTR                   (FH_MEM_LOWER_BOUND + 0xBC8u)
+#define FH_RSCSR_CHNL0_RDPTR                  (FH_MEM_LOWER_BOUND + 0xBCCu)
+#define FH_MEM_RCSR_CHNL0_CONFIG_REG          (FH_MEM_LOWER_BOUND + 0xC00u)
+#define FH_MEM_RCSR_CHNL0_RBDCB_WPTR          (FH_MEM_LOWER_BOUND + 0xC08u)
+#define FH_MEM_RCSR_CHNL0_FLUSH_RB_REQ        (FH_MEM_LOWER_BOUND + 0xC10u)
+#define FH_RCSR_RX_CONFIG_CHNL_EN_ENABLE_VAL  0x80000000u
+#define FH_RCSR_CHNL0_RX_IGNORE_RXF_EMPTY     0x00000004u
+#define FH_RCSR_CHNL0_RX_CONFIG_IRQ_DEST_INT_HOST_VAL 0x00001000u
+#define FH_RCSR_RX_CONFIG_REG_VAL_RB_SIZE_4K  0u
+#define FH_RCSR_RX_CONFIG_REG_IRQ_RBTH_POS    4
+#define FH_RCSR_RX_CONFIG_RBDCB_SIZE_POS      20
+#define RX_RB_TIMEOUT                         0x11u
+#define IWL_8000_RX_N                         32
+#define IWL_8000_RX_LOG                       5
+#define FH_UCODE_LOAD_STATUS                  0x1AF0u
+#define RELEASE_CPU_RESET                     0x300Cu
+#define RELEASE_CPU_RESET_BIT                 (1u << 24)
+#define WFPM_GP2                              0xA030B4u
+#define LMPM_CHICK                            0xA01FF8u
+#define LMPM_CHICK_EXTENDED_ADDR_SPACE        (1u << 0)
+#define IWL_FW_MEM_EXTENDED_START             0x40000u
+#define IWL_FW_MEM_EXTENDED_END               0x57FFFu
+#define IWL_8000_PLAN_MAX                     64
 /* iwl-csr.h: bit 27 = estado del switch RF-kill (1 = radio ON). El 9 es SYS_CONFIG. */
 #define CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW   (1u << 27)
 #define APMG_CLK_EN_REG                       0x3004u
@@ -194,6 +353,13 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define INVALID_WR_PTR_CMD         0x6
 
 #define INIT_EXTENDED_CFG_CMD      0x03
+/* Linux fw/api/nvm-reg.h: PNVM_INIT_COMPLETE_NTFY, grupo 0xc. */
+#define PNVM_INIT_COMPLETE_NTFY    0xFE
+/* Linux fw/pnvm.h: MVM_UCODE_PNVM_TIMEOUT = HZ/4. */
+#define IWL_PNVM_TIMEOUT_MS        250
+/* Linux fw/api/alive.h: iwl_alive_ntf_v5; sku_id detrás de umac (v5=128, v6=144). */
+#define IWL_ALIVE_NTFY_V5_LEN      128
+#define IWL_ALIVE_SKU_OFF          116
 #define NVM_ACCESS_CMD             0x88 /* LEGACY_GROUP — no usar en init unificado */
 #define NVM_ACCESS_COMPLETE        0x00
 #define NVM_GET_INFO               0x02
@@ -250,14 +416,21 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 
 /* Linux `enum iwl_ucode_tlv_capa` — bit 12 = DQA_SUPPORT (file.h). */
 #define IWL_UCODE_TLV_CAPA_DQA_SUPPORT           12
+#define IWL_UCODE_TLV_CAPA_FRAGMENTED_PNVM_IMG   32
 #define IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT   39
 #define IWL_UCODE_TLV_CAPA_CDB_SUPPORT           40
+#define IWL_UCODE_TLV_CAPA_TLC_OFFLOAD           43
 #define IWL_UCODE_TLV_CAPA_SESSION_PROT_CMD      54
 #define IWL_FW_CAPA_SETS                         4
+#define IWL_UCODE_TLV_HW_TYPE                    58
+#define IWL_UCODE_TLV_PNVM_VERSION               62
+#define IPC_DRAM_MAP_ENTRY_NUM_MAX               64
+#define UNFRAGMENTED_PNVM_PAYLOADS_NUMBER        2
 
 #define BINDING_CONTEXT_CMD                      0x2b
 #define TIME_EVENT_CMD                           0x29
 #define SESSION_PROTECTION_CMD                   0x05
+#define SESSION_PROTECTION_NOTIF                 0xfb
 #define SESSION_PROTECT_CONF_ASSOC               0
 #define ADD_STA_KEY                              0x17
 
@@ -271,6 +444,11 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define STA_KEY_FLG_WEP_KEY_MAP                  (1u << 3)
 #define STA_KEY_FLG_KEYID_POS                    8
 #define STA_KEY_FLG_KEYID_MSK                    (3u << STA_KEY_FLG_KEYID_POS)
+#define STA_KEY_NOT_VALID                        (1u << 11)
+/* Clave de grupo. Linux mvm/sta.c la pone en toda GTK; sin ella el firmware
+ * la registra como otra clave de pares. */
+#define STA_KEY_MULTICAST                        (1u << 14)
+#define STA_KEY_MFP                              (1u << 15)
 
 #define IWL_MVM_TE_SESSION_PROTECTION_MAX_TIME_MS 600u
 #define IWL_MVM_TE_ASSOC_MAX_DELAY_MS             500u
@@ -402,7 +580,10 @@ struct iwl_ucode_capa {
 #define IWL_RX_DESC_SIZE_V1        48u
 
 #define ADD_STA                    0x18
-#define TX_CMD                     0x1
+#define ADD_STA_SUCCESS            0x1
+#define IWL_ADD_STA_STATUS_MASK    0xffu
+#define LQ_CMD                     0x4e
+#define TX_CMD                     0x1c
 #define IWL_TX_FLAGS_CMD_RATE      (1u << 0)
 #define IWL_TX_FLAGS_ENCRYPT_DIS   (1u << 1)
 #define IWL_TX_FLAGS_HIGH_PRI      (1u << 2)
@@ -596,6 +777,22 @@ struct iwl_prph_scratch_pnvm_cfg {
     uint32_t reserved;
 } __attribute__((packed));
 
+/* Linux iwl-context-info-gen3.h: descriptor de chunks PNVM (capa 32). */
+struct iwl_prph_scrath_mem_desc_addr_array {
+    uint64_t mem_descs[IPC_DRAM_MAP_ENTRY_NUM_MAX];
+} __attribute__((packed));
+
+struct iwl_pnvm_chunk {
+    const uint8_t *data;
+    uint32_t len;
+};
+
+struct iwl_pnvm_image {
+    uint32_t version;
+    unsigned n_chunks;
+    struct iwl_pnvm_chunk chunks[IPC_DRAM_MAP_ENTRY_NUM_MAX];
+};
+
 struct iwl_prph_scratch_hwm_cfg {
     uint64_t hwm_base_addr;
     uint32_t hwm_size;
@@ -676,6 +873,19 @@ struct iwl_context_info_gen3 {
     uint32_t prph_scratch_size;
     uint32_t reserved;
 } __attribute__((packed));
+
+struct iwl_tfd_tb {
+    uint32_t lo;
+    uint16_t hi_n_len;
+} __attribute__((packed));
+
+struct iwl_tfd {
+    uint8_t __reserved1[3];
+    uint8_t num_tbs;
+    struct iwl_tfd_tb tbs[IWL_NUM_OF_TBS];
+    uint32_t __pad;
+} __attribute__((packed));
+typedef char iwl_gen1_tfd_size_check[sizeof(struct iwl_tfd) == IWL_GEN1_TFD_SIZE ? 1 : -1];
 
 struct iwl_tfh_tfd {
     uint64_t addr;
@@ -811,12 +1021,11 @@ struct iwl_rx_packet {
     uint8_t data[];
 } __attribute__((packed));
 
+/* Linux fw/api/cmdhdr.h — cabecera corta TFD (4 B), no confundir con wide HCMD. */
 struct iwl_cmd_header {
     uint8_t cmd;
     uint8_t group_id;
     uint16_t sequence;
-    uint8_t reserved;
-    uint8_t length;
 } __attribute__((packed));
 
 struct iwl_cmd_header_wide {
@@ -949,6 +1158,24 @@ struct iwl_rx_mpdu_desc_v1 {
     uint64_t tsf_on_air_rise;
 } __attribute__((packed));
 
+/* v3 de iwl_rx_mpdu_desc (AX210 / AX211). Mismo prefijo de 20 B que v1, pero
+ * la cola mide 36 en vez de 28: el descriptor completo son 56 B, no 48.
+ * Linux fw/api/rx.h, IWL_RX_DESC_SIZE_V3 = offsetofend(..., v3). */
+struct iwl_rx_mpdu_desc_v3 {
+    uint32_t filter_match;
+    uint32_t rss_hash;
+    uint32_t partial_hash;
+    uint16_t raw_xsum;
+    uint16_t reserved_xsum;
+    uint32_t rate_n_flags;
+    uint8_t energy_a;
+    uint8_t energy_b;
+    uint8_t channel;
+    uint8_t mac_context;
+    uint32_t gp2_on_air_rise;
+    uint64_t tsf_on_air_rise;
+} __attribute__((packed));
+
 struct iwl_rx_mpdu_desc {
     uint16_t mpdu_len;
     uint8_t mac_flags1;
@@ -959,13 +1186,40 @@ struct iwl_rx_mpdu_desc {
     uint32_t dw4;
     uint32_t status;
     uint32_t reorder_data;
-    struct iwl_rx_mpdu_desc_v1 v1;
+    union {
+        struct iwl_rx_mpdu_desc_v1 v1;
+        struct iwl_rx_mpdu_desc_v3 v3;
+    };
 } __attribute__((packed));
 
-typedef char iwl_rx_mpdu_desc_v1_sz[
-    sizeof(struct iwl_rx_mpdu_desc) == IWL_RX_DESC_SIZE_V1 ? 1 : -1];
+/* Tamaño del descriptor que precede a la MPDU, por generación. Saltar 4 B
+ * (`iwl_rx_mpdu_res_start`) en AX211 deja la trama 802.11 desplazada 52 B. */
+#define IWL_RX_DESC_SIZE_V3        56u
+
+typedef char iwl_rx_mpdu_desc_v3_sz[
+    sizeof(struct iwl_rx_mpdu_desc) == IWL_RX_DESC_SIZE_V3 ? 1 : -1];
+typedef char iwl_rx_mpdu_desc_v1_off[
+    offsetof(struct iwl_rx_mpdu_desc, v1) == 20 ? 1 : -1];
 typedef char iwl_rx_mpdu_v1_channel_off[
     offsetof(struct iwl_rx_mpdu_desc, v1.channel) == 34 ? 1 : -1];
+typedef char iwl_rx_mpdu_v3_channel_off[
+    offsetof(struct iwl_rx_mpdu_desc, v3.channel) == 42 ? 1 : -1];
+
+/* Bits de `status` (DW5). Linux fw/api/rx.h. */
+#define IWL_RX_MPDU_STATUS_CRC_OK      (1u << 0)
+#define IWL_RX_MPDU_STATUS_OVERRUN_OK  (1u << 1)
+#define IWL_RX_MPDU_STATUS_KEY_VALID   (1u << 3)
+#define IWL_RX_MPDU_STATUS_ICV_OK      (1u << 5)
+#define IWL_RX_MPDU_STATUS_MIC_OK      (1u << 6)
+#define IWL_RX_MPDU_STATUS_SEC_MASK    0x0700u
+#define IWL_RX_MPDU_STATUS_SEC_NONE    0x0000u
+#define IWL_RX_MPDU_STATUS_SEC_CCM     0x0200u
+#define IWL_RX_MPDU_STATUS_DECRYPTED   (1u << 11)
+
+#define ETH_P_EAPOL                    0x888eu
+/* MTU Ethernet que anuncia smoltcp: la conversión y la cola TX tienen que
+ * admitirlo entero, no recortarlo a 450 bytes. */
+#define IWL_MAX_ETH_FRAME              1514u
 
 static inline uint8_t iwl_rx_phy_info_channel(const uint8_t *data, int len)
 {
@@ -1012,6 +1266,42 @@ static inline uint8_t iwl_rx_mpdu_v1_channel(const uint8_t *data, int len)
         return 0;
     desc = (const struct iwl_rx_mpdu_desc *)data;
     return desc->v1.channel;
+}
+
+static inline uint8_t iwl_rx_mpdu_v3_channel(const uint8_t *data, int len)
+{
+    const struct iwl_rx_mpdu_desc *desc;
+
+    if (!data || len < (int)IWL_RX_DESC_SIZE_V3)
+        return 0;
+    desc = (const struct iwl_rx_mpdu_desc *)data;
+    return desc->v3.channel;
+}
+
+static inline void iwl_rx_mpdu_v3_energy(const uint8_t *data, int len,
+                                         uint8_t *a, uint8_t *b)
+{
+    const struct iwl_rx_mpdu_desc *desc;
+
+    if (!a || !b)
+        return;
+    *a = 0;
+    *b = 0;
+    if (!data || len < (int)IWL_RX_DESC_SIZE_V3)
+        return;
+    desc = (const struct iwl_rx_mpdu_desc *)data;
+    *a = desc->v3.energy_a;
+    *b = desc->v3.energy_b;
+}
+
+static inline uint32_t iwl_rx_mpdu_status(const uint8_t *data, int len)
+{
+    const struct iwl_rx_mpdu_desc *desc;
+
+    if (!data || len < (int)(offsetof(struct iwl_rx_mpdu_desc, status) + 4))
+        return 0;
+    desc = (const struct iwl_rx_mpdu_desc *)data;
+    return desc->status;
 }
 
 static inline void iwl_rx_mpdu_v1_energy(const uint8_t *data, int len,
@@ -1121,6 +1411,26 @@ struct iwl_fw_channel_info {
     uint8_t width;
     uint8_t ctrl_pos;
     uint8_t reserved;
+} __attribute__((packed));
+
+struct iwl_rlc_properties {
+    uint32_t rx_chain_info;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_sad_properties {
+    uint32_t chain_a_sad_mode;
+    uint32_t chain_b_sad_mode;
+    uint32_t mac_id;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct iwl_rlc_config_cmd {
+    uint32_t phy_id;
+    struct iwl_rlc_properties rlc;
+    struct iwl_sad_properties sad;
+    uint8_t flags;
+    uint8_t reserved[3];
 } __attribute__((packed));
 
 struct iwl_phy_context_cmd {
@@ -1337,8 +1647,26 @@ struct iwl_ax211_priv;
 
 #define IWL_FW_AC_NUM              4u
 #define IWL_FW_MAC_TYPE_BSS_STA     5u
+#define IWL_MAC_FILTER_IN_CONTROL_AND_MGMT (1u << 1)
 #define IWL_MAC_FILTER_ACCEPT_GRP  (1u << 2)
 #define IWL_MAC_FILTER_IN_BEACON   (1u << 6)
+
+#define TX_STATUS_MSK              0x000000ffu
+#define TX_STATUS_SUCCESS            0x01u
+#define IWL_MVM_TX_RESP_V3_STATUS_OFF 36u
+#define IWL_MVM_TX_RESP_STATUS_OFF     40u
+
+struct agg_tx_status {
+    uint16_t status;
+    uint16_t sequence;
+} __attribute__((packed));
+
+struct iwl_mvm_session_prot_notif {
+    uint32_t mac_id;
+    uint32_t status;
+    uint32_t start;
+    uint32_t conf_id;
+} __attribute__((packed));
 
 struct iwl_ac_qos {
     uint16_t cw_min;
@@ -1407,6 +1735,57 @@ static inline void iwl_mvm_mac_qos_defaults(struct iwl_ac_qos ac[IWL_FW_AC_NUM +
 int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned long fw_len);
 int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl);
 int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl);
+int iwl_trans_8000_start(struct iwl_ax211_priv *iwl);
+void iwl_trans_8000_drain(struct iwl_ax211_priv *iwl);
+int iwl_trans_8000_fw_alive(struct iwl_ax211_priv *iwl);
+int iwl_trans_8000_alloc_hcmd(struct iwl_ax211_priv *iwl);
+
+/* Plan de carga FH 8000: comprobable en host, sin NIC. */
+struct iwl_8000_chunk {
+    uint32_t dst;
+    uint32_t len;
+    uint32_t off;
+    uint8_t cpu;
+    uint8_t sec;
+};
+
+struct iwl_8000_sec_status {
+    uint8_t cpu;
+    uint8_t sec;
+    uint32_t load_status;
+};
+
+struct iwl_8000_load_plan {
+    uint32_t n_chunks;
+    uint32_t n_status;
+    uint32_t cpu1_secs;
+    uint32_t cpu2_secs;
+    uint32_t cpu1_final;
+    uint32_t cpu2_final;
+    uint32_t uses_context_info;
+    struct iwl_8000_chunk chunks[IWL_8000_PLAN_MAX];
+    struct iwl_8000_sec_status status[IWL_FW_RT_MAX];
+};
+
+struct iwl_8000_fh_prog {
+    uint32_t tcsr_cfg_reg;
+    uint32_t tcsr_pause;
+    uint32_t sram_reg;
+    uint32_t sram_val;
+    uint32_t tfdib0_reg;
+    uint32_t tfdib0_val;
+    uint32_t tfdib1_reg;
+    uint32_t tfdib1_val;
+    uint32_t buf_sts_reg;
+    uint32_t buf_sts_val;
+    uint32_t tcsr_run;
+};
+
+int iwl_8000_plan_load(const struct iwl_fw_image *fw, struct iwl_8000_load_plan *plan);
+int iwl_8000_plan_load_ex(const struct iwl_fw_image *fw, uint32_t chunk_sz,
+                          struct iwl_8000_load_plan *plan);
+void iwl_8000_fh_program(uint32_t dst, uint64_t dma, uint32_t byte_cnt,
+                         struct iwl_8000_fh_prog *out);
 void iwl_trans_poll(struct iwl_ax211_priv *iwl);
 int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                        const void *payload, uint16_t pay_len);
@@ -1420,6 +1799,10 @@ unsigned iwl_trans_cmd_space(struct iwl_ax211_priv *iwl);
 int iwl_trans_needs_recover(struct iwl_ax211_priv *iwl);
 /* Libera la cola y marca MVM abajo: el llamador debe repetir init/up. */
 int iwl_trans_recover(struct iwl_ax211_priv *iwl);
+/* Linux iwl_write_umac_prph(UREG_DOORBELL_TO_ISR6, BIT(20)). */
+int iwl_trans_pnvm_publish(struct iwl_ax211_priv *iwl);
+void iwl_trans_pnvm_doorbell(struct iwl_ax211_priv *iwl);
+int iwl_fw_pnvm_select(struct iwl_ax211_priv *iwl, struct iwl_pnvm_image *out);
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl);
 int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl);
 int iwl_mvm_phy_ctxt_changed(struct iwl_ax211_priv *iwl, uint8_t channel);
@@ -1448,6 +1831,7 @@ int iwl_fw_notif_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd);
 uint8_t iwl_mvm_valid_tx_ant(struct iwl_ax211_priv *iwl);
 uint8_t iwl_mvm_valid_rx_ant(struct iwl_ax211_priv *iwl);
 void iwl_mvm_fill_probe_req(struct iwl_ax211_priv *iwl, struct iwl_scan_probe_params_v4 *probe);
+int iwl_mvm_rate_init_ap_sta(struct iwl_ax211_priv *iwl);
 int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
                           const uint8_t *bssid);
 int iwl_mvm_scan(struct iwl_ax211_priv *iwl);
@@ -1471,6 +1855,16 @@ const struct iwl_ax211_bss *iwl_mvm_pick_bss(struct iwl_ax211_priv *iwl,
 int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid);
 int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid, const uint8_t psk[32]);
 int iwl_mvm_install_key(struct iwl_ax211_priv *iwl, const uint8_t key[16], int key_idx);
+int iwl_mvm_install_gtk(struct iwl_ax211_priv *iwl, const uint8_t key[16], int key_idx,
+                        const uint8_t rsc[8]);
+int iwl_mvm_rsn_ie(const struct iwl_ax211_priv *iwl, uint8_t *out, int max);
+int iwl_80211_hdrlen(uint16_t fc);
+int iwl_rx_crypto_ok(uint32_t status);
+int iwl_mvm_rx_to_eth(const struct iwl_ax211_priv *iwl, const uint8_t *frame, int flen,
+                      uint32_t status, uint8_t *out, int outmax);
+int iwl_mvm_eth_to_80211(const struct iwl_ax211_priv *iwl, const uint8_t *eth, int len,
+                         uint8_t *out, int outmax);
+
 int iwl_mvm_tx_8023(struct iwl_ax211_priv *iwl, const uint8_t *buf, int len);
 int iwl_mvm_rx_8023(struct iwl_ax211_priv *iwl, uint8_t *buf, int buflen);
 

@@ -259,6 +259,20 @@ static int iwl_mvm_mac_ctxt_add_scan(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
+static int iwl_mvm_phy_send_rlc(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_rlc_config_cmd cmd;
+    uint8_t rx = iwl_mvm_valid_rx_ant(iwl);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.phy_id = iwl_cpu_to_le32(0);
+    cmd.rlc.rx_chain_info =
+        iwl_cpu_to_le32(phy_rxchain_info(rx, 2, 2));
+    return iwl_trans_send_cmd_wait(iwl, DATA_PATH_GROUP, RLC_CONFIG_CMD, &cmd,
+                                   (uint16_t)sizeof(cmd),
+                                   IWL_MVM_HCMD_TIMEOUT_MS);
+}
+
 static int iwl_mvm_phy_ctxt_apply(struct iwl_ax211_priv *iwl, uint8_t channel,
                                   uint32_t action)
 {
@@ -267,6 +281,8 @@ static int iwl_mvm_phy_ctxt_apply(struct iwl_ax211_priv *iwl, uint8_t channel,
     uint8_t rx = iwl_mvm_valid_rx_ant(iwl);
     uint32_t rxchain = phy_rxchain_info(rx, 2, 2);
     int ver = iwl_fw_cmd_ver(iwl, LEGACY_GROUP, PHY_CONTEXT_CMD);
+    int rlc_ver = iwl_fw_cmd_ver(iwl, DATA_PATH_GROUP, RLC_CONFIG_CMD);
+    int use_rlc = rlc_ver >= 2;
     uint32_t lmac = phy_lmac_id(iwl, band);
 
     if (ver >= 3) {
@@ -279,7 +295,7 @@ static int iwl_mvm_phy_ctxt_apply(struct iwl_ax211_priv *iwl, uint8_t channel,
         cmd.ci.band = band;
         cmd.ci.width = IWL_PHY_CHANNEL_MODE20;
         cmd.lmac_id = iwl_cpu_to_le32(lmac);
-        cmd.rxchain_info = rxchain;
+        cmd.rxchain_info = use_rlc ? 0 : rxchain;
         if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_CONTEXT_CMD, &cmd,
                                     (uint16_t)sizeof(cmd),
                                     IWL_MVM_HCMD_TIMEOUT_MS) != 0)
@@ -294,11 +310,18 @@ static int iwl_mvm_phy_ctxt_apply(struct iwl_ax211_priv *iwl, uint8_t channel,
         cmd.ci.channel = channel;
         cmd.ci.width = IWL_PHY_CHANNEL_MODE20;
         cmd.txchain_info = iwl_cpu_to_le32(tx);
-        cmd.rxchain_info = rxchain;
+        cmd.rxchain_info = use_rlc ? 0 : rxchain;
         if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_CONTEXT_CMD, &cmd,
                                     (uint16_t)sizeof(cmd),
                                     IWL_MVM_HCMD_TIMEOUT_MS) != 0)
             return -1;
+    }
+
+    if (action != FW_CTXT_ACTION_REMOVE && use_rlc) {
+        if (iwl_mvm_phy_send_rlc(iwl) != 0) {
+            lx_printk("iwl_mvm: RLC_CONFIG falló\n");
+            return -1;
+        }
     }
 
     if (action == FW_CTXT_ACTION_REMOVE) {

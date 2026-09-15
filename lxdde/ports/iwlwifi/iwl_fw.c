@@ -128,15 +128,16 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
         case IWL_UCODE_TLV_CMD_VERSIONS: {
             unsigned n = length / sizeof(struct iwl_fw_cmd_version);
             unsigned i;
+            unsigned before = iwl->cmd_ver_count;
 
-            iwl->cmd_ver_count = 0;
-            for (i = 0; i < n && iwl->cmd_ver_count < 64u; i++) {
+            for (i = 0; i < n && iwl->cmd_ver_count < IWL_CMD_VER_MAX; i++) {
                 const struct iwl_fw_cmd_version *cv =
                     (const struct iwl_fw_cmd_version *)(pos +
                                                         i * sizeof(*cv));
                 iwl->cmd_ver[iwl->cmd_ver_count++] = *cv;
             }
-            lx_printk("iwl_fw: CMD_VERSIONS %u entradas\n", iwl->cmd_ver_count);
+            lx_printk("iwl_fw: CMD_VERSIONS +%u entradas (total %u)\n",
+                      iwl->cmd_ver_count - before, iwl->cmd_ver_count);
             break;
         }
         case IWL_UCODE_TLV_ENABLED_CAPABILITIES: {
@@ -221,48 +222,140 @@ int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
 
 int iwl_fw_parse_pnvm(struct iwl_ax211_priv *iwl, const uint8_t *pnvm, unsigned long pnvm_len)
 {
-    const uint8_t *pos;
-    const uint8_t *end;
-    int collecting = 0;
-    uint8_t *acc = 0;
-    unsigned long acc_len = 0;
+    uint8_t *copy;
 
-    if (!pnvm || pnvm_len < 8)
+    if (!iwl || !pnvm || pnvm_len < 8)
         return 0;
-    pos = pnvm;
-    end = pnvm + pnvm_len;
-    while (pos + 8 <= end) {
-        uint32_t type = le32(pos);
-        uint32_t length = le32(pos + 4);
-        pos += 8;
-        if (pos + length > end)
-            break;
-        if (type == IWL_UCODE_TLV_PNVM_SKU) {
-            if (collecting && acc_len)
-                break;
-            collecting = 1;
-        } else if (collecting && type == IWL_UCODE_TLV_SEC_RT && length > 4) {
-            const uint8_t *payload = pos + 4;
-            uint32_t plen = length - 4;
-            uint8_t *nbuf = lx_kmalloc(acc_len + plen, GFP_KERNEL);
-            if (!nbuf)
-                return -1;
-            if (acc && acc_len)
-                memcpy(nbuf, acc, acc_len);
-            memcpy(nbuf + acc_len, payload, plen);
-            if (acc)
-                lx_kfree(acc);
-            acc = nbuf;
-            acc_len += plen;
-        }
-        pos += (length + 3) & ~3u;
-    }
-    if (acc && acc_len) {
-        iwl->pnvm_data = acc;
-        iwl->pnvm_len = acc_len;
-        lx_printk("iwl_fw: pnvm %lu bytes\n", acc_len);
-    }
+    copy = lx_kmalloc(pnvm_len, GFP_KERNEL);
+    if (!copy)
+        return -1;
+    memcpy(copy, pnvm, pnvm_len);
+    if (iwl->pnvm_file)
+        lx_kfree(iwl->pnvm_file);
+    iwl->pnvm_file = copy;
+    iwl->pnvm_file_len = pnvm_len;
+    iwl->pnvm_published = 0;
+    lx_printk("iwl_fw: pnvm file %lu bytes\n", pnvm_len);
     return 0;
+}
+
+static int pnvm_sku_match(const uint32_t *alive_sku, const uint8_t *tlv_data, uint32_t tlv_len)
+{
+    uint32_t file_sku[3];
+
+    if (tlv_len < 12)
+        return 0;
+    file_sku[0] = le32(tlv_data);
+    file_sku[1] = le32(tlv_data + 4);
+    file_sku[2] = le32(tlv_data + 8);
+    return alive_sku[0] == file_sku[0] && alive_sku[1] == file_sku[1] &&
+           alive_sku[2] == file_sku[2];
+}
+
+static int pnvm_handle_section(struct iwl_ax211_priv *iwl, const uint8_t *data,
+                               unsigned long len, struct iwl_pnvm_image *pnvm_data)
+{
+    const uint8_t *pos = data;
+    const uint8_t *end = data + len;
+    uint16_t mac_type = 0;
+    uint16_t rf_id = 0;
+    int hw_match = 0;
+
+    memset(pnvm_data, 0, sizeof(*pnvm_data));
+
+    while (pos + 8 <= end) {
+        uint32_t tlv_len = le32(pos + 4);
+        uint32_t tlv_type = le32(pos);
+        const uint8_t *payload;
+
+        pos += 8;
+        if (pos + tlv_len > end)
+            return -1;
+        payload = pos;
+
+        switch (tlv_type) {
+        case IWL_UCODE_TLV_PNVM_VERSION:
+            if (tlv_len >= 4)
+                pnvm_data->version = le32(payload);
+            break;
+        case IWL_UCODE_TLV_HW_TYPE:
+            if (tlv_len >= 4 && !hw_match) {
+                mac_type = (uint16_t)(payload[0] | (payload[1] << 8));
+                rf_id = (uint16_t)(payload[2] | (payload[3] << 8));
+                if (mac_type == CSR_HW_REV_TYPE(iwl->hw_rev) &&
+                    rf_id == (uint16_t)CSR_HW_RFID_TYPE(iwl->hw_rf_id))
+                    hw_match = 1;
+            }
+            break;
+        case IWL_UCODE_TLV_SEC_RT:
+            if (tlv_len > 4) {
+                uint32_t sep = le32(payload);
+
+                if (sep == 0xddddeeee)
+                    break;
+                if (pnvm_data->n_chunks >= IPC_DRAM_MAP_ENTRY_NUM_MAX)
+                    return -1;
+                pnvm_data->chunks[pnvm_data->n_chunks].data = payload + 4;
+                pnvm_data->chunks[pnvm_data->n_chunks].len = tlv_len - 4;
+                pnvm_data->n_chunks++;
+            }
+            break;
+        case IWL_UCODE_TLV_PNVM_SKU:
+            goto done;
+        default:
+            break;
+        }
+
+        pos += (tlv_len + 3u) & ~3u;
+    }
+
+done:
+    if (!hw_match) {
+        lx_printk("iwl_fw: pnvm HW mismatch (need mac=0x%x rf=0x%x)\n",
+                  (unsigned)CSR_HW_REV_TYPE(iwl->hw_rev),
+                  (unsigned)CSR_HW_RFID_TYPE(iwl->hw_rf_id));
+        return -1;
+    }
+    if (!pnvm_data->n_chunks)
+        return -1;
+    return 0;
+}
+
+int iwl_fw_pnvm_select(struct iwl_ax211_priv *iwl, struct iwl_pnvm_image *out)
+{
+    const uint8_t *data;
+    unsigned long len;
+
+    if (!iwl || !out || !iwl->pnvm_file || iwl->pnvm_file_len < 8)
+        return -1;
+
+    data = iwl->pnvm_file;
+    len = iwl->pnvm_file_len;
+
+    while (len >= 8) {
+        uint32_t tlv_len = le32(data + 4);
+        uint32_t tlv_type = le32(data);
+        unsigned long padded;
+
+        if (len < 8 + tlv_len)
+            break;
+
+        if (tlv_type == IWL_UCODE_TLV_PNVM_SKU &&
+            pnvm_sku_match(iwl->sku_id, data + 8, tlv_len)) {
+            data += 8 + ((tlv_len + 3u) & ~3u);
+            len -= 8 + ((tlv_len + 3u) & ~3u);
+            return pnvm_handle_section(iwl, data, len, out);
+        }
+
+        padded = (tlv_len + 3u) & ~3u;
+        data += 8 + padded;
+        len -= 8 + padded;
+    }
+
+    lx_printk("iwl_fw: pnvm sin SKU 0x%x 0x%x 0x%x\n",
+              (unsigned)iwl->sku_id[0], (unsigned)iwl->sku_id[1],
+              (unsigned)iwl->sku_id[2]);
+    return -1;
 }
 
 static int dram_push(uint64_t *map, int idx, const uint8_t *data, uint32_t len)
