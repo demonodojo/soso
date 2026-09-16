@@ -1,6 +1,7 @@
 # T32 — Inventariar dependencias del OpenCode que se quiere portar
 
-**Hito:** SI-6 · **Tipo:** Inspección acotada · **Estado:** pendiente.  
+**Hito:** SI-6 · **Tipo:** Inspección acotada · **Estado:** pendiente.
+
 **Dependencias:** [T01](T01-base.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Inventario para el modo sin TUI, con lista finita de capacidades que T33 debe co
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C1, C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [docs/SELF-HOSTING.md](../../docs/SELF-HOSTING.md)
 - [crates/soso-abi/src/lib.rs](../../crates/soso-abi/src/lib.rs)
@@ -53,3 +54,8 @@ Entregar `target/self-improvement/tasks/T32/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Incluir dependencias transitivas, instalación offline, bibliotecas nativas y cada utilidad invocada por herramientas de OpenCode. Cada dependencia funcional debe ejecutarse en soso o sustituirse con semántica probada.
+
+Validación nativa: **no aplicable a esta entrega de laboratorio/especificación**. Condiciones adicionales: [T35](T35-opencode-nativo.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

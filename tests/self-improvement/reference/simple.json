@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "nombre": "simple",
+  "modelo": "Qwen/Qwen2.5-Coder-3B-Instruct",
+  "revision": "488639f1ff808d1d3d0ba301aef8c11461451ec5",
+  "mensajes": [
+    {
+      "content": "Di la palabra LISTO y nada más.",
+      "role": "user"
+    }
+  ],
+  "add_generation_prompt": true,
+  "texto": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nDi la palabra LISTO y nada más.<|im_end|>\n<|im_start|>assistant\n",
+  "texto_sha256": "883dae6b75bb02edbedf46b117c2b2173055c56e7ef86a550754db680c709e74",
+  "ids": [
+    151644,
+    8948,
+    198,
+    2610,
+    525,
+    1207,
+    16948,
+    11,
+    3465,
+    553,
+    54364,
+    14817,
+    13,
+    1446,
+    525,
+    264,
+    10950,
+    17847,
+    13,
+    151645,
+    198,
+    151644,
+    872,
+    198,
+    21685,
+    1187,
+    72937,
+    26966,
+    46,
+    379,
+    38211,
+    10918,
+    13,
+    151645,
+    198,
+    151644,
+    77091,
+    198
+  ],
+  "ids_sha256": "25665b20686a9c9f87f330679a4c750b8a0af76d41837bf024deb2a5cfee470a",
+  "especiales": {
+    "<|endoftext|>": 151643,
+    "<|im_end|>": 151645,
+    "<|im_start|>": 151644
+  },
+  "generador": {
+    "herramienta": "tokenizer-ref 0.1.0",
+    "tokenizers": "tokenizers 0.20",
+    "minijinja": "minijinja 2",
+    "tokenizer_json_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+    "tokenizer_config_sha256": "959e7f1d9a1b7641a6d6ce05ca97b75c7894fcb66cbe5a040406458fb1128ee4"
+  }
+}

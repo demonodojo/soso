@@ -1,0 +1,20 @@
+[package]
+name = "tokenizer-ref"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Generador **offline** de fixtures de referencia (ficha T03).
+#
+# Está fuera del workspace a propósito: usa la implementación oficial de
+# Hugging Face (`tokenizers`, la misma que sirve `tokenizer.json`) y su
+# plantilla Jinja, y eso no debe convertirse en dependencia de build del
+# proyecto. Se ejecuta a mano al preparar los fixtures; lo que compara esos
+# fixtures con el tokenizer de soso es código del propio proyecto.
+
+[dependencies]
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+minijinja = { version = "2", features = ["json", "loader"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"

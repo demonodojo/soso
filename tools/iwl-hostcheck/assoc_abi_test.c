@@ -1,5 +1,6 @@
 /* Host: PHY (sin BINDING extra), MAC is_assoc=0, ADD_STA, SESSION_PROTECTION (AX200)
- * o TIME_EVENT (legacy), TX AUTH/ASSOC y MAC is_assoc=1 (Linux 6.6.32). */
+ * o TIME_EVENT (legacy), TX AUTH/ASSOC, MAC is_assoc=0 post-ASSOC, beacon+TBTT,
+ * MAC is_assoc=1 (Linux 6.6.32 mac-ctxt.c). */
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -10,6 +11,8 @@
 #include "iwl_ax211.h"
 
 #define MAC_CONTEXT_CMD 0x28
+#define IWL_MLME_BI_DEFAULT 100u
+#define IWL_MLME_LISTEN_INT 10u
 
 struct cmd_rec {
     uint8_t group;
@@ -57,9 +60,34 @@ void lx_dma_free_coherent(void *dev, size_t size, void *cpu, uint64_t dma)
     free(cpu);
 }
 
+static void inject_beacon(struct iwl_ax211_priv *iwl, int zero_tsf)
+{
+    uint8_t bc[64];
+    int pos = 24 + 12;
+
+    memset(bc, 0, sizeof(bc));
+    bc[0] = (uint8_t)IEEE80211_STYPE_BEACON;
+    memcpy(bc + 16, iwl->bssid, 6);
+    bc[32] = 100;
+    bc[33] = 0;
+    bc[pos] = WLAN_EID_TIM;
+    bc[pos + 1] = 4;
+    bc[pos + 2] = 0;
+    bc[pos + 3] = 1;
+    if (!zero_tsf) {
+        iwl->sync_tsf = 1000000;
+        iwl->sync_device_ts = 500000;
+    } else {
+        iwl->sync_tsf = 0;
+        iwl->sync_device_ts = 0;
+    }
+    iwl_mvm_rx_mlme_frame(iwl, bc, pos + 6);
+}
+
 void iwl_trans_poll(struct iwl_ax211_priv *iwl)
 {
-    (void)iwl;
+    if (iwl && iwl->assoc_pending_beacon && !iwl->sync_beacon_seen)
+        inject_beacon(iwl, 0);
 }
 
 void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl)
@@ -102,8 +130,6 @@ static void inject_mlme_rx(struct iwl_ax211_priv *iwl, const void *payload,
     rx[0] = (uint8_t)IEEE80211_STYPE_ASSOC_RESP;
     rx[24] = (uint8_t)WLAN_CAPABILITY_ESS;
     rx[28] = 1;
-    iwl->beacon_int = 100;
-    iwl->dtim_period = 1;
     iwl_mvm_rx_mlme_frame(iwl, rx, 30);
 }
 
@@ -839,23 +865,28 @@ static int run_assoc_case(int expect_tlc, int expect_lq)
     {
         unsigned tx_off = (unsigned)sizeof(struct iwl_tx_cmd_gen2);
         int idx_mac1 = find_idx_n(MAC_CONTEXT_CMD, 1);
+        int idx_mac2 = find_idx_n(MAC_CONTEXT_CMD, 2);
         const struct tx_rec *tx0;
         const struct tx_rec *tx1;
         const struct cmd_rec *mac1;
+        const struct cmd_rec *mac2;
         const struct iwl_mac_ctx_cmd *mc1;
+        const struct iwl_mac_ctx_cmd *mc2;
 
-        if (g_tx_n < 2 || idx_mac1 < 0) {
-            fprintf(stderr, "faltan TX data AUTH/ASSOC=%d MAC1=%d\n",
-                    g_tx_n, idx_mac1);
+        if (g_tx_n < 2 || idx_mac1 < 0 || idx_mac2 < 0) {
+            fprintf(stderr, "faltan TX AUTH/ASSOC=%d MAC1=%d MAC2=%d\n",
+                    g_tx_n, idx_mac1, idx_mac2);
             return 1;
         }
-        if (!(idx_sess < idx_mac1)) {
-            fprintf(stderr, "orden SESS(%d) MAC1(%d)\n", idx_sess, idx_mac1);
+        if (!(idx_sess < idx_mac1 && idx_mac1 < idx_mac2)) {
+            fprintf(stderr, "orden SESS(%d) MAC1(%d) MAC2(%d)\n",
+                    idx_sess, idx_mac1, idx_mac2);
             return 1;
         }
         tx0 = &g_tx[0];
         tx1 = &g_tx[1];
         mac1 = &g_sent[idx_mac1];
+        mac2 = &g_sent[idx_mac2];
         if (tx0->txq_id == 0 || tx1->txq_id == 0) {
             fprintf(stderr, "TX mgmt qid=%u/%u (esperado != 0)\n",
                     tx0->txq_id, tx1->txq_id);
@@ -920,21 +951,59 @@ static int run_assoc_case(int expect_tlc, int expect_lq)
             return 1;
         }
         mc1 = (const struct iwl_mac_ctx_cmd *)mac1->payload;
-        if (mc1->u.sta.is_assoc != 1u) {
-            fprintf(stderr, "MAC1 is_assoc=%u (esperado 1 tras AUTH+ASSOC)\n",
+        if (mc1->u.sta.is_assoc != 0u) {
+            fprintf(stderr, "MAC1 is_assoc=%u (esperado 0 post-ASSOC sin DTIM)\n",
                     mc1->u.sta.is_assoc);
             return 1;
         }
-        if (mc1->u.sta.dtim_interval == 0) {
-            fprintf(stderr, "MAC1 dtim_interval=0 (Linux mac-ctxt.c:706)\n");
+        if (mc1->u.sta.bi != iwl_cpu_to_le32(IWL_MLME_BI_DEFAULT)) {
+            fprintf(stderr, "MAC1 bi=0x%x (esperado %u, Linux mac-ctxt.c:706)\n",
+                    mc1->u.sta.bi, (unsigned)IWL_MLME_BI_DEFAULT);
             return 1;
         }
-        if (mc1->filter_flags & IWL_MAC_FILTER_IN_BEACON) {
-            fprintf(stderr, "MAC1 filter sigue con IN_BEACON=0x%x\n", mc1->filter_flags);
+        if (mc1->u.sta.dtim_interval != 0) {
+            fprintf(stderr, "MAC1 dtim_interval=0x%x (esperado 0 sin TIM aún)\n",
+                    mc1->u.sta.dtim_interval);
             return 1;
         }
-        if ((mc1->filter_flags & IWL_MAC_FILTER_ACCEPT_GRP) == 0) {
-            fprintf(stderr, "MAC1 filter_flags=0x%x sin ACCEPT_GRP\n", mc1->filter_flags);
+        if (mc1->u.sta.listen_interval != iwl_cpu_to_le32(IWL_MLME_LISTEN_INT)) {
+            fprintf(stderr, "MAC1 listen_interval=0x%x\n", mc1->u.sta.listen_interval);
+            return 1;
+        }
+        if (mc1->u.sta.assoc_id != iwl_cpu_to_le32(1u)) {
+            fprintf(stderr, "MAC1 assoc_id=0x%x (esperado 1 tras ASSOC)\n",
+                    mc1->u.sta.assoc_id);
+            return 1;
+        }
+        if ((mc1->filter_flags & IWL_MAC_FILTER_IN_BEACON) == 0) {
+            fprintf(stderr, "MAC1 filter_flags=0x%x sin IN_BEACON\n", mc1->filter_flags);
+            return 1;
+        }
+        if (mac2->len != sizeof(struct iwl_mac_ctx_cmd)) {
+            fprintf(stderr, "MAC2 len=%u\n", mac2->len);
+            return 1;
+        }
+        mc2 = (const struct iwl_mac_ctx_cmd *)mac2->payload;
+        if (mc2->u.sta.is_assoc != 1u) {
+            fprintf(stderr, "MAC2 is_assoc=%u (esperado 1 tras beacon+TBTT)\n",
+                    mc2->u.sta.is_assoc);
+            return 1;
+        }
+        if (mc2->u.sta.dtim_interval == 0) {
+            fprintf(stderr, "MAC2 dtim_interval=0 (Linux mac-ctxt.c:706)\n");
+            return 1;
+        }
+        if (mc2->u.sta.dtim_tsf == 0 || mc2->u.sta.dtim_time == 0) {
+            fprintf(stderr, "MAC2 TBTT cero (dtim_tsf=0x%llx dtim_time=0x%x)\n",
+                    (unsigned long long)mc2->u.sta.dtim_tsf, mc2->u.sta.dtim_time);
+            return 1;
+        }
+        if (mc2->filter_flags & IWL_MAC_FILTER_IN_BEACON) {
+            fprintf(stderr, "MAC2 filter sigue con IN_BEACON=0x%x\n", mc2->filter_flags);
+            return 1;
+        }
+        if ((mc2->filter_flags & IWL_MAC_FILTER_ACCEPT_GRP) == 0) {
+            fprintf(stderr, "MAC2 filter_flags=0x%x sin ACCEPT_GRP\n", mc2->filter_flags);
             return 1;
         }
     }
@@ -971,6 +1040,32 @@ static int run_assoc_case(int expect_tlc, int expect_lq)
         return 1;
     }
 
+    return 0;
+}
+
+static int test_beacon_tsf_zero(void)
+{
+    struct iwl_ax211_priv iwl;
+    static const uint8_t bssid[6] = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
+
+    memset(&iwl, 0, sizeof(iwl));
+    memcpy(iwl.bssid, bssid, 6);
+    iwl.assoc_pending_beacon = 1;
+    iwl.sync_tsf = 0;
+    iwl.sync_device_ts = 0;
+    inject_beacon(&iwl, 1);
+    if (!iwl.sync_beacon_seen) {
+        fprintf(stderr, "beacon TSF=0: sync_beacon_seen sigue en 0\n");
+        return 1;
+    }
+    if (!iwl.dtim_period) {
+        fprintf(stderr, "beacon TSF=0: dtim_period no parseado\n");
+        return 1;
+    }
+    if (iwl.sync_tsf != 0 || iwl.sync_device_ts != 0) {
+        fprintf(stderr, "beacon TSF=0: tsf/gp2 cambiaron inesperadamente\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -1077,6 +1172,10 @@ int main(void)
     if (run_assoc_case(0, 1) != 0)
         return 1;
     puts("OK: assoc legacy — LQ_CMD + SCD v3 + SESSION_PROT");
+
+    if (test_beacon_tsf_zero() != 0)
+        return 1;
+    puts("OK: beacon v1 TSF=0/GP2=0 aún marca TIM seen (Linux rxmq.c no descarta)");
 
     if (test_eapol_lazy_data_txq() != 0)
         return 1;

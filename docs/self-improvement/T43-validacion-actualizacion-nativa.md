@@ -1,6 +1,7 @@
 # T43 — Validar y recuperar candidatos construidos en soso
 
-**Hito:** SI-7 · **Tipo:** Integración · **Estado:** pendiente.  
+**Hito:** SI-7 · **Tipo:** Integración · **Estado:** pendiente.
+
 **Dependencias:** [T31](T31-restauracion.md), [T37](T37-mejora-nativa-forja.md), [T42](T42-c-link-imagen.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Un candidato producido en soso tiene aceptación independiente y recuperación c
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [xtask/src/test_update.rs](../../xtask/src/test_update.rs)
 - [crates/soso-update-core/src/lib.rs](../../crates/soso-update-core/src/lib.rs)
@@ -35,7 +36,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 ## Comprobación
 
-Pruebas nativas equivalentes del perfil, boot candidato y fallos controlados kernel/rootfs. Cualquier verificador que siga en otra máquina figura con su papel y límites.
+Pruebas nativas equivalentes del perfil, boot candidato y fallos controlados kernel/rootfs. Una segunda máquina es válida si también ejecuta soso; un verificador o controlador Linux obligatorio bloquea el cierre.
 
 Los comandos de crates, scripts o subcomandos nuevos se ejecutan **después de
 crearlos en esta tarea o en sus dependencias**. Guardar salida y exit code;
@@ -53,3 +54,8 @@ Entregar `target/self-improvement/tasks/T43/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Mapear cada suite obligatoria a prueba nativa equivalente. Definir receptor soso de candidatos, arranque, observación y recuperación nativos; conservar hashes y resultados bajo autoridad independiente. QEMU/SSH controlados desde Linux solo acreditan desarrollo.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

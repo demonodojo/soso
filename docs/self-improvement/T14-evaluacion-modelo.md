@@ -1,7 +1,8 @@
 # T14 — Medir calidad y fijar presupuestos antes de usar el agente
 
-**Hito:** SI-0 / SI-1 · **Tipo:** Implementación de evaluación e integración · **Estado:** pendiente.  
-**Dependencias:** [T02](T02-banco.md), [T03](T03-perfil-modelo.md), [T13](T13-servidor-host.md)
+**Hito:** SI-0 / SI-1 · **Tipo:** Implementación de evaluación e integración · **Estado:** pendiente.
+
+**Dependencias:** [T02](T02-banco.md), [T03](T03-perfil-modelo.md), [T13](T13-servidor-host.md), [T48](T48-reloj-red.md)
 
 ## Objetivo y entrega
 
@@ -10,15 +11,17 @@ Modelo apto demostrado y presupuestos medidos, o no-go justificado con la siguie
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C2–C3, C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [SELF_IMPROVEMENT.md](../../SELF_IMPROVEMENT.md)
 - [crates/soso-llm-core/examples/hostrun.rs](../../crates/soso-llm-core/examples/hostrun.rs)
+- [crates/soso-improve-core/src/entorno.rs](../../crates/soso-improve-core/src/entorno.rs)
+- [user/soso-improve/src/main.rs](../../user/soso-improve/src/main.rs)
 
 ## Archivos que se pueden cambiar
 
-Añadir la evaluación a `crates/soso-improve-core` (lógica portable) con su orden en `tools/soso-improve` y pruebas en el mismo crate, más `docs/self-improvement/evaluacion.md`.
+Añadir la evaluación a `crates/soso-improve-core` (lógica portable) con su orden en `tools/soso-improve` y `user/soso-improve` y pruebas en el mismo crate, más `docs/self-improvement/evaluacion.md`.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
@@ -31,7 +34,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 ## Pasos
 
-1. Consumir el banco T02 y un endpoint explícito. Medir con reloj monotónico host: primer byte útil, primer token, fin, tokens reales, memoria reportada y fallos.
+1. Consumir el banco T02 y un endpoint explícito. Medir con el reloj monotónico inyectado de T48 (adaptadores host y soso): primer byte útil, primer token, fin, tokens reales, memoria reportada y fallos.
 2. Ejecutar cada caso tres veces con semillas registradas. Separar frío/caliente y corrección/velocidad; incluir todos los intentos en el denominador.
 3. Usar verificadores reservados fuera del contexto del modelo. Ejercitar tool request → resultado de herramienta → siguiente petición.
 4. Probar contexto representativo de OpenCode y el caso de 8 Ki tokens si cabe. Fijar límite de salida, timeouts finitos y presupuesto por tarea en model-lock.
@@ -57,3 +60,8 @@ Entregar `target/self-improvement/tasks/T14/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T16](T16-servicio-guest.md), [T41](T41-cargo-offline.md), [T48](T48-reloj-red.md), [T49](T49-pruebas-guest.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

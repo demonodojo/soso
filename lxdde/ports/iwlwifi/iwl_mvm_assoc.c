@@ -9,10 +9,10 @@ extern int memcmp(const void *a, const void *b, unsigned long n);
 extern char *strncpy(char *dst, const char *src, unsigned long n);
 
 #define MAC_CONTEXT_CMD            0x28
-#define IWL_MLME_WAIT_ITERS      50
-#define IWL_MLME_LISTEN_INT     10u
-#define IWL_MLME_BI_DEFAULT      100u
-#define IWL_MLME_DTIM_DEFAULT    1u
+#define IWL_MLME_WAIT_ITERS           50
+#define IWL_MLME_BEACON_WAIT_ITERS   100
+#define IWL_MLME_LISTEN_INT           10u
+#define IWL_MLME_BI_DEFAULT          100u
 
 static int bssid_is_zero(const uint8_t *bssid)
 {
@@ -65,8 +65,16 @@ static void parse_tim_ie(struct iwl_ax211_priv *iwl, const uint8_t *frame, int l
 
         if (pos + 2 + (int)elen > len)
             break;
-        if (id == WLAN_EID_TIM && elen >= 2 && frame[pos + 3]) {
-            iwl->dtim_period = frame[pos + 3];
+        if (id == WLAN_EID_TIM && elen >= 2) {
+            iwl->sync_dtim_count = frame[pos + 2];
+            if (frame[pos + 3])
+                iwl->dtim_period = frame[pos + 3];
+            iwl->sync_beacon_seen = 1;
+            lx_printk("iwl_mvm: beacon TIM dtim_count=%u dtim_period=%u bi=%u tsf=%llu gp2=%u\n",
+                      (unsigned)iwl->sync_dtim_count, (unsigned)iwl->dtim_period,
+                      (unsigned)iwl->beacon_int,
+                      (unsigned long long)iwl->sync_tsf,
+                      (unsigned)iwl->sync_device_ts);
             break;
         }
         pos += 2 + elen;
@@ -126,6 +134,8 @@ void iwl_mvm_rx_mlme_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
             return;
         status = (uint16_t)frame[26] | ((uint16_t)frame[27] << 8);
         aid = (uint16_t)frame[28] | ((uint16_t)frame[29] << 8);
+        lx_printk("iwl_mvm: rx ASSOC status=%u aid=%u\n",
+                  (unsigned)status, (unsigned)(aid & 0x3fffu));
         if (status == 0) {
             iwl->assoc_id = aid & 0x3fffu;
             if (!iwl->assoc_id)
@@ -133,6 +143,19 @@ void iwl_mvm_rx_mlme_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
             iwl->mlme_assoc_ok = 1;
         }
     }
+}
+
+static void iwl_mvm_set_fw_dtim_tbtt(struct iwl_ax211_priv *iwl,
+                                     uint64_t *dtim_tsf, uint32_t *dtim_time,
+                                     uint32_t *assoc_beacon_arrive_time)
+{
+    uint32_t dtim_offs;
+
+    dtim_offs = (uint32_t)iwl->sync_dtim_count * (uint32_t)iwl->beacon_int;
+    dtim_offs *= 1024u;
+    *dtim_tsf = iwl->sync_tsf + dtim_offs;
+    *dtim_time = iwl->sync_device_ts + dtim_offs;
+    *assoc_beacon_arrive_time = iwl->sync_device_ts;
 }
 
 static int iwl_mvm_mac_context_assoc(struct iwl_ax211_priv *iwl,
@@ -150,20 +173,26 @@ static int iwl_mvm_mac_context_assoc(struct iwl_ax211_priv *iwl,
     cmd.cck_rates = 0x0fu;
     cmd.ofdm_rates = 0xffu;
     iwl_mvm_mac_qos_defaults(cmd.ac);
-    /* Linux mac-ctxt.c:680–711: is_assoc=1 solo con assoc y dtim_period. */
+    cmd.filter_flags = IWL_MAC_FILTER_ACCEPT_GRP;
+    /* Linux mac-ctxt.c:680–690: is_assoc=1 solo con assoc y dtim_period. */
     if (is_assoc && iwl->dtim_period) {
-        cmd.filter_flags = IWL_MAC_FILTER_ACCEPT_GRP;
         cmd.u.sta.is_assoc = 1u;
-        cmd.u.sta.bi = iwl_cpu_to_le32(iwl->beacon_int);
-        cmd.u.sta.dtim_interval =
-            iwl_cpu_to_le32((uint32_t)iwl->beacon_int * iwl->dtim_period);
-        cmd.u.sta.listen_interval = iwl_cpu_to_le32(IWL_MLME_LISTEN_INT);
-        cmd.u.sta.assoc_id = iwl_cpu_to_le32(iwl->assoc_id);
+        iwl_mvm_set_fw_dtim_tbtt(iwl, &cmd.u.sta.dtim_tsf, &cmd.u.sta.dtim_time,
+                                 &cmd.u.sta.assoc_beacon_arrive_time);
     } else {
-        cmd.filter_flags = IWL_MAC_FILTER_ACCEPT_GRP | IWL_MAC_FILTER_IN_BEACON;
+        cmd.filter_flags |= IWL_MAC_FILTER_IN_BEACON;
         if (iwl->auth_ctl_filter)
             cmd.filter_flags |= IWL_MAC_FILTER_IN_CONTROL_AND_MGMT;
         cmd.u.sta.is_assoc = 0u;
+    }
+    /* Linux mac-ctxt.c:706–711: bi/dtim_interval/listen/aid siempre. */
+    {
+        uint32_t bi = iwl->beacon_int ? iwl->beacon_int : IWL_MLME_BI_DEFAULT;
+
+        cmd.u.sta.bi = iwl_cpu_to_le32(bi);
+        cmd.u.sta.dtim_interval = iwl_cpu_to_le32(bi * (uint32_t)iwl->dtim_period);
+        cmd.u.sta.listen_interval = iwl_cpu_to_le32(IWL_MLME_LISTEN_INT);
+        cmd.u.sta.assoc_id = iwl_cpu_to_le32(iwl->assoc_id ? iwl->assoc_id : 1u);
     }
     return iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, MAC_CONTEXT_CMD, &cmd,
                                    (uint16_t)sizeof(cmd), IWL_MVM_HCMD_TIMEOUT_MS);
@@ -449,6 +478,26 @@ static int wait_mlme_flag(struct iwl_ax211_priv *iwl, uint8_t *flag)
     return -1;
 }
 
+static int iwl_mvm_wait_assoc_beacon(struct iwl_ax211_priv *iwl)
+{
+    int i;
+
+    for (i = 0; i < IWL_MLME_BEACON_WAIT_ITERS; i++) {
+        unsigned p;
+
+        if (iwl->dtim_period && iwl->sync_beacon_seen)
+            return 0;
+        for (p = 0; p < 4; p++)
+            iwl_trans_poll(iwl);
+        if (iwl->dtim_period && iwl->sync_beacon_seen)
+            return 0;
+        lx_mdelay(20);
+    }
+    lx_printk("iwl_mvm: beacon/DTIM timeout (dtim=%u sync=%u)\n",
+              (unsigned)iwl->dtim_period, (unsigned)iwl->sync_beacon_seen);
+    return -1;
+}
+
 static int iwl_mvm_mlme_auth_assoc(struct iwl_ax211_priv *iwl, const char *ssid,
                                    const uint8_t *bssid)
 {
@@ -461,10 +510,6 @@ static int iwl_mvm_mlme_auth_assoc(struct iwl_ax211_priv *iwl, const char *ssid,
     iwl->assoc_id = 0;
     iwl->last_mgmt_tx_status = 0;
     /* auth_ctl_filter queda como lo dejó assoc_prepare (IN_CONTROL_AND_MGMT). */
-    if (!iwl->beacon_int)
-        iwl->beacon_int = IWL_MLME_BI_DEFAULT;
-    if (!iwl->dtim_period)
-        iwl->dtim_period = IWL_MLME_DTIM_DEFAULT;
 
     for (attempt = 0; attempt < 2; attempt++) {
         if (attempt == 1) {
@@ -512,10 +557,6 @@ auth_ok:
         lx_printk("iwl_mvm: ASSOC timeout\n");
         return -1;
     }
-    if (!iwl->dtim_period)
-        iwl->dtim_period = IWL_MLME_DTIM_DEFAULT;
-    if (!iwl->beacon_int)
-        iwl->beacon_int = IWL_MLME_BI_DEFAULT;
     if (!iwl->assoc_id)
         iwl->assoc_id = 1;
     return 0;
@@ -527,6 +568,12 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
     iwl->associated = 0;
     iwl->mlme_auth_ok = 0;
     iwl->mlme_assoc_ok = 0;
+    iwl->dtim_period = 0;
+    iwl->sync_tsf = 0;
+    iwl->sync_device_ts = 0;
+    iwl->sync_dtim_count = 0;
+    iwl->sync_beacon_seen = 0;
+    iwl->assoc_pending_beacon = 0;
     strncpy(iwl->ssid, ssid, IWL_AX211_SSID_MAX);
     iwl->ssid[IWL_AX211_SSID_MAX] = '\0';
     memcpy(iwl->bssid, bssid, 6);
@@ -583,6 +630,16 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
         return -1;
     }
     iwl->auth_ctl_filter = 0;
+    if (iwl_mvm_mac_context_assoc(iwl, bssid, 0) != 0) {
+        lx_printk("iwl_mvm: MAC_CONTEXT post-ASSOC is_assoc=0 falló\n");
+        return -1;
+    }
+    iwl->assoc_pending_beacon = 1;
+    if (iwl_mvm_wait_assoc_beacon(iwl) != 0) {
+        iwl->assoc_pending_beacon = 0;
+        return -1;
+    }
+    iwl->assoc_pending_beacon = 0;
     if (iwl_mvm_mac_context_assoc(iwl, bssid, 1) != 0) {
         lx_printk("iwl_mvm: MAC_CONTEXT is_assoc=1 falló\n");
         return -1;

@@ -1,6 +1,7 @@
 # T42 — Cerrar C, ensamblador y empaquetado por perfil
 
-**Hito:** SI-7 · **Tipo:** Especificación e integración por componente · **Estado:** pendiente.  
+**Hito:** SI-7 · **Tipo:** Especificación e integración por componente · **Estado:** pendiente.
+
 **Dependencias:** [T38](T38-toolchain-inventario.md), [T41](T41-cargo-offline.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Build y empaquetado nativos del perfil declarado, con ninguna herramienta oculta
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C1, C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [xtask/src/lx_build.rs](../../xtask/src/lx_build.rs)
 - [xtask/src/release.rs](../../xtask/src/release.rs)
@@ -55,3 +56,8 @@ Entregar `target/self-improvement/tasks/T42/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La receta Rust ejecuta C/asm/linker y empaqueta el perfil íntegramente en soso. Extraer lógica portable de xtask y portar sus dependencias; no ejecutar scripts Linux ni excluir drivers silenciosamente.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

@@ -1,6 +1,7 @@
 # T03 — Fijar un modelo y obtener fixtures independientes de su chat
 
-**Hito:** SI-0 / SI-1 · **Tipo:** Inspección y fixtures · **Estado:** pendiente.  
+**Hito:** SI-0 / SI-1 · **Tipo:** Inspección y fixtures · **Estado:** completada (16 de septiembre de 2026; perfil en [modelo.md](modelo.md), resumen en [seguimiento/T03.md](seguimiento/T03.md)).
+
 **Dependencias:** [T01](T01-base.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Perfil candidato identificable y fixtures reproducibles; diferencias del tokeniz
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C1–C2**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [rootfs/etc/llm.conf](../../rootfs/etc/llm.conf)
 - [xtask/src/live_models.rs](../../xtask/src/live_models.rs)
@@ -20,7 +21,7 @@ se obtienen de las dependencias; todavía no existen en la base del plan.
 
 ## Archivos que se pueden cambiar
 
-Crear `tests/self-improvement/model-profile.schema.json`, fixtures pequeños en `tests/self-improvement/reference/` y `docs/self-improvement/modelo.md`. Pesos y herramientas externas permanecen fuera de Git.
+Crear `tests/self-improvement/model-profile.schema.json`, fixtures pequeños en `tests/self-improvement/reference/` y `docs/self-improvement/modelo.md`. Pesos y herramientas externas permanecen fuera de Git. Añadir el comparador Rust de fixtures y su entrada guest, reutilizando tokenizer de core y el runner T49 cuando esté disponible.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
@@ -30,7 +31,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 1. Inventariar modelos disponibles localmente. Evaluar primero el candidato Qwen2.5-Coder de C1; si falta, registrar la ubicación de entrada necesaria. No seleccionar tiny sintético como candidato de programación.
 2. Guardar `model-lock.json` en artefactos: origen/revisión, arquitectura, cuantización, hashes, familia, plantilla original, tokenizer original, manifest/index `.som` y parámetros de referencia.
-3. Usar el tokenizer oficial de esa revisión para obtener texto renderizado y token IDs de cinco conversaciones: simple, system, historial, esquema de herramienta y resultado de herramienta. Guardar script/comando y versiones con los fixtures.
+3. Usar el tokenizer oficial de esa revisión para obtener texto renderizado y token IDs de cinco conversaciones: simple, system, historial, esquema de herramienta y resultado de herramienta. Guardar comando, versiones y hashes de referencia con los fixtures. El generador externo se usa offline durante preparación; el comparador y el tokenizer de ejecución deben correr en soso.
 4. Comparar los IDs con el tokenizer `.som` actual. Identificar la primera divergencia y clasificarla: token especial, normalización, segmentación, conversión o plantilla.
 5. Fijar el formato exacto de llamada de la familia, stops y tratamiento de errores. Publicar perfil candidato aunque la calidad siga pendiente; T14 decidirá si sirve para el agente.
 
@@ -44,9 +45,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Si faltan pesos/tokenizer originales, entregar inventario y entrada pendiente. No inventar IDs ni inferir soporte de herramientas a partir de ChatML.
 
@@ -54,3 +55,8 @@ Entregar `target/self-improvement/tasks/T03/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). El generador oficial solo prepara fixtures independientes offline con revisión y hashes. El consumo y comparación se ejecutan en Rust dentro de soso; nunca depender de Python por petición ni usar el renderer probado como su propio oráculo.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T49](T49-pruebas-guest.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

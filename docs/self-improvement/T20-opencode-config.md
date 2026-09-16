@@ -1,6 +1,7 @@
 # T20 — Configurar OpenCode para el proveedor soso
 
-**Hito:** SI-3 · **Tipo:** Configuración · **Estado:** pendiente.  
+**Hito:** SI-3 · **Tipo:** Configuración · **Estado:** pendiente.
+
 **Dependencias:** [T14](T14-evaluacion-modelo.md), [T19](T19-qemu-e2e.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Configuración reproducible con solo proveedor previsto para la ejecución y lí
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C3, C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [SELF_IMPROVEMENT.md](../../SELF_IMPROVEMENT.md)
 
@@ -51,3 +52,8 @@ Entregar `target/self-improvement/tasks/T20/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Configuración y credenciales tienen rutas explícitas en soso. T35 instala offline runtime, proveedor y herramientas; no descargar paquetes ni depender de un home Linux durante una campaña.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T35](T35-opencode-nativo.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

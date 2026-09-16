@@ -427,6 +427,31 @@ static void parse_rx_mpdu(struct iwl_ax211_priv *iwl, const uint8_t *data, int l
     frame = data + desc_size;
     if (flen <= 0 || desc_size + (size_t)flen > (size_t)len)
         return;
+    if (iwl->assoc_pending_beacon && flen >= 24) {
+        uint16_t fc = (uint16_t)frame[0] | ((uint16_t)frame[1] << 8);
+        uint16_t stype = fc & IEEE80211_FC_STYPE_MASK;
+        int bi;
+
+        if (stype == IEEE80211_STYPE_BEACON) {
+            for (bi = 0; bi < 6; bi++) {
+                if (frame[16 + bi] != iwl->bssid[bi])
+                    break;
+            }
+            if (bi == 6) {
+                uint64_t tsf = 0;
+                uint32_t gp2 = 0;
+
+                iwl_rx_mpdu_sync_times(data, len, iwl->gen3, &tsf, &gp2);
+                if (tsf)
+                    iwl->sync_tsf = tsf;
+                if (gp2)
+                    iwl->sync_device_ts = gp2;
+                lx_printk("iwl_mvm: beacon sync tsf=%llu gp2=%u (gen3=%u)\n",
+                          (unsigned long long)tsf, (unsigned)gp2,
+                          (unsigned)iwl->gen3);
+            }
+        }
+    }
     iwl_mvm_rx_scan_frame(iwl, frame, flen);
     iwl_mvm_rx_mlme_frame(iwl, frame, flen);
 

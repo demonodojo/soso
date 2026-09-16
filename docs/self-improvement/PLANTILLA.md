@@ -38,11 +38,23 @@ manifiestos y documentación necesarios. Separar capacidades independientes.
 De tres a seis pasos concretos que produzcan un solo cambio observable.
 Si un paso dice «completar el runtime/compilador», volver a dividirlo.
 
+## Ejecución dentro de soso
+
+Aplicar [NATIVO.md](NATIVO.md). Indicar módulo de lógica portable, adaptador
+guest, capacidades de ABI y comandos externos invocados. Para cada dependencia
+de bootstrap, fijar sustitución nativa y prueba que acredita su retirada.
+Distinguir depends_on de condiciones native_validation.requires. Especificar
+raíz de artefactos guest y estado nativo pending/partial/verified con evidencia.
+No presuponer std, Git, shell POSIX, Python, Cargo/libtest o sandbox Linux.
+
 ## Comprobación
 
 Comando, cwd, entradas y resultado esperado. Al menos un caso negativo relevante.
 El test debe fallar con la base cuando se trata de un defecto y pasar con el cambio.
 Indicar cuándo hacen falta pesos reales, QEMU, build externo o hardware.
+Separar prueba rápida host y prueba guest con comando, entradas y exit code;
+un build cruzado no acredita la segunda. En integración final, cualquier
+operación funcional externa pendiente impide el cierre.
 
 ## Entrega y cierre
 

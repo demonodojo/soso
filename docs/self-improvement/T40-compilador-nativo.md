@@ -1,6 +1,7 @@
 # T40 — Descomponer y acreditar el port del compilador
 
-**Hito:** SI-7 · **Tipo:** Especificación e integración condicionada · **Estado:** pendiente.  
+**Hito:** SI-7 · **Tipo:** Especificación e integración condicionada · **Estado:** pendiente.
+
 **Dependencias:** [T38](T38-toolchain-inventario.md), [T39](T39-bootstrap-libstd.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Todas las C-xxx necesarias están implementadas y rustc ejecutado en soso genera
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C1, C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [user/soso-rustc/src/main.rs](../../user/soso-rustc/src/main.rs)
 - [config/rust-soso/sys/pal/soso/dl.rs](../../config/rust-soso/sys/pal/soso/dl.rs)
@@ -54,3 +55,8 @@ Entregar `target/self-improvement/tasks/T40/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Acreditar que rustc se ejecuta en soso y documentar la receta de reconstrucción desde una semilla identificada. La reconstrucción completa de la toolchain se prueba en T51, después de disponer de Cargo T41 y las herramientas T42; no bloquear el port inicial con su propio bootstrap. Registrar ejecutables transitivos y plataforma; un compilador que solo ejecuta en Linux no satisface esta ficha.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

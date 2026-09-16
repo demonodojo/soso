@@ -44,11 +44,15 @@ La captura solo lee (sale con 3 si el árbol cambia mientras lee) y guarda el
 es copiar archivos. Lo que no es fuente se decide leyendo el `.gitignore` del
 árbol, no con una lista escrita a mano.
 
-El mismo binario existe dentro de soso (`/bin/soso-improve`): la lógica vive en
-`crates/soso-improve-core` (`no_std + alloc`) y cada lado pone su entorno —`std`
-en el host, `spawn_io`/`getdents` en el guest—. Dentro de soso funcionan
-`capturar`, `reconstruir`, `banco` y `protocolo`; `programa` necesita un
-compilador real (T40) y `repo`, cargo (T41).
+Existe un adaptador guest en `user/soso-improve`: comparte lógica con
+`crates/soso-improve-core` (`no_std + alloc`) y usa libsoso. Tiene órdenes
+`capturar`, `reconstruir`, `banco` y `protocolo`, con sintaxis todavía distinta
+del host. No asumir paridad por compartir core: T45/T49 deben acreditar CLI,
+exit codes y pruebas guest; T47 debe preservar argv, stdin/env, canales, cwd
+y timeout. `programa` necesita compilador real T40 y `repo`, Cargo T41 y
+referencias portables T50. Consultar el
+[contrato nativo](../../../docs/self-improvement/NATIVO.md) y registrar
+`native_validation` separado del cierre histórico de T01/T02.
 
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
 Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).

@@ -160,6 +160,12 @@ struct iwl_ax211_priv {
     uint8_t dtim_period;
     uint16_t beacon_int;
     uint16_t assoc_id;
+    /* Sincronización del último beacon del BSSID (Linux bss_conf sync_*). */
+    uint64_t sync_tsf;
+    uint32_t sync_device_ts;
+    uint8_t sync_dtim_count;
+    uint8_t sync_beacon_seen;
+    uint8_t assoc_pending_beacon;
     uint8_t scan_rx_ant;
     uint32_t phy_sku;
     uint8_t fw_valid_tx_ant;

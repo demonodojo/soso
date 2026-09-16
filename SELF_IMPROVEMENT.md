@@ -1,27 +1,32 @@
 # Automejora de soso con OpenCode y su modelo local
 
-**Fecha:** 15 de septiembre de 2026.  
-**Estado:** plan de implementación; hitos SI-0–SI-7 pendientes.  
+**Fecha:** 15 de septiembre de 2026; revisión nativa: 16 de septiembre.
+
+**Estado:** plan de implementación; hitos SI-0–SI-7 pendientes.
+
 **Objetivo:** que un agente OpenCode use un modelo servido por el runtime de
 soso para leer el proyecto, realizar mejoras pequeñas, compilarlas, probarlas
 y acumular mejoras verificadas del propio sistema.
 
-**Subplanes para implementación:** [índice de 44 fichas](docs/self-improvement/README.md),
+**Subplanes para implementación:** [índice de 51 fichas](docs/self-improvement/README.md),
 [contratos compartidos](docs/self-improvement/CONTRATO.md) y
 [catálogo de dependencias](docs/self-improvement/tasks.json). Cada ficha fija
 contexto mínimo, archivos, pasos, pruebas y cierre.
-[T01 — Base reproducible](docs/self-improvement/T01-base.md) está completada
-(`tools/soso-improve`); seguir por
-[T02](docs/self-improvement/T02-banco.md) y
-[T03](docs/self-improvement/T03-perfil-modelo.md). Las fichas de
+[T01 — Base reproducible](docs/self-improvement/T01-base.md) y
+[T02 — Banco](docs/self-improvement/T02-banco.md) conservan su cierre histórico
+y su port a Rust. Seguir por [T03](docs/self-improvement/T03-perfil-modelo.md)
+para el modelo o [T45](docs/self-improvement/T45-cli-capacidades.md) para
+completar el contrato CLI guest. Validación nativa todavía pendiente. Las fichas de
 ports nativos distinguen investigación, implementación por capacidad e
 integración; redactar un inventario no acredita completar un port.
 
 La primera entrega útil ejecutará OpenCode y las herramientas de desarrollo
 en Linux, con **la inferencia dentro de soso**. El destino final es trasladar
-también el agente y la compilación a soso. Cada traslado tendrá una prueba
-independiente: servir un modelo, ejecutar un agente y compilar el sistema son
-capacidades distintas.
+todo el circuito a soso: agente, coordinador, evaluación, herramientas,
+compilación, validación, promoción, recuperación e informes.
+El [contrato nativo](docs/self-improvement/NATIVO.md) exige pruebas de cada
+adaptador y cierre sin dependencias funcionales Linux ni Python. Los usos
+externos de desarrollo/bootstrap tienen una prueba explícita de retirada.
 
 Aquí «modelo propio» significa pesos instalados en `/models` y ejecutados por
 `soso-llm-core`. No presupone entrenar un modelo desde cero. La mejora inicial
@@ -30,8 +35,9 @@ ajustar los pesos será una línea posterior, sometida a evaluaciones separadas.
 
 ## 1. Punto de partida comprobado
 
-Inspección del árbol de trabajo actual, que contiene cambios sin commit. Esta
-revisión documental no certifica que las suites o el hardware estén en verde.
+La inspección inicial es del 15 de septiembre; la revisión del 16 incorpora
+el core y los adaptadores Rust de T01/T02. Esta revisión documental no
+certifica que las suites o el hardware estén en verde.
 
 | Pieza | Qué existe | Qué falta para el objetivo |
 |---|---|---|
@@ -43,7 +49,8 @@ revisión documental no certifica que las suites o el hardware estén en verde.
 | OpenCode | Binario instalado en el host: **1.18.31**, comprobado con `opencode --version` | Proveedor soso y prueba de integración; no se encontró integración en el código inspeccionado |
 | Compilación remota | [`soso-forja-server`](tools/soso-forja-server), árbol de build aislado y cliente guest | Enlazar cada tarea, parche, build y prueba con el mismo identificador |
 | Self-hosting | [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md): ABI, `soso-std`, editor y Forja | `soso-rustc` sigue siendo un stub; `build-local` copia artefactos; Git nativo y toolchain completa pendientes |
-| Verificación | `cargo xtask check`, `cargo xtask test`, suites por subsistema | Banco de tareas de agente y registro de iteraciones reproducibles |
+| Verificación | Banco T02 y `soso-improve-core` con adaptadores host/guest; checks xtask de desarrollo | Equivalencia de verificadores y runner guest T49/T51 |
+| Coordinador | Captura por contenido, banco y protocolos en Rust | CLI/errores T45, persistencia T46, procesos T47, red/reloj T48 y delta sin Git T50; política T23–T29 |
 | Recuperación | OTA de kernel con metadatos y backup | Rootfs sin rollback automático de binarios; usar imágenes descartables al principio |
 
 El host dispone además de [`hostrun`](crates/soso-llm-core/examples/hostrun.rs),
@@ -61,23 +68,27 @@ reciente por equipo prevalece sobre un «GO» histórico de otra configuración.
 
 ## 2. Arquitectura y decisiones
 
+Arquitectura final; los ejecutores Linux solo intervienen en etapas de desarrollo:
+
 ```mermaid
 flowchart LR
-    T[Tarea acotada] --> O[OpenCode en Linux]
-    O -->|HTTP: conversación y herramientas| A[API del modelo en soso]
-    A --> R[soso-llm-core y pesos en /models]
-    O --> W[Checkout aislado de soso]
-    W --> B[Build y pruebas host]
-    B --> Q[QEMU candidato]
-    Q --> E[Resultados y parche verificable]
-    E --> V[Validación independiente]
-    V --> N[Nueva base y siguiente tarea]
+    T[Tarea y base por hash] --> C[Coordinador en soso]
+    C --> O[OpenCode en soso]
+    O --> A[Modelo servido por soso]
+    O --> W[Árbol candidato y herramientas en soso]
+    W --> B[Build nativo]
+    B --> V[Validador independiente en soso]
+    V --> Q[Arranque y recuperación del candidato]
+    Q --> N[Promoción por hash e informe en soso]
+    N --> C
 ```
 
 - **Un servidor de inferencia estable y un sistema candidato separados.**
   Probar un kernel nuevo no debe apagar el modelo que está ayudando a repararlo.
   Inicialmente podrán ser dos VMs; después, una máquina de inferencia y una VM
-  candidata. Reservar RAM/CPU para ambos y serializar builds si compiten.
+  candidata durante desarrollo. El cierre T43/T51 exige también control y
+  recuperación del candidato desde soso (por ejemplo otra máquina soso).
+  Reservar RAM/CPU para ambos y serializar builds si compiten.
 - **API HTTP compatible con Chat Completions.** OpenCode admite proveedores
   personalizados mediante `@ai-sdk/openai-compatible` y `options.baseURL`.
   Esta es la interfaz elegida para el proyecto.
@@ -86,7 +97,7 @@ flowchart LR
   Extraer la gestión reutilizable del modelo desde `askd`; conservar `ask`
   como cliente. El protocolo HTTP tendrá un núcleo compartido `no_std + alloc`
   que se pueda probar en host. Evitar mantener dos cargas del mismo modelo.
-- **Una generación activa al principio.** Cola pequeña y limitada; petición
+- **Una generación activa al principio.** Sin cola de generación; petición
   ocupada o demasiado grande recibe un error explícito. El primer diseño
   reconstruirá el contexto de cada petición; optimizar KV compartida después.
 - **OpenCode ejecuta las herramientas.** El servidor genera solicitudes
@@ -107,9 +118,9 @@ actual en HTTP no resuelve sus límites de historial, tamaño y herramientas.
 
 **Dependencias:** ninguna. **Resultado:** una línea base repetible.
 
-- [ ] Crear un checkout de referencia identificado por commit. Si incluye
-  cambios actuales, conservar también su diff y archivos nuevos; no borrar
-  ni incorporar automáticamente trabajo ajeno.
+- [ ] Conservar una base por inventario y objetos identificados por hash,
+  incluidos archivos nuevos. Commit y diff Git son metadatos opcionales;
+  reconstruir y comparar dentro de soso sin Git (T01/T45/T49/T50).
 - [ ] Registrar versión de OpenCode y dependencias del proveedor, toolchain,
   perfil QEMU, recursos y hashes de kernel, pesos, tokenizer y plantilla.
 - [ ] Ejecutar las comprobaciones base y conservar sus logs antes de dejar
@@ -177,7 +188,8 @@ runtime que ejecuta los pesos dentro del guest.
   no demuestra por sí solo acceso desde el host.
 - [ ] Publicar identidad del modelo, build y backend efectivo en diagnósticos
   correlacionados por petición. Si falta el modelo fijado, devolver error.
-  Para acceso desde LAN, añadir autenticación y limitar el acceso de red.
+  Exigir autenticación desde la primera versión guest y limitar el acceso
+  de red según C3; tcp_listen no permite asumir bind a loopback.
 
 **Cierre:** banco HTTP host y prueba en QEMU con modelo real, incluyendo
 streaming, herramientas, exceso de contexto, cancelación y recuperación.
@@ -210,8 +222,11 @@ de herramientas observadas, no solo una explicación textual de la solución.
 
 **Dependencias:** SI-3. **Resultado:** un ejecutor repetible de tareas pequeñas.
 
-- [ ] Crear un coordinador externo sencillo que asigne una tarea cada vez,
-  prepare el checkout, lance OpenCode y recoja el resultado.
+- [ ] Extender `soso-improve-core` con política de coordinación y adaptadores
+  `tools/soso-improve` / `user/soso-improve`; asignar una tarea cada vez,
+  preparar árbol por contenido, lanzar OpenCode y recoger resultados.
+- [ ] Acreditar CLI, persistencia, procesos, red/reloj, runner y cambios
+  portables (T45–T50); no dejar política en el adaptador std.
 - [ ] Persistir el ciclo:
   `pendiente → reproduciendo → editando → verificando → aceptada/rechazada/bloqueada`.
   Una tarea bloqueada conserva causa, logs y condición para reintentarse.
@@ -288,7 +303,7 @@ permanece pendiente hasta que se ejecute realmente.
 
 **Dependencias:** SI-6 y toolchain de
 [SELF-HOSTING.md](docs/SELF-HOSTING.md). **Resultado:** soso desarrolla una
-nueva versión de sí mismo sin un host Linux de compilación.
+nueva versión de sí mismo con todo el ciclo ejecutado en soso.
 
 - [ ] Completar rustc, Cargo, linker, sysroot y dependencias necesarias para
   compilar las crates y herramientas del sistema dentro de soso.
@@ -297,15 +312,22 @@ nueva versión de sí mismo sin un host Linux de compilación.
   drivers. Llevar también la generación de imágenes y paquetes al guest.
 - [ ] Completar manejo de fuentes y revisiones, pruebas nativas y un destino
   de ensayo independiente. Acreditar cobertura equivalente o documentar los
-  checks que siguen requiriendo otra máquina.
+  checks pendientes de equivalente nativo. Otra instancia soso está permitida;
+  un ejecutor Linux obligatorio bloquea el cierre final.
 - [ ] Ensayar actualización y vuelta a la versión anterior del sistema
   completo con el agente parado o servido por la instancia estable.
-- [ ] Repetir varias mejoras usando solo modelo, agente y toolchain en soso;
-  conservar hashes y trazabilidad de las versiones producidas.
+- [ ] Reconstruir toolchain/herramientas del perfil desde una semilla fijada
+  usando recetas y ejecutables nativos; eliminar x.py, Bash/Python y helpers
+  externos del camino de build, incluidos build.rs y generadores transitivos.
+- [ ] Pasar T51: campaña completa con coordinador, evaluadores, modelo,
+  OpenCode, herramientas, build, pruebas e informes nativos, Forja inaccesible
+  y sin ejecutores Linux. Repetir tres mejoras en T44.
 
 **Cierre final:** soso genera, valida y arranca una versión mejorada de sí
-mismo; el ciclo se repite al menos 3 veces sin edición ni compilación manual
-en Linux y con recuperación demostrada de una versión candidata fallida.
+mismo; el ciclo se repite al menos 3 veces sin ninguna operación funcional
+en Linux, con T51 verificada y recuperación de una versión candidata fallida.
+Registrar cada proceso, plataforma, inputs/outputs y conexiones; la observación
+externa pasiva es opcional y no puede ejecutar validaciones ni recuperar tareas.
 
 ## 4. Contrato de una iteración
 
@@ -314,7 +336,7 @@ Cada tarea deberá incluir:
 | Campo | Contenido |
 |---|---|
 | Problema | Síntoma concreto y forma de reproducirlo |
-| Base | Commit y perfil de ejecución |
+| Base | Hash de inventario/objetos y perfil; commit opcional |
 | Alcance | Rutas y tamaño esperado del cambio |
 | Aceptación | Comportamiento observable y comprobación independiente |
 | Presupuesto | Intentos, herramientas, tokens y tiempo máximo |
@@ -327,8 +349,9 @@ Los builds ejecutan código del repositorio, por lo que el entorno aislado
 debe limitar también sus recursos y accesos. Un worktree separa archivos,
 pero no constituye aislamiento de procesos.
 
-Los criterios de aceptación y el validador quedan fuera del alcance editable
-de la tarea. Si la mejora necesita cambiar pruebas, comprobar el nuevo caso
+Los criterios de aceptación, casos reservados y autoridad validadora quedan
+fuera de la instancia modificable por el candidato. soso es monousuario;
+directorios distintos no garantizan esa separación. Si la mejora necesita cambiar pruebas, comprobar el nuevo caso
 contra la base: debe detectar el defecto antes de aceptar el arreglo. Para
 mejoras de rendimiento, comparar corrección y medidas antes/después bajo el
 mismo perfil. El resumen del modelo nunca sustituye al resultado del comando.
@@ -391,8 +414,9 @@ del binario local. Esta revisión no lanzó una sesión de inferencia.
 
 ## 6. Entregables propuestos y orden inmediato
 
-Las rutas siguientes son propuestas para futuras entregas; este cambio solo
-crea el plan.
+T01/T02 ya aportan core y adaptadores; extenderlos sin recrear las crates.
+Los demás módulos y comandos son propuestas pendientes. Esta revisión
+actualiza documentación, sin acreditar ejecución de campañas.
 
 | Orden | Entregable | Ubicación prevista |
 |---|---|---|
@@ -401,16 +425,20 @@ crea el plan.
 | 3 | Tipos, codec HTTP y eventos comprobables en host | `crates/soso-llm-api/` |
 | 4 | Servicio residente y reenvío QEMU | `user/soso-llm/`, `xtask/` |
 | 5 | Proveedor y agente acotado | `opencode.json`, `.opencode/` |
-| 6 | Coordinador de iteraciones | `tools/soso-improve/` |
-| 7 | Historial de ejecuciones y conocimiento verificado | `target/self-improvement/`, `docs/self-improvement/` |
+| 6 | Coordinador de iteraciones compartido | `crates/soso-improve-core/`, `user/soso-improve/`; adaptador host en `tools/` |
+| 7 | Historial y conocimiento verificado | `/var/self-improvement/` guest, `target/self-improvement/` host, resúmenes en docs |
+| 8 | Mecanismos y aceptación del circuito nativo | T45–T51 y `NATIVO.md` |
 
-**Siguiente paso concreto:** SI-0, seguido de una prueba SI-1 del modelo real
+**Siguiente paso concreto:** T03 (perfil) y T45 (CLI/capacidades) están
+habilitadas; elegir una por sesión. Continuar con una prueba SI-1 del modelo real
 seleccionado que lea un archivo mediante una herramienta y use su resultado
 en el siguiente turno. Esta prueba determina si el cuello de botella es la
 calidad del modelo, el formato de chat o la infraestructura del servidor.
 
 Para los cambios de implementación, ejecutar primero pruebas focalizadas;
-antes de promover una base, `cargo xtask check` y `cargo xtask test`. Añadir
+antes de promover una base de desarrollo, `cargo xtask check` y
+`cargo xtask test`. Para promoción nativa, equivalentes completos T49/T43
+según C6; una comprobación sin equivalente bloquea T51/T44. Añadir
 las suites del subsistema afectado, como `test-update` si cambia OTA. Mantener
 actualizadas las skills de dominio y el manual cuando cambien comandos o UX.
 El soporte físico se acredita con logs de placa y su matriz, según

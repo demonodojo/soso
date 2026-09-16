@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "nombre": "system",
+  "modelo": "Qwen/Qwen2.5-Coder-3B-Instruct",
+  "revision": "488639f1ff808d1d3d0ba301aef8c11461451ec5",
+  "mensajes": [
+    {
+      "content": "Responde siempre con una sola palabra en mayúsculas.",
+      "role": "system"
+    },
+    {
+      "content": "¿Estás preparado? Contesta LISTO.",
+      "role": "user"
+    }
+  ],
+  "add_generation_prompt": true,
+  "texto": "<|im_start|>system\nResponde siempre con una sola palabra en mayúsculas.<|im_end|>\n<|im_start|>user\n¿Estás preparado? Contesta LISTO.<|im_end|>\n<|im_start|>assistant\n",
+  "texto_sha256": "6241679c33344e37f49e910f271bd585f24ca4f5729ed334edad3999f67473e9",
+  "ids": [
+    151644,
+    8948,
+    198,
+    1061,
+    75049,
+    41598,
+    390,
+    5093,
+    95089,
+    72937,
+    662,
+    1231,
+    6654,
+    2388,
+    25541,
+    13,
+    151645,
+    198,
+    151644,
+    872,
+    198,
+    30182,
+    13782,
+    7061,
+    9872,
+    2123,
+    30,
+    2093,
+    29179,
+    26966,
+    46,
+    13,
+    151645,
+    198,
+    151644,
+    77091,
+    198
+  ],
+  "ids_sha256": "7774feeb861fe71ba9d27416d13c43d27e05bbe43cdfbb83811521274fe7ab0a",
+  "especiales": {
+    "<|endoftext|>": 151643,
+    "<|im_end|>": 151645,
+    "<|im_start|>": 151644
+  },
+  "generador": {
+    "herramienta": "tokenizer-ref 0.1.0",
+    "tokenizers": "tokenizers 0.20",
+    "minijinja": "minijinja 2",
+    "tokenizer_json_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+    "tokenizer_config_sha256": "959e7f1d9a1b7641a6d6ce05ca97b75c7894fcb66cbe5a040406458fb1128ee4"
+  }
+}

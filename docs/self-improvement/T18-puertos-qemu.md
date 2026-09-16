@@ -1,7 +1,8 @@
 # T18 — Añadir reenvío HTTP configurable sin colisiones
 
-**Hito:** SI-2 · **Tipo:** Implementación xtask · **Estado:** pendiente.  
-**Dependencias:** Ninguna; puede iniciarse ahora.
+**Hito:** SI-2 · **Tipo:** Implementación xtask · **Estado:** pendiente.
+
+**Dependencias:** ninguna.
 
 ## Objetivo y entrega
 
@@ -10,8 +11,8 @@ Dos VMs pueden tener forwards API distintos; los shards existentes conservan sus
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C3–C4, C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [xtask/src/main.rs](../../xtask/src/main.rs)
 - [xtask/src/test.rs](../../xtask/src/test.rs)
@@ -53,3 +54,8 @@ Entregar `target/self-improvement/tasks/T18/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). El reenvío QEMU es infraestructura de laboratorio. T19 reutiliza aserciones nativas; T43 acredita control del candidato sin un comando Linux obligatorio.
+
+Validación nativa: **no aplicable a esta entrega de laboratorio/especificación**. Condiciones adicionales: [T19](T19-qemu-e2e.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

@@ -1,6 +1,7 @@
 # T34 — Convertir huecos del port en fichas implementables
 
-**Hito:** SI-6 · **Tipo:** Especificación técnica basada en evidencia · **Estado:** pendiente.  
+**Hito:** SI-6 · **Tipo:** Especificación técnica basada en evidencia · **Estado:** pendiente.
+
 **Dependencias:** [T32](T32-opencode-inventario.md), [T33](T33-sondas-abi.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Backlog técnico completo y trazable. T35 requiere además implementar y verific
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C1, C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [docs/SELF-HOSTING.md](../../docs/SELF-HOSTING.md)
 - [crates/soso-abi/src/lib.rs](../../crates/soso-abi/src/lib.rs)
@@ -53,3 +54,8 @@ Entregar `target/self-improvement/tasks/T34/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **no aplicable a esta entrega de laboratorio/especificación**. Condiciones adicionales: [T35](T35-opencode-nativo.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

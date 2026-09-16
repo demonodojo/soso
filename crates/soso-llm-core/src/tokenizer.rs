@@ -82,6 +82,18 @@ impl Tokenizer {
     /// Con el byte-level de reserva no hay tokens de verdad —`<|user|>` son nueve
     /// bytes de ruido— así que quien vaya a aplicar una plantilla de chat debe
     /// preguntar esto antes.
+    /// Cuántas piezas tiene el vocabulario.
+    ///
+    /// Hace falta para comprobar que un id de referencia cabe en este
+    /// tokenizer: un id por encima del vocabulario no es una divergencia de
+    /// segmentación, es otro vocabulario.
+    pub fn vocab_len(&self) -> usize {
+        match self {
+            Tokenizer::ByteLevel => 256,
+            Tokenizer::Vocab(v) => v.pieces.len(),
+        }
+    }
+
     pub fn tiene_vocabulario(&self) -> bool {
         matches!(self, Tokenizer::Vocab(_))
     }

@@ -337,6 +337,11 @@ static inline uint32_t iwl_cpu_to_le32(uint32_t v)
     return v;
 }
 
+static inline uint64_t iwl_cpu_to_le64(uint64_t v)
+{
+    return v;
+}
+
 static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 {
     return v;
@@ -1319,6 +1324,32 @@ static inline void iwl_rx_mpdu_v1_energy(const uint8_t *data, int len,
     desc = (const struct iwl_rx_mpdu_desc *)data;
     *a = desc->v1.energy_a;
     *b = desc->v1.energy_b;
+}
+
+static inline void iwl_rx_mpdu_sync_times(const uint8_t *data, int len, int gen3,
+                                          uint64_t *tsf, uint32_t *gp2)
+{
+    const struct iwl_rx_mpdu_desc *desc;
+
+    if (!tsf || !gp2)
+        return;
+    *tsf = 0;
+    *gp2 = 0;
+    if (!data)
+        return;
+    if (gen3) {
+        if (len < (int)IWL_RX_DESC_SIZE_V3)
+            return;
+        desc = (const struct iwl_rx_mpdu_desc *)data;
+        *tsf = desc->v3.tsf_on_air_rise;
+        *gp2 = desc->v3.gp2_on_air_rise;
+    } else {
+        if (len < (int)IWL_RX_DESC_SIZE_V1)
+            return;
+        desc = (const struct iwl_rx_mpdu_desc *)data;
+        *tsf = desc->v1.tsf_on_air_rise;
+        *gp2 = desc->v1.gp2_on_air_rise;
+    }
 }
 
 struct iwl_init_extended_cfg_cmd {

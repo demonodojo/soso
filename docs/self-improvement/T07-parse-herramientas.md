@@ -1,6 +1,7 @@
 # T07 — Extraer llamadas válidas de la salida del modelo
 
-**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.  
+**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+
 **Dependencias:** [T03](T03-perfil-modelo.md), [T05](T05-validacion-chat.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ El resultado final es idéntico para todas las particiones de la misma entrada; 
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C2–C3**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [crates/soso-llm-core/src/tokenizer.rs](../../crates/soso-llm-core/src/tokenizer.rs)
 
@@ -51,3 +52,8 @@ Entregar `target/self-improvement/tasks/T07/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

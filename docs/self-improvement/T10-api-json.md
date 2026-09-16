@@ -1,6 +1,7 @@
 # T10 — Crear la crate API y adaptar peticiones JSON
 
-**Hito:** SI-2 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.  
+**Hito:** SI-2 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+
 **Dependencias:** [T05](T05-validacion-chat.md), [T06](T06-render-chat.md), [T08](T08-resultado-generacion.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Entrada JSON validada y lista para inferencia o error preciso; ningún socket ni
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C1–C3**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [Cargo.toml](../../Cargo.toml)
 - [crates/soso-llm-core/Cargo.toml](../../crates/soso-llm-core/Cargo.toml)
@@ -52,3 +53,8 @@ Entregar `target/self-improvement/tasks/T10/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

@@ -1,6 +1,7 @@
 # T12 — Emitir respuestas completas y eventos SSE
 
-**Hito:** SI-2 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.  
+**Hito:** SI-2 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+
 **Dependencias:** [T07](T07-parse-herramientas.md), [T08](T08-resultado-generacion.md), [T10](T10-api-json.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Cliente de prueba consume ambas variantes sin pérdida; usage coincide con Gener
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C2–C3**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [crates/soso-llm-core/src/tokenizer.rs](../../crates/soso-llm-core/src/tokenizer.rs)
 
@@ -51,3 +52,8 @@ Entregar `target/self-improvement/tasks/T12/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

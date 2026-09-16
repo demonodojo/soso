@@ -1,6 +1,7 @@
 # T02 — Definir los casos y sus verificadores
 
-**Hito:** SI-0 · **Tipo:** Implementación host · **Estado:** completada (15 de septiembre de 2026; resumen en [seguimiento/T02.md](seguimiento/T02.md), evidencia en `target/self-improvement/tasks/T02/resultado.md`).  
+**Hito:** SI-0 · **Tipo:** Implementación portable con adaptadores host/guest · **Estado:** completada (15 de septiembre de 2026; resumen en [seguimiento/T02.md](seguimiento/T02.md), evidencia en `target/self-improvement/tasks/T02/resultado.md`).
+
 **Dependencias:** [T01](T01-base.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [crates/soso-llm-core/src/chat.rs](../../crates/soso-llm-core/src/chat.rs)
 - [crates/soso-llm-core/tests/arch_ext.rs](../../crates/soso-llm-core/tests/arch_ext.rs)
@@ -57,3 +58,8 @@ Entregar `target/self-improvement/tasks/T02/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Cierre histórico conservado. Validar banco/protocolo con T49; programa y repo requieren T40/T41 y referencias portables T50. Mantener huella, partición reservada y denominador; completar evidencia en T51.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T45](T45-cli-capacidades.md), [T49](T49-pruebas-guest.md), [T40](T40-compilador-nativo.md), [T41](T41-cargo-offline.md), [T50](T50-cambios-contenido.md), [T51](T51-aceptacion-circuito-nativo.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

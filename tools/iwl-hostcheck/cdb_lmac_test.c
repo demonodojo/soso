@@ -50,7 +50,31 @@ void lx_dma_free_coherent(void *dev, size_t size, void *cpu, uint64_t dma)
     free(cpu);
 }
 
-void iwl_trans_poll(struct iwl_ax211_priv *iwl) { (void)iwl; }
+static void inject_beacon(struct iwl_ax211_priv *iwl)
+{
+    uint8_t bc[64];
+    int pos = 24 + 12;
+
+    memset(bc, 0, sizeof(bc));
+    bc[0] = (uint8_t)IEEE80211_STYPE_BEACON;
+    memcpy(bc + 16, iwl->bssid, 6);
+    bc[32] = 100;
+    bc[33] = 0;
+    bc[pos] = WLAN_EID_TIM;
+    bc[pos + 1] = 4;
+    bc[pos + 2] = 0;
+    bc[pos + 3] = 1;
+    iwl->sync_tsf = 1000000;
+    iwl->sync_device_ts = 500000;
+    iwl->sync_beacon_seen = 1;
+    iwl_mvm_rx_mlme_frame(iwl, bc, pos + 6);
+}
+
+void iwl_trans_poll(struct iwl_ax211_priv *iwl)
+{
+    if (iwl && iwl->assoc_pending_beacon && !iwl->sync_beacon_seen)
+        inject_beacon(iwl);
+}
 
 void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl) { (void)iwl; }
 
@@ -84,8 +108,6 @@ static void inject_mlme_rx(struct iwl_ax211_priv *iwl, const void *payload,
     rx[0] = (uint8_t)IEEE80211_STYPE_ASSOC_RESP;
     rx[24] = (uint8_t)WLAN_CAPABILITY_ESS;
     rx[28] = 1;
-    iwl->beacon_int = 100;
-    iwl->dtim_period = 1;
     iwl_mvm_rx_mlme_frame(iwl, rx, 30);
 }
 

@@ -1,6 +1,7 @@
 # T31 — Demostrar recuperación completa de la instalación
 
-**Hito:** SI-5 · **Tipo:** Integración de recuperación · **Estado:** pendiente.  
+**Hito:** SI-5 · **Tipo:** Integración de recuperación · **Estado:** pendiente.
+
 **Dependencias:** [T30](T30-hardware.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Sistema anterior vuelve a arrancar y atender una conversación después de fallo
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [docs/ESTADO.md](../../docs/ESTADO.md)
 - [xtask/src/test_update.rs](../../xtask/src/test_update.rs)
@@ -53,3 +54,8 @@ Entregar `target/self-improvement/tasks/T31/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

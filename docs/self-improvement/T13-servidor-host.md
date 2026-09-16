@@ -1,6 +1,7 @@
 # T13 — Conectar el mismo runtime a un servidor de desarrollo en host
 
-**Hito:** SI-1 / SI-2 · **Tipo:** Implementación host · **Estado:** pendiente.  
+**Hito:** SI-1 / SI-2 · **Tipo:** Implementación host · **Estado:** pendiente.
+
 **Dependencias:** [T09](T09-cancelacion-runtime.md), [T11](T11-http.md), [T12](T12-respuestas-sse.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Servidor reutiliza pesos, devuelve JSON/SSE y maneja desconexión sin fuga persi
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C1–C4**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [crates/soso-llm-core/examples/hostrun.rs](../../crates/soso-llm-core/examples/hostrun.rs)
 - [crates/soso-llm-core/src/source.rs](../../crates/soso-llm-core/src/source.rs)
@@ -52,3 +53,8 @@ Entregar `target/self-improvement/tasks/T13/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Este ejecutable std es un arnés de desarrollo. Compartir codec/runtime con T16; su proceso host desaparece del circuito final. La evidencia host no verifica el servicio guest.
+
+Validación nativa: **no aplicable a esta entrega de laboratorio/especificación**. Condiciones adicionales: [T16](T16-servicio-guest.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

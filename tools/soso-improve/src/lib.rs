@@ -40,6 +40,7 @@ macro_rules! aviso {
 pub mod banco;
 pub mod captura;
 pub mod git;
+pub mod modelo;
 pub mod sistema;
 pub mod verificar;
 
@@ -54,6 +55,9 @@ uso: soso-improve <orden> [opciones]
   reconstruir --captura <ruta> --destino <ruta>
   suites      --captura <ruta> --arbol <ruta> [--solo <nombre>] [--timeout <s>]
   banco       listar|validar|sellar [--banco <ruta>] [--reservado <ruta>]
+  modelo      perfil    --modelo <dir .som> --original <dir> --out <ruta>
+              comparar  --modelo <dir .som> [--fixtures <dir>] [--json <ruta>]
+              detalle   --modelo <dir .som> --caso <nombre> [--desde N] [--n N]
   verificar   programa  --caso <id> --candidato <ruta> [--reservado <ruta>]
               protocolo --caso <id> --respuesta <ruta> [--reservado <ruta>]
               repo      --caso <id> --arbol <ruta> [--con-referencia]
@@ -121,6 +125,12 @@ pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
                 .first()
                 .ok_or_else(|| Error::uso("banco necesita listar|validar|sellar"))?;
             banco::despachar(sub, &Opciones::parsear(&args[1..])?)
+        }
+        "modelo" => {
+            let sub = args
+                .first()
+                .ok_or_else(|| Error::uso("modelo necesita un subcomando (comparar)"))?;
+            modelo::despachar(sub, &Opciones::parsear(&args[1..])?)
         }
         "verificar" => {
             let sub = args

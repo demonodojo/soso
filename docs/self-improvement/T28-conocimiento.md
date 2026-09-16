@@ -1,6 +1,7 @@
 # T28 — Guardar y recuperar aprendizaje verificado
 
-**Hito:** SI-4 · **Tipo:** Implementación host · **Estado:** pendiente.  
+**Hito:** SI-4 · **Tipo:** Implementación portable con adaptadores host/guest · **Estado:** pendiente.
+
 **Dependencias:** [T26](T26-validador.md)
 
 ## Objetivo y entrega
@@ -10,14 +11,16 @@ La siguiente tarea recibe solo notas pertinentes con procedencia y estado de vig
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C5**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [docs/ESTADO.md](../../docs/ESTADO.md)
+- [crates/soso-improve-core/src/entorno.rs](../../crates/soso-improve-core/src/entorno.rs)
+- [user/soso-improve/src/main.rs](../../user/soso-improve/src/main.rs)
 
 ## Archivos que se pueden cambiar
 
-Crear `tools/soso-improve/src/knowledge.rs`, `tests/knowledge.rs` y formato de notas en `docs/self-improvement/conocimiento/`.
+Crear `crates/soso-improve-core/src/knowledge.rs`, pruebas compartidas y órdenes en ambos frontends, más formato de notas en `docs/self-improvement/conocimiento/`.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
@@ -33,7 +36,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 ## Comprobación
 
-`cargo test -p soso-improve --test knowledge`. Nota de intento fallido, evidencia ausente, selección por ruta, truncamiento, orden estable y cambio de base.
+`cargo test -p soso-improve-core --test knowledge`. Nota de intento fallido, evidencia ausente, selección por ruta, truncamiento, orden estable y cambio de base.
 
 Los comandos de crates, scripts o subcomandos nuevos se ejecutan **después de
 crearlos en esta tarea o en sus dependencias**. Guardar salida y exit code;
@@ -51,3 +54,8 @@ Entregar `target/self-improvement/tasks/T28/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T49](T49-pruebas-guest.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

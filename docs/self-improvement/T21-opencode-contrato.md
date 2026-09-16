@@ -1,7 +1,8 @@
 # T21 — Capturar el contrato real de OpenCode sin depender del modelo
 
-**Hito:** SI-3 · **Tipo:** Implementación de integración host · **Estado:** pendiente.  
-**Dependencias:** [T20](T20-opencode-config.md)
+**Hito:** SI-3 · **Tipo:** Implementación portable con adaptadores host/guest · **Estado:** pendiente.
+
+**Dependencias:** [T20](T20-opencode-config.md), [T47](T47-procesos-nativos.md), [T48](T48-reloj-red.md)
 
 ## Objetivo y entrega
 
@@ -10,14 +11,16 @@ Bucle OpenCode read→edit→test verificado y contrato HTTP compatible con fixt
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C3, C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [SELF_IMPROVEMENT.md](../../SELF_IMPROVEMENT.md)
+- [crates/soso-improve-core/src/entorno.rs](../../crates/soso-improve-core/src/entorno.rs)
+- [user/soso-improve/src/main.rs](../../user/soso-improve/src/main.rs)
 
 ## Archivos que se pueden cambiar
 
-Añadir el contraste del contrato a `crates/soso-improve-core` con su orden en `tools/soso-improve`, pruebas en el mismo crate y fixtures wire en `tests/self-improvement/opencode/`.
+Añadir el contraste del contrato a `crates/soso-improve-core` con su orden en `tools/soso-improve` y `user/soso-improve`, pruebas en el mismo crate y fixtures wire en `tests/self-improvement/opencode/`.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
@@ -56,3 +59,8 @@ Entregar `target/self-improvement/tasks/T21/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T35](T35-opencode-nativo.md), [T47](T47-procesos-nativos.md), [T48](T48-reloj-red.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

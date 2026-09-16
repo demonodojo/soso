@@ -44,7 +44,7 @@ la discrepancia y el alcance, no reemplazar estados a partir de la fecha sola.
 
 - Resolver `tasks[].id` y abrir `file` relativo al directorio del catálogo.
   `context` contiene rutas desde la raíz. Leer la ficha, `depends_on`,
-  `entry_conditions` y las secciones `contract_sections`; no las 44 fichas.
+  `entry_conditions` y las secciones `contract_sections`; no todas las fichas.
 - Si hay tarea activa dentro del encargo, retomar desde su resultado y siguiente
   paso persistidos. Antes de repetir pruebas, comprobar qué diff/base y perfil
   cubría la evidencia anterior y si siguen siendo los mismos.
@@ -57,6 +57,23 @@ la discrepancia y el alcance, no reemplazar estados a partir de la fecha sola.
 - Una ficha por contexto de modelo pequeño. Si el usuario encarga el plan
   completo, continuar con fichas habilitadas; si encarga una sola, terminarla
   sin iniciar otras. El catálogo no autoriza por sí mismo lanzar subagentes.
+
+## Ejecución nativa de automejora
+
+Leer [NATIVO.md](../../../../docs/self-improvement/NATIVO.md) al implementar
+o redefinir una ficha. Reutilizar soso-improve-core no_std y adaptadores
+tools/user existentes. La lógica del circuito debe ejecutarse dentro de soso;
+host, Forja y scripts de bootstrap solo son etapas transitorias con prueba
+de retirada. Revisar argumentos, exit codes, plazos, durabilidad y procesos:
+una implementación de trait que ignora campos no acredita la capacidad.
+
+Distinguir `depends_on` (orden de desarrollo) de `native_validation.requires`
+(condiciones para probar en soso). Conservar cierres históricos T01/T02;
+registrar validación nativa pending/partial/verified y evidence por separado.
+`not_applicable` solo vale para laboratorio/inventario con consumidor nativo
+identificado. No derivar verified de done, Rust o compilación cruzada.
+Al cambiar estado nativo, sincronizar catálogo, sección de ficha y resumen;
+T51 exige circuito completo sin Linux y T44 sus tres mejoras finales.
 
 ## Estados de seguimiento del catálogo
 
@@ -102,7 +119,8 @@ En cada cambio de estado de una Txx, actualizar en la misma entrega:
    resultados, limitaciones, bloqueo y próximo paso ejecutable. Añadir entradas
    por intento para preservar historia; no crear informes vacíos para todas.
 
-Los logs completos siguen en `target/self-improvement/tasks/Txx/`; para varios
+Los logs completos siguen en `target/self-improvement/tasks/Txx/` en host
+o `/var/self-improvement/tasks/Txx/` en soso (raíz configurable); para varios
 intentos usar subdirectorios identificados y conservar `resultado.md` como
 entrada al último resultado. El resumen versionable debe retener comandos,
 exit codes, hashes y conclusiones aunque se limpie `target/`. Un log desaparecido

@@ -1,6 +1,7 @@
 # T35 — Probar OpenCode nativo en modo no interactivo
 
-**Hito:** SI-6 · **Tipo:** Integración condicionada al port · **Estado:** pendiente.  
+**Hito:** SI-6 · **Tipo:** Integración condicionada al port · **Estado:** pendiente.
+
 **Dependencias:** [T19](T19-qemu-e2e.md), [T34](T34-tickets-port.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ OpenCode como proceso soso realiza lectura/edición y persiste sesión. El build
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C3–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [user/init/src/main.rs](../../user/init/src/main.rs)
 - [user/soso-std-test/src/main.rs](../../user/soso-std-test/src/main.rs)
@@ -19,7 +20,7 @@ se obtienen de las dependencias; todavía no existen en la base del plan.
 
 ## Archivos que se pueden cambiar
 
-Crear receta de empaquetado en `scripts/self-improvement/package-opencode.sh` y caso aislado en `xtask/src/test_opencode_native.rs`; registrar comando de integración.
+Crear receta Rust de empaquetado reproducible con dependencias fijadas, consumible dentro de soso; aserciones compartidas con T49 y caso de laboratorio en `xtask/src/test_opencode_native.rs`. Si exige portar un empaquetador, crear ficha N-xxx concreta.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
@@ -53,3 +54,8 @@ Entregar `target/self-improvement/tasks/T35/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Empaquetado reproducible mediante receta Rust portable; runtime, proveedor y utilidades disponibles offline. Repetir las aserciones desde T49; xtask es solo lanzador de laboratorio.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T47](T47-procesos-nativos.md), [T49](T49-pruebas-guest.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

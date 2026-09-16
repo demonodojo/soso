@@ -21,6 +21,8 @@
 //! - [`caso`] — casos del banco, partición reproducible y sellado.
 //! - [`protocolo`] — aserciones sobre una respuesta HTTP/SSE grabada.
 //! - [`programa`] — comparación de un candidato contra vectores.
+//! - [`referencia`] — comparación de fixtures del modelo original contra el
+//!   tokenizer de soso (T03).
 //! - [`repo`] — verificación de un caso de repo sobre un árbol.
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -34,6 +36,7 @@ pub mod caso;
 pub mod entorno;
 pub mod ignorar;
 pub mod programa;
+pub mod referencia;
 pub mod protocolo;
 pub mod repo;
 

@@ -1,6 +1,7 @@
 # T17 — Atender ocupado, health y desconexión durante inferencia
 
-**Hito:** SI-2 · **Tipo:** Implementación guest acotada · **Estado:** pendiente.  
+**Hito:** SI-2 · **Tipo:** Implementación guest acotada · **Estado:** pendiente.
+
 **Dependencias:** [T09](T09-cancelacion-runtime.md), [T16](T16-servicio-guest.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Servicio no queda ocupado para siempre ni mezcla conversaciones tras cancelar; l
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C3–C4**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [user/soso-llm/src/net.rs](../../user/soso-llm/src/net.rs)
 - [user/libsoso/src/sys.rs](../../user/libsoso/src/sys.rs)
@@ -53,3 +54,8 @@ Entregar `target/self-improvement/tasks/T17/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

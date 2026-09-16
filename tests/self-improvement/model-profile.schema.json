@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://soso.local/self-improvement/model-profile.schema.json",
+  "title": "Perfil de modelo fijado (model-lock.json)",
+  "description": "Qué modelo exacto se está usando: lo que publica el origen y lo que hay convertido en soso, cada cosa con su hash. Lo escribe `soso-improve modelo perfil`.",
+  "type": "object",
+  "required": ["schema_version", "origen", "som", "hashes"],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [1]},
+    "origen": {
+      "type": "object",
+      "description": "Publicado por el proveedor del modelo en una revisión concreta.",
+      "required": ["repositorio", "revision"],
+      "properties": {
+        "repositorio": {"type": "string", "minLength": 3},
+        "revision": {
+          "type": "string",
+          "description": "Commit exacto. 'desconocida' invalida la trazabilidad del perfil.",
+          "pattern": "^([0-9a-f]{40}|desconocida)$"
+        },
+        "familia": {"type": ["string", "null"]},
+        "arquitecturas": {"type": ["array", "null"], "items": {"type": "string"}},
+        "vocab_size": {"type": ["integer", "null"]},
+        "max_position_embeddings": {"type": ["integer", "null"]},
+        "eos_token": {"type": ["string", "null"]},
+        "pad_token": {"type": ["string", "null"]},
+        "add_bos_token": {"type": ["boolean", "null"]},
+        "eos_token_id_generacion": {
+          "description": "Lo que el modelo declara como parada; puede ser lista.",
+          "type": ["array", "integer", "null"]
+        },
+        "chat_template_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "som": {
+      "type": "object",
+      "description": "El modelo ya convertido al formato de soso.",
+      "required": ["directorio", "nombre", "vocab_size", "num_layers", "chat_template_sha256"],
+      "properties": {
+        "directorio": {"type": "string"},
+        "nombre": {"type": "string"},
+        "vocab_size": {"type": "integer", "minimum": 1},
+        "hidden_dim": {"type": "integer"},
+        "num_layers": {"type": "integer", "minimum": 1},
+        "num_heads": {"type": "integer"},
+        "num_kv_heads": {"type": "integer"},
+        "ffn_dim": {"type": "integer"},
+        "max_seq": {"type": "integer"},
+        "rope_theta": {"type": "number"},
+        "num_experts": {"type": "integer"},
+        "chat_template": {
+          "type": "string",
+          "description": "Plantilla traducida al formato de soso ({prompt}/{eos}). Puede no expresar system, historial ni herramientas: eso lo resuelve T06."
+        },
+        "chat_template_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "tokenizer_vocab_len": {"type": "integer", "minimum": 1},
+        "capas": {"type": "integer", "minimum": 1}
+      }
+    },
+    "hashes": {
+      "type": "object",
+      "description": "Hash de cada archivo que define el perfil; null si el archivo no está.",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "null"},
+          {
+            "type": "object",
+            "required": ["ruta", "bytes", "sha256"],
+            "properties": {
+              "ruta": {"type": "string"},
+              "bytes": {"type": "integer", "minimum": 0},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        ]
+      }
+    },
+    "nota": {"type": "string"}
+  }
+}

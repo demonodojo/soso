@@ -788,6 +788,8 @@ dependencies = [
  "serde",
  "serde_json",
  "soso-improve-core",
+ "soso-llm-core",
+ "sosomodel",
 ]
 
 [[package]]

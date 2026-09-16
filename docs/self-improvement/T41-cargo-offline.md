@@ -1,6 +1,7 @@
 # T41 — Validar Cargo y fuentes reproducibles dentro de soso
 
-**Hito:** SI-7 · **Tipo:** Integración condicionada · **Estado:** pendiente.  
+**Hito:** SI-7 · **Tipo:** Integración condicionada · **Estado:** pendiente.
+
 **Dependencias:** [T40](T40-compilador-nativo.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Cargo guest produce artefactos nuevos a partir de fuentes identificadas; las dep
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [Cargo.toml](../../Cargo.toml)
 - [Cargo.lock](../../Cargo.lock)
@@ -55,3 +56,8 @@ Entregar `target/self-improvement/tasks/T41/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Ejecutar Cargo offline y sus build.rs/proc macros/generadores en soso, incluidos verificadores P/R. Fuentes por inventario y hash; Git CLI y descargas no son requisitos. Cualquier helper externo pendiente bloquea cobertura del perfil.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

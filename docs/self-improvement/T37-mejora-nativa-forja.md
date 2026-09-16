@@ -1,6 +1,7 @@
 # T37 — Cerrar una mejora desde OpenCode nativo con build remoto
 
-**Hito:** SI-6 · **Tipo:** Integración · **Estado:** pendiente.  
+**Hito:** SI-6 · **Tipo:** Integración · **Estado:** pendiente.
+
 **Dependencias:** [T22](T22-primera-mejora.md), [T35](T35-opencode-nativo.md), [T36](T36-forja-trazabilidad.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ SI-6 completo para el alcance headless documentado: tarea end-to-end con agente 
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [docs/SELF-HOSTING.md](../../docs/SELF-HOSTING.md)
 - [user/soso-forja/src/main.rs](../../user/soso-forja/src/main.rs)
@@ -52,3 +53,8 @@ Entregar `target/self-improvement/tasks/T37/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Registrar etapa mixta explícita: agente/modelo nativos con build remoto. Conservar esta evidencia, pero exigir repetición de build, pruebas e informe sin Forja en T51.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T51](T51-aceptacion-circuito-nativo.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

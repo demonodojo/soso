@@ -1,0 +1,50 @@
+{
+  "fixtures": [
+    {
+      "archivo": "simple.json",
+      "ids_sha256": "25665b20686a9c9f87f330679a4c750b8a0af76d41837bf024deb2a5cfee470a",
+      "nombre": "simple",
+      "texto_sha256": "883dae6b75bb02edbedf46b117c2b2173055c56e7ef86a550754db680c709e74",
+      "tokens": 38
+    },
+    {
+      "archivo": "system.json",
+      "ids_sha256": "7774feeb861fe71ba9d27416d13c43d27e05bbe43cdfbb83811521274fe7ab0a",
+      "nombre": "system",
+      "texto_sha256": "6241679c33344e37f49e910f271bd585f24ca4f5729ed334edad3999f67473e9",
+      "tokens": 37
+    },
+    {
+      "archivo": "historial.json",
+      "ids_sha256": "f7b1cca3b57382c1cc53d410e19aedfc5661b59dd351bf635f3bd49c9141a1a4",
+      "nombre": "historial",
+      "texto_sha256": "a8fc219b947786797988445325d71bc7cea071fcb1454980ddc6c8c12b04d770",
+      "tokens": 74
+    },
+    {
+      "archivo": "herramienta-esquema.json",
+      "ids_sha256": "14d712a883149fec653d615fbaeb1bf9b1a2e5062deedf4c7c8568eecf1e5a66",
+      "nombre": "herramienta-esquema",
+      "texto_sha256": "d10f8a28350c5d9a85f09df76d2e1981d883c4e950865cca877422cb9a2e472b",
+      "tokens": 197
+    },
+    {
+      "archivo": "herramienta-resultado.json",
+      "ids_sha256": "589ee6940aeb129ad745efb2b3ed51045fe7a47669d6b8c0bf9b5556cea25231",
+      "nombre": "herramienta-resultado",
+      "texto_sha256": "3cafa5869c3509be534c72edce84cb9cc53010181a47ea9260ec905cad9ea969",
+      "tokens": 252
+    }
+  ],
+  "generador": {
+    "herramienta": "tokenizer-ref 0.1.0",
+    "minijinja": "minijinja 2",
+    "tokenizer_config_sha256": "959e7f1d9a1b7641a6d6ce05ca97b75c7894fcb66cbe5a040406458fb1128ee4",
+    "tokenizer_json_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+    "tokenizers": "tokenizers 0.20"
+  },
+  "modelo": "Qwen/Qwen2.5-Coder-3B-Instruct",
+  "revision": "488639f1ff808d1d3d0ba301aef8c11461451ec5",
+  "schema_version": 1,
+  "vocab_size": 151665
+}

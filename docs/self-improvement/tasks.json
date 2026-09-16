@@ -10,7 +10,7 @@
       "file": "T01-base.md",
       "title": "Capturar una base reproducible sin alterar el checkout",
       "milestone": "SI-0",
-      "kind": "Implementación host",
+      "kind": "Implementación portable con adaptadores host/guest",
       "status": "done",
       "depends_on": [],
       "entry_conditions": [],
@@ -27,6 +27,15 @@
         "evidence": "target/self-improvement/tasks/T01/resultado.md",
         "blocker": null,
         "next_step": "T02 y T03 habilitadas; implementación portada a Rust el 2026-09-16 (tools/soso-improve + user/soso-improve)"
+      },
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T45",
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       }
     },
     {
@@ -34,7 +43,7 @@
       "file": "T02-banco.md",
       "title": "Definir los casos y sus verificadores",
       "milestone": "SI-0",
-      "kind": "Implementación host",
+      "kind": "Implementación portable con adaptadores host/guest",
       "status": "done",
       "depends_on": [
         "T01"
@@ -45,8 +54,7 @@
         "crates/soso-llm-core/src/chat.rs",
         "crates/soso-llm-core/tests/arch_ext.rs",
         "xtask/src/test.rs"
-      ]
-      ,
+      ],
       "tracking": {
         "updated_at": "2026-09-15",
         "base": "6f558f072bcc3ce46763994c377f1161d6411698",
@@ -54,6 +62,19 @@
         "evidence": "target/self-improvement/tasks/T02/resultado.md",
         "blocker": null,
         "next_step": "T03 habilitada; banco portado a Rust el 2026-09-16, huella 74f325fcf5ca95dd; T14 lo consumirá cuando existan T03 y T13"
+      },
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T45",
+          "T49",
+          "T40",
+          "T41",
+          "T50",
+          "T51"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       }
     },
     {
@@ -62,7 +83,7 @@
       "title": "Fijar un modelo y obtener fixtures independientes de su chat",
       "milestone": "SI-0 / SI-1",
       "kind": "Inspección y fixtures",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T01"
       ],
@@ -75,7 +96,23 @@
         "xtask/src/live_models.rs",
         "crates/gguf2som/src/lib.rs",
         "crates/soso-llm-core/src/tokenizer.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-16",
+        "base": "cfe3c4452",
+        "summary": "docs/self-improvement/seguimiento/T03.md",
+        "evidence": "target/self-improvement/tasks/T03/resultado.md",
+        "blocker": null,
+        "next_step": "T52 y T53 corrigen el tokenizer antes de T06; T14 medirá la calidad"
+      }
     },
     {
       "id": "T04",
@@ -91,7 +128,13 @@
         "crates/soso-llm-core/src/lib.rs",
         "crates/soso-llm-core/Cargo.toml",
         "user/soso-hf/Cargo.toml"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T05",
@@ -107,7 +150,13 @@
       "contract_sections": "C1–C3",
       "context": [
         "crates/soso-llm-core/src/lib.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T06",
@@ -118,7 +167,9 @@
       "status": "pending",
       "depends_on": [
         "T03",
-        "T05"
+        "T05",
+        "T52",
+        "T53"
       ],
       "entry_conditions": [
         "Las divergencias de tokenizer detectadas en T03 están corregidas y verificadas."
@@ -127,7 +178,13 @@
       "context": [
         "crates/soso-llm-core/src/chat.rs",
         "crates/soso-llm-core/src/tokenizer.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T07",
@@ -144,7 +201,13 @@
       "contract_sections": "C2–C3",
       "context": [
         "crates/soso-llm-core/src/tokenizer.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T08",
@@ -160,7 +223,13 @@
         "crates/soso-llm-core/src/runtime.rs",
         "crates/soso-llm-core/src/sample.rs",
         "crates/soso-llm-core/tests/arch_ext.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T09",
@@ -177,7 +246,13 @@
       "context": [
         "crates/soso-llm-core/src/runtime.rs",
         "crates/soso-llm-core/src/parallel.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T10",
@@ -196,7 +271,13 @@
       "context": [
         "Cargo.toml",
         "crates/soso-llm-core/Cargo.toml"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T11",
@@ -213,7 +294,13 @@
       "context": [
         "tools/soso-forja-server/src/main.rs",
         "user/soso-llm/src/net.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T12",
@@ -231,7 +318,13 @@
       "contract_sections": "C2–C3",
       "context": [
         "crates/soso-llm-core/src/tokenizer.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T13",
@@ -250,7 +343,15 @@
       "context": [
         "crates/soso-llm-core/examples/hostrun.rs",
         "crates/soso-llm-core/src/source.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [
+          "T16"
+        ],
+        "evidence": [],
+        "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+      }
     },
     {
       "id": "T14",
@@ -262,7 +363,8 @@
       "depends_on": [
         "T02",
         "T03",
-        "T13"
+        "T13",
+        "T48"
       ],
       "entry_conditions": [
         "Pesos reales disponibles; un informe no-go no habilita las tareas consumidoras."
@@ -270,8 +372,21 @@
       "contract_sections": "C2–C3, C5–C6",
       "context": [
         "SELF_IMPROVEMENT.md",
-        "crates/soso-llm-core/examples/hostrun.rs"
-      ]
+        "crates/soso-llm-core/examples/hostrun.rs",
+        "crates/soso-improve-core/src/entorno.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T16",
+          "T41",
+          "T48",
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T15",
@@ -291,7 +406,13 @@
         "user/soso-llm/src/ask.rs",
         "user/soso-llm/src/pool.rs",
         "user/soso-llm/src/staging.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T16",
@@ -315,7 +436,13 @@
         "user/soso-llm/src/main.rs",
         "user/soso-llm/src/net.rs",
         "user/libsoso/src/sys.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T17",
@@ -334,7 +461,13 @@
         "user/soso-llm/src/net.rs",
         "user/libsoso/src/sys.rs",
         "kernel/src/net/mod.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T18",
@@ -350,7 +483,15 @@
         "xtask/src/main.rs",
         "xtask/src/test.rs",
         "xtask/src/test_distributed.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [
+          "T19"
+        ],
+        "evidence": [],
+        "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+      }
     },
     {
       "id": "T19",
@@ -372,7 +513,16 @@
         "xtask/src/test.rs",
         "xtask/src/main.rs",
         "xtask/src/test_distributed.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T48",
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T20",
@@ -389,23 +539,45 @@
       "contract_sections": "C3, C5–C6",
       "context": [
         "SELF_IMPROVEMENT.md"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T35"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T21",
       "file": "T21-opencode-contrato.md",
       "title": "Capturar el contrato real de OpenCode sin depender del modelo",
       "milestone": "SI-3",
-      "kind": "Implementación de integración host",
+      "kind": "Implementación portable con adaptadores host/guest",
       "status": "pending",
       "depends_on": [
-        "T20"
+        "T20",
+        "T47",
+        "T48"
       ],
       "entry_conditions": [],
       "contract_sections": "C3, C5–C6",
       "context": [
-        "SELF_IMPROVEMENT.md"
-      ]
+        "SELF_IMPROVEMENT.md",
+        "crates/soso-improve-core/src/entorno.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T35",
+          "T47",
+          "T48"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T22",
@@ -426,65 +598,116 @@
       "context": [
         "SELF_IMPROVEMENT.md",
         "docs/SELF-HOSTING.md"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T35",
+          "T41"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T23",
       "file": "T23-estado-coordinador.md",
       "title": "Crear el formato de tareas y estados del coordinador",
       "milestone": "SI-4",
-      "kind": "Implementación host",
+      "kind": "Implementación portable con adaptadores host/guest",
       "status": "pending",
       "depends_on": [
         "T01",
-        "T02"
+        "T02",
+        "T46",
+        "T45"
       ],
       "entry_conditions": [],
       "contract_sections": "C5",
       "context": [
-        "Cargo.toml",
-        "tools/soso-forja-server/Cargo.toml"
-      ]
+        "crates/soso-improve-core/src/entorno.rs",
+        "crates/soso-improve-core/src/lib.rs",
+        "tools/soso-improve/src/main.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T46",
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T24",
       "file": "T24-checkout.md",
       "title": "Preparar una copia de tarea y exportar su parche",
       "milestone": "SI-4",
-      "kind": "Implementación host",
+      "kind": "Implementación portable con adaptadores host/guest",
       "status": "pending",
       "depends_on": [
-        "T23"
+        "T23",
+        "T50"
       ],
       "entry_conditions": [],
       "contract_sections": "C5",
       "context": [
-        "tools/soso-forja-server/src/main.rs"
-      ]
+        "crates/soso-improve-core/src/entorno.rs",
+        "crates/soso-improve-core/src/lib.rs",
+        "tools/soso-improve/src/main.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T49",
+          "T50"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T25",
       "file": "T25-ejecutor.md",
       "title": "Ejecutar OpenCode con límites y logs",
       "milestone": "SI-4",
-      "kind": "Implementación host",
+      "kind": "Implementación portable con adaptadores host/guest",
       "status": "pending",
       "depends_on": [
         "T21",
-        "T24"
+        "T24",
+        "T47",
+        "T48"
       ],
       "entry_conditions": [],
       "contract_sections": "C5",
       "context": [
-        "tools/soso-forja-server/src/main.rs"
-      ]
+        "crates/soso-improve-core/src/entorno.rs",
+        "crates/soso-improve-core/src/lib.rs",
+        "tools/soso-improve/src/main.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T35",
+          "T47",
+          "T48",
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T26",
       "file": "T26-validador.md",
       "title": "Validar candidatos y promover solo los aceptados",
       "milestone": "SI-4",
-      "kind": "Implementación host",
+      "kind": "Implementación portable con adaptadores host/guest",
       "status": "pending",
       "depends_on": [
         "T24",
@@ -494,15 +717,27 @@
       "contract_sections": "C5–C6",
       "context": [
         "xtask/src/check.rs",
-        "xtask/src/test.rs"
-      ]
+        "xtask/src/test.rs",
+        "crates/soso-improve-core/src/entorno.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T41",
+          "T43",
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T27",
       "file": "T27-reanudacion.md",
       "title": "Reanudar tras caída sin repetir efectos",
       "milestone": "SI-4",
-      "kind": "Implementación host",
+      "kind": "Implementación portable con adaptadores host/guest",
       "status": "pending",
       "depends_on": [
         "T23",
@@ -512,15 +747,28 @@
       "entry_conditions": [],
       "contract_sections": "C5",
       "context": [
-        "tools/soso-forja-server/src/main.rs"
-      ]
+        "crates/soso-improve-core/src/entorno.rs",
+        "crates/soso-improve-core/src/lib.rs",
+        "tools/soso-improve/src/main.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T46",
+          "T47",
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T28",
       "file": "T28-conocimiento.md",
       "title": "Guardar y recuperar aprendizaje verificado",
       "milestone": "SI-4",
-      "kind": "Implementación host",
+      "kind": "Implementación portable con adaptadores host/guest",
       "status": "pending",
       "depends_on": [
         "T26"
@@ -528,8 +776,18 @@
       "entry_conditions": [],
       "contract_sections": "C5",
       "context": [
-        "docs/ESTADO.md"
-      ]
+        "docs/ESTADO.md",
+        "crates/soso-improve-core/src/entorno.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T29",
@@ -541,13 +799,24 @@
       "depends_on": [
         "T22",
         "T27",
-        "T28"
+        "T28",
+        "T49"
       ],
       "entry_conditions": [],
       "contract_sections": "C5–C6",
       "context": [
-        "SELF_IMPROVEMENT.md"
-      ]
+        "SELF_IMPROVEMENT.md",
+        "crates/soso-improve-core/src/entorno.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T51"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T30",
@@ -558,7 +827,8 @@
       "status": "pending",
       "depends_on": [
         "T19",
-        "T29"
+        "T29",
+        "T48"
       ],
       "entry_conditions": [
         "Máquina física identificada, accesible y con red validada."
@@ -569,8 +839,16 @@
         "docs/hw-matrix.json",
         "docs/DIAGNOSTICO-GB205-2026-09-15.md",
         "docs/DIAGNOSTICO-ROG-2026-09-15.md",
-        "docs/WIFI-OPERATIVA.md"
-      ]
+        "docs/WIFI-OPERATIVA.md",
+        "crates/soso-improve-core/src/entorno.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T31",
@@ -590,7 +868,13 @@
         "docs/ESTADO.md",
         "xtask/src/test_update.rs",
         "crates/soso-update-core/src/lib.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T32",
@@ -608,7 +892,15 @@
         "docs/SELF-HOSTING.md",
         "crates/soso-abi/src/lib.rs",
         "user/Cargo.toml"
-      ]
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [
+          "T35"
+        ],
+        "evidence": [],
+        "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+      }
     },
     {
       "id": "T33",
@@ -618,7 +910,8 @@
       "kind": "Implementación de pruebas guest",
       "status": "pending",
       "depends_on": [
-        "T32"
+        "T32",
+        "T49"
       ],
       "entry_conditions": [],
       "contract_sections": "C6",
@@ -628,7 +921,13 @@
         "crates/soso-std/src/net.rs",
         "user/soso-std-test/src/main.rs",
         "user/libsoso/src/thread.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T34",
@@ -647,7 +946,15 @@
         "docs/SELF-HOSTING.md",
         "crates/soso-abi/src/lib.rs",
         "config/rust-soso/sys/pal/soso/mod.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [
+          "T35"
+        ],
+        "evidence": [],
+        "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+      }
     },
     {
       "id": "T35",
@@ -668,7 +975,16 @@
         "user/init/src/main.rs",
         "user/soso-std-test/src/main.rs",
         "xtask/src/test.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T47",
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T36",
@@ -686,7 +1002,13 @@
         "tools/soso-forja-server/src/main.rs",
         "user/soso-forja/src/main.rs",
         "docs/SELF-HOSTING.md"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T37",
@@ -705,7 +1027,15 @@
       "context": [
         "docs/SELF-HOSTING.md",
         "user/soso-forja/src/main.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T51"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T38",
@@ -726,7 +1056,15 @@
         "user/soso-rustc/src/main.rs",
         "tools/wild-soso/src/main.rs",
         "tools/sosoas/src/main.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [
+          "T40"
+        ],
+        "evidence": [],
+        "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+      }
     },
     {
       "id": "T39",
@@ -736,7 +1074,8 @@
       "kind": "Implementación de build",
       "status": "pending",
       "depends_on": [
-        "T38"
+        "T38",
+        "T50"
       ],
       "entry_conditions": [
         "Revisión de toolchain de T38 y recursos de compilación disponibles."
@@ -747,7 +1086,17 @@
         "config/rust-soso/apply-patches.sh",
         "config/rust-soso/config.toml",
         "config/rust-soso/sys/pal/soso/mod.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T40",
+          "T41",
+          "T42"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T40",
@@ -769,7 +1118,13 @@
         "config/rust-soso/sys/pal/soso/dl.rs",
         "crates/soso-rt/src/lib.rs",
         "targets/x86_64-unknown-soso.json"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T41",
@@ -791,7 +1146,13 @@
         "user/Cargo.toml",
         "user/soso-git/src/main.rs",
         "docs/SELF-HOSTING.md"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T42",
@@ -814,7 +1175,13 @@
         "tools/sosoas/src/main.rs",
         "tools/wild-soso/src/main.rs",
         "tools/mkfs-soso/src/main.rs"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T43",
@@ -836,7 +1203,13 @@
         "xtask/src/test_update.rs",
         "crates/soso-update-core/src/lib.rs",
         "docs/SELF-HOSTING.md"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
     },
     {
       "id": "T44",
@@ -847,15 +1220,262 @@
       "status": "pending",
       "depends_on": [
         "T29",
-        "T43"
+        "T43",
+        "T51"
       ],
       "entry_conditions": [],
       "contract_sections": "C5–C6",
       "context": [
         "SELF_IMPROVEMENT.md",
         "docs/SELF-HOSTING.md"
-      ]
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T51"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
+    },
+    {
+      "id": "T45",
+      "file": "T45-cli-capacidades.md",
+      "title": "Unificar órdenes, capacidades y códigos de salida",
+      "milestone": "SI-0",
+      "kind": "Implementación portable y validación guest",
+      "status": "pending",
+      "depends_on": [
+        "T01",
+        "T02"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C7",
+      "context": [
+        "crates/soso-improve-core/src/entorno.rs",
+        "user/soso-improve/src/main.rs",
+        "tools/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
+    },
+    {
+      "id": "T46",
+      "file": "T46-archivos-durables.md",
+      "title": "Acreditar persistencia y actualización de referencias en sosofs",
+      "milestone": "SI-4",
+      "kind": "Implementación portable y validación guest",
+      "status": "pending",
+      "depends_on": [
+        "T01"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C7",
+      "context": [
+        "crates/soso-improve-core/src/entorno.rs",
+        "user/libsoso/src/sys.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
+    },
+    {
+      "id": "T47",
+      "file": "T47-procesos-nativos.md",
+      "title": "Ejecutar procesos con argumentos, canales y límites exactos",
+      "milestone": "SI-4",
+      "kind": "Implementación portable y validación guest",
+      "status": "pending",
+      "depends_on": [
+        "T45",
+        "T48"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C7",
+      "context": [
+        "crates/soso-improve-core/src/entorno.rs",
+        "user/soso-improve/src/main.rs",
+        "user/libsoso/src/sys.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
+    },
+    {
+      "id": "T48",
+      "file": "T48-reloj-red.md",
+      "title": "Añadir reloj y transporte nativos para evaluaciones",
+      "milestone": "SI-2",
+      "kind": "Implementación portable y validación guest",
+      "status": "pending",
+      "depends_on": [
+        "T45"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C7",
+      "context": [
+        "user/libsoso/src/sys.rs",
+        "user/soso-llm/src/net.rs",
+        "crates/soso-improve-core/src/entorno.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
+    },
+    {
+      "id": "T49",
+      "file": "T49-pruebas-guest.md",
+      "title": "Ejecutar casos compartidos desde un runner nativo",
+      "milestone": "SI-0 / SI-4",
+      "kind": "Implementación portable y validación guest",
+      "status": "pending",
+      "depends_on": [
+        "T45",
+        "T46",
+        "T47",
+        "T48"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C7",
+      "context": [
+        "crates/soso-improve-core/src/lib.rs",
+        "user/soso-improve/src/main.rs",
+        "tests/self-improvement/cases/banco.json"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
+    },
+    {
+      "id": "T50",
+      "file": "T50-cambios-contenido.md",
+      "title": "Aplicar y exportar cambios sin Git",
+      "milestone": "SI-4",
+      "kind": "Implementación portable y validación guest",
+      "status": "pending",
+      "depends_on": [
+        "T01",
+        "T46"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C7",
+      "context": [
+        "crates/soso-improve-core/src/captura.rs",
+        "crates/soso-improve-core/src/repo.rs",
+        "tools/soso-improve/src/verificar.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
+    },
+    {
+      "id": "T51",
+      "file": "T51-aceptacion-circuito-nativo.md",
+      "title": "Acreditar todo el circuito de automejora dentro de soso",
+      "milestone": "SI-7",
+      "kind": "Integración y evaluación nativa",
+      "status": "pending",
+      "depends_on": [
+        "T29",
+        "T35",
+        "T37",
+        "T41",
+        "T42",
+        "T43",
+        "T49",
+        "T50"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5–C7",
+      "context": [
+        "docs/self-improvement/NATIVO.md",
+        "user/soso-improve/src/main.rs",
+        "docs/SELF-HOSTING.md"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      }
+    },
+    {
+      "id": "T52",
+      "file": "T52-tokenizer-merges.md",
+      "title": "Llevar las fusiones BPE al formato .som y al convertidor",
+      "milestone": "SI-1",
+      "kind": "Implementación host + formato",
+      "status": "pending",
+      "depends_on": [],
+      "origin": "T03",
+      "entry_conditions": [
+        "GGUF o tokenizer.json de la familia con su tabla de fusiones."
+      ],
+      "contract_sections": "C1–C2",
+      "context": [
+        "crates/soso-llm-core/src/tokenizer.rs",
+        "crates/gguf2som/src/lib.rs",
+        "tools/convert-gguf/src/main.rs",
+        "crates/sosomodel/src/lib.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa."
+      }
+    },
+    {
+      "id": "T53",
+      "file": "T53-tokenizer-bpe.md",
+      "title": "Segmentar por fusiones BPE en soso-llm-core",
+      "milestone": "SI-1",
+      "kind": "Implementación core",
+      "status": "pending",
+      "depends_on": [
+        "T52"
+      ],
+      "origin": "T03",
+      "entry_conditions": [
+        "tokenizer.som con fusiones (T52)."
+      ],
+      "contract_sections": "C1–C2",
+      "context": [
+        "crates/soso-llm-core/src/tokenizer.rs",
+        "crates/soso-improve-core/src/referencia.rs",
+        "tests/self-improvement/reference/"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia de ejecución nativa completa."
+      }
     }
-  ]
+  ],
+  "native_contract": "NATIVO.md"
 }
-

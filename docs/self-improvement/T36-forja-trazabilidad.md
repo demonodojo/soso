@@ -1,6 +1,7 @@
 # T36 — Vincular fuentes, build y artefacto de Forja
 
-**Hito:** SI-6 · **Tipo:** Implementación cliente-servidor · **Estado:** pendiente.  
+**Hito:** SI-6 · **Tipo:** Implementación cliente-servidor · **Estado:** pendiente.
+
 **Dependencias:** [T01](T01-base.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Fuentes y ELF/pack están unidos por recibo verificable de extremo a extremo.
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [tools/soso-forja-server/src/main.rs](../../tools/soso-forja-server/src/main.rs)
 - [user/soso-forja/src/main.rs](../../user/soso-forja/src/main.rs)
@@ -53,3 +54,8 @@ Entregar `target/self-improvement/tasks/T36/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Forja es una etapa mixta identificada por plataforma en el manifiesto. El cliente corre en soso; su build Linux no acredita el cierre nativo, que debe repetir T51 sin Forja.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

@@ -1,7 +1,8 @@
 # T04 — Añadir tipos de conversación compartidos
 
-**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.  
-**Dependencias:** Ninguna; puede iniciarse ahora.
+**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+
+**Dependencias:** ninguna.
 
 ## Objetivo y entrega
 
@@ -10,8 +11,8 @@ Tipos utilizables sin std y tests de conservación de información; métodos ant
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C1**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [crates/soso-llm-core/src/lib.rs](../../crates/soso-llm-core/src/lib.rs)
 - [crates/soso-llm-core/Cargo.toml](../../crates/soso-llm-core/Cargo.toml)
@@ -52,3 +53,8 @@ Entregar `target/self-improvement/tasks/T04/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

@@ -1,6 +1,7 @@
 # T22 — Resolver una tarea real usando la inferencia guest
 
-**Hito:** SI-3 · **Tipo:** Integración y evaluación · **Estado:** pendiente.  
+**Hito:** SI-3 · **Tipo:** Integración y evaluación · **Estado:** pendiente.
+
 **Dependencias:** [T02](T02-banco.md), [T19](T19-qemu-e2e.md), [T21](T21-opencode-contrato.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ Un cambio útil generado por el modelo de soso y validado independientemente. Ad
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C5–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [SELF_IMPROVEMENT.md](../../SELF_IMPROVEMENT.md)
 - [docs/SELF-HOSTING.md](../../docs/SELF-HOSTING.md)
@@ -52,3 +53,8 @@ Entregar `target/self-improvement/tasks/T22/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T35](T35-opencode-nativo.md), [T41](T41-cargo-offline.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

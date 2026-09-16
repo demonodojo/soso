@@ -1,6 +1,7 @@
 # T15 — Extraer la sesión residente manteniendo ask
 
-**Hito:** SI-2 · **Tipo:** Refactor guest · **Estado:** pendiente.  
+**Hito:** SI-2 · **Tipo:** Refactor guest · **Estado:** pendiente.
+
 **Dependencias:** [T08](T08-resultado-generacion.md), [T09](T09-cancelacion-runtime.md)
 
 ## Objetivo y entrega
@@ -10,8 +11,8 @@ ask carga una vez entre dos preguntas y reconexión; dos pools sucesivos termina
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C2, C4**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [user/soso-llm/src/main.rs](../../user/soso-llm/src/main.rs)
 - [user/soso-llm/src/ask.rs](../../user/soso-llm/src/ask.rs)
@@ -54,3 +55,8 @@ Entregar `target/self-improvement/tasks/T15/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

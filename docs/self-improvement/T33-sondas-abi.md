@@ -1,7 +1,8 @@
 # T33 — Crear sondas pequeñas para las capacidades requeridas
 
-**Hito:** SI-6 · **Tipo:** Implementación de pruebas guest · **Estado:** pendiente.  
-**Dependencias:** [T32](T32-opencode-inventario.md)
+**Hito:** SI-6 · **Tipo:** Implementación de pruebas guest · **Estado:** pendiente.
+
+**Dependencias:** [T32](T32-opencode-inventario.md), [T49](T49-pruebas-guest.md)
 
 ## Objetivo y entrega
 
@@ -10,8 +11,8 @@ Todas las capacidades identificadas tienen sonda y resultado; cada fallo tiene r
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [crates/soso-std/src/process.rs](../../crates/soso-std/src/process.rs)
 - [crates/soso-std/src/fs.rs](../../crates/soso-std/src/fs.rs)
@@ -55,3 +56,8 @@ Entregar `target/self-improvement/tasks/T33/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

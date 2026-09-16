@@ -1,7 +1,8 @@
 # T30 — Medir servicio e inferencia en una máquina física identificada
 
-**Hito:** SI-5 · **Tipo:** Integración de hardware · **Estado:** pendiente.  
-**Dependencias:** [T19](T19-qemu-e2e.md), [T29](T29-campana.md)
+**Hito:** SI-5 · **Tipo:** Integración de hardware · **Estado:** pendiente.
+
+**Dependencias:** [T19](T19-qemu-e2e.md), [T29](T29-campana.md), [T48](T48-reloj-red.md)
 
 ## Objetivo y entrega
 
@@ -10,18 +11,20 @@ Diez tareas atendidas sin caída del servicio ni agotamiento progresivo; fallos 
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C3–C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [docs/HW-MATRIX.md](../../docs/HW-MATRIX.md)
 - [docs/hw-matrix.json](../../docs/hw-matrix.json)
 - [docs/DIAGNOSTICO-GB205-2026-09-15.md](../../docs/DIAGNOSTICO-GB205-2026-09-15.md)
 - [docs/DIAGNOSTICO-ROG-2026-09-15.md](../../docs/DIAGNOSTICO-ROG-2026-09-15.md)
 - [docs/WIFI-OPERATIVA.md](../../docs/WIFI-OPERATIVA.md)
+- [crates/soso-improve-core/src/entorno.rs](../../crates/soso-improve-core/src/entorno.rs)
+- [user/soso-improve/src/main.rs](../../user/soso-improve/src/main.rs)
 
 ## Archivos que se pueden cambiar
 
-Añadir el informe de hardware a `crates/soso-improve-core` con su orden en `tools/soso-improve`, pruebas en el mismo crate e informe por equipo en `docs/self-improvement/hardware/`.
+Añadir el informe de hardware a `crates/soso-improve-core` con su orden en `tools/soso-improve` y `user/soso-improve`, pruebas en el mismo crate e informe por equipo en `docs/self-improvement/hardware/`.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
@@ -60,3 +63,8 @@ Entregar `target/self-improvement/tasks/T30/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
+
+Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

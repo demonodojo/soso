@@ -1,7 +1,8 @@
 # T39 — Hacer reproducible el bootstrap de libstd para soso
 
-**Hito:** SI-7 · **Tipo:** Implementación de build · **Estado:** pendiente.  
-**Dependencias:** [T38](T38-toolchain-inventario.md)
+**Hito:** SI-7 · **Tipo:** Implementación de build · **Estado:** pendiente.
+
+**Dependencias:** [T38](T38-toolchain-inventario.md), [T50](T50-cambios-contenido.md)
 
 ## Objetivo y entrega
 
@@ -10,8 +11,8 @@ La misma revisión produce sysroot utilizable; segunda preparación no duplica p
 ## Contexto mínimo
 
 Leer [CONTRATO.md](CONTRATO.md), secciones **C6**, y los símbolos
-pertinentes de estos archivos. Los módulos nuevos mencionados en los pasos
-se obtienen de las dependencias; todavía no existen en la base del plan.
+pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo los símbolos que falten
+tras comprobar las entregas de las dependencias.
 
 - [scripts/soso-rust-bootstrap.sh](../../scripts/soso-rust-bootstrap.sh)
 - [config/rust-soso/apply-patches.sh](../../config/rust-soso/apply-patches.sh)
@@ -20,7 +21,7 @@ se obtienen de las dependencias; todavía no existen en la base del plan.
 
 ## Archivos que se pueden cambiar
 
-Editar bootstrap/apply-patches y documentación asociada; añadir las pruebas del bootstrap a `tools/soso-improve` (o a `xtask`, si encaja mejor con el flujo de build) con vendor temporal.
+Mantener bootstrap/apply-patches como entrada de desarrollo; extraer preparación, verificación de hashes y receta a un módulo Rust portable, invocable desde tools/soso-improve y user/soso-improve. Añadir pruebas con vendor temporal. La ejecución nativa de build consume T40–T42.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
@@ -33,8 +34,8 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 ## Pasos
 
-1. Exigir revisión del lock T38 y destino externo específico; comprobar HEAD y estado antes de aplicar parches. No resetear un vendor con cambios.
-2. Separar preparación y build; hacer preparación idempotente y reportar cada fallo sin tragarse errores con éxito posterior.
+1. Exigir revisión del lock T38 y destino externo específico; comprobar inventario/hashes y, opcionalmente, HEAD antes de aplicar cambios portables. No resetear un vendor con cambios.
+2. Separar preparación y build en receta declarativa: argv, cwd, inputs/outputs y hashes por paso. Hacer preparación idempotente y reportar cada fallo. Inventariar helpers de los scripts y asignar sustitución nativa; mover solo sus tests a Rust no basta.
 3. Corregir rutas de salida reales de los wrappers/linker y producir manifiesto de sysroot con target y hashes.
 4. Compilar libstd cruzada para el target soso y ejecutar un programa mínimo enlazado con esa libstd dentro del guest.
 5. Si la PAL falla por un símbolo/semántica, generar una ficha C-xxx según T40 y cerrarla antes de afirmar bootstrap completo.
@@ -59,3 +60,8 @@ Entregar `target/self-improvement/tasks/T39/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto
 del hito en la misma sesión.
 
+## Ejecución nativa
+
+Aplicar [NATIVO.md](NATIVO.md). Separar semilla cruzada de reconstrucción nativa. Los scripts existentes sirven de referencia de desarrollo; entregar receta declarativa ejecutable por Rust y hashes de la semilla. T40–T42 prueban reconstrucción sin x.py, Bash ni Python.
+
+Validación nativa: **pendiente**. Condiciones adicionales: [T40](T40-compilador-nativo.md), [T41](T41-cargo-offline.md), [T42](T42-c-link-imagen.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).

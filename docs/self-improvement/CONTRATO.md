@@ -1,7 +1,8 @@
 # Contrato común de las tareas
 
-**Estado:** diseño propuesto, 15 de septiembre de 2026. Los símbolos, crates,
-comandos y archivos nuevos de estas fichas se crean al implementar su tarea.
+**Estado:** diseño revisado el 16 de septiembre de 2026. Reutilizar core y
+adaptadores de soso-improve ya existentes; crear solo las capacidades pendientes.
+El requisito de ejecución completa dentro de soso se concreta en [NATIVO.md](NATIVO.md).
 Las rutas se expresan desde la raíz del repositorio salvo indicación contraria.
 
 ## Cómo ejecutar una ficha
@@ -10,14 +11,14 @@ Las rutas se expresan desde la raíz del repositorio salvo indicación contraria
    de «Contexto mínimo». No cargar todos los subplanes en el contexto.
 2. Comprobar la evidencia de las dependencias. Una casilla marcada sin diff,
    pruebas o artefactos no acredita que una dependencia esté satisfecha.
-3. Revisar `git status --short` y las instrucciones locales aplicables. Mantener
+3. Revisar el inventario de fuentes (y `git status --short` si hay Git) y las instrucciones locales aplicables. Mantener
    los cambios existentes; trabajar sobre una base identificada en copia aislada.
 4. Implementar exclusivamente la ficha. Objetivo orientativo: 1–3 archivos de
    lógica y sus pruebas; manifiestos y documentación pueden añadir archivos.
    Si exige resolver otra arquitectura, registrar la dependencia y separarla.
 5. Ejecutar sus comprobaciones. Una prueba sin casos ejecutados no es un pase.
    Ante un fallo ajeno, conservar el log y explicar su relación con la tarea.
-6. Entregar el diff y un informe en `target/self-improvement/tasks/Txx/` con
+6. Entregar el paquete de cambios y un informe bajo la raíz de artefactos de NATIVO.md, en `tasks/Txx/`, con
    `resultado.md`, comandos, códigos de salida y artefactos. Actualizar la fila
    del índice solo al acreditar el cierre. No marcar como cerrado el hito padre
    hasta pasar su evaluación de integración.
@@ -37,7 +38,10 @@ soso-llm-api    JSON del proveedor + HTTP + SSE; no sockets ni syscalls
     ↑                       ↑
 soso-llm (guest)       ejemplo servidor host
 
-soso-improve (host) → ejecuta OpenCode y validadores como procesos
+soso-improve-core (no_std + alloc) → política, evaluación, estado y casos
+    ↑                       ↑
+tools/soso-improve      user/soso-improve
+adaptador std, lab      adaptador libsoso, producto
 ```
 
 - `soso-llm-core` conserva `no_std + alloc` por defecto. `soso-llm-api` también.
@@ -155,8 +159,10 @@ finitos de cabeceras/cuerpo y tiempo total de generación.
 
 ## C5. Coordinador, evidencia y aceptación
 
-`tools/soso-improve` será una crate host; comandos propuestos `prepare`, `run`,
-`validate`, `resume`, `report`. JSON versionado con `schema_version: 1`.
+Extender `crates/soso-improve-core` y los dos adaptadores existentes
+`tools/soso-improve` / `user/soso-improve`; comandos propuestos `prepare`, `run`,
+`validate`, `resume`, `report`. T45 unifica órdenes y errores; T46–T48 aportan
+almacenamiento, procesos, reloj y red. JSON versionado con `schema_version: 1`.
 Los comandos se ejecutan con arrays de argv y cwd explícito, sin `sh -c` para
 interpolar datos del modelo. Logs completos fuera del prompt, resumen acotado
 para el agente. Evitar secretos y variables de entorno ajenas en manifiestos.
@@ -165,16 +171,16 @@ para el agente. Evitar secretos y variables de entorno ajenas en manifiestos.
   `rechazada`, `bloqueada`. Solo el validador puede escribir `aceptada`.
 - Una tarea contiene id, base, problema, rutas editables, comprobaciones como
   argv, criterios, límites y hashes de entradas. Los criterios reservados se
-  almacenan fuera del checkout visible al agente.
+  almacenan fuera de la instancia modificable por el agente/candidato.
 - 3 intentos, 30 herramientas; tokens y tiempo según calibración. Si la versión
   de OpenCode no expone un dato, declararlo no disponible y no inventarlo.
-- Worktree = separación de cambios. Para ejecutar código de candidatos usar
-  un entorno aislado sin credenciales del host, con recursos limitados y solo
-  las rutas y red necesarias. No atribuir ese aislamiento a los permisos de
-  OpenCode o a Git por sí solos.
-- Publicar/parchear una rama candidata no implica desplegar. No ejecutar OTA
+- Copia de fuentes por contenido T01/T50 = separación de cambios. El candidato
+  se ejecuta en una instancia distinta de la autoridad validadora o con
+  contención acreditada. T26/T43 definen receptor, ejecución y recuperación
+  nativos; directorios separados y permisos de OpenCode no bastan.
+- Publicar un paquete candidato por hash no implica desplegar. No ejecutar OTA
   ni escribir discos físicos desde el coordinador inicial.
-- Estado durable con escritura temporal, flush y rename en host. Diario de
+- Estado durable mediante el contrato T46 y semántica sosofs comprobada. Diario de
   intención/resultado para operaciones con efectos; tras caída, comprobar
   evidencia antes de repetir. Un PID reciclado no identifica una ejecución.
 
@@ -188,7 +194,11 @@ Desde raíz: `cargo test -p soso-llm-core --features std`. Para el binario guest
 ejecutar `cargo build --release -p soso-llm` **con cwd `user/`**, que contiene
 su configuración de target y linker. Para crates nuevas usar los comandos
 de la ficha después de crearlas. Antes de promover una base, ejecutar
-`cargo xtask check` y `cargo xtask test`, conservando logs de ambos.
+`cargo xtask check` y `cargo xtask test` durante desarrollo, conservando logs
+de ambos. En el circuito nativo T49/T43 deben mapear todas las comprobaciones
+obligatorias a ejecutores soso equivalentes. Un check sin sustitución nativa
+bloquea T51/T44; omitirlo no acredita paridad. No exigir Cargo/libtest nativos
+para el runner temprano T49; los candidatos compilados sí requieren T40/T41.
 
 Actualizar las skills de dominio y sus espejos al cambiar arquitectura o
 procedimientos; `MANUAL-USUARIO.md` cuando aparezcan comandos o UX nuevos.
@@ -200,3 +210,13 @@ Fuentes OpenCode: [proveedores](https://opencode.ai/docs/providers/),
 [CLI](https://opencode.ai/docs/cli/) y
 [permisos](https://opencode.ai/docs/permissions/), consultadas para el plan
 principal. Revalidar contra la revisión fijada antes de implementar T20–T21.
+
+## C7. Ejecución nativa y cierre
+
+Leer [NATIVO.md](NATIVO.md) para toda ficha de automejora. Política compartida
+en no_std, adapters guest reales y evidencia de ejecución son requisitos
+distintos. No introducir Python ni dependencias funcionales Linux permanentes.
+T45–T50 resuelven mecanismos; T51 integra el circuito; T44 repite tres mejoras.
+`depends_on` ordena desarrollo y `native_validation.requires` su validación
+nativa posterior. Registrar ambos sin ciclos artificiales de bootstrap y
+sin convertir un cierre histórico host en ejecución guest verificada.
