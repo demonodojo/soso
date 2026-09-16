@@ -180,6 +180,22 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
+/// Escribe un registro en fd 3 (canal de log del kernel). Ignora errores
+/// (p. ej. fd cerrado con `3>&-`).
+#[macro_export]
+macro_rules! logln {
+    () => {
+        let _ = $crate::sys::write_all($crate::abi::LOG_FD, b"\n");
+    };
+    ($($arg:tt)*) => {{
+        use alloc::string::String;
+        use core::fmt::Write;
+        let mut s = String::new();
+        let _ = write!(s, "{}\n", format_args!($($arg)*));
+        let _ = $crate::sys::write_all($crate::abi::LOG_FD, s.as_bytes());
+    }};
+}
+
 /// Un campo de texto de tamaño fijo del kernel (`GpuInfo::name`, `::phase`, un
 /// nombre de dirent…) como `&str`: hasta el primer NUL, o el campo entero si no
 /// lo hay, y `"?"` si no es UTF-8 válido.

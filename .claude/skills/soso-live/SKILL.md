@@ -25,6 +25,10 @@ Docs de usuario: `MANUAL-USUARIO.md`. Bring-up on-box: `docs/L5c-on-box.md`.
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
 Estado/límites OTA: [`docs/ESTADO.md`](../../docs/ESTADO.md).
 
+Plan pendiente U0–U8: [actualizaciones de instalaciones y logs en sosofs](../../../docs/PLAN-ACTUALIZACIONES.md).
+Incluye recuperación conjunta kernel/rootfs, transición legacy y eliminación
+de `SOSOLOG.TXT` en la ESP instalada; no tratarlo como comportamiento implementado.
+
 ## Particiones (orden real en el stick)
 
 | # | Nombre | Contenido |

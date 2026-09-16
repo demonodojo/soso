@@ -1,6 +1,6 @@
 # T04 — Añadir tipos de conversación compartidos
 
-**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** completada (16 de septiembre de 2026; resumen en [seguimiento/T04.md](seguimiento/T04.md)).
 
 **Dependencias:** ninguna.
 
@@ -43,9 +43,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Si una dependencia activa std en guest, corregir features antes de avanzar; no crear un segundo dominio dentro de la API.
 

@@ -116,8 +116,12 @@ fn repl_lectura(hist: &mut Vec<String>, ancho: usize) -> u8 {
     loop {
         print!("\n[soso-web] ");
         let linea = match lector.siguiente() {
-            Some(l) => l,
-            None => continue,
+            Ok(Some(l)) => l,
+            Ok(None) => continue,
+            Err(e) => {
+                println!("soso-web: tty: {e}");
+                return 1;
+            }
         };
         let t = linea.trim();
         if t.is_empty() {

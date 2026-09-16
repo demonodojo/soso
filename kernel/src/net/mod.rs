@@ -18,7 +18,7 @@ use device::NicDev;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::{dhcpv4, tcp};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{EthernetAddress, IpCidr, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr};
 use spin::{Mutex, Once};
 
 #[cfg(feature = "drv-e1000e")]
@@ -756,6 +756,74 @@ pub fn tcp_accept_wake(listener_slot: usize) -> Result<Option<usize>, i64> {
     }
     tcp_accept(listener_slot)?;
     Ok(None)
+}
+
+/// Foto de la IPv4 de la NIC activa. La pila sin adaptador no cuenta como presente.
+pub fn info() -> soso_abi::NetInfo {
+    let mut out = soso_abi::NetInfo::default();
+    let Some(net) = NET.get() else {
+        return out;
+    };
+    let n = net.lock();
+    out.mac = n.mac;
+    out.backend = match n.backend {
+        BackendKind::Ninguno => soso_abi::NET_BACKEND_NONE,
+        BackendKind::Wired => soso_abi::NET_BACKEND_WIRED,
+        BackendKind::Wifi => soso_abi::NET_BACKEND_WIFI,
+    };
+    if n.backend != BackendKind::Ninguno {
+        out.flags |= soso_abi::NET_FLAG_PRESENT;
+    }
+    if n.configured {
+        out.flags |= soso_abi::NET_FLAG_CONFIGURED;
+    }
+    if let Some(IpCidr::Ipv4(v4)) = n.iface.ip_addrs().first().copied() {
+        out.addr = v4.address().octets();
+        out.prefix_len = v4.prefix_len();
+    }
+    if let Some(route) = n.iface.routes().get_default_ipv4_route() {
+        let IpAddress::Ipv4(gw) = route.via_router;
+        out.gateway = gw.octets();
+    }
+    out
+}
+
+/// Texto del comando `ip` (kshell). El binario de userspace imprime lo mismo.
+pub fn print_info() {
+    let info = info();
+    if info.flags & soso_abi::NET_FLAG_PRESENT == 0 {
+        println!("ip: sin adaptador de red");
+        return;
+    }
+    let medio = match info.backend {
+        soso_abi::NET_BACKEND_WIFI => "wifi",
+        _ => "ethernet",
+    };
+    if info.flags & soso_abi::NET_FLAG_CONFIGURED == 0 {
+        println!("ip: sin dirección (esperando DHCP)");
+    } else if info.gateway != [0, 0, 0, 0] {
+        println!(
+            "ip: {}.{}.{}.{}/{} gw {}.{}.{}.{}",
+            info.addr[0],
+            info.addr[1],
+            info.addr[2],
+            info.addr[3],
+            info.prefix_len,
+            info.gateway[0],
+            info.gateway[1],
+            info.gateway[2],
+            info.gateway[3]
+        );
+    } else {
+        println!(
+            "ip: {}.{}.{}.{}/{}",
+            info.addr[0], info.addr[1], info.addr[2], info.addr[3], info.prefix_len
+        );
+    }
+    println!(
+        "  mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {medio}",
+        info.mac[0], info.mac[1], info.mac[2], info.mac[3], info.mac[4], info.mac[5]
+    );
 }
 
 pub fn tcp_listener_ready(slot: usize) -> bool {

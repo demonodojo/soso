@@ -120,7 +120,7 @@
       "title": "Añadir tipos de conversación compartidos",
       "milestone": "SI-1",
       "kind": "Implementación Rust host/no_std",
-      "status": "pending",
+      "status": "done",
       "depends_on": [],
       "entry_conditions": [],
       "contract_sections": "C1",
@@ -134,6 +134,14 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-16",
+        "base": "92531cd2d",
+        "summary": "docs/self-improvement/seguimiento/T04.md",
+        "evidence": "target/self-improvement/tasks/T04/resultado.md",
+        "blocker": null,
+        "next_step": "T05 cerrada; T06 y T07 quedan libres"
       }
     },
     {
@@ -142,7 +150,7 @@
       "title": "Validar historial y esquemas de herramientas",
       "milestone": "SI-1",
       "kind": "Implementación Rust host/no_std",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T04"
       ],
@@ -155,7 +163,15 @@
         "status": "pending",
         "requires": [],
         "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "note": "Sin evidencia de ejecución nativa completa: la validación compila para x86_64-soso-user y sus 30 casos corren en host; T49 los tiene que ejecutar dentro de soso."
+      },
+      "tracking": {
+        "updated_at": "2026-09-16",
+        "base": "92531cd2d",
+        "summary": "docs/self-improvement/seguimiento/T05.md",
+        "evidence": "target/self-improvement/tasks/T05/resultado.md",
+        "blocker": null,
+        "next_step": "T06 y T07 quedan con sus dependencias cerradas"
       }
     },
     {
@@ -1461,7 +1477,7 @@
       "title": "Segmentar por fusiones BPE en soso-llm-core",
       "milestone": "SI-1",
       "kind": "Implementación core",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T52"
       ],
@@ -1482,6 +1498,14 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa."
+      },
+      "tracking": {
+        "updated_at": "2026-09-16",
+        "base": "92531cd2d",
+        "summary": "docs/self-improvement/seguimiento/T53.md",
+        "evidence": "target/self-improvement/tasks/T53/resultado.md",
+        "blocker": null,
+        "next_step": "T06 desbloqueada (sus otras dependencias son T04 y T05)"
       }
     }
   ],

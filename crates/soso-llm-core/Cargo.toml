@@ -6,7 +6,10 @@ license = "GPL-2.0-only"
 
 [features]
 default = []
-std = []
+# `std` no debe colarse en el guest a través de una dependencia: serde y
+# serde_json van con `default-features = false` y solo suben a std si se pide
+# esta característica de forma explícita (C1).
+std = ["serde/std", "serde_json/std"]
 
 [dev-dependencies]
 soso-audio = { path = "../soso-audio", features = ["std"] }
@@ -14,6 +17,8 @@ soso-audio = { path = "../soso-audio", features = ["std"] }
 [dependencies]
 sosomodel = { path = "../sosomodel" }
 libm = "0.2"
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 [lib]
 doctest = false

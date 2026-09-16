@@ -31,3 +31,26 @@ pub fn read_text() -> Option<alloc::vec::Vec<u8>> {
     espfat::read(slot.data_lba, &mut buf).ok()?;
     Some(buf)
 }
+
+/// Sobrescribe el hueco 4 KiB de `SOSOWIFI.TXT`. `Ok(false)` si no hay ESP o
+/// el fichero no está localizado; no es un error de E/S.
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
+pub fn write_text(text: &str) -> Result<bool, ()> {
+    let Some(slot) = SLOT.get().and_then(|s| *s) else {
+        return Ok(false);
+    };
+    let bytes = text.as_bytes();
+    if bytes.len() >= FILE_SIZE {
+        return Err(());
+    }
+    let mut buf = alloc::vec![b'\n'; FILE_SIZE];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    let write_ok = crate::drivers::logbuf::run_without_capture(|| {
+        espfat::write(slot.data_lba, &buf).is_ok()
+    });
+    if write_ok {
+        Ok(true)
+    } else {
+        Err(())
+    }
+}

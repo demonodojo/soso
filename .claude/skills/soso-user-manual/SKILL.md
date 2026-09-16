@@ -74,9 +74,9 @@ Referencia rápida — ampliar el manual si cambian:
 - **Log USB live:** usuario `cargo xtask sosolog` / `--drv`; el agente monta p1 con `udisksctl` (skill **soso-live**), no `sudo cargo`
 - **SSH:** `ssh -tt -i target/soso_test_key -p 2222 soso@localhost` (QEMU); puerto 22 en placa
 - **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, `wifi`, `ask`, `voz`, pipes, redirecciones)
-- **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `halt`
+- **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `ip`, `halt`
 - **LLM:** `soso-llm run …`; modelos en `/models/`; live escala modelo según tamaño del stick
-- **Red:** echo TCP `nc localhost 7777`; live: Realtek 8168 o WiFi AX211/AX200
+- **Red:** `ip` (IPv4); echo TCP `nc localhost 7777`; live: Realtek 8168 o WiFi AX211/AX200
 
 ## Skills compartidas
 

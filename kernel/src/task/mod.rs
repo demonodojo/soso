@@ -178,6 +178,8 @@ pub enum Fd {
     PipeRead(pipe::PipeId),
     PipeWrite(pipe::PipeId),
     Tcp { slot: usize },
+    /// Canal de registro del kernel (fd 3 por defecto).
+    Log,
 }
 
 pub struct Process {
@@ -772,7 +774,19 @@ pub fn spawn_console(
             .map(|p| p.env.clone())
             .unwrap_or_default()
     };
-    spawn_console_io(path, &argv, parent, console, [soso_abi::FD_INHERIT_TTY; 3], &env)
+    spawn_console_io(
+        path,
+        &argv,
+        parent,
+        console,
+        [
+            soso_abi::FD_INHERIT_TTY,
+            soso_abi::FD_INHERIT_TTY,
+            soso_abi::FD_INHERIT_TTY,
+            soso_abi::FD_KERNEL_LOG,
+        ],
+        &env,
+    )
 }
 
 /// Como `spawn_console` pero con stdio opcional (`FD_INHERIT_TTY` /
@@ -782,7 +796,7 @@ pub fn spawn_console_io(
     argv: &[String],
     parent: u64,
     console: Console,
-    stdio: [u64; 3],
+    stdio: [u64; 4],
     env: &str,
 ) -> Result<u64, i64> {
     use soso_abi as abi;
@@ -807,13 +821,17 @@ pub fn spawn_console_io(
     } else {
         String::from(env)
     };
-    let stdio_fds = if stdio.iter().all(|&f| abi::stdio_es_tty(f)) {
-        [None, None, None]
-    } else if current_pid() == 0 {
-        return Err(-abi::EINVAL);
-    } else {
-        syscall::take_stdio_fds(stdio)?
+    // Resolver el ELF antes de mover fds del padre: un ENOENT no debe
+    // vaciar stdin de sosh (Linux copia la tabla; el exec fallido no la toca).
+    let (ino, file_size) = {
+        let ino = crate::vfs::resolve(path).map_err(crate::task::syscall::fs_errno)?;
+        let st = crate::vfs::stat_inode(ino).map_err(crate::task::syscall::fs_errno)?;
+        (ino, st.size.get())
     };
+    let needs_parent = !stdio.iter().all(|&f| abi::stdio_es_centinela(f));
+    if needs_parent && current_pid() == 0 {
+        return Err(-abi::EINVAL);
+    }
     let cwd = {
         let procs = PROCS.lock();
         procs
@@ -830,11 +848,7 @@ pub fn spawn_console_io(
             .map(|p| (p.pgid, p.sid))
             .unwrap_or((0, 0))
     };
-    let (ino, file_size) = {
-        let ino = crate::vfs::resolve(path).map_err(crate::task::syscall::fs_errno)?;
-        let st = crate::vfs::stat_inode(ino).map_err(crate::task::syscall::fs_errno)?;
-        (ino, st.size.get())
-    };
+    let stdio_fds = syscall::build_child_fds(stdio)?;
     let space = AddrSpace::new().ok_or(-abi::ENOMEM)?;
     let (ctx, brk, tls_base) = if file_size > abi::LAZY_FILE_THRESHOLD {
         let head_len = core::cmp::min(file_size as usize, 65536);
@@ -869,12 +883,7 @@ pub fn spawn_console_io(
     } else {
         (parent_pgid, parent_sid)
     };
-    let mut fds = vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)];
-    for (slot, fd) in stdio_fds.into_iter().enumerate() {
-        if let Some(f) = fd {
-            fds[slot] = Some(f);
-        }
-    }
+    let fds = stdio_fds.into_fds();
     PROCS.lock().push(Process {
         pid,
         parent,
@@ -946,7 +955,12 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
         state: State::Runnable,
         ctx,
         space: Some(space),
-        fds: vec![Some(Fd::Tty), Some(Fd::Tty), Some(Fd::Tty)],
+        fds: vec![
+            Some(Fd::Tty),
+            Some(Fd::Tty),
+            Some(Fd::Tty),
+            Some(Fd::Log),
+        ],
         brk,
         brk_min,
         console,

@@ -13,6 +13,7 @@
 | Familia | `qwen2` · `Qwen2ForCausalLM` |
 | Capas / vocab / contexto | 36 · 151 936 · 32 768 |
 | Convertido en | `target/qwen2.5-coder-3b-model` (`manifest.som`, `index.som`, `tokenizer.som`, shards) |
+| Formato del tokenizer | `.som` **v2** con las 151 387 fusiones BPE (T52/T53) |
 | Catálogo del proyecto | `qwen2.5-coder-3b` en [`xtask/src/live_models.rs`](../../xtask/src/live_models.rs) |
 
 Es el candidato que fija C1 del [contrato](CONTRATO.md). Los hashes de cada
@@ -103,7 +104,17 @@ soso-improve modelo detalle  --modelo target/qwen2.5-coder-3b-model --caso syste
 
 ## Divergencias encontradas
 
-**Los cinco fixtures divergen.** Ningún ID de la referencia se sale del
+> **Corregidas.** Lo que sigue es el estado en que T03 dejó el modelo, y es el
+> motivo de ser de T52 y T53. Con el `.som` v2, `soso-improve modelo comparar
+> --modelo target/qwen2.5-coder-3b-model` da hoy **5 iguales, 0 divergencias**.
+> El directorio del perfil es también el que empaqueta el live USB
+> (`default_live_spec` en [`live_models.rs`](../../xtask/src/live_models.rs)),
+> así que tenía que quedarse con el tokenizer bueno: el 16 de septiembre de 2026
+> se le pusieron el `manifest.som` y el `tokenizer.som` reconvertidos, con los
+> 436 shards y el `index.som` byte a byte iguales. El par v1 anterior está en
+> `target/qwen2.5-coder-3b-model.v1/`.
+
+**Los cinco fixtures divergían.** Ningún ID de la referencia se sale del
 vocabulario de soso (máximo 151 664 frente a 151 936), así que no es un
 problema de vocabulario: es de **segmentación**.
 

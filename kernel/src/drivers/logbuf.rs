@@ -8,10 +8,8 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-/// ~256 KiB: mismo tamaño que SOSOLOG.TXT en la ESP.
-const CAP: usize = 256 * 1024;
-
-struct LogBuf {
+/// Ring de bytes de capacidad fija (sobrescribe lo más antiguo).
+pub(crate) struct Ring<const CAP: usize> {
     data: [u8; CAP],
     /// Siguiente índice de escritura (módulo CAP).
     pos: usize,
@@ -19,8 +17,8 @@ struct LogBuf {
     len: usize,
 }
 
-impl LogBuf {
-    const fn new() -> Self {
+impl<const CAP: usize> Ring<CAP> {
+    pub(crate) const fn new() -> Self {
         Self {
             data: [0; CAP],
             pos: 0,
@@ -28,7 +26,7 @@ impl LogBuf {
         }
     }
 
-    fn append(&mut self, bytes: &[u8]) {
+    pub(crate) fn append(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.data[self.pos] = b;
             self.pos = (self.pos + 1) % CAP;
@@ -46,7 +44,7 @@ impl LogBuf {
         self.len
     }
 
-    fn copy_from(&self, offset: usize, out: &mut [u8]) -> usize {
+    pub(crate) fn copy_from(&self, offset: usize, out: &mut [u8]) -> usize {
         if offset >= self.len || out.is_empty() {
             return 0;
         }
@@ -60,7 +58,10 @@ impl LogBuf {
     }
 }
 
-static BUF: Mutex<LogBuf> = Mutex::new(LogBuf::new());
+/// ~256 KiB: mismo tamaño que SOSOLOG.TXT en la ESP.
+const CAP: usize = 256 * 1024;
+
+static BUF: Mutex<Ring<CAP>> = Mutex::new(Ring::new());
 /// Evita reentrar al buffer mientras `dmesg` vuelca (no duplicar el dump).
 static QUIET: AtomicBool = AtomicBool::new(false);
 
@@ -80,7 +81,7 @@ pub fn append(bytes: &[u8]) {
 }
 
 pub fn len() -> usize {
-    BUF.lock().len
+    BUF.lock().byte_len()
 }
 
 /// Copia el ring completo en `dest` bajo un solo lock.
@@ -106,7 +107,7 @@ pub fn copy_log_into(dest: &mut [u8]) -> (usize, usize) {
 }
 
 /// Lee el ring bajo un solo lock (sin capturar `print!` durante la copia).
-fn with_read<R>(f: impl FnOnce(&LogBuf) -> R) -> R {
+fn with_read<R>(f: impl FnOnce(&Ring<CAP>) -> R) -> R {
     // Igual que `_print`: evita que una IRQ intercale bytes mientras copiamos.
     x86_64::instructions::interrupts::without_interrupts(|| {
         QUIET.store(true, Ordering::Relaxed);

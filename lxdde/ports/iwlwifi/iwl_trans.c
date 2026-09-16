@@ -591,7 +591,14 @@ static int hcmd_scd_pending(const struct iwl_ax211_priv *iwl)
 static void log_rx(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd,
                    uint16_t seq, int pay, int status)
 {
+    /* Linux IWL_DEBUG_RX: sin CONFIG_IWLWIFI_DEBUG no hay traza por paquete. */
+    if (status == 0 && !hcmd_scd_pending(iwl))
+        return;
     if (hcmd_scd_pending(iwl)) {
+        static unsigned scd_wait_rx_logged;
+
+        if (scd_wait_rx_logged++)
+            return;
         lx_printk("iwl_rx: [SCD-wait] grp=%u id=0x%02x seq=0x%04x len=%d st=%d "
                   "(esperando seq=0x%04x)\n",
                   (unsigned)group, (unsigned)cmd, (unsigned)seq, pay, status,
@@ -732,7 +739,8 @@ static void parse_tx_resp(struct iwl_ax211_priv *iwl, uint8_t group,
     }
     st = raw & TX_STATUS_MSK;
     iwl->last_mgmt_tx_status = (uint8_t)st;
-    {
+    /* Linux IWL_DEBUG_TX_REPLY: SUCCESS no va a info. 0x83 y el resto sí. */
+    if (st != TX_STATUS_SUCCESS) {
         const char *name = tx_status_name(st);
         uint16_t qid = resp_qid ? resp_qid : SEQ_TO_QUEUE(seq);
         uint16_t *rd = txq_read_ptr(iwl, qid);
@@ -907,13 +915,13 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
      * descarta. Recortar dejaba pasar respuestas incompletas como válidas. */
     if ((unsigned)pay > avail - 8u) {
         iwl->rx_trunc_drop++;
-        log_rx(iwl, group, cmd, seq, pay, -1);
         lx_printk("iwl_rx: truncado grp=%u id=0x%02x len=%d recibidos=%u; descartado\n",
                   (unsigned)group, (unsigned)cmd, pay, avail - 8u);
         return;
     }
 
-    log_rx(iwl, group, cmd, seq, pay, 0);
+    if (hcmd_scd_pending(iwl))
+        log_rx(iwl, group, cmd, seq, pay, 0);
 
     /* TX_CMD (0x1c) es notificación de cola de datos, no respuesta HCMD. */
     if (cmd == TX_CMD) {
@@ -1026,7 +1034,7 @@ static void drain_rx_gen2(struct iwl_ax211_priv *iwl)
 
     if (!iwl->rb_stts || !iwl->used_bd_cpu || !iwl->rx_page_cpu || !iwl->rx_bd_cpu)
         return;
-    hw = iwl->rb_stts[0] & 0x0fff;
+    hw = iwl_closed_rb_idx(iwl->rb_stts, IWL_GEN2_RX_N);
     while (iwl->rx_read != hw && n++ < IWL_GEN2_RX_N) {
         uint16_t vid = iwl_rx_completed_vid(iwl, iwl->rx_read);
 
@@ -1044,7 +1052,7 @@ static void drain_rx_gen2(struct iwl_ax211_priv *iwl)
             iwl->rx_vid_drop++;
         }
         iwl->rx_read = (uint16_t)((iwl->rx_read + 1) % IWL_GEN2_RX_N);
-        hw = iwl->rb_stts[0] & 0x0fff;
+        hw = iwl_closed_rb_idx(iwl->rb_stts, IWL_GEN2_RX_N);
     }
     iwl_write32(iwl, RFH_Q0_FRBDCB_WIDX_TRG, (uint32_t)(iwl->rx_write & ~7u));
 }
@@ -1874,9 +1882,6 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
 
     *writep = (uint16_t)((*writep + 1u) & (IWL_MGMT_QUEUE_SIZE - 1u));
     doorbell = tx_doorbell(iwl, txq_id, *writep);
-    lx_printk("iwl_trans: tx qid=%u doorbell=0x%08x seq=0x%04x len=%u\n",
-              (unsigned)txq_id, doorbell, (unsigned)hdr->sequence,
-              (unsigned)pay_len);
     iwl_write32(iwl, HBUS_TARG_WRPTR, doorbell);
     for (poll = 0; poll < 16; poll++)
         drain_rx_gen2(iwl);

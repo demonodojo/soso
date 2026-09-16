@@ -190,7 +190,10 @@ fn imprimir_discos(disks: &[DiskInfo]) {
 }
 
 fn leer_linea_tty() -> Option<String> {
-    Lector::new().siguiente()
+    match Lector::new().siguiente() {
+        Ok(s) => s,
+        Err(_) => None,
+    }
 }
 
 fn pedir_destino(disks: &[DiskInfo]) -> Option<u32> {

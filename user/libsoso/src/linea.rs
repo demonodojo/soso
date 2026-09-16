@@ -95,11 +95,16 @@ impl Lector {
         self
     }
 
-    /// Bloquea hasta tener una línea completa. Devuelve `None` en fin de
-    /// entrada (Ctrl-D o error de lectura), que es la señal de salida de un
-    /// REPL. Una línea que no sea UTF-8 válido se descarta con aviso y se
-    /// espera a la siguiente.
-    pub fn siguiente(&mut self) -> Option<String> {
+    /// Bloquea hasta tener una línea completa.
+    ///
+    /// - `Ok(Some(s))`: línea (sin el salto).
+    /// - `Ok(None)`: fin de entrada (Ctrl-D en línea vacía).
+    /// - `Err(e)`: error de lectura (p. ej. `EBADF` si el spawn robó stdin).
+    ///   No es EOF: quien llama debe distinguirlo para no salir como con `exit`.
+    ///
+    /// Una línea que no sea UTF-8 válido se descarta con aviso y se espera a
+    /// la siguiente.
+    pub fn siguiente(&mut self) -> Result<Option<String>, i64> {
         self.inyectar_prefijo();
         loop {
             let mut byte = [0u8; 1];
@@ -110,7 +115,7 @@ impl Lector {
                 continue;
             }
             if n < 0 {
-                return None;
+                return Err(n);
             }
             if n == 0 {
                 continue;
@@ -124,7 +129,7 @@ impl Lector {
                     let len = self.len;
                     self.len = 0;
                     match core::str::from_utf8(&self.linea[..len]) {
-                        Ok(s) => return Some(String::from(s)),
+                        Ok(s) => return Ok(Some(String::from(s))),
                         Err(_) => crate::println!("entrada descartada: no es UTF-8 válido"),
                     }
                 }
@@ -133,7 +138,7 @@ impl Lector {
                 0x04 => {
                     if self.len == 0 {
                         self.eco_str("\n");
-                        return None;
+                        return Ok(None);
                     }
                 }
                 0x08 | 0x7f => self.borrar_caracter(),

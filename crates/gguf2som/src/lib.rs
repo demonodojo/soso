@@ -604,24 +604,27 @@ pub fn convert_with_options<R: Read + Seek>(
         };
         let eos = gguf.meta_u32("tokenizer.ggml.eos_token_id").unwrap_or(NO_TOKEN);
         let (merges, sueltas) = merges_del_gguf(&gguf, &pieces);
+        // Igual que la plantilla de chat: este crate va `no_std` en `soso-hf`.
+        #[cfg(feature = "std")]
         if !merges.is_empty() {
-            println!(
-                "gguf2som: {} fusiones BPE guardadas{}",
-                merges.len(),
-                if sueltas > 0 {
-                    format!(" ({sueltas} descartadas: un lado no está en el vocabulario)")
-                } else {
-                    String::new()
-                }
-            );
+            if sueltas > 0 {
+                std::eprintln!(
+                    "gguf2som: {} fusiones BPE guardadas ({sueltas} descartadas: un lado no está en el vocabulario)",
+                    merges.len(),
+                );
+            } else {
+                std::eprintln!("gguf2som: {} fusiones BPE guardadas", merges.len());
+            }
         } else if gguf.meta.contains_key("tokenizer.ggml.merges") {
-            println!("gguf2som: AVISO el GGUF trae fusiones pero ninguna se pudo resolver");
+            std::eprintln!("gguf2som: AVISO el GGUF trae fusiones pero ninguna se pudo resolver");
         } else {
-            println!(
+            std::eprintln!(
                 "gguf2som: AVISO este GGUF no trae fusiones BPE; la segmentación \
                  será aproximada para vocabularios byte-level"
             );
         }
+        #[cfg(not(feature = "std"))]
+        let _ = sueltas;
         out.write(
             TOKENIZER_FILE,
             &VocabTokenizer::serialize_con_merges(&pieces, bos, eos, &merges),

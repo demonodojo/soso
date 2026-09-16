@@ -142,6 +142,16 @@ pub fn spawn_io_ex(
     stdout: u64,
     stderr: u64,
 ) -> i64 {
+    spawn_io_full(
+        path,
+        argv,
+        env,
+        [stdin, stdout, stderr, abi::FD_KERNEL_LOG],
+    )
+}
+
+/// Spawn con control explícito de los cuatro descriptores estándar (0–3).
+pub fn spawn_io_full(path: &str, argv: &[&str], env: &[&str], fds: [u64; 4]) -> i64 {
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -169,9 +179,10 @@ pub fn spawn_io_ex(
         path_len: path.len() as u64,
         args_ptr: args_joined.as_ptr() as u64,
         args_len: args_joined.len() as u64,
-        stdin_fd: stdin,
-        stdout_fd: stdout,
-        stderr_fd: stderr,
+        stdin_fd: fds[0],
+        stdout_fd: fds[1],
+        stderr_fd: fds[2],
+        log_fd: fds[3],
         argv_ptr: if argv.is_empty() {
             0
         } else {
@@ -324,6 +335,16 @@ pub fn meminfo(out: &mut abi::MemInfo) -> i64 {
     )
 }
 
+pub fn netinfo(out: &mut abi::NetInfo) -> i64 {
+    syscall4(
+        abi::SYS_NETINFO,
+        out as *mut abi::NetInfo as u64,
+        0,
+        0,
+        0,
+    )
+}
+
 pub fn iostat(out: &mut abi::IoStat) -> i64 {
     syscall4(abi::SYS_IOSTAT, out as *mut abi::IoStat as u64, 0, 0, 0)
 }
@@ -394,6 +415,17 @@ pub fn bootreq_read(buf: &mut [u8]) -> i64 {
 /// Volcado inmediato del log de consola a `SOSOLOG.TXT` en la ESP live.
 pub fn fatlog_flush() -> i64 {
     syscall4(abi::SYS_FATLOG_FLUSH, 0, 0, 0, 0)
+}
+
+/// Lee el ring de registros de aplicaciones (offset 0 = byte más antiguo).
+pub fn log_read(offset: u64, buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_LOG_READ,
+        offset,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    )
 }
 
 /// Versión del kernel (`version build`). Devuelve bytes escritos o errno.

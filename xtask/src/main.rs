@@ -647,6 +647,8 @@ pub(crate) fn build_user() -> bool {
         "mkdir",
         "rm",
         "hexdump",
+        "log",
+        "ip",
         "halt",
         "soso-llm",
         "soso-install",

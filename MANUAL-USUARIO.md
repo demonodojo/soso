@@ -30,7 +30,7 @@ el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
 | Actualización | **soso-update** | Bajar e instalar releases nuevas (programas + kernel) |
 | Desarrollo | **soso-ed**, **soso-forja** | Editar fuentes en `/src/soso`; bucle remoto o plan local (`docs/SELF-HOSTING.md`) |
 | Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
-| Red | **wifi** (builtin) | Escanear y conectar redes WiFi Intel en placa real |
+| Red | **ip**, **wifi** (builtin) | Ver la IPv4; escanear y conectar redes WiFi Intel en placa real |
 | Sistema | **halt**, **exit** | Apagar o salir de la shell |
 
 Al arrancar verás una línea como `soso 0.2.2 (6641119fd)` — versión del kernel
@@ -187,6 +187,8 @@ wifi connect MiRed
 wifi connect MiRed MiClaveWPA2
 ```
 
+Si la conexión termina bien, soso guarda el SSID y la clave (red abierta: solo el SSID) en `SOSOWIFI.TXT` de la ESP (USB live) y en `/etc/wifi.conf`. El siguiente arranque conecta solo y pide DHCP; no hace falta volver a escribir la clave.
+
 Tras autorizar el enlace, soso pide DHCP. SSH queda en el **puerto 22**.
 
 `wifi status` distingue dos cosas que no son lo mismo:
@@ -216,7 +218,9 @@ devuelve nada, el motivo se dice en claro y no todos son un error:
 
 2. **En el pendrive, antes de arrancar:** edita `SOSOWIFI.TXT` en la ESP (partición 1
    FAT). El kernel se conecta solo al boot. No hace falta regenerar la imagen.
-3. **En rootfs:** `/etc/wifi.conf` (se empaqueta al flashear).
+   Un `wifi connect` correcto también lo actualiza.
+3. **En rootfs:** `/etc/wifi.conf` (se empaqueta al flashear; un `wifi connect`
+   correcto lo actualiza).
 
 ```ini
 ssid=MiRed
@@ -226,7 +230,7 @@ psk=MiClaveWPA2
 Firmware en `/lib/firmware/iwlwifi-so-a0-gf-a0-89.ucode` y `.pnvm` (AX211),
 o `iwlwifi-cc-a0-77.ucode` (AX200, sin pnvm).
 
-**SSH en placa** (IP del log `net: dhcp …`):
+**SSH en placa** (IP de `ip`, o del log `net: dhcp …`):
 
 ```sh
 ssh -i target/soso_test_key soso@<ip>
@@ -235,6 +239,7 @@ ssh -i target/soso_test_key soso@<ip>
 **Consola de emergencia (kernel-shell):**
 
 ```text
+ip                 # IPv4 (DHCP o fallback)
 wifi scan          # listar redes
 wifi status        # estado del driver
 wifi connect Red   # red abierta
@@ -302,8 +307,12 @@ $
 | Operador | Significado |
 |---|---|
 | `cmd1 \| cmd2` | La salida de `cmd1` es la entrada de `cmd2` |
-| `cmd > fichero` | Redirige la salida a `fichero` (lo crea o trunca) |
-| `cmd >> fichero` | Añade la salida al final de `fichero` |
+| `cmd > fichero` | Redirige stdout (fd 1) a `fichero` (lo crea o trunca) |
+| `cmd >> fichero` | Añade stdout al final de `fichero` |
+| `cmd 2> fichero` | Redirige stderr (fd 2) |
+| `cmd 3> fichero` | Redirige el canal de registro (fd 3); bytes crudos, sin sello del kernel |
+| `cmd 3>> fichero` | Añade registros al final |
+| `cmd 3>&-` | Desactiva el canal de registro (los `write(3)` fallan silenciosamente con `logln!`) |
 | `cmd < fichero` | Lee la entrada desde `fichero` |
 
 Ejemplos:
@@ -319,7 +328,29 @@ ls /tmp
 cat /etc/motd | hexdump -    # el `-` es lo que lee stdin
 ls | cat -
 cat < /etc/motd
+servidor 3>/tmp/servidor.log    # registros en fichero crudo
+servidor 3>&-                   # sin registros
+log                             # ver el ring global de registros
 ```
+
+### Canal de registro (fd 3)
+
+Todo proceso arranca con un cuarto descriptor, **fd 3**, pensado para eventos de
+aplicación (no confundir con stderr, que es salida humana/diagnóstico interactivo).
+
+Por defecto, cada `write(3, …)` es un **registro indivisible** que el kernel guarda
+en un ring de 64 KiB con sello monotónico, pid y nombre del binario, por ejemplo:
+
+```
+[   12.345678] pid=7 /bin/sosh: usuario autenticado
+```
+
+El comando **`log`** vuelca ese ring. No mezcla con la consola, `dmesg` ni
+`SOSOLOG.TXT`. En código userspace puedes usar la macro **`logln!`** de `libsoso`
+(una línea por llamada).
+
+Redirigir `3>fichero` escribe **bytes crudos** (sin sello), igual que stdout hacia
+un fichero: el entorno decide dónde van los registros sin recompilar.
 
 **Los pipelines necesitan un `-`.** `cat` y `hexdump` leen stdin cuando se les pasa
 `-` como fichero, no cuando se les llama sin argumentos: en la tty de soso nadie
@@ -342,7 +373,7 @@ pipelines de esta sección **no funcionaban** aunque estuvieran documentados.
 | `voz [ask]` | Dictado por voz: transcribe e inserta en la línea (Enter confirma). Ver [voz](#voz--dictado) |
 | `wifi scan` | Lista redes WiFi (Intel AX211/AX200) |
 | `wifi status` | Estado del adaptador WiFi |
-| `wifi connect <ssid> [psk]` | Asocia a una red (sin `psk` = abierta; con clave = WPA2) |
+| `wifi connect <ssid> [psk]` | Asocia a una red (sin `psk` = abierta; con clave = WPA2) y guarda las credenciales para el próximo arranque |
 
 Ejemplos:
 
@@ -425,6 +456,23 @@ hexdump /etc/motd
 ```
 
 Muestra offset, bytes en hex y representación ASCII.
+
+### ip — consultar la dirección IPv4
+
+```sh
+ip
+```
+
+Muestra la IPv4 que obtuvo DHCP (o el fallback estático de QEMU), la pasarela y la MAC:
+
+```text
+ip: 192.168.68.132/24 gw 192.168.68.1
+  mac 8c:b8:7e:12:34:56  wifi
+```
+
+Si aún no hay lease: `ip: sin dirección (esperando DHCP)`. Sin NIC: `ip: sin adaptador de red`. En la kernel-shell de emergencia (`soso>`) el comando es el mismo.
+
+Úsalo en placa para saber a qué IP conectar por SSH (`ssh -i target/soso_test_key soso@<ip>`).
 
 ### halt — apagar el sistema
 
@@ -1699,6 +1747,7 @@ soso-web --local /etc/web-prueba.html
 soso-web https://example.com
 
 # Red (placa real)
+ip                          # IPv4 para SSH
 wifi scan
 wifi connect MiRed MiClaveWPA2
 

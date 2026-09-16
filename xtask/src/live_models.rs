@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 use crate::fetch_hf;
+use sosomodel::parse_som;
 
 /// Margen extra sobre el árbol `.som` al dimensionar la imagen sosomfs.
 pub const MODELS_IMAGE_MARGIN: u64 = 256 * 1024 * 1024;
@@ -16,6 +17,22 @@ pub const GPT_OVERHEAD_BYTES: u64 = 1024 * 1024;
 
 /// Tamaño estimado del modelo sintético `tiny` empaquetado junto al demo.
 pub const TINY_SOM_ESTIMATE: u64 = 64 * 1024 * 1024;
+
+/// Qué tokenizer tiene que traer el `.som` convertido de un modelo del catálogo.
+///
+/// Se **declara** aquí en vez de deducirlo del vocabulario: contar marcas de
+/// espacio acierta con el separador y no con el algoritmo (ficha T52). Y
+/// equivocarse en esto no da un error, da un modelo que carga, responde y
+/// segmenta mal en silencio, que es lo que se coló en el pendrive con el
+/// Qwen2.5 del 15 de septiembre de 2026.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenizerEsperado {
+    /// SentencePiece: el `.som` v1, sin tabla de fusiones, es lo correcto.
+    Piezas,
+    /// BPE byte-level (GPT-2, Qwen2, Qwen3): sin la tabla de fusiones no se
+    /// puede reproducir su segmentación, y esa tabla es un `.som` v2.
+    Fusiones,
+}
 
 /// Entrada del catálogo live (GGUF llama/qwen2, tokenizer SentencePiece o GPT-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +47,8 @@ pub struct LiveModelSpec {
     pub gguf_bytes_estimate: u64,
     /// Tamaño mínimo del pendrive (bytes) para considerar este modelo.
     pub min_usb_bytes: u64,
+    /// Tokenizer que tiene que traer su `.som` para segmentar como el original.
+    pub tokenizer: TokenizerEsperado,
 }
 
 /// Catálogo ordenado de peor a mejor calidad (el picker recorre al revés).
@@ -40,6 +59,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_file: None,
         gguf_bytes_estimate: 700 * 1024 * 1024,
         min_usb_bytes: 8 * 1024 * 1024 * 1024,
+        tokenizer: TokenizerEsperado::Piezas,
     },
     LiveModelSpec {
         name: "qwen2.5-coder-3b",
@@ -47,6 +67,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_file: Some("qwen2.5-coder-3b-instruct-q4_k_m.gguf"),
         gguf_bytes_estimate: 2100 * 1024 * 1024,
         min_usb_bytes: 8 * 1024 * 1024 * 1024,
+        tokenizer: TokenizerEsperado::Fusiones,
     },
     LiveModelSpec {
         name: "mistral-7b",
@@ -54,6 +75,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_file: None,
         gguf_bytes_estimate: 4_400 * 1024 * 1024,
         min_usb_bytes: 16 * 1024 * 1024 * 1024,
+        tokenizer: TokenizerEsperado::Piezas,
     },
     LiveModelSpec {
         name: "mixtral",
@@ -61,6 +83,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_file: None,
         gguf_bytes_estimate: 26 * 1024 * 1024 * 1024,
         min_usb_bytes: 32 * 1024 * 1024 * 1024,
+        tokenizer: TokenizerEsperado::Piezas,
     },
     LiveModelSpec {
         name: "llama2-70b",
@@ -68,6 +91,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_file: None,
         gguf_bytes_estimate: 39 * 1024 * 1024 * 1024,
         min_usb_bytes: 64 * 1024 * 1024 * 1024,
+        tokenizer: TokenizerEsperado::Piezas,
     },
     LiveModelSpec {
         name: "qwen3.8-27b",
@@ -75,8 +99,22 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_file: Some("Qwen3.8-27B-Q4_K_M.gguf"),
         gguf_bytes_estimate: 19 * 1024 * 1024 * 1024,
         min_usb_bytes: 32 * 1024 * 1024 * 1024,
+        tokenizer: TokenizerEsperado::Fusiones,
     },
 ];
+
+/// Entrada del catálogo con ese nombre, si la hay.
+pub fn spec_by_name(name: &str) -> Option<LiveModelSpec> {
+    CATALOG.iter().find(|s| s.name == name).copied()
+}
+
+/// Versión del `.som` de `path`, validando magic y CRC de paso.
+fn som_version(path: &Path) -> Result<u32, String> {
+    let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    parse_som(&data)
+        .map(|(v, _)| v)
+        .map_err(|_| format!("{}: cabecera o CRC de .som inválidos", path.display()))
+}
 
 /// Modelo demo de `package-usb-live` cuando no hay pendrive ni `SOSO_LIVE_CAPACITY`.
 pub fn default_live_spec() -> LiveModelSpec {
@@ -87,6 +125,46 @@ pub fn default_live_spec() -> LiveModelSpec {
 }
 
 impl LiveModelSpec {
+    /// ¿Trae este directorio el tokenizer que el modelo necesita?
+    ///
+    /// Un `.som` v1 en un modelo BPE no rompe nada de forma visible: carga,
+    /// responde y elige otros tokens. Por eso se comprueba antes de meterlo en
+    /// una imagen, que es donde deja de poder arreglarse a tiempo.
+    pub fn check_tokenizer(&self, dir: &Path) -> Result<(), String> {
+        let path = dir.join("tokenizer.som");
+        if !path.exists() {
+            return Err(format!("falta {}", path.display()));
+        }
+        let version = som_version(&path)?;
+        match self.tokenizer {
+            // Un v2 en un SentencePiece querría decir que el GGUF traía
+            // fusiones, y entonces usarlas es lo correcto: no es un fallo.
+            TokenizerEsperado::Piezas => Ok(()),
+            TokenizerEsperado::Fusiones if version >= 2 => Ok(()),
+            TokenizerEsperado::Fusiones => Err(format!(
+                "{} es un .som v{version}, sin tabla de fusiones BPE: {} segmentaría \
+                 por pieza más larga y no como el tokenizer original",
+                path.display(),
+                self.name
+            )),
+        }
+    }
+
+    /// Aborta si el tokenizer no es el que toca. Mejor no empaquetar que
+    /// empaquetar un modelo que segmenta mal.
+    pub fn require_tokenizer(&self, dir: &Path) {
+        if let Err(why) = self.check_tokenizer(dir) {
+            eprintln!(
+                "live-models: {why}\n\
+                 Reconviértelo con: cargo xtask fetch-hf {} --name {} --out {}",
+                self.repo,
+                self.name,
+                dir.display()
+            );
+            exit(1);
+        }
+    }
+
     pub fn target_dir(&self, root: &Path) -> PathBuf {
         root.join(format!("target/{}-model", self.name))
     }
@@ -95,13 +173,17 @@ impl LiveModelSpec {
     pub fn resolved_dir(&self, root: &Path) -> PathBuf {
         let primary = self.target_dir(root);
         if primary.join("manifest.som").exists() {
-            if crate::fetch_hf::check_som_model(root, &primary).is_ok() {
+            if crate::fetch_hf::check_som_model(root, &primary).is_ok()
+                && self.check_tokenizer(&primary).is_ok()
+            {
                 return primary;
             }
         }
         let alt = root.join(format!("target/{}-model-new", self.name));
         if alt.join("manifest.som").exists() {
-            if crate::fetch_hf::check_som_model(root, &alt).is_ok() {
+            if crate::fetch_hf::check_som_model(root, &alt).is_ok()
+                && self.check_tokenizer(&alt).is_ok()
+            {
                 eprintln!(
                     "live-models: {} obsoleto en {} — uso {}",
                     self.name,
@@ -542,6 +624,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn dir_con_tokenizer(tag: &str, version: Option<u32>) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "soso-live-tok-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(v) = version {
+            let som = sosomodel::pack_som(b"cuerpo de mentira", v, sosomodel::CACHE_ALIGN);
+            std::fs::write(dir.join("tokenizer.som"), som).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn un_som_v1_no_vale_para_un_modelo_bpe() {
+        let dir = dir_con_tokenizer("bpe-v1", Some(1));
+        let err = spec_by_name("qwen2.5-coder-3b")
+            .unwrap()
+            .check_tokenizer(&dir)
+            .expect_err("un v1 no trae fusiones");
+        assert!(err.contains("fusiones"), "{err}");
+        assert!(err.contains("pieza más larga"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn un_som_v2_vale_para_un_modelo_bpe() {
+        let dir = dir_con_tokenizer("bpe-v2", Some(2));
+        spec_by_name("qwen2.5-coder-3b")
+            .unwrap()
+            .check_tokenizer(&dir)
+            .expect("v2 trae la tabla de fusiones");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn un_sentencepiece_sigue_valiendo_en_v1() {
+        // Es lo correcto para TinyLlama: no cambia de versión por no tener
+        // fusiones, y los modelos ya convertidos siguen siendo los mismos.
+        let dir = dir_con_tokenizer("sp-v1", Some(1));
+        spec_by_name("tinyllama")
+            .unwrap()
+            .check_tokenizer(&dir)
+            .expect("v1 es lo que le toca a SentencePiece");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sin_tokenizer_no_se_empaqueta() {
+        let dir = dir_con_tokenizer("sin", None);
+        let err = spec_by_name("tinyllama")
+            .unwrap()
+            .check_tokenizer(&dir)
+            .expect_err("sin tokenizer.som no hay modelo que valga");
+        assert!(err.contains("falta"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn el_catalogo_declara_fusiones_en_las_familias_bpe() {
+        // Si mañana entra otro Qwen/GPT al catálogo y nadie declara su
+        // tokenizer, esto lo dice antes de que se meta en un pendrive.
+        for spec in CATALOG {
+            let bpe = spec.name.starts_with("qwen");
+            assert_eq!(
+                spec.tokenizer == TokenizerEsperado::Fusiones,
+                bpe,
+                "{}: familia BPE y declaración no concuerdan",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn el_modelo_por_defecto_materializado_trae_sus_fusiones() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let spec = default_live_spec();
+        let dir = spec.target_dir(&root);
+        if !dir.join("tokenizer.som").exists() {
+            return;
+        }
+        spec.check_tokenizer(&dir)
+            .expect("el modelo que empaqueta el live tiene que segmentar como el original");
+    }
+
     #[test]
     fn pick_offline_for_usb_falls_back_to_smaller() {
         let root = offline_fixture("usb8");
@@ -552,3 +720,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+

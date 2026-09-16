@@ -129,6 +129,10 @@ pub const SYS_GETENV: u64 = 83;
 pub const SYS_FS_RESIZE: u64 = 84;
 /// Volcado inmediato del log de consola a `SOSOLOG.TXT` en la ESP live.
 pub const SYS_FATLOG_FLUSH: u64 = 85;
+/// Lee el ring de registros de aplicaciones: `(offset, buf_ptr, len) -> n`.
+pub const SYS_LOG_READ: u64 = 86;
+/// IPv4 de la NIC activa (`out: *mut NetInfo`).
+pub const SYS_NETINFO: u64 = 87;
 
 pub const FS_RESIZE_GROW_ROOT: u64 = 0;
 pub const FS_RESIZE_QUERY: u64 = 1;
@@ -414,6 +418,28 @@ pub struct MemInfo {
     pub reclaimable_frames: u64,
 }
 
+/// Hay NIC real (ethernet o WiFi), no la pila vacía de loopback.
+pub const NET_FLAG_PRESENT: u32 = 1;
+/// La iface tiene IPv4 (DHCP o fallback estático).
+pub const NET_FLAG_CONFIGURED: u32 = 2;
+pub const NET_BACKEND_NONE: u8 = 0;
+pub const NET_BACKEND_WIRED: u8 = 1;
+pub const NET_BACKEND_WIFI: u8 = 2;
+
+/// Respuesta de `SYS_NETINFO`: IPv4 de la NIC activa.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct NetInfo {
+    pub flags: u32,
+    pub prefix_len: u8,
+    pub backend: u8,
+    pub _pad: [u8; 2],
+    pub addr: [u8; 4],
+    pub gateway: [u8; 4],
+    pub mac: [u8; 6],
+    pub _pad2: [u8; 2],
+}
+
 /// Respuesta de `SYS_IOSTAT`: contadores de E/S de bloque desde el arranque.
 ///
 /// `peticiones` frente a `bloques` es la distinción que importa al agrupar
@@ -526,10 +552,33 @@ pub const FD_INHERIT_TTY: u64 = u64::MAX;
 /// Sirve para demonios (askd) lanzados desde una sesión SSH: su stdout acaba
 /// en el puerto serie y en `SOSOLOG.TXT`, no mezclado con la sesión remota.
 pub const FD_SERIAL_TTY: u64 = u64::MAX - 1;
+/// Canal de registro del kernel (fd 3 por defecto); sólo válido en el slot `log_fd`.
+pub const FD_KERNEL_LOG: u64 = u64::MAX - 2;
+/// Deja el slot vacío (`write` devuelve `EBADF`).
+pub const FD_CLOSED: u64 = u64::MAX - 3;
+
+/// Descriptor estándar de registro de eventos de aplicación.
+pub const LOG_FD: u64 = 3;
+/// Máximo de bytes de mensaje por `write(3, …)` antes de truncar.
+pub const LOG_MSG_MAX: usize = 1024;
 
 /// ¿`spec` de stdio es un centinela (no un fd del padre)?
 pub fn stdio_es_tty(spec: u64) -> bool {
     spec == FD_INHERIT_TTY || spec == FD_SERIAL_TTY
+}
+
+/// ¿`spec` es un centinela de spawn (tty, log del kernel o cerrado)?
+pub fn stdio_es_centinela(spec: u64) -> bool {
+    stdio_es_tty(spec) || spec == FD_KERNEL_LOG || spec == FD_CLOSED
+}
+
+/// `log_fd` del hijo: `0` (layout viejo / sin inicializar) → canal de log.
+pub fn spawn_log_fd(spec: u64) -> u64 {
+    if spec == 0 {
+        FD_KERNEL_LOG
+    } else {
+        spec
+    }
 }
 
 // ---- seek ----
@@ -604,6 +653,26 @@ pub struct SpawnIo {
     /// Puntero a tabla de cadenas `KEY=VAL`; puede ser 0.
     pub envp_ptr: u64,
     pub envp_count: u64,
+    /// fd 3 del hijo: `FD_KERNEL_LOG`, `FD_CLOSED`, un fd del padre, etc.
+    ///
+    /// `0` es el canal de log por defecto (`FD_KERNEL_LOG`), no el fd 0 del
+    /// padre. Un cliente anterior a este campo escribe 88 B; el kernel lee 96
+    /// y el extra en pila suele ser cero — interpretarlo como stdin vaciaba
+    /// la tty de sosh al fallar un spawn.
+    pub log_fd: u64,
+}
+
+#[cfg(test)]
+mod spawn_log_fd_tests {
+    use super::*;
+
+    #[test]
+    fn cero_es_canal_de_log() {
+        assert_eq!(spawn_log_fd(0), FD_KERNEL_LOG);
+        assert_eq!(spawn_log_fd(FD_CLOSED), FD_CLOSED);
+        assert_eq!(spawn_log_fd(FD_KERNEL_LOG), FD_KERNEL_LOG);
+        assert_eq!(spawn_log_fd(7), 7);
+    }
 }
 
 /// wait() devuelve (pid << 8) | (código de salida & 0xff).

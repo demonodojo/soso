@@ -308,6 +308,8 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_GETENV => sys_getenv(a1, a2, a3, a4),
         abi::SYS_FS_RESIZE => sys_fs_resize(a1, a2, a3),
         abi::SYS_FATLOG_FLUSH => sys_fatlog_flush(),
+        abi::SYS_LOG_READ => sys_log_read(a1, a2, a3),
+        abi::SYS_NETINFO => sys_netinfo(a1),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -507,7 +509,12 @@ fn fd_ok_for_stdin(fd: &Fd) -> bool {
 fn fd_ok_for_stdout(fd: &Fd) -> bool {
     matches!(
         fd,
-        Fd::Tty | Fd::WriteBuf { .. } | Fd::StreamWrite { .. } | Fd::PipeWrite(_) | Fd::Tcp { .. }
+        Fd::Tty
+            | Fd::Log
+            | Fd::WriteBuf { .. }
+            | Fd::StreamWrite { .. }
+            | Fd::PipeWrite(_)
+            | Fd::Tcp { .. }
     )
 }
 
@@ -547,12 +554,109 @@ fn flush_stream_write(
     Ok(())
 }
 
-/// Transfiere fds del padre al hijo según `stdio` (`FD_INHERIT_TTY` /
-/// `FD_SERIAL_TTY` = tty, sin tocar la tabla del padre).
-pub fn take_stdio_fds(stdio: [u64; 3]) -> Result<[Option<Fd>; 3], i64> {
+/// Tabla 0–3 cuando no hay que heredar fds del padre (tty / log / cerrado).
+///
+/// El kernel lanza `/bin/init` así, con `current_pid() == 0`. Antes, tres
+/// tty cortocircuitaban `with_current`; al añadir fd 3 el spawn de init
+/// paniqueaba (`sin proceso actual` en `task/mod.rs`).
+fn fds_from_sentinels(stdio: [u64; 4]) -> Result<alloc::vec::Vec<Option<Fd>>, i64> {
+    let mut out = alloc::vec![
+        Some(Fd::Tty),
+        Some(Fd::Tty),
+        Some(Fd::Tty),
+        Some(Fd::Log),
+    ];
+    for (slot, spec) in stdio.into_iter().enumerate() {
+        if spec == abi::FD_KERNEL_LOG {
+            if slot != 3 {
+                return Err(-abi::EINVAL);
+            }
+            out[3] = Some(Fd::Log);
+            continue;
+        }
+        if spec == abi::FD_CLOSED {
+            out[slot] = None;
+            continue;
+        }
+        if abi::stdio_es_tty(spec) {
+            if slot == 3 {
+                return Err(-abi::EINVAL);
+            }
+            continue;
+        }
+        return Err(-abi::EINVAL);
+    }
+    Ok(out)
+}
+
+/// Tabla de fds del hijo. Si se tira sin `into_fds`, lo que se movió del
+/// padre vuelve a su sitio: un ENOENT/ENOMEM no debe vaciar stdin de sosh.
+pub struct ChildStdio {
+    fds: alloc::vec::Vec<Option<Fd>>,
+    /// (índice en el padre, slot 0–3 del hijo)
+    taken: alloc::vec::Vec<(usize, usize)>,
+    committed: bool,
+}
+
+impl ChildStdio {
+    fn from_vec(fds: alloc::vec::Vec<Option<Fd>>) -> Self {
+        Self {
+            fds,
+            taken: alloc::vec::Vec::new(),
+            committed: false,
+        }
+    }
+
+    pub fn into_fds(mut self) -> alloc::vec::Vec<Option<Fd>> {
+        self.committed = true;
+        self.taken.clear();
+        core::mem::take(&mut self.fds)
+    }
+}
+
+impl Drop for ChildStdio {
+    fn drop(&mut self) {
+        if self.committed || self.taken.is_empty() {
+            return;
+        }
+        let taken = core::mem::take(&mut self.taken);
+        let fds = &mut self.fds;
+        super::with_current(|p| {
+            for (parent_slot, child_slot) in taken {
+                let Some(fd) = fds.get_mut(child_slot).and_then(|s| s.take()) else {
+                    continue;
+                };
+                if parent_slot >= p.fds.len() {
+                    while p.fds.len() <= parent_slot {
+                        p.fds.push(None);
+                    }
+                }
+                p.fds[parent_slot] = Some(fd);
+            }
+        });
+    }
+}
+
+/// Construye la tabla inicial de fds del hijo según `stdio` (0–3).
+pub fn build_child_fds(stdio: [u64; 4]) -> Result<ChildStdio, i64> {
+    if stdio.iter().all(|&f| abi::stdio_es_centinela(f)) {
+        return Ok(ChildStdio::from_vec(fds_from_sentinels(stdio)?));
+    }
     super::with_current(|p| {
         for (slot, &spec) in stdio.iter().enumerate() {
+            if spec == abi::FD_KERNEL_LOG {
+                if slot != 3 {
+                    return Err(-abi::EINVAL);
+                }
+                continue;
+            }
+            if spec == abi::FD_CLOSED {
+                continue;
+            }
             if abi::stdio_es_tty(spec) {
+                if slot == 3 {
+                    return Err(-abi::EINVAL);
+                }
                 continue;
             }
             let fd = p
@@ -569,14 +673,36 @@ pub fn take_stdio_fds(stdio: [u64; 3]) -> Result<[Option<Fd>; 3], i64> {
                 return Err(-abi::EBADF);
             }
         }
-        let mut out: [Option<Fd>; 3] = [None, None, None];
+        let mut out = alloc::vec![
+            Some(Fd::Tty),
+            Some(Fd::Tty),
+            Some(Fd::Tty),
+            Some(Fd::Log),
+        ];
+        let mut taken = alloc::vec::Vec::new();
         for (slot, spec) in stdio.into_iter().enumerate() {
             if abi::stdio_es_tty(spec) {
                 continue;
             }
-            out[slot] = p.fds.get_mut(spec as usize).and_then(|s| s.take());
+            if spec == abi::FD_KERNEL_LOG {
+                out[3] = Some(Fd::Log);
+                continue;
+            }
+            if spec == abi::FD_CLOSED {
+                out[slot] = None;
+                continue;
+            }
+            let parent_slot = spec as usize;
+            out[slot] = p.fds.get_mut(parent_slot).and_then(|s| s.take());
+            if out[slot].is_some() {
+                taken.push((parent_slot, slot));
+            }
         }
-        Ok(out)
+        Ok(ChildStdio {
+            fds: out,
+            taken,
+            committed: false,
+        })
     })
 }
 
@@ -682,6 +808,16 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
                 deadline_ms: 0,
             },
         );
+    }
+    let is_log = with_fd(fd, |slot| Ok(matches!(slot, Fd::Log)))?;
+    if is_log {
+        if len == 0 {
+            return Ok(0);
+        }
+        let data = user_slice(buf, len)?;
+        let (pid, name) = super::with_current(|p| (p.pid, p.name.clone()));
+        crate::drivers::applog::append_record(pid, &name, data);
+        return Ok(len);
     }
     let data = user_slice(buf, len)?;
     // La consola se lee fuera de with_fd (que ya tiene tomado PROCS).
@@ -1096,7 +1232,12 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
         opts.args_len,
     )?;
     let env = read_spawn_env(opts.envp_ptr, opts.envp_count)?;
-    let stdio = [opts.stdin_fd, opts.stdout_fd, opts.stderr_fd];
+    let stdio = [
+        opts.stdin_fd,
+        opts.stdout_fd,
+        opts.stderr_fd,
+        abi::spawn_log_fd(opts.log_fd),
+    ];
     // Un centinela `FD_SERIAL_TTY` despega al hijo de la sesión SSH del padre:
     // fd 0/1/2 quedan en `Fd::Tty` atados a la consola serie. Sin esto, el
     // askd heredaba el canal SSH, escribía el diagnóstico de carga ahí, y
@@ -1354,6 +1495,22 @@ fn sys_gpu_info(out: u64) -> Result<u64, i64> {
         )
     };
     // Copia bajo PROCS: ver `sys_stat`.
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(0)
+    })
+}
+
+fn sys_netinfo(out: u64) -> Result<u64, i64> {
+    let n = core::mem::size_of::<abi::NetInfo>() as u64;
+    if !user_range_ok(out, n, true) {
+        return Err(-abi::EFAULT);
+    }
+    let info = crate::net::info();
+    let bytes = unsafe {
+        core::slice::from_raw_parts((&info as *const abi::NetInfo).cast::<u8>(), n as usize)
+    };
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
         space.write(out, bytes).ok_or(-abi::EFAULT)?;
@@ -2044,18 +2201,22 @@ fn sys_wifi_connect(ssid_ptr: u64, ssid_len: u64, psk_ptr: u64, psk_len: u64) ->
             return Err(-abi::ENOTSUP);
         }
         let ssid = user_str(ssid_ptr, ssid_len)?;
-        let rc = if psk_len == 0 {
-            crate::lxdde::wifi::connect_open(ssid)
+        let psk = if psk_len == 0 {
+            None
         } else {
             if psk_ptr == 0 {
                 return Err(-abi::EFAULT);
             }
-            let psk = user_str(psk_ptr, psk_len)?;
-            crate::net::wifi_wpa::connect_wpa2(ssid, psk)
+            Some(user_str(psk_ptr, psk_len)?)
+        };
+        let rc = match psk {
+            None => crate::lxdde::wifi::connect_open(ssid),
+            Some(pass) => crate::net::wifi_wpa::connect_wpa2(ssid, pass),
         };
         if rc != 0 {
             return Err(-abi::EIO);
         }
+        crate::net::wifi_wpa::persist_credentials(ssid, psk);
         crate::net::on_wifi_connected();
         Ok(0)
     }
@@ -2236,7 +2397,17 @@ fn clone_fd(f: &Fd) -> Fd {
         Fd::PipeWrite(id) => Fd::PipeWrite(*id),
         Fd::Tcp { slot } => Fd::Tcp { slot: *slot },
         Fd::Tty => Fd::Tty,
+        Fd::Log => Fd::Log,
     }
+}
+
+fn sys_log_read(offset: u64, buf_ptr: u64, len: u64) -> Result<u64, i64> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let dst = user_slice_mut(buf_ptr, len)?;
+    let n = crate::drivers::applog::copy_from(offset as usize, dst);
+    Ok(n as u64)
 }
 
 fn sys_fstat(fd: u64, out: u64) -> Result<u64, i64> {

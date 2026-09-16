@@ -343,7 +343,7 @@ void iwl_trans_8000_drain(struct iwl_ax211_priv *iwl)
 
     if (!iwl->rb_stts || !iwl->rx_page_cpu || !iwl->rx_bd_cpu)
         return;
-    closed = iwl->rb_stts[0] & 0x0fffu;
+    closed = iwl_closed_rb_idx(iwl->rb_stts, IWL_8000_RX_N);
     while (iwl->rx_read != closed && n++ < IWL_8000_RX_N) {
         unsigned slot = (unsigned)iwl->rx_read % IWL_8000_RX_N;
         const uint8_t *buf = (const uint8_t *)iwl->rx_page_cpu +
@@ -352,7 +352,7 @@ void iwl_trans_8000_drain(struct iwl_ax211_priv *iwl)
         iwl_trans_rx_packet(iwl, buf, IWL_GEN2_RX_SZ);
         iwl->rx_write = (uint16_t)((iwl->rx_write + 1u) % IWL_8000_RX_N);
         iwl->rx_read = (uint16_t)((iwl->rx_read + 1u) % IWL_8000_RX_N);
-        closed = iwl->rb_stts[0] & 0x0fffu;
+        closed = iwl_closed_rb_idx(iwl->rb_stts, IWL_8000_RX_N);
     }
     iwl_write32(iwl, FH_RSCSR_CHNL0_WPTR, (uint32_t)(iwl->rx_write & ~7u));
 }

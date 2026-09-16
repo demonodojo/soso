@@ -5,6 +5,8 @@
 extern crate alloc;
 
 pub mod chat;
+/// Tipos de conversación compartidos (T04): dominio sin HTTP ni syscalls.
+pub mod conversation;
 pub mod f16;
 pub mod gemm;
 pub mod gpu;

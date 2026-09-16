@@ -90,6 +90,10 @@ fn main(args: &str) -> u8 {
     if args.starts_with("env-check") {
         return env_check();
     }
+    if let Some(msg) = args.strip_prefix("log ") {
+        libsoso::logln!("{}", msg.trim());
+        return 0;
+    }
     println!("init: args desconocidos {args:?} (usa: test)");
     2
 }
@@ -848,6 +852,94 @@ fn suite() -> u8 {
     check!(pid > 0, "spawn_io FD_SERIAL_TTY (pid {pid})");
     check!(sys::wait().is_ok(), "wait spawn_io serial");
 
+    // fd 3: canal de registro del kernel.
+    {
+        let marker = "init_log_ok";
+        check!(
+            sys::write_all(abi::LOG_FD, marker.as_bytes()).is_ok(),
+            "write fd 3"
+        );
+        let mut ring = [0u8; 4096];
+        let n = sys::log_read(0, &mut ring);
+        check!(n > 0, "log_read devolvió datos");
+        let text = core::str::from_utf8(&ring[..n as usize]).unwrap_or("");
+        check!(
+            text.contains(marker) && text.contains("pid="),
+            "log con sello de pid"
+        );
+
+        let fd = sys::open("/tmp/log_fd3.txt", abi::O_WRONLY);
+        check!(fd >= 0, "open para log fd3");
+        let pid = sys::spawn_io_full(
+            "/bin/init",
+            &["/bin/init", "log fichero_ok"],
+            &[],
+            [
+                abi::FD_INHERIT_TTY,
+                abi::FD_INHERIT_TTY,
+                abi::FD_INHERIT_TTY,
+                fd as u64,
+            ],
+        );
+        check!(pid > 0, "spawn_io log a fichero (pid {pid})");
+        check!(sys::wait().is_ok(), "wait spawn_io log fichero");
+        sys::close(fd as u64);
+        let fd = sys::open("/tmp/log_fd3.txt", abi::O_RDONLY);
+        let n = sys::read(fd as u64, &mut buf);
+        sys::close(fd as u64);
+        sys::unlink("/tmp/log_fd3.txt");
+        let body = core::str::from_utf8(&buf[..n.max(0) as usize]).unwrap_or("");
+        check!(
+            body.contains("fichero_ok") && !body.contains("pid="),
+            "log redirigido sin sello"
+        );
+
+        let pid = sys::spawn_io_full(
+            "/bin/init",
+            &["/bin/init", "log cerrado_ok"],
+            &[],
+            [
+                abi::FD_INHERIT_TTY,
+                abi::FD_INHERIT_TTY,
+                abi::FD_INHERIT_TTY,
+                abi::FD_CLOSED,
+            ],
+        );
+        check!(pid > 0, "spawn_io log cerrado (pid {pid})");
+        let (_, code) = sys::wait().unwrap_or((0, 255));
+        check!(code == 0, "hijo con fd 3 cerrado sale 0");
+    }
+
+    // Path inexistente no vacía fds del padre (log_fd=0 = ABI de 88 B).
+    {
+        let fd = sys::open("/tmp/spawn_enoent.txt", abi::O_WRONLY);
+        check!(fd >= 0, "open para spawn ENOENT");
+        let rc = sys::spawn_io_full(
+            "/bin/no-existe-soso",
+            &["/bin/no-existe-soso"],
+            &[],
+            [
+                abi::FD_INHERIT_TTY,
+                fd as u64,
+                abi::FD_INHERIT_TTY,
+                0,
+            ],
+        );
+        check!(
+            rc == -abi::ENOENT,
+            "spawn inexistente ENOENT ({rc})"
+        );
+        let n = sys::write(fd as u64, b"padre_ok");
+        check!(n == 8, "padre conserva el fd tras ENOENT ({n})");
+        sys::close(fd as u64);
+        let fd = sys::open("/tmp/spawn_enoent.txt", abi::O_RDONLY);
+        let n = sys::read(fd as u64, &mut buf);
+        sys::close(fd as u64);
+        sys::unlink("/tmp/spawn_enoent.txt");
+        let body = core::str::from_utf8(&buf[..n.max(0) as usize]).unwrap_or("");
+        check!(body.contains("padre_ok"), "contenido tras ENOENT");
+    }
+
     // Hilos + futex: N workers incrementan un contador compartido.
     {
         use core::sync::atomic::{AtomicU32, Ordering};
@@ -945,6 +1037,20 @@ fn suite() -> u8 {
             check!(
                 r == 0 || r == -abi::ENOSYS,
                 "wifi_status errno {r}"
+            );
+        }
+        {
+            let mut ni = abi::NetInfo::default();
+            check!(sys::netinfo(&mut ni) == 0, "netinfo errno");
+            println!(
+                "init: OK  netinfo flags={} backend={} addr={}.{}.{}.{}/{}",
+                ni.flags,
+                ni.backend,
+                ni.addr[0],
+                ni.addr[1],
+                ni.addr[2],
+                ni.addr[3],
+                ni.prefix_len
             );
         }
         check!(

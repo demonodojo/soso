@@ -56,8 +56,12 @@ pub struct VocabTokenizer {
     /// Qwen2.5 tiene ~151 k piezas y ~151 k fusiones; repetir el texto de cada
     /// lado multiplicaría por seis el tamaño del `tokenizer.som`.
     merges: Vec<(u32, u32)>,
-    /// Rango de cada par de piezas, para no buscar en lista en cada fusión.
-    rango: BTreeMap<(u32, u32), u32>,
+    /// Por cada par fusionable: su rango (menor = antes) y la pieza que sale.
+    /// Se resuelve al cargar para no concatenar cadenas en cada fusión.
+    rango: BTreeMap<(u32, u32), (u32, u32)>,
+    /// Tokens añadidos, los que hay que apartar antes de segmentar.
+    /// Ordenados de más largo a más corto para que gane el más específico.
+    especiales: Vec<u32>,
     pub bos: u32,
     pub eos: u32,
 }
@@ -181,13 +185,45 @@ impl VocabTokenizer {
         let gpt2 = n_gpt2 > n_sp;
         let mut rango = BTreeMap::new();
         for (i, par) in merges.iter().enumerate() {
-            rango.entry(*par).or_insert(i as u32);
+            let (a, b) = *par;
+            let (Some(izq), Some(der)) = (pieces.get(a as usize), pieces.get(b as usize)) else {
+                continue;
+            };
+            let mut unida = String::with_capacity(izq.len() + der.len());
+            unida.push_str(izq);
+            unida.push_str(der);
+            // Una fusión cuyo resultado no está en el vocabulario no se puede
+            // aplicar; se ignora en vez de inventar un id.
+            if let Some(&resultado) = lookup.get(&unida) {
+                rango.entry((a, b)).or_insert((i as u32, resultado));
+            }
         }
         let segmentacion = if merges.is_empty() {
             Segmentacion::PiezaMasLarga
         } else {
             Segmentacion::BpeByteLevel
         };
+        // En un BPE, **toda** pieza de más de un carácter sale de una fusión.
+        // La que no sale de ninguna es un token añadido: `<|im_start|>`,
+        // `<tool_call>`… Deducirlo así evita una heurística sobre su forma y
+        // sale exacto: 256 piezas de un byte + una por fusión + las añadidas.
+        let mut resultados = alloc::collections::BTreeSet::new();
+        for (_, (_, resultado)) in rango.iter() {
+            resultados.insert(*resultado);
+        }
+        let mut especiales: Vec<u32> = if merges.is_empty() {
+            Vec::new()
+        } else {
+            pieces
+                .iter()
+                .enumerate()
+                .filter(|(i, p)| {
+                    p.chars().count() > 1 && !resultados.contains(&(*i as u32))
+                })
+                .map(|(i, _)| i as u32)
+                .collect()
+        };
+        especiales.sort_by_key(|i| core::cmp::Reverse(pieces[*i as usize].len()));
         Self {
             pieces,
             lookup,
@@ -197,6 +233,7 @@ impl VocabTokenizer {
             segmentacion,
             merges,
             rango,
+            especiales,
             bos,
             eos,
         }
@@ -214,7 +251,21 @@ impl VocabTokenizer {
 
     /// Rango de un par, si es una fusión conocida. Menor = se aplica antes.
     pub fn rango_de(&self, izquierda: u32, derecha: u32) -> Option<u32> {
+        self.rango.get(&(izquierda, derecha)).map(|(r, _)| *r)
+    }
+
+    /// Rango y pieza resultante de fusionar dos piezas.
+    pub fn fusion_de(&self, izquierda: u32, derecha: u32) -> Option<(u32, u32)> {
         self.rango.get(&(izquierda, derecha)).copied()
+    }
+
+    /// Texto de una pieza, tal y como está en el vocabulario.
+    ///
+    /// No pasa por `decode`: eso traduce bytes y **suprime los marcadores de
+    /// parada**, que es justo lo que hay que poder mirar al diagnosticar una
+    /// divergencia.
+    pub fn pieza_de(&self, id: u32) -> Option<&str> {
+        self.pieces.get(id as usize).map(|p| p.as_str())
     }
 
     /// Índice de una pieza exacta.
@@ -304,10 +355,96 @@ impl VocabTokenizer {
     /// Greedy longest-match. SentencePiece: espacios → `▁` y `▁` inicial.
     /// GPT-2 / Qwen2: espacios → `Ġ`, sin marca al empezar.
     /// Caracteres sin pieza caen al byte-fallback `<0xXX>`.
+    /// Tokens añadidos del vocabulario, de más largo a más corto.
+    pub fn especiales(&self) -> &[u32] {
+        &self.especiales
+    }
+
+    /// Fusiona los símbolos de un pre-token siguiendo el orden de rango.
+    fn fusionar(&self, simbolos: &mut Vec<u32>) {
+        loop {
+            let mut mejor: Option<(usize, u32, u32)> = None;
+            for i in 0..simbolos.len().saturating_sub(1) {
+                if let Some((rango, resultado)) = self.fusion_de(simbolos[i], simbolos[i + 1]) {
+                    if mejor.map(|(_, r, _)| rango < r).unwrap_or(true) {
+                        mejor = Some((i, rango, resultado));
+                    }
+                }
+            }
+            let Some((i, _, resultado)) = mejor else {
+                return;
+            };
+            simbolos[i] = resultado;
+            simbolos.remove(i + 1);
+        }
+    }
+
+    /// Segmenta un trozo sin tokens especiales: pre-token, byte-level y fusiones.
+    fn encode_trozo_bpe(&self, texto: &str, out: &mut Vec<u32>) {
+        let mut resto = texto;
+        while !resto.is_empty() {
+            let largo = largo_pretoken(resto).max(1);
+            let (pre, siguiente) = resto.split_at(largo);
+            resto = siguiente;
+
+            let mapeado = a_bytelevel(pre);
+            let mut simbolos = Vec::with_capacity(mapeado.len());
+            for ch in mapeado.chars() {
+                let mut buf = [0u8; 4];
+                let pieza = ch.encode_utf8(&mut buf);
+                match self.lookup.get(pieza) {
+                    Some(&id) => simbolos.push(id),
+                    // Un vocabulario byte-level completo tiene los 256; si
+                    // falta alguno, ese byte no se puede representar y se salta
+                    // en vez de inventar un id.
+                    None => continue,
+                }
+            }
+            self.fusionar(&mut simbolos);
+            out.extend_from_slice(&simbolos);
+        }
+    }
+
+    /// Segmentación BPE: primero los tokens especiales, luego el resto.
+    ///
+    /// Las apariciones se buscan **de una vez** y no una por trozo: repetir el
+    /// barrido sobre el resto del texto por cada marcador encontrado hace el
+    /// coste cuadrático, y aquí entran prompts de miles de tokens.
+    fn encode_bpe(&self, text: &str, out: &mut Vec<u32>) {
+        let mut marcas: Vec<(usize, usize, u32)> = Vec::new();
+        for id in &self.especiales {
+            let pieza = &self.pieces[*id as usize];
+            for (pos, _) in text.match_indices(pieza.as_str()) {
+                marcas.push((pos, pieza.len(), *id));
+            }
+        }
+        // Por posición; a igualdad, gana el más largo.
+        marcas.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+
+        let mut i = 0;
+        for (pos, largo, id) in marcas {
+            if pos < i {
+                continue; // solapa con un marcador ya consumido
+            }
+            if pos > i {
+                self.encode_trozo_bpe(&text[i..pos], out);
+            }
+            out.push(id);
+            i = pos + largo;
+        }
+        if i < text.len() {
+            self.encode_trozo_bpe(&text[i..], out);
+        }
+    }
+
     fn encode(&self, text: &str, bos: bool, prefijo: bool) -> Vec<u32> {
         let mut out = Vec::new();
         if bos && self.bos != NO_TOKEN {
             out.push(self.bos);
+        }
+        if self.segmentacion == Segmentacion::BpeByteLevel {
+            self.encode_bpe(text, &mut out);
+            return out;
         }
         let replaced = if self.space_mark == SPACE_GPT2 {
             gpt2_prepare(text)
@@ -358,6 +495,19 @@ impl VocabTokenizer {
         };
         if let Some(b) = parse_byte_piece(piece) {
             bytes.push(b);
+        } else if self.segmentacion == Segmentacion::BpeByteLevel {
+            // En un vocabulario byte-level cada carácter de la pieza **es** un
+            // byte: `Ã¡` son los dos bytes de «á». Devolverlos como UTF-8 del
+            // propio carácter era lo que convertía las tildes en mojibake.
+            for ch in piece.chars() {
+                match char_a_byte(ch) {
+                    Some(b) => bytes.push(b),
+                    None => {
+                        let mut buf = [0u8; 4];
+                        bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    }
+                }
+            }
         } else {
             for ch in piece.chars() {
                 if ch == SPACE_SP || ch == SPACE_GPT2 {
@@ -437,6 +587,206 @@ impl Default for StreamDecoder {
 }
 
 /// Normaliza texto al alfabeto de tokens Qwen2/GPT-2 (espacio/`\\n`/`\\t`/`\\r`).
+/// Tabla bytes→unicode de GPT-2, la que usan Qwen2 y compañía.
+///
+/// El vocabulario de un BPE byte-level no contiene letras acentuadas: contiene
+/// **un carácter imprimible por byte**. «más» son los bytes `6D C3 A1 73`, que
+/// en esa tabla son `m Ã ¡ s`. Sin esta traducción, buscar la letra «á» en el
+/// vocabulario encuentra la pieza que representa al byte `0xE1`, que es otra
+/// cosa: el modelo recibe un token que no significa lo que pone.
+///
+/// Los bytes imprimibles se representan a sí mismos; los 68 restantes van a
+/// `U+0100 + n`. De ahí salen las constantes que ya había (`Ġ` para el espacio,
+/// `Ċ` para el salto de línea).
+fn byte_a_char(b: u8) -> char {
+    match b {
+        0x21..=0x7E | 0xA1..=0xAC | 0xAE..=0xFF => b as char,
+        0x00..=0x20 => char::from_u32(0x100 + b as u32).unwrap_or('\u{fffd}'),
+        0x7F..=0xA0 => char::from_u32(0x100 + 33 + (b as u32 - 0x7F)).unwrap_or('\u{fffd}'),
+        0xAD => char::from_u32(0x100 + 67).unwrap_or('\u{fffd}'),
+    }
+}
+
+/// La inversa: de carácter del vocabulario al byte que representa.
+fn char_a_byte(c: char) -> Option<u8> {
+    let v = c as u32;
+    match v {
+        0x21..=0x7E | 0xA1..=0xAC | 0xAE..=0xFF => Some(v as u8),
+        0x100..=0x120 => Some((v - 0x100) as u8),
+        0x121..=0x142 => Some((v - 0x100 - 33 + 0x7F) as u8),
+        0x143 => Some(0xAD),
+        _ => None,
+    }
+}
+
+/// Texto a la representación byte-level del vocabulario.
+fn a_bytelevel(texto: &str) -> String {
+    let mut out = String::with_capacity(texto.len());
+    for b in texto.bytes() {
+        out.push(byte_a_char(b));
+    }
+    out
+}
+
+
+/// Longitud del siguiente pre-token, siguiendo el patrón de la familia.
+///
+/// El `pre_tokenizer` de Qwen2.5 es esta alternancia, y el orden importa
+/// porque una alternancia de expresión regular se resuelve por la izquierda:
+///
+/// ```text
+/// (?i:'s|'t|'re|'ve|'m|'ll|'d)   contracciones
+/// | [^\r\n\p{L}\p{N}]?\p{L}+      un símbolo suelto y letras
+/// | \p{N}                         un dígito, de uno en uno
+/// |  ?[^\s\p{L}\p{N}]+[\r\n]*     espacio opcional, signos y saltos
+/// | \s*[\r\n]+                   saltos con lo que lleven delante
+/// | \s+(?!\S)                     espacios finales
+/// | \s+                           espacios
+/// ```
+///
+/// Se implementa a mano porque meter un motor de expresiones regulares en un
+/// crate `no_std` que va dentro del sistema operativo es un precio alto por
+/// siete alternativas fijas. Las fusiones **nunca cruzan** un pre-token: de ahí
+/// salía que un `.` se pegara al `<` siguiente.
+fn largo_pretoken(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return 0;
+    }
+    let letra = |c: char| c.is_alphabetic();
+    let numero = |c: char| c.is_numeric();
+    let blanco = |c: char| c.is_whitespace();
+
+    // 1. Contracciones inglesas, sin distinguir mayúsculas.
+    if bytes[0] == b'\'' {
+        const SUFIJOS: &[&str] = &["s", "t", "re", "ve", "m", "ll", "d"];
+        for suf in SUFIJOS {
+            let fin = 1 + suf.len();
+            if s.len() >= fin && s[1..fin].eq_ignore_ascii_case(suf) {
+                return fin;
+            }
+        }
+    }
+
+    let mut it = s.char_indices().peekable();
+    let (_, primero) = *it.peek().expect("no vacío");
+
+    // 2. Un símbolo opcional (que no sea salto ni letra ni dígito) y letras.
+    {
+        let mut i = 0;
+        let mut chars = s.chars();
+        let mut c = primero;
+        if !letra(c) && !numero(c) && c != '\r' && c != '\n' {
+            i += c.len_utf8();
+            chars.next();
+            match chars.next() {
+                Some(sig) => c = sig,
+                None => c = '\0',
+            }
+        }
+        if letra(c) {
+            let mut fin = i;
+            for (j, ch) in s[i..].char_indices() {
+                if letra(ch) {
+                    fin = i + j + ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            return fin;
+        }
+    }
+
+    // 3. Un dígito suelto.
+    if numero(primero) {
+        return primero.len_utf8();
+    }
+
+    // 4. Espacio opcional, signos, y los saltos que vengan detrás.
+    {
+        let mut i = 0;
+        if primero == ' ' {
+            i = 1;
+        }
+        let mut fin = i;
+        for (j, ch) in s[i..].char_indices() {
+            if !blanco(ch) && !letra(ch) && !numero(ch) {
+                fin = i + j + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if fin > i {
+            for (j, ch) in s[fin..].char_indices() {
+                if ch == '\r' || ch == '\n' {
+                    fin += j + ch.len_utf8() - j;
+                } else {
+                    break;
+                }
+            }
+            // Recuento simple de los saltos finales.
+            let mut k = fin;
+            while k < s.len() {
+                let ch = s[k..].chars().next().unwrap();
+                if ch == '\r' || ch == '\n' {
+                    k += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            return k;
+        }
+    }
+
+    // 5. Blancos seguidos de al menos un salto.
+    {
+        let mut k = 0;
+        while k < s.len() {
+            let ch = s[k..].chars().next().unwrap();
+            if blanco(ch) && ch != '\r' && ch != '\n' {
+                k += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let inicio_saltos = k;
+        while k < s.len() {
+            let ch = s[k..].chars().next().unwrap();
+            if ch == '\r' || ch == '\n' {
+                k += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if k > inicio_saltos {
+            return k;
+        }
+    }
+
+    // 6 y 7. Blancos: si detrás viene algo que no es blanco, se deja el último
+    // para quien venga (eso es el `(?!\S)` del patrón original).
+    if blanco(primero) {
+        let mut k = 0;
+        let mut ultimo = 0;
+        while k < s.len() {
+            let ch = s[k..].chars().next().unwrap();
+            if blanco(ch) {
+                ultimo = k;
+                k += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if k < s.len() && ultimo > 0 {
+            return ultimo;
+        }
+        return k;
+    }
+
+    // Nada encajó: un carácter, para no quedarse parado.
+    primero.len_utf8()
+}
+
 fn gpt2_prepare(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -477,13 +827,17 @@ mod tests {
     }
 
     /// Piezas al estilo GPT-2/Qwen2 con sus fusiones, para el formato v2.
+    /// Vocabulario BPE realista en pequeño: piezas de un carácter, las demás
+    /// salidas de una fusión, y un token añadido que no sale de ninguna.
+    ///
+    /// Índices: 0 `a` · 1 `b` · 2 `c` · 3 `ab` · 4 `abc` · 5 `<|fin|>`
     fn vocab_bpe() -> (Vec<String>, Vec<(u32, u32)>) {
-        let pieces: Vec<String> = ["<|endoftext|>", "R", "e", "s", "Res", "ponde", "pon", "de"]
+        let pieces: Vec<String> = ["a", "b", "c", "ab", "abc", "<|fin|>"]
             .iter()
             .map(|s| String::from(*s))
             .collect();
-        // (R,e)->? no existe; se usan pares que sí están en el vocabulario.
-        let merges = alloc::vec![(6u32, 7u32), (1, 2)];
+        // (a,b) -> ab ; (ab,c) -> abc
+        let merges = alloc::vec![(0u32, 1u32), (3, 2)];
         (pieces, merges)
     }
 
@@ -495,13 +849,26 @@ mod tests {
         assert_eq!(leido.merges(), merges.as_slice());
         assert_eq!(leido.segmentacion(), Segmentacion::BpeByteLevel);
         // El rango es la posición: menor se aplica antes.
-        assert_eq!(leido.rango_de(6, 7), Some(0));
-        assert_eq!(leido.rango_de(1, 2), Some(1));
-        assert_eq!(leido.rango_de(2, 1), None);
-        assert_eq!(leido.id_de_pieza("Res"), Some(4));
+        assert_eq!(leido.rango_de(0, 1), Some(0));
+        assert_eq!(leido.rango_de(3, 2), Some(1));
+        assert_eq!(leido.rango_de(2, 0), None);
+        assert_eq!(leido.fusion_de(0, 1), Some((0, 3)), "(a,b) produce ab");
+        assert_eq!(leido.id_de_pieza("abc"), Some(4));
     }
 
     /// Un `tokenizer.som` de los de antes tiene que seguir cargando igual.
+    /// Una fusión cuyo resultado no está en el vocabulario no se puede aplicar:
+    /// se ignora al cargar en vez de inventar un id.
+    #[test]
+    fn una_fusion_sin_resultado_en_el_vocabulario_se_ignora() {
+        let pieces: Vec<String> = ["a", "b"].iter().map(|s| String::from(*s)).collect();
+        // (a,b) -> "ab", que no está.
+        let datos = VocabTokenizer::serialize_con_merges(&pieces, 0, 0, &[(0, 1)]);
+        let leido = VocabTokenizer::parse(&datos).expect("el archivo es válido");
+        assert_eq!(leido.merges(), &[(0, 1)], "la tabla se conserva tal cual");
+        assert_eq!(leido.fusion_de(0, 1), None, "pero no se puede aplicar");
+    }
+
     #[test]
     fn el_formato_v1_sigue_cargando_sin_fusiones() {
         let pieces: Vec<String> = ["<s>", "</s>", "\u{2581}hola"]
@@ -543,6 +910,83 @@ mod tests {
         // El contenedor .som guarda la versión en los bytes 12..16.
         datos[12..16].copy_from_slice(&9u32.to_le_bytes());
         assert!(VocabTokenizer::parse(&datos).is_err());
+    }
+
+    #[test]
+    fn el_texto_con_tildes_va_y_vuelve() {
+        // Vocabulario byte-level mínimo: los 256 bytes y una fusión.
+        let mut pieces: Vec<String> = (0..=255u8).map(|b| String::from(byte_a_char(b))).collect();
+        pieces.push(String::from("Ã¡"));
+        let merges = alloc::vec![(0xC3u32, 0xA1u32)];
+        let datos = VocabTokenizer::serialize_con_merges(&pieces, NO_TOKEN, NO_TOKEN, &merges);
+        let tok = Tokenizer::parse(&datos).unwrap();
+        let ids = tok.encode("más");
+        assert_eq!(tok.decode(&ids), "más", "ids = {ids:?}");
+        assert_eq!(tok.decode(&tok.encode("café ☕")), "café ☕");
+    }
+
+    #[test]
+    fn la_tabla_byte_level_es_la_de_gpt2() {
+        // Los valores que ya usaba el código, ahora salen de la tabla general.
+        assert_eq!(byte_a_char(b' '), SPACE_GPT2);
+        assert_eq!(byte_a_char(b'\n'), GPT2_NL);
+        assert_eq!(byte_a_char(b'\t'), GPT2_TAB);
+        assert_eq!(byte_a_char(b'\r'), GPT2_CR);
+        assert_eq!(byte_a_char(b'A'), 'A');
+        // «á» son dos bytes, y cada uno tiene su carácter.
+        assert_eq!(a_bytelevel("á"), "Ã¡");
+        // Ida y vuelta para los 256.
+        for b in 0..=255u8 {
+            assert_eq!(char_a_byte(byte_a_char(b)), Some(b), "byte {b}");
+        }
+    }
+
+    #[test]
+    fn el_pretokenizador_separa_como_la_familia() {
+        // Un signo no se pega a la letra siguiente, y el espacio se va con la
+        // palabra: de ahí salían `.<` y compañía.
+        let trozos = |mut s: &str| {
+            let mut out = alloc::vec::Vec::new();
+            while !s.is_empty() {
+                let n = largo_pretoken(s).max(1);
+                out.push(String::from(&s[..n]));
+                s = &s[n..];
+            }
+            out
+        };
+        assert_eq!(trozos("hola mundo"), alloc::vec!["hola", " mundo"]);
+        assert_eq!(trozos("."), alloc::vec!["."]);
+        assert_eq!(trozos(".<"), alloc::vec![".<"]);
+        assert_eq!(trozos("a.\nb"), alloc::vec!["a", ".\n", "b"]);
+        assert_eq!(trozos("12"), alloc::vec!["1", "2"], "los dígitos van sueltos");
+        assert_eq!(trozos("don't"), alloc::vec!["don", "'t"]);
+        assert_eq!(trozos("  x"), alloc::vec![" ", " x"], "el último espacio es del siguiente");
+    }
+
+    /// Con fusiones, el vocabulario se segmenta por rangos y no por pieza más
+    /// larga: es la diferencia que hacía que «Responde» saliera partido mal.
+    #[test]
+    fn con_fusiones_se_segmenta_por_rango() {
+        let (pieces, merges) = vocab_bpe();
+        let datos = VocabTokenizer::serialize_con_merges(&pieces, NO_TOKEN, NO_TOKEN, &merges);
+        let tok = Tokenizer::parse(&datos).unwrap();
+        // a+b -> ab (rango 0) y ab+c -> abc (rango 1).
+        assert_eq!(tok.encode("abc"), alloc::vec![4]);
+        // Sin fusión aplicable, cada carácter va suelto.
+        assert_eq!(tok.encode("acb"), alloc::vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn los_tokens_anadidos_se_apartan_antes_de_segmentar() {
+        let (pieces, merges) = vocab_bpe();
+        let datos = VocabTokenizer::serialize_con_merges(&pieces, NO_TOKEN, NO_TOKEN, &merges);
+        let tok = Tokenizer::parse(&datos).unwrap();
+        // `<|fin|>` no sale de ninguna fusión: se deduce que es añadido y no se
+        // parte, ni se lleva por delante lo que tiene al lado.
+        assert_eq!(tok.encode("abc<|fin|>abc"), alloc::vec![4, 5, 4]);
+        if let Tokenizer::Vocab(v) = &tok {
+            assert_eq!(v.especiales(), &[5]);
+        }
     }
 
     #[test]

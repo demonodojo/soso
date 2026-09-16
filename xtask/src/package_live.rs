@@ -246,6 +246,11 @@ fn resolve_live_models(
             "package-usb-live: SOSO_MODELS_DIR={} (modelo={llm_name})",
             custom.display()
         );
+        // Un directorio a mano se respeta, pero si su nombre es del catálogo
+        // sabemos qué tokenizer le toca y se comprueba igual.
+        if let Some(spec) = live_models::spec_by_name(&llm_name) {
+            spec.require_tokenizer(&custom);
+        }
         return LiveModelSelection {
             primary_dir: custom,
             tiny_dir: None,
@@ -314,8 +319,12 @@ fn resolve_live_models(
         live_models::ensure_materialized(root, &spec);
     }
     let tiny = live_models::ensure_tiny(root);
+    let primary_dir = spec.resolved_dir(root);
+    // Lo último antes de empaquetar: un tokenizer equivocado no da error al
+    // cargar, y dentro de la imagen ya no hay forma de notarlo.
+    spec.require_tokenizer(&primary_dir);
     LiveModelSelection {
-        primary_dir: spec.resolved_dir(root),
+        primary_dir,
         tiny_dir: Some(tiny),
         llm_name: spec.name.to_string(),
     }

@@ -76,6 +76,11 @@ son validación física y siguen abiertos.
 
 ## OTA — límites publicados
 
+Plan de evolución: [Actualizaciones de soso instalado y logs en sosofs](PLAN-ACTUALIZACIONES.md)
+(2026-09-16, U0–U8 pendientes): recuperación conjunta de kernel/rootfs,
+actualización por WiFi y nuevas instalaciones sin `SOSOLOG.TXT` en la ESP.
+El plan todavía no modifica los límites actuales descritos a continuación.
+
 - **Kernel:** recuperación verificable con `SOSOKRN.MET` + backup en
   `SOSOKRN.BIN` (cortes en fase applying/backup). Imágenes antiguas sin
   `SOSOKRN.MET`: revert legacy limitado; reflashear para meta durable.

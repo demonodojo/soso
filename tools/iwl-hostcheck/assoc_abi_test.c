@@ -1114,6 +1114,52 @@ static int test_beacon_tsf_zero(void)
     return 0;
 }
 
+static int test_tim_ratelimit_tsf(void)
+{
+    struct iwl_ax211_priv iwl;
+    static const uint8_t bssid[6] = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
+    uint8_t bc[64];
+    int pos = 24 + 12;
+
+    memset(&iwl, 0, sizeof(iwl));
+    memcpy(iwl.bssid, bssid, 6);
+
+    /* Tres beacons con TSF/GP2 distintos pero mismo TIM → una sola línea de log. */
+    inject_beacon(&iwl, 0);
+    if (!iwl.tim_logged || iwl.tim_log_dtim_period != 1 || iwl.tim_log_beacon_int != 100) {
+        fprintf(stderr, "TIM ratelimit: primer beacon no registró log\n");
+        return 1;
+    }
+    iwl.sync_tsf = 2000000;
+    iwl.sync_device_ts = 600000;
+    inject_beacon(&iwl, 0);
+    iwl.sync_tsf = 3000000;
+    iwl.sync_device_ts = 700000;
+    inject_beacon(&iwl, 0);
+    if (iwl.tim_log_dtim_period != 1 || iwl.tim_log_beacon_int != 100) {
+        fprintf(stderr, "TIM ratelimit: TSF distinto re-disparó el log\n");
+        return 1;
+    }
+
+    memset(bc, 0, sizeof(bc));
+    bc[0] = (uint8_t)IEEE80211_STYPE_BEACON;
+    memcpy(bc + 16, iwl.bssid, 6);
+    bc[32] = 100;
+    bc[33] = 0;
+    bc[pos] = WLAN_EID_TIM;
+    bc[pos + 1] = 4;
+    bc[pos + 2] = 0;
+    bc[pos + 3] = 2;
+    iwl.sync_tsf = 4000000;
+    iwl.sync_device_ts = 800000;
+    iwl_mvm_rx_mlme_frame(&iwl, bc, pos + 6);
+    if (iwl.tim_log_dtim_period != 2) {
+        fprintf(stderr, "TIM ratelimit: cambio dtim_period no actualizó log\n");
+        return 1;
+    }
+    return 0;
+}
+
 static int test_eapol_lazy_data_txq(void)
 {
     struct iwl_ax211_priv iwl;
@@ -1225,6 +1271,10 @@ int main(void)
     if (test_beacon_tsf_zero() != 0)
         return 1;
     puts("OK: beacon v1 TSF=0/GP2=0 aún marca TIM seen (Linux rxmq.c no descarta)");
+
+    if (test_tim_ratelimit_tsf() != 0)
+        return 1;
+    puts("OK: TIM log solo al primer beacon o cambio DTIM/BI (no por TSF/GP2)");
 
     if (test_eapol_lazy_data_txq() != 0)
         return 1;

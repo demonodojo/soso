@@ -11,11 +11,13 @@ de implementación se declara realizada por crear estas fichas.
 completadas** (15–16 de septiembre de 2026; resúmenes en
 [seguimiento/](seguimiento/)). T03 encontró que el tokenizer de soso **no
 reproduce la segmentación oficial del modelo** y dejó dos fichas previas a T06;
-el perfil del modelo está en [modelo.md](modelo.md). **[T52](T52-tokenizer-merges.md)
-está completada** (el `.som` ya lleva las fusiones BPE); la siguiente es
-**[T53](T53-tokenizer-bpe.md)**, que las usa para segmentar. Para completar la ejecución
-guest ya puede empezar **[T45](T45-cli-capacidades.md)**; T46 también está
-habilitada. Los cierres históricos de T01/T02 no acreditan aún su validación
+el perfil del modelo está en [modelo.md](modelo.md). **[T52](T52-tokenizer-merges.md) y [T53](T53-tokenizer-bpe.md) están
+completadas**: soso segmenta ya **exactamente igual** que el tokenizer oficial
+del modelo (5/5 fixtures). Con eso y con **[T04](T04-dominio-chat.md)** y
+**[T05](T05-validacion-chat.md)** cerradas, **[T06](T06-render-chat.md)** y
+**[T07](T07-parse-herramientas.md)** tienen ya todas sus dependencias. Para
+completar la ejecución guest ya puede empezar **[T45](T45-cli-capacidades.md)**;
+T46 también está habilitada. Los cierres históricos de T01/T02 no acreditan aún su validación
 nativa completa.
 Entregar al modelo una ficha por sesión, las secciones indicadas
 del [contrato](CONTRATO.md), el [contrato nativo](NATIVO.md) y el contexto de
@@ -25,7 +27,7 @@ Cada subplan define alcance, archivos, decisiones, pasos, pruebas, salida y
 condiciones de bloqueo. Los nombres propuestos de módulos y comandos se crean
 al implementar la ficha; los enlaces de contexto apuntan al código existente.
 
-También pueden empezar sin otras tareas **[T04](T04-dominio-chat.md)** (tipos de chat),
+También pueden empezar sin otras tareas
 **[T08](T08-resultado-generacion.md)** (resultado de generación) y
 **[T18](T18-puertos-qemu.md)** (puertos QEMU). Trabajar una tarea cada vez por defecto;
 varias fichas modifican los mismos manifiestos o módulos de integración.
@@ -33,7 +35,7 @@ varias fichas modifican los mismos manifiestos o módulos de integración.
 ### Prompt listo para copiar
 
 ```text
-Implementa docs/self-improvement/T53-tokenizer-bpe.md.
+Implementa docs/self-improvement/T06-render-chat.md.
 
 Lee las secciones del CONTRATO.md que indique la ficha, NATIVO.md y las instrucciones
 locales aplicables. Revisa el estado del checkout antes de editar.
@@ -101,8 +103,8 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T01](T01-base.md) | Capturar una base reproducible sin alterar el checkout | SI-0 | — | Completada |
 | [T02](T02-banco.md) | Definir los casos y sus verificadores | SI-0 | T01 | Completada |
 | [T03](T03-perfil-modelo.md) | Fijar un modelo y obtener fixtures independientes de su chat | SI-0 / SI-1 | T01 | Completada |
-| [T04](T04-dominio-chat.md) | Añadir tipos de conversación compartidos | SI-1 | — | Pendiente |
-| [T05](T05-validacion-chat.md) | Validar historial y esquemas de herramientas | SI-1 | T04 | Pendiente |
+| [T04](T04-dominio-chat.md) | Añadir tipos de conversación compartidos | SI-1 | — | Completada |
+| [T05](T05-validacion-chat.md) | Validar historial y esquemas de herramientas | SI-1 | T04 | Completada |
 | [T06](T06-render-chat.md) | Renderizar la familia elegida con historial completo | SI-1 | T03, T05 | Pendiente |
 | [T07](T07-parse-herramientas.md) | Extraer llamadas válidas de la salida del modelo | SI-1 | T03, T05 | Pendiente |
 | [T08](T08-resultado-generacion.md) | Devolver motivo de parada y consumo real del runtime | SI-1 / SI-2 | — | Pendiente |
@@ -150,7 +152,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T50](T50-cambios-contenido.md) | Aplicar y exportar cambios sin Git | SI-4 | T01, T46 | Pendiente |
 | [T51](T51-aceptacion-circuito-nativo.md) | Acreditar todo el circuito de automejora dentro de soso | SI-7 | T29, T35, T37, T41, T42, T43, T49, T50 | Pendiente |
 | [T52](T52-tokenizer-merges.md) | Llevar las fusiones BPE al formato .som y al convertidor | SI-1 | — (deriva de T03) | Completada |
-| [T53](T53-tokenizer-bpe.md) | Segmentar por fusiones BPE en soso-llm-core | SI-1 | T52 (deriva de T03) | Pendiente |
+| [T53](T53-tokenizer-bpe.md) | Segmentar por fusiones BPE en soso-llm-core | SI-1 | T52 (deriva de T03) | Completada |
 
 ## Condiciones adicionales de entrada
 

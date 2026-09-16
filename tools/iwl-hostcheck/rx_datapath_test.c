@@ -470,11 +470,47 @@ static void test_tx_eapol_cmd(void)
           "EAPOL TX offload_assist MH_SIZE=0x0c00");
 }
 
+static void test_closed_rb_wrap(void)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t body[16];
+    unsigned n = alive_notif(body);
+    uint16_t wr;
+
+    priv_init(&iwl, 0);
+    if (iwl_alloc_queues(&iwl) != 0)
+        exit(2);
+    post_completion(&iwl, 2, body, n);
+    drain_rx_gen2(&iwl);
+    check(iwl.alive && iwl.rx_read == 1, "pre: un ALIVE avanza rx_read");
+
+    /* Firmware escribió N (=32) en vez de 0 al dar la vuelta. Linux rx.c:1517. */
+    iwl.alive = 0;
+    wr = iwl.rx_write;
+    iwl.rx_read = 0;
+    iwl.rb_stts[0] = IWL_GEN2_RX_N;
+    drain_rx_gen2(&iwl);
+    check(!iwl.alive && iwl.rx_read == 0 && iwl.rx_write == wr,
+          "AX200: closed_rb=32 no re-procesa VID ya consumido");
+
+    iwl.rb_stts[0] = (uint16_t)(2u * IWL_GEN2_RX_N);
+    drain_rx_gen2(&iwl);
+    check(!iwl.alive && iwl.rx_read == 0,
+          "AX200: closed_rb=64 no re-procesa VID ya consumido");
+
+    post_completion(&iwl, 3, body, n);
+    iwl.rb_stts[0] = (uint16_t)(IWL_GEN2_RX_N + 1);
+    drain_rx_gen2(&iwl);
+    check(iwl.alive && iwl.rx_read == 1,
+          "AX200: closed_rb=33 entrega el RB nuevo y para");
+}
+
 int main(void)
 {
     test_free_bd();
     test_completion_desc();
     test_vid_invalido();
+    test_closed_rb_wrap();
     test_rx_datapath(0);
     test_rx_datapath(1);
     test_rx_filtros();

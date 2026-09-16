@@ -5,6 +5,7 @@
 //! transcripciones; este módulo le da tramas y ejecuta lo que decide.
 //!
 //! Lee credenciales de `SOSOWIFI.TXT` (ESP live) o `/etc/wifi.conf`.
+//! Tras un `wifi connect` correcto las persiste en ambos para el próximo arranque.
 
 use alloc::string::{String, ToString};
 use soso_wpa2::{Discard, State, Supplicant};
@@ -166,6 +167,68 @@ fn motivo(d: Discard) -> &'static str {
         Discard::NoGtk => "M3 sin GTK utilizable",
         Discard::Unexpected => "mensaje fuera de secuencia",
         Discard::NoSpace => "respuesta que no cabe",
+    }
+}
+
+/// Serializa el formato que lee `parse_wifi_conf` / el autoconnect.
+pub fn format_wifi_conf(ssid: &str, psk: Option<&str>) -> String {
+    match psk {
+        Some(p) if !p.is_empty() => alloc::format!("ssid={ssid}\npsk={p}\n"),
+        _ => alloc::format!("ssid={ssid}\n"),
+    }
+}
+
+fn credenciales_validas(ssid: &str, psk: Option<&str>) -> bool {
+    if ssid.is_empty() || ssid.contains('\n') || ssid.contains('\r') {
+        return false;
+    }
+    match psk {
+        Some(p) => !p.contains('\n') && !p.contains('\r'),
+        None => true,
+    }
+}
+
+fn write_etc_wifi_conf(text: &str) -> bool {
+    if crate::fs::FS.get().is_none() {
+        return false;
+    }
+    let mtime = crate::time::wall_secs();
+    let Ok(etc) = crate::vfs::resolve("/etc") else {
+        return false;
+    };
+    match crate::vfs::create_file(etc, "wifi.conf", text.as_bytes(), mtime) {
+        Ok(_) => true,
+        Err(e) => {
+            crate::println!("wifi: no pude escribir /etc/wifi.conf ({e:?})");
+            false
+        }
+    }
+}
+
+/// Guarda SSID/clave para el autoconnect y DHCP del siguiente arranque.
+/// ESP primero (`SOSOWIFI.TXT`); `/etc/wifi.conf` como respaldo e instalación.
+pub fn persist_credentials(ssid: &str, psk: Option<&str>) {
+    if !credenciales_validas(ssid, psk) {
+        crate::println!("wifi: no se guardan credenciales (SSID o clave inválidos)");
+        return;
+    }
+    let text = format_wifi_conf(ssid, psk);
+    let mut ok = false;
+    #[cfg(feature = "drv-live-disk")]
+    match crate::drivers::wificonf::write_text(&text) {
+        Ok(true) => {
+            crate::println!("wifi: credenciales en SOSOWIFI.TXT");
+            ok = true;
+        }
+        Ok(false) => {}
+        Err(()) => crate::println!("wifi: no se pudo escribir SOSOWIFI.TXT"),
+    }
+    if write_etc_wifi_conf(&text) {
+        crate::println!("wifi: credenciales en /etc/wifi.conf");
+        ok = true;
+    }
+    if !ok {
+        crate::println!("wifi: no se pudieron guardar las credenciales");
     }
 }
 

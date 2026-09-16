@@ -312,8 +312,10 @@ fn repl_interactivo() -> u8 {
     let mut lector = libsoso::linea::Lector::new();
     loop {
         print!("?> ");
-        let Some(linea) = lector.siguiente() else {
-            return 0;
+        let linea = match lector.siguiente() {
+            Ok(Some(l)) => l,
+            Ok(None) => return 0,
+            Err(_) => return 1,
         };
         let texto = linea.trim();
         if texto.is_empty() {

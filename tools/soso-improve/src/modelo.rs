@@ -49,12 +49,12 @@ impl Tokeniza for TokenizerSoso {
     }
 
     fn pieza(&self, id: u32) -> Option<String> {
-        let mut bytes = Vec::new();
-        self.0.token_bytes(id, &mut bytes);
-        if bytes.is_empty() {
-            return None;
+        // La pieza tal cual está en el vocabulario: `decode` traduce bytes y se
+        // come los marcadores de parada, que son los que más interesa ver.
+        match &self.0 {
+            Tokenizer::Vocab(v) => v.pieza_de(id).map(String::from),
+            Tokenizer::ByteLevel => None,
         }
-        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -75,9 +75,10 @@ pub fn despachar(sub: &str, opciones: &Opciones) -> Resultado<i32> {
     match sub {
         "comparar" => comparar(opciones),
         "detalle" => detalle(opciones),
+        "coste" => coste(opciones),
         "perfil" => perfil(opciones),
         otro => Err(Error::uso(format!(
-            "modelo: subcomando desconocido {otro} (usa: perfil | comparar | detalle)"
+            "modelo: subcomando desconocido {otro} (usa: perfil | comparar | detalle | coste)"
         ))),
     }
 }
@@ -293,5 +294,64 @@ fn perfil(opciones: &Opciones) -> Resultado<i32> {
     host.escribir(&salida, texto.as_bytes(), 0o644)?;
     crate::digo!("perfil en {salida}: {} ({} capas, vocab .som {})",
                  origen, manifiesto.layers.len(), manifiesto.vocab_size);
+    Ok(0)
+}
+
+/// Mide cuánto cuesta segmentar (lo exige T53).
+///
+/// El bucle de fusión no puede ser cuadrático: aquí entran prompts de miles de
+/// tokens y esto corre también dentro de soso, sin `std`.
+fn coste(opciones: &Opciones) -> Resultado<i32> {
+    let modelo = opciones.exigido("modelo")?.to_string();
+    let fixtures = opciones
+        .uno("fixtures")
+        .filter(|s| !s.is_empty())
+        .unwrap_or("tests/self-improvement/reference")
+        .to_string();
+    let tokenizer = cargar_tokenizer(&modelo)?;
+    let fixture = referencia::leer_fixture(&Host, &fixtures, "herramienta-resultado.json")?;
+
+    // `decode` suprime el token de parada a propósito, y lo hace desde siempre:
+    // el bucle de generación no quiere imprimirlo. Para juzgar la ida y vuelta
+    // se compara contra el texto sin él.
+    let parada = tokenizer
+        .0
+        .eos()
+        .and_then(|id| tokenizer.pieza(id))
+        .unwrap_or_default();
+    // El texto del fixture trae el marcador literal; `decode` no lo devuelve.
+
+    for (nombre, veces) in [("fixture", 1usize), ("x16", 16), ("x64", 64)] {
+        let texto = fixture.texto.repeat(veces);
+        let inicio = std::time::Instant::now();
+        let ids = tokenizer.encode(&texto);
+        let ms = inicio.elapsed().as_secs_f64() * 1000.0;
+        let vuelta = tokenizer.0.decode(&ids);
+        let esperado = if parada.is_empty() {
+            texto.clone()
+        } else {
+            texto.replace(&parada, "")
+        };
+        let igual = vuelta == esperado;
+        crate::digo!(
+            "{nombre:8} {:>8} bytes → {:>6} tokens en {ms:7.1} ms · ida y vuelta {}",
+            texto.len(),
+            ids.len(),
+            if igual { "idéntica" } else { "DIFIERE" }
+        );
+        if !igual && veces == 1 {
+            let corte = esperado
+                .char_indices()
+                .zip(vuelta.char_indices())
+                .find(|((_, a), (_, b))| a != b)
+                .map(|((i, _), _)| i)
+                .unwrap_or(esperado.len().min(vuelta.len()));
+            crate::aviso!(
+                "      primera diferencia en el byte {corte}: esperado {:?} · obtenido {:?}",
+                &esperado[corte..(corte + 30).min(esperado.len())],
+                &vuelta[corte..(corte + 30).min(vuelta.len())]
+            );
+        }
+    }
     Ok(0)
 }

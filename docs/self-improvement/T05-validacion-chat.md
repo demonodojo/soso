@@ -1,6 +1,6 @@
 # T05 — Validar historial y esquemas de herramientas
 
-**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** completada (16 de septiembre de 2026).
 
 **Dependencias:** [T04](T04-dominio-chat.md)
 
@@ -19,6 +19,10 @@ tras comprobar las entregas de las dependencias.
 ## Archivos que se pueden cambiar
 
 Crear `crates/soso-llm-core/src/conversation/validate.rs` y `tests/conversation_validation.rs`; conectar desde `conversation.rs` creado en T04.
+
+Hecho; `conversation.rs` añade además las variantes de `ChatError` que faltaban para
+registrar la ruta del argumento inválido. Seguimiento en
+[seguimiento/T05.md](seguimiento/T05.md).
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
@@ -42,9 +46,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Un esquema real de OpenCode fuera del subconjunto requiere fixture y ampliación acotada; no desactivar la validación para aceptarlo.
 

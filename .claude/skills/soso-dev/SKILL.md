@@ -228,7 +228,7 @@ nc localhost 7777
 
 Port forwards (host → guest): **2222→22** (SSH), **7777→7** (echo).
 
-Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp).
+Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp). En el guest: `ip`.
 
 ## Testing
 
@@ -273,6 +273,7 @@ cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 # End-to-end (host tests ∥ build user/kernel, luego 4 shards QEMU en paralelo)
 cargo xtask test
 # La suite debe quedar en verde (stdin/SSH aislado por sesión desde A1).
+# Shard sys incluye «fd 3: redirección y comando log» (`3>`, `log`, sello pid=).
 # Ante regresiones: target/test-{llm-dense,llm-moe,sys,reclaim}-serial.log
 
 # Pre-commit / CI equivalente:

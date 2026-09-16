@@ -28,6 +28,7 @@ el alcance: consultar o editar documentación no inicia su implementación.
 | Automejora, OpenCode, modelo de soso | [SELF_IMPROVEMENT.md](../../../../SELF_IMPROVEMENT.md) → [índice](../../../../docs/self-improvement/README.md) → [tasks.json](../../../../docs/self-improvement/tasks.json) → ficha Txx |
 | Contratos y fichas derivadas | [CONTRATO.md](../../../../docs/self-improvement/CONTRATO.md), solo secciones de la tarea; [PLANTILLA.md](../../../../docs/self-improvement/PLANTILLA.md) para N-xxx/C-xxx |
 | Entregas generales y pendientes | [PLAN_ASTRA.md](../../../../PLAN_ASTRA.md); comprobar su revisión e IDs actuales |
+| Actualizaciones de instalaciones y logs en sosofs | [PLAN-ACTUALIZACIONES.md](../../../../docs/PLAN-ACTUALIZACIONES.md), entregas U0–U8; transición legacy y recuperación conjunta kernel/rootfs |
 | Inferencia y modelos grandes | [PLAN-MODELOS-GRANDES.md](../../../../PLAN-MODELOS-GRANDES.md); distinguir etapas históricas de pendientes reales |
 | GPU nativa y VRAM | [L6-native-autonomy.md](../../../../docs/L6-native-autonomy.md), gates enlazados y [PLAN-VRAM-16G-ROG.md](../../../../docs/PLAN-VRAM-16G-ROG.md) |
 | Steam Deck / ath11k | [PLAN-STEAMDECK.md](../../../../docs/PLAN-STEAMDECK.md) |

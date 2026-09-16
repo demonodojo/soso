@@ -1,6 +1,6 @@
 # T53 — Segmentar por fusiones BPE en `soso-llm-core`
 
-**Hito:** SI-1 · **Tipo:** Implementación core · **Estado:** pendiente.
+**Hito:** SI-1 · **Tipo:** Implementación core · **Estado:** completada (16 de septiembre de 2026; resumen en [seguimiento/T53.md](seguimiento/T53.md)).
 **Origen:** derivada de [T03](T03-perfil-modelo.md) (perfil del modelo).
 **Dependencias:** [T52](T52-tokenizer-merges.md) — sin fusiones en el `.som` no
 hay con qué segmentar.
@@ -80,9 +80,9 @@ a 151 936): **no es un problema de vocabulario**, es del algoritmo.
 
 ## Cierre y condición de bloqueo
 
-- [ ] BPE por rangos para vocabularios byte-level, SentencePiece intacto.
-- [ ] 5/5 fixtures iguales en la comparación.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] BPE por rangos para vocabularios byte-level, SentencePiece intacto.
+- [x] 5/5 fixtures iguales en la comparación.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
 
 Si tras implementar las fusiones quedara alguna divergencia, **no cerrar**:
 clasificarla con `modelo detalle` y decidir si es normalización, token especial

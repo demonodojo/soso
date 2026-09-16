@@ -79,14 +79,15 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 
 ### Syscalls principales
 
-`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo` (+ GPU, TCP, hilos, WiFi)
+`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo, netinfo` (+ GPU, TCP, hilos, WiFi)
 
 - **Instalación / OTA / ESP:** syscalls y huecos 8.3 — skill **`soso-live`** (`disk_*`, `bootreq_*`, `upd_*`, `espfat`)
 - **Framebuffer / entrada:** `fb_info=62`, `fb_set_mode=63`, `fb_present=64`, `input_poll=65` (modo gráfico userspace; ratón PS/2 aux)
 - **WiFi:** `wifi_scan=56`, `wifi_status=57`, `wifi_connect=58` — detalle en **`soso-wifi`**
+- **Red:** `netinfo=87` — IPv4/MAC/pasarela de la NIC activa (`/bin/ip`, kshell `ip`)
 - **Audio:** `audio_open=59`, `audio_read=60`, `audio_close=61` (HDA, `drv-hda`)
 
-- **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`; hijos heredan cwd del padre
+- **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`/`spawn_io_full`; hijos heredan cwd del padre; fd 3 = registro (`Fd::Log`, ring `applog`, `SYS_LOG_READ=86`, `logln!`); redirecciones `N>`, `N>>`, `N>&-` para N=1–3
 - **Señales (mínimo):** SIGINT/SIGKILL/SIGTERM vía `kill`; `kill(pid, 0)` sondea existencia (no entrega). Grupos con `setpgid`/`setsid`/`tcsetpgrp`; Ctrl-C (ISIG) al grupo en primer plano de la consola. Sin handlers (`sigaction`). El líder de sesión en el prompt recibe `-EINTR` en `read` en vez de morir
 - **Escritura:** `open(O_WRONLY)` → buffer en kernel; `create_file` en sosofs al `close()`
 - **Rutas:** `task/path.rs` resuelve relativas contra `Process.cwd` (default `/`)
@@ -107,7 +108,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `vfs.rs` | Router: lectura/escritura sosofs; modelos → sosomfs (read-only) |
 | `net/` | smoltcp, DHCPv4 al arrancar (fallback 10.0.2.15), polled from scheduler |
 | `net/ssh.rs` | sunset SSH-2, una sesión, CRLF en tx_push, reset_socket al desconectar |
-| `kshell.rs` | Emergency kernel-shell (`soso>`): `help`, `dmesg [save]`, `hwscan`, `wifi`, `io`, `halt`, … |
+| `kshell.rs` | Emergency kernel-shell (`soso>`): `help`, `dmesg [save]`, `hwscan`, `ip`, `wifi`, `io`, `halt`, … |
 | `task/` | Processes (cwd, console), scheduler, syscall, path normalization |
 
 ## sosofs (v1)
@@ -134,7 +135,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `/bin/soso-resize` | Amplía sosofs robando margen libre al final de modelos (`SYS_FS_RESIZE`; live/instalado GPT) |
 | `/bin/soso-update` | Releases GitHub: rootfs por fichero (sin rollback de binarios; progreso en `/etc/actualiza.estado`); kernel vía `SOSOUPD.TXT` + `SOSOKRN.BIN` + meta `SOSOKRN.MET` (recovery verificable) |
 | `/bin/soso-web` | Navegador mínimo: HTTPS + HTML→texto (modo lectura) o framebuffer (modo `--grafico`) |
-| `/bin/{ls,cat,echo,mkdir,rm,hexdump,halt}` | Coreutils |
+| `/bin/{ls,cat,echo,mkdir,rm,hexdump,ip,halt}` | Coreutils |
 
 `libsoso`: crt0, syscall wrappers, mini-libstd (256 KiB heap arena), `linea::Lector`
 (lectura de línea con eco: **acepta UTF-8** y borra por carácter; lee **byte a byte**

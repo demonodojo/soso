@@ -770,6 +770,15 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_voz_wav(key, port)
             });
         });
+        filter.if_step(sid, "fd 3: redirección y comando log", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "fd 3: redirección y comando log",
+                || ssh_fd3_log(key, port),
+            );
+        });
         filter.if_step(
             sid,
             "SSH por clave pública + comando + halt",
@@ -1984,6 +1993,35 @@ fn ssh_init_test(key: &Path, ssh_port: u16) -> Result<(), String> {
         return Err(format!(
             "init test no llegó al final (¿timeout?); stdout: {texto:?}"
         ));
+    }
+    Ok(())
+}
+
+fn ssh_fd3_log(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let tok_f = "xtask_fd3_f_42";
+    let tok_r = "xtask_fd3_r_42";
+    let guion = format!(
+        "init log {tok_f} 3>/tmp/l.txt\ncat /tmp/l.txt\ninit log {tok_r}\nlog\nhalt\n"
+    );
+    let texto = ssh_guion_hasta(key, ssh_port, &guion, Duration::from_secs(60), "halt")?;
+    let cat_chunk = texto
+        .split("cat /tmp/l.txt")
+        .nth(1)
+        .and_then(|s| s.split("init log").next())
+        .unwrap_or("");
+    if !cat_chunk.contains(tok_f) {
+        return Err(format!("cat no mostró {tok_f}; salida: {texto:?}"));
+    }
+    if cat_chunk.contains("pid=") {
+        return Err(format!(
+            "3>fichero incluyó sello del kernel; trozo: {cat_chunk:?}"
+        ));
+    }
+    if !texto.contains(tok_r) {
+        return Err(format!("no se vio {tok_r} en log; salida: {texto:?}"));
+    }
+    if !texto.contains("pid=") {
+        return Err(format!("log no incluyó sello pid=; salida: {texto:?}"));
     }
     Ok(())
 }

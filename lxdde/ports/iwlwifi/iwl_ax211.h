@@ -167,10 +167,10 @@ struct iwl_ax211_priv {
     uint8_t sync_beacon_seen;
     uint8_t assoc_pending_beacon;
     /* Rate-limit del log TIM (evita llenar SOSOLOG). */
+    uint8_t tim_logged;
     uint8_t tim_log_dtim_count;
     uint8_t tim_log_dtim_period;
-    uint64_t tim_log_tsf;
-    uint32_t tim_log_gp2;
+    uint16_t tim_log_beacon_int;
     uint8_t scan_rx_ant;
     uint32_t phy_sku;
     uint8_t fw_valid_tx_ant;

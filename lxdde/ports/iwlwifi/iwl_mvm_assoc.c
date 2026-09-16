@@ -70,20 +70,22 @@ static void parse_tim_ie(struct iwl_ax211_priv *iwl, const uint8_t *frame, int l
             if (frame[pos + 3])
                 iwl->dtim_period = frame[pos + 3];
             iwl->sync_beacon_seen = 1;
-            if (iwl->tim_log_dtim_count != iwl->sync_dtim_count ||
+            /* Linux mac-ctxt: TIM/TBTT se loguea una vez (IWL_DEBUG_INFO), no
+             * por cada beacon; TSF/GP2 cambian siempre y no son criterio. */
+            if (!iwl->tim_logged ||
+                iwl->tim_log_dtim_count != iwl->sync_dtim_count ||
                 iwl->tim_log_dtim_period != iwl->dtim_period ||
-                iwl->tim_log_tsf != iwl->sync_tsf ||
-                iwl->tim_log_gp2 != iwl->sync_device_ts) {
+                iwl->tim_log_beacon_int != iwl->beacon_int) {
                 lx_printk("iwl_mvm: beacon TIM dtim_count=%u dtim_period=%u bi=%u tsf=%llu gp2=%u\n",
                           (unsigned)iwl->sync_dtim_count,
                           (unsigned)iwl->dtim_period,
                           (unsigned)iwl->beacon_int,
                           (unsigned long long)iwl->sync_tsf,
                           (unsigned)iwl->sync_device_ts);
+                iwl->tim_logged = 1;
                 iwl->tim_log_dtim_count = iwl->sync_dtim_count;
                 iwl->tim_log_dtim_period = iwl->dtim_period;
-                iwl->tim_log_tsf = iwl->sync_tsf;
-                iwl->tim_log_gp2 = iwl->sync_device_ts;
+                iwl->tim_log_beacon_int = iwl->beacon_int;
             }
             break;
         }
@@ -588,10 +590,10 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
     iwl->sync_dtim_count = 0;
     iwl->sync_beacon_seen = 0;
     iwl->assoc_pending_beacon = 0;
+    iwl->tim_logged = 0;
     iwl->tim_log_dtim_count = 0;
     iwl->tim_log_dtim_period = 0;
-    iwl->tim_log_tsf = 0;
-    iwl->tim_log_gp2 = 0;
+    iwl->tim_log_beacon_int = 0;
     strncpy(iwl->ssid, ssid, IWL_AX211_SSID_MAX);
     iwl->ssid[IWL_AX211_SSID_MAX] = '\0';
     memcpy(iwl->bssid, bssid, 6);

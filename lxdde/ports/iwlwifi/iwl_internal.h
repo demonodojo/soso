@@ -76,6 +76,16 @@ enum iwl_device_family {
 #define IWL_GEN2_RX_N                32
 #define IWL_GEN2_RX_SZ               4096
 
+/* Linux pcie/rx.c: `r = closed_rb_num & 0xFFF; r &= (queue_size - 1)`.
+ * Sin el wrap, closed=32 y rx_read∈0..31 recorren el anillo entero. */
+static inline uint16_t iwl_closed_rb_idx(const volatile uint16_t *rb_stts,
+                                         unsigned queue_n)
+{
+    uint16_t hw = rb_stts[0] & 0x0fffu;
+
+    return (uint16_t)(hw & (queue_n - 1u));
+}
+
 /* Contrato DMA del anillo RX, distinto por generación (pcie/internal.h).
  *
  *  - 22000 / AX200 (`!gen3`): BD libre = `__le64 (addr | vid)`; el descriptor

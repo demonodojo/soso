@@ -542,9 +542,20 @@ pub fn require_valid_model(root: &Path, dir: &Path) {
     }
 }
 
+/// Un `.som` puede ser perfectamente válido y traer el tokenizer equivocado: un
+/// modelo BPE convertido antes de que el formato guardara las fusiones carga
+/// igual y segmenta mal. Aquí el GGUF ya está en caché, así que reconvertir
+/// sale barato y es lo correcto.
+fn tokenizer_esperado(out_dir: &Path, name: &str) -> Result<(), String> {
+    match crate::live_models::spec_by_name(name) {
+        Some(spec) => spec.check_tokenizer(out_dir),
+        None => Ok(()),
+    }
+}
+
 fn convert_gguf(root: &Path, gguf: &Path, out_dir: &Path, name: &str) {
     if out_dir.join("manifest.som").exists() {
-        match check_som_model(root, out_dir) {
+        match check_som_model(root, out_dir).and_then(|()| tokenizer_esperado(out_dir, name)) {
             Ok(()) => {
                 println!("fetch-hf: {} ya válido", out_dir.display());
                 return;

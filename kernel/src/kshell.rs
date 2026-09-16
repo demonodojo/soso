@@ -53,7 +53,7 @@ fn exec(line: &str) {
 
     match cmd {
         "help" => {
-            println!("comandos: help dmesg [patrón|save] hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem io wifi blk blkread blkwrite pf panic halt");
+            println!("comandos: help dmesg [patrón|save] hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem io ip wifi blk blkread blkwrite pf panic halt");
         }
         "dmesg" => match args.first() {
             Some(&"save") => {
@@ -224,6 +224,7 @@ fn exec(line: &str) {
                 }
             }
         }
+        "ip" => crate::net::print_info(),
         "wifi" => {
             #[cfg(feature = "lxdde")]
             {
@@ -276,13 +277,17 @@ fn exec(line: &str) {
                     }
                     Some(&"connect") => match args.get(1) {
                         Some(ssid) => {
-                            let rc = if args.len() > 2 {
-                                let pass = args[2..].join(" ");
-                                crate::net::wifi_wpa::connect_wpa2(ssid, &pass)
+                            let psk = if args.len() > 2 {
+                                Some(args[2..].join(" "))
                             } else {
-                                crate::lxdde::wifi::connect_open(ssid)
+                                None
+                            };
+                            let rc = match psk.as_deref() {
+                                Some(pass) => crate::net::wifi_wpa::connect_wpa2(ssid, pass),
+                                None => crate::lxdde::wifi::connect_open(ssid),
                             };
                             if rc == 0 {
+                                crate::net::wifi_wpa::persist_credentials(ssid, psk.as_deref());
                                 crate::net::on_wifi_connected();
                             }
                             println!("wifi connect: rc={rc}");

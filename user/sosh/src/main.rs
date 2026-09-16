@@ -127,12 +127,17 @@ fn main(_args: &str) -> u8 {
     escribir_marca_listo(prefault_ms);
     loop {
         print!("{PROMPT}");
-        let Some(cmd) = lector.siguiente() else {
-            // Ctrl-D: salir como con `exit`.
-            return 0;
-        };
-        if let Some(code) = ejecutar(&cmd) {
-            return code;
+        match lector.siguiente() {
+            Ok(Some(cmd)) => {
+                if let Some(code) = ejecutar(&cmd) {
+                    return code;
+                }
+            }
+            Ok(None) => return 0,
+            Err(e) => {
+                println!("sosh: tty: {}", errno_str(e));
+                return 1;
+            }
         }
     }
 }
@@ -144,16 +149,21 @@ enum TokenKind {
     RedirectOut,
     RedirectAppend,
     RedirectIn,
+    RedirectClose,
 }
 
 struct Token {
     kind: TokenKind,
     word: String,
+    /// Descriptor destino (1–3) para redirecciones; 0 en palabras y pipes.
+    fd: u64,
 }
 
 #[derive(Clone)]
 enum RedirSpec {
     Tty,
+    Log,
+    Closed,
     Path(String, u64),
 }
 
@@ -162,6 +172,8 @@ struct CmdSpec {
     args: String,
     stdin: RedirSpec,
     stdout: RedirSpec,
+    stderr: RedirSpec,
+    log: RedirSpec,
 }
 
 fn tokenize(line: &str) -> Vec<Token> {
@@ -175,22 +187,32 @@ fn tokenize(line: &str) -> Vec<Token> {
             '|' => tokens.push(Token {
                 kind: TokenKind::Pipe,
                 word: String::new(),
+                fd: 0,
             }),
             '>' => {
                 let kind = if chars.peek() == Some(&'>') {
                     chars.next();
                     TokenKind::RedirectAppend
+                } else if chars.peek() == Some(&'&') {
+                    chars.next();
+                    if chars.next() == Some('-') {
+                        TokenKind::RedirectClose
+                    } else {
+                        TokenKind::RedirectOut
+                    }
                 } else {
                     TokenKind::RedirectOut
                 };
                 tokens.push(Token {
                     kind,
                     word: String::new(),
+                    fd: 1,
                 });
             }
             '<' => tokens.push(Token {
                 kind: TokenKind::RedirectIn,
                 word: String::new(),
+                fd: 0,
             }),
             _ => {
                 let mut word = String::new();
@@ -201,9 +223,37 @@ fn tokenize(line: &str) -> Vec<Token> {
                     }
                     word.push(chars.next().unwrap());
                 }
+                if word.len() == 1 {
+                    if let Some(d) = word.chars().next().and_then(|ch| ch.to_digit(10)) {
+                        if (1..=3).contains(&d) && chars.peek() == Some(&'>') {
+                            chars.next();
+                            let fd = d as u64;
+                            let kind = if chars.peek() == Some(&'>') {
+                                chars.next();
+                                TokenKind::RedirectAppend
+                            } else if chars.peek() == Some(&'&') {
+                                chars.next();
+                                if chars.next() == Some('-') {
+                                    TokenKind::RedirectClose
+                                } else {
+                                    TokenKind::RedirectOut
+                                }
+                            } else {
+                                TokenKind::RedirectOut
+                            };
+                            tokens.push(Token {
+                                kind,
+                                word: String::new(),
+                                fd,
+                            });
+                            continue;
+                        }
+                    }
+                }
                 tokens.push(Token {
                     kind: TokenKind::Word,
                     word,
+                    fd: 0,
                 });
             }
         }
@@ -229,10 +279,13 @@ fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
         }
         let mut stdin = RedirSpec::Tty;
         let mut stdout = RedirSpec::Tty;
+        let mut stderr = RedirSpec::Tty;
+        let mut log = RedirSpec::Log;
         let mut words = Vec::new();
         let mut i = 0usize;
         while i < seg.len() {
-            match seg[i].kind {
+            let tok = &seg[i];
+            match tok.kind {
                 TokenKind::RedirectIn => {
                     i += 1;
                     let path = seg.get(i).ok_or("falta fichero tras <")?;
@@ -248,7 +301,13 @@ fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
                     if path.kind != TokenKind::Word {
                         return Err("falta fichero tras >");
                     }
-                    stdout = RedirSpec::Path(path.word.clone(), abi::O_WRONLY);
+                    let spec = RedirSpec::Path(path.word.clone(), abi::O_WRONLY);
+                    match tok.fd {
+                        1 => stdout = spec,
+                        2 => stderr = spec,
+                        3 => log = spec,
+                        _ => return Err("descriptor de redirección inválido"),
+                    }
                     i += 1;
                 }
                 TokenKind::RedirectAppend => {
@@ -257,11 +316,27 @@ fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
                     if path.kind != TokenKind::Word {
                         return Err("falta fichero tras >>");
                     }
-                    stdout = RedirSpec::Path(path.word.clone(), abi::O_WRONLY | abi::O_APPEND);
+                    let spec =
+                        RedirSpec::Path(path.word.clone(), abi::O_WRONLY | abi::O_APPEND);
+                    match tok.fd {
+                        1 => stdout = spec,
+                        2 => stderr = spec,
+                        3 => log = spec,
+                        _ => return Err("descriptor de redirección inválido"),
+                    }
+                    i += 1;
+                }
+                TokenKind::RedirectClose => {
+                    match tok.fd {
+                        1 => stdout = RedirSpec::Closed,
+                        2 => stderr = RedirSpec::Closed,
+                        3 => log = RedirSpec::Closed,
+                        _ => return Err("descriptor de redirección inválido"),
+                    }
                     i += 1;
                 }
                 TokenKind::Word => {
-                    words.push(seg[i].word.as_str());
+                    words.push(tok.word.as_str());
                     i += 1;
                 }
                 TokenKind::Pipe => return Err("sintaxis inválida"),
@@ -281,6 +356,8 @@ fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
             args,
             stdin,
             stdout,
+            stderr,
+            log,
         });
     }
     Ok(cmds)
@@ -289,6 +366,8 @@ fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
 fn open_redir(spec: &RedirSpec) -> Result<u64, i64> {
     match spec {
         RedirSpec::Tty => Ok(abi::FD_INHERIT_TTY),
+        RedirSpec::Log => Ok(abi::FD_KERNEL_LOG),
+        RedirSpec::Closed => Ok(abi::FD_CLOSED),
         RedirSpec::Path(path, flags) => {
             let fd = sys::open(path, *flags);
             if fd < 0 { Err(fd) } else { Ok(fd as u64) }
@@ -341,7 +420,31 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
             format!("/bin/{}", cmd.prog)
         };
 
-        let pid = sys::spawn_io(&path, &cmd.args, stdin_fd, stdout_fd, abi::FD_INHERIT_TTY);
+        let stderr_fd = match open_redir(&cmd.stderr) {
+            Ok(fd) => fd,
+            Err(e) => {
+                println!("sosh: {}: {}", cmd.prog, errno_str(e));
+                return None;
+            }
+        };
+        let log_fd = match open_redir(&cmd.log) {
+            Ok(fd) => fd,
+            Err(e) => {
+                println!("sosh: {}: {}", cmd.prog, errno_str(e));
+                return None;
+            }
+        };
+
+        let pid = if cmd.args.is_empty() {
+            sys::spawn_io_full(&path, &[&path], &[], [stdin_fd, stdout_fd, stderr_fd, log_fd])
+        } else {
+            sys::spawn_io_full(
+                &path,
+                &[&path, &cmd.args],
+                &[],
+                [stdin_fd, stdout_fd, stderr_fd, log_fd],
+            )
+        };
         if pid < 0 {
             println!("sosh: {}: {}", cmd.prog, errno_str(pid));
             return None;
@@ -472,7 +575,7 @@ fn ejecutar_wifi(args: &str) {
         if r < 0 {
             println!("sosh: wifi connect: {}", errno_str(r));
         } else {
-            println!("wifi: asociado a '{ssid}'");
+            println!("wifi: asociado a '{ssid}' (se usará al arrancar)");
         }
         return;
     }
@@ -498,7 +601,7 @@ fn ayuda() {
     println!("voz:      voz             — dictar; Enter confirma la línea");
     println!("          voz ask         — prefija «ask » al dictado");
     println!("          F4              — push-to-talk en la línea");
-    println!("comandos: ELF de /bin o ruta absoluta");
+    println!("comandos: ELF de /bin o ruta absoluta (ip, ls, cat, …)");
     println!("install:  soso-install  — clonar live a un NVMe (elige disco)");
     println!("          soso-install list | nvme1 --yes | status");
     println!("pipes:    cmd1 | cmd2 | cmd3");
@@ -791,10 +894,14 @@ fn ejecutar_voz(texto: &str) -> Option<u8> {
             let linea = format!("{prefijo}{t}");
             print!("{PROMPT}");
             let mut lector = Lector::new().con_texto_inicial(&linea);
-            let Some(cmd) = lector.siguiente() else {
-                return Some(0);
-            };
-            ejecutar(&cmd)
+            match lector.siguiente() {
+                Ok(Some(cmd)) => ejecutar(&cmd),
+                Ok(None) => Some(0),
+                Err(e) => {
+                    println!("sosh: tty: {}", errno_str(e));
+                    Some(1)
+                }
+            }
         }
         None => {
             println!("voz: error de transcripción");
@@ -814,8 +921,13 @@ fn repl_ask() -> Option<u8> {
     let mut lector = Lector::new();
     loop {
         print!("?> ");
-        let Some(linea) = lector.siguiente() else {
-            return Some(0);
+        let linea = match lector.siguiente() {
+            Ok(Some(l)) => l,
+            Ok(None) => return Some(0),
+            Err(e) => {
+                println!("sosh: tty: {}", errno_str(e));
+                return Some(1);
+            }
         };
         let texto = linea.trim();
         if texto.is_empty() {
