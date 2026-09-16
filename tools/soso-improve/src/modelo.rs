@@ -8,7 +8,7 @@
 use soso_improve_core::entorno::Archivos;
 use soso_improve_core::referencia::{self, Tokeniza};
 use soso_improve_core::{unir, Error, Resultado};
-use soso_llm_core::tokenizer::Tokenizer;
+use soso_llm_core::tokenizer::{Segmentacion, Tokenizer};
 use sosomodel::manifest::Manifest;
 
 use crate::sistema::Host;
@@ -16,6 +16,28 @@ use crate::Opciones;
 
 /// El tokenizer del `.som`, con lo que pide el comparador.
 struct TokenizerSoso(Tokenizer);
+
+impl TokenizerSoso {
+    /// Qué algoritmo pide el vocabulario y cuántas fusiones trae. Un
+    /// vocabulario byte-level sin fusiones no puede reproducir la segmentación
+    /// oficial (T52/T53), y eso tiene que verse en el perfil.
+    fn segmentacion(&self) -> &'static str {
+        match &self.0 {
+            Tokenizer::Vocab(v) => match v.segmentacion() {
+                Segmentacion::BpeByteLevel => "bpe-bytelevel",
+                Segmentacion::PiezaMasLarga => "pieza-mas-larga",
+            },
+            Tokenizer::ByteLevel => "bytes",
+        }
+    }
+
+    fn merges(&self) -> usize {
+        match &self.0 {
+            Tokenizer::Vocab(v) => v.merges().len(),
+            Tokenizer::ByteLevel => 0,
+        }
+    }
+}
 
 impl Tokeniza for TokenizerSoso {
     fn encode(&self, texto: &str) -> Vec<u32> {
@@ -256,6 +278,8 @@ fn perfil(opciones: &Opciones) -> Resultado<i32> {
             "chat_template_sha256": soso_improve_core::sha256_hex(
                 manifiesto.chat_template.as_bytes()),
             "tokenizer_vocab_len": tokenizer.vocab_size(),
+            "tokenizer_segmentacion": tokenizer.segmentacion(),
+            "tokenizer_merges": tokenizer.merges(),
             "capas": manifiesto.layers.len(),
         },
         "hashes": hashes,

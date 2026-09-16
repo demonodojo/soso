@@ -223,3 +223,64 @@ Criterio de validación en placa (tras reflash con HEAD):
 - Sin `SESSION_PROTECTION` timeout (kernel reciente con TXQ mgmt previo).
 - Sin `MAC_CONTEXT is_assoc=1` timeout; log `asociado a 'Rutilo' aid=… dtim=…`.
 - EAPOL lazy tid=0 → `wifi-wpa: 4-way completado`.
+
+---
+
+## Flush #55 — kernel `cfe3c4452` (tarde, 16 sep 2026)
+
+Lectura ESP `/dev/sda1` (`KERNEL`). Copias en
+[`target/usb-diagnostic-2026-09-16-run4/`](../target/usb-diagnostic-2026-09-16-run4/).
+Connect manual a Rutilo (sin PSK en informe).
+
+| Campo | Valor (flush **#55**, arranque tarde) |
+|---|---|
+| Kernel en placa (SOSOLOG) | **0.2.2 (`cfe3c4452-dirty`)** |
+| Flush | **#55 @ 178451 ms** (~178 s) |
+| Hardware | `10de:249c` (GA107) + `8086:2723` (AX200 gen2) + `10ec:8168` rtl8169 DOWN |
+| Userspace | **`sosh —`** OK |
+| WiFi | ALIVE + MVM + scan **22 BSS**; **AUTH+ASSOC+4-way OK** (`aid=6`); **sin DHCP** |
+| GPU | GSP_INIT_DONE + pool VRAM + apagado limpio |
+| Ethernet | rtl8169 enlace DOWN (sin cable); `net: dhcp` al arranque sobre MAC ethernet |
+
+### Tabla de etapas (flush #55)
+
+| Etapa | Evidencia SOSOLOG | Resultado |
+|---|---|---|
+| Boot / sosh | `soso 0.2.2 (cfe3c4452-dirty)` → `sosh —` | **OK** |
+| fatlog | flush **#55** @ 178 s; 181413 B (casi lleno) | parcial |
+| GPU GSP | `GSP_INIT_DONE`; `pool VRAM=sí`; `GSP-RM dma=off` | **OK** |
+| WiFi ALIVE | `UCODE_ALIVE_NTFY`; familia 22000 gen2 | **OK** |
+| WiFi init | `INIT_COMPLETE_NOTIF`; `init NVM listo` | **OK** |
+| Scan userspace | `SCAN_COMPLETE count=22`; Rutilo WPA2 **ch40** | **OK** |
+| AUTH / ASSOC | `asociado a 'Rutilo' aid=6 dtim=1 bi=100` | **OK** |
+| 4-way EAPOL | `wifi-wpa: 4-way completado, enlace autorizado` | **OK** |
+| Beacon TIM | `beacon TIM … tsf=0 gp2=0` × **553** (fatlog saturado) | **FAIL** |
+| DHCP LxWifi | sin `net: wifi asociada — solicitando DHCP…` | **FAIL** |
+
+**Bloqueante DHCP:** `net::init()` adjunta **rtl8169** al arranque (`net: backend rtl8169`).
+Tras el 4-way, `on_wifi_connected()` llama `attach_now()` (no-op con `NIC_REAL`) y sale en
+`if n.backend != Wifi { return; }` — smoltcp sigue en ethernet DOWN; no hay lease WiFi.
+
+**Bloqueante TSF:** `iwl_rx_mpdu_sync_times` solo corría con `assoc_pending_beacon`; tras
+`wait_assoc_beacon` el flag se apaga sin leer TSF/GP2 del descriptor v1. Todos los beacons
+post-assoc muestran `tsf=0 gp2=0`.
+
+### Corrección aplicada (kernel en árbol, reflash pendiente)
+
+1. **`on_wifi_connected`:** si `wifi_authorized()`, sustituir `NicDev::LxWifi` + MAC iwl,
+   `backend=Wifi`, reset DHCP y log `net: wifi asociada — solicitando DHCP…`.
+2. **Beacon BSSID:** sync TSF/GP2 en cada beacon (respetar `IWL_RX_MPDU_PHY_TSF_OVERLOAD`;
+   fallback TSF en offset 24 del frame 802.11).
+3. **`parse_tim_ie`:** log TIM solo al primer beacon o si cambian tsf/dtim (no ×553).
+
+Hostcheck: `./scripts/l6-iwl-fw-hostcheck.sh` **OK** (incl. `test_beacon_sync_descriptor`).
+
+Criterio de validación en placa (tras reflash):
+
+- `net: backend lx-wifi` tras connect; `net: wifi asociada — solicitando DHCP…`.
+- `net: dhcp …` con MAC iwl (no confundir con `net: dhcp` del arranque rtl8169).
+- Una línea `beacon TIM … tsf≠0` o `gp2≠0`; fatlog sin inundación TIM.
+
+```bash
+cargo xtask flash-usb-live /dev/sda --yes --only kernel
+```

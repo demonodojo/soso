@@ -603,12 +603,65 @@ pub fn convert_with_options<R: Read + Seek>(
             NO_TOKEN
         };
         let eos = gguf.meta_u32("tokenizer.ggml.eos_token_id").unwrap_or(NO_TOKEN);
+        let (merges, sueltas) = merges_del_gguf(&gguf, &pieces);
+        if !merges.is_empty() {
+            println!(
+                "gguf2som: {} fusiones BPE guardadas{}",
+                merges.len(),
+                if sueltas > 0 {
+                    format!(" ({sueltas} descartadas: un lado no está en el vocabulario)")
+                } else {
+                    String::new()
+                }
+            );
+        } else if gguf.meta.contains_key("tokenizer.ggml.merges") {
+            println!("gguf2som: AVISO el GGUF trae fusiones pero ninguna se pudo resolver");
+        } else {
+            println!(
+                "gguf2som: AVISO este GGUF no trae fusiones BPE; la segmentación \
+                 será aproximada para vocabularios byte-level"
+            );
+        }
         out.write(
             TOKENIZER_FILE,
-            &VocabTokenizer::serialize(&pieces, bos, eos),
+            &VocabTokenizer::serialize_con_merges(&pieces, bos, eos, &merges),
         )?;
     }
     Ok(())
+}
+
+/// Fusiones BPE del GGUF, traducidas a índices del vocabulario.
+///
+/// El GGUF las guarda como texto `"izquierda derecha"` en orden de rango. Se
+/// convierten a `(u32, u32)` porque en un vocabulario de 151 k piezas repetir
+/// el texto de cada lado multiplica por seis el tamaño del `tokenizer.som`.
+///
+/// Una fusión cuyo lado no esté en el vocabulario no se puede aplicar: se
+/// descarta y se cuenta, para que el convertidor lo diga en vez de dejar una
+/// tabla con agujeros silenciosos.
+fn merges_del_gguf(gguf: &GgufFile, pieces: &[String]) -> (Vec<(u32, u32)>, usize) {
+    let crudas = match gguf.meta.get("tokenizer.ggml.merges") {
+        Some(MetaValue::StrArray(v)) => v,
+        _ => return (Vec::new(), 0),
+    };
+    let mut indice: BTreeMap<&str, u32> = BTreeMap::new();
+    for (i, p) in pieces.iter().enumerate() {
+        indice.entry(p.as_str()).or_insert(i as u32);
+    }
+    let mut fuera = Vec::with_capacity(crudas.len());
+    let mut sueltas = 0;
+    for linea in crudas {
+        // El separador es el primer espacio: las piezas traen el suyo como `Ġ`.
+        let Some((izq, der)) = linea.split_once(' ') else {
+            sueltas += 1;
+            continue;
+        };
+        match (indice.get(izq), indice.get(der)) {
+            (Some(a), Some(b)) => fuera.push((*a, *b)),
+            _ => sueltas += 1,
+        }
+    }
+    (fuera, sueltas)
 }
 
 fn gguf_has_layer_part(gguf: &GgufFile, layer: u32, part: &str) -> bool {
@@ -1241,6 +1294,49 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use crate::io::std_file::File as IoFile;
+
+    /// Las fusiones del GGUF son texto; en el `.som` van como índices.
+    #[test]
+    fn las_fusiones_se_traducen_a_indices() {
+        let piezas: Vec<String> = ["Ġ", "Res", "pon", "de", "ponde"]
+            .iter()
+            .map(|s| String::from(*s))
+            .collect();
+        let mut meta = BTreeMap::new();
+        meta.insert(
+            String::from("tokenizer.ggml.merges"),
+            MetaValue::StrArray(
+                [
+                    "pon de",    // (2,3) → existe
+                    "Res ponde", // (1,4) → existe
+                    "Res falta", // el lado derecho no está en el vocabulario
+                    "sinseparador",
+                ]
+                .iter()
+                .map(|s| String::from(*s))
+                .collect(),
+            ),
+        );
+        let gguf = GgufFile { meta, tensors: BTreeMap::new(), data_offset: 0 };
+
+        let (merges, sueltas) = merges_del_gguf(&gguf, &piezas);
+        assert_eq!(merges, vec![(2, 3), (1, 4)], "orden de rango conservado");
+        assert_eq!(sueltas, 2, "las que no se pueden resolver se cuentan");
+    }
+
+    /// Un GGUF sin fusiones no inventa ninguna: el modelo se convierte igual y
+    /// el tokenizer queda como estaba.
+    #[test]
+    fn sin_fusiones_no_se_inventa_nada() {
+        let gguf = GgufFile {
+            meta: BTreeMap::new(),
+            tensors: BTreeMap::new(),
+            data_offset: 0,
+        };
+        let (merges, sueltas) = merges_del_gguf(&gguf, &[String::from("a")]);
+        assert!(merges.is_empty());
+        assert_eq!(sueltas, 0);
+    }
 
     #[test]
     fn f16_conversion() {

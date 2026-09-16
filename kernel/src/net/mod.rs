@@ -316,16 +316,39 @@ pub fn init() {
     attach_now();
 }
 
-/// Tras asociar WiFi: reinicia DHCP y habilita el cliente.
+/// Tras asociar WiFi: sustituye ethernet por LxWifi si hace falta y pide DHCP.
 #[cfg(feature = "lxdde")]
 pub fn on_wifi_connected() {
-    attach_now();
     let Some(net) = NET.get() else {
+        attach_now();
         return;
     };
     let mut n = net.lock();
-    if n.backend != BackendKind::Wifi {
-        return;
+    if crate::lxdde::wifi_authorized() {
+        let Some(mac) = crate::lxdde::wifi_mac() else {
+            return;
+        };
+        if n.backend != BackendKind::Wifi || n.mac != mac {
+            n.dev = NicDev::LxWifi(device::LxWifiDev);
+            n.mac = mac;
+            n.backend = BackendKind::Wifi;
+            n.iface
+                .set_hardware_addr(EthernetAddress(mac).into());
+            n.configured = false;
+            clear_ipv4_config(&mut n.iface);
+            NIC_REAL.store(true, core::sync::atomic::Ordering::Relaxed);
+            println!("net: backend lx-wifi (Intel AX211/AX200)");
+        }
+    } else if n.backend != BackendKind::Wifi {
+        drop(n);
+        attach_now();
+        let Some(net) = NET.get() else {
+            return;
+        };
+        n = net.lock();
+        if n.backend != BackendKind::Wifi {
+            return;
+        }
     }
     n.configured = false;
     n.dhcp_enabled = true;

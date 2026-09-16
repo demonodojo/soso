@@ -1043,6 +1043,51 @@ static int run_assoc_case(int expect_tlc, int expect_lq)
     return 0;
 }
 
+static int test_beacon_sync_descriptor(void)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t pkt[128];
+    struct iwl_rx_mpdu_desc *desc = (struct iwl_rx_mpdu_desc *)pkt;
+    uint8_t *frame;
+    uint64_t tsf;
+    uint32_t gp2;
+
+    memset(&iwl, 0, sizeof(iwl));
+    memset(pkt, 0, sizeof(pkt));
+    desc->mpdu_len = 64;
+    desc->phy_info = 0;
+    desc->v1.gp2_on_air_rise = 0x78563412u;
+    desc->v1.tsf_on_air_rise = 0xEFCDAB9078563412ULL;
+    frame = pkt + IWL_RX_DESC_SIZE_V1;
+    frame[0] = (uint8_t)IEEE80211_STYPE_BEACON;
+    memcpy(frame + 16, (const uint8_t[]){0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, 6);
+
+    iwl_rx_mpdu_beacon_sync(pkt, (int)sizeof(pkt), 0, frame, 64, &tsf, &gp2);
+    if (gp2 != 0x78563412u || tsf != 0xEFCDAB9078563412ULL) {
+        fprintf(stderr, "beacon sync v1: tsf=%llu gp2=%u\n",
+                (unsigned long long)tsf, (unsigned)gp2);
+        return 1;
+    }
+
+    desc->phy_info = IWL_RX_MPDU_PHY_TSF_OVERLOAD;
+    desc->v1.tsf_on_air_rise = 0;
+    frame[24] = 0x88;
+    frame[25] = 0x77;
+    frame[26] = 0x66;
+    frame[27] = 0x55;
+    frame[28] = 0x44;
+    frame[29] = 0x33;
+    frame[30] = 0x22;
+    frame[31] = 0x11;
+    iwl_rx_mpdu_beacon_sync(pkt, (int)sizeof(pkt), 0, frame, 64, &tsf, &gp2);
+    if (tsf != 0x1122334455667788ULL) {
+        fprintf(stderr, "beacon sync TSF_OVERLOAD: tsf=%llu\n",
+                (unsigned long long)tsf);
+        return 1;
+    }
+    return 0;
+}
+
 static int test_beacon_tsf_zero(void)
 {
     struct iwl_ax211_priv iwl;
@@ -1172,6 +1217,10 @@ int main(void)
     if (run_assoc_case(0, 1) != 0)
         return 1;
     puts("OK: assoc legacy — LQ_CMD + SCD v3 + SESSION_PROT");
+
+    if (test_beacon_sync_descriptor() != 0)
+        return 1;
+    puts("OK: beacon sync v1 descriptor + TSF_OVERLOAD → cuerpo 802.11");
 
     if (test_beacon_tsf_zero() != 0)
         return 1;

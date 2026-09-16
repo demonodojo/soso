@@ -1425,7 +1425,7 @@
       "title": "Llevar las fusiones BPE al formato .som y al convertidor",
       "milestone": "SI-1",
       "kind": "Implementación host + formato",
-      "status": "pending",
+      "status": "done",
       "depends_on": [],
       "origin": "T03",
       "entry_conditions": [
@@ -1445,6 +1445,14 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa."
+      },
+      "tracking": {
+        "updated_at": "2026-09-16",
+        "base": "cfe3c4452",
+        "summary": "docs/self-improvement/seguimiento/T52.md",
+        "evidence": "target/self-improvement/tasks/T52/resultado.md",
+        "blocker": null,
+        "next_step": "T53 usa las fusiones para segmentar; criterio: 5/5 fixtures iguales"
       }
     },
     {

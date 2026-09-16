@@ -1222,6 +1222,9 @@ typedef char iwl_rx_mpdu_v3_channel_off[
 #define IWL_RX_MPDU_STATUS_SEC_CCM     0x0200u
 #define IWL_RX_MPDU_STATUS_DECRYPTED   (1u << 11)
 
+/* fw/api/rx.h — TSF del descriptor no es válido; usar cuerpo 802.11 @24. */
+#define IWL_RX_MPDU_PHY_TSF_OVERLOAD   (1u << 8)
+
 #define ETH_P_EAPOL                    0x888eu
 /* MTU Ethernet que anuncia smoltcp: la conversión y la cola TX tienen que
  * admitirlo entero, no recortarlo a 450 bytes. */
@@ -1326,10 +1329,42 @@ static inline void iwl_rx_mpdu_v1_energy(const uint8_t *data, int len,
     *b = desc->v1.energy_b;
 }
 
-static inline void iwl_rx_mpdu_sync_times(const uint8_t *data, int len, int gen3,
-                                          uint64_t *tsf, uint32_t *gp2)
+static inline uint64_t iwl_le64_to_cpu(uint64_t v)
+{
+    return v;
+}
+
+static inline uint32_t iwl_le32_to_cpu(uint32_t v)
+{
+    return v;
+}
+
+static inline uint16_t iwl_le16_to_cpu(uint16_t v)
+{
+    return v;
+}
+
+static inline uint64_t iwl_beacon_tsf_from_frame(const uint8_t *frame, int flen)
+{
+    if (!frame || flen < 32)
+        return 0;
+    return (uint64_t)frame[24] |
+           ((uint64_t)frame[25] << 8) |
+           ((uint64_t)frame[26] << 16) |
+           ((uint64_t)frame[27] << 24) |
+           ((uint64_t)frame[28] << 32) |
+           ((uint64_t)frame[29] << 40) |
+           ((uint64_t)frame[30] << 48) |
+           ((uint64_t)frame[31] << 56);
+}
+
+/* Linux mvm/rxmq.c: GP2 siempre del descriptor; TSF salvo TSF_OVERLOAD. */
+static inline void iwl_rx_mpdu_beacon_sync(const uint8_t *data, int len, int gen3,
+                                           const uint8_t *frame, int flen,
+                                           uint64_t *tsf, uint32_t *gp2)
 {
     const struct iwl_rx_mpdu_desc *desc;
+    uint16_t phy_info;
 
     if (!tsf || !gp2)
         return;
@@ -1341,14 +1376,22 @@ static inline void iwl_rx_mpdu_sync_times(const uint8_t *data, int len, int gen3
         if (len < (int)IWL_RX_DESC_SIZE_V3)
             return;
         desc = (const struct iwl_rx_mpdu_desc *)data;
-        *tsf = desc->v3.tsf_on_air_rise;
-        *gp2 = desc->v3.gp2_on_air_rise;
+        phy_info = iwl_le16_to_cpu(desc->phy_info);
+        *gp2 = iwl_le32_to_cpu(desc->v3.gp2_on_air_rise);
+        if (phy_info & IWL_RX_MPDU_PHY_TSF_OVERLOAD)
+            *tsf = iwl_beacon_tsf_from_frame(frame, flen);
+        else
+            *tsf = iwl_le64_to_cpu(desc->v3.tsf_on_air_rise);
     } else {
         if (len < (int)IWL_RX_DESC_SIZE_V1)
             return;
         desc = (const struct iwl_rx_mpdu_desc *)data;
-        *tsf = desc->v1.tsf_on_air_rise;
-        *gp2 = desc->v1.gp2_on_air_rise;
+        phy_info = iwl_le16_to_cpu(desc->phy_info);
+        *gp2 = iwl_le32_to_cpu(desc->v1.gp2_on_air_rise);
+        if (phy_info & IWL_RX_MPDU_PHY_TSF_OVERLOAD)
+            *tsf = iwl_beacon_tsf_from_frame(frame, flen);
+        else
+            *tsf = iwl_le64_to_cpu(desc->v1.tsf_on_air_rise);
     }
 }
 

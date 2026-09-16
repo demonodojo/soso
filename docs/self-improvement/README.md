@@ -10,9 +10,10 @@ de implementación se declara realizada por crear estas fichas.
 **[T01](T01-base.md), [T02](T02-banco.md) y [T03](T03-perfil-modelo.md) están
 completadas** (15–16 de septiembre de 2026; resúmenes en
 [seguimiento/](seguimiento/)). T03 encontró que el tokenizer de soso **no
-reproduce la segmentación oficial del modelo** y dejó dos fichas previas a T06:
-**[T52](T52-tokenizer-merges.md)** y **[T53](T53-tokenizer-bpe.md)**; el perfil
-del modelo está en [modelo.md](modelo.md). Para completar la ejecución
+reproduce la segmentación oficial del modelo** y dejó dos fichas previas a T06;
+el perfil del modelo está en [modelo.md](modelo.md). **[T52](T52-tokenizer-merges.md)
+está completada** (el `.som` ya lleva las fusiones BPE); la siguiente es
+**[T53](T53-tokenizer-bpe.md)**, que las usa para segmentar. Para completar la ejecución
 guest ya puede empezar **[T45](T45-cli-capacidades.md)**; T46 también está
 habilitada. Los cierres históricos de T01/T02 no acreditan aún su validación
 nativa completa.
@@ -32,7 +33,7 @@ varias fichas modifican los mismos manifiestos o módulos de integración.
 ### Prompt listo para copiar
 
 ```text
-Implementa docs/self-improvement/T52-tokenizer-merges.md.
+Implementa docs/self-improvement/T53-tokenizer-bpe.md.
 
 Lee las secciones del CONTRATO.md que indique la ficha, NATIVO.md y las instrucciones
 locales aplicables. Revisa el estado del checkout antes de editar.
@@ -148,7 +149,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T49](T49-pruebas-guest.md) | Ejecutar casos compartidos desde un runner nativo | SI-0 / SI-4 | T45, T46, T47, T48 | Pendiente |
 | [T50](T50-cambios-contenido.md) | Aplicar y exportar cambios sin Git | SI-4 | T01, T46 | Pendiente |
 | [T51](T51-aceptacion-circuito-nativo.md) | Acreditar todo el circuito de automejora dentro de soso | SI-7 | T29, T35, T37, T41, T42, T43, T49, T50 | Pendiente |
-| [T52](T52-tokenizer-merges.md) | Llevar las fusiones BPE al formato .som y al convertidor | SI-1 | — (deriva de T03) | Pendiente |
+| [T52](T52-tokenizer-merges.md) | Llevar las fusiones BPE al formato .som y al convertidor | SI-1 | — (deriva de T03) | Completada |
 | [T53](T53-tokenizer-bpe.md) | Segmentar por fusiones BPE en soso-llm-core | SI-1 | T52 (deriva de T03) | Pendiente |
 
 ## Condiciones adicionales de entrada

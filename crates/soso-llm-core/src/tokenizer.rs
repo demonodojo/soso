@@ -25,6 +25,20 @@ const GPT2_NL: char = '\u{010A}'; // Ċ ← \\n
 const GPT2_TAB: char = '\u{0109}'; // ĉ ← \\t
 const GPT2_CR: char = '\u{010D}'; // ċ ← \\r
 
+/// Cómo segmenta este vocabulario.
+///
+/// Hasta ahora se deducía contando marcas de espacio, que acierta casi siempre
+/// y no sirve para decidir el **algoritmo**: un vocabulario GPT-2/Qwen2 es BPE
+/// por rangos de fusión, y sin esa tabla no se puede reproducir su
+/// segmentación (ficha T52).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Segmentacion {
+    /// Pieza más larga que encaje. Es lo que hace falta para SentencePiece.
+    PiezaMasLarga,
+    /// BPE byte-level: símbolos iniciales y fusiones en orden de rango.
+    BpeByteLevel,
+}
+
 pub struct VocabTokenizer {
     pieces: Vec<String>,
     lookup: BTreeMap<String, u32>,
@@ -33,6 +47,17 @@ pub struct VocabTokenizer {
     space_mark: char,
     /// SentencePiece pone la marca al empezar el texto; GPT-2/Qwen2 no.
     leading_space: bool,
+    /// Qué algoritmo pide este vocabulario.
+    segmentacion: Segmentacion,
+    /// Fusiones BPE en orden de rango: `(izquierda, derecha)` como índices de
+    /// `pieces`. Vacío = el modelo no las trajo.
+    ///
+    /// Se guardan como índices y no como cadenas a propósito: el vocabulario de
+    /// Qwen2.5 tiene ~151 k piezas y ~151 k fusiones; repetir el texto de cada
+    /// lado multiplicaría por seis el tamaño del `tokenizer.som`.
+    merges: Vec<(u32, u32)>,
+    /// Rango de cada par de piezas, para no buscar en lista en cada fusión.
+    rango: BTreeMap<(u32, u32), u32>,
     pub bos: u32,
     pub eos: u32,
 }
@@ -124,7 +149,21 @@ impl Tokenizer {
 }
 
 impl VocabTokenizer {
+    /// Vocabulario sin fusiones: segmenta por pieza más larga, como siempre.
     pub fn new(pieces: Vec<String>, bos: u32, eos: u32) -> Self {
+        Self::con_merges(pieces, bos, eos, Vec::new())
+    }
+
+    /// Vocabulario con su tabla de fusiones BPE.
+    ///
+    /// Que haya fusiones es lo que decide el algoritmo: un vocabulario que las
+    /// trae es BPE por rangos, y uno que no, se segmenta como antes.
+    pub fn con_merges(
+        pieces: Vec<String>,
+        bos: u32,
+        eos: u32,
+        merges: Vec<(u32, u32)>,
+    ) -> Self {
         let mut lookup = BTreeMap::new();
         let mut max_piece_len = 1;
         let mut n_sp = 0u32;
@@ -140,19 +179,80 @@ impl VocabTokenizer {
             }
         }
         let gpt2 = n_gpt2 > n_sp;
+        let mut rango = BTreeMap::new();
+        for (i, par) in merges.iter().enumerate() {
+            rango.entry(*par).or_insert(i as u32);
+        }
+        let segmentacion = if merges.is_empty() {
+            Segmentacion::PiezaMasLarga
+        } else {
+            Segmentacion::BpeByteLevel
+        };
         Self {
             pieces,
             lookup,
             max_piece_len,
             space_mark: if gpt2 { SPACE_GPT2 } else { SPACE_SP },
             leading_space: !gpt2,
+            segmentacion,
+            merges,
+            rango,
             bos,
             eos,
         }
     }
 
-    /// Cuerpo: bos u32 | eos u32 | count u32 | (len u32 | bytes)*
+    /// Qué algoritmo pide este vocabulario.
+    pub fn segmentacion(&self) -> Segmentacion {
+        self.segmentacion
+    }
+
+    /// Fusiones en orden de rango, como índices de piezas.
+    pub fn merges(&self) -> &[(u32, u32)] {
+        &self.merges
+    }
+
+    /// Rango de un par, si es una fusión conocida. Menor = se aplica antes.
+    pub fn rango_de(&self, izquierda: u32, derecha: u32) -> Option<u32> {
+        self.rango.get(&(izquierda, derecha)).copied()
+    }
+
+    /// Índice de una pieza exacta.
+    pub fn id_de_pieza(&self, pieza: &str) -> Option<u32> {
+        self.lookup.get(pieza).copied()
+    }
+
+    /// v1 — bos u32 | eos u32 | count u32 | (len u32 | bytes)*
+    ///
+    /// Se sigue emitiendo v1 cuando no hay fusiones: un `tokenizer.som` de un
+    /// modelo SentencePiece no tiene por qué cambiar de versión, y así los
+    /// modelos ya convertidos siguen siendo byte a byte los mismos.
     pub fn serialize(pieces: &[String], bos: u32, eos: u32) -> Vec<u8> {
+        pack_som(&Self::cuerpo(pieces, bos, eos), 1, CACHE_ALIGN)
+    }
+
+    /// v2 — lo de v1, y después: n_merges u32 | (izquierda u32, derecha u32)*
+    ///
+    /// Los lados son índices de `pieces`, en orden de rango.
+    pub fn serialize_con_merges(
+        pieces: &[String],
+        bos: u32,
+        eos: u32,
+        merges: &[(u32, u32)],
+    ) -> Vec<u8> {
+        if merges.is_empty() {
+            return Self::serialize(pieces, bos, eos);
+        }
+        let mut body = Self::cuerpo(pieces, bos, eos);
+        body.extend_from_slice(&(merges.len() as u32).to_le_bytes());
+        for (a, b) in merges {
+            body.extend_from_slice(&a.to_le_bytes());
+            body.extend_from_slice(&b.to_le_bytes());
+        }
+        pack_som(&body, 2, CACHE_ALIGN)
+    }
+
+    fn cuerpo(pieces: &[String], bos: u32, eos: u32) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&bos.to_le_bytes());
         body.extend_from_slice(&eos.to_le_bytes());
@@ -161,11 +261,16 @@ impl VocabTokenizer {
             body.extend_from_slice(&(p.len() as u32).to_le_bytes());
             body.extend_from_slice(p.as_bytes());
         }
-        pack_som(&body, 1, CACHE_ALIGN)
+        body
     }
 
+    /// Lee v1 y v2. Un `tokenizer.som` antiguo sigue cargando y se comporta
+    /// igual que antes: sin fusiones, segmentación por pieza más larga.
     pub fn parse(data: &[u8]) -> Result<Self, ()> {
-        let (_version, body) = parse_som(data)?;
+        let (version, body) = parse_som(data)?;
+        if version > 2 {
+            return Err(());
+        }
         let mut r = Reader::new(body);
         let bos = r.u32()?;
         let eos = r.u32()?;
@@ -178,7 +283,22 @@ impl VocabTokenizer {
                 core::str::from_utf8(bytes).map_err(|_| ())?,
             ));
         }
-        Ok(Self::new(pieces, bos, eos))
+        let mut merges = Vec::new();
+        if version >= 2 {
+            let n = r.u32()? as usize;
+            merges.reserve(n);
+            for _ in 0..n {
+                let a = r.u32()?;
+                let b = r.u32()?;
+                if a as usize >= pieces.len() || b as usize >= pieces.len() {
+                    // Una fusión que apunta fuera del vocabulario no se puede
+                    // aplicar: mejor rechazar el archivo que segmentar a medias.
+                    return Err(());
+                }
+                merges.push((a, b));
+            }
+        }
+        Ok(Self::con_merges(pieces, bos, eos, merges))
     }
 
     /// Greedy longest-match. SentencePiece: espacios → `▁` y `▁` inicial.
@@ -354,6 +474,75 @@ mod tests {
         .map(|s| String::from(*s))
         .collect();
         Tokenizer::Vocab(VocabTokenizer::new(pieces, 0, 1))
+    }
+
+    /// Piezas al estilo GPT-2/Qwen2 con sus fusiones, para el formato v2.
+    fn vocab_bpe() -> (Vec<String>, Vec<(u32, u32)>) {
+        let pieces: Vec<String> = ["<|endoftext|>", "R", "e", "s", "Res", "ponde", "pon", "de"]
+            .iter()
+            .map(|s| String::from(*s))
+            .collect();
+        // (R,e)->? no existe; se usan pares que sí están en el vocabulario.
+        let merges = alloc::vec![(6u32, 7u32), (1, 2)];
+        (pieces, merges)
+    }
+
+    #[test]
+    fn el_formato_v2_conserva_las_fusiones() {
+        let (pieces, merges) = vocab_bpe();
+        let datos = VocabTokenizer::serialize_con_merges(&pieces, 0, 0, &merges);
+        let leido = VocabTokenizer::parse(&datos).expect("v2 debe parsearse");
+        assert_eq!(leido.merges(), merges.as_slice());
+        assert_eq!(leido.segmentacion(), Segmentacion::BpeByteLevel);
+        // El rango es la posición: menor se aplica antes.
+        assert_eq!(leido.rango_de(6, 7), Some(0));
+        assert_eq!(leido.rango_de(1, 2), Some(1));
+        assert_eq!(leido.rango_de(2, 1), None);
+        assert_eq!(leido.id_de_pieza("Res"), Some(4));
+    }
+
+    /// Un `tokenizer.som` de los de antes tiene que seguir cargando igual.
+    #[test]
+    fn el_formato_v1_sigue_cargando_sin_fusiones() {
+        let pieces: Vec<String> = ["<s>", "</s>", "\u{2581}hola"]
+            .iter()
+            .map(|s| String::from(*s))
+            .collect();
+        let datos = VocabTokenizer::serialize(&pieces, 0, 1);
+        let leido = VocabTokenizer::parse(&datos).expect("v1 debe seguir parseándose");
+        assert!(leido.merges().is_empty());
+        assert_eq!(leido.segmentacion(), Segmentacion::PiezaMasLarga);
+        assert_eq!(leido.bos, 0);
+        assert_eq!(leido.eos, 1);
+    }
+
+    /// Sin fusiones se sigue emitiendo v1: los modelos ya convertidos no
+    /// cambian ni un byte por este cambio de formato.
+    #[test]
+    fn sin_fusiones_el_archivo_no_cambia() {
+        let pieces: Vec<String> = ["a", "b"].iter().map(|s| String::from(*s)).collect();
+        let v1 = VocabTokenizer::serialize(&pieces, 0, 1);
+        let igual = VocabTokenizer::serialize_con_merges(&pieces, 0, 1, &[]);
+        assert_eq!(v1, igual);
+    }
+
+    /// Una fusión que apunta fuera del vocabulario no se puede aplicar: el
+    /// archivo se rechaza en vez de segmentar a medias.
+    #[test]
+    fn una_fusion_fuera_del_vocabulario_invalida_el_archivo() {
+        let (pieces, _) = vocab_bpe();
+        let malas = alloc::vec![(0u32, 99u32)];
+        let datos = VocabTokenizer::serialize_con_merges(&pieces, 0, 0, &malas);
+        assert!(VocabTokenizer::parse(&datos).is_err());
+    }
+
+    #[test]
+    fn una_version_futura_se_rechaza() {
+        let (pieces, merges) = vocab_bpe();
+        let mut datos = VocabTokenizer::serialize_con_merges(&pieces, 0, 0, &merges);
+        // El contenedor .som guarda la versión en los bytes 12..16.
+        datos[12..16].copy_from_slice(&9u32.to_le_bytes());
+        assert!(VocabTokenizer::parse(&datos).is_err());
     }
 
     #[test]

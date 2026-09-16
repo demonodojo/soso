@@ -1,6 +1,6 @@
 # T52 — Llevar las fusiones BPE al formato `.som` y al convertidor
 
-**Hito:** SI-1 · **Tipo:** Implementación host + formato · **Estado:** pendiente.
+**Hito:** SI-1 · **Tipo:** Implementación host + formato · **Estado:** completada (16 de septiembre de 2026; resumen en [seguimiento/T52.md](seguimiento/T52.md)).
 **Origen:** derivada de [T03](T03-perfil-modelo.md) (perfil del modelo).
 **Dependencias:** ninguna; puede empezarse ya.
 **Bloquea:** [T53](T53-tokenizer-bpe.md) y, con ella, [T06](T06-render-chat.md).
@@ -72,9 +72,9 @@ El GGUF de la familia trae `tokenizer.ggml.merges` (lista de pares). El
 
 ## Cierre y condición de bloqueo
 
-- [ ] Formato versionado y compatible hacia atrás.
-- [ ] Convertidor guardando fusiones, con aviso cuando no las haya.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Formato versionado y compatible hacia atrás.
+- [x] Convertidor guardando fusiones, con aviso cuando no las haya.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
 
 Si el GGUF de la familia elegida no publicase las fusiones, esta ficha entrega
 el formato y registra la entrada que falta; no se inventan fusiones a partir

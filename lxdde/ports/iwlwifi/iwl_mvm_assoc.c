@@ -70,11 +70,21 @@ static void parse_tim_ie(struct iwl_ax211_priv *iwl, const uint8_t *frame, int l
             if (frame[pos + 3])
                 iwl->dtim_period = frame[pos + 3];
             iwl->sync_beacon_seen = 1;
-            lx_printk("iwl_mvm: beacon TIM dtim_count=%u dtim_period=%u bi=%u tsf=%llu gp2=%u\n",
-                      (unsigned)iwl->sync_dtim_count, (unsigned)iwl->dtim_period,
-                      (unsigned)iwl->beacon_int,
-                      (unsigned long long)iwl->sync_tsf,
-                      (unsigned)iwl->sync_device_ts);
+            if (iwl->tim_log_dtim_count != iwl->sync_dtim_count ||
+                iwl->tim_log_dtim_period != iwl->dtim_period ||
+                iwl->tim_log_tsf != iwl->sync_tsf ||
+                iwl->tim_log_gp2 != iwl->sync_device_ts) {
+                lx_printk("iwl_mvm: beacon TIM dtim_count=%u dtim_period=%u bi=%u tsf=%llu gp2=%u\n",
+                          (unsigned)iwl->sync_dtim_count,
+                          (unsigned)iwl->dtim_period,
+                          (unsigned)iwl->beacon_int,
+                          (unsigned long long)iwl->sync_tsf,
+                          (unsigned)iwl->sync_device_ts);
+                iwl->tim_log_dtim_count = iwl->sync_dtim_count;
+                iwl->tim_log_dtim_period = iwl->dtim_period;
+                iwl->tim_log_tsf = iwl->sync_tsf;
+                iwl->tim_log_gp2 = iwl->sync_device_ts;
+            }
             break;
         }
         pos += 2 + elen;
@@ -485,16 +495,20 @@ static int iwl_mvm_wait_assoc_beacon(struct iwl_ax211_priv *iwl)
     for (i = 0; i < IWL_MLME_BEACON_WAIT_ITERS; i++) {
         unsigned p;
 
-        if (iwl->dtim_period && iwl->sync_beacon_seen)
+        if (iwl->dtim_period && iwl->sync_beacon_seen &&
+            (iwl->sync_tsf || iwl->sync_device_ts))
             return 0;
         for (p = 0; p < 4; p++)
             iwl_trans_poll(iwl);
-        if (iwl->dtim_period && iwl->sync_beacon_seen)
+        if (iwl->dtim_period && iwl->sync_beacon_seen &&
+            (iwl->sync_tsf || iwl->sync_device_ts))
             return 0;
         lx_mdelay(20);
     }
-    lx_printk("iwl_mvm: beacon/DTIM timeout (dtim=%u sync=%u)\n",
-              (unsigned)iwl->dtim_period, (unsigned)iwl->sync_beacon_seen);
+    lx_printk("iwl_mvm: beacon/DTIM timeout (dtim=%u sync=%u tsf=%llu gp2=%u)\n",
+              (unsigned)iwl->dtim_period, (unsigned)iwl->sync_beacon_seen,
+              (unsigned long long)iwl->sync_tsf,
+              (unsigned)iwl->sync_device_ts);
     return -1;
 }
 
@@ -574,6 +588,10 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
     iwl->sync_dtim_count = 0;
     iwl->sync_beacon_seen = 0;
     iwl->assoc_pending_beacon = 0;
+    iwl->tim_log_dtim_count = 0;
+    iwl->tim_log_dtim_period = 0;
+    iwl->tim_log_tsf = 0;
+    iwl->tim_log_gp2 = 0;
     strncpy(iwl->ssid, ssid, IWL_AX211_SSID_MAX);
     iwl->ssid[IWL_AX211_SSID_MAX] = '\0';
     memcpy(iwl->bssid, bssid, 6);
