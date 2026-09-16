@@ -103,6 +103,8 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
 | `drivers/pci.rs` | ECAM + MSI-X. `devices()` = foto cacheada del bus (usar esta); `enumerate()` reescribe BARs, sólo en arranque |
 | `drivers/espfat.rs` | Ficheros 8.3 contiguos en la ESP live (SOSOLOG, SOSODRV, SOSOBOOT, SOSOWIFI, SOSOUPD, SOSOKRN, SOSOKRN.MET) |
+| `drivers/logfs.rs` | **Logs nativos en sosofs** (U1): `/var/log/{kernel,aplicaciones,actualizaciones}.log`. Rings con **cursor monotónico** (`crates/soso-log-core`) — `len()` se satura y por eso `fatlog::poll` dejaba de detectar bytes nuevos con el ring lleno. Lote copiado bajo el lock del ring y escrito **fuera** de él; E/S envuelta en `run_without_capture` (un error del escritor en el ring que se está vaciando es una escritura recursiva); `try_lock` del escritor, nunca desde IRQ; rotación 1 MiB × 3; fallo de FS → suspende y reintenta a los 30 s. Panic/muerte de proceso: un intento y **sólo** si `vfs::fs_disponible()` (forzar el lock del FS parte el árbol CoW) |
+| `drivers/otalog.rs` | Ring de eventos OTA del kernel (`otalog!`), alimentado por `updslot` |
 | `xtask/src/sosolog.rs` | Host: monta la ESP del USB, imprime `SOSOLOG.TXT` y desmonta (`cargo xtask sosolog`) |
 | `fs/` | sosofs (blk0) + sosomfs (blk1); VFS enruta `/models/*` |
 | `vfs.rs` | Router: lectura/escritura sosofs; modelos → sosomfs (read-only) |

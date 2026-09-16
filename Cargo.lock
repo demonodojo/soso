@@ -813,6 +813,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "soso-log-core"
+version = "0.1.0"
+
+[[package]]
 name = "soso-resize-core"
 version = "0.1.0"
 dependencies = [

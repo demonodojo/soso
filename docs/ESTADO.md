@@ -76,10 +76,14 @@ son validación física y siguen abiertos.
 
 ## OTA — límites publicados
 
-Plan de evolución: [Actualizaciones de soso instalado y logs en sosofs](PLAN-ACTUALIZACIONES.md)
-(2026-09-16, U0–U8 pendientes): recuperación conjunta de kernel/rootfs,
-actualización por WiFi y nuevas instalaciones sin `SOSOLOG.TXT` en la ESP.
-El plan todavía no modifica los límites actuales descritos a continuación.
+Plan de evolución: [Actualizaciones de soso instalado y logs en sosofs](PLAN-ACTUALIZACIONES.md).
+Pendiente: recuperación conjunta de kernel/rootfs, actualización por WiFi y
+nuevas instalaciones sin `SOSOLOG.TXT` en la ESP (U2–U8).
+
+Cerradas a 2026-09-16: **U0**, el [contrato de la transacción](U0-CONTRATO-ACTUALIZACION.md),
+sólo banco host y sin conectar al arranque; y **U1**, los logs nativos de
+`/var/log`, que sí están en funcionamiento y sobreviven al reinicio.
+Los límites de OTA descritos a continuación **no** han cambiado todavía.
 
 - **Kernel:** recuperación verificable con `SOSOKRN.MET` + backup en
   `SOSOKRN.BIN` (cortes en fase applying/backup). Imágenes antiguas sin

@@ -177,6 +177,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // (`lx_request_firmware` → `/lib/firmware/…`) y sin montar falla en fw_loading.
     println!("boot: fs");
     fs::init();
+    // Logs nativos en cuanto hay sosofs y **antes** del bring-up de firmware:
+    // lo capturado en RAM desde el primer `println!` se vuelca aquí, que es lo
+    // que hace útil el fichero cuando el arranque siguiente no llega tan lejos.
+    drivers::logfs::init();
     #[cfg(feature = "drv-live-disk")]
     drivers::fatlog::flush_checkpoint();
     println!("boot: ethernet");
@@ -301,5 +305,7 @@ fn panic(info: &PanicInfo) -> ! {
     };
     #[cfg(feature = "drv-live-disk")]
     let _ = drivers::fatlog::flush();
+    // Un solo intento, y sólo si nadie tiene el FS tomado: ver `logfs`.
+    drivers::logfs::drenar_si_seguro();
     qemu::exit(qemu::ExitCode::Failed);
 }

@@ -54,6 +54,7 @@ sosomodel = { path = "../crates/sosomodel" }
 block-dev = { path = "../crates/block-dev" }
 gptdisk = { path = "../crates/gptdisk" }
 soso-resize-core = { path = "../crates/soso-resize-core" }
+soso-log-core = { path = "../crates/soso-log-core" }
 soso-abi = { path = "../crates/soso-abi" }
 soso-hw = { path = "../crates/soso-hw" }
 soso-wpa2 = { path = "../crates/soso-wpa2" }

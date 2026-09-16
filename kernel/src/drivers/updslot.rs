@@ -16,10 +16,14 @@ pub fn init() {
         Some(slot) => {
             MAILBOX.call_once(|| Some(slot));
             crate::println!("updslot: SOSOUPD.TXT LBA {}", slot.data_lba);
+            crate::otalog!("hueco SOSOUPD.TXT disponible LBA {}", slot.data_lba);
         }
-        None => crate::println!(
-            "updslot: SOSOUPD.TXT no encontrado; actualizaciones de kernel desactivadas"
-        ),
+        None => {
+            crate::println!(
+                "updslot: SOSOUPD.TXT no encontrado; actualizaciones de kernel desactivadas"
+            );
+            crate::otalog!("hueco SOSOUPD.TXT ausente: OTA de kernel desactivada");
+        }
     }
     let ksize = abi::UPD_KERNEL_SLOT_SIZE as usize;
     match espfat::locate(b"SOSOKRN ", b"BIN", ksize) {
@@ -69,6 +73,16 @@ fn max_size(which: u64) -> Result<usize, i64> {
     })
 }
 
+/// Nombre del hueco para el registro de actualizaciones.
+fn nombre(which: u64) -> &'static str {
+    match which {
+        abi::UPD_WHICH_MAILBOX => "SOSOUPD.TXT",
+        abi::UPD_WHICH_KERNEL => "SOSOKRN.BIN",
+        abi::UPD_WHICH_META => "SOSOKRN.MET",
+        _ => "?",
+    }
+}
+
 pub fn write(which: u64, offset: u64, data: &[u8]) -> Result<(), i64> {
     if data.is_empty() {
         return Ok(());
@@ -82,7 +96,7 @@ pub fn write(which: u64, offset: u64, data: &[u8]) -> Result<(), i64> {
     if end > cap {
         return Err(-abi::EINVAL);
     }
-    crate::drivers::logbuf::run_without_capture(|| {
+    let ok = crate::drivers::logbuf::run_without_capture(|| {
         let mut lba = slot.data_lba + offset / SECTOR as u64;
         for chunk in data.chunks(SECTOR) {
             if espfat::write(lba, chunk).is_err() {
@@ -91,9 +105,25 @@ pub fn write(which: u64, offset: u64, data: &[u8]) -> Result<(), i64> {
             lba += 1;
         }
         true
-    })
-    .then_some(())
-    .ok_or(-abi::EIO)
+    });
+    // Los huecos pequeños son las decisiones durables de la actualización, así
+    // que se registran enteros. El kernel llega en miles de trozos: sólo se
+    // anotan el principio, el final y un hito cada 16 MiB, para no ahogar el
+    // registro con lo mismo repetido.
+    const HITO: u64 = 16 * 1024 * 1024;
+    let hito = offset == 0
+        || end == cap
+        || offset / HITO != (offset + data.len() as u64 - 1) / HITO;
+    if which != abi::UPD_WHICH_KERNEL || hito || !ok {
+        crate::otalog!(
+            "hueco {} escritura off={} len={} {}",
+            nombre(which),
+            offset,
+            data.len(),
+            if ok { "ok" } else { "FALLO" }
+        );
+    }
+    ok.then_some(()).ok_or(-abi::EIO)
 }
 
 pub fn read(which: u64, offset: u64, out: &mut [u8]) -> Result<usize, i64> {

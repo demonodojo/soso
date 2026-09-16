@@ -166,3 +166,42 @@ pub fn wall_secs() -> u64 {
 pub fn monotonic_ns() -> u64 {
     crate::arch::tsc::now_ns()
 }
+
+/// ¿Hubo hora CMOS válida al arrancar? Sin ella `wall_secs` devuelve uptime,
+/// que no es una fecha: quien la vaya a escribir en un log tiene que saberlo.
+pub fn epoch_valido() -> bool {
+    EPOCH_AT_BOOT.load(Ordering::Relaxed) > 0
+}
+
+/// Fecha UTC en ISO 8601, o `None` si el reloj no es utilizable. Una fecha
+/// inventada en un log es peor que no tener fecha.
+pub fn fecha_iso() -> Option<alloc::string::String> {
+    if !epoch_valido() {
+        return None;
+    }
+    let secs = wall_secs();
+    let dias = secs / 86400;
+    let resto = secs % 86400;
+    let (y, m, d) = civil_desde_dias(dias);
+    Some(alloc::format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        resto / 3600,
+        (resto % 3600) / 60,
+        resto % 60
+    ))
+}
+
+/// Inversa de `days_since_epoch` (algoritmo civil-from-days de Hinnant).
+fn civil_desde_dias(dias: u64) -> (u64, u64, u64) {
+    let z = dias as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u64, m as u64, d as u64)
+}

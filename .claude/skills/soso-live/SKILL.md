@@ -25,9 +25,27 @@ Docs de usuario: `MANUAL-USUARIO.md`. Bring-up on-box: `docs/L5c-on-box.md`.
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
 Estado/límites OTA: [`docs/ESTADO.md`](../../docs/ESTADO.md).
 
-Plan pendiente U0–U8: [actualizaciones de instalaciones y logs en sosofs](../../../docs/PLAN-ACTUALIZACIONES.md).
+Plan U0–U8: [actualizaciones de instalaciones y logs en sosofs](../../../docs/PLAN-ACTUALIZACIONES.md).
 Incluye recuperación conjunta kernel/rootfs, transición legacy y eliminación
 de `SOSOLOG.TXT` en la ESP instalada; no tratarlo como comportamiento implementado.
+
+**U1 cerrada (2026-09-16):** logs nativos en sosofs —`/var/log/{kernel,
+aplicaciones,actualizaciones}.log`— con cabecera por arranque, rotación 1 MiB × 3
+y suspensión ante errores de FS (`kernel/src/drivers/logfs.rs`, lógica en
+`crates/soso-log-core`). `sosolog` / `SYS_FATLOG_FLUSH` y `dmesg save` persisten
+en **los dos** destinos. **Ojo:** en el live se escriben los dos a la vez, porque
+la identidad `live`/`installed` no existe hasta que U2 cree `SOSOMODE.TXT`; hasta
+entonces `fatlog` no se apaga en ninguna parte. Acreditado por
+`cargo xtask test-update` (el arranque 2 comprueba que los registros del anterior
+siguen ahí).
+
+**U0 cerrada (2026-09-16), sólo banco host:** el contrato de la transacción está
+en [U0-CONTRATO-ACTUALIZACION.md](../../../docs/U0-CONTRATO-ACTUALIZACION.md) y
+en `crates/soso-update-core/{record.rs,txn/,identity.rs,compat.rs}`. Es lógica
+`no_std` sin E/S: **no hay aplicador en el arranque**. Los ficheros ESP nuevos
+(`SOSOTXN.BIN` y `SOSOMODE.TXT`, 4 KiB cada uno, cuatro ranuras) todavía **no**
+los pre-crea `package-usb-live`; los reservan U2/U5. El buzón `SOSOUPD.TXT` y
+`SOSOKRN.MET` siguen siendo el camino real del OTA de kernel. Siguiente: U1.
 
 ## Particiones (orden real en el stick)
 

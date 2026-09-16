@@ -199,6 +199,9 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
             #[cfg(feature = "drv-gpu-nvidia")]
             crate::drivers::gpu::shutdown();
             crate::println!("halt: apagando soso");
+            // Apagado limpio: drenar lo pendiente antes de irse. El `println!`
+            // de arriba entra en el ring primero, así que queda registrado.
+            crate::drivers::logfs::drenar_todo();
             crate::qemu::exit(crate::qemu::ExitCode::Success);
         }
         abi::SYS_MMAP => sys_mmap(a1, a2, a3, a4),
@@ -1791,14 +1794,24 @@ fn sys_bootreq_read(_buf: u64, _len: u64) -> Result<u64, i64> {
     Err(-abi::ENOTSUP)
 }
 
-#[cfg(feature = "drv-live-disk")]
+/// «Persiste mi log ahora». Va a los dos destinos que haya: los logs nativos
+/// de sosofs y, si existe, `SOSOLOG.TXT` en la ESP. Basta con que uno funcione;
+/// en una instalación sin ESP montada ya no es un error.
 fn sys_fatlog_flush() -> Result<u64, i64> {
-    crate::drivers::fatlog::flush().map(|_| 0).map_err(|_| -abi::EIO)
-}
-
-#[cfg(not(feature = "drv-live-disk"))]
-fn sys_fatlog_flush() -> Result<u64, i64> {
-    Err(-abi::ENOTSUP)
+    let mut alguno = false;
+    if crate::drivers::logfs::activo() {
+        crate::drivers::logfs::drenar_todo();
+        alguno = true;
+    }
+    #[cfg(feature = "drv-live-disk")]
+    if crate::drivers::fatlog::flush().is_ok() {
+        alguno = true;
+    }
+    if alguno {
+        Ok(0)
+    } else {
+        Err(-abi::EIO)
+    }
 }
 
 fn sys_gpu_alloc(size: u64, domain: u64) -> Result<u64, i64> {

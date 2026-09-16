@@ -1,0 +1,12 @@
+[package]
+name = "soso-log-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Rings de log con cursor monotónico y política de rotación (kernel + host)"
+
+[features]
+default = []
+std = []
+
+[dependencies]

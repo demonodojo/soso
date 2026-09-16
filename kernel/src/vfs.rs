@@ -97,6 +97,19 @@ fn parse_models(path: &str) -> Result<(&str, &str), SosoFsError> {
     }
 }
 
+/// ¿Está libre el candado del FS?
+///
+/// Para caminos de emergencia (panic, muerte de un proceso) que sólo pueden
+/// intentar escribir si nadie lo tiene tomado: forzar su desbloqueo dejaría el
+/// árbol CoW a medio commit, que es peor que perder la cola del log. Es una
+/// sonda best-effort: otro core puede tomarlo justo después.
+pub fn fs_disponible() -> bool {
+    match crate::fs::FS.get() {
+        Some(fs) => fs.try_lock().is_some(),
+        None => false,
+    }
+}
+
 pub fn stat_inode(ino: u64) -> Result<InodeItem, SosoFsError> {
     if !is_sosomfs(ino) {
         let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;

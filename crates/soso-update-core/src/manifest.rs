@@ -26,6 +26,9 @@ pub struct Manifest {
     pub kernel_size: u64,
     pub pack_hash: String,
     pub pack_size: u64,
+    /// Contrato de compatibilidad (U0). `None` en manifiestos anteriores a U3:
+    /// se conservan legibles, pero el cliente los rechaza al comprobar.
+    pub compat: Option<crate::compat::Compat>,
     pub files: Vec<FileEntry>,
 }
 
@@ -116,6 +119,11 @@ impl Manifest {
             return Err(ParseError::MissingField);
         }
         let version = semver::parse(&version_raw).ok_or(ParseError::BadLine)?;
+        let compat = match crate::compat::Compat::parse(text) {
+            Some(Ok(c)) => Some(c),
+            Some(Err(_)) => return Err(ParseError::BadLine),
+            None => None,
+        };
         Ok(Self {
             version,
             version_raw,
@@ -125,6 +133,7 @@ impl Manifest {
             kernel_size,
             pack_hash,
             pack_size,
+            compat,
             files,
         })
     }
@@ -135,6 +144,9 @@ impl Manifest {
         out.push_str(&format!("version={}\n", self.version_raw));
         out.push_str(&format!("build={}\n", self.build));
         out.push_str(&format!("fecha={}\n", self.fecha));
+        if let Some(c) = &self.compat {
+            out.push_str(&c.format());
+        }
         out.push_str(&format!(
             "kernel {} {}\n",
             self.kernel_hash, self.kernel_size

@@ -198,6 +198,16 @@ fn cmd_aplicar(args: &[String]) -> u8 {
         "/etc/actualiza.estado",
         &format!("APLICANDO {}\n", man.version_raw),
     );
+    // fd 3: el relato de la actualización queda en el log persistente, no sólo
+    // en la consola de quien lanzó el comando.
+    libsoso::logln!(
+        "actualiza: aplicando {} sobre {}.{}.{} (build {})",
+        man.version_raw,
+        actual.major,
+        actual.minor,
+        actual.patch,
+        man.build
+    );
 
     // Sólo los ficheros que de verdad cambian. El resto del pack ni se pide.
     let pendientes: Vec<FileEntry> = man
@@ -257,6 +267,7 @@ fn cmd_aplicar(args: &[String]) -> u8 {
         return 1;
     }
     let _ = sys::unlink("/etc/actualiza.estado");
+    libsoso::logln!("actualiza: {} preparada; falta reiniciar", man.version_raw);
     println!("soso-update: listo — reinicia para arrancar soso {}", man.version_raw);
     0
 }
@@ -278,6 +289,7 @@ fn apply_span(opts: &Opts, pendientes: &[FileEntry], span: &Span) -> Result<(), 
             let _ = sys::mkdir(parent);
         }
         if let Err((fase, e)) = escribir(&path, data) {
+            libsoso::logln!("actualiza: {path}: {fase} falló ({e})");
             println!("soso-update: {path}: {fase} falló ({e})");
             return Err("no pude escribir el fichero");
         }
@@ -304,9 +316,11 @@ fn cmd_revertir() -> u8 {
     let payload = Mailbox::format_revertir();
     let r = sys::upd_write(UPD_WHICH_MAILBOX, 0, &payload);
     if r < 0 {
+        libsoso::logln!("actualiza: REVERTIR no se pudo registrar ({r})");
         println!("soso-update: no pude escribir buzón ({r})");
         return 1;
     }
+    libsoso::logln!("actualiza: REVERTIR registrado; falta reiniciar");
     println!("soso-update: REVERTIR registrado — reinicia para restaurar el kernel");
     0
 }

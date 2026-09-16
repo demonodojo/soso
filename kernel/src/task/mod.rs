@@ -1082,6 +1082,7 @@ fn flush_fatlog_on_task_death() {
     };
     #[cfg(feature = "drv-live-disk")]
     let _ = crate::drivers::fatlog::flush();
+    crate::drivers::logfs::drenar_si_seguro();
 }
 
 /// Mata el proceso actual por una falta (page fault, GP...).
@@ -1206,6 +1207,7 @@ extern "C" fn schedule_inner() -> ! {
             crate::net::poll();
             #[cfg(feature = "drv-live-disk")]
             crate::drivers::fatlog::poll();
+            crate::drivers::logfs::poll();
             #[cfg(feature = "lxdde")]
             crate::lxdde::poll();
         }

@@ -587,13 +587,15 @@ fn ejecutar_sosolog() {
     if r < 0 {
         println!("sosh: sosolog: {}", errno_str(r));
     } else {
-        println!("sosh: volcado a SOSOLOG.TXT");
+        // El kernel vuelca a los destinos que haya: /var/log siempre que sosofs
+        // esté montado, y además SOSOLOG.TXT si se arrancó de un live.
+        println!("sosh: log volcado (/var/log y, en live, SOSOLOG.TXT)");
     }
 }
 
 fn ayuda() {
     println!("builtins: exit [código], help, cd, pwd, wifi, ask, voz, sosolog");
-    println!("sosolog:  volcar el log de consola a SOSOLOG.TXT (ESP del USB live)");
+    println!("sosolog:  persistir el log ahora: /var/log/*.log y, en live, SOSOLOG.TXT");
     println!("wifi:     wifi scan | status | connect <ssid> [psk]");
     println!("ask:      ask <pregunta>  — el texto va literal al modelo");
     println!("          ask             — modo interactivo (Ctrl-D o «salir»)");

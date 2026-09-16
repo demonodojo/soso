@@ -5,16 +5,22 @@
 
 extern crate alloc;
 
+pub mod compat;
 pub mod hash;
+pub mod identity;
 pub mod kernel_apply;
 pub mod kernel_meta;
 pub mod mailbox;
 pub mod manifest;
 pub mod pack;
 pub mod plan;
+pub mod record;
 pub mod semver;
+pub mod txn;
 
-pub use hash::{hex_sha256, sha256, Hash256, Hasher};
+pub use compat::{Compat, CompatError, Equipo};
+pub use hash::{hex_of, hex_sha256, sha256, Hash256, Hasher};
+pub use identity::{resolver as resolver_identidad, BootMode, Identidad, ModeRecord};
 pub use kernel_apply::{
     after_interrupt, plan_apply, restore_from_slot, verify_staged_kernel, AfterInterrupt,
     ApplyError, ApplyPlan,
@@ -28,7 +34,17 @@ pub use plan::{plan_bytes, plan_spans, Span, GAP_MAX, SPAN_MAX};
 pub use pack::{pack_rootfs, pack_rootfs_con};
 #[cfg(feature = "std")]
 pub use pack::PackWriter;
+pub use record::{RecordError, SLOTS, SLOT_SIZE};
 pub use semver::{cmp as semver_cmp, parse as parse_semver, SemVer};
+pub use txn::bootrec::{BootRecord, Decision};
+pub use txn::journal::{Accion, Entrada, Journal, Progreso};
+pub use txn::reconcile::{reconcile, EstadoEsp, EstadoJournal, Motivo, Recuperacion};
+pub use txn::{preflight, Capacidad, Necesidad, TxnEvent, TxnId, TxnState};
+
+/// Registro de arranque de la transacción (`SOSOTXN.BIN`, U0).
+pub const UPD_BOOTREC_SIZE: usize = txn::bootrec::BOOTREC_SIZE;
+/// Identidad live/instalado (`SOSOMODE.TXT`, U0).
+pub const UPD_MODE_SIZE: usize = identity::MODE_SIZE;
 
 /// Tamaño del buzón `SOSOUPD.TXT` en la ESP.
 pub const UPD_MAILBOX_SIZE: usize = 4096;

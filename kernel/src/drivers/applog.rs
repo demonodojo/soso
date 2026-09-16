@@ -6,7 +6,7 @@
 use core::fmt::Write;
 use spin::Mutex;
 
-use super::logbuf::Ring;
+use super::logbuf::{Lectura, Ring};
 
 const CAP: usize = 64 * 1024;
 
@@ -67,4 +67,19 @@ impl Write for SliceWriter<'_> {
 /// Copia una ventana del ring (offset 0 = byte más antiguo).
 pub fn copy_from(offset: usize, out: &mut [u8]) -> usize {
     BUF.lock().copy_from(offset, out)
+}
+
+/// Bytes anexados desde el arranque (no se satura al llenarse el ring).
+pub fn escritos() -> u64 {
+    BUF.lock().escritos()
+}
+
+pub fn cursor_minimo() -> u64 {
+    BUF.lock().cursor_minimo()
+}
+
+/// Copia a partir de un cursor absoluto. El lote se copia aquí, bajo el lock,
+/// y el llamante escribe a disco **después** de soltarlo.
+pub fn leer_desde(cursor: u64, out: &mut [u8]) -> Lectura {
+    BUF.lock().leer_desde(cursor, out)
 }

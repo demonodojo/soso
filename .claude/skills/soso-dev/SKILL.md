@@ -291,6 +291,7 @@ cargo xtask test-usb
 
 # OTA recovery (host, sin QEMU):
 cargo test -p soso-update-core --features std --tests
+cargo test -p soso-log-core --features std   # rings, rotación y fallos de FS (U1)
 
 # Matriz hardware A8 (tras arranque en placa con SOSOLOG/SOSODRV):
 # El agente SÍ actualiza docs/hw-matrix.json (no pide sudo). No marques

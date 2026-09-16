@@ -27,6 +27,8 @@ pub mod hw_inv;
 pub mod live_disk;
 pub mod applog;
 pub mod logbuf;
+pub mod logfs;
+pub mod otalog;
 #[cfg(feature = "drv-usb")]
 pub mod usb_storage;
 #[cfg(feature = "drv-hda")]

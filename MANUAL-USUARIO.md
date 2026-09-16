@@ -349,6 +349,9 @@ El comando **`log`** vuelca ese ring. No mezcla con la consola, `dmesg` ni
 `SOSOLOG.TXT`. En código userspace puedes usar la macro **`logln!`** de `libsoso`
 (una línea por llamada).
 
+El ring es de RAM, pero **ya no se pierde al reiniciar**: el kernel lo va
+persistiendo en `/var/log/aplicaciones.log` (ver abajo).
+
 Redirigir `3>fichero` escribe **bytes crudos** (sin sello), igual que stdout hacia
 un fichero: el entorno decide dónde van los registros sin recompilar.
 
@@ -818,7 +821,8 @@ Comandos principales:
 |---|---|
 | `help` | Lista todos los comandos |
 | `dmesg` | Log de consola paginado (espacio/enter = más, `q` = salir); el FB solo muestra ~40 líneas |
-| `dmesg save` | Volcar el log a `SOSOLOG.TXT` en la ESP del USB live (también se hace solo cada ~2 s) |
+| `dmesg save` | Persistir el log ahora: `/var/log/kernel.log` y, en live, `SOSOLOG.TXT` (también se hace solo cada ~2 s) |
+| `logfs` | Estado de los logs de `/var/log`: bytes escritos, perdidos y fallos por flujo |
 | `ls [ruta]` | Listar directorio (por defecto `/`) |
 | `cat <ruta>` | Mostrar un fichero (`cat -` lee stdin, para pipelines) |
 | `stat <ruta>` | Metadatos de un fichero o directorio |
@@ -894,6 +898,46 @@ cargo xtask fit-drivers /ruta/a/SOSODRV.TXT
 # o actualizar solo la ESP del pendrive:
 cargo xtask fit-drivers target/SOSODRV.TXT --esp /dev/sdX
 ```
+
+### Logs persistentes en disco (`/var/log`)
+
+Con sosofs montado, el kernel guarda tres registros dentro del sistema de
+ficheros, así que **sobreviven al reinicio** y se leen con las herramientas de
+siempre (`cat`, `grep`, `tail`) desde la consola o por SSH:
+
+| Fichero | Contenido |
+|---|---|
+| `/var/log/kernel.log` | La consola del kernel: lo mismo que `dmesg`, desde el primer mensaje del arranque |
+| `/var/log/aplicaciones.log` | Los registros de fd 3, con sello de tiempo, pid y binario |
+| `/var/log/actualizaciones.log` | Qué le hace el kernel a los huecos de actualización de la ESP |
+
+```sh
+tail /var/log/kernel.log
+grep actualiza /var/log/aplicaciones.log
+sosolog                       # persistir ahora, sin esperar
+```
+
+Cada arranque empieza con una cabecera que lo identifica, para poder separar en
+un fichero acumulado lo que pasó en cada uno:
+
+```
+=== soso 0.2.2 arranque 5056f5e969534eb3 flujo kernel.log monotónico 58021ms fecha 2026-09-16T12:03:58Z ===
+```
+
+La fecha sólo aparece si el reloj de la máquina es utilizable; sin RTC válido se
+omite en vez de inventarla. El volcado es diferido (cada ~2 s, por lotes) y
+también ocurre al apagar con `halt`. Cada fichero crece hasta 1 MiB y conserva
+tres rotaciones (`kernel.log.1`, `.2`, `.3`), unos 4 MiB por registro.
+
+Dos límites que conviene conocer:
+
+- Si el kernel falla **antes de montar sosofs**, esos mensajes sólo están en la
+  consola. Para esos casos está el USB live y su `SOSOLOG.TXT`.
+- Un corte brusco puede perder la cola que aún no se había volcado. Si el disco
+  se llena o da error, el registro se suspende y se reintenta más tarde: los
+  logs nunca impiden que la máquina arranque. El comando `logfs` de la
+  kernel-shell dice el estado de cada flujo, cuánto se ha escrito y cuánto se ha
+  perdido.
 
 ### Trazas persistentes en USB live (`SOSOLOG.TXT`)
 

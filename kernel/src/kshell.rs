@@ -21,6 +21,7 @@ pub fn run() -> ! {
             crate::net::poll();
             #[cfg(feature = "drv-live-disk")]
             crate::drivers::fatlog::poll();
+            crate::drivers::logfs::poll();
             let _ = crate::drivers::kbd::has_input();
             x86_64::instructions::hlt();
             continue;
@@ -53,21 +54,32 @@ fn exec(line: &str) {
 
     match cmd {
         "help" => {
-            println!("comandos: help dmesg [patrón|save] hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem io ip wifi blk blkread blkwrite pf panic halt");
+            println!("comandos: help dmesg [patrón|save] logfs hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem io ip wifi blk blkread blkwrite pf panic halt");
         }
         "dmesg" => match args.first() {
+            // `save` va al destino efectivo: sosofs si hay logs nativos, la ESP
+            // si además hay live. En una instalación sin ESP montada, decir
+            // «fatlog no activo» sería falso: el log sí se ha persistido.
             Some(&"save") => {
-                #[cfg(feature = "drv-live-disk")]
-                match crate::drivers::fatlog::flush() {
-                    Ok(()) => println!("dmesg: volcado a SOSOLOG.TXT"),
-                    Err(()) => println!("dmesg: fatlog no activo o fallo de escritura"),
+                let mut destinos = 0;
+                if crate::drivers::logfs::activo() {
+                    crate::drivers::logfs::drenar_todo();
+                    println!("dmesg: volcado a /var/log/kernel.log");
+                    destinos += 1;
                 }
-                #[cfg(not(feature = "drv-live-disk"))]
-                println!("dmesg: fatlog no disponible en esta imagen");
+                #[cfg(feature = "drv-live-disk")]
+                if crate::drivers::fatlog::flush().is_ok() {
+                    println!("dmesg: volcado a SOSOLOG.TXT");
+                    destinos += 1;
+                }
+                if destinos == 0 {
+                    println!("dmesg: sin destino persistente (ni /var/log ni ESP)");
+                }
             }
             Some(pat) => dmesg_grep(pat),
             None => dmesg_paged(),
         },
+        "logfs" => crate::drivers::logfs::resumen(),
         "hwscan" => {
             crate::drivers::registry::print_hwscan();
             #[cfg(feature = "drv-live-disk")]
@@ -341,6 +353,7 @@ fn exec(line: &str) {
         }
         "halt" => {
             println!("apagando");
+            crate::drivers::logfs::drenar_todo();
             qemu::exit(qemu::ExitCode::Success);
         }
         otro => {

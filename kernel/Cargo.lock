@@ -417,6 +417,7 @@ dependencies = [
  "smoltcp",
  "soso-abi",
  "soso-hw",
+ "soso-log-core",
  "soso-resize-core",
  "soso-wpa2",
  "sosofs",
@@ -660,6 +661,10 @@ version = "0.1.0"
 
 [[package]]
 name = "soso-hw"
+version = "0.1.0"
+
+[[package]]
+name = "soso-log-core"
 version = "0.1.0"
 
 [[package]]

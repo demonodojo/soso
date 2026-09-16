@@ -1,6 +1,8 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
-Fecha: **2026-09-16**. Estado: **plan preparado; implementación pendiente**.
+Fecha: **2026-09-16**. Estado: **U0 y U1 cerradas; U2–U8 pendientes**.
+El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md);
+todavía no está conectado al arranque, al cliente ni al instalador.
 Base de la revisión: `92531cd2d` y árbol de trabajo con cambios locales, incluidos
 WiFi, instalador y registros de aplicaciones. Esta revisión describe ese árbol;
 no acredita una release publicada ni una actualización probada en el ROG.
@@ -187,12 +189,13 @@ colateral; trasladar ese informe podrá evaluarse por separado.
 
 ## 4. Entregas y dependencias
 
-Todas las entregas están **pendientes**. U0 es el primer paso ejecutable.
+**U0 y U1 cerradas** (2026-09-16). U2–U8 siguen **pendientes**; U2 es el primer
+paso ejecutable.
 
 | ID | Depende de | Trabajo y archivos principales | Criterio de cierre |
 |---|---|---|---|
-| U0 | — | Contrato de transacción, tabla de cortes/reconciliación, identidad live/installed, formatos y compatibilidad; `soso-update-core` | Especificación y pruebas host de la máquina de estados, incluidos registros rotos, confirmación interrumpida y espacio insuficiente. |
-| U1 | U0 | Persistencia y rotación de los dos rings y eventos OTA; `logbuf`, `applog`, nuevo escritor sosofs, main/scheduler/halt/kshell | Logs tempranos y de apps sobreviven reinicio; el ring lleno sigue persistiendo; rotación y errores de FS no bloquean. |
+| U0 ✅ | — | Contrato de transacción, tabla de cortes/reconciliación, identidad live/installed, formatos y compatibilidad; `soso-update-core` | **Cerrada 2026-09-16.** [Contrato](U0-CONTRATO-ACTUALIZACION.md) y 92 pruebas host: máquina de estados, registros rotos, confirmación interrumpida y espacio insuficiente. |
+| U1 ✅ | U0 | Persistencia y rotación de los dos rings y eventos OTA; `logbuf`, `applog`, nuevo escritor sosofs, main/scheduler/halt/kshell | **Cerrada 2026-09-16.** `crates/soso-log-core` (13 pruebas host) + `kernel/src/drivers/logfs.rs`; `cargo xtask test-update` acredita que los logs tempranos y los de fd 3 sobreviven al reinicio. |
 | U2 | U1 | Finalización de instalación, modo temprano y eliminación FAT; `soso-install`, `package_live`, `install_disk`, script Linux y utilidades compartidas | Instalación NVMe arranca sin USB, no contiene `SOSOLOG.TXT`, escribe `/var/log`; live conserva su log y el clon es coherente. |
 | U3 | U0 | Contrato de release, perfil, canales, inventario y exclusiones; `release.rs`, manifest/pack y configuración | Fixtures verifican canales/precedencia, versiones y preservación; ninguna release contiene logs, claves, cachés o journal OTA. |
 | U4 | U3 | Preflight y descarga durable reanudable; `soso-update`, `net.rs`, `soso-http` | Corte de red y reinicio reanudan solo bloques pendientes verificados, con RAM acotada y sin cambiar el sistema activo. |
@@ -259,6 +262,64 @@ Actualizar `MANUAL-USUARIO.md` al implementar la UX: comandos, rutas, retención
 recuperación desde live y significado de `estado`/`revertir`. Hasta entonces,
 el manual debe seguir describiendo el comportamiento actual.
 
-**Siguiente paso: U0.** Fijar tabla de durabilidad y puente legacy antes de
-programar el nuevo aplicador; a continuación U1 para disponer de evidencia
-persistente dentro del sistema durante el resto del trabajo.
+### U0 — cerrada el 2026-09-16
+
+- **Base:** `92531cd2d` más el árbol de trabajo de esa fecha.
+- **Resultado:** contrato en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md)
+  e implementación `no_std` en `crates/soso-update-core`: `record.rs` (envoltura
+  con formato, secuencia, suma y copias por turnos), `txn/{mod,journal,bootrec,
+  reconcile}.rs` (estados, identidad por hash de manifiesto, órdenes de
+  escritura, tabla de reconciliación y `preflight` de capacidad), `identity.rs`
+  (live/installed) y `compat.rs` (arch, perfil, drivers, ABI, FS, shim/recuperador
+  mínimos, leídos del manifiesto).
+- **Comandos y evidencia:** `cargo test -p soso-update-core --features std --tests`
+  (92 pruebas, verde), `cargo build -p soso-update-core` (no_std) y
+  `cargo xtask check` (exit 0). Los bancos nuevos están en
+  `crates/soso-update-core/tests/txn_*.rs` e `identidad_compat.rs`;
+  `txn_tabla_doc.rs` falla si la tabla del documento deja de ser la que produce
+  `reconcile()`.
+- **Limitación:** es lógica pura, sin E/S. Nada de esto se ejecuta todavía en el
+  arranque: no hay aplicador, ni escritor del diario, ni huecos `SOSOTXN.BIN` y
+  `SOSOMODE.TXT` en la ESP —los reservan U2/U5—, ni emisión de las líneas de
+  compatibilidad en `xtask release` (U3, que además debe fijar la política de
+  firma; los hashes acreditan integridad, no autoría).
+- **Siguiente paso: U1.** Persistencia y rotación de los rings de log en sosofs,
+  decidiendo el destino con la identidad de la sección 9 del contrato, para
+  tener evidencia dentro del sistema durante el resto del trabajo.
+
+### U1 — cerrada el 2026-09-16
+
+- **Base:** `92531cd2d` más el árbol de trabajo de esa fecha.
+- **Resultado:** tres flujos en sosofs —`/var/log/kernel.log`,
+  `aplicaciones.log` y `actualizaciones.log`— con cabecera por arranque
+  (ID, versión, monotónico y fecha real sólo si el RTC es utilizable),
+  cursor monotónico, marca explícita de pérdidas, rotación 1 MiB × 3 y
+  suspensión con reintento ante errores de FS.
+  - Lógica pura y probable en host: [`crates/soso-log-core`](../crates/soso-log-core)
+    (`ring.rs` con cursor, `rotacion.rs`, `flujo.rs`, `texto.rs`).
+  - Kernel: [`drivers/logfs.rs`](../kernel/src/drivers/logfs.rs) (escritor),
+    [`drivers/otalog.rs`](../kernel/src/drivers/otalog.rs) (ring de eventos OTA,
+    alimentado por `updslot`), `logbuf`/`applog` migrados al ring con cursor,
+    y enganches en `main` (tras montar sosofs, antes del firmware), planificador,
+    `halt`, panic (intento único y sólo con el FS libre) y kshell (`logfs`,
+    `dmesg save` al destino efectivo).
+  - `SYS_FATLOG_FLUSH` (builtin `sosolog`) persiste ahora en **los dos**
+    destinos; en una instalación sin ESP ya no es un error.
+  - Emisores reales de fd 3: `soso-update` registra el relato de la
+    actualización, que antes sólo existía en la consola de quien la lanzaba.
+- **Comandos y evidencia:** `cargo test -p soso-log-core --features std`
+  (13 pruebas), `cargo xtask check` (exit 0) y `cargo xtask test-update`
+  (4 arranques OK). El arranque 2 comprueba, tras reiniciar, que
+  `aplicaciones.log` conserva los registros de fd 3 del arranque anterior y que
+  `kernel.log` acumula **una cabecera por arranque** con las trazas tempranas
+  (`boot: fs`), en vez de reescribirse.
+- **Limitación:** en el live se escriben **los dos** destinos (sosofs y
+  `SOSOLOG.TXT`), porque la identidad `live`/`installed` de U0 todavía no se
+  escribe en la ESP: `soso-install` no crea `SOSOMODE.TXT` hasta U2, y sin él
+  la identidad se resuelve como heredada. Apagar `fatlog` por modo instalado y
+  retirar `SOSOLOG.TXT` es justamente el trabajo de U2/U6. Tampoco se ha
+  probado el disco lleno ni la rotación dentro de QEMU —sólo en banco host—,
+  ni un lector SSH concurrente: son casos de la matriz de U7.
+- **Siguiente paso: U2.** Finalización de la instalación: escribir la identidad
+  `installed` en la ESP del destino, preparar `/var/log` y el estado inicial OTA,
+  y reservar los huecos `SOSOTXN.BIN` y `SOSOMODE.TXT` que el contrato U0 exige.

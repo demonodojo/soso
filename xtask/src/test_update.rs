@@ -149,6 +149,7 @@ fn preparar_release_prueba(root: &Path) {
         kernel_size: kernel_bytes.len() as u64,
         pack_hash: hex_sha256(&pack_blob),
         pack_size: pack_blob.len() as u64,
+        compat: None,
         files,
     };
     std::fs::write(rel_dir.join("manifest.txt"), manifest.format()).expect("manifest");
@@ -181,7 +182,9 @@ fn fase_aplicar(
     let salida = ssh_guion_hasta(
         key,
         SSH_PORT,
-        "soso-update aplicar --local /var/actualiza-prueba --forzar\nhalt\n",
+        // `init log` deja un registro por fd 3 y `sosolog` fuerza el volcado a
+        // /var/log: así el arranque 2 puede comprobar que sobrevivieron.
+        "soso-update aplicar --local /var/actualiza-prueba --forzar\ninit log marca-u1-aplicar\nsosolog\nhalt\n",
         Duration::from_secs(180),
         "soso-update: listo",
     )?;
@@ -220,7 +223,13 @@ fn fase_comprobar_version(
         // El `cat` va primero: la última línea del guion se pierde a veces al
         // cerrar la sesión SSH, y la salida de `estado` sirve de barrera.
         // `halt` apaga el guest y SSH se cuelga: cortar al ver `rootfs:`.
-        "cat /etc/actualiza-marca.txt\nsoso-update estado\nhalt\n",
+        // Los `cat`/`grep` de los logs van **antes** de `estado` por el mismo
+        // motivo que la marca: la lectura se corta al ver `rootfs:`. Y se usa
+        // `grep` en kernel.log porque el fichero acumulado son decenas de KiB
+        // que no hacen falta enteros por la sesión SSH.
+        // Sin comillas: el tokenizador de sosh no las interpreta y «grep "a b"»
+        // acaba buscando el fichero `b"`.
+        "cat /etc/actualiza-marca.txt\ncat /var/log/aplicaciones.log\ngrep flujo /var/log/kernel.log\ngrep boot: /var/log/kernel.log\nsoso-update estado\nhalt\n",
         Duration::from_secs(120),
         &format!("rootfs: {ver}"),
     )?;
@@ -237,6 +246,24 @@ fn fase_comprobar_version(
     // disco de arranque debe reconocerse como tal por DISK_KIND_USB.
     if !salida.contains("arranque: USB live") {
         return Err(format!("estado no reconoce el medio de arranque USB: {salida:?}"));
+    }
+    // U1: los logs nativos sobreviven al reinicio. El registro de fd 3 lo
+    // escribió el arranque anterior; si `/var/log` no persistiera, aquí no
+    // quedaría rastro de él.
+    if !salida.contains("marca-u1-aplicar") {
+        return Err(format!(
+            "el registro de fd 3 del arranque anterior no sobrevivió en /var/log/aplicaciones.log: {salida:?}"
+        ));
+    }
+    // Y el log de kernel acumula una cabecera por arranque, no se reescribe.
+    let cabeceras = salida.matches("flujo kernel.log").count();
+    if cabeceras < 2 {
+        return Err(format!(
+            "kernel.log debería tener una cabecera por arranque, encontré {cabeceras}: {salida:?}"
+        ));
+    }
+    if !salida.contains("boot: fs") {
+        return Err(format!("kernel.log no conserva las trazas tempranas: {salida:?}"));
     }
     Ok(())
 }

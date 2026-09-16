@@ -8,55 +8,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-/// Ring de bytes de capacidad fija (sobrescribe lo más antiguo).
-pub(crate) struct Ring<const CAP: usize> {
-    data: [u8; CAP],
-    /// Siguiente índice de escritura (módulo CAP).
-    pos: usize,
-    /// Bytes válidos (como máximo CAP).
-    len: usize,
-}
-
-impl<const CAP: usize> Ring<CAP> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            data: [0; CAP],
-            pos: 0,
-            len: 0,
-        }
-    }
-
-    pub(crate) fn append(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.data[self.pos] = b;
-            self.pos = (self.pos + 1) % CAP;
-            if self.len < CAP {
-                self.len += 1;
-            }
-        }
-    }
-
-    fn start(&self) -> usize {
-        (self.pos + CAP - self.len) % CAP
-    }
-
-    pub(crate) fn byte_len(&self) -> usize {
-        self.len
-    }
-
-    pub(crate) fn copy_from(&self, offset: usize, out: &mut [u8]) -> usize {
-        if offset >= self.len || out.is_empty() {
-            return 0;
-        }
-        let n = out.len().min(self.len - offset);
-        let mut idx = (self.start() + offset) % CAP;
-        for slot in out.iter_mut().take(n) {
-            *slot = self.data[idx];
-            idx = (idx + 1) % CAP;
-        }
-        n
-    }
-}
+pub use soso_log_core::ring::{Lectura, Ring};
 
 /// ~256 KiB: mismo tamaño que SOSOLOG.TXT en la ESP.
 const CAP: usize = 256 * 1024;
@@ -82,6 +34,23 @@ pub fn append(bytes: &[u8]) {
 
 pub fn len() -> usize {
     BUF.lock().byte_len()
+}
+
+/// Bytes anexados desde el arranque. A diferencia de `len()`, **no se satura**:
+/// es lo que permite a `logfs` saber que el ring sigue creciendo cuando ya está
+/// lleno (ver `docs/PLAN-ACTUALIZACIONES.md`, U1).
+pub fn escritos() -> u64 {
+    BUF.lock().escritos()
+}
+
+/// Cursor del byte más antiguo que todavía está en el ring.
+pub fn cursor_minimo() -> u64 {
+    BUF.lock().cursor_minimo()
+}
+
+/// Copia a partir de un cursor absoluto, informando de lo sobrescrito.
+pub fn leer_desde(cursor: u64, out: &mut [u8]) -> Lectura {
+    with_read(|log| log.leer_desde(cursor, out))
 }
 
 /// Copia el ring completo en `dest` bajo un solo lock.

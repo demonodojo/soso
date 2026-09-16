@@ -51,6 +51,7 @@ pub fn run(args: &[String]) {
         kernel_size: kernel_bytes.len() as u64,
         pack_hash: pack_hash.clone(),
         pack_size: pack_blob.len() as u64,
+        compat: None,
         files,
     };
     let manifest_text = manifest.format();

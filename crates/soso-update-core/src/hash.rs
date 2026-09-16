@@ -79,3 +79,8 @@ mod hex {
 }
 
 pub use hex::decode as decode_hex_sha256;
+
+/// Hex minúsculas de un hash ya calculado.
+pub fn hex_of(h: Hash256) -> alloc::string::String {
+    hex::encode(h)
+}
