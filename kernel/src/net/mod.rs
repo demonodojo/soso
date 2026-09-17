@@ -5,6 +5,7 @@
 mod device;
 pub mod dns;
 mod loopback;
+mod ping;
 pub mod ssh;
 mod tcp_user;
 #[cfg(feature = "lxdde")]
@@ -757,6 +758,8 @@ pub fn tcp_accept_wake(listener_slot: usize) -> Result<Option<usize>, i64> {
     tcp_accept(listener_slot)?;
     Ok(None)
 }
+
+pub use ping::ping;
 
 /// Foto de la IPv4 de la NIC activa. La pila sin adaptador no cuenta como presente.
 pub fn info() -> soso_abi::NetInfo {

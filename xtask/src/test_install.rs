@@ -116,6 +116,21 @@ pub fn run() {
         }
     }
 
+    // --- 3b. la ESP del destino quedó finalizada ---------------------------
+    for (nombre, r) in comprobar_esp_instalada(&target) {
+        let ok = r.is_ok();
+        marca(
+            &match r {
+                Ok(()) => nombre.clone(),
+                Err(e) => format!("{nombre} — {e}"),
+            },
+            ok,
+        );
+        if !ok {
+            fallos += 1;
+        }
+    }
+
     // --- 4. arrancar solo del disco instalado ------------------------------
     let serial3 = dir.join("boot3.log");
     match fase_arranque_solo(&ovmf_code, &vars, &target, &serial3, &key) {
@@ -247,13 +262,21 @@ fn fase_arranque_solo(
              ¿falta /etc/soso-hw en el clon?"
         ));
     }
+    // U2: el destino tiene que saber que es una instalación, no un live.
+    if !log.contains("modo: installed") {
+        return Err("el destino no se declara instalación (¿sin SOSOMODE.TXT?)".into());
+    }
+    if !log.contains("fatlog: instalación declarada") {
+        return Err("el log FAT sigue activo en una instalación".into());
+    }
     // Sin USB conectado (a propósito, esta fase sólo lleva el NVMe): antes del
     // fix de `boot_source()`, ningún disco quedaba marcado DISK_FLAG_BOOT y
     // `soso-update estado` no podía decir de dónde había arrancado.
     let salida = ssh_guion_hasta(
         key,
         SSH_PORT,
-        "soso-update estado\nhalt\n",
+        // Los `grep` van antes de `estado`, que es la barrera de corte.
+        "grep flujo /var/log/kernel.log\nsoso-update estado\nhalt\n",
         Duration::from_secs(120),
         "arranque: disco instalado",
     )?;
@@ -262,7 +285,83 @@ fn fase_arranque_solo(
             "estado no reconoce el NVMe como disco de arranque: {salida:?}"
         ));
     }
+    // U2: sin ESP donde escribir el log, `/var/log` es el único destino.
+    if !salida.contains("flujo kernel.log") {
+        return Err(format!(
+            "la instalación no escribe /var/log/kernel.log: {salida:?}"
+        ));
+    }
     Ok(())
+}
+
+/// U2: la ESP del destino queda finalizada — sin `SOSOLOG.TXT` y con la
+/// identidad declarada. Se comprueba sobre la imagen, desde el host, con la
+/// misma lógica que usa el kernel.
+fn comprobar_esp_instalada(target: &Path) -> Vec<(String, Result<(), String>)> {
+    use espfat_core::{FatError, Sectores, Volumen};
+
+    struct Img {
+        f: std::fs::File,
+        base: u64,
+    }
+    impl Sectores for Img {
+        fn leer(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FatError> {
+            use std::io::{Read, Seek, SeekFrom};
+            self.f
+                .seek(SeekFrom::Start(self.base + lba * espfat_core::SECTOR as u64))
+                .map_err(|_| FatError::Io)?;
+            self.f.read_exact(buf).map_err(|_| FatError::Io)
+        }
+        fn escribir(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), FatError> {
+            Err(FatError::Io)
+        }
+    }
+
+    let abrir = || -> Result<Volumen<Img>, String> {
+        let p1 = gpt_part_lba(target, 1).ok_or("sin partición 1 en el destino")?;
+        let f = std::fs::File::open(target).map_err(|e| e.to_string())?;
+        Volumen::abrir(Img { f, base: p1 * 512 }).map_err(|e| format!("{e:?}"))
+    };
+
+    let mut out = Vec::new();
+    match abrir() {
+        Err(e) => {
+            out.push(("ESP del destino legible".into(), Err(e)));
+            return out;
+        }
+        Ok(mut vol) => {
+            out.push((
+                "ESP instalada: sin SOSOLOG.TXT".into(),
+                if vol.existe(b"SOSOLOG ", b"TXT") {
+                    Err("el log del live sigue en la ESP del destino".into())
+                } else {
+                    Ok(())
+                },
+            ));
+            let modo = vol
+                .localizar(b"SOSOMODE", b"TXT", soso_update_core::UPD_MODE_SIZE)
+                .map_err(|e| format!("{e:?}"))
+                .and_then(|slot| {
+                    let mut buf = vec![0u8; soso_update_core::UPD_MODE_SIZE];
+                    for (i, trozo) in buf.chunks_mut(espfat_core::SECTOR).enumerate() {
+                        vol.dispositivo()
+                            .leer(slot.data_lba + i as u64, trozo)
+                            .map_err(|e| format!("{e:?}"))?;
+                    }
+                    match soso_update_core::resolver_identidad(Some(&buf), "") {
+                        soso_update_core::Identidad::Explicita(r)
+                        | soso_update_core::Identidad::Ajena(r)
+                            if r.modo == soso_update_core::BootMode::Installed =>
+                        {
+                            Ok(())
+                        }
+                        otra => Err(format!("identidad inesperada: {otra:?}")),
+                    }
+                });
+            out.push(("ESP instalada: modo installed declarado".into(), modo));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------- QEMU

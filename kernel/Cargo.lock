@@ -309,6 +309,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "espfat-core"
+version = "0.1.0"
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -406,6 +410,7 @@ dependencies = [
  "ed25519-dalek",
  "embedded-bitmap-fonts",
  "embedded-graphics",
+ "espfat-core",
  "font8x8",
  "getrandom",
  "gptdisk",
@@ -419,6 +424,7 @@ dependencies = [
  "soso-hw",
  "soso-log-core",
  "soso-resize-core",
+ "soso-update-core",
  "soso-wpa2",
  "sosofs",
  "sosomfs",
@@ -672,6 +678,14 @@ name = "soso-resize-core"
 version = "0.1.0"
 dependencies = [
  "gptdisk",
+]
+
+[[package]]
+name = "soso-update-core"
+version = "0.1.0"
+dependencies = [
+ "crc",
+ "sha2",
 ]
 
 [[package]]

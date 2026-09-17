@@ -7,6 +7,7 @@
 //! comprobaciones previas de capacidad. No hace E/S: el kernel, el shim, el
 //! cliente y los bancos host le dan los bytes ya leídos.
 
+pub mod aplicador;
 pub mod bootrec;
 pub mod journal;
 pub mod reconcile;
@@ -267,6 +268,13 @@ pub struct Capacidad {
 pub const RESERVA_LOGS: u64 = 12 * 1024 * 1024;
 pub const RESERVA_RECUPERACION: u64 = 8 * 1024 * 1024;
 
+/// Tamaño de `SOSOKRN.MET`. Está aquí y no en `kernel_meta` porque ese módulo
+/// no se compila en el kernel; la aserción de abajo impide que se separen.
+pub const META_KERNEL_MIN: usize = 512;
+
+#[cfg(feature = "full")]
+const _: () = assert!(META_KERNEL_MIN == crate::kernel_meta::KERNEL_META_SIZE);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreflightError {
     SinEspacio { necesita: u64, libre: u64 },
@@ -298,7 +306,7 @@ pub fn preflight(n: &Necesidad, c: &Capacidad) -> Result<(), PreflightError> {
     if c.registro_arranque < crate::record::SLOT_SIZE * crate::record::SLOTS {
         return Err(PreflightError::RegistroNoCabe { size: c.registro_arranque });
     }
-    if c.meta_kernel < crate::kernel_meta::KERNEL_META_SIZE {
+    if c.meta_kernel < META_KERNEL_MIN {
         return Err(PreflightError::RegistroNoCabe { size: c.meta_kernel });
     }
     Ok(())

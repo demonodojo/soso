@@ -245,6 +245,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "espfat-core"
+version = "0.1.0"
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -844,6 +848,7 @@ dependencies = [
 name = "soso-update-core"
 version = "0.1.0"
 dependencies = [
+ "crc",
  "sha2",
 ]
 
@@ -1249,6 +1254,7 @@ version = "0.1.0"
 dependencies = [
  "bootloader",
  "chrono",
+ "espfat-core",
  "serde",
  "serde_json",
  "sha2",

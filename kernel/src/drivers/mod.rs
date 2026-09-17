@@ -25,10 +25,14 @@ pub mod fatlog;
 pub mod hw_inv;
 #[cfg(feature = "drv-live-disk")]
 pub mod live_disk;
+#[cfg(feature = "drv-live-disk")]
+pub mod modo;
 pub mod applog;
 pub mod logbuf;
 pub mod logfs;
 pub mod otalog;
+#[cfg(feature = "drv-live-disk")]
+pub mod txnaplica;
 #[cfg(feature = "drv-usb")]
 pub mod usb_storage;
 #[cfg(feature = "drv-hda")]

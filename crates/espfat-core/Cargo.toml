@@ -1,0 +1,12 @@
+[package]
+name = "espfat-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Operaciones sobre ficheros 8.3 de la raíz de una ESP FAT16/FAT32, sin montarla"
+
+[features]
+default = []
+std = []
+
+[dependencies]

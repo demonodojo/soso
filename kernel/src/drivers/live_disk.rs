@@ -25,6 +25,10 @@ pub struct LivePart {
     backend: LiveBackend,
     first_lba: u64,
     sectors: u64,
+    /// GUID único de la partición (bytes 16..32 de la entrada GPT). Identifica
+    /// **esta** ESP: `soso-install` genera GUID nuevos al clonar, así que sirve
+    /// para distinguir el original de la copia.
+    guid: gptdisk::Guid,
 }
 
 /// Índices en la tabla GPT del live (particiones 1=ESP, 2=root, 3=modelos, 4=install).
@@ -160,10 +164,13 @@ fn parse_entry(table: &[u8], index: usize, backend: LiveBackend) -> Option<LiveP
     if last < first {
         return None;
     }
+    let mut guid = [0u8; 16];
+    guid.copy_from_slice(ent.get(16..32)?);
     Some(LivePart {
         backend,
         first_lba: first,
         sectors: last - first + 1,
+        guid: gptdisk::Guid(guid),
     })
 }
 
@@ -525,6 +532,11 @@ pub fn active() -> bool {
 /// Arranque nativo desde NVMe instalado (puede omitir hwscan si hay inventario).
 pub fn es_instalado() -> bool {
     matches!(backend(), Some(LiveBackend::Nvme(_)))
+}
+
+/// GUID único de la ESP desde la que arrancamos.
+pub fn esp_guid() -> Option<gptdisk::Guid> {
+    LIVE_ESP.lock().map(|p| p.guid)
 }
 
 /// ¿Hay una ESP donde escribir los logs? Puede haberla sin live montado.

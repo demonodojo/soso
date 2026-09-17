@@ -25,6 +25,13 @@ static LAST_LATIDO: AtomicU32 = AtomicU32::new(u32::MAX);
 static mut BUF: [u8; FILE_SIZE] = [b'\n'; FILE_SIZE];
 
 pub fn init() {
+    // En una instalación declarada, el log persistente es `/var/log` dentro de
+    // sosofs y la ESP queda sólo para arrancar y recuperar (U2). Hace falta el
+    // registro **explícito**: ante la duda se conserva el log FAT.
+    if crate::drivers::modo::instalado_declarado() {
+        crate::println!("fatlog: instalación declarada; el log va a /var/log");
+        return;
+    }
     // Basta con tener ESP: el log no necesita que el root live haya montado, y
     // es justo cuando NO monta cuando más falta hace poder leerlo.
     if !crate::drivers::live_disk::esp_available() {

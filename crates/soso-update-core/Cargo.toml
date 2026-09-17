@@ -5,10 +5,23 @@ edition = "2021"
 license = "GPL-2.0-only"
 
 [features]
-default = []
-std = ["sha2/std"]
+# `full` = el formato de release completo (manifest, pack, plan, transacción).
+# El kernel sólo necesita la identidad live/instalado y la envoltura de
+# registros; con `default-features = false` se queda con eso. El tamaño del
+# kernel no es gratis: la imagen BIOS deja de arrancar si crece de más.
+default = ["full"]
+# `txn` = contrato de transacción (diario, registro de arranque, reconciliación
+# y aplicador). Lo necesita el kernel para el recuperador temprano de U5, sin
+# arrastrar el formato de release.
+txn = []
+full = ["txn"]
+std = ["sha2/std", "full"]
 
 [dependencies]
+# CRC32C para la integridad de los registros durables: el kernel ya lo enlaza
+# vía sosofs, mientras que instanciar SHA-256 aquí le costaba 466 KB —
+# suficiente para que la imagen BIOS deje de arrancar.
+crc = "3"
 sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]

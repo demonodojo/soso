@@ -10,6 +10,14 @@
 
 // ---- números de syscall ----
 
+/// Versión de la ABI de syscalls que publica este kernel.
+///
+/// La declara cada release en su manifiesto (`abi=`) y el cliente la compara
+/// antes de bajar nada: un paquete con otra ABI trae binarios que este kernel
+/// no sabe atender, y eso sólo se descubriría al reiniciar. Súbela al cambiar
+/// o retirar una syscall, no al añadir una.
+pub const ABI_VERSION: u32 = 1;
+
 pub const SYS_EXIT: u64 = 0;
 pub const SYS_READ: u64 = 1;
 pub const SYS_WRITE: u64 = 2;
@@ -133,6 +141,14 @@ pub const SYS_FATLOG_FLUSH: u64 = 85;
 pub const SYS_LOG_READ: u64 = 86;
 /// IPv4 de la NIC activa (`out: *mut NetInfo`).
 pub const SYS_NETINFO: u64 = 87;
+/// Espacio del sistema de ficheros raíz → `FsInfo`. Lo necesita la
+/// comprobación previa de una actualización: quedarse sin sitio a mitad es una
+/// de las formas típicas de dejar una pareja kernel/rootfs incoherente.
+pub const SYS_FSINFO: u64 = 88;
+/// ICMP Echo Request a una IPv4: `(addr_be, timeout_ms) → rtt_ms`.
+/// `addr_be` es la dirección en orden de red (`u32`). `timeout_ms == 0`
+/// usa 1000 ms. 127.0.0.0/8 y la IPv4 propia contestan en 0 ms sin cable.
+pub const SYS_PING: u64 = 89;
 
 pub const FS_RESIZE_GROW_ROOT: u64 = 0;
 pub const FS_RESIZE_QUERY: u64 = 1;
@@ -408,6 +424,15 @@ pub struct GpuInfo {
 /// Umbral: ficheros mayores se abren en modo lazy (sin cargar todo).
 pub const LAZY_FILE_THRESHOLD: u64 = 64 * 1024;
 
+/// Respuesta de `SYS_FSINFO`: bloques del sosofs raíz.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct FsInfo {
+    pub total_blocks: u64,
+    pub free_blocks: u64,
+    pub block_size: u64,
+}
+
 /// Respuesta de `SYS_MEMINFO`: frames de 4 KiB (multiplicar ×4096 para bytes).
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
@@ -559,6 +584,12 @@ pub const FD_CLOSED: u64 = u64::MAX - 3;
 
 /// Descriptor estándar de registro de eventos de aplicación.
 pub const LOG_FD: u64 = 3;
+
+/// Modos de `SYS_FATLOG_FLUSH`.
+pub const LOG_FLUSH: u64 = 0;
+/// Vaciar y **pausar** el escritor de `/var/log` (clon de disco en curso).
+pub const LOG_QUIESCE: u64 = 1;
+pub const LOG_REANUDAR: u64 = 2;
 /// Máximo de bytes de mensaje por `write(3, …)` antes de truncar.
 pub const LOG_MSG_MAX: usize = 1024;
 

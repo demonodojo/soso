@@ -144,7 +144,11 @@ typedef char iwl_rx_completion_rbid_off[
 #define SCD_DRAM_BASE_ADDR           (SCD_BASE + 0x8u)
 #define SCD_TXFACT                   (SCD_BASE + 0x10u)
 #define SCD_CHAINEXT_EN              (SCD_BASE + 0x244u)
+#define SCD_GP_CTRL                  (SCD_BASE + 0x1a8u)
+#define SCD_GP_CTRL_ENABLE_31_QUEUES (1u << 0)
+#define SCD_GP_CTRL_AUTO_ACTIVE_MODE (1u << 18)
 #define SCD_EN_CTRL                  (SCD_BASE + 0x254u)
+#define IWL_DEFAULT_QUEUE_SIZE       256
 #define SCD_QUEUE_WRPTR(q)           (SCD_BASE + 0x18u + (unsigned)(q) * 4u)
 #define SCD_QUEUE_RDPTR(q)           (SCD_BASE + 0x68u + (unsigned)(q) * 4u)
 #define SCD_QUEUE_STATUS_BITS(q)     (SCD_BASE + 0x10cu + (unsigned)(q) * 4u)
@@ -217,14 +221,48 @@ static inline uint32_t tfd_queue_cb_size(unsigned qsize)
 #define CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX (0x00800000u)
 #define CSR_DBG_HPET_MEM_REG_VAL              (0xFFFF0000u)
 #define CSR_INT_BIT_ALIVE                     (1u << 0)
+#define CSR_INT_BIT_WAKEUP                    (1u << 1)
+#define CSR_INT_BIT_RESET_DONE                (1u << 2)
+#define CSR_INT_BIT_SW_RX                     (1u << 3)
 #define CSR_INT_BIT_RF_KILL                   (1u << 7)
 #define CSR_INT_BIT_SW_ERR                    (1u << 25)
+#define CSR_INT_BIT_SCD                       (1u << 26)
 #define CSR_INT_BIT_FH_TX                     (1u << 27)
+#define CSR_INT_BIT_RX_PERIODIC               (1u << 28)
+#define CSR_INT_BIT_HW_ERR                    (1u << 29)
 #define CSR_INT_BIT_FH_RX                     (1u << 31)
+#define CSR_INI_SET_MASK                      (CSR_INT_BIT_FH_RX | \
+                                               CSR_INT_BIT_HW_ERR | \
+                                               CSR_INT_BIT_FH_TX | \
+                                               CSR_INT_BIT_SW_ERR | \
+                                               CSR_INT_BIT_RF_KILL | \
+                                               CSR_INT_BIT_SW_RX | \
+                                               CSR_INT_BIT_WAKEUP | \
+                                               CSR_INT_BIT_RESET_DONE | \
+                                               CSR_INT_BIT_ALIVE | \
+                                               CSR_INT_BIT_RX_PERIODIC)
+#define CSR_HW_IF_CONFIG_REG_MSK_MAC_STEP_DASH 0x0000000fu
+#define CSR_HW_IF_CONFIG_REG_MSK_PHY_TYPE     0x00000c00u
+#define CSR_HW_IF_CONFIG_REG_MSK_PHY_DASH     0x00003000u
+#define CSR_HW_IF_CONFIG_REG_MSK_PHY_STEP     0x0000c000u
+#define CSR_HW_IF_CONFIG_REG_BIT_RADIO_SI     0x00000200u
+#define CSR_HW_IF_CONFIG_REG_BIT_MAC_SI       0x00000100u
+#define CSR_HW_IF_CONFIG_REG_D3_DEBUG         0x00000200u
+#define CSR_HW_IF_CONFIG_REG_POS_PHY_TYPE     10
+#define CSR_HW_IF_CONFIG_REG_POS_PHY_DASH     12
+#define CSR_HW_IF_CONFIG_REG_POS_PHY_STEP     14
+#define CSR_HW_REV_STEP_DASH(_val)            ((_val) & CSR_HW_IF_CONFIG_REG_MSK_MAC_STEP_DASH)
 #define CSR_FH_INT_STATUS                     (CSR_BASE + 0x010)
 #define CSR_FH_INT_BIT_TX_CHNL0               (1u << 0)
 #define CSR_FH_INT_BIT_TX_CHNL1               (1u << 1)
+#define CSR_FH_INT_BIT_RX_CHNL0               (1u << 16)
+#define CSR_FH_INT_BIT_RX_CHNL1               (1u << 17)
+#define CSR_FH_INT_BIT_HI_PRIOR               (1u << 30)
+#define CSR_FH_INT_RX_MASK                    (CSR_FH_INT_BIT_HI_PRIOR | \
+                                               CSR_FH_INT_BIT_RX_CHNL1 | \
+                                               CSR_FH_INT_BIT_RX_CHNL0)
 #define CSR_FH_INT_TX_MASK                    (CSR_FH_INT_BIT_TX_CHNL0 | CSR_FH_INT_BIT_TX_CHNL1)
+#define PCI_CFG_RETRY_TIMEOUT                 0x41u
 #define CSR_DRAM_INT_TBL_REG                  (CSR_BASE + 0x0A0)
 #define CSR_DRAM_INT_TBL_ENABLE               (1u << 31)
 #define CSR_DRAM_INIT_TBL_WRITE_POINTER       (1u << 28)
@@ -269,12 +307,14 @@ static inline uint32_t tfd_queue_cb_size(unsigned qsize)
 #define FH_RCSR_RX_CONFIG_REG_IRQ_RBTH_POS    4
 #define FH_RCSR_RX_CONFIG_RBDCB_SIZE_POS      20
 #define RX_RB_TIMEOUT                         0x11u
-#define IWL_8000_RX_N                         32
-#define IWL_8000_RX_LOG                       5
+#define IWL_8000_RX_N                         256
+#define IWL_8000_RX_LOG                       8
 #define FH_UCODE_LOAD_STATUS                  0x1AF0u
 #define RELEASE_CPU_RESET                     0x300Cu
 #define RELEASE_CPU_RESET_BIT                 (1u << 24)
 #define WFPM_GP2                              0xA030B4u
+#define SB_CPU_1_STATUS                       0xA01E30u
+#define SB_CPU_2_STATUS                       0xA01E34u
 #define LMPM_CHICK                            0xA01FF8u
 #define LMPM_CHICK_EXTENDED_ADDR_SPACE        (1u << 0)
 #define IWL_FW_MEM_EXTENDED_START             0x40000u
@@ -383,6 +423,12 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define TX_ANT_CONFIGURATION_CMD   0x98 /* LEGACY_GROUP */
 #define MCC_UPDATE_CMD             0xc8 /* LEGACY_GROUP */
 
+#define FW_PHY_CFG_RADIO_TYPE_POS  0
+#define FW_PHY_CFG_RADIO_TYPE      (0x3u << FW_PHY_CFG_RADIO_TYPE_POS)
+#define FW_PHY_CFG_RADIO_STEP_POS  2
+#define FW_PHY_CFG_RADIO_STEP      (0x3u << FW_PHY_CFG_RADIO_STEP_POS)
+#define FW_PHY_CFG_RADIO_DASH_POS  4
+#define FW_PHY_CFG_RADIO_DASH      (0x3u << FW_PHY_CFG_RADIO_DASH_POS)
 #define FW_PHY_CFG_TX_CHAIN_POS    16
 #define FW_PHY_CFG_TX_CHAIN        (0xfu << FW_PHY_CFG_TX_CHAIN_POS)
 #define FW_PHY_CFG_RX_CHAIN_POS    20
@@ -771,6 +817,8 @@ struct iwl_fw_image {
     struct iwl_fw_section init;
     struct iwl_fw_section init_data;
     struct iwl_fw_section boot;
+    struct iwl_fw_rt_section sec_init[IWL_FW_RT_MAX];
+    int sec_init_n;
     struct iwl_fw_rt_section rt[IWL_FW_RT_MAX];
     int rt_n;
 };
@@ -1868,11 +1916,29 @@ struct iwl_8000_fh_prog {
     uint32_t tcsr_run;
 };
 
+int iwl_8000_plan_load_secs(const struct iwl_fw_rt_section *secs, int n_secs,
+                            struct iwl_8000_load_plan *plan);
+int iwl_8000_plan_load_ex(const struct iwl_fw_rt_section *secs, int n_secs,
+                          uint32_t chunk_sz, struct iwl_8000_load_plan *plan);
 int iwl_8000_plan_load(const struct iwl_fw_image *fw, struct iwl_8000_load_plan *plan);
-int iwl_8000_plan_load_ex(const struct iwl_fw_image *fw, uint32_t chunk_sz,
-                          struct iwl_8000_load_plan *plan);
+int iwl_8000_plan_load_init(const struct iwl_fw_image *fw, struct iwl_8000_load_plan *plan);
+uint32_t iwl_8000_nic_config_value(uint32_t hw_rev, uint32_t phy_sku);
 void iwl_8000_fh_program(uint32_t dst, uint64_t dma, uint32_t byte_cnt,
                          struct iwl_8000_fh_prog *out);
+int iwl_8000_chunk_done_policy(uint32_t inta, uint32_t tssr);
+
+struct iwl_8000_tx_init_prog {
+    uint32_t scd_txfact;
+    uint32_t kw_reg;
+    uint32_t kw_val;
+    uint32_t cbbc[IWL_8000_NUM_QUEUES];
+    uint32_t gp_ctrl_set;
+};
+
+unsigned iwl_8000_tx_slots(unsigned qid, unsigned cmd_qid);
+void iwl_8000_tx_init_program(uint64_t kw_dma, const uint64_t *ring_dma,
+                              unsigned n_queues, struct iwl_8000_tx_init_prog *out);
+int iwl_8000_tx_preload_ready(const struct iwl_ax211_priv *iwl);
 void iwl_trans_poll(struct iwl_ax211_priv *iwl);
 void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl);
 int iwl_trans_txq_alloc_data(struct iwl_ax211_priv *iwl, uint8_t sta_id, uint8_t tid);

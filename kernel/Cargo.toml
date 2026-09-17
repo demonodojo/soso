@@ -55,6 +55,12 @@ block-dev = { path = "../crates/block-dev" }
 gptdisk = { path = "../crates/gptdisk" }
 soso-resize-core = { path = "../crates/soso-resize-core" }
 soso-log-core = { path = "../crates/soso-log-core" }
+espfat-core = { path = "../crates/espfat-core" }
+soso-update-core = { path = "../crates/soso-update-core", default-features = false, features = ["txn"] }
+# Sólo `identity` + `record`. El resto del crate (manifest, pack, transacción)
+# no hace falta aquí y el tamaño del kernel no es gratis: ver U2 en
+# docs/PLAN-ACTUALIZACIONES.md y el techo de la imagen BIOS.
+
 soso-abi = { path = "../crates/soso-abi" }
 soso-hw = { path = "../crates/soso-hw" }
 soso-wpa2 = { path = "../crates/soso-wpa2" }
@@ -65,6 +71,7 @@ smoltcp = { version = "0.13.1", default-features = false, features = [
     "socket-tcp",
     "socket-udp",
     "socket-dhcpv4",
+    "socket-icmp",
     "alloc",
 ] }
 talc = { version = "4", default-features = false, features = ["lock_api"] }

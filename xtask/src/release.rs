@@ -21,7 +21,7 @@ pub fn run(args: &[String]) {
         exit(1);
     }
 
-    let profile = live_profile();
+    let (profile, perfil_nombre) = live_profile();
     crate::build_user();
     let _ = crate::build_image_with_profile(&profile, true);
     crate::mkfs_rootfs_with_profile(true, &profile, crate::RootfsImgMode::PackOnly);
@@ -35,6 +35,20 @@ pub fn run(args: &[String]) {
     strip_kernel(&kernel_dst);
 
     let (pack_blob, files) = pack_rootfs(&root.join("rootfs")).expect("empaquetar rootfs");
+    // Segunda barrera: `PackWriter::should_pack` ya filtra, pero una release
+    // publicada con la clave SSH o los logs de la máquina que empaquetó no se
+    // puede despublicar. Más vale abortar aquí.
+    let coladas: Vec<_> = files
+        .iter()
+        .filter_map(|f| soso_update_core::por_que_se_excluye(&f.path).map(|m| (&f.path, m)))
+        .collect();
+    if !coladas.is_empty() {
+        eprintln!("release: ABORTADO — el pack incluye rutas que nunca deben publicarse:");
+        for (p, m) in &coladas {
+            eprintln!("  {p} ({m:?})");
+        }
+        exit(1);
+    }
     let pack_path = out_dir.join("rootfs.pack");
     std::fs::write(&pack_path, &pack_blob).expect("rootfs.pack");
 
@@ -51,7 +65,7 @@ pub fn run(args: &[String]) {
         kernel_size: kernel_bytes.len() as u64,
         pack_hash: pack_hash.clone(),
         pack_size: pack_blob.len() as u64,
-        compat: None,
+        compat: Some(compat_de(&profile, &perfil_nombre)),
         files,
     };
     let manifest_text = manifest.format();
@@ -144,13 +158,58 @@ pub(crate) fn strip_kernel(path: &std::path::Path) {
     eprintln!("release: aviso — no encontré strip/llvm-strip, publico el kernel entero ({antes} B)");
 }
 
-fn live_profile() -> DriverProfile {
-    if std::env::var("SOSO_DRIVERS")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
-        drivers::profile_from_env_or_args()
-    } else {
-        drivers::preset_live_usb()
+/// Perfil con el que se construye la release, y su nombre para el manifiesto.
+fn live_profile() -> (DriverProfile, String) {
+    match std::env::var("SOSO_DRIVERS") {
+        Ok(v) if !v.is_empty() => (drivers::profile_from_arg(&v), v),
+        _ => (drivers::preset_live_usb(), "live-usb".to_string()),
     }
+}
+
+/// Contrato de compatibilidad de la release (U0 §8, emitido en U3).
+///
+/// Sin estas líneas el cliente no puede saber si el paquete sirve para su
+/// máquina, y `compat::exigir` rechaza los manifiestos que no las traen.
+fn compat_de(profile: &DriverProfile, perfil: &str) -> soso_update_core::Compat {
+    soso_update_core::Compat {
+        arch: "x86_64".to_string(),
+        perfil: perfil.to_string(),
+        drivers: drivers_declarados(profile),
+        abi: soso_abi::ABI_VERSION,
+        fs: soso_update_core::compat::FS_FORMATO.to_string(),
+        min_shim: soso_update_core::compat::SHIM_VERSION,
+        min_recuperador: soso_update_core::compat::RECUPERADOR_VERSION,
+    }
+}
+
+/// Drivers que trae la release, con el nombre corto que usa el cliente.
+/// `drv-all` se expande: un manifiesto que dijera «all» obligaría al cliente a
+/// conocer el significado de cada meta-feature de este repositorio.
+fn drivers_declarados(profile: &DriverProfile) -> Vec<String> {
+    let feats = drivers::kernel_feature_args(profile);
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |n: &str| {
+        let n = n.to_string();
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    };
+    const TODOS: &[&str] = &[
+        "virtio-blk", "virtio-net", "e1000e", "rtl8169", "nvme", "usb", "gpu-nvidia",
+        "live-disk", "hda",
+    ];
+    for f in &feats {
+        if f == "drv-all" {
+            for t in TODOS {
+                push(t);
+            }
+        } else if let Some(n) = f.strip_prefix("drv-") {
+            push(n);
+        }
+    }
+    for p in &profile.lxdde_ports {
+        push(p);
+    }
+    out.sort();
+    out
 }

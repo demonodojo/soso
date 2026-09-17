@@ -310,9 +310,11 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_PWRITE => sys_pwrite(a1, a2, a3, a4),
         abi::SYS_GETENV => sys_getenv(a1, a2, a3, a4),
         abi::SYS_FS_RESIZE => sys_fs_resize(a1, a2, a3),
-        abi::SYS_FATLOG_FLUSH => sys_fatlog_flush(),
+        abi::SYS_FATLOG_FLUSH => sys_fatlog_flush(a1),
         abi::SYS_LOG_READ => sys_log_read(a1, a2, a3),
         abi::SYS_NETINFO => sys_netinfo(a1),
+        abi::SYS_FSINFO => sys_fsinfo(a1),
+        abi::SYS_PING => sys_ping(a1, a2),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -1505,6 +1507,11 @@ fn sys_gpu_info(out: u64) -> Result<u64, i64> {
     })
 }
 
+fn sys_ping(addr_be: u64, timeout_ms: u64) -> Result<u64, i64> {
+    let addr = (addr_be as u32).to_be_bytes();
+    crate::net::ping(addr, timeout_ms)
+}
+
 fn sys_netinfo(out: u64) -> Result<u64, i64> {
     let n = core::mem::size_of::<abi::NetInfo>() as u64;
     if !user_range_ok(out, n, true) {
@@ -1794,10 +1801,24 @@ fn sys_bootreq_read(_buf: u64, _len: u64) -> Result<u64, i64> {
     Err(-abi::ENOTSUP)
 }
 
-/// «Persiste mi log ahora». Va a los dos destinos que haya: los logs nativos
-/// de sosofs y, si existe, `SOSOLOG.TXT` en la ESP. Basta con que uno funcione;
-/// en una instalación sin ESP montada ya no es un error.
-fn sys_fatlog_flush() -> Result<u64, i64> {
+/// `0` = «persiste mi log ahora»; `1` = pausa el escritor de sosofs tras
+/// vaciarlo; `2` = lo reanuda.
+///
+/// La pausa la usa `soso-install` mientras clona el disco: el argumento va aquí
+/// en vez de en una syscall nueva porque es la misma pregunta —qué pasa con el
+/// log persistente— y los llamantes antiguos pasan `0`.
+fn sys_fatlog_flush(modo: u64) -> Result<u64, i64> {
+    match modo {
+        abi::LOG_QUIESCE => {
+            crate::drivers::logfs::pausar();
+            return Ok(0);
+        }
+        abi::LOG_REANUDAR => {
+            crate::drivers::logfs::reanudar();
+            return Ok(0);
+        }
+        _ => {}
+    }
     let mut alguno = false;
     if crate::drivers::logfs::activo() {
         crate::drivers::logfs::drenar_todo();
@@ -2412,6 +2433,33 @@ fn clone_fd(f: &Fd) -> Fd {
         Fd::Tty => Fd::Tty,
         Fd::Log => Fd::Log,
     }
+}
+
+/// Espacio del sosofs raíz, para la comprobación previa de una actualización.
+fn sys_fsinfo(out: u64) -> Result<u64, i64> {
+    let fs = crate::fs::FS.get().ok_or(-abi::EIO)?;
+    let info = {
+        let fs = fs.lock();
+        abi::FsInfo {
+            total_blocks: fs.block_count(),
+            free_blocks: fs.free_blocks(),
+            block_size: 4096,
+        }
+    };
+    if !user_range_ok(out, core::mem::size_of::<abi::FsInfo>() as u64, true) {
+        return Err(-abi::EFAULT);
+    }
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &info as *const abi::FsInfo as *const u8,
+                core::mem::size_of::<abi::FsInfo>(),
+            )
+        };
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(0)
+    })
 }
 
 fn sys_log_read(offset: u64, buf_ptr: u64, len: u64) -> Result<u64, i64> {

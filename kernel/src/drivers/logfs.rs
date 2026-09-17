@@ -80,11 +80,43 @@ struct Escritor {
 
 static ESCRITOR: Mutex<Option<Escritor>> = Mutex::new(None);
 static ACTIVO: AtomicBool = AtomicBool::new(false);
+/// Escritor en pausa: nadie escribe en sosofs desde aquí.
+static PAUSADO: AtomicBool = AtomicBool::new(false);
 static ULTIMO_POLL_MS: AtomicU64 = AtomicU64::new(0);
 static BOOT_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn activo() -> bool {
-    ACTIVO.load(Ordering::Relaxed)
+    ACTIVO.load(Ordering::Relaxed) && !PAUSADO.load(Ordering::Relaxed)
+}
+
+/// Deja de escribir en sosofs hasta nuevo aviso, tras vaciar lo pendiente.
+///
+/// Lo pide `soso-install` mientras clona: a partir de U1 este módulo escribe en
+/// el rootfs cada dos segundos, y un commit de sosofs a mitad del clon deja en
+/// el destino un superbloque que apunta a bloques que todavía no se habían
+/// copiado. El ring sigue capturando; se vuelca al reanudar.
+pub fn pausar() {
+    if !activo() {
+        PAUSADO.store(true, Ordering::Relaxed);
+        return;
+    }
+    drenar_todo();
+    PAUSADO.store(true, Ordering::Relaxed);
+    crate::println!("logfs: en pausa (clon en curso); el log se queda en RAM");
+}
+
+pub fn reanudar() {
+    if !PAUSADO.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    if ACTIVO.load(Ordering::Relaxed) {
+        crate::println!("logfs: reanudado");
+        drenar_todo();
+    }
+}
+
+pub fn pausado() -> bool {
+    PAUSADO.load(Ordering::Relaxed)
 }
 
 /// Arranca los logs nativos. Se llama **justo después de montar sosofs y antes
@@ -350,6 +382,10 @@ fn boot_id() -> u64 {
 
 /// Resumen para el kshell.
 pub fn resumen() {
+    if pausado() {
+        crate::println!("logfs: en pausa (clon en curso); el log se acumula en RAM");
+        return;
+    }
     if !activo() {
         crate::println!("logfs: inactivo (sin sosofs o sin {DIR_LOG})");
         return;

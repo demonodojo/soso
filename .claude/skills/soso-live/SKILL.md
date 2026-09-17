@@ -29,6 +29,55 @@ Plan U0–U8: [actualizaciones de instalaciones y logs en sosofs](../../../docs/
 Incluye recuperación conjunta kernel/rootfs, transición legacy y eliminación
 de `SOSOLOG.TXT` en la ESP instalada; no tratarlo como comportamiento implementado.
 
+**U5c parcial (2026-09-17) — no confundir con U5 entera.** El plan creció el
+2026-09-16 (§3.6: puntos de recuperación **retenidos**, tres vías de vuelta
+atrás, entrada UEFI de rescate) y U5 se desglosó en U5a–U5e, todas pendientes.
+Hecho y probado: `txn/aplicador.rs` (idempotente, verifica hashes antes de
+escribir, 11 pruebas cortando en **cada** paso) y `kernel/src/drivers/txnaplica.rs`
+(lee `SOSOTXN.BIN` + diario, `reconcile`, ejecuta; corre tras montar sosofs y
+**antes** de firmware e init; con pareja incoherente no lanza userspace).
+**Está enlazado pero inerte:** `soso-update` todavía instala él mismo en vez de
+armar, así que nadie publica un registro y `reconcile` siempre dice «normal».
+Aviso de diseño: la reversión restaura **toda** la operación, no sólo lo marcado
+como aplicado — entre escribir un fichero y anotarlo hay una ventana, y deshacer
+sólo lo anotado dejaba una pareja mezclada. Feature `txn` en soso-update-core
+para que el kernel no arrastre el formato de release.
+
+**U4 cerrada (2026-09-17):** la descarga va a `/var/lib/soso-update/<id>/etapa/`
+y **no toca el sistema activo** hasta tenerlo todo verificado; antes se escribía
+`/bin`/`/lib` según llegaba cada tramo. Reanudable: el registro de la etapa está
+atado al **hash del manifiesto** (no a la versión), lo verificado no se vuelve a
+pedir y un fichero truncado no cuenta. RAM acotada por `TROZO_MAX` = 1 MiB
+(`net::https_download_span_a` entrega por trozos); se siguen pidiendo **tramos**
+para no hacer una petición por binario. `SYS_FSINFO` (88) da el espacio libre al
+`preflight` de U0. Acreditado por `test-update`, cuyo arranque 2 ensucia el
+fichero y reaplica para exigir reanudación **cruzando el reinicio**.
+
+**U3 cerrada (2026-09-16):** el manifiesto lleva contrato de compatibilidad
+(`arch`/`perfil`/`drivers`/`abi`/`fs`/`min_shim`/`min_recuperador`) que emite
+`cargo xtask release`, y `soso-update` lo exige antes de descargar — **ojo al
+sentido**: el manifiesto declara lo que la release **trae** y el equipo lo que
+**necesita**; invertirlo rechaza cualquier release completa. Canales en
+`crates/soso-update-core/src/canal.rs` con precedencia fija
+(`--local` > `--channel` > `url=` > `channel=` > stable); el origen se resuelve
+**una vez por comando**. Exclusiones del pack clasificadas por motivo
+(`por_que_se_excluye`), ya con `var/log/` y `var/lib/soso-update/`; `release`
+aborta si una ruta prohibida llega al pack. Las releases **no se firman**
+todavía: ver la política en `docs/U0-CONTRATO-ACTUALIZACION.md` §8.
+
+**U2 cerrada (2026-09-16):** la lógica FAT de la ESP vive en
+`crates/espfat-core` (no_std, sobre un trait de sectores, 10 pruebas host) y el
+kernel la usa a través de `drivers/espfat.rs`. `soso-install` **finaliza** el
+destino: escribe `SOSOMODE.TXT` con modo `installed` y el GUID nuevo, **borra**
+`SOSOLOG.TXT` y `SOSOBOOT.TXT` —borrado real: entrada de directorio + cadena FAT
+en todas las copias; a ceros no vale—, rechaza clonar un origen con OTA a medias
+y **pausa el escritor de logs** mientras copia (`sys::log_quiesce`), porque desde
+U1 el kernel escribe el rootfs cada 2 s. `drivers/modo.rs` lee la identidad antes
+de montar sosofs y `fatlog` se apaga **sólo** con identidad explícita, propia e
+`installed`. Acreditado por `cargo xtask test-install`. No probado E2E:
+`install-disk` y el `install-soso.sh` empaquetado, que hacen lo mismo por su
+cuenta. Migrar instalaciones ya existentes es U6.
+
 **U1 cerrada (2026-09-16):** logs nativos en sosofs —`/var/log/{kernel,
 aplicaciones,actualizaciones}.log`— con cabecera por arranque, rotación 1 MiB × 3
 y suspensión ante errores de FS (`kernel/src/drivers/logfs.rs`, lógica en
@@ -133,6 +182,8 @@ tamaño fijo y escribe sectores. Si falta el hueco, esa vía queda desactivada
 | `SOSOBOOT.TXT` | 4 KiB | `soso-install` → shim | `INSTALL <guid-ESP>` → `Boot####` |
 | `SOSOWIFI.TXT` | 4 KiB | usuario en host | `ssid=` / `psk=` |
 | `SOSOUPD.TXT` | 4 KiB | `soso-update` / shim / init | buzón OTA kernel |
+| `SOSOMODE.TXT` | 4 KiB | `soso-install` / `install-disk` | identidad `live`/`installed` (U2); 4 ranuras de 1 KiB |
+| `SOSOTXN.BIN` | 4 KiB | (U5) | registro de transacción del contrato U0; **reservado, aún sin usar** |
 | `SOSOKRN.BIN` | 64 MiB | `soso-update` / shim | hueco kernel (nuevo o backup) |
 | `SOSOKRN.MET` | 512 B | `soso-update` / shim | meta durable OTA (fases staged/backup/applying/probando) |
 | `SOSORES.TXT` | 4 KiB | kernel `fs-resize` | journal de redimensionado rootfs |

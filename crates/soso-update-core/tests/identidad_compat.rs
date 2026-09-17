@@ -92,7 +92,9 @@ fn equipo() -> Equipo {
         fs: "sosofs1".into(),
         shim: 1,
         recuperador: 1,
-        drivers: vec!["nvme".into(), "iwlwifi".into(), "e1000e".into()],
+        // Lo que esta máquina **necesita**: arranca de NVMe y se actualiza por
+        // WiFi. La release de arriba trae las dos cosas.
+        drivers: vec!["nvme".into(), "iwlwifi".into()],
     }
 }
 
@@ -141,12 +143,19 @@ fn shim_o_recuperador_antiguos_exigen_transicion() {
 
 #[test]
 fn falta_el_driver_del_disco_o_de_la_red() {
-    let mut eq = equipo();
-    eq.drivers.retain(|d| d != "nvme");
+    // La release no trae el driver del disco desde el que arranca la máquina.
+    let mut c = release();
+    c.drivers.retain(|d| d != "nvme");
     assert_eq!(
-        release().check(&eq),
+        c.check(&equipo()),
         Err(CompatError::DriverAusente("nvme".into()))
     );
+
+    // Y al revés **no** es un error: una release con drivers de más sirve
+    // igual. Invertir esta comprobación rechazaba cualquier release completa.
+    let mut eq = equipo();
+    eq.drivers.retain(|d| d != "iwlwifi");
+    assert_eq!(release().check(&eq), Ok(()));
 }
 
 #[test]
@@ -182,4 +191,30 @@ fn un_manifiesto_antiguo_sigue_leyendose_pero_no_pasa_la_comprobacion() {
         exigir(m.compat.as_ref(), &equipo()),
         Err(CompatError::NoDeclarada)
     );
+}
+
+#[test]
+fn la_suma_del_registro_es_un_crc_no_un_hash() {
+    // El campo `sum=` protege contra escrituras cortadas y sectores dañados,
+    // no contra falsificación: quien pueda reescribir la ESP puede rehacer el
+    // registro entero. Se dejó de usar SHA-256 porque instanciarlo en el kernel
+    // sólo para esto costaba 466 KB, y con eso la imagen BIOS dejaba de
+    // arrancar (ver U2 en docs/PLAN-ACTUALIZACIONES.md).
+    let rec = ModeRecord::nuevo(BootMode::Installed, "2026-09-16T10:00:00Z", GUID, 1);
+    let bytes = rec.format().unwrap();
+    let texto = core::str::from_utf8(&bytes).unwrap();
+    let sum = texto
+        .lines()
+        .find_map(|l| l.strip_prefix("sum="))
+        .expect("falta sum=");
+    assert_eq!(sum.len(), 8, "CRC32C en hex");
+    assert!(sum.bytes().all(|b| b.is_ascii_hexdigit()));
+
+    // Y sigue detectando un registro tocado.
+    let mut roto = bytes.clone();
+    roto[20] ^= 0x01;
+    let mut fichero = vec![0u8; MODE_SIZE];
+    let off = rec.ranura() * SLOT_SIZE;
+    fichero[off..off + roto.len()].copy_from_slice(&roto);
+    assert!(matches!(resolver(Some(&fichero), GUID), Identidad::Rota(_)));
 }

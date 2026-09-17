@@ -2,6 +2,7 @@
 //! banco de pruebas hasta que exista la shell de usuario (fase 7).
 
 use crate::{drivers::serial, print, println, qemu};
+use soso_abi;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -54,7 +55,7 @@ fn exec(line: &str) {
 
     match cmd {
         "help" => {
-            println!("comandos: help dmesg [patrón|save] logfs hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem io ip wifi blk blkread blkwrite pf panic halt");
+            println!("comandos: help dmesg [patrón|save] logfs hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem io ip ping wifi blk blkread blkwrite pf panic halt");
         }
         "dmesg" => match args.first() {
             // `save` va al destino efectivo: sosofs si hay logs nativos, la ESP
@@ -79,7 +80,11 @@ fn exec(line: &str) {
             Some(pat) => dmesg_grep(pat),
             None => dmesg_paged(),
         },
-        "logfs" => crate::drivers::logfs::resumen(),
+        "logfs" => {
+            crate::drivers::logfs::resumen();
+            #[cfg(feature = "drv-live-disk")]
+            crate::drivers::modo::resumen();
+        }
         "hwscan" => {
             crate::drivers::registry::print_hwscan();
             #[cfg(feature = "drv-live-disk")]
@@ -237,6 +242,39 @@ fn exec(line: &str) {
             }
         }
         "ip" => crate::net::print_info(),
+        "ping" => {
+            let Some(dest) = args.first() else {
+                println!("uso: ping <ip|host> [n]");
+                return;
+            };
+            let addr = match crate::net::dns::resolve_hostname(dest) {
+                Ok(sa) => sa.addr,
+                Err(e) => {
+                    println!("ping: no resuelve ({e})");
+                    return;
+                }
+            };
+            let n: u32 = args
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1)
+                .clamp(1, 8);
+            for i in 1..=n {
+                match crate::net::ping(addr, 1000) {
+                    Ok(ms) => println!(
+                        "ping: {}.{}.{}.{} seq={i} {ms} ms",
+                        addr[0], addr[1], addr[2], addr[3]
+                    ),
+                    Err(e) if e == -soso_abi::ETIMEDOUT => {
+                        println!(
+                            "ping: {}.{}.{}.{} seq={i} timeout",
+                            addr[0], addr[1], addr[2], addr[3]
+                        );
+                    }
+                    Err(e) => println!("ping: error {e}"),
+                }
+            }
+        }
         "wifi" => {
             #[cfg(feature = "lxdde")]
             {

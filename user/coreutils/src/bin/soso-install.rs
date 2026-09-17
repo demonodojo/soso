@@ -25,10 +25,11 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use espfat_core::{FatError, Sectores, Volumen};
 use gptdisk::{Guid, Header, Plan};
 use libsoso::abi::{
     DISK_FLAG_BOOT, DISK_FLAG_EMPTY, DISK_FLAG_SOSO, DISK_KIND_NVME, DISK_KIND_USB, DiskInfo,
-    O_RDONLY,
+    O_RDONLY, UPD_WHICH_MAILBOX,
 };
 use libsoso::linea::Lector;
 use libsoso::{print, println, sys};
@@ -416,9 +417,10 @@ fn read_gpt(id: u32) -> Option<(Header, Vec<u8>)> {
     Some((hdr, entries))
 }
 
-/// Adapta la GPT recién clonada al disco destino y devuelve el GUID de su ESP,
-/// que es lo que el shim necesita para localizarla en el siguiente arranque.
-fn fix_gpt(id: u32, disk_sectors: u64, seed: u64) -> Result<Guid, &'static str> {
+/// Adapta la GPT recién clonada al disco destino y devuelve el GUID de su ESP
+/// —que es lo que el shim necesita para localizarla en el siguiente arranque—
+/// y su primera LBA, que hace falta para finalizarla como instalación.
+fn fix_gpt(id: u32, disk_sectors: u64, seed: u64) -> Result<(Guid, u64), &'static str> {
     let (mut hdr, mut entries) = read_gpt(id).ok_or("no pude leer la GPT clonada")?;
     let bytes = hdr.entries_bytes();
     entries.resize(bytes.div_ceil(SECTOR) * SECTOR, 0);
@@ -428,9 +430,9 @@ fn fix_gpt(id: u32, disk_sectors: u64, seed: u64) -> Result<Guid, &'static str> 
     let mut rng = gptdisk::Rng::new(seed);
     gptdisk::reseed_guids(&mut hdr, &mut entries, &mut rng);
 
-    let esp = gptdisk::entry(&entries, &hdr, 0)
-        .map(gptdisk::entry_unique)
-        .ok_or("sin partición 1")?;
+    let entrada_esp = gptdisk::entry(&entries, &hdr, 0).ok_or("sin partición 1")?;
+    let esp = gptdisk::entry_unique(entrada_esp);
+    let esp_lba = gptdisk::entry_first_lba(entrada_esp);
 
     // Respaldo primero y cabecera primaria al final: si se corta la corriente a
     // medias, el disco es un destino dedicado y se reinstala, pero al menos la
@@ -450,7 +452,7 @@ fn fix_gpt(id: u32, disk_sectors: u64, seed: u64) -> Result<Guid, &'static str> 
     write_sectors(id, 0, &mbr)?;
 
     write_sectors(id, plan.primary_header_lba, &primary)?;
-    Ok(esp)
+    Ok((esp, esp_lba))
 }
 
 fn write_sectors(id: u32, lba: u64, buf: &[u8]) -> Result<(), &'static str> {
@@ -522,6 +524,14 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         }
     }
 
+    if let Some(motivo) = ota_pendiente() {
+        println!("soso-install: el origen tiene una actualización a medias ({motivo}).");
+        println!(
+            "  Clonarlo copiaría esa operación al destino, que arrancaría\n           \x20 intentando aplicar o revertir algo que no es suyo. Termina la\n           \x20 actualización (reinicia) o deshazla con «soso-update revertir»\n           \x20 y vuelve a instalar."
+        );
+        return 1;
+    }
+
     let live_bytes = match read_live_bytes() {
         Some(b) => b,
         None => {
@@ -572,7 +582,19 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         }
     }
 
-    if !clonar(src.id, dst.id, copy_bytes) {
+    // El sosofs de origen no puede cambiar mientras se copia. Desde U1 el
+    // kernel escribe `/var/log` cada dos segundos sobre ese mismo rootfs, y un
+    // commit de sosofs a mitad del clon deja en el destino un superbloque que
+    // apunta a bloques que aún no se habían copiado.
+    let pausado = sys::log_quiesce(true) >= 0;
+    if !pausado {
+        println!("soso-install: aviso: no pude pausar el log; el clon puede salir incoherente");
+    }
+    let copiado = clonar(src.id, dst.id, copy_bytes);
+    if pausado {
+        sys::log_quiesce(false);
+    }
+    if !copiado {
         return 1;
     }
     println!("soso-install: copia terminada");
@@ -582,8 +604,8 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
     let seed = (sys::uptime_ms() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ dst.sectors
         ^ (dst.id as u64) << 32;
-    let esp = match fix_gpt(dst.id, dst.sectors, seed) {
-        Ok(g) => g,
+    let (esp, esp_lba) = match fix_gpt(dst.id, dst.sectors, seed) {
+        Ok(v) => v,
         Err(e) => {
             println!("soso-install: no pude reparar la GPT del destino: {e}");
             println!("  el disco tiene los datos pero no arrancará; reinstala");
@@ -595,9 +617,158 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         dst.sectors / 2048
     );
 
+    finalizar_instalacion(dst.id, esp_lba, &esp);
+
     println!();
     pedir_arranque(&esp, dst);
     0
+}
+
+/// ¿Hay una actualización en vuelo en el buzón del origen? Devuelve el motivo.
+///
+/// Una instalación que hereda un buzón a medias arranca intentando aplicar o
+/// revertir un kernel que no es el suyo, con un backup que se quedó en el USB.
+fn ota_pendiente() -> Option<&'static str> {
+    use soso_update_core::{Mailbox, MailboxCmd};
+    let mut buf = vec![0u8; soso_update_core::UPD_MAILBOX_SIZE];
+    let n = sys::upd_read(UPD_WHICH_MAILBOX, 0, &mut buf);
+    if n <= 0 {
+        // Sin buzón legible no hay operación que heredar.
+        return None;
+    }
+    let texto = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
+    match Mailbox::parse(texto).cmd {
+        MailboxCmd::Kernel { .. } => Some("kernel preparado, sin reiniciar"),
+        MailboxCmd::Probando { .. } => Some("kernel a prueba, sin confirmar"),
+        MailboxCmd::Revertir => Some("reversión pedida, sin reiniciar"),
+        MailboxCmd::Idle | MailboxCmd::Ok { .. } | MailboxCmd::Revertido { .. } => None,
+    }
+}
+
+// ------------------------------------------------- finalizar la instalación
+
+/// Acceso por sectores a una partición del disco destino, que no está montada.
+/// Los LBA son relativos al inicio de la partición, como espera `espfat-core`.
+struct ParticionDisco {
+    id: u32,
+    primera_lba: u64,
+}
+
+impl Sectores for ParticionDisco {
+    fn leer(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FatError> {
+        if sys::disk_read(self.id, self.primera_lba + lba, buf) < 0 {
+            return Err(FatError::Io);
+        }
+        Ok(())
+    }
+    fn escribir(&mut self, lba: u64, buf: &[u8]) -> Result<(), FatError> {
+        if sys::disk_write(self.id, self.primera_lba + lba, buf) < 0 {
+            return Err(FatError::Io);
+        }
+        Ok(())
+    }
+}
+
+/// Convierte el clon en una **instalación**: declara su identidad y retira el
+/// log de la ESP.
+///
+/// Sin esto el destino es un live con otros GUID: seguiría escribiendo
+/// `SOSOLOG.TXT` y nadie sabría, al arrancar, que ya no es un medio de
+/// diagnóstico. `/var/log` no hay que crearlo: el kernel lo hace en el primer
+/// arranque, dentro del sosofs que se acaba de copiar.
+fn finalizar_instalacion(id: u32, esp_lba: u64, esp: &Guid) {
+    let mut vol = match Volumen::abrir(ParticionDisco { id, primera_lba: esp_lba }) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("soso-install: aviso: no pude leer la ESP del destino ({e:?});");
+            println!("  arrancará, pero seguirá comportándose como un live");
+            return;
+        }
+    };
+
+    // 1) Identidad. El GUID es el **nuevo**, el del destino: si algún día se
+    //    vuelve a clonar este disco, la copia se detectará como ajena.
+    let fecha = fecha_de_hoy();
+    let registro = soso_update_core::ModeRecord::nuevo(
+        soso_update_core::BootMode::Installed,
+        &fecha,
+        &alloc::format!("{esp}"),
+        1,
+    );
+    match registro.format() {
+        Ok(bytes) => {
+            let escrito = vol
+                .localizar(b"SOSOMODE", b"TXT", soso_update_core::UPD_MODE_SIZE)
+                .map_err(|e| alloc::format!("{e:?}"))
+                .and_then(|slot| {
+                    // Ranura, no sector: el registro se divide en ranuras de 1 KiB.
+                    let ranura = registro.ranura() * soso_update_core::SLOT_SIZE;
+                    let mut buf = vec![b'\n'; soso_update_core::UPD_MODE_SIZE];
+                    buf[ranura..ranura + bytes.len()].copy_from_slice(&bytes);
+                    vol.dispositivo()
+                        .escribir(slot.data_lba, &buf)
+                        .map_err(|e| alloc::format!("{e:?}"))
+                });
+            match escrito {
+                Ok(()) => println!("soso-install: destino declarado como instalación"),
+                Err(e) => println!(
+                    "soso-install: aviso: no pude escribir SOSOMODE.TXT ({e}); \
+                     el destino seguirá tratándose como live"
+                ),
+            }
+        }
+        Err(e) => println!("soso-install: aviso: SOSOMODE.TXT no cabe ({e:?})"),
+    }
+
+    // 2) El log de la ESP se **borra**, no se pone a ceros: a ceros la entrada
+    //    de directorio sigue ahí y la instalación seguiría teniendo su
+    //    SOSOLOG.TXT. El live conserva el suyo: esto es el disco destino.
+    match vol.borrar(b"SOSOLOG ", b"TXT") {
+        Ok(()) => println!("soso-install: SOSOLOG.TXT retirado de la ESP del destino"),
+        Err(FatError::NoEncontrado) => {}
+        Err(e) => println!("soso-install: aviso: no pude retirar SOSOLOG.TXT ({e:?})"),
+    }
+
+    // 3) Estados transitorios heredados del live que no significan nada en el
+    //    destino: la petición de arranque es del USB, no suya.
+    let _ = vol.borrar(b"SOSOBOOT", b"TXT");
+}
+
+/// Fecha de hoy en ISO, o vacío si el reloj no es utilizable: una fecha
+/// inventada en el registro de una instalación no ayuda a nadie.
+fn fecha_de_hoy() -> String {
+    let mut ts = libsoso::abi::Timespec::default();
+    if sys::clock_gettime(libsoso::abi::CLOCK_REALTIME, &mut ts) < 0 {
+        return String::new();
+    }
+    let secs = ts.tv_sec as u64;
+    // Sin RTC válido el kernel devuelve uptime, que no es una fecha.
+    if secs < 1_600_000_000 {
+        return String::new();
+    }
+    let dias = secs / 86400;
+    let resto = secs % 86400;
+    let (y, m, d) = civil_desde_dias(dias);
+    alloc::format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        resto / 3600,
+        (resto % 3600) / 60,
+        resto % 60
+    )
+}
+
+fn civil_desde_dias(dias: u64) -> (u64, u64, u64) {
+    let z = dias as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u64, m as u64, d as u64)
 }
 
 fn clonar(src_id: u32, dst_id: u32, bytes: u64) -> bool {

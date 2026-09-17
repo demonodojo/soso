@@ -11,7 +11,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::hash::sha256;
+use crc::{Crc, CRC_32_ISCSI};
+
+const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 /// Tamaño de cada ranura del registro de arranque. Cuatro ranuras caben en los
 /// 4 KiB de un fichero 8.3 pre-creado en la ESP.
@@ -21,8 +23,14 @@ pub const SLOTS: usize = 4;
 /// Copias del diario en sosofs. Ahí el registro es un fichero normal y crece
 /// con el inventario, así que se alternan dos ficheros en vez de rellenar.
 pub const COPIAS: usize = 2;
-/// Longitud del campo `sum=` (16 bytes de SHA-256 en hex).
-pub const SUM_LEN: usize = 32;
+/// Longitud del campo `sum=` (CRC32C en hex).
+///
+/// Es un CRC y no un hash a propósito: este campo protege contra **escrituras
+/// cortadas y sectores dañados**, no contra falsificación —quien pueda
+/// reescribir la ESP puede reescribir también el registro entero—. Y la
+/// diferencia no es teórica: instanciar SHA-256 en el kernel sólo para esto
+/// añadía 466 KB, y con eso la imagen BIOS dejaba de arrancar.
+pub const SUM_LEN: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordError {
@@ -76,13 +84,12 @@ impl Framed {
     }
 }
 
-fn hex16(data: &[u8]) -> String {
+fn suma(data: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let h = sha256(data);
+    let c = CRC32C.checksum(data);
     let mut s = String::with_capacity(SUM_LEN);
-    for b in &h[..SUM_LEN / 2] {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0xf) as usize] as char);
+    for i in (0..8).rev() {
+        s.push(HEX[((c >> (i * 4)) & 0xf) as usize] as char);
     }
     s
 }
@@ -97,7 +104,7 @@ pub fn frame(magic: &str, formato: u16, seq: u64, body: &str) -> Vec<u8> {
             text.push('\n');
         }
     }
-    let sum = hex16(text.as_bytes());
+    let sum = suma(text.as_bytes());
     text.push_str(&format!("sum={sum}\n"));
     text.into_bytes()
 }
@@ -128,18 +135,18 @@ pub fn parse(magic: &str, formato_max: u16, raw: &[u8]) -> Result<Framed, Record
     let text = core::str::from_utf8(&raw[..fin]).map_err(|_| RecordError::NoTexto)?;
 
     let mut prefijo = 0usize;
-    let mut suma: Option<&str> = None;
+    let mut valor: Option<&str> = None;
     let mut off = 0usize;
     for linea in text.split_inclusive('\n') {
         if let Some(v) = linea.trim().strip_prefix("sum=") {
             prefijo = off;
-            suma = Some(v);
+            valor = Some(v);
             break;
         }
         off += linea.len();
     }
-    let suma = suma.ok_or(RecordError::SinSuma)?;
-    if suma.len() != SUM_LEN || hex16(&raw[..prefijo]) != suma {
+    let valor = valor.ok_or(RecordError::SinSuma)?;
+    if valor.len() != SUM_LEN || suma(&raw[..prefijo]) != valor {
         return Err(RecordError::SumaIncorrecta);
     }
 

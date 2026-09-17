@@ -23,7 +23,7 @@ pub struct Compat {
     pub arch: String,
     /// Perfil de drivers con el que se construyó (`live-usb`, …).
     pub perfil: String,
-    /// Drivers que la instalación necesita para arrancar y actualizarse.
+    /// Drivers que la release **trae** compilados en su kernel.
     pub drivers: Vec<String>,
     /// Versión de la ABI de syscalls.
     pub abi: u32,
@@ -40,7 +40,9 @@ pub struct Equipo {
     pub fs: String,
     pub shim: u32,
     pub recuperador: u32,
-    /// Drivers presentes en el kernel en ejecución.
+    /// Drivers que esta máquina **necesita** que la release traiga: sin ellos
+    /// no vuelve a arrancar (el del disco de arranque, el de la red de la OTA).
+    /// No es el inventario de lo que hay: es la lista de lo imprescindible.
     pub drivers: Vec<String>,
 }
 
@@ -55,7 +57,7 @@ pub enum CompatError {
     /// falta la transición de U6, no una sobrescritura de ficheros.
     ShimAntiguo { min: u32, hay: u32 },
     RecuperadorAntiguo { min: u32, hay: u32 },
-    /// Falta un driver imprescindible (disco de arranque, red de la OTA).
+    /// La release no trae un driver imprescindible para esta máquina.
     DriverAusente(String),
     CampoInvalido(&'static str),
 }
@@ -131,9 +133,13 @@ impl Compat {
                 hay: eq.recuperador,
             });
         }
-        for d in &self.drivers {
-            if !eq.drivers.iter().any(|x| x == d) {
-                return Err(CompatError::DriverAusente(d.clone()));
+        // El sentido importa y es fácil invertirlo: se comprueba que la release
+        // trae **todo lo que la máquina necesita**, no que la máquina tenga
+        // todo lo que la release trae. Al revés, cualquier release con un
+        // driver de más se rechazaba.
+        for necesario in &eq.drivers {
+            if !self.drivers.iter().any(|d| d == necesario) {
+                return Err(CompatError::DriverAusente(necesario.clone()));
             }
         }
         Ok(())

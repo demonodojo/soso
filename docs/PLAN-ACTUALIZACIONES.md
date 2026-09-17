@@ -1,6 +1,6 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
-Fecha: **2026-09-16**. Estado: **U0 y U1 cerradas; U2–U8 pendientes**.
+Fecha: **2026-09-17**. Estado: **U0–U4 cerradas; U5a–U5e pendientes (parte de U5c hecha); U6–U8 pendientes**.
 El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md);
 todavía no está conectado al arranque, al cliente ni al instalador.
 Base de la revisión: `92531cd2d` y árbol de trabajo con cambios locales, incluidos
@@ -187,25 +187,148 @@ eliminar su fichero mediante la migración U6 una vez confirmado el logger nuevo
 Los buzones de boot/OTA siguen en ESP. `SOSODRV.TXT` no se elimina como efecto
 colateral; trasladar ese informe podrá evaluarse por separado.
 
+### 3.6 Vuelta atrás segura, incluso después de confirmar
+
+**Ampliación del plan, 2026-09-16; pendiente de implementación en U5–U7.**
+La confirmación del arranque no prueba que todas las aplicaciones funcionen.
+Debe poder recuperarse la versión anterior también después de varios arranques,
+sin Internet, sin reinstalar y sin depender de la shell de la versión defectuosa.
+Las interfaces de esta sección son **propuestas**, no comandos disponibles hoy.
+
+#### Punto de recuperación y conservación
+
+Antes de armar A→B, crear un punto de recuperación de A con ID completo de
+transacción, GUID del destino, versiones/builds, manifiesto, kernel, firmware y
+copias de los archivos administrados que cambian o desaparecen. Registrar los
+archivos añadidos por B para retirarlos al volver. Incluir hashes y longitudes
+exactas, metadatos de versión y cambios reversibles de configuración. Verificar
+el conjunto releyéndolo tras flush; si falta una pieza, **no armar**.
+
+- Conservar A mientras B sea la versión activa, aunque B esté confirmada y se
+  reinicie muchas veces. No caducar el punto por tiempo, limpieza de caché o
+  espacio escaso. `estado` mostrará versión recuperable y si se ha verificado.
+- Al preparar B→C conservar A hasta confirmar C y acreditar que el nuevo punto
+  de B es completo. Durante esa transición pueden coexistir dos puntos. Si C
+  falla, volver a B y conservar también el punto de A que B tenía disponible.
+- **No reutilizar la única copia del kernel anterior como área de descarga.**
+  `SOSOKRN.BIN` hoy alterna kernel nuevo/backup y no basta para esa retención.
+  U5 deberá separar staging y copias retenidas accesibles al shim; U6 ampliará
+  o migrará los huecos ESP necesarios sin formatear. Comprobar capacidad antes
+  de empezar; si no cabe, rechazar la actualización, sin borrar el último punto.
+- La limpieza solo retira puntos no referenciados por el sistema activo, una
+  transacción pendiente o su recuperación. Conservar sus manifiestos mientras
+  haya dependencias; no dejar backups diferenciales huérfanos.
+- Reservar capacidad **efectiva** para restaurar con CoW, journal y logs. La
+  reserva fija de U0 es un mínimo, no una demostración de que quepa cualquier
+  restauración: calcular el peor caso y evitar que otros escritores consuman
+  la reserva mientras exista una operación que la necesite.
+
+#### Tres vías de recuperación
+
+| Situación | Vía propuesta | Comportamiento |
+|---|---|---|
+| B no supera su primer arranque | Automática en el siguiente encendido | Un intento de prueba sin confirmación durable válida inicia la recuperación de A. Una confirmación interrumpida se reconcilia según U0; no se confunde con un fallo. |
+| B arranca, pero falla WiFi o una aplicación | `soso-update revertir` desde consola o SSH | Muestra A/B e ID, verifica el punto y registra la petición durable. La restauración se ejecuta en el siguiente arranque; no sustituye los ejecutables bajo procesos vivos. |
+| No funciona init/sosh, o se quiere volver antes de cargar B | Opción UEFI «soso — recuperar versión anterior» | Entrada del shim, independiente de init y de la red. Muestra el destino, valida la petición y activa el mismo recuperador. Debe ser accesible también desde el menú del firmware, sin exigir una tecla que el usuario pueda perder durante el arranque. |
+| Falla el shim, la ESP o la recuperación interna | Live actualizado en modo mantenimiento | Inspecciona la instalación por GUID y ejecuta recuperación offline sobre su ESP y sosofs, con el destino desmontado y acceso exclusivo. No llama al instalador destructivo. |
+
+La entrada de recuperación tendrá un cargador/recuperador conocido y compatible
+con el formato del punto, protegido de la OTA ordinaria. Su actualización exige
+una transición separada y conservar el recuperador anterior hasta validar el
+nuevo. U5 debe fijar sus artefactos y huecos; U6 los provisionará en instalaciones
+antiguas. Un fallo de la propia ESP se atiende desde el live.
+
+Propuesta de UX adicional: `soso-update recuperacion comprobar` verifica sin
+escribir y enumera qué puede restaurar; `soso-update estado` distingue versión
+en ejecución, versión confirmada, candidata y punto de vuelta atrás. Desde el
+live, `soso-update recuperar --disco <id>` identificará modelo, capacidad y GUID,
+mostrará el plan y pedirá confirmación antes de escribir. Debe rechazar el disco
+del live, un destino montado o una copia perteneciente a otra instalación.
+
+#### Secuencia de restauración y cortes durante la vuelta atrás
+
+1. Resolver el punto exacto y verificar identidad, compatibilidad y todos sus
+   hashes antes de la primera modificación. No elegir «la versión más antigua»
+   ni interpretar metadatos dañados como un sistema sin transacción.
+2. Registrar la intención de revertir en las ranuras redundantes y tomar la
+   exclusión de escritores. Toda entrada —automática, manual, UEFI o live— usa
+   la misma lógica y diario, con eventos identificados en `/var/log`.
+3. Restaurar archivos y configuración según inventario; retirar solo adiciones
+   de la operación. Registrar progreso durable y verificar cada resultado.
+   Un corte durante esta fase mantiene `revirtiendo`: el próximo arranque
+   reanuda sin iniciar servicios ni aplicar de nuevo B.
+4. Restaurar y releer el kernel anterior. Si el recuperador sigue ejecutando
+   el kernel B, **reiniciar antes de lanzar init de A**. El kernel en memoria
+   no cambia al escribir el ELF en la ESP. El orden definitivo entre shim y
+   recuperador debe probarse en U5, incluidos los cortes entre ambos medios.
+5. Arrancar A y verificar la pareja restaurada, sosofs e init/sosh. Distinguir
+   «restauración escrita» de «arranque restaurado validado»; no anunciar éxito
+   solo porque se pudo escribir `revertido` en el journal.
+6. Registrar motivo, versiones, hashes y resultado. Mantener B marcada como
+   fallida para ese ID de manifiesto: no reintentar automáticamente la misma
+   candidata. Un reintento explícito vuelve a pasar todas las verificaciones.
+
+La recuperación tendrá reintentos acotados. Si también falla el arranque de A,
+quedarse en diagnóstico/recuperación; no alternar indefinidamente A↔B. Un corte
+no cuenta como permiso para borrar backups o saltarse la comprobación de hashes.
+No habrá una opción de «forzar» que restaure contenido corrupto o ignore el GUID.
+
+#### Datos creados después de actualizar y límites
+
+La vuelta atrás restaura el sistema administrado, no rebobina todo el disco:
+conservar modelos, documentos, fuentes, credenciales y logs, incluidos los de B.
+Para configuraciones migradas, registrar contenido previo y posterior. Si el
+usuario las modifica después, preservar una copia y usar una transformación
+reversible comprobada; ante un conflicto no resuelto, detenerse antes de
+mutar el sistema y explicarlo en la consola de recuperación.
+
+Una release con cambios de datos o formato de FS incompatibles hacia atrás no
+puede ofrecer esta vuelta atrás ordinaria. U3/U5 deben rechazarla hasta disponer
+de una migración reversible y un recuperador compatible. No basta restaurar
+binarios viejos sobre datos que ya no entienden.
+
+Este mecanismo cubre actualizaciones defectuosas e interrupciones mientras el
+disco y al menos una copia íntegra sean legibles. No recupera por sí solo un
+NVMe averiado o un sosofs ilegible. El live diagnosticará esos casos sin
+formatear; para restaurarlos se necesita una copia externa válida. Un rollback
+fallido debe conservar los datos y copias restantes para ese rescate.
+
 ## 4. Entregas y dependencias
 
-**U0 y U1 cerradas** (2026-09-16). U2–U8 siguen **pendientes**; U2 es el primer
-paso ejecutable.
+**U0–U4 cerradas** (2026-09-17) contra el plan vigente en ese momento. La
+sección 3.6 amplió el alcance de la vuelta atrás **después**, y U5 se desglosó en
+U5a–U5e: siguen **pendientes**, con una parte de U5c hecha (ver sección 6).
+U6–U8 pendientes. El primer paso ejecutable es **U5a**.
 
 | ID | Depende de | Trabajo y archivos principales | Criterio de cierre |
 |---|---|---|---|
 | U0 ✅ | — | Contrato de transacción, tabla de cortes/reconciliación, identidad live/installed, formatos y compatibilidad; `soso-update-core` | **Cerrada 2026-09-16.** [Contrato](U0-CONTRATO-ACTUALIZACION.md) y 92 pruebas host: máquina de estados, registros rotos, confirmación interrumpida y espacio insuficiente. |
 | U1 ✅ | U0 | Persistencia y rotación de los dos rings y eventos OTA; `logbuf`, `applog`, nuevo escritor sosofs, main/scheduler/halt/kshell | **Cerrada 2026-09-16.** `crates/soso-log-core` (13 pruebas host) + `kernel/src/drivers/logfs.rs`; `cargo xtask test-update` acredita que los logs tempranos y los de fd 3 sobreviven al reinicio. |
-| U2 | U1 | Finalización de instalación, modo temprano y eliminación FAT; `soso-install`, `package_live`, `install_disk`, script Linux y utilidades compartidas | Instalación NVMe arranca sin USB, no contiene `SOSOLOG.TXT`, escribe `/var/log`; live conserva su log y el clon es coherente. |
-| U3 | U0 | Contrato de release, perfil, canales, inventario y exclusiones; `release.rs`, manifest/pack y configuración | Fixtures verifican canales/precedencia, versiones y preservación; ninguna release contiene logs, claves, cachés o journal OTA. |
-| U4 | U3 | Preflight y descarga durable reanudable; `soso-update`, `net.rs`, `soso-http` | Corte de red y reinicio reanudan solo bloques pendientes verificados, con RAM acotada y sin cambiar el sistema activo. |
-| U5 | U0, U4 | Backup, exclusión de escritores, aplicación/recuperación antes de firmware/init, shim y confirmación conjunta | Cada corte deja una pareja anterior/nueva completa al arrancar; `revertir` restaura kernel, programas, borrados y versión. |
-| U6 | U2, U5 | Transición de instalaciones existentes, release puente y reparación offline desde live | Migrar una copia de instalación antigua sin formatear ni perder modelos/configuración; interrupciones recuperables; eliminar log FAT tras habilitar logs nativos. |
-| U7 | U1–U6 | Extender bancos host, QEMU USB→NVMe y OTA con fallos | Matriz de la sección 5 verde, incluida actualización sucesiva A→B→C y reversión C→B. |
+| U2 ✅ | U1 | Finalización de instalación, modo temprano y eliminación FAT; `soso-install`, `package_live`, `install_disk`, script Linux y utilidades compartidas | **Cerrada 2026-09-16.** `crates/espfat-core` (10 pruebas host) + identidad temprana en el kernel; `cargo xtask test-install` comprueba ESP sin `SOSOLOG.TXT`, modo `installed` y `/var/log` en el NVMe. |
+| U3 ✅ | U0 | Contrato de release, perfil, canales, inventario y exclusiones; `release.rs`, manifest/pack y configuración | **Cerrada 2026-09-16.** `canal.rs` + inventario con motivo, 14 fixtures de canal/precedencia/exclusiones; `release` emite el contrato de compatibilidad y aborta si cuela una ruta prohibida. |
+| U4 ✅ | U3 | Preflight y descarga durable reanudable; `soso-update`, `net.rs`, `soso-http` | **Cerrada 2026-09-17.** `descarga.rs` (12 pruebas host) + área de preparación en sosofs; `test-update` comprueba la reanudación **cruzando un reinicio**. |
+| U5 | U0, U4 | Backup retenido, exclusión de escritores, aplicación/recuperación antes de firmware/init, shim, entrada UEFI de rescate y confirmación conjunta; desglose U5a–U5e | Vuelta atrás automática y manual, también tras confirmar; ningún corte arranca una pareja mezclada ni elimina la última copia válida (§3.6). |
+| U6 | U2, U5 | Transición de instalaciones existentes, release puente, huecos ESP/entrada de recuperación y reparación offline desde live | Migrar y recuperar sin formatear ni perder modelos/configuración; cortes recuperables; retirar log FAT tras habilitar logs nativos; rescate sin init/sosh ni red del destino. |
+| U7 | U1–U6 | Extender bancos host, QEMU USB→NVMe y OTA con fallos | Matriz de la sección 5 verde, incluida retención A→B→C, fallo de C, reversión tras confirmar y fallo durante la propia recuperación. |
 | U8 | U7 | Release candidata y validación en ROG por WiFi | Instalación/actualización y recuperación verificadas en placa; manual y estado reflejan exactamente lo probado. |
 
 U1–U2 dan una primera entrega útil: instalaciones con logs en sosofs. No se
 anunciará actualización recuperable completa hasta U5–U8.
+
+Desglose de U5 para ejecutar la ampliación sin alterar los cierres históricos:
+
+| Subentrega | Depende de | Entregable y aceptación |
+|---|---|---|
+| U5a | U0 | Extensión versionada del contrato: punto retenido, decisión/estado de rescate, reserva efectiva y tabla de cortes. Sin invalidar silenciosamente registros existentes; pruebas host de cada transición nueva. |
+| U5b | U5a, U4 | Creador/verificador de puntos y conservación durante actualizaciones sucesivas. Cualquier backup incompleto o falta de espacio impide armar; preparar C no destruye la vuelta de B a A. |
+| U5c | U5b | Aplicador y recuperador compartidos, reversión idempotente y arranque de la pareja antigua bajo su kernel. Cortes en todos los pasos y backup corrupto no producen un arranque mixto. |
+| U5d | U5c | CLI manual y entrada UEFI independiente del sistema actualizado. Recuperar sin shell ni red; cancelación antes de escribir; diagnóstico sin bucles si falla también la versión anterior. |
+| U5e | U5d | Confirmación de la pareja, comprobación del arranque restaurado, bloqueo de la candidata fallida y limpieza de puntos no referenciados. Reversión después de varios boots confirmados y datos nuevos conservados. |
+
+U5a–U5e están **pendientes**. La ampliación exige nueva evidencia; las pruebas
+históricas de U0 no certifican estas garantías adicionales. De U5c hay hecha y
+probada una parte —aplicador idempotente con banco de cortes y recuperador
+temprano en el kernel, hoy inerte—; ver sección 6.
 
 **U6, transición obligatoria:** inventariar formato de ESP, tamaño de huecos,
 shim y kernel de recuperación. La release puente debe habilitar el recuperador
@@ -228,6 +351,21 @@ migración. Una vez arrancada y confirmada la base puente, habilitar OTA normal.
 | QEMU, instalación antigua | Migración con y sin huecos/meta modernos; interrupción de migración; recuperación desde live; nunca reinstalación destructiva como salida automática. |
 | ROG NVMe/WiFi | HTTPS sostenido, desconexión/reconexión durante descarga, actualización, arranque sin USB, shell/SSH, WiFi/firmware y logs persistentes; reversión controlada a una versión conocida. |
 
+Casos de aceptación adicionales de vuelta atrás (§3.6), obligatorios para U7/U8:
+
+| Caso | Resultado exigido |
+|---|---|
+| B confirmada, varios reinicios y luego regresión de una aplicación | Reversión manual a A; kernel, firmware, programas y versión coinciden con el punto, con datos nuevos y logs de B conservados. |
+| B deja init/sosh inutilizable o pierde su driver WiFi | Recuperación automática o desde la entrada UEFI, sin SSH, Internet ni ejecutables de B. |
+| Preparar C sobre B falla al descargar o llenar ESP/sosofs | B sigue operativa y su punto de A permanece verificable. No se sobrescribe la única copia de kernel de A. |
+| C falla al arrancar; después se solicita volver desde B a A | C→B recupera una pareja completa y mantiene utilizable el punto previo B→A. |
+| Corte tras cada escritura/flush durante reversión, incluido kernel | Reanuda reversión; jamás init de A con kernel B; una segunda invocación no aplica de nuevo B. |
+| Punto truncado, hash erróneo, GUID ajeno o ambas ranuras dañadas | Rechazo con causa y sin sobrescrituras a ciegas; diagnóstico/lectura desde live y copias restantes conservadas. |
+| Configuración editada después de la migración | Restauración compatible sin perder la edición, o conflicto explícito antes de modificar el sistema; nunca descarte silencioso. |
+| Disco lleno después de armar y antes de revertir | La reserva efectiva permite completar la recuperación y el journal; el logger no consume ese margen. |
+| Kernel/ESP de B inarrancable, punto íntegro en el destino | Rescate desde live sobre el GUID seleccionado; otro NVMe presente queda intacto, sin reinstalar ni tocar modelos. |
+| También falla A durante la validación del arranque restaurado | Diagnóstico estable y rescate disponible, sin bucle de reinicios ni falso mensaje de éxito. |
+
 Reutilizar y extender comandos existentes:
 
 ```sh
@@ -249,6 +387,19 @@ Una prueba con cable o `--local` no acredita OTA por WiFi; QEMU no acredita
 comportamiento ante corte eléctrico real del NVMe.
 
 ## 6. Seguimiento y siguiente paso
+
+### Ampliación de vuelta atrás — 2026-09-16
+
+- **Alcance:** §3.6, desglose U5a–U5e y pruebas de recuperación adicionales.
+  U0–U2 conservan su cierre histórico; U3–U8 y U5a–U5e siguen pendientes.
+- **Hallazgo de diseño:** el slot único `SOSOKRN.BIN` alterna staging/backup;
+  no acredita conservar la versión anterior al preparar la siguiente OTA.
+  Además, restaurar el ELF no sustituye el kernel que sigue ejecutándose.
+- **Evidencia de esta entrega:** revisión del plan, contrato U0 y formatos de
+  buzón/meta; comprobación de enlaces y diff de documentación. No implementa
+  ni valida todavía rollback completo en host, QEMU o placa.
+- **Siguiente paso:** continúa U3; antes del aplicador real, ejecutar U5a y
+  sincronizar extensión del contrato, lógica y pruebas de reconciliación.
 
 Este documento es el índice y registro de estado del plan U0–U8. Al iniciar
 cada entrega, añadir aquí fecha/base, resultado, comandos y evidencia, limitación
@@ -323,3 +474,254 @@ el manual debe seguir describiendo el comportamiento actual.
 - **Siguiente paso: U2.** Finalización de la instalación: escribir la identidad
   `installed` en la ESP del destino, preparar `/var/log` y el estado inicial OTA,
   y reservar los huecos `SOSOTXN.BIN` y `SOSOMODE.TXT` que el contrato U0 exige.
+
+### U2 — cerrada el 2026-09-16
+
+- **Base:** `92531cd2d` más el árbol de trabajo de esa fecha.
+- **Resultado:** el destino de una instalación deja de ser «un live con otros
+  GUID» y pasa a declararse como instalación.
+  - [`crates/espfat-core`](../crates/espfat-core): la lógica FAT sale del kernel
+    a un crate no_std sobre un trait de sectores, para poder operar sobre la ESP
+    **del disco destino** —que es otro volumen y no está montado— y para poder
+    probarla en host (10 pruebas). Incluye la primitiva que faltaba: **borrar**
+    de verdad, marcando la entrada de directorio y liberando la cadena en todas
+    las copias de la FAT, en ese orden (al revés, un corte deja dos ficheros
+    enlazados sobre los mismos datos). El kernel pierde 200 líneas duplicadas.
+  - Identidad temprana: `package_live` pre-crea `SOSOMODE.TXT` y `SOSOTXN.BIN`;
+    [`drivers/modo.rs`](../kernel/src/drivers/modo.rs) la lee antes de montar
+    sosofs y `fatlog` se apaga **sólo** con una identidad explícita, propia e
+    `installed`. `live_disk` conserva ahora el GUID de la ESP para detectar un
+    clon sin finalizar.
+  - [`soso-install`](../user/coreutils/src/bin/soso-install.rs) finaliza el
+    destino: escribe la identidad con el GUID **nuevo**, retira `SOSOLOG.TXT` y
+    `SOSOBOOT.TXT`, y **rechaza clonar un origen con una OTA a medias** (el
+    destino heredaría un buzón cuyo respaldo se quedó en el USB).
+  - Clon coherente: `soso-install` **pausa el escritor de logs** mientras copia
+    (`SYS_FATLOG_FLUSH` con modo `quiesce`). Es un riesgo que introdujo U1: desde
+    entonces el kernel escribe en el rootfs cada dos segundos, y un commit de
+    sosofs a mitad del clon deja en el destino un superbloque que apunta a
+    bloques aún sin copiar.
+  - Misma finalización en `cargo xtask install-disk` (con `espfat-core` sobre el
+    dispositivo) y en el `install-soso.sh` empaquetado (con `mount`+`rm` y la
+    suma calculada con `sha256sum`); un test ata el formato que escribe el script
+    al que produce el crate.
+- **Un hallazgo que costó la tarde:** al meter la lectura de identidad en el
+  kernel, `cargo xtask test` empezó a fallar con los **cuatro shards muertos y
+  el log de serie a cero bytes**. No era el código: es el techo del cargador de
+  la **imagen BIOS**. Medido: 30 921 376 B de kernel arrancan, 31 318 224 B no,
+  y la misma imagen **UEFI arranca sin problema** con el mismo kernel. Usar
+  `soso-update-core` desde `drivers/modo.rs` costó ~400 KB y bastó para cruzarlo.
+  Dos consecuencias:
+  - `SOSO_FIRMWARE` pasa a **uefi por defecto** en la suite (decisión del
+    usuario, 2026-09-16). Es el firmware de la placa real y el kernel va a
+    seguir creciendo: el aplicador de U5 va dentro.
+  - Se arregló de paso un fallo del arnés que hacía inútil `SOSO_FIRMWARE=uefi`:
+    la copia por shard se llamaba siempre `test-<id>-bios.img` y `apply_firmware`
+    comparaba con el nombre exacto `soso-uefi.img`, así que lanzaba la imagen
+    UEFI **sin OVMF** — otro guest mudo con la misma pinta.
+  - El campo `sum=` de los registros durables pasa de SHA-256 a **CRC32C**
+    (`crc`, que el kernel ya enlaza vía sosofs). Protege contra escrituras
+    cortadas, no contra falsificación, y esa distinción tiene precio en un
+    kernel. El `install-soso.sh` de Linux ya no escribe la identidad —bash no
+    calcula CRC32C con herramientas estándar—: retira `SOSOLOG.TXT` y deja la
+    identidad heredada, con lo que los logs acaban en `/var/log` igualmente.
+- **Comandos y evidencia:** `cargo test -p espfat-core --features std` (10),
+  `cargo test -p soso-update-core --features std --tests` (14 en identidad y
+  compatibilidad), `cargo xtask check`, `cargo xtask test`, `cargo xtask test-update`
+  y `SOSO_MODELS_SIZE=256M cargo xtask test-install`, que añade dos
+  comprobaciones nuevas sobre la imagen del destino —sin `SOSOLOG.TXT` y con
+  modo `installed`— y exige que el arranque nativo escriba `/var/log/kernel.log`.
+  Contraste en los logs de serie del propio banco: el live dice «modo: sin
+  SOSOMODE.TXT; se trata como live» y conserva `SOSOLOG.TXT`; la instalación dice
+  «modo: installed (declarado…)» y «fatlog: instalación declarada».
+- **Limitación:** la finalización por `install-disk` y por el script de Linux
+  **no está probada E2E**: sólo lo está el instalador nativo, que es el camino
+  del criterio de cierre. El live sigue sin declararse `live` de forma explícita
+  (su `SOSOMODE.TXT` va vacío y se resuelve como heredado); es equivalente en
+  comportamiento, pero la declaración explícita convendría al llegar a U6.
+  `SOSOTXN.BIN` queda **reservado y sin usar**: lo consume el aplicador de U5.
+  Las instalaciones ya existentes no se migran: eso es U6.
+- **Siguiente paso: U3.** Contrato de release: perfil, canales, inventario y
+  exclusiones, emitiendo ya las líneas de compatibilidad que U0 definió y
+  fijando la política de firma del manifiesto.
+
+### U3 — cerrada el 2026-09-16
+
+- **Base:** `e2c42f400` más el árbol de trabajo de esa fecha.
+- **Resultado:** una release ya dice para qué sirve, y el cliente la rechaza
+  antes de bajarla si no sirve para esta máquina.
+  - **Contrato emitido:** `cargo xtask release` escribe las líneas de
+    compatibilidad que U0 definió (`arch`, `perfil`, `drivers`, `abi`, `fs`,
+    `min_shim`, `min_recuperador`), con `drv-all` expandido — un manifiesto que
+    dijera «all» obligaría al cliente a conocer las meta-features de este
+    repositorio. `soso-abi::ABI_VERSION` es ahora el número que se declara.
+  - **Comprobación antes de descargar:** `soso-update` construye su `Equipo` y
+    rechaza arquitectura, ABI, formato de FS o shim/recuperador incompatibles, y
+    una release que **no traiga el driver de su disco de arranque**. Un
+    manifiesto sin contrato se rechaza: es una release anterior a este cliente.
+  - **Canales** ([`canal.rs`](../crates/soso-update-core/src/canal.rs)): precedencia
+    fijada y documentada (`--local` > `--channel` > `url=` > `channel=` > stable).
+    Se arreglan dos cosas que estaban mal: el `url=` del fichero anulaba en
+    silencio el `--channel` de la orden, y el canal `dev` generaba
+    `…/download/dev/download/manifest.txt`, con un `/download` de más. El origen
+    se resuelve **una sola vez por comando** —con `latest`, resolverlo en cada
+    petición puede mezclar artefactos de dos releases— y `comprobar` dice de
+    dónde va a bajar y por qué.
+  - **Inventario con motivo** (`por_que_se_excluye`): las exclusiones dejan de
+    ser una lista de rutas y pasan a estar clasificadas (log, estado OTA, caché,
+    temporal, config local, volumen, fuente). Se añaden las que U1 y U2 crearon
+    y nadie había excluido todavía: **`var/log/`** y **`var/lib/soso-update/`**,
+    más `var/cache/`, `tmp/` y los sufijos `.log`/`.key`/`_key`. `release`
+    **aborta** si alguna ruta prohibida llega al pack: una release publicada con
+    la clave SSH de quien empaquetó no se puede despublicar.
+  - **Firma:** decidida y escrita en el contrato (U0 §8). Hoy **no se firma**;
+    la confianza está en HTTPS contra el origen y en los hashes del manifiesto,
+    lo que detecta corrupción pero **no** protege de quien controle el origen.
+    Quedan fijados los requisitos de la firma futura (ed25519 separada sobre los
+    bytes exactos del manifiesto, clave que sólo cambia una migración,
+    verificación antes de escribir nada).
+- **Un error de diseño que sólo apareció al usarlo:** la comprobación de drivers
+  estaba **invertida** —exigía que la máquina tuviera todo lo que la release
+  trae, de modo que cualquier release completa se rechazaba—. Lo destapó
+  `test-update`, no el banco host, porque el banco había fijado las dos listas
+  con el mismo contenido. Ahora el manifiesto declara lo que la release **trae**,
+  el equipo lo que **necesita**, y hay un test de que lo contrario no es error.
+- **Comandos y evidencia:** `cargo test -p soso-update-core --features std --tests`
+  (107 pruebas, 14 nuevas en `release_canal.rs`), `cargo xtask check`,
+  `cargo xtask test` y `cargo xtask test-update` 4/4 con el contrato nuevo.
+- **Limitación:** los drivers que el cliente exige se deducen sólo del **medio
+  de arranque**; la red por la que se actualiza todavía no entra en la cuenta,
+  porque no hay forma de preguntarle al kernel qué drivers lleva compilados.
+  No se ha publicado ninguna release real con este contrato: `cargo xtask release`
+  está probado en compilación y por el banco de OTA con una release fabricada,
+  no contra GitHub.
+- **Siguiente paso: U4.** Preflight y descarga durable reanudable: que un corte
+  de red y un reinicio reanuden sólo los bloques pendientes verificados, con RAM
+  acotada y sin tocar el sistema activo.
+
+### U4 — cerrada el 2026-09-17
+
+- **Base:** `e2c42f400` más el árbol de trabajo.
+- **Resultado:** bajar una actualización deja de ser una operación de todo o
+  nada que además tocaba el sistema mientras bajaba.
+  - **Bajar ya no cambia el sistema activo.** Antes, cada tramo descargado se
+    escribía en `/bin` y `/lib` según llegaba: un corte a mitad dejaba media
+    versión instalada. Ahora todo cae en
+    `/var/lib/soso-update/<id>/etapa/`, verificado por hash, y sólo cuando está
+    entero se copia al sistema.
+  - **Reanudable de verdad.** El área lleva un registro durable
+    ([`descarga.rs`](../crates/soso-update-core/src/descarga.rs)) atado al **hash
+    del manifiesto**, no a la versión: si `latest` cambia entre dos intentos, lo
+    bajado no se reutiliza, porque los offsets del pack son de otro fichero. Lo
+    que ya está y verifica no se vuelve a pedir; un fichero truncado por un
+    corte no cuenta como hecho y se baja entero.
+  - **RAM acotada.** `net.rs` gana una variante que entrega cada trozo según
+    llega (`https_download_span_a`) y el trozo baja de 8 MiB a
+    `TROZO_MAX` = 1 MiB. Antes se reservaba el tramo entero: memoria que una
+    máquina pequeña no tiene, y un corte al 99 % obligaba a repetirlo todo. Se
+    siguen pidiendo **tramos** y no ficheros sueltos, para no hacer una petición
+    HTTP por binario; lo que se sostiene en RAM es el fichero en curso.
+  - **Comprobación previa real.** Nueva syscall `SYS_FSINFO` (88) con el espacio
+    del sosofs raíz, que alimenta el `preflight` de U0: se exige sitio para
+    preparar **y** para deshacer, más las reservas de log y recuperación.
+    Quedarse sin espacio a mitad es una de las formas típicas de dejar una
+    pareja kernel/rootfs incoherente.
+- **Comandos y evidencia:** `cargo test -p soso-update-core --features std --tests`
+  (119 pruebas, 12 nuevas en `descarga.rs`), `cargo xtask check`,
+  `cargo xtask test` y `cargo xtask test-update` 4/4. El arranque 2 del banco
+  ensucia el fichero ya instalado y vuelve a aplicar: tiene que **reanudar desde
+  el área de preparación que dejó el arranque anterior**, lo que cruza un
+  reinicio de verdad.
+- **Limitación:** el corte de red no se provoca en el banco —la reanudación se
+  prueba a nivel de unidad y, cruzando el reinicio, con `--local`—; los casos de
+  la matriz de U7 (DNS, TLS, 206 con `Content-Range` incorrecto, 200 inesperado,
+  redirect, 429/5xx) siguen pendientes. El área de preparación no se recoge
+  sola: una release abandonada deja sus ficheros hasta que otra la sustituya.
+  La identidad entre peticiones se comprueba contra el manifiesto al empezar,
+  no en cada petición HTTP.
+- **Siguiente paso: U5.** Respaldo, exclusión de escritores y aplicación desde
+  la transacción: el aplicador temprano que consume `reconcile()` y el progreso
+  del diario, con confirmación conjunta de kernel y rootfs.
+
+### U5c — parcial el 2026-09-17 (aplicador y recuperador)
+
+**Ojo al alcance.** Esta sesión cerró U0–U4 contra el plan tal como estaba, y
+mientras tanto el plan **creció**: la sección 3.6 (2026-09-16) añadió puntos de
+recuperación retenidos, tres vías de vuelta atrás y una entrada UEFI de rescate,
+y U5 se desglosó en U5a–U5e. Lo entregado aquí es **una parte de U5c**, no U5.
+U5a, U5b, U5d y U5e siguen enteras pendientes, y sin U5a/U5b esto **no** da la
+garantía de la sección 3.6: el respaldo que maneja es el de la operación en
+curso, no un punto retenido que sobreviva a la confirmación de B ni que coexista
+con el de B durante B→C.
+
+**Lo que hay, probado:**
+
+- **Aplicador idempotente** ([`txn/aplicador.rs`](../crates/soso-update-core/src/txn/aplicador.rs)):
+  ejecuta lo que `reconcile` decide, sin E/S propia (el kernel y el cliente
+  aportan un `Sistema`), verificando hashes **antes** de escribir tanto lo
+  preparado como lo respaldado. `se_puede_deshacer` es la comprobación previa a
+  armar: sin respaldo íntegro de todo lo que cambia, no se publica nada.
+- **Banco de cortes** (`tests/aplicador.rs`, 11 pruebas): corta en **cada** paso
+  de aplicar y de deshacer, reanuda desde el diario durable y exige que el
+  sistema quede o entero nuevo o entero anterior.
+  - **Encontró un fallo real:** entre escribir un fichero y anotar que se
+    escribió hay una ventana. Un corte ahí dejaba el diario diciendo
+    «pendiente» sobre un fichero que ya era el nuevo, y deshacer **sólo lo
+    marcado** dejaba una **pareja mezclada** — exactamente lo que este contrato
+    existe para impedir. Ahora la reversión restaura la operación entera mire lo
+    que mire el progreso: es idempotente (reescribir un fichero intacto con su
+    propio respaldo no lo cambia) y cuesta E/S, no corrección.
+- **Recuperador temprano en el kernel**
+  ([`drivers/txnaplica.rs`](../kernel/src/drivers/txnaplica.rs)): lee el registro
+  de arranque de `SOSOTXN.BIN` y el diario de sosofs, llama a `reconcile` y
+  ejecuta. Corre **después de montar sosofs y antes de cargar firmware de `/lib`
+  y de arrancar `/bin/init`**, y con una pareja incoherente **no lanza nada de
+  usuario**: se queda en la consola de emergencia. El diario se escribe por
+  turnos entre `diario.0` y `diario.1`.
+- `soso-update-core` gana la feature `txn`, para que el kernel compile el
+  contrato de transacción sin arrastrar el formato de release.
+
+**Lo que falta de U5c, y por qué esto todavía no se usa:**
+
+- Que `soso-update aplicar` **arme** en vez de instalar: respaldar lo que cambia,
+  escribir el diario, publicar el registro de arranque y dejar que el siguiente
+  arranque aplique. Hoy sigue copiando los ficheros él mismo, así que **el
+  recuperador está enlazado pero inerte**: nadie arma nada y `reconcile` siempre
+  decide «normal».
+- Arrancar la pareja antigua **bajo su propio kernel**, que U5c exige y aquí no
+  está: el recuperador restaura el rootfs, pero la vuelta del kernel sigue
+  dependiendo del buzón `SOSOKRN.MET` de siempre.
+- Cortar en cada punto **dentro de QEMU**: hoy los cortes sólo están cubiertos
+  en banco host.
+
+**Y antes de U5c, en realidad, van U5a y U5b:** la extensión versionada del
+contrato (punto retenido, estado de rescate, reserva efectiva) y el
+creador/verificador de puntos con conservación A→B→C. El aplicador de aquí les
+sirve, pero su modelo de respaldo tendrá que ampliarse: hoy es «una operación,
+un respaldo», no «puntos retenidos».
+
+**Estado del árbol:** `cargo xtask check` y `cargo xtask test-update` (4/4) en
+verde. `cargo xtask test` pasa, pero el paso `voz` necesita reintentos desde
+este cambio, y una vez agotó los tres y tumbó la suite.
+
+**No es un fallo de la actualización ni de voz.** Capturado el log de serie en
+el momento del fallo: **pánico del kernel** con `page fault at 0x0 rip=0x0
+cs=0x8 err=0x10`, es decir un `ret` sobre basura en ring 0. Analizado:
+
+- El `rsp` del fallo cae **fuera de toda pila válida** —en `AP_STACKS`, 480 KiB
+  de `.bss` a ceros que con `-smp 1` nadie usa—, así que es un **`rsp`
+  corrompido**, no un desbordamiento de `KSTACK`. El log confirma
+  `smp: MADT con 1 CPUs`, y había 377 567 frames libres: ni SMP ni falta de RAM.
+- Las líneas `mmap-fault … región RO` y `spawn: elf inválido` de justo antes son
+  del paso `init test`, que las provoca a propósito.
+- Los marcos del rastro son basura de pila, no una cadena de llamadas.
+
+Queda **abierto**: es corrupción de memoria del kernel y arreglarlo a ojo sería
+peor que dejarlo documentado; hace falta una sesión con gdb y una reproducción.
+Lo que sí se hizo: el pánico ahora dice **en qué pila cayó el `rsp`**
+(`arch::gdt::zona_de_pila`), que es la deducción que costó la sesión entera.
+
+**Corrección importante sobre la atribución:** el control que hice con
+`git stash -u` se llevó **U2–U5 a la vez**, no sólo U5. Así que no está
+demostrado que lo dispare el recuperador de U5; sólo que con el árbol de hoy
+`voz` necesita reintentos y sin esas cuatro entregas no los necesitó.

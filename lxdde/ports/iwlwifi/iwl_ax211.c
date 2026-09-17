@@ -104,6 +104,8 @@ static int iwl_ax211_probe(struct lx_pci_dev *pdev, const struct lx_pci_device_i
     if (lx_pci_enable_device(pdev) != 0)
         return -1;
     lx_pci_set_master(pdev);
+    /* Linux pcie/drv.c:1532 — evitar reintentos PCI Tx vs C3. */
+    lx_pci_write_config(pdev, (int)PCI_CFG_RETRY_TIMEOUT, 0, 1);
 
     void *mmio = lx_pci_iomap(pdev, 0, 0x10000);
     if (!mmio)

@@ -9894,47 +9894,47 @@
       "firmware": {},
       "artefactos": {},
       "git": {
-        "commit": "dfec53f84d49756b7c869e072444b247c6cc7728",
-        "commit_corto": "dfec53f84",
+        "commit": "e2c42f400",
+        "commit_corto": "e2c42f400",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "98 ficheros modificados"
+        "cambios_locales": "run7: FH OK (INT≠0x08000000) pero ALIVE INIT falla SB1=0x3; host añade tx_init 31 colas+SCD_GP_CTRL pre-INIT, PCI 0x41=0, wait_alive ACK FH_RX/ALIVE (pendiente reflash)"
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh pid=2; sin adaptador WiFi (8086:24fd no reclamado); rtl8169 DOWN. No es aceptación.",
-        "fecha": "2026-09-15"
+        "nota": "sosh pid=2; WiFi probe OK pero ALIVE falló; rtl8169 DOWN. sosh≠ALIVE.",
+        "fecha": "2026-09-16"
       },
       "wifi": {
         "alive": {
           "status": "fail",
-          "nota": "sin probe: 8086:24fd no está en iwl_ax211_ids; start rc=-1 alive=false (no es ALIVE degradado)",
-          "fecha": "2026-09-15"
+          "nota": "run7 flush#24: timeout ALIVE INIT INT=0 SB1=0x3 SB2=0x29f6 rb_hw=0 LOAD_ST=0xffffffff; FH chunks OK; falta tx_init 31 colas pre-INIT (corregido host, sin reflash)",
+          "fecha": "2026-09-16"
         },
         "init_complete": {
           "status": "fail",
-          "nota": "MVM no arranca: chip familia 8000 no portado",
-          "fecha": "2026-09-15"
+          "nota": "sin ALIVE RT; MVM no llega a INIT_COMPLETE",
+          "fecha": "2026-09-16"
         },
         "mvm_ready": {
           "status": "fail",
-          "nota": "sin probe / sin ALIVE",
-          "fecha": "2026-09-15"
+          "nota": "phase=fw_start alive=false",
+          "fecha": "2026-09-16"
         },
         "scan": {
           "status": "fail",
-          "nota": "hwscan RED SIN DRIVER 8086:24fd; wifi scan sin adaptador",
-          "fecha": "2026-09-15"
+          "nota": "wifi scan: firmware no arrancó (phase=fw_start); sin BSS",
+          "fecha": "2026-09-16"
         },
         "assoc_wpa2": {
           "status": "pendiente"
         },
         "dhcp": {
           "status": "pendiente",
-          "nota": "sin WiFi; net: dhcp es rtl8169 DOWN, no lease LxWifi",
-          "fecha": "2026-09-15"
+          "nota": "sin WiFi; rtl8169 DOWN sin cable — no es DHCP WiFi",
+          "fecha": "2026-09-16"
         },
         "ssh": {
           "status": "pendiente",
@@ -9967,8 +9967,12 @@
       },
       "bench": {},
       "logs": [
-        "target/usb-diagnostic-2026-09-15/SOSOLOG-parse.txt",
-        "target/usb-diagnostic-2026-09-15/SOSODRV-parse.txt"
+        "target/usb-diagnostic-2026-09-16-run7/SOSOLOG.body.txt",
+        "target/usb-diagnostic-2026-09-16-eve/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-16-eve/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-16/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-16/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-15/SOSOLOG-parse.txt"
       ],
       "historial": [
         {
@@ -10061,8 +10065,8 @@
           "fecha": "2026-09-15"
         }
       ],
-      "notas": "flush#24 @211763ms (kernel flasheado sin 8265): RED SIN DRIVER. Tree 15sep noche: probe+FH+HCMD SCD+MVM 8000 implementados; hostcheck OK. Pendiente reflash+SOSOWIFI y validar UCODE_ALIVE/scan en placa. Ver docs/DIAGNOSTICO-HP-2026-09-15.md",
-      "actualizado": "2026-09-15"
+      "notas": "run7 flush#24 @408s: FH fixes OK (11 chunks, INT=0) pero ALIVE INIT falla SecBoot SB1=0x3. Host: tx_init 31 colas+SCD_GP_CTRL pre-INIT, PCI retry 0x41=0, wait_alive ISR+kick dumps. Hostcheck OK; pendiente reflash. Ver docs/DIAGNOSTICO-HP-2026-09-16.md",
+      "actualizado": "2026-09-16"
     }
   ]
 }

@@ -35,6 +35,62 @@ static int iwl_pnvm_load(struct iwl_ax211_priv *iwl)
     return -1;
 }
 
+static int iwl_mvm_run_init_8000(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_phy_cfg_cmd_v1 phy;
+    int t;
+
+    if (!iwl->alive)
+        return -1;
+
+    iwl->init_complete = 0;
+
+    {
+        struct iwl_tx_ant_cfg_cmd ant;
+
+        memset(&ant, 0, sizeof(ant));
+        ant.valid = iwl_mvm_valid_tx_ant(iwl);
+        if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, TX_ANT_CONFIGURATION_CMD, &ant,
+                                    (uint16_t)sizeof(ant), 2000) != 0) {
+            lx_printk("iwl_mvm: TX_ANT 8000 falló\n");
+            return -1;
+        }
+    }
+
+    memset(&phy, 0, sizeof(phy));
+    phy.phy_cfg = iwl->phy_sku;
+    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_CONFIGURATION_CMD, &phy,
+                                (uint16_t)sizeof(phy), 2000) != 0) {
+        lx_printk("iwl_mvm: PHY_CFG 8000 falló\n");
+        return -1;
+    }
+
+    for (t = 0; t < 600; t++) {
+        iwl_trans_poll(iwl);
+        if (iwl->init_complete)
+            break;
+        lx_mdelay(10);
+    }
+    if (!iwl->init_complete) {
+        lx_printk("iwl_mvm: timeout INIT_COMPLETE_NOTIF (8000)\n");
+        return -1;
+    }
+
+    iwl->radio_ready = 1;
+    if (iwl_mvm_nvm_get_info_mac(iwl) != 0) {
+        iwl->radio_ready = 0;
+        iwl->nvm_ready = 0;
+        lx_printk("iwl_mvm: NVM_EXT/NVM_GET_INFO falló (8000)\n");
+        return -1;
+    }
+    iwl->nvm_ready = 1;
+    lx_printk("iwl_mvm: init 8000 listo (phy_sku=0x%08x n_scan=%u tx=0x%x rx=0x%x)\n",
+              (unsigned)iwl->phy_sku, (unsigned)iwl->n_scan_channels,
+              (unsigned)iwl_mvm_valid_tx_ant(iwl),
+              (unsigned)iwl_mvm_valid_rx_ant(iwl));
+    return 0;
+}
+
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
 {
     struct iwl_init_extended_cfg_cmd init_cfg;
@@ -44,6 +100,9 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
     if (!iwl->alive) {
         return -1;
     }
+
+    if (iwl->family == IWL_DEVICE_FAMILY_8000)
+        return iwl_mvm_run_init_8000(iwl);
 
     if (iwl_pnvm_load(iwl) != 0) {
         return -1;

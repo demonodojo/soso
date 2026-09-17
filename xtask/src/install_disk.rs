@@ -130,6 +130,16 @@ pub fn install_from_image(live: &Path, dev: &Path, root: &Path, opts: InstallOpt
         String::new()
     });
 
+    // El disco acaba de recibir una copia del live: hay que convertirlo en una
+    // instalación antes de que arranque, o seguirá comportándose como tal.
+    let partuuid = esp_partuuid(&esp_path).unwrap_or_default();
+    match finalizar_esp(&esp_path, &partuuid) {
+        Ok(()) => println!("install-disk: destino declarado como instalación (sin SOSOLOG.TXT)"),
+        Err(e) => eprintln!(
+            "install-disk: aviso: no pude finalizar la ESP ({e});\n             el disco arrancará, pero se comportará como un live"
+        ),
+    }
+
     if opts.no_grub {
         print_manual_grub(root, &uuid);
         print_summary(dev, &uuid, false);
@@ -636,4 +646,81 @@ sdd4 /media/jmdiez/SOSOINSTALL\n";
     fn parse_lsblk_ignores_disk_without_mounts() {
         assert!(parse_lsblk_mounts("sdd\nsdd1\nsdd4\n", "sdd").is_none());
     }
+}
+
+// ------------------------------------------------- finalizar la instalación
+
+/// Acceso por sectores a una partición (o imagen) desde el host.
+struct FicheroSectores(std::fs::File);
+
+impl espfat_core::Sectores for FicheroSectores {
+    fn leer(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), espfat_core::FatError> {
+        use std::io::{Read, Seek, SeekFrom};
+        self.0
+            .seek(SeekFrom::Start(lba * espfat_core::SECTOR as u64))
+            .map_err(|_| espfat_core::FatError::Io)?;
+        self.0.read_exact(buf).map_err(|_| espfat_core::FatError::Io)
+    }
+    fn escribir(&mut self, lba: u64, buf: &[u8]) -> Result<(), espfat_core::FatError> {
+        use std::io::{Seek, SeekFrom, Write};
+        self.0
+            .seek(SeekFrom::Start(lba * espfat_core::SECTOR as u64))
+            .map_err(|_| espfat_core::FatError::Io)?;
+        self.0.write_all(buf).map_err(|_| espfat_core::FatError::Io)
+    }
+}
+
+/// Convierte una ESP recién escrita en la de una **instalación**: declara la
+/// identidad `installed` y retira `SOSOLOG.TXT`.
+///
+/// Es lo mismo que hace `soso-install` desde dentro de soso, con la misma
+/// lógica (`espfat-core`). Sin esto el disco sería un live con otros GUID:
+/// seguiría escribiendo su log en la ESP y el kernel no sabría que ya no es un
+/// medio de diagnóstico.
+pub(crate) fn finalizar_esp(esp: &Path, partuuid: &str) -> Result<(), String> {
+    use espfat_core::Volumen;
+
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(esp)
+        .map_err(|e| format!("no pude abrir {}: {e}", esp.display()))?;
+    let mut vol = Volumen::abrir(FicheroSectores(f)).map_err(|e| format!("{e:?}"))?;
+
+    let fecha = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let registro = soso_update_core::ModeRecord::nuevo(
+        soso_update_core::BootMode::Installed,
+        &fecha,
+        partuuid,
+        1,
+    );
+    let bytes = registro.format().map_err(|e| format!("{e:?}"))?;
+    let slot = vol
+        .localizar(b"SOSOMODE", b"TXT", soso_update_core::UPD_MODE_SIZE)
+        .map_err(|e| format!("SOSOMODE.TXT: {e:?}"))?;
+    // Ranura, no sector: el registro se divide en ranuras de 1 KiB.
+    let ranura = registro.ranura() * soso_update_core::SLOT_SIZE;
+    let mut buf = vec![b'\n'; soso_update_core::UPD_MODE_SIZE];
+    buf[ranura..ranura + bytes.len()].copy_from_slice(&bytes);
+    espfat_core::Sectores::escribir(vol.dispositivo(), slot.data_lba, &buf)
+        .map_err(|e| format!("escribir SOSOMODE.TXT: {e:?}"))?;
+
+    match vol.borrar(b"SOSOLOG ", b"TXT") {
+        Ok(()) | Err(espfat_core::FatError::NoEncontrado) => {}
+        Err(e) => return Err(format!("retirar SOSOLOG.TXT: {e:?}")),
+    }
+    let _ = vol.borrar(b"SOSOBOOT", b"TXT");
+    Ok(())
+}
+
+/// PARTUUID de la ESP (GUID único de la partición en la GPT), que es lo que
+/// identifica **esta** ESP; el UUID de `esp_uuid` es el del volumen FAT.
+pub(crate) fn esp_partuuid(esp: &Path) -> Option<String> {
+    let out = Command::new("blkid")
+        .args(["-s", "PARTUUID", "-o", "value"])
+        .arg(esp)
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
 }

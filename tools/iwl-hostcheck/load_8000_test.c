@@ -175,14 +175,114 @@ static int hcmd_constants(void)
     if (sizeof(struct iwl_tfd) != IWL_GEN1_TFD_SIZE ||
         IWL_8000_TFD_RING_N * IWL_GEN1_TFD_SIZE != 32768u ||
         IWL_8000_NUM_QUEUES * IWL_SCD_BC_TBL_BYTES == 0u ||
+        IWL_8000_RX_N != 256u || IWL_8000_RX_LOG != 8u ||
         FH_MEM_CBBC_QUEUE(0) != 0x19d0u ||
         SCD_SRAM_BASE_ADDR != 0xa02c00u ||
         SCD_DRAM_BASE_ADDR != 0xa02c08u ||
-        SCD_TXFACT != 0xa02c10u) {
-        fprintf(stderr, "FALLO: constantes HCMD/SCD 8000\n");
+        SCD_TXFACT != 0xa02c10u ||
+        CSR_INI_SET_MASK == 0u) {
+        fprintf(stderr, "FALLO: constantes HCMD/SCD/RX 8000\n");
         return -1;
     }
-    puts("OK: constantes HCMD/SCD 8000 (gen1 TFD 128 B, CBBC q0, SCD prph)");
+    puts("OK: constantes HCMD/SCD/RX 8000 (256 RBD log=8, CSR_INI_SET_MASK)");
+    return 0;
+}
+
+static int chunk_wait_policy(void)
+{
+    uint32_t tssr_idle = FH_TSSR_TX_STATUS_REG_MSK_CHNL_IDLE(FH_SRVC_CHNL);
+
+    if (iwl_8000_chunk_done_policy(0u, tssr_idle) != 0) {
+        fprintf(stderr, "FALLO: TSSR idle sin FH_TX no debe ser chunk OK\n");
+        return -1;
+    }
+    if (iwl_8000_chunk_done_policy(CSR_INT_BIT_FH_TX, 0u) != 1) {
+        fprintf(stderr, "FALLO: FH_TX debe completar chunk\n");
+        return -1;
+    }
+    puts("OK: wait_chunk solo FH_TX (TSSR idle sin INT no cuenta)");
+    return 0;
+}
+
+static int tx_init_order(void)
+{
+    uint64_t ring_dma[IWL_8000_NUM_QUEUES];
+    struct iwl_8000_tx_init_prog prog;
+    unsigned qid;
+
+    for (qid = 0; qid < IWL_8000_NUM_QUEUES; qid++)
+        ring_dma[qid] = 0x10000000ull + (uint64_t)qid * 0x20000ull;
+    iwl_8000_tx_init_program(0x2000ull, ring_dma, IWL_8000_NUM_QUEUES, &prog);
+
+    if (prog.scd_txfact != 0u || prog.kw_reg != FH_KW_MEM_ADDR_REG ||
+        prog.kw_val != 0x200u ||
+        prog.gp_ctrl_set != (SCD_GP_CTRL_AUTO_ACTIVE_MODE |
+                             SCD_GP_CTRL_ENABLE_31_QUEUES)) {
+        fprintf(stderr, "FALLO: tx_init SCD/KW/GP txfact=0x%x kw=0x%x/0x%x gp=0x%x\n",
+                prog.scd_txfact, prog.kw_reg, prog.kw_val, prog.gp_ctrl_set);
+        return -1;
+    }
+    for (qid = 0; qid < IWL_8000_NUM_QUEUES; qid++) {
+        unsigned slots = iwl_8000_tx_slots(qid, IWL_MVM_DQA_CMD_QUEUE);
+        uint32_t expect = (uint32_t)(ring_dma[qid] >> 8);
+
+        if (prog.cbbc[qid] != expect) {
+            fprintf(stderr, "FALLO: CBBC q%u=0x%x vs 0x%x\n",
+                    qid, prog.cbbc[qid], expect);
+            return -1;
+        }
+        if (qid == IWL_MVM_DQA_CMD_QUEUE) {
+            if (slots != IWL_CMD_QUEUE_SIZE) {
+                fprintf(stderr, "FALLO: slots cmd=%u\n", slots);
+                return -1;
+            }
+        } else if (slots != IWL_DEFAULT_QUEUE_SIZE) {
+            fprintf(stderr, "FALLO: slots q%u=%u\n", qid, slots);
+            return -1;
+        }
+    }
+    if (FH_MEM_CBBC_QUEUE(0) != 0x19d0u || SCD_GP_CTRL != 0xa02da8u ||
+        PCI_CFG_RETRY_TIMEOUT != 0x41u) {
+        fprintf(stderr, "FALLO: constantes tx_init 8000\n");
+        return -1;
+    }
+    puts("OK: tx_init 31 colas (SCD off→KW→CBBC→SCD_GP_CTRL) vs Linux tx.c:546");
+    return 0;
+}
+
+static int tx_preload_gate(void)
+{
+    struct iwl_ax211_priv iwl;
+
+    memset(&iwl, 0, sizeof(iwl));
+    if (iwl_8000_tx_preload_ready(&iwl) != 0) {
+        fprintf(stderr, "FALLO: tx_preload_ready debe ser 0 al inicio\n");
+        return -1;
+    }
+    iwl.tx_preload_ready = 1;
+    if (iwl_8000_tx_preload_ready(&iwl) != 1) {
+        fprintf(stderr, "FALLO: tx_preload_ready debe ser 1 tras tx_init\n");
+        return -1;
+    }
+    puts("OK: start no carga INIT sin tx_preload_ready");
+    return 0;
+}
+
+static int nic_config_8265(void)
+{
+    uint32_t val = iwl_8000_nic_config_value(0x230u, 0x00330018u);
+    uint32_t phy = ((uint32_t)0x0u << CSR_HW_IF_CONFIG_REG_POS_PHY_TYPE) |
+                   ((uint32_t)0x2u << CSR_HW_IF_CONFIG_REG_POS_PHY_STEP) |
+                   ((uint32_t)0x1u << CSR_HW_IF_CONFIG_REG_POS_PHY_DASH);
+
+    if ((val & CSR_HW_IF_CONFIG_REG_MSK_PHY_TYPE) != (phy & CSR_HW_IF_CONFIG_REG_MSK_PHY_TYPE) ||
+        (val & CSR_HW_IF_CONFIG_REG_MSK_PHY_STEP) != (phy & CSR_HW_IF_CONFIG_REG_MSK_PHY_STEP) ||
+        (val & CSR_HW_IF_CONFIG_REG_MSK_PHY_DASH) != (phy & CSR_HW_IF_CONFIG_REG_MSK_PHY_DASH) ||
+        (val & CSR_HW_IF_CONFIG_REG_BIT_RADIO_SI) != 0u) {
+        fprintf(stderr, "FALLO: nic_config 8265 val=0x%08x phy=0x%08x\n", val, phy);
+        return -1;
+    }
+    puts("OK: nic_config PHY_SKU 0x00330018 → CSR_HW_IF_CONFIG_REG");
     return 0;
 }
 
@@ -192,7 +292,8 @@ static int real_8265(const char *path)
     long sz;
     uint8_t *fw;
     struct iwl_ax211_priv iwl;
-    struct iwl_8000_load_plan plan;
+    struct iwl_8000_load_plan plan_init;
+    struct iwl_8000_load_plan plan_rt;
     uint32_t first_dest;
     unsigned i;
 
@@ -215,32 +316,50 @@ static int real_8265(const char *path)
         fprintf(stderr, "FALLO: parse 8265\n");
         return -1;
     }
-    if (iwl_8000_plan_load(&iwl.fw, &plan) != 0) {
-        fprintf(stderr, "FALLO: plan 8265\n");
+    if (!iwl.fw.sec_init_n || !iwl.fw.rt_n) {
+        fprintf(stderr, "FALLO: 8265 sec_init_n=%d rt_n=%d\n",
+                iwl.fw.sec_init_n, iwl.fw.rt_n);
+        return -1;
+    }
+    if (iwl_8000_plan_load_init(&iwl.fw, &plan_init) != 0) {
+        fprintf(stderr, "FALLO: plan INIT 8265\n");
+        return -1;
+    }
+    if (iwl_8000_plan_load(&iwl.fw, &plan_rt) != 0) {
+        fprintf(stderr, "FALLO: plan RT 8265\n");
         return -1;
     }
     first_dest = le32_at(iwl.fw.rt[0].data);
-    if (plan.uses_context_info || !plan.cpu1_secs || !plan.cpu2_secs ||
-        plan.n_chunks == 0 || plan.chunks[0].dst != first_dest) {
-        fprintf(stderr, "FALLO: 8265 ctx=%u cpu1=%u cpu2=%u dst=0x%x vs 0x%x\n",
-                (unsigned)plan.uses_context_info, (unsigned)plan.cpu1_secs,
-                (unsigned)plan.cpu2_secs, plan.chunks[0].dst, first_dest);
+    if (plan_rt.uses_context_info || !plan_rt.cpu1_secs || !plan_rt.cpu2_secs ||
+        plan_rt.n_chunks == 0 || plan_rt.chunks[0].dst != first_dest) {
+        fprintf(stderr, "FALLO: 8265 RT ctx=%u cpu1=%u cpu2=%u dst=0x%x vs 0x%x\n",
+                (unsigned)plan_rt.uses_context_info, (unsigned)plan_rt.cpu1_secs,
+                (unsigned)plan_rt.cpu2_secs, plan_rt.chunks[0].dst, first_dest);
         return -1;
     }
-    for (i = 0; i < plan.n_chunks; i++) {
-        if (plan.chunks[i].len == 0 || plan.chunks[i].len > FH_MEM_TB_MAX_LENGTH) {
-            fprintf(stderr, "FALLO: chunk %u len=%u\n", i, plan.chunks[i].len);
+    if (plan_init.uses_context_info || !plan_init.cpu1_secs || !plan_init.cpu2_secs ||
+        plan_init.n_chunks == 0) {
+        fprintf(stderr, "FALLO: 8265 INIT ctx=%u cpu1=%u cpu2=%u chunks=%u\n",
+                (unsigned)plan_init.uses_context_info, (unsigned)plan_init.cpu1_secs,
+                (unsigned)plan_init.cpu2_secs, (unsigned)plan_init.n_chunks);
+        return -1;
+    }
+    for (i = 0; i < plan_rt.n_chunks; i++) {
+        if (plan_rt.chunks[i].len == 0 || plan_rt.chunks[i].len > FH_MEM_TB_MAX_LENGTH) {
+            fprintf(stderr, "FALLO: RT chunk %u len=%u\n", i, plan_rt.chunks[i].len);
             return -1;
         }
-        if (plan.chunks[i].cpu != 1 && plan.chunks[i].cpu != 2) {
-            fprintf(stderr, "FALLO: chunk %u cpu=%u\n", i,
-                    (unsigned)plan.chunks[i].cpu);
+        if (plan_rt.chunks[i].cpu != 1 && plan_rt.chunks[i].cpu != 2) {
+            fprintf(stderr, "FALLO: RT chunk %u cpu=%u\n", i,
+                    (unsigned)plan_rt.chunks[i].cpu);
             return -1;
         }
     }
-    printf("OK: 8265 plan FH cpu1=%u cpu2=%u chunks=%u dst0=0x%x (sin context-info)\n",
-           (unsigned)plan.cpu1_secs, (unsigned)plan.cpu2_secs,
-           (unsigned)plan.n_chunks, plan.chunks[0].dst);
+    printf("OK: 8265 INIT cpu1=%u cpu2=%u chunks=%u; RT cpu1=%u cpu2=%u chunks=%u dst0=0x%x\n",
+           (unsigned)plan_init.cpu1_secs, (unsigned)plan_init.cpu2_secs,
+           (unsigned)plan_init.n_chunks,
+           (unsigned)plan_rt.cpu1_secs, (unsigned)plan_rt.cpu2_secs,
+           (unsigned)plan_rt.n_chunks, plan_rt.chunks[0].dst);
     free(fw);
     return 0;
 }
@@ -250,6 +369,14 @@ int main(int argc, char **argv)
     if (synthetic_plan() != 0)
         return 1;
     if (hcmd_constants() != 0)
+        return 1;
+    if (tx_init_order() != 0)
+        return 1;
+    if (tx_preload_gate() != 0)
+        return 1;
+    if (chunk_wait_policy() != 0)
+        return 1;
+    if (nic_config_8265() != 0)
         return 1;
     if (argc == 2 && real_8265(argv[1]) != 0)
         return 1;

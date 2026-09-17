@@ -1052,6 +1052,9 @@ fn suite() -> u8 {
                 ni.addr[3],
                 ni.prefix_len
             );
+            let rtt = sys::ping([127, 0, 0, 1], 1000);
+            check!(rtt >= 0, "ping 127.0.0.1 errno {rtt}");
+            println!("init: OK  ping 127.0.0.1 {rtt} ms");
         }
         check!(
             ALLOC_MAL.load(Ordering::Relaxed) == 0,

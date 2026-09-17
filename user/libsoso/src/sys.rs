@@ -345,6 +345,17 @@ pub fn netinfo(out: &mut abi::NetInfo) -> i64 {
     )
 }
 
+/// ICMP Echo a `addr`. `timeout_ms == 0` → 1000 ms. Devuelve RTT en ms o -errno.
+pub fn ping(addr: [u8; 4], timeout_ms: u64) -> i64 {
+    syscall4(
+        abi::SYS_PING,
+        u32::from_be_bytes(addr) as u64,
+        timeout_ms,
+        0,
+        0,
+    )
+}
+
 pub fn iostat(out: &mut abi::IoStat) -> i64 {
     syscall4(abi::SYS_IOSTAT, out as *mut abi::IoStat as u64, 0, 0, 0)
 }
@@ -695,6 +706,24 @@ pub fn truncate(path: &str, size: u64) -> i64 {
         path.as_ptr() as u64,
         path.len() as u64,
         size,
+        0,
+    )
+}
+
+/// Pausa o reanuda el escritor de `/var/log`. Mientras está en pausa el ring
+/// sigue capturando en RAM; al reanudar se vuelca. Lo usa `soso-install` para
+/// que el sosofs de origen no cambie mientras se copia.
+/// Espacio libre del sistema de ficheros raíz.
+pub fn fsinfo(out: &mut abi::FsInfo) -> i64 {
+    syscall4(abi::SYS_FSINFO, out as *mut abi::FsInfo as u64, 0, 0, 0)
+}
+
+pub fn log_quiesce(pausar: bool) -> i64 {
+    syscall4(
+        abi::SYS_FATLOG_FLUSH,
+        if pausar { abi::LOG_QUIESCE } else { abi::LOG_REANUDAR },
+        0,
+        0,
         0,
     )
 }

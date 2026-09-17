@@ -79,12 +79,12 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 
 ### Syscalls principales
 
-`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo, netinfo` (+ GPU, TCP, hilos, WiFi)
+`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo, netinfo, ping` (+ GPU, TCP, hilos, WiFi)
 
 - **Instalación / OTA / ESP:** syscalls y huecos 8.3 — skill **`soso-live`** (`disk_*`, `bootreq_*`, `upd_*`, `espfat`)
 - **Framebuffer / entrada:** `fb_info=62`, `fb_set_mode=63`, `fb_present=64`, `input_poll=65` (modo gráfico userspace; ratón PS/2 aux)
 - **WiFi:** `wifi_scan=56`, `wifi_status=57`, `wifi_connect=58` — detalle en **`soso-wifi`**
-- **Red:** `netinfo=87` — IPv4/MAC/pasarela de la NIC activa (`/bin/ip`, kshell `ip`)
+- **Red:** `netinfo=87` — IPv4/MAC/pasarela de la NIC activa (`/bin/ip`, kshell `ip`); `fsinfo=88` — bloques totales/libres del sosofs raíz (comprobación previa de OTA); `ping=89` — ICMP Echo (`/bin/ping`, kshell `ping`)
 - **Audio:** `audio_open=59`, `audio_read=60`, `audio_close=61` (HDA, `drv-hda`)
 
 - **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`/`spawn_io_full`; hijos heredan cwd del padre; fd 3 = registro (`Fd::Log`, ring `applog`, `SYS_LOG_READ=86`, `logln!`); redirecciones `N>`, `N>>`, `N>&-` para N=1–3
@@ -102,7 +102,8 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `drivers/fb.rs` | Consola GOP: buffer UTF-8 con glifos Latin-1 + €. Shadow en RAM → GOP **WC** (`arch/pat.rs` entrada 1 + `mm::set_write_combining`), copia `movntdq` + `sfence`, *jump scroll* de `rows/4` en ráfagas (<200 ms entre scrolls) con un solo `flush_all`. Ver «Consola GOP» abajo |
 | `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
 | `drivers/pci.rs` | ECAM + MSI-X. `devices()` = foto cacheada del bus (usar esta); `enumerate()` reescribe BARs, sólo en arranque |
-| `drivers/espfat.rs` | Ficheros 8.3 contiguos en la ESP live (SOSOLOG, SOSODRV, SOSOBOOT, SOSOWIFI, SOSOUPD, SOSOKRN, SOSOKRN.MET) |
+| `drivers/espfat.rs` | Ficheros 8.3 contiguos en la ESP del disco de arranque. La lógica FAT está en **`crates/espfat-core`** (no_std, sobre un trait de sectores): la misma sirve para la ESP **del destino** de una instalación, que es otro volumen sin montar. Incluye `borrar` (entrada de directorio **antes** que la cadena: al revés, un corte deja dos ficheros sobre los mismos clusters) |
+| `drivers/modo.rs` | Identidad `live`/`installed` (`SOSOMODE.TXT`), leída **antes de montar sosofs**. `fatlog` se apaga sólo con identidad explícita, propia e `installed`; ante la duda se conserva el log de la ESP |
 | `drivers/logfs.rs` | **Logs nativos en sosofs** (U1): `/var/log/{kernel,aplicaciones,actualizaciones}.log`. Rings con **cursor monotónico** (`crates/soso-log-core`) — `len()` se satura y por eso `fatlog::poll` dejaba de detectar bytes nuevos con el ring lleno. Lote copiado bajo el lock del ring y escrito **fuera** de él; E/S envuelta en `run_without_capture` (un error del escritor en el ring que se está vaciando es una escritura recursiva); `try_lock` del escritor, nunca desde IRQ; rotación 1 MiB × 3; fallo de FS → suspende y reintenta a los 30 s. Panic/muerte de proceso: un intento y **sólo** si `vfs::fs_disponible()` (forzar el lock del FS parte el árbol CoW) |
 | `drivers/otalog.rs` | Ring de eventos OTA del kernel (`otalog!`), alimentado por `updslot` |
 | `xtask/src/sosolog.rs` | Host: monta la ESP del USB, imprime `SOSOLOG.TXT` y desmonta (`cargo xtask sosolog`) |
@@ -110,7 +111,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `vfs.rs` | Router: lectura/escritura sosofs; modelos → sosomfs (read-only) |
 | `net/` | smoltcp, DHCPv4 al arrancar (fallback 10.0.2.15), polled from scheduler |
 | `net/ssh.rs` | sunset SSH-2, una sesión, CRLF en tx_push, reset_socket al desconectar |
-| `kshell.rs` | Emergency kernel-shell (`soso>`): `help`, `dmesg [save]`, `hwscan`, `ip`, `wifi`, `io`, `halt`, … |
+| `kshell.rs` | Emergency kernel-shell (`soso>`): `help`, `dmesg [save]`, `hwscan`, `ip`, `ping`, `wifi`, `io`, `halt`, … |
 | `task/` | Processes (cwd, console), scheduler, syscall, path normalization |
 
 ## sosofs (v1)
@@ -137,7 +138,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `/bin/soso-resize` | Amplía sosofs robando margen libre al final de modelos (`SYS_FS_RESIZE`; live/instalado GPT) |
 | `/bin/soso-update` | Releases GitHub: rootfs por fichero (sin rollback de binarios; progreso en `/etc/actualiza.estado`); kernel vía `SOSOUPD.TXT` + `SOSOKRN.BIN` + meta `SOSOKRN.MET` (recovery verificable) |
 | `/bin/soso-web` | Navegador mínimo: HTTPS + HTML→texto (modo lectura) o framebuffer (modo `--grafico`) |
-| `/bin/{ls,cat,echo,mkdir,rm,hexdump,ip,halt}` | Coreutils |
+| `/bin/{ls,cat,echo,mkdir,rm,hexdump,ip,ping,halt}` | Coreutils |
 
 `libsoso`: crt0, syscall wrappers, mini-libstd (256 KiB heap arena), `linea::Lector`
 (lectura de línea con eco: **acepta UTF-8** y borra por carácter; lee **byte a byte**

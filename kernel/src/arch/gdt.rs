@@ -59,6 +59,38 @@ pub fn kstack_top_for(cpu: usize) -> VirtAddr {
     }
 }
 
+/// ¿En qué pila conocida cae este `rsp`?
+///
+/// Un `rip=0` con `[rsp]=0` en ring 0 es un `ret` sobre basura, y hay dos
+/// causas muy distintas que se confunden: **desbordar** una pila válida (se ve
+/// como un `rsp` justo por debajo de su base) o correr con un `rsp`
+/// **corrompido**, que suele caer en .bss a ceros y por eso el `ret` saca 0.
+/// Sin esta línea hay que resolver el mapa de símbolos a mano para distinguirlo;
+/// costó una sesión entera el 2026-09-17.
+pub fn zona_de_pila(rsp: u64) -> &'static str {
+    let dentro = |base: *const u8, tam: usize| {
+        let b = base as u64;
+        rsp >= b && rsp < b + tam as u64
+    };
+    if dentro(&raw const KSTACK as *const u8, KSTACK_SIZE) {
+        let base = &raw const KSTACK as u64;
+        return if rsp - base < 8 * 1024 {
+            "KSTACK, a menos de 8 KiB del fondo (¿desbordamiento?)"
+        } else {
+            "KSTACK (pila de kernel de la BSP)"
+        };
+    }
+    if dentro(&raw const AP_KSTACKS as *const u8, AP_KSTACK_SIZE * (MAX_CPUS - 1)) {
+        return "AP_KSTACKS (pila de kernel de un AP)";
+    }
+    if dentro(&raw const IST_STACKS as *const u8, IST_SIZE * MAX_CPUS) {
+        return "IST_STACKS (double fault)";
+    }
+    // Ni pila de kernel ni IST: el `rsp` no es de ninguna pila válida, así que
+    // está corrompido. No es un desbordamiento, es otra cosa.
+    "NINGUNA pila conocida — rsp corrompido, no es desbordamiento"
+}
+
 /// Pila IST del double fault, una por CPU.
 const IST_SIZE: usize = 4096 * 5;
 #[repr(C, align(16))]

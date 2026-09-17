@@ -30,7 +30,7 @@ el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
 | Actualización | **soso-update** | Bajar e instalar releases nuevas (programas + kernel) |
 | Desarrollo | **soso-ed**, **soso-forja** | Editar fuentes en `/src/soso`; bucle remoto o plan local (`docs/SELF-HOSTING.md`) |
 | Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
-| Red | **ip**, **wifi** (builtin) | Ver la IPv4; escanear y conectar redes WiFi Intel en placa real |
+| Red | **ip**, **ping**, **wifi** (builtin) | Ver la IPv4; comprobar alcance ICMP; escanear y conectar redes WiFi Intel en placa real |
 | Sistema | **halt**, **exit** | Apagar o salir de la shell |
 
 Al arrancar verás una línea como `soso 0.2.2 (6641119fd)` — versión del kernel
@@ -240,6 +240,7 @@ ssh -i target/soso_test_key soso@<ip>
 
 ```text
 ip                 # IPv4 (DHCP o fallback)
+ping 192.168.68.1  # eco ICMP (opcional: `ping <host> n`)
 wifi scan          # listar redes
 wifi status        # estado del driver
 wifi connect Red   # red abierta
@@ -477,6 +478,25 @@ Si aún no hay lease: `ip: sin dirección (esperando DHCP)`. Sin NIC: `ip: sin a
 
 Úsalo en placa para saber a qué IP conectar por SSH (`ssh -i target/soso_test_key soso@<ip>`).
 
+### ping — comprobar que una máquina responde
+
+```sh
+ping 10.0.2.2
+ping -c 1 192.168.68.1
+ping -c 3 -W 2 ejemplo.com
+```
+
+Envía ecos ICMP. En QEMU la pasarela es `10.0.2.2`. En placa, usa la pasarela que muestra `ip` (o el otro equipo de la LAN). `127.0.0.1` y la IPv4 propia contestan al momento.
+
+```text
+PING 10.0.2.2 (10.0.2.2)
+ping: 10.0.2.2 seq=1 1 ms
+--- 10.0.2.2 ---
+1 enviados, 1 recibidos
+```
+
+`-c N` limita el número de ecos (por defecto 4). `-W seg` es la espera por eco (por defecto 1). Si un destino no es IPv4, soso intenta resolverlo por DNS. En la kernel-shell de emergencia: `ping <ip|host> [n]`.
+
 ### halt — apagar el sistema
 
 ```sh
@@ -687,6 +707,18 @@ soso-install status        # estado de la entrada de arranque UEFI
 Solo tiene sentido arrancando desde el pendrive live. Ver
 [Instalar soso en un disco](#instalar-soso-en-un-disco-dual-boot-uefi).
 
+Al terminar, el instalador **finaliza el destino**: lo marca como instalación
+—no como una copia del live—, con lo que sus logs pasan a `/var/log` y se retira
+el `SOSOLOG.TXT` de su ESP. El pendrive conserva el suyo intacto.
+
+Dos cosas que puede rechazar, y por qué:
+
+- **Una actualización a medias en el origen.** Clonarla dejaría al disco nuevo
+  intentando aplicar o revertir un kernel cuyo respaldo se quedó en el USB.
+  Reinicia para terminarla, o deshazla con `soso-update revertir`.
+- **Un destino que no sea NVMe**, o el propio disco de arranque. Con otro
+  sistema operativo dentro hace falta `--force`.
+
 ### soso-resize — ampliar el disco de sistema
 
 La imagen live empaqueta sosofs **compacto** (solo contenido + margen). Al
@@ -714,9 +746,48 @@ soso-update revertir            # restaura el kernel anterior (reinicia después
 ```
 
 Opciones útiles: `--forzar` (reinstala aunque la versión no suba), `--sin-kernel`
-(solo `/bin`, `/etc`, `/lib`), `--local /ruta` (artefactos locales, sin red).
+(solo `/bin`, `/etc`, `/lib`), `--local /ruta` (artefactos locales, sin red),
+`--channel dev|stable|<etiqueta>`.
 
-Configuración en `/etc/actualiza.conf` (`url=https://…/releases/latest/download`).
+**De dónde baja.** `comprobar` lo dice en la primera línea, con el motivo. El
+orden es, de más fuerte a menos:
+
+1. `--local DIR` — ni red ni canal.
+2. `--channel X` en la orden.
+3. `url=` de `/etc/actualiza.conf` — tu espejo.
+4. `channel=` de `/etc/actualiza.conf`.
+5. `stable`.
+
+Que `--channel` gane al `url=` del fichero es a propósito: pedir un canal a mano
+y que te sirvan otro sitio sin avisar es peor sorpresa que ignorar el espejo en
+esa ejecución. En el fichero se admiten espacios (`channel = dev`) y `#` para
+comentarios.
+
+**Qué se comprueba antes de bajar nada.** La release declara para qué sirve
+—arquitectura, perfil de drivers, ABI, formato del sistema de ficheros y qué
+versión mínima de arranque exige— y `soso-update` la rechaza si no encaja con tu
+máquina; en particular, si no trae el driver del disco desde el que arrancas.
+Una release antigua, sin esa declaración, también se rechaza.
+
+**Qué no viaja en una release:** tus claves (`ssh_host_key`, `authorized_key`),
+tu configuración de `/etc`, los logs de `/var/log`, las cachés y el estado de una
+actualización a medias. Se preservan; la actualización no los toca.
+
+**Si se corta a mitad.** La descarga va a un área de preparación dentro del
+disco (`/var/lib/soso-update/`), no directamente a `/bin` y `/lib`: mientras
+baja, tu sistema sigue siendo el de siempre. Si se corta la red o reinicias,
+vuelve a lanzar `soso-update aplicar` y **sólo bajará lo que faltaba** — lo ya
+descargado se conserva verificado. Si entretanto se publica otra release, lo
+guardado no se reutiliza y se empieza de nuevo, porque los datos de una no
+sirven para la otra.
+
+Antes de bajar nada comprueba que hay sitio para preparar la actualización **y
+para poder deshacerla**; si no lo hay, lo dice y no empieza.
+
+**Confianza.** Las releases todavía **no van firmadas**: la integridad la dan los
+hashes del manifiesto y el HTTPS contra el origen, lo que detecta corrupción pero
+no protege de quien controle ese origen. Poner un `url=` en
+`/etc/actualiza.conf` es, por tanto, una decisión de confianza.
 
 **Solo se descarga lo que cambia.** `aplicar` compara cada fichero instalado con
 el hash del manifiesto y pide por HTTP `Range` únicamente los tramos del pack que
@@ -940,6 +1011,12 @@ Dos límites que conviene conocer:
   perdido.
 
 ### Trazas persistentes en USB live (`SOSOLOG.TXT`)
+
+Esto es **del USB live**. Una instalación en disco no tiene `SOSOLOG.TXT`: el
+instalador lo retira de la ESP del destino y su log va a `/var/log` (arriba). La
+ESP del disco instalado queda sólo para arrancar y para recuperar
+actualizaciones. Puedes comprobar en qué modo estás con `logfs` en la
+kernel-shell, que dice la identidad y si la ESP conserva el log.
 
 En arranque live, el kernel vuelca automáticamente el log de consola (ring de
 ~256 KiB) al fichero **`SOSOLOG.TXT`** en la **ESP** (partición 1 FAT del
@@ -1792,6 +1869,7 @@ soso-web https://example.com
 
 # Red (placa real)
 ip                          # IPv4 para SSH
+ping -c 1 192.168.68.1      # pasarela (la de `ip`)
 wifi scan
 wifi connect MiRed MiClaveWPA2
 

@@ -292,6 +292,12 @@ cargo xtask test-usb
 # OTA recovery (host, sin QEMU):
 cargo test -p soso-update-core --features std --tests
 cargo test -p soso-log-core --features std   # rings, rotación y fallos de FS (U1)
+cargo test -p espfat-core --features std     # localizar y borrar en la ESP (U2)
+
+# Firmware de la suite: UEFI por defecto desde 2026-09-16 (SOSO_FIRMWARE=bios
+# para el camino viejo). La imagen BIOS deja de arrancar por encima de ~31 MB
+# de kernel y el síntoma es el log de serie a CERO bytes, que parece una
+# regresión del arranque: comprueba el tamaño del kernel antes de bisecar.
 
 # Matriz hardware A8 (tras arranque en placa con SOSOLOG/SOSODRV):
 # El agente SÍ actualiza docs/hw-matrix.json (no pide sudo). No marques

@@ -1,4 +1,4 @@
-/* Transporte familia 8000 (8265): carga FH + ICT, sin context-info. */
+/* Transporte familia 8000 (8265): carga FH; ICT tras ALIVE RT (Linux fw_alive). */
 #include "iwl_internal.h"
 #include "iwl_ax211.h"
 #include "lx_emul.h"
@@ -27,13 +27,13 @@ static int rt_dest(const struct iwl_fw_rt_section *sec, uint32_t *dest,
     return 0;
 }
 
-int iwl_8000_plan_load_ex(const struct iwl_fw_image *fw, uint32_t chunk_sz,
-                          struct iwl_8000_load_plan *plan)
+int iwl_8000_plan_load_ex(const struct iwl_fw_rt_section *secs, int n_secs,
+                          uint32_t chunk_sz, struct iwl_8000_load_plan *plan)
 {
     int first = 0;
     int cpu;
 
-    if (!fw || !plan || !chunk_sz)
+    if (!secs || !plan || !chunk_sz || n_secs <= 0)
         return -1;
     memset(plan, 0, sizeof(*plan));
     plan->cpu1_final = 0xFFFFu;
@@ -49,10 +49,10 @@ int iwl_8000_plan_load_ex(const struct iwl_fw_image *fw, uint32_t chunk_sz,
 
         if (cpu == 2)
             first++;
-        if (first < 0 || first > fw->rt_n)
+        if (first < 0 || first > n_secs)
             return -1;
 
-        for (i = first; i < fw->rt_n; i++) {
+        for (i = first; i < n_secs; i++) {
             uint32_t dest = 0;
             const uint8_t *payload = 0;
             uint32_t plen = 0;
@@ -60,7 +60,7 @@ int iwl_8000_plan_load_ex(const struct iwl_fw_image *fw, uint32_t chunk_sz,
             int kind;
 
             last = i;
-            kind = rt_dest(&fw->rt[i], &dest, &payload, &plen);
+            kind = rt_dest(&secs[i], &dest, &payload, &plen);
             if (kind != 0)
                 break;
             for (off = 0; off < plen; ) {
@@ -98,9 +98,40 @@ int iwl_8000_plan_load_ex(const struct iwl_fw_image *fw, uint32_t chunk_sz,
     return 0;
 }
 
+int iwl_8000_plan_load_secs(const struct iwl_fw_rt_section *secs, int n_secs,
+                            struct iwl_8000_load_plan *plan)
+{
+    return iwl_8000_plan_load_ex(secs, n_secs, FH_MEM_TB_MAX_LENGTH, plan);
+}
+
 int iwl_8000_plan_load(const struct iwl_fw_image *fw, struct iwl_8000_load_plan *plan)
 {
-    return iwl_8000_plan_load_ex(fw, FH_MEM_TB_MAX_LENGTH, plan);
+    if (!fw)
+        return -1;
+    return iwl_8000_plan_load_secs(fw->rt, fw->rt_n, plan);
+}
+
+int iwl_8000_plan_load_init(const struct iwl_fw_image *fw, struct iwl_8000_load_plan *plan)
+{
+    if (!fw)
+        return -1;
+    return iwl_8000_plan_load_secs(fw->sec_init, fw->sec_init_n, plan);
+}
+
+uint32_t iwl_8000_nic_config_value(uint32_t hw_rev, uint32_t phy_sku)
+{
+    uint8_t radio_type =
+        (uint8_t)((phy_sku & FW_PHY_CFG_RADIO_TYPE) >> FW_PHY_CFG_RADIO_TYPE_POS);
+    uint8_t radio_step =
+        (uint8_t)((phy_sku & FW_PHY_CFG_RADIO_STEP) >> FW_PHY_CFG_RADIO_STEP_POS);
+    uint8_t radio_dash =
+        (uint8_t)((phy_sku & FW_PHY_CFG_RADIO_DASH) >> FW_PHY_CFG_RADIO_DASH_POS);
+    uint32_t reg_val = CSR_HW_REV_STEP_DASH(hw_rev);
+
+    reg_val |= (uint32_t)radio_type << CSR_HW_IF_CONFIG_REG_POS_PHY_TYPE;
+    reg_val |= (uint32_t)radio_step << CSR_HW_IF_CONFIG_REG_POS_PHY_STEP;
+    reg_val |= (uint32_t)radio_dash << CSR_HW_IF_CONFIG_REG_POS_PHY_DASH;
+    return reg_val;
 }
 
 void iwl_8000_fh_program(uint32_t dst, uint64_t dma, uint32_t byte_cnt,
@@ -259,6 +290,22 @@ static int iwl_finish_nic_init(struct iwl_ax211_priv *iwl)
                         CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY, 25000);
 }
 
+static void iwl_8000_nic_config(struct iwl_ax211_priv *iwl)
+{
+    uint32_t mask = CSR_HW_IF_CONFIG_REG_MSK_MAC_STEP_DASH |
+                    CSR_HW_IF_CONFIG_REG_MSK_PHY_TYPE |
+                    CSR_HW_IF_CONFIG_REG_MSK_PHY_STEP |
+                    CSR_HW_IF_CONFIG_REG_MSK_PHY_DASH |
+                    CSR_HW_IF_CONFIG_REG_BIT_RADIO_SI |
+                    CSR_HW_IF_CONFIG_REG_BIT_MAC_SI |
+                    CSR_HW_IF_CONFIG_REG_D3_DEBUG;
+    uint32_t reg_val = iwl_8000_nic_config_value(iwl->hw_rev, iwl->phy_sku);
+    uint32_t old = iwl_read32(iwl, CSR_HW_IF_CONFIG_REG);
+
+    /* Familia 8000: sin CSR_HW_IF_CONFIG_REG_BIT_RADIO_SI (mvm/ops.c). */
+    iwl_write32(iwl, CSR_HW_IF_CONFIG_REG, (old & ~mask) | (reg_val & mask));
+}
+
 static int iwl_8000_apm_init(struct iwl_ax211_priv *iwl)
 {
     /* 8000: apmg_not_supported; mismos chicken bits que Linux >= 8000. */
@@ -266,7 +313,12 @@ static int iwl_8000_apm_init(struct iwl_ax211_priv *iwl)
     iwl_set_bit(iwl, CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL);
     iwl_set_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A);
     iwl_set_bit(iwl, CSR_GIO_REG, CSR_GIO_REG_VAL_L0S_DISABLED);
-    return iwl_finish_nic_init(iwl);
+    if (iwl_finish_nic_init(iwl) != 0)
+        return -1;
+    iwl_8000_nic_config(iwl);
+    /* cfg/8000.c shadow_reg_enable=true → trans.c:568-571. */
+    iwl_write32(iwl, CSR_MAC_SHADOW_REG_CTRL, 0x800FFFFFu);
+    return 0;
 }
 
 static void iwl_sw_reset(struct iwl_ax211_priv *iwl)
@@ -308,7 +360,8 @@ reiniciar:
     for (i = 0; i < IWL_8000_RX_N; i++)
         bd[i] = (uint32_t)((iwl->rx_page_dma + (uint64_t)i * IWL_GEN2_RX_SZ) >> 8);
     iwl->rx_read = 0;
-    iwl->rx_write = 24;
+    /* Linux rxsq_restock: anillo casi lleno; WPTR alineado a 8 (write & ~7). */
+    iwl->rx_write = (uint16_t)(IWL_8000_RX_N - 1u);
     return 0;
 }
 
@@ -357,26 +410,34 @@ void iwl_trans_8000_drain(struct iwl_ax211_priv *iwl)
     iwl_write32(iwl, FH_RSCSR_CHNL0_WPTR, (uint32_t)(iwl->rx_write & ~7u));
 }
 
+/* Linux pcie/trans.c:687 — solo FH_TX completa el chunk; TSSR idle no hace ACK. */
 static int iwl_8000_wait_chunk(struct iwl_ax211_priv *iwl)
 {
     int t;
 
     for (t = 0; t < 5000; t++) {
         uint32_t inta = iwl_read32(iwl, CSR_INT);
-        uint32_t tssr = iwl_read32(iwl, FH_TSSR_TX_STATUS_REG);
 
         if (inta & CSR_INT_BIT_FH_TX) {
             iwl_write32(iwl, CSR_FH_INT_STATUS, CSR_FH_INT_TX_MASK);
             iwl_write32(iwl, CSR_INT, CSR_INT_BIT_FH_TX);
             return 0;
         }
-        if (tssr & FH_TSSR_TX_STATUS_REG_MSK_CHNL_IDLE(FH_SRVC_CHNL))
-            return 0;
         lx_udelay(1000);
     }
     lx_printk("iwl_trans: timeout carga FH chunk INT=0x%08x TSSR=0x%08x\n",
               iwl_read32(iwl, CSR_INT), iwl_read32(iwl, FH_TSSR_TX_STATUS_REG));
     return -1;
+}
+
+/* Hostcheck: TSSR idle sin FH_TX no debe contar como chunk OK. */
+int iwl_8000_chunk_done_policy(uint32_t inta, uint32_t tssr)
+{
+    if (inta & CSR_INT_BIT_FH_TX)
+        return 1;
+    if (tssr & FH_TSSR_TX_STATUS_REG_MSK_CHNL_IDLE(FH_SRVC_CHNL))
+        return 0;
+    return 0;
 }
 
 static int iwl_8000_load_chunk(struct iwl_ax211_priv *iwl, uint32_t dst,
@@ -411,25 +472,254 @@ static int iwl_8000_load_chunk(struct iwl_ax211_priv *iwl, uint32_t dst,
     return 0;
 }
 
-int iwl_trans_8000_start(struct iwl_ax211_priv *iwl)
+static int iwl_8000_load_cpu_sections(struct iwl_ax211_priv *iwl,
+                                      const struct iwl_fw_rt_section *secs,
+                                      int n_secs, int cpu, int *first_sec,
+                                      void *chunk_cpu, uint64_t chunk_dma,
+                                      uint32_t chunk_sz)
 {
-    struct iwl_8000_load_plan plan;
-    void *chunk_cpu;
-    uint64_t chunk_dma = 0;
-    uint32_t chunk_sz = FH_MEM_TB_MAX_LENGTH;
-    void *kw_cpu;
-    uint64_t kw_dma = 0;
-    void *ict_cpu;
-    uint64_t ict_dma = 0;
-    unsigned i;
-    uint32_t last_cpu = 0;
+    int shift = cpu == 1 ? 0 : 16;
+    uint32_t sec_num = 1;
+    int last = *first_sec;
+    int si;
 
-    if (!iwl || !iwl->mmio)
-        return -1;
-    if (iwl_8000_plan_load(&iwl->fw, &plan) != 0) {
-        lx_printk("iwl_trans: plan carga 8000 inválido (SEC_RT)\n");
-        return -1;
+    if (cpu == 2)
+        (*first_sec)++;
+    for (si = *first_sec; si < n_secs; si++) {
+        uint32_t dest = 0;
+        const uint8_t *payload = 0;
+        uint32_t plen = 0;
+        uint32_t off;
+        int kind = rt_dest(&secs[si], &dest, &payload, &plen);
+
+        last = si;
+        if (kind != 0)
+            break;
+        for (off = 0; off < plen; off += chunk_sz) {
+            uint32_t n = plen - off;
+
+            if (n > chunk_sz)
+                n = chunk_sz;
+            memcpy(chunk_cpu, payload + off, n);
+            if (iwl_8000_load_chunk(iwl, dest + off, chunk_dma, n) != 0)
+                return -1;
+        }
+        {
+            uint32_t val = iwl_read_direct32(iwl, FH_UCODE_LOAD_STATUS);
+
+            val |= (sec_num << shift);
+            iwl_write_direct32(iwl, FH_UCODE_LOAD_STATUS, val);
+        }
+        sec_num = (sec_num << 1) | 1u;
     }
+    *first_sec = last;
+
+    /* Linux load_cpu_sections_8000: máscara completa antes del kick final. */
+    iwl_write32(iwl, CSR_INT_MASK, CSR_INI_SET_MASK);
+    if (cpu == 1)
+        iwl_write_direct32(iwl, FH_UCODE_LOAD_STATUS, 0xFFFFu);
+    else
+        iwl_write_direct32(iwl, FH_UCODE_LOAD_STATUS, 0xFFFFFFFFu);
+    {
+        uint32_t load_st = iwl_read_direct32(iwl, FH_UCODE_LOAD_STATUS);
+        uint32_t sb1 = iwl_read_prph(iwl, SB_CPU_1_STATUS);
+        uint32_t sb2 = iwl_read_prph(iwl, SB_CPU_2_STATUS);
+        uint32_t tssr = iwl_read32(iwl, FH_TSSR_TX_STATUS_REG);
+
+        lx_printk("iwl_trans: kick CPU%d LOAD_ST=0x%08x SB1=0x%08x SB2=0x%08x "
+                  "FH_TSSR=0x%08x\n",
+                  cpu, load_st, sb1, sb2, tssr);
+    }
+    return 0;
+}
+
+static int iwl_8000_run_load(struct iwl_ax211_priv *iwl,
+                             const struct iwl_8000_load_plan *plan,
+                             const struct iwl_fw_rt_section *secs, int n_secs,
+                             void *chunk_cpu, uint64_t chunk_dma, uint32_t chunk_sz)
+{
+    int first = 0;
+
+    (void)plan;
+    if (iwl_8000_load_cpu_sections(iwl, secs, n_secs, 1, &first, chunk_cpu,
+                                   chunk_dma, chunk_sz) != 0)
+        return -1;
+    return iwl_8000_load_cpu_sections(iwl, secs, n_secs, 2, &first, chunk_cpu,
+                                    chunk_dma, chunk_sz);
+}
+
+static void iwl_8000_log_alive_timeout(struct iwl_ax211_priv *iwl, const char *phase)
+{
+    uint32_t inta = iwl_read32(iwl, CSR_INT);
+    uint32_t gp = iwl_read32(iwl, CSR_GP_CNTRL);
+    uint16_t rb_hw = iwl->rb_stts ? (iwl->rb_stts[0] & 0x0fffu) : 0;
+    uint32_t wptr = iwl_read32(iwl, FH_RSCSR_CHNL0_WPTR);
+    uint32_t load_st = iwl_read_direct32(iwl, FH_UCODE_LOAD_STATUS);
+
+    {
+        uint32_t sb1 = iwl_read_prph(iwl, SB_CPU_1_STATUS);
+        uint32_t sb2 = iwl_read_prph(iwl, SB_CPU_2_STATUS);
+
+        lx_printk("iwl_trans: timeout ALIVE %s (8265/8000) INT=0x%08x GP=0x%08x "
+                  "rb_hw=0x%03x rx_read=%u rx_write=%u WPTR=0x%x LOAD_ST=0x%08x "
+                  "SB1=0x%08x SB2=0x%08x%s%s\n",
+                  phase, inta, gp, rb_hw, (unsigned)iwl->rx_read,
+                  (unsigned)iwl->rx_write, wptr, load_st, sb1, sb2,
+                  (inta & CSR_INT_BIT_SW_ERR) ? " SW_ERR" : "",
+                  !(gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW) ? " RF_KILL" : "");
+    }
+}
+
+unsigned iwl_8000_tx_slots(unsigned qid, unsigned cmd_qid)
+{
+    if (qid == cmd_qid)
+        return IWL_CMD_QUEUE_SIZE;
+    return IWL_DEFAULT_QUEUE_SIZE;
+}
+
+void iwl_8000_tx_init_program(uint64_t kw_dma, const uint64_t *ring_dma,
+                              unsigned n_queues, struct iwl_8000_tx_init_prog *out)
+{
+    unsigned qid;
+
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->scd_txfact = 0;
+    out->kw_reg = FH_KW_MEM_ADDR_REG;
+    out->kw_val = (uint32_t)(kw_dma >> 4);
+    if (ring_dma) {
+        for (qid = 0; qid < n_queues && qid < IWL_8000_NUM_QUEUES; qid++)
+            out->cbbc[qid] = (uint32_t)(ring_dma[qid] >> 8);
+    }
+    out->gp_ctrl_set = SCD_GP_CTRL_AUTO_ACTIVE_MODE;
+    if (n_queues > 20)
+        out->gp_ctrl_set |= SCD_GP_CTRL_ENABLE_31_QUEUES;
+}
+
+int iwl_8000_tx_preload_ready(const struct iwl_ax211_priv *iwl)
+{
+    return iwl && iwl->tx_preload_ready;
+}
+
+static void iwl_8000_set_bits_prph(struct iwl_ax211_priv *iwl, uint32_t addr, uint32_t bits)
+{
+    uint32_t v = iwl_read_prph(iwl, addr);
+
+    iwl_write_prph(iwl, addr, v | bits);
+}
+
+static int iwl_8000_tx_alloc(struct iwl_ax211_priv *iwl)
+{
+    unsigned qid;
+
+    if (!iwl->kw_cpu) {
+        iwl->kw_cpu = lx_dma_alloc_coherent(0, 4096, &iwl->kw_dma, GFP_KERNEL);
+        if (!iwl->kw_cpu)
+            return -1;
+    }
+    for (qid = 0; qid < IWL_8000_NUM_QUEUES; qid++) {
+        unsigned slots = iwl_8000_tx_slots(qid, (unsigned)iwl->cmd_qid);
+        size_t bytes = (size_t)slots * IWL_GEN1_TFD_SIZE;
+
+        if (!iwl->tx_ring_cpu[qid]) {
+            iwl->tx_ring_cpu[qid] = lx_dma_alloc_coherent(0, bytes,
+                                                          &iwl->tx_ring_dma[qid],
+                                                          GFP_KERNEL);
+            if (!iwl->tx_ring_cpu[qid])
+                return -1;
+        }
+        memset(iwl->tx_ring_cpu[qid], 0, bytes);
+    }
+    return 0;
+}
+
+/* Linux pcie/tx.c:546 — tx_init completo antes de load_given_ucode_8000. */
+static int iwl_8000_tx_init(struct iwl_ax211_priv *iwl)
+{
+    unsigned qid;
+
+    if (iwl_8000_tx_alloc(iwl) != 0)
+        return -1;
+
+    iwl_write_prph(iwl, SCD_TXFACT, 0);
+    iwl_write_direct32(iwl, FH_KW_MEM_ADDR_REG, (uint32_t)(iwl->kw_dma >> 4));
+
+    for (qid = 0; qid < IWL_8000_NUM_QUEUES; qid++) {
+        if (iwl_grab_nic_access(iwl) != 0)
+            return -1;
+        iwl_write32(iwl, FH_MEM_CBBC_QUEUE(qid),
+                    (uint32_t)(iwl->tx_ring_dma[qid] >> 8));
+        iwl_release_nic_access(iwl);
+    }
+
+    iwl_8000_set_bits_prph(iwl, SCD_GP_CTRL, SCD_GP_CTRL_AUTO_ACTIVE_MODE);
+    if (IWL_8000_NUM_QUEUES > 20)
+        iwl_8000_set_bits_prph(iwl, SCD_GP_CTRL, SCD_GP_CTRL_ENABLE_31_QUEUES);
+
+    iwl->tx_preload_ready = 1;
+    lx_printk("iwl_trans: tx_init 8000 %u colas CBBC+SCD_GP_CTRL ok\n",
+              (unsigned)IWL_8000_NUM_QUEUES);
+    return 0;
+}
+
+static void iwl_8000_poll_alive_int(struct iwl_ax211_priv *iwl)
+{
+    uint32_t inta = iwl_read32(iwl, CSR_INT);
+
+    if (inta == 0xffffffffu)
+        return;
+
+    /* Linux pcie/rx.c:1902 — ACK pending bits before service. */
+    iwl_write32(iwl, CSR_INT, inta);
+
+    if (inta & (CSR_INT_BIT_FH_RX | CSR_INT_BIT_SW_RX))
+        iwl_write32(iwl, CSR_FH_INT_STATUS, CSR_FH_INT_RX_MASK);
+    if (inta & CSR_INT_BIT_FH_TX)
+        iwl_write32(iwl, CSR_FH_INT_STATUS, CSR_FH_INT_TX_MASK);
+
+    iwl_trans_8000_drain(iwl);
+}
+
+static int iwl_8000_wait_alive(struct iwl_ax211_priv *iwl, const char *phase)
+{
+    unsigned i;
+
+    for (i = 0; i < 500; i++) {
+        iwl_8000_poll_alive_int(iwl);
+        if (iwl->alive)
+            return 0;
+        lx_mdelay(10);
+    }
+    iwl_8000_log_alive_timeout(iwl, phase);
+    return -1;
+}
+
+static void iwl_8000_reset_ict(struct iwl_ax211_priv *iwl)
+{
+    if (!iwl->ict_cpu)
+        return;
+    memset(iwl->ict_cpu, 0, IWL_ICT_SIZE);
+    {
+        uint32_t val = (uint32_t)(iwl->ict_dma >> IWL_ICT_SHIFT);
+
+        val |= CSR_DRAM_INT_TBL_ENABLE | CSR_DRAM_INIT_TBL_WRAP_CHECK |
+               CSR_DRAM_INIT_TBL_WRITE_POINTER;
+        iwl_write32(iwl, CSR_DRAM_INT_TBL_REG, val);
+    }
+}
+
+static void iwl_8000_begin_fw_load(struct iwl_ax211_priv *iwl)
+{
+    /* Linux load_given_ucode_8000: WFPM → RELEASE → carga inmediata. */
+    iwl_write_prph(iwl, WFPM_GP2, 0x01010101u);
+    iwl_write_direct32(iwl, FH_UCODE_LOAD_STATUS, 0);
+    iwl_write32(iwl, CSR_INT_MASK, CSR_INT_BIT_FH_TX);
+    iwl_write_prph(iwl, RELEASE_CPU_RESET, RELEASE_CPU_RESET_BIT);
+}
+
+static int iwl_8000_start_hw(struct iwl_ax211_priv *iwl)
+{
     if (iwl_prepare_card_hw(iwl) != 0)
         return -1;
     iwl_sw_reset(iwl);
@@ -456,30 +746,49 @@ int iwl_trans_8000_start(struct iwl_ax211_priv *iwl)
     if (iwl_8000_alloc_rx(iwl) != 0)
         return -1;
     iwl_8000_rx_hw_init(iwl);
+    if (iwl_8000_tx_init(iwl) != 0)
+        return -1;
+    iwl_write32(iwl, CSR_INT, 0xffffffffu);
+    return 0;
+}
 
-    kw_cpu = lx_dma_alloc_coherent(0, 4096, &kw_dma, GFP_KERNEL);
-    if (kw_cpu)
-        iwl_write32(iwl, FH_KW_MEM_ADDR_REG, (uint32_t)(kw_dma >> 4));
+static int iwl_8000_reinit_for_rt(struct iwl_ax211_priv *iwl)
+{
+    iwl_sw_reset(iwl);
+    iwl->alive = 0;
+    lx_iwlwifi_set_alive(0);
+    iwl->tx_8000_ready = 0;
+    iwl->tx_preload_ready = 0;
+    return iwl_8000_start_hw(iwl);
+}
 
-    ict_cpu = lx_dma_alloc_coherent(0, IWL_ICT_SIZE, &ict_dma, GFP_KERNEL);
-    if (ict_cpu) {
-        uint32_t val;
+int iwl_trans_8000_start(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_8000_load_plan plan_init;
+    struct iwl_8000_load_plan plan_rt;
+    void *chunk_cpu;
+    uint64_t chunk_dma = 0;
+    uint32_t chunk_sz = FH_MEM_TB_MAX_LENGTH;
 
-        memset(ict_cpu, 0, IWL_ICT_SIZE);
-        val = (uint32_t)(ict_dma >> IWL_ICT_SHIFT);
-        val |= CSR_DRAM_INT_TBL_ENABLE | CSR_DRAM_INIT_TBL_WRAP_CHECK |
-               CSR_DRAM_INIT_TBL_WRITE_POINTER;
-        iwl_write32(iwl, CSR_DRAM_INT_TBL_REG, val);
+    if (!iwl || !iwl->mmio)
+        return -1;
+    if (!iwl->fw.sec_init_n || !iwl->fw.rt_n) {
+        lx_printk("iwl_trans: 8000 requiere SEC_INIT (%d) y SEC_RT (%d)\n",
+                  iwl->fw.sec_init_n, iwl->fw.rt_n);
+        return -1;
+    }
+    if (iwl_8000_plan_load_init(&iwl->fw, &plan_init) != 0) {
+        lx_printk("iwl_trans: plan carga 8000 inválido (SEC_INIT)\n");
+        return -1;
+    }
+    if (iwl_8000_plan_load(&iwl->fw, &plan_rt) != 0) {
+        lx_printk("iwl_trans: plan carga 8000 inválido (SEC_RT)\n");
+        return -1;
     }
 
-    iwl_write32(iwl, CSR_INT, 0xffffffffu);
-    iwl_write32(iwl, CSR_INT_MASK, CSR_INT_BIT_FH_TX);
-
-    iwl_write_prph(iwl, WFPM_GP2, 0x01010101u);
-    iwl_write_prph(iwl, RELEASE_CPU_RESET, RELEASE_CPU_RESET_BIT);
-    lx_printk("iwlwifi: RELEASE_CPU_RESET; carga FH cpu1=%u cpu2=%u chunks=%u\n",
-              (unsigned)plan.cpu1_secs, (unsigned)plan.cpu2_secs,
-              (unsigned)plan.n_chunks);
+    if (!iwl->ict_cpu)
+        iwl->ict_cpu = lx_dma_alloc_coherent(0, IWL_ICT_SIZE, &iwl->ict_dma,
+                                             GFP_KERNEL);
 
     chunk_cpu = lx_dma_alloc_coherent(0, chunk_sz, &chunk_dma, GFP_KERNEL);
     if (!chunk_cpu) {
@@ -489,88 +798,48 @@ int iwl_trans_8000_start(struct iwl_ax211_priv *iwl)
     if (!chunk_cpu)
         return -1;
 
-    /* Recorre SEC_RT al vuelo: el plan de 128 KiB no cabe si el DMA es 4 KiB. */
-    {
-        int first = 0;
-        int cpu;
-
-        for (cpu = 1; cpu <= 2; cpu++) {
-            int shift = cpu == 1 ? 0 : 16;
-            uint32_t sec_num = 1;
-            int last = first;
-            int si;
-
-            if (cpu == 2) {
-                if (last_cpu == 1)
-                    iwl_write_direct32(iwl, FH_UCODE_LOAD_STATUS, plan.cpu1_final);
-                first++;
-            }
-            for (si = first; si < iwl->fw.rt_n; si++) {
-                uint32_t dest = 0;
-                const uint8_t *payload = 0;
-                uint32_t plen = 0;
-                uint32_t off;
-                int kind = rt_dest(&iwl->fw.rt[si], &dest, &payload, &plen);
-
-                last = si;
-                if (kind != 0)
-                    break;
-                last_cpu = (uint32_t)cpu;
-                for (off = 0; off < plen; off += chunk_sz) {
-                    uint32_t n = plen - off;
-
-                    if (n > chunk_sz)
-                        n = chunk_sz;
-                    memcpy(chunk_cpu, payload + off, n);
-                    if (iwl_8000_load_chunk(iwl, dest + off, chunk_dma, n) != 0)
-                        return -1;
-                }
-                {
-                    uint32_t val = iwl_read_direct32(iwl, FH_UCODE_LOAD_STATUS);
-
-                    val |= (sec_num << shift);
-                    iwl_write_direct32(iwl, FH_UCODE_LOAD_STATUS, val);
-                }
-                sec_num = (sec_num << 1) | 1u;
-            }
-            first = last;
-        }
+    if (iwl_8000_start_hw(iwl) != 0)
+        return -1;
+    if (!iwl->tx_preload_ready) {
+        lx_printk("iwl_trans: tx_init 8000 incompleto; no se carga INIT\n");
+        return -1;
     }
-    iwl_write_direct32(iwl, FH_UCODE_LOAD_STATUS, plan.cpu2_final);
-    iwl_write32(iwl, CSR_INT_MASK, CSR_INT_BIT_FH_TX | CSR_INT_BIT_FH_RX |
-                                    CSR_INT_BIT_ALIVE | CSR_INT_BIT_SW_ERR);
+
+    iwl_8000_begin_fw_load(iwl);
+    lx_printk("iwlwifi: RELEASE_CPU_RESET; carga FH INIT cpu1=%u cpu2=%u chunks=%u\n",
+              (unsigned)plan_init.cpu1_secs, (unsigned)plan_init.cpu2_secs,
+              (unsigned)plan_init.n_chunks);
+    if (iwl_8000_run_load(iwl, &plan_init, iwl->fw.sec_init, iwl->fw.sec_init_n,
+                          chunk_cpu, chunk_dma, chunk_sz) != 0)
+        return -1;
+    if (iwl_8000_wait_alive(iwl, "INIT") != 0)
+        return -1;
+    lx_printk("iwl_trans: INIT ucode ALIVE ok\n");
+
+    if (iwl_8000_reinit_for_rt(iwl) != 0)
+        return -1;
+
+    iwl_8000_begin_fw_load(iwl);
+    lx_printk("iwlwifi: carga FH RT cpu1=%u cpu2=%u chunks=%u\n",
+              (unsigned)plan_rt.cpu1_secs, (unsigned)plan_rt.cpu2_secs,
+              (unsigned)plan_rt.n_chunks);
+    if (iwl_8000_run_load(iwl, &plan_rt, iwl->fw.rt, iwl->fw.rt_n,
+                          chunk_cpu, chunk_dma, chunk_sz) != 0)
+        return -1;
 
     if (iwl_trans_8000_alloc_hcmd(iwl) != 0) {
         lx_printk("iwl_trans: reserva HCMD 8000 falló\n");
         return -1;
     }
 
-    for (i = 0; i < 500; i++) {
-        iwl_trans_8000_drain(iwl);
-        if (iwl->alive) {
-            if (iwl_trans_8000_fw_alive(iwl) != 0) {
-                lx_printk("iwl_trans: fw_alive 8000 falló\n");
-                return -1;
-            }
-            return 0;
-        }
-        lx_mdelay(10);
+    if (iwl_8000_wait_alive(iwl, "RT") != 0)
+        return -1;
+    iwl_8000_reset_ict(iwl);
+    if (iwl_trans_8000_fw_alive(iwl) != 0) {
+        lx_printk("iwl_trans: fw_alive 8000 falló\n");
+        return -1;
     }
-    {
-        uint32_t inta = iwl_read32(iwl, CSR_INT);
-        uint32_t gp = iwl_read32(iwl, CSR_GP_CNTRL);
-        uint16_t rb_hw = iwl->rb_stts ? (iwl->rb_stts[0] & 0x0fffu) : 0;
-
-        lx_printk("iwl_trans: timeout ALIVE (8265/8000) INT=0x%08x GP=0x%08x "
-                  "rb_hw=0x%03x rx_read=%u rx_write=%u%s%s\n",
-                  inta, gp, rb_hw, (unsigned)iwl->rx_read,
-                  (unsigned)iwl->rx_write,
-                  (inta & CSR_INT_BIT_SW_ERR) ? " SW_ERR" : "",
-                  !(gp & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW) ? " RF_KILL" : "");
-    }
-    (void)kw_cpu;
-    (void)ict_cpu;
-    return -1;
+    return 0;
 }
 
 static void iwl_8000_write_mem32(struct iwl_ax211_priv *iwl, uint32_t addr, uint32_t val)

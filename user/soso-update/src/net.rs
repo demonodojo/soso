@@ -64,7 +64,9 @@ pub fn https_get_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, &'stat
     Ok(resp.body)
 }
 
-const MAX_RANGE: u64 = 8 * 1024 * 1024;
+/// Trozo máximo en vuelo. Lo fija `soso-update-core` (U4) y acota dos cosas a
+/// la vez: la RAM del cliente y lo que se pierde si se corta la red.
+const MAX_RANGE: u64 = soso_update_core::TROZO_MAX;
 
 pub fn https_download_all(
     url: &str,
@@ -90,6 +92,29 @@ pub fn https_download_span(
     if out.try_reserve(len as usize).is_err() {
         return Err("sin memoria");
     }
+    https_download_span_a(url, token, start, len, &mut |trozo| {
+        out.extend_from_slice(trozo);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Igual, pero entregando cada trozo según llega.
+///
+/// Es la variante que usa la descarga durable: el llamante lo escribe en el
+/// área de preparación y lo hashea al vuelo, así que en RAM nunca hay más de
+/// `MAX_RANGE`. Acumular el tramo entero —lo que se hacía antes— es memoria que
+/// una máquina pequeña no tiene, y obliga a repetirlo todo si se corta la red.
+pub fn https_download_span_a(
+    url: &str,
+    token: Option<&str>,
+    start: u64,
+    len: u64,
+    recibe: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    if len == 0 {
+        return Ok(());
+    }
     let mut off = start;
     let fin = start + len;
     while off < fin {
@@ -100,21 +125,20 @@ pub fn https_download_span(
         // entero, y eso únicamente sirve cuando pedíamos desde el principio.
         if status != 206 {
             if start == 0 && off == 0 && status == 200 && chunk.len() as u64 >= len {
-                out.extend_from_slice(&chunk[..len as usize]);
-                return Ok(out);
+                recibe(&chunk[..len as usize])?;
+                return Ok(());
             }
             return Err("HTTP range");
         }
         if chunk.is_empty() {
             return Err("range vacío");
         }
-        out.extend_from_slice(&chunk);
-        off += chunk.len() as u64;
+        // Un servidor que devuelva más de lo pedido no puede desbordar el plan.
+        let n = (chunk.len() as u64).min(fin - off) as usize;
+        recibe(&chunk[..n])?;
+        off += n as u64;
     }
-    if out.len() as u64 != len {
-        return Err("tamaño inesperado");
-    }
-    Ok(out)
+    Ok(())
 }
 
 fn map_http_err(e: soso_http::HttpError) -> &'static str {

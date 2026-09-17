@@ -77,6 +77,13 @@ struct iwl_ax211_priv {
     void *scratch_cpu;
     void *info_cpu;
     void *ctxt_cpu;
+    void *kw_cpu;
+    uint64_t kw_dma;
+    void *tx_ring_cpu[IWL_8000_NUM_QUEUES];
+    uint64_t tx_ring_dma[IWL_8000_NUM_QUEUES];
+    uint8_t tx_preload_ready;
+    void *ict_cpu;
+    uint64_t ict_dma;
     void *iml_cpu;
     uint64_t iml_dma;
     unsigned long iml_cpu_len;

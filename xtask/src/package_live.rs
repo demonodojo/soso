@@ -823,7 +823,12 @@ fn copy_uefi_esp_mtools(uefi: &Path, fat: &Path) -> bool {
     status.map(|s| s.success()).unwrap_or(false)
 }
 
-/// Huecos 8.3 pre-creados en la ESP (log, hwscan, install, WiFi, OTA).
+/// Huecos 8.3 pre-creados en la ESP (log, hwscan, install, WiFi, OTA, modo).
+///
+/// El kernel no crea entradas en FAT: si un hueco no está aquí, esa vía queda
+/// desactivada hasta reflashear. `SOSOMODE.TXT` y `SOSOTXN.BIN` son los que
+/// añade U2 para la identidad live/instalado y el registro de transacción del
+/// contrato U0.
 pub(crate) fn create_esp_slots(live: &Path) {
     create_esp_file(live, b"SOSORES ", b"TXT", 4096);
     create_esp_file(live, b"SOSOLOG ", b"TXT", 256 * 1024);
@@ -831,6 +836,8 @@ pub(crate) fn create_esp_slots(live: &Path) {
     create_esp_file(live, b"SOSOBOOT", b"TXT", 4096);
     create_esp_file(live, b"SOSOWIFI", b"TXT", 4096);
     create_esp_file(live, b"SOSOUPD ", b"TXT", 4096);
+    create_esp_file(live, b"SOSOMODE", b"TXT", soso_update_core::UPD_MODE_SIZE);
+    create_esp_file(live, b"SOSOTXN ", b"BIN", soso_update_core::UPD_BOOTREC_SIZE);
     create_esp_file(live, b"SOSOKRN ", b"BIN", LIVE_KERNEL_SLOT);
     create_esp_file(live, b"SOSOKRN ", b"MET", 512);
 }
@@ -1526,6 +1533,30 @@ fi
 esp="${{TARGET}}p1"
 [[ -b "$esp" ]] || esp="${{TARGET}}1"
 uuid=$(blkid -s UUID -o value "$esp" 2>/dev/null || true)
+
+# Finalizar la ESP como instalación: declarar la identidad y retirar el log.
+# Sin esto el disco es una copia del live y se seguiría comportando como tal:
+# escribiría su log en la ESP en vez de en /var/log.
+finalizar_esp() {{
+  local mnt
+  mnt=$(mktemp -d)
+  if ! mount "$esp" "$mnt" 2>/dev/null; then
+    rmdir "$mnt"
+    echo "aviso: no pude montar $esp; el destino se comportará como un live" >&2
+    return
+  fi
+  # `rm` de verdad: dejar el fichero a ceros no quita su entrada de directorio.
+  rm -f "$mnt/SOSOLOG.TXT" "$mnt/SOSOBOOT.TXT"
+  # La identidad (`SOSOMODE.TXT`) **no** se escribe desde aquí: su suma es un
+  # CRC32C y bash no lo calcula con herramientas estándar. No pasa nada: sin
+  # registro el arranque se trata como live, no encuentra SOSOLOG.TXT —que
+  # acabamos de borrar— y los logs acaban igualmente en /var/log. Para dejar la
+  # identidad declarada, instala desde el live con `soso-install`.
+  echo "ESP finalizada: sin SOSOLOG.TXT (identidad: usa soso-install para declararla)"
+  umount "$mnt"
+  rmdir "$mnt"
+}}
+finalizar_esp
 
 grub_snippet() {{
   cat <<GRUB

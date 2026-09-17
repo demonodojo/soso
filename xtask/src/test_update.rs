@@ -149,7 +149,23 @@ fn preparar_release_prueba(root: &Path) {
         kernel_size: kernel_bytes.len() as u64,
         pack_hash: hex_sha256(&pack_blob),
         pack_size: pack_blob.len() as u64,
-        compat: None,
+        // Desde U3 el cliente rechaza un manifiesto sin contrato de
+        // compatibilidad, así que la release de prueba tiene que traerlo. El
+        // banco arranca desde un USB, de ahí el driver declarado.
+        compat: Some(soso_update_core::Compat {
+            arch: "x86_64".into(),
+            perfil: "live-usb".into(),
+            drivers: vec![
+                "usb".into(),
+                "nvme".into(),
+                "virtio-blk".into(),
+                "live-disk".into(),
+            ],
+            abi: soso_abi::ABI_VERSION,
+            fs: soso_update_core::compat::FS_FORMATO.into(),
+            min_shim: soso_update_core::compat::SHIM_VERSION,
+            min_recuperador: soso_update_core::compat::RECUPERADOR_VERSION,
+        }),
         files,
     };
     std::fs::write(rel_dir.join("manifest.txt"), manifest.format()).expect("manifest");
@@ -229,7 +245,11 @@ fn fase_comprobar_version(
         // que no hacen falta enteros por la sesión SSH.
         // Sin comillas: el tokenizador de sosh no las interpreta y «grep "a b"»
         // acaba buscando el fichero `b"`.
-        "cat /etc/actualiza-marca.txt\ncat /var/log/aplicaciones.log\ngrep flujo /var/log/kernel.log\ngrep boot: /var/log/kernel.log\nsoso-update estado\nhalt\n",
+        // U4: se ensucia la marca para que el fichero vuelva a hacer falta, y
+        // se reaplica. Lo bajado y verificado en el arranque anterior sigue en
+        // el área de preparación, así que tiene que reanudar en vez de pedirlo
+        // otra vez — y eso cruza un reinicio, que es lo que exige el criterio.
+        "cat /etc/actualiza-marca.txt\ncat /var/log/aplicaciones.log\ngrep flujo /var/log/kernel.log\necho sucia > /etc/actualiza-marca.txt\nsoso-update aplicar --local /var/actualiza-prueba --forzar\nsoso-update estado\nhalt\n",
         Duration::from_secs(120),
         &format!("rootfs: {ver}"),
     )?;
@@ -262,8 +282,11 @@ fn fase_comprobar_version(
             "kernel.log debería tener una cabecera por arranque, encontré {cabeceras}: {salida:?}"
         ));
     }
-    if !salida.contains("boot: fs") {
-        return Err(format!("kernel.log no conserva las trazas tempranas: {salida:?}"));
+    // U4: la etapa sobrevivió al reinicio y no se vuelve a descargar nada.
+    if !salida.contains("ya descargados, reanudando") {
+        return Err(format!(
+            "la segunda aplicación no reanudó desde el área de preparación: {salida:?}"
+        ));
     }
     Ok(())
 }

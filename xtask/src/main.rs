@@ -328,7 +328,15 @@ fn rust_bootstrap(build_std: bool) {
     }
 }
 
-/// Firmware de arranque: `SOSO_FIRMWARE=bios|uefi` (default bios).
+/// Firmware de arranque: `SOSO_FIRMWARE=bios|uefi` (**default uefi**).
+///
+/// Era BIOS, pero el cargador de la imagen BIOS deja de arrancar cuando el
+/// kernel crece: medido el 2026-09-16, 30,92 MB arranca y 31,32 MB da **cero
+/// bytes** de serie, sin error de QEMU y sin llegar a imprimir el cargador.
+/// Parece una regresión gravísima del arranque y no lo es. UEFI no tiene ese
+/// techo, es lo que usa la placa real y es el camino que el kernel seguirá
+/// engordando (el aplicador de U5 va dentro). Con `bios` sigue disponible a
+/// mano, con la advertencia de que el margen es estrecho.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Firmware {
     Bios,
@@ -337,8 +345,8 @@ pub(crate) enum Firmware {
 
 pub(crate) fn firmware() -> Firmware {
     match std::env::var("SOSO_FIRMWARE").unwrap_or_default().to_ascii_lowercase().as_str() {
-        "uefi" => Firmware::Uefi,
-        _ => Firmware::Bios,
+        "bios" => Firmware::Bios,
+        _ => Firmware::Uefi,
     }
 }
 
@@ -491,9 +499,9 @@ pub(crate) fn build_image_with_profile(
         Firmware::Uefi => {
             if ovmf_paths().is_none() {
                 eprintln!(
-                    "xtask: SOSO_FIRMWARE=uefi pero no se encontró OVMF \
-                     (instala ovmf o define SOSO_OVMF_CODE/SOSO_OVMF_VARS); \
-                     usando BIOS"
+                    "xtask: sin OVMF (instala ovmf o define \
+                     SOSO_OVMF_CODE/SOSO_OVMF_VARS); usando BIOS, que sólo \
+                     arranca si el kernel está por debajo de ~31 MB"
                 );
                 bios
             } else {
@@ -596,12 +604,24 @@ pub(crate) fn gpt_first_partition_lba(img: &Path) -> Option<u64> {
     Some(u64::from_le_bytes(ent[32..40].try_into().ok()?))
 }
 
+/// `"uefi"` o `"bios"` según la imagen, para nombrar copias sin perder el dato.
+pub(crate) fn firmware_kind(img: &Path) -> &'static str {
+    match img.file_name().and_then(|n| n.to_str()) {
+        Some(n) if n.ends_with("uefi.img") => "uefi",
+        _ => "bios",
+    }
+}
+
 /// Añade a `qemu` los drives de firmware (pflash OVMF) si la imagen es UEFI.
 pub(crate) fn apply_firmware(qemu: &mut Command, img: &Path) {
+    // Por sufijo, no por nombre exacto: la suite arranca **copias por shard**
+    // (`test-sys-uefi.img`), y comparar con "soso-uefi.img" hacía que una
+    // imagen UEFI se lanzara sin OVMF. El síntoma era un guest mudo —cero bytes
+    // de serie— que parecía una regresión del arranque.
     let is_uefi = img
         .file_name()
         .and_then(|n| n.to_str())
-        == Some("soso-uefi.img");
+        .is_some_and(|n| n.ends_with("uefi.img"));
     if !is_uefi {
         return;
     }
@@ -649,6 +669,7 @@ pub(crate) fn build_user() -> bool {
         "hexdump",
         "log",
         "ip",
+        "ping",
         "halt",
         "soso-llm",
         "soso-install",

@@ -250,6 +250,8 @@ pub fn errno_str(e: i64) -> &'static str {
         x if x == abi::ENOSYS => "syscall inexistente",
         x if x == abi::ENOTEMPTY => "directorio no vacío",
         x if x == abi::ENOTSUP => "no soportado",
+        x if x == abi::ETIMEDOUT => "timeout",
+        x if x == abi::ENOTCONN => "sin red",
         _ => "error desconocido",
     }
 }

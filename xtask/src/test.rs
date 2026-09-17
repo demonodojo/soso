@@ -541,7 +541,9 @@ fn make_slot(shard: ShardId, img: &Path, data: &Path, models: &Path) -> QemuSlot
         echo_port: shard.echo_port(),
         mac: shard.mac(),
         serial,
-        bios: copiar_imagen(img, id, "bios"),
+        // El nombre de la copia tiene que conservar el firmware: `apply_firmware`
+        // decide por él si hay que añadir OVMF.
+        bios: copiar_imagen(img, id, super::firmware_kind(img)),
         data: copiar_imagen(data, id, "data"),
         models: copiar_imagen(models, id, "models"),
         mem: if shard == ShardId::Reclaim {
@@ -731,6 +733,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
         let _ = report.paso(sid, &format!("echo TCP en :{echo}"), || echo_tcp(echo));
         let _ = report.paso_ssh_sys(&mut qemu, slot, sid, "marca /tmp/sosh-ready", || {
             ssh_sosh_ready(key, port)
+        });
+        filter.if_step(sid, "ping ICMP a 10.0.2.2", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "ping ICMP a 10.0.2.2", || {
+                ssh_ping(key, port)
+            });
         });
         filter.if_step(sid, "ask: el texto llega literal", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "ask: el texto llega literal", || {
@@ -1310,6 +1317,27 @@ fn ssh_guion_inner(
         ));
     }
     Ok(salida)
+}
+
+fn ssh_ping(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "ping -c 1 127.0.0.1\nping -c 1 10.0.2.2\nexit\n",
+        Duration::from_secs(30),
+    )?;
+    if !salida.contains("127.0.0.1") || !salida.lines().any(|l| l.contains("seq=1") && l.contains("ms"))
+    {
+        return Err(format!("ping 127.0.0.1 no contestó; stdout: {salida:?}"));
+    }
+    if !salida.contains("10.0.2.2")
+        || !salida
+            .lines()
+            .any(|l| l.contains("10.0.2.2") && l.contains("seq=1") && l.contains("ms"))
+    {
+        return Err(format!("ping 10.0.2.2 no contestó; stdout: {salida:?}"));
+    }
+    Ok(())
 }
 
 fn ssh_sosh_ready(key: &Path, ssh_port: u16) -> Result<(), String> {
@@ -2278,7 +2306,7 @@ pub fn run_usb() {
                 let _permit = pool.acquire();
                 let serial = root.join(esc.log);
                 let _ = std::fs::remove_file(&serial);
-                let bios = copiar_imagen(&img, esc.id, "bios");
+                let bios = copiar_imagen(&img, esc.id, super::firmware_kind(&img));
                 let data_img = copiar_imagen(&data, esc.id, "data");
                 let models_img = copiar_imagen(&models, esc.id, "models");
                 let live_src = super::package_live::live_image_path();

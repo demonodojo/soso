@@ -415,6 +415,7 @@ extern "sysv64" fn kernel_pf_panic_shim(addr: u64, _: u64) -> u64 {
     let cs = EXC_CS.load(Ordering::Relaxed);
     let err = EXC_ERR.load(Ordering::Relaxed);
     rastro_de_pila(rsp);
+    crate::println!("rastro: rsp en {}", crate::arch::gdt::zona_de_pila(rsp));
     panic!(
         "EXCEPTION: page fault at {addr:#x} rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x} cs={cs:#x} err={err:#x}"
     );

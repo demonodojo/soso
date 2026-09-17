@@ -28,6 +28,13 @@ deshace entera. El contrato define:
 Lo que **no** fija: descarga, HTTP, empaquetado, rotación de logs, migración de
 instalaciones antiguas y el aplicador real. Son U1–U6 y usan estas piezas.
 
+**Ampliación pendiente (2026-09-16):** la [sección 3.6 del plan](PLAN-ACTUALIZACIONES.md#36-vuelta-atrás-segura-incluso-después-de-confirmar)
+exige retención entre actualizaciones sucesivas, recuperación manual/UEFI/live
+y validación del arranque restaurado. U5a extenderá este contrato y sus pruebas;
+el cierre histórico de U0 no acredita esas garantías. Hasta esa entrega, la
+tabla de reconciliación de este documento describe el banco existente y no se
+debe ampliar solo en prosa sin cambiar su implementación y pruebas.
+
 ## 2. Identidad de la operación
 
 `TxnId` es el **SHA-256 del manifiesto**, no la versión. Dos builds de `0.3.0`
@@ -78,7 +85,11 @@ romper la copia en curso.
 | Identidad | ESP `SOSOMODE.TXT` | 4 KiB | 4 ranuras de 1 KiB | `live`/`installed`, fecha, GUID de la ESP |
 
 Envoltura común ([`record.rs`](../crates/soso-update-core/src/record.rs)): magic,
-`formato=`, `seq=`, cuerpo y `sum=` con 16 bytes de SHA-256. Se distingue
+`formato=`, `seq=`, cuerpo y `sum=` con un **CRC32C** en hex. Es un CRC y no un
+hash a propósito: protege contra escrituras cortadas y sectores dañados, no
+contra falsificación —quien pueda reescribir la ESP puede rehacer el registro
+entero—. Y la diferencia se paga: instanciar SHA-256 en el kernel sólo para
+esto costaba 466 KB, suficiente para que la imagen BIOS dejara de arrancar (U2). Se distingue
 «nunca escrito» (ranura a ceros, a `\n` o a `0xff`) de «roto» (magic, formato o
 suma que no cuadran): lo primero es un sistema sin transacción, lo segundo exige
 diagnóstico. Un `formato=` mayor del que entiende el recuperador se rechaza; no
@@ -199,17 +210,43 @@ mitad es una de las formas típicas de dejar una pareja incoherente.
 ## 8. Compatibilidad de la release
 
 El manifiesto declara `arch`, `perfil`, `drivers`, `abi`, `fs`, `min_shim` y
-`min_recuperador`. `Manifest::parse` los lee si están y deja `compat: None` en
+`min_recuperador`. El sentido de `drivers` importa y es fácil invertirlo: el
+manifiesto dice lo que la release **trae**, y el equipo lo que **necesita** para
+volver a arrancar (el driver de su disco, el de la red por la que se actualiza).
+Se comprueba que lo segundo está contenido en lo primero; al revés, cualquier
+release con un driver de más se rechazaba. `Manifest::parse` los lee si están y deja `compat: None` en
 los manifiestos anteriores; `compat::exigir` rechaza un paquete **sin**
 declaración, así que un manifiesto viejo se lee pero no se aplica.
 
 `min_shim`/`min_recuperador` mayores que los de este equipo son exactamente el
-caso de U6: hace falta una release puente, no sobrescribir ficheros. Falta un
-driver declarado (el del disco de arranque, el de la red de la OTA) se rechaza
-antes de descargar.
+caso de U6: hace falta una release puente, no sobrescribir ficheros. Que a la release le falte un driver
+imprescindible para este equipo se rechaza antes de descargar.
 
-La política de firma del manifiesto y distribución de claves **sigue sin
-decidirse**: los hashes acreditan integridad, no autoría. U3 tendrá que fijarla.
+### Firma: qué se decidió (U3, 2026-09-16)
+
+Las releases **no se firman todavía**, y conviene ser exacto sobre lo que eso
+significa en vez de dejarlo en «hay hashes».
+
+La confianza se apoya hoy en dos cosas: **HTTPS con validación de certificado**
+contra el origen configurado, y los **hashes del manifiesto**, que atan el pack
+y el kernel a ese manifiesto concreto. Eso basta para detectar corrupción en
+tránsito, un artefacto truncado o alterado, y —con U4— mezclar artefactos de dos
+releases distintas. **No** protege de quien controle el origen: quien pueda
+publicar en el repositorio, o quien ponga un `url=` en `/etc/actualiza.conf`,
+puede servir el sistema operativo que quiera. Por eso `url=` es una decisión de
+confianza y por eso el cliente **dice de qué origen va a bajar, y por qué,
+antes de tocar nada**.
+
+Cuando se añada la firma, estos son los requisitos, no una intención:
+
+- firma ed25519 **separada** sobre los bytes exactos de `manifest.txt`
+  (`manifest.sig`), no sobre una forma normalizada;
+- clave pública en la instalación (`/etc/soso-release.pub`), que **sólo** puede
+  cambiar una migración explícita: nunca el propio pack, o la primera release
+  maliciosa se autoriza sola;
+- verificación **antes** de escribir nada y antes de armar la transacción;
+- con clave presente, una release sin firma válida se rechaza; sin clave, el
+  cliente avisa de que está confiando sólo en el transporte.
 
 ## 9. Identidad live / instalado
 

@@ -25,9 +25,10 @@ static int copy_section(struct iwl_fw_section *sec, const uint8_t *data, uint32_
     return 0;
 }
 
-static int append_rt(struct iwl_fw_image *fw, const uint8_t *data, uint32_t len)
+static int append_sec(struct iwl_fw_rt_section *secs, int *n_secs,
+                    const uint8_t *data, uint32_t len)
 {
-    if (fw->rt_n >= IWL_FW_RT_MAX)
+    if (*n_secs >= IWL_FW_RT_MAX)
         return -1;
     if (len < 4)
         return -1;
@@ -35,10 +36,20 @@ static int append_rt(struct iwl_fw_image *fw, const uint8_t *data, uint32_t len)
     if (!buf)
         return -1;
     memcpy(buf, data, len);
-    fw->rt[fw->rt_n].data = buf;
-    fw->rt[fw->rt_n].len = len;
-    fw->rt_n++;
+    secs[*n_secs].data = buf;
+    secs[*n_secs].len = len;
+    (*n_secs)++;
     return 0;
+}
+
+static int append_rt(struct iwl_fw_image *fw, const uint8_t *data, uint32_t len)
+{
+    return append_sec(fw->rt, &fw->rt_n, data, len);
+}
+
+static int append_sec_init(struct iwl_fw_image *fw, const uint8_t *data, uint32_t len)
+{
+    return append_sec(fw->sec_init, &fw->sec_init_n, data, len);
 }
 
 static int is_separator(const struct iwl_fw_rt_section *sec, uint32_t magic)
@@ -92,6 +103,10 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
             break;
         case IWL_UCODE_TLV_SEC_RT:
             if (append_rt(&iwl->fw, pos, length))
+                return -1;
+            break;
+        case IWL_UCODE_TLV_SEC_INIT:
+            if (append_sec_init(&iwl->fw, pos, length))
                 return -1;
             break;
         case IWL_UCODE_TLV_IML: {
@@ -165,6 +180,11 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
     if (pos != end)
         return -1;
 
+    if (iwl->fw.sec_init_n > 0 && iwl->fw.rt_n > 0) {
+        lx_printk("iwl_fw: SEC_INIT %d SEC_RT %d secciones\n",
+                  iwl->fw.sec_init_n, iwl->fw.rt_n);
+        return 0;
+    }
     if (iwl->fw.rt_n > 0) {
         lx_printk("iwl_fw: SEC_RT %d secciones\n", iwl->fw.rt_n);
         return 0;

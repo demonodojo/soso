@@ -424,6 +424,7 @@ fn eth_caps() -> DeviceCapabilities {
     caps.max_burst_size = Some(1);
     caps.checksum.ipv4 = Checksum::Both;
     caps.checksum.tcp = Checksum::Both;
+    caps.checksum.icmpv4 = Checksum::Both;
     #[cfg(feature = "drv-virtio-net")]
     let _ = BUF_LEN;
     caps

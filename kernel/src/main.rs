@@ -157,6 +157,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     {
         println!("boot: live-disk");
         drivers::live_disk::init();
+        // La identidad decide a dónde van los logs, así que se lee antes que
+        // el log FAT y antes de montar sosofs.
+        drivers::modo::init();
         drivers::fatlog::init();
         drivers::drvlog::init();
         drivers::bootreq::init();
@@ -181,6 +184,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // lo capturado en RAM desde el primer `println!` se vuelca aquí, que es lo
     // que hace útil el fichero cuando el arranque siguiente no llega tan lejos.
     drivers::logfs::init();
+    // Recuperador de actualizaciones: **antes** de cargar firmware de `/lib` y
+    // de arrancar `/bin/init`. Si una actualización se quedó a medias, nadie
+    // puede consumir un `/lib` mezclado ni ejecutar un `/bin/init` que quizá
+    // sea el nuevo con el resto viejo.
+    #[cfg(feature = "drv-live-disk")]
+    let pareja_coherente = drivers::txnaplica::recuperar();
+    #[cfg(not(feature = "drv-live-disk"))]
+    let pareja_coherente = true;
     #[cfg(feature = "drv-live-disk")]
     drivers::fatlog::flush_checkpoint();
     println!("boot: ethernet");
@@ -248,7 +259,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     task::init();
 
     // Si hay un init de usuario, arranca en ring 3; si no, kernel-shell.
-    let hay_init = crate::vfs::resolve("/bin/init").is_ok();
+    // Con una pareja kernel/rootfs incoherente no se lanza nada de usuario:
+    // se queda en la consola de emergencia para diagnosticar.
+    let hay_init = pareja_coherente && crate::vfs::resolve("/bin/init").is_ok();
+    if !pareja_coherente {
+        println!("init: no arranco con una actualización a medias — usa el USB live");
+    }
     if hay_init {
         match task::spawn("/bin/init", "", 0) {
             Ok(pid) => {
