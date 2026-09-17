@@ -29,6 +29,16 @@ Plan U0–U8: [actualizaciones de instalaciones y logs en sosofs](../../../docs/
 Incluye recuperación conjunta kernel/rootfs, transición legacy y eliminación
 de `SOSOLOG.TXT` en la ESP instalada; no tratarlo como comportamiento implementado.
 
+**U5a cerrada (2026-09-17):** registro de arranque en **formato 2** — punto
+retenido + decisión `rescatar` — que **sigue leyendo el formato 1** (sin punto:
+«no consta», no «no hay»; `BootRecord::conoce_puntos()`) y rechaza uno más nuevo
+entero. `txn/punto.rs`: el punto guarda A **mientras B sea la activa**, aunque B
+esté confirmada; lleva GUID del destino, se **verifica releyéndolo**, anota lo
+que añadió B para **quitarlo** al volver, y `reserva_efectiva` cuenta los datos
+dos veces por el CoW. `recogible` sólo suelta lo no referenciado (en A→B→C
+conviven dos). La fila `rescatar` de la tabla **manda sobre el diario**. Nadie
+crea puntos todavía: eso es U5b; la entrada UEFI que los pide, U5d.
+
 **U5c parcial (2026-09-17) — no confundir con U5 entera.** El plan creció el
 2026-09-16 (§3.6: puntos de recuperación **retenidos**, tres vías de vuelta
 atrás, entrada UEFI de rescate) y U5 se desglosó en U5a–U5e, todas pendientes.

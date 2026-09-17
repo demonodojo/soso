@@ -65,6 +65,18 @@ pub fn recuperar() -> bool {
             publicar(&esp, Decision::Revertido, id);
             true
         }
+        // U5a define la petición de rescate; restaurar un punto retenido es
+        // U5b/U5c y todavía no está. Se dice claramente y **no** se arranca
+        // como si nada: alguien pidió volver atrás desde fuera del sistema, y
+        // seguir adelante sería ignorarlo en silencio.
+        Recuperacion::Rescatar(punto) => {
+            crate::println!(
+                "txn: rescate pedido al punto {} — este kernel aún no sabe restaurarlo (U5b/U5c)",
+                punto.dir()
+            );
+            crate::otalog!("arranque: rescate pedido al punto {}, sin soporte", punto.dir());
+            false
+        }
         Recuperacion::Diagnostico(motivo) => {
             crate::println!(
                 "txn: PAREJA INCOHERENTE ({motivo:?}) — no arranco así; \

@@ -9,6 +9,7 @@
 
 pub mod aplicador;
 pub mod bootrec;
+pub mod punto;
 pub mod journal;
 pub mod reconcile;
 

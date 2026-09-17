@@ -81,7 +81,8 @@ romper la copia en curso.
 | Registro | Dónde | Tamaño | Copias | Contenido |
 |---|---|---|---|---|
 | Diario | sosofs `/var/lib/soso-update/<id>/diario.{0,1}` | variable | 2, por secuencia par/impar | inventario, hashes, respaldos, progreso por fichero |
-| Arranque | ESP `SOSOTXN.BIN` | 4 KiB | 4 ranuras de 1 KiB | decisión, ID, pareja de versiones, directorio |
+| Arranque | ESP `SOSOTXN.BIN` | 4 KiB | 4 ranuras de 1 KiB | decisión, ID, pareja de versiones, directorio y **punto retenido** (formato 2) |
+| Punto retenido | sosofs `/var/lib/soso-update/puntos/<id>` | variable | 1 | versión/build, GUID del destino, kernel y qué restaurar o quitar |
 | Identidad | ESP `SOSOMODE.TXT` | 4 KiB | 4 ranuras de 1 KiB | `live`/`installed`, fecha, GUID de la ESP |
 
 Envoltura común ([`record.rs`](../crates/soso-update-core/src/record.rs)): magic,
@@ -167,6 +168,14 @@ acreditarse. `reconcile()` es total: cada celda tiene una acción y sólo una.
 | **confirmado** | normal | normal | diag. imposible | diag. imposible | diag. imposible | diag. imposible | completar confirmación | normal | **revertir** | completar reversión | diag. imposible |
 | **revertir** | diag. sin diario | diag. sin diario | descartar | descartar | **revertir** | **revertir** | **revertir** | **revertir** | **revertir** | completar reversión | descartar |
 | **revertido** | normal | normal | diag. imposible | diag. imposible | diag. imposible | diag. imposible | diag. imposible | diag. imposible | **revertir** | normal | normal |
+| **rescatar** | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto |
+
+`rescatar punto` es la fila que añade U5a: una petición hecha **desde fuera**
+del sistema actualizado (entrada UEFI o live) manda sobre lo que diga el diario,
+porque quien la hace o no puede arrancar o ya confirmó y aun así quiere volver.
+Lo que restaura es el **punto retenido**, no la operación en curso. Un registro
+que pida rescate sin decir a qué punto volver es `diag. sin punto`: no hay nada
+que restaurar y adivinarlo sería peor.
 
 Acciones: `normal` arranca hacia init sin tocar nada; `descartar` recoge el área
 de preparación; `retroceder` devuelve el diario a `preparado` porque el armado
@@ -197,6 +206,40 @@ Decisiones de la tabla que conviene no reinventar:
 
 Invariante que comprueba el banco: **ninguna** pareja con el rootfs posiblemente
 mezclado (`aplicando`, `revirtiendo`) acaba en un arranque normal.
+
+## 6.bis Punto retenido y rescate (U5a)
+
+El registro de arranque pasa a **formato 2**, que añade el punto retenido y la
+decisión `rescatar`. La extensión es versionada, no un cambio a la brava:
+
+- Un registro de **formato 1 se sigue leyendo**. No trae punto, y quien lo lea
+  tiene que tratarlo como «no consta», no como «no hay vuelta atrás»:
+  `BootRecord::conoce_puntos()` existe para no confundir las dos cosas.
+- Un registro de formato **más nuevo** se rechaza entero. Aceptarlo a medias
+  sería quedarse con los campos que se entienden e ignorar los que no, que es
+  como se pierde una garantía sin enterarse.
+
+Un **punto retenido** no es el respaldo de una operación en curso. El respaldo
+vive mientras dura la transacción; el punto guarda la versión A **mientras B sea
+la activa**, aunque B esté confirmada y se reinicie muchas veces. Es lo que
+permite volver cuando el fallo no sale en el primer arranque —una aplicación que
+no va, el WiFi que deja de asociar—, que es justo cuando la confirmación ya se
+dio por buena. Reglas:
+
+1. **No caduca**: ni por tiempo, ni por limpieza, ni por falta de espacio. Si no
+   cabe algo, lo que se rechaza es la actualización nueva, no el punto.
+2. **Se verifica releyéndolo** (`Punto::verificar`), antes de armar la siguiente
+   y antes de usarlo. Un punto que se da por bueno sin releer se descubre roto
+   el día que hace falta.
+3. Lleva el **GUID del destino**: un punto de otra instalación no se aplica.
+4. Sólo se recoge el punto **no referenciado** (`punto::recogible`). Durante un
+   A→B→C conviven dos a propósito.
+
+**Reserva efectiva.** La reserva fija de la sección 7 es un mínimo, no una
+demostración de que quepa cualquier restauración. `punto::reserva_efectiva`
+calcula el peor caso real: los datos del punto contados **dos veces**, porque
+con copia en escritura conviven el bloque viejo y el nuevo, más logs y margen de
+recuperación.
 
 ## 7. Capacidad previa
 

@@ -1,6 +1,6 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
-Fecha: **2026-09-17**. Estado: **U0–U4 cerradas; U5a–U5e pendientes (parte de U5c hecha); U6–U8 pendientes**.
+Fecha: **2026-09-17**. Estado: **U0–U4 y U5a cerradas; parte de U5c hecha; U5b/U5d/U5e y U6–U8 pendientes**.
 El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md);
 todavía no está conectado al arranque, al cliente ni al instalador.
 Base de la revisión: `92531cd2d` y árbol de trabajo con cambios locales, incluidos
@@ -319,16 +319,16 @@ Desglose de U5 para ejecutar la ampliación sin alterar los cierres históricos:
 
 | Subentrega | Depende de | Entregable y aceptación |
 |---|---|---|
-| U5a | U0 | Extensión versionada del contrato: punto retenido, decisión/estado de rescate, reserva efectiva y tabla de cortes. Sin invalidar silenciosamente registros existentes; pruebas host de cada transición nueva. |
+| U5a ✅ | U0 | **Cerrada 2026-09-17.** Registro de arranque en **formato 2** (punto retenido + decisión `rescatar`) que sigue leyendo el formato 1 y rechaza uno más nuevo; `txn/punto.rs` con verificación releyendo, GUID del destino, retención y `reserva_efectiva`; fila `rescatar` en la tabla de cortes. 11 pruebas host nuevas. |
 | U5b | U5a, U4 | Creador/verificador de puntos y conservación durante actualizaciones sucesivas. Cualquier backup incompleto o falta de espacio impide armar; preparar C no destruye la vuelta de B a A. |
 | U5c | U5b | Aplicador y recuperador compartidos, reversión idempotente y arranque de la pareja antigua bajo su kernel. Cortes en todos los pasos y backup corrupto no producen un arranque mixto. |
 | U5d | U5c | CLI manual y entrada UEFI independiente del sistema actualizado. Recuperar sin shell ni red; cancelación antes de escribir; diagnóstico sin bucles si falla también la versión anterior. |
 | U5e | U5d | Confirmación de la pareja, comprobación del arranque restaurado, bloqueo de la candidata fallida y limpieza de puntos no referenciados. Reversión después de varios boots confirmados y datos nuevos conservados. |
 
-U5a–U5e están **pendientes**. La ampliación exige nueva evidencia; las pruebas
-históricas de U0 no certifican estas garantías adicionales. De U5c hay hecha y
+**U5a cerrada** el 2026-09-17; U5b, U5d y U5e pendientes, y de U5c hay hecha y
 probada una parte —aplicador idempotente con banco de cortes y recuperador
-temprano en el kernel, hoy inerte—; ver sección 6.
+temprano en el kernel, hoy inerte—; ver sección 6. La ampliación exige nueva
+evidencia; las pruebas históricas de U0 no certifican estas garantías.
 
 **U6, transición obligatoria:** inventariar formato de ESP, tamaño de huecos,
 shim y kernel de recuperación. La release puente debe habilitar el recuperador
@@ -642,6 +642,39 @@ el manual debe seguir describiendo el comportamiento actual.
 - **Siguiente paso: U5.** Respaldo, exclusión de escritores y aplicación desde
   la transacción: el aplicador temprano que consume `reconcile()` y el progreso
   del diario, con confirmación conjunta de kernel y rootfs.
+
+### U5a — cerrada el 2026-09-17 (contrato versionado y punto retenido)
+
+- **Extensión versionada, no un cambio a la brava.** El registro de arranque
+  pasa a **formato 2** con el punto retenido y la decisión `rescatar`. Un
+  registro de formato 1 **se sigue leyendo** —no trae punto, y
+  `BootRecord::conoce_puntos()` obliga a tratarlo como «no consta», no como «no
+  hay vuelta atrás»—; uno de formato más nuevo se rechaza entero, porque
+  aceptarlo a medias es perder una garantía sin enterarse.
+- **Punto retenido** ([`txn/punto.rs`](../crates/soso-update-core/src/txn/punto.rs)):
+  guarda la versión A **mientras B sea la activa**, aunque B esté confirmada y
+  se reinicie muchas veces. Lleva versión/build, GUID del destino —un punto de
+  otra instalación no se aplica—, kernel y qué restaurar o **quitar** (lo que
+  añadió B no tiene copia: volver es retirarlo). `verificar` lo **relee** entero
+  y comprueba tamaños y hashes; darlo por bueno sin releer se descubre el día
+  que hace falta.
+- **Reserva efectiva** (`punto::reserva_efectiva`): los datos del punto contados
+  **dos veces**, porque con copia en escritura conviven el bloque viejo y el
+  nuevo, más logs y margen. La reserva fija de U0 era un mínimo, no una
+  demostración de que quepa la restauración.
+- **Retención:** `punto::recogible` sólo deja recoger lo que nadie referencia;
+  durante un A→B→C conviven dos puntos a propósito.
+- **Tabla de cortes** ampliada con la fila `rescatar`, que **manda sobre el
+  diario**: quien pide rescate desde fuera del sistema actualizado o no puede
+  arrancar, o ya confirmó y aun así quiere volver. Sin punto al que volver es
+  diagnóstico, no un intento a ciegas. El test que ata la tabla al documento
+  obligó a actualizar el contrato en el mismo cambio.
+- **Evidencia:** 11 pruebas host nuevas (`tests/punto_retenido.rs`), 141 en el
+  crate, y `cargo build -p soso-update-core --no-default-features --features txn`
+  (lo que compila el kernel) sigue verde.
+- **Limitación:** es contrato y lógica; **nadie crea todavía un punto**. Eso es
+  U5b, que además debe conservar A al preparar C. La entrada UEFI de rescate que
+  escribiría `rescatar` es U5d.
 
 ### U5c — parcial el 2026-09-17 (aplicador y recuperador)
 

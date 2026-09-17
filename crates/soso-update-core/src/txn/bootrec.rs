@@ -14,7 +14,10 @@ use crate::record::{self, Framed, RecordError, SLOTS, SLOT_SIZE};
 use crate::txn::TxnId;
 
 pub const BOOTREC_MAGIC: &str = "SOSOTXN arranque";
-pub const BOOTREC_FORMATO: u16 = 1;
+/// Formato 2 (U5a): añade el punto retenido y la decisión de rescate. Los
+/// registros de formato 1 **siguen leyéndose**; simplemente no traen punto, y
+/// quien los lea tiene que saberlo en vez de suponer que hay vuelta atrás.
+pub const BOOTREC_FORMATO: u16 = 2;
 /// Tamaño del fichero completo en la ESP.
 pub const BOOTREC_SIZE: usize = SLOT_SIZE * SLOTS;
 
@@ -35,6 +38,11 @@ pub enum Decision {
     Revertir,
     /// Reversión terminada.
     Revertido,
+    /// Rescate pedido desde fuera del sistema actualizado (entrada UEFI o live):
+    /// restaurar el **punto retenido**, no la operación en curso. Es la vía para
+    /// cuando el fallo aparece después de confirmar, o cuando init/sosh no
+    /// arrancan y no hay dónde escribir una petición normal.
+    Rescatar,
 }
 
 impl Decision {
@@ -46,6 +54,7 @@ impl Decision {
             Decision::Confirmado => "confirmado",
             Decision::Revertir => "revertir",
             Decision::Revertido => "revertido",
+            Decision::Rescatar => "rescatar",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -56,6 +65,7 @@ impl Decision {
             "confirmado" => Decision::Confirmado,
             "revertir" => Decision::Revertir,
             "revertido" => Decision::Revertido,
+            "rescatar" => Decision::Rescatar,
             _ => return None,
         })
     }
@@ -72,6 +82,12 @@ pub struct BootRecord {
     pub version_anterior: String,
     /// Directorio de la operación dentro de sosofs (`/var/lib/soso-update/`).
     pub dir: String,
+    /// Punto retenido al que se vuelve (formato 2). `None` en registros de
+    /// formato 1: no es que no haya vuelta atrás, es que ese registro no sabe
+    /// de puntos, y confundirlo con «no hay» sería inventarse una garantía.
+    pub punto: Option<TxnId>,
+    /// Formato con el que se leyó.
+    pub formato: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,11 +112,19 @@ impl BootRecord {
             version_nueva: nueva.into(),
             version_anterior: anterior.into(),
             dir: id.dir(),
+            punto: None,
+            formato: BOOTREC_FORMATO,
         }
     }
 
+    /// Ata el registro a un punto retenido.
+    pub fn con_punto(mut self, punto: TxnId) -> Self {
+        self.punto = Some(punto);
+        self
+    }
+
     pub fn format(&self) -> Result<Vec<u8>, BootRecError> {
-        let body = format!(
+        let mut body = format!(
             "decision={}\nid={}\nversion_nueva={}\nversion_anterior={}\ndir={}\n",
             self.decision.as_str(),
             self.id.to_hex(),
@@ -108,6 +132,9 @@ impl BootRecord {
             self.version_anterior,
             self.dir
         );
+        if let Some(p) = self.punto {
+            body.push_str(&format!("punto={}\n", p.to_hex()));
+        }
         record::frame_slot(BOOTREC_MAGIC, BOOTREC_FORMATO, self.seq, &body, SLOT_SIZE)
             .map_err(BootRecError::Registro)
     }
@@ -139,6 +166,8 @@ impl BootRecord {
             version_nueva: f.requerido("version_nueva")?.into(),
             version_anterior: f.requerido("version_anterior")?.into(),
             dir: f.campo("dir").unwrap_or(&id.dir()).into(),
+            punto: f.campo("punto").and_then(TxnId::from_hex),
+            formato: f.formato,
         })
     }
 
@@ -149,5 +178,11 @@ impl BootRecord {
             Decision::Confirmado | Decision::Probando => &self.version_nueva,
             _ => &self.version_anterior,
         }
+    }
+
+    /// ¿Este registro sabe de puntos retenidos? Un formato 1 **no**, y hay que
+    /// tratarlo como «no consta», no como «no hay».
+    pub fn conoce_puntos(&self) -> bool {
+        self.formato >= 2
     }
 }

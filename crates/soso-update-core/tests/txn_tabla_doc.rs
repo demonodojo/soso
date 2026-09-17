@@ -22,13 +22,14 @@ const ESTADOS: [TxnState; 9] = [
     TxnState::Descartado,
 ];
 
-const DECISIONES: [Decision; 6] = [
+const DECISIONES: [Decision; 7] = [
     Decision::Idle,
     Decision::Armado,
     Decision::Probando,
     Decision::Confirmado,
     Decision::Revertir,
     Decision::Revertido,
+    Decision::Rescatar,
 ];
 
 fn id() -> TxnId {
@@ -50,11 +51,13 @@ fn celda(r: &Recuperacion) -> &'static str {
         Recuperacion::Revertir(_) => "**revertir**",
         Recuperacion::CompletarConfirmacion(_) => "completar confirmación",
         Recuperacion::CompletarReversion(_) => "completar reversión",
+        Recuperacion::Rescatar(_) => "rescatar punto",
         Recuperacion::Diagnostico(Motivo::ArmadoSinDiario) => "diag. sin diario",
         Recuperacion::Diagnostico(Motivo::MedioSinDecision) => "diag. sin decisión",
         Recuperacion::Diagnostico(Motivo::IdDiscordante) => "diag. ID",
         Recuperacion::Diagnostico(Motivo::ParejaImposible) => "diag. imposible",
         Recuperacion::Diagnostico(Motivo::RegistrosRotos) => "diag. rotos",
+        Recuperacion::Diagnostico(Motivo::RescateSinPunto) => "diag. sin punto",
     }
 }
 
@@ -87,10 +90,11 @@ fn tabla() -> String {
     let filas = [("ausente", EstadoEsp::Ausente), ("roto", EstadoEsp::Roto)]
         .into_iter()
         .chain(DECISIONES.iter().map(|d| {
-            (
-                d.as_str(),
-                EstadoEsp::Registro(BootRecord::nuevo(*d, id(), "N", "A", 1)),
-            )
+            let r = BootRecord::nuevo(*d, id(), "N", "A", 1);
+            // El rescate sólo tiene sentido con punto retenido; sin él la tabla
+            // diría «diag. sin punto» en toda la fila y no enseñaría nada.
+            let r = if *d == Decision::Rescatar { r.con_punto(id()) } else { r };
+            (d.as_str(), EstadoEsp::Registro(r))
         }));
 
     for (nombre, esp) in filas {

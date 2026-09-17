@@ -44,6 +44,9 @@ pub enum Motivo {
     ParejaImposible,
     /// Registros ilegibles en ambos medios.
     RegistrosRotos,
+    /// Se pide rescate pero el registro no dice a qué punto volver. Sin eso no
+    /// hay nada que restaurar y adivinarlo sería peor.
+    RescateSinPunto,
 }
 
 /// Acción del recuperador, antes de cargar firmware y antes de `/bin/init`.
@@ -65,6 +68,9 @@ pub enum Recuperacion {
     CompletarConfirmacion(TxnId),
     /// La restauración terminó; falta cerrarla en la ESP.
     CompletarReversion(TxnId),
+    /// Restaurar el **punto retenido** (U5a): la vuelta atrás pedida desde
+    /// fuera del sistema actualizado, que no depende de la operación en curso.
+    Rescatar(TxnId),
     /// Diagnóstico local y recuperación desde live. No es arranque normal.
     Diagnostico(Motivo),
 }
@@ -82,7 +88,8 @@ impl Recuperacion {
             | Recuperacion::PublicarProbando(i)
             | Recuperacion::Revertir(i)
             | Recuperacion::CompletarConfirmacion(i)
-            | Recuperacion::CompletarReversion(i) => Some(*i),
+            | Recuperacion::CompletarReversion(i)
+            | Recuperacion::Rescatar(i) => Some(*i),
             _ => None,
         }
     }
@@ -205,6 +212,16 @@ pub fn reconcile(esp: &EstadoEsp, journal: &EstadoJournal) -> Recuperacion {
                     }
                     S::Revertido => R::CompletarReversion(j.id),
                     S::Preparado | S::Descargando | S::Descartado => R::Descartar(j.id),
+                },
+
+                // ── Rescatar ─────────────────────────────────────────────
+                // Petición de fuera del sistema actualizado (entrada UEFI o
+                // live). Manda sobre lo que diga el diario: quien la hace no
+                // puede arrancar, o ya confirmó y aun así quiere volver. Lo que
+                // se restaura es el **punto retenido**, no la operación.
+                (D::Rescatar, _) => match r.punto {
+                    Some(p) => R::Rescatar(p),
+                    None => R::Diagnostico(Motivo::RescateSinPunto),
                 },
 
                 // ── Revertido ────────────────────────────────────────────
