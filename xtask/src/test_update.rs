@@ -21,7 +21,8 @@ const TEST_VER: &str = "0.2.1-prueba";
 const MARCA_NUEVA: &str = "nueva\n";
 const MARCA_VIEJA: &str = "vieja\n";
 
-pub fn run() {
+pub fn run(filtro: Option<&str>) {
+    let quiere = |nombre: &str| filtro.is_none_or(|f| nombre.contains(f));
     let root = crate::project_root();
     let dir = root.join("target/test-update");
     std::fs::create_dir_all(&dir).expect("test-update dir");
@@ -48,41 +49,65 @@ pub fn run() {
     let mut fallos = 0u32;
 
     let serial1 = dir.join("boot1.log");
-    match fase_aplicar(&ovmf_code, &vars, &live, &serial1, &key) {
-        Ok(s) => {
-            marca("arranque 1: soso-update aplicar --local", true);
-            println!("{}", sangrar(&s));
-        }
-        Err(e) => {
-            marca(&format!("arranque 1: aplicar — {e}"), false);
-            fallos += 1;
+    if quiere("aplicar") {
+        match fase_aplicar(&ovmf_code, &vars, &live, &serial1, &key) {
+            Ok(s) => {
+                marca("arranque 1: soso-update aplicar --local", true);
+                println!("{}", sangrar(&s));
+            }
+            Err(e) => {
+                marca(&format!("arranque 1: aplicar — {e}"), false);
+                fallos += 1;
+            }
         }
     }
 
     let serial2 = dir.join("boot2.log");
-    match fase_comprobar_version(&ovmf_code, &vars, &live, &serial2, &key, TEST_VER) {
-        Ok(()) => marca(&format!("arranque 2: versión {TEST_VER} visible"), true),
-        Err(e) => {
-            marca(&format!("arranque 2: versión — {e}"), false);
-            fallos += 1;
+    if quiere("version") {
+        match fase_comprobar_version(&ovmf_code, &vars, &live, &serial2, &key, TEST_VER) {
+            Ok(()) => marca(&format!("arranque 2: versión {TEST_VER} visible"), true),
+            Err(e) => {
+                marca(&format!("arranque 2: versión — {e}"), false);
+                fallos += 1;
+            }
+        }
+    }
+
+    if quiere("vuelta") {
+        let base_vuelta = dir.join("live-vuelta.img");
+        crate::copy_sparse(&live_base, &base_vuelta);
+        let ver_base = crate::version::read_version(&root);
+        match fase_vuelta_atras(&ovmf_code, &vars, &base_vuelta, &dir, &key, &ver_base) {
+            Ok(()) => marca(
+                "vuelta atrás manual: revertir + arranque restaura la anterior",
+                true,
+            ),
+            Err(e) => {
+                marca(&format!("vuelta atrás manual — {e}"), false);
+                fallos += 1;
+            }
         }
     }
 
     let serial3 = dir.join("boot-recovery.log");
-    match fase_recuperacion_corte(&ovmf_code, &vars, &live_base, &serial3, &key) {
-        Ok(()) => marca("arranque 3: recuperación tras corte (meta applying)", true),
-        Err(e) => {
-            marca(&format!("arranque 3: recuperación — {e}"), false);
-            fallos += 1;
+    if quiere("recuperacion") {
+        match fase_recuperacion_corte(&ovmf_code, &vars, &live_base, &serial3, &key) {
+            Ok(()) => marca("arranque 3: recuperación tras corte (meta applying)", true),
+            Err(e) => {
+                marca(&format!("arranque 3: recuperación — {e}"), false);
+                fallos += 1;
+            }
         }
     }
 
     let serial4 = dir.join("boot-manifest.log");
-    match fase_manifiesto_invalido(&ovmf_code, &vars, &live, &serial4, &key) {
-        Ok(()) => marca("arranque 4: manifiesto inválido rechazado", true),
-        Err(e) => {
-            marca(&format!("arranque 4: manifiesto — {e}"), false);
-            fallos += 1;
+    if quiere("manifiesto") {
+        match fase_manifiesto_invalido(&ovmf_code, &vars, &live, &serial4, &key) {
+            Ok(()) => marca("arranque 4: manifiesto inválido rechazado", true),
+            Err(e) => {
+                marca(&format!("arranque 4: manifiesto — {e}"), false);
+                fallos += 1;
+            }
         }
     }
 
@@ -267,12 +292,16 @@ fn fase_comprobar_version(
         return Err(format!("estado no muestra rootfs {ver}: {salida:?}"));
     }
     if !salida.contains(MARCA_NUEVA.trim()) {
-        return Err(format!("el fichero actualizado no sobrevivió al reinicio: {salida:?}"));
+        return Err(format!(
+            "el fichero actualizado no sobrevivió al reinicio: {salida:?}"
+        ));
     }
     // El USB de este test es un `usb-storage` real de QEMU (no virtio): el
     // disco de arranque debe reconocerse como tal por DISK_KIND_USB.
     if !salida.contains("arranque: USB live") {
-        return Err(format!("estado no reconoce el medio de arranque USB: {salida:?}"));
+        return Err(format!(
+            "estado no reconoce el medio de arranque USB: {salida:?}"
+        ));
     }
     // U1: los logs nativos sobreviven al reinicio. El registro de fd 3 lo
     // escribió el arranque anterior; si `/var/log` no persistiera, aquí no
@@ -289,12 +318,29 @@ fn fase_comprobar_version(
             "kernel.log debería tener una cabecera por arranque, encontré {cabeceras}: {salida:?}"
         ));
     }
-    // U5a/U5b: tras reiniciar, `estado` dice a qué versión se puede volver y
-    // que esa copia está comprobada.
-    if !salida.contains("vuelta atrás: 0.2.2") {
-        return Err(format!("estado no ofrece la vuelta atrás guardada: {salida:?}"));
+    // U5c: quien instaló fue el **recuperador del kernel**, antes de cargar
+    // firmware y antes de `/bin/init`, no el cliente. Si esto desaparece, la
+    // actualización habrá vuelto a ser «el programa escribe /bin» sin que
+    // ninguna otra comprobación se entere.
+    let serie = std::fs::read_to_string(serial).unwrap_or_default();
+    if !serie.contains("txn: actualización aplicada") {
+        return Err("la transacción no la aplicó el recuperador del kernel".into());
     }
-    if salida.contains("INCOMPLETA") {
+    let (antes, _) = serie
+        .split_once("txn: actualización aplicada")
+        .unwrap_or((&serie, ""));
+    if antes.contains("boot: ethernet") || antes.contains("task: /bin/init lanzado") {
+        return Err("el recuperador corrió después del firmware o de init".into());
+    }
+
+    // U5a/U5b: tras reiniciar, `estado` ofrece una vuelta atrás y dice que esa
+    // copia está **comprobada**. No se fija la versión a propósito: al
+    // reaplicar, el punto pasa a reflejar la que estuviera activa entonces, que
+    // es justo lo que debe guardar.
+    if !salida.contains("vuelta atrás: ") || salida.contains("vuelta atrás: ninguna") {
+        return Err(format!("estado no ofrece ninguna vuelta atrás: {salida:?}"));
+    }
+    if !salida.contains("verificada") || salida.contains("INCOMPLETA") {
         return Err(format!("el punto guardado no se relee entero: {salida:?}"));
     }
 
@@ -308,6 +354,109 @@ fn fase_comprobar_version(
 }
 
 /// Simula un corte tras escribir el backup: meta `applying`, kernel activo corrupto.
+/// U5d: vuelta atrás manual. Sobre una copia limpia: armar, aplicar y luego
+/// `revertir`, y comprobar que el arranque siguiente deja la versión anterior
+/// **y** el fichero que la actualización había cambiado.
+fn fase_vuelta_atras(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    dir: &Path,
+    key: &Path,
+    ver_base: &str,
+) -> Result<(), String> {
+    // 1) Armar.
+    let s1 = dir.join("vuelta-1.log");
+    let _ = std::fs::remove_file(&s1);
+    {
+        let qemu = lanzar_live(code, vars, live, &s1)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s1, "sosh —", Duration::from_secs(300))?;
+        ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "soso-update aplicar --local /var/actualiza-prueba --forzar
+halt
+",
+            Duration::from_secs(180),
+            "soso-update: listo",
+        )?;
+    }
+
+    // 2) Se aplica sola al arrancar; después se pide la vuelta atrás.
+    let s2 = dir.join("vuelta-2.log");
+    let _ = std::fs::remove_file(&s2);
+    {
+        let qemu = lanzar_live(code, vars, live, &s2)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s2, "sosh —", Duration::from_secs(300))?;
+        let salida = ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "soso-update revertir --yes
+halt
+",
+            Duration::from_secs(120),
+            "reinicia y volverás",
+        )?;
+        // No se promete nada sin haber releído la copia.
+        if !salida.contains("copia verificada") {
+            return Err(format!("revertir no verificó el punto antes: {salida:?}"));
+        }
+    }
+
+    // 3) Y al arrancar, la versión anterior entera.
+    // Cada arranque va en su bloque: el guardián del anterior tiene que caer
+    // antes de lanzar el siguiente, o los dos QEMU se pelean por la imagen y el
+    // segundo muere sin llegar a escribir su log de serie.
+    let s3 = dir.join("vuelta-3.log");
+    let _ = std::fs::remove_file(&s3);
+    {
+        let qemu = lanzar_live(code, vars, live, &s3)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s3, "sosh —", Duration::from_secs(300))?;
+        let serie = std::fs::read_to_string(&s3).unwrap_or_default();
+        if !serie.contains("txn: restaurada la versión") {
+            return Err("el arranque no restauró el punto".into());
+        }
+        let salida = ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "cat /etc/actualiza-marca.txt
+soso-update estado
+halt
+",
+            Duration::from_secs(120),
+            &format!("rootfs: {ver_base}"),
+        )?;
+        if !salida.contains(MARCA_VIEJA.trim()) {
+            return Err(format!(
+                "el fichero no volvió a su contenido anterior: {salida:?}"
+            ));
+        }
+        if !salida.contains(&format!("rootfs: {ver_base}")) {
+            return Err(format!("la versión no volvió a {ver_base}: {salida:?}"));
+        }
+    }
+
+    // U5e: la versión restaurada queda **a prueba** hasta que ese arranque se
+    // acredita. Un cuarto arranque tiene que encontrarlo ya cerrado y seguir
+    // como si nada; si siguiera a prueba, el sistema diría que no arranca.
+    let s4 = dir.join("vuelta-4.log");
+    let _ = std::fs::remove_file(&s4);
+    let qemu = lanzar_live(code, vars, live, &s4)?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(&s4, "sosh —", Duration::from_secs(300))?;
+    let serie4 = std::fs::read_to_string(&s4).unwrap_or_default();
+    if serie4.contains("RestauradoNoArranca") {
+        return Err("la restauración no se acreditó y el arranque la da por fallida".into());
+    }
+    if serie4.contains("txn: restaurada la versión") {
+        return Err("volvió a restaurar: la vuelta atrás no quedó cerrada".into());
+    }
+    Ok(())
+}
+
 fn fase_recuperacion_corte(
     code: &Path,
     vars: &Path,
@@ -325,8 +474,7 @@ fn fase_recuperacion_corte(
 
     let log = std::fs::read_to_string(serial).unwrap_or_default();
     let p1 = esp_p1(live);
-    let mark = crate::fat32_write::read_root_file(live, p1, b"BOOTMARKTXT")
-        .unwrap_or_default();
+    let mark = crate::fat32_write::read_root_file(live, p1, b"BOOTMARKTXT").unwrap_or_default();
     let mark_s = String::from_utf8_lossy(&mark);
     let ok_serial = log.contains("recuperado tras corte") || log.contains("actualiza: recuperado");
     let ok_mark = mark_s.contains("recuperado tras corte");
@@ -421,11 +569,16 @@ fn inyectar_corte_backup(live: &Path) -> Result<(), String> {
 }
 
 fn esp_p1(live: &Path) -> u64 {
-    crate::package_live::partition_first_sector(live, 1)
-        .expect("ESP p1 del live")
+    crate::package_live::partition_first_sector(live, 1).expect("ESP p1 del live")
 }
 
-fn esp_write_root(live: &Path, p1: u64, name: &[u8; 8], ext: &[u8; 3], data: &[u8]) -> Result<(), String> {
+fn esp_write_root(
+    live: &Path,
+    p1: u64,
+    name: &[u8; 8],
+    ext: &[u8; 3],
+    data: &[u8],
+) -> Result<(), String> {
     crate::fat32_write::write_root_file(live, p1, name, ext, data)
 }
 
@@ -469,12 +622,7 @@ impl Drop for Matar {
     }
 }
 
-fn lanzar_live(
-    code: &Path,
-    vars: &Path,
-    live: &Path,
-    serial: &Path,
-) -> Result<QemuProc, String> {
+fn lanzar_live(code: &Path, vars: &Path, live: &Path, serial: &Path) -> Result<QemuProc, String> {
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args(["-machine", "q35", "-cpu", "max"])
         .args(["-m", "2048M"])

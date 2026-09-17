@@ -15,6 +15,7 @@ extern crate alloc;
 
 mod actualiza;
 mod bootentry;
+mod rescate;
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -54,6 +55,19 @@ fn main() -> Status {
             uefi::println!("soso-shim: {linea}");
             let head = format!("{head}bootentry: {linea}\n");
             write_mark(&head);
+            head
+        }
+        None => head,
+    };
+    // El rescate va **antes** que el buzón: deja pedida la vuelta atrás del
+    // kernel, y quien la ejecuta es `actualiza::atender()` justo después.
+    let head = match rescate::atender() {
+        Some(linea) => {
+            uefi::println!("soso-shim: {linea}");
+            let head = format!("{head}rescate: {linea}\n");
+            write_mark(&head);
+            // Un rescate no es rutina: que se lea en pantalla antes de seguir.
+            boot::stall(Duration::from_secs(5));
             head
         }
         None => head,

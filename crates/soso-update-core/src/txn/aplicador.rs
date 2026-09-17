@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::hash::hex_sha256;
-use crate::txn::journal::{Accion, Journal, Progreso};
+use crate::txn::journal::{Accion, Entrada, Journal, Progreso};
 use crate::txn::{TxnEvent, TxnState};
 
 /// De dónde sale un contenido.
@@ -134,13 +134,24 @@ pub fn revertir<S: Sistema>(j: &mut Journal, s: &mut S) -> Result<(), Fallo> {
     Ok(())
 }
 
-fn paso_revertir<S: Sistema>(j: &mut Journal, i: usize, s: &mut S) -> Result<(), Fallo> {
-    let e = j.entradas[i].clone();
+/// Restaura un conjunto de entradas sin diario de por medio.
+///
+/// Es lo que usa la vuelta atrás desde un **punto retenido** (U5d): ahí no hay
+/// una transacción en curso cuyo progreso anotar, sólo una versión a la que
+/// volver. No hace falta llevar la cuenta porque cada paso es idempotente:
+/// si el arranque se corta a mitad, el siguiente lo repite entero y llega al
+/// mismo sitio.
+pub fn restaurar<S: Sistema>(entradas: &[Entrada], s: &mut S) -> Result<(), Fallo> {
+    for e in entradas {
+        restaurar_una(e, s)?;
+    }
+    Ok(())
+}
+
+fn restaurar_una<S: Sistema>(e: &Entrada, s: &mut S) -> Result<(), Fallo> {
     match e.accion {
-        // No existía antes de la actualización: deshacer es quitarlo.
-        Accion::Crear => {
-            s.borrar(&e.path).map_err(|_| Fallo::Borrado(e.path.clone()))?;
-        }
+        // Lo añadió la versión nueva: volver atrás es quitarlo.
+        Accion::Crear => s.borrar(&e.path).map_err(|_| Fallo::Borrado(e.path.clone())),
         Accion::Reemplazar | Accion::Borrar => {
             let resp = e
                 .respaldo
@@ -153,9 +164,14 @@ fn paso_revertir<S: Sistema>(j: &mut Journal, i: usize, s: &mut S) -> Result<(),
                 return Err(Fallo::HashDistinto(e.path.clone()));
             }
             s.escribir(&e.path, &datos)
-                .map_err(|_| Fallo::Escritura(e.path.clone()))?;
+                .map_err(|_| Fallo::Escritura(e.path.clone()))
         }
     }
+}
+
+fn paso_revertir<S: Sistema>(j: &mut Journal, i: usize, s: &mut S) -> Result<(), Fallo> {
+    let e = j.entradas[i].clone();
+    restaurar_una(&e, s)?;
     j.entradas[i].progreso = Progreso::Restaurado;
     Ok(())
 }

@@ -12,6 +12,7 @@ pub mod bootrec;
 pub mod punto;
 pub mod journal;
 pub mod reconcile;
+pub mod rescate;
 
 use alloc::string::String;
 

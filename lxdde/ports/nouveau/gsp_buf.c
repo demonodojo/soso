@@ -390,10 +390,12 @@ int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
     if (size > G6_SRC_MAX - (uint64_t)src_off) {
         return -1;
     }
-    /* Las páginas tienen que cubrir exactamente `src_off + size` (la última puede
-     * ir a medias): si sobran o faltan, el mapeo y la copia dirían cosas
-     * distintas. */
-    esperadas = ((uint64_t)src_off + size + VRAM_PAGE - 1ull) / VRAM_PAGE;
+    /* Las páginas cubren la ventana mapeada desde `G6_SRC_VA`. El CE no mueve
+     * sólo `size`: con boa0b5 un rabo < 4 KiB es LINE_COUNT=1 y LINE_LENGTH=
+     * página, así que desde `G6_SRC_VA+src_off` puede leer hasta una página
+     * entera (fallo ROG 2026-09-17: +64, 512 B, 1 PTE → fault en +0x1000). */
+    esperadas = (src_off + gsp_ce_io_bytes((uint32_t)size) + VRAM_PAGE - 1ull) /
+                VRAM_PAGE;
     if ((uint64_t)npages != esperadas) {
         return -1;
     }
@@ -405,6 +407,9 @@ int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
         lx_printk("nouveau-lx: G6 — DMA fuera del búfer (off=%llu size=%llu de %llu)\n",
                   (unsigned long long)offset, (unsigned long long)size,
                   (unsigned long long)s->size);
+        return -1;
+    }
+    if (offset + gsp_ce_io_bytes((uint32_t)size) > s->size) {
         return -1;
     }
     /* Sólo el camino probado: destino alineado y tamaño múltiplo de página, o un

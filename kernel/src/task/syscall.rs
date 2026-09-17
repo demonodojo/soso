@@ -317,6 +317,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_LOG_READ => sys_log_read(a1, a2, a3),
         abi::SYS_NETINFO => sys_netinfo(a1),
         abi::SYS_FSINFO => sys_fsinfo(a1),
+        abi::SYS_TXN_CONFIRM => sys_txn_confirm(),
         abi::SYS_PING => sys_ping(a1, a2),
         _ => Err(-abi::ENOSYS),
     };
@@ -2436,6 +2437,21 @@ fn clone_fd(f: &Fd) -> Fd {
         Fd::Tty => Fd::Tty,
         Fd::Log => Fd::Log,
     }
+}
+
+/// Confirma la pareja kernel+rootfs tras acreditar el arranque.
+#[cfg(feature = "drv-live-disk")]
+fn sys_txn_confirm() -> Result<u64, i64> {
+    if crate::drivers::txnaplica::confirmar() {
+        Ok(0)
+    } else {
+        Err(-abi::EIO)
+    }
+}
+
+#[cfg(not(feature = "drv-live-disk"))]
+fn sys_txn_confirm() -> Result<u64, i64> {
+    Ok(0)
 }
 
 /// Espacio del sosofs raíz, para la comprobación previa de una actualización.

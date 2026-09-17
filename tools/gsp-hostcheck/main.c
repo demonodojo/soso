@@ -4592,15 +4592,38 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         printf("OK: subida por DMA desde un origen en +64 — el CE lee de "
                "G6_SRC_VA+64 (el caso del payload de un shard)\n");
 
+        /* Primer tensor tiny (512 B) con puntero en +64: boa0b5 mueve una línea
+         * de página; hace falta 2 PTEs, no 1 (ROG 2026-09-17, fault 0x8031001000). */
+        if (gsp_buf_upload_dma(&buf, va, 0, phys, 1u, 64u, 512u) == 0) {
+            printf("FALLO: DMA +64 512 B aceptó 1 página (CE toca 4096 B desde +64)\n");
+            return -1;
+        }
+        antes = chan.pb_pos;
+        if (gsp_buf_upload_dma(&buf, va, 0, phys, 2u, 64u, 512u) != 0) {
+            printf("FALLO: DMA +64 512 B con 2 páginas\n");
+            return -1;
+        }
+        pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + antes);
+        if (pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_OFFSET_IN_LOWER, &lo) != 0 ||
+            pb_method_value(pb, (chan.pb_pos - antes) / 4u, NVC6B5_LINE_COUNT, &lines) != 0) {
+            printf("FALLO: pushbuffer +64 512 B\n");
+            return -1;
+        }
+        if (lo != (uint32_t)(G6_SRC_VA + 64ull) || lines != 1u) {
+            printf("FALLO: +64 512 B src=0x%08x lines=%u\n", lo, lines);
+            return -1;
+        }
+        printf("OK: DMA +64 512 B exige 2 páginas (footprint CE = una línea)\n");
+
         if (gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 4096u, 2u * 4096u) == 0 ||
             gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 64u, 3u * 4096u) == 0 ||
             gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 64u, G6_SRC_MAX) == 0) {
             printf("FALLO: el DMA acepta src_off de una página entera, una lista "
-                   "que no cubre src_off+size, o pasarse de ventana con src_off\n");
+                   "que no cubre src_off+footprint CE, o pasarse de ventana\n");
             return -1;
         }
-        printf("OK: el DMA rechaza src_off >= 4096, lista corta para src_off+size "
-               "y ventana pasada por el src_off\n");
+        printf("OK: el DMA rechaza src_off >= 4096, lista corta para el footprint "
+               "del CE y ventana pasada\n");
 
         /* Ventana G6 ampliada (>8 GiB): reservar y traducir más allá del límite
          * anterior (8 GiB). */

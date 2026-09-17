@@ -3,6 +3,7 @@ lxdde/ports/iwlwifi/iwlwifi_lx.c
 lxdde/ports/iwlwifi/iwl_ax211.c
 lxdde/ports/iwlwifi/iwl_unclaimed.c
 lxdde/ports/iwlwifi/iwl_fw.c
+lxdde/ports/iwlwifi/iwl_mvm_route.c
 lxdde/ports/iwlwifi/iwl_trans.c
 lxdde/ports/iwlwifi/iwl_trans_8000.c
 lxdde/ports/iwlwifi/iwl_mvm.c

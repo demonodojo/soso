@@ -145,6 +145,13 @@ pub const SYS_NETINFO: u64 = 87;
 /// comprobación previa de una actualización: quedarse sin sitio a mitad es una
 /// de las formas típicas de dejar una pareja kernel/rootfs incoherente.
 pub const SYS_FSINFO: u64 = 88;
+/// Confirma la pareja kernel+rootfs de una actualización aplicada.
+///
+/// La llama `init` cuando el arranque se acredita. Sin ella, el arranque
+/// siguiente ve el registro en `probando` —la señal de que el anterior no
+/// llegó a confirmar— y **deshace la actualización**. La lógica vive en el
+/// kernel porque ahí está ya el contrato de la transacción.
+pub const SYS_TXN_CONFIRM: u64 = 90;
 /// ICMP Echo Request a una IPv4: `(addr_be, timeout_ms) → rtt_ms`.
 /// `addr_be` es la dirección en orden de red (`u32`). `timeout_ms == 0`
 /// usa 1000 ms. 127.0.0.0/8 y la IPv4 propia contestan en 0 ms sin cable.

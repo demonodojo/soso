@@ -105,7 +105,9 @@ static void iwl_mvm_scan_umac_fill_general_v11(
     struct iwl_ax211_priv *iwl, struct iwl_scan_general_params_v11 *gp,
     uint8_t scan_ver, uint8_t flags2)
 {
-    gp->scan_start_mac_or_link_id = iwl->scan_mac_id;
+    gp->scan_start_mac_or_link_id =
+        (iwl_mvm_uses_mld_mac(iwl) && iwl->link_active) ? iwl->fw_link_id
+                                                        : iwl->scan_mac_id;
     gp->adwell_default_social_chn = IWL_SCAN_ADWELL_DEFAULT_N_APS_SOCIAL;
     gp->adwell_default_2g = IWL_SCAN_ADWELL_DEFAULT_LB_N_APS;
     gp->adwell_default_5g = IWL_SCAN_ADWELL_DEFAULT_HB_N_APS;

@@ -44,6 +44,9 @@ pub enum Motivo {
     ParejaImposible,
     /// Registros ilegibles en ambos medios.
     RegistrosRotos,
+    /// La versión restaurada tampoco llegó a acreditar su arranque. No se
+    /// repite la restauración: no hay nada más que el sistema pueda intentar.
+    RestauradoNoArranca,
     /// Se pide rescate pero el registro no dice a qué punto volver. Sin eso no
     /// hay nada que restaurar y adivinarlo sería peor.
     RescateSinPunto,
@@ -213,6 +216,12 @@ pub fn reconcile(esp: &EstadoEsp, journal: &EstadoJournal) -> Recuperacion {
                     S::Revertido => R::CompletarReversion(j.id),
                     S::Preparado | S::Descargando | S::Descartado => R::Descartar(j.id),
                 },
+
+                // ── Restaurado a prueba ──────────────────────────────────
+                // Verlo al arrancar significa que la versión restaurada
+                // **tampoco** se acreditó. Repetir la restauración sería entrar
+                // en bucle: ya está puesta, y volver a ponerla no cambia nada.
+                (D::RestauradoAPrueba, _) => R::Diagnostico(Motivo::RestauradoNoArranca),
 
                 // ── Rescatar ─────────────────────────────────────────────
                 // Petición de fuera del sistema actualizado (entrada UEFI o

@@ -1,6 +1,6 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
-Fecha: **2026-09-17**. Estado: **U0–U4, U5a y U5b cerradas; parte de U5c hecha; U5d/U5e y U6–U8 pendientes**.
+Fecha: **2026-09-17**. Estado: **U0–U4 y U5a–U5c cerradas; U5d y U5e a medias; U6–U8 pendientes**.
 El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md);
 todavía no está conectado al arranque, al cliente ni al instalador.
 Base de la revisión: `92531cd2d` y árbol de trabajo con cambios locales, incluidos
@@ -321,13 +321,13 @@ Desglose de U5 para ejecutar la ampliación sin alterar los cierres históricos:
 |---|---|---|
 | U5a ✅ | U0 | **Cerrada 2026-09-17.** Registro de arranque en **formato 2** (punto retenido + decisión `rescatar`) que sigue leyendo el formato 1 y rechaza uno más nuevo; `txn/punto.rs` con verificación releyendo, GUID del destino, retención y `reserva_efectiva`; fila `rescatar` en la tabla de cortes. 11 pruebas host nuevas. |
 | U5b ✅ | U5a, U4 | **Cerrada 2026-09-17.** `crear_punto` comprueba espacio **antes** de copiar, copia y **relee** todo; cualquier fallo o falta de espacio devuelve error y no se arma. `Retencion` conserva A mientras C no confirme y **no suelta el punto viejo si el nuevo no está verificado**. 12 pruebas host. |
-| U5c | U5b | Aplicador y recuperador compartidos, reversión idempotente y arranque de la pareja antigua bajo su kernel. Cortes en todos los pasos y backup corrupto no producen un arranque mixto. |
-| U5d | U5c | CLI manual y entrada UEFI independiente del sistema actualizado. Recuperar sin shell ni red; cancelación antes de escribir; diagnóstico sin bucles si falla también la versión anterior. |
-| U5e | U5d | Confirmación de la pareja, comprobación del arranque restaurado, bloqueo de la candidata fallida y limpieza de puntos no referenciados. Reversión después de varios boots confirmados y datos nuevos conservados. |
+| U5c ✅ | U5b | **Cerrada 2026-09-17.** Aplicador idempotente (11 pruebas cortando en cada paso), recuperador temprano en el kernel y cliente que **arma** en vez de instalar; `init` confirma la pareja. Falta el arranque de la pareja antigua **bajo su kernel** (sigue gobernado por `SOSOKRN.MET`) y los cortes E2E. |
+| U5d ⏳ | U5c | **CLI hecha (2026-09-17)**, entrada UEFI pendiente. `soso-update revertir` muestra A→B, **verifica el punto antes de prometer nada**, deja cancelar y registra la petición; el arranque siguiente restaura. Acreditado E2E. Falta la entrada UEFI independiente de init y de la red. |
+| U5e ⏳ | U5d | **Parcial (2026-09-17).** Confirmación de la pareja (U5c), **bloqueo de la candidata fallida** y **limpieza sólo de puntos no referenciados** —nunca por tiempo ni por espacio, y nada si no consta ninguna referencia—. Falta comprobar el arranque **restaurado** y no entrar en bucle si también falla. |
 
-**U5a y U5b cerradas** el 2026-09-17; U5d y U5e pendientes, y de U5c hay hecha y
-probada una parte —aplicador idempotente con banco de cortes y recuperador
-temprano en el kernel, hoy inerte—; ver sección 6. La ampliación exige nueva
+**U5a, U5b y U5c cerradas** el 2026-09-17 (U5c con dos límites anotados). De
+**U5d** está hecha la vía manual y falta la entrada UEFI; de **U5e**, el bloqueo
+de la candidata fallida y la limpieza, y falta comprobar el arranque restaurado. La ampliación exige nueva
 evidencia; las pruebas históricas de U0 no certifican estas garantías.
 
 **U6, transición obligatoria:** inventariar formato de ESP, tamaño de huecos,
@@ -702,7 +702,47 @@ el manual debe seguir describiendo el comportamiento actual.
   usa `reserva_efectiva`, pero nadie impide aún que **otros escritores** se
   coman esa reserva mientras existe la operación: eso sigue pendiente.
 
-### U5c — parcial el 2026-09-17 (aplicador y recuperador)
+### U5e — parcial el 2026-09-17 (bloqueo y limpieza)
+
+- **La candidata que falló no se reinstala a ciegas.** Si el registro de
+  arranque dice que esa misma versión hubo que deshacerla, `aplicar` se planta y
+  pide `--forzar`. Sin esto, repetir el comando vuelve a armar lo mismo y se
+  entra en el bucle de aplicar, fallar y deshacer.
+- **Limpieza conservadora de puntos.** Al armar se recogen los que no referencia
+  ni la versión activa ni la operación nueva. Nunca por tiempo ni por falta de
+  espacio, y **si no consta ninguna referencia no se recoge nada**: sin saber
+  cuál es el bueno, borrar es peor que ocupar sitio. Durante un A→B→C conviven
+  dos a propósito, y hay pruebas de las tres reglas.
+- **Falta:** comprobar que el arranque **restaurado** funciona y no entrar en
+  bucle si también falla, que es el resto de U5e.
+
+### U5d — parcial el 2026-09-17 (vía manual hecha, entrada UEFI pendiente)
+
+- **`soso-update revertir` va contra la transacción**, no contra el buzón:
+  enseña `actual → versión del punto` y el ID, **verifica la copia releyéndola**,
+  pide confirmación (`--yes` la salta) y **no escribe nada si cancelas**. La
+  restauración la ejecuta el arranque siguiente, que es la única forma de no
+  sustituir ejecutables por debajo de procesos vivos.
+- El kernel **restaura el punto** (`Recuperacion::Rescatar`): lo comprueba
+  entero antes de escribir nada —restaurar a medias desde un punto roto deja la
+  pareja mezclada— y publica `revertido`. No lleva diario de progreso y no le
+  hace falta: cada paso es idempotente, así que un corte se arregla repitiéndolo.
+- **Acreditado E2E**: fase nueva de `test-update` sobre una copia limpia —armar,
+  aplicar, `revertir --yes`, reiniciar— que exige `txn: restaurada la versión`
+  en el serial y comprueba que vuelven **el fichero y el número de versión**.
+- **Un fallo con la misma raíz que el del diario, encontrado aquí:** con el hash
+  del kernel vacío —máquina recién instalada, nadie lo ha anotado— el punto se
+  escribía como `kernel=0 ` y al releer se recorta el espacio final, dejando un
+  campo que ya no se puede partir. El registro quedaba **ilegible** y `estado`
+  decía «no hay vuelta atrás guardada» con el fichero ahí delante. Ahora «no
+  consta» se escribe explícito (`- -`) y hay una prueba que lo fija. De paso, el
+  mensaje de «no hay vuelta atrás» dice **por qué**: si el registro existe pero
+  no se puede interpretar, lo dice en vez de callarse.
+- **Falta la entrada UEFI** «soso — recuperar versión anterior»: shim, entrada
+  de arranque y validación de la petición, independientes de init y de la red.
+  Es lo que cubre el caso de que ni init ni sosh arranquen, y sigue pendiente.
+
+### U5c — cerrada el 2026-09-17 (aplicador y recuperador)
 
 **Ojo al alcance.** Esta sesión cerró U0–U4 contra el plan tal como estaba, y
 mientras tanto el plan **creció**: la sección 3.6 (2026-09-16) añadió puntos de
@@ -740,18 +780,58 @@ con el de B durante B→C.
 - `soso-update-core` gana la feature `txn`, para que el kernel compile el
   contrato de transacción sin arrastrar el formato de release.
 
-**Lo que falta de U5c, y por qué esto todavía no se usa:**
+**Añadido el 2026-09-17: el cliente ya crea puntos de verdad.** `soso-update`
+implementa `Almacen` sobre las syscalls y, **antes de tocar el sistema**, crea y
+verifica el punto de la versión activa. Si no se puede crear entero y releer,
+**la actualización no sigue** — la regla de U5b aplicada de verdad, no sólo en
+banco. `soso-update estado` dice ahora a qué versión se puede volver y si esa
+copia está comprobada, y el banco lo exige: el arranque 1 no vale sin
+«vuelta atrás … verificada» y el 2 comprueba que `estado` la ofrece.
+Dos huecos nuevos de la ESP (`UPD_WHICH_TXN`, `UPD_WHICH_MODE`) dejan el registro
+de transacción y la identidad al alcance de userspace.
 
-- Que `soso-update aplicar` **arme** en vez de instalar: respaldar lo que cambia,
-  escribir el diario, publicar el registro de arranque y dejar que el siguiente
-  arranque aplique. Hoy sigue copiando los ficheros él mismo, así que **el
-  recuperador está enlazado pero inerte**: nadie arma nada y `reconcile` siempre
-  decide «normal».
-- Arrancar la pareja antigua **bajo su propio kernel**, que U5c exige y aquí no
-  está: el recuperador restaura el rootfs, pero la vuelta del kernel sigue
-  dependiendo del buzón `SOSOKRN.MET` de siempre.
-- Cortar en cada punto **dentro de QEMU**: hoy los cortes sólo están cubiertos
-  en banco host.
+De paso, la aserción nueva cazó dos fallos míos: `getdents` devuelve **bytes**,
+no entradas —`estado` reventaba con un índice fuera de rango—, y la propia
+aserción fijaba una versión que no correspondía: al reaplicar, el punto pasa a
+reflejar la versión activa en ese momento, que es justo lo que debe guardar.
+
+**Cerrada el 2026-09-17: el cliente ya arma y aplica el kernel.** `soso-update`
+dejó de escribir `/bin` y `/lib`. Ahora: baja a la etapa, crea y verifica el
+punto, escribe el **diario**, prepara el kernel y **publica el registro de
+arranque**; instala el recuperador del kernel en el arranque siguiente, antes de
+cargar firmware y antes de `/bin/init`. `/etc/soso-release` pasa a ser un fichero
+administrado más —se aplica y se deshace con el resto—, porque si no, volver
+atrás dejaría los binarios viejos anunciando la versión nueva. `init` confirma la
+**pareja** con `SYS_TXN_CONFIRM` (89); sin esa confirmación, el arranque
+siguiente encuentra el registro en `probando` y deshace la actualización, que es
+justo el comportamiento que se quiere.
+
+El banco lo exige, no lo observa: comprueba que la línea
+`txn: actualización aplicada` está en el log de serie **antes** de `boot: ethernet`
+y de que se lance init. Si alguien devuelve la instalación al cliente, salta.
+
+Dos fallos encontrados aquí, los dos por hacer que el banco mirara:
+
+- El diario se escribía con el hash del kernel **vacío** —`/etc/soso-release` de
+  la imagen live no trae línea `kernel=`— y eso lo dejaba **ilegible**: el
+  arranque siguiente decía «armada sin diario», el peor diagnóstico posible
+  porque no dice qué falló. Ahora `validate` rechaza un hash mal formado, y el
+  kernel anterior puede **no constar** (su vuelta atrás la gobierna
+  `SOSOKRN.MET`, que sí lo respalda al arrancar) pero no estar a medias.
+- Al armar dos veces la misma release, el diario nuevo empezaba con secuencia
+  menor que el viejo y `pick` elegía el obsoleto. La secuencia continúa ahora
+  desde la que hubiera.
+
+**Lo que queda fuera de U5c (es U5d/U5e):**
+
+- Arrancar la pareja antigua **bajo su propio kernel**: el recuperador restaura
+  el rootfs y la versión, pero la vuelta del kernel sigue siendo la del buzón
+  `SOSOKRN.MET`, con su propia recuperación ya probada. Unificar las dos es lo
+  que falta del «bajo su kernel» de U5c.
+- Cortar en cada punto **dentro de QEMU**: los cortes siguen cubiertos sólo en
+  banco host (11 pruebas), no E2E.
+- `revertir` contra la transacción y la entrada UEFI de rescate: U5d.
+- Exclusión de escritores entre respaldo y reinicio: sigue pendiente.
 
 **Y antes de U5c, en realidad, van U5a y U5b:** la extensión versionada del
 contrato (punto retenido, estado de rescate, reserva efectiva) y el

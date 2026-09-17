@@ -74,7 +74,15 @@ build hostcheck \
 build capa_dqa \
     "$root/tools/iwl-hostcheck/capa_dqa_test.c" \
     "$src/iwl_mvm_up.c" \
+    "$src/iwl_mvm_route.c" \
     "$src/iwl_mvm_nvm.c"
+
+build mld_mac_route \
+    "$root/tools/iwl-hostcheck/mld_mac_route_test.c"
+echo "=== iwl MLD MAC route hostcheck ==="
+run mld_mac_route \
+    "$fwdir/iwlwifi-so-a0-gf-a0-89.ucode" \
+    "$fwdir/iwlwifi-cc-a0-77.ucode"
 
 build hcmd_wide \
     "$root/tools/iwl-hostcheck/hcmd_wide_test.c" \
@@ -102,6 +110,7 @@ run ring_soak ${SOSO_IWL_SOAK_SEED:-0x5e1f1a11} ${SOSO_IWL_SOAK_ITERS:-4000}
 build scan_abi \
     "$root/tools/iwl-hostcheck/scan_abi_test.c" \
     "$src/iwl_mvm.c" \
+    "$src/iwl_mvm_route.c" \
     "$src/iwl_mvm_nvm.c" \
     "$src/iwl_mvm_data.c"
 echo "=== iwl scan ABI / MAC hostcheck ==="
@@ -126,6 +135,7 @@ run hcmd_queue
 build bss_select \
     "$root/tools/iwl-hostcheck/bss_select_test.c" \
     "$src/iwl_mvm.c" \
+    "$src/iwl_mvm_route.c" \
     "$src/iwl_mvm_nvm.c" \
     "$src/iwl_mvm_data.c"
 echo "=== iwl selección de BSS / RSN hostcheck ==="
@@ -134,6 +144,7 @@ run bss_select
 build mcc_chan \
     "$root/tools/iwl-hostcheck/mcc_chan_test.c" \
     "$src/iwl_mvm.c" \
+    "$src/iwl_mvm_route.c" \
     "$src/iwl_mvm_nvm.c" \
     "$src/iwl_mvm_data.c"
 echo "=== iwl MCC / política de canales hostcheck ==="
@@ -151,6 +162,7 @@ run pnvm_publish \
 build binding_power \
     "$root/tools/iwl-hostcheck/binding_power_test.c" \
     "$src/iwl_mvm_up.c" \
+    "$src/iwl_mvm_route.c" \
     "$src/iwl_mvm_nvm.c"
 
 build assoc_abi \
@@ -158,6 +170,7 @@ build assoc_abi \
     "$src/iwl_mvm_assoc.c" \
     "$src/iwl_mvm_lq.c" \
     "$src/iwl_mvm_up.c" \
+    "$src/iwl_mvm_route.c" \
     "$src/iwl_mvm_data.c" \
     "$src/iwl_mvm_tx.c"
 echo "=== iwl assoc ABI hostcheck ==="
@@ -168,6 +181,7 @@ build cdb_lmac \
     "$src/iwl_mvm_assoc.c" \
     "$src/iwl_mvm_lq.c" \
     "$src/iwl_mvm_up.c" \
+    "$src/iwl_mvm_route.c" \
     "$src/iwl_mvm_data.c" \
     "$src/iwl_mvm_tx.c"
 

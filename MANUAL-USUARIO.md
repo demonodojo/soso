@@ -742,7 +742,7 @@ Comprueba y aplica releases publicadas en GitHub (`demonodojo/soso`):
 soso-update estado              # medio de arranque, versión rootfs, kernel y buzón ESP
 soso-update comprobar           # compara con la última release
 soso-update aplicar             # descarga e instala (rootfs + kernel)
-soso-update revertir            # restaura el kernel anterior (reinicia después)
+soso-update revertir            # vuelve a la versión anterior (reinicia después)
 ```
 
 Opciones útiles: `--forzar` (reinstala aunque la versión no suba), `--sin-kernel`
@@ -772,6 +772,35 @@ Una release antigua, sin esa declaración, también se rechaza.
 **Qué no viaja en una release:** tus claves (`ssh_host_key`, `authorized_key`),
 tu configuración de `/etc`, los logs de `/var/log`, las cachés y el estado de una
 actualización a medias. Se preservan; la actualización no los toca.
+
+**Cómo se instala ahora.** `soso-update aplicar` ya **no escribe** `/bin` ni
+`/lib`: prepara la actualización y la deja lista. La instala el propio arranque
+siguiente, antes de cargar nada más, y mientras tanto puedes seguir usando la
+versión de siempre. Por eso el comando termina diciendo «reinicia para instalar».
+
+Antes de preparar nada guarda una **vuelta atrás verificada** de la versión que
+tienes. Si no puede guardarla entera, **no actualiza**: prefiere no tocar el
+sistema a dejarte sin camino de regreso. `soso-update estado` te dice a qué
+versión puedes volver y si esa copia está comprobada.
+
+Si el arranque nuevo no llega a funcionar, el siguiente encendido **deshace la
+actualización solo** y vuelve a dejarte la anterior: programas, ficheros
+retirados y número de versión.
+
+**Volver a mano, aunque ya funcione.** `soso-update revertir` te enseña de qué
+versión a cuál vas, **relee la copia guardada para comprobarla** antes de
+prometer nada y te deja cancelar: si dices que no, no se escribe nada. Cuando
+aceptas, no toca el sistema en caliente —sustituir programas por debajo de los
+que están corriendo es justo lo que no hay que hacer—; lo apunta y **la vuelta
+atrás la hace el arranque siguiente**, kernel y rootfs juntos.
+
+**Si ni siquiera arranca.** En el menú de arranque del firmware (el de F12, F8 o
+Esc según la placa) hay una segunda entrada, **«soso — recuperar versión
+anterior»**. Arrancar por ahí pide la vuelta atrás sin necesitar init, ni sosh,
+ni red: el shim anota la petición en la ESP y ese mismo arranque restaura la
+pareja anterior, después de comprobar la copia entera. Si no consta ninguna
+copia guardada, lo dice en pantalla y sigue arrancando con normalidad en vez de
+intentar nada a ciegas.
 
 **Si se corta a mitad.** La descarga va a un área de preparación dentro del
 disco (`/var/lib/soso-update/`), no directamente a `/bin` y `/lib`: mientras
@@ -818,7 +847,9 @@ rootfs hasta reflashear/reinstalar el live una vez.
 
 **Rootfs:** la actualización es por fichero (solo baja lo que cambia). Si
 `aplicar` se interrumpe, el progreso queda en `/etc/actualiza.estado` para
-reintentar; **no** hay copia automática de los binarios anteriores del rootfs.
+reintentar. De los ficheros que la versión nueva reemplaza o retira **sí** queda
+copia verificada (el punto de vuelta atrás, en `/var/lib/soso-update/`), que es
+lo que hace posible `revertir` y la entrada de rescate.
 
 La versión del sistema está en `/etc/soso-release`; el kernel la muestra al
 arrancar (`soso 0.2.2 (build)`).

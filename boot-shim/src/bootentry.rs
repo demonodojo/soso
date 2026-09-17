@@ -41,6 +41,10 @@ const REQ: &CStr16 = cstr16!("SOSOBOOT.TXT");
 /// Ruta del cargador dentro de la ESP instalada (la imagen es un clon del USB).
 const TARGET_LOADER: &CStr16 = cstr16!("\\EFI\\BOOT\\BOOTX64.EFI");
 const DESC: &str = "soso";
+/// Segunda entrada, la de rescate: mismo cargador, pero con `rescatar` en su
+/// OptionalData. Es la vía de vuelta atrás cuando el sistema no llega a init
+/// ni hay red: la ofrece el firmware, no el sistema que ha fallado.
+const DESC_RESCATE: &str = "soso — recuperar versión anterior";
 const LOAD_OPTION_ACTIVE: u32 = 0x0000_0001;
 
 /// Punto de entrada: atiende la petición pendiente, si la hay. Devuelve una
@@ -49,11 +53,19 @@ pub fn atender() -> Option<String> {
     let texto = leer_peticion()?;
     let guid = parse_install(&texto)?;
 
-    let resultado = match registrar(guid) {
-        Ok(num) => format!(
-            "DONE Boot{num:04X} {DESC}\nesp {guid}\nEntrada de arranque registrada; \
-             ya puedes quitar el USB.\n"
-        ),
+    let resultado = match registrar(guid, DESC, None) {
+        Ok(num) => {
+            // La de rescate es un extra: si falla, la instalación sigue siendo
+            // buena y lo que se pierde es una comodidad, no el arranque.
+            let rescate = match registrar(guid, DESC_RESCATE, Some(crate::rescate::SENAL)) {
+                Ok(r) => format!("rescate Boot{r:04X}"),
+                Err(e) => format!("rescate NO registrado: {e}"),
+            };
+            format!(
+                "DONE Boot{num:04X} {DESC}\nesp {guid}\n{rescate}\nEntrada de arranque \
+                 registrada; ya puedes quitar el USB.\n"
+            )
+        }
         Err(e) => format!("ERROR {e}\nesp {guid}\n"),
     };
     escribir_respuesta(&resultado);
@@ -74,7 +86,10 @@ fn parse_install(texto: &str) -> Option<Guid> {
     None
 }
 
-fn registrar(esp: Guid) -> Result<u16, String> {
+/// Registra (o reutiliza) la `Boot####` con esta descripción. `datos` viaja en
+/// el OptionalData, que es lo que el shim lee para saber por dónde lo han
+/// arrancado.
+fn registrar(esp: Guid, desc: &str, datos: Option<&str>) -> Result<u16, String> {
     let handle = localizar_esp(esp).ok_or_else(|| {
         format!("no encuentro ninguna ESP con GUID de partición {esp}")
     })?;
@@ -86,13 +101,19 @@ fn registrar(esp: Guid) -> Result<u16, String> {
     let mut option = Vec::with_capacity(64 + dp_bytes.len());
     option.extend_from_slice(&LOAD_OPTION_ACTIVE.to_le_bytes());
     option.extend_from_slice(&(dp_bytes.len() as u16).to_le_bytes());
-    for c in DESC.encode_utf16() {
+    for c in desc.encode_utf16() {
         option.extend_from_slice(&c.to_le_bytes());
     }
     option.extend_from_slice(&0u16.to_le_bytes()); // NUL de la descripción
     option.extend_from_slice(dp_bytes);
+    if let Some(d) = datos {
+        for c in d.encode_utf16() {
+            option.extend_from_slice(&c.to_le_bytes());
+        }
+        option.extend_from_slice(&0u16.to_le_bytes());
+    }
 
-    let num = hueco_boot();
+    let num = hueco_boot(desc);
     let nombre = nombre_boot(num)?;
     runtime::set_variable(
         &nombre,
@@ -106,7 +127,15 @@ fn registrar(esp: Guid) -> Result<u16, String> {
 
     // Si el firmware reordena el arranque por su cuenta, la entrada sigue
     // estando en el menú: por eso un fallo aquí no invalida el registro.
-    if let Err(e) = poner_primero_en_bootorder(num) {
+    //
+    // La de rescate va **al final** del orden: tiene que estar listada para que
+    // el menú la enseñe, pero nunca por delante del arranque normal.
+    let r = if datos.is_some() {
+        poner_ultimo_en_bootorder(num)
+    } else {
+        poner_primero_en_bootorder(num)
+    };
+    if let Err(e) = r {
         return Err(format!("Boot{num:04X} creada pero BootOrder falló: {e}"));
     }
     Ok(num)
@@ -161,9 +190,10 @@ fn ruta_cargador(handle: Handle, buf: &mut Vec<u8>) -> Result<&DevicePath, Strin
     .map_err(|_| "device path inválido".to_string())
 }
 
-/// Reutiliza la `Boot####` que ya describa a soso —reinstalar no debe dejar el
-/// menú lleno de entradas duplicadas— y si no, coge el número libre más bajo.
-fn hueco_boot() -> u16 {
+/// Reutiliza la `Boot####` que ya lleve esta descripción —reinstalar no debe
+/// dejar el menú lleno de entradas duplicadas— y si no, coge el número libre
+/// más bajo.
+fn hueco_boot(desc: &str) -> u16 {
     let claves: Vec<CString16> = runtime::variable_keys()
         .filter_map(|k| k.ok())
         .filter(|k| k.vendor == VariableVendor::GLOBAL_VARIABLE)
@@ -178,7 +208,7 @@ fn hueco_boot() -> u16 {
         usados.push(num);
         if let Ok((datos, _)) = runtime::get_variable_boxed(nombre, &VariableVendor::GLOBAL_VARIABLE)
         {
-            if descripcion(&datos).as_deref() == Some(DESC) {
+            if descripcion(&datos).as_deref() == Some(desc) {
                 return num;
             }
         }
@@ -223,6 +253,14 @@ fn nombre_boot(num: u16) -> Result<CString16, String> {
 }
 
 fn poner_primero_en_bootorder(num: u16) -> Result<(), String> {
+    colocar_en_bootorder(num, true)
+}
+
+fn poner_ultimo_en_bootorder(num: u16) -> Result<(), String> {
+    colocar_en_bootorder(num, false)
+}
+
+fn colocar_en_bootorder(num: u16, primero: bool) -> Result<(), String> {
     let nombre = cstr16!("BootOrder");
     let actual = runtime::get_variable_boxed(nombre, &VariableVendor::GLOBAL_VARIABLE)
         .map(|(d, _)| d.to_vec())
@@ -233,7 +271,11 @@ fn poner_primero_en_bootorder(num: u16) -> Result<(), String> {
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .filter(|&n| n != num)
         .collect();
-    orden.insert(0, num);
+    if primero {
+        orden.insert(0, num);
+    } else {
+        orden.push(num);
+    }
 
     let mut bytes = Vec::with_capacity(orden.len() * 2);
     for n in orden {

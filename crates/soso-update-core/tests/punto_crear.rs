@@ -250,3 +250,42 @@ fn confirmar_dos_veces_no_suelta_el_punto_activo() {
     assert!(r.al_confirmar(true).is_empty());
     assert_eq!(r.activo, Some(id("B")));
 }
+
+// ── Limpieza y candidata fallida (U5e) ───────────────────────────────────
+
+#[test]
+fn solo_se_recoge_lo_que_nadie_referencia() {
+    let todos = [id("A"), id("B"), id("C")];
+    let recoger = soso_update_core::txn::punto::a_recoger(&todos, &[id("B")]);
+    assert_eq!(recoger, vec![id("A"), id("C")]);
+}
+
+#[test]
+fn sin_referencias_no_se_recoge_nada() {
+    // Quedarse sin ninguna copia recuperable por no saber cuál era la buena es
+    // peor que ocupar sitio.
+    let todos = [id("A"), id("B")];
+    assert!(soso_update_core::txn::punto::a_recoger(&todos, &[]).is_empty());
+}
+
+#[test]
+fn durante_a_b_c_no_se_recoge_ninguno_de_los_dos() {
+    let todos = [id("A"), id("B"), id("viejo")];
+    let r = Retencion { activo: Some(id("A")), armado: Some(id("B")) };
+    let recoger = soso_update_core::txn::punto::a_recoger(&todos, &r.referencias());
+    assert_eq!(recoger, vec![id("viejo")], "A y B se conservan a propósito");
+}
+
+#[test]
+fn una_candidata_que_ya_fallo_se_reconoce() {
+    use soso_update_core::txn::bootrec::Decision;
+    use soso_update_core::txn::punto::candidata_fallida;
+    // El registro dice que esa misma versión se deshizo: reinstalarla a ciegas
+    // es entrar en el bucle de aplicar, fallar y deshacer.
+    assert!(candidata_fallida(Decision::Revertido, "0.3.0", "0.3.0"));
+    assert!(candidata_fallida(Decision::Rescatar, "0.3.0", "0.3.0"));
+    // Otra versión, o un registro que no habla de fallo, no bloquean nada.
+    assert!(!candidata_fallida(Decision::Revertido, "0.3.0", "0.3.1"));
+    assert!(!candidata_fallida(Decision::Confirmado, "0.3.0", "0.3.0"));
+    assert!(!candidata_fallida(Decision::Revertido, "", ""));
+}

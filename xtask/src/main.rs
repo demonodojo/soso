@@ -111,7 +111,11 @@ fn main() {
             test_install::run();
         }
         "test-update" => {
-            test_update::run();
+            // Un argumento suelto filtra las fases por nombre: cada ciclo
+            // completo son cuatro arranques largos, y depurar una sola fase a
+            // veinticinco minutos la vuelta no es depurar.
+            let filtro = std::env::args().nth(2);
+            test_update::run(filtro.as_deref());
         }
         "test-resize" => {
             test_resize::run();

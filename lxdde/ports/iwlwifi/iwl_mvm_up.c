@@ -21,8 +21,6 @@ extern void *memcpy(void *dst, const void *src, unsigned long n);
 #define SF_W_MARK_MIMO2            8192
 #define SF_LONG_DELAY_AGING_TIMER  1000000
 
-#define MAC_CONTEXT_CMD            0x28
-
 #define PHY_RX_CHAIN_VALID_POS     1
 #define PHY_RX_CHAIN_CNT_POS       10
 #define PHY_RX_CHAIN_MIMO_CNT_POS  12
@@ -33,6 +31,159 @@ struct iwl_sf_cfg_cmd {
     uint32_t long_delay_timeouts[SF_NUM_SCENARIO][SF_NUM_TIMEOUT_TYPES];
     uint32_t full_on_timeouts[SF_NUM_SCENARIO][SF_NUM_TIMEOUT_TYPES];
 } __attribute__((packed));
+
+static int iwl_mvm_link_cmd_send(struct iwl_ax211_priv *iwl,
+                                 struct iwl_link_config_cmd *cmd,
+                                 uint32_t action)
+{
+    cmd->action = iwl_cpu_to_le32(action);
+    if (iwl_trans_send_cmd_wait(iwl, MAC_CONF_GROUP, LINK_CONFIG_CMD, cmd,
+                                (uint16_t)sizeof(*cmd),
+                                IWL_MVM_HCMD_TIMEOUT_MS) != 0)
+        return -1;
+    return 0;
+}
+
+static int iwl_mvm_mld_mac_config_add(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_mac_config_cmd cmd;
+    uint32_t filter;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.id_and_color = iwl_cpu_to_le32((uint32_t)iwl->scan_mac_id);
+    cmd.action = iwl_cpu_to_le32(FW_CTXT_ACTION_ADD);
+    cmd.mac_type = iwl_cpu_to_le32(IWL_FW_MAC_TYPE_BSS_STA);
+    memcpy(cmd.local_mld_addr, iwl->mac, 6);
+    filter = MAC_CFG_FILTER_ACCEPT_GRP | MAC_CFG_FILTER_ACCEPT_BEACON;
+    cmd.filter_flags = iwl_cpu_to_le32(filter);
+    cmd.client.is_assoc = 0;
+    if (iwl_trans_send_cmd_wait(iwl, MAC_CONF_GROUP, MAC_CONFIG_CMD, &cmd,
+                                (uint16_t)sizeof(cmd),
+                                IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
+        lx_printk("iwl_mvm: MAC_CONFIG scan timeout\n");
+        return -1;
+    }
+    lx_printk("iwl_mvm: MAC_CONFIG scan id=%u ok\n",
+              (unsigned)iwl->scan_mac_id);
+    return 0;
+}
+
+static int iwl_mvm_mld_link_add_scan(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_link_config_cmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    iwl->fw_link_id = 0;
+    cmd.link_id = iwl_cpu_to_le32((uint32_t)iwl->fw_link_id);
+    cmd.mac_id = iwl_cpu_to_le32((uint32_t)iwl->scan_mac_id);
+    cmd.phy_id = iwl_cpu_to_le32(FW_CTXT_INVALID);
+    memcpy(cmd.local_link_addr, iwl->mac, 6);
+    if (iwl_mvm_link_cmd_send(iwl, &cmd, FW_CTXT_ACTION_ADD) != 0) {
+        lx_printk("iwl_mvm: LINK_CONFIG ADD falló\n");
+        return -1;
+    }
+    lx_printk("iwl_mvm: LINK_CONFIG ADD link=%u mac=%u ok\n",
+              (unsigned)iwl->fw_link_id, (unsigned)iwl->scan_mac_id);
+    return 0;
+}
+
+static int iwl_mvm_mld_link_activate(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_link_config_cmd cmd;
+
+    if (!iwl->phy_ctxt_added)
+        return -1;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.link_id = iwl_cpu_to_le32((uint32_t)iwl->fw_link_id);
+    cmd.mac_id = iwl_cpu_to_le32((uint32_t)iwl->scan_mac_id);
+    cmd.phy_id = iwl_cpu_to_le32(0);
+    cmd.modify_mask = iwl_cpu_to_le32(LINK_CONTEXT_MODIFY_ACTIVE);
+    cmd.active = iwl_cpu_to_le32(1);
+    memcpy(cmd.local_link_addr, iwl->mac, 6);
+    if (iwl_mvm_link_cmd_send(iwl, &cmd, FW_CTXT_ACTION_MODIFY) != 0) {
+        lx_printk("iwl_mvm: LINK_CONFIG MODIFY active falló\n");
+        return -1;
+    }
+    iwl->link_active = 1;
+    lx_printk("iwl_mvm: LINK_CONFIG active link=%u phy=0 ok\n",
+              (unsigned)iwl->fw_link_id);
+    return 0;
+}
+
+int iwl_mvm_mld_link_refresh_phy(struct iwl_ax211_priv *iwl)
+{
+    if (!iwl_mvm_uses_mld_mac(iwl) || iwl->fw_link_id == IWL_MVM_FW_LINK_ID_INVALID)
+        return 0;
+    if (!iwl->link_active)
+        return iwl_mvm_mld_link_activate(iwl);
+    {
+        struct iwl_link_config_cmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.link_id = iwl_cpu_to_le32((uint32_t)iwl->fw_link_id);
+        cmd.mac_id = iwl_cpu_to_le32((uint32_t)iwl->scan_mac_id);
+        cmd.phy_id = iwl_cpu_to_le32(0);
+        cmd.modify_mask = iwl_cpu_to_le32(LINK_CONTEXT_MODIFY_ACTIVE);
+        cmd.active = iwl_cpu_to_le32(1);
+        memcpy(cmd.local_link_addr, iwl->mac, 6);
+        if (iwl_mvm_link_cmd_send(iwl, &cmd, FW_CTXT_ACTION_MODIFY) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+int iwl_mvm_mld_mac_config_modify(struct iwl_ax211_priv *iwl, uint8_t is_assoc)
+{
+    struct iwl_mac_config_cmd cmd;
+    uint32_t filter;
+
+    if (!iwl_mvm_uses_mld_mac(iwl))
+        return -1;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.id_and_color = iwl_cpu_to_le32((uint32_t)iwl->scan_mac_id);
+    cmd.action = iwl_cpu_to_le32(FW_CTXT_ACTION_MODIFY);
+    cmd.mac_type = iwl_cpu_to_le32(IWL_FW_MAC_TYPE_BSS_STA);
+    memcpy(cmd.local_mld_addr, iwl->mac, 6);
+    filter = MAC_CFG_FILTER_ACCEPT_GRP;
+    if (!is_assoc || !iwl->dtim_period) {
+        filter |= MAC_CFG_FILTER_ACCEPT_BEACON;
+        if (iwl->auth_ctl_filter)
+            filter |= MAC_CFG_FILTER_ACCEPT_CONTROL_AND_MGMT;
+        cmd.client.is_assoc = 0;
+    } else {
+        cmd.client.is_assoc = 1;
+    }
+    cmd.filter_flags = iwl_cpu_to_le32(filter);
+    cmd.client.assoc_id = iwl_cpu_to_le16(iwl->assoc_id ? iwl->assoc_id : 1u);
+    if (iwl_trans_send_cmd_wait(iwl, MAC_CONF_GROUP, MAC_CONFIG_CMD, &cmd,
+                                (uint16_t)sizeof(cmd),
+                                IWL_MVM_HCMD_TIMEOUT_MS) != 0)
+        return -1;
+    return 0;
+}
+
+int iwl_mvm_mld_link_beacon_timing(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_link_config_cmd cmd;
+    uint32_t bi;
+
+    if (!iwl_mvm_uses_mld_mac(iwl) || !iwl->dtim_period)
+        return 0;
+    bi = iwl->beacon_int ? iwl->beacon_int : 100u;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.link_id = iwl_cpu_to_le32((uint32_t)iwl->fw_link_id);
+    cmd.mac_id = iwl_cpu_to_le32((uint32_t)iwl->scan_mac_id);
+    cmd.phy_id = iwl_cpu_to_le32(0);
+    cmd.modify_mask = iwl_cpu_to_le32(LINK_CONTEXT_MODIFY_BEACON_TIMING);
+    cmd.bi = iwl_cpu_to_le32(bi);
+    cmd.dtim_interval = iwl_cpu_to_le32(bi * (uint32_t)iwl->dtim_period);
+    memcpy(cmd.local_link_addr, iwl->mac, 6);
+    if (iwl_mvm_link_cmd_send(iwl, &cmd, FW_CTXT_ACTION_MODIFY) != 0) {
+        lx_printk("iwl_mvm: LINK_CONFIG beacon timing falló\n");
+        return -1;
+    }
+    return 0;
+}
 
 static uint32_t phy_rxchain_info(uint8_t valid_rx, uint8_t idle, uint8_t active)
 {
@@ -201,6 +352,8 @@ int iwl_mvm_binding_update(struct iwl_ax211_priv *iwl)
 
 static int iwl_mvm_binding_add_scan(struct iwl_ax211_priv *iwl)
 {
+    if (!iwl_mvm_fw_has_binding_cmd(iwl))
+        return 0;
     if (iwl->binding_added)
         return 0;
     if (!iwl->mac_ctxt_added || !iwl->phy_ctxt_added)
@@ -231,31 +384,44 @@ static int iwl_mvm_power_update_mac_scan(struct iwl_ax211_priv *iwl)
 
 static int iwl_mvm_mac_ctxt_add_scan(struct iwl_ax211_priv *iwl)
 {
-    struct iwl_mac_ctx_cmd cmd;
-
     if (iwl->mac_ctxt_added)
         return 0;
 
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.id_and_color = FW_CMD_ID_AND_COLOR(iwl->scan_mac_id, 0);
-    cmd.action = FW_CTXT_ACTION_ADD;
-    cmd.mac_type = IWL_FW_MAC_TYPE_BSS_STA;
-    memcpy(cmd.node_addr, iwl->mac, 6);
-    memset(cmd.bssid_addr, 0xff, 6);
-    cmd.cck_rates = 0x0fu;
-    cmd.ofdm_rates = 0xffu;
-    cmd.filter_flags = IWL_MAC_FILTER_ACCEPT_GRP | IWL_MAC_FILTER_IN_BEACON;
-    iwl_mvm_mac_qos_defaults(cmd.ac);
-    cmd.u.sta.is_assoc = 0u;
-    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, MAC_CONTEXT_CMD, &cmd,
-                                (uint16_t)sizeof(cmd),
-                                IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
-        lx_printk("iwl_mvm: MAC_CONTEXT scan timeout (grp=1) — sigue up\n");
+    if (iwl_mvm_uses_mld_mac(iwl)) {
+        if (iwl_mvm_mld_mac_config_add(iwl) != 0)
+            return -1;
+        if (iwl_mvm_mld_link_add_scan(iwl) != 0)
+            return -1;
+        if (iwl_mvm_mld_link_activate(iwl) != 0)
+            return -1;
+        iwl->mac_ctxt_added = 1;
         return 0;
     }
-    iwl->mac_ctxt_added = 1;
-    lx_printk("iwl_mvm: MAC_CONTEXT scan id=%u ok\n",
-              (unsigned)iwl->scan_mac_id);
+
+    {
+        struct iwl_mac_ctx_cmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.id_and_color = FW_CMD_ID_AND_COLOR(iwl->scan_mac_id, 0);
+        cmd.action = FW_CTXT_ACTION_ADD;
+        cmd.mac_type = IWL_FW_MAC_TYPE_BSS_STA;
+        memcpy(cmd.node_addr, iwl->mac, 6);
+        memset(cmd.bssid_addr, 0xff, 6);
+        cmd.cck_rates = 0x0fu;
+        cmd.ofdm_rates = 0xffu;
+        cmd.filter_flags = IWL_MAC_FILTER_ACCEPT_GRP | IWL_MAC_FILTER_IN_BEACON;
+        iwl_mvm_mac_qos_defaults(cmd.ac);
+        cmd.u.sta.is_assoc = 0u;
+        if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, MAC_CONTEXT_CMD, &cmd,
+                                    (uint16_t)sizeof(cmd),
+                                    IWL_MVM_HCMD_TIMEOUT_MS) != 0) {
+            lx_printk("iwl_mvm: MAC_CONTEXT scan timeout (grp=1)\n");
+            return -1;
+        }
+        iwl->mac_ctxt_added = 1;
+        lx_printk("iwl_mvm: MAC_CONTEXT scan id=%u ok\n",
+                  (unsigned)iwl->scan_mac_id);
+    }
     return 0;
 }
 
@@ -431,7 +597,10 @@ int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
-    (void)iwl_mvm_mac_ctxt_add_scan(iwl);
+    if (iwl_mvm_mac_ctxt_add_scan(iwl) != 0) {
+        lx_printk("iwl_mvm: MAC/LINK context no creado — abort up\n");
+        return -1;
+    }
 
     if (iwl_mvm_binding_add_scan(iwl) != 0) {
         lx_printk("iwl_mvm: binding PHY↔MAC no creado — abort up\n");

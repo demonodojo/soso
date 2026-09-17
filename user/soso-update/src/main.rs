@@ -12,12 +12,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use libsoso::{println, sys};
+use libsoso::{print, println, sys};
 use soso_abi::{O_RDONLY, O_WRONLY, UPD_WHICH_KERNEL, UPD_WHICH_MAILBOX, UPD_WHICH_META};
 use soso_update_core::canal::{self, Conf, Origen};
 use soso_update_core::descarga::{self, Etapa};
 use soso_update_core::txn::journal::Contenido;
 use soso_update_core::txn::punto::{crear_punto, Almacen, Cambio, CrearError, Punto};
+use soso_update_core::txn::bootrec::{BootRecord, Decision};
+use soso_update_core::txn::journal::{Accion, Entrada, Journal, Progreso};
+use soso_update_core::txn::TxnState;
 use soso_update_core::txn::TxnId;
 use soso_update_core::compat::{CompatError, Equipo};
 use soso_update_core::hash::{hex_sha256, Hasher};
@@ -42,7 +45,7 @@ fn main(args: &str) -> u8 {
         "estado" => cmd_estado(),
         "comprobar" => cmd_comprobar(rest),
         "aplicar" => cmd_aplicar(rest),
-        "revertir" => cmd_revertir(),
+        "revertir" => cmd_revertir(rest),
         "help" | "--help" | "-h" => {
             print_usage();
             0
@@ -120,6 +123,10 @@ fn cmd_estado() -> u8 {
                 estado
             );
         }
+        // La otra vía existe justamente para cuando esto no se puede escribir:
+        // decirla aquí, mientras el sistema arranca, es lo único que sirve.
+        println!("  «soso-update revertir», o la entrada «soso — recuperar versión");
+        println!("  anterior» del menú de arranque si el sistema no llega a arrancar");
     }
     let mut mbuf = [0u8; 4096];
     let mn = sys::upd_read(UPD_WHICH_MAILBOX, 0, &mut mbuf);
@@ -221,6 +228,25 @@ fn cmd_aplicar(args: &[String]) -> u8 {
             minor: 0,
             patch: 0,
         });
+    // No reinstalar a ciegas lo que esta máquina ya rechazó: sin esto, repetir
+    // `aplicar` vuelve a armar lo mismo y se entra en el bucle de aplicar,
+    // fallar y deshacer.
+    if !opts.forzar {
+        if let Some(rec) = leer_bootrec_actual() {
+            if soso_update_core::txn::punto::candidata_fallida(
+                rec.decision,
+                &rec.version_nueva,
+                &man.version_raw,
+            ) {
+                println!(
+                    "soso-update: la versión {} ya se instaló y hubo que deshacerla",
+                    man.version_raw
+                );
+                println!("  si aun así quieres intentarlo otra vez: --forzar");
+                return 0;
+            }
+        }
+    }
     if !opts.forzar && semver::cmp(&man.version, &actual) != Ordering::Greater {
         println!("soso-update: ya estás en {} (usa --forzar)", man.version_raw);
         return 0;
@@ -300,61 +326,42 @@ fn cmd_aplicar(args: &[String]) -> u8 {
 
     // Antes de tocar el sistema: la vuelta atrás. Si no se puede crear y
     // verificar entera, no se actualiza (U5b).
-    if !cambian.is_empty() {
-        match preparar_punto(&man, &cambian) {
-            Ok(p) => println!(
+    let punto = match preparar_punto(&man, &cambian) {
+        Ok(p) => {
+            println!(
                 "punto: vuelta atrás a {} verificada ({} ficheros)",
                 p.version,
                 p.entradas.len()
-            ),
-            Err(e) => {
-                println!("soso-update: {e}");
-                libsoso::logln!("actualiza: sin punto de recuperación ({e}); no aplico");
-                return 1;
-            }
-        }
-    }
-
-    // Y ahora, con todo verificado en la etapa, se escribe el sistema.
-    for f in &cambian {
-        if let Err(e) = instalar_desde_etapa(&etapa, f) {
-            println!("soso-update: {}: {e}", f.path);
-            libsoso::logln!("actualiza: {}: {e}", f.path);
-            return 1;
-        }
-        println!("  ok {} ({})", f.path, humano(f.size));
-    }
-
-    if !opts.sin_kernel {
-        if let Err(e) = apply_kernel(&opts, &man) {
-            println!("soso-update: kernel: {e}");
-            let _ = write_file(
-                "/etc/actualiza.estado",
-                &format!("KERNEL_FALLO {}\n", man.version_raw),
             );
+            p
+        }
+        Err(e) => {
+            println!("soso-update: {e}");
+            libsoso::logln!("actualiza: sin punto de recuperación ({e}); no aplico");
             return 1;
         }
-    }
-
-    let kernel_hash = if opts.sin_kernel {
-        read_release()
-            .map(|r| r.kernel)
-            .filter(|h| !h.is_empty())
-            .unwrap_or(man.kernel_hash.clone())
-    } else {
-        man.kernel_hash.clone()
     };
-    let release = format!(
-        "version={}\nbuild={}\nfecha={}\nkernel={}\n",
-        man.version_raw, man.build, man.fecha, kernel_hash
-    );
-    if !write_file("/etc/soso-release", &release) {
-        println!("soso-update: no pude escribir /etc/soso-release");
+
+    // Y ahora se **arma**: el cliente no escribe `/bin` ni `/lib`. Deja el
+    // diario y el registro de arranque, y aplica el recuperador del kernel en
+    // el siguiente arranque, antes de cargar firmware y antes de `/bin/init`.
+    // Mientras tanto se puede seguir usando la versión de siempre.
+    for f in &cambian {
+        println!("  armado {} ({})", f.path, humano(f.size));
+    }
+    if let Err(e) = armar(&opts, &man, &etapa, &cambian, &punto) {
+        println!("soso-update: {e}");
+        libsoso::logln!("actualiza: no pude armar la operación ({e})");
         return 1;
     }
+
     let _ = sys::unlink("/etc/actualiza.estado");
-    libsoso::logln!("actualiza: {} preparada; falta reiniciar", man.version_raw);
-    println!("soso-update: listo — reinicia para arrancar soso {}", man.version_raw);
+    libsoso::logln!("actualiza: {} armada; falta reiniciar", man.version_raw);
+    println!(
+        "soso-update: listo — reinicia para instalar soso {}",
+        man.version_raw
+    );
+    println!("  si el arranque nuevo falla, se vuelve solo a {}", punto.version);
     0
 }
 
@@ -368,17 +375,136 @@ fn humano(bytes: u64) -> String {
     }
 }
 
-fn cmd_revertir() -> u8 {
-    let payload = Mailbox::format_revertir();
-    let r = sys::upd_write(UPD_WHICH_MAILBOX, 0, &payload);
-    if r < 0 {
-        libsoso::logln!("actualiza: REVERTIR no se pudo registrar ({r})");
-        println!("soso-update: no pude escribir buzón ({r})");
+/// Vuelta atrás manual (U5d).
+///
+/// Es la vía para cuando la versión nueva arranca pero algo no funciona —una
+/// aplicación, el WiFi—, que es justo cuando la confirmación ya se dio por
+/// buena. Muestra qué va a hacer, **verifica el punto antes de prometer nada** y
+/// deja la petición durable; la restauración la ejecuta el arranque siguiente,
+/// que es la única forma de no sustituir ejecutables por debajo de procesos
+/// vivos.
+fn cmd_revertir(args: &[String]) -> u8 {
+    let si = args.iter().any(|a| a == "--yes" || a == "--si");
+    let puntos = puntos_guardados();
+    let Some(punto) = elegir_punto(puntos) else {
+        println!("soso-update: no hay ninguna vuelta atrás guardada");
+        println!("  sólo se puede volver a una versión que esta máquina haya instalado");
+        diagnostico_puntos();
+        return 1;
+    };
+
+    let actual = read_release()
+        .map(|r| r.version)
+        .unwrap_or_else(|| "desconocida".into());
+    println!("vuelta atrás: {actual} → {}", punto.version);
+    println!("  operación {}", punto.id.dir());
+    println!("  {} ficheros a restaurar", punto.entradas.len());
+
+    // Verificar **antes** de escribir la petición: prometer una vuelta atrás
+    // que no se ha comprobado es lo que este contrato evita.
+    let mut almacen = AlmacenSoso { libre: u64::MAX };
+    if let Err(e) = verificar_punto(&punto, &mut almacen) {
+        println!("soso-update: la copia guardada no está completa ({e:?})");
+        println!("  no registro la petición: arrancaría a medias");
         return 1;
     }
-    libsoso::logln!("actualiza: REVERTIR registrado; falta reiniciar");
-    println!("soso-update: REVERTIR registrado — reinicia para restaurar el kernel");
+    println!("  copia verificada");
+
+    if !si {
+        print!("¿Volver a {} en el próximo arranque? [s/N] ", punto.version);
+        let resp: String = match libsoso::linea::Lector::new().siguiente() {
+            Ok(Some(t)) => t.trim().into(),
+            _ => String::new(),
+        };
+        let c = resp.chars().next().unwrap_or('\0');
+        if c != 's' && c != 'S' && c != 'y' && c != 'Y' {
+            println!("cancelado; no se ha escrito nada");
+            return 0;
+        }
+    }
+
+    let rec = BootRecord::nuevo(
+        Decision::Rescatar,
+        punto.id,
+        &actual,
+        &punto.version,
+        siguiente_seq_bootrec(),
+    )
+    .con_punto(punto.id);
+    if let Err(e) = publicar_bootrec(&rec) {
+        println!("soso-update: {e}");
+        return 1;
+    }
+    // El kernel sigue teniendo su propia recuperación por el buzón.
+    let _ = sys::upd_write(UPD_WHICH_MAILBOX, 0, &Mailbox::format_revertir());
+
+    libsoso::logln!("actualiza: vuelta atrás a {} registrada", punto.version);
+    println!("soso-update: registrado — reinicia y volverás a {}", punto.version);
     0
+}
+
+/// Por qué no se encontró ningún punto. Sin esto, «no hay vuelta atrás» no
+/// distingue entre no haber actualizado nunca y no poder leer el directorio.
+fn diagnostico_puntos() {
+    let fd = sys::open("/var/lib/soso-update", O_RDONLY);
+    if fd < 0 {
+        println!("  (no puedo abrir /var/lib/soso-update: errno {})", -fd);
+        return;
+    }
+    let mut ents = [soso_abi::Dirent::default(); 32];
+    let mut total = 0usize;
+    loop {
+        let n = sys::getdents(fd as u64, &mut ents);
+        if n <= 0 {
+            break;
+        }
+        for e in &ents[..(n as usize / soso_abi::DIRENT_SIZE).min(ents.len())] {
+            let nombre = core::str::from_utf8(e.name_bytes()).unwrap_or("?");
+            if nombre == "." || nombre == ".." {
+                continue;
+            }
+            total += 1;
+            let ruta = alloc::format!("/var/lib/soso-update/{nombre}/punto.rec");
+            let mut st = soso_abi::Stat::default();
+            if sys::stat(&ruta, &mut st) < 0 {
+                println!("  {nombre}: sin punto.rec");
+                continue;
+            }
+            match read_file_bytes(&ruta, 256 * 1024) {
+                None => println!("  {nombre}: punto.rec de {} B ilegible", st.size),
+                Some(d) => match Punto::parse(&d) {
+                    Ok(p) => println!("  {nombre}: punto de {} (leído {} B)", p.version, d.len()),
+                    Err(e) => println!(
+                        "  {nombre}: punto.rec no se puede interpretar ({e:?}); {} B en disco, {} leídos",
+                        st.size,
+                        d.len()
+                    ),
+                },
+            }
+        }
+    }
+    let _ = sys::close(fd as u64);
+    if total == 0 {
+        println!("  (el directorio está vacío)");
+    }
+}
+
+/// De los puntos guardados, el que toca: el que referencia el registro de
+/// arranque si lo dice, y si no, el único que haya.
+fn elegir_punto(mut puntos: Vec<Punto>) -> Option<Punto> {
+    if puntos.is_empty() {
+        return None;
+    }
+    if let Some(p) = leer_bootrec_actual().and_then(|r| r.punto) {
+        if let Some(i) = puntos.iter().position(|x| x.id == p) {
+            return Some(puntos.remove(i));
+        }
+    }
+    if puntos.len() == 1 {
+        return puntos.pop();
+    }
+    println!("soso-update: hay {} puntos guardados y el registro no dice cuál", puntos.len());
+    None
 }
 
 struct Opts {
@@ -874,24 +1000,6 @@ fn bajar_span(
     Ok(())
 }
 
-/// Copia un fichero ya verificado de la etapa al sistema.
-fn instalar_desde_etapa(etapa: &str, f: &FileEntry) -> Result<(), &'static str> {
-    let datos = read_file_bytes(&ruta_etapa(etapa, f), f.size as usize + 1)
-        .ok_or("falta en el área de preparación")?;
-    if datos.len() as u64 != f.size || hex_sha256(&datos) != f.hash_hex {
-        return Err("el fichero preparado no cuadra con el manifiesto");
-    }
-    let destino = format!("/{}", f.path);
-    if let Some(padre) = parent_dir(&destino) {
-        crear_arbol(padre);
-    }
-    escribir(&destino, &datos).map_err(|(fase, _)| match fase {
-        "open" => "no pude abrirlo para escribir",
-        "write" => "falló la escritura",
-        _ => "falló al cerrarlo",
-    })
-}
-
 fn crear_arbol(dir: &str) {
     let mut acc = String::new();
     for parte in dir.trim_start_matches('/').split('/') {
@@ -983,6 +1091,8 @@ impl Almacen for AlmacenSoso {
         if let Some(padre) = parent_dir(&destino) {
             crear_arbol(padre);
         }
+        // Se borra antes: sobrescribir uno más largo dejaría cola del anterior.
+        let _ = sys::unlink(&destino);
         escribir(&destino, &p.format()).map_err(|_| ())
     }
 
@@ -1042,15 +1152,25 @@ fn puntos_guardados() -> Vec<Punto> {
         return out;
     }
     let mut ents = [soso_abi::Dirent::default(); 32];
-    // `getdents` devuelve **bytes**, no entradas: dividir por `DIRENT_SIZE`.
-    let n = sys::getdents(fd as u64, &mut ents);
-    let _ = sys::close(fd as u64);
-    if n <= 0 {
-        return out;
+    // `getdents` devuelve **bytes**, no entradas, y **por lotes**: hay que
+    // llamarlo hasta que dé 0, como hace `ls`.
+    let mut nombres: Vec<String> = Vec::new();
+    loop {
+        let n = sys::getdents(fd as u64, &mut ents);
+        if n <= 0 {
+            break;
+        }
+        let cuantas = (n as usize / soso_abi::DIRENT_SIZE).min(ents.len());
+        for e in &ents[..cuantas] {
+            if let Ok(s) = core::str::from_utf8(e.name_bytes()) {
+                nombres.push(s.into());
+            }
+        }
     }
-    let cuantas = (n as usize / soso_abi::DIRENT_SIZE).min(ents.len());
-    for e in &ents[..cuantas] {
-        let nombre = core::str::from_utf8(e.name_bytes()).unwrap_or("");
+    let _ = sys::close(fd as u64);
+    for nombre in nombres {
+        let e = nombre.as_str();
+        let nombre = e;
         if nombre == "." || nombre == ".." || nombre.is_empty() {
             continue;
         }
@@ -1102,7 +1222,10 @@ fn preparar_punto(man: &Manifest, cambian: &[FileEntry]) -> Result<Punto, &'stat
         u64::MAX
     };
 
-    let cambios: Vec<Cambio> = cambian.iter().map(|f| Cambio::Trae(f.path.clone())).collect();
+    let mut cambios: Vec<Cambio> = cambian.iter().map(|f| Cambio::Trae(f.path.clone())).collect();
+    // `/etc/soso-release` se aplica y se deshace como el resto: si no, volver
+    // atrás dejaría los binarios viejos anunciando la versión nueva.
+    cambios.push(Cambio::Trae("etc/soso-release".into()));
     let id = TxnId::from_manifest(man.format().as_bytes());
     let mut almacen = AlmacenSoso { libre };
     match crear_punto(
@@ -1134,5 +1257,223 @@ fn preparar_punto(man: &Manifest, cambian: &[FileEntry]) -> Result<Punto, &'stat
             Err("la vuelta atrás no se pudo verificar")
         }
         Err(CrearError::Registro) => Err("no pude registrar la vuelta atrás"),
+    }
+}
+
+// --------------------------------------------------------------- armar
+
+/// Contenido de `/etc/soso-release` para la versión nueva.
+fn texto_release(man: &Manifest, sin_kernel: bool) -> String {
+    let kernel_hash = if sin_kernel {
+        read_release()
+            .map(|r| r.kernel)
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| man.kernel_hash.clone())
+    } else {
+        man.kernel_hash.clone()
+    };
+    format!(
+        "version={}\nbuild={}\nfecha={}\nkernel={}\n",
+        man.version_raw, man.build, man.fecha, kernel_hash
+    )
+}
+
+/// Deja la operación **armada**: diario durable, kernel preparado y registro de
+/// arranque publicado. A partir de aquí no instala el cliente, sino el
+/// recuperador del kernel en el siguiente arranque, antes de cargar firmware y
+/// antes de `/bin/init`.
+///
+/// El orden es el del contrato U0: nada se publica en la ESP hasta que
+/// completar o deshacer es posible **sólo** con lo que ya está en sosofs.
+fn armar(
+    opts: &Opts,
+    man: &Manifest,
+    etapa: &str,
+    cambian: &[FileEntry],
+    punto: &Punto,
+) -> Result<(), &'static str> {
+    let id = punto.id;
+    let actual = read_release();
+    let version_anterior = actual
+        .as_ref()
+        .map(|r| r.version.clone())
+        .unwrap_or_else(|| "desconocida".into());
+
+    // `/etc/soso-release` es un fichero administrado más: así la versión se
+    // aplica y se deshace con el resto, en vez de escribirla alguien aparte.
+    let release = texto_release(man, opts.sin_kernel);
+    let ruta_release = format!("{etapa}/etc/soso-release");
+    if let Some(p) = parent_dir(&ruta_release) {
+        crear_arbol(p);
+    }
+    escribir(&ruta_release, release.as_bytes()).map_err(|_| "no pude preparar la versión")?;
+
+    let mut j = Journal::nuevo(id, &man.version_raw, &version_anterior);
+    j.kernel_nuevo = Some(Contenido {
+        size: man.kernel_size,
+        hash: man.kernel_hash.clone(),
+    });
+    // Sólo si de verdad consta: en una máquina recién instalada nadie ha
+    // anotado el hash del kernel activo. Su vuelta atrás la gobierna
+    // `SOSOKRN.MET`, que sí lo respalda al arrancar.
+    j.kernel_anterior = (punto.kernel.hash.len() == 64).then(|| punto.kernel.clone());
+
+    let respaldo_de = |ruta: &str| {
+        punto
+            .entradas
+            .iter()
+            .find(|e| e.path == ruta)
+            .and_then(|e| e.respaldo.clone())
+    };
+    for f in cambian {
+        let respaldo = respaldo_de(&f.path);
+        j.entradas.push(Entrada {
+            accion: if respaldo.is_some() { Accion::Reemplazar } else { Accion::Crear },
+            progreso: Progreso::Respaldado,
+            path: f.path.clone(),
+            nuevo: Some(Contenido { size: f.size, hash: f.hash_hex.clone() }),
+            respaldo,
+        });
+    }
+    let resp_release = respaldo_de("etc/soso-release");
+    j.entradas.push(Entrada {
+        accion: if resp_release.is_some() { Accion::Reemplazar } else { Accion::Crear },
+        progreso: Progreso::Respaldado,
+        path: "etc/soso-release".into(),
+        nuevo: Some(Contenido {
+            size: release.len() as u64,
+            hash: hex_sha256(release.as_bytes()),
+        }),
+        respaldo: resp_release,
+    });
+
+    // La secuencia tiene que seguir a la del diario que ya hubiera: se elige
+    // siempre la copia de secuencia más alta, y empezar de cero dejaría ganar
+    // al diario de la operación anterior.
+    j.seq = seq_diario_existente(id) + 1;
+    j.estado = TxnState::Preparado;
+    j.validate().map_err(|_| "el diario de la operación no es coherente")?;
+    guardar_diario(&j)?;
+
+    // El kernel a su hueco de la ESP; su recuperación sigue siendo la del buzón.
+    if !opts.sin_kernel {
+        apply_kernel(opts, man).map_err(|_| "no pude preparar el kernel")?;
+    }
+
+    // Punto de compromiso: sólo ahora se publica el registro de arranque.
+    let anterior = leer_bootrec_actual();
+    let rec = BootRecord::nuevo(
+        Decision::Armado,
+        id,
+        &man.version_raw,
+        &version_anterior,
+        anterior.as_ref().map(|r| r.seq + 1).unwrap_or(1),
+    )
+    .con_punto(id);
+    publicar_bootrec(&rec)?;
+
+    j.seq += 1;
+    j.estado = TxnState::Armado;
+    guardar_diario(&j)?;
+
+    // Con la operación ya armada, sobra lo que no referencia nadie. El punto de
+    // la versión activa y el que acabamos de crear se conservan: durante un
+    // A→B→C conviven dos a propósito.
+    let mut refs = alloc::vec![id];
+    if let Some(p) = anterior.and_then(|r| r.punto) {
+        if !refs.contains(&p) {
+            refs.push(p);
+        }
+    }
+    recoger_puntos(&refs);
+    Ok(())
+}
+
+/// Secuencia más alta de los diarios que ya existan para esta operación.
+fn seq_diario_existente(id: TxnId) -> u64 {
+    let mut max = 0u64;
+    for n in 0..2 {
+        let ruta = format!("{}/diario.{n}", dir_punto(id));
+        if let Some(d) = read_file_bytes(&ruta, 256 * 1024) {
+            if let Ok(j) = Journal::parse(&d) {
+                max = max.max(j.seq);
+            }
+        }
+    }
+    max
+}
+
+/// El diario se escribe por turnos entre dos copias: una escritura cortada no
+/// puede llevarse por delante la anterior.
+fn guardar_diario(j: &Journal) -> Result<(), &'static str> {
+    let destino = format!("{}/diario.{}", dir_punto(j.id), j.seq % 2);
+    if let Some(p) = parent_dir(&destino) {
+        crear_arbol(p);
+    }
+    escribir(&destino, &j.format()).map_err(|_| "no pude escribir el diario de la operación")
+}
+
+fn leer_bootrec_actual() -> Option<BootRecord> {
+    let mut buf = alloc::vec![0u8; soso_update_core::UPD_BOOTREC_SIZE];
+    let n = sys::upd_read(soso_abi::UPD_WHICH_TXN, 0, &mut buf);
+    (n > 0).then(|| BootRecord::pick(&buf[..n as usize]).ok()).flatten()
+}
+
+fn siguiente_seq_bootrec() -> u64 {
+    leer_bootrec_actual().map(|r| r.seq + 1).unwrap_or(1)
+}
+
+/// Escribe el registro en la ranura que le toca por secuencia.
+fn publicar_bootrec(rec: &BootRecord) -> Result<(), &'static str> {
+    let bytes = rec.format().map_err(|_| "registro de arranque inválido")?;
+    let off = (rec.ranura() * soso_update_core::SLOT_SIZE) as u64;
+    if sys::upd_write(soso_abi::UPD_WHICH_TXN, off, &bytes) < 0 {
+        return Err("no pude publicar el registro de arranque (¿falta SOSOTXN.BIN?)");
+    }
+    Ok(())
+}
+
+// ------------------------------------------------- limpieza de puntos (U5e)
+
+/// Borra un árbol entero. `unlink` quita ficheros y directorios **vacíos**, así
+/// que hay que vaciarlos de dentro afuera.
+fn borrar_arbol(ruta: &str) {
+    let fd = sys::open(ruta, O_RDONLY);
+    if fd >= 0 {
+        let mut ents = [soso_abi::Dirent::default(); 32];
+        let mut hijos: Vec<String> = Vec::new();
+        loop {
+            let n = sys::getdents(fd as u64, &mut ents);
+            if n <= 0 {
+                break;
+            }
+            let cuantas = (n as usize / soso_abi::DIRENT_SIZE).min(ents.len());
+            for e in &ents[..cuantas] {
+                if let Ok(nombre) = core::str::from_utf8(e.name_bytes()) {
+                    if nombre != "." && nombre != ".." && !nombre.is_empty() {
+                        hijos.push(nombre.into());
+                    }
+                }
+            }
+        }
+        let _ = sys::close(fd as u64);
+        for h in hijos {
+            borrar_arbol(&format!("{ruta}/{h}"));
+        }
+    }
+    let _ = sys::unlink(ruta);
+}
+
+/// Recoge los puntos que ya no referencia nadie.
+///
+/// `referencias` son el punto con el que la versión activa puede volver atrás y
+/// el que se está armando. Si no consta ninguna, **no se recoge nada**: sin
+/// saber cuál es el bueno, borrar es peor que ocupar sitio. Y no se recoge por
+/// tiempo ni por falta de espacio, nunca (sección 3.6 del plan).
+fn recoger_puntos(referencias: &[TxnId]) {
+    let todos: Vec<TxnId> = puntos_guardados().into_iter().map(|p| p.id).collect();
+    for id in soso_update_core::txn::punto::a_recoger(&todos, referencias) {
+        println!("  recogido el punto {} (ya no lo referencia nadie)", id.dir());
+        borrar_arbol(&dir_punto(id));
     }
 }

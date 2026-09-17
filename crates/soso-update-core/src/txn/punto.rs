@@ -67,15 +67,28 @@ impl From<RecordError> for PuntoError {
     }
 }
 
+/// `- -` significa **no consta**, y hay que escribirlo así explícitamente.
+///
+/// Con un hash vacío salía `0 ` y, al releer, la línea se recorta y queda `0`:
+/// un campo que ya no se puede partir en dos y que hace ilegible el registro
+/// entero. Pasó con el kernel de una máquina recién instalada, donde nadie ha
+/// anotado todavía su hash.
 fn contenido_fmt(c: &Contenido) -> String {
+    if c.hash.is_empty() {
+        return String::from("- -");
+    }
     alloc::format!("{} {}", c.size, c.hash)
 }
 
 fn contenido_parse(s: &str) -> Result<Contenido, PuntoError> {
+    let s = s.trim();
+    if s == "- -" || s == "-" {
+        return Ok(Contenido { size: 0, hash: String::new() });
+    }
     let (size, hash) = s.split_once(' ').ok_or(PuntoError::Campo("contenido"))?;
     Ok(Contenido {
         size: size.parse().map_err(|_| PuntoError::Campo("size"))?,
-        hash: hash.into(),
+        hash: hash.trim().into(),
     })
 }
 
@@ -418,4 +431,36 @@ impl Retencion {
             _ => Vec::new(),
         }
     }
+}
+
+/// Puntos que se pueden recoger: los que **nadie** referencia.
+///
+/// La regla que no se puede romper es no quedarse sin ninguna copia
+/// recuperable. Por eso, si no consta ninguna referencia, no se recoge nada:
+/// sin saber cuál es el bueno, borrar es peor que ocupar sitio. Y la limpieza
+/// nunca decide por tiempo ni por espacio escaso (sección 3.6).
+pub fn a_recoger(todos: &[TxnId], referencias: &[TxnId]) -> Vec<TxnId> {
+    if referencias.is_empty() {
+        return Vec::new();
+    }
+    todos
+        .iter()
+        .copied()
+        .filter(|p| !referencias.contains(p))
+        .collect()
+}
+
+/// ¿Es esta release la que acaba de fallar y se deshizo?
+///
+/// Sirve para no reinstalar a ciegas la versión que la máquina ya rechazó: sin
+/// esto, un `aplicar` repetido vuelve a armar lo mismo y se entra en el bucle
+/// de aplicar, fallar y deshacer.
+pub fn candidata_fallida(decision: crate::txn::bootrec::Decision, version_registro: &str, version: &str) -> bool {
+    matches!(
+        decision,
+        crate::txn::bootrec::Decision::Revertido
+            | crate::txn::bootrec::Decision::Rescatar
+            | crate::txn::bootrec::Decision::RestauradoAPrueba
+    ) && !version.is_empty()
+        && version_registro == version
 }

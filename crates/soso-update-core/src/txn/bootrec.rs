@@ -38,6 +38,12 @@ pub enum Decision {
     Revertir,
     /// Reversión terminada.
     Revertido,
+    /// Punto restaurado y **a prueba**: falta que ese arranque se acredite.
+    ///
+    /// Es la simétrica de `probando`, para la vuelta atrás. Verla al arrancar
+    /// significa que la versión restaurada **tampoco** llegó a init, y entonces
+    /// lo que toca es decirlo, no repetir la restauración en bucle.
+    RestauradoAPrueba,
     /// Rescate pedido desde fuera del sistema actualizado (entrada UEFI o live):
     /// restaurar el **punto retenido**, no la operación en curso. Es la vía para
     /// cuando el fallo aparece después de confirmar, o cuando init/sosh no
@@ -55,6 +61,7 @@ impl Decision {
             Decision::Revertir => "revertir",
             Decision::Revertido => "revertido",
             Decision::Rescatar => "rescatar",
+            Decision::RestauradoAPrueba => "restaurado-a-prueba",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -66,6 +73,7 @@ impl Decision {
             "revertir" => Decision::Revertir,
             "revertido" => Decision::Revertido,
             "rescatar" => Decision::Rescatar,
+            "restaurado-a-prueba" => Decision::RestauradoAPrueba,
             _ => return None,
         })
     }
@@ -176,6 +184,9 @@ impl BootRecord {
     pub fn version_efectiva(&self) -> &str {
         match self.decision {
             Decision::Confirmado | Decision::Probando => &self.version_nueva,
+            // Ya se restauró: lo que corre es la anterior, aunque falte
+            // acreditar que arranca.
+            Decision::RestauradoAPrueba => &self.version_anterior,
             _ => &self.version_anterior,
         }
     }

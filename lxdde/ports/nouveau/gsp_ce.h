@@ -18,6 +18,18 @@
  * páginas enteras del vaspace. */
 #define GSP_CE_LINE_BYTES  4096u
 
+/* Bytes que el CE toca en src/dst con el encoding boa0b5 (`LINE_LENGTH`=página).
+ * Para un rabo < 4 KiB sigue siendo UNA línea de página entera, no `size`. */
+static inline uint64_t gsp_ce_io_bytes(uint32_t size)
+{
+    unsigned lines = (size + GSP_CE_LINE_BYTES - 1u) / GSP_CE_LINE_BYTES;
+
+    if (lines == 1u && size < GSP_CE_LINE_BYTES) {
+        return GSP_CE_LINE_BYTES;
+    }
+    return (uint64_t)lines * GSP_CE_LINE_BYTES;
+}
+
 /* Sondeo con reloj fino antes de dormir por ticks, igual que el QMD. Con el tick
  * a 100 Hz, cada `lx_mdelay(1)` cuesta 10 ms: una subida de 64 MiB son 64 copias
  * y eso era más de medio segundo de puro dormir. */

@@ -483,7 +483,19 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define IWL_UCODE_TLV_CAPA_CDB_SUPPORT           40
 #define IWL_UCODE_TLV_CAPA_TLC_OFFLOAD           43
 #define IWL_UCODE_TLV_CAPA_SESSION_PROT_CMD      54
+#define IWL_UCODE_TLV_CAPA_MLD_API_SUPPORT       110
 #define IWL_FW_CAPA_SETS                         4
+
+#define MAC_CONFIG_CMD                           0x08
+#define LINK_CONFIG_CMD                          0x09
+#define IWL_MVM_FW_LINK_ID_INVALID               0xffu
+
+#define MAC_CFG_FILTER_ACCEPT_CONTROL_AND_MGMT   (1u << 1)
+#define MAC_CFG_FILTER_ACCEPT_GRP                (1u << 2)
+#define MAC_CFG_FILTER_ACCEPT_BEACON             (1u << 3)
+
+#define LINK_CONTEXT_MODIFY_ACTIVE               (1u << 0)
+#define LINK_CONTEXT_MODIFY_BEACON_TIMING        (1u << 4)
 #define IWL_UCODE_TLV_HW_TYPE                    58
 #define IWL_UCODE_TLV_PNVM_VERSION               62
 #define IPC_DRAM_MAP_ENTRY_NUM_MAX               64
@@ -1784,6 +1796,33 @@ struct iwl_ax211_priv;
 #define IWL_MAC_FILTER_ACCEPT_GRP  (1u << 2)
 #define IWL_MAC_FILTER_IN_BEACON   (1u << 6)
 
+#define MAC_CONTEXT_CMD            0x28
+
+struct iwl_mac_client_data {
+    uint8_t is_assoc;
+    uint8_t esr_transition_timeout;
+    uint16_t medium_sync_delay;
+    uint16_t assoc_id;
+    uint16_t reserved1;
+    uint16_t data_policy;
+    uint16_t reserved2;
+    uint32_t ctwin;
+} __attribute__((packed));
+
+struct iwl_mac_config_cmd {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t mac_type;
+    uint8_t local_mld_addr[6];
+    uint16_t reserved_for_local_mld_addr;
+    uint32_t filter_flags;
+    uint16_t he_support;
+    uint16_t he_ap_support;
+    uint32_t eht_support;
+    uint32_t nic_not_ack_enabled;
+    struct iwl_mac_client_data client;
+} __attribute__((packed));
+
 #define TX_STATUS_MSK              0x000000ffu
 #define TX_STATUS_SUCCESS            0x01u
 #define TX_STATUS_FAIL_LONG_LIMIT    0x83u
@@ -1809,6 +1848,52 @@ struct iwl_ac_qos {
     uint8_t aifsn;
     uint8_t fifos_mask;
     uint16_t edca_txop;
+} __attribute__((packed));
+
+struct iwl_he_backoff_conf {
+    uint16_t cwmin;
+    uint16_t cwmax;
+    uint16_t aifsn;
+    uint16_t mu_time;
+} __attribute__((packed));
+
+struct iwl_link_config_cmd {
+    uint32_t action;
+    uint32_t link_id;
+    uint32_t mac_id;
+    uint32_t phy_id;
+    uint8_t local_link_addr[6];
+    uint16_t reserved_for_local_link_addr;
+    uint32_t modify_mask;
+    uint32_t active;
+    uint32_t listen_lmac;
+    uint32_t cck_rates;
+    uint32_t ofdm_rates;
+    uint32_t cck_short_preamble;
+    uint32_t short_slot;
+    uint32_t protection_flags;
+    uint32_t qos_flags;
+    struct iwl_ac_qos ac[IWL_FW_AC_NUM + 1];
+    uint8_t htc_trig_based_pkt_ext;
+    uint8_t rand_alloc_ecwmin;
+    uint8_t rand_alloc_ecwmax;
+    uint8_t ndp_fdbk_buff_th_exp;
+    struct iwl_he_backoff_conf trig_based_txf[IWL_FW_AC_NUM];
+    uint32_t bi;
+    uint32_t dtim_interval;
+    uint16_t puncture_mask;
+    uint16_t frame_time_rts_th;
+    uint32_t flags;
+    uint32_t flags_mask;
+    uint8_t ref_bssid_addr[6];
+    uint16_t reserved_for_ref_bssid_addr;
+    uint8_t bssid_index;
+    uint8_t bss_color;
+    uint8_t spec_link_id;
+    uint8_t reserved;
+    uint8_t ibss_bssid_addr[6];
+    uint16_t reserved_for_ibss_bssid_addr;
+    uint32_t reserved1[8];
 } __attribute__((packed));
 
 struct iwl_mac_data_sta {
@@ -2002,6 +2087,11 @@ void iwl_mac_from_csr(struct iwl_ax211_priv *iwl, uint8_t mac[6]);
 void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigned len);
 int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd);
 int iwl_fw_has_capa(const struct iwl_ax211_priv *iwl, unsigned capa_bit);
+int iwl_mvm_uses_mld_mac(const struct iwl_ax211_priv *iwl);
+int iwl_mvm_fw_has_binding_cmd(const struct iwl_ax211_priv *iwl);
+int iwl_mvm_mld_link_refresh_phy(struct iwl_ax211_priv *iwl);
+int iwl_mvm_mld_link_beacon_timing(struct iwl_ax211_priv *iwl);
+int iwl_mvm_mld_mac_config_modify(struct iwl_ax211_priv *iwl, uint8_t is_assoc);
 void iwl_mvm_rx_scan_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len);
 void iwl_mvm_rx_mlme_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int len);
 /* Clasifica un beacon/probe response: SSID, canal, capacidades y RSN.

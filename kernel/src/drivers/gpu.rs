@@ -541,6 +541,17 @@ fn subir_por_trozos(va: u64, user_ptr: u64, n: usize) -> Result<u64, i64> {
 #[cfg(feature = "lxdde")]
 const LOTE_DMA: usize = 16 * 1024 * 1024 - 4096;
 
+/// Bytes que el CE toca con encoding boa0b5 (rabo < 4 KiB = una línea de página).
+#[cfg(feature = "lxdde")]
+fn ce_io_bytes(n: usize) -> usize {
+    let lines = n.div_ceil(4096);
+    if lines == 1 && n < 4096 {
+        4096
+    } else {
+        lines * 4096
+    }
+}
+
 /// Por qué no se pudo subir sin copia. Eran cuatro causas distintas devolviendo
 /// el mismo `Err(())`, y la que estuvo activa tres meses —el origen en `+64`— no
 /// se distinguía de un CE roto.
@@ -605,10 +616,12 @@ fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
     // `with_current` por lote: cada entrada toma `PROCS`, y con los cores ociosos
     // sondeando ese candado no es gratis.
     let space = crate::task::with_current(|p| p.space.clone()).ok_or(Motivo::SinEspacio)?;
-    // Lo que vaya a hacer falta y no el lote entero: un `gpu_map` de 4 KiB no
-    // tiene por qué pedir 32 KiB de lista. El `+1` es la página que puede añadir
-    // el `lead_in`.
-    let tope = core::cmp::min((lead_in + n).div_ceil(4096), LOTE_DMA / 4096 + 1);
+    // Capacidad de `phys`: el CE puede tocar `ce_io_bytes(c)` bytes desde
+    // `lead_in`, no sólo `c` (rabo < 4 KiB = una línea de página entera).
+    let tope = core::cmp::min(
+        (lead_in + ce_io_bytes(n)).div_ceil(4096),
+        LOTE_DMA / 4096 + 2,
+    );
     let mut phys = alloc::vec![0u64; tope];
     let mut off = 0usize;
     while off < n {
@@ -622,9 +635,9 @@ fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
         } else {
             resto
         };
-        // La ventana empieza en la página que contiene al origen del lote, así que
-        // cubre `lead_in + c`.
-        let paginas = (lead_in + c).div_ceil(4096);
+        // La ventana empieza en la página que contiene al origen del lote. El CE
+        // lee `ce_io_bytes(c)` desde `G6_SRC_VA + lead_in`, no sólo `c` bytes.
+        let paginas = (lead_in + ce_io_bytes(c)).div_ceil(4096);
         let ventana = (paginas * 4096) as u64;
         let ini = base + off as u64;
         crate::mm::reclaim::pin_range(&space, ini, ventana);
@@ -632,10 +645,13 @@ fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
             .phys_pages(ini, ventana, &mut phys[..paginas])
             .ok_or(Motivo::PhysPages)
             .and_then(|k| {
+                if k != paginas {
+                    return Err(Motivo::PhysPages);
+                }
                 crate::lxdde::device_buf_upload_dma(
                     va,
                     off as u64,
-                    &phys[..k],
+                    &phys[..paginas],
                     lead_in as u32,
                     c as u64,
                 )

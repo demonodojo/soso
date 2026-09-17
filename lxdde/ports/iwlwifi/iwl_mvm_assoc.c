@@ -8,7 +8,6 @@ extern void *memset(void *dst, int c, unsigned long n);
 extern int memcmp(const void *a, const void *b, unsigned long n);
 extern char *strncpy(char *dst, const char *src, unsigned long n);
 
-#define MAC_CONTEXT_CMD            0x28
 #define IWL_MLME_WAIT_ITERS           50
 #define IWL_MLME_BEACON_WAIT_ITERS   100
 #define IWL_MLME_LISTEN_INT           10u
@@ -170,8 +169,8 @@ static void iwl_mvm_set_fw_dtim_tbtt(struct iwl_ax211_priv *iwl,
     *assoc_beacon_arrive_time = iwl->sync_device_ts;
 }
 
-static int iwl_mvm_mac_context_assoc(struct iwl_ax211_priv *iwl,
-                                     const uint8_t *bssid, uint8_t is_assoc)
+static int iwl_mvm_mac_context_assoc_legacy(struct iwl_ax211_priv *iwl,
+                                            const uint8_t *bssid, uint8_t is_assoc)
 {
     struct iwl_mac_ctx_cmd cmd;
     uint32_t id_color = FW_CMD_ID_AND_COLOR(iwl->scan_mac_id, 0);
@@ -208,6 +207,20 @@ static int iwl_mvm_mac_context_assoc(struct iwl_ax211_priv *iwl,
     }
     return iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, MAC_CONTEXT_CMD, &cmd,
                                    (uint16_t)sizeof(cmd), IWL_MVM_HCMD_TIMEOUT_MS);
+}
+
+static int iwl_mvm_mac_context_assoc(struct iwl_ax211_priv *iwl,
+                                     const uint8_t *bssid, uint8_t is_assoc)
+{
+    (void)bssid;
+    if (iwl_mvm_uses_mld_mac(iwl)) {
+        if (iwl_mvm_mld_mac_config_modify(iwl, is_assoc) != 0)
+            return -1;
+        if (is_assoc)
+            return iwl_mvm_mld_link_beacon_timing(iwl);
+        return 0;
+    }
+    return iwl_mvm_mac_context_assoc_legacy(iwl, bssid, is_assoc);
 }
 
 static int iwl_mvm_add_sta_ap(struct iwl_ax211_priv *iwl, const uint8_t *bssid)
@@ -601,7 +614,8 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
 
     {
         uint8_t new_band = assoc_phy_band(iwl->channel);
-        int cdb_band_change = iwl->binding_added &&
+        int cdb_band_change = iwl_mvm_fw_has_binding_cmd(iwl) &&
+            iwl->binding_added &&
             iwl_fw_has_capa(iwl, IWL_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT) &&
             iwl->phy_band != new_band;
 
@@ -615,7 +629,12 @@ int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
             lx_printk("iwl_mvm: PHY_CONTEXT assoc falló\n");
             return -1;
         }
-        if (!iwl->binding_added) {
+        if (iwl_mvm_uses_mld_mac(iwl)) {
+            if (iwl_mvm_mld_link_refresh_phy(iwl) != 0) {
+                lx_printk("iwl_mvm: LINK_CONFIG assoc phy falló\n");
+                return -1;
+            }
+        } else if (iwl_mvm_fw_has_binding_cmd(iwl) && !iwl->binding_added) {
             if (iwl_mvm_binding_send(iwl, FW_CTXT_ACTION_ADD) != 0) {
                 lx_printk("iwl_mvm: BINDING assoc ADD falló\n");
                 return -1;

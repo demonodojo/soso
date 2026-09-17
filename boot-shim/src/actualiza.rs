@@ -76,6 +76,20 @@ pub fn atender() -> Option<String> {
     }
 }
 
+/// ¿Hay una copia del kernel anterior **identificada** en la meta? El rescate
+/// sólo pide revertir el kernel si la hay: restaurar los bytes sueltos del
+/// hueco sin saber de quién son es como se acaba con una pareja mezclada.
+pub(crate) fn hay_copia_de_kernel() -> bool {
+    leer_kernel_meta()
+        .map(|m| m.backup_size > 0 && m.backup_hash.len() == 64)
+        .unwrap_or(false)
+}
+
+/// Deja pedida la vuelta atrás del kernel para este mismo arranque.
+pub(crate) fn pedir_revertir_kernel() -> Result<(), &'static str> {
+    escribir_buzon(&soso_update_core::Mailbox::format_revertir())
+}
+
 fn recuperar_interrumpido() -> Option<String> {
     let meta = leer_kernel_meta()?;
     if !meta.needs_recovery() {

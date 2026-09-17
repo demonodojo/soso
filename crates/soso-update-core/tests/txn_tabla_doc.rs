@@ -22,7 +22,7 @@ const ESTADOS: [TxnState; 9] = [
     TxnState::Descartado,
 ];
 
-const DECISIONES: [Decision; 7] = [
+const DECISIONES: [Decision; 8] = [
     Decision::Idle,
     Decision::Armado,
     Decision::Probando,
@@ -30,6 +30,7 @@ const DECISIONES: [Decision; 7] = [
     Decision::Revertir,
     Decision::Revertido,
     Decision::Rescatar,
+    Decision::RestauradoAPrueba,
 ];
 
 fn id() -> TxnId {
@@ -52,6 +53,7 @@ fn celda(r: &Recuperacion) -> &'static str {
         Recuperacion::CompletarConfirmacion(_) => "completar confirmación",
         Recuperacion::CompletarReversion(_) => "completar reversión",
         Recuperacion::Rescatar(_) => "rescatar punto",
+        Recuperacion::Diagnostico(Motivo::RestauradoNoArranca) => "diag. restaurada no arranca",
         Recuperacion::Diagnostico(Motivo::ArmadoSinDiario) => "diag. sin diario",
         Recuperacion::Diagnostico(Motivo::MedioSinDecision) => "diag. sin decisión",
         Recuperacion::Diagnostico(Motivo::IdDiscordante) => "diag. ID",

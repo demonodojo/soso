@@ -420,6 +420,15 @@ int iwl_ax211_tx(const uint8_t *buf, int len)
     return iwl_mvm_tx_8023(&g_iwl, buf, len);
 }
 
+int iwl_ax211_can_tx(void)
+{
+    if (!g_iwl.associated || !g_iwl.alive)
+        return 0;
+    if (!g_iwl.data_txq_ready)
+        return 1;
+    return iwl_trans_data_tx_space(&g_iwl) > 0;
+}
+
 void iwl_ax211_deliver_rx(const uint8_t *data, int len)
 {
     struct iwl_ax211_priv *iwl = &g_iwl;

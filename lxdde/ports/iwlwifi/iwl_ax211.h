@@ -159,6 +159,8 @@ struct iwl_ax211_priv {
     uint8_t phy_channel;
     uint8_t phy_band;
     uint8_t scan_mac_id;
+    uint8_t fw_link_id;
+    uint8_t link_active;
     uint8_t ap_sta_id;
     uint8_t mlme_auth_ok;
     uint8_t mlme_assoc_ok;
@@ -285,6 +287,7 @@ int iwl_ax211_rsn_ie(uint8_t *out, int max);
 int iwl_ax211_rx(uint8_t *buf, int buflen);
 int iwl_ax211_rx_eapol(uint8_t *buf, int buflen);
 int iwl_ax211_tx(const uint8_t *buf, int len);
+int iwl_ax211_can_tx(void);
 int iwl_ax211_mac(uint8_t mac[6]);
 int iwl_ax211_bssid(uint8_t bssid[6]);
 
@@ -308,6 +311,7 @@ int iwl_trans_wait_mgmt_tx_resp(struct iwl_ax211_priv *iwl, unsigned iters);
 int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
                  const void *payload, uint16_t pay_len);
 unsigned iwl_trans_tx_space(const struct iwl_ax211_priv *iwl);
+unsigned iwl_trans_data_tx_space(const struct iwl_ax211_priv *iwl);
 void iwl_trans_tx_reclaim(struct iwl_ax211_priv *iwl, uint16_t seq);
 
 #endif

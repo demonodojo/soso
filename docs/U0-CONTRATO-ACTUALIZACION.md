@@ -169,6 +169,13 @@ acreditarse. `reconcile()` es total: cada celda tiene una acción y sólo una.
 | **revertir** | diag. sin diario | diag. sin diario | descartar | descartar | **revertir** | **revertir** | **revertir** | **revertir** | **revertir** | completar reversión | descartar |
 | **revertido** | normal | normal | diag. imposible | diag. imposible | diag. imposible | diag. imposible | diag. imposible | diag. imposible | **revertir** | normal | normal |
 | **rescatar** | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto | rescatar punto |
+| **restaurado-a-prueba** | diag. restaurada no arranca | diag. restaurada no arranca | diag. restaurada no arranca | diag. restaurada no arranca | diag. restaurada no arranca | diag. restaurada no arranca | diag. restaurada no arranca | diag. restaurada no arranca | diag. restaurada no arranca | diag. restaurada no arranca | diag. restaurada no arranca |
+
+`restaurado-a-prueba` es la simétrica de `probando`, para la vuelta atrás: tras
+restaurar un punto, ese arranque **también** tiene que acreditarse. Verlo al
+arrancar significa que la versión restaurada tampoco llegó a init, y entonces lo
+que toca es **decirlo**, no repetir la restauración: ya está puesta, y volver a
+ponerla no cambia nada. Es lo que impide el bucle de restaurar sin fin.
 
 `rescatar punto` es la fila que añade U5a: una petición hecha **desde fuera**
 del sistema actualizado (entrada UEFI o live) manda sobre lo que diga el diario,

@@ -553,6 +553,8 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
     iwl->phy_ctxt_added = 0;
     iwl->mac_ctxt_added = 0;
     iwl->binding_added = 0;
+    iwl->fw_link_id = IWL_MVM_FW_LINK_ID_INVALID;
+    iwl->link_active = 0;
     iwl->phy_channel = 0;
     iwl->phy_band = 0;
     iwl->mlme_auth_ok = 0;
@@ -678,6 +680,14 @@ unsigned iwl_trans_tx_space(const struct iwl_ax211_priv *iwl)
     if (!iwl || !iwl->mgmt_txq_ready)
         return 0;
     return txq_space_one(iwl->mgmt_txq_write, iwl->mgmt_txq_read);
+}
+
+/* Cola de datos (SSH, TCP). `iwl_trans_tx_space` es solo mgmt. */
+unsigned iwl_trans_data_tx_space(const struct iwl_ax211_priv *iwl)
+{
+    if (!iwl || !iwl->data_txq_ready)
+        return 0;
+    return txq_space_one(iwl->data_txq_write, iwl->data_txq_read);
 }
 
 /* Libera hasta el TFD que el firmware acaba de reconocer. La cola es FIFO y el
@@ -1816,9 +1826,9 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
         return -1;
     writep = txq_write_ptr(iwl, txq_id);
     if (!writep || txq_space_id(iwl, txq_id) == 0) {
+        /* Sin printk: este camino corre dentro de `net::poll` (timer) y
+         * pintar en el GOP del ROG colgó el SSH y acabó en page fault. */
         iwl->tx_full_drop++;
-        lx_printk("iwl_trans: cola TX qid=%u llena; trama descartada\n",
-                  (unsigned)txq_id);
         return -1;
     }
 

@@ -238,7 +238,17 @@ fn fase_registrar(
     if linea.starts_with("ERROR") {
         return Err(linea.to_string());
     }
-    Ok(linea.to_string())
+    // U5d: junto a la entrada normal se registra la de rescate. Es la única
+    // vuelta atrás disponible cuando el sistema instalado no llega a init, así
+    // que no vale con que exista el código: tiene que quedar en la NVRAM.
+    let rescate = texto
+        .lines()
+        .find(|l| l.starts_with("rescate "))
+        .ok_or_else(|| "el shim no registró la entrada de rescate".to_string())?;
+    if !rescate.starts_with("rescate Boot") {
+        return Err(rescate.to_string());
+    }
+    Ok(format!("{linea} · {rescate}"))
 }
 
 fn fase_arranque_solo(

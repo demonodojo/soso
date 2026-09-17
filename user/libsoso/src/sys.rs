@@ -713,6 +713,11 @@ pub fn truncate(path: &str, size: u64) -> i64 {
 /// Pausa o reanuda el escritor de `/var/log`. Mientras está en pausa el ring
 /// sigue capturando en RAM; al reanudar se vuelca. Lo usa `soso-install` para
 /// que el sosofs de origen no cambie mientras se copia.
+/// Confirma la pareja kernel+rootfs de una actualización aplicada.
+pub fn txn_confirm() -> i64 {
+    syscall4(abi::SYS_TXN_CONFIRM, 0, 0, 0, 0)
+}
+
 /// Espacio libre del sistema de ficheros raíz.
 pub fn fsinfo(out: &mut abi::FsInfo) -> i64 {
     syscall4(abi::SYS_FSINFO, out as *mut abi::FsInfo as u64, 0, 0, 0)

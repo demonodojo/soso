@@ -154,10 +154,6 @@ impl SshSession {
     }
 }
 
-/// Plazo máximo que esperamos al apretón de manos FIN antes de abortar y
-/// volver a escuchar. Solo protege contra un cliente que no cierre nunca.
-const GRACIA_CIERRE_MS: u64 = 3_000;
-
 /// Plazo máximo para vaciar TX hacia el canal tras morir la shell. Si el
 /// cliente deja de abrir ventana, se cierra igual y se pierde lo que quede:
 /// peor que perder unos bytes es no cerrar la sesión nunca.
@@ -165,11 +161,24 @@ const GRACIA_TX_MS: u64 = 2_000;
 
 static SESSION: Mutex<Option<SshSession>> = Mutex::new(None);
 
-/// Mata la shell, limpia colas y deja el socket escuchando de nuevo.
-fn reset_socket(socket: &mut tcp::Socket, guard: &mut Option<SshSession>) {
-    teardown(guard);
-    socket.abort();
-    let _ = socket.listen(SSH_PORT);
+/// Vuelve a LISTEN **sin** RST. `abort()` pone CLOSED y smoltcp manda un RST;
+/// en el AX200 del ROG eso tumba la radio (`No route to host`) y el Enter
+/// siguiente en consola acaba en panic. `listen` admite Closed y TimeWait
+/// (`is_open` es falso); CloseWait se cierra con FIN (`close` → LastAck).
+fn reciclar_listen(socket: &mut tcp::Socket, guard: &mut Option<SshSession>, motivo: &str) {
+    if guard.is_some() {
+        teardown(guard);
+        crate::println!("ssh: sesión cerrada ({motivo})");
+    }
+    match socket.state() {
+        tcp::State::Closed | tcp::State::TimeWait => {
+            let _ = socket.listen(SSH_PORT);
+        }
+        tcp::State::CloseWait | tcp::State::Established | tcp::State::SynReceived => {
+            socket.close();
+        }
+        _ => {}
+    }
 }
 
 /// Avanza la sesión SSH usando `socket` como transporte. Llamada desde
@@ -179,33 +188,34 @@ pub fn poll(socket: &mut tcp::Socket) {
     let mut guard = SESSION.lock();
 
     match socket.state() {
-        // Sin conexión: derribar sesión previa y volver a escuchar.
-        State::Closed => {
-            if guard.is_some() {
-                teardown(&mut guard);
-            }
-            socket.listen(SSH_PORT).ok();
+        State::Closed | State::TimeWait => {
+            reciclar_listen(socket, &mut guard, "fin");
             return;
         }
-        // Esperando o negociando conexión: nada que hacer todavía; una
-        // sesión colgada aquí es basura de una conexión anterior.
         State::Listen | State::SynSent | State::SynReceived => {
             if guard.is_some() {
                 teardown(&mut guard);
             }
             return;
         }
-        // Cliente desconectado (p. ej. Ctrl-C) o socket en TIME-WAIT: no
-        // puede aceptar otra conexión hasta abortar y volver a LISTEN.
-        State::CloseWait | State::TimeWait => {
-            reset_socket(socket, &mut guard);
+        // El cliente cerró (Ctrl-C, hangup): FIN nuestro, no RST.
+        State::CloseWait => {
+            reciclar_listen(socket, &mut guard, "cliente");
             return;
         }
-        _ => {}
+        // Cierre ordenado en curso. Sin sesión no inventar otra.
+        State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck => {
+            if guard.is_none() {
+                return;
+            }
+        }
+        State::Established => {}
     }
 
-    // Hay conexión (establecida o cerrándose con datos pendientes).
     if guard.is_none() {
+        if socket.state() != State::Established {
+            return;
+        }
         RX.lock().clear();
         TX.lock().clear();
         *guard = Some(SshSession::new());
@@ -216,30 +226,7 @@ pub fn poll(socket: &mut tcp::Socket) {
     };
     if let Some(e) = drive_err {
         crate::println!("ssh: sesión terminada ({e:?})");
-        reset_socket(socket, &mut guard);
-        return;
-    }
-
-    // Cierre iniciado por nosotros (shell terminada). NO abortar aquí aunque
-    // ya no quede nada pendiente: `abort()` manda un RST y un RST descarta lo
-    // que el cliente todavía no haya leído de su cola de recepción — medido,
-    // era la causa de que la salida de `ask` no llegara nunca (el guest la
-    // escribía entera en el canal y el cliente solo veía el banner). Lo
-    // correcto es dejar que el apretón de manos FIN termine solo: el cliente
-    // lee todo, cierra, y el socket llega a TimeWait/Closed, donde las ramas
-    // de arriba reciclan la escucha. El plazo de gracia solo existe para que
-    // un cliente que nunca cierre no deje el servidor sin escuchar.
-    let vencido = {
-        let s = guard.as_mut().unwrap();
-        matches!(
-            socket.state(),
-            State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck
-        ) && s
-            .cierre_ms
-            .is_some_and(|t| pit::uptime_ms().saturating_sub(t) >= GRACIA_CIERRE_MS)
-    };
-    if vencido {
-        reset_socket(socket, &mut guard);
+        reciclar_listen(socket, &mut guard, "error");
     }
 }
 

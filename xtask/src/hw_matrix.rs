@@ -963,6 +963,41 @@ fn any_line(lines: &[String], pred: impl Fn(&str) -> bool) -> bool {
     lines.iter().any(|l| pred(l))
 }
 
+/// Cifra inmediatamente antes de `needle` en la línea (p. ej. «132» en «132 matvec»).
+fn digits_before(haystack: &str, needle: &str) -> Option<u64> {
+    let idx = haystack.find(needle)?;
+    let prefix = haystack[..idx].trim_end();
+    let n: String = prefix
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if n.is_empty() {
+        None
+    } else {
+        n.parse().ok()
+    }
+}
+
+fn gpu_matvec_ejecutados(lines: &[String]) -> bool {
+    any_line(lines, |l| {
+        digits_before(l, "matvec")
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    })
+}
+
+fn gpu_compute_fallido(lines: &[String]) -> bool {
+    any_line(lines, |l| {
+        l.contains("offload gpu desactivado")
+            || l.contains("ultimo on_gpu=0")
+            || l.contains("0 matvec")
+    })
+}
+
 /// Reconoce el banner de versión que imprime el kernel al arrancar
 /// (`kernel/src/main.rs`: `soso {version} ({build})`).
 ///
@@ -1450,20 +1485,23 @@ pub fn parse_gpu_stages(text: &str) -> GpuStages {
             l.contains("dispositivo «soft") || l.contains("dispositivo \"soft")
         }) {
             StageStatus::no_aplica("dispositivo software (QEMU)")
+        } else if gpu_compute_fallido(&lines) {
+            StageStatus::fail("inferencia sin matvec GPU (0 matvec u offload caído)")
         } else if any_line(&lines, |l| {
-            // Solo una comparación ejecutada en GPU acredita cálculo: ni el
-            // pool de VRAM, ni GSP_INIT_DONE, ni una ruta CPU con «gpu» en la
-            // línea. Han de aparecer el kernel medido y su resultado.
-            l.contains("matvec")
-                && l.contains("gpu")
-                && l.contains("tok/s")
-                && !l.contains("cpu")
-                && !l.contains("soft")
-        }) || any_line(&lines, |l| {
             (l.contains("saxpy") || l.contains("matvec"))
                 && l.contains("gpu")
                 && (l.contains("coincide") || l.contains("ok vs cpu") || l.contains("max_err"))
-        }) {
+        }) || gpu_matvec_ejecutados(&lines)
+            || any_line(&lines, |l| l.contains("on_gpu=1"))
+            || any_line(&lines, |l| {
+                l.contains("matvec")
+                    && l.contains("gpu")
+                    && l.contains("tok/s")
+                    && !l.contains("cpu")
+                    && !l.contains("soft")
+                    && !l.contains("0 matvec")
+            })
+        {
             StageStatus::ok(None)
         } else {
             StageStatus::pendiente()
@@ -2055,6 +2093,21 @@ soso 0.2.3 (bbbbbbbbb)\nboot: memtest\niwl: start\n";
         );
         assert_eq!(g.compute_cpu_gpu.status, "ok");
         assert!(campana_gpu_ok(&g));
+    }
+
+    #[test]
+    fn r2_rendimiento_gpu_con_cero_matvec_no_es_ok() {
+        let g = parse_gpu_stages(
+            "GSP_INIT_DONE\npool VRAM=16056 MiB\nreadback GO\n\
+             soso-llm: rendimiento gpu — 119.46 tok/s, 0.0 submits/token (0 matvec / 132 tokens)\n\
+             soso-llm: ultimo on_gpu=0\n\
+             soso-llm: offload gpu desactivado — subida de pesos\n",
+        );
+        assert_eq!(
+            g.compute_cpu_gpu.status,
+            "fail",
+            "tok/s con 0 matvec no acredita compute_cpu_gpu"
+        );
     }
 
     #[test]

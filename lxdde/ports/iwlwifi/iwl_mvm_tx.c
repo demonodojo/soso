@@ -77,6 +77,5 @@ int iwl_mvm_tx_8023(struct iwl_ax211_priv *iwl, const uint8_t *buf, int len)
     pay = (uint16_t)(hdr_off + (unsigned)flen);
     if (iwl_trans_tx(iwl, txq_id, txbuf, pay) != 0)
         return -1;
-    (void)iwl_trans_wait_mgmt_tx_resp(iwl, 40);
     return 0;
 }

@@ -345,11 +345,19 @@ int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
         return 3;
     if (group == DATA_PATH_GROUP && cmd == TLC_MNG_CONFIG_CMD)
         return 4;
-    if (cmd == ADD_STA)
+    if (group == LEGACY_GROUP && cmd == ADD_STA)
         return 12;
-    if (cmd == PHY_CONTEXT_CMD)
+    if (group == LEGACY_GROUP && cmd == PHY_CONTEXT_CMD)
         return 4;
-    if (cmd == TX_CMD)
+    if (group == LEGACY_GROUP && cmd == MAC_CONTEXT_CMD)
+        return 5;
+    if (group == LEGACY_GROUP && cmd == BINDING_CONTEXT_CMD)
+        return 2;
+    if (group == MAC_CONF_GROUP && cmd == MAC_CONFIG_CMD)
+        return 0;
+    if (group == MAC_CONF_GROUP && cmd == LINK_CONFIG_CMD)
+        return 0;
+    if (group == LEGACY_GROUP && cmd == TX_CMD)
         return 9;
     return 0;
 }

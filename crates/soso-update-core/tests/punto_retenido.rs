@@ -175,6 +175,20 @@ fn el_punto_sobrevive_al_roundtrip() {
 }
 
 #[test]
+fn un_kernel_que_no_consta_sobrevive_al_roundtrip() {
+    // En una máquina recién instalada nadie ha anotado el hash del kernel
+    // activo. Antes eso producía `kernel=0 `, cuyo espacio final se recorta al
+    // releer y dejaba el registro **ilegible** — el punto existía en disco y
+    // `estado` decía «no hay vuelta atrás guardada».
+    let (mut p, _) = punto_y_copias();
+    p.kernel = Contenido { size: 0, hash: String::new() };
+    let leido = Punto::parse(&p.format()).expect("un kernel que no consta no rompe el punto");
+    assert_eq!(leido.kernel.hash, "");
+    assert_eq!(leido.entradas.len(), p.entradas.len());
+    assert_eq!(leido.version, p.version);
+}
+
+#[test]
 fn un_punto_de_otra_instalacion_no_se_aplica() {
     let (p, _) = punto_y_copias();
     assert_eq!(p.comprobar_destino(GUID), Ok(()));
@@ -241,4 +255,39 @@ fn un_punto_roto_no_pasa_por_bueno() {
         Punto::parse(&bytes),
         Err(PuntoError::Registro(RecordError::SumaIncorrecta))
     ));
+}
+
+// ── Arranque restaurado a prueba (U5e) ───────────────────────────────────
+
+#[test]
+fn una_restauracion_que_no_arranca_no_se_repite() {
+    // Es la simétrica de `probando`: tras restaurar, ese arranque también tiene
+    // que acreditarse. Encontrarlo sin acreditar significa que la versión
+    // restaurada tampoco llegó a init — repetir la restauración sería un bucle,
+    // porque ya está puesta.
+    let r = BootRecord::nuevo(Decision::RestauradoAPrueba, id(), "0.3.0", "0.2.9", 4)
+        .con_punto(id());
+    let esp = EstadoEsp::Registro(r);
+    for diario in [EstadoJournal::Ausente, EstadoJournal::Roto] {
+        assert_eq!(
+            reconcile(&esp, &diario),
+            Recuperacion::Diagnostico(Motivo::RestauradoNoArranca)
+        );
+    }
+}
+
+#[test]
+fn restaurado_a_prueba_ya_anuncia_la_version_anterior() {
+    // Lo que corre es la anterior, aunque falte acreditar que arranca: si
+    // anunciara la nueva, `estado` mentiría justo cuando más importa.
+    let r = BootRecord::nuevo(Decision::RestauradoAPrueba, id(), "0.3.0", "0.2.9", 1);
+    assert_eq!(r.version_efectiva(), "0.2.9");
+    let leido = BootRecord::parse(&r.format().unwrap()).unwrap();
+    assert_eq!(leido.decision, Decision::RestauradoAPrueba);
+}
+
+#[test]
+fn tras_restaurar_la_version_nueva_queda_bloqueada() {
+    use soso_update_core::txn::punto::candidata_fallida;
+    assert!(candidata_fallida(Decision::RestauradoAPrueba, "0.3.0", "0.3.0"));
 }

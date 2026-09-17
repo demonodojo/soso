@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use soso_update_core::txn::aplicador::{self, De, Sistema};
 use soso_update_core::txn::bootrec::{BootRecError, BootRecord, Decision, BOOTREC_SIZE};
 use soso_update_core::txn::journal::Journal;
+use soso_update_core::txn::punto::Punto;
 use soso_update_core::txn::reconcile::{reconcile, EstadoEsp, EstadoJournal, Recuperacion};
 use soso_update_core::RecordError;
 
@@ -51,7 +52,16 @@ pub fn recuperar() -> bool {
         Recuperacion::Normal => true,
         Recuperacion::Descartar(_) => true,
         Recuperacion::RetrocederAPreparado(_) => true,
-        Recuperacion::Aplicar(_) => ejecutar(&dir, diario, true),
+        Recuperacion::Aplicar(id) => {
+            let ok = ejecutar(&dir, diario, true);
+            if ok {
+                // Paso 4 del orden de aplicación: la pareja nueva queda a
+                // prueba. Si el arranque no llega a confirmarse, el siguiente
+                // encontrará esto y la deshará.
+                publicar(&esp, Decision::Probando, id);
+            }
+            ok
+        }
         Recuperacion::Revertir(_) => ejecutar(&dir, diario, false),
         Recuperacion::PublicarProbando(id) => {
             publicar(&esp, Decision::Probando, id);
@@ -65,18 +75,7 @@ pub fn recuperar() -> bool {
             publicar(&esp, Decision::Revertido, id);
             true
         }
-        // U5a define la petición de rescate; restaurar un punto retenido es
-        // U5b/U5c y todavía no está. Se dice claramente y **no** se arranca
-        // como si nada: alguien pidió volver atrás desde fuera del sistema, y
-        // seguir adelante sería ignorarlo en silencio.
-        Recuperacion::Rescatar(punto) => {
-            crate::println!(
-                "txn: rescate pedido al punto {} — este kernel aún no sabe restaurarlo (U5b/U5c)",
-                punto.dir()
-            );
-            crate::otalog!("arranque: rescate pedido al punto {}, sin soporte", punto.dir());
-            false
-        }
+        Recuperacion::Rescatar(punto) => rescatar(&esp, punto),
         Recuperacion::Diagnostico(motivo) => {
             crate::println!(
                 "txn: PAREJA INCOHERENTE ({motivo:?}) — no arranco así; \
@@ -111,6 +110,95 @@ fn ejecutar(dir: &str, diario: EstadoJournal, aplicar: bool) -> bool {
             false
         }
     }
+}
+
+/// Restaura un **punto retenido** (U5d): la vuelta atrás pedida desde fuera del
+/// sistema actualizado, que no depende de la operación en curso.
+///
+/// No lleva diario de progreso y no le hace falta: cada paso es idempotente, así
+/// que un corte a mitad se arregla repitiéndolo entero en el arranque siguiente
+/// —el registro sigue diciendo `rescatar` hasta que termina—.
+fn rescatar(esp: &EstadoEsp, punto: soso_update_core::txn::TxnId) -> bool {
+    let dir = punto.dir();
+    let ruta = format!("{DIR_BASE}/{dir}/punto.rec");
+    let datos = crate::vfs::resolve(&ruta)
+        .ok()
+        .and_then(|i| crate::vfs::read_file(i).ok());
+    let Some(datos) = datos else {
+        crate::println!("txn: rescate pedido pero no encuentro el punto en {ruta}");
+        crate::otalog!("arranque: rescate sin punto en disco");
+        return false;
+    };
+    let p = match Punto::parse(&datos) {
+        Ok(p) => p,
+        Err(e) => {
+            crate::println!("txn: el punto de rescate está ilegible ({e:?})");
+            return false;
+        }
+    };
+    let mut sis = Vfs { dir: String::from(&dir) };
+    // Se comprueba **entero antes** de escribir nada: restaurar a medias desde
+    // un punto roto deja una pareja mezclada, que es lo que se quiere evitar.
+    if let Err(e) = p.verificar(&mut sis) {
+        crate::println!("txn: el punto de rescate no está completo ({e:?}); no lo uso");
+        crate::otalog!("arranque: punto de rescate incompleto {e:?}");
+        return false;
+    }
+    match aplicador::restaurar(&p.entradas, &mut sis) {
+        Ok(()) => {
+            crate::println!(
+                "txn: restaurada la versión {} desde el punto ({} entradas)",
+                p.version,
+                p.entradas.len()
+            );
+            crate::otalog!("arranque: restaurada {} desde punto retenido", p.version);
+            // A prueba: falta que este arranque llegue a init. Si no llega, el
+            // siguiente lo verá y lo dirá en vez de repetir la restauración.
+            publicar(esp, Decision::RestauradoAPrueba, punto);
+            true
+        }
+        Err(e) => {
+            crate::println!("txn: fallo restaurando el punto ({e:?})");
+            crate::otalog!("arranque: fallo restaurando punto {e:?}");
+            false
+        }
+    }
+}
+
+/// Confirma la pareja: primero la evidencia en sosofs, después la decisión en
+/// la ESP. Si se corta entre las dos, `reconcile` lo completa al arrancar.
+pub fn confirmar() -> bool {
+    let esp = leer_bootrec();
+    let EstadoEsp::Registro(rec) = &esp else {
+        // Sin registro no hay nada que acreditar, pero que el arranque lo diga:
+        // un «no había registro» silencioso se confunde con «ya está hecho».
+        crate::println!("txn: acreditar — sin registro en la ESP ({esp:?})");
+        return true;
+    };
+    match rec.decision {
+        // La pareja nueva se acredita.
+        Decision::Probando => {
+            let dir = rec.dir.clone();
+            if let EstadoJournal::Diario(mut j) = leer_diario(&dir) {
+                if j.avanzar(soso_update_core::txn::TxnEvent::PruebaSuperada).is_ok() {
+                    let _ = escribir_diario(&dir, &j);
+                }
+            }
+            publicar(&esp, Decision::Confirmado, rec.id);
+            crate::println!("txn: pareja confirmada ({})", rec.version_nueva);
+            crate::otalog!("arranque: pareja confirmada");
+        }
+        // La versión restaurada sí arranca: la vuelta atrás queda cerrada.
+        Decision::RestauradoAPrueba => {
+            publicar(&esp, Decision::Revertido, rec.id);
+            crate::println!("txn: versión restaurada acreditada ({})", rec.version_anterior);
+            crate::otalog!("arranque: versión restaurada acreditada");
+        }
+        otra => {
+            crate::println!("txn: acreditar — nada que hacer ({otra:?})");
+        }
+    }
+    true
 }
 
 /// El sistema, visto por el aplicador. Las rutas del diario son relativas a la

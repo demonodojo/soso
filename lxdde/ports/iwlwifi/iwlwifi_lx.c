@@ -114,6 +114,11 @@ int lx_iwlwifi_tx(const unsigned char *buf, int len)
     return iwl_ax211_tx(buf, len);
 }
 
+int lx_iwlwifi_can_send(void)
+{
+    return iwl_ax211_can_tx();
+}
+
 int lx_iwlwifi_mac(unsigned char mac[6])
 {
     return iwl_ax211_mac(mac);

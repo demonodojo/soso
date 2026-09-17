@@ -283,10 +283,28 @@ impl Journal {
                 return Err(JournalError::ProgresoInconsistente(e.path.clone()));
             }
         }
-        if self.estado.exige_respaldos()
-            && (self.kernel_nuevo.is_none() || self.kernel_anterior.is_none())
-        {
-            return Err(JournalError::SinKernel);
+        if self.estado.exige_respaldos() {
+            // Un hash vacío o mal formado no es «no consta»: al releer, el
+            // diario entero deja de parsearse y la operación aparece como
+            // «armada sin diario», que es el peor diagnóstico posible porque
+            // no dice qué falló. Se rechaza al validar, antes de escribirlo.
+            let bien = |c: &Contenido| {
+                c.hash.len() == 64 && c.hash.bytes().all(|b| b.is_ascii_hexdigit())
+            };
+            // El kernel nuevo siempre se conoce: lo declara el manifiesto.
+            if !self.kernel_nuevo.as_ref().is_some_and(bien) {
+                return Err(JournalError::SinKernel);
+            }
+            // El anterior puede **no constar**: en una máquina que nunca se ha
+            // actualizado, nadie ha anotado su hash, y el cliente no puede
+            // leerlo (vive en la ESP y lo respalda el shim al arrancar). Se
+            // admite ausente, pero no mal formado: un hash a medias hace
+            // ilegible el diario entero y la operación aparece como «armada sin
+            // diario», el peor diagnóstico posible porque no dice qué falló.
+            // La vuelta atrás del kernel la gobierna `SOSOKRN.MET`, no esto.
+            if self.kernel_anterior.as_ref().is_some_and(|c| !bien(c)) {
+                return Err(JournalError::SinKernel);
+            }
         }
         Ok(())
     }

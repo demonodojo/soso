@@ -29,6 +29,41 @@ Plan U0–U8: [actualizaciones de instalaciones y logs en sosofs](../../../docs/
 Incluye recuperación conjunta kernel/rootfs, transición legacy y eliminación
 de `SOSOLOG.TXT` en la ESP instalada; no tratarlo como comportamiento implementado.
 
+**U5e parcial (2026-09-17):** `aplicar` **se planta** si el registro dice que esa
+versión ya hubo que deshacerla (pide `--forzar`), y al armar se recogen los
+puntos que no referencia ni la versión activa ni la operación nueva — **nunca por
+tiempo ni por espacio, y nada si no consta ninguna referencia**. Falta comprobar
+el arranque restaurado y no entrar en bucle si también falla.
+
+**U5d parcial (2026-09-17):** `soso-update revertir` va contra la transacción —
+muestra A→B, **verifica el punto releyéndolo**, deja cancelar y registra
+`Decision::Rescatar`; restaura el arranque siguiente (`txn: restaurada la
+versión`). Falta la **entrada UEFI** independiente de init/red. Trampa cazada
+aquí: un `Contenido` con hash vacío se escribe `0 ` y al releer se recorta el
+espacio → campo impartible y registro **ilegible**; «no consta» va explícito
+(`- -`). Vale para el punto y para el diario.
+
+**U5c cerrada (2026-09-17): `soso-update` ARMA, no instala.** Baja a la etapa,
+crea+verifica el punto, escribe el **diario**, prepara el kernel y publica el
+**registro de arranque**; instala `drivers/txnaplica.rs` en el arranque
+siguiente, antes de firmware e init. `/etc/soso-release` es un fichero
+administrado más (si no, volver atrás deja binarios viejos anunciando versión
+nueva). `init` confirma la pareja con `SYS_TXN_CONFIRM` (89) — **sin eso el
+arranque siguiente ve `probando` y deshace la actualización**. El banco exige
+`txn: actualización aplicada` en el serial **antes** de `boot: ethernet`.
+Trampas encontradas: el diario con hash de kernel vacío queda **ilegible** y
+aparece como «armada sin diario» (la imagen live no trae `kernel=` en
+`/etc/soso-release`); y al rearmar la misma release hay que **continuar la
+secuencia** del diario o `pick` elige el obsoleto. Falta: arrancar la pareja
+antigua **bajo su kernel** (sigue en `SOSOKRN.MET`) y cortes E2E.
+
+**Cliente creando puntos (2026-09-17):** `soso-update` implementa `Almacen` y
+crea+verifica el punto **antes de tocar el sistema**; si no se puede, no
+actualiza. `estado` muestra la vuelta atrás y si está verificada. Huecos ESP
+nuevos: `UPD_WHICH_TXN` (SOSOTXN.BIN) y `UPD_WHICH_MODE` (SOSOMODE.TXT, de donde
+sale el GUID que ata el punto a su instalación). Ojo: `sys::getdents` devuelve
+**bytes**, no entradas — dividir por `DIRENT_SIZE`.
+
 **U5b cerrada (2026-09-17):** `punto::crear_punto` comprueba espacio **antes**
 de copiar, copia y **relee** todo; sin espacio, con una copia que falla o que no
 se relee igual, devuelve error y **no se arma**. `Retencion` conserva A mientras

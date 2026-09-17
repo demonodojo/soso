@@ -43,6 +43,7 @@ unsafe extern "C" {
     fn lx_iwlwifi_rx(buf: *mut u8, buflen: c_int) -> c_int;
     fn lx_iwlwifi_rx_eapol(buf: *mut u8, buflen: c_int) -> c_int;
     fn lx_iwlwifi_tx(buf: *const u8, len: c_int) -> c_int;
+    fn lx_iwlwifi_can_send() -> c_int;
     fn lx_iwlwifi_mac(mac: *mut u8) -> c_int;
     fn lx_iwlwifi_bssid(bssid: *mut u8) -> c_int;
     fn lx_iwlwifi_poll();
@@ -251,5 +252,5 @@ pub fn send(data: &[u8]) -> Result<(), ()> {
 }
 
 pub fn can_send() -> bool {
-    connected()
+    connected() && unsafe { lx_iwlwifi_can_send() != 0 }
 }

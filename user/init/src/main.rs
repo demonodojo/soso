@@ -297,6 +297,17 @@ fn confirmar_actualizacion() -> bool {
     true
 }
 
+/// Confirma la **pareja** kernel+rootfs de la transacción (U5).
+///
+/// Va junto a la confirmación del buzón y por el mismo motivo: sin ella, el
+/// arranque siguiente encuentra el registro en `probando` —la señal de que el
+/// anterior no se acreditó— y deshace la actualización.
+fn confirmar_pareja() {
+    if sys::txn_confirm() < 0 {
+        println!("init: no pude confirmar la pareja de la actualización");
+    }
+}
+
 fn rootfs_accesible() -> bool {
     let mut st = abi::Stat::default();
     sys::stat("/etc/soso-release", &mut st) >= 0
@@ -364,6 +375,7 @@ fn lanzar_shell() -> u8 {
     }
     let mut ota_hecho = false;
     if esperar_sosh_lista(pid) {
+        confirmar_pareja();
         if !confirmar_actualizacion() {
             println!("init: no pude confirmar actualización en buzón");
             return 1;
@@ -377,6 +389,7 @@ fn lanzar_shell() -> u8 {
     }
     loop {
         if !ota_hecho && sosh_sigue_viva(pid) && sosh_ready_de(pid) {
+            confirmar_pareja();
             if confirmar_actualizacion() {
                 ota_hecho = true;
             } else {

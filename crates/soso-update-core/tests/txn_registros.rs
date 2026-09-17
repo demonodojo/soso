@@ -226,9 +226,22 @@ fn diario_armado_exige_respaldo_de_lo_que_reemplaza() {
 }
 
 #[test]
-fn diario_armado_exige_la_pareja_de_kernels() {
+fn diario_armado_exige_el_kernel_nuevo_bien_formado() {
+    // El nuevo siempre se conoce: lo declara el manifiesto.
+    let mut j = diario(TxnState::Armado);
+    j.kernel_nuevo = None;
+    assert_eq!(j.validate(), Err(JournalError::SinKernel));
+
+    // El anterior puede **no constar** —en una máquina recién instalada nadie
+    // ha anotado su hash— pero no puede estar a medias: un hash mal formado
+    // hace ilegible el diario entero, y entonces la operación aparece como
+    // «armada sin diario», que no dice qué falló.
     let mut j = diario(TxnState::Armado);
     j.kernel_anterior = None;
+    assert!(j.validate().is_ok(), "ausente vale: lo respalda SOSOKRN.MET");
+
+    let mut j = diario(TxnState::Armado);
+    j.kernel_anterior = Some(Contenido { size: 10, hash: "no-es-un-hash".into() });
     assert_eq!(j.validate(), Err(JournalError::SinKernel));
 }
 
