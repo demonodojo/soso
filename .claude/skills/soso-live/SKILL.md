@@ -35,10 +35,14 @@ puntos que no referencia ni la versión activa ni la operación nueva — **nunc
 tiempo ni por espacio, y nada si no consta ninguna referencia**. Falta comprobar
 el arranque restaurado y no entrar en bucle si también falla.
 
-**U5d parcial (2026-09-17):** `soso-update revertir` va contra la transacción —
+**U5d (2026-09-17):** `soso-update revertir` va contra la transacción —
 muestra A→B, **verifica el punto releyéndolo**, deja cancelar y registra
 `Decision::Rescatar`; restaura el arranque siguiente (`txn: restaurada la
-versión`). Falta la **entrada UEFI** independiente de init/red. Trampa cazada
+versión`). La **entrada UEFI** ya existe: el instalador registra una segunda
+`Boot####` «soso — recuperar versión anterior», al mismo cargador y con
+`rescatar` en su OptionalData, la última del `BootOrder`. El shim
+(`boot-shim/src/rescate.rs`) sólo **pide** el rescate en `SOSOTXN.BIN`; decide
+con `txn::rescate::planear`, que se prueba en el host. Trampa cazada
 aquí: un `Contenido` con hash vacío se escribe `0 ` y al releer se recorta el
 espacio → campo impartible y registro **ilegible**; «no consta» va explícito
 (`- -`). Vale para el punto y para el diario.
@@ -78,8 +82,10 @@ entero. `txn/punto.rs`: el punto guarda A **mientras B sea la activa**, aunque B
 esté confirmada; lleva GUID del destino, se **verifica releyéndolo**, anota lo
 que añadió B para **quitarlo** al volver, y `reserva_efectiva` cuenta los datos
 dos veces por el CoW. `recogible` sólo suelta lo no referenciado (en A→B→C
-conviven dos). La fila `rescatar` de la tabla **manda sobre el diario**. Nadie
-crea puntos todavía: eso es U5b; la entrada UEFI que los pide, U5d.
+conviven dos). La fila `rescatar` de la tabla **manda sobre el diario**, pero el rescate
+**cierra ese diario** al terminar (`txn::rescate::cerrar_diario`, antes de
+publicar la decisión): si no, la ESP dice `revertido` y el diario `probando`, y
+el arranque siguiente no sabe cuál manda — se plantaba en `ParejaImposible`.
 
 **U5c parcial (2026-09-17) — no confundir con U5 entera.** El plan creció el
 2026-09-16 (§3.6: puntos de recuperación **retenidos**, tres vías de vuelta
@@ -235,7 +241,7 @@ tamaño fijo y escribe sectores. Si falta el hueco, esa vía queda desactivada
 | `SOSOWIFI.TXT` | 4 KiB | usuario en host | `ssid=` / `psk=` |
 | `SOSOUPD.TXT` | 4 KiB | `soso-update` / shim / init | buzón OTA kernel |
 | `SOSOMODE.TXT` | 4 KiB | `soso-install` / `install-disk` | identidad `live`/`installed` (U2); 4 ranuras de 1 KiB |
-| `SOSOTXN.BIN` | 4 KiB | (U5) | registro de transacción del contrato U0; **reservado, aún sin usar** |
+| `SOSOTXN.BIN` | 4 KiB | `soso-update` / kernel / shim | registro de arranque del contrato U0 (formato 2: punto retenido y `rescatar`), 4 ranuras de 1 KiB |
 | `SOSOKRN.BIN` | 64 MiB | `soso-update` / shim | hueco kernel (nuevo o backup) |
 | `SOSOKRN.MET` | 512 B | `soso-update` / shim | meta durable OTA (fases staged/backup/applying/probando) |
 | `SOSORES.TXT` | 4 KiB | kernel `fs-resize` | journal de redimensionado rootfs |
@@ -249,9 +255,17 @@ entrada FAT (no duplicar `SOSOUPD`/`SOSOKRN`).
 `BOOTX64.EFI` deja marca en `BOOTMARK.TXT`, atiende buzones y chainloadea
 `efi/boot/bootsoso.efi`.
 
-- **Install:** `bootentry.rs` lee `SOSOBOOT.TXT`, crea `Boot####` «soso».
-  El kernel no puede tocar NVRAM (`ExitBootServices`). Si falla, **no aborta**
-  el arranque. Deja `DONE Boot#### soso`.
+- **Install:** `bootentry.rs` lee `SOSOBOOT.TXT`, crea `Boot####` «soso» y,
+  detrás, la de rescate «soso — recuperar versión anterior» (mismo cargador,
+  `rescatar` en OptionalData, **última** del `BootOrder`). El kernel no puede
+  tocar NVRAM (`ExitBootServices`). Si falla, **no aborta** el arranque. Deja
+  `DONE Boot#### soso` y `rescate Boot####`.
+- **Rescate:** `rescate.rs` reconoce la señal, lee el registro de arranque y
+  publica `rescatar` con el punto que ya trae; si la meta identifica copia del
+  kernel, pide también su vuelta atrás (la pareja vuelve entera o no vuelve).
+  No restaura nada él: eso es del kernel, que sí puede leer sosofs y comprobar
+  el punto entero antes de tocar nada. Sin punto no promete nada y sigue
+  arrancando.
 - **Update:** `actualiza.rs` lee `SOSOUPD.TXT` y `SOSOKRN.MET`:
   - `KERNEL <tam> <sha256> <ver>` → verifica hueco, copia kernel viejo a
     `SOSOKRN.BIN`, escribe el nuevo, deja `PROBANDO` (meta `applying`/`probando`).

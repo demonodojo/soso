@@ -84,3 +84,31 @@ pub fn planear(rec: &BootRecord) -> Plan {
         hasta: rec.version_anterior.clone(),
     }
 }
+
+/// Cierra el diario de la operación que el rescate acaba de deshacer.
+///
+/// Un rescate restaura el **punto**, no la operación, y por eso no lleva diario
+/// de progreso. Pero dejar el diario abierto diciendo «probando» mientras la
+/// ESP ya dice «revertido» es justo la pareja incoherente que el contrato
+/// prohíbe: el arranque siguiente no puede saber cuál de los dos manda. Así que
+/// el rescate lo cierra con los eventos de siempre, sin inventar estados:
+/// lo que llegó a aplicarse se deshace, y lo que no, se descarta.
+///
+/// Devuelve `true` si el diario cambió y hay que volver a escribirlo.
+pub fn cerrar_diario(j: &mut crate::txn::journal::Journal) -> bool {
+    use crate::txn::{TxnEvent, TxnState};
+    match j.estado {
+        // Ya cerrado: repetir el rescate no debe moverlo.
+        TxnState::Revertido | TxnState::Descartado => false,
+        // Nada se había escrito en el sistema activo; su preparación ya no
+        // sirve, porque el sistema de debajo no es el que tenía delante.
+        TxnState::Descargando | TxnState::Preparado => j.avanzar(TxnEvent::Abortada).is_ok(),
+        _ => {
+            let mut cambio = j.avanzar(TxnEvent::ReversionSolicitada).is_ok();
+            if j.estado == TxnState::Revirtiendo {
+                cambio |= j.avanzar(TxnEvent::ReversionCompleta).is_ok();
+            }
+            cambio
+        }
+    }
+}

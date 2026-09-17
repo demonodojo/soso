@@ -75,7 +75,7 @@ pub fn recuperar() -> bool {
             publicar(&esp, Decision::Revertido, id);
             true
         }
-        Recuperacion::Rescatar(punto) => rescatar(&esp, punto),
+        Recuperacion::Rescatar(punto) => rescatar(&esp, punto, diario, &dir),
         Recuperacion::Diagnostico(motivo) => {
             crate::println!(
                 "txn: PAREJA INCOHERENTE ({motivo:?}) — no arranco así; \
@@ -118,7 +118,15 @@ fn ejecutar(dir: &str, diario: EstadoJournal, aplicar: bool) -> bool {
 /// No lleva diario de progreso y no le hace falta: cada paso es idempotente, así
 /// que un corte a mitad se arregla repitiéndolo entero en el arranque siguiente
 /// —el registro sigue diciendo `rescatar` hasta que termina—.
-fn rescatar(esp: &EstadoEsp, punto: soso_update_core::txn::TxnId) -> bool {
+fn rescatar(
+    esp: &EstadoEsp,
+    punto: soso_update_core::txn::TxnId,
+    diario: EstadoJournal,
+    // Directorio de la **operación** (el del registro de arranque), que no
+    // tiene por qué ser el del punto: se rescata un punto retenido, y el
+    // diario que hay que cerrar es el de la operación en curso.
+    dir_op: &str,
+) -> bool {
     let dir = punto.dir();
     let ruta = format!("{DIR_BASE}/{dir}/punto.rec");
     let datos = crate::vfs::resolve(&ruta)
@@ -152,6 +160,19 @@ fn rescatar(esp: &EstadoEsp, punto: soso_update_core::txn::TxnId) -> bool {
                 p.entradas.len()
             );
             crate::otalog!("arranque: restaurada {} desde punto retenido", p.version);
+            // El diario de la operación deshecha se cierra **antes** de publicar
+            // la decisión: si se corta en medio, el registro sigue diciendo
+            // `rescatar` y el arranque siguiente repite el rescate entero, que
+            // es idempotente. Al revés quedaría una pareja incoherente.
+            if let EstadoJournal::Diario(mut j) = diario {
+                if soso_update_core::txn::rescate::cerrar_diario(&mut j) {
+                    if escribir_diario(dir_op, &j).is_err() {
+                        crate::println!("txn: no pude cerrar el diario tras el rescate");
+                        crate::otalog!("arranque: diario abierto tras rescatar");
+                        return false;
+                    }
+                }
+            }
             // A prueba: falta que este arranque llegue a init. Si no llega, el
             // siguiente lo verá y lo dirá en vez de repetir la restauración.
             publicar(esp, Decision::RestauradoAPrueba, punto);
@@ -169,10 +190,9 @@ fn rescatar(esp: &EstadoEsp, punto: soso_update_core::txn::TxnId) -> bool {
 /// la ESP. Si se corta entre las dos, `reconcile` lo completa al arrancar.
 pub fn confirmar() -> bool {
     let esp = leer_bootrec();
+    // Sin registro no hay nada que acreditar. Se calla: en una máquina sin
+    // hueco en la ESP esto pasa en cada invocación del cliente.
     let EstadoEsp::Registro(rec) = &esp else {
-        // Sin registro no hay nada que acreditar, pero que el arranque lo diga:
-        // un «no había registro» silencioso se confunde con «ya está hecho».
-        crate::println!("txn: acreditar — sin registro en la ESP ({esp:?})");
         return true;
     };
     match rec.decision {
@@ -194,9 +214,9 @@ pub fn confirmar() -> bool {
             crate::println!("txn: versión restaurada acreditada ({})", rec.version_anterior);
             crate::otalog!("arranque: versión restaurada acreditada");
         }
-        otra => {
-            crate::println!("txn: acreditar — nada que hacer ({otra:?})");
-        }
+        // Ya cerrado: acreditar es idempotente y el cliente lo salda en cada
+        // orden, así que aquí no hay nada que decir.
+        _ => {}
     }
     true
 }

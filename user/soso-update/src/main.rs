@@ -41,6 +41,7 @@ fn main(args: &str) -> u8 {
     let parts: Vec<String> = args.split_whitespace().map(String::from).collect();
     let cmd = parts.first().map(|s| s.as_str()).unwrap_or("aplicar");
     let rest: &[String] = parts.get(1..).unwrap_or(&[]);
+    saldar_acreditacion();
     match cmd {
         "estado" => cmd_estado(),
         "comprobar" => cmd_comprobar(rest),
@@ -57,6 +58,19 @@ fn main(args: &str) -> u8 {
             2
         }
     }
+}
+
+/// Salda la decisión pendiente antes de mirar o tocar el registro de arranque.
+///
+/// Que este programa esté corriendo **es** la prueba de que el arranque llegó a
+/// userland, que es lo único que init espera para acreditarlo. Hacerlo aquí
+/// arregla dos cosas: `estado` deja de enseñar un «probando» eterno en un
+/// sistema que evidentemente arrancó, y sobre todo se acaba la carrera por la
+/// secuencia —init y este programa componiendo cada uno su registro a partir de
+/// la misma lectura y escribiendo los dos en la misma ranura, con lo que la
+/// vuelta atrás que acabábamos de prometer podía perderse—.
+fn saldar_acreditacion() {
+    let _ = sys::txn_confirm();
 }
 
 fn print_usage() {

@@ -403,6 +403,14 @@ halt
         if !salida.contains("copia verificada") {
             return Err(format!("revertir no verificó el punto antes: {salida:?}"));
         }
+        // La pareja nueva se acredita **antes** de registrar la vuelta atrás.
+        // Si no, init y el cliente componen cada uno su registro desde la misma
+        // lectura, escriben en la misma ranura y uno de los dos se pierde: la
+        // vuelta atrás que acabamos de prometer, con suerte.
+        let serie = std::fs::read_to_string(&s2).unwrap_or_default();
+        if !serie.contains("txn: pareja confirmada") {
+            return Err("la pareja no se acreditó antes de pedir la vuelta atrás".into());
+        }
     }
 
     // 3) Y al arrancar, la versión anterior entera.
@@ -437,6 +445,12 @@ halt
         if !salida.contains(&format!("rootfs: {ver_base}")) {
             return Err(format!("la versión no volvió a {ver_base}: {salida:?}"));
         }
+        // La restaurada también se acredita: sin esto la vuelta atrás se queda
+        // «a prueba» para siempre y el arranque siguiente la da por fallida.
+        let serie = std::fs::read_to_string(&s3).unwrap_or_default();
+        if !serie.contains("txn: versión restaurada acreditada") {
+            return Err("la versión restaurada no llegó a acreditarse".into());
+        }
     }
 
     // U5e: la versión restaurada queda **a prueba** hasta que ese arranque se
@@ -453,6 +467,11 @@ halt
     }
     if serie4.contains("txn: restaurada la versión") {
         return Err("volvió a restaurar: la vuelta atrás no quedó cerrada".into());
+    }
+    // Y el diario tiene que haber quedado cerrado con la ESP: si uno dice
+    // «revertido» y el otro sigue en «probando», el arranque no sabe cuál manda.
+    if serie4.contains("PAREJA INCOHERENTE") {
+        return Err("el rescate dejó el diario y la ESP diciendo cosas distintas".into());
     }
     Ok(())
 }

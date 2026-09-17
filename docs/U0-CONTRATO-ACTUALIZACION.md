@@ -184,6 +184,15 @@ Lo que restaura es el **punto retenido**, no la operación en curso. Un registro
 que pida rescate sin decir a qué punto volver es `diag. sin punto`: no hay nada
 que restaurar y adivinarlo sería peor.
 
+Mandar sobre el diario no es ignorarlo: al terminar, el rescate **cierra el
+diario de la operación que acaba de deshacer** —`revertido` si llegó a
+aplicarse, `descartado` si no—, y lo hace **antes** de publicar la decisión. Si
+no, la ESP acabaría diciendo `revertido` con un diario en `probando`, que es
+justo una de las combinaciones que la tabla llama imposible: ningún arranque
+podría saber cuál de los dos manda. Cerrarlo antes de publicar también fija el
+corte: mientras el registro siga diciendo `rescatar`, el arranque siguiente
+repite el rescate entero, que es idempotente.
+
 Acciones: `normal` arranca hacia init sin tocar nada; `descartar` recoge el área
 de preparación; `retroceder` devuelve el diario a `preparado` porque el armado
 nunca llegó a publicarse; `aplicar` continúa de forma idempotente por el

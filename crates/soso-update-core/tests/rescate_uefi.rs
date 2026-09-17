@@ -110,3 +110,72 @@ fn el_registro_pedido_se_relee_igual() {
     let leido = BootRecord::parse(&bytes).expect("releer");
     assert_eq!(leido, registro);
 }
+
+// --- cierre del diario tras el rescate ------------------------------------
+
+use soso_update_core::txn::journal::Journal;
+use soso_update_core::txn::rescate::cerrar_diario;
+use soso_update_core::txn::TxnState;
+
+fn diario(estado: TxnState) -> Journal {
+    let mut j = Journal::nuevo(id(1), "0.3.0", "0.2.0");
+    j.estado = estado;
+    j
+}
+
+#[test]
+fn el_rescate_cierra_lo_que_llego_a_aplicarse() {
+    for estado in [
+        TxnState::Armado,
+        TxnState::Aplicando,
+        TxnState::Probando,
+        TxnState::Confirmado,
+        TxnState::Revirtiendo,
+    ] {
+        let mut j = diario(estado);
+        assert!(cerrar_diario(&mut j), "{estado:?} tenía que cerrarse");
+        assert_eq!(
+            j.estado,
+            TxnState::Revertido,
+            "{estado:?}: el punto puso de vuelta los ficheros de antes"
+        );
+    }
+}
+
+#[test]
+fn lo_que_nunca_se_aplico_se_descarta() {
+    for estado in [TxnState::Descargando, TxnState::Preparado] {
+        let mut j = diario(estado);
+        assert!(cerrar_diario(&mut j));
+        assert_eq!(
+            j.estado,
+            TxnState::Descartado,
+            "{estado:?}: su preparación ya no sirve para el sistema restaurado"
+        );
+    }
+}
+
+#[test]
+fn repetir_el_rescate_no_mueve_un_diario_ya_cerrado() {
+    for estado in [TxnState::Revertido, TxnState::Descartado] {
+        let mut j = diario(estado);
+        let seq = j.seq;
+        assert!(!cerrar_diario(&mut j));
+        assert_eq!(j.estado, estado);
+        assert_eq!(j.seq, seq, "un rescate repetido no gasta secuencia");
+    }
+}
+
+#[test]
+fn tras_cerrarlo_la_pareja_ya_no_es_imposible() {
+    use soso_update_core::txn::reconcile::{reconcile, EstadoEsp, EstadoJournal, Recuperacion};
+    // La secuencia real: rescate, restauración, y el arranque siguiente ya
+    // acreditado. Antes de cerrar el diario esto era `ParejaImposible`.
+    let mut j = diario(TxnState::Probando);
+    cerrar_diario(&mut j);
+    let rec = BootRecord::nuevo(Decision::Revertido, id(1), "0.3.0", "0.2.0", 6).con_punto(id(1));
+    assert_eq!(
+        reconcile(&EstadoEsp::Registro(rec), &EstadoJournal::Diario(j)),
+        Recuperacion::Normal
+    );
+}
