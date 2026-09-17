@@ -221,6 +221,9 @@ pub fn init() {
 ///
 /// Inocuo si no hay GPU NVIDIA o si nunca se llegó a inicializar: en QEMU sin
 /// passthrough no imprime nada ni entra en la capa C.
+///
+/// En placa (sin hypervisor) no se toca el GSP: el fini ha dado panic en el
+/// GOP del ROG y aquí no hay vfio-pci que resetee la función al `hlt`.
 pub fn shutdown() {
     let Some(g) = GPU.get() else {
         return;
@@ -230,6 +233,10 @@ pub fn shutdown() {
         s.present && s.vendor == GPU_VENDOR_NVIDIA
     };
     if !is_nvidia {
+        return;
+    }
+    if !crate::qemu::bajo_hypervisor() {
+        crate::println!("gpu: GSP se deja (placa; no hay reset VFIO)");
         return;
     }
     if gsp_fini() {

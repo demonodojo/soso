@@ -170,6 +170,12 @@ pub struct FsSpaceInfo {
 pub const UPD_WHICH_MAILBOX: u64 = 0;
 pub const UPD_WHICH_KERNEL: u64 = 1;
 pub const UPD_WHICH_META: u64 = 2;
+/// Registro de arranque de la transacción (`SOSOTXN.BIN`, contrato U0/U5a).
+pub const UPD_WHICH_TXN: u64 = 3;
+/// Identidad live/instalado (`SOSOMODE.TXT`, U2). El cliente la lee para saber
+/// el GUID de **esta** ESP, que es lo que ata un punto de recuperación a su
+/// instalación.
+pub const UPD_WHICH_MODE: u64 = 4;
 pub const UPD_MAILBOX_SIZE: usize = 4096;
 pub const UPD_KERNEL_META_SIZE: usize = 512;
 pub const UPD_KERNEL_SLOT_SIZE: u64 = 64 * 1024 * 1024;

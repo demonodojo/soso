@@ -16,6 +16,8 @@ use libsoso::{println, sys};
 use soso_abi::{O_RDONLY, O_WRONLY, UPD_WHICH_KERNEL, UPD_WHICH_MAILBOX, UPD_WHICH_META};
 use soso_update_core::canal::{self, Conf, Origen};
 use soso_update_core::descarga::{self, Etapa};
+use soso_update_core::txn::journal::Contenido;
+use soso_update_core::txn::punto::{crear_punto, Almacen, Cambio, CrearError, Punto};
 use soso_update_core::txn::TxnId;
 use soso_update_core::compat::{CompatError, Equipo};
 use soso_update_core::hash::{hex_sha256, Hasher};
@@ -97,6 +99,27 @@ fn cmd_estado() -> u8 {
             "kernel: {}",
             core::str::from_utf8(&kbuf[..n as usize]).unwrap_or("?")
         );
+    }
+    // Vuelta atrás disponible (U5a/U5b): a qué versión se puede volver y si esa
+    // copia se ha comprobado releyéndola.
+    let puntos = puntos_guardados();
+    if puntos.is_empty() {
+        println!("vuelta atrás: ninguna guardada");
+    } else {
+        for p in &puntos {
+            let mut almacen = AlmacenSoso { libre: u64::MAX };
+            let estado = match verificar_punto(p, &mut almacen) {
+                Ok(()) => "verificada",
+                Err(_) => "INCOMPLETA",
+            };
+            println!(
+                "vuelta atrás: {} ({}) — {} ficheros, {}",
+                p.version,
+                if p.build.is_empty() { "?" } else { &p.build },
+                p.entradas.len(),
+                estado
+            );
+        }
     }
     let mut mbuf = [0u8; 4096];
     let mn = sys::upd_read(UPD_WHICH_MAILBOX, 0, &mut mbuf);
@@ -270,6 +293,23 @@ fn cmd_aplicar(args: &[String]) -> u8 {
                 println!("soso-update: {e}");
                 println!("  lo descargado se conserva: vuelve a lanzarlo para reanudar");
                 libsoso::logln!("actualiza: descarga interrumpida ({e}); etapa conservada");
+                return 1;
+            }
+        }
+    }
+
+    // Antes de tocar el sistema: la vuelta atrás. Si no se puede crear y
+    // verificar entera, no se actualiza (U5b).
+    if !cambian.is_empty() {
+        match preparar_punto(&man, &cambian) {
+            Ok(p) => println!(
+                "punto: vuelta atrás a {} verificada ({} ficheros)",
+                p.version,
+                p.entradas.len()
+            ),
+            Err(e) => {
+                println!("soso-update: {e}");
+                libsoso::logln!("actualiza: sin punto de recuperación ({e}); no aplico");
                 return 1;
             }
         }
@@ -896,5 +936,203 @@ fn comprobar_espacio(man: &Manifest, pendientes: &[FileEntry]) -> Result<(), &'s
             Err("el kernel de la release no cabe en el hueco de la ESP")
         }
         Err(_) => Err("los huecos de la ESP no tienen el tamaño esperado"),
+    }
+}
+
+// ------------------------------------------------- punto de recuperación
+
+/// Directorio del punto de una operación.
+fn dir_punto(id: TxnId) -> String {
+    format!("/var/lib/soso-update/{}", id.dir())
+}
+
+/// `Almacen` sobre el sistema real: lee del rootfs y guarda las copias dentro
+/// del directorio de la operación, donde el recuperador del kernel las busca.
+struct AlmacenSoso {
+    libre: u64,
+}
+
+impl Almacen for AlmacenSoso {
+    fn leer_sistema(&mut self, ruta: &str) -> Option<Vec<u8>> {
+        let mut st = soso_abi::Stat::default();
+        if sys::stat(&format!("/{ruta}"), &mut st) < 0 {
+            return None;
+        }
+        read_file_bytes(&format!("/{ruta}"), st.size as usize + 1)
+    }
+
+    fn guardar_copia(&mut self, punto: TxnId, ruta: &str, datos: &[u8]) -> Result<(), ()> {
+        let destino = format!("{}/respaldo/{ruta}", dir_punto(punto));
+        if let Some(padre) = parent_dir(&destino) {
+            crear_arbol(padre);
+        }
+        escribir(&destino, datos).map_err(|_| ())
+    }
+
+    fn releer_copia(&mut self, punto: TxnId, ruta: &str) -> Option<Vec<u8>> {
+        let destino = format!("{}/respaldo/{ruta}", dir_punto(punto));
+        let mut st = soso_abi::Stat::default();
+        if sys::stat(&destino, &mut st) < 0 {
+            return None;
+        }
+        read_file_bytes(&destino, st.size as usize + 1)
+    }
+
+    fn guardar_punto(&mut self, p: &Punto) -> Result<(), ()> {
+        let destino = format!("{}/punto.rec", dir_punto(p.id));
+        if let Some(padre) = parent_dir(&destino) {
+            crear_arbol(padre);
+        }
+        escribir(&destino, &p.format()).map_err(|_| ())
+    }
+
+    fn borrar_punto(&mut self, punto: TxnId) -> Result<(), ()> {
+        let _ = sys::unlink(&format!("{}/punto.rec", dir_punto(punto)));
+        Ok(())
+    }
+
+    fn espacio_libre(&mut self) -> u64 {
+        self.libre
+    }
+}
+
+/// Comprueba un punto releyendo sus copias, que es la única forma de saber si
+/// sirve. `Almacen` guarda; `Sistema` es lo que lee el verificador.
+fn verificar_punto(p: &Punto, a: &mut AlmacenSoso) -> Result<(), soso_update_core::txn::aplicador::Fallo> {
+    struct Lector<'a> {
+        a: &'a mut AlmacenSoso,
+        id: TxnId,
+    }
+    impl soso_update_core::txn::aplicador::Sistema for Lector<'_> {
+        fn leer(
+            &mut self,
+            de: soso_update_core::txn::aplicador::De,
+            ruta: &str,
+        ) -> Option<Vec<u8>> {
+            match de {
+                soso_update_core::txn::aplicador::De::Respaldo => {
+                    self.a.releer_copia(self.id, ruta)
+                }
+                soso_update_core::txn::aplicador::De::Preparado => None,
+            }
+        }
+        fn escribir(&mut self, _r: &str, _d: &[u8]) -> Result<(), ()> {
+            Ok(())
+        }
+        fn borrar(&mut self, _r: &str) -> Result<(), ()> {
+            Ok(())
+        }
+        fn guardar_diario(
+            &mut self,
+            _j: &soso_update_core::txn::journal::Journal,
+        ) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+    p.verificar(&mut Lector { a, id: p.id })
+}
+
+/// Puntos de recuperación guardados, del más reciente al más antiguo según el
+/// orden del directorio. Es lo que permite a `estado` decir **a qué versión se
+/// puede volver** y si esa vuelta está verificada.
+fn puntos_guardados() -> Vec<Punto> {
+    let mut out = Vec::new();
+    let fd = sys::open("/var/lib/soso-update", O_RDONLY);
+    if fd < 0 {
+        return out;
+    }
+    let mut ents = [soso_abi::Dirent::default(); 32];
+    // `getdents` devuelve **bytes**, no entradas: dividir por `DIRENT_SIZE`.
+    let n = sys::getdents(fd as u64, &mut ents);
+    let _ = sys::close(fd as u64);
+    if n <= 0 {
+        return out;
+    }
+    let cuantas = (n as usize / soso_abi::DIRENT_SIZE).min(ents.len());
+    for e in &ents[..cuantas] {
+        let nombre = core::str::from_utf8(e.name_bytes()).unwrap_or("");
+        if nombre == "." || nombre == ".." || nombre.is_empty() {
+            continue;
+        }
+        let ruta = alloc::format!("/var/lib/soso-update/{nombre}/punto.rec");
+        if let Some(datos) = read_file_bytes(&ruta, 256 * 1024) {
+            if let Ok(p) = Punto::parse(&datos) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// GUID de **esta** ESP, leído de `SOSOMODE.TXT`. Es lo que ata un punto a su
+/// instalación: uno de otra máquina no se aplica aquí.
+fn guid_esp() -> String {
+    let mut buf = alloc::vec![0u8; soso_update_core::UPD_MODE_SIZE];
+    let n = sys::upd_read(soso_abi::UPD_WHICH_MODE, 0, &mut buf);
+    if n <= 0 {
+        return String::new();
+    }
+    match soso_update_core::resolver_identidad(Some(&buf[..n as usize]), "") {
+        soso_update_core::Identidad::Explicita(r) | soso_update_core::Identidad::Ajena(r) => {
+            r.esp_guid
+        }
+        _ => String::new(),
+    }
+}
+
+/// Crea y verifica el punto de recuperación de la versión **actual** antes de
+/// tocar nada.
+///
+/// Es la regla de U5b: si el punto no se puede crear entero y releer, la
+/// actualización **no sigue**. Prometer una vuelta atrás que nadie ha
+/// comprobado es peor que no ofrecerla.
+fn preparar_punto(man: &Manifest, cambian: &[FileEntry]) -> Result<Punto, &'static str> {
+    let actual = read_release();
+    let version = actual
+        .as_ref()
+        .map(|r| r.version.clone())
+        .unwrap_or_else(|| "desconocida".into());
+    let build = actual.as_ref().map(|r| r.build.clone()).unwrap_or_default();
+    let kernel_hash = actual.map(|r| r.kernel).unwrap_or_default();
+
+    let mut fs = soso_abi::FsInfo::default();
+    let libre = if sys::fsinfo(&mut fs) >= 0 && fs.block_size > 0 {
+        fs.free_blocks.saturating_mul(fs.block_size)
+    } else {
+        u64::MAX
+    };
+
+    let cambios: Vec<Cambio> = cambian.iter().map(|f| Cambio::Trae(f.path.clone())).collect();
+    let id = TxnId::from_manifest(man.format().as_bytes());
+    let mut almacen = AlmacenSoso { libre };
+    match crear_punto(
+        id,
+        &version,
+        &build,
+        &guid_esp(),
+        // El kernel activo: su tamaño no lo sabe el cliente —está en la ESP—,
+        // así que se anota el hash que declara `/etc/soso-release`.
+        Contenido { size: 0, hash: kernel_hash },
+        &cambios,
+        &mut almacen,
+    ) {
+        Ok(p) => Ok(p),
+        Err(CrearError::SinEspacio { necesita, libre }) => {
+            println!(
+                "punto: hacen falta {} para poder deshacer y hay {}",
+                humano(necesita),
+                humano(libre)
+            );
+            Err("sin espacio para guardar la vuelta atrás")
+        }
+        Err(CrearError::Copia(r)) => {
+            println!("punto: no pude copiar {r}");
+            Err("no pude guardar la vuelta atrás")
+        }
+        Err(CrearError::Incompleto(r)) => {
+            println!("punto: {r} no se relee igual que se escribió");
+            Err("la vuelta atrás no se pudo verificar")
+        }
+        Err(CrearError::Registro) => Err("no pude registrar la vuelta atrás"),
     }
 }

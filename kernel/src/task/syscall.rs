@@ -196,12 +196,15 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
             State::Sleeping(crate::arch::pit::uptime_ms() + a1),
         ),
         abi::SYS_HALT => {
+            // Primero el rastro: si el GSP o el USB revienta después, el
+            // pendrive ya lleva `halt: apagando`. En el ROG el fini iba
+            // delante y el panic no llegó al SOSOLOG.
+            crate::println!("halt: apagando soso");
+            #[cfg(feature = "drv-live-disk")]
+            let _ = crate::drivers::fatlog::flush();
+            crate::drivers::logfs::drenar_todo();
             #[cfg(feature = "drv-gpu-nvidia")]
             crate::drivers::gpu::shutdown();
-            crate::println!("halt: apagando soso");
-            // Apagado limpio: drenar lo pendiente antes de irse. El `println!`
-            // de arriba entra en el ring primero, así que queda registrado.
-            crate::drivers::logfs::drenar_todo();
             crate::qemu::exit(crate::qemu::ExitCode::Success);
         }
         abi::SYS_MMAP => sys_mmap(a1, a2, a3, a4),

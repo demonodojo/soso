@@ -7,6 +7,8 @@ use soso_abi as abi;
 static MAILBOX: Once<Option<Slot>> = Once::new();
 static KERNEL: Once<Option<Slot>> = Once::new();
 static META: Once<Option<Slot>> = Once::new();
+static TXN: Once<Option<Slot>> = Once::new();
+static MODE: Once<Option<Slot>> = Once::new();
 
 pub fn init() {
     if !crate::drivers::live_disk::esp_available() {
@@ -35,6 +37,16 @@ pub fn init() {
             "updslot: SOSOKRN.BIN no encontrado; reflashea el live para habilitar actualizaciones de kernel"
         ),
     }
+    // Huecos de la transacción (U5a) y de la identidad (U2). Que falten no es
+    // fatal: sólo desactiva esa vía, como el resto.
+    if let Some(slot) = espfat::locate(b"SOSOTXN ", b"BIN", soso_update_core::UPD_BOOTREC_SIZE) {
+        TXN.call_once(|| Some(slot));
+    } else {
+        crate::println!("updslot: SOSOTXN.BIN no encontrado; sin registro de transacción");
+    }
+    if let Some(slot) = espfat::locate(b"SOSOMODE", b"TXT", soso_update_core::UPD_MODE_SIZE) {
+        MODE.call_once(|| Some(slot));
+    }
     match espfat::locate(b"SOSOKRN ", b"MET", abi::UPD_KERNEL_META_SIZE) {
         Some(slot) => {
             META.call_once(|| Some(slot));
@@ -56,6 +68,14 @@ fn slot_for(which: u64) -> Result<Slot, i64> {
             .get()
             .and_then(|s| *s)
             .ok_or(-abi::ENOTSUP),
+        abi::UPD_WHICH_TXN => TXN
+            .get()
+            .and_then(|s| *s)
+            .ok_or(-abi::ENOTSUP),
+        abi::UPD_WHICH_MODE => MODE
+            .get()
+            .and_then(|s| *s)
+            .ok_or(-abi::ENOTSUP),
         abi::UPD_WHICH_META => META
             .get()
             .and_then(|s| *s)
@@ -69,6 +89,8 @@ fn max_size(which: u64) -> Result<usize, i64> {
         abi::UPD_WHICH_MAILBOX => abi::UPD_MAILBOX_SIZE,
         abi::UPD_WHICH_KERNEL => abi::UPD_KERNEL_SLOT_SIZE as usize,
         abi::UPD_WHICH_META => abi::UPD_KERNEL_META_SIZE,
+        abi::UPD_WHICH_TXN => soso_update_core::UPD_BOOTREC_SIZE,
+        abi::UPD_WHICH_MODE => soso_update_core::UPD_MODE_SIZE,
         _ => return Err(-abi::EINVAL),
     })
 }
@@ -77,6 +99,8 @@ fn max_size(which: u64) -> Result<usize, i64> {
 fn nombre(which: u64) -> &'static str {
     match which {
         abi::UPD_WHICH_MAILBOX => "SOSOUPD.TXT",
+        abi::UPD_WHICH_TXN => "SOSOTXN.BIN",
+        abi::UPD_WHICH_MODE => "SOSOMODE.TXT",
         abi::UPD_WHICH_KERNEL => "SOSOKRN.BIN",
         abi::UPD_WHICH_META => "SOSOKRN.MET",
         _ => "?",

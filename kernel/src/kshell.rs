@@ -391,6 +391,8 @@ fn exec(line: &str) {
         }
         "halt" => {
             println!("apagando");
+            #[cfg(feature = "drv-live-disk")]
+            let _ = crate::drivers::fatlog::flush();
             crate::drivers::logfs::drenar_todo();
             qemu::exit(qemu::ExitCode::Success);
         }

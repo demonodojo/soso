@@ -210,6 +210,13 @@ fn fase_aplicar(
     if !salida.contains("etc/actualiza-marca.txt") {
         return Err(format!("no actualizó el fichero cambiado: {salida:?}"));
     }
+    // U5b: antes de tocar nada tiene que haber una vuelta atrás **verificada**.
+    // Sin punto no se actualiza, así que esto no es informativo: es la puerta.
+    if !salida.contains("verificada") || !salida.contains("punto: vuelta atrás") {
+        return Err(format!(
+            "aplicó sin dejar un punto de recuperación verificado: {salida:?}"
+        ));
+    }
     // La gracia de la actualización parcial: se piden unos pocos ficheros, no
     // los 60 y pico del pack.
     if let Some(l) = salida.lines().find(|l| l.trim_start().starts_with("rootfs:"))
@@ -282,6 +289,15 @@ fn fase_comprobar_version(
             "kernel.log debería tener una cabecera por arranque, encontré {cabeceras}: {salida:?}"
         ));
     }
+    // U5a/U5b: tras reiniciar, `estado` dice a qué versión se puede volver y
+    // que esa copia está comprobada.
+    if !salida.contains("vuelta atrás: 0.2.2") {
+        return Err(format!("estado no ofrece la vuelta atrás guardada: {salida:?}"));
+    }
+    if salida.contains("INCOMPLETA") {
+        return Err(format!("el punto guardado no se relee entero: {salida:?}"));
+    }
+
     // U4: la etapa sobrevivió al reinicio y no se vuelve a descargar nada.
     if !salida.contains("ya descargados, reanudando") {
         return Err(format!(

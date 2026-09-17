@@ -275,6 +275,51 @@ impl Report {
         unreachable!()
     }
 
+    /// Como `paso_con_reintento`, pero relanza el guest si SSH cae (p. ej. tras
+    /// un pánico intermitente a mitad de A7).
+    fn paso_con_reintento_guest<F: FnMut() -> Result<(), String>>(
+        &self,
+        qemu: &mut Child,
+        slot: &QemuSlot,
+        shard: &str,
+        nombre: &str,
+        mut f: F,
+    ) -> Result<(), ()> {
+        const MAX: u32 = 3;
+        for intento in 1..=MAX {
+            match f() {
+                Ok(()) => {
+                    self.marca(shard, nombre, true);
+                    return Ok(());
+                }
+                Err(e) if intento < MAX => {
+                    let reinicio = guest_requiere_reinicio(&e);
+                    println!(
+                        "      [{shard}] (reintento {}/{} de «{nombre}»{}: {e})",
+                        intento,
+                        MAX - 1,
+                        if reinicio { " tras reinicio" } else { " tras 5 s" },
+                    );
+                    if reinicio {
+                        if let Err(re) = reiniciar_guest_sys(qemu, slot) {
+                            self.marca(shard, &format!("{nombre}: {re}"), false);
+                            *self.fallos.lock().unwrap() += 1;
+                            return Err(());
+                        }
+                    } else {
+                        std::thread::sleep(Duration::from_secs(5));
+                    }
+                }
+                Err(e) => {
+                    self.marca(shard, &format!("{nombre}: {e}"), false);
+                    *self.fallos.lock().unwrap() += 1;
+                    return Err(());
+                }
+            }
+        }
+        unreachable!()
+    }
+
     /// Paso SSH del shard `sys` con reinicio del guest si la sesión queda colgada
     /// (p. ej. `soso-voz` sigue corriendo tras un timeout del cliente).
     fn paso_ssh_sys<F: FnMut() -> Result<(), String>>(
@@ -589,7 +634,7 @@ fn run_shard(shard: ShardId, slot: &QemuSlot, key: &Path, report: &Report, filte
 
 fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilter) {
     let sid = slot.id;
-    let qemu = match lanzar_qemu(slot) {
+    let mut qemu = match lanzar_qemu(slot) {
         Ok(c) => c,
         Err(e) => {
             report.marca(sid, &format!("lanzar QEMU: {e}"), false);
@@ -597,7 +642,6 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report, filter: &Te
             return;
         }
     };
-    let _vivo = QemuVivo(qemu);
     let arrancado = report
         .paso(sid, "arranque hasta la shell", || {
             esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(180))?;
@@ -654,7 +698,9 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report, filter: &Te
             sid,
             "soso-llm: 20 ciclos carga/generación/cambio (A7)",
             || {
-                let _ = report.paso_con_reintento(
+                let _ = report.paso_con_reintento_guest(
+                    &mut qemu,
+                    slot,
                     sid,
                     "soso-llm: 20 ciclos carga/generación/cambio (A7)",
                     || ssh_llm_ciclos(key, port),
@@ -662,6 +708,8 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report, filter: &Te
             },
         );
     }
+    let _ = qemu.kill();
+    let _ = qemu.wait();
 }
 
 /// Un comando trivial que debe contestar rápido: detecta la máquina ahogada
@@ -1438,7 +1486,10 @@ fn ssh_llm(key: &Path, ssh_port: u16) -> Result<(), String> {
 const LLM_CICLOS_A7: usize = 20;
 
 fn ssh_llm_ciclos(key: &Path, ssh_port: u16) -> Result<(), String> {
-    let mut guion = String::from("ask :max 1\n");
+    // Tras «ask: mmap huge» askd sigue con tiny-huge residente; mezclar ask +
+    // `soso-llm run tiny` en la misma sesión con ese modelo colgado provocaba
+    // cortes de SSH a mitad del guion (3 «generado» y guest muerto en el reintento).
+    let mut guion = String::from("ask :modelo tiny\nask :max 1\n");
     for i in 0..LLM_CICLOS_A7 {
         if i == LLM_CICLOS_A7 / 2 {
             guion.push_str("ask :modelo tiny\n");
