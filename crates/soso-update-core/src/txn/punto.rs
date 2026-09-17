@@ -234,3 +234,188 @@ pub fn reserva_efectiva(punto: &Punto) -> u64 {
 pub fn recogible(punto: &Punto, referencias: &[TxnId]) -> bool {
     !referencias.iter().any(|r| *r == punto.id)
 }
+
+// ─────────────────────────── Creación y conservación (U5b) ───────────────
+
+/// Lo que el creador de puntos necesita del sistema. El kernel y el cliente lo
+/// implementan; el banco host lo simula para poder quedarse sin espacio o
+/// dejar una copia a medias sin tener que provocarlo de verdad.
+pub trait Almacen {
+    /// Contenido actual de un fichero del sistema, o `None` si no existe.
+    fn leer_sistema(&mut self, ruta: &str) -> Option<Vec<u8>>;
+    /// Guarda una copia dentro del punto.
+    fn guardar_copia(&mut self, punto: TxnId, ruta: &str, datos: &[u8]) -> Result<(), ()>;
+    /// Relee una copia ya guardada. Tiene que ir **al medio**, no a una caché:
+    /// la verificación existe para detectar lo que no llegó a disco.
+    fn releer_copia(&mut self, punto: TxnId, ruta: &str) -> Option<Vec<u8>>;
+    fn guardar_punto(&mut self, p: &Punto) -> Result<(), ()>;
+    fn borrar_punto(&mut self, punto: TxnId) -> Result<(), ()>;
+    fn espacio_libre(&mut self) -> u64;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CrearError {
+    /// No cabe el punto **y** su restauración: no se arma.
+    SinEspacio { necesita: u64, libre: u64 },
+    /// No se pudo copiar un fichero al punto.
+    Copia(String),
+    /// La copia no se pudo releer, o no coincide. Un punto a medias es peor que
+    /// no tenerlo: se descubre el día que hace falta.
+    Incompleto(String),
+    /// No se pudo dejar durable el registro del punto.
+    Registro,
+}
+
+/// Qué le va a pasar a una ruta con la versión nueva.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cambio {
+    /// La versión nueva la trae (exista o no hoy).
+    Trae(String),
+    /// La versión nueva ya no la incluye: hay que poder reponerla al volver.
+    Retira(String),
+}
+
+/// Crea el punto de la versión **actual** antes de armar la siguiente.
+///
+/// El orden importa: primero se comprueba que cabe, después se copia, y sólo
+/// entonces se relee todo y se hace durable el registro. Si algo falla, se
+/// devuelve error y **no se arma**: publicar el registro de arranque sin una
+/// vuelta atrás verificada es justo lo que este contrato evita.
+pub fn crear_punto<A: Almacen>(
+    id: TxnId,
+    version: &str,
+    build: &str,
+    guid_destino: &str,
+    kernel: Contenido,
+    cambios: &[Cambio],
+    a: &mut A,
+) -> Result<Punto, CrearError> {
+    let mut entradas = Vec::new();
+    let mut copias: Vec<(String, Vec<u8>)> = Vec::new();
+
+    for c in cambios {
+        let (ruta, retira) = match c {
+            Cambio::Trae(r) => (r, false),
+            Cambio::Retira(r) => (r, true),
+        };
+        match a.leer_sistema(ruta) {
+            Some(datos) => {
+                entradas.push(Entrada {
+                    // Al volver: lo que la nueva reemplaza se restaura, y lo
+                    // que retira se repone. Las dos cosas necesitan copia.
+                    accion: if retira { Accion::Borrar } else { Accion::Reemplazar },
+                    progreso: crate::txn::journal::Progreso::Respaldado,
+                    path: ruta.clone(),
+                    nuevo: None,
+                    respaldo: Some(Contenido {
+                        size: datos.len() as u64,
+                        hash: crate::hash::hex_sha256(&datos),
+                    }),
+                });
+                copias.push((ruta.clone(), datos));
+            }
+            None => {
+                // Hoy no existe: lo añade la versión nueva, así que volver
+                // atrás es quitarlo. No hay nada que copiar.
+                entradas.push(Entrada {
+                    accion: Accion::Crear,
+                    progreso: crate::txn::journal::Progreso::Respaldado,
+                    path: ruta.clone(),
+                    nuevo: None,
+                    respaldo: None,
+                });
+            }
+        }
+    }
+
+    let punto = Punto::nuevo(id, version, build, guid_destino, kernel, entradas);
+
+    // Cabe el punto **y** lo que costará restaurarlo. Comprobarlo después de
+    // copiar sería tarde: ya habríamos gastado el espacio.
+    let necesita = copias.iter().map(|(_, d)| d.len() as u64).sum::<u64>()
+        + reserva_efectiva(&punto);
+    let libre = a.espacio_libre();
+    if necesita > libre {
+        return Err(CrearError::SinEspacio { necesita, libre });
+    }
+
+    for (ruta, datos) in &copias {
+        a.guardar_copia(id, ruta, datos)
+            .map_err(|_| CrearError::Copia(ruta.clone()))?;
+    }
+
+    // Releer **todo** antes de darlo por bueno.
+    for e in &punto.entradas {
+        let Some(resp) = e.respaldo.as_ref() else {
+            continue;
+        };
+        let leido = a
+            .releer_copia(id, &e.path)
+            .ok_or_else(|| CrearError::Incompleto(e.path.clone()))?;
+        if leido.len() as u64 != resp.size || crate::hash::hex_sha256(&leido) != resp.hash {
+            return Err(CrearError::Incompleto(e.path.clone()));
+        }
+    }
+
+    a.guardar_punto(&punto).map_err(|_| CrearError::Registro)?;
+    Ok(punto)
+}
+
+/// Qué puntos hay que conservar mientras haya una operación en vuelo.
+///
+/// Durante A→B→C conviven dos a propósito: el de A —que es la vuelta atrás de
+/// la versión activa B— y el de B, que se crea al armar C. Recoger el de A al
+/// preparar C dejaría la máquina sin camino de vuelta si C falla y B también.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Retencion {
+    /// Punto con el que la versión **activa** puede volver atrás.
+    pub activo: Option<TxnId>,
+    /// Punto creado al armar la operación pendiente, aún sin confirmar.
+    pub armado: Option<TxnId>,
+}
+
+impl Retencion {
+    pub fn referencias(&self) -> Vec<TxnId> {
+        let mut v = Vec::new();
+        if let Some(a) = self.activo {
+            v.push(a);
+        }
+        if let Some(b) = self.armado {
+            if !v.contains(&b) {
+                v.push(b);
+            }
+        }
+        v
+    }
+
+    /// La operación se confirmó: el punto que se armó pasa a ser la vuelta
+    /// atrás de la versión nueva y el anterior queda libre. Devuelve lo que se
+    /// puede recoger.
+    ///
+    /// **Sólo si el punto nuevo está verificado.** Si no, se conservan los dos:
+    /// quedarse sin ninguna copia recuperable por recoger una que no sabíamos
+    /// si servía es precisamente lo que no puede pasar.
+    pub fn al_confirmar(&mut self, armado_verificado: bool) -> Vec<TxnId> {
+        let Some(nuevo) = self.armado.take() else {
+            return Vec::new();
+        };
+        if !armado_verificado {
+            self.armado = Some(nuevo);
+            return Vec::new();
+        }
+        let anterior = self.activo.replace(nuevo);
+        match anterior {
+            Some(a) if a != nuevo => alloc::vec![a],
+            _ => Vec::new(),
+        }
+    }
+
+    /// La operación se deshizo: el punto que se armó para ella sobra, y el de
+    /// la versión activa sigue donde estaba.
+    pub fn al_revertir(&mut self) -> Vec<TxnId> {
+        match self.armado.take() {
+            Some(b) if Some(b) != self.activo => alloc::vec![b],
+            _ => Vec::new(),
+        }
+    }
+}

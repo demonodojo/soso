@@ -29,6 +29,13 @@ Plan U0–U8: [actualizaciones de instalaciones y logs en sosofs](../../../docs/
 Incluye recuperación conjunta kernel/rootfs, transición legacy y eliminación
 de `SOSOLOG.TXT` en la ESP instalada; no tratarlo como comportamiento implementado.
 
+**U5b cerrada (2026-09-17):** `punto::crear_punto` comprueba espacio **antes**
+de copiar, copia y **relee** todo; sin espacio, con una copia que falla o que no
+se relee igual, devuelve error y **no se arma**. `Retencion` conserva A mientras
+C no confirme (dos puntos a la vez a propósito) y **no suelta el viejo si el
+nuevo no está verificado**. Falta implementación real de `Almacen`: quien cree
+puntos de verdad será el cliente al armar.
+
 **U5a cerrada (2026-09-17):** registro de arranque en **formato 2** — punto
 retenido + decisión `rescatar` — que **sigue leyendo el formato 1** (sin punto:
 «no consta», no «no hay»; `BootRecord::conoce_puntos()`) y rechaza uno más nuevo

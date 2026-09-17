@@ -1,6 +1,6 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
-Fecha: **2026-09-17**. Estado: **U0–U4 y U5a cerradas; parte de U5c hecha; U5b/U5d/U5e y U6–U8 pendientes**.
+Fecha: **2026-09-17**. Estado: **U0–U4, U5a y U5b cerradas; parte de U5c hecha; U5d/U5e y U6–U8 pendientes**.
 El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md);
 todavía no está conectado al arranque, al cliente ni al instalador.
 Base de la revisión: `92531cd2d` y árbol de trabajo con cambios locales, incluidos
@@ -320,12 +320,12 @@ Desglose de U5 para ejecutar la ampliación sin alterar los cierres históricos:
 | Subentrega | Depende de | Entregable y aceptación |
 |---|---|---|
 | U5a ✅ | U0 | **Cerrada 2026-09-17.** Registro de arranque en **formato 2** (punto retenido + decisión `rescatar`) que sigue leyendo el formato 1 y rechaza uno más nuevo; `txn/punto.rs` con verificación releyendo, GUID del destino, retención y `reserva_efectiva`; fila `rescatar` en la tabla de cortes. 11 pruebas host nuevas. |
-| U5b | U5a, U4 | Creador/verificador de puntos y conservación durante actualizaciones sucesivas. Cualquier backup incompleto o falta de espacio impide armar; preparar C no destruye la vuelta de B a A. |
+| U5b ✅ | U5a, U4 | **Cerrada 2026-09-17.** `crear_punto` comprueba espacio **antes** de copiar, copia y **relee** todo; cualquier fallo o falta de espacio devuelve error y no se arma. `Retencion` conserva A mientras C no confirme y **no suelta el punto viejo si el nuevo no está verificado**. 12 pruebas host. |
 | U5c | U5b | Aplicador y recuperador compartidos, reversión idempotente y arranque de la pareja antigua bajo su kernel. Cortes en todos los pasos y backup corrupto no producen un arranque mixto. |
 | U5d | U5c | CLI manual y entrada UEFI independiente del sistema actualizado. Recuperar sin shell ni red; cancelación antes de escribir; diagnóstico sin bucles si falla también la versión anterior. |
 | U5e | U5d | Confirmación de la pareja, comprobación del arranque restaurado, bloqueo de la candidata fallida y limpieza de puntos no referenciados. Reversión después de varios boots confirmados y datos nuevos conservados. |
 
-**U5a cerrada** el 2026-09-17; U5b, U5d y U5e pendientes, y de U5c hay hecha y
+**U5a y U5b cerradas** el 2026-09-17; U5d y U5e pendientes, y de U5c hay hecha y
 probada una parte —aplicador idempotente con banco de cortes y recuperador
 temprano en el kernel, hoy inerte—; ver sección 6. La ampliación exige nueva
 evidencia; las pruebas históricas de U0 no certifican estas garantías.
@@ -675,6 +675,32 @@ el manual debe seguir describiendo el comportamiento actual.
 - **Limitación:** es contrato y lógica; **nadie crea todavía un punto**. Eso es
   U5b, que además debe conservar A al preparar C. La entrada UEFI de rescate que
   escribiría `rescatar` es U5d.
+
+### U5b — cerrada el 2026-09-17 (creación y conservación de puntos)
+
+- **Crear un punto es una operación con orden.** `crear_punto` comprueba que
+  cabe el punto **y su restauración** *antes* de copiar nada —comprobarlo
+  después sería tarde: el espacio ya estaría gastado—, copia, y **relee todo**
+  para verificarlo. Cualquier fallo devuelve error y **no se arma**: publicar
+  el registro de arranque prometiendo una vuelta atrás que no se ha comprobado
+  es justo lo que este contrato evita.
+- Clasifica sola lo que le pasa a cada ruta: lo que la versión nueva
+  **reemplaza** y lo que **retira** llevan copia; lo que **añade** no tiene nada
+  que copiar y se anota para quitarlo al volver.
+- **Conservación A→B→C** (`Retencion`): mientras C está armada y sin confirmar
+  se conservan **dos** puntos a propósito, el de A y el de B. Al confirmar C, el
+  de A se suelta… **sólo si el de B está verificado**. Si no, se conservan los
+  dos: quedarse sin ninguna copia recuperable por soltar una que no sabíamos si
+  servía es precisamente lo que no puede pasar. Si C falla y se revierte, sobra
+  el de B y el de A sigue donde estaba.
+- **Evidencia:** 12 pruebas host (`tests/punto_crear.rs`) con las averías que
+  importan simuladas —sin espacio, copia que falla, copia que **no se relee
+  igual**, registro que no queda durable—, 153 en el crate, `cargo xtask check`
+  en verde y el juego de features del kernel compilando.
+- **Limitación:** `Almacen` no tiene todavía implementación real; quien cree
+  puntos de verdad será el cliente al armar (lo que falta de U5c). La reserva
+  usa `reserva_efectiva`, pero nadie impide aún que **otros escritores** se
+  coman esa reserva mientras existe la operación: eso sigue pendiente.
 
 ### U5c — parcial el 2026-09-17 (aplicador y recuperador)
 
