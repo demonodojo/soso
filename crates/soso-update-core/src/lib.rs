@@ -154,6 +154,26 @@ const PACK_SKIP_SUFIJOS: &[(&str, Excluido)] = &[
     (".key", Excluido::ConfigLocal),
 ];
 
+/// Raíces que administra una release: lo que una actualización puede
+/// reemplazar o retirar. Todo lo demás —`/var`, `/tmp`, `/models`, lo que el
+/// usuario cree por su cuenta— es suyo y no se toca.
+///
+/// La barra final no es cosmética: sin ella, `/binario` contaría como parte de
+/// `/bin`.
+pub const RAICES_ADMINISTRADAS: &[&str] = &["bin/", "lib/", "etc/"];
+
+/// ¿Esta ruta la administra la actualización? Es la definición de qué protege
+/// la exclusión de escritores mientras existe una operación: exactamente lo
+/// que el punto respalda y lo que el aplicador escribe, ni un fichero más.
+///
+/// Que la configuración local quede fuera es a propósito: `etc/wifi.conf` o
+/// `etc/llm.conf` no viajan en el pack, así que nadie va a pisarlos y no hay
+/// razón para impedir que los edites con una actualización armada.
+pub fn es_administrada(ruta: &str) -> bool {
+    let rel = ruta.trim_start_matches('/');
+    RAICES_ADMINISTRADAS.iter().any(|r| rel.starts_with(r)) && por_que_se_excluye(rel).is_none()
+}
+
 /// Motivo por el que `rel` (ruta relativa a la raíz, sin `/` inicial) se
 /// excluye del pack, o `None` si sí viaja.
 pub fn por_que_se_excluye(rel: &str) -> Option<Excluido> {

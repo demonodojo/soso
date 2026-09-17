@@ -319,19 +319,37 @@ fn parse_sosh_ready(text: &str) -> Option<i64> {
     rest.parse().ok()
 }
 
-fn sosh_ready_de(pid: i64) -> bool {
+/// Pid que dejó la marca, si hay marca legible.
+fn marca_sosh() -> Option<i64> {
     let fd = sys::open("/tmp/sosh-ready", abi::O_RDONLY);
     if fd < 0 {
-        return false;
+        return None;
     }
     let mut buf = [0u8; 64];
     let n = sys::read(fd as u64, &mut buf);
     let _ = sys::close(fd as u64);
     if n <= 0 {
-        return false;
+        return None;
     }
     let text = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
-    parse_sosh_ready(text) == Some(pid)
+    parse_sosh_ready(text)
+}
+
+/// ¿Hay una shell en marcha y lista? Vale la marca de **esta** instancia o la
+/// de otra sosh viva.
+///
+/// Lo segundo no es laxitud: una sesión SSH lanza su propia sosh, que reescribe
+/// la marca con su pid. Exigir la de la primera dejaba a init dando vueltas
+/// para siempre —«sosh viva sin marca válida»— y, con ella, la pareja de la
+/// actualización **sin acreditar**: el arranque siguiente la habría deshecho
+/// por haber entrado por SSH demasiado pronto. Que otra shell viva haya dejado
+/// su marca es, si acaso, mejor prueba de que el sistema arrancó.
+fn sosh_ready_de(pid: i64) -> bool {
+    match marca_sosh() {
+        Some(p) if p == pid => true,
+        Some(p) => sosh_sigue_viva(p),
+        None => false,
+    }
 }
 
 fn sosh_sigue_viva(pid: i64) -> bool {

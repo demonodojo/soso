@@ -33,6 +33,7 @@ pub mod logfs;
 pub mod otalog;
 #[cfg(feature = "drv-live-disk")]
 pub mod txnaplica;
+pub mod txnlock;
 #[cfg(feature = "drv-usb")]
 pub mod usb_storage;
 #[cfg(feature = "drv-hda")]

@@ -1,7 +1,6 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
-Fecha: **2026-09-17**. Estado: **U0–U4 cerradas y U5a–U5e cerradas; de U5 queda
-la exclusión de escritores; U6–U8 pendientes**.
+Fecha: **2026-09-17**. Estado: **U0–U5 cerradas; U6–U8 pendientes**.
 El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md)
 y ya gobierna el arranque, el cliente, el instalador y el shim: el kernel
 reconcilia el registro de la ESP con el diario antes de firmware e init, y
@@ -193,8 +192,8 @@ colateral; trasladar ese informe podrá evaluarse por separado.
 
 ### 3.6 Vuelta atrás segura, incluso después de confirmar
 
-**Ampliación del plan, 2026-09-16; entregada en U5a–U5e el 2026-09-17, salvo la
-exclusión de escritores y las pruebas de la matriz, que son de U7.**
+**Ampliación del plan, 2026-09-16; entregada en U5a–U5e el 2026-09-17, salvo las
+pruebas de la matriz, que son de U7.**
 La confirmación del arranque no prueba que todas las aplicaciones funcionen.
 Debe poder recuperarse la versión anterior también después de varios arranques,
 sin Internet, sin reinstalar y sin depender de la shell de la versión defectuosa.
@@ -302,13 +301,13 @@ fallido debe conservar los datos y copias restantes para ese rescate.
 
 ## 4. Entregas y dependencias
 
-**U0–U4 cerradas** (2026-09-17). La sección 3.6 amplió el alcance de la vuelta
+**U0–U5 cerradas** (2026-09-17). La sección 3.6 amplió el alcance de la vuelta
 atrás después, y U5 se desglosó en U5a–U5e, entregadas y acreditadas una a una
-(ver el desglose y la sección 6). De U5 queda un trozo que no cayó en ninguna
-subentrega: la **exclusión de escritores**. U6–U8 pendientes. Siguiente paso:
-cerrar esa exclusión y **U6**, la transición de instalaciones existentes —que es
-además quien lleva la entrada de rescate a las máquinas ya instaladas, porque hoy
-la registra el instalador y sólo en instalaciones nuevas—.
+(ver el desglose y la sección 6); la **exclusión de escritores**, que no caía en
+ninguna de las cinco, se cerró aparte el mismo día. U6–U8 pendientes. Siguiente
+paso: **U6**, la transición de instalaciones existentes —que es además quien
+lleva la entrada de rescate a las máquinas ya instaladas, porque hoy la registra
+el instalador y sólo en instalaciones nuevas—.
 
 | ID | Depende de | Trabajo y archivos principales | Criterio de cierre |
 |---|---|---|---|
@@ -317,7 +316,7 @@ la registra el instalador y sólo en instalaciones nuevas—.
 | U2 ✅ | U1 | Finalización de instalación, modo temprano y eliminación FAT; `soso-install`, `package_live`, `install_disk`, script Linux y utilidades compartidas | **Cerrada 2026-09-16.** `crates/espfat-core` (10 pruebas host) + identidad temprana en el kernel; `cargo xtask test-install` comprueba ESP sin `SOSOLOG.TXT`, modo `installed` y `/var/log` en el NVMe. |
 | U3 ✅ | U0 | Contrato de release, perfil, canales, inventario y exclusiones; `release.rs`, manifest/pack y configuración | **Cerrada 2026-09-16.** `canal.rs` + inventario con motivo, 14 fixtures de canal/precedencia/exclusiones; `release` emite el contrato de compatibilidad y aborta si cuela una ruta prohibida. |
 | U4 ✅ | U3 | Preflight y descarga durable reanudable; `soso-update`, `net.rs`, `soso-http` | **Cerrada 2026-09-17.** `descarga.rs` (12 pruebas host) + área de preparación en sosofs; `test-update` comprueba la reanudación **cruzando un reinicio**. |
-| U5 ⏳ | U0, U4 | Backup retenido, exclusión de escritores, aplicación/recuperación antes de firmware/init, shim, entrada UEFI de rescate y confirmación conjunta; desglose U5a–U5e | **U5a–U5e cerradas 2026-09-17**: vuelta atrás automática, manual y desde el firmware, también tras confirmar; ningún corte arranca una pareja mezclada ni elimina la última copia válida (§3.6). **U5 entera no está cerrada**: su fila incluye la **exclusión de escritores**, que no la cubre ninguna de las cinco subentregas y sigue sin implementarse —la reserva se calcula bien, pero nada impide que otro programa la gaste mientras la operación existe, y entonces la restauración puede quedarse sin sitio—. Anotados además: el arranque de la pareja antigua **bajo su propio kernel** (lo gobierna `SOSOKRN.MET`) y los cortes inyectados E2E, que son de U7. |
+| U5 ✅ | U0, U4 | Backup retenido, exclusión de escritores, aplicación/recuperación antes de firmware/init, shim, entrada UEFI de rescate y confirmación conjunta; desglose U5a–U5e | **Cerrada 2026-09-17** (U5a–U5e + exclusión de escritores): vuelta atrás automática, manual y desde el firmware, también tras confirmar; ningún corte arranca una pareja mezclada ni elimina la última copia válida (§3.6); y entre el respaldo y el reinicio nadie reescribe lo que el punto copió. Dos límites anotados: el arranque de la pareja antigua **bajo su propio kernel** (lo gobierna `SOSOKRN.MET`) y los cortes inyectados E2E, que son de U7. |
 | U6 | U2, U5 | Transición de instalaciones existentes, release puente, huecos ESP/entrada de recuperación y reparación offline desde live | Migrar y recuperar sin formatear ni perder modelos/configuración; cortes recuperables; retirar log FAT tras habilitar logs nativos; rescate sin init/sosh ni red del destino. |
 | U7 | U1–U6 | Extender bancos host, QEMU USB→NVMe y OTA con fallos | Matriz de la sección 5 verde, incluida retención A→B→C, fallo de C, reversión tras confirmar y fallo durante la propia recuperación. |
 | U8 | U7 | Release candidata y validación en ROG por WiFi | Instalación/actualización y recuperación verificadas en placa; manual y estado reflejan exactamente lo probado. |
@@ -335,12 +334,11 @@ Desglose de U5 para ejecutar la ampliación sin alterar los cierres históricos:
 | U5d ✅ | U5c | **Cerrada 2026-09-17.** `soso-update revertir` muestra A→B, **verifica el punto antes de prometer nada**, deja cancelar y registra la petición; el arranque siguiente restaura. Y la **entrada UEFI de rescate**: segunda `Boot####` «soso — recuperar versión anterior», sin init ni red, que sólo **pide** el rescate; restaura el kernel, que sí puede comprobar el punto entero. Vía manual acreditada E2E en `test-update`; el registro de la entrada, en `test-install`. |
 | U5e ✅ | U5d | **Cerrada 2026-09-17.** Confirmación de la pareja (U5c), **bloqueo de la candidata fallida**, **limpieza sólo de puntos no referenciados** —nunca por tiempo ni por espacio— y el arranque **restaurado a prueba**: se acredita como cualquier otro, y verlo todavía a prueba al arrancar es diagnóstico, no otra restauración en bucle. Cuarto arranque E2E: `txn: Normal`. |
 
-**U5a–U5e cerradas** el 2026-09-17, con tres límites anotados y no disimulados:
-la **exclusión de escritores** sigue sin implementarse —la reserva se calcula
-bien, pero nada impide que otro programa la gaste mientras la operación existe—,
-la pareja antigua todavía arranca bajo el kernel que gobierna `SOSOKRN.MET`, y
-los cortes inyectados E2E dentro de QEMU son materia de U7. La ampliación exige
-nueva evidencia; las pruebas históricas de U0 no certifican estas garantías.
+**U5a–U5e cerradas** el 2026-09-17, más la exclusión de escritores, con dos
+límites anotados y no disimulados: la pareja antigua todavía arranca bajo el
+kernel que gobierna `SOSOKRN.MET`, y los cortes inyectados E2E dentro de QEMU
+son materia de U7. La ampliación exige nueva evidencia; las pruebas históricas
+de U0 no certifican estas garantías.
 
 **U6, transición obligatoria:** inventariar formato de ESP, tamaño de huecos,
 shim y kernel de recuperación. La release puente debe habilitar el recuperador
@@ -403,8 +401,8 @@ comportamiento ante corte eléctrico real del NVMe.
 ### Ampliación de vuelta atrás — 2026-09-16
 
 - **Alcance:** §3.6, desglose U5a–U5e y pruebas de recuperación adicionales.
-  U0–U2 conservan su cierre histórico; U3, U4 y U5a–U5e cerradas el 2026-09-17;
-  de U5 queda la exclusión de escritores; U6–U8 siguen pendientes.
+  U0–U2 conservan su cierre histórico; U3–U5 cerradas el 2026-09-17;
+  U6–U8 siguen pendientes.
 - **Hallazgo de diseño:** el slot único `SOSOKRN.BIN` alterna staging/backup;
   no acredita conservar la versión anterior al preparar la siguiente OTA.
   Además, restaurar el ELF no sustituye el kernel que sigue ejecutándose.
@@ -758,6 +756,74 @@ escondidas porque nadie miraba un arranque **después** del que revierte.
   siempre —`revertido` si llegó a aplicarse, `descartado` si no— y **antes** de
   publicar la decisión, para que un corte en medio deje el registro en
   `rescatar` y el arranque siguiente repita un rescate idempotente.
+
+### Exclusión de escritores — cerrada el 2026-09-17
+
+Era el trozo de U5 que no caía en ninguna de las cinco subentregas, y sin él la
+vuelta atrás tenía una grieta: el punto guarda los ficheros **tal como estaban**
+al respaldarlos, así que si otro programa reescribe `/bin/sosh` después, revertir
+no devuelve el sistema a un estado que existió —lo machaca con uno anterior,
+perdiendo lo que aquel programa hizo—.
+
+- **Qué protege, exactamente**
+  ([`es_administrada`](../crates/soso-update-core/src/lib.rs)): las raíces que
+  una release posee (`bin/`, `lib/`, `etc/`) **menos** lo que el pack ya excluye.
+  Que la configuración local quede fuera es a propósito: `etc/wifi.conf` o
+  `etc/llm.conf` no viajan en el pack, nadie los va a pisar, y bloquearlos sólo
+  sería molestar. Una prueba ata la definición al pack: proteger algo que el pack
+  no trae, o dejar suelto algo que sí, sería la misma grieta por el otro lado.
+- **Leer no se toca.** Los procesos que sólo leen siguen usando los ficheros
+  viejos, que es lo que se quiere mientras la versión nueva no está.
+- **La exclusión sobrevive al proceso.** Al armar pierde dueño y dura hasta el
+  reinicio: la ventana que hay que proteger va del respaldo al reinicio, no de un
+  `main` a su `return`. El kernel la retoma al aplicar y no la suelta hasta que
+  la pareja se **acredita o se deshace**, porque hasta entonces el arranque
+  siguiente todavía puede tener que revertir desde esos respaldos.
+- **Un dueño muerto no deja la máquina de solo lectura.** Si el proceso que la
+  tomó se cae antes de armar, se suelta sola: se comprueba que siga vivo cada vez
+  que se consulta.
+- **La reserva deja de ser un cálculo sin consecuencias.** Con el punto ya
+  creado, el cliente reserva el peor caso de la restauración y los demás
+  escritores reciben `ENOSPC` antes de comérsela, en vez de descubrirlo cuando ya
+  no hay margen.
+- **Mensajes, no números.** Escribir una ruta administrada dice «hay una
+  actualización en curso; esa ruta no se toca hasta reiniciar»; una segunda
+  instancia del cliente se planta **antes de bajarse doce megas para nada**.
+- **La comprobación no puede estar sólo al abrir.** Un proceso que ya tuviera
+  `/bin/algo` abierto para escritura —Forja compilando, que es el caso que
+  nombra §3.1— publicaría su contenido después, con el punto ya copiado, y la
+  garantía se caería sin que nadie se entere. El descriptor recuerda si su ruta
+  la administra una release (se decide al abrir, que es cuando se tiene la ruta
+  entera) y se vuelve a comprobar **en cada escritura y al publicar**: el camino
+  de streaming vuelca a sosofs según llega, así que mirar sólo en `close`
+  tampoco bastaba.
+- **Acreditado E2E** en `test-update`: con la operación armada, `echo > /bin/…`
+  se rechaza, `echo > /var/…` funciona —una exclusión que deje la máquina de solo
+  lectura no sirve de nada— y el segundo `aplicar` falla con su mensaje. Cinco
+  pruebas host para la definición de ruta administrada.
+- **Un fallo de U5c que esto destapó, y que era serio:** init acreditaba la
+  pareja sólo al ver en `/tmp/sosh-ready` la marca de **la sosh que él lanzó**.
+  Una sesión SSH lanza la suya, que reescribe la marca con su pid, e init se
+  quedaba dando vueltas para siempre (`sosh viva sin marca válida`). O sea:
+  **entrar por SSH en el primer medio segundo dejaba la actualización sin
+  acreditar, y el arranque siguiente la habría deshecho.** Estaba ahí desde
+  U5c e era invisible porque `version_efectiva` de `probando` ya devuelve la
+  versión nueva; lo que lo sacó fue la exclusión, que sigue puesta mientras la
+  pareja no se acredita. Ahora vale la marca de esa instancia **o la de otra
+  sosh viva** —que otra shell viva haya dejado su marca es, si acaso, mejor
+  prueba de que el sistema arrancó— y la fase espera `txn: pareja confirmada`
+  en el serial antes de entrar, que es la única prueba de que init acredita.
+- **Lo que no está probado E2E:** el descriptor abierto **antes** de empezar la
+  actualización. sosh no deja mantener uno abierto entre órdenes, así que no hay
+  forma de guionizarlo; el caso está cubierto por construcción (la bandera del
+  descriptor y las dos comprobaciones), no por una prueba. Cubrirlo de verdad
+  pide un programa de prueba que abra, espere y escriba, y encaja en la matriz
+  de U7.
+- **Añade la syscall `SYS_TXN_LOCK` (91) y no sube `ABI_VERSION`**: la política
+  escrita en `soso-abi` es subirla al cambiar o retirar una syscall, no al
+  añadir una. Subirla aquí habría hecho que **ninguna** máquina instalada
+  pudiera aceptar la release, porque la compatibilidad se compara por igualdad
+  exacta.
 
 ### U5d — cerrada el 2026-09-17 (vía manual y entrada UEFI de rescate)
 

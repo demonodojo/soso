@@ -165,7 +165,17 @@ pub enum Fd {
     File { inode: u64, data: Vec<u8>, pos: usize },
     /// Fichero grande: lectura parcial bajo demanda.
     LazyFile { inode: u64, size: usize, pos: usize },
-    WriteBuf { dir: u64, name: String, data: Vec<u8>, pos: usize },
+    WriteBuf {
+        dir: u64,
+        name: String,
+        data: Vec<u8>,
+        pos: usize,
+        /// La ruta la administra una release (ver `txnlock`). Se decide al
+        /// abrir, cuando todavía se tiene la ruta entera, y se comprueba otra
+        /// vez al publicar: un fichero abierto **antes** de que empezara la
+        /// actualización no puede colarse por la ventana.
+        protegida: bool,
+    },
     /// Escritura streaming a sosofs (p. ej. `/var/models/`); vacía por bloques.
     StreamWrite {
         dir: u64,
@@ -173,6 +183,7 @@ pub enum Fd {
         inode: Option<u64>,
         pos: usize,
         buf: Vec<u8>,
+        protegida: bool,
     },
     Dir { entries: Vec<soso_abi::Dirent>, pos: usize },
     PipeRead(pipe::PipeId),

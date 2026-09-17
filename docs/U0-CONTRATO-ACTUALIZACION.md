@@ -266,6 +266,35 @@ en un disco lleno). Rechaza además un kernel que no cabe en el hueco de la ESP
 —o de tamaño cero— y huecos de registro insuficientes. Quedarse sin sitio a
 mitad es una de las formas típicas de dejar una pareja incoherente.
 
+## 7.bis Exclusión de escritores (U5)
+
+Desde que se respalda hasta que se reinicia, **las rutas que administra la
+release son de la operación**. No es coherencia por gusto: el punto guarda los
+ficheros tal como estaban al copiarlos, así que si otro programa los reescribe
+después, deshacer no devuelve el sistema a un estado que existió — lo machaca
+con uno anterior.
+
+- **Administrada** es lo que el pack puede reemplazar o retirar: las raíces
+  `bin/`, `lib/`, `etc/` menos lo que el pack ya excluye. La configuración local
+  y el estado mutable (`/var`, `/tmp`, `/models`, `etc/wifi.conf`…) quedan fuera:
+  nadie los va a pisar, y bloquearlos sólo sería molestar.
+- **Leer nunca se bloquea.** Los procesos que sólo leen siguen con los ficheros
+  viejos mientras la versión nueva no está.
+- **Dura lo que dura la ventana, no lo que dura un proceso.** Al armar, la
+  exclusión pierde dueño; el kernel la retoma al aplicar y la suelta cuando la
+  pareja se **acredita o se deshace**, porque hasta ese momento el arranque
+  siguiente todavía puede tener que revertir desde esos respaldos.
+- **Un dueño que muere la libera.** Si no, un cliente que se cae dejaría la
+  máquina de solo lectura hasta reiniciar.
+- **La reserva se defiende.** Los demás escritores reciben `ENOSPC` antes de
+  gastar lo que la restauración va a necesitar: descubrirlo al restaurar es
+  descubrirlo cuando ya no hay margen.
+- **No basta comprobar al abrir.** Quien ya tuviera abierto un fichero
+  administrado publicaría su contenido después, con el punto ya copiado. La
+  regla se aplica también a cada escritura y a la publicación.
+- **Dos operaciones a la vez no tienen arreglo posible**, así que la segunda se
+  rechaza con un mensaje que se entiende, no con un número.
+
 ## 8. Compatibilidad de la release
 
 El manifiesto declara `arch`, `perfil`, `drivers`, `abi`, `fs`, `min_shim` y

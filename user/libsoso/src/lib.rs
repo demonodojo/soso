@@ -252,6 +252,10 @@ pub fn errno_str(e: i64) -> &'static str {
         x if x == abi::ENOTSUP => "no soportado",
         x if x == abi::ETIMEDOUT => "timeout",
         x if x == abi::ENOTCONN => "sin red",
+        // No es «no tienes permiso»: es que ahora mismo eso no se toca,
+        // porque hay una actualización armada sobre esas rutas.
+        x if x == abi::EROFS => "hay una actualización en curso; esa ruta no se toca hasta reiniciar",
+        x if x == abi::EBUSY => "ocupado",
         _ => "error desconocido",
     }
 }

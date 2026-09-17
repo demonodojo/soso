@@ -47,6 +47,20 @@ aquí: un `Contenido` con hash vacío se escribe `0 ` y al releer se recorta el
 espacio → campo impartible y registro **ilegible**; «no consta» va explícito
 (`- -`). Vale para el punto y para el diario.
 
+**Exclusión de escritores (2026-09-17, cierra U5):** `SYS_TXN_LOCK=91` +
+`kernel/src/drivers/txnlock.rs`. Entre el respaldo y el reinicio, las rutas que
+administra la release (`soso_update_core::es_administrada`: `bin/ lib/ etc/`
+menos lo que el pack excluye) devuelven **EROFS** a cualquiera que no sea el
+dueño; el resto del disco no se toca y **leer nunca se bloquea**. Se comprueba al
+abrir **y además en cada escritura y al publicar** (el `Fd` lleva `protegida`):
+sólo al abrir, un descriptor abierto antes de la actualización colaba su
+contenido después del respaldo. La exclusión
+sobrevive al proceso (`TXN_LOCK_ARMADO` la deja sin dueño hasta reiniciar), el
+kernel la retoma al aplicar y la suelta al acreditar o deshacer
+(`txnaplica::confirmar`), y un dueño muerto la libera solo. Añadir una syscall
+**no** sube `ABI_VERSION` (política escrita en `soso-abi`; la compatibilidad se
+compara por igualdad exacta y subirla dejaría fuera a todas las máquinas).
+
 **U5c cerrada (2026-09-17): `soso-update` ARMA, no instala.** Baja a la etapa,
 crea+verifica el punto, escribe el **diario**, prepara el kernel y publica el
 **registro de arranque**; instala `drivers/txnaplica.rs` en el arranque

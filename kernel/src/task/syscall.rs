@@ -319,6 +319,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_FSINFO => sys_fsinfo(a1),
         abi::SYS_TXN_CONFIRM => sys_txn_confirm(),
         abi::SYS_PING => sys_ping(a1, a2),
+        abi::SYS_TXN_LOCK => sys_txn_lock(a1, a2),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -718,7 +719,8 @@ pub fn build_child_fds(stdio: [u64; 4]) -> Result<ChildStdio, i64> {
 /// Cierra un fd y aplica efectos secundarios (commit, pipes).
 pub fn drop_fd(fd: Fd) -> Result<(), i64> {
     match fd {
-        Fd::WriteBuf { dir, name, data, .. } => {
+        Fd::WriteBuf { dir, name, data, protegida, .. } => {
+            sigue_pudiendo_publicar(protegida)?;
             let mtime = crate::time::wall_secs();
             with_vfs(|| crate::vfs::create_file(dir, &name, &data, mtime))?;
         }
@@ -727,8 +729,10 @@ pub fn drop_fd(fd: Fd) -> Result<(), i64> {
             name,
             mut inode,
             mut buf,
+            protegida,
             ..
         } => {
+            sigue_pudiendo_publicar(protegida)?;
             flush_stream_write(dir, &name, &mut inode, &mut buf)?;
         }
         Fd::PipeRead(id) => pipe::close_reader(id),
@@ -855,7 +859,12 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
             inode,
             pos,
             buf,
+            protegida,
         } => {
+            // El streaming vuelca a sosofs según llega, así que aquí es donde
+            // hay que plantarse: si mientras tanto ha empezado una
+            // actualización, este contenido ya no puede llegar al disco.
+            sigue_pudiendo_publicar(*protegida)?;
             *pos += data.len();
             buf.extend_from_slice(data);
             while buf.len() >= STREAM_FLUSH {
@@ -982,9 +991,29 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
     })
 }
 
+/// Único punto donde se decide si este proceso puede escribir esta ruta
+/// ahora mismo. Se comprueba **antes** de abrir o resolver el padre: si la
+/// respuesta es que no, tampoco hay que crear el directorio de paso.
+fn puede_escribir(path: &str) -> Result<(), i64> {
+    crate::drivers::txnlock::comprobar_escritura(super::current_pid(), path)
+}
+
+/// Un fichero administrado que se abrió **antes** de que empezara la
+/// actualización no puede publicarse después: el punto ya copió su contenido
+/// viejo, y dejarlo pasar es exactamente la grieta que la exclusión cierra.
+/// Se comprueba al publicar, que es cuando el contenido llega de verdad al
+/// disco.
+fn sigue_pudiendo_publicar(protegida: bool) -> Result<(), i64> {
+    if !protegida {
+        return Ok(());
+    }
+    crate::drivers::txnlock::comprobar_ruta_administrada(super::current_pid())
+}
+
 fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
     let path = resolve_user_path(path_ptr, path_len)?;
     let nuevo = if flags & abi::O_WRONLY != 0 {
+        puede_escribir(&path)?;
         let (dir, name) = resolve_parent(&path)?;
         let lookup = with_vfs(|| crate::vfs::lookup(dir, &name));
         let exists = lookup.is_ok();
@@ -1021,6 +1050,7 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
         } else {
             data.len()
         };
+        let protegida = soso_update_core::es_administrada(&path);
         let stream = true;
         if stream {
             Fd::StreamWrite {
@@ -1029,9 +1059,10 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
                 inode: append_ino,
                 pos,
                 buf: Vec::new(),
+                protegida,
             }
         } else {
-            Fd::WriteBuf { dir, name, data, pos }
+            Fd::WriteBuf { dir, name, data, pos, protegida }
         }
     } else {
         let ino = with_vfs(|| crate::vfs::resolve(&path))?;
@@ -1175,6 +1206,7 @@ fn sys_getdents(fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
 
 fn sys_mkdir(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
     let path = resolve_user_path(path_ptr, path_len)?;
+    puede_escribir(&path)?;
     let (dir, name) = resolve_parent(&path)?;
     let mtime = crate::time::wall_secs();
     with_vfs(|| crate::vfs::mkdir(dir, &name, mtime))?;
@@ -1183,6 +1215,7 @@ fn sys_mkdir(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
 
 fn sys_unlink(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
     let path = resolve_user_path(path_ptr, path_len)?;
+    puede_escribir(&path)?;
     let (dir, name) = resolve_parent(&path)?;
     with_vfs(|| crate::vfs::unlink(dir, &name))?;
     Ok(0)
@@ -1649,12 +1682,14 @@ fn convert_writebuf_to_stream(f: &mut Fd, data: &[u8]) -> Result<(), i64> {
         name,
         data: out,
         pos,
+        protegida,
     } = f
     else {
         return Ok(());
     };
     let dir_val = *dir;
     let name_val = name.clone();
+    let protegida_val = *protegida;
     let written = *pos;
     let mut prefix = core::mem::take(out);
     prefix.truncate(written);
@@ -1673,6 +1708,7 @@ fn convert_writebuf_to_stream(f: &mut Fd, data: &[u8]) -> Result<(), i64> {
         inode,
         pos: new_pos,
         buf,
+        protegida: protegida_val,
     };
     if let Fd::StreamWrite {
         dir,
@@ -2328,6 +2364,9 @@ fn sys_input_poll(out: u64, max: u64) -> Result<u64, i64> {
 fn sys_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64) -> Result<u64, i64> {
     let old = resolve_user_path(old_ptr, old_len)?;
     let new = resolve_user_path(new_ptr, new_len)?;
+    // Las dos puntas: renombrar es escribir en origen y en destino.
+    puede_escribir(&old)?;
+    puede_escribir(&new)?;
     let (old_dir, old_name) = resolve_parent(&old)?;
     let (new_dir, new_name) = resolve_parent(&new)?;
     let mtime = crate::time::wall_secs();
@@ -2337,6 +2376,7 @@ fn sys_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64) -> Result<
 
 fn sys_truncate(path_ptr: u64, path_len: u64, size: u64) -> Result<u64, i64> {
     let path = resolve_user_path(path_ptr, path_len)?;
+    puede_escribir(&path)?;
     let mtime = crate::time::wall_secs();
     with_vfs(|| crate::vfs::truncate_path(&path, size, mtime))?;
     Ok(0)
@@ -2408,11 +2448,12 @@ fn clone_fd(f: &Fd) -> Fd {
             size: *size,
             pos: *pos,
         },
-        Fd::WriteBuf { dir, name, data, pos } => Fd::WriteBuf {
+        Fd::WriteBuf { dir, name, data, pos, protegida } => Fd::WriteBuf {
             dir: *dir,
             name: name.clone(),
             data: data.clone(),
             pos: *pos,
+            protegida: *protegida,
         },
         Fd::StreamWrite {
             dir,
@@ -2420,12 +2461,14 @@ fn clone_fd(f: &Fd) -> Fd {
             inode,
             pos,
             buf,
+            protegida,
         } => Fd::StreamWrite {
             dir: *dir,
             name: name.clone(),
             inode: *inode,
             pos: *pos,
             buf: buf.clone(),
+            protegida: *protegida,
         },
         Fd::Dir { entries, pos } => Fd::Dir {
             entries: entries.clone(),
@@ -2436,6 +2479,19 @@ fn clone_fd(f: &Fd) -> Fd {
         Fd::Tcp { slot } => Fd::Tcp { slot: *slot },
         Fd::Tty => Fd::Tty,
         Fd::Log => Fd::Log,
+    }
+}
+
+/// La exclusión de escritores de la actualización, vista desde userspace.
+fn sys_txn_lock(op: u64, reserva: u64) -> Result<u64, i64> {
+    use crate::drivers::txnlock as lock;
+    let pid = super::current_pid();
+    match op {
+        abi::TXN_LOCK_TOMAR => lock::tomar(pid, reserva).map(|()| 0),
+        abi::TXN_LOCK_ARMADO => lock::armado(pid).map(|()| 0),
+        abi::TXN_LOCK_SOLTAR => lock::soltar(pid).map(|()| 0),
+        abi::TXN_LOCK_ESTADO => Ok(lock::estado(pid)),
+        _ => Err(-abi::EINVAL),
     }
 }
 

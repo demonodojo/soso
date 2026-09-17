@@ -157,6 +157,30 @@ pub const SYS_TXN_CONFIRM: u64 = 90;
 /// usa 1000 ms. 127.0.0.0/8 y la IPv4 propia contestan en 0 ms sin cable.
 pub const SYS_PING: u64 = 89;
 
+/// Exclusión de escritores de la actualización: `(op, reserva_bloques) → …`.
+///
+/// Entre que se respalda y se reinicia, nadie más puede tocar las rutas que
+/// administra la release: si otro programa reescribe `/bin/sosh` después del
+/// respaldo, la vuelta atrás restauraría encima de un sistema que ya no es el
+/// que se copió. Leer no se toca; los que sólo leen siguen con los ficheros
+/// viejos.
+pub const SYS_TXN_LOCK: u64 = 91;
+/// Tomarla para este proceso. `-EBUSY` si ya la tiene otro.
+pub const TXN_LOCK_TOMAR: u64 = 1;
+/// La operación quedó **armada**: la exclusión deja de tener dueño y dura
+/// hasta el reinicio, que es cuando se aplica. El proceso puede terminar.
+pub const TXN_LOCK_ARMADO: u64 = 2;
+/// Soltarla (la operación se canceló). Sólo el dueño.
+pub const TXN_LOCK_SOLTAR: u64 = 3;
+/// Consultar: devuelve `TXN_LOCK_LIBRE`, `TXN_LOCK_MIA`, `TXN_LOCK_AJENA` o
+/// `TXN_LOCK_ARMADA`.
+pub const TXN_LOCK_ESTADO: u64 = 4;
+
+pub const TXN_LOCK_LIBRE: u64 = 0;
+pub const TXN_LOCK_MIA: u64 = 1;
+pub const TXN_LOCK_AJENA: u64 = 2;
+pub const TXN_LOCK_ARMADA: u64 = 3;
+
 pub const FS_RESIZE_GROW_ROOT: u64 = 0;
 pub const FS_RESIZE_QUERY: u64 = 1;
 

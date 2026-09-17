@@ -802,6 +802,16 @@ pareja anterior, después de comprobar la copia entera. Si no consta ninguna
 copia guardada, lo dice en pantalla y sigue arrancando con normalidad en vez de
 intentar nada a ciegas.
 
+**Mientras hay una actualización armada.** Desde que `aplicar` guarda la copia
+de vuelta atrás y hasta que reinicias, los programas y bibliotecas del sistema
+(`/bin`, `/lib` y la parte de `/etc` que trae la release) **no se pueden
+escribir**: si algo los cambiara por debajo, volver atrás no te devolvería a un
+estado que existió, te machacaría ese cambio. Intentarlo dice «hay una
+actualización en curso; esa ruta no se toca hasta reiniciar». Leerlos, ejecutarlos
+y usar el ordenador normal sigue igual, y tus ficheros, tu configuración
+(`/etc/wifi.conf`, `/etc/llm.conf`…), `/var` y `/tmp` siguen siendo tuyos. Un
+segundo `soso-update aplicar` te lo dice en vez de ponerse a armar encima.
+
 **Si se corta a mitad.** La descarga va a un área de preparación dentro del
 disco (`/var/lib/soso-update/`), no directamente a `/bin` y `/lib`: mientras
 baja, tu sistema sigue siendo el de siempre. Si se corta la red o reinicias,

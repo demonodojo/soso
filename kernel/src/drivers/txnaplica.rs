@@ -59,12 +59,17 @@ pub fn recuperar() -> bool {
                 // prueba. Si el arranque no llega a confirmarse, el siguiente
                 // encontrará esto y la deshará.
                 publicar(&esp, Decision::Probando, id);
+                // Y hasta que se acredite, esas rutas no las toca nadie: la
+                // reversión saldría de unos respaldos que describen el sistema
+                // tal como estaba, no como lo dejara otro programa.
+                crate::drivers::txnlock::tomar_por_el_kernel();
             }
             ok
         }
         Recuperacion::Revertir(_) => ejecutar(&dir, diario, false),
         Recuperacion::PublicarProbando(id) => {
             publicar(&esp, Decision::Probando, id);
+            crate::drivers::txnlock::tomar_por_el_kernel();
             true
         }
         Recuperacion::CompletarConfirmacion(id) => {
@@ -176,6 +181,7 @@ fn rescatar(
             // A prueba: falta que este arranque llegue a init. Si no llega, el
             // siguiente lo verá y lo dirá en vez de repetir la restauración.
             publicar(esp, Decision::RestauradoAPrueba, punto);
+            crate::drivers::txnlock::tomar_por_el_kernel();
             true
         }
         Err(e) => {
@@ -205,12 +211,14 @@ pub fn confirmar() -> bool {
                 }
             }
             publicar(&esp, Decision::Confirmado, rec.id);
+            crate::drivers::txnlock::liberar_del_kernel();
             crate::println!("txn: pareja confirmada ({})", rec.version_nueva);
             crate::otalog!("arranque: pareja confirmada");
         }
         // La versión restaurada sí arranca: la vuelta atrás queda cerrada.
         Decision::RestauradoAPrueba => {
             publicar(&esp, Decision::Revertido, rec.id);
+            crate::drivers::txnlock::liberar_del_kernel();
             crate::println!("txn: versión restaurada acreditada ({})", rec.version_anterior);
             crate::otalog!("arranque: versión restaurada acreditada");
         }

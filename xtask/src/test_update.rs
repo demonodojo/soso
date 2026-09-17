@@ -225,7 +225,10 @@ fn fase_aplicar(
         SSH_PORT,
         // `init log` deja un registro por fd 3 y `sosolog` fuerza el volcado a
         // /var/log: así el arranque 2 puede comprobar que sobrevivieron.
-        "soso-update aplicar --local /var/actualiza-prueba --forzar\ninit log marca-u1-aplicar\nsosolog\nhalt\n",
+        // Con la operación armada, las rutas que administra la release no se
+        // tocan (U5) y el resto del disco sigue siendo tuyo. Y una segunda
+        // instancia del cliente tiene que decirlo, no ponerse a armar encima.
+        "soso-update aplicar --local /var/actualiza-prueba --forzar\n         echo intruso > /bin/prueba-exclusion\n         echo mias > /var/prueba-exclusion\n         cat /var/prueba-exclusion\n         soso-update aplicar --local /var/actualiza-prueba --forzar\n         init log marca-u1-aplicar\nsosolog\nhalt\n",
         Duration::from_secs(180),
         "soso-update: listo",
     )?;
@@ -242,6 +245,29 @@ fn fase_aplicar(
             "aplicó sin dejar un punto de recuperación verificado: {salida:?}"
         ));
     }
+    // U5, exclusión de escritores: entre el respaldo y el reinicio nadie
+    // reescribe lo que el punto acaba de copiar. Si se dejara, deshacer no
+    // devolvería el sistema a un estado que existió: lo machacaría.
+    if !salida.contains("actualización en curso; esa ruta no se toca") {
+        return Err(format!(
+            "se pudo escribir en /bin con la actualización armada: {salida:?}"
+        ));
+    }
+    // Y lo que no administra la release sigue siendo del usuario: una
+    // exclusión que deje la máquina de solo lectura no sirve de nada.
+    if !salida.contains("mias") {
+        return Err(format!(
+            "la exclusión bloqueó también /var, que no es suyo: {salida:?}"
+        ));
+    }
+    // Dos operaciones a la vez sobre las mismas rutas no tienen arreglo: la
+    // segunda se planta con un mensaje que se entiende.
+    if !salida.contains("ya hay una actualización en curso") {
+        return Err(format!(
+            "una segunda instancia se puso a armar encima de la primera: {salida:?}"
+        ));
+    }
+
     // La gracia de la actualización parcial: se piden unos pocos ficheros, no
     // los 60 y pico del pack.
     if let Some(l) = salida.lines().find(|l| l.trim_start().starts_with("rootfs:"))
@@ -265,6 +291,11 @@ fn fase_comprobar_version(
     let qemu = lanzar_live(code, vars, live, serial)?;
     let _guard = Matar(qemu.child);
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
+    // Esta fase da por hecho que la pareja quedó **acreditada**: hasta
+    // entonces la exclusión sigue puesta —el arranque siguiente aún podría
+    // tener que deshacerla— y el `echo` de más abajo no podría ensuciar nada.
+    // Esperarlo en el serial es además la única prueba de que init acredita.
+    esperar_en_fichero(serial, "txn: pareja confirmada", Duration::from_secs(60))?;
     let salida = ssh_guion_hasta(
         key,
         SSH_PORT,

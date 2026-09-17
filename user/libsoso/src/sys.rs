@@ -718,6 +718,12 @@ pub fn txn_confirm() -> i64 {
     syscall4(abi::SYS_TXN_CONFIRM, 0, 0, 0, 0)
 }
 
+/// Exclusión de escritores de la actualización: `op` es una de las
+/// `abi::TXN_LOCK_*`. `reserva` sólo lo mira `TOMAR`, en bloques de sosofs.
+pub fn txn_lock(op: u64, reserva: u64) -> i64 {
+    syscall4(abi::SYS_TXN_LOCK, op, reserva, 0, 0)
+}
+
 /// Espacio libre del sistema de ficheros raíz.
 pub fn fsinfo(out: &mut abi::FsInfo) -> i64 {
     syscall4(abi::SYS_FSINFO, out as *mut abi::FsInfo as u64, 0, 0, 0)

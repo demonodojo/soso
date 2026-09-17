@@ -265,6 +265,13 @@ fn cmd_aplicar(args: &[String]) -> u8 {
         println!("soso-update: ya estás en {} (usa --forzar)", man.version_raw);
         return 0;
     }
+    // La exclusión, lo primero: una segunda instancia tiene que plantarse
+    // **antes** de bajarse doce megas para nada. Desde aquí y hasta el
+    // reinicio, las rutas administradas son de esta operación.
+    if let Err(e) = tomar_exclusion() {
+        println!("soso-update: {e}");
+        return 1;
+    }
     write_file(
         "/etc/actualiza.estado",
         &format!("APLICANDO {}\n", man.version_raw),
@@ -292,6 +299,7 @@ fn cmd_aplicar(args: &[String]) -> u8 {
         Ok(d) => d,
         Err(e) => {
             println!("soso-update: {e}");
+            soltar_exclusion();
             return 1;
         }
     };
@@ -333,6 +341,7 @@ fn cmd_aplicar(args: &[String]) -> u8 {
                 println!("soso-update: {e}");
                 println!("  lo descargado se conserva: vuelve a lanzarlo para reanudar");
                 libsoso::logln!("actualiza: descarga interrumpida ({e}); etapa conservada");
+                soltar_exclusion();
                 return 1;
             }
         }
@@ -347,11 +356,13 @@ fn cmd_aplicar(args: &[String]) -> u8 {
                 p.version,
                 p.entradas.len()
             );
+            reservar_para_restaurar(&p);
             p
         }
         Err(e) => {
             println!("soso-update: {e}");
             libsoso::logln!("actualiza: sin punto de recuperación ({e}); no aplico");
+            soltar_exclusion();
             return 1;
         }
     };
@@ -366,8 +377,13 @@ fn cmd_aplicar(args: &[String]) -> u8 {
     if let Err(e) = armar(&opts, &man, &etapa, &cambian, &punto) {
         println!("soso-update: {e}");
         libsoso::logln!("actualiza: no pude armar la operación ({e})");
+        soltar_exclusion();
         return 1;
     }
+    // Armada: la exclusión deja de ser de este proceso y dura hasta el
+    // reinicio, que es cuando se aplica. La ventana que hay que proteger va
+    // del respaldo al reinicio, no de este `main` a su `return`.
+    let _ = sys::txn_lock(soso_abi::TXN_LOCK_ARMADO, 0);
 
     let _ = sys::unlink("/etc/actualiza.estado");
     libsoso::logln!("actualiza: {} armada; falta reiniciar", man.version_raw);
@@ -1272,6 +1288,45 @@ fn preparar_punto(man: &Manifest, cambian: &[FileEntry]) -> Result<Punto, &'stat
         }
         Err(CrearError::Registro) => Err("no pude registrar la vuelta atrás"),
     }
+}
+
+// ------------------------------------------------- exclusión de escritores
+
+/// Toma la exclusión para esta operación. El mensaje de error dice **qué**
+/// pasa, no un número: quien lo lee está intentando actualizar su ordenador.
+///
+/// Se toma **antes** de crear el punto, sin reserva todavía: lo primero es que
+/// nadie más escriba las rutas que se van a copiar. La reserva se fija después,
+/// cuando el punto ya dice cuánto ocupará restaurarlo.
+fn tomar_exclusion() -> Result<(), String> {
+    match sys::txn_lock(soso_abi::TXN_LOCK_TOMAR, 0) {
+        r if r >= 0 => Ok(()),
+        r if r == -libsoso::abi::EBUSY => Err(
+            "ya hay una actualización en curso en esta máquina\n               espera a que termine, o reinicia si se quedó a medias"
+                .into(),
+        ),
+        // Un kernel viejo no conoce la syscall. No es motivo para no
+        // actualizar: es exactamente la máquina que más falta le hace.
+        r if r == -libsoso::abi::ENOSYS => Ok(()),
+        r => Err(format!("no pude tomar la exclusión de escritores (errno {})", -r)),
+    }
+}
+
+fn soltar_exclusion() {
+    let _ = sys::txn_lock(soso_abi::TXN_LOCK_SOLTAR, 0);
+}
+
+/// Con el punto ya creado se sabe el peor caso de la restauración: se reserva
+/// para que los demás escritores no se lo coman antes de que haga falta.
+fn reservar_para_restaurar(punto: &Punto) {
+    let mut fs = soso_abi::FsInfo::default();
+    let bloque = if sys::fsinfo(&mut fs) >= 0 && fs.block_size > 0 {
+        fs.block_size
+    } else {
+        4096
+    };
+    let bloques = soso_update_core::txn::punto::reserva_efectiva(punto).div_ceil(bloque);
+    let _ = sys::txn_lock(soso_abi::TXN_LOCK_TOMAR, bloques);
 }
 
 // --------------------------------------------------------------- armar
