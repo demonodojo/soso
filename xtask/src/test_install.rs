@@ -334,7 +334,10 @@ fn fase_instalar(
         key,
         SSH_PORT,
         "soso-install list\nsoso-install 3\nsoso-install 2 --yes\nsoso-install status\nexit\n",
-        Duration::from_secs(600),
+        // El clon son ~3 GiB por un USB emulado: con la máquina cargada, 600 s
+        // se quedaban cortos y el fallo aparecía como «no se declara
+        // instalación» tres fases después, que no se parece en nada a la causa.
+        Duration::from_secs(1200),
     )?;
     if !salida.contains("particiones de otro sistema") || !salida.contains("swap") {
         return Err(format!(

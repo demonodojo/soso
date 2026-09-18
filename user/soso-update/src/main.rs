@@ -1737,6 +1737,7 @@ fn recoger_puntos(referencias: &[TxnId]) {
 /// o la recuperación interna. No llama al instalador: aquí no se formatea nada.
 fn cmd_recuperar(args: &[String]) -> u8 {
     let pedir = args.iter().any(|a| a == "--pedir");
+    let restaurar = args.iter().any(|a| a == "--restaurar");
     let disco = match args.iter().position(|a| a == "--disco") {
         Some(i) => match args.get(i + 1).and_then(|s| s.parse::<u32>().ok()) {
             Some(d) => d,
@@ -1787,8 +1788,14 @@ fn cmd_recuperar(args: &[String]) -> u8 {
         return 1;
     };
 
-    // 2) Su sosofs, sólo lectura: el punto se **verifica** antes de prometer.
-    let dev = BloquesDisco { disco, base: fs_lba, bloques: fs_bloques };
+    // 2) Su sosofs. Sólo lectura salvo que se pida restaurar aquí mismo: el
+    //    disco de otra máquina no se escribe por si acaso.
+    let dev = BloquesDisco {
+        disco,
+        base: fs_lba,
+        bloques: fs_bloques,
+        escritura: restaurar,
+    };
     let mut fs = match sosofs::Sosofs::mount(dev) {
         Ok(fs) => fs,
         Err(e) => {
@@ -1815,7 +1822,11 @@ fn cmd_recuperar(args: &[String]) -> u8 {
     };
     println!("  vuelta atrás guardada: {} ({} ficheros)", punto.version, punto.entradas.len());
 
-    let mut sis = SistemaAjeno { fs: &mut fs, dir: dir.clone() };
+    let mut sis = SistemaAjeno {
+        fs: &mut fs,
+        dir: dir.clone(),
+        ahora: ahora_secs(),
+    };
     if let Err(e) = punto.verificar(&mut sis) {
         println!("  pero la copia NO está completa ({e:?})");
         println!("  no registro nada: arrancaría a medias");
@@ -1823,8 +1834,12 @@ fn cmd_recuperar(args: &[String]) -> u8 {
     }
     println!("  copia verificada");
 
+    if restaurar {
+        return restaurar_ahora(&mut sis, &punto, &rec, punto_id, &mut sectores, disco);
+    }
     if !pedir {
-        println!("para registrarla: soso-update recuperar --disco {disco} --pedir");
+        println!("para que la haga ese arranque:  soso-update recuperar --disco {disco} --pedir");
+        println!("para hacerla desde aquí ahora:  soso-update recuperar --disco {disco} --restaurar");
         return 0;
     }
 
@@ -1854,6 +1869,98 @@ fn cmd_recuperar(args: &[String]) -> u8 {
     println!("registrado: al arrancar ese disco volverá a {}", rec.version_anterior);
     libsoso::logln!("actualiza: rescate registrado para el disco {} → {}", disco, rec.version_anterior);
     0
+}
+
+/// Restaura el punto **desde aquí**, sobre el disco de la otra máquina.
+///
+/// Es la vía para cuando su kernel no arranca y por tanto no puede atender un
+/// `rescatar`. El orden es el mismo que usa ese kernel cuando sí puede: el
+/// punto ya está verificado entero, se restauran los ficheros, se cierra el
+/// diario de la operación deshecha y sólo entonces se publica la decisión —si
+/// se corta antes, el registro sigue pidiendo rescate y repetirlo es inofensivo,
+/// porque cada paso es idempotente—.
+///
+/// Se publica `revertido`, no `restaurado-a-prueba`. «A prueba» significa que
+/// **un arranque de esa máquina lo intentó y no sabemos cómo acabó**, y aquí no
+/// ha arrancado nadie: dejarlo a prueba hace que su primer encendido diagnostique
+/// un fallo que no ha ocurrido —que es exactamente lo que pasó la primera vez
+/// que se probó esto—. Un estado que describe un arranque sólo lo puede escribir
+/// ese arranque.
+fn restaurar_ahora(
+    sis: &mut SistemaAjeno<'_>,
+    punto: &Punto,
+    rec: &BootRecord,
+    punto_id: TxnId,
+    sectores: &mut SectoresDisco,
+    disco: u32,
+) -> u8 {
+    use soso_update_core::txn::aplicador;
+
+    if let Err(e) = aplicador::restaurar(&punto.entradas, sis) {
+        println!("soso-update: fallo restaurando ({e:?})");
+        println!("  su disco puede haber quedado a medias: repite esta misma orden");
+        return 1;
+    }
+    println!("restaurados {} ficheros de {}", punto.entradas.len(), punto.version);
+
+    if let Some(mut j) = leer_diario_ajeno(sis) {
+        if soso_update_core::txn::rescate::cerrar_diario(&mut j) {
+            use soso_update_core::txn::aplicador::Sistema;
+            if sis.guardar_diario(&j).is_err() {
+                println!("soso-update: no pude cerrar su diario; no publico la decisión");
+                println!("  repite la orden: hasta que se publique, su registro sigue pidiendo rescate");
+                return 1;
+            }
+        }
+    }
+
+    let nuevo = BootRecord::nuevo(
+        Decision::Revertido,
+        rec.id,
+        rec.version_efectiva(),
+        &rec.version_anterior,
+        rec.seq + 1,
+    )
+    .con_punto(punto_id);
+    let Ok(bytes) = nuevo.format() else {
+        println!("soso-update: no pude formar su registro de arranque");
+        return 1;
+    };
+    let off = nuevo.ranura() * soso_update_core::SLOT_SIZE;
+    if !escribir_hueco_esp(
+        sectores,
+        b"SOSOTXN ",
+        b"BIN",
+        soso_update_core::UPD_BOOTREC_SIZE,
+        off,
+        &bytes,
+    ) {
+        println!("soso-update: restauré los ficheros pero no pude escribir su SOSOTXN.BIN");
+        println!("  repite la orden con el disco conectado");
+        return 1;
+    }
+    println!("disco {disco}: vuelto a {}; ya puede arrancar", rec.version_anterior);
+    libsoso::logln!(
+        "actualiza: restaurado el disco {} a {} desde el live",
+        disco,
+        rec.version_anterior
+    );
+    0
+}
+
+/// El diario de la operación que se acaba de deshacer, si está.
+fn leer_diario_ajeno(sis: &mut SistemaAjeno<'_>) -> Option<Journal> {
+    let mut mejor: Option<Journal> = None;
+    for n in 0..2 {
+        let ruta = format!("/var/lib/soso-update/{}/diario.{n}", sis.dir);
+        let datos = sis.fs.resolve(&ruta).ok().and_then(|i| sis.fs.read_file(i).ok());
+        if let Some(j) = datos.and_then(|d| Journal::parse(&d).ok()) {
+            if mejor.as_ref().is_none_or(|m| j.seq > m.seq) {
+                mejor = Some(j);
+            }
+        }
+    }
+    mejor
 }
 
 /// Recorre los discos que no son el de arranque y dice de cuáles se puede
@@ -1999,13 +2106,17 @@ impl espfat_core::Sectores for SectoresDisco {
     }
 }
 
-/// Acceso por bloques de 4 KiB al sosofs de otro disco. Sólo lectura: la
-/// restauración de verdad la hace el kernel de esa máquina, que es quien puede
-/// tomar la exclusión de escritores y llevar el diario.
+/// Acceso por bloques de 4 KiB al sosofs de otro disco.
+///
+/// Nace **sólo lectura** a propósito: mirar el disco de otra máquina es lo
+/// normal, y escribirlo la excepción que hay que pedir a mano. Con `escritura`
+/// puesto, es la reparación offline: para cuando el kernel de esa máquina no
+/// arranca y por tanto no puede atender una petición de rescate.
 struct BloquesDisco {
     disco: u32,
     base: u64,
     bloques: u64,
+    escritura: bool,
 }
 
 impl block_dev::BlockDevice for BloquesDisco {
@@ -2021,21 +2132,30 @@ impl block_dev::BlockDevice for BloquesDisco {
         }
         Ok(())
     }
-    fn write_block(&mut self, _block: u64, _buf: &block_dev::Block) -> Result<(), block_dev::BlockError> {
-        // A propósito: desde aquí no se escribe en el disco de otra máquina.
-        Err(block_dev::BlockError::Io)
+    fn write_block(&mut self, block: u64, buf: &block_dev::Block) -> Result<(), block_dev::BlockError> {
+        if !self.escritura {
+            return Err(block_dev::BlockError::Io);
+        }
+        if block >= self.bloques {
+            return Err(block_dev::BlockError::OutOfRange);
+        }
+        if sys::disk_write(self.disco, self.base + block * 8, buf) < 0 {
+            return Err(block_dev::BlockError::Io);
+        }
+        Ok(())
     }
     fn flush(&mut self) -> Result<(), block_dev::BlockError> {
         Ok(())
     }
 }
 
-/// El sistema de ficheros de la otra máquina, visto por el verificador del
-/// punto. Sólo sabe leer, y lo dice: cualquier intento de escribir falla en vez
-/// de hacer algo a medias.
+/// El sistema de ficheros de la otra máquina, visto por el verificador y por el
+/// restaurador. Lo que pueda hacer depende del dispositivo: si se montó sólo
+/// lectura, las escrituras fallan abajo, no aquí.
 struct SistemaAjeno<'a> {
     fs: &'a mut sosofs::Sosofs<BloquesDisco>,
     dir: String,
+    ahora: u64,
 }
 
 impl soso_update_core::txn::aplicador::Sistema for SistemaAjeno<'_> {
@@ -2048,13 +2168,82 @@ impl soso_update_core::txn::aplicador::Sistema for SistemaAjeno<'_> {
         let ino = self.fs.resolve(&completa).ok()?;
         self.fs.read_file(ino).ok()
     }
-    fn escribir(&mut self, _ruta: &str, _datos: &[u8]) -> Result<(), ()> {
-        Err(())
+    fn escribir(&mut self, rel: &str, datos: &[u8]) -> Result<(), ()> {
+        let destino = format!("/{}", rel.trim_start_matches('/'));
+        let (dir, nombre) = partir(&destino).ok_or(())?;
+        let padre = self.crear_arbol(dir)?;
+        // Igual que el aplicador del kernel: quitar y crear, no modificar en
+        // sitio. La copia en escritura del sosofs deja la generación anterior
+        // intacta hasta el commit, así que un corte aquí no mezcla nada.
+        let _ = self.fs.unlink(padre, nombre);
+        self.fs
+            .create_file(padre, nombre, datos, self.ahora)
+            .map(|_| ())
+            .map_err(|_| ())
     }
-    fn borrar(&mut self, _ruta: &str) -> Result<(), ()> {
-        Err(())
+
+    fn borrar(&mut self, rel: &str) -> Result<(), ()> {
+        let destino = format!("/{}", rel.trim_start_matches('/'));
+        let Some((dir, nombre)) = partir(&destino) else {
+            return Ok(());
+        };
+        let Ok(padre) = self.fs.resolve(dir) else {
+            return Ok(());
+        };
+        // Que ya no esté no es un error: restaurar es idempotente.
+        let _ = self.fs.unlink(padre, nombre);
+        Ok(())
     }
-    fn guardar_diario(&mut self, _j: &Journal) -> Result<(), ()> {
-        Err(())
+
+    fn guardar_diario(&mut self, j: &Journal) -> Result<(), ()> {
+        let destino = format!(
+            "/var/lib/soso-update/{}/diario.{}",
+            self.dir,
+            j.seq % 2
+        );
+        let (dir, nombre) = partir(&destino).ok_or(())?;
+        let padre = self.crear_arbol(dir)?;
+        let datos = j.format();
+        let _ = self.fs.unlink(padre, nombre);
+        self.fs
+            .create_file(padre, nombre, &datos, self.ahora)
+            .map(|_| ())
+            .map_err(|_| ())
     }
+}
+
+impl SistemaAjeno<'_> {
+    /// `mkdir -p` sobre el sistema de ficheros ajeno.
+    fn crear_arbol(&mut self, ruta: &str) -> Result<u64, ()> {
+        let mut ino = sosofs::layout::ROOT_INODE;
+        for parte in ruta.split('/').filter(|p| !p.is_empty()) {
+            ino = match self.fs.lookup(ino, parte) {
+                Ok(hijo) => hijo,
+                Err(_) => self.fs.mkdir(ino, parte, self.ahora).map_err(|_| ())?,
+            };
+        }
+        Ok(ino)
+    }
+}
+
+/// Hora de pared del **live**, para las fechas de lo que se escriba en el
+/// disco ajeno. No es la de esa máquina, pero es la única que hay y anotar cero
+/// sería peor.
+fn ahora_secs() -> u64 {
+    let mut t = soso_abi::Timespec::default();
+    if sys::clock_gettime(soso_abi::CLOCK_REALTIME, &mut t) < 0 {
+        return 0;
+    }
+    t.tv_sec as u64
+}
+
+/// `/a/b/c` → `("/a/b", "c")`.
+fn partir(ruta: &str) -> Option<(&str, &str)> {
+    let i = ruta.rfind('/')?;
+    let (dir, nombre) = ruta.split_at(i);
+    let nombre = &nombre[1..];
+    if nombre.is_empty() {
+        return None;
+    }
+    Some((if dir.is_empty() { "/" } else { dir }, nombre))
 }

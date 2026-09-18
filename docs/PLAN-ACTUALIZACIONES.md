@@ -1,8 +1,6 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
-Fecha: **2026-09-17**. Estado: **U0–U5 cerradas; U6 a medias (inventario,
-provisión, retirada del log FAT y rescate desde el live hechos; falta la
-restauración offline escribiendo en el destino); U7–U8 pendientes**.
+Fecha: **2026-09-18**. Estado: **U0–U6 cerradas; U7–U8 pendientes**.
 El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md)
 y ya gobierna el arranque, el cliente, el instalador y el shim: el kernel
 reconcilia el registro de la ESP con el diario antes de firmware e init, y
@@ -306,9 +304,9 @@ fallido debe conservar los datos y copias restantes para ese rescate.
 **U0–U5 cerradas** (2026-09-17). La sección 3.6 amplió el alcance de la vuelta
 atrás después, y U5 se desglosó en U5a–U5e, entregadas y acreditadas una a una
 (ver el desglose y la sección 6); la **exclusión de escritores**, que no caía en
-ninguna de las cinco, se cerró aparte el mismo día. De **U6** están hechos el inventario,
-la provisión desde el live y la retirada del log FAT (2026-09-17); falta la
-reparación offline sobre el sosofs del destino. U7–U8 pendientes.
+ninguna de las cinco, se cerró aparte el mismo día. **U6** quedó cerrada el 2026-09-18.
+U7–U8 pendientes: el siguiente paso es U7, la matriz de validación con fallos
+inyectados.
 
 | ID | Depende de | Trabajo y archivos principales | Criterio de cierre |
 |---|---|---|---|
@@ -318,7 +316,7 @@ reparación offline sobre el sosofs del destino. U7–U8 pendientes.
 | U3 ✅ | U0 | Contrato de release, perfil, canales, inventario y exclusiones; `release.rs`, manifest/pack y configuración | **Cerrada 2026-09-16.** `canal.rs` + inventario con motivo, 14 fixtures de canal/precedencia/exclusiones; `release` emite el contrato de compatibilidad y aborta si cuela una ruta prohibida. |
 | U4 ✅ | U3 | Preflight y descarga durable reanudable; `soso-update`, `net.rs`, `soso-http` | **Cerrada 2026-09-17.** `descarga.rs` (12 pruebas host) + área de preparación en sosofs; `test-update` comprueba la reanudación **cruzando un reinicio**. |
 | U5 ✅ | U0, U4 | Backup retenido, exclusión de escritores, aplicación/recuperación antes de firmware/init, shim, entrada UEFI de rescate y confirmación conjunta; desglose U5a–U5e | **Cerrada 2026-09-17** (U5a–U5e + exclusión de escritores): vuelta atrás automática, manual y desde el firmware, también tras confirmar; ningún corte arranca una pareja mezclada ni elimina la última copia válida (§3.6); y entre el respaldo y el reinicio nadie reescribe lo que el punto copió. Dos límites anotados: el arranque de la pareja antigua **bajo su propio kernel** (lo gobierna `SOSOKRN.MET`) y los cortes inyectados E2E, que son de U7. |
-| U6 ⏳ | U2, U5 | Transición de instalaciones existentes, release puente, huecos ESP/entrada de recuperación y reparación offline desde live | **Parcial 2026-09-17:** inventario (`soso-update transicion`), provisión desde el live por el shim (huecos, identidad, cargador y entrada de rescate) y retirada del log FAT, acreditados E2E en `test-install`. Falta la restauración **offline de verdad** (escribir en el sosofs del destino desde el live, para cuando su kernel no arranca) y escribir la secuencia de release puente. |
+| U6 ✅ | U2, U5 | Transición de instalaciones existentes, release puente, huecos ESP/entrada de recuperación y reparación offline desde live | **Cerrada 2026-09-18:** inventario (`soso-update transicion`), provisión desde el live por el shim (huecos, identidad, cargador y entrada de rescate), retirada del log FAT, y `soso-update recuperar` sobre otro disco —enumerar, verificar, pedir el rescate o restaurarlo offline—. Acreditado E2E en `test-install` (transición) y `test-update` (fase «ajeno», arrancando el disco reparado). La secuencia puente está escrita: transición primero, OTA recuperable después. |
 | U7 | U1–U6 | Extender bancos host, QEMU USB→NVMe y OTA con fallos | Matriz de la sección 5 verde, incluida retención A→B→C, fallo de C, reversión tras confirmar y fallo durante la propia recuperación. |
 | U8 | U7 | Release candidata y validación en ROG por WiFi | Instalación/actualización y recuperación verificadas en placa; manual y estado reflejan exactamente lo probado. |
 
@@ -402,8 +400,8 @@ comportamiento ante corte eléctrico real del NVMe.
 ### Ampliación de vuelta atrás — 2026-09-16
 
 - **Alcance:** §3.6, desglose U5a–U5e y pruebas de recuperación adicionales.
-  U0–U2 conservan su cierre histórico; U3–U5 cerradas el 2026-09-17; U6 a
-  medias desde esa fecha; U7–U8 siguen pendientes.
+  U0–U2 conservan su cierre histórico; U3–U5 cerradas el 2026-09-17 y U6 el
+  2026-09-18; U7–U8 siguen pendientes.
 - **Hallazgo de diseño:** el slot único `SOSOKRN.BIN` alterna staging/backup;
   no acredita conservar la versión anterior al preparar la siguiente OTA.
   Además, restaurar el ELF no sustituye el kernel que sigue ejecutándose.
@@ -758,7 +756,7 @@ escondidas porque nadie miraba un arranque **después** del que revierte.
   publicar la decisión, para que un corte en medio deje el registro en
   `rescatar` y el arranque siguiente repita un rescate idempotente.
 
-### U6 — parcial el 2026-09-17/18 (inventario, provisión, log FAT y rescate desde el live)
+### U6 — cerrada el 2026-09-18 (transición, rescate y reparación desde el live)
 
 Una instalación hecha con un live antiguo **se puede actualizar, pero sin vuelta
 atrás**: no tiene los huecos de la ESP que el contrato necesita ni la entrada de
@@ -831,11 +829,44 @@ rescate. Lo entregado aquí es saber eso y arreglarlo sin reinstalar.
     se exige que lo encuentre en una ESP que no es la suya, monte su sosofs y
     verifique la copia antes de ofrecer nada.
 
-**Lo que falta de U6:** la restauración **offline de verdad**, escribiendo en el
-sosofs del destino desde el live, para cuando el kernel de esa máquina **no
-arranca** y por tanto no puede atender un `rescatar`; y escribir la secuencia de
-release puente como procedimiento —hoy el orden recomendado es transición
-primero, OTA recuperable después—.
+- **Restauración offline** (`--restaurar`): monta su sosofs **en escritura** y
+  hace lo mismo que haría su kernel, en el mismo orden —punto verificado entero,
+  restaurar, cerrar el diario, publicar la decisión—. Es la vía para cuando ese
+  kernel **no arranca** y por tanto no puede atender un `rescatar`. El
+  dispositivo nace sólo lectura y la escritura hay que pedirla a mano: mirar el
+  disco de otra máquina es lo normal, escribirlo es la excepción. La versión
+  Si se corta antes de publicar, su registro sigue pidiendo rescate y repetir la
+  orden es inofensivo.
+  - **Publica `revertido`, no `restaurado-a-prueba`**, y esto lo enseñó la
+    prueba: «a prueba» significa *un arranque de esa máquina lo intentó y no
+    sabemos cómo acabó*, y aquí no ha arrancado nadie. Dejarlo a prueba hacía
+    que su primer encendido diagnosticara un fallo que no había ocurrido
+    (`PAREJA INCOHERENTE`). **Un estado que describe un arranque sólo lo puede
+    escribir ese arranque.**
+  - **Acreditado E2E**: tras reparar, la imagen se arranca por su cuenta y se
+    exige que corra la versión de destino, que no vuelva a restaurar y que no
+    diagnostique nada. Que el comando diga que restauró no vale como prueba.
+
+#### La secuencia puente
+
+El orden importa, y es al revés de lo que parece:
+
+1. **Primero la transición**, desde el live: `soso-update transicion --disco N` y
+   reiniciar con el USB puesto. La máquina conserva rootfs, sosomfs, claves y
+   configuración; lo único que cambia es su arranque.
+2. **Después la actualización**, ya recuperable: `soso-update aplicar` en la
+   propia máquina, con punto de vuelta atrás y las tres vías de regreso.
+
+Actualizar primero y migrar después **no** vale: esa primera actualización iría
+sin vuelta atrás, que es justamente lo que se quiere evitar. Por eso el cliente
+nuevo se planta antes de descargar si la máquina no admite recuperación, en vez
+de dejar decidir por descuido. Y no hace falta una release intermedia: la
+transición la hace el **live**, no el OTA, así que no depende de que el sistema
+viejo sepa nada nuevo.
+
+**Lo que falta de U6:** nada conocido. Los casos de la matriz de §5 que tocan
+esto —cortes en mitad de la transición, ESP sin sitio para los huecos— son de
+U7.
 
 ### Exclusión de escritores — cerrada el 2026-09-17
 

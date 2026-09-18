@@ -91,7 +91,10 @@ pub fn run(filtro: Option<&str>) {
 
     if quiere("ajeno") {
         let serial = dir.join("ajeno.log");
-        match fase_recuperar_ajeno(&ovmf_code, &vars, &live_base, &dir, &key, &serial) {
+        let ver = crate::version::read_version(&root);
+        match fase_recuperar_ajeno(
+            &ovmf_code, &vars, &live_base, &live, &dir, &key, &serial, &ver,
+        ) {
             Ok(l) => marca(&format!("desde el live: recuperar otro disco — {l}"), true),
             Err(e) => {
                 marca(&format!("desde el live: recuperar otro disco — {e}"), false);
@@ -534,16 +537,17 @@ fn fase_recuperar_ajeno(
     code: &Path,
     vars: &Path,
     live: &Path,
+    origen: &Path,
     dir: &Path,
     key: &Path,
     serial: &Path,
+    ver_base: &str,
 ) -> Result<String, String> {
-    let origen = dir.join("live-vuelta.img");
-    if !origen.exists() {
-        return Err("hace falta la fase de vuelta atrás antes (deja live-vuelta.img)".into());
-    }
+    // La imagen ajena es la que quedó **actualizada** en las fases anteriores:
+    // versión nueva corriendo y un punto retenido a la anterior. Es el estado
+    // en que de verdad hace falta esto.
     let ajeno = dir.join("ajeno.img");
-    crate::copy_sparse(&origen, &ajeno);
+    crate::copy_sparse(origen, &ajeno);
 
     let _ = std::fs::remove_file(serial);
     let qemu = lanzar_live_con(code, vars, live, serial, Some(&ajeno))?;
@@ -553,7 +557,6 @@ fn fase_recuperar_ajeno(
         key,
         SSH_PORT,
         "soso-update recuperar
-halt
 ",
         Duration::from_secs(180),
         "copia verificada",
@@ -567,12 +570,67 @@ halt
     if !salida.contains("copia verificada") {
         return Err(format!("ofreció una vuelta atrás sin comprobarla: {salida:?}"));
     }
-    Ok(salida
+    let id = salida
         .lines()
-        .find(|l| l.contains("vuelta atrás guardada"))
-        .unwrap_or("")
-        .trim()
-        .to_string())
+        .find_map(|l| l.trim().strip_prefix("--- disco "))
+        .and_then(|r| r.split_whitespace().next())
+        .ok_or_else(|| format!("no enumeró ningún disco: {salida:?}"))?
+        .to_string();
+    // A qué versión dice que puede volver: es la que tendrá que estar corriendo
+    // cuando ese disco arranque.
+    let destino = salida
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("vuelta atrás guardada: "))
+        .and_then(|r| r.split_whitespace().next())
+        .ok_or("no dijo a qué versión volvía")?
+        .to_string();
+
+    // Y ahora la reparación de verdad: restaurar desde aquí, que es la vía para
+    // cuando el kernel de esa máquina ni siquiera arranca.
+    let salida2 = ssh_guion_hasta(
+        key,
+        SSH_PORT,
+        &format!("soso-update recuperar --disco {id} --restaurar\nhalt\n"),
+        Duration::from_secs(180),
+        "ya puede arrancar",
+    )?;
+    if !salida2.contains("restaurados") {
+        return Err(format!("no restauró nada: {salida2:?}"));
+    }
+    drop(_guard);
+
+    // La prueba que cuenta: esa imagen, arrancada por su cuenta, tiene que
+    // estar en la versión anterior y acreditarla ella sola. Que el comando diga
+    // que restauró no vale: lo que importa es que la máquina arranque así.
+    let serial2 = dir.join("ajeno-2.log");
+    let _ = std::fs::remove_file(&serial2);
+    let qemu = lanzar_live(code, vars, &ajeno, &serial2)?;
+    let _guard2 = Matar(qemu.child);
+    esperar_en_fichero(&serial2, "sosh —", Duration::from_secs(300))?;
+    let salida3 = ssh_guion_hasta(
+        key,
+        SSH_PORT,
+        "soso-update estado
+halt
+",
+        Duration::from_secs(120),
+        &format!("rootfs: {destino}"),
+    )?;
+    if !salida3.contains(&format!("rootfs: {destino}")) {
+        return Err(format!("el disco restaurado no arrancó en {destino}: {salida3:?}"));
+    }
+    let serie = std::fs::read_to_string(&serial2).unwrap_or_default();
+    if serie.contains("txn: restaurada la versión") {
+        return Err("volvió a restaurar: la reparación desde el live no quedó cerrada".into());
+    }
+    // Y sobre todo: el arranque no puede diagnosticar un fallo que no ha
+    // ocurrido. Reparar desde fuera deja la máquina lista, no «a prueba»: nadie
+    // ha intentado arrancarla todavía.
+    if serie.contains("PAREJA INCOHERENTE") {
+        return Err("el disco reparado desde el live arrancó dando diagnóstico".into());
+    }
+    let _ = ver_base;
+    Ok(format!("restaurado desde el live; arranca en {destino}"))
 }
 
 fn fase_recuperacion_corte(
