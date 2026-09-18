@@ -1,8 +1,8 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
 Fecha: **2026-09-17**. Estado: **U0–U5 cerradas; U6 a medias (inventario,
-provisión y retirada del log FAT hechos; falta la reparación offline desde el
-live); U7–U8 pendientes**.
+provisión, retirada del log FAT y rescate desde el live hechos; falta la
+restauración offline escribiendo en el destino); U7–U8 pendientes**.
 El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md)
 y ya gobierna el arranque, el cliente, el instalador y el shim: el kernel
 reconcilia el registro de la ESP con el diario antes de firmware e init, y
@@ -318,7 +318,7 @@ reparación offline sobre el sosofs del destino. U7–U8 pendientes.
 | U3 ✅ | U0 | Contrato de release, perfil, canales, inventario y exclusiones; `release.rs`, manifest/pack y configuración | **Cerrada 2026-09-16.** `canal.rs` + inventario con motivo, 14 fixtures de canal/precedencia/exclusiones; `release` emite el contrato de compatibilidad y aborta si cuela una ruta prohibida. |
 | U4 ✅ | U3 | Preflight y descarga durable reanudable; `soso-update`, `net.rs`, `soso-http` | **Cerrada 2026-09-17.** `descarga.rs` (12 pruebas host) + área de preparación en sosofs; `test-update` comprueba la reanudación **cruzando un reinicio**. |
 | U5 ✅ | U0, U4 | Backup retenido, exclusión de escritores, aplicación/recuperación antes de firmware/init, shim, entrada UEFI de rescate y confirmación conjunta; desglose U5a–U5e | **Cerrada 2026-09-17** (U5a–U5e + exclusión de escritores): vuelta atrás automática, manual y desde el firmware, también tras confirmar; ningún corte arranca una pareja mezclada ni elimina la última copia válida (§3.6); y entre el respaldo y el reinicio nadie reescribe lo que el punto copió. Dos límites anotados: el arranque de la pareja antigua **bajo su propio kernel** (lo gobierna `SOSOKRN.MET`) y los cortes inyectados E2E, que son de U7. |
-| U6 ⏳ | U2, U5 | Transición de instalaciones existentes, release puente, huecos ESP/entrada de recuperación y reparación offline desde live | **Parcial 2026-09-17:** inventario (`soso-update transicion`), provisión desde el live por el shim (huecos, identidad, cargador y entrada de rescate) y retirada del log FAT, acreditados E2E en `test-install`. Falta la **reparación offline** sobre el sosofs del destino y escribir la secuencia de release puente. |
+| U6 ⏳ | U2, U5 | Transición de instalaciones existentes, release puente, huecos ESP/entrada de recuperación y reparación offline desde live | **Parcial 2026-09-17:** inventario (`soso-update transicion`), provisión desde el live por el shim (huecos, identidad, cargador y entrada de rescate) y retirada del log FAT, acreditados E2E en `test-install`. Falta la restauración **offline de verdad** (escribir en el sosofs del destino desde el live, para cuando su kernel no arranca) y escribir la secuencia de release puente. |
 | U7 | U1–U6 | Extender bancos host, QEMU USB→NVMe y OTA con fallos | Matriz de la sección 5 verde, incluida retención A→B→C, fallo de C, reversión tras confirmar y fallo durante la propia recuperación. |
 | U8 | U7 | Release candidata y validación en ROG por WiFi | Instalación/actualización y recuperación verificadas en placa; manual y estado reflejan exactamente lo probado. |
 
@@ -758,7 +758,7 @@ escondidas porque nadie miraba un arranque **después** del que revierte.
   publicar la decisión, para que un corte en medio deje el registro en
   `rescatar` y el arranque siguiente repita un rescate idempotente.
 
-### U6 — parcial el 2026-09-17 (inventario, provisión y retirada del log FAT)
+### U6 — parcial el 2026-09-17/18 (inventario, provisión, log FAT y rescate desde el live)
 
 Una instalación hecha con un live antiguo **se puede actualizar, pero sin vuelta
 atrás**: no tiene los huecos de la ESP que el contrato necesita ni la entrada de
@@ -814,8 +814,26 @@ rescate. Lo entregado aquí es saber eso y arreglarlo sin reinstalar.
   (`bootindex`), lo que de paso hace deterministas las dos primeras fases, que
   arrancaban del live por suerte y no por decisión.
 
-**Lo que falta de U6:** la reparación **offline desde el live** sobre el sosofs
-del destino (`soso-update recuperar --disco N`), y escribir la secuencia de
+- **Recuperación desde el live** (`soso-update recuperar`): abre el disco de la
+  otra máquina —su GPT, su ESP por FAT y su sosofs— **sólo en lectura**, lee su
+  registro de arranque, encuentra el punto retenido y lo **verifica entero**
+  contra los ficheros de ese disco. Sin `--disco` **enumera**: quien llega desde
+  un live no tiene por qué saberse los números de sus discos.
+  - Con `--pedir` deja escrita la decisión `rescatar` en su ESP y **la
+    restauración la hace su propio kernel** al arrancar. Es a propósito: es el
+    único que puede tomar la exclusión de escritores y llevar el diario.
+    Escribir en el sosofs de otra máquina desde fuera sería justo el atajo que
+    este contrato evita.
+  - Un hueco a ceros se dice como «nunca ha actualizado», no como avería: un
+    registro vacío no es un registro roto.
+  - **Acreditado E2E** (`test-update`, fase «ajeno»): se le cuelga al live la
+    imagen que dejó la fase de vuelta atrás —con un punto retenido de verdad— y
+    se exige que lo encuentre en una ESP que no es la suya, monte su sosofs y
+    verifique la copia antes de ofrecer nada.
+
+**Lo que falta de U6:** la restauración **offline de verdad**, escribiendo en el
+sosofs del destino desde el live, para cuando el kernel de esa máquina **no
+arranca** y por tanto no puede atender un `rescatar`; y escribir la secuencia de
 release puente como procedimiento —hoy el orden recomendado es transición
 primero, OTA recuperable después—.
 

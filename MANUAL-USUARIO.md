@@ -816,6 +816,14 @@ cargador y registra la entrada «soso — recuperar versión anterior». Despué
 quita el USB y arranca normal; a partir de ahí las actualizaciones ya son
 recuperables. Tiene que ser desde el live porque es el que trae el código nuevo.
 
+**Si una máquina ya no arranca.** Desde el USB live, `soso-update recuperar`
+recorre los demás discos y te dice de cuáles puede recuperar algo: qué versión
+tienen, a cuál pueden volver y si esa copia está **comprobada** (la relee
+entera, no se fía del registro). Con `--pedir` deja apuntada la vuelta atrás en
+ese disco y la hace su propio arranque siguiente; quita el USB y enciende
+normal. Si lo que está roto es el kernel de esa máquina y no llega a arrancar,
+esto todavía no basta — está anotado como pendiente.
+
 **Mientras hay una actualización armada.** Desde que `aplicar` guarda la copia
 de vuelta atrás y hasta que reinicias, los programas y bibliotecas del sistema
 (`/bin`, `/lib` y la parte de `/etc` que trae la release) **no se pueden

@@ -49,6 +49,7 @@ fn main(args: &str) -> u8 {
         "aplicar" => cmd_aplicar(rest),
         "revertir" => cmd_revertir(rest),
         "transicion" | "transición" => cmd_transicion(rest),
+        "recuperar" => cmd_recuperar(rest),
         "help" | "--help" | "-h" => {
             print_usage();
             0
@@ -82,6 +83,7 @@ fn print_usage() {
     println!("  soso-update aplicar [--forzar] [--sin-kernel] [--local DIR] [--channel dev|stable]");
     println!("  soso-update revertir");
     println!("  soso-update transicion [--disco <id>]   (--disco, sólo desde el live)");
+    println!("  soso-update recuperar --disco <id> [--pedir]   (desde el live)");
 }
 
 /// De qué disco arrancó el sistema — mismo `sys::disk_list` + `DISK_FLAG_BOOT`
@@ -1723,5 +1725,336 @@ fn recoger_puntos(referencias: &[TxnId]) {
     for id in soso_update_core::txn::punto::a_recoger(&todos, referencias) {
         println!("  recogido el punto {} (ya no lo referencia nadie)", id.dir());
         borrar_arbol(&dir_punto(id));
+    }
+}
+
+// ------------------------------------------ recuperación desde el live (U6)
+
+/// Mira, desde el live, qué vuelta atrás tiene guardada **otra** instalación, y
+/// —con `--pedir`— se la deja registrada para su próximo arranque.
+///
+/// Es la cuarta vía de recuperación de §3.6: la de cuando falla el shim, la ESP
+/// o la recuperación interna. No llama al instalador: aquí no se formatea nada.
+fn cmd_recuperar(args: &[String]) -> u8 {
+    let pedir = args.iter().any(|a| a == "--pedir");
+    let disco = match args.iter().position(|a| a == "--disco") {
+        Some(i) => match args.get(i + 1).and_then(|s| s.parse::<u32>().ok()) {
+            Some(d) => d,
+            None => {
+                println!("soso-update: --disco necesita el id del disco (mira «soso-install»)");
+                return 2;
+            }
+        },
+        // Sin disco se enumera: quien llega aquí desde un live no tiene por qué
+        // saberse los números de sus discos de memoria.
+        None => return enumerar_recuperables(),
+    };
+
+    let (esp_lba, fs_lba, fs_bloques) = match particiones_de(disco) {
+        Some(v) => v,
+        None => {
+            println!("soso-update: el disco {disco} no parece una instalación de soso");
+            println!("  hace falta una ESP y una partición con sosofs");
+            return 1;
+        }
+    };
+
+    // 1) El registro de arranque de esa máquina: qué dice y a qué punto apunta.
+    let mut sectores = SectoresDisco { disco, base: esp_lba };
+    let Some(raw) = leer_hueco_esp(&mut sectores, b"SOSOTXN ", b"BIN", soso_update_core::UPD_BOOTREC_SIZE) else {
+        println!("soso-update: esa ESP no tiene SOSOTXN.BIN utilizable");
+        println!("  ponla al día primero: soso-update transicion --disco {disco}");
+        return 1;
+    };
+    let rec = match BootRecord::pick(&raw) {
+        Ok(r) => r,
+        // Un hueco a ceros no es un registro roto: es una máquina que no ha
+        // actualizado nunca, y decirlo como avería sería alarmar por nada.
+        Err(soso_update_core::txn::bootrec::BootRecError::Registro(
+            soso_update_core::RecordError::Vacia,
+        )) => {
+            println!("disco {disco}: nunca ha actualizado; no hay nada que deshacer");
+            return 1;
+        }
+        Err(e) => {
+            println!("soso-update: su registro de arranque no se puede leer ({e:?})");
+            return 1;
+        }
+    };
+    println!("disco {disco}: {} → decisión «{}»", rec.version_efectiva(), rec.decision.as_str());
+    let Some(punto_id) = rec.punto else {
+        println!("  no consta ninguna copia guardada a la que volver");
+        return 1;
+    };
+
+    // 2) Su sosofs, sólo lectura: el punto se **verifica** antes de prometer.
+    let dev = BloquesDisco { disco, base: fs_lba, bloques: fs_bloques };
+    let mut fs = match sosofs::Sosofs::mount(dev) {
+        Ok(fs) => fs,
+        Err(e) => {
+            println!("soso-update: no pude montar su sistema de ficheros ({e:?})");
+            return 1;
+        }
+    };
+    let dir = punto_id.dir();
+    let ruta = format!("/var/lib/soso-update/{dir}/punto.rec");
+    let datos = fs
+        .resolve(&ruta)
+        .ok()
+        .and_then(|ino| fs.read_file(ino).ok());
+    let Some(datos) = datos else {
+        println!("  el registro apunta a un punto que no está en su disco ({ruta})");
+        return 1;
+    };
+    let punto = match Punto::parse(&datos) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("  su punto guardado está ilegible ({e:?})");
+            return 1;
+        }
+    };
+    println!("  vuelta atrás guardada: {} ({} ficheros)", punto.version, punto.entradas.len());
+
+    let mut sis = SistemaAjeno { fs: &mut fs, dir: dir.clone() };
+    if let Err(e) = punto.verificar(&mut sis) {
+        println!("  pero la copia NO está completa ({e:?})");
+        println!("  no registro nada: arrancaría a medias");
+        return 1;
+    }
+    println!("  copia verificada");
+
+    if !pedir {
+        println!("para registrarla: soso-update recuperar --disco {disco} --pedir");
+        return 0;
+    }
+
+    // 3) Se **pide**, no se restaura desde aquí. Quien escribe en ese sosofs
+    //    tiene que ser su propio kernel: es el único que puede excluir a otros
+    //    escritores y llevar el diario. Aquí sólo se deja la decisión.
+    let nuevo = BootRecord::nuevo(
+        Decision::Rescatar,
+        rec.id,
+        rec.version_efectiva(),
+        &rec.version_anterior,
+        rec.seq + 1,
+    )
+    .con_punto(punto_id);
+    let bytes = match nuevo.format() {
+        Ok(b) => b,
+        Err(e) => {
+            println!("soso-update: no pude formar el registro ({e:?})");
+            return 1;
+        }
+    };
+    let off = nuevo.ranura() * soso_update_core::SLOT_SIZE;
+    if !escribir_hueco_esp(&mut sectores, b"SOSOTXN ", b"BIN", soso_update_core::UPD_BOOTREC_SIZE, off, &bytes) {
+        println!("soso-update: no pude escribir en su SOSOTXN.BIN");
+        return 1;
+    }
+    println!("registrado: al arrancar ese disco volverá a {}", rec.version_anterior);
+    libsoso::logln!("actualiza: rescate registrado para el disco {} → {}", disco, rec.version_anterior);
+    0
+}
+
+/// Recorre los discos que no son el de arranque y dice de cuáles se puede
+/// recuperar algo. No escribe nada.
+fn enumerar_recuperables() -> u8 {
+    let mut discos = [soso_abi::DiskInfo::default(); 8];
+    let n = sys::disk_list(&mut discos);
+    if n <= 0 {
+        println!("soso-update: no veo ningún disco");
+        return 1;
+    }
+    let mut vistos = 0;
+    for d in &discos[..n as usize] {
+        if d.flags & soso_abi::DISK_FLAG_BOOT != 0 {
+            continue;
+        }
+        if particiones_de(d.id).is_none() {
+            continue;
+        }
+        vistos += 1;
+        println!("--- disco {} ---", d.id);
+        let _ = cmd_recuperar(&[String::from("--disco"), alloc::format!("{}", d.id)]);
+    }
+    if vistos == 0 {
+        println!("soso-update: ningún otro disco tiene una instalación de soso");
+        return 1;
+    }
+    0
+}
+
+/// `(primer LBA de la ESP, primer LBA del sosofs, bloques del sosofs)`.
+fn particiones_de(disco: u32) -> Option<(u64, u64, u64)> {
+    const T_ESP: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+    let mut sec = [0u8; 512];
+    if sys::disk_read(disco, 1, &mut sec) < 0 {
+        return None;
+    }
+    let hdr = gptdisk::Header::parse(&sec).ok()?;
+    let mut entradas = alloc::vec![0u8; hdr.entries_sectors() as usize * 512];
+    if sys::disk_read(disco, hdr.entries_lba, &mut entradas) < 0 {
+        return None;
+    }
+    let tipo_esp = gptdisk::Guid::parse(T_ESP)?;
+    let (mut esp, mut fs) = (None, None);
+    for i in 0..hdr.num_entries as usize {
+        let Some(e) = gptdisk::entry(&entradas, &hdr, i) else {
+            continue;
+        };
+        if !gptdisk::entry_used(e) {
+            continue;
+        }
+        let primero = gptdisk::entry_first_lba(e);
+        if esp.is_none() && gptdisk::entry_type(e) == tipo_esp {
+            esp = Some(primero);
+            continue;
+        }
+        // El sosofs se reconoce por su superbloque, no por el tipo de
+        // partición: el tipo lo elige quien particiona y puede ser cualquiera.
+        if fs.is_none() {
+            let mut cab = [0u8; 512];
+            if sys::disk_read(disco, primero, &mut cab) >= 0 && sosofs::layout::looks_like_sosofs(&cab) {
+                let bloques = (gptdisk::entry_last_lba(e) + 1 - primero) / 8;
+                fs = Some((primero, bloques));
+            }
+        }
+    }
+    let (fs_lba, fs_bloques) = fs?;
+    Some((esp?, fs_lba, fs_bloques))
+}
+
+fn leer_hueco_esp(
+    s: &mut SectoresDisco,
+    nombre: &[u8; 8],
+    ext: &[u8; 3],
+    tamano: usize,
+) -> Option<Vec<u8>> {
+    let slot = {
+        let mut vol = espfat_core::Volumen::abrir(&mut *s).ok()?;
+        vol.localizar(nombre, ext, tamano).ok()?
+    };
+    let mut datos = alloc::vec![0u8; tamano];
+    for (i, trozo) in datos.chunks_mut(espfat_core::SECTOR).enumerate() {
+        if sys::disk_read(s.disco, s.base + slot.data_lba + i as u64, trozo) < 0 {
+            return None;
+        }
+    }
+    Some(datos)
+}
+
+fn escribir_hueco_esp(
+    s: &mut SectoresDisco,
+    nombre: &[u8; 8],
+    ext: &[u8; 3],
+    tamano: usize,
+    offset: usize,
+    datos: &[u8],
+) -> bool {
+    let Some(slot) = espfat_core::Volumen::abrir(&mut *s)
+        .ok()
+        .and_then(|mut v| v.localizar(nombre, ext, tamano).ok())
+    else {
+        return false;
+    };
+    let base = slot.data_lba + (offset / espfat_core::SECTOR) as u64;
+    for (i, trozo) in datos.chunks(espfat_core::SECTOR).enumerate() {
+        if sys::disk_write(s.disco, s.base + base + i as u64, trozo) < 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Acceso por sectores a una partición de **otro** disco, para `espfat-core`.
+struct SectoresDisco {
+    disco: u32,
+    base: u64,
+}
+
+// Por referencia también: los dos ayudantes de abajo prestan el mismo acceso a
+// sectores dos veces —una para localizar el hueco y otra para leerlo o
+// escribirlo— y sin esto habría que duplicarlo.
+impl espfat_core::Sectores for &mut SectoresDisco {
+    fn leer(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), espfat_core::FatError> {
+        (**self).leer(lba, buf)
+    }
+    fn escribir(&mut self, lba: u64, buf: &[u8]) -> Result<(), espfat_core::FatError> {
+        (**self).escribir(lba, buf)
+    }
+}
+
+impl espfat_core::Sectores for SectoresDisco {
+    fn leer(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), espfat_core::FatError> {
+        if sys::disk_read(self.disco, self.base + lba, buf) < 0 {
+            return Err(espfat_core::FatError::Io);
+        }
+        Ok(())
+    }
+    fn escribir(&mut self, lba: u64, buf: &[u8]) -> Result<(), espfat_core::FatError> {
+        if sys::disk_write(self.disco, self.base + lba, buf) < 0 {
+            return Err(espfat_core::FatError::Io);
+        }
+        Ok(())
+    }
+}
+
+/// Acceso por bloques de 4 KiB al sosofs de otro disco. Sólo lectura: la
+/// restauración de verdad la hace el kernel de esa máquina, que es quien puede
+/// tomar la exclusión de escritores y llevar el diario.
+struct BloquesDisco {
+    disco: u32,
+    base: u64,
+    bloques: u64,
+}
+
+impl block_dev::BlockDevice for BloquesDisco {
+    fn block_count(&self) -> u64 {
+        self.bloques
+    }
+    fn read_block(&mut self, block: u64, buf: &mut block_dev::Block) -> Result<(), block_dev::BlockError> {
+        if block >= self.bloques {
+            return Err(block_dev::BlockError::OutOfRange);
+        }
+        if sys::disk_read(self.disco, self.base + block * 8, buf) < 0 {
+            return Err(block_dev::BlockError::Io);
+        }
+        Ok(())
+    }
+    fn write_block(&mut self, _block: u64, _buf: &block_dev::Block) -> Result<(), block_dev::BlockError> {
+        // A propósito: desde aquí no se escribe en el disco de otra máquina.
+        Err(block_dev::BlockError::Io)
+    }
+    fn flush(&mut self) -> Result<(), block_dev::BlockError> {
+        Ok(())
+    }
+}
+
+/// El sistema de ficheros de la otra máquina, visto por el verificador del
+/// punto. Sólo sabe leer, y lo dice: cualquier intento de escribir falla en vez
+/// de hacer algo a medias.
+struct SistemaAjeno<'a> {
+    fs: &'a mut sosofs::Sosofs<BloquesDisco>,
+    dir: String,
+}
+
+impl soso_update_core::txn::aplicador::Sistema for SistemaAjeno<'_> {
+    fn leer(&mut self, de: soso_update_core::txn::aplicador::De, ruta: &str) -> Option<Vec<u8>> {
+        use soso_update_core::txn::aplicador::De;
+        let completa = match de {
+            De::Preparado => format!("/var/lib/soso-update/{}/etapa/{ruta}", self.dir),
+            De::Respaldo => format!("/var/lib/soso-update/{}/respaldo/{ruta}", self.dir),
+        };
+        let ino = self.fs.resolve(&completa).ok()?;
+        self.fs.read_file(ino).ok()
+    }
+    fn escribir(&mut self, _ruta: &str, _datos: &[u8]) -> Result<(), ()> {
+        Err(())
+    }
+    fn borrar(&mut self, _ruta: &str) -> Result<(), ()> {
+        Err(())
+    }
+    fn guardar_diario(&mut self, _j: &Journal) -> Result<(), ()> {
+        Err(())
     }
 }

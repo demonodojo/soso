@@ -13,5 +13,10 @@ soso-abi = { workspace = true }
 libsoso = { workspace = true }
 soso-http = { path = "../../crates/soso-http" }
 soso-update-core = { path = "../../crates/soso-update-core" }
-# Sólo para leer la GPT del disco que se va a poner al día desde el live.
+# Sólo para mirar el disco de **otra** máquina desde el live: su GPT, su ESP
+# y su sosofs. Todo de lectura; escribir en el disco ajeno es del kernel de esa
+# máquina, que es quien puede tomar la exclusión y llevar el diario.
 gptdisk = { path = "../../crates/gptdisk" }
+espfat-core = { path = "../../crates/espfat-core" }
+sosofs = { path = "../../crates/sosofs" }
+block-dev = { path = "../../crates/block-dev" }

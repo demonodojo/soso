@@ -551,11 +551,14 @@ dependencies = [
 name = "soso-update"
 version = "0.1.0"
 dependencies = [
+ "block-dev",
+ "espfat-core",
  "gptdisk",
  "libsoso",
  "soso-abi",
  "soso-http",
  "soso-update-core",
+ "sosofs",
 ]
 
 [[package]]
@@ -595,6 +598,15 @@ name = "soso-web-core"
 version = "0.1.0"
 dependencies = [
  "miniz_oxide",
+]
+
+[[package]]
+name = "sosofs"
+version = "0.1.0"
+dependencies = [
+ "block-dev",
+ "crc",
+ "zerocopy",
 ]
 
 [[package]]

@@ -60,6 +60,11 @@ releyéndolo para compararlo, y registra las dos entradas. Con `/var/log` vivo y
 la identidad declarada, el kernel retira `SOSOLOG.TXT` (`logfs::retirar_log_fat`).
 Prueba: fase 4 de `test-install`, con `bootindex` fijando que arranque el USB
 —si no, el firmware arranca del destino ya instalado y lo atiende su propio shim—.
+`soso-update recuperar [--disco N] [--pedir]` mira **otro** disco desde el live
+(GPT con `gptdisk`, ESP con `espfat-core`, sosofs con `sosofs` montado sólo
+lectura sobre `sys::disk_read`), verifica su punto y, con `--pedir`, le escribe
+`rescatar` en su ESP: **restaura su propio kernel**, que es quien puede excluir
+escritores y llevar el diario. Prueba: fase «ajeno» de `test-update`.
 
 **Exclusión de escritores (2026-09-17, cierra U5):** `SYS_TXN_LOCK=91` +
 `kernel/src/drivers/txnlock.rs`. Entre el respaldo y el reinicio, las rutas que

@@ -89,6 +89,17 @@ pub fn run(filtro: Option<&str>) {
         }
     }
 
+    if quiere("ajeno") {
+        let serial = dir.join("ajeno.log");
+        match fase_recuperar_ajeno(&ovmf_code, &vars, &live_base, &dir, &key, &serial) {
+            Ok(l) => marca(&format!("desde el live: recuperar otro disco — {l}"), true),
+            Err(e) => {
+                marca(&format!("desde el live: recuperar otro disco — {e}"), false);
+                fallos += 1;
+            }
+        }
+    }
+
     let serial3 = dir.join("boot-recovery.log");
     if quiere("recuperacion") {
         match fase_recuperacion_corte(&ovmf_code, &vars, &live_base, &serial3, &key) {
@@ -516,6 +527,54 @@ halt
     Ok(())
 }
 
+/// U6: desde el live, mirar la instalación de **otro** disco y dejarle pedida
+/// la vuelta atrás. El disco ajeno es la copia que dejó la fase de vuelta
+/// atrás: tiene un punto retenido de verdad, verificable.
+fn fase_recuperar_ajeno(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    dir: &Path,
+    key: &Path,
+    serial: &Path,
+) -> Result<String, String> {
+    let origen = dir.join("live-vuelta.img");
+    if !origen.exists() {
+        return Err("hace falta la fase de vuelta atrás antes (deja live-vuelta.img)".into());
+    }
+    let ajeno = dir.join("ajeno.img");
+    crate::copy_sparse(&origen, &ajeno);
+
+    let _ = std::fs::remove_file(serial);
+    let qemu = lanzar_live_con(code, vars, live, serial, Some(&ajeno))?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
+    let salida = ssh_guion_hasta(
+        key,
+        SSH_PORT,
+        "soso-update recuperar
+halt
+",
+        Duration::from_secs(180),
+        "copia verificada",
+    )?;
+    // Lo que importa: encontró la otra instalación, leyó su registro en una ESP
+    // que no es la suya, montó su sosofs y **verificó** la copia antes de
+    // ofrecer nada.
+    if !salida.contains("vuelta atrás guardada") {
+        return Err(format!("no encontró el punto del otro disco: {salida:?}"));
+    }
+    if !salida.contains("copia verificada") {
+        return Err(format!("ofreció una vuelta atrás sin comprobarla: {salida:?}"));
+    }
+    Ok(salida
+        .lines()
+        .find(|l| l.contains("vuelta atrás guardada"))
+        .unwrap_or("")
+        .trim()
+        .to_string())
+}
+
 fn fase_recuperacion_corte(
     code: &Path,
     vars: &Path,
@@ -682,6 +741,18 @@ impl Drop for Matar {
 }
 
 fn lanzar_live(code: &Path, vars: &Path, live: &Path, serial: &Path) -> Result<QemuProc, String> {
+    lanzar_live_con(code, vars, live, serial, None)
+}
+
+/// Como `lanzar_live`, pero con **otro** disco colgado del NVMe: el de la
+/// máquina a la que se va a mirar desde el live.
+fn lanzar_live_con(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    serial: &Path,
+    ajeno: Option<&Path>,
+) -> Result<QemuProc, String> {
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args(["-machine", "q35", "-cpu", "max"])
         .args(["-m", "2048M"])
@@ -702,7 +773,17 @@ fn lanzar_live(code: &Path, vars: &Path, live: &Path, serial: &Path) -> Result<Q
         "-drive",
         &format!("file={},format=raw,if=none,id=live0", live.display()),
     ]);
-    cmd.args(["-device", "usb-storage,bus=xhci.0,port=1,drive=live0"]);
+    cmd.args([
+        "-device",
+        "usb-storage,bus=xhci.0,port=1,drive=live0,bootindex=0",
+    ]);
+    if let Some(ajeno) = ajeno {
+        cmd.args([
+            "-drive",
+            &format!("file={},format=raw,if=none,id=nvme0", ajeno.display()),
+        ]);
+        cmd.args(["-device", "nvme,serial=soso-ajeno,drive=nvme0,bootindex=1"]);
+    }
     crate::apply_qemu_nic_with_ports(&mut cmd, SSH_PORT, SSH_PORT + 1, Some(&MAC.to_string()));
     cmd.args(["-serial", &format!("file:{}", serial.display())])
         .stderr(Stdio::null());
