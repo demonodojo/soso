@@ -47,6 +47,20 @@ aquí: un `Contenido` con hash vacío se escribe `0 ` y al releer se recorta el
 espacio → campo impartible y registro **ilegible**; «no consta» va explícito
 (`- -`). Vale para el punto y para el diario.
 
+**U6 parcial (2026-09-17): transición de instalaciones antiguas.**
+`soso-update transicion` inventaría los huecos de la ESP y separa lo que
+**bloquea** (sin `SOSOTXN.BIN` no hay vuelta atrás; `aplicar` se planta antes de
+descargar) de lo que sólo conviene. `soso-update transicion --disco N` (sólo
+desde el live) deja `PROVISION <guid>` en `SOSOBOOT.TXT`, y
+`boot-shim/src/provision.rs` lo ejecuta: **crear** ficheros FAT necesita el
+driver de UEFI, el kernel sólo sabe sobrescribir por LBA. Crea los huecos con
+tamaño exacto, **declara la identidad `installed`** (un hueco en blanco se lee
+como «sin registro» y la máquina se cree un live), sustituye `bootx64.efi`
+releyéndolo para compararlo, y registra las dos entradas. Con `/var/log` vivo y
+la identidad declarada, el kernel retira `SOSOLOG.TXT` (`logfs::retirar_log_fat`).
+Prueba: fase 4 de `test-install`, con `bootindex` fijando que arranque el USB
+—si no, el firmware arranca del destino ya instalado y lo atiende su propio shim—.
+
 **Exclusión de escritores (2026-09-17, cierra U5):** `SYS_TXN_LOCK=91` +
 `kernel/src/drivers/txnlock.rs`. Entre el respaldo y el reinicio, las rutas que
 administra la release (`soso_update_core::es_administrada`: `bin/ lib/ etc/`

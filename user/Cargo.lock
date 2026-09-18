@@ -551,6 +551,7 @@ dependencies = [
 name = "soso-update"
 version = "0.1.0"
 dependencies = [
+ "gptdisk",
  "libsoso",
  "soso-abi",
  "soso-http",

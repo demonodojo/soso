@@ -142,6 +142,17 @@ pub fn run() {
         }
     }
 
+    // --- 5. U6: poner al día una instalación antigua -----------------------
+    let serial4 = dir.join("boot-transicion.log");
+    match fase_transicion(&ovmf_code, &vars, &live, &target, &dir, &serial4, live_p1) {
+        Ok(l) => marca(&format!("arranque 4: transición — {l}"), true),
+        Err(e) => {
+            marca(&format!("arranque 4: transición — {e}"), false);
+            eprintln!("      ver log serie: {}", serial4.display());
+            fallos += 1;
+        }
+    }
+
     if fallos > 0 {
         eprintln!("\ntest-install: {fallos} comprobación(es) fallaron");
         std::process::exit(1);
@@ -150,6 +161,149 @@ pub fn run() {
 }
 
 // ---------------------------------------------------------------- fases
+
+/// U6: una instalación hecha con un live antiguo no tiene los huecos de la ESP
+/// ni la entrada de rescate. Aquí se fabrica una así —quitándoselos a la recién
+/// instalada— y se comprueba que el shim del live los repone.
+fn fase_transicion(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    target: &Path,
+    dir: &Path,
+    serial: &Path,
+    live_p1: u64,
+) -> Result<String, String> {
+    let antigua = dir.join("legacy.img");
+    crate::copy_sparse(target, &antigua);
+    let esp = gpt_part_lba(&antigua, 1).ok_or("sin partición 1 en la copia")?;
+
+    // Los nombres 8.3 tal como están en la raíz de la ESP.
+    let huecos: [&[u8; 11]; 3] = [b"SOSOTXN BIN", b"SOSOKRN MET", b"SOSOMODETXT"];
+    for n in huecos {
+        crate::fat32_write::delete_root_file(&antigua, esp, n)
+            .map_err(|e| format!("no pude fabricar la ESP antigua ({}): {e}", ascii11(n)))?;
+    }
+    for n in huecos {
+        if hueco_de(&antigua, esp, n).is_some() {
+            return Err(format!("{} seguía ahí antes de empezar", ascii11(n)));
+        }
+    }
+
+    // Y una instalación antigua **sí** tiene su log en la ESP: es lo que U2
+    // sustituye por /var/log y U6 tiene que retirar.
+    crate::fat32_write::write_root_file_fill(&antigua, esp, b"SOSOLOG ", b"TXT", 256 * 1024, b'\n')
+        .map_err(|e| format!("no pude devolver SOSOLOG.TXT a la ESP antigua: {e}"))?;
+
+    // La petición va en la ESP del **live**: la atiende su shim, que es el que
+    // trae el código nuevo. En la máquina de verdad la escribe
+    // `soso-update transicion --disco N`.
+    let guid = guid_particion(&antigua, 1).ok_or("sin GUID de la ESP del destino")?;
+    let peticion = format!("SOSOBOOT v1\nPROVISION {guid}\ndisco destino\n");
+    let mut datos = vec![b'\n'; 4096];
+    datos[..peticion.len()].copy_from_slice(peticion.as_bytes());
+    crate::fat32_write::overwrite_in_dir(live, live_p1, &[], b"SOSOBOOTTXT", &datos)
+        .map_err(|e| format!("no pude dejar la petición en el live: {e}"))?;
+
+    let _ = std::fs::remove_file(serial);
+    let qemu = lanzar(
+        code,
+        vars,
+        serial,
+        Discos::LiveYDestino {
+            live,
+            target: &antigua,
+            ajeno: None,
+        },
+    )?;
+    let _guard = Matar(qemu);
+    esperar_en_fichero(serial, "sosh —", Duration::from_secs(240))?;
+    drop(_guard);
+
+    let respuesta = crate::fat32_write::read_root_file(live, live_p1, b"SOSOBOOTTXT")
+        .map_err(|e| format!("no pude releer SOSOBOOT.TXT: {e}"))?;
+    let texto = String::from_utf8_lossy(&respuesta);
+    let linea = texto
+        .lines()
+        .find(|l| l.starts_with("DONE") || l.starts_with("ERROR"))
+        .ok_or_else(|| format!("el shim no contestó: {:?}", texto.lines().take(3).collect::<Vec<_>>()))?;
+    if linea.starts_with("ERROR") {
+        return Err(linea.to_string());
+    }
+
+    // Y lo que importa: los huecos están otra vez, con el tamaño exacto que el
+    // kernel exige. Uno «casi bien» no le sirve, así que el tamaño es la
+    // comprobación, no la mera presencia.
+    for h in soso_update_core::migracion::HUECOS {
+        let n11 = nombre_8_3(h.nombre);
+        match hueco_de(&antigua, esp, &n11) {
+            Some(size) if size as usize == h.tamano => {}
+            Some(size) => {
+                return Err(format!("{} quedó con {size} B y hacen falta {}", h.nombre, h.tamano))
+            }
+            None => return Err(format!("{} no se creó", h.nombre)),
+        }
+    }
+    // Y ahora la máquina ya puesta al día arranca sola: es cuando su propio
+    // kernel puede retirar el log de la ESP, que sólo se quita **después** de
+    // que /var/log esté vivo.
+    let serial5 = dir.join("boot-transicion-2.log");
+    let _ = std::fs::remove_file(&serial5);
+    {
+        let qemu = lanzar(code, vars, &serial5, Discos::SoloDestino { target: &antigua })?;
+        let _guard = Matar(qemu);
+        esperar_en_fichero(&serial5, "sosh —", Duration::from_secs(240))?;
+    }
+    if hueco_de(&antigua, esp, b"SOSOLOG TXT").is_some() {
+        return Err("la instalación al día sigue con SOSOLOG.TXT en la ESP".into());
+    }
+
+    Ok(texto
+        .lines()
+        .find(|l| l.starts_with("rescate Boot"))
+        .unwrap_or(linea)
+        .to_string())
+}
+
+fn hueco_de(img: &Path, esp_lba: u64, name11: &[u8; 11]) -> Option<u32> {
+    crate::fat32_write::list_root_files(img, esp_lba)
+        .ok()?
+        .into_iter()
+        .find(|(n, _)| n == name11)
+        .map(|(_, size)| size)
+}
+
+fn ascii11(n: &[u8; 11]) -> String {
+    String::from_utf8_lossy(n).trim().to_string()
+}
+
+/// `SOSOTXN.BIN` → `b"SOSOTXN BIN"`.
+fn nombre_8_3(nombre: &str) -> [u8; 11] {
+    let (base, ext) = nombre.split_once('.').unwrap_or((nombre, ""));
+    let mut out = [b' '; 11];
+    for (i, c) in base.bytes().take(8).enumerate() {
+        out[i] = c;
+    }
+    for (i, c) in ext.bytes().take(3).enumerate() {
+        out[8 + i] = c;
+    }
+    out
+}
+
+/// GUID único de una partición, tal como lo escribe el shim en la respuesta.
+fn guid_particion(img: &Path, part: u32) -> Option<String> {
+    let out = Command::new("sgdisk")
+        .args(["-i", &part.to_string()])
+        .arg(img)
+        .output()
+        .ok()?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(rest) = line.split("Partition unique GUID:").nth(1) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
 
 fn fase_instalar(
     code: &Path,
@@ -415,12 +569,20 @@ fn lanzar(code: &Path, vars: &Path, serial: &Path, discos: Discos) -> Result<Chi
                 "-drive",
                 &format!("file={},format=raw,if=none,id=live0", live.display()),
             ]);
-            qemu.args(["-device", "usb-storage,bus=xhci.0,port=1,drive=live0"]);
+            // El USB, primero. Sin esto, en cuanto el destino tiene su entrada
+            // en la NVRAM el firmware arranca de él y el live —que es quien
+            // trae el código nuevo— no llega a ejecutarse nunca. Con las dos
+            // imágenes clonadas, además, sus GUID coinciden y el despiste es
+            // difícil de ver.
+            qemu.args([
+                "-device",
+                "usb-storage,bus=xhci.0,port=1,drive=live0,bootindex=0",
+            ]);
             qemu.args([
                 "-drive",
                 &format!("file={},format=raw,if=none,id=nvme0", target.display()),
             ]);
-            qemu.args(["-device", "nvme,serial=soso-target,drive=nvme0"]);
+            qemu.args(["-device", "nvme,serial=soso-target,drive=nvme0,bootindex=1"]);
             if let Some(ajeno) = ajeno {
                 qemu.args([
                     "-drive",

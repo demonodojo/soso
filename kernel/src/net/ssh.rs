@@ -1,14 +1,16 @@
-//! Servidor SSH-2 con sunset sobre un socket smoltcp (puerto 22).
+//! Servidor SSH-2 con sunset sobre sockets smoltcp (puerto 22).
 //!
-//! Una sola sesión a la vez (monousuario). El flujo replica el prototipo
-//! host `tools/ssh-proto`, ya validado con un cliente OpenSSH real:
+//! Hasta `SSH_SESSIONS` sesiones concurrentes (monousuario, misma clave).
+//! El flujo replica el prototipo host `tools/ssh-proto`, ya validado con un
+//! cliente OpenSSH real:
 //!   Hostkeys → FirstAuth → Authenticated → OpenSession → Env/Pty →
 //!   SessionShell → (datos del canal) → Defunct.
 //!
 //! Al recibir la petición de shell se lanza `/bin/sosh` con su consola
-//! atada a este canal (Console::Ssh): lo que la shell escribe en stdout va
-//! a la cola TX (que este módulo drena hacia el canal) y lo que llega por
-//! el canal va a la cola RX (que la shell lee por su fd 0).
+//! atada a este canal (`Console::Ssh(slot)`): lo que la shell escribe en
+//! stdout va a la cola TX de la ranura (que este módulo drena hacia el
+//! canal) y lo que llega por el canal va a la cola RX (que la shell lee
+//! por su fd 0).
 //!
 //! Reglas de concurrencia: `poll()` solo corre desde `net::poll` (bajo el
 //! try_lock de NetStack) y nunca reentra. Las colas RX/TX las tocan además las
@@ -32,6 +34,7 @@ use sunset::event::{Event, ServEvent};
 use sunset::{ChanData, ChanHandle, Runner, Server, SignKey};
 
 pub const SSH_PORT: u16 = 22;
+pub const SSH_SESSIONS: usize = 4;
 
 /// Host key ed25519: persistente desde /etc/ssh_host_key (semilla de 32
 /// bytes) o generada al arranque si el fichero no existe.
@@ -40,22 +43,44 @@ static HOST_KEY: Once<SignKey> = Once::new();
 /// None => no hay fichero: se rechaza cualquier login.
 static AUTHORIZED: Once<Option<[u8; 32]>> = Once::new();
 
-/// Datos del canal SSH hacia el stdin de la shell.
-static RX: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
-/// stdout de la shell hacia el canal SSH.
-static TX: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
-
-pub fn rx_has_data() -> bool {
-    without_interrupts(|| !RX.lock().is_empty())
+struct Colas {
+    rx: Mutex<VecDeque<u8>>,
+    tx: Mutex<VecDeque<u8>>,
 }
-pub fn rx_pop() -> Option<u8> {
-    without_interrupts(|| RX.lock().pop_front())
+
+static COLAS: [Colas; SSH_SESSIONS] = [
+    Colas {
+        rx: Mutex::new(VecDeque::new()),
+        tx: Mutex::new(VecDeque::new()),
+    },
+    Colas {
+        rx: Mutex::new(VecDeque::new()),
+        tx: Mutex::new(VecDeque::new()),
+    },
+    Colas {
+        rx: Mutex::new(VecDeque::new()),
+        tx: Mutex::new(VecDeque::new()),
+    },
+    Colas {
+        rx: Mutex::new(VecDeque::new()),
+        tx: Mutex::new(VecDeque::new()),
+    },
+];
+
+pub fn rx_has_data(slot: usize) -> bool {
+    without_interrupts(|| COLAS.get(slot).is_some_and(|c| !c.rx.lock().is_empty()))
+}
+pub fn rx_pop(slot: usize) -> Option<u8> {
+    without_interrupts(|| COLAS.get(slot)?.rx.lock().pop_front())
 }
 /// Empujar stdout de la shell hacia el canal. La tty SSH es cruda: sin
 /// `\r` antes de `\n` el cursor no vuelve al inicio de línea.
-pub fn tx_push(data: &[u8]) {
+pub fn tx_push(slot: usize, data: &[u8]) {
+    let Some(colas) = COLAS.get(slot) else {
+        return;
+    };
     without_interrupts(|| {
-        let mut tx = TX.lock();
+        let mut tx = colas.tx.lock();
         let mut prev = tx.back().copied();
         for &b in data {
             if b == b'\n' && prev != Some(b'\r') {
@@ -65,6 +90,19 @@ pub fn tx_push(data: &[u8]) {
             prev = Some(b);
         }
     });
+}
+
+fn colas_vaciar(slot: usize) {
+    if let Some(colas) = COLAS.get(slot) {
+        colas.rx.lock().clear();
+        colas.tx.lock().clear();
+    }
+}
+
+fn tx_vacia(slot: usize) -> bool {
+    COLAS
+        .get(slot)
+        .is_none_or(|c| without_interrupts(|| c.tx.lock().is_empty()))
 }
 
 /// Lee un fichero pequeño del FS montado (claves). None si no existe.
@@ -118,8 +156,9 @@ fn pubkey_autorizada(pk: &sunset::PubKey) -> bool {
     matches!(pk, sunset::PubKey::Ed25519(k) if &k.key.0 == esperada)
 }
 
-/// Estado de la sesión SSH en curso (solo una).
+/// Estado de una sesión SSH en una ranura.
 pub struct SshSession {
+    slot: u8,
     runner: Runner<'static, Server>,
     chan: Option<ChanHandle>,
     shell_pid: Option<u64>,
@@ -139,8 +178,9 @@ pub struct SshSession {
 }
 
 impl SshSession {
-    fn new() -> Self {
+    fn new(slot: u8) -> Self {
         Self {
+            slot,
             runner: Runner::new_server_owned(),
             chan: None,
             shell_pid: None,
@@ -159,16 +199,26 @@ impl SshSession {
 /// peor que perder unos bytes es no cerrar la sesión nunca.
 const GRACIA_TX_MS: u64 = 2_000;
 
-static SESSION: Mutex<Option<SshSession>> = Mutex::new(None);
+static SESIONES: [Mutex<Option<SshSession>>; SSH_SESSIONS] = [
+    Mutex::new(None),
+    Mutex::new(None),
+    Mutex::new(None),
+    Mutex::new(None),
+];
 
 /// Vuelve a LISTEN **sin** RST. `abort()` pone CLOSED y smoltcp manda un RST;
 /// en el AX200 del ROG eso tumba la radio (`No route to host`) y el Enter
 /// siguiente en consola acaba en panic. `listen` admite Closed y TimeWait
 /// (`is_open` es falso); CloseWait se cierra con FIN (`close` → LastAck).
-fn reciclar_listen(socket: &mut tcp::Socket, guard: &mut Option<SshSession>, motivo: &str) {
+fn reciclar_listen(
+    slot: usize,
+    socket: &mut tcp::Socket,
+    guard: &mut Option<SshSession>,
+    motivo: &str,
+) {
     if guard.is_some() {
-        teardown(guard);
-        crate::println!("ssh: sesión cerrada ({motivo})");
+        teardown(slot, guard);
+        crate::println!("ssh[{slot}]: sesión cerrada ({motivo})");
     }
     match socket.state() {
         tcp::State::Closed | tcp::State::TimeWait => {
@@ -183,24 +233,27 @@ fn reciclar_listen(socket: &mut tcp::Socket, guard: &mut Option<SshSession>, mot
 
 /// Avanza la sesión SSH usando `socket` como transporte. Llamada desde
 /// `net::poll` con el socket TCP del puerto 22 ya poll-eado por la iface.
-pub fn poll(socket: &mut tcp::Socket) {
+pub fn poll(slot: usize, socket: &mut tcp::Socket) {
     use tcp::State;
-    let mut guard = SESSION.lock();
+    let Some(mutex) = SESIONES.get(slot) else {
+        return;
+    };
+    let mut guard = mutex.lock();
 
     match socket.state() {
         State::Closed | State::TimeWait => {
-            reciclar_listen(socket, &mut guard, "fin");
+            reciclar_listen(slot, socket, &mut guard, "fin");
             return;
         }
         State::Listen | State::SynSent | State::SynReceived => {
             if guard.is_some() {
-                teardown(&mut guard);
+                teardown(slot, &mut guard);
             }
             return;
         }
         // El cliente cerró (Ctrl-C, hangup): FIN nuestro, no RST.
         State::CloseWait => {
-            reciclar_listen(socket, &mut guard, "cliente");
+            reciclar_listen(slot, socket, &mut guard, "cliente");
             return;
         }
         // Cierre ordenado en curso. Sin sesión no inventar otra.
@@ -216,34 +269,30 @@ pub fn poll(socket: &mut tcp::Socket) {
         if socket.state() != State::Established {
             return;
         }
-        RX.lock().clear();
-        TX.lock().clear();
-        *guard = Some(SshSession::new());
+        colas_vaciar(slot);
+        *guard = Some(SshSession::new(slot as u8));
     }
     let drive_err = {
         let sess = guard.as_mut().unwrap();
         drive(sess, socket).err()
     };
     if let Some(e) = drive_err {
-        crate::println!("ssh: sesión terminada ({e:?})");
-        reciclar_listen(socket, &mut guard, "error");
+        crate::println!("ssh[{slot}]: sesión terminada ({e:?})");
+        reciclar_listen(slot, socket, &mut guard, "error");
     }
 }
 
 /// Cierra la shell y limpia el estado de la sesión.
-fn teardown(guard: &mut Option<SshSession>) {
-    if let Some(sess) = guard
-        && let Some(pid) = sess.shell_pid.take()
-    {
-        task::kill_pid(pid);
-    }
-    RX.lock().clear();
-    TX.lock().clear();
+fn teardown(slot: usize, guard: &mut Option<SshSession>) {
+    task::kill_console(Console::Ssh(slot as u8));
+    colas_vaciar(slot);
     *guard = None;
 }
 
 fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::Error> {
+    let slot = sess.slot as usize;
     let key = HOST_KEY.get().expect("ssh sin host key");
+    let colas = COLAS.get(slot).expect("ranura ssh inválida");
 
     // 1) Rellenar netbuf desde el socket si está vacío y el runner acepta.
     if sess.pos == sess.have && sess.runner.is_input_ready() && socket.can_recv() {
@@ -341,15 +390,16 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
 
     // 5) E/S del canal: recibido → RX (stdin de la shell); TX → canal.
     if let Some(ch) = &sess.chan {
+        let console = Console::Ssh(sess.slot);
         // Entrada: del canal a la cola RX.
         let mut cbuf = [0u8; 1024];
         match sess.runner.read_channel(ch, ChanData::Normal, &mut cbuf) {
             Ok(n) if n > 0 => {
                 for &b in &cbuf[..n] {
                     if b == 0x03 {
-                        task::signal_console(task::Console::Ssh, soso_abi::SIGINT as u8);
+                        task::signal_console(console, soso_abi::SIGINT as u8);
                     } else {
-                        RX.lock().push_back(b);
+                        colas.rx.lock().push_back(b);
                     }
                 }
             }
@@ -380,7 +430,7 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
             }
             let mut chunk = [0u8; 1024];
             let n = {
-                let mut tx = TX.lock();
+                let mut tx = colas.tx.lock();
                 let n = tx.len().min(chunk.len()).min(listo);
                 for c in chunk.iter_mut().take(n) {
                     *c = tx.pop_front().unwrap();
@@ -393,7 +443,7 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
             let escrito = sess.runner.write_channel(ch, ChanData::Normal, &chunk[..n])?;
             // Si el canal aceptó menos de lo sacado, devolver el resto a TX.
             if escrito < n {
-                let mut tx = TX.lock();
+                let mut tx = colas.tx.lock();
                 for &b in chunk[escrito..n].iter().rev() {
                     tx.push_front(b);
                 }
@@ -406,7 +456,7 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
     // canal. El plazo importa porque si el cliente deja de abrir ventana, TX
     // no se vacía nunca y sin él la sesión no terminaría jamás.
     if let Some(t) = sess.muerte_ms
-        && (TX.lock().is_empty() || pit::uptime_ms().saturating_sub(t) >= GRACIA_TX_MS)
+        && (tx_vacia(slot) || pit::uptime_ms().saturating_sub(t) >= GRACIA_TX_MS)
         && let Some(ch) = sess.chan.take()
     {
         sess.runner.channel_done(ch)?;
@@ -447,16 +497,18 @@ fn lanzar_shell(sess: &mut SshSession) {
     if sess.shell_pid.is_some() {
         return; // ya hay shell
     }
+    let slot = sess.slot as usize;
+    let console = Console::Ssh(sess.slot);
     if let Some(motd) = leer_fichero("/etc/motd") {
-        tx_push(&motd);
+        tx_push(slot, &motd);
     }
-    match task::spawn_console("/bin/sosh", "", 0, Console::Ssh) {
+    match task::spawn_console("/bin/sosh", "", 0, console) {
         Ok(pid) => {
-            task::session_leader(pid, Console::Ssh);
-            crate::println!("ssh: sesión abierta, /bin/sosh pid {pid}");
+            task::session_leader(pid, console);
+            crate::println!("ssh[{slot}]: sesión abierta, /bin/sosh pid {pid}");
             sess.shell_pid = Some(pid);
             sess.tuvo_shell = true;
         }
-        Err(e) => crate::println!("ssh: no pude lanzar sosh (errno {e})"),
+        Err(e) => crate::println!("ssh[{slot}]: no pude lanzar sosh (errno {e})"),
     }
 }

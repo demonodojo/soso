@@ -454,6 +454,70 @@ fn delete_named_with_lfn(
     found.ok_or_else(|| format!("fichero {:?} no encontrado", ascii(name11)))
 }
 
+/// Borra un fichero de la raíz, para poder fabricar en las pruebas una ESP
+/// «antigua» a la que le falten los huecos de la transición.
+pub fn delete_root_file(img: &Path, part_first_lba: u64, name11: &[u8; 11]) -> Result<(), String> {
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(img)
+        .map_err(|e| format!("open: {e}"))?;
+    let vol = read_vol(&mut f, part_first_lba)?;
+    let fat_bytes = (vol.spf * vol.bps) as usize;
+    let mut fat = vec![0u8; fat_bytes];
+    read_at(&mut f, vol.base + vol.reserved * vol.bps, &mut fat)?;
+    let root_cluster = if vol.fat16 {
+        None
+    } else {
+        Some(((vol.root_lba - vol.data_start) / (vol.spc * vol.bps)) as u32 + 2)
+    };
+    let offsets = dir_sector_offsets(&vol, &fat, root_cluster);
+    let (primer_cluster, _) = delete_named_with_lfn(&mut f, &offsets, name11)?;
+    // Soltar la cadena: si no, el driver FAT del firmware no podría reutilizar
+    // ese espacio y la prueba no se parecería a una ESP antigua de verdad.
+    liberar_cadena(&mut f, &vol, &mut fat, primer_cluster)?;
+    Ok(())
+}
+
+fn liberar_cadena(
+    f: &mut std::fs::File,
+    vol: &Vol,
+    fat: &mut [u8],
+    primero: u32,
+) -> Result<(), String> {
+    let fin = if vol.fat16 { 0xFFF8 } else { 0x0FFF_FFF8 };
+    let mut c = primero;
+    while c >= 2 && (c as u64) < fin {
+        let siguiente = leer_fat(fat, vol, c);
+        escribir_fat(fat, vol, c, 0);
+        c = siguiente;
+    }
+    for i in 0..vol.num_fats {
+        write_at(f, vol.base + (vol.reserved + i * vol.spf) * vol.bps, fat)?;
+    }
+    Ok(())
+}
+
+fn leer_fat(fat: &[u8], vol: &Vol, c: u32) -> u32 {
+    if vol.fat16 {
+        let o = c as usize * 2;
+        u16::from_le_bytes([fat[o], fat[o + 1]]) as u32
+    } else {
+        let o = c as usize * 4;
+        u32::from_le_bytes([fat[o], fat[o + 1], fat[o + 2], fat[o + 3]]) & 0x0FFF_FFFF
+    }
+}
+
+fn escribir_fat(fat: &mut [u8], vol: &Vol, c: u32, v: u32) {
+    if vol.fat16 {
+        let o = c as usize * 2;
+        fat[o..o + 2].copy_from_slice(&(v as u16).to_le_bytes());
+    } else {
+        let o = c as usize * 4;
+        fat[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    }
+}
+
 /// Localiza el kernel en la raíz: `KERNEL~1` o el primer fichero ELF.
 pub fn find_root_kernel_name(img: &Path, part_first_lba: u64) -> Result<[u8; 11], String> {
     let files = list_root_files(img, part_first_lba)?;

@@ -40,18 +40,29 @@ const FILE_SIZE: usize = 4096;
 const REQ: &CStr16 = cstr16!("SOSOBOOT.TXT");
 /// Ruta del cargador dentro de la ESP instalada (la imagen es un clon del USB).
 const TARGET_LOADER: &CStr16 = cstr16!("\\EFI\\BOOT\\BOOTX64.EFI");
-const DESC: &str = "soso";
+pub(crate) const DESC: &str = "soso";
 /// Segunda entrada, la de rescate: mismo cargador, pero con `rescatar` en su
 /// OptionalData. Es la vía de vuelta atrás cuando el sistema no llega a init
 /// ni hay red: la ofrece el firmware, no el sistema que ha fallado.
-const DESC_RESCATE: &str = "soso — recuperar versión anterior";
+pub(crate) const DESC_RESCATE: &str = "soso — recuperar versión anterior";
 const LOAD_OPTION_ACTIVE: u32 = 0x0000_0001;
 
 /// Punto de entrada: atiende la petición pendiente, si la hay. Devuelve una
 /// línea para el log de pantalla, o `None` si no había nada que hacer.
 pub fn atender() -> Option<String> {
     let texto = leer_peticion()?;
-    let guid = parse_install(&texto)?;
+    if let Some(guid) = parse_peticion(&texto, "PROVISION ") {
+        // U6: una instalación hecha con un live antiguo no tiene los huecos de
+        // la ESP ni la entrada de rescate. Aquí, con el firmware todavía al
+        // mando, sí se pueden crear ficheros en FAT: el kernel no puede.
+        let resultado = match crate::provision::provisionar(guid) {
+            Ok(detalle) => format!("DONE PROVISION\nesp {guid}\n{detalle}"),
+            Err(e) => format!("ERROR {e}\nesp {guid}\n"),
+        };
+        escribir_respuesta(&resultado);
+        return Some(resultado.lines().next().unwrap_or("").to_string());
+    }
+    let guid = parse_peticion(&texto, "INSTALL ")?;
 
     let resultado = match registrar(guid, DESC, None) {
         Ok(num) => {
@@ -72,14 +83,16 @@ pub fn atender() -> Option<String> {
     Some(resultado.lines().next().unwrap_or("").to_string())
 }
 
-/// Busca la línea `INSTALL <guid>`. Ignora peticiones ya atendidas (`DONE`).
-fn parse_install(texto: &str) -> Option<Guid> {
+/// Busca la línea `<verbo> <guid>`. Ignora peticiones ya atendidas (`DONE`):
+/// el fichero se queda escrito, y repetir una instalación o una provisión
+/// porque nadie borró la nota sería peor que no hacer nada.
+fn parse_peticion(texto: &str, verbo: &str) -> Option<Guid> {
     for line in texto.lines() {
         let line = line.trim();
         if line.starts_with("DONE") || line.starts_with("ERROR") {
             return None;
         }
-        if let Some(g) = line.strip_prefix("INSTALL ") {
+        if let Some(g) = line.strip_prefix(verbo) {
             return Guid::try_parse(g.trim()).ok();
         }
     }
@@ -89,7 +102,7 @@ fn parse_install(texto: &str) -> Option<Guid> {
 /// Registra (o reutiliza) la `Boot####` con esta descripción. `datos` viaja en
 /// el OptionalData, que es lo que el shim lee para saber por dónde lo han
 /// arrancado.
-fn registrar(esp: Guid, desc: &str, datos: Option<&str>) -> Result<u16, String> {
+pub(crate) fn registrar(esp: Guid, desc: &str, datos: Option<&str>) -> Result<u16, String> {
     let handle = localizar_esp(esp).ok_or_else(|| {
         format!("no encuentro ninguna ESP con GUID de partición {esp}")
     })?;
@@ -143,7 +156,7 @@ fn registrar(esp: Guid, desc: &str, datos: Option<&str>) -> Result<u16, String> 
 
 /// Handle de la partición (con sistema de ficheros FAT) cuyo device path lleva
 /// un nodo HardDrive con esta firma GPT.
-fn localizar_esp(esp: Guid) -> Option<Handle> {
+pub(crate) fn localizar_esp(esp: Guid) -> Option<Handle> {
     let handles = boot::locate_handle_buffer(SearchType::from_proto::<SimpleFileSystem>()).ok()?;
     for &handle in handles.iter() {
         let Ok(dp) = abrir_device_path(handle) else {

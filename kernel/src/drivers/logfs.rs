@@ -158,7 +158,36 @@ pub fn init() {
     cabeceras();
     drenar_todo();
     crate::println!("logfs: {DIR_LOG} activo ({abiertos}/3 flujos)");
+    retirar_log_fat();
 }
+
+/// U6: con `/var/log` funcionando en una instalación declarada, `SOSOLOG.TXT`
+/// sobra en la ESP y se retira.
+///
+/// El orden importa: se hace **después** de que el escritor nativo esté vivo,
+/// nunca antes. Quedarse sin el log de la ESP es quedarse sin el único canal de
+/// diagnóstico de una máquina que no monta sosofs, así que sólo se quita cuando
+/// consta que hay otro. En el live no se toca: allí ese fichero no es un resto,
+/// es la forma de leer lo que pasó.
+#[cfg(feature = "drv-live-disk")]
+fn retirar_log_fat() {
+    use crate::drivers::{espfat, modo};
+    if !modo::instalado_declarado() || !espfat::existe(b"SOSOLOG ", b"TXT") {
+        return;
+    }
+    match espfat::borrar(b"SOSOLOG ", b"TXT") {
+        Ok(()) => {
+            crate::println!("logfs: retirado SOSOLOG.TXT de la ESP ({DIR_LOG} ocupa su sitio)");
+            crate::otalog!("arranque: retirado SOSOLOG.TXT; el log vive en {}", DIR_LOG);
+        }
+        // Que no se pueda quitar no es motivo para nada más: el log de más no
+        // rompe nada, y se volverá a intentar en el arranque siguiente.
+        Err(e) => crate::println!("logfs: no pude retirar SOSOLOG.TXT ({e:?})"),
+    }
+}
+
+#[cfg(not(feature = "drv-live-disk"))]
+fn retirar_log_fat() {}
 
 /// Volcado diferido, ~cada 2 s. Se llama desde el bucle del planificador.
 pub fn poll() {

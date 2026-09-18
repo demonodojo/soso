@@ -782,6 +782,15 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
         let _ = report.paso_ssh_sys(&mut qemu, slot, sid, "marca /tmp/sosh-ready", || {
             ssh_sosh_ready(key, port)
         });
+        filter.if_step(sid, "ssh: dos sesiones concurrentes", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "ssh: dos sesiones concurrentes",
+                || ssh_dos_sesiones(key, port),
+            );
+        });
         filter.if_step(sid, "ping ICMP a 10.0.2.2", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "ping ICMP a 10.0.2.2", || {
                 ssh_ping(key, port)
@@ -1397,6 +1406,45 @@ fn ssh_sosh_ready(key: &Path, ssh_port: u16) -> Result<(), String> {
     )?;
     if !salida.contains("pid=") {
         return Err(format!("sin marca pid= en /tmp/sosh-ready: {salida:?}"));
+    }
+    Ok(())
+}
+
+/// Dos clientes SSH a la vez: salidas aisladas (no cola en un solo canal).
+fn ssh_dos_sesiones(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let key_path = key.to_path_buf();
+    let limite_largo = Duration::from_secs(120);
+    let limite_corto = Duration::from_secs(60);
+    let key_a = key_path.clone();
+    let hilo_a = std::thread::spawn(move || {
+        ssh_guion(
+            &key_a,
+            ssh_port,
+            "init sleep 4000\necho FIN-A\nexit\n",
+            limite_largo,
+        )
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let texto_b = ssh_guion(
+        &key_path,
+        ssh_port,
+        "echo FIN-B\nexit\n",
+        limite_corto,
+    )?;
+    let texto_a = hilo_a
+        .join()
+        .map_err(|_| "hilo SSH A paniqueó".to_string())??;
+    if !texto_a.contains("FIN-A") {
+        return Err(format!("sesión A sin FIN-A: {texto_a:?}"));
+    }
+    if texto_a.contains("FIN-B") {
+        return Err(format!("sesión A mezcló salida de B: {texto_a:?}"));
+    }
+    if !texto_b.contains("FIN-B") {
+        return Err(format!("sesión B sin FIN-B: {texto_b:?}"));
+    }
+    if texto_b.contains("FIN-A") {
+        return Err(format!("sesión B mezcló salida de A: {texto_b:?}"));
     }
     Ok(())
 }

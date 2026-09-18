@@ -51,7 +51,7 @@ struct NetStack {
     iface: Interface,
     sockets: SocketSet<'static>,
     echo: Vec<SocketHandle>,
-    ssh: SocketHandle,
+    ssh: Vec<SocketHandle>,
     dhcp: SocketHandle,
     configured: bool,
     dhcp_enabled: bool,
@@ -143,16 +143,22 @@ fn clear_ipv4_config(iface: &mut Interface) {
     iface.routes_mut().remove_default_ipv4_route();
 }
 
-fn close_tcp_services(sockets: &mut SocketSet<'static>, echo: &[SocketHandle], ssh: SocketHandle) {
+fn close_tcp_services(
+    sockets: &mut SocketSet<'static>,
+    echo: &[SocketHandle],
+    ssh: &[SocketHandle],
+) {
     for &h in echo {
         let s = sockets.get_mut::<tcp::Socket>(h);
         if s.is_open() {
             s.close();
         }
     }
-    let s = sockets.get_mut::<tcp::Socket>(ssh);
-    if s.is_open() {
-        s.close();
+    for &h in ssh {
+        let s = sockets.get_mut::<tcp::Socket>(h);
+        if s.is_open() {
+            s.close();
+        }
     }
 }
 
@@ -171,10 +177,14 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
             ))
         })
         .collect();
-    let ssh = sockets.add(tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0; 16384]),
-        tcp::SocketBuffer::new(vec![0; 16384]),
-    ));
+    let ssh = (0..ssh::SSH_SESSIONS)
+        .map(|_| {
+            sockets.add(tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0; 16384]),
+                tcp::SocketBuffer::new(vec![0; 16384]),
+            ))
+        })
+        .collect();
 
     if backend == BackendKind::Ninguno {
         println!("net: sin NIC — pila sólo para loopback (127.0.0.1)");
@@ -306,9 +316,9 @@ pub fn on_wired_link_up() {
     n.dhcp_started = now();
     clear_ipv4_config(&mut n.iface);
     let echo = n.echo.clone();
-    let ssh = n.ssh;
+    let ssh = n.ssh.clone();
     let dhcp = n.dhcp;
-    close_tcp_services(&mut n.sockets, &echo, ssh);
+    close_tcp_services(&mut n.sockets, &echo, &ssh);
     n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
     println!("net: enlace ethernet UP — solicitando DHCP…");
 }
@@ -356,9 +366,9 @@ pub fn on_wifi_connected() {
     n.dhcp_started = now();
     clear_ipv4_config(&mut n.iface);
     let echo = n.echo.clone();
-    let ssh = n.ssh;
+    let ssh = n.ssh.clone();
     let dhcp = n.dhcp;
-    close_tcp_services(&mut n.sockets, &echo, ssh);
+    close_tcp_services(&mut n.sockets, &echo, &ssh);
     n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
     println!("net: wifi asociada — solicitando DHCP…");
 }
@@ -367,7 +377,7 @@ fn poll_dhcp(
     iface: &mut Interface,
     sockets: &mut SocketSet<'static>,
     echo: &[SocketHandle],
-    ssh: SocketHandle,
+    ssh: &[SocketHandle],
     dhcp: SocketHandle,
     configured: &mut bool,
 ) {
@@ -429,13 +439,15 @@ fn try_static_fallback(
 fn poll_tcp_services(
     sockets: &mut SocketSet<'static>,
     echo: &[SocketHandle],
-    ssh: SocketHandle,
+    ssh: &[SocketHandle],
     configured: bool,
 ) {
     if !configured {
         return;
     }
-    ssh::poll(sockets.get_mut::<tcp::Socket>(ssh));
+    for (slot, &h) in ssh.iter().enumerate() {
+        ssh::poll(slot, sockets.get_mut::<tcp::Socket>(h));
+    }
     for &h in echo {
         let s = sockets.get_mut::<tcp::Socket>(h);
         if !s.is_open() {
@@ -501,10 +513,10 @@ pub fn poll() {
 
     iface.poll(now(), dev, sockets);
     if *dhcp_enabled {
-        poll_dhcp(iface, sockets, echo, *ssh, *dhcp, configured);
+        poll_dhcp(iface, sockets, echo, ssh, *dhcp, configured);
         try_static_fallback(iface, *mac, *backend, dev, *dhcp_started, configured);
     }
-    poll_tcp_services(sockets, echo, *ssh, *configured);
+    poll_tcp_services(sockets, echo, ssh, *configured);
     poll_user_tcp(iface, sockets, user_tcp, *configured);
     iface.poll(now(), dev, sockets);
 }

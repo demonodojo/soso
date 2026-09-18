@@ -4,7 +4,7 @@
 filesystem copy-on-write (sosofs), modelos de lenguaje en un segundo disco
 (sosomfs), red real (ethernet, WiFi, SSH), reconocimiento de voz, un navegador
 mínimo, instalación en NVMe y actualizaciones por red. Es **monousuario**: una
-sola sesión SSH a la vez, sin permisos ni cuentas múltiples.
+hasta **4 sesiones SSH simultáneas**, sin permisos ni cuentas múltiples.
 
 Puedes usarlo en **QEMU** (desarrollo), en un **pendrive live** en hardware real
 o **instalado en un disco NVMe** junto a Linux (dual-boot UEFI).
@@ -152,7 +152,7 @@ ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 
 Al conectar verás el mensaje del día (`/etc/motd`) y luego la misma shell **sosh**
 que en la consola serie. Para **cerrar la sesión** usa `exit` o cierra la terminal
-del cliente; solo hay **una sesión SSH a la vez**. Con `ssh -tt`, **Ctrl-C** durante
+del cliente; el sistema admite **hasta 4 sesiones SSH a la vez**. Con `ssh -tt`, **Ctrl-C** durante
 un comando interrumpe ese comando (como en la consola serie), no cierra la sesión.
 
 **Clave de acceso:** al construir la imagen, se inyecta una clave pública ed25519 en
@@ -802,6 +802,20 @@ pareja anterior, después de comprobar la copia entera. Si no consta ninguna
 copia guardada, lo dice en pantalla y sigue arrancando con normalidad en vez de
 intentar nada a ciegas.
 
+**Si tu soso es de antes.** Una instalación hecha con un USB antiguo se
+actualiza, pero **sin vuelta atrás**: le faltan en la ESP los huecos donde se
+apunta la decisión. `soso-update transicion` te dice qué tiene y qué le falta, y
+distingue lo que impide la vuelta atrás de lo que sólo conviene. Si falta lo
+importante, `aplicar` no actualiza y lo dice antes de descargar nada.
+
+Para arreglarlo no hace falta reinstalar ni perder modelos, datos ni
+configuración: arranca el **USB live nuevo**, mira el número de tu disco con
+`soso-install` y lanza `soso-update transicion --disco <n>`. Reinicia con el USB
+puesto: el arranque siguiente crea los huecos que falten, pone al día el
+cargador y registra la entrada «soso — recuperar versión anterior». Después
+quita el USB y arranca normal; a partir de ahí las actualizaciones ya son
+recuperables. Tiene que ser desde el live porque es el que trae el código nuevo.
+
 **Mientras hay una actualización armada.** Desde que `aplicar` guarda la copia
 de vuelta atrás y hasta que reinicias, los programas y bibliotecas del sistema
 (`/bin`, `/lib` y la parte de `/etc` que trae la release) **no se pueden
@@ -1163,7 +1177,7 @@ soso es un sistema con alcance deliberadamente reducido en algunas áreas:
 
 | Área | Limitación |
 |---|---|
-| Usuarios | Monousuario; una sesión SSH simultánea |
+| Usuarios | Monousuario; hasta 4 sesiones SSH simultáneas |
 | Shell | Sin variables ni historial; cwd, pipes y redirecciones |
 | Procesos | `spawn`, no `fork`; scheduler round-robin preemptivo |
 | Red | DHCP automático al arrancar; fallback a `10.0.2.15` en QEMU; sin IPv6 |

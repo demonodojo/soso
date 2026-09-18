@@ -110,7 +110,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `fs/` | sosofs (blk0) + sosomfs (blk1); VFS enruta `/models/*` |
 | `vfs.rs` | Router: lectura/escritura sosofs; modelos → sosomfs (read-only) |
 | `net/` | smoltcp, DHCPv4 al arrancar (fallback 10.0.2.15), polled from scheduler |
-| `net/ssh.rs` | sunset SSH-2, una sesión, CRLF en tx_push, reset_socket al desconectar |
+| `net/ssh.rs` | sunset SSH-2, `SSH_SESSIONS=4`, `Console::Ssh(slot)`, CRLF en tx_push; teardown mata todos los procesos de la ranura |
 | `kshell.rs` | Emergency kernel-shell (`soso>`): `help`, `dmesg [save]`, `hwscan`, `ip`, `ping`, `wifi`, `io`, `halt`, … |
 | `task/` | Processes (cwd, console), scheduler, syscall, path normalization |
 
@@ -217,7 +217,8 @@ el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
 - Auth: ed25519 public key only (`/etc/authorized_key`, 32 raw bytes)
 - Host key: `/etc/ssh_host_key` (32-byte seed, persistent across mkfs)
 - **Stack alignment:** `timer_isr` alinea rsp antes de `net::poll` (crypto SSE); los handlers `x86-interrupt` con código de error dejan `rsp%16==8` en los `call` — TODA llamada profunda desde esos handlers (mmap fault, kill_current, y el print del panic handler) pasa por el trampolín genérico `con_rsp_alineado` de interrupts.rs. Síntomas si se olvida: GPF esporádicos (error 0) en código con `movaps` y panics truncados
-- **Reconexión:** `CloseWait`/`TimeWait` → `abort()` + `listen(22)`; mata shell huérfana
+- **SSH multisesión:** `SSH_SESSIONS=4` sockets en `:22` (como echo); colas RX/TX y `Runner` sunset por ranura; `Console::Ssh(slot)` en procesos; al cerrar una sesión `kill_console` limpia todos los procesos de esa ranura
+- **Reconexión:** `CloseWait`/`TimeWait` → `listen(22)` por socket (sin RST); teardown por ranura
 
 ## sosomfs + LLM
 

@@ -76,8 +76,8 @@ pub enum State {
 pub enum Console {
     /// Puerto serie: la consola física / de emergencia.
     Serial,
-    /// Canal de una sesión SSH (sunset). Solo hay una sesión a la vez.
-    Ssh,
+    /// Canal de una sesión SSH (sunset). El índice es la ranura del socket.
+    Ssh(u8),
 }
 
 impl Console {
@@ -85,7 +85,7 @@ impl Console {
     pub fn has_input(self) -> bool {
         match self {
             Console::Serial => crate::drivers::serial::has_input(),
-            Console::Ssh => crate::net::ssh::rx_has_data(),
+            Console::Ssh(slot) => crate::net::ssh::rx_has_data(slot as usize),
         }
     }
 
@@ -93,7 +93,7 @@ impl Console {
     pub fn read_byte(self) -> Option<u8> {
         match self {
             Console::Serial => crate::drivers::serial::read_byte(),
-            Console::Ssh => crate::net::ssh::rx_pop(),
+            Console::Ssh(slot) => crate::net::ssh::rx_pop(slot as usize),
         }
     }
 
@@ -101,27 +101,37 @@ impl Console {
     pub fn write_bytes(self, data: &[u8]) {
         match self {
             Console::Serial => crate::drivers::serial::write_bytes(data),
-            Console::Ssh => crate::net::ssh::tx_push(data),
+            Console::Ssh(slot) => crate::net::ssh::tx_push(slot as usize, data),
         }
     }
 
     fn fg_pgid(self) -> u64 {
         match self {
             Console::Serial => FG_SERIAL.load(Ordering::Relaxed),
-            Console::Ssh => FG_SSH.load(Ordering::Relaxed),
+            Console::Ssh(slot) => {
+                FG_SSH
+                    .get(slot as usize)
+                    .map(|a| a.load(Ordering::Relaxed))
+                    .unwrap_or(0)
+            }
         }
     }
 
     fn set_fg_pgid(self, pgid: u64) {
         match self {
             Console::Serial => FG_SERIAL.store(pgid, Ordering::Relaxed),
-            Console::Ssh => FG_SSH.store(pgid, Ordering::Relaxed),
+            Console::Ssh(slot) => {
+                if let Some(a) = FG_SSH.get(slot as usize) {
+                    a.store(pgid, Ordering::Relaxed);
+                }
+            }
         }
     }
 }
 
 static FG_SERIAL: AtomicU64 = AtomicU64::new(1);
-static FG_SSH: AtomicU64 = AtomicU64::new(0);
+static FG_SSH: [AtomicU64; crate::net::ssh::SSH_SESSIONS] =
+    [const { AtomicU64::new(0) }; crate::net::ssh::SSH_SESSIONS];
 static SERIAL_SIGINT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
@@ -264,14 +274,27 @@ pub fn note_serial_sigint() {
     SERIAL_SIGINT.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// Marca un proceso para morir (cliente SSH desconectado). No libera su
-/// espacio aquí. Si está `Running` en un core, solo pone `kill_pending`
-/// para que ese core lo convierta en Zombie al desalojar (marcar Zombie
-/// mientras sigue en ring 3 permitiría liberar el AddrSpace desde otro
-/// core → UAF).
+/// Marca un proceso para morir. No libera su espacio aquí. Si está
+/// `Running` en un core, solo pone `kill_pending` para que ese core lo
+/// convierta en Zombie al desalojar (marcar Zombie mientras sigue en ring 3
+/// permitiría liberar el AddrSpace desde otro core → UAF).
+#[allow(dead_code)]
 pub fn kill_pid(pid: u64) {
     let mut procs = PROCS.lock();
     deliver_death(&mut procs, pid, 255, true);
+}
+
+/// Mata todos los procesos vivos atados a esta consola (p. ej. al cerrar SSH).
+pub fn kill_console(console: Console) {
+    let mut procs = PROCS.lock();
+    let pids: alloc::vec::Vec<u64> = procs
+        .iter()
+        .filter(|p| p.console == console && !matches!(p.state, State::Zombie(_)))
+        .map(|p| p.pid)
+        .collect();
+    for pid in pids {
+        deliver_death(&mut procs, pid, 255, true);
+    }
 }
 
 /// Tras `spawn_console` por SSH: nueva sesión y primer plano en esa consola.

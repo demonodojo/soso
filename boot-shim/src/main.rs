@@ -15,6 +15,7 @@ extern crate alloc;
 
 mod actualiza;
 mod bootentry;
+mod provision;
 mod rescate;
 
 use alloc::format;

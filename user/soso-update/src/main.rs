@@ -26,6 +26,7 @@ use soso_update_core::compat::{CompatError, Equipo};
 use soso_update_core::hash::{hex_sha256, Hasher};
 use soso_update_core::kernel_meta::KernelMeta;
 use soso_update_core::manifest::{self, FileEntry, Manifest};
+use soso_update_core::migracion;
 use soso_update_core::mailbox::Mailbox;
 use soso_update_core::plan::{self, Span};
 use soso_update_core::semver::{self, SemVer};
@@ -47,6 +48,7 @@ fn main(args: &str) -> u8 {
         "comprobar" => cmd_comprobar(rest),
         "aplicar" => cmd_aplicar(rest),
         "revertir" => cmd_revertir(rest),
+        "transicion" | "transición" => cmd_transicion(rest),
         "help" | "--help" | "-h" => {
             print_usage();
             0
@@ -79,6 +81,7 @@ fn print_usage() {
     println!("  soso-update comprobar [--local DIR] [--channel dev|stable]");
     println!("  soso-update aplicar [--forzar] [--sin-kernel] [--local DIR] [--channel dev|stable]");
     println!("  soso-update revertir");
+    println!("  soso-update transicion [--disco <id>]   (--disco, sólo desde el live)");
 }
 
 /// De qué disco arrancó el sistema — mismo `sys::disk_list` + `DISK_FLAG_BOOT`
@@ -142,6 +145,18 @@ fn cmd_estado() -> u8 {
         println!("  «soso-update revertir», o la entrada «soso — recuperar versión");
         println!("  anterior» del menú de arranque si el sistema no llega a arrancar");
     }
+    // U6: lo primero que quiere saber quien mira `estado` es si su máquina
+    // puede volver atrás, no cuántos huecos tiene la ESP.
+    let faltas = migracion::diagnosticar(&inventario());
+    if faltas.is_empty() {
+        println!("transición: al día");
+    } else if migracion::admite_recuperable(&faltas) {
+        println!("transición: falta algo menor ({} cosas) — «soso-update transicion»", faltas.len());
+    } else {
+        println!("transición: esta instalación NO admite vuelta atrás todavía");
+        println!("  detalle y arreglo: «soso-update transicion»");
+    }
+
     let mut mbuf = [0u8; 4096];
     let mn = sys::upd_read(UPD_WHICH_MAILBOX, 0, &mut mbuf);
     if mn > 0 {
@@ -265,6 +280,21 @@ fn cmd_aplicar(args: &[String]) -> u8 {
         println!("soso-update: ya estás en {} (usa --forzar)", man.version_raw);
         return 0;
     }
+    // U6: si esta máquina no tiene dónde escribir la decisión, no se puede
+    // prometer vuelta atrás — y hay que decirlo **antes** de descargar y
+    // respaldar, no al final, cuando el sistema ya está tocado.
+    let faltas = migracion::diagnosticar(&inventario());
+    if !migracion::admite_recuperable(&faltas) {
+        println!("soso-update: esta instalación todavía no admite actualización recuperable");
+        for f in faltas.iter().filter(|f| f.bloquea()) {
+            println!("  {}", f.descripcion());
+        }
+        println!("  no actualizo: prefiero no tocar nada a dejarte sin camino de regreso");
+        println!("  arréglalo desde un live actualizado («soso-update transicion» lo detalla)");
+        libsoso::logln!("actualiza: instalación sin huecos de transición; no aplico");
+        return 1;
+    }
+
     // La exclusión, lo primero: una segunda instancia tiene que plantarse
     // **antes** de bajarse doce megas para nada. Desde aquí y hasta el
     // reinicio, las rutas administradas son de esta operación.
@@ -1288,6 +1318,155 @@ fn preparar_punto(man: &Manifest, cambian: &[FileEntry]) -> Result<Punto, &'stat
         }
         Err(CrearError::Registro) => Err("no pude registrar la vuelta atrás"),
     }
+}
+
+// ------------------------------------------------------ transición (U6)
+
+/// Qué tiene esta máquina y qué le falta para poder recibir una actualización
+/// **recuperable**. No toca nada: mirar antes de prometer es justamente el
+/// punto —una instalación hecha con un live antiguo se actualiza, pero sin
+/// vuelta atrás, y eso hay que decirlo antes de descargar, no después—.
+fn cmd_transicion(args: &[String]) -> u8 {
+    if let Some(i) = args.iter().position(|a| a == "--disco") {
+        let Some(id) = args.get(i + 1).and_then(|s| s.parse::<u32>().ok()) else {
+            println!("soso-update: --disco necesita el id del disco (mira «soso-install»)");
+            return 2;
+        };
+        return pedir_provision(id);
+    }
+    let inv = inventario();
+    let faltas = migracion::diagnosticar(&inv);
+    if faltas.is_empty() {
+        println!("transición: nada que hacer, esta instalación está al día");
+        return 0;
+    }
+    println!("transición: falta algo en esta instalación");
+    for f in &faltas {
+        let marca = if f.bloquea() { "!!" } else { "  " };
+        println!("  {marca} {}", f.descripcion());
+    }
+    if migracion::admite_recuperable(&faltas) {
+        println!("puede actualizarse con vuelta atrás; lo marcado con «!!» sería lo que la impide");
+    } else {
+        println!("NO puede actualizarse con vuelta atrás todavía");
+        println!("  arréglalo desde un live actualizado; reinstalar no hace falta");
+    }
+    0
+}
+
+/// Pide al shim que ponga al día la ESP de otro disco.
+///
+/// Lo hace el shim y no el kernel porque **crear** ficheros en FAT exige un
+/// driver FAT completo: el kernel sólo sabe sobrescribir por LBA huecos que ya
+/// existen. Bajo UEFI ese driver está, y puede abrir la ESP del disco instalado
+/// por GUID. Por eso esto sólo tiene sentido desde el live: la petición la
+/// atiende el shim **del live**, que es el que trae el código nuevo.
+fn pedir_provision(disco: u32) -> u8 {
+    if !arrancado_de_live() {
+        println!("soso-update: «--disco» es para poner al día otra instalación desde el live");
+        println!("  arrancado así, la petición la atendería el shim de esta misma máquina,");
+        println!("  que es justo el que todavía no sabe hacerlo");
+        return 1;
+    }
+    let Some(esp) = esp_guid_de(disco) else {
+        println!("soso-update: no encuentro una ESP en el disco {disco}");
+        println!("  «soso-install» lista los discos y sus particiones");
+        return 1;
+    };
+    let payload = format!("SOSOBOOT v1\nPROVISION {esp}\ndisco id {disco}\n");
+    if sys::bootreq_write(payload.as_bytes()) < 0 {
+        println!("soso-update: no pude escribir la petición en SOSOBOOT.TXT de este USB");
+        return 1;
+    }
+    println!("transición: pedida para la ESP {esp} del disco {disco}");
+    println!("  reinicia **con el USB puesto**: el shim creará los huecos que falten,");
+    println!("  actualizará su cargador y registrará la entrada de recuperación");
+    libsoso::logln!("actualiza: transición pedida para la ESP {}", esp);
+    0
+}
+
+/// GUID **único** de la primera partición de tipo ESP del disco.
+fn esp_guid_de(disco: u32) -> Option<String> {
+    const T_ESP: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+    let mut sec = [0u8; 512];
+    if sys::disk_read(disco, 1, &mut sec) < 0 {
+        return None;
+    }
+    let hdr = gptdisk::Header::parse(&sec).ok()?;
+    let mut entradas = alloc::vec![0u8; hdr.entries_sectors() as usize * 512];
+    if sys::disk_read(disco, hdr.entries_lba, &mut entradas) < 0 {
+        return None;
+    }
+    let esperado = gptdisk::Guid::parse(T_ESP)?;
+    for i in 0..hdr.num_entries as usize {
+        let e = gptdisk::entry(&entradas, &hdr, i)?;
+        if gptdisk::entry_used(e) && gptdisk::entry_type(e) == esperado {
+            return Some(format!("{}", gptdisk::entry_unique(e)));
+        }
+    }
+    None
+}
+
+/// ¿Estamos en el live? Se pregunta al registro de identidad de la ESP (U2).
+fn arrancado_de_live() -> bool {
+    let mut buf = alloc::vec![0u8; soso_update_core::UPD_MODE_SIZE];
+    let n = sys::upd_read(soso_abi::UPD_WHICH_MODE, 0, &mut buf);
+    let datos = (n > 0).then(|| &buf[..n as usize]);
+    match soso_update_core::resolver_identidad(datos, "") {
+        soso_update_core::Identidad::Explicita(r) => r.modo == soso_update_core::BootMode::Live,
+        // Sin registro legible se trata como live, que es lo que hace el resto
+        // del sistema con una ESP anterior a U2.
+        _ => true,
+    }
+}
+
+/// Mira los huecos de la ESP uno a uno. El kernel sólo los da por buenos si
+/// están, miden lo que deben y sus clusters son consecutivos, así que un
+/// `upd_read` que falle es exactamente «no se puede usar».
+fn inventario() -> migracion::Inventario {
+    let mut huecos = Vec::new();
+    for h in migracion::HUECOS {
+        let which = match h.nombre {
+            "SOSOTXN.BIN" => soso_abi::UPD_WHICH_TXN,
+            "SOSOKRN.BIN" => soso_abi::UPD_WHICH_KERNEL,
+            "SOSOKRN.MET" => soso_abi::UPD_WHICH_META,
+            "SOSOUPD.TXT" => UPD_WHICH_MAILBOX,
+            _ => soso_abi::UPD_WHICH_MODE,
+        };
+        let mut buf = [0u8; 512];
+        let r = sys::upd_read(which, 0, &mut buf);
+        huecos.push(if r > 0 {
+            migracion::EstadoHueco::Listo
+        } else {
+            // El kernel no distingue «no está» de «está y no sirve»: para lo
+            // que hay que decidir aquí da igual, y fingir precisión sería peor.
+            migracion::EstadoHueco::Inservible
+        });
+    }
+    migracion::Inventario {
+        huecos,
+        formato_registro: leer_bootrec_actual().map(|r| r.formato),
+        entrada_rescate: entrada_rescate_registrada(),
+        // Desde dentro no se puede listar la raíz de la ESP: el kernel sólo
+        // sabe localizar huecos por nombre y tamaño. Así que esto se deja en
+        // «no consta» en vez de inventárselo; quien puede mirarlo de verdad es
+        // el live, con el disco delante.
+        log_fat: false,
+        es_live: arrancado_de_live(),
+    }
+}
+
+/// La NVRAM no la puede leer ni el kernel (no hay Runtime Services tras
+/// `ExitBootServices`), así que se mira lo que el shim dejó escrito al
+/// registrar las entradas.
+fn entrada_rescate_registrada() -> bool {
+    let mut buf = alloc::vec![0u8; soso_abi::BOOTREQ_SIZE];
+    let n = sys::bootreq_read(&mut buf);
+    if n <= 0 {
+        return false;
+    }
+    let texto = String::from_utf8_lossy(&buf[..n as usize]);
+    texto.lines().any(|l| l.trim_start().starts_with("rescate Boot"))
 }
 
 // ------------------------------------------------- exclusión de escritores

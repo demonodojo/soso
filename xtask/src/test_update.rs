@@ -228,7 +228,7 @@ fn fase_aplicar(
         // Con la operación armada, las rutas que administra la release no se
         // tocan (U5) y el resto del disco sigue siendo tuyo. Y una segunda
         // instancia del cliente tiene que decirlo, no ponerse a armar encima.
-        "soso-update aplicar --local /var/actualiza-prueba --forzar\n         echo intruso > /bin/prueba-exclusion\n         echo mias > /var/prueba-exclusion\n         cat /var/prueba-exclusion\n         soso-update aplicar --local /var/actualiza-prueba --forzar\n         init log marca-u1-aplicar\nsosolog\nhalt\n",
+        "soso-update aplicar --local /var/actualiza-prueba --forzar\n         echo intruso > /bin/prueba-exclusion\n         echo mias > /var/prueba-exclusion\n         cat /var/prueba-exclusion\n         soso-update aplicar --local /var/actualiza-prueba --forzar\nsoso-update transicion\ninit log marca-u1-aplicar\nsosolog\nhalt\n",
         Duration::from_secs(180),
         "soso-update: listo",
     )?;
@@ -265,6 +265,15 @@ fn fase_aplicar(
     if !salida.contains("ya hay una actualización en curso") {
         return Err(format!(
             "una segunda instancia se puso a armar encima de la primera: {salida:?}"
+        ));
+    }
+
+    // U6: esta máquina tiene todos los huecos, así que la transición no tiene
+    // nada que decir. La prueba está aquí para que, el día que un hueco cambie
+    // de tamaño o desaparezca del empaquetado, se entere alguien.
+    if !salida.contains("transición: nada que hacer") {
+        return Err(format!(
+            "la transición ve la imagen live como incompleta: {salida:?}"
         ));
     }
 

@@ -1,6 +1,8 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
-Fecha: **2026-09-17**. Estado: **U0–U5 cerradas; U6–U8 pendientes**.
+Fecha: **2026-09-17**. Estado: **U0–U5 cerradas; U6 a medias (inventario,
+provisión y retirada del log FAT hechos; falta la reparación offline desde el
+live); U7–U8 pendientes**.
 El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md)
 y ya gobierna el arranque, el cliente, el instalador y el shim: el kernel
 reconcilia el registro de la ESP con el diario antes de firmware e init, y
@@ -304,10 +306,9 @@ fallido debe conservar los datos y copias restantes para ese rescate.
 **U0–U5 cerradas** (2026-09-17). La sección 3.6 amplió el alcance de la vuelta
 atrás después, y U5 se desglosó en U5a–U5e, entregadas y acreditadas una a una
 (ver el desglose y la sección 6); la **exclusión de escritores**, que no caía en
-ninguna de las cinco, se cerró aparte el mismo día. U6–U8 pendientes. Siguiente
-paso: **U6**, la transición de instalaciones existentes —que es además quien
-lleva la entrada de rescate a las máquinas ya instaladas, porque hoy la registra
-el instalador y sólo en instalaciones nuevas—.
+ninguna de las cinco, se cerró aparte el mismo día. De **U6** están hechos el inventario,
+la provisión desde el live y la retirada del log FAT (2026-09-17); falta la
+reparación offline sobre el sosofs del destino. U7–U8 pendientes.
 
 | ID | Depende de | Trabajo y archivos principales | Criterio de cierre |
 |---|---|---|---|
@@ -317,7 +318,7 @@ el instalador y sólo en instalaciones nuevas—.
 | U3 ✅ | U0 | Contrato de release, perfil, canales, inventario y exclusiones; `release.rs`, manifest/pack y configuración | **Cerrada 2026-09-16.** `canal.rs` + inventario con motivo, 14 fixtures de canal/precedencia/exclusiones; `release` emite el contrato de compatibilidad y aborta si cuela una ruta prohibida. |
 | U4 ✅ | U3 | Preflight y descarga durable reanudable; `soso-update`, `net.rs`, `soso-http` | **Cerrada 2026-09-17.** `descarga.rs` (12 pruebas host) + área de preparación en sosofs; `test-update` comprueba la reanudación **cruzando un reinicio**. |
 | U5 ✅ | U0, U4 | Backup retenido, exclusión de escritores, aplicación/recuperación antes de firmware/init, shim, entrada UEFI de rescate y confirmación conjunta; desglose U5a–U5e | **Cerrada 2026-09-17** (U5a–U5e + exclusión de escritores): vuelta atrás automática, manual y desde el firmware, también tras confirmar; ningún corte arranca una pareja mezclada ni elimina la última copia válida (§3.6); y entre el respaldo y el reinicio nadie reescribe lo que el punto copió. Dos límites anotados: el arranque de la pareja antigua **bajo su propio kernel** (lo gobierna `SOSOKRN.MET`) y los cortes inyectados E2E, que son de U7. |
-| U6 | U2, U5 | Transición de instalaciones existentes, release puente, huecos ESP/entrada de recuperación y reparación offline desde live | Migrar y recuperar sin formatear ni perder modelos/configuración; cortes recuperables; retirar log FAT tras habilitar logs nativos; rescate sin init/sosh ni red del destino. |
+| U6 ⏳ | U2, U5 | Transición de instalaciones existentes, release puente, huecos ESP/entrada de recuperación y reparación offline desde live | **Parcial 2026-09-17:** inventario (`soso-update transicion`), provisión desde el live por el shim (huecos, identidad, cargador y entrada de rescate) y retirada del log FAT, acreditados E2E en `test-install`. Falta la **reparación offline** sobre el sosofs del destino y escribir la secuencia de release puente. |
 | U7 | U1–U6 | Extender bancos host, QEMU USB→NVMe y OTA con fallos | Matriz de la sección 5 verde, incluida retención A→B→C, fallo de C, reversión tras confirmar y fallo durante la propia recuperación. |
 | U8 | U7 | Release candidata y validación en ROG por WiFi | Instalación/actualización y recuperación verificadas en placa; manual y estado reflejan exactamente lo probado. |
 
@@ -401,8 +402,8 @@ comportamiento ante corte eléctrico real del NVMe.
 ### Ampliación de vuelta atrás — 2026-09-16
 
 - **Alcance:** §3.6, desglose U5a–U5e y pruebas de recuperación adicionales.
-  U0–U2 conservan su cierre histórico; U3–U5 cerradas el 2026-09-17;
-  U6–U8 siguen pendientes.
+  U0–U2 conservan su cierre histórico; U3–U5 cerradas el 2026-09-17; U6 a
+  medias desde esa fecha; U7–U8 siguen pendientes.
 - **Hallazgo de diseño:** el slot único `SOSOKRN.BIN` alterna staging/backup;
   no acredita conservar la versión anterior al preparar la siguiente OTA.
   Además, restaurar el ELF no sustituye el kernel que sigue ejecutándose.
@@ -756,6 +757,67 @@ escondidas porque nadie miraba un arranque **después** del que revierte.
   siempre —`revertido` si llegó a aplicarse, `descartado` si no— y **antes** de
   publicar la decisión, para que un corte en medio deje el registro en
   `rescatar` y el arranque siguiente repita un rescate idempotente.
+
+### U6 — parcial el 2026-09-17 (inventario, provisión y retirada del log FAT)
+
+Una instalación hecha con un live antiguo **se puede actualizar, pero sin vuelta
+atrás**: no tiene los huecos de la ESP que el contrato necesita ni la entrada de
+rescate. Lo entregado aquí es saber eso y arreglarlo sin reinstalar.
+
+- **Inventario** ([`migracion.rs`](../crates/soso-update-core/src/migracion.rs),
+  `soso-update transicion`): qué hay y qué falta, separando **lo que bloquea**
+  de lo que sólo conviene. Sin `SOSOTXN.BIN` no hay dónde escribir la decisión y
+  no se puede prometer vuelta atrás; un registro de formato 1, la entrada de
+  rescate ausente o el log todavía en FAT se dicen y no impiden nada. Reglas que
+  fijan las pruebas: un hueco del **tamaño equivocado cuenta igual que no
+  tenerlo** —el kernel los localiza por LBA exigiendo la medida—, un inventario
+  vacío **no** se toma por bueno, y a un live no se le exige lo que no le toca
+  (no necesita entrada de rescate: él *es* el rescate, y su `SOSOLOG.TXT` es lo
+  que se lee cuando la máquina no monta nada).
+- **`aplicar` se planta antes de descargar** si la máquina no admite vuelta
+  atrás, en vez de bajar el pack, crear el punto y fallar al publicar el
+  registro con el sistema ya tocado.
+- **Provisión** ([`boot-shim/src/provision.rs`](../boot-shim/src/provision.rs),
+  `soso-update transicion --disco N`): **la hace el shim, y tiene que ser él**.
+  Los huecos son ficheros FAT pre-creados que el kernel sobrescribe por LBA;
+  *crear* entradas de directorio y asignar clusters pide un driver FAT completo,
+  que el kernel no tiene y UEFI sí. El shim del live abre la ESP del disco
+  instalado por GUID —la misma vía del registro de entrada tras instalar—, crea
+  lo que falte con el tamaño exacto, **declara la identidad** `installed`,
+  sustituye `bootx64.efi` y registra las dos entradas de arranque. No toca
+  rootfs, ni sosomfs, ni configuración: no es un instalador.
+  - La sustitución del shim se **relee y compara**; si no coincide, devuelve los
+    bytes viejos. Dejar a medias el fichero que arranca la máquina es la única
+    avería de aquí sin arreglo desde el propio sistema.
+  - Sólo desde el live, y el cliente lo explica si no: arrancando de la máquina
+    vieja, la petición la atendería su propio shim, que es justo el que todavía
+    no sabe hacerlo.
+- **Retirada del log FAT:** con `/var/log` vivo y una identidad instalada
+  declarada, el kernel quita `SOSOLOG.TXT` de la ESP. **Después** de que el
+  escritor nativo esté en marcha, nunca antes, y nunca en el live. Si no puede,
+  lo dice y se reintenta al arrancar: un log de más no rompe nada.
+- **Acreditado E2E** (`test-install`, fase nueva): se fabrica una ESP antigua
+  —quitándole los huecos, soltando sus cadenas de clusters y devolviéndole el
+  `SOSOLOG.TXT`—, se hace la transición desde el live y **después arranca la
+  máquina sola**, que es el único momento en que su propio kernel puede retirar
+  el log. Los huecos se comprueban por **tamaño exacto**, no por presencia.
+
+**Dos cosas que encontró esa prueba y que no se habrían visto de otro modo:**
+
+- El hueco de identidad quedaba **creado y en blanco**, que es peor que no
+  tenerlo: el kernel lo lee como «sin registro» y trata la máquina como un live,
+  con su log en la ESP y sin retirar nada. Ahora la transición declara lo que es.
+- Con el destino ya instalado y su entrada en la NVRAM, **el firmware arrancaba
+  del disco**, así que quien leía la petición era el shim del propio destino y
+  no hacía nada. Y como las dos imágenes son clones, sus GUID coinciden y el
+  despiste no salta a la vista. Las pruebas fijan ahora el orden de arranque
+  (`bootindex`), lo que de paso hace deterministas las dos primeras fases, que
+  arrancaban del live por suerte y no por decisión.
+
+**Lo que falta de U6:** la reparación **offline desde el live** sobre el sosofs
+del destino (`soso-update recuperar --disco N`), y escribir la secuencia de
+release puente como procedimiento —hoy el orden recomendado es transición
+primero, OTA recuperable después—.
 
 ### Exclusión de escritores — cerrada el 2026-09-17
 

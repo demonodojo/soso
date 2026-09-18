@@ -53,3 +53,11 @@ pub fn locate(name: &[u8; 8], ext: &[u8; 3], expect_size: usize) -> Option<Slot>
 pub fn existe(name: &[u8; 8], ext: &[u8; 3]) -> bool {
     volumen().is_some_and(|mut v| v.existe(name, ext))
 }
+
+/// Borra un fichero de la raíz de la ESP. Lo usa la retirada del log FAT (U6)
+/// cuando `/var/log` ya funciona: es la única escritura que **quita** algo de
+/// la ESP, y por eso va aparte y con nombre propio.
+pub fn borrar(name: &[u8; 8], ext: &[u8; 3]) -> Result<(), FatError> {
+    let mut v = volumen().ok_or(FatError::Io)?;
+    v.borrar(name, ext)
+}

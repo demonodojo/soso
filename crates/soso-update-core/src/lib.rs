@@ -9,6 +9,10 @@ extern crate alloc;
 // del arranque antes de montar sosofs.
 pub mod hash;
 pub mod identity;
+/// Transición de instalaciones antiguas (U6). No la necesita el kernel: la
+/// miran el cliente y el live, que son quienes pueden arreglar lo que falte.
+#[cfg(feature = "full")]
+pub mod migracion;
 pub mod record;
 
 #[cfg(feature = "full")]

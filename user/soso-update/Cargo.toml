@@ -13,3 +13,5 @@ soso-abi = { workspace = true }
 libsoso = { workspace = true }
 soso-http = { path = "../../crates/soso-http" }
 soso-update-core = { path = "../../crates/soso-update-core" }
+# Sólo para leer la GPT del disco que se va a poner al día desde el live.
+gptdisk = { path = "../../crates/gptdisk" }
