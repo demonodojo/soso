@@ -751,9 +751,14 @@ typedef struct NVC0B5_ALLOCATION_PARAMETERS {
 #define NVKM_RM_THREED_GOLDEN      0x3d000000u
 
 #define NVC7C0_SET_OBJECT                    0x00000000u
+#define NVC7C0_SET_QMD_VERSION               0x00000288u
+#define NVC7C0_CHECK_QMD_VERSION             0x00000290u
 #define NVC7C0_SEND_PCAS_A                   0x000002b4u
 #define NVC7C0_SEND_SIGNALING_PCAS2_B        0x000002c0u
 #define NVC7C0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE 0x3u
+
+/* QMD v01_07: current/oldest en SET/CHECK (15:0 y 31:16). */
+#define GSP_QMD_AMPERE_ENGINE_VERSION_WORD   0x01070107u
 
 /* Y GR0 es el 1, la primera entrada útil de esa misma tabla (el 0 es NULL). Hace
  * falta porque un objeto de compute NO se puede colgar de un canal de copia: RM
@@ -1231,6 +1236,7 @@ typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 
 #define QMDV02_CTA_RASTER_HEIGHT                   416u, 431u
 #define QMDV02_CTA_RASTER_DEPTH                    432u, 447u
 #define QMDV02_SHARED_MEMORY_SIZE                  544u, 561u
+#define QMDV02_QMD_VERSION                         576u, 579u
 #define QMDV02_QMD_MAJOR_VERSION                   580u, 583u
 #define QMDV02_CTA_THREAD_DIMENSION0                 592u, 607u
 #define QMDV02_CTA_THREAD_DIMENSION1                 608u, 623u
@@ -1255,6 +1261,7 @@ typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 
 #define NVA0C0_QMDV01_07_CONSTANT_BUFFER_INVALIDATE_TRUE          0x00000001u
 #define NVA0C0_QMDV01_07_RELEASE0_STRUCTURE_SIZE_ONE_WORD        0x00000001u
 #define NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01                    0x00000001u
+#define NVA0C0_QMDV01_07_QMD_VERSION_V07                          0x00000007u
 
 typedef struct GspQmdV02 {
     NvU32 words[GSP_QMD_V02_WORDS];

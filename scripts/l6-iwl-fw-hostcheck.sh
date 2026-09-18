@@ -116,6 +116,13 @@ build scan_abi \
 echo "=== iwl scan ABI / MAC hostcheck ==="
 run scan_abi
 
+echo "=== iwl connect: scan antes de pick_bss tras recover/vacío ==="
+if ! grep -q 'iwl_mvm_ensure_scan_for_connect' "$src/iwl_mvm.c"; then
+    echo "FALLO: iwl_mvm.c no llama iwl_mvm_ensure_scan_for_connect antes de assoc" >&2
+    exit 1
+fi
+echo "OK: connect reescanea si scan_count=0"
+
 build hcmd_contract \
     "$root/tools/iwl-hostcheck/hcmd_contract_test.c" \
     "$root/tools/iwl-hostcheck/iwl_fw_pnvm_weak.c" \

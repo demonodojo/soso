@@ -22,15 +22,33 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     return 0;
 }
 
+static unsigned g_scan_req_umac;
+
 int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                             const void *payload, uint16_t pay_len, int wait_ms)
 {
-    (void)group;
-    (void)id;
     (void)payload;
     (void)pay_len;
     (void)wait_ms;
-    iwl->cmd_status = 1;
+    if (iwl && group == LONG_GROUP && id == SCAN_REQ_UMAC && iwl->scan_active) {
+        struct iwl_ax211_bss b;
+
+        g_scan_req_umac++;
+        memset(&b, 0, sizeof(b));
+        memcpy(b.ssid, "Rutilo", 6);
+        b.rsn = 1;
+        b.akm_psk = 1;
+        b.ccmp = 1;
+        b.channel = 36;
+        if (iwl->scan_count < IWL_AX211_MAX_SCAN) {
+            iwl->scan[iwl->scan_count++] = b;
+        }
+        iwl->scan_end = IWL_SCAN_END_NORMAL;
+        iwl->scan_active = 0;
+    }
+    if (iwl) {
+        iwl->cmd_status = 1;
+    }
     return 0;
 }
 
@@ -52,13 +70,15 @@ int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
+static int g_assoc_allow;
+
 int iwl_mvm_assoc_prepare(struct iwl_ax211_priv *iwl, const char *ssid,
                           const uint8_t *bssid)
 {
     (void)iwl;
     (void)ssid;
     (void)bssid;
-    return -1;
+    return g_assoc_allow ? 0 : -1;
 }
 
 int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd)
@@ -546,6 +566,88 @@ static int check_phy_bands(void)
     return 0;
 }
 
+static void scan_abi_rf_ok(struct iwl_ax211_priv *iwl)
+{
+    static uint32_t mmio[0x400];
+
+    memset(mmio, 0, sizeof(mmio));
+    mmio[CSR_GP_CNTRL / 4] = CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW;
+    iwl->mmio = mmio;
+}
+
+static int check_connect_rescan_if_empty(void)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t psk[32];
+
+    memset(&psk, 0, sizeof(psk));
+    memset(&iwl, 0, sizeof(iwl));
+    scan_abi_rf_ok(&iwl);
+    g_scan_req_umac = 0;
+    g_assoc_allow = 1;
+    iwl.alive = 1;
+    iwl.radio_ready = 1;
+    iwl.mvm_up_done = 1;
+    iwl.scan_count = 0;
+    iwl.nvm_n_channels = 2;
+    iwl.nvm_chan_flags[0] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    iwl.nvm_chan_flags[1] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    iwl.cmd_ver_count = 2;
+    iwl.cmd_ver[0].group = LONG_GROUP;
+    iwl.cmd_ver[0].cmd = SCAN_REQ_UMAC;
+    iwl.cmd_ver[0].version = 17;
+    iwl.cmd_ver[1].group = LONG_GROUP;
+    iwl.cmd_ver[1].cmd = SCAN_CFG_CMD;
+    iwl.cmd_ver[1].version = 5;
+    iwl.fw_valid_tx_ant = 0x3;
+    iwl.fw_valid_rx_ant = 0x3;
+
+    if (iwl_mvm_connect_wpa2(&iwl, "Rutilo", psk) != 0) {
+        fprintf(stderr, "connect tras scan vacío debería asociar\n");
+        return -1;
+    }
+    if (g_scan_req_umac == 0) {
+        fprintf(stderr, "connect con scan_count=0 no emitió SCAN_REQ_UMAC\n");
+        return -1;
+    }
+    if (iwl.scan_count == 0) {
+        fprintf(stderr, "scan post-connect sigue vacío\n");
+        return -1;
+    }
+    g_assoc_allow = 0;
+    puts("OK: connect con scan vacío lanza SCAN_REQ antes de assoc");
+    return 0;
+}
+
+static int check_connect_no_assoc_without_scan(void)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t psk[32];
+
+    memset(&psk, 0, sizeof(psk));
+    memset(&iwl, 0, sizeof(iwl));
+    scan_abi_rf_ok(&iwl);
+    g_scan_req_umac = 0;
+    g_assoc_allow = 1;
+    iwl.alive = 1;
+    iwl.radio_ready = 1;
+    iwl.mvm_up_done = 1;
+    iwl.scan_count = 0;
+    iwl.nvm_n_channels = 0;
+    g_assoc_allow = 0;
+
+    if (iwl_mvm_connect_wpa2(&iwl, "Rutilo", psk) == 0) {
+        fprintf(stderr, "connect sin canales no debería asociar\n");
+        return -1;
+    }
+    if (g_scan_req_umac != 0) {
+        fprintf(stderr, "sin NVM no debería mandar SCAN\n");
+        return -1;
+    }
+    puts("OK: sin BSS ni scan válido no hay assoc a ciegas");
+    return 0;
+}
+
 static int check_scan_cfg_bcast_ax200(void)
 {
     struct iwl_ax211_priv iwl;
@@ -595,6 +697,10 @@ int main(void)
     if (check_mac_csr() != 0)
         return 1;
     if (check_scan_states() != 0)
+        return 1;
+    if (check_connect_rescan_if_empty() != 0)
+        return 1;
+    if (check_connect_no_assoc_without_scan() != 0)
         return 1;
     return 0;
 }

@@ -465,18 +465,18 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "a8f6be44f",
-        "commit_corto": "a8f6be44f",
+        "commit": "4f94c6cb9",
+        "commit_corto": "4f94c6cb9",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "flush#44 @344s a8f6be44f: ask tiny→CE atascado subida pesos (0 matvec, on_gpu=0); racha 2/3. Ver docs/DIAGNOSTICO-ROG-2026-09-17.md"
+        "cambios_locales": "flush#104 @19797s 4f94c6cb9: CE 435/435 OK; matvec-res QMD 1.0→PBDMA_HANG; ask hola CPU on_gpu=0. Ver docs/DIAGNOSTICO-ROG-2026-09-18.md"
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 2,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh+ask hola ~344s; halt",
-        "fecha": "2026-09-17"
+        "nota": "sosh+ask hola flush#104 ~5.5h; halt",
+        "fecha": "2026-09-18"
       },
       "wifi": {
         "alive": {
@@ -515,42 +515,46 @@
           "fecha": "2026-09-17"
         },
         "reconexion": {
-          "status": "pendiente"
+          "status": "fail",
+          "nota": "dhcp perdido; recover→0 BSS; wifi connect E/S",
+          "fecha": "2026-09-18"
         }
       },
       "gpu": {
         "gsp_rpc": {
           "status": "ok",
           "nota": "GSP_INIT_DONE",
-          "fecha": "2026-09-17"
+          "fecha": "2026-09-18"
         },
         "vram_pool": {
           "status": "ok",
-          "fecha": "2026-09-17"
+          "fecha": "2026-09-18"
         },
         "ce_readback": {
           "status": "ok",
-          "nota": "CE readback GO (boot)",
-          "fecha": "2026-09-17"
+          "nota": "CE readback GO; subida G6 435/435",
+          "fecha": "2026-09-18"
         },
         "compute_cpu_gpu": {
           "status": "fail",
-          "nota": "0 matvec; CE atascado subida L00.attn_norm; PBDMA_HANG",
-          "fecha": "2026-09-17"
+          "nota": "matvec-res QMD sin señalizar; GR_EXCEPTION; camino GPU desactivado",
+          "fecha": "2026-09-18"
         },
         "carga_real": {
           "status": "fail",
-          "nota": "ask hola 132 tok CPU (offload desactivado)",
-          "fecha": "2026-09-17"
+          "nota": "generado 138 tok CPU (44713 matvec contados, on_gpu=0)",
+          "fecha": "2026-09-18"
         },
         "apagado_limpio": {
           "status": "ok",
           "nota": "halt; GSP se deja placa",
-          "fecha": "2026-09-17"
+          "fecha": "2026-09-18"
         }
       },
       "bench": {},
       "logs": [
+        "target/usb-diagnostic-2026-09-18/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-18/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-15/SOSOLOG-clean.txt",
         "target/usb-diagnostic-2026-09-15/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-15/SOSODRV.txt",
@@ -5724,89 +5728,92 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "a8f6be44f",
-        "commit_corto": "a8f6be44f",
+        "commit": "4f94c6cb9",
+        "commit_corto": "4f94c6cb9",
         "version": "0.2.2",
         "dirty": true,
-        "cambios_locales": "flush#44 @344s a8f6be44f: ask tiny→CE atascado subida pesos. Ver docs/DIAGNOSTICO-ROG-2026-09-17.md"
+        "cambios_locales": "flush#104: ALIVE+4-way+DHCP OK; post-recover scan timeout 0 BSS. Ver docs/DIAGNOSTICO-ROG-2026-09-18.md"
       },
       "perfil_drivers": "live-usb + iwlwifi",
-      "arranques_consecutivos_ok": 2,
+      "arranques_consecutivos_ok": 3,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh+ask hola ~344s",
-        "fecha": "2026-09-17"
+        "nota": "shell + red; recon fallida tras dhcp perdido",
+        "fecha": "2026-09-18"
       },
       "wifi": {
         "alive": {
           "status": "ok",
           "nota": "UCODE_ALIVE_NTFY",
-          "fecha": "2026-09-17"
+          "fecha": "2026-09-18"
         },
         "init_complete": {
           "status": "ok",
           "nota": "INIT_COMPLETE_NOTIF",
-          "fecha": "2026-09-17"
+          "fecha": "2026-09-18"
         },
         "mvm_ready": {
           "status": "ok",
-          "nota": "up mínimo listo",
-          "fecha": "2026-09-17"
+          "nota": "MVM up",
+          "fecha": "2026-09-18"
         },
         "scan": {
           "status": "ok",
-          "nota": "fin normal",
-          "fecha": "2026-09-17"
+          "nota": "SCAN_COMPLETE 17/23 BSS (boot); fallo SCAN 0x0d tras recover",
+          "fecha": "2026-09-18"
         },
         "assoc_wpa2": {
           "status": "ok",
-          "fecha": "2026-09-17"
+          "nota": "4-way Rutilo (boot)",
+          "fecha": "2026-09-18"
         },
         "dhcp": {
           "status": "ok",
-          "nota": "192.168.68.132/24 LxWifi",
-          "fecha": "2026-09-17"
+          "nota": "192.168.68.132/24 LxWifi (boot)",
+          "fecha": "2026-09-18"
         },
         "ssh": {
           "status": "pendiente"
         },
         "reconexion": {
-          "status": "pendiente"
+          "status": "fail",
+          "nota": "timeout SCAN_REQ; 0 BSS; TXQ EAPOL falló",
+          "fecha": "2026-09-18"
         }
       },
       "gpu": {
         "gsp_rpc": {
           "status": "ok",
           "nota": "GSP_INIT_DONE",
-          "fecha": "2026-09-17"
+          "fecha": "2026-09-18"
         },
         "vram_pool": {
           "status": "ok",
-          "fecha": "2026-09-17"
+          "fecha": "2026-09-18"
         },
         "ce_readback": {
           "status": "ok",
-          "nota": "CE readback GO (boot)",
-          "fecha": "2026-09-17"
+          "nota": "CE readback GO",
+          "fecha": "2026-09-18"
         },
         "compute_cpu_gpu": {
           "status": "fail",
-          "nota": "0 matvec; CE atascado subida pesos",
-          "fecha": "2026-09-17"
+          "nota": "matvec-res QMD hang; inferencia CPU on_gpu=0",
+          "fecha": "2026-09-18"
         },
         "carga_real": {
           "status": "fail",
-          "nota": "inferencia CPU tras offload off",
-          "fecha": "2026-09-17"
+          "nota": "generado en CPU (sin matvec GPU en silicio)",
+          "fecha": "2026-09-18"
         },
         "apagado_limpio": {
-          "status": "ok",
-          "nota": "halt",
-          "fecha": "2026-09-17"
+          "status": "pendiente"
         }
       },
       "bench": {},
       "logs": [
+        "target/usb-diagnostic-2026-09-18/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-18/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-15/SOSOLOG-clean.txt",
         "target/usb-diagnostic-2026-09-15-wifi/SOSOLOG.body.txt",
         "target/usb-diagnostic-2026-09-15-wifi/SOSODRV.txt",
@@ -10476,10 +10483,117 @@
           "campana_gpu": false,
           "flushes": 44,
           "fecha": "2026-09-17"
+        },
+        {
+          "log_hash": "43b5b5c52ae2afdc3de4cb977a5000eaf3d67c51449dffd1db7ac10a10ab0e6d",
+          "kernel": "soso 0.2.2 (4f94c6cb9-dirty)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "048d:1234",
+            "0b05:1866",
+            "0b05:18c6"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-09-18"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-09-18"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-09-18"
+            },
+            "scan": {
+              "status": "fail",
+              "nota": "scan fallido o sin BSS",
+              "fecha": "2026-09-18"
+            },
+            "assoc_wpa2": {
+              "status": "ok",
+              "fecha": "2026-09-18"
+            },
+            "dhcp": {
+              "status": "pendiente"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-09-18"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-09-18"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-09-18"
+            },
+            "compute_cpu_gpu": {
+              "status": "fail",
+              "nota": "inferencia sin matvec GPU (0 matvec u offload caído)",
+              "fecha": "2026-09-18"
+            },
+            "carga_real": {
+              "status": "fail",
+              "nota": "generado en CPU (sin matvec GPU en silicio)",
+              "fecha": "2026-09-18"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-09-18"
         }
       ],
-      "notas": "flush#44 @344s: ask tiny; CE PBDMA_HANG subida G6. Ver docs/DIAGNOSTICO-ROG-2026-09-17.md",
-      "actualizado": "2026-09-17"
+      "notas": "hwscan: hda=compilado, hda=compilado, hda=compilado, lx-iwlwifi=compilado, lx-nouveau=compilado, nvme=compilado, nvme=compilado, rtl8169=compilado, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, usb-xhci=compilado, usb-xhci=compilado",
+      "actualizado": "2026-09-18"
     },
     {
       "id": "deck-oled",

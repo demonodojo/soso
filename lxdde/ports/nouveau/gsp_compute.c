@@ -763,6 +763,8 @@ static void gsp_compute_fill_qmd_v02_grid(struct gsp_compute *cp,
                  NVA0C0_QMDV01_07_API_VISIBLE_CALL_LIMIT_NO_CHECK);
     qmd_set_bits(qmd->words, QMDV02_QMD_MAJOR_VERSION,
                  NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01);
+    qmd_set_bits(qmd->words, QMDV02_QMD_VERSION,
+                 NVA0C0_QMDV01_07_QMD_VERSION_V07);
 
     qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_WIDTH, grid_x ? grid_x : 1u);
     qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_HEIGHT, grid_y ? grid_y : 1u);
@@ -885,7 +887,7 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
     }
     c = cp->chan;
     start = (unsigned)c->pb_pos;
-    if (gsp_chan_pb_reserve(c, 64) < 0) {
+    if (gsp_chan_pb_reserve(c, 96) < 0) {
         return -1;
     }
     pos = start;
@@ -910,6 +912,13 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
 
     cp_pb_set_object(c, &pos, GSP_COMPUTE_SUBCHANNEL, set_object, cp->cls);
     cp_pb_immd(c, &pos, 0u, NVC86F_WFI, 0u);
+    if (cp->caps && cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
+        cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVC7C0_SET_QMD_VERSION, 1);
+        cp_pb_write(c, &pos, GSP_QMD_AMPERE_ENGINE_VERSION_WORD);
+        cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVC7C0_CHECK_QMD_VERSION,
+                     1);
+        cp_pb_write(c, &pos, GSP_QMD_AMPERE_ENGINE_VERSION_WORD);
+    }
     cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_pcas, 1);
     cp_pb_write(c, &pos, (uint32_t)(qmd_va >> 8));
     cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_sig, sig_action);

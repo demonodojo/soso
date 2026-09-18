@@ -1,0 +1,9 @@
+GSP_INIT_DONE recibido
+pool VRAM=sí
+readback GO
+lx: nouveau-lx: matvec-res — el QMD no señalizó en 2000 ms (sem=0x00000000)
+lx: nouveau-lx: 3 lanzamientos seguidos fallidos — camino de GPU desactivado, todo a CPU (reinicia soso para reintentarlo)
+soso-llm: capa 1/36 5217 ms on_gpu=0
+soso-llm: rendimiento gpu — 2.86 tok/s, 324.0 submits/token (44713 matvec / 138 tokens)
+soso-llm: el silicio no calculó nada — el GSP se quedó en la fase «rm_compute»
+soso-llm: generado (138 tokens, 48183 ms, 2.86 tok/s)

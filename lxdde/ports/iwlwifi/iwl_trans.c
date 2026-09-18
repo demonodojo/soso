@@ -577,6 +577,10 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
     iwl->data_txq_read = 0;
     iwl->keys_installed = 0;
     iwl->authorized = 0;
+    iwl->scan_count = 0;
+    iwl->scan_complete = 0;
+    iwl->scan_end = IWL_SCAN_END_NONE;
+    iwl->scan_active = 0;
     lx_iwlwifi_set_alive(0);
     lx_printk("iwl_trans: recuperación #%u — cola liberada, MVM abajo\n",
               (unsigned)iwl->cmd_recover);

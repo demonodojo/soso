@@ -133,6 +133,16 @@ if ! grep -q 'GSP_FAM_AMPERE.*GSP_QMD_VERSION_AMPERE' "$compute"; then
     echo "FALLO: gsp_compute.c no declara qmd_version=GSP_QMD_VERSION_AMPERE para Ampere" >&2
     exit 1
 fi
+if ! grep -q 'NVC7C0_SET_QMD_VERSION' "$nvrm" ||
+   ! grep -q 'GSP_QMD_AMPERE_ENGINE_VERSION_WORD' "$nvrm" ||
+   ! grep -q 'NVA0C0_QMDV01_07_QMD_VERSION_V07' "$nvrm"; then
+    echo "FALLO: nvrm_r570.h sin QMD minor=7 ni SET/CHECK 0x0107 para Ampere" >&2
+    exit 1
+fi
+if ! grep -q 'NVC7C0_SET_QMD_VERSION' "$compute"; then
+    echo "FALLO: gsp_compute_encode_qmd no emite SET_QMD_VERSION en Ampere" >&2
+    exit 1
+fi
 if [[ -d "$root/lxdde/reference" ]]; then
     qmd_hdrs=$(find "$root/lxdde/reference" -iname '*qmd*.h' 2>/dev/null | wc -l | tr -d ' ')
     cla0c0="$root/lxdde/reference/open-gpu-kernel-modules-570.144/src/common/sdk/nvidia/inc/class/cla0c0qmd.h"

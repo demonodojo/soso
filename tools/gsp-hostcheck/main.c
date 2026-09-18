@@ -756,6 +756,40 @@ static int check_family_caps(void)
             gsp_compute_fill_qmd_grid(&cp_amp, &k_amp, (GspQmdV05 *)&q2, 4, 1, 0);
             if (check_qmd_v02_fields(&cp_amp, &k_amp, 4, &q2) != 0)
                 return -1;
+            {
+                struct gsp_chan ch;
+                unsigned char pb[128];
+                unsigned char data[G4F_DATA_SIZE];
+                unsigned off, len;
+                const uint32_t *pbw;
+                unsigned ver_words = 0;
+
+                memset(&ch, 0, sizeof(ch));
+                ch.pushbuf.va = pb;
+                ch.pushbuf.size = sizeof(pb);
+                ch.ready = 1;
+                cp_amp.data.va = data;
+                cp_amp.cls = AMPERE_COMPUTE_B;
+                cp_amp.ready = 1;
+                cp_amp.chan = &ch;
+                if (gsp_compute_encode_qmd(&cp_amp, (const GspQmdV05 *)&q2,
+                                           &off, &len) != 0 ||
+                    len != 40u) {
+                    printf("FALLO: encode QMD Ampere len=%u (esperaba 40)\n",
+                           len);
+                    return -1;
+                }
+                pbw = (const uint32_t *)(pb + off);
+                for (unsigned j = 0; j < len / 4u; j++) {
+                    if (pbw[j] == GSP_QMD_AMPERE_ENGINE_VERSION_WORD)
+                        ver_words++;
+                }
+                if (ver_words < 2u) {
+                    printf("FALLO: pushbuffer Ampere sin SET/CHECK QMD 0x0107 "
+                           "(palabras=%u)\n", ver_words);
+                    return -1;
+                }
+            }
         }
         cp.caps = 0;
         if (gsp_compute_launch_ready(&cp, &k, "prueba") == 0) {
@@ -2259,6 +2293,8 @@ static int check_qmd_v02_fields(const struct gsp_compute *cp,
 
     if (qmd_get_bits(w, QMDV02_QMD_MAJOR_VERSION) !=
             NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01 ||
+        qmd_get_bits(w, QMDV02_QMD_VERSION) !=
+            NVA0C0_QMDV01_07_QMD_VERSION_V07 ||
         qmd_get_bits(w, QMDV02_SEMAPHORE_RELEASE_ENABLE0) != 1 ||
         qmd_get_bits(w, QMDV02_REQUIRE_SCHEDULING_PCAS) !=
             NVA0C0_QMDV01_07_REQUIRE_SCHEDULING_PCAS_TRUE) {

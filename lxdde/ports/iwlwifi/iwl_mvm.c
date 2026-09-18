@@ -713,6 +713,19 @@ static int iwl_mvm_assoc(struct iwl_ax211_priv *iwl, const char *ssid, const uin
 
 /* El BSS con ese SSID exacto y mejor señal. NULL si no está: conectarse «al
  * primero que haya» es asociarse a una red que nadie pidió (R7). */
+/* Tras recover o sin BSS en memoria, hay que volver a escanear antes de AUTH. */
+static int iwl_mvm_ensure_scan_for_connect(struct iwl_ax211_priv *iwl)
+{
+    if (!iwl) {
+        return -1;
+    }
+    if (iwl->scan_count > 0) {
+        return 0;
+    }
+    lx_printk("iwl_mvm: scan vacío antes de conectar; lanzando SCAN_REQ_UMAC\n");
+    return iwl_mvm_scan(iwl);
+}
+
 const struct iwl_ax211_bss *iwl_mvm_pick_bss(struct iwl_ax211_priv *iwl,
                                              const char *ssid)
 {
@@ -744,6 +757,9 @@ int iwl_mvm_connect_open(struct iwl_ax211_priv *iwl, const char *ssid)
     if (!iwl->alive || !ssid) {
         return -1;
     }
+    if (iwl_mvm_ensure_scan_for_connect(iwl) != 0) {
+        return -1;
+    }
     pick = iwl_mvm_pick_bss(iwl, ssid);
     if (!pick) {
         lx_printk("iwl_mvm: '%s' no está entre los %d BSS del scan\n",
@@ -771,6 +787,9 @@ int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid,
     const struct iwl_ax211_bss *pick;
 
     if (!iwl->alive || !ssid || !psk) {
+        return -1;
+    }
+    if (iwl_mvm_ensure_scan_for_connect(iwl) != 0) {
         return -1;
     }
     pick = iwl_mvm_pick_bss(iwl, ssid);

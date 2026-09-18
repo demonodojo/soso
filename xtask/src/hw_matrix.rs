@@ -983,6 +983,9 @@ fn digits_before(haystack: &str, needle: &str) -> Option<u64> {
 }
 
 fn gpu_matvec_ejecutados(lines: &[String]) -> bool {
+    if any_line(lines, |l| l.contains("on_gpu=0")) {
+        return false;
+    }
     any_line(lines, |l| {
         digits_before(l, "matvec")
             .map(|n| n > 0)
@@ -993,9 +996,17 @@ fn gpu_matvec_ejecutados(lines: &[String]) -> bool {
 fn gpu_compute_fallido(lines: &[String]) -> bool {
     any_line(lines, |l| {
         l.contains("offload gpu desactivado")
+            || l.contains("camino de GPU desactivado")
+            || l.contains("el silicio no calculó nada")
             || l.contains("ultimo on_gpu=0")
             || l.contains("0 matvec")
     })
+}
+
+fn gpu_inferencia_en_silicio(lines: &[String]) -> bool {
+    !gpu_compute_fallido(lines)
+        && any_line(lines, |l| l.contains("on_gpu=1"))
+        && !any_line(lines, |l| l.contains("on_gpu=0"))
 }
 
 /// Reconoce el banner de versión que imprime el kernel al arrancar
@@ -1506,8 +1517,16 @@ pub fn parse_gpu_stages(text: &str) -> GpuStages {
         } else {
             StageStatus::pendiente()
         },
-        carga_real: if any_line(&lines, |l| l.contains("soso-llm: generado")) && gpu_backend {
+        carga_real: if any_line(&lines, |l| l.contains("soso-llm: generado"))
+            && gpu_backend
+            && gpu_inferencia_en_silicio(&lines)
+        {
             StageStatus::ok(None)
+        } else if any_line(&lines, |l| l.contains("soso-llm: generado"))
+            && gpu_backend
+            && gpu_compute_fallido(&lines)
+        {
+            StageStatus::fail("generado en CPU (sin matvec GPU en silicio)")
         } else {
             StageStatus::pendiente()
         },
@@ -1780,7 +1799,11 @@ mod tests {
         let g = parse_gpu_stages("GSP_INIT_DONE recibido\npool VRAM=256MiB\nsoso-llm: generado 8 tokens");
         assert_eq!(g.gsp_rpc.status, "ok");
         assert_eq!(g.vram_pool.status, "ok");
-        assert_eq!(g.carga_real.status, "ok");
+        assert_eq!(
+            g.carga_real.status,
+            "pendiente",
+            "generado sin on_gpu=1 no acredita carga_real"
+        );
 
         let w = parse_wifi_stages("wifi: no asociado\nnet: dhcp 192.168.1.10/24");
         assert_eq!(w.assoc_wpa2.status, "fail");
@@ -2107,6 +2130,23 @@ soso 0.2.3 (bbbbbbbbb)\nboot: memtest\niwl: start\n";
             g.compute_cpu_gpu.status,
             "fail",
             "tok/s con 0 matvec no acredita compute_cpu_gpu"
+        );
+    }
+
+    const ROG18_GPU_CPU: &str = include_str!("../fixtures/rog-2026-09-18-gpu-cpu.log");
+
+    #[test]
+    fn rog18_matvec_cpu_no_acredita_compute_ni_carga() {
+        let g = parse_gpu_stages(ROG18_GPU_CPU);
+        assert_eq!(
+            g.compute_cpu_gpu.status,
+            "fail",
+            "44713 matvec con on_gpu=0 no es compute GPU"
+        );
+        assert_eq!(
+            g.carga_real.status,
+            "fail",
+            "generado en CPU no acredita carga_real con backend GPU"
         );
     }
 
