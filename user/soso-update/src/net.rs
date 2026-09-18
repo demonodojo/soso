@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 use libsoso::{abi, sys};
 use soso_abi::SockAddr;
+use soso_update_core::descarga;
 use soso_http::TcpTransport;
 
 struct Net;
@@ -119,26 +120,41 @@ pub fn https_download_span_a(
     let fin = start + len;
     while off < fin {
         let end = (off + MAX_RANGE).min(fin) - 1;
-        let (status, chunk) =
-            soso_http::https_get_range(&Net, url, token, off, end).map_err(map_http_err)?;
-        // 200 sólo vale si el servidor ignoró el Range y nos dio el fichero
-        // entero, y eso únicamente sirve cuando pedíamos desde el principio.
-        if status != 206 {
-            if start == 0 && off == 0 && status == 200 && chunk.len() as u64 >= len {
-                recibe(&chunk[..len as usize])?;
-                return Ok(());
-            }
-            return Err("HTTP range");
+        let resp =
+            soso_http::https_get_range_full(&Net, url, token, off, end).map_err(map_http_err)?;
+        let content_range = soso_http::header_value(&resp.headers, "content-range");
+        // Qué respuesta vale y cuál no es política, y vive en el core para
+        // poder probarla una a una en el host.
+        let pet = descarga::Peticion {
+            desde: off,
+            hasta: end,
+            restante: fin - off,
+            desde_el_principio: start == 0,
+        };
+        let aceptado = descarga::juzgar_rango(&pet, resp.status, content_range, resp.body.len())
+            .map_err(fallo_rango)?;
+        recibe(&resp.body[..aceptado.usar])?;
+        if aceptado.completo {
+            return Ok(());
         }
-        if chunk.is_empty() {
-            return Err("range vacío");
-        }
-        // Un servidor que devuelva más de lo pedido no puede desbordar el plan.
-        let n = (chunk.len() as u64).min(fin - off) as usize;
-        recibe(&chunk[..n])?;
-        off += n as u64;
+        off += aceptado.usar as u64;
     }
     Ok(())
+}
+
+/// El porqué, con el dato que hace falta para arreglarlo.
+fn fallo_rango(e: descarga::FalloRango) -> &'static str {
+    match e {
+        descarga::FalloRango::Vacia => "el servidor devolvió un tramo vacío",
+        descarga::FalloRango::RangoAjeno { .. } => "el servidor devolvió otro tramo del pedido",
+        descarga::FalloRango::Estado(404) => "el artefacto no está en el servidor (404)",
+        descarga::FalloRango::Estado(429) => "el servidor pide esperar (429)",
+        descarga::FalloRango::Estado(s) if s >= 500 => "el servidor falla (5xx)",
+        descarga::FalloRango::Estado(s) if (300..400).contains(&s) => {
+            "el servidor redirige y no seguimos redirecciones aquí"
+        }
+        descarga::FalloRango::Estado(_) => "el servidor no respeta Range",
+    }
 }
 
 fn map_http_err(e: soso_http::HttpError) -> &'static str {

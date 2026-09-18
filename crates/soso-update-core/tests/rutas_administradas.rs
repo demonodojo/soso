@@ -52,6 +52,24 @@ fn la_barra_final_de_la_raiz_importa() {
 }
 
 #[test]
+fn ninguna_release_viaja_dentro_de_otra() {
+    // El banco fabrica sus releases en `rootfs/var/actualiza-*`, y el pack sale
+    // de `rootfs/`. Sin excluirlas por prefijo, una release publicada se
+    // llevaría dentro las de prueba de quien la empaquetó.
+    for r in [
+        "var/actualiza-prueba/manifest.txt",
+        "var/actualiza-rota/rootfs.pack",
+        "var/actualiza-c/kernel-x86_64",
+        "var/actualiza-loquesea/x",
+    ] {
+        assert!(
+            soso_update_core::por_que_se_excluye(r).is_some(),
+            "{r} no puede viajar en un pack"
+        );
+    }
+}
+
+#[test]
 fn coincide_con_lo_que_viaja_en_el_pack() {
     // La exclusión y el pack tienen que decir lo mismo: si protegiéramos algo
     // que el pack no trae, o dejáramos suelto algo que sí, la vuelta atrás

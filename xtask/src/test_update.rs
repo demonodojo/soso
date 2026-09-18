@@ -18,6 +18,11 @@ use crate::test::{esperar_en_fichero, ssh_guion_hasta};
 const SSH_PORT: u16 = 2243;
 const MAC: &str = "52:54:00:12:34:43";
 const TEST_VER: &str = "0.2.1-prueba";
+/// Versión de la release que **no arranca**: su `/bin/init` no es un ELF.
+const VER_ROTA: &str = "0.2.8-rota";
+/// Tercera versión, para la cadena A→B→C.
+const VER_C: &str = "0.2.3-prueba";
+const MARCA_C: &str = "tercera\n";
 const MARCA_NUEVA: &str = "nueva\n";
 const MARCA_VIEJA: &str = "vieja\n";
 
@@ -28,6 +33,8 @@ pub fn run(filtro: Option<&str>) {
     std::fs::create_dir_all(&dir).expect("test-update dir");
 
     preparar_release_prueba(&root);
+    preparar_release_rota(&root);
+    preparar_release_c(&root);
 
     unsafe {
         std::env::set_var("SOSO_QEMU_LIVE", "1");
@@ -114,6 +121,55 @@ pub fn run(filtro: Option<&str>) {
         }
     }
 
+    if quiere("cadena") {
+        let base = dir.join("live-cadena.img");
+        crate::copy_sparse(&live_base, &base);
+        match fase_cadena(&ovmf_code, &vars, &base, &dir, &key) {
+            Ok(l) => marca(&format!("cadena A→B→C y vuelta a B — {l}"), true),
+            Err(e) => {
+                marca(&format!("cadena A→B→C — {e}"), false);
+                fallos += 1;
+            }
+        }
+    }
+
+    if quiere("confirmacion") {
+        let base = dir.join("live-confirma.img");
+        crate::copy_sparse(&live_base, &base);
+        match fase_corte_confirmacion(&ovmf_code, &vars, &base, &dir, &key) {
+            Ok(l) => marca(&format!("corte al confirmar: se completa, no se deshace — {l}"), true),
+            Err(e) => {
+                marca(&format!("corte al confirmar — {e}"), false);
+                fallos += 1;
+            }
+        }
+    }
+
+    if quiere("respaldo") {
+        let base = dir.join("live-respaldo.img");
+        crate::copy_sparse(&live_base, &base);
+        match fase_respaldo_roto(&ovmf_code, &vars, &base, &dir, &key) {
+            Ok(l) => marca(&format!("respaldo corrupto: no arranca a medias — {l}"), true),
+            Err(e) => {
+                marca(&format!("respaldo corrupto — {e}"), false);
+                fallos += 1;
+            }
+        }
+    }
+
+    if quiere("roto") {
+        let base = dir.join("live-roto.img");
+        crate::copy_sparse(&live_base, &base);
+        let ver = crate::version::read_version(&root);
+        match fase_init_roto(&ovmf_code, &vars, &base, &dir, &key, &ver) {
+            Ok(l) => marca(&format!("arranque roto: se deshace solo — {l}"), true),
+            Err(e) => {
+                marca(&format!("arranque roto — {e}"), false);
+                fallos += 1;
+            }
+        }
+    }
+
     let serial4 = dir.join("boot-manifest.log");
     if quiere("manifiesto") {
         match fase_manifiesto_invalido(&ovmf_code, &vars, &live, &serial4, &key) {
@@ -164,7 +220,12 @@ fn preparar_release_prueba(root: &Path) {
     // Sin el firmware de la GPU: son 127 MB que el test no necesita y que, al
     // vivir el release dentro del propio rootfs, duplicarían la imagen.
     let (pack_blob, files) = pack_rootfs_con(&root.join("rootfs"), |rel| {
-        !rel.starts_with("lib/firmware/")
+        // Ni el firmware de la GPU (127 MB que el test no necesita) ni las
+        // **otras releases de prueba**: viven dentro del propio rootfs, así que
+        // sin esto cada release empaquetaría a las anteriores y la tercera
+        // ocuparía el triple que la primera —hasta llenar el disco a mitad de
+        // descarga—.
+        !rel.starts_with("lib/firmware/") && !rel.starts_with("var/actualiza")
     })
     .expect("pack");
     std::fs::write(&marca_path, MARCA_VIEJA).expect("marca vieja");
@@ -221,6 +282,504 @@ fn preparar_release_prueba(root: &Path) {
     )
     .expect("manifest-malo");
     println!("test-update: release de prueba en rootfs/var/actualiza-prueba/");
+}
+
+/// Una release cuyo `/bin/init` no arranca. Es el caso que da sentido a todo
+/// el contrato: si la versión nueva no llega a userspace, el encendido
+/// siguiente la deshace **solo**, sin que nadie pida nada.
+fn preparar_release_rota(root: &Path) {
+    let rel_dir = root.join("rootfs/var/actualiza-rota");
+    let _ = std::fs::remove_dir_all(&rel_dir);
+    std::fs::create_dir_all(&rel_dir).expect("actualiza-rota");
+
+    let etc = root.join("rootfs/etc");
+    let init = root.join("rootfs/bin/init");
+    let init_bueno = std::fs::read(&init).expect("bin/init");
+    // Un ELF que no lo es: el kernel resuelve el fichero, intenta lanzarlo y
+    // falla. Se rompe **init** y no el kernel a propósito: así el fallo ocurre
+    // ya con la pareja aplicada, que es el momento que hay que probar.
+    std::fs::write(&init, b"esto no es un ELF
+").expect("init roto");
+    std::fs::write(
+        etc.join("soso-release"),
+        format!("version={VER_ROTA}
+build=rota
+fecha=2026-09-18
+"),
+    )
+    .expect("soso-release rota");
+
+    let empaquetado = pack_rootfs_con(&root.join("rootfs"), |rel| {
+        // Ni el firmware de la GPU (127 MB que el test no necesita) ni las
+        // **otras releases de prueba**: viven dentro del propio rootfs, así que
+        // sin esto cada release empaquetaría a las anteriores y la tercera
+        // ocuparía el triple que la primera —hasta llenar el disco a mitad de
+        // descarga—.
+        !rel.starts_with("lib/firmware/") && !rel.starts_with("var/actualiza")
+    });
+    // Pase lo que pase, el rootfs vuelve a tener su init de verdad: se empaqueta
+    // entero en la imagen justo después.
+    std::fs::write(&init, &init_bueno).expect("init restaurado");
+    crate::version::write_soso_release(root);
+    let (pack_blob, files) = empaquetado.expect("pack roto");
+
+    // El kernel es el mismo que ya corre: lo que se prueba es un rootfs que no
+    // arranca, no un kernel que no arranca.
+    let kernel_src = root.join("target/kernel/x86_64-soso/debug/kernel");
+    let kernel_pub = rel_dir.join("kernel-x86_64");
+    std::fs::copy(&kernel_src, &kernel_pub).expect("kernel copy");
+    crate::release::strip_kernel(&kernel_pub);
+    let kernel_bytes = std::fs::read(&kernel_pub).expect("kernel stripped");
+    std::fs::write(rel_dir.join("rootfs.pack"), &pack_blob).expect("pack");
+
+    let manifest = Manifest {
+        version: parse_semver(VER_ROTA).unwrap(),
+        version_raw: VER_ROTA.into(),
+        build: "rota".into(),
+        fecha: "2026-09-18".into(),
+        kernel_hash: hex_sha256(&kernel_bytes),
+        kernel_size: kernel_bytes.len() as u64,
+        pack_hash: hex_sha256(&pack_blob),
+        pack_size: pack_blob.len() as u64,
+        compat: Some(soso_update_core::Compat {
+            arch: "x86_64".into(),
+            perfil: "live-usb".into(),
+            drivers: vec![
+                "usb".into(),
+                "nvme".into(),
+                "virtio-blk".into(),
+                "live-disk".into(),
+            ],
+            abi: soso_abi::ABI_VERSION,
+            fs: soso_update_core::compat::FS_FORMATO.into(),
+            min_shim: soso_update_core::compat::SHIM_VERSION,
+            min_recuperador: soso_update_core::compat::RECUPERADOR_VERSION,
+        }),
+        files,
+    };
+    std::fs::write(rel_dir.join("manifest.txt"), manifest.format()).expect("manifest roto");
+    println!("test-update: release que no arranca en rootfs/var/actualiza-rota/");
+}
+
+/// La tercera release de la cadena: cambia el mismo fichero que la segunda,
+/// para que volver de C a B se note en el **contenido** y no sólo en el número.
+fn preparar_release_c(root: &Path) {
+    let rel_dir = root.join("rootfs/var/actualiza-c");
+    let _ = std::fs::remove_dir_all(&rel_dir);
+    std::fs::create_dir_all(&rel_dir).expect("actualiza-c");
+
+    let etc = root.join("rootfs/etc");
+    let marca_path = etc.join("actualiza-marca.txt");
+    std::fs::write(
+        etc.join("soso-release"),
+        format!("version={VER_C}\nbuild=tercera\nfecha=2026-09-18\n"),
+    )
+    .expect("soso-release c");
+    std::fs::write(&marca_path, MARCA_C).expect("marca c");
+    let empaquetado = pack_rootfs_con(&root.join("rootfs"), |rel| {
+        // Ni el firmware de la GPU (127 MB que el test no necesita) ni las
+        // **otras releases de prueba**: viven dentro del propio rootfs, así que
+        // sin esto cada release empaquetaría a las anteriores y la tercera
+        // ocuparía el triple que la primera —hasta llenar el disco a mitad de
+        // descarga—.
+        !rel.starts_with("lib/firmware/") && !rel.starts_with("var/actualiza")
+    });
+    std::fs::write(&marca_path, MARCA_VIEJA).expect("marca vieja");
+    crate::version::write_soso_release(root);
+    let (pack_blob, files) = empaquetado.expect("pack c");
+
+    let kernel_src = root.join("target/kernel/x86_64-soso/debug/kernel");
+    let kernel_pub = rel_dir.join("kernel-x86_64");
+    std::fs::copy(&kernel_src, &kernel_pub).expect("kernel copy");
+    crate::release::strip_kernel(&kernel_pub);
+    let kernel_bytes = std::fs::read(&kernel_pub).expect("kernel stripped");
+    std::fs::write(rel_dir.join("rootfs.pack"), &pack_blob).expect("pack");
+
+    let manifest = Manifest {
+        version: parse_semver(VER_C).unwrap(),
+        version_raw: VER_C.into(),
+        build: "tercera".into(),
+        fecha: "2026-09-18".into(),
+        kernel_hash: hex_sha256(&kernel_bytes),
+        kernel_size: kernel_bytes.len() as u64,
+        pack_hash: hex_sha256(&pack_blob),
+        pack_size: pack_blob.len() as u64,
+        compat: Some(soso_update_core::Compat {
+            arch: "x86_64".into(),
+            perfil: "live-usb".into(),
+            drivers: vec![
+                "usb".into(),
+                "nvme".into(),
+                "virtio-blk".into(),
+                "live-disk".into(),
+            ],
+            abi: soso_abi::ABI_VERSION,
+            fs: soso_update_core::compat::FS_FORMATO.into(),
+            min_shim: soso_update_core::compat::SHIM_VERSION,
+            min_recuperador: soso_update_core::compat::RECUPERADOR_VERSION,
+        }),
+        files,
+    };
+    std::fs::write(rel_dir.join("manifest.txt"), manifest.format()).expect("manifest c");
+    println!("test-update: tercera release en rootfs/var/actualiza-c/");
+}
+
+/// §3.6: A→B→C conserva **dos** puntos a propósito —el de A y el de B—, y
+/// volver desde C tiene que devolver B entero, contenido incluido.
+fn fase_cadena(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    dir: &Path,
+    key: &Path,
+) -> Result<String, String> {
+    let s1 = dir.join("cadena-1.log");
+    let _ = std::fs::remove_file(&s1);
+    {
+        let qemu = lanzar_live(code, vars, live, &s1)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s1, "sosh —", Duration::from_secs(300))?;
+        ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "soso-update aplicar --local /var/actualiza-prueba --forzar
+halt
+",
+            Duration::from_secs(300),
+            "soso-update: listo",
+        )?;
+    }
+
+    // B aplicada y acreditada; ahora se arma C. Con C armada tienen que
+    // convivir dos puntos: el de A y el de B. Soltar el de A aquí sería
+    // quedarse sin camino de vuelta si C resulta ser la mala.
+    let s2 = dir.join("cadena-2.log");
+    let _ = std::fs::remove_file(&s2);
+    let salida = {
+        let qemu = lanzar_live(code, vars, live, &s2)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s2, "sosh —", Duration::from_secs(300))?;
+        ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "soso-update aplicar --local /var/actualiza-c --forzar
+soso-update estado
+halt
+",
+            Duration::from_secs(300),
+            "buzón:",
+        )?
+    };
+    let puntos = salida
+        .lines()
+        .filter(|l| l.trim_start().starts_with("vuelta atrás: "))
+        .count();
+    if puntos != 2 {
+        return Err(format!(
+            "con C armada tenían que convivir dos puntos y hay {puntos}: {salida:?}"
+        ));
+    }
+    if !salida.contains(&format!("vuelta atrás: {TEST_VER}")) {
+        return Err(format!("falta el punto de B ({TEST_VER}): {salida:?}"));
+    }
+
+    // C aplicada; y desde C se vuelve a B, no a A.
+    let s3 = dir.join("cadena-3.log");
+    let _ = std::fs::remove_file(&s3);
+    {
+        let qemu = lanzar_live(code, vars, live, &s3)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s3, "sosh —", Duration::from_secs(300))?;
+        let salida = ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "soso-update estado
+soso-update revertir --yes
+halt
+",
+            Duration::from_secs(300),
+            "reinicia y volverás",
+        )?;
+        if !salida.contains(&format!("rootfs: {VER_C}")) {
+            return Err(format!("C no quedó aplicada: {salida:?}"));
+        }
+        if !salida.contains(&format!("volverás a {TEST_VER}")) {
+            return Err(format!("la vuelta atrás no apunta a B: {salida:?}"));
+        }
+    }
+
+    let s4 = dir.join("cadena-4.log");
+    let _ = std::fs::remove_file(&s4);
+    let qemu = lanzar_live(code, vars, live, &s4)?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(&s4, "sosh —", Duration::from_secs(300))?;
+    let salida = ssh_guion_hasta(
+        key,
+        SSH_PORT,
+        "cat /etc/actualiza-marca.txt
+soso-update estado
+halt
+",
+        Duration::from_secs(300),
+        &format!("rootfs: {TEST_VER}"),
+    )?;
+    if !salida.contains(&format!("rootfs: {TEST_VER}")) {
+        return Err(format!("no volvió a B: {salida:?}"));
+    }
+    // El contenido, no sólo el número: B y C cambian el mismo fichero.
+    if !salida.contains(MARCA_NUEVA.trim()) || salida.contains(MARCA_C.trim()) {
+        return Err(format!("el fichero no volvió al contenido de B: {salida:?}"));
+    }
+    Ok(format!("dos puntos con C armada; de C se vuelve a {TEST_VER}"))
+}
+
+/// Un corte **entre las dos escrituras durables de la confirmación**: el diario
+/// ya dice «confirmado» y la ESP todavía dice «probando».
+///
+/// Es el caso que más caro sale si la tabla se equivoca: el arranque siguiente
+/// vería «probando» y desharía una actualización que había ido bien, por haber
+/// perdido la corriente un segundo después de acertar.
+fn fase_corte_confirmacion(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    dir: &Path,
+    key: &Path,
+) -> Result<String, String> {
+    let s1 = dir.join("confirma-1.log");
+    let _ = std::fs::remove_file(&s1);
+    {
+        let qemu = lanzar_live(code, vars, live, &s1)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s1, "sosh —", Duration::from_secs(300))?;
+        ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "soso-update aplicar --local /var/actualiza-prueba --forzar
+halt
+",
+            Duration::from_secs(300),
+            "soso-update: listo",
+        )?;
+    }
+
+    // Aplica y se acredita: diario y ESP quedan en «confirmado».
+    let s2 = dir.join("confirma-2.log");
+    let _ = std::fs::remove_file(&s2);
+    {
+        let qemu = lanzar_live(code, vars, live, &s2)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s2, "sosh —", Duration::from_secs(300))?;
+        esperar_en_fichero(&s2, "txn: pareja confirmada", Duration::from_secs(120))?;
+        ssh_guion_hasta(key, SSH_PORT, "halt
+", Duration::from_secs(120), "apagando")?;
+    }
+
+    // Y ahora el corte: se rebobina **sólo** la ESP a «probando», que es el
+    // estado en que la deja perder la corriente justo después de anotar la
+    // confirmación en el diario.
+    let p1 = esp_p1(live);
+    let raw = crate::fat32_write::read_root_file(live, p1, b"SOSOTXN BIN")
+        .map_err(|e| format!("leer SOSOTXN.BIN: {e}"))?;
+    let rec = soso_update_core::txn::bootrec::BootRecord::pick(&raw)
+        .map_err(|e| format!("registro ilegible: {e:?}"))?;
+    if rec.decision != soso_update_core::txn::bootrec::Decision::Confirmado {
+        return Err(format!("esperaba «confirmado» y hay «{}»", rec.decision.as_str()));
+    }
+    let atras = soso_update_core::txn::bootrec::BootRecord::nuevo(
+        soso_update_core::txn::bootrec::Decision::Probando,
+        rec.id,
+        &rec.version_nueva,
+        &rec.version_anterior,
+        rec.seq + 1,
+    );
+    let atras = match rec.punto {
+        Some(p) => atras.con_punto(p),
+        None => atras,
+    };
+    let bytes = atras.format().map_err(|e| format!("formatear: {e:?}"))?;
+    let mut fichero = raw.clone();
+    let off = atras.ranura() * soso_update_core::SLOT_SIZE;
+    fichero[off..off + bytes.len()].copy_from_slice(&bytes);
+    crate::fat32_write::overwrite_in_dir(live, p1, &[], b"SOSOTXN BIN", &fichero)
+        .map_err(|e| format!("escribir SOSOTXN.BIN: {e}"))?;
+
+    // El arranque tiene que **completar** la confirmación, no deshacerla.
+    let s3 = dir.join("confirma-3.log");
+    let _ = std::fs::remove_file(&s3);
+    let qemu = lanzar_live(code, vars, live, &s3)?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(&s3, "sosh —", Duration::from_secs(300))?;
+    let serie = std::fs::read_to_string(&s3).unwrap_or_default();
+    if serie.contains("txn: actualización revertida") {
+        return Err("deshizo una actualización que había ido bien".into());
+    }
+    if !serie.contains("CompletarConfirmacion") {
+        return Err(format!(
+            "no completó la confirmación: {:?}",
+            serie.lines().filter(|l| l.starts_with("txn:")).collect::<Vec<_>>()
+        ));
+    }
+    let salida = ssh_guion_hasta(
+        key,
+        SSH_PORT,
+        "soso-update estado
+halt
+",
+        Duration::from_secs(120),
+        &format!("rootfs: {TEST_VER}"),
+    )?;
+    if !salida.contains(&format!("rootfs: {TEST_VER}")) {
+        return Err(format!("no se quedó en {TEST_VER}: {salida:?}"));
+    }
+    Ok(format!("sigue en {TEST_VER}"))
+}
+
+/// Qué pasa cuando falla **la propia recuperación**: con un respaldo que ya no
+/// cuadra con su hash, deshacer dejaría la pareja mezclada. El arranque tiene
+/// que plantarse y decirlo, no seguir adelante.
+fn fase_respaldo_roto(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    dir: &Path,
+    key: &Path,
+) -> Result<String, String> {
+    // 1) Armar la release que no arranca: así la reversión ocurre sola.
+    let s1 = dir.join("respaldo-1.log");
+    let _ = std::fs::remove_file(&s1);
+    {
+        let qemu = lanzar_live(code, vars, live, &s1)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s1, "sosh —", Duration::from_secs(300))?;
+        ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "soso-update aplicar --local /var/actualiza-rota --forzar
+halt
+",
+            Duration::from_secs(300),
+            "soso-update: listo",
+        )?;
+    }
+
+    // 2) Se estropea un respaldo dentro del sosofs de la imagen: es lo que ve
+    //    el arranque cuando un sector se va o un corte deja la copia a medias.
+    let estropeado = {
+        let (lba, ultimo) = crate::package_live::partition_range(live, 2)
+            .ok_or("sin partición 2 en la imagen")?;
+        let mut fs = crate::sosofs_img::montar(live, lba, ultimo + 1 - lba)?;
+        let op = crate::sosofs_img::dir_operacion(&mut fs)
+            .ok_or("no encuentro la operación armada en el disco")?;
+        let respaldo = format!("/var/lib/soso-update/{op}/respaldo");
+        let fichero = crate::sosofs_img::primer_fichero(&mut fs, &respaldo)
+            .ok_or("la operación no dejó respaldos")?;
+        crate::sosofs_img::estropear(&mut fs, &fichero)?
+    };
+
+    // 3) Aplica (la release rota no arranca) y 4) al intentar deshacer, el
+    //    respaldo no cuadra: diagnóstico, no un arranque a medias.
+    let s2 = dir.join("respaldo-2.log");
+    let _ = std::fs::remove_file(&s2);
+    {
+        let qemu = lanzar_live(code, vars, live, &s2)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s2, "fallo lanzando /bin/init", Duration::from_secs(300))?;
+    }
+
+    let s3 = dir.join("respaldo-3.log");
+    let _ = std::fs::remove_file(&s3);
+    let qemu = lanzar_live(code, vars, live, &s3)?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(&s3, "no arranco con una pareja a medias", Duration::from_secs(300))?;
+    let serie = std::fs::read_to_string(&s3).unwrap_or_default();
+    if !serie.contains("txn: fallo") {
+        return Err(format!(
+            "no dijo por qué no podía deshacer: {:?}",
+            serie.lines().filter(|l| l.starts_with("txn:")).collect::<Vec<_>>()
+        ));
+    }
+    // Y no lanza userspace: arrancar con media versión puesta sería justo lo
+    // que el contrato evita.
+    if serie.contains("sosh — escribe") {
+        return Err("arrancó la shell con la pareja mezclada".into());
+    }
+    Ok(format!("diagnóstico tras estropear {estropeado}"))
+}
+
+/// §3.6: «si el arranque nuevo no funciona, el siguiente lo deshace solo».
+fn fase_init_roto(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    dir: &Path,
+    key: &Path,
+    ver_base: &str,
+) -> Result<String, String> {
+    // 1) Armar la release que no arranca.
+    let s1 = dir.join("roto-1.log");
+    let _ = std::fs::remove_file(&s1);
+    {
+        let qemu = lanzar_live(code, vars, live, &s1)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s1, "sosh —", Duration::from_secs(300))?;
+        ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "soso-update aplicar --local /var/actualiza-rota --forzar
+halt
+",
+            Duration::from_secs(300),
+            "soso-update: listo",
+        )?;
+    }
+
+    // 2) Se aplica… y no arranca. Nadie la acredita, y aquí no hay SSH al que
+    //    pedirle nada: la máquina se queda en la consola de emergencia.
+    let s2 = dir.join("roto-2.log");
+    let _ = std::fs::remove_file(&s2);
+    {
+        let qemu = lanzar_live(code, vars, live, &s2)?;
+        let _guard = Matar(qemu.child);
+        esperar_en_fichero(&s2, "fallo lanzando /bin/init", Duration::from_secs(300))?;
+        let serie = std::fs::read_to_string(&s2).unwrap_or_default();
+        if !serie.contains("txn: actualización aplicada") {
+            return Err("no llegó a aplicar la release rota".into());
+        }
+    }
+
+    // 3) El encendido siguiente la deshace **solo**: nadie ha pedido nada.
+    let s3 = dir.join("roto-3.log");
+    let _ = std::fs::remove_file(&s3);
+    let qemu = lanzar_live(code, vars, live, &s3)?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(&s3, "sosh —", Duration::from_secs(300))?;
+    let serie = std::fs::read_to_string(&s3).unwrap_or_default();
+    if !serie.contains("txn: actualización revertida") {
+        return Err(format!(
+            "no deshizo la actualización sin que nadie se lo pidiera: {:?}",
+            serie.lines().filter(|l| l.starts_with("txn:")).collect::<Vec<_>>()
+        ));
+    }
+    // Y nadie confirma lo que se acaba de deshacer: si la ESP se quedara en
+    // «probando», el primer programa que salde la acreditación daría por buena
+    // la versión que no arranca.
+    if serie.contains("txn: pareja confirmada") {
+        return Err("confirmó la versión que acababa de deshacer".into());
+    }
+    let salida = ssh_guion_hasta(
+        key,
+        SSH_PORT,
+        "soso-update estado
+halt
+",
+        Duration::from_secs(120),
+        &format!("rootfs: {ver_base}"),
+    )?;
+    if !salida.contains(&format!("rootfs: {ver_base}")) {
+        return Err(format!("no volvió a {ver_base}: {salida:?}"));
+    }
+    Ok(format!("volvió a {ver_base} sin que nadie lo pidiera"))
 }
 
 fn fase_aplicar(

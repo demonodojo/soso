@@ -47,7 +47,20 @@ aquí: un `Contenido` con hash vacío se escribe `0 ` y al releer se recorta el
 espacio → campo impartible y registro **ilegible**; «no consta» va explícito
 (`- -`). Vale para el punto y para el diario.
 
-**U6 parcial (2026-09-17): transición de instalaciones antiguas.**
+**U7 cerrada (2026-09-18): la matriz, con las averías provocadas.** `test-update`
+tiene 9 fases; las nuevas se seleccionan con `cargo xtask test-update <filtro>`:
+`roto` (una release con `/bin/init` que no es ELF: se aplica, no arranca y el
+encendido siguiente la deshace **solo**), `cadena` (A→B→C: dos puntos conviven
+con C armada, y de C se vuelve a B con su contenido), `respaldo` (se estropea un
+respaldo con `xtask::sosofs_img` y el arranque tiene que dar diagnóstico sin
+lanzar la shell), `confirmacion` (se rebobina **sólo** la ESP a `probando` con el
+diario ya en `confirmado`: hay que **completar**, no deshacer) y `ajeno`.
+Bancos host nuevos: `rangos_http` (política de respuestas; un 206 de otro tramo
+se aceptaba) y `manifiesto` (traversal, duplicados, solapes…). Trampa: las
+releases de prueba viven en `rootfs/var/actualiza-*` y hay que excluirlas del
+pack o se empaquetan entre sí.
+
+**U6 cerrada (2026-09-18): transición de instalaciones antiguas.**
 `soso-update transicion` inventaría los huecos de la ESP y separa lo que
 **bloquea** (sin `SOSOTXN.BIN` no hay vuelta atrás; `aplicar` se planta antes de
 descargar) de lo que sólo conviene. `soso-update transicion --disco N` (sólo

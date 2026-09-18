@@ -152,3 +152,92 @@ pub fn trozos(start: u64, len: u64, max: u64) -> Vec<(u64, u64)> {
 pub fn bytes_pendientes(pendientes: &[FileEntry]) -> u64 {
     pendientes.iter().map(|f| f.size).sum()
 }
+
+// ------------------------------------------------- respuestas a un rango
+
+/// Lo que se pidió en una petición de rango, para poder juzgar la respuesta.
+#[derive(Clone, Copy, Debug)]
+pub struct Peticion {
+    pub desde: u64,
+    pub hasta: u64,
+    /// Bytes que faltan por recibir del tramo entero (no sólo de esta
+    /// petición): un servidor que devuelva de más no puede desbordar el plan.
+    pub restante: u64,
+    /// El tramo empezaba en el byte 0 del artefacto.
+    pub desde_el_principio: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FalloRango {
+    /// El servidor contestó algo que no sirve (404, 429, 5xx, un redirect que
+    /// nadie siguió…). Se guarda el código porque es lo que hay que enseñar.
+    Estado(u16),
+    /// 206 con el cuerpo vacío: no avanza y repetirlo sería un bucle.
+    Vacia,
+    /// 206, pero de **otro** tramo. Aceptarlo colocaría los bytes en el sitio
+    /// equivocado; lo detectaría después el hash del fichero, pero diciendo
+    /// «fichero corrupto» en vez de «tu servidor no respeta Range».
+    RangoAjeno { pedido: u64, recibido: u64 },
+}
+
+/// Qué hacer con la respuesta.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Aceptado {
+    /// Bytes del cuerpo que se usan (el resto sobra).
+    pub usar: usize,
+    /// El servidor ignoró el `Range` y mandó el artefacto entero: con esto ya
+    /// está todo, no hay que pedir más tramos.
+    pub completo: bool,
+}
+
+/// Decide qué hacer con lo que contestó el servidor a una petición de rango.
+///
+/// Está aquí y no en el cliente porque es **política**, no transporte: son las
+/// reglas de qué respuesta vale, y se prueban en el host una a una.
+pub fn juzgar_rango(
+    p: &Peticion,
+    status: u16,
+    content_range: Option<&str>,
+    cuerpo: usize,
+) -> Result<Aceptado, FalloRango> {
+    match status {
+        206 => {
+            if cuerpo == 0 {
+                return Err(FalloRango::Vacia);
+            }
+            if let Some(cr) = content_range {
+                match parse_content_range(cr) {
+                    Some(inicio) if inicio != p.desde => {
+                        return Err(FalloRango::RangoAjeno {
+                            pedido: p.desde,
+                            recibido: inicio,
+                        });
+                    }
+                    // Un `Content-Range` que no se entiende no se usa para
+                    // rechazar: lo que se compara después es el hash, y
+                    // plantarse por una cabecera rara dejaría sin actualizar a
+                    // quien tiene delante un proxy pintoresco.
+                    _ => {}
+                }
+            }
+            Ok(Aceptado {
+                usar: (cuerpo as u64).min(p.restante) as usize,
+                completo: false,
+            })
+        }
+        // 200 sólo vale si el servidor ignoró el `Range` y nos dio el artefacto
+        // entero, y eso únicamente sirve cuando pedíamos desde el principio.
+        200 if p.desde_el_principio && p.desde == 0 && cuerpo as u64 >= p.restante => Ok(Aceptado {
+            usar: p.restante as usize,
+            completo: true,
+        }),
+        otro => Err(FalloRango::Estado(otro)),
+    }
+}
+
+/// Primer byte que dice `Content-Range: bytes 100-199/12345`.
+pub fn parse_content_range(v: &str) -> Option<u64> {
+    let resto = v.trim().strip_prefix("bytes")?.trim_start();
+    let inicio = resto.split(['-', '/']).next()?.trim();
+    inicio.parse().ok()
+}

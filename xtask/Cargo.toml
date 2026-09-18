@@ -13,5 +13,8 @@ soso-abi = { path = "../crates/soso-abi" }
 sosomodel = { path = "../crates/sosomodel", features = ["std"] }
 soso-update-core = { path = "../crates/soso-update-core", features = ["std"] }
 espfat-core = { path = "../crates/espfat-core", features = ["std"] }
+# Para inyectar averías dentro del sosofs de una imagen en las pruebas.
+sosofs = { path = "../crates/sosofs", features = ["std"] }
+block-dev = { path = "../crates/block-dev" }
 soso-resize-core = { path = "../crates/soso-resize-core" }
 sha2 = "0.10"

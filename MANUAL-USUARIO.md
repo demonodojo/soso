@@ -785,7 +785,18 @@ versión puedes volver y si esa copia está comprobada.
 
 Si el arranque nuevo no llega a funcionar, el siguiente encendido **deshace la
 actualización solo** y vuelve a dejarte la anterior: programas, ficheros
-retirados y número de versión.
+retirados y número de versión. No hay que pedir nada ni acertar con ninguna
+tecla. Y si lo que falla es la propia vuelta atrás —una copia que ya no cuadra
+con su hash—, el arranque se planta y lo dice en vez de dejarte media versión
+puesta: entonces toca el USB live.
+
+**Qué está probado y dónde.** Todo lo de esta sección se comprueba en cada
+`cargo xtask test-update`, con las averías provocadas a mano: una actualización
+cuyo `/bin/init` no arranca, una copia de seguridad corrompida, un corte de
+corriente justo entre las dos anotaciones de la confirmación, y una cadena de
+tres versiones con vuelta a la del medio. Lo que **todavía no** está probado en
+una máquina de verdad es la descarga larga por WiFi y el menú de arranque de una
+placa concreta; eso va aparte.
 
 **Volver a mano, aunque ya funcione.** `soso-update revertir` te enseña de qué
 versión a cuál vas, **relee la copia guardada para comprobarla** antes de

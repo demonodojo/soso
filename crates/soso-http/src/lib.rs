@@ -575,6 +575,35 @@ pub fn https_download<T: TcpTransport, S: BodySink>(
 }
 
 /// GET HTTPS con cabecera `Range: bytes=start-end` (respuesta en RAM).
+/// Como `https_get_range`, pero devolviendo también las cabeceras: quien pide
+/// un tramo necesita `Content-Range` para saber si le han dado **ese** tramo.
+pub fn https_get_range_full<T: TcpTransport>(
+    transport: &T,
+    url: &str,
+    auth: Option<&str>,
+    start: u64,
+    end: u64,
+) -> Result<FullResponse, HttpError> {
+    let (scheme, _, _, _) = parse_url(url)?;
+    if scheme != "https" {
+        return Err(HttpError::Parse);
+    }
+    let mut body = Vec::new();
+    let (status, headers) = https_request(
+        transport,
+        url,
+        auth,
+        HttpReqKind::Range { start, end },
+        &mut VecSink(&mut body),
+        120_000,
+    )?;
+    Ok(FullResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
 pub fn https_get_range<T: TcpTransport>(
     transport: &T,
     url: &str,

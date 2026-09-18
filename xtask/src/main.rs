@@ -181,6 +181,7 @@ mod test_distributed;
 mod sosomfs_check;
 mod test_install;
 mod test_resize;
+mod sosofs_img;
 mod test_update;
 mod version;
 

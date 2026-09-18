@@ -66,7 +66,18 @@ pub fn recuperar() -> bool {
             }
             ok
         }
-        Recuperacion::Revertir(_) => ejecutar(&dir, diario, false),
+        Recuperacion::Revertir(id) => {
+            let ok = ejecutar(&dir, diario, false);
+            if ok {
+                // Publicar la decisión es parte de deshacer, no un adorno: sin
+                // esto la ESP se queda diciendo «probando» con la versión
+                // vieja ya puesta, y el primer programa que salde la
+                // acreditación la da por buena —confirmando una versión que
+                // acabamos de quitar—.
+                publicar(&esp, Decision::Revertido, id);
+            }
+            ok
+        }
         Recuperacion::PublicarProbando(id) => {
             publicar(&esp, Decision::Probando, id);
             crate::drivers::txnlock::tomar_por_el_kernel();

@@ -1,6 +1,6 @@
 # Actualizaciones de soso instalado y logs en sosofs
 
-Fecha: **2026-09-18**. Estado: **U0–U6 cerradas; U7–U8 pendientes**.
+Fecha: **2026-09-18**. Estado: **U0–U7 cerradas; queda U8, que necesita el ROG**.
 El contrato está en [U0-CONTRATO-ACTUALIZACION.md](U0-CONTRATO-ACTUALIZACION.md)
 y ya gobierna el arranque, el cliente, el instalador y el shim: el kernel
 reconcilia el registro de la ESP con el diario antes de firmware e init, y
@@ -305,8 +305,8 @@ fallido debe conservar los datos y copias restantes para ese rescate.
 atrás después, y U5 se desglosó en U5a–U5e, entregadas y acreditadas una a una
 (ver el desglose y la sección 6); la **exclusión de escritores**, que no caía en
 ninguna de las cinco, se cerró aparte el mismo día. **U6** quedó cerrada el 2026-09-18.
-U7–U8 pendientes: el siguiente paso es U7, la matriz de validación con fallos
-inyectados.
+U7 quedó cerrada el mismo día. Sólo
+queda **U8**: release candidata y validación en el ROG, que necesita la placa.
 
 | ID | Depende de | Trabajo y archivos principales | Criterio de cierre |
 |---|---|---|---|
@@ -317,8 +317,8 @@ inyectados.
 | U4 ✅ | U3 | Preflight y descarga durable reanudable; `soso-update`, `net.rs`, `soso-http` | **Cerrada 2026-09-17.** `descarga.rs` (12 pruebas host) + área de preparación en sosofs; `test-update` comprueba la reanudación **cruzando un reinicio**. |
 | U5 ✅ | U0, U4 | Backup retenido, exclusión de escritores, aplicación/recuperación antes de firmware/init, shim, entrada UEFI de rescate y confirmación conjunta; desglose U5a–U5e | **Cerrada 2026-09-17** (U5a–U5e + exclusión de escritores): vuelta atrás automática, manual y desde el firmware, también tras confirmar; ningún corte arranca una pareja mezclada ni elimina la última copia válida (§3.6); y entre el respaldo y el reinicio nadie reescribe lo que el punto copió. Dos límites anotados: el arranque de la pareja antigua **bajo su propio kernel** (lo gobierna `SOSOKRN.MET`) y los cortes inyectados E2E, que son de U7. |
 | U6 ✅ | U2, U5 | Transición de instalaciones existentes, release puente, huecos ESP/entrada de recuperación y reparación offline desde live | **Cerrada 2026-09-18:** inventario (`soso-update transicion`), provisión desde el live por el shim (huecos, identidad, cargador y entrada de rescate), retirada del log FAT, y `soso-update recuperar` sobre otro disco —enumerar, verificar, pedir el rescate o restaurarlo offline—. Acreditado E2E en `test-install` (transición) y `test-update` (fase «ajeno», arrancando el disco reparado). La secuencia puente está escrita: transición primero, OTA recuperable después. |
-| U7 | U1–U6 | Extender bancos host, QEMU USB→NVMe y OTA con fallos | Matriz de la sección 5 verde, incluida retención A→B→C, fallo de C, reversión tras confirmar y fallo durante la propia recuperación. |
-| U8 | U7 | Release candidata y validación en ROG por WiFi | Instalación/actualización y recuperación verificadas en placa; manual y estado reflejan exactamente lo probado. |
+| U7 ✅ | U1–U6 | Extender bancos host, QEMU USB→NVMe y OTA con fallos | **Cerrada 2026-09-18.** Matriz de §5 verde salvo la fila del ROG (es U8): cinco casos nuevos en QEMU —arranque roto que se deshace solo, cadena A→B→C, respaldo corrupto, corte al confirmar, reparación desde el live— y dos bancos host nuevos (respuestas HTTP y validación de paquete). Dos huecos anotados: interrumpir la migración y el descriptor abierto antes de armar. |
+| U8 ⏳ | U7 | Release candidata y validación en ROG por WiFi | **Necesita la placa.** La candidata ya se construye (`cargo xtask release`, v0.2.2: kernel 5,8 MB, pack 169 MB, 64 ficheros) y el guion de validación está escrito (siete pasos, más abajo). Falta ejecutarlo. |
 
 U1–U2 dan una primera entrega útil: instalaciones con logs en sosofs. No se
 anunciará actualización recuperable completa hasta U5–U8.
@@ -349,16 +349,19 @@ migración. Una vez arrancada y confirmada la base puente, habilitar OTA normal.
 
 ## 5. Validación
 
-| Entorno | Casos obligatorios |
-|---|---|
-| Host, FS simulado | Cortes antes/después de cada commit y flush, escritura corta, ENOSPC, backup corrupto, registros discordantes, rollback interrumpido y GC sin borrar la única copia recuperable. |
-| Host, HTTP simulado | DNS/TLS/timeout, desconexión a mitad, Range 206 y Content-Range incorrecto, 200 inesperado, redirect, 404/429/5xx, cambio de release, tamaño excesivo y hash incorrecto. Sin Internet en tests deterministas. |
-| Host, paquete | Rutas absolutas/traversal/alias, duplicados, rutas protegidas, formato desconocido, ABI/shim/perfil incompatibles, mismo número con otro build y argumentos CLI inválidos. |
-| Host/QEMU, logs | Más de 256 KiB kernel y 64 KiB apps, sin duplicados silenciosos, pérdidas marcadas, rotación, múltiples boots, FS lleno, escritura fallida y lector SSH simultáneo. |
-| QEMU OVMF, instalación | Live USB → NVMe; segundo arranque sin USB; ESP sin SOSOLOG; origen intacto; particiones/credenciales/modelos conservados; log nuevo legible tras reiniciar. |
-| QEMU OVMF, OTA | A→B correcta; interrupción de descarga; kernel o init/sosh defectuoso; fallo después de parte del rootfs; corte antes/después de confirmación; revertir; después B→C y C→B. |
-| QEMU, instalación antigua | Migración con y sin huecos/meta modernos; interrupción de migración; recuperación desde live; nunca reinstalación destructiva como salida automática. |
-| ROG NVMe/WiFi | HTTPS sostenido, desconexión/reconexión durante descarga, actualización, arranque sin USB, shell/SSH, WiFi/firmware y logs persistentes; reversión controlada a una versión conocida. |
+Estado al 2026-09-18 (U7): todo verde salvo la fila del ROG, que necesita la
+placa (es U8). La columna de la derecha dice dónde se comprueba cada fila.
+
+| Entorno | Casos obligatorios | Dónde |
+|---|---|---|
+| Host, FS simulado | Cortes antes/después de cada commit y flush, escritura corta, ENOSPC, backup corrupto, registros discordantes, rollback interrumpido y GC sin borrar la única copia recuperable. | `sosofs/tests/crash.rs`, `txn_cortes`, `aplicador`, `txn_registros`, `punto_crear`, `punto_retenido` |
+| Host, HTTP simulado | DNS/TLS/timeout, desconexión a mitad, Range 206 y Content-Range incorrecto, 200 inesperado, redirect, 404/429/5xx, cambio de release, tamaño excesivo y hash incorrecto. Sin Internet en tests deterministas. | `rangos_http` (política de respuestas), `descarga` (etapa, reanudación, cambio de release), `soso-http` (DNS/conexión) |
+| Host, paquete | Rutas absolutas/traversal/alias, duplicados, rutas protegidas, formato desconocido, ABI/shim/perfil incompatibles, mismo número con otro build y argumentos CLI inválidos. | `manifiesto`, `rutas_administradas`, `identidad_compat`, `release_canal` |
+| Host/QEMU, logs | Más de 256 KiB kernel y 64 KiB apps, sin duplicados silenciosos, pérdidas marcadas, rotación, múltiples boots, FS lleno, escritura fallida y lector SSH simultáneo. | `soso-log-core/tests/escritor.rs` (15) + `test-update` (sobreviven al reinicio) |
+| QEMU OVMF, instalación | Live USB → NVMe; segundo arranque sin USB; ESP sin SOSOLOG; origen intacto; particiones/credenciales/modelos conservados; log nuevo legible tras reiniciar. | `test-install` |
+| QEMU OVMF, OTA | A→B correcta; interrupción de descarga; kernel o init/sosh defectuoso; fallo después de parte del rootfs; corte antes/después de confirmación; revertir; después B→C y C→B. | `test-update`, 9 fases: aplicar, versión, vuelta atrás, ajeno, corte del kernel, cadena A→B→C, respaldo corrupto, arranque roto, manifiesto inválido |
+| QEMU, instalación antigua | Migración con y sin huecos/meta modernos; interrupción de migración; recuperación desde live; nunca reinstalación destructiva como salida automática. | `test-install` (fase 4) y `test-update` (fase «ajeno»). La **interrupción** de la migración sigue sin prueba: ver abajo |
+| ROG NVMe/WiFi | HTTPS sostenido, desconexión/reconexión durante descarga, actualización, arranque sin USB, shell/SSH, WiFi/firmware y logs persistentes; reversión controlada a una versión conocida. | **Pendiente: necesita la placa (U8)** |
 
 Casos de aceptación adicionales de vuelta atrás (§3.6), obligatorios para U7/U8:
 
@@ -755,6 +758,110 @@ escondidas porque nadie miraba un arranque **después** del que revierte.
   siempre —`revertido` si llegó a aplicarse, `descartado` si no— y **antes** de
   publicar la decisión, para que un corte en medio deje el registro en
   `rescatar` y el arranque siguiente repita un rescate idempotente.
+
+### U8 — pendiente: qué hay que hacer en el ROG
+
+Todo lo anterior está acreditado **en QEMU**. La placa aporta lo que un
+emulador no puede: WiFi de verdad, una descarga larga por HTTPS que se puede
+cortar de verdad, y un firmware que no es OVMF. Esto es el guion, para poder
+seguirlo sin volver a pensarlo.
+
+**Antes de empezar.** La release candidata se construye con `cargo xtask
+release` (deja `target/release-soso/v<versión>/` con `kernel-x86_64`,
+`rootfs.pack` y `manifest.txt`); con `--publish` sube a GitHub. Sin publicar,
+las pruebas se hacen con `--local <dir>` desde un USB de datos.
+
+1. **Punto de partida.** En el ROG, `soso-update estado`. Anota versión, kernel
+   y qué dice la línea `transición:`. Si dice que **no** admite vuelta atrás,
+   primero la transición: arrancar el live nuevo, `soso-install` para ver el
+   número del disco, `soso-update transicion --disco <n>`, reiniciar con el USB
+   puesto, y comprobar que aparece «soso — recuperar versión anterior» en el
+   menú de arranque de la placa (F12 / Boot menu).
+2. **Actualización por WiFi.** `soso-update comprobar` y `soso-update aplicar`.
+   Lo que hay que mirar: que la descarga aguanta —son ~170 MB— y que al
+   terminar dice «reinicia para instalar». Reiniciar y comprobar `soso-update
+   estado`: versión nueva, y una vuelta atrás **verificada** a la anterior.
+3. **Corte de red a mitad.** Repetir `aplicar` apagando el WiFi a mitad de la
+   descarga. Tiene que conservar lo bajado y reanudar al relanzarlo, no volver
+   a empezar.
+4. **Arranque sin USB**, shell y SSH: que la placa arranca sola del NVMe, que
+   `sosh` responde y que se entra por SSH con la clave.
+5. **Logs persistentes.** `cat /var/log/kernel.log` tras dos reinicios: las
+   cabeceras de arranque tienen que estar las dos, y la ESP instalada **no**
+   debe tener ya `SOSOLOG.TXT`.
+6. **Vuelta atrás controlada.** `soso-update revertir`, reiniciar, y comprobar
+   que vuelve la versión anterior entera —número y ficheros—.
+7. **La vía del firmware.** Volver a actualizar y, esta vez, arrancar por la
+   entrada «soso — recuperar versión anterior» del menú de la placa. Tiene que
+   volver sola sin tocar nada más.
+
+**Criterio de cierre de U8:** los siete pasos, y que el manual y `soso-update
+estado` digan exactamente lo que se ha visto. Si algo de lo que promete el
+manual no se cumple en la placa, se corrige **el manual** además del código: lo
+que no se ha probado en hardware no se anuncia como probado.
+
+### U7 — cerrada el 2026-09-18 (la matriz, con las averías provocadas a mano)
+
+Cinco casos nuevos en QEMU, todos fabricando la avería en vez de esperarla. Los
+cuatro que U7 nombra explícitamente —retención A→B→C, fallo de C, reversión tras
+confirmar y fallo durante la propia recuperación— quedan cubiertos, y con ellos
+la fila OTA de la matriz.
+
+- **Una actualización que no arranca se deshace sola.** Es *la* promesa del
+  plan y no estaba probada de punta a punta. La release trae un `/bin/init` que
+  no es un ELF —se rompe init y no el kernel a propósito, para que el fallo
+  ocurra ya con la pareja aplicada—: el segundo encendido aplica y se queda en
+  la consola de emergencia, sin nadie a quien pedirle nada, y el tercero
+  restaura la versión anterior **sin que nadie lo pida**.
+  - **Fallo real que destapó:** al deshacer, el kernel no publicaba la decisión.
+    La ESP se quedaba diciendo `probando` con la versión vieja ya puesta, y el
+    primer programa que saldaba la acreditación la daba por buena —el log
+    mostraba `pareja confirmada (0.2.8-rota)`, confirmando justo la versión que
+    acababa de quitarse por no arrancar—. Publicar la decisión es parte de
+    deshacer, no un adorno.
+- **Cadena A→B→C y vuelta a B.** Con C armada conviven **dos** puntos, el de A
+  y el de B; soltar el de A ahí sería quedarse sin camino si C es la mala. Hizo
+  falta una tercera release de verdad: la identidad de la operación es el hash
+  del manifiesto, así que aplicar dos veces la misma reutiliza el punto y no hay
+  cadena que probar. Se comprueba el **contenido** del fichero, no sólo el
+  número de versión.
+- **Falla la propia recuperación.** Se estropea un respaldo dentro del sosofs de
+  la imagen —lo que hace un sector que se va— y el arranque siguiente tiene que
+  plantarse con diagnóstico y **no lanzar la shell**: arrancar con media versión
+  puesta es lo que el contrato evita. Para poder provocarlo, `xtask` sabe ahora
+  escribir dentro del sosofs de una imagen (`sosofs_img.rs`); no es una utilidad
+  de usuario, existe para fabricar averías.
+- **Corte entre las dos escrituras de la confirmación.** El diario ya dice
+  «confirmado» y la ESP todavía «probando»: perder la corriente un segundo
+  después de acertar. Si esa fila de la tabla estuviera mal, el arranque
+  siguiente desharía una actualización que había ido bien. Se rebobina **sólo**
+  la ESP y se exige que **complete** la confirmación.
+- **Respuestas HTTP** (`rangos_http`, 9 pruebas): la política estaba en el
+  cliente, donde no hay banco, así que se movió al core. Tapó un agujero real:
+  un **206 de otro tramo se aceptaba**, los bytes iban al offset equivocado y el
+  fallo salía después como «fichero corrupto», culpando al fichero y no al
+  servidor. Un `Content-Range` ilegible, en cambio, no tumba la descarga: el
+  hash sigue siendo la comprobación de verdad.
+- **Paquete** (`manifiesto`, 12 pruebas): rutas absolutas, `../`, la barra
+  invertida como alias, duplicados, ficheros vacíos, offsets fuera del pack,
+  solapes, hashes que no lo son, tamaño máximo, y que el mismo número con otro
+  build es **otra** release.
+
+**Una trampa del andamiaje, anotada porque volverá:** cada release de prueba
+empaquetaba a las anteriores —viven dentro del propio `rootfs`—, así que la
+tercera ocupaba el triple que la primera y llenaba el disco a mitad de descarga.
+El síntoma era «no pude escribir en el área de preparación», que suena a fallo
+del cliente y no del test.
+
+**Lo que queda sin prueba, dicho aquí y no escondido:**
+
+- **Interrupción de la propia migración** (U6 a medias de U7): cortar mientras
+  el shim crea los huecos. Hace falta matar QEMU en un instante concreto del
+  firmware, que es justo lo que no es determinista.
+- **El descriptor abierto antes de la actualización** (exclusión de escritores):
+  cubierto por construcción, sin prueba E2E, porque sosh no deja mantener un
+  descriptor abierto entre órdenes.
+- **La fila del ROG**: necesita la placa. Es U8.
 
 ### U6 — cerrada el 2026-09-18 (transición, rescate y reparación desde el live)
 

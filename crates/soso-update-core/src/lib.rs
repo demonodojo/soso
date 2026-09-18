@@ -122,7 +122,12 @@ pub enum Excluido {
 pub const PACK_SKIP_DIRS: &[(&str, Excluido)] = &[
     ("var/log/", Excluido::Log),
     ("var/lib/soso-update/", Excluido::EstadoOta),
-    ("var/actualiza-prueba/", Excluido::EstadoOta),
+    // Cualquier `var/actualiza-*`: es el área de una OTA o una release de
+    // prueba del banco. Sin el prefijo, una release publicada se llevaría
+    // dentro las releases de prueba del que la empaquetó —28 MB de fixtures
+    // instalándose en máquinas de verdad—, que es lo que pasó al añadir la
+    // segunda y la tercera.
+    ("var/actualiza-", Excluido::EstadoOta),
     ("var/forja-cache/", Excluido::Cache),
     ("var/forja-out/", Excluido::Cache),
     ("var/cache/", Excluido::Cache),
