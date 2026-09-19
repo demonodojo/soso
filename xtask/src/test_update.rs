@@ -170,6 +170,22 @@ pub fn run(filtro: Option<&str>) {
         }
     }
 
+    // Salida TCP desde userland: determinista y sin internet — el guest llega
+    // al host por 10.0.2.2, así que el servidor de eco lo levanta el propio
+    // banco. Es el camino que el OTA necesita y que no probaba nadie.
+    if quiere("saliente") {
+        let serial = dir.join("saliente.log");
+        let base = dir.join("live-saliente.img");
+        crate::copy_sparse(&live_base, &base);
+        match fase_tcp_saliente(&ovmf_code, &vars, &base, &serial, &key) {
+            Ok(l) => marca(&format!("TCP saliente desde userland — {l}"), true),
+            Err(e) => {
+                marca(&format!("TCP saliente — {e}"), false);
+                fallos += 1;
+            }
+        }
+    }
+
     // Camino de red real: **no** entra en la pasada normal, porque depende de
     // internet y de que GitHub conteste. Se pide a mano con SOSO_TEST_RED=1.
     // Existe porque todo lo demás usa `--local` y el HTTPS de userspace no lo
@@ -1220,6 +1236,77 @@ halt
     }
     let _ = ver_base;
     Ok(format!("restaurado desde el live; arranca en {destino}"))
+}
+
+/// Abrir una conexión TCP **hacia fuera** desde un proceso de usuario.
+///
+/// Dos casos, y el segundo importa tanto como el primero:
+/// 1. Contra un servidor que escucha: conecta, manda y recibe.
+/// 2. Contra un puerto cerrado: falla **a tiempo**. Un `connect` que se cuelga
+///    para siempre es lo que dejó el OTA mudo quince minutos.
+fn fase_tcp_saliente(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    serial: &Path,
+    key: &Path,
+) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // El eco vive en el host; el guest lo ve en 10.0.2.2 por slirp.
+    let listener = TcpListener::bind("0.0.0.0:0").map_err(|e| format!("bind: {e}"))?;
+    let puerto = listener
+        .local_addr()
+        .map_err(|e| format!("local_addr: {e}"))?
+        .port();
+    let eco = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener.accept() {
+            let mut buf = [0u8; 256];
+            if let Ok(n) = s.read(&mut buf) {
+                let _ = s.write_all(&buf[..n]);
+            }
+        }
+    });
+
+    let _ = std::fs::remove_file(serial);
+    let qemu = lanzar_live(code, vars, live, serial)?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
+    let salida = ssh_guion_hasta(
+        key,
+        SSH_PORT,
+        &format!(
+            "tcpconn 10.0.2.2 {puerto} hola-soso\n\
+             tcpconn 10.0.2.2 1 nadie --timeout 3000\n\
+             halt\n"
+        ),
+        Duration::from_secs(180),
+        "sin conexión",
+    )?;
+    let _ = eco.join();
+
+    if !salida.contains("tcpconn: conectado") {
+        return Err(format!("no abrió la conexión saliente: {salida:?}"));
+    }
+    if !salida.contains("hola-soso") {
+        return Err(format!("conectó pero no hubo ida y vuelta: {salida:?}"));
+    }
+    // Y el puerto cerrado tiene que fallar **dentro** de su plazo.
+    let linea = salida
+        .lines()
+        .find(|l| l.contains("sin conexión tras"))
+        .ok_or_else(|| format!("el puerto cerrado no dio error: {salida:?}"))?;
+    let ms: u64 = linea
+        .split("tras ")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(u64::MAX);
+    if ms > 10_000 {
+        return Err(format!("el plazo de 3 s no se respetó: tardó {ms} ms"));
+    }
+    Ok(format!("ida y vuelta OK; puerto cerrado falla en {ms} ms"))
 }
 
 /// `soso-update comprobar` contra el canal de verdad: DNS, TLS y descarga del

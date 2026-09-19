@@ -1,6 +1,6 @@
 # T09 — Añadir cancelación cooperativa a prefill y decode
 
-**Hito:** SI-2 · **Tipo:** Implementación Rust de inferencia · **Estado:** pendiente.
+**Hito:** SI-2 · **Tipo:** Implementación Rust de inferencia · **Estado:** completada (2026-09-19).
 
 **Dependencias:** [T08](T08-resultado-generacion.md)
 
@@ -43,9 +43,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Las llamadas de red y liberación de workers guest pertenecen a T17; no introducir syscalls en core.
 

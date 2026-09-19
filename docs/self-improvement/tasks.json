@@ -277,7 +277,7 @@
       "title": "Añadir cancelación cooperativa a prefill y decode",
       "milestone": "SI-2",
       "kind": "Implementación Rust de inferencia",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T08"
       ],

@@ -174,7 +174,9 @@ fn forward_por_rangos_paridad() {
 
     for &tok in &prompt {
         full.embed_token(tok, &mut src_full).unwrap();
-        full.forward_step_par(&mut src_full, None, &mut None).unwrap();
+        let mut cancel_slot = None;
+        full.forward_step_par(&mut src_full, None, &mut None, None, &mut cancel_slot, None)
+            .unwrap();
     }
     let logits_full = full.logits(&mut src_full).unwrap().to_vec();
 
@@ -215,7 +217,9 @@ fn forward_estrella_tres_segmentos() {
     let mut full = Runtime::new(m1, i1, 0, 0);
     let mut src_full = MmapTensorSource::new(String::from(BASE), full.index.clone(), map1);
     full.embed_token(prompt[0], &mut src_full).unwrap();
-    full.forward_step_par(&mut src_full, None, &mut None).unwrap();
+    let mut cancel_slot = None;
+        full.forward_step_par(&mut src_full, None, &mut None, None, &mut cancel_slot, None)
+            .unwrap();
     let logits_full = full.logits(&mut src_full).unwrap().to_vec();
 
     let run_seg =

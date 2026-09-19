@@ -1,7 +1,8 @@
 //! Runtime de inferencia: bucle de generación de tokens.
 
 use crate::generation::{
-    GenerationLedger, GenerationOptions, GenerationReport, stops_from_eos,
+    GenCancel, GenCheckpoint, GenerationLedger, GenerationObserver, GenerationOptions,
+    GenerationReport, LegacyStreamObserver, NoCancelObserver, stops_from_eos,
 };
 use crate::gemm::rmsnorm;
 use crate::kv::LayerKv;
@@ -365,10 +366,22 @@ impl Runtime {
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         clock_ms: Option<fn() -> u64>,
     ) -> Result<(), ()> {
-        self.prefill_prompt_with(source, prompt, parallel, gpu, clock_ms, &mut |_, _| {})
+        let mut noop = NoCancelObserver;
+        let mut scratch_ledger = GenerationLedger::new(0);
+        let mut cancel_slot = None;
+        self.prefill_prompt_with(
+            source,
+            prompt,
+            parallel,
+            gpu,
+            clock_ms,
+            &mut scratch_ledger,
+            &mut noop,
+            &mut cancel_slot,
+        )
     }
 
-    /// Como `prefill_prompt`, avisando tras cada token (`i` de `total`, 1-based).
+    /// Como `prefill_prompt`, con checkpoints cancelables (T09).
     pub fn prefill_prompt_with(
         &mut self,
         source: &mut impl TensorSource,
@@ -376,26 +389,64 @@ impl Runtime {
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         clock_ms: Option<fn() -> u64>,
-        on_progress: &mut dyn FnMut(usize, usize),
+        ledger: &mut GenerationLedger,
+        observer: &mut dyn GenerationObserver,
+        cancel_slot: &mut Option<&mut GenCancel>,
     ) -> Result<(), ()> {
         let total = prompt.len();
+        if let Some(g) = cancel_slot.as_mut() {
+            if g.checkpoint(observer, ledger, GenCheckpoint::BeforePrefill) {
+                return Ok(());
+            }
+        } else {
+            let _ = observer.cancel_at(GenCheckpoint::BeforePrefill);
+        }
         for (i, &tok) in prompt.iter().enumerate() {
+            let at = GenCheckpoint::PrefillToken {
+                done: i + 1,
+                total,
+            };
+            if let Some(g) = cancel_slot.as_mut() {
+                if g.checkpoint(observer, ledger, at) {
+                    return Ok(());
+                }
+            } else {
+                let _ = observer.cancel_at(at);
+            }
             if let Some(&next) = prompt.get(i + 1) {
                 self.prefetch_embed(next, source);
             }
             self.embed_token(tok, source)?;
             if let Some(c) = clock_ms {
-                let _ = self.forward_step_timed(source, parallel, gpu, c)?;
+                let _ = self.forward_step_timed(
+                    source,
+                    parallel,
+                    gpu,
+                    c,
+                    Some(observer),
+                    cancel_slot,
+                    Some(ledger),
+                )?;
             } else {
-                self.forward_step_par(source, parallel, gpu)?;
+                self.forward_step_par(
+                    source,
+                    parallel,
+                    gpu,
+                    Some(observer),
+                    cancel_slot,
+                    Some(ledger),
+                )?;
             }
-            on_progress(i + 1, total);
+            if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+                return Ok(());
+            }
         }
         Ok(())
     }
 
     pub fn forward_step(&mut self, source: &mut impl TensorSource) -> Result<(), ()> {
-        self.forward_step_par(source, None, &mut None)
+        let mut cancel_slot = None;
+        self.forward_step_par(source, None, &mut None, None, &mut cancel_slot, None)
     }
 
     pub fn forward_step_par(
@@ -403,6 +454,9 @@ impl Runtime {
         source: &mut impl TensorSource,
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        mut observer: Option<&mut dyn GenerationObserver>,
+        cancel_slot: &mut Option<&mut GenCancel>,
+        ledger: Option<&mut GenerationLedger>,
     ) -> Result<(), ()> {
         self.forward_layers_range_clock(
             0,
@@ -411,7 +465,13 @@ impl Runtime {
             parallel,
             gpu,
             None,
+            &mut observer,
+            cancel_slot,
+            ledger,
         )?;
+        if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+            return Ok(());
+        }
         self.advance_pos();
         self.slide_kv_if_needed();
         Ok(())
@@ -424,6 +484,9 @@ impl Runtime {
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         clock_ms: fn() -> u64,
+        mut observer: Option<&mut dyn GenerationObserver>,
+        cancel_slot: &mut Option<&mut GenCancel>,
+        ledger: Option<&mut GenerationLedger>,
     ) -> Result<bool, ()> {
         self.forward_layers_range_clock(
             0,
@@ -432,7 +495,13 @@ impl Runtime {
             parallel,
             gpu,
             Some(clock_ms),
+            &mut observer,
+            cancel_slot,
+            ledger,
         )?;
+        if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+            return Ok(false);
+        }
         self.advance_pos();
         self.slide_kv_if_needed();
         let replanned = self
@@ -452,12 +521,17 @@ impl Runtime {
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     ) -> Result<(), ()> {
+        let mut cancel_slot = None;
+        let mut observer = None;
         self.forward_layers_range_clock(
             layer_start,
             layer_end,
             source,
             parallel,
             gpu,
+            None,
+            &mut observer,
+            &mut cancel_slot,
             None,
         )
     }
@@ -471,6 +545,9 @@ impl Runtime {
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         clock_ms: Option<fn() -> u64>,
+        observer: &mut Option<&mut dyn GenerationObserver>,
+        cancel_slot: &mut Option<&mut GenCancel>,
+        mut ledger: Option<&mut GenerationLedger>,
     ) -> Result<(), ()> {
         // Con planner: la ventana KV deslizante permite superar max_seq.
         if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
@@ -542,6 +619,20 @@ impl Runtime {
             note_infer_op(Some(layer), "");
             if let Some(hook) = self.layer_enter_hook {
                 hook(layer, layer_end);
+            }
+            if let (Some(g), Some(led)) = (cancel_slot.as_mut(), ledger.as_mut()) {
+                if let Some(obs) = observer.as_deref_mut() {
+                    if g.checkpoint(
+                        obs,
+                        led,
+                        GenCheckpoint::Layer {
+                            layer,
+                            of: layer_end,
+                        },
+                    ) {
+                        return Ok(());
+                    }
+                }
             }
             let t0 = clock_ms.map(|c| c());
             let timing = exec.forward_layer(
@@ -751,10 +842,36 @@ impl Runtime {
         prompt: &[u32],
         options: GenerationOptions,
         sampler: &mut crate::sample::Sampler,
-        mut on_token: impl FnMut(u32),
+        on_token: impl FnMut(u32),
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         on_prefill: &mut dyn FnMut(usize, usize),
+    ) -> Result<(Vec<u32>, GenerationReport), ()> {
+        let mut legacy = LegacyStreamObserver {
+            on_token,
+            on_prefill: |done, total| on_prefill(done, total),
+        };
+        self.generate_stream_par_observed(
+            source,
+            prompt,
+            options,
+            sampler,
+            &mut legacy,
+            parallel,
+            gpu,
+        )
+    }
+
+    /// Generación con observador explícito (cancelación cooperativa, T09).
+    pub fn generate_stream_par_observed(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        options: GenerationOptions,
+        sampler: &mut crate::sample::Sampler,
+        observer: &mut dyn GenerationObserver,
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     ) -> Result<(Vec<u32>, GenerationReport), ()> {
         clear_infer_op();
         if prompt.is_empty() {
@@ -763,19 +880,43 @@ impl Runtime {
         }
         self.reset_sequence();
         let mut ledger = GenerationLedger::new(prompt.len());
+        let mut cancel = GenCancel::default();
+        let mut cancel_slot: Option<&mut GenCancel> = Some(&mut cancel);
         let stop_token_ids = options.stop_token_ids;
         let mut tokens: Vec<u32> = prompt.to_vec();
-        self.prefill_prompt_with(source, prompt, parallel, gpu, None, on_prefill)?;
+        self.prefill_prompt_with(
+            source,
+            prompt,
+            parallel,
+            gpu,
+            None,
+            &mut ledger,
+            observer,
+            &mut cancel_slot,
+        )?;
+        if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+            return Ok((tokens, ledger.into_report()));
+        }
         let greedy = sampler.temp <= 0.0;
         let mut remaining = options.max_new;
+        if cancel_slot.as_mut().is_some_and(|g| {
+            g.checkpoint(observer, &mut ledger, GenCheckpoint::BeforeDecode)
+        }) {
+            return Ok((tokens, ledger.into_report()));
+        }
         while remaining > 0 {
             if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
                 ledger.note_context_limit();
                 break;
             }
+            if cancel_slot.as_mut().is_some_and(|g| {
+                g.checkpoint(observer, &mut ledger, GenCheckpoint::BeforeSample)
+            }) {
+                break;
+            }
             let logits = self.logits_par(source, parallel)?;
             let next = sampler.sample(logits);
-            if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, &mut on_token) {
+            if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, observer) {
                 break;
             }
             remaining -= 1;
@@ -788,9 +929,24 @@ impl Runtime {
                 self.prefetch_embed(d0, source);
             }
             self.embed_token(next, source)?;
-            self.forward_step_par(source, parallel, gpu)?;
+            self.forward_step_par(
+                source,
+                parallel,
+                gpu,
+                Some(observer),
+                &mut cancel_slot,
+                Some(&mut ledger),
+            )?;
+            if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+                break;
+            }
             for (di, &draft) in drafts.iter().enumerate() {
                 if remaining == 0 {
+                    break;
+                }
+                if cancel_slot.as_mut().is_some_and(|g| {
+                    g.checkpoint(observer, &mut ledger, GenCheckpoint::BeforeSample)
+                }) {
                     break;
                 }
                 let logits = self.logits_par(source, parallel)?;
@@ -798,7 +954,7 @@ impl Runtime {
                 if next != draft {
                     break;
                 }
-                if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, &mut on_token) {
+                if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, observer) {
                     break;
                 }
                 remaining -= 1;
@@ -806,7 +962,17 @@ impl Runtime {
                     self.prefetch_embed(nxt, source);
                 }
                 self.embed_token(next, source)?;
-                self.forward_step_par(source, parallel, gpu)?;
+                self.forward_step_par(
+                    source,
+                    parallel,
+                    gpu,
+                    Some(observer),
+                    &mut cancel_slot,
+                    Some(&mut ledger),
+                )?;
+                if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+                    break;
+                }
             }
         }
         Ok((tokens, ledger.into_report()))
@@ -848,11 +1014,41 @@ impl Runtime {
         prompt: &[u32],
         options: GenerationOptions,
         sampler: &mut crate::sample::Sampler,
-        mut on_token: impl FnMut(u32),
+        on_token: impl FnMut(u32),
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         clock_ms: fn() -> u64,
         mut refresh_mem: impl FnMut() -> crate::plan::MemSnapshot,
+    ) -> Result<(Vec<u32>, GenerationReport), ()> {
+        let mut legacy = LegacyStreamObserver {
+            on_token,
+            on_prefill: |_, _| {},
+        };
+        self.generate_stream_planned_observed(
+            source,
+            prompt,
+            options,
+            sampler,
+            &mut legacy,
+            parallel,
+            gpu,
+            clock_ms,
+            &mut refresh_mem,
+        )
+    }
+
+    /// Como `generate_stream_planned_with_report` con observador explícito.
+    pub fn generate_stream_planned_observed(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        options: GenerationOptions,
+        sampler: &mut crate::sample::Sampler,
+        observer: &mut dyn GenerationObserver,
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        clock_ms: fn() -> u64,
+        refresh_mem: &mut dyn FnMut() -> crate::plan::MemSnapshot,
     ) -> Result<(Vec<u32>, GenerationReport), ()> {
         clear_infer_op();
         if prompt.is_empty() {
@@ -864,14 +1060,38 @@ impl Runtime {
             pl.refresh_mem(refresh_mem());
         }
         let mut ledger = GenerationLedger::new(prompt.len());
+        let mut cancel = GenCancel::default();
+        let mut cancel_slot: Option<&mut GenCancel> = Some(&mut cancel);
         let stop_token_ids = options.stop_token_ids;
         let mut tokens: Vec<u32> = prompt.to_vec();
-        self.prefill_prompt(source, prompt, parallel, gpu, Some(clock_ms))?;
+        self.prefill_prompt_with(
+            source,
+            prompt,
+            parallel,
+            gpu,
+            Some(clock_ms),
+            &mut ledger,
+            observer,
+            &mut cancel_slot,
+        )?;
+        if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+            return Ok((tokens, ledger.into_report()));
+        }
         let greedy = sampler.temp <= 0.0;
         let mut remaining = options.max_new;
+        if cancel_slot.as_mut().is_some_and(|g| {
+            g.checkpoint(observer, &mut ledger, GenCheckpoint::BeforeDecode)
+        }) {
+            return Ok((tokens, ledger.into_report()));
+        }
         while remaining > 0 {
             if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
                 ledger.note_context_limit();
+                break;
+            }
+            if cancel_slot.as_mut().is_some_and(|g| {
+                g.checkpoint(observer, &mut ledger, GenCheckpoint::BeforeSample)
+            }) {
                 break;
             }
             if let Some(pl) = self.planner.as_mut() {
@@ -879,7 +1099,7 @@ impl Runtime {
             }
             let logits = self.logits_par(source, parallel)?;
             let next = sampler.sample(logits);
-            if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, &mut on_token) {
+            if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, observer) {
                 break;
             }
             remaining -= 1;
@@ -903,11 +1123,22 @@ impl Runtime {
                 self.prefetch_embed(d0, source);
             }
             self.embed_token(next, source)?;
-            if self.forward_step_timed(source, parallel, gpu, clock_ms)? {
+            if self.forward_step_timed(
+                source,
+                parallel,
+                gpu,
+                clock_ms,
+                Some(observer),
+                &mut cancel_slot,
+                Some(&mut ledger),
+            )? {
                 if let Some(pl) = self.planner.as_mut() {
                     pl.refresh_mem(refresh_mem());
                     pl.recompute_streaming_budgets(&self.manifest, &self.index);
                 }
+            }
+            if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+                break;
             }
             if drafts.is_empty() {
                 continue;
@@ -921,12 +1152,17 @@ impl Runtime {
                 if remaining == 0 {
                     break;
                 }
+                if cancel_slot.as_mut().is_some_and(|g| {
+                    g.checkpoint(observer, &mut ledger, GenCheckpoint::BeforeSample)
+                }) {
+                    break;
+                }
                 let logits = self.logits_par(source, parallel)?;
                 let next = Self::argmax(logits);
                 if next != draft {
                     break;
                 }
-                if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, &mut on_token) {
+                if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, observer) {
                     break;
                 }
                 remaining -= 1;
@@ -935,7 +1171,18 @@ impl Runtime {
                     self.prefetch_embed(nxt, source);
                 }
                 self.embed_token(next, source)?;
-                let _ = self.forward_step_timed(source, parallel, gpu, clock_ms)?;
+                let _ = self.forward_step_timed(
+                    source,
+                    parallel,
+                    gpu,
+                    clock_ms,
+                    Some(observer),
+                    &mut cancel_slot,
+                    Some(&mut ledger),
+                )?;
+                if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+                    break;
+                }
             }
             if let Some(pl) = self.planner.as_mut() {
                 if accepted > 0 {
@@ -967,15 +1214,35 @@ impl Runtime {
         options: GenerationOptions,
     ) -> Result<(Vec<u32>, GenerationReport), ()> {
         let mut sampler = crate::sample::Sampler::greedy();
-        self.generate_stream_par_with_report(
+        let mut noop = crate::generation::NoCancelObserver;
+        self.generate_stream_par_observed(
             source,
             prompt,
             options,
             &mut sampler,
-            |_| {},
+            &mut noop,
             None,
             &mut None,
-            &mut |_, _| {},
+        )
+    }
+
+    /// Como `generate_with_report` con observador (cancelación).
+    pub fn generate_with_report_observed(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        options: GenerationOptions,
+        observer: &mut dyn GenerationObserver,
+    ) -> Result<(Vec<u32>, GenerationReport), ()> {
+        let mut sampler = crate::sample::Sampler::greedy();
+        self.generate_stream_par_observed(
+            source,
+            prompt,
+            options,
+            &mut sampler,
+            observer,
+            None,
+            &mut None,
         )
     }
 

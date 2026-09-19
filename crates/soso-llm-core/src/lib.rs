@@ -30,7 +30,8 @@ pub mod source;
 pub mod tokenizer;
 
 pub use generation::{
-    GenerationLedger, GenerationOptions, GenerationReport, StopReason, stops_from_eos,
+    GenCancel, GenCheckpoint, GenerationLedger, GenerationObserver, GenerationOptions,
+    GenerationReport, LegacyStreamObserver, NoCancelObserver, StopReason, stops_from_eos,
 };
 pub use runtime::Runtime;
 pub use asr::{AsrPhase, AsrProfile, AsrTokenProfile};

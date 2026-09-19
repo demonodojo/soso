@@ -14,10 +14,10 @@ reproduce la segmentación oficial del modelo** y dejó dos fichas previas a T06
 el perfil del modelo está en [modelo.md](modelo.md). **[T52](T52-tokenizer-merges.md) y [T53](T53-tokenizer-bpe.md) están
 completadas**: soso segmenta ya **exactamente igual** que el tokenizer oficial
 del modelo (5/5 fixtures). **[T04](T04-dominio-chat.md)**, **[T05](T05-validacion-chat.md)** y
-**[T06](T06-render-chat.md)**–**[T08](T08-resultado-generacion.md)** están
-completadas (dominio chat + render + parse + informe de generación).
+**[T06](T06-render-chat.md)**–**[T09](T09-cancelacion-runtime.md)** están
+completadas (dominio chat + render + parse + informe + cancelación cooperativa).
 Siguiente en el camino SI-2: **[T10](T10-api-json.md)** (API JSON; requiere T05–T06–T08).
-En paralelo siguen habilitadas **T09**, **T18**, **T45** y **T46**. Los cierres
+En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.
 Entregar al modelo una ficha por sesión, las secciones indicadas
 del [contrato](CONTRATO.md), el [contrato nativo](NATIVO.md) y el contexto de
@@ -108,7 +108,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T06](T06-render-chat.md) | Renderizar la familia elegida con historial completo | SI-1 | T03, T05 | Completada |
 | [T07](T07-parse-herramientas.md) | Extraer llamadas válidas de la salida del modelo | SI-1 | T03, T05 | Completada |
 | [T08](T08-resultado-generacion.md) | Devolver motivo de parada y consumo real del runtime | SI-1 / SI-2 | — | Completada |
-| [T09](T09-cancelacion-runtime.md) | Añadir cancelación cooperativa a prefill y decode | SI-2 | T08 | Pendiente |
+| [T09](T09-cancelacion-runtime.md) | Añadir cancelación cooperativa a prefill y decode | SI-2 | T08 | Completada |
 | [T10](T10-api-json.md) | Crear la crate API y adaptar peticiones JSON | SI-2 | T05, T06, T08 | Pendiente |
 | [T11](T11-http.md) | Leer HTTP fragmentado con límites explícitos | SI-2 | T10 | Pendiente |
 | [T12](T12-respuestas-sse.md) | Emitir respuestas completas y eventos SSE | SI-2 | T07, T08, T10 | Pendiente |
