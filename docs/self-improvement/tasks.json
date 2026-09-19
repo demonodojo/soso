@@ -207,7 +207,7 @@
         "summary": "docs/self-improvement/seguimiento/T06.md",
         "evidence": "target/self-improvement/tasks/T06/resultado.md",
         "blocker": null,
-        "next_step": "T07 (parse de llamadas) o T08/T18/T45 en paralelo según encargo"
+        "next_step": "T08 (resultado de generación) o T18/T45 en paralelo según encargo"
       }
     },
     {
@@ -216,7 +216,7 @@
       "title": "Extraer llamadas válidas de la salida del modelo",
       "milestone": "SI-1",
       "kind": "Implementación Rust host/no_std",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T03",
         "T05"
@@ -231,6 +231,14 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-19",
+        "base": "79e80c17e",
+        "summary": "docs/self-improvement/seguimiento/T07.md",
+        "evidence": "target/self-improvement/tasks/T07/resultado.md",
+        "blocker": null,
+        "next_step": "T08 (resultado de generación) o T10/T12 según encargo"
       }
     },
     {

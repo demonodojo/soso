@@ -31,12 +31,15 @@ use serde_json::Value;
 pub mod validate;
 /// Render de historial por familia de modelo (T06).
 pub mod render;
+/// Parse de `<tool_call>` en salida del modelo (T07).
+pub mod tools;
 
 pub use render::render_messages;
+pub use tools::{parse_assistant_output, AssistantTurn, ToolCallParser};
 
 pub use validate::{
-    validate_input, MAX_ARGUMENTOS_BYTES, MAX_HERRAMIENTAS, MAX_MENSAJES,
-    MAX_PROFUNDIDAD_ESQUEMA,
+    validate_assistant_turn, validate_input, validate_parsed_tool_call, MAX_ARGUMENTOS_BYTES,
+    MAX_HERRAMIENTAS, MAX_MENSAJES, MAX_PROFUNDIDAD_ESQUEMA,
 };
 
 /// Quién habla en un turno.

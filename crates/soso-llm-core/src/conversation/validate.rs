@@ -61,6 +61,53 @@ const TIPOS: &[&str] = &[
     "object", "array", "string", "number", "integer", "boolean", "null",
 ];
 
+/// Valida una llamada ya parseada de la salida del modelo (T07).
+///
+/// Comprueba id, límites, nombre declarado y argumentos contra el esquema.
+pub fn validate_parsed_tool_call(entrada: &ChatInput, llamada: &ToolCall) -> Result<(), ChatError> {
+    validar_llamada(entrada, llamada, &[])
+}
+
+/// Comprueba `tool_choice` frente al turno parseado (texto y/o llamada).
+pub fn validate_assistant_turn(
+    entrada: &ChatInput,
+    content: Option<&str>,
+    llamada: Option<&ToolCall>,
+) -> Result<(), ChatError> {
+    validar_seleccion_salida(entrada, llamada)?;
+    if let Some(c) = llamada {
+        validate_parsed_tool_call(entrada, c)?;
+    }
+    let _ = content;
+    Ok(())
+}
+
+fn validar_seleccion_salida(
+    entrada: &ChatInput,
+    llamada: Option<&ToolCall>,
+) -> Result<(), ChatError> {
+    match (&entrada.tool_choice, llamada) {
+        (ToolChoice::None, Some(_)) => Err(ChatError::SeleccionInvalida {
+            motivo: String::from("tool_choice none pero el modelo emitió una llamada"),
+        }),
+        (ToolChoice::Required, None) => Err(ChatError::SeleccionInvalida {
+            motivo: String::from("tool_choice required pero no hay llamada"),
+        }),
+        (ToolChoice::Named(nombre), None) => Err(ChatError::SeleccionInvalida {
+            motivo: format!("tool_choice named `{nombre}` pero no hay llamada"),
+        }),
+        (ToolChoice::Named(nombre), Some(c)) if c.name != *nombre => {
+            Err(ChatError::SeleccionInvalida {
+                motivo: format!(
+                    "tool_choice named `{nombre}` pero la llamada es `{}`",
+                    c.name
+                ),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Comprueba una conversación entera contra C3.
 ///
 /// No muta la entrada ni ejecuta nada. El orden de comprobación va de lo barato

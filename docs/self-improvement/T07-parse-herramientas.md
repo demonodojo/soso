@@ -1,6 +1,6 @@
 # T07 — Extraer llamadas válidas de la salida del modelo
 
-**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** completada (2026-09-19).
 
 **Dependencias:** [T03](T03-perfil-modelo.md), [T05](T05-validacion-chat.md)
 
@@ -42,9 +42,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Si se desconoce el formato real, volver a la evidencia T03; no añadir detectores heurísticos de bloques de código.
 
