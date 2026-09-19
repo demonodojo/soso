@@ -1,0 +1,17 @@
+[package]
+name = "soso-llm-api"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[features]
+default = []
+std = ["serde/std", "serde_json/std", "soso-llm-core/std"]
+
+[dependencies]
+soso-llm-core = { path = "../soso-llm-core" }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[lib]
+doctest = false

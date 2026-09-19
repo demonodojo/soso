@@ -806,6 +806,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "soso-llm-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soso-llm-core",
+]
+
+[[package]]
 name = "soso-llm-core"
 version = "0.1.0"
 dependencies = [

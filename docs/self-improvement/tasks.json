@@ -300,7 +300,7 @@
       "title": "Crear la crate API y adaptar peticiones JSON",
       "milestone": "SI-2",
       "kind": "Implementación Rust host/no_std",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T05",
         "T06",

@@ -9,6 +9,7 @@ members = [
     "crates/gptdisk",
     "crates/sosomodel",
     "crates/soso-llm-core",
+    "crates/soso-llm-api",
     "crates/soso-audio",
     "crates/soso-gpu",
     "tools/mkfs-soso",
