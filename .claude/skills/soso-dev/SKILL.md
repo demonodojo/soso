@@ -7,7 +7,8 @@ description: >-
   by SSH, troubleshooting boot/network, reading SOSOLOG.TXT or the hwscan
   report SOSODRV.TXT from the live USB (udisksctl on ESP p1; `cargo xtask sosolog` needs sudo/TTY),
   `cargo xtask check`, `cargo xtask hw-matrix`, running cargo xtask test, or
-  tracking soso plan tasks, validation evidence and implementation progress.
+  tracking soso plan tasks that are not automejora. OpenCode / Txx / SI-*:
+  skill soso-self-improvement.
 ---
 
 # soso — Development workflow
@@ -27,32 +28,9 @@ próximo paso, además de logs en `target/`. Una prueba host o QEMU no cierra un
 validación física. Al terminar una sesión con trabajo pendiente, dejar el
 punto exacto de reanudación; no volver a ejecutar pruebas vigentes sin motivo.
 
-Para fijar la base de una sesión de automejora sin tocar el checkout:
-
-```sh
-cargo run -q -p soso-improve -- capturar --repo . --out target/self-improvement/base
-cargo run -q -p soso-improve -- reconstruir \
-    --captura target/self-improvement/base --destino target/self-improvement/copia
-cargo run -q -p soso-improve -- suites \
-    --captura target/self-improvement/base --arbol target/self-improvement/copia
-cargo run -q -p soso-improve -- banco validar
-cargo run -q -p soso-improve -- verificar protocolo --caso Q01 --respuesta r.json
-```
-
-La captura solo lee (sale con 3 si el árbol cambia mientras lee) y guarda el
-**contenido** de la base en un almacén por hash, así que reconstruir no usa git:
-es copiar archivos. Lo que no es fuente se decide leyendo el `.gitignore` del
-árbol, no con una lista escrita a mano.
-
-Existe un adaptador guest en `user/soso-improve`: comparte lógica con
-`crates/soso-improve-core` (`no_std + alloc`) y usa libsoso. Tiene órdenes
-`capturar`, `reconstruir`, `banco` y `protocolo`, con sintaxis todavía distinta
-del host. No asumir paridad por compartir core: T45/T49 deben acreditar CLI,
-exit codes y pruebas guest; T47 debe preservar argv, stdin/env, canales, cwd
-y timeout. `programa` necesita compilador real T40 y `repo`, Cargo T41 y
-referencias portables T50. Consultar el
-[contrato nativo](../../../docs/self-improvement/NATIVO.md) y registrar
-`native_validation` separado del cierre histórico de T01/T02.
+Automejora (Txx, SI-*, OpenCode, `soso-improve`): skill
+**[`soso-self-improvement`](../soso-self-improvement/SKILL.md)**. No arrancar
+esa ruta desde aquí.
 
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
 Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).
@@ -78,7 +56,7 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask test` | Full integration: sosofs, boot, TCP, SSH, soso-llm, halt |
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
-| `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **qwen2.5-coder-3b** Q4_K_M; ver `docs/L5c-on-box.md`) |
+| `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **qwen3-4b-instruct-2507** Q4_K_M; ver `docs/L5c-on-box.md`) |
 | `cargo xtask flash-usb-live /dev/sdX --yes` | Mide el stick, empaqueta el mejor modelo GGUF que quepa, graba live y estira p3. p4 `SOSOINSTALL` (FAT) va en la imagen tras el rootfs para que Linux la monte. `SOSO_LIVE_OFFLINE=1`: sin HF; el mayor ya en `target/*-model/` que quepa. **`--skip-models`**: solo ESP+rootfs (bucle diario); **`--only kernel|rootfs`**. **El agente no puede ejecutarlo:** sudo pide contraseña y no hay TTY; deja el comando al usuario (skill **soso-live**). |
 | `cargo xtask sosolog [/dev/sdX]` | Monta la ESP, imprime `SOSOLOG.TXT` y desmonta. **Pide sudo/TTY:** el agente no lo lanza; usa `udisksctl` (skill **soso-live**) |
 | `cargo xtask sosolog --drv [/dev/sdX]` | Igual con `SOSODRV.TXT` (hwscan). Mismo límite de sudo; el agente lee el fichero montando p1 con udisks |
@@ -230,6 +208,32 @@ Port forwards (host → guest): **2222→22** (SSH), **7777→7** (echo).
 
 Guest IP: **10.0.2.15** (DHCP; fallback estático en QEMU slirp). En el guest: `ip`.
 
+## Bancos de QEMU: filtros, inyección y trampas
+
+- `cargo xtask test-update [filtro]` corre **una sola fase** (10 en total:
+  `aplicar version vuelta ajeno recuperacion cadena confirmacion respaldo roto
+  manifiesto`). Un ciclo completo son ~40 min; depurar a esa vuelta no es
+  depurar. Detalle en la skill [`soso-update`](../soso-update/SKILL.md).
+- **Inyectar averías**: `xtask/src/sosofs_img.rs` monta y escribe el **sosofs
+  dentro de una imagen** (estropear un respaldo, forzar un estado del diario);
+  `xtask/src/fat32_write.rs` hace lo propio con la ESP (crear, borrar,
+  sobrescribir huecos). No son utilidades de usuario: existen para fabricar
+  estados que en la vida real produce un corte de corriente.
+- **Cada arranque de QEMU, en su bloque**: el guardián `Matar` del anterior
+  tiene que caer antes de lanzar el siguiente, o los dos QEMU se pelean por la
+  imagen y el segundo muere **sin escribir un byte** en su log de serie. El
+  síntoma («no apareció "sosh —"») parece regresión del arranque.
+- **`test-install` fija `bootindex`**: con el destino ya instalado y su
+  `Boot####` en la NVRAM, el firmware arranca de él. Como las imágenes son
+  clones, sus GUID coinciden y el despiste no se ve en el log.
+- **Marcadores de fin de sesión SSH**: esperar «apagando» es flaky (lo imprime
+  el kernel por la serie). Usar algo que imprima la propia sesión.
+- **`cargo xtask build` no compila el userspace entero** (`soso-update` se le
+  escapa): para verificar userspace hay que empaquetar (`package-usb-live`).
+- **Artefactos del banco dentro de `rootfs/`**: `test-update` fabrica releases
+  en `rootfs/var/actualiza-*`; se limpian al terminar, y el pack las excluye por
+  prefijo. Si vuelven a colarse, inflan cualquier imagen posterior.
+
 ## Testing
 
 ```sh
@@ -265,7 +269,7 @@ cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 #   cargo test -p soso-llm-core --features std --test arch_ext
 #   cargo test -p soso-llm-core --features std --test asr
 #   cargo test -p soso-audio --features std
-#   cargo test -p gguf2som --features std -- convierte_gguf_qwen35 convierte_gguf_qwen2
+#   cargo test -p gguf2som --features std -- convierte_gguf_qwen35 convierte_gguf_qwen3 convierte_gguf_qwen2
 # Hostrun MoE sintético:
 #   cargo run -q --release -p mkmodel-soso -- --moe target/tiny-moe-model
 #   cargo run --release -p soso-llm-core --features std --example hostrun -- target/tiny-moe-model @bos 4
@@ -273,7 +277,8 @@ cargo test -q -p soso-llm-core --features std -p sosomodel -p convert-gguf
 # End-to-end (host tests ∥ build user/kernel, luego 4 shards QEMU en paralelo)
 cargo xtask test
 # La suite debe quedar en verde (stdin/SSH aislado por sesión desde A1).
-# Shard sys incluye «fd 3: redirección y comando log» (`3>`, `log`, sello pid=).
+# Shard sys incluye «fd 3: redirección y comando log» (`3>`, `log`, sello pid=)
+# y `echo … | grep askd` (stdin sin `-`; VEOF tty = Ctrl-D, `tty_tomar`).
 # Ante regresiones: target/test-{llm-dense,llm-moe,sys,reclaim}-serial.log
 
 # Pre-commit / CI equivalente:
@@ -388,14 +393,17 @@ argumentos.
 
 ## Skills layout
 
-La fuente es `.claude/skills/`; en este checkout `.cursor/skills` y
-`.agents/skills` son symlinks a ella. Comprobarlos antes de sincronizar: editar
-la fuente una sola vez y preservar los enlaces. Si son copias en otro checkout,
-comparar y sincronizar solo los archivos cambiados. Tras cada etapa de un
-`/loop`: actualizar seguimiento del plan y el skill de dominio
-(`soso-architecture`, `soso-gpu`, `soso-wifi`, `soso-live`), este skill si hay
-tests/comandos nuevos, y `MANUAL-USUARIO.md` si el usuario ve strings o
-comportamiento distinto (skill `soso-user-manual`).
+El directorio real es `.claude/skills/`; `.cursor/skills` y `.agents/skills` son
+**enlaces simbólicos** a él, y así están guardados en git (modo `120000`). No
+hay nada que sincronizar: se edita una vez. Lo que sí hay que cuidar es **no
+romper los enlaces** escribiendo un directorio encima; `file .cursor/skills` lo
+dice en un segundo. (En otro checkout donde fueran copias de verdad, comparar y
+sincronizar sólo lo cambiado.)
+
+Tras cada etapa de un `/loop`: actualizar seguimiento del plan y el skill de
+dominio (`soso-architecture`, `soso-gpu`, `soso-wifi`, `soso-live`,
+`soso-update`, `soso-self-improvement`), este skill si hay tests/comandos nuevos, y `MANUAL-USUARIO.md`
+si el usuario ve strings o comportamiento distinto (skill `soso-user-manual`).
 
 ## Common issues
 
@@ -410,7 +418,9 @@ comportamiento distinto (skill `soso-user-manual`).
 | Fecha 1970 / `soso-hf` «reloj no utilizable» | RTC CMOS: Status B bit 2 = BCD vs binario (no siglo); century en reg `0x32`. Ver `kernel/src/arch/rtc.rs`; test `cargo test -p xtask rtc_decode` |
 | `voz` / `soso-voz dictar` falla | Comprobar `tiny-asr` en `/models`; `soso-voz vozd` en `:7421`; test host: `cargo test -p soso-llm-core --features std --test asr` |
 | Micrófono en QEMU | `SOSO_QEMU_AUDIO=1 cargo xtask run` (Intel HDA); sin flag el shard `sys` usa `--wav` determinista |
-| `ask hola` con Mixtral se queda en puntos | Sin pool de VRAM (`pool VRAM=no`) Mixtral va a CPU. No está colgado; minutos/token. `ask :modelo tiny` o esperar. Tras reflashear, un punto por capa |
+| `ask hola` con Mixtral se queda en puntos | Sin pool de VRAM (`pool VRAM=no`) Mixtral va a CPU. No está colgado; minutos/token. `ask :modelo tiny` o esperar. Tras reflashear, un punto por capa (el texto llega después; trazas en `log`) |
+| Trazas de `ask` mezcladas con la respuesta | Deben ir por fd 3 (`logln!`). En pantalla: `ask: modelo …`, puntos de espera, texto. Diagnóstico: `log`, `log \| grep askd` o `/var/log/aplicaciones.log` |
+| `cat`/`grep`/`hexdump` piden `-` o se cuelgan en stdin | Kernel VEOF (`tty_tomar`, Ctrl-D = `0x04`, no llega a userspace). Coreutils leen stdin sin args. Live: kernel **y** rootfs, no `--only kernel` |
 | `Could not set up host forwarding rule tcp::2222` | Puerto ocupado; `pkill qemu-system-x86` y relanzar |
 | SSH output desalineada | Kernel debe enviar CRLF en `ssh::tx_push` (tty cruda) |
 | SSH no reconecta tras cerrar sesión | Kernel debe hacer `reset_socket` en CloseWait/TimeWait; Ctrl-C interrumpe comandos, no cierra la sesión con `ssh -tt` |

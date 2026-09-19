@@ -1312,8 +1312,17 @@ extern "C" fn schedule_inner() -> ! {
                     continue;
                 }
                 let console = procs[i].console;
-                procs[i].ctx.rax = tty_read_into(console, buf, len);
-                procs[i].state = State::Runnable;
+                match tty_read_into(console, buf, len) {
+                    LecturaTty::Datos(n) => {
+                        procs[i].ctx.rax = n;
+                        procs[i].state = State::Runnable;
+                    }
+                    LecturaTty::Eof => {
+                        procs[i].ctx.rax = 0;
+                        procs[i].state = State::Runnable;
+                    }
+                    LecturaTty::Nada => {}
+                }
             }
         }
         // Despertar lectores/escritores de pipe cuando haya datos, espacio o EOF.
@@ -1493,19 +1502,47 @@ fn pipe_wake_write(pipe_id: pipe::PipeId, buf: u64, len: u64) -> Result<u64, i64
 }
 
 /// Copia bytes de la consola al buffer de usuario (CR3 del proceso ya
-/// activo; el rango se validó en la syscall). Devuelve cuántos.
-fn tty_read_into(console: Console, buf: u64, len: u64) -> u64 {
-    let mut n = 0u64;
-    while n < len {
+/// activo; el rango se validó en la syscall).
+///
+/// Ctrl-D (`0x04`) es VEOF, como en Unix: no es un byte de datos. Si esta
+/// lectura iba vacía, `read` devuelve 0 (EOF). Si ya había bytes, los entrega
+/// y consume el VEOF. No es persistente: el siguiente `read` espera más teclas.
+const TTY_VEOF: u8 = 0x04;
+
+pub(crate) enum LecturaTty {
+    Datos(u64),
+    Eof,
+    Nada,
+}
+
+pub(crate) fn tty_tomar(console: Console, dst: &mut [u8]) -> LecturaTty {
+    let mut n = 0usize;
+    let mut eof = false;
+    while n < dst.len() {
         match console.read_byte() {
+            Some(TTY_VEOF) => {
+                eof = true;
+                break;
+            }
             Some(b) => {
-                unsafe { *((buf + n) as *mut u8) = b };
+                dst[n] = b;
                 n += 1;
             }
             None => break,
         }
     }
-    n
+    if n > 0 {
+        LecturaTty::Datos(n as u64)
+    } else if eof {
+        LecturaTty::Eof
+    } else {
+        LecturaTty::Nada
+    }
+}
+
+fn tty_read_into(console: Console, buf: u64, len: u64) -> LecturaTty {
+    let dst = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+    tty_tomar(console, dst)
 }
 
 /// Reanuda un contexto de usuario con iretq. Interrupciones deshabilitadas

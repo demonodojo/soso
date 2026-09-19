@@ -177,6 +177,10 @@ fn cmd_estado() -> u8 {
 
 fn cmd_comprobar(args: &[String]) -> u8 {
     let opts = parse_opts(args);
+    // El origen **antes** de ir a por el manifiesto: DNS, TLS y descarga pueden
+    // tardar, y si no se dice nada hasta el final no hay forma de distinguir
+    // «trabajando» de «colgado» —ni de saber a qué servidor fue—.
+    println!("origen: {} [{}]", describe_origen(&opts.origen), opts.motivo);
     let man = match load_manifest(&opts) {
         Ok(m) => m,
         Err(e) => {
@@ -191,7 +195,6 @@ fn cmd_comprobar(args: &[String]) -> u8 {
             minor: 0,
             patch: 0,
         });
-    println!("origen: {} [{}]", describe_origen(&opts.origen), opts.motivo);
     if let Some(c) = &man.compat {
         println!("perfil: {} — abi {} fs {}", c.perfil, c.abi, c.fs);
     }
@@ -1437,11 +1440,14 @@ fn inventario() -> migracion::Inventario {
         };
         let mut buf = [0u8; 512];
         let r = sys::upd_read(which, 0, &mut buf);
+        // «No está» y «está y no sirve» piden arreglos distintos, y decirlo mal
+        // manda a buscar el problema donde no está: costó una tarde creer que
+        // un hueco estaba fragmentado cuando nunca se había creado.
         huecos.push(if r > 0 {
             migracion::EstadoHueco::Listo
+        } else if r == -libsoso::abi::ENOENT {
+            migracion::EstadoHueco::Ausente
         } else {
-            // El kernel no distingue «no está» de «está y no sirve»: para lo
-            // que hay que decidir aquí da igual, y fingir precisión sería peor.
             migracion::EstadoHueco::Inservible
         });
     }

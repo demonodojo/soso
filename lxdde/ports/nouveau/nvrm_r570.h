@@ -1229,6 +1229,9 @@ typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 
 /* QMD v01_07 (Ampere compute), transcrito de cla0c0qmd.h (OGKM 570.144). */
 #define QMDV02_SEMAPHORE_RELEASE_ENABLE0           202u, 202u
 #define QMDV02_REQUIRE_SCHEDULING_PCAS             204u, 204u
+#define QMDV02_QMD_GROUP_ID                        192u, 197u
+#define QMDV02_INVALIDATE_INSTRUCTION_CACHE        254u, 254u
+#define QMDV02_INVALIDATE_SHADER_CONSTANT_CACHE    255u, 255u
 #define QMDV02_PROGRAM_OFFSET                      256u, 287u
 #define QMDV02_RELEASE_MEMBAR_TYPE                 366u, 366u
 #define QMDV02_API_VISIBLE_CALL_LIMIT              378u, 378u
@@ -1262,6 +1265,8 @@ typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 
 #define NVA0C0_QMDV01_07_RELEASE0_STRUCTURE_SIZE_ONE_WORD        0x00000001u
 #define NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01                    0x00000001u
 #define NVA0C0_QMDV01_07_QMD_VERSION_V07                          0x00000007u
+#define NVA0C0_QMDV01_07_INVALIDATE_INSTRUCTION_CACHE_TRUE        0x00000001u
+#define NVA0C0_QMDV01_07_INVALIDATE_SHADER_CONSTANT_CACHE_TRUE    0x00000001u
 
 typedef struct GspQmdV02 {
     NvU32 words[GSP_QMD_V02_WORDS];

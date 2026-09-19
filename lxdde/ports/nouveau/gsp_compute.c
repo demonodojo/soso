@@ -748,7 +748,8 @@ static void gsp_compute_fill_qmd_v02_grid(struct gsp_compute *cp,
      * no la VA absoluta de 40 bits que usa v05. */
     uint64_t prog_shift = (k->sass_va - GSP_VA_BASE) >> 4;
     uint64_t cb_va = cp->data_va + G4F_CBANK_OFF;
-    uint64_t cb_shift = (cb_va - GSP_VA_BASE) >> 6;
+    /* CB addr en QMD v01_07: VA>>6 en 40 bits (OGKM cla0c0qmd.h), no relativo a GSP_VA_BASE. */
+    uint64_t cb_shift = cb_va >> 6;
     uint64_t sem_va = cp->data_va + G4F_SEM_SLOT(sem_slot);
     uint32_t cb_size = (k->cbank_size + 15u) & ~15u;
 
@@ -765,6 +766,11 @@ static void gsp_compute_fill_qmd_v02_grid(struct gsp_compute *cp,
                  NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01);
     qmd_set_bits(qmd->words, QMDV02_QMD_VERSION,
                  NVA0C0_QMDV01_07_QMD_VERSION_V07);
+    qmd_set_bits(qmd->words, QMDV02_QMD_GROUP_ID, 0x1fu);
+    qmd_set_bits(qmd->words, QMDV02_INVALIDATE_INSTRUCTION_CACHE,
+                 NVA0C0_QMDV01_07_INVALIDATE_INSTRUCTION_CACHE_TRUE);
+    qmd_set_bits(qmd->words, QMDV02_INVALIDATE_SHADER_CONSTANT_CACHE,
+                 NVA0C0_QMDV01_07_INVALIDATE_SHADER_CONSTANT_CACHE_TRUE);
 
     qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_WIDTH, grid_x ? grid_x : 1u);
     qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_HEIGHT, grid_y ? grid_y : 1u);

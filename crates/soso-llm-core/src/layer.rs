@@ -18,7 +18,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 use sosomodel::index::TensorIndex;
 use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
-use sosomodel::manifest::{AttnKind, FfnKind, Manifest, FLAG_ROPE_NEOX};
+use sosomodel::manifest::{AttnKind, FfnKind, Manifest, FLAG_QK_NORM, FLAG_ROPE_NEOX};
 
 /// Vista zero-copy del payload de un tensor (bytes crudos del shard mapeado,
 /// alineados a 64 B en shards v2).
@@ -279,12 +279,12 @@ impl LayerScratch {
                     max_nv = max_nv.max(kv_heads);
                 }
                 _ => {
-                    if heads > 0 {
-                        let classic = h / heads;
-                        max_k = max_k.max(kv_heads.saturating_mul(classic));
-                        max_v = max_v.max(kv_heads.saturating_mul(classic));
-                        max_head = max_head.max(classic.max(1));
-                    }
+                    let hd = m.effective_head_dim(layer) as usize;
+                    max_q = max_q.max(heads.saturating_mul(hd));
+                    max_k = max_k.max(kv_heads.saturating_mul(hd));
+                    max_v = max_v.max(kv_heads.saturating_mul(hd));
+                    max_attn = max_attn.max(heads.saturating_mul(hd));
+                    max_head = max_head.max(hd.max(1));
                 }
             }
         }
@@ -389,8 +389,9 @@ impl<'a> LayerExecutor<'a> {
         let h = self.manifest.hidden_dim as usize;
         let heads = self.manifest.effective_num_heads(layer) as usize;
         let kv_heads = self.manifest.effective_num_kv_heads(layer) as usize;
-        let head_dim = h / heads;
+        let head_dim = self.manifest.effective_head_dim(layer) as usize;
         let kv_dim = kv_heads * head_dim;
+        let q_dim = heads * head_dim;
         let group = heads / kv_heads;
         let ffn = self.manifest.layer_expert_ffn_dim(layer) as usize;
         let eps = self.manifest.rms_eps;
@@ -520,10 +521,10 @@ impl<'a> LayerExecutor<'a> {
             gpu,
             &name_attn_q,
             source.tensor_view(&name_attn_q)?,
-            h,
+            q_dim,
             h,
             hidden,
-            &mut s.q,
+            &mut s.q[..q_dim],
             par,
             planner_ro,
             layer,
@@ -557,7 +558,7 @@ impl<'a> LayerExecutor<'a> {
         add_optional_bias(
             source,
             &format!("{name_attn_q}.bias"),
-            &mut s.q,
+            &mut s.q[..q_dim],
             &mut s.attn_out,
         );
         add_optional_bias(
@@ -572,6 +573,24 @@ impl<'a> LayerExecutor<'a> {
             &mut s.v[..kv_dim],
             &mut s.attn_out,
         );
+        if spec.flags & FLAG_QK_NORM != 0 {
+            source.load_f32(&format!("{prefix}.attn_q_norm"), &mut s.head_out[..head_dim])?;
+            for head in 0..heads {
+                rmsnorm(
+                    &mut s.q[head * head_dim..(head + 1) * head_dim],
+                    &s.head_out[..head_dim],
+                    eps,
+                );
+            }
+            source.load_f32(&format!("{prefix}.attn_k_norm"), &mut s.head_out[..head_dim])?;
+            for head in 0..kv_heads {
+                rmsnorm(
+                    &mut s.k[head * head_dim..(head + 1) * head_dim],
+                    &s.head_out[..head_dim],
+                    eps,
+                );
+            }
+        }
         let t_attn0 = tick(clock_ms);
 
         let rope = |x: &mut [f32]| {
@@ -650,14 +669,14 @@ impl<'a> LayerExecutor<'a> {
             &name_attn_output,
             source.tensor_view(&name_attn_output)?,
             h,
-            h,
-            &s.attn_out,
-            &mut s.q,
+            q_dim,
+            &s.attn_out[..q_dim],
+            &mut s.q[..h],
             par,
             planner_ro,
             layer,
         )?;
-        add_f32(&s.residual, &s.q, hidden);
+        add_f32(&s.residual, &s.q[..h], hidden);
         if clock_ms.is_some() {
             timing.matvec_ms = t_attn0.saturating_sub(t_mv0);
             timing.attn_ms = t_attn1.saturating_sub(t_attn0);

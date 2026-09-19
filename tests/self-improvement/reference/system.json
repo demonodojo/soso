@@ -2,7 +2,7 @@
   "schema_version": 1,
   "nombre": "system",
   "modelo": "Qwen/Qwen2.5-Coder-3B-Instruct",
-  "revision": "488639f1ff808d1d3d0ba301aef8c11461451ec5",
+  "revision": "desconocida",
   "mensajes": [
     {
       "content": "Responde siempre con una sola palabra en mayúsculas.",

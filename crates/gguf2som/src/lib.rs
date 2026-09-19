@@ -1,4 +1,4 @@
-//! Convierte GGUF (llama, deepseek2, qwen2, qwen35/qwen38) al layout sosomodel (.som).
+//! Convierte GGUF (llama, deepseek2, qwen2, qwen3, qwen35/qwen38) al layout sosomodel (.som).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #[cfg(feature = "std")]
@@ -22,7 +22,7 @@ use sosomodel::layout::{
     SHARDS_DIR, TOKENIZER_FILE,
 };
 use sosomodel::manifest::{
-    AttnKind, AudioSpec, LayerPrefetch, Manifest, ModelKind, NormKind, FLAG_ROPE_NEOX,
+    AttnKind, AudioSpec, LayerPrefetch, Manifest, ModelKind, NormKind, FLAG_QK_NORM, FLAG_ROPE_NEOX,
 };
 
 pub trait SomOut {
@@ -145,15 +145,16 @@ pub fn convert_with_options<R: Read + Seek>(
         .unwrap_or("llama");
     let is_mla = arch_name == "deepseek2";
     let is_qwen2 = arch_name == "qwen2";
+    let is_qwen3 = arch_name == "qwen3";
     let is_qwen35 = arch_name == "qwen35" || arch_name == "qwen38";
-    if arch_name != "llama" && !is_mla && !is_qwen2 && !is_qwen35 {
+    if arch_name != "llama" && !is_mla && !is_qwen2 && !is_qwen3 && !is_qwen35 {
         return Err(format!(
-            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen35 | qwen38)"
+            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen3 | qwen35 | qwen38)"
         ));
     }
     let meta_prefix = if is_mla {
         "deepseek2"
-    } else if is_qwen2 || is_qwen35 {
+    } else if is_qwen2 || is_qwen3 || is_qwen35 {
         arch_name
     } else {
         "llama"
@@ -225,6 +226,20 @@ pub fn convert_with_options<R: Read + Seek>(
         ("ffn_gate", "ffn_gate"),
         ("ffn_down", "ffn_down"),
     ];
+    // Qwen3 denso: GQA + QK-norm por cabeza (sin bias Q/K/V).
+    const QWEN3_LAYER_PARTS: &[(&str, &str)] = &[
+        ("attn_norm", "attn_norm"),
+        ("attn_q", "attn_q"),
+        ("attn_k", "attn_k"),
+        ("attn_v", "attn_v"),
+        ("attn_output", "attn_output"),
+        ("attn_q_norm", "attn_q_norm"),
+        ("attn_k_norm", "attn_k_norm"),
+        ("ffn_norm", "ffn_norm"),
+        ("ffn_up", "ffn_up"),
+        ("ffn_gate", "ffn_gate"),
+        ("ffn_down", "ffn_down"),
+    ];
     // Qwen3.5/3.8 gated full-attn: Q+gate fusionados, QK-norm, post-norm.
     const QWEN35_GATED_PARTS: &[(&str, &str)] = &[
         ("attn_norm", "attn_norm"),
@@ -270,6 +285,8 @@ pub fn convert_with_options<R: Read + Seek>(
     ];
     let layer_parts = if is_mla {
         MLA_LAYER_PARTS
+    } else if is_qwen3 {
+        QWEN3_LAYER_PARTS
     } else {
         LLAMA_LAYER_PARTS
     };
@@ -574,6 +591,25 @@ pub fn convert_with_options<R: Read + Seek>(
             spec.flags |= FLAG_ROPE_NEOX;
         }
     }
+    if is_qwen3 {
+        let hd = gguf
+            .meta_u32(&format!("{meta_prefix}.attention.key_length"))
+            .or_else(|_| gguf.meta_u32(&format!("{meta_prefix}.attention.value_length")))
+            .unwrap_or_else(|_| {
+                let q_rows = index_rows(&index, "L00.attn_q");
+                if num_heads > 0 {
+                    q_rows / num_heads
+                } else {
+                    0
+                }
+            });
+        for spec in manifest.layers.iter_mut() {
+            spec.flags |= FLAG_ROPE_NEOX | FLAG_QK_NORM;
+            if hd > 0 {
+                spec.v_head_dim = hd;
+            }
+        }
+    }
     if is_mla {
         for spec in manifest.layers.iter_mut() {
             spec.attn_kind = AttnKind::Mla;
@@ -595,7 +631,7 @@ pub fn convert_with_options<R: Read + Seek>(
     if let Some(pieces) = tokens {
         let add_bos = match gguf.meta.get("tokenizer.ggml.add_bos_token") {
             Some(MetaValue::Int(v)) => *v != 0,
-            _ => !is_qwen2,
+            _ => !is_qwen2 && !is_qwen3,
         };
         let bos = if add_bos {
             gguf.meta_u32("tokenizer.ggml.bos_token_id").unwrap_or(NO_TOKEN)
@@ -2087,5 +2123,76 @@ mod tests {
         .unwrap();
         assert!(tok.bos().is_none());
         assert_eq!(tok.encode_trozo("hola mundo", false, true), vec![2, 3]);
+    }
+
+    #[test]
+    fn convierte_gguf_qwen3() {
+        const H: u64 = 8;
+        const HD: u64 = 12;
+        const HEADS: u64 = 2;
+        const Q: u64 = HEADS * HD;
+        const KVH: u64 = 1;
+        const KV: u64 = KVH * HD;
+        const FFN: u64 = 16;
+        let tensors: Vec<(&str, Vec<u64>)> = vec![
+            ("token_embd.weight", vec![H, 6]),
+            ("output_norm.weight", vec![H]),
+            ("output.weight", vec![H, 6]),
+            ("blk.0.attn_norm.weight", vec![H]),
+            ("blk.0.attn_q.weight", vec![H, Q]),
+            ("blk.0.attn_k.weight", vec![H, KV]),
+            ("blk.0.attn_v.weight", vec![H, KV]),
+            ("blk.0.attn_output.weight", vec![Q, H]),
+            ("blk.0.attn_q_norm.weight", vec![HD]),
+            ("blk.0.attn_k_norm.weight", vec![HD]),
+            ("blk.0.ffn_norm.weight", vec![H]),
+            ("blk.0.ffn_up.weight", vec![H, FFN]),
+            ("blk.0.ffn_gate.weight", vec![H, FFN]),
+            ("blk.0.ffn_down.weight", vec![FFN, H]),
+        ];
+        let g = pack_gguf_v3(13, |g| {
+            gguf_kv_str(g, "general.architecture", "qwen3");
+            gguf_kv_u32(g, "qwen3.embedding_length", H as u32);
+            gguf_kv_u32(g, "qwen3.block_count", 1);
+            gguf_kv_u32(g, "qwen3.feed_forward_length", FFN as u32);
+            gguf_kv_u32(g, "qwen3.attention.head_count", HEADS as u32);
+            gguf_kv_u32(g, "qwen3.attention.head_count_kv", KVH as u32);
+            gguf_kv_u32(g, "qwen3.attention.key_length", HD as u32);
+            gguf_kv_f32(g, "qwen3.attention.layer_norm_rms_epsilon", 1e-6);
+            gguf_kv_f32(g, "qwen3.rope.freq_base", 5_000_000.0);
+            gguf_kv_bool(g, "tokenizer.ggml.add_bos_token", false);
+            gguf_kv_str_array(
+                g,
+                "tokenizer.ggml.tokens",
+                &["<|im_start|>", "<|im_end|>", "hola", "\u{0120}mundo", "a", "b"],
+            );
+            gguf_kv_u32(g, "tokenizer.ggml.eos_token_id", 1);
+            gguf_kv_str(
+                g,
+                "tokenizer.chat_template",
+                "{% for message in messages %}{% if message['role'] == 'user' %}<|im_start|>user\n{{ message['content'] }}<|im_end|>\n<|im_start|>assistant\n{% endif %}{% endfor %}",
+            );
+        }, &tensors);
+        let dir = std::env::temp_dir().join("convert-gguf-qwen3");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("qwen3.gguf");
+        fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let out = dir.join("out");
+        convert_path(gguf_path.to_str().unwrap(), &out, Some("qwen3-4b-instruct-2507")).unwrap();
+        let manifest = Manifest::parse(&fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.name, "qwen3-4b-instruct-2507");
+        assert_eq!(
+            manifest.layers[0].flags & (FLAG_ROPE_NEOX | FLAG_QK_NORM),
+            FLAG_ROPE_NEOX | FLAG_QK_NORM
+        );
+        assert_eq!(manifest.layers[0].v_head_dim, HD as u32);
+        assert!(manifest.chat_template.contains("<|im_start|>"));
+        let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
+        assert!(index.find("L00.attn_q_norm").is_some());
+        assert!(index.find("L00.attn_k_norm").is_some());
+        assert!(index.find("L00.attn_q.bias").is_none());
+        let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
+        rt.validate_shapes().expect("shapes qwen3");
     }
 }

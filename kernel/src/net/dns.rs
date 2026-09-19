@@ -1,5 +1,8 @@
-//! Resolución DNS A (IPv4) vía UDP/53. Usa el resolver de QEMU slirp
-//! (10.0.2.3) o 8.8.8.8 como respaldo.
+//! Resolución DNS A (IPv4) vía UDP/53.
+//!
+//! Los servidores salen del **DHCP**; 8.8.8.8 y el de QEMU (10.0.2.3) quedan
+//! sólo como respaldo para cuando el lease no anuncia ninguno. Adivinarlos era
+//! el primero de los dos motivos por los que esto no funcionaba fuera de QEMU.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -94,13 +97,18 @@ fn parse_a_record(pkt: &[u8]) -> Result<[u8; 4], ()> {
 
 /// Resuelve `host` a IPv4. Requiere interfaz configurada y bloquea hasta
 /// timeout.
+/// Presupuesto por servidor: con varios en la lista, uno que no conteste no se
+/// puede comer el tiempo de los demás.
+const POR_SERVIDOR: Duration = Duration::from_millis(1500);
+
 pub fn resolve_a(
     iface: &mut Interface,
     sockets: &mut SocketSet<'_>,
     dev: &mut crate::net::device::NicDev,
     host: &str,
-    now: Instant,
+    _now: Instant,
     deadline: Instant,
+    servidores: &[Ipv4Address],
 ) -> Result<[u8; 4], ()> {
     let id = (crate::arch::pit::uptime_ms() as u16).max(1);
     let query = build_query(host, id)?;
@@ -112,15 +120,22 @@ pub fn resolve_a(
         sock.bind(49152).map_err(|_| ())?;
     }
 
-    let servers = [SLIRP_DNS, FALLBACK_DNS];
-    for server in servers {
-        let remote = IpEndpoint::new(IpAddress::Ipv4(server), DNS_PORT);
+    for server in servidores {
+        let remote = IpEndpoint::new(IpAddress::Ipv4(*server), DNS_PORT);
         {
             let sock = sockets.get_mut::<udp::Socket>(handle);
             sock.send_slice(&query, remote).ok();
         }
-        let mut t = now;
-        while t < deadline {
+        // El reloj de verdad, no uno inventado. Antes esto avanzaba `t` de 10
+        // en 10 ms sin mirar la hora: los «5 segundos» de espera se gastaban en
+        // unos pocos milisegundos reales, así que en QEMU —donde la respuesta
+        // viene del propio host— llegaba a tiempo y por WiFi no llegaba nunca.
+        let fin = min_instant(crate::net::now() + POR_SERVIDOR, deadline);
+        loop {
+            let t = crate::net::now();
+            if t >= fin {
+                break;
+            }
             iface.poll(t, dev, sockets);
             let sock = sockets.get_mut::<udp::Socket>(handle);
             if sock.can_recv() {
@@ -134,11 +149,28 @@ pub fn resolve_a(
                     }
                 }
             }
-            t += Duration::from_millis(10);
         }
     }
     sockets.remove(handle);
     Err(())
+}
+
+fn min_instant(a: Instant, b: Instant) -> Instant {
+    if a < b { a } else { b }
+}
+
+/// Servidores a los que preguntar: primero los que anunció el DHCP.
+///
+/// Esto **sí** reserva, y puede: corre en el contexto de la syscall que
+/// resuelve un nombre, no en una interrupción.
+pub fn servidores(dhcp: &[Option<Ipv4Address>]) -> alloc::vec::Vec<Ipv4Address> {
+    let mut v: alloc::vec::Vec<Ipv4Address> = dhcp.iter().flatten().copied().collect();
+    for respaldo in [FALLBACK_DNS, SLIRP_DNS] {
+        if !v.contains(&respaldo) {
+            v.push(respaldo);
+        }
+    }
+    v
 }
 
 pub fn resolve_hostname(host: &str) -> Result<soso_abi::SockAddr, i64> {
@@ -163,11 +195,14 @@ pub fn resolve_hostname(host: &str) -> Result<soso_abi::SockAddr, i64> {
         iface,
         sockets,
         dev,
+        dns,
         ..
     } = &mut *n;
+    let lista = servidores(dns);
     let start = super::now();
     let deadline = start + TIMEOUT;
-    let ip = resolve_a(iface, sockets, dev, trimmed, start, deadline).map_err(|_| -soso_abi::ENOENT)?;
+    let ip = resolve_a(iface, sockets, dev, trimmed, start, deadline, &lista)
+        .map_err(|_| -soso_abi::ENOENT)?;
     Ok(soso_abi::SockAddr {
         addr: ip,
         port: 0,

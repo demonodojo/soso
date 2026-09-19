@@ -59,6 +59,15 @@ struct NetStack {
     dev: NicDev,
     mac: [u8; 6],
     backend: BackendKind,
+    /// Servidores DNS que anunció el DHCP. Sin esto había que adivinarlos, y
+    /// lo que se adivinaba era el de QEMU.
+    ///
+    /// Array fijo, **no** un `Vec`: esto se rellena desde `poll_dhcp`, que
+    /// corre también desde el tick del temporizador —o sea, desde una
+    /// interrupción—. Reservar memoria ahí dentro puede pillar al asignador a
+    /// medias y dejar su lista de bloques corrupta; se paga mucho después, con
+    /// un page fault dentro de `talc` que no se parece en nada a su causa.
+    dns: [Option<smoltcp::wire::Ipv4Address>; 3],
     user_tcp: tcp_user::TcpTable,
 }
 
@@ -198,6 +207,7 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
     let dhcp_started = if dhcp_now { now() } else { Instant::from_millis(0) };
     NET.call_once(|| {
         Mutex::new(NetStack {
+            dns: [None; 3],
             iface,
             sockets,
             echo,
@@ -380,6 +390,7 @@ fn poll_dhcp(
     ssh: &[SocketHandle],
     dhcp: SocketHandle,
     configured: &mut bool,
+    dns: &mut [Option<smoltcp::wire::Ipv4Address>; 3],
 ) {
     let event = sockets.get_mut::<dhcpv4::Socket>(dhcp).poll();
     match event {
@@ -401,6 +412,13 @@ fn poll_dhcp(
                     config.address.address(),
                     config.address.prefix_len()
                 );
+            }
+            if !config.dns_servers.is_empty() {
+                *dns = [None; 3];
+                for (hueco, servidor) in dns.iter_mut().zip(config.dns_servers.iter()) {
+                    *hueco = Some(*servidor);
+                    println!("net: dns {servidor}");
+                }
             }
             *configured = true;
         }
@@ -508,12 +526,13 @@ pub fn poll() {
         dev,
         mac,
         backend,
+        dns,
         user_tcp,
     } = &mut *n;
 
     iface.poll(now(), dev, sockets);
     if *dhcp_enabled {
-        poll_dhcp(iface, sockets, echo, ssh, *dhcp, configured);
+        poll_dhcp(iface, sockets, echo, ssh, *dhcp, configured, dns);
         try_static_fallback(iface, *mac, *backend, dev, *dhcp_started, configured);
     }
     poll_tcp_services(sockets, echo, ssh, *configured);

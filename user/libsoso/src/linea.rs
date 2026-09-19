@@ -118,6 +118,13 @@ impl Lector {
                 return Err(n);
             }
             if n == 0 {
+                // El kernel trata Ctrl-D como VEOF: `read` = 0. En línea
+                // vacía es fin de entrada; con texto pendiente se ignora
+                // (el siguiente `read` espera más teclas).
+                if self.len == 0 {
+                    self.eco_str("\n");
+                    return Ok(None);
+                }
                 continue;
             }
             let c = byte[0];

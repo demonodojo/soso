@@ -1,7 +1,7 @@
 //! HTTPS para descargas de actualización.
 
 use alloc::vec::Vec;
-use libsoso::{abi, sys};
+use libsoso::{abi, println, sys};
 use soso_abi::SockAddr;
 use soso_update_core::descarga;
 use soso_http::TcpTransport;
@@ -29,16 +29,37 @@ fn ensure_wall_clock() {
     }
 }
 
+/// Las etapas de una descarga se dicen según pasan.
+///
+/// No es ruido: entre resolver un nombre y tener el manifiesto hay DNS, TCP,
+/// TLS y HTTP, cada uno con su forma de quedarse parado. Sin esto, un fallo en
+/// cualquiera de los cuatro se ve igual desde fuera —el comando callado— y no
+/// hay manera de saber cuál. Costó dos pasadas de quince minutos averiguar que
+/// se paraba **después** de resolver el origen.
 impl TcpTransport for Net {
     fn dns_resolve(&self, host: &str, out: &mut [u8; 4]) -> Result<(), i64> {
-        sys::dns_resolve(host, out)
+        let r = sys::dns_resolve(host, out);
+        match r {
+            Ok(()) => println!(
+                "  red: {host} → {}.{}.{}.{}",
+                out[0], out[1], out[2], out[3]
+            ),
+            Err(e) => println!("  red: no pude resolver {host} (errno {})", -e),
+        }
+        r
     }
 
     fn tcp_connect(&self, addr: SockAddr, timeout_ms: u64) -> Result<u64, i64> {
+        println!(
+            "  red: conectando a {}.{}.{}.{}:{}…",
+            addr.addr[0], addr.addr[1], addr.addr[2], addr.addr[3], addr.port
+        );
         let fd = sys::tcp_connect(&addr, timeout_ms);
         if fd < 0 {
+            println!("  red: conexión rechazada (errno {})", -fd);
             Err(fd)
         } else {
+            println!("  red: conectado (fd {fd})");
             Ok(fd as u64)
         }
     }

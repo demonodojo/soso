@@ -18,7 +18,7 @@ pub mod validate;
 pub use layout::*;
 pub use manifest::{
     AttnKind, AudioSpec, FfnKind, LayerSpec, Manifest, ModelKind, NormKind, UnsupportedLayer,
-    FLAG_ROPE_NEOX,
+    FLAG_QK_NORM, FLAG_ROPE_NEOX,
 };
 pub use index::{TensorEntry, TensorIndex};
 

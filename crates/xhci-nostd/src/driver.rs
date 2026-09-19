@@ -451,12 +451,21 @@ impl XhciController {
 
     fn clear_port_change_bits(&mut self) {
         for port in 1..=self.max_ports() {
-            let portsc = self.op.portsc(port);
-            let ch = portsc & PORTSC_CHANGE_BITS;
-            if ch != 0 {
-                self.write_portsc_masked(port, portsc, ch);
-            }
+            self.ack_port_status_change(port);
         }
+    }
+
+    /// Limpia CSC/PEC/… del puerto (Linux `handle_port_status`) y PCD en USBSTS.
+    fn ack_port_status_change(&mut self, port_id: u8) {
+        if port_id == 0 || port_id > self.max_ports() {
+            return;
+        }
+        let portsc = self.op.portsc(port_id);
+        let ch = portsc & PORTSC_CHANGE_BITS;
+        if ch != 0 {
+            self.write_portsc_masked(port_id, portsc, ch);
+        }
+        self.clear_pcd();
     }
 
     fn wait_for_ports_connected(&mut self, max_passes: u32) -> bool {
@@ -742,7 +751,7 @@ impl XhciController {
                 } else if evt_type == TRB_TYPE_PORT_STATUS_CHANGE {
                     let port_id = (evt.parameter() >> 24) as u8;
                     log::info!("xhci: port status change event: port={}", port_id);
-                    // Could handle hot-plug here; for now continue polling
+                    self.ack_port_status_change(port_id);
                     continue;
                 } else if evt_type == TRB_TYPE_TRANSFER_EVENT {
                     self.dispatch_event(evt);
@@ -1457,29 +1466,30 @@ impl XhciController {
             config_index, slot_id
         );
 
-        // First, get just the header to learn wTotalLength
+        if self.transfer_rings.get(slot_id as usize)?.get(1)?.is_none() {
+            return None;
+        }
+
         let header_size = 9;
         let (hdr_va, hdr_phys) = unsafe { alloc_dma_buffer(header_size) };
-
-        let ring = self.transfer_rings[slot_id as usize][1].as_mut()?;
-        let handles = ring.enqueue_control_transfer(
-            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-            USB_REQ_GET_DESCRIPTOR,
-            (USB_DESC_CONFIGURATION as u16) << 8 | config_index as u16,
-            0,
-            hdr_phys,
-            header_size as u16,
-        );
-        self.db.ring_endpoint(slot_id, 1);
-
-        let evt = self.wait_transfer_event(slot_id, Some(handles.status_trb_phys))?;
-        if evt.completion_code() != TRB_COMPLETION_SUCCESS
-            && evt.completion_code() != TRB_COMPLETION_SHORT_PACKET
-        {
-            log::warn!(
-                "xhci: GET_DESCRIPTOR(Config header) failed: code={}",
-                evt.completion_code()
-            );
+        let mut header_ok = false;
+        for attempt in 0..GET_DESCRIPTOR_RETRIES {
+            if attempt > 0 {
+                delay_us(GET_DESCRIPTOR_RETRY_DELAY_US);
+            }
+            if self.ep0_get_descriptor_in(
+                slot_id,
+                USB_DESC_CONFIGURATION,
+                config_index,
+                hdr_phys,
+                header_size as u16,
+            ) {
+                header_ok = true;
+                break;
+            }
+        }
+        if !header_ok {
+            log::warn!("xhci: GET_DESCRIPTOR(Config header) failed for slot {slot_id}");
             return None;
         }
 
@@ -1487,28 +1497,25 @@ impl XhciController {
         let total_len = u16::from_le_bytes([hdr_data[2], hdr_data[3]]) as usize;
         log::debug!("xhci: config descriptor total length = {}", total_len);
 
-        // Now get the full descriptor set
         let (full_va, full_phys) = unsafe { alloc_dma_buffer(total_len) };
-
-        let ring = self.transfer_rings[slot_id as usize][1].as_mut()?;
-        let handles = ring.enqueue_control_transfer(
-            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-            USB_REQ_GET_DESCRIPTOR,
-            (USB_DESC_CONFIGURATION as u16) << 8 | config_index as u16,
-            0,
-            full_phys,
-            total_len as u16,
-        );
-        self.db.ring_endpoint(slot_id, 1);
-
-        let evt = self.wait_transfer_event(slot_id, Some(handles.status_trb_phys))?;
-        if evt.completion_code() != TRB_COMPLETION_SUCCESS
-            && evt.completion_code() != TRB_COMPLETION_SHORT_PACKET
-        {
-            log::warn!(
-                "xhci: GET_DESCRIPTOR(Config full) failed: code={}",
-                evt.completion_code()
-            );
+        let mut full_ok = false;
+        for attempt in 0..GET_DESCRIPTOR_RETRIES {
+            if attempt > 0 {
+                delay_us(GET_DESCRIPTOR_RETRY_DELAY_US);
+            }
+            if self.ep0_get_descriptor_in(
+                slot_id,
+                USB_DESC_CONFIGURATION,
+                config_index,
+                full_phys,
+                total_len as u16,
+            ) {
+                full_ok = true;
+                break;
+            }
+        }
+        if !full_ok {
+            log::warn!("xhci: GET_DESCRIPTOR(Config full) failed for slot {slot_id}");
             return None;
         }
 
@@ -2045,6 +2052,7 @@ impl XhciController {
         } else if evt_type == TRB_TYPE_PORT_STATUS_CHANGE {
             let port_id = (evt.parameter() >> 24) as u8;
             log::info!("xhci: port status change event: port={}", port_id);
+            self.ack_port_status_change(port_id);
         } else {
             log::trace!("xhci: unhandled event type {}", evt_type);
         }

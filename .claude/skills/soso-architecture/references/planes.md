@@ -25,7 +25,7 @@ el alcance: consultar o editar documentación no inicia su implementación.
 
 | Trabajo | Entrada y relación |
 |---|---|
-| Automejora, OpenCode, modelo de soso | [SELF_IMPROVEMENT.md](../../../../SELF_IMPROVEMENT.md) → [índice](../../../../docs/self-improvement/README.md) → [tasks.json](../../../../docs/self-improvement/tasks.json) → ficha Txx |
+| Automejora, OpenCode, modelo de soso | Skill **soso-self-improvement**. Plan: [SELF_IMPROVEMENT.md](../../../../SELF_IMPROVEMENT.md) → [índice](../../../../docs/self-improvement/README.md) → [tasks.json](../../../../docs/self-improvement/tasks.json) → ficha Txx |
 | Contratos y fichas derivadas | [CONTRATO.md](../../../../docs/self-improvement/CONTRATO.md), solo secciones de la tarea; [PLANTILLA.md](../../../../docs/self-improvement/PLANTILLA.md) para N-xxx/C-xxx |
 | Entregas generales y pendientes | [PLAN_ASTRA.md](../../../../PLAN_ASTRA.md); comprobar su revisión e IDs actuales |
 | Actualizaciones de instalaciones y logs en sosofs | [PLAN-ACTUALIZACIONES.md](../../../../docs/PLAN-ACTUALIZACIONES.md), entregas U0–U8; transición legacy y recuperación conjunta kernel/rootfs |
@@ -42,6 +42,9 @@ invalidar un GO histórico sin invalidar el trabajo de otros equipos. Registrar
 la discrepancia y el alcance, no reemplazar estados a partir de la fecha sola.
 
 ## Elegir y retomar una ficha de automejora
+
+Para implementar o avanzar, skill **soso-self-improvement** (no esta
+referencia sola). Resumen:
 
 - Resolver `tasks[].id` y abrir `file` relativo al directorio del catálogo.
   `context` contiene rutas desde la raíz. Leer la ficha, `depends_on`,

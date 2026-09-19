@@ -2301,6 +2301,15 @@ static int check_qmd_v02_fields(const struct gsp_compute *cp,
         printf("FALLO: QMD v2 major/semaphore/REQUIRE_SCHEDULING_PCAS\n");
         return -1;
     }
+    if (qmd_get_bits(w, QMDV02_QMD_GROUP_ID) != 0x1fu) {
+        printf("FALLO: QMD v2 QMD_GROUP_ID (esperaba 0x1f)\n");
+        return -1;
+    }
+    if (qmd_get_bits(w, QMDV02_INVALIDATE_INSTRUCTION_CACHE) != 1 ||
+        qmd_get_bits(w, QMDV02_INVALIDATE_SHADER_CONSTANT_CACHE) != 1) {
+        printf("FALLO: QMD v2 invalidate instruction/shader constant cache\n");
+        return -1;
+    }
     prog = qmd_get_bits(w, QMDV02_PROGRAM_OFFSET);
     if (prog != ((k->sass_va - GSP_VA_BASE) >> 4)) {
         printf("FALLO: PROGRAM_OFFSET=0x%llx, esperaba 0x%llx rel (%s)\n",
@@ -2317,8 +2326,10 @@ static int check_qmd_v02_fields(const struct gsp_compute *cp,
     }
     cbank = (qmd_get_bits(w, QMDV02_CONSTANT_BUFFER_ADDR_UPPER0) << 32) |
             qmd_get_bits(w, QMDV02_CONSTANT_BUFFER_ADDR_LOWER0);
-    if (GSP_VA_BASE + (cbank << 6) != cp->data_va + G4F_CBANK_OFF) {
-        printf("FALLO: CBANK0 addr rel=0x%llx\n", (unsigned long long)(cbank << 6));
+    if ((cbank << 6) != cp->data_va + G4F_CBANK_OFF) {
+        printf("FALLO: CBANK0 addr VA>>6=0x%llx (esperaba cb_va 0x%llx)\n",
+               (unsigned long long)(cbank << 6),
+               (unsigned long long)(cp->data_va + G4F_CBANK_OFF));
         return -1;
     }
     sem = (qmd_get_bits(w, QMDV02_RELEASE0_ADDRESS_UPPER) << 32) |

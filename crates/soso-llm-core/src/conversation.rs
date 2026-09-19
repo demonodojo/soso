@@ -29,6 +29,10 @@ use serde_json::Value;
 
 /// Validación del historial y de los esquemas de herramientas (T05).
 pub mod validate;
+/// Render de historial por familia de modelo (T06).
+pub mod render;
+
+pub use render::render_messages;
 
 pub use validate::{
     validate_input, MAX_ARGUMENTOS_BYTES, MAX_HERRAMIENTAS, MAX_MENSAJES,
@@ -316,6 +320,10 @@ pub enum ChatError {
     ArgumentosInvalidos { llamada: String },
     /// El render más la reserva de salida no caben en el contexto.
     ContextoExcedido { necesarios: u32, disponibles: u32 },
+    /// La familia del perfil no tiene renderer en esta entrega.
+    FamiliaNoImplementada { family: String },
+    /// El tokenizer no puede representar el texto renderizado.
+    TokenizacionInvalida { motivo: String },
 }
 
 /// La raíz de un JSON Pointer es la cadena vacía; en un mensaje se lee mal.
@@ -382,6 +390,12 @@ impl core::fmt::Display for ChatError {
                 f,
                 "el render necesita {necesarios} tokens y hay {disponibles}"
             ),
+            ChatError::FamiliaNoImplementada { family } => {
+                write!(f, "familia de chat no implementada: {family}")
+            }
+            ChatError::TokenizacionInvalida { motivo } => {
+                write!(f, "tokenización inválida: {motivo}")
+            }
         }
     }
 }

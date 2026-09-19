@@ -26,179 +26,13 @@ Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
 Estado/límites OTA: [`docs/ESTADO.md`](../../docs/ESTADO.md).
 
 Plan U0–U8: [actualizaciones de instalaciones y logs en sosofs](../../../docs/PLAN-ACTUALIZACIONES.md).
-Incluye recuperación conjunta kernel/rootfs, transición legacy y eliminación
-de `SOSOLOG.TXT` en la ESP instalada; no tratarlo como comportamiento implementado.
+U0–U7 cerradas (2026-09-18); U8 necesita la placa.
 
-**U5e parcial (2026-09-17):** `aplicar` **se planta** si el registro dice que esa
-versión ya hubo que deshacerla (pide `--forzar`), y al armar se recogen los
-puntos que no referencia ni la versión activa ni la operación nueva — **nunca por
-tiempo ni por espacio, y nada si no consta ninguna referencia**. Falta comprobar
-el arranque restaurado y no entrar en bucle si también falla.
+**Actualizaciones y vuelta atrás: [skill `soso-update`](../soso-update/SKILL.md).**
+Ahí está el contrato de la transacción, las cuatro vías de recuperación, la
+transición de instalaciones antiguas y el banco de `test-update`. Aquí queda
+sólo lo que es del medio: particiones, ficheros de la ESP, shim y USB.
 
-**U5d (2026-09-17):** `soso-update revertir` va contra la transacción —
-muestra A→B, **verifica el punto releyéndolo**, deja cancelar y registra
-`Decision::Rescatar`; restaura el arranque siguiente (`txn: restaurada la
-versión`). La **entrada UEFI** ya existe: el instalador registra una segunda
-`Boot####` «soso — recuperar versión anterior», al mismo cargador y con
-`rescatar` en su OptionalData, la última del `BootOrder`. El shim
-(`boot-shim/src/rescate.rs`) sólo **pide** el rescate en `SOSOTXN.BIN`; decide
-con `txn::rescate::planear`, que se prueba en el host. Trampa cazada
-aquí: un `Contenido` con hash vacío se escribe `0 ` y al releer se recorta el
-espacio → campo impartible y registro **ilegible**; «no consta» va explícito
-(`- -`). Vale para el punto y para el diario.
-
-**U7 cerrada (2026-09-18): la matriz, con las averías provocadas.** `test-update`
-tiene 9 fases; las nuevas se seleccionan con `cargo xtask test-update <filtro>`:
-`roto` (una release con `/bin/init` que no es ELF: se aplica, no arranca y el
-encendido siguiente la deshace **solo**), `cadena` (A→B→C: dos puntos conviven
-con C armada, y de C se vuelve a B con su contenido), `respaldo` (se estropea un
-respaldo con `xtask::sosofs_img` y el arranque tiene que dar diagnóstico sin
-lanzar la shell), `confirmacion` (se rebobina **sólo** la ESP a `probando` con el
-diario ya en `confirmado`: hay que **completar**, no deshacer) y `ajeno`.
-Bancos host nuevos: `rangos_http` (política de respuestas; un 206 de otro tramo
-se aceptaba) y `manifiesto` (traversal, duplicados, solapes…). Trampa: las
-releases de prueba viven en `rootfs/var/actualiza-*` y hay que excluirlas del
-pack o se empaquetan entre sí.
-
-**U6 cerrada (2026-09-18): transición de instalaciones antiguas.**
-`soso-update transicion` inventaría los huecos de la ESP y separa lo que
-**bloquea** (sin `SOSOTXN.BIN` no hay vuelta atrás; `aplicar` se planta antes de
-descargar) de lo que sólo conviene. `soso-update transicion --disco N` (sólo
-desde el live) deja `PROVISION <guid>` en `SOSOBOOT.TXT`, y
-`boot-shim/src/provision.rs` lo ejecuta: **crear** ficheros FAT necesita el
-driver de UEFI, el kernel sólo sabe sobrescribir por LBA. Crea los huecos con
-tamaño exacto, **declara la identidad `installed`** (un hueco en blanco se lee
-como «sin registro» y la máquina se cree un live), sustituye `bootx64.efi`
-releyéndolo para compararlo, y registra las dos entradas. Con `/var/log` vivo y
-la identidad declarada, el kernel retira `SOSOLOG.TXT` (`logfs::retirar_log_fat`).
-Prueba: fase 4 de `test-install`, con `bootindex` fijando que arranque el USB
-—si no, el firmware arranca del destino ya instalado y lo atiende su propio shim—.
-`soso-update recuperar [--disco N] [--pedir]` mira **otro** disco desde el live
-(GPT con `gptdisk`, ESP con `espfat-core`, sosofs con `sosofs` montado sólo
-lectura sobre `sys::disk_read`), verifica su punto y, con `--pedir`, le escribe
-`rescatar` en su ESP: **restaura su propio kernel**, que es quien puede excluir
-escritores y llevar el diario. Prueba: fase «ajeno» de `test-update`.
-
-**Exclusión de escritores (2026-09-17, cierra U5):** `SYS_TXN_LOCK=91` +
-`kernel/src/drivers/txnlock.rs`. Entre el respaldo y el reinicio, las rutas que
-administra la release (`soso_update_core::es_administrada`: `bin/ lib/ etc/`
-menos lo que el pack excluye) devuelven **EROFS** a cualquiera que no sea el
-dueño; el resto del disco no se toca y **leer nunca se bloquea**. Se comprueba al
-abrir **y además en cada escritura y al publicar** (el `Fd` lleva `protegida`):
-sólo al abrir, un descriptor abierto antes de la actualización colaba su
-contenido después del respaldo. La exclusión
-sobrevive al proceso (`TXN_LOCK_ARMADO` la deja sin dueño hasta reiniciar), el
-kernel la retoma al aplicar y la suelta al acreditar o deshacer
-(`txnaplica::confirmar`), y un dueño muerto la libera solo. Añadir una syscall
-**no** sube `ABI_VERSION` (política escrita en `soso-abi`; la compatibilidad se
-compara por igualdad exacta y subirla dejaría fuera a todas las máquinas).
-
-**U5c cerrada (2026-09-17): `soso-update` ARMA, no instala.** Baja a la etapa,
-crea+verifica el punto, escribe el **diario**, prepara el kernel y publica el
-**registro de arranque**; instala `drivers/txnaplica.rs` en el arranque
-siguiente, antes de firmware e init. `/etc/soso-release` es un fichero
-administrado más (si no, volver atrás deja binarios viejos anunciando versión
-nueva). `init` confirma la pareja con `SYS_TXN_CONFIRM` (89) — **sin eso el
-arranque siguiente ve `probando` y deshace la actualización**. El banco exige
-`txn: actualización aplicada` en el serial **antes** de `boot: ethernet`.
-Trampas encontradas: el diario con hash de kernel vacío queda **ilegible** y
-aparece como «armada sin diario» (la imagen live no trae `kernel=` en
-`/etc/soso-release`); y al rearmar la misma release hay que **continuar la
-secuencia** del diario o `pick` elige el obsoleto. Falta: arrancar la pareja
-antigua **bajo su kernel** (sigue en `SOSOKRN.MET`) y cortes E2E.
-
-**Cliente creando puntos (2026-09-17):** `soso-update` implementa `Almacen` y
-crea+verifica el punto **antes de tocar el sistema**; si no se puede, no
-actualiza. `estado` muestra la vuelta atrás y si está verificada. Huecos ESP
-nuevos: `UPD_WHICH_TXN` (SOSOTXN.BIN) y `UPD_WHICH_MODE` (SOSOMODE.TXT, de donde
-sale el GUID que ata el punto a su instalación). Ojo: `sys::getdents` devuelve
-**bytes**, no entradas — dividir por `DIRENT_SIZE`.
-
-**U5b cerrada (2026-09-17):** `punto::crear_punto` comprueba espacio **antes**
-de copiar, copia y **relee** todo; sin espacio, con una copia que falla o que no
-se relee igual, devuelve error y **no se arma**. `Retencion` conserva A mientras
-C no confirme (dos puntos a la vez a propósito) y **no suelta el viejo si el
-nuevo no está verificado**. Falta implementación real de `Almacen`: quien cree
-puntos de verdad será el cliente al armar.
-
-**U5a cerrada (2026-09-17):** registro de arranque en **formato 2** — punto
-retenido + decisión `rescatar` — que **sigue leyendo el formato 1** (sin punto:
-«no consta», no «no hay»; `BootRecord::conoce_puntos()`) y rechaza uno más nuevo
-entero. `txn/punto.rs`: el punto guarda A **mientras B sea la activa**, aunque B
-esté confirmada; lleva GUID del destino, se **verifica releyéndolo**, anota lo
-que añadió B para **quitarlo** al volver, y `reserva_efectiva` cuenta los datos
-dos veces por el CoW. `recogible` sólo suelta lo no referenciado (en A→B→C
-conviven dos). La fila `rescatar` de la tabla **manda sobre el diario**, pero el rescate
-**cierra ese diario** al terminar (`txn::rescate::cerrar_diario`, antes de
-publicar la decisión): si no, la ESP dice `revertido` y el diario `probando`, y
-el arranque siguiente no sabe cuál manda — se plantaba en `ParejaImposible`.
-
-**U5c parcial (2026-09-17) — no confundir con U5 entera.** El plan creció el
-2026-09-16 (§3.6: puntos de recuperación **retenidos**, tres vías de vuelta
-atrás, entrada UEFI de rescate) y U5 se desglosó en U5a–U5e, todas pendientes.
-Hecho y probado: `txn/aplicador.rs` (idempotente, verifica hashes antes de
-escribir, 11 pruebas cortando en **cada** paso) y `kernel/src/drivers/txnaplica.rs`
-(lee `SOSOTXN.BIN` + diario, `reconcile`, ejecuta; corre tras montar sosofs y
-**antes** de firmware e init; con pareja incoherente no lanza userspace).
-**Está enlazado pero inerte:** `soso-update` todavía instala él mismo en vez de
-armar, así que nadie publica un registro y `reconcile` siempre dice «normal».
-Aviso de diseño: la reversión restaura **toda** la operación, no sólo lo marcado
-como aplicado — entre escribir un fichero y anotarlo hay una ventana, y deshacer
-sólo lo anotado dejaba una pareja mezclada. Feature `txn` en soso-update-core
-para que el kernel no arrastre el formato de release.
-
-**U4 cerrada (2026-09-17):** la descarga va a `/var/lib/soso-update/<id>/etapa/`
-y **no toca el sistema activo** hasta tenerlo todo verificado; antes se escribía
-`/bin`/`/lib` según llegaba cada tramo. Reanudable: el registro de la etapa está
-atado al **hash del manifiesto** (no a la versión), lo verificado no se vuelve a
-pedir y un fichero truncado no cuenta. RAM acotada por `TROZO_MAX` = 1 MiB
-(`net::https_download_span_a` entrega por trozos); se siguen pidiendo **tramos**
-para no hacer una petición por binario. `SYS_FSINFO` (88) da el espacio libre al
-`preflight` de U0. Acreditado por `test-update`, cuyo arranque 2 ensucia el
-fichero y reaplica para exigir reanudación **cruzando el reinicio**.
-
-**U3 cerrada (2026-09-16):** el manifiesto lleva contrato de compatibilidad
-(`arch`/`perfil`/`drivers`/`abi`/`fs`/`min_shim`/`min_recuperador`) que emite
-`cargo xtask release`, y `soso-update` lo exige antes de descargar — **ojo al
-sentido**: el manifiesto declara lo que la release **trae** y el equipo lo que
-**necesita**; invertirlo rechaza cualquier release completa. Canales en
-`crates/soso-update-core/src/canal.rs` con precedencia fija
-(`--local` > `--channel` > `url=` > `channel=` > stable); el origen se resuelve
-**una vez por comando**. Exclusiones del pack clasificadas por motivo
-(`por_que_se_excluye`), ya con `var/log/` y `var/lib/soso-update/`; `release`
-aborta si una ruta prohibida llega al pack. Las releases **no se firman**
-todavía: ver la política en `docs/U0-CONTRATO-ACTUALIZACION.md` §8.
-
-**U2 cerrada (2026-09-16):** la lógica FAT de la ESP vive en
-`crates/espfat-core` (no_std, sobre un trait de sectores, 10 pruebas host) y el
-kernel la usa a través de `drivers/espfat.rs`. `soso-install` **finaliza** el
-destino: escribe `SOSOMODE.TXT` con modo `installed` y el GUID nuevo, **borra**
-`SOSOLOG.TXT` y `SOSOBOOT.TXT` —borrado real: entrada de directorio + cadena FAT
-en todas las copias; a ceros no vale—, rechaza clonar un origen con OTA a medias
-y **pausa el escritor de logs** mientras copia (`sys::log_quiesce`), porque desde
-U1 el kernel escribe el rootfs cada 2 s. `drivers/modo.rs` lee la identidad antes
-de montar sosofs y `fatlog` se apaga **sólo** con identidad explícita, propia e
-`installed`. Acreditado por `cargo xtask test-install`. No probado E2E:
-`install-disk` y el `install-soso.sh` empaquetado, que hacen lo mismo por su
-cuenta. Migrar instalaciones ya existentes es U6.
-
-**U1 cerrada (2026-09-16):** logs nativos en sosofs —`/var/log/{kernel,
-aplicaciones,actualizaciones}.log`— con cabecera por arranque, rotación 1 MiB × 3
-y suspensión ante errores de FS (`kernel/src/drivers/logfs.rs`, lógica en
-`crates/soso-log-core`). `sosolog` / `SYS_FATLOG_FLUSH` y `dmesg save` persisten
-en **los dos** destinos. **Ojo:** en el live se escriben los dos a la vez, porque
-la identidad `live`/`installed` no existe hasta que U2 cree `SOSOMODE.TXT`; hasta
-entonces `fatlog` no se apaga en ninguna parte. Acreditado por
-`cargo xtask test-update` (el arranque 2 comprueba que los registros del anterior
-siguen ahí).
-
-**U0 cerrada (2026-09-16), sólo banco host:** el contrato de la transacción está
-en [U0-CONTRATO-ACTUALIZACION.md](../../../docs/U0-CONTRATO-ACTUALIZACION.md) y
-en `crates/soso-update-core/{record.rs,txn/,identity.rs,compat.rs}`. Es lógica
-`no_std` sin E/S: **no hay aplicador en el arranque**. Los ficheros ESP nuevos
-(`SOSOTXN.BIN` y `SOSOMODE.TXT`, 4 KiB cada uno, cuatro ranuras) todavía **no**
-los pre-crea `package-usb-live`; los reservan U2/U5. El buzón `SOSOUPD.TXT` y
-`SOSOKRN.MET` siguen siendo el camino real del OTA de kernel. Siguiente: U1.
 
 ## Particiones (orden real en el stick)
 
@@ -281,6 +115,7 @@ tamaño fijo y escribe sectores. Si falta el hueco, esa vía queda desactivada
 | Fichero | Tamaño | Quién escribe | Para qué |
 |---------|--------|---------------|----------|
 | `BOOTMARK.TXT` | — | boot-shim | UEFI nos ejecutó; si sigue vacío, el firmware no arrancó el USB |
+| `SOSOHASH.TXT` | 4 KiB | `package-usb-live` | identidad de lo flasheado (versión, sha256 kernel/rootfs) |
 | `SOSOLOG.TXT` | 256 KiB | kernel `fatlog` (~2 s) | log serie persistente |
 | `SOSODRV.TXT` | 16 KiB | `hwscan` / `drvlog` | informe PCI |
 | `SOSOBOOT.TXT` | 4 KiB | `soso-install` → shim | `INSTALL <guid-ESP>` → `Boot####` |
@@ -359,20 +194,24 @@ Host alternativo: `cargo xtask install-disk /dev/nvmeXn1 --yes` (GRUB).
 E2E: `cargo xtask test-install` (3 arranques OVMF; NVMe falso con swap/ESP
 que el instalador debe rechazar). `SOSO_MODELS_SIZE=256M` para que sea rápido.
 
-## OTA (`soso-update`)
+## OTA (`soso-update`) — resumen; el detalle está en la skill `soso-update`
 
-Userspace + `crates/soso-update-core`. Release: `manifest.txt` + `rootfs.pack`
-+ `kernel-x86_64` (`cargo xtask release [--publish]`).
+Release: `manifest.txt` + `rootfs.pack` + `kernel-x86_64`
+(`cargo xtask release [--publish]`). El cliente **arma** y aplica el arranque
+siguiente; hay vuelta atrás verificada, entrada UEFI de rescate y reparación
+desde el live. Lo que toca a este medio:
 
-- Rootfs: pack concatenado; `PackWriter::should_pack` salta rutas en `PACK_SKIP`.
-  Sin rollback automático de binarios; progreso en `/etc/actualiza.estado`.
-- Kernel: `SYS_UPD_WRITE`/`READ` (68/69) sobre huecos ESP + `SOSOKRN.MET`.
-- Comandos: `estado` / `comprobar` / `aplicar` / `revertir`; `--local` apunta
-  a un directorio (p. ej. `/var/actualiza-prueba`).
-- Versión: `VERSION` → `/etc/soso-release` + banner kernel.
-
-E2E: `cargo xtask test-update` (apply, corte simulado + recovery, manifiesto inválido).
-Host: `cargo test -p soso-update-core --features std --tests`.
+- **Huecos de la ESP** (pre-creados por `package-usb-live`, 8.3 y contiguos):
+  `SOSOTXN.BIN` 4 KiB, `SOSOKRN.BIN` 64 MiB, `SOSOKRN.MET` 512 B,
+  `SOSOUPD.TXT` 4 KiB, `SOSOMODE.TXT` 4 KiB. El kernel los localiza por LBA
+  exigiendo **tamaño exacto y clusters consecutivos**: uno «casi bien» no sirve.
+- **El flasheo incremental NO rehace la ESP.** `--skip-models` / `--only kernel`
+  actualizan `kernel-x86_64` **in situ** y nada más: ni los huecos ni
+  `bootx64.efi`. Un stick flasheado así conserva la ESP del último flasheo
+  completo — y `soso-install` la clona tal cual al destino. Si a una instalación
+  le faltan huecos, el origen suele ser ese (2026-09-19, ROG).
+- `cargo xtask test-install` comprueba ahora que **cada hueco sigue siendo
+  utilizable** tras instalar, no sólo que el fichero esté.
 
 ## USB / xHCI (`crates/xhci-nostd` + `drivers/usb_storage.rs`)
 
@@ -421,7 +260,7 @@ Tests: `cargo xtask test-usb` (4 escenarios en paralelo).
 ## Comandos host
 
 ```bash
-cargo xtask package-usb-live              # qwen2.5-coder-3b Q4_K_M (sin medir stick)
+cargo xtask package-usb-live              # qwen3-4b-instruct-2507 Q4_K_M (sin medir stick)
 cargo xtask flash-usb-live /dev/sdX --yes # mide, elige GGUF, dd, estira p3
 SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 # incremental (pendrive ya flasheado; no toca p3 modelos):

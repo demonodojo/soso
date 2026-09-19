@@ -1,6 +1,6 @@
 # T06 — Renderizar la familia elegida con historial completo
 
-**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+**Hito:** SI-1 · **Tipo:** Implementación Rust host/no_std · **Estado:** completada (19 de septiembre de 2026; resumen en [seguimiento/T06.md](seguimiento/T06.md)).
 
 **Dependencias:** [T03](T03-perfil-modelo.md), [T05](T05-validacion-chat.md)
 
@@ -43,9 +43,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Si el tokenizer actual no reproduce la referencia, completar la ficha correctiva de T03; no debilitar la igualdad a una comparación aproximada.
 

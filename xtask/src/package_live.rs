@@ -502,8 +502,8 @@ fn write_flash(
         .unwrap_or_default();
     let model_demo = format!(
         "Modelo demo empaquetado: `{}` (Q4_K_M). También `tiny` sintético.\n\
-         Por defecto al flashear: qwen2.5-coder-3b. Escalera por tamaño: SOSO_LIVE_AUTO_MODEL=1 \
-         (tinyllama → qwen2.5-coder-3b → mistral-7b → qwen3.8-27b en 32 GB+) o SOSO_LIVE_CAPACITY=32G.",
+         Por defecto al flashear: qwen3-4b-instruct-2507. Escalera por tamaño: SOSO_LIVE_AUTO_MODEL=1 \
+         (tinyllama → qwen2.5-coder-3b → qwen3-4b-instruct-2507 → mistral-7b → qwen3.8-27b en 32 GB+) o SOSO_LIVE_CAPACITY=32G.",
         selection.llm_name
     );
     let body = format!(
@@ -823,13 +823,14 @@ fn copy_uefi_esp_mtools(uefi: &Path, fat: &Path) -> bool {
     status.map(|s| s.success()).unwrap_or(false)
 }
 
-/// Huecos 8.3 pre-creados en la ESP (log, hwscan, install, WiFi, OTA, modo).
+/// Huecos 8.3 pre-creados en la ESP (log, hwscan, install, WiFi, OTA, modo, hash).
 ///
 /// El kernel no crea entradas en FAT: si un hueco no está aquí, esa vía queda
 /// desactivada hasta reflashear. `SOSOMODE.TXT` y `SOSOTXN.BIN` son los que
 /// añade U2 para la identidad live/instalado y el registro de transacción del
 /// contrato U0.
 pub(crate) fn create_esp_slots(live: &Path) {
+    create_esp_file(live, b"SOSOHASH", b"TXT", 4096);
     create_esp_file(live, b"SOSORES ", b"TXT", 4096);
     create_esp_file(live, b"SOSOLOG ", b"TXT", 256 * 1024);
     create_esp_file(live, b"SOSODRV ", b"TXT", 16 * 1024);

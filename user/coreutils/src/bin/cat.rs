@@ -1,11 +1,6 @@
-//! `cat <fichero>...` vuelca ficheros a la salida; `cat -` vuelca **stdin**, que es
-//! lo que hace falta para que los pipelines de sosh sirvan de algo (los soportaba
-//! desde siempre, pero ningún programa leía stdin).
-//!
-//! Por qué `-` y no "sin argumentos, como en Unix": en la tty de soso no hay EOF
-//! —nadie interpreta Ctrl-D—, así que un `cat` sin argumentos leyendo la consola se
-//! quedaría colgado para siempre en vez de decir cómo se usa. En un pipeline sí hay
-//! EOF de verdad: la lectura del pipe devuelve 0 cuando el escritor cierra.
+//! `cat <fichero>...` vuelca ficheros a la salida. Sin argumentos (o con `-`)
+//! lee **stdin**: en un pipeline el escritor cierra y `read` devuelve 0; en la
+//! consola, Ctrl-D hace lo mismo.
 
 #![no_std]
 #![no_main]
@@ -55,8 +50,7 @@ fn main(args: &str) -> u8 {
         sys::close(fd as u64);
     }
     if !alguno {
-        println!("uso: cat <fichero>...  |  cat - (lee stdin, para pipelines)");
-        return 2;
+        return volcar(0, "-");
     }
     fallo
 }

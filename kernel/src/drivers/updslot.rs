@@ -58,30 +58,41 @@ pub fn init() {
     }
 }
 
-fn slot_for(which: u64) -> Result<Slot, i64> {
-    match which {
-        abi::UPD_WHICH_MAILBOX => MAILBOX
-            .get()
-            .and_then(|s| *s)
-            .ok_or(-abi::ENOTSUP),
-        abi::UPD_WHICH_KERNEL => KERNEL
-            .get()
-            .and_then(|s| *s)
-            .ok_or(-abi::ENOTSUP),
-        abi::UPD_WHICH_TXN => TXN
-            .get()
-            .and_then(|s| *s)
-            .ok_or(-abi::ENOTSUP),
-        abi::UPD_WHICH_MODE => MODE
-            .get()
-            .and_then(|s| *s)
-            .ok_or(-abi::ENOTSUP),
-        abi::UPD_WHICH_META => META
-            .get()
-            .and_then(|s| *s)
-            .ok_or(-abi::ENOTSUP),
-        _ => Err(-abi::EINVAL),
+/// Por qué no hay hueco: que **no esté** y que esté pero no sirva piden arreglos
+/// distintos —reflashear entero o sólo reponerlo—, así que el errno lo dice.
+/// Confundirlos manda a quien diagnostica a buscar fragmentación donde sólo
+/// había un fichero que nunca se creó.
+fn falta(nombre: &[u8; 8], ext: &[u8; 3]) -> i64 {
+    if espfat::existe(nombre, ext) {
+        -abi::ENOTSUP
+    } else {
+        -abi::ENOENT
     }
+}
+
+fn nombre_83(which: u64) -> (&'static [u8; 8], &'static [u8; 3]) {
+    match which {
+        abi::UPD_WHICH_MAILBOX => (b"SOSOUPD ", b"TXT"),
+        abi::UPD_WHICH_KERNEL => (b"SOSOKRN ", b"BIN"),
+        abi::UPD_WHICH_META => (b"SOSOKRN ", b"MET"),
+        abi::UPD_WHICH_TXN => (b"SOSOTXN ", b"BIN"),
+        _ => (b"SOSOMODE", b"TXT"),
+    }
+}
+
+fn slot_for(which: u64) -> Result<Slot, i64> {
+    let encontrado = match which {
+        abi::UPD_WHICH_MAILBOX => MAILBOX.get().and_then(|s| *s),
+        abi::UPD_WHICH_KERNEL => KERNEL.get().and_then(|s| *s),
+        abi::UPD_WHICH_TXN => TXN.get().and_then(|s| *s),
+        abi::UPD_WHICH_MODE => MODE.get().and_then(|s| *s),
+        abi::UPD_WHICH_META => META.get().and_then(|s| *s),
+        _ => return Err(-abi::EINVAL),
+    };
+    encontrado.ok_or_else(|| {
+        let (n, e) = nombre_83(which);
+        falta(n, e)
+    })
 }
 
 fn max_size(which: u64) -> Result<usize, i64> {

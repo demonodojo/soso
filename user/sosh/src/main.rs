@@ -600,6 +600,7 @@ fn ayuda() {
     println!("ask:      ask <pregunta>  — el texto va literal al modelo");
     println!("          ask             — modo interactivo (Ctrl-D o «salir»)");
     println!("          /bin/ask-modelo — elegir el modelo que usa ask");
+    println!("          log | grep askd  — trazas de carga de ask (fd 3)");
     println!("voz:      voz             — dictar; Enter confirma la línea");
     println!("          voz ask         — prefija «ask » al dictado");
     println!("          F4              — push-to-talk en la línea");
@@ -651,12 +652,10 @@ fn parse_sock_addr(s: &str) -> Option<abi::SockAddr> {
 
 /// Lanza el demonio. Devuelve el pid, o el errno del spawn.
 ///
-/// Stdio a la consola serie, no a la sesión SSH de quien lo lanzó: así el
-/// diagnóstico de carga acaba en `SOSOLOG.TXT` y no se mezcla con el canal
-/// remoto. Un tubo de lectura en stdout era `EBADF` al escribir, y reusar el
-/// mismo fd tres veces dejaba 1/2 en la tty SSH del padre (`take` solo cede
-/// una vez). El error NO se traga: un spawn fallido y un askd que tarda en
-/// escuchar daban el mismo síntoma («no pude conectar» a los 5 s).
+/// Stdio 0–2 a la consola serie: un panic o un `println!` olvidado no se
+/// mezcla con la sesión SSH. El diagnóstico de askd va por fd 3 (`logln!`,
+/// `spawn_io` ya pone `FD_KERNEL_LOG`): acaba en `log` y
+/// `/var/log/aplicaciones.log`, no en el socket ni en `SOSOLOG.TXT`.
 fn spawn_askd() -> Result<u64, i64> {
     let rc = sys::spawn_io(
         ASKD,

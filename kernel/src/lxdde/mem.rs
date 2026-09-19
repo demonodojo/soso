@@ -6,9 +6,17 @@ use core::ffi::c_void;
 use spin::Mutex;
 
 struct Pool {
+    /// Bloques libres: `(dirección, capacidad real reservada)`.
     blocks: Vec<(usize, usize)>,
-    live: BTreeMap<usize, usize>,
+    /// Vivos: `(dirección) -> (bytes del usuario, capacidad real)`.
+    live: BTreeMap<usize, (usize, usize)>,
 }
+
+/// Centinela detrás de cada bloque. Los drivers son C portado y el síntoma de
+/// que uno se pase escribiendo aparece **lejos** de la causa: el asignador del
+/// kernel se encuentra sus listas rotas y revienta en otra cosa, minutos
+/// después. Ocho bytes por bloque valen ese diagnóstico.
+const CENTINELA: u64 = 0x5A50_4F53_4F5A_4F53; // "ZSOSOZOS"
 
 static POOL: Mutex<Pool> = Mutex::new(Pool {
     blocks: Vec::new(),
@@ -17,20 +25,27 @@ static POOL: Mutex<Pool> = Mutex::new(Pool {
 
 const ALIGN: usize = 8;
 
+fn poner_centinela(addr: usize, size: usize) {
+    unsafe { core::ptr::write_unaligned((addr + size) as *mut u64, CENTINELA) };
+}
+
 fn alloc_block(user_size: usize, zero: bool) -> *mut c_void {
     let size = (user_size + ALIGN - 1) & !(ALIGN - 1);
+    // Lo que se reserva de verdad: lo pedido más el centinela.
+    let total = size + 8;
     let mut p = POOL.lock();
-    if let Some(i) = p.blocks.iter().position(|&(_, s)| s >= size) {
+    if let Some(i) = p.blocks.iter().position(|&(_, cap)| cap >= total) {
         let (addr, cap) = p.blocks.swap_remove(i);
         if zero {
             unsafe { core::ptr::write_bytes(addr as *mut u8, 0, size) };
         }
-        p.live.insert(addr, size.min(cap));
+        poner_centinela(addr, size);
+        p.live.insert(addr, (size, cap));
         return addr as *mut c_void;
     }
     drop(p);
     use alloc::alloc::{alloc, Layout};
-    let layout = Layout::from_size_align(size.max(ALIGN), ALIGN).unwrap();
+    let layout = Layout::from_size_align(total.max(ALIGN), ALIGN).unwrap();
     let ptr = unsafe { alloc(layout) };
     if ptr.is_null() {
         return core::ptr::null_mut();
@@ -38,7 +53,8 @@ fn alloc_block(user_size: usize, zero: bool) -> *mut c_void {
     if zero {
         unsafe { core::ptr::write_bytes(ptr, 0, size) };
     }
-    POOL.lock().live.insert(ptr as usize, size);
+    poner_centinela(ptr as usize, size);
+    POOL.lock().live.insert(ptr as usize, (size, layout.size()));
     ptr as *mut c_void
 }
 
@@ -57,10 +73,13 @@ pub extern "C" fn lx_krealloc(ptr: *mut c_void, size: usize, _flags: u32) -> *mu
     if ptr.is_null() {
         return lx_kmalloc(size, 0);
     }
+    // Lo que se copia es lo que **había**, no lo que se pide: al crecer, el
+    // bloque viejo es más pequeño y copiar `size` bytes lee fuera de él.
+    let viejo = POOL.lock().live.get(&(ptr as usize)).map(|&(s, _)| s).unwrap_or(0);
     let n = lx_kmalloc(size, 0);
     if !n.is_null() {
         unsafe {
-            core::ptr::copy_nonoverlapping(ptr as *const u8, n as *mut u8, size);
+            core::ptr::copy_nonoverlapping(ptr as *const u8, n as *mut u8, size.min(viejo));
         }
     }
     lx_kfree(ptr);
@@ -74,8 +93,18 @@ pub extern "C" fn lx_kfree(ptr: *mut c_void) {
     }
     let addr = ptr as usize;
     let mut p = POOL.lock();
-    if let Some(size) = p.live.remove(&addr) {
-        p.blocks.push((addr, size));
+    if let Some((size, cap)) = p.live.remove(&addr) {
+        // Si el centinela no está, alguien escribió más allá de su bloque. Se
+        // dice **aquí**, con el tamaño y la dirección, en vez de dejar que el
+        // asignador del kernel se estrelle después siguiendo una lista rota.
+        let visto = unsafe { core::ptr::read_unaligned((addr + size) as *const u64) };
+        if visto != CENTINELA {
+            crate::println!(
+                "lxdde: BLOQUE DESBORDADO en {addr:#x} ({size} B): centinela {visto:#x}"
+            );
+            panic!("lxdde escribió más allá de un bloque de {size} B en {addr:#x}");
+        }
+        p.blocks.push((addr, cap));
     }
 }
 

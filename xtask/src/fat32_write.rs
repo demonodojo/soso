@@ -31,7 +31,8 @@ pub fn find_root_entry(
         .open(img)
         .map_err(|e| format!("open: {e}"))?;
     let vol = read_vol(&mut f, part_first_lba)?;
-    find_entry(&mut f, &[vol.root_lba], name11, false)
+    let offsets = root_dir_offsets(&mut f, &vol)?;
+    find_entry(&mut f, &offsets, name11, false)
 }
 
 pub fn write_root_file(
@@ -52,7 +53,8 @@ pub fn write_root_file(
     name11[..8].copy_from_slice(name);
     name11[8..11].copy_from_slice(ext);
 
-    if let Some((cluster, size)) = find_entry(&mut f, &[vol.root_lba], &name11, false)? {
+    let offsets = root_dir_offsets(&mut f, &vol)?;
+    if let Some((cluster, size)) = find_entry(&mut f, &offsets, &name11, false)? {
         let clusters_needed =
             (data.len() as u64 + vol.bps * vol.spc - 1) / (vol.bps * vol.spc);
         let clusters_have = (size as u64 + vol.bps * vol.spc - 1) / (vol.bps * vol.spc);
@@ -140,7 +142,8 @@ pub fn write_root_file_fill(
     name11[..8].copy_from_slice(name);
     name11[8..11].copy_from_slice(ext);
 
-    if let Some((cluster, existing)) = find_entry(&mut f, &[vol.root_lba], &name11, false)? {
+    let offsets = root_dir_offsets(&mut f, &vol)?;
+    if let Some((cluster, existing)) = find_entry(&mut f, &offsets, &name11, false)? {
         if existing == size {
             write_fill(
                 &mut f,
@@ -890,6 +893,63 @@ fn is_eoc(vol: &Vol, entry: u32) -> bool {
     }
 }
 
+fn load_fat(f: &mut std::fs::File, vol: &Vol) -> Result<Vec<u8>, String> {
+    let fat_bytes = (vol.spf * vol.bps) as usize;
+    let mut fat = vec![0u8; fat_bytes];
+    read_at(f, vol.base + vol.reserved * vol.bps, &mut fat)?;
+    Ok(fat)
+}
+
+fn root_start_cluster(vol: &Vol) -> Option<u32> {
+    if vol.fat16 {
+        None
+    } else {
+        Some(((vol.root_lba - vol.data_start) / (vol.spc * vol.bps)) as u32 + 2)
+    }
+}
+
+fn root_dir_offsets(f: &mut std::fs::File, vol: &Vol) -> Result<Vec<u64>, String> {
+    match root_start_cluster(vol) {
+        None => Ok(dir_sector_offsets(vol, &[], None)),
+        Some(c) => {
+            let fat = load_fat(f, vol)?;
+            Ok(dir_sector_offsets(vol, &fat, Some(c)))
+        }
+    }
+}
+
+fn chain_last(vol: &Vol, fat: &[u8], start: u32) -> u32 {
+    let mut c = start;
+    loop {
+        let next = fat_entry(vol, fat, c);
+        if next < 2 || is_eoc(vol, next) {
+            return c;
+        }
+        c = next;
+    }
+}
+
+fn grow_fat32_root(
+    f: &mut std::fs::File,
+    vol: &Vol,
+    fat: &mut [u8],
+) -> Result<(), String> {
+    let start = root_start_cluster(vol).ok_or_else(|| String::from("directorio raíz lleno"))?;
+    let last = chain_last(vol, fat, start);
+    let new = find_run(vol, fat, 1)
+        .ok_or_else(|| String::from("sin cluster para ampliar el directorio raíz"))?;
+    mark_run(vol, fat, new, 1);
+    set_fat32(fat, last, new);
+    write_fats(f, vol, fat)?;
+    write_fill(
+        f,
+        cluster_off(vol, new),
+        (vol.spc * vol.bps) as usize,
+        0,
+    )?;
+    Ok(())
+}
+
 fn ascii(name: &[u8; 11]) -> String {
     String::from_utf8_lossy(name).trim().to_string()
 }
@@ -1520,23 +1580,31 @@ fn install_dir_entry(
     cluster: u32,
     size: u32,
 ) -> Result<(), String> {
-    for s in 0..vol.root_sectors {
-        let mut sec = [0u8; 512];
-        read_at(f, vol.root_lba + s * SECTOR, &mut sec)?;
-        for i in 0..16 {
-            let off = i * 32;
-            if sec[off] == 0x00 || sec[off] == 0xE5 {
-                sec[off..off + 8].copy_from_slice(name);
-                sec[off + 8..off + 11].copy_from_slice(ext);
-                sec[off + 11] = 0x20;
-                sec[off + 20..off + 22]
-                    .copy_from_slice(&(cluster >> 16).to_le_bytes()[..2]);
-                sec[off + 26..off + 28].copy_from_slice(&(cluster as u16).to_le_bytes());
-                sec[off + 28..off + 32].copy_from_slice(&size.to_le_bytes());
-                write_at(f, vol.root_lba + s * SECTOR, &sec)?;
-                return Ok(());
+    let mut fat = load_fat(f, vol)?;
+    for _ in 0..8 {
+        let offsets = dir_sector_offsets(vol, &fat, root_start_cluster(vol));
+        for &sec_off in &offsets {
+            let mut sec = [0u8; 512];
+            read_at(f, sec_off, &mut sec)?;
+            for i in 0..16 {
+                let off = i * 32;
+                if sec[off] == 0x00 || sec[off] == 0xE5 {
+                    sec[off..off + 8].copy_from_slice(name);
+                    sec[off + 8..off + 11].copy_from_slice(ext);
+                    sec[off + 11] = 0x20;
+                    sec[off + 20..off + 22]
+                        .copy_from_slice(&(cluster >> 16).to_le_bytes()[..2]);
+                    sec[off + 26..off + 28].copy_from_slice(&(cluster as u16).to_le_bytes());
+                    sec[off + 28..off + 32].copy_from_slice(&size.to_le_bytes());
+                    write_at(f, sec_off, &sec)?;
+                    return Ok(());
+                }
             }
         }
+        if vol.fat16 {
+            return Err("directorio raíz lleno".into());
+        }
+        grow_fat32_root(f, vol, &mut fat)?;
     }
     Err("directorio raíz lleno".into())
 }
@@ -1680,6 +1748,46 @@ mod tests {
         let slot = read_root_file(&path, 0, b"SOSOKRN BIN").unwrap();
         assert_eq!(slot.len(), 128 * 1024);
         assert!(slot.iter().all(|&b| b == b'\n'));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_root_file_amplia_raiz_fat32() {
+        let mkfs = ["mkfs.vfat", "/usr/sbin/mkfs.vfat"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("-V").output().is_ok());
+        let Some(mkfs) = mkfs else {
+            eprintln!("write_root_file_amplia_raiz_fat32: sin mkfs.vfat, omito");
+            return;
+        };
+        let path = std::env::temp_dir().join(format!("soso-fat-root-{}", std::process::id()));
+        {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            f.set_len(8 * 1024 * 1024).unwrap();
+        }
+        assert!(Command::new(mkfs)
+            .args(["-F", "32"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let mut name = *b"F000    ";
+        for i in 0..200u32 {
+            let digits = format!("{i:03}");
+            name[1..4].copy_from_slice(digits.as_bytes());
+            write_root_file(&path, 0, &name, b"DAT", b"x").unwrap();
+        }
+        let mut sosohash = b"version=test\n".to_vec();
+        sosohash.resize(4096, b'\n');
+        write_root_file(&path, 0, b"SOSOHASH", b"TXT", &sosohash).unwrap();
+        let got = read_root_file(&path, 0, b"SOSOHASHTXT").unwrap();
+        assert_eq!(&got[..12], b"version=test");
+        assert_eq!(got.len(), 4096);
         let _ = std::fs::remove_file(&path);
     }
 

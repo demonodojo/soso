@@ -16,7 +16,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use ask::{resto_tras, run_ask};
 use distributed::{crc_bytes, default_keepalive, default_timeouts, DistributedConfig};
 use libsoso::{println, sys};
@@ -491,13 +491,36 @@ fn load_model(
 }
 
 fn emit_plan_lines(lines: &[String], echo_fd: Option<u64>) {
+    let askd = echo_fd.is_some();
     for line in lines {
-        println!("{line}");
-        if let Some(fd) = echo_fd {
-            let _ = sys::write_all(fd, line.as_bytes());
-            let _ = sys::write_all(fd, b"\n");
-        }
+        traza(askd, line);
     }
+}
+
+/// Diagnóstico: fd 3 en askd, stdout en `soso-llm run`.
+fn traza(askd: bool, msg: &str) {
+    if askd {
+        libsoso::logln!("{msg}");
+    } else {
+        println!("{msg}");
+    }
+}
+
+fn keepalive_dot(fd: u64) {
+    let _ = sys::write_all(fd, b".");
+}
+
+fn traza_gpu_askd(g: &soso_gpu::SysGpu) {
+    let (calls, uploads, resident, sin_sitio) = g.stats();
+    libsoso::logln!(
+        "soso-llm: dispositivo «{}» — {} matvec, {} subidas de pesos, {} matrices residentes, {} sin sitio (a CPU), último on_gpu={}",
+        g.device_name(),
+        calls,
+        uploads,
+        resident,
+        sin_sitio,
+        g.last_on_gpu() as u8
+    );
 }
 
 fn run_distributed_head(
@@ -712,14 +735,13 @@ fn prefetch_shards_logged(
     echo_fd: Option<u64>,
 ) {
     let n = shards.len();
+    let askd = echo_fd.is_some();
     for (i, shard) in shards.iter().enumerate() {
         let step = i + 1;
         if step == 1 || step == n || step % 8 == 0 {
-            let line = format!("askd: prefetch {step}/{n} {shard}");
-            println!("{line}");
+            traza(askd, &format!("askd: prefetch {step}/{n} {shard}"));
             if let Some(fd) = echo_fd {
-                let _ = sys::write_all(fd, line.as_bytes());
-                let _ = sys::write_all(fd, b"\n");
+                keepalive_dot(fd);
             }
         }
         source.prefetch_shards(&[shard.clone()]);
@@ -749,6 +771,7 @@ pub(crate) fn preparar_sesion_echo(
     echo_fd: Option<u64>,
 ) -> Result<Sesion, u8> {
     let t_sess = sys::uptime_ms();
+    let askd = echo_fd.is_some();
     let io0 = read_iostat();
     let (manifest, index, manifest_crc, index_crc) = read_model_catalog(name)?;
     let num_layers = manifest.num_layers;
@@ -782,8 +805,8 @@ pub(crate) fn preparar_sesion_echo(
     // decode, y el disco se gasta casi entero antes de que ese reloj arranque.
     // Medirlas juntas es lo que hacía invisible el coste de E/S.
     let carga_ms = (sys::uptime_ms() - t_carga).max(0) as u64;
-    if echo_fd.is_some() {
-        println!("askd: catálogo+disco {name} — {carga_ms} ms");
+    if askd {
+        traza(true, &format!("askd: catálogo+disco {name} — {carga_ms} ms"));
     }
     let io_carga = read_iostat();
     if verboso {
@@ -813,13 +836,22 @@ pub(crate) fn preparar_sesion_echo(
     let t_backend = sys::uptime_ms();
     let mut sys_gpu = if force_cpu { None } else { soso_gpu::SysGpu::new() };
     let backend_ms = (sys::uptime_ms() - t_backend).max(0) as u64;
-    println!(
-        "soso-llm: backend {} (+{} ms)",
-        if sys_gpu.is_some() { "GPU" } else { "CPU" },
-        backend_ms
+    traza(
+        askd,
+        &format!(
+            "soso-llm: backend {} (+{} ms)",
+            if sys_gpu.is_some() { "GPU" } else { "CPU" },
+            backend_ms
+        ),
     );
-    if echo_fd.is_some() {
-        println!("askd: backend {} (+{backend_ms} ms)", if sys_gpu.is_some() { "GPU" } else { "CPU" });
+    if askd {
+        traza(
+            true,
+            &format!(
+                "askd: backend {} (+{backend_ms} ms)",
+                if sys_gpu.is_some() { "GPU" } else { "CPU" }
+            ),
+        );
     }
     // El `present` del kernel no basta para decidir: un dispositivo puede aceptar
     // búferes y no ejecutar nada (iGPU Intel), y entonces `SysGpu::new` dice no.
@@ -858,16 +890,19 @@ pub(crate) fn preparar_sesion_echo(
             .is_some_and(|p| p.keep_weights_mapped());
         let eager_vram = gpu.vram_bufs != 0 && vram_free > 0;
         let full_vram = model_g6 > 0 && model_g6 <= vram_free;
-        if echo_fd.is_some() {
-            println!(
-                "askd: VRAM — modelo {} MiB (G6 {} MiB), pool {} MiB, libre {} MiB, tablas {}, eager={}, residente={}",
-                model_payload >> 20,
-                model_g6 >> 20,
-                gpu.vram_pool_free >> 20,
-                vram_free >> 20,
-                gpu.g6_pt_free,
-                eager_vram,
-                full_vram
+        if askd {
+            traza(
+                true,
+                &format!(
+                    "askd: VRAM — modelo {} MiB (G6 {} MiB), pool {} MiB, libre {} MiB, tablas {}, eager={}, residente={}",
+                    model_payload >> 20,
+                    model_g6 >> 20,
+                    gpu.vram_pool_free >> 20,
+                    vram_free >> 20,
+                    gpu.g6_pt_free,
+                    eager_vram,
+                    full_vram
+                ),
             );
         }
         let index = &bundle.rt.index;
@@ -903,19 +938,17 @@ pub(crate) fn preparar_sesion_echo(
                 .map(|e| (e.name.clone(), e.shape.clone()))
                 .collect();
             let n_up = to_upload.len();
-            if let Some(fd) = echo_fd {
-                let _ = sys::write_all(fd, b"askd: subida GPU...\n");
-            }
-            println!("askd: subida GPU — {n_up} tensores");
+            traza(askd, &format!("askd: subida GPU — {n_up} tensores"));
             for (i, (name, shape)) in to_upload.iter().enumerate() {
                 let step = i + 1;
                 if step == 1 || step == n_up || step % 8 == 0 {
                     let ms = (sys::uptime_ms() - t_up).max(0) as u64;
-                    let line = format!("askd: subida GPU {step}/{n_up} (+{ms} ms) ({name})");
-                    println!("{line}");
+                    traza(
+                        askd,
+                        &format!("askd: subida GPU {step}/{n_up} (+{ms} ms) ({name})"),
+                    );
                     if let Some(fd) = echo_fd {
-                        let _ = sys::write_all(fd, line.as_bytes());
-                        let _ = sys::write_all(fd, b"\n");
+                        keepalive_dot(fd);
                     }
                 }
                 if let Ok(view) = bundle.source.tensor_view(name) {
@@ -927,8 +960,9 @@ pub(crate) fn preparar_sesion_echo(
             }
             let uploaded = g.stats().1.saturating_sub(uploads0);
             let ms_up = (sys::uptime_ms() - t_up).max(0) as u64;
-            println!(
-                "askd: subida GPU fin — {uploaded} ok, {bytes_subidos} B en {ms_up} ms"
+            traza(
+                askd,
+                &format!("askd: subida GPU fin — {uploaded} ok, {bytes_subidos} B en {ms_up} ms"),
             );
             let (dma, bounce) = if sys::gpu_info(&mut gpu_info) == 0 {
                 (
@@ -938,7 +972,18 @@ pub(crate) fn preparar_sesion_echo(
             } else {
                 (0, 0)
             };
-            g.log_subida_eager(uploaded, bytes_subidos, ms_up, dma, bounce);
+            if askd {
+                libsoso::logln!(
+                    "soso-llm: subida eager VRAM — {} MiB, {} tensores, {} ms (dma={} bounce={})",
+                    bytes_subidos >> 20,
+                    uploaded,
+                    ms_up,
+                    dma,
+                    bounce
+                );
+            } else {
+                g.log_subida_eager(uploaded, bytes_subidos, ms_up, dma, bounce);
+            }
         }
     } else if gpu.present != 0 {
         if verboso {
@@ -964,9 +1009,9 @@ pub(crate) fn preparar_sesion_echo(
     } else {
         None
     };
-    if echo_fd.is_some() {
+    if askd {
         let total_ms = (sys::uptime_ms() - t_sess).max(0) as u64;
-        println!("askd: sesión {name} preparada — {total_ms} ms total");
+        traza(true, &format!("askd: sesión {name} preparada — {total_ms} ms total"));
     }
     Ok(Sesion {
         bundle,
@@ -1028,10 +1073,22 @@ static ASK_LAYER_T0: AtomicU64 = AtomicU64::new(0);
 static ASK_INFER_T0: AtomicU64 = AtomicU64::new(0);
 static ASK_GPU_FOR_TICK: AtomicU64 = AtomicU64::new(0);
 static ASK_TICK_N: AtomicU32 = AtomicU32::new(0);
+/// Puntos de espera al socket hasta el primer token; el texto no se mezcla.
+static ASK_KEEPALIVE: AtomicBool = AtomicBool::new(false);
 
 fn askd_elapsed_ms(t0: u64) -> u64 {
     let now = sys::uptime_ms().max(0) as u64;
     now.saturating_sub(t0)
+}
+
+fn ask_keepalive_dot() {
+    if !ASK_KEEPALIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let fd = ASK_TICK_FD.load(Ordering::Relaxed);
+    if fd != u64::MAX {
+        keepalive_dot(fd);
+    }
 }
 
 fn ask_layer_tick(layer: u32, n: u32) {
@@ -1045,7 +1102,7 @@ fn ask_layer_tick(layer: u32, n: u32) {
     let seq = ASK_TICK_N.fetch_add(1, Ordering::Relaxed);
     let ptr = ASK_GPU_FOR_TICK.load(Ordering::Relaxed);
     // Prefill (primer recorrido de capas) o capa lenta: el resto a 32×N líneas
-    // de serie/SOSOLOG se come el tok/s.
+    // de log se come el tok/s.
     let prefill = n > 0 && seq < n;
     if seq == 0 {
         let infer0 = ASK_INFER_T0.load(Ordering::Relaxed);
@@ -1054,7 +1111,7 @@ fn ask_layer_tick(layer: u32, n: u32) {
         } else {
             0
         };
-        println!(
+        libsoso::logln!(
             "askd: primera capa completada ({}/{} capas, {} ms capa, {} ms inferencia)",
             layer + 1,
             n,
@@ -1064,7 +1121,7 @@ fn ask_layer_tick(layer: u32, n: u32) {
     }
     if ptr != 0 && (prefill || ms >= 80) {
         let on_gpu = unsafe { (*(ptr as *const soso_gpu::SysGpu)).last_on_gpu() as u8 };
-        println!(
+        libsoso::logln!(
             "soso-llm: capa {}/{} {} ms on_gpu={}",
             layer.saturating_add(1),
             n,
@@ -1072,13 +1129,10 @@ fn ask_layer_tick(layer: u32, n: u32) {
             on_gpu
         );
     }
-    let fd = ASK_TICK_FD.load(Ordering::Relaxed);
-    if fd != u64::MAX {
-        let _ = sys::write_all(fd, b".");
-    }
+    ask_keepalive_dot();
 }
 
-/// Punto al cliente y traza en serie al entrar en una capa (antes del matvec).
+/// Punto de espera al cliente y traza en fd 3 al entrar en una capa.
 fn ask_layer_enter(layer: u32, n: u32) {
     if layer == 0 {
         let infer0 = ASK_INFER_T0.load(Ordering::Relaxed);
@@ -1087,12 +1141,9 @@ fn ask_layer_enter(layer: u32, n: u32) {
         } else {
             0
         };
-        println!("askd: forward capa 1/{n} (+{total} ms inferencia)");
+        libsoso::logln!("askd: forward capa 1/{n} (+{total} ms inferencia)");
     }
-    let fd = ASK_TICK_FD.load(Ordering::Relaxed);
-    if fd != u64::MAX {
-        let _ = sys::write_all(fd, b".");
-    }
+    ask_keepalive_dot();
 }
 
 /// Igual que `generar` pero con el prompt YA tokenizado.
@@ -1144,16 +1195,17 @@ pub(crate) fn generar_tokens(
             ASK_LAYER_T0.store(infer0, Ordering::Relaxed);
             ASK_GPU_FOR_TICK.store(gpu_tick_ptr, Ordering::Relaxed);
             ASK_TICK_N.store(0, Ordering::Relaxed);
+            ASK_KEEPALIVE.store(true, Ordering::Relaxed);
             bundle.rt.layer_hook = Some(ask_layer_tick);
             bundle.rt.layer_enter_hook = Some(ask_layer_enter);
         }
         // askd: sin clock_ms/refresh_mem (syscall en el matvec AVX2) y sin
         // planificador por token. `run` sigue con el camino cronometrado.
-        // Un punto por capa: Mixtral tarda minutos en el prefill y, si no
-        // hay tráfico, el cliente corta a los 4 min de silencio.
+        // Un punto por capa mientras espera: Mixtral tarda minutos en el
+        // prefill y, si no hay tráfico, el cliente corta a los 4 min.
         if let Some(fd) = fd_out {
             let t_prefill = sys::uptime_ms();
-            let _ = sys::write_all(fd, b".");
+            keepalive_dot(fd);
             bundle.rt.generate_stream_par(
                 &mut bundle.source,
                 prompt_tokens,
@@ -1165,6 +1217,9 @@ pub(crate) fn generar_tokens(
                     if !s.is_empty() {
                         let limpio = texto_ask_seguro(&s);
                         if !limpio.is_empty() {
+                            if ASK_KEEPALIVE.swap(false, Ordering::Relaxed) {
+                                emitir_ask(fd, "\n");
+                            }
                             streamed.push_str(&limpio);
                             emitir_ask(fd, &limpio);
                         }
@@ -1175,9 +1230,9 @@ pub(crate) fn generar_tokens(
                 &mut |i, total| {
                     let ms = (sys::uptime_ms() - t_prefill).max(0) as u64;
                     if i == 1 || i == total || (total > 4 && i % 4 == 0) {
-                        println!("askd: prefill token {i}/{total} (+{ms} ms)");
+                        libsoso::logln!("askd: prefill token {i}/{total} (+{ms} ms)");
                     }
-                    let _ = sys::write_all(fd, b".");
+                    ask_keepalive_dot();
                     if i == total {
                         emitir_ask(fd, "\n");
                     }
@@ -1211,6 +1266,7 @@ pub(crate) fn generar_tokens(
     ASK_TICK_FD.store(u64::MAX, Ordering::Relaxed);
     ASK_INFER_T0.store(0, Ordering::Relaxed);
     ASK_GPU_FOR_TICK.store(0, Ordering::Relaxed);
+    ASK_KEEPALIVE.store(false, Ordering::Relaxed);
     sesion.bundle.rt.layer_hook = None;
     sesion.bundle.rt.layer_enter_hook = None;
     if drop_pool {
@@ -1241,14 +1297,22 @@ pub(crate) fn generar_tokens(
                 println!();
             }
             let n = tokens.len();
-            if let Some(ref g) = sesion.sys_gpu {
-                g.print_diagnostics_run(n, elapsed_ms);
-            }
             let tok_s = n as f64 * 1000.0 / elapsed_ms as f64;
-            println!(
+            let resumen = format!(
                 "soso-llm: generado ({} tokens, {} ms, {:.2} tok/s)",
                 n, elapsed_ms, tok_s
             );
+            if fd_out.is_some() {
+                if let Some(ref g) = sesion.sys_gpu {
+                    traza_gpu_askd(g);
+                }
+                libsoso::logln!("{resumen}");
+                return 0;
+            }
+            if let Some(ref g) = sesion.sys_gpu {
+                g.print_diagnostics_run(n, elapsed_ms);
+            }
+            println!("{resumen}");
             if !verboso {
                 return 0;
             }
@@ -1323,12 +1387,16 @@ pub(crate) fn generar_tokens(
             if let Some(r) = gpu_fail {
                 msg.push_str(&format!(" gpu={r}"));
             }
-            println!("{msg}");
+            traza(fd_out.is_some(), &msg);
             if let Some(fd) = fd_out {
                 emitir_ask(fd, &format!("{msg}\n"));
             }
             if let Some(ref g) = sesion.sys_gpu {
-                g.print_diagnostics();
+                if fd_out.is_some() {
+                    traza_gpu_askd(g);
+                } else {
+                    g.print_diagnostics();
+                }
             }
             1
         }

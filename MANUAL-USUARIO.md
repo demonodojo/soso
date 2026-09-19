@@ -300,7 +300,8 @@ $
 - **Backspace** funciona para corregir la línea.
 - **Ctrl-C** interrumpe el comando en primer plano (p. ej. un pipeline largo) y
   devuelve el prompt `$`; en la línea vacía muestra `^C` y sigue en sosh.
-- **Ctrl-D** en una línea vacía cierra la shell (equivalente a `exit`).
+- **Ctrl-D** en una línea vacía cierra la shell (equivalente a `exit`). En un
+  programa que lee la consola (`cat`, `grep`, …) es fin de entrada.
 - Si un comando falla, sosh muestra el código de salida.
 
 ### Pipes y redirecciones
@@ -326,8 +327,9 @@ cat saludo.txt
 echo linea >> saludo.txt
 cd ..
 ls /tmp
-cat /etc/motd | hexdump -    # el `-` es lo que lee stdin
-ls | cat -
+cat /etc/motd | hexdump
+ls | cat
+log | grep askd              # trazas de ask (stdin del pipe)
 cat < /etc/motd
 servidor 3>/tmp/servidor.log    # registros en fichero crudo
 servidor 3>&-                   # sin registros
@@ -347,8 +349,9 @@ en un ring de 64 KiB con sello monotónico, pid y nombre del binario, por ejempl
 ```
 
 El comando **`log`** vuelca ese ring. No mezcla con la consola, `dmesg` ni
-`SOSOLOG.TXT`. En código userspace puedes usar la macro **`logln!`** de `libsoso`
-(una línea por llamada).
+`SOSOLOG.TXT`. El demonio de `ask` escribe ahí la carga del modelo y el
+progreso de inferencia. En código userspace puedes usar la macro **`logln!`** de
+`libsoso` (una línea por llamada).
 
 El ring es de RAM, pero **ya no se pierde al reiniciar**: el kernel lo va
 persistiendo en `/var/log/aplicaciones.log` (ver abajo).
@@ -356,14 +359,10 @@ persistiendo en `/var/log/aplicaciones.log` (ver abajo).
 Redirigir `3>fichero` escribe **bytes crudos** (sin sello), igual que stdout hacia
 un fichero: el entorno decide dónde van los registros sin recompilar.
 
-**Los pipelines necesitan un `-`.** `cat` y `hexdump` leen stdin cuando se les pasa
-`-` como fichero, no cuando se les llama sin argumentos: en la tty de soso nadie
-interpreta Ctrl-D, así que un `cat` sin argumentos leyendo la consola se quedaría
-colgado para siempre en vez de decir cómo se usa. Dentro de un pipeline sí hay EOF
-de verdad (la lectura del pipe devuelve 0 cuando el escritor cierra), pero el
-programa no puede distinguir un caso del otro sin preguntarle al kernel, y eso hoy
-no se puede. Hasta la versión de 2026-07-28 ningún programa leía stdin, así que los
-pipelines de esta sección **no funcionaban** aunque estuvieran documentados.
+**Stdin y Ctrl-D.** `cat`, `hexdump` y `grep` leen stdin si no les pasas ficheros
+(o si les pasas `-`). En un pipeline el escritor cierra y `read` devuelve 0. En la
+consola, **Ctrl-D** hace lo mismo: el programa termina. El `-` sigue valiendo,
+como en Unix.
 
 ### Comandos integrados (builtins)
 
@@ -578,10 +577,15 @@ ask                                # modo interactivo
 ```
 
 Escribe la pregunta detrás y ya está: **el texto llega al modelo tal cual se
-escribió**, con comillas, tildes, `|`, `>` o lo que lleve. Tras cargar el modelo
-sale `ask: generando...` y, en modelos grandes, un punto por cada **capa**
-mientras calcula (Mixtral tiene 32: verás una ristra de puntos antes del
-texto). El diagnóstico de velocidad y disco está en `soso-llm run`.
+escribió**, con comillas, tildes, `|`, `>` o lo que lleve. Antes de la respuesta
+verás qué modelo está contestando (`ask: modelo qwen3-4b-instruct-2507 (plantilla chat, GPU)`),
+luego `ask: generando...` y, mientras calcula, una ristra de puntos. Cuando
+empieza el texto, los puntos paran: la respuesta no se mezcla con el diagnóstico.
+
+Las trazas de carga (prefetch, VRAM, capas, tok/s) van al canal de registro
+(fd 3). Míralas con `log`, `log | grep askd` o
+`grep askd /var/log/aplicaciones.log`; no salen en la consola ni en
+`SOSOLOG.TXT`. El diagnóstico detallado de `soso-llm run` sigue en su stdout.
 
 Si arrancas desde el live USB con **Mixtral** y no hay pool de VRAM
 (`GPU presente sin pool de VRAM` / `pool VRAM=no`) — GPU Ampere cuyo booter
@@ -1053,12 +1057,13 @@ siempre (`cat`, `grep`, `tail`) desde la consola o por SSH:
 | Fichero | Contenido |
 |---|---|
 | `/var/log/kernel.log` | La consola del kernel: lo mismo que `dmesg`, desde el primer mensaje del arranque |
-| `/var/log/aplicaciones.log` | Los registros de fd 3, con sello de tiempo, pid y binario |
+| `/var/log/aplicaciones.log` | Los registros de fd 3 (`askd`, actualizaciones, …), con sello de tiempo, pid y binario |
 | `/var/log/actualizaciones.log` | Qué le hace el kernel a los huecos de actualización de la ESP |
 
 ```sh
 tail /var/log/kernel.log
-grep actualiza /var/log/aplicaciones.log
+log | grep askd
+grep askd /var/log/aplicaciones.log
 sosolog                       # persistir ahora, sin esperar
 ```
 
@@ -1348,12 +1353,12 @@ Los expertos siguen la convención `L{i}.E{e}.ffn_{gate,up,down}` en el índice
 del modelo; el convertidor trocea automáticamente los tensores 3D `ffn_*_exps`
 del GGUF.
 
-### Modelo demo del live: Qwen2.5-Coder-3B
+### Modelo demo del live: Qwen3-4B-Instruct-2507
 
-El USB live empaqueta por defecto **Qwen2.5-Coder-3B-Instruct Q4_K_M**
-(`qwen2.5-coder-3b`). `ask` y `soso-llm run qwen2.5-coder-3b` lo usan igual
-que el resto. En pendrives de 16 GB+ con `SOSO_LIVE_AUTO_MODEL=1` puede
-escalar a mistral-7b o Qwen3.8-27B.
+El USB live empaqueta por defecto **Qwen3-4B-Instruct-2507 Q4_K_M**
+(`qwen3-4b-instruct-2507`). `ask` y `soso-llm run qwen3-4b-instruct-2507` lo
+usan igual que el resto. En pendrives de 16 GB+ con `SOSO_LIVE_AUTO_MODEL=1`
+puede escalar a mistral-7b o Qwen3.8-27B.
 
 ### Modelos Qwen3.8 (atención híbrida)
 
@@ -1853,19 +1858,19 @@ Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
 cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
 
 # Escalera automática (Q4_K_M):
-#   8 GB  → qwen2.5-coder-3b
+#   8 GB  → qwen3-4b-instruct-2507
 #  16 GB  → mistral-7b
 #  32 GB+ → qwen3.8-27b
 # La primera vez descarga desde Hugging Face (puede tardar horas en modelos grandes).
 # Sin descargas: el mayor ya materializado que quepa en el stick:
 # sudo env SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 
-# Sin pendrive conectado (qwen2.5-coder-3b Q4_K_M) o simular capacidad:
+# Sin pendrive conectado (qwen3-4b-instruct-2507 Q4_K_M) o simular capacidad:
 cargo xtask package-usb-live
 SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
 
 # En placa: ask  o  soso-llm run <modelo> --prompt "hola" --max 32
-# (<modelo> = el empaquetado: qwen2.5-coder-3b, tinyllama, mistral-7b o qwen3.8-27b)
+# (<modelo> = el empaquetado: qwen3-4b-instruct-2507, tinyllama, mistral-7b o qwen3.8-27b)
 
 # Override manual:
 # SOSO_MODELS_DIR=target/mi-modelo cargo xtask flash-usb-live /dev/sdX --yes

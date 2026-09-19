@@ -73,14 +73,15 @@ Referencia rápida — ampliar el manual si cambian:
 - **Arranque:** QEMU `cargo xtask run`; live `flash-usb-live`; salida `Ctrl-A X`
 - **Log USB live:** usuario `cargo xtask sosolog` / `--drv`; el agente monta p1 con `udisksctl` (skill **soso-live**), no `sudo cargo`
 - **SSH:** `ssh -tt -i target/soso_test_key -p 2222 soso@localhost` (QEMU); puerto 22 en placa
-- **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, `wifi`, `ask`, `voz`, pipes, redirecciones)
-- **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `ip`, `ping`, `halt`
+- **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, `wifi`, `ask`, `voz`, pipes, redirecciones). Ctrl-D en línea vacía = `exit`; en `cat`/`grep`/`hexdump` sobre la consola = fin de entrada
+- **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `grep`, `ip`, `ping`, `halt`. `cat`/`grep`/`hexdump` leen stdin sin argumentos (`log | grep askd`); `-` sigue valiendo
 - **LLM:** `soso-llm run …`; modelos en `/models/`; live escala modelo según tamaño del stick
 - **Red:** `ip` (IPv4); `ping` (ICMP); echo TCP `nc localhost 7777`; live: Realtek 8168 o WiFi AX211/AX200
 
 ## Skills compartidas
 
-Copias en `.claude/skills/`, `.cursor/skills/` y `.agents/skills/` — mantenerlas alineadas.
+El directorio real es `.claude/skills/`; `.cursor/skills` y `.agents/skills` son
+**enlaces simbólicos** a él. Se edita una vez y vale para los tres.
 
 | Skill | Cuándo |
 |-------|--------|

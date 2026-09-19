@@ -3,6 +3,8 @@
 //! El modelo vive en `soso-llm askd` (sesión de máquina en 127.0.0.1:7420).
 //! Consola, SSH y reconexiones comparten la misma carga; sólo se recarga al
 //! cambiar de modelo, si el planificador necesita RAM, o al apagar.
+//! El diagnóstico de carga e inferencia va por fd 3 (`logln!`); el socket
+//! sólo lleva estado `ask:` y el texto de la respuesta.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -149,12 +151,6 @@ pub fn modelo_efectivo(conf: &Conf) -> Option<String> {
     if !conf.modelo.is_empty() && disponibles.iter().any(|m| *m == conf.modelo) {
         return Some(conf.modelo.clone());
     }
-    if !conf.modelo.is_empty() {
-        println!(
-            "ask: el modelo «{}» de {CONF} no está en /models; uso el primero",
-            conf.modelo
-        );
-    }
     disponibles.into_iter().next()
 }
 
@@ -174,16 +170,13 @@ fn askd_ms_desde(t0: i64) -> u64 {
     (sys::uptime_ms() - t0).max(0) as u64
 }
 
-/// Diagnóstico en serie (SOSOLOG) y, si hay cliente, un trozo breve al socket.
-fn askd_trace(fd: u64, msg: &str) {
-    println!("askd: {msg}");
-    if fd != u64::MAX {
-        socket_write_str(fd, &format!("askd: {msg}\n"));
-    }
+/// Diagnóstico de askd: fd 3 (`log` / `/var/log/aplicaciones.log`), no el socket.
+fn askd_trace(msg: &str) {
+    libsoso::logln!("askd: {msg}");
 }
 
-fn askd_trace_ms(fd: u64, msg: &str, t0: i64) {
-    askd_trace(fd, &format!("{msg} (+{} ms)", askd_ms_desde(t0)));
+fn askd_trace_ms(msg: &str, t0: i64) {
+    askd_trace(&format!("{msg} (+{} ms)", askd_ms_desde(t0)));
 }
 
 /// Respuesta completa al cliente en un solo `write` (texto + `PROTO_FIN`).
@@ -342,11 +335,11 @@ pub fn run_askd() -> u8 {
         Ok(l) => l,
         Err(e) if e == -abi::EADDRINUSE => return 0,
         Err(e) => {
-            println!("askd: listen {ASK_PORT} falló ({e})");
+            libsoso::logln!("askd: listen {ASK_PORT} falló ({e})");
             return 1;
         }
     };
-    println!("askd: escuchando en {ASK_ADDR}");
+    libsoso::logln!("askd: escuchando en {ASK_ADDR}");
 
     let mut sesion: Option<Sesion> = None;
     let mut conf = leer_conf();
@@ -360,7 +353,7 @@ pub fn run_askd() -> u8 {
                 continue;
             }
             Err(e) => {
-                println!("askd: accept falló ({e})");
+                libsoso::logln!("askd: accept falló ({e})");
                 let _ = sys::sleep_ms(200);
                 continue;
             }
@@ -377,13 +370,10 @@ pub fn run_askd() -> u8 {
             continue;
         }
         let preview: String = texto.chars().take(48).collect();
-        askd_trace(
-            conn.fd,
-            &format!(
-                "conexión — «{preview}{}»",
-                if texto.len() > 48 { "…" } else { "" }
-            ),
-        );
+        askd_trace(&format!(
+            "conexión — «{preview}{}»",
+            if texto.len() > 48 { "…" } else { "" }
+        ));
         let rc = tratar_linea_askd(
             &mut sesion,
             &mut conf,
@@ -413,6 +403,14 @@ fn asegurar_modelo(
             return Err(1);
         }
     };
+    if !conf.modelo.is_empty() && conf.modelo != want {
+        let msg = format!(
+            "ask: el modelo «{}» de {CONF} no está en /models; uso {want}",
+            conf.modelo
+        );
+        libsoso::logln!("{msg}");
+        socket_write_str(fd, &format!("{msg}\n"));
+    }
     let recargar = sesion
         .as_ref()
         .map(|s| s.modelo != want)
@@ -420,11 +418,11 @@ fn asegurar_modelo(
     if recargar {
         let t_carga = sys::uptime_ms();
         socket_write_str(fd, &format!("ask: cargando {want}...\n"));
-        askd_trace(fd, &format!("cargando {want} (catálogo + backend)"));
+        askd_trace(&format!("cargando {want} (catálogo + backend)"));
         match preparar_sesion_echo(&want, false, MemoryPlanConfig::default(), false, false, Some(fd))
         {
             Ok(s) => {
-                askd_trace_ms(fd, &format!("{want} listo"), t_carga);
+                askd_trace_ms(&format!("{want} listo"), t_carga);
                 *sesion = Some(s);
                 *modelo = want;
                 // Sin hilo de staging: sosh está bloqueado en el socket y
@@ -451,13 +449,13 @@ fn asegurar_modelo(
                 }
             }
             Err(c) => {
-                askd_trace(fd, &format!("no pude cargar {want} (código {c})"));
+                askd_trace(&format!("no pude cargar {want} (código {c})"));
                 socket_write_str(fd, &format!("ask: no pude cargar «{want}» (código {c})\n"));
                 return Err(c);
             }
         }
     } else {
-        askd_trace(fd, &format!("reutilizo sesión {want}"));
+        askd_trace(&format!("reutilizo sesión {want}"));
     }
     Ok(())
 }
@@ -558,14 +556,22 @@ fn tratar_linea_askd(
     } else {
         "CPU"
     };
+    let modo = if plantilla.is_empty() {
+        "texto crudo"
+    } else {
+        "plantilla chat"
+    };
     askd_trace_ms(
-        fd,
         &format!(
-            "generando — prompt={} max={} backend={backend}",
+            "generando — modelo={modelo} {modo} prompt={} max={} backend={backend}",
             tokens.len(),
             conf.max
         ),
         t_req,
+    );
+    socket_write_str(
+        fd,
+        &format!("ask: modelo {modelo} ({modo}, {backend})\n"),
     );
     socket_write_str(
         fd,
@@ -577,7 +583,7 @@ fn tratar_linea_askd(
     );
     ses.bundle.source.disable_worker();
     let t_infer = sys::uptime_ms();
-    askd_trace_ms(fd, "entrando inferencia (prefill + decode)", t_req);
+    askd_trace("entrando inferencia (prefill + decode)");
     let rc = generar_tokens(
         ses,
         &tokens,
@@ -601,14 +607,13 @@ fn tratar_linea_askd(
         if let Some(r) = gpu_fail {
             msg.push_str(&format!(" gpu={r}"));
         }
-        println!("{msg}");
+        libsoso::logln!("{msg}");
         socket_write_str(fd, &format!("ask: error — {msg}\n"));
-        if let Some(ref g) = ses.sys_gpu {
-            g.print_diagnostics();
-        }
     }
     let infer_ms = askd_ms_desde(t_infer);
     let req_ms = askd_ms_desde(t_req);
-    println!("askd: generar rc={rc} (inferencia {infer_ms} ms, petición {req_ms} ms)");
+    askd_trace(&format!(
+        "generar rc={rc} (inferencia {infer_ms} ms, petición {req_ms} ms)"
+    ));
     rc
 }

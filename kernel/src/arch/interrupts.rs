@@ -338,7 +338,15 @@ extern "sysv64" fn mmap_fault_shim(addr: u64, is_write: u64) -> u64 {
 extern "sysv64" fn kill_shim(motivo: u64, dato: u64) -> u64 {
     match motivo {
         0 => {
-            crate::println!("task: page fault de usuario en {dato:#x}");
+            let rip = EXC_RIP.load(Ordering::Relaxed);
+            let rsp = EXC_RSP.load(Ordering::Relaxed);
+            crate::println!(
+                "task: page fault de usuario en {dato:#x} rip={rip:#x} rsp={rsp:#x}"
+            );
+            crate::println!(
+                "task: traduce con: addr2line -f -C -e target/x86_64-soso-user/release/<prog> {:#x}",
+                rip.wrapping_sub(0x400000)
+            );
             crate::task::kill_current("page fault")
         }
         1 => crate::task::kill_current("general protection fault"),
@@ -357,6 +365,15 @@ extern "x86-interrupt" fn page_fault_handler(
         if con_rsp_alineado(mmap_fault_shim, addr, is_write as u64) != 0 {
             return;
         }
+        // Sin el `rip` el mensaje dice **qué** dirección tocó pero no **quién**,
+        // y sin eso no hay forma de traducirlo a una función: el proceso muere
+        // y se lleva la pista. Va por los estáticos porque el trampolín de
+        // alineación sólo pasa dos argumentos.
+        stash_exc(
+            stack_frame.instruction_pointer.as_u64(),
+            stack_frame.stack_pointer.as_u64(),
+            0,
+        );
         con_rsp_alineado(kill_shim, 0, addr);
     }
     // Escalares primero: el Debug del frame puede volver a fallar y perder

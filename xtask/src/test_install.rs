@@ -505,6 +505,26 @@ fn comprobar_esp_instalada(target: &Path) -> Vec<(String, Result<(), String>)> {
                     Ok(())
                 },
             ));
+
+            // U6: que el fichero esté no basta. El kernel los localiza por LBA
+            // exigiendo tamaño exacto y clusters consecutivos, así que un hueco
+            // «presente pero inservible» deja la instalación **sin vuelta
+            // atrás** — y eso no se veía porque nadie lo comprobaba aquí.
+            for h in soso_update_core::migracion::HUECOS {
+                let n11 = nombre_8_3(h.nombre);
+                let (nombre, ext): ([u8; 8], [u8; 3]) = (
+                    n11[..8].try_into().unwrap(),
+                    n11[8..].try_into().unwrap(),
+                );
+                let r = match vol.localizar(&nombre, &ext, h.tamano) {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(format!(
+                        "{} no es utilizable tras instalar ({e:?}) — hace falta para {}",
+                        h.nombre, h.para
+                    )),
+                };
+                out.push((format!("ESP instalada: {} utilizable", h.nombre), r));
+            }
             let modo = vol
                 .localizar(b"SOSOMODE", b"TXT", soso_update_core::UPD_MODE_SIZE)
                 .map_err(|e| format!("{e:?}"))

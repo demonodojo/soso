@@ -142,12 +142,17 @@ pub struct LayerSpec {
     pub num_experts_per_tok: u32,
     pub moe_ffn_dim: u32,
     pub num_shared_experts: u32,
-    /// bit0 gated MLA, bit1 AttnRes, bit2 SiTU, bit3 RoPE NeoX (Qwen2).
+    /// bit0 gated MLA, bit1 AttnRes, bit2 SiTU, bit3 RoPE NeoX (Qwen2/3),
+    /// bit4 QK-norm por cabeza (Qwen3 denso).
     pub flags: u32,
 }
 
 /// RoPE estilo GPT-NeoX / Qwen2: parejas `(x[i], x[i+half])` en vez de intercaladas.
 pub const FLAG_ROPE_NEOX: u32 = 1 << 3;
+/// RMSNorm de Q y K por cabeza, antes del RoPE (Qwen3 denso).
+pub const FLAG_QK_NORM: u32 = 1 << 4;
+/// Flags de capa que el runtime entiende.
+pub const FLAGS_SOPORTADOS: u32 = FLAG_ROPE_NEOX | FLAG_QK_NORM;
 
 impl Default for LayerSpec {
     fn default() -> Self {
@@ -455,7 +460,13 @@ impl Manifest {
                     }
                 }
                 AttnKind::Gqa | AttnKind::Kda => {
-                    if self.hidden_dim % heads != 0 || heads % kv_heads != 0 {
+                    if heads % kv_heads != 0 || self.effective_head_dim(layer) == 0 {
+                        return Err(());
+                    }
+                    // Sin `v_head_dim` el contrato clásico: hidden se parte en cabezas.
+                    if self.layer(layer).map(|s| s.v_head_dim).unwrap_or(0) == 0
+                        && self.hidden_dim % heads != 0
+                    {
                         return Err(());
                     }
                 }
@@ -476,7 +487,7 @@ impl Manifest {
                 layer,
                 reason: "missing layer spec",
             })?;
-            if spec.flags & !FLAG_ROPE_NEOX != 0 {
+            if spec.flags & !FLAGS_SOPORTADOS != 0 {
                 return Err(UnsupportedLayer {
                     layer,
                     reason: "layer flags not supported",
@@ -516,7 +527,6 @@ impl Manifest {
                         || spec.q_lora_rank > 0
                         || spec.qk_rope_head_dim > 0
                         || spec.qk_nope_head_dim > 0
-                        || spec.v_head_dim > 0
                     {
                         return Err(UnsupportedLayer {
                             layer,

@@ -170,6 +170,23 @@ pub fn run(filtro: Option<&str>) {
         }
     }
 
+    // Camino de red real: **no** entra en la pasada normal, porque depende de
+    // internet y de que GitHub conteste. Se pide a mano con SOSO_TEST_RED=1.
+    // Existe porque todo lo demás usa `--local` y el HTTPS de userspace no lo
+    // ejercitaba nadie: el primer intento en placa se estrelló.
+    if quiere("https") && std::env::var("SOSO_TEST_RED").is_ok() {
+        let base = dir.join("live-https.img");
+        crate::copy_sparse(&live_base, &base);
+        let serial = dir.join("https.log");
+        match fase_https(&ovmf_code, &vars, &base, &serial, &key) {
+            Ok(l) => marca(&format!("HTTPS real: {l}"), true),
+            Err(e) => {
+                marca(&format!("HTTPS real — {e}"), false);
+                fallos += 1;
+            }
+        }
+    }
+
     let serial4 = dir.join("boot-manifest.log");
     if quiere("manifiesto") {
         match fase_manifiesto_invalido(&ovmf_code, &vars, &live, &serial4, &key) {
@@ -181,11 +198,24 @@ pub fn run(filtro: Option<&str>) {
         }
     }
 
+    // Las releases de prueba viven dentro de `rootfs/` para que el guest las
+    // vea en `/var/actualiza-*`, así que hay que retirarlas al acabar: si no,
+    // se quedan ahí e inflan **cualquier** imagen que se construya después
+    // —42 MB que dejaron de caber en la partición de un USB ya flasheado—.
+    limpiar_releases_prueba(&root);
+
     if fallos > 0 {
         eprintln!("\ntest-update: {fallos} fallo(s)");
         std::process::exit(1);
     }
     println!("\ntest-update: actualización local OK (+ recuperación OTA)");
+}
+
+/// Retira del rootfs las releases que fabrica este banco.
+fn limpiar_releases_prueba(root: &Path) {
+    for d in ["actualiza-prueba", "actualiza-rota", "actualiza-c"] {
+        let _ = std::fs::remove_dir_all(root.join("rootfs/var").join(d));
+    }
 }
 
 fn preparar_release_prueba(root: &Path) {
@@ -1190,6 +1220,52 @@ halt
     }
     let _ = ver_base;
     Ok(format!("restaurado desde el live; arranca en {destino}"))
+}
+
+/// `soso-update comprobar` contra el canal de verdad: DNS, TLS y descarga del
+/// manifiesto. Lo que se comprueba no es que haya actualización —puede no
+/// haberla— sino que el camino **no se estrella**.
+fn fase_https(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    serial: &Path,
+    key: &Path,
+) -> Result<String, String> {
+    let _ = std::fs::remove_file(serial);
+    let qemu = lanzar_live(code, vars, live, serial)?;
+    let _guard = Matar(qemu.child);
+    esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
+    let salida = ssh_guion_hasta(
+        key,
+        SSH_PORT,
+        "soso-update comprobar
+halt
+",
+        // Generoso a propósito: lo que se quiere distinguir es «lento» de
+        // «colgado», y con el límite corto los dos se parecen.
+        Duration::from_secs(900),
+        "local:",
+    )?;
+    let serie = std::fs::read_to_string(serial).unwrap_or_default();
+    if serie.contains("page fault de usuario") {
+        return Err(format!(
+            "el cliente murió en el camino HTTPS: {:?}",
+            serie
+                .lines()
+                .filter(|l| l.contains("page fault") || l.contains("mmap-fault"))
+                .collect::<Vec<_>>()
+        ));
+    }
+    if !salida.contains("remoto:") {
+        return Err(format!("no llegó a leer el manifiesto remoto: {salida:?}"));
+    }
+    Ok(salida
+        .lines()
+        .find(|l| l.trim_start().starts_with("remoto:"))
+        .unwrap_or("")
+        .trim()
+        .to_string())
 }
 
 fn fase_recuperacion_corte(

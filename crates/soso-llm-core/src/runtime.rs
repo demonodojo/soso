@@ -267,10 +267,15 @@ impl Runtime {
                 check(&alloc::format!("{p}.ssm_norm"), &[d], true)?;
                 check(&alloc::format!("{p}.ssm_out"), &[h, n_v * d], true)?;
             } else {
-                check(&alloc::format!("{p}.attn_q"), &[h, h], true)?;
+                let q_dim = layer_heads * head_dim;
+                check(&alloc::format!("{p}.attn_q"), &[q_dim, h], true)?;
                 check(&alloc::format!("{p}.attn_k"), &[kv_dim, h], true)?;
                 check(&alloc::format!("{p}.attn_v"), &[kv_dim, h], true)?;
-                check(&alloc::format!("{p}.attn_output"), &[h, h], true)?;
+                check(&alloc::format!("{p}.attn_output"), &[h, q_dim], true)?;
+                if spec.flags & sosomodel::FLAG_QK_NORM != 0 {
+                    check(&alloc::format!("{p}.attn_q_norm"), &[head_dim], true)?;
+                    check(&alloc::format!("{p}.attn_k_norm"), &[head_dim], true)?;
+                }
             }
             check(&alloc::format!("{p}.ffn_norm"), &[h], true)?;
             if spec.ffn_kind == sosomodel::FfnKind::LatentMoe {
@@ -628,11 +633,11 @@ impl Runtime {
         let name = if self.has_lm_head { "lm_head" } else { "embed" };
         note_infer_op(None, name);
 
-        // norma final (si el modelo la trae) sobre una copia del hidden
-        self.scratch.attn_out.copy_from_slice(&self.hidden);
+        // `attn_out` puede ser q_dim > hidden (GQA Qwen3). `residual` sí es `h`.
+        self.scratch.residual.copy_from_slice(&self.hidden);
         if self.has_output_norm {
             source.load_f32("output_norm", &mut self.scratch.norm_w)?;
-            rmsnorm(&mut self.scratch.attn_out, &self.scratch.norm_w, self.manifest.rms_eps);
+            rmsnorm(&mut self.scratch.residual, &self.scratch.norm_w, self.manifest.rms_eps);
         }
 
         let view = source.tensor_view(name)?;
@@ -640,7 +645,7 @@ impl Runtime {
             &view,
             vocab,
             h,
-            &self.scratch.attn_out,
+            &self.scratch.residual,
             &mut self.logits_buf,
             &Sequential,
         )?;
@@ -656,10 +661,10 @@ impl Runtime {
         let vocab = self.manifest.vocab_size as usize;
         let name = if self.has_lm_head { "lm_head" } else { "embed" };
         note_infer_op(None, name);
-        self.scratch.attn_out.copy_from_slice(&self.hidden);
+        self.scratch.residual.copy_from_slice(&self.hidden);
         if self.has_output_norm {
             source.load_f32("output_norm", &mut self.scratch.norm_w)?;
-            rmsnorm(&mut self.scratch.attn_out, &self.scratch.norm_w, self.manifest.rms_eps);
+            rmsnorm(&mut self.scratch.residual, &self.scratch.norm_w, self.manifest.rms_eps);
         }
         let view = source.tensor_view(name)?;
         let seq = Sequential;
@@ -668,7 +673,7 @@ impl Runtime {
             &view,
             vocab,
             h,
-            &self.scratch.attn_out,
+            &self.scratch.residual,
             &mut self.logits_buf,
             par,
         )?;

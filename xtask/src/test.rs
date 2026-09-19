@@ -829,6 +829,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_pipeline(key, port)
             });
         });
+        filter.if_step(sid, "grep: stdin de un pipe", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "grep: stdin de un pipe", || {
+                ssh_grep_pipe(key, port)
+            });
+        });
         filter.if_step(sid, "voz: transcribe WAV de prueba", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "voz: transcribe WAV de prueba", || {
                 ssh_voz_wav(key, port)
@@ -1950,6 +1955,23 @@ fn ssh_pipeline(key: &Path, ssh_port: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// `grep PATRON` sin ficheros lee el pipe (EOF al cerrar el escritor).
+fn ssh_grep_pipe(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let token = "soso_grep_askd_42";
+    let texto = ssh_guion(
+        key,
+        ssh_port,
+        &format!("echo {token} | grep askd\nexit\n"),
+        Duration::from_secs(60),
+    )?;
+    if !texto.contains(token) {
+        return Err(format!(
+            "log|grep: no se vio {token} en `echo | grep askd`; stdout: {texto:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// Transcripción determinista desde fichero WAV (no requiere micrófono).
 fn ssh_voz_wav(key: &Path, ssh_port: u16) -> Result<(), String> {
     let guion = "soso-voz dictar --wav /etc/voz-prueba.wav --max-tokens 128\nexit\n";
@@ -2028,7 +2050,7 @@ fn ssh_ask_literal(key: &Path, ssh_port: u16) -> Result<(), String> {
 /// el camino de página grande en `handle_mmap_fault`. Comprueba que la carga no
 /// mata askd y que la inferencia arranca (smoke del bug del 27B en placa).
 fn ssh_ask_huge_mmap(key: &Path, ssh_port: u16, serial: &Path) -> Result<(), String> {
-    let guion = "ask :modelo tiny-huge\nask :max 1\nask hola\nexit\n";
+    let guion = "ask :modelo tiny-huge\nask :max 1\nask hola\nlog\nexit\n";
     let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(600))?;
     if texto.contains("ask: no pude cargar") || texto.contains("ask: error\n") {
         return Err(format!(
@@ -2058,10 +2080,9 @@ fn ssh_ask_huge_mmap(key: &Path, ssh_port: u16, serial: &Path) -> Result<(), Str
             serial.display()
         ));
     }
-    if !serie.contains("askd: tiny-huge listo") {
+    if !texto.contains("askd: tiny-huge listo") {
         return Err(format!(
-            "askd no terminó de cargar tiny-huge; serial sin «listo»; ver {}",
-            serial.display()
+            "askd no terminó de cargar tiny-huge; `log` sin «listo»; stdout: {texto:?}"
         ));
     }
     Ok(())

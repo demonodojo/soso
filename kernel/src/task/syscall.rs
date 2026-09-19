@@ -954,18 +954,10 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
             return Ok(0);
         }
         let console = super::with_current(|p| p.console);
-        let mut n = 0usize;
-        while n < dst.len() {
-            match console.read_byte() {
-                Some(b) => {
-                    dst[n] = b;
-                    n += 1;
-                }
-                None => break,
-            }
-        }
-        if n > 0 {
-            return Ok(n as u64);
+        match super::tty_tomar(console, dst) {
+            super::LecturaTty::Datos(n) => return Ok(n),
+            super::LecturaTty::Eof => return Ok(0),
+            super::LecturaTty::Nada => {}
         }
         // Sin datos: a dormir hasta que lleguen (el scheduler hace la copia).
         super::block_current(ctx_from_frame(f), State::WaitingTty { buf, len });
