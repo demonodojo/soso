@@ -432,18 +432,14 @@ fn asegurar_modelo(
                     ses.bundle.source.disable_worker();
                     if let Some(ref mut g) = ses.sys_gpu {
                         if !g.probe_compute() {
-                            let msg = g
+                            let reason = g
                                 .last_fail()
-                                .map(|r| {
-                                    format!(
-                                        "ask: GPU no calcula ({r}); inferencia muy lenta en CPU\n"
-                                    )
-                                })
-                                .unwrap_or_else(|| {
-                                    "ask: GPU no calcula; inferencia muy lenta en CPU\n"
-                                        .to_string()
-                                });
+                                .unwrap_or("probe matvec sin GPU");
+                            let msg = format!(
+                                "ask: GPU no calcula ({reason}); inferencia muy lenta en CPU\n"
+                            );
                             socket_write_str(fd, &msg);
+                            g.disable_offload(reason);
                         }
                     }
                 }

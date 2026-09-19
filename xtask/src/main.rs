@@ -675,6 +675,7 @@ pub(crate) fn build_user() -> bool {
         "log",
         "ip",
         "ping",
+        "tcpconn",
         "halt",
         "soso-llm",
         "soso-install",

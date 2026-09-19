@@ -2067,6 +2067,7 @@ fn sys_tcp_connect(f: &mut SyscallFrame, addr_ptr: u64, timeout_ms: u64) -> Resu
     if crate::net::tcp_is_connected(slot) {
         return Ok(fd);
     }
+    let plazo = socket_deadline(timeout_ms);
     super::block_current(
         ctx_from_frame(f),
         State::WaitingSocket {
@@ -2077,7 +2078,7 @@ fn sys_tcp_connect(f: &mut SyscallFrame, addr_ptr: u64, timeout_ms: u64) -> Resu
             accept: false,
             connect: true,
             result_fd: fd,
-            deadline_ms: socket_deadline(timeout_ms),
+            deadline_ms: plazo,
         },
     );
 }

@@ -918,13 +918,10 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
 
     cp_pb_set_object(c, &pos, GSP_COMPUTE_SUBCHANNEL, set_object, cp->cls);
     cp_pb_immd(c, &pos, 0u, NVC86F_WFI, 0u);
-    if (cp->caps && cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
-        cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVC7C0_SET_QMD_VERSION, 1);
-        cp_pb_write(c, &pos, GSP_QMD_AMPERE_ENGINE_VERSION_WORD);
-        cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVC7C0_CHECK_QMD_VERSION,
-                     1);
-        cp_pb_write(c, &pos, GSP_QMD_AMPERE_ENGINE_VERSION_WORD);
-    }
+    /* Ampere: la versión va en el descriptor QMD v01_07 (major/minor en el
+     * blob). SET/CHECK_QMD_VERSION en el pushbuffer levantó GR_CLASS_ERROR en
+     * GA107 (2026-09): mismo layout de 24 B que Blackwell (SET_OBJECT+WFI+
+     * SEND_PCAS+PCAS2). */
     cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_pcas, 1);
     cp_pb_write(c, &pos, (uint32_t)(qmd_va >> 8));
     cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_sig, sig_action);

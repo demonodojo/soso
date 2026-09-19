@@ -761,8 +761,6 @@ static int check_family_caps(void)
                 unsigned char pb[128];
                 unsigned char data[G4F_DATA_SIZE];
                 unsigned off, len;
-                const uint32_t *pbw;
-                unsigned ver_words = 0;
 
                 memset(&ch, 0, sizeof(ch));
                 ch.pushbuf.va = pb;
@@ -774,19 +772,9 @@ static int check_family_caps(void)
                 cp_amp.chan = &ch;
                 if (gsp_compute_encode_qmd(&cp_amp, (const GspQmdV05 *)&q2,
                                            &off, &len) != 0 ||
-                    len != 40u) {
-                    printf("FALLO: encode QMD Ampere len=%u (esperaba 40)\n",
+                    len != 24u) {
+                    printf("FALLO: encode QMD Ampere len=%u (esperaba 24)\n",
                            len);
-                    return -1;
-                }
-                pbw = (const uint32_t *)(pb + off);
-                for (unsigned j = 0; j < len / 4u; j++) {
-                    if (pbw[j] == GSP_QMD_AMPERE_ENGINE_VERSION_WORD)
-                        ver_words++;
-                }
-                if (ver_words < 2u) {
-                    printf("FALLO: pushbuffer Ampere sin SET/CHECK QMD 0x0107 "
-                           "(palabras=%u)\n", ver_words);
                     return -1;
                 }
             }

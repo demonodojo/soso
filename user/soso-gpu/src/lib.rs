@@ -262,6 +262,11 @@ impl SysGpu {
         }
     }
 
+    /// Tras una sonda fallida: no volver a encolar QMD (el canal puede estar en RC).
+    pub fn disable_offload(&mut self, reason: &'static str) {
+        self.kill_offload(reason);
+    }
+
     /// Marca pesos como fijos: no desalojar residentes (modelo cabe en VRAM).
     pub fn fijar_pesos_residentes(&mut self) {
         self.pesos_fijos = true;

@@ -39,6 +39,13 @@ pub fn run(filtro: Option<&str>) {
     unsafe {
         std::env::set_var("SOSO_QEMU_LIVE", "1");
         std::env::set_var("SOSO_QEMU_LIVE_USB", "1");
+        // Sólo el modelo sintético: estas pruebas son de actualización, no de
+        // inferencia, y el modelo grande se lleva 2,2 GB de imagen —que hay que
+        // escribir, arrancar y, en la fase del disco ajeno, **clonar**—. Si
+        // alguien pide otro por entorno, se respeta.
+        if std::env::var_os("SOSO_MODELS_DIR").is_none() {
+            unsafe { std::env::set_var("SOSO_MODELS_DIR", root.join("target/tiny-model")) };
+        }
     }
     crate::package_live::run();
     let live = crate::package_live::live_image_path();
@@ -1260,13 +1267,31 @@ fn fase_tcp_saliente(
         .local_addr()
         .map_err(|e| format!("local_addr: {e}"))?
         .port();
+    // El servidor dice si **llegó a aceptar** una conexión: separa «el guest no
+    // manda el SYN» de «lo manda y no procesa la respuesta». Con plazo: si
+    // nadie conecta, un `accept` bloqueante colgaría la suite para siempre.
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("nonblocking: {e}"))?;
     let eco = std::thread::spawn(move || {
-        if let Ok((mut s, _)) = listener.accept() {
-            let mut buf = [0u8; 256];
-            if let Ok(n) = s.read(&mut buf) {
-                let _ = s.write_all(&buf[..n]);
+        let fin = std::time::Instant::now() + Duration::from_secs(240);
+        while std::time::Instant::now() < fin {
+            match listener.accept() {
+                Ok((mut s, de)) => {
+                    let _ = s.set_nonblocking(false);
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+                    let mut buf = [0u8; 256];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let _ = s.write_all(&buf[..n]);
+                    return Some(format!("{de} envió {n} B"));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => return None,
             }
         }
+        None
     });
 
     let _ = std::fs::remove_file(serial);
@@ -1284,7 +1309,8 @@ fn fase_tcp_saliente(
         Duration::from_secs(180),
         "sin conexión",
     )?;
-    let _ = eco.join();
+    let aceptada = eco.join().ok().flatten();
+    println!("      eco del host: {}", aceptada.as_deref().unwrap_or("NADIE conectó"));
 
     if !salida.contains("tcpconn: conectado") {
         return Err(format!("no abrió la conexión saliente: {salida:?}"));

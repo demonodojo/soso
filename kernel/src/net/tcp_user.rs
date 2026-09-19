@@ -276,23 +276,17 @@ pub fn poll_entry(
                     ));
                     let s = sockets.get_mut::<tcp::Socket>(entry.handle);
                     let cx = iface.context();
+                    // Un `connect` que el propio smoltcp rechaza sí se dice: no
+                    // hay otra forma de enterarse desde fuera.
                     match s.connect(cx, remote, local) {
-                        Ok(()) => {
-                            entry.connect_started = true;
-                            crate::println!(
-                                "tcp: SYN → {remote} desde :{local_port} (slot {slot})"
-                            );
-                        }
+                        Ok(()) => entry.connect_started = true,
                         Err(e) => crate::println!("tcp: connect rechazado ({e:?}) slot {slot}"),
                     }
                 }
             } else {
                 let s = sockets.get::<tcp::Socket>(entry.handle);
                 let estado = s.state();
-                if estado != entry.ultimo_estado {
-                    crate::println!("tcp: slot {slot} {:?} → {estado:?}", entry.ultimo_estado);
-                    entry.ultimo_estado = estado;
-                }
+                entry.ultimo_estado = estado;
                 if estado == tcp::State::Established {
                     entry.role = TcpRole::Connected;
                 } else if matches!(estado, tcp::State::Closed | tcp::State::TimeWait) {

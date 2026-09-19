@@ -139,8 +139,12 @@ if ! grep -q 'NVC7C0_SET_QMD_VERSION' "$nvrm" ||
     echo "FALLO: nvrm_r570.h sin QMD minor=7 ni SET/CHECK 0x0107 para Ampere" >&2
     exit 1
 fi
-if ! grep -q 'NVC7C0_SET_QMD_VERSION' "$compute"; then
-    echo "FALLO: gsp_compute_encode_qmd no emite SET_QMD_VERSION en Ampere" >&2
+if ! grep -q 'NVA0C0_QMDV01_07_QMD_VERSION_V07' "$compute"; then
+    echo "FALLO: gsp_compute.c no rellena QMD minor=7 en el descriptor Ampere" >&2
+    exit 1
+fi
+if grep -q 'cp_pb_method.*NVC7C0_SET_QMD_VERSION' "$compute"; then
+    echo "FALLO: pushbuffer Ampere no debe emitir SET_QMD_VERSION (GR_CLASS_ERROR en placa)" >&2
     exit 1
 fi
 if [[ -d "$root/lxdde/reference" ]]; then

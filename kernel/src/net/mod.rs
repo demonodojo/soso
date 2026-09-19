@@ -72,6 +72,7 @@ struct NetStack {
 }
 
 static NET: Once<Mutex<NetStack>> = Once::new();
+static LOCK_PERDIDO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn now() -> Instant {
     Instant::from_millis(pit::uptime_ms() as i64)
@@ -512,7 +513,16 @@ pub fn poll() {
         on_wired_link_up();
     }
     let Some(net) = NET.get() else { return };
-    let Some(mut n) = net.try_lock() else { return };
+    let Some(mut n) = net.try_lock() else {
+        // Quien se lleva el candado y no lo suelta deja la pila sin sondear: ni
+        // avanza una conexión ni vencen los plazos. Se cuenta de vez en cuando
+        // para no ahogar la consola.
+        let fallos = LOCK_PERDIDO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if fallos.is_multiple_of(1000) {
+            crate::println!("net: poll sin candado ({fallos} veces)");
+        }
+        return;
+    };
     TRABAJO_PENDIENTE.store(false, core::sync::atomic::Ordering::Relaxed);
     let NetStack {
         iface,
@@ -674,7 +684,9 @@ pub fn tcp_accept(listener_slot: usize) -> Result<usize, i64> {
 
 pub fn tcp_try_read(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;
-    let mut n = net.lock();
+    // Ver la nota de `tcp_is_connected`. «Cero bytes» es una respuesta que el
+    // llamante ya sabe tratar: vuelve a dormirse y se reintenta.
+    let Some(mut n) = net.try_lock() else { return Ok(0) };
     let entry = n
         .user_tcp
         .entries
@@ -694,7 +706,8 @@ pub fn tcp_try_read(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
 
 pub fn tcp_try_write(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;
-    let mut n = net.lock();
+    // Ver la nota de `tcp_is_connected`.
+    let Some(mut n) = net.try_lock() else { return Ok(0) };
     let entry = n
         .user_tcp
         .entries
@@ -724,9 +737,18 @@ pub fn tcp_close(slot: usize) {
     }
 }
 
+/// **Nunca `lock()` bloqueante aquí.** Estas funciones las llama el planificador
+/// con el candado de **procesos** tomado, mientras el servicio SSH —que corre
+/// bajo el candado de **red**— llama a `task::exists`, `spawn_console` y
+/// compañía, que toman el de procesos. Los dos órdenes juntos son un abrazo
+/// mortal con dos cores: uno tiene red y quiere procesos, el otro al revés.
+/// Nadie sale, la pila deja de sondearse y ningún plazo vence.
+///
+/// Contestar «todavía no» cuando el candado está ocupado es seguro: quien
+/// pregunta vuelve a intentarlo en la vuelta siguiente del planificador.
 pub fn tcp_is_connected(slot: usize) -> bool {
     let Some(net) = NET.get() else { return false };
-    let n = net.lock();
+    let Some(n) = net.try_lock() else { return false };
     let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
         return false;
     };
@@ -761,7 +783,8 @@ pub fn tcp_is_connecting(slot: usize) -> bool {
 
 pub fn tcp_connect_failed(slot: usize) -> bool {
     let Some(net) = NET.get() else { return false };
-    let n = net.lock();
+    // Ver la nota de `tcp_is_connected`: aquí tampoco se espera por la red.
+    let Some(n) = net.try_lock() else { return false };
     let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
         return false;
     };
@@ -862,7 +885,8 @@ pub fn print_info() {
 
 pub fn tcp_listener_ready(slot: usize) -> bool {
     let Some(net) = NET.get() else { return false };
-    let n = net.lock();
+    // Ver la nota de `tcp_is_connected`.
+    let Some(n) = net.try_lock() else { return false };
     let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
         return false;
     };
