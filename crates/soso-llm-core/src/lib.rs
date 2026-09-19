@@ -7,6 +7,7 @@ extern crate alloc;
 pub mod chat;
 /// Tipos de conversación compartidos (T04): dominio sin HTTP ni syscalls.
 pub mod conversation;
+pub mod generation;
 pub mod f16;
 pub mod gemm;
 pub mod gpu;
@@ -28,6 +29,9 @@ pub mod attn;
 pub mod source;
 pub mod tokenizer;
 
+pub use generation::{
+    GenerationLedger, GenerationOptions, GenerationReport, StopReason, stops_from_eos,
+};
 pub use runtime::Runtime;
 pub use asr::{AsrPhase, AsrProfile, AsrTokenProfile};
 pub use sched::{CostModel, Dest, OpDesc, OpSched};

@@ -1380,6 +1380,10 @@ extern "C" fn schedule_inner() -> ! {
                 procs[i].space.as_ref().unwrap().activate();
                 let now = crate::arch::pit::uptime_ms();
                 if deadline_ms != 0 && now >= deadline_ms {
+                    crate::println!(
+                        "tcp: pid {} vence el plazo (slot {slot}, connect={connect})",
+                        procs[i].pid
+                    );
                     procs[i].ctx.rax = (-soso_abi::EAGAIN) as u64;
                     procs[i].state = State::Runnable;
                     continue;

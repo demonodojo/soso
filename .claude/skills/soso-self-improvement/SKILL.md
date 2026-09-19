@@ -174,6 +174,5 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 
 ## Por dónde (actualizar al cerrar la recomendada)
 
-Camino SI-1: **T08** (resultado de generación). T18, T45 y T46 también
-habilitadas. T06/T07 cerradas (render Qwen2 + parse `<tool_call>`). Validación
-nativa pendiente de T45/T49.
+Camino SI-2: **T10** (API JSON; deps T05–T06–T08 listas). T09, T18, T45 y T46
+también habilitadas. T06–T08 cerradas. Validación nativa pendiente de T45/T49.

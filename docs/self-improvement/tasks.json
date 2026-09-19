@@ -238,7 +238,7 @@
         "summary": "docs/self-improvement/seguimiento/T07.md",
         "evidence": "target/self-improvement/tasks/T07/resultado.md",
         "blocker": null,
-        "next_step": "T08 (resultado de generación) o T10/T12 según encargo"
+        "next_step": "T10 (API JSON) o T09/T12 según encargo"
       }
     },
     {
@@ -247,7 +247,7 @@
       "title": "Devolver motivo de parada y consumo real del runtime",
       "milestone": "SI-1 / SI-2",
       "kind": "Implementación Rust de inferencia",
-      "status": "pending",
+      "status": "done",
       "depends_on": [],
       "entry_conditions": [],
       "contract_sections": "C2",
@@ -261,6 +261,14 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-19",
+        "base": "a60e8abff",
+        "summary": "docs/self-improvement/seguimiento/T08.md",
+        "evidence": "target/self-improvement/tasks/T08/resultado.md",
+        "blocker": null,
+        "next_step": "T10 (API JSON) o T09 (cancelación)"
       }
     },
     {

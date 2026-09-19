@@ -1,6 +1,6 @@
 # T08 — Devolver motivo de parada y consumo real del runtime
 
-**Hito:** SI-1 / SI-2 · **Tipo:** Implementación Rust de inferencia · **Estado:** pendiente.
+**Hito:** SI-1 / SI-2 · **Tipo:** Implementación Rust de inferencia · **Estado:** completada (2026-09-19).
 
 **Dependencias:** ninguna.
 
@@ -44,9 +44,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Si el refactor exige cambios numéricos, separarlos; esta tarea solo cambia control e informe.
 

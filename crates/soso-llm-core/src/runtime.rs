@@ -1,5 +1,8 @@
 //! Runtime de inferencia: bucle de generación de tokens.
 
+use crate::generation::{
+    GenerationLedger, GenerationOptions, GenerationReport, stops_from_eos,
+};
 use crate::gemm::rmsnorm;
 use crate::kv::LayerKv;
 use crate::layer::{
@@ -722,32 +725,59 @@ impl Runtime {
         max_new: usize,
         eos: Option<u32>,
         sampler: &mut crate::sample::Sampler,
-        mut on_token: impl FnMut(u32),
+        on_token: impl FnMut(u32),
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         on_prefill: &mut dyn FnMut(usize, usize),
     ) -> Result<Vec<u32>, ()> {
+        let stops = stops_from_eos(eos);
+        self.generate_stream_par_with_report(
+            source,
+            prompt,
+            GenerationOptions::new(max_new, stops),
+            sampler,
+            on_token,
+            parallel,
+            gpu,
+            on_prefill,
+        )
+        .map(|(tokens, _)| tokens)
+    }
+
+    /// Como `generate_stream_par` con [`GenerationReport`](crate::generation::GenerationReport).
+    pub fn generate_stream_par_with_report(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        options: GenerationOptions,
+        sampler: &mut crate::sample::Sampler,
+        mut on_token: impl FnMut(u32),
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        on_prefill: &mut dyn FnMut(usize, usize),
+    ) -> Result<(Vec<u32>, GenerationReport), ()> {
         clear_infer_op();
         if prompt.is_empty() {
             note_infer_op(None, "prompt vacío");
             return Err(());
         }
         self.reset_sequence();
+        let mut ledger = GenerationLedger::new(prompt.len());
+        let stop_token_ids = options.stop_token_ids;
         let mut tokens: Vec<u32> = prompt.to_vec();
         self.prefill_prompt_with(source, prompt, parallel, gpu, None, on_prefill)?;
         let greedy = sampler.temp <= 0.0;
-        let mut remaining = max_new;
+        let mut remaining = options.max_new;
         while remaining > 0 {
             if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
+                ledger.note_context_limit();
                 break;
             }
             let logits = self.logits_par(source, parallel)?;
-            let mut next = sampler.sample(logits);
-            if eos == Some(next) {
+            let next = sampler.sample(logits);
+            if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, &mut on_token) {
                 break;
             }
-            tokens.push(next);
-            on_token(next);
             remaining -= 1;
             let drafts = if greedy {
                 crate::attn::prompt_lookup_draft(&tokens, remaining.min(8))
@@ -764,12 +794,13 @@ impl Runtime {
                     break;
                 }
                 let logits = self.logits_par(source, parallel)?;
-                next = Self::argmax(logits);
-                if next != draft || eos == Some(next) {
+                let next = Self::argmax(logits);
+                if next != draft {
                     break;
                 }
-                tokens.push(next);
-                on_token(next);
+                if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, &mut on_token) {
+                    break;
+                }
                 remaining -= 1;
                 if let Some(&nxt) = drafts.get(di + 1) {
                     self.prefetch_embed(nxt, source);
@@ -778,7 +809,7 @@ impl Runtime {
                 self.forward_step_par(source, parallel, gpu)?;
             }
         }
-        Ok(tokens)
+        Ok((tokens, ledger.into_report()))
     }
 
     /// Como `generate_stream_par` con cronometraje de capas y replanificación.
@@ -789,12 +820,40 @@ impl Runtime {
         max_new: usize,
         eos: Option<u32>,
         sampler: &mut crate::sample::Sampler,
+        on_token: impl FnMut(u32),
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        clock_ms: fn() -> u64,
+        refresh_mem: impl FnMut() -> crate::plan::MemSnapshot,
+    ) -> Result<Vec<u32>, ()> {
+        let stops = stops_from_eos(eos);
+        self.generate_stream_planned_with_report(
+            source,
+            prompt,
+            GenerationOptions::new(max_new, stops),
+            sampler,
+            on_token,
+            parallel,
+            gpu,
+            clock_ms,
+            refresh_mem,
+        )
+        .map(|(tokens, _)| tokens)
+    }
+
+    /// Como `generate_stream_planned` con informe de generación.
+    pub fn generate_stream_planned_with_report(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        options: GenerationOptions,
+        sampler: &mut crate::sample::Sampler,
         mut on_token: impl FnMut(u32),
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         clock_ms: fn() -> u64,
         mut refresh_mem: impl FnMut() -> crate::plan::MemSnapshot,
-    ) -> Result<Vec<u32>, ()> {
+    ) -> Result<(Vec<u32>, GenerationReport), ()> {
         clear_infer_op();
         if prompt.is_empty() {
             note_infer_op(None, "prompt vacío");
@@ -804,21 +863,25 @@ impl Runtime {
         if let Some(pl) = self.planner.as_mut() {
             pl.refresh_mem(refresh_mem());
         }
+        let mut ledger = GenerationLedger::new(prompt.len());
+        let stop_token_ids = options.stop_token_ids;
         let mut tokens: Vec<u32> = prompt.to_vec();
         self.prefill_prompt(source, prompt, parallel, gpu, Some(clock_ms))?;
         let greedy = sampler.temp <= 0.0;
-        let mut remaining = max_new;
+        let mut remaining = options.max_new;
         while remaining > 0 {
+            if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
+                ledger.note_context_limit();
+                break;
+            }
             if let Some(pl) = self.planner.as_mut() {
                 pl.begin_token();
             }
             let logits = self.logits_par(source, parallel)?;
-            let mut next = sampler.sample(logits);
-            if eos == Some(next) {
+            let next = sampler.sample(logits);
+            if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, &mut on_token) {
                 break;
             }
-            tokens.push(next);
-            on_token(next);
             remaining -= 1;
             let drafts = if greedy {
                 let (max_d, min_n, max_n, hint) = self
@@ -859,12 +922,13 @@ impl Runtime {
                     break;
                 }
                 let logits = self.logits_par(source, parallel)?;
-                next = Self::argmax(logits);
-                if next != draft || eos == Some(next) {
+                let next = Self::argmax(logits);
+                if next != draft {
                     break;
                 }
-                tokens.push(next);
-                on_token(next);
+                if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, &mut on_token) {
+                    break;
+                }
                 remaining -= 1;
                 accepted += 1;
                 if let Some(&nxt) = drafts.get(di + 1) {
@@ -880,7 +944,7 @@ impl Runtime {
                 pl.tune_pld(offered, accepted);
             }
         }
-        Ok(tokens)
+        Ok((tokens, ledger.into_report()))
     }
 
     /// Decode greedy sin streaming (tests y usos simples).
@@ -893,6 +957,26 @@ impl Runtime {
     ) -> Result<Vec<u32>, ()> {
         let mut sampler = crate::sample::Sampler::greedy();
         self.generate_stream(source, prompt, max_new, eos, &mut sampler, |_| {})
+    }
+
+    /// Como `generate` con informe de parada y contadores.
+    pub fn generate_with_report(
+        &mut self,
+        source: &mut impl TensorSource,
+        prompt: &[u32],
+        options: GenerationOptions,
+    ) -> Result<(Vec<u32>, GenerationReport), ()> {
+        let mut sampler = crate::sample::Sampler::greedy();
+        self.generate_stream_par_with_report(
+            source,
+            prompt,
+            options,
+            &mut sampler,
+            |_| {},
+            None,
+            &mut None,
+            &mut |_, _| {},
+        )
     }
 
     pub fn load_shard_to_ram(&mut self, name: &str, bytes: Vec<u8>) -> Result<(), ()> {

@@ -24,6 +24,9 @@ pub struct UserTcp {
     pub remote: Option<IpEndpoint>,
     pub closed: bool,
     pub connect_started: bool,
+    /// Último estado visto de la conexión, para contar sólo los cambios: sin
+    /// esto la traza escupiría una línea por vuelta del planificador.
+    pub ultimo_estado: tcp::State,
     /// Conexión 127.0.0.1 (sin smoltcp).
     pub loopback: bool,
     pub loop_pair: Option<usize>,
@@ -62,6 +65,7 @@ impl TcpTable {
             remote,
             closed: false,
             connect_started: false,
+            ultimo_estado: tcp::State::Closed,
             loopback: false,
             loop_pair: None,
             loop_side: super::loopback::LoopSide::Client,
@@ -90,6 +94,7 @@ impl TcpTable {
             remote: None,
             closed: false,
             connect_started: false,
+            ultimo_estado: tcp::State::Closed,
             loopback: true,
             loop_pair: Some(pair_id),
             loop_side: side,
@@ -271,15 +276,26 @@ pub fn poll_entry(
                     ));
                     let s = sockets.get_mut::<tcp::Socket>(entry.handle);
                     let cx = iface.context();
-                    if s.connect(cx, remote, local).is_ok() {
-                        entry.connect_started = true;
+                    match s.connect(cx, remote, local) {
+                        Ok(()) => {
+                            entry.connect_started = true;
+                            crate::println!(
+                                "tcp: SYN → {remote} desde :{local_port} (slot {slot})"
+                            );
+                        }
+                        Err(e) => crate::println!("tcp: connect rechazado ({e:?}) slot {slot}"),
                     }
                 }
             } else {
                 let s = sockets.get::<tcp::Socket>(entry.handle);
-                if s.state() == tcp::State::Established {
+                let estado = s.state();
+                if estado != entry.ultimo_estado {
+                    crate::println!("tcp: slot {slot} {:?} → {estado:?}", entry.ultimo_estado);
+                    entry.ultimo_estado = estado;
+                }
+                if estado == tcp::State::Established {
                     entry.role = TcpRole::Connected;
-                } else if matches!(s.state(), tcp::State::Closed | tcp::State::TimeWait) {
+                } else if matches!(estado, tcp::State::Closed | tcp::State::TimeWait) {
                     entry.closed = true;
                 }
             }
