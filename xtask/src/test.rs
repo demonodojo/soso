@@ -345,6 +345,12 @@ impl Report {
                         MAX - 1,
                         if reinicio { " tras reinicio" } else { " tras 5 s" },
                     );
+                    // Antes de reintentar —y sobre todo antes de reiniciar, que
+                    // borra la evidencia— mirar la máquina viva. Un paso flaky
+                    // sin esto sólo dice «no contestó»; con esto dice en qué
+                    // estaba parado cada proceso, que es la diferencia entre
+                    // «se colgó» y «no le dio tiempo».
+                    diagnostico_de_fallo(slot, sid, nombre);
                     if reinicio {
                         if let Err(re) = reiniciar_guest_sys(qemu, slot) {
                             self.marca(sid, &format!("{nombre}: {re}"), false);
@@ -796,6 +802,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_ping(key, port)
             });
         });
+        filter.if_step(sid, "ps lista procesos", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "ps lista procesos", || {
+                ssh_ps(key, port)
+            });
+        });
         filter.if_step(sid, "ask: el texto llega literal", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "ask: el texto llega literal", || {
                 ssh_ask_literal(key, port)
@@ -894,6 +905,67 @@ fn guest_ssh_caido(err: &str) -> bool {
 
 fn guest_requiere_reinicio(err: &str) -> bool {
     guest_ssh_caido(err) || err.contains("la sesión SSH no terminó")
+}
+
+/// Retrato de la máquina en el momento en que un paso falla.
+///
+/// Abre una sesión SSH **nueva** —si el guest sigue vivo— y pide `ps`. Que la
+/// sesión entre ya es un dato: significa que la red y el planificador funcionan
+/// y que lo parado es el proceso del paso, no el sistema.
+fn diagnostico_de_fallo(slot: &QemuSlot, sid: &str, nombre: &str) {
+    let key = crate::project_root().join("target/soso_test_key");
+    match ssh_guion_inner(
+        &key,
+        slot.ssh_port,
+        "ps\nexit\n",
+        Duration::from_secs(30),
+        true,
+        Some("COMANDO"),
+    ) {
+        Ok(texto) => {
+            println!("      [{sid}] estado tras fallar «{nombre}»:");
+            for l in texto.lines().filter(|l| l.contains("/bin/") || l.contains("ESTADO")) {
+                println!("      [{sid}]   {}", l.trim_end());
+            }
+        }
+        Err(e) => {
+            // Si no se puede entrar, lo que queda es la serie — y `reiniciar_guest_sys`
+            // la trunca justo después, así que o se lee aquí o se pierde.
+            println!("      [{sid}] no se pudo mirar tras «{nombre}»: {e}");
+            let serie = fs::read_to_string(&slot.serial).unwrap_or_default();
+            let panico = serie.contains("!!! panic");
+            // Copia fuera del camino que `reiniciar_guest_sys` trunca. Sin esto
+            // sólo queda lo que quepa en la consola, y de un pánico hace falta
+            // el rastro entero para resolverlo con addr2line.
+            let copia = crate::project_root().join(format!(
+                "target/panico-{sid}-{}.log",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            ));
+            let guardada = fs::write(&copia, &serie).is_ok();
+            println!(
+                "      [{sid}] serie ({} B{}){}",
+                serie.len(),
+                if panico { ", CON PÁNICO" } else { "" },
+                if guardada {
+                    format!(" → {}", copia.display())
+                } else {
+                    String::new()
+                }
+            );
+            // Desde el primer `rastro:` hasta el final: es el bloque que sirve.
+            let lineas: Vec<&str> = serie.lines().collect();
+            let desde = lineas
+                .iter()
+                .position(|l| l.contains("rastro:") || l.contains("!!! panic"))
+                .unwrap_or(lineas.len().saturating_sub(12));
+            for l in &lineas[desde..] {
+                println!("      [{sid}]   {}", l.trim_end());
+            }
+        }
+    }
 }
 
 fn reiniciar_guest_sys(qemu: &mut Child, slot: &QemuSlot) -> Result<(), String> {
@@ -1298,9 +1370,17 @@ fn ssh_guion_inner(
         }
         let resto = fin_prompt.saturating_duration_since(Instant::now());
         if resto.is_zero() {
+            // El **stderr** del ssh va aquí a propósito. Sólo se añadía a la
+            // salida en el camino de éxito (más abajo), así que este error —el
+            // único que se ve cuando el guest no contesta— decía «stdout
+            // parcial: \"\"» y se tragaba el motivo real: «Connection refused»,
+            // «Connection timed out», clave rechazada… Un fallo intermitente
+            // cuyo mensaje oculta su causa no se puede diagnosticar nunca.
+            let err = String::from_utf8_lossy(&stderr_acum.lock().unwrap()).into_owned();
             return Err(format!(
-                "no apareció el prompt en 45s; stdout parcial: {:?}",
-                String::from_utf8_lossy(&acum.lock().unwrap())
+                "no apareció el prompt en 45s; stdout parcial: {:?}; ssh dijo: {:?}",
+                String::from_utf8_lossy(&acum.lock().unwrap()),
+                err.trim()
             ));
         }
         visto = prompt.1.wait_timeout(visto, resto).unwrap().0;
@@ -1379,6 +1459,20 @@ fn ssh_guion_inner(
         ));
     }
     Ok(salida)
+}
+
+fn ssh_ps(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(key, ssh_port, "ps\nexit\n", Duration::from_secs(30))?;
+    if !salida.contains("/bin/init") {
+        return Err(format!("ps no listó init; stdout: {salida:?}"));
+    }
+    if !salida.contains("/bin/sosh") {
+        return Err(format!("ps no listó sosh; stdout: {salida:?}"));
+    }
+    if !salida.contains("PID") || !salida.contains("COMANDO") {
+        return Err(format!("ps sin cabecera esperada; stdout: {salida:?}"));
+    }
+    Ok(())
 }
 
 fn ssh_ping(key: &Path, ssh_port: u16) -> Result<(), String> {
@@ -2148,10 +2242,17 @@ fn ssh_init_test(key: &Path, ssh_port: u16) -> Result<(), String> {
 fn ssh_fd3_log(key: &Path, ssh_port: u16) -> Result<(), String> {
     let tok_f = "xtask_fd3_f_42";
     let tok_r = "xtask_fd3_r_42";
+    // **Sin `halt`.** Este guion acababa apagando la máquina y usaba «halt»
+    // como marcador de fin. El paso se marcaba OK y el siguiente se encontraba
+    // el guest apagado: «Connection refused», reintento y reinicio de 40 s en
+    // cada pasada de la suite. Parecía intermitente porque a veces el apagado
+    // aún no había terminado cuando el paso siguiente conectaba. Un marcador
+    // propio termina el guion igual de bien y deja la máquina viva para quien
+    // venga detrás — apagar es cosa del último paso del shard.
     let guion = format!(
-        "init log {tok_f} 3>/tmp/l.txt\ncat /tmp/l.txt\ninit log {tok_r}\nlog\nhalt\n"
+        "init log {tok_f} 3>/tmp/l.txt\ncat /tmp/l.txt\ninit log {tok_r}\nlog\necho FIN-FD3\n"
     );
-    let texto = ssh_guion_hasta(key, ssh_port, &guion, Duration::from_secs(60), "halt")?;
+    let texto = ssh_guion_hasta(key, ssh_port, &guion, Duration::from_secs(60), "FIN-FD3")?;
     let cat_chunk = texto
         .split("cat /tmp/l.txt")
         .nth(1)

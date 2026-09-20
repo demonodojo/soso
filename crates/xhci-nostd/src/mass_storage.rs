@@ -490,7 +490,10 @@ impl XhciController {
 
     fn setup_mass_storage(&mut self, slot_id: u8, path: DevPath, speed: UsbSpeed) -> Option<MassStorage> {
         self.set_device(slot_id, path, speed);
-        if !self.address_device(slot_id, path, speed) {
+        let addressed = crate::driver::usb2_use_new_scheme(speed)
+            && self.usb2_new_scheme_address(slot_id, path, speed)
+            || self.address_device(slot_id, path, speed);
+        if !addressed {
             return None;
         }
         let dev_desc = self.get_device_descriptor(slot_id)?;

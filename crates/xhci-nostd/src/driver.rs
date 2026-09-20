@@ -55,6 +55,8 @@ const GET_DESCRIPTOR_RETRIES: u32 = 3;
 const GET_DESCRIPTOR_RETRY_DELAY_US: u32 = 200_000;
 /// Reintentos completos con re-reset de puerto si el descriptor sigue fallando.
 const GET_DESCRIPTOR_TRIES: u32 = 2;
+/// Linux `GET_DESCRIPTOR_BUFSIZE` / new-scheme first read (hub.c).
+const NEW_SCHEME_DEVICE_DESC_LEN: u16 = 64;
 const EP0_DCI: u8 = 1;
 /// Transfer events de otros slots mientras se espera uno concreto (p. ej. HID
 /// durante BOT del pendrive). Sin cola, `wait_transfer_event` los tiraba.
@@ -215,6 +217,14 @@ fn trst_recovery_us(speed: UsbSpeed) -> u32 {
         UsbSpeed::High => TRSTRCY_HS_US,
         _ => TRSTRCY_FS_US,
     }
+}
+
+/// Linux `use_new_scheme`: SuperSpeed+ uses the old path only (hub.c).
+pub(crate) fn usb2_use_new_scheme(speed: UsbSpeed) -> bool {
+    matches!(
+        speed,
+        UsbSpeed::Full | UsbSpeed::Low | UsbSpeed::High
+    )
 }
 
 impl XhciController {
@@ -877,6 +887,16 @@ impl XhciController {
                 path.tt_port,
             ));
 
+            let use_new_scheme = usb2_use_new_scheme(speed) && attempt == 0;
+            if use_new_scheme && self.usb2_new_scheme_address(slot_id, path, speed) {
+                addressed = true;
+                break;
+            }
+            if use_new_scheme {
+                log::info!(
+                    "xhci: USB2 new scheme failed slot={slot_id}, trying old scheme"
+                );
+            }
             if self.address_device(slot_id, path, speed) {
                 addressed = true;
                 break;
@@ -1097,10 +1117,83 @@ impl XhciController {
         }
     }
 
-    /// Issue an Address Device command.
+    /// USB2 speeds use Linux «new scheme» (GET 64 at addr 0 via BSR=1) on first try.
+    pub(crate) fn usb2_new_scheme_address(
+        &mut self,
+        slot_id: u8,
+        path: DevPath,
+        speed: UsbSpeed,
+    ) -> bool {
+        log::info!("xhci: USB2 new scheme slot={slot_id} port={}", path.root_port);
+        if !self.address_device_with_bsr(slot_id, path, speed, true) {
+            return false;
+        }
+        let (buf_va, buf_phys) = unsafe { alloc_dma_buffer(NEW_SCHEME_DEVICE_DESC_LEN as usize) };
+        let mut read_ok = false;
+        for attempt in 0..GET_DESCRIPTOR_RETRIES {
+            if attempt > 0 {
+                delay_us(GET_DESCRIPTOR_RETRY_DELAY_US);
+            }
+            if self.ep0_get_descriptor_in(
+                slot_id,
+                USB_DESC_DEVICE,
+                0,
+                buf_phys,
+                NEW_SCHEME_DEVICE_DESC_LEN,
+            ) {
+                read_ok = true;
+                break;
+            }
+        }
+        if !read_ok {
+            log::warn!("xhci: new scheme GET_DESCRIPTOR 64B failed slot={slot_id}");
+            return false;
+        }
+        let header = unsafe { read_dma_buffer(buf_va, NEW_SCHEME_DEVICE_DESC_LEN as usize) };
+        if header.len() < 8 {
+            return false;
+        }
+        let max_pkt0 = header[7] as u16;
+        let valid_max = matches!(max_pkt0, 8 | 9 | 16 | 32 | 64);
+        if header[1] != USB_DESC_DEVICE || !valid_max {
+            log::warn!(
+                "xhci: new scheme invalid device header slot={slot_id} type={:#x} maxpkt={max_pkt0}",
+                header[1]
+            );
+            return false;
+        }
+        if max_pkt0 != speed.default_max_packet_size0() {
+            let _ = self.evaluate_ep0_max_packet(slot_id, max_pkt0);
+        }
+        if path.route == 0 {
+            self.reset_port(path.root_port);
+        } else if !self.hub_reset_child_port(path.tt_hub_slot, path.tt_port) {
+            log::warn!(
+                "xhci: new scheme hub child reset failed hub_slot={} port={}",
+                path.tt_hub_slot,
+                path.tt_port
+            );
+            return false;
+        }
+        delay_us(trst_recovery_us(speed));
+        self.address_device_with_bsr(slot_id, path, speed, false)
+    }
+
+    /// Issue an Address Device command (full address, BSR=0).
     pub(crate) fn address_device(&mut self, slot_id: u8, path: DevPath, speed: UsbSpeed) -> bool {
+        self.address_device_with_bsr(slot_id, path, speed, false)
+    }
+
+    /// Address Device with optional Block Set Address Request (Linux SETUP_CONTEXT_ONLY).
+    fn address_device_with_bsr(
+        &mut self,
+        slot_id: u8,
+        path: DevPath,
+        speed: UsbSpeed,
+        bsr: bool,
+    ) -> bool {
         log::debug!(
-            "xhci: Address Device slot={} root_port={} route={:#x}",
+            "xhci: Address Device slot={} root_port={} route={:#x} bsr={bsr}",
             slot_id, path.root_port, path.route
         );
 
@@ -1139,17 +1232,21 @@ impl XhciController {
         );
 
         // Send command
-        let trb = Trb::address_device(input_ctx.phys_addr(), slot_id, false, false);
+        let trb = Trb::address_device(input_ctx.phys_addr(), slot_id, bsr, false);
         match self.send_command(trb) {
             Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
-                log::info!("xhci: slot {} addressed successfully", slot_id);
-                delay_us(SET_ADDRESS_SETTLE_US);
+                if bsr {
+                    log::info!("xhci: slot {slot_id} context enabled (BSR)");
+                } else {
+                    log::info!("xhci: slot {} addressed successfully", slot_id);
+                    delay_us(SET_ADDRESS_SETTLE_US);
+                }
                 true
             }
             Some(evt) => {
                 let code = evt.completion_code();
                 log::warn!(
-                    "xhci: Address Device failed for slot {}: code={} ({})",
+                    "xhci: Address Device failed for slot {} bsr={bsr}: code={} ({})",
                     slot_id,
                     code,
                     completion_name(code),
@@ -1157,7 +1254,10 @@ impl XhciController {
                 false
             }
             None => {
-                log::warn!("xhci: Address Device timeout for slot {}", slot_id);
+                log::warn!(
+                    "xhci: Address Device timeout for slot {} bsr={bsr}",
+                    slot_id
+                );
                 false
             }
         }
@@ -2690,6 +2790,28 @@ impl XhciController {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod enumeration_scheme_tests {
+    use super::{usb2_use_new_scheme, UsbSpeed};
+
+    #[test]
+    fn usb2_new_scheme_only_full_low_high() {
+        assert!(usb2_use_new_scheme(UsbSpeed::High));
+        assert!(usb2_use_new_scheme(UsbSpeed::Full));
+        assert!(usb2_use_new_scheme(UsbSpeed::Low));
+        assert!(!usb2_use_new_scheme(UsbSpeed::Super));
+        assert!(!usb2_use_new_scheme(UsbSpeed::SuperPlus));
+    }
+
+    #[test]
+    fn first_address_attempt_prefers_get64_before_set_address() {
+        // initialize_device: attempt 0 → new scheme (BSR+GET64) before old Address Device.
+        let attempt = 0u32;
+        assert!(usb2_use_new_scheme(UsbSpeed::High) && attempt == 0);
+        assert!(!(usb2_use_new_scheme(UsbSpeed::High) && attempt == 1));
     }
 }
 

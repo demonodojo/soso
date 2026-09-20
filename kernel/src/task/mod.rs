@@ -956,7 +956,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
     if parent == 0 {
         return Err(-abi::EINVAL);
     }
-    let (space, console, cwd, brk, brk_min, name, pgid, sid, env) = with_current(|p| {
+    let (space, console, cwd, brk, brk_min, name, pgid, sid, env, tls_base) = with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::ENOMEM)?.clone();
         Ok::<_, i64>((
             space,
@@ -968,6 +968,12 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
             p.pgid,
             p.sid,
             p.env.clone(),
+            // El hilo hereda la base FS del padre. Dejarla a 0 hacía que el
+            // canario de `-fstack-protector` (`%fs:0x28`) leyera la dirección
+            // lineal 0x28: el hilo moría con page fault en 0x28 en cuanto
+            // entrara en cualquier función del C de `ring`, y el hilo principal
+            // no, lo que parece cualquier cosa menos un problema de TLS.
+            p.tls_base,
         ))
     })?;
     let tid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
@@ -1005,7 +1011,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
         kill_orphan: false,
         pgid,
         sid,
-        tls_base: 0,
+        tls_base,
         env,
         is_thread: true,
         join_uaddr,
@@ -1238,6 +1244,23 @@ extern "C" fn schedule_inner() -> ! {
         // AP que también llamara aquí solo desperdiciaría ciclos).
         let es_bsp = crate::arch::percpu::cpu_index() == 0;
         if es_bsp {
+            // Centinela: nadie debería escribir por encima de la cima de
+            // KSTACK. Se comprueba aquí porque es el sitio por el que se pasa
+            // constantemente y está a profundidad conocida (`schedule_inner`
+            // arranca en la cima), así que el aviso sale cerca del culpable.
+            if let Some(off) = crate::arch::gdt::guarda_sobre_kstack_rota() {
+                static AVISADO: core::sync::atomic::AtomicBool =
+                    core::sync::atomic::AtomicBool::new(false);
+                if !AVISADO.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                    let rsp: u64;
+                    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
+                    crate::println!(
+                        "!!! guarda: escrito {off:#x} B por encima de la cima de KSTACK \
+                         (cima={:#x}, rsp ahora={rsp:#x})",
+                        crate::arch::gdt::kstack_top().as_u64()
+                    );
+                }
+            }
             crate::net::poll();
             #[cfg(feature = "drv-live-disk")]
             crate::drivers::fatlog::poll();
@@ -1435,7 +1458,9 @@ extern "C" fn schedule_inner() -> ! {
                                 procs[i].ctx.rax = n;
                                 procs[i].state = State::Runnable;
                             }
-                            Ok(0) if !crate::net::tcp_is_connected(slot) => {
+                            // Igual que en `sys_read_timeout`: sólo se
+                            // despierta con EOF si **consta** que está cerrado.
+                            Ok(0) if crate::net::tcp_cerrado_seguro(slot) => {
                                 procs[i].ctx.rax = 0;
                                 procs[i].state = State::Runnable;
                             }

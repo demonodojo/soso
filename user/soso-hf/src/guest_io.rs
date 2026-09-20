@@ -131,7 +131,7 @@ impl soso_http::BodySink for ScratchSink {
         while self.pending.len() >= BLOCK {
             let r = sys::som_scratch_write(self.start_lba, self.offset, &self.pending[..BLOCK]);
             if r < 0 {
-                return Err(soso_http::HttpError::Io);
+                return Err(soso_http::HttpError::Io("escritura del cuerpo en el guest"));
             }
             self.offset += BLOCK as u64;
             self.pending.drain(..BLOCK);

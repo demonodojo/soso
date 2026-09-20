@@ -10,6 +10,28 @@ use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address};
 pub const MAX_USER_TCP: usize = 8;
 const TCP_BUF: usize = 65536;
 
+/// Rango de puertos locales para conexiones salientes.
+const PUERTO_EFIMERO_MIN: u16 = 49152;
+const PUERTOS_EFIMEROS: u32 = 65536 - PUERTO_EFIMERO_MIN as u32;
+static SIGUIENTE_EFIMERO: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Puerto local para un `connect` saliente.
+///
+/// **No puede salir del índice de slot.** Al cerrar una conexión el slot se
+/// libera y se reutiliza de inmediato, así que con `49152 + slot` la conexión
+/// siguiente al mismo destino repetía la **cuádrupla entera**: el par todavía
+/// la tiene en `TIME_WAIT` y descarta el SYN. El `connect` vencía a los 30 s
+/// con `EAGAIN` y sin una sola pista de por qué.
+///
+/// No se ve con una conexión sola —por eso pasaba la fase `saliente`—: hace
+/// falta una **segunda** conexión al mismo host, que es exactamente lo que
+/// provoca cualquier redirección HTTP (2026-09-20).
+fn puerto_efimero() -> u16 {
+    let n = SIGUIENTE_EFIMERO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    PUERTO_EFIMERO_MIN + (n % PUERTOS_EFIMEROS) as u16
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TcpRole {
     Listening,
@@ -262,7 +284,7 @@ pub fn poll_entry(
         TcpRole::Connecting => {
             if !entry.connect_started {
                 if let Some(remote) = entry.remote {
-                    let local_port = 49152u16.wrapping_add(slot as u16);
+                    let local_port = puerto_efimero();
                     let local_ip = iface
                         .ip_addrs()
                         .iter()

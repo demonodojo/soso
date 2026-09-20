@@ -85,7 +85,7 @@ después**. Al revés, esa primera actualización iría sin vuelta atrás.
 
 ## Banco de pruebas
 
-`cargo xtask test-update [filtro]` — 10 fases; el filtro casa por nombre:
+`cargo xtask test-update [filtro]` — 12 fases; el filtro casa por nombre:
 
 | Filtro | Qué prueba |
 |---|---|
@@ -99,6 +99,12 @@ después**. Al revés, esa primera actualización iría sin vuelta atrás.
 | `respaldo` | Respaldo corrupto → diagnóstico, sin lanzar la shell |
 | `roto` | Release con `/bin/init` que no es ELF: se deshace **sola** |
 | `manifiesto` | Manifiesto inválido rechazado |
+| `saliente` | TCP **de salida** desde userland: ida y vuelta contra un eco del host, y puerto cerrado que falla rápido |
+| `https` | Descarga real contra GitHub; sólo corre con `SOSO_TEST_RED=1` |
+
+El banco fija `SOSO_MODELS_DIR=target/tiny-model` si no viene puesto: la imagen
+sale con el modelo mínimo y no con los pesos grandes, que aquí no aportan nada y
+cuestan minutos por pasada.
 
 Inyección de averías: `xtask/src/sosofs_img.rs` escribe **dentro del sosofs de
 una imagen** (estropear un respaldo, etc.). Para la ESP, `fat32_write`.
@@ -121,6 +127,32 @@ Banco host: `cargo test -p soso-update-core --features std` (208 pruebas).
 - **`ABI_VERSION` se compara por igualdad exacta**: subirla al **añadir** una
   syscall deja fuera a todas las máquinas instaladas. La política está escrita en
   `soso-abi`: subir al cambiar o retirar, no al añadir.
+- **Las features de Cargo se unifican en todo el grafo.** En `getrandom` 0.2 el
+  backend `rdrand` se elige **antes** que `custom`, así que bastaba con que
+  `soso-http` pidiera `rdrand` para anular el `register_custom_getrandom!` de
+  `libsoso` aunque el binario pidiera `custom`. Se comprueba con `nm` sobre el
+  ELF: `getrandom::custom::getrandom_inner` presente, ninguna cadena `rdrand`.
+- **`soso-update --traza`** imprime cada `read`/`write` del transporte con bytes
+  y milisegundos. Es la herramienta que distingue «la petición no salió» de «salió
+  y no volvió nada» de «volvió y lo tiramos», que desde el mensaje de error se ven
+  igual. Bandera y no variable de entorno: `sosh` no tiene variables.
+- **Para depurar la red, no uses la fase del banco**: son 15 minutos por intento.
+  Arranca a mano la imagen ya construida (`qemu-system-x86_64` con los argumentos
+  de `lanzar_live`, sin `-monitor unix:` — la ruta del scratchpad pasa de 108 B) y
+  entra por SSH; reproducir baja a 30 s y desde una **segunda** sesión puedes
+  correr `ps` sobre la máquina rota. Alimenta el stdin con `(echo "orden"; sleep N)`
+  o el shell se cierra antes de que llegue la salida.
+- **Un marcador de fin que sólo sale si la orden tuvo éxito no es un marcador**:
+  la fase `https` esperaba `local:` y convertía cualquier fallo en 900 s y en un
+  «la sesión SSH no terminó» que culpa al SSH. Usa un `echo` propio.
+- **`page fault de usuario en 0x28` no es un puntero nulo**: es `mov %fs:0x28`,
+  el canario de `-fstack-protector` del C de `ring`, con la base FS sin fijar. Lo
+  arregla `libsoso::tls_init()` desde `entry!`. Si vuelve a salir, mira `tls_base`
+  antes que el código que falla —el rip cae en `curve25519.c`, que no tiene culpa—.
+- **El orden de candados es NET → PROCS.** Todo lo que ya tenga PROCS debe usar
+  `try_lock` sobre NET. Saltárselo no da un mensaje de interbloqueo: la conexión
+  saliente no despierta nunca y el plazo tampoco vence, así que `aplicar` se
+  cuelga mudo.
 - **`test-install` necesita `bootindex`**: con el destino ya instalado el
   firmware arranca de él y la petición la atiende el shim equivocado.
 

@@ -320,6 +320,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_TXN_CONFIRM => sys_txn_confirm(),
         abi::SYS_PING => sys_ping(a1, a2),
         abi::SYS_TXN_LOCK => sys_txn_lock(a1, a2),
+        abi::SYS_PSLIST => sys_pslist(a1, a2),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -929,7 +930,10 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
         if n > 0 {
             return Ok(n);
         }
-        if !crate::net::tcp_is_connected(slot) {
+        // `tcp_cerrado_seguro`, no `!tcp_is_connected`: devolver 0 aquí es
+        // decirle EOF al proceso, y eso no se puede hacer cuando la respuesta
+        // real es «no he podido mirar».
+        if crate::net::tcp_cerrado_seguro(slot) {
             return Ok(0);
         }
         super::block_current(
@@ -1611,6 +1615,71 @@ fn sys_iostat(out: u64) -> Result<u64, i64> {
     })
 }
 
+fn proc_state_abi(s: super::State) -> u8 {
+    use super::State;
+    use abi::{
+        PROC_STATE_RUNNABLE, PROC_STATE_RUNNING, PROC_STATE_SLEEPING, PROC_STATE_WAIT_CHILD,
+        PROC_STATE_WAIT_FUTEX, PROC_STATE_WAIT_PIPE, PROC_STATE_WAIT_SOCKET, PROC_STATE_WAIT_TTY,
+        PROC_STATE_ZOMBIE,
+    };
+    match s {
+        State::Runnable => PROC_STATE_RUNNABLE,
+        State::Running => PROC_STATE_RUNNING,
+        State::Sleeping(_) => PROC_STATE_SLEEPING,
+        State::WaitingChild => PROC_STATE_WAIT_CHILD,
+        State::WaitingTty { .. } => PROC_STATE_WAIT_TTY,
+        State::WaitingPipe { .. } => PROC_STATE_WAIT_PIPE,
+        State::WaitingFutex { .. } => PROC_STATE_WAIT_FUTEX,
+        State::WaitingSocket { .. } => PROC_STATE_WAIT_SOCKET,
+        State::Zombie(_) => PROC_STATE_ZOMBIE,
+    }
+}
+
+fn fill_proc_name(dst: &mut [u8; 48], src: &str) {
+    dst.fill(0);
+    let n = src.len().min(47);
+    dst[..n].copy_from_slice(&src.as_bytes()[..n]);
+}
+
+fn sys_pslist(out: u64, max: u64) -> Result<u64, i64> {
+    if max == 0 || max > 128 {
+        return Err(-abi::EINVAL);
+    }
+    let cap = max as usize;
+    let n_bytes = cap * core::mem::size_of::<abi::ProcInfo>();
+    if !user_range_ok(out, n_bytes as u64, true) {
+        return Err(-abi::EFAULT);
+    }
+    let snapshot: alloc::vec::Vec<abi::ProcInfo> = {
+        let procs = super::PROCS.lock();
+        procs
+            .iter()
+            .take(cap)
+            .map(|p| {
+                let mut info = abi::ProcInfo::default();
+                info.pid = p.pid;
+                info.ppid = p.parent;
+                info.pgid = p.pgid;
+                info.state = proc_state_abi(p.state);
+                if p.is_thread {
+                    info.flags |= abi::PROC_FLAG_THREAD;
+                }
+                fill_proc_name(&mut info.name, &p.name);
+                info
+            })
+            .collect()
+    };
+    let count = snapshot.len();
+    let bytes = unsafe {
+        core::slice::from_raw_parts(snapshot.as_ptr().cast::<u8>(), count * core::mem::size_of::<abi::ProcInfo>())
+    };
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.write(out, bytes).ok_or(-abi::EFAULT)?;
+        Ok(count as u64)
+    })
+}
+
 fn sys_disk_list(out: u64, max: u64) -> Result<u64, i64> {
     if max == 0 || max > 16 {
         return Err(-abi::EINVAL);
@@ -2025,7 +2094,10 @@ fn sys_read_timeout(
         if n > 0 {
             return Ok(n);
         }
-        if !crate::net::tcp_is_connected(slot) {
+        // `tcp_cerrado_seguro`, no `!tcp_is_connected`: devolver 0 aquí es
+        // decirle EOF al proceso, y eso no se puede hacer cuando la respuesta
+        // real es «no he podido mirar».
+        if crate::net::tcp_cerrado_seguro(slot) {
             return Ok(0);
         }
         super::block_current(

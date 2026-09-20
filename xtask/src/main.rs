@@ -674,6 +674,7 @@ pub(crate) fn build_user() -> bool {
         "hexdump",
         "log",
         "ip",
+        "ps",
         "ping",
         "tcpconn",
         "halt",

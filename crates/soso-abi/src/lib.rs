@@ -165,6 +165,8 @@ pub const SYS_PING: u64 = 89;
 /// que se copió. Leer no se toca; los que sólo leen siguen con los ficheros
 /// viejos.
 pub const SYS_TXN_LOCK: u64 = 91;
+/// Lista procesos del scheduler: `(out: *mut ProcInfo, max) → n`.
+pub const SYS_PSLIST: u64 = 92;
 /// Tomarla para este proceso. `-EBUSY` si ya la tiene otro.
 pub const TXN_LOCK_TOMAR: u64 = 1;
 /// La operación quedó **armada**: la exclusión deja de tener dueño y dura
@@ -500,6 +502,46 @@ pub struct NetInfo {
     pub gateway: [u8; 4],
     pub mac: [u8; 6],
     pub _pad2: [u8; 2],
+}
+
+/// Valores de `ProcInfo.state` (syscall `SYS_PSLIST`).
+pub const PROC_STATE_RUNNABLE: u8 = 0;
+pub const PROC_STATE_RUNNING: u8 = 1;
+pub const PROC_STATE_SLEEPING: u8 = 2;
+pub const PROC_STATE_WAIT_CHILD: u8 = 3;
+pub const PROC_STATE_WAIT_TTY: u8 = 4;
+pub const PROC_STATE_WAIT_PIPE: u8 = 5;
+pub const PROC_STATE_WAIT_FUTEX: u8 = 6;
+pub const PROC_STATE_WAIT_SOCKET: u8 = 7;
+pub const PROC_STATE_ZOMBIE: u8 = 8;
+
+pub const PROC_FLAG_THREAD: u8 = 1;
+
+/// Entrada de `SYS_PSLIST`: un proceso (o hilo) del scheduler.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct ProcInfo {
+    pub pid: u64,
+    pub ppid: u64,
+    pub pgid: u64,
+    pub state: u8,
+    pub flags: u8,
+    pub _pad: [u8; 6],
+    pub name: [u8; 48],
+}
+
+impl Default for ProcInfo {
+    fn default() -> Self {
+        Self {
+            pid: 0,
+            ppid: 0,
+            pgid: 0,
+            state: 0,
+            flags: 0,
+            _pad: [0; 6],
+            name: [0; 48],
+        }
+    }
 }
 
 /// Respuesta de `SYS_IOSTAT`: contadores de E/S de bloque desde el arranque.

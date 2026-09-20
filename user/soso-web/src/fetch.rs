@@ -18,8 +18,8 @@ impl FetchError {
     pub fn mensaje(&self) -> &'static str {
         match self {
             Self::Http(HttpError::Parse) => "error HTTP (parse)",
-            Self::Http(HttpError::Tls) => "error TLS",
-            Self::Http(HttpError::Io) => "error HTTP (E/S)",
+            Self::Http(HttpError::Tls(_)) => "error TLS",
+            Self::Http(HttpError::Io(_)) => "error HTTP (E/S)",
             Self::Http(HttpError::Dns) => "error DNS",
             Self::Http(HttpError::Clock) => "reloj del sistema no utilizable",
             Self::Io(_) => "error de E/S",

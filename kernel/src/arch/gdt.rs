@@ -35,6 +35,31 @@ pub struct KStack(pub [u8; KSTACK_SIZE]);
 
 pub static mut KSTACK: KStack = KStack([0; KSTACK_SIZE]);
 
+/// Guarda **por encima** de la cima de `KSTACK`.
+///
+/// Un `rsp` que sube por encima de la cima escribe en lo que haya detrás en
+/// `.bss` —hoy `smp::AP_STACKS`, que con un solo core nadie toca— y no lo
+/// detecta nadie: no hay páginas de guarda entre objetos de `.bss`. El
+/// resultado se paga mucho más tarde, cuando alguien vuelve a una zona con
+/// basura, y entonces ya no queda rastro de quién la escribió.
+///
+/// Esto no arregla nada; sirve para que el fallo salte **donde se produce**.
+/// El área sobre la cima está a ceros de `.bss`, así que basta con mirarla.
+const GUARDA_QWORDS: usize = 32;
+
+/// `Some(offset)` si alguien ha escrito por encima de la cima de `KSTACK`.
+pub fn guarda_sobre_kstack_rota() -> Option<usize> {
+    let tope = kstack_top().as_u64();
+    for i in 0..GUARDA_QWORDS {
+        let p = tope + (i * 8) as u64;
+        let v = unsafe { core::ptr::read_volatile(p as *const u64) };
+        if v != 0 {
+            return Some(i * 8);
+        }
+    }
+    None
+}
+
 pub fn kstack_top() -> VirtAddr {
     VirtAddr::from_ptr(&raw const KSTACK) + KSTACK_SIZE as u64
 }

@@ -78,13 +78,13 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 
 ### Syscalls principales
 
-`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo, netinfo, ping` (+ GPU, TCP, hilos, WiFi)
+`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo, netinfo, ping, pslist` (+ GPU, TCP, hilos, WiFi)
 
 - **Instalación / ESP:** syscalls y huecos 8.3 — skill **`soso-live`** (`disk_*`, `bootreq_*`, `upd_*`, `espfat`)
 - **OTA, transacción y vuelta atrás:** skill **`soso-update`** (`txn_*`, `SYS_TXN_LOCK`, `txnaplica`, puntos)
 - **Framebuffer / entrada:** `fb_info=62`, `fb_set_mode=63`, `fb_present=64`, `input_poll=65` (modo gráfico userspace; ratón PS/2 aux)
 - **WiFi:** `wifi_scan=56`, `wifi_status=57`, `wifi_connect=58` — detalle en **`soso-wifi`**
-- **Red:** `netinfo=87` — IPv4/MAC/pasarela de la NIC activa (`/bin/ip`, kshell `ip`); `fsinfo=88` — bloques totales/libres del sosofs raíz (comprobación previa de OTA); `ping=89` — ICMP Echo (`/bin/ping`, kshell `ping`)
+- **Red:** `netinfo=87` — IPv4/MAC/pasarela de la NIC activa (`/bin/ip`, kshell `ip`); `fsinfo=88` — bloques totales/libres del sosofs raíz (comprobación previa de OTA); `ping=89` — ICMP Echo (`/bin/ping`, kshell `ping`); `pslist=92` — tabla de procesos (`/bin/ps`, kshell `ps`)
 - **Audio:** `audio_open=59`, `audio_read=60`, `audio_close=61` (HDA, `drv-hda`)
 
 - **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`/`spawn_io_full`; hijos heredan cwd del padre; fd 3 = registro (`Fd::Log`, ring `applog`, `SYS_LOG_READ=86`, `logln!`); redirecciones `N>`, `N>>`, `N>&-` para N=1–3. `cat`/`grep`/`hexdump` leen stdin **sin argumentos** (o con `-`); el pipe cierra y `read` = 0
@@ -138,12 +138,32 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `/bin/soso-resize` | Amplía sosofs robando margen libre al final de modelos (`SYS_FS_RESIZE`; live/instalado GPT) |
 | `/bin/soso-update` | Releases GitHub: rootfs por fichero (sin rollback de binarios; progreso en `/etc/actualiza.estado`); kernel vía `SOSOUPD.TXT` + `SOSOKRN.BIN` + meta `SOSOKRN.MET` (recovery verificable) |
 | `/bin/soso-web` | Navegador mínimo: HTTPS + HTML→texto (modo lectura) o framebuffer (modo `--grafico`) |
-| `/bin/{ls,cat,echo,mkdir,rm,hexdump,grep,ip,ping,halt}` | Coreutils (`cat`/`grep`/`hexdump`: stdin si no hay ficheros; `-` sigue valiendo) |
+| `/bin/{ls,cat,echo,mkdir,rm,hexdump,grep,ip,ps,ping,halt}` | Coreutils (`cat`/`grep`/`hexdump`: stdin si no hay ficheros; `-` sigue valiendo) |
 
 `libsoso`: crt0, syscall wrappers, mini-libstd (256 KiB heap arena), `linea::Lector`
 (lectura de línea con eco: **acepta UTF-8** y borra por carácter; lee **byte a byte**
 para que lo que venga detrás de la línea se quede en la cola de la tty y lo vea el
 hijo que se acabe de lanzar; `read` = 0 o Ctrl-D en línea vacía → `Ok(None)`).
+
+**Entropía de userland**: `libsoso` registra el backend de `getrandom` con
+`register_custom_getrandom!`, que llama a `SYS_GETRANDOM` (78). De ahí sacan el
+aleatorio `ring` y `rustls`, o sea todo lo que hable TLS (`soso-update`,
+`soso-web`, `soso-hf`). **No volver a `rdrand`**: ese backend corre un autotest
+de ocho tiradas que bajo TCG no pasa, y además las features de Cargo se unifican
+en todo el grafo —en `getrandom` 0.2 el de CPU se elige antes que el
+personalizado—, así que un solo crate pidiendo `rdrand` deja muerto el registro.
+El fallo aparece como `TLS: failed to get random bytes`. Ojo: `sys_getrandom` es
+RDRAND en ring 0 **sin comprobar CPUID**; no hay fuente propia del kernel.
+
+**Base FS (`tls_base`) y canario de pila**: `entry!` llama a
+`libsoso::tls_init()`, que monta un TCB mínimo —puntero a sí mismo en `fs:0x00`,
+canario en `fs:0x28`— y lo fija con `SYS_SET_TLS`; `task::thread_spawn` lo
+hereda del padre. Hace falta porque el C de `ring` se compila con
+`-fstack-protector` y **lee** `%fs:0x28` al entrar en cada función: sin base FS
+eso es la dirección lineal `0x28` y el proceso muere con «page fault de usuario
+en 0x28» dentro de `curve25519.c`. Definir `__stack_chk_fail` no basta —ese
+símbolo sólo hace falta para enlazar, y no se alcanza nunca—. Los ELF de
+userspace no traen `PT_TLS`, así que `tls_base` sólo lo pone `tls_init`.
 
 **`ask`** (`user/soso-llm/src/ask.rs`, cliente en `user/sosh/src/main.rs`): `sosh` lo
 resuelve **antes de tokenizar** y habla por TCP con el demonio de máquina
@@ -203,6 +223,37 @@ E2E: paso `soso-web: HTML local` en `cargo xtask test`.
 era por instancia: el hilo de staging y `STAGE` son del proceso, así que arrancaba un
 segundo worker y reseteaba `generation` (que el vivo leía como kick) → dos hilos sobre
 el mismo `BTreeMap`. Ahora el flag es global (`WORKER_VIVO`).
+
+## Candados de red y procesos: un solo orden
+
+`net/ssh.rs` corre **bajo el candado de red** y llama a `task::exists`,
+`spawn_console`, `kill_console`… que toman **procesos**. Por tanto el orden
+válido es **red → procesos**, y nada que sostenga `PROCS` puede esperar por la
+red: el bucle de despertares de `schedule_inner` usa `try_lock` en
+`tcp_is_connected`, `tcp_connect_failed`, `tcp_try_read`, `tcp_try_write` y
+`tcp_listener_ready`, y contesta «todavía no» si está ocupada.
+
+**Pero `false` no puede significar dos cosas.** `try_lock` fallido es «no lo
+sé», no «está cerrado», y hay tres sitios —`sys_read`, `sys_read_timeout` y el
+propio bucle de despertares— que convierten ese `false` en **EOF para el
+proceso**. Por eso `net::mod` expone `EstadoTcp { Conectado, Cerrado, Ocupado }`:
+`tcp_is_connected` es «consta que está arriba» (quien espera a conectar puede
+tratar la duda como «todavía no») y `tcp_cerrado_seguro` es «consta que está
+cerrado», la única pregunta válida antes de dar EOF. Confundirlas hacía que la
+primera lectura tras un ClientHello volviera con 0 bytes en 0 ms y el handshake
+TLS muriera siempre contra un servidor real.
+
+**Puerto local efímero**: `tcp_user::puerto_efimero()` rota por 49152..65535 con
+un contador. **No derivarlo del slot**: el slot se reutiliza en cuanto se cierra
+una conexión, y entonces la siguiente al mismo destino repite la cuádrupla
+entera — el par la tiene en `TIME_WAIT`, descarta el SYN y el `connect` vence a
+los 30 s con `EAGAIN`. Con una sola conexión no se ve; hace falta una segunda al
+mismo host, o sea cualquier redirección HTTP.
+
+Volver a poner ahí un `lock()` bloqueante cuelga **toda** la red en cuanto haya
+un proceso dormido en un socket y dos cores: uno tiene red y quiere procesos, el
+otro al revés. El síntoma no es «no conecta» sino que **tampoco vence el plazo**.
+Lo cubre `cargo xtask test-update saliente` (2026-09-19).
 
 ## Network & SSH
 

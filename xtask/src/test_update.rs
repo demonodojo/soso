@@ -624,8 +624,18 @@ halt
         let _guard = Matar(qemu.child);
         esperar_en_fichero(&s2, "sosh —", Duration::from_secs(300))?;
         esperar_en_fichero(&s2, "txn: pareja confirmada", Duration::from_secs(120))?;
-        ssh_guion_hasta(key, SSH_PORT, "halt
-", Duration::from_secs(120), "apagando")?;
+        // El marcador tiene que imprimirlo **la sesión**: «apagando» lo dice el
+        // kernel por la consola serie y llega al canal SSH o no, según quién
+        // gane la carrera con el cierre del socket.
+        ssh_guion_hasta(
+            key,
+            SSH_PORT,
+            "soso-update estado
+halt
+",
+            Duration::from_secs(120),
+            "rootfs:",
+        )?;
     }
 
     // Y ahora el corte: se rebobina **sólo** la ESP a «probando», que es el
@@ -1352,13 +1362,18 @@ fn fase_https(
     let salida = ssh_guion_hasta(
         key,
         SSH_PORT,
-        "soso-update comprobar
+        "soso-update comprobar --traza
+echo FIN-COMPROBAR
 halt
 ",
         // Generoso a propósito: lo que se quiere distinguir es «lento» de
         // «colgado», y con el límite corto los dos se parecen.
         Duration::from_secs(900),
-        "local:",
+        // El marcador es el `echo`, **no** «local:». Esperar por una línea que
+        // sólo sale si el cliente tuvo éxito convierte cualquier fallo en una
+        // espera de 900 s y un mensaje —«la sesión SSH no terminó»— que acusa
+        // al SSH de algo que hizo la red.
+        "FIN-COMPROBAR",
     )?;
     let serie = std::fs::read_to_string(serial).unwrap_or_default();
     if serie.contains("page fault de usuario") {

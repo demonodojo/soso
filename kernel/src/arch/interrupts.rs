@@ -433,9 +433,40 @@ extern "sysv64" fn kernel_pf_panic_shim(addr: u64, _: u64) -> u64 {
     let err = EXC_ERR.load(Ordering::Relaxed);
     rastro_de_pila(rsp);
     crate::println!("rastro: rsp en {}", crate::arch::gdt::zona_de_pila(rsp));
+    volcado_junto_a_rsp(rsp);
     panic!(
         "EXCEPTION: page fault at {addr:#x} rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x} cs={cs:#x} err={err:#x}"
     );
+}
+
+/// Volcado crudo alrededor de `rsp`.
+///
+/// Un `ret` que saca 0 tiene dos explicaciones muy distintas y el rastro no las
+/// separa: que **alguien haya puesto a cero** un trozo de pila viva (corrupción)
+/// o que se haya vuelto a una zona que nunca se escribió (pila nueva, o `rsp`
+/// movido). Se ven de un vistazo: en el primer caso hay ceros rodeados de datos
+/// plausibles; en el segundo, ceros hasta donde alcanza la vista.
+fn volcado_junto_a_rsp(rsp: u64) {
+    if rsp == 0 || rsp % 8 != 0 {
+        return;
+    }
+    let zona = crate::arch::gdt::zona_de_pila(rsp);
+    let desde = rsp.saturating_sub(64);
+    crate::println!("volcado: 8 qwords antes y 8 después de rsp ({zona})");
+    for i in 0..16u64 {
+        let p = desde + i * 8;
+        // No leer fuera de una pila conocida: el volcado no puede provocar
+        // una segunda excepción dentro del manejador de la primera.
+        if crate::arch::gdt::zona_de_pila(p).starts_with("NINGUNA") {
+            continue;
+        }
+        let v = unsafe { core::ptr::read_volatile(p as *const u64) };
+        crate::println!(
+            "volcado: [{:+#06x}] {v:#018x}{}",
+            p as i64 - rsp as i64,
+            if p == rsp { "  <- rsp" } else { "" }
+        );
+    }
 }
 
 /// Backtrace de pobre para una excepción en ring 0: recorre la pila de kernel
@@ -458,7 +489,7 @@ fn rastro_de_pila(rsp: u64) {
     let mut p = rsp;
     let fin = rsp.saturating_add(4096);
     let mut vistos = 0;
-    while p < fin && vistos < 24 {
+    while p < fin && vistos < 40 {
         let v = unsafe { core::ptr::read_volatile(p as *const u64) };
         if v > base && v < tope {
             crate::println!("rastro: [{:+#06x}] {v:#x} (+{:#x})", p - rsp, v - base);

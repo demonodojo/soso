@@ -8,6 +8,21 @@ use soso_http::TcpTransport;
 
 struct Net;
 
+/// Traza byte a byte del transporte, que enciende `--traza`. En una avería de
+/// red lo que hace falta saber es si la petición salió y si volvió algo, y eso
+/// no se deduce del mensaje de error. `sosh` no tiene variables de entorno, así
+/// que es una bandera y no una variable.
+static TRAZA_BYTES: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+fn ahora_ms() -> u64 {
+    let mut ts = abi::Timespec::default();
+    if sys::clock_gettime(abi::CLOCK_MONOTONIC, &mut ts) != 0 {
+        return 0;
+    }
+    ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
+}
+
 fn guest_wall_clock() -> Option<u64> {
     let mut ts = abi::Timespec::default();
     if sys::clock_gettime(abi::CLOCK_REALTIME, &mut ts) != 0 {
@@ -27,6 +42,11 @@ fn ensure_wall_clock() {
     if !INSTALLED.swap(true, core::sync::atomic::Ordering::AcqRel) {
         soso_http::set_wall_clock(guest_wall_clock);
     }
+}
+
+/// Enciende la traza byte a byte del transporte (`--traza`).
+pub fn encender_traza() {
+    TRAZA_BYTES.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Las etapas de una descarga se dicen según pasan.
@@ -65,11 +85,20 @@ impl TcpTransport for Net {
     }
 
     fn read_timeout(&self, fd: u64, buf: &mut [u8], timeout_ms: u64) -> i64 {
-        sys::read_timeout(fd, buf, timeout_ms)
+        let t0 = ahora_ms();
+        let n = sys::read_timeout(fd, buf, timeout_ms);
+        if TRAZA_BYTES.load(core::sync::atomic::Ordering::Relaxed) {
+            println!("  red: read(fd {fd}, {timeout_ms}ms) = {n} en {}ms", ahora_ms() - t0);
+        }
+        n
     }
 
     fn write_all(&self, fd: u64, data: &[u8]) -> Result<(), i64> {
-        sys::write_all(fd, data)
+        let r = sys::write_all(fd, data);
+        if TRAZA_BYTES.load(core::sync::atomic::Ordering::Relaxed) {
+            println!("  red: write(fd {fd}, {} B) = {:?}", data.len(), r);
+        }
+        r
     }
 
     fn close(&self, fd: u64) {
@@ -182,8 +211,15 @@ fn map_http_err(e: soso_http::HttpError) -> &'static str {
     match e {
         soso_http::HttpError::Clock => "reloj del sistema no utilizable",
         soso_http::HttpError::Dns => "DNS",
-        soso_http::HttpError::Tls => "TLS",
+        // El motivo viaja con el error: se enseña, que para eso está.
+        soso_http::HttpError::Tls(motivo) => {
+            println!("  red: TLS falló — {motivo}");
+            "TLS"
+        }
         soso_http::HttpError::Parse => "HTTP parse",
-        soso_http::HttpError::Io => "descarga HTTP",
+        soso_http::HttpError::Io(donde) => {
+            println!("  red: E/S falló — {donde}");
+            "descarga HTTP"
+        }
     }
 }

@@ -9,7 +9,12 @@ members = ["libsoso", "init", "sosh", "coreutils", "soso-gpu", "soso-llm", "soso
 soso-abi = { path = "../crates/soso-abi" }
 libsoso = { path = "libsoso" }
 soso-update-core = { path = "../crates/soso-update-core" }
-getrandom = { version = "0.2", features = ["rdrand"] }
+# `custom`, no `rdrand`: la entropía la da el kernel por `SYS_GETRANDOM`, que
+# ya la tiene. Con el backend de CPU, un proceso de usuario depende de que
+# RDRAND esté disponible **y** de que su detección por CPUID acierte —bajo TCG
+# no acierta—, y el fallo aparece como «TLS: failed to get random bytes» al
+# primer handshake, que no se parece en nada a su causa.
+getrandom = { version = "0.2", features = ["custom"] }
 
 [profile.release]
 panic = "abort"

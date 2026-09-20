@@ -529,6 +529,26 @@ fn suite() -> u8 {
     // Señales: getpid, kill(SIGINT) y grupos de procesos.
     let me = sys::getpid();
     check!(me > 0, "getpid ({me})");
+
+    check!(sys::pslist(&mut []) == -abi::EINVAL, "pslist max=0 -> EINVAL");
+    let mut plist = [abi::ProcInfo::default(); 128];
+    let np = sys::pslist(&mut plist);
+    check!(np >= 2, "pslist devuelve al menos init+test (n={np})");
+    let mut vi_init = false;
+    let mut vi_me = false;
+    for p in &plist[..np as usize] {
+        let end = p.name.iter().position(|&b| b == 0).unwrap_or(p.name.len());
+        let nom = core::str::from_utf8(&p.name[..end]).unwrap_or("");
+        if p.pid == 1 && nom == "/bin/init" {
+            vi_init = true;
+        }
+        if p.pid == me && nom == "/bin/init" {
+            vi_me = true;
+        }
+    }
+    check!(vi_init, "pslist incluye pid 1 /bin/init");
+    check!(vi_me, "pslist incluye getpid()");
+
     let sid = sys::setsid();
     check!(sid == me as i64, "setsid devuelve el pid ({sid})");
 

@@ -800,6 +800,132 @@ estado` digan exactamente lo que se ha visto. Si algo de lo que promete el
 manual no se cumple en la placa, se corrige **el manual** además del código: lo
 que no se ha probado en hardware no se anuncia como probado.
 
+### Camino de red de la actualización — 2026-09-20
+
+Preparando U8 salió en la placa un `soso-update: DNS` y, al arreglarlo, debajo
+había seis averías más, cada una tapando a la siguiente. Ninguna es del
+actualizador: las siete están en el camino que usa, y por eso no las veía
+ninguna prueba del plan. Ahora hay dos fases
+nuevas en `cargo xtask test-update` que las fijan: **`saliente`** (TCP de salida
+desde userland, sin red de verdad) y **`https`** (descarga real, sólo con
+`SOSO_TEST_RED=1`).
+
+**1. DNS con reloj falso.** `net::dns` esperaba con un contador de vueltas y
+consultaba servidores fijos. En QEMU el temporizador va tan rápido que no se
+nota; en la placa el plazo vencía antes de que llegara la respuesta. Ahora
+espera contra `net::now()` (1500 ms por servidor) y prefiere los servidores que
+anunció el DHCP, que se guardan en `NetStack.dns` como array fijo —nada de
+`Vec`— para no reservar memoria dentro de `poll_dhcp`.
+
+**2. Interbloqueo NET → PROCS.** El orden de candados del sistema es
+**NET antes que PROCS**, y el servicio SSH lo respeta. Pero cinco funciones de
+`net::mod` (`tcp_is_connected`, `tcp_connect_failed`, `tcp_try_read`,
+`tcp_try_write`, `tcp_listener_ready`) tomaban NET con `lock()` desde contextos
+que ya tenían PROCS. El síntoma no se parece a un interbloqueo: la conexión
+saliente **no despertaba nunca** y el plazo tampoco vencía, así que `aplicar`
+se quedaba colgado sin un solo mensaje de error. Las cinco usan ya `try_lock`.
+
+**3. Entropía de userland.** Con la red viva, el handshake moría con
+`TLS: failed to get random bytes`. `rustls`/`ring` piden aleatorio a
+`getrandom`, que estaba configurado con el backend **`rdrand`**. Ese backend no
+ejecuta RDRAND a secas: comprueba CPUID y además corre un autotest de ocho
+tiradas que rechaza la fuente si se repiten valores. Bajo TCG no pasa, y el
+programa se queda sin aleatorio. `SYS_GETRANDOM` (78) ya existía en el kernel
+—sin que nadie la usara— y ahí RDRAND se ejecuta sin ese filtro, así que
+`libsoso` registra un backend propio (`register_custom_getrandom!`) que llama a
+la syscall.
+
+Dicho con precisión: **el kernel no tiene una fuente de entropía mejor**, es el
+mismo RDRAND en ring 0. Lo que gana es no depender del juicio del backend de
+userland. Una fuente propia del kernel (mezcla de TSC, interrupciones y RDRAND
+cuando esté) sigue pendiente, y `sys_getrandom` tampoco comprueba CPUID: en una
+máquina sin RDRAND haría `#UD` en vez de devolver error.
+
+El detalle que costó una pasada entera: **las features de Cargo se unifican en
+todo el grafo**, y en `getrandom` 0.2 el backend de CPU se elige *antes* que el
+personalizado. Bastaba con que `crates/soso-http/Cargo.toml` siguiera pidiendo
+`rdrand` para que el `register_custom_getrandom!` de `libsoso` quedara compilado
+pero muerto, aunque el binario de usuario pidiera `custom`. Los dos piden
+`custom` ahora; se comprueba con `nm` sobre el ELF: tiene que aparecer
+`getrandom::custom::getrandom_inner` y ninguna cadena `rdrand`.
+
+**4. El canario de pila sin TLS.** Con entropía de verdad, el handshake
+avanzó hasta `x25519_public_from_private_generic_masked` y ahí el proceso murió:
+`page fault de usuario en 0x28`. No es un puntero nulo. La primera instrucción
+de esa función es `mov %fs:0x28,%rax` — el canario de `-fstack-protector`, que
+el `cc` de `ring` trae activado. Ningún binario de soso fijaba la base FS
+(`tls_base` sale de `PT_TLS` y los ELF de userspace no traen ninguno), así que
+`%fs:0x28` era la dirección lineal `0x28`. Sólo en `soso-update` hay **81**
+lecturas así.
+
+Había ya un apaño a medias: `libsoso` definía `__stack_chk_fail` para que
+enlazara, con un comentario diciendo que así «se conserva la comprobación». No
+se conservaba: el fallo está en **leer** el canario, no en comprobarlo, y
+`__stack_chk_fail` no se alcanzaba nunca. Ahora `entry!` llama a
+`libsoso::tls_init()`, que monta un TCB mínimo (puntero a sí mismo en `fs:0x00`,
+canario en `fs:0x28`, comprobado con `offset_of!` en tiempo de compilación) y lo
+fija con `SYS_SET_TLS`. Y `task::thread_spawn` **hereda `tls_base` del padre**:
+lo dejaba a 0, con lo que el mismo fallo habría salido sólo en los hilos, que es
+aún más difícil de leer.
+
+**Este es el `page fault en 0x28` que salió en el ROG**, y no tenía nada que ver
+con la transición ni con el hardware: cualquier máquina que llegue a hablar TLS
+lo encuentra.
+
+**5. «Ocupado» devuelto como EOF.** El arreglo del punto 2 dejó a
+`tcp_is_connected` devolviendo `false` en dos casos distintos: «está cerrado» y
+«no he podido mirar porque la red estaba tomada». Y los tres sitios que leen ese
+`false` —`sys_read`, `sys_read_timeout` y el bucle de despertares— lo convierten
+en **EOF para el proceso**. Un solo instante desafortunado mataba el handshake:
+la primera lectura después del ClientHello volvía con `0 bytes en 0 ms`.
+
+`net::mod` tiene ya un `EstadoTcp { Conectado, Cerrado, Ocupado }`.
+`tcp_is_connected` sigue siendo «consta que está arriba» —quien espera a que una
+conexión se establezca puede tratar la duda como «todavía no» sin perder nada— y
+`tcp_cerrado_seguro` es «consta que está cerrado», que es la única pregunta
+válida antes de darle EOF a nadie.
+
+**6. Bucle vivo en el cuerpo de la respuesta.** En `read_plain_to`, el estado
+`WriteTraffic` de rustls no hacía nada. Post-handshake ese estado significa «no
+queda nada por procesar de lo ya recibido», no «no hay nada que hacer»: hay que
+pedir más bytes. El cliente se quedaba girando justo después de mandar la
+petición, sin traza ninguna y sin vencer ningún plazo, que es lo más parecido a
+un cuelgue del kernel que puede hacer un proceso de usuario.
+
+**7. El puerto local salía del índice de slot.** `tcp_user::poll_entry` usaba
+`49152 + slot`. Al cerrar una conexión el slot se libera y se reutiliza de
+inmediato, así que la conexión siguiente **al mismo destino** repetía la
+cuádrupla entera; el par la tiene todavía en `TIME_WAIT` y descarta el SYN, y el
+`connect` vencía a los 30 s con `EAGAIN`. Ahora hay un contador que rota por el
+rango efímero.
+
+Esta es la que explica por qué `saliente` pasaba y `https` no: con **una** sola
+conexión no se ve. Hace falta una segunda al mismo host, que es exactamente lo
+que provoca cualquier redirección — y GitHub encadena tres saltos para
+`releases/latest/download`.
+
+**Cómo se encontraron las tres últimas.** No con la fase del banco: a quince
+minutos por intento y con cada arreglo destapando el siguiente, el ciclo no
+cerraba. Lo que lo desatascó fue arrancar a mano la imagen ya construida
+(`qemu-system-x86_64` con los mismos argumentos que `lanzar_live`) y entrar por
+SSH: reproducir pasa a costar treinta segundos, y desde una **segunda** sesión
+se puede mirar el sistema mientras está roto. `ps` sobre la máquina colgada fue
+lo que dijo que `soso-update` ya no existía —el `connect` sí vencía, sólo que
+después del límite del banco— y eso descartó el cuelgue que yo daba por hecho.
+
+Dos herramientas nuevas salen de aquí y se quedan: `soso-update --traza`, que
+imprime cada `read`/`write` del transporte con bytes y milisegundos, y el
+marcador `FIN-COMPROBAR` del banco. Antes la fase esperaba la línea `local:`,
+que **sólo sale si el cliente tuvo éxito**: cualquier fallo se convertía en 900 s
+de espera y en un mensaje que acusaba al SSH de algo que había hecho la red.
+
+Las siete comparten una forma: **la causa está lejos del síntoma**. Falta de
+entropía que se lee como «TLS», orden de candados que se lee como «la red no
+responde», reloj que se lee como «DNS», base FS sin fijar que se lee como «page
+fault en una dirección absurda dentro de una librería de criptografía», y un
+puerto local reutilizado que se lee como «el servidor no contesta». `HttpError::Tls` lleva ya el mensaje de
+`rustls` en vez de ser un enum vacío, precisamente para acortar esa distancia.
+
 ### U7 — cerrada el 2026-09-18 (la matriz, con las averías provocadas a mano)
 
 Cinco casos nuevos en QEMU, todos fabricando la avería en vez de esperarla. Los

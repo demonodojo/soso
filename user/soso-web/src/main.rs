@@ -218,8 +218,8 @@ fn linea_err(e: &fetch::FetchError) -> String {
         fetch::FetchError::Io(code) => format!("errno {}", -code),
         fetch::FetchError::Status(st) => format!("HTTP {st}"),
         fetch::FetchError::Http(soso_http::HttpError::Parse) => String::from("parse"),
-        fetch::FetchError::Http(soso_http::HttpError::Tls) => String::from("tls"),
-        fetch::FetchError::Http(soso_http::HttpError::Io) => String::from("http-io"),
+        fetch::FetchError::Http(soso_http::HttpError::Tls(_)) => String::from("tls"),
+        fetch::FetchError::Http(soso_http::HttpError::Io(_)) => String::from("http-io"),
         fetch::FetchError::Http(soso_http::HttpError::Dns) => String::from("dns"),
         fetch::FetchError::Http(soso_http::HttpError::Clock) => String::from("reloj"),
     }

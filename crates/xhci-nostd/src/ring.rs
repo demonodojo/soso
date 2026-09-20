@@ -843,3 +843,23 @@ impl TransferRing {
         }
     }
 }
+
+#[cfg(test)]
+mod trb_tests {
+    use super::{Trb, TRB_BSR, TRB_SLOT_ID_SHIFT, TRB_TYPE_ADDRESS_DEVICE, TRB_TYPE_SHIFT};
+
+    #[test]
+    fn address_device_trb_bsr_bit() {
+        let ctx = 0x20f4_a000u64;
+        let with_bsr = Trb::address_device(ctx, 1, true, false);
+        assert_ne!(with_bsr.control & TRB_BSR, 0);
+        let without = Trb::address_device(ctx, 1, false, false);
+        assert_eq!(without.control & TRB_BSR, 0);
+        assert_eq!(
+            (with_bsr.control >> TRB_TYPE_SHIFT) & 0x3f,
+            TRB_TYPE_ADDRESS_DEVICE
+        );
+        assert_eq!((with_bsr.control >> TRB_SLOT_ID_SHIFT) & 0xff, 1);
+        assert_eq!(with_bsr.parameter(), ctx);
+    }
+}

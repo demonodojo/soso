@@ -70,11 +70,18 @@ impl TimeProvider for GuestTimeProvider {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpError {
     Parse,
-    Tls,
-    Io,
+    /// Fallo de TLS **con el motivo que dio rustls**. Sin él, «TLS» a secas no
+    /// distingue un certificado rechazado de una alerta del servidor o de un
+    /// reloj mal puesto, y desde el guest no hay forma de averiguarlo.
+    Tls(alloc::string::String),
+    /// Fallo de E/S **con el punto donde ocurrió**. «descarga HTTP» a secas no
+    /// distingue un `write` cortado de un servidor que deja de mandar bytes a
+    /// mitad del handshake, y son averías distintas. Es `&'static str`: no
+    /// reserva, así que vale en cualquier camino de error.
+    Io(&'static str),
     Dns,
     /// Reloj del guest ausente o fuera de rango para validar certificados.
     Clock,
@@ -93,7 +100,7 @@ fn client_config() -> Result<Arc<ClientConfig>, HttpError> {
     Ok(Arc::new(
         ClientConfig::builder_with_details(Arc::new(provider), Arc::new(GuestTimeProvider))
             .with_safe_default_protocol_versions()
-            .map_err(|_| HttpError::Tls)?
+            .map_err(|e| HttpError::Tls(alloc::format!("{e}")))?
             .with_root_certificates(roots)
             .with_no_client_auth(),
     ))
@@ -137,8 +144,8 @@ struct TlsSession<'a, T: TcpTransport> {
 
 impl<'a, T: TcpTransport> TlsSession<'a, T> {
     fn new(transport: &'a T, fd: u64, host: &str, config: Arc<ClientConfig>) -> Result<Self, HttpError> {
-        let name = ServerName::try_from(host.to_string()).map_err(|_| HttpError::Tls)?;
-        let conn = UnbufferedClientConnection::new(config, name).map_err(|_| HttpError::Tls)?;
+        let name = ServerName::try_from(host.to_string()).map_err(|e| HttpError::Tls(alloc::format!("{e}")))?;
+        let conn = UnbufferedClientConnection::new(config, name).map_err(|e| HttpError::Tls(alloc::format!("{e}")))?;
         Ok(Self {
             conn,
             fd,
@@ -152,7 +159,7 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
         if !self.outgoing_pending.is_empty() {
             self.transport
                 .write_all(self.fd, &self.outgoing_pending)
-                .map_err(|_| HttpError::Io)?;
+                .map_err(|_| HttpError::Io("write_all del transporte"))?;
             self.outgoing_pending.clear();
         }
         Ok(())
@@ -176,14 +183,13 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                 let status = self.conn.process_tls_records(&mut scratch);
                 let discard = status.discard;
                 match status.state {
-                    Err(_) => {
-                        if !self.read_more(30_000)? {
-                            return Err(HttpError::Io);
-                        }
-                    }
+                    // Un error aquí **es** un error de TLS (certificado,
+                    // versión, alerta), no «faltan bytes»: tratarlo como lo
+                    // segundo lo convertía en un `Io` mudo al cerrar el par.
+                    Err(e) => return Err(HttpError::Tls(alloc::format!("{e}"))),
                     Ok(state) => match state {
                         ConnectionState::EncodeTlsData(mut enc) => {
-                            let n = enc.encode(&mut out_buf).map_err(|_| HttpError::Tls)?;
+                            let n = enc.encode(&mut out_buf).map_err(|e| HttpError::Tls(alloc::format!("{e}")))?;
                             drop(enc);
                             self.outgoing_pending.extend_from_slice(&out_buf[..n]);
                             self.flush_pending()?;
@@ -193,7 +199,9 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                         }
                         ConnectionState::BlockedHandshake => {
                             if !self.read_more(30_000)? {
-                                return Err(HttpError::Io);
+                                return Err(HttpError::Io(
+                                    "el par dejó de mandar bytes durante el handshake TLS",
+                                ));
                             }
                         }
                         ConnectionState::WriteTraffic(_) => return Ok(()),
@@ -227,14 +235,14 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                         ConnectionState::WriteTraffic(mut wt) => {
                             let n = wt
                                 .encrypt(&data[off..], &mut out_buf)
-                                .map_err(|_| HttpError::Tls)?;
+                                .map_err(|e| HttpError::Tls(alloc::format!("{e}")))?;
                             drop(wt);
                             self.outgoing_pending.extend_from_slice(&out_buf[..n]);
                             self.flush_pending()?;
                             off = data.len();
                         }
                         ConnectionState::EncodeTlsData(mut enc) => {
-                            let n = enc.encode(&mut out_buf).map_err(|_| HttpError::Tls)?;
+                            let n = enc.encode(&mut out_buf).map_err(|e| HttpError::Tls(alloc::format!("{e}")))?;
                             drop(enc);
                             self.outgoing_pending.extend_from_slice(&out_buf[..n]);
                             self.flush_pending()?;
@@ -278,14 +286,14 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                     Ok(state) => match state {
                         ConnectionState::ReadTraffic(mut rt) => {
                             while let Some(rec) = rt.next_record() {
-                                let rec = rec.map_err(|_| HttpError::Tls)?;
+                                let rec = rec.map_err(|e| HttpError::Tls(alloc::format!("{e}")))?;
                                 stream.feed(rec.payload, sink)?;
                             }
                             drop(rt);
                         }
                         ConnectionState::PeerClosed | ConnectionState::Closed => return Ok(()),
                         ConnectionState::EncodeTlsData(mut enc) => {
-                            let n = enc.encode(&mut out_buf).map_err(|_| HttpError::Tls)?;
+                            let n = enc.encode(&mut out_buf).map_err(|e| HttpError::Tls(alloc::format!("{e}")))?;
                             drop(enc);
                             self.outgoing_pending.extend_from_slice(&out_buf[..n]);
                             self.flush_pending()?;
@@ -298,7 +306,19 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                                 return Ok(());
                             }
                         }
-                        ConnectionState::WriteTraffic(_) => {}
+                        ConnectionState::WriteTraffic(_) => {
+                            // `WriteTraffic` post-handshake significa «no queda
+                            // nada por procesar de lo ya recibido», no «no hay
+                            // nada que hacer»: hay que pedir más bytes. Dejarlo
+                            // en `{}` era un bucle vivo que no leía nunca — el
+                            // cliente se quedaba girando justo después de mandar
+                            // la petición, sin traza ninguna y sin vencer plazo,
+                            // que es lo más parecido a un cuelgue del kernel que
+                            // puede hacer un proceso (2026-09-20).
+                            if !self.read_more(timeout_ms)? {
+                                return Ok(());
+                            }
+                        }
                         _ => {}
                     },
                 }
@@ -523,7 +543,7 @@ fn https_request<T: TcpTransport, S: BodySink>(
                 },
                 30_000,
             )
-            .map_err(|_| HttpError::Io)?;
+            .map_err(|_| HttpError::Io("tcp_connect"))?;
         let mut guard = FdGuard::new(transport, fd);
         let mut tls = TlsSession::new(transport, fd, host, config.clone())?;
         tls.handshake()?;

@@ -31,7 +31,7 @@ el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
 | Desarrollo | **soso-ed**, **soso-forja** | Editar fuentes en `/src/soso`; bucle remoto o plan local (`docs/SELF-HOSTING.md`) |
 | Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
 | Red | **ip**, **ping**, **wifi** (builtin) | Ver la IPv4; comprobar alcance ICMP; escanear y conectar redes WiFi Intel en placa real |
-| Sistema | **halt**, **exit** | Apagar o salir de la shell |
+| Sistema | **ps**, **halt**, **exit** | Ver procesos en ejecución; apagar o salir de la shell |
 
 Al arrancar verás una línea como `soso 0.2.2 (6641119fd)` — versión del kernel
 y build. La versión del disco está en `/etc/soso-release` (`soso-update estado`
@@ -476,6 +476,23 @@ ip: 192.168.68.132/24 gw 192.168.68.1
 Si aún no hay lease: `ip: sin dirección (esperando DHCP)`. Sin NIC: `ip: sin adaptador de red`. En la kernel-shell de emergencia (`soso>`) el comando es el mismo.
 
 Úsalo en placa para saber a qué IP conectar por SSH (`ssh -i target/soso_test_key soso@<ip>`).
+
+### ps — listar procesos
+
+```sh
+ps
+```
+
+Muestra los procesos del sistema: PID, proceso padre, estado y comando (ruta del ELF):
+
+```text
+  PID  PADRE  ESTADO     COMANDO
+    1      0  listo      /bin/init
+    2      1  tty        /bin/sosh
+    7      2  corriendo  /bin/ps
+```
+
+Los hilos de usuario aparecen con `(hilo)` al final. En la kernel-shell de emergencia (`soso>`) el comando es el mismo.
 
 ### ping — comprobar que una máquina responde
 

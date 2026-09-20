@@ -370,6 +370,16 @@ pub fn fs_resize(op: u64, arg: u64, out: &mut abi::FsSpaceInfo) -> i64 {
     )
 }
 
+pub fn pslist(out: &mut [abi::ProcInfo]) -> i64 {
+    syscall4(
+        abi::SYS_PSLIST,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+        0,
+        0,
+    )
+}
+
 pub fn disk_list(out: &mut [abi::DiskInfo]) -> i64 {
     syscall4(
         abi::SYS_DISK_LIST,

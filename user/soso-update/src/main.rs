@@ -39,7 +39,12 @@ const CHUNK: usize = 64 * 1024;
 const HASH_BUF: usize = 256 * 1024;
 
 fn main(args: &str) -> u8 {
-    let parts: Vec<String> = args.split_whitespace().map(String::from).collect();
+    let mut parts: Vec<String> = args.split_whitespace().map(String::from).collect();
+    // `--traza` vale para cualquier subcomando y se quita antes de repartir.
+    if let Some(i) = parts.iter().position(|p| p == "--traza") {
+        parts.remove(i);
+        net::encender_traza();
+    }
     let cmd = parts.first().map(|s| s.as_str()).unwrap_or("aplicar");
     let rest: &[String] = parts.get(1..).unwrap_or(&[]);
     saldar_acreditacion();

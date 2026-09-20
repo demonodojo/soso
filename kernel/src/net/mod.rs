@@ -746,18 +746,43 @@ pub fn tcp_close(slot: usize) {
 ///
 /// Contestar «todavía no» cuando el candado está ocupado es seguro: quien
 /// pregunta vuelve a intentarlo en la vuelta siguiente del planificador.
-pub fn tcp_is_connected(slot: usize) -> bool {
-    let Some(net) = NET.get() else { return false };
-    let Some(n) = net.try_lock() else { return false };
+/// Lo que se sabe de un socket después de intentar mirar la red.
+///
+/// `Ocupado` **no es un estado del socket**: es «la red estaba tomada y no se ha
+/// podido mirar». Tiene que ir aparte porque no todas las preguntas admiten la
+/// misma respuesta por defecto. Quien espera a que una conexión se establezca
+/// puede tratar «no lo sé» como «todavía no» sin perder nada; quien va a
+/// devolverle **EOF** a un proceso, no: eso es una respuesta definitiva y
+/// equivocarse cuesta la conexión entera.
+///
+/// Con `tcp_is_connected` devolviendo `false` en ese caso —como hizo entre el
+/// arreglo del abrazo mortal y el 2026-09-20—, la primera lectura después del
+/// ClientHello volvía con **0 bytes en 0 ms**, `soso-http` lo leía como «el par
+/// dejó de mandar» y el handshake TLS moría siempre contra un servidor real. En
+/// bucle local no salía: el eco contesta antes de que haga falta preguntar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EstadoTcp {
+    Conectado,
+    Cerrado,
+    Ocupado,
+}
+
+pub fn tcp_estado(slot: usize) -> EstadoTcp {
+    let Some(net) = NET.get() else {
+        return EstadoTcp::Cerrado;
+    };
+    let Some(n) = net.try_lock() else {
+        return EstadoTcp::Ocupado;
+    };
     let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
-        return false;
+        return EstadoTcp::Cerrado;
     };
     if entry.role != tcp_user::TcpRole::Connected || entry.closed {
-        return false;
+        return EstadoTcp::Cerrado;
     }
     if entry.loopback {
         let Some(pair) = entry.loop_pair else {
-            return false;
+            return EstadoTcp::Cerrado;
         };
         // Sin esto, el cierre del par (askd muerto) dejaba al cliente
         // «conectado» para siempre: `try_read` devolvía 0, `tcp_is_connected`
@@ -765,10 +790,21 @@ pub fn tcp_is_connected(slot: usize) -> bool {
         // (sosh giraba en `copiar_respuesta_ask`, 2026-08-31).
         if loopback::peer_closed(pair, entry.loop_side) && !loopback::has_unread(pair, entry.loop_side)
         {
-            return false;
+            return EstadoTcp::Cerrado;
         }
     }
-    true
+    EstadoTcp::Conectado
+}
+
+/// `true` sólo si **consta** que está conectado. Un `false` puede ser «no lo sé».
+pub fn tcp_is_connected(slot: usize) -> bool {
+    tcp_estado(slot) == EstadoTcp::Conectado
+}
+
+/// `true` sólo si **consta** que está cerrado. Es la pregunta que hay que hacer
+/// antes de devolverle EOF a un proceso; `!tcp_is_connected` no vale.
+pub fn tcp_cerrado_seguro(slot: usize) -> bool {
+    tcp_estado(slot) == EstadoTcp::Cerrado
 }
 
 #[allow(dead_code)]

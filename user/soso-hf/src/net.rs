@@ -77,7 +77,7 @@ pub fn download_to_scratch(
     if status != 200 {
         return Err(HttpError::Parse);
     }
-    sink.finish().map_err(|_| HttpError::Io)
+    sink.finish().map_err(|_| HttpError::Io("cierre del sink"))
 }
 
 /// GET parcial HTTPS (`Range: bytes=start-end`).

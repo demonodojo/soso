@@ -103,6 +103,7 @@ macro_rules! entry {
     ($main:ident) => {
         #[unsafe(no_mangle)]
         extern "C" fn __soso_main(ptr: *const u8, len: usize) -> u8 {
+            $crate::tls_init();
             $crate::heap_init();
             let blob = unsafe { core::slice::from_raw_parts(ptr, len) };
             let args = $crate::args_for_main(blob);
@@ -141,6 +142,59 @@ extern "C" fn _start() -> ! {
 /// que recordarlo en cada dependencia nueva; proveer el símbolo lo arregla de
 /// una vez y además **conserva la comprobación**: si el canario salta, el
 /// proceso muere aquí en vez de seguir con la pila corrupta.
+/// Bloque TLS mínimo del hilo principal.
+///
+/// `-fstack-protector` no sólo llama a `__stack_chk_fail` cuando el canario
+/// salta: **lee** el canario en `%fs:0x28` al entrar en cada función. Sin base
+/// FS eso es la dirección lineal `0x28`, y el proceso muere con
+/// «page fault de usuario en 0x28» dentro de `curve25519.c` —81 lecturas así
+/// hay sólo en `soso-update`—. Proveer `__stack_chk_fail` no arregla eso: el
+/// fallo está en leer el canario, no en comprobarlo.
+///
+/// El layout es el del ABI de TLS de x86-64: puntero a sí mismo en `fs:0x00` y
+/// canario en `fs:0x28`. Nada más se usa; si algún día hace falta `#[thread_local]`
+/// de verdad, esto se queda corto y hay que montar el bloque desde `PT_TLS`.
+#[repr(C, align(16))]
+struct Tcb {
+    propio: *mut Tcb,
+    _reservado: [u64; 4],
+    canario: u64,
+    _cola: [u64; 8],
+}
+
+const _: () = assert!(core::mem::offset_of!(Tcb, canario) == 0x28);
+
+static mut TCB: Tcb = Tcb {
+    propio: core::ptr::null_mut(),
+    _reservado: [0; 4],
+    canario: 0,
+    _cola: [0; 8],
+};
+
+/// Fija la base FS del proceso. La llama el `entry!` antes que nada; sin heap.
+///
+/// Los hilos heredan `tls_base` del padre (`task::thread_spawn`), así que
+/// comparten este bloque: el canario sólo se lee, nunca se escribe.
+pub fn tls_init() {
+    unsafe {
+        let p = &raw mut TCB;
+        (*p).propio = p;
+        let mut semilla = [0u8; 8];
+        let canario = if sys::getrandom(&mut semilla) == 8 {
+            u64::from_ne_bytes(semilla)
+        } else {
+            // Sin entropía el canario deja de ser impredecible, pero sigue
+            // detectando el desbordamiento accidental, que es lo que importa
+            // aquí. Lo que no se puede es dejar la base FS sin fijar.
+            0x00c0_ffee_5050_1234
+        };
+        // Byte bajo a cero: un desbordamiento por cadena no puede copiar el
+        // canario entero con un `strcpy`.
+        (*p).canario = canario & !0xff;
+        sys::set_tls(p as u64);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn __stack_chk_fail() -> ! {
     panic!("__stack_chk_fail: canario de pila pisado en código C");
@@ -229,6 +283,20 @@ pub fn ciclos() -> u64 {
         ((hi as u64) << 32) | lo as u64
     }
 }
+
+/// Entropía para todo el userspace: la pide al kernel, no a la CPU.
+///
+/// `getrandom` (y con él `ring`/rustls) busca un backend; sin esto usa RDRAND
+/// directamente desde ring 3 y se queda sin aleatoriedad donde la detección
+/// falla. Se registra aquí, en la biblioteca que enlazan todos los binarios.
+fn entropia_del_kernel(buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    if sys::getrandom(buf) < 0 {
+        return Err(getrandom::Error::UNSUPPORTED);
+    }
+    Ok(())
+}
+
+getrandom::register_custom_getrandom!(entropia_del_kernel);
 
 pub fn errno_str(e: i64) -> &'static str {
     match -e {
