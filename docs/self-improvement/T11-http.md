@@ -1,6 +1,8 @@
 # T11 — Leer HTTP fragmentado con límites explícitos
 
-**Hito:** SI-2 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+**Hito:** SI-2 · **Tipo:** Implementación Rust host/no_std · **Estado:** completada (2026-09-20).
+
+**Seguimiento:** [seguimiento/T11.md](seguimiento/T11.md)
 
 **Dependencias:** [T10](T10-api-json.md)
 
@@ -43,9 +45,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 El lector Forja es contexto, no una implementación que copiar con sus defaults; no modificar Forja en esta ficha.
 

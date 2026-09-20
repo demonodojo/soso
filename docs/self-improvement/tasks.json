@@ -325,7 +325,7 @@
       "title": "Leer HTTP fragmentado con límites explícitos",
       "milestone": "SI-2",
       "kind": "Implementación Rust host/no_std",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T10"
       ],
@@ -340,6 +340,14 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-20",
+        "base": "e80acd2aa",
+        "summary": "docs/self-improvement/seguimiento/T11.md",
+        "evidence": "target/self-improvement/tasks/T11/resultado.md",
+        "blocker": null,
+        "next_step": "T12 (respuestas SSE); T13 cuando T11+T12+T09 estén integradas en servidor host"
       }
     },
     {
@@ -348,7 +356,7 @@
       "title": "Emitir respuestas completas y eventos SSE",
       "milestone": "SI-2",
       "kind": "Implementación Rust host/no_std",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T07",
         "T08",
@@ -364,6 +372,14 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-20",
+        "base": "e80acd2aa",
+        "summary": "docs/self-improvement/seguimiento/T12.md",
+        "evidence": "target/self-improvement/tasks/T12/resultado.md",
+        "blocker": null,
+        "next_step": "T13 (servidor host); T15 en paralelo según encargo"
       }
     },
     {

@@ -1,6 +1,8 @@
 # T12 — Emitir respuestas completas y eventos SSE
 
-**Hito:** SI-2 · **Tipo:** Implementación Rust host/no_std · **Estado:** pendiente.
+**Hito:** SI-2 · **Tipo:** Implementación Rust host/no_std · **Estado:** completada (2026-09-20).
+
+**Seguimiento:** [seguimiento/T12.md](seguimiento/T12.md)
 
 **Dependencias:** [T07](T07-parse-herramientas.md), [T08](T08-resultado-generacion.md), [T10](T10-api-json.md)
 
@@ -42,9 +44,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 No medir tokens re-tokenizando el texto de salida ni contar eventos SSE como tokens.
 

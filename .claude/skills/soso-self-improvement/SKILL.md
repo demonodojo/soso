@@ -174,5 +174,5 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 
 ## Por dónde (actualizar al cerrar la recomendada)
 
-Camino SI-2: **T11** (HTTP; dep T10 lista). T18, T45 y T46 también habilitadas.
-T06–T10 cerradas. Validación nativa pendiente de T45/T49.
+Camino SI-2: **T13** (servidor host; deps T09/T11/T12 listas). T15, T18, T45 y T46 también habilitadas.
+T06–T12 cerradas. Validación nativa pendiente de T45/T49.
