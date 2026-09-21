@@ -31,28 +31,30 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const KSTACK_SIZE: usize = 256 * 1024;
 
 #[repr(C, align(16))]
-pub struct KStack(pub [u8; KSTACK_SIZE]);
+pub struct KStack(pub [u8; KSTACK_SIZE], pub [u64; GUARDA_QWORDS]);
 
-pub static mut KSTACK: KStack = KStack([0; KSTACK_SIZE]);
+pub static mut KSTACK: KStack = KStack([0; KSTACK_SIZE], [0; GUARDA_QWORDS]);
 
-/// Guarda **por encima** de la cima de `KSTACK`.
+/// Guarda **por encima** de la cima de `KSTACK`, dentro del propio `KStack`.
 ///
-/// Un `rsp` que sube por encima de la cima escribe en lo que haya detrás en
-/// `.bss` —hoy `smp::AP_STACKS`, que con un solo core nadie toca— y no lo
-/// detecta nadie: no hay páginas de guarda entre objetos de `.bss`. El
+/// Un `rsp` que sube por encima de la cima escribe en lo que haya detrás, y no
+/// lo detecta nadie: entre objetos de `.bss` no hay páginas de guarda. El
 /// resultado se paga mucho más tarde, cuando alguien vuelve a una zona con
-/// basura, y entonces ya no queda rastro de quién la escribió.
+/// basura, y para entonces no queda rastro de quién la escribió.
 ///
-/// Esto no arregla nada; sirve para que el fallo salte **donde se produce**.
-/// El área sobre la cima está a ceros de `.bss`, así que basta con mirarla.
+/// **La guarda es un campo de la estructura a propósito.** La primera versión
+/// miraba «lo que hubiera detrás en `.bss`» dando por hecho que estaría a
+/// ceros; el enlazador puso ahí `drivers::pci::ECAM` y el centinela saltaba al
+/// arrancar, acusando de corrupción a un estático perfectamente normal
+/// (2026-09-21). Un aviso que miente es peor que no tener aviso.
+///
+/// Esto no arregla nada: sirve para que el fallo salte **donde se produce**.
 const GUARDA_QWORDS: usize = 32;
 
 /// `Some(offset)` si alguien ha escrito por encima de la cima de `KSTACK`.
 pub fn guarda_sobre_kstack_rota() -> Option<usize> {
-    let tope = kstack_top().as_u64();
     for i in 0..GUARDA_QWORDS {
-        let p = tope + (i * 8) as u64;
-        let v = unsafe { core::ptr::read_volatile(p as *const u64) };
+        let v = unsafe { core::ptr::read_volatile(&raw const KSTACK.1[i]) };
         if v != 0 {
             return Some(i * 8);
         }

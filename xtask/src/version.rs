@@ -10,6 +10,10 @@ pub fn read_version(root: &Path) -> String {
         .to_string()
 }
 
+pub fn write_version(root: &Path, ver: &str) {
+    std::fs::write(root.join("VERSION"), format!("{ver}\n")).expect("VERSION");
+}
+
 pub fn git_build(root: &Path) -> String {
     Command::new("git")
         .args(["-C", root.to_str().unwrap(), "describe", "--always", "--dirty"])

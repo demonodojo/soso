@@ -65,7 +65,7 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask test-resize` | B1: host + grow/recovery QEMU live (`drv-live-disk`, tiny 256 MiB; no uses el preset `qemu`) |
 | `cargo xtask hw-matrix show` | Matriz validación hardware (A8); `init`, `collect`, `record-boot` |
 | `./scripts/l6-a8-collect.sh` | Recoger boot/bench en placa → `docs/hw-matrix.json`. Tras SOSOLOG de placa: `parse-logs` a `gb205-dgpu` y `ax211-wifi`; no `--boot-ok` ni etapas `ok` sin sosh / `UCODE_ALIVE_NTFY` / GSP RPC. |
-| `cargo xtask release [--publish]` | Empaqueta release en `target/release-soso/v<VERSION>/`; `--publish` sube a GitHub Releases |
+| `cargo xtask release [--bump [patch|minor|major]] [--publish]` | Empaqueta en `target/release-soso/v<VERSION>/`. `--bump` sube y commitea `VERSION` (patch por defecto). `--publish` crea la GitHub Release |
 | `cargo xtask fetch-hf` | Descargar GGUF de Hugging Face, convertir a `.som` y preparar `SOSO_MODELS_DIR` |
 | `cargo xtask fetch-whisper` | Descargar `ggml-tiny.bin` (curl reanudable) y convertir a `target/whisper-tiny-model` |
 | `cargo xtask convert-gguf` | Convert GGUF → `.som` layout (denso o MoE Mixtral, host tool) |

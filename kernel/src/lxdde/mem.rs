@@ -108,6 +108,32 @@ pub extern "C" fn lx_kfree(ptr: *mut c_void) {
     }
 }
 
+/// Comprueba el centinela de **todos** los bloques vivos.
+///
+/// El de `lx_kfree` sólo mira el bloque que se libera, y un driver puede
+/// desbordar un buffer que no suelta en horas: para entonces la lista del
+/// asignador ya está rota y el pánico sale en `talc`, lejísimos de la causa.
+/// Esto recorre los vivos y dice **qué** bloque se pasó, con dirección y
+/// tamaño, poco después de que ocurra.
+///
+/// Devuelve el número de bloques revisados, o `None` si el candado estaba
+/// ocupado (se prueba en la vuelta siguiente; esto nunca debe esperar).
+pub fn barrer_centinelas() -> Option<usize> {
+    let p = POOL.try_lock()?;
+    let mut n = 0usize;
+    for (&addr, &(size, _)) in p.live.iter() {
+        let visto = unsafe { core::ptr::read_unaligned((addr + size) as *const u64) };
+        if visto != CENTINELA {
+            crate::println!(
+                "lxdde: BLOQUE DESBORDADO (barrido) en {addr:#x} ({size} B): centinela {visto:#x}"
+            );
+            panic!("lxdde escribió más allá de un bloque de {size} B en {addr:#x}");
+        }
+        n += 1;
+    }
+    Some(n)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn lx_vmalloc(size: u32) -> *mut c_void {
     lx_kmalloc(size as usize, 0)

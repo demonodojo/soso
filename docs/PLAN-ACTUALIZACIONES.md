@@ -759,12 +759,85 @@ escondidas porque nadie miraba un arranque **después** del que revierte.
   publicar la decisión, para que un corte en medio deje el registro en
   `rescatar` y el arranque siguiente repita un rescate idempotente.
 
+### Paso 2 de U8 acreditado en QEMU — 2026-09-21
+
+Contra la release **publicada** (no una local): un soso instalado en QEMU baja
+los 12,6 MB por HTTPS real, los verifica, arma la pareja y el arranque siguiente
+la aplica y la **acredita**.
+
+```
+txn: actualización aplicada (38 entradas)
+txn: pareja confirmada (0.3.0)
+rootfs: 0.3.0 (07e6ef747)      kernel: 0.3.0 07e6ef747
+vuelta atrás: 0.3.2 — 38 ficheros, verificada
+```
+
+Para montarlo hay que saber dos cosas que no estaban escritas:
+
+- **En el live no se puede aplicar**, y no es un fallo: la transacción exige
+  sitio para el respaldo que permite deshacerla, y el rootfs del live (384 MiB)
+  va lleno. Hace falta un soso **instalado**.
+- `soso-install` deja el rootfs en **384 MiB fijos** aunque el disco sea de
+  8 GB; el resto va a la partición de modelos. Para tener sitio hay que
+  `soso-resize rootfs +N`, que mueve los datos de modelos y **no imprime
+  progreso**: mover 1 GB parece un cuelgue y no lo es (si se corta, reanuda solo
+  — se ve `fs-resize: recuperando fase 2` en el arranque siguiente).
+
+**Tres averías arregladas aquí, todas en el camino que usa la placa:**
+
+1. **La estimación de espacio contaba el manifiesto entero.** `descarga::necesidad`
+   sumaba el respaldo de **todos** los ficheros de la release, cuando el respaldo
+   real sólo copia los que cambian. Con 121 MB de firmware de NVIDIA invariable,
+   exigía **167,7 MB libres para escribir unos 20**, y `aplicar` se negaba en
+   cualquier instalación con el rootfs normal. El comentario del campo ya decía
+   «los que se van a reemplazar»: era el código el que no cumplía lo documentado.
+   Lo fija `lo_que_no_cambia_no_se_respalda`.
+2. **Interbloqueo en la lista de IRQ de lxdde.** `IRQS` se tomaba desde el
+   top-half de una interrupción y desde `poll`/`lx_request_irq`/`lx_free_irq`
+   sin enmascarar, con `Vec::push` —que reserva— dentro del candado. Una IRQ que
+   llegue mientras el lado normal lo sostiene deja al top-half girando sobre un
+   candado que nadie soltará. Es la disciplina que `arch::irq::allocate` ya
+   aplicaba a `SLOTS`; ahora también aquí.
+3. **El centinela de bloques de driver sólo miraba al liberar.** Un driver puede
+   desbordar un buffer que no suelta en horas, y para entonces el pánico sale en
+   `talc`, lejísimos de la causa. `lxdde::mem::barrer_centinelas()` recorre ya
+   **todos** los vivos (una de cada 256 vueltas del bombeo, con `try_lock`).
+
+**Sobre el pánico de `talc` en el ROG:** con esta prueba **no reproduce en QEMU**
+—la descarga completa entera con `virtio-net`—, lo que deja a `iwlwifi` como
+sospechoso casi único: es el driver que hace DMA y reserva memoria durante la
+descarga. No es prueba (QEMU cambia driver, tiempos y emulación a la vez), pero
+el barrido de centinelas convertirá el próximo pánico en «el bloque X de N bytes
+se desbordó» **si** la causa es un driver portado.
+
 ### U8 — pendiente: qué hay que hacer en el ROG
 
 Todo lo anterior está acreditado **en QEMU**. La placa aporta lo que un
 emulador no puede: WiFi de verdad, una descarga larga por HTTPS que se puede
 cortar de verdad, y un firmware que no es OVMF. Esto es el guion, para poder
 seguirlo sin volver a pensarlo.
+
+**Hecho ya (2026-09-21): v0.3.2 publicada.** Es `Latest` en GitHub, con los
+tres artefactos (`kernel-x86_64` 5,9 MB, `rootfs.pack` 142 MB, `manifest.txt`),
+y `releases/latest/download/manifest.txt` sirve `version=0.3.2`. Lleva los siete
+arreglos del camino de red (ver la sección siguiente) y el `cld` de los ISR
+`naked`. Como la placa quedaría en 0.3.1, el paso 2 ya tiene adónde actualizar.
+
+Dos avisos sobre **esta** release, para no diagnosticar mal en la placa:
+
+- El manifiesto dice `build=750e9026e-dirty`. Va construida sobre un árbol con
+  trabajo en curso de otra sesión en `lxdde/ports/iwlwifi` y
+  `lxdde/ports/nouveau`, que se compila dentro del kernel. El WiFi del ROG es
+  iwlwifi: **si el WiFi se porta raro, sospecha de eso antes que de la OTA**.
+- Sigue abierta la corrupción de heap del ROG (pánico dentro de `talc`), que no
+  tiene que ver con la actualización. Plan B: compilar sin `iwlwifi` y luego sin
+  `nouveau` (`SOSO_LXDDE_MODE` es de compilación; `--only kernel` reflashea en
+  minutos).
+
+Y una herramienta nueva para el paso 2: **`soso-update comprobar --traza`**
+imprime cada `read`/`write` del transporte con bytes y milisegundos. Es lo que
+distingue «la petición no salió» de «salió y no volvió nada» de «volvió y lo
+tiramos», que desde el mensaje de error se ven igual.
 
 **Antes de empezar.** La release candidata se construye con `cargo xtask
 release` (deja `target/release-soso/v<versión>/` con `kernel-x86_64`,

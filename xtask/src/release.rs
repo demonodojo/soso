@@ -1,20 +1,42 @@
-//! `cargo xtask release [--publish]` — empaqueta y opcionalmente publica en GitHub Releases.
+//! `cargo xtask release [--bump [patch|minor|major]] [--publish]`
+//!
+//! Empaqueta y opcionalmente publica en GitHub Releases. `--bump` sube
+//! `VERSION`, la commitea (solo ese fichero) y evita el desfase tag/número
+//! que deja `gh release create` si se publica con el fichero sucio.
 
+use std::path::Path;
 use std::process::{Command, exit};
 
 use soso_update_core::hash::hex_sha256;
 use soso_update_core::manifest::Manifest;
 use soso_update_core::pack::pack_rootfs;
-use soso_update_core::semver::parse as parse_semver;
+use soso_update_core::semver::{parse as parse_semver, SemVer};
 
 use crate::drivers::{self, DriverProfile};
 use crate::version;
 
 const GITHUB_BASE: &str = "https://github.com/demonodojo/soso/releases/latest/download";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bump {
+    Patch,
+    Minor,
+    Major,
+}
+
 pub fn run(args: &[String]) {
-    let publish = args.iter().any(|a| a == "--publish");
+    let (publish, bump) = parse_args(args);
     let root = crate::project_root();
+    if let Some(kind) = bump {
+        aplicar_bump(&root, kind);
+    }
+    if publish {
+        exigir_arbol_limpio_salvo_version(&root);
+    }
+    if bump.is_some() {
+        commitear_version(&root);
+    }
+
     let ver = version::read_version(&root);
     if parse_semver(&ver).is_none() {
         eprintln!("release: VERSION inválida: {ver}");
@@ -132,6 +154,194 @@ pub fn run(args: &[String]) {
     println!("release: publicado {tag}");
 }
 
+fn parse_args(args: &[String]) -> (bool, Option<Bump>) {
+    let mut publish = false;
+    let mut bump = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--publish" => publish = true,
+            "--bump" => {
+                bump = Some(match args.get(i + 1).map(String::as_str) {
+                    Some("major") => {
+                        i += 1;
+                        Bump::Major
+                    }
+                    Some("minor") => {
+                        i += 1;
+                        Bump::Minor
+                    }
+                    Some("patch") => {
+                        i += 1;
+                        Bump::Patch
+                    }
+                    Some(other) if other.starts_with('-') || other.is_empty() => Bump::Patch,
+                    Some(other) => {
+                        eprintln!("release: --bump espera patch, minor o major, no {other}");
+                        exit(1);
+                    }
+                    None => Bump::Patch,
+                });
+            }
+            other => {
+                eprintln!(
+                    "release: argumento desconocido: {other}\n\
+                     uso: cargo xtask release [--bump [patch|minor|major]] [--publish]"
+                );
+                exit(1);
+            }
+        }
+        i += 1;
+    }
+    (publish, bump)
+}
+
+fn aplicar_bump(root: &Path, kind: Bump) {
+    let actual = version::read_version(root);
+    let parsed = parse_semver(&actual).unwrap_or_else(|| {
+        eprintln!("release: VERSION inválida: {actual}");
+        exit(1);
+    });
+    let nueva = bump_semver(parsed, kind);
+    let texto = format_semver(&nueva);
+    let tag = format!("v{texto}");
+    if tag_existe(root, &tag) {
+        eprintln!("release: la etiqueta {tag} ya existe");
+        exit(1);
+    }
+    version::write_version(root, &texto);
+    println!("release: VERSION {actual} → {texto}");
+}
+
+fn bump_semver(v: SemVer, kind: Bump) -> SemVer {
+    match kind {
+        Bump::Major => SemVer {
+            major: v.major + 1,
+            minor: 0,
+            patch: 0,
+        },
+        Bump::Minor => SemVer {
+            major: v.major,
+            minor: v.minor + 1,
+            patch: 0,
+        },
+        Bump::Patch => SemVer {
+            major: v.major,
+            minor: v.minor,
+            patch: v.patch + 1,
+        },
+    }
+}
+
+fn format_semver(v: &SemVer) -> String {
+    format!("{}.{}.{}", v.major, v.minor, v.patch)
+}
+
+fn tag_existe(root: &Path, tag: &str) -> bool {
+    Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("refs/tags/{tag}"),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn exigir_arbol_limpio_salvo_version(root: &Path) {
+    let sucios = rutas_sucias(root);
+    let ajenos: Vec<_> = sucios.into_iter().filter(|p| p != "VERSION").collect();
+    if !ajenos.is_empty() {
+        eprintln!("release: el árbol tiene cambios que no son VERSION:");
+        for p in &ajenos {
+            eprintln!("  {p}");
+        }
+        eprintln!("release: commitea o aparta esos cambios antes de --publish");
+        exit(1);
+    }
+}
+
+fn rutas_sucias(root: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .args(["-C", root.to_str().unwrap(), "status", "--porcelain"])
+        .output()
+        .unwrap_or_else(|e| {
+            eprintln!("release: git status: {e}");
+            exit(1);
+        });
+    if !out.status.success() {
+        eprintln!("release: git status falló");
+        exit(1);
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(ruta_porcelain)
+        .collect()
+}
+
+fn ruta_porcelain(line: &str) -> Option<String> {
+    if line.len() < 4 {
+        return None;
+    }
+    let path = line[3..].trim();
+    let path = path.split(" -> ").last().unwrap_or(path);
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+fn commitear_version(root: &Path) {
+    let ver = version::read_version(root);
+    let add = Command::new("git")
+        .args(["-C", root.to_str().unwrap(), "add", "--", "VERSION"])
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("release: git add VERSION: {e}");
+            exit(1);
+        });
+    if !add.success() {
+        eprintln!("release: git add VERSION falló");
+        exit(1);
+    }
+    let staged = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "diff",
+            "--cached",
+            "--quiet",
+            "--",
+            "VERSION",
+        ])
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("release: git diff VERSION: {e}");
+            exit(1);
+        });
+    if staged.success() {
+        println!("release: VERSION {ver} ya estaba commiteada");
+        return;
+    }
+    let commit = Command::new("git")
+        .args(["-C", root.to_str().unwrap(), "commit", "-m", &ver])
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("release: git commit VERSION: {e}");
+            exit(1);
+        });
+    if !commit.success() {
+        eprintln!("release: git commit VERSION falló");
+        exit(1);
+    }
+    println!("release: commit {ver}");
+}
+
 /// Quita la información de depuración del kernel que se publica.
 ///
 /// El perfil de compilación es `debug`, así que dos tercios largos del ELF son
@@ -212,4 +422,52 @@ fn drivers_declarados(profile: &DriverProfile) -> Vec<String> {
     }
     out.sort();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn bump_patch_por_defecto() {
+        let (publish, bump) = parse_args(&args(&["--bump", "--publish"]));
+        assert!(publish);
+        assert_eq!(bump, Some(Bump::Patch));
+    }
+
+    #[test]
+    fn bump_minor() {
+        let (publish, bump) = parse_args(&args(&["--publish", "--bump", "minor"]));
+        assert!(publish);
+        assert_eq!(bump, Some(Bump::Minor));
+    }
+
+    #[test]
+    fn solo_empaquetar() {
+        let (publish, bump) = parse_args(&args(&[]));
+        assert!(!publish);
+        assert_eq!(bump, None);
+    }
+
+    #[test]
+    fn bump_semver_resetea_los_campos_menores() {
+        let v = parse_semver("0.3.2").unwrap();
+        assert_eq!(format_semver(&bump_semver(v, Bump::Patch)), "0.3.3");
+        assert_eq!(format_semver(&bump_semver(v, Bump::Minor)), "0.4.0");
+        assert_eq!(format_semver(&bump_semver(v, Bump::Major)), "1.0.0");
+    }
+
+    #[test]
+    fn porcelain_ignora_renombres_y_toma_el_destino() {
+        assert_eq!(
+            ruta_porcelain("R  docs/a.md -> docs/b.md").as_deref(),
+            Some("docs/b.md")
+        );
+        assert_eq!(ruta_porcelain(" M VERSION").as_deref(), Some("VERSION"));
+        assert_eq!(ruta_porcelain(""), None);
+    }
 }

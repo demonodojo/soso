@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use spin::Mutex;
+use x86_64::instructions::interrupts::without_interrupts;
 
 type IrqHandlerFn = extern "C" fn(i32, *mut c_void) -> u32;
 
@@ -119,7 +120,14 @@ pub fn stub_for(vector: u8) -> Option<crate::arch::irq::IrqHandler> {
 }
 
 pub fn poll() {
-    let pending: Vec<(IrqHandlerFn, i32, *mut c_void)> = {
+    // `without_interrupts`: `IRQS` lo toma también `top_half`, desde una IRQ
+    // dura. Sin enmascarar aquí, una interrupción que llegue mientras este lado
+    // sostiene el candado —y encima reserva memoria en el `push`— deja al
+    // top-half girando sobre un candado que nadie va a soltar, porque su dueño
+    // no volverá a correr hasta que el handler termine. Es la disciplina
+    // `spin_lock_irqsave` que `arch::irq::allocate` ya aplica a `SLOTS`: un
+    // candado compartido con la IRQ no admite excepciones.
+    let pending: Vec<(IrqHandlerFn, i32, *mut c_void)> = without_interrupts(|| {
         let mut irqs = IRQS.lock();
         let mut list = Vec::new();
         for slot in irqs.items.iter_mut() {
@@ -129,7 +137,7 @@ pub fn poll() {
             }
         }
         list
-    };
+    });
     for (handler, irq, dev) in pending {
         let _ = handler(irq, dev);
     }
@@ -144,11 +152,14 @@ pub extern "C" fn lx_request_irq(
     dev: *mut c_void,
 ) -> i32 {
     let vector = irq as u8;
-    IRQS.lock().items.push(IrqReg {
-        vector,
-        handler,
-        dev: dev as usize,
-        pending: false,
+    // Ver la nota de `poll`: candado compartido con la IRQ.
+    without_interrupts(|| {
+        IRQS.lock().items.push(IrqReg {
+            vector,
+            handler,
+            dev: dev as usize,
+            pending: false,
+        })
     });
     0
 }
@@ -156,7 +167,8 @@ pub extern "C" fn lx_request_irq(
 #[unsafe(no_mangle)]
 pub extern "C" fn lx_free_irq(irq: u32, _dev: *mut c_void) {
     let v = irq as u8;
-    IRQS.lock().items.retain(|s| s.vector != v);
+    // Ver la nota de `poll`: candado compartido con la IRQ.
+    without_interrupts(|| IRQS.lock().items.retain(|s| s.vector != v));
 }
 
 #[unsafe(no_mangle)]

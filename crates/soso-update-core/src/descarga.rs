@@ -110,14 +110,25 @@ where
 /// `tam_actual` da el tamaño del fichero que hay hoy en el sistema, o `None` si
 /// no existe: de ahí sale el respaldo (lo que habrá que copiar para poder
 /// deshacer) y el crecimiento neto.
-pub fn necesidad<F>(man: &Manifest, pendientes: &[FileEntry], tam_actual: F) -> Necesidad
+pub fn necesidad<F>(
+    man: &Manifest,
+    cambian: &[FileEntry],
+    pendientes: &[FileEntry],
+    tam_actual: F,
+) -> Necesidad
 where
     F: Fn(&str) -> Option<u64>,
 {
     let preparacion = pendientes.iter().map(|f| f.size).sum::<u64>() + man.kernel_size;
     let mut respaldo = 0u64;
     let mut crecimiento = 0u64;
-    for f in &man.files {
+    // **`cambian`, no `man.files`.** El respaldo guarda lo que se va a
+    // reemplazar, y un fichero que no cambia no se toca. Sumando el manifiesto
+    // entero, una release con 121 MB de firmware invariable exigía 167,7 MB
+    // libres para bajar 12,6, y `aplicar` se negaba en cualquier instalación
+    // con el rootfs normal (384 MiB). El respaldo real ya se hacía sólo sobre
+    // los que cambian: era la estimación la que mentía (2026-09-21).
+    for f in cambian {
         match tam_actual(&f.path) {
             Some(actual) => {
                 respaldo = respaldo.saturating_add(actual);

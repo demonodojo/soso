@@ -116,7 +116,7 @@ fn la_necesidad_cuenta_respaldo_y_crecimiento() {
     let (man, _) = manifiesto(&[("bin/a", 100), ("bin/b", 200)]);
     let pend = descarga::pendientes(&man, |_| false);
     // `bin/a` ya existe midiendo 60; `bin/b` es nuevo.
-    let n = descarga::necesidad(&man, &pend, |p| (p == "bin/a").then_some(60));
+    let n = descarga::necesidad(&man, &pend, &pend, |p| (p == "bin/a").then_some(60));
     assert_eq!(n.preparacion, 300 + 1000, "los dos ficheros y el kernel");
     assert_eq!(n.respaldo, 60, "hay que poder deshacer lo que se reemplaza");
     assert_eq!(n.crecimiento, 40 + 200);
@@ -127,7 +127,7 @@ fn la_necesidad_cuenta_respaldo_y_crecimiento() {
 fn un_fichero_que_encoge_no_cuenta_como_crecimiento() {
     let (man, _) = manifiesto(&[("bin/a", 100)]);
     let pend = descarga::pendientes(&man, |_| false);
-    let n = descarga::necesidad(&man, &pend, |_| Some(5_000));
+    let n = descarga::necesidad(&man, &pend, &pend, |_| Some(5_000));
     assert_eq!(n.crecimiento, 0, "no se resta espacio que no se libera hasta aplicar");
     assert_eq!(n.respaldo, 5_000);
 }
@@ -136,7 +136,7 @@ fn un_fichero_que_encoge_no_cuenta_como_crecimiento() {
 fn sin_espacio_la_operacion_no_empieza() {
     let (man, _) = manifiesto(&[("bin/a", 8 * 1024 * 1024)]);
     let pend = descarga::pendientes(&man, |_| false);
-    let n = descarga::necesidad(&man, &pend, |_| None);
+    let n = descarga::necesidad(&man, &pend, &pend, |_| None);
     let cap = Capacidad {
         sosofs_libre: 4 * 1024 * 1024,
         hueco_kernel: 64 * 1024 * 1024,
@@ -158,10 +158,14 @@ fn reanudar_pide_menos_espacio_que_empezar() {
     // Lo ya bajado y verificado no se vuelve a contar: si no, una operación
     // reanudada podría fallar el preflight por espacio que ya está ocupado.
     let (man, _) = manifiesto(&[("bin/a", 1_000_000), ("bin/b", 1_000_000)]);
-    let todo = descarga::necesidad(&man, &descarga::pendientes(&man, |_| false), |_| None);
+    // `cambian` es el mismo conjunto en los dos casos —lo que va a cambiar no
+    // depende de lo ya bajado—; lo que encoge al reanudar es `pendientes`.
+    let todos = descarga::pendientes(&man, |_| false);
+    let todo = descarga::necesidad(&man, &todos, &todos, |_| None);
     let listos: BTreeSet<&str> = ["bin/a"].into_iter().collect();
     let medio = descarga::necesidad(
         &man,
+        &todos,
         &descarga::pendientes(&man, |f| listos.contains(f.path.as_str())),
         |_| None,
     );
@@ -172,7 +176,7 @@ fn reanudar_pide_menos_espacio_que_empezar() {
 #[test]
 fn un_manifiesto_sin_ficheros_sigue_necesitando_el_kernel() {
     let (man, _) = manifiesto(&[]);
-    let n = descarga::necesidad(&man, &[], |_| None);
+    let n = descarga::necesidad(&man, &[], &[], |_| None);
     assert_eq!(n.kernel, 1000);
     assert_eq!(n.preparacion, 1000);
     assert_eq!(n.respaldo, 0);
@@ -189,4 +193,22 @@ fn el_plan_de_descarga_no_conoce_rutas_del_sistema() {
     for prohibido in ["/bin/", "/lib/", "/etc/"] {
         assert!(!fuente.contains(prohibido), "descarga.rs menciona {prohibido}");
     }
+}
+
+#[test]
+fn lo_que_no_cambia_no_se_respalda() {
+    // Una release trae 120 MB de firmware que no cambia y 1 MB de binarios que
+    // sí. El respaldo sólo tiene que cubrir lo que se reemplaza: contando el
+    // manifiesto entero, `aplicar` exigía ~168 MB libres para escribir ~20 y se
+    // negaba en cualquier instalación con el rootfs de 384 MiB (2026-09-21).
+    let (man, _) = manifiesto(&[("lib/firmware/gsp.bin", 120_000_000), ("bin/init", 1_000_000)]);
+    let cambian: Vec<_> = man
+        .files
+        .iter()
+        .filter(|f| f.path == "bin/init")
+        .cloned()
+        .collect();
+    let n = descarga::necesidad(&man, &cambian, &cambian, |_| Some(1_000_000));
+    assert_eq!(n.respaldo, 1_000_000, "sólo se respalda lo que se reemplaza");
+    assert_eq!(n.preparacion, 1_000_000 + 1000, "y sólo se baja eso más el kernel");
 }

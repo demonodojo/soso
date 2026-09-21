@@ -153,6 +153,17 @@ pub fn poll() {
     let Some(_g) = POLL_LOCK.try_lock() else {
         return;
     };
+    // Barrido de centinelas, espaciado: recorrerlos en cada vuelta costaría más
+    // que el trabajo útil. Uno cada 256 bombeos basta para que un desbordamiento
+    // salte en milisegundos en vez de horas —cuando se libere el bloque— y con
+    // el culpable todavía identificable.
+    {
+        static VUELTAS: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if VUELTAS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 256 == 0 {
+            let _ = mem::barrer_centinelas();
+        }
+    }
     timer::tick();
     workqueue::poll();
     irq::poll();

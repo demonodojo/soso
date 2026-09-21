@@ -352,7 +352,7 @@ fn cmd_aplicar(args: &[String]) -> u8 {
         println!("etapa: {ya} de {} ya descargados, reanudando", cambian.len());
     }
 
-    if let Err(e) = comprobar_espacio(&man, &pendientes) {
+    if let Err(e) = comprobar_espacio(&man, &cambian, &pendientes) {
         println!("soso-update: {e}");
         return 1;
     }
@@ -1083,14 +1083,18 @@ fn crear_arbol(dir: &str) {
 }
 
 /// Comprobación previa: sin sitio para preparar **y** deshacer, no se empieza.
-fn comprobar_espacio(man: &Manifest, pendientes: &[FileEntry]) -> Result<(), &'static str> {
+fn comprobar_espacio(
+    man: &Manifest,
+    cambian: &[FileEntry],
+    pendientes: &[FileEntry],
+) -> Result<(), &'static str> {
     let mut fs = soso_abi::FsInfo::default();
     if sys::fsinfo(&mut fs) < 0 || fs.block_size == 0 {
         // Sin el dato no se inventa una comprobación: se avisa y se sigue.
         println!("soso-update: aviso: no pude leer el espacio libre");
         return Ok(());
     }
-    let necesidad = descarga::necesidad(man, pendientes, |ruta| {
+    let necesidad = descarga::necesidad(man, cambian, pendientes, |ruta| {
         let mut st = soso_abi::Stat::default();
         (sys::stat(&format!("/{ruta}"), &mut st) >= 0).then_some(st.size)
     });
