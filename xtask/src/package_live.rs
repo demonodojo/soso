@@ -396,11 +396,21 @@ fn print_profile_summary(profile: &DriverProfile) {
         "package-usb-live: kernel features=[{}]",
         feats.join(", ")
     );
-    if !profile.lxdde_ports.is_empty() {
+    // Lo que se va a construir de verdad, no lo que trae el perfil: con
+    // `SOSO_LXDDE_MODE` puesto son cosas distintas, y una línea que anuncia
+    // `ports=[nouveau, iwlwifi]` mientras se compila sólo iwlwifi convierte un
+    // bisect de drivers en una persecución de fantasmas.
+    let puertos = crate::drivers::lx_ports_for_build(profile);
+    if !puertos.is_empty() {
+        let del_entorno = crate::lxdde_mode_env().is_some();
         println!(
-            "package-usb-live: lxdde ports=[{}] mode={:?}",
-            profile.lxdde_ports.join(", "),
-            profile.lxdde_mode
+            "package-usb-live: lxdde ports=[{}]{}",
+            puertos.join(", "),
+            if del_entorno {
+                " (de SOSO_LXDDE_MODE, el perfil queda anulado)"
+            } else {
+                ""
+            }
         );
     }
     if profile.firmware_exclude.is_empty() {

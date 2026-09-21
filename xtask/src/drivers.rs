@@ -213,13 +213,29 @@ pub fn kernel_feature_args(profile: &DriverProfile) -> Vec<String> {
 }
 
 pub fn lx_ports_for_build(profile: &DriverProfile) -> Vec<String> {
+    // `SOSO_LXDDE_MODE` gana al perfil. Antes sólo se miraba cuando el perfil
+    // no traía puertos, así que en el live —que los trae fijos— la variable no
+    // hacía nada: dejar un port fuera para bisecar un fallo de hardware era
+    // imposible sin editar este fichero, que es justo lo que documentaba el
+    // plan B de la corrupción de heap del ROG (2026-09-21).
+    //
+    // Y se parte por comas: el modo es una lista («nouveau,iwlwifi») y meterla
+    // entera como un puerto no casaba con ningún nombre, así que activaba cero.
+    if let Some(mode) = super::lxdde_mode_env() {
+        let puertos: Vec<String> = mode
+            .split(',')
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect();
+        if !puertos.is_empty() {
+            return puertos;
+        }
+    }
     if !profile.lxdde_ports.is_empty() {
         return profile.lxdde_ports.clone();
     }
     if super::lxdde_enabled() {
-        if let Some(mode) = super::lxdde_mode_env() {
-            return vec![mode];
-        }
         return vec!["all".into()];
     }
     vec![]
