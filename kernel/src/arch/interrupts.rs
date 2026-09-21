@@ -359,6 +359,13 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    // Ver la nota de `cld` en `timer_isr`: la CPU **no** limpia DF al entrar
+    // por una puerta de interrupción, y los handlers `x86-interrupt` que
+    // genera LLVM tampoco lo hacen. Aquí es lo antes que se puede desde Rust.
+    // Sin `cld` aquí a propósito: este handler es `extern "x86-interrupt"` y
+    // LLVM ya emite `cld` en su prólogo por convención. Los que sí lo
+    // necesitan son los `naked` (`timer_isr`, `ap_timer_isr`), que no tienen
+    // prólogo; la entrada de `syscall` la cubre `SFMask` con DIRECTION_FLAG.
     let addr = x86_64::registers::control::Cr2::read_raw();
     if desde_usuario(&stack_frame) {
         let is_write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);

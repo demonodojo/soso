@@ -88,6 +88,12 @@ extern "C" fn syscall_entry() {
         "push rsi",
         "push rdx",
         "push r10",
+        // `cld` **antes de llamar a Rust**. La CPU limpia TF, NT, RF, VM e IF
+        // al entrar por una puerta de interrupción, pero **no DF**: si ring 3
+        // corría con DF=1, el kernel hereda la bandera y todo `rep movs`/
+        // `rep stos` —o sea `memcpy` y `memset`— copia hacia atrás. Linux hace
+        // este mismo `cld` en sus rutas de entrada por esta razón exacta.
+        "cld",
         "mov rdi, rsp",
         // 14 pushes (112 B) desde el tope alineado dejan rsp%16==0 antes
         // del call, que es lo que la ABI pide (dispatch entra con %16==8).
@@ -136,6 +142,12 @@ extern "C" fn ap_syscall_entry() {
         "push rsi",
         "push rdx",
         "push r10",
+        // `cld` **antes de llamar a Rust**. La CPU limpia TF, NT, RF, VM e IF
+        // al entrar por una puerta de interrupción, pero **no DF**: si ring 3
+        // corría con DF=1, el kernel hereda la bandera y todo `rep movs`/
+        // `rep stos` —o sea `memcpy` y `memset`— copia hacia atrás. Linux hace
+        // este mismo `cld` en sus rutas de entrada por esta razón exacta.
+        "cld",
         "mov rdi, rsp",
         "sti",
         "call {dispatch}",
@@ -176,6 +188,23 @@ fn ctx_from_frame(f: &SyscallFrame) -> Context {
 }
 
 extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
+    // ¿Entra alguien con DF puesto? `f.rflags` es el r11 que guardó `syscall`,
+    // o sea las banderas **de ring 3**, que el `cld` de la entrada no altera.
+    // Aquí es donde se vería un proceso que dejó DF=1: por el temporizador casi
+    // nunca se cae dentro de esa ventana.
+    if f.rflags & 0x400 != 0 {
+        static DF_SYSCALL: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !DF_SYSCALL.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            crate::println!(
+                "!!! DF=1 en syscall {}: rip={:#x} rflags={:#x} pid={}",
+                f.nr,
+                f.rip,
+                f.rflags,
+                super::current_pid()
+            );
+        }
+    }
     let (a1, a2, a3, a4) = (f.rdi, f.rsi, f.rdx, f.r10);
     let r = match f.nr {
         abi::SYS_EXIT => super::exit_current(a1 as u8),

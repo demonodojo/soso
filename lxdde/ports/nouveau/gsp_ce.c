@@ -94,10 +94,27 @@ int gsp_ce_init(struct gsp_rm *rm, struct gsp_chan *chan, struct gsp_ce *ce)
  * mmuFault) salga por el log en el mismo ciclo en que pasó. */
 void gsp_ce_drain_events(struct gsp_ce *ce)
 {
+    unsigned pass;
+    unsigned total = 0;
+    unsigned n;
+
     if (!ce || !ce->rm || !ce->rm->rpc) {
         return;
     }
-    gsp_rpc_drain(ce->rm->rpc, GSP_CE_RC_DRAIN_MS);
+    /* Varios pases: RM puede soltar NOCAT/RC_TRIGGERED justo después del
+     * timeout del semáforo; un solo barrido de 300 ms a veces dejaba «N
+     * pendientes» sin volcar el journal. */
+    for (pass = 0; pass < 4; pass++) {
+        n = gsp_rpc_drain(ce->rm->rpc, GSP_CE_RC_DRAIN_MS);
+        total += n;
+        if (n == 0) {
+            break;
+        }
+    }
+    if (total) {
+        lx_printk("nouveau-lx: CE drenó %u mensaje(s) GSP-RM (busca rc:/NOCAT arriba)\n",
+                  total);
+    }
 }
 
 static void ce_mark_stuck(struct gsp_ce *ce, const char *why)

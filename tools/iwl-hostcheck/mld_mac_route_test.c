@@ -98,10 +98,29 @@ int main(int argc, char **argv)
                 sizeof(struct iwl_mac_config_cmd));
         return 1;
     }
-    if (sizeof(struct iwl_link_config_cmd) < 200) {
-        fprintf(stderr, "LINK_CONFIG size=%zu demasiado pequeño\n",
+    if (sizeof(struct iwl_link_config_cmd) != 208) {
+        fprintf(stderr, "LINK_CONFIG size=%zu (esperado 208)\n",
                 sizeof(struct iwl_link_config_cmd));
         return 1;
+    }
+    {
+        struct iwl_link_config_cmd bind = {};
+        struct iwl_link_config_cmd act = {};
+
+        bind.phy_id = iwl_cpu_to_le32(0);
+        bind.modify_mask = iwl_cpu_to_le32(0);
+        bind.active = iwl_cpu_to_le32(0);
+        act.modify_mask = iwl_cpu_to_le32(LINK_CONTEXT_MODIFY_ACTIVE |
+                                            LINK_CONTEXT_MODIFY_RATES_INFO);
+        act.active = iwl_cpu_to_le32(1);
+        act.cck_rates = iwl_cpu_to_le32(0x0fu);
+        act.ofdm_rates = iwl_cpu_to_le32(0xffu);
+        if (bind.active != 0 || bind.phy_id != iwl_cpu_to_le32(0) ||
+            act.cck_rates != iwl_cpu_to_le32(0x0fu) ||
+            act.ofdm_rates != iwl_cpu_to_le32(0xffu)) {
+            fprintf(stderr, "secuencia LINK bind/activate mal armada\n");
+            return 1;
+        }
     }
     if (!uses_mld_mac(&ax211)) {
         fprintf(stderr, "AX211 debería usar MLD MAC\n");

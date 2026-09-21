@@ -446,22 +446,41 @@ int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
         return -1;
     }
 
-    /* Nada de `lx_dma_flush_range` aquí: no hemos escrito nosotros esas páginas.
-     * Quien las escribió (el proceso) lo hizo con sus propias barreras, y el
-     * kernel ha pasado por la syscall —serializante— entre medias.
-     *
-     * El origen es `G6_SRC_VA + src_off`, no la base de la ventana: la copia
-     * multilínea del CE lleva PITCH = LINE_LENGTH = 4096 en los dos lados, que es
-     * una copia contigua de `size` bytes y no exige que las direcciones estén
-     * alineadas a página (ver `gsp_ce_encode_copy`). Lo que sí tiene que estar
-     * alineado es el DESTINO, comprobado arriba. */
-    if (gsp_ce_copy_sync(b->ce, va + offset, G6_SRC_VA + (uint64_t)src_off,
-                         (uint32_t)size, GSP_CE_WAIT_MS) != 0) {
-        if (!b->ce->stuck) {
-            lx_printk("nouveau-lx: G6 — DMA: el CE falló (off=%llu size=%llu)\n",
-                      (unsigned long long)offset, (unsigned long long)size);
+    /* Trocear como `gsp_buf_upload_at`: un LAUNCH_DMA de varios MiB desde sysmem
+     * desalineado (+64) dejó el semáforo colgado en placa (GB205 flush #55). */
+    {
+        uint64_t off;
+        uint64_t chunk;
+        uint64_t rest;
+        unsigned max_chunk = b->scratch_bytes ? b->scratch_bytes : (unsigned)VRAM_PAGE;
+
+        for (off = 0; off < size; off += chunk) {
+            rest = size - off;
+            chunk = rest;
+            if (chunk > (uint64_t)max_chunk) {
+                chunk = max_chunk;
+            }
+            if (chunk > VRAM_PAGE) {
+                chunk &= ~(VRAM_PAGE - 1ull);
+            }
+            if (chunk == 0) {
+                lx_printk("nouveau-lx: G6 — DMA: troceo inválido en off=%llu\n",
+                          (unsigned long long)off);
+                return -1;
+            }
+            if (gsp_ce_copy_sync(b->ce, va + offset + off,
+                                 G6_SRC_VA + (uint64_t)src_off + off,
+                                 (uint32_t)chunk, GSP_CE_WAIT_MS) != 0) {
+                if (!b->ce->stuck) {
+                    lx_printk("nouveau-lx: G6 — DMA: el CE falló (off=%llu "
+                              "chunk=%llu de %llu)\n",
+                              (unsigned long long)(offset + off),
+                              (unsigned long long)chunk,
+                              (unsigned long long)size);
+                }
+                return -1;
+            }
         }
-        return -1;
     }
     return 0;
 }

@@ -87,7 +87,9 @@ static int iwl_mvm_mld_link_add_scan(struct iwl_ax211_priv *iwl)
     return 0;
 }
 
-static int iwl_mvm_mld_link_activate(struct iwl_ax211_priv *iwl)
+/* Linux `iwl_mvm_link_changed(..., 0, false)` antes de activar: phy_id sólo
+ * se aplica con el link inactivo (mac-cfg.h). */
+static int iwl_mvm_mld_link_bind_phy(struct iwl_ax211_priv *iwl)
 {
     struct iwl_link_config_cmd cmd;
 
@@ -97,8 +99,35 @@ static int iwl_mvm_mld_link_activate(struct iwl_ax211_priv *iwl)
     cmd.link_id = iwl_cpu_to_le32((uint32_t)iwl->fw_link_id);
     cmd.mac_id = iwl_cpu_to_le32((uint32_t)iwl->scan_mac_id);
     cmd.phy_id = iwl_cpu_to_le32(0);
-    cmd.modify_mask = iwl_cpu_to_le32(LINK_CONTEXT_MODIFY_ACTIVE);
+    cmd.modify_mask = iwl_cpu_to_le32(0);
+    cmd.active = iwl_cpu_to_le32(0);
+    memcpy(cmd.local_link_addr, iwl->mac, 6);
+    if (iwl_mvm_link_cmd_send(iwl, &cmd, FW_CTXT_ACTION_MODIFY) != 0) {
+        lx_printk("iwl_mvm: LINK_CONFIG MODIFY bind phy falló\n");
+        return -1;
+    }
+    lx_printk("iwl_mvm: LINK_CONFIG bind link=%u phy=0 ok\n",
+              (unsigned)iwl->fw_link_id);
+    return 0;
+}
+
+static int iwl_mvm_mld_link_activate(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_link_config_cmd cmd;
+
+    if (!iwl->phy_ctxt_added)
+        return -1;
+    if (iwl_mvm_mld_link_bind_phy(iwl) != 0)
+        return -1;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.link_id = iwl_cpu_to_le32((uint32_t)iwl->fw_link_id);
+    cmd.mac_id = iwl_cpu_to_le32((uint32_t)iwl->scan_mac_id);
+    cmd.phy_id = iwl_cpu_to_le32(0);
+    cmd.modify_mask = iwl_cpu_to_le32(LINK_CONTEXT_MODIFY_ACTIVE |
+                                      LINK_CONTEXT_MODIFY_RATES_INFO);
     cmd.active = iwl_cpu_to_le32(1);
+    cmd.cck_rates = iwl_cpu_to_le32(0x0fu);
+    cmd.ofdm_rates = iwl_cpu_to_le32(0xffu);
     memcpy(cmd.local_link_addr, iwl->mac, 6);
     if (iwl_mvm_link_cmd_send(iwl, &cmd, FW_CTXT_ACTION_MODIFY) != 0) {
         lx_printk("iwl_mvm: LINK_CONFIG MODIFY active falló\n");

@@ -3788,6 +3788,27 @@ static int pb_method_value(const uint32_t *pb, unsigned dwords, unsigned mthd,
     return -1;
 }
 
+static unsigned pb_count_method(const uint32_t *pb, unsigned dwords, unsigned mthd)
+{
+    unsigned i = 0;
+    unsigned count = 0;
+
+    while (i < dwords) {
+        uint32_t hdr = pb[i];
+        unsigned n = (hdr >> 16) & 0x1fffu;
+        unsigned m = (hdr & 0xfffu) << 2;
+
+        if (n == 0u || i + n >= dwords + 1u) {
+            break;
+        }
+        if (m == mthd) {
+            count++;
+        }
+        i += 1u + n;
+    }
+    return count;
+}
+
 static int check_g4e_chan_ce(const struct gsp_libos *lo)
 {
     struct gsp_rpc rpc;
@@ -4649,6 +4670,40 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
             return -1;
         }
         printf("OK: DMA +64 512 B exige 2 páginas (footprint CE = una línea)\n");
+
+        {
+            struct gsp_dma_buf origen_grande;
+            uint64_t phys_grande[32];
+            unsigned npg = 25u;
+            uint32_t seq0;
+            uint64_t va_grande;
+
+            if (gsp_dma_alloc(&origen_grande, npg * 4096u, "origen G6 grande") != 0) {
+                printf("FALLO: origen grande para troceo DMA\n");
+                return -1;
+            }
+            for (i = 0; i < npg; i++) {
+                phys_grande[i] = origen_grande.phys + (uint64_t)i * 4096ull;
+            }
+            va_grande = gsp_buf_alloc(&buf, 96u * 1024u);
+            if (!va_grande) {
+                printf("FALLO: VA grande para troceo DMA\n");
+                return -1;
+            }
+            seq0 = ce.seq;
+            if (gsp_buf_upload_dma(&buf, va_grande, 0, phys_grande, npg, 64u,
+                                   96u * 1024u) != 0) {
+                printf("FALLO: DMA troceado 96 KiB desde +64\n");
+                return -1;
+            }
+            if (ce.seq - seq0 != 3u) {
+                printf("FALLO: DMA troceado — %u copias CE (esperaba 3, scratch %u B)\n",
+                       ce.seq - seq0, 8u * 4096u);
+                return -1;
+            }
+            printf("OK: DMA troceado — 96 KiB desde +64 en 3 copias CE (scratch 32 KiB)\n");
+            gsp_dma_free(&origen_grande);
+        }
 
         if (gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 4096u, 2u * 4096u) == 0 ||
             gsp_buf_upload_dma(&buf, va, 0, phys, 3u, 64u, 3u * 4096u) == 0 ||

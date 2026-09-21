@@ -1248,6 +1248,15 @@ extern "C" fn schedule_inner() -> ! {
             // KSTACK. Se comprueba aquí porque es el sitio por el que se pasa
             // constantemente y está a profundidad conocida (`schedule_inner`
             // arranca en la cima), así que el aviso sale cerca del culpable.
+            // Aviso de DF anotado desde una IRQ (ver `irq::anotar_df`): se
+            // saca aquí, fuera del handler, donde imprimir es seguro.
+            if let Some((rip, cs)) = crate::arch::irq::df_pendiente() {
+                crate::println!(
+                    "!!! DF=1 al entrar por IRQ: cs={cs:#x} rip={rip:#x} \
+                     ({})",
+                    if cs & 3 == 3 { "ring 3" } else { "ring 0" }
+                );
+            }
             if let Some(off) = crate::arch::gdt::guarda_sobre_kstack_rota() {
                 static AVISADO: core::sync::atomic::AtomicBool =
                     core::sync::atomic::AtomicBool::new(false);
@@ -1633,6 +1642,12 @@ const _: () = assert!(core::mem::offset_of!(TrapFrame, rip) == 120);
 #[unsafe(naked)]
 pub extern "C" fn timer_isr() {
     naked_asm!(
+        // `cld` **antes de llamar a Rust**. La CPU limpia TF, NT, RF, VM e IF
+        // al entrar por una puerta de interrupción, pero **no DF**: si ring 3
+        // corría con DF=1, el kernel hereda la bandera y todo `rep movs`/
+        // `rep stos` —o sea `memcpy` y `memset`— copia hacia atrás. Linux hace
+        // este mismo `cld` en sus rutas de entrada por esta razón exacta.
+        "cld",
         "push rax",
         "push rcx",
         "push rdx",
@@ -1703,6 +1718,12 @@ pub extern "C" fn timer_isr() {
 #[unsafe(naked)]
 pub extern "C" fn ap_timer_isr() {
     naked_asm!(
+        // `cld` **antes de llamar a Rust**. La CPU limpia TF, NT, RF, VM e IF
+        // al entrar por una puerta de interrupción, pero **no DF**: si ring 3
+        // corría con DF=1, el kernel hereda la bandera y todo `rep movs`/
+        // `rep stos` —o sea `memcpy` y `memset`— copia hacia atrás. Linux hace
+        // este mismo `cld` en sus rutas de entrada por esta razón exacta.
+        "cld",
         "push rax",
         "push rcx",
         "push rdx",
@@ -1765,6 +1786,22 @@ pub extern "C" fn ap_timer_isr() {
 
 /// Devuelve 1 si hay que replanificar (el contexto ya quedó guardado).
 extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
+    // ¿Quién llega con DF puesto? `f.rflags` es el valor **guardado** por la
+    // CPU, así que el `cld` de la entrada no lo tapa. Se avisa una sola vez:
+    // con DF=1 todo `rep movs` del kernel copiaría hacia atrás, y el destrozo
+    // se paga mucho después y muy lejos.
+    if f.rflags & 0x400 != 0 {
+        static DF_VISTO: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if !DF_VISTO.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            crate::println!(
+                "!!! DF=1 al entrar en el kernel: cs={:#x} rip={:#x} rflags={:#x}",
+                f.cs,
+                f.rip,
+                f.rflags
+            );
+        }
+    }
     crate::arch::pit::tick();
     unsafe {
         crate::arch::interrupts::PICS

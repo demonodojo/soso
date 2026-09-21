@@ -495,6 +495,7 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define MAC_CFG_FILTER_ACCEPT_BEACON             (1u << 3)
 
 #define LINK_CONTEXT_MODIFY_ACTIVE               (1u << 0)
+#define LINK_CONTEXT_MODIFY_RATES_INFO           (1u << 1)
 #define LINK_CONTEXT_MODIFY_BEACON_TIMING        (1u << 4)
 #define IWL_UCODE_TLV_HW_TYPE                    58
 #define IWL_UCODE_TLV_PNVM_VERSION               62

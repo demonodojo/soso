@@ -114,6 +114,13 @@ fn index(vector: u8) -> Option<usize> {
 /// trabajo se queda agendado y lo recoge el bucle del scheduler o el próximo tick
 /// que venga de usuario.
 pub(crate) fn dispatch(vector: u8, desde_ring3: bool) {
+    // Ver la nota de `cld` en `timer_isr`: la CPU **no** limpia DF al entrar
+    // por una puerta de interrupción, y los handlers `x86-interrupt` que
+    // genera LLVM tampoco lo hacen. Aquí es lo antes que se puede desde Rust.
+    // Sin `cld` aquí a propósito: este handler es `extern "x86-interrupt"` y
+    // LLVM ya emite `cld` en su prólogo por convención. Los que sí lo
+    // necesitan son los `naked` (`timer_isr`, `ap_timer_isr`), que no tienen
+    // prólogo; la entrada de `syscall` la cubre `SFMask` con DIRECTION_FLAG.
     let prof = &PROF_IRQ[crate::arch::percpu::cpu_index()];
     prof.fetch_add(1, Ordering::Relaxed);
     if let Some(idx) = index(vector) {
@@ -144,6 +151,44 @@ extern "sysv64" fn net_poll_shim(_a: u64, _b: u64) -> u64 {
     0
 }
 
+/// Primer contexto visto con DF puesto al entrar por una IRQ.
+///
+/// La CPU no limpia DF al entrar por una puerta de interrupción, así que el
+/// kernel hereda la bandera del contexto interrumpido y todo `rep movs` copia
+/// hacia atrás. El `cld` de arriba lo corrige; esto sirve para saber **quién**
+/// lo traía, que es lo que separa «el síntoma se fue» de «sé por qué».
+///
+/// **No imprime aquí**: un `println!` dentro de un handler de IRQ toma el
+/// candado de la consola y clava la máquina. Sólo anota; lo saca
+/// `schedule_inner`, que corre en contexto normal.
+pub static DF_VISTO_RIP: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static DF_VISTO_CS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static DF_ANOTADO: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+fn anotar_df(frame: &InterruptStackFrame) {
+    use x86_64::registers::rflags::RFlags;
+    if !frame.cpu_flags.contains(RFlags::DIRECTION_FLAG) {
+        return;
+    }
+    if DF_ANOTADO.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    DF_VISTO_RIP.store(frame.instruction_pointer.as_u64(), Ordering::Relaxed);
+    DF_VISTO_CS.store(frame.code_segment.0 as u64, Ordering::Relaxed);
+}
+
+/// Saca el aviso pendiente, si lo hay. La llama `schedule_inner`.
+pub fn df_pendiente() -> Option<(u64, u64)> {
+    let rip = DF_VISTO_RIP.swap(0, Ordering::Relaxed);
+    if rip == 0 {
+        return None;
+    }
+    Some((rip, DF_VISTO_CS.load(Ordering::Relaxed)))
+}
+
 macro_rules! irq_stubs {
     ($(($vec:expr, $name:ident)),+ $(,)?) => {
         $(
@@ -152,6 +197,7 @@ macro_rules! irq_stubs {
                 // diferido puede correr al salir (ver `dispatch`).
                 let desde_ring3 =
                     frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+                anotar_df(&frame);
                 dispatch($vec, desde_ring3);
             }
         )+
