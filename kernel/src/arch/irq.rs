@@ -114,13 +114,16 @@ fn index(vector: u8) -> Option<usize> {
 /// trabajo se queda agendado y lo recoge el bucle del scheduler o el próximo tick
 /// que venga de usuario.
 pub(crate) fn dispatch(vector: u8, desde_ring3: bool) {
-    // Ver la nota de `cld` en `timer_isr`: la CPU **no** limpia DF al entrar
-    // por una puerta de interrupción, y los handlers `x86-interrupt` que
-    // genera LLVM tampoco lo hacen. Aquí es lo antes que se puede desde Rust.
-    // Sin `cld` aquí a propósito: este handler es `extern "x86-interrupt"` y
-    // LLVM ya emite `cld` en su prólogo por convención. Los que sí lo
-    // necesitan son los `naked` (`timer_isr`, `ap_timer_isr`), que no tienen
-    // prólogo; la entrada de `syscall` la cubre `SFMask` con DIRECTION_FLAG.
+    // La CPU no limpia DF al entrar por una puerta de interrupción, y el
+    // prólogo `x86-interrupt` de LLVM tampoco (`push`/`movaps`, sin `cld`:
+    // comprobado en el ELF). `timer_isr` sí lo hace, en asm, porque es
+    // `naked`. Este camino no: la MSI de la NIC llama a `net::poll` aquí
+    // mismo, y si el userspace interrumpido iba a medias de un `memmove`
+    // (DF=1, el TLS de rustls), el `rep movs` copia hacia atrás y pisa el
+    // hueco libre de `talc` que hay delante del búfer. El centinela de
+    // `lx_kmalloc` no se entera: está detrás del bloque. `iret` restaura
+    // RFLAGS, así que este `cld` no rompe el `memmove` interrumpido.
+    unsafe { core::arch::asm!("cld") };
     let prof = &PROF_IRQ[crate::arch::percpu::cpu_index()];
     prof.fetch_add(1, Ordering::Relaxed);
     if let Some(idx) = index(vector) {

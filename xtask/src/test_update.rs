@@ -179,7 +179,8 @@ pub fn run(filtro: Option<&str>) {
 
     // Salida TCP desde userland: determinista y sin internet — el guest llega
     // al host por 10.0.2.2, así que el servidor de eco lo levanta el propio
-    // banco. Es el camino que el OTA necesita y que no probaba nadie.
+    // banco. Dos connects al mismo puerto (cierra y reabre): es el patrón de
+    // un redirect HTTP, y con uno solo `saliente` pasaba mientras `https` no.
     if quiere("saliente") {
         let serial = dir.join("saliente.log");
         let base = dir.join("live-saliente.img");
@@ -1255,11 +1256,36 @@ halt
     Ok(format!("restaurado desde el live; arranca en {destino}"))
 }
 
+/// El #PF de ring 0 no llega a SOSOLOG y el banco de HTTPS sólo miraba
+/// «page fault de usuario». En placa el pánico era `EXCEPTION: page fault`
+/// dentro de `talc` al **segundo** `connect` (redirect HTTP).
+fn rastro_kernel_muerto(serie: &str) -> Option<String> {
+    serie.lines().find(|l| {
+        l.contains("EXCEPTION:")
+            || l.contains("panicked at")
+            || l.contains("!!! panic")
+            || l.contains("page fault de usuario")
+            || l.contains("BLOQUE DESBORDADO")
+    }).map(|l| l.trim().to_string())
+}
+
+fn exigir_kernel_vivo(serial: &Path) -> Result<(), String> {
+    let serie = std::fs::read_to_string(serial).unwrap_or_default();
+    if let Some(linea) = rastro_kernel_muerto(&serie) {
+        return Err(format!("el kernel reventó: {linea}"));
+    }
+    Ok(())
+}
+
 /// Abrir una conexión TCP **hacia fuera** desde un proceso de usuario.
 ///
-/// Dos casos, y el segundo importa tanto como el primero:
+/// Tres casos, y el del medio es el que `saliente` no cubría:
 /// 1. Contra un servidor que escucha: conecta, manda y recibe.
-/// 2. Contra un puerto cerrado: falla **a tiempo**. Un `connect` que se cuelga
+/// 2. **Cierra y vuelve a conectar al mismo host:puerto.** Es el patrón de un
+///    redirect HTTP (GitHub encadena varios para `releases/latest/download`).
+///    Con una sola conexión no se ve ni el TIME_WAIT del puerto local ni un
+///    `malloc` que recorre la lista de `talc` ya podrida.
+/// 3. Contra un puerto cerrado: falla **a tiempo**. Un `connect` que se cuelga
 ///    para siempre es lo que dejó el OTA mudo quince minutos.
 fn fase_tcp_saliente(
     code: &Path,
@@ -1280,12 +1306,14 @@ fn fase_tcp_saliente(
     // El servidor dice si **llegó a aceptar** una conexión: separa «el guest no
     // manda el SYN» de «lo manda y no procesa la respuesta». Con plazo: si
     // nadie conecta, un `accept` bloqueante colgaría la suite para siempre.
+    // Dos aceptaciones: la segunda es el close+reconnect del redirect.
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("nonblocking: {e}"))?;
     let eco = std::thread::spawn(move || {
         let fin = std::time::Instant::now() + Duration::from_secs(240);
-        while std::time::Instant::now() < fin {
+        let mut vistos = Vec::new();
+        while std::time::Instant::now() < fin && vistos.len() < 2 {
             match listener.accept() {
                 Ok((mut s, de)) => {
                     let _ = s.set_nonblocking(false);
@@ -1293,40 +1321,71 @@ fn fase_tcp_saliente(
                     let mut buf = [0u8; 256];
                     let n = s.read(&mut buf).unwrap_or(0);
                     let _ = s.write_all(&buf[..n]);
-                    return Some(format!("{de} envió {n} B"));
+                    vistos.push(format!("{de} envió {n} B"));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                Err(_) => return None,
+                Err(_) => break,
             }
         }
-        None
+        vistos
     });
 
     let _ = std::fs::remove_file(serial);
     let qemu = lanzar_live(code, vars, live, serial)?;
     let _guard = Matar(qemu.child);
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
-    let salida = ssh_guion_hasta(
+    let salida = match ssh_guion_hasta(
         key,
         SSH_PORT,
         &format!(
             "tcpconn 10.0.2.2 {puerto} hola-soso\n\
+             tcpconn 10.0.2.2 {puerto} segunda\n\
              tcpconn 10.0.2.2 1 nadie --timeout 3000\n\
              halt\n"
         ),
         Duration::from_secs(180),
         "sin conexión",
-    )?;
-    let aceptada = eco.join().ok().flatten();
-    println!("      eco del host: {}", aceptada.as_deref().unwrap_or("NADIE conectó"));
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            exigir_kernel_vivo(serial)?;
+            return Err(e);
+        }
+    };
+    exigir_kernel_vivo(serial)?;
+    let aceptadas = eco.join().unwrap_or_default();
+    println!(
+        "      eco del host: {} conexión(es) — {}",
+        aceptadas.len(),
+        if aceptadas.is_empty() {
+            "NADIE conectó".into()
+        } else {
+            aceptadas.join("; ")
+        }
+    );
 
-    if !salida.contains("tcpconn: conectado") {
-        return Err(format!("no abrió la conexión saliente: {salida:?}"));
+    let conectados = salida
+        .lines()
+        .filter(|l| l.contains("tcpconn: conectado"))
+        .count();
+    if conectados < 2 {
+        return Err(format!(
+            "hacían falta dos connects al mismo puerto (hubo {conectados}): {salida:?}"
+        ));
+    }
+    if aceptadas.len() < 2 {
+        return Err(format!(
+            "el host sólo aceptó {} conexión(es): {salida:?}",
+            aceptadas.len()
+        ));
     }
     if !salida.contains("hola-soso") {
-        return Err(format!("conectó pero no hubo ida y vuelta: {salida:?}"));
+        return Err(format!("primera ida y vuelta falló: {salida:?}"));
+    }
+    if !salida.contains("segunda") {
+        return Err(format!("segunda ida y vuelta falló: {salida:?}"));
     }
     // Y el puerto cerrado tiene que fallar **dentro** de su plazo.
     let linea = salida
@@ -1342,7 +1401,9 @@ fn fase_tcp_saliente(
     if ms > 10_000 {
         return Err(format!("el plazo de 3 s no se respetó: tardó {ms} ms"));
     }
-    Ok(format!("ida y vuelta OK; puerto cerrado falla en {ms} ms"))
+    Ok(format!(
+        "dos idas y vueltas OK; puerto cerrado falla en {ms} ms"
+    ))
 }
 
 /// `soso-update comprobar` contra el canal de verdad: DNS, TLS y descarga del
@@ -1359,7 +1420,7 @@ fn fase_https(
     let qemu = lanzar_live(code, vars, live, serial)?;
     let _guard = Matar(qemu.child);
     esperar_en_fichero(serial, "sosh —", Duration::from_secs(300))?;
-    let salida = ssh_guion_hasta(
+    let salida = match ssh_guion_hasta(
         key,
         SSH_PORT,
         "soso-update comprobar --traza
@@ -1374,17 +1435,14 @@ halt
         // espera de 900 s y un mensaje —«la sesión SSH no terminó»— que acusa
         // al SSH de algo que hizo la red.
         "FIN-COMPROBAR",
-    )?;
-    let serie = std::fs::read_to_string(serial).unwrap_or_default();
-    if serie.contains("page fault de usuario") {
-        return Err(format!(
-            "el cliente murió en el camino HTTPS: {:?}",
-            serie
-                .lines()
-                .filter(|l| l.contains("page fault") || l.contains("mmap-fault"))
-                .collect::<Vec<_>>()
-        ));
-    }
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            exigir_kernel_vivo(serial)?;
+            return Err(e);
+        }
+    };
+    exigir_kernel_vivo(serial)?;
     if !salida.contains("remoto:") {
         return Err(format!("no llegó a leer el manifiesto remoto: {salida:?}"));
     }
@@ -1622,4 +1680,34 @@ fn sangrar(s: &str) -> String {
         .map(|l| format!("      {l}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod rastro_kernel {
+    use super::rastro_kernel_muerto;
+
+    #[test]
+    fn ignora_un_arranque_sano() {
+        let serie = "sosh — escribe 'help' para la ayuda\nnet: dhcp 10.0.2.15/24\n";
+        assert_eq!(rastro_kernel_muerto(serie), None);
+    }
+
+    #[test]
+    fn caza_el_pf_de_ring0_de_talc() {
+        let serie = "\
+lxdde: centinelas en #PF: 12 bloques vivos, 0 desbordados
+!!! panic: panicked at src/arch/interrupts.rs:446:15:
+EXCEPTION: page fault at 0x17a7e98 rip=0x1000043a5ed cs=0x8 err=0xe
+";
+        let linea = rastro_kernel_muerto(serie).expect("tenía que cazar el pánico");
+        assert!(linea.contains("EXCEPTION:") || linea.contains("panicked at"));
+    }
+
+    #[test]
+    fn caza_un_desbordamiento_de_kmalloc() {
+        let serie = "lxdde: BLOQUE DESBORDADO en 0x444444441000 (64 B): centinela 0x41414141\n";
+        assert!(rastro_kernel_muerto(serie)
+            .unwrap()
+            .contains("BLOQUE DESBORDADO"));
+    }
 }

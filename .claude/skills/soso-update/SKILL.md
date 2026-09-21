@@ -99,8 +99,8 @@ después**. Al revés, esa primera actualización iría sin vuelta atrás.
 | `respaldo` | Respaldo corrupto → diagnóstico, sin lanzar la shell |
 | `roto` | Release con `/bin/init` que no es ELF: se deshace **sola** |
 | `manifiesto` | Manifiesto inválido rechazado |
-| `saliente` | TCP **de salida** desde userland: ida y vuelta contra un eco del host, y puerto cerrado que falla rápido |
-| `https` | Descarga real contra GitHub; sólo corre con `SOSO_TEST_RED=1` |
+| `saliente` | TCP **de salida**: dos connects al mismo puerto (cierra y reabre, como un redirect HTTP), ida y vuelta, puerto cerrado que falla rápido; el serial no puede traer `EXCEPTION`/`panicked` |
+| `https` | Descarga real contra GitHub; sólo con `SOSO_TEST_RED=1`. El serial no puede traer `EXCEPTION`/`panicked` (el #PF de ring 0 de `talc` no es un page fault de usuario) |
 
 El banco fija `SOSO_MODELS_DIR=target/tiny-model` si no viene puesto: la imagen
 sale con el modelo mínimo y no con los pesos grandes, que aquí no aportan nada y
