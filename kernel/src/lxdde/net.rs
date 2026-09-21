@@ -217,7 +217,15 @@ pub extern "C" fn lx_skb_put(skb: *mut LxSkBuff, len: u32) -> *mut u8 {
     unsafe {
         let s = &mut *skb;
         let start = s.headroom + s.len;
-        s.len += len as usize;
+        let add = len as usize;
+        if start.saturating_add(add) > s.data.len() {
+            crate::println!(
+                "lxdde: skb_put overflow start={start} +{add} cap={}",
+                s.data.len()
+            );
+            return core::ptr::null_mut();
+        }
+        s.len += add;
         s.data.as_mut_ptr().add(start)
     }
 }

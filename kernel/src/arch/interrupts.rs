@@ -441,6 +441,8 @@ extern "sysv64" fn kernel_pf_panic_shim(addr: u64, _: u64) -> u64 {
     rastro_de_pila(rsp);
     crate::println!("rastro: rsp en {}", crate::arch::gdt::zona_de_pila(rsp));
     volcado_junto_a_rsp(rsp);
+    #[cfg(feature = "lxdde")]
+    crate::lxdde::avisar_kmalloc_en_pf();
     panic!(
         "EXCEPTION: page fault at {addr:#x} rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x} cs={cs:#x} err={err:#x}"
     );

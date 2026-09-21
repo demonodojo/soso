@@ -31,7 +31,15 @@ void wifi_free_skb(struct wifi_sk_buff *skb)
 
 unsigned char *wifi_skb_put(struct wifi_sk_buff *skb, unsigned int len)
 {
-    unsigned char *p = skb->data + skb->len;
+    unsigned char *p;
+
+    if (!skb)
+        return 0;
+    /* `tailroom` es lo pedido en `wifi_alloc_skb`; sin este tope un put
+     * grande pisa el centinela de `lx_kmalloc` y el pánico sale en `talc`. */
+    if (skb->len + len > skb->tailroom)
+        return 0;
+    p = skb->data + skb->len;
     skb->len += len;
     return p;
 }

@@ -145,6 +145,11 @@ pub fn init(modes: LxddeModes) {
     }
 }
 
+/// Desde un #PF en kernel: dice si algún `lx_kmalloc` vivo perdió el centinela.
+pub fn avisar_kmalloc_en_pf() {
+    mem::avisar_desbordados_en_pf();
+}
+
 /// Bomba cooperativa: timers, workqueues, fibras e IRQ threads.
 pub fn poll() {
     if crate::arch::percpu::cpu_index() != 0 {

@@ -134,6 +134,31 @@ pub fn barrer_centinelas() -> Option<usize> {
     Some(n)
 }
 
+/// Igual que `barrer_centinelas`, pero **no panica**: se llama desde el
+/// manejador de un #PF en ring 0, cuando `talc` ya ha petado siguiendo una
+/// lista rota. Si el smash fue un `lx_kmalloc`, aquí sale el bloque y el
+/// tamaño. Si no sale nada, el overflow no fue de este pool (Vec/smoltcp).
+pub fn avisar_desbordados_en_pf() {
+    let Some(p) = POOL.try_lock() else {
+        crate::println!("lxdde: pool ocupado, no se pudieron mirar centinelas en el #PF");
+        return;
+    };
+    let mut rotos = 0usize;
+    for (&addr, &(size, _)) in p.live.iter() {
+        let visto = unsafe { core::ptr::read_unaligned((addr + size) as *const u64) };
+        if visto != CENTINELA {
+            rotos += 1;
+            crate::println!(
+                "lxdde: BLOQUE DESBORDADO (en #PF) en {addr:#x} ({size} B): centinela {visto:#x}"
+            );
+        }
+    }
+    crate::println!(
+        "lxdde: centinelas en #PF: {} bloques vivos, {rotos} desbordados",
+        p.live.len()
+    );
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn lx_vmalloc(size: u32) -> *mut c_void {
     lx_kmalloc(size as usize, 0)
