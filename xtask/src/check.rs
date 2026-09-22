@@ -155,16 +155,24 @@ fn glob_simple(patron: &str, ruta: &str) -> bool {
     patron == ruta
 }
 
-fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
-    let batches: &[(&str, &[&str], bool)] = &[
-        (
-            "sosofs+sosomfs+soso-llm-core",
-            &["sosofs", "sosomfs", "soso-llm-core"],
-            true,
-        ),
-        (
-            "gptdisk+soso-http+soso-web-core+sosomodel+convert-gguf+cuda-proxy",
-            &[
+/// Lote de `cargo test` en host; compartido con `memcheck`.
+pub(crate) struct HostTestBatch {
+    pub label: &'static str,
+    pub pkgs: &'static [&'static str],
+    pub std: bool,
+}
+
+/// Mismos paquetes que `run_host` en `cargo xtask check`.
+pub(crate) fn host_test_batches() -> &'static [HostTestBatch] {
+    &[
+        HostTestBatch {
+            label: "sosofs+sosomfs+soso-llm-core",
+            pkgs: &["sosofs", "sosomfs", "soso-llm-core"],
+            std: true,
+        },
+        HostTestBatch {
+            label: "gptdisk+soso-http+soso-web-core+sosomodel+convert-gguf+cuda-proxy",
+            pkgs: &[
                 "gptdisk",
                 "soso-http",
                 "soso-web-core",
@@ -172,27 +180,81 @@ fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
                 "convert-gguf",
                 "cuda-proxy",
             ],
-            false,
-        ),
-        ("soso-update-core", &["soso-update-core"], true),
-        ("soso-resize-core", &["soso-resize-core"], false),
-        ("soso-hw", &["soso-hw"], false),
-        // Supplicant WPA2: vectores publicados y transcripciones del 4-way.
-        ("soso-wpa2", &["soso-wpa2"], false),
-        ("xhci-nostd", &["xhci-nostd"], false),
-        ("soso-audio+gguf2som", &["soso-audio", "gguf2som"], true),
-        ("soso-forja-server", &["soso-forja-server"], false),
-        // Automejora: base reproducible (T01) y banco de casos (T02). El banco
-        // compila con rustc los candidatos de sus 10 casos de programación.
-        (
-            "soso-improve-core+soso-improve",
-            &["soso-improve-core", "soso-improve"],
-            false,
-        ),
-    ];
-    for (nombre, pkgs, std) in batches {
-        if !cargo_test(root, pkgs, *std) {
-            eprintln!("check: falló host ({nombre})");
+            std: false,
+        },
+        HostTestBatch {
+            label: "soso-update-core",
+            pkgs: &["soso-update-core"],
+            std: true,
+        },
+        HostTestBatch {
+            label: "soso-resize-core",
+            pkgs: &["soso-resize-core"],
+            std: false,
+        },
+        HostTestBatch {
+            label: "soso-hw",
+            pkgs: &["soso-hw"],
+            std: false,
+        },
+        HostTestBatch {
+            label: "soso-wpa2",
+            pkgs: &["soso-wpa2"],
+            std: false,
+        },
+        HostTestBatch {
+            label: "xhci-nostd",
+            pkgs: &["xhci-nostd"],
+            std: false,
+        },
+        HostTestBatch {
+            label: "soso-audio+gguf2som",
+            pkgs: &["soso-audio", "gguf2som"],
+            std: true,
+        },
+        HostTestBatch {
+            label: "soso-forja-server",
+            pkgs: &["soso-forja-server"],
+            std: false,
+        },
+        HostTestBatch {
+            label: "soso-improve-core+soso-improve",
+            pkgs: &["soso-improve-core", "soso-improve"],
+            std: false,
+        },
+    ]
+}
+
+pub(crate) fn host_test_single_thread(pkgs: &[&str]) -> bool {
+    pkgs == ["soso-http"] || pkgs == ["soso-forja-server"]
+}
+
+pub(crate) fn configure_host_cargo_test(
+    cmd: &mut Command,
+    root: &Path,
+    pkgs: &[&str],
+    con_std: bool,
+    target: Option<&str>,
+) {
+    cmd.current_dir(root).args(["test", "-q", "--locked"]);
+    if let Some(t) = target {
+        cmd.args(["--target", t]);
+    }
+    for pkg in pkgs {
+        cmd.args(["-p", pkg]);
+    }
+    if con_std {
+        cmd.args(["--features", "std"]);
+    }
+    if host_test_single_thread(pkgs) {
+        cmd.args(["--", "--test-threads=1"]);
+    }
+}
+
+fn run_host(root: &Path, fallos: &Arc<Mutex<u32>>) {
+    for batch in host_test_batches() {
+        if !cargo_test(root, batch.pkgs, batch.std) {
+            eprintln!("check: falló host ({})", batch.label);
             *fallos.lock().unwrap() += 1;
         }
     }
@@ -216,16 +278,7 @@ contrastado consigo mismo (sudo ./scripts/l6-wifi-capture-4way.sh)"
 
 fn cargo_test(root: &Path, pkgs: &[&str], con_std: bool) -> bool {
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(root).args(["test", "-q", "--locked"]);
-    for pkg in pkgs {
-        cmd.args(["-p", pkg]);
-    }
-    if con_std {
-        cmd.args(["--features", "std"]);
-    }
-    if pkgs == &["soso-http"] || pkgs == &["soso-forja-server"] {
-        cmd.args(["--", "--test-threads=1"]);
-    }
+    configure_host_cargo_test(&mut cmd, root, pkgs, con_std, None);
     match cmd.status() {
         Ok(st) => st.success(),
         Err(e) => {

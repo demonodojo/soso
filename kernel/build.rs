@@ -2,6 +2,14 @@ fn main() {
     // Rotación de la consola fijada en el build (la Steam Deck la deduce sola;
     // esto es para corregir el sentido sin tocar código).
     println!("cargo:rerun-if-env-changed=SOSO_FB_ROT");
+    println!("cargo::rustc-check-cfg=cfg(soso_heap_debug)");
+    println!("cargo:rerun-if-env-changed=SOSO_HEAP_DEBUG");
+    if matches!(
+        std::env::var("SOSO_HEAP_DEBUG").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    ) {
+        println!("cargo:rustc-cfg=soso_heap_debug");
+    }
     gen_font12x12();
     if std::env::var("CARGO_FEATURE_LXDDE").is_ok() {
         let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());

@@ -1,6 +1,8 @@
 # T13 — Conectar el mismo runtime a un servidor de desarrollo en host
 
-**Hito:** SI-1 / SI-2 · **Tipo:** Implementación host · **Estado:** pendiente.
+**Hito:** SI-1 / SI-2 · **Tipo:** Implementación host · **Estado:** completada (2026-09-22).
+
+Resumen: [seguimiento/T13.md](seguimiento/T13.md).
 
 **Dependencias:** [T09](T09-cancelacion-runtime.md), [T11](T11-http.md), [T12](T12-respuestas-sse.md)
 
@@ -43,9 +45,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Esto no cierra inferencia dentro de soso. Si falla calidad, conservar salida para T14.
 

@@ -55,7 +55,7 @@ fn exec(line: &str) {
 
     match cmd {
         "help" => {
-            println!("comandos: help dmesg [patrón|save] logfs hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem io ip ping wifi blk blkread blkwrite pf panic halt");
+            println!("comandos: help dmesg [patrón|save] logfs hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem heap io ip ping wifi blk blkread blkwrite pf panic halt");
         }
         "dmesg" => match args.first() {
             // `save` va al destino efectivo: sosofs si hay logs nativos, la ESP
@@ -196,6 +196,16 @@ fn exec(line: &str) {
             let libres = crate::mm::FRAME_ALLOC.get().unwrap().lock().free_frames();
             println!("{} frames libres ({} MiB)", libres, libres * 4096 / (1024 * 1024));
         }
+        "heap" => match args.first() {
+            Some(&"audit") => {
+                if crate::mm::heap::debug_enabled() {
+                    crate::mm::heap::audit("kshell");
+                } else {
+                    println!("heap: compila con SOSO_HEAP_DEBUG=1 (cargo xtask build/run)");
+                }
+            }
+            _ => println!("uso: heap audit"),
+        },
         "kbd" => {
             if let Some(name) = args.first() {
                 if crate::drivers::kbd::set_layout(name) {

@@ -1,6 +1,8 @@
 # T15 — Extraer la sesión residente manteniendo ask
 
-**Hito:** SI-2 · **Tipo:** Refactor guest · **Estado:** pendiente.
+**Hito:** SI-2 · **Tipo:** Refactor guest · **Estado:** completada (2026-09-22).
+
+Resumen: [seguimiento/T15.md](seguimiento/T15.md).
 
 **Dependencias:** [T08](T08-resultado-generacion.md), [T09](T09-cancelacion-runtime.md)
 
@@ -45,9 +47,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Si existe una regresión previa de ask, conservar evidencia y separar su arreglo antes de declarar el refactor equivalente.
 

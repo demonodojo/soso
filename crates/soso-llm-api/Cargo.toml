@@ -6,12 +6,30 @@ license = "GPL-2.0-only"
 
 [features]
 default = []
-std = ["serde/std", "serde_json/std", "soso-llm-core/std"]
+std = [
+    "serde/std",
+    "serde_json/std",
+    "soso-llm-core/std",
+    "dep:sha2",
+    "dep:sosomodel",
+]
 
 [dependencies]
 soso-llm-core = { path = "../soso-llm-core" }
+sosomodel = { path = "../sosomodel", optional = true }
+sha2 = { version = "0.10", optional = true }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[[example]]
+name = "serve_host"
+required-features = ["std"]
+
+[[test]]
+name = "admission"
+required-features = ["std"]
+
+[dev-dependencies]
 
 [lib]
 doctest = false

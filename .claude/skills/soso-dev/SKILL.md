@@ -47,6 +47,8 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 |---------|--------|
 | `cargo xtask build` | Compile kernel → `target/soso-bios.img` |
 | `cargo xtask check` | Pre-commit/CI: host tests, builds, iwl/GSP hostchecks, hw-matrix parser |
+| `cargo xtask memcheck [pkg…]` | Mismos tests de host que `check` con ASan+LSan (`x86_64-unknown-linux-gnuasan`); sin args incluye `-p xtask`. Opt-in, no CI |
+| `SOSO_HEAP_DEBUG=1 cargo xtask build` | Kernel: sonda `talc` al arranque y `heap audit` en kshell; userspace: redzones en el allocator + `libsoso::heap_audit()` en `init test`. Opt-in, no CI |
 | `cargo xtask build --drivers qemu` | Kernel mínimo (virtio-blk + virtio-net) |
 | `cargo xtask fit-drivers target/SOSODRV.TXT` | Reempaqueta kernel según informe hwscan |
 | `cargo xtask driver-add <git-url>` | Clona port lxdde externo a `lxdde/ports-extern/` |

@@ -1,0 +1,4 @@
+# FileMapper de tests host: Box::leak en map_file (shards vivos hasta fin del test).
+leak:convierte_deepseek2_mla_sintetico
+leak:tiny_asr_encode_decode_smoke
+leak:whisper_tiny_wav_reference

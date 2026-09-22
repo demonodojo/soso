@@ -98,6 +98,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // traza; el último marcador visible acota dónde se colgó el arranque.
     println!("boot: memtest");
     mm::memtest::run();
+    if mm::heap::debug_enabled() {
+        println!("boot: heap audit (SOSO_HEAP_DEBUG)");
+        mm::heap::audit("post-memtest");
+    }
 
     // Autotests rápidos de arranque: heap e IDT.
     let cuadrados: Vec<u64> = (1..=10).map(|n| n * n).collect();

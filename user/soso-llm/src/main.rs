@@ -10,6 +10,9 @@ mod cuda_host;
 mod distributed;
 mod net;
 mod pool;
+mod serve;
+mod serve_poll;
+mod session;
 mod staging;
 
 use alloc::format;
@@ -27,11 +30,12 @@ use soso_llm_core::parallel::RowParallel;
 use soso_llm_core::plan::{MemSnapshot, MemoryPlanConfig, MemoryPreset, ResourcePlanner};
 use soso_llm_core::pipeline::{PipelinePlan, PipelineRole};
 use soso_llm_core::runtime::{Backend, Runtime};
+use soso_llm_core::conversation::ModelProfile;
+use soso_llm_core::generation::{GenerationOptions, GenerationReport};
 use soso_llm_core::sample::Sampler;
-use soso_llm_core::source::MmapTensorSource;
-use soso_llm_core::tokenizer::{StreamDecoder, Tokenizer};
-use staging::StagedSource;
-use sosomodel::index::TensorIndex;
+use soso_llm_core::tokenizer::StreamDecoder;
+use soso_llm_api::PreparedChatCompletion;
+use session::{liberar_sesion, load_model, preparar_sesion, Sesion};
 use sosomodel::manifest::Manifest;
 
 libsoso::entry!(main);
@@ -72,7 +76,7 @@ fn print_iostat(antes: &abi::IoStat) {
     );
 }
 
-fn read_mem_snapshot() -> MemSnapshot {
+pub(crate) fn read_mem_snapshot() -> MemSnapshot {
     let mut mi = abi::MemInfo::default();
     if sys::meminfo(&mut mi) == 0 {
         MemSnapshot {
@@ -89,7 +93,7 @@ fn clock_ms() -> u64 {
     sys::uptime_ms().max(0) as u64
 }
 
-fn read_file(path: &str) -> Result<Vec<u8>, i64> {
+pub(crate) fn read_file(path: &str) -> Result<Vec<u8>, i64> {
     let fd = sys::open(path, O_RDONLY);
     if fd < 0 {
         return Err(fd);
@@ -123,13 +127,6 @@ fn read_file(path: &str) -> Result<Vec<u8>, i64> {
     Ok(buf)
 }
 
-struct ModelBundle {
-    rt: Runtime,
-    source: StagedSource,
-    tokenizer: Tokenizer,
-    manifest_crc: u32,
-    index_crc: u32,
-}
 
 fn main(args: &str) -> u8 {
     // `ask` se resuelve sobre el string CRUDO, antes de trocear: todo lo que
@@ -143,6 +140,9 @@ fn main(args: &str) -> u8 {
         return ask::run_askd();
     }
     let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.first() == Some(&"serve") {
+        return serve::run(&parts[1..]);
+    }
     if parts.first() == Some(&"node") || parts.first() == Some(&"worker") {
         return run_node_cmd(&parts);
     }
@@ -261,6 +261,7 @@ fn main(args: &str) -> u8 {
     println!("  soso-llm node <modelo> --listen <puerto> --layers <start>:<end>");
     println!("  soso-llm worker ...  (alias de node)");
     println!("  soso-llm ask <pregunta>   (texto literal; lo normal es usar `ask`)");
+    println!("  soso-llm serve --model <nombre> --port <puerto> --token-file <ruta>");
     1
 }
 
@@ -384,118 +385,6 @@ fn parse_pipeline_list(pipeline: &str) -> Vec<String> {
         .collect()
 }
 
-fn model_base(name: &str) -> String {
-    for prefix in ["/models/", "/var/models/"] {
-        let p = format!("{prefix}{name}/manifest.som");
-        let mut st = soso_abi::Stat::default();
-        if sys::stat(&p, &mut st) == 0 {
-            return format!("{prefix}{name}");
-        }
-    }
-    format!("/models/{name}")
-}
-
-fn read_model_catalog(name: &str) -> Result<(Manifest, TensorIndex, u32, u32), u8> {
-    let base = model_base(name);
-    let manifest_path = format!("{base}/manifest.som");
-    let index_path = format!("{base}/index.som");
-
-    let manifest_data = read_file(&manifest_path).map_err(|e| {
-        println!("soso-llm: no puedo leer {manifest_path} (errno {e})");
-        1u8
-    })?;
-    let manifest = Manifest::parse(&manifest_data).map_err(|_| {
-        println!("soso-llm: manifest inválido");
-        1u8
-    })?;
-    let manifest_crc = crc_bytes(&manifest_data);
-
-    let index_data = read_file(&index_path).map_err(|e| {
-        println!("soso-llm: no puedo leer {index_path} (errno {e})");
-        1u8
-    })?;
-    let index = TensorIndex::parse(&index_data).map_err(|_| {
-        println!("soso-llm: index inválido");
-        1u8
-    })?;
-    let index_crc = crc_bytes(&index_data);
-    Ok((manifest, index, manifest_crc, index_crc))
-}
-
-fn load_model_from_catalog(
-    name: &str,
-    manifest: Manifest,
-    index: TensorIndex,
-    manifest_crc: u32,
-    index_crc: u32,
-    role: PipelineRole,
-    layer_start: u32,
-    layer_end: u32,
-    staging: bool,
-) -> Result<ModelBundle, u8> {
-    let base = model_base(name);
-    let rt = Runtime::new(manifest, index.clone(), 32 * 1024 * 1024, 0);
-    if let Err(why) = rt.validate_shapes_for_role(role, layer_start, layer_end) {
-        println!("soso-llm: shapes del index no casan con el rol ({why})");
-        return Err(1);
-    }
-
-    let tokenizer = match read_file(&format!("{base}/tokenizer.som")) {
-        Ok(data) => Tokenizer::parse(&data).map_err(|_| {
-            println!("soso-llm: tokenizer.som inválido");
-            1u8
-        })?,
-        Err(_) => Tokenizer::byte_level(),
-    };
-
-    let inner = MmapTensorSource::new(format!("{base}/shards"), index, staging::SyscallMapper);
-    let inner = if staging {
-        inner
-    } else {
-        inner.with_sync_prefetch()
-    };
-    let mut source = StagedSource::new(inner);
-    if staging {
-        source.enable_worker();
-    } else {
-        source.disable_worker();
-    }
-    Ok(ModelBundle {
-        rt,
-        source,
-        tokenizer,
-        manifest_crc,
-        index_crc,
-    })
-}
-
-fn load_model(
-    name: &str,
-    role: PipelineRole,
-    layer_start: u32,
-    layer_end: u32,
-    staging: bool,
-) -> Result<ModelBundle, u8> {
-    let (manifest, index, manifest_crc, index_crc) = read_model_catalog(name)?;
-    load_model_from_catalog(
-        name,
-        manifest,
-        index,
-        manifest_crc,
-        index_crc,
-        role,
-        layer_start,
-        layer_end,
-        staging,
-    )
-}
-
-fn emit_plan_lines(lines: &[String], echo_fd: Option<u64>) {
-    let askd = echo_fd.is_some();
-    for line in lines {
-        traza(askd, line);
-    }
-}
 
 /// Diagnóstico: fd 3 en askd, stdout en `soso-llm run`.
 fn traza(askd: bool, msg: &str) {
@@ -521,6 +410,46 @@ fn traza_gpu_askd(g: &soso_gpu::SysGpu) {
         sin_sitio,
         g.last_on_gpu() as u8
     );
+}
+
+fn run_model(
+    name: &str,
+    prompt: &str,
+    max_new: usize,
+    mut sampler: Sampler,
+    force_cpu: bool,
+    mem_plan: MemoryPlanConfig,
+    chat: bool,
+) -> u8 {
+    let io0 = read_iostat();
+    let mut sesion = match preparar_sesion(name, force_cpu, mem_plan, true, true) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let rc = if !chat {
+        generar(&mut sesion, prompt, max_new, &mut sampler, true, Some(&io0))
+    } else {
+        let conf = ask::leer_conf();
+        let plantilla = ask::plantilla_efectiva(&conf, &sesion);
+        if plantilla.is_empty() {
+            println!("soso-llm: --chat sin plantilla (ni el modelo ni /etc/llm.conf traen una)");
+        } else {
+            println!("soso-llm: plantilla de chat aplicada");
+        }
+        let tokens = soso_llm_core::chat::render(plantilla, prompt, &sesion.bundle.tokenizer);
+        generar_tokens(
+            &mut sesion,
+            &tokens,
+            max_new,
+            &mut sampler,
+            true,
+            Some(&io0),
+            None,
+            false,
+        )
+    };
+    liberar_sesion(&mut sesion);
+    rc
 }
 
 fn run_distributed_head(
@@ -681,346 +610,6 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
     rc
 }
 
-/// Modelo cargado y listo para generar.
-pub(crate) struct Sesion {
-    bundle: ModelBundle,
-    pool: Option<ThreadPool>,
-    sys_gpu: Option<soso_gpu::SysGpu>,
-    pub(crate) modelo: String,
-}
-
-fn run_model(
-    name: &str,
-    prompt: &str,
-    max_new: usize,
-    mut sampler: Sampler,
-    force_cpu: bool,
-    mem_plan: MemoryPlanConfig,
-    chat: bool,
-) -> u8 {
-    let io0 = read_iostat();
-    let mut sesion = match preparar_sesion(name, force_cpu, mem_plan, true, true) {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let rc = if !chat {
-        // Sin `--chat` el prompt va crudo, y eso es lo que hace útil a `run`:
-        // poder comparar con y sin plantilla sobre el mismo modelo.
-        generar(&mut sesion, prompt, max_new, &mut sampler, true, Some(&io0))
-    } else {
-        let conf = ask::leer_conf();
-        let plantilla = ask::plantilla_efectiva(&conf, &sesion);
-        if plantilla.is_empty() {
-            println!("soso-llm: --chat sin plantilla (ni el modelo ni /etc/llm.conf traen una)");
-        } else {
-            println!("soso-llm: plantilla de chat aplicada");
-        }
-        let tokens = soso_llm_core::chat::render(plantilla, prompt, &sesion.bundle.tokenizer);
-        generar_tokens(&mut sesion, &tokens, max_new, &mut sampler, true, Some(&io0), None, false)
-    };
-    liberar_sesion(&mut sesion);
-    rc
-}
-
-/// Apaga workers de inferencia antes de salir del proceso.
-fn liberar_sesion(sesion: &mut Sesion) {
-    sesion.bundle.source.shutdown_worker();
-    sesion.pool = None;
-}
-
-/// Prefetch con progreso en serie (evita minutos sin línea en SOSOLOG).
-fn prefetch_shards_logged(
-    source: &mut StagedSource,
-    shards: &[String],
-    echo_fd: Option<u64>,
-) {
-    let n = shards.len();
-    let askd = echo_fd.is_some();
-    for (i, shard) in shards.iter().enumerate() {
-        let step = i + 1;
-        if step == 1 || step == n || step % 8 == 0 {
-            traza(askd, &format!("askd: prefetch {step}/{n} {shard}"));
-            if let Some(fd) = echo_fd {
-                keepalive_dot(fd);
-            }
-        }
-        source.prefetch_shards(&[shard.clone()]);
-    }
-}
-
-/// Carga el modelo y decide planificador, backend y workers.
-///
-/// `verboso` apaga el diagnóstico entero: `ask` quiere la respuesta y nada
-/// más, y `soso-llm run` sigue contándolo todo.
-pub(crate) fn preparar_sesion(
-    name: &str,
-    force_cpu: bool,
-    mem_plan: MemoryPlanConfig,
-    verboso: bool,
-    with_pool: bool,
-) -> Result<Sesion, u8> {
-    preparar_sesion_echo(name, force_cpu, mem_plan, verboso, with_pool, None)
-}
-
-pub(crate) fn preparar_sesion_echo(
-    name: &str,
-    force_cpu: bool,
-    mem_plan: MemoryPlanConfig,
-    verboso: bool,
-    with_pool: bool,
-    echo_fd: Option<u64>,
-) -> Result<Sesion, u8> {
-    let t_sess = sys::uptime_ms();
-    let askd = echo_fd.is_some();
-    let io0 = read_iostat();
-    let (manifest, index, manifest_crc, index_crc) = read_model_catalog(name)?;
-    let num_layers = manifest.num_layers;
-
-    let mut gpu = abi::GpuInfo::default();
-    let _ = sys::gpu_info(&mut gpu);
-    let mem = read_mem_snapshot();
-    let planner = ResourcePlanner::with_config(
-        &manifest,
-        &index,
-        mem,
-        gpu.vram_free,
-        false,
-        mem_plan,
-    );
-    emit_plan_lines(&planner.explain_load_plan(&manifest, &index), echo_fd);
-
-    let t_carga = sys::uptime_ms();
-    let mut bundle = load_model_from_catalog(
-        name,
-        manifest,
-        index,
-        manifest_crc,
-        index_crc,
-        PipelineRole::Full,
-        0,
-        num_layers,
-        with_pool,
-    )?;
-    // La carga en frío va aparte de tok/s: `generado` sólo cronometra el
-    // decode, y el disco se gasta casi entero antes de que ese reloj arranque.
-    // Medirlas juntas es lo que hacía invisible el coste de E/S.
-    let carga_ms = (sys::uptime_ms() - t_carga).max(0) as u64;
-    if askd {
-        traza(true, &format!("askd: catálogo+disco {name} — {carga_ms} ms"));
-    }
-    let io_carga = read_iostat();
-    if verboso {
-        println!(
-            "soso-llm: carga en frío — {} ms, {} peticiones de disco, {} bloques ({} ms de disco)",
-            carga_ms,
-            io_carga.peticiones.saturating_sub(io0.peticiones),
-            io_carga.bloques.saturating_sub(io0.bloques),
-            io_carga.nanos.saturating_sub(io0.nanos) / 1_000_000,
-        );
-        println!(
-            "soso-llm: modelo {} ({} capas, hidden={})",
-            bundle.rt.manifest.name, bundle.rt.manifest.num_layers, bundle.rt.manifest.hidden_dim
-        );
-    }
-
-    bundle.rt.set_planner(planner);
-    if verboso {
-        if let Some(pl) = bundle.rt.planner.as_ref() {
-            println!(
-                "soso-llm: planificador (detalle) — preset {:?}, replan cada {} tokens",
-                pl.plan_config().preset,
-                soso_llm_core::plan::REPLAN_EVERY_TOKENS,
-            );
-        }
-    }
-    let t_backend = sys::uptime_ms();
-    let mut sys_gpu = if force_cpu { None } else { soso_gpu::SysGpu::new() };
-    let backend_ms = (sys::uptime_ms() - t_backend).max(0) as u64;
-    traza(
-        askd,
-        &format!(
-            "soso-llm: backend {} (+{} ms)",
-            if sys_gpu.is_some() { "GPU" } else { "CPU" },
-            backend_ms
-        ),
-    );
-    if askd {
-        traza(
-            true,
-            &format!(
-                "askd: backend {} (+{backend_ms} ms)",
-                if sys_gpu.is_some() { "GPU" } else { "CPU" }
-            ),
-        );
-    }
-    // El `present` del kernel no basta para decidir: un dispositivo puede aceptar
-    // búferes y no ejecutar nada (iGPU Intel), y entonces `SysGpu::new` dice no.
-    // Anunciar "GPU detectada" mirando sólo `present` era prometer un offload que
-    // no iba a ocurrir — y con el dispositivo software, además, mentir.
-    if force_cpu {
-        if verboso {
-            println!("soso-llm: backend CPU (--cpu)");
-        }
-        bundle.rt.set_backend(Backend::Cpu);
-    } else if let Some(ref mut g) = sys_gpu {
-        // `gpu_info` inicial puede ver vram_bufs=0 antes de que GSP exponga el
-        // pool; `SysGpu::new` ya releyó. Sin esto, eager_vram queda en false y
-        // el prefetch por USB (~4,5 GiB) parece un cuelgue tras «backend GPU».
-        let _ = sys::gpu_info(&mut gpu);
-        let vram_free = gpu.vram_free;
-        if verboso {
-            println!(
-                "soso-llm: dispositivo de cómputo «{}» (fase {}), VRAM libre {} bytes",
-                g.device_name(),
-                g.phase(),
-                vram_free
-            );
-        }
-        bundle.rt.set_backend(Backend::Auto);
-        bundle.rt.tiers.vram_budget = vram_free as usize;
-        if let Some(pl) = bundle.rt.planner.as_mut() {
-            pl.refresh_vram(&bundle.rt.manifest, &bundle.rt.index, vram_free);
-        }
-        let model_payload = soso_llm_core::plan::total_model_vram_bytes(&bundle.rt.index);
-        let model_g6 = soso_llm_core::plan::total_model_vram_g6_budget_bytes(&bundle.rt.index);
-        let keep_mapped = bundle
-            .rt
-            .planner
-            .as_ref()
-            .is_some_and(|p| p.keep_weights_mapped());
-        let eager_vram = gpu.vram_bufs != 0 && vram_free > 0;
-        let full_vram = model_g6 > 0 && model_g6 <= vram_free;
-        if askd {
-            traza(
-                true,
-                &format!(
-                    "askd: VRAM — modelo {} MiB (G6 {} MiB), pool {} MiB, libre {} MiB, tablas {}, eager={}, residente={}",
-                    model_payload >> 20,
-                    model_g6 >> 20,
-                    gpu.vram_pool_free >> 20,
-                    vram_free >> 20,
-                    gpu.g6_pt_free,
-                    eager_vram,
-                    full_vram
-                ),
-            );
-        }
-        let index = &bundle.rt.index;
-        let mut shards = Vec::new();
-        for e in &index.entries {
-            if !shards.iter().any(|s| s == &e.shard) {
-                shards.push(e.shard.clone());
-            }
-        }
-        // Sin eager: prefetch para streaming CPU. Con eager: una pasada calienta
-        // el page cache antes de subir (sin ella cada tensor_view faultea el USB).
-        if keep_mapped && (!eager_vram || full_vram) && !shards.is_empty() {
-            prefetch_shards_logged(&mut bundle.source, &shards, echo_fd);
-        }
-        if full_vram {
-            g.fijar_pesos_residentes();
-        }
-        if eager_vram {
-            let mut gpu_info = abi::GpuInfo::default();
-            let (dma0, bounce0) = if sys::gpu_info(&mut gpu_info) == 0 {
-                (gpu_info.uploads_dma, gpu_info.uploads_bounce)
-            } else {
-                (0, 0)
-            };
-            let t_up = sys::uptime_ms().max(0);
-            let uploads0 = g.stats().1;
-            let mut bytes_subidos = 0u64;
-            let to_upload: Vec<(String, Vec<u32>)> = bundle
-                .rt
-                .index
-                .entries
-                .iter()
-                .map(|e| (e.name.clone(), e.shape.clone()))
-                .collect();
-            let n_up = to_upload.len();
-            traza(askd, &format!("askd: subida GPU — {n_up} tensores"));
-            for (i, (name, shape)) in to_upload.iter().enumerate() {
-                let step = i + 1;
-                if step == 1 || step == n_up || step % 8 == 0 {
-                    let ms = (sys::uptime_ms() - t_up).max(0) as u64;
-                    traza(
-                        askd,
-                        &format!("askd: subida GPU {step}/{n_up} (+{ms} ms) ({name})"),
-                    );
-                    if let Some(fd) = echo_fd {
-                        keepalive_dot(fd);
-                    }
-                }
-                if let Ok(view) = bundle.source.tensor_view(name) {
-                    if g.subir_tensor(name, &view, shape) {
-                        bytes_subidos =
-                            bytes_subidos.saturating_add(view.bytes.len() as u64);
-                    }
-                }
-            }
-            let uploaded = g.stats().1.saturating_sub(uploads0);
-            let ms_up = (sys::uptime_ms() - t_up).max(0) as u64;
-            traza(
-                askd,
-                &format!("askd: subida GPU fin — {uploaded} ok, {bytes_subidos} B en {ms_up} ms"),
-            );
-            let (dma, bounce) = if sys::gpu_info(&mut gpu_info) == 0 {
-                (
-                    gpu_info.uploads_dma.saturating_sub(dma0),
-                    gpu_info.uploads_bounce.saturating_sub(bounce0),
-                )
-            } else {
-                (0, 0)
-            };
-            if askd {
-                libsoso::logln!(
-                    "soso-llm: subida eager VRAM — {} MiB, {} tensores, {} ms (dma={} bounce={})",
-                    bytes_subidos >> 20,
-                    uploaded,
-                    ms_up,
-                    dma,
-                    bounce
-                );
-            } else {
-                g.log_subida_eager(uploaded, bytes_subidos, ms_up, dma, bounce);
-            }
-        }
-    } else if gpu.present != 0 {
-        if verboso {
-            println!(
-                "soso-llm: hay GPU («{}») pero no ejecuta kernels; backend CPU",
-                libsoso::str_hasta_nul(&gpu.name)
-            );
-        }
-        bundle.rt.set_backend(Backend::Cpu);
-    } else {
-        if verboso {
-            println!("soso-llm: backend CPU");
-        }
-        bundle.rt.set_backend(Backend::Cpu);
-    }
-
-    let pool = if with_pool {
-        let pool = ThreadPool::new();
-        if verboso {
-            println!("soso-llm: workers={}", pool.workers());
-        }
-        Some(pool)
-    } else {
-        None
-    };
-    if askd {
-        let total_ms = (sys::uptime_ms() - t_sess).max(0) as u64;
-        traza(true, &format!("askd: sesión {name} preparada — {total_ms} ms total"));
-    }
-    Ok(Sesion {
-        bundle,
-        pool,
-        sys_gpu,
-        modelo: String::from(name),
-    })
-}
-
 /// Genera la respuesta a `prompt` sobre una sesión ya cargada, en streaming.
 ///
 /// `io0` es la marca de E/S desde la que contar (la de antes de cargar, para
@@ -1144,6 +733,50 @@ fn ask_layer_enter(layer: u32, n: u32) {
         libsoso::logln!("askd: forward capa 1/{n} (+{total} ms inferencia)");
     }
     ask_keepalive_dot();
+}
+
+/// Generación para la API HTTP guest: sin stdout ni protocolo ask (T16).
+pub(crate) fn generar_para_api(
+    sesion: &mut Sesion,
+    prompt_ids: &[u32],
+    prepared: &PreparedChatCompletion,
+    profile: &ModelProfile,
+    observer: &mut dyn soso_llm_core::generation::GenerationObserver,
+) -> Result<(Vec<u32>, GenerationReport), ()> {
+    if sesion.pool.is_none() {
+        sesion.pool = Some(ThreadPool::new());
+    }
+    sesion.bundle.source.disable_worker();
+    let options = GenerationOptions::new(
+        prepared.max_new_tokens as usize,
+        profile.stop_token_ids.clone(),
+    );
+    let seed = prepared.seed.unwrap_or(42) as u64;
+    let mut sampler = Sampler::new(
+        prepared.temperature as f32,
+        prepared.top_p as f32,
+        seed,
+    );
+    let par: Option<&dyn RowParallel> = sesion
+        .pool
+        .as_ref()
+        .filter(|p| p.workers() > 1)
+        .map(|p| p as &dyn RowParallel);
+    let mut gpu_ref: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = sesion
+        .sys_gpu
+        .as_mut()
+        .map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
+    sesion.bundle.rt.generate_stream_planned_observed(
+        &mut sesion.bundle.source,
+        prompt_ids,
+        options,
+        &mut sampler,
+        observer,
+        par,
+        &mut gpu_ref,
+        || sys::uptime_ms().max(0) as u64,
+        &mut read_mem_snapshot,
+    )
 }
 
 /// Igual que `generar` pero con el prompt YA tokenizado.

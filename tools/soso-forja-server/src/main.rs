@@ -991,7 +991,7 @@ members = ["libsoso", "hola-std"]
 [workspace.dependencies]
 soso-abi = { path = "../crates/soso-abi" }
 libsoso = { path = "libsoso" }
-getrandom = { version = "0.2", features = ["rdrand"] }
+getrandom = { version = "0.2", features = ["custom"] }
 
 [profile.release]
 panic = "abort"

@@ -1,6 +1,6 @@
 # T17 — Atender ocupado, health y desconexión durante inferencia
 
-**Hito:** SI-2 · **Tipo:** Implementación guest acotada · **Estado:** pendiente.
+**Hito:** SI-2 · **Tipo:** Implementación guest acotada · **Estado:** hecho (e2e T19 pendiente).
 
 **Dependencias:** [T09](T09-cancelacion-runtime.md), [T16](T16-servicio-guest.md)
 
@@ -44,9 +44,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Si la syscall no permite el sondeo supuesto, adjuntar reproducción mínima y especificar una ficha ABI; no usar un bucle bloqueante oculto.
 
@@ -58,4 +58,4 @@ del hito en la misma sesión.
 
 Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
 
-Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).
+Validación nativa e2e: **pendiente (T19)**. Evidencia: `target/self-improvement/tasks/T17/resultado.md`, `seguimiento/T17.md`.

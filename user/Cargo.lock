@@ -502,8 +502,18 @@ dependencies = [
  "libsoso",
  "soso-abi",
  "soso-gpu",
+ "soso-llm-api",
  "soso-llm-core",
  "sosomodel",
+]
+
+[[package]]
+name = "soso-llm-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soso-llm-core",
 ]
 
 [[package]]

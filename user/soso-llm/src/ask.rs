@@ -16,7 +16,10 @@ use soso_llm_core::plan::MemoryPlanConfig;
 use soso_llm_core::sample::Sampler;
 
 use crate::net::{parse_sock_addr, TcpFd};
-use crate::{generar_tokens, preparar_sesion_echo, Sesion};
+use crate::session::{
+    preparar_sesion_echo, PropietarioSesion, PoliticaModelo, Sesion, resolver_modelo,
+};
+use crate::generar_tokens;
 
 const CONF: &str = "/etc/llm.conf";
 pub const ASK_PORT: u16 = 7420;
@@ -147,11 +150,11 @@ pub fn modelos() -> Vec<String> {
 }
 
 pub fn modelo_efectivo(conf: &Conf) -> Option<String> {
-    let disponibles = modelos();
-    if !conf.modelo.is_empty() && disponibles.iter().any(|m| *m == conf.modelo) {
-        return Some(conf.modelo.clone());
-    }
-    disponibles.into_iter().next()
+    resolver_modelo(
+        PoliticaModelo::AskHistorica,
+        &conf.modelo,
+        &modelos(),
+    )
 }
 
 fn socket_write(fd: u64, data: &[u8]) {
@@ -341,9 +344,8 @@ pub fn run_askd() -> u8 {
     };
     libsoso::logln!("askd: escuchando en {ASK_ADDR}");
 
-    let mut sesion: Option<Sesion> = None;
+    let mut propietario = PropietarioSesion::vacio();
     let mut conf = leer_conf();
-    let mut modelo = String::new();
 
     loop {
         let conn = match TcpFd::accept(&listener, 0) {
@@ -358,42 +360,42 @@ pub fn run_askd() -> u8 {
                 continue;
             }
         };
-        let mut line_buf = [0u8; LINE_MAX];
-        let Some(n) = read_line_fd(conn.fd, &mut line_buf) else {
-            continue;
-        };
-        let texto = core::str::from_utf8(&line_buf[..n])
-            .unwrap_or("")
-            .trim();
-        if texto.is_empty() {
-            socket_fin(conn.fd);
-            continue;
-        }
-        let preview: String = texto.chars().take(48).collect();
-        askd_trace(&format!(
-            "conexión — «{preview}{}»",
-            if texto.len() > 48 { "…" } else { "" }
-        ));
-        let rc = tratar_linea_askd(
-            &mut sesion,
-            &mut conf,
-            &mut modelo,
-            texto,
-            conn.fd,
-        );
-        if rc != 0 {
-            socket_reply(conn.fd, "ask: error\n");
-        }
-        // Ceder el CPU: sosh está bloqueado en el socket y, si no salimos
-        // del hilo, en SMP el despertar del read puede tardar una rodaja.
-        let _ = sys::sleep_ms(1);
+        atender_conexion_ask(&mut propietario, &mut conf, conn);
     }
 }
 
+/// Atiende una conexión ask ya aceptada (compartido con `serve`, T16).
+pub fn atender_conexion_ask(
+    propietario: &mut PropietarioSesion,
+    conf: &mut Conf,
+    conn: TcpFd,
+) {
+    let mut line_buf = [0u8; LINE_MAX];
+    let Some(n) = read_line_fd(conn.fd, &mut line_buf) else {
+        return;
+    };
+    let texto = core::str::from_utf8(&line_buf[..n])
+        .unwrap_or("")
+        .trim();
+    if texto.is_empty() {
+        socket_fin(conn.fd);
+        return;
+    }
+    let preview: String = texto.chars().take(48).collect();
+    askd_trace(&format!(
+        "conexión — «{preview}{}»",
+        if texto.len() > 48 { "…" } else { "" }
+    ));
+    let rc = tratar_linea_askd(propietario, conf, texto, conn.fd);
+    if rc != 0 {
+        socket_reply(conn.fd, "ask: error\n");
+    }
+    let _ = sys::sleep_ms(1);
+}
+
 fn asegurar_modelo(
-    sesion: &mut Option<Sesion>,
+    propietario: &mut PropietarioSesion,
     conf: &Conf,
-    modelo: &mut String,
     fd: u64,
 ) -> Result<(), u8> {
     let want = match modelo_efectivo(conf) {
@@ -411,11 +413,7 @@ fn asegurar_modelo(
         libsoso::logln!("{msg}");
         socket_write_str(fd, &format!("{msg}\n"));
     }
-    let recargar = sesion
-        .as_ref()
-        .map(|s| s.modelo != want)
-        .unwrap_or(true);
-    if recargar {
+    if propietario.necesita_carga(&want) {
         let t_carga = sys::uptime_ms();
         socket_write_str(fd, &format!("ask: cargando {want}...\n"));
         askd_trace(&format!("cargando {want} (catálogo + backend)"));
@@ -423,12 +421,9 @@ fn asegurar_modelo(
         {
             Ok(s) => {
                 askd_trace_ms(&format!("{want} listo"), t_carga);
-                *sesion = Some(s);
-                *modelo = want;
-                // Sin hilo de staging: sosh está bloqueado en el socket y
-                // con SMP>1 el worker no llega a poner `done` (askd cuelga
-                // en generate; 2026-08-31). El prefetch va en este hilo.
-                if let Some(ses) = sesion.as_mut() {
+                propietario.sesion = Some(s);
+                propietario.modelo = want;
+                if let Some(ses) = propietario.sesion.as_mut() {
                     ses.bundle.source.disable_worker();
                     if let Some(ref mut g) = ses.sys_gpu {
                         if !g.probe_compute() {
@@ -457,9 +452,8 @@ fn asegurar_modelo(
 }
 
 fn tratar_linea_askd(
-    sesion: &mut Option<Sesion>,
+    propietario: &mut PropietarioSesion,
     conf: &mut Conf,
-    modelo: &mut String,
     texto: &str,
     fd: u64,
 ) -> u8 {
@@ -471,7 +465,7 @@ fn tratar_linea_askd(
     if texto == ":modelos" {
         let mut out = String::new();
         for m in modelos() {
-            let marca = if m == *modelo { '*' } else { ' ' };
+            let marca = if m == propietario.modelo { '*' } else { ' ' };
             out.push_str(&format!("{marca} {m}\n"));
         }
         socket_reply(fd, &out);
@@ -480,7 +474,7 @@ fn tratar_linea_askd(
     if let Some(n) = resto_tras(":modelo", texto) {
         let n = n.trim();
         if n.is_empty() {
-            socket_reply(fd, &format!("ask: modelo actual: {modelo}\n"));
+            socket_reply(fd, &format!("ask: modelo actual: {}\n", propietario.modelo));
             return 0;
         }
         if !modelos().iter().any(|m| m == n) {
@@ -488,11 +482,11 @@ fn tratar_linea_askd(
             return 0;
         }
         conf.modelo = n.to_string();
-        *sesion = None;
-        if asegurar_modelo(sesion, conf, modelo, fd).is_err() {
+        propietario.sesion = None;
+        if asegurar_modelo(propietario, conf, fd).is_err() {
             return 1;
         }
-        socket_reply(fd, &format!("ask: modelo {modelo}\n"));
+        socket_reply(fd, &format!("ask: modelo {}\n", propietario.modelo));
         return 0;
     }
     if let Some(n) = resto_tras(":max", texto) {
@@ -503,7 +497,7 @@ fn tratar_linea_askd(
                 // generar 128 tokens, y espera «ask: cargando» en esa sesión.
                 // Sin esto el primer `ask` posterior puede reutilizar una
                 // sesión que el cliente no vio cargar.
-                if asegurar_modelo(sesion, conf, modelo, fd).is_err() {
+                if asegurar_modelo(propietario, conf, fd).is_err() {
                     return 1;
                 }
                 socket_reply(fd, &format!("ask: máx {v} tokens\n"));
@@ -513,10 +507,11 @@ fn tratar_linea_askd(
         return 0;
     }
 
-    if asegurar_modelo(sesion, conf, modelo, fd).is_err() {
+    if asegurar_modelo(propietario, conf, fd).is_err() {
         return 1;
     }
-    let ses = sesion.as_mut().unwrap();
+    let ses = propietario.sesion.as_mut().unwrap();
+    ses.reset_peticion();
 
     let plantilla = plantilla_efectiva(conf, ses);
     let tokens = chat::render(plantilla, texto, &ses.bundle.tokenizer);
@@ -543,7 +538,8 @@ fn tratar_linea_askd(
         socket_write_str(
             fd,
             &format!(
-                "ask: {modelo} en CPU (GPU sin cómputo usable); minutos por token.{atajo}\n"
+                "ask: {} en CPU (GPU sin cómputo usable); minutos por token.{atajo}\n",
+                propietario.modelo
             ),
         );
     }
@@ -559,7 +555,8 @@ fn tratar_linea_askd(
     };
     askd_trace_ms(
         &format!(
-            "generando — modelo={modelo} {modo} prompt={} max={} backend={backend}",
+            "generando — modelo={} {modo} prompt={} max={} backend={backend}",
+            propietario.modelo,
             tokens.len(),
             conf.max
         ),
@@ -567,7 +564,10 @@ fn tratar_linea_askd(
     );
     socket_write_str(
         fd,
-        &format!("ask: modelo {modelo} ({modo}, {backend})\n"),
+        &format!(
+            "ask: modelo {} ({modo}, {backend})\n",
+            propietario.modelo
+        ),
     );
     socket_write_str(
         fd,

@@ -1,6 +1,6 @@
 # T16 — Servir HTTP en guest con el modelo residente
 
-**Hito:** SI-2 · **Tipo:** Implementación guest · **Estado:** pendiente.
+**Hito:** SI-2 · **Tipo:** Implementación guest · **Estado:** hecho (validación nativa / T14 go pendientes).
 
 **Dependencias:** [T10](T10-api-json.md), [T11](T11-http.md), [T12](T12-respuestas-sse.md), [T14](T14-evaluacion-modelo.md), [T15](T15-sesion-residente.md)
 
@@ -44,9 +44,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 No modificar kernel/syscalls para facilitar el primer servidor. Una carencia reproducida de la ABI se convierte en tarea independiente.
 
@@ -58,4 +58,4 @@ del hito en la misma sesión.
 
 Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
 
-Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).
+Validación nativa: **pendiente** (humo loopback guest con T18). Condición de entrada **T14 go** sin cumplir. Evidencia: `target/self-improvement/tasks/T16/resultado.md`, `seguimiento/T16.md`.

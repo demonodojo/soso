@@ -370,7 +370,13 @@ fn lanzar_live(code: &Path, vars: &Path, live: &Path, serial: &Path) -> Result<Q
         &format!("file={},format=raw,if=none,id=live0", live.display()),
     ]);
     cmd.args(["-device", "virtio-blk-pci,drive=live0"]);
-    crate::apply_qemu_nic_with_ports(&mut cmd, SSH_PORT, SSH_PORT + 1, Some(&MAC.to_string()));
+    crate::apply_qemu_nic_with_ports(
+        &mut cmd,
+        SSH_PORT,
+        SSH_PORT + 1,
+        Some(&MAC.to_string()),
+        None,
+    );
     cmd.args(["-serial", &format!("file:{}", serial.display())])
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;

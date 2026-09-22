@@ -5,6 +5,9 @@
 
 extern crate alloc;
 
+#[cfg(soso_heap_debug)]
+mod heap_debug;
+
 pub mod linea;
 pub mod sys;
 pub mod thread;
@@ -382,6 +385,23 @@ static ARENA: Arena = Arena {
     }),
 };
 
+/// Comprueba invariantes del arena (no-op sin `SOSO_HEAP_DEBUG=1` al compilar).
+pub fn heap_audit() {
+    #[cfg(soso_heap_debug)]
+    heap_debug::audit();
+}
+
+#[cfg(soso_heap_debug)]
+pub(crate) fn heap_debug_audit_impl() {
+    ARENA.lock();
+    let st = unsafe { &*ARENA.st.get() };
+    heap_debug::audit_arena(st.cur, st.end, st.last_start, st.last_end);
+    ARENA.unlock();
+}
+
+#[cfg(not(soso_heap_debug))]
+pub(crate) fn heap_debug_audit_impl() {}
+
 impl Arena {
     fn lock(&self) {
         use core::sync::atomic::Ordering;
@@ -431,21 +451,37 @@ impl SbrkAllocator {
 unsafe impl core::alloc::GlobalAlloc for SbrkAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         unsafe {
-            let size = layout.size();
-            let align = layout.align().max(16);
+            #[cfg(soso_heap_debug)]
+            let inner = heap_debug::layout_extra(layout);
+            #[cfg(not(soso_heap_debug))]
+            let inner = layout;
+            let size = inner.size();
+            let align = inner.align().max(16);
             ARENA.lock();
             let ptr = Self::bump(&mut *ARENA.st.get(), size, align);
             ARENA.unlock();
+            if !ptr.is_null() {
+                #[cfg(soso_heap_debug)]
+                heap_debug::stamp(ptr, layout.size());
+            }
             ptr
         }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
         unsafe {
+            #[cfg(soso_heap_debug)]
+            if !ptr.is_null() {
+                heap_debug::verify(ptr, layout.size(), "dealloc arena");
+            }
             let p = ptr as usize;
             ARENA.lock();
             let st = &mut *ARENA.st.get();
-            if p == st.last_start && p + layout.size() == st.last_end && st.cur == st.last_end {
+            #[cfg(soso_heap_debug)]
+            let reserved = heap_debug::stored_size(layout);
+            #[cfg(not(soso_heap_debug))]
+            let reserved = layout.size();
+            if p == st.last_start && p + reserved == st.last_end && st.cur == st.last_end {
                 st.cur = st.last_start;
                 st.last_end = st.last_start;
             }
@@ -463,12 +499,24 @@ unsafe impl core::alloc::GlobalAlloc for SbrkAllocator {
             let p = ptr as usize;
             ARENA.lock();
             let st = &mut *ARENA.st.get();
+            #[cfg(soso_heap_debug)]
+            let old_reserved = heap_debug::stored_size(layout);
+            #[cfg(not(soso_heap_debug))]
+            let old_reserved = layout.size();
             let es_ultimo =
-                p == st.last_start && p + layout.size() == st.last_end && st.cur == st.last_end;
-            if es_ultimo && p + new_size <= st.end {
-                st.cur = p + new_size;
+                p == st.last_start && p + old_reserved == st.last_end && st.cur == st.last_end;
+            let new_layout =
+                core::alloc::Layout::from_size_align_unchecked(new_size, layout.align());
+            #[cfg(soso_heap_debug)]
+            let new_reserved = heap_debug::stored_size(new_layout);
+            #[cfg(not(soso_heap_debug))]
+            let new_reserved = new_size;
+            if es_ultimo && p + new_reserved <= st.end {
+                st.cur = p + new_reserved;
                 st.last_end = st.cur;
                 ARENA.unlock();
+                #[cfg(soso_heap_debug)]
+                heap_debug::stamp(ptr, new_size);
                 return ptr;
             }
             ARENA.unlock();
@@ -490,6 +538,30 @@ impl HybridAllocator {
     unsafe fn bump(st: &mut ArenaState, size: usize, align: usize) -> *mut u8 {
         unsafe { SbrkAllocator::bump(st, size, align) }
     }
+
+    fn inner_layout(layout: core::alloc::Layout) -> core::alloc::Layout {
+        #[cfg(soso_heap_debug)]
+        {
+            heap_debug::layout_extra(layout)
+        }
+        #[cfg(not(soso_heap_debug))]
+        {
+            layout
+        }
+    }
+
+    /// El arena vive por encima del heap enlazado; liberar un puntero del arena
+    /// con `deallocate` del linked list corrompe la lista.
+    fn ptr_in_linked_heap(ptr: *mut u8) -> bool {
+        if ptr.is_null() {
+            return false;
+        }
+        let heap = HEAP.lock();
+        let p = ptr as usize;
+        let bottom = heap.bottom() as usize;
+        let top = heap.top() as usize;
+        p >= bottom && p < top
+    }
 }
 
 unsafe impl core::alloc::GlobalAlloc for HybridAllocator {
@@ -502,15 +574,26 @@ unsafe impl core::alloc::GlobalAlloc for HybridAllocator {
                     return p as *mut u8;
                 }
             }
+            #[cfg(soso_heap_debug)]
+            let inner = heap_debug::layout_extra(layout);
+            #[cfg(not(soso_heap_debug))]
+            let inner = layout;
             if layout.align() <= 4096 {
-                if let Ok(ptr) = HEAP.lock().allocate_first_fit(layout) {
-                    return ptr.as_ptr();
+                if let Ok(ptr) = HEAP.lock().allocate_first_fit(inner) {
+                    let p = ptr.as_ptr();
+                    #[cfg(soso_heap_debug)]
+                    heap_debug::stamp(p, layout.size());
+                    return p;
                 }
             }
-            let align = layout.align().max(16);
+            let align = inner.align().max(16);
             ARENA.lock();
-            let ptr = Self::bump(&mut *ARENA.st.get(), size, align);
+            let ptr = Self::bump(&mut *ARENA.st.get(), inner.size(), align);
             ARENA.unlock();
+            if !ptr.is_null() {
+                #[cfg(soso_heap_debug)]
+                heap_debug::stamp(ptr, layout.size());
+            }
             ptr
         }
     }
@@ -521,11 +604,16 @@ unsafe impl core::alloc::GlobalAlloc for HybridAllocator {
                 let _ = sys::munmap(ptr as u64, (layout.size() as u64).next_multiple_of(4096));
                 return;
             }
-            if layout.align() <= 4096 {
-                if let Some(nonnull) = core::ptr::NonNull::new(ptr) {
-                    let _ = HEAP.lock().deallocate(nonnull, layout);
-                    return;
-                }
+            #[cfg(soso_heap_debug)]
+            if !ptr.is_null() {
+                heap_debug::verify(ptr, layout.size(), "dealloc");
+            }
+            if layout.align() <= 4096 && Self::ptr_in_linked_heap(ptr) {
+                let inner = Self::inner_layout(layout);
+                let _ = HEAP
+                    .lock()
+                    .deallocate(core::ptr::NonNull::new_unchecked(ptr), inner);
+                return;
             }
             SbrkAllocator.dealloc(ptr, layout);
         }
@@ -537,7 +625,33 @@ unsafe impl core::alloc::GlobalAlloc for HybridAllocator {
         layout: core::alloc::Layout,
         new_size: usize,
     ) -> *mut u8 {
-        unsafe { SbrkAllocator.realloc(ptr, layout, new_size) }
+        unsafe {
+            if layout.size() >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
+                let new_layout =
+                    core::alloc::Layout::from_size_align_unchecked(new_size, layout.align());
+                let dst = self.alloc(new_layout);
+                if !dst.is_null() && !ptr.is_null() {
+                    core::ptr::copy_nonoverlapping(ptr, dst, layout.size().min(new_size));
+                    self.dealloc(ptr, layout);
+                }
+                return dst;
+            }
+            #[cfg(soso_heap_debug)]
+            if !ptr.is_null() {
+                heap_debug::verify(ptr, layout.size(), "realloc");
+            }
+            if layout.align() <= 4096 && Self::ptr_in_linked_heap(ptr) {
+                let new_layout =
+                    core::alloc::Layout::from_size_align_unchecked(new_size, layout.align());
+                let dst = self.alloc(new_layout);
+                if !dst.is_null() && !ptr.is_null() {
+                    core::ptr::copy_nonoverlapping(ptr, dst, layout.size().min(new_size));
+                    self.dealloc(ptr, layout);
+                }
+                return dst;
+            }
+            SbrkAllocator.realloc(ptr, layout, new_size)
+        }
     }
 }
 

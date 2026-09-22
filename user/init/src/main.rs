@@ -519,6 +519,7 @@ fn suite() -> u8 {
     let v: Vec<u64> = (0..10_000).collect();
     let s = String::from("heap ok: ") + itoa(v.iter().sum::<u64>());
     check!(v.len() == 10_000, "{s}");
+    libsoso::heap_audit();
 
     // spawn + wait con código de salida.
     let pid = sys::spawn("/bin/init", "hijo");

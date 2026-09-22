@@ -1663,7 +1663,13 @@ fn lanzar_live_con(
         ]);
         cmd.args(["-device", "nvme,serial=soso-ajeno,drive=nvme0,bootindex=1"]);
     }
-    crate::apply_qemu_nic_with_ports(&mut cmd, SSH_PORT, SSH_PORT + 1, Some(&MAC.to_string()));
+    crate::apply_qemu_nic_with_ports(
+        &mut cmd,
+        SSH_PORT,
+        SSH_PORT + 1,
+        Some(&MAC.to_string()),
+        None,
+    );
     cmd.args(["-serial", &format!("file:{}", serial.display())])
         .stderr(Stdio::null());
     let child = cmd.spawn().map_err(|e| e.to_string())?;

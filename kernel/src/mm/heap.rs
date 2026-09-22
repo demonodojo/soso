@@ -1,6 +1,7 @@
 //! Heap del kernel: páginas mapeadas bajo demanda en el arranque y
 //! gestionadas por `talc` como asignador global.
 
+use alloc::boxed::Box;
 use spin::Mutex;
 use talc::{ClaimOnOom, Span, Talc, Talck};
 use x86_64::VirtAddr;
@@ -31,6 +32,35 @@ const HEAP_MIN: u64 = 6 * 1024 * 1024;
 #[global_allocator]
 static ALLOCATOR: Talck<Mutex<()>, ClaimOnOom> =
     Talc::new(unsafe { ClaimOnOom::new(Span::empty()) }).lock();
+
+/// Fuerza a Talc a recorrer todas sus listas libres y deja un marcador antes
+/// y después. En `dev`, `malloc` llama a `scan_for_errors()` antes de tocar el
+/// heap: si una liberación anterior dejó un enlace inválido, el segundo
+/// marcador no llega a imprimirse y el contexto del primero identifica la
+/// operación culpable.
+///
+/// La sonda se conserva deliberadamente. Liberarla aquí convertiría su propio
+/// `free` en la última mutación sin validar y volvería ambiguo el diagnóstico.
+/// Son ocho bytes por punto de comprobación, sólo usado por la traza temporal
+/// del DNS que reproduce el panic en hardware.
+/// Activo si el kernel se compiló con `SOSO_HEAP_DEBUG=1` (xtask/build).
+pub const fn debug_enabled() -> bool {
+    cfg!(soso_heap_debug)
+}
+
+/// Sonda del heap del kernel (`talc`). Sin el cfg es no-op.
+pub fn audit(contexto: &str) {
+    if debug_enabled() {
+        comprobar_listas(contexto);
+    }
+}
+
+pub fn comprobar_listas(contexto: &str) {
+    crate::println!("heap: comprobando listas {contexto}");
+    let sonda = Box::new(0x534f_534f_4845_4150u64);
+    let ptr = Box::into_raw(sonda);
+    crate::println!("heap: listas OK {contexto} sonda={ptr:p}");
+}
 
 /// Mapea el heap y se lo entrega a talc. Devuelve los bytes que quedaron.
 ///

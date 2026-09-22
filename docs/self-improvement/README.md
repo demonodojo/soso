@@ -16,7 +16,9 @@ completadas**: soso segmenta ya **exactamente igual** que el tokenizer oficial
 del modelo (5/5 fixtures). **[T04](T04-dominio-chat.md)**, **[T05](T05-validacion-chat.md)** y
 **[T06](T06-render-chat.md)**–**[T12](T12-respuestas-sse.md)** están
 completadas (dominio chat + render + parse + informe + cancelación + API JSON + HTTP + respuestas SSE).
-Siguiente en el camino SI-2: **[T13](T13-servidor-host.md)** (servidor de desarrollo host; requiere T09, T11, T12).
+**[T13](T13-servidor-host.md)** (servidor de desarrollo host) está **completada** (2026-09-22;
+[seguimiento/T13.md](seguimiento/T13.md)). **[T15](T15-sesion-residente.md)** (sesión residente guest) está **completada** (2026-09-22;
+[seguimiento/T15.md](seguimiento/T15.md), [seguimiento/T16.md](seguimiento/T16.md), [seguimiento/T17.md](seguimiento/T17.md), [seguimiento/T18.md](seguimiento/T18.md)). **T16–T18** implementadas; e2e **T19** y producción **T14 go** pendientes; **T14** bloqueada por **T48**.
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.
 Entregar al modelo una ficha por sesión, las secciones indicadas
@@ -112,12 +114,12 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T10](T10-api-json.md) | Crear la crate API y adaptar peticiones JSON | SI-2 | T05, T06, T08 | Completada |
 | [T11](T11-http.md) | Leer HTTP fragmentado con límites explícitos | SI-2 | T10 | Completada |
 | [T12](T12-respuestas-sse.md) | Emitir respuestas completas y eventos SSE | SI-2 | T07, T08, T10 | Completada |
-| [T13](T13-servidor-host.md) | Conectar el mismo runtime a un servidor de desarrollo en host | SI-1 / SI-2 | T09, T11, T12 | Pendiente |
+| [T13](T13-servidor-host.md) | Conectar el mismo runtime a un servidor de desarrollo en host | SI-1 / SI-2 | T09, T11, T12 | Completada |
 | [T14](T14-evaluacion-modelo.md) | Medir calidad y fijar presupuestos antes de usar el agente | SI-0 / SI-1 | T02, T03, T13, T48 | Pendiente |
-| [T15](T15-sesion-residente.md) | Extraer la sesión residente manteniendo ask | SI-2 | T08, T09 | Pendiente |
-| [T16](T16-servicio-guest.md) | Servir HTTP en guest con el modelo residente | SI-2 | T10, T11, T12, T14, T15 | Pendiente |
-| [T17](T17-admisiones-cancelacion.md) | Atender ocupado, health y desconexión durante inferencia | SI-2 | T09, T16 | Pendiente |
-| [T18](T18-puertos-qemu.md) | Añadir reenvío HTTP configurable sin colisiones | SI-2 | — | Pendiente |
+| [T15](T15-sesion-residente.md) | Extraer la sesión residente manteniendo ask | SI-2 | T08, T09 | Completada |
+| [T16](T16-servicio-guest.md) | Servir HTTP en guest con el modelo residente | SI-2 | T10, T11, T12, T14, T15 | Hecho (T14 go / nativo pend.) |
+| [T17](T17-admisiones-cancelacion.md) | Atender ocupado, health y desconexión durante inferencia | SI-2 | T09, T16 | Hecho (e2e T19 pend.) |
+| [T18](T18-puertos-qemu.md) | Añadir reenvío HTTP configurable sin colisiones | SI-2 | — | Hecho (e2e T19) |
 | [T19](T19-qemu-e2e.md) | Crear la prueba completa de API dentro de soso | SI-2 | T16, T17, T18 | Pendiente |
 | [T20](T20-opencode-config.md) | Configurar OpenCode para el proveedor soso | SI-3 | T14, T19 | Pendiente |
 | [T21](T21-opencode-contrato.md) | Capturar el contrato real de OpenCode sin depender del modelo | SI-3 | T20, T47, T48 | Pendiente |

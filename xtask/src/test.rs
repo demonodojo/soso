@@ -182,6 +182,8 @@ struct QemuSlot {
     id: &'static str,
     ssh_port: u16,
     echo_port: u16,
+    /// Reenvío host→guest API (`127.0.0.1:puerto`); `None` en la mayoría de tests.
+    llm_host_port: Option<u16>,
     mac: String,
     serial: PathBuf,
     bios: PathBuf,
@@ -590,6 +592,7 @@ fn make_slot(shard: ShardId, img: &Path, data: &Path, models: &Path) -> QemuSlot
         id,
         ssh_port: shard.ssh_port(),
         echo_port: shard.echo_port(),
+        llm_host_port: None,
         mac: shard.mac(),
         serial,
         // El nombre de la copia tiene que conservar el firmware: `apply_firmware`
@@ -1064,7 +1067,13 @@ fn lanzar_qemu(slot: &QemuSlot) -> std::io::Result<Child> {
     ]);
     super::apply_qemu_disks(&mut qemu, &slot.data, &slot.models, &slot.guest);
     super::apply_qemu_usb(&mut qemu, &slot.guest);
-    super::apply_qemu_nic_with_ports(&mut qemu, slot.ssh_port, slot.echo_port, Some(&slot.mac));
+    super::apply_qemu_nic_with_ports(
+        &mut qemu,
+        slot.ssh_port,
+        slot.echo_port,
+        Some(&slot.mac),
+        slot.llm_host_port,
+    );
     super::apply_qemu_gpu(&mut qemu);
     if let Some(mon) = &slot.monitor {
         let _ = std::fs::remove_file(mon);
@@ -1105,6 +1114,7 @@ fn lanzar_qemu_legacy_ports(
         id: "legacy",
         ssh_port,
         echo_port,
+        llm_host_port: None,
         mac: mac.into(),
         serial: serial.to_path_buf(),
         bios: img.to_path_buf(),
@@ -2587,6 +2597,7 @@ fn run_usb_scenario(
         id: "usb",
         ssh_port,
         echo_port,
+        llm_host_port: None,
         mac: mac.into(),
         serial: serial.to_path_buf(),
         bios: img.to_path_buf(),

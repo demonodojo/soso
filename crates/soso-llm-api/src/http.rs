@@ -10,6 +10,15 @@ pub const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// Límite de bytes del cuerpo de la petición.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 
+/// Cabeceras HTTP ya parseadas; el cuerpo puede faltar aún.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderPeek {
+    pub method: String,
+    pub path: String,
+    pub content_length: usize,
+    pub header_end: usize,
+}
+
 /// Petición HTTP/1.1 completa (una por conexión).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
@@ -51,6 +60,11 @@ impl HttpReader {
         Self::default()
     }
 
+    /// Bytes acumulados (T17: comprobar Authorization antes del cuerpo).
+    pub fn buffer(&self) -> &[u8] {
+        &self.buf
+    }
+
     pub fn feed(&mut self, chunk: &[u8]) -> Result<FeedOutcome, HttpError> {
         if self.finished {
             return Err(HttpError::TrailingData);
@@ -60,6 +74,37 @@ impl HttpReader {
         }
         self.buf.extend_from_slice(chunk);
         self.try_complete()
+    }
+
+    /// Cabeceras completas sin exigir el cuerpo (T17: responder busy antes del body).
+    pub fn peek_headers(&self) -> Result<Option<HeaderPeek>, HttpError> {
+        let header_end = match find_header_end(&self.buf) {
+            Some(end) => end,
+            None => {
+                if self.buf.len() > MAX_HEADER_BYTES {
+                    return Err(HttpError::HeaderTooLarge);
+                }
+                return Ok(None);
+            }
+        };
+        if header_end > MAX_HEADER_BYTES {
+            return Err(HttpError::HeaderTooLarge);
+        }
+        let headers_text = core::str::from_utf8(&self.buf[..header_end]).map_err(|_| HttpError::Parse)?;
+        let (method, path, parsed_headers) = parse_header_block(headers_text)?;
+        if has_transfer_encoding_chunked(&parsed_headers) {
+            return Err(HttpError::UnsupportedTransferEncoding);
+        }
+        let content_length = resolve_content_length(&method, &parsed_headers)?;
+        if content_length > MAX_BODY_BYTES {
+            return Err(HttpError::BodyTooLarge);
+        }
+        Ok(Some(HeaderPeek {
+            method,
+            path,
+            content_length,
+            header_end,
+        }))
     }
 
     pub fn signal_eof(&mut self) -> Result<FeedOutcome, HttpError> {

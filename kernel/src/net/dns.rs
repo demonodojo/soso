@@ -201,8 +201,23 @@ pub fn resolve_hostname(host: &str) -> Result<soso_abi::SockAddr, i64> {
     let lista = servidores(dns);
     let start = super::now();
     let deadline = start + TIMEOUT;
-    let ip = resolve_a(iface, sockets, dev, trimmed, start, deadline, &lista)
-        .map_err(|_| -soso_abi::ENOENT)?;
+    let resultado = resolve_a(iface, sockets, dev, trimmed, start, deadline, &lista)
+        .map_err(|_| -soso_abi::ENOENT);
+
+    // El socket UDP y `query` ya se han destruido al volver de `resolve_a`.
+    // Este recorrido separa su posible corrupción de la liberación siguiente.
+    crate::mm::heap::comprobar_listas("tras resolve_a");
+
+    crate::println!(
+        "heap: liberando servidores DNS ptr={:p} len={} cap={}",
+        lista.as_ptr(),
+        lista.len(),
+        lista.capacity()
+    );
+    drop(lista);
+    crate::mm::heap::comprobar_listas("tras liberar servidores DNS");
+
+    let ip = resultado?;
     Ok(soso_abi::SockAddr {
         addr: ip,
         port: 0,

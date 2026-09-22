@@ -388,7 +388,7 @@
       "title": "Conectar el mismo runtime a un servidor de desarrollo en host",
       "milestone": "SI-1 / SI-2",
       "kind": "Implementación host",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T09",
         "T11",
@@ -407,6 +407,17 @@
         ],
         "evidence": [],
         "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+      },
+      "tracking": {
+        "updated_at": "2026-09-22",
+        "base": "bb08640366888c36b50fea40133d4c95f237e5d0",
+        "summary": "docs/self-improvement/seguimiento/T13.md",
+        "evidence": [
+          "target/self-improvement/tasks/T13/resultado.md",
+          "cargo test -p soso-llm-api --features std --test host_service"
+        ],
+        "blocker": null,
+        "next_step": "T15-sesion-residente.md (camino SI-2); T14 sigue pendiente de T48"
       }
     },
     {
@@ -450,7 +461,7 @@
       "title": "Extraer la sesión residente manteniendo ask",
       "milestone": "SI-2",
       "kind": "Refactor guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T08",
         "T09"
@@ -468,6 +479,17 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-22",
+        "base": "bb08640366888c36b50fea40133d4c95f237e5d0",
+        "summary": "docs/self-improvement/seguimiento/T15.md",
+        "evidence": [
+          "target/self-improvement/tasks/T15/resultado.md",
+          "cargo xtask test -- --guest llm-dense --only ask"
+        ],
+        "blocker": null,
+        "next_step": "T16-servicio-guest.md (bloqueada por T14 go + deps)"
       }
     },
     {
@@ -476,7 +498,7 @@
       "title": "Servir HTTP en guest con el modelo residente",
       "milestone": "SI-2",
       "kind": "Implementación guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T10",
         "T11",
@@ -495,9 +517,24 @@
       ],
       "native_validation": {
         "status": "pending",
-        "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "requires": [
+          "T18"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T16/resultado.md"
+        ],
+        "note": "Build guest y tests host API OK; humo loopback guest pendiente T18; T14 go no acreditado."
+      },
+      "tracking": {
+        "updated_at": "2026-09-22",
+        "summary": "docs/self-improvement/seguimiento/T16.md",
+        "evidence": [
+          "target/self-improvement/tasks/T16/resultado.md",
+          "cargo build --release -p soso-llm (cwd user/)",
+          "cargo test -p soso-llm-api --features std --test host_service"
+        ],
+        "blocker": "T14 go (condición de entrada catálogo)",
+        "next_step": "T18-puertos-qemu.md o T19-qemu-e2e.md"
       }
     },
     {
@@ -506,7 +543,7 @@
       "title": "Atender ocupado, health y desconexión durante inferencia",
       "milestone": "SI-2",
       "kind": "Implementación guest acotada",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T09",
         "T16"
@@ -520,9 +557,24 @@
       ],
       "native_validation": {
         "status": "pending",
-        "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "requires": [
+          "T19"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T17/resultado.md"
+        ],
+        "note": "Tests admission + build guest OK; e2e QEMU en T19."
+      },
+      "tracking": {
+        "updated_at": "2026-09-22",
+        "summary": "docs/self-improvement/seguimiento/T17.md",
+        "evidence": [
+          "target/self-improvement/tasks/T17/resultado.md",
+          "cargo test -p soso-llm-api --features std --test admission",
+          "cargo build --release -p soso-llm (cwd user/)"
+        ],
+        "blocker": null,
+        "next_step": "T18-puertos-qemu.md o T19-qemu-e2e.md"
       }
     },
     {
@@ -531,7 +583,7 @@
       "title": "Añadir reenvío HTTP configurable sin colisiones",
       "milestone": "SI-2",
       "kind": "Implementación xtask",
-      "status": "pending",
+      "status": "done",
       "depends_on": [],
       "entry_conditions": [],
       "contract_sections": "C3–C4, C6",
@@ -545,8 +597,20 @@
         "requires": [
           "T19"
         ],
-        "evidence": [],
-        "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+        "evidence": [
+          "target/self-improvement/tasks/T18/resultado.md"
+        ],
+        "note": "Tests llm_ports OK; red real en T19."
+      },
+      "tracking": {
+        "updated_at": "2026-09-22",
+        "summary": "docs/self-improvement/seguimiento/T18.md",
+        "evidence": [
+          "target/self-improvement/tasks/T18/resultado.md",
+          "cargo test -p xtask llm_ports::"
+        ],
+        "blocker": null,
+        "next_step": "T19-qemu-e2e.md"
       }
     },
     {

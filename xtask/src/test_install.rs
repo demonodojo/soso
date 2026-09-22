@@ -623,7 +623,13 @@ fn lanzar(code: &Path, vars: &Path, serial: &Path, discos: Discos) -> Result<Chi
         }
     }
 
-    crate::apply_qemu_nic_with_ports(&mut qemu, SSH_PORT, SSH_PORT + 1, Some(&MAC.to_string()));
+    crate::apply_qemu_nic_with_ports(
+        &mut qemu,
+        SSH_PORT,
+        SSH_PORT + 1,
+        Some(&MAC.to_string()),
+        None,
+    );
     qemu.args(["-serial", &format!("file:{}", serial.display())])
         .args(["-display", "none"])
         .arg("-no-reboot")

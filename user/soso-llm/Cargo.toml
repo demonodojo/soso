@@ -10,3 +10,4 @@ soso-abi = { workspace = true }
 soso-gpu = { path = "../soso-gpu" }
 sosomodel = { path = "../../crates/sosomodel" }
 soso-llm-core = { path = "../../crates/soso-llm-core" }
+soso-llm-api = { path = "../../crates/soso-llm-api" }

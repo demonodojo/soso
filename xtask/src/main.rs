@@ -123,6 +123,10 @@ fn main() {
         "check" => {
             check::run();
         }
+        "memcheck" => {
+            let filter: Vec<String> = std::env::args().skip(2).collect();
+            memcheck::run(&filter);
+        }
         "release" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             release::run(&args);
@@ -146,7 +150,7 @@ fn main() {
         other => {
             eprintln!(
                 "comando desconocido: {other} \
-                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-update | test-resize | check | release | forja-out | sync-src | rust-bootstrap | rust-build-std | sosomfs-check | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | fetch-whisper | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check | hw-matrix)"
+                 (usa build | run | gdb | mkfs | test | test-usb | test-install | test-update | test-resize | check | memcheck | release | forja-out | sync-src | rust-bootstrap | rust-build-std | sosomfs-check | test-distributed-llm | test-distributed-llm-3 | convert-gguf | fetch-hf | fetch-whisper | package-usb | package-usb-live | install-disk | flash-usb-live | sosolog | lx-build | fit-drivers | driver-add | bench-llm | g1-check | g3-check | hw-matrix)"
             );
             exit(2);
         }
@@ -157,6 +161,7 @@ mod fb_shot;
 mod bench;
 mod as_user;
 mod check;
+mod memcheck;
 mod drivers;
 mod fat32_write;
 mod fetch_hf;
@@ -170,6 +175,7 @@ mod pci_stable;
 #[cfg(test)]
 mod elf_mmap_rules;
 mod install_disk;
+mod llm_ports;
 mod live_models;
 mod lx_build;
 mod package_live;
@@ -408,6 +414,19 @@ fn ovmf_vars_writable(src: &Path) -> PathBuf {
 /// Compila el kernel y genera imágenes BIOS + UEFI. Devuelve la que
 /// corresponda a `SOSO_FIRMWARE` (BIOS por defecto; si se pide UEFI y no
 /// hay OVMF, avisa y cae a BIOS).
+pub(crate) fn soso_heap_debug_enabled() -> bool {
+    matches!(
+        std::env::var("SOSO_HEAP_DEBUG").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+fn apply_heap_debug_env(cmd: &mut Command) {
+    if soso_heap_debug_enabled() {
+        cmd.env("SOSO_HEAP_DEBUG", "1");
+    }
+}
+
 pub(crate) fn build_image() -> PathBuf {
     build_image_with_profile(&drivers::profile_from_env_or_args(), false)
 }
@@ -449,6 +468,7 @@ pub(crate) fn build_image_with_profile(
     if let Ok(rot) = std::env::var("SOSO_FB_ROT") {
         cmd.env("SOSO_FB_ROT", rot);
     }
+    apply_heap_debug_env(&mut cmd);
     let status = cmd.status().expect("no se pudo ejecutar cargo");
     if !status.success() {
         exit(status.code().unwrap_or(1));
@@ -650,6 +670,7 @@ pub(crate) fn build_user() -> bool {
     version::write_soso_release(&root);
     let mut cmd = Command::new("cargo");
     as_user::apply_invoking_user(&mut cmd);
+    apply_heap_debug_env(&mut cmd);
     let status = cmd
         .current_dir(root.join("user"))
         .args(["build", "--release", "--target-dir"])
@@ -1536,7 +1557,7 @@ pub(crate) fn apply_qemu_disks(
 }
 
 pub(crate) fn apply_qemu_nic(qemu: &mut Command) {
-    apply_qemu_nic_with_ports(qemu, 2222, 7777, None);
+    apply_qemu_nic_with_ports(qemu, 2222, 7777, None, llm_ports::llm_host_port_from_env());
 }
 
 /// NIC slirp con reenvío SSH/echo configurables (tests en paralelo).
@@ -1545,42 +1566,54 @@ pub(crate) fn apply_qemu_nic_with_ports(
     ssh_port: u16,
     echo_port: u16,
     mac: Option<&str>,
+    llm_host_port: Option<u16>,
 ) {
     let mac = mac
         .map(String::from)
         .or_else(|| std::env::var("SOSO_QEMU_MAC").ok())
         .unwrap_or_else(|| "52:54:00:12:34:15".into());
+    let forwards = llm_ports::SlirpForwards {
+        echo_port,
+        ssh_port,
+        llm_host_port,
+    };
     match qemu_nic().to_ascii_lowercase().as_str() {
         s if s.starts_with("vfio:") => {
             let bdf = s.strip_prefix("vfio:").unwrap_or("");
             println!("xtask: NIC VFIO passthrough {bdf} (sin slirp)");
+            if llm_host_port.is_some() {
+                println!(
+                    "xtask: aviso: VFIO no reenvía el API LLM; accede por la IP del guest (puerto guest {})",
+                    llm_ports::GUEST_LLM_HTTP_PORT
+                );
+            }
             qemu.args(["-device", &format!("vfio-pci,host={bdf}")]);
         }
         "e1000e" | "e1000" => {
-            qemu.args([
-                "-netdev",
-                &format!(
-                    "user,id=net0,hostfwd=tcp::{echo_port}-:7,hostfwd=tcp::{ssh_port}-:22"
-                ),
-            ]);
+            let netdev = llm_ports::build_user_netdev(&forwards)
+                .unwrap_or_else(|e| panic!("xtask: forwards NIC inválidos: {e}"));
+            if llm_host_port.is_some() {
+                println!("xtask: NIC {}", llm_ports::describe_forwards(&forwards));
+            }
+            qemu.args(["-netdev", &netdev]);
             qemu.args(["-device", &format!("e1000e,netdev=net0,mac={mac}")]);
         }
         "lx-e1000e" | "lx_e1000e" => {
-            qemu.args([
-                "-netdev",
-                &format!(
-                    "user,id=net0,hostfwd=tcp::{echo_port}-:7,hostfwd=tcp::{ssh_port}-:22"
-                ),
-            ]);
+            let netdev = llm_ports::build_user_netdev(&forwards)
+                .unwrap_or_else(|e| panic!("xtask: forwards NIC inválidos: {e}"));
+            if llm_host_port.is_some() {
+                println!("xtask: NIC {}", llm_ports::describe_forwards(&forwards));
+            }
+            qemu.args(["-netdev", &netdev]);
             qemu.args(["-device", &format!("e1000e,netdev=net0,mac={mac}")]);
         }
         _ => {
-            qemu.args([
-                "-netdev",
-                &format!(
-                    "user,id=net0,hostfwd=tcp::{echo_port}-:7,hostfwd=tcp::{ssh_port}-:22"
-                ),
-            ]);
+            let netdev = llm_ports::build_user_netdev(&forwards)
+                .unwrap_or_else(|e| panic!("xtask: forwards NIC inválidos: {e}"));
+            if llm_host_port.is_some() {
+                println!("xtask: NIC {}", llm_ports::describe_forwards(&forwards));
+            }
+            qemu.args(["-netdev", &netdev]);
             qemu.args(["-device", &format!("virtio-net-pci,netdev=net0,mac={mac}")]);
         }
     }
