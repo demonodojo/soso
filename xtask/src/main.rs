@@ -32,6 +32,10 @@ fn main() {
             build_user();
             mkfs(true);
         }
+        "test-llm-api" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            test_llm_api::run(&args);
+        }
         "test" => {
             test::run();
             if matches!(
@@ -184,6 +188,7 @@ mod rtc_host;
 mod sosolog;
 mod test;
 mod test_distributed;
+mod test_llm_api;
 mod sosomfs_check;
 mod test_install;
 mod test_resize;

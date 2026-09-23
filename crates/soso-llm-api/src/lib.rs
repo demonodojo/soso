@@ -37,8 +37,17 @@ pub use sse::{
 };
 
 #[cfg(feature = "std")]
+pub mod e2e;
+#[cfg(feature = "std")]
 pub mod service;
 
+#[cfg(feature = "std")]
+pub use e2e::{
+    check_busy_while_generating, check_busy_while_generating_guest,
+    check_health_during_generation, check_health_during_generation_guest, check_server_down,
+    model_profile_from_lock, run_core_invariants, run_core_invariants_guest, ApiClient,
+    GuestHttpLimits, ProfileFile, ProfileSom, StepResult,
+};
 #[cfg(feature = "std")]
 pub use service::{
     http_error_bytes, load_cpu_backend, run_accept_loop, CancelBridge, ChatBackend, CpuBackend,

@@ -59,12 +59,20 @@ pub struct UserTcp {
 
 pub struct TcpTable {
     pub entries: Vec<Option<UserTcp>>,
+    /// Sockets cerrados que **todavía tienen datos por enviar**. Ver `free`.
+    cerrando: Vec<(SocketHandle, u64)>,
 }
+
+/// Cuánto se espera a que un socket cerrado termine de vaciarse antes de
+/// tirarlo igualmente. Un par que no asiente no puede retener memoria del
+/// kernel para siempre.
+const DRENAJE_MAX_MS: u64 = 3_000;
 
 impl TcpTable {
     pub fn new() -> Self {
         Self {
             entries: (0..MAX_USER_TCP).map(|_| None).collect(),
+            cerrando: Vec::new(),
         }
     }
 
@@ -138,9 +146,41 @@ impl TcpTable {
                 }
             }
             // `alloc_loopback` también mete un socket smoltcp (no se usa para
-            // copiar, pero ocupa 128 KiB). Sin remove, cada `ask` fugaba uno y
-            // a la octava conexión `tcp_listen`/`connect` morían con EMFILE.
-            sockets.remove(entry.handle);
+            // copiar, pero ocupa 128 KiB). Sin quitarlo, cada `ask` fugaba uno
+            // y a la octava conexión `tcp_listen`/`connect` morían con EMFILE.
+            //
+            // Pero quitarlo **aquí** tira lo que el usuario acaba de escribir y
+            // aún no ha salido por el cable: el servidor HTTP del guest
+            // contestaba y el cliente veía «empty reply», porque `close()` sólo
+            // pide el FIN y es smoltcp quien vacía el búfer en los siguientes
+            // `poll`. El socket pasa a la cola de drenaje y se quita cuando ha
+            // terminado —o a los `DRENAJE_MAX_MS`, para que un par mudo no
+            // retenga memoria—.
+            if entry.loopback {
+                sockets.remove(entry.handle);
+            } else {
+                let plazo = pit::uptime_ms().saturating_add(DRENAJE_MAX_MS);
+                self.cerrando.push((entry.handle, plazo));
+            }
+        }
+    }
+
+    /// Quita los sockets ya drenados. Se llama desde `net::poll`.
+    pub fn purgar_cerrados(&mut self, sockets: &mut smoltcp::iface::SocketSet<'static>) {
+        let ahora = pit::uptime_ms();
+        let mut fuera: Vec<SocketHandle> = Vec::new();
+        self.cerrando.retain(|&(handle, plazo)| {
+            let s = sockets.get::<tcp::Socket>(handle);
+            // `Closed`/`TimeWait` = el otro extremo ya asintió lo que había.
+            let terminado = matches!(s.state(), tcp::State::Closed | tcp::State::TimeWait);
+            if terminado || ahora >= plazo {
+                fuera.push(handle);
+                return false;
+            }
+            true
+        });
+        for handle in fuera {
+            sockets.remove(handle);
         }
     }
 
@@ -157,6 +197,76 @@ impl TcpTable {
     }
 }
 
+/// Entrega al usuario una conexión **externa** ya establecida sobre el socket
+/// del listener, y deja el listener escuchando otra vez.
+///
+/// Hasta 2026-09-23 esto no existía: `tcp_listen` marcaba todo listener como
+/// `loop_listener` y `accept` sólo miraba pares de loopback, así que un
+/// servidor de userspace era inalcanzable desde fuera del guest —el SYN
+/// llegaba, smoltcp lo establecía y nadie lo recogía nunca—. El eco y SSH no
+/// lo delataban porque son servidores del kernel, no de userspace.
+///
+/// El socket establecido **se cede** al slot nuevo y el listener recibe uno
+/// recién creado: sin eso, la primera petición dejaría el puerto sin escucha y
+/// la segunda moriría, que con HTTP es siempre.
+pub fn ceder_establecida(
+    table: &mut TcpTable,
+    sockets: &mut smoltcp::iface::SocketSet<'static>,
+    listener_slot: usize,
+) -> Result<usize, i64> {
+    let (handle, port) = {
+        let e = table
+            .entries
+            .get(listener_slot)
+            .and_then(|e| e.as_ref())
+            .ok_or(-soso_abi::EBADF)?;
+        (e.handle, e.port)
+    };
+    let nuevo = table
+        .entries
+        .iter()
+        .position(|e| e.is_none())
+        .ok_or(-soso_abi::EMFILE)?;
+    let (remote, estado) = {
+        let s = sockets.get::<tcp::Socket>(handle);
+        (s.remote_endpoint(), s.state())
+    };
+
+    // El socket de relevo se crea antes de tocar el listener: si no hubiera
+    // sitio, el listener se queda exactamente como estaba.
+    let relevo = sockets.add(tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; TCP_BUF]),
+        tcp::SocketBuffer::new(vec![0; TCP_BUF]),
+    ));
+
+    table.entries[nuevo] = Some(UserTcp {
+        handle,
+        role: TcpRole::Connected,
+        port,
+        remote,
+        closed: false,
+        connect_started: false,
+        ultimo_estado: estado,
+        loopback: false,
+        loop_pair: None,
+        loop_side: super::loopback::LoopSide::Client,
+        loop_listener: false,
+    });
+
+    if let Some(l) = table.entries[listener_slot].as_mut() {
+        l.handle = relevo;
+        // `poll_entry` pasa un listener a `Connected` en cuanto su socket se
+        // establece; al cederlo hay que devolverlo a `Listening` o dejaría de
+        // rearmar la escucha.
+        l.role = TcpRole::Listening;
+        l.ultimo_estado = tcp::State::Closed;
+        if listen_start(sockets, l).is_err() {
+            crate::println!("tcp: no pude rearmar la escucha en {port}");
+        }
+    }
+    Ok(nuevo)
+}
+
 pub fn listen_start(
     sockets: &mut smoltcp::iface::SocketSet<'static>,
     entry: &mut UserTcp,
@@ -168,9 +278,34 @@ pub fn listen_start(
     Ok(())
 }
 
+/// Reexporta los estados de smoltcp para que `net::mod` no tenga que importar
+/// el crate entero sólo para nombrarlos.
+pub use smoltcp::socket::tcp::State as EstadoSmoltcp;
+
 pub fn is_established(sockets: &smoltcp::iface::SocketSet<'static>, handle: SocketHandle) -> bool {
     let s = sockets.get::<tcp::Socket>(handle);
     s.state() == tcp::State::Established
+}
+
+/// ¿Hay una conexión entrante que entregar al usuario en este listener?
+///
+/// **No basta con `Established`.** Un cliente que manda su petición y cierra
+/// —un sondeo con plazo corto, `curl` con `--max-time`, cualquier cosa detrás
+/// de slirp— deja el socket en `CloseWait` antes de que el `accept` del
+/// proceso llegue a mirarlo, y con la condición estrecha la conexión se perdía
+/// **y** el listener se quedaba clavado en `CloseWait`: la primera petición
+/// mataba el puerto para siempre. La petición ya está en el búfer de
+/// recepción; se puede leer y contestar igual.
+pub fn tiene_conexion(sockets: &smoltcp::iface::SocketSet<'static>, handle: SocketHandle) -> bool {
+    matches!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::Established
+            | tcp::State::CloseWait
+            | tcp::State::FinWait1
+            | tcp::State::FinWait2
+            | tcp::State::Closing
+            | tcp::State::LastAck
+    )
 }
 
 pub fn try_read_loopback(
@@ -280,6 +415,16 @@ pub fn poll_entry(
             } else if s.state() == tcp::State::Established {
                 entry.role = TcpRole::Connected;
             }
+            // Un listener cuyo socket muere sin que nadie lo aceptara tiene que
+            // volver a escuchar, o el puerto queda mudo para siempre.
+            let estado = sockets.get::<tcp::Socket>(entry.handle).state();
+            if matches!(estado, tcp::State::Closed | tcp::State::TimeWait) {
+                let s = sockets.get_mut::<tcp::Socket>(entry.handle);
+                if !s.is_open() {
+                    let _ = s.listen(entry.port);
+                }
+            }
+            entry.ultimo_estado = estado;
         }
         TcpRole::Connecting => {
             if !entry.connect_started {
@@ -318,9 +463,13 @@ pub fn poll_entry(
         }
         TcpRole::Connected => {
             let s = sockets.get_mut::<tcp::Socket>(entry.handle);
-            if s.state() == tcp::State::CloseWait && !s.can_recv() {
-                s.close();
-            }
+            // **No** se cierra por estar en `CloseWait`. El medio cierre del
+            // cliente (`shutdown(Write)` tras mandar la petición) es corriente
+            // en HTTP y sólo dice «no mando más», no «no quiero respuesta».
+            // Cerrando aquí, la aplicación escribía su respuesta sobre un
+            // socket ya cerrado y el cliente recibía cero bytes: era el
+            // «empty reply from server» del servidor del guest. El socket lo
+            // cierra su dueño, y `free` lo drena.
             if matches!(s.state(), tcp::State::Closed | tcp::State::TimeWait) {
                 entry.closed = true;
             }

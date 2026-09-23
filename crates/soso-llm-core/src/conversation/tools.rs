@@ -168,8 +168,17 @@ fn split_partial_suffix(data: &str, tag: &str) -> (String, String) {
     }
     let max = data.len().min(tag.len().saturating_sub(1));
     for n in (1..=max).rev() {
-        if tag.starts_with(&data[data.len() - n..]) {
-            let split = data.len() - n;
+        let split = data.len() - n;
+        // El corte va por **bytes**, y el modelo genera UTF-8: sin esta guarda,
+        // una salida acabada en un carácter multibyte —«¡», «☕», cualquier
+        // acento— revienta con «is not a char boundary» y se lleva por delante
+        // el proceso entero del servidor. Un offset que parte un carácter no
+        // puede ser el principio de una etiqueta ASCII, así que saltárselo no
+        // pierde ninguna coincidencia.
+        if !data.is_char_boundary(split) {
+            continue;
+        }
+        if tag.starts_with(&data[split..]) {
             return (data[..split].to_string(), data[split..].to_string());
         }
     }

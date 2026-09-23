@@ -29,6 +29,10 @@ required-features = ["std"]
 name = "admission"
 required-features = ["std"]
 
+[[test]]
+name = "e2e_suite"
+required-features = ["std"]
+
 [dev-dependencies]
 
 [lib]

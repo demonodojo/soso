@@ -1,6 +1,6 @@
 # T19 — Crear la prueba completa de API dentro de soso
 
-**Hito:** SI-2 · **Tipo:** Implementación de integración QEMU · **Estado:** pendiente.
+**Hito:** SI-2 · **Tipo:** Implementación de integración QEMU · **Estado:** hecha (2026-09-23; campaña guest 12/12 con pesos reales).
 
 **Dependencias:** [T16](T16-servicio-guest.md), [T17](T17-admisiones-cancelacion.md), [T18](T18-puertos-qemu.md)
 
@@ -44,9 +44,24 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
+
+La campaña guest del 23-sep-2026 pasa **12/12** con los pesos reales
+(`target/self-improvement/tasks/T19/resultado.md`: `guest_ok`, exit 0). Llegar
+ahí exigió corregir cuatro fallos del propio arnés (tamaño de la imagen de
+modelos, perfil desfasado, `&`/`2>&1`/`echo -n` que `sosh` no tiene) y cuatro
+defectos del producto, cada uno con su ficha: [T54](T54-accept-externo.md),
+[T55](T55-accept-sin-plazo.md), [T56](T56-utf8-tool-parser.md) y
+[T57](T57-medio-cierre.md). Resumen en [seguimiento/T19.md](seguimiento/T19.md).
+
+**Límites.** Las aserciones las ejecuta el arnés del **host** contra el guest;
+repetirlas desde el runner nativo es [T49](T49-pruebas-guest.md). El guest de la
+campaña usa 5 GiB: con 2 GiB el presupuesto de pesos (1040 MiB) se queda corto
+para un modelo de 2212 MiB y cada token pagina desde disco (×3,5 en la fase de
+invariantes). SI-2 no cierra con esto solo: falta [T14](T14-evaluacion-modelo.md)
+con resultado go contra el endpoint guest.
 
 Los éxitos con backend falso o synthetic tiny no cuentan como capacidad de agente; informar por separado.
 

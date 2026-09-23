@@ -548,6 +548,8 @@ pub fn poll() {
     poll_tcp_services(sockets, echo, ssh, *configured);
     poll_user_tcp(iface, sockets, user_tcp, *configured);
     iface.poll(now(), dev, sockets);
+    // Después del último `poll`: lo que quedara por enviar ya salió.
+    user_tcp.purgar_cerrados(sockets);
 }
 
 fn poll_user_tcp(
@@ -582,7 +584,11 @@ pub fn tcp_listen(port: u16) -> Result<usize, i64> {
         // El accept de userspace es loopback (127.0.0.1); smoltcp listen es
         // opcional. Sin IP (NicDev::Ninguno) puede fallar, y si abortáramos
         // aquí el askd no levantaba nunca en placa sin driver de red.
-        let _ = tcp_user::listen_start(sockets, entry);
+        let r = tcp_user::listen_start(sockets, entry);
+        crate::println!(
+            "tcp: listen puerto {port} slot {slot} smoltcp={}",
+            if r.is_ok() { "ok" } else { "no" }
+        );
     }
     Ok(slot)
 }
@@ -649,35 +655,35 @@ pub fn tcp_accept_loopback(listener_slot: usize) -> Result<usize, i64> {
     loopback::take_pending(listener_slot).ok_or(-soso_abi::EAGAIN)
 }
 
+/// Un listener de userspace atiende **las dos** procedencias: el loopback del
+/// propio guest (`ask` conecta a 127.0.0.1) y las conexiones externas que
+/// entran por la NIC. Antes sólo miraba el loopback, así que ningún servidor
+/// HTTP de userspace era alcanzable desde fuera (T54).
 pub fn tcp_accept(listener_slot: usize) -> Result<usize, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;
-    let n = net.lock();
+    let mut n = net.lock();
     let entry = n
         .user_tcp
         .entries
         .get(listener_slot)
         .and_then(|e| e.as_ref())
         .ok_or(-soso_abi::EBADF)?;
-    if entry.loop_listener {
+    let loop_listener = entry.loop_listener;
+    let role = entry.role;
+    let handle = entry.handle;
+    // El loopback va primero: es el camino de `ask`, no puede regresionar.
+    if loop_listener && loopback::has_pending(listener_slot) {
         drop(n);
         return tcp_accept_loopback(listener_slot);
     }
-    if entry.role != tcp_user::TcpRole::Listening && entry.role != tcp_user::TcpRole::Connected {
+    if role != tcp_user::TcpRole::Listening && role != tcp_user::TcpRole::Connected {
         return Err(-soso_abi::EINVAL);
     }
-    if tcp_user::is_established(&n.sockets, entry.handle) {
-        drop(n);
-        let net = NET.get().unwrap();
-        let mut n = net.lock();
-        if let Some(e) = n
-            .user_tcp
-            .entries
-            .get_mut(listener_slot)
-            .and_then(|x| x.as_mut())
-        {
-            e.role = tcp_user::TcpRole::Connected;
-        }
-        return Ok(listener_slot);
+    if tcp_user::tiene_conexion(&n.sockets, handle) {
+        let NetStack {
+            sockets, user_tcp, ..
+        } = &mut *n;
+        return tcp_user::ceder_establecida(user_tcp, sockets, listener_slot);
     }
     Err(-soso_abi::EAGAIN)
 }
@@ -792,6 +798,28 @@ pub fn tcp_estado(slot: usize) -> EstadoTcp {
         {
             return EstadoTcp::Cerrado;
         }
+        return EstadoTcp::Conectado;
+    }
+    // Mismo criterio para smoltcp: el par mandó su FIN y no queda nada por
+    // leer, así que las lecturas deben dar EOF. Esto **no** cierra nuestro
+    // lado —`entry.closed` sigue en false y `tcp_try_write` sigue escribiendo—
+    // porque el medio cierre (`shutdown(Write)` del cliente HTTP tras mandar
+    // la petición) dice «no mando más», no «no quiero respuesta». Antes lo
+    // cerraba `poll_entry` y la respuesta del servidor caía en un socket
+    // muerto: el cliente veía cero bytes.
+    let handle = entry.handle;
+    let s = n.sockets.get::<tcp::Socket>(handle);
+    if !s.can_recv()
+        && matches!(
+            s.state(),
+            tcp_user::EstadoSmoltcp::CloseWait
+                | tcp_user::EstadoSmoltcp::LastAck
+                | tcp_user::EstadoSmoltcp::Closing
+                | tcp_user::EstadoSmoltcp::Closed
+                | tcp_user::EstadoSmoltcp::TimeWait
+        )
+    {
+        return EstadoTcp::Cerrado;
     }
     EstadoTcp::Conectado
 }
@@ -827,26 +855,14 @@ pub fn tcp_connect_failed(slot: usize) -> bool {
     entry.role == tcp_user::TcpRole::Connecting && entry.closed
 }
 
-pub fn tcp_slot_loop_listener(slot: usize) -> bool {
-    let Some(net) = NET.get() else { return false };
-    let n = net.lock();
-    n.user_tcp
-        .entries
-        .get(slot)
-        .and_then(|e| e.as_ref())
-        .is_some_and(|e| e.loop_listener)
-}
-
 /// Resultado de accept al despertar un waiter: `None` = mismo fd; `Some(slot)` = fd nuevo.
 pub fn tcp_accept_wake(listener_slot: usize) -> Result<Option<usize>, i64> {
     if !tcp_listener_ready(listener_slot) {
         return Err(-soso_abi::EAGAIN);
     }
-    if tcp_slot_loop_listener(listener_slot) {
-        return tcp_accept_loopback(listener_slot).map(Some);
-    }
-    tcp_accept(listener_slot)?;
-    Ok(None)
+    // `tcp_accept` decide ya entre loopback y externa, y las dos devuelven un
+    // slot nuevo: el listener se queda escuchando en ambos casos.
+    tcp_accept(listener_slot).map(Some)
 }
 
 pub use ping::ping;
@@ -926,8 +942,11 @@ pub fn tcp_listener_ready(slot: usize) -> bool {
     let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
         return false;
     };
-    if entry.loop_listener {
-        return loopback::has_pending(slot);
+    // Loopback **o** conexión externa establecida: un listener de userspace
+    // sirve a las dos (T54). Un slot puramente de loopback no tiene socket
+    // smoltcp en uso, así que `is_established` es false y no confunde.
+    if entry.loop_listener && loopback::has_pending(slot) {
+        return true;
     }
-    tcp_user::is_established(&n.sockets, entry.handle)
+    tcp_user::tiene_conexion(&n.sockets, entry.handle)
 }

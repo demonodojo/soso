@@ -171,15 +171,18 @@ pub fn run(args: &[&str]) -> u8 {
     };
 
     loop {
-        if let Ok(conn) = TcpFd::accept(&http_listener, 0) {
+        // Plazo corto, no `0`: `0` es «sin plazo» y duerme el proceso para
+        // siempre en el primer `accept`, de forma que el listener de `ask`
+        // nunca llegaba a atenderse mientras `serve` estuviera vivo.
+        if let Ok(conn) = TcpFd::accept(&http_listener, ACCEPT_POLL_MS) {
             atender_http(&mut rt, conn);
             continue;
         }
-        if let Ok(conn) = TcpFd::accept(&ask_listener, 0) {
+        if let Ok(conn) = TcpFd::accept(&ask_listener, ACCEPT_POLL_MS) {
             atender_conexion_ask(&mut rt.propietario, &mut rt.conf, conn);
             continue;
         }
-        let _ = sys::sleep_ms(50);
+        let _ = sys::sleep_ms(20);
     }
 }
 
@@ -293,6 +296,10 @@ fn post_chat_inner(
         &json,
     ))
 }
+
+/// Espera de cada `accept` del bucle principal. Corta para alternar entre los
+/// dos listeners sin quemar CPU.
+const ACCEPT_POLL_MS: u64 = 10;
 
 fn run_generation(
     rt: &mut ServeRuntime,
@@ -435,7 +442,11 @@ fn validate_tool_choice(
 fn read_http_request(fd: u64) -> Result<HttpRequest, GuestServiceError> {
     let mut reader = HttpReader::new();
     let mut buf = [0u8; 8192];
+    let deadline = sys::uptime_ms().saturating_add(120_000);
     loop {
+        if sys::uptime_ms() > deadline {
+            return Err(GuestServiceError::Http(HttpError::IncompleteBody));
+        }
         let n = sys::read_timeout(fd, &mut buf, crate::net::READ_CHUNK_MS);
         if n == -(abi::EAGAIN as i64) {
             continue;

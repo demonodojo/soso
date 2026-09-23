@@ -253,3 +253,31 @@ fn delimitador_partido_entre_chunks() {
     let turno = p.finish(&entrada).unwrap();
     assert!(turno.tool_call.is_some());
 }
+
+/// Reproducción del panic que mataba `soso-llm serve` en el guest (T56): el
+/// modelo acaba una respuesta en un carácter multibyte y el buscador de
+/// etiquetas partidas cortaba por índice de byte dentro de ese carácter.
+#[test]
+fn texto_acabado_en_caracter_multibyte_no_revienta() {
+    let entrada = ChatInput::nuevo(vec![Message::user("hola")]);
+    for cola in ["¡", "☕", "ñ", "日本語", "¡Hola!¡"] {
+        let texto = alloc_texto(cola);
+        let turno = parse_assistant_output(&entrada, &texto, 0)
+            .unwrap_or_else(|e| panic!("parse falló con cola {cola:?}: {e:?}"));
+        assert!(
+            turno.content.as_deref().unwrap_or("").ends_with(cola),
+            "se perdió la cola {cola:?}"
+        );
+    }
+}
+
+/// Rellena hasta pasar de los 128 bytes para que el corte caiga lejos del
+/// principio, como en la salida real que lo destapó.
+fn alloc_texto(cola: &str) -> String {
+    let mut s = String::from("respuesta del modelo ");
+    while s.len() < 130 {
+        s.push_str("bla ");
+    }
+    s.push_str(cola);
+    s
+}

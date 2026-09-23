@@ -18,3 +18,4 @@ sosofs = { path = "../crates/sosofs", features = ["std"] }
 block-dev = { path = "../crates/block-dev" }
 soso-resize-core = { path = "../crates/soso-resize-core" }
 sha2 = "0.10"
+soso-llm-api = { path = "../crates/soso-llm-api", features = ["std"] }

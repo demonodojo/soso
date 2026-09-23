@@ -18,7 +18,7 @@ del modelo (5/5 fixtures). **[T04](T04-dominio-chat.md)**, **[T05](T05-validacio
 completadas (dominio chat + render + parse + informe + cancelación + API JSON + HTTP + respuestas SSE).
 **[T13](T13-servidor-host.md)** (servidor de desarrollo host) está **completada** (2026-09-22;
 [seguimiento/T13.md](seguimiento/T13.md)). **[T15](T15-sesion-residente.md)** (sesión residente guest) está **completada** (2026-09-22;
-[seguimiento/T15.md](seguimiento/T15.md), [seguimiento/T16.md](seguimiento/T16.md), [seguimiento/T17.md](seguimiento/T17.md), [seguimiento/T18.md](seguimiento/T18.md)). **T16–T18** implementadas; e2e **T19** y producción **T14 go** pendientes; **T14** bloqueada por **T48**.
+[seguimiento/T15.md](seguimiento/T15.md) … [seguimiento/T19.md](seguimiento/T19.md)). **SI-2 (T16–T19) tiene ya su evidencia guest**: el 23-sep-2026 `cargo xtask test-llm-api` pasó **12/12 invariantes contra soso en QEMU con los pesos reales** (`guest_ok`, exit 0). Llegar ahí costó cuatro defectos reales, con ficha cada uno: **[T54](T54-accept-externo.md)** (el `accept` de userspace era loopback puro), **[T55](T55-accept-sin-plazo.md)** (`tcp_accept(fd,0)` dormía al servidor para siempre), **[T56](T56-utf8-tool-parser.md)** (el parser partía caracteres UTF-8 y mataba el proceso) y **[T57](T57-medio-cierre.md)** (el medio cierre del cliente tiraba la respuesta). Lo que queda para **cerrar el hito** es **[T14](T14-evaluacion-modelo.md)** con resultado go contra el endpoint guest, y T14 sigue bloqueada por **[T48](T48-reloj-red.md)**, que es por tanto la ficha recomendada ahora.
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.
 Entregar al modelo una ficha por sesión, las secciones indicadas
@@ -120,7 +120,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T16](T16-servicio-guest.md) | Servir HTTP en guest con el modelo residente | SI-2 | T10, T11, T12, T14, T15 | Hecho (T14 go / nativo pend.) |
 | [T17](T17-admisiones-cancelacion.md) | Atender ocupado, health y desconexión durante inferencia | SI-2 | T09, T16 | Hecho (e2e T19 pend.) |
 | [T18](T18-puertos-qemu.md) | Añadir reenvío HTTP configurable sin colisiones | SI-2 | — | Hecho (e2e T19) |
-| [T19](T19-qemu-e2e.md) | Crear la prueba completa de API dentro de soso | SI-2 | T16, T17, T18 | Pendiente |
+| [T19](T19-qemu-e2e.md) | Crear la prueba completa de API dentro de soso | SI-2 | T16, T17, T18 | Completada (guest 12/12 con pesos reales) |
 | [T20](T20-opencode-config.md) | Configurar OpenCode para el proveedor soso | SI-3 | T14, T19 | Pendiente |
 | [T21](T21-opencode-contrato.md) | Capturar el contrato real de OpenCode sin depender del modelo | SI-3 | T20, T47, T48 | Pendiente |
 | [T22](T22-primera-mejora.md) | Resolver una tarea real usando la inferencia guest | SI-3 | T02, T19, T21 | Pendiente |
@@ -155,6 +155,10 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T51](T51-aceptacion-circuito-nativo.md) | Acreditar todo el circuito de automejora dentro de soso | SI-7 | T29, T35, T37, T41, T42, T43, T49, T50 | Pendiente |
 | [T52](T52-tokenizer-merges.md) | Llevar las fusiones BPE al formato .som y al convertidor | SI-1 | — (deriva de T03) | Completada |
 | [T53](T53-tokenizer-bpe.md) | Segmentar por fusiones BPE en soso-llm-core | SI-1 | T52 (deriva de T03) | Completada |
+| [T54](T54-accept-externo.md) | Aceptar conexiones externas en un listener de userspace | SI-2 | — (deriva de T19) | Completada |
+| [T55](T55-accept-sin-plazo.md) | `tcp_accept(fd, 0)` duerme el servidor para siempre | SI-2 | T54 (deriva de T19) | Completada |
+| [T56](T56-utf8-tool-parser.md) | El parser de salida parte caracteres UTF-8 y mata el servidor | SI-1 / SI-2 | — (deriva de T19) | Completada |
+| [T57](T57-medio-cierre.md) | El medio cierre del cliente mataba la respuesta | SI-2 | T54–T56 (deriva de T19) | Completada |
 
 ## Condiciones adicionales de entrada
 
@@ -166,6 +170,7 @@ son obligatorias y también constan en [tasks.json](tasks.json):
 - **[T14](T14-evaluacion-modelo.md)**: Pesos reales disponibles; un informe no-go no habilita las tareas consumidoras.
 - **[T16](T16-servicio-guest.md)**: T14 tiene resultado go, además de informe terminado.
 - **[T19](T19-qemu-e2e.md)**: Modo de integración con pesos reales y entorno QEMU disponible.
+- **[T54](T54-accept-externo.md)**: Entorno QEMU con reenvío de puertos (T18) y un servidor de userspace escuchando.
 - **[T22](T22-primera-mejora.md)**: T14 mantiene resultado go para la misma identidad de modelo.
 - **[T30](T30-hardware.md)**: Máquina física identificada, accesible y con red validada.
 - **[T31](T31-restauracion.md)**: Destino de recuperación identificado y acceso de escritura autorizado.

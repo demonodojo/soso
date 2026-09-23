@@ -65,7 +65,13 @@ fn active_peer_closed(fd: u64) -> bool {
     let mut buf = [0u8; 64];
     let n = sys::read_timeout(fd, &mut buf, POLL_READ_MS);
     if n == 0 {
-        return true;
+        // EOF **no** es «el cliente se ha ido»: un cliente HTTP puede cerrar
+        // su mitad de escritura en cuanto acaba de mandar la petición y seguir
+        // esperando la respuesta (`shutdown(Write)`; lo hace el propio arnés
+        // de T19). Cancelar aquí abortaba toda generación pedida por un
+        // cliente así. Si el cliente se ha ido de verdad, la escritura de la
+        // respuesta fallará y ahí sí se sabe.
+        return false;
     }
     if n == -(abi::EAGAIN as i64) {
         return false;
@@ -81,7 +87,12 @@ fn try_accept_aux(env: &mut ServePollEnv<'_>) {
     if env.admission.aux_vacant_index().is_none() {
         return;
     }
-    let fd = sys::tcp_accept(env.http_listener_fd, 0);
+    // `0` en `tcp_accept` **no** es «no bloquees»: es «sin plazo», y el proceso
+    // se duerme para siempre. Con él, el primer punto de control de la
+    // generación se quedaba aquí clavado y la petición no terminaba nunca: el
+    // cliente veía una respuesta vacía tras su propio timeout y la sesión
+    // quedaba ocupada, así que las siguientes recibían 429.
+    let fd = sys::tcp_accept(env.http_listener_fd, POLL_READ_MS);
     if fd == -(abi::EAGAIN as i64) {
         return;
     }

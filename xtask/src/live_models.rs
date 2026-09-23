@@ -417,8 +417,22 @@ const SOSOMFS_CATALOG_HEADROOM: u64 = 64 * 1024 * 1024;
 
 /// Tamaño de imagen sosomfs recomendado para un árbol `.som` ya materializado.
 pub fn suggest_models_image_size(model_dir: &Path, tiny_dir: &Path) -> String {
-    let bytes = packed_dir_size_bytes(model_dir)
-        .saturating_add(packed_dir_size_bytes(tiny_dir))
+    size_for_packed(
+        packed_dir_size_bytes(model_dir).saturating_add(packed_dir_size_bytes(tiny_dir)),
+    )
+}
+
+/// Igual, para una imagen que lleva un **único** árbol `.som`.
+///
+/// Un tamaño fijo «que siempre valió» con los tiny models revienta con un
+/// modelo real: `build_from_dirs` escribe fuera del dispositivo y el único
+/// rastro es `construir sosomfs: "escribir shard"`.
+pub fn suggest_models_image_size_one(model_dir: &Path) -> String {
+    size_for_packed(packed_dir_size_bytes(model_dir))
+}
+
+fn size_for_packed(bytes: u64) -> String {
+    let bytes = bytes
         .saturating_add(MODELS_IMAGE_MARGIN)
         .saturating_add(SOSOMFS_CATALOG_HEADROOM);
     const G: u64 = 1024 * 1024 * 1024;

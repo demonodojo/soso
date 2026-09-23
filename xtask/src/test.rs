@@ -178,22 +178,22 @@ fn parse_only_list(s: &str) -> Vec<String> {
         .collect()
 }
 
-struct QemuSlot {
-    id: &'static str,
-    ssh_port: u16,
-    echo_port: u16,
+pub(crate) struct QemuSlot {
+    pub id: &'static str,
+    pub ssh_port: u16,
+    pub echo_port: u16,
     /// Reenvío host→guest API (`127.0.0.1:puerto`); `None` en la mayoría de tests.
-    llm_host_port: Option<u16>,
-    mac: String,
-    serial: PathBuf,
-    bios: PathBuf,
-    data: PathBuf,
-    models: PathBuf,
-    mem: Option<String>,
-    smp: Option<String>,
+    pub llm_host_port: Option<u16>,
+    pub mac: String,
+    pub serial: PathBuf,
+    pub bios: PathBuf,
+    pub data: PathBuf,
+    pub models: PathBuf,
+    pub mem: Option<String>,
+    pub smp: Option<String>,
     /// Socket UNIX del monitor QEMU (`sendkey` tras I/O USB).
-    monitor: Option<PathBuf>,
-    guest: super::QemuGuestConfig,
+    pub monitor: Option<PathBuf>,
+    pub guest: super::QemuGuestConfig,
 }
 
 struct Report {
@@ -723,7 +723,7 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report, filter: &Te
 
 /// Un comando trivial que debe contestar rápido: detecta la máquina ahogada
 /// por hilos que quedaron girando.
-fn ssh_vive(key: &Path, ssh_port: u16) -> Result<(), String> {
+pub(crate) fn ssh_vive(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion(key, ssh_port, "echo vivo\nexit\n", Duration::from_secs(45))?;
     if texto.contains("vivo") {
         Ok(())
@@ -1039,6 +1039,7 @@ fn limpiar_huérfanos_shard(slot: &QemuSlot) {
             "-c",
             &format!(
                 "pkill -f 'qemu-system-x86_64.*test-{id}' 2>/dev/null; \
+                 pkill -f 'qemu-system-x86_64.*test-llm-api-' 2>/dev/null; \
                  pkill -f 'ssh.*-p {puerto} ' 2>/dev/null; \
                  true"
             ),
@@ -1051,7 +1052,7 @@ fn limpiar_huérfanos_shard(slot: &QemuSlot) {
         .open(&slot.serial);
 }
 
-fn lanzar_qemu(slot: &QemuSlot) -> std::io::Result<Child> {
+pub(crate) fn lanzar_qemu(slot: &QemuSlot) -> std::io::Result<Child> {
     limpiar_huérfanos_shard(slot);
     let mem = slot.mem.clone().unwrap_or_else(super::qemu_mem);
     let smp = slot.smp.clone().unwrap_or_else(super::qemu_smp);
@@ -1387,6 +1388,8 @@ fn ssh_guion_inner(
             // «Connection timed out», clave rechazada… Un fallo intermitente
             // cuyo mensaje oculta su causa no se puede diagnosticar nunca.
             let err = String::from_utf8_lossy(&stderr_acum.lock().unwrap()).into_owned();
+            let _ = hijo.kill();
+            let _ = hijo.wait();
             return Err(format!(
                 "no apareció el prompt en 45s; stdout parcial: {:?}; ssh dijo: {:?}",
                 String::from_utf8_lossy(&acum.lock().unwrap()),

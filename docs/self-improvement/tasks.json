@@ -619,7 +619,7 @@
       "title": "Crear la prueba completa de API dentro de soso",
       "milestone": "SI-2",
       "kind": "Implementación de integración QEMU",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T16",
         "T17",
@@ -635,13 +635,31 @@
         "xtask/src/test_distributed.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "partial",
         "requires": [
           "T48",
           "T49"
         ],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "evidence": [
+          "target/self-improvement/tasks/T19/resultado.md (guest_ok, exit 0, 12/12)",
+          "target/test-llm-api-run.log",
+          "target/test-llm-api-serial.log"
+        ],
+        "note": "Campaña guest completa con pesos reales el 2026-09-23: las 12 invariantes pasan contra soso en QEMU. Sigue siendo *partial* porque las aserciones las ejecuta el arnés del host, no el runner nativo (T49)."
+      },
+      "tracking": {
+        "updated_at": "2026-09-23",
+        "base": "95de3c162 + diff sucio (kernel T54/T57, userspace T55/T57, core T56, arnés T19)",
+        "summary": "docs/self-improvement/seguimiento/T19.md",
+        "evidence": [
+          "cargo xtask test-llm-api --model-dir target/qwen2.5-coder-3b-model --profile target/self-improvement/tasks/T19/model-lock.json -> guest_ok (exit 0)",
+          "target/self-improvement/tasks/T19/resultado.md",
+          "cargo xtask test: TODO OK",
+          "cargo xtask check: TODO OK",
+          "cargo test -p soso-llm-api --features std --test e2e_suite (2 passed)"
+        ],
+        "blocker": null,
+        "next_step": "SI-2 necesita además T14 (go) contra el endpoint guest; T14 sigue bloqueada por T48. Repetir las aserciones desde el runner nativo en T49."
       }
     },
     {
@@ -1610,6 +1628,178 @@
         "evidence": "target/self-improvement/tasks/T53/resultado.md",
         "blocker": null,
         "next_step": "T06 desbloqueada (sus otras dependencias son T04 y T05)"
+      }
+    },
+    {
+      "id": "T54",
+      "file": "T54-accept-externo.md",
+      "title": "Aceptar conexiones externas en un listener de userspace",
+      "milestone": "SI-2",
+      "kind": "Implementación de kernel (red)",
+      "status": "done",
+      "depends_on": [],
+      "origin": "T19",
+      "entry_conditions": [
+        "Entorno QEMU con reenvío de puertos (T18) y un servidor de userspace escuchando."
+      ],
+      "contract_sections": "C3–C4",
+      "context": [
+        "kernel/src/net/mod.rs",
+        "kernel/src/net/tcp_user.rs",
+        "kernel/src/net/loopback.rs",
+        "user/soso-llm/src/serve.rs",
+        "user/soso-llm/src/net.rs"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T19/resultado.md",
+          "target/suite-tras-t54.log"
+        ],
+        "note": "Ejecutado en guest QEMU: /health responde 200 desde el host y 6 invariantes de la campaña T19 pasan. Falta una prueba propia en el runner nativo (T49)."
+      },
+      "tracking": {
+        "updated_at": "2026-09-23",
+        "base": "95de3c162 + diff sucio (kernel T54 + arnés T19)",
+        "summary": "docs/self-improvement/seguimiento/T19.md",
+        "evidence": [
+          "curl http://127.0.0.1:17299/health -> HTTP/1.1 200 OK",
+          "target/self-improvement/tasks/T19/resultado.md",
+          "cargo xtask check: TODO OK",
+          "cargo xtask test: TODO OK (suite QEMU completa, sin regresión de ask/askd)"
+        ],
+        "blocker": null,
+        "next_step": "Prueba propia de listener externo en el runner nativo (T49); medir keep-alive y conexiones simultáneas."
+      }
+    },
+    {
+      "id": "T55",
+      "file": "T55-accept-sin-plazo.md",
+      "title": "tcp_accept(fd, 0) duerme el servidor para siempre",
+      "milestone": "SI-2",
+      "kind": "Corrección de userspace",
+      "status": "done",
+      "depends_on": [
+        "T54"
+      ],
+      "origin": "T19",
+      "entry_conditions": [
+        "Campaña guest de T19 con pesos reales."
+      ],
+      "contract_sections": "C3–C4",
+      "context": [
+        "user/soso-llm/src/serve.rs",
+        "user/soso-llm/src/serve_poll.rs"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T19/resultado.md",
+          "cargo xtask test: TODO OK"
+        ],
+        "note": "Verificado en guest: la generación avanza y ask_con_serve deja de agotar su plazo."
+      },
+      "tracking": {
+        "updated_at": "2026-09-23",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T19.md",
+        "evidence": [
+          "target/self-improvement/tasks/T19/resultado.md",
+          "cargo xtask test: TODO OK"
+        ],
+        "blocker": null,
+        "next_step": "Medir el coste del sondeo de 1 ms por punto de control en generaciones largas."
+      }
+    },
+    {
+      "id": "T56",
+      "file": "T56-utf8-tool-parser.md",
+      "title": "El parser de salida parte caracteres UTF-8 y mata el servidor",
+      "milestone": "SI-1 / SI-2",
+      "kind": "Corrección de core",
+      "status": "done",
+      "depends_on": [],
+      "origin": "T19",
+      "entry_conditions": [
+        "Campaña guest de T19 con pesos reales."
+      ],
+      "contract_sections": "C3–C4",
+      "context": [
+        "crates/soso-llm-core/src/conversation/tools.rs",
+        "crates/soso-llm-core/tests/conversation_tools.rs"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [
+          "cargo test -p soso-llm-core --test conversation_tools (17 passed)",
+          "target/self-improvement/tasks/T19/resultado.md"
+        ],
+        "note": "Prueba de host que reproduce el panic exacto del guest; verificada en la campaña."
+      },
+      "tracking": {
+        "updated_at": "2026-09-23",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T19.md",
+        "evidence": [
+          "cargo test -p soso-llm-core --test conversation_tools (17 passed)",
+          "target/self-improvement/tasks/T19/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "Auditar el resto del core en busca del mismo patrón de corte por bytes."
+      }
+    },
+    {
+      "id": "T57",
+      "file": "T57-medio-cierre.md",
+      "title": "El medio cierre del cliente mataba la respuesta",
+      "milestone": "SI-2",
+      "kind": "Corrección de kernel (red) + userspace",
+      "status": "done",
+      "depends_on": [
+        "T54",
+        "T55",
+        "T56"
+      ],
+      "origin": "T19",
+      "entry_conditions": [
+        "Campaña guest de T19 con pesos reales."
+      ],
+      "contract_sections": "C3–C4",
+      "context": [
+        "kernel/src/net/mod.rs",
+        "kernel/src/net/tcp_user.rs",
+        "user/soso-llm/src/serve_poll.rs"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [
+          "cargo xtask test: TODO OK (incluye forja: hola-std remoto)",
+          "target/self-improvement/tasks/T19/resultado.md"
+        ],
+        "note": "Verificado en guest: core_invariants pasa de 0,0 s (todo abortado) a tiempos reales de generación."
+      },
+      "tracking": {
+        "updated_at": "2026-09-23",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T19.md",
+        "evidence": [
+          "cargo xtask test: TODO OK (incluye forja: hola-std remoto)",
+          "target/self-improvement/tasks/T19/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "Detectar la desaparición real del cliente por estado del socket, no por EOF."
       }
     }
   ],
