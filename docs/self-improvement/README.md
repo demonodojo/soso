@@ -135,6 +135,15 @@ antes de empezar), porque el segundo que abre se encuentra el contenido ya
 cargado. El riesgo que la ficha declaraba se respetó: **`StreamWrite` no se ha
 tocado**, así que el camino de crear ficheros y `/var/models/` siguen igual.
 
+**[N-004](native/N-004.md) está hecha**, y sólo tenía sentido ahora: con el
+modelo por descriptor, un candado sobre un fichero que cada proceso ve por su
+cuenta no habría coordinado nada. `flock` consultivo, del fichero entero y
+**sólo no bloqueante** — sin `LOCK_NB` devuelve `ENOSYS` en vez de fingir que
+esperó, porque quien pide un cerrojo bloqueante y recibe uno que no bloquea
+corre sin saberlo. El cerrojo es del proceso: cerrar un fd no lo suelta, morir
+sí. Se prueba con **dos procesos**, que es la única forma de demostrar que el
+otro no puede cogerlo.
+
 **Lo que queda habilitado**: los inventarios [T36](T36-forja-trazabilidad.md) y
 [T38](T38-toolchain-inventario.md).
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres

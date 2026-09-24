@@ -174,41 +174,16 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 
 ## Por dónde (actualizar al cerrar la recomendada)
 
-**SI-2** no cierra: T14 dio **no-go del modelo** (T59 cerró la atribución), y
-esa decisión es de plan, no de código.
+Camino SI-2: **T16–T19** hechas 2026-09-22; cerrar hito con campaña guest `test-llm-api` + T14 go. T14 bloqueada por T48.
+T18, T45 y T46 en paralelo. T06–T15 cerradas en host/API/sesión. Validación nativa pendiente de T45/T49.
 
-**SI-4**: T23, T24, T63, T62 y T64 cerradas el 24-sep-2026. La cadena del
-coordinador se para ahí — T25 → T21 → T20 dependen del no-go de T14.
+**Backlog nativo** (`docs/self-improvement/native/backlog.json`, sale de T32/T33/T34):
+N-001 … N-004 **hechas** 2026-09-24 — modelo de ficheros por inodo, `PROT_NONE`
+y guarda de pila, cwd por spawn, y `flock` consultivo. Lo siguiente es N-005
+(experimento: `dlopen` frente a enlazado estático). Cada una se acredita con
+`cargo xtask test sys --only=…` sobre `user/soso-agent-probe`, y las medidas se
+anotan en `native/probes.json`.
 
-**SI-6**: T32 (OpenCode v1.18.32 fijado; el repo se movió a `anomalyco/opencode`
-y `opencode run` importa el TUI) y **T33** cerradas. T33 dejó siete sondas en
-`user/soso-agent-probe/`, la tabla en `native/probes.json` y
-`cargo xtask test-probe` (dos arranques). Lo negativo de fondo: el modelo de
-ficheros es **por descriptor, no por inodo** —mata SQLite— y **no hay
-protecciones de página** más allá de la escritura, lo que hace viable el JIT e
-imposible la guarda de pila.
-
-**T34 cerrada**: `native/backlog.json` con 11 fichas N-xxx y ruta elegida
-—**sustrato POSIX primero**—; N-001/002/003 redactadas. Portar Bun descartado
-por carencias medidas (sin `dlopen`, sin pty/inotify, modelo de ficheros).
-
-**N-002 hecha** (PROT_NONE): los hilos ya tienen guarda de pila, y con ella
-T66 quedó cerrada. **T66 hecha** (dejó de fingir la guarda). **T65 hecha**:
-`O_CREAT|O_EXCL` reserva el nombre al abrir, así que la exclusión —la única que
-tiene soso, y de la que depende el contrato durable de T46— es real.
-
-**N-001 cerrada**: el modelo de ficheros es **por inodo** (`kernel/src/task/fcache.rs`),
-no por descriptor. Los ocho casos de la sonda de SQLite pasan y el coste vuelve
-a ~84×. `StreamWrite` **no se tocó**: crear ficheros y `/var/models/` siguen
-igual. **N-003 hecha** (cwd por spawn).
-
-**Recomendada ahora**: los inventarios **T36** y **T38**, o **N-004** (flock),
-que ahora tiene sentido porque compartir significa algo.
-
-**Decisión de plan pendiente**, como el no-go de T14: portar OpenCode o
-reimplementar el agente en Rust reutilizando el protocolo — lo que el plan ya
-construye y lo que T33 dice que ya funciona.
-
-También libres: los defectos **T65** (`O_EXCL` no excluye; afecta al contrato
-durable de T46) y **T66** (`thread::spawn` finge instalar una guarda de pila), y
-los inventarios **T36** y **T38**.
+Y hay una **decisión de plan** esperando, como la de T14: portar OpenCode o
+reimplementar el agente en Rust reutilizando el protocolo. La evidencia está en
+`backlog.json` y en la ficha T34; elegir no es de ninguna ficha.

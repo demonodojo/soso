@@ -30,7 +30,7 @@ el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
 | Actualización | **soso-update** | Bajar e instalar releases nuevas (programas + kernel) |
 | Desarrollo | **soso-ed**, **soso-forja** | Editar fuentes en `/src/soso`; bucle remoto o plan local (`docs/SELF-HOSTING.md`) |
 | Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
-| Red | **ip**, **ping**, **wifi** (builtin) | Ver la IPv4; comprobar alcance ICMP; escanear y conectar redes WiFi Intel en placa real |
+| Red | **ip**, **ping**, **dns**, **wifi** (builtin) | Ver la IPv4; comprobar alcance ICMP; resolver un nombre; escanear y conectar redes WiFi Intel en placa real |
 | Sistema | **ps**, **halt**, **exit** | Ver procesos en ejecución; apagar o salir de la shell |
 
 Al arrancar verás una línea como `soso 0.2.2 (6641119fd)` — versión del kernel
@@ -512,6 +512,18 @@ ping: 10.0.2.2 seq=1 1 ms
 ```
 
 `-c N` limita el número de ecos (por defecto 4). `-W seg` es la espera por eco (por defecto 1). Si un destino no es IPv4, soso intenta resolverlo por DNS. En la kernel-shell de emergencia: `ping <ip|host> [n]`.
+
+### dns — resolver un nombre
+
+```sh
+dns github.com
+```
+
+Pregunta a los DNS del DHCP (y a `8.8.8.8` si hace falta) y escribe la IPv4. Si no hay respuesta en el plazo, el código de salida es 1 y la línea trae el errno (`2` = ninguna respuesta, `107` = la interfaz no está configurada).
+
+```text
+github.com → 140.82.121.4
+```
 
 ### halt — apagar el sistema
 

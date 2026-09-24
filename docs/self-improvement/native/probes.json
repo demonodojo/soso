@@ -118,7 +118,7 @@
       "capacidad": "varios descriptores sobre el mismo fichero (lo que necesita SQLite)",
       "por_que": "bun:sqlite abre el mismo .db desde varias conexiones: lee por posición y escribe sin pisar al resto.",
       "estado": "medida",
-      "resultado": "**pasa entera** desde N-001 y T65",
+      "resultado": "**pasa entera** desde N-001, T65 y N-004",
       "modulo": "user/soso-agent-probe/src/sondas/compartir.rs",
       "casos": [
         {
@@ -168,14 +168,36 @@
           "observado": "gana uno",
           "resultado": "pasa desde T65",
           "nota": "Era NEGATIVO: ganaban los dos porque la entrada de directorio no se materializaba hasta cerrar. T65 la reserva al abrir."
+        },
+        {
+          "id": "compartir/el-cerrojo-excluye-a-otro-proceso",
+          "esperado": "el hijo no pudo (1)",
+          "observado": "el hijo no pudo (1)",
+          "resultado": "pasa desde N-004",
+          "nota": "Se prueba con **dos procesos**: lo que hace útil a un candado es que el otro no pueda cogerlo, y eso un solo proceso no lo puede demostrar. El hijo sale con un código, no con un mensaje, para que el padre juzgue sin leer texto."
+        },
+        {
+          "id": "compartir/soltar-el-cerrojo-deja-pasar",
+          "esperado": "el hijo pudo (0)",
+          "observado": "el hijo pudo (0)",
+          "resultado": "pasa desde N-004",
+          "nota": "LOCK_UN libera de verdad; sin este caso, un `flock` que nunca concediera nada pasaría el anterior."
+        },
+        {
+          "id": "compartir/dos-compartidos-conviven",
+          "esperado": "el hijo pudo (0)",
+          "observado": "el hijo pudo (0)",
+          "resultado": "pasa desde N-004",
+          "nota": "LOCK_SH no excluye a otro compartido; sin este caso, un `flock` que excluyera siempre pasaría los dos anteriores."
         }
       ],
-      "hallazgo": "El modelo de ficheros era **por descriptor**: cada `open` se llevaba su copia. N-001 lo pasó a **por inodo** —el contenido en una caché compartida, los descriptores con su posición— y con eso los dos descriptores se ven, una escritura parcial no trunca y dos escritores no se pisan. T65 arregló aparte que `O_EXCL` excluyera.",
+      "hallazgo": "El modelo de ficheros era **por descriptor**: cada `open` se llevaba su copia. N-001 lo pasó a **por inodo** —el contenido en una caché compartida, los descriptores con su posición— y con eso los dos descriptores se ven, una escritura parcial no trunca y dos escritores no se pisan. T65 arregló aparte que `O_EXCL` excluyera. El hueco que quedaba —no había forma de coordinar el acceso— lo cierra **N-004** con `flock` consultivo y no bloqueante.",
       "para_t34": [
         {
-          "hueco": "bloqueo de ficheros (no hay flock ni fcntl)",
-          "archivos": "crates/soso-abi/src/lib.rs, kernel/src/task/syscall.rs",
-          "reproduccion": "sin sonda posible: la syscall no existe. N-004, ahora que N-001 hace que compartir signifique algo"
+          "hueco": "bloqueo de ficheros — **cubierto por N-004**",
+          "archivos": "crates/soso-abi/src/lib.rs, kernel/src/task/fcache.rs, kernel/src/task/syscall.rs, user/libsoso/src/sys.rs",
+          "reproduccion": "los tres casos de cerrojo de la sonda `compartir`, entre dos procesos",
+          "lo_que_sigue_faltando": "esperar por un cerrojo (sin LOCK_NB devuelve ENOSYS) y los rangos de `fcntl`. SQLite tiene una VFS `unix-flock` que no necesita rangos; esperar sí habría que emularlo reintentando."
         }
       ],
       "evidencia": "target/self-improvement/tasks/T33/compartir.txt"

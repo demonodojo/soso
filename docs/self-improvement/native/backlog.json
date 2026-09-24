@@ -131,7 +131,7 @@
     {
       "id": "N-004",
       "titulo": "Bloqueo de ficheros: flock o equivalente",
-      "estado": "pendiente",
+      "estado": "hecha",
       "prioridad": 4,
       "depende_de": [
         "N-001"
@@ -139,11 +139,24 @@
       "aplica_en": "soso",
       "archivos": [
         "crates/soso-abi/src/lib.rs",
-        "kernel/src/task/syscall.rs"
+        "kernel/src/task/fcache.rs",
+        "kernel/src/task/syscall.rs",
+        "kernel/src/task/mod.rs",
+        "user/libsoso/src/sys.rs"
       ],
-      "sonda": "sin sonda posible hoy: la syscall no existe. El sustituto, O_EXCL, falla su propio caso (T65)",
+      "sonda": "compartir/el-cerrojo-excluye-a-otro-proceso y las otras dos, nuevas con la syscall",
       "origen": "T32 + T33 pase 3",
-      "nota": "Detrás de N-001: bloquear un fichero que no se comparte no significa nada."
+      "nota": "Detrás de N-001: bloquear un fichero que no se comparte no significa nada.",
+      "ficha": "native/N-004.md",
+      "resultado": {
+        "hecho": "2026-09-24",
+        "que": "`SYS_FLOCK` con LOCK_SH/EX/UN/NB; el estado del cerrojo vive en la entrada de la caché por inodo de N-001, con los titulares por pid.",
+        "acreditado": "compartir/el-cerrojo-excluye-a-otro-proceso, compartir/soltar-el-cerrojo-deja-pasar y compartir/dos-compartidos-conviven — **con dos procesos**, porque uno solo no prueba que el otro no pueda.",
+        "elecciones": "`flock` y no `fcntl`: fichero entero, no rangos. Consultivo: coordina a quien lo pide, no vigila a quien no. Y **sólo no bloqueante** — sin LOCK_NB devuelve ENOSYS en vez de fingir que esperó.",
+        "del_proceso": "El cerrojo es del proceso, no del descriptor: cerrar un fd no lo suelta, morir sí (`fcache::soltar_todos` en los dos caminos de `exit_current`). Un candado que sobrevive a su dueño es un bloqueo.",
+        "limites": "Sólo sobre lo que la caché cubre —ficheros que existen y son pequeños—; sobre lo demás EINVAL en vez de fingir. Y el cerrojo muere con la entrada: sin nadie con el fichero abierto no hay nada que coordinar, pero es una diferencia con POSIX, donde vive en la descripción abierta.",
+        "evidencia": "target/self-improvement/tasks/N-004/compartir.txt"
+      }
     },
     {
       "id": "N-005",
