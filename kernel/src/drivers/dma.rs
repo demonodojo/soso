@@ -12,6 +12,8 @@ pub const PAGE_SIZE: usize = 4096;
 pub type PhysAddr = usize;
 
 static DMA_FREE: Mutex<Vec<(PhysAddr, usize)>> = Mutex::new(Vec::new());
+/// Páginas liberadas por `lx_dma_free_coherent`: no se reutilizan (cuarentena).
+static DMA_QUARANTINE: Mutex<Vec<(PhysAddr, usize)>> = Mutex::new(Vec::new());
 
 /// Saca `pages` páginas contiguas de la free-list, si hay una entrada exacta.
 fn de_la_free_list(pages: usize) -> Option<PhysAddr> {
@@ -68,6 +70,52 @@ const DMA_RECLAIM_RONDAS: usize = 3;
 /// Devuelve páginas a la free-list (no al frame allocator).
 pub fn free_pages(paddr: PhysAddr, pages: usize) {
     DMA_FREE.lock().push((paddr, pages.max(1)));
+}
+
+/// Libera DMA a cuarentena: envenena y no vuelve a `alloc_pages`.
+pub fn free_pages_cuarentena(paddr: PhysAddr, pages: usize) {
+    let pages = pages.max(1);
+    let bytes = pages * PAGE_SIZE;
+    unsafe {
+        core::ptr::write_bytes(virt(paddr).as_ptr(), 0xDE, bytes);
+    }
+    DMA_QUARANTINE.lock().push((paddr, pages));
+}
+
+fn en_rango_pa(valor: u64, pa: PhysAddr, pages: usize) -> bool {
+    let fin = pa as u64 + pages as u64 * PAGE_SIZE as u64;
+    valor >= pa as u64 && valor < fin
+}
+
+/// ¿El valor cae en RAM DMA conocida (free-list, cuarentena o offset físico)?
+pub fn informar_valor_dma(valor: u64) {
+    if valor == 0 {
+        return;
+    }
+    let page = valor & !0xfff;
+    for (pa, pages) in DMA_QUARANTINE.lock().iter().copied() {
+        if en_rango_pa(valor, pa, pages) || en_rango_pa(page, pa, pages) {
+            crate::println!(
+                "dma: valor {valor:#x} cae en cuarentena pa={pa:#x} {} páginas",
+                pages
+            );
+            return;
+        }
+    }
+    for (pa, pages) in DMA_FREE.lock().iter().copied() {
+        if en_rango_pa(valor, pa, pages) || en_rango_pa(page, pa, pages) {
+            crate::println!(
+                "dma: valor {valor:#x} cae en DMA_FREE pa={pa:#x} {} páginas",
+                pages
+            );
+            return;
+        }
+    }
+    if let Some(phys) = crate::mm::virt_to_phys(valor) {
+        crate::println!("dma: valor {valor:#x} traduce a phys {phys:#x}");
+    } else if valor < crate::mm::heap::HEAP_START && valor > 0x1000_0000 {
+        crate::println!("dma: valor {valor:#x} no es VA del heap ni mapeado como virt");
+    }
 }
 
 /// Vista virtual de una dirección física de RAM (mapeo del bootloader).

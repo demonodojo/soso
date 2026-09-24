@@ -41,6 +41,7 @@ uso: soso-agent-probe <sonda> [fase]
   salidas               stdout/stderr separados, código de salida, entorno, cwd
   hilos                 hilos, join, guarda de pila y temporizadores
   canales               tubería con salida grande y EOF, TCP con reconexión
+  coste                 coste de escritura en sosofs (paso 1 de N-001)
 
   codigos: 0 todo bien, 1 alguna capacidad falló, 2 uso incorrecto";
 
@@ -56,6 +57,7 @@ fn main(args: &[String]) -> u8 {
         "salidas" => sondas::salidas::ejecutar(),
         "hilos" => sondas::hilos::ejecutar(),
         "canales" => sondas::canales::ejecutar(),
+        "coste" => sondas::coste::ejecutar(),
         // Auxiliares: la sonda de señales se lanza a sí misma para tener
         // hijos de verdad a los que matar.
         "dormir" => return sondas::senales::dormir(args.get(1).map(|s| s.as_str()).unwrap_or("0")),
@@ -89,6 +91,22 @@ pub struct Caso {
 }
 
 impl Caso {
+    /// Una medida que **no juzga**: no hay «esperado» porque no hay criterio
+    /// todavía — el criterio es lo que la ficha tiene que decidir con este dato
+    /// delante. Cuenta como pasada para no ensuciar la señal del paso, y se
+    /// distingue en el informe por su `esperado` vacío.
+    ///
+    /// Es la misma idea que `Medida::Desconocida` en T23: lo que no se puede
+    /// juzgar se dice, no se fuerza a caber en un booleano.
+    pub fn observacion(id: &str, observado: impl Into<String>) -> Self {
+        Caso {
+            id: String::from(id),
+            paso: true,
+            esperado: String::new(),
+            observado: observado.into(),
+        }
+    }
+
     pub fn nuevo(id: &str, esperado: impl Into<String>, observado: impl Into<String>) -> Self {
         let esperado = esperado.into();
         let observado = observado.into();
@@ -103,7 +121,9 @@ impl Caso {
 
 fn imprimir(casos: &[Caso]) {
     for c in casos {
-        if c.paso {
+        if c.paso && c.esperado.is_empty() {
+            println!("probe: {} medido: {}", c.id, c.observado);
+        } else if c.paso {
             println!("probe: {} ok ({})", c.id, c.observado);
         } else {
             println!(

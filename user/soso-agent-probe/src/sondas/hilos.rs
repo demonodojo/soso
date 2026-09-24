@@ -126,6 +126,23 @@ pub fn ejecutar() -> Vec<Caso> {
             format!("prot=0 → {sin_permisos}"),
         ),
     );
+    // Y que `libsoso` **lo diga**: tras T66, `hay_guarda_de_pila()` informa si
+    // se pudo instalar. Que coincida con lo que contesta `mprotect` es lo que
+    // impide que la biblioteca vuelva a prometer lo que el kernel no da.
+    let dice = thread::hay_guarda_de_pila();
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "hilos/libsoso-no-promete-guarda",
+            "no hay guarda y libsoso lo dice",
+            if !dice {
+                String::from("no hay guarda y libsoso lo dice")
+            } else {
+                String::from("libsoso dice que sí la hay")
+            },
+        ),
+    );
+
     anotar(
         &mut casos,
         Caso::nuevo(

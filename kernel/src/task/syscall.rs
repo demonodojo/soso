@@ -1066,11 +1066,41 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
                 }
             }
         }
+        // N-001: reescribir un fichero que ya existe **no puede acortarlo**.
+        //
+        // Sin esto, abrir para escribir, ir a un offset y poner unos bytes
+        // dejaba el fichero con sólo esos bytes: `StreamWrite` acumula lo
+        // escrito y al cerrar hace `create_file`, que **reemplaza**. T33 lo
+        // midió (`compartir/escritura-conserva-el-resto`): cinco bytes en el
+        // offset 0 de un fichero de sesenta lo dejaban en cinco.
+        //
+        // Se carga el contenido para que las escrituras caigan **encima** y la
+        // cola sobreviva. `WriteBuf` ya hacía exactamente eso y estaba muerta
+        // tras un `let stream = true`; lo único que faltaba era elegirla.
+        //
+        // Con tope, y por una razón medida: cargar un fichero al abrirlo cuesta
+        // leerlo entero, y por `/var/models/` pasan shards de cientos de MB que
+        // hoy se escriben en streaming. Por encima del tope se conserva la
+        // conducta de siempre, y queda dicho como límite.
+        const CARGA_MAX: u64 = 1024 * 1024;
+        let mut cargado = false;
+        if exists && flags & abi::O_APPEND == 0 && flags & abi::O_TRUNC == 0 {
+            let ino = lookup.unwrap();
+            let st = with_vfs(|| crate::vfs::stat_inode(ino))?;
+            if st.file_type == sosofs::layout::FT_FILE && st.size.get() <= CARGA_MAX {
+                data = with_vfs(|| crate::vfs::read_file(ino))?;
+                cargado = true;
+            }
+        }
         if flags & abi::O_TRUNC != 0 {
             data.clear();
             append_pos = 0;
         }
-        let pos = if append_ino.is_some() && (path.starts_with("/var/") || path.starts_with("/tmp/")) {
+        let pos = if cargado {
+            // Reescritura: se empieza por el principio, como en POSIX sin
+            // `O_APPEND`. Quien quiera añadir usa `O_APPEND` o `seek`.
+            0
+        } else if append_ino.is_some() && (path.starts_with("/var/") || path.starts_with("/tmp/")) {
             append_pos
         } else if flags & abi::O_TRUNC != 0 || !exists {
             0
@@ -1078,8 +1108,13 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
             data.len()
         };
         let protegida = soso_update_core::es_administrada(&path);
-        let stream = true;
-        if stream {
+        if cargado {
+            // El búfer lleva el fichero entero: al cerrar se reemplaza con él,
+            // que es **una** transacción, igual que antes. Y si crece por
+            // encima de 16 MiB, `convert_writebuf_to_stream` lo pasa a
+            // streaming solo.
+            Fd::WriteBuf { dir, name, data, pos, protegida }
+        } else {
             Fd::StreamWrite {
                 dir,
                 name,
@@ -1088,8 +1123,6 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
                 buf: Vec::new(),
                 protegida,
             }
-        } else {
-            Fd::WriteBuf { dir, name, data, pos, protegida }
         }
     } else {
         let ino = with_vfs(|| crate::vfs::resolve(&path))?;

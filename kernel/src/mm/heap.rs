@@ -67,6 +67,81 @@ static TABLA: Mutex<Tabla> = Mutex::new(Tabla {
 
 static EN_REVISION: AtomicBool = AtomicBool::new(false);
 
+const ACCESOS_HIST: usize = 8;
+
+#[derive(Clone, Copy, Default)]
+struct Acceso {
+    ptr: usize,
+    size: usize,
+    ra: u64,
+}
+
+struct RingAccesos {
+    i: usize,
+    v: [Acceso; ACCESOS_HIST],
+}
+
+impl RingAccesos {
+    const fn new() -> Self {
+        Self {
+            i: 0,
+            v: [Acceso {
+                ptr: 0,
+                size: 0,
+                ra: 0,
+            }; ACCESOS_HIST],
+        }
+    }
+
+    fn push(&mut self, ptr: usize, size: usize, ra: u64) {
+        self.v[self.i] = Acceso { ptr, size, ra };
+        self.i = (self.i + 1) % ACCESOS_HIST;
+    }
+}
+
+static ULTIMOS_ALLOC: Mutex<RingAccesos> = Mutex::new(RingAccesos::new());
+static ULTIMOS_FREE: Mutex<RingAccesos> = Mutex::new(RingAccesos::new());
+
+pub(super) fn imprimir_ultimos_accesos() {
+    crate::println!("heap: últimos {ACCESOS_HIST} alloc (ptr size ra):");
+    let a = ULTIMOS_ALLOC.lock();
+    for n in 0..ACCESOS_HIST {
+        let e = a.v[(a.i + n) % ACCESOS_HIST];
+        if e.ptr != 0 {
+            crate::println!("heap:   alloc {:#x} {} B ra={:#x}", e.ptr, e.size, e.ra);
+        }
+    }
+    crate::println!("heap: últimos {ACCESOS_HIST} free (ptr size ra):");
+    let f = ULTIMOS_FREE.lock();
+    for n in 0..ACCESOS_HIST {
+        let e = f.v[(f.i + n) % ACCESOS_HIST];
+        if e.ptr != 0 {
+            crate::println!("heap:   free {:#x} {} B ra={:#x}", e.ptr, e.size, e.ra);
+        }
+    }
+}
+
+fn registrar_alloc(ptr: usize, size: usize, ra: u64) {
+    ULTIMOS_ALLOC.lock().push(ptr, size, ra);
+}
+
+fn registrar_free(ptr: usize, size: usize, ra: u64) {
+    ULTIMOS_FREE.lock().push(ptr, size, ra);
+}
+
+/// Bytes del heap ya mapeados (para auditoría de talc).
+pub fn heap_mapeado_bytes() -> u64 {
+    HEAP_MAPEADO.load(Ordering::Acquire)
+}
+
+pub(super) fn with_talc_audit(f: impl FnOnce(&Talc<ClaimOnOom>)) {
+    if let Some(guard) = TALC.try_lock() {
+        f(&*guard);
+    } else {
+        crate::println!("heap: auditoría talc sin candado");
+    }
+}
+
 struct ConCentinela;
 
 #[global_allocator]
@@ -173,7 +248,9 @@ unsafe impl GlobalAlloc for ConCentinela {
             unsafe {
                 core::ptr::write_unaligned(p.add(layout.size()) as *mut u64, CENTINELA_RUST);
             }
-            anotar(p as usize, layout.size(), ra_de_quien_reserva());
+            let ra = ra_de_quien_reserva();
+            anotar(p as usize, layout.size(), ra);
+            registrar_alloc(p as usize, layout.size(), ra);
         }
         p
     }
@@ -183,8 +260,17 @@ unsafe impl GlobalAlloc for ConCentinela {
         let Some(grande) = con_cola(layout) else {
             return;
         };
+        let ra = ra_de_quien_reserva();
+        registrar_free(ptr as usize, layout.size(), ra);
         quitar(ptr as usize);
         unsafe { TALC.dealloc(ptr, grande) };
+    }
+}
+
+/// Recorre los `next` de los huecos libres de talc (véase `heap_talc_audit`).
+pub fn vigilar_huecos(contexto: &str) {
+    if vigilando() {
+        super::heap_talc_audit::vigilar_huecos(contexto);
     }
 }
 
@@ -237,6 +323,7 @@ pub fn vigilando() -> bool {
 pub fn punto(contexto: &str) {
     let sonda = Box::new(0x534f_534f_4845_4150u64);
     drop(sonda);
+    vigilar_huecos(contexto);
     let bytes = contexto.as_bytes();
     let n = bytes.len().min(24);
     let mut buf = [0u8; 24];
@@ -282,6 +369,14 @@ pub fn localizar_en_pf(valor: u64) {
         cursor = sitio + 8;
     }
     crate::println!("heap: búsqueda terminada ({encontrados} coincidencias, máximo 8)");
+}
+
+/// ¿El puntero encaja en RAM DMA (iwlwifi, free-list, cuarentena)?
+pub fn informar_dma_en_pf(valor: u64) {
+    #[cfg(feature = "lxdde")]
+    crate::lxdde::informar_dma_en_pf(valor);
+    #[cfg(not(feature = "lxdde"))]
+    crate::drivers::dma::informar_valor_dma(valor);
 }
 
 /// Mapea el heap y se lo entrega a talc. Devuelve los bytes que quedaron.

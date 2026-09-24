@@ -75,15 +75,16 @@ Lecturas ya hechas, no reutilizarlas con otro ELF:
 
 ## Qué queda abierto
 
-Quién fabrica el slice que `checksum::data` lee en `0x3500000000`. La foto
-de las 12:15 (ELF de esa ESP, `interrupts.rs:448`) dejó `poll-nicho` intacto
-y no llegó a `poll-rx`: el fallo es el primer `iface.poll`. El `rip`
-`0x1000043a00d` es el `data.first()` del byte impar (`ip.rs:797`); el bucle
-de `read_u16` ya había terminado. `0x3500000000` está alineado a página y no
-es la pila (`0x10000a97…`) ni el heap (`0x4444…`). El RX/TX de la WiFi copia
-a un `[u8; 2048]` de la pila antes de entregar el slice: ese array no puede
-ser el puntero que peta. `try_attach` y el `Vec` de DNS quedan descartados
-en este ELF.
+Quién escribe el qword del heap que guarda el puntero malo. Instrumentación
+en el kernel (sin `SOSO_HEAP_DEBUG` extra):
+
+- `heap::vigilar_huecos` en cada `punto` y tras RX/TX WiFi → panic
+  `HUECO ROTO` con nodo, `next`, últimos 8 alloc/free (`ra`).
+- En #PF: `localizar_en_pf`, luego `informar_dma_en_pf` (iwlwifi + DMA_FREE
+  + cuarentena).
+
+Flashear y repetir `soso-update comprobar`. La foto tiene que traer
+`HUECO ROTO` o líneas `dma:` / `lxdde: valor … cae en iwlwifi DMA`.
 
 Sonda `mm::heap::punto` (no se libera): el pánico imprime `heap: último
 punto intacto «…»`, el último `malloc` de sonda que **volvió**. También

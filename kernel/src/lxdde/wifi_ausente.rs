@@ -95,3 +95,5 @@ pub fn send(_data: &[u8]) -> Result<(), ()> {
 pub fn can_send() -> bool {
     false
 }
+
+pub fn informar_dma_valor(_valor: u64) {}

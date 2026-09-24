@@ -297,6 +297,12 @@ pub fn wifi_can_send() -> bool {
     wifi::can_send()
 }
 
+/// Rangos DMA iwlwifi y pool DMA del kernel frente a CR2 / puntero almacenado.
+pub fn informar_dma_en_pf(valor: u64) {
+    crate::drivers::dma::informar_valor_dma(valor);
+    wifi::informar_dma_valor(valor);
+}
+
 pub fn wifi_scan() -> i32 {
     wifi::scan()
 }

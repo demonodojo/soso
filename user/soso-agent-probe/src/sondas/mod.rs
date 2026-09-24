@@ -7,6 +7,7 @@
 pub mod archivos;
 pub mod canales;
 pub mod compartir;
+pub mod coste;
 pub mod ejecutable;
 pub mod hilos;
 pub mod salidas;

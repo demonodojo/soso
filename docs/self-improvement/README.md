@@ -99,8 +99,15 @@ protocolo** — que es lo que el plan ya está construyendo (`soso-llm`,
 `conversation`, `soso-improve`) y lo que las sondas de T33 dicen que ya
 funciona. Elegir entre las dos no es de esta ficha.
 
-**Lo que queda habilitado**: **[N-001](native/N-001.md)** (la primera del
-backlog y la de mayor riesgo), los defectos
+**[N-001](native/N-001.md) tiene su paso 1 hecho**: la ficha exigía **medir
+antes de elegir**, y la medida dice que la opción que parecía simple —cada
+`write` al VFS— cuesta **~75×** más (64 KiB en una transacción frente a 64, con
+`rdtsc` y no con el PIT, que subcuenta durante el polling de disco). Elegida la
+**caché por inodo**, que conserva el agrupado y resuelve lo que N-001 persigue.
+La intuición escrita en la ficha era la contraria y sólo se vio al medir.
+
+**Lo que queda habilitado**: implementar **[N-001](native/N-001.md)**, los
+defectos
 [T65](T65-o-excl-no-excluye.md) y [T66](T66-guarda-de-pila-fingida.md), y los
 inventarios [T36](T36-forja-trazabilidad.md) y
 [T38](T38-toolchain-inventario.md).
@@ -221,7 +228,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T32](T32-opencode-inventario.md) | Inventariar dependencias del OpenCode que se quiere portar | SI-6 | T01 | Completada (v1.18.32 fijada) |
 | [T33](T33-sondas-abi.md) | Crear sondas pequeñas para las capacidades requeridas | SI-6 | T32, T49 | Completada (7 sondas; abrió T65 y T66) |
 | [T65](T65-o-excl-no-excluye.md) | `O_EXCL` no excluye mientras el primer descriptor sigue abierto | SI-4 | — (deriva de T33) | Pendiente |
-| [T66](T66-guarda-de-pila-fingida.md) | La guarda de pila de los hilos no existe, y el código finge que sí | SI-4 | — (deriva de T33) | Pendiente |
+| [T66](T66-guarda-de-pila-fingida.md) | La guarda de pila de los hilos no existe, y el código finge que sí | SI-4 | — (deriva de T33) | Completada (deja de fingir; la guarda es N-002) |
 | [T34](T34-tickets-port.md) | Convertir huecos del port en fichas implementables | SI-6 | T32, T33 | Completada (11 fichas N-xxx) |
 | [T35](T35-opencode-nativo.md) | Probar OpenCode nativo en modo no interactivo | SI-6 | T19, T34 | Pendiente |
 | [T36](T36-forja-trazabilidad.md) | Vincular fuentes, build y artefacto de Forja | SI-6 | T01 | Pendiente |

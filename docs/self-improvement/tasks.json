@@ -2365,7 +2365,7 @@
       "title": "La guarda de pila de los hilos no existe, y el código finge que sí",
       "milestone": "SI-4",
       "kind": "Corrección de userspace (y decisión de ABI)",
-      "status": "pending",
+      "status": "done",
       "depends_on": [],
       "entry_conditions": [],
       "contract_sections": "C5",
@@ -2375,20 +2375,25 @@
         "user/soso-agent-probe/src/sondas/hilos.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "verified",
         "requires": [],
-        "evidence": [],
-        "note": "La sonda corre dentro de soso (hilos/guarda-de-pila-se-puede-instalar)."
+        "evidence": [
+          "cargo xtask test sys --only=\"hilos, guarda\" (caso hilos/libsoso-no-promete-guarda)",
+          "target/self-improvement/tasks/T66/hilos.txt"
+        ],
+        "note": "La sonda comprueba que lo que dice hay_guarda_de_pila() coincide con lo que contesta mprotect."
       },
       "tracking": {
         "updated_at": "2026-09-24",
         "base": "da8934b31 + diff sucio",
         "summary": "docs/self-improvement/T66-guarda-de-pila-fingida.md",
         "evidence": [
-          "hilos/guarda-de-pila-se-puede-instalar: prot=0 → argumento inválido (-22)"
+          "cargo xtask test: TODO OK",
+          "cargo xtask check: TODO OK",
+          "target/self-improvement/tasks/T66/hilos.txt"
         ],
         "blocker": null,
-        "next_step": "Dejar de tragarse el error en thread::spawn; la ampliación del ABI (PROT_NONE) va a T34."
+        "next_step": "La guarda de verdad la trae N-002 (PROT_NONE). Cuando esté, hay_guarda_de_pila() pasará a true sin tocar nada más."
       }
     }
   ],

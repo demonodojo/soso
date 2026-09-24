@@ -1,6 +1,6 @@
 # T66 — La guarda de pila de los hilos no existe, y el código finge que sí
 
-**Hito:** SI-4 · **Tipo:** Corrección de userspace (y decisión de ABI) · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Corrección de userspace (y decisión de ABI) · **Estado:** completada (2026-09-24).
 
 **Dependencias:** ninguna. **La origina:** [T33](T33-sondas-abi.md), pase 6.
 
@@ -69,18 +69,47 @@ esta ficha: aquí se registra como límite conocido.
 4. Anotar en el backlog de [T34](T34-tickets-port.md) la ampliación del ABI:
    un `PROT_NONE` de verdad.
 
+## Resultado
+
+`thread::spawn` **mira** el resultado de `mprotect` en vez de tragárselo, y
+publica lo que salió en `libsoso::thread::hay_guarda_de_pila()`. Hoy es
+`false` en soso, y cuando [N-002](native/N-002.md) traiga `PROT_NONE` pasará a
+ser `true` sin que cambie nada más.
+
+**No se falla el `spawn`.** Se pensó y se descartó: dejaría a soso sin hilos, y
+la pila sin guarda es lo que hay hoy. Lo que no se hace es callarlo — la
+decisión está escrita en el código, que era el sitio donde faltaba.
+
+Y `DEFAULT_STACK` lo dice en su documentación, porque es donde alguien va a
+mirar al elegir un tamaño: **la pila de un hilo no tiene guarda**, así que ese
+número es lo único que separa una recursión profunda de corromper la memoria de
+al lado; quien elija uno menor está eligiendo también a qué profundidad se
+corrompe el montón en silencio.
+
 ## Comprobación
 
-`cargo xtask test sys --only="hilos, guarda"`. Los dos casos seguirán en
-negativo mientras el ABI no cambie —eso es correcto y es el punto—: lo que
-cambia con esta ficha es que el código deje de fingir. Más `cargo xtask test`
-entero, porque `thread::spawn` lo usa el pool de `soso-llm`.
+    cargo xtask test sys --only="hilos, guarda"    OK
+    cargo xtask test                                TODO OK
+    cargo xtask check                               TODO OK
+
+Caso nuevo en la sonda de T33, `hilos/libsoso-no-promete-guarda`: comprueba que
+lo que dice `hay_guarda_de_pila()` **coincide** con lo que contesta `mprotect`.
+Sin él, la biblioteca podría volver a prometer lo que el kernel no da, que es
+exactamente el defecto que esta ficha arregla.
+
+Los otros dos casos siguen en negativo, y eso es correcto: la capacidad no
+existe hasta N-002. Lo que cambia aquí es que el código deje de fingir.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación terminada.
-- [ ] Comprobaciones ejecutadas y evidencia guardada.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación terminada.
+- [x] Comprobaciones ejecutadas y evidencia guardada.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
+
+**Límite, y es el importante:** esto **no** añade una guarda de pila. Sigue sin
+haberla, y desbordar la pila de un hilo sigue corrompiendo lo que haya debajo.
+Lo que se arregla es que el sistema dejó de decir lo contrario. La capacidad la
+trae [N-002](native/N-002.md).
 
 ## Ejecución nativa
 

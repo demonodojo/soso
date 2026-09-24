@@ -254,3 +254,42 @@ pub fn send(data: &[u8]) -> Result<(), ()> {
 pub fn can_send() -> bool {
     connected() && unsafe { lx_iwlwifi_can_send() != 0 }
 }
+
+#[repr(C)]
+struct LxIwlDmaRange {
+    pa: u64,
+    len: u64,
+}
+
+unsafe extern "C" {
+    fn lx_iwlwifi_dma_ranges(out: *mut LxIwlDmaRange, max: c_int) -> c_int;
+}
+
+const DMA_RANGES_MAX: usize = 16;
+
+/// Compara `valor` (CR2 o `next` almacenado) con los anillos DMA del port iwlwifi.
+pub fn informar_dma_valor(valor: u64) {
+    if valor == 0 {
+        return;
+    }
+    let mut buf = [LxIwlDmaRange { pa: 0, len: 0 }; DMA_RANGES_MAX];
+    let n = unsafe { lx_iwlwifi_dma_ranges(buf.as_mut_ptr(), DMA_RANGES_MAX as c_int) };
+    if n <= 0 {
+        return;
+    }
+    let page = valor & !0xfff;
+    for i in 0..n as usize {
+        let r = &buf[i];
+        if r.pa == 0 || r.len == 0 {
+            continue;
+        }
+        let fin = r.pa + r.len;
+        if (valor >= r.pa && valor < fin) || (page >= r.pa && page < fin) {
+            crate::println!(
+                "lxdde: valor {valor:#x} cae en iwlwifi DMA pa={:#x} len={:#x}",
+                r.pa,
+                r.len
+            );
+        }
+    }
+}

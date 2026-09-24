@@ -73,7 +73,7 @@ pub extern "C" fn lx_dma_free_coherent(
     dma_handle: u64,
 ) {
     let pages = (size + 4095) / 4096;
-    dma::free_pages(dma_handle as dma::PhysAddr, pages);
+    dma::free_pages_cuarentena(dma_handle as dma::PhysAddr, pages);
 }
 
 #[unsafe(no_mangle)]

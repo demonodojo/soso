@@ -144,7 +144,9 @@ impl RxToken for LxWifiRx {
     {
         let frame = &self.buf[..self.len];
         anotar_trama(b'R', frame.as_ptr() as u64, frame.len());
-        f(frame)
+        let r = f(frame);
+        crate::mm::heap::vigilar_huecos("rx-consumido");
+        r
     }
 }
 
@@ -160,6 +162,7 @@ impl TxToken for LxWifiTx {
         anotar_trama(b'T', frame.as_ptr() as u64, frame.len());
         let r = f(frame);
         let _ = crate::lxdde::wifi_send(&buf[..n]);
+        crate::mm::heap::vigilar_huecos("tx-consumido");
         r
     }
 }

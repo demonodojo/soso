@@ -970,6 +970,15 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 || ssh_probe_canales(key, port),
             );
         });
+        filter.if_step(sid, "probe: coste de escritura en sosofs (N-001)", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: coste de escritura en sosofs (N-001)",
+                || ssh_probe_coste(key, port),
+            );
+        });
         filter.if_step(sid, "sosh: comillas en rutas con espacios", || {
             report.paso_ssh_sys(
                 &mut qemu,
@@ -2805,6 +2814,7 @@ fn ssh_probe_hilos(key: &Path, ssh_port: u16) -> Result<(), String> {
         "hilos/cuatro-corren-y-se-recogen",
         "hilos/join-espera-de-verdad",
         "hilos/guarda-de-pila-se-puede-instalar",
+        "hilos/libsoso-no-promete-guarda",
         "temporizadores/dormir-no-vuelve-antes",
         "temporizadores/el-reloj-no-retrocede",
         "temporizadores/el-reloj-de-pared-avanza",
@@ -2839,6 +2849,35 @@ fn ssh_probe_canales(key: &Path, ssh_port: u16) -> Result<(), String> {
         if !salida.contains(esperado) {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
+    }
+    Ok(())
+}
+
+/// N-001, paso 1 — cuánto cuesta una escritura en sosofs.
+///
+/// No juzga: **informa**. N-001 tiene que elegir entre dos formas de cambiar el
+/// modelo de ficheros, y la segunda cuesta una transacción CoW por `write`.
+/// Poner aquí un umbral sería inventarme el criterio que esa ficha debe decidir
+/// con el dato delante.
+fn ssh_probe_coste(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe coste\nexit\n",
+        Duration::from_secs(300),
+    )?;
+    if !salida.contains("probe-json:") {
+        return Err(format!("la medida no llegó al informe final: {salida:?}"));
+    }
+    publicar_informe("coste", &salida);
+    for l in salida.lines() {
+        let l = l.trim();
+        if l.starts_with("coste: ") {
+            println!("      [coste] {l}");
+        }
+    }
+    if salida.contains("FALLO") {
+        return Err(format!("la medida no cuadró: {salida:?}"));
     }
     Ok(())
 }

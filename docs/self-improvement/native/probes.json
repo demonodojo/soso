@@ -118,7 +118,7 @@
       "capacidad": "varios descriptores sobre el mismo fichero (lo que necesita SQLite)",
       "por_que": "bun:sqlite abre el mismo .db desde varias conexiones: lee por posición y escribe sin pisar al resto.",
       "estado": "medida",
-      "resultado": "**no la hay**: cuatro de ocho casos negativos, y el modelo de ficheros no admite una base de datos encima",
+      "resultado": "mejorado por N-001: la escritura parcial ya no trunca. Siguen negativos la visibilidad entre descriptores y el «gana el último», que necesitan la caché compartida",
       "modulo": "user/soso-agent-probe/src/sondas/compartir.rs",
       "casos": [
         {
@@ -138,16 +138,16 @@
         {
           "id": "compartir/escritura-conserva-el-resto",
           "esperado": "60 bytes, empieza XXXXX y acaba 55555",
-          "observado": "5 bytes, empieza XXXXX y acaba XXXXX",
-          "resultado": "NEGATIVO",
-          "nota": "Abrir para escribir, ir al offset 0, escribir 5 bytes y cerrar deja el fichero **en 5 bytes**. Los otros 55 desaparecen. Cualquier reescritura parcial destruye la cola."
+          "observado": "60 bytes, empieza XXXXX y acaba 55555",
+          "resultado": "pasa desde N-001",
+          "nota": "Era NEGATIVO: poner cinco bytes en el offset 0 de un fichero de sesenta lo dejaba en cinco. N-001 lo arregló eligiendo `WriteBuf` —que carga el contenido y lo reemplaza entero— en vez de `StreamWrite` cuando el fichero ya existe y es pequeño."
         },
         {
           "id": "compartir/dos-escritores-zonas-distintas",
           "esperado": "60 bytes: AAAAA y BBBBB",
-          "observado": "5 bytes: BBBBB y no llega (sólo 5 bytes)",
+          "observado": "60 bytes: 00000 y BBBBB",
           "resultado": "NEGATIVO",
-          "nota": "Dos escritores en zonas que no se solapan: gana el último en cerrar y se lleva por delante lo del otro y el resto del fichero."
+          "nota": "Mejoró con N-001 —el fichero ya no queda en 5 bytes— pero **sigue negativo**: el segundo escritor cargó su copia antes de que el primero cerrara, así que al cerrar la suya pisa la de él. Esto necesita la caché **compartida** por inodo, no sólo cargar el contenido."
         },
         {
           "id": "compartir/pwrite-en-offset",
@@ -170,7 +170,7 @@
           "nota": "Los dos `O_EXCL` ganan si el primero sigue abierto. Ficha T65."
         }
       ],
-      "hallazgo": "El modelo de ficheros de soso es **por descriptor, no por inodo**: cada `open` se lleva una vista propia y al cerrar vuelca lo suyo. Los offsets independientes y `pwrite` funcionan, pero dos descriptores no comparten el fichero y una escritura parcial trunca la cola. SQLite no puede funcionar así, y no por falta de `pread` —que se sustituye con `seek`+`read`— sino por el modelo entero.",
+      "hallazgo": "El modelo de ficheros es **por descriptor, no por inodo**. N-001 arregló la mitad que no necesitaba compartir —cargar el contenido al abrir para escribir, de modo que una escritura parcial no acorte el fichero— y dejó la otra mitad para la caché compartida: dos descriptores siguen sin verse, y el último en cerrar pisa al otro.",
       "para_t34": [
         {
           "hueco": "visibilidad entre descriptores y escritura parcial no destructiva",

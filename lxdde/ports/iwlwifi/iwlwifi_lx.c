@@ -133,3 +133,41 @@ void lx_iwlwifi_poll(void)
 {
     iwl_ax211_poll();
 }
+
+struct lx_iwl_dma_range {
+    uint64_t pa;
+    uint64_t len;
+};
+
+static void push_dma(struct lx_iwl_dma_range *out, int max, int *n,
+                     uint64_t pa, uint64_t len)
+{
+    if (!pa || !len || !out || *n >= max)
+        return;
+    out[*n].pa = pa;
+    out[*n].len = len;
+    (*n)++;
+}
+
+int lx_iwlwifi_dma_ranges(struct lx_iwl_dma_range *out, int max)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    int n = 0;
+    unsigned bd_sz = IWL_GEN2_RX_N * 16u;
+    unsigned used_sz = IWL_GEN2_RX_N * 8u;
+    unsigned rx_pages = (unsigned)IWL_GEN2_RX_N * (unsigned)IWL_GEN2_RX_SZ;
+
+    push_dma(out, max, &n, iwl->rx_bd_dma, bd_sz);
+    push_dma(out, max, &n, iwl->used_bd_dma, used_sz);
+    push_dma(out, max, &n, iwl->rb_stts_dma, 16);
+    push_dma(out, max, &n, iwl->rx_page_dma, rx_pages);
+    push_dma(out, max, &n, iwl->mtr_dma,
+             (uint64_t)IWL_CMD_QUEUE_SIZE * (uint64_t)IWL_TFH_TFD_SIZE);
+    push_dma(out, max, &n, iwl->mcr_dma,
+             (uint64_t)IWL_CMD_QUEUE_SIZE * (uint64_t)IWL_CMD_SLOT_SIZE);
+    push_dma(out, max, &n, iwl->data_body_dma,
+             (uint64_t)IWL_MGMT_QUEUE_SIZE * (uint64_t)IWL_MGMT_TX_SLOT_SIZE);
+    push_dma(out, max, &n, iwl->mgmt_body_dma,
+             (uint64_t)IWL_MGMT_QUEUE_SIZE * (uint64_t)IWL_MGMT_TX_SLOT_SIZE);
+    return n;
+}

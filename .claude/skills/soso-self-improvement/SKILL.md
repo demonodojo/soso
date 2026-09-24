@@ -192,8 +192,10 @@ imposible la guarda de pila.
 —**sustrato POSIX primero**—; N-001/002/003 redactadas. Portar Bun descartado
 por carencias medidas (sin `dlopen`, sin pty/inotify, modelo de ficheros).
 
-**Recomendada ahora: N-001** (modelo de ficheros por inodo), la de mayor riesgo
-del backlog: su paso 1 es elegir forma y **medir** el coste en sosofs.
+**Recomendada ahora: N-001** (modelo de ficheros por inodo). Su paso 1 está
+hecho: medido que la escritura directa al VFS cuesta **~75×** más (con `rdtsc`,
+porque el PIT subcuenta con E/S), y elegida la **caché por inodo**. Falta
+implementarla.
 
 **Decisión de plan pendiente**, como el no-go de T14: portar OpenCode o
 reimplementar el agente en Rust reutilizando el protocolo — lo que el plan ya

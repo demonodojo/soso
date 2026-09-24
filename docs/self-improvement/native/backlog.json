@@ -37,7 +37,7 @@
     {
       "id": "N-001",
       "titulo": "Modelo de ficheros por inodo: los descriptores comparten y la escritura parcial no trunca",
-      "estado": "lista",
+      "estado": "en curso",
       "prioridad": 1,
       "depende_de": [],
       "aplica_en": "soso",
@@ -47,7 +47,27 @@
       ],
       "sonda": "compartir/visibilidad-entre-descriptores, compartir/escritura-conserva-el-resto, compartir/dos-escritores-zonas-distintas",
       "origen": "T33 pase 3",
-      "ficha": "native/N-001.md"
+      "ficha": "native/N-001.md",
+      "paso_1": {
+        "hecho": "2026-09-24",
+        "decision": "opción 1, caché por inodo",
+        "medida": "64 KiB en 1 transacción ~1,4e8 ciclos; en 64 transacciones ~1,07e10; razón ~75x (75, 76 y 90 en tres ejecuciones)",
+        "como": "soso-agent-probe coste, con rdtsc y no con uptime_ms: el PIT subcuenta durante el polling de disco",
+        "por_que": "La opción 2 parecía la simple y con el dato delante no lo es: un programa que escriba en trozos —todos: un compilador, un tar, una base de datos— pagaría ~75x. La caché por inodo conserva el agrupado y resuelve lo que N-001 persigue, a cambio de cuenta de referencias y decidir cuándo vuelca.",
+        "de_propina": "Por el camino de 64 ciclos el fichero acaba con 1024 bytes y no con 65536: cada ciclo reemplaza en vez de añadir. Es el truncamiento del pase 3 de T33 visto por otro camino.",
+        "evidencia": "target/self-improvement/tasks/N-001/coste.txt"
+      },
+      "paso_2": {
+        "hecho": "2026-09-24 (primera mitad)",
+        "que": "La escritura parcial ya no trunca: `sys_open` carga el contenido y usa `Fd::WriteBuf` cuando el fichero existe, no lleva O_APPEND ni O_TRUNC y mide ≤ 1 MiB.",
+        "causa_encontrada": "`append_ino` sólo se rellenaba con O_APPEND, así que un O_WRONLY normal dejaba inode=None y el volcado hacía `create_file`, que reemplaza el fichero entero. Un O_TRUNC implícito aplicado al cerrar.",
+        "pieza_reutilizada": "`Fd::WriteBuf` ya hacía lo correcto y estaba muerta tras un `let stream = true`.",
+        "resultado": "compartir/escritura-conserva-el-resto pasa de FALLO a ok; los otros dos casos siguen negativos y necesitan la caché compartida.",
+        "coste": "El camino de reescritura sin O_TRUNC se duplicó (~75x → ~160x en la razón de la sonda) porque ahora cada open de escritura lee el fichero. El de una transacción no se movió: usa O_TRUNC y se salta la carga.",
+        "limite": "Tope de 1 MiB: por encima se conserva la conducta de siempre, porque por /var/models/ pasan shards de cientos de MB en streaming.",
+        "falta": "La caché compartida por inodo, con cuenta de referencias y decisión de cuándo volcar. Es donde está el riesgo declarado.",
+        "evidencia": "target/self-improvement/tasks/N-001/{compartir,suite}.txt"
+      }
     },
     {
       "id": "N-002",
