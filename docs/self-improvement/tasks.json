@@ -1131,7 +1131,7 @@
       "title": "Crear sondas pequeñas para las capacidades requeridas",
       "milestone": "SI-6",
       "kind": "Implementación de pruebas guest",
-      "status": "in_progress",
+      "status": "done",
       "depends_on": [
         "T32",
         "T49"
@@ -1142,34 +1142,37 @@
         "user/soso-agent-probe/src/main.rs",
         "user/soso-agent-probe/src/sondas/archivos.rs",
         "user/soso-agent-probe/src/sondas/ejecutable.rs",
+        "user/soso-agent-probe/src/sondas/senales.rs",
+        "user/soso-agent-probe/src/sondas/salidas.rs",
+        "user/soso-agent-probe/src/sondas/hilos.rs",
+        "user/soso-agent-probe/src/sondas/canales.rs",
         "user/soso-agent-probe/src/sondas/compartir.rs",
         "docs/self-improvement/native/probes.json",
         "xtask/src/test_probe.rs"
       ],
       "native_validation": {
-        "status": "partial",
+        "status": "verified",
         "requires": [],
         "evidence": [
-          "cargo xtask test sys --only=\"archivos persistentes\"",
-          "cargo xtask test sys --only=\"W+X\"",
-          "cargo xtask test sys --only=\"mismo fichero\"",
+          "cargo xtask test (46 pasos, siete de sondas)",
           "cargo xtask test-probe (dos arranques con halt en medio)",
-          "target/self-improvement/tasks/T33/{reinicio,wx,compartir}.txt"
+          "docs/self-improvement/native/probes.json",
+          "target/self-improvement/tasks/T33/*.txt"
         ],
-        "note": "Pases 1–3 acreditados en guest. Parcial a propósito: quedan 7 capacidades por medir."
+        "note": "Las siete sondas corren dentro de soso; la de archivos además con un reinicio real en medio."
       },
       "tracking": {
         "updated_at": "2026-09-24",
         "base": "da8934b31 + diff sucio",
         "summary": "docs/self-improvement/seguimiento/T33.md",
         "evidence": [
-          "docs/self-improvement/native/probes.json (3 de 10 medidas)",
+          "docs/self-improvement/native/probes.json (7 de 7 medidas)",
           "target/self-improvement/tasks/T33/resultado.md",
-          "cargo xtask test: TODO OK (42 pasos)",
+          "cargo xtask test: TODO OK (46 pasos)",
           "cargo xtask check: TODO OK"
         ],
         "blocker": null,
-        "next_step": "Pase 4: señales — no «manejar», que no existe, sino que el padre distinga muerte por señal de salida con código, que es lo que usa un timeout de subproceso. El pase 3 dejó dos huecos anotados para T34 y abrió T65."
+        "next_step": "T34: convertir en fichas N-xxx los cinco huecos que T33 dejó con archivos y reproducción. Los dos negativos de fondo son el modelo de ficheros por descriptor (mata SQLite) y la ausencia de protecciones de página (hace viable el JIT e imposible la guarda de pila)."
       }
     },
     {
@@ -2337,6 +2340,38 @@
         ],
         "blocker": null,
         "next_step": "Reservar la entrada de directorio al abrir con O_CREAT|O_EXCL, no al cerrar."
+      }
+    },
+    {
+      "id": "T66",
+      "file": "T66-guarda-de-pila-fingida.md",
+      "title": "La guarda de pila de los hilos no existe, y el código finge que sí",
+      "milestone": "SI-4",
+      "kind": "Corrección de userspace (y decisión de ABI)",
+      "status": "pending",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C5",
+      "context": [
+        "user/libsoso/src/thread.rs",
+        "kernel/src/task/syscall.rs",
+        "user/soso-agent-probe/src/sondas/hilos.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "La sonda corre dentro de soso (hilos/guarda-de-pila-se-puede-instalar)."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "docs/self-improvement/T66-guarda-de-pila-fingida.md",
+        "evidence": [
+          "hilos/guarda-de-pila-se-puede-instalar: prot=0 → argumento inválido (-22)"
+        ],
+        "blocker": null,
+        "next_step": "Dejar de tragarse el error en thread::spawn; la ampliación del ABI (PROT_NONE) va a T34."
       }
     }
   ],

@@ -5,6 +5,7 @@
 
 pub mod frame;
 pub mod heap;
+mod heap_scan;
 pub mod memtest;
 pub mod paging;
 pub mod reclaim;

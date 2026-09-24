@@ -61,17 +61,34 @@ capacidades. Dos hallazgos cambian lo que SI-6 puede planear: el repositorio
 `inotify`, y **portar OpenCode es portar Bun**. Las incógnitas quedan escritas
 como siete sondas para [T33](T33-sondas-abi.md).
 
-**[T33](T33-sondas-abi.md) está en curso**: la ficha va por pases —una
-capacidad cada vez— y el primero mide **archivos persistentes**, con crate nuevo
-(`user/soso-agent-probe/`), tabla en
-[`native/probes.json`](native/probes.json) y, además del paso de suite, un
-`cargo xtask test-probe` que arranca la imagen **dos veces** con un `halt` en
-medio: «sobrevive a cerrar el descriptor» y «sobrevive al apagado» no son lo
-mismo, y lo primero lo cumple una caché. Van **1 de 10**; el pase siguiente es
-la sonda decisiva, **W+X**, porque sin JIT no hay JavaScriptCore.
+**[T33](T33-sondas-abi.md) está completada** el 24-sep-2026: **siete sondas**
+en un crate nuevo (`user/soso-agent-probe/`), ejecutadas en siete pases —uno por
+capacidad, como la ficha exige— con la tabla en
+[`native/probes.json`](native/probes.json), que lleva `esperado` y `observado`
+por caso también en los que pasan. Hay además un `cargo xtask test-probe` que
+arranca la imagen **dos veces** con un `halt` en medio, porque «sobrevive a
+cerrar el descriptor» y «sobrevive al apagado» no son lo mismo.
 
-**Lo que queda habilitado**: seguir con los pases de T33, y los inventarios
-[T36](T36-forja-trazabilidad.md) y [T38](T38-toolchain-inventario.md).
+**Lo que sale bien, y no era obvio**: páginas ejecutables **con recompilación**
+—el JIT es viable—, señales suficientes para el timeout de una herramienta,
+stdout y stderr separados, hilos con `join` que espera, relojes que no mienten,
+tuberías que aguantan 64 KiB y avisan del EOF cuando el escritor muere, y TCP
+que reconecta.
+
+**Lo que sale mal**, con reproducción y archivos responsables: **el modelo de
+ficheros es por descriptor, no por inodo** —dos descriptores no comparten el
+fichero y una escritura parcial trunca la cola, así que SQLite no puede
+funcionar, y no por falta de `pread`—; y **no hay protecciones de página más
+allá de la escritura** —ni `PROT_EXEC` porque todo es ejecutable, ni `PROT_NONE`
+así que no hay guarda de pila—, que es **una** decisión de diseño con los dos
+signos. De ahí salen dos defectos abiertos, **[T65](T65-o-excl-no-excluye.md)**
+y **[T66](T66-guarda-de-pila-fingida.md)**, y cinco huecos listos para
+**[T34](T34-tickets-port.md)**, que es la recomendada ahora.
+
+**Lo que queda habilitado**: **[T34](T34-tickets-port.md)**, los defectos
+[T65](T65-o-excl-no-excluye.md) y [T66](T66-guarda-de-pila-fingida.md), y los
+inventarios [T36](T36-forja-trazabilidad.md) y
+[T38](T38-toolchain-inventario.md).
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.
 Entregar al modelo una ficha por sesión, las secciones indicadas
@@ -187,8 +204,9 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T30](T30-hardware.md) | Medir servicio e inferencia en una máquina física identificada | SI-5 | T19, T29, T48 | Pendiente |
 | [T31](T31-restauracion.md) | Demostrar recuperación completa de la instalación | SI-5 | T30 | Pendiente |
 | [T32](T32-opencode-inventario.md) | Inventariar dependencias del OpenCode que se quiere portar | SI-6 | T01 | Completada (v1.18.32 fijada) |
-| [T33](T33-sondas-abi.md) | Crear sondas pequeñas para las capacidades requeridas | SI-6 | T32, T49 | En curso (3 de 10; abrió T65) |
+| [T33](T33-sondas-abi.md) | Crear sondas pequeñas para las capacidades requeridas | SI-6 | T32, T49 | Completada (7 sondas; abrió T65 y T66) |
 | [T65](T65-o-excl-no-excluye.md) | `O_EXCL` no excluye mientras el primer descriptor sigue abierto | SI-4 | — (deriva de T33) | Pendiente |
+| [T66](T66-guarda-de-pila-fingida.md) | La guarda de pila de los hilos no existe, y el código finge que sí | SI-4 | — (deriva de T33) | Pendiente |
 | [T34](T34-tickets-port.md) | Convertir huecos del port en fichas implementables | SI-6 | T32, T33 | Pendiente |
 | [T35](T35-opencode-nativo.md) | Probar OpenCode nativo en modo no interactivo | SI-6 | T19, T34 | Pendiente |
 | [T36](T36-forja-trazabilidad.md) | Vincular fuentes, build y artefacto de Forja | SI-6 | T01 | Pendiente |

@@ -5,5 +5,9 @@
 //! hilos/join/TLS, temporizadores y TCP con cierre y reconexión.
 
 pub mod archivos;
+pub mod canales;
 pub mod compartir;
 pub mod ejecutable;
+pub mod hilos;
+pub mod salidas;
+pub mod senales;

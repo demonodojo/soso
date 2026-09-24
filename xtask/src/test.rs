@@ -934,6 +934,42 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 || ssh_probe_compartir(key, port),
             );
         });
+        filter.if_step(sid, "probe: señales y muerte de subprocesos", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: señales y muerte de subprocesos",
+                || ssh_probe_senales(key, port),
+            );
+        });
+        filter.if_step(sid, "probe: salidas, entorno y cwd de una herramienta", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: salidas, entorno y cwd de una herramienta",
+                || ssh_probe_salidas(key, port),
+            );
+        });
+        filter.if_step(sid, "probe: hilos, guarda de pila y relojes", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: hilos, guarda de pila y relojes",
+                || ssh_probe_hilos(key, port),
+            );
+        });
+        filter.if_step(sid, "probe: tuberías con EOF y TCP con reconexión", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: tuberías con EOF y TCP con reconexión",
+                || ssh_probe_canales(key, port),
+            );
+        });
         filter.if_step(sid, "sosh: comillas en rutas con espacios", || {
             report.paso_ssh_sys(
                 &mut qemu,
@@ -2675,6 +2711,130 @@ fn ssh_probe_compartir(key: &Path, ssh_port: u16) -> Result<(), String> {
         "compartir/dos-escritores-zonas-distintas",
         "compartir/pwrite-en-offset",
         "compartir/o-excl-excluye",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// T33, sonda 4 — señales, por lo que un runtime necesita de ellas.
+///
+/// No se mide «¿se puede manejar una señal?» —eso ya se sabe leyendo el ABI, y
+/// es que no— sino matar un subproceso desbocado, distinguir esa muerte de una
+/// salida con código, y qué pasa al escribir en una tubería sin lector.
+fn ssh_probe_senales(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe senales\nexit\n",
+        Duration::from_secs(180),
+    )?;
+    if !salida.contains("probe-json:") {
+        return Err(format!("la sonda no llegó al informe final: {salida:?}"));
+    }
+    publicar_informe("senales", &salida);
+    for esperado in [
+        "senales/salida-normal",
+        "senales/sigterm-mata-y-se-distingue",
+        "senales/sigkill-se-distingue-de-sigterm",
+        "senales/sondeo-distingue-vivo-de-inexistente",
+        "senales/kill-devuelve-cuantos-no-cero",
+        "senales/tuberia-sin-lector",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    // El hijo dormilón no debe haber llegado al final de su siesta: si lo
+    // hiciera, `kill` no habría cortado nada y el caso pasaría por otro
+    // camino.
+    if salida.contains("terminó de dormir 60000") {
+        return Err(format!("el kill no cortó al hijo: {salida:?}"));
+    }
+    Ok(())
+}
+
+/// T33, sonda 5 — lo que necesita un lanzador de herramientas.
+///
+/// stdout y stderr **separados** (mezclarlos corrompe la salida que el agente
+/// parsea), código de salida, entorno y directorio de trabajo.
+fn ssh_probe_salidas(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe salidas\nexit\n",
+        Duration::from_secs(180),
+    )?;
+    if !salida.contains("probe-json:") {
+        return Err(format!("la sonda no llegó al informe final: {salida:?}"));
+    }
+    publicar_informe("salidas", &salida);
+    for esperado in [
+        "salidas/stdout-lleva-solo-lo-suyo",
+        "salidas/stderr-lleva-solo-lo-suyo",
+        "salidas/codigo-de-salida",
+        "entorno/variable-heredada",
+        "cwd/el-hijo-hereda-el-del-padre",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// T33, sonda 6 — hilos, `join`, guarda de pila y relojes.
+///
+/// Mide una cosa que el código de `thread::spawn` da por hecha: que la guarda
+/// de pila se instala. Como los demás casos negativos de T33, el paso publica
+/// el informe y no falla por ello: la medida es el entregable.
+fn ssh_probe_hilos(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe hilos\nexit\n",
+        Duration::from_secs(180),
+    )?;
+    if !salida.contains("probe-json:") {
+        return Err(format!("la sonda no llegó al informe final: {salida:?}"));
+    }
+    publicar_informe("hilos", &salida);
+    for esperado in [
+        "hilos/cuatro-corren-y-se-recogen",
+        "hilos/join-espera-de-verdad",
+        "hilos/guarda-de-pila-se-puede-instalar",
+        "temporizadores/dormir-no-vuelve-antes",
+        "temporizadores/el-reloj-no-retrocede",
+        "temporizadores/el-reloj-de-pared-avanza",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// T33, sonda 7 — tuberías con EOF y TCP con cierre y reconexión.
+///
+/// Las dos son de lo mismo: saber **cuándo se acabó**. Confundir «todavía no
+/// hay datos» con «ya no va a haber más» es esperar de más o truncar.
+fn ssh_probe_canales(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe canales\nexit\n",
+        Duration::from_secs(180),
+    )?;
+    if !salida.contains("probe-json:") {
+        return Err(format!("la sonda no llegó al informe final: {salida:?}"));
+    }
+    publicar_informe("canales", &salida);
+    for esperado in [
+        "canales/salida-grande-intacta",
+        "canales/eof-cuando-el-escritor-muere",
+        "canales/tcp-dos-conexiones-al-mismo-destino",
     ] {
         if !salida.contains(esperado) {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));

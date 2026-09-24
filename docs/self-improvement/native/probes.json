@@ -187,49 +187,238 @@
       "evidencia": "target/self-improvement/tasks/T33/compartir.txt"
     },
     {
-      "id": "argv-env-cwd",
-      "capacidad": "argv, entorno y directorio de trabajo",
-      "estado": "pendiente",
-      "pase": "siguiente",
-      "nota": "T47 dejó el adaptador y T62 arregló el paso de argv; falta la sonda que lo mida como capacidad."
+      "id": "senales",
+      "capacidad": "matar un subproceso y distinguir cómo murió",
+      "por_que": "Es el fondo de cualquier timeout de herramienta: OpenCode lanza bash, git o rg con plazo y alguien tiene que poder cortarlos, y el padre tiene que saber si murió por plazo o falló solo.",
+      "estado": "medida",
+      "resultado": "la capacidad **está entera**, con una desviación de POSIX que una capa de compatibilidad tendría que traducir",
+      "modulo": "user/soso-agent-probe/src/sondas/senales.rs",
+      "casos": [
+        {
+          "id": "senales/salida-normal",
+          "esperado": "7",
+          "observado": "7",
+          "resultado": "pasa",
+          "nota": "El código del hijo llega al padre tal cual: es la referencia contra la que 143 significa algo."
+        },
+        {
+          "id": "senales/sigterm-mata-y-se-distingue",
+          "esperado": "143",
+          "observado": "143",
+          "resultado": "pasa",
+          "nota": "SIGTERM corta un hijo dormido y llega como 128+15. El timeout de herramienta es viable."
+        },
+        {
+          "id": "senales/sigkill-se-distingue-de-sigterm",
+          "esperado": "137",
+          "observado": "137",
+          "resultado": "pasa",
+          "nota": "Y se distingue de SIGTERM, así que un runtime puede escalar y saber cuál usó."
+        },
+        {
+          "id": "senales/sondeo-distingue-vivo-de-inexistente",
+          "esperado": "vivo=sí inexistente=no",
+          "observado": "vivo=sí inexistente=no",
+          "resultado": "pasa",
+          "nota": "Distingue. La expectativa original («vivo=0») era **mía y estaba mal**: soso devuelve el número de procesos señalados, no 0."
+        },
+        {
+          "id": "senales/kill-devuelve-cuantos-no-cero",
+          "esperado": "1",
+          "observado": "1",
+          "resultado": "pasa (y documenta la desviación)",
+          "nota": "`kill` devuelve cuántos procesos señaló; POSIX devuelve 0. No es defecto —la capacidad está— pero un shim de libc tiene que traducirlo."
+        },
+        {
+          "id": "senales/tuberia-sin-lector",
+          "esperado": "error la tubería no tiene lector (-32)",
+          "observado": "error la tubería no tiene lector (-32)",
+          "resultado": "pasa",
+          "nota": "Escribir sin lector devuelve **EPIPE** y no mata al escritor, que sin `SIGPIPE` ignorable es la única conducta usable. El fallo anterior era del informe, no del sistema: `EPIPE` estaba en el ABI pero faltaba en la tabla de `errno_str`, así que la sonda decía «error desconocido» de algo que soso hace bien. Añadido."
+        }
+      ],
+      "hallazgo": "No hay manejadores de señal y **no hacen falta** para lo que un agente necesita: matar un subproceso desbocado funciona, el padre distingue SIGTERM (143) de SIGKILL (137) y de una salida con código, el sondeo `kill(pid,0)` separa vivo de inexistente, y escribir en una tubería sin lector devuelve EPIPE en vez de matar. El timeout de herramienta de OpenCode es viable tal cual.",
+      "para_t34": [
+        {
+          "hueco": "`kill` devuelve el número de procesos señalados, no 0",
+          "archivos": "kernel/src/task/mod.rs (kill_target), crates/soso-abi/src/lib.rs",
+          "reproduccion": "soso-agent-probe senales, caso senales/kill-devuelve-cuantos-no-cero"
+        }
+      ],
+      "evidencia": "target/self-improvement/tasks/T33/senales.txt"
     },
     {
       "id": "salidas",
-      "capacidad": "stdout/stderr separados y código de salida",
-      "estado": "pendiente",
-      "pase": "siguiente"
-    },
-    {
-      "id": "tuberias",
-      "capacidad": "tuberías con EOF",
-      "estado": "pendiente",
-      "pase": "siguiente",
-      "nota": "T61 abrió la lectura con plazo; falta medirla como capacidad del agente."
+      "capacidad": "lanzar una herramienta: stdout y stderr separados, código de salida, entorno y cwd",
+      "por_que": "Un agente no ejecuta programas, ejecuta herramientas y lee lo que devuelven. Si stdout y stderr se mezclan, el diagnóstico contamina la salida que el agente parsea — y `git` y `rg` escriben por stderr constantemente.",
+      "estado": "medida",
+      "resultado": "pasa entera",
+      "modulo": "user/soso-agent-probe/src/sondas/salidas.rs",
+      "casos": [
+        {
+          "id": "salidas/stdout-lleva-solo-lo-suyo",
+          "esperado": "contiene la marca de stdout y no la de stderr",
+          "observado": "igual",
+          "resultado": "pasa",
+          "nota": "Se comprueba que **no** llegue la otra marca: que cada una llegue no descarta que se mezclen."
+        },
+        {
+          "id": "salidas/stderr-lleva-solo-lo-suyo",
+          "esperado": "contiene la marca de stderr y no la de stdout",
+          "observado": "igual",
+          "resultado": "pasa"
+        },
+        {
+          "id": "salidas/codigo-de-salida",
+          "esperado": "3",
+          "observado": "3",
+          "resultado": "pasa",
+          "nota": "Se espera **después** de drenar las tuberías: al revés, un hijo que llene la tubería se bloquea y el padre espera a un proceso que espera al padre."
+        },
+        {
+          "id": "entorno/variable-heredada",
+          "esperado": "valor con espacios",
+          "observado": "valor con espacios",
+          "resultado": "pasa",
+          "nota": "Con espacios a propósito: es como se pasa configuración sin meterla en la línea de órdenes, donde además quedaría a la vista de quien liste procesos."
+        },
+        {
+          "id": "cwd/el-hijo-hereda-el-del-padre",
+          "esperado": "/tmp/t33-cwd",
+          "observado": "/tmp/t33-cwd",
+          "resultado": "pasa"
+        }
+      ],
+      "hallazgo": "Las cuatro capacidades están. La única fricción no es una ausencia sino una forma: **no hay parámetro de cwd en el spawn**, así que lanzar una herramienta «en» un directorio obliga a `chdir` antes — y el `chdir` es del **proceso**, no de la llamada. Un agente que quiera correr dos herramientas a la vez en directorios distintos no puede: tendría que serializarlas o usar rutas absolutas. T47 ya lo rodea con un `CwdGuardado` que restaura después, lo que confirma que la fricción es real.",
+      "para_t34": [
+        {
+          "hueco": "el spawn no acepta directorio de trabajo; el cwd es por proceso",
+          "archivos": "crates/soso-abi/src/lib.rs (SpawnIo), kernel/src/task/syscall.rs (sys_spawn_io)",
+          "reproduccion": "soso-agent-probe salidas, caso cwd/el-hijo-hereda-el-del-padre"
+        }
+      ],
+      "evidencia": "target/self-improvement/tasks/T33/salidas.txt"
     },
     {
       "id": "hilos",
-      "capacidad": "hilo, join y TLS",
-      "estado": "pendiente",
-      "pase": "siguiente"
+      "capacidad": "hilos, join, guarda de pila y relojes",
+      "por_que": "Un runtime de JavaScript no es monohilo por dentro: JavaScriptCore compila en un hilo aparte y Bun tiene su pool de E/S. Y la recursión profunda es rutina en un intérprete, no un caso raro.",
+      "estado": "medida",
+      "resultado": "los hilos y los relojes funcionan; **la guarda de pila no existe** y el código finge que sí",
+      "modulo": "user/soso-agent-probe/src/sondas/hilos.rs",
+      "casos": [
+        {
+          "id": "hilos/cuatro-corren-y-se-recogen",
+          "esperado": "10",
+          "observado": "10",
+          "resultado": "pasa",
+          "nota": "La suma comprueba que corrieron **todos**, no que arrancó alguno."
+        },
+        {
+          "id": "hilos/spawn-devuelve-handle",
+          "esperado": "4",
+          "observado": "4",
+          "resultado": "pasa"
+        },
+        {
+          "id": "hilos/join-espera-de-verdad",
+          "esperado": "1",
+          "observado": "1",
+          "resultado": "pasa",
+          "nota": "El hilo duerme 400 ms y sólo después marca: si `join` volviera antes, la marca estaría sin poner."
+        },
+        {
+          "id": "hilos/guarda-de-pila-se-puede-instalar",
+          "esperado": "prot=0 aceptado",
+          "observado": "prot=0 → argumento inválido (-22)",
+          "resultado": "NEGATIVO",
+          "nota": "`thread::spawn` llama a `mprotect(base, 4096, 0)` y se traga el error con `let _`. La guarda no existe. Ficha T66."
+        },
+        {
+          "id": "hilos/pagina-sin-lectura",
+          "esperado": "sólo escritura aceptado",
+          "observado": "PROT_WRITE sin READ → argumento inválido (-22)",
+          "resultado": "NEGATIVO",
+          "nota": "No hay forma de marcar una página como inaccesible: `mprotect` exige PROT_READ. Es la misma forma que el hallazgo de W+X — soso no tiene protecciones de página más allá de la escritura."
+        },
+        {
+          "id": "temporizadores/dormir-no-vuelve-antes",
+          "esperado": "al menos 250 ms",
+          "observado": "al menos 250 ms",
+          "resultado": "pasa",
+          "nota": "Un `setTimeout` que vuelve antes de tiempo es peor que uno que tarda."
+        },
+        {
+          "id": "temporizadores/el-reloj-no-retrocede",
+          "esperado": "0 retrocesos",
+          "observado": "0 retrocesos",
+          "resultado": "pasa",
+          "nota": "Mil lecturas seguidas."
+        },
+        {
+          "id": "temporizadores/el-reloj-de-pared-avanza",
+          "esperado": "avanzó",
+          "observado": "avanzó",
+          "resultado": "pasa",
+          "nota": "Que `clock_gettime` exista no garantiza que avance; se mide con 1,1 s en medio."
+        }
+      ],
+      "hallazgo": "Hilos y relojes cumplen lo que un runtime espera: `join` espera de verdad, dormir no vuelve antes, el monotónico no retrocede y el de pared avanza. Lo que no existe es la **guarda de pila**: `mprotect` no acepta `prot=0` ni quitar la lectura, así que no hay forma de hacer una página inaccesible. Desbordar la pila de un hilo no falla — escribe en lo que haya debajo, y el síntoma aparece lejos y tarde.",
+      "para_t34": [
+        {
+          "hueco": "no existe PROT_NONE: no se puede marcar una página como inaccesible",
+          "archivos": "crates/soso-abi/src/lib.rs, kernel/src/task/syscall.rs (sys_mprotect)",
+          "reproduccion": "soso-agent-probe hilos, caso hilos/pagina-sin-lectura"
+        }
+      ],
+      "defecto_abierto": "T66 — `libsoso::thread::spawn` dice instalar una guarda de pila y se traga el error con `let _`. Es un defecto de hoy, separable de la ampliación del ABI.",
+      "evidencia": "target/self-improvement/tasks/T33/hilos.txt"
     },
     {
-      "id": "temporizadores",
-      "capacidad": "temporizadores y reloj monotónico",
-      "estado": "pendiente",
-      "pase": "siguiente"
-    },
-    {
-      "id": "tcp",
-      "capacidad": "TCP con cierre y reconexión",
-      "estado": "pendiente",
-      "pase": "siguiente"
-    },
-    {
-      "id": "senales",
-      "capacidad": "instalar un manejador de señal",
-      "estado": "pendiente",
-      "pase": "siguiente",
-      "nota": "Hay SYS_KILL y números de señal, pero no forma de reaccionar. La sonda tiene que distinguir «se puede señalar» de «se puede manejar»."
+      "id": "canales",
+      "capacidad": "tuberías con EOF y TCP con cierre y reconexión",
+      "por_que": "Las dos son de lo mismo: saber cuándo se acabó. Un agente lee la salida de una herramienta por una tubería y habla con el modelo por un socket; confundir «todavía no hay datos» con «ya no va a haber más» es esperar de más o truncar la respuesta.",
+      "estado": "medida",
+      "resultado": "pasa entera",
+      "modulo": "user/soso-agent-probe/src/sondas/canales.rs",
+      "casos": [
+        {
+          "id": "canales/salida-grande-intacta",
+          "esperado": "65536 bytes en orden",
+          "observado": "65536 bytes en orden",
+          "resultado": "pasa",
+          "nota": "Dieciséis veces el búfer de la tubería, así que el escritor se bloquea varias veces. Se comprueba **contenido y no sólo longitud**, con un patrón que cambia con la posición: una tubería que pierde un trozo da la longitud mal, pero una que reordena la da bien."
+        },
+        {
+          "id": "canales/eof-cuando-el-escritor-muere",
+          "esperado": "EOF",
+          "observado": "EOF",
+          "resultado": "pasa",
+          "nota": "El hijo sale **sin cerrar**, que es lo que pasa cuando una herramienta revienta. Sin EOF ahí, el lector esperaría para siempre a un programa que ya no está."
+        },
+        {
+          "id": "canales/tcp-dos-conexiones-al-mismo-destino",
+          "esperado": "hola-0 y hola-1",
+          "observado": "hola-0 y hola-1",
+          "resultado": "pasa",
+          "nota": "**Dos** seguidas al mismo destino a propósito: con una sola no se ve el fallo del puerto local por índice de ranura, donde la segunda moría en TIME_WAIT."
+        }
+      ],
+      "hallazgo": "Las dos cumplen. Una salida de 64 KiB cruza la tubería entera y en orden pese a bloquear al escritor varias veces; el lector ve EOF cuando el escritor **muere** sin cerrar; y dos conexiones seguidas al mismo destino funcionan las dos.",
+      "evidencia": "target/self-improvement/tasks/T33/canales.txt"
     }
-  ]
+  ],
+  "resumen": {
+    "medidas": 7,
+    "total": 7,
+    "con_negativos": [
+      "compartir",
+      "hilos"
+    ],
+    "defectos_abiertos": [
+      "T65 — O_EXCL no excluye con el primer descriptor abierto",
+      "T66 — la guarda de pila de los hilos no existe y el código finge que sí"
+    ],
+    "nota": "Todas las capacidades que T32 identificó están medidas. Lo negativo está en «compartir» (el modelo de ficheros es por descriptor, no por inodo) y en la guarda de pila de «hilos»."
+  }
 }

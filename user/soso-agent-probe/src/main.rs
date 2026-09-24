@@ -37,6 +37,10 @@ uso: soso-agent-probe <sonda> [fase]
   archivos-fase2        reabrir y comparar           (después de reiniciar)
   ejecutable            escribir código máquina en una página y llamarlo
   compartir             varios descriptores sobre el mismo fichero (lo de SQLite)
+  senales               matar un hijo, distinguir la muerte, tubería sin lector
+  salidas               stdout/stderr separados, código de salida, entorno, cwd
+  hilos                 hilos, join, guarda de pila y temporizadores
+  canales               tubería con salida grande y EOF, TCP con reconexión
 
   codigos: 0 todo bien, 1 alguna capacidad falló, 2 uso incorrecto";
 
@@ -48,6 +52,19 @@ fn main(args: &[String]) -> u8 {
         "archivos-fase2" => sondas::archivos::fase2(),
         "ejecutable" => sondas::ejecutable::ejecutar(),
         "compartir" => sondas::compartir::ejecutar(),
+        "senales" => sondas::senales::ejecutar(),
+        "salidas" => sondas::salidas::ejecutar(),
+        "hilos" => sondas::hilos::ejecutar(),
+        "canales" => sondas::canales::ejecutar(),
+        // Auxiliares: la sonda de señales se lanza a sí misma para tener
+        // hijos de verdad a los que matar.
+        "dormir" => return sondas::senales::dormir(args.get(1).map(|s| s.as_str()).unwrap_or("0")),
+        "salir" => return sondas::senales::salir(args.get(1).map(|s| s.as_str()).unwrap_or("0")),
+        "gritar" => return sondas::salidas::gritar(),
+        "eco-entorno" => return sondas::salidas::eco_entorno(),
+        "eco-cwd" => return sondas::salidas::eco_cwd(),
+        "chorro" => return sondas::canales::chorro(),
+        "eco-tcp" => return sondas::canales::eco_tcp(),
         "" | "-h" | "--help" => {
             println!("{USO}");
             return if sonda.is_empty() { 2 } else { 0 };
@@ -129,12 +146,16 @@ fn esc(s: &str) -> String {
     out
 }
 
-/// Nombre legible de un errno, o el número si no se conoce.
+/// Nombre legible de un errno **y** su número.
+///
+/// El número va siempre: `errno_str` devuelve «error desconocido» para lo que
+/// no conoce, y una sonda que informa eso no ha medido nada. Con el número, un
+/// código sin nombre sigue siendo un dato.
 pub fn errno(rc: i64) -> String {
     if rc >= 0 {
         return format!("{rc}");
     }
-    String::from(libsoso::errno_str(rc))
+    format!("{} ({rc})", libsoso::errno_str(rc))
 }
 
 /// Hex de unos bytes, para que un fallo binario se pueda leer en la consola.

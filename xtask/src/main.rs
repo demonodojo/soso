@@ -9,6 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
+#[cfg(test)]
+#[path = "../../kernel/src/mm/heap_scan.rs"]
+mod heap_scan;
+
 fn main() {
     as_user::restore_invoking_env();
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "run".into());

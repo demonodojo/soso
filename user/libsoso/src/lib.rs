@@ -355,6 +355,10 @@ pub fn errno_str(e: i64) -> &'static str {
         x if x == abi::ENOTSUP => "no soportado",
         x if x == abi::ETIMEDOUT => "timeout",
         x if x == abi::ENOTCONN => "sin red",
+        // Escribir en una tubería cuyo lector cerró. Faltaba en esta tabla, y
+        // sin el nombre la sonda de T33 informaba «error desconocido» de algo
+        // que soso hace **bien**: devolver EPIPE en vez de matar al escritor.
+        x if x == abi::EPIPE => "la tubería no tiene lector",
         // No es «no tienes permiso»: es que ahora mismo eso no se toca,
         // porque hay una actualización armada sobre esas rutas.
         x if x == abi::EROFS => "hay una actualización en curso; esa ruta no se toca hasta reiniciar",

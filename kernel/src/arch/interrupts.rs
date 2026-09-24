@@ -461,6 +461,7 @@ extern "sysv64" fn kernel_pf_panic_shim(addr: u64, _: u64) -> u64 {
     );
     #[cfg(feature = "lxdde")]
     crate::lxdde::avisar_kmalloc_en_pf();
+    crate::mm::heap::localizar_en_pf(addr);
     panic!(
         "EXCEPTION: page fault at {addr:#x} rip={rip:#x} rsp={rsp:#x} [rsp]={ret:#x} cs={cs:#x} err={err:#x}"
     );
