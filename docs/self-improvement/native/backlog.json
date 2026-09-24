@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "descripcion": "Backlog del port (T34). Cada N-xxx sale de una carencia **medida** en T33 o inventariada en T32, con archivos responsables y la sonda que debe pasar.",
+  "actualizado": "2026-09-24",
+  "fuentes": [
+    "docs/self-improvement/native/opencode-deps.md (T32)",
+    "docs/self-improvement/native/probes.json (T33)"
+  ],
+  "ruta_elegida": {
+    "id": "sustrato-primero",
+    "nombre": "Sustrato POSIX primero; el runtime después, y sin módulos nativos",
+    "por_que": "Todas las rutas de port pasan por lo mismo: un programa escrito contra POSIX tiene que encontrarse POSIX. T33 midió que varias semánticas de soso **no lo son**, y ninguna se arregla en el runtime: el modelo de ficheros es por descriptor, no hay PROT_NONE, el spawn no lleva cwd. Eso va primero porque lo necesita cualquier cosa que se ponga encima, incluido un agente nativo que no sea OpenCode.",
+    "alternativas_descartadas": [
+      {
+        "ruta": "Portar Bun tal cual",
+        "por_que_no": "Cuatro carencias **medidas o inventariadas**, no opiniones: no hay `dlopen`, así que ningún `.node` es cargable ni recompilándolo (node-pty, @parcel/watcher, tree-sitter); no hay pty ni `inotify`, que son dependencias del núcleo de OpenCode; y el modelo de ficheros impide SQLite, sobre el que se apoya `bun:sqlite`. Además `opencode run` importa el TUI en el módulo (T32), así que «modo sin TUI» no se consigue eligiendo comando."
+      },
+      {
+        "ruta": "Un motor JS pequeño sin JIT (QuickJS y parecidos)",
+        "por_que_no": "Evita `dlopen` si se enlaza estático, y el JIT no hace falta —aunque T33 midió que **sí** sería viable: hay W+X con recompilación—. Pero el código de OpenCode está escrito contra las API de Bun (`Bun.spawn`, `bun:sqlite`, `Bun.stdin`) y contra ~90 paquetes de npm; habría que implementar esa superficie. No elimina ninguna de las fichas de sustrato: sigue necesitando el modelo de ficheros."
+      },
+      {
+        "ruta": "No portar: agente nativo en Rust que reutiliza el protocolo",
+        "por_que_no": "No es una ruta de port, así que queda fuera de lo que T34 tiene que elegir. Se anota porque **el propio plan ya la está construyendo** —`soso-llm` sirve la API (T16–T19), `soso-llm-core::conversation` renderiza y parsea llamadas a herramientas (T06–T12), `soso-improve` coordina tareas (T23–T24)— y porque las sondas de T33 dicen que las herramientas de un agente (leer, escribir, editar, buscar, lanzar procesos con plazo) **ya funcionan**. Elegir entre portar y reimplementar es decisión de plan, no de esta ficha; se deja dicho con la evidencia delante."
+      }
+    ],
+    "que_cambiaria_la_eleccion": "Que apareciera `dlopen` y una capa POSIX de ficheros, o que el objetivo dejara de ser «OpenCode» y pasara a ser «un agente». Lo primero es N-001 y N-005; lo segundo es una decisión del usuario, como la de T14."
+  },
+  "cierres": {
+    "sustrato": "N-001 … N-004: lo que cualquier programa POSIX necesita y hoy no encuentra.",
+    "runtime-arranca": "N-005 … N-007: cargar y ejecutar código ajeno (dlopen o enlazado estático) y su libc.",
+    "persistencia": "N-001 lo desbloquea; sin él no hay SQLite ni base de datos alguna.",
+    "herramientas": "N-008 … N-010: lo que el agente invoca (`bash`, `rg`) y hoy no existe en soso.",
+    "http": "Cubierto: `crates/soso-http` sirve y consume TLS (T16–T19). No genera fichas."
+  },
+  "fichas": [
+    {
+      "id": "N-001",
+      "titulo": "Modelo de ficheros por inodo: los descriptores comparten y la escritura parcial no trunca",
+      "estado": "lista",
+      "prioridad": 1,
+      "depende_de": [],
+      "aplica_en": "soso",
+      "archivos": [
+        "kernel/src/task/syscall.rs",
+        "kernel/src/task/mod.rs"
+      ],
+      "sonda": "compartir/visibilidad-entre-descriptores, compartir/escritura-conserva-el-resto, compartir/dos-escritores-zonas-distintas",
+      "origen": "T33 pase 3",
+      "ficha": "native/N-001.md"
+    },
+    {
+      "id": "N-002",
+      "titulo": "PROT_NONE: poder marcar una página como inaccesible",
+      "estado": "lista",
+      "prioridad": 2,
+      "depende_de": [],
+      "aplica_en": "soso",
+      "archivos": [
+        "crates/soso-abi/src/lib.rs",
+        "kernel/src/task/syscall.rs"
+      ],
+      "sonda": "hilos/pagina-sin-lectura, hilos/guarda-de-pila-se-puede-instalar",
+      "origen": "T33 pase 6",
+      "ficha": "native/N-002.md"
+    },
+    {
+      "id": "N-003",
+      "titulo": "Directorio de trabajo por spawn",
+      "estado": "lista",
+      "prioridad": 3,
+      "depende_de": [],
+      "aplica_en": "soso",
+      "archivos": [
+        "crates/soso-abi/src/lib.rs",
+        "kernel/src/task/syscall.rs",
+        "user/libsoso/src/sys.rs"
+      ],
+      "sonda": "cwd/el-hijo-hereda-el-del-padre (ampliada con un cwd explícito)",
+      "origen": "T33 pase 5",
+      "ficha": "native/N-003.md"
+    },
+    {
+      "id": "N-004",
+      "titulo": "Bloqueo de ficheros: flock o equivalente",
+      "estado": "pendiente",
+      "prioridad": 4,
+      "depende_de": [
+        "N-001"
+      ],
+      "aplica_en": "soso",
+      "archivos": [
+        "crates/soso-abi/src/lib.rs",
+        "kernel/src/task/syscall.rs"
+      ],
+      "sonda": "sin sonda posible hoy: la syscall no existe. El sustituto, O_EXCL, falla su propio caso (T65)",
+      "origen": "T32 + T33 pase 3",
+      "nota": "Detrás de N-001: bloquear un fichero que no se comparte no significa nada."
+    },
+    {
+      "id": "N-005",
+      "titulo": "Carga de código ajeno: dlopen o enlazado estático acreditado",
+      "estado": "experimento",
+      "prioridad": 5,
+      "depende_de": [],
+      "aplica_en": "soso",
+      "archivos": [
+        "kernel/src/task/elf.rs",
+        "crates/soso-abi/src/lib.rs"
+      ],
+      "sonda": "sin sonda: hay que decidir antes si se hace con dlopen o enlazando estático",
+      "origen": "T32",
+      "nota": "Ficha de **experimento** con resultado binario (paso 4 de T34): ¿se puede enlazar estáticamente todo lo nativo que necesita un runtime, o hace falta carga dinámica? Sus consumidores quedan condicionados."
+    },
+    {
+      "id": "N-006",
+      "titulo": "Capa libc/POSIX mínima para código C ajeno",
+      "estado": "pendiente",
+      "prioridad": 6,
+      "depende_de": [
+        "N-001",
+        "N-002",
+        "N-003",
+        "N-005"
+      ],
+      "aplica_en": "soso",
+      "archivos": [
+        "por decidir en N-005"
+      ],
+      "sonda": "las siete de T33, ejecutadas desde C en vez de desde Rust",
+      "origen": "T32",
+      "nota": "No se descompone hasta que N-005 diga cómo se carga el código."
+    },
+    {
+      "id": "N-007",
+      "titulo": "Pseudo-terminales: pty, termios e ioctl",
+      "estado": "pendiente",
+      "prioridad": 7,
+      "depende_de": [
+        "N-006"
+      ],
+      "aplica_en": "soso",
+      "archivos": [
+        "crates/soso-abi/src/lib.rs",
+        "kernel/src/task/"
+      ],
+      "sonda": "sin sonda: la capacidad no existe",
+      "origen": "T32",
+      "nota": "Lo necesitan `@lydell/node-pty` y `bun-pty`, que son del núcleo de OpenCode, no opcionales."
+    },
+    {
+      "id": "N-008",
+      "titulo": "Vigilancia de ficheros: inotify o equivalente",
+      "estado": "pendiente",
+      "prioridad": 8,
+      "depende_de": [
+        "N-001"
+      ],
+      "aplica_en": "soso",
+      "archivos": [
+        "crates/soso-abi/src/lib.rs",
+        "kernel/src/vfs/"
+      ],
+      "sonda": "sin sonda: la capacidad no existe",
+      "origen": "T32",
+      "nota": "Lo necesita `@parcel/watcher`."
+    },
+    {
+      "id": "N-009",
+      "titulo": "Sustituto de ripgrep con semántica declarada",
+      "estado": "pendiente",
+      "prioridad": 9,
+      "depende_de": [],
+      "aplica_en": "soso",
+      "archivos": [
+        "user/coreutils/src/bin/grep.rs"
+      ],
+      "sonda": "por escribir: comparar con la salida de ripgrep sobre un árbol fijo",
+      "origen": "T32",
+      "nota": "OpenCode **descarga ripgrep en ejecución** (binario x86-64 Linux). En soso no hay ni binario ni quien lo compile; el `grep` propio tiene otra semántica y hay que declarar cuál."
+    },
+    {
+      "id": "N-010",
+      "titulo": "Sustituto de bash para la herramienta `bash`",
+      "estado": "pendiente",
+      "prioridad": 10,
+      "depende_de": [
+        "T64"
+      ],
+      "aplica_en": "soso",
+      "archivos": [
+        "user/sosh/src/main.rs"
+      ],
+      "sonda": "por escribir",
+      "origen": "T32",
+      "nota": "35 apariciones de `\"bash\"` en el código de OpenCode. `sosh` no es bash y no pretende serlo; T64 le dio comillas, pero falta decidir qué subconjunto se promete."
+    },
+    {
+      "id": "N-011",
+      "titulo": "`kill` devuelve 0 como POSIX, o el shim lo traduce",
+      "estado": "pendiente",
+      "prioridad": 11,
+      "depende_de": [
+        "N-006"
+      ],
+      "aplica_en": "shim",
+      "archivos": [
+        "kernel/src/task/mod.rs",
+        "crates/soso-abi/src/lib.rs"
+      ],
+      "sonda": "senales/kill-devuelve-cuantos-no-cero",
+      "origen": "T33 pase 4",
+      "nota": "**No es un defecto**: devolver cuántos procesos se señalaron es más informativo. Sólo importa si hay una capa de compatibilidad, y entonces se traduce ahí, no en el kernel."
+    }
+  ],
+  "defectos_de_hoy_aparte": [
+    {
+      "ficha": "T65",
+      "titulo": "O_EXCL no excluye con el primer descriptor abierto",
+      "por_que_aparte": "No es un hueco del port: es la única exclusión mutua que tiene soso y de ella depende el contrato durable de T46."
+    },
+    {
+      "ficha": "T66",
+      "titulo": "La guarda de pila de los hilos no existe y el código finge que sí",
+      "por_que_aparte": "La ampliación del ABI es N-002; que `thread::spawn` calle el error es un defecto de hoy y se arregla aparte."
+    }
+  ]
+}

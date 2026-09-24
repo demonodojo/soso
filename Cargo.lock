@@ -1277,6 +1277,7 @@ dependencies = [
  "soso-update-core",
  "sosofs",
  "sosomodel",
+ "talc",
 ]
 
 [[package]]

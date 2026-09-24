@@ -85,7 +85,22 @@ signos. De ahí salen dos defectos abiertos, **[T65](T65-o-excl-no-excluye.md)**
 y **[T66](T66-guarda-de-pila-fingida.md)**, y cinco huecos listos para
 **[T34](T34-tickets-port.md)**, que es la recomendada ahora.
 
-**Lo que queda habilitado**: **[T34](T34-tickets-port.md)**, los defectos
+**[T34](T34-tickets-port.md) está completada** el mismo día, con
+[`native/backlog.json`](native/backlog.json) —11 fichas N-xxx, grafo acíclico—
+y las tres primeras redactadas. **La ruta elegida es «sustrato POSIX primero»**:
+un programa escrito contra POSIX tiene que encontrarse POSIX, y lo que T33 midió
+que no lo es no se arregla en el runtime. Portar Bun queda descartado por cuatro
+carencias medidas —sin `dlopen` ningún `.node` es cargable, faltan pty e
+`inotify`, y el modelo de ficheros impide SQLite—.
+
+**Y queda una decisión de plan sobre la mesa, como la de T14**: el backlog anota
+que la alternativa a portar es **un agente nativo en Rust que reutilice el
+protocolo** — que es lo que el plan ya está construyendo (`soso-llm`,
+`conversation`, `soso-improve`) y lo que las sondas de T33 dicen que ya
+funciona. Elegir entre las dos no es de esta ficha.
+
+**Lo que queda habilitado**: **[N-001](native/N-001.md)** (la primera del
+backlog y la de mayor riesgo), los defectos
 [T65](T65-o-excl-no-excluye.md) y [T66](T66-guarda-de-pila-fingida.md), y los
 inventarios [T36](T36-forja-trazabilidad.md) y
 [T38](T38-toolchain-inventario.md).
@@ -207,7 +222,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T33](T33-sondas-abi.md) | Crear sondas pequeñas para las capacidades requeridas | SI-6 | T32, T49 | Completada (7 sondas; abrió T65 y T66) |
 | [T65](T65-o-excl-no-excluye.md) | `O_EXCL` no excluye mientras el primer descriptor sigue abierto | SI-4 | — (deriva de T33) | Pendiente |
 | [T66](T66-guarda-de-pila-fingida.md) | La guarda de pila de los hilos no existe, y el código finge que sí | SI-4 | — (deriva de T33) | Pendiente |
-| [T34](T34-tickets-port.md) | Convertir huecos del port en fichas implementables | SI-6 | T32, T33 | Pendiente |
+| [T34](T34-tickets-port.md) | Convertir huecos del port en fichas implementables | SI-6 | T32, T33 | Completada (11 fichas N-xxx) |
 | [T35](T35-opencode-nativo.md) | Probar OpenCode nativo en modo no interactivo | SI-6 | T19, T34 | Pendiente |
 | [T36](T36-forja-trazabilidad.md) | Vincular fuentes, build y artefacto de Forja | SI-6 | T01 | Pendiente |
 | [T37](T37-mejora-nativa-forja.md) | Cerrar una mejora desde OpenCode nativo con build remoto | SI-6 | T22, T35, T36 | Pendiente |

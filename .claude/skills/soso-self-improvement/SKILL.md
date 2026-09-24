@@ -188,8 +188,16 @@ ficheros es **por descriptor, no por inodo** —mata SQLite— y **no hay
 protecciones de página** más allá de la escritura, lo que hace viable el JIT e
 imposible la guarda de pila.
 
-**Recomendada ahora: T34** (convertir en fichas N-xxx los cinco huecos que T33
-dejó con archivos y reproducción).
+**T34 cerrada**: `native/backlog.json` con 11 fichas N-xxx y ruta elegida
+—**sustrato POSIX primero**—; N-001/002/003 redactadas. Portar Bun descartado
+por carencias medidas (sin `dlopen`, sin pty/inotify, modelo de ficheros).
+
+**Recomendada ahora: N-001** (modelo de ficheros por inodo), la de mayor riesgo
+del backlog: su paso 1 es elegir forma y **medir** el coste en sosofs.
+
+**Decisión de plan pendiente**, como el no-go de T14: portar OpenCode o
+reimplementar el agente en Rust reutilizando el protocolo — lo que el plan ya
+construye y lo que T33 dice que ya funciona.
 
 También libres: los defectos **T65** (`O_EXCL` no excluye; afecta al contrato
 durable de T46) y **T66** (`thread::spawn` finge instalar una guarda de pila), y

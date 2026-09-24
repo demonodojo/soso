@@ -1181,7 +1181,7 @@
       "title": "Convertir huecos del port en fichas implementables",
       "milestone": "SI-6",
       "kind": "Especificación técnica basada en evidencia",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T32",
         "T33"
@@ -1189,17 +1189,34 @@
       "entry_conditions": [],
       "contract_sections": "C1, C5–C6",
       "context": [
-        "docs/SELF-HOSTING.md",
-        "crates/soso-abi/src/lib.rs",
-        "config/rust-soso/sys/pal/soso/mod.rs"
+        "docs/self-improvement/native/backlog.json",
+        "docs/self-improvement/native/N-001.md",
+        "docs/self-improvement/native/N-002.md",
+        "docs/self-improvement/native/N-003.md",
+        "docs/self-improvement/native/probes.json",
+        "docs/self-improvement/native/opencode-deps.md"
       ],
       "native_validation": {
         "status": "not_applicable",
         "requires": [
           "T35"
         ],
-        "evidence": [],
-        "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+        "evidence": [
+          "docs/self-improvement/native/backlog.json (11 fichas, grafo acíclico)",
+          "docs/self-improvement/native/N-001.md, N-002.md, N-003.md"
+        ],
+        "note": "Especificación: el backlog no se ejecuta, se ejecutan sus fichas. La función se acredita en T35."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T34.md",
+        "evidence": [
+          "docs/self-improvement/native/backlog.json",
+          "target/self-improvement/tasks/T34/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "N-001 (modelo de ficheros por inodo) es la primera y la de mayor riesgo: su paso 1 es elegir forma y medir el coste en sosofs, no implementar. Y queda sobre la mesa una decisión de plan, como la de T14: portar OpenCode o reimplementar el agente en Rust reutilizando el protocolo, que es lo que el plan ya construye y lo que las sondas de T33 dicen que ya funciona."
       }
     },
     {
