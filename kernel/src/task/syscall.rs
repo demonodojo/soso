@@ -217,6 +217,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_GETDENTS => sys_getdents(a1, a2, a3),
         abi::SYS_MKDIR => sys_mkdir(a1, a2),
         abi::SYS_UNLINK => sys_unlink(a1, a2),
+        abi::SYS_FLOCK => sys_flock(a1, a2),
         abi::SYS_SPAWN => sys_spawn(a1, a2, a3, a4),
         abi::SYS_WAIT => sys_wait(f),
         abi::SYS_SBRK => sys_sbrk(a1 as i64),
@@ -746,13 +747,35 @@ pub fn build_child_fds(stdio: [u64; 4]) -> Result<ChildStdio, i64> {
     })
 }
 
+/// Publica el contenido de la caché si este descriptor es el **último** sobre
+/// ese inodo, y suelta la referencia.
+///
+/// `pendiente` devuelve una copia en vez de escribir dentro del candado:
+/// publicar toca el VFS, y hacerlo con el candado de la caché cogido monta un
+/// abrazo mortal con cualquier otro camino que abra un fichero.
+fn volcar_si_es_el_ultimo(inode: u64) -> Result<(), i64> {
+    if super::fcache::refs(inode) <= 1 {
+        if let Some((dir, name, datos)) = super::fcache::pendiente(inode) {
+            let mtime = crate::time::wall_secs();
+            // `name` vacío significa que la entrada se creó por un camino que
+            // no conocía la ruta; publicar ahí escribiría en el sitio
+            // equivocado, así que se prefiere no publicar y que se vea.
+            if !name.is_empty() {
+                with_vfs(|| crate::vfs::create_file(dir, &name, &datos, mtime))?;
+                super::fcache::limpio(inode);
+            }
+        }
+    }
+    super::fcache::cerrar(inode);
+    Ok(())
+}
+
 /// Cierra un fd y aplica efectos secundarios (commit, pipes).
 pub fn drop_fd(fd: Fd) -> Result<(), i64> {
     match fd {
-        Fd::WriteBuf { dir, name, data, protegida, .. } => {
+        Fd::WriteBuf { inode, protegida, .. } => {
             sigue_pudiendo_publicar(protegida)?;
-            let mtime = crate::time::wall_secs();
-            with_vfs(|| crate::vfs::create_file(dir, &name, &data, mtime))?;
+            volcar_si_es_el_ultimo(inode)?;
         }
         Fd::StreamWrite {
             dir,
@@ -764,6 +787,13 @@ pub fn drop_fd(fd: Fd) -> Result<(), i64> {
         } => {
             sigue_pudiendo_publicar(protegida)?;
             flush_stream_write(dir, &name, &mut inode, &mut buf)?;
+        }
+        Fd::File { inode, .. } => {
+            // También un lector puede ser el último: si un escritor cerró
+            // mientras este descriptor seguía abierto, el contenido sucio
+            // todavía está en la caché y el que lo publica es quien apaga la
+            // luz. Sin esto, la escritura se perdía en silencio.
+            volcar_si_es_el_ultimo(inode)?;
         }
         Fd::PipeRead(id) => pipe::close_reader(id),
         Fd::PipeWrite(id) => pipe::close_writer(id),
@@ -871,16 +901,13 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
             console.write_bytes(data);
             Ok(len)
         }
-        Fd::WriteBuf { data: out, pos, .. } => {
+        Fd::WriteBuf { inode, pos, .. } => {
             const THRESH: usize = 16 * 1024 * 1024;
             if *pos + data.len() > THRESH {
                 convert_writebuf_to_stream(f, data)?;
                 return Ok(len);
             }
-            if *pos + data.len() > out.len() {
-                out.resize(*pos + data.len(), 0);
-            }
-            out[*pos..*pos + data.len()].copy_from_slice(data);
+            super::fcache::escribir(*inode, *pos, data).ok_or(-abi::EIO)?;
             *pos += data.len();
             Ok(len)
         }
@@ -998,9 +1025,10 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
         super::block_current(ctx_from_frame(f), State::WaitingTty { buf, len });
     }
     with_fd(fd, |f| match f {
-        Fd::File { data, pos, .. } => {
-            let n = dst.len().min(data.len().saturating_sub(*pos));
-            dst[..n].copy_from_slice(&data[*pos..*pos + n]);
+        Fd::File { inode, pos } => {
+            // Se lee de la caché, no de una copia del descriptor: por eso un
+            // lector abierto antes ve lo que escribe otro (N-001).
+            let n = super::fcache::leer(*inode, *pos, dst).ok_or(-abi::EIO)?;
             *pos += n;
             Ok(n as u64)
         }
@@ -1130,7 +1158,11 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
             // que es **una** transacción, igual que antes. Y si crece por
             // encima de 16 MiB, `convert_writebuf_to_stream` lo pasa a
             // streaming solo.
-            Fd::WriteBuf { dir, name, data, pos, protegida }
+            {
+                let ino = lookup.unwrap();
+                super::fcache::abrir(ino, dir, &name, || data);
+                Fd::WriteBuf { inode: ino, dir, name, pos, protegida }
+            }
         } else {
             Fd::StreamWrite {
                 dir,
@@ -1181,7 +1213,11 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
                 }
             } else {
                 let data = with_vfs(|| crate::vfs::read_file(ino))?;
-                Fd::File { inode: ino, data, pos: 0 }
+                {
+                    let (pdir, pname) = resolve_parent(&path).unwrap_or((0, String::new()));
+                    super::fcache::abrir(ino, pdir, &pname, || data);
+                    Fd::File { inode: ino, pos: 0 }
+                }
             }
         }
     };
@@ -1202,9 +1238,15 @@ fn sys_close(fd: u64) -> Result<u64, i64> {
 fn sys_seek(fd: u64, off: i64, whence: u64) -> Result<u64, i64> {
     with_fd(fd, |f| {
         let (pos, len) = match f {
-            Fd::File { data, pos, .. } => (pos, data.len()),
+            Fd::File { inode, pos } => {
+                let len = super::fcache::largo(*inode).unwrap_or(0);
+                (pos, len)
+            }
             Fd::LazyFile { size, pos, .. } => (pos, *size),
-            Fd::WriteBuf { data, pos, .. } => (pos, data.len()),
+            Fd::WriteBuf { inode, pos, .. } => {
+                let len = super::fcache::largo(*inode).unwrap_or(0);
+                (pos, len)
+            }
             Fd::StreamWrite { pos, buf, .. } => {
                 let len = *pos + buf.len();
                 (pos, len)
@@ -1351,6 +1393,15 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
         opts.args_len,
     )?;
     let env = read_spawn_env(opts.envp_ptr, opts.envp_count)?;
+    // N-003: directorio de trabajo del hijo. `cwd_len == 0` hereda el del
+    // padre. Un sosh anterior a este campo escribe 16 bytes menos: el kernel
+    // lee basura de la pila y `user_str` responde ENAMETOOLONG en cada orden
+    // (`ls` incluido). Una longitud por encima de PATH_MAX no es un cwd.
+    let cwd = if opts.cwd_len == 0 || opts.cwd_len > super::path::PATH_MAX as u64 {
+        None
+    } else {
+        Some(user_str(opts.cwd_ptr, opts.cwd_len)?)
+    };
     let stdio = [
         opts.stdin_fd,
         opts.stdout_fd,
@@ -1367,7 +1418,15 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
     } else {
         super::with_current(|p| p.console)
     };
-    super::spawn_console_io(path, &args, super::current_pid(), console, stdio, &env)
+    super::spawn_console_io_cwd(
+        path,
+        &args,
+        super::current_pid(),
+        console,
+        stdio,
+        &env,
+        cwd.as_deref(),
+    )
 }
 
 fn read_spawn_env(envp_ptr: u64, envp_count: u64) -> Result<alloc::string::String, i64> {
@@ -1553,7 +1612,9 @@ fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
                 .and_then(|s| s.as_ref())
                 .ok_or(-abi::EBADF)?;
             match slot {
-                Fd::File { inode, data, .. } => Ok((*inode, data.len() as u64)),
+                Fd::File { inode, .. } => {
+                    Ok((*inode, super::fcache::largo(*inode).unwrap_or(0) as u64))
+                }
                 Fd::LazyFile { inode, size, .. } => Ok((*inode, *size as u64)),
                 _ => Err(-abi::EBADF),
             }
@@ -1831,9 +1892,9 @@ fn sys_disk_write(id: u64, lba: u64, buf: u64, len: u64) -> Result<u64, i64> {
 #[cfg(feature = "drv-live-disk")]
 fn convert_writebuf_to_stream(f: &mut Fd, data: &[u8]) -> Result<(), i64> {
     let Fd::WriteBuf {
+        inode,
         dir,
         name,
-        data: out,
         pos,
         protegida,
     } = f
@@ -1844,8 +1905,14 @@ fn convert_writebuf_to_stream(f: &mut Fd, data: &[u8]) -> Result<(), i64> {
     let name_val = name.clone();
     let protegida_val = *protegida;
     let written = *pos;
-    let mut prefix = core::mem::take(out);
+    let ino_val = *inode;
+    // El prefijo vive en la caché desde N-001. Se saca una copia y se suelta la
+    // entrada: a partir de aquí el fichero lo lleva `StreamWrite`.
+    let mut prefix = super::fcache::pendiente(ino_val)
+        .map(|(_, _, d)| d)
+        .unwrap_or_default();
     prefix.truncate(written);
+    super::fcache::cerrar(ino_val);
     let mtime = crate::time::wall_secs();
     let inode = if prefix.is_empty() {
         None
@@ -2630,23 +2697,31 @@ fn sys_dup2(oldfd: u64, newfd: u64) -> Result<u64, i64> {
 
 fn clone_fd(f: &Fd) -> Fd {
     match f {
-        Fd::File { inode, data, pos } => Fd::File {
-            inode: *inode,
-            data: data.clone(),
-            pos: *pos,
-        },
+        Fd::File { inode, pos } => {
+            // El hijo comparte el contenido con el padre: una referencia más,
+            // no una copia. Antes se clonaba el `Vec` entero y los dos
+            // descriptores quedaban desconectados.
+            super::fcache::abrir(*inode, 0, "", Vec::new);
+            Fd::File {
+                inode: *inode,
+                pos: *pos,
+            }
+        }
         Fd::LazyFile { inode, size, pos } => Fd::LazyFile {
             inode: *inode,
             size: *size,
             pos: *pos,
         },
-        Fd::WriteBuf { dir, name, data, pos, protegida } => Fd::WriteBuf {
-            dir: *dir,
-            name: name.clone(),
-            data: data.clone(),
-            pos: *pos,
-            protegida: *protegida,
-        },
+        Fd::WriteBuf { inode, dir, name, pos, protegida } => {
+            super::fcache::abrir(*inode, *dir, name, Vec::new);
+            Fd::WriteBuf {
+                inode: *inode,
+                dir: *dir,
+                name: name.clone(),
+                pos: *pos,
+                protegida: *protegida,
+            }
+        }
         Fd::StreamWrite {
             dir,
             name,
@@ -2751,7 +2826,8 @@ fn sys_fstat(fd: u64, out: u64) -> Result<u64, i64> {
     // SSH a medio drenar — parecía una avería de virtio y era un interbloqueo.
     let stat = with_fd(fd, |slot| {
         let stat = match slot {
-            Fd::File { inode, data, .. } => {
+            Fd::File { inode, .. } => {
+                let data = alloc::vec![0u8; super::fcache::largo(*inode).unwrap_or(0)];
                 let st = with_vfs(|| crate::vfs::stat_inode(*inode))?;
                 abi::Stat {
                     ino: *inode,
@@ -2771,7 +2847,14 @@ fn sys_fstat(fd: u64, out: u64) -> Result<u64, i64> {
                     _pad: [0; 7],
                 }
             }
-            Fd::WriteBuf { data, .. } | Fd::StreamWrite { buf: data, .. } => abi::Stat {
+            Fd::WriteBuf { inode, .. } => {
+                let len = super::fcache::largo(*inode).unwrap_or(0);
+                abi::Stat {
+                    size: len as u64,
+                    ..abi::Stat::default()
+                }
+            }
+            Fd::StreamWrite { buf: data, .. } => abi::Stat {
                 ino: 0,
                 size: data.len() as u64,
                 mtime: crate::time::wall_secs(),
@@ -2804,12 +2887,52 @@ fn sys_utime(path_ptr: u64, path_len: u64, mtime: u64) -> Result<u64, i64> {
     Ok(0)
 }
 
+/// Cerrojo consultivo sobre un fichero abierto (N-004).
+///
+/// Consultivo quiere decir que **no impide** leer ni escribir a quien no lo
+/// pide: coordina a los que colaboran. Es lo que necesita una base de datos, y
+/// es lo único que tiene sentido sin cambiar todos los caminos de E/S.
+///
+/// Sólo sobre ficheros que están en la caché por inodo, que es donde vive lo
+/// compartido — sobre un `LazyFile` o un fichero en creación no hay nada que
+/// coordinar todavía, y se dice con `EINVAL` en vez de fingir que se tomó.
+fn sys_flock(fd: u64, op: u64) -> Result<u64, i64> {
+    let ino = with_fd(fd, |f| match f {
+        Fd::File { inode, .. } => Ok(*inode),
+        Fd::WriteBuf { inode, .. } => Ok(*inode),
+        _ => Err(-abi::EINVAL),
+    })?;
+    let pid = super::current_pid();
+    let modo = op & !abi::LOCK_NB;
+    if modo == abi::LOCK_UN {
+        super::fcache::desbloquear(ino, pid);
+        return Ok(0);
+    }
+    if modo != abi::LOCK_SH && modo != abi::LOCK_EX {
+        return Err(-abi::EINVAL);
+    }
+    // Esperar no está implementado. Decirlo con `ENOSYS` es mejor que aceptar
+    // la petición y devolver al momento: quien pide un cerrojo bloqueante y
+    // recibe uno que no bloquea corre sin saberlo.
+    if op & abi::LOCK_NB == 0 {
+        return Err(-abi::ENOSYS);
+    }
+    super::fcache::bloquear(ino, pid, modo == abi::LOCK_EX)
+        .map(|_| 0)
+        .map_err(|_| -abi::EAGAIN)
+}
+
 fn sys_fsync(fd: u64) -> Result<u64, i64> {
     with_fd(fd, |slot| {
         match slot {
-            Fd::WriteBuf { dir, name, data, .. } => {
-                let mtime = crate::time::wall_secs();
-                with_vfs(|| crate::vfs::create_file(*dir, name, data, mtime))?;
+            Fd::WriteBuf { inode, .. } => {
+                // `fsync` publica aunque queden descriptores abiertos: el que
+                // lo pide quiere los bytes en disco ahora.
+                if let Some((dir, name, datos)) = super::fcache::pendiente(*inode) {
+                    let mtime = crate::time::wall_secs();
+                    with_vfs(|| crate::vfs::create_file(dir, &name, &datos, mtime))?;
+                    super::fcache::limpio(*inode);
+                }
             }
             Fd::StreamWrite {
                 dir,
@@ -2931,7 +3054,11 @@ fn sys_pwrite(fd: u64, buf: u64, len: u64, offset: u64) -> Result<u64, i64> {
     }
     let data = user_slice(buf, len)?;
     with_fd(fd, |f| match f {
-        Fd::WriteBuf { data: out, .. } | Fd::StreamWrite { buf: out, .. } => {
+        Fd::WriteBuf { inode, .. } => {
+            super::fcache::escribir(*inode, offset as usize, data).ok_or(-abi::EIO)?;
+            Ok(len)
+        }
+        Fd::StreamWrite { buf: out, .. } => {
             let end = offset
                 .checked_add(len)
                 .ok_or(-abi::EINVAL)? as usize;
@@ -2941,14 +3068,8 @@ fn sys_pwrite(fd: u64, buf: u64, len: u64, offset: u64) -> Result<u64, i64> {
             out[offset as usize..end].copy_from_slice(data);
             Ok(len)
         }
-        Fd::File { data: out, .. } => {
-            let end = offset
-                .checked_add(len)
-                .ok_or(-abi::EINVAL)? as usize;
-            if end > out.len() {
-                out.resize(end, 0);
-            }
-            out[offset as usize..end].copy_from_slice(data);
+        Fd::File { inode, .. } => {
+            super::fcache::escribir(*inode, offset as usize, data).ok_or(-abi::EIO)?;
             Ok(len)
         }
         _ => Err(-abi::EBADF),

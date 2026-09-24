@@ -11,6 +11,7 @@
 pub mod addrspace;
 pub mod argv;
 pub mod elf;
+pub mod fcache;
 pub mod futex;
 pub mod mmap;
 pub mod path;
@@ -177,14 +178,16 @@ const _: () = {
 /// Descriptores de fichero.
 pub enum Fd {
     Tty,
-    /// Fichero pequeño cargado entero al abrir.
-    File { inode: u64, data: Vec<u8>, pos: usize },
+    /// Fichero pequeño. El contenido vive en [`fcache`], no aquí: así dos
+    /// descriptores del mismo inodo se ven entre sí (N-001).
+    File { inode: u64, pos: usize },
     /// Fichero grande: lectura parcial bajo demanda.
     LazyFile { inode: u64, size: usize, pos: usize },
     WriteBuf {
+        /// Inodo del fichero, que es la clave en [`fcache`].
+        inode: u64,
         dir: u64,
         name: String,
-        data: Vec<u8>,
         pos: usize,
         /// La ruta la administra una release (ver `txnlock`). Se decide al
         /// abrir, cuando todavía se tiene la ruta entera, y se comprueba otra
@@ -852,6 +855,25 @@ pub fn spawn_console_io(
     stdio: [u64; 4],
     env: &str,
 ) -> Result<u64, i64> {
+    spawn_console_io_cwd(path, argv, parent, console, stdio, env, None)
+}
+
+/// Como [`spawn_console_io`], con directorio de trabajo explícito (N-003).
+///
+/// `cwd = None` hereda el del padre. Con `Some`, el hijo arranca ahí **sin que
+/// el padre tenga que hacer `chdir`** — que es del proceso y no de la llamada,
+/// así que dos herramientas en directorios distintos no podían lanzarse a la
+/// vez sin serializarlas.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_console_io_cwd(
+    path: &str,
+    argv: &[String],
+    parent: u64,
+    console: Console,
+    stdio: [u64; 4],
+    env: &str,
+    cwd_pedido: Option<&str>,
+) -> Result<u64, i64> {
     use soso_abi as abi;
     let total_argv: usize = argv.iter().map(|s| s.len()).sum();
     if total_argv > 3000 || argv.len() > 256 {
@@ -885,13 +907,31 @@ pub fn spawn_console_io(
     if needs_parent && current_pid() == 0 {
         return Err(-abi::EINVAL);
     }
-    let cwd = {
+    let cwd_padre = {
         let procs = PROCS.lock();
         procs
             .iter()
             .find(|p| p.pid == parent)
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| String::from("/"))
+    };
+    // El directorio pedido se resuelve contra el del padre si es relativo, y
+    // **tiene que existir**: lanzar al hijo en otro sitio porque el pedido no
+    // estaba sería la clase de sorpresa que se paga tarde.
+    let cwd = match cwd_pedido {
+        None => cwd_padre,
+        Some(p) => {
+            // `abs_path` es el mismo normalizador que usa `resolve_user_path`:
+            // una ruta relativa se resuelve contra el cwd del **padre**, que es
+            // lo que espera quien llama.
+            let abs = path::abs_path(&cwd_padre, p)?;
+            let ino = crate::vfs::resolve(&abs).map_err(|_| -abi::ENOENT)?;
+            let st = crate::vfs::stat_inode(ino).map_err(|_| -abi::ENOENT)?;
+            if st.file_type != sosofs::layout::FT_DIR {
+                return Err(-abi::ENOTDIR);
+            }
+            abs
+        }
     };
     let (parent_pgid, parent_sid) = {
         let procs = PROCS.lock();
@@ -1088,7 +1128,8 @@ pub fn exit_current(code: u8) -> ! {
         let join_pml4 = procs[idx].space.as_ref().map(|s| s.pml4_phys());
         if is_thread {
             futex::forget_pid(pid);
-            syscall::close_all_fds(&mut procs[idx].fds);
+            fcache::soltar_todos(pid);
+        syscall::close_all_fds(&mut procs[idx].fds);
             space = procs.remove(idx).space;
             crate::arch::percpu::set_current_pid(0);
             drop(procs);
@@ -1105,6 +1146,9 @@ pub fn exit_current(code: u8) -> ! {
             schedule();
         }
         futex::forget_pid(pid);
+        // Los cerrojos mueren con su dueño: uno que sobrevive al proceso que
+        // lo cogió no es un candado, es un bloqueo (N-004).
+        fcache::soltar_todos(pid);
         syscall::close_all_fds(&mut procs[idx].fds);
         let parent = procs[idx].parent;
         let padre_esperando = procs

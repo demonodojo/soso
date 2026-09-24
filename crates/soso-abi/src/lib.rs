@@ -353,6 +353,26 @@ pub const SYS_READ_TIMEOUT: u64 = 32;
 pub const FUTEX_WAIT: u64 = 0;
 pub const FUTEX_WAKE: u64 = 1;
 
+/// Cerrojo consultivo sobre un fichero abierto: `(fd, op)` (N-004).
+///
+/// Es un syscall **nuevo**, no un cambio de uno existente: añadir no obliga a
+/// tocar `ABI_VERSION`, que se compara por igualdad exacta y dejaría fuera a
+/// todas las máquinas instaladas.
+pub const SYS_FLOCK: u64 = 93;
+
+/// Cerrojo compartido: varios lectores a la vez, ningún escritor.
+pub const LOCK_SH: u64 = 1;
+/// Cerrojo exclusivo: un solo titular.
+pub const LOCK_EX: u64 = 2;
+/// Suelta el cerrojo de este proceso sobre el fichero.
+pub const LOCK_UN: u64 = 8;
+/// Con `LOCK_SH` o `LOCK_EX`: no esperar; devolver `EAGAIN` si no se puede.
+///
+/// **Hoy es obligatorio**, porque esperar no está implementado: sin él,
+/// `flock` devuelve `ENOSYS`. Prometer una espera que no existe sería peor que
+/// no tenerla.
+pub const LOCK_NB: u64 = 4;
+
 // ---- señales (modelo mínimo) ----
 
 /// `kill(pid, 0)`: sondeo. El proceso existe y no es zombi; no entrega señal.
@@ -771,6 +791,17 @@ pub struct SpawnIo {
     /// y el extra en pila suele ser cero — interpretarlo como stdin vaciaba
     /// la tty de sosh al fallar un spawn.
     pub log_fd: u64,
+    /// Directorio de trabajo del hijo (N-003). `cwd_len == 0` **hereda el del
+    /// padre**, que es lo que se hacía antes de existir este campo.
+    ///
+    /// Que el cero signifique «como siempre» no es casualidad: es la lección
+    /// que dejó `log_fd` justo aquí arriba. Un cliente anterior a este campo
+    /// escribe una estructura más corta, el kernel lee el resto como ceros, y
+    /// lo único seguro es que ese cero sea la conducta de antes. Con `log_fd`
+    /// hubo que redefinirlo porque el 0 ya significaba otra cosa; aquí sale
+    /// gratis.
+    pub cwd_ptr: u64,
+    pub cwd_len: u64,
 }
 
 #[cfg(test)]

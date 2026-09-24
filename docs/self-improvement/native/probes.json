@@ -118,7 +118,7 @@
       "capacidad": "varios descriptores sobre el mismo fichero (lo que necesita SQLite)",
       "por_que": "bun:sqlite abre el mismo .db desde varias conexiones: lee por posición y escribe sin pisar al resto.",
       "estado": "medida",
-      "resultado": "mejorado por N-001 y T65: la escritura parcial ya no trunca y `O_EXCL` excluye. Siguen negativos la visibilidad entre descriptores y el «gana el último», que necesitan la caché compartida (segunda mitad de N-001)",
+      "resultado": "**pasa entera** desde N-001 y T65",
       "modulo": "user/soso-agent-probe/src/sondas/compartir.rs",
       "casos": [
         {
@@ -131,9 +131,9 @@
         {
           "id": "compartir/visibilidad-entre-descriptores",
           "esperado": "XXXXX",
-          "observado": "00000",
-          "resultado": "NEGATIVO",
-          "nota": "Un lector abierto **antes** no ve la escritura de otro descriptor, ni tras `fsync`. Cada `open` se lleva su copia."
+          "observado": "XXXXX",
+          "resultado": "pasa desde N-001",
+          "nota": "Era NEGATIVO. La caché por inodo lo resuelve por construcción: no hay dos copias que puedan divergir."
         },
         {
           "id": "compartir/escritura-conserva-el-resto",
@@ -145,9 +145,9 @@
         {
           "id": "compartir/dos-escritores-zonas-distintas",
           "esperado": "60 bytes: AAAAA y BBBBB",
-          "observado": "60 bytes: 00000 y BBBBB",
-          "resultado": "NEGATIVO",
-          "nota": "Mejoró con N-001 —el fichero ya no queda en 5 bytes— pero **sigue negativo**: el segundo escritor cargó su copia antes de que el primero cerrara, así que al cerrar la suya pisa la de él. Esto necesita la caché **compartida** por inodo, no sólo cargar el contenido."
+          "observado": "60 bytes: AAAAA y BBBBB",
+          "resultado": "pasa desde N-001",
+          "nota": "Era NEGATIVO. Los dos escriben sobre el mismo búfer, así que ninguno pisa al otro."
         },
         {
           "id": "compartir/pwrite-en-offset",
@@ -170,17 +170,12 @@
           "nota": "Era NEGATIVO: ganaban los dos porque la entrada de directorio no se materializaba hasta cerrar. T65 la reserva al abrir."
         }
       ],
-      "hallazgo": "El modelo de ficheros es **por descriptor, no por inodo**. N-001 arregló la mitad que no necesitaba compartir —cargar el contenido al abrir para escribir, de modo que una escritura parcial no acorte el fichero— y dejó la otra mitad para la caché compartida: dos descriptores siguen sin verse, y el último en cerrar pisa al otro.",
+      "hallazgo": "El modelo de ficheros era **por descriptor**: cada `open` se llevaba su copia. N-001 lo pasó a **por inodo** —el contenido en una caché compartida, los descriptores con su posición— y con eso los dos descriptores se ven, una escritura parcial no trunca y dos escritores no se pisan. T65 arregló aparte que `O_EXCL` excluyera.",
       "para_t34": [
-        {
-          "hueco": "visibilidad entre descriptores y escritura parcial no destructiva",
-          "archivos": "kernel/src/task/syscall.rs (Fd::File, Fd::StreamWrite, sys_open, el volcado al cerrar)",
-          "reproduccion": "soso-agent-probe compartir"
-        },
         {
           "hueco": "bloqueo de ficheros (no hay flock ni fcntl)",
           "archivos": "crates/soso-abi/src/lib.rs, kernel/src/task/syscall.rs",
-          "reproduccion": "sin sonda posible: la syscall no existe; el sustituto O_EXCL falla su propio caso"
+          "reproduccion": "sin sonda posible: la syscall no existe. N-004, ahora que N-001 hace que compartir signifique algo"
         }
       ],
       "evidencia": "target/self-improvement/tasks/T33/compartir.txt"
@@ -286,16 +281,30 @@
           "esperado": "/tmp/t33-cwd",
           "observado": "/tmp/t33-cwd",
           "resultado": "pasa"
-        }
-      ],
-      "hallazgo": "Las cuatro capacidades están. La única fricción no es una ausencia sino una forma: **no hay parámetro de cwd en el spawn**, así que lanzar una herramienta «en» un directorio obliga a `chdir` antes — y el `chdir` es del **proceso**, no de la llamada. Un agente que quiera correr dos herramientas a la vez en directorios distintos no puede: tendría que serializarlas o usar rutas absolutas. T47 ya lo rodea con un `CwdGuardado` que restaura después, lo que confirma que la fricción es real.",
-      "para_t34": [
+        },
         {
-          "hueco": "el spawn no acepta directorio de trabajo; el cwd es por proceso",
-          "archivos": "crates/soso-abi/src/lib.rs (SpawnIo), kernel/src/task/syscall.rs (sys_spawn_io)",
-          "reproduccion": "soso-agent-probe salidas, caso cwd/el-hijo-hereda-el-del-padre"
+          "id": "cwd/el-hijo-arranca-donde-se-le-dice",
+          "esperado": "/tmp/t33-otro",
+          "observado": "/tmp/t33-otro",
+          "resultado": "pasa desde N-003"
+        },
+        {
+          "id": "cwd/el-padre-no-se-mueve",
+          "esperado": "/",
+          "observado": "/",
+          "resultado": "pasa desde N-003",
+          "nota": "El que importa: lanzar «en» un sitio sin mover al padre. Con `chdir` no se podía, porque es del proceso."
+        },
+        {
+          "id": "cwd/un-directorio-inexistente-falla",
+          "esperado": "no existe (-2)",
+          "observado": "no existe (-2)",
+          "resultado": "pasa desde N-003",
+          "nota": "Falla el spawn en vez de lanzar al hijo en otro sitio."
         }
       ],
+      "hallazgo": "Las cuatro capacidades están. La fricción que había —el spawn no aceptaba directorio de trabajo— la quitó **N-003**: ahora va en la llamada, no en un `chdir` del proceso, y el apaño de T47 se borró.",
+      "para_t34": [],
       "evidencia": "target/self-improvement/tasks/T33/salidas.txt"
     },
     {

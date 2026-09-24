@@ -218,47 +218,6 @@ const PIPE_CAP: usize = 4096;
 /// puede agotar la memoria del coordinador.
 const SALIDA_MAX: usize = 1024 * 1024;
 
-/// Devuelve el cwd al salir, **pase lo que pase**. El adaptador anterior hacía
-/// `chdir` y no volvía: la siguiente orden con ruta relativa miraba a otro
-/// sitio, y eso no se ve hasta mucho después.
-struct CwdGuardado {
-    anterior: Option<String>,
-}
-
-impl CwdGuardado {
-    fn cambiar_a(destino: &str) -> Resultado<CwdGuardado> {
-        if destino.is_empty() {
-            return Ok(CwdGuardado { anterior: None });
-        }
-        let mut buf = [0u8; 1024];
-        // `getcwd` devuelve el **puntero** al búfer, no la longitud: el valor
-        // que devuelve no se puede usar como tamaño. La cadena va terminada en
-        // NUL, así que la longitud se busca ahí.
-        let rc = sys::getcwd(&mut buf);
-        if rc < 0 {
-            return Err(fallo("getcwd", rc));
-        }
-        let anterior = cadena_c(&buf)
-            .ok_or_else(|| Error::entorno("cwd no es UTF-8"))?
-            .to_string();
-        let rc = sys::chdir(destino);
-        if rc < 0 {
-            return Err(fallo(&format!("chdir {destino}"), rc));
-        }
-        Ok(CwdGuardado {
-            anterior: Some(anterior),
-        })
-    }
-}
-
-impl Drop for CwdGuardado {
-    fn drop(&mut self) {
-        if let Some(a) = &self.anterior {
-            sys::chdir(a);
-        }
-    }
-}
-
 /// Texto hasta el primer NUL. `getcwd` rellena así el búfer.
 fn cadena_c(buf: &[u8]) -> Option<&str> {
     let fin = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
@@ -300,9 +259,6 @@ impl Procesos for Soso {
             )));
         }
 
-        // El cwd se restaura por `Drop`, así que vale con que exista.
-        let _cwd = CwdGuardado::cambiar_a(&orden.cwd)?;
-
         let (salida_r, salida_w) = sys::pipe().map_err(|e| fallo("pipe de salida", e))?;
         let (entrada_r, entrada_w) = match sys::pipe() {
             Ok(p) => p,
@@ -324,13 +280,16 @@ impl Procesos for Soso {
             .collect();
         let entorno_ref: Vec<&str> = entorno.iter().map(|s| s.as_str()).collect();
 
-        let pid = sys::spawn_io_ex(
+        // N-003: el directorio va **en el spawn**, no en un `chdir` del
+        // proceso. El apaño anterior (`CwdGuardado`: cambiar, lanzar y
+        // restaurar por `Drop`) funcionaba, pero movía el directorio de todo
+        // el proceso durante la ventana — y con hilos eso lo ve todo el mundo.
+        let pid = sys::spawn_io_cwd(
             &orden.argv[0],
             &argv,
             &entorno_ref,
-            entrada_r,
-            salida_w,
-            salida_w,
+            [entrada_r, salida_w, salida_w, abi::FD_KERNEL_LOG],
+            &orden.cwd,
         );
         // Los extremos del hijo se cierran aquí: si no, la tubería nunca da EOF.
         sys::close(salida_w);

@@ -37,7 +37,7 @@
     {
       "id": "N-001",
       "titulo": "Modelo de ficheros por inodo: los descriptores comparten y la escritura parcial no trunca",
-      "estado": "en curso",
+      "estado": "hecha",
       "prioridad": 1,
       "depende_de": [],
       "aplica_en": "soso",
@@ -67,6 +67,15 @@
         "limite": "Tope de 1 MiB: por encima se conserva la conducta de siempre, porque por /var/models/ pasan shards de cientos de MB en streaming.",
         "falta": "La caché compartida por inodo, con cuenta de referencias y decisión de cuándo volcar. Es donde está el riesgo declarado.",
         "evidencia": "target/self-improvement/tasks/N-001/{compartir,suite}.txt"
+      },
+      "paso_3": {
+        "hecho": "2026-09-24",
+        "que": "kernel/src/task/fcache.rs: el contenido vive en un mapa por inodo y los descriptores guardan sólo su posición. Fd::File y Fd::WriteBuf pierden su Vec<u8>.",
+        "acreditado": "Las ocho casos de compartir pasan; los cuatro que T33 dejó negativos están arreglados.",
+        "leccion": "La regla no es «vuelca el escritor» sino «vuelca el último que cierra, sea quien sea»: un lector abierto después del escritor se llevaba el contenido sucio a la tumba. Y una entrada creada por un lector no sabía la ruta, así que `pendiente` se niega a publicar con nombre vacío en vez de adivinar.",
+        "coste": "~128 M y ~10,8 G (razón ~84x), de vuelta al nivel previo a N-001: la caché deshace la duplicación que había introducido la primera mitad, porque el segundo que abre se encuentra el contenido cargado.",
+        "limite": "Sólo ficheros que existen y son pequeños. No entra LazyFile ni el camino de crear (StreamWrite, /var/models/). Sin desalojo por presión de memoria: el tamaño lo acota cuántos ficheros haya abiertos a la vez.",
+        "evidencia": "target/self-improvement/tasks/N-001/{compartir-cache,suite}.txt"
       }
     },
     {
@@ -98,7 +107,7 @@
     {
       "id": "N-003",
       "titulo": "Directorio de trabajo por spawn",
-      "estado": "lista",
+      "estado": "hecha",
       "prioridad": 3,
       "depende_de": [],
       "aplica_en": "soso",
@@ -109,7 +118,15 @@
       ],
       "sonda": "cwd/el-hijo-hereda-el-del-padre (ampliada con un cwd explícito)",
       "origen": "T33 pase 5",
-      "ficha": "native/N-003.md"
+      "ficha": "native/N-003.md",
+      "resultado": {
+        "hecho": "2026-09-24",
+        "que": "`SpawnIo` gana cwd_ptr/cwd_len, el kernel los honra resolviendo con path::abs_path contra el cwd del padre, y libsoso los expone en spawn_io_cwd.",
+        "acreditado": "cwd/el-hijo-arranca-donde-se-le-dice, cwd/el-padre-no-se-mueve y cwd/un-directorio-inexistente-falla.",
+        "compatibilidad": "cwd_len == 0 hereda, que es la conducta de antes. Es la lección que dejó el campo log_fd justo al lado: un cliente anterior escribe menos bytes y el kernel lee ceros, así que el cero tiene que significar lo de siempre.",
+        "quita": "El CwdGuardado de T47 (chdir/lanzar/restaurar), borrado: movía el directorio de todo el proceso durante la ventana.",
+        "evidencia": "target/self-improvement/tasks/N-003/{salidas,suite}.txt"
+      }
     },
     {
       "id": "N-004",

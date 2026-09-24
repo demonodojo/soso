@@ -121,9 +121,21 @@ aquélla enseñó a soso a seguir tras un corte, y ésta hace que la exclusión 
 real — las dos sostienen el contrato durable de
 [T46](T46-archivos-durables.md), que es la única exclusión mutua que hay.
 
-**Lo que queda habilitado**: la segunda mitad de **[N-001](native/N-001.md)**
-—la caché compartida por inodo, con su diseño ya escrito—, **[N-003](native/N-003.md)**
-(cwd por spawn) y los inventarios [T36](T36-forja-trazabilidad.md) y
+**[N-003](native/N-003.md) está hecha**: el spawn acepta directorio de trabajo,
+así que un agente puede lanzar dos herramientas a la vez en sitios distintos sin
+mover el suyo. La compatibilidad la resolvió un precedente que ya estaba escrito
+en el ABI —el comentario de `log_fd`—: el cero tiene que significar la conducta
+de antes, y aquí sale gratis. De paso se borró el `CwdGuardado` de T47.
+
+**[N-001](native/N-001.md) está cerrada**: el modelo de ficheros pasa de ser
+**por descriptor** a ser **por inodo**. Con eso los ocho casos de la sonda de
+SQLite pasan — dos descriptores se ven, una escritura parcial no trunca la cola
+y dos escritores no se pisan—, y el coste vuelve a su sitio (~84×, igual que
+antes de empezar), porque el segundo que abre se encuentra el contenido ya
+cargado. El riesgo que la ficha declaraba se respetó: **`StreamWrite` no se ha
+tocado**, así que el camino de crear ficheros y `/var/models/` siguen igual.
+
+**Lo que queda habilitado**: los inventarios [T36](T36-forja-trazabilidad.md) y
 [T38](T38-toolchain-inventario.md).
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.

@@ -172,8 +172,13 @@ extern "sysv64" fn watch_panic_shim(_: u64, _b: u64) -> u64 {
     let addr = EXC_EXTRA.load(Ordering::Relaxed);
     let valor = WATCH_VALOR.load(Ordering::Relaxed);
     let idx = WATCH_IDX.load(Ordering::Relaxed);
+    let via = match idx {
+        2 => "alias del mapa físico",
+        0 | 1 => "VA del heap",
+        _ => "otra",
+    };
     crate::println!(
-        "heap: ESCRITURA EN bins (DR{idx}) addr={addr:#x} valor={valor:#018x} rip={rip:#x} rsp={rsp:#x} cpu={} candado={}",
+        "heap: ESCRITURA EN bins (DR{idx}, {via}) addr={addr:#x} valor={valor:#018x} rip={rip:#x} rsp={rsp:#x} cpu={} candado={}",
         crate::arch::percpu::cpu_index(),
         crate::mm::heap::talc_bloqueado()
     );

@@ -1,5 +1,5 @@
 //! Arranque de APs (SMP): trampolín real→protegido→largo copiado a
-//! TRAMP_PHYS (<1 MiB, reservado en el frame allocator) + INIT-SIPI-SIPI
+//! TRAMP_PHYS (dentro del primer MiB, que el frame allocator no entrega) + INIT-SIPI-SIPI
 //! por x2APIC. En L3a los APs quedan en un idle-loop; el scheduler
 //! multicore llega en L3b.
 

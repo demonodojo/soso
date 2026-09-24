@@ -2720,6 +2720,9 @@ fn ssh_probe_compartir(key: &Path, ssh_port: u16) -> Result<(), String> {
         "compartir/dos-escritores-zonas-distintas",
         "compartir/pwrite-en-offset",
         "compartir/o-excl-excluye",
+        "compartir/el-cerrojo-excluye-a-otro-proceso",
+        "compartir/soltar-el-cerrojo-deja-pasar",
+        "compartir/dos-compartidos-conviven",
     ] {
         if !salida.contains(esperado) {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
@@ -2786,6 +2789,9 @@ fn ssh_probe_salidas(key: &Path, ssh_port: u16) -> Result<(), String> {
         "salidas/codigo-de-salida",
         "entorno/variable-heredada",
         "cwd/el-hijo-hereda-el-del-padre",
+        "cwd/el-hijo-arranca-donde-se-le-dice",
+        "cwd/el-padre-no-se-mueve",
+        "cwd/un-directorio-inexistente-falla",
     ] {
         if !salida.contains(esperado) {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));

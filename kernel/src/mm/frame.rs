@@ -51,8 +51,17 @@ impl BootInfoFrameAllocator {
         }
     }
 
+    /// El primer mebibyte no se entrega: BIOS, trampolín SMP y DMA de
+    /// firmware. Reciclarlo en `free` se lo daba al heap (la página 0).
+    fn es_memoria_baja(addr: u64) -> bool {
+        addr < 0x10_0000
+    }
+
     /// Devuelve un frame a la lista de libres manteniendo la marca de orden.
     fn push_free(&mut self, frame: PhysFrame) {
+        if Self::es_memoria_baja(frame.start_address().as_u64()) {
+            return;
+        }
         if let Some(last) = self.free.last()
             && frame.start_address() < last.start_address()
         {
@@ -83,20 +92,22 @@ impl BootInfoFrameAllocator {
                 continue;
             }
             let base = self.next_addr.max(r.start).next_multiple_of(4096);
-            let aligned = base.next_multiple_of(align_bytes);
-            // Página reservada para el trampolín SMP (<1 MiB): saltarla.
-            let tramp = crate::arch::smp::TRAMP_PHYS;
-            if aligned <= tramp && tramp < aligned + bytes {
+            if base < 0x10_0000 {
+                let hasta = r.end.min(0x10_0000);
                 let mut gap = base;
-                while gap < tramp {
-                    self.push_free(PhysFrame::containing_address(PhysAddr::new(gap)));
+                while gap + 4096 <= hasta {
                     self.cursor_consumed += 1;
                     gap += 4096;
                 }
-                self.cursor_consumed += 1; // la propia página del trampolín
-                self.next_addr = tramp + 4096;
+                if r.end <= 0x10_0000 {
+                    self.region_idx += 1;
+                    self.next_addr = 0;
+                } else {
+                    self.next_addr = 0x10_0000;
+                }
                 continue;
             }
+            let aligned = base.next_multiple_of(align_bytes);
             if aligned + bytes <= r.end {
                 // reciclar el hueco [base, aligned)
                 let mut gap = base;
@@ -146,6 +157,10 @@ impl BootInfoFrameAllocator {
         let mut i = 0usize;
         while i + count <= self.free.len() {
             let base = self.free[i].start_address().as_u64();
+            if Self::es_memoria_baja(base) {
+                i += 1;
+                continue;
+            }
             if align > 4096 && !base.is_multiple_of(align) {
                 i += 1;
                 continue;

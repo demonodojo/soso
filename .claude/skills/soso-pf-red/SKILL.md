@@ -104,10 +104,11 @@ sudo, lo hace el usuario) y repetir `soso-update comprobar`. Lectura:
 
 - `ESCRITURA EN bins` → la CPU escribe; el `rip` (menos `0x10000000000`)
   es el store. Corregir ahí.
-- `HUECO ROTO` en `bin=0` **sin** `#DB` antes → nadie de la CPU lo tocó: es
-  DMA (firmware iwlwifi o GSP) sobre el frame físico de `HEAP_START`.
-  Siguiente paso: imprimir en `heap::init` la PA de ese frame y buscarla en
-  las tablas DMA de iwlwifi/nouveau.
+- `HUECO ROTO` o `nodo libre fuera del heap en bin 0` **sin** `#DB` antes →
+  el store no usó la VA vigilada. Visto el 2026-09-24 en `aplicar`:
+  `bins[0] = 0xa9700000000` (`u16` `0x0A97` en +4, mitad baja 0) y ningún
+  `ESCRITURA EN bins`. Siguiente paso: la PA del frame de `HEAP_START` y si
+  aparece en las tablas DMA de iwlwifi o en otra VA del mismo frame.
 
 Sonda `mm::heap::punto` (no se libera): el pánico imprime `heap: último
 punto intacto «…»`, el último `malloc` de sonda que **volvió**. También

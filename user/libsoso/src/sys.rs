@@ -163,6 +163,22 @@ pub fn spawn_io_ex(
 
 /// Spawn con control explícito de los cuatro descriptores estándar (0–3).
 pub fn spawn_io_full(path: &str, argv: &[&str], env: &[&str], fds: [u64; 4]) -> i64 {
+    spawn_io_cwd(path, argv, env, fds, "")
+}
+
+/// Como [`spawn_io_full`], lanzando al hijo **en** `cwd` (N-003).
+///
+/// `cwd` vacío hereda el del padre. Existe porque el `chdir` es del **proceso**
+/// y no de la llamada: sin esto, lanzar dos herramientas a la vez en
+/// directorios distintos obligaba a serializarlas o a que un hilo viera el
+/// directorio cambiado por debajo.
+pub fn spawn_io_cwd(
+    path: &str,
+    argv: &[&str],
+    env: &[&str],
+    fds: [u64; 4],
+    cwd: &str,
+) -> i64 {
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -206,6 +222,8 @@ pub fn spawn_io_full(path: &str, argv: &[&str], env: &[&str], fds: [u64; 4]) -> 
             env_table.as_ptr() as u64
         },
         envp_count: env.len() as u64,
+        cwd_ptr: cwd.as_ptr() as u64,
+        cwd_len: cwd.len() as u64,
     };
     syscall4(
         abi::SYS_SPAWN_IO,
@@ -818,6 +836,17 @@ pub fn getrandom(buf: &mut [u8]) -> i64 {
 
 pub fn set_tls(base: u64) -> i64 {
     syscall1(abi::SYS_SET_TLS, base)
+}
+
+/// Cerrojo consultivo sobre un fichero abierto (N-004).
+///
+/// `op` es `LOCK_SH` o `LOCK_EX`, **siempre** con `LOCK_NB`: esperar no está
+/// implementado y sin esa bandera devuelve `ENOSYS`. `LOCK_UN` suelta.
+///
+/// Consultivo: no impide leer ni escribir a quien no lo pide. Coordina a los
+/// que colaboran, que es lo que necesita una base de datos.
+pub fn flock(fd: u64, op: u64) -> i64 {
+    syscall4(abi::SYS_FLOCK, fd, op, 0, 0)
 }
 
 pub fn mprotect(addr: u64, len: u64, prot: u64) -> i64 {

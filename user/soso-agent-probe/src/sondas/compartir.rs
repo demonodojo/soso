@@ -313,5 +313,92 @@ pub fn ejecutar() -> Vec<Caso> {
         ),
     );
 
+    // 6. **N-004: el cerrojo.** Se prueba con **dos procesos**, porque uno
+    //    solo no prueba nada: lo que hace útil a un candado es que el otro no
+    //    pueda cogerlo.
+    let ruta_lock = unir(DIR, "cerrojo.dat");
+    let _ = escribir_nuevo(&ruta_lock, b"contenido");
+
+    let observado = con_cerrojo(&ruta_lock, Some(abi::LOCK_EX), false, "tomar-cerrojo");
+    anotar(
+        &mut casos,
+        Caso::nuevo("compartir/el-cerrojo-excluye-a-otro-proceso", "1", observado),
+    );
+
+    // Y cuando se suelta, el otro sí puede: un candado que no se abre tampoco
+    // sirve.
+    let observado = con_cerrojo(&ruta_lock, Some(abi::LOCK_EX), true, "tomar-cerrojo");
+    anotar(
+        &mut casos,
+        Caso::nuevo("compartir/soltar-el-cerrojo-deja-pasar", "0", observado),
+    );
+
+    // Un cerrojo **compartido** deja entrar a otro compartido: es la mitad que
+    // permite varios lectores a la vez.
+    let observado = con_cerrojo(&ruta_lock, Some(abi::LOCK_SH), false, "tomar-cerrojo-compartido");
+    anotar(
+        &mut casos,
+        Caso::nuevo("compartir/dos-compartidos-conviven", "0", observado),
+    );
+
     casos
+}
+
+/// Coge el cerrojo pedido, lanza un hijo que intenta el suyo y devuelve el
+/// código con el que salió. Con `soltar`, lo suelta antes de lanzarlo.
+fn con_cerrojo(ruta: &str, modo: Option<u64>, soltar: bool, sub: &str) -> String {
+    let fd = sys::open(ruta, abi::O_RDONLY);
+    if fd < 0 {
+        return format!("open = {}", errno(fd));
+    }
+    let fd = fd as u64;
+    if let Some(m) = modo {
+        let rc = sys::flock(fd, m | abi::LOCK_NB);
+        if rc < 0 {
+            sys::close(fd);
+            return format!("no pude coger el mío: {}", errno(rc));
+        }
+    }
+    if soltar {
+        sys::flock(fd, abi::LOCK_UN);
+    }
+    const YO: &str = "/bin/soso-agent-probe";
+    let pid = sys::spawn_io_ex(
+        YO,
+        &[YO, sub, ruta],
+        &[],
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+    );
+    let del_hijo = if pid < 0 {
+        format!("spawn = {}", errno(pid))
+    } else {
+        loop {
+            match sys::wait() {
+                Ok((p, c)) if p == pid as u64 => break format!("{c}"),
+                Ok(_) => continue,
+                Err(e) => break format!("wait = {}", errno(e)),
+            }
+        }
+    };
+    sys::flock(fd, abi::LOCK_UN);
+    sys::close(fd);
+    del_hijo
+}
+
+/// Subcomando auxiliar: intenta el cerrojo y **sale con un código**, no con un
+/// mensaje: el padre tiene que poder juzgarlo sin leer texto.
+///
+/// 0 si lo consiguió, 1 si estaba cogido, 2 si ni siquiera pudo abrir.
+pub fn tomar_cerrojo(ruta: &str, exclusivo: bool) -> u8 {
+    let fd = sys::open(ruta, abi::O_RDONLY);
+    if fd < 0 {
+        println!("tomar-cerrojo: open = {}", errno(fd));
+        return 2;
+    }
+    let modo = if exclusivo { abi::LOCK_EX } else { abi::LOCK_SH };
+    let rc = sys::flock(fd as u64, modo | abi::LOCK_NB);
+    sys::close(fd as u64);
+    if rc >= 0 { 0 } else { 1 }
 }

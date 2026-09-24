@@ -183,18 +183,9 @@ pub fn ejecutar() -> Vec<Caso> {
     //    hijo hereda el del padre, así que lanzar una herramienta «en» un sitio
     //    obliga a hacer `chdir` antes — y el `chdir` es del **proceso**, no de
     //    la llamada. Se mide la herencia, y la consecuencia queda dicha.
-    let antes = {
-        let mut b = [0u8; 256];
-        let rc = sys::getcwd(&mut b);
-        if rc < 0 {
-            String::from("?")
-        } else {
-            // `getcwd` devuelve el puntero al búfer, no una longitud: la
-            // cadena acaba en NUL (lo aprendió T47 por las malas).
-            let fin = b.iter().position(|c| *c == 0).unwrap_or(b.len());
-            String::from_utf8_lossy(&b[..fin]).into_owned()
-        }
-    };
+    // `getcwd` devuelve el puntero al búfer, no una longitud: la cadena acaba
+    // en NUL (lo aprendió T47 por las malas).
+    let antes = cwd_actual();
     sys::mkdir("/tmp/t33-cwd");
     sys::chdir("/tmp/t33-cwd");
     let (r, w) = sys::pipe().unwrap_or((0, 0));
@@ -219,7 +210,71 @@ pub fn ejecutar() -> Vec<Caso> {
         Caso::nuevo("cwd/el-hijo-hereda-el-del-padre", "/tmp/t33-cwd", visto),
     );
 
+    // 5. **N-003: cwd explícito.** El hijo arranca donde se le dice, y —lo que
+    //    de verdad importa— **el padre no se mueve**. Sin eso habría que hacer
+    //    `chdir` antes de lanzar, y el `chdir` es del proceso: otro hilo vería
+    //    el directorio cambiado por debajo.
+    sys::mkdir("/tmp/t33-otro");
+    let mio_antes = cwd_actual();
+    let (r, w) = sys::pipe().unwrap_or((0, 0));
+    let pid = sys::spawn_io_cwd(
+        YO,
+        &[YO, "eco-cwd"],
+        &[],
+        [abi::FD_SERIAL_TTY, w, abi::FD_SERIAL_TTY, abi::FD_KERNEL_LOG],
+        "/tmp/t33-otro",
+    );
+    sys::close(w);
+    let visto = if pid < 0 {
+        format!("spawn = {}", errno(pid))
+    } else {
+        let t = drenar(r);
+        let _ = sys::wait();
+        t.trim().into()
+    };
+    sys::close(r);
+    let mio_despues = cwd_actual();
+    anotar(
+        &mut casos,
+        Caso::nuevo("cwd/el-hijo-arranca-donde-se-le-dice", "/tmp/t33-otro", visto),
+    );
+    anotar(
+        &mut casos,
+        Caso::nuevo("cwd/el-padre-no-se-mueve", mio_antes, mio_despues),
+    );
+
+    // Y un directorio que no existe **falla el spawn**, en vez de lanzar al
+    // hijo en otro sitio: esa sorpresa se paga tarde.
+    let rc = sys::spawn_io_cwd(
+        YO,
+        &[YO, "eco-cwd"],
+        &[],
+        [abi::FD_SERIAL_TTY, abi::FD_SERIAL_TTY, abi::FD_SERIAL_TTY, abi::FD_KERNEL_LOG],
+        "/tmp/no-existe-este-directorio",
+    );
+    if rc >= 0 {
+        let _ = sys::wait();
+    }
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "cwd/un-directorio-inexistente-falla",
+            "no existe (-2)",
+            if rc < 0 { errno(rc) } else { format!("lanzó igual, pid {rc}") },
+        ),
+    );
+
     casos
+}
+
+/// El directorio de trabajo de este proceso.
+fn cwd_actual() -> String {
+    let mut b = [0u8; 256];
+    if sys::getcwd(&mut b) < 0 {
+        return String::from("?");
+    }
+    let fin = b.iter().position(|c| *c == 0).unwrap_or(b.len());
+    String::from_utf8_lossy(&b[..fin]).into_owned()
 }
 
 /// Subcomando auxiliar: una marca por stdout y otra por stderr, y salir con 3.

@@ -197,10 +197,13 @@ T66 quedó cerrada. **T66 hecha** (dejó de fingir la guarda). **T65 hecha**:
 `O_CREAT|O_EXCL` reserva el nombre al abrir, así que la exclusión —la única que
 tiene soso, y de la que depende el contrato durable de T46— es real.
 
-**Recomendada ahora: la segunda mitad de N-001** — la caché compartida por
-inodo, con el diseño ya escrito en su ficha. La primera mitad está hecha: una
-escritura parcial ya no trunca el fichero. Medido que la escritura directa al
-VFS costaría ~75× (con `rdtsc`, porque el PIT subcuenta con E/S).
+**N-001 cerrada**: el modelo de ficheros es **por inodo** (`kernel/src/task/fcache.rs`),
+no por descriptor. Los ocho casos de la sonda de SQLite pasan y el coste vuelve
+a ~84×. `StreamWrite` **no se tocó**: crear ficheros y `/var/models/` siguen
+igual. **N-003 hecha** (cwd por spawn).
+
+**Recomendada ahora**: los inventarios **T36** y **T38**, o **N-004** (flock),
+que ahora tiene sentido porque compartir significa algo.
 
 **Decisión de plan pendiente**, como el no-go de T14: portar OpenCode o
 reimplementar el agente en Rust reutilizando el protocolo — lo que el plan ya

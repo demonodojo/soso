@@ -68,6 +68,18 @@ fn main(args: &[String]) -> u8 {
         "chorro" => return sondas::canales::chorro(),
         "eco-tcp" => return sondas::canales::eco_tcp(),
         "tocar-guarda" => return sondas::hilos::tocar_guarda(),
+        "tomar-cerrojo" => {
+            return sondas::compartir::tomar_cerrojo(
+                args.get(1).map(|s| s.as_str()).unwrap_or(""),
+                true,
+            )
+        }
+        "tomar-cerrojo-compartido" => {
+            return sondas::compartir::tomar_cerrojo(
+                args.get(1).map(|s| s.as_str()).unwrap_or(""),
+                false,
+            )
+        }
         "" | "-h" | "--help" => {
             println!("{USO}");
             return if sonda.is_empty() { 2 } else { 0 };

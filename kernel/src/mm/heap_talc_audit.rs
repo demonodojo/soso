@@ -96,6 +96,14 @@ fn vigilar_huecos_locked(contexto: &str, talc: &Talc<ClaimOnOom>, fin: u64) {
                 panic!("heap: lista libre bin {bin} demasiado larga (>{pasos})");
             }
             if !next_en_rango(cur, fin) {
+                let pa = super::heap::bins_pa();
+                let alias = super::heap::bins_alias();
+                crate::println!(
+                    "heap: cabecera bin {bin} fuera del heap ({contexto}) valor={cur:#x} pa={pa:#x} alias={alias:#x} (sin #DB: ni la VA ni el alias)"
+                );
+                super::heap::informar_dma_en_pf(pa);
+                super::heap::informar_dma_en_pf(cur);
+                imprimir_ultimos_accesos();
                 panic!("heap: nodo libre fuera del heap en bin {bin}: {cur:#x}");
             }
             let next = unsafe { core::ptr::read_volatile(cur as *const u64) };

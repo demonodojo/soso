@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use talc::{ClaimOnOom, Span, Talc, Talck};
 use x86_64::VirtAddr;
-use x86_64::structures::paging::mapper::MapToError;
+use x86_64::structures::paging::mapper::{MapToError, Translate};
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
 };
@@ -33,6 +33,9 @@ const HEAP_MIN: u64 = 6 * 1024 * 1024;
 
 static HEAP_MAPEADO: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+/// PA de `bins[0]` y su alias en el mapa físico (`PHYS_OFFSET` + PA).
+static BINS_PA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static BINS_ALIAS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 static TALC: Talck<Mutex<()>, ClaimOnOom> =
     Talc::new(unsafe { ClaimOnOom::new(Span::empty()) }).lock();
@@ -154,6 +157,14 @@ pub fn puntero_de_heap_valido(v: u64) -> bool {
 /// Dirección de `bins` de talc: `claim` deja la tabla justo detrás de la
 /// etiqueta base del primer heap (`HEAP_START + TAG_SIZE`).
 pub const TALC_BINS: u64 = HEAP_START + 8;
+
+pub fn bins_pa() -> u64 {
+    BINS_PA.load(Ordering::Relaxed)
+}
+
+pub fn bins_alias() -> u64 {
+    BINS_ALIAS.load(Ordering::Relaxed)
+}
 
 pub(super) fn with_talc_audit(f: impl FnOnce(&Talc<ClaimOnOom>)) {
     if let Some(guard) = TALC.try_lock() {
@@ -420,7 +431,7 @@ pub fn informar_dma_en_pf(valor: u64) {
 /// ahí salen las tablas de páginas de este mismo mapeo (~1 página por cada 512),
 /// los búferes de DMA de los drivers y las páginas de los procesos.
 pub fn init(
-    mapper: &mut impl Mapper<Size4KiB>,
+    mapper: &mut (impl Mapper<Size4KiB> + Translate),
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     usable_bytes: u64,
 ) -> Result<u64, MapToError<Size4KiB>> {
@@ -462,5 +473,17 @@ pub fn init(
     // en `bins[1]`): watchpoint de escritura sobre ambas cabeceras.
     crate::arch::hwbp::vigilar_escritura(0, TALC_BINS);
     crate::arch::hwbp::vigilar_escritura(1, TALC_BINS + 8);
+    // El mismo qword también es accesible por el mapa físico. Un store por
+    // esa VA no dispara DR0. DR2 vigila el alias; si tampoco salta, es DMA.
+    if let Some(pa) = mapper.translate_addr(VirtAddr::new(TALC_BINS)) {
+        let pa = pa.as_u64();
+        let alias = crate::mm::phys_to_virt(pa).as_u64();
+        BINS_PA.store(pa, Ordering::Relaxed);
+        BINS_ALIAS.store(alias, Ordering::Relaxed);
+        crate::println!("heap: bins[0] va={TALC_BINS:#x} pa={pa:#x} alias={alias:#x}");
+        if alias % 8 == 0 && alias != TALC_BINS {
+            crate::arch::hwbp::vigilar_escritura(2, alias);
+        }
+    }
     Ok(mapeado)
 }
