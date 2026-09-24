@@ -24,7 +24,16 @@ pub fn init() {
     env::init();
 }
 
-/// Parsea la cadena de argumentos del crt0 (`__soso_main`) en `env::args`.
+/// Fija `env::args` a partir del argv que entrega `entry!` (T62).
+pub fn init_from_argv(args: &[alloc::string::String]) {
+    env::init_from_argv(args);
+}
+
+/// Parsea una **cadena** de argumentos en `env::args`.
+///
+/// Queda para quien todavía reciba una cadena suelta; parte por espacios, así
+/// que un argumento con un espacio dentro se pierde. Lo correcto es
+/// [`init_from_argv`].
 pub fn init_from_args(args: &str) {
     env::init_from_args(args);
 }

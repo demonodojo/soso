@@ -9,6 +9,15 @@ static ENVP: Mutex<Option<Vec<(String, String)>>> = Mutex::new(None);
 
 pub fn init() {}
 
+/// Fija los argumentos a partir del **argv de verdad**.
+///
+/// Es la entrada buena desde T62: `init_from_args` recibía una cadena ya
+/// juntada y la volvía a partir por espacios, así que un argumento con un
+/// espacio dentro se convertía en dos y no había forma de deshacerlo.
+pub fn init_from_argv(args: &[String]) {
+    set_args(args.to_vec());
+}
+
 pub fn init_from_args(args: &str) {
     if args.as_bytes().starts_with(b"SOSA") {
         if let Some(v) = decode_sosa(args.as_bytes()) {

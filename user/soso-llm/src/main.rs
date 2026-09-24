@@ -128,18 +128,31 @@ pub(crate) fn read_file(path: &str) -> Result<Vec<u8>, i64> {
 }
 
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
     // `ask` se resuelve sobre el string CRUDO, antes de trocear: todo lo que
     // va detrás es la pregunta, con sus comillas, sus tildes y sus `|` o `>`.
     // Es la única forma de que el texto llegue tal como se escribió, y por eso
     // sosh lo desvía aquí sin pasarlo por su tokenizador.
-    if let Some(texto) = resto_tras("ask", args) {
+    //
+    // Desde T62 `main` recibe el argv de verdad, así que la línea literal sólo
+    // existe cuando el llamante no pasó argv (`spawn_io`). Si pasó argv, la
+    // pregunta es el argumento siguiente —entera, con sus espacios— y no hay
+    // nada que reconstruir.
+    let linea = libsoso::linea_cruda();
+    if let Some(texto) = linea.as_deref().and_then(|l| resto_tras("ask", l)) {
         return run_ask(texto);
     }
-    if args.trim_start().starts_with("askd") {
+    if args.first().map(|s| s.as_str()) == Some("ask") {
+        // Con argv la pregunta ya viene troceada por quien llamó, así que esto
+        // es lo más literal que queda. La ruta que conserva el texto exacto es
+        // el builtin `ask` de sosh, que no pasa por aquí: va por el socket de
+        // askd sin tokenizar.
+        return run_ask(args[1..].join(" ").trim());
+    }
+    if args.first().map(|s| s.as_str()) == Some("askd") {
         return ask::run_askd();
     }
-    let parts: Vec<&str> = args.split_whitespace().collect();
+    let parts: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     if parts.first() == Some(&"serve") {
         return serve::run(&parts[1..]);
     }

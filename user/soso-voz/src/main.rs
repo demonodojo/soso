@@ -16,13 +16,13 @@ use vozd::{conectar_vozd, dialogar, preguntar_via_vozd, run_vozd, spawn_vozd};
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
-    let args = args.trim();
-    if args == "vozd" {
+fn main(args: &[String]) -> u8 {
+    let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
+    if cmd == "vozd" {
         return run_vozd();
     }
-    if args.starts_with("dictar ") {
-        return dictar(&args["dictar ".len()..].trim());
+    if cmd == "dictar" {
+        return dictar(&args[1..]);
     }
     if args.is_empty() {
         println!("uso: soso-voz vozd | dictar [--wav fichero] [--max-tokens N]");
@@ -32,11 +32,11 @@ fn main(args: &str) -> u8 {
     1
 }
 
-fn dictar(args: &str) -> u8 {
+fn dictar(args: &[String]) -> u8 {
     let mut wav: Option<&str> = None;
     let mut max_tokens: Option<usize> = None;
     let mut i = 0;
-    let parts: Vec<&str> = args.split_whitespace().collect();
+    let parts: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     while i < parts.len() {
         match parts[i] {
             "--wav" => {

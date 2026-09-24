@@ -7,13 +7,14 @@ extern crate alloc;
 
 use alloc::format;
 use libsoso::{abi, errno_str, println, sys};
+use alloc::string::String;
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
-    let path = match args.trim() {
-        "" => "/",
-        p => p,
+fn main(args: &[String]) -> u8 {
+    let path = match args.first().map(|s| s.as_str()) {
+        None | Some("") => "/",
+        Some(p) => p,
     };
     let mut st = abi::Stat::default();
     let r = sys::stat(path, &mut st);

@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use coreutils::util::{err_path, leer_fichero};
 use libsoso::{sys, println};
 
@@ -44,10 +45,10 @@ fn wc_fichero(path: &str, _solo_lineas: bool) -> Result<(usize, usize), i64> {
     Ok(contar(&data))
 }
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
     let mut solo_lineas = false;
     let mut paths: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-    for tok in args.split_whitespace() {
+    for tok in args.iter().map(|s| s.as_str()) {
         if tok == "-l" {
             solo_lineas = true;
         } else {

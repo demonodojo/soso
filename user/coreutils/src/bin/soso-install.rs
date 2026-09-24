@@ -45,8 +45,8 @@ const SECTORS_PER_MFS_BLOCK: u64 = MFS_BLOCK as u64 / SECTOR as u64;
 const PROGRESS_INTERVAL_MS: u64 = 2000;
 const PROGRESS_STEP_MIB: u64 = 64;
 
-fn main(args: &str) -> u8 {
-    let parts: Vec<&str> = args.split_whitespace().collect();
+fn main(args: &[String]) -> u8 {
+    let parts: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     if !parts.is_empty() && (parts[0] == "help" || parts[0] == "--help") {
         help();
         return 0;

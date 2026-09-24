@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use coreutils::util::{err_path, leer_fichero};
 use libsoso::sys;
 
@@ -20,10 +21,10 @@ fn head_data(data: &[u8], n: usize) {
     }
 }
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
     let mut n = 10usize;
     let mut paths: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-    let mut it = args.split_whitespace();
+    let mut it = args.iter().map(|s| s.as_str());
     while let Some(tok) = it.next() {
         if tok == "-n" {
             if let Some(v) = it.next() {

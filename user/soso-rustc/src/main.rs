@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::format;
 use libsoso::{println, sys};
 
@@ -17,16 +18,19 @@ fn existe(path: &str) -> bool {
     sys::open(path, libsoso::abi::O_RDONLY) >= 0
 }
 
-fn main(args: &str) -> u8 {
-    if args.contains("--version") || args.contains("-V") {
+fn main(args: &[String]) -> u8 {
+    // Antes esto era `contains` sobre la línea entera: `--versionado` casaba
+    // con `--version`. Con el argv de verdad se compara el argumento.
+    let tiene = |f: &str| args.iter().any(|a| a == f);
+    if tiene("--version") || tiene("-V") {
         println!("{VERSION}");
         return 0;
     }
-    if args.contains("--print") && args.contains("sysroot") {
+    if tiene("--print") && tiene("sysroot") {
         println!("{SYSROOT}");
         return 0;
     }
-    if args.contains("help") || args.is_empty() {
+    if tiene("help") || args.is_empty() {
         println!("{VERSION}");
         println!("sysroot: {SYSROOT}");
         println!("usa: soso-rustc --version | --print sysroot");

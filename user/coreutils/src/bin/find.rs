@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::format;
 use coreutils::util::err_path;
 use libsoso::{abi, println, sys};
@@ -52,8 +53,8 @@ fn recorrer(dir: &str, patron: Option<&str>) -> u8 {
     fallo
 }
 
-fn main(args: &str) -> u8 {
-    let mut it = args.split_whitespace();
+fn main(args: &[String]) -> u8 {
+    let mut it = args.iter().map(|s| s.as_str());
     let Some(root) = it.next() else {
         println!("uso: find RUTA [-name PATRON]");
         return 2;

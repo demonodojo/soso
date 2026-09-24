@@ -818,6 +818,7 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
                 buf,
                 len,
                 write: true,
+                deadline_ms: 0,
             },
         );
     }
@@ -939,6 +940,7 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
                 buf,
                 len,
                 write: false,
+                deadline_ms: 0,
             },
         );
     }
@@ -1380,9 +1382,19 @@ fn read_spawn_args(
         }
         return Ok(parts);
     }
+    // Camino antiguo (`spawn_io`): el llamante no tiene un argv, tiene una
+    // **línea**. Convertirla en argv es partirla por espacios, que es lo que
+    // hacía cada programa por su cuenta hasta T62. Meterla entera como un solo
+    // argumento haría que `soso-improve eco-servidor 9460` viera una orden
+    // llamada «eco-servidor 9460» — y así estaba: el juntado que `entry!` hacía
+    // al otro lado lo tapaba.
+    //
+    // Quien necesite pasar un argumento con espacios usa `spawn_io_ex`, que
+    // lleva argv de verdad y no pasa por aquí.
     let mut argv: alloc::vec::Vec<alloc::string::String> = alloc::vec![path.into()];
     if fallback_len != 0 {
-        argv.push(user_str(fallback_ptr, fallback_len)?.into());
+        let linea = user_str(fallback_ptr, fallback_len)?;
+        argv.extend(linea.split_whitespace().map(alloc::string::String::from));
     }
     Ok(argv)
 }
@@ -2111,6 +2123,41 @@ fn sys_read_timeout(
             _ => None,
         })
     })?;
+    // Tuberías con plazo (T61). Sin esto, leer una tubería sólo se podía hacer
+    // bloqueando, y drenar stdout y stderr a la vez era imposible sin
+    // arriesgar un interbloqueo: el hijo llena el canal que no estás leyendo.
+    let pipe_id = with_fd(fd, |slot| {
+        Ok(match slot {
+            Fd::PipeRead(id) => Some(*id),
+            _ => None,
+        })
+    })?;
+    if let Some(id) = pipe_id {
+        if len == 0 {
+            return Ok(0);
+        }
+        if !user_range_ok(buf, len, true) {
+            return Err(-abi::EFAULT);
+        }
+        let n = pipe::try_read(id, buf, len);
+        if n > 0 {
+            return Ok(n);
+        }
+        // Cero **sólo** significa EOF, y EOF sólo lo hay si el escritor cerró.
+        if pipe::write_closed(id) {
+            return Ok(0);
+        }
+        super::block_current(
+            ctx_from_frame(f),
+            State::WaitingPipe {
+                pipe_id: id,
+                buf,
+                len,
+                write: false,
+                deadline_ms: socket_deadline(timeout_ms),
+            },
+        );
+    }
     if let Some(slot) = tcp_slot {
         if len == 0 {
             return Ok(0);

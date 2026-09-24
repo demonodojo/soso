@@ -3,14 +3,17 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use libsoso::{errno_str, println, sys};
+use alloc::string::String;
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
     let mut alguno = false;
     let mut fallo = 0u8;
-    for path in args.split_whitespace() {
+    for path in args {
         alguno = true;
         let r = sys::unlink(path);
         if r < 0 {

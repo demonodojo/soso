@@ -18,7 +18,7 @@ fn check(cond: bool, msg: &str) -> u8 {
     }
 }
 
-fn main(_args: &str) -> u8 {
+fn main(_args: &[alloc::string::String]) -> u8 {
     let mut fallo = 0u8;
     let _ = sys::mkdir("/tmp/sosofs-test");
 

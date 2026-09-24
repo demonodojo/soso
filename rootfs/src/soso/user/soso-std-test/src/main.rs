@@ -5,13 +5,14 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use soso_std::{env, fs, pipe, sync, time};
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
     libsoso::heap_init();
-    soso_std::init_from_args(args);
+    soso_std::init_from_argv(args);
     let mut fallo = 0u8;
 
     if env::args().next().is_none() {

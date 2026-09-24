@@ -4,12 +4,15 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use libsoso::{abi, errno_str, print, println, sys};
+use alloc::string::String;
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
-    let path = args.trim();
+fn main(args: &[String]) -> u8 {
+    let path = args.first().map(|s| s.as_str()).unwrap_or("");
     let desde_stdin = path.is_empty() || path == "-";
     let fd = if desde_stdin {
         0

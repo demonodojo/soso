@@ -1,6 +1,6 @@
 # T48 — Añadir reloj y transporte nativos para evaluaciones
 
-**Hito:** SI-2 · **Tipo:** Implementación portable y validación guest · **Estado:** pendiente.
+**Hito:** SI-2 · **Tipo:** Implementación portable y validación guest · **Estado:** hecha (2026-09-23).
 
 **Dependencias:** [T45](T45-cli-capacidades.md)
 
@@ -37,9 +37,26 @@ Los subcomandos nuevos se ejecutan después de implementarlos. Guardar comando, 
 
 ## Cierre y condición de bloqueo
 
-- [ ] Entrega y comprobaciones terminadas con evidencia.
-- [ ] Catálogo, índice y seguimiento sincronizados.
-- [ ] Validación nativa registrada por separado, sin inferirla de la compilación.
+- [x] Entrega y comprobaciones terminadas con evidencia.
+- [x] Catálogo, índice y seguimiento sincronizados.
+- [x] Validación nativa registrada por separado, sin inferirla de la compilación.
+
+Entregado en `crates/soso-improve-core/src/tiempo.rs` (`Reloj`, `Plazo`,
+`RelojSimulado`) y `transporte.rs` (`Paso::{Hecho,Espera,Fin}`, `Transporte`,
+`Conector`, `escribir_todo`/`leer_hasta_fin`/`leer_exacto`, `TransporteSimulado`),
+con adaptadores host (`std::net`, `Instant`) y guest (`tcp_connect`,
+`read_timeout`, `uptime_ms`). La orden `soso-improve eco` ejecuta la
+comprobación **entre dos procesos de soso**, sin proxy del host. Resumen en
+[seguimiento/T48.md](seguimiento/T48.md); evidencia en
+`target/self-improvement/tasks/T48/resultado.md`.
+
+**Límites.** El transporte mueve bytes: no hay HTTP ni SSE dentro. El
+`Transport` de `soso-llm-core` —que sí confunde espera con cierre— no se ha
+migrado; hacerlo aquí habría arrastrado `soso-llm` entero. No hay cancelación
+explícita todavía, y por eso el sondeo está acotado a 20 ms.
+`native_validation` queda en **partial**: el eco corre en soso, pero lo lanza
+el arnés del host, y repetirlo desde el runner nativo es
+[T49](T49-pruebas-guest.md).
 
 Una syscall ausente origina una ficha con sonda. No reemplazar el transporte guest por un proxy host para marcarlo verificado.
 

@@ -58,6 +58,10 @@ struct ServeRuntime {
     conf: Conf,
     admission: AdmissionState,
     http_listener_fd: u64,
+    /// Si ya se mandaron las cabeceras de esta respuesta. En streaming se
+    /// mandan **antes** de generar, así que a partir de ahí el estado HTTP no
+    /// se puede rectificar y un error tiene que ir dentro del flujo.
+    cabeceras_enviadas: bool,
 }
 
 struct ServingObserver<'a> {
@@ -168,6 +172,7 @@ pub fn run(args: &[&str]) -> u8 {
         conf,
         admission: AdmissionState::default(),
         http_listener_fd,
+        cabeceras_enviadas: false,
     };
 
     loop {
@@ -194,14 +199,51 @@ fn atender_http(rt: &mut ServeRuntime, mut conn: TcpFd) {
             return;
         }
     };
+    // **Una petición, una respuesta.** En streaming las cabeceras salen antes
+    // de generar, así que un fallo posterior —la validación de `tool_choice`,
+    // por ejemplo— no puede contestarse con otra respuesta HTTP entera: el
+    // cliente está leyendo un flujo y recibiría un `HTTP/1.1 400 …` como si
+    // fueran datos. Eso es lo que vio la campaña de T14 en el caso Q07.
+    rt.cabeceras_enviadas = false;
     match dispatch(rt, req, &mut conn) {
         Ok(resp) if !resp.is_empty() => {
             let _ = write_bytes(conn.fd, &resp);
         }
         Ok(_) => {}
+        Err(e) if rt.cabeceras_enviadas => {
+            // El error viaja **dentro** del flujo y se cierra con `[DONE]`,
+            // con el mismo codificador que ya usa la cancelación.
+            for ev in encode_stream_failure(&mensaje_error(&e), codigo_error(&e)) {
+                let _ = write_bytes(conn.fd, &ev);
+            }
+        }
         Err(e) => {
             let _ = write_bytes(conn.fd, &error_response(&e));
         }
+    }
+}
+
+/// Mensaje y código del error, para reportarlo dentro de un flujo ya abierto.
+fn mensaje_error(err: &GuestServiceError) -> String {
+    match err {
+        GuestServiceError::Api(e) => e.message(),
+        GuestServiceError::Unauthorized => String::from("autenticacion invalida"),
+        GuestServiceError::NotFound => String::from("ruta desconocida"),
+        GuestServiceError::MethodNotAllowed => String::from("metodo no permitido"),
+        GuestServiceError::Busy => String::from("generacion en curso"),
+        GuestServiceError::Inferencia => String::from("inferencia fallo"),
+        _ => String::from("error interno"),
+    }
+}
+
+fn codigo_error(err: &GuestServiceError) -> &'static str {
+    match err {
+        GuestServiceError::Api(e) => e.code(),
+        GuestServiceError::Unauthorized => "invalid_api_key",
+        GuestServiceError::NotFound => "not_found",
+        GuestServiceError::MethodNotAllowed => "method_not_allowed",
+        GuestServiceError::Busy => "busy",
+        _ => "internal",
     }
 }
 
@@ -276,6 +318,13 @@ fn post_chat_inner(
         return Err(GuestServiceError::Inferencia);
     }
 
+    // `generate_*` devuelve la secuencia **entera**: prompt + generación. Sin
+    // recortarla, el `content` de la respuesta traía la plantilla renderizada
+    // completa —`<|im_start|>system … <|im_start|>assistant\nLISTO`— mientras
+    // `usage.completion_tokens` decía 2. El texto y el consumo se contradecían,
+    // y cualquiera que leyera el `content` recibía el prompt de vuelta.
+    let token_ids = solo_generados(&token_ids, prompt_ids.len());
+
     let generated_text = rt
         .propietario
         .sesion
@@ -339,6 +388,8 @@ fn post_chat_stream(
     let cancel = AtomicBool::new(false);
     write_bytes_or_cancel(conn.fd, &format_sse_response_headers(200), &cancel)
         .map_err(|_| GuestServiceError::Io)?;
+    // A partir de aquí el estado HTTP ya está dicho y no se puede rectificar.
+    rt.cabeceras_enviadas = true;
 
     let (token_ids, report) = {
         let mut observer = ServingObserver {
@@ -360,6 +411,7 @@ fn post_chat_stream(
         generar_para_api(sesion, &prompt_ids, &prepared, &profile, &mut observer)
             .map_err(|_| GuestServiceError::Inferencia)?
     };
+    let token_ids = solo_generados(&token_ids, prompt_ids.len());
 
     if report.stop == StopReason::Cancelled || cancel.load(Ordering::Acquire) {
         let events = encode_stream_failure("generacion cancelada", "cancelled");
@@ -536,6 +588,18 @@ fn unauthorized_body() -> Vec<u8> {
 fn busy_body() -> Vec<u8> {
     let body = "{\"error\":{\"message\":\"generacion en curso\",\"type\":\"invalid_request_error\",\"code\":\"busy\"}}";
     format_response(429, &[("Content-Type", "application/json")], body.as_bytes())
+}
+
+/// Quita el prompt de la secuencia devuelta por el generador.
+///
+/// Se hace por longitud y no buscando un separador: los ids del prompt son
+/// exactamente los que se le pasaron, y un separador podría aparecer también
+/// en lo generado.
+fn solo_generados(secuencia: &[u32], prompt_len: usize) -> Vec<u32> {
+    if secuencia.len() <= prompt_len {
+        return Vec::new();
+    }
+    secuencia[prompt_len..].to_vec()
 }
 
 fn error_response(err: &GuestServiceError) -> Vec<u8> {

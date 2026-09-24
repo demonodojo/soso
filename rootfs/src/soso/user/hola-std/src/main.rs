@@ -5,13 +5,14 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use soso_std::println;
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
     libsoso::heap_init();
-    soso_std::init_from_args(args);
+    soso_std::init_from_argv(args);
     soso_std::init();
     if let Some(a) = soso_std::env::args().next() {
         println!("arg0: {a}");

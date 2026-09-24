@@ -50,9 +50,7 @@ impl PackWriter {
     }
 
     pub fn should_pack(rel: &str) -> bool {
-        use crate::{PACK_SKIP, PACK_SKIP_DIRS};
-        !PACK_SKIP.iter().any(|skip| *skip == rel)
-            && !PACK_SKIP_DIRS.iter().any(|dir| rel.starts_with(dir))
+        crate::por_que_se_excluye(rel).is_none()
     }
 
     pub fn push(&mut self, path: String, data: Vec<u8>) {

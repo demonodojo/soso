@@ -1,6 +1,6 @@
 # T49 — Ejecutar casos compartidos desde un runner nativo
 
-**Hito:** SI-0 / SI-4 · **Tipo:** Implementación portable y validación guest · **Estado:** pendiente.
+**Hito:** SI-0 / SI-4 · **Tipo:** Implementación portable y validación guest · **Estado:** hecha (2026-09-24), con límites declarados.
 
 **Dependencias:** [T45](T45-cli-capacidades.md), [T46](T46-archivos-durables.md), [T47](T47-procesos-nativos.md), [T48](T48-reloj-red.md)
 

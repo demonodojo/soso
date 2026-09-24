@@ -53,6 +53,12 @@ pub enum State {
         buf: u64,
         len: u64,
         write: bool,
+        /// Instante límite en ms de `uptime`; `0` = sin plazo (T61).
+        ///
+        /// Sin esto, leer una tubería sólo se podía hacer bloqueando, y por eso
+        /// no había forma de drenar stdout y stderr a la vez sin arriesgar un
+        /// interbloqueo.
+        deadline_ms: u64,
     },
     /// `futex_wait` sobre (pml4, uaddr).
     WaitingFutex { pml4: u64, uaddr: u64 },
@@ -796,10 +802,16 @@ pub fn spawn_console(
     // path del binario y `main()` recibe argv[1..]. Sin el path aquí, un
     // `spawn("/bin/init", "sleep 5000")` llegaba como argv=["sleep 5000"] y el
     // hijo se quedaba sin argumentos.
+    //
+    // `args` es una **línea**, no un argv, así que se parte por espacios: es
+    // lo que la línea significa. Meterla entera como un solo argumento
+    // funcionaba sólo mientras `entry!` la volvía a juntar al otro lado; al
+    // quitar ese juntado (T62), `spawn("/bin/init", "fpu 3")` pasó a llegar
+    // como un único argumento «fpu 3» y el hijo no reconocía la orden.
+    // Quien tenga que pasar un argumento con espacios usa `SYS_SPAWN_IO` con
+    // `argv_ptr`, que no pasa por aquí.
     let mut argv = vec![String::from(path)];
-    if !args.is_empty() {
-        argv.push(String::from(args));
-    }
+    argv.extend(args.split_whitespace().map(String::from));
     let env = {
         let procs = PROCS.lock();
         procs
@@ -1359,8 +1371,23 @@ extern "C" fn schedule_inner() -> ! {
         }
         // Despertar lectores/escritores de pipe cuando haya datos, espacio o EOF.
         for i in 0..procs.len() {
-            if let State::WaitingPipe { pipe_id, buf, len, write } = procs[i].state {
+            if let State::WaitingPipe {
+                pipe_id,
+                buf,
+                len,
+                write,
+                deadline_ms,
+            } = procs[i].state
+            {
                 procs[i].space.as_ref().unwrap().activate();
+                // El plazo se mira antes que nada: vencido, se contesta EAGAIN
+                // igual que en el camino TCP. «Todavía no hay datos» y «el otro
+                // extremo cerró» siguen siendo cosas distintas (0 es EOF).
+                if deadline_ms != 0 && crate::arch::pit::uptime_ms() >= deadline_ms {
+                    procs[i].ctx.rax = (-soso_abi::EAGAIN) as u64;
+                    procs[i].state = State::Runnable;
+                    continue;
+                }
                 // Revalidar el rango del usuario: se comprobó al entrar en la
                 // syscall, pero otro hilo del proceso pudo hacer `munmap` mientras
                 // este estaba bloqueado, y aquí el kernel copia sin red. Se usa

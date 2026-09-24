@@ -1,21 +1,19 @@
-//! `hexdump <fichero>`: volcado hexadecimal + ASCII. Con `-` lee **stdin**, que es
-//! lo que hace útil `algo | hexdump -` (ver la nota de `cat` sobre por qué `-` y no
-//! "sin argumentos": en la tty de soso no hay EOF).
+//! `hexdump <fichero>`: volcado hexadecimal + ASCII. Sin argumentos (o con `-`)
+//! lee **stdin** (`algo | hexdump`). En la consola, Ctrl-D cierra la entrada.
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use libsoso::{abi, errno_str, print, println, sys};
+use alloc::string::String;
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
-    let path = args.trim();
-    if path.is_empty() {
-        println!("uso: hexdump <fichero>  |  hexdump - (lee stdin)");
-        return 2;
-    }
-    let desde_stdin = path == "-";
+fn main(args: &[String]) -> u8 {
+    let path = args.first().map(|s| s.as_str()).unwrap_or("");
+    let desde_stdin = path.is_empty() || path == "-";
     let fd = if desde_stdin {
         0
     } else {

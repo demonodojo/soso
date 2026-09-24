@@ -189,6 +189,11 @@ impl ApiError {
             ApiError::Dominio(ChatError::ContextoExcedido { .. }) => "context_length_exceeded",
             ApiError::Dominio(ChatError::EsquemaNoSoportado { .. }) => "unsupported_schema",
             ApiError::Dominio(ChatError::LimiteExcedido { .. }) => "limit_exceeded",
+            // Pedir una herramienta que no existe tiene su propio código: un
+            // cliente necesita distinguirlo de «tu JSON está mal», porque se
+            // arreglan de formas distintas. Caía en `invalid_request`, el
+            // cajón de sastre, y así lo vio la campaña de T14 (caso Q08).
+            ApiError::Dominio(ChatError::HerramientaDesconocida { .. }) => "unknown_tool",
             _ => "invalid_request",
         }
     }

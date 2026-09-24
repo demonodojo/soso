@@ -19,12 +19,7 @@ use soso_abi::O_RDONLY;
 
 libsoso::entry!(main);
 
-fn parse_args(args: &str) -> alloc::vec::Vec<alloc::string::String> {
-    args.split_whitespace().map(alloc::string::String::from).collect()
-}
-
-fn main(args: &str) -> u8 {
-    let args = parse_args(args);
+fn main(args: &[alloc::string::String]) -> u8 {
     if args.is_empty() {
         print_usage();
         return 2;

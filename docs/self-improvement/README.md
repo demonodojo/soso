@@ -18,7 +18,41 @@ del modelo (5/5 fixtures). **[T04](T04-dominio-chat.md)**, **[T05](T05-validacio
 completadas (dominio chat + render + parse + informe + cancelación + API JSON + HTTP + respuestas SSE).
 **[T13](T13-servidor-host.md)** (servidor de desarrollo host) está **completada** (2026-09-22;
 [seguimiento/T13.md](seguimiento/T13.md)). **[T15](T15-sesion-residente.md)** (sesión residente guest) está **completada** (2026-09-22;
-[seguimiento/T15.md](seguimiento/T15.md) … [seguimiento/T19.md](seguimiento/T19.md)). **SI-2 (T16–T19) tiene ya su evidencia guest**: el 23-sep-2026 `cargo xtask test-llm-api` pasó **12/12 invariantes contra soso en QEMU con los pesos reales** (`guest_ok`, exit 0). Llegar ahí costó cuatro defectos reales, con ficha cada uno: **[T54](T54-accept-externo.md)** (el `accept` de userspace era loopback puro), **[T55](T55-accept-sin-plazo.md)** (`tcp_accept(fd,0)` dormía al servidor para siempre), **[T56](T56-utf8-tool-parser.md)** (el parser partía caracteres UTF-8 y mataba el proceso) y **[T57](T57-medio-cierre.md)** (el medio cierre del cliente tiraba la respuesta). Lo que queda para **cerrar el hito** es **[T14](T14-evaluacion-modelo.md)** con resultado go contra el endpoint guest, y T14 sigue bloqueada por **[T48](T48-reloj-red.md)**, que es por tanto la ficha recomendada ahora.
+[seguimiento/T15.md](seguimiento/T15.md) … [seguimiento/T19.md](seguimiento/T19.md)). **SI-2 (T16–T19) tiene ya su evidencia guest**: el 23-sep-2026 `cargo xtask test-llm-api` pasó **12/12 invariantes contra soso en QEMU con los pesos reales** (`guest_ok`, exit 0). Llegar ahí costó cuatro defectos reales, con ficha cada uno: **[T54](T54-accept-externo.md)** (el `accept` de userspace era loopback puro), **[T55](T55-accept-sin-plazo.md)** (`tcp_accept(fd,0)` dormía al servidor para siempre), **[T56](T56-utf8-tool-parser.md)** (el parser partía caracteres UTF-8 y mataba el proceso) y **[T57](T57-medio-cierre.md)** (el medio cierre del cliente tiraba la respuesta). **[T14](T14-evaluacion-modelo.md) dio NO-GO**: **8 de 10** casos de protocolo sólidos frente a un umbral de 10, con **0 inestables** (el modelo es reproducible a temperatura 0). La investigación de **[T59](T59-tool-calls.md)** (24-sep) cerró la atribución: **el no-go es del modelo**. El Qwen2.5-Coder-3B no usa las herramientas en ninguno de los dos casos que el banco ejercita —en Q04 repite la llamada con el resultado delante; en Q07, con `tool_choice: "required"`, no emite ninguna—, mientras que el render es correcto y el servicio detecta la violación. Los otros dos casos ya pasan: uno era un defecto real del servicio (**[T60](T60-validacion-peticion.md)**, cerrada) y el otro, del propio arnés. Con este modelo el umbral de 10/10 **no se alcanza**, y **todo lo accionable está hecho**: la decisión siguiente es de plan —probar otro modelo con el mismo banco, sin tocarlo durante la comparación, o acotar SI-3 a lo que un agente sin herramientas pueda hacer—. Presupuestos medidos: mediana 60,7 s por tarea, máximo 278 s. **Un no-go no habilita a [T16](T16-servicio-guest.md) ni a [T22](T22-primera-mejora.md)**, así que **SI-2 no cierra**: fichas recomendadas ahora, T59 y T60, y repetir la campaña al cerrarlas. Criterio de la evaluación en [evaluacion.md](evaluacion.md).
+**Camino SI-4**: **[T23](T23-estado-coordinador.md)** (formato de tareas y
+estados), **[T63](T63-generacion-rota-encalla.md)** (el corte que encallaba la
+referencia durable) y **[T24](T24-checkout.md)** (copia de tarea y exportación
+de su parche) están **completadas** el 24-sep-2026, las tres con su sonda en
+guest. Con eso el coordinador ya sabe llevar el estado de una tarea y preparar
+y recoger el trabajo de un candidato **sin Git**.
+
+De T23 salieron las decisiones que después no se pueden cambiar: sólo el
+validador escribe «aceptada», lo que no se midió se informa con motivo —nunca
+como cero— y en el estado van referencias, no logs. De T24, que lo que siembra
+el coordinador no cuenta como cambio del candidato y que un enlace simbólico se
+informa en vez de desaparecer del parche.
+
+**Y aquí la cadena se para.** [T25](T25-ejecutor.md) necesita
+[T21](T21-opencode-contrato.md), que necesita [T20](T20-opencode-config.md), que
+depende del **no-go de [T14](T14-evaluacion-modelo.md)**; y
+[T26](T26-validador.md)–[T29](T29-campana.md) van detrás de T25. El hito SI-4 no
+avanza más sin la decisión de plan que T14 dejó sobre la mesa: probar otro
+modelo con el mismo banco, sin tocarlo durante la comparación, o acotar SI-3 a
+lo que un agente sin herramientas pueda hacer.
+
+**[T62](T62-argv-en-los-programas.md) está cerrada** el 24-sep-2026, y resultó
+ser de **cinco** sitios y no de uno: además de `entry!`, empaquetaban la línea
+entera como un solo argumento `sosh`, `libsoso::spawn_io` y dos caminos del
+kernel. El compilador encontró los 39 consumidores; los cinco productores no,
+porque ahí no cambia el tipo, y salieron en QEMU disfrazados de otra cosa
+—conexión rechazada, registros YMM, un HTTP 500 de Forja—. Con eso el «argv,
+nunca una línea de shell» de C5 es cierto de punta a punta. Lo que queda es
+escribirlo desde la shell: **[T64](T64-sosh-comillas.md)**, que es una decisión
+de sintaxis.
+
+**Lo que queda habilitado**: T64 y los inventarios
+[T32](T32-opencode-inventario.md), [T36](T36-forja-trazabilidad.md) y
+[T38](T38-toolchain-inventario.md).
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.
 Entregar al modelo una ficha por sesión, las secciones indicadas
@@ -115,17 +149,17 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T11](T11-http.md) | Leer HTTP fragmentado con límites explícitos | SI-2 | T10 | Completada |
 | [T12](T12-respuestas-sse.md) | Emitir respuestas completas y eventos SSE | SI-2 | T07, T08, T10 | Completada |
 | [T13](T13-servidor-host.md) | Conectar el mismo runtime a un servidor de desarrollo en host | SI-1 / SI-2 | T09, T11, T12 | Completada |
-| [T14](T14-evaluacion-modelo.md) | Medir calidad y fijar presupuestos antes de usar el agente | SI-0 / SI-1 | T02, T03, T13, T48 | Pendiente |
+| [T14](T14-evaluacion-modelo.md) | Medir calidad y fijar presupuestos antes de usar el agente | SI-0 / SI-1 | T02, T03, T13, T48 | Completada — **resultado NO-GO** |
 | [T15](T15-sesion-residente.md) | Extraer la sesión residente manteniendo ask | SI-2 | T08, T09 | Completada |
-| [T16](T16-servicio-guest.md) | Servir HTTP en guest con el modelo residente | SI-2 | T10, T11, T12, T14, T15 | Hecho (T14 go / nativo pend.) |
+| [T16](T16-servicio-guest.md) | Servir HTTP en guest con el modelo residente | SI-2 | T10, T11, T12, T14, T15 | Hecho (T14 dio **no-go**: no habilitada) |
 | [T17](T17-admisiones-cancelacion.md) | Atender ocupado, health y desconexión durante inferencia | SI-2 | T09, T16 | Hecho (e2e T19 pend.) |
 | [T18](T18-puertos-qemu.md) | Añadir reenvío HTTP configurable sin colisiones | SI-2 | — | Hecho (e2e T19) |
 | [T19](T19-qemu-e2e.md) | Crear la prueba completa de API dentro de soso | SI-2 | T16, T17, T18 | Completada (guest 12/12 con pesos reales) |
 | [T20](T20-opencode-config.md) | Configurar OpenCode para el proveedor soso | SI-3 | T14, T19 | Pendiente |
 | [T21](T21-opencode-contrato.md) | Capturar el contrato real de OpenCode sin depender del modelo | SI-3 | T20, T47, T48 | Pendiente |
 | [T22](T22-primera-mejora.md) | Resolver una tarea real usando la inferencia guest | SI-3 | T02, T19, T21 | Pendiente |
-| [T23](T23-estado-coordinador.md) | Crear el formato de tareas y estados del coordinador | SI-4 | T01, T02, T46, T45 | Pendiente |
-| [T24](T24-checkout.md) | Preparar una copia de tarea y exportar su parche | SI-4 | T23, T50 | Pendiente |
+| [T23](T23-estado-coordinador.md) | Crear el formato de tareas y estados del coordinador | SI-4 | T01, T02, T46, T45 | Completada (guest acreditado; destapó T63) |
+| [T24](T24-checkout.md) | Preparar una copia de tarea y exportar su parche | SI-4 | T23, T50 | Completada (guest acreditado) |
 | [T25](T25-ejecutor.md) | Ejecutar OpenCode con límites y logs | SI-4 | T21, T24, T47, T48 | Pendiente |
 | [T26](T26-validador.md) | Validar candidatos y promover solo los aceptados | SI-4 | T24, T25 | Pendiente |
 | [T27](T27-reanudacion.md) | Reanudar tras caída sin repetir efectos | SI-4 | T23, T25, T26 | Pendiente |
@@ -146,12 +180,12 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T42](T42-c-link-imagen.md) | Cerrar C, ensamblador y empaquetado por perfil | SI-7 | T38, T41 | Pendiente |
 | [T43](T43-validacion-actualizacion-nativa.md) | Validar y recuperar candidatos construidos en soso | SI-7 | T31, T37, T42 | Pendiente |
 | [T44](T44-cierre-nativo.md) | Repetir tres mejoras con agente, modelo y build en soso | SI-7 | T29, T43, T51 | Pendiente |
-| [T45](T45-cli-capacidades.md) | Unificar órdenes, capacidades y códigos de salida | SI-0 | T01, T02 | Pendiente |
-| [T46](T46-archivos-durables.md) | Acreditar persistencia y actualización de referencias en sosofs | SI-4 | T01 | Pendiente |
-| [T47](T47-procesos-nativos.md) | Ejecutar procesos con argumentos, canales y límites exactos | SI-4 | T45, T48 | Pendiente |
-| [T48](T48-reloj-red.md) | Añadir reloj y transporte nativos para evaluaciones | SI-2 | T45 | Pendiente |
-| [T49](T49-pruebas-guest.md) | Ejecutar casos compartidos desde un runner nativo | SI-0 / SI-4 | T45, T46, T47, T48 | Pendiente |
-| [T50](T50-cambios-contenido.md) | Aplicar y exportar cambios sin Git | SI-4 | T01, T46 | Pendiente |
+| [T45](T45-cli-capacidades.md) | Unificar órdenes, capacidades y códigos de salida | SI-0 | T01, T02 | Completada |
+| [T46](T46-archivos-durables.md) | Acreditar persistencia y actualización de referencias en sosofs | SI-4 | T01 | Completada (reinicio real) |
+| [T47](T47-procesos-nativos.md) | Ejecutar procesos con argumentos, canales y límites exactos | SI-4 | T45, T48 | Completada (con límites: T61, T62) |
+| [T48](T48-reloj-red.md) | Añadir reloj y transporte nativos para evaluaciones | SI-2 | T45 | Completada |
+| [T49](T49-pruebas-guest.md) | Ejecutar casos compartidos desde un runner nativo | SI-0 / SI-4 | T45, T46, T47, T48 | Completada (con límites) |
+| [T50](T50-cambios-contenido.md) | Aplicar y exportar cambios sin Git | SI-4 | T01, T46 | Completada (pasos 4–5 aparte) |
 | [T51](T51-aceptacion-circuito-nativo.md) | Acreditar todo el circuito de automejora dentro de soso | SI-7 | T29, T35, T37, T41, T42, T43, T49, T50 | Pendiente |
 | [T52](T52-tokenizer-merges.md) | Llevar las fusiones BPE al formato .som y al convertidor | SI-1 | — (deriva de T03) | Completada |
 | [T53](T53-tokenizer-bpe.md) | Segmentar por fusiones BPE en soso-llm-core | SI-1 | T52 (deriva de T03) | Completada |
@@ -159,6 +193,13 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T55](T55-accept-sin-plazo.md) | `tcp_accept(fd, 0)` duerme el servidor para siempre | SI-2 | T54 (deriva de T19) | Completada |
 | [T56](T56-utf8-tool-parser.md) | El parser de salida parte caracteres UTF-8 y mata el servidor | SI-1 / SI-2 | — (deriva de T19) | Completada |
 | [T57](T57-medio-cierre.md) | El medio cierre del cliente mataba la respuesta | SI-2 | T54–T56 (deriva de T19) | Completada |
+| [T58](T58-respuesta-con-prompt.md) | La respuesta de chat devolvía el prompt pegado a la generación | SI-2 | — (deriva de T14) | Completada |
+| [T59](T59-tool-calls.md) | Herramientas: investigación — **resultado: límite del modelo** | SI-2 / SI-3 | — (deriva de T14) | Cerrada |
+| [T60](T60-validacion-peticion.md) | Errores de la API: clasificación y doble respuesta en streaming | SI-2 | — (deriva de T14) | Completada |
+| [T61](T61-pipe-no-bloqueante.md) | Lectura de tuberías con plazo, sin bloquear | SI-4 | — (deriva de T47) | Completada |
+| [T62](T62-argv-en-los-programas.md) | Los programas reciben los argumentos juntados, no su argv | SI-4 | — (deriva de T47) | Completada (5 productores; abrió T64) |
+| [T64](T64-sosh-comillas.md) | `sosh` no entiende comillas: una ruta con espacios es inescribible | SI-4 | T62 | Pendiente |
+| [T63](T63-generacion-rota-encalla.md) | Desencallar una referencia durable con una generación rota | SI-4 | T46 | Completada (guest acreditado; desbloquea T27) |
 
 ## Condiciones adicionales de entrada
 
@@ -168,6 +209,7 @@ son obligatorias y también constan en [tasks.json](tasks.json):
 - **[T03](T03-perfil-modelo.md)**: Pesos, tokenizer y plantilla originales de una revisión identificada.
 - **[T06](T06-render-chat.md)**: Las divergencias de tokenizer detectadas en T03 están corregidas y verificadas.
 - **[T14](T14-evaluacion-modelo.md)**: Pesos reales disponibles; un informe no-go no habilita las tareas consumidoras.
+- **Criterio de la evaluación**: [evaluacion.md](evaluacion.md) — qué cuenta como éxito, los cinco desenlaces y de dónde salen los presupuestos.
 - **[T16](T16-servicio-guest.md)**: T14 tiene resultado go, además de informe terminado.
 - **[T19](T19-qemu-e2e.md)**: Modo de integración con pesos reales y entorno QEMU disponible.
 - **[T54](T54-accept-externo.md)**: Entorno QEMU con reenvío de puertos (T18) y un servidor de userspace escuchando.

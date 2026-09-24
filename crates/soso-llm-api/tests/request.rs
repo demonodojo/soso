@@ -227,3 +227,31 @@ fn error_body_forma_openai() {
     assert!(v.get("error").unwrap().get("message").is_some());
     assert_eq!(err.status_code(), 404);
 }
+
+/// T60: cada causa de rechazo tiene su código. `unknown_tool` caía en el cajón
+/// de sastre `invalid_request`, y la campaña de T14 (caso Q08) lo vio.
+#[test]
+fn codigos_de_error_distinguen_la_causa() {
+    use soso_llm_api::ApiError;
+    use soso_llm_core::conversation::ChatError;
+
+    let desconocida = ApiError::Dominio(ChatError::HerramientaDesconocida {
+        nombre: String::from("no_existe"),
+    });
+    assert_eq!(desconocida.code(), "unknown_tool");
+    assert_eq!(desconocida.status_code(), 400);
+    assert_eq!(desconocida.error_type(), "invalid_request_error");
+
+    // Los vecinos no se mueven: un JSON malo y un contexto pasado siguen
+    // diciendo lo suyo.
+    let json_malo = ApiError::JsonInvalido {
+        motivo: String::from("x"),
+    };
+    assert_eq!(json_malo.code(), "invalid_json");
+    let contexto = ApiError::Dominio(ChatError::ContextoExcedido {
+        necesarios: 40_000,
+        disponibles: 32_768,
+    });
+    assert_eq!(contexto.code(), "context_length_exceeded");
+    assert_eq!(contexto.status_code(), 422);
+}

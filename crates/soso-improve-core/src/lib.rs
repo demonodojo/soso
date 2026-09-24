@@ -11,7 +11,33 @@
 //!
 //! Módulos:
 //!
+//! - [`cli`] — órdenes, capacidades y códigos de salida compartidos por los
+//!   dos frontends (T45): sin esto cada uno tenía su sintaxis y su criterio de
+//!   éxito.
+//! - [`delta`] — paquete de cambios por contenido (T50): aplicar un candidato
+//!   **sin Git**, con precondiciones por hash y validación entera antes de
+//!   escribir nada.
+//! - [`durable`] — referencias que sobreviven a un corte (T46). En soso
+//!   `rename` **no** sustituye al destino, así que el patrón habitual no vale:
+//!   aquí se publica por generaciones y nunca se sobrescribe.
 //! - [`entorno`] — traits de archivos y procesos, y sus tipos.
+//! - [`evaluacion`] — campaña go/no-go del modelo (T14): todos los intentos
+//!   cuentan, el verificador no ve el contexto del modelo y lo que no se puede
+//!   medir no se apunta como medido.
+//! - [`pruebas`] — runner sin libtest para ejecutar las comprobaciones
+//!   **dentro de soso** (T49). Una capacidad que aún no existe se informa como
+//!   pendiente: cuenta en el total y no cuenta como acierto.
+//! - [`state`] — tareas, intentos y transiciones del coordinador (T23): sólo
+//!   el validador puede escribir «aceptada», y lo que no se midió se dice, no
+//!   se pone a cero.
+//! - [`workspace`] — copia de tarea y exportación de su parche (T24): lo que
+//!   siembra el coordinador no cuenta como cambio del candidato, y un enlace
+//!   simbólico se informa en vez de desaparecer del parche.
+//! - [`tiempo`] — reloj monotónico y plazos (T48), con un reloj simulado para
+//!   pruebas que no dependen de dormir de verdad.
+//! - [`transporte`] — TCP abstracto (T48) que distingue «hay datos», «espera»
+//!   y «el otro cerró», que es lo que el `Transport` de `soso-llm-core` no
+//!   separa.
 //! - [`captura`] — base reproducible: inventario, almacén por contenido, sonda
 //!   de estabilidad y reconstrucción. **No usa git para reconstruir**: guarda
 //!   los contenidos, así que no hace falta `clone` ni `apply` (soso no los
@@ -33,12 +59,21 @@ use alloc::string::{String, ToString};
 
 pub mod captura;
 pub mod caso;
+pub mod cli;
+pub mod delta;
+pub mod durable;
 pub mod entorno;
+pub mod evaluacion;
+pub mod pruebas;
+pub mod tiempo;
+pub mod transporte;
 pub mod ignorar;
 pub mod programa;
 pub mod referencia;
 pub mod protocolo;
 pub mod repo;
+pub mod state;
+pub mod workspace;
 
 /// Versión del formato de manifiestos y casos (C5: `schema_version`).
 pub const ESQUEMA: u32 = 1;
@@ -54,6 +89,9 @@ pub enum Error {
     Formato(String),
     /// El checkout cambió mientras se capturaba.
     Inestable(String),
+    /// Se acabó el plazo. **No** es lo mismo que «el otro extremo cerró»:
+    /// confundir las dos cosas es justo lo que T48 impide.
+    Plazo(String),
 }
 
 impl Error {
@@ -66,6 +104,9 @@ impl Error {
     pub fn formato(m: impl ToString) -> Self {
         Error::Formato(m.to_string())
     }
+    pub fn plazo(m: impl ToString) -> Self {
+        Error::Plazo(m.to_string())
+    }
 }
 
 impl core::fmt::Display for Error {
@@ -75,6 +116,7 @@ impl core::fmt::Display for Error {
             Error::Entorno(m) => write!(f, "entorno: {m}"),
             Error::Formato(m) => write!(f, "formato: {m}"),
             Error::Inestable(m) => write!(f, "captura inestable: {m}"),
+            Error::Plazo(m) => write!(f, "plazo agotado: {m}"),
         }
     }
 }

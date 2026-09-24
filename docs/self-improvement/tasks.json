@@ -426,7 +426,7 @@
       "title": "Medir calidad y fijar presupuestos antes de usar el agente",
       "milestone": "SI-0 / SI-1",
       "kind": "Implementación de evaluación e integración",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T02",
         "T03",
@@ -438,22 +438,42 @@
       ],
       "contract_sections": "C2–C3, C5–C6",
       "context": [
-        "SELF_IMPROVEMENT.md",
-        "crates/soso-llm-core/examples/hostrun.rs",
-        "crates/soso-improve-core/src/entorno.rs",
+        "crates/soso-improve-core/src/evaluacion.rs",
+        "docs/self-improvement/evaluacion.md",
+        "crates/soso-improve-core/src/tiempo.rs",
+        "crates/soso-improve-core/src/protocolo.rs",
+        "tools/soso-improve/src/lib.rs",
         "user/soso-improve/src/main.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "partial",
         "requires": [
           "T16",
           "T41",
           "T48",
           "T49"
         ],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
-      }
+        "evidence": [
+          "target/self-improvement/tasks/T14/resultado.md",
+          "target/self-improvement/tasks/T14/informe.json",
+          "target/t14-campana.log"
+        ],
+        "note": "Campaña ejecutada contra el endpoint guest con pesos reales; la lanza el arnés del host. Ejecutarla desde soso es T49."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T14.md",
+        "evidence": [
+          "cargo run -p soso-improve -- evaluar … -> NO-GO (8/10 sólidos, 0 inestables, 24/30 intentos)",
+          "target/self-improvement/tasks/T14/informe.json",
+          "cargo test -p soso-improve-core -p soso-improve (51 en el core)",
+          "cargo xtask check: TODO OK"
+        ],
+        "blocker": null,
+        "next_step": "Todo lo accionable está hecho (T58, T59, T60). El no-go es del modelo: no usa herramientas. Decisión de plan: otro modelo con el mismo banco, o acotar SI-3."
+      },
+      "resultado": "no-go"
     },
     {
       "id": "T15",
@@ -526,14 +546,14 @@
         "note": "Build guest y tests host API OK; humo loopback guest pendiente T18; T14 go no acreditado."
       },
       "tracking": {
-        "updated_at": "2026-09-22",
+        "updated_at": "2026-09-24",
         "summary": "docs/self-improvement/seguimiento/T16.md",
         "evidence": [
           "target/self-improvement/tasks/T16/resultado.md",
           "cargo build --release -p soso-llm (cwd user/)",
           "cargo test -p soso-llm-api --features std --test host_service"
         ],
-        "blocker": "T14 go (condición de entrada catálogo)",
+        "blocker": "T14 dio **no-go** (8/10 protocolo; el modelo no usa herramientas). Un `done` con no-go no habilita a los consumidores: `depends_on` no puede expresar «go», así que se dice aquí.",
         "next_step": "T18-puertos-qemu.md o T19-qemu-e2e.md"
       }
     },
@@ -685,6 +705,10 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "blocker": "T14 dio **no-go** (8/10 protocolo; el modelo no usa herramientas). Un `done` con no-go no habilita a los consumidores: `depends_on` no puede expresar «go», así que se dice aquí.",
+        "updated_at": "2026-09-24"
       }
     },
     {
@@ -715,6 +739,10 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "blocker": "T14 dio **no-go** (8/10 protocolo; el modelo no usa herramientas). Un `done` con no-go no habilita a los consumidores: `depends_on` no puede expresar «go», así que se dice aquí.",
+        "updated_at": "2026-09-24"
       }
     },
     {
@@ -745,6 +773,10 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "blocker": "T14 dio **no-go** (8/10 protocolo; el modelo no usa herramientas). Un `done` con no-go no habilita a los consumidores: `depends_on` no puede expresar «go», así que se dice aquí.",
+        "updated_at": "2026-09-24"
       }
     },
     {
@@ -753,7 +785,7 @@
       "title": "Crear el formato de tareas y estados del coordinador",
       "milestone": "SI-4",
       "kind": "Implementación portable con adaptadores host/guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T01",
         "T02",
@@ -763,19 +795,33 @@
       "entry_conditions": [],
       "contract_sections": "C5",
       "context": [
-        "crates/soso-improve-core/src/entorno.rs",
-        "crates/soso-improve-core/src/lib.rs",
-        "tools/soso-improve/src/main.rs",
+        "crates/soso-improve-core/src/state.rs",
+        "crates/soso-improve-core/src/cli.rs",
+        "crates/soso-improve-core/src/durable.rs",
+        "tools/soso-improve/src/tarea.rs",
         "user/soso-improve/src/main.rs"
       ],
       "native_validation": {
-        "status": "pending",
-        "requires": [
-          "T46",
-          "T49"
+        "status": "verified",
+        "requires": [],
+        "evidence": [
+          "cargo xtask test sys --only=\"estado de tareas\"",
+          "soso-improve tarea preparar en guest: estado escrito y releído desde sosofs; el coordinador no puede aceptar; la medida desconocida sobrevive al viaje"
         ],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "note": "El formato se escribe y se recupera dentro de soso por el contrato durable de T46; el paso de suite sys lo acredita."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio 89c77d240cbfaecf",
+        "summary": "docs/self-improvement/seguimiento/T23.md",
+        "evidence": [
+          "cargo test -p soso-improve-core --features std --test state (14/14)",
+          "cargo build -p soso-improve-core --no-default-features",
+          "cargo xtask test sys --only=\"estado de tareas\"",
+          "target/self-improvement/tasks/T23/host-ciclo.txt"
+        ],
+        "blocker": null,
+        "next_step": "T63 cerrada el mismo día. La siguiente por el camino SI-4 es T24 (copia de tarea y exportación de parche), con T23 y T50 detrás."
       }
     },
     {
@@ -784,7 +830,7 @@
       "title": "Preparar una copia de tarea y exportar su parche",
       "milestone": "SI-4",
       "kind": "Implementación portable con adaptadores host/guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T23",
         "T50"
@@ -792,19 +838,34 @@
       "entry_conditions": [],
       "contract_sections": "C5",
       "context": [
-        "crates/soso-improve-core/src/entorno.rs",
-        "crates/soso-improve-core/src/lib.rs",
-        "tools/soso-improve/src/main.rs",
+        "crates/soso-improve-core/src/workspace.rs",
+        "crates/soso-improve-core/src/captura.rs",
+        "crates/soso-improve-core/src/delta.rs",
+        "tools/soso-improve/src/tarea.rs",
         "user/soso-improve/src/main.rs"
       ],
       "native_validation": {
-        "status": "pending",
-        "requires": [
-          "T49",
-          "T50"
+        "status": "verified",
+        "requires": [],
+        "evidence": [
+          "cargo xtask test sys --only=\"runner de pruebas\" (sonda workspace/copia-y-parche)",
+          "target/self-improvement/tasks/T24/guest.txt"
         ],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "note": "Ciclo capturar → copiar → exportar → aplicar dentro de soso, sin Git; comprueba además que el TASK.md del coordinador no se cuela en el repositorio."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T24.md",
+        "evidence": [
+          "cargo test -p soso-improve-core --features std --test workspace (14/14)",
+          "cargo build -p soso-improve-core --no-default-features",
+          "cargo xtask test: TODO OK (38 pasos)",
+          "cargo xtask check: TODO OK",
+          "target/self-improvement/tasks/T24/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "T25 (ejecutor con límites y logs) depende además de T21, que depende de T20 y por tanto del no-go de T14. La ruta sin bloquear del hito es T28 (conocimiento) sólo tras T26; mientras tanto, los inventarios T32/T36/T38."
       }
     },
     {
@@ -899,6 +960,14 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "Sin empezar. T63 quitó el impedimento de fondo: una caída encallaba la referencia durable y reanudar era imposible por construcción.",
+        "evidence": [],
+        "blocker": "Depende de T25 y T26, todavía pendientes.",
+        "next_step": "Esperar a T25 y T26."
       }
     },
     {
@@ -1382,7 +1451,7 @@
       "title": "Unificar órdenes, capacidades y códigos de salida",
       "milestone": "SI-0",
       "kind": "Implementación portable y validación guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T01",
         "T02"
@@ -1390,15 +1459,39 @@
       "entry_conditions": [],
       "contract_sections": "C5–C7",
       "context": [
+        "crates/soso-improve-core/src/cli.rs",
         "crates/soso-improve-core/src/entorno.rs",
         "user/soso-improve/src/main.rs",
-        "tools/soso-improve/src/main.rs"
+        "tools/soso-improve/src/lib.rs",
+        "tools/soso-improve/src/main.rs",
+        "tools/soso-improve/src/banco.rs",
+        "rootfs/var/self-improvement/fixtures-cli/"
       ],
       "native_validation": {
-        "status": "pending",
-        "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "status": "partial",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T45/resultado.md",
+          "target/suite-t45-full.log",
+          "cargo xtask test: paso «soso-improve: órdenes y códigos de salida» OK en guest"
+        ],
+        "note": "Órdenes, capacidades y códigos ejecutados dentro de soso con fixtures preinstalados. Partial porque el guion lo lanza el arnés del host; el runner nativo es T49."
+      },
+      "tracking": {
+        "updated_at": "2026-09-23",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T45.md",
+        "evidence": [
+          "cargo test -p soso-improve-core -p soso-improve",
+          "cargo build -p soso-improve-core --no-default-features",
+          "cargo xtask check: TODO OK",
+          "cargo xtask test: TODO OK",
+          "target/self-improvement/tasks/T45/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "T48 (reloj y red nativos), que ya tiene su dependencia cerrada."
       }
     },
     {
@@ -1407,22 +1500,41 @@
       "title": "Acreditar persistencia y actualización de referencias en sosofs",
       "milestone": "SI-4",
       "kind": "Implementación portable y validación guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T01"
       ],
       "entry_conditions": [],
       "contract_sections": "C5–C7",
       "context": [
+        "crates/soso-improve-core/src/durable.rs",
         "crates/soso-improve-core/src/entorno.rs",
         "user/libsoso/src/sys.rs",
-        "user/soso-improve/src/main.rs"
+        "user/soso-improve/src/main.rs",
+        "crates/sosofs/src/write.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "verified",
         "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "evidence": [
+          "target/self-improvement/tasks/T46/resultado.md",
+          "sonda en dos arranques con halt: la generación truncada se ignora y la anterior sobrevive"
+        ],
+        "note": "Durabilidad acreditada con reinicio real de la máquina: los datos cruzan el apagón. El corte se prueba en una fase, no en todas; la sonda se lanza a mano."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T46.md",
+        "evidence": [
+          "cargo test -p soso-improve-core --features std (62, 9 de durable)",
+          "cargo build -p soso-improve-core --no-default-features",
+          "cargo xtask check: TODO OK",
+          "cargo xtask test: TODO OK",
+          "target/self-improvement/tasks/T46/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "T49 (runner nativo) queda habilitada: es la que convierte los `partial` en `verified`."
       }
     },
     {
@@ -1431,7 +1543,7 @@
       "title": "Ejecutar procesos con argumentos, canales y límites exactos",
       "milestone": "SI-4",
       "kind": "Implementación portable y validación guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T45",
         "T48"
@@ -1444,10 +1556,29 @@
         "user/libsoso/src/sys.rs"
       ],
       "native_validation": {
-        "status": "pending",
-        "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "status": "partial",
+        "requires": [
+          "T49",
+          "T61",
+          "T62"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T47/resultado.md",
+          "cargo xtask test: paso «soso-improve: procesos (argv, stdin, cwd)» OK"
+        ],
+        "note": "Adaptador verificado dentro de soso. Quedan fuera y declarados: stdout/stderr separados (T61), argumentos con espacios de punta a punta (T62) y la limpieza de descendientes, no verificada."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T47.md",
+        "evidence": [
+          "cargo xtask check: TODO OK",
+          "cargo xtask test: TODO OK",
+          "target/self-improvement/tasks/T47/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "T61 (tubería no bloqueante) para separar canales; T62 para el argv en los programas."
       }
     },
     {
@@ -1456,22 +1587,44 @@
       "title": "Añadir reloj y transporte nativos para evaluaciones",
       "milestone": "SI-2",
       "kind": "Implementación portable y validación guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T45"
       ],
       "entry_conditions": [],
       "contract_sections": "C5–C7",
       "context": [
-        "user/libsoso/src/sys.rs",
-        "user/soso-llm/src/net.rs",
-        "crates/soso-improve-core/src/entorno.rs"
+        "crates/soso-improve-core/src/tiempo.rs",
+        "crates/soso-improve-core/src/transporte.rs",
+        "tools/soso-improve/src/sistema.rs",
+        "user/soso-improve/src/main.rs",
+        "user/libsoso/src/sys.rs"
       ],
       "native_validation": {
-        "status": "pending",
-        "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "status": "partial",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T48/resultado.md",
+          "target/suite-t48-full.log",
+          "cargo xtask test: paso «soso-improve: eco, reloj y plazos» OK en guest"
+        ],
+        "note": "Eco entre dos procesos de soso por su propia pila de red, sin proxy del host: byte a byte, UTF-8 partido, cierre temprano, cliente lento y plazo. Partial porque el guion lo lanza el arnés del host; el runner nativo es T49."
+      },
+      "tracking": {
+        "updated_at": "2026-09-23",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T48.md",
+        "evidence": [
+          "cargo test -p soso-improve-core --features std (39)",
+          "cargo build -p soso-improve-core --no-default-features",
+          "cargo xtask check: TODO OK",
+          "cargo xtask test: TODO OK",
+          "target/self-improvement/tasks/T48/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "T14 (evaluación del modelo), que era lo que T48 bloqueaba y cierra SI-2."
       }
     },
     {
@@ -1480,7 +1633,7 @@
       "title": "Ejecutar casos compartidos desde un runner nativo",
       "milestone": "SI-0 / SI-4",
       "kind": "Implementación portable y validación guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T45",
         "T46",
@@ -1490,15 +1643,32 @@
       "entry_conditions": [],
       "contract_sections": "C5–C7",
       "context": [
-        "crates/soso-improve-core/src/lib.rs",
+        "crates/soso-improve-core/src/pruebas.rs",
         "user/soso-improve/src/main.rs",
-        "tests/self-improvement/cases/banco.json"
+        "rootfs/var/self-improvement/banco/",
+        "xtask/src/test.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "verified",
         "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "evidence": [
+          "target/self-improvement/tasks/T49/resultado.md",
+          "cargo xtask test: paso «soso-improve: runner de pruebas en soso» OK"
+        ],
+        "note": "El runner ejecuta dentro de soso lo que acredita: procesos, transporte, tuberías y carga del banco. Lo que no cubre se informa como pendiente, no como aprobado."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T49.md",
+        "evidence": [
+          "cargo test -p soso-improve-core --features std (67)",
+          "cargo xtask check: TODO OK",
+          "cargo xtask test: TODO OK",
+          "target/self-improvement/tasks/T49/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "Añadir captura/reconstrucción al runner (paso 3) cuando haya semilla en la imagen; el banco reservado no puede viajar en ella (C5)."
       }
     },
     {
@@ -1507,7 +1677,7 @@
       "title": "Aplicar y exportar cambios sin Git",
       "milestone": "SI-4",
       "kind": "Implementación portable y validación guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T01",
         "T46"
@@ -1515,15 +1685,33 @@
       "entry_conditions": [],
       "contract_sections": "C5–C7",
       "context": [
+        "crates/soso-improve-core/src/delta.rs",
         "crates/soso-improve-core/src/captura.rs",
-        "crates/soso-improve-core/src/repo.rs",
+        "user/soso-improve/src/main.rs",
         "tools/soso-improve/src/verificar.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "verified",
         "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "evidence": [
+          "target/self-improvement/tasks/T50/resultado.md",
+          "soso-improve delta en guest: huella igual que la fijada en el host"
+        ],
+        "note": "Aplicado dentro de soso sin Git; la huella coincide con la del host por fixture compartido."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T50.md",
+        "evidence": [
+          "cargo test -p soso-improve-core --features std (77, 10 de delta)",
+          "cargo build -p soso-improve-core --no-default-features",
+          "cargo xtask check: TODO OK",
+          "cargo xtask test: TODO OK",
+          "target/self-improvement/tasks/T50/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "Pasos 4 y 5: convertir las referencias R del banco y conectar AplicarParche; ambos cambian el significado de los casos y van en su propia pasada."
       }
     },
     {
@@ -1800,6 +1988,279 @@
         ],
         "blocker": null,
         "next_step": "Detectar la desaparición real del cliente por estado del socket, no por EOF."
+      }
+    },
+    {
+      "id": "T58",
+      "file": "T58-respuesta-con-prompt.md",
+      "title": "La respuesta de chat devolvía el prompt pegado a la generación",
+      "milestone": "SI-2",
+      "kind": "Corrección de userspace",
+      "status": "done",
+      "depends_on": [],
+      "origin": "T14",
+      "entry_conditions": [
+        "Endpoint guest con pesos reales."
+      ],
+      "contract_sections": "C2–C3",
+      "context": [
+        "user/soso-llm/src/serve.rs",
+        "crates/soso-llm-core/src/runtime.rs"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [
+          "curl al endpoint guest: content \"LISTO\" y usage coherente"
+        ],
+        "note": "Verificado contra el endpoint guest con pesos reales; el runner nativo es T49."
+      },
+      "tracking": {
+        "updated_at": "2026-09-23",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T14.md",
+        "evidence": [
+          "docs/self-improvement/T58-respuesta-con-prompt.md",
+          "target/t14-campana.log"
+        ],
+        "blocker": null,
+        "next_step": "Ficha aparte para que `generate_*` no obligue a recortar en cada llamante."
+      }
+    },
+    {
+      "id": "T59",
+      "file": "T59-tool-calls.md",
+      "title": "Las llamadas a herramienta: investigación (resultado: límite del modelo)",
+      "milestone": "SI-2",
+      "kind": "Investigación",
+      "status": "done",
+      "depends_on": [],
+      "origin": "T14",
+      "entry_conditions": [
+        "Endpoint guest con pesos reales y banco de casos."
+      ],
+      "contract_sections": "C2–C3",
+      "context": [
+        "crates/soso-llm-core/src/conversation/render.rs",
+        "crates/soso-llm-core/src/conversation/tools.rs",
+        "user/soso-llm/src/serve.rs"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [
+          "crates/soso-llm-api/examples/render_dump.rs",
+          "documento crudo de Q07: 400 «tool_choice required pero no hay llamada»"
+        ],
+        "note": "Sonda de render en host y repetición de Q07 contra el endpoint guest."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T14.md",
+        "evidence": [
+          "render de Q04 y Q07 correcto (sonda render_dump)",
+          "Q07 repetido: el servicio rechaza con 400 porque el modelo no emite llamada",
+          "Q04: el modelo repite la llamada con el resultado delante"
+        ],
+        "blocker": null,
+        "next_step": "Es límite del modelo; si SI-3 depende de herramientas, comparar otro perfil en T14 sin tocar el banco. El doble respuesta HTTP en streaming se lleva T60."
+      },
+      "resultado": "no era el servicio: es el modelo"
+    },
+    {
+      "id": "T60",
+      "file": "T60-validacion-peticion.md",
+      "title": "Errores de la API: genera donde debe rechazar, clasifica mal y responde dos veces",
+      "milestone": "SI-2",
+      "kind": "Corrección de userspace (API)",
+      "status": "done",
+      "depends_on": [],
+      "origin": "T14",
+      "entry_conditions": [
+        "Endpoint guest con pesos reales y banco de casos."
+      ],
+      "contract_sections": "C2–C3",
+      "context": [
+        "crates/soso-llm-api/src/request.rs",
+        "user/soso-llm/src/serve.rs",
+        "tools/soso-improve/src/evaluar.rs",
+        "crates/soso-llm-api/tests/request.rs"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T49"
+        ],
+        "evidence": [
+          "Q08 y Q10 pasan contra el endpoint guest (2026-09-24)",
+          "documento crudo de Q07: error dentro del flujo SSE + [DONE]"
+        ],
+        "note": "Verificado contra el guest con pesos reales; el runner nativo es T49."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T14.md",
+        "evidence": [
+          "cargo test -p soso-llm-api --features std --test request (14)",
+          "evaluar --caso Q08,Q10: ambos «bien»",
+          "target/self-improvement/tasks/T14/informe.json"
+        ],
+        "blocker": null,
+        "next_step": "De los tres síntomas, sólo dos eran del servicio; Q10 era el arnés. El 10/10 sigue sin alcanzarse por el modelo (T59)."
+      }
+    },
+    {
+      "id": "T61",
+      "file": "T61-pipe-no-bloqueante.md",
+      "title": "Lectura de tuberías con plazo, sin bloquear",
+      "milestone": "SI-4",
+      "kind": "Ampliación de ABI (kernel)",
+      "status": "done",
+      "depends_on": [],
+      "origin": "T47",
+      "entry_conditions": [],
+      "contract_sections": "C5–C7",
+      "context": [
+        "kernel/src/task/syscall.rs",
+        "kernel/src/task/pipe.rs",
+        "user/libsoso/src/sys.rs"
+      ],
+      "native_validation": {
+        "status": "verified",
+        "requires": [],
+        "evidence": [
+          "cargo xtask test: paso «soso-improve: dos tuberías sin bloquear» OK",
+          "sin el arreglo, el mismo paso se cuelga",
+          "target/self-improvement/tasks/T61/resultado.md"
+        ],
+        "note": "Es kernel y la prueba corre dentro de soso entre dos procesos: la reproducción del interbloqueo y su ausencia se observan en el guest."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "95de3c162 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T47.md",
+        "evidence": [
+          "cargo xtask check: TODO OK",
+          "cargo xtask test: TODO OK",
+          "target/self-improvement/tasks/T61/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "Con esto, T47 puede separar stdout y stderr; queda como mejora de esa ficha."
+      }
+    },
+    {
+      "id": "T62",
+      "file": "T62-argv-en-los-programas.md",
+      "title": "Los programas reciben los argumentos juntados, no su argv",
+      "milestone": "SI-4",
+      "kind": "Corrección de userspace y kernel",
+      "status": "done",
+      "depends_on": [],
+      "origin": "T47",
+      "entry_conditions": [],
+      "contract_sections": "C5–C7",
+      "context": [
+        "user/libsoso/src/lib.rs",
+        "user/coreutils/src/bin/"
+      ],
+      "native_validation": {
+        "status": "verified",
+        "requires": [],
+        "evidence": [
+          "cargo xtask test sys --only=\"runner de pruebas\" (sonda argv/ruta-con-espacios)",
+          "target/self-improvement/tasks/T62/control-negativo.txt: el fallo se reprodujo antes de arreglarlo"
+        ],
+        "note": "El paso de argumentos es de soso; la sonda corre entre dos procesos del guest."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T62.md",
+        "evidence": [
+          "cargo xtask test: TODO OK (38 pasos)",
+          "cargo xtask check: TODO OK",
+          "target/self-improvement/tasks/T62/resultado.md",
+          "target/self-improvement/tasks/T62/control-negativo.txt"
+        ],
+        "blocker": null,
+        "next_step": "T64: el tokenizador de sosh no entiende comillas, así que desde la shell sigue sin poderse escribir una ruta con espacios."
+      }
+    },
+    {
+      "id": "T63",
+      "file": "T63-generacion-rota-encalla.md",
+      "title": "Desencallar una referencia durable con una generación rota",
+      "milestone": "SI-4",
+      "kind": "Corrección portable con validación guest",
+      "status": "done",
+      "depends_on": [
+        "T46"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5",
+      "context": [
+        "crates/soso-improve-core/src/durable.rs",
+        "crates/soso-improve-core/tests/state.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "verified",
+        "requires": [],
+        "evidence": [
+          "cargo xtask test sys --only=\"runner de pruebas\" (sonda durable/publicar-sobre-un-corte)",
+          "durable_fase2 publica ahora después del corte que dejó el arranque anterior"
+        ],
+        "note": "Sonda de un arranque en sosofs: siembra el resto de un corte, publica por encima y purga. El caso con reinicio real sigue dependiendo de la fase manual de T46."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T63.md",
+        "evidence": [
+          "cargo test -p soso-improve-core --features std (79 + 14)",
+          "cargo build -p soso-improve-core --no-default-features",
+          "cargo xtask test: TODO OK",
+          "cargo xtask check: TODO OK",
+          "target/self-improvement/tasks/T63/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "T27 queda desbloqueada por esta corrección, pero depende además de T25 y T26. La siguiente por el camino SI-4 es T24 (copia de tarea y exportación de parche), con T23 y T50 detrás."
+      }
+    },
+    {
+      "id": "T64",
+      "file": "T64-sosh-comillas.md",
+      "title": "sosh no entiende comillas: una ruta con espacios es inescribible",
+      "milestone": "SI-4",
+      "kind": "Corrección de userspace (shell)",
+      "status": "pending",
+      "depends_on": [
+        "T62"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C5",
+      "context": [
+        "user/sosh/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Es la shell de soso y la prueba se escribe desde ella; no hay otro sitio donde comprobarlo."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "docs/self-improvement/T64-sosh-comillas.md",
+        "evidence": [],
+        "blocker": null,
+        "next_step": "Elegir sintaxis (subconjunto POSIX o sólo comillas dobles) antes de tocar tokenize."
       }
     }
   ],

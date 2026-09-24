@@ -5,6 +5,9 @@
 
 extern crate alloc;
 
+#[cfg(soso_heap_debug)]
+mod heap_debug;
+
 pub mod linea;
 pub mod sys;
 pub mod thread;
@@ -40,16 +43,106 @@ pub fn heap_init() {
     *ready = true;
 }
 
+/// argv completo (argv[0] = path del binario) tal como lo mandó el kernel.
+static ARGV: Mutex<Option<alloc::vec::Vec<alloc::string::String>>> = Mutex::new(None);
+
+/// La cadena que entregó un llamante **sin** argv estructurado (`spawn_io`).
+///
+/// Sólo la hay por el camino antiguo, y existe por un consumidor concreto:
+/// `soso-llm ask <pregunta>` tiene que recibir el texto **tal como se
+/// escribió**, con sus espacios seguidos y sus comillas. Partirlo y volver a
+/// juntarlo lo cambiaría, y esa literalidad es justo lo que su prueba de la
+/// suite comprueba.
+static LINEA_CRUDA: Mutex<Option<alloc::string::String>> = Mutex::new(None);
+
+/// Decodifica el blob `SOSA` del kernel (`kernel/src/task/argv.rs`):
+/// `"SOSA" u32 count { u32 len, bytes }*`. `None` si no lleva el magic.
+pub fn decode_argv(blob: &[u8]) -> Option<alloc::vec::Vec<alloc::string::String>> {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    const MAGIC: &[u8; 4] = b"SOSA";
+    if blob.len() < 8 || &blob[..4] != MAGIC {
+        return None;
+    }
+    let count = u32::from_le_bytes(blob[4..8].try_into().unwrap()) as usize;
+    let mut argv: Vec<String> = Vec::with_capacity(count.min(256));
+    let mut off = 8usize;
+    for _ in 0..count {
+        if off + 4 > blob.len() {
+            break;
+        }
+        let slen = u32::from_le_bytes(blob[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        if off + slen > blob.len() {
+            break;
+        }
+        if let Ok(s) = core::str::from_utf8(&blob[off..off + slen]) {
+            argv.push(String::from(s));
+        }
+        off += slen;
+    }
+    Some(argv)
+}
+
+/// argv exacto del proceso (sin unir por espacios): `argv[0]` es el path del
+/// binario. Vacío si el crt0 aún no ha corrido o el kernel no mandó blob.
+pub fn argv() -> alloc::vec::Vec<alloc::string::String> {
+    ARGV.lock().clone().unwrap_or_default()
+}
+
+/// La línea tal como llegó, si el llamante no pasó argv estructurado.
+///
+/// `None` significa que **sí** hubo argv: entonces la línea no existe, y
+/// reconstruirla juntando los argumentos sería inventarla. Quien la quiera de
+/// todas formas que haga el `join` y se vea en el código.
+pub fn linea_cruda() -> Option<alloc::string::String> {
+    LINEA_CRUDA.lock().clone()
+}
+
+/// Decodifica el blob SOSA del kernel y devuelve los argumentos del programa
+/// (`argv[1..]`; `argv[0]` es la ruta del binario).
+///
+/// Antes esto devolvía los argumentos **juntados por espacios** y cada programa
+/// los volvía a partir. Era lossy por construcción: una ruta con un espacio
+/// dentro salía del otro lado como dos rutas, y no había forma de distinguirla
+/// de dos argumentos de verdad (T62). Quien quiera una cadena la arma con
+/// `join(" ")`, que es lo mismo pero se ve en el código.
+pub fn args_for_main(blob: &[u8]) -> alloc::vec::Vec<alloc::string::String> {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    if let Some(argv) = decode_argv(blob) {
+        // Blob válido: sin más elementos que argv[0] no hay argumentos. Nunca
+        // devolver aquí los bytes crudos «SOSA…».
+        let args: Vec<String> = if argv.len() > 1 {
+            argv[1..].to_vec()
+        } else {
+            Vec::new()
+        };
+        *ARGV.lock() = Some(argv);
+        return args;
+    }
+    // Sin magic: el blob es texto suelto de un llamante antiguo (`spawn_io`,
+    // y el tokenizador de sosh). Se parte por espacios porque no hay nada
+    // mejor que hacer con él —y porque es lo que hacían ya todos los
+    // programas—, pero el original se guarda: quien necesite el texto literal
+    // lo pide con [`linea_cruda`].
+    let texto = core::str::from_utf8(blob).unwrap_or("");
+    *LINEA_CRUDA.lock() = Some(String::from(texto));
+    texto.split_whitespace().map(String::from).collect()
+}
+
 #[macro_export]
 macro_rules! entry {
     ($main:ident) => {
         #[unsafe(no_mangle)]
         extern "C" fn __soso_main(ptr: *const u8, len: usize) -> u8 {
+            $crate::tls_init();
             $crate::heap_init();
-            let args = unsafe {
-                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len))
-            };
-            $main(args)
+            let blob = unsafe { core::slice::from_raw_parts(ptr, len) };
+            let args = $crate::args_for_main(blob);
+            $main(&args)
         }
     };
 }
@@ -84,6 +177,59 @@ extern "C" fn _start() -> ! {
 /// que recordarlo en cada dependencia nueva; proveer el símbolo lo arregla de
 /// una vez y además **conserva la comprobación**: si el canario salta, el
 /// proceso muere aquí en vez de seguir con la pila corrupta.
+/// Bloque TLS mínimo del hilo principal.
+///
+/// `-fstack-protector` no sólo llama a `__stack_chk_fail` cuando el canario
+/// salta: **lee** el canario en `%fs:0x28` al entrar en cada función. Sin base
+/// FS eso es la dirección lineal `0x28`, y el proceso muere con
+/// «page fault de usuario en 0x28» dentro de `curve25519.c` —81 lecturas así
+/// hay sólo en `soso-update`—. Proveer `__stack_chk_fail` no arregla eso: el
+/// fallo está en leer el canario, no en comprobarlo.
+///
+/// El layout es el del ABI de TLS de x86-64: puntero a sí mismo en `fs:0x00` y
+/// canario en `fs:0x28`. Nada más se usa; si algún día hace falta `#[thread_local]`
+/// de verdad, esto se queda corto y hay que montar el bloque desde `PT_TLS`.
+#[repr(C, align(16))]
+struct Tcb {
+    propio: *mut Tcb,
+    _reservado: [u64; 4],
+    canario: u64,
+    _cola: [u64; 8],
+}
+
+const _: () = assert!(core::mem::offset_of!(Tcb, canario) == 0x28);
+
+static mut TCB: Tcb = Tcb {
+    propio: core::ptr::null_mut(),
+    _reservado: [0; 4],
+    canario: 0,
+    _cola: [0; 8],
+};
+
+/// Fija la base FS del proceso. La llama el `entry!` antes que nada; sin heap.
+///
+/// Los hilos heredan `tls_base` del padre (`task::thread_spawn`), así que
+/// comparten este bloque: el canario sólo se lee, nunca se escribe.
+pub fn tls_init() {
+    unsafe {
+        let p = &raw mut TCB;
+        (*p).propio = p;
+        let mut semilla = [0u8; 8];
+        let canario = if sys::getrandom(&mut semilla) == 8 {
+            u64::from_ne_bytes(semilla)
+        } else {
+            // Sin entropía el canario deja de ser impredecible, pero sigue
+            // detectando el desbordamiento accidental, que es lo que importa
+            // aquí. Lo que no se puede es dejar la base FS sin fijar.
+            0x00c0_ffee_5050_1234
+        };
+        // Byte bajo a cero: un desbordamiento por cadena no puede copiar el
+        // canario entero con un `strcpy`.
+        (*p).canario = canario & !0xff;
+        sys::set_tls(p as u64);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn __stack_chk_fail() -> ! {
     panic!("__stack_chk_fail: canario de pila pisado en código C");
@@ -123,6 +269,22 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
+/// Escribe un registro en fd 3 (canal de log del kernel). Ignora errores
+/// (p. ej. fd cerrado con `3>&-`).
+#[macro_export]
+macro_rules! logln {
+    () => {
+        let _ = $crate::sys::write_all($crate::abi::LOG_FD, b"\n");
+    };
+    ($($arg:tt)*) => {{
+        use alloc::string::String;
+        use core::fmt::Write;
+        let mut s = String::new();
+        let _ = write!(s, "{}\n", format_args!($($arg)*));
+        let _ = $crate::sys::write_all($crate::abi::LOG_FD, s.as_bytes());
+    }};
+}
+
 /// Un campo de texto de tamaño fijo del kernel (`GpuInfo::name`, `::phase`, un
 /// nombre de dirent…) como `&str`: hasta el primer NUL, o el campo entero si no
 /// lo hay, y `"?"` si no es UTF-8 válido.
@@ -157,6 +319,20 @@ pub fn ciclos() -> u64 {
     }
 }
 
+/// Entropía para todo el userspace: la pide al kernel, no a la CPU.
+///
+/// `getrandom` (y con él `ring`/rustls) busca un backend; sin esto usa RDRAND
+/// directamente desde ring 3 y se queda sin aleatoriedad donde la detección
+/// falla. Se registra aquí, en la biblioteca que enlazan todos los binarios.
+fn entropia_del_kernel(buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    if sys::getrandom(buf) < 0 {
+        return Err(getrandom::Error::UNSUPPORTED);
+    }
+    Ok(())
+}
+
+getrandom::register_custom_getrandom!(entropia_del_kernel);
+
 pub fn errno_str(e: i64) -> &'static str {
     match -e {
         x if x == abi::ENOENT => "no existe",
@@ -177,6 +353,12 @@ pub fn errno_str(e: i64) -> &'static str {
         x if x == abi::ENOSYS => "syscall inexistente",
         x if x == abi::ENOTEMPTY => "directorio no vacío",
         x if x == abi::ENOTSUP => "no soportado",
+        x if x == abi::ETIMEDOUT => "timeout",
+        x if x == abi::ENOTCONN => "sin red",
+        // No es «no tienes permiso»: es que ahora mismo eso no se toca,
+        // porque hay una actualización armada sobre esas rutas.
+        x if x == abi::EROFS => "hay una actualización en curso; esa ruta no se toca hasta reiniciar",
+        x if x == abi::EBUSY => "ocupado",
         _ => "error desconocido",
     }
 }
@@ -235,6 +417,23 @@ static ARENA: Arena = Arena {
     }),
 };
 
+/// Comprueba invariantes del arena (no-op sin `SOSO_HEAP_DEBUG=1` al compilar).
+pub fn heap_audit() {
+    #[cfg(soso_heap_debug)]
+    heap_debug::audit();
+}
+
+#[cfg(soso_heap_debug)]
+pub(crate) fn heap_debug_audit_impl() {
+    ARENA.lock();
+    let st = unsafe { &*ARENA.st.get() };
+    heap_debug::audit_arena(st.cur, st.end, st.last_start, st.last_end);
+    ARENA.unlock();
+}
+
+#[cfg(not(soso_heap_debug))]
+pub(crate) fn heap_debug_audit_impl() {}
+
 impl Arena {
     fn lock(&self) {
         use core::sync::atomic::Ordering;
@@ -284,21 +483,37 @@ impl SbrkAllocator {
 unsafe impl core::alloc::GlobalAlloc for SbrkAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         unsafe {
-            let size = layout.size();
-            let align = layout.align().max(16);
+            #[cfg(soso_heap_debug)]
+            let inner = heap_debug::layout_extra(layout);
+            #[cfg(not(soso_heap_debug))]
+            let inner = layout;
+            let size = inner.size();
+            let align = inner.align().max(16);
             ARENA.lock();
             let ptr = Self::bump(&mut *ARENA.st.get(), size, align);
             ARENA.unlock();
+            if !ptr.is_null() {
+                #[cfg(soso_heap_debug)]
+                heap_debug::stamp(ptr, layout.size());
+            }
             ptr
         }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
         unsafe {
+            #[cfg(soso_heap_debug)]
+            if !ptr.is_null() {
+                heap_debug::verify(ptr, layout.size(), "dealloc arena");
+            }
             let p = ptr as usize;
             ARENA.lock();
             let st = &mut *ARENA.st.get();
-            if p == st.last_start && p + layout.size() == st.last_end && st.cur == st.last_end {
+            #[cfg(soso_heap_debug)]
+            let reserved = heap_debug::stored_size(layout);
+            #[cfg(not(soso_heap_debug))]
+            let reserved = layout.size();
+            if p == st.last_start && p + reserved == st.last_end && st.cur == st.last_end {
                 st.cur = st.last_start;
                 st.last_end = st.last_start;
             }
@@ -316,12 +531,24 @@ unsafe impl core::alloc::GlobalAlloc for SbrkAllocator {
             let p = ptr as usize;
             ARENA.lock();
             let st = &mut *ARENA.st.get();
+            #[cfg(soso_heap_debug)]
+            let old_reserved = heap_debug::stored_size(layout);
+            #[cfg(not(soso_heap_debug))]
+            let old_reserved = layout.size();
             let es_ultimo =
-                p == st.last_start && p + layout.size() == st.last_end && st.cur == st.last_end;
-            if es_ultimo && p + new_size <= st.end {
-                st.cur = p + new_size;
+                p == st.last_start && p + old_reserved == st.last_end && st.cur == st.last_end;
+            let new_layout =
+                core::alloc::Layout::from_size_align_unchecked(new_size, layout.align());
+            #[cfg(soso_heap_debug)]
+            let new_reserved = heap_debug::stored_size(new_layout);
+            #[cfg(not(soso_heap_debug))]
+            let new_reserved = new_size;
+            if es_ultimo && p + new_reserved <= st.end {
+                st.cur = p + new_reserved;
                 st.last_end = st.cur;
                 ARENA.unlock();
+                #[cfg(soso_heap_debug)]
+                heap_debug::stamp(ptr, new_size);
                 return ptr;
             }
             ARENA.unlock();
@@ -343,6 +570,30 @@ impl HybridAllocator {
     unsafe fn bump(st: &mut ArenaState, size: usize, align: usize) -> *mut u8 {
         unsafe { SbrkAllocator::bump(st, size, align) }
     }
+
+    fn inner_layout(layout: core::alloc::Layout) -> core::alloc::Layout {
+        #[cfg(soso_heap_debug)]
+        {
+            heap_debug::layout_extra(layout)
+        }
+        #[cfg(not(soso_heap_debug))]
+        {
+            layout
+        }
+    }
+
+    /// El arena vive por encima del heap enlazado; liberar un puntero del arena
+    /// con `deallocate` del linked list corrompe la lista.
+    fn ptr_in_linked_heap(ptr: *mut u8) -> bool {
+        if ptr.is_null() {
+            return false;
+        }
+        let heap = HEAP.lock();
+        let p = ptr as usize;
+        let bottom = heap.bottom() as usize;
+        let top = heap.top() as usize;
+        p >= bottom && p < top
+    }
 }
 
 unsafe impl core::alloc::GlobalAlloc for HybridAllocator {
@@ -355,15 +606,26 @@ unsafe impl core::alloc::GlobalAlloc for HybridAllocator {
                     return p as *mut u8;
                 }
             }
+            #[cfg(soso_heap_debug)]
+            let inner = heap_debug::layout_extra(layout);
+            #[cfg(not(soso_heap_debug))]
+            let inner = layout;
             if layout.align() <= 4096 {
-                if let Ok(ptr) = HEAP.lock().allocate_first_fit(layout) {
-                    return ptr.as_ptr();
+                if let Ok(ptr) = HEAP.lock().allocate_first_fit(inner) {
+                    let p = ptr.as_ptr();
+                    #[cfg(soso_heap_debug)]
+                    heap_debug::stamp(p, layout.size());
+                    return p;
                 }
             }
-            let align = layout.align().max(16);
+            let align = inner.align().max(16);
             ARENA.lock();
-            let ptr = Self::bump(&mut *ARENA.st.get(), size, align);
+            let ptr = Self::bump(&mut *ARENA.st.get(), inner.size(), align);
             ARENA.unlock();
+            if !ptr.is_null() {
+                #[cfg(soso_heap_debug)]
+                heap_debug::stamp(ptr, layout.size());
+            }
             ptr
         }
     }
@@ -374,11 +636,16 @@ unsafe impl core::alloc::GlobalAlloc for HybridAllocator {
                 let _ = sys::munmap(ptr as u64, (layout.size() as u64).next_multiple_of(4096));
                 return;
             }
-            if layout.align() <= 4096 {
-                if let Some(nonnull) = core::ptr::NonNull::new(ptr) {
-                    let _ = HEAP.lock().deallocate(nonnull, layout);
-                    return;
-                }
+            #[cfg(soso_heap_debug)]
+            if !ptr.is_null() {
+                heap_debug::verify(ptr, layout.size(), "dealloc");
+            }
+            if layout.align() <= 4096 && Self::ptr_in_linked_heap(ptr) {
+                let inner = Self::inner_layout(layout);
+                let _ = HEAP
+                    .lock()
+                    .deallocate(core::ptr::NonNull::new_unchecked(ptr), inner);
+                return;
             }
             SbrkAllocator.dealloc(ptr, layout);
         }
@@ -390,7 +657,33 @@ unsafe impl core::alloc::GlobalAlloc for HybridAllocator {
         layout: core::alloc::Layout,
         new_size: usize,
     ) -> *mut u8 {
-        unsafe { SbrkAllocator.realloc(ptr, layout, new_size) }
+        unsafe {
+            if layout.size() >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
+                let new_layout =
+                    core::alloc::Layout::from_size_align_unchecked(new_size, layout.align());
+                let dst = self.alloc(new_layout);
+                if !dst.is_null() && !ptr.is_null() {
+                    core::ptr::copy_nonoverlapping(ptr, dst, layout.size().min(new_size));
+                    self.dealloc(ptr, layout);
+                }
+                return dst;
+            }
+            #[cfg(soso_heap_debug)]
+            if !ptr.is_null() {
+                heap_debug::verify(ptr, layout.size(), "realloc");
+            }
+            if layout.align() <= 4096 && Self::ptr_in_linked_heap(ptr) {
+                let new_layout =
+                    core::alloc::Layout::from_size_align_unchecked(new_size, layout.align());
+                let dst = self.alloc(new_layout);
+                if !dst.is_null() && !ptr.is_null() {
+                    core::ptr::copy_nonoverlapping(ptr, dst, layout.size().min(new_size));
+                    self.dealloc(ptr, layout);
+                }
+                return dst;
+            }
+            SbrkAllocator.realloc(ptr, layout, new_size)
+        }
     }
 }
 

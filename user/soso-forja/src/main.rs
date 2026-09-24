@@ -365,7 +365,7 @@ fn cmd_write_hola(msg: &str) -> u8 {
         return 1;
     }
     let src = format!(
-        "#![no_std]\n#![no_main]\n\nextern crate alloc;\n\nuse soso_std::println;\n\nlibsoso::entry!(main);\n\nfn main(_a: &str) -> u8 {{\n    libsoso::heap_init();\n    soso_std::init();\n    println!(\"{msg}\");\n    0\n}}\n"
+        "#![no_std]\n#![no_main]\n\nextern crate alloc;\n\nuse soso_std::println;\n\nlibsoso::entry!(main);\n\nfn main(_a: &[alloc::string::String]) -> u8 {{\n    libsoso::heap_init();\n    soso_std::init();\n    println!(\"{msg}\");\n    0\n}}\n"
     );
     let path = "/src/soso/user/hola-std/src/main.rs";
     if escribir(path, src.as_bytes()).is_err() {
@@ -446,13 +446,13 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
     Some(p)
 }
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
     let mut ip = DEFAULT_IP;
     let mut port = DEFAULT_PORT;
     let mut cmd = "help";
     let mut msg = "hola-astra-B3-guest";
     let mut token: Option<&str> = None;
-    let mut it = args.split_whitespace();
+    let mut it = args.iter().map(|s| s.as_str());
     while let Some(tok) = it.next() {
         match tok {
             "--host" => {

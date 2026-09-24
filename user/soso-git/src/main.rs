@@ -172,12 +172,8 @@ fn cmd_commit() -> u8 {
     0
 }
 
-fn main(args: &str) -> u8 {
-    let mut cmd = "help";
-    for tok in args.split_whitespace() {
-        cmd = tok;
-        break;
-    }
+fn main(args: &[String]) -> u8 {
+    let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "status" => cmd_status(),
         "log" => cmd_log(),

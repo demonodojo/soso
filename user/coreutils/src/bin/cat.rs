@@ -5,7 +5,10 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use libsoso::{abi, errno_str, println, sys};
+use alloc::string::String;
 
 libsoso::entry!(main);
 
@@ -31,10 +34,10 @@ fn volcar(fd: u64, quien: &str) -> u8 {
     }
 }
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
     let mut alguno = false;
     let mut fallo = 0u8;
-    for path in args.split_whitespace() {
+    for path in args {
         alguno = true;
         if path == "-" {
             fallo |= volcar(0, "-");

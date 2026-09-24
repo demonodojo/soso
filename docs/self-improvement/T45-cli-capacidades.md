@@ -1,6 +1,6 @@
 # T45 — Unificar órdenes, capacidades y códigos de salida
 
-**Hito:** SI-0 · **Tipo:** Implementación portable y validación guest · **Estado:** pendiente.
+**Hito:** SI-0 · **Tipo:** Implementación portable y validación guest · **Estado:** hecha (2026-09-23).
 
 **Dependencias:** [T01](T01-base.md), [T02](T02-banco.md)
 
@@ -38,9 +38,23 @@ Los subcomandos nuevos se ejecutan después de implementarlos. Guardar comando, 
 
 ## Cierre y condición de bloqueo
 
-- [ ] Entrega y comprobaciones terminadas con evidencia.
-- [ ] Catálogo, índice y seguimiento sincronizados.
-- [ ] Validación nativa registrada por separado, sin inferirla de la compilación.
+- [x] Entrega y comprobaciones terminadas con evidencia.
+- [x] Catálogo, índice y seguimiento sincronizados.
+- [x] Validación nativa registrada por separado, sin inferirla de la compilación.
+
+Entregado en `crates/soso-improve-core/src/cli.rs` (`Codigo`, `Capacidad`,
+`Capacidades`, `Orden`, `Informe`, `argv_de_texto`), con los dos frontends
+adaptados y fixtures en `rootfs/var/self-improvement/fixtures-cli/`. El paso
+«soso-improve: órdenes y códigos de salida» de `cargo xtask test` lo ejecuta
+dentro de soso. Resumen en [seguimiento/T45.md](seguimiento/T45.md); evidencia
+en `target/self-improvement/tasks/T45/resultado.md`.
+
+**Límites.** El interior de cada subcomando del host conserva su parser
+`Opciones`; lo compartido es la orden canónica, la capacidad y el código. El
+transporte de `Orden` a un proceso sigue siendo [T47](T47-procesos-nativos.md).
+`native_validation` queda en **partial**: se ejecuta en guest, pero el guion lo
+lanza el arnés del host, y repetirlo desde el runner nativo es
+[T49](T49-pruebas-guest.md).
 
 No implementar aquí nuevos mecanismos de procesos o filesystem. Si falta una syscall, registrar una ficha derivada.
 

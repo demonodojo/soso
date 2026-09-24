@@ -10,6 +10,14 @@
 
 // ---- números de syscall ----
 
+/// Versión de la ABI de syscalls que publica este kernel.
+///
+/// La declara cada release en su manifiesto (`abi=`) y el cliente la compara
+/// antes de bajar nada: un paquete con otra ABI trae binarios que este kernel
+/// no sabe atender, y eso sólo se descubriría al reiniciar. Súbela al cambiar
+/// o retirar una syscall, no al añadir una.
+pub const ABI_VERSION: u32 = 1;
+
 pub const SYS_EXIT: u64 = 0;
 pub const SYS_READ: u64 = 1;
 pub const SYS_WRITE: u64 = 2;
@@ -124,10 +132,83 @@ pub const SYS_MREMAP: u64 = 81;
 pub const SYS_PWRITE: u64 = 82;
 /// Lee variable de entorno del proceso: `(key_ptr, key_len, val_ptr, val_len)`.
 pub const SYS_GETENV: u64 = 83;
+/// Redimensiona sosofs/sosomfs en disco GPT live/instalado.
+/// `(op, arg, out_ptr)`: `FS_RESIZE_GROW_ROOT` + bloques 4K, o `FS_RESIZE_QUERY` + `FsSpaceInfo`.
+pub const SYS_FS_RESIZE: u64 = 84;
+/// Volcado inmediato del log de consola a `SOSOLOG.TXT` en la ESP live.
+pub const SYS_FATLOG_FLUSH: u64 = 85;
+/// Lee el ring de registros de aplicaciones: `(offset, buf_ptr, len) -> n`.
+pub const SYS_LOG_READ: u64 = 86;
+/// IPv4 de la NIC activa (`out: *mut NetInfo`).
+pub const SYS_NETINFO: u64 = 87;
+/// Espacio del sistema de ficheros raíz → `FsInfo`. Lo necesita la
+/// comprobación previa de una actualización: quedarse sin sitio a mitad es una
+/// de las formas típicas de dejar una pareja kernel/rootfs incoherente.
+pub const SYS_FSINFO: u64 = 88;
+/// Confirma la pareja kernel+rootfs de una actualización aplicada.
+///
+/// La llama `init` cuando el arranque se acredita. Sin ella, el arranque
+/// siguiente ve el registro en `probando` —la señal de que el anterior no
+/// llegó a confirmar— y **deshace la actualización**. La lógica vive en el
+/// kernel porque ahí está ya el contrato de la transacción.
+pub const SYS_TXN_CONFIRM: u64 = 90;
+/// ICMP Echo Request a una IPv4: `(addr_be, timeout_ms) → rtt_ms`.
+/// `addr_be` es la dirección en orden de red (`u32`). `timeout_ms == 0`
+/// usa 1000 ms. 127.0.0.0/8 y la IPv4 propia contestan en 0 ms sin cable.
+pub const SYS_PING: u64 = 89;
+
+/// Exclusión de escritores de la actualización: `(op, reserva_bloques) → …`.
+///
+/// Entre que se respalda y se reinicia, nadie más puede tocar las rutas que
+/// administra la release: si otro programa reescribe `/bin/sosh` después del
+/// respaldo, la vuelta atrás restauraría encima de un sistema que ya no es el
+/// que se copió. Leer no se toca; los que sólo leen siguen con los ficheros
+/// viejos.
+pub const SYS_TXN_LOCK: u64 = 91;
+/// Lista procesos del scheduler: `(out: *mut ProcInfo, max) → n`.
+pub const SYS_PSLIST: u64 = 92;
+/// Tomarla para este proceso. `-EBUSY` si ya la tiene otro.
+pub const TXN_LOCK_TOMAR: u64 = 1;
+/// La operación quedó **armada**: la exclusión deja de tener dueño y dura
+/// hasta el reinicio, que es cuando se aplica. El proceso puede terminar.
+pub const TXN_LOCK_ARMADO: u64 = 2;
+/// Soltarla (la operación se canceló). Sólo el dueño.
+pub const TXN_LOCK_SOLTAR: u64 = 3;
+/// Consultar: devuelve `TXN_LOCK_LIBRE`, `TXN_LOCK_MIA`, `TXN_LOCK_AJENA` o
+/// `TXN_LOCK_ARMADA`.
+pub const TXN_LOCK_ESTADO: u64 = 4;
+
+pub const TXN_LOCK_LIBRE: u64 = 0;
+pub const TXN_LOCK_MIA: u64 = 1;
+pub const TXN_LOCK_AJENA: u64 = 2;
+pub const TXN_LOCK_ARMADA: u64 = 3;
+
+pub const FS_RESIZE_GROW_ROOT: u64 = 0;
+pub const FS_RESIZE_QUERY: u64 = 1;
+
+/// Informe de espacio para `FS_RESIZE_QUERY`.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct FsSpaceInfo {
+    pub root_fs_blocks: u64,
+    pub root_free_blocks: u64,
+    pub root_part_blocks: u64,
+    pub models_fs_blocks: u64,
+    pub models_used_blocks: u64,
+    pub models_part_blocks: u64,
+    /// Cuántos bloques 4K se pueden robar del final de modelos.
+    pub max_grow_blocks: u64,
+}
 
 pub const UPD_WHICH_MAILBOX: u64 = 0;
 pub const UPD_WHICH_KERNEL: u64 = 1;
 pub const UPD_WHICH_META: u64 = 2;
+/// Registro de arranque de la transacción (`SOSOTXN.BIN`, contrato U0/U5a).
+pub const UPD_WHICH_TXN: u64 = 3;
+/// Identidad live/instalado (`SOSOMODE.TXT`, U2). El cliente la lee para saber
+/// el GUID de **esta** ESP, que es lo que ata un punto de recuperación a su
+/// instalación.
+pub const UPD_WHICH_MODE: u64 = 4;
 pub const UPD_MAILBOX_SIZE: usize = 4096;
 pub const UPD_KERNEL_META_SIZE: usize = 512;
 pub const UPD_KERNEL_SLOT_SIZE: u64 = 64 * 1024 * 1024;
@@ -274,6 +355,8 @@ pub const FUTEX_WAKE: u64 = 1;
 
 // ---- señales (modelo mínimo) ----
 
+/// `kill(pid, 0)`: sondeo. El proceso existe y no es zombi; no entrega señal.
+pub const SIGPROBE: u64 = 0;
 pub const SIGINT: u64 = 2;
 pub const SIGKILL: u64 = 9;
 pub const SIGTERM: u64 = 15;
@@ -380,6 +463,15 @@ pub struct GpuInfo {
 /// Umbral: ficheros mayores se abren en modo lazy (sin cargar todo).
 pub const LAZY_FILE_THRESHOLD: u64 = 64 * 1024;
 
+/// Respuesta de `SYS_FSINFO`: bloques del sosofs raíz.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct FsInfo {
+    pub total_blocks: u64,
+    pub free_blocks: u64,
+    pub block_size: u64,
+}
+
 /// Respuesta de `SYS_MEMINFO`: frames de 4 KiB (multiplicar ×4096 para bytes).
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
@@ -388,6 +480,68 @@ pub struct MemInfo {
     pub free_frames: u64,
     /// Páginas mmap RO file-backed registradas y evictables por el kernel.
     pub reclaimable_frames: u64,
+}
+
+/// Hay NIC real (ethernet o WiFi), no la pila vacía de loopback.
+pub const NET_FLAG_PRESENT: u32 = 1;
+/// La iface tiene IPv4 (DHCP o fallback estático).
+pub const NET_FLAG_CONFIGURED: u32 = 2;
+pub const NET_BACKEND_NONE: u8 = 0;
+pub const NET_BACKEND_WIRED: u8 = 1;
+pub const NET_BACKEND_WIFI: u8 = 2;
+
+/// Respuesta de `SYS_NETINFO`: IPv4 de la NIC activa.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct NetInfo {
+    pub flags: u32,
+    pub prefix_len: u8,
+    pub backend: u8,
+    pub _pad: [u8; 2],
+    pub addr: [u8; 4],
+    pub gateway: [u8; 4],
+    pub mac: [u8; 6],
+    pub _pad2: [u8; 2],
+}
+
+/// Valores de `ProcInfo.state` (syscall `SYS_PSLIST`).
+pub const PROC_STATE_RUNNABLE: u8 = 0;
+pub const PROC_STATE_RUNNING: u8 = 1;
+pub const PROC_STATE_SLEEPING: u8 = 2;
+pub const PROC_STATE_WAIT_CHILD: u8 = 3;
+pub const PROC_STATE_WAIT_TTY: u8 = 4;
+pub const PROC_STATE_WAIT_PIPE: u8 = 5;
+pub const PROC_STATE_WAIT_FUTEX: u8 = 6;
+pub const PROC_STATE_WAIT_SOCKET: u8 = 7;
+pub const PROC_STATE_ZOMBIE: u8 = 8;
+
+pub const PROC_FLAG_THREAD: u8 = 1;
+
+/// Entrada de `SYS_PSLIST`: un proceso (o hilo) del scheduler.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct ProcInfo {
+    pub pid: u64,
+    pub ppid: u64,
+    pub pgid: u64,
+    pub state: u8,
+    pub flags: u8,
+    pub _pad: [u8; 6],
+    pub name: [u8; 48],
+}
+
+impl Default for ProcInfo {
+    fn default() -> Self {
+        Self {
+            pid: 0,
+            ppid: 0,
+            pgid: 0,
+            state: 0,
+            flags: 0,
+            _pad: [0; 6],
+            name: [0; 48],
+        }
+    }
 }
 
 /// Respuesta de `SYS_IOSTAT`: contadores de E/S de bloque desde el arranque.
@@ -419,7 +573,8 @@ pub const DISK_FLAG_READONLY: u32 = 1;
 /// qué disco protege `sys_disk_write` (nunca deja escribir el propio disco
 /// de arranque).
 pub const DISK_FLAG_BOOT: u32 = 2;
-/// GPT con magic SOSOFS10 en la partición 2: soso previo, reinstalar es seguro.
+/// GPT con magic SOSOFS11 o SOSOFS10 en la partición 2: soso previo,
+/// reinstalar es seguro (el montaje exige `SOSOFS11`).
 pub const DISK_FLAG_SOSO: u32 = 4;
 /// Sin tabla de particiones y primer sector a cero.
 pub const DISK_FLAG_EMPTY: u32 = 8;
@@ -442,6 +597,7 @@ pub const ENOENT: i64 = 2;
 pub const ESRCH: i64 = 3;
 pub const EINTR: i64 = 4;
 pub const EIO: i64 = 5;
+pub const ETIMEDOUT: i64 = 110;
 pub const EBADF: i64 = 9;
 pub const ECHILD: i64 = 10;
 pub const ENOMEM: i64 = 12;
@@ -497,13 +653,43 @@ pub const CLOCK_MONOTONIC: u64 = 1;
 /// Valor de stdio en `SpawnIo` para usar la tty del proceso (fd 0/1/2).
 pub const FD_INHERIT_TTY: u64 = u64::MAX;
 /// Como `FD_INHERIT_TTY`, pero ata esos fds a la consola serie, no a la del padre.
-/// Sirve para demonios (askd) lanzados desde una sesión SSH: su stdout acaba
-/// en el puerto serie y en `SOSOLOG.TXT`, no mezclado con la sesión remota.
+/// Sirve para demonios (askd) lanzados desde una sesión SSH: un panic en stdout
+/// acaba en el puerto serie, no mezclado con la sesión remota. El diagnóstico
+/// de askd va por fd 3 (`logln!`), no por estos fds.
 pub const FD_SERIAL_TTY: u64 = u64::MAX - 1;
+/// Canal de registro del kernel (fd 3 por defecto); sólo válido en el slot `log_fd`.
+pub const FD_KERNEL_LOG: u64 = u64::MAX - 2;
+/// Deja el slot vacío (`write` devuelve `EBADF`).
+pub const FD_CLOSED: u64 = u64::MAX - 3;
+
+/// Descriptor estándar de registro de eventos de aplicación.
+pub const LOG_FD: u64 = 3;
+
+/// Modos de `SYS_FATLOG_FLUSH`.
+pub const LOG_FLUSH: u64 = 0;
+/// Vaciar y **pausar** el escritor de `/var/log` (clon de disco en curso).
+pub const LOG_QUIESCE: u64 = 1;
+pub const LOG_REANUDAR: u64 = 2;
+/// Máximo de bytes de mensaje por `write(3, …)` antes de truncar.
+pub const LOG_MSG_MAX: usize = 1024;
 
 /// ¿`spec` de stdio es un centinela (no un fd del padre)?
 pub fn stdio_es_tty(spec: u64) -> bool {
     spec == FD_INHERIT_TTY || spec == FD_SERIAL_TTY
+}
+
+/// ¿`spec` es un centinela de spawn (tty, log del kernel o cerrado)?
+pub fn stdio_es_centinela(spec: u64) -> bool {
+    stdio_es_tty(spec) || spec == FD_KERNEL_LOG || spec == FD_CLOSED
+}
+
+/// `log_fd` del hijo: `0` (layout viejo / sin inicializar) → canal de log.
+pub fn spawn_log_fd(spec: u64) -> u64 {
+    if spec == 0 {
+        FD_KERNEL_LOG
+    } else {
+        spec
+    }
 }
 
 // ---- seek ----
@@ -578,6 +764,26 @@ pub struct SpawnIo {
     /// Puntero a tabla de cadenas `KEY=VAL`; puede ser 0.
     pub envp_ptr: u64,
     pub envp_count: u64,
+    /// fd 3 del hijo: `FD_KERNEL_LOG`, `FD_CLOSED`, un fd del padre, etc.
+    ///
+    /// `0` es el canal de log por defecto (`FD_KERNEL_LOG`), no el fd 0 del
+    /// padre. Un cliente anterior a este campo escribe 88 B; el kernel lee 96
+    /// y el extra en pila suele ser cero — interpretarlo como stdin vaciaba
+    /// la tty de sosh al fallar un spawn.
+    pub log_fd: u64,
+}
+
+#[cfg(test)]
+mod spawn_log_fd_tests {
+    use super::*;
+
+    #[test]
+    fn cero_es_canal_de_log() {
+        assert_eq!(spawn_log_fd(0), FD_KERNEL_LOG);
+        assert_eq!(spawn_log_fd(FD_CLOSED), FD_CLOSED);
+        assert_eq!(spawn_log_fd(FD_KERNEL_LOG), FD_KERNEL_LOG);
+        assert_eq!(spawn_log_fd(7), 7);
+    }
 }
 
 /// wait() devuelve (pid << 8) | (código de salida & 0xff).

@@ -3,12 +3,18 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use libsoso::{abi, errno_str, println, sys};
+use alloc::string::String;
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
-    let path = args.trim();
+fn main(args: &[String]) -> u8 {
+    let Some(path) = args.first() else {
+        println!("uso: stat RUTA");
+        return 2;
+    };
     if path.is_empty() {
         println!("uso: stat RUTA");
         return 2;

@@ -125,12 +125,23 @@ pub fn spawn(path: &str, args: &str) -> i64 {
     )
 }
 
+/// Lanza un programa a partir de una **línea** de argumentos.
+///
+/// La línea se parte por espacios, porque eso es lo que una línea significa.
+/// Antes se metía entera como **un solo** argumento, y funcionaba sólo porque
+/// `entry!` la volvía a juntar al otro lado; al quitar ese juntado (T62),
+/// `spawn_io("/bin/soso-improve", "eco-servidor 9460")` pasó a lanzar una orden
+/// llamada literalmente «eco-servidor 9460». El síntoma fue un
+/// `ECONNREFUSED` en el puerto: nadie llegó a escuchar.
+///
+/// Quien tenga que pasar un argumento **con** espacios usa [`spawn_io_ex`],
+/// que lleva argv de verdad y no pasa por aquí.
 pub fn spawn_io(path: &str, args: &str, stdin: u64, stdout: u64, stderr: u64) -> i64 {
-    if args.is_empty() {
-        spawn_io_ex(path, &[path], &[], stdin, stdout, stderr)
-    } else {
-        spawn_io_ex(path, &[path, args], &[], stdin, stdout, stderr)
-    }
+    let piezas: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let mut argv: alloc::vec::Vec<&str> = alloc::vec::Vec::with_capacity(piezas.len() + 1);
+    argv.push(path);
+    argv.extend(piezas);
+    spawn_io_ex(path, &argv, &[], stdin, stdout, stderr)
 }
 
 /// `argv[0]` suele ser el nombre del binario; el resto son argumentos.

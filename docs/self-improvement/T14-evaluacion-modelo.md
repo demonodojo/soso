@@ -1,6 +1,6 @@
 # T14 — Medir calidad y fijar presupuestos antes de usar el agente
 
-**Hito:** SI-0 / SI-1 · **Tipo:** Implementación de evaluación e integración · **Estado:** pendiente.
+**Hito:** SI-0 / SI-1 · **Tipo:** Implementación de evaluación e integración · **Estado:** hecha (2026-09-23) · **Resultado: NO-GO**.
 
 **Dependencias:** [T02](T02-banco.md), [T03](T03-perfil-modelo.md), [T13](T13-servidor-host.md), [T48](T48-reloj-red.md)
 
@@ -50,9 +50,32 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados (lógica portable y pruebas).
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado: **NO-GO justificado**, con la corrección concreta que sigue.
+
+Entregado el 23-sep-2026: `crates/soso-improve-core/src/evaluacion.rs` con el
+criterio del plan convertido en código —todos los intentos en el denominador,
+cinco desenlaces distintos, `sin-uso` que no cuenta, umbrales explícitos y
+presupuestos derivados de lo medido— y [evaluacion.md](evaluacion.md) como
+criterio citable. `cargo test -p soso-improve-core -p soso-improve` verde con
+backend simulado. Resumen en [seguimiento/T14.md](seguimiento/T14.md).
+
+**Campaña del 23-sep-2026 contra el endpoint guest: NO-GO.** 6 de 10 casos de
+protocolo sólidos, 0 inestables; mediana 60,7 s por tarea y máximo 278 s.
+Ninguno de los cuatro fallos es del modelo: son del servicio, y van en
+[T59](T59-tool-calls.md) (tool_calls) y [T60](T60-validacion-peticion.md)
+(validación 422 y `unknown_tool`). Evidencia en
+`target/self-improvement/tasks/T14/resultado.md` e `informe.json`.
+
+Como la ficha exige, **un no-go no habilita a [T16](T16-servicio-guest.md) ni a
+[T22](T22-primera-mejora.md)**, y SI-2 no cierra con esto.
+
+**Límites.** Sólo se evaluó la clase protocolo: las microtareas necesitan
+compilador en el guest (T40/T41), y el umbral se puso a 0 para no fabricar un
+no-go por una clase que ni se intentó. `native_validation` queda en partial: la
+campaña la lanza el host contra el guest, y ejecutarla desde soso es
+[T49](T49-pruebas-guest.md).
 
 Si el modelo no usa herramientas, no pasar a una demo que ejecute comandos inventados por el adaptador.
 

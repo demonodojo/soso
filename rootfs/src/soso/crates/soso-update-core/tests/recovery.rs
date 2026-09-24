@@ -119,6 +119,36 @@ fn recovery_rejects_corrupt_backup() {
 }
 
 #[test]
+fn fault_before_backup_must_not_restore() {
+    let old = b"kernel-original-bytes".to_vec();
+    let new = b"kernel-nuevo-staged".to_vec();
+    let hash = soso_update_core::hex_sha256(&new);
+    let plan = plan_apply(&old, &new, new.len() as u64, &hash, "0.2.6").unwrap();
+    let mut meta = plan.meta_after_backup.clone();
+    meta.phase = KernelPhase::Applying;
+    // Corte antes de copiar el backup: el hueco sigue siendo el kernel nuevo.
+    let mut slot = new.clone();
+    slot.resize(8192, 0);
+    assert!(
+        restore_from_slot(&slot, &meta).is_err(),
+        "restaurar con el kernel nuevo en el hueco no es un backup"
+    );
+}
+
+#[test]
+fn fault_during_partial_backup_must_not_restore() {
+    let old = vec![7u8; 64];
+    let new = b"kernel-nuevo-staged".to_vec();
+    let hash = soso_update_core::hex_sha256(&new);
+    let plan = plan_apply(&old, &new, new.len() as u64, &hash, "0.2.6").unwrap();
+    let mut meta = plan.meta_after_backup.clone();
+    meta.phase = KernelPhase::Applying;
+    let mut slot = old[..32].to_vec();
+    slot.resize(8192, 0);
+    assert!(restore_from_slot(&slot, &meta).is_err());
+}
+
+#[test]
 fn fault_after_backup_step() {
     let old = vec![0u8; 512];
     let new = b"N".repeat(1024);

@@ -125,12 +125,23 @@ pub fn spawn(path: &str, args: &str) -> i64 {
     )
 }
 
+/// Lanza un programa a partir de una **línea** de argumentos.
+///
+/// La línea se parte por espacios, porque eso es lo que una línea significa.
+/// Antes se metía entera como **un solo** argumento, y funcionaba sólo porque
+/// `entry!` la volvía a juntar al otro lado; al quitar ese juntado (T62),
+/// `spawn_io("/bin/soso-improve", "eco-servidor 9460")` pasó a lanzar una orden
+/// llamada literalmente «eco-servidor 9460». El síntoma fue un
+/// `ECONNREFUSED` en el puerto: nadie llegó a escuchar.
+///
+/// Quien tenga que pasar un argumento **con** espacios usa [`spawn_io_ex`],
+/// que lleva argv de verdad y no pasa por aquí.
 pub fn spawn_io(path: &str, args: &str, stdin: u64, stdout: u64, stderr: u64) -> i64 {
-    if args.is_empty() {
-        spawn_io_ex(path, &[path], &[], stdin, stdout, stderr)
-    } else {
-        spawn_io_ex(path, &[path, args], &[], stdin, stdout, stderr)
-    }
+    let piezas: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let mut argv: alloc::vec::Vec<&str> = alloc::vec::Vec::with_capacity(piezas.len() + 1);
+    argv.push(path);
+    argv.extend(piezas);
+    spawn_io_ex(path, &argv, &[], stdin, stdout, stderr)
 }
 
 /// `argv[0]` suele ser el nombre del binario; el resto son argumentos.
@@ -142,6 +153,16 @@ pub fn spawn_io_ex(
     stdout: u64,
     stderr: u64,
 ) -> i64 {
+    spawn_io_full(
+        path,
+        argv,
+        env,
+        [stdin, stdout, stderr, abi::FD_KERNEL_LOG],
+    )
+}
+
+/// Spawn con control explícito de los cuatro descriptores estándar (0–3).
+pub fn spawn_io_full(path: &str, argv: &[&str], env: &[&str], fds: [u64; 4]) -> i64 {
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -169,9 +190,10 @@ pub fn spawn_io_ex(
         path_len: path.len() as u64,
         args_ptr: args_joined.as_ptr() as u64,
         args_len: args_joined.len() as u64,
-        stdin_fd: stdin,
-        stdout_fd: stdout,
-        stderr_fd: stderr,
+        stdin_fd: fds[0],
+        stdout_fd: fds[1],
+        stderr_fd: fds[2],
+        log_fd: fds[3],
         argv_ptr: if argv.is_empty() {
             0
         } else {
@@ -324,8 +346,49 @@ pub fn meminfo(out: &mut abi::MemInfo) -> i64 {
     )
 }
 
+pub fn netinfo(out: &mut abi::NetInfo) -> i64 {
+    syscall4(
+        abi::SYS_NETINFO,
+        out as *mut abi::NetInfo as u64,
+        0,
+        0,
+        0,
+    )
+}
+
+/// ICMP Echo a `addr`. `timeout_ms == 0` → 1000 ms. Devuelve RTT en ms o -errno.
+pub fn ping(addr: [u8; 4], timeout_ms: u64) -> i64 {
+    syscall4(
+        abi::SYS_PING,
+        u32::from_be_bytes(addr) as u64,
+        timeout_ms,
+        0,
+        0,
+    )
+}
+
 pub fn iostat(out: &mut abi::IoStat) -> i64 {
     syscall4(abi::SYS_IOSTAT, out as *mut abi::IoStat as u64, 0, 0, 0)
+}
+
+pub fn fs_resize(op: u64, arg: u64, out: &mut abi::FsSpaceInfo) -> i64 {
+    syscall4(
+        abi::SYS_FS_RESIZE,
+        op,
+        arg,
+        out as *mut abi::FsSpaceInfo as u64,
+        0,
+    )
+}
+
+pub fn pslist(out: &mut [abi::ProcInfo]) -> i64 {
+    syscall4(
+        abi::SYS_PSLIST,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+        0,
+        0,
+    )
 }
 
 pub fn disk_list(out: &mut [abi::DiskInfo]) -> i64 {
@@ -377,6 +440,22 @@ pub fn bootreq_read(buf: &mut [u8]) -> i64 {
         buf.as_mut_ptr() as u64,
         buf.len() as u64,
         0,
+        0,
+    )
+}
+
+/// Volcado inmediato del log de consola a `SOSOLOG.TXT` en la ESP live.
+pub fn fatlog_flush() -> i64 {
+    syscall4(abi::SYS_FATLOG_FLUSH, 0, 0, 0, 0)
+}
+
+/// Lee el ring de registros de aplicaciones (offset 0 = byte más antiguo).
+pub fn log_read(offset: u64, buf: &mut [u8]) -> i64 {
+    syscall4(
+        abi::SYS_LOG_READ,
+        offset,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
         0,
     )
 }
@@ -648,6 +727,35 @@ pub fn truncate(path: &str, size: u64) -> i64 {
         path.as_ptr() as u64,
         path.len() as u64,
         size,
+        0,
+    )
+}
+
+/// Pausa o reanuda el escritor de `/var/log`. Mientras está en pausa el ring
+/// sigue capturando en RAM; al reanudar se vuelca. Lo usa `soso-install` para
+/// que el sosofs de origen no cambie mientras se copia.
+/// Confirma la pareja kernel+rootfs de una actualización aplicada.
+pub fn txn_confirm() -> i64 {
+    syscall4(abi::SYS_TXN_CONFIRM, 0, 0, 0, 0)
+}
+
+/// Exclusión de escritores de la actualización: `op` es una de las
+/// `abi::TXN_LOCK_*`. `reserva` sólo lo mira `TOMAR`, en bloques de sosofs.
+pub fn txn_lock(op: u64, reserva: u64) -> i64 {
+    syscall4(abi::SYS_TXN_LOCK, op, reserva, 0, 0)
+}
+
+/// Espacio libre del sistema de ficheros raíz.
+pub fn fsinfo(out: &mut abi::FsInfo) -> i64 {
+    syscall4(abi::SYS_FSINFO, out as *mut abi::FsInfo as u64, 0, 0, 0)
+}
+
+pub fn log_quiesce(pausar: bool) -> i64 {
+    syscall4(
+        abi::SYS_FATLOG_FLUSH,
+        if pausar { abi::LOG_QUIESCE } else { abi::LOG_REANUDAR },
+        0,
+        0,
         0,
     )
 }

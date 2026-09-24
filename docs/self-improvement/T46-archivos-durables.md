@@ -1,6 +1,6 @@
 # T46 — Acreditar persistencia y actualización de referencias en sosofs
 
-**Hito:** SI-4 · **Tipo:** Implementación portable y validación guest · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Implementación portable y validación guest · **Estado:** hecha (2026-09-24), acreditada con reinicio real.
 
 **Dependencias:** [T01](T01-base.md)
 

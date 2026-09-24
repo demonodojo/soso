@@ -40,6 +40,18 @@ fn leer(path: &str) -> Result<Vec<u8>, i64> {
     Ok(out)
 }
 
+fn escribir(path: &str, data: &[u8]) -> Result<(), i64> {
+    let fd = sys::open(path, abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
+    if fd < 0 {
+        return Err(fd);
+    }
+    if !data.is_empty() {
+        sys::write_all(fd as u64, data)?;
+    }
+    sys::close(fd as u64);
+    Ok(())
+}
+
 fn listar(dir: &str, out: &mut Vec<(String, String)>) {
     let fd = sys::open(dir, abi::O_RDONLY);
     if fd < 0 {
@@ -160,12 +172,8 @@ fn cmd_commit() -> u8 {
     0
 }
 
-fn main(args: &str) -> u8 {
-    let mut cmd = "help";
-    for tok in args.split_whitespace() {
-        cmd = tok;
-        break;
-    }
+fn main(args: &[String]) -> u8 {
+    let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "status" => cmd_status(),
         "log" => cmd_log(),

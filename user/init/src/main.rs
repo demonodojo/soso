@@ -27,71 +27,75 @@ macro_rules! check {
     };
 }
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
+    // Despacho por argv: el subcomando es el primer argumento y el operando el
+    // segundo. Antes esto era `strip_prefix("sleep ")` sobre la línea entera,
+    // que funcionaba sólo mientras nada llevara espacios (T62).
+    let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
+    let op = args.get(1).map(|s| s.as_str()).unwrap_or("");
     if args.is_empty() {
         return lanzar_shell();
     }
-    if args == "test" {
+    if cmd == "test" {
         return suite();
     }
     // Modos de hijo (el propio init se re-spawnea para las pruebas).
-    if args == "hijo" {
+    if cmd == "hijo" {
         println!("hijo: hola, me voy con código 7");
         return 7;
     }
-    if let Some(rest) = args.strip_prefix("sleep ") {
-        let ms = rest
-            .trim()
+    if cmd == "sleep" {
+        let ms = op
             .bytes()
             .fold(0u64, |acc, b| acc.saturating_mul(10).saturating_add((b - b'0') as u64));
         let _ = sys::sleep_ms(ms);
         return 0;
     }
-    if args == "crash" {
+    if cmd == "crash" {
         // Para probar que una falta de usuario mata al proceso, no al kernel.
         unsafe { core::ptr::read_volatile(core::ptr::null::<u8>()) };
         return 0;
     }
-    if let Some(n) = args.strip_prefix("cpu ") {
+    if cmd == "cpu" {
         // Trabajo de CPU puro, sin syscalls entre iteraciones: si esto se
         // intercala con el otro hijo, la preempción por timer funciona.
         for i in 1..=3 {
             busy();
-            println!("cpu {n}: iteración {i}");
+            println!("cpu {op}: iteración {i}");
         }
         return 0;
     }
-    if let Some(s) = args.strip_prefix("fpu ") {
+    if cmd == "fpu" {
         // Estrés de preservación FPU/SSE: mantiene un patrón en YMM durante
         // muchos desalojos de timer y verifica que no se corrompe.
-        let seed = s.bytes().next().unwrap_or(b'1');
+        let seed = op.bytes().next().unwrap_or(b'1');
         return fpu_stress(seed);
     }
-    if args.starts_with("argv-check") {
-        // `main` recibe argv[1..] unido por espacios; el argv exacto (con
-        // vacíos y espacios internos) lo conserva el crt0 en `libsoso::argv()`.
+    if cmd == "argv-check" {
+        // El argv exacto —con vacíos y espacios internos— sigue estando en
+        // `libsoso::argv()`, que además lleva argv[0].
         return argv_check(&libsoso::argv());
     }
-    if args == "mprotect-test" {
+    if cmd == "mprotect-test" {
         return modo_mprotect_test();
     }
-    if args == "mprotect-ok" {
+    if cmd == "mprotect-ok" {
         return modo_mprotect_ok();
     }
-    if args == "mremap-test" {
+    if cmd == "mremap-test" {
         return modo_mremap_test();
     }
-    if args == "mremap-oom" {
+    if cmd == "mremap-oom" {
         return modo_mremap_oom();
     }
-    if args == "mprotect-interior" {
+    if cmd == "mprotect-interior" {
         return modo_mprotect_interior();
     }
-    if args.starts_with("env-check") {
+    if cmd == "env-check" {
         return env_check();
     }
-    if let Some(msg) = args.strip_prefix("log ") {
-        libsoso::logln!("{}", msg.trim());
+    if cmd == "log" {
+        libsoso::logln!("{}", args[1..].join(" "));
         return 0;
     }
     println!("init: args desconocidos {args:?} (usa: test)");
@@ -924,7 +928,7 @@ fn suite() -> u8 {
         check!(fd >= 0, "open para log fd3");
         let pid = sys::spawn_io_full(
             "/bin/init",
-            &["/bin/init", "log fichero_ok"],
+            &["/bin/init", "log", "fichero_ok"],
             &[],
             [
                 abi::FD_INHERIT_TTY,
@@ -948,7 +952,7 @@ fn suite() -> u8 {
 
         let pid = sys::spawn_io_full(
             "/bin/init",
-            &["/bin/init", "log cerrado_ok"],
+            &["/bin/init", "log", "cerrado_ok"],
             &[],
             [
                 abi::FD_INHERIT_TTY,

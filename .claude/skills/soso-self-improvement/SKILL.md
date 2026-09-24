@@ -174,10 +174,10 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 
 ## Por dónde (actualizar al cerrar la recomendada)
 
-Camino SI-2: **T19 cerrada** (2026-09-23) — `cargo xtask test-llm-api` pasa **12/12 en guest
-con pesos reales** (`guest_ok`). Costó T54–T57, todas cerradas. Ficha recomendada ahora: **T48**
-(reloj y transporte nativos), que desbloquea **T14**, lo último que falta para cerrar SI-2.
-Notas de campo: la campaña necesita **5 GiB** de guest (con 2 GiB los pesos no caben y tarda
-×3,5); dos campañas solapadas se sabotean (puertos fijos), y un «connection refused» a mitad
-de un informe es eso, no un fallo del producto.
-T18, T45 y T46 en paralelo. T06–T15 cerradas en host/API/sesión. Validación nativa pendiente de T45/T49.
+Camino SI-2: **T16–T19** hechas 2026-09-22; T14 dio **no-go** del modelo (T59
+cerró la atribución), así que SI-2 no cierra y la decisión siguiente es de plan.
+Camino SI-4: **T23, T63 y T24 cerradas** 2026-09-24, las tres con sonda guest.
+La cadena se para ahí: T25 → T21 → T20 depende del no-go de T14, y T26–T29 van
+detrás. T62 también cerrada (eran cinco productores, no uno). Recomendada ahora:
+**T64** (sosh no entiende comillas). También libres: los inventarios
+T32/T36/T38.

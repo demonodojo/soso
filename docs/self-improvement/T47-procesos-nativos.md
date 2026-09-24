@@ -1,6 +1,6 @@
 # T47 — Ejecutar procesos con argumentos, canales y límites exactos
 
-**Hito:** SI-4 · **Tipo:** Implementación portable y validación guest · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Implementación portable y validación guest · **Estado:** hecha (2026-09-24), con límites declarados.
 
 **Dependencias:** [T45](T45-cli-capacidades.md), [T48](T48-reloj-red.md)
 
@@ -38,9 +38,23 @@ Los subcomandos nuevos se ejecutan después de implementarlos. Guardar comando, 
 
 ## Cierre y condición de bloqueo
 
-- [ ] Entrega y comprobaciones terminadas con evidencia.
-- [ ] Catálogo, índice y seguimiento sincronizados.
-- [ ] Validación nativa registrada por separado, sin inferirla de la compilación.
+- [x] Entrega y comprobaciones terminadas con evidencia.
+- [x] Catálogo, índice y seguimiento sincronizados.
+- [x] Validación nativa registrada por separado, sin inferirla de la compilación.
+
+El adaptador guest pasa argv y entorno reales, escribe stdin, restaura el cwd
+—también al fallar—, aplica plazo con `kill` y espera **al hijo correcto**.
+Autoprueba `soso-improve procesos` en la suite. Resumen en
+[seguimiento/T47.md](seguimiento/T47.md); evidencia en
+`target/self-improvement/tasks/T47/resultado.md`.
+
+**Límites, y ninguno silencioso.** stdout y stderr van mezclados y se declara
+en `Salida.motivo`: con 4 KiB de búfer de tubería, separarlos sin lectura no
+bloqueante añadiría un interbloqueo que hoy no existe
+([T61](T61-pipe-no-bloqueante.md)). Los argumentos con espacios llegan bien al
+hijo, pero los programas reciben una cadena juntada
+([T62](T62-argv-en-los-programas.md)). La **limpieza de descendientes** (paso 5)
+no se ha verificado, así que no se declara hecha.
 
 No portar OpenCode aquí. Dividir los huecos de argv, espera y cancelación en fichas con sondas independientes antes de modificar ABI/kernel.
 

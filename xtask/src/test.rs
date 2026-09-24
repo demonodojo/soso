@@ -810,6 +810,60 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_ps(key, port)
             });
         });
+        filter.if_step(sid, "soso-improve: runner de pruebas en soso", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "soso-improve: runner de pruebas en soso",
+                || ssh_improve_pruebas(key, port),
+            );
+        });
+        filter.if_step(sid, "soso-improve: estado de tareas", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "soso-improve: estado de tareas",
+                || ssh_improve_tarea(key, port),
+            );
+        });
+        filter.if_step(sid, "soso-improve: dos tuberías sin bloquear", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "soso-improve: dos tuberías sin bloquear",
+                || ssh_improve_tuberias(key, port),
+            );
+        });
+        filter.if_step(sid, "soso-improve: procesos (argv, stdin, cwd)", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "soso-improve: procesos (argv, stdin, cwd)",
+                || ssh_improve_procesos(key, port),
+            );
+        });
+        filter.if_step(sid, "soso-improve: eco, reloj y plazos", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "soso-improve: eco, reloj y plazos",
+                || ssh_improve_eco(key, port),
+            );
+        });
+        filter.if_step(sid, "soso-improve: órdenes y códigos de salida", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "soso-improve: órdenes y códigos de salida",
+                || ssh_improve_cli(key, port),
+            );
+        });
         filter.if_step(sid, "ask: el texto llega literal", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "ask: el texto llega literal", || {
                 ssh_ask_literal(key, port)
@@ -1474,6 +1528,212 @@ fn ssh_guion_inner(
     Ok(salida)
 }
 
+/// T49: el runner que ejecuta las comprobaciones **dentro** de soso.
+///
+/// Lo que se comprueba aquí, además de que pasen, es que las capacidades que
+/// todavía no existen se informen como **pendientes**: cuentan en el total y no
+/// como aciertos. Contarlas bien es lo que impide que el porcentaje suba solo.
+/// T23 — el estado del coordinador, escrito y releído **desde el disco de
+/// soso**.
+///
+/// Lo que acredita: que el formato sobrevive a un viaje por sosofs, que una
+/// medida desconocida sigue desconocida al volver, y que el coordinador no
+/// puede aceptar su propio trabajo tampoco aquí. En el host eso lo comprueban
+/// `--test state`; esta es la mitad que no se puede deducir de aquella.
+fn ssh_improve_tarea(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-improve tarea preparar\nexit\n",
+        Duration::from_secs(180),
+    )?;
+    for esperado in [
+        "tarea: preparada r-autoprueba para T99-autoprueba",
+        "el coordinador no puede aceptar: ok",
+        "el intento cerrado sobrevivió al disco: ok",
+        "lo no medido sigue sin medirse tras el viaje: ok",
+        "tarea: 0 caso(s) mal",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta «{esperado}»: {salida:?}"));
+        }
+    }
+    // Y el informe imprime la medida ausente como ausente, con su motivo: un
+    // `0` aquí sería un dato inventado que después alguien promedia.
+    if !salida.contains("tokens ? (") {
+        return Err(format!("la medida desconocida no se informó: {salida:?}"));
+    }
+    Ok(())
+}
+
+fn ssh_improve_pruebas(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-improve pruebas\nexit\n",
+        Duration::from_secs(300),
+    )?;
+    for esperado in [
+        "procesos/argv-stdin-cwd",
+        "transporte/eco",
+        "tuberias/dos-canales",
+        // T63: un resto de corte no encalla la referencia. Se comprueba aquí,
+        // en sosofs, porque el patrón de generaciones existe precisamente
+        // porque en soso `rename` no sustituye al destino.
+        "durable/publicar-sobre-un-corte",
+        // T24: el ciclo copia → parche → aplicar, sin Git, dentro de soso.
+        "workspace/copia-y-parche",
+        // T62: una ruta con un espacio, vista por `main` de un programa real.
+        "argv/ruta-con-espacios",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta la prueba «{esperado}»: {salida:?}"));
+        }
+    }
+    // Programa y repo no existen todavía: tienen que salir como pendientes,
+    // ni aprobadas ni escondidas.
+    if !salida.contains("pendiente") || !salida.contains("T40") {
+        return Err(format!("las capacidades ausentes no se informaron: {salida:?}"));
+    }
+    if salida.contains("fallo ") || salida.contains("error  ") {
+        return Err(format!("alguna prueba falló: {salida:?}"));
+    }
+    if !salida.contains("\"fallaron\":0") {
+        return Err(format!("el resumen JSON no dice 0 fallos: {salida:?}"));
+    }
+    Ok(())
+}
+
+/// T61: leer dos tuberías alternando, sin bloquearse.
+///
+/// El hijo escribe 12 KiB en stderr —tres veces el búfer de 4 KiB— y una línea
+/// en stdout. Sin `read_timeout` sobre tuberías, el padre se queda esperando en
+/// una mientras el hijo se atasca en la otra, y el paso vence por plazo. Es el
+/// interbloqueo que la ficha pide reproducir.
+fn ssh_improve_tuberias(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-improve tuberias\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    if !salida.contains("tuberías alternadas: ok") {
+        return Err(format!("el drenaje alternado falló: {salida:?}"));
+    }
+    if !salida.contains("tuberias: 0 caso(s) mal") {
+        return Err(format!("algún caso de tuberías falló: {salida:?}"));
+    }
+    Ok(())
+}
+
+/// T47: el adaptador de procesos cumple `Orden`/`Salida` o dice qué le falta.
+///
+/// El caso decisivo es el de argv con espacios: el adaptador anterior juntaba
+/// los argumentos con espacios, así que una ruta con un espacio llegaba al hijo
+/// partida en dos. Con la tabla de argv de la ABI llega entera.
+fn ssh_improve_procesos(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-improve procesos\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    for esperado in [
+        "argv con espacios: ok",
+        "stdin: ok",
+        "código de fallo: ok",
+        "cwd restaurado: ok",
+        "stdin grande: ok",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta «{esperado}» en la salida: {salida:?}"));
+        }
+    }
+    if !salida.contains("procesos: 0 caso(s) mal") {
+        return Err(format!("algún caso de procesos falló: {salida:?}"));
+    }
+    Ok(())
+}
+
+/// T48: reloj monotónico y transporte, ejercitados **entre procesos soso**.
+///
+/// El cliente y el servidor son dos procesos del guest hablando por la pila de
+/// red de soso; no hay proxy del host en medio, que es justo lo que la ficha
+/// prohíbe para darla por verificada. Lo que se comprueba es que las tres
+/// cosas se distinguen: hay datos, hay que esperar, y el otro cerró.
+fn ssh_improve_eco(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-improve eco --puerto 9450\nexit\n",
+        Duration::from_secs(180),
+    )?;
+    for esperado in [
+        "eco byte-a-byte + utf8 partido: ok",
+        "cierre temprano: ok",
+        "cliente lento: ok",
+        "plazo agotado: ok",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta «{esperado}» en la salida: {salida:?}"));
+        }
+    }
+    if !salida.contains("eco: 0 caso(s) mal") {
+        return Err(format!("algún caso de eco falló: {salida:?}"));
+    }
+    // Un fallo saldría con código != 0 y `sosh` lo diría.
+    if salida.contains("salió con código") {
+        return Err(format!("`eco` no salió con 0: {salida:?}"));
+    }
+    Ok(())
+}
+
+/// T45: los dos frontends comparten órdenes, capacidades y códigos de salida.
+///
+/// Lo que de verdad se comprueba aquí es el agujero que cerró la ficha: el
+/// guest **imprimía** el fallo de una verificación y salía con 0, así que
+/// cualquier arnés que mirara el código de salida daba por buena una medida
+/// rota. `sosh` imprime «salió con código N» cuando N no es cero, que es la
+/// única forma de leer el código desde una sesión SSH.
+fn ssh_improve_cli(key: &Path, ssh_port: u16) -> Result<(), String> {
+    const FIX: &str = "/var/self-improvement/fixtures-cli";
+    let guion = format!(
+        "soso-improve capacidades
+         soso-improve verificar protocolo --banco {FIX} --caso Q04 --respuesta {FIX}/reservado/Q04/correcta.json
+         soso-improve verificar protocolo --banco {FIX} --caso Q04 --respuesta {FIX}/reservado/Q04/incorrecta.json
+         soso-improve verificar programa --caso P01 --candidato /tmp/no-existe.rs
+         soso-improve inventada
+         exit
+"
+    );
+    let salida = ssh_guion(key, ssh_port, &guion, Duration::from_secs(120))?;
+
+    // Capacidades publicadas: están las que hay y **no** las que no.
+    if !salida.contains("verificar protocolo") {
+        return Err(format!("`capacidades` no listó verificar protocolo: {salida:?}"));
+    }
+    // El caso correcto pasa…
+    if !salida.contains("Q04: ok") {
+        return Err(format!("el caso correcto no dio ok: {salida:?}"));
+    }
+    // …y el incorrecto falla **con código 2**, no con 0.
+    if !salida.contains("salió con código 2") {
+        return Err(format!(
+            "una verificación fallida no salió con código 2: {salida:?}"
+        ));
+    }
+    // Capacidad ausente: se rechaza antes de cualquier efecto y dice su ficha.
+    if !salida.contains("capacidad ausente") || !salida.contains("T40") {
+        return Err(format!(
+            "`verificar programa` no se rechazó como capacidad ausente: {salida:?}"
+        ));
+    }
+    if !salida.contains("orden desconocida") {
+        return Err(format!("una orden inventada no se rechazó: {salida:?}"));
+    }
+    Ok(())
+}
+
 fn ssh_ps(key: &Path, ssh_port: u16) -> Result<(), String> {
     let salida = ssh_guion(key, ssh_port, "ps\nexit\n", Duration::from_secs(30))?;
     if !salida.contains("/bin/init") {
@@ -1958,7 +2218,11 @@ members = ["libsoso", "hola-std"]
 [workspace.dependencies]
 soso-abi = { path = "../crates/soso-abi" }
 libsoso = { path = "libsoso" }
-getrandom = { version = "0.2", features = ["rdrand"] }
+# Las mismas features que `user/Cargo.toml`: `libsoso` usa
+# `register_custom_getrandom!`, que sólo existe con `custom`. Este manifiesto
+# se escribió con `rdrand` y funcionaba porque la copia de `rootfs/src` estaba
+# vieja; al sincronizarla, el build de Forja dejó de compilar.
+getrandom = { version = "0.2", features = ["custom"] }
 
 [profile.release]
 panic = "abort"

@@ -5,13 +5,14 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use coreutils::util::{err_path, leer_fichero};
 use libsoso::println;
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
-    let mut it = args.split_whitespace();
+fn main(args: &[String]) -> u8 {
+    let mut it = args.iter().map(|s| s.as_str());
     let Some(a) = it.next() else {
         println!("uso: diff A B");
         return 2;

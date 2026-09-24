@@ -13,3 +13,5 @@ name = "coreutils"
 libsoso = { workspace = true }
 gptdisk = { path = "../../crates/gptdisk" }
 sosomfs = { path = "../../crates/sosomfs" }
+espfat-core = { path = "../../crates/espfat-core" }
+soso-update-core = { path = "../../crates/soso-update-core" }

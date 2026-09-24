@@ -1,6 +1,6 @@
 # T50 — Aplicar y exportar cambios sin Git
 
-**Hito:** SI-4 · **Tipo:** Implementación portable y validación guest · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Implementación portable y validación guest · **Estado:** hecha (2026-09-24); pasos 4 y 5 en su propia pasada.
 
 **Dependencias:** [T01](T01-base.md), [T46](T46-archivos-durables.md)
 

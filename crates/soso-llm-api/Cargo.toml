@@ -25,6 +25,11 @@ serde_json = { version = "1", default-features = false, features = ["alloc"] }
 name = "serve_host"
 required-features = ["std"]
 
+# Sonda de T59: enseña el prompt renderizado, no genera nada.
+[[example]]
+name = "render_dump"
+required-features = ["std"]
+
 [[test]]
 name = "admission"
 required-features = ["std"]

@@ -1,5 +1,6 @@
 //! Órdenes del banco: `listar`, `validar` y `sellar`.
 
+use soso_improve_core::cli::Codigo;
 use soso_improve_core::caso::{self, CasoCargado};
 use soso_improve_core::entorno::Archivos;
 use soso_improve_core::{unir, Error, Resultado};
@@ -69,7 +70,14 @@ pub fn despachar(sub: &str, opciones: &Opciones) -> Resultado<i32> {
                 crate::aviso!("problema: {p}");
             }
             crate::digo!("{} casos, {} problema(s)", casos.len(), problemas.len());
-            Ok(if problemas.is_empty() { 0 } else { 1 })
+            // Un banco inválido es una **medida que falla**, no un «no se pudo
+            // usar»: le toca el 2. Devolvía 1, así que host y guest no sólo
+            // tenían sintaxis distinta, también criterio distinto (T45).
+            Ok(if problemas.is_empty() {
+                Codigo::Exito.como_i32()
+            } else {
+                Codigo::Verificacion.como_i32()
+            })
         }
         "sellar" => sellar(&banco, &reservado),
         otro => Err(Error::uso(format!("banco: subcomando desconocido {otro}"))),

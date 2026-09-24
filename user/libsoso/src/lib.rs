@@ -46,6 +46,15 @@ pub fn heap_init() {
 /// argv completo (argv[0] = path del binario) tal como lo mandó el kernel.
 static ARGV: Mutex<Option<alloc::vec::Vec<alloc::string::String>>> = Mutex::new(None);
 
+/// La cadena que entregó un llamante **sin** argv estructurado (`spawn_io`).
+///
+/// Sólo la hay por el camino antiguo, y existe por un consumidor concreto:
+/// `soso-llm ask <pregunta>` tiene que recibir el texto **tal como se
+/// escribió**, con sus espacios seguidos y sus comillas. Partirlo y volver a
+/// juntarlo lo cambiaría, y esa literalidad es justo lo que su prueba de la
+/// suite comprueba.
+static LINEA_CRUDA: Mutex<Option<alloc::string::String>> = Mutex::new(None);
+
 /// Decodifica el blob `SOSA` del kernel (`kernel/src/task/argv.rs`):
 /// `"SOSA" u32 count { u32 len, bytes }*`. `None` si no lleva el magic.
 pub fn decode_argv(blob: &[u8]) -> Option<alloc::vec::Vec<alloc::string::String>> {
@@ -82,23 +91,46 @@ pub fn argv() -> alloc::vec::Vec<alloc::string::String> {
     ARGV.lock().clone().unwrap_or_default()
 }
 
-/// Decodifica el blob SOSA del kernel (argv completo) y devuelve los argumentos
-/// del programa (argv[1..]), unidos con espacio — argv[0] es el path del binario.
-pub fn args_for_main(blob: &[u8]) -> alloc::string::String {
+/// La línea tal como llegó, si el llamante no pasó argv estructurado.
+///
+/// `None` significa que **sí** hubo argv: entonces la línea no existe, y
+/// reconstruirla juntando los argumentos sería inventarla. Quien la quiera de
+/// todas formas que haga el `join` y se vea en el código.
+pub fn linea_cruda() -> Option<alloc::string::String> {
+    LINEA_CRUDA.lock().clone()
+}
+
+/// Decodifica el blob SOSA del kernel y devuelve los argumentos del programa
+/// (`argv[1..]`; `argv[0]` es la ruta del binario).
+///
+/// Antes esto devolvía los argumentos **juntados por espacios** y cada programa
+/// los volvía a partir. Era lossy por construcción: una ruta con un espacio
+/// dentro salía del otro lado como dos rutas, y no había forma de distinguirla
+/// de dos argumentos de verdad (T62). Quien quiera una cadena la arma con
+/// `join(" ")`, que es lo mismo pero se ve en el código.
+pub fn args_for_main(blob: &[u8]) -> alloc::vec::Vec<alloc::string::String> {
     use alloc::string::String;
+    use alloc::vec::Vec;
 
     if let Some(argv) = decode_argv(blob) {
         // Blob válido: sin más elementos que argv[0] no hay argumentos. Nunca
         // devolver aquí los bytes crudos «SOSA…».
-        let args = if argv.len() > 1 {
-            argv[1..].join(" ")
+        let args: Vec<String> = if argv.len() > 1 {
+            argv[1..].to_vec()
         } else {
-            String::new()
+            Vec::new()
         };
         *ARGV.lock() = Some(argv);
         return args;
     }
-    String::from(core::str::from_utf8(blob).unwrap_or(""))
+    // Sin magic: el blob es texto suelto de un llamante antiguo (`spawn_io`,
+    // y el tokenizador de sosh). Se parte por espacios porque no hay nada
+    // mejor que hacer con él —y porque es lo que hacían ya todos los
+    // programas—, pero el original se guarda: quien necesite el texto literal
+    // lo pide con [`linea_cruda`].
+    let texto = core::str::from_utf8(blob).unwrap_or("");
+    *LINEA_CRUDA.lock() = Some(String::from(texto));
+    texto.split_whitespace().map(String::from).collect()
 }
 
 #[macro_export]

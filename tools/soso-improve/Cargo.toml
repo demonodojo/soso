@@ -18,6 +18,9 @@ path = "src/main.rs"
 [dependencies]
 soso-improve-core = { path = "../../crates/soso-improve-core", features = ["std"] }
 soso-llm-core = { path = "../../crates/soso-llm-core", features = ["std"] }
+# Cliente HTTP de la campaña de T14. Se reutiliza el de T19 en vez de escribir
+# un tercero que se desincronice con el servidor.
+soso-llm-api = { path = "../../crates/soso-llm-api", features = ["std"] }
 sosomodel = { path = "../../crates/sosomodel" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

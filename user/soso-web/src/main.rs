@@ -29,7 +29,7 @@ struct Args {
     fuente: Option<String>,
 }
 
-fn parse_args(raw: &str) -> Args {
+fn parse_args(raw: &[String]) -> Args {
     let mut a = Args {
         url: None,
         local: None,
@@ -37,7 +37,7 @@ fn parse_args(raw: &str) -> Args {
         ancho: ANCHO_DEF,
         fuente: None,
     };
-    let mut it = raw.split_whitespace();
+    let mut it = raw.iter().map(|s| s.as_str());
     while let Some(tok) = it.next() {
         match tok {
             "--local" => a.local = it.next().map(String::from),
@@ -56,9 +56,9 @@ fn parse_args(raw: &str) -> Args {
     a
 }
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
     let a = parse_args(args);
-    if args.trim().contains("--help") || args.trim().contains("-h") {
+    if args.iter().any(|x| x == "--help" || x == "-h") {
         ayuda();
         return 0;
     }

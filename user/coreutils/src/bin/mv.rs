@@ -5,13 +5,14 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use coreutils::util::{err_path, escribir_fichero, leer_fichero};
 use libsoso::{abi, sys};
 
 libsoso::entry!(main);
 
-fn main(args: &str) -> u8 {
-    let mut it = args.split_whitespace();
+fn main(args: &[String]) -> u8 {
+    let mut it = args.iter().map(|s| s.as_str());
     let Some(src) = it.next() else {
         libsoso::println!("uso: mv ORIGEN DESTINO");
         return 2;

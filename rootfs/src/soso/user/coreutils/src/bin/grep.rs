@@ -1,62 +1,100 @@
-//! `grep PATRON [FICHERO...]` — busca líneas que contienen el patrón.
+//! `grep PATRON [FICHERO...]` — líneas que contienen el patrón (subcadena).
+//!
+//! Sin ficheros (o con `-`) lee **stdin**: `log | grep askd`. En la consola,
+//! Ctrl-D cierra la entrada.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use coreutils::util::{err_path, leer_fichero};
 use libsoso::sys;
 
 libsoso::entry!(main);
 
-fn buscar_en(path: &str, patron: &str) -> u8 {
-    let data = match leer_fichero(path) {
-        Ok(d) => d,
-        Err(e) => {
-            err_path(path, e);
+fn emitir(linea: &[u8], prefijo: Option<&str>) {
+    if let Some(p) = prefijo {
+        let _ = sys::write_all(1, p.as_bytes());
+        let _ = sys::write_all(1, b":");
+    }
+    let _ = sys::write_all(1, linea);
+}
+
+fn contiene(linea: &[u8], patron: &str) -> bool {
+    core::str::from_utf8(linea)
+        .map(|s| s.contains(patron))
+        .unwrap_or(false)
+}
+
+fn buscar_bytes(data: &[u8], patron: &str, prefijo: Option<&str>) {
+    let mut start = 0usize;
+    for (i, &b) in data.iter().enumerate() {
+        if b != b'\n' {
+            continue;
+        }
+        let linea = &data[start..=i];
+        if contiene(linea, patron) {
+            emitir(linea, prefijo);
+        }
+        start = i + 1;
+    }
+    if start < data.len() && contiene(&data[start..], patron) {
+        emitir(&data[start..], prefijo);
+        let _ = sys::write_all(1, b"\n");
+    }
+}
+
+fn buscar_stdin(patron: &str, prefijo: Option<&str>) -> u8 {
+    let mut data = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = sys::read(0, &mut buf);
+        if n < 0 {
             return 1;
         }
-    };
-    let texto = core::str::from_utf8(&data).unwrap_or("");
-    for linea in texto.split_inclusive('\n') {
-        if linea.contains(patron) {
-            if path == "-" {
-                libsoso::print!("{linea}");
-            } else {
-                libsoso::print!("{path}:{linea}");
-            }
+        if n == 0 {
+            break;
         }
+        data.extend_from_slice(&buf[..n as usize]);
     }
+    buscar_bytes(&data, patron, prefijo);
     0
 }
 
-fn main(args: &str) -> u8 {
-    let mut it = args.split_whitespace();
+fn buscar_en(path: &str, patron: &str, prefijo: Option<&str>) -> u8 {
+    if path == "-" {
+        return buscar_stdin(patron, prefijo);
+    }
+    match leer_fichero(path) {
+        Ok(data) => {
+            buscar_bytes(&data, patron, prefijo);
+            0
+        }
+        Err(e) => {
+            err_path(path, e);
+            1
+        }
+    }
+}
+
+fn main(args: &[String]) -> u8 {
+    let mut it = args.iter().map(|s| s.as_str());
     let Some(patron) = it.next() else {
         libsoso::println!("uso: grep PATRON [FICHERO...]");
         return 2;
     };
-    let mut alguno = false;
-    let mut fallo = 0u8;
-    for path in it {
-        alguno = true;
-        fallo |= buscar_en(path, patron);
+    let paths: Vec<&str> = it.collect();
+    if paths.is_empty() {
+        return buscar_stdin(patron, None);
     }
-    if !alguno {
-        let mut buf = [0u8; 1024];
-        loop {
-            let n = sys::read(0, &mut buf);
-            if n <= 0 {
-                break;
-            }
-            let chunk = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
-            for linea in chunk.split_inclusive('\n') {
-                if linea.contains(patron) {
-                    libsoso::print!("{linea}");
-                }
-            }
-        }
+    let varios = paths.len() > 1;
+    let mut fallo = 0u8;
+    for path in &paths {
+        let prefijo = if varios { Some(*path) } else { None };
+        fallo |= buscar_en(path, patron, prefijo);
     }
     fallo
 }

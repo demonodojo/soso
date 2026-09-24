@@ -18,8 +18,8 @@ libsoso::entry!(main);
 
 const CONF: &str = "/etc/llm.conf";
 
-fn main(args: &str) -> u8 {
-    let arg = args.trim();
+fn main(args: &[String]) -> u8 {
+    let arg = args.first().map(|s| s.as_str()).unwrap_or("");
     if arg == "--help" || arg == "help" {
         println!("uso: ask-modelo            # lista los modelos y marca el actual");
         println!("     ask-modelo <nombre>   # fija el que usará `ask`");

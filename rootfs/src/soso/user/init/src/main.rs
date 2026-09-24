@@ -27,48 +27,216 @@ macro_rules! check {
     };
 }
 
-fn main(args: &str) -> u8 {
+fn main(args: &[String]) -> u8 {
+    // Despacho por argv: el subcomando es el primer argumento y el operando el
+    // segundo. Antes esto era `strip_prefix("sleep ")` sobre la línea entera,
+    // que funcionaba sólo mientras nada llevara espacios (T62).
+    let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
+    let op = args.get(1).map(|s| s.as_str()).unwrap_or("");
     if args.is_empty() {
         return lanzar_shell();
     }
-    if args == "test" {
+    if cmd == "test" {
         return suite();
     }
     // Modos de hijo (el propio init se re-spawnea para las pruebas).
-    if args == "hijo" {
+    if cmd == "hijo" {
         println!("hijo: hola, me voy con código 7");
         return 7;
     }
-    if let Some(rest) = args.strip_prefix("sleep ") {
-        let ms = rest
-            .trim()
+    if cmd == "sleep" {
+        let ms = op
             .bytes()
             .fold(0u64, |acc, b| acc.saturating_mul(10).saturating_add((b - b'0') as u64));
         let _ = sys::sleep_ms(ms);
         return 0;
     }
-    if args == "crash" {
+    if cmd == "crash" {
         // Para probar que una falta de usuario mata al proceso, no al kernel.
         unsafe { core::ptr::read_volatile(core::ptr::null::<u8>()) };
         return 0;
     }
-    if let Some(n) = args.strip_prefix("cpu ") {
+    if cmd == "cpu" {
         // Trabajo de CPU puro, sin syscalls entre iteraciones: si esto se
         // intercala con el otro hijo, la preempción por timer funciona.
         for i in 1..=3 {
             busy();
-            println!("cpu {n}: iteración {i}");
+            println!("cpu {op}: iteración {i}");
         }
         return 0;
     }
-    if let Some(s) = args.strip_prefix("fpu ") {
+    if cmd == "fpu" {
         // Estrés de preservación FPU/SSE: mantiene un patrón en YMM durante
         // muchos desalojos de timer y verifica que no se corrompe.
-        let seed = s.bytes().next().unwrap_or(b'1');
+        let seed = op.bytes().next().unwrap_or(b'1');
         return fpu_stress(seed);
+    }
+    if cmd == "argv-check" {
+        // El argv exacto —con vacíos y espacios internos— sigue estando en
+        // `libsoso::argv()`, que además lleva argv[0].
+        return argv_check(&libsoso::argv());
+    }
+    if cmd == "mprotect-test" {
+        return modo_mprotect_test();
+    }
+    if cmd == "mprotect-ok" {
+        return modo_mprotect_ok();
+    }
+    if cmd == "mremap-test" {
+        return modo_mremap_test();
+    }
+    if cmd == "mremap-oom" {
+        return modo_mremap_oom();
+    }
+    if cmd == "mprotect-interior" {
+        return modo_mprotect_interior();
+    }
+    if cmd == "env-check" {
+        return env_check();
+    }
+    if cmd == "log" {
+        libsoso::logln!("{}", args[1..].join(" "));
+        return 0;
     }
     println!("init: args desconocidos {args:?} (usa: test)");
     2
+}
+
+fn argv_check(argv: &[String]) -> u8 {
+    const EXPECT: &[&str] = &["init", "argv-check", "", "a b", "ñ"];
+    if argv.len() != EXPECT.len() {
+        return 1;
+    }
+    for (got, want) in argv.iter().zip(EXPECT.iter()) {
+        if got != want {
+            return 2;
+        }
+    }
+    0
+}
+
+fn env_check() -> u8 {
+    let mut val = [0u8; 16];
+    let n = sys::getenv("x", &mut val);
+    if n != 1 || val[0] != b'y' {
+        return 1;
+    }
+    0
+}
+
+fn modo_mprotect_test() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    unsafe {
+        *(base as *mut u8) = 42;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ) != 0 {
+        return 2;
+    }
+    unsafe {
+        *(base as *mut u8) = 43;
+    }
+    3
+}
+
+fn modo_mprotect_ok() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ) != 0 {
+        return 2;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ | abi::PROT_WRITE) != 0 {
+        return 3;
+    }
+    unsafe {
+        *(base as *mut u8) = 1;
+    }
+    0
+}
+
+fn modo_mprotect_interior() -> u8 {
+    let base = sys::mmap(0, 3 * 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    unsafe {
+        *(base as *mut u8) = 1;
+        *((base as u64 + 8192) as *mut u8) = 3;
+    }
+    if sys::mprotect((base as u64) + 4096, 4096, abi::PROT_READ) != 0 {
+        return 2;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ) != 0 {
+        return 3;
+    }
+    let mid = unsafe { *((base as u64 + 4096) as *const u8) };
+    let _ = mid;
+    unsafe {
+        *((base as u64 + 4096) as *mut u8) = 2;
+    }
+    4
+}
+
+fn modo_mremap_test() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    let grown = sys::mremap(base as u64, 4096, 8192, 0);
+    if grown != base {
+        return 2;
+    }
+    unsafe {
+        *((grown as u64 + 5000) as *mut u8) = 99;
+    }
+    0
+}
+
+/// R9: un mremap que se queda sin memoria a mitad tiene que dejar el mapa
+/// como estaba. El tamaño se calcula con `meminfo`, así que falla sea cual sea
+/// la RAM de la máquina, y va en un hijo aparte para que la presión de memoria
+/// no salpique al resto de la batería.
+fn modo_mremap_oom() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base <= 0 {
+        return 1;
+    }
+    unsafe {
+        *((base as u64) as *mut u8) = 0xa5;
+    }
+    let mut mi = abi::MemInfo::default();
+    if sys::meminfo(&mut mi) < 0 {
+        return 2;
+    }
+    // Más de lo que hay, con margen para que ni el reclaim lo salve.
+    let paginas = mi.free_frames + mi.free_frames / 4 + 1024;
+    let grande = paginas.saturating_mul(4096);
+    if sys::mremap(base as u64, 4096, grande, 0) >= 0 {
+        return 3;
+    }
+    // El contenido y los permisos de la región original siguen ahí…
+    if unsafe { *((base as u64) as *const u8) } != 0xa5 {
+        return 4;
+    }
+    unsafe {
+        *((base as u64) as *mut u8) = 0x5a;
+    }
+    // …y la región sigue midiendo 4096: si el rollback no hubiera devuelto la
+    // longitud, este crecer con old_len=4096 sería rechazado.
+    if sys::mremap(base as u64, 4096, 8192, 0) != base {
+        return 5;
+    }
+    unsafe {
+        *((base as u64 + 4096) as *mut u8) = 1;
+    }
+    if unsafe { *((base as u64) as *const u8) } != 0x5a {
+        return 6;
+    }
+    0
 }
 
 /// Bucle cpu-bound que mantiene un patrón en ymm3 y lo compara contra
@@ -133,9 +301,84 @@ fn confirmar_actualizacion() -> bool {
     true
 }
 
+/// Confirma la **pareja** kernel+rootfs de la transacción (U5).
+///
+/// Va junto a la confirmación del buzón y por el mismo motivo: sin ella, el
+/// arranque siguiente encuentra el registro en `probando` —la señal de que el
+/// anterior no se acreditó— y deshace la actualización.
+fn confirmar_pareja() {
+    if sys::txn_confirm() < 0 {
+        println!("init: no pude confirmar la pareja de la actualización");
+    }
+}
+
 fn rootfs_accesible() -> bool {
     let mut st = abi::Stat::default();
     sys::stat("/etc/soso-release", &mut st) >= 0
+}
+
+fn parse_sosh_ready(text: &str) -> Option<i64> {
+    let line = text.lines().next()?.trim();
+    let rest = line.strip_prefix("pid=")?;
+    rest.parse().ok()
+}
+
+/// Pid que dejó la marca, si hay marca legible.
+fn marca_sosh() -> Option<i64> {
+    let fd = sys::open("/tmp/sosh-ready", abi::O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 64];
+    let n = sys::read(fd as u64, &mut buf);
+    let _ = sys::close(fd as u64);
+    if n <= 0 {
+        return None;
+    }
+    let text = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
+    parse_sosh_ready(text)
+}
+
+/// ¿Hay una shell en marcha y lista? Vale la marca de **esta** instancia o la
+/// de otra sosh viva.
+///
+/// Lo segundo no es laxitud: una sesión SSH lanza su propia sosh, que reescribe
+/// la marca con su pid. Exigir la de la primera dejaba a init dando vueltas
+/// para siempre —«sosh viva sin marca válida»— y, con ella, la pareja de la
+/// actualización **sin acreditar**: el arranque siguiente la habría deshecho
+/// por haber entrado por SSH demasiado pronto. Que otra shell viva haya dejado
+/// su marca es, si acaso, mejor prueba de que el sistema arrancó.
+fn sosh_ready_de(pid: i64) -> bool {
+    match marca_sosh() {
+        Some(p) if p == pid => true,
+        Some(p) => sosh_sigue_viva(p),
+        None => false,
+    }
+}
+
+fn sosh_sigue_viva(pid: i64) -> bool {
+    sys::kill(pid, abi::SIGPROBE) >= 0
+}
+
+/// Espera la marca de *esta* instancia. Si el hijo vive sin marca, no
+/// confirma; el bucle de PID 1 sigue sondeando.
+fn esperar_sosh_lista(pid: i64) -> bool {
+    for _ in 0..40 {
+        if !sosh_sigue_viva(pid) {
+            return false;
+        }
+        if sosh_ready_de(pid) {
+            for _ in 0..8 {
+                let _ = sys::sleep_ms(50);
+                if !sosh_sigue_viva(pid) {
+                    return false;
+                }
+            }
+            return sosh_ready_de(pid) && sosh_sigue_viva(pid);
+        }
+        let _ = sys::sleep_ms(50);
+    }
+    false
 }
 
 /// Bucle de PID 1: sosh en marcha siempre. Si la shell sale limpia
@@ -145,34 +388,61 @@ fn lanzar_shell() -> u8 {
         println!("init: rootfs no accesible (/etc/soso-release)");
         return 1;
     }
-    let pid = sys::spawn("/bin/sosh", "");
+    let _ = sys::mkdir("/tmp");
+    let _ = sys::unlink("/tmp/sosh-ready");
+    let mut pid = sys::spawn("/bin/sosh", "");
     if pid < 0 {
         println!("init: no puedo lanzar /bin/sosh (errno {pid})");
         return 1;
     }
-    if !confirmar_actualizacion() {
-        println!("init: no pude confirmar actualización en buzón");
+    let mut ota_hecho = false;
+    if esperar_sosh_lista(pid) {
+        confirmar_pareja();
+        if !confirmar_actualizacion() {
+            println!("init: no pude confirmar actualización en buzón");
+            return 1;
+        }
+        ota_hecho = true;
+    } else if !sosh_sigue_viva(pid) {
+        println!("init: sosh murió al arrancar (pid {pid}); no confirmo OTA");
         return 1;
+    } else {
+        println!("init: sosh viva sin marca válida; seguiré comprobando");
     }
     loop {
-        match sys::wait() {
-            Ok((_, 0)) => {
-                println!("init: shell cerrada; adiós");
-                return 0;
-            }
-            Ok((_, code)) => {
-                println!("init: sosh murió con código {code}; relanzando");
-                let pid = sys::spawn("/bin/sosh", "");
-                if pid < 0 {
-                    println!("init: no puedo relanzar /bin/sosh (errno {pid})");
-                    return 1;
-                }
-            }
-            Err(e) => {
-                println!("init: wait falló (errno {e})");
+        if !ota_hecho && sosh_sigue_viva(pid) && sosh_ready_de(pid) {
+            confirmar_pareja();
+            if confirmar_actualizacion() {
+                ota_hecho = true;
+            } else {
+                println!("init: no pude confirmar actualización en buzón");
                 return 1;
             }
         }
+        if !sosh_sigue_viva(pid) {
+            match sys::wait() {
+                Ok((_, 0)) => {
+                    println!("init: shell cerrada; adiós");
+                    return 0;
+                }
+                Ok((_, code)) => {
+                    println!("init: sosh murió con código {code}; relanzando");
+                    let _ = sys::unlink("/tmp/sosh-ready");
+                    ota_hecho = false;
+                    pid = sys::spawn("/bin/sosh", "");
+                    if pid < 0 {
+                        println!("init: no puedo relanzar /bin/sosh (errno {pid})");
+                        return 1;
+                    }
+                }
+                Err(e) => {
+                    println!("init: wait falló (errno {e})");
+                    return 1;
+                }
+            }
+            continue;
+        }
+        let _ = sys::sleep_ms(50);
     }
 }
 
@@ -253,6 +523,7 @@ fn suite() -> u8 {
     let v: Vec<u64> = (0..10_000).collect();
     let s = String::from("heap ok: ") + itoa(v.iter().sum::<u64>());
     check!(v.len() == 10_000, "{s}");
+    libsoso::heap_audit();
 
     // spawn + wait con código de salida.
     let pid = sys::spawn("/bin/init", "hijo");
@@ -263,11 +534,34 @@ fn suite() -> u8 {
     // Señales: getpid, kill(SIGINT) y grupos de procesos.
     let me = sys::getpid();
     check!(me > 0, "getpid ({me})");
+
+    check!(sys::pslist(&mut []) == -abi::EINVAL, "pslist max=0 -> EINVAL");
+    let mut plist = [abi::ProcInfo::default(); 128];
+    let np = sys::pslist(&mut plist);
+    check!(np >= 2, "pslist devuelve al menos init+test (n={np})");
+    let mut vi_init = false;
+    let mut vi_me = false;
+    for p in &plist[..np as usize] {
+        let end = p.name.iter().position(|&b| b == 0).unwrap_or(p.name.len());
+        let nom = core::str::from_utf8(&p.name[..end]).unwrap_or("");
+        if p.pid == 1 && nom == "/bin/init" {
+            vi_init = true;
+        }
+        if p.pid == me && nom == "/bin/init" {
+            vi_me = true;
+        }
+    }
+    check!(vi_init, "pslist incluye pid 1 /bin/init");
+    check!(vi_me, "pslist incluye getpid()");
+
     let sid = sys::setsid();
     check!(sid == me as i64, "setsid devuelve el pid ({sid})");
 
     let sleeper = sys::spawn("/bin/init", "sleep 5000");
     check!(sleeper > 0, "spawn sleeper (pid {sleeper})");
+    check!(sys::kill(sleeper, abi::SIGPROBE) > 0, "kill(0) sondea sleeper vivo");
+    check!(sys::kill(1, abi::SIGPROBE) > 0, "kill(0) a PID 1 existe");
+    check!(sys::kill(99_999, abi::SIGPROBE) < 0, "kill(0) ESRCH si no existe");
     check!(sys::kill(sleeper, abi::SIGINT) > 0, "kill SIGINT al sleeper");
     check!(
         sys::wait() == Ok((sleeper as u64, abi::exit_by_signal(abi::SIGINT as u8))),
@@ -367,6 +661,214 @@ fn suite() -> u8 {
     );
     sys::unlink("/tmp/append.txt");
 
+    // B2: mprotect, mremap y argv sin pérdida.
+    {
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mprotect-test"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mprotect-test (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 255)),
+            "mprotect write tras RO mata al hijo (255)"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mprotect-ok"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mprotect-ok (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "mprotect RW restaurado funciona"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mprotect-interior"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mprotect-interior (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 255)),
+            "mprotect interior (fault+presente) RO mata al write"
+        );
+        let base = sys::mmap(0, 4096, u64::MAX, 0);
+        check!(base > 0, "mmap anónimo para mremap");
+        let grown = sys::mremap(base as u64, 4096, 8192, 0);
+        check!(grown == base, "mremap grow in-place");
+        check!(
+            sys::mremap(base as u64, 9999, 8192, 0) < 0,
+            "mremap old_len inventada rechazada"
+        );
+        check!(
+            sys::mremap(base as u64, 8192, 8192, 0) == base,
+            "mremap misma longitud valida la región"
+        );
+        // R9: contrato de longitudes y modos. Cero es error, no un no-op; la
+        // dirección va alineada; los flags distintos de 0 siguen sin existir.
+        check!(
+            sys::mremap(base as u64, 0, 8192, 0) < 0,
+            "mremap old_len=0 rechazado"
+        );
+        check!(
+            sys::mremap(base as u64, 8192, 0, 0) < 0,
+            "mremap new_len=0 rechazado"
+        );
+        check!(
+            sys::mremap(base as u64 + 1, 8192, 12288, 0) < 0,
+            "mremap addr desalineada rechazada"
+        );
+        check!(
+            sys::mremap(base as u64 + 4096, 4096, 8192, 0) < 0,
+            "mremap desde el interior de la región rechazado"
+        );
+        check!(
+            sys::mremap(base as u64, 8192, 12288, 1) < 0,
+            "mremap con flags no soportados rechazado"
+        );
+        check!(
+            sys::mremap(base as u64, 4096, 4096, 0) < 0,
+            "mremap no-op con old_len que no es la región rechazado"
+        );
+        unsafe {
+            *((base as u64 + 4100) as *mut u8) = 0x33;
+        }
+        // Longitudes desalineadas se normalizan al alza, como en mmap/munmap.
+        check!(
+            sys::mremap(base as u64, 8000, 12000, 0) == base,
+            "mremap normaliza longitudes desalineadas"
+        );
+        unsafe {
+            *((base as u64 + 12000) as *mut u8) = 0x44;
+        }
+        check!(
+            unsafe { *((base as u64 + 4100) as *const u8) } == 0x33
+                && unsafe { *((base as u64 + 12000) as *const u8) } == 0x44,
+            "el contenido sobrevive al crecimiento"
+        );
+        unsafe {
+            *((grown as u64 + 6000) as *mut u8) = 7;
+        }
+        check!(
+            sys::mremap(grown as u64, 12288, 4096, 0) < 0,
+            "mremap shrink rechazado"
+        );
+        let a = sys::mmap(0, 4096, u64::MAX, 0);
+        check!(a > 0, "mmap región A");
+        let b = sys::mmap(a as u64 + 4096, 4096, u64::MAX, 0);
+        check!(b == a + 4096, "mmap región B adyacente (b={b})");
+        unsafe {
+            *((b as u64) as *mut u8) = 0x77;
+        }
+        check!(
+            sys::mremap(a as u64, 4096, 8192, 0) < 0,
+            "mremap grow con colisión rechazado"
+        );
+        // El solape falla antes de tocar nada: B conserva contenido y permisos.
+        check!(
+            unsafe { *((b as u64) as *const u8) } == 0x77,
+            "la región vecina sobrevive al solape"
+        );
+        unsafe {
+            *((b as u64) as *mut u8) = 55;
+        }
+        check!(
+            sys::mremap(a as u64, 4096, 4096, 0) == a,
+            "tras el solape, A sigue midiendo 4096"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mremap-oom"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mremap-oom (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "mremap sin memoria: rollback conserva mapa y contenido"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mremap-test"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mremap-test (pid={pid})");
+        check!(sys::wait() == Ok((pid as u64, 0)), "mremap hijo OK");
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "argv-check", "", "a b", "ñ"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn argv-check (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "argv exactos ['', 'a b', 'ñ']"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "env-check"],
+            &["x=y"],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn env-check (pid={pid})");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "envp x=y visible en hijo"
+        );
+        let fd = sys::open(
+            "/tmp/bad.elf",
+            abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC,
+        );
+        check!(fd >= 0, "open bad.elf");
+        let junk: &[u8] = b"not-an-elf";
+        check!(
+            sys::write(fd as u64, junk) == junk.len() as i64,
+            "write bad.elf"
+        );
+        sys::close(fd as u64);
+        let pid = sys::spawn("/tmp/bad.elf", "");
+        check!(pid < 0, "spawn ELF malformado rechazado (pid={pid})");
+        sys::unlink("/tmp/bad.elf");
+        let fd = sys::open("/bin/init", abi::O_RDONLY);
+        check!(fd >= 0, "open /bin/init para trunc ELF");
+        let n = sys::read(fd as u64, &mut buf);
+        sys::close(fd as u64);
+        check!(n > 128, "cabecera ELF legible ({n} B)");
+        let fd = sys::open(
+            "/tmp/trunc.elf",
+            abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC,
+        );
+        check!(fd >= 0, "open trunc.elf");
+        check!(
+            sys::write(fd as u64, &buf[..128]) == 128,
+            "write trunc.elf (128 B)"
+        );
+        sys::close(fd as u64);
+        let pid = sys::spawn("/tmp/trunc.elf", "");
+        check!(pid < 0, "spawn ELF truncado rechazado (pid={pid})");
+        sys::unlink("/tmp/trunc.elf");
+    }
+
     // spawn_io: redirige stdout de echo a un fichero.
     let fd = sys::open("/tmp/spawn_io.txt", abi::O_WRONLY);
     check!(fd >= 0, "open para spawn_io");
@@ -386,6 +888,12 @@ fn suite() -> u8 {
         n > 0 && core::str::from_utf8(&buf[..n as usize]).unwrap_or("").contains("spawn_io_ok"),
         "spawn_io escribió al fichero"
     );
+    check!(
+        !core::str::from_utf8(&buf[..n as usize])
+            .unwrap_or("")
+            .contains("/bin/echo"),
+        "spawn_io no debe pasar argv[0] al hijo"
+    );
     sys::unlink("/tmp/spawn_io.txt");
 
     // spawn_io a consola serie: `FD_SERIAL_TTY` no es un fd del padre. Si el
@@ -399,6 +907,94 @@ fn suite() -> u8 {
     );
     check!(pid > 0, "spawn_io FD_SERIAL_TTY (pid {pid})");
     check!(sys::wait().is_ok(), "wait spawn_io serial");
+
+    // fd 3: canal de registro del kernel.
+    {
+        let marker = "init_log_ok";
+        check!(
+            sys::write_all(abi::LOG_FD, marker.as_bytes()).is_ok(),
+            "write fd 3"
+        );
+        let mut ring = [0u8; 4096];
+        let n = sys::log_read(0, &mut ring);
+        check!(n > 0, "log_read devolvió datos");
+        let text = core::str::from_utf8(&ring[..n as usize]).unwrap_or("");
+        check!(
+            text.contains(marker) && text.contains("pid="),
+            "log con sello de pid"
+        );
+
+        let fd = sys::open("/tmp/log_fd3.txt", abi::O_WRONLY);
+        check!(fd >= 0, "open para log fd3");
+        let pid = sys::spawn_io_full(
+            "/bin/init",
+            &["/bin/init", "log", "fichero_ok"],
+            &[],
+            [
+                abi::FD_INHERIT_TTY,
+                abi::FD_INHERIT_TTY,
+                abi::FD_INHERIT_TTY,
+                fd as u64,
+            ],
+        );
+        check!(pid > 0, "spawn_io log a fichero (pid {pid})");
+        check!(sys::wait().is_ok(), "wait spawn_io log fichero");
+        sys::close(fd as u64);
+        let fd = sys::open("/tmp/log_fd3.txt", abi::O_RDONLY);
+        let n = sys::read(fd as u64, &mut buf);
+        sys::close(fd as u64);
+        sys::unlink("/tmp/log_fd3.txt");
+        let body = core::str::from_utf8(&buf[..n.max(0) as usize]).unwrap_or("");
+        check!(
+            body.contains("fichero_ok") && !body.contains("pid="),
+            "log redirigido sin sello"
+        );
+
+        let pid = sys::spawn_io_full(
+            "/bin/init",
+            &["/bin/init", "log", "cerrado_ok"],
+            &[],
+            [
+                abi::FD_INHERIT_TTY,
+                abi::FD_INHERIT_TTY,
+                abi::FD_INHERIT_TTY,
+                abi::FD_CLOSED,
+            ],
+        );
+        check!(pid > 0, "spawn_io log cerrado (pid {pid})");
+        let (_, code) = sys::wait().unwrap_or((0, 255));
+        check!(code == 0, "hijo con fd 3 cerrado sale 0");
+    }
+
+    // Path inexistente no vacía fds del padre (log_fd=0 = ABI de 88 B).
+    {
+        let fd = sys::open("/tmp/spawn_enoent.txt", abi::O_WRONLY);
+        check!(fd >= 0, "open para spawn ENOENT");
+        let rc = sys::spawn_io_full(
+            "/bin/no-existe-soso",
+            &["/bin/no-existe-soso"],
+            &[],
+            [
+                abi::FD_INHERIT_TTY,
+                fd as u64,
+                abi::FD_INHERIT_TTY,
+                0,
+            ],
+        );
+        check!(
+            rc == -abi::ENOENT,
+            "spawn inexistente ENOENT ({rc})"
+        );
+        let n = sys::write(fd as u64, b"padre_ok");
+        check!(n == 8, "padre conserva el fd tras ENOENT ({n})");
+        sys::close(fd as u64);
+        let fd = sys::open("/tmp/spawn_enoent.txt", abi::O_RDONLY);
+        let n = sys::read(fd as u64, &mut buf);
+        sys::close(fd as u64);
+        sys::unlink("/tmp/spawn_enoent.txt");
+        let body = core::str::from_utf8(&buf[..n.max(0) as usize]).unwrap_or("");
+        check!(body.contains("padre_ok"), "contenido tras ENOENT");
+    }
 
     // Hilos + futex: N workers incrementan un contador compartido.
     {
@@ -498,6 +1094,23 @@ fn suite() -> u8 {
                 r == 0 || r == -abi::ENOSYS,
                 "wifi_status errno {r}"
             );
+        }
+        {
+            let mut ni = abi::NetInfo::default();
+            check!(sys::netinfo(&mut ni) == 0, "netinfo errno");
+            println!(
+                "init: OK  netinfo flags={} backend={} addr={}.{}.{}.{}/{}",
+                ni.flags,
+                ni.backend,
+                ni.addr[0],
+                ni.addr[1],
+                ni.addr[2],
+                ni.addr[3],
+                ni.prefix_len
+            );
+            let rtt = sys::ping([127, 0, 0, 1], 1000);
+            check!(rtt >= 0, "ping 127.0.0.1 errno {rtt}");
+            println!("init: OK  ping 127.0.0.1 {rtt} ms");
         }
         check!(
             ALLOC_MAL.load(Ordering::Relaxed) == 0,
@@ -1251,6 +1864,9 @@ fn suite() -> u8 {
         check!(n > 0, "SYS_GETENV PATH (n={n})");
         let path = core::str::from_utf8(&path_buf[..n as usize]).unwrap_or("");
         check!(path.contains("/bin"), "PATH contiene /bin ({path})");
+        let _ = sys::unlink("/tmp/sh-test/b");
+        let _ = sys::unlink("/tmp/sh-test/a");
+        let _ = sys::unlink("/tmp/sh-test/c");
         let _ = sys::mkdir("/tmp/sh-test");
         let fd = sys::open("/tmp/sh-test/a", abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
         check!(fd >= 0, "open escribir self-host (fd={fd})");
@@ -1263,6 +1879,9 @@ fn suite() -> u8 {
             sys::clock_gettime(abi::CLOCK_REALTIME, &mut ts) == 0,
             "SYS_CLOCK_GETTIME"
         );
+        if ts.tv_sec >= 1_000_000_000 {
+            check!(ts.tv_sec >= 1_000_000_000, "RTC epoch plausible");
+        }
         let mut rnd = [0u8; 8];
         check!(sys::getrandom(&mut rnd) == 8, "SYS_GETRANDOM");
         let fd2 = sys::open("/tmp/sh-test/b", abi::O_RDONLY);

@@ -229,6 +229,15 @@ impl Sonda {
 }
 
 /// Recorre el árbol aplicando la política. Devuelve (incluidos, excluidos).
+/// Motivo con el que se excluye lo que no es un archivo regular: enlaces
+/// simbólicos, dispositivos, sockets.
+///
+/// Es una constante y no un literal suelto porque [`workspace`](crate::workspace)
+/// distingue por él lo sospechoso de lo meramente ignorado. Con dos literales
+/// iguales, reescribir uno haría desaparecer los enlaces del informe sin que
+/// fallara nada.
+pub const NO_REGULAR: &str = "no es archivo regular";
+
 pub fn recorrer(
     arbol: &dyn Archivos,
     raiz: &str,
@@ -274,7 +283,7 @@ pub fn recorrer(
                     ruta,
                     bytes: entrada.bytes,
                     sha256: None,
-                    motivo: "no es archivo regular".to_string(),
+                    motivo: NO_REGULAR.to_string(),
                 }),
             }
         }

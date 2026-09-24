@@ -115,7 +115,7 @@ fn escribir_marca_listo(prefault_ms: i64) {
     println!("sosh: marca lista pid={pid} prefault={prefault_ms}ms write={marca_ms}ms");
 }
 
-fn main(_args: &str) -> u8 {
+fn main(_args: &[alloc::string::String]) -> u8 {
     let shell_pgid = sys::getpid();
     let _ = sys::setsid();
     let _ = sys::tcsetpgrp(shell_pgid);
@@ -169,7 +169,13 @@ enum RedirSpec {
 
 struct CmdSpec {
     prog: String,
-    args: String,
+    /// Los argumentos **separados**, tal como salieron del tokenizador.
+    ///
+    /// Antes se volvían a juntar con espacios aquí y el hijo los recibía en una
+    /// sola cadena, así que una ruta con un espacio dentro era imposible de
+    /// pasar aunque el tokenizador la hubiera reconocido bien (T62). Las
+    /// palabras ya estaban separadas: lo único que hacía falta era no tirarlas.
+    args: Vec<String>,
     stdin: RedirSpec,
     stdout: RedirSpec,
     stderr: RedirSpec,
@@ -346,11 +352,7 @@ fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
             return Err("sin comando");
         }
         let prog = words[0].to_string();
-        let args = if words.len() > 1 {
-            words[1..].join(" ")
-        } else {
-            String::new()
-        };
+        let args: Vec<String> = words[1..].iter().map(|w| String::from(*w)).collect();
         cmds.push(CmdSpec {
             prog,
             args,
@@ -435,16 +437,10 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
             }
         };
 
-        let pid = if cmd.args.is_empty() {
-            sys::spawn_io_full(&path, &[&path], &[], [stdin_fd, stdout_fd, stderr_fd, log_fd])
-        } else {
-            sys::spawn_io_full(
-                &path,
-                &[&path, &cmd.args],
-                &[],
-                [stdin_fd, stdout_fd, stderr_fd, log_fd],
-            )
-        };
+        let mut argv: Vec<&str> = Vec::with_capacity(cmd.args.len() + 1);
+        argv.push(path.as_str());
+        argv.extend(cmd.args.iter().map(|a| a.as_str()));
+        let pid = sys::spawn_io_full(&path, &argv, &[], [stdin_fd, stdout_fd, stderr_fd, log_fd]);
         if pid < 0 {
             println!("sosh: {}: {}", cmd.prog, errno_str(pid));
             return None;
@@ -1005,7 +1001,7 @@ fn ejecutar(line: &str) -> Option<u8> {
                 return None;
             }
             "cd" => {
-                let dir = cmds[0].args.trim();
+                let dir = cmds[0].args.first().map(|s| s.as_str()).unwrap_or("");
                 if dir.is_empty() {
                     println!("sosh: cd: falta directorio");
                     return None;
@@ -1028,7 +1024,7 @@ fn ejecutar(line: &str) -> Option<u8> {
                 return None;
             }
             "wifi" => {
-                ejecutar_wifi(cmds[0].args.trim());
+                ejecutar_wifi(&cmds[0].args.join(" "));
                 return None;
             }
             "sosolog" if cmds[0].args.is_empty() => {
@@ -1058,7 +1054,7 @@ fn ejecutar(line: &str) -> Option<u8> {
         let code = if cmds[0].args.is_empty() {
             0
         } else {
-            cmds[0].args.parse().unwrap_or(0)
+            cmds[0].args[0].parse().unwrap_or(0)
         };
         return Some(code);
     }

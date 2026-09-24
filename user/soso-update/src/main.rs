@@ -38,8 +38,8 @@ const CHUNK: usize = 64 * 1024;
 /// Buffer de lectura para hashear ficheros ya instalados.
 const HASH_BUF: usize = 256 * 1024;
 
-fn main(args: &str) -> u8 {
-    let mut parts: Vec<String> = args.split_whitespace().map(String::from).collect();
+fn main(args: &[String]) -> u8 {
+    let mut parts: Vec<String> = args.to_vec();
     // `--traza` vale para cualquier subcomando y se quita antes de repartir.
     if let Some(i) = parts.iter().position(|p| p == "--traza") {
         parts.remove(i);

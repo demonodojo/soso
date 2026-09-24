@@ -200,3 +200,149 @@ impl Drop for Temporal {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reloj y transporte del host (T48)
+// ---------------------------------------------------------------------------
+
+use soso_improve_core::tiempo::{Plazo, Reloj};
+use soso_improve_core::transporte::{Conector, Destino, Paso, Transporte};
+
+/// Reloj monotónico del host. `Instant` no retrocede aunque cambie la hora.
+pub struct RelojHost {
+    origen: std::time::Instant,
+}
+
+impl Default for RelojHost {
+    fn default() -> Self {
+        RelojHost {
+            origen: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Reloj for RelojHost {
+    fn ahora_ms(&self) -> u64 {
+        self.origen.elapsed().as_millis() as u64
+    }
+}
+
+/// Conexión TCP del host. El socket va en modo no bloqueante para poder
+/// distinguir «todavía nada» de «el otro cerró», que es lo que pide T48.
+pub struct EnlaceHost {
+    flujo: Option<std::net::TcpStream>,
+}
+
+impl Transporte for EnlaceHost {
+    fn escribir(&mut self, datos: &[u8]) -> Resultado<Paso> {
+        let Some(f) = self.flujo.as_mut() else {
+            return Ok(Paso::Fin);
+        };
+        match f.write(datos) {
+            Ok(0) => Ok(Paso::Fin),
+            Ok(n) => Ok(Paso::Hecho(n)),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Paso::Espera),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(Paso::Espera),
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(Paso::Fin),
+            Err(e) => Err(Error::entorno(format!("escribir: {e}"))),
+        }
+    }
+
+    fn leer(&mut self, buf: &mut [u8], espera_ms: u64) -> Resultado<Paso> {
+        let Some(f) = self.flujo.as_mut() else {
+            return Ok(Paso::Fin);
+        };
+        match f.read(buf) {
+            // Cero bytes en una lectura **bloqueante o no** significa EOF en
+            // POSIX; `WouldBlock` es la espera. No son lo mismo.
+            Ok(0) => Ok(Paso::Fin),
+            Ok(n) => Ok(Paso::Hecho(n)),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                if espera_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(espera_ms.min(50)));
+                }
+                Ok(Paso::Espera)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => Ok(Paso::Fin),
+            Err(e) => Err(Error::entorno(format!("leer: {e}"))),
+        }
+    }
+
+    fn cerrar(&mut self) {
+        if let Some(f) = self.flujo.take() {
+            let _ = f.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+pub struct ConectorHost;
+
+impl Conector for ConectorHost {
+    type Enlace = EnlaceHost;
+
+    fn conectar(
+        &self,
+        destino: &Destino,
+        plazo: Plazo,
+        reloj: &dyn Reloj,
+    ) -> Resultado<EnlaceHost> {
+        let dir = std::net::SocketAddr::from((destino.ip, destino.puerto));
+        // El plazo manda también en la conexión, no sólo en la E/S.
+        let restante = plazo.restante_ms(reloj);
+        let espera = std::time::Duration::from_millis(restante.min(30_000).max(1));
+        let flujo = std::net::TcpStream::connect_timeout(&dir, espera).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                Error::plazo(format!("conectando a {}: {e}", destino.texto()))
+            } else {
+                Error::entorno(format!("conectar a {}: {e}", destino.texto()))
+            }
+        })?;
+        flujo
+            .set_nonblocking(true)
+            .map_err(|e| Error::entorno(format!("no bloqueante: {e}")))?;
+        Ok(EnlaceHost { flujo: Some(flujo) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Durabilidad en el host (T46)
+// ---------------------------------------------------------------------------
+
+use soso_improve_core::durable::Durable;
+
+impl Durable for Host {
+    fn crear_exclusivo(&mut self, ruta: &str, datos: &[u8]) -> Resultado<()> {
+        if let Some(padre) = Path::new(ruta).parent() {
+            traducir(
+                std::fs::create_dir_all(padre),
+                &format!("crear {}", padre.display()),
+            )?;
+        }
+        // `create_new` es la creación exclusiva: si existe, falla, y eso es
+        // justo la señal de que otro escritor ganó la carrera.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(ruta)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Error::uso(format!("{ruta} ya existe"))
+                } else {
+                    Error::entorno(format!("crear {ruta}: {e}"))
+                }
+            })?;
+        traducir(f.write_all(datos), &format!("escribir {ruta}"))?;
+        // Sin esto la promesa es falsa: el contenido puede seguir en caché.
+        traducir(f.sync_all(), &format!("sincronizar {ruta}"))?;
+        Ok(())
+    }
+
+    fn sincronizar(&mut self, ruta: &str) -> Resultado<()> {
+        let f = traducir(std::fs::File::open(ruta), &format!("abrir {ruta}"))?;
+        traducir(f.sync_all(), &format!("sincronizar {ruta}"))
+    }
+}
