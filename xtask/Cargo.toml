@@ -19,8 +19,3 @@ block-dev = { path = "../crates/block-dev" }
 soso-resize-core = { path = "../crates/soso-resize-core" }
 sha2 = "0.10"
 soso-llm-api = { path = "../crates/soso-llm-api", features = ["std"] }
-
-[dev-dependencies]
-# El page fault de placa es el `next` de un hueco libre de talc. El test
-# arma el mismo asignador y no sigue ese puntero.
-talc = { version = "4", default-features = false }
