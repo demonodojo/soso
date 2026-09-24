@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "descripcion": "Resultados de las sondas de ABI de T33. Una capacidad por pase; lo no medido se dice, no se supone.",
+  "actualizado": "2026-09-24",
+  "origen_incognitas": "docs/self-improvement/native/opencode-deps.md (T32)",
+  "como_se_ejecuta": {
+    "un_arranque": "cargo xtask test sys --only=\"archivos persistentes\"",
+    "con_reinicio": "cargo xtask test-probe"
+  },
+  "sondas": [
+    {
+      "id": "archivos",
+      "capacidad": "archivos persistentes: crear, escribir, cerrar, reabrir, comparar",
+      "por_que": "Las herramientas read/write/edit/apply-patch del agente no hacen otra cosa, y SQLite se apoya en lo mismo.",
+      "estado": "medida",
+      "resultado": "pasa",
+      "modulo": "user/soso-agent-probe/src/sondas/archivos.rs",
+      "casos": [
+        {
+          "id": "archivos/texto-utf8",
+          "que": "UTF-8 de 1, 2, 3 y 4 bytes por carácter",
+          "resultado": "pasa"
+        },
+        {
+          "id": "archivos/binario",
+          "que": "0x00, 0x80, 0x0a, 0x0d, 0xff y UTF-8 inválido",
+          "resultado": "pasa"
+        },
+        {
+          "id": "archivos/nombre-con-espacio",
+          "que": "nombre de fichero con espacio y acento",
+          "resultado": "pasa"
+        },
+        {
+          "id": "archivos/stat-texto",
+          "que": "el tamaño del inodo cuadra con lo escrito",
+          "resultado": "pasa"
+        },
+        {
+          "id": "archivos/stat-binario",
+          "que": "igual, con contenido binario",
+          "resultado": "pasa"
+        },
+        {
+          "id": "archivos/truncar",
+          "que": "O_TRUNC deja el fichero corto de verdad",
+          "resultado": "pasa"
+        },
+        {
+          "id": "archivos/borrar",
+          "que": "unlink hace desaparecer, no vacía",
+          "resultado": "pasa"
+        }
+      ],
+      "con_reinicio": {
+        "resultado": "pasa",
+        "que_acredita": "El contenido y los tamaños sobreviven a un `halt` y un arranque nuevo, no sólo a cerrar el descriptor. Sin esta mitad, una caché pasaría la sonda de un arranque.",
+        "evidencia": "target/self-improvement/tasks/T33/reinicio.txt"
+      }
+    },
+    {
+      "id": "ejecutable",
+      "capacidad": "páginas ejecutables y W+X (escribir código máquina y llamarlo)",
+      "por_que": "La decisiva de T32: Bun trae JavaScriptCore, que compila en tiempo de ejecución. Sin esto, el resto del inventario es teórico.",
+      "estado": "medida",
+      "resultado": "pasa, y por un motivo que conviene mirar de cerca",
+      "modulo": "user/soso-agent-probe/src/sondas/ejecutable.rs",
+      "casos": [
+        {
+          "id": "exec/mmap",
+          "que": "mmap anónimo",
+          "esperado": "página anónima",
+          "observado": "página anónima",
+          "resultado": "pasa"
+        },
+        {
+          "id": "exec/prot-exec-existe",
+          "que": "¿se puede pedir permiso de ejecución?",
+          "esperado": "EINVAL: no hay PROT_EXEC",
+          "observado": "EINVAL: no hay PROT_EXEC",
+          "resultado": "pasa"
+        },
+        {
+          "id": "exec/w-mas-x",
+          "que": "código escrito en una página escribible, ejecutado",
+          "esperado": "42 y 101",
+          "observado": "42 y 101",
+          "resultado": "pasa"
+        },
+        {
+          "id": "exec/tras-quitar-escritura",
+          "que": "sigue ejecutándose con la página de sólo lectura",
+          "esperado": "43",
+          "observado": "43",
+          "resultado": "pasa"
+        },
+        {
+          "id": "exec/volver-a-escribir",
+          "que": "volver a hacerla escribible y recompilar",
+          "esperado": "51",
+          "observado": "51",
+          "resultado": "pasa"
+        },
+        {
+          "id": "exec/monton",
+          "que": "código escrito en el heap, ejecutado",
+          "esperado": "8",
+          "observado": "8",
+          "resultado": "pasa"
+        }
+      ],
+      "hallazgo": "No existe PROT_EXEC **porque todo es ejecutable**. `mprotect` sólo acepta READ y WRITE y rechaza el resto con EINVAL; las páginas de usuario se mapean sin el bit NX, así que cualquier página de datos —incluido el montón— se puede ejecutar. Para un JIT es permiso de sobra. Como propiedad del sistema es lo contrario de W^X: no hay forma de marcar una página como no ejecutable, ni siquiera queriendo.",
+      "consecuencia": "El requisito de JavaScriptCore queda cubierto. Endurecerlo (añadir NX y un PROT_EXEC de verdad) **rompería** este requisito, así que no es un arreglo pendiente sino una decisión de diseño que alguien tiene que tomar a la vista de las dos cosas.",
+      "evidencia": "target/self-improvement/tasks/T33/wx.txt"
+    },
+    {
+      "id": "compartir",
+      "capacidad": "varios descriptores sobre el mismo fichero (lo que necesita SQLite)",
+      "por_que": "bun:sqlite abre el mismo .db desde varias conexiones: lee por posición y escribe sin pisar al resto.",
+      "estado": "medida",
+      "resultado": "**no la hay**: cuatro de ocho casos negativos, y el modelo de ficheros no admite una base de datos encima",
+      "modulo": "user/soso-agent-probe/src/sondas/compartir.rs",
+      "casos": [
+        {
+          "id": "compartir/offsets-independientes",
+          "esperado": "00000 | 33333 | 11111",
+          "observado": "00000 | 33333 | 11111",
+          "resultado": "pasa",
+          "nota": "El `pos` vive en el descriptor, no en el inodo: `seek`+`read` sustituye a `pread` sin que un descriptor mueva al otro."
+        },
+        {
+          "id": "compartir/visibilidad-entre-descriptores",
+          "esperado": "XXXXX",
+          "observado": "00000",
+          "resultado": "NEGATIVO",
+          "nota": "Un lector abierto **antes** no ve la escritura de otro descriptor, ni tras `fsync`. Cada `open` se lleva su copia."
+        },
+        {
+          "id": "compartir/escritura-conserva-el-resto",
+          "esperado": "60 bytes, empieza XXXXX y acaba 55555",
+          "observado": "5 bytes, empieza XXXXX y acaba XXXXX",
+          "resultado": "NEGATIVO",
+          "nota": "Abrir para escribir, ir al offset 0, escribir 5 bytes y cerrar deja el fichero **en 5 bytes**. Los otros 55 desaparecen. Cualquier reescritura parcial destruye la cola."
+        },
+        {
+          "id": "compartir/dos-escritores-zonas-distintas",
+          "esperado": "60 bytes: AAAAA y BBBBB",
+          "observado": "5 bytes: BBBBB y no llega (sólo 5 bytes)",
+          "resultado": "NEGATIVO",
+          "nota": "Dos escritores en zonas que no se solapan: gana el último en cerrar y se lleva por delante lo del otro y el resto del fichero."
+        },
+        {
+          "id": "compartir/pwrite-en-offset",
+          "esperado": "PPPPP",
+          "observado": "PPPPP",
+          "resultado": "pasa"
+        },
+        {
+          "id": "compartir/pwrite-no-mueve-offset",
+          "esperado": "7",
+          "observado": "7",
+          "resultado": "pasa",
+          "nota": "Semántica POSIX correcta: escribir por posición no mueve el descriptor. Es la clase de detalle que el nombre no garantiza."
+        },
+        {
+          "id": "compartir/o-excl-excluye",
+          "esperado": "gana uno",
+          "observado": "p1=4 p2=5",
+          "resultado": "NEGATIVO",
+          "nota": "Los dos `O_EXCL` ganan si el primero sigue abierto. Ficha T65."
+        }
+      ],
+      "hallazgo": "El modelo de ficheros de soso es **por descriptor, no por inodo**: cada `open` se lleva una vista propia y al cerrar vuelca lo suyo. Los offsets independientes y `pwrite` funcionan, pero dos descriptores no comparten el fichero y una escritura parcial trunca la cola. SQLite no puede funcionar así, y no por falta de `pread` —que se sustituye con `seek`+`read`— sino por el modelo entero.",
+      "para_t34": [
+        {
+          "hueco": "visibilidad entre descriptores y escritura parcial no destructiva",
+          "archivos": "kernel/src/task/syscall.rs (Fd::File, Fd::StreamWrite, sys_open, el volcado al cerrar)",
+          "reproduccion": "soso-agent-probe compartir"
+        },
+        {
+          "hueco": "bloqueo de ficheros (no hay flock ni fcntl)",
+          "archivos": "crates/soso-abi/src/lib.rs, kernel/src/task/syscall.rs",
+          "reproduccion": "sin sonda posible: la syscall no existe; el sustituto O_EXCL falla su propio caso"
+        }
+      ],
+      "defecto_abierto": "T65 — O_EXCL no excluye mientras el primer descriptor sigue abierto. Es un defecto de hoy, no un hueco del port: afecta al `crear_exclusivo` de T46, que es la única exclusión mutua del coordinador.",
+      "evidencia": "target/self-improvement/tasks/T33/compartir.txt"
+    },
+    {
+      "id": "argv-env-cwd",
+      "capacidad": "argv, entorno y directorio de trabajo",
+      "estado": "pendiente",
+      "pase": "siguiente",
+      "nota": "T47 dejó el adaptador y T62 arregló el paso de argv; falta la sonda que lo mida como capacidad."
+    },
+    {
+      "id": "salidas",
+      "capacidad": "stdout/stderr separados y código de salida",
+      "estado": "pendiente",
+      "pase": "siguiente"
+    },
+    {
+      "id": "tuberias",
+      "capacidad": "tuberías con EOF",
+      "estado": "pendiente",
+      "pase": "siguiente",
+      "nota": "T61 abrió la lectura con plazo; falta medirla como capacidad del agente."
+    },
+    {
+      "id": "hilos",
+      "capacidad": "hilo, join y TLS",
+      "estado": "pendiente",
+      "pase": "siguiente"
+    },
+    {
+      "id": "temporizadores",
+      "capacidad": "temporizadores y reloj monotónico",
+      "estado": "pendiente",
+      "pase": "siguiente"
+    },
+    {
+      "id": "tcp",
+      "capacidad": "TCP con cierre y reconexión",
+      "estado": "pendiente",
+      "pase": "siguiente"
+    },
+    {
+      "id": "senales",
+      "capacidad": "instalar un manejador de señal",
+      "estado": "pendiente",
+      "pase": "siguiente",
+      "nota": "Hay SYS_KILL y números de señal, pero no forma de reaccionar. La sonda tiene que distinguir «se puede señalar» de «se puede manejar»."
+    }
+  ]
+}

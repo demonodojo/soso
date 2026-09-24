@@ -8,6 +8,7 @@ description: >-
   soso plans that are not automejora. GPU NVIDIA: skill soso-gpu. WiFi iwlwifi:
   soso-wifi. Live USB e instalación: soso-live. Actualizaciones: soso-update.
   Automejora, OpenCode, Txx, SI-*: skill soso-self-improvement.
+  Page fault recurrente en soso-update / GitHub en placa: skill soso-pf-red.
 ---
 
 # soso — Architecture

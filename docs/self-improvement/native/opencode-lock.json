@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "descripcion": "Revisión fijada de OpenCode para SI-6 (T32). No se trabaja contra una rama móvil.",
+  "fijado_el": "2026-09-24",
+  "proyecto": {
+    "nombre": "opencode",
+    "sitio": "https://opencode.ai",
+    "repositorio": "https://github.com/anomalyco/opencode",
+    "nota_repositorio": "El plan y CONTRATO.md citan opencode.ai; el repositorio se movió de sst/opencode a anomalyco/opencode y la URL antigua redirige. Se fija la nueva.",
+    "licencia": "MIT",
+    "lenguaje": "TypeScript",
+    "rama_por_defecto": "dev  (NO usar: es móvil)"
+  },
+  "revision": {
+    "tag": "v1.18.32",
+    "commit": "545f51d26cc39a907d2867492d498d9607ea5fa4",
+    "publicado": "2026-09-21T22:51:20Z",
+    "clonado_con": "git clone --depth 1 --branch v1.18.32 https://github.com/anomalyco/opencode.git",
+    "checkout": "target/self-improvement/opencode/src (fuera del árbol fuente de soso, no versionado)"
+  },
+  "lockfile": {
+    "ruta": "bun.lock",
+    "sha256": "459a7d71db89d5e16f54b12d728ce1401da0f4b69e22053dbccc6ca04cf0e2df",
+    "package_json_sha256": "b1aa48ddbe8074072e308daf98e30eba2596fd2ad479bbbe061d04504b7a757e",
+    "gestor": "bun@1.3.14"
+  },
+  "build_oficial": {
+    "runtime": "bun 1.3.14 (JavaScriptCore, no V8)",
+    "instalar": "bun install",
+    "arrancar_dev": "bun run --cwd packages/opencode src/index.ts",
+    "typecheck": "bun turbo typecheck",
+    "lint": "oxlint",
+    "nota": "No hay paso de compilación a binario nativo en el repo; el `install` publicado descarga artefactos por plataforma."
+  },
+  "artefactos_externos": {
+    "ripgrep": {
+      "version": "15.1.0",
+      "origen": "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/",
+      "descarga_en_ejecucion": true,
+      "fuente": "packages/core/src/ripgrep/binary.ts:105"
+    }
+  },
+  "nativos_por_plataforma": {
+    "@lydell/node-pty": "1.2.0-beta.12",
+    "bun-pty": "0.4.8",
+    "@parcel/watcher": "2.5.1",
+    "tree-sitter-bash": "0.25.0",
+    "tree-sitter-powershell": "0.25.10",
+    "web-tree-sitter": "0.25.10",
+    "@silvia-odwyer/photon-node": "0.3.4"
+  }
+}

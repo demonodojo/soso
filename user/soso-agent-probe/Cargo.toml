@@ -1,0 +1,15 @@
+[package]
+name = "soso-agent-probe"
+version = "0.1.0"
+edition = "2024"
+
+# Sondas de ABI para las capacidades que T32 identificó como necesarias para
+# correr un agente dentro de soso. Un módulo por capacidad: cada pase de T33
+# añade uno y sólo ejecuta ese caso.
+[[bin]]
+name = "soso-agent-probe"
+path = "src/main.rs"
+
+[dependencies]
+libsoso = { workspace = true }
+soso-abi = { workspace = true }

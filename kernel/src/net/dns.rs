@@ -174,6 +174,8 @@ pub fn servidores(dhcp: &[Option<Ipv4Address>]) -> alloc::vec::Vec<Ipv4Address> 
 }
 
 pub fn resolve_hostname(host: &str) -> Result<soso_abi::SockAddr, i64> {
+    crate::mm::heap::vigilar();
+    crate::mm::heap::punto("dns");
     let trimmed = host.trim_end_matches('.');
     if trimmed.is_empty() || trimmed.len() > 253 {
         return Err(-soso_abi::EINVAL);

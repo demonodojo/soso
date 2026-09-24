@@ -412,6 +412,14 @@ name = "soso-abi"
 version = "0.1.0"
 
 [[package]]
+name = "soso-agent-probe"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+ "soso-abi",
+]
+
+[[package]]
 name = "soso-audio"
 version = "0.1.0"
 dependencies = [

@@ -84,6 +84,7 @@ impl TcpTable {
         remote: Option<IpEndpoint>,
     ) -> Result<usize, ()> {
         let slot = self.entries.iter().position(|e| e.is_none()).ok_or(())?;
+        crate::mm::heap::punto("tcp-buf");
         let handle = sockets.add(tcp::Socket::new(
             tcp::SocketBuffer::new(vec![0; TCP_BUF]),
             tcp::SocketBuffer::new(vec![0; TCP_BUF]),

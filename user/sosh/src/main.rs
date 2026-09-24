@@ -157,6 +157,12 @@ struct Token {
     word: String,
     /// Descriptor destino (1–3) para redirecciones; 0 en palabras y pipes.
     fd: u64,
+    /// La palabra llevaba comillas o escapes (T64).
+    ///
+    /// Importa por dos cosas: una palabra entrecomillada **nunca** es un
+    /// operador —`">"` es un nombre de fichero, no una redirección— y `""` es
+    /// un argumento vacío, que no es lo mismo que ningún argumento.
+    entrecomillada: bool,
 }
 
 #[derive(Clone)]
@@ -182,7 +188,20 @@ struct CmdSpec {
     log: RedirSpec,
 }
 
-fn tokenize(line: &str) -> Vec<Token> {
+/// Parte la línea en palabras y operadores, respetando comillas (T64).
+///
+/// Reglas, elegidas en la ficha y no ampliables sin volver a decidirlas:
+///
+/// - `'…'` es literal hasta la comilla de cierre; **dentro no hay escapes**.
+/// - `"…"` es literal salvo `\"` y `\\`.
+/// - Fuera de comillas, `\X` da `X` literal: `\ ` es un espacio y `\|` una barra.
+/// - Una comilla sin cerrar es un **error**, no una palabra a medias.
+///
+/// Las comillas se quitan del resultado. sosh no expande variables, así que
+/// `'` y `"` hacen hoy lo mismo; se aceptan las dos porque quien escriba la
+/// otra recibiría la comilla dentro del argumento y un fallo que no se parece
+/// a su causa.
+fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
     let mut tokens = Vec::new();
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
@@ -194,6 +213,7 @@ fn tokenize(line: &str) -> Vec<Token> {
                 kind: TokenKind::Pipe,
                 word: String::new(),
                 fd: 0,
+                entrecomillada: false,
             }),
             '>' => {
                 let kind = if chars.peek() == Some(&'>') {
@@ -213,23 +233,82 @@ fn tokenize(line: &str) -> Vec<Token> {
                     kind,
                     word: String::new(),
                     fd: 1,
+                    entrecomillada: false,
                 });
             }
             '<' => tokens.push(Token {
                 kind: TokenKind::RedirectIn,
                 word: String::new(),
                 fd: 0,
+                entrecomillada: false,
             }),
             _ => {
                 let mut word = String::new();
-                word.push(c);
-                while let Some(&nc) = chars.peek() {
-                    if nc.is_whitespace() || nc == '|' || nc == '>' || nc == '<' {
-                        break;
+                let mut entrecomillada = false;
+                // El primer carácter ya se consumió: se trata igual que el
+                // resto para que `"a"b` y `a"b"` den los dos `ab`.
+                let mut pendiente = Some(c);
+                loop {
+                    let ch = match pendiente.take() {
+                        Some(ch) => ch,
+                        None => match chars.peek() {
+                            Some(&nc)
+                                if nc.is_whitespace()
+                                    || nc == '|'
+                                    || nc == '>'
+                                    || nc == '<' =>
+                            {
+                                break
+                            }
+                            Some(_) => chars.next().unwrap(),
+                            None => break,
+                        },
+                    };
+                    match ch {
+                        '\'' => {
+                            entrecomillada = true;
+                            loop {
+                                match chars.next() {
+                                    Some('\'') => break,
+                                    Some(x) => word.push(x),
+                                    None => return Err("comilla simple sin cerrar"),
+                                }
+                            }
+                        }
+                        '"' => {
+                            entrecomillada = true;
+                            loop {
+                                match chars.next() {
+                                    Some('"') => break,
+                                    Some('\\') => match chars.next() {
+                                        // Sólo `\"` y `\\`: lo demás se queda
+                                        // literal, barra incluida, para que
+                                        // una ruta no se coma sus separadores.
+                                        Some(x @ ('"' | '\\')) => word.push(x),
+                                        Some(x) => {
+                                            word.push('\\');
+                                            word.push(x);
+                                        }
+                                        None => return Err("comilla doble sin cerrar"),
+                                    },
+                                    Some(x) => word.push(x),
+                                    None => return Err("comilla doble sin cerrar"),
+                                }
+                            }
+                        }
+                        '\\' => {
+                            entrecomillada = true;
+                            match chars.next() {
+                                Some(x) => word.push(x),
+                                None => return Err("barra invertida al final de la línea"),
+                            }
+                        }
+                        x => word.push(x),
                     }
-                    word.push(chars.next().unwrap());
                 }
-                if word.len() == 1 {
+                // Un dígito suelto pegado a `>` es un descriptor… salvo que
+                // viniera entrecomillado, en cuyo caso es una palabra.
+                if !entrecomillada && word.len() == 1 {
                     if let Some(d) = word.chars().next().and_then(|ch| ch.to_digit(10)) {
                         if (1..=3).contains(&d) && chars.peek() == Some(&'>') {
                             chars.next();
@@ -251,6 +330,7 @@ fn tokenize(line: &str) -> Vec<Token> {
                                 kind,
                                 word: String::new(),
                                 fd,
+                                entrecomillada: false,
                             });
                             continue;
                         }
@@ -260,11 +340,12 @@ fn tokenize(line: &str) -> Vec<Token> {
                     kind: TokenKind::Word,
                     word,
                     fd: 0,
+                    entrecomillada,
                 });
             }
         }
     }
-    tokens
+    Ok(tokens)
 }
 
 fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
@@ -980,7 +1061,13 @@ fn ejecutar(line: &str) -> Option<u8> {
         return ejecutar_voz(texto);
     }
 
-    let tokens = tokenize(line);
+    let tokens = match tokenize(line) {
+        Ok(t) => t,
+        Err(msg) => {
+            println!("sosh: {msg}");
+            return None;
+        }
+    };
     let cmds = match parse(&tokens) {
         Ok(c) => c,
         Err(msg) => {

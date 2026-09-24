@@ -2,7 +2,7 @@
 //! DHCP al arrancar en backends cableados; en WiFi sólo tras asociación.
 //! Fallback 10.0.2.x únicamente en QEMU (virtio/e1000e).
 
-mod device;
+pub(crate) mod device;
 pub mod dns;
 mod loopback;
 mod ping;
@@ -503,6 +503,10 @@ pub fn poll() {
         !crate::arch::irq::en_irq_dura(),
         "net::poll() desde IRQ dura: reentraría en PROCS/RX/TX/heap"
     );
+    let vigilar = crate::mm::heap::vigilando();
+    if vigilar {
+        crate::mm::heap::punto("poll-entra");
+    }
     try_attach();
     #[cfg(feature = "drv-rtl8169")]
     if rtl8169::poll_link() {
@@ -511,6 +515,9 @@ pub fn poll() {
     #[cfg(feature = "drv-e1000e")]
     if e1000e::poll_link() {
         on_wired_link_up();
+    }
+    if vigilar {
+        crate::mm::heap::punto("poll-nicho");
     }
     let Some(net) = NET.get() else { return };
     let Some(mut n) = net.try_lock() else {
@@ -541,6 +548,9 @@ pub fn poll() {
     } = &mut *n;
 
     iface.poll(now(), dev, sockets);
+    if vigilar {
+        crate::mm::heap::punto("poll-rx");
+    }
     if *dhcp_enabled {
         poll_dhcp(iface, sockets, echo, ssh, *dhcp, configured, dns);
         try_static_fallback(iface, *mac, *backend, dev, *dhcp_started, configured);
@@ -550,6 +560,9 @@ pub fn poll() {
     iface.poll(now(), dev, sockets);
     // Después del último `poll`: lo que quedara por enviar ya salió.
     user_tcp.purgar_cerrados(sockets);
+    if vigilar {
+        crate::mm::heap::punto("poll-sale");
+    }
 }
 
 fn poll_user_tcp(
@@ -594,6 +607,7 @@ pub fn tcp_listen(port: u16) -> Result<usize, i64> {
 }
 
 pub fn tcp_connect(remote: soso_abi::SockAddr) -> Result<usize, i64> {
+    crate::mm::heap::vigilar();
     if loopback::is_loopback_addr(&remote.addr) {
         return tcp_connect_loopback(remote.port);
     }

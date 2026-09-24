@@ -907,6 +907,42 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_voz_wav(key, port)
             });
         });
+        filter.if_step(sid, "probe: archivos persistentes", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: archivos persistentes",
+                || ssh_probe_archivos(key, port),
+            );
+        });
+        filter.if_step(sid, "probe: páginas ejecutables (W+X)", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: páginas ejecutables (W+X)",
+                || ssh_probe_ejecutable(key, port),
+            );
+        });
+        filter.if_step(sid, "probe: descriptores sobre el mismo fichero", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: descriptores sobre el mismo fichero",
+                || ssh_probe_compartir(key, port),
+            );
+        });
+        filter.if_step(sid, "sosh: comillas en rutas con espacios", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "sosh: comillas en rutas con espacios",
+                || ssh_sosh_comillas(key, port),
+            );
+        });
         filter.if_step(sid, "fd 3: redirección y comando log", || {
             report.paso_ssh_sys(
                 &mut qemu,
@@ -2512,6 +2548,175 @@ fn ssh_init_test(key: &Path, ssh_port: u16) -> Result<(), String> {
         return Err(format!(
             "init test no llegó al final (¿timeout?); stdout: {texto:?}"
         ));
+    }
+    Ok(())
+}
+
+/// T64 — `sosh` respeta las comillas.
+///
+/// Se comprueba el camino entero desde la shell: **escribir** un fichero cuyo
+/// nombre lleva un espacio (redirección con la ruta entrecomillada) y volver a
+/// **leerlo**. Antes de T64 la línea se partía en tres palabras y `cat`
+/// contestaba dos «no existe»; antes de [T62] ni siquiera habría llegado
+/// entero al programa.
+/// T33, sonda 1 — archivos persistentes.
+///
+/// Lo que acredita es el **efecto**, no el código de retorno: se escribe, se
+/// cierra, se reabre y se compara byte a byte. Un `write` que devolviera el
+/// número de bytes sin guardarlos pasaría una comprobación de errno y fallaría
+/// aquí.
+///
+/// Este paso cubre «sobrevive a cerrar el descriptor». «Sobrevive al apagado»
+/// es la sonda de dos fases, que necesita reiniciar la máquina.
+fn ssh_probe_archivos(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe archivos\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    for esperado in [
+        "archivos/texto-utf8",
+        "archivos/binario",
+        "archivos/nombre-con-espacio",
+        "archivos/stat-texto",
+        "archivos/truncar",
+        "archivos/borrar",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    if salida.contains("FALLO") {
+        return Err(format!("alguna capacidad falló: {salida:?}"));
+    }
+    if !salida.contains("\"malos\":0") {
+        return Err(format!("el informe no dice 0 malos: {salida:?}"));
+    }
+    publicar_informe("archivos", &salida);
+    Ok(())
+}
+
+/// T33, sonda 2 — páginas ejecutables y W+X.
+///
+/// La decisiva del inventario de T32: sin poder escribir código y ejecutarlo
+/// no hay JIT, y sin JIT no hay JavaScriptCore. Se mide **ejecutando**, no
+/// leyendo los bits de la tabla de páginas: si la página no fuera ejecutable
+/// el proceso moriría, así que la ausencia del informe final también es un
+/// resultado, y por eso la sonda imprime cada caso según lo decide.
+fn ssh_probe_ejecutable(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe ejecutable\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    for esperado in [
+        "exec/mmap",
+        "exec/prot-exec-existe",
+        "exec/w-mas-x",
+        "exec/tras-quitar-escritura",
+        "exec/volver-a-escribir",
+        "exec/monton",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!(
+                "falta el caso «{esperado}» — ¿murió el proceso antes de llegar?: {salida:?}"
+            ));
+        }
+    }
+    if !salida.contains("probe-json:") {
+        return Err(format!("la sonda no llegó al informe final: {salida:?}"));
+    }
+    if salida.contains("FALLO") {
+        return Err(format!("alguna capacidad falló: {salida:?}"));
+    }
+    publicar_informe("exec", &salida);
+    Ok(())
+}
+
+/// Vuelca las líneas del informe de una sonda al log de la suite.
+///
+/// En T33 la **medida es el entregable**: un paso que sólo dice OK no deja
+/// constancia de qué se observó, y el criterio no se puede revisar después.
+fn publicar_informe(etiqueta: &str, salida: &str) {
+    for l in salida.lines() {
+        let l = l.trim();
+        if l.starts_with("probe: ") || l.starts_with("probe-json: ") {
+            println!("      [{etiqueta}] {l}");
+        }
+    }
+}
+
+/// T33, sonda 3 — varios descriptores sobre el mismo fichero.
+///
+/// Lo que necesita SQLite, y por tanto el `bun:sqlite` del inventario. El paso
+/// **publica el informe pase o falle**: aquí la medida es el entregable, y un
+/// resultado negativo es tan útil como uno positivo mientras quede escrito.
+fn ssh_probe_compartir(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe compartir\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    if !salida.contains("probe-json:") {
+        return Err(format!("la sonda no llegó al informe final: {salida:?}"));
+    }
+    publicar_informe("compartir", &salida);
+    // Ojo: este paso **no** falla porque un caso salga negativo. La sonda
+    // mide una capacidad que T32 ya sospechaba ausente, y el resultado —bueno
+    // o malo— es el entregable. Falla si no llegó a medir, que es lo único
+    // que invalidaría la medida.
+    for esperado in [
+        "compartir/offsets-independientes",
+        "compartir/visibilidad-entre-descriptores",
+        "compartir/escritura-conserva-el-resto",
+        "compartir/dos-escritores-zonas-distintas",
+        "compartir/pwrite-en-offset",
+        "compartir/o-excl-excluye",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn ssh_sosh_comillas(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let tok = "xtask_t64_ok";
+    let guion = format!(
+        concat!(
+            "mkdir /tmp/t64\n",
+            "echo {tok} > \"/tmp/t64/con espacio.txt\"\n",
+            "cat \"/tmp/t64/con espacio.txt\"\n",
+            "cat '/tmp/t64/con espacio.txt'\n",
+            "cat \"/tmp/t64/no existe.txt\"\n",
+            "cat \"sin cerrar\n",
+            "echo FIN-T64\n"
+        ),
+        tok = tok
+    );
+    let texto = ssh_guion_hasta(key, ssh_port, &guion, Duration::from_secs(90), "FIN-T64")?;
+
+    // Las dos comillas valen y las dos leen el mismo fichero.
+    let lecturas = texto.matches(tok).count();
+    if lecturas < 3 {
+        return Err(format!(
+            "esperaba el eco y dos lecturas de «con espacio.txt», hubo {lecturas}: {texto:?}"
+        ));
+    }
+    // La ruta no se partió: nadie se quejó de «/tmp/t64/con» a secas.
+    if texto.contains("/tmp/t64/con:") || texto.contains("espacio.txt:") {
+        return Err(format!("la ruta se partió en palabras: {texto:?}"));
+    }
+    // Un fichero que no existe sigue dando un error con el nombre **entero**.
+    if !texto.contains("/tmp/t64/no existe.txt") {
+        return Err(format!("el error no llevó la ruta entera: {texto:?}"));
+    }
+    // Y una comilla sin cerrar se dice, no se adivina.
+    if !texto.contains("sin cerrar") || !texto.contains("comilla doble sin cerrar") {
+        return Err(format!("la comilla sin cerrar no se rechazó: {texto:?}"));
     }
     Ok(())
 }

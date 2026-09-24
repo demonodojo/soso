@@ -62,6 +62,37 @@ pub fn comprobar_listas(contexto: &str) {
     crate::println!("heap: listas OK {contexto} sonda={ptr:p}");
 }
 
+/// Se enciende en el DNS y en el `connect` del HTTPS. Mientras está puesta,
+/// `net::poll` y la reserva del búfer TCP comprueban las listas libres.
+static VIGILAR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+static ULTIMO_CTX: spin::Mutex<[u8; 24]> = spin::Mutex::new([0; 24]);
+
+pub fn vigilar() {
+    VIGILAR.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn vigilando() -> bool {
+    VIGILAR.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Reserva una sonda y no la libera. El nombre se guarda **después** de
+/// reservar: si este `malloc` peta, el pánico sigue mostrando el punto
+/// anterior, que sí recorrió las listas.
+pub fn punto(contexto: &str) {
+    let sonda = Box::new(0x534f_534f_4845_4150u64);
+    core::mem::forget(sonda);
+    let bytes = contexto.as_bytes();
+    let n = bytes.len().min(24);
+    let mut buf = [0u8; 24];
+    buf[..n].copy_from_slice(&bytes[..n]);
+    *ULTIMO_CTX.lock() = buf;
+}
+
+pub fn ultimo_punto() -> [u8; 24] {
+    *ULTIMO_CTX.lock()
+}
+
 /// Mapea el heap y se lo entrega a talc. Devuelve los bytes que quedaron.
 ///
 /// `HEAP_SIZE` es un TECHO, no una exigencia. Antes se mapeaban los 512 MiB de

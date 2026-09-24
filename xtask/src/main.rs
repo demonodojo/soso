@@ -121,6 +121,12 @@ fn main() {
             let filtro = std::env::args().nth(2);
             test_update::run(filtro.as_deref());
         }
+        "test-probe" => {
+            // Las sondas de T33 que necesitan reiniciar la máquina. Un
+            // argumento suelto filtra por nombre.
+            let filtro = std::env::args().nth(2);
+            test_probe::run(filtro.as_deref());
+        }
         "test-resize" => {
             test_resize::run();
         }
@@ -193,6 +199,7 @@ mod sosomfs_check;
 mod test_install;
 mod test_resize;
 mod sosofs_img;
+mod test_probe;
 mod test_update;
 mod version;
 
@@ -729,6 +736,7 @@ pub(crate) fn build_user() -> bool {
         "soso-test-sosofs",
         "soso-rustc",
         "soso-improve",
+        "soso-agent-probe",
     ] {
         let src = out.join(prog);
         let dst = bin.join(prog);

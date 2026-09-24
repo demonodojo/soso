@@ -178,6 +178,16 @@ Camino SI-2: **T16–T19** hechas 2026-09-22; T14 dio **no-go** del modelo (T59
 cerró la atribución), así que SI-2 no cierra y la decisión siguiente es de plan.
 Camino SI-4: **T23, T63 y T24 cerradas** 2026-09-24, las tres con sonda guest.
 La cadena se para ahí: T25 → T21 → T20 depende del no-go de T14, y T26–T29 van
-detrás. T62 también cerrada (eran cinco productores, no uno). Recomendada ahora:
-**T64** (sosh no entiende comillas). También libres: los inventarios
-T32/T36/T38.
+detrás. T62 y T64 también cerradas: el argv es correcto de punta a punta y sosh
+entiende comillas. **En SI-4 no queda nada libre**: T25→T21→T20 dependen del
+no-go de T14. Camino SI-6: **T32 cerrada** 2026-09-24 (OpenCode v1.18.32
+fijado; el repo se movió a anomalyco/opencode y `opencode run` importa el TUI).
+**T33 en curso**: va por pases, uno por capacidad; el pase 1 (archivos
+persistentes) está hecho y acreditado con reinicio real
+(`cargo xtask test-probe`). Van 2 de 10 en `native/probes.json`. El pase 2 midió **W+X**: no hay
+`PROT_EXEC` porque **todo** es ejecutable (incluido el montón) — el JIT queda
+cubierto y no hay W^X en ninguna parte; decisión de diseño para T35, no
+arreglo. El pase 3 (SQLite) dio el primer negativo: el modelo de ficheros es **por
+descriptor, no por inodo** —una escritura parcial trunca la cola— y abrió
+**T65** (O_EXCL no excluye con el primer fd abierto; afecta a T46). Pase
+siguiente: señales. También libres: T36 y T38.

@@ -15,7 +15,7 @@ use soso_update_core::UPD_KERNEL_SLOT_SIZE;
 
 use crate::test::{esperar_en_fichero, ssh_guion_hasta};
 
-const SSH_PORT: u16 = 2243;
+pub(crate) const SSH_PORT: u16 = 2243;
 const MAC: &str = "52:54:00:12:34:43";
 const TEST_VER: &str = "0.2.1-prueba";
 /// Versión de la release que **no arranca**: su `/bin/init` no es un ELF.
@@ -1606,11 +1606,11 @@ fn esp_read_kernel(live: &Path, p1: u64) -> Result<(([u8; 8], [u8; 3]), Vec<u8>)
     Ok(((n, e), data))
 }
 
-struct QemuProc {
-    child: std::process::Child,
+pub(crate) struct QemuProc {
+    pub(crate) child: std::process::Child,
 }
 
-struct Matar(std::process::Child);
+pub(crate) struct Matar(pub(crate) std::process::Child);
 
 impl Drop for Matar {
     fn drop(&mut self) {
@@ -1619,7 +1619,12 @@ impl Drop for Matar {
     }
 }
 
-fn lanzar_live(code: &Path, vars: &Path, live: &Path, serial: &Path) -> Result<QemuProc, String> {
+pub(crate) fn lanzar_live(
+    code: &Path,
+    vars: &Path,
+    live: &Path,
+    serial: &Path,
+) -> Result<QemuProc, String> {
     lanzar_live_con(code, vars, live, serial, None)
 }
 
@@ -1679,6 +1684,11 @@ fn lanzar_live_con(
 fn marca(msg: &str, ok: bool) {
     let tag = if ok { "OK" } else { "FALLO" };
     println!("test-update: [{tag}] {msg}");
+}
+
+/// Igual que `sangrar`, expuesto para `test_probe`.
+pub(crate) fn sangrar_pub(s: &str) -> String {
+    sangrar(s)
 }
 
 fn sangrar(s: &str) -> String {

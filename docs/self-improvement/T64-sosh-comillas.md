@@ -1,6 +1,6 @@
 # T64 — `sosh` no entiende comillas: una ruta con espacios es inescribible
 
-**Hito:** SI-4 · **Tipo:** Corrección de userspace (shell) · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Corrección de userspace (shell) · **Estado:** completada (2026-09-24).
 
 **Dependencias:** [T62](T62-argv-en-los-programas.md). **La origina:** T62, paso 4.
 
@@ -34,15 +34,26 @@ hay que decidir una **sintaxis** —qué comillas, si hay escapes, qué pasa con
 compromete a la shell para siempre. Mezclarlo con el transporte habría
 escondido una decisión de diseño dentro de una corrección mecánica.
 
-## Decisión pendiente
+## Decisión tomada: subconjunto POSIX con las dos comillas
 
-1. **Subconjunto POSIX**: `'literal'` sin escapes, `"con $nada pero con \\"
-   escapes"`, `\<espacio>` fuera de comillas. Es lo que espera cualquiera.
-2. **Sólo comillas dobles**, sin escapes. Más simple, y deja fuera el caso de
-   una ruta con comilla dentro.
+| Escrito | Resultado |
+|---|---|
+| `'…'` | literal hasta la `'` de cierre; dentro **no hay escapes** |
+| `"…"` | literal salvo `\"` y `\\` |
+| `\X` fuera de comillas | `X` literal (`\ ` es un espacio, `\|` una barra) |
+| comilla sin cerrar | **error**, no una palabra a medias |
 
-Conviene la 1 si va a haber usuarios; la 2 si sosh se queda como shell de
-arranque y diagnóstico. Elegir antes de tocar el tokenizador.
+**Por qué las dos, si en sosh hacen lo mismo.** sosh no expande variables, así
+que `'` y `"` son hoy idénticas. Eso podría parecer motivo para implementar
+sólo una; es al revés. Precisamente porque no hay diferencia semántica,
+aceptar las dos no cuesta nada y **evita la trampa**: quien escriba
+`'con espacio.txt'` en una shell que sólo entiende `"` recibe la comilla dentro
+del argumento y un `no existe 'con` — el mismo fallo silencioso que
+[T62](T62-argv-en-los-programas.md) acaba de quitar, con otro disfraz.
+
+Lo que **no** se hace es fingir que `"` expande. Cuando llegue `$`, `"` tendrá
+que expandir y `'` no; esta elección deja el sitio preparado sin prometer nada
+hoy.
 
 ## Alcance
 
@@ -59,18 +70,54 @@ camino ya está: `CmdSpec.args` es `Vec<String>` y se pasa como argv.
 5. Revisar que las redirecciones y el pipe siguen partiéndose igual, y que una
    ruta entrecomillada tras `>` funciona.
 
+## Resultado
+
+`tokenize` devuelve `Result` y entiende comillas y escapes. `Token` gana
+`entrecomillada`, que hace falta para dos cosas que si no se pierden en
+silencio:
+
+- **Una palabra entrecomillada nunca es un operador.** El reconocimiento de
+  descriptor —un dígito suelto pegado a `>`— sólo mira palabras sin comillas,
+  así que `"2>"` es un nombre de fichero y no una redirección.
+- **`""` es un argumento vacío**, no ningún argumento: la misma distinción que
+  T62 tuvo que rescatar.
+
+Dentro de `"`, sólo `\"` y `\\` son escapes; cualquier otra barra se queda
+literal, barra incluida, para que una ruta no se coma sus separadores.
+
 ## Comprobación
 
-`cargo xtask test` con un paso nuevo en el shard `sys`.
+    cargo xtask test sys --only="comillas"     OK con el arreglo, FALLO sin él
+    cargo xtask test                           TODO OK (39 pasos)
+    cargo xtask check                          TODO OK
+
+El paso nuevo `sosh: comillas en rutas con espacios` **escribe** el fichero por
+redirección con la ruta entrecomillada y lo vuelve a **leer**, con las dos
+comillas; comprueba además que un fichero inexistente da un error con la ruta
+entera y que una comilla sin cerrar se rechaza diciéndolo.
+
+Control negativo, desactivando sólo el reconocimiento de comillas:
+
+    $ cat "/tmp/t64/con espacio.txt"
+    cat: "/tmp/t64/con: no existe
+    cat: espacio.txt": no existe
+
+Evidencia en `target/self-improvement/tasks/T64/`.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación terminada.
-- [ ] Comprobaciones ejecutadas y evidencia guardada.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación terminada.
+- [x] Comprobaciones ejecutadas y evidencia guardada.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
+
+**Límite.** No hay expansión de variables, así que `"` no expande nada; es una
+coincidencia de hoy, no una promesa. Y una primera pasada de la suite dio un
+timeout de arranque en `[reclaim]`: repetido el shard solo y la suite entera,
+39/39. Es la intermitencia por carga ya conocida —el mensaje es «no apareció
+sosh —», de antes de que el tokenizador se ejecute—, no una regresión.
 
 ## Ejecución nativa
 
 Aplicar [NATIVO.md](NATIVO.md). Es la shell de soso y la prueba se escribe
 desde ella, así que no hay otro sitio donde comprobarlo. Validación nativa:
-**pendiente**.
+**verificada** (2026-09-24).

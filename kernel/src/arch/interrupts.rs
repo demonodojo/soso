@@ -437,6 +437,28 @@ extern "sysv64" fn kernel_pf_panic_shim(addr: u64, _: u64) -> u64 {
     rastro_de_pila(rsp);
     crate::println!("rastro: rsp en {}", crate::arch::gdt::zona_de_pila(rsp));
     volcado_junto_a_rsp(rsp);
+    let marca = crate::mm::heap::ultimo_punto();
+    let n = marca.iter().position(|&b| b == 0).unwrap_or(marca.len());
+    if n > 0 {
+        let s = core::str::from_utf8(&marca[..n]).unwrap_or("?");
+        crate::println!("heap: último punto intacto «{s}»");
+    }
+    let (dir, ptr, len) = crate::net::device::ultima_trama();
+    if dir != 0 {
+        let lado = if dir == b'R' { "rx" } else { "tx" };
+        crate::println!("red: última trama {lado} ptr={ptr:#x} len={len}");
+    }
+    // Los bytes de la instrucción, por si la foto se come un dígito del rip.
+    // Sólo hasta el final de la página: el fetch ya pasó, un byte de más no.
+    let n = (0x1000 - (rip & 0xfff)).min(8) as usize;
+    let mut raw = [0u8; 8];
+    for i in 0..n {
+        raw[i] = unsafe { core::ptr::read_volatile((rip + i as u64) as *const u8) };
+    }
+    crate::println!(
+        "pf: ins {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]
+    );
     #[cfg(feature = "lxdde")]
     crate::lxdde::avisar_kmalloc_en_pf();
     panic!(

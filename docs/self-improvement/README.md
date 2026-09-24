@@ -46,13 +46,32 @@ entera como un solo argumento `sosh`, `libsoso::spawn_io` y dos caminos del
 kernel. El compilador encontró los 39 consumidores; los cinco productores no,
 porque ahí no cambia el tipo, y salieron en QEMU disfrazados de otra cosa
 —conexión rechazada, registros YMM, un HTTP 500 de Forja—. Con eso el «argv,
-nunca una línea de shell» de C5 es cierto de punta a punta. Lo que queda es
-escribirlo desde la shell: **[T64](T64-sosh-comillas.md)**, que es una decisión
-de sintaxis.
+nunca una línea de shell» de C5 es cierto de punta a punta. Y
+**[T64](T64-sosh-comillas.md)** cierra el otro extremo el mismo día: `sosh`
+entiende ya `'…'`, `"…"` y `\`, así que una ruta con espacios se puede
+**escribir** además de pasar.
 
-**Lo que queda habilitado**: T64 y los inventarios
-[T32](T32-opencode-inventario.md), [T36](T36-forja-trazabilidad.md) y
-[T38](T38-toolchain-inventario.md).
+**[T32](T32-opencode-inventario.md) está cerrada** el 24-sep-2026 con la
+revisión de OpenCode fijada (v1.18.32, commit `545f51d2…`) y su matriz de
+capacidades. Dos hallazgos cambian lo que SI-6 puede planear: el repositorio
+**se movió** a `anomalyco/opencode`, y **`opencode run` no es un modo sin TUI**
+—importa `@opentui/*` en el módulo, y lo no interactivo es una rama dentro de
+él—. El obstáculo de fondo no es la lista de paquetes sino tres cosas: **no hay
+`dlopen`** (ningún `.node` es cargable, ni recompilándolo), no hay pty ni
+`inotify`, y **portar OpenCode es portar Bun**. Las incógnitas quedan escritas
+como siete sondas para [T33](T33-sondas-abi.md).
+
+**[T33](T33-sondas-abi.md) está en curso**: la ficha va por pases —una
+capacidad cada vez— y el primero mide **archivos persistentes**, con crate nuevo
+(`user/soso-agent-probe/`), tabla en
+[`native/probes.json`](native/probes.json) y, además del paso de suite, un
+`cargo xtask test-probe` que arranca la imagen **dos veces** con un `halt` en
+medio: «sobrevive a cerrar el descriptor» y «sobrevive al apagado» no son lo
+mismo, y lo primero lo cumple una caché. Van **1 de 10**; el pase siguiente es
+la sonda decisiva, **W+X**, porque sin JIT no hay JavaScriptCore.
+
+**Lo que queda habilitado**: seguir con los pases de T33, y los inventarios
+[T36](T36-forja-trazabilidad.md) y [T38](T38-toolchain-inventario.md).
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.
 Entregar al modelo una ficha por sesión, las secciones indicadas
@@ -167,8 +186,9 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T29](T29-campana.md) | Ejecutar una campaña reproducible de diez tareas | SI-4 | T22, T27, T28, T49 | Pendiente |
 | [T30](T30-hardware.md) | Medir servicio e inferencia en una máquina física identificada | SI-5 | T19, T29, T48 | Pendiente |
 | [T31](T31-restauracion.md) | Demostrar recuperación completa de la instalación | SI-5 | T30 | Pendiente |
-| [T32](T32-opencode-inventario.md) | Inventariar dependencias del OpenCode que se quiere portar | SI-6 | T01 | Pendiente |
-| [T33](T33-sondas-abi.md) | Crear sondas pequeñas para las capacidades requeridas | SI-6 | T32, T49 | Pendiente |
+| [T32](T32-opencode-inventario.md) | Inventariar dependencias del OpenCode que se quiere portar | SI-6 | T01 | Completada (v1.18.32 fijada) |
+| [T33](T33-sondas-abi.md) | Crear sondas pequeñas para las capacidades requeridas | SI-6 | T32, T49 | En curso (3 de 10; abrió T65) |
+| [T65](T65-o-excl-no-excluye.md) | `O_EXCL` no excluye mientras el primer descriptor sigue abierto | SI-4 | — (deriva de T33) | Pendiente |
 | [T34](T34-tickets-port.md) | Convertir huecos del port en fichas implementables | SI-6 | T32, T33 | Pendiente |
 | [T35](T35-opencode-nativo.md) | Probar OpenCode nativo en modo no interactivo | SI-6 | T19, T34 | Pendiente |
 | [T36](T36-forja-trazabilidad.md) | Vincular fuentes, build y artefacto de Forja | SI-6 | T01 | Pendiente |
@@ -198,7 +218,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T60](T60-validacion-peticion.md) | Errores de la API: clasificación y doble respuesta en streaming | SI-2 | — (deriva de T14) | Completada |
 | [T61](T61-pipe-no-bloqueante.md) | Lectura de tuberías con plazo, sin bloquear | SI-4 | — (deriva de T47) | Completada |
 | [T62](T62-argv-en-los-programas.md) | Los programas reciben los argumentos juntados, no su argv | SI-4 | — (deriva de T47) | Completada (5 productores; abrió T64) |
-| [T64](T64-sosh-comillas.md) | `sosh` no entiende comillas: una ruta con espacios es inescribible | SI-4 | T62 | Pendiente |
+| [T64](T64-sosh-comillas.md) | `sosh` no entiende comillas: una ruta con espacios es inescribible | SI-4 | T62 | Completada (guest acreditado) |
 | [T63](T63-generacion-rota-encalla.md) | Desencallar una referencia durable con una generación rota | SI-4 | T46 | Completada (guest acreditado; desbloquea T27) |
 
 ## Condiciones adicionales de entrada

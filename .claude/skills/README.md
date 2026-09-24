@@ -24,6 +24,7 @@ Comprobarlo con `file .cursor/skills` antes de tocar nada.
 | `soso-update` | OTA: transacción kernel+rootfs, vuelta atrás, rescate y transición |
 | `soso-self-improvement` | Automejora: fichas Txx, SI-0–SI-7, OpenCode, soso-improve |
 | `soso-user-manual` | Maintain `MANUAL-USUARIO.md` for end users |
+| `soso-pf-red` | Page fault recurrente del kernel al hacer `soso-update comprobar` en placa |
 
 Docs operativos compartidos: [`docs/GUIA-OPERATIVA.md`](../docs/GUIA-OPERATIVA.md),
 [`docs/ESTADO.md`](../docs/ESTADO.md), [`docs/HW-MATRIX.md`](../docs/HW-MATRIX.md).

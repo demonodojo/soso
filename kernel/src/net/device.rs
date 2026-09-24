@@ -79,6 +79,29 @@ impl TxToken for SmolTx {
 #[cfg(feature = "lxdde")]
 pub struct LxWifiDev;
 
+static ULTIMA_TRAMA_DIR: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+static ULTIMA_TRAMA_PTR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static ULTIMA_TRAMA_LEN: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+#[cfg(feature = "lxdde")]
+fn anotar_trama(dir: u8, ptr: u64, len: usize) {
+    ULTIMA_TRAMA_PTR.store(ptr, core::sync::atomic::Ordering::Relaxed);
+    ULTIMA_TRAMA_LEN.store(len as u64, core::sync::atomic::Ordering::Relaxed);
+    ULTIMA_TRAMA_DIR.store(dir, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Última trama entregada a smoltcp: `(R|T, ptr, len)`. `dir == 0` si no hubo.
+pub fn ultima_trama() -> (u8, u64, u64) {
+    (
+        ULTIMA_TRAMA_DIR.load(core::sync::atomic::Ordering::Relaxed),
+        ULTIMA_TRAMA_PTR.load(core::sync::atomic::Ordering::Relaxed),
+        ULTIMA_TRAMA_LEN.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 #[cfg(feature = "lxdde")]
 pub struct LxWifiRx {
     buf: [u8; 2048],
@@ -119,7 +142,9 @@ impl RxToken for LxWifiRx {
     where
         F: FnOnce(&[u8]) -> R,
     {
-        f(&self.buf[..self.len])
+        let frame = &self.buf[..self.len];
+        anotar_trama(b'R', frame.as_ptr() as u64, frame.len());
+        f(frame)
     }
 }
 
@@ -131,7 +156,9 @@ impl TxToken for LxWifiTx {
     {
         let mut buf = [0u8; 2048];
         let n = len.min(buf.len());
-        let r = f(&mut buf[..n]);
+        let frame = &mut buf[..n];
+        anotar_trama(b'T', frame.as_ptr() as u64, frame.len());
+        let r = f(frame);
         let _ = crate::lxdde::wifi_send(&buf[..n]);
         r
     }

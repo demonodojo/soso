@@ -1089,7 +1089,7 @@
       "title": "Inventariar dependencias del OpenCode que se quiere portar",
       "milestone": "SI-6",
       "kind": "Inspección acotada",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T01"
       ],
@@ -1105,8 +1105,24 @@
         "requires": [
           "T35"
         ],
-        "evidence": [],
-        "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+        "evidence": [
+          "docs/self-improvement/native/opencode-lock.json",
+          "docs/self-improvement/native/opencode-deps.md"
+        ],
+        "note": "Entrega de laboratorio: inventario y revisión fijada. La función se acredita en T35; T33 convierte sus incógnitas en sondas."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T32.md",
+        "evidence": [
+          "docs/self-improvement/native/opencode-lock.json (v1.18.32, commit 545f51d2…, bun.lock sha256)",
+          "docs/self-improvement/native/opencode-deps.md (matriz dependencia→uso→capacidad→estado)",
+          "target/self-improvement/tasks/T32/resultado.md",
+          "checkout fijado en target/self-improvement/opencode/src"
+        ],
+        "blocker": null,
+        "next_step": "T33: siete sondas, la decisiva si SYS_MPROTECT permite W+X (sin JIT no hay JavaScriptCore). Ojo: el repo se movió a anomalyco/opencode y `opencode run` importa el TUI, así que T35 no puede planear «usar el modo sin TUI» sin tocar el código."
       }
     },
     {
@@ -1115,7 +1131,7 @@
       "title": "Crear sondas pequeñas para las capacidades requeridas",
       "milestone": "SI-6",
       "kind": "Implementación de pruebas guest",
-      "status": "pending",
+      "status": "in_progress",
       "depends_on": [
         "T32",
         "T49"
@@ -1123,17 +1139,37 @@
       "entry_conditions": [],
       "contract_sections": "C6",
       "context": [
-        "crates/soso-std/src/process.rs",
-        "crates/soso-std/src/fs.rs",
-        "crates/soso-std/src/net.rs",
-        "user/soso-std-test/src/main.rs",
-        "user/libsoso/src/thread.rs"
+        "user/soso-agent-probe/src/main.rs",
+        "user/soso-agent-probe/src/sondas/archivos.rs",
+        "user/soso-agent-probe/src/sondas/ejecutable.rs",
+        "user/soso-agent-probe/src/sondas/compartir.rs",
+        "docs/self-improvement/native/probes.json",
+        "xtask/src/test_probe.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "partial",
         "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "evidence": [
+          "cargo xtask test sys --only=\"archivos persistentes\"",
+          "cargo xtask test sys --only=\"W+X\"",
+          "cargo xtask test sys --only=\"mismo fichero\"",
+          "cargo xtask test-probe (dos arranques con halt en medio)",
+          "target/self-improvement/tasks/T33/{reinicio,wx,compartir}.txt"
+        ],
+        "note": "Pases 1–3 acreditados en guest. Parcial a propósito: quedan 7 capacidades por medir."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "docs/self-improvement/seguimiento/T33.md",
+        "evidence": [
+          "docs/self-improvement/native/probes.json (3 de 10 medidas)",
+          "target/self-improvement/tasks/T33/resultado.md",
+          "cargo xtask test: TODO OK (42 pasos)",
+          "cargo xtask check: TODO OK"
+        ],
+        "blocker": null,
+        "next_step": "Pase 4: señales — no «manejar», que no existe, sino que el padre distinga muerte por señal de salida con código, que es lo que usa un timeout de subproceso. El pase 3 dejó dos huecos anotados para T34 y abrió T65."
       }
     },
     {
@@ -2239,7 +2275,7 @@
       "title": "sosh no entiende comillas: una ruta con espacios es inescribible",
       "milestone": "SI-4",
       "kind": "Corrección de userspace (shell)",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T62"
       ],
@@ -2249,18 +2285,58 @@
         "user/sosh/src/main.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "verified",
         "requires": [],
-        "evidence": [],
-        "note": "Es la shell de soso y la prueba se escribe desde ella; no hay otro sitio donde comprobarlo."
+        "evidence": [
+          "cargo xtask test sys --only=\"comillas\" (paso «sosh: comillas en rutas con espacios»)",
+          "target/self-improvement/tasks/T64/control-negativo.txt: el fallo se reprodujo antes de arreglarlo"
+        ],
+        "note": "Es la shell de soso y la prueba se escribe desde ella: escribe por redirección con la ruta entrecomillada y la vuelve a leer."
       },
       "tracking": {
         "updated_at": "2026-09-24",
         "base": "da8934b31 + diff sucio",
-        "summary": "docs/self-improvement/T64-sosh-comillas.md",
-        "evidence": [],
+        "summary": "docs/self-improvement/seguimiento/T64.md",
+        "evidence": [
+          "cargo xtask test: TODO OK (39 pasos)",
+          "cargo xtask check: TODO OK",
+          "target/self-improvement/tasks/T64/resultado.md",
+          "target/self-improvement/tasks/T64/control-negativo.txt"
+        ],
         "blocker": null,
-        "next_step": "Elegir sintaxis (subconjunto POSIX o sólo comillas dobles) antes de tocar tokenize."
+        "next_step": "Con T62 y T64 el argv es correcto de punta a punta. En SI-4 no queda nada libre: T25→T21→T20 dependen del no-go de T14. Quedan los inventarios T32/T36/T38."
+      }
+    },
+    {
+      "id": "T65",
+      "file": "T65-o-excl-no-excluye.md",
+      "title": "O_EXCL no excluye mientras el primer descriptor sigue abierto",
+      "milestone": "SI-4",
+      "kind": "Corrección de kernel",
+      "status": "pending",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C5",
+      "context": [
+        "kernel/src/task/syscall.rs",
+        "crates/soso-improve-core/src/durable.rs",
+        "user/soso-agent-probe/src/sondas/compartir.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Es kernel y la sonda corre dentro de soso (compartir/o-excl-excluye)."
+      },
+      "tracking": {
+        "updated_at": "2026-09-24",
+        "base": "da8934b31 + diff sucio",
+        "summary": "docs/self-improvement/T65-o-excl-no-excluye.md",
+        "evidence": [
+          "compartir/o-excl-excluye: p1=4 p2=5, ganan los dos"
+        ],
+        "blocker": null,
+        "next_step": "Reservar la entrada de directorio al abrir con O_CREAT|O_EXCL, no al cerrar."
       }
     }
   ],
