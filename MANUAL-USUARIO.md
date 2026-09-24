@@ -294,7 +294,7 @@ $
 - **Directorio de trabajo (cwd):** cada shell tiene un cwd (inicialmente `/`).
   Las rutas sin `/` inicial son relativas al cwd (p. ej. `echo x > f.txt` en
   `/tmp` crea `/tmp/f.txt` tras `cd /tmp`).
-- No hay variables de entorno ni historial de comandos.
+- No hay variables de entorno. **Flecha arriba** recupera el último comando para volver a ejecutarlo o editarlo; **flecha abajo** devuelve lo que se estaba escribiendo.
 - Los comandos sin ruta se buscan en `/bin/`.
 - También puedes invocar un ELF por ruta absoluta (por ejemplo `/bin/init test`).
 - **Backspace** funciona para corregir la línea.

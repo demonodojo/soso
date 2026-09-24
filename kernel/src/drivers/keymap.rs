@@ -66,6 +66,8 @@ pub enum KeyOutput {
     Char(char),
     /// Sin salida (modifier, caps toggle, etc.).
     None,
+    /// Secuencia CSI (`ESC [` + este byte). Flechas: `A` arriba, `B` abajo.
+    Csi(u8),
 }
 
 /// Estado del traductor (shift, altgr, ctrl, tecla muerta).
@@ -134,6 +136,12 @@ impl KeymapState {
     }
 
     fn translate_inner(&mut self, sc: u8) -> KeyOutput {
+        // Set 1: flecha arriba 0x48, abajo 0x50 (también el mapeo HID).
+        match sc {
+            0x48 => return KeyOutput::Csi(b'A'),
+            0x50 => return KeyOutput::Csi(b'B'),
+            _ => {}
+        }
         match layout() {
             Layout::Us => self.translate_us(sc),
             Layout::Es => self.translate_es(sc),
@@ -395,6 +403,15 @@ pub fn output_bytes(out: KeyOutput, buf: &mut [u8]) -> usize {
         KeyOutput::Byte(b) => {
             buf[0] = b;
             1
+        }
+        KeyOutput::Csi(b) => {
+            if buf.len() < 3 {
+                return 0;
+            }
+            buf[0] = 0x1b;
+            buf[1] = b'[';
+            buf[2] = b;
+            3
         }
         KeyOutput::Char(c) => {
             let mut tmp = [0u8; 4];
