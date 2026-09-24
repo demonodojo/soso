@@ -371,7 +371,18 @@ impl AddrSpace {
     }
 
     /// Cambia permisos de un rango ya mapeado (solo lectura ↔ lectura/escritura).
-    pub fn set_prot(&self, addr: u64, len: u64, writable: bool) -> Option<()> {
+    /// Cambia los permisos de un rango ya reservado.
+    ///
+    /// `sin_acceso` (N-002) es el tercer estado: ni lectura ni escritura. Las
+    /// páginas que ya estén mapeadas se **desmapean**, porque en x86 «sin
+    /// acceso» es «no presente» y no un juego de bits de permiso.
+    ///
+    /// **Eso descarta su contenido**, y es una diferencia real con POSIX que
+    /// conviene tener delante: volver a dar permisos deja la página a cero. Para
+    /// lo que N-002 persigue —una guarda al pie de una pila, que nadie ha
+    /// tocado— da igual; para usar `PROT_NONE` como candado temporal sobre
+    /// datos, no.
+    pub fn set_prot(&self, addr: u64, len: u64, writable: bool, sin_acceso: bool) -> Option<()> {
         if len == 0 {
             return Some(());
         }
@@ -385,13 +396,21 @@ impl AddrSpace {
         while va < end {
             if !self.is_mapped(va) {
                 // mmap perezoso: los permisos se aplican al fault-in vía
-                // MmapRegion::writable (actualizado en sys_mprotect).
+                // MmapRegion::writable / sin_acceso (que actualiza
+                // `sys_mprotect`). Una guarda sobre una página nunca tocada no
+                // cuesta ni un marco.
                 va += 4096;
                 continue;
             }
             let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
-            let flush = unsafe { mapper.update_flags(page, flags).ok()? };
-            flush.flush();
+            if sin_acceso {
+                if let Ok((_marco, flush)) = mapper.unmap(page) {
+                    flush.flush();
+                }
+            } else {
+                let flush = unsafe { mapper.update_flags(page, flags).ok()? };
+                flush.flush();
+            }
             va += 4096;
         }
         crate::arch::apic::tlb_shootdown_all();

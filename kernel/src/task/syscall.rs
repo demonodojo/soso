@@ -1053,8 +1053,25 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
                 return Err(-abi::EISDIR);
             }
         }
+        // T65: `O_CREAT|O_EXCL` **reserva el nombre ahora**, no al cerrar.
+        //
+        // Antes la entrada de directorio se materializaba en el volcado, así
+        // que mientras el primer descriptor seguía abierto el `lookup` de un
+        // segundo `O_EXCL` no encontraba nada y **ganaban los dos**. Y `O_EXCL`
+        // es la única exclusión mutua que tiene soso —no hay `flock` ni
+        // `fcntl`—, así que de ella depende el `crear_exclusivo` del contrato
+        // durable de T46.
+        //
+        // Crear el fichero vacío aquí cierra la ventana: el segundo llega,
+        // encuentra la entrada y recibe `EEXIST`.
+        let mut reservado = None;
+        if flags & abi::O_CREAT != 0 && flags & abi::O_EXCL != 0 && !exists {
+            let mtime = crate::time::wall_secs();
+            let ino = with_vfs(|| crate::vfs::create_file(dir, &name, &[], mtime))?;
+            reservado = Some(ino);
+        }
         let mut data = Vec::new();
-        let mut append_ino = None;
+        let mut append_ino = reservado;
         let mut append_pos = 0usize;
         if exists && flags & abi::O_APPEND != 0 {
             let ino = lookup.unwrap();
@@ -1084,7 +1101,7 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
         // conducta de siempre, y queda dicho como límite.
         const CARGA_MAX: u64 = 1024 * 1024;
         let mut cargado = false;
-        if exists && flags & abi::O_APPEND == 0 && flags & abi::O_TRUNC == 0 {
+        if exists && reservado.is_none() && flags & abi::O_APPEND == 0 && flags & abi::O_TRUNC == 0 {
             let ino = lookup.unwrap();
             let st = with_vfs(|| crate::vfs::stat_inode(ino))?;
             if st.file_type == sosofs::layout::FT_FILE && st.size.get() <= CARGA_MAX {
@@ -1558,6 +1575,7 @@ fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
                 file_offset: offset,
                 file_len,
                 writable,
+                sin_acceso: false,
             });
             if virt >= book.next {
                 book.next = virt + len_aligned;
@@ -2841,15 +2859,19 @@ fn sys_set_tls(base: u64) -> Result<u64, i64> {
 }
 
 fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
-    if prot == 0 {
-        return Err(-abi::EINVAL);
-    }
+    // `prot == 0` es **sin acceso** (N-002), no un error: es lo que hace falta
+    // para una guarda de pila, y hasta ahora no se podía pedir.
+    //
+    // Lo que sigue rechazándose es escribir sin poder leer: x86 no lo
+    // distingue —no hay bit de «sólo escritura»— así que aceptarlo sería
+    // prometer algo que la tabla de páginas no puede cumplir.
     if prot & !(abi::PROT_READ | abi::PROT_WRITE) != 0 {
         return Err(-abi::EINVAL);
     }
-    if prot & abi::PROT_READ == 0 {
+    if prot != 0 && prot & abi::PROT_READ == 0 {
         return Err(-abi::EINVAL);
     }
+    let sin_acceso = prot == 0;
     let writable = prot & abi::PROT_WRITE != 0;
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
@@ -2863,10 +2885,10 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
             va += 4096;
         }
         space
-            .set_prot(addr, len, writable)
+            .set_prot(addr, len, writable, sin_acceso)
             .ok_or(-abi::EINVAL)?;
         space.with_mmap_mut(|book| {
-            crate::task::mmap::split_prot(&mut book.regions, addr, len, writable);
+            crate::task::mmap::split_prot(&mut book.regions, addr, len, writable, sin_acceso);
         });
         Ok(0)
     })

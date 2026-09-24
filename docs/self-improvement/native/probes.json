@@ -118,7 +118,7 @@
       "capacidad": "varios descriptores sobre el mismo fichero (lo que necesita SQLite)",
       "por_que": "bun:sqlite abre el mismo .db desde varias conexiones: lee por posición y escribe sin pisar al resto.",
       "estado": "medida",
-      "resultado": "mejorado por N-001: la escritura parcial ya no trunca. Siguen negativos la visibilidad entre descriptores y el «gana el último», que necesitan la caché compartida",
+      "resultado": "mejorado por N-001 y T65: la escritura parcial ya no trunca y `O_EXCL` excluye. Siguen negativos la visibilidad entre descriptores y el «gana el último», que necesitan la caché compartida (segunda mitad de N-001)",
       "modulo": "user/soso-agent-probe/src/sondas/compartir.rs",
       "casos": [
         {
@@ -165,9 +165,9 @@
         {
           "id": "compartir/o-excl-excluye",
           "esperado": "gana uno",
-          "observado": "p1=4 p2=5",
-          "resultado": "NEGATIVO",
-          "nota": "Los dos `O_EXCL` ganan si el primero sigue abierto. Ficha T65."
+          "observado": "gana uno",
+          "resultado": "pasa desde T65",
+          "nota": "Era NEGATIVO: ganaban los dos porque la entrada de directorio no se materializaba hasta cerrar. T65 la reserva al abrir."
         }
       ],
       "hallazgo": "El modelo de ficheros es **por descriptor, no por inodo**. N-001 arregló la mitad que no necesitaba compartir —cargar el contenido al abrir para escribir, de modo que una escritura parcial no acorte el fichero— y dejó la otra mitad para la caché compartida: dos descriptores siguen sin verse, y el último en cerrar pisa al otro.",
@@ -183,7 +183,6 @@
           "reproduccion": "sin sonda posible: la syscall no existe; el sustituto O_EXCL falla su propio caso"
         }
       ],
-      "defecto_abierto": "T65 — O_EXCL no excluye mientras el primer descriptor sigue abierto. Es un defecto de hoy, no un hueco del port: afecta al `crear_exclusivo` de T46, que es la única exclusión mutua del coordinador.",
       "evidencia": "target/self-improvement/tasks/T33/compartir.txt"
     },
     {
@@ -304,7 +303,7 @@
       "capacidad": "hilos, join, guarda de pila y relojes",
       "por_que": "Un runtime de JavaScript no es monohilo por dentro: JavaScriptCore compila en un hilo aparte y Bun tiene su pool de E/S. Y la recursión profunda es rutina en un intérprete, no un caso raro.",
       "estado": "medida",
-      "resultado": "los hilos y los relojes funcionan; **la guarda de pila no existe** y el código finge que sí",
+      "resultado": "pasa entera desde N-002: hilos, relojes y **guarda de pila**",
       "modulo": "user/soso-agent-probe/src/sondas/hilos.rs",
       "casos": [
         {
@@ -330,16 +329,30 @@
         {
           "id": "hilos/guarda-de-pila-se-puede-instalar",
           "esperado": "prot=0 aceptado",
-          "observado": "prot=0 → argumento inválido (-22)",
-          "resultado": "NEGATIVO",
-          "nota": "`thread::spawn` llama a `mprotect(base, 4096, 0)` y se traga el error con `let _`. La guarda no existe. Ficha T66."
+          "observado": "prot=0 → 0",
+          "resultado": "pasa desde N-002",
+          "nota": "Era NEGATIVO. N-002 aceptó `prot == 0` y lo tradujo a no presente."
         },
         {
-          "id": "hilos/pagina-sin-lectura",
-          "esperado": "sólo escritura aceptado",
-          "observado": "PROT_WRITE sin READ → argumento inválido (-22)",
-          "resultado": "NEGATIVO",
-          "nota": "No hay forma de marcar una página como inaccesible: `mprotect` exige PROT_READ. Es la misma forma que el hallazgo de W+X — soso no tiene protecciones de página más allá de la escritura."
+          "id": "hilos/tocar-la-guarda-mata-al-proceso",
+          "esperado": "el hijo murió",
+          "observado": "el hijo murió",
+          "resultado": "pasa desde N-002",
+          "nota": "Lo que hace útil a una guarda. Necesita un hijo: el proceso que la toca no vuelve a contarlo."
+        },
+        {
+          "id": "hilos/libsoso-dice-la-verdad",
+          "esperado": "mprotect y libsoso coinciden",
+          "observado": "coinciden: true",
+          "resultado": "pasa desde T66",
+          "nota": "Coteja `hay_guarda_de_pila()` con lo que contesta `mprotect`. Impide que la biblioteca vuelva a prometer lo que el kernel no da."
+        },
+        {
+          "id": "hilos/escribir-sin-leer-se-rechaza",
+          "esperado": "argumento inválido (-22)",
+          "observado": "argumento inválido (-22)",
+          "resultado": "pasa",
+          "nota": "Se rechaza **a propósito**: x86 no tiene bit de sólo-escritura, así que aceptarlo sería prometer lo que la tabla de páginas no puede cumplir. La expectativa se corrigió en vez de dejar un negativo permanente, porque un fallo que nadie mira deja de ser un fallo."
         },
         {
           "id": "temporizadores/dormir-no-vuelve-antes",
@@ -363,15 +376,8 @@
           "nota": "Que `clock_gettime` exista no garantiza que avance; se mide con 1,1 s en medio."
         }
       ],
-      "hallazgo": "Hilos y relojes cumplen lo que un runtime espera: `join` espera de verdad, dormir no vuelve antes, el monotónico no retrocede y el de pared avanza. Lo que no existe es la **guarda de pila**: `mprotect` no acepta `prot=0` ni quitar la lectura, así que no hay forma de hacer una página inaccesible. Desbordar la pila de un hilo no falla — escribe en lo que haya debajo, y el síntoma aparece lejos y tarde.",
-      "para_t34": [
-        {
-          "hueco": "no existe PROT_NONE: no se puede marcar una página como inaccesible",
-          "archivos": "crates/soso-abi/src/lib.rs, kernel/src/task/syscall.rs (sys_mprotect)",
-          "reproduccion": "soso-agent-probe hilos, caso hilos/pagina-sin-lectura"
-        }
-      ],
-      "defecto_abierto": "T66 — `libsoso::thread::spawn` dice instalar una guarda de pila y se traga el error con `let _`. Es un defecto de hoy, separable de la ampliación del ABI.",
+      "hallazgo": "Hilos y relojes cumplen. La guarda de pila **no existía** —`mprotect` rechazaba `prot == 0`— y **existe desde N-002**: tocarla mata al proceso, y `libsoso` lo publica en `hay_guarda_de_pila()`.",
+      "para_t34": [],
       "evidencia": "target/self-improvement/tasks/T33/hilos.txt"
     },
     {

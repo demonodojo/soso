@@ -192,10 +192,15 @@ imposible la guarda de pila.
 —**sustrato POSIX primero**—; N-001/002/003 redactadas. Portar Bun descartado
 por carencias medidas (sin `dlopen`, sin pty/inotify, modelo de ficheros).
 
-**Recomendada ahora: N-001** (modelo de ficheros por inodo). Su paso 1 está
-hecho: medido que la escritura directa al VFS cuesta **~75×** más (con `rdtsc`,
-porque el PIT subcuenta con E/S), y elegida la **caché por inodo**. Falta
-implementarla.
+**N-002 hecha** (PROT_NONE): los hilos ya tienen guarda de pila, y con ella
+T66 quedó cerrada. **T66 hecha** (dejó de fingir la guarda). **T65 hecha**:
+`O_CREAT|O_EXCL` reserva el nombre al abrir, así que la exclusión —la única que
+tiene soso, y de la que depende el contrato durable de T46— es real.
+
+**Recomendada ahora: la segunda mitad de N-001** — la caché compartida por
+inodo, con el diseño ya escrito en su ficha. La primera mitad está hecha: una
+escritura parcial ya no trunca el fichero. Medido que la escritura directa al
+VFS costaría ~75× (con `rdtsc`, porque el PIT subcuenta con E/S).
 
 **Decisión de plan pendiente**, como el no-go de T14: portar OpenCode o
 reimplementar el agente en Rust reutilizando el protocolo — lo que el plan ya

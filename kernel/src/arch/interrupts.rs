@@ -73,7 +73,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
 /// fue la excepción.
 fn instalar_excepciones_restantes(idt: &mut InterruptDescriptorTable) {
     idt.divide_error.set_handler_fn(exc_divide);
-    idt.debug.set_handler_fn(exc_debug);
+    idt.debug.set_handler_fn(debug_handler);
     idt.overflow.set_handler_fn(exc_overflow);
     idt.bound_range_exceeded.set_handler_fn(exc_bound);
     idt.device_not_available.set_handler_fn(exc_nm);
@@ -107,7 +107,7 @@ macro_rules! excepciones_con_error {
 }
 
 excepciones! {
-    (exc_divide, 0), (exc_debug, 1), (exc_overflow, 4), (exc_bound, 5),
+    (exc_divide, 0), (exc_overflow, 4), (exc_bound, 5),
     (exc_nm, 7), (exc_x87, 16), (exc_simd, 19), (exc_virt, 20),
 }
 
@@ -134,6 +134,57 @@ fn nombre_excepcion(vector: u8) -> &'static str {
 }
 
 static EXC_VECTOR: AtomicU64 = AtomicU64::new(0);
+static WATCH_VALOR: AtomicU64 = AtomicU64::new(0);
+static WATCH_IDX: AtomicU64 = AtomicU64::new(0);
+
+/// `#DB`. Si viene de un watchpoint de `hwbp` sobre `bins` de talc, decide
+/// si la escritura es legítima (talc con su candado tomado y valor dentro
+/// del heap) y vuelve; si no, panica con el `rip` de quien escribió. Es una
+/// trampa: `rip` ya apunta a la instrucción siguiente al `mov`.
+extern "x86-interrupt" fn debug_handler(stack_frame: InterruptStackFrame) {
+    let dr6 = crate::arch::hwbp::leer_dr6();
+    if dr6 & 0xf == 0 {
+        excepcion_generica(&stack_frame, 1, dr6);
+        return;
+    }
+    crate::arch::hwbp::limpiar_dr6();
+    let idx = (dr6 & 0xf).trailing_zeros() as usize;
+    let addr = crate::arch::hwbp::vigilada(idx);
+    let valor = unsafe { core::ptr::read_volatile(addr as *const u64) };
+    let legitima = crate::mm::heap::talc_bloqueado() && crate::mm::heap::puntero_de_heap_valido(valor);
+    if legitima {
+        return;
+    }
+    stash_exc(
+        stack_frame.instruction_pointer.as_u64(),
+        stack_frame.stack_pointer.as_u64(),
+        addr,
+    );
+    WATCH_VALOR.store(valor, Ordering::Relaxed);
+    WATCH_IDX.store(idx as u64, Ordering::Relaxed);
+    let _ = con_rsp_alineado(watch_panic_shim, 0, 0);
+    loop {}
+}
+
+extern "sysv64" fn watch_panic_shim(_: u64, _b: u64) -> u64 {
+    let rip = EXC_RIP.load(Ordering::Relaxed);
+    let rsp = EXC_RSP.load(Ordering::Relaxed);
+    let addr = EXC_EXTRA.load(Ordering::Relaxed);
+    let valor = WATCH_VALOR.load(Ordering::Relaxed);
+    let idx = WATCH_IDX.load(Ordering::Relaxed);
+    crate::println!(
+        "heap: ESCRITURA EN bins (DR{idx}) addr={addr:#x} valor={valor:#018x} rip={rip:#x} rsp={rsp:#x} cpu={} candado={}",
+        crate::arch::percpu::cpu_index(),
+        crate::mm::heap::talc_bloqueado()
+    );
+    rastro_de_pila(rsp);
+    crate::mm::heap::imprimir_ultimos_accesos();
+    crate::mm::heap::informar_dma_en_pf(valor);
+    panic!(
+        "heap: escritura ajena en bins de talc addr={addr:#x} valor={valor:#x} rip={rip:#x} (addr2line -e kernel-x86_64 {:#x})",
+        rip.wrapping_sub(0x100_0000_0000)
+    );
+}
 
 fn excepcion_generica(stack_frame: &InterruptStackFrame, vector: u8, error_code: u64) {
     if desde_usuario(stack_frame) {

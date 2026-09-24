@@ -102,7 +102,7 @@ impl RingAccesos {
 static ULTIMOS_ALLOC: Mutex<RingAccesos> = Mutex::new(RingAccesos::new());
 static ULTIMOS_FREE: Mutex<RingAccesos> = Mutex::new(RingAccesos::new());
 
-pub(super) fn imprimir_ultimos_accesos() {
+pub fn imprimir_ultimos_accesos() {
     crate::println!("heap: últimos {ACCESOS_HIST} alloc (ptr size ra):");
     let a = ULTIMOS_ALLOC.lock();
     for n in 0..ACCESOS_HIST {
@@ -133,6 +133,27 @@ fn registrar_free(ptr: usize, size: usize, ra: u64) {
 pub fn heap_mapeado_bytes() -> u64 {
     HEAP_MAPEADO.load(Ordering::Acquire)
 }
+
+/// `true` si alguien tiene tomado el candado de talc (desde el handler de
+/// `#DB`: talc escribe `bins` siempre con él tomado; nadie más debería).
+pub fn talc_bloqueado() -> bool {
+    match TALC.try_lock() {
+        Some(guard) => {
+            drop(guard);
+            false
+        }
+        None => true,
+    }
+}
+
+/// Un `next`/cabecera de bin válido: `None` o un puntero dentro del heap.
+pub fn puntero_de_heap_valido(v: u64) -> bool {
+    v == 0 || (v >= HEAP_START && v < HEAP_START + heap_mapeado_bytes())
+}
+
+/// Dirección de `bins` de talc: `claim` deja la tabla justo detrás de la
+/// etiqueta base del primer heap (`HEAP_START + TAG_SIZE`).
+pub const TALC_BINS: u64 = HEAP_START + 8;
 
 pub(super) fn with_talc_audit(f: impl FnOnce(&Talc<ClaimOnOom>)) {
     if let Some(guard) = TALC.try_lock() {
@@ -358,6 +379,12 @@ pub fn localizar_en_pf(valor: u64) {
         let sitio = cursor + indice as u64 * 8;
         encontrados += 1;
         crate::println!("heap: coincidencia {encontrados} en {sitio:#x}");
+        // La foto pierde dígitos: decir en claro si el qword es una cabecera
+        // de bin de talc (tabla de 128 en `TALC_BINS`), que es lo que apuntan
+        // las coincidencias en `0x44444444…` de las fotos de las 17:11 y 19:33.
+        if sitio >= TALC_BINS && sitio < TALC_BINS + 128 * 8 {
+            crate::println!("heap: la coincidencia es bins[{}] de talc", (sitio - TALC_BINS) / 8);
+        }
         let desde = sitio.saturating_sub(16).max(HEAP_START);
         let hasta = (sitio + 32).min(fin);
         let mut p = desde;
@@ -431,5 +458,9 @@ pub fn init(
             .claim(Span::from_base_size(HEAP_START as *mut u8, mapeado as usize))
             .expect("talc rechazó el span del heap");
     }
+    // Las fotos del #PF de red sitúan el valor malo en `bins[0]` (y una vez
+    // en `bins[1]`): watchpoint de escritura sobre ambas cabeceras.
+    crate::arch::hwbp::vigilar_escritura(0, TALC_BINS);
+    crate::arch::hwbp::vigilar_escritura(1, TALC_BINS + 8);
     Ok(mapeado)
 }

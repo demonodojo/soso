@@ -2,6 +2,7 @@ pub mod acpi;
 pub mod apic;
 pub mod fpu;
 pub mod gdt;
+pub mod hwbp;
 pub mod interrupts;
 pub mod ioapic;
 pub mod iommu;

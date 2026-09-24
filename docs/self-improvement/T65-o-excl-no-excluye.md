@@ -1,6 +1,6 @@
 # T65 — `O_EXCL` no excluye mientras el primer descriptor sigue abierto
 
-**Hito:** SI-4 · **Tipo:** Corrección de kernel · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Corrección de kernel · **Estado:** completada (2026-09-24).
 
 **Dependencias:** ninguna. **La origina:** [T33](T33-sondas-abi.md), pase 3.
 **Afecta a:** [T46](T46-archivos-durables.md), cuyo `crear_exclusivo` es la
@@ -66,19 +66,54 @@ semántica de streaming; reservar una entrada vacía, no.
 4. Revisar si `crear_exclusivo` de T46 puede entonces prometer lo que dice, y
    ajustar su comentario si sigue habiendo límites.
 
+## Resultado
+
+`O_CREAT|O_EXCL` **reserva el nombre al abrir**: si el `lookup` no encuentra
+nada, se crea el fichero vacío ahí mismo y el descriptor apunta a ese inodo. El
+segundo `O_EXCL` llega, encuentra la entrada y recibe `EEXIST`.
+
+    compartir/o-excl-excluye   FALLO → ok   (gana uno)
+
+Escribir sigue costando lo mismo: el fichero reservado está vacío, así que el
+volcado le **añade** el contenido —un `append_file`, una transacción— en vez de
+crearlo. No se toca el camino de `WriteBuf` que N-001 introdujo, porque un
+fichero recién reservado no tiene cola que conservar.
+
+### Lo que cambia de conducta, y conviene saberlo
+
+Si el proceso que reservó el nombre **muere antes de escribir**, ahora queda un
+fichero **vacío**; antes no quedaba nada. Es el precio de que la exclusión
+signifique algo, y es lo que hace POSIX.
+
+Para el consumidor que motivó la ficha no es un problema: el contrato durable de
+[T46](T46-archivos-durables.md) publica por generaciones y ya sabe convivir con
+una generación a medias — [T63](T63-generacion-rota-encalla.md) se ocupó
+precisamente de que un resto así no encalle la referencia. Las dos fichas
+encajan: T63 enseñó a soso a seguir después de un corte, y T65 hace que la
+exclusión sea real.
+
 ## Comprobación
 
-`cargo xtask test sys --only="mismo fichero"` — el caso
-`compartir/o-excl-excluye` debe pasar de FALLO a ok. Más `cargo xtask test`
-entero, porque toca `open`, que lo usa absolutamente todo.
+    cargo xtask test sys --only="mismo fichero"   o-excl-excluye ok
+    cargo xtask test                               TODO OK (47 pasos)
+    cargo xtask check                              TODO OK
+
+La suite entera importa aquí más que en otras fichas: toca `open`, y `O_EXCL` lo
+usan `soso-test-sosofs`, el contrato durable y el instalador.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación terminada.
-- [ ] Comprobaciones ejecutadas y evidencia guardada.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación terminada.
+- [x] Comprobaciones ejecutadas y evidencia guardada.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
+
+**Límite.** Esto cierra la ventana entre dos `open`, que era la que importaba.
+Lo que **no** da es un candado sobre un fichero ya existente: para eso hace
+falta `flock` o equivalente, que no existe y está en el backlog como **N-004**
+([`native/backlog.json`](native/backlog.json)) — detrás de N-001, porque
+bloquear un fichero que los descriptores no comparten no significa nada.
 
 ## Ejecución nativa
 
 Aplicar [NATIVO.md](NATIVO.md). Es kernel y la sonda corre dentro de soso.
-Validación nativa: **pendiente**.
+Validación nativa: **verificada** (2026-09-24).

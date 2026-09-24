@@ -628,6 +628,13 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
                 return false;
             }
         };
+        // N-002: una región sin acceso **no se mapea nunca**. Es lo que
+        // convierte una página en guarda: tocarla mata al proceso en vez de
+        // dejarle escribir en lo que haya debajo.
+        if region.sin_acceso {
+            mmap_fault_fail(addr, is_write, "región sin acceso (PROT_NONE)");
+            return false;
+        }
         if is_write && !region.writable {
             mmap_fault_fail(addr, is_write, "escritura en región RO");
             return false;

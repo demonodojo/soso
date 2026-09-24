@@ -204,6 +204,7 @@ pub fn load_lazy(
                 file_offset,
                 file_len: core::cmp::min(offset.saturating_add(filesz), file_size),
                 writable: ph.flags().is_write(),
+                sin_acceso: false,
             });
         });
         let mut page = (vaddr + filesz).next_multiple_of(4096);

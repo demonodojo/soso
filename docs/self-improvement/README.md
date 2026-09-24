@@ -106,10 +106,24 @@ antes de elegir**, y la medida dice que la opción que parecía simple —cada
 **caché por inodo**, que conserva el agrupado y resuelve lo que N-001 persigue.
 La intuición escrita en la ficha era la contraria y sólo se vio al medir.
 
-**Lo que queda habilitado**: implementar **[N-001](native/N-001.md)**, los
-defectos
-[T65](T65-o-excl-no-excluye.md) y [T66](T66-guarda-de-pila-fingida.md), y los
-inventarios [T36](T36-forja-trazabilidad.md) y
+**[N-002](native/N-002.md) está hecha** el mismo día: `mprotect` acepta
+`prot == 0` y **los hilos de soso tienen guarda de pila**. La pieza que lo hizo
+barato es que el mmap es perezoso — la guarda no cuesta ni un marco, porque
+basta con que el manejador de faltas se niegue a mapearla. El caso que lo
+acredita es el que mide que **tocarla mata al proceso**, con un hijo, porque el
+que la toca no vuelve a contarlo. De rebote cerró lo que T66 dejó preparado:
+`hay_guarda_de_pila()` pasó a `true` sin tocar una línea.
+
+**[T65](T65-o-excl-no-excluye.md) también está cerrada**: `O_CREAT|O_EXCL`
+reserva el nombre **al abrir** en vez de al cerrar, así que la ventana en la que
+ganaban los dos ya no existe. Encaja con [T63](T63-generacion-rota-encalla.md):
+aquélla enseñó a soso a seguir tras un corte, y ésta hace que la exclusión sea
+real — las dos sostienen el contrato durable de
+[T46](T46-archivos-durables.md), que es la única exclusión mutua que hay.
+
+**Lo que queda habilitado**: la segunda mitad de **[N-001](native/N-001.md)**
+—la caché compartida por inodo, con su diseño ya escrito—, **[N-003](native/N-003.md)**
+(cwd por spawn) y los inventarios [T36](T36-forja-trazabilidad.md) y
 [T38](T38-toolchain-inventario.md).
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.
@@ -227,7 +241,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T31](T31-restauracion.md) | Demostrar recuperación completa de la instalación | SI-5 | T30 | Pendiente |
 | [T32](T32-opencode-inventario.md) | Inventariar dependencias del OpenCode que se quiere portar | SI-6 | T01 | Completada (v1.18.32 fijada) |
 | [T33](T33-sondas-abi.md) | Crear sondas pequeñas para las capacidades requeridas | SI-6 | T32, T49 | Completada (7 sondas; abrió T65 y T66) |
-| [T65](T65-o-excl-no-excluye.md) | `O_EXCL` no excluye mientras el primer descriptor sigue abierto | SI-4 | — (deriva de T33) | Pendiente |
+| [T65](T65-o-excl-no-excluye.md) | `O_EXCL` no excluye mientras el primer descriptor sigue abierto | SI-4 | — (deriva de T33) | Completada (reserva el nombre al abrir) |
 | [T66](T66-guarda-de-pila-fingida.md) | La guarda de pila de los hilos no existe, y el código finge que sí | SI-4 | — (deriva de T33) | Completada (deja de fingir; la guarda es N-002) |
 | [T34](T34-tickets-port.md) | Convertir huecos del port en fichas implementables | SI-6 | T32, T33 | Completada (11 fichas N-xxx) |
 | [T35](T35-opencode-nativo.md) | Probar OpenCode nativo en modo no interactivo | SI-6 | T19, T34 | Pendiente |

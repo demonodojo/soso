@@ -52,6 +52,51 @@ extern "C" fn duerme_y_marca(_arg: u64) -> ! {
     sys::exit(0)
 }
 
+fn lanzar_guarda() -> i64 {
+    const YO: &str = "/bin/soso-agent-probe";
+    sys::spawn_io_ex(
+        YO,
+        &[YO, "tocar-guarda"],
+        &[],
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+    )
+}
+
+fn esperar_hijo(pid: u64) -> Result<u8, String> {
+    loop {
+        match sys::wait() {
+            Ok((p, c)) if p == pid => return Ok(c),
+            Ok(_) => continue,
+            Err(e) => return Err(format!("wait = {}", errno(e))),
+        }
+    }
+}
+
+/// Subcomando auxiliar: reserva una página, la deja **sin acceso** y la toca.
+///
+/// Si N-002 funciona, esto no vuelve: el proceso muere con una falta de página.
+/// Que devuelva 0 significaría que la guarda no guarda nada.
+pub fn tocar_guarda() -> u8 {
+    let p = sys::mmap(0, 4096, u64::MAX, 0);
+    if p < 0 {
+        println!("tocar-guarda: mmap = {}", errno(p));
+        return 2;
+    }
+    let rc = sys::mprotect(p as u64, 4096, 0);
+    if rc < 0 {
+        println!("tocar-guarda: mprotect = {}", errno(rc));
+        return 3;
+    }
+    println!("tocar-guarda: escribiendo en la página sin acceso");
+    unsafe {
+        core::ptr::write_volatile(p as *mut u8, 0x42);
+    }
+    println!("tocar-guarda: sobreviví, la guarda no guarda");
+    0
+}
+
 pub fn ejecutar() -> Vec<Caso> {
     let mut casos: Vec<Caso> = Vec::new();
 
@@ -122,33 +167,62 @@ pub fn ejecutar() -> Vec<Caso> {
         &mut casos,
         Caso::nuevo(
             "hilos/guarda-de-pila-se-puede-instalar",
-            "prot=0 aceptado",
+            "prot=0 → 0",
             format!("prot=0 → {sin_permisos}"),
         ),
     );
-    // Y que `libsoso` **lo diga**: tras T66, `hay_guarda_de_pila()` informa si
-    // se pudo instalar. Que coincida con lo que contesta `mprotect` es lo que
-    // impide que la biblioteca vuelva a prometer lo que el kernel no da.
+    // Y que `libsoso` **diga la verdad**: tras T66, `hay_guarda_de_pila()`
+    // informa de si se pudo instalar, y tras N-002 ya se puede. Lo que se
+    // comprueba es que **coincida** con lo que contesta `mprotect` — si
+    // divergieran, la biblioteca estaría prometiendo otra vez lo que el kernel
+    // no da, que es el defecto que T66 arregló.
     let dice = thread::hay_guarda_de_pila();
+    let puede = sin_permisos == "0";
     anotar(
         &mut casos,
         Caso::nuevo(
-            "hilos/libsoso-no-promete-guarda",
-            "no hay guarda y libsoso lo dice",
-            if !dice {
-                String::from("no hay guarda y libsoso lo dice")
-            } else {
-                String::from("libsoso dice que sí la hay")
-            },
+            "hilos/libsoso-dice-la-verdad",
+            format!("mprotect y libsoso coinciden: {puede}"),
+            format!("mprotect y libsoso coinciden: {}", dice == puede && dice == puede),
         ),
     );
 
+    // Escribir sin poder leer **se rechaza a propósito**, y por eso lo
+    // esperado es el error: x86 no tiene bit de «sólo escritura», así que
+    // aceptarlo sería prometer lo que la tabla de páginas no puede cumplir.
+    // Dejarlo como negativo permanente habría sido peor: un fallo que nadie
+    // mira deja de ser un fallo.
     anotar(
         &mut casos,
         Caso::nuevo(
-            "hilos/pagina-sin-lectura",
-            "sólo escritura aceptado",
-            format!("PROT_WRITE sin READ → {solo_escritura}"),
+            "hilos/escribir-sin-leer-se-rechaza",
+            "argumento inválido (-22)",
+            solo_escritura,
+        ),
+    );
+
+    // **Lo que hace útil a una guarda**: tocarla tiene que matar al proceso.
+    // Se mide en un hijo, porque el que la toca no vuelve a contarlo.
+    let pid = lanzar_guarda();
+    let observado = if pid < 0 {
+        format!("spawn = {}", errno(pid))
+    } else {
+        match esperar_hijo(pid as u64) {
+            Ok(0) => String::from("el hijo sobrevivió y salió con 0"),
+            Ok(c) => format!("el hijo murió (código {c})"),
+            Err(e) => e,
+        }
+    };
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "hilos/tocar-la-guarda-mata-al-proceso",
+            "el hijo murió",
+            if observado.starts_with("el hijo murió") {
+                String::from("el hijo murió")
+            } else {
+                observado
+            },
         ),
     );
 

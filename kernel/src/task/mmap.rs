@@ -14,6 +14,16 @@ pub struct MmapRegion {
     /// dónde puede servirse un fault con página de 2 MiB completa.
     pub file_len: u64,
     pub writable: bool,
+    /// Región **sin acceso** (`PROT_NONE`, N-002).
+    ///
+    /// No es «no escribible»: es que tocarla —leer o escribir— tiene que matar
+    /// al proceso. Es lo que hace útil una guarda de pila, y hasta N-002 no se
+    /// podía expresar: `mprotect` exigía `PROT_READ`.
+    ///
+    /// Se apoya en que el mmap es **perezoso**: la página no está mapeada, y el
+    /// manejador de faltas se niega a mapearla. Por eso una guarda no cuesta ni
+    /// un marco de memoria.
+    pub sin_acceso: bool,
 }
 
 /// Alineación de mapeos grandes: permite servir faults con páginas de 2 MiB
@@ -64,7 +74,13 @@ pub fn find_region(regions: &[MmapRegion], addr: u64) -> Option<&MmapRegion> {
 
 /// Parte regiones que solapan `[addr, addr+len)` y aplica `writable` solo al
 /// subrango. Así un mprotect interior no deja el fault-in con el permiso viejo.
-pub fn split_prot(regions: &mut Vec<MmapRegion>, addr: u64, len: u64, writable: bool) -> bool {
+pub fn split_prot(
+    regions: &mut Vec<MmapRegion>,
+    addr: u64,
+    len: u64,
+    writable: bool,
+    sin_acceso: bool,
+) -> bool {
     let Some(end) = addr.checked_add(len) else {
         return false;
     };
@@ -85,6 +101,7 @@ pub fn split_prot(regions: &mut Vec<MmapRegion>, addr: u64, len: u64, writable: 
                 file_offset: r.file_offset,
                 file_len: r.file_len,
                 writable: r.writable,
+                sin_acceso: r.sin_acceso,
             });
         }
         let mid_start = r.virt_start.max(addr);
@@ -97,6 +114,7 @@ pub fn split_prot(regions: &mut Vec<MmapRegion>, addr: u64, len: u64, writable: 
                 file_offset: r.file_offset.saturating_add(mid_start - r.virt_start),
                 file_len: r.file_len,
                 writable,
+                sin_acceso,
             });
         }
         if rend > end {
@@ -107,6 +125,7 @@ pub fn split_prot(regions: &mut Vec<MmapRegion>, addr: u64, len: u64, writable: 
                 file_offset: r.file_offset.saturating_add(end - r.virt_start),
                 file_len: r.file_len,
                 writable: r.writable,
+                sin_acceso: r.sin_acceso,
             });
         }
     }

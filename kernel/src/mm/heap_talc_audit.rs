@@ -1,22 +1,18 @@
 //! Recorre las listas libres de talc sin desreferenciar un `next` fuera del heap.
 //!
-//! Layout de `Talc<O>` 4.4.3 en 64 bits: `availability_low`, `availability_high`,
-//! `bins` (deuda: campos privados del crate talc).
+//! `Talc` es `repr(Rust)`: el orden de sus campos no está garantizado (en
+//! placa el tercer word era la máscara de disponibilidad, no `bins`). Se
+//! localiza `bins` buscando entre sus palabras la que vale `TALC_BINS`, que
+//! es donde `claim` deja la tabla (`HEAP_START + TAG_SIZE`).
 
 use core::ptr::NonNull;
 use talc::{ClaimOnOom, Talc};
 
-use super::heap::{HEAP_START, imprimir_ultimos_accesos};
+use super::heap::{HEAP_START, TALC_BINS, imprimir_ultimos_accesos};
 
 const BIN_COUNT: usize = 128;
 const GAP_LOW_SIZE_OFFSET: usize = 16;
-
-#[repr(C)]
-struct TalcBinsHead {
-    availability_low: usize,
-    availability_high: usize,
-    bins: *mut Option<NonNull<LlistNode>>,
-}
+const BINS_TABLE_BYTES: u64 = (BIN_COUNT * core::mem::size_of::<Option<NonNull<LlistNode>>>()) as u64;
 
 #[repr(C)]
 struct LlistNode {
@@ -36,15 +32,36 @@ fn next_en_rango(next: u64, fin: u64) -> bool {
     next == 0 || (next >= HEAP_START && next < fin)
 }
 
-unsafe fn bin_head(talc: &Talc<ClaimOnOom>, bin: usize) -> u64 {
-    unsafe {
-        let head = talc as *const _ as *const TalcBinsHead;
-        let bins = (*head).bins;
-        if bins.is_null() {
-            return 0;
+fn bins_en_heap(bins: *mut Option<NonNull<LlistNode>>, fin: u64) -> bool {
+    if bins.is_null() {
+        return false;
+    }
+    let b = bins as u64;
+    b >= HEAP_START && b.saturating_add(BINS_TABLE_BYTES) <= fin && b % 8 == 0
+}
+
+/// Busca entre las palabras de `Talc` la que apunta a la tabla de bins.
+/// Devuelve nulo si ninguna vale `TALC_BINS` (talc aún sin `claim`).
+unsafe fn bins_ptr(talc: &Talc<ClaimOnOom>) -> *mut Option<NonNull<LlistNode>> {
+    let palabras = core::mem::size_of::<Talc<ClaimOnOom>>() / core::mem::size_of::<u64>();
+    let base = talc as *const Talc<ClaimOnOom> as *const u64;
+    for i in 0..palabras {
+        let v = unsafe { core::ptr::read_volatile(base.add(i)) };
+        if v == TALC_BINS {
+            return v as *mut Option<NonNull<LlistNode>>;
         }
-        let slot = bins.add(bin).read();
-        slot.map(|n| n.as_ptr() as u64).unwrap_or(0)
+    }
+    core::ptr::null_mut()
+}
+
+unsafe fn bin_head(bins: *mut Option<NonNull<LlistNode>>, bin: usize) -> u64 {
+    unsafe {
+        let raw = core::ptr::read_volatile(bins.add(bin) as *const u64);
+        if raw == 0 {
+            0
+        } else {
+            raw
+        }
     }
 }
 
@@ -61,8 +78,18 @@ pub fn vigilar_huecos(contexto: &str) {
 }
 
 fn vigilar_huecos_locked(contexto: &str, talc: &Talc<ClaimOnOom>, fin: u64) {
+    let bins = unsafe { bins_ptr(talc) };
+    if !bins_en_heap(bins, fin) {
+        static AVISADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        if !AVISADO.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            crate::println!(
+                "heap: vigilar_huecos({contexto}) omitido (bins={bins:p} fuera de {HEAP_START:#x}..{fin:#x})"
+            );
+        }
+        return;
+    }
     for bin in 0..BIN_COUNT {
-        let mut cur = unsafe { bin_head(talc, bin) };
+        let mut cur = unsafe { bin_head(bins, bin) };
         let mut pasos = 0usize;
         while cur != 0 {
             if pasos > 4096 {
@@ -73,7 +100,8 @@ fn vigilar_huecos_locked(contexto: &str, talc: &Talc<ClaimOnOom>, fin: u64) {
             }
             let next = unsafe { core::ptr::read_volatile(cur as *const u64) };
             if !next_en_rango(next, fin) {
-                let size = unsafe { core::ptr::read_volatile((cur + GAP_LOW_SIZE_OFFSET as u64) as *const usize) };
+                let size =
+                    unsafe { core::ptr::read_volatile((cur + GAP_LOW_SIZE_OFFSET as u64) as *const usize) };
                 let acme = cur.saturating_add(size as u64);
                 let tag_bajo = cur.saturating_sub(8);
                 let bajo = if tag_bajo >= HEAP_START {

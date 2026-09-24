@@ -75,16 +75,39 @@ Lecturas ya hechas, no reutilizarlas con otro ELF:
 
 ## Qué queda abierto
 
-Quién escribe el qword del heap que guarda el puntero malo. Instrumentación
-en el kernel (sin `SOSO_HEAP_DEBUG` extra):
+Quién escribe el qword. Lo que se sabe del qword (fotos 17:11 y 19:33):
+la coincidencia del CR2 en el heap cae en `0x44444444…`, es decir en los
+primeros 64 KiB, donde `claim` deja la tabla `bins` de talc
+(`HEAP_START+8`, 128 cabeceras). Los CR2 de todas las fotos son un `u16`
+pequeño en los bytes +4/+5 (`0x55`, `0x32`, `0xe7`, `0x153`, `0x216`…) y a
+veces conservan en la mitad baja un puntero del heap (`0xe7_4c81da30`).
+Hipótesis de trabajo: un store de 16 bits en `bins[0]+4`.
 
+Instrumentación en el kernel (sin `SOSO_HEAP_DEBUG` extra):
+
+- **Watchpoint hardware** `arch::hwbp`: DR0/DR1 sobre `bins[0]`/`bins[1]`
+  (escritura, 8 bytes), armado tras `claim` y en cada AP. El handler `#DB`
+  deja pasar las escrituras con el candado de talc tomado y valor dentro del
+  heap; cualquier otra → `heap: ESCRITURA EN bins (DRn) addr valor rip rsp
+  cpu candado`, rastro de pila, últimos alloc/free y panic con el offset
+  para `addr2line -e kernel-x86_64`. `rip` es la instrucción **siguiente**
+  al store (es una trampa).
 - `heap::vigilar_huecos` en cada `punto` y tras RX/TX WiFi → panic
-  `HUECO ROTO` con nodo, `next`, últimos 8 alloc/free (`ra`).
-- En #PF: `localizar_en_pf`, luego `informar_dma_en_pf` (iwlwifi + DMA_FREE
-  + cuarentena).
+  `HUECO ROTO` con bin, nodo, `next`, últimos 8 alloc/free (`ra`). Busca
+  `bins` por valor (`TALC_BINS`), no por orden de campos: `Talc` es
+  `repr(Rust)` y el espejo anterior leía la máscara de bits.
+- En #PF: `localizar_en_pf` (dice `la coincidencia es bins[N] de talc`),
+  luego `informar_dma_en_pf` (iwlwifi + DMA_FREE + cuarentena).
 
-Flashear y repetir `soso-update comprobar`. La foto tiene que traer
-`HUECO ROTO` o líneas `dma:` / `lxdde: valor … cae en iwlwifi DMA`.
+Flashear (`cargo xtask flash-usb-live /dev/sda --yes --only kernel`, con
+sudo, lo hace el usuario) y repetir `soso-update comprobar`. Lectura:
+
+- `ESCRITURA EN bins` → la CPU escribe; el `rip` (menos `0x10000000000`)
+  es el store. Corregir ahí.
+- `HUECO ROTO` en `bin=0` **sin** `#DB` antes → nadie de la CPU lo tocó: es
+  DMA (firmware iwlwifi o GSP) sobre el frame físico de `HEAP_START`.
+  Siguiente paso: imprimir en `heap::init` la PA de ese frame y buscarla en
+  las tablas DMA de iwlwifi/nouveau.
 
 Sonda `mm::heap::punto` (no se libera): el pánico imprime `heap: último
 punto intacto «…»`, el último `malloc` de sonda que **volvió**. También

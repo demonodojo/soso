@@ -143,6 +143,9 @@ extern "C" fn ap_entry() -> ! {
     crate::arch::percpu::init(cpu, crate::arch::gdt::kstack_top_for(cpu).as_u64());
     apic::enable_cpu();
     interrupts::load_idt_ap();
+    // DR0–DR3/DR7 son por CPU: sin esto, una escritura en `bins` de talc
+    // desde este core pasaría sin `#DB`.
+    crate::arch::hwbp::armar_en_este_cpu();
     // MSRs de syscall propias (LSTAR → ap_syscall_entry, no el de la BSP):
     // sin esto, un proceso ejecutando `syscall` en este core saltaría a la
     // pila de la BSP (o a lo que hubiera en LSTAR, sin inicializar = #GP).

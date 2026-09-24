@@ -256,6 +256,7 @@ pub fn can_send() -> bool {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct LxIwlDmaRange {
     pa: u64,
     len: u64,

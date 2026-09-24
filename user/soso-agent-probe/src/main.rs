@@ -67,6 +67,7 @@ fn main(args: &[String]) -> u8 {
         "eco-cwd" => return sondas::salidas::eco_cwd(),
         "chorro" => return sondas::canales::chorro(),
         "eco-tcp" => return sondas::canales::eco_tcp(),
+        "tocar-guarda" => return sondas::hilos::tocar_guarda(),
         "" | "-h" | "--help" => {
             println!("{USO}");
             return if sonda.is_empty() { 2 } else { 0 };

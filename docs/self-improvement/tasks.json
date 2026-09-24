@@ -2333,7 +2333,7 @@
       "title": "O_EXCL no excluye mientras el primer descriptor sigue abierto",
       "milestone": "SI-4",
       "kind": "Corrección de kernel",
-      "status": "pending",
+      "status": "done",
       "depends_on": [],
       "entry_conditions": [],
       "contract_sections": "C5",
@@ -2343,20 +2343,25 @@
         "user/soso-agent-probe/src/sondas/compartir.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "verified",
         "requires": [],
-        "evidence": [],
-        "note": "Es kernel y la sonda corre dentro de soso (compartir/o-excl-excluye)."
+        "evidence": [
+          "cargo xtask test sys --only=\"mismo fichero\" (compartir/o-excl-excluye pasa)",
+          "target/self-improvement/tasks/T65/compartir.txt"
+        ],
+        "note": "La sonda corre dentro de soso. La suite entera importa: toca open, y O_EXCL lo usan soso-test-sosofs, el contrato durable y el instalador."
       },
       "tracking": {
         "updated_at": "2026-09-24",
         "base": "da8934b31 + diff sucio",
         "summary": "docs/self-improvement/T65-o-excl-no-excluye.md",
         "evidence": [
-          "compartir/o-excl-excluye: p1=4 p2=5, ganan los dos"
+          "cargo xtask test: TODO OK (47 pasos)",
+          "cargo xtask check: TODO OK",
+          "target/self-improvement/tasks/T65/{compartir,suite}.txt"
         ],
         "blocker": null,
-        "next_step": "Reservar la entrada de directorio al abrir con O_CREAT|O_EXCL, no al cerrar."
+        "next_step": "Un candado sobre un fichero ya existente sigue sin haberlo: es N-004 (flock), detrás de N-001."
       }
     },
     {

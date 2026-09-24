@@ -72,7 +72,7 @@
     {
       "id": "N-002",
       "titulo": "PROT_NONE: poder marcar una página como inaccesible",
-      "estado": "lista",
+      "estado": "hecha",
       "prioridad": 2,
       "depende_de": [],
       "aplica_en": "soso",
@@ -82,7 +82,18 @@
       ],
       "sonda": "hilos/pagina-sin-lectura, hilos/guarda-de-pila-se-puede-instalar",
       "origen": "T33 pase 6",
-      "ficha": "native/N-002.md"
+      "ficha": "native/N-002.md",
+      "resultado": {
+        "hecho": "2026-09-24",
+        "que": "`prot == 0` se acepta y se traduce a no presente. `MmapRegion` gana `sin_acceso` y `handle_mmap_fault` se niega a mapear la región, así que una guarda sobre una página nunca tocada no cuesta ni un marco.",
+        "acreditado": "hilos/guarda-de-pila-se-puede-instalar pasa de FALLO a ok, y el caso nuevo hilos/tocar-la-guarda-mata-al-proceso comprueba lo que la hace útil: el hijo que la toca muere.",
+        "decisiones": [
+          "PROT_NONE **descarta el contenido**: en x86 «sin acceso» es «no presente», así que las páginas mapeadas se desmapean y volver a dar permisos deja la página a cero. Diferencia real con POSIX, escrita en set_prot.",
+          "Escribir sin poder leer se sigue rechazando: x86 no tiene bit de sólo-escritura."
+        ],
+        "desbloquea": "T66 ya dejó `hay_guarda_de_pila()` mirando el resultado; sin tocar nada más, ahora devuelve `true`. Los hilos de soso tienen guarda de pila.",
+        "evidencia": "target/self-improvement/tasks/N-002/{hilos,suite}.txt"
+      }
     },
     {
       "id": "N-003",
