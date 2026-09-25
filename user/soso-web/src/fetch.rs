@@ -22,6 +22,7 @@ impl FetchError {
             Self::Http(HttpError::Io(_)) => "error HTTP (E/S)",
             Self::Http(HttpError::Dns) => "error DNS",
             Self::Http(HttpError::Clock) => "reloj del sistema no utilizable",
+            Self::Http(HttpError::Interrupted) => "interrumpido",
             Self::Io(_) => "error de E/S",
             Self::Status(_) => "respuesta HTTP no válida",
         }

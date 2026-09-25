@@ -222,6 +222,7 @@ fn linea_err(e: &fetch::FetchError) -> String {
         fetch::FetchError::Http(soso_http::HttpError::Io(_)) => String::from("http-io"),
         fetch::FetchError::Http(soso_http::HttpError::Dns) => String::from("dns"),
         fetch::FetchError::Http(soso_http::HttpError::Clock) => String::from("reloj"),
+        fetch::FetchError::Http(soso_http::HttpError::Interrupted) => String::from("interrumpido"),
     }
 }
 
