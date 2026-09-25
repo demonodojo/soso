@@ -289,8 +289,11 @@ $
 
 ### Comportamiento
 
-- **Una línea = un comando o un pipeline.** Puedes encadenar comandos con `|`
-  y redirigir la entrada o salida con `<`, `>` y `>>`.
+- **Una línea = un comando, un pipeline o una cadena** (`|`, `;`, `&&`, `||`).
+  Redirige con `<`, `>`, `>>`.
+- **Guiones:** `sosh /ruta/al/fichero` ejecuta una orden por línea (sin prompt).
+  Líneas vacías y las que empiezan por `#` (tras espacios) se ignoran; `exit`
+  termina el guion con ese código.
 - **Directorio de trabajo (cwd):** cada shell tiene un cwd (inicialmente `/`).
   Las rutas sin `/` inicial son relativas al cwd (p. ej. `echo x > f.txt` en
   `/tmp` crea `/tmp/f.txt` tras `cd /tmp`).
@@ -336,6 +339,25 @@ servidor 3>&-                   # sin registros
 log                             # ver el ring global de registros
 ```
 
+### Cadena y guiones
+
+| Operador | Significado |
+|---|---|
+| `cmd1 ; cmd2` | Ejecuta `cmd2` después de `cmd1`, sin mirar el código de salida |
+| `cmd1 && cmd2` | Ejecuta `cmd2` solo si `cmd1` terminó con código 0 |
+| `cmd1 \|\| cmd2` | Ejecuta `cmd2` solo si `cmd1` terminó con código distinto de 0 |
+
+Ejemplo de guion (`/tmp/ejemplo.sh`):
+
+```sh
+# ir a /tmp o salir
+cd /tmp || exit 1
+echo listo
+```
+
+Ejecución: `sosh /tmp/ejemplo.sh`. No hace falta shebang: el kernel solo
+arranca ELF; el guion lo interpreta sosh al invocarlo así.
+
 ### Lo que sosh no sabe hacer, y lo dice
 
 `sosh` no es bash. Lo que no está no se queda callado: se rechaza con un
@@ -343,17 +365,15 @@ mensaje que dice qué hacer en su lugar.
 
 | Si escribes | sosh responde |
 |---|---|
-| `a ; b`, `a && b`, `a \|\| b` | no sé encadenar comandos; usa una línea por comando |
 | `cmd &` | no sé ejecutar en segundo plano; cada comando termina antes del siguiente |
 | `cmd 2>&1` | no sé duplicar descriptores; redirige cada uno a su fichero, o `>&-` para cerrar |
 | `ls *.rs` | no expando comodines; entrecomíllalo si es literal |
 | `echo $HOME` | no expando variables; entrecomíllalo si es literal |
 
-Antes estos caracteres se colaban como **argumentos del comando**, que es peor
-que un error: `echo dos ; echo tres` imprimía `dos ; echo tres` y el segundo
-comando no llegaba a ejecutarse.
+Antes algunos de estos caracteres se colaban como **argumentos del comando**,
+que es peor que un error.
 
-Si quieres el carácter tal cual, **entrecomíllalo**: `echo "seis;siete"`
+Si quieres un `*`, `$` o `&` tal cual, **entrecomíllalo**: `echo "seis;siete"`
 imprime `seis;siete`. Y `ask` no se ve afectado — se resuelve antes de
 interpretar la línea, así que una pregunta puede llevar `;`, `$` o `*`.
 

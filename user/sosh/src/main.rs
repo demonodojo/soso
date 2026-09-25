@@ -2,12 +2,14 @@
 //! Una línea puede ser un pipeline de comandos de /bin, más los builtins
 //! `exit`, `help`, `cd`, `pwd`, `wifi` y `ask`.
 //!
+//! **Guiones:** `sosh /ruta` ejecuta una orden por línea (comentarios `#`, sin
+//! prompt). En la misma línea: `;`, `&&` y `||` con el código de salida del
+//! paso anterior.
+//!
 //! **Lo que no sabe hacer lo dice** ([N-010](../../../docs/self-improvement/native/N-010.md)):
-//! encadenar (`;`, `&&`, `||`), segundo plano (`&`), duplicar descriptores
-//! (`2>&1`), comodines (`*`) y variables (`$`) se **rechazan con un mensaje**.
-//! Antes se colaban como argumentos del comando, que es peor que un error:
-//! `echo dos ; echo tres` imprimía «dos ; echo tres» y el segundo comando no
-//! llegaba a ejecutarse. La salida de emergencia es entrecomillar.
+//! segundo plano (`&`), duplicar descriptores (`2>&1`), comodines (`*`) y
+//! variables (`$`) se **rechazan con un mensaje**. La salida de emergencia es
+//! entrecomillar.
 //!
 //! `ask` es el único que se resuelve **antes** de tokenizar: todo lo que va
 //! detrás es el texto de la pregunta, con sus comillas, sus tildes y sus `|` o
@@ -34,6 +36,8 @@ const ASK_ADDR: &str = "127.0.0.1:7420";
 const VOZD: &str = "/bin/soso-voz";
 const PROTO_FIN: u8 = 0xFF;
 const LINE_MAX: usize = 1024;
+/// Tope de un fichero de guion leído entero en memoria.
+const SCRIPT_MAX: usize = 256 * 1024;
 const CONF: &str = "/etc/llm.conf";
 
 /// ET_EXEC de soso: cabecera y PT_LOAD en 0x400000 (p_offset 0).
@@ -122,7 +126,7 @@ fn escribir_marca_listo(prefault_ms: i64) {
     println!("sosh: marca lista pid={pid} prefault={prefault_ms}ms write={marca_ms}ms");
 }
 
-fn main(_args: &[alloc::string::String]) -> u8 {
+fn main(args: &[alloc::string::String]) -> u8 {
     let shell_pgid = sys::getpid();
     let _ = sys::setsid();
     let _ = sys::tcsetpgrp(shell_pgid);
@@ -130,13 +134,18 @@ fn main(_args: &[alloc::string::String]) -> u8 {
     let t0 = sys::uptime_ms();
     prefault_imagen();
     let prefault_ms = sys::uptime_ms().saturating_sub(t0);
+    if args.is_empty() {
+        escribir_marca_listo(prefault_ms);
+    }
+    if let Some(path) = args.first() {
+        return ejecutar_guion(path);
+    }
     let mut lector = Lector::new().con_hook_ptt(hook_ptt);
-    escribir_marca_listo(prefault_ms);
     loop {
         print!("{PROMPT}");
         match lector.siguiente() {
             Ok(Some(cmd)) => {
-                if let Some(code) = ejecutar(&cmd) {
+                if let Some(code) = ejecutar(&cmd, None).0 {
                     return code;
                 }
             }
@@ -157,8 +166,12 @@ enum TokenKind {
     RedirectAppend,
     RedirectIn,
     RedirectClose,
+    Semicolon,
+    AndAnd,
+    OrOr,
 }
 
+#[derive(Clone)]
 struct Token {
     kind: TokenKind,
     word: String,
@@ -218,7 +231,6 @@ struct CmdSpec {
 ///
 /// La salida de emergencia es entrecomillar, igual que el `-F` de `grep`: si
 /// de verdad quieres el carácter, `"a;b"` lo da.
-const ENCADENAR: &str = "no sé encadenar comandos (; && ||); usa una línea por comando";
 const SEGUNDO_PLANO: &str = "no sé ejecutar en segundo plano (&); cada comando termina antes del siguiente";
 const DUPLICAR: &str = "no sé duplicar descriptores (2>&1); redirige cada uno a su fichero, o usa >&- para cerrar";
 const COMODINES: &str = "no expando comodines (*); entrecomíllalo si es literal";
@@ -234,25 +246,41 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
         match c {
             '|' => {
                 if chars.peek() == Some(&'|') {
-                    return Err(ENCADENAR);
+                    chars.next();
+                    tokens.push(Token {
+                        kind: TokenKind::OrOr,
+                        word: String::new(),
+                        fd: 0,
+                        entrecomillada: false,
+                    });
+                } else {
+                    tokens.push(Token {
+                        kind: TokenKind::Pipe,
+                        word: String::new(),
+                        fd: 0,
+                        entrecomillada: false,
+                    });
                 }
-                tokens.push(Token {
-                    kind: TokenKind::Pipe,
-                    word: String::new(),
-                    fd: 0,
-                    entrecomillada: false,
-                })
             }
-            // `&` y `;` no son palabras. Antes se colaban como argumentos, y
-            // eso es peor que un error: `echo dos ; echo tres` imprimía
-            // «dos ; echo tres» y el segundo comando **no se ejecutaba**.
             '&' => {
                 if chars.peek() == Some(&'&') {
-                    return Err(ENCADENAR);
+                    chars.next();
+                    tokens.push(Token {
+                        kind: TokenKind::AndAnd,
+                        word: String::new(),
+                        fd: 0,
+                        entrecomillada: false,
+                    });
+                } else {
+                    return Err(SEGUNDO_PLANO);
                 }
-                return Err(SEGUNDO_PLANO);
             }
-            ';' => return Err(ENCADENAR),
+            ';' => tokens.push(Token {
+                kind: TokenKind::Semicolon,
+                word: String::new(),
+                fd: 0,
+                entrecomillada: false,
+            }),
             '>' => {
                 let kind = if chars.peek() == Some(&'>') {
                     chars.next();
@@ -474,7 +502,10 @@ fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
                     words.push(tok.word.as_str());
                     i += 1;
                 }
-                TokenKind::Pipe => return Err("sintaxis inválida"),
+                TokenKind::Pipe
+                | TokenKind::Semicolon
+                | TokenKind::AndAnd
+                | TokenKind::OrOr => return Err("sintaxis inválida"),
             }
         }
         if words.is_empty() {
@@ -494,6 +525,125 @@ fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
     Ok(cmds)
 }
 
+#[derive(Clone, Copy)]
+enum ChainLink {
+    Always,
+    And,
+    Or,
+}
+
+fn split_chain(tokens: &[Token]) -> Result<Vec<(ChainLink, Vec<Token>)>, &'static str> {
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    let mut next_link = ChainLink::Always;
+    for t in tokens {
+        match t.kind {
+            TokenKind::Semicolon => {
+                if cur.is_empty() {
+                    return Err("comando vacío en la cadena");
+                }
+                out.push((next_link, core::mem::take(&mut cur)));
+                next_link = ChainLink::Always;
+            }
+            TokenKind::AndAnd => {
+                if cur.is_empty() {
+                    return Err("comando vacío en la cadena");
+                }
+                out.push((next_link, core::mem::take(&mut cur)));
+                next_link = ChainLink::And;
+            }
+            TokenKind::OrOr => {
+                if cur.is_empty() {
+                    return Err("comando vacío en la cadena");
+                }
+                out.push((next_link, core::mem::take(&mut cur)));
+                next_link = ChainLink::Or;
+            }
+            _ => cur.push(t.clone()),
+        }
+    }
+    if cur.is_empty() {
+        if out.is_empty() {
+            return Ok(out);
+        }
+        return Err("comando vacío al final");
+    }
+    out.push((next_link, cur));
+    Ok(out)
+}
+
+fn sosh_msg(ctx: Option<usize>, msg: &str) {
+    if let Some(n) = ctx {
+        println!("sosh: línea {n}: {msg}");
+    } else {
+        println!("sosh: {msg}");
+    }
+}
+
+fn leer_fichero_script(path: &str) -> Result<Vec<u8>, i64> {
+    let mut st = abi::Stat::default();
+    let sr = sys::stat(path, &mut st);
+    if sr < 0 {
+        return Err(sr);
+    }
+    let size = st.size as usize;
+    if size > SCRIPT_MAX {
+        return Err(-abi::EINVAL);
+    }
+    let fd = sys::open(path, abi::O_RDONLY);
+    if fd < 0 {
+        return Err(fd);
+    }
+    let mut buf = alloc::vec![0u8; size];
+    if size == 0 {
+        let _ = sys::close(fd as u64);
+        return Ok(buf);
+    }
+    let mut off = 0usize;
+    while off < size {
+        let n = sys::read(fd as u64, &mut buf[off..]);
+        if n <= 0 {
+            let _ = sys::close(fd as u64);
+            return Err(if n < 0 { n } else { -abi::EIO });
+        }
+        off += n as usize;
+    }
+    let _ = sys::close(fd as u64);
+    Ok(buf)
+}
+
+fn ejecutar_guion(path: &str) -> u8 {
+    let data = match leer_fichero_script(path) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("sosh: {}: {}", path, errno_str(e));
+            return 1;
+        }
+    };
+    let mut ultimo = 0u8;
+    let mut n = 1usize;
+    for raw in data.split(|&b| b == b'\n') {
+        let raw = if raw.last() == Some(&b'\r') {
+            &raw[..raw.len().saturating_sub(1)]
+        } else {
+            raw
+        };
+        let line = core::str::from_utf8(raw).unwrap_or("");
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            n += 1;
+            continue;
+        }
+        let (exit_shell, code) = ejecutar(trimmed, Some(n));
+        ultimo = code;
+        if let Some(c) = exit_shell {
+            return c;
+        }
+        n += 1;
+    }
+    ultimo
+}
+
 fn open_redir(spec: &RedirSpec) -> Result<u64, i64> {
     match spec {
         RedirSpec::Tty => Ok(abi::FD_INHERIT_TTY),
@@ -506,15 +656,15 @@ fn open_redir(spec: &RedirSpec) -> Result<u64, i64> {
     }
 }
 
-fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
+fn ejecutar_pipeline(cmds: &[CmdSpec], ctx: Option<usize>) -> u8 {
     let n = cmds.len();
     let mut pipes = Vec::new();
     for _ in 0..n.saturating_sub(1) {
         match sys::pipe() {
             Ok(pair) => pipes.push(pair),
             Err(e) => {
-                println!("sosh: pipe: {}", errno_str(e));
-                return None;
+                sosh_msg(ctx, &format!("pipe: {}", errno_str(e)));
+                return 1;
             }
         }
     }
@@ -525,8 +675,8 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
             match open_redir(&cmd.stdin) {
                 Ok(fd) => fd,
                 Err(e) => {
-                    println!("sosh: {}: {}", cmd.prog, errno_str(e));
-                    return None;
+                    sosh_msg(ctx, &format!("{}: {}", cmd.prog, errno_str(e)));
+                    return 1;
                 }
             }
         } else {
@@ -537,8 +687,8 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
             match open_redir(&cmd.stdout) {
                 Ok(fd) => fd,
                 Err(e) => {
-                    println!("sosh: {}: {}", cmd.prog, errno_str(e));
-                    return None;
+                    sosh_msg(ctx, &format!("{}: {}", cmd.prog, errno_str(e)));
+                    return 1;
                 }
             }
         } else {
@@ -554,15 +704,15 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
         let stderr_fd = match open_redir(&cmd.stderr) {
             Ok(fd) => fd,
             Err(e) => {
-                println!("sosh: {}: {}", cmd.prog, errno_str(e));
-                return None;
+                sosh_msg(ctx, &format!("{}: {}", cmd.prog, errno_str(e)));
+                return 1;
             }
         };
         let log_fd = match open_redir(&cmd.log) {
             Ok(fd) => fd,
             Err(e) => {
-                println!("sosh: {}: {}", cmd.prog, errno_str(e));
-                return None;
+                sosh_msg(ctx, &format!("{}: {}", cmd.prog, errno_str(e)));
+                return 1;
             }
         };
 
@@ -571,8 +721,8 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
         argv.extend(cmd.args.iter().map(|a| a.as_str()));
         let pid = sys::spawn_io_full(&path, &argv, &[], [stdin_fd, stdout_fd, stderr_fd, log_fd]);
         if pid < 0 {
-            println!("sosh: {}: {}", cmd.prog, errno_str(pid));
-            return None;
+            sosh_msg(ctx, &format!("{}: {}", cmd.prog, errno_str(pid)));
+            return 1;
         }
         pids.push(pid);
     }
@@ -585,27 +735,102 @@ fn ejecutar_pipeline(cmds: &[CmdSpec]) -> Option<u8> {
     }
 
     let shell_pgid = sys::getpid();
-    let mut fallo = false;
+    let mut ultimo = 0u8;
     for (cmd, pid) in cmds.iter().zip(pids.iter()) {
         match wait_pid(*pid as u64) {
-            Ok(0) => {}
+            Ok(0) => ultimo = 0,
             Ok(130) => {
                 println!("sosh: [{} interrumpido]", cmd.prog);
-                fallo = true;
+                ultimo = 130;
             }
             Ok(code) => {
                 println!("sosh: [{} salió con código {code}]", cmd.prog);
-                fallo = true;
+                ultimo = code;
             }
             Err(e) => {
-                println!("sosh: wait: {}", errno_str(e));
-                fallo = true;
+                sosh_msg(ctx, &format!("wait: {}", errno_str(e)));
+                ultimo = 1;
             }
         }
     }
     let _ = sys::tcsetpgrp(shell_pgid);
-    let _ = fallo;
-    None
+    ultimo
+}
+
+/// Un pipeline (sin operadores de cadena). `(Some, _)` = salir de la shell.
+fn ejecutar_pipeline_o_builtin(cmds: &[CmdSpec], ctx: Option<usize>) -> (Option<u8>, u8) {
+    let single_tty = cmds.len() == 1
+        && matches!(cmds[0].stdin, RedirSpec::Tty)
+        && matches!(cmds[0].stdout, RedirSpec::Tty);
+
+    if single_tty {
+        match cmds[0].prog.as_str() {
+            "exit" if cmds[0].args.is_empty() => return (Some(0), 0),
+            "help" if cmds[0].args.is_empty() => {
+                ayuda();
+                return (None, 0);
+            }
+            "cd" => {
+                let dir = cmds[0].args.first().map(|s| s.as_str()).unwrap_or("");
+                if dir.is_empty() {
+                    sosh_msg(ctx, "cd: falta directorio");
+                    return (None, 1);
+                }
+                let r = sys::chdir(dir);
+                if r < 0 {
+                    sosh_msg(ctx, &format!("cd: {}", errno_str(r)));
+                    return (None, 1);
+                }
+                return (None, 0);
+            }
+            "pwd" => {
+                let mut buf = [0u8; 256];
+                let r = sys::getcwd(&mut buf);
+                if r < 0 {
+                    sosh_msg(ctx, &format!("pwd: {}", errno_str(r)));
+                    return (None, 1);
+                }
+                let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                println!("{}", core::str::from_utf8(&buf[..n]).unwrap_or("?"));
+                return (None, 0);
+            }
+            "wifi" => {
+                ejecutar_wifi(&cmds[0].args.join(" "));
+                return (None, 0);
+            }
+            "sosolog" if cmds[0].args.is_empty() => {
+                ejecutar_sosolog();
+                return (None, 0);
+            }
+            _ => {}
+        }
+    }
+
+    if cmds.len() == 1 && cmds[0].args.is_empty() {
+        match cmds[0].prog.as_str() {
+            "exit" => return (Some(0), 0),
+            "help" => {
+                ayuda();
+                return (None, 0);
+            }
+            "sosolog" => {
+                ejecutar_sosolog();
+                return (None, 0);
+            }
+            _ => {}
+        }
+    }
+
+    if cmds.len() == 1 && cmds[0].prog == "exit" {
+        let code = if cmds[0].args.is_empty() {
+            0
+        } else {
+            cmds[0].args[0].parse().unwrap_or(0)
+        };
+        return (Some(code), code);
+    }
+
+    (None, ejecutar_pipeline(cmds, ctx))
 }
 
 fn wifi_uso() {
@@ -732,10 +957,12 @@ fn ayuda() {
     println!("comandos: ELF de /bin o ruta absoluta (ip, ls, cat, …)");
     println!("install:  soso-install  — clonar live a un NVMe (elige disco)");
     println!("          soso-install list | nvme1 --yes | status");
+    println!("guion:    sosh /ruta  — una orden por línea; # comentario al inicio");
+    println!("cadena:   cmd1 ; cmd2   cmd1 && cmd2   cmd1 || cmd2");
     println!("pipes:    cmd1 | cmd2 | cmd3");
     println!("redirect: cmd > fichero, cmd >> fichero, cmd < fichero");
-    println!("no hay:   ; && || (una línea por comando), & (segundo plano),");
-    println!("          2>&1 (redirige cada uno), * y $ (entrecomíllalos)");
+    println!("no hay:   & (segundo plano), 2>&1 (redirige cada uno),");
+    println!("          * y $ (entrecomíllalos)");
     println!("ojo:      ask no admite pipes ni redirecciones, justamente para");
     println!("          que `|` y `>` puedan formar parte de la pregunta");
 }
@@ -1003,7 +1230,7 @@ fn ejecutar_voz(texto: &str) -> Option<u8> {
             match transcribir_voz(":escucha") {
                 Some(t) => {
                     let linea = format!("ask {rest}{t}");
-                    return ejecutar(&linea);
+                    return ejecutar(&linea, None).0;
                 }
                 None => {
                     println!("voz: error de transcripción");
@@ -1023,7 +1250,7 @@ fn ejecutar_voz(texto: &str) -> Option<u8> {
             print!("{PROMPT}");
             let mut lector = Lector::new().con_texto_inicial(&linea);
             match lector.siguiente() {
-                Ok(Some(cmd)) => ejecutar(&cmd),
+                Ok(Some(cmd)) => ejecutar(&cmd, None).0,
                 Ok(None) => Some(0),
                 Err(e) => {
                     println!("sosh: tty: {}", errno_str(e));
@@ -1093,11 +1320,12 @@ fn ejecutar_ask(texto: &str) -> Option<u8> {
     None
 }
 
-/// Ejecuta una línea. Some(código) = salir de la shell.
-fn ejecutar(line: &str) -> Option<u8> {
+/// Ejecuta una línea. `(Some(código), _)` = salir de la shell; el segundo valor
+/// es el código del último paso (para guiones y encadenado).
+fn ejecutar(line: &str, ctx: Option<usize>) -> (Option<u8>, u8) {
     let line = line.trim();
     if line.is_empty() {
-        return None;
+        return (None, 0);
     }
 
     // `ask` va antes que el tokenizador a propósito: el resto de la línea es
@@ -1105,97 +1333,53 @@ fn ejecutar(line: &str) -> Option<u8> {
     // `tokenize`, un `¿2 > 1?` se leería como redirección a un fichero `1?` y
     // las comillas quedarían dentro de las palabras.
     if let Some(texto) = resto_de("ask", line) {
-        return ejecutar_ask(texto);
+        return (ejecutar_ask(texto), 0);
     }
     if let Some(texto) = resto_de("voz", line) {
-        return ejecutar_voz(texto);
+        return (ejecutar_voz(texto), 0);
     }
 
     let tokens = match tokenize(line) {
         Ok(t) => t,
         Err(msg) => {
-            println!("sosh: {msg}");
-            return None;
+            sosh_msg(ctx, msg);
+            return (None, 1);
         }
     };
-    let cmds = match parse(&tokens) {
+    let chain = match split_chain(&tokens) {
         Ok(c) => c,
         Err(msg) => {
-            println!("sosh: {msg}");
-            return None;
+            sosh_msg(ctx, msg);
+            return (None, 1);
         }
     };
-
-    let single_tty = cmds.len() == 1
-        && matches!(cmds[0].stdin, RedirSpec::Tty)
-        && matches!(cmds[0].stdout, RedirSpec::Tty);
-
-    if single_tty {
-        match cmds[0].prog.as_str() {
-            "exit" if cmds[0].args.is_empty() => return Some(0),
-            "help" if cmds[0].args.is_empty() => {
-                ayuda();
-                return None;
-            }
-            "cd" => {
-                let dir = cmds[0].args.first().map(|s| s.as_str()).unwrap_or("");
-                if dir.is_empty() {
-                    println!("sosh: cd: falta directorio");
-                    return None;
-                }
-                let r = sys::chdir(dir);
-                if r < 0 {
-                    println!("sosh: cd: {}", errno_str(r));
-                }
-                return None;
-            }
-            "pwd" => {
-                let mut buf = [0u8; 256];
-                let r = sys::getcwd(&mut buf);
-                if r < 0 {
-                    println!("sosh: pwd: {}", errno_str(r));
-                } else {
-                    let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-                    println!("{}", core::str::from_utf8(&buf[..n]).unwrap_or("?"));
-                }
-                return None;
-            }
-            "wifi" => {
-                ejecutar_wifi(&cmds[0].args.join(" "));
-                return None;
-            }
-            "sosolog" if cmds[0].args.is_empty() => {
-                ejecutar_sosolog();
-                return None;
-            }
-            _ => {}
-        }
+    if chain.is_empty() {
+        return (None, 0);
     }
 
-    if cmds.len() == 1 && cmds[0].args.is_empty() {
-        match cmds[0].prog.as_str() {
-            "exit" => return Some(0),
-            "help" => {
-                ayuda();
-                return None;
-            }
-            "sosolog" => {
-                ejecutar_sosolog();
-                return None;
-            }
-            _ => {}
-        }
-    }
-
-    if cmds.len() == 1 && cmds[0].prog == "exit" {
-        let code = if cmds[0].args.is_empty() {
-            0
-        } else {
-            cmds[0].args[0].parse().unwrap_or(0)
+    let mut status = 0u8;
+    for (link, seg_tokens) in chain {
+        let run = match link {
+            ChainLink::Always => true,
+            ChainLink::And => status == 0,
+            ChainLink::Or => status != 0,
         };
-        return Some(code);
+        if !run {
+            continue;
+        }
+        let cmds = match parse(&seg_tokens) {
+            Ok(c) => c,
+            Err(msg) => {
+                sosh_msg(ctx, msg);
+                status = 1;
+                continue;
+            }
+        };
+        let (exit_shell, code) = ejecutar_pipeline_o_builtin(&cmds, ctx);
+        status = code;
+        if let Some(c) = exit_shell {
+            return (Some(c), status);
+        }
     }
-
-    ejecutar_pipeline(&cmds);
-    None
+    (None, status)
 }

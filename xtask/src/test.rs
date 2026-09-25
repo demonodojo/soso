@@ -2993,22 +2993,40 @@ fn ssh_probe_vigilancia(key: &Path, ssh_port: u16) -> Result<(), String> {
 /// últimas son el **control**: lo que sí se sabe hacer tiene que seguir
 /// funcionando, y entrecomillar tiene que ser la salida de emergencia.
 fn ssh_sosh_subconjunto(key: &Path, ssh_port: u16) -> Result<(), String> {
-    let guion = concat!(
-        "echo uno &\n",
-        "echo dos ; echo tres\n",
-        "echo cuatro && echo cinco\n",
-        "ls 2>&1\n",
-        "ls *.rs\n",
-        "echo $HOME\n",
-        "echo \"seis;siete\"\n",
-        "echo ocho | grep ocho\n",
-        "exit\n",
+    let script_tag = "sosh_guion_e2e";
+    let tag_and = "TAG_AND_SKIP_771";
+    let tag_and2 = "TAG_AND2_SKIP_772";
+    let tag_or = "TAG_OR_SKIP_773";
+    let guion = format!(
+        concat!(
+            "echo uno &\n",
+            "echo dos ; echo tres\n",
+            "echo cuatro && echo cinco\n",
+            "cd /no-existe-soso-xyz-a && echo {tag_and}\n",
+            "cd /no-existe-soso-xyz && echo {tag_and2}\n",
+            "echo si-aparece || echo {tag_or}\n",
+            "cd /no-existe-soso-xyz || echo si-or\n",
+            "ls 2>&1\n",
+            "ls *.rs\n",
+            "echo $HOME\n",
+            "echo \"seis;siete\"\n",
+            "echo ocho | grep ocho\n",
+            "echo '# guion' > /tmp/sosh-test.sh\n",
+            "echo 'echo {tag}-a' >> /tmp/sosh-test.sh\n",
+            "echo 'cd /no-existe-soso-xyz && echo {tag}-skip' >> /tmp/sosh-test.sh\n",
+            "echo 'echo {tag}-b' >> /tmp/sosh-test.sh\n",
+            "sosh /tmp/sosh-test.sh\n",
+            "echo FIN-SOSH-SUB\n",
+            "exit\n",
+        ),
+        tag = script_tag,
+        tag_and = tag_and,
+        tag_and2 = tag_and2,
+        tag_or = tag_or,
     );
-    let salida = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
+    let salida = ssh_guion_hasta(key, ssh_port, &guion, Duration::from_secs(120), "FIN-SOSH-SUB")?;
     for (etiqueta, marca) in [
         ("& en segundo plano", "sosh: no sé ejecutar en segundo plano"),
-        ("; como separador", "sosh: no sé encadenar comandos"),
-        ("&& condicional", "sosh: no sé encadenar comandos"),
         ("2>&1", "sosh: no sé duplicar descriptores"),
         ("* como comodín", "sosh: no expando comodines"),
         ("$ como variable", "sosh: no expando variables"),
@@ -3017,13 +3035,32 @@ fn ssh_sosh_subconjunto(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("«{etiqueta}» no se rechazó ({marca:?}); salida: {salida:?}"));
         }
     }
-    // Controles: entrecomillado pasa, y el pipe sigue funcionando.
     for (etiqueta, marca) in [
+        ("; encadena", "tres"),
+        ("&& encadena", "cinco"),
         ("entrecomillado literal", "seis;siete"),
         ("pipe", "ocho"),
+        ("guion -a", &format!("{script_tag}-a")),
+        ("guion -b", &format!("{script_tag}-b")),
+        ("|| alternativa", "si-or"),
     ] {
         if !salida.contains(marca) {
-            return Err(format!("el control «{etiqueta}» dejó de funcionar; salida: {salida:?}"));
+            return Err(format!("«{etiqueta}» falló ({marca:?}); salida: {salida:?}"));
+        }
+    }
+    // El eco de la consola repite la orden tecleada; si &&/|| cortan bien, el
+    // marcador sólo aparece una vez (en la línea del prompt), no como salida.
+    for (etiqueta, marca, max) in [
+        ("&& corta tras fallo", tag_and, 1usize),
+        ("&& corta cd", tag_and2, 1usize),
+        ("|| corta si ok", tag_or, 1usize),
+        ("guion && en fichero", &format!("{script_tag}-skip"), 1usize),
+    ] {
+        let n = salida.matches(marca).count();
+        if n > max {
+            return Err(format!(
+                "«{etiqueta}» apareció {n} veces (máx {max}, {marca:?}); salida: {salida:?}"
+            ));
         }
     }
     Ok(())
