@@ -17,6 +17,9 @@ pub struct CachedBlockDevice<D: BlockDevice> {
     entries: Vec<Entry>,
     capacity: usize,
     tick: u32,
+    /// Si la última lectura fue un acierto. Lo consulta `read_node` para no
+    /// recalcular el CRC de un bloque que ya venía comprobado (N-012).
+    ultimo_acierto: bool,
 }
 
 impl<D: BlockDevice> CachedBlockDevice<D> {
@@ -30,6 +33,7 @@ impl<D: BlockDevice> CachedBlockDevice<D> {
             entries: Vec::with_capacity(capacity),
             capacity: capacity.max(4),
             tick: 0,
+            ultimo_acierto: false,
         }
     }
 
@@ -80,8 +84,10 @@ impl<D: BlockDevice> BlockDevice for CachedBlockDevice<D> {
         if let Some(idx) = self.entries.iter().position(|e| e.block == block) {
             buf.copy_from_slice(&self.entries[idx].data);
             self.touch(idx);
+            self.ultimo_acierto = true;
             return Ok(());
         }
+        self.ultimo_acierto = false;
         self.inner.read_block(block, buf)?;
         self.tick = self.tick.wrapping_add(1);
         if self.entries.len() >= self.capacity {
@@ -91,6 +97,14 @@ impl<D: BlockDevice> BlockDevice for CachedBlockDevice<D> {
             self.entries.push(Entry { block, data: *buf, age: self.tick });
         }
         Ok(())
+    }
+
+    fn last_read_cached(&self) -> bool {
+        self.ultimo_acierto
+    }
+
+    fn invalidate_block(&mut self, block: u64) {
+        self.invalidate(block);
     }
 
     fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {

@@ -20,6 +20,32 @@ pub trait BlockDevice {
     fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError>;
     fn flush(&mut self) -> Result<(), BlockError>;
 
+    /// `true` si la **última** `read_block` se sirvió de una caché en RAM en
+    /// vez de ir al dispositivo.
+    ///
+    /// Existe para que quien verifica integridad pueda no repetir el trabajo:
+    /// un bloque que ya se comprobó al llegar del disco no se corrompe por
+    /// leerlo otra vez de RAM. Medido en
+    /// [N-012](../../../docs/self-improvement/native/N-012.md): un `stat`
+    /// profundo equivalía a ~49 CRC de bloque de 4 KiB, casi todos repetidos.
+    ///
+    /// **Por defecto `false`**, que es lo seguro: quien no lo implemente se
+    /// comporta como si cada lectura viniera del disco y se comprueba siempre.
+    fn last_read_cached(&self) -> bool {
+        false
+    }
+
+    /// Saca `block` de la caché, si la hay.
+    ///
+    /// Lo llama quien detecta que un bloque está corrupto: sin esto, el bloque
+    /// malo se quedaría cacheado y la **siguiente** lectura sería un acierto,
+    /// que con `last_read_cached` se daría por bueno sin comprobarlo. Un
+    /// error que se detecta una vez y después se calla es peor que no
+    /// detectarlo.
+    fn invalidate_block(&mut self, block: u64) {
+        let _ = block;
+    }
+
     /// Cuántos bloques admite el dispositivo en **una sola** petición. 1 = no
     /// sabe agrupar, y el llamante no debe molestarse en juntar rangos.
     ///

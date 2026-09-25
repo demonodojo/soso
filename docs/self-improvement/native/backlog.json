@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "descripcion": "Backlog del port (T34). Cada N-xxx sale de una carencia **medida** en T33 o inventariada en T32, con archivos responsables y la sonda que debe pasar.",
-  "actualizado": "2026-09-24",
+  "actualizado": "2026-09-25",
   "fuentes": [
     "docs/self-improvement/native/opencode-deps.md (T32)",
     "docs/self-improvement/native/probes.json (T33)"
@@ -161,22 +161,34 @@
     {
       "id": "N-005",
       "titulo": "Carga de código ajeno: dlopen o enlazado estático acreditado",
-      "estado": "experimento",
+      "estado": "decidida",
       "prioridad": 5,
       "depende_de": [],
       "aplica_en": "soso",
       "archivos": [
-        "kernel/src/task/elf.rs",
-        "crates/soso-abi/src/lib.rs"
+        "user/soso-agent-probe/c/ajeno.c",
+        "user/soso-agent-probe/build.rs",
+        "user/soso-agent-probe/src/sondas/carga.rs",
+        "xtask/src/test.rs"
       ],
-      "sonda": "sin sonda: hay que decidir antes si se hace con dlopen o enlazando estático",
+      "sonda": "carga/c-ajeno-compilado-y-enlazado y carga/un-et-dyn-no-arranca, con su control",
       "origen": "T32",
-      "nota": "Ficha de **experimento** con resultado binario (paso 4 de T34): ¿se puede enlazar estáticamente todo lo nativo que necesita un runtime, o hace falta carga dinámica? Sus consumidores quedan condicionados."
+      "nota": "Ficha de **experimento** con resultado binario (paso 4 de T34): ¿se puede enlazar estáticamente todo lo nativo que necesita un runtime, o hace falta carga dinámica? Sus consumidores quedan condicionados.",
+      "ficha": "native/N-005.md",
+      "resultado": {
+        "hecho": "2026-09-24",
+        "decision": "**Enlazado estático.** `dlopen` no existe y nada del inventario obliga a tenerlo.",
+        "lo_que_si": "Un fichero C **nuevo**, compilado hacia x86_64-soso-user y enlazado en la sonda, corre: calcula sobre la entrada (no una constante) y escribe en memoria del llamante por `memcpy`.",
+        "lo_que_no": "Un ELF que no es ET_EXEC no arranca: EINVAL. Medido con un delta de **un byte** sobre el propio binario de la sonda —`e_type` 2→3— y con el control de la copia intacta, que sí arranca.",
+        "superficie_libc": "`nm -u` sobre los 31 objetos de C de ring compilados para soso: sólo `memcpy`, `memset` y `__stack_chk_fail`. Es el **suelo**, no el techo: ring es freestanding y no llama a malloc, stdio ni errno.",
+        "por_que_no_dlopen": "Los `.node` de OpenCode no son código nativo que haya que cargar: son binarios compilados para otro sistema operativo. Recompilarlos es un problema de libc (N-006), no de carga. Y el target de soso es `relocation-model: static` sin PIE, así que `dlopen` tampoco sería un interruptor.",
+        "evidencia": "target/self-improvement/tasks/N-005/{carga.txt,libc-superficie.txt}"
+      }
     },
     {
       "id": "N-006",
       "titulo": "Capa libc/POSIX mínima para código C ajeno",
-      "estado": "pendiente",
+      "estado": "aplazada",
       "prioridad": 6,
       "depende_de": [
         "N-001",
@@ -186,11 +198,13 @@
       ],
       "aplica_en": "soso",
       "archivos": [
-        "por decidir en N-005"
+        "user/libsoso/src/lib.rs",
+        "user/<programa>/build.rs",
+        "por descomponer con la medida de N-005"
       ],
       "sonda": "las siete de T33, ejecutadas desde C en vez de desde Rust",
       "origen": "T32",
-      "nota": "No se descompone hasta que N-005 diga cómo se carga el código."
+      "nota": "N-005 dice **cómo**: enlazado estático, no cargador. El suelo medido son tres símbolos (`memcpy`, `memset`, `__stack_chk_fail`) para C freestanding; lo que falta por medir es qué pide C que no lo sea — malloc, stdio, errno, pthread— y eso son las siete sondas de T33 escritas en C. **Aplazada a propósito (2026-09-25)**: no hay ningún consumidor de C en soso, así que elegir hoy qué funciones lleva la capa sería adivinar. Se destraba cuando se escriban las sondas de T33 en C o cuando la decisión de plan elija portar un runtime."
     },
     {
       "id": "N-007",
@@ -212,49 +226,86 @@
     {
       "id": "N-008",
       "titulo": "Vigilancia de ficheros: inotify o equivalente",
-      "estado": "pendiente",
+      "estado": "decidida",
       "prioridad": 8,
       "depende_de": [
         "N-001"
       ],
       "aplica_en": "soso",
       "archivos": [
-        "crates/soso-abi/src/lib.rs",
-        "kernel/src/vfs/"
+        "user/soso-agent-probe/src/sondas/vigilancia.rs",
+        "xtask/src/test.rs"
       ],
-      "sonda": "sin sonda: la capacidad no existe",
+      "sonda": "vigilancia/dos-escrituras-del-mismo-tamano y vigilancia/coste-de-sondear",
       "origen": "T32",
-      "nota": "Lo necesita `@parcel/watcher`."
+      "nota": "Lo necesita `@parcel/watcher`.",
+      "ficha": "native/N-008.md",
+      "resultado": {
+        "hecho": "2026-09-25",
+        "decision": "**Si hace falta vigilar, por eventos.** Sondear `stat` queda descartado por corrección, no por coste.",
+        "por_que": "Dos escrituras del **mismo tamaño** en el mismo segundo dejan `stat` idéntico: **6 de 6 pares indistinguibles**. `mtime` está en segundos. Aunque `stat` fuera gratis, seguiría sin verlas.",
+        "intermitente": "En una ejecución anterior salió «se distinguen» porque las escrituras cayeron a caballo de un segundo. Por eso se repite y se informa de la tasa: un punto ciego intermitente pasa las pruebas casi siempre y falla cuando nadie mira.",
+        "coste": "~17 M ciclos por `stat`, y frío ≈ caliente. El coste va con la profundidad de la ruta (~3 M por componente); eso es de N-012, no de esta ficha.",
+        "variante_descartada": "Un contador de cambios por inodo visible en `stat` arreglaría la corrección pero no el coste, que está en resolver la ruta.",
+        "implementacion_aplazada": "El único consumidor conocido es `@parcel/watcher`, de la rama de portar OpenCode. La forma ya está decidida con datos, que es lo que la ficha pedía; lo que queda es mecánico el día que haya a quién dárselo.",
+        "evidencia": "target/self-improvement/tasks/N-008/vigilancia.txt"
+      }
     },
     {
       "id": "N-009",
       "titulo": "Sustituto de ripgrep con semántica declarada",
-      "estado": "pendiente",
+      "estado": "hecha",
       "prioridad": 9,
       "depende_de": [],
       "aplica_en": "soso",
       "archivos": [
-        "user/coreutils/src/bin/grep.rs"
+        "user/coreutils/src/bin/grep.rs",
+        "user/soso-agent-probe/src/sondas/busqueda.rs",
+        "xtask/src/test.rs",
+        "MANUAL-USUARIO.md"
       ],
-      "sonda": "por escribir: comparar con la salida de ripgrep sobre un árbol fijo",
+      "sonda": "las siete de busqueda/, que miran el código de salida y no el texto",
       "origen": "T32",
-      "nota": "OpenCode **descarga ripgrep en ejecución** (binario x86-64 Linux). En soso no hay ni binario ni quien lo compile; el `grep` propio tiene otra semántica y hay que declarar cuál."
+      "nota": "OpenCode **descarga ripgrep en ejecución** (binario x86-64 Linux). En soso no hay ni binario ni quien lo compile; el `grep` propio tiene otra semántica y hay que declarar cuál.",
+      "ficha": "native/N-009.md",
+      "resultado": {
+        "hecho": "2026-09-25",
+        "que": "El `grep` de soso declara su semántica —subcadenas literales, no expresiones regulares— y deja de poder mentir de las tres formas que importaban.",
+        "codigos_de_salida": "0 hubo coincidencias, 1 no hubo ninguna, 2 no se pudo buscar. Antes «no aparece» y «funcionó» eran el mismo valor.",
+        "rechazo": "Un patrón que sólo tiene sentido como expresión regular (`\\w`, `.*`, `^…`, `…$`) se rechaza con 2 en vez de buscarse tal cual y devolver cero líneas. `-F` lo fuerza. La frontera no es «¿tiene metacaracteres?»: `main.rs` y `data[0]` son literales legítimos y se buscan.",
+        "bytes": "Se busca sobre bytes. Antes se convertía cada línea a UTF-8 y lo que no valía se saltaba **en silencio**: un byte inválido escondía el resto del fichero.",
+        "anadido": "-n, -r (sin recursión de pila), -l, -i, -m N.",
+        "sigue_faltando": "expresiones regulares (se rechazan, no se emulan), filtros por glob, orden por fecha y detección de binarios.",
+        "evidencia": "target/self-improvement/tasks/N-009/{busqueda.txt,suite.txt,check.txt}"
+      }
     },
     {
       "id": "N-010",
       "titulo": "Sustituto de bash para la herramienta `bash`",
-      "estado": "pendiente",
+      "estado": "hecha",
       "prioridad": 10,
       "depende_de": [
         "T64"
       ],
       "aplica_en": "soso",
       "archivos": [
-        "user/sosh/src/main.rs"
+        "user/sosh/src/main.rs",
+        "xtask/src/test.rs",
+        "MANUAL-USUARIO.md"
       ],
-      "sonda": "por escribir",
+      "sonda": "paso de suite «sosh: lo que no sabe hacer lo dice», con sus dos controles",
       "origen": "T32",
-      "nota": "35 apariciones de `\"bash\"` en el código de OpenCode. `sosh` no es bash y no pretende serlo; T64 le dio comillas, pero falta decidir qué subconjunto se promete."
+      "nota": "35 apariciones de `\"bash\"` en el código de OpenCode. `sosh` no es bash y no pretende serlo; T64 le dio comillas, pero falta decidir qué subconjunto se promete.",
+      "ficha": "native/N-010.md",
+      "resultado": {
+        "hecho": "2026-09-25",
+        "que": "`sosh` declara su subconjunto y **rechaza** lo que no sabe hacer en vez de colarlo como argumento: encadenar (; && ||), segundo plano (&), duplicar descriptores (2>&1), comodines (*) y variables ($).",
+        "linea_base": "El paso se escribió con la conducta deseada y se ejecutó contra el sosh de antes: `echo dos ; echo tres` imprimía «dos ; echo tres» y **el segundo comando no se ejecutaba**; `ls *.rs` contestaba «*.rs: no existe», que suena a un hecho sobre el disco; `ls 2>&1` se comía el `1` y fallaba con «falta fichero tras >», señalando al sitio equivocado.",
+        "salida_de_emergencia": "Entrecomillar, como el -F de grep: `echo \"seis;siete\"` sigue funcionando. Y `ask` se resuelve antes de tokenizar, así que una pregunta puede llevar ; $ o *.",
+        "controles": "Dos en el mismo paso —el entrecomillado y el pipe—, porque sin ellos una shell que rechazara todo pasaría los seis casos.",
+        "por_que_no_implementarlo": "Encadenar y los comodines son trabajo corto, pero esta ficha es **declarar** el subconjunto: añadir operadores mientras se declara mueve la frontera durante la medida. Quedan anotados como trabajo posible, no como deuda oculta.",
+        "evidencia": "target/self-improvement/tasks/N-010/{subconjunto.txt,suite.txt,check.txt}"
+      }
     },
     {
       "id": "N-011",
@@ -272,6 +323,71 @@
       "sonda": "senales/kill-devuelve-cuantos-no-cero",
       "origen": "T33 pase 4",
       "nota": "**No es un defecto**: devolver cuántos procesos se señalaron es más informativo. Sólo importa si hay una capa de compatibilidad, y entonces se traduce ahí, no en el kernel."
+    },
+    {
+      "id": "N-012",
+      "titulo": "`stat` cuesta ~3 M de ciclos por componente de ruta",
+      "estado": "hecha",
+      "prioridad": 12,
+      "depende_de": [],
+      "aplica_en": "soso",
+      "archivos": [
+        "crates/sosofs/src/fs.rs",
+        "crates/sosofs/src/cache.rs",
+        "crates/block-dev/src/lib.rs",
+        "crates/sosofs/tests/coste_stat.rs",
+        "crates/sosofs/tests/integridad_cacheada.rs",
+        "kernel/src/task/path.rs",
+        "kernel/src/task/syscall.rs",
+        "user/soso-agent-probe/src/sondas/rutas.rs"
+      ],
+      "sonda": "vigilancia/coste-por-profundidad-*",
+      "origen": "medido en N-008, fuera de su alcance",
+      "ficha": "native/N-012.md",
+      "nota": "No es de agente: es rendimiento del sistema. Lo paga todo lo que toca rutas — `ls`, `grep -r`, el instalador, cada `open`. **Hay** caché de bloques (512×4 KiB) y frío ≈ caliente, así que no es leer del disco: el candidato es `scan_range`. Primero medir dónde se va el tiempo, como en N-001.",
+      "avance": {
+        "fecha": "2026-09-25",
+        "descartado": "**No es el syscall** (`getpid` 98 ciclos frente a 1,75 M), **no es leer del disco** (frío ≈ caliente, hay caché de 512×4 KiB) y **no es el CRC** (quitarlo no movió el guest).",
+        "arreglado": "`read_node` recalculaba el CRC de 4092 bytes en **cada** lectura, también desde la caché. Ahora sólo cuando el bloque llega del dispositivo. En el host: 23,7→5,3 µs la raíz y 319,9→81,0 µs una ruta de cinco componentes (3,9×), estable en tres pasadas.",
+        "pero": "En el guest sólo bajó de 17,1 M a 16,6 M ciclos (3 %). **La reproducción en el host no capturaba el coste dominante del guest**: antes del arreglo el guest era 24× el host y después 110×, y si hicieran el mismo trabajo la razón sería la misma. El CRC era *un* coste, no *el* coste.",
+        "integridad": "Saltarse el CRC en los aciertos abría un agujero: un bloque corrupto se quedaría cacheado y la segunda lectura lo daría por bueno. Se saca de la caché al detectarlo, y `tests/integridad_cacheada.rs` lo comprueba — quitando esa línea el test falla. `BlockDevice::last_read_cached()` devuelve `false` por defecto, así que quien no lo implemente comprueba siempre.",
+        "siguiente": "(1) N-013, decisión del usuario. (2) Lo que queda de `stat(\"/\")` son 264 k ciclos: la reserva final de la ruta más el recorrido del árbol; separarlos pide medir otra vez. (3) La copia de 4 KiB por nodo. (4) Caché de rutas resueltas, sin decidir.",
+        "evidencia": "target/self-improvement/tasks/N-012/",
+        "instrumento": "`SYS_IOSTAT` ya existía y cuenta peticiones al dispositivo: 16 `stat` profundos hacen **cero**. La caché acierta siempre, así que era CPU pura recorriendo el árbol — y me costó tres pasos llegar ahí adivinando desde el host en vez de mirar el instrumento que el guest ya traía.",
+        "lookup": "`lookup` volcaba **todos** los dirents del directorio en un `Vec`: 13 µs con 8 entradas, 39 con 64 y 135 con 256, buscando el **último** nombre. La clave del dirent ya es `name_hash(nombre)` con sondeo hacia delante (igual en builder y en escritura en caliente) y no se aprovechaba. Con `find_first`, que corta al encontrar y empieza en el hash: 10,3 / 16,0 / 35,9 µs, y ya no crece lineal. En el guest: **16,6 M → 11,4 M ciclos** (1,45×).",
+        "controles": "Cuatro, y dos mentían: los tests del host corrían en **debug** (el guest lleva `sosofs` a opt-level 3, así que comparaba debug contra release; en release el host cae 12–17×), y los microbancos en release daban **0 ns** porque el optimizador se los comió. QEMU va con **KVM**, así que no había emulación que culpar; y se pasó a medir **mínimo y media** por si la media era ruido del planificador — coinciden.",
+        "la_causa_grande": "Fuera de sosofs: `kernel/src/mm/heap.rs` llama a `revisar()` en cada alloc y cada dealloc, recorriendo 4096 ranuras. Comentarlo y revertir (byte a byte, md5 verificado) da `stat(\"/\")` 1,66 M → 0,42 M: **~75 %**. No se toca — es un detector de desbordamientos con una caza de pánicos en marcha. Es **N-013**, decisión del usuario.",
+        "pool": "Lo que sí era nuestro: `read_node` reservaba un `Box<Block>` de 4 KiB por nodo. Con un pool reutilizable (devolverlo es **opcional**, así que un descuido no gana pero tampoco rompe): host 427→209 ns, guest **10,96 M → 3,70 M** ciclos con la auditoría puesta. Desde el inicio de la ficha: 17,1 M → 3,70 M, **4,6×**.",
+        "flake_propio": "Mis dos primeros tests compartían directorio de fixture y corren en paralelo: fallaba intermitentemente y culpé dos rondas al cambio que probaba. `tests/grow.rs` ya lo tenía escrito en este repo: un directorio por test.",
+        "reservas": "Con N-013 midiendo que cada `alloc` cuesta O(reservas vivas), la pregunta útil pasa a ser **cuántas veces se pide memoria**. `stat_inode` pedía un `Vec` para un solo elemento, y `resolve` lo llama **por componente**: seis veces en una ruta de cinco. Con `find_first`, cero. Guest: 3,70 M → **2,24 M** ciclos. Seis reservas menos, 1,46 M de ciclos menos → **~243 000 ciclos por reserva**, la misma cifra que da el experimento de N-013 por otro camino.",
+        "total": "**17,1 M → 833 k ciclos, 20,5×**, sin tocar la auditoría del montón.",
+        "rutas": "La reserva más ancha no estaba en el sistema de ficheros: `resolve_user_path` la paga **toda** syscall con ruta y hacía **cinco** (clon del cwd, concatenación intermedia, `Vec` de componentes, `join` y cadena final). Ahora **una**, en una pasada. Guest: 2,23 M → **833 k** ciclos. En la iteración anterior lo descarté como «ficha aparte porque toca el ABI»: lo que toca el ABI es cambiar el tipo de retorno, no quitar reservas de dentro.",
+        "validacion": "El kernel no se compila para el host, así que la comprobación vive en el guest: `soso-agent-probe rutas`, ocho casos que abren **el mismo fichero** por escrituras distintas de su ruta comparando contenido. Y se comprobó que **pueden fallar**, con dos mutaciones sobre `empujar` (fichero restaurado, md5 verificado). Con la primera, el caso de contención pasa igual — hacía falta la segunda para saber que vigila otro fallo.",
+        "reparto_final": "El syscall pelado (ruta rechazada por larga, sin reserva ni árbol) son **2 635 ciclos**: el 1 %. De los 263 k de `stat(\"/\")`, ~243 k son **una reserva** y ~17 k el árbol. El coste por componente pasó de ~3 M a **~36 k** (83×), que es justo lo que daba título a la ficha.",
+        "por_que_se_cierra": "Dentro del sistema de ficheros no queda nada grande: el 94 % de lo que sobra es una reserva de montón, y eso es N-013 —decisión del usuario—. Seguir optimizando sosofs sería pulir el 6 %."
+      },
+      "resultado": {
+        "hecho": "2026-09-25",
+        "total": "**17,1 M → 833 k ciclos (20,5×)** en un `stat` de cinco componentes, y de ~3 M a ~36 k por componente de ruta (83×).",
+        "arreglos": "(1) CRC recalculado en cada lectura de nodo, también desde la caché. (2) `lookup` volcaba el directorio entero pese a que la clave del dirent ya es `name_hash`. (3) `Box<Block>` de 4 KiB por nodo → pool reutilizable. (4) `Vec` de `stat_inode`, llamado por componente. (5) Las **cinco** reservas de `resolve_user_path`, que paga toda syscall con ruta → una.",
+        "lo_que_no_se_toco": "La auditoría del montón del kernel (N-013): es instrumental de depuración del usuario y explica el ~75 % del coste original.",
+        "evidencia": "target/self-improvement/tasks/N-012/{guest,rutas,coste-host,suite,check}.txt"
+      }
+    },
+    {
+      "id": "N-013",
+      "titulo": "Cada reserva del montón del kernel cuesta O(reservas vivas)",
+      "estado": "decision del usuario",
+      "prioridad": 13,
+      "depende_de": [],
+      "aplica_en": "soso",
+      "archivos": [
+        "kernel/src/mm/heap.rs"
+      ],
+      "sonda": "vigilancia/coste-por-profundidad-*, con y sin `revisar()`",
+      "origen": "medido en N-012, fuera de su alcance",
+      "ficha": "native/N-013.md",
+      "nota": "`revisar()` corre en cada alloc y cada dealloc y recorre las 4096 ranuras de la tabla de reservas vivas. Medido: **~75 % del coste de un `stat`** (1,66 M → 0,42 M ciclos al comentarlo; el fichero se revirtió byte a byte). Lo paga **cualquier** camino del kernel que reserve. **No lo apago**: es un detector de desbordamientos de montón y hay una caza de pánicos en marcha — el compromiso lo elige quien depura. La ficha aporta el número y cuatro opciones, de dejarlo igual a ponerlo tras la bandera `SOSO_HEAP_DEBUG` que ya existe. Confirmado por segunda vía en N-012: quitar seis reservas del camino de `stat` ahorró 1,46 M de ciclos, **~243 000 por reserva**."
     }
   ],
   "defectos_de_hoy_aparte": [

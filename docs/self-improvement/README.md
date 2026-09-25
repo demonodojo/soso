@@ -144,8 +144,138 @@ corre sin saberlo. El cerrojo es del proceso: cerrar un fd no lo suelta, morir
 sí. Se prueba con **dos procesos**, que es la única forma de demostrar que el
 otro no puede cogerlo.
 
-**Lo que queda habilitado**: los inventarios [T36](T36-forja-trazabilidad.md) y
-[T38](T38-toolchain-inventario.md).
+**[N-005](native/N-005.md) está decidida** — es una ficha de experimento, y su
+resultado binario es **enlazado estático**. C escrito para la ocasión,
+compilado hacia el target de soso y enlazado en un programa, corre; un ELF que
+no sea `ET_EXEC` no arranca, medido con un delta de **un byte** sobre un
+control que acababa de arrancar. De propina, `nm -u` dice que el C de `ring`
+sólo pide tres símbolos externos (`memcpy`, `memset`, `__stack_chk_fail`) — el
+**suelo** de N-006, no su techo, porque `ring` es freestanding. Con eso queda
+dicho que `dlopen` no hace falta: los `.node` de OpenCode no son código que
+haya que cargar en caliente, son binarios de otro sistema operativo, y
+recompilarlos es un problema de libc.
+
+**[N-009](native/N-009.md) está hecha**, y se eligió **por delante de N-006**
+con el motivo escrito: no hay ningún consumidor de C en soso, así que una capa
+libc hoy sería elegir funciones adivinando — mientras que buscar en el código
+hace falta tanto si el agente se porta como si se reescribe en Rust. Lo que
+estaba roto no era que el `grep` de soso fuera limitado: era que **no lo
+decía**, y podía mentir de tres formas —«no hay» por «no pude», una expresión
+regular buscada tal cual, y una línea no-UTF8 saltada en silencio—. Ahora los
+códigos de salida separan 0/1/2, un patrón que sólo tiene sentido como regex se
+**rechaza** (y `-F` lo fuerza), y se busca sobre bytes. Con `-n`, `-r`, `-l`,
+`-i` y `-m`.
+
+**[N-010](native/N-010.md) está hecha**, y es la misma lección que N-009 en otro
+sitio: `sosh` no es bash, y lo que faltaba no era parecerse más sino **decir en
+qué no se parece**. Antes `;`, `&`, `&&`, `*` y `$` se colaban como argumentos
+del comando — `echo dos ; echo tres` imprimía «dos ; echo tres» y el segundo
+comando **no se ejecutaba**, y `ls *.rs` contestaba «no existe», que suena a un
+hecho sobre el disco. Ahora cada uno se rechaza diciendo qué hacer en su lugar,
+con entrecomillar como salida de emergencia. La línea base se midió **antes**
+de tocar nada, escribiendo el paso con la conducta deseada y ejecutándolo
+contra el `sosh` viejo.
+
+**[N-008](native/N-008.md) tiene la forma decidida**: si hace falta vigilar
+ficheros, tiene que ser **por eventos**. Lo decidió la corrección, no el coste
+que había salido a medir: dos escrituras del **mismo tamaño** dentro del mismo
+segundo dejan `stat` idéntico —**6 de 6 pares indistinguibles**—, así que
+aunque `stat` fuera gratis el sondeo seguiría sin verlas. La medida casi se
+queda en anécdota: una ejecución anterior dio «se distinguen» porque las
+escrituras cayeron a caballo de un segundo, y por eso el caso pasó a informar
+de una **tasa**. La implementación se aplaza —el único consumidor conocido es
+`@parcel/watcher`, de la rama de portar—, pero la forma ya está decidida con
+datos, que es lo que la ficha pedía. De rebote salió
+**[N-012](native/N-012.md)**: `stat` cuesta ~3 M de ciclos **por componente de
+ruta**, y lo paga todo lo que toca rutas.
+
+**[N-012](native/N-012.md) está cerrada, 20,5×** — un `stat` de cinco
+componentes pasó de 17,1 M a **833 k** de ciclos, y el coste **por componente
+de ruta**, que es lo que daba título a la ficha, de ~3 M a ~36 k (**83×**) — y
+lo que enseñó vale más que la cifra.
+Cuatro controles, y **dos me estaban mintiendo**: los tests del host corrían en
+`debug` mientras el guest lleva `sosofs` a `opt-level = 3` (comparaba debug
+contra release; en release el host cae 12–17×), y los microbancos en release
+daban **0 ns** porque el optimizador se los había comido enteros. QEMU va con
+**KVM**, así que no había emulación a la que culpar, y el mínimo de 32 vueltas
+coincide con la media, así que tampoco era el planificador. Con eso, los
+arreglos: `lookup` ya no vuelca el directorio entero (la clave del dirent ya era
+`name_hash`), y `read_node` ya no pide 4 KiB de montón por nodo. Pero el trozo
+grande **no es mío y no lo toco**: `revisar()` audita el montón del kernel en
+cada `alloc` y cada `dealloc` recorriendo 4096 ranuras, y explica el **~75 %**
+del coste — medido comentándolo y revirtiendo byte a byte. Es un detector de
+desbordamientos con una caza de pánicos en marcha, así que es
+**[N-013](native/N-013.md)**: el número y cuatro opciones, y la decisión de
+quien depura. Con eso medido, la pregunta útil deja de ser «¿qué hace lento
+este código?» y pasa a ser «**¿cuántas veces pide memoria?**» — una reserva son
+**~243 000 ciclos**, y quitar seis de ellas del camino de `stat` valió tanto
+como todo lo anterior junto. La más ancha ni siquiera estaba en el sistema de
+ficheros: `resolve_user_path`, que paga **toda** syscall con ruta, hacía cinco
+reservas y ahora hace una. Lo había descartado como «ficha aparte porque toca
+el ABI» — lo que toca el ABI es cambiar el tipo de retorno, no quitar reservas
+de dentro. Se cierra con el reparto medido: de los 263 k que cuesta hoy un
+`stat("/")`, el mecanismo de llamada es **2 635 ciclos** (el 1 %), el árbol
+~17 k, y **~243 k son la única reserva que sobrevive**. Dentro del sistema de
+ficheros no queda nada grande; lo que queda es N-013.
+
+**[T36](T36-forja-trazabilidad.md) está hecha** (2026-09-25): `manifest.txt` deja
+de ser una etiqueta y pasa a ser un **recibo versionado** que liga fuentes,
+build y artefactos. Tres cosas estaban mal y las tres eran del mismo tipo —
+algo que *parecía* comprobar y no comprobaba—: el `build-id` salía de
+`DefaultHasher` (que no promete estabilidad entre versiones ni plataformas), el
+campo `sources=` contenía el hash **del pack** en vez del de las fuentes, y el
+cliente escribía el staging **antes** de mirar el manifiesto. Ahora `sync`
+guarda lo que envió y `build` verifica versión, build-id, fuentes y el sha256
+de lo descargado **antes** de escribir nada — porque del staging se aplica.
+Resumen en [resultado.md](../../target/self-improvement/tasks/T36/resultado.md).
+
+**[T38](T38-toolchain-inventario.md) está hecha** (2026-09-25), y aplicar su
+propia regla —«ninguna herramienta marcada nativa solo por su nombre o
+`--version`»— cambió el estado de tres. `sosoas` se anuncia como ensamblador y
+rechaza ensamblador real; el objeto que sí emite tiene la **cabecera ELF
+desplazada dos bytes**, y cada síntoma de `readelf` mapea a una escritura
+concreta ([T67](T67-sosoas-elf-desplazado.md)). `wild-soso` declara su binario
+como `wild`, así que las dos rutas que lo buscan como `wild-soso` no existen
+nunca, y si su directorio entra en el PATH el envoltorio se llamaría a sí mismo
+([T68](T68-wild-soso-nombre.md)); además `wild` no está instalado. Y el sysroot
+de `x86_64-unknown-soso` **no se ha construido**. Ninguno de los tres se había
+notado porque ninguno participa en el camino que hoy funciona: todo lo que
+arranca sale de `rustc` + `rust-lld` sobre los targets de `user/`. Entrega en
+[toolchain-lock.json](native/toolchain-lock.json) y
+[toolchain-deps.md](native/toolchain-deps.md).
+
+**[T67](T67-sosoas-elf-desplazado.md) y [T68](T68-wild-soso-nombre.md) están
+hechas** el mismo día, y las dos resultaron ser más anchas de lo documentado.
+En `sosoas`, los **section headers** iban ocho bytes corridos además de la
+cabecera, y `sh_name`/`sh_type` no se escribían nunca: no se había visto porque
+`readelf -S` se paraba antes, en el `e_shentsize` roto — un síntoma tapaba al
+otro. Hoy `objdump -d` desensambla los bytes que entraron. En `wild-soso`, el
+nombre arrastraba **dos rutas más** que tampoco existen: el bootstrap y `xtask`
+apuntaban a `tools/*/target/release`, que nunca se crean porque los dos crates
+son miembros del workspace, y el bootstrap compilaba sin `--release`.
+
+Los dos arreglos llevan tests que **no dependen de binutils** —la toolchain
+nativa tiene que poder comprobarse a sí misma— y en los dos se verificó por
+mutación que pueden fallar. El de `wild-soso` ata el nombre del binario al
+`"linker"` del target: no vigila el bug, vigila la **deriva** que lo produjo.
+
+**[T39](T39-bootstrap-libstd.md) va por los pasos 1–2 de 5.** Lo que la motiva
+está comprobado, no supuesto: `sed -i` y `perl -i` **salen 0 cuando el ancla no
+aparece**, así que `apply-patches.sh` imprime `OK` habiendo parcheado **cero**
+si upstream renombra cualquier cosa — y el fallo sale mucho después como un
+error de compilación que no señala a la causa. Ya existe
+`soso_improve_core::receta`: declarativa sobre el trait `Archivos` (así podrá
+correr dentro de soso), idempotente por una marca **explícita** en vez de por
+una subcadena adivinada, y con un ancla ausente como **fallo con nombre**. Ocho
+tests.
+
+Los pasos **4–5 están bloqueados** por algo que midió T38: `wild` no está
+instalado, así que no hay con qué enlazar el programa que debe ejecutarse en el
+guest. No instalo la herramienta por mi cuenta — es el entorno de quien trabaja
+aquí; `cargo install wild-linker` es lo que dice el propio envoltorio.
+
+**Lo que queda habilitado**: el campo `perfil` del recibo de T36, que hoy
+registra el modo y no los comandos, y [T20](T20-opencode-config.md).
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.
 Entregar al modelo una ficha por sesión, las secciones indicadas

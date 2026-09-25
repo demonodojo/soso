@@ -2,6 +2,13 @@
 //! Una línea puede ser un pipeline de comandos de /bin, más los builtins
 //! `exit`, `help`, `cd`, `pwd`, `wifi` y `ask`.
 //!
+//! **Lo que no sabe hacer lo dice** ([N-010](../../../docs/self-improvement/native/N-010.md)):
+//! encadenar (`;`, `&&`, `||`), segundo plano (`&`), duplicar descriptores
+//! (`2>&1`), comodines (`*`) y variables (`$`) se **rechazan con un mensaje**.
+//! Antes se colaban como argumentos del comando, que es peor que un error:
+//! `echo dos ; echo tres` imprimía «dos ; echo tres» y el segundo comando no
+//! llegaba a ejecutarse. La salida de emergencia es entrecomillar.
+//!
 //! `ask` es el único que se resuelve **antes** de tokenizar: todo lo que va
 //! detrás es el texto de la pregunta, con sus comillas, sus tildes y sus `|` o
 //! `>` si los lleva. Cualquier otro camino los interpretaría como pipe o
@@ -201,6 +208,22 @@ struct CmdSpec {
 /// `'` y `"` hacen hoy lo mismo; se aceptan las dos porque quien escriba la
 /// otra recibiría la comilla dentro del argumento y un fallo que no se parece
 /// a su causa.
+/// Lo que `sosh` **no** sabe hacer, dicho en voz alta.
+///
+/// Es la semántica declarada de
+/// [N-010](../../../docs/self-improvement/native/N-010.md): antes estos
+/// operadores se colaban como argumentos del comando, así que una línea que
+/// pedía una cosa hacía otra **sin decirlo**. Un guion que los usara parecía
+/// colgarse, y el diagnóstico costaba caro.
+///
+/// La salida de emergencia es entrecomillar, igual que el `-F` de `grep`: si
+/// de verdad quieres el carácter, `"a;b"` lo da.
+const ENCADENAR: &str = "no sé encadenar comandos (; && ||); usa una línea por comando";
+const SEGUNDO_PLANO: &str = "no sé ejecutar en segundo plano (&); cada comando termina antes del siguiente";
+const DUPLICAR: &str = "no sé duplicar descriptores (2>&1); redirige cada uno a su fichero, o usa >&- para cerrar";
+const COMODINES: &str = "no expando comodines (*); entrecomíllalo si es literal";
+const VARIABLES: &str = "no expando variables ($); entrecomíllalo si es literal";
+
 fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
     let mut tokens = Vec::new();
     let mut chars = line.chars().peekable();
@@ -209,22 +232,41 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
             continue;
         }
         match c {
-            '|' => tokens.push(Token {
-                kind: TokenKind::Pipe,
-                word: String::new(),
-                fd: 0,
-                entrecomillada: false,
-            }),
+            '|' => {
+                if chars.peek() == Some(&'|') {
+                    return Err(ENCADENAR);
+                }
+                tokens.push(Token {
+                    kind: TokenKind::Pipe,
+                    word: String::new(),
+                    fd: 0,
+                    entrecomillada: false,
+                })
+            }
+            // `&` y `;` no son palabras. Antes se colaban como argumentos, y
+            // eso es peor que un error: `echo dos ; echo tres` imprimía
+            // «dos ; echo tres» y el segundo comando **no se ejecutaba**.
+            '&' => {
+                if chars.peek() == Some(&'&') {
+                    return Err(ENCADENAR);
+                }
+                return Err(SEGUNDO_PLANO);
+            }
+            ';' => return Err(ENCADENAR),
             '>' => {
                 let kind = if chars.peek() == Some(&'>') {
                     chars.next();
                     TokenKind::RedirectAppend
                 } else if chars.peek() == Some(&'&') {
                     chars.next();
+                    // `>&-` cierra el descriptor y eso sí se sabe hacer;
+                    // `2>&1` es duplicarlo, y no. Antes se comía el `1` y
+                    // acababa en «falta fichero tras >», que señala al sitio
+                    // equivocado.
                     if chars.next() == Some('-') {
                         TokenKind::RedirectClose
                     } else {
-                        TokenKind::RedirectOut
+                        return Err(DUPLICAR);
                     }
                 } else {
                     TokenKind::RedirectOut
@@ -303,6 +345,12 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                                 None => return Err("barra invertida al final de la línea"),
                             }
                         }
+                        // Sin comillas, `*` y `$` sólo pueden ser una
+                        // intención que esta shell no cumple. Dejarlos pasar
+                        // daba respuestas que parecen hechos: `ls *.rs` decía
+                        // «*.rs: no existe», que suena a que no hay ficheros.
+                        '*' => return Err(COMODINES),
+                        '$' => return Err(VARIABLES),
                         x => word.push(x),
                     }
                 }
@@ -321,7 +369,7 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                                 if chars.next() == Some('-') {
                                     TokenKind::RedirectClose
                                 } else {
-                                    TokenKind::RedirectOut
+                                    return Err(DUPLICAR);
                                 }
                             } else {
                                 TokenKind::RedirectOut
@@ -686,6 +734,8 @@ fn ayuda() {
     println!("          soso-install list | nvme1 --yes | status");
     println!("pipes:    cmd1 | cmd2 | cmd3");
     println!("redirect: cmd > fichero, cmd >> fichero, cmd < fichero");
+    println!("no hay:   ; && || (una línea por comando), & (segundo plano),");
+    println!("          2>&1 (redirige cada uno), * y $ (entrecomíllalos)");
     println!("ojo:      ask no admite pipes ni redirecciones, justamente para");
     println!("          que `|` y `>` puedan formar parte de la pregunta");
 }

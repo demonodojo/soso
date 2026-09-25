@@ -101,6 +101,12 @@ fn parse_a_record(pkt: &[u8]) -> Result<[u8; 4], ()> {
 /// puede comer el tiempo de los demás.
 const POR_SERVIDOR: Duration = Duration::from_millis(1500);
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum ResolveFail {
+    Timeout,
+    Interrupted,
+}
+
 pub fn resolve_a(
     iface: &mut Interface,
     sockets: &mut SocketSet<'_>,
@@ -109,15 +115,15 @@ pub fn resolve_a(
     _now: Instant,
     deadline: Instant,
     servidores: &[Ipv4Address],
-) -> Result<[u8; 4], ()> {
+) -> Result<[u8; 4], ResolveFail> {
     let id = (crate::arch::pit::uptime_ms() as u16).max(1);
-    let query = build_query(host, id)?;
+    let query = build_query(host, id).map_err(|_| ResolveFail::Timeout)?;
     let rx = udp::PacketBuffer::new([udp::PacketMetadata::EMPTY; 2], vec![0u8; 768]);
     let tx = udp::PacketBuffer::new([udp::PacketMetadata::EMPTY; 2], vec![0u8; 512]);
     let handle = sockets.add(udp::Socket::new(rx, tx));
     {
         let sock = sockets.get_mut::<udp::Socket>(handle);
-        sock.bind(49152).map_err(|_| ())?;
+        sock.bind(49152).map_err(|_| ResolveFail::Timeout)?;
     }
 
     for server in servidores {
@@ -132,6 +138,10 @@ pub fn resolve_a(
         // viene del propio host— llegaba a tiempo y por WiFi no llegaba nunca.
         let fin = min_instant(crate::net::now() + POR_SERVIDOR, deadline);
         loop {
+            if crate::task::interrupt_requested() {
+                sockets.remove(handle);
+                return Err(ResolveFail::Interrupted);
+            }
             let t = crate::net::now();
             if t >= fin {
                 break;
@@ -152,7 +162,7 @@ pub fn resolve_a(
         }
     }
     sockets.remove(handle);
-    Err(())
+    Err(ResolveFail::Timeout)
 }
 
 fn min_instant(a: Instant, b: Instant) -> Instant {
@@ -203,8 +213,11 @@ pub fn resolve_hostname(host: &str) -> Result<soso_abi::SockAddr, i64> {
     let lista = servidores(dns);
     let start = super::now();
     let deadline = start + TIMEOUT;
-    let resultado = resolve_a(iface, sockets, dev, trimmed, start, deadline, &lista)
-        .map_err(|_| -soso_abi::ENOENT);
+    let resultado = match resolve_a(iface, sockets, dev, trimmed, start, deadline, &lista) {
+        Ok(ip) => Ok(ip),
+        Err(ResolveFail::Interrupted) => Err(-soso_abi::EINTR),
+        Err(ResolveFail::Timeout) => Err(-soso_abi::ENOENT),
+    };
 
     // El socket UDP y `query` ya se han destruido al volver de `resolve_a`.
     // Este recorrido separa su posible corrupción de la liberación siguiente.

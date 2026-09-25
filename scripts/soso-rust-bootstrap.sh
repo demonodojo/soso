@@ -30,7 +30,7 @@ channel = "dev"
 download-rustc = true
 
 [target.x86_64-unknown-soso]
-linker = "$ROOT/tools/wild-soso/target/release/wild-soso"
+linker = "$ROOT/target/release/wild-soso"
 
 [llvm]
 download-ci-llvm = false
@@ -39,7 +39,9 @@ EOF
 SOSO_RUST_VENDOR="${SOSO_RUST_VENDOR:-${XDG_CACHE_HOME:-$HOME/.cache}/soso-rust-vendor}"
 bash "$ROOT/config/rust-soso/apply-patches.sh"
 
-( cd "$ROOT" && cargo build -q -p sosoas -p wild-soso -p soso-rt 2>/dev/null ) || \
+# `--release` porque las rutas de abajo (y el `linker =` de arriba) apuntan a
+# `target/release`. Sin él se compilaba en `debug` y nada de eso existía.
+( cd "$ROOT" && cargo build -q --release -p sosoas -p wild-soso -p soso-rt 2>/dev/null ) || \
   echo "soso-rust-bootstrap: compila sosoas, wild-soso y soso-rt en el host"
 
 cat <<EOF
@@ -48,7 +50,7 @@ Vendor: $VENDOR
 Parches aplicados. Compilar libstd:
 
   cd "$VENDOR"
-  export PATH="$ROOT/tools/sosoas/target/release:$ROOT/tools/wild-soso/target/release:\$PATH"
+  export PATH="$ROOT/target/release:\$PATH"
   ./x.py build library/std --target x86_64-unknown-soso
 
 O desde la raíz del repo:

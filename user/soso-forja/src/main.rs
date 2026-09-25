@@ -17,6 +17,12 @@ const SRC: &str = "/src/soso";
 const STAGING: &str = "/var/actualiza-prueba";
 const CACHE: &str = "/var/forja-cache";
 const OUT: &str = "/var/forja-out";
+/// Lo que `sync` deja escrito para que `build` pueda comprobar el recibo.
+///
+/// Va a disco porque `sync` y `build` son **dos invocaciones distintas**: sin
+/// esto, `build` no tendría contra qué comparar y sólo podría confiar en que
+/// el servidor le cuenta la verdad sobre sus propias fuentes.
+const ESTADO_SYNC: &str = "/var/forja-cache/ultimo-sync.txt";
 const DEFAULT_IP: [u8; 4] = [10, 0, 2, 2];
 const DEFAULT_PORT: u16 = 8740;
 
@@ -163,6 +169,32 @@ fn http_req(
     Ok(resp[sep + 4..].to_vec())
 }
 
+/// Lo que el cliente sabe de su último `sync`.
+struct EstadoSync {
+    build_id: String,
+    fuentes_sha256: String,
+}
+
+fn guardar_estado_sync(build_id: &str, fuentes_sha256: &str) -> Result<(), i64> {
+    let _ = sys::mkdir(CACHE);
+    let txt = format!("build-id={build_id}\nsource-manifest-sha256={fuentes_sha256}\n");
+    escribir(ESTADO_SYNC, txt.as_bytes())
+}
+
+fn leer_estado_sync() -> Option<EstadoSync> {
+    let datos = leer_fichero(ESTADO_SYNC).ok()?;
+    let txt = core::str::from_utf8(&datos).ok()?;
+    let build_id = campo(txt, "build-id=")?;
+    let fuentes = campo(txt, "source-manifest-sha256=")?;
+    if build_id.is_empty() || fuentes.is_empty() {
+        return None;
+    }
+    Some(EstadoSync {
+        build_id: String::from(build_id),
+        fuentes_sha256: String::from(fuentes),
+    })
+}
+
 fn cmd_sync(ip: [u8; 4], port: u16, token: Option<&str>) -> u8 {
     let _ = sys::mkdir(SRC);
     let mut manifest = Vec::new();
@@ -174,6 +206,10 @@ fn cmd_sync(ip: [u8; 4], port: u16, token: Option<&str>) -> u8 {
         body.extend_from_slice(h.as_bytes());
         body.push(b'\n');
     }
+    // El sha256 se toma **de los mismos bytes** que van en la petición, antes
+    // de añadir el separador: es lo que el servidor recibe como manifiesto, y
+    // hashear otra cosa haría fallar la comprobación por la razón equivocada.
+    let fuentes_sha256 = hex_sha256(&body);
     body.extend_from_slice(b"\n---DATA---\n");
     for (rel, _) in &manifest {
         let path = format!("{SRC}/{rel}");
@@ -193,6 +229,32 @@ fn cmd_sync(ip: [u8; 4], port: u16, token: Option<&str>) -> u8 {
     match http_post(ip, port, "/sync", &body, token) {
         Ok(resp) => {
             let txt = core::str::from_utf8(&resp).unwrap_or("");
+            let Some(build_id) = campo(txt, "build-id=") else {
+                println!("forja: sync: el servidor no devolvió build-id");
+                return 1;
+            };
+            // Si el servidor dice haber recibido otras fuentes, se para aquí:
+            // más adelante el recibo cuadraría consigo mismo y el desajuste
+            // pasaría desapercibido.
+            match campo(txt, "source-manifest-sha256=") {
+                Some(h) if h == fuentes_sha256 => {}
+                Some(h) => {
+                    println!(
+                        "forja: sync: el servidor resumió otras fuentes ({} … frente a {} …)",
+                        &h[..h.len().min(16)],
+                        &fuentes_sha256[..fuentes_sha256.len().min(16)]
+                    );
+                    return 1;
+                }
+                None => {
+                    println!("forja: sync: el servidor no devolvió source-manifest-sha256");
+                    return 1;
+                }
+            }
+            if guardar_estado_sync(build_id, &fuentes_sha256).is_err() {
+                println!("forja: sync: no pude guardar {ESTADO_SYNC}");
+                return 1;
+            }
             println!("forja: sync OK ({} ficheros) {txt}", manifest.len());
             0
         }
@@ -203,7 +265,104 @@ fn cmd_sync(ip: [u8; 4], port: u16, token: Option<&str>) -> u8 {
     }
 }
 
+/// Un campo del recibo, o `None` si no está.
+fn campo<'a>(recibo: &'a str, clave: &str) -> Option<&'a str> {
+    recibo
+        .lines()
+        .find_map(|l| l.strip_prefix(clave).map(str::trim))
+}
+
+/// El sha256 que el recibo declara para un artefacto.
+///
+/// Las líneas son `artefacto=<nombre> sha256=<hex> bytes=<n>`; se busca por
+/// nombre y no por posición, para que añadir artefactos más adelante no
+/// desplace lo que se comprueba.
+fn sha_de_artefacto<'a>(recibo: &'a str, nombre: &str) -> Option<&'a str> {
+    for l in recibo.lines() {
+        let Some(resto) = l.strip_prefix("artefacto=") else {
+            continue;
+        };
+        let mut campos = resto.split_whitespace();
+        if campos.next() != Some(nombre) {
+            continue;
+        }
+        for c in campos {
+            if let Some(h) = c.strip_prefix("sha256=") {
+                return Some(h);
+            }
+        }
+    }
+    None
+}
+
+/// Comprueba que el recibo corresponde a **esta** petición y a lo descargado.
+///
+/// Es el núcleo de [T36](../../../docs/self-improvement/T36-forja-trazabilidad.md):
+/// antes, `build` escribía el staging con lo que devolviera el servidor sin
+/// mirar nada. Un pack de un build anterior, o de otras fuentes, entraba igual
+/// — y desde el staging se aplica.
+///
+/// Se comprueba en este orden a propósito: primero que el recibo sea legible y
+/// de una versión conocida, después que hable de nuestras fuentes, y sólo
+/// entonces que los bytes descargados sean los que declara. Al revés, un
+/// recibo de otro build podría "validar" unos bytes coherentes consigo mismos.
+fn verificar_recibo(
+    recibo: &[u8],
+    esperado: &EstadoSync,
+    pack: &[u8],
+    kernel: &[u8],
+) -> Result<(), String> {
+    let Ok(txt) = core::str::from_utf8(recibo) else {
+        return Err(String::from("el recibo no es texto"));
+    };
+    match campo(txt, "forja-recibo=") {
+        Some("1") => {}
+        Some(v) => return Err(format!("recibo de versión {v}, no la 1")),
+        None => {
+            return Err(String::from(
+                "el servidor no emite recibo (¿versión antigua?)",
+            ));
+        }
+    }
+    let Some(id) = campo(txt, "build-id=") else {
+        return Err(String::from("el recibo no trae build-id"));
+    };
+    if id != esperado.build_id {
+        return Err(format!(
+            "build-id {id} pero el sync dio {}",
+            esperado.build_id
+        ));
+    }
+    let Some(fuentes) = campo(txt, "source-manifest-sha256=") else {
+        return Err(String::from("el recibo no trae source-manifest-sha256"));
+    };
+    if fuentes != esperado.fuentes_sha256 {
+        return Err(format!(
+            "el recibo habla de otras fuentes ({} … frente a {} …)",
+            &fuentes[..fuentes.len().min(16)],
+            &esperado.fuentes_sha256[..esperado.fuentes_sha256.len().min(16)]
+        ));
+    }
+    for (nombre, datos) in [("rootfs.pack", pack), ("kernel-x86_64", kernel)] {
+        let Some(want) = sha_de_artefacto(txt, nombre) else {
+            return Err(format!("el recibo no declara {nombre}"));
+        };
+        let visto = hex_sha256(datos);
+        if visto != want {
+            return Err(format!("{nombre} no coincide con el recibo"));
+        }
+    }
+    Ok(())
+}
+
 fn cmd_build(ip: [u8; 4], port: u16, token: Option<&str>) -> u8 {
+    let esperado = match leer_estado_sync() {
+        Some(e) => e,
+        None => {
+            println!("forja: no hay un sync previo en esta máquina; corre `soso-forja sync`");
+            return 1;
+        }
+    };
     let pack = match http_post(ip, port, "/build", b"", token) {
         Ok(p) if !p.is_empty() => p,
         _ => {
@@ -225,6 +384,13 @@ fn cmd_build(ip: [u8; 4], port: u16, token: Option<&str>) -> u8 {
             return 1;
         }
     };
+    // **Antes de tocar el staging.** Lo que se escribe ahí se aplica después,
+    // así que un artefacto que no cuadra no debe llegar a existir en disco.
+    if let Err(por_que) = verificar_recibo(&manifest, &esperado, &pack, &kernel) {
+        println!("forja: recibo rechazado: {por_que}");
+        println!("forja: no se escribió nada en {STAGING}");
+        return 1;
+    }
     let _ = sys::mkdir(STAGING);
     if escribir(&format!("{STAGING}/rootfs.pack"), &pack).is_err()
         || escribir(&format!("{STAGING}/manifest.txt"), &manifest).is_err()
@@ -233,13 +399,7 @@ fn cmd_build(ip: [u8; 4], port: u16, token: Option<&str>) -> u8 {
         println!("forja: no se pudo escribir staging");
         return 1;
     }
-    if let Ok(txt) = core::str::from_utf8(&manifest) {
-        for line in txt.lines() {
-            if line.starts_with("forja-id=") || line.starts_with("build-id=") {
-                println!("forja: {line}");
-            }
-        }
-    }
+    println!("forja: recibo OK (build-id={})", esperado.build_id);
     println!(
         "forja: build OK → {STAGING}/ (pack {} B, kernel {} B)",
         pack.len(),

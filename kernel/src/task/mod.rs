@@ -269,6 +269,12 @@ fn remaining() -> &'static AtomicU32 {
 
 /// PID que ejecuta la CPU actual (0 = ninguno). Vía GS: cada core tiene su
 /// propio valor, no hay un único "proceso actual" del sistema.
+/// Ctrl-C u otra señal pidió abortar al proceso **en ejecución en este core**
+/// (p. ej. DNS síncrono dentro de una syscall).
+pub fn interrupt_requested() -> bool {
+    with_current(|p| p.kill_pending)
+}
+
 pub fn current_pid() -> u64 {
     crate::arch::percpu::current_pid()
 }
@@ -348,14 +354,14 @@ fn signal_one(procs: &mut Vec<Process>, pid: u64, sig: u8) -> bool {
         return true;
     }
     if sig == soso_abi::SIGINT as u8 || sig == soso_abi::SIGTERM as u8 {
-        let lider = procs[idx].pgid == procs[idx].sid;
         let bloqueado = matches!(
             procs[idx].state,
             State::WaitingTty { .. }
                 | State::WaitingSocket { .. }
+                | State::WaitingPipe { .. }
                 | State::Sleeping(_)
         );
-        if lider && bloqueado {
+        if bloqueado {
             procs[idx].ctx.rax = (-soso_abi::EINTR) as u64;
             procs[idx].state = State::Runnable;
             return true;

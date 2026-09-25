@@ -58,6 +58,10 @@ fn main(args: &[String]) -> u8 {
         "hilos" => sondas::hilos::ejecutar(),
         "canales" => sondas::canales::ejecutar(),
         "coste" => sondas::coste::ejecutar(),
+        "carga" => sondas::carga::ejecutar(),
+        "busqueda" => sondas::busqueda::ejecutar(),
+        "vigilancia" => sondas::vigilancia::ejecutar(),
+        "rutas" => sondas::rutas::ejecutar(),
         // Auxiliares: la sonda de señales se lanza a sí misma para tener
         // hijos de verdad a los que matar.
         "dormir" => return sondas::senales::dormir(args.get(1).map(|s| s.as_str()).unwrap_or("0")),

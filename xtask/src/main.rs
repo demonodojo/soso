@@ -339,12 +339,10 @@ fn rust_bootstrap(build_std: bool) {
             .join("soso-rust-vendor")
     });
     let mut path = std::env::var("PATH").unwrap_or_default();
-    path = format!(
-        "{}:{}:{}",
-        root.join("tools/sosoas/target/release").display(),
-        root.join("tools/wild-soso/target/release").display(),
-        path
-    );
+    // `target/release` del **workspace**: `sosoas` y `wild-soso` son miembros,
+    // así que `tools/sosoas/target/` y `tools/wild-soso/target/` no existen
+    // nunca y ponerlos en el PATH no añadía nada (T68).
+    path = format!("{}:{}", root.join("target/release").display(), path);
     let st = Command::new("./x.py")
         .current_dir(&vendor)
         .env("PATH", path)

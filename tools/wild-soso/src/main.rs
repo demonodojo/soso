@@ -23,3 +23,24 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// El nombre del binario tiene que ser el que el target pide como enlazador.
+    ///
+    /// Se separaron —el binario se llamaba `wild` y el target pedía
+    /// `wild-soso`— y nadie se enteró porque **nada consume ese target
+    /// todavía**. Este test los ata: si alguien cambia uno, falla.
+    #[test]
+    fn el_binario_se_llama_como_el_target_lo_busca() {
+        let spec = include_str!("../../../targets/x86_64-unknown-soso.json");
+        let linker = spec
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("\"linker\":"))
+            .expect("el target declara un linker")
+            .trim()
+            .trim_end_matches(',')
+            .trim_matches('"');
+        assert_eq!(linker, env!("CARGO_BIN_NAME"));
+    }
+}

@@ -15,6 +15,9 @@ soso-update-core = { path = "../crates/soso-update-core" }
 # no acierta—, y el fallo aparece como «TLS: failed to get random bytes» al
 # primer handshake, que no se parece en nada a su causa.
 getrandom = { version = "0.2", features = ["custom"] }
+# Para compilar C ajeno hacia el target de soso (experimento N-005); misma
+# versión que usa `crates/soso-http` para el ensamblador de `ring`.
+cc = "1"
 
 [profile.release]
 panic = "abort"

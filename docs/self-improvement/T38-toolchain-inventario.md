@@ -1,6 +1,11 @@
 # T38 — Fijar revisiones y dependencias de la toolchain nativa
 
-**Hito:** SI-7 · **Tipo:** Inspección acotada · **Estado:** pendiente.
+**Hito:** SI-7 · **Tipo:** Inspección acotada · **Estado:** **hecha** (2026-09-25).
+
+Entrega: [native/toolchain-lock.json](native/toolchain-lock.json) y
+[native/toolchain-deps.md](native/toolchain-deps.md). Resumen:
+[resultado.md](../../target/self-improvement/tasks/T38/resultado.md).
+Defectos abiertos: [T67](T67-sosoas-elf-desplazado.md), [T68](T68-wild-soso-nombre.md).
 
 **Dependencias:** [T01](T01-base.md)
 
@@ -47,9 +52,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 No arrancar un build enorme de stage2 dentro de esta inspección ni sobrescribir un vendor compartido.
 

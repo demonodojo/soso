@@ -52,6 +52,14 @@ pub fn set_wall_clock(f: WallClockFn) {
     WALL_CLOCK.store(f as usize as u64, Ordering::Release);
 }
 
+fn map_transport_err(e: i64, other: HttpError) -> HttpError {
+    if e == -(soso_abi::EINTR as i64) {
+        HttpError::Interrupted
+    } else {
+        other
+    }
+}
+
 fn wall_clock_secs() -> Option<u64> {
     let ptr = WALL_CLOCK.load(Ordering::Acquire);
     if ptr == 0 {
@@ -72,6 +80,8 @@ impl TimeProvider for GuestTimeProvider {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpError {
+    /// Syscall interrumpida (Ctrl-C / SIGINT en el grupo en primer plano).
+    Interrupted,
     Parse,
     /// Fallo de TLS **con el motivo que dio rustls**. Sin él, «TLS» a secas no
     /// distingue un certificado rechazado de una alerta del servidor o de un
@@ -159,7 +169,7 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
         if !self.outgoing_pending.is_empty() {
             self.transport
                 .write_all(self.fd, &self.outgoing_pending)
-                .map_err(|_| HttpError::Io("write_all del transporte"))?;
+                .map_err(|e| map_transport_err(e, HttpError::Io("write_all del transporte")))?;
             self.outgoing_pending.clear();
         }
         Ok(())
@@ -168,6 +178,9 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
     fn read_more(&mut self, timeout_ms: u64) -> Result<bool, HttpError> {
         let mut buf = [0u8; 4096];
         let n = self.transport.read_timeout(self.fd, &mut buf, timeout_ms);
+        if n == -(soso_abi::EINTR as i64) {
+            return Err(HttpError::Interrupted);
+        }
         if n <= 0 {
             return Ok(false);
         }
@@ -533,7 +546,9 @@ fn https_request<T: TcpTransport, S: BodySink>(
         }
         let redirect_auth = auth_for_origin(auth, host, port, auth_origin.as_ref());
         let mut ip = [0u8; 4];
-        transport.dns_resolve(host, &mut ip).map_err(|_| HttpError::Dns)?;
+        transport
+            .dns_resolve(host, &mut ip)
+            .map_err(|e| map_transport_err(e, HttpError::Dns))?;
         let fd = transport
             .tcp_connect(
                 SockAddr {
@@ -543,7 +558,7 @@ fn https_request<T: TcpTransport, S: BodySink>(
                 },
                 30_000,
             )
-            .map_err(|_| HttpError::Io("tcp_connect"))?;
+            .map_err(|e| map_transport_err(e, HttpError::Io("tcp_connect")))?;
         let mut guard = FdGuard::new(transport, fd);
         let mut tls = TlsSession::new(transport, fd, host, config.clone())?;
         tls.handshake()?;

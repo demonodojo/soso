@@ -1,6 +1,8 @@
 # T36 — Vincular fuentes, build y artefacto de Forja
 
-**Hito:** SI-6 · **Tipo:** Implementación cliente-servidor · **Estado:** pendiente.
+**Hito:** SI-6 · **Tipo:** Implementación cliente-servidor · **Estado:** **hecha** (2026-09-25).
+
+Resumen: [target/self-improvement/tasks/T36/resultado.md](../../target/self-improvement/tasks/T36/resultado.md).
 
 **Dependencias:** [T01](T01-base.md)
 
@@ -44,9 +46,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 No rediseñar OTA ni trasladar el compilador al guest en esta ficha.
 

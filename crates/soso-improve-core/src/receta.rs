@@ -1,0 +1,429 @@
+//! Receta declarativa del bootstrap de libstd para soso (T39).
+//!
+//! Hoy esto lo hace `config/rust-soso/apply-patches.sh` con `rsync`, `sed -i`
+//! y `perl -i`. Dos cosas lo hacen inservible como base del circuito nativo:
+//!
+//! 1. **Nada de eso existe en soso.** El objetivo del plan es que la
+//!    preparación pueda correr dentro, así que la política vive aquí y el
+//!    mecanismo lo pone quien hospeda, como el resto del crate.
+//! 2. **`sed -i` y `perl -i` salen 0 cuando el ancla no está.** Comprobado:
+//!    `sed -i 's/ancla-que-no-existe/x/' f` devuelve 0 y deja el fichero
+//!    igual. Así que si un cambio de upstream renombra cualquier ancla, el
+//!    script imprime «apply-patches: OK» habiendo parcheado **cero**, y el
+//!    fallo aparece mucho después como un error de compilación que no señala
+//!    a la causa.
+//!
+//! Aquí un ancla que no aparece es un **error del paso, con su nombre**.
+//!
+//! La otra mitad es la idempotencia. El script la consigue con
+//! `grep -q '<subcadena>' || parchear`, y la subcadena es floja: `target_os =
+//! "soso"` puede aparecer en un fichero por otro motivo y saltarse el parche.
+//! Cada paso de esta receta lleva una **marca** distintiva, que es lo que se
+//! busca para decidir si ya está aplicado.
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use crate::entorno::Archivos;
+
+/// Qué hacer con un fichero del vendor.
+#[derive(Debug, Clone)]
+pub enum Accion {
+    /// Copiar bytes tal cual (lo que hacía `rsync`/`cp`).
+    Copiar { desde: String },
+    /// Insertar `texto` **después** de la línea que contiene `ancla`.
+    InsertarTrasLinea { ancla: String, texto: String },
+    /// Insertar `texto` **antes** de la línea que contiene `ancla`.
+    InsertarAntesDeLinea { ancla: String, texto: String },
+    /// Añadir `texto` al final del fichero.
+    Anadir { texto: String },
+}
+
+/// Un paso de la receta: qué fichero, qué hacer y cómo saber si ya está hecho.
+#[derive(Debug, Clone)]
+pub struct Paso {
+    /// Nombre para los informes. Es lo que se lee cuando algo falla.
+    pub nombre: String,
+    /// Ruta relativa a la raíz del vendor.
+    pub fichero: String,
+    /// Presencia de esta cadena = el paso ya está aplicado.
+    ///
+    /// Tiene que ser **distintiva**: si se elige algo que el fichero puede
+    /// contener por otro motivo, el paso se salta y nadie se entera.
+    pub marca: String,
+    pub accion: Accion,
+}
+
+/// Qué pasó con un paso.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resultado {
+    /// Se aplicó ahora.
+    Aplicado,
+    /// Ya estaba: la marca estaba presente.
+    YaEstaba,
+    /// No se pudo, y por qué.
+    Fallo(String),
+}
+
+/// Informe de un paso, para que un fallo diga **cuál**.
+#[derive(Debug, Clone)]
+pub struct Informe {
+    pub nombre: String,
+    pub fichero: String,
+    pub resultado: Resultado,
+}
+
+impl Informe {
+    pub fn ok(&self) -> bool {
+        !matches!(self.resultado, Resultado::Fallo(_))
+    }
+}
+
+/// La revisión del vendor tiene que ser la que fija el lock de T38.
+///
+/// Se compara aquí en vez de mirar `.git` porque este crate no puede hablar
+/// con git —ni existirá en soso—: quien hospeda observa la revisión y la
+/// pasa. Separa la política (¿coincide?) del mecanismo (¿cómo se averigua?).
+pub fn verificar_revision(esperada: &str, observada: &str) -> Result<(), String> {
+    if esperada.is_empty() {
+        return Err("el lock no fija revisión".to_string());
+    }
+    if esperada == observada {
+        return Ok(());
+    }
+    Err(format!(
+        "el vendor está en {} y el lock fija {}",
+        corto(observada),
+        corto(esperada)
+    ))
+}
+
+fn corto(rev: &str) -> &str {
+    if rev.len() > 12 { &rev[..12] } else { rev }
+}
+
+/// Aplica la receta entera. Devuelve un informe por paso, **en orden**.
+///
+/// No se para en el primer fallo: un informe que sólo cuenta el primer
+/// problema obliga a repetir el ciclo entero por cada uno. El llamante decide
+/// con [`Informe::ok`].
+pub fn aplicar<A: Archivos>(fs: &mut A, raiz: &str, pasos: &[Paso]) -> Vec<Informe> {
+    pasos
+        .iter()
+        .map(|p| Informe {
+            nombre: p.nombre.clone(),
+            fichero: p.fichero.clone(),
+            resultado: aplicar_uno(fs, raiz, p),
+        })
+        .collect()
+}
+
+fn unir(raiz: &str, rel: &str) -> String {
+    if raiz.is_empty() || raiz == "/" {
+        format!("/{}", rel.trim_start_matches('/'))
+    } else {
+        format!("{}/{}", raiz.trim_end_matches('/'), rel.trim_start_matches('/'))
+    }
+}
+
+fn aplicar_uno<A: Archivos>(fs: &mut A, raiz: &str, paso: &Paso) -> Resultado {
+    let destino = unir(raiz, &paso.fichero);
+
+    // `Copiar` es el único paso que puede crear el fichero; los demás editan
+    // uno que tiene que existir, y que no exista es un fallo con nombre y no
+    // un silencio.
+    if let Accion::Copiar { desde } = &paso.accion {
+        let datos = match fs.leer(desde) {
+            Ok(d) => d,
+            Err(e) => return Resultado::Fallo(format!("no pude leer la plantilla {desde}: {e:?}")),
+        };
+        if let Ok(actual) = fs.leer(&destino) {
+            if actual == datos {
+                return Resultado::YaEstaba;
+            }
+        }
+        return match fs.escribir(&destino, &datos, 0o644) {
+            Ok(()) => Resultado::Aplicado,
+            Err(e) => Resultado::Fallo(format!("no pude escribir {destino}: {e:?}")),
+        };
+    }
+
+    let bytes = match fs.leer(&destino) {
+        Ok(d) => d,
+        Err(e) => return Resultado::Fallo(format!("no pude leer {destino}: {e:?}")),
+    };
+    let Ok(texto) = String::from_utf8(bytes) else {
+        return Resultado::Fallo(format!("{destino} no es UTF-8"));
+    };
+    if texto.contains(&paso.marca) {
+        return Resultado::YaEstaba;
+    }
+
+    let nuevo = match &paso.accion {
+        Accion::Copiar { .. } => unreachable!("tratado arriba"),
+        Accion::Anadir { texto: t } => {
+            let mut s = texto.clone();
+            if !s.ends_with('\n') {
+                s.push('\n');
+            }
+            s.push_str(t);
+            s
+        }
+        Accion::InsertarTrasLinea { ancla, texto: t } => {
+            match insertar(&texto, ancla, t, true) {
+                Some(s) => s,
+                None => {
+                    return Resultado::Fallo(format!(
+                        "no encontré el ancla {ancla:?} en {}",
+                        paso.fichero
+                    ));
+                }
+            }
+        }
+        Accion::InsertarAntesDeLinea { ancla, texto: t } => {
+            match insertar(&texto, ancla, t, false) {
+                Some(s) => s,
+                None => {
+                    return Resultado::Fallo(format!(
+                        "no encontré el ancla {ancla:?} en {}",
+                        paso.fichero
+                    ));
+                }
+            }
+        }
+    };
+
+    match fs.escribir(&destino, nuevo.as_bytes(), 0o644) {
+        Ok(()) => Resultado::Aplicado,
+        Err(e) => Resultado::Fallo(format!("no pude escribir {destino}: {e:?}")),
+    }
+}
+
+/// Inserta `texto` junto a la **primera** línea que contiene `ancla`.
+///
+/// La primera y no todas: los parches de este bootstrap añaden una rama a un
+/// `match`, y hacerlo dos veces rompería la compilación de una forma mucho
+/// menos evidente que no hacerlo ninguna.
+fn insertar(fuente: &str, ancla: &str, texto: &str, despues: bool) -> Option<String> {
+    let mut out = String::with_capacity(fuente.len() + texto.len() + 1);
+    let mut puesto = false;
+    for linea in fuente.split_inclusive('\n') {
+        if !puesto && linea.contains(ancla) {
+            puesto = true;
+            if despues {
+                out.push_str(linea);
+                empujar_linea(&mut out, texto);
+            } else {
+                empujar_linea(&mut out, texto);
+                out.push_str(linea);
+            }
+        } else {
+            out.push_str(linea);
+        }
+    }
+    puesto.then_some(out)
+}
+
+fn empujar_linea(out: &mut String, texto: &str) {
+    out.push_str(texto);
+    if !texto.ends_with('\n') {
+        out.push('\n');
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entorno::{Entrada, Tipo};
+    use crate::{Error, Resultado as Res};
+    use alloc::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct Memoria {
+        f: BTreeMap<String, Vec<u8>>,
+    }
+
+    impl Memoria {
+        fn con(pares: &[(&str, &str)]) -> Self {
+            let mut m = Self::default();
+            for (r, c) in pares {
+                m.f.insert(r.to_string(), c.as_bytes().to_vec());
+            }
+            m
+        }
+        fn texto(&self, ruta: &str) -> String {
+            String::from_utf8(self.f.get(ruta).cloned().unwrap_or_default()).unwrap()
+        }
+    }
+
+    impl Archivos for Memoria {
+        fn leer(&self, ruta: &str) -> Res<Vec<u8>> {
+            self.f
+                .get(ruta)
+                .cloned()
+                .ok_or_else(|| Error::entorno(format!("no existe {ruta}")))
+        }
+        fn escribir(&mut self, ruta: &str, datos: &[u8], _m: u32) -> Res<()> {
+            self.f.insert(ruta.to_string(), datos.to_vec());
+            Ok(())
+        }
+        fn existe(&self, ruta: &str) -> bool {
+            self.f.contains_key(ruta)
+        }
+        fn listar(&self, _d: &str) -> Res<Vec<Entrada>> {
+            Ok(Vec::new())
+        }
+        fn metadatos(&self, ruta: &str) -> Res<Entrada> {
+            Ok(Entrada {
+                ruta: ruta.to_string(),
+                tipo: Tipo::Archivo,
+                bytes: self.leer(ruta)?.len() as u64,
+                modo: 0,
+            })
+        }
+        fn crear_directorio(&mut self, _r: &str) -> Res<()> {
+            Ok(())
+        }
+        fn borrar(&mut self, ruta: &str) -> Res<()> {
+            self.f.remove(ruta).map(|_| ()).ok_or_else(|| Error::entorno("no existe"))
+        }
+    }
+
+    fn paso_insertar(ancla: &str, texto: &str, marca: &str) -> Paso {
+        Paso {
+            nombre: "rama soso en el match".into(),
+            fichero: "library/std/src/sys/pal/mod.rs".into(),
+            marca: marca.into(),
+            accion: Accion::InsertarTrasLinea {
+                ancla: ancla.into(),
+                texto: texto.into(),
+            },
+        }
+    }
+
+    const MOD_RS: &str = "pub mod pal {\n    target_os = \"zkvm\" => {}\n    _ => {}\n}\n";
+
+    #[test]
+    fn inserta_tras_el_ancla_y_no_toca_el_resto() {
+        let mut fs = Memoria::con(&[("/v/library/std/src/sys/pal/mod.rs", MOD_RS)]);
+        let pasos = [paso_insertar("zkvm", "    target_os = \"soso\" => {}", "\"soso\" =>")];
+        let inf = aplicar(&mut fs, "/v", &pasos);
+        assert_eq!(inf[0].resultado, Resultado::Aplicado);
+        let t = fs.texto("/v/library/std/src/sys/pal/mod.rs");
+        assert!(t.contains("target_os = \"soso\" => {}"));
+        // El ancla sigue, y sigue **antes**: insertar no sustituye.
+        let i_zkvm = t.find("zkvm").unwrap();
+        let i_soso = t.find("\"soso\"").unwrap();
+        assert!(i_zkvm < i_soso);
+        assert!(t.contains("_ => {}"), "el resto del fichero se conserva");
+    }
+
+    /// Aplicar dos veces deja el fichero **igual**.
+    ///
+    /// Es la propiedad que el script consigue con `grep -q … ||`, y la que
+    /// hay que conservar: la preparación se ejecuta cada vez que alguien
+    /// arranca el bootstrap.
+    #[test]
+    fn aplicar_dos_veces_no_duplica() {
+        let mut fs = Memoria::con(&[("/v/library/std/src/sys/pal/mod.rs", MOD_RS)]);
+        let pasos = [paso_insertar("zkvm", "    target_os = \"soso\" => {}", "\"soso\" =>")];
+        assert_eq!(aplicar(&mut fs, "/v", &pasos)[0].resultado, Resultado::Aplicado);
+        let tras_uno = fs.texto("/v/library/std/src/sys/pal/mod.rs");
+
+        let segundo = aplicar(&mut fs, "/v", &pasos);
+        assert_eq!(segundo[0].resultado, Resultado::YaEstaba);
+        assert_eq!(fs.texto("/v/library/std/src/sys/pal/mod.rs"), tras_uno);
+        assert_eq!(tras_uno.matches("\"soso\"").count(), 1, "una sola vez");
+    }
+
+    /// **El caso que motiva la ficha.** Con `sed -i`, un ancla que no aparece
+    /// es un exit 0 y un fichero intacto; el script imprime «OK» y no ha
+    /// parcheado nada.
+    #[test]
+    fn un_ancla_que_no_aparece_es_un_fallo_con_nombre() {
+        let mut fs = Memoria::con(&[("/v/library/std/src/sys/pal/mod.rs", MOD_RS)]);
+        let pasos = [paso_insertar("upstream-renombro-esto", "x", "marca-x")];
+        let inf = aplicar(&mut fs, "/v", &pasos);
+        assert!(!inf[0].ok());
+        match &inf[0].resultado {
+            Resultado::Fallo(m) => {
+                assert!(m.contains("upstream-renombro-esto"), "dice qué ancla: {m}");
+                assert!(m.contains("pal/mod.rs"), "y en qué fichero: {m}");
+            }
+            otro => panic!("esperaba un fallo, hubo {otro:?}"),
+        }
+        // Y no se escribió nada a medias.
+        assert_eq!(fs.texto("/v/library/std/src/sys/pal/mod.rs"), MOD_RS);
+    }
+
+    /// Un fichero que no existe tampoco pasa por bueno.
+    #[test]
+    fn un_fichero_que_falta_es_un_fallo() {
+        let mut fs = Memoria::default();
+        let pasos = [paso_insertar("zkvm", "x", "marca-x")];
+        let inf = aplicar(&mut fs, "/v", &pasos);
+        assert!(!inf[0].ok());
+    }
+
+    /// Los demás pasos siguen informando aunque uno falle: si parara en el
+    /// primero, cada problema costaría un ciclo entero.
+    #[test]
+    fn un_fallo_no_esconde_los_pasos_siguientes() {
+        let mut fs = Memoria::con(&[("/v/a.rs", "hola\n"), ("/v/b.rs", "ancla\n")]);
+        let pasos = [
+            Paso {
+                nombre: "el que falla".into(),
+                fichero: "a.rs".into(),
+                marca: "zzz".into(),
+                accion: Accion::InsertarTrasLinea { ancla: "no-esta".into(), texto: "x".into() },
+            },
+            Paso {
+                nombre: "el que sí".into(),
+                fichero: "b.rs".into(),
+                marca: "zzz".into(),
+                accion: Accion::InsertarTrasLinea { ancla: "ancla".into(), texto: "zzz".into() },
+            },
+        ];
+        let inf = aplicar(&mut fs, "/v", &pasos);
+        assert_eq!(inf.len(), 2);
+        assert!(!inf[0].ok());
+        assert_eq!(inf[1].resultado, Resultado::Aplicado);
+    }
+
+    #[test]
+    fn copiar_es_idempotente_por_contenido() {
+        let mut fs = Memoria::con(&[("/plantilla/dl.rs", "pub fn dlopen() {}\n")]);
+        let pasos = [Paso {
+            nombre: "PAL dl.rs".into(),
+            fichero: "library/std/src/sys/pal/soso/dl.rs".into(),
+            marca: "no se usa en Copiar".into(),
+            accion: Accion::Copiar { desde: "/plantilla/dl.rs".into() },
+        }];
+        assert_eq!(aplicar(&mut fs, "/v", &pasos)[0].resultado, Resultado::Aplicado);
+        assert_eq!(aplicar(&mut fs, "/v", &pasos)[0].resultado, Resultado::YaEstaba);
+        assert_eq!(fs.texto("/v/library/std/src/sys/pal/soso/dl.rs"), "pub fn dlopen() {}\n");
+    }
+
+    #[test]
+    fn anadir_pone_al_final_una_sola_vez() {
+        let mut fs = Memoria::con(&[("/v/Cargo.toml", "[package]\nname = \"std\"\n")]);
+        let pasos = [Paso {
+            nombre: "dependencia soso-rt".into(),
+            fichero: "Cargo.toml".into(),
+            marca: "soso-rt".into(),
+            accion: Accion::Anadir { texto: "\n[target.soso.dependencies]\nsoso-rt = { path = \"x\" }\n".into() },
+        }];
+        assert_eq!(aplicar(&mut fs, "/v", &pasos)[0].resultado, Resultado::Aplicado);
+        assert_eq!(aplicar(&mut fs, "/v", &pasos)[0].resultado, Resultado::YaEstaba);
+        assert_eq!(fs.texto("/v/Cargo.toml").matches("soso-rt").count(), 1);
+    }
+
+    #[test]
+    fn la_revision_tiene_que_ser_la_del_lock() {
+        assert!(verificar_revision("abc123", "abc123").is_ok());
+        let e = verificar_revision("32d94cc9be3f", "otracosa").unwrap_err();
+        assert!(e.contains("otracosa") && e.contains("32d94cc9be3f"), "{e}");
+        assert!(verificar_revision("", "loquesea").is_err(), "sin lock no se parchea");
+    }
+}

@@ -64,6 +64,9 @@ impl TcpTransport for Net {
                 "  red: {host} → {}.{}.{}.{}",
                 out[0], out[1], out[2], out[3]
             ),
+            Err(e) if e == -(abi::EINTR as i64) => {
+                println!("  red: interrumpido resolviendo {host}");
+            }
             Err(e) => println!("  red: no pude resolver {host} (errno {})", -e),
         }
         r
@@ -76,7 +79,14 @@ impl TcpTransport for Net {
         );
         let fd = sys::tcp_connect(&addr, timeout_ms);
         if fd < 0 {
-            println!("  red: conexión rechazada (errno {})", -fd);
+            let e = -fd;
+            let msg = match e {
+                11 => "EAGAIN (timeout o socket no listo)",
+                111 => "conexión rechazada",
+                110 => "timeout de conexión",
+                _ => "E/S de red",
+            };
+            println!("  red: {msg} (errno {e})");
             Err(fd)
         } else {
             println!("  red: conectado (fd {fd})");
@@ -97,6 +107,9 @@ impl TcpTransport for Net {
         let r = sys::write_all(fd, data);
         if TRAZA_BYTES.load(core::sync::atomic::Ordering::Relaxed) {
             println!("  red: write(fd {fd}, {} B) = {:?}", data.len(), r);
+        }
+        if r == Err(-(abi::EINTR as i64)) {
+            println!("  red: interrumpido escribiendo");
         }
         r
     }
@@ -207,8 +220,11 @@ fn fallo_rango(e: descarga::FalloRango) -> &'static str {
     }
 }
 
+pub(crate) const ERR_INTERRUPCION: &str = "interrumpido";
+
 fn map_http_err(e: soso_http::HttpError) -> &'static str {
     match e {
+        soso_http::HttpError::Interrupted => ERR_INTERRUPCION,
         soso_http::HttpError::Clock => "reloj del sistema no utilizable",
         soso_http::HttpError::Dns => "DNS",
         // El motivo viaja con el error: se enseña, que para eso está.

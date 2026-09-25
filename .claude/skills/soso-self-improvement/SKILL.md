@@ -176,11 +176,41 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 
 Camino SI-2: **T16–T19** hechas 2026-09-22; cerrar hito con campaña guest `test-llm-api` + T14 go. T14 bloqueada por T48.
 T18, T45 y T46 en paralelo. T06–T15 cerradas en host/API/sesión. Validación nativa pendiente de T45/T49.
+**T36 y T38 hechas 2026-09-25**. T36: recibo de Forja que liga fuentes, build y
+artefactos, verificado por el cliente antes de escribir el staging. T38:
+inventario con prueba de resultado por herramienta
+(`native/toolchain-lock.json`), que destapó dos defectos, **ya arreglados el mismo día**: el ELF de `sosoas` tenía
+cabecera y section headers desplazados (**T67**, hoy `objdump` lo desensambla,
+pero sigue sin tabla de símbolos) y `wild-soso` declaraba su binario como
+`wild`, arrastrando dos rutas más que tampoco existían (**T68**). Sigue sin
+construirse el sysroot de `x86_64-unknown-soso`, y **`wild` no está instalado**:
+eso bloquea los pasos 4–5 de **T39**, que va por los pasos 1–2 con
+`soso_improve_core::receta` (receta declarativa, idempotente por marca
+explícita, y un ancla ausente es un fallo con nombre — `sed -i` salía 0). Ojo al elegir: los targets de `user/`
+son los que funcionan; `targets/x86_64-unknown-soso.json` es la ruta A y hoy no
+enlaza.
 
 **Backlog nativo** (`docs/self-improvement/native/backlog.json`, sale de T32/T33/T34):
-N-001 … N-004 **hechas** 2026-09-24 — modelo de ficheros por inodo, `PROT_NONE`
-y guarda de pila, cwd por spawn, y `flock` consultivo. Lo siguiente es N-005
-(experimento: `dlopen` frente a enlazado estático). Cada una se acredita con
+N-001 … N-004 **hechas** y **N-005 decidida** (2026-09-24) — modelo de ficheros
+por inodo, `PROT_NONE` y guarda de pila, cwd por spawn, `flock` consultivo, y
+el experimento de carga resuelto a favor del **enlazado estático** (`dlopen` no
+hace falta), y **N-009** (2026-09-25) le da al buscador una semántica que se
+puede creer. **N-006 está aplazada a propósito**: sin ningún consumidor de C,
+elegir qué funciones lleva la capa libc sería adivinar. **N-010 también está
+hecha** (2026-09-25): `sosh` declara su subconjunto y rechaza lo que no sabe
+hacer en vez de colarlo como argumento. **N-008 tiene la forma decidida**
+(eventos, no sondeo: `stat` es ciego dentro de su segundo) con la
+implementación aplazada por falta de consumidor. **N-012 cerrada, 20,5×** (`stat` de 5 componentes: 17,1 M → 833 k ciclos; por componente de ruta ~3 M → ~36 k):
+arreglados el CRC recalculado en cada lectura, `lookup` volcando el directorio
+entero, el `Box` de 4 KiB por nodo, el `Vec` de `stat_inode` y las **cinco**
+reservas de `resolve_user_path` (que paga toda syscall con ruta). Medido el reparto final: el syscall pelado son 2 635 ciclos (1 %), el árbol
+~17 k y **~243 k una sola reserva**, así que dentro de sosofs no queda nada
+grande. El trozo que queda es
+**[N-013](../../../docs/self-improvement/native/N-013.md)** — `revisar()` audita
+el montón del kernel en cada alloc/dealloc y explica el **~75 %** — y **es
+decisión del usuario**: es un detector de desbordamientos, no lastre. Ojo al
+medir: los tests del host van en `debug` salvo que pidas `--release`, y en
+release los microbancos se los come el optimizador. Cada una se acredita con
 `cargo xtask test sys --only=…` sobre `user/soso-agent-probe`, y las medidas se
 anotan en `native/probes.json`.
 

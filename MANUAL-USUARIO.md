@@ -336,6 +336,27 @@ servidor 3>&-                   # sin registros
 log                             # ver el ring global de registros
 ```
 
+### Lo que sosh no sabe hacer, y lo dice
+
+`sosh` no es bash. Lo que no está no se queda callado: se rechaza con un
+mensaje que dice qué hacer en su lugar.
+
+| Si escribes | sosh responde |
+|---|---|
+| `a ; b`, `a && b`, `a \|\| b` | no sé encadenar comandos; usa una línea por comando |
+| `cmd &` | no sé ejecutar en segundo plano; cada comando termina antes del siguiente |
+| `cmd 2>&1` | no sé duplicar descriptores; redirige cada uno a su fichero, o `>&-` para cerrar |
+| `ls *.rs` | no expando comodines; entrecomíllalo si es literal |
+| `echo $HOME` | no expando variables; entrecomíllalo si es literal |
+
+Antes estos caracteres se colaban como **argumentos del comando**, que es peor
+que un error: `echo dos ; echo tres` imprimía `dos ; echo tres` y el segundo
+comando no llegaba a ejecutarse.
+
+Si quieres el carácter tal cual, **entrecomíllalo**: `echo "seis;siete"`
+imprime `seis;siete`. Y `ask` no se ve afectado — se resuelve antes de
+interpretar la línea, así que una pregunta puede llevar `;`, `$` o `*`.
+
 ### Canal de registro (fd 3)
 
 Todo proceso arranca con un cuarto descriptor, **fd 3**, pensado para eventos de
@@ -363,6 +384,33 @@ un fichero: el entorno decide dónde van los registros sin recompilar.
 (o si les pasas `-`). En un pipeline el escritor cierra y `read` devuelve 0. En la
 consola, **Ctrl-D** hace lo mismo: el programa termina. El `-` sigue valiendo,
 como en Unix.
+
+### `grep`: busca subcadenas, no expresiones regulares
+
+    grep [-inlrF] [-m N] PATRON [FICHERO...]
+
+| Opción | Qué hace |
+|---|---|
+| `-i` | ignora mayúsculas y minúsculas (ASCII) |
+| `-n` | pone el número de línea |
+| `-l` | sólo los nombres de los ficheros que tienen algo |
+| `-r` | baja por los subdirectorios de las rutas que le des |
+| `-F` | busca el patrón tal cual, sin avisos |
+| `-m N` | para después de N líneas por fichero |
+
+El patrón es una **subcadena literal**. No hay expresiones regulares, y por eso
+un patrón que sólo tiene sentido como tal —`fn \w+`, `.*`, `^fn`, `;$`— se
+**rechaza** en vez de buscarse letra por letra y no encontrar nada: un «no hay
+resultados» que en realidad significa «no sé buscar eso» es peor que un error.
+Si de verdad quieres esos caracteres, `-F`.
+
+El **código de salida** distingue las tres cosas:
+
+| Código | Significa |
+|---|---|
+| 0 | hubo coincidencias |
+| 1 | no hubo ninguna |
+| 2 | no se pudo buscar: uso, patrón o fichero |
 
 ### Comandos integrados (builtins)
 

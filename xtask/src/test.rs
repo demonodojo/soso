@@ -979,6 +979,39 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 || ssh_probe_coste(key, port),
             );
         });
+        filter.if_step(sid, "probe: carga de codigo ajeno (N-005)", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: carga de codigo ajeno (N-005)",
+                || ssh_probe_carga(key, port),
+            );
+        });
+        filter.if_step(sid, "probe: busqueda con semantica declarada (N-009)", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: busqueda con semantica declarada (N-009)",
+                || ssh_probe_busqueda(key, port),
+            );
+        });
+        filter.if_step(sid, "probe: normalizar rutas (N-012)", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "probe: normalizar rutas (N-012)", || {
+                ssh_probe_rutas(key, port)
+            });
+        });
+        filter.if_step(sid, "probe: enterarse de un cambio (N-008)", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "probe: enterarse de un cambio (N-008)", || {
+                ssh_probe_vigilancia(key, port)
+            });
+        });
+        filter.if_step(sid, "sosh: lo que no sabe hacer lo dice (N-010)", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "sosh: lo que no sabe hacer lo dice (N-010)", || {
+                ssh_sosh_subconjunto(key, port)
+            });
+        });
         filter.if_step(sid, "sosh: comillas en rutas con espacios", || {
             report.paso_ssh_sys(
                 &mut qemu,
@@ -2242,10 +2275,23 @@ fn ssh_forja_hola_run(
         let _ = srv.kill();
         return Err(e);
     }
+    // Tras el camino feliz, dos casos que **no** deben dejar nada en el
+    // staging (T36). Van en el mismo guion para aprovechar el servidor y el
+    // arranque que ya están en pie.
+    //
+    // El estado del último `sync` vive en un fichero, así que se puede
+    // estropear desde la shell sin meter ganchos de prueba en el cliente:
+    // 1. un build-id que no es el de este sync → el recibo no cuadra;
+    // 2. sin estado ninguno → no hay contra qué comparar y no se construye.
     let guion = format!(
         "soso-forja write-hola --msg {MSG}\n\
          soso-forja all --host 10.0.2.2 --token soso-b3\n\
          /bin/hola-std\n\
+         echo build-id=noesmio > /var/forja-cache/ultimo-sync.txt\n\
+         echo source-manifest-sha256=00 >> /var/forja-cache/ultimo-sync.txt\n\
+         soso-forja build --host 10.0.2.2 --token soso-b3\n\
+         rm /var/forja-cache/ultimo-sync.txt\n\
+         soso-forja build --host 10.0.2.2 --token soso-b3\n\
          exit\n"
     );
     let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(180));
@@ -2260,6 +2306,18 @@ fn ssh_forja_hola_run(
     }
     if !texto.contains(MSG) {
         return Err(format!("hola-std no mostró {MSG}: {texto}"));
+    }
+    // Lo que se vigila no es sólo que falle: es que **no escriba**. Un cliente
+    // que rechaza el recibo pero ya dejó el pack en el staging no protege de
+    // nada, porque de ahí se aplica.
+    if !texto.contains("forja: recibo rechazado") {
+        return Err(format!("un recibo ajeno no se rechazó: {texto}"));
+    }
+    if !texto.contains("no se escribió nada en") {
+        return Err(format!("rechazó el recibo pero no dijo que no escribió: {texto}"));
+    }
+    if !texto.contains("no hay un sync previo") {
+        return Err(format!("construyó sin sync previo: {texto}"));
     }
     Ok(())
 }
@@ -2852,6 +2910,175 @@ fn ssh_probe_canales(key: &Path, ssh_port: u16) -> Result<(), String> {
         "canales/salida-grande-intacta",
         "canales/eof-cuando-el-escritor-muere",
         "canales/tcp-dos-conexiones-al-mismo-destino",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// N-012 — que normalizar rutas siga significando lo mismo.
+///
+/// `abs_path` se reescribió para hacer una reserva en vez de cinco, y es el
+/// camino de **toda** llamada con ruta. El kernel no se compila para el host,
+/// así que la comprobación vive aquí; y lo que de verdad se vigila es que
+/// `..` **no deje salirse de la raíz**.
+fn ssh_probe_rutas(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe rutas\nexit\n",
+        Duration::from_secs(240),
+    )?;
+    publicar_informe("rutas", &salida);
+    for esperado in [
+        "rutas/el-fichero-esta-donde-se-dejo ok",
+        "rutas/el-punto-no-cambia-nada ok",
+        "rutas/las-barras-de-mas-no-cuentan ok",
+        "rutas/punto-punto-sube-un-nivel ok",
+        "rutas/subir-desde-la-raiz-no-escapa ok",
+        "rutas/relativa-usa-el-cwd ok",
+        "rutas/relativa-con-punto-punto ok",
+        "rutas/una-ruta-demasiado-larga-se-rechaza ok",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// N-008, paso 1 — ¿basta con sondear `stat` para enterarse de un cambio?
+///
+/// **No juzga la parte que decide: informa.** La ficha tiene que elegir entre
+/// eventos en el kernel y sondeo, y poner aquí un umbral sería inventarme el
+/// criterio antes de mirar el dato — la lección del paso 1 de N-001.
+fn ssh_probe_vigilancia(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe vigilancia\nexit\n",
+        Duration::from_secs(300),
+    )?;
+    if !salida.contains("probe-json:") {
+        return Err(format!("la medida no llegó al informe final: {salida:?}"));
+    }
+    publicar_informe("vigilancia", &salida);
+    for l in salida.lines() {
+        let l = l.trim();
+        if l.starts_with("vigilancia: ") {
+            println!("      [vigilancia] {l}");
+        }
+    }
+    for esperado in [
+        "vigilancia/un-cambio-de-tamano-se-nota ok",
+        "vigilancia/las-dos-escrituras-eran-del-mismo-tamano ok",
+        "vigilancia/el-contenido-si-cambio ok",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// N-010 — qué subconjunto de shell promete `sosh`.
+///
+/// Lo que se comprueba no es que falten operadores, sino que **no se cuelen
+/// como argumentos**. `echo hola &` imprimiendo «hola &» es peor que un error:
+/// quien lo escribió cree que lanzó algo en segundo plano.
+///
+/// Cada línea lleva su marca para que el fallo diga cuál falló, y las dos
+/// últimas son el **control**: lo que sí se sabe hacer tiene que seguir
+/// funcionando, y entrecomillar tiene que ser la salida de emergencia.
+fn ssh_sosh_subconjunto(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let guion = concat!(
+        "echo uno &\n",
+        "echo dos ; echo tres\n",
+        "echo cuatro && echo cinco\n",
+        "ls 2>&1\n",
+        "ls *.rs\n",
+        "echo $HOME\n",
+        "echo \"seis;siete\"\n",
+        "echo ocho | grep ocho\n",
+        "exit\n",
+    );
+    let salida = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
+    for (etiqueta, marca) in [
+        ("& en segundo plano", "sosh: no sé ejecutar en segundo plano"),
+        ("; como separador", "sosh: no sé encadenar comandos"),
+        ("&& condicional", "sosh: no sé encadenar comandos"),
+        ("2>&1", "sosh: no sé duplicar descriptores"),
+        ("* como comodín", "sosh: no expando comodines"),
+        ("$ como variable", "sosh: no expando variables"),
+    ] {
+        if !salida.contains(marca) {
+            return Err(format!("«{etiqueta}» no se rechazó ({marca:?}); salida: {salida:?}"));
+        }
+    }
+    // Controles: entrecomillado pasa, y el pipe sigue funcionando.
+    for (etiqueta, marca) in [
+        ("entrecomillado literal", "seis;siete"),
+        ("pipe", "ocho"),
+    ] {
+        if !salida.contains(marca) {
+            return Err(format!("el control «{etiqueta}» dejó de funcionar; salida: {salida:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// N-009 — qué promete el buscador de soso.
+///
+/// Los casos miran el **código de salida** y no el texto: es lo que un
+/// programa que llame a la herramienta puede interpretar sin adivinar, y las
+/// tres formas de mentir que se vigilan —«no hay» por «no pude», una regex
+/// buscada tal cual, y una línea no-UTF8 saltada en silencio— se distinguen
+/// ahí.
+fn ssh_probe_busqueda(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe busqueda\nexit\n",
+        Duration::from_secs(240),
+    )?;
+    publicar_informe("busqueda", &salida);
+    for esperado in [
+        "busqueda/hay-coincidencias-sale-0 ok",
+        "busqueda/sin-coincidencias-sale-1 ok",
+        "busqueda/una-regex-se-rechaza-en-vez-de-mentir ok",
+        "busqueda/con-F-se-busca-literal ok",
+        "busqueda/un-byte-invalido-no-esconde-el-resto ok",
+        "busqueda/numera-las-lineas ok",
+        "busqueda/recursivo-baja-a-los-subdirectorios ok",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// N-005 — el experimento de carga de código ajeno.
+///
+/// Dos medidas en direcciones contrarias: C compilado desde fuente y enlazado
+/// **sí** corre; un ELF que no es `ET_EXEC` **no** arranca. La segunda lleva su
+/// control —la misma copia sin tocar, que sí arranca—, porque «no arrancó»
+/// también lo diría un fallo de ruta o de permisos.
+fn ssh_probe_carga(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe carga\nexit\n",
+        Duration::from_secs(240),
+    )?;
+    publicar_informe("carga", &salida);
+    for esperado in [
+        "carga/c-ajeno-compilado-y-enlazado ok",
+        "carga/c-ajeno-escribe-en-memoria-del-llamante ok",
+        "carga/copia-intacta-arranca ok",
+        "carga/un-et-dyn-no-arranca ok",
     ] {
         if !salida.contains(esperado) {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));

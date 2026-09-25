@@ -1255,7 +1255,7 @@
       "title": "Vincular fuentes, build y artefacto de Forja",
       "milestone": "SI-6",
       "kind": "Implementación cliente-servidor",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T01"
       ],
@@ -1271,6 +1271,14 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-25",
+        "base": "54f2efb54 + diff de trabajo (T36)",
+        "summary": "Recibo versionado que liga fuentes, build y artefactos. El `build-id` pasa de `DefaultHasher` a sha256; el campo `sources=` —que contenía el hash del **pack**— se sustituye por `source-manifest-sha256` más una línea por artefacto con su sha256 y su tamaño. El cliente verifica **antes** de escribir el staging, y guarda en disco lo que envió en `sync` para tener contra qué comparar. `/build` da 409 sin sync y 500 si el recibo del disco no es el de esa petición.",
+        "evidence": "target/self-improvement/tasks/T36/resultado.md; cargo test -p soso-forja-server 20/20; cargo xtask test sys --only=forja OK; cargo xtask test y check TODO OK",
+        "blocker": "",
+        "next_step": "T38 fija los comandos y versiones exactos de la toolchain, que es lo que le falta al campo `perfil` del recibo."
       }
     },
     {
@@ -1306,7 +1314,7 @@
       "title": "Fijar revisiones y dependencias de la toolchain nativa",
       "milestone": "SI-7",
       "kind": "Inspección acotada",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T01"
       ],
@@ -1327,6 +1335,14 @@
         ],
         "evidence": [],
         "note": "Entrega de laboratorio o especificación; la función se acredita en el consumidor indicado."
+      },
+      "tracking": {
+        "updated_at": "2026-09-25",
+        "base": "54f2efb54 + diff de trabajo (T38)",
+        "summary": "Inventario con prueba de resultado por herramienta. Aplicar la regla («nada nativo por su nombre») cambió el estado de tres: `sosoas` no ensambla y emite un ELF con la cabecera desplazada dos bytes (T67); `wild-soso` declara su binario como `wild`, así que las dos rutas que lo buscan no existen nunca (T68) y además `wild` no está instalado; y el sysroot de `x86_64-unknown-soso` no se ha construido. Ninguno se había notado porque ninguno participa en el camino que hoy funciona.",
+        "evidence": "docs/self-improvement/native/{toolchain-lock.json,toolchain-deps.md}; target/self-improvement/tasks/T38/resultado.md",
+        "blocker": "",
+        "next_step": "T67 y T68 son los dos defectos abiertos. T39–T42 levantan la ruta A, que hoy no puede ni emitir un objeto ni enlazar."
       }
     },
     {
@@ -1335,7 +1351,7 @@
       "title": "Hacer reproducible el bootstrap de libstd para soso",
       "milestone": "SI-7",
       "kind": "Implementación de build",
-      "status": "pending",
+      "status": "in_progress",
       "depends_on": [
         "T38",
         "T50"
@@ -1359,6 +1375,14 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-25",
+        "base": "54f2efb54 + diff de trabajo (T39)",
+        "summary": "Pasos 1–2 de 5. `soso_improve_core::receta`: receta declarativa sobre el trait `Archivos`, idempotente por marca explícita, que **falla con nombre cuando un ancla no aparece** — `sed -i` y `perl -i` salen 0 en ese caso (comprobado), así que `apply-patches.sh` imprime OK habiendo parcheado cero si upstream renombra algo. `verificar_revision` compara contra el lock de T38 sin hablar con git. 8 tests.",
+        "evidence": "target/self-improvement/tasks/T39/{tests-receta.txt,check.txt}; cargo test -p soso-improve-core --features std 87+14+14 verdes; no_std y guest compilan",
+        "blocker": "Pasos 4–5 (compilar libstd cruzada y ejecutar un programa enlazado en el guest) **bloqueados**: `wild`, el enlazador que nombra `targets/x86_64-unknown-soso.json`, no está instalado en este host (medido en T38). El paso 3 depende del build. No instalo la herramienta por mi cuenta: es el entorno del usuario.",
+        "next_step": "Traducir los parches de apply-patches.sh a pasos de la receta y enchufarla en los dos adaptadores; los pasos 3–5 cuando haya enlazador."
       }
     },
     {
@@ -2399,6 +2423,69 @@
         ],
         "blocker": null,
         "next_step": "La guarda de verdad la trae N-002 (PROT_NONE). Cuando esté, hay_guarda_de_pila() pasará a true sin tocar nada más."
+      }
+    },
+    {
+      "id": "T67",
+      "file": "T67-sosoas-elf-desplazado.md",
+      "title": "El ELF de sosoas tiene la cabecera desplazada dos bytes",
+      "milestone": "SI-7",
+      "kind": "Corrección acotada",
+      "status": "done",
+      "depends_on": [
+        "T38"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C6",
+      "context": [
+        "tools/sosoas/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [],
+        "evidence": [],
+        "note": "Herramienta de host; su función se acredita en el consumidor (T39–T42)."
+      },
+      "tracking": {
+        "updated_at": "2026-09-25",
+        "base": "54f2efb54 + diff de trabajo",
+        "summary": "La cabecera ELF iba dos bytes corrida desde `e_type` y **los section headers ocho** desde `sh_addr`; `sh_name`, `sh_type`, `e_ehsize`, `e_shentsize` y `e_shstrndx` no se escribían nunca. Los offsets viven ahora en módulos con nombre y hay tres tests que no dependen de binutils, con las dos mutaciones comprobadas.",
+        "evidence": "cargo test -p sosoas 5/5; cargo test -p wild-soso 1/1; readelf/objdump sobre el objeto emitido",
+        "blocker": "",
+        "next_step": "Falta la tabla de símbolos: `.globl` se ignora, así que el objeto no sirve para enlazar. Es trabajo de ensamblador, fuera de esta corrección."
+      }
+    },
+    {
+      "id": "T68",
+      "file": "T68-wild-soso-nombre.md",
+      "title": "El enlazador wild-soso no existe con ese nombre",
+      "milestone": "SI-7",
+      "kind": "Corrección acotada",
+      "status": "done",
+      "depends_on": [
+        "T38"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C6",
+      "context": [
+        "tools/wild-soso/Cargo.toml",
+        "targets/x86_64-unknown-soso.json",
+        "scripts/soso-rust-bootstrap.sh",
+        "xtask/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [],
+        "evidence": [],
+        "note": "Herramienta de host; su función se acredita en el consumidor (T39–T42)."
+      },
+      "tracking": {
+        "updated_at": "2026-09-25",
+        "base": "54f2efb54 + diff de trabajo",
+        "summary": "El binario se declaraba `wild` mientras el target y el bootstrap pedían `wild-soso`, así que ninguna de las dos rutas existía nunca — y como el envoltorio invoca `wild`, poner su directorio en el PATH lo hacía llamarse a sí mismo. Además el bootstrap y `xtask` apuntaban a `tools/*/target/release`, que no existen (son miembros del workspace), y el bootstrap compilaba sin `--release`. Un test ata el nombre del binario al `\"linker\"` del target.",
+        "evidence": "cargo test -p wild-soso 1/1",
+        "blocker": "",
+        "next_step": "`wild` sigue sin estar instalado, así que el target no puede enlazar: instalarlo o portarlo es T39–T42."
       }
     }
   ],

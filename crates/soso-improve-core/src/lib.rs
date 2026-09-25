@@ -65,6 +65,7 @@ pub mod durable;
 pub mod entorno;
 pub mod evaluacion;
 pub mod pruebas;
+pub mod receta;
 pub mod tiempo;
 pub mod transporte;
 pub mod ignorar;

@@ -415,6 +415,7 @@ version = "0.1.0"
 name = "soso-agent-probe"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "libsoso",
  "soso-abi",
 ]

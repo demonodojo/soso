@@ -12,6 +12,36 @@ Tres caminos distintos (no mezclarlos):
 
 `soso-forja all --host 10.0.2.2 --token …` + revert del shim. Token: `SOSO_FORJA_TOKEN` (Bearer en POST y GET); obligatorio si `SOSO_FORJA_BIND` no es loopback (`127.0.0.1`/`::1`/`localhost`). Cliente: `--token`. `SOSO_FORJA_RELEASE=hola-std` compila solo ese binario y entrega el ELF como pack con `X-Forja-Build-Id`. Demo B3: `soso-forja write-hola --msg …` + `all --host 10.0.2.2 --token …` aplica `/bin/hola-std` sin halt (`cargo xtask test -- --guest sys --only forja`).
 
+### El recibo: qué liga las fuentes con el artefacto
+
+`manifest.txt` **es un recibo versionado** (T36), no una etiqueta. El servidor
+lo emite junto a los artefactos y el cliente lo verifica **antes** de escribir
+nada en `/var/actualiza-prueba`, porque de ahí se aplica.
+
+```
+forja-recibo=1
+build-id=<16 hex del sha256 del manifiesto de fuentes>
+source-manifest-sha256=<sha256 completo del manifiesto aceptado en /sync>
+source-files=<cuántos ficheros>
+perfil=<cargo-xtask-release|hola-std|fake-ok|fake-fail>
+artefacto=rootfs.pack sha256=<hex> bytes=<n>
+artefacto=kernel-x86_64 sha256=<hex> bytes=<n>
+```
+
+`sync` guarda en `/var/forja-cache/ultimo-sync.txt` el `build-id` y el hash de
+las fuentes **que envió**, y `build` rechaza el pack si el recibo habla de otro
+build o de otras fuentes, si falta un campo, o si los bytes descargados no
+tienen el sha256 que el recibo declara. Un rechazo no deja nada escrito.
+
+Dos cosas que el cliente ya no acepta: construir sin un `sync` previo en esa
+máquina (no hay contra qué comparar), y un servidor que no emita recibo — se
+dice con un error, no se interpreta a medias.
+
+Del lado del servidor, `POST /build` devuelve **409** si no hubo `sync`, y
+**500** si el build no dejó un recibo con el `build-id` de esa petición: lo que
+quedara en el directorio de release es de otra, y servirlo sería entregar un
+artefacto viejo como si fuera el pedido.
+
 ## Hito 1 — ABI ✓
 
 Syscalls 70–82, `SpawnIo` argv/envp, ELF perezoso + PT_TLS, `SOSOFS11`.

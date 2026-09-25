@@ -10,6 +10,9 @@ edition = "2024"
 name = "soso-agent-probe"
 path = "src/main.rs"
 
+[build-dependencies]
+cc = { workspace = true }
+
 [dependencies]
 libsoso = { workspace = true }
 soso-abi = { workspace = true }

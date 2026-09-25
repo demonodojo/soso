@@ -38,6 +38,19 @@ const CHUNK: usize = 64 * 1024;
 /// Buffer de lectura para hashear ficheros ya instalados.
 const HASH_BUF: usize = 256 * 1024;
 
+fn es_interrupcion(msg: &str) -> bool {
+    msg == net::ERR_INTERRUPCION
+}
+
+fn salir_interrumpido(liberar_exclusion: bool) -> u8 {
+    if liberar_exclusion {
+        soltar_exclusion();
+    }
+    println!("soso-update: interrumpido (Ctrl-C)");
+    libsoso::logln!("actualiza: interrumpido (Ctrl-C)");
+    130
+}
+
 fn main(args: &[String]) -> u8 {
     let mut parts: Vec<String> = args.to_vec();
     // `--traza` vale para cualquier subcomando y se quita antes de repartir.
@@ -189,6 +202,9 @@ fn cmd_comprobar(args: &[String]) -> u8 {
     let man = match load_manifest(&opts) {
         Ok(m) => m,
         Err(e) => {
+            if es_interrupcion(e) {
+                return salir_interrumpido(false);
+            }
             println!("soso-update: {e}");
             return 1;
         }
@@ -256,6 +272,9 @@ fn cmd_aplicar(args: &[String]) -> u8 {
     let (man, man_bytes) = match load_manifest_con_bytes(&opts) {
         Ok(m) => m,
         Err(e) => {
+            if es_interrupcion(e) {
+                return salir_interrumpido(false);
+            }
             println!("soso-update: {e}");
             return 1;
         }
@@ -287,8 +306,14 @@ fn cmd_aplicar(args: &[String]) -> u8 {
         }
     }
     if !opts.forzar && semver::cmp(&man.version, &actual) != Ordering::Greater {
-        println!("soso-update: ya estás en {} (usa --forzar)", man.version_raw);
-        return 0;
+        if !manifiesto_tiene_trabajo(&man) {
+            println!("soso-update: ya estás en {} (usa --forzar)", man.version_raw);
+            return 0;
+        }
+        println!(
+            "soso-update: misma versión {} pero hay artefactos distintos en el manifiesto",
+            man.version_raw
+        );
     }
     // U6: si esta máquina no tiene dónde escribir la decisión, no se puede
     // prometer vuelta atrás — y hay que decirlo **antes** de descargar y
@@ -338,6 +363,9 @@ fn cmd_aplicar(args: &[String]) -> u8 {
     let etapa = match preparar_etapa(&man, &man_bytes) {
         Ok(d) => d,
         Err(e) => {
+            if es_interrupcion(e) {
+                return salir_interrumpido(true);
+            }
             println!("soso-update: {e}");
             soltar_exclusion();
             return 1;
@@ -353,7 +381,11 @@ fn cmd_aplicar(args: &[String]) -> u8 {
     }
 
     if let Err(e) = comprobar_espacio(&man, &cambian, &pendientes) {
+        if es_interrupcion(e) {
+            return salir_interrumpido(true);
+        }
         println!("soso-update: {e}");
+        soltar_exclusion();
         return 1;
     }
 
@@ -378,6 +410,11 @@ fn cmd_aplicar(args: &[String]) -> u8 {
         // el sistema a medias, sólo la etapa incompleta.
         for span in &spans {
             if let Err(e) = bajar_span(&opts, &etapa, &pendientes, span) {
+                if es_interrupcion(e) {
+                    println!("  lo descargado se conserva: vuelve a lanzarlo para reanudar");
+                    libsoso::logln!("actualiza: descarga interrumpida (Ctrl-C); etapa conservada");
+                    return salir_interrumpido(true);
+                }
                 println!("soso-update: {e}");
                 println!("  lo descargado se conserva: vuelve a lanzarlo para reanudar");
                 libsoso::logln!("actualiza: descarga interrumpida ({e}); etapa conservada");
@@ -845,6 +882,19 @@ fn pad_sector(chunk: &[u8]) -> Vec<u8> {
         v.resize(v.len() + (SECTOR - rem), 0);
     }
     v
+}
+
+/// Hay algo que `comprobar` marcaría como descarga (rootfs o kernel), aunque el
+/// semver local ya coincida con el remoto (p. ej. kernel reflasheado in situ).
+fn manifiesto_tiene_trabajo(man: &Manifest) -> bool {
+    man.files.iter().any(|f| file_needs_update(f)) || kernel_necesita_actualizar(man)
+}
+
+fn kernel_necesita_actualizar(man: &Manifest) -> bool {
+    if man.kernel_size == 0 || man.kernel_hash.is_empty() {
+        return false;
+    }
+    read_release().map(|r| r.kernel) != Some(man.kernel_hash.clone())
 }
 
 fn file_needs_update(entry: &manifest::FileEntry) -> bool {

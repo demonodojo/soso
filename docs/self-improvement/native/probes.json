@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "descripcion": "Resultados de las sondas de ABI de T33. Una capacidad por pase; lo no medido se dice, no se supone.",
-  "actualizado": "2026-09-24",
+  "actualizado": "2026-09-25",
   "origen_incognitas": "docs/self-improvement/native/opencode-deps.md (T32)",
   "como_se_ejecuta": {
     "un_arranque": "cargo xtask test sys --only=\"archivos persistentes\"",
@@ -443,6 +443,185 @@
       ],
       "hallazgo": "Las dos cumplen. Una salida de 64 KiB cruza la tubería entera y en orden pese a bloquear al escritor varias veces; el lector ve EOF cuando el escritor **muere** sin cerrar; y dos conexiones seguidas al mismo destino funcionan las dos.",
       "evidencia": "target/self-improvement/tasks/T33/canales.txt"
+    },
+    {
+      "id": "carga",
+      "capacidad": "ejecutar código nativo ajeno (el experimento de N-005)",
+      "por_que": "T32 dejó que «no hay dlopen» mata todos los `.node`. La pregunta que decide N-006 y N-007 no es si se puede añadir carga dinámica, sino si hace falta: ¿basta con enlazar estáticamente?",
+      "estado": "medida",
+      "resultado": "**enlazado estático sí, carga dinámica no** — y ninguna ficha del backlog necesita la segunda",
+      "modulo": "user/soso-agent-probe/src/sondas/carga.rs (+ c/ajeno.c, compilado por build.rs)",
+      "casos": [
+        {
+          "id": "carga/c-ajeno-compilado-y-enlazado",
+          "esperado": "286d4b6114e61fc3",
+          "observado": "286d4b6114e61fc3",
+          "resultado": "pasa",
+          "nota": "C **nuevo**, escrito para la ocasión, no heredado de `ring`: mide la capacidad, no lo que ya venía dentro. Calcula un FNV-1a de la entrada y se compara contra el mismo cálculo hecho en Rust — no contra un número copiado de la primera ejecución, que habría hecho pasar el caso para siempre."
+        },
+        {
+          "id": "carga/c-ajeno-escribe-en-memoria-del-llamante",
+          "esperado": "[26, 1, dc, b7, 92, 6d, 48, 23]",
+          "observado": "[26, 1, dc, b7, 92, 6d, 48, 23]",
+          "resultado": "pasa",
+          "nota": "Pasa por el `memcpy` de compiler-builtins-mem, que es uno de los tres únicos símbolos externos que el C de ring necesita."
+        },
+        {
+          "id": "carga/copia-intacta-arranca",
+          "esperado": "arrancó y salió con 7",
+          "observado": "arrancó y salió con 7",
+          "resultado": "pasa",
+          "nota": "**Es el control del caso siguiente**, y va antes a propósito: sin él, «el ET_DYN no arrancó» sería compatible con «nada de /tmp arranca»."
+        },
+        {
+          "id": "carga/un-et-dyn-no-arranca",
+          "esperado": "no arrancó: argumento inválido (-22)",
+          "observado": "no arrancó: argumento inválido (-22)",
+          "resultado": "pasa",
+          "nota": "Delta de **un byte** sobre el binario del control: `e_type` de 2 (ET_EXEC) a 3 (ET_DYN). Ruta, tamaño, permisos y contenido idénticos. Lo que se mide es que el cargador lo **rechace**, no que se caiga: un ELF que arrancara a medias sería peor que uno que no arranca."
+        }
+      ],
+      "hallazgo": "El camino de código nativo ajeno **ya está abierto y es estático**: `soso-http` enlaza 31 objetos de C de `ring`, y esos objetos sólo necesitan tres símbolos externos (`memcpy`, `memset`, `__stack_chk_fail`). El binario que sale es ET_EXEC sin PT_INTERP ni sección dinámica, y el cargador rechaza cualquier otra cosa. Cuidado con generalizar el tres: `ring` es freestanding —ni malloc, ni stdio, ni errno—, así que es el **suelo** de N-006, no su techo.",
+      "para_t34": [
+        {
+          "hueco": "carga dinámica (`dlopen`) — **decidido que no hace falta** (N-005)",
+          "archivos": "kernel/src/task/elf.rs, user/x86_64-soso-user.json",
+          "reproduccion": "los cuatro casos de la sonda `carga`",
+          "lo_que_sigue_faltando": "la libc para C que no sea freestanding: malloc, stdio, errno, pthread. Es N-006, y se mide pasando las siete sondas de T33 escritas en C."
+        }
+      ],
+      "evidencia": "target/self-improvement/tasks/N-005/{carga.txt,libc-superficie.txt}"
+    },
+    {
+      "id": "busqueda",
+      "capacidad": "buscar en el código con una semántica que se pueda creer",
+      "por_que": "La herramienta `grep` de OpenCode es ripgrep, que se descarga en ejecución; en soso no está ni hay quien lo compile. Sirve a las dos ramas de la decisión de plan: un agente portado y uno nativo necesitan igual buscar.",
+      "estado": "medida",
+      "resultado": "**pasa entera** desde N-009",
+      "modulo": "user/soso-agent-probe/src/sondas/busqueda.rs",
+      "casos": [
+        {
+          "id": "busqueda/hay-coincidencias-sale-0",
+          "esperado": "0 con la línea",
+          "observado": "0 con la línea",
+          "resultado": "pasa",
+          "nota": "El caso fácil. Existe para que los dos siguientes signifiquen algo: sin él, un grep que siempre fallara pasaría el de «sin coincidencias»."
+        },
+        {
+          "id": "busqueda/sin-coincidencias-sale-1",
+          "esperado": "1",
+          "observado": "1",
+          "resultado": "pasa desde N-009",
+          "nota": "Era NEGATIVO: siempre salía 0 salvo error de lectura, así que «no aparece» y «funcionó» eran el mismo valor para quien llama."
+        },
+        {
+          "id": "busqueda/una-regex-se-rechaza-en-vez-de-mentir",
+          "esperado": "2 y lo explica",
+          "observado": "2 y lo explica",
+          "resultado": "pasa desde N-009",
+          "nota": "Era NEGATIVO: `fn \\w+` se buscaba letra por letra y devolvía cero líneas con salida 0 — una respuesta que *parece* un hecho sobre el código."
+        },
+        {
+          "id": "busqueda/con-F-se-busca-literal",
+          "esperado": "1",
+          "observado": "1",
+          "resultado": "pasa desde N-009",
+          "nota": "El control del anterior: sin él, un grep que rechazara cualquier patrón raro también lo pasaría."
+        },
+        {
+          "id": "busqueda/un-byte-invalido-no-esconde-el-resto",
+          "esperado": "0 y la encuentra",
+          "observado": "0 y la encuentra",
+          "resultado": "pasa desde N-009",
+          "nota": "Era NEGATIVO y era el más callado: se comparaba convirtiendo la línea a UTF-8 y lo que no convertía se saltaba en silencio, así que un byte suelto escondía el resto del fichero."
+        },
+        {
+          "id": "busqueda/numera-las-lineas",
+          "esperado": "3:let x = 1;",
+          "observado": "3:let x = 1;",
+          "resultado": "pasa desde N-009",
+          "nota": "Lo que convierte «está» en «está aquí»."
+        },
+        {
+          "id": "busqueda/recursivo-baja-a-los-subdirectorios",
+          "esperado": "0 y nombra el fichero anidado",
+          "observado": "0 y nombra el fichero anidado",
+          "resultado": "pasa desde N-009",
+          "nota": "Recorre con lista de pendientes, no con recursión de pila: un árbol hondo no puede tumbar el proceso."
+        }
+      ],
+      "hallazgo": "El defecto no era que el `grep` de soso fuera limitado, sino que **no lo decía**: podía mentir de tres formas —«no hay» por «no pude», una expresión regular buscada tal cual, y una línea no-UTF8 saltada en silencio— y las tres producen una conclusión falsa sobre el código en quien no puede sospechar. N-009 declara la semántica (subcadenas literales), separa los códigos de salida y rechaza en voz alta lo que no sabe hacer.",
+      "para_t34": [
+        {
+          "hueco": "ripgrep — **sustituido con semántica declarada** (N-009)",
+          "archivos": "user/coreutils/src/bin/grep.rs",
+          "reproduccion": "los siete casos de la sonda `busqueda`",
+          "lo_que_sigue_faltando": "expresiones regulares (se rechazan, no se emulan), filtros por glob (`--include`), orden por fecha y detección de binarios."
+        }
+      ],
+      "evidencia": "target/self-improvement/tasks/N-009/busqueda.txt"
+    },
+    {
+      "id": "vigilancia",
+      "capacidad": "enterarse de que un fichero cambió",
+      "por_que": "`@parcel/watcher` lo necesita, y antes de escribir eventos en el kernel hay que medir si basta con sondear `stat` — la pregunta que N-001 enseñó a hacer.",
+      "estado": "medida",
+      "resultado": "**sondear no vale**, y no por lento: por ciego",
+      "modulo": "user/soso-agent-probe/src/sondas/vigilancia.rs",
+      "casos": [
+        {
+          "id": "vigilancia/un-cambio-de-tamano-se-nota",
+          "esperado": "cambió",
+          "observado": "cambió",
+          "resultado": "pasa",
+          "nota": "El caso barato, que hace que los otros signifiquen algo: si ni esto se viera, sondear estaría descartado de entrada."
+        },
+        {
+          "id": "vigilancia/las-dos-escrituras-eran-del-mismo-tamano",
+          "esperado": "iguales",
+          "observado": "iguales",
+          "resultado": "pasa",
+          "nota": "Comprueba la **premisa** del caso siguiente. En el primer intento escribí 30 bytes donde había 29 y la medida creía estar midiendo la ceguera de `mtime` cuando medía una diferencia de tamaño."
+        },
+        {
+          "id": "vigilancia/dos-escrituras-del-mismo-tamano",
+          "esperado": "",
+          "observado": "6 de 6 pares indistinguibles",
+          "resultado": "observación: es el dato que decide",
+          "nota": "Dos escrituras del mismo tamaño en el mismo segundo dejan `stat` idéntico. **Intermitente**: una ejecución anterior dio «se distinguen» porque cayeron a caballo de un segundo, y por eso se informa de la tasa y no de una anécdota. No juzga, porque poner aquí un veredicto sería decidir la forma antes de mirar el dato."
+        },
+        {
+          "id": "vigilancia/el-contenido-si-cambio",
+          "esperado": "empieza como lo último escrito",
+          "observado": "empieza como lo último escrito",
+          "resultado": "pasa",
+          "nota": "Sin esto, «indistinguibles» podría significar que la escritura no ocurrió. La expectativa se **deriva del valor** escrito, no de un literal: tres veces en esta sonda una expectativa copiada a mano dejó de ser cierta al cambiar el código."
+        },
+        {
+          "id": "vigilancia/coste-de-sondear",
+          "esperado": "",
+          "observado": "64 ficheros: frío 1,12e9 ciclos, caliente 1,09e9 (≈17 M por fichero)",
+          "resultado": "observación",
+          "nota": "Se mide dos veces: una cifra tomada una sola vez no distingue «`stat` es caro» de «la primera vez es cara». Empatan, así que no es el primer acceso."
+        },
+        {
+          "id": "vigilancia/coste-por-profundidad-*",
+          "esperado": "",
+          "observado": "/ = 1,73 M · /var = 4,78 M · 5 componentes = 17,1 M",
+          "resultado": "observación",
+          "nota": "~3 M de ciclos por componente de ruta. Sale de aquí pero **no es de esta ficha**: se abrió N-012."
+        }
+      ],
+      "hallazgo": "Sondear `stat` no sirve para vigilar, y el motivo no es el coste sino la **corrección**: `mtime` está en segundos, así que dos escrituras del mismo tamaño dentro del mismo segundo son invisibles (6 de 6). Aunque `stat` fuera gratis seguiría sin verlas. De rebote quedó medido que `stat` cuesta ~17 M ciclos y que el coste va con la profundidad de la ruta — N-012.",
+      "para_t34": [
+        {
+          "hueco": "vigilancia de ficheros — **forma decidida (eventos), implementación aplazada** (N-008)",
+          "archivos": "por decidir: cola por vigilante y enganches en el VFS",
+          "reproduccion": "los casos de la sonda `vigilancia`",
+          "lo_que_sigue_faltando": "los eventos en sí. El único consumidor conocido es `@parcel/watcher`, de la rama de portar; y con la caché de N-001 el contenido se publica al cerrar, así que ninguna forma puede ver un fichero **mientras** se escribe."
+        }
+      ],
+      "evidencia": "target/self-improvement/tasks/N-008/vigilancia.txt"
     }
   ],
   "resumen": {

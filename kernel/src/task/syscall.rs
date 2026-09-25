@@ -489,8 +489,12 @@ fn with_vfs<R>(f: impl FnOnce() -> Result<R, FsError>) -> Result<R, i64> {
 /// Ruta de usuario resuelta contra el cwd del proceso actual.
 fn resolve_user_path(path_ptr: u64, path_len: u64) -> Result<String, i64> {
     let raw = user_str(path_ptr, path_len)?;
-    let cwd = super::with_current(|p| p.cwd.clone());
-    super::path::abs_path(&cwd, raw)
+    // `abs_path` va **dentro** de `with_current` para no clonar el cwd. Era
+    // una reserva de montón por cada llamada con ruta, y en soso una reserva
+    // cuesta ~243 000 ciclos porque el asignador audita su tabla entera
+    // (N-013). Sólo lee `p.cwd`, así que no alarga la sección crítica más que
+    // lo que ya duraba el clon.
+    super::with_current(|p| super::path::abs_path(&p.cwd, raw))
 }
 
 /// Separa una ruta absoluta en (inode del padre, nombre final).

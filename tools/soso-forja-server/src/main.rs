@@ -22,9 +22,25 @@ enum ReleaseKind {
     HolaStd,
 }
 
+impl ReleaseKind {
+    /// Cómo se llama este perfil en el recibo.
+    fn perfil(self) -> &'static str {
+        match self {
+            ReleaseKind::Cargo => "cargo-xtask-release",
+            ReleaseKind::FakeOk => "fake-ok",
+            ReleaseKind::FakeFail => "fake-fail",
+            ReleaseKind::HolaStd => "hola-std",
+        }
+    }
+}
+
 #[derive(Default)]
 struct Estado {
     manifest: String,
+    /// sha256 **completo** del manifiesto de fuentes aceptado en el último
+    /// `/sync`. Es lo que el recibo liga con los artefactos, y lo que el
+    /// cliente compara contra lo que él envió.
+    manifest_sha256: String,
     build_id: String,
     build_lock: bool,
     synced: Vec<String>,
@@ -273,12 +289,18 @@ fn apply_sync(work: &Path, files: &[(String, Vec<u8>)], prev: &[String]) -> io::
     Ok(new_rels)
 }
 
+/// Identificador corto del conjunto de fuentes aceptado.
+///
+/// Sale de **sha256**, no de `DefaultHasher`. El anterior lo usaba, y eso no es
+/// un hash de contenido en ningún sentido verificable: `DefaultHasher` no
+/// promete estabilidad entre versiones de Rust ni entre plataformas, así que
+/// dos lados del circuito podían calcular identificadores distintos para las
+/// mismas fuentes y nadie se enteraría hasta que el recibo no cuadrase.
+///
+/// Se corta a 16 caracteres porque es un rótulo para leer; lo que liga fuentes
+/// con artefactos en el recibo es el sha256 **completo**.
 fn manifest_id(manifest: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    manifest.hash(&mut h);
-    format!("{:016x}", h.finish())
+    sha256_hex(manifest.as_bytes())[..16].to_string()
 }
 
 fn release_dir(work: &Path) -> Option<PathBuf> {
@@ -297,20 +319,77 @@ fn release_dir_for(work: &Path) -> Option<PathBuf> {
     Some(work.join(format!("target/release-soso/v{}", ver.trim())))
 }
 
-fn write_identified_artifacts(work: &Path, build_id: &str, pack: &[u8], kernel: &[u8]) -> io::Result<()> {
+/// Lo que hace falta para emitir un recibo: de qué fuentes salió el build.
+///
+/// Va junto en una estructura para que no se pueda pasar el hash de unas
+/// fuentes con la cuenta de otras — que es la clase de error que un recibo
+/// existe justo para impedir.
+#[derive(Clone)]
+struct Fuentes {
+    sha256: String,
+    ficheros: usize,
+    perfil: &'static str,
+}
+
+/// Versión del recibo. El cliente rechaza lo que no reconozca en vez de
+/// interpretarlo a medias.
+pub const RECIBO_VERSION: u32 = 1;
+
+/// Escribe los artefactos y el **recibo** que los liga a las fuentes.
+///
+/// El recibo anterior decía `sources=<hash>` y ese hash era el **del pack**,
+/// no el de las fuentes. Un recibo con un campo mal nombrado es peor que no
+/// tenerlo: quien comprueba «sources» cree estar comparando fuentes y está
+/// comparando el artefacto consigo mismo.
+///
+/// Ahora cada cosa dice lo que es, y hay una línea por artefacto con su
+/// tamaño y su sha256, para que el cliente pueda comprobar lo que descarga.
+fn write_identified_artifacts(
+    work: &Path,
+    build_id: &str,
+    fuentes: &Fuentes,
+    pack: &[u8],
+    kernel: &[u8],
+) -> io::Result<()> {
     let dir = release_dir_for(work).ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "VERSION")
     })?;
     fs::create_dir_all(&dir)?;
-    let manifest = format!(
-        "forja-id={build_id}\nsources={}\npack-size={}\n",
+    let recibo = format!(
+        "forja-recibo={RECIBO_VERSION}\n\
+         build-id={build_id}\n\
+         source-manifest-sha256={}\n\
+         source-files={}\n\
+         perfil={}\n\
+         artefacto=rootfs.pack sha256={} bytes={}\n\
+         artefacto=kernel-x86_64 sha256={} bytes={}\n",
+        fuentes.sha256,
+        fuentes.ficheros,
+        fuentes.perfil,
         sha256_hex(pack),
-        pack.len()
+        pack.len(),
+        sha256_hex(kernel),
+        kernel.len(),
     );
-    fs::write(dir.join("manifest.txt"), manifest)?;
+    fs::write(dir.join("manifest.txt"), recibo)?;
     fs::write(dir.join("rootfs.pack"), pack)?;
     fs::write(dir.join("kernel-x86_64"), kernel)?;
     Ok(())
+}
+
+/// El `build-id` que declara el recibo del directorio de release, si lo hay.
+///
+/// Sirve para no servir como resultado de **esta** petición un artefacto que
+/// quedó de otra: si el recibo del disco no es el de la petición en curso, el
+/// build no dejó nada y hay que decirlo, no entregar lo viejo.
+fn build_id_del_recibo(dir: &Path) -> Option<String> {
+    let txt = fs::read_to_string(dir.join("manifest.txt")).ok()?;
+    for line in txt.lines() {
+        if let Some(v) = line.strip_prefix("build-id=") {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
 }
 
 fn pack_from_synced(work: &Path, build_id: &str, synced: &[String]) -> Vec<u8> {
@@ -340,7 +419,7 @@ fn hola_target_dir(work: &Path) -> PathBuf {
     work.join("target/hola-std")
 }
 
-fn run_hola_std(work: &Path, build_id: &str) -> bool {
+fn run_hola_std(work: &Path, build_id: &str, fuentes: &Fuentes) -> bool {
     let user = work.join("user");
     if !user.join("hola-std/src/main.rs").is_file() {
         eprintln!("forja-server: falta user/hola-std en el árbol de trabajo");
@@ -366,7 +445,7 @@ fn run_hola_std(work: &Path, build_id: &str) -> bool {
                 eprintln!("forja-server: hola-std no es ELF");
                 return false;
             }
-            write_identified_artifacts(work, build_id, &bytes, build_id.as_bytes()).is_ok()
+            write_identified_artifacts(work, build_id, fuentes, &bytes, build_id.as_bytes()).is_ok()
         }
         Ok(o) => {
             eprintln!(
@@ -382,14 +461,20 @@ fn run_hola_std(work: &Path, build_id: &str) -> bool {
     }
 }
 
-fn run_release(work: &Path, kind: ReleaseKind, build_id: &str, synced: &[String]) -> bool {
+fn run_release(
+    work: &Path,
+    kind: ReleaseKind,
+    build_id: &str,
+    synced: &[String],
+    fuentes: &Fuentes,
+) -> bool {
     match kind {
         ReleaseKind::FakeFail => return false,
         ReleaseKind::FakeOk => {
             let pack = pack_from_synced(work, build_id, synced);
-            return write_identified_artifacts(work, build_id, &pack, build_id.as_bytes()).is_ok();
+            return write_identified_artifacts(work, build_id, fuentes, &pack, build_id.as_bytes()).is_ok();
         }
-        ReleaseKind::HolaStd => return run_hola_std(work, build_id),
+        ReleaseKind::HolaStd => return run_hola_std(work, build_id, fuentes),
         ReleaseKind::Cargo => {}
     }
     let out = Command::new("cargo")
@@ -555,13 +640,19 @@ fn manejar(
             };
             let n = synced.len();
             let id = manifest_id(&manifest);
+            let sha = sha256_hex(manifest.as_bytes());
             {
                 let mut st = estado.lock().unwrap();
+                st.manifest_sha256 = sha.clone();
                 st.manifest = manifest;
                 st.build_id = id.clone();
                 st.synced = synced;
             }
-            let body = format!("OK {n} ficheros\nbuild-id={id}\n");
+            // El cliente necesita las dos cosas para comprobar el recibo
+            // después: el rótulo corto y el hash completo de lo que **él**
+            // envió. Decirle sólo el rótulo le obligaría a confiar en que el
+            // servidor lo derivó de sus fuentes y no de otras.
+            let body = format!("OK {n} ficheros\nbuild-id={id}\nsource-manifest-sha256={sha}\n");
             let _ = responder(&mut stream, "200 OK", body.as_bytes(), "");
         }
         ("POST", "/build") => {
@@ -579,15 +670,40 @@ fn manejar(
             let build_id = st.build_id.clone();
             let kind = st.release;
             let synced = st.synced.clone();
+            let fuentes = Fuentes {
+                sha256: st.manifest_sha256.clone(),
+                ficheros: st.synced.len(),
+                perfil: kind.perfil(),
+            };
             drop(st);
+            if build_id.is_empty() {
+                estado.lock().unwrap().build_lock = false;
+                let _ = responder(&mut stream, "409 Conflict", b"sin sync previo\n", "");
+                return;
+            }
             if ensure_worktree(&root, &work).is_err()
-                || !run_release(&work, kind, &build_id, &synced)
+                || !run_release(&work, kind, &build_id, &synced, &fuentes)
             {
                 estado.lock().unwrap().build_lock = false;
                 let _ = responder(&mut stream, "500 Error", b"build failed\n", "");
                 return;
             }
             estado.lock().unwrap().build_lock = false;
+            // **Nunca servir lo de otra petición.** Si el recibo que hay en
+            // disco no es el de este build, es que el build no dejó nada y lo
+            // que queda es de antes: eso es un fallo, no un resultado.
+            let recibo_ok = release_dir(&work)
+                .and_then(|d| build_id_del_recibo(&d))
+                .is_some_and(|id| id == build_id);
+            if !recibo_ok {
+                let _ = responder(
+                    &mut stream,
+                    "500 Error",
+                    b"el build no dejo recibo de esta peticion\n",
+                    "",
+                );
+                return;
+            }
             servir_artifact(&mut stream, &work, "rootfs.pack", &build_id);
         }
         ("GET", "/manifest.txt") => {
@@ -827,8 +943,30 @@ mod tests {
     fn http_build_500_and_503() {
         let work = temp_work();
         let (addr, estado) = start_test_server(work.clone(), ReleaseKind::FakeFail, None);
+
+        // Sin `/sync` no hay fuentes de las que construir, y desde T36 eso se
+        // dice con 409: un 500 haría pensar que el build se intentó y falló.
         let resp = http_raw(addr, b"POST /build HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
-        assert_eq!(status_of(&resp), 500);
+        assert_eq!(status_of(&resp), 409, "build sin sync");
+
+        // Con fuentes, un build que falla **sigue siendo** un 500: es lo que
+        // este test vigilaba antes y sigue vigilando.
+        let data = b"x";
+        let h = sha256_hex(data);
+        let mut body = format!("a.rs\t{h}\n").into_bytes();
+        body.extend_from_slice(DATA_SEP);
+        body.extend_from_slice(b"a.rs\n1\nx");
+        let mut req = format!(
+            "POST /sync HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        req.extend_from_slice(&body);
+        assert_eq!(status_of(&http_raw(addr, &req)), 200);
+
+        let resp = http_raw(addr, b"POST /build HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(status_of(&resp), 500, "build fallido");
+
         estado.lock().unwrap().build_lock = true;
         estado.lock().unwrap().release = ReleaseKind::FakeOk;
         let resp = http_raw(addr, b"POST /build HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
@@ -963,8 +1101,20 @@ mod tests {
         let man = http_raw(addr, b"GET /manifest.txt HTTP/1.1\r\nHost: x\r\n\r\n");
         assert_eq!(status_of(&man), 200);
         let man_txt = std::str::from_utf8(body_of(&man)).unwrap();
-        assert!(man_txt.contains(&format!("forja-id={id}")));
-        assert!(man_txt.contains(&format!("sources={}", sha256_hex(pack))));
+        assert!(man_txt.contains(&format!("forja-recibo={RECIBO_VERSION}")));
+        assert!(man_txt.contains(&format!("build-id={id}")));
+        assert!(man_txt.contains(&format!(
+            "artefacto=rootfs.pack sha256={}",
+            sha256_hex(pack)
+        )));
+        // Y lo que da sentido al recibo: que diga de qué **fuentes** salió, no
+        // sólo qué artefacto es. El campo anterior se llamaba `sources` y
+        // contenía el hash del pack.
+        let fuentes_declaradas = man_txt
+            .lines()
+            .find_map(|l| l.strip_prefix("source-manifest-sha256="))
+            .expect("el recibo declara las fuentes");
+        assert_ne!(fuentes_declaradas, sha256_hex(pack));
 
         let src2 = src.replace(msg, "hola-astra-B3-otro");
         let sync2 = post_sync(addr, rel, src2.as_bytes());
@@ -1085,5 +1235,121 @@ fn main(args: &[alloc::string::String]) -> u8 {{
             "el ELF debe incrustar el mensaje sincronizado"
         );
         let _ = fs::remove_dir_all(work);
+    }
+    // ---- T36: el recibo liga fuentes, build y artefactos ----
+
+    fn fuentes_de(manifiesto: &str, n: usize) -> Fuentes {
+        Fuentes {
+            sha256: sha256_hex(manifiesto.as_bytes()),
+            ficheros: n,
+            perfil: "fake-ok",
+        }
+    }
+
+    /// Un árbol de trabajo mínimo: `write_identified_artifacts` necesita
+    /// `VERSION` para saber dónde deja el release.
+    fn work_temporal(nombre: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("forja-t36-{nombre}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("crear work");
+        fs::write(dir.join("VERSION"), "9.9.9\n").expect("VERSION");
+        dir
+    }
+
+    #[test]
+    fn el_build_id_sale_de_sha256_y_no_del_hasher_por_defecto() {
+        let m = "a.rs\tdeadbeef\n";
+        // Estable y derivado del contenido: es el prefijo del sha256 real.
+        assert_eq!(manifest_id(m), sha256_hex(m.as_bytes())[..16]);
+        // Y distingue fuentes distintas.
+        assert_ne!(manifest_id(m), manifest_id("b.rs\tdeadbeef\n"));
+    }
+
+    #[test]
+    fn el_recibo_dice_de_que_fuentes_salio_y_que_artefactos_dejo() {
+        let work = work_temporal("recibo");
+        let manifiesto = "a.rs\t00ff\nb.rs\t11ee\n";
+        let fuentes = fuentes_de(manifiesto, 2);
+        let pack = b"PACK-CONTENIDO".to_vec();
+        let kernel = b"KERNEL-CONTENIDO".to_vec();
+        write_identified_artifacts(&work, "abc123", &fuentes, &pack, &kernel).expect("escribir");
+
+        let dir = release_dir(&work).expect("release dir");
+        let recibo = fs::read_to_string(dir.join("manifest.txt")).expect("recibo");
+
+        assert!(recibo.contains(&format!("forja-recibo={RECIBO_VERSION}\n")));
+        assert!(recibo.contains("build-id=abc123\n"));
+        // **El campo de fuentes contiene las fuentes.** Antes se llamaba
+        // `sources` y guardaba el hash del pack: quien lo comprobara creería
+        // estar comparando fuentes y estaría comparando el artefacto consigo
+        // mismo.
+        assert!(recibo.contains(&format!(
+            "source-manifest-sha256={}\n",
+            sha256_hex(manifiesto.as_bytes())
+        )));
+        assert!(recibo.contains("source-files=2\n"));
+        assert!(recibo.contains(&format!(
+            "artefacto=rootfs.pack sha256={} bytes={}\n",
+            sha256_hex(&pack),
+            pack.len()
+        )));
+        assert!(recibo.contains(&format!(
+            "artefacto=kernel-x86_64 sha256={} bytes={}\n",
+            sha256_hex(&kernel),
+            kernel.len()
+        )));
+        // Y el hash del pack **no** es el de las fuentes, que es lo que hacía
+        // inútil el recibo anterior.
+        assert_ne!(sha256_hex(&pack), sha256_hex(manifiesto.as_bytes()));
+    }
+
+    #[test]
+    fn dos_fuentes_distintas_dan_recibos_distintos() {
+        let work = work_temporal("distintas");
+        let pack = b"MISMO PACK".to_vec();
+        let kernel = b"MISMO KERNEL".to_vec();
+
+        write_identified_artifacts(&work, "id-1", &fuentes_de("a.rs\t00\n", 1), &pack, &kernel)
+            .expect("uno");
+        let dir = release_dir(&work).expect("dir");
+        let primero = fs::read_to_string(dir.join("manifest.txt")).expect("recibo 1");
+
+        write_identified_artifacts(&work, "id-2", &fuentes_de("b.rs\t11\n", 1), &pack, &kernel)
+            .expect("dos");
+        let segundo = fs::read_to_string(dir.join("manifest.txt")).expect("recibo 2");
+
+        // Mismos artefactos, fuentes distintas: el recibo tiene que
+        // distinguirlos. Si no, un pack viejo pasaría por nuevo.
+        assert_ne!(primero, segundo);
+    }
+
+    #[test]
+    fn el_recibo_del_disco_delata_un_artefacto_de_otra_peticion() {
+        let work = work_temporal("viejo");
+        let fuentes = fuentes_de("a.rs\t00\n", 1);
+        write_identified_artifacts(&work, "build-viejo", &fuentes, b"PACK", b"KERNEL")
+            .expect("escribir");
+        let dir = release_dir(&work).expect("dir");
+
+        // Es lo que mira `/build` antes de servir: si el recibo que hay en
+        // disco no es el de esta petición, el build no dejó nada y servir lo
+        // que hay sería entregar el resultado de otra.
+        assert_eq!(build_id_del_recibo(&dir).as_deref(), Some("build-viejo"));
+        assert_ne!(build_id_del_recibo(&dir).as_deref(), Some("build-nuevo"));
+    }
+
+    #[test]
+    fn un_recibo_truncado_no_declara_build_id() {
+        let work = work_temporal("truncado");
+        let fuentes = fuentes_de("a.rs\t00\n", 1);
+        write_identified_artifacts(&work, "abc", &fuentes, b"PACK", b"KERNEL").expect("escribir");
+        let dir = release_dir(&work).expect("dir");
+
+        let recibo = fs::read_to_string(dir.join("manifest.txt")).expect("recibo");
+        // Se corta por la mitad de la primera línea: lo que queda no tiene
+        // build-id, y quien lo lea debe quedarse sin respuesta en vez de
+        // inventarse una.
+        fs::write(dir.join("manifest.txt"), &recibo[..8]).expect("truncar");
+        assert_eq!(build_id_del_recibo(&dir), None);
     }
 }

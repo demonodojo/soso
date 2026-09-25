@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "descripcion": "Inventario de la toolchain nativa (T38). Cada herramienta lleva **prueba de resultado**, no sólo nombre y `--version`: la regla de la ficha es que nada se marca nativo por cómo se llama. `estado` dice qué hace de verdad, no qué pretende.",
+  "medido_en": "2026-09-25",
+  "host": {
+    "triple": "x86_64-unknown-linux-gnu",
+    "rustc": "rustc 1.98.0-nightly (f46ec5218 2026-06-30)",
+    "cargo": "cargo 1.98.0-nightly (a335d47ff 2026-06-26)",
+    "toolchain": "nightly-2026-07-01 (fijada por rust-toolchain.toml)",
+    "sysroot": "/home/jmdiez/.rustup/toolchains/nightly-2026-07-01-x86_64-unknown-linux-gnu",
+    "clang": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+    "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "git": "git version 2.43.0",
+    "python3": "Python 3.12.3"
+  },
+  "ausentes_en_el_host": [
+    {
+      "herramienta": "wild",
+      "por_que_importa": "es el enlazador que nombra `targets/x86_64-unknown-soso.json` y al que delega `tools/wild-soso`. Sin él, ese target no puede enlazar.",
+      "comprobado": "command -v wild → no está"
+    },
+    {
+      "herramienta": "ld.lld / llvm-ar / nasm",
+      "por_que_importa": "no hacen falta hoy: el camino que **sí** funciona (`user/x86_64-soso-user.json`) usa `rust-lld`, que viene dentro del sysroot de rustc.",
+      "comprobado": "command -v → no están; rust-lld sí está en el sysroot"
+    }
+  ],
+  "herramientas": [
+    {
+      "id": "rustc-host",
+      "papel": "compilar Rust para los targets de soso",
+      "origen": "rustup, nightly-2026-07-01",
+      "ejecuta_en": "host Linux",
+      "estado": "real",
+      "prueba_de_resultado": "La suite entera: `cargo xtask test` compila kernel y userspace para `x86_64-soso.json` y `x86_64-soso-user.json` y arranca la imagen."
+    },
+    {
+      "id": "rust-lld",
+      "papel": "enlazar los binarios de soso que hoy funcionan",
+      "origen": "dentro del sysroot de rustc",
+      "ejecuta_en": "host Linux",
+      "estado": "real",
+      "prueba_de_resultado": "`user/.cargo/config.toml` pasa `-C link-arg=-Tlink.ld` y el target usa `linker-flavor: gnu-lld`; los ELF resultantes arrancan en el guest."
+    },
+    {
+      "id": "clang",
+      "papel": "compilar C ajeno hacia el target de soso",
+      "origen": "Ubuntu clang 18.1.3",
+      "ejecuta_en": "host Linux",
+      "estado": "real",
+      "prueba_de_resultado": "N-005: 31 objetos de C de `ring` y un fichero C escrito para la ocasión se compilan y enlazan, y el resultado se ejecuta en el guest (sonda `carga`)."
+    },
+    {
+      "id": "fork-rust-soso",
+      "papel": "libstd/PAL para `x86_64-unknown-soso`",
+      "origen": "rust-lang/rust en ~/.cache/soso-rust-vendor",
+      "commit": "32d94cc9be3f6e6c3fa1deaea9e0ab93c4980dba",
+      "fecha_commit": "2026-09-07",
+      "parches": "config/rust-soso/apply-patches.sh (sys/ y tree/)",
+      "ejecuta_en": "host Linux (compila **para** soso)",
+      "estado": "clonado y parcheado; **libstd para soso sin construir**",
+      "prueba_de_resultado": "`build-soso/` sólo contiene `x86_64-unknown-linux-gnu`: no hay directorio de `x86_64-unknown-soso`, así que `x.py build library/std --target x86_64-unknown-soso` no ha llegado a completarse."
+    },
+    {
+      "id": "sosoas",
+      "papel": "ensamblador para el toolchain nativo",
+      "origen": "tools/sosoas (propio)",
+      "ejecuta_en": "host Linux",
+      "estado": "transcribe `.byte`; el ELF que emite **ya es válido** (T67 hecha). Sigue sin ser un ensamblador.",
+      "prueba_de_resultado": "Con un `.s` real responde «sin bytes (.byte)» y sale 1. Con `.byte`: `readelf -h` da REL/X86-64/0x1, `readelf -S` lista tres secciones sin errores y `objdump -d` desensambla `mov %edi,%eax / add %esi,%eax / ret`. **Sin tabla de símbolos**: `nm` dice «no hay símbolos», así que el objeto no sirve todavía para enlazar.",
+      "ficha_abierta": "T67 (hecha)"
+    },
+    {
+      "id": "wild-soso",
+      "papel": "enlazador del target x86_64-unknown-soso",
+      "origen": "tools/wild-soso (envoltorio propio de `wild`)",
+      "ejecuta_en": "host Linux",
+      "estado": "nombres alineados (T68 hecha); **sigue sin poder enlazar** porque `wild` no está instalado",
+      "prueba_de_resultado": "`[[bin]] name = \"wild-soso\"` coincide ahora con el `\"linker\"` del target, y un test lo ata. El bootstrap y `xtask` apuntan a `target/release` del workspace, que es donde el build deja las cosas. Sin `wild` en el PATH, el envoltorio sale con 127 y explica cómo instalarlo.",
+      "ficha_abierta": "T68 (hecha)"
+    },
+    {
+      "id": "soso-rustc",
+      "papel": "rustc dentro del guest",
+      "origen": "user/soso-rustc (propio)",
+      "ejecuta_en": "guest soso",
+      "estado": "stub declarado",
+      "prueba_de_resultado": "Sin sysroot responde «sin sysroot» y sale 1; con sysroot, «compilador aún no enlazado» y sale 2. No compila nada, y lo dice."
+    },
+    {
+      "id": "mkfs-soso / mkfs-sosomfs / bootloader",
+      "papel": "crear la imagen arrancable",
+      "origen": "tools/ del propio repo",
+      "ejecuta_en": "host Linux",
+      "estado": "real",
+      "prueba_de_resultado": "`cargo xtask test` construye la imagen y arranca; `cargo xtask test-install` la instala en un NVMe emulado."
+    },
+    {
+      "id": "git",
+      "papel": "clonar el fork y fijar revisiones",
+      "origen": "git 2.43.0 del sistema",
+      "ejecuta_en": "host Linux",
+      "estado": "real en el host; **sin sustituto nativo**",
+      "prueba_de_resultado": "`user/soso-git` existe como cliente del guest; el bootstrap usa el `git` del host."
+    }
+  ],
+  "host_tools_no": "`targets/x86_64-unknown-soso.json` declara `\"host_tools\": false`, y el `config.toml` que genera el bootstrap fija `host = [\"x86_64-unknown-linux-gnu\"]`. Es la respuesta al paso 3 de la ficha, y está en el propio fichero: compilar `--target x86_64-unknown-soso` **no** produce un rustc que corra en soso, ni puede hacerlo con esta especificación.",
+  "perfil_minimo_inicial": [
+    "rustc-host",
+    "rust-lld",
+    "clang",
+    "mkfs-soso",
+    "git"
+  ],
+  "perfil_lxdde_completo_aparte": "El perfil con lxdde añade la compilación de C del árbol de drivers (`target/lxdde/*.o`) y por tanto clang con sus cabeceras; no entra en el perfil mínimo y se inventaría aparte cuando esa rama lo necesite."
+}

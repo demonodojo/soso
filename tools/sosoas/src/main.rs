@@ -30,14 +30,73 @@ fn parse_bytes(src: &str) -> Vec<u8> {
     out
 }
 
+// Desplazamientos de la cabecera ELF64 y de un section header. Están aquí con
+// nombre porque el fallo que arregló [T67] fue exactamente escribir en el sitio
+// de al lado: `e_type` iba a `e_machine`, `e_machine` a `e_version`, y desde
+// `sh_addr` los section headers iban ocho bytes corridos. Con números pelados
+// eso se lee igual de bien esté bien o mal.
+//
+// [T67]: ../../../docs/self-improvement/T67-sosoas-elf-desplazado.md
+mod eh {
+    pub const TYPE: usize = 0x10; // u16
+    pub const MACHINE: usize = 0x12; // u16
+    pub const VERSION: usize = 0x14; // u32
+    pub const SHOFF: usize = 0x28; // u64
+    pub const EHSIZE: usize = 0x34; // u16
+    pub const PHENTSIZE: usize = 0x36; // u16
+    pub const SHENTSIZE: usize = 0x3a; // u16
+    pub const SHNUM: usize = 0x3c; // u16
+    pub const SHSTRNDX: usize = 0x3e; // u16
+    pub const SIZE: u16 = 64;
+}
+
+mod sh {
+    pub const NAME: usize = 0x00; // u32
+    pub const TYPE: usize = 0x04; // u32
+    pub const FLAGS: usize = 0x08; // u64
+    pub const ADDR: usize = 0x10; // u64
+    pub const OFFSET: usize = 0x18; // u64
+    pub const SIZE_: usize = 0x20; // u64
+    pub const LINK: usize = 0x28; // u32
+    pub const INFO: usize = 0x2c; // u32
+    pub const ADDRALIGN: usize = 0x30; // u64
+    pub const ENTSIZE: usize = 0x38; // u64
+    pub const SIZE: u64 = 64;
+}
+
+const ET_REL: u16 = 1;
+const EM_X86_64: u16 = 0x3e;
+const EV_CURRENT: u32 = 1;
+const SHT_PROGBITS: u32 = 1;
+const SHT_STRTAB: u32 = 3;
+const SHF_ALLOC: u64 = 0x2;
+const SHF_EXECINSTR: u64 = 0x4;
+
+fn put16(out: &mut [u8], off: usize, v: u16) {
+    out[off..off + 2].copy_from_slice(&v.to_le_bytes());
+}
+fn put32(out: &mut [u8], off: usize, v: u32) {
+    out[off..off + 4].copy_from_slice(&v.to_le_bytes());
+}
+fn put64(out: &mut [u8], off: usize, v: u64) {
+    out[off..off + 8].copy_from_slice(&v.to_le_bytes());
+}
+
 fn emit_elf(text: &[u8]) -> Vec<u8> {
-    // ELF64 ET_REL mínimo: header + 2 section headers (.null, .text) + .shstrtab
-    let e_shoff = 64u64;
-    let shdr_size = 64u64;
-    let shnum = 3u64;
-    let shstrndx = 2u64;
+    // ELF64 ET_REL mínimo: cabecera + 3 section headers (null, .text,
+    // .shstrtab) + los datos.
+    //
+    // **Sin tabla de símbolos**: `.globl` se ignora, así que el objeto es
+    // válido pero no exporta nada. Es un límite declarado, no un descuido —
+    // leer símbolos es trabajo de ensamblador y `sosoas` no lo es todavía
+    // (ver `docs/self-improvement/native/toolchain-deps.md`).
+    let e_shoff = u64::from(eh::SIZE);
+    let shnum: u16 = 3;
+    let shstrndx: u16 = 2;
     let shstr: &[u8] = b"\0.text\0.shstrtab\0";
-    let text_off = e_shoff + shnum * shdr_size;
+    const NAME_TEXT: u32 = 1; // índice de ".text" dentro de shstr
+    const NAME_SHSTRTAB: u32 = 7; // índice de ".shstrtab"
+    let text_off = e_shoff + u64::from(shnum) * sh::SIZE;
     let shstr_off = text_off + text.len() as u64;
     let file_size = shstr_off + shstr.len() as u64;
 
@@ -45,26 +104,40 @@ fn emit_elf(text: &[u8]) -> Vec<u8> {
     out[0..4].copy_from_slice(b"\x7fELF");
     out[4] = 2; // ELFCLASS64
     out[5] = 1; // ELFDATA2LSB
-    out[6] = 1; // EV_CURRENT
-    out[0x12..0x14].copy_from_slice(&1u16.to_le_bytes()); // ET_REL
-    out[0x14..0x16].copy_from_slice(&0x3eu16.to_le_bytes()); // EM_X86_64
-    out[0x28..0x30].copy_from_slice(&e_shoff.to_le_bytes());
-    out[0x3a..0x3c].copy_from_slice(&(shnum as u16).to_le_bytes());
-    out[0x3c..0x3e].copy_from_slice(&(shstrndx as u16).to_le_bytes());
+    out[6] = 1; // EV_CURRENT en e_ident
+    put16(&mut out, eh::TYPE, ET_REL);
+    put16(&mut out, eh::MACHINE, EM_X86_64);
+    put32(&mut out, eh::VERSION, EV_CURRENT);
+    put64(&mut out, eh::SHOFF, e_shoff);
+    put16(&mut out, eh::EHSIZE, eh::SIZE);
+    put16(&mut out, eh::PHENTSIZE, 0);
+    put16(&mut out, eh::SHENTSIZE, sh::SIZE as u16);
+    put16(&mut out, eh::SHNUM, shnum);
+    put16(&mut out, eh::SHSTRNDX, shstrndx);
 
-    // .text shdr (index 1)
-    let mut o = (e_shoff + shdr_size) as usize;
-    out[o + 0x08..o + 0x10].copy_from_slice(&1u64.to_le_bytes()); // sh_flags SHF_ALLOC|EXEC
-    out[o + 0x10..o + 0x18].copy_from_slice(&text_off.to_le_bytes());
-    out[o + 0x18..o + 0x20].copy_from_slice(&(text.len() as u64).to_le_bytes());
-    out[o + 0x20..o + 0x24].copy_from_slice(&1u32.to_le_bytes()); // sh_link
-    out[o + 0x28..o + 0x30].copy_from_slice(&1u64.to_le_bytes()); // sh_addralign
+    // El section header 0 es la entrada nula: se queda a ceros a propósito.
 
-    // .shstrtab shdr (index 2)
-    o = (e_shoff + 2 * shdr_size) as usize;
-    out[o + 0x08..o + 0x10].copy_from_slice(&0u64.to_le_bytes());
-    out[o + 0x10..o + 0x18].copy_from_slice(&shstr_off.to_le_bytes());
-    out[o + 0x18..o + 0x20].copy_from_slice(&(shstr.len() as u64).to_le_bytes());
+    // .text (índice 1)
+    let o = (e_shoff + sh::SIZE) as usize;
+    put32(&mut out, o + sh::NAME, NAME_TEXT);
+    put32(&mut out, o + sh::TYPE, SHT_PROGBITS);
+    put64(&mut out, o + sh::FLAGS, SHF_ALLOC | SHF_EXECINSTR);
+    put64(&mut out, o + sh::ADDR, 0);
+    put64(&mut out, o + sh::OFFSET, text_off);
+    put64(&mut out, o + sh::SIZE_, text.len() as u64);
+    put32(&mut out, o + sh::LINK, 0);
+    put32(&mut out, o + sh::INFO, 0);
+    put64(&mut out, o + sh::ADDRALIGN, 1);
+    put64(&mut out, o + sh::ENTSIZE, 0);
+
+    // .shstrtab (índice 2)
+    let o = (e_shoff + 2 * sh::SIZE) as usize;
+    put32(&mut out, o + sh::NAME, NAME_SHSTRTAB);
+    put32(&mut out, o + sh::TYPE, SHT_STRTAB);
+    put64(&mut out, o + sh::FLAGS, 0);
+    put64(&mut out, o + sh::OFFSET, shstr_off);
+    put64(&mut out, o + sh::SIZE_, shstr.len() as u64);
+    put64(&mut out, o + sh::ADDRALIGN, 1);
 
     out[text_off as usize..(text_off as usize + text.len())].copy_from_slice(text);
     out[shstr_off as usize..].copy_from_slice(shstr);
@@ -114,5 +187,85 @@ mod tests {
     fn emit_elf_magic() {
         let e = emit_elf(&[0x90]);
         assert_eq!(&e[0..4], b"\x7fELF");
+    }
+
+    fn u16_en(e: &[u8], off: usize) -> u16 {
+        u16::from_le_bytes(e[off..off + 2].try_into().unwrap())
+    }
+    fn u32_en(e: &[u8], off: usize) -> u32 {
+        u32::from_le_bytes(e[off..off + 4].try_into().unwrap())
+    }
+    fn u64_en(e: &[u8], off: usize) -> u64 {
+        u64::from_le_bytes(e[off..off + 8].try_into().unwrap())
+    }
+
+    /// La cabecera dice lo que es, en el sitio donde ELF64 lo espera.
+    ///
+    /// Esto es [T67]: antes `ET_REL` acababa en `e_machine` y `EM_X86_64` en
+    /// `e_version`, y cuatro campos no se escribían nunca. `readelf` lo
+    /// delataba, pero el criterio de esta prueba **no puede depender de
+    /// binutils**: la toolchain nativa tiene que poder comprobarse a sí misma.
+    ///
+    /// [T67]: ../../../docs/self-improvement/T67-sosoas-elf-desplazado.md
+    #[test]
+    fn la_cabecera_elf_tiene_cada_campo_en_su_sitio() {
+        let e = emit_elf(&[0x90]);
+        assert_eq!(u16_en(&e, eh::TYPE), ET_REL, "e_type");
+        assert_eq!(u16_en(&e, eh::MACHINE), EM_X86_64, "e_machine");
+        assert_eq!(u32_en(&e, eh::VERSION), EV_CURRENT, "e_version");
+        assert_eq!(u64_en(&e, eh::SHOFF), u64::from(eh::SIZE), "e_shoff");
+        assert_eq!(u16_en(&e, eh::EHSIZE), eh::SIZE, "e_ehsize");
+        assert_eq!(u16_en(&e, eh::SHENTSIZE), sh::SIZE as u16, "e_shentsize");
+        assert_eq!(u16_en(&e, eh::SHNUM), 3, "e_shnum");
+        assert_eq!(u16_en(&e, eh::SHSTRNDX), 2, "e_shstrndx");
+    }
+
+    /// Los section headers también iban desplazados —ocho bytes desde
+    /// `sh_addr`—, y `sh_name`/`sh_type` no se escribían: las secciones salían
+    /// sin nombre y de tipo NULL.
+    #[test]
+    fn las_secciones_se_llaman_y_apuntan_a_donde_deben() {
+        let text = [0x89u8, 0xf8, 0xc3];
+        let e = emit_elf(&text);
+        let shoff = u64_en(&e, eh::SHOFF) as usize;
+        let tam = sh::SIZE as usize;
+
+        // La entrada 0 es la nula: entera a ceros.
+        assert!(e[shoff..shoff + tam].iter().all(|b| *b == 0), "shdr nula");
+
+        let t = shoff + tam;
+        assert_eq!(u32_en(&e, t + sh::TYPE), SHT_PROGBITS, ".text es PROGBITS");
+        assert_eq!(
+            u64_en(&e, t + sh::FLAGS),
+            SHF_ALLOC | SHF_EXECINSTR,
+            ".text es alojable y ejecutable"
+        );
+        assert_eq!(u64_en(&e, t + sh::SIZE_), text.len() as u64, ".text sh_size");
+
+        // Y el nombre apunta a una cadena de verdad dentro de .shstrtab.
+        let st = shoff + 2 * tam;
+        assert_eq!(u32_en(&e, st + sh::TYPE), SHT_STRTAB, ".shstrtab es STRTAB");
+        let str_off = u64_en(&e, st + sh::OFFSET) as usize;
+        let str_len = u64_en(&e, st + sh::SIZE_) as usize;
+        let tabla = &e[str_off..str_off + str_len];
+        for (shdr, esperado) in [(t, ".text"), (st, ".shstrtab")] {
+            let n = u32_en(&e, shdr + sh::NAME) as usize;
+            let fin = tabla[n..].iter().position(|b| *b == 0).unwrap() + n;
+            assert_eq!(&tabla[n..fin], esperado.as_bytes(), "nombre de sección");
+        }
+    }
+
+    /// Los bytes del `.text` están donde el section header dice, y son los que
+    /// entraron. Sin esto, la cabecera podría estar perfecta y el contenido en
+    /// otro sitio.
+    #[test]
+    fn el_texto_esta_donde_dice_el_section_header() {
+        let text = [0x89u8, 0xf8, 0x01, 0xf0, 0xc3];
+        let e = emit_elf(&text);
+        let shoff = u64_en(&e, eh::SHOFF) as usize;
+        let t = shoff + sh::SIZE as usize;
+        let off = u64_en(&e, t + sh::OFFSET) as usize;
+        let len = u64_en(&e, t + sh::SIZE_) as usize;
+        assert_eq!(&e[off..off + len], &text);
     }
 }
