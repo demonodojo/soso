@@ -8,6 +8,7 @@ extern crate alloc;
 #[cfg(soso_heap_debug)]
 mod heap_debug;
 
+pub mod glob;
 pub mod linea;
 pub mod sys;
 pub mod thread;

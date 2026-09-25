@@ -275,8 +275,10 @@
         "rechazo": "Un patrón que sólo tiene sentido como expresión regular (`\\w`, `.*`, `^…`, `…$`) se rechaza con 2 en vez de buscarse tal cual y devolver cero líneas. `-F` lo fuerza. La frontera no es «¿tiene metacaracteres?»: `main.rs` y `data[0]` son literales legítimos y se buscan.",
         "bytes": "Se busca sobre bytes. Antes se convertía cada línea a UTF-8 y lo que no valía se saltaba **en silencio**: un byte inválido escondía el resto del fichero.",
         "anadido": "-n, -r (sin recursión de pila), -l, -i, -m N.",
-        "sigue_faltando": "expresiones regulares (se rechazan, no se emulan), filtros por glob, orden por fecha y detección de binarios.",
-        "evidencia": "target/self-improvement/tasks/N-009/{busqueda.txt,suite.txt,check.txt}"
+        "sigue_faltando": "expresiones regulares (se rechazan, no se emulan) y orden por fecha.",
+        "evidencia": "target/self-improvement/tasks/N-009/{busqueda.txt,suite.txt,check.txt}",
+        "globs": "**2026-09-25**: `--include=GLOB` y `--exclude=GLOB` (sólo `*` y `?`, contra el nombre y no la ruta; exclude gana). El filtro se aplica a lo que se va a abrir, no a la salida. De paso introduje un cuelgue —filtrar hasta vaciar la lista caía en la rama de stdin y `grep` esperaba al terminal para siempre— que **cazó la sonda porque tenía un caso para el resultado vacío**; los cuatro casos felices pasaban limpios.",
+        "binarios": "**2026-09-25**: un fichero con un byte cero en los primeros 8 KiB se anuncia en una línea en vez de volcarse (`-a` lo fuerza). Coincidir sigue siendo coincidir —salida 0—, porque callarlo convertiría «no lo enseño» en «no lo hay»; y un binario que no coincide no dice nada."
       }
     },
     {
@@ -299,12 +301,15 @@
       "ficha": "native/N-010.md",
       "resultado": {
         "hecho": "2026-09-25",
-        "que": "`sosh` declara su subconjunto y **rechaza** lo que no sabe hacer en vez de colarlo como argumento: encadenar (; && ||), segundo plano (&), duplicar descriptores (2>&1), comodines (*) y variables ($).",
+        "que": "`sosh` declara su subconjunto y **rechaza** lo que no sabe hacer en vez de colarlo como argumento: segundo plano (&) y variables ($).",
         "linea_base": "El paso se escribió con la conducta deseada y se ejecutó contra el sosh de antes: `echo dos ; echo tres` imprimía «dos ; echo tres» y **el segundo comando no se ejecutaba**; `ls *.rs` contestaba «*.rs: no existe», que suena a un hecho sobre el disco; `ls 2>&1` se comía el `1` y fallaba con «falta fichero tras >», señalando al sitio equivocado.",
         "salida_de_emergencia": "Entrecomillar, como el -F de grep: `echo \"seis;siete\"` sigue funcionando. Y `ask` se resuelve antes de tokenizar, así que una pregunta puede llevar ; $ o *.",
         "controles": "Dos en el mismo paso —el entrecomillado y el pipe—, porque sin ellos una shell que rechazara todo pasaría los seis casos.",
         "por_que_no_implementarlo": "Encadenar y los comodines son trabajo corto, pero esta ficha es **declarar** el subconjunto: añadir operadores mientras se declara mueve la frontera durante la medida. Quedan anotados como trabajo posible, no como deuda oculta.",
-        "evidencia": "target/self-improvement/tasks/N-010/{subconjunto.txt,suite.txt,check.txt}"
+        "evidencia": "target/self-improvement/tasks/N-010/{subconjunto.txt,suite.txt,check.txt}",
+        "encadenar": "**Encadenar (`;`, `&&`, `||`) se implementó el mismo día** (commit `7f0f6bb66`) y la suite lo comprueba. El rechazo no fue trabajo perdido: declarar el subconjunto es lo que hizo visible el hueco — antes `echo dos ; echo tres` imprimía «dos ; echo tres» y nadie lo veía.",
+        "duplicar": "**`2>&1` implementado el 2026-09-25.** Salió barato porque el hijo recibe un array de cuatro descriptores: duplicar es pasar el mismo número dos veces, sin `dup2` que emular. Divergencia **declarada**: se resuelve después de montar todas las redirecciones, así que `2>&1 >f` y `>f 2>&1` dan lo mismo — en POSIX no. El caso de la suite lleva control: la misma orden sin `2>&1` no encuentra nada.",
+        "comodines": "**`*` y `?` implementados el 2026-09-25.** Se expanden antes de lanzar el programa, y **un patrón sin coincidencias es un error** — bash lo pasaría tal cual y el programa diría «no existe», que suena a un hecho sobre el disco. Límites declarados: sólo el último componente, los ocultos sólo con patrón que empiece por punto, y resultado ordenado porque `getdents` no promete orden. El emparejador vive en `libsoso::glob`, compartido con `grep --include`: dos copias serían dos semánticas."
       }
     },
     {

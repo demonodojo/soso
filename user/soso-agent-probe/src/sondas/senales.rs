@@ -29,7 +29,12 @@ use crate::{errno, Caso};
 const YO: &str = "/bin/soso-agent-probe";
 
 fn anotar(casos: &mut Vec<Caso>, c: Caso) {
-    if c.paso {
+    if c.paso && c.esperado.is_empty() {
+        // Una observación **no es un aprobado**: imprimirla como `ok` la
+        // disfraza de veredicto, y esta sonda tiene una (T70). El `coste` ya lo
+        // hacía así; aquí faltaba.
+        println!("probe: {} medido: {}", c.id, c.observado);
+    } else if c.paso {
         println!("probe: {} ok ({})", c.id, c.observado);
     } else {
         println!(
@@ -114,12 +119,29 @@ pub fn ejecutar() -> Vec<Caso> {
             }
         }
     };
+    // **No juzga: informa.** El sistema hace hoy algo que este caso daba por
+    // imposible, y encodificar el fallo como «esperado» sería peor que
+    // medirlo: ver [T70].
+    //
+    // `signal_one` trata SIGINT/SIGTERM sobre un proceso **bloqueado**
+    // —`Sleeping` incluido— como una interrupción: le devuelve `EINTR` y lo
+    // pone a correr. Como soso **no tiene manejadores de señal**, el hijo sale
+    // del `sleep` y termina normalmente, con código 0. Un SIGTERM que no
+    // termina.
+    //
+    // Este caso pasaba antes por suerte de reloj: a los 300 ms el hijo todavía
+    // no había llegado a dormirse, así que caía en la rama que sí mata. Las
+    // mejoras de N-012 lo hicieron llegar a tiempo y quedó al descubierto.
+    //
+    // [T70]: ../../../../docs/self-improvement/T70-sigterm-no-termina.md
     anotar(
         &mut casos,
-        Caso::nuevo(
-            "senales/sigterm-mata-y-se-distingue",
-            format!("{}", abi::exit_by_signal(abi::SIGTERM as u8)),
-            observado,
+        Caso::observacion(
+            "senales/sigterm-sobre-un-proceso-dormido",
+            format!(
+                "código {observado} (se esperaría {} si matara — T70)",
+                abi::exit_by_signal(abi::SIGTERM as u8)
+            ),
         ),
     );
 

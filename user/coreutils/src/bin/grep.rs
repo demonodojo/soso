@@ -31,6 +31,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use coreutils::util::{err_path, leer_fichero};
+use libsoso::glob;
 use libsoso::{abi, errno_str, println, sys};
 
 libsoso::entry!(main);
@@ -43,22 +44,45 @@ const SALIDA_NADA: u8 = 1;
 const SALIDA_ERROR: u8 = 2;
 
 struct Opciones {
+    /// Patrones de nombre que un fichero debe cumplir para mirarse.
+    ///
+    /// Vacío = todos. Es el hueco que [N-009] dejó declarado: «un agente los
+    /// usa; hoy hay que filtrar después». Filtrar después significa leer y
+    /// buscar en ficheros que no interesan, y en soso cada `open` cuesta
+    /// (N-012).
+    ///
+    /// [N-009]: ../../../../docs/self-improvement/native/N-009.md
+    incluir: Vec<String>,
+    excluir: Vec<String>,
     ignorar_caso: bool,
     numerar: bool,
     solo_nombres: bool,
     recursivo: bool,
     literal: bool,
+    /// Tratar como texto lo que parezca binario.
+    ///
+    /// Por defecto un fichero binario que coincide se anuncia en **una línea**
+    /// en vez de volcar sus bytes. [N-009] lo dejó escrito como hueco: «se
+    /// buscan como texto, sin detectar que lo son ni saltárselos, y puede
+    /// escupir basura a la consola». Cuando quien lee es un agente, esa basura
+    /// no es sólo fea: se lleva por delante su contexto.
+    ///
+    /// [N-009]: ../../../../docs/self-improvement/native/N-009.md
+    texto: bool,
     max: usize,
 }
 
 impl Default for Opciones {
     fn default() -> Self {
         Self {
+            incluir: Vec::new(),
+            excluir: Vec::new(),
             ignorar_caso: false,
             numerar: false,
             solo_nombres: false,
             recursivo: false,
             literal: false,
+            texto: false,
             max: usize::MAX,
         }
     }
@@ -105,6 +129,32 @@ fn clasificar(patron: &str) -> Veredicto {
         return Veredicto::LiteralConAviso("los metacaracteres se buscan tal cual");
     }
     Veredicto::Literal
+}
+
+/// ¿Parece binario?
+///
+/// Un byte cero en los primeros 8 KiB, que es lo que usa `grep` de toda la
+/// vida. No es una clasificación perfecta y no pretende serlo: es una heurística
+/// **declarada**, y `-a` la desactiva.
+fn es_binario(datos: &[u8]) -> bool {
+    datos.iter().take(8192).any(|b| *b == 0)
+}
+
+/// El último componente de una ruta.
+fn nombre_de(ruta: &str) -> &str {
+    ruta.rsplit('/').next().unwrap_or(ruta)
+}
+
+/// ¿Hay que mirar este fichero?
+///
+/// `--exclude` gana sobre `--include`: quien excluye algo lo hace para no
+/// verlo, y que un include lo devolviera sería lo contrario de lo que pidió.
+fn se_mira(ruta: &str, o: &Opciones) -> bool {
+    let nombre = nombre_de(ruta);
+    if o.excluir.iter().any(|g| glob::casa(nombre, g)) {
+        return false;
+    }
+    o.incluir.is_empty() || o.incluir.iter().any(|g| glob::casa(nombre, g))
 }
 
 /// Busca `aguja` en `pajar` por bytes. Sin asignar nada: los ficheros de
@@ -175,6 +225,16 @@ fn buscar_bytes(data: &[u8], patron: &[u8], nombre: Option<&str>, o: &Opciones) 
         }
     }
     cuenta
+}
+
+/// Cuenta coincidencias sin imprimir nada.
+///
+/// Para los binarios: hace falta saber **si** coincide para el código de
+/// salida, sin volcar los bytes.
+fn contar_silencioso(data: &[u8], patron: &[u8], o: &Opciones) -> usize {
+    data.split(|b| *b == b'\n')
+        .filter(|l| contiene(l, patron, o.ignorar_caso))
+        .count()
 }
 
 fn buscar_stdin(patron: &[u8], o: &Opciones) -> Result<usize, u8> {
@@ -265,6 +325,30 @@ fn main(args: &[String]) -> u8 {
             solo_sueltos = true;
             continue;
         }
+        if let Some(g) = a.strip_prefix("--include=") {
+            o.incluir.push(String::from(g));
+            continue;
+        }
+        if let Some(g) = a.strip_prefix("--exclude=") {
+            o.excluir.push(String::from(g));
+            continue;
+        }
+        if a == "--include" || a == "--exclude" {
+            let Some(g) = it.next() else {
+                println!("grep: {a} necesita un patrón");
+                return SALIDA_ERROR;
+            };
+            if a == "--include" {
+                o.incluir.push(String::from(g));
+            } else {
+                o.excluir.push(String::from(g));
+            }
+            continue;
+        }
+        if a.starts_with("--") {
+            println!("grep: opción desconocida: {a}");
+            return SALIDA_ERROR;
+        }
         if a == "-m" {
             let Some(v) = it.next().and_then(|v| v.parse::<usize>().ok()) else {
                 println!("grep: -m necesita un número");
@@ -280,6 +364,7 @@ fn main(args: &[String]) -> u8 {
                 'l' => o.solo_nombres = true,
                 'r' => o.recursivo = true,
                 'F' => o.literal = true,
+                'a' => o.texto = true,
                 otra => {
                     println!("grep: opción desconocida: -{otra}");
                     return SALIDA_ERROR;
@@ -289,7 +374,9 @@ fn main(args: &[String]) -> u8 {
     }
 
     let Some(patron) = sueltos.first().copied() else {
-        println!("uso: grep [-inlrF] [-m N] PATRON [FICHERO...]");
+        println!("uso: grep [-ainlrF] [-m N] [--include=GLOB] [--exclude=GLOB] PATRON [FICHERO...]");
+        println!("  un binario que coincide se anuncia, no se vuelca; -a lo fuerza");
+        println!("  globs: sólo * y ?, sobre el nombre del fichero (no la ruta)");
         println!("  busca subcadenas literales; no hay expresiones regulares");
         println!("  salida: 0 hubo coincidencias, 1 ninguna, 2 no se pudo buscar");
         return SALIDA_ERROR;
@@ -320,6 +407,23 @@ fn main(args: &[String]) -> u8 {
         }
         rutas = expandidas;
     }
+    // El filtro se aplica **a lo que se va a abrir**, no a la salida: abrir un
+    // fichero que no interesa cuesta, y en soso cuesta bastante (N-012).
+    //
+    // Sobre rutas dadas a mano también: quien pone `--include=*.rs` y lista
+    // ficheros espera que el filtro mande, no que sólo valga en `-r`.
+    let dieron_rutas = !rutas.is_empty();
+    if !o.incluir.is_empty() || !o.excluir.is_empty() {
+        rutas.retain(|r| r == "-" || se_mira(r, &o));
+    }
+    // **Filtrar hasta dejar la lista vacía no es «no me dieron ficheros».**
+    // Sin esto se caía en la rama de stdin y `grep` se quedaba esperando
+    // entrada del terminal para siempre: un filtro que no casa con nada
+    // colgaba el programa en vez de decir que no hay coincidencias. Lo cazó la
+    // sonda, y sólo porque tenía un caso para el resultado vacío.
+    if dieron_rutas && rutas.is_empty() {
+        return SALIDA_NADA;
+    }
 
     if rutas.is_empty() {
         return match buscar_stdin(patron, &o) {
@@ -344,6 +448,18 @@ fn main(args: &[String]) -> u8 {
         match leer_fichero(path) {
             Ok(data) => {
                 let nombre = if varios || o.solo_nombres { Some(path.as_str()) } else { None };
+                // Un binario se busca igual —la aguja puede estar ahí— pero no
+                // se vuelca. Sólo se anuncia, salvo `-a`.
+                if !o.texto && !o.solo_nombres && es_binario(&data) {
+                    let mut o_mudo = Opciones { solo_nombres: true, ..Opciones::default() };
+                    o_mudo.ignorar_caso = o.ignorar_caso;
+                    let n = contar_silencioso(&data, patron, &o_mudo);
+                    if n > 0 {
+                        println!("grep: {path}: binario coincide (usa -a para verlo)");
+                        total += n;
+                    }
+                    continue;
+                }
                 total += buscar_bytes(&data, patron, nombre, &o).coincidencias;
             }
             Err(e) => {

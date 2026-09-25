@@ -2486,6 +2486,35 @@
         "blocker": "",
         "next_step": "`wild` sigue sin estar instalado, así que el target no puede enlazar: instalarlo o portarlo es T39–T42."
       }
+    },
+    {
+      "id": "T70",
+      "file": "T70-sigterm-no-termina.md",
+      "title": "SIGTERM no termina un proceso dormido",
+      "milestone": "SI-6",
+      "kind": "Decisión de semántica",
+      "status": "pending",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C6",
+      "context": [
+        "kernel/src/task/mod.rs",
+        "user/soso-agent-probe/src/sondas/senales.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Semántica del kernel; se acredita en el guest con la sonda `senales`."
+      },
+      "tracking": {
+        "updated_at": "2026-09-25",
+        "base": "7f0f6bb66 + diff de trabajo",
+        "summary": "`signal_one` trata SIGINT/SIGTERM sobre un proceso **bloqueado** como interrupción (`EINTR` + Runnable) en vez de matarlo. Como soso **no tiene manejadores de señal**, el proceso sale del `sleep` y termina normalmente: SIGTERM no termina, y `kill` devuelve éxito. SIGKILL sí mata.",
+        "evidence": "sonda `senales`: sigterm-sobre-un-proceso-dormido = 0; sigkill = 137",
+        "blocker": "Decisión: matar también a los bloqueados, declarar que SIGTERM sólo interrumpe, o implementar manejadores. Cambia la conducta de una señal y afecta a sosh, al arnés y a guiones existentes.",
+        "next_step": "Elegir entre las tres opciones de la ficha. La sonda mide sin juzgar hasta entonces."
+      }
     }
   ],
   "native_contract": "NATIVO.md"

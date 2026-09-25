@@ -32,7 +32,13 @@ const DIR: &str = "/var/self-improvement/probe/busqueda";
 const GREP: &str = "/bin/grep";
 
 fn anotar(casos: &mut Vec<Caso>, c: Caso) {
-    if c.paso {
+    // Una observación —`Caso::observacion`, sin `esperado`— **no es un
+    // aprobado**: imprimirla como `ok` la disfraza de veredicto. Se distingue
+    // aquí aunque esta sonda no tenga ninguna todavía, porque la trampa la
+    // paga quien añada la primera.
+    if c.paso && c.esperado.is_empty() {
+        println!("probe: {} medido: {}", c.id, c.observado);
+    } else if c.paso {
         println!("probe: {} ok ({})", c.id, c.observado);
     } else {
         println!(
@@ -219,6 +225,174 @@ pub fn ejecutar() -> Vec<Caso> {
             "busqueda/recursivo-baja-a-los-subdirectorios",
             format!("0 y nombra {anidado}"),
             if c == 0 && texto.contains("hondo/otro.txt") { format!("0 y nombra {anidado}") } else { format!("código {c}, {texto:?}") },
+        ),
+    );
+
+    // 8. **Filtros por glob** (hueco declarado en N-009). Se preparan dos
+    //    ficheros con la misma aguja y distinta extensión.
+    let dir_glob = unir(DIR, "globs");
+    sys::mkdir(&dir_glob);
+    sys::mkdir(&unir(&dir_glob, "sub"));
+    let aguja = b"AGUJA_GLOB\n";
+    for r in [
+        unir(&dir_glob, "uno.rs"),
+        unir(&dir_glob, "dos.txt"),
+        unir(&unir(&dir_glob, "sub"), "tres.rs"),
+    ] {
+        if let Err(e) = escribir(&r, aguja) {
+            anotar(&mut casos, Caso::nuevo("busqueda/preparar-globs", "ficheros", e));
+            return casos;
+        }
+    }
+
+    // **El control, primero.** Sin filtro tienen que salir los tres: si no,
+    // «sólo salen los .rs» sería compatible con «sólo se encuentra uno».
+    let (c, texto) = correr(&["-r", "-l", "AGUJA_GLOB", &dir_glob]);
+    let todos = texto.contains("uno.rs") && texto.contains("dos.txt") && texto.contains("tres.rs");
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "busqueda/sin-filtro-salen-todos",
+            "los tres",
+            if c == 0 && todos { String::from("los tres") } else { format!("código {c}, {texto:?}") },
+        ),
+    );
+
+    let (c, texto) = correr(&["-r", "-l", "--include=*.rs", "AGUJA_GLOB", &dir_glob]);
+    let solo_rs = texto.contains("uno.rs") && texto.contains("tres.rs") && !texto.contains("dos.txt");
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "busqueda/include-filtra-por-extension",
+            "los .rs y sólo ésos",
+            if c == 0 && solo_rs { String::from("los .rs y sólo ésos") } else { format!("código {c}, {texto:?}") },
+        ),
+    );
+
+    // El glob mira el **nombre**, no la ruta: `*.rs` tiene que casar
+    // `…/sub/tres.rs`, y comparando la ruta entera no casaría por las barras.
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "busqueda/el-glob-mira-el-nombre-no-la-ruta",
+            "encuentra el anidado",
+            if texto.contains("sub/tres.rs") { String::from("encuentra el anidado") } else { format!("{texto:?}") },
+        ),
+    );
+
+    // Y `--exclude` gana sobre `--include`: quien excluye algo lo hace para no
+    // verlo.
+    let (c, texto) = correr(&["-r", "-l", "--include=*.rs", "--exclude=tres*", "AGUJA_GLOB", &dir_glob]);
+    let sin_tres = texto.contains("uno.rs") && !texto.contains("tres.rs");
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "busqueda/exclude-gana-sobre-include",
+            "queda uno.rs sin tres.rs",
+            if c == 0 && sin_tres { String::from("queda uno.rs sin tres.rs") } else { format!("código {c}, {texto:?}") },
+        ),
+    );
+
+    // Un glob que no casa con nada no es un error: es «no hay», código 1.
+    let (c, _) = correr(&["-r", "-l", "--include=*.zzz", "AGUJA_GLOB", &dir_glob]);
+    anotar(
+        &mut casos,
+        Caso::nuevo("busqueda/un-glob-sin-coincidencias-sale-1", "1", format!("{c}")),
+    );
+
+    // 9. **Binarios**: coinciden, pero no se vuelcan. Es el otro hueco que
+    //    N-009 declaró: cuando quien lee es un agente, volcar bytes crudos no
+    //    es sólo feo — se lleva por delante su contexto.
+    let bin = unir(DIR, "binario.bin");
+    let mut datos = alloc::vec![0x7fu8, b'E', b'L', b'F', 0x02, 0x01, 0x00, 0x00];
+    datos.extend_from_slice(b"AGUJA_EN_BINARIO");
+    datos.extend_from_slice(&[0u8; 32]);
+    if let Err(e) = escribir(&bin, &datos) {
+        anotar(&mut casos, Caso::nuevo("busqueda/preparar-binario", "fichero", e));
+        return casos;
+    }
+
+    let (c, texto) = correr(&["AGUJA_EN_BINARIO", &bin]);
+    // Coincide (código 0) y lo dice, pero **no** aparecen los bytes crudos: el
+    // 0x7f del ELF no debe estar en la salida.
+    let anuncia = texto.contains("binario coincide");
+    let sin_basura = !texto.contains('\u{7f}');
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "busqueda/un-binario-se-anuncia-no-se-vuelca",
+            "0 y lo anuncia sin volcar",
+            if c == 0 && anuncia && sin_basura {
+                String::from("0 y lo anuncia sin volcar")
+            } else {
+                format!("código {c}, anuncia={anuncia}, sin_basura={sin_basura}")
+            },
+        ),
+    );
+
+    // **El control**: con `-a` sí se vuelca. Sin este caso, «no salieron los
+    // bytes» sería compatible con «no encontró nada».
+    let (c, texto) = correr(&["-a", "AGUJA_EN_BINARIO", &bin]);
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "busqueda/con-a-el-binario-si-se-vuelca",
+            "0 y sale la aguja",
+            if c == 0 && texto.contains("AGUJA_EN_BINARIO") {
+                String::from("0 y sale la aguja")
+            } else {
+                format!("código {c}, {texto:?}")
+            },
+        ),
+    );
+
+    // Y un binario que **no** coincide no se anuncia: anunciarlo sería decir
+    // que hay algo donde no lo hay.
+    let (c, texto) = correr(&["NO_ESTA_EN_EL_BINARIO", &bin]);
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "busqueda/un-binario-que-no-coincide-calla",
+            "1 y no dice nada",
+            if c == 1 && !texto.contains("binario coincide") {
+                String::from("1 y no dice nada")
+            } else {
+                format!("código {c}, {texto:?}")
+            },
+        ),
+    );
+
+    // 10. **Retroceso del `*`.** Es la parte del emparejador que puede fallar
+    //     en silencio: `*a.rs` tiene que casar `aaa.rs` cediendo terreno. Se
+    //     comprueba aquí porque `libsoso` es `no_std` y sus tests unitarios no
+    //     se pueden ejecutar en el host.
+    let (c, texto) = correr(&["-r", "-l", "--include=*o.rs", "AGUJA_GLOB", &dir_glob]);
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "busqueda/el-asterisco-retrocede",
+            "casa uno.rs",
+            if c == 0 && texto.contains("uno.rs") && !texto.contains("tres.rs") {
+                String::from("casa uno.rs")
+            } else {
+                format!("código {c}, {texto:?}")
+            },
+        ),
+    );
+
+    // Y `?` es exactamente un carácter: `?res.rs` no casa `tres.rs` (son
+    // cuatro letras antes del punto), pero `????.rs` sí.
+    let (_, texto_uno) = correr(&["-r", "-l", "--include=????.rs", "AGUJA_GLOB", &dir_glob]);
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "busqueda/interrogante-es-un-caracter",
+            "casa tres.rs y no uno.rs",
+            if texto_uno.contains("tres.rs") && !texto_uno.contains("uno.rs") {
+                String::from("casa tres.rs y no uno.rs")
+            } else {
+                format!("{texto_uno:?}")
+            },
         ),
     );
 

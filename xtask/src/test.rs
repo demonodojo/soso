@@ -2780,6 +2780,11 @@ fn ssh_probe_ejecutable(key: &Path, ssh_port: u16) -> Result<(), String> {
         return Err(format!("alguna capacidad falló: {salida:?}"));
     }
     publicar_informe("exec", &salida);
+    // Ver la nota de los otros pasos: el nombre del caso no basta, una línea
+    // de `FALLO` también lo contiene.
+    if !salida.contains("\"malos\":0") {
+        return Err(format!("la sonda informa casos malos: {salida:?}"));
+    }
     Ok(())
 }
 
@@ -2831,6 +2836,13 @@ fn ssh_probe_compartir(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
+    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
+    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
+    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
+    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
+    if !salida.contains("\"malos\":0") {
+        return Err(format!("la sonda informa casos malos: {salida:?}"));
+    }
     Ok(())
 }
 
@@ -2852,7 +2864,7 @@ fn ssh_probe_senales(key: &Path, ssh_port: u16) -> Result<(), String> {
     publicar_informe("senales", &salida);
     for esperado in [
         "senales/salida-normal",
-        "senales/sigterm-mata-y-se-distingue",
+        "senales/sigterm-sobre-un-proceso-dormido",  // observación: T70
         "senales/sigkill-se-distingue-de-sigterm",
         "senales/sondeo-distingue-vivo-de-inexistente",
         "senales/kill-devuelve-cuantos-no-cero",
@@ -2867,6 +2879,13 @@ fn ssh_probe_senales(key: &Path, ssh_port: u16) -> Result<(), String> {
     // camino.
     if salida.contains("terminó de dormir 60000") {
         return Err(format!("el kill no cortó al hijo: {salida:?}"));
+    }
+    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
+    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
+    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
+    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
+    if !salida.contains("\"malos\":0") {
+        return Err(format!("la sonda informa casos malos: {salida:?}"));
     }
     Ok(())
 }
@@ -2899,6 +2918,13 @@ fn ssh_probe_salidas(key: &Path, ssh_port: u16) -> Result<(), String> {
         if !salida.contains(esperado) {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
+    }
+    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
+    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
+    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
+    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
+    if !salida.contains("\"malos\":0") {
+        return Err(format!("la sonda informa casos malos: {salida:?}"));
     }
     Ok(())
 }
@@ -2933,6 +2959,13 @@ fn ssh_probe_hilos(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
+    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
+    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
+    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
+    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
+    if !salida.contains("\"malos\":0") {
+        return Err(format!("la sonda informa casos malos: {salida:?}"));
+    }
     Ok(())
 }
 
@@ -2959,6 +2992,13 @@ fn ssh_probe_canales(key: &Path, ssh_port: u16) -> Result<(), String> {
         if !salida.contains(esperado) {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
+    }
+    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
+    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
+    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
+    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
+    if !salida.contains("\"malos\":0") {
+        return Err(format!("la sonda informa casos malos: {salida:?}"));
     }
     Ok(())
 }
@@ -3051,8 +3091,14 @@ fn ssh_sosh_subconjunto(key: &Path, ssh_port: u16) -> Result<(), String> {
             "cd /no-existe-soso-xyz && echo {tag_and2}\n",
             "echo si-aparece || echo {tag_or}\n",
             "cd /no-existe-soso-xyz || echo si-or\n",
-            "ls 2>&1\n",
-            "ls *.rs\n",
+            "soso-agent-probe gritar | grep DIAGNOSTICO\n",
+            "soso-agent-probe gritar 2>&1 | grep DIAGNOSTICO\n",
+            "mkdir /tmp/glob-sosh\n",
+            "echo a > /tmp/glob-sosh/uno.rs\n",
+            "echo b > /tmp/glob-sosh/dos.rs\n",
+            "echo c > /tmp/glob-sosh/tres.txt\n",
+            "grep -l a /tmp/glob-sosh/*.rs\n",
+            "ls /tmp/glob-sosh/*.zzz\n",
             "echo $HOME\n",
             "echo \"seis;siete\"\n",
             "echo ocho | grep ocho\n",
@@ -3072,8 +3118,10 @@ fn ssh_sosh_subconjunto(key: &Path, ssh_port: u16) -> Result<(), String> {
     let salida = ssh_guion_hasta(key, ssh_port, &guion, Duration::from_secs(120), "FIN-SOSH-SUB")?;
     for (etiqueta, marca) in [
         ("& en segundo plano", "sosh: no sé ejecutar en segundo plano"),
-        ("2>&1", "sosh: no sé duplicar descriptores"),
-        ("* como comodín", "sosh: no expando comodines"),
+        // Un comodín que no casa con nada **se dice**; bash lo pasaría tal
+        // cual y el programa contestaría «no existe», que suena a un hecho
+        // sobre el disco.
+        ("comodín sin coincidencias", "ningún fichero casa con /tmp/glob-sosh/*.zzz"),
         ("$ como variable", "sosh: no expando variables"),
     ] {
         if !salida.contains(marca) {
@@ -3088,6 +3136,15 @@ fn ssh_sosh_subconjunto(key: &Path, ssh_port: u16) -> Result<(), String> {
         ("guion -a", &format!("{script_tag}-a")),
         ("guion -b", &format!("{script_tag}-b")),
         ("|| alternativa", "si-or"),
+        // `2>&1` manda stderr por el mismo sitio que stdout, así que el pipe
+        // lo ve. El **control** va justo antes en el guion: la misma orden sin
+        // `2>&1` no encuentra nada, así que esta marca sólo puede venir de la
+        // duplicación.
+        ("2>&1 lleva stderr al pipe", "DIAGNOSTICO-POR-STDERR"),
+        // El comodín se expande **antes** de lanzar el programa: `grep -l`
+        // recibe dos rutas y nombra las dos. Que salga `dos.rs` es lo que
+        // distingue «expandió» de «le pasó el patrón y grep se apañó».
+        ("comodín expande a varios", "/tmp/glob-sosh/dos.rs"),
     ] {
         if !salida.contains(marca) {
             return Err(format!("«{etiqueta}» falló ({marca:?}); salida: {salida:?}"));
@@ -3134,6 +3191,16 @@ fn ssh_probe_busqueda(key: &Path, ssh_port: u16) -> Result<(), String> {
         "busqueda/un-byte-invalido-no-esconde-el-resto ok",
         "busqueda/numera-las-lineas ok",
         "busqueda/recursivo-baja-a-los-subdirectorios ok",
+        "busqueda/sin-filtro-salen-todos ok",
+        "busqueda/include-filtra-por-extension ok",
+        "busqueda/el-glob-mira-el-nombre-no-la-ruta ok",
+        "busqueda/exclude-gana-sobre-include ok",
+        "busqueda/un-glob-sin-coincidencias-sale-1 ok",
+        "busqueda/un-binario-se-anuncia-no-se-vuelca ok",
+        "busqueda/con-a-el-binario-si-se-vuelca ok",
+        "busqueda/un-binario-que-no-coincide-calla ok",
+        "busqueda/el-asterisco-retrocede ok",
+        "busqueda/interrogante-es-un-caracter ok",
     ] {
         if !salida.contains(esperado) {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));

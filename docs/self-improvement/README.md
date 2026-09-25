@@ -176,6 +176,14 @@ con entrecomillar como salida de emergencia. La línea base se midió **antes**
 de tocar nada, escribiendo el paso con la conducta deseada y ejecutándolo
 contra el `sosh` viejo.
 
+Y el rechazo resultó ser el paso intermedio, no el final: **encadenar (`;`,
+`&&`, `||`) se implementó el mismo día** y la suite lo comprueba. Declarar el
+subconjunto fue lo que hizo visible el hueco — antes nadie veía que media línea
+se perdía—, y con eso delante implementarlo fue una decisión informada. Lo mismo con **`2>&1`**, implementado después: resultó ser el más barato de los
+cuatro, porque en soso el hijo recibe un array de descriptores y duplicar es
+pasar el mismo número dos veces. Siguen rechazados, y ahí el rechazo es el
+entregable: `&`, `*` y `$`.
+
 **[N-008](native/N-008.md) tiene la forma decidida**: si hace falta vigilar
 ficheros, tiene que ser **por eventos**. Lo decidió la corrección, no el coste
 que había salido a medir: dos escrituras del **mismo tamaño** dentro del mismo

@@ -161,6 +161,8 @@ fn main(args: &[alloc::string::String]) -> u8 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
     Word,
+    /// `N>&M`: el descriptor `fd` pasa a apuntar donde `dup`.
+    RedirectDup,
     Pipe,
     RedirectOut,
     RedirectAppend,
@@ -183,6 +185,12 @@ struct Token {
     /// operador —`">"` es un nombre de fichero, no una redirección— y `""` es
     /// un argumento vacío, que no es lo mismo que ningún argumento.
     entrecomillada: bool,
+    /// La palabra traía `*` o `?` **fuera** de comillas: hay que expandirla.
+    ///
+    /// Se marca en el tokenizador y no se mira el texto después, porque
+    /// después ya no se sabe si el `*` venía entrecomillado. Es el mismo
+    /// motivo por el que existe `entrecomillada` (T64).
+    con_comodin: bool,
 }
 
 #[derive(Clone)]
@@ -191,6 +199,14 @@ enum RedirSpec {
     Log,
     Closed,
     Path(String, u64),
+    /// «Apunta a donde apunte el descriptor N» (`2>&1`).
+    ///
+    /// Se resuelve **después** de montar todas las redirecciones, así que
+    /// `cmd 2>&1 >f` y `cmd >f 2>&1` hacen lo mismo. En POSIX **no**: allí el
+    /// orden manda y el primero deja stderr en la tty. Es una divergencia
+    /// declarada, no un descuido — `CmdSpec` guarda una ranura por descriptor y
+    /// conservar el orden pediría otra estructura.
+    Dup(u64),
 }
 
 struct CmdSpec {
@@ -232,7 +248,7 @@ struct CmdSpec {
 /// La salida de emergencia es entrecomillar, igual que el `-F` de `grep`: si
 /// de verdad quieres el carácter, `"a;b"` lo da.
 const SEGUNDO_PLANO: &str = "no sé ejecutar en segundo plano (&); cada comando termina antes del siguiente";
-const DUPLICAR: &str = "no sé duplicar descriptores (2>&1); redirige cada uno a su fichero, o usa >&- para cerrar";
+const DUPLICAR: &str = "tras >& sólo entiendo un dígito (2>&1) o un guion (>&-)";
 const COMODINES: &str = "no expando comodines (*); entrecomíllalo si es literal";
 const VARIABLES: &str = "no expando variables ($); entrecomíllalo si es literal";
 
@@ -251,14 +267,16 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                         kind: TokenKind::OrOr,
                         word: String::new(),
                         fd: 0,
-                        entrecomillada: false,
+                        con_comodin: false,
+                    entrecomillada: false,
                     });
                 } else {
                     tokens.push(Token {
                         kind: TokenKind::Pipe,
                         word: String::new(),
                         fd: 0,
-                        entrecomillada: false,
+                        con_comodin: false,
+                    entrecomillada: false,
                     });
                 }
             }
@@ -269,7 +287,8 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                         kind: TokenKind::AndAnd,
                         word: String::new(),
                         fd: 0,
-                        entrecomillada: false,
+                        con_comodin: false,
+                    entrecomillada: false,
                     });
                 } else {
                     return Err(SEGUNDO_PLANO);
@@ -279,42 +298,53 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                 kind: TokenKind::Semicolon,
                 word: String::new(),
                 fd: 0,
-                entrecomillada: false,
+                con_comodin: false,
+                    entrecomillada: false,
             }),
             '>' => {
+                let mut destino_dup = 0u64;
                 let kind = if chars.peek() == Some(&'>') {
                     chars.next();
                     TokenKind::RedirectAppend
                 } else if chars.peek() == Some(&'&') {
                     chars.next();
-                    // `>&-` cierra el descriptor y eso sí se sabe hacer;
-                    // `2>&1` es duplicarlo, y no. Antes se comía el `1` y
-                    // acababa en «falta fichero tras >», que señala al sitio
-                    // equivocado.
-                    if chars.next() == Some('-') {
-                        TokenKind::RedirectClose
-                    } else {
-                        return Err(DUPLICAR);
+                    match chars.next() {
+                        Some('-') => TokenKind::RedirectClose,
+                        Some(d) if d.is_ascii_digit() => {
+                            destino_dup = d.to_digit(10).unwrap_or(0) as u64;
+                            TokenKind::RedirectDup
+                        }
+                        _ => return Err(DUPLICAR),
                     }
                 } else {
                     TokenKind::RedirectOut
                 };
                 tokens.push(Token {
                     kind,
-                    word: String::new(),
+                    // El destino de un `>&N` viaja en `word`: es lo único
+                    // variable que lleva ese token, y añadir un campo a `Token`
+                    // para usarlo en un caso de cada cien es peor negocio.
+                    word: if kind == TokenKind::RedirectDup {
+                        format!("{destino_dup}")
+                    } else {
+                        String::new()
+                    },
                     fd: 1,
                     entrecomillada: false,
+                    con_comodin: false,
                 });
             }
             '<' => tokens.push(Token {
                 kind: TokenKind::RedirectIn,
                 word: String::new(),
                 fd: 0,
-                entrecomillada: false,
+                con_comodin: false,
+                    entrecomillada: false,
             }),
             _ => {
                 let mut word = String::new();
                 let mut entrecomillada = false;
+                let mut con_comodin = false;
                 // El primer carácter ya se consumió: se trata igual que el
                 // resto para que `"a"b` y `a"b"` den los dos `ab`.
                 let mut pendiente = Some(c);
@@ -377,7 +407,13 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                         // intención que esta shell no cumple. Dejarlos pasar
                         // daba respuestas que parecen hechos: `ls *.rs` decía
                         // «*.rs: no existe», que suena a que no hay ficheros.
-                        '*' => return Err(COMODINES),
+                        // `*` y `?` sin comillas se expanden después, contra
+                        // el directorio. Con comillas son literales, que es la
+                        // salida de emergencia de siempre en esta shell.
+                        '*' | '?' => {
+                            con_comodin = true;
+                            word.push(ch);
+                        }
                         '$' => return Err(VARIABLES),
                         x => word.push(x),
                     }
@@ -389,24 +425,33 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                         if (1..=3).contains(&d) && chars.peek() == Some(&'>') {
                             chars.next();
                             let fd = d as u64;
+                            let mut destino_dup = 0u64;
                             let kind = if chars.peek() == Some(&'>') {
                                 chars.next();
                                 TokenKind::RedirectAppend
                             } else if chars.peek() == Some(&'&') {
                                 chars.next();
-                                if chars.next() == Some('-') {
-                                    TokenKind::RedirectClose
-                                } else {
-                                    return Err(DUPLICAR);
+                                match chars.next() {
+                                    Some('-') => TokenKind::RedirectClose,
+                                    Some(d) if d.is_ascii_digit() => {
+                                        destino_dup = d.to_digit(10).unwrap_or(0) as u64;
+                                        TokenKind::RedirectDup
+                                    }
+                                    _ => return Err(DUPLICAR),
                                 }
                             } else {
                                 TokenKind::RedirectOut
                             };
                             tokens.push(Token {
                                 kind,
-                                word: String::new(),
+                                word: if kind == TokenKind::RedirectDup {
+                                    format!("{destino_dup}")
+                                } else {
+                                    String::new()
+                                },
                                 fd,
                                 entrecomillada: false,
+                                con_comodin: false,
                             });
                             continue;
                         }
@@ -417,6 +462,7 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                     word,
                     fd: 0,
                     entrecomillada,
+                    con_comodin,
                 });
             }
         }
@@ -456,6 +502,23 @@ fn parse(tokens: &[Token]) -> Result<Vec<CmdSpec>, &'static str> {
                         return Err("falta fichero tras <");
                     }
                     stdin = RedirSpec::Path(path.word.clone(), abi::O_RDONLY);
+                    i += 1;
+                }
+                TokenKind::RedirectDup => {
+                    let destino: u64 = tok.word.parse().unwrap_or(9);
+                    if !(0..=3).contains(&destino) {
+                        return Err("sólo se puede duplicar 0, 1, 2 o 3");
+                    }
+                    if destino == tok.fd {
+                        return Err("un descriptor no puede duplicarse a sí mismo");
+                    }
+                    let spec = RedirSpec::Dup(destino);
+                    match tok.fd {
+                        1 => stdout = spec,
+                        2 => stderr = spec,
+                        3 => log = spec,
+                        _ => return Err("descriptor de redirección inválido"),
+                    }
                     i += 1;
                 }
                 TokenKind::RedirectOut => {
@@ -530,6 +593,88 @@ enum ChainLink {
     Always,
     And,
     Or,
+}
+
+/// Expande las palabras con comodines contra el sistema de ficheros.
+///
+/// **Un patrón que no casa con nada es un error**, no se pasa tal cual. Bash
+/// hace lo contrario por omisión, y eso es justo lo que N-010 vino a quitar de
+/// esta shell: `ls *.rs` sin ficheros `.rs` le entregaba a `ls` la cadena
+/// `*.rs` y salía «*.rs: no existe», que suena a un hecho sobre el disco
+/// cuando lo que pasa es que no había nada que expandir.
+///
+/// Sólo el **último** componente lleva comodín: `/tmp/*.txt` vale, `a/*/b` no.
+/// Lo segundo pide recorrer el árbol y no lo pide nadie todavía.
+fn expandir_comodines(tokens: Vec<Token>) -> Result<Vec<Token>, String> {
+    let mut out = Vec::with_capacity(tokens.len());
+    for t in tokens {
+        if !t.con_comodin || t.kind != TokenKind::Word {
+            out.push(t);
+            continue;
+        }
+        let (dir, patron) = match t.word.rfind('/') {
+            Some(i) => (&t.word[..=i], &t.word[i + 1..]),
+            None => ("", t.word.as_str()),
+        };
+        if libsoso::glob::tiene_comodin(dir) {
+            return Err(format!(
+                "sólo el último componente puede llevar comodín: {}",
+                t.word
+            ));
+        }
+        let base = if dir.is_empty() { "." } else { dir };
+        let mut casan = listar_que_casan(base, patron);
+        if casan.is_empty() {
+            return Err(format!("ningún fichero casa con {}", t.word));
+        }
+        // En orden, para que dos ejecuciones den lo mismo: `getdents` no
+        // promete ninguno.
+        casan.sort();
+        for nombre in casan {
+            out.push(Token {
+                kind: TokenKind::Word,
+                word: format!("{dir}{nombre}"),
+                fd: 0,
+                entrecomillada: false,
+                con_comodin: false,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Nombres de `dir` que casan con `patron`.
+fn listar_que_casan(dir: &str, patron: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let fd = sys::open(dir, abi::O_RDONLY);
+    if fd < 0 {
+        return out;
+    }
+    let mut ents = [abi::Dirent::default(); 16];
+    loop {
+        let n = sys::getdents(fd as u64, &mut ents);
+        if n <= 0 {
+            break;
+        }
+        for e in &ents[..n as usize / abi::DIRENT_SIZE] {
+            let Ok(nombre) = core::str::from_utf8(e.name_bytes()) else {
+                continue;
+            };
+            if nombre == "." || nombre == ".." {
+                continue;
+            }
+            // Los ocultos sólo salen si el patrón empieza por punto, como en
+            // cualquier shell: si no, `rm *` se llevaría la configuración.
+            if nombre.starts_with('.') && !patron.starts_with('.') {
+                continue;
+            }
+            if libsoso::glob::casa(nombre, patron) {
+                out.push(String::from(nombre));
+            }
+        }
+    }
+    sys::close(fd as u64);
+    out
 }
 
 fn split_chain(tokens: &[Token]) -> Result<Vec<(ChainLink, Vec<Token>)>, &'static str> {
@@ -653,6 +798,21 @@ fn open_redir(spec: &RedirSpec) -> Result<u64, i64> {
             let fd = sys::open(path, *flags);
             if fd < 0 { Err(fd) } else { Ok(fd as u64) }
         }
+        // Una duplicación no abre nada: apunta a un descriptor que el
+        // pipeline ya ha montado, así que se resuelve allí y no aquí.
+        RedirSpec::Dup(_) => Ok(abi::FD_INHERIT_TTY),
+    }
+}
+
+/// Resuelve un `N>&M` contra los descriptores ya montados.
+///
+/// Se hace **después** de abrir todo, así que `2>&1 >f` y `>f 2>&1` dan lo
+/// mismo. En POSIX el orden manda; aquí no, y está declarado en `RedirSpec`.
+fn resolver_dup(spec: &RedirSpec, stdin: u64, stdout: u64, actual: u64) -> u64 {
+    match spec {
+        RedirSpec::Dup(0) => stdin,
+        RedirSpec::Dup(1) => stdout,
+        _ => actual,
     }
 }
 
@@ -719,6 +879,10 @@ fn ejecutar_pipeline(cmds: &[CmdSpec], ctx: Option<usize>) -> u8 {
         let mut argv: Vec<&str> = Vec::with_capacity(cmd.args.len() + 1);
         argv.push(path.as_str());
         argv.extend(cmd.args.iter().map(|a| a.as_str()));
+        // `2>&1` y `3>&1`: el hijo recibe un array de descriptores, así que
+        // duplicar es pasar el mismo número dos veces.
+        let stderr_fd = resolver_dup(&cmd.stderr, stdin_fd, stdout_fd, stderr_fd);
+        let log_fd = resolver_dup(&cmd.log, stdin_fd, stdout_fd, log_fd);
         let pid = sys::spawn_io_full(&path, &argv, &[], [stdin_fd, stdout_fd, stderr_fd, log_fd]);
         if pid < 0 {
             sosh_msg(ctx, &format!("{}: {}", cmd.prog, errno_str(pid)));
@@ -1343,6 +1507,13 @@ fn ejecutar(line: &str, ctx: Option<usize>) -> (Option<u8>, u8) {
         Ok(t) => t,
         Err(msg) => {
             sosh_msg(ctx, msg);
+            return (None, 1);
+        }
+    };
+    let tokens = match expandir_comodines(tokens) {
+        Ok(t) => t,
+        Err(msg) => {
+            sosh_msg(ctx, &msg);
             return (None, 1);
         }
     };

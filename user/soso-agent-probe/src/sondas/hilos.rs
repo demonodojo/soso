@@ -21,7 +21,13 @@ use libsoso::{abi, println, sys, thread};
 use crate::{errno, Caso};
 
 fn anotar(casos: &mut Vec<Caso>, c: Caso) {
-    if c.paso {
+    // Una observación —`Caso::observacion`, sin `esperado`— **no es un
+    // aprobado**: imprimirla como `ok` la disfraza de veredicto. Se distingue
+    // aquí aunque esta sonda no tenga ninguna todavía, porque la trampa la
+    // paga quien añada la primera.
+    if c.paso && c.esperado.is_empty() {
+        println!("probe: {} medido: {}", c.id, c.observado);
+    } else if c.paso {
         println!("probe: {} ok ({})", c.id, c.observado);
     } else {
         println!(

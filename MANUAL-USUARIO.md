@@ -366,8 +366,6 @@ mensaje que dice qué hacer en su lugar.
 | Si escribes | sosh responde |
 |---|---|
 | `cmd &` | no sé ejecutar en segundo plano; cada comando termina antes del siguiente |
-| `cmd 2>&1` | no sé duplicar descriptores; redirige cada uno a su fichero, o `>&-` para cerrar |
-| `ls *.rs` | no expando comodines; entrecomíllalo si es literal |
 | `echo $HOME` | no expando variables; entrecomíllalo si es literal |
 
 Antes algunos de estos caracteres se colaban como **argumentos del comando**,
@@ -417,6 +415,17 @@ como en Unix.
 | `-r` | baja por los subdirectorios de las rutas que le des |
 | `-F` | busca el patrón tal cual, sin avisos |
 | `-m N` | para después de N líneas por fichero |
+| `--include=GLOB` | sólo mira los ficheros cuyo **nombre** casa |
+| `--exclude=GLOB` | nunca mira los que casan (gana sobre `--include`) |
+| `-a` | vuelca también los ficheros binarios |
+
+Un fichero **binario** que coincide se anuncia en una línea
+(`grep: ruta: binario coincide`) en vez de volcar sus bytes a la consola; `-a`
+lo fuerza. Coincidir sigue contando: la salida es 0.
+
+En los globs sólo valen `*` y `?`, y se comparan contra el **nombre** del
+fichero, no contra la ruta: `--include=*.rs` encuentra `src/a.rs`. Si el filtro
+no deja ningún fichero, la salida es 1 («no hay»), no un error.
 
 El patrón es una **subcadena literal**. No hay expresiones regulares, y por eso
 un patrón que sólo tiene sentido como tal —`fn \w+`, `.*`, `^fn`, `;$`— se
