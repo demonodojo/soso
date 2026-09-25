@@ -259,7 +259,20 @@ nativa tiene que poder comprobarse a sí misma— y en los dos se verificó por
 mutación que pueden fallar. El de `wild-soso` ata el nombre del binario al
 `"linker"` del target: no vigila el bug, vigila la **deriva** que lo produjo.
 
-**[T39](T39-bootstrap-libstd.md) va por los pasos 1–2 de 5.** Lo que la motiva
+**[T39](T39-bootstrap-libstd.md) encontró que el bootstrap no podía
+completarse.** El `sed` que parchea `os/mod.rs` tiene los paréntesis
+desbalanceados —`\)` sin `\(` en una expresión básica—, así que **falla en
+cualquier entrada**, y con `set -euo pipefail` abortaba `apply-patches.sh`
+justo ahí: los cuatro parches siguientes no se ejecutaban nunca en un vendor
+limpio. El vendor real lo confirma: `os/mod.rs` no tiene «soso» por ninguna
+parte mientras los otros seis parches sí están. Arreglado y comprobado de punta
+a punta contra un **vendor falso** hecho con copias de los ficheros reales
+—sin tocar el del usuario—: el script completa, los parches aplican, y tres
+pasadas dejan los ficheros **byte a byte iguales**, que es la propiedad que la
+ficha exige. De paso salió [T69](T69-apply-patches-no-completaba.md): el script
+copia `dl.rs` a una PAL cuyo `mod.rs` no lo declara.
+
+**Y va por los pasos 1–2 de 5.** Lo que la motiva
 está comprobado, no supuesto: `sed -i` y `perl -i` **salen 0 cuando el ancla no
 aparece**, así que `apply-patches.sh` imprime `OK` habiendo parcheado **cero**
 si upstream renombra cualquier cosa — y el fallo sale mucho después como un

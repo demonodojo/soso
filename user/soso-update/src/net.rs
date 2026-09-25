@@ -67,6 +67,9 @@ impl TcpTransport for Net {
             Err(e) if e == -(abi::EINTR as i64) => {
                 println!("  red: interrumpido resolviendo {host}");
             }
+            Err(e) if e == -(abi::ETIMEDOUT as i64) => {
+                println!("  red: timeout resolviendo {host}");
+            }
             Err(e) => println!("  red: no pude resolver {host} (errno {})", -e),
         }
         r
@@ -233,6 +236,10 @@ fn map_http_err(e: soso_http::HttpError) -> &'static str {
             "TLS"
         }
         soso_http::HttpError::Parse => "HTTP parse",
+        soso_http::HttpError::ParseDetail(detail) => {
+            println!("  red: HTTP parse — {detail}");
+            "HTTP parse"
+        }
         soso_http::HttpError::Io(donde) => {
             println!("  red: E/S falló — {donde}");
             "descarga HTTP"

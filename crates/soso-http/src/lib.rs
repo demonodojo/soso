@@ -83,6 +83,8 @@ pub enum HttpError {
     /// Syscall interrumpida (Ctrl-C / SIGINT en el grupo en primer plano).
     Interrupted,
     Parse,
+    /// Cabecera HTTP incompleta o ilegible (detalle para traza en consola).
+    ParseDetail(alloc::string::String),
     /// Fallo de TLS **con el motivo que dio rustls**. Sin él, «TLS» a secas no
     /// distingue un certificado rechazado de una alerta del servidor o de un
     /// reloj mal puesto, y desde el guest no hay forma de averiguarlo.
@@ -420,12 +422,22 @@ impl HttpStreamState {
                 .header_buf
                 .windows(4)
                 .position(|w| w == b"\r\n\r\n")
-                .ok_or(HttpError::Parse)?;
+                .ok_or_else(|| {
+                    HttpError::ParseDetail(parse_head_diag(self.header_buf.len(), &self.header_buf))
+                })?;
             let (status, headers) = parse_response_head(&self.header_buf[..sep])?;
             return Ok((status, headers));
         }
-        Err(HttpError::Parse)
+        Err(HttpError::ParseDetail(alloc::string::String::from(
+            "vacío (0 bytes de cabecera HTTP en claro)",
+        )))
     }
+}
+
+fn parse_head_diag(len: usize, buf: &[u8]) -> alloc::string::String {
+    let preview_len = buf.len().min(120);
+    let preview = core::str::from_utf8(&buf[..preview_len]).unwrap_or("(no UTF-8)");
+    alloc::format!("cabecera {len} B sin \\r\\n\\r\\n; inicio: {preview:?}")
 }
 
 /// GET HTTPS con redirects (hasta 8). `auth` opcional: token Bearer HF.

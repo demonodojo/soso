@@ -26,8 +26,14 @@ grep -q 'target_os = "soso"' "$RUST/library/std/src/sys/pal/mod.rs" || \
   perl -i -0pe 's/(\s+target_os = "zkvm" => \{\s+mod zkvm;\s+pub use self::zkvm::\*;\s+\})\s+_ =>/\1\n    target_os = "soso" => {\n        mod soso;\n        pub use self::soso::*;\n    }\n    _ =>/s' \
     "$RUST/library/std/src/sys/pal/mod.rs"
 
+# Los paréntesis **no** se escapan en una expresión básica: `\)` sin `\(`
+# delante es un error de sintaxis, y `sed` sale 1. Con `set -e` eso abortaba el
+# script justo aquí, así que los cuatro parches siguientes no llegaban a
+# ejecutarse nunca en un vendor limpio — y el mensaje final «OK» tampoco se
+# imprimía, pero quien mirara el vendor a medio parchear no tenía forma de
+# saber por dónde se había quedado. Ver T39.
 grep -q 'pub mod soso' "$RUST/library/std/src/os/mod.rs" || \
-  sed -i '/#\[cfg(target_os = "hermit"\)\]/a\
+  sed -i '/#\[cfg(target_os = "hermit")\]/a\
 #[cfg(target_os = "soso")]\
 pub mod soso;' "$RUST/library/std/src/os/mod.rs"
 

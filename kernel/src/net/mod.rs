@@ -565,6 +565,36 @@ pub fn poll() {
     }
 }
 
+/// Sondeo con el candado de `NET` ya tomado. Lo usa DNS para avanzar también
+/// los TCP de usuario (TLS) mientras espera UDP/53.
+pub(crate) fn poll_locked(n: &mut NetStack) {
+    let NetStack {
+        iface,
+        sockets,
+        echo,
+        ssh,
+        dhcp,
+        configured,
+        dhcp_enabled,
+        dhcp_started,
+        dev,
+        mac,
+        backend,
+        dns,
+        user_tcp,
+    } = n;
+    let t = now();
+    iface.poll(t, dev, sockets);
+    if *dhcp_enabled {
+        poll_dhcp(iface, sockets, echo, ssh, *dhcp, configured, dns);
+        try_static_fallback(iface, *mac, *backend, dev, *dhcp_started, configured);
+    }
+    poll_tcp_services(sockets, echo, ssh, *configured);
+    poll_user_tcp(iface, sockets, user_tcp, *configured);
+    iface.poll(t, dev, sockets);
+    user_tcp.purgar_cerrados(sockets);
+}
+
 fn poll_user_tcp(
     iface: &mut Interface,
     sockets: &mut SocketSet<'static>,

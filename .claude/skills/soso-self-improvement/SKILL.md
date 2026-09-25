@@ -184,9 +184,12 @@ cabecera y section headers desplazados (**T67**, hoy `objdump` lo desensambla,
 pero sigue sin tabla de símbolos) y `wild-soso` declaraba su binario como
 `wild`, arrastrando dos rutas más que tampoco existían (**T68**). Sigue sin
 construirse el sysroot de `x86_64-unknown-soso`, y **`wild` no está instalado**:
-eso bloquea los pasos 4–5 de **T39**, que va por los pasos 1–2 con
-`soso_improve_core::receta` (receta declarativa, idempotente por marca
-explícita, y un ancla ausente es un fallo con nombre — `sed -i` salía 0). Ojo al elegir: los targets de `user/`
+eso bloquea los pasos 4–5 de **T39**. T39 encontró además que el bootstrap
+**no podía completarse**: un `sed` con paréntesis desbalanceados fallaba en
+cualquier entrada y, con `set -e`, abortaba `apply-patches.sh` — arreglado y
+verificado contra un vendor falso. Va por los pasos 1–2 con
+`soso_improve_core::receta` (declarativa, idempotente por marca explícita, y un
+ancla ausente es un fallo con nombre — `sed -i` salía 0 sin tocar nada). Ojo al elegir: los targets de `user/`
 son los que funcionan; `targets/x86_64-unknown-soso.json` es la ruta A y hoy no
 enlaza.
 

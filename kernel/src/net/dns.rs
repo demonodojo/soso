@@ -6,7 +6,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use smoltcp::iface::{Interface, SocketSet};
+use smoltcp::iface::SocketSet;
 use smoltcp::socket::udp;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
@@ -15,6 +15,7 @@ const DNS_PORT: u16 = 53;
 const SLIRP_DNS: Ipv4Address = Ipv4Address::new(10, 0, 2, 3);
 const FALLBACK_DNS: Ipv4Address = Ipv4Address::new(8, 8, 8, 8);
 const TIMEOUT: Duration = Duration::from_secs(5);
+const RCODE_NXDOMAIN: u8 = 3;
 
 fn encode_qname(host: &str, out: &mut Vec<u8>) -> Result<(), ()> {
     if host.is_empty() || host.len() > 253 {
@@ -40,6 +41,20 @@ fn build_query(host: &str, id: u16) -> Result<Vec<u8>, ()> {
     q.extend_from_slice(&[0x00, 0x01]); // type A
     q.extend_from_slice(&[0x00, 0x01]); // class IN
     Ok(q)
+}
+
+fn dns_id(pkt: &[u8]) -> Option<u16> {
+    if pkt.len() < 2 {
+        return None;
+    }
+    Some(u16::from_be_bytes([pkt[0], pkt[1]]))
+}
+
+fn dns_rcode(pkt: &[u8]) -> Option<u8> {
+    if pkt.len() < 4 {
+        return None;
+    }
+    Some(pkt[3] & 0x0f)
 }
 
 fn parse_a_record(pkt: &[u8]) -> Result<[u8; 4], ()> {
@@ -105,14 +120,12 @@ const POR_SERVIDOR: Duration = Duration::from_millis(1500);
 enum ResolveFail {
     Timeout,
     Interrupted,
+    NxDomain,
 }
 
 pub fn resolve_a(
-    iface: &mut Interface,
-    sockets: &mut SocketSet<'_>,
-    dev: &mut crate::net::device::NicDev,
+    n: &mut super::NetStack,
     host: &str,
-    _now: Instant,
     deadline: Instant,
     servidores: &[Ipv4Address],
 ) -> Result<[u8; 4], ResolveFail> {
@@ -120,48 +133,68 @@ pub fn resolve_a(
     let query = build_query(host, id).map_err(|_| ResolveFail::Timeout)?;
     let rx = udp::PacketBuffer::new([udp::PacketMetadata::EMPTY; 2], vec![0u8; 768]);
     let tx = udp::PacketBuffer::new([udp::PacketMetadata::EMPTY; 2], vec![0u8; 512]);
-    let handle = sockets.add(udp::Socket::new(rx, tx));
+    let handle = n.sockets.add(udp::Socket::new(rx, tx));
     {
-        let sock = sockets.get_mut::<udp::Socket>(handle);
-        sock.bind(49152).map_err(|_| ResolveFail::Timeout)?;
+        let sock = n.sockets.get_mut::<udp::Socket>(handle);
+        if sock.bind(49152).is_err() {
+            crate::println!("dns: bind puerto 49152 falló (host={host})");
+            n.sockets.remove(handle);
+            return Err(ResolveFail::Timeout);
+        }
     }
 
     for server in servidores {
         let remote = IpEndpoint::new(IpAddress::Ipv4(*server), DNS_PORT);
         {
-            let sock = sockets.get_mut::<udp::Socket>(handle);
-            sock.send_slice(&query, remote).ok();
+            let sock = n.sockets.get_mut::<udp::Socket>(handle);
+            if sock.send_slice(&query, remote).is_err() {
+                crate::println!("dns: send falló hacia {server} host={host}");
+            } else {
+                crate::println!("dns: consulta {server} host={host} id={id}");
+            }
         }
-        // El reloj de verdad, no uno inventado. Antes esto avanzaba `t` de 10
-        // en 10 ms sin mirar la hora: los «5 segundos» de espera se gastaban en
-        // unos pocos milisegundos reales, así que en QEMU —donde la respuesta
-        // viene del propio host— llegaba a tiempo y por WiFi no llegaba nunca.
         let fin = min_instant(crate::net::now() + POR_SERVIDOR, deadline);
         loop {
             if crate::task::interrupt_requested() {
-                sockets.remove(handle);
+                n.sockets.remove(handle);
                 return Err(ResolveFail::Interrupted);
             }
             let t = crate::net::now();
             if t >= fin {
+                crate::println!("dns: sin respuesta de {server} host={host} (plazo servidor)");
                 break;
             }
-            iface.poll(t, dev, sockets);
-            let sock = sockets.get_mut::<udp::Socket>(handle);
+            super::poll_locked(n);
+            let sock = n.sockets.get_mut::<udp::Socket>(handle);
             if sock.can_recv() {
                 let mut buf = [0u8; 512];
-                if let Ok((n, meta)) = sock.recv_slice(&mut buf) {
-                    if meta.endpoint.port == DNS_PORT && n > 0 {
-                        if let Ok(ip) = parse_a_record(&buf[..n]) {
-                            sockets.remove(handle);
-                            return Ok(ip);
+                if let Ok((nbytes, meta)) = sock.recv_slice(&mut buf) {
+                    if meta.endpoint.port == DNS_PORT && nbytes > 0 {
+                        let pkt = &buf[..nbytes];
+                        let id_ok = dns_id(pkt) == Some(id);
+                        let rcode = dns_rcode(pkt).unwrap_or(0xff);
+                        let a_ok = id_ok && parse_a_record(pkt).is_ok();
+                        crate::println!(
+                            "dns: resp {server} host={host} {nbytes}B id={} rcode={rcode} registro_a={}",
+                            if id_ok { "ok" } else { "distinto" },
+                            if a_ok { "ok" } else { "no" }
+                        );
+                        if id_ok && rcode == RCODE_NXDOMAIN {
+                            n.sockets.remove(handle);
+                            return Err(ResolveFail::NxDomain);
+                        }
+                        if let Ok(ip) = parse_a_record(pkt) {
+                            if id_ok {
+                                n.sockets.remove(handle);
+                                return Ok(ip);
+                            }
                         }
                     }
                 }
             }
         }
     }
-    sockets.remove(handle);
+    n.sockets.remove(handle);
     Err(ResolveFail::Timeout)
 }
 
@@ -203,24 +236,16 @@ pub fn resolve_hostname(host: &str) -> Result<soso_abi::SockAddr, i64> {
     if !configured {
         return Err(-soso_abi::ENOTCONN);
     }
-    let NetStack {
-        iface,
-        sockets,
-        dev,
-        dns,
-        ..
-    } = &mut *n;
-    let lista = servidores(dns);
+    let lista = servidores(&n.dns);
     let start = super::now();
     let deadline = start + TIMEOUT;
-    let resultado = match resolve_a(iface, sockets, dev, trimmed, start, deadline, &lista) {
+    let resultado = match resolve_a(&mut *n, trimmed, deadline, &lista) {
         Ok(ip) => Ok(ip),
         Err(ResolveFail::Interrupted) => Err(-soso_abi::EINTR),
-        Err(ResolveFail::Timeout) => Err(-soso_abi::ENOENT),
+        Err(ResolveFail::NxDomain) => Err(-soso_abi::ENOENT),
+        Err(ResolveFail::Timeout) => Err(-soso_abi::ETIMEDOUT),
     };
 
-    // El socket UDP y `query` ya se han destruido al volver de `resolve_a`.
-    // Este recorrido separa su posible corrupción de la liberación siguiente.
     crate::mm::heap::comprobar_listas("tras resolve_a");
 
     crate::println!(
@@ -239,8 +264,6 @@ pub fn resolve_hostname(host: &str) -> Result<soso_abi::SockAddr, i64> {
         _pad: 0,
     })
 }
-
-use super::NetStack;
 
 fn parse_dotted_ipv4(s: &str) -> Option<[u8; 4]> {
     let mut oct = [0u8; 4];

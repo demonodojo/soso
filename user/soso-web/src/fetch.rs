@@ -17,7 +17,9 @@ pub enum FetchError {
 impl FetchError {
     pub fn mensaje(&self) -> &'static str {
         match self {
-            Self::Http(HttpError::Parse) => "error HTTP (parse)",
+            Self::Http(HttpError::Parse) | Self::Http(HttpError::ParseDetail(_)) => {
+                "error HTTP (parse)"
+            }
             Self::Http(HttpError::Tls(_)) => "error TLS",
             Self::Http(HttpError::Io(_)) => "error HTTP (E/S)",
             Self::Http(HttpError::Dns) => "error DNS",

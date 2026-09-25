@@ -30,8 +30,14 @@ use crate::entorno::Archivos;
 /// Qué hacer con un fichero del vendor.
 #[derive(Debug, Clone)]
 pub enum Accion {
-    /// Copiar bytes tal cual (lo que hacía `rsync`/`cp`).
+    /// Copiar bytes tal cual (lo que hacía `cp`).
     Copiar { desde: String },
+    /// Copiar un árbol entero, recursivo (lo que hacía `rsync -a`).
+    ///
+    /// No borra lo que sobre en el destino, igual que `rsync` **sin**
+    /// `--delete`: si se cambiara eso, un fichero que ya no está en la
+    /// plantilla desaparecería del vendor sin avisar.
+    CopiarArbol { desde: String },
     /// Insertar `texto` **después** de la línea que contiene `ancla`.
     InsertarTrasLinea { ancla: String, texto: String },
     /// Insertar `texto` **antes** de la línea que contiene `ancla`.
@@ -149,6 +155,15 @@ fn aplicar_uno<A: Archivos>(fs: &mut A, raiz: &str, paso: &Paso) -> Resultado {
         };
     }
 
+    if let Accion::CopiarArbol { desde } = &paso.accion {
+        let mut copiados = 0usize;
+        return match copiar_arbol(fs, desde, &destino, &mut copiados) {
+            Ok(()) if copiados == 0 => Resultado::YaEstaba,
+            Ok(()) => Resultado::Aplicado,
+            Err(e) => Resultado::Fallo(e),
+        };
+    }
+
     let bytes = match fs.leer(&destino) {
         Ok(d) => d,
         Err(e) => return Resultado::Fallo(format!("no pude leer {destino}: {e:?}")),
@@ -161,7 +176,9 @@ fn aplicar_uno<A: Archivos>(fs: &mut A, raiz: &str, paso: &Paso) -> Resultado {
     }
 
     let nuevo = match &paso.accion {
-        Accion::Copiar { .. } => unreachable!("tratado arriba"),
+        Accion::Copiar { .. } | Accion::CopiarArbol { .. } => {
+            unreachable!("tratados arriba")
+        }
         Accion::Anadir { texto: t } => {
             let mut s = texto.clone();
             if !s.ends_with('\n') {
@@ -200,6 +217,45 @@ fn aplicar_uno<A: Archivos>(fs: &mut A, raiz: &str, paso: &Paso) -> Resultado {
     }
 }
 
+/// Copia `desde` en `hasta`, recursivo. Cuenta cuántos ficheros **cambiaron**.
+///
+/// Se compara el contenido antes de escribir para que una segunda preparación
+/// no toque nada: la idempotencia de un árbol no es una marca en un fichero,
+/// es que los bytes ya estén.
+fn copiar_arbol<A: Archivos>(
+    fs: &mut A,
+    desde: &str,
+    hasta: &str,
+    copiados: &mut usize,
+) -> Result<(), String> {
+    let entradas = fs
+        .listar(desde)
+        .map_err(|e| format!("no pude listar la plantilla {desde}: {e:?}"))?;
+    if fs.crear_directorio(hasta).is_err() {
+        return Err(format!("no pude crear {hasta}"));
+    }
+    for e in entradas {
+        let nombre = e.ruta.rsplit('/').next().unwrap_or(&e.ruta).to_string();
+        let origen = format!("{}/{}", desde.trim_end_matches('/'), nombre);
+        let destino = format!("{}/{}", hasta.trim_end_matches('/'), nombre);
+        match e.tipo {
+            crate::entorno::Tipo::Directorio => copiar_arbol(fs, &origen, &destino, copiados)?,
+            _ => {
+                let datos = fs
+                    .leer(&origen)
+                    .map_err(|err| format!("no pude leer {origen}: {err:?}"))?;
+                if fs.leer(&destino).map(|a| a == datos).unwrap_or(false) {
+                    continue;
+                }
+                fs.escribir(&destino, &datos, 0o644)
+                    .map_err(|err| format!("no pude escribir {destino}: {err:?}"))?;
+                *copiados += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Inserta `texto` junto a la **primera** línea que contiene `ancla`.
 ///
 /// La primera y no todas: los parches de este bootstrap añaden una rama a un
@@ -230,6 +286,114 @@ fn empujar_linea(out: &mut String, texto: &str) {
     if !texto.ends_with('\n') {
         out.push('\n');
     }
+}
+
+/// La receta del bootstrap de libstd, traducida de
+/// `config/rust-soso/apply-patches.sh`.
+///
+/// `plantillas` es `config/rust-soso` del checkout y `soso_rt` la ruta que va
+/// en el `Cargo.toml` del vendor. Las rutas de los ficheros son **relativas a
+/// la raíz del vendor**.
+///
+/// Es una traducción **fiel**, no una mejora: si el script hace algo raro,
+/// aquí hace lo mismo y queda anotado. Cambiar la conducta sin poder compilar
+/// la libstd —hoy no se puede, falta el enlazador— sería decidir a ciegas.
+pub fn pasos_libstd(plantillas: &str, soso_rt: &str) -> Vec<Paso> {
+    let t = plantillas.trim_end_matches('/');
+    alloc::vec![
+        Paso {
+            nombre: "PAL: os/soso".into(),
+            fichero: "library/std/src/os/soso".into(),
+            marca: String::new(),
+            accion: Accion::CopiarArbol {
+                desde: format!("{t}/tree/library/std/src/os/soso"),
+            },
+        },
+        Paso {
+            nombre: "PAL: sys/pal/soso".into(),
+            fichero: "library/std/src/sys/pal/soso".into(),
+            marca: String::new(),
+            accion: Accion::CopiarArbol {
+                desde: format!("{t}/tree/library/std/src/sys/pal/soso"),
+            },
+        },
+        // **Anotado**: el `mod.rs` que copia el paso anterior no declara
+        // `mod dl`, así que este fichero queda en el vendor sin que nada lo
+        // compile. Comprobado en el vendor real. Se conserva porque quitarlo
+        // es una decisión que necesita un build para validarse; está en T69.
+        Paso {
+            nombre: "PAL: dl.rs (hoy no lo declara nadie — T69)".into(),
+            fichero: "library/std/src/sys/pal/soso/dl.rs".into(),
+            marca: String::new(),
+            accion: Accion::Copiar {
+                desde: format!("{t}/sys/pal/soso/dl.rs"),
+            },
+        },
+        Paso {
+            nombre: "build.rs: target soso".into(),
+            fichero: "library/std/build.rs".into(),
+            marca: "target_os == \"soso\"".into(),
+            accion: Accion::InsertarTrasLinea {
+                ancla: "|| target_os == \"vexos\"".into(),
+                texto: "        || target_os == \"soso\"".into(),
+            },
+        },
+        Paso {
+            nombre: "sys/pal/mod.rs: rama soso".into(),
+            fichero: "library/std/src/sys/pal/mod.rs".into(),
+            marca: "mod soso;".into(),
+            accion: Accion::InsertarTrasLinea {
+                ancla: "pub use self::zkvm::*;".into(),
+                texto: "    }\n    target_os = \"soso\" => {\n        mod soso;\n        pub use self::soso::*;".into(),
+            },
+        },
+        Paso {
+            nombre: "os/mod.rs: pub mod soso".into(),
+            fichero: "library/std/src/os/mod.rs".into(),
+            marca: "pub mod soso;".into(),
+            accion: Accion::InsertarTrasLinea {
+                ancla: "#[cfg(target_os = \"hermit\")]".into(),
+                texto: "#[cfg(target_os = \"soso\")]\npub mod soso;".into(),
+            },
+        },
+        Paso {
+            nombre: "os/mod.rs: soso en la lista de targets".into(),
+            fichero: "library/std/src/os/mod.rs".into(),
+            marca: "target_os = \"soso\",".into(),
+            accion: Accion::InsertarTrasLinea {
+                ancla: "target_os = \"hermit\",".into(),
+                texto: "    target_os = \"soso\",".into(),
+            },
+        },
+        Paso {
+            nombre: "sys/exit.rs: salida por soso_rt".into(),
+            fichero: "library/std/src/sys/exit.rs".into(),
+            marca: "soso_rt::exit".into(),
+            accion: Accion::InsertarTrasLinea {
+                ancla: "hermit_abi::exit(code)".into(),
+                texto: "        target_os = \"soso\" => soso_rt::exit(code),".into(),
+            },
+        },
+        Paso {
+            nombre: "Cargo.toml: dependencia soso-rt".into(),
+            fichero: "library/std/Cargo.toml".into(),
+            marca: "soso-rt".into(),
+            accion: Accion::Anadir {
+                texto: format!(
+                    "\n[target.'cfg(target_os = \"soso\")'.dependencies]\nsoso-rt = {{ path = \"{soso_rt}\", features = [\"dep-of-std\"] }}\n"
+                ),
+            },
+        },
+        Paso {
+            nombre: "env_consts.rs: constantes de soso".into(),
+            fichero: "library/std/src/sys/env_consts.rs".into(),
+            marca: "OS: &str = \"soso\"".into(),
+            accion: Accion::InsertarAntesDeLinea {
+                ancla: "#[cfg(target_os = \"hermit\")]".into(),
+                texto: "#[cfg(target_os = \"soso\")]\npub mod os {\n    pub const FAMILY: &str = \"unix\";\n    pub const OS: &str = \"soso\";\n    pub const ARCH: &str = env!(\"STD_ENV_ARCH\");\n}\n".into(),
+            },
+        },
+    ]
 }
 
 #[cfg(test)]

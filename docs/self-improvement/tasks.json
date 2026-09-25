@@ -1379,10 +1379,10 @@
       "tracking": {
         "updated_at": "2026-09-25",
         "base": "54f2efb54 + diff de trabajo (T39)",
-        "summary": "Pasos 1–2 de 5. `soso_improve_core::receta`: receta declarativa sobre el trait `Archivos`, idempotente por marca explícita, que **falla con nombre cuando un ancla no aparece** — `sed -i` y `perl -i` salen 0 en ese caso (comprobado), así que `apply-patches.sh` imprime OK habiendo parcheado cero si upstream renombra algo. `verificar_revision` compara contra el lock de T38 sin hablar con git. 8 tests.",
-        "evidence": "target/self-improvement/tasks/T39/{tests-receta.txt,check.txt}; cargo test -p soso-improve-core --features std 87+14+14 verdes; no_std y guest compilan",
+        "summary": "Pasos 1–2 de 5, y un hallazgo que vale más: **el bootstrap no podía completarse**. El `sed` del parche de `os/mod.rs` tiene los paréntesis desbalanceados (`\\)` sin `\\(` en una BRE), así que **falla en cualquier entrada**, y con `set -euo pipefail` abortaba `apply-patches.sh` justo ahí: los cuatro parches siguientes no se ejecutaban nunca en un vendor limpio. El vendor real lo confirma — `os/mod.rs` no tiene «soso» por ninguna parte mientras los otros seis parches sí están. Arreglado y comprobado de extremo a extremo contra un **vendor falso** (sin tocar el del usuario): rc=0, los parches aplican, y tres pasadas dejan los ficheros byte a byte iguales. Además, `soso_improve_core::receta` traduce el script a pasos declarativos (`pasos_libstd`), con copia de árbol recursiva, y 8 tests.",
+        "evidence": "target/self-improvement/tasks/T39/{bootstrap-roto.txt,tests-receta.txt,check.txt}",
         "blocker": "Pasos 4–5 (compilar libstd cruzada y ejecutar un programa enlazado en el guest) **bloqueados**: `wild`, el enlazador que nombra `targets/x86_64-unknown-soso.json`, no está instalado en este host (medido en T38). El paso 3 depende del build. No instalo la herramienta por mi cuenta: es el entorno del usuario.",
-        "next_step": "Traducir los parches de apply-patches.sh a pasos de la receta y enchufarla en los dos adaptadores; los pasos 3–5 cuando haya enlazador."
+        "next_step": "Enchufar la receta en los dos adaptadores; T69 decide qué pasa con `dl.rs`; los pasos 3–5 cuando haya enlazador."
       }
     },
     {
