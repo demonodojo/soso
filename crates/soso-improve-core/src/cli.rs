@@ -98,6 +98,11 @@ pub enum Capacidad {
     TareaCopiar,
     /// Exportar lo que cambió en la copia como paquete aplicable (T24).
     TareaExportar,
+    /// Decir qué parches del bootstrap de libstd faltan en un vendor, **sin
+    /// tocarlo** (T39). Existe porque el vendor se quedaba a medias en
+    /// silencio: un `sed` que falla, o un script que aborta a la mitad, dejan
+    /// exactamente ese estado y no hay forma de verlo salvo abriendo ficheros.
+    RecetaComprobar,
 }
 
 impl Capacidad {
@@ -125,6 +130,7 @@ impl Capacidad {
             Capacidad::TareaInforme => "tarea informe",
             Capacidad::TareaCopiar => "tarea copiar",
             Capacidad::TareaExportar => "tarea exportar",
+            Capacidad::RecetaComprobar => "receta comprobar",
         }
     }
 
@@ -281,6 +287,10 @@ impl Orden {
             ("banco", otro) => Err(Error::uso(format!(
                 "banco necesita listar|validar|sellar, no «{otro}»"
             ))),
+            ("receta", "comprobar") => Ok(Capacidad::RecetaComprobar),
+            ("receta", otro) => Err(Error::uso(format!(
+                "receta necesita comprobar, no «{otro}»"
+            ))),
             ("verificar", "protocolo") => Ok(Capacidad::VerificarProtocolo),
             ("verificar", "programa") => Ok(Capacidad::VerificarPrograma),
             ("verificar", "repo") => Ok(Capacidad::VerificarRepo),
@@ -303,7 +313,7 @@ impl Orden {
         };
         let nombre = *nombre;
         let (sub, resto) = match nombre {
-            "banco" | "verificar" | "modelo" | "tarea" => match resto.split_first() {
+            "banco" | "verificar" | "modelo" | "tarea" | "receta" => match resto.split_first() {
                 Some((s, r)) if !s.starts_with("--") => (Some(*s), r),
                 _ => (None, resto),
             },
@@ -347,6 +357,7 @@ impl Orden {
             ("tarea", Some("copiar")) => &["estado", "run"],
             ("tarea", Some("exportar")) => &["estado", "run"],
             ("tarea", _) => &["estado", "run"],
+            ("receta", Some("comprobar")) => &["vendor", "plantillas"],
             ("verificar", Some("protocolo")) => &["banco", "caso", "respuesta"],
             ("verificar", Some("programa")) => &["caso", "candidato"],
             ("verificar", Some("repo")) => &["caso", "arbol"],

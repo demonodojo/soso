@@ -177,17 +177,36 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
         Ok(())
     }
 
-    fn read_more(&mut self, timeout_ms: u64) -> Result<bool, HttpError> {
+    fn read_more(&mut self, timeout_ms: u64) -> Result<(), HttpError> {
         let mut buf = [0u8; 4096];
         let n = self.transport.read_timeout(self.fd, &mut buf, timeout_ms);
         if n == -(soso_abi::EINTR as i64) {
             return Err(HttpError::Interrupted);
         }
-        if n <= 0 {
-            return Ok(false);
+        if n > 0 {
+            self.incoming.extend_from_slice(&buf[..n as usize]);
+            return Ok(());
         }
-        self.incoming.extend_from_slice(&buf[..n as usize]);
-        Ok(true)
+        if n == 0 {
+            return Err(HttpError::Io(
+                "el par cerró TCP antes de completar el handshake TLS",
+            ));
+        }
+        if n == -(soso_abi::EAGAIN as i64) {
+            return Err(HttpError::Io(
+                "plazo agotado esperando bytes del handshake TLS",
+            ));
+        }
+        Err(HttpError::Io("lectura TLS falló durante el handshake"))
+    }
+
+    /// Tras el handshake: un timeout o un cierre TCP no son error fatal.
+    fn read_more_body(&mut self, timeout_ms: u64) -> Result<bool, HttpError> {
+        match self.read_more(timeout_ms) {
+            Ok(()) => Ok(true),
+            Err(HttpError::Io(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     fn handshake(&mut self) -> Result<(), HttpError> {
@@ -213,11 +232,7 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                             tx.done();
                         }
                         ConnectionState::BlockedHandshake => {
-                            if !self.read_more(30_000)? {
-                                return Err(HttpError::Io(
-                                    "el par dejó de mandar bytes durante el handshake TLS",
-                                ));
-                            }
+                            self.read_more(30_000)?;
                         }
                         ConnectionState::WriteTraffic(_) => return Ok(()),
                         ConnectionState::ReadTraffic(_)
@@ -244,7 +259,7 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                 let discard = status.discard;
                 match status.state {
                     Err(_) => {
-                        self.read_more(30_000)?;
+                        let _ = self.read_more(30_000);
                     }
                     Ok(state) => match state {
                         ConnectionState::WriteTraffic(mut wt) => {
@@ -294,7 +309,7 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                 let discard = status.discard;
                 match status.state {
                     Err(_) => {
-                        if !self.read_more(timeout_ms)? {
+                        if !self.read_more_body(timeout_ms)? {
                             return Ok(());
                         }
                     }
@@ -317,7 +332,7 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                             tx.done();
                         }
                         ConnectionState::BlockedHandshake => {
-                            if !self.read_more(timeout_ms)? {
+                            if !self.read_more_body(timeout_ms)? {
                                 return Ok(());
                             }
                         }
@@ -330,7 +345,7 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
                             // la petición, sin traza ninguna y sin vencer plazo,
                             // que es lo más parecido a un cuelgue del kernel que
                             // puede hacer un proceso (2026-09-20).
-                            if !self.read_more(timeout_ms)? {
+                            if !self.read_more_body(timeout_ms)? {
                                 return Ok(());
                             }
                         }
@@ -514,6 +529,17 @@ struct AuthOrigin {
     port: u16,
 }
 
+fn tls_handshake_io_retryable(err: &HttpError) -> bool {
+    matches!(
+        err,
+        HttpError::Io(
+            "plazo agotado esperando bytes del handshake TLS"
+                | "el par cerró TCP antes de completar el handshake TLS"
+                | "lectura TLS falló durante el handshake"
+        )
+    )
+}
+
 fn auth_for_origin<'a>(
     auth: Option<&'a str>,
     host: &str,
@@ -561,7 +587,7 @@ fn https_request<T: TcpTransport, S: BodySink>(
         transport
             .dns_resolve(host, &mut ip)
             .map_err(|e| map_transport_err(e, HttpError::Dns))?;
-        let fd = transport
+        let mut session_fd = transport
             .tcp_connect(
                 SockAddr {
                     addr: ip,
@@ -571,16 +597,36 @@ fn https_request<T: TcpTransport, S: BodySink>(
                 30_000,
             )
             .map_err(|e| map_transport_err(e, HttpError::Io("tcp_connect")))?;
-        let mut guard = FdGuard::new(transport, fd);
-        let mut tls = TlsSession::new(transport, fd, host, config.clone())?;
-        tls.handshake()?;
+        let mut guard = FdGuard::new(transport, session_fd);
+        let mut tls = TlsSession::new(transport, session_fd, host, config.clone())?;
+        if let Err(e) = tls.handshake() {
+            if tls_handshake_io_retryable(&e) {
+                drop(tls);
+                transport.close(session_fd);
+                session_fd = transport
+                    .tcp_connect(
+                        SockAddr {
+                            addr: ip,
+                            port,
+                            _pad: 0,
+                        },
+                        30_000,
+                    )
+                    .map_err(|e| map_transport_err(e, HttpError::Io("tcp_connect (reintento TLS)")))?;
+                guard = FdGuard::new(transport, session_fd);
+                tls = TlsSession::new(transport, session_fd, host, config.clone())?;
+                tls.handshake()?;
+            } else {
+                return Err(e);
+            }
+        }
         let req = kind.build(host, &path, redirect_auth);
         tls.write(req.as_bytes())?;
         let mut stream = HttpStreamState::new();
         tls.read_plain_to(&mut stream, sink, read_timeout_ms)?;
         guard.disarm();
         drop(guard);
-        transport.close(fd);
+        transport.close(session_fd);
         let (status, headers) = stream.finish()?;
         if (300..400).contains(&status) {
             if let Some(loc) = header_value(&headers, "location") {

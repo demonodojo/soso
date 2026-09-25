@@ -32,6 +32,18 @@ impl ReleaseKind {
             ReleaseKind::HolaStd => "hola-std",
         }
     }
+
+    /// El comando que ejecuta este perfil, literal.
+    ///
+    /// Los perfiles de prueba no ejecutan nada y lo dicen: poner ahí un comando
+    /// plausible haría que un recibo de `fake-ok` pareciera un build de verdad.
+    fn comando(self) -> &'static str {
+        match self {
+            ReleaseKind::Cargo => "cargo xtask release",
+            ReleaseKind::HolaStd => "cargo build --release -p hola-std",
+            ReleaseKind::FakeOk | ReleaseKind::FakeFail => "(ninguno: perfil de prueba)",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -329,11 +341,40 @@ struct Fuentes {
     sha256: String,
     ficheros: usize,
     perfil: &'static str,
+    /// El comando real del build, tal cual se ejecuta. `perfil` dice el modo;
+    /// esto dice **qué se corrió**, que es lo que T36 pedía y no tenía.
+    comando: &'static str,
 }
 
 /// Versión del recibo. El cliente rechaza lo que no reconozca en vez de
 /// interpretarlo a medias.
-pub const RECIBO_VERSION: u32 = 1;
+pub const RECIBO_VERSION: u32 = 2;
+
+/// Qué herramientas construyeron esto, preguntándoselo a ellas.
+///
+/// [T36](../../../docs/self-improvement/T36-forja-trazabilidad.md) dejó escrito
+/// como límite que `perfil` registra el **modo** y no los comandos ni sus
+/// versiones, y remitió a [T38](../../../docs/self-improvement/T38-toolchain-inventario.md).
+/// T38 lo inventarió con una regla: nada se da por bueno por su nombre. Aquí se
+/// aplica igual —se ejecuta `--version` y se apunta lo que responde— con una
+/// diferencia que importa: esto **no acredita** nada, sólo registra. Un recibo
+/// que dijera «toolchain correcta» sin comprobarlo sería otro campo mentiroso,
+/// como el `sources=` que T36 quitó.
+fn herramientas_del_build() -> Vec<(&'static str, String)> {
+    ["rustc", "cargo"]
+        .iter()
+        .map(|t| {
+            let v = Command::new(t)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| String::from("desconocida"));
+            (*t, v)
+        })
+        .collect()
+}
 
 /// Escribe los artefactos y el **recibo** que los liga a las fuentes.
 ///
@@ -355,22 +396,32 @@ fn write_identified_artifacts(
         io::Error::new(io::ErrorKind::NotFound, "VERSION")
     })?;
     fs::create_dir_all(&dir)?;
-    let recibo = format!(
+    let mut recibo = format!(
         "forja-recibo={RECIBO_VERSION}\n\
          build-id={build_id}\n\
          source-manifest-sha256={}\n\
          source-files={}\n\
          perfil={}\n\
-         artefacto=rootfs.pack sha256={} bytes={}\n\
-         artefacto=kernel-x86_64 sha256={} bytes={}\n",
+         comando={}\n",
         fuentes.sha256,
         fuentes.ficheros,
         fuentes.perfil,
+        fuentes.comando,
+    );
+    // Las herramientas van **antes** que los artefactos porque describen cómo
+    // se hicieron: quien lea el recibo de arriba abajo llega al hash sabiendo
+    // ya con qué se produjo.
+    for (nombre, version) in herramientas_del_build() {
+        recibo.push_str(&format!("herramienta={nombre} {version}\n"));
+    }
+    recibo.push_str(&format!(
+        "artefacto=rootfs.pack sha256={} bytes={}\n\
+         artefacto=kernel-x86_64 sha256={} bytes={}\n",
         sha256_hex(pack),
         pack.len(),
         sha256_hex(kernel),
         kernel.len(),
-    );
+    ));
     fs::write(dir.join("manifest.txt"), recibo)?;
     fs::write(dir.join("rootfs.pack"), pack)?;
     fs::write(dir.join("kernel-x86_64"), kernel)?;
@@ -674,6 +725,7 @@ fn manejar(
                 sha256: st.manifest_sha256.clone(),
                 ficheros: st.synced.len(),
                 perfil: kind.perfil(),
+                comando: kind.comando(),
             };
             drop(st);
             if build_id.is_empty() {
@@ -1243,6 +1295,7 @@ fn main(args: &[alloc::string::String]) -> u8 {{
             sha256: sha256_hex(manifiesto.as_bytes()),
             ficheros: n,
             perfil: "fake-ok",
+            comando: "(ninguno: perfil de prueba)",
         }
     }
 
@@ -1301,6 +1354,43 @@ fn main(args: &[alloc::string::String]) -> u8 {{
         // Y el hash del pack **no** es el de las fuentes, que es lo que hacía
         // inútil el recibo anterior.
         assert_ne!(sha256_hex(&pack), sha256_hex(manifiesto.as_bytes()));
+    }
+
+    /// El recibo dice **con qué** se construyó, no sólo en qué modo.
+    ///
+    /// Era el límite que T36 se dejó escrito y remitió a T38: `perfil` daba el
+    /// modo y nada más. Ahora van el comando literal y la versión que responden
+    /// las herramientas.
+    #[test]
+    fn el_recibo_dice_con_que_se_construyo() {
+        let work = work_temporal("herramientas");
+        let mut fuentes = fuentes_de("a.rs\t00\n", 1);
+        fuentes.perfil = ReleaseKind::Cargo.perfil();
+        fuentes.comando = ReleaseKind::Cargo.comando();
+        write_identified_artifacts(&work, "abc", &fuentes, b"PACK", b"KERNEL").expect("escribir");
+        let dir = release_dir(&work).expect("dir");
+        let recibo = fs::read_to_string(dir.join("manifest.txt")).expect("recibo");
+
+        assert!(recibo.contains("perfil=cargo-xtask-release\n"));
+        assert!(recibo.contains("comando=cargo xtask release\n"));
+        // `rustc --version` se ejecuta de verdad: si la herramienta no está, el
+        // recibo lo dice en vez de callarse.
+        let linea = recibo
+            .lines()
+            .find(|l| l.starts_with("herramienta=rustc "))
+            .expect("el recibo nombra rustc");
+        assert!(
+            linea.contains("rustc 1.") || linea.contains("desconocida"),
+            "versión inesperada: {linea}"
+        );
+    }
+
+    /// Un perfil de prueba **no finge** un comando.
+    #[test]
+    fn un_perfil_de_prueba_no_inventa_un_comando() {
+        assert_eq!(ReleaseKind::FakeOk.comando(), "(ninguno: perfil de prueba)");
+        assert_eq!(ReleaseKind::FakeFail.comando(), "(ninguno: perfil de prueba)");
+        assert_ne!(ReleaseKind::Cargo.comando(), ReleaseKind::FakeOk.comando());
     }
 
     #[test]

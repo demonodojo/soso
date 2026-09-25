@@ -19,15 +19,16 @@ const TOKEN: &str = "test-token";
 fn static_tokenizer() -> &'static Tokenizer {
     static TOK: OnceLock<Tokenizer> = OnceLock::new();
     TOK.get_or_init(|| {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/qwen2.5-coder-3b-model/tokenizer.som");
-        if let Ok(data) = std::fs::read(&path) {
-            Tokenizer::parse(&data).expect("tokenizer.som del perfil T03")
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let convertido = root.join("target/qwen2.5-coder-3b-model/tokenizer.som");
+        let path = if convertido.is_file() {
+            convertido
         } else {
-            panic!(
-                "falta {path:?}: los tests host_service necesitan el tokenizer convertido (T03)"
-            );
-        }
+            root.join("tests/self-improvement/reference/tokenizer.som")
+        };
+        let data = std::fs::read(&path)
+            .unwrap_or_else(|_| panic!("falta {path:?}: tokenizer.som del perfil T03"));
+        Tokenizer::parse(&data).expect("tokenizer.som del perfil T03")
     })
 }
 

@@ -19,3 +19,6 @@ block-dev = { path = "../crates/block-dev" }
 soso-resize-core = { path = "../crates/soso-resize-core" }
 sha2 = "0.10"
 soso-llm-api = { path = "../crates/soso-llm-api", features = ["std"] }
+# Para leer el código de salida de `evaluar` de su fuente y no copiarlo: un
+# número duplicado deja de coincidir sin que nadie lo note.
+soso-improve-core = { path = "../crates/soso-improve-core", features = ["std"] }

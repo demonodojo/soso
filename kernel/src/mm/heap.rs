@@ -169,8 +169,6 @@ pub fn bins_alias() -> u64 {
 pub(super) fn with_talc_audit(f: impl FnOnce(&Talc<ClaimOnOom>)) {
     if let Some(guard) = TALC.try_lock() {
         f(&*guard);
-    } else {
-        crate::println!("heap: auditoría talc sin candado");
     }
 }
 

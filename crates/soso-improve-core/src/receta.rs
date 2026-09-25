@@ -68,6 +68,8 @@ pub enum Resultado {
     Aplicado,
     /// Ya estaba: la marca estaba presente.
     YaEstaba,
+    /// Sólo en [`comprobar`]: falta por aplicar, y se puede.
+    Falta,
     /// No se pudo, y por qué.
     Fallo(String),
 }
@@ -107,6 +109,72 @@ pub fn verificar_revision(esperada: &str, observada: &str) -> Result<(), String>
 
 fn corto(rev: &str) -> &str {
     if rev.len() > 12 { &rev[..12] } else { rev }
+}
+
+/// Dice qué pasos faltan **sin escribir nada**.
+///
+/// Existe porque el vendor puede quedarse a medias sin que nadie lo note: al
+/// escribir esta ficha, `library/std/src/os/mod.rs` no tenía ni rastro de soso
+/// mientras los otros seis parches sí estaban, y no había forma de verlo salvo
+/// mirando fichero por fichero. Un `sed` que falla en silencio —o un script
+/// que aborta a la mitad— deja exactamente ese estado.
+///
+/// Un ancla ausente se informa igual que en [`aplicar`]: es un fallo con
+/// nombre, no un «falta».
+pub fn comprobar<A: Archivos>(fs: &A, raiz: &str, pasos: &[Paso]) -> Vec<Informe> {
+    pasos
+        .iter()
+        .map(|p| Informe {
+            nombre: p.nombre.clone(),
+            fichero: p.fichero.clone(),
+            resultado: comprobar_uno(fs, raiz, p),
+        })
+        .collect()
+}
+
+fn comprobar_uno<A: Archivos>(fs: &A, raiz: &str, paso: &Paso) -> Resultado {
+    let destino = unir(raiz, &paso.fichero);
+    match &paso.accion {
+        // Para las copias, «aplicado» es que el contenido ya esté.
+        Accion::Copiar { desde } => match (fs.leer(desde), fs.leer(&destino)) {
+            (Ok(origen), Ok(actual)) if origen == actual => Resultado::YaEstaba,
+            (Ok(_), _) => Resultado::Falta,
+            (Err(e), _) => Resultado::Fallo(format!("no pude leer la plantilla {desde}: {e:?}")),
+        },
+        // Un árbol no se compara aquí entero: lo que interesa de la
+        // comprobación es el estado de los parches, y decir «puede que falte
+        // algún fichero» sin mirar sería peor que no decir nada.
+        Accion::CopiarArbol { .. } => {
+            if fs.existe(&destino) {
+                Resultado::YaEstaba
+            } else {
+                Resultado::Falta
+            }
+        }
+        _ => {
+            let Ok(bytes) = fs.leer(&destino) else {
+                return Resultado::Fallo(format!("no pude leer {destino}"));
+            };
+            let Ok(texto) = String::from_utf8(bytes) else {
+                return Resultado::Fallo(format!("{destino} no es UTF-8"));
+            };
+            if texto.contains(&paso.marca) {
+                return Resultado::YaEstaba;
+            }
+            let ancla = match &paso.accion {
+                Accion::InsertarTrasLinea { ancla, .. }
+                | Accion::InsertarAntesDeLinea { ancla, .. } => Some(ancla),
+                _ => None,
+            };
+            match ancla {
+                Some(a) if !texto.contains(a.as_str()) => Resultado::Fallo(format!(
+                    "no encontré el ancla {a:?} en {}",
+                    paso.fichero
+                )),
+                _ => Resultado::Falta,
+            }
+        }
+    }
 }
 
 /// Aplica la receta entera. Devuelve un informe por paso, **en orden**.
@@ -581,6 +649,81 @@ mod tests {
         assert_eq!(aplicar(&mut fs, "/v", &pasos)[0].resultado, Resultado::Aplicado);
         assert_eq!(aplicar(&mut fs, "/v", &pasos)[0].resultado, Resultado::YaEstaba);
         assert_eq!(fs.texto("/v/Cargo.toml").matches("soso-rt").count(), 1);
+    }
+
+    /// `comprobar` dice qué falta **y no escribe**.
+    ///
+    /// Es el caso que existía de verdad: seis parches aplicados y uno no, sin
+    /// forma de verlo salvo abriendo los ficheros.
+    #[test]
+    fn comprobar_distingue_aplicado_de_falta_sin_tocar_nada() {
+        let mut fs = Memoria::con(&[
+            ("/v/a.rs", "ancla\nMARCA-A\n"),
+            ("/v/b.rs", "ancla\n"),
+        ]);
+        let pasos = [
+            Paso {
+                nombre: "el que ya está".into(),
+                fichero: "a.rs".into(),
+                marca: "MARCA-A".into(),
+                accion: Accion::InsertarTrasLinea { ancla: "ancla".into(), texto: "MARCA-A".into() },
+            },
+            Paso {
+                nombre: "el que falta".into(),
+                fichero: "b.rs".into(),
+                marca: "MARCA-B".into(),
+                accion: Accion::InsertarTrasLinea { ancla: "ancla".into(), texto: "MARCA-B".into() },
+            },
+        ];
+        let antes_a = fs.texto("/v/a.rs");
+        let antes_b = fs.texto("/v/b.rs");
+
+        let inf = comprobar(&fs, "/v", &pasos);
+        assert_eq!(inf[0].resultado, Resultado::YaEstaba);
+        assert_eq!(inf[1].resultado, Resultado::Falta);
+
+        // Y no ha tocado nada: es una comprobación, no una preparación.
+        assert_eq!(fs.texto("/v/a.rs"), antes_a);
+        assert_eq!(fs.texto("/v/b.rs"), antes_b);
+        let _ = &mut fs;
+    }
+
+    /// Un ancla ausente sigue siendo un **fallo**, no un «falta»: «falta» dice
+    /// que se puede aplicar, y eso sería mentira.
+    #[test]
+    fn comprobar_no_confunde_un_ancla_rota_con_un_parche_pendiente() {
+        let fs = Memoria::con(&[("/v/a.rs", "otra cosa\n")]);
+        let pasos = [Paso {
+            nombre: "x".into(),
+            fichero: "a.rs".into(),
+            marca: "MARCA".into(),
+            accion: Accion::InsertarTrasLinea { ancla: "ancla-que-no-esta".into(), texto: "MARCA".into() },
+        }];
+        let inf = comprobar(&fs, "/v", &pasos);
+        assert!(!inf[0].ok(), "un ancla rota no es «falta»");
+    }
+
+    /// La receta real tiene un paso por parche del script, y ninguno con
+    /// marca vacía salvo las copias (que se comparan por contenido).
+    #[test]
+    fn la_receta_real_declara_los_parches_del_script() {
+        let pasos = pasos_libstd("/repo/config/rust-soso", "/repo/crates/soso-rt");
+        assert_eq!(pasos.len(), 10, "tres copias y siete ediciones");
+        for p in &pasos {
+            let copia = matches!(p.accion, Accion::Copiar { .. } | Accion::CopiarArbol { .. });
+            assert!(!p.nombre.is_empty(), "todo paso se llama de algo");
+            assert!(
+                copia || !p.marca.is_empty(),
+                "el paso «{}» edita y no tiene marca de idempotencia",
+                p.nombre
+            );
+        }
+        // La ruta de soso-rt entra en el Cargo.toml, no se adivina.
+        let cargo = pasos.iter().find(|p| p.fichero.ends_with("Cargo.toml")).unwrap();
+        match &cargo.accion {
+            Accion::Anadir { texto } => assert!(texto.contains("/repo/crates/soso-rt")),
+            otro => panic!("esperaba Anadir, hay {otro:?}"),
+        }
     }
 
     #[test]

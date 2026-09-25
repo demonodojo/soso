@@ -315,9 +315,14 @@ fn verificar_recibo(
     let Ok(txt) = core::str::from_utf8(recibo) else {
         return Err(String::from("el recibo no es texto"));
     };
+    // La 2 añade `comando=` y `herramienta=`, que **describen** el build sin
+    // acreditar nada: el cliente no tiene contra qué compararlos. Por eso la 1
+    // sigue valiendo — lo que este cliente verifica no cambió — y rechazar una
+    // versión conocida sólo por ser más vieja dejaría fuera a un servidor que
+    // dice exactamente lo mismo de lo que sí se comprueba.
     match campo(txt, "forja-recibo=") {
-        Some("1") => {}
-        Some(v) => return Err(format!("recibo de versión {v}, no la 1")),
+        Some("1") | Some("2") => {}
+        Some(v) => return Err(format!("recibo de versión {v}, no la 1 ni la 2")),
         None => {
             return Err(String::from(
                 "el servidor no emite recibo (¿versión antigua?)",

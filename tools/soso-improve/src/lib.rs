@@ -37,6 +37,7 @@ macro_rules! aviso {
     }};
 }
 
+pub mod receta;
 pub mod banco;
 pub mod captura;
 pub mod evaluar;
@@ -73,6 +74,7 @@ pub fn capacidades() -> Capacidades {
             Capacidad::TareaInforme,
             Capacidad::TareaCopiar,
             Capacidad::TareaExportar,
+            Capacidad::RecetaComprobar,
         ],
     )
 }
@@ -173,6 +175,7 @@ impl Opciones {
 /// Claves que las órdenes usan. Están enumeradas a propósito: una clave que no
 /// esté aquí no viaja, y se nota al instante en vez de desaparecer en silencio.
 const CLAVES: &[&str] = &[
+    "vendor", "plantillas",
     "repo", "out", "captura", "destino", "arbol", "banco", "reservado", "caso", "candidato",
     "respuesta", "modelo", "original", "fixtures", "json", "desde", "n", "solo", "timeout",
     "revision", "origen", "sin-herramientas", "con-referencia", "puerto", "token",
@@ -202,6 +205,7 @@ pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
             "evaluar" => evaluar::evaluar(&op),
             "modelo" => modelo::despachar(&sub, &op),
             "tarea" => tarea::despachar(&sub, &op),
+            "receta" => receta::despachar(&sub, &op),
             "verificar" => verificar::despachar(&sub, &op),
             otro => Err(Error::uso(format!("orden desconocida: {otro}"))),
         };
@@ -229,6 +233,12 @@ pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
                 .first()
                 .ok_or_else(|| Error::uso("tarea necesita preparar|reanudar|informe"))?;
             tarea::despachar(sub, &Opciones::parsear(&args[1..])?)
+        }
+        "receta" => {
+            let sub = args
+                .first()
+                .ok_or_else(|| Error::uso("receta necesita comprobar"))?;
+            receta::despachar(sub, &Opciones::parsear(&args[1..])?)
         }
         "verificar" => {
             let sub = args

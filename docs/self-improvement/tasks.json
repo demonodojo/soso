@@ -461,17 +461,12 @@
         "note": "Campaña ejecutada contra el endpoint guest con pesos reales; la lanza el arnés del host. Ejecutarla desde soso es T49."
       },
       "tracking": {
-        "updated_at": "2026-09-24",
+        "updated_at": "2026-09-25",
         "base": "95de3c162 + diff sucio",
-        "summary": "docs/self-improvement/seguimiento/T14.md",
-        "evidence": [
-          "cargo run -p soso-improve -- evaluar … -> NO-GO (8/10 sólidos, 0 inestables, 24/30 intentos)",
-          "target/self-improvement/tasks/T14/informe.json",
-          "cargo test -p soso-improve-core -p soso-improve (51 en el core)",
-          "cargo xtask check: TODO OK"
-        ],
+        "summary": "docs/self-improvement/seguimiento/T14.md — campaña repetida el 2026-09-25 con el arnés nuevo (`test-llm-api --campana`): **8/10, sigue NO-GO**, 0 inestables, 55,6 min. Confirma **a nivel de sistema** que T60 arregló Q08 y Q10, que era lo que le faltaba (estaba cerrada con pruebas unitarias). El techo lo pone el modelo, como dijo T59: emite `{\"name\":…}` en `content` con `finish_reason: \"stop\"` en vez de `tool_calls`. Presupuestos nuevos: mediana 50 058 ms, máximo 287 100 ms, timeout 574 200 ms, 22 tokens.",
+        "evidence": "target/self-improvement/tasks/T19/{campana-t14.json,campana-completa-2026-09-25.txt}",
         "blocker": null,
-        "next_step": "Todo lo accionable está hecho (T58, T59, T60). El no-go es del modelo: no usa herramientas. Decisión de plan: otro modelo con el mismo banco, o acotar SI-3."
+        "next_step": "Decisión de plan para pasar de 8/10: modelo mayor, parsear la llamada en el servicio (declarándolo), o agente nativo sin `tool_calls`. Las tres parten de 8/10 medido."
       },
       "resultado": "no-go"
     },
@@ -688,7 +683,7 @@
       "title": "Configurar OpenCode para el proveedor soso",
       "milestone": "SI-3",
       "kind": "Configuración",
-      "status": "pending",
+      "status": "blocked",
       "depends_on": [
         "T14",
         "T19"
@@ -707,8 +702,12 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "blocker": "T14 dio **no-go** (8/10 protocolo; el modelo no usa herramientas). Un `done` con no-go no habilita a los consumidores: `depends_on` no puede expresar «go», así que se dice aquí.",
-        "updated_at": "2026-09-24"
+        "updated_at": "2026-09-25",
+        "base": "7f0f6bb66 + diff de trabajo",
+        "summary": "No se empieza: T20 configura OpenCode para **usar** el modelo de soso, y [T14] cerró con **NO-GO**. Que sus dependencias estén `done` no basta — es justo el caso que la skill advierte: un informe no-go marcado `done` no habilita al consumidor. Un filtro que mira `status` y no el veredicto lo da por habilitado.",
+        "evidence": "docs/self-improvement/seguimiento/T14.md (veredicto NO-GO, 6/10, umbral 10); docs/self-improvement/T59-tool-calls.md (conclusión: «es el modelo»)",
+        "blocker": "T14 en NO-GO. De los cuatro casos que fallaban, T60 arregló dos (del servicio) pero **T59 concluyó que los otros dos son un límite del modelo**: no emite `tool_calls`, emite el JSON como texto. Configurar un agente contra un modelo que no sabe llamar herramientas produce una configuración que no puede funcionar. La campaña se repitió el 2026-09-25 con el arnés nuevo: **8/10, sigue NO-GO**. T60 confirmada (Q08 y Q10 pasan); Q04 y Q07 siguen mal porque el modelo escribe la llamada como texto.",
+        "next_step": "Desbloquea una decisión de plan, no una corrección: modelo mayor, parsear la llamada en el servicio, o agente nativo sin `tool_calls`."
       }
     },
     {
@@ -1275,10 +1274,10 @@
       "tracking": {
         "updated_at": "2026-09-25",
         "base": "54f2efb54 + diff de trabajo (T36)",
-        "summary": "Recibo versionado que liga fuentes, build y artefactos. El `build-id` pasa de `DefaultHasher` a sha256; el campo `sources=` —que contenía el hash del **pack**— se sustituye por `source-manifest-sha256` más una línea por artefacto con su sha256 y su tamaño. El cliente verifica **antes** de escribir el staging, y guarda en disco lo que envió en `sync` para tener contra qué comparar. `/build` da 409 sin sync y 500 si el recibo del disco no es el de esa petición.",
+        "summary": "Recibo versionado que liga fuentes, build y artefactos. El `build-id` pasa de `DefaultHasher` a sha256; el campo `sources=` —que contenía el hash del **pack**— se sustituye por `source-manifest-sha256` más una línea por artefacto con su sha256 y su tamaño. El cliente verifica **antes** de escribir el staging, y guarda en disco lo que envió en `sync` para tener contra qué comparar. `/build` da 409 sin sync y 500 si el recibo del disco no es el de esa petición. **Recibo v2 (2026-09-25)**: añade el comando literal del build y la versión que responde cada herramienta, que es lo que T36 se había dejado como límite y T38 aportó. La versión 1 sigue aceptándose porque lo que el cliente verifica no cambió.",
         "evidence": "target/self-improvement/tasks/T36/resultado.md; cargo test -p soso-forja-server 20/20; cargo xtask test sys --only=forja OK; cargo xtask test y check TODO OK",
         "blocker": "",
-        "next_step": "T38 fija los comandos y versiones exactos de la toolchain, que es lo que le falta al campo `perfil` del recibo."
+        "next_step": "Cerrado el 2026-09-25: el recibo v2 añade `comando=` y `herramienta=` con el inventario de T38. Describen, no acreditan."
       }
     },
     {
@@ -1379,10 +1378,10 @@
       "tracking": {
         "updated_at": "2026-09-25",
         "base": "54f2efb54 + diff de trabajo (T39)",
-        "summary": "Pasos 1–2 de 5, y un hallazgo que vale más: **el bootstrap no podía completarse**. El `sed` del parche de `os/mod.rs` tiene los paréntesis desbalanceados (`\\)` sin `\\(` en una BRE), así que **falla en cualquier entrada**, y con `set -euo pipefail` abortaba `apply-patches.sh` justo ahí: los cuatro parches siguientes no se ejecutaban nunca en un vendor limpio. El vendor real lo confirma — `os/mod.rs` no tiene «soso» por ninguna parte mientras los otros seis parches sí están. Arreglado y comprobado de extremo a extremo contra un **vendor falso** (sin tocar el del usuario): rc=0, los parches aplican, y tres pasadas dejan los ficheros byte a byte iguales. Además, `soso_improve_core::receta` traduce el script a pasos declarativos (`pasos_libstd`), con copia de árbol recursiva, y 8 tests.",
-        "evidence": "target/self-improvement/tasks/T39/{bootstrap-roto.txt,tests-receta.txt,check.txt}",
+        "summary": "Pasos 1–2 de 5, y un hallazgo que vale más: **el bootstrap no podía completarse**. El `sed` del parche de `os/mod.rs` tiene los paréntesis desbalanceados (`\\)` sin `\\(` en una BRE), así que **falla en cualquier entrada**, y con `set -euo pipefail` abortaba `apply-patches.sh` justo ahí: los cuatro parches siguientes no se ejecutaban nunca en un vendor limpio. El vendor real lo confirma — `os/mod.rs` no tiene «soso» por ninguna parte mientras los otros seis parches sí están. Arreglado y comprobado de extremo a extremo contra un **vendor falso** (sin tocar el del usuario): rc=0, los parches aplican, y tres pasadas dejan los ficheros byte a byte iguales. Además, `soso_improve_core::receta` traduce el script a pasos declarativos (`pasos_libstd`), con copia de árbol recursiva, y 8 tests. Enchufada en el host como `soso-improve receta comprobar` (**sólo lectura**): sobre el vendor real señala a la primera los dos parches de `os/mod.rs` que faltan. Códigos distintos para «falta» (1) y «ancla rota» (2), porque el segundo no se arregla repitiendo la preparación. Y sobre el vendor que parcheó el script arreglado dice «0 por aplicar»: las dos implementaciones coinciden. Y enchufada también en el **guest**: comprobar la receta es leer ficheros, así que no depende de la plataforma. La suite lo acredita apuntando a un directorio vacío, que da una forma determinista (2 por aplicar · 8 con el ancla rota) y prueba despacho, capacidad e informe sin fingir un vendor que en soso no existe.",
+        "evidence": "target/self-improvement/tasks/T39/{bootstrap-roto.txt,receta-comprobar.txt,tests-receta.txt,suite.txt,check.txt}; paso de suite «soso-improve: receta del bootstrap (T39)»",
         "blocker": "Pasos 4–5 (compilar libstd cruzada y ejecutar un programa enlazado en el guest) **bloqueados**: `wild`, el enlazador que nombra `targets/x86_64-unknown-soso.json`, no está instalado en este host (medido en T38). El paso 3 depende del build. No instalo la herramienta por mi cuenta: es el entorno del usuario.",
-        "next_step": "Enchufar la receta en los dos adaptadores; T69 decide qué pasa con `dl.rs`; los pasos 3–5 cuando haya enlazador."
+        "next_step": "Exponer `receta aplicar` cuando se pueda compilar libstd y validar que deja el vendor igual que el script; T69 decide qué pasa con `dl.rs`; los pasos 3–5 cuando haya enlazador."
       }
     },
     {

@@ -272,7 +272,18 @@ pasadas dejan los ficheros **byte a byte iguales**, que es la propiedad que la
 ficha exige. De paso salió [T69](T69-apply-patches-no-completaba.md): el script
 copia `dl.rs` a una PAL cuyo `mod.rs` no lo declara.
 
-**Y va por los pasos 1–2 de 5.** Lo que la motiva
+**Y va por los pasos 1–2 de 5**, con la receta ya enchufada en el host:
+`soso-improve receta comprobar --vendor … --plantillas …` dice qué parches
+faltan **sin tocar el vendor**, y sobre el real señala a la primera los dos de
+`os/mod.rs`. Distingue «falta» (código 1) de «ancla rota» (2), porque el
+segundo no se arregla repitiendo la preparación. `aplicar` existe y está
+probado en el núcleo pero **no se expone todavía**: sin poder compilar libstd
+no hay forma de validar que la versión Rust deja el vendor igual que el
+script, y dos formas de escribir sin comprobarlas es cómo aparecen dos
+verdades. También corre **dentro de soso**: la suite lo acredita apuntando a un
+directorio vacío, que da una forma determinista —2 por aplicar, 8 con el ancla
+rota— y prueba despacho, capacidad e informe sin fingir un vendor que en el
+guest todavía no existe. Lo que la motiva
 está comprobado, no supuesto: `sed -i` y `perl -i` **salen 0 cuando el ancla no
 aparece**, así que `apply-patches.sh` imprime `OK` habiendo parcheado **cero**
 si upstream renombra cualquier cosa — y el fallo sale mucho después como un
@@ -287,8 +298,45 @@ instalado, así que no hay con qué enlazar el programa que debe ejecutarse en e
 guest. No instalo la herramienta por mi cuenta — es el entorno de quien trabaja
 aquí; `cargo install wild-linker` es lo que dice el propio envoltorio.
 
-**Lo que queda habilitado**: el campo `perfil` del recibo de T36, que hoy
-registra el modo y no los comandos, y [T20](T20-opencode-config.md).
+**[T20](T20-opencode-config.md) no estaba habilitada**, aunque sus dependencias
+figuren `done`: [T14](T14-evaluacion-modelo.md) cerró con **NO-GO**, y la propia
+skill advierte que un informe no-go marcado `done` no habilita a su consumidor.
+Un filtro que mira `status` y no el veredicto lo da por listo — el mismo error
+de leer la etiqueta en vez del contenido.
+
+**La campaña se repitió el 2026-09-25** con el arnés nuevo
+(`cargo xtask test-llm-api --campana`), 10 casos × 3 repeticiones en 55,6
+minutos: **8/10, sigue NO-GO**, 0 inestables. Salió exactamente lo que se había
+escrito **antes** de correrla, y eso es lo valioso: **T60 queda confirmada a
+nivel de sistema** —Q08 y Q10 pasan; estaba cerrada sólo con pruebas
+unitarias— y el techo lo pone el modelo, como dijo T59. La evidencia es
+literal: en las tres repeticiones Q04 devuelve
+`content: "{\"name\": \"obtener_hora\", …}"` con `finish_reason: "stop"`. El
+modelo **sí** decide llamar y **sí** compone el JSON correcto; lo emite por el
+canal equivocado.
+
+Presupuestos nuevos: mediana **50 058 ms**, máximo **287 100 ms**, timeout
+sugerido **574 200 ms**, 22 tokens.
+
+Así que lo que falta **no es una corrección pendiente, es una decisión**:
+modelo mayor, parsear la llamada en el servicio y declararlo como capa de
+compatibilidad, o un agente nativo que no dependa de `tool_calls` (la rama que
+el backlog de T34 ya tiene anotada). Las tres parten de **8/10 medido**.
+
+**El recibo de Forja va por la v2** (2026-09-25) y con eso se cierra el último
+límite que T36 se había dejado escrito: `perfil` daba el modo y nada más, y la
+ficha remitía a T38 para los comandos. Ahora lleva `comando=` (literal) y
+`herramienta=` con lo que responde cada `--version`. **Describen, no
+acreditan**: el cliente no tiene contra qué compararlos, así que no los
+verifica — decir lo contrario sería otro campo mentiroso, como el `sources=`
+que T36 quitó. Un perfil de prueba dice `(ninguno: perfil de prueba)` en vez de
+fingir un comando plausible, y la v1 sigue aceptándose porque lo que el cliente
+verifica no cambió.
+
+**Lo que queda**: decisiones, no implementación —
+[N-013](native/N-013.md) (la auditoría del montón), la salida del 8/10 de T14,
+y portar frente a agente nativo (T34)— más lo bloqueado por herramientas
+ausentes: T39 y T69 esperan a que `wild` esté instalado.
 En paralelo siguen habilitadas **T18**, **T45** y **T46**. Los cierres
 históricos de T01/T02 no acreditan aún su validación nativa completa.
 Entregar al modelo una ficha por sesión, las secciones indicadas

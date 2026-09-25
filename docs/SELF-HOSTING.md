@@ -19,14 +19,27 @@ lo emite junto a los artefactos y el cliente lo verifica **antes** de escribir
 nada en `/var/actualiza-prueba`, porque de ahí se aplica.
 
 ```
-forja-recibo=1
+forja-recibo=2
 build-id=<16 hex del sha256 del manifiesto de fuentes>
 source-manifest-sha256=<sha256 completo del manifiesto aceptado en /sync>
 source-files=<cuántos ficheros>
 perfil=<cargo-xtask-release|hola-std|fake-ok|fake-fail>
+comando=<el comando literal del build>
+herramienta=rustc <lo que responde `rustc --version`>
+herramienta=cargo <lo que responde `cargo --version`>
 artefacto=rootfs.pack sha256=<hex> bytes=<n>
 artefacto=kernel-x86_64 sha256=<hex> bytes=<n>
 ```
+
+`comando` y `herramienta` **describen, no acreditan**: el cliente no tiene
+contra qué compararlos, así que no los verifica. Están para que una diagnosis
+posterior sepa con qué se construyó — es el límite que T36 se dejó escrito y
+T38 cerró. Los perfiles de prueba dicen `comando=(ninguno: perfil de prueba)`
+en vez de inventarse uno plausible.
+
+La versión **1 sigue valiendo** para el cliente: lo que verifica no cambió, y
+rechazar un recibo conocido sólo por ser más viejo dejaría fuera a un servidor
+que dice lo mismo de lo que sí se comprueba.
 
 `sync` guarda en `/var/forja-cache/ultimo-sync.txt` el `build-id` y el hash de
 las fuentes **que envió**, y `build` rechaza el pack si el recibo habla de otro

@@ -6,7 +6,6 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use smoltcp::iface::SocketSet;
 use smoltcp::socket::udp;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
@@ -124,28 +123,31 @@ enum ResolveFail {
 }
 
 pub fn resolve_a(
-    n: &mut super::NetStack,
     host: &str,
     deadline: Instant,
     servidores: &[Ipv4Address],
 ) -> Result<[u8; 4], ResolveFail> {
+    let net = super::NET.get().ok_or(ResolveFail::Timeout)?;
     let id = (crate::arch::pit::uptime_ms() as u16).max(1);
     let query = build_query(host, id).map_err(|_| ResolveFail::Timeout)?;
-    let rx = udp::PacketBuffer::new([udp::PacketMetadata::EMPTY; 2], vec![0u8; 768]);
-    let tx = udp::PacketBuffer::new([udp::PacketMetadata::EMPTY; 2], vec![0u8; 512]);
-    let handle = n.sockets.add(udp::Socket::new(rx, tx));
-    {
+    let handle = {
+        let mut n = net.lock();
+        let rx = udp::PacketBuffer::new([udp::PacketMetadata::EMPTY; 2], vec![0u8; 768]);
+        let tx = udp::PacketBuffer::new([udp::PacketMetadata::EMPTY; 2], vec![0u8; 512]);
+        let handle = n.sockets.add(udp::Socket::new(rx, tx));
         let sock = n.sockets.get_mut::<udp::Socket>(handle);
         if sock.bind(49152).is_err() {
             crate::println!("dns: bind puerto 49152 falló (host={host})");
             n.sockets.remove(handle);
             return Err(ResolveFail::Timeout);
         }
-    }
+        handle
+    };
 
     for server in servidores {
         let remote = IpEndpoint::new(IpAddress::Ipv4(*server), DNS_PORT);
         {
+            let mut n = net.lock();
             let sock = n.sockets.get_mut::<udp::Socket>(handle);
             if sock.send_slice(&query, remote).is_err() {
                 crate::println!("dns: send falló hacia {server} host={host}");
@@ -156,6 +158,7 @@ pub fn resolve_a(
         let fin = min_instant(crate::net::now() + POR_SERVIDOR, deadline);
         loop {
             if crate::task::interrupt_requested() {
+                let mut n = net.lock();
                 n.sockets.remove(handle);
                 return Err(ResolveFail::Interrupted);
             }
@@ -164,7 +167,8 @@ pub fn resolve_a(
                 crate::println!("dns: sin respuesta de {server} host={host} (plazo servidor)");
                 break;
             }
-            super::poll_locked(n);
+            super::poll();
+            let mut n = net.lock();
             let sock = n.sockets.get_mut::<udp::Socket>(handle);
             if sock.can_recv() {
                 let mut buf = [0u8; 512];
@@ -194,7 +198,10 @@ pub fn resolve_a(
             }
         }
     }
-    n.sockets.remove(handle);
+    {
+        let mut n = net.lock();
+        n.sockets.remove(handle);
+    }
     Err(ResolveFail::Timeout)
 }
 
@@ -231,15 +238,16 @@ pub fn resolve_hostname(host: &str) -> Result<soso_abi::SockAddr, i64> {
         });
     }
     let net = super::NET.get().ok_or(-soso_abi::EIO)?;
-    let mut n = net.lock();
-    let configured = n.configured;
+    let (configured, lista) = {
+        let n = net.lock();
+        (n.configured, servidores(&n.dns))
+    };
     if !configured {
         return Err(-soso_abi::ENOTCONN);
     }
-    let lista = servidores(&n.dns);
     let start = super::now();
     let deadline = start + TIMEOUT;
-    let resultado = match resolve_a(&mut *n, trimmed, deadline, &lista) {
+    let resultado = match resolve_a(trimmed, deadline, &lista) {
         Ok(ip) => Ok(ip),
         Err(ResolveFail::Interrupted) => Err(-soso_abi::EINTR),
         Err(ResolveFail::NxDomain) => Err(-soso_abi::ENOENT),

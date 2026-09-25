@@ -174,7 +174,16 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 
 ## Por dónde (actualizar al cerrar la recomendada)
 
-Camino SI-2: **T16–T19** hechas 2026-09-22; cerrar hito con campaña guest `test-llm-api` + T14 go. T14 bloqueada por T48.
+Camino SI-2: **T16–T19** hechas 2026-09-22; cerrar hito con campaña guest + T14 go.
+**T14 está en NO-GO**, así que **T20 y T21 no están habilitadas** por más que
+sus dependencias figuren `done` — mirar el veredicto, no el `status`. Campaña
+repetida el 2026-09-25 con `cargo xtask test-llm-api --campana` (el arnés está
+hecho): **8/10**, 0 inestables, 55,6 min. T60 confirmada a nivel de sistema; el
+techo lo pone el modelo, que escribe la llamada en `content` con
+`finish_reason: "stop"`. Pasar de ahí es **decisión de plan**: modelo mayor,
+parsear la llamada en el servicio declarándolo, o agente nativo sin
+`tool_calls`. Ojo: una tirada con `--caso`/`--repeticiones` es **parcial** y su
+veredicto no es el de la campaña (escribe en `campana-t14-parcial-…json`).
 T18, T45 y T46 en paralelo. T06–T15 cerradas en host/API/sesión. Validación nativa pendiente de T45/T49.
 **T36 y T38 hechas 2026-09-25**. T36: recibo de Forja que liga fuentes, build y
 artefactos, verificado por el cliente antes de escribir el staging. T38:

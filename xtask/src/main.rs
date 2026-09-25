@@ -839,6 +839,31 @@ fn rootfs_firmware_min_mib(root: &Path) -> u64 {
 }
 
 /// Disco de datos persistente (virtio-blk 0) con sosofs desde rootfs/.
+/// Q04 para el paso guest «órdenes y códigos de salida».
+///
+/// `rootfs/var/` no está en el repositorio: sin esto la imagen del CI no tiene
+/// `esperado.json` y `verificar protocolo` falla con errno -2.
+fn sembrar_fixtures_cli(root: &Path) {
+    let origen = root.join("tests/self-improvement/cases/reservado/Q04");
+    let destino = root.join("rootfs/var/self-improvement/fixtures-cli/reservado/Q04");
+    std::fs::create_dir_all(&destino).unwrap_or_else(|e| {
+        eprintln!("fixtures-cli: no pude crear {}: {e}", destino.display());
+        exit(1);
+    });
+    for nombre in ["esperado.json", "correcta.json", "incorrecta.json"] {
+        let desde = origen.join(nombre);
+        let hacia = destino.join(nombre);
+        std::fs::copy(&desde, &hacia).unwrap_or_else(|e| {
+            eprintln!(
+                "fixtures-cli: no pude copiar {} → {}: {e}",
+                desde.display(),
+                hacia.display()
+            );
+            exit(1);
+        });
+    }
+}
+
 pub(crate) fn mkfs_rootfs(force: bool) -> PathBuf {
     mkfs_rootfs_with_profile(force, &drivers::profile_from_env_or_args(), RootfsImgMode::Workspace)
 }
@@ -859,6 +884,7 @@ pub(crate) fn mkfs_rootfs_with_profile(
         pack_ath11k_firmware(&root);
     }
     drivers::filter_rootfs_firmware(&root.join("rootfs"), profile);
+    sembrar_fixtures_cli(&root);
     let path = root.join("target/soso-data.img");
     let vieja = path
         .metadata()

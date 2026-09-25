@@ -819,6 +819,15 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 || ssh_improve_pruebas(key, port),
             );
         });
+        filter.if_step(sid, "soso-improve: receta del bootstrap (T39)", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "soso-improve: receta del bootstrap (T39)",
+                || ssh_improve_receta(key, port),
+            );
+        });
         filter.if_step(sid, "soso-improve: estado de tareas", || {
             report.paso_ssh_sys(
                 &mut qemu,
@@ -1654,6 +1663,42 @@ fn ssh_guion_inner(
 /// medida desconocida sigue desconocida al volver, y que el coordinador no
 /// puede aceptar su propio trabajo tampoco aquí. En el host eso lo comprueban
 /// `--test state`; esta es la mitad que no se puede deducir de aquella.
+
+/// T39 — la receta del bootstrap también corre **dentro** de soso.
+///
+/// No hay un vendor de Rust en el guest, así que lo que se comprueba no es el
+/// resultado de los parches sino que la orden esté enchufada de verdad: que la
+/// capacidad se declare, que el despacho llegue y que el informe distinga
+/// «falta» de «ancla rota». Apuntando a un directorio vacío eso da una forma
+/// **determinista**: los dos pasos de copia de árbol dicen FALTA (el destino no
+/// está) y los ocho restantes ROTO (no se puede leer el fichero).
+///
+/// Sin esto, «invocable desde los dos frontends» se quedaría en que compila.
+fn ssh_improve_receta(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-improve receta comprobar /var/receta-vacia /var/receta-vacia\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    for esperado in [
+        "receta: 10 pasos",
+        "FALTA PAL: os/soso",
+        "ROTO  build.rs: target soso",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta «{esperado}»: {salida:?}"));
+        }
+    }
+    // La cuenta exacta: si un cambio hiciera que un paso dejara de informar,
+    // el total lo delata aunque las tres líneas de arriba sigan estando.
+    if !salida.contains("2 por aplicar · 8 con el ancla rota") {
+        return Err(format!("la cuenta de la receta no cuadra: {salida:?}"));
+    }
+    Ok(())
+}
+
+
 fn ssh_improve_tarea(key: &Path, ssh_port: u16) -> Result<(), String> {
     let salida = ssh_guion(
         key,

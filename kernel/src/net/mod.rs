@@ -19,7 +19,7 @@ use device::NicDev;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::{dhcpv4, tcp};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{DhcpRepr, EthernetAddress, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr};
 use spin::{Mutex, Once};
 
 #[cfg(feature = "drv-e1000e")]
@@ -68,6 +68,8 @@ struct NetStack {
     /// medias y dejar su lista de bloques corrupta; se paga mucho después, con
     /// un page fault dentro de `talc` que no se parece en nada a su causa.
     dns: [Option<smoltcp::wire::Ipv4Address>; 3],
+    /// Fin de lease según la última concesión DHCP (opción 51).
+    dhcp_expires_at: Option<Instant>,
     user_tcp: tcp_user::TcpTable,
 }
 
@@ -220,9 +222,28 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
             dev,
             mac,
             backend,
+            dhcp_expires_at: None,
             user_tcp: tcp_user::TcpTable::new(),
         })
     });
+}
+
+fn dhcp_lease_expires(config: &dhcpv4::Config<'_>, now: Instant) -> Option<Instant> {
+    let packet = config.packet.as_ref()?;
+    let repr = DhcpRepr::parse(packet).ok()?;
+    let secs = repr.lease_duration? as u64;
+    Some(now + Duration::from_secs(secs))
+}
+
+fn dhcp_deconfig_motivo(now: Instant, expires_at: Option<Instant>) -> &'static str {
+    match expires_at {
+        Some(exp) if now >= exp => "lease expirado",
+        Some(exp) if now + Duration::from_secs(30) >= exp => {
+            "renovación fallida (cerca del fin de lease)"
+        }
+        Some(_) => "NAK o retirada del servidor",
+        None => "configuración retirada",
+    }
 }
 
 /// Reintento de sondeo mientras no hay pila: `poll()` entra aquí en cada vuelta
@@ -392,6 +413,7 @@ fn poll_dhcp(
     dhcp: SocketHandle,
     configured: &mut bool,
     dns: &mut [Option<smoltcp::wire::Ipv4Address>; 3],
+    dhcp_expires_at: &mut Option<Instant>,
 ) {
     let event = sockets.get_mut::<dhcpv4::Socket>(dhcp).poll();
     match event {
@@ -421,13 +443,16 @@ fn poll_dhcp(
                     println!("net: dns {servidor}");
                 }
             }
+            *dhcp_expires_at = dhcp_lease_expires(&config, now());
             *configured = true;
         }
         Some(dhcpv4::Event::Deconfigured) => {
             if !*configured {
                 return;
             }
-            println!("net: dhcp perdido");
+            let motivo = dhcp_deconfig_motivo(now(), *dhcp_expires_at);
+            println!("net: dhcp perdido ({motivo})");
+            *dhcp_expires_at = None;
             clear_ipv4_config(iface);
             close_tcp_services(sockets, echo, ssh);
             *configured = false;
@@ -524,8 +549,8 @@ pub fn poll() {
         // Quien se lleva el candado y no lo suelta deja la pila sin sondear: ni
         // avanza una conexión ni vencen los plazos. Se cuenta de vez en cuando
         // para no ahogar la consola.
-        let fallos = LOCK_PERDIDO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if fallos.is_multiple_of(1000) {
+        let fallos = LOCK_PERDIDO.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+        if fallos == 1 || fallos.is_multiple_of(1000) {
             crate::println!("net: poll sin candado ({fallos} veces)");
         }
         return;
@@ -544,6 +569,7 @@ pub fn poll() {
         mac,
         backend,
         dns,
+        dhcp_expires_at,
         user_tcp,
     } = &mut *n;
 
@@ -552,7 +578,16 @@ pub fn poll() {
         crate::mm::heap::punto("poll-rx");
     }
     if *dhcp_enabled {
-        poll_dhcp(iface, sockets, echo, ssh, *dhcp, configured, dns);
+        poll_dhcp(
+            iface,
+            sockets,
+            echo,
+            ssh,
+            *dhcp,
+            configured,
+            dns,
+            dhcp_expires_at,
+        );
         try_static_fallback(iface, *mac, *backend, dev, *dhcp_started, configured);
     }
     poll_tcp_services(sockets, echo, ssh, *configured);
@@ -581,12 +616,22 @@ pub(crate) fn poll_locked(n: &mut NetStack) {
         mac,
         backend,
         dns,
+        dhcp_expires_at,
         user_tcp,
     } = n;
     let t = now();
     iface.poll(t, dev, sockets);
     if *dhcp_enabled {
-        poll_dhcp(iface, sockets, echo, ssh, *dhcp, configured, dns);
+        poll_dhcp(
+            iface,
+            sockets,
+            echo,
+            ssh,
+            *dhcp,
+            configured,
+            dns,
+            dhcp_expires_at,
+        );
         try_static_fallback(iface, *mac, *backend, dev, *dhcp_started, configured);
     }
     poll_tcp_services(sockets, echo, ssh, *configured);

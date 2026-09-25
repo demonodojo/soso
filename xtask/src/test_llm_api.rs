@@ -34,6 +34,17 @@ struct Args {
     model_dir: Option<PathBuf>,
     profile: Option<PathBuf>,
     inspect_argv: bool,
+    /// Correr la campaña de [T14] contra el endpoint vivo en vez de los
+    /// invariantes de T19.
+    ///
+    /// **En vez de**, no además: son la evidencia de dos fichas distintas, y
+    /// juntarlas da una tirada de hora y pico cuyo fallo podría venir de
+    /// cualquiera de las dos. Los invariantes ya se corren solos.
+    ///
+    /// [T14]: ../../docs/self-improvement/T14-evaluacion-modelo.md
+    campana: bool,
+    repeticiones: Option<String>,
+    caso: Option<String>,
 }
 
 #[derive(Default)]
@@ -64,11 +75,11 @@ pub fn run(from: &[String]) {
         return;
     }
 
-    let Some(model_dir) = args.model_dir else {
+    let Some(model_dir) = args.model_dir.clone() else {
         uso();
         exit(1);
     };
-    let Some(profile_path) = args.profile else {
+    let Some(profile_path) = args.profile.clone() else {
         eprintln!("test-llm-api: falta --profile <model-lock.json>");
         uso();
         exit(1);
@@ -83,7 +94,7 @@ pub fn run(from: &[String]) {
     }
     let profile = load_profile(&profile_path);
     let catalog = profile.catalog_name().to_string();
-    run_guest(&root, &arte, &model_dir, &catalog);
+    run_guest(&root, &arte, &model_dir, &catalog, &args);
 }
 
 fn parse(from: &[String]) -> Args {
@@ -91,6 +102,9 @@ fn parse(from: &[String]) -> Args {
     let mut model_dir = None;
     let mut profile = None;
     let mut inspect_argv = false;
+    let mut campana = false;
+    let mut repeticiones = None;
+    let mut caso = None;
     let mut i = 0;
     while i < from.len() {
         match from[i].as_str() {
@@ -104,6 +118,15 @@ fn parse(from: &[String]) -> Args {
                 i += 1;
                 profile = from.get(i).map(PathBuf::from);
             }
+            "--campana" | "--campaña" => campana = true,
+            "--repeticiones" => {
+                i += 1;
+                repeticiones = from.get(i).cloned();
+            }
+            "--caso" => {
+                i += 1;
+                caso = from.get(i).cloned();
+            }
             _ => {}
         }
         i += 1;
@@ -113,6 +136,9 @@ fn parse(from: &[String]) -> Args {
         model_dir,
         profile,
         inspect_argv,
+        campana,
+        repeticiones,
+        caso,
     }
 }
 
@@ -121,6 +147,11 @@ fn uso() {
     eprintln!("  cargo xtask test-llm-api --synthetic");
     eprintln!("  cargo xtask test-llm-api --model-dir <dir> --profile <model-lock.json>");
     eprintln!("  cargo xtask test-llm-api --inspect-argv …  (solo imprime forwards QEMU)");
+    eprintln!();
+    eprintln!("  --campana            corre la campaña de T14 contra el endpoint vivo");
+    eprintln!("                       **en vez de** los invariantes de T19");
+    eprintln!("  --repeticiones N     por caso (T14 usó 3; 1 para una pasada rápida)");
+    eprintln!("  --caso Qxx           un solo caso, para no pagar la campaña entera");
 }
 
 fn load_profile(path: &Path) -> ProfileFile {
@@ -162,7 +193,7 @@ fn run_synthetic(root: &Path, arte: &Path) {
     exit(if ok { 0 } else { 1 });
 }
 
-fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str) {
+fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &Args) {
     println!(
         "test-llm-api: guest modelo={catalog} dir={} puerto_llm={LLM_PORT}",
         model_dir.display()
@@ -238,7 +269,20 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str) {
     phases.record("lanzar_qemu", t);
 
     let mut steps: Vec<StepResult> = Vec::new();
-    let exit_code = match run_guest_inner(&key, &serial, catalog, &mut steps, &mut qemu, &mut phases) {
+    let campana = args.campana.then(|| Campana {
+        arte,
+        repeticiones: args.repeticiones.as_deref(),
+        caso: args.caso.as_deref(),
+    });
+    let exit_code = match run_guest_inner(
+        &key,
+        &serial,
+        catalog,
+        &mut steps,
+        &mut qemu,
+        &mut phases,
+        campana.as_ref(),
+    ) {
         Ok(()) => 0,
         Err(msg) => {
             eprintln!("test-llm-api: {msg}");
@@ -263,6 +307,97 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str) {
     exit(exit_code);
 }
 
+/// Qué campaña correr, si es que hay que correr alguna.
+struct Campana<'a> {
+    arte: &'a Path,
+    repeticiones: Option<&'a str>,
+    caso: Option<&'a str>,
+}
+
+/// Lanza `soso-improve evaluar` contra el endpoint reenviado.
+///
+/// Un **NO-GO no es un fallo del arnés**: la campaña se hizo y el resultado es
+/// que no. `evaluar` ya sale con el código de verificación (no el de error)
+/// justo por eso, así que aquí se distingue «no pude medir» de «medí y salió
+/// que no», y sólo lo primero marca el paso como malo.
+fn correr_campana(catalog: &str, c: &Campana<'_>) -> StepResult {
+    let root = crate::project_root();
+    let banco = root.join("tests/self-improvement/cases");
+    // **Una campaña filtrada no es la campaña.** `evaluar` calcula el veredicto
+    // sobre lo que se le da, así que con `--caso Q08` el informe dice
+    // `"go": true` con un caso — y quien abra el fichero después no tiene forma
+    // de saber que estaba filtrado. Por eso una tirada parcial **no escribe en
+    // el nombre canónico**: lleva el suyo, y el aviso va también por pantalla.
+    let parcial = c.caso.is_some() || c.repeticiones.is_some();
+    let informe = if parcial {
+        let etiqueta = c.caso.unwrap_or("todos");
+        let reps = c.repeticiones.unwrap_or("3");
+        c.arte.join(format!("campana-t14-parcial-{etiqueta}-x{reps}.json"))
+    } else {
+        c.arte.join("campana-t14.json")
+    };
+    let puerto = LLM_PORT.to_string();
+
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(&root).args([
+        "run",
+        "-q",
+        "-p",
+        "soso-improve",
+        "--",
+        "evaluar",
+        "--modelo",
+        catalog,
+        "--banco",
+        banco.to_str().unwrap_or_default(),
+        "--puerto",
+        &puerto,
+        "--token",
+        TOKEN,
+        "--out",
+        informe.to_str().unwrap_or_default(),
+    ]);
+    if let Some(r) = c.repeticiones {
+        cmd.args(["--repeticiones", r]);
+    }
+    if let Some(caso) = c.caso {
+        cmd.args(["--caso", caso]);
+    }
+
+    println!("test-llm-api: campaña T14 contra el endpoint vivo (puerto {puerto})");
+    if parcial {
+        println!(
+            "test-llm-api: AVISO — tirada **parcial**: su veredicto no es el de la campaña"
+        );
+    }
+    match cmd.status() {
+        // 0 = GO. El código de verificación es un NO-GO medido, que **también**
+        // es un resultado: el paso pasa y el veredicto está en el informe.
+        Ok(st) if st.success() => StepResult {
+            name: "campana_t14",
+            ok: true,
+            detail: format!("GO — informe en {}", informe.display()),
+        },
+        Ok(st) if st.code() == Some(soso_improve_core::cli::Codigo::Verificacion.como_i32()) => {
+            StepResult {
+                name: "campana_t14",
+                ok: true,
+                detail: format!("NO-GO medido — informe en {}", informe.display()),
+            }
+        }
+        Ok(st) => StepResult {
+            name: "campana_t14",
+            ok: false,
+            detail: format!("evaluar salió con {:?}: no se pudo medir", st.code()),
+        },
+        Err(e) => StepResult {
+            name: "campana_t14",
+            ok: false,
+            detail: format!("no pude lanzar soso-improve: {e}"),
+        },
+    }
+}
+
 fn run_guest_inner(
     key: &Path,
     serial: &Path,
@@ -270,6 +405,7 @@ fn run_guest_inner(
     steps: &mut Vec<StepResult>,
     qemu: &mut Child,
     phases: &mut PhaseLog,
+    campana: Option<&Campana<'_>>,
 ) -> Result<(), String> {
     let t = Instant::now();
     wait_guest_ready(key, serial, qemu)?;
@@ -290,6 +426,15 @@ fn run_guest_inner(
     let t = Instant::now();
     wait_health_ready(&client, qemu, key, &serve)?;
     phases.record("health_ready", t);
+
+    // Con `--campana` el endpoint ya está vivo y es lo único que la campaña
+    // necesita: se corre y se vuelve, sin los invariantes de T19.
+    if let Some(c) = campana {
+        let t = Instant::now();
+        steps.push(correr_campana(catalog, c));
+        phases.record("campana_t14", t);
+        return Ok(());
+    }
 
     let guest_lim = GuestHttpLimits::default();
     let t = Instant::now();

@@ -1272,6 +1272,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "soso-abi",
+ "soso-improve-core",
  "soso-llm-api",
  "soso-resize-core",
  "soso-update-core",

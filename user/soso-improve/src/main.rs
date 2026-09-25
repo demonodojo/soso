@@ -38,6 +38,7 @@ use soso_improve_core::caso;
 use soso_improve_core::cli::{self, Capacidad, Capacidades, Codigo, Informe};
 use soso_improve_core::entorno::{Archivos, Entrada, Orden, Procesos, Salida, Tipo};
 use soso_improve_core::ignorar::Reglas;
+use soso_improve_core::receta;
 use soso_improve_core::{protocolo, unir, Error, Resultado};
 
 libsoso::entry!(main);
@@ -414,6 +415,10 @@ fn capacidades() -> Capacidades {
             Capacidad::TareaPreparar,
             Capacidad::TareaReanudar,
             Capacidad::TareaInforme,
+            // Comprobar la receta es **leer ficheros**: no depende de la
+            // plataforma, así que el guest la tiene igual que el host. Otra
+            // cosa es que aquí haya todavía un vendor al que apuntar.
+            Capacidad::RecetaComprobar,
         ],
     )
 }
@@ -482,6 +487,41 @@ fn reconstruir(captura: &str, destino: &str) -> Resultado<usize> {
     Ok(verificacion.problemas.len())
 }
 
+/// `receta comprobar <vendor> <plantillas>` — qué parches del bootstrap de
+/// libstd faltan, **sin tocar el vendor**.
+///
+/// Misma política que en el host: vive en `soso_improve_core::receta` y aquí
+/// sólo se pone el sistema de ficheros. Devuelve cuántos pasos faltan, que es
+/// lo que el llamante cuenta como problemas.
+fn receta_comprobar(vendor: &str, plantillas: &str) -> Resultado<usize> {
+    let soso_rt = format!("{}/../../crates/soso-rt", plantillas.trim_end_matches('/'));
+    let pasos = receta::pasos_libstd(plantillas, &soso_rt);
+    let informes = receta::comprobar(&Soso, vendor, &pasos);
+    let mut faltan = 0usize;
+    let mut rotos = 0usize;
+    for i in &informes {
+        match &i.resultado {
+            receta::Resultado::YaEstaba => println!("ok    {}", i.nombre),
+            receta::Resultado::Falta => {
+                faltan += 1;
+                println!("FALTA {}", i.nombre);
+            }
+            receta::Resultado::Fallo(m) => {
+                rotos += 1;
+                println!("ROTO  {} — {m}", i.nombre);
+            }
+            receta::Resultado::Aplicado => println!("?     {}", i.nombre),
+        }
+    }
+    println!(
+        "receta: {} pasos · {faltan} por aplicar · {rotos} con el ancla rota",
+        informes.len()
+    );
+    // Un ancla rota no se arregla repitiendo la preparación: cuenta como
+    // problema aunque no falte nada por aplicar.
+    Ok(faltan + rotos)
+}
+
 fn banco(dir: &str, sub: &str) -> Resultado<usize> {
     let casos = caso::cargar(&Soso, dir)?;
     match sub {
@@ -544,6 +584,10 @@ fn ejecutar(orden: &cli::Orden) -> Resultado<usize> {
         Capacidad::Procesos => procesos(),
         Capacidad::Pruebas => pruebas(orden.uno("banco")),
         Capacidad::Delta => delta_prueba(),
+        Capacidad::RecetaComprobar => receta_comprobar(
+            orden.exigido("vendor")?,
+            orden.exigido("plantillas")?,
+        ),
         Capacidad::TareaPreparar => match orden.uno("spec") {
             Some(spec) => tarea_preparar(orden.exigido("estado")?, spec),
             // Sin enunciado, la orden es la autoprueba del formato: siembra el
@@ -854,7 +898,7 @@ fn eco_peticion(
 ) -> Resultado<EnlaceSoso> {
     let reloj = RelojSoso;
     let plazo = Plazo::en(&reloj, 15_000);
-    let mut enlace = ConectorSoso.conectar(&Destino::local(puerto), plazo, &reloj)?;
+    let mut enlace = eco_conectar(puerto, &reloj)?;
     let cabecera = [modo, (cuerpo.len() >> 8) as u8, cuerpo.len() as u8];
     transporte::escribir_todo(&mut enlace, &reloj, plazo, &cabecera)?;
     let mut i = 0;
@@ -881,10 +925,24 @@ fn eco_lanzar_servidor(puerto: u16) -> Resultado<()> {
     if pid < 0 {
         return Err(fallo("lanzar el servidor de eco", pid));
     }
-    // El servidor necesita llegar a `tcp_listen` antes de que el cliente
-    // conecte; si no, el connect da ECONNREFUSED y parece un fallo de red.
-    sys::sleep_ms(300);
     Ok(())
+}
+
+/// Espera a que el servidor llegue a `tcp_listen`. Un `sleep` fijo no basta:
+/// bajo carga el hijo tarda más, el connect recibe ECONNREFUSED y el proceso
+/// se queda en `accept` hasta que vence su plazo.
+fn eco_conectar(puerto: u16, reloj: &RelojSoso) -> Resultado<EnlaceSoso> {
+    let limite = Plazo::en(reloj, 5_000);
+    loop {
+        let intento = Plazo::en(reloj, 200);
+        match ConectorSoso.conectar(&Destino::local(puerto), intento, reloj) {
+            Ok(enlace) => return Ok(enlace),
+            Err(Error::Entorno(m)) if m.contains("errno -61") && !limite.vencido(reloj) => {
+                sys::sleep_ms(50);
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Comprobación de T48 dentro de soso: fragmentación byte a byte, UTF-8

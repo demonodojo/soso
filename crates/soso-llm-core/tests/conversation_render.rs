@@ -21,9 +21,18 @@ fn dir_fixtures() -> PathBuf {
     raiz_repo().join("tests/self-improvement/reference")
 }
 
+fn ruta_tokenizer() -> PathBuf {
+    let convertido = raiz_repo().join("target/qwen2.5-coder-3b-model/tokenizer.som");
+    if convertido.is_file() {
+        convertido
+    } else {
+        // El de target/ no viaja a CI; esta copia es el mismo .som v2 del perfil T03.
+        dir_fixtures().join("tokenizer.som")
+    }
+}
+
 fn tokenizer_qwen() -> Option<Tokenizer> {
-    let ruta = raiz_repo().join("target/qwen2.5-coder-3b-model/tokenizer.som");
-    let datos = std::fs::read(ruta).ok()?;
+    let datos = std::fs::read(ruta_tokenizer()).ok()?;
     let tok = Tokenizer::parse(&datos).ok()?;
     tok.tiene_vocabulario().then_some(tok)
 }
@@ -156,7 +165,7 @@ const CASOS: &[&str] = &[
 fn los_cinco_fixtures_coinciden_en_texto_y_tokens() {
     let Some(tokenizer) = tokenizer_qwen() else {
         panic!(
-            "falta target/qwen2.5-coder-3b-model/tokenizer.som; convierte el modelo del perfil T03"
+            "falta tokenizer.som (target/qwen2.5-coder-3b-model o tests/self-improvement/reference)"
         );
     };
     let perfil = perfil_qwen();
