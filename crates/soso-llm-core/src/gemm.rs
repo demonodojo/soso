@@ -597,55 +597,38 @@ mod tests {
     use super::*;
     use crate::quant::{dequant_q4_k, quantize_q8_0};
 
-    fn tiene_avx2() -> bool {
-        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
-    }
-
-    fn casi_iguales(a: &[f32], b: &[f32]) {
+    pub(super) fn casi_iguales(a: &[f32], b: &[f32]) {
         for (i, (x, y)) in a.iter().zip(b).enumerate() {
             let tol = 1e-3 + x.abs() * 1e-4;
             assert!((x - y).abs() < tol, "fila {i}: {x} vs {y}");
         }
     }
 
-    #[test]
-    fn avx2_f32_coincide_con_escalar() {
-        if !tiene_avx2() {
-            return;
-        }
-        let (rows, cols) = (5, 100); // no múltiplo de 8: ejercita el tail
-        let m: Vec<f32> = (0..rows * cols).map(|i| ((i * 31 % 97) as f32 - 48.0) * 0.03).collect();
-        let x: Vec<f32> = (0..cols).map(|i| ((i * 17 % 89) as f32 - 44.0) * 0.02).collect();
-        let mut a = vec![0.0f32; rows];
-        let mut b = vec![0.0f32; rows];
-        matvec_f32_scalar(&m, rows, cols, &x, &mut a);
-        unsafe { avx2::matvec_f32(&m, rows, cols, &x, &mut b) };
-        casi_iguales(&a, &b);
+    pub(super) fn fixture_f32() -> (usize, usize, Vec<f32>, Vec<f32>) {
+        let (rows, cols) = (5, 100);
+        let m: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 31 % 97) as f32 - 48.0) * 0.03)
+            .collect();
+        let x: Vec<f32> = (0..cols)
+            .map(|i| ((i * 17 % 89) as f32 - 44.0) * 0.02)
+            .collect();
+        (rows, cols, m, x)
     }
 
-    #[test]
-    fn avx2_q8_coincide_con_escalar() {
-        if !tiene_avx2() {
-            return;
-        }
+    pub(super) fn fixture_q8() -> (usize, usize, Vec<u8>, Vec<f32>) {
         let (rows, cols) = (4, 96);
-        let w: Vec<f32> = (0..rows * cols).map(|i| ((i * 13 % 61) as f32 - 30.0) * 0.05).collect();
+        let w: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 13 % 61) as f32 - 30.0) * 0.05)
+            .collect();
         let bytes = quantize_q8_0(&w);
-        let x: Vec<f32> = (0..cols).map(|i| ((i * 7 % 53) as f32 - 26.0) * 0.04).collect();
-        let mut a = vec![0.0f32; rows];
-        let mut b = vec![0.0f32; rows];
-        matvec_q8_0_scalar(&bytes, rows, cols, &x, &mut a);
-        unsafe { avx2::matvec_q8_0(&bytes, rows, cols, &x, &mut b) };
-        casi_iguales(&a, &b);
+        let x: Vec<f32> = (0..cols)
+            .map(|i| ((i * 7 % 53) as f32 - 26.0) * 0.04)
+            .collect();
+        (rows, cols, bytes, x)
     }
 
-    #[test]
-    fn avx2_q4k_coincide_con_escalar() {
-        if !tiene_avx2() {
-            return;
-        }
+    pub(super) fn fixture_q4_k() -> (usize, usize, Vec<u8>, Vec<f32>) {
         use crate::f16::f32_to_f16;
-        // 2 filas × 512 cols de superbloques sintéticos variados
         let (rows, cols) = (2, 512);
         let blocks = rows * cols / 256;
         let mut bytes = Vec::new();
@@ -659,18 +642,99 @@ mod tests {
                 bytes.push(((b * 3 + j * 7) % 256) as u8);
             }
         }
-        let x: Vec<f32> = (0..cols).map(|i| ((i * 5 % 71) as f32 - 35.0) * 0.02).collect();
+        let x: Vec<f32> = (0..cols)
+            .map(|i| ((i * 5 % 71) as f32 - 35.0) * 0.02)
+            .collect();
+        (rows, cols, bytes, x)
+    }
+
+    /// Camino escalar: corre en cualquier host sin RUSTFLAGS AVX2.
+    #[test]
+    fn matvec_f32_escalar_ejecuta_producto() {
+        let (rows, cols, m, x) = fixture_f32();
+        let mut out = vec![0.0f32; rows];
+        matvec_f32_scalar(&m, rows, cols, &x, &mut out);
+        let esperado: Vec<f32> = (0..rows)
+            .map(|r| (0..cols).map(|c| m[r * cols + c] * x[c]).sum::<f32>())
+            .collect();
+        casi_iguales(&out, &esperado);
+    }
+
+    #[test]
+    fn matvec_q8_0_escalar_ejecuta_producto() {
+        let (rows, cols, bytes, x) = fixture_q8();
+        let mut out = vec![0.0f32; rows];
+        matvec_q8_0_scalar(&bytes, rows, cols, &x, &mut out);
+        assert!(out.iter().any(|v| v.abs() > 1e-6), "salida Q8_0 vacía");
+        assert_eq!(out.len(), rows);
+    }
+
+    #[test]
+    fn matvec_q4_k_escalar_coincide_con_dequant() {
+        let (rows, cols, bytes, x) = fixture_q4_k();
         let mut a = vec![0.0f32; rows];
-        let mut b = vec![0.0f32; rows];
         matvec_q4_k_scalar(&bytes, rows, cols, &x, &mut a);
-        unsafe { avx2::matvec_q4_k(&bytes, rows, cols, &x, &mut b) };
-        casi_iguales(&a, &b);
-        // y ambos contra dequant + matvec f32 de referencia
         let mut wq = vec![0.0f32; rows * cols];
         dequant_q4_k(&bytes, &mut wq).unwrap();
         let mut c = vec![0.0f32; rows];
         matvec_f32_scalar(&wq, rows, cols, &x, &mut c);
         casi_iguales(&a, &c);
+    }
+}
+
+/// Comparación AVX2 vs escalar: sólo se compila con
+/// `RUSTFLAGS='-C target-feature=+avx2,+fma'` (perfil alineado al target soso).
+#[cfg(test)]
+#[cfg(feature = "std")]
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    target_feature = "fma"
+))]
+mod tests_avx2 {
+    use super::*;
+    use super::tests::{casi_iguales, fixture_f32, fixture_q4_k, fixture_q8};
+
+    fn exige_avx2_en_runtime() {
+        let avx2 = std::arch::is_x86_feature_detected!("avx2");
+        let fma = std::arch::is_x86_feature_detected!("fma");
+        assert!(
+            avx2 && fma,
+            "binario compilado con AVX2+FMA (perfil de validación) pero la CPU no expone avx2={avx2} fma={fma}"
+        );
+    }
+
+    #[test]
+    fn avx2_f32_coincide_con_escalar() {
+        exige_avx2_en_runtime();
+        let (rows, cols, m, x) = fixture_f32();
+        let mut a = vec![0.0f32; rows];
+        let mut b = vec![0.0f32; rows];
+        matvec_f32_scalar(&m, rows, cols, &x, &mut a);
+        unsafe { avx2::matvec_f32(&m, rows, cols, &x, &mut b) };
+        casi_iguales(&a, &b);
+    }
+
+    #[test]
+    fn avx2_q8_coincide_con_escalar() {
+        exige_avx2_en_runtime();
+        let (rows, cols, bytes, x) = fixture_q8();
+        let mut a = vec![0.0f32; rows];
+        let mut b = vec![0.0f32; rows];
+        matvec_q8_0_scalar(&bytes, rows, cols, &x, &mut a);
+        unsafe { avx2::matvec_q8_0(&bytes, rows, cols, &x, &mut b) };
+        casi_iguales(&a, &b);
+    }
+
+    #[test]
+    fn avx2_q4k_coincide_con_escalar() {
+        exige_avx2_en_runtime();
+        let (rows, cols, bytes, x) = fixture_q4_k();
+        let mut a = vec![0.0f32; rows];
+        let mut b = vec![0.0f32; rows];
+        matvec_q4_k_scalar(&bytes, rows, cols, &x, &mut a);
+        unsafe { avx2::matvec_q4_k(&bytes, rows, cols, &x, &mut b) };
+        casi_iguales(&a, &b);
     }
 }
 

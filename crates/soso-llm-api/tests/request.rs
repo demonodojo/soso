@@ -16,9 +16,24 @@ fn raiz_repo() -> PathBuf {
         .expect("raíz del repo")
 }
 
+fn dir_fixtures() -> PathBuf {
+    raiz_repo().join("tests/self-improvement/reference")
+}
+
+fn ruta_tokenizer() -> PathBuf {
+    let convertido = raiz_repo().join("target/qwen2.5-coder-3b-model/tokenizer.som");
+    if convertido.is_file() {
+        convertido
+    } else {
+        dir_fixtures().join("tokenizer.som")
+    }
+}
+
+const FALTA_TOKENIZER: &str =
+    "falta tokenizer.som (target/qwen2.5-coder-3b-model o tests/self-improvement/reference)";
+
 fn tokenizer_qwen() -> Option<Tokenizer> {
-    let ruta = raiz_repo().join("target/qwen2.5-coder-3b-model/tokenizer.som");
-    let datos = std::fs::read(ruta).ok()?;
+    let datos = std::fs::read(ruta_tokenizer()).ok()?;
     let tok = Tokenizer::parse(&datos).ok()?;
     tok.tiene_vocabulario().then_some(tok)
 }
@@ -160,7 +175,7 @@ fn q04_peticion_wire_a_dominio() {
 #[test]
 fn q04_prepare_si_hay_tokenizer() {
     let Some(tokenizer) = tokenizer_qwen() else {
-        return;
+        panic!("{FALTA_TOKENIZER}");
     };
     let path = raiz_repo().join("tests/self-improvement/cases/visible/Q04/peticion.json");
     let body = std::fs::read_to_string(path).expect("Q04 peticion");
@@ -180,7 +195,7 @@ fn q04_prepare_si_hay_tokenizer() {
 #[test]
 fn modelo_distinto_perfil_404() {
     let Some(tokenizer) = tokenizer_qwen() else {
-        return;
+        panic!("{FALTA_TOKENIZER}");
     };
     let body = r#"{
       "model": "otro-modelo",
@@ -195,7 +210,7 @@ fn modelo_distinto_perfil_404() {
 #[test]
 fn contexto_excedido_422() {
     let Some(tokenizer) = tokenizer_qwen() else {
-        return;
+        panic!("{FALTA_TOKENIZER}");
     };
     let texto = "palabra ".repeat(4000);
     let body = format!(

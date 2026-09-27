@@ -32,7 +32,10 @@ pub const SYS_SPAWN: u64 = 10;
 pub const SYS_WAIT: u64 = 11;
 pub const SYS_SBRK: u64 = 12;
 pub const SYS_SLEEP_MS: u64 = 13;
+/// Apaga (`HALT_APAGAR`) o reinicia (`HALT_REINICIAR`). No vuelve si funciona.
 pub const SYS_HALT: u64 = 14;
+pub const HALT_APAGAR: u64 = 0;
+pub const HALT_REINICIAR: u64 = 1;
 pub const SYS_MMAP: u64 = 15;
 pub const SYS_MUNMAP: u64 = 16;
 pub const SYS_GPU_INFO: u64 = 17;

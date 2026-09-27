@@ -7,8 +7,13 @@ description = "Runtime ABI for libstd on x86_64-unknown-soso (Hito 3)"
 
 [dependencies]
 soso-abi = { path = "../soso-abi" }
+soso-alloc = { path = "../soso-alloc" }
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 
 [features]
 default = []
-# Habilitar cuando std enlace este crate como hermit-abi.
-dep-of-std = []
+# `dep-of-std` era una feature **vacía**: se declaraba y no hacía nada, así que
+# al compilar libstd este crate buscaba `core` en un sysroot de
+# `x86_64-unknown-soso` que todavía no existe («can't find crate for `core`»).
+# El nombre y el mecanismo los fija rust: ver `library/rustc-std-workspace-core`.
+rustc-dep-of-std = ["dep:core", "soso-abi/rustc-dep-of-std", "soso-alloc/rustc-dep-of-std"]

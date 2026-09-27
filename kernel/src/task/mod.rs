@@ -62,7 +62,17 @@ pub enum State {
         deadline_ms: u64,
     },
     /// `futex_wait` sobre (pml4, uaddr).
-    WaitingFutex { pml4: u64, uaddr: u64 },
+    WaitingFutex {
+        pml4: u64,
+        uaddr: u64,
+        /// Instante límite en ms de `uptime`; `0` = sin plazo (T73).
+        ///
+        /// Igual que en `WaitingPipe`. Sin esto, `futex_wait` sólo sabía
+        /// esperar para siempre, y la `Condvar::wait_timeout` de la libstd de
+        /// soso habría dormido sin vuelta — el defecto de T55 un nivel más
+        /// abajo y afectando a todo lo que sincronice.
+        deadline_ms: u64,
+    },
     /// read/write/accept/connect TCP bloqueante.
     WaitingSocket {
         slot: usize,
@@ -1397,6 +1407,26 @@ extern "C" fn schedule_inner() -> ! {
                 p.ctx.rax = 0;
             }
         }
+        // Futex con plazo vencido (T73): se despierta con -ETIMEDOUT, que es
+        // lo que distingue «expiró» de «me despertaron» (rax = 0).
+        //
+        // **No se toca `WAITERS` aquí.** El orden de candados del futex es
+        // WAITERS → PROCS (lo toman así `wait_or_resume` y `wake`), y aquí ya
+        // tenemos PROCS: pedir WAITERS ahora sería invertirlo, que es
+        // exactamente como se produjo el abrazo mortal entre el candado de red
+        // y el de procesos. No hace falta: `wake` saca el pid de la lista
+        // antes de mirar su estado y sólo cuenta como despertado al que seguía
+        // en `WaitingFutex`, así que una entrada rancia **no se come un
+        // wakeup**; y `futex::forget_pid` la limpia al morir el proceso.
+        for p in procs.iter_mut() {
+            if let State::WaitingFutex { deadline_ms, .. } = p.state
+                && deadline_ms != 0
+                && now >= deadline_ms
+            {
+                p.state = State::Runnable;
+                p.ctx.rax = (-soso_abi::ETIMEDOUT) as u64;
+            }
+        }
         // Despertar a cada lector de tty cuya consola ya tenga datos.
         for i in 0..procs.len() {
             if let State::WaitingTty { buf, len } = procs[i].state
@@ -1496,6 +1526,9 @@ extern "C" fn schedule_inner() -> ! {
                 procs[i].space.as_ref().unwrap().activate();
                 let now = crate::arch::pit::uptime_ms();
                 if deadline_ms != 0 && now >= deadline_ms {
+                    if connect {
+                        syscall::close_fd_slot(&mut procs[i], result_fd);
+                    }
                     procs[i].ctx.rax = (-soso_abi::EAGAIN) as u64;
                     procs[i].state = State::Runnable;
                     continue;

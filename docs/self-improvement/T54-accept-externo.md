@@ -168,4 +168,9 @@ conexión viva (keep-alive); el servidor responde con `Connection: close`.
 Aplicar [NATIVO.md](NATIVO.md). La prueba del paso 1 debe poder ejecutarse
 también desde el runner nativo de [T49](T49-pruebas-guest.md).
 
-Validación nativa: **pendiente**.
+Validación nativa: **parcial**, según la evidencia histórica del catálogo. No
+se ha repetido en esta revisión.
+
+## Revisión del 26-sep-2026
+
+Sincronización documental, sin reejecución. Ver [seguimiento/T54.md](seguimiento/T54.md).

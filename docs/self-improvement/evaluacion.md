@@ -94,9 +94,15 @@ sea una acción y no una intuición. Si se prueba otro perfil de modelo, el banc
 **no se toca** durante la comparación: cambiar la vara mientras se mide
 invalida las dos medidas.
 
-## Estado
+## Estado (26-sep-2026)
 
-La lógica y sus pruebas con backend simulado están hechas y verdes. La
-**campaña real** contra el endpoint guest es evidencia aparte y es lo que
-decide el go/no-go; hasta que exista, T14 no está cerrada y SI-2 no puede
-cerrarse.
+T14 está cerrada como entrega del evaluador, con **NO-GO válido del 3B: 8/10**
+el 25-sep (0 inestables). La comparación 7B del 26-sep perdió la conexión
+tras Q05: su agregado 4/10 no permite atribuir el fallo a calidad del modelo.
+SI-2 no se cierra y el perfil C1 sigue siendo el 3B.
+
+[T74](T74-campana-7b-interrumpida.md) debe distinguir cobertura de campaña y
+veredicto: una pérdida de servicio no permite GO ni presentar el resultado
+como una comparación completa de calidad. Los intentos fallidos se conservan
+en el denominador. Esta distinción está planificada, no implementada todavía.
+Ver comandos, informes por modelo y límites en [seguimiento/T14.md](seguimiento/T14.md).

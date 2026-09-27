@@ -81,7 +81,7 @@ Syscalls 70–82, `SpawnIo` argv/envp, ELF perezoso + PT_TLS, `SOSOFS11`.
 - **`SYS_GETENV` (83)**: entorno por proceso; herencia en spawn; `PATH`/`HOME` en init
 - **`spawn_io_ex`**: argv/envp desde userspace (libsoso)
 - [`tools/sosoas`](../tools/sosoas): GAS `.byte` → ELF64 ET_REL
-- [`config/rust-soso/sys/pal/soso/dl.rs`](../config/rust-soso/sys/pal/soso/dl.rs): parse ELF + stub dlopen
+- Carga dinámica (el stub `dl.rs` se retiró en T69; libstd no lo declara)
 - [`tools/wild-soso`](../tools/wild-soso): passthrough a `wild`
 - **`/bin/soso-rustc`**: stub guest (`--version`, comprueba sysroot)
 - Canal OTA **`dev`**: `UPD_CHANNEL_DEV` en `soso-update-core`

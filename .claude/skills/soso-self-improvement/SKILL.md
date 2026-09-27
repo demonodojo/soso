@@ -1,7 +1,7 @@
 ---
 name: soso-self-improvement
 description: >-
-  Automejora de soso con OpenCode y el modelo local: fichas T01–T53, hitos
+  Automejora de soso con OpenCode y el modelo local: fichas T01–T75, hitos
   SI-0–SI-7, catálogo tasks.json, contratos C1–C7/NATIVO, soso-improve,
   soso-llm-core conversation/chat, soso-llm-api, banco de casos y
   native_validation. Úsala al oír automejora, self-improvement,
@@ -54,7 +54,7 @@ Un diagnóstico u otro archivo abierto en el IDE no cambia el objetivo.
 | Tentación | Por qué no |
 |---|---|
 | `SELF_IMPROVEMENT.md` entero | Padre de 450 líneas. Hitos SI-* ya están en el README. |
-| Las 53 fichas / `tasks.json` completo | Una ficha. El índice nombra la siguiente. |
+| El catálogo / `tasks.json` completo | Una ficha. El índice nombra la siguiente. |
 | `CONTRATO.md` entero | Solo `contract_sections`. |
 | `soso-architecture` / `soso-dev` | Kernel/QEMU genéricos. Dev solo si la ficha pide `xtask test/check`. |
 | `chat.rs` / runtime / tokenizer enteros | Salvo que `context` o «archivos que se pueden cambiar» los listen. |
@@ -67,8 +67,8 @@ Candidata = `pending` (o `in_progress`), `depends_on` todas `done`,
 consumidor que exige `go` (T14 → T16/T22). `native_validation.pending` **no**
 bloquea implementar: bloquea declarar ejecución guest.
 
-Independientes típicas (comprobar el README, no esta lista): camino SI-1
-(T06/T07), T08, T18, T45, T46, inventarios T32/T36/T38.
+Frentes independientes actuales: T74 (evaluación) y T72/T75 (bootstrap).
+Comprobar siempre el README y el catálogo; no reutilizar listas históricas.
 
 Nombres de módulos/comandos en fichas pendientes son **entregables**, no APIs
 existentes. Crearlos en esa ficha.
@@ -140,7 +140,7 @@ Esta skill: actualizar «Por dónde» de abajo y comandos si la ficha los cambia
 | Chat dominio | `crates/soso-llm-core/src/conversation.rs` |
 | Coordinador | `crates/soso-improve-core`, `tools/soso-improve`, `user/soso-improve` |
 
-Familia fijada: **Qwen2.5-Coder-3B-Instruct** (`qwen2`, id `soso-coder`).
+Perfil elegido: **Qwen2.5-Coder-7B-Instruct** (`qwen2.5-coder-7b`, id `soso-coder`). El 3B es el candidato anterior.
 T52/T53: segmentación BPE **igual** a la referencia (5/5). T06 no puede
 debilitar eso a una comparación aproximada.
 
@@ -174,58 +174,29 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 
 ## Por dónde (actualizar al cerrar la recomendada)
 
-Camino SI-2: **T16–T19** hechas 2026-09-22; cerrar hito con campaña guest + T14 go.
-**T14 está en NO-GO**, así que **T20 y T21 no están habilitadas** por más que
-sus dependencias figuren `done` — mirar el veredicto, no el `status`. Campaña
-repetida el 2026-09-25 con `cargo xtask test-llm-api --campana` (el arnés está
-hecho): **8/10**, 0 inestables, 55,6 min. T60 confirmada a nivel de sistema; el
-techo lo pone el modelo, que escribe la llamada en `content` con
-`finish_reason: "stop"`. Pasar de ahí es **decisión de plan**: modelo mayor,
-parsear la llamada en el servicio declarándolo, o agente nativo sin
-`tool_calls`. Ojo: una tirada con `--caso`/`--repeticiones` es **parcial** y su
-veredicto no es el de la campaña (escribe en `campana-t14-parcial-…json`).
-T18, T45 y T46 en paralelo. T06–T15 cerradas en host/API/sesión. Validación nativa pendiente de T45/T49.
-**T36 y T38 hechas 2026-09-25**. T36: recibo de Forja que liga fuentes, build y
-artefactos, verificado por el cliente antes de escribir el staging. T38:
-inventario con prueba de resultado por herramienta
-(`native/toolchain-lock.json`), que destapó dos defectos, **ya arreglados el mismo día**: el ELF de `sosoas` tenía
-cabecera y section headers desplazados (**T67**, hoy `objdump` lo desensambla,
-pero sigue sin tabla de símbolos) y `wild-soso` declaraba su binario como
-`wild`, arrastrando dos rutas más que tampoco existían (**T68**). Sigue sin
-construirse el sysroot de `x86_64-unknown-soso`, y **`wild` no está instalado**:
-eso bloquea los pasos 4–5 de **T39**. T39 encontró además que el bootstrap
-**no podía completarse**: un `sed` con paréntesis desbalanceados fallaba en
-cualquier entrada y, con `set -e`, abortaba `apply-patches.sh` — arreglado y
-verificado contra un vendor falso. Va por los pasos 1–2 con
-`soso_improve_core::receta` (declarativa, idempotente por marca explícita, y un
-ancla ausente es un fallo con nombre — `sed -i` salía 0 sin tocar nada). Ojo al elegir: los targets de `user/`
-son los que funcionan; `targets/x86_64-unknown-soso.json` es la ruta A y hoy no
-enlaza.
+Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/README.md).
+Revisión del **27-sep-2026**: el perfil elegido es `qwen2.5-coder-7b`, con
+campaña 10×3, cobertura `completa` y **GO 10/10**. El 3B queda como candidato
+anterior (NO-GO 8/10). **T20** está pendiente con esa identidad. La ficha en
+curso a reanudar es **T40** (getrandom 0.3.3, C-002).
 
-**Backlog nativo** (`docs/self-improvement/native/backlog.json`, sale de T32/T33/T34):
-N-001 … N-004 **hechas** y **N-005 decidida** (2026-09-24) — modelo de ficheros
-por inodo, `PROT_NONE` y guarda de pila, cwd por spawn, `flock` consultivo, y
-el experimento de carga resuelto a favor del **enlazado estático** (`dlopen` no
-hace falta), y **N-009** (2026-09-25) le da al buscador una semántica que se
-puede creer. **N-006 está aplazada a propósito**: sin ningún consumidor de C,
-elegir qué funciones lleva la capa libc sería adivinar. **N-010 también está
-hecha** (2026-09-25): `sosh` declara su subconjunto y rechaza lo que no sabe
-hacer en vez de colarlo como argumento. **N-008 tiene la forma decidida**
-(eventos, no sondeo: `stat` es ciego dentro de su segundo) con la
-implementación aplazada por falta de consumidor. **N-012 cerrada, 20,5×** (`stat` de 5 componentes: 17,1 M → 833 k ciclos; por componente de ruta ~3 M → ~36 k):
-arreglados el CRC recalculado en cada lectura, `lookup` volcando el directorio
-entero, el `Box` de 4 KiB por nodo, el `Vec` de `stat_inode` y las **cinco**
-reservas de `resolve_user_path` (que paga toda syscall con ruta). Medido el reparto final: el syscall pelado son 2 635 ciclos (1 %), el árbol
-~17 k y **~243 k una sola reserva**, así que dentro de sosofs no queda nada
-grande. El trozo que queda es
-**[N-013](../../../docs/self-improvement/native/N-013.md)** — `revisar()` audita
-el montón del kernel en cada alloc/dealloc y explica el **~75 %** — y **es
-decisión del usuario**: es un detector de desbordamientos, no lastre. Ojo al
-medir: los tests del host van en `debug` salvo que pidas `--release`, y en
-release los microbancos se los come el optimizador. Cada una se acredita con
-`cargo xtask test sys --only=…` sobre `user/soso-agent-probe`, y las medidas se
-anotan en `native/probes.json`.
+Trabajo independiente: **T72** está cerrada (26-sep): `soso-alloc` lo usan
+libsoso y soso-rt; la sonda guest `monton` sale 7/7. **T75** está cerrada
+(26-sep): la receta iguala al script en copias de 32d94cc9 y la sonda guest
+`receta/espejo-resto-ajeno` pasó junto al humo de directorio vacío (exit 0).
+**T76** (tokenizer en tests) está cerrada. T39 sigue bloqueada por el build
+de std: los dos errores del alocador (`cfg_select` / `imp`) ya no están; el
+intento del 26-sep (rc=1) falla por `implicit_provenance_casts` en
+`sys/random/soso.rs` y `sys/sync/futex/soso.rs`, y por avisos en deny.
+T73 está cerrada. T08/T18/T45/T46 están terminadas: no volver a recomendarlas.
 
-Y hay una **decisión de plan** esperando, como la de T14: portar OpenCode o
-reimplementar el agente en Rust reutilizando el protocolo. La evidencia está en
-`backlog.json` y en la ficha T34; elegir no es de ninguna ficha.
+T20 está pendiente: el perfil es el 7B. T21/T22 y T25–T29 esperan esa cadena.
+T16/T17 tienen evidencia guest parcial, no validación completa. El port de
+OpenCode sigue pendiente; N-xxx decidida no significa implementada.
+[DECISIONES.md](../../../docs/self-improvement/DECISIONES.md) separa ruta elegida
+y trabajo aplazado. Revisar antes de proponer otra decisión ya tomada.
+
+Al **revisar/replanificar** por petición expresa, inspeccionar resúmenes del
+catálogo, seguimientos recientes y evidencia de los frentes afectados; la
+regla de una ficha limita implementación, no impide auditar el plan. No
+iniciar implementación ni campañas largas por una actualización documental.

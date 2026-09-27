@@ -5,3 +5,15 @@ edition = "2024"
 license = "GPL-2.0-only"
 
 [dependencies]
+# Se llama `core` **a propósito**: lo exige `library/rustc-std-workspace-core/README.md`.
+# Con `package = …` cargo pasa `--extern core=…` y eso satisface el
+# `extern crate core` que el compilador inyecta por el `#![no_std]`. Depender
+# del shim por su nombre real y renombrarlo con `extern crate … as core` **no**
+# funciona: el `--extern core=` no aparece y sale «can't find crate for `core`».
+# Fuera del árbol de rust es opcional y no se descarga.
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
+
+[features]
+default = []
+# El nombre lo fija rust: lo activan todos los deps de std (libc, hermit-abi…).
+rustc-dep-of-std = ["dep:core"]

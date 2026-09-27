@@ -33,6 +33,11 @@ fn llamada_valida() -> &'static str {
 </tool_call>"#
 }
 
+/// Lo que escribió el Coder-7B en Q07: el JSON correcto, en una cerca Markdown.
+fn llamada_en_markdown() -> &'static str {
+    "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"kernel/src/main.rs\", \"lineas\": 20}}\n```"
+}
+
 fn parse_incremental(entrada: &ChatInput, texto: &str, id: u32) -> Result<AssistantTurn, ChatError> {
     let mut p = ToolCallParser::new(id);
     for chunk in fragmentos(texto) {
@@ -125,6 +130,7 @@ fn particiones_coinciden_con_entrada_completa() {
         llamada_valida(),
         "solo texto plano",
         &format!("prefijo\n{}", llamada_valida()),
+        llamada_en_markdown(),
     ];
     for caso in casos {
         let esperado = parse_assistant_output(&entrada, caso, 0).expect("referencia");
@@ -224,6 +230,37 @@ fn tool_choice_required_exige_llamada() {
         .con_herramientas(vec![leer_archivo()], ToolChoice::Required);
     let err = parse_assistant_output(&entrada, "solo texto", 0).unwrap_err();
     assert!(matches!(err, ChatError::SeleccionInvalida { .. }));
+}
+
+#[test]
+fn cerca_markdown_es_la_llamada() {
+    let entrada = ChatInput::nuevo(vec![Message::user("hola")])
+        .con_herramientas(vec![leer_archivo()], ToolChoice::Required);
+    let turno = parse_assistant_output(&entrada, llamada_en_markdown(), 1).expect("parse");
+    assert_eq!(turno.content, None);
+    let call = turno.tool_call.expect("llamada");
+    assert_eq!(call.id, "call_1");
+    assert_eq!(call.name, "leer_archivo");
+    let args = call.argumentos().unwrap();
+    assert_eq!(args["ruta"], "kernel/src/main.rs");
+    assert_eq!(args["lineas"], 20);
+}
+
+#[test]
+fn json_suelto_no_es_llamada() {
+    let entrada = entrada_auto();
+    let texto = r#"{"name": "leer_archivo", "arguments": {"ruta": "a", "lineas": 1}}"#;
+    let turno = parse_assistant_output(&entrada, texto, 0).expect("parse");
+    assert!(turno.tool_call.is_none());
+    assert_eq!(turno.content.as_deref(), Some(texto));
+}
+
+#[test]
+fn cerca_markdown_truncada() {
+    let entrada = entrada_auto();
+    let texto = "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a\"}}";
+    let err = parse_assistant_output(&entrada, texto, 0).unwrap_err();
+    assert!(matches!(err, ChatError::HistorialInvalido { .. }));
 }
 
 #[test]

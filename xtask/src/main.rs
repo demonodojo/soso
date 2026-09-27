@@ -315,6 +315,153 @@ fn copy_tree_filtered(src: &Path, dst: &Path) -> usize {
     n
 }
 
+/// Dónde vive el fork de `rust-lang/rust`.
+///
+/// **Tiene que dar lo mismo que `scripts/soso-rust-bootstrap.sh`**, que usa
+/// `${SOSO_RUST_VENDOR:-${XDG_CACHE_HOME:-$HOME/.cache}/soso-rust-vendor}`.
+/// Aquí faltaba el `.cache` cuando `XDG_CACHE_HOME` no está definida —lo
+/// normal en un arranque de sesión—, así que `xtask` apuntaba a
+/// `$HOME/soso-rust-vendor`, que no existe nunca, y `rust-build-std` moría con
+/// «x.py: No such file or directory» señalando a un `x.py` que sí estaba
+/// (T71). El test de abajo ata las dos rutas para que no se separen otra vez.
+fn vendor_rust() -> PathBuf {
+    let leer = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    vendor_rust_de(
+        leer("SOSO_RUST_VENDOR").as_deref(),
+        leer("XDG_CACHE_HOME").as_deref(),
+        leer("HOME").as_deref(),
+    )
+}
+
+/// La misma regla, sin leer el entorno, para poder compararla con la del
+/// script en un test sin mutar variables de proceso.
+fn vendor_rust_de(soso: Option<&str>, xdg: Option<&str>, home: Option<&str>) -> PathBuf {
+    if let Some(v) = soso {
+        return PathBuf::from(v);
+    }
+    let cache = match (xdg, home) {
+        (Some(c), _) => PathBuf::from(c),
+        (None, Some(h)) => PathBuf::from(h).join(".cache"),
+        (None, None) => PathBuf::from("/tmp"),
+    };
+    cache.join("soso-rust-vendor")
+}
+
+#[cfg(test)]
+mod vendor_rust_tests {
+    use super::vendor_rust_de;
+    use std::process::Command;
+
+    /// Pregunta al **script** dónde cae el vendor con un entorno dado. Es la
+    /// otra implementación de la misma regla; si se separan, se separan aquí.
+    fn segun_el_script(xdg: Option<&str>, home: Option<&str>) -> String {
+        let script = super::project_root().join("scripts/soso-rust-bootstrap.sh");
+        let linea = std::fs::read_to_string(&script)
+            .expect("leer el bootstrap")
+            .lines()
+            .find(|l| l.trim_start().starts_with("VENDOR="))
+            .expect("el bootstrap define VENDOR=")
+            .trim()
+            .to_string();
+        let mut c = Command::new("bash");
+        c.arg("-c").arg(format!("{linea}; printf '%s' \"$VENDOR\""));
+        c.env_remove("SOSO_RUST_VENDOR").env_remove("XDG_CACHE_HOME").env_remove("HOME");
+        if let Some(x) = xdg {
+            c.env("XDG_CACHE_HOME", x);
+        }
+        if let Some(h) = home {
+            c.env("HOME", h);
+        }
+        let o = c.output().expect("bash");
+        assert!(o.status.success(), "el script falló: {o:?}");
+        String::from_utf8(o.stdout).expect("utf8")
+    }
+
+    #[test]
+    fn xtask_y_el_bootstrap_ponen_el_vendor_en_el_mismo_sitio() {
+        // Sin XDG_CACHE_HOME — el caso normal, y el que estaba roto (T71):
+        // xtask decía $HOME/soso-rust-vendor, sin `.cache`.
+        let esperado = segun_el_script(None, Some("/tmp/casa"));
+        let obtenido = vendor_rust_de(None, None, Some("/tmp/casa"));
+        assert_eq!(obtenido.to_str().unwrap(), esperado);
+        assert!(esperado.contains("/.cache/"), "el script sí pone .cache: {esperado}");
+
+        // Con XDG_CACHE_HOME, que sí coincidía antes.
+        let esperado = segun_el_script(Some("/tmp/cache"), Some("/tmp/casa"));
+        let obtenido = vendor_rust_de(None, Some("/tmp/cache"), Some("/tmp/casa"));
+        assert_eq!(obtenido.to_str().unwrap(), esperado);
+    }
+
+    #[test]
+    fn soso_rust_vendor_manda_sobre_todo() {
+        let v = vendor_rust_de(Some("/otro/sitio"), Some("/tmp/cache"), Some("/tmp/casa"));
+        assert_eq!(v.to_str().unwrap(), "/otro/sitio");
+    }
+}
+
+fn stage_rustc(vendor: &std::path::Path) -> Option<std::path::PathBuf> {
+    let host = vendor.join("build-soso");
+    let Ok(rd) = std::fs::read_dir(&host) else {
+        return None;
+    };
+    for ent in rd.flatten() {
+        let candidate = ent.path().join("stage2/bin/rustc");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn t39_build_smoke(
+    root: &std::path::Path,
+    vendor: &std::path::Path,
+    target: &str,
+) -> Result<(), String> {
+    let libdir = soso_improve_core::sysroot::buscar_lib_sysroot(vendor, target)
+        .ok_or_else(|| "sysroot lib no encontrado".to_string())?;
+    // `rustc --print sysroot` del stage2 apunta al directorio que contiene `lib/rustlib/`.
+    let sysroot = libdir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .ok_or_else(|| "sysroot base no deducible".to_string())?;
+    let rustc = stage_rustc(vendor).ok_or_else(|| "rustc del stage no encontrado".to_string())?;
+    let out_dir = root.join("target/self-improvement/tasks/T39");
+    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let out_bin = out_dir.join("std-soso-smoke");
+    let smoke_src = root.join("config/rust-soso/std-soso-smoke/src/main.rs");
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    path = format!("{}:{}", root.join("target/release").display(), path);
+    let st = Command::new(&rustc)
+        .arg(smoke_src)
+        .arg("-o")
+        .arg(&out_bin)
+        .arg("-Zunstable-options")
+        .arg("--target")
+        .arg(target)
+        .arg("--sysroot")
+        .arg(&sysroot)
+        .arg("--edition")
+        .arg("2021")
+        .arg("-C")
+        .arg("link-arg=--no-gc-sections")
+        .env("PATH", path)
+        .env("RUST_TARGET_PATH", vendor)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !st.success() {
+        return Err(format!(
+            "rustc smoke exit {}",
+            st.code().unwrap_or(1)
+        ));
+    }
+    let guest_bin = root.join("rootfs/bin/std-soso-smoke");
+    std::fs::copy(&out_bin, &guest_bin).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn rust_bootstrap(build_std: bool) {
     let root = project_root();
     let script = root.join("scripts/soso-rust-bootstrap.sh");
@@ -328,31 +475,67 @@ fn rust_bootstrap(build_std: bool) {
     if !build_std {
         return;
     }
-    let vendor = std::env::var("SOSO_RUST_VENDOR").map(PathBuf::from).unwrap_or_else(|_| {
-        std::env::var("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::var("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("/tmp"))
-            })
-            .join("soso-rust-vendor")
-    });
+    let vendor = vendor_rust();
+    if !vendor.join("x.py").is_file() {
+        eprintln!(
+            "rust-build-std: no hay vendor en {} (falta x.py).\n\
+             Lo prepara `scripts/soso-rust-bootstrap.sh`; con SOSO_RUST_VENDOR se elige otro sitio.",
+            vendor.display()
+        );
+        exit(1);
+    }
     let mut path = std::env::var("PATH").unwrap_or_default();
     // `target/release` del **workspace**: `sosoas` y `wild-soso` son miembros,
     // así que `tools/sosoas/target/` y `tools/wild-soso/target/` no existen
     // nunca y ponerlos en el PATH no añadía nada (T68).
     path = format!("{}:{}", root.join("target/release").display(), path);
-    let st = Command::new("./x.py")
+    let log_dir = root.join("target/self-improvement/tasks/T39");
+    std::fs::create_dir_all(&log_dir).ok();
+    let log_path = log_dir.join("build-std.txt");
+    let log_file = std::fs::File::create(&log_path)
+        .unwrap_or_else(|e| panic!("rust-build-std: log {}: {e}", log_path.display()));
+    let xpy = vendor.join("x.py");
+    let st = Command::new(&xpy)
         .current_dir(&vendor)
         .env("PATH", path)
         .env("SOSO_RUST_VENDOR", &vendor)
+        // El bootstrap de rust valida el target **antes** de compilar y no
+        // mira el JSON que el script deja en la raíz del vendor si nadie le
+        // dice dónde buscarlo: «x86_64-unknown-soso: No such target exists».
+        .env("RUST_TARGET_PATH", &vendor)
         .args(["build", "library/std", "--target", "x86_64-unknown-soso"])
+        .stdout(std::process::Stdio::from(
+            log_file.try_clone().expect("log clone"),
+        ))
+        .stderr(std::process::Stdio::from(log_file))
         .status()
-        .unwrap_or_else(|e| panic!("x.py: {e}"));
+        .unwrap_or_else(|e| panic!("{}: {e}", xpy.display()));
+    let code = st.code().unwrap_or(1);
     if !st.success() {
-        eprintln!("rust-build-std: falló — revisa {}/build-soso/", vendor.display());
-        exit(st.code().unwrap_or(1));
+        eprintln!(
+            "rust-build-std: falló (exit {code}) — revisa {}/build-soso/ y {}",
+            vendor.display(),
+            log_path.display()
+        );
+        exit(code);
+    }
+    let target = "x86_64-unknown-soso";
+    if let Some(libdir) = soso_improve_core::sysroot::buscar_lib_sysroot(&vendor, target) {
+        match soso_improve_core::sysroot::catalogar_rlibs(&libdir) {
+            Ok(entries) => {
+                let manifiesto =
+                    soso_improve_core::sysroot::render_manifiesto(target, &entries);
+                let man_path = log_dir.join("sysroot-manifiesto.txt");
+                std::fs::write(&man_path, manifiesto.as_bytes())
+                    .unwrap_or_else(|e| panic!("escribir {}: {e}", man_path.display()));
+            }
+            Err(e) => eprintln!("rust-build-std: manifiesto: {e}"),
+        }
+    } else {
+        eprintln!("rust-build-std: no encontré rustlib/{target}/lib bajo build-soso");
+    }
+    if let Err(e) = t39_build_smoke(&root, &vendor, target) {
+        eprintln!("rust-build-std: humo host (compilar): {e}");
     }
 }
 
@@ -717,6 +900,7 @@ pub(crate) fn build_user() -> bool {
         "dns",
         "tcpconn",
         "halt",
+        "reboot",
         "soso-llm",
         "soso-install",
         "soso-hf",

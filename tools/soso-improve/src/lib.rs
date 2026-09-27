@@ -96,6 +96,7 @@ uso: soso-improve <orden> [opciones]
               detalle   --modelo <dir .som> --caso <nombre> [--desde N] [--n N]
   evaluar     --modelo <catalogo> [--puerto 17299] [--token <t>]
               [--repeticiones 3] [--plazo-ms 600000] [--semilla 1] [--out <ruta>]
+              [--contexto <tokens>] [--modelo-dir <dir>]
               [--caso Q07[,Q04]]   (repetir sólo esos casos)
   verificar   programa  --caso <id> --candidato <ruta> [--reservado <ruta>]
               protocolo --caso <id> --respuesta <ruta> [--reservado <ruta>]
@@ -179,7 +180,7 @@ const CLAVES: &[&str] = &[
     "repo", "out", "captura", "destino", "arbol", "banco", "reservado", "caso", "candidato",
     "respuesta", "modelo", "original", "fixtures", "json", "desde", "n", "solo", "timeout",
     "revision", "origen", "sin-herramientas", "con-referencia", "puerto", "token",
-    "repeticiones", "plazo-ms", "semilla", "caso",
+    "repeticiones", "plazo-ms", "semilla", "caso", "contexto", "modelo-dir",
 ];
 
 pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {

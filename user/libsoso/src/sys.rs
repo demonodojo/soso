@@ -279,7 +279,11 @@ pub fn sleep_ms(ms: u64) -> i64 {
 }
 
 pub fn halt() -> i64 {
-    syscall1(abi::SYS_HALT, 0)
+    syscall1(abi::SYS_HALT, abi::HALT_APAGAR)
+}
+
+pub fn reboot() -> i64 {
+    syscall1(abi::SYS_HALT, abi::HALT_REINICIAR)
 }
 
 /// Mapea un fichero o región anónima. `fd == u64::MAX` para anónimo.
@@ -333,12 +337,22 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> i6
 }
 
 pub fn futex_wait(addr: *const u32, expected: u32) -> i64 {
+    futex_wait_timeout(addr, expected, 0)
+}
+
+/// Como `futex_wait`, con plazo **relativo** en ms; `0` = sin plazo.
+///
+/// Devuelve `0` si despertó (por `futex_wake` o porque el valor ya había
+/// cambiado) y `-ETIMEDOUT` si venció el plazo. Distinguir las dos cosas es el
+/// motivo de T73: sin ello, quien pone un plazo no puede saber si comprobar la
+/// condición o rendirse.
+pub fn futex_wait_timeout(addr: *const u32, expected: u32, timeout_ms: u64) -> i64 {
     syscall4(
         abi::SYS_FUTEX,
         abi::FUTEX_WAIT,
         addr as u64,
         expected as u64,
-        0,
+        timeout_ms,
     )
 }
 

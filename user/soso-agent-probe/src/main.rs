@@ -40,6 +40,7 @@ uso: soso-agent-probe <sonda> [fase]
   senales               matar un hijo, distinguir la muerte, tubería sin lector
   salidas               stdout/stderr separados, código de salida, entorno, cwd
   hilos                 hilos, join, guarda de pila y temporizadores
+  monton                asignación, realloc y liberación del montón
   canales               tubería con salida grande y EOF, TCP con reconexión
   coste                 coste de escritura en sosofs (paso 1 de N-001)
 
@@ -56,6 +57,7 @@ fn main(args: &[String]) -> u8 {
         "senales" => sondas::senales::ejecutar(),
         "salidas" => sondas::salidas::ejecutar(),
         "hilos" => sondas::hilos::ejecutar(),
+        "monton" => sondas::monton::ejecutar(),
         "canales" => sondas::canales::ejecutar(),
         "coste" => sondas::coste::ejecutar(),
         "carga" => sondas::carga::ejecutar(),

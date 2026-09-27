@@ -594,6 +594,7 @@ pub const HERRAMIENTAS: &[(&str, &[&str])] = &[
     ("rustup", &["rustup", "show", "active-toolchain"]),
     ("clang", &["clang", "--version"]),
     ("lld", &["ld.lld", "--version"]),
+    ("wild", &["wild", "--version"]),
     ("qemu", &["qemu-system-x86_64", "--version"]),
     ("opencode", &["opencode", "--version"]),
 ];

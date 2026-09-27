@@ -403,6 +403,24 @@ impl<B: ChatBackend + Send> HostService<B> {
         req: HttpRequest,
         stream: &mut TcpStream,
     ) -> Result<Vec<u8>, ServiceError> {
+        // Igual que en el guest: un contexto que no cabe es 422, aunque haya
+        // otra generación en curso. Ocupar el hueco antes de mirar el cuerpo
+        // convertía ese rechazo en 429.
+        let body = std::str::from_utf8(&req.body)
+            .map_err(|_| ServiceError::Api(ApiError::PeticionInvalida {
+                motivo: String::from("cuerpo no UTF-8"),
+            }))?;
+
+        let (prepared, prompt_ids, profile) = {
+            let b = self.backend.lock().unwrap();
+            let profile = b.profile().clone();
+            let prepared = prepare_chat_completion(body, &profile, b.tokenizer())
+                .map_err(ServiceError::Api)?;
+            let prompt_ids = render_messages(&prepared.input, &profile, b.tokenizer())
+                .map_err(|e| ServiceError::Api(e.into()))?;
+            (prepared, prompt_ids, profile)
+        };
+
         if !self.try_acquire_busy() {
             return Ok(busy_body());
         }
@@ -418,21 +436,6 @@ impl<B: ChatBackend + Send> HostService<B> {
             }
         }
         let _guard = Guard { svc: self };
-
-        let body = std::str::from_utf8(&req.body)
-            .map_err(|_| ServiceError::Api(ApiError::PeticionInvalida {
-                motivo: String::from("cuerpo no UTF-8"),
-            }))?;
-
-        let (prepared, prompt_ids, profile) = {
-            let b = self.backend.lock().unwrap();
-            let profile = b.profile().clone();
-            let prepared = prepare_chat_completion(body, &profile, b.tokenizer())
-                .map_err(ServiceError::Api)?;
-            let prompt_ids = render_messages(&prepared.input, &profile, b.tokenizer())
-                .map_err(|e| ServiceError::Api(e.into()))?;
-            (prepared, prompt_ids, profile)
-        };
 
         if prepared.stream {
             return self.post_chat_stream(stream, prepared, prompt_ids, profile);

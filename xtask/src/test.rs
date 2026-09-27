@@ -970,6 +970,15 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 || ssh_probe_hilos(key, port),
             );
         });
+        filter.if_step(sid, "probe: monton asignacion y liberacion", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "probe: monton asignacion y liberacion",
+                || ssh_probe_monton(key, port),
+            );
+        });
         filter.if_step(sid, "probe: tuberías con EOF y TCP con reconexión", || {
             report.paso_ssh_sys(
                 &mut qemu,
@@ -1668,10 +1677,9 @@ fn ssh_guion_inner(
 ///
 /// No hay un vendor de Rust en el guest, así que lo que se comprueba no es el
 /// resultado de los parches sino que la orden esté enchufada de verdad: que la
-/// capacidad se declare, que el despacho llegue y que el informe distinga
-/// «falta» de «ancla rota». Apuntando a un directorio vacío eso da una forma
-/// **determinista**: los dos pasos de copia de árbol dicen FALTA (el destino no
-/// está) y los ocho restantes ROTO (no se puede leer el fichero).
+/// capacidad se declare, que el despacho llegue y que un directorio vacío sea
+/// ancla rota (no hay plantilla que copiar ni fichero que editar). El espejo
+/// con retirada de restos corre en `receta/espejo-resto-ajeno`.
 ///
 /// Sin esto, «invocable desde los dos frontends» se quedaría en que compila.
 fn ssh_improve_receta(key: &Path, ssh_port: u16) -> Result<(), String> {
@@ -1682,17 +1690,18 @@ fn ssh_improve_receta(key: &Path, ssh_port: u16) -> Result<(), String> {
         Duration::from_secs(120),
     )?;
     for esperado in [
-        "receta: 10 pasos",
-        "FALTA PAL: os/soso",
+        "receta: 27 pasos",
+        "ROTO  PAL: os/soso",
         "ROTO  build.rs: target soso",
     ] {
         if !salida.contains(esperado) {
             return Err(format!("falta «{esperado}»: {salida:?}"));
         }
     }
-    // La cuenta exacta: si un cambio hiciera que un paso dejara de informar,
-    // el total lo delata aunque las tres líneas de arriba sigan estando.
-    if !salida.contains("2 por aplicar · 8 con el ancla rota") {
+    // Directorio vacío: ni la plantilla ni el vendor existen, así que ningún
+    // paso se puede aplicar. «Falta» significaría que repetir la preparación
+    // lo arregla, y aquí no hay nada que copiar.
+    if !salida.contains("0 por aplicar · 27 con el ancla rota") {
         return Err(format!("la cuenta de la receta no cuadra: {salida:?}"));
     }
     Ok(())
@@ -1744,6 +1753,8 @@ fn ssh_improve_pruebas(key: &Path, ssh_port: u16) -> Result<(), String> {
         "workspace/copia-y-parche",
         // T62: una ruta con un espacio, vista por `main` de un programa real.
         "argv/ruta-con-espacios",
+        // T75: espejo que retira un resto y no toca un fichero ajeno.
+        "receta/espejo-resto-ajeno",
     ] {
         if !salida.contains(esperado) {
             return Err(format!("falta la prueba «{esperado}»: {salida:?}"));
@@ -2716,6 +2727,23 @@ fn ssh_init_test(key: &Path, ssh_port: u16) -> Result<(), String> {
 ///
 /// Este paso cubre «sobrevive a cerrar el descriptor». «Sobrevive al apagado»
 /// es la sonda de dos fases, que necesita reiniciar la máquina.
+/// Exige que una sonda no informe **ningún** caso malo.
+///
+/// Es la comprobación que faltaba en doce pasos: comprobar que el nombre de un
+/// caso aparece en la salida deja pasar un `FALLO`, porque la línea lo contiene
+/// igual. Lo destapó `senales`, que llevaba un caso en rojo con el paso en
+/// verde.
+///
+/// Vive aquí y no copiada en cada paso por el mismo motivo por el que
+/// `libsoso::glob` existe: doce copias son doce sitios donde olvidarse, y el
+/// paso trece nace sin ella.
+fn exigir_sonda_limpia(salida: &str) -> Result<(), String> {
+    if salida.contains("\"malos\":0") {
+        return Ok(());
+    }
+    Err(format!("la sonda informa casos malos: {salida:?}"))
+}
+
 fn ssh_probe_archivos(key: &Path, ssh_port: u16) -> Result<(), String> {
     let salida = ssh_guion(
         key,
@@ -2738,9 +2766,7 @@ fn ssh_probe_archivos(key: &Path, ssh_port: u16) -> Result<(), String> {
     if salida.contains("FALLO") {
         return Err(format!("alguna capacidad falló: {salida:?}"));
     }
-    if !salida.contains("\"malos\":0") {
-        return Err(format!("el informe no dice 0 malos: {salida:?}"));
-    }
+    exigir_sonda_limpia(&salida)?;
     publicar_informe("archivos", &salida);
     Ok(())
 }
@@ -2780,11 +2806,7 @@ fn ssh_probe_ejecutable(key: &Path, ssh_port: u16) -> Result<(), String> {
         return Err(format!("alguna capacidad falló: {salida:?}"));
     }
     publicar_informe("exec", &salida);
-    // Ver la nota de los otros pasos: el nombre del caso no basta, una línea
-    // de `FALLO` también lo contiene.
-    if !salida.contains("\"malos\":0") {
-        return Err(format!("la sonda informa casos malos: {salida:?}"));
-    }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -2836,13 +2858,7 @@ fn ssh_probe_compartir(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
-    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
-    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
-    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
-    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
-    if !salida.contains("\"malos\":0") {
-        return Err(format!("la sonda informa casos malos: {salida:?}"));
-    }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -2880,13 +2896,7 @@ fn ssh_probe_senales(key: &Path, ssh_port: u16) -> Result<(), String> {
     if salida.contains("terminó de dormir 60000") {
         return Err(format!("el kill no cortó al hijo: {salida:?}"));
     }
-    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
-    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
-    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
-    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
-    if !salida.contains("\"malos\":0") {
-        return Err(format!("la sonda informa casos malos: {salida:?}"));
-    }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -2919,13 +2929,36 @@ fn ssh_probe_salidas(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
-    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
-    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
-    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
-    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
-    if !salida.contains("\"malos\":0") {
-        return Err(format!("la sonda informa casos malos: {salida:?}"));
+    exigir_sonda_limpia(&salida)?;
+    Ok(())
+}
+
+/// T72 — asignación, realloc y liberación del montón compartido.
+fn ssh_probe_monton(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-agent-probe monton\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    if !salida.contains("probe-json:") {
+        return Err(format!("la sonda no llegó al informe final: {salida:?}"));
     }
+    publicar_informe("monton", &salida);
+    for esperado in [
+        "monton-align-16",
+        "monton-align-64",
+        "monton-align-256",
+        "monton-align-4096",
+        "monton-zeroed-realloc",
+        "monton-liberar-pequeno",
+        "monton-liberar-grande",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta el caso «{esperado}»: {salida:?}"));
+        }
+    }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -2959,13 +2992,7 @@ fn ssh_probe_hilos(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
-    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
-    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
-    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
-    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
-    if !salida.contains("\"malos\":0") {
-        return Err(format!("la sonda informa casos malos: {salida:?}"));
-    }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -2993,13 +3020,7 @@ fn ssh_probe_canales(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
-    // **El veredicto, no sólo el nombre.** Comprobar que el caso aparece deja
-    // pasar un `FALLO`: la línea lo contiene igual. Lo cazó `senales`, que
-    // llevaba un caso en rojo con el paso en verde. `"malos":0` es la forma
-    // fuerte y no envejece: un caso nuevo que falle también lo rompe.
-    if !salida.contains("\"malos\":0") {
-        return Err(format!("la sonda informa casos malos: {salida:?}"));
-    }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -3031,6 +3052,7 @@ fn ssh_probe_rutas(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -3065,6 +3087,7 @@ fn ssh_probe_vigilancia(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -3206,6 +3229,7 @@ fn ssh_probe_busqueda(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -3233,6 +3257,7 @@ fn ssh_probe_carga(key: &Path, ssh_port: u16) -> Result<(), String> {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
         }
     }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 
@@ -3262,6 +3287,7 @@ fn ssh_probe_coste(key: &Path, ssh_port: u16) -> Result<(), String> {
     if salida.contains("FALLO") {
         return Err(format!("la medida no cuadró: {salida:?}"));
     }
+    exigir_sonda_limpia(&salida)?;
     Ok(())
 }
 

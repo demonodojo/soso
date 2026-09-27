@@ -16,7 +16,8 @@ produjo cuando se ejecutó —, y tres de ellas cambiaron de estado al aplicarla
 | clang 18.1.3 | host | real (N-005 lo acredita) |
 | fork rust-soso (libstd/PAL) | host | clonado y parcheado; **libstd para soso sin construir** |
 | `sosoas` | host | no es un ensamblador (sólo `.byte`); su ELF **ya es válido** desde [T67](../T67-sosoas-elf-desplazado.md), pero sin símbolos |
-| `wild-soso` | host | nombres alineados desde [T68](../T68-wild-soso-nombre.md); **sigue sin enlazar**: `wild` no está instalado |
+| `wild` 0.10.0 | host | instalado; enlazó un ELF64 estático que salió con 0 |
+| `wild-soso` | host | nombres alineados desde [T68](../T68-wild-soso-nombre.md); delega en `wild`, que ya está |
 | `soso-rustc` | guest | stub, y lo dice |
 | mkfs/bootloader | host | real |
 | git | host | real; sin sustituto nativo |
@@ -42,7 +43,7 @@ bytes, y los section headers ocho. **Arreglado en
 desensambla los bytes. Lo que sigue faltando es la tabla de símbolos, así que
 `.globl` se ignora y el objeto no sirve para enlazar.
 
-### `wild-soso` no puede ser el enlazador de nadie
+### `wild-soso` ya delega en un `wild` que existe
 
 Su `Cargo.toml` declara `[[bin]] name = "wild"`. Mientras tanto:
 
@@ -56,8 +57,10 @@ rutas más del mismo tipo: el bootstrap y `xtask` apuntaban a
 `tools/*/target/release`, que no existen porque los dos crates son miembros del
 workspace, y el bootstrap compilaba sin `--release`.
 
-Además **`wild` no está instalado** en este host, así que aunque los nombres
-cuadraran, ese target no podría enlazar hoy.
+**`wild` 0.10.0 está instalado** (`cargo install --locked wild-linker`,
+`~/.cargo/bin/wild`). Enlazó un `_start` a un ELF64 EXEC estático y ese
+binario salió con 0. El target soso sigue sin libstd, así que todavía no hay
+programa de guest que enlazar.
 
 ### El sysroot de soso no existe
 
@@ -89,7 +92,7 @@ Hay dos targets y es fácil confundirlos:
 |---|---|---|
 | Para qué | lo que se compila hoy | ruta A de autohospedaje |
 | `std` | no (`no_std + alloc`) | sí |
-| Enlazador | `rust-lld` (existe) | `wild-soso` (no existe) |
+| Enlazador | `rust-lld` (existe) | `wild-soso` → `wild` 0.10.0 (existe; libstd no) |
 | Estado | **funciona**, lo acredita la suite | sin libstd construida |
 
 Todo lo que arranca en el guest hoy sale del primero. El segundo es la ruta
@@ -104,7 +107,7 @@ que es información:
 | Sonda | Qué acredita | Hoy |
 |---|---|---|
 | **emitir objeto** | `sosoas` produce un `.o` que `readelf -h` valida y `nm` lee | **pasa** desde T67 — sin símbolos, que es un límite aparte |
-| **enlazar ejecutable** | el enlazador del target produce un ELF que el guest arranca | **falla**: `wild` no está instalado (los nombres ya cuadran, T68) |
+| **enlazar ejecutable** | el enlazador del target produce un ELF que el guest arranca | **a medias**: `wild` 0.10.0 enlaza un ELF de host que arranca; el programa de guest con libstd de soso no existe |
 | **build offline con Cargo** | `cargo build --offline` para el target soso, sin red | pendiente: necesita libstd |
 | **macro procedural / build.rs** | un build script y una proc macro se ejecutan durante la compilación | pendiente |
 | **C + asm** | un fichero C y uno de ensamblador se compilan y enlazan juntos | la mitad de C **pasa** (N-005); la de asm necesita símbolos en `sosoas` y un enlazador |

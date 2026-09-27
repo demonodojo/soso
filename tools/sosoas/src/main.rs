@@ -8,6 +8,27 @@ use std::env;
 use std::fs;
 use std::process::exit;
 
+fn parse_globl(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let t = line.split('#').next().unwrap_or("").trim();
+        let Some(rest) = t.strip_prefix(".globl") else {
+            continue;
+        };
+        let Some(name) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 fn parse_bytes(src: &str) -> Vec<u8> {
     let mut out = Vec::new();
     for line in src.lines() {
@@ -68,7 +89,10 @@ const ET_REL: u16 = 1;
 const EM_X86_64: u16 = 0x3e;
 const EV_CURRENT: u32 = 1;
 const SHT_PROGBITS: u32 = 1;
+const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
+const STB_GLOBAL: u8 = 1;
+const SYM_ENT: u64 = 24;
 const SHF_ALLOC: u64 = 0x2;
 const SHF_EXECINSTR: u64 = 0x4;
 
@@ -83,13 +107,100 @@ fn put64(out: &mut [u8], off: usize, v: u64) {
 }
 
 fn emit_elf(text: &[u8]) -> Vec<u8> {
+    emit_elf_syms(&[], text)
+}
+
+fn emit_elf_syms(globales: &[String], text: &[u8]) -> Vec<u8> {
+    if globales.is_empty() {
+        return emit_elf_sin_simbolos(text);
+    }
+    // Con `.globl`: null + .text + .symtab + .strtab + .shstrtab.
+    // El símbolo 0 es el nulo obligatorio; los demás son globales en .text.
+    let e_shoff = u64::from(eh::SIZE);
+    let shnum: u16 = 5;
+    let shstrndx: u16 = 4;
+    let shstr: &[u8] = b"\0.text\0.symtab\0.strtab\0.shstrtab\0";
+    const NAME_TEXT: u32 = 1;
+    const NAME_SYMTAB: u32 = 7;
+    const NAME_STRTAB: u32 = 15;
+    const NAME_SHSTRTAB: u32 = 23;
+    let mut strtab = vec![0u8];
+    let mut sym_names = Vec::with_capacity(globales.len());
+    for name in globales {
+        sym_names.push(strtab.len() as u32);
+        strtab.extend_from_slice(name.as_bytes());
+        strtab.push(0);
+    }
+    let nsyms = 1 + globales.len();
+    let text_off = e_shoff + u64::from(shnum) * sh::SIZE;
+    let sym_off = text_off + text.len() as u64;
+    let str_off = sym_off + nsyms as u64 * SYM_ENT;
+    let shstr_off = str_off + strtab.len() as u64;
+    let file_size = shstr_off + shstr.len() as u64;
+
+    let mut out = vec![0u8; file_size as usize];
+    out[0..4].copy_from_slice(b"\x7fELF");
+    out[4] = 2;
+    out[5] = 1;
+    out[6] = 1;
+    put16(&mut out, eh::TYPE, ET_REL);
+    put16(&mut out, eh::MACHINE, EM_X86_64);
+    put32(&mut out, eh::VERSION, EV_CURRENT);
+    put64(&mut out, eh::SHOFF, e_shoff);
+    put16(&mut out, eh::EHSIZE, eh::SIZE);
+    put16(&mut out, eh::PHENTSIZE, 0);
+    put16(&mut out, eh::SHENTSIZE, sh::SIZE as u16);
+    put16(&mut out, eh::SHNUM, shnum);
+    put16(&mut out, eh::SHSTRNDX, shstrndx);
+
+    let o = (e_shoff + sh::SIZE) as usize;
+    put32(&mut out, o + sh::NAME, NAME_TEXT);
+    put32(&mut out, o + sh::TYPE, SHT_PROGBITS);
+    put64(&mut out, o + sh::FLAGS, SHF_ALLOC | SHF_EXECINSTR);
+    put64(&mut out, o + sh::OFFSET, text_off);
+    put64(&mut out, o + sh::SIZE_, text.len() as u64);
+    put64(&mut out, o + sh::ADDRALIGN, 1);
+
+    let o = (e_shoff + 2 * sh::SIZE) as usize;
+    put32(&mut out, o + sh::NAME, NAME_SYMTAB);
+    put32(&mut out, o + sh::TYPE, SHT_SYMTAB);
+    put64(&mut out, o + sh::OFFSET, sym_off);
+    put64(&mut out, o + sh::SIZE_, nsyms as u64 * SYM_ENT);
+    put32(&mut out, o + sh::LINK, 3); // .strtab
+    put32(&mut out, o + sh::INFO, 1); // el primero que no es local
+    put64(&mut out, o + sh::ADDRALIGN, 8);
+    put64(&mut out, o + sh::ENTSIZE, SYM_ENT);
+
+    let o = (e_shoff + 3 * sh::SIZE) as usize;
+    put32(&mut out, o + sh::NAME, NAME_STRTAB);
+    put32(&mut out, o + sh::TYPE, SHT_STRTAB);
+    put64(&mut out, o + sh::OFFSET, str_off);
+    put64(&mut out, o + sh::SIZE_, strtab.len() as u64);
+    put64(&mut out, o + sh::ADDRALIGN, 1);
+
+    let o = (e_shoff + 4 * sh::SIZE) as usize;
+    put32(&mut out, o + sh::NAME, NAME_SHSTRTAB);
+    put32(&mut out, o + sh::TYPE, SHT_STRTAB);
+    put64(&mut out, o + sh::OFFSET, shstr_off);
+    put64(&mut out, o + sh::SIZE_, shstr.len() as u64);
+    put64(&mut out, o + sh::ADDRALIGN, 1);
+
+    out[text_off as usize..text_off as usize + text.len()].copy_from_slice(text);
+    let sym_at = sym_off as usize;
+    for (i, name_off) in sym_names.iter().enumerate() {
+        let s = sym_at + (1 + i) * SYM_ENT as usize;
+        put32(&mut out, s, *name_off);
+        out[s + 4] = STB_GLOBAL << 4; // st_info: global, sin tipo
+        put16(&mut out, s + 6, 1); // st_shndx = .text
+    }
+    out[str_off as usize..str_off as usize + strtab.len()].copy_from_slice(&strtab);
+    out[shstr_off as usize..].copy_from_slice(shstr);
+    out
+}
+
+fn emit_elf_sin_simbolos(text: &[u8]) -> Vec<u8> {
     // ELF64 ET_REL mínimo: cabecera + 3 section headers (null, .text,
-    // .shstrtab) + los datos.
-    //
-    // **Sin tabla de símbolos**: `.globl` se ignora, así que el objeto es
-    // válido pero no exporta nada. Es un límite declarado, no un descuido —
-    // leer símbolos es trabajo de ensamblador y `sosoas` no lo es todavía
-    // (ver `docs/self-improvement/native/toolchain-deps.md`).
+    // .shstrtab) + los datos. Sin `.globl` no hay nada que exportar.
     let e_shoff = u64::from(eh::SIZE);
     let shnum: u16 = 3;
     let shstrndx: u16 = 2;
@@ -165,7 +276,8 @@ fn main() {
         eprintln!("sosoas: {inp}: sin bytes (.byte)");
         exit(1);
     }
-    let elf = emit_elf(&text);
+    let globales = parse_globl(&src);
+    let elf = emit_elf_syms(&globales, &text);
     fs::write(out, &elf).unwrap_or_else(|e| {
         eprintln!("sosoas: no se pudo escribir {out}: {e}");
         exit(1);
@@ -267,5 +379,33 @@ mod tests {
         let off = u64_en(&e, t + sh::OFFSET) as usize;
         let len = u64_en(&e, t + sh::SIZE_) as usize;
         assert_eq!(&e[off..off + len], &text);
+    }
+
+    /// `.globl` deja un símbolo global cuyo nombre está en `.strtab` y que
+    /// apunta a `.text`. Antes la directiva se aceptaba y se tiraba.
+    #[test]
+    fn globl_exporta_el_simbolo() {
+        let src = ".text\n.globl suma\n.byte 0x89, 0xf8, 0xc3\n";
+        let nombres = parse_globl(src);
+        let e = emit_elf_syms(&nombres, &parse_bytes(src));
+        let shoff = u64_en(&e, eh::SHOFF) as usize;
+        let tam = sh::SIZE as usize;
+        assert_eq!(u16_en(&e, eh::SHNUM), 5);
+        let sym = shoff + 2 * tam;
+        assert_eq!(u32_en(&e, sym + sh::TYPE), SHT_SYMTAB);
+        let sym_off = u64_en(&e, sym + sh::OFFSET) as usize;
+        let ent = SYM_ENT as usize;
+        assert_eq!(&e[sym_off..sym_off + ent], &[0u8; 24], "símbolo 0 nulo");
+        let s = sym_off + ent;
+        assert_eq!(e[s + 4], STB_GLOBAL << 4, "st_info global");
+        assert_eq!(u16_en(&e, s + 6), 1, "st_shndx es .text");
+        let strtab = shoff + 3 * tam;
+        let str_off = u64_en(&e, strtab + sh::OFFSET) as usize;
+        let name_off = u32_en(&e, s) as usize;
+        let fin = e[str_off + name_off..]
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap();
+        assert_eq!(&e[str_off + name_off..str_off + name_off + fin], b"suma");
     }
 }

@@ -195,7 +195,9 @@ fn los_cinco_fixtures_coinciden_en_texto_y_tokens() {
 #[test]
 fn otra_familia_devuelve_error() {
     let Some(tokenizer) = tokenizer_qwen() else {
-        return;
+        panic!(
+            "falta tokenizer.som (target/qwen2.5-coder-3b-model o tests/self-improvement/reference)"
+        );
     };
     let input = ChatInput::nuevo(vec![Message::user("hola")]);
     let mut perfil = perfil_qwen();

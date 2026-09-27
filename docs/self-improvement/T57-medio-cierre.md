@@ -79,4 +79,9 @@ no volver a tratar EOF como desconexión.
 Aplicar [NATIVO.md](NATIVO.md). La comprobación vive en la campaña de T19 y
 debería repetirse desde el runner nativo de [T49](T49-pruebas-guest.md).
 
-Validación nativa: **pendiente**.
+Validación nativa: **parcial**, según la evidencia histórica del catálogo. No
+se ha repetido en esta revisión.
+
+## Revisión del 26-sep-2026
+
+Sincronización documental, sin reejecución. Ver [seguimiento/T57.md](seguimiento/T57.md).

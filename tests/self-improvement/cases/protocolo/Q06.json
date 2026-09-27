@@ -11,7 +11,7 @@
       "visible/Q06/peticion.json"
     ]
   },
-  "resultado_observable": "Los trozos recibidos se concatenan, decodifican en UTF-8 y el texto coincide literalmente con el pedido.",
+  "resultado_observable": "Los trozos recibidos se concatenan y decodifican en UTF-8. La frase pedida aparece intacta; el texto que la rodea no invalida el caso.",
   "comprobador": {
     "argv": [
       "soso-improve",

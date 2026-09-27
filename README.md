@@ -2,33 +2,66 @@
 
 **soso** is a bare-metal x86_64 operating system written in Rust: own kernel,
 copy-on-write filesystem with checksums (sosofs), a second read-only disk for
-LLM models (sosomfs), real SSH, WiFi and Ethernet on real hardware, voice
-recognition, a minimal web browser, over-the-air updates, and a native NVIDIA GPU
-stack (L6). Single-user by design — one session at a time, no Unix permissions.
+LLM models (sosomfs), SSH, Ethernet and WiFi drivers, voice recognition, a
+minimal web browser, native install, over-the-air updates, and an NVIDIA GPU
+stack (L6). Single-user by design — no Unix permissions, up to **four** SSH
+sessions at once.
 
 Use it in **QEMU** for development, on a **live USB** on real machines, or
 **installed to NVMe** with UEFI dual-boot alongside Linux.
 
-End-user guide (Spanish): [`MANUAL-USUARIO.md`](MANUAL-USUARIO.md)
+Tree version: **0.3.7** ([`VERSION`](VERSION)), shown at boot and in
+`/etc/soso-release`.
+
+End-user guide (Spanish): [`MANUAL-USUARIO.md`](MANUAL-USUARIO.md).
 
 Operational docs (Spanish): [`docs/GUIA-OPERATIVA.md`](docs/GUIA-OPERATIVA.md),
-[`docs/ESTADO.md`](docs/ESTADO.md). Hardware matrix: [`docs/HW-MATRIX.md`](docs/HW-MATRIX.md).
+[`docs/ESTADO.md`](docs/ESTADO.md). Hardware matrix:
+[`docs/HW-MATRIX.md`](docs/HW-MATRIX.md).
 
 ## At a glance
 
 | Area | What you get |
 |------|----------------|
-| **Shell** | **sosh** — pipes, redirections, `cd`/`pwd`, WiFi builtins, `ask` to the LLM |
-| **LLM** | **soso-llm** + **ask** (resident daemon); models in `/models/`; MoE, MLA, Qwen, GPU offload |
-| **Models** | **soso-hf** pulls GGUF from Hugging Face inside soso; host tools convert GGUF → `.som` |
-| **Voice** | **soso-voz** / **voz** — Whisper ASR via mic or WAV; push-to-talk (F4) |
+| **Shell** | **sosh** — pipes, and-or lists, redirections, Spanish keymap, `ask` / `voz` / `wifi` |
+| **LLM** | **soso-llm** + resident **askd**; models in `/models/`; MoE, MLA, Qwen; GPU offload when a VRAM pool exists |
+| **Models** | **soso-hf** pulls GGUF from Hugging Face; **ask-modelo** picks the default; host tools convert GGUF → `.som` |
+| **Voice** | **soso-voz** / **voz** — Whisper ASR via Intel HDA or a WAV; push-to-talk (F4) |
 | **Web** | **soso-web** — HTTPS fetch, HTML→text or framebuffer GUI (no JavaScript) |
-| **Install** | **soso-install** — clone live USB to NVMe from soso, no Linux required |
-| **Updates** | **soso-update** — apply GitHub Releases (rootfs + kernel with rollback) |
-| **Network** | DHCP, SSH-2, WiFi (Intel AX211/AX200), Realtek r8169 on live USB |
-| **GPU** | lxdde + nouveau/nvkm; matvec on GB205; optional CUDA hybrid (L6-H) |
+| **Install** | **soso-install** — clone the live USB to NVMe from soso |
+| **Disk** | **soso-resize** — grow sosofs by taking free space from the end of the models partition |
+| **Updates** | **soso-update** — GitHub Releases: kernel with verifiable rollback; rootfs file-by-file, retryable, no automatic rollback of old binaries |
+| **Network** | DHCP, SSH-2 (4 sessions), virtio-net / e1000e / Realtek r8169, Intel AX211/AX200 driver |
+| **GPU** | lxdde + nouveau/nvkm; G1–G5 historically GO on GB205 (revalidation still open); optional CUDA hybrid (L6-H) |
+| **Self-hosting** | **soso-ed**, remote **soso-forja**, **soso-git** content hashes. Native `rustc` is still a stub |
 
-Version: [`VERSION`](VERSION) (e.g. `0.2.2`); shown at boot and in `/etc/soso-release`.
+## Where things stand (September 2026)
+
+QEMU is the reliable path: boot, sosofs, SSH, syscall regression, LLM smoke
+(`tiny`), native install, OTA (apply, kernel recovery, invalid manifest), USB
+mass storage, and the remote forge loop are covered by `cargo xtask`. Cycle B
+(resize, ELF/argv, remote forge, CI, the hardware-matrix parser, GPT cache) is
+closed for those host and QEMU checks. Re-validating a board (B5) is still
+open. Detail and the published OTA limits live in
+[`docs/ESTADO.md`](docs/ESTADO.md).
+
+On real hardware, treat [`docs/hw-matrix.json`](docs/hw-matrix.json) as the
+record. A historical GO is not a fresh `ok`:
+
+| Piece | In the tree | Still open on hardware |
+|-------|-------------|------------------------|
+| Live USB, GOP console, NVMe, xHCI | Used on ROG / GB205 boards | Each board needs its own matrix entry |
+| NVIDIA GB205 | G1–G5 GO logged in July 2026 | Revalidate after FWSEC/falcon changes |
+| NVIDIA Ampere (GA104 `10de:249c` on the ROG) | FWSEC-FRTS path written | GPU stages are not `ok` in the matrix |
+| Ethernet Realtek r8169 | Native driver, DHCP, no slirp fallback | — |
+| WiFi AX200 | ALIVE, init, MVM and scan on the ROG | SCD, data path and WPA2 against an AP |
+| WiFi AX211 | Driver + gen3 descriptor fix | Real ALIVE (last board log timed out before that fix) |
+| Steam Deck OLED | Defensive AMD-Vi shutdown, rotated 800×1280 console, USB input plumbing, ath11k MHI hostcheck | Never booted on the Deck. QMI framing exists; HTC/WMI, data rings, scan and WPA2 do not. RDNA2 is out of scope |
+| Self-improvement (OpenCode + local model) | Coordinador, chat API and many Txx cards in Rust | No SI-0–SI-7 milestone closed; no accepted first patch. See [`SELF_IMPROVEMENT.md`](SELF_IMPROVEMENT.md) |
+| Native toolchain | PAL, `soso-std`, `soso-rt`, `soso-alloc`, bootstrap scripts | `soso-rustc` is a stub; libstd still fails after the allocator |
+
+Logs: live ESP keeps `SOSOLOG.TXT` / `SOSODRV.TXT` (`cargo xtask sosolog`).
+An installed system also writes `/var/log/{kernel,aplicaciones,actualizaciones}.log`.
 
 ## Requirements
 
@@ -36,14 +69,15 @@ Version: [`VERSION`](VERSION) (e.g. `0.2.2`); shown at boot and in `/etc/soso-re
 |------|---------|
 | **rustup** | Builds kernel and userspace (nightly pinned in `rust-toolchain.toml`; required because bootloader 0.11 uses `-Zbuild-std`) |
 | **qemu-system-x86_64** | Run the VM (`sudo apt install qemu-system-x86`) |
+| **OVMF** | `test-install`, `test-update` and `test-resize` boot a UEFI guest |
 | **OpenSSH client** + **ssh-keygen** | SSH access and integration tests |
-| **clang**, **zstd** | Optional — lxdde GPU/NIC ports and NVIDIA firmware packing |
+| **clang**, **zstd** | Optional — lxdde ports and NVIDIA / ath11k firmware packing |
 
 ## Quick start
 
 ```sh
 cargo xtask build          # compile kernel → target/soso-bios.img
-cargo xtask check            # host tests + builds + iwl/GSP hostchecks + hw-matrix parser
+cargo xtask check          # host tests + builds + iwl/GSP/ath11k hostchecks + hw-matrix parser
 cargo xtask run            # build + QEMU q35, serial console on stdio
 cargo xtask gdb            # like run, frozen at boot; gdb -ex 'target remote :1234'
 cargo xtask test           # integration: FS, boot, TCP, SSH, soso-llm, halt
@@ -75,106 +109,117 @@ soso-llm run tinyllama-q4km --cuda-host 10.0.2.2:11400 --prompt hola --max 32   
 **Exit QEMU:** `Ctrl-A X` (not `Ctrl-C`). If port 2222 is busy:
 `pkill qemu-system-x86` before restarting.
 
-Guest network: DHCP at boot, fallback **10.0.2.15/24** in QEMU slirp. Port forwards:
-**2222→22** (SSH), **7777→7** (echo).
+Guest network: DHCP at boot. Fallback **10.0.2.15/24** only for virtio-net and
+e1000e under QEMU slirp — not for WiFi and not for rtl8169. Port forwards:
+**2222→22** (SSH), **7777→7** (echo). `ask` and `voz` talk to local daemons on
+`127.0.0.1` (kernel loopback, no extra NIC).
 
 ## Project layout
 
 | Path | Role |
 |------|------|
-| `kernel/` | `no_std` kernel (`x86_64-unknown-none`, outside root workspace) |
+| `kernel/` | `no_std` kernel (`x86_64-unknown-none`, outside the root workspace) |
 | `boot-shim/` | UEFI shim: BOOTMARK, install/update mailbox, chainload |
 | `xtask/` | Disk images, mkfs, QEMU, releases, integration tests |
-| `crates/` | sosofs, sosomfs, soso-abi, soso-llm-core, soso-http, soso-update-core, soso-web-core, soso-audio, soso-gpu, … |
-| `tools/` | mkfs-soso, mkfs-sosomfs, mkmodel-soso, convert-gguf, convert-whisper, cuda-proxy |
-| `user/` | libsoso, init, sosh, soso-llm, soso-voz, soso-web, soso-hf, soso-update, soso-install, coreutils |
+| `crates/` | sosofs, sosomfs, soso-abi, soso-llm-core, soso-llm-api, soso-http, soso-update-core, soso-web-core, soso-audio, soso-gpu, soso-std, soso-rt, soso-alloc, soso-improve-core, gptdisk, xhci-nostd, … |
+| `tools/` | mkfs-soso, mkfs-sosomfs, mkmodel-soso, convert-gguf, convert-whisper, cuda-proxy, soso-forja-server, sosoas, wild-soso |
+| `user/` | libsoso, init, sosh, soso-llm, soso-voz, soso-web, soso-hf, soso-update, soso-install, soso-ed, soso-forja, soso-git, soso-improve, coreutils |
+| `config/rust-soso/` | Rust std PAL and bootstrap patches for a future native toolchain |
 | `rootfs/` | Source tree embedded into the data disk — see [`rootfs/README.md`](rootfs/README.md) |
-| `lxdde/` | Linux-style DDE layer (`lx_emul`) for ported C drivers (e1000e, nouveau/nvkm, iwlwifi) |
-| `docs/` | Architecture notes (L5c on-box, L6 GPU roadmap) |
+| `lxdde/` | Freestanding C ports: e1000e, nouveau/nvkm, iwlwifi, ath11k |
+| `docs/` | Status, hardware matrix, live USB, OTA, self-hosting, L6, Steam Deck |
 
 ## What is implemented
 
-### Kernel and platform (phases 0–10)
+### Kernel and platform
 
-- [x] **Boot** — BIOS/UEFI via bootloader 0.11, serial console, q35 + `-cpu max`
-- [x] **Memory** — GDT/TSS, IDT, PIC+PIT 100 Hz, frame allocator, buddy heap
-- [x] **PCI** — ECAM enumeration
-- [x] **Block I/O** — virtio-blk (data + models disks), NVMe, live GPT disk reader, USB mass storage + xHCI
-- [x] **Filesystem** — sosofs CoW B+ tree, CRC32C checksums, dual superblocks, commits on `close()` and periodic flush
-- [x] **VFS** — routes `/models/*` → sosomfs (read-only); everything else → sosofs
-- [x] **Userspace** — ring 3 ELF processes, preemptive round-robin scheduler, **spawn** (no fork)
-- [x] **Syscalls** — file I/O, mmap/munmap, pipe, spawn/spawn_io, chdir/getcwd, sleep, halt, futex, GPU ioctls
-- [x] **Network** — smoltcp TCP/IPv4, DHCP client, polled virtio-net (and optional lxdde e1000e NIC)
-- [x] **SSH** — sunset stack (curve25519, ed25519, chacha20-poly1305), single session, reconnectable, CRLF on remote tty
-- [x] **Emergency kshell** — serial diagnostic shell (`soso>`) if userspace exits
+- [x] **Boot** — BIOS/UEFI via bootloader 0.11, serial and GOP framebuffer, q35 + `-cpu max`
+- [x] **Memory** — GDT/TSS, IDT, PIC+PIT 100 Hz, frame allocator, buddy heap, clock reclaim for read-only mmap
+- [x] **PCI** — ECAM enumeration; `hwscan` prints one line per device on every boot
+- [x] **Block I/O** — virtio-blk (data + models), NVMe (512- and 4096-byte LBA), live GPT reader, USB mass storage + xHCI
+- [x] **Filesystem** — sosofs CoW B+ tree, CRC32C, dual superblocks, commits on `close()` and about every 2 s; `NAME_MAX` 255
+- [x] **VFS** — `/models/*` → sosomfs (read-only catalog; atomic import via `SYS_SOM_*`); everything else → sosofs
+- [x] **Userspace** — ring 3 ELF, preemptive round-robin, SMP (`-smp N`), **spawn** (no fork), user threads joined by futex
+- [x] **Syscalls** — file I/O, mmap/munmap, pipe, spawn/spawn_io, chdir/getcwd, futex, signals (delivery only, no handlers), GPU, TCP, audio, framebuffer
+- [x] **Console** — GOP framebuffer, UTF-8, Spanish ISO-105 keymap by default (`kbd es` / `kbd us` in the kernel shell)
+- [x] **Power** — `halt` (ACPI S5 on hardware; isa-debug-exit in QEMU) and `reboot`
+- [x] **Network** — smoltcp TCP/IPv4, DHCP, polled NICs: virtio-net, native e1000e, rtl8169, iwlwifi
+- [x] **SSH** — sunset (curve25519, ed25519, chacha20-poly1305), four sessions, reconnectable, CRLF on the remote tty
+- [x] **Emergency kshell** — `soso>` (`help`, `dmesg`, `hwscan`, `ip`, `ping`, `wifi`, `io`, `halt`, `reboot`, …) if userspace exits
 
 ### Shell and userspace
 
-- [x] **sosh** — pipes `|`, redirections `>`, `>>`, `<`, builtins `cd`/`pwd`/`help`/`exit`/`wifi`/`ask`/`voz`
+- [x] **sosh** — pipes `|`, redirections including `N>&M`, lists with `;` / `&&` / `||`, builtins `cd` / `pwd` / `help` / `exit` / `wifi` / `ask` / `voz`
 - [x] **Per-process cwd** — relative paths resolve against the process working directory
-- [x] **Coreutils** — `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `halt`
-- [x] **init** — PID 1, relaunches sosh; confirms kernel updates; `init test` runs syscall regression suite
-- [x] **soso-voz** — Whisper ASR daemon (`vozd`), mic capture (Intel HDA), push-to-talk
+- [x] **Coreutils** — `ls`, `cat`, `echo`, `mkdir`, `rm`, `cp`, `mv`, `hexdump`, `grep`, `diff`, `find`, `wc`, `head`, `tail`, `stat`, `ip`, `ping`, `dns`, `ps`, `log`, `halt`, `reboot`
+- [x] **init** — PID 1, relaunches sosh, confirms a kernel update only after rootfs and `/tmp/sosh-ready`; `init test` is the syscall regression suite
+- [x] **soso-voz** — Whisper ASR daemon (`vozd` on `127.0.0.1:7421`); transcription is inserted into the line and never run by itself
 - [x] **soso-web** — HTTPS client, HTML reflow or framebuffer GUI (fontdue + DejaVu)
-- [x] **soso-hf** — download/import GGUF models from Hugging Face Hub inside soso
-- [x] **soso-install** — native live→NVMe installer with GPT relayout and UEFI boot entry
-- [x] **soso-update** — OTA updates from GitHub Releases (rootfs pack + kernel slot with rollback)
-- [x] **SIMD** — userspace AVX2+FMA; FPU state preserved with xsave64 across context switches
+- [x] **soso-hf** — download and atomically import GGUF models from Hugging Face inside soso
+- [x] **soso-install** / **soso-resize** — live→NVMe installer (GPT relayout, UEFI boot entry via the shim); grow the root filesystem on a GPT disk
+- [x] **soso-update** — kernel slot with `SOSOKRN.MET` recovery; rootfs pack applied per file with progress in `/etc/actualiza.estado`
+- [x] **SIMD** — userspace AVX2+FMA; the kernel saves x87/XMM/YMM with `xsave64`
 
 ### LLM stack
 
-- [x] **sosomfs** — second virtio-blk disk, model shards under `/models/<name>/`
-- [x] **.som format** — manifest, index, tokenizer, quantized tensor shards (F32, Q8_0, Q4_K)
-- [x] **soso-llm-core** — full Llama-style pipeline: RoPE, GQA, SwiGLU, KV cache, greedy/temp/top-p sampling, streaming decode
-- [x] **soso-llm** — userspace CLI (`run`, `askd`, distributed `node`/`worker` modes)
-- [x] **ask** — sosh builtin; talks to resident `askd` on `127.0.0.1:7420` (quotes and UTF-8 safe)
-- [x] **Host tools** — `cargo xtask convert-gguf`, synthetic tiny/bench models via mkmodel-soso
+- [x] **sosomfs** — model shards under `/models/<name>/`
+- [x] **.som format** — manifest (through v4: GQA, MoE, MLA, Qwen gated / GDN), index, tokenizer, shards F32 / Q8_0 / Q4_K / MXFP4
+- [x] **soso-llm-core** — RoPE, GQA, SwiGLU, KV cache, sampling, streaming decode; same runtime on host and in the guest
+- [x] **soso-llm** — `run`, resident `askd`, distributed `node` / `worker`
+- [x] **ask** — sosh builtin; one question at a time to `askd` on `127.0.0.1:7420` (quotes and UTF-8 stay intact)
+- [x] **Host tools** — `cargo xtask convert-gguf`, `fetch-hf`, `fetch-whisper`; synthetic models via mkmodel-soso
 - [x] **Custom models** — `SOSO_MODELS_DIR=<dir> cargo xtask run`
-- [x] **Distributed inference** — multi-QEMU pipeline over socket netdev (`cargo xtask test-distributed-llm`)
-- [x] **SMP benchmark** — `cargo xtask bench-llm` (decode tok/s vs worker count)
+- [x] **Distributed inference** — multi-QEMU pipeline (`cargo xtask test-distributed-llm`)
+- [x] **Chat HTTP API** — `soso-llm-api` (guest evidence exists; model-quality gate T14 is not GO)
 
-### Deployment, install and updates
+### Self-hosting
 
-- [x] **Classic USB package** — `cargo xtask package-usb` (UEFI + separate data/models images)
-- [x] **Live USB image** — `cargo xtask package-usb-live` (single GPT stick: ESP + sosofs + sosomfs); see [`docs/L5c-on-box.md`](docs/L5c-on-box.md)
-- [x] **Flash live USB** — `cargo xtask flash-usb-live /dev/sdX --yes` (auto-picks largest GGUF that fits)
-- [x] **Native installer** — `soso-install` from live stick: safety checks, block clone, GPT relayout, UEFI `Boot####` via boot-shim
-- [x] **OTA updates** — `soso-update` from installed system; releases via `cargo xtask release [--publish]`
-- [x] **Versioning** — `VERSION` file → `/etc/soso-release` + kernel banner; semver compare in updates
-- [x] **Dual-boot UEFI + Linux** — `cargo xtask install-disk /dev/nvmeXn1 --yes` (host-side), or native install
-- [x] **QEMU live mode** — `SOSO_QEMU_LIVE=1 cargo xtask run`; install flow: `cargo xtask test-install`; update flow: `cargo xtask test-update`
-- [x] **Persistent logs** — `cargo xtask sosolog` reads `SOSOLOG.TXT` / `SOSODRV.TXT` from live ESP
+Remote forge loop is closed (milestone B3): the guest uploads sources, the host
+builds in an isolated tree, and the client checks the receipt before writing
+anything. See [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md).
 
-### lxdde and native GPU (L6 — G1→G5 GO on GB205)
+- [x] **soso-ed** — edit sources under `/src/soso`
+- [x] **soso-forja** — `local` only plans; `sync|build|all --host` builds on the host; `build-local` copies artifacts already in `/var/forja-out`
+- [x] **soso-git** — `status|log|diff|commit` as content hashes (not a full git client)
+- [x] **soso-std** / **hola-std** — small standard library and a guest smoke demo
+- [ ] **Native rustc** — `soso-rustc` prints a version and checks for a sysroot. Bootstrap (`cargo xtask rust-bootstrap`) is in progress; libstd still fails after the allocator
 
-Optional kernel feature (`SOSO_LXDDE=1`) linking a freestanding C library built from
-ported Linux driver code:
+## lxdde and native GPU (L6)
+
+Optional kernel feature (`SOSO_LXDDE=1`) linking a freestanding C library built
+from ported Linux 6.6 driver code:
 
 | Port | Status |
 |------|--------|
 | `spike`, `testdrv` | DDE plumbing validated |
-| `e1000e` | Linux-style NIC backend (`SOSO_QEMU_NIC=lx-e1000e`) |
-| `nouveau` | **G5 GO** on GB205 (GSP-FMC → RM → CE → SASS matvec in `soso-llm`); Ampere GA10x path written, untested |
+| `e1000e` | Linux-style NIC (`SOSO_QEMU_NIC=lx-e1000e`). The live image also has a native e1000e |
+| `nouveau` | G1–G5 **historically GO** on GB205 (GSP-FMC → RM → CE → SASS matvec). Revalidation after later firmware work is still open. Ampere path written, not `ok` in the matrix |
+| `iwlwifi` | Intel AX211 (gen3) and AX200 (gen2). See the hardware table above |
+| `ath11k` | Steam Deck WCN6855: MHI hostcheck green against a model; not proven on silicon |
 
 GPU syscalls: `SYS_GPU_INFO`, `SYS_GPU_ALLOC`, `SYS_GPU_MAP`, `SYS_GPU_SUBMIT`,
-`SYS_GPU_READ`. Firmware is packed into rootfs with `./scripts/l6-pack-firmware.sh`.
+`SYS_GPU_READ`. Pack firmware with `./scripts/l6-pack-firmware.sh` (NVIDIA) or
+`./scripts/l6-pack-ath11k-fw.sh` (Deck).
 
 **L6 roadmap (G1→G5):**
 
 | Gate | Deliverable | Status |
 |------|-------------|--------|
-| G1 | VFIO passthrough + BAR0 (`NV_PMC_BOOT_0`) | **Done** on real GB205 (`0x1b5000a1`) |
+| G1 | VFIO passthrough + BAR0 (`NV_PMC_BOOT_0`) | **Done** on real GB205 (`0x1b5000a1`); revalidation open |
 | G2 | GSP firmware blobs in sosofs | **Done** (gb205 + ga102 reference set) |
 | G3a | ELF validation, GEM staging | **Done** |
-| G3b | Real GSP boot (FSP/COT, radix3, WPR, libos) | **Done** on GB205 HW |
-| G4a–c | GSP-RM RPC + RM objects | **Done** on GB205 HW |
+| G3b | Real GSP boot (FSP/COT, radix3, WPR, libos) | **Done** on GB205 HW; revalidation open |
+| G4a–c | GSP-RM RPC + RM objects | **Done** on GB205 HW; revalidation open |
 | G4d | VRAM + external VA space (VER3 page tables) | **Done** on GB205 HW (exercised by CE/compute) |
-| G4e | GPFIFO channel + CE copy (`gsp_chan`, `gsp_ce`) | **Done** (2026-07-29): `CE readback verificado (G4e GO)` |
+| G4e | GPFIFO channel + CE copy | **Done** (2026-07-29): `CE readback verificado (G4e GO)` |
 | G4f | SAXPY / matvec SASS (`SYS_GPU_SUBMIT`) | **Done** (2026-07-29): PCAS 24 B + QMD v05, `on_gpu=1` |
-| G5 | Hybrid LLM matvec on GPU | **GO functional** (2026-07-29): `soso-llm run tiny` → matvec on GPU; tok/s on large models still TBD |
-| **L6-H** | CUDA inference on host Linux (`--cuda-host`) | **GO** (2026-07-27): ~35 tok/s via cuda-proxy + llama-server |
+| G5 | Hybrid LLM matvec on GPU | **GO functional** (2026-07-29) on `tiny`; large-model tok/s still TBD; revalidation open |
+| **L6-H** | CUDA inference on host Linux (`--cuda-host`) | **GO** (2026-07-27): cuda-proxy + llama-server. This is host CUDA, not the in-kernel GPU path |
 
-Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G1-gate.md`](docs/L6-G1-gate.md), [`docs/L6-G3-nvkm-scope.md`](docs/L6-G3-nvkm-scope.md), [`docs/L6-H-cuda-hybrid.md`](docs/L6-H-cuda-hybrid.md). Skill: `.cursor/skills/soso-gpu/` (or `.claude/skills/soso-gpu/`).
+Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md),
+[`docs/L6-G1-gate.md`](docs/L6-G1-gate.md),
+[`docs/L6-G3-nvkm-scope.md`](docs/L6-G3-nvkm-scope.md),
+[`docs/L6-H-cuda-hybrid.md`](docs/L6-H-cuda-hybrid.md).
 
 **Daily dev without releasing the GPU** (driver stays on the host):
 
@@ -190,36 +235,43 @@ Details: [`docs/L6-native-autonomy.md`](docs/L6-native-autonomy.md), [`docs/L6-G
 
 | Command | Action |
 |---------|--------|
-| `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
-| `cargo xtask package-usb-live` | Single GPT image (ESP + sosofs + sosomfs) for USB or install |
-| `cargo xtask flash-usb-live /dev/sdX --yes` | Flash live USB (model sized to stick) |
-| `cargo xtask flash-usb-live /dev/sdX --yes --skip-models` | Incremental: ESP + rootfs only (models unchanged) |
-| `cargo xtask release [--publish]` | Pack release (`manifest.txt`, `rootfs.pack`, `kernel-x86_64`); `--publish` → GitHub Releases |
+| `cargo xtask mkfs` | Force-regenerate the sosofs image from `rootfs/` |
+| `cargo xtask package-usb-live` | Single GPT image (ESP + sosofs + sosomfs) |
+| `cargo xtask flash-usb-live /dev/sdX --yes` | Flash a live USB (model sized to the stick) |
+| `cargo xtask flash-usb-live /dev/sdX --yes --skip-models` | Incremental: ESP + rootfs only |
+| `cargo xtask release [--publish]` | Pack a release; `--publish` uploads a GitHub Release |
 | `cargo xtask test-install` | E2E native install (OVMF, 3 boots) |
-| `cargo xtask test-update` | E2E OTA: apply, kernel rollback on cut, invalid manifest |
-| `cargo xtask check` | Pre-commit: host FS tests, builds, hostchecks, hw-matrix parser |
-| `cargo xtask hw-matrix show` | Hardware validation matrix (A8) |
-| `cargo xtask sosolog [--drv]` | Read `SOSOLOG.TXT` / `SOSODRV.TXT` from live USB ESP |
-| `cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot: write live image to empty disk + GRUB entry |
-| `cargo xtask lx-build [port\|all]` | Build `liblxdde.a` (spike, testdrv, e1000e, nouveau) |
-| `cargo xtask g1-check` | Host checklist: IOMMU/VFIO, firmware, BAR0 |
-| `cargo xtask g3-check` | GSP bring-up checklist (firmware, modules, phases) |
-| `cargo xtask bench-llm` | Measure decode tok/s under configurable SMP |
+| `cargo xtask test-update` | E2E OTA: apply, kernel recovery, invalid manifest |
+| `cargo xtask test-resize` | Grow/recovery of sosofs (host cuts + QEMU) |
+| `cargo xtask test-usb` | USB mass storage / xHCI |
+| `cargo xtask fb-shot` | Capture the guest framebuffer |
+| `cargo xtask check` | Pre-commit: host tests, builds, iwl/GSP/ath11k hostchecks, hw-matrix parser |
+| `cargo xtask hw-matrix show` | Hardware validation matrix |
+| `cargo xtask sosolog [--drv]` | Read `SOSOLOG.TXT` / `SOSODRV.TXT` from the live ESP |
+| `cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot: write the live image and a GRUB entry |
+| `cargo xtask lx-build [port\|all]` | Build `liblxdde.a` (spike, testdrv, e1000e, nouveau, iwlwifi, ath11k) |
+| `cargo xtask bench-llm` | Decode tok/s under configurable SMP |
 | `cargo xtask test-distributed-llm` | Two-QEMU distributed LLM smoke test |
-| `./scripts/l6-pack-firmware.sh` | Pack NVIDIA GSP firmware (.zst→.bin) into rootfs |
-| `./scripts/l6-g3-gsp-hostcheck.sh` | GSP bring-up hostcheck (steps 3–6 + G4d–G4f encoders, no GPU) |
-| `./scripts/l6-h-start-cuda.sh` | L6-H: llama-server (native) + cuda-proxy (requires `llama-server` in PATH) |
-| `./scripts/l6-g1-vfio-persist.sh` | Persistent VFIO bind for iterative G1–G5 / VFIO cycles |
-| `./scripts/l6-g1-vfio-test.sh` | Full VFIO cycle (PCIe Gen3 cap + Gen4/5 bump GO; see soso-gpu skill) |
+| `cargo xtask test-llm-api` | Chat HTTP API checks |
+| `cargo xtask sync-src` | Copy editable sources to `/src/soso` in the image |
+| `cargo xtask forja-out` | Copy release artifacts into `rootfs/var/forja-out/` |
+| `cargo xtask rust-bootstrap` | Apply the std PAL patches and start a Rust bootstrap |
+| `./scripts/l6-pack-firmware.sh` | Pack NVIDIA GSP firmware into rootfs |
+| `./scripts/l6-g3-gsp-hostcheck.sh` | GSP bring-up hostcheck (no GPU) |
+| `./scripts/l6-iwl-fw-hostcheck.sh` | iwlwifi firmware parser hostcheck |
+| `./scripts/l6-h-start-cuda.sh` | L6-H: llama-server + cuda-proxy |
 
 Useful environment variables:
 
 ```sh
-SOSO_MODELS_DIR=/path/to/model     # custom .som tree on models disk
-SOSO_QEMU_GPU=vfio:01:00.0       # GPU passthrough (requires IOMMU)
-SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau   # enable nouveau/nvkm port
-SOSO_QEMU_LIVE=1                   # boot from live GPT image in QEMU
-SOSO_QEMU_NIC=lx-e1000e            # use lxdde e1000e instead of virtio-net
+SOSO_MODELS_DIR=/path/to/model          # custom .som tree on the models disk
+SOSO_QEMU_GPU=vfio:01:00.0              # GPU passthrough (requires IOMMU)
+SOSO_LXDDE=1 SOSO_LXDDE_MODE=nouveau    # enable a port; live USB uses nouveau,iwlwifi
+SOSO_QEMU_LIVE=1                        # boot the live GPT image in QEMU
+SOSO_QEMU_NIC=lx-e1000e                 # lxdde e1000e instead of virtio-net
+SOSO_DRIVERS=qemu|live-usb|all          # which drv-* features to compile
+SOSO_LIVE_OFFLINE=1                     # package a stick without fetching a model
+SOSO_ROOTFS_SIZE=64G                    # data image size (default 32G)
 ```
 
 ## Testing
@@ -235,13 +287,14 @@ SOSO_QEMU_NIC=lx-e1000e            # use lxdde e1000e instead of virtio-net
 | OTA E2E (OVMF) | `cargo xtask test-update` |
 | USB/xHCI | `cargo xtask test-usb` |
 | Native install E2E | `cargo xtask test-install` |
+| Rootfs resize | `cargo xtask test-resize` |
 
-`cargo xtask test` verifies: host FS tests, QEMU boot to sosh, TCP echo, SSH
-authenticated session, `soso-llm run tiny`, LLM shutdown cycles, and clean
-shutdown via `halt`. The suite should be fully green; investigate any failure.
+`cargo xtask test` covers host filesystem tests, QEMU boot to sosh, TCP echo,
+an authenticated SSH session, `soso-llm run tiny`, LLM shutdown, and `halt`.
+A red suite is not an acceptable release. Investigate the failure.
 
-Do not run `sudo cargo` — root lacks rustup. `cargo xtask flash-usb-live` and
-`install-disk` ask sudo only to write the disk.
+Do not run `sudo cargo` — root has no rustup. `flash-usb-live` and
+`install-disk` ask for sudo only when writing the disk.
 
 ## License
 

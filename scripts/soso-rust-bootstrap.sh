@@ -21,7 +21,8 @@ cat >"$VENDOR/config.toml" <<EOF
 host = ["x86_64-unknown-linux-gnu"]
 target = ["x86_64-unknown-soso"]
 build-dir = "build-soso"
-install = false
+# install es la seccion [install], no una clave de [build]: el bootstrap de rust
+# rechaza unknown field install. Estaba aqui desde un rust mas viejo (T71).
 extended = false
 
 [rust]
@@ -30,10 +31,10 @@ channel = "dev"
 download-rustc = true
 
 [target.x86_64-unknown-soso]
-linker = "$ROOT/target/release/wild-soso"
+linker = "${ROOT}/target/release/wild-soso"
 
-[llvm]
-download-ci-llvm = false
+# Sin seccion [llvm]: download-ci-llvm = false es incompatible con
+# rust.download-rustc = true. Aqui solo se compila library/std cruzada.
 EOF
 
 SOSO_RUST_VENDOR="${SOSO_RUST_VENDOR:-${XDG_CACHE_HOME:-$HOME/.cache}/soso-rust-vendor}"
@@ -51,6 +52,7 @@ Parches aplicados. Compilar libstd:
 
   cd "$VENDOR"
   export PATH="$ROOT/target/release:\$PATH"
+  export RUST_TARGET_PATH="$VENDOR"   # o el bootstrap no encuentra el JSON
   ./x.py build library/std --target x86_64-unknown-soso
 
 O desde la raíz del repo:

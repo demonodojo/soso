@@ -19,7 +19,19 @@ static WAITERS: Mutex<BTreeMap<(u64, u64), Vec<u64>>> = Mutex::new(BTreeMap::new
 /// Si `*uaddr == expected`, bloquea al proceso actual en `WaitingFutex`.
 /// No vuelve. Si el valor ya cambió, restaura `Runnable` con rax=0 y
 /// replanifica (equivalente a "wait no-op").
-pub fn wait_or_resume(pml4: u64, uaddr: u64, expected: u32, ctx: Context) -> ! {
+///
+/// `timeout_ms` es **relativo** y `0` = sin plazo, como en `read_timeout`,
+/// `ping`, `tcp_connect` y `tcp_accept`: el instante límite lo calcula el
+/// kernel. Al vencer, el planificador despierta al proceso con `-ETIMEDOUT`,
+/// que es lo que permite a quien llama distinguir «expiró» de «me
+/// despertaron» (T73).
+pub fn wait_or_resume(
+    pml4: u64,
+    uaddr: u64,
+    expected: u32,
+    timeout_ms: u64,
+    ctx: Context,
+) -> ! {
     x86_64::instructions::interrupts::disable();
     let pid = super::current_pid();
     {
@@ -37,9 +49,17 @@ pub fn wait_or_resume(pml4: u64, uaddr: u64, expected: u32, ctx: Context) -> ! {
             super::schedule();
         }
         waiters.entry((pml4, uaddr)).or_default().push(pid);
+        // El plazo se ancla **aquí**, no en `sys_futex`: entre una cosa y otra
+        // hay un lock que puede tardar, y anclarlo antes lo acortaría en
+        // silencio.
+        let deadline_ms = if timeout_ms == 0 {
+            0
+        } else {
+            crate::arch::pit::uptime_ms().saturating_add(timeout_ms)
+        };
         if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
             p.ctx = ctx;
-            p.state = State::WaitingFutex { pml4, uaddr };
+            p.state = State::WaitingFutex { pml4, uaddr, deadline_ms };
         }
         crate::arch::percpu::set_current_pid(0);
     }

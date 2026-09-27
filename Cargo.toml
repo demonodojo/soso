@@ -23,6 +23,7 @@ members = [
     "crates/soso-update-core",
     "crates/soso-std",
     "crates/soso-rt",
+    "crates/soso-alloc",
     "crates/xhci-nostd",
     "tools/cuda-proxy",
     "tools/soso-forja-server",

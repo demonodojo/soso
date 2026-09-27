@@ -6,7 +6,8 @@
 pub extern crate soso_rt as soso_abi;
 
 pub mod ffi;
-pub mod io;
+// `pub mod io;` vuelve cuando la PAL exponga descriptores: hoy reexportaba
+// `os::fd`, que trae `impl`s para tipos que la PAL `unsupported` no tiene.
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub mod prelude {

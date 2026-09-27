@@ -3,7 +3,7 @@
   "kind": "planning_catalog",
   "parent": "../../SELF_IMPROVEMENT.md",
   "contract": "CONTRATO.md",
-  "status": "pending",
+  "status": "in_progress",
   "tasks": [
     {
       "id": "T01",
@@ -454,21 +454,27 @@
           "T49"
         ],
         "evidence": [
-          "target/self-improvement/tasks/T14/resultado.md",
-          "target/self-improvement/tasks/T14/informe.json",
-          "target/t14-campana.log"
+          "docs/self-improvement/seguimiento/T14.md",
+          "target/self-improvement/tasks/T14/campana-t14-3b.json",
+          "target/self-improvement/tasks/T14/campana-t14-7b.json"
         ],
         "note": "Campaña ejecutada contra el endpoint guest con pesos reales; la lanza el arnés del host. Ejecutarla desde soso es T49."
       },
       "tracking": {
-        "updated_at": "2026-09-25",
-        "base": "95de3c162 + diff sucio",
-        "summary": "docs/self-improvement/seguimiento/T14.md — campaña repetida el 2026-09-25 con el arnés nuevo (`test-llm-api --campana`): **8/10, sigue NO-GO**, 0 inestables, 55,6 min. Confirma **a nivel de sistema** que T60 arregló Q08 y Q10, que era lo que le faltaba (estaba cerrada con pruebas unitarias). El techo lo pone el modelo, como dijo T59: emite `{\"name\":…}` en `content` con `finish_reason: \"stop\"` en vez de `tool_calls`. Presupuestos nuevos: mediana 50 058 ms, máximo 287 100 ms, timeout 574 200 ms, 22 tokens.",
-        "evidence": "target/self-improvement/tasks/T19/{campana-t14.json,campana-completa-2026-09-25.txt}",
+        "updated_at": "2026-09-27T02:55:00+02:00",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:68db191f3c5eceee4471a0037075742ac324ca4911413de951504181d9d2e5a2",
+        "summary": "docs/self-improvement/seguimiento/T14.md",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T14.md",
+          "target/self-improvement/tasks/T14/campana-t14-3b.json",
+          "target/self-improvement/tasks/T14/campana-t14-7b.json",
+          "target/self-improvement/tasks/T14/campana-t14-qwen2.5-coder-7b.json",
+          "target/self-improvement/tasks/T14/model-lock-7b.json"
+        ],
         "blocker": null,
-        "next_step": "Decisión de plan para pasar de 8/10: modelo mayor, parsear la llamada en el servicio (declarándolo), o agente nativo sin `tool_calls`. Las tres parten de 8/10 medido."
+        "next_step": "Perfil elegido: qwen2.5-coder-7b (GO 10/10, 27-sep). El 3B queda como candidato anterior, NO-GO 8/10."
       },
-      "resultado": "no-go"
+      "resultado": "go"
     },
     {
       "id": "T15",
@@ -531,25 +537,25 @@
         "user/libsoso/src/sys.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "partial",
         "requires": [
           "T18"
         ],
         "evidence": [
-          "target/self-improvement/tasks/T16/resultado.md"
+          "target/self-improvement/tasks/T16/resultado.md",
+          "docs/self-improvement/seguimiento/T19.md"
         ],
-        "note": "Build guest y tests host API OK; humo loopback guest pendiente T18; T14 go no acreditado."
+        "note": "T19 documenta guest_ok, exit 0, 12/12 con pesos 3B el 23-sep. Evidencia histórica, no revalidación del checkout actual. T14 sigue NO-GO; no acredita aptitud del agente."
       },
       "tracking": {
-        "updated_at": "2026-09-24",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
         "summary": "docs/self-improvement/seguimiento/T16.md",
         "evidence": [
-          "target/self-improvement/tasks/T16/resultado.md",
-          "cargo build --release -p soso-llm (cwd user/)",
-          "cargo test -p soso-llm-api --features std --test host_service"
+          "docs/self-improvement/seguimiento/T19.md"
         ],
-        "blocker": "T14 dio **no-go** (8/10 protocolo; el modelo no usa herramientas). Un `done` con no-go no habilita a los consumidores: `depends_on` no puede expresar «go», así que se dice aquí.",
-        "next_step": "T18-puertos-qemu.md o T19-qemu-e2e.md"
+        "blocker": "GO de T14 pendiente.",
+        "next_step": "T74 y repetición de campaña; conservar por separado las comprobaciones de servicio y la aptitud del modelo."
       }
     },
     {
@@ -571,25 +577,25 @@
         "kernel/src/net/mod.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "partial",
         "requires": [
           "T19"
         ],
         "evidence": [
-          "target/self-improvement/tasks/T17/resultado.md"
+          "target/self-improvement/tasks/T17/resultado.md",
+          "docs/self-improvement/seguimiento/T19.md"
         ],
-        "note": "Tests admission + build guest OK; e2e QEMU en T19."
+        "note": "T19 documenta guest_ok, exit 0, 12/12 con pesos 3B el 23-sep. Evidencia histórica, no revalidación del checkout actual. Acredita busy_429 y health_en_generacion; falta evidencia específica completa de cliente lento, cancelación y latencia de checkpoints."
       },
       "tracking": {
-        "updated_at": "2026-09-22",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
         "summary": "docs/self-improvement/seguimiento/T17.md",
         "evidence": [
-          "target/self-improvement/tasks/T17/resultado.md",
-          "cargo test -p soso-llm-api --features std --test admission",
-          "cargo build --release -p soso-llm (cwd user/)"
+          "docs/self-improvement/seguimiento/T19.md"
         ],
         "blocker": null,
-        "next_step": "T18-puertos-qemu.md o T19-qemu-e2e.md"
+        "next_step": "T74 y repetición de campaña; conservar por separado las comprobaciones de servicio y la aptitud del modelo."
       }
     },
     {
@@ -656,25 +662,25 @@
           "T49"
         ],
         "evidence": [
-          "target/self-improvement/tasks/T19/resultado.md (guest_ok, exit 0, 12/12)",
+          "target/self-improvement/tasks/T14/resultado-t19.md (guest_ok, exit 0, 12/12)",
           "target/test-llm-api-run.log",
           "target/test-llm-api-serial.log"
         ],
         "note": "Campaña guest completa con pesos reales el 2026-09-23: las 12 invariantes pasan contra soso en QEMU. Sigue siendo *partial* porque las aserciones las ejecuta el arnés del host, no el runner nativo (T49)."
       },
       "tracking": {
-        "updated_at": "2026-09-23",
-        "base": "95de3c162 + diff sucio (kernel T54/T57, userspace T55/T57, core T56, arnés T19)",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
         "summary": "docs/self-improvement/seguimiento/T19.md",
         "evidence": [
           "cargo xtask test-llm-api --model-dir target/qwen2.5-coder-3b-model --profile target/self-improvement/tasks/T19/model-lock.json -> guest_ok (exit 0)",
-          "target/self-improvement/tasks/T19/resultado.md",
+          "target/self-improvement/tasks/T14/resultado-t19.md",
           "cargo xtask test: TODO OK",
           "cargo xtask check: TODO OK",
           "cargo test -p soso-llm-api --features std --test e2e_suite (2 passed)"
         ],
         "blocker": null,
-        "next_step": "SI-2 necesita además T14 (go) contra el endpoint guest; T14 sigue bloqueada por T48. Repetir las aserciones desde el runner nativo en T49."
+        "next_step": "T74: campaña 7B íntegra, después GO T14; el runner nativo T49 sigue siendo una validación separada."
       }
     },
     {
@@ -683,12 +689,14 @@
       "title": "Configurar OpenCode para el proveedor soso",
       "milestone": "SI-3",
       "kind": "Configuración",
-      "status": "blocked",
+      "status": "pending",
       "depends_on": [
         "T14",
         "T19"
       ],
-      "entry_conditions": [],
+      "entry_conditions": [
+        "T14 tiene resultado go para la misma identidad de modelo y el banco completo; una campaña interrumpida o parcial no satisface esta entrada."
+      ],
       "contract_sections": "C3, C5–C6",
       "context": [
         "SELF_IMPROVEMENT.md"
@@ -702,12 +710,15 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-09-25",
-        "base": "7f0f6bb66 + diff de trabajo",
-        "summary": "No se empieza: T20 configura OpenCode para **usar** el modelo de soso, y [T14] cerró con **NO-GO**. Que sus dependencias estén `done` no basta — es justo el caso que la skill advierte: un informe no-go marcado `done` no habilita al consumidor. Un filtro que mira `status` y no el veredicto lo da por habilitado.",
-        "evidence": "docs/self-improvement/seguimiento/T14.md (veredicto NO-GO, 6/10, umbral 10); docs/self-improvement/T59-tool-calls.md (conclusión: «es el modelo»)",
-        "blocker": "T14 en NO-GO. De los cuatro casos que fallaban, T60 arregló dos (del servicio) pero **T59 concluyó que los otros dos son un límite del modelo**: no emite `tool_calls`, emite el JSON como texto. Configurar un agente contra un modelo que no sabe llamar herramientas produce una configuración que no puede funcionar. La campaña se repitió el 2026-09-25 con el arnés nuevo: **8/10, sigue NO-GO**. T60 confirmada (Q08 y Q10 pasan); Q04 y Q07 siguen mal porque el modelo escribe la llamada como texto.",
-        "next_step": "Desbloquea una decisión de plan, no una corrección: modelo mayor, parsear la llamada en el servicio, o agente nativo sin `tool_calls`."
+        "updated_at": "2026-09-27T02:55:00+02:00",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:68db191f3c5eceee4471a0037075742ac324ca4911413de951504181d9d2e5a2",
+        "summary": "docs/self-improvement/seguimiento/T20.md",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T14.md",
+          "target/self-improvement/tasks/T14/campana-t14-qwen2.5-coder-7b.json"
+        ],
+        "blocker": null,
+        "next_step": "Configurar OpenCode con la identidad qwen2.5-coder-7b y los presupuestos del informe del 27-sep."
       }
     },
     {
@@ -1350,10 +1361,12 @@
       "title": "Hacer reproducible el bootstrap de libstd para soso",
       "milestone": "SI-7",
       "kind": "Implementación de build",
-      "status": "in_progress",
+      "status": "done",
       "depends_on": [
         "T38",
-        "T50"
+        "T50",
+        "T72",
+        "T75"
       ],
       "entry_conditions": [
         "Revisión de toolchain de T38 y recursos de compilación disponibles."
@@ -1363,7 +1376,9 @@
         "scripts/soso-rust-bootstrap.sh",
         "config/rust-soso/apply-patches.sh",
         "config/rust-soso/config.toml",
-        "config/rust-soso/sys/pal/soso/mod.rs"
+        "config/rust-soso/sys/pal/soso/mod.rs",
+        "crates/soso-improve-core/src/receta.rs",
+        "config/rust-soso/tree/library/std/src/sys/pal/soso/mod.rs"
       ],
       "native_validation": {
         "status": "pending",
@@ -1376,12 +1391,17 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-09-25",
-        "base": "54f2efb54 + diff de trabajo (T39)",
-        "summary": "Pasos 1–2 de 5, y un hallazgo que vale más: **el bootstrap no podía completarse**. El `sed` del parche de `os/mod.rs` tiene los paréntesis desbalanceados (`\\)` sin `\\(` en una BRE), así que **falla en cualquier entrada**, y con `set -euo pipefail` abortaba `apply-patches.sh` justo ahí: los cuatro parches siguientes no se ejecutaban nunca en un vendor limpio. El vendor real lo confirma — `os/mod.rs` no tiene «soso» por ninguna parte mientras los otros seis parches sí están. Arreglado y comprobado de extremo a extremo contra un **vendor falso** (sin tocar el del usuario): rc=0, los parches aplican, y tres pasadas dejan los ficheros byte a byte iguales. Además, `soso_improve_core::receta` traduce el script a pasos declarativos (`pasos_libstd`), con copia de árbol recursiva, y 8 tests. Enchufada en el host como `soso-improve receta comprobar` (**sólo lectura**): sobre el vendor real señala a la primera los dos parches de `os/mod.rs` que faltan. Códigos distintos para «falta» (1) y «ancla rota» (2), porque el segundo no se arregla repitiendo la preparación. Y sobre el vendor que parcheó el script arreglado dice «0 por aplicar»: las dos implementaciones coinciden. Y enchufada también en el **guest**: comprobar la receta es leer ficheros, así que no depende de la plataforma. La suite lo acredita apuntando a un directorio vacío, que da una forma determinista (2 por aplicar · 8 con el ancla rota) y prueba despacho, capacidad e informe sin fingir un vendor que en soso no existe.",
-        "evidence": "target/self-improvement/tasks/T39/{bootstrap-roto.txt,receta-comprobar.txt,tests-receta.txt,suite.txt,check.txt}; paso de suite «soso-improve: receta del bootstrap (T39)»",
-        "blocker": "Pasos 4–5 (compilar libstd cruzada y ejecutar un programa enlazado en el guest) **bloqueados**: `wild`, el enlazador que nombra `targets/x86_64-unknown-soso.json`, no está instalado en este host (medido en T38). El paso 3 depende del build. No instalo la herramienta por mi cuenta: es el entorno del usuario.",
-        "next_step": "Exponer `receta aplicar` cuando se pueda compilar libstd y validar que deja el vendor igual que el script; T69 decide qué pasa con `dl.rs`; los pasos 3–5 cuando haya enlazador."
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
+        "summary": "docs/self-improvement/seguimiento/T39.md",
+        "evidence": [
+          "target/self-improvement/tasks/T39/build-std.txt",
+          "target/self-improvement/tasks/T39/sysroot-manifiesto.txt",
+          "target/self-improvement/tasks/T39/guest-smoke.txt",
+          "target/self-improvement/tasks/T39/resultado.md"
+        ],
+        "blocker": null,
+        "next_step": "T40–T42 para native_validation. T69 alinear rutas PAL si el build expone huecos."
       }
     },
     {
@@ -1390,7 +1410,7 @@
       "title": "Descomponer y acreditar el port del compilador",
       "milestone": "SI-7",
       "kind": "Especificación e integración condicionada",
-      "status": "pending",
+      "status": "in_progress",
       "depends_on": [
         "T38",
         "T39"
@@ -1401,7 +1421,7 @@
       "contract_sections": "C1, C6",
       "context": [
         "user/soso-rustc/src/main.rs",
-        "config/rust-soso/sys/pal/soso/dl.rs",
+        "config/rust-soso/tree/library/std/src/sys/pal/soso/mod.rs",
         "crates/soso-rt/src/lib.rs",
         "targets/x86_64-unknown-soso.json"
       ],
@@ -1410,6 +1430,18 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:2477f5245fd820ef6a9f1c35d372aebcce3124dc604f1c85499c2f2785ad3636",
+        "summary": "docs/self-improvement/seguimiento/T40.md",
+        "evidence": [
+          "target/self-improvement/tasks/T40/check-host.txt",
+          "target/self-improvement/tasks/T40/check-host-3.txt",
+          "docs/self-improvement/native/compiler-backlog.json"
+        ],
+        "blocker": "C-002: getrandom 0.3.3 sin backend; el check de host soso sale 1.",
+        "next_step": "Backend de getrandom 0.3.3 sobre SYS_GETRANDOM. No cerrar T40 hasta que rustc arranque en el guest."
       }
     },
     {
@@ -1923,18 +1955,18 @@
           "T49"
         ],
         "evidence": [
-          "target/self-improvement/tasks/T19/resultado.md",
+          "target/self-improvement/tasks/T14/resultado-t19.md",
           "target/suite-tras-t54.log"
         ],
         "note": "Ejecutado en guest QEMU: /health responde 200 desde el host y 6 invariantes de la campaña T19 pasan. Falta una prueba propia en el runner nativo (T49)."
       },
       "tracking": {
-        "updated_at": "2026-09-23",
-        "base": "95de3c162 + diff sucio (kernel T54 + arnés T19)",
-        "summary": "docs/self-improvement/seguimiento/T19.md",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
+        "summary": "docs/self-improvement/seguimiento/T54.md",
         "evidence": [
           "curl http://127.0.0.1:17299/health -> HTTP/1.1 200 OK",
-          "target/self-improvement/tasks/T19/resultado.md",
+          "target/self-improvement/tasks/T14/resultado-t19.md",
           "cargo xtask check: TODO OK",
           "cargo xtask test: TODO OK (suite QEMU completa, sin regresión de ask/askd)"
         ],
@@ -1967,17 +1999,17 @@
           "T49"
         ],
         "evidence": [
-          "target/self-improvement/tasks/T19/resultado.md",
+          "target/self-improvement/tasks/T14/resultado-t19.md",
           "cargo xtask test: TODO OK"
         ],
         "note": "Verificado en guest: la generación avanza y ask_con_serve deja de agotar su plazo."
       },
       "tracking": {
-        "updated_at": "2026-09-23",
-        "base": "95de3c162 + diff sucio",
-        "summary": "docs/self-improvement/seguimiento/T19.md",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
+        "summary": "docs/self-improvement/seguimiento/T55.md",
         "evidence": [
-          "target/self-improvement/tasks/T19/resultado.md",
+          "target/self-improvement/tasks/T14/resultado-t19.md",
           "cargo xtask test: TODO OK"
         ],
         "blocker": null,
@@ -2008,17 +2040,17 @@
         ],
         "evidence": [
           "cargo test -p soso-llm-core --test conversation_tools (17 passed)",
-          "target/self-improvement/tasks/T19/resultado.md"
+          "target/self-improvement/tasks/T14/resultado-t19.md"
         ],
         "note": "Prueba de host que reproduce el panic exacto del guest; verificada en la campaña."
       },
       "tracking": {
-        "updated_at": "2026-09-23",
-        "base": "95de3c162 + diff sucio",
-        "summary": "docs/self-improvement/seguimiento/T19.md",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
+        "summary": "docs/self-improvement/seguimiento/T56.md",
         "evidence": [
           "cargo test -p soso-llm-core --test conversation_tools (17 passed)",
-          "target/self-improvement/tasks/T19/resultado.md"
+          "target/self-improvement/tasks/T14/resultado-t19.md"
         ],
         "blocker": null,
         "next_step": "Auditar el resto del core en busca del mismo patrón de corte por bytes."
@@ -2053,17 +2085,17 @@
         ],
         "evidence": [
           "cargo xtask test: TODO OK (incluye forja: hola-std remoto)",
-          "target/self-improvement/tasks/T19/resultado.md"
+          "target/self-improvement/tasks/T14/resultado-t19.md"
         ],
         "note": "Verificado en guest: core_invariants pasa de 0,0 s (todo abortado) a tiempos reales de generación."
       },
       "tracking": {
-        "updated_at": "2026-09-23",
-        "base": "95de3c162 + diff sucio",
-        "summary": "docs/self-improvement/seguimiento/T19.md",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
+        "summary": "docs/self-improvement/seguimiento/T57.md",
         "evidence": [
           "cargo xtask test: TODO OK (incluye forja: hola-std remoto)",
-          "target/self-improvement/tasks/T19/resultado.md"
+          "target/self-improvement/tasks/T14/resultado-t19.md"
         ],
         "blocker": null,
         "next_step": "Detectar la desaparición real del cliente por estado del socket, no por EOF."
@@ -2097,9 +2129,9 @@
         "note": "Verificado contra el endpoint guest con pesos reales; el runner nativo es T49."
       },
       "tracking": {
-        "updated_at": "2026-09-23",
-        "base": "95de3c162 + diff sucio",
-        "summary": "docs/self-improvement/seguimiento/T14.md",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
+        "summary": "docs/self-improvement/seguimiento/T58.md",
         "evidence": [
           "docs/self-improvement/T58-respuesta-con-prompt.md",
           "target/t14-campana.log"
@@ -2138,16 +2170,16 @@
         "note": "Sonda de render en host y repetición de Q07 contra el endpoint guest."
       },
       "tracking": {
-        "updated_at": "2026-09-24",
-        "base": "95de3c162 + diff sucio",
-        "summary": "docs/self-improvement/seguimiento/T14.md",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
+        "summary": "docs/self-improvement/seguimiento/T59.md",
         "evidence": [
           "render de Q04 y Q07 correcto (sonda render_dump)",
           "Q07 repetido: el servicio rechaza con 400 porque el modelo no emite llamada",
           "Q04: el modelo repite la llamada con el resultado delante"
         ],
         "blocker": null,
-        "next_step": "Es límite del modelo; si SI-3 depende de herramientas, comparar otro perfil en T14 sin tocar el banco. El doble respuesta HTTP en streaming se lleva T60."
+        "next_step": "La comparación 7B ya empezó: T74 recupera la campaña; repetir T14 antes de cambiar perfil."
       },
       "resultado": "no era el servicio: es el modelo"
     },
@@ -2182,9 +2214,9 @@
         "note": "Verificado contra el guest con pesos reales; el runner nativo es T49."
       },
       "tracking": {
-        "updated_at": "2026-09-24",
-        "base": "95de3c162 + diff sucio",
-        "summary": "docs/self-improvement/seguimiento/T14.md",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
+        "summary": "docs/self-improvement/seguimiento/T60.md",
         "evidence": [
           "cargo test -p soso-llm-api --features std --test request (14)",
           "evaluar --caso Q08,Q10: ambos «bien»",
@@ -2221,16 +2253,16 @@
         "note": "Es kernel y la prueba corre dentro de soso entre dos procesos: la reproducción del interbloqueo y su ausencia se observan en el guest."
       },
       "tracking": {
-        "updated_at": "2026-09-24",
-        "base": "95de3c162 + diff sucio",
-        "summary": "docs/self-improvement/seguimiento/T47.md",
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:5df07f7a8286f45db05e89269e345b795291e4648725469fe9d1ff81d135e789",
+        "summary": "docs/self-improvement/seguimiento/T61.md",
         "evidence": [
           "cargo xtask check: TODO OK",
           "cargo xtask test: TODO OK",
           "target/self-improvement/tasks/T61/resultado.md"
         ],
         "blocker": null,
-        "next_step": "Con esto, T47 puede separar stdout y stderr; queda como mejora de esa ficha."
+        "next_step": "Conservar regresión de tuberías; T47 ya implementa el consumidor. Sin nueva implementación pendiente en T61."
       }
     },
     {
@@ -2484,7 +2516,46 @@
         "summary": "El binario se declaraba `wild` mientras el target y el bootstrap pedían `wild-soso`, así que ninguna de las dos rutas existía nunca — y como el envoltorio invoca `wild`, poner su directorio en el PATH lo hacía llamarse a sí mismo. Además el bootstrap y `xtask` apuntaban a `tools/*/target/release`, que no existen (son miembros del workspace), y el bootstrap compilaba sin `--release`. Un test ata el nombre del binario al `\"linker\"` del target.",
         "evidence": "cargo test -p wild-soso 1/1",
         "blocker": "",
-        "next_step": "`wild` sigue sin estar instalado, así que el target no puede enlazar: instalarlo o portarlo es T39–T42."
+        "next_step": "`wild` 0.10.0 está instalado (D3). El target sigue sin libstd: eso es T39–T42."
+      }
+    },
+    {
+      "id": "T69",
+      "file": "T69-apply-patches-no-completaba.md",
+      "title": "dl.rs se copia al vendor y nadie lo compila",
+      "milestone": "SI-7",
+      "kind": "Decisión pendiente de compilar",
+      "status": "done",
+      "depends_on": [
+        "T39"
+      ],
+      "entry_conditions": [
+        "Se puede compilar libstd para soso y ver si la PAL nueva usa dl."
+      ],
+      "contract_sections": "C6",
+      "context": [
+        "config/rust-soso/apply-patches.sh",
+        "config/rust-soso/sys/pal/soso/mod.rs",
+        "config/rust-soso/tree/library/std/src/sys/pal/soso/mod.rs"
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [
+          "T40"
+        ],
+        "evidence": [],
+        "note": "Decisión de la PAL del vendor; se acredita cuando libstd enlace."
+      },
+      "tracking": {
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:af5d42cd02435323cfec0082225d7e567741c0a719ca57cc498f9c6739657665",
+        "summary": "docs/self-improvement/seguimiento/T69.md",
+        "evidence": [
+          "target/self-improvement/tasks/T69/resultado.md",
+          "target/self-improvement/tasks/T39/build-std.txt"
+        ],
+        "blocker": null,
+        "next_step": "Ninguno en T69. La carga dinámica, si hace falta, es trabajo de T40."
       }
     },
     {
@@ -2514,6 +2585,351 @@
         "evidence": "sonda `senales`: sigterm-sobre-un-proceso-dormido = 0; sigkill = 137",
         "blocker": "Decisión: matar también a los bloqueados, declarar que SIGTERM sólo interrumpe, o implementar manejadores. Cambia la conducta de una señal y afecta a sosh, al arnés y a guiones existentes.",
         "next_step": "Elegir entre las tres opciones de la ficha. La sonda mide sin juzgar hasta entonces."
+      }
+    },
+    {
+      "id": "T71",
+      "file": "T71-vendor-sin-cache.md",
+      "title": "xtask buscaba el vendor de Rust en un sitio donde nunca está",
+      "milestone": "SI-7",
+      "kind": "Corrección acotada",
+      "status": "done",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C6",
+      "context": [
+        "xtask/src/main.rs",
+        "scripts/soso-rust-bootstrap.sh"
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [],
+        "evidence": [],
+        "note": "Herramienta de host; su función se acredita en el consumidor (T39)."
+      },
+      "tracking": {
+        "updated_at": "2026-09-25",
+        "base": "f6aff2212 + diff de trabajo",
+        "summary": "`cargo xtask rust-build-std` moría con «x.py: No such file or directory» señalando a un `x.py` que existía y se ejecutaba a mano. Las dos mitades del comando no ponían el vendor en el mismo sitio: el script usa `${XDG_CACHE_HOME:-$HOME/.cache}/soso-rust-vendor` y `xtask`, al caer a `HOME`, se dejaba el `.cache`. Sin `XDG_CACHE_HOME` definida —lo normal aquí— apuntaba a `$HOME/soso-rust-vendor`, que no existe; el `ENOENT` era del `current_dir`, no del programa. El comando de Comprobación de T39 no había funcionado nunca en este host. Descartada por medición la primera hipótesis (que `Command` no resuelve rutas relativas contra `current_dir`): relativo y absoluto dan los dos rc=0.",
+        "evidence": "cargo test -p xtask --bin xtask vendor_rust 2/2; mutación comprobada (left: /tmp/casa/soso-rust-vendor, right: /tmp/casa/.cache/soso-rust-vendor); target/self-improvement/tasks/T39/build-std.txt",
+        "blocker": "",
+        "next_step": "Destapa la cadena de T39: `install` como clave de `[build]`, `download-ci-llvm` incompatible con `download-rustc`, y `RUST_TARGET_PATH` sin poner."
+      }
+    },
+    {
+      "id": "T72",
+      "file": "T72-heap-de-libstd.md",
+      "title": "Compartir el alocador entre libsoso y la libstd de soso",
+      "milestone": "SI-7",
+      "kind": "Implementación del alocador compartido",
+      "status": "done",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C1, C6",
+      "context": [
+        "crates/soso-rt/src/lib.rs",
+        "user/libsoso/src/lib.rs",
+        "config/rust-soso/apply-patches.sh"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T39"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T72/sonda-guest.txt"
+        ],
+        "note": "Sonda guest libsoso monton 7/7, malos 0. El humo std sigue en T39: el alocador compila y el build falla por implicit_provenance_casts en random y futex."
+      },
+      "tracking": {
+        "updated_at": "2026-09-26T09:30:00+02:00",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:ab6bca552a5a19a9e837ab21a5410ee889e1ecd845bd443b2137112d9b9111f2",
+        "summary": "docs/self-improvement/seguimiento/T72.md",
+        "evidence": [
+          "target/self-improvement/tasks/T72/sonda-guest.txt",
+          "target/self-improvement/tasks/T72/rust-build-std.txt"
+        ],
+        "blocker": null,
+        "next_step": "Ninguno en T72. Los casts de procedencia de std quedan en T39; la sonda guest de la receta, en T75."
+      }
+    },
+    {
+      "id": "T73",
+      "file": "T73-futex-sin-plazo.md",
+      "title": "El futex de soso no tiene plazo, y Condvar::wait_timeout lo necesita",
+      "milestone": "SI-7",
+      "kind": "Corrección de kernel",
+      "status": "done",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C6",
+      "context": [
+        "kernel/src/task/syscall.rs",
+        "kernel/src/task/futex.rs",
+        "crates/soso-abi/src/lib.rs",
+        "crates/soso-rt/src/lib.rs"
+      ],
+      "native_validation": {
+        "status": "verified",
+        "requires": [],
+        "evidence": [
+          "target/self-improvement/tasks/T73/sonda.txt"
+        ],
+        "note": "Sonda `hilos` en QEMU: la espera con plazo expira (-110), el control devuelve 0 y la medición da 300 ms."
+      },
+      "tracking": {
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212 + diff de trabajo",
+        "summary": "`FUTEX_WAIT` ignoraba el cuarto argumento y esperaba sin plazo. Ahora es el plazo **relativo** en ms con 0 = sin plazo, como `read_timeout`/`ping`/`tcp_connect`/`tcp_accept`; `State::WaitingFutex` lleva `deadline_ms` igual que `WaitingPipe` (T61) y el planificador lo vence con `-ETIMEDOUT`, que es lo que distingue expirar de que te despierten. **No se toca `WAITERS` al vencer**: el orden de candados del futex es WAITERS → PROCS y ahí ya se tiene PROCS; invertirlo es como se produjo el abrazo mortal red/procesos. No hace falta, porque `wake` saca el pid antes de mirar su estado y una entrada rancia no se come un wakeup. Añadidos `libsoso::futex_wait_timeout`, `soso_rt::syscall4` y `sys/sync/futex/soso.rs` con soso en los cinco `cfg_select`. De paso se corrigió que las envolturas de syscall de `soso-rt` **no declaraban** `clobber_abi(\"C\")` —el kernel usa SSE y el target compila con AVX2—, que la libstd habría heredado entera.",
+        "evidence": "target/self-improvement/tasks/T73/{sonda.txt,suite.txt}; sonda `hilos`: futex/la-espera-con-plazo-expira ok (-110), futex/expirar-se-distingue-de-despertar ok (0), medición 300 ms; `std` baja de 6 errores a 2; suite completa tras el cambio de kernel: `cargo xtask test` TODO OK (suite.txt)",
+        "blocker": "",
+        "next_step": "Con T72 decidida, `std` debería compilar y T39 puede seguir con sus pasos 3 y 5."
+      }
+    },
+    {
+      "id": "T74",
+      "file": "T74-campana-7b-interrumpida.md",
+      "title": "Recuperar y acreditar la campaña interrumpida del modelo 7B",
+      "milestone": "SI-0 / SI-2",
+      "kind": "Diagnóstico e implementación acotada",
+      "status": "done",
+      "depends_on": [
+        "T14",
+        "T19"
+      ],
+      "entry_conditions": [
+        "Conservar el banco y el perfil C1 del 3B; disponer del 7B y QEMU con memoria suficiente."
+      ],
+      "contract_sections": "C2–C3, C5–C6",
+      "context": [
+        "xtask/src/test_llm_api.rs",
+        "crates/soso-improve-core/src/evaluacion.rs",
+        "crates/soso-improve-core/src/protocolo.rs",
+        "tools/soso-improve/src/lib.rs",
+        "docs/self-improvement/seguimiento/T14.md"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T14",
+          "T49"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T74/campana-10x3.log",
+          "target/self-improvement/tasks/T14/campana-t14-qwen2.5-coder-7b.json"
+        ],
+        "note": "Campaña 10×3 contra el guest, cobertura completa, NO-GO 8/10. El clasificador corrió en el host; dentro de soso sigue T49."
+      },
+      "tracking": {
+        "updated_at": "2026-09-26T13:15:00+02:00",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:4501064c9f3a030dec6e4c552030e28d153da087af62a0edcc6e6dfda9d72f9e",
+        "summary": "docs/self-improvement/seguimiento/T74.md",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T74.md",
+          "target/self-improvement/tasks/T74/campana-10x3.log",
+          "target/self-improvement/tasks/T14/campana-t14-qwen2.5-coder-7b.json"
+        ],
+        "blocker": null,
+        "next_step": "Ninguno en T74. T14 sigue NO-GO; T20 bloqueada. Reanudar T40."
+      }
+    },
+    {
+      "id": "T75",
+      "file": "T75-receta-bootstrap-desfasada.md",
+      "title": "Sincronizar la receta Rust con el bootstrap de libstd",
+      "milestone": "SI-7",
+      "kind": "Implementación de receta portable",
+      "status": "done",
+      "depends_on": [
+        "T38",
+        "T50"
+      ],
+      "entry_conditions": [
+        "Comparar contra la revisión fijada del vendor en copias temporales; no resetear el vendor del usuario."
+      ],
+      "contract_sections": "C6",
+      "context": [
+        "crates/soso-improve-core/src/receta.rs",
+        "config/rust-soso/apply-patches.sh",
+        "config/rust-soso/tree",
+        "tools/soso-improve/src/lib.rs",
+        "user/soso-improve/src/main.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T39",
+          "T49"
+        ],
+        "evidence": [],
+        "note": "Host: la receta iguala al script en copias de 32d94cc9. Guest: receta/espejo-resto-ajeno y el humo de directorio vacío corrieron dentro de soso (xtask exit 0). El toolchain nativo sigue pendiente de T39."
+      },
+      "tracking": {
+        "updated_at": "2026-09-26T09:50:00+02:00",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:a123906b35704d181fe320e91543deb4c900ce05f3a10257be978012a319cfdd",
+        "summary": "docs/self-improvement/seguimiento/T75.md",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T75.md",
+          "cargo test -p soso-improve --test receta --offline exit 0 (2/2)",
+          "cargo test -p soso-improve-core -p soso-improve --offline exit 0",
+          "cargo check -p soso-improve-core --no-default-features --offline exit 0",
+          "cargo build -p soso-improve (cwd user/) exit 0",
+          "huella receta 92fb8dfbe403ae9946c526057e53c28187eec5cdfc1d526d3156fc792db8504d",
+          "cargo xtask test -- --guest sys --only runner,receta exit 0: OK runner de pruebas en soso (receta/espejo-resto-ajeno, fallaron 0) y OK receta del bootstrap (receta: 27 pasos, 0 por aplicar · 27 con el ancla rota)"
+        ],
+        "blocker": "",
+        "next_step": "T75 cerrada. No declarar std compilada: el build sigue en T39. native_validation permanece pending."
+      }
+    },
+    {
+      "id": "T76",
+      "file": "T76-tokenizer-sin-retorno.md",
+      "title": "Tests de tokenizer que no pueden pasar en silencio",
+      "milestone": "SI-1",
+      "kind": "Corrección acotada de pruebas host",
+      "status": "done",
+      "depends_on": [
+        "T03",
+        "T06"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "",
+      "context": [
+        "crates/soso-llm-core/tests/conversation_render.rs",
+        "crates/soso-llm-api/tests/request.rs",
+        "tests/self-improvement/reference/tokenizer.som"
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [],
+        "evidence": [],
+        "note": "Veredicto de host; no acredita inferencia guest."
+      },
+      "tracking": {
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff T76",
+        "summary": "Cuatro tests contractuales fallan si falta tokenizer.som; request.rs usa reference/ como T06.",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T76.md",
+          "cargo test -p soso-llm-core --features std --test conversation_render → exit 0 (2 tests)",
+          "cargo test -p soso-llm-api --test request → exit 0 (14 tests)"
+        ],
+        "blocker": null,
+        "next_step": null
+      }
+    },
+    {
+      "id": "T77",
+      "file": "T77-simd-avx2.md",
+      "title": "Tests SIMD de matvec sin retorno silencioso",
+      "milestone": "SI-1",
+      "kind": "Corrección acotada de pruebas host",
+      "status": "done",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "",
+      "context": [
+        "crates/soso-llm-core/src/gemm.rs"
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [],
+        "evidence": [],
+        "note": "Veredicto de host; no acredita inferencia guest."
+      },
+      "tracking": {
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff T77",
+        "summary": "Tests escalares siempre activos; comparación AVX2 sólo con target-feature +avx2,+fma.",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T77.md",
+          "cargo test -p soso-llm-core --features std --lib gemm:: → exit 0 (7 passed)",
+          "RUSTFLAGS=-C target-feature=+avx2,+fma cargo test -p soso-llm-core --features std --lib gemm:: → exit 0 (10 passed)"
+        ],
+        "blocker": null,
+        "next_step": null
+      }
+    },
+    {
+      "id": "T78",
+      "file": "T78-entradas-integracion.md",
+      "title": "Entradas de integración ASR y banco sin ok silencioso",
+      "milestone": "SI-0",
+      "kind": "Corrección acotada de pruebas host",
+      "status": "done",
+      "depends_on": [
+        "T02",
+        "T76"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "",
+      "context": [
+        "crates/soso-llm-core/tests/asr.rs",
+        "tools/soso-improve/tests/banco.rs"
+      ],
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [],
+        "evidence": [],
+        "note": "Veredicto de host; perfiles SOSO_REQUIRE_ASR / SOSO_REQUIRE_RUSTC."
+      },
+      "tracking": {
+        "updated_at": "2026-09-26",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff T78",
+        "summary": "ASR ignored por defecto; banco exige rustc; variables de perfil CI.",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T78.md",
+          "cargo test -p soso-llm-core --features std --test asr → exit 0 (1 passed, 2 ignored)",
+          "cargo test -p soso-improve --test banco → exit 0 (16 passed)"
+        ],
+        "blocker": null,
+        "next_step": null
+      }
+    },
+    {
+      "id": "T79",
+      "file": "T79-relleno-q10.md",
+      "title": "El relleno de Q10 no rebasa el contexto del 7B",
+      "milestone": "SI-0 / SI-1",
+      "kind": "Corrección del arnés de evaluación",
+      "status": "done",
+      "depends_on": [
+        "T14",
+        "T74"
+      ],
+      "entry_conditions": [
+        "Campaña 7B completa con Q10 en plazo/429 y max_seq 131072 en el lock."
+      ],
+      "contract_sections": "C2, C5",
+      "context": [
+        "tools/soso-improve/src/evaluar.rs",
+        "xtask/src/test_llm_api.rs",
+        "crates/soso-llm-api/src/e2e.rs",
+        "crates/soso-llm-api/src/service.rs",
+        "user/soso-llm/src/serve.rs"
+      ],
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T14",
+          "T19"
+        ],
+        "evidence": [
+          "docs/self-improvement/seguimiento/T79.md",
+          "target/self-improvement/tasks/T14/campana-t14-qwen2.5-coder-7b.json"
+        ],
+        "note": "Q10 del 7B, tres veces bien, dentro de la campaña GO del 27-sep. La lanza el arnés del host."
+      },
+      "tracking": {
+        "updated_at": "2026-09-27T02:46:00+02:00",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:68db191f3c5eceee4471a0037075742ac324ca4911413de951504181d9d2e5a2",
+        "summary": "docs/self-improvement/seguimiento/T79.md",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T79.md",
+          "target/self-improvement/tasks/T14/campana-t14-qwen2.5-coder-7b.json"
+        ],
+        "blocker": null,
+        "next_step": null
       }
     }
   ],

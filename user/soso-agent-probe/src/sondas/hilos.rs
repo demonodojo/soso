@@ -290,5 +290,49 @@ pub fn ejecutar() -> Vec<Caso> {
         Caso::nuevo("temporizadores/el-reloj-de-pared-avanza", "avanzó", observado),
     );
 
+    // --- futex con plazo (T73) ---------------------------------------------
+    //
+    // Hasta T73, `futex_wait` sólo sabía esperar para siempre: el cuarto
+    // argumento se ignoraba en `FUTEX_WAIT`. Eso dejaba a cualquier espera con
+    // plazo —`Condvar::wait_timeout` de la libstd, el plazo de un pool—
+    // durmiendo sin vuelta, que es el defecto de T55 un nivel más abajo.
+    //
+    // Se mide lo que importa: que **expira** y que expirar **se distingue** de
+    // que te despierten. Lo segundo necesita su propio caso: sin él, «devuelve
+    // ETIMEDOUT» también lo cumpliría una implementación que devolviera
+    // ETIMEDOUT siempre.
+    static PLAZO: AtomicU32 = AtomicU32::new(7);
+
+    let antes = sys::uptime_ms();
+    let rc = sys::futex_wait_timeout(PLAZO.as_ptr() as *const u32, 7, 300);
+    let tardo = sys::uptime_ms().saturating_sub(antes);
+    // Se compara el **código**, no el texto: `errno_str(ETIMEDOUT)` es
+    // «timeout», y una expectativa escrita a mano con otro nombre falla sin
+    // que falle nada del sistema. Ya pasó tres veces en la sonda `vigilancia`.
+    anotar(
+        &mut casos,
+        Caso::nuevo(
+            "futex/la-espera-con-plazo-expira",
+            format!("{}", -abi::ETIMEDOUT),
+            format!("{rc}"),
+        ),
+    );
+
+    // Control: con el valor ya distinto, `futex_wait` no espera y vuelve con
+    // 0. Si este caso diera también ETIMEDOUT, el de arriba no probaría nada.
+    let rc = sys::futex_wait_timeout(PLAZO.as_ptr() as *const u32, 999, 300);
+    anotar(
+        &mut casos,
+        Caso::nuevo("futex/expirar-se-distingue-de-despertar", "0", errno(rc)),
+    );
+
+    // Medición, no veredicto: el PIT pierde tiempo durante el sondeo de disco,
+    // así que cuánto tardó exactamente no es algo que esta sonda deba juzgar.
+    // Se informa para que se vea si algún día se dispara.
+    anotar(
+        &mut casos,
+        Caso::observacion("futex/cuanto-tardo-el-plazo-de-300ms", format!("{tardo} ms")),
+    );
+
     casos
 }

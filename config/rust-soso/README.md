@@ -32,4 +32,4 @@
 
 Sysroot destino en guest: `/usr/lib/rustlib/x86_64-unknown-soso/`.
 
-Contingencia proc-macros: pre-expansión en host hasta que `dl.rs` cargue `.so`.
+Contingencia proc-macros: pre-expansión en host. La PAL antigua con `dl.rs` se retiró (T69): libstd no la declara.

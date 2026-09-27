@@ -15,11 +15,6 @@
   },
   "ausentes_en_el_host": [
     {
-      "herramienta": "wild",
-      "por_que_importa": "es el enlazador que nombra `targets/x86_64-unknown-soso.json` y al que delega `tools/wild-soso`. Sin él, ese target no puede enlazar.",
-      "comprobado": "command -v wild → no está"
-    },
-    {
       "herramienta": "ld.lld / llvm-ar / nasm",
       "por_que_importa": "no hacen falta hoy: el camino que **sí** funciona (`user/x86_64-soso-user.json`) usa `rust-lld`, que viene dentro del sysroot de rustc.",
       "comprobado": "command -v → no están; rust-lld sí está en el sysroot"
@@ -71,12 +66,22 @@
       "ficha_abierta": "T67 (hecha)"
     },
     {
+      "id": "wild",
+      "papel": "enlazador al que delega `wild-soso` en la ruta A (`x86_64-unknown-soso`)",
+      "origen": "cargo install --locked wild-linker",
+      "version": "0.10.0",
+      "ruta": "/home/jmdiez/.cargo/bin/wild",
+      "ejecuta_en": "host Linux",
+      "estado": "instalado; enlaza un ELF64 estático que arranca",
+      "prueba_de_resultado": "`wild --version` → Wild 0.10.0. Enlazó un `_start` en ensamblador a un ELF64 EXEC estático (`readelf -h`: EXEC, x86-64) y ese binario salió con 0. No acredita el target soso: libstd para `x86_64-unknown-soso` sigue sin construirse."
+    },
+    {
       "id": "wild-soso",
       "papel": "enlazador del target x86_64-unknown-soso",
       "origen": "tools/wild-soso (envoltorio propio de `wild`)",
       "ejecuta_en": "host Linux",
-      "estado": "nombres alineados (T68 hecha); **sigue sin poder enlazar** porque `wild` no está instalado",
-      "prueba_de_resultado": "`[[bin]] name = \"wild-soso\"` coincide ahora con el `\"linker\"` del target, y un test lo ata. El bootstrap y `xtask` apuntan a `target/release` del workspace, que es donde el build deja las cosas. Sin `wild` en el PATH, el envoltorio sale con 127 y explica cómo instalarlo.",
+      "estado": "nombres alineados (T68 hecha); delega en `wild` 0.10.0, que ya está en el PATH",
+      "prueba_de_resultado": "`[[bin]] name = \"wild-soso\"` coincide con el `\"linker\"` del target, y un test lo ata. El bootstrap y `xtask` apuntan a `target/release` del workspace. `wild` 0.10.0 enlaza un ELF64 que arranca; el programa de guest con libstd de soso sigue sin existir.",
       "ficha_abierta": "T68 (hecha)"
     },
     {

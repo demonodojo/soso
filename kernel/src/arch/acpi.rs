@@ -48,6 +48,28 @@ pub struct McfgAllocation {
 static MADT: Once<MadtInfo> = Once::new();
 static MCFG: Once<Option<McfgAllocation>> = Once::new();
 static RSDP: Once<u64> = Once::new();
+static ENERGIA: Once<Option<Energia>> = Once::new();
+
+/// Registro fijo del FADT: PM1 o RESET. `space` 0 = memoria, 1 = E/S.
+#[derive(Clone, Copy)]
+pub struct RegAcpi {
+    pub space: u8,
+    pub width: u8,
+    pub addr: u64,
+}
+
+/// Lo que hace falta para S5 y para el reset ACPI. `None` si no hay FADT.
+#[derive(Clone, Copy)]
+pub struct Energia {
+    pub smi_cmd: u32,
+    pub acpi_enable: u8,
+    pub pm1a: Option<RegAcpi>,
+    pub pm1b: Option<RegAcpi>,
+    pub slp_typa: Option<u8>,
+    pub slp_typb: Option<u8>,
+    pub reset_reg: Option<RegAcpi>,
+    pub reset_val: u8,
+}
 
 /// Recorre RSDT/XSDT y cachea MADT + MCFG. Idempotente.
 pub fn init(rsdp_phys: u64) {
@@ -87,6 +109,8 @@ pub fn init(rsdp_phys: u64) {
         madt.ioapics.len(),
         madt.overrides.len()
     );
+    ENERGIA.call_once(|| parse_energia(rsdp_phys));
+    anunciar_energia();
 }
 
 pub fn madt() -> &'static MadtInfo {
@@ -95,6 +119,11 @@ pub fn madt() -> &'static MadtInfo {
 
 pub fn mcfg() -> Option<&'static McfgAllocation> {
     MCFG.get().and_then(|o| o.as_ref())
+}
+
+/// FADT ya parseado. `None` si `init` no corrió o el firmware no trae FACP.
+pub fn energia() -> Option<&'static Energia> {
+    ENERGIA.get().and_then(|o| o.as_ref())
 }
 
 /// Compat: APIC IDs (vacío si aún no hay init).
@@ -119,10 +148,22 @@ pub fn tabla_bytes(sig: &[u8; 4]) -> Option<&'static [u8]> {
 }
 
 fn find_table(rsdp_phys: u64, sig: &[u8; 4]) -> Option<u64> {
+    let mut found = None;
+    let ok = visitar_tablas(rsdp_phys, sig, |table| {
+        found = Some(table);
+        true
+    });
+    if !ok {
+        crate::println!("acpi: RSDP inválido");
+    }
+    found
+}
+
+/// `true` si el RSDP es válido. `f` devuelve `true` para dejar de recorrer.
+fn visitar_tablas(rsdp_phys: u64, sig: &[u8; 4], mut f: impl FnMut(u64) -> bool) -> bool {
     let rsdp = bytes(rsdp_phys, 36);
     if &rsdp[0..8] != b"RSD PTR " {
-        crate::println!("acpi: RSDP inválido");
-        return None;
+        return false;
     }
     let revision = rsdp[15];
     let (sdt_phys, wide) = if revision >= 2 {
@@ -130,8 +171,10 @@ fn find_table(rsdp_phys: u64, sig: &[u8; 4]) -> Option<u64> {
     } else {
         (leer::<u32>(rsdp_phys + 16) as u64, false)
     };
-
     let sdt_len = leer::<u32>(sdt_phys + 4) as u64;
+    if !(36..1024 * 1024).contains(&sdt_len) {
+        return true;
+    }
     let entry_size = if wide { 8 } else { 4 };
     let n = (sdt_len - 36) / entry_size;
     for i in 0..n {
@@ -141,11 +184,11 @@ fn find_table(rsdp_phys: u64, sig: &[u8; 4]) -> Option<u64> {
         } else {
             leer::<u32>(ptr) as u64
         };
-        if bytes(table, 4) == sig {
-            return Some(table);
+        if table != 0 && bytes(table, 4) == sig && f(table) {
+            break;
         }
     }
-    None
+    true
 }
 
 fn parse_madt(madt: u64, info: &mut MadtInfo) {
@@ -211,4 +254,231 @@ fn parse_mcfg(mcfg: u64) -> Option<McfgAllocation> {
         bus_start,
         bus_end,
     })
+}
+
+fn anunciar_energia() {
+    let Some(e) = energia() else {
+        crate::println!("acpi: FADT no encontrado; halt no corta la alimentación");
+        return;
+    };
+    match (e.pm1a, e.slp_typa) {
+        (Some(pm), Some(typ)) => {
+            let b = e.slp_typb.unwrap_or(typ);
+            match e.reset_reg {
+                Some(r) => crate::println!(
+                    "acpi: apagado {} S5={typ}/{b} reset={}",
+                    fmt_reg(pm),
+                    fmt_reg(r)
+                ),
+                None => crate::println!("acpi: apagado {} S5={typ}/{b}", fmt_reg(pm)),
+            }
+        }
+        _ => crate::println!("acpi: FADT sin _S5_; halt no corta la alimentación"),
+    }
+}
+
+fn fmt_reg(r: RegAcpi) -> alloc::string::String {
+    let clase = if r.space == 0 { "mem" } else { "io" };
+    alloc::format!("{clase}:{:#x}", r.addr)
+}
+
+fn parse_energia(rsdp: u64) -> Option<Energia> {
+    let fadt = find_table(rsdp, b"FACP")?;
+    if bytes(fadt, 4) != b"FACP" {
+        return None;
+    }
+    let len = leer::<u32>(fadt + 4) as usize;
+    // ACPI 1.0 llega hasta Flags (offset 112). PM1a_CNT está en 64.
+    if !(68..1024 * 1024).contains(&len) {
+        return None;
+    }
+    let smi_cmd = if len >= 52 {
+        leer::<u32>(fadt + 48)
+    } else {
+        0
+    };
+    let acpi_enable = if len >= 53 { leer::<u8>(fadt + 52) } else { 0 };
+    let mut pm1a = reg_io(leer::<u32>(fadt + 64));
+    let mut pm1b = if len >= 72 {
+        reg_io(leer::<u32>(fadt + 68))
+    } else {
+        None
+    };
+    // Los X_ del FADT mandan cuando la dirección no es cero.
+    if len >= 184 {
+        if let Some(r) = reg_gas(fadt + 172, 16) {
+            pm1a = Some(r);
+        }
+    }
+    if len >= 196 {
+        if let Some(r) = reg_gas(fadt + 184, 16) {
+            pm1b = Some(r);
+        }
+    }
+    let mut reset_reg = None;
+    let mut reset_val = 0u8;
+    if len >= 129 {
+        let flags = leer::<u32>(fadt + 112);
+        if flags & (1 << 10) != 0 {
+            reset_val = leer::<u8>(fadt + 128);
+            reset_reg = reg_gas(fadt + 116, 8);
+        }
+    }
+    let (slp_typa, slp_typb) = buscar_s5(rsdp, dsdt_phys(fadt, len));
+    Some(Energia {
+        smi_cmd,
+        acpi_enable,
+        pm1a,
+        pm1b,
+        slp_typa,
+        slp_typb,
+        reset_reg,
+        reset_val,
+    })
+}
+
+fn reg_io(port: u32) -> Option<RegAcpi> {
+    if port == 0 || port > 0xffff {
+        return None;
+    }
+    Some(RegAcpi {
+        space: 1,
+        width: 16,
+        addr: port as u64,
+    })
+}
+
+/// Generic Address Structure de 12 bytes. `ancho` si el bit width del GAS no vale.
+fn reg_gas(phys: u64, ancho: u8) -> Option<RegAcpi> {
+    let space = leer::<u8>(phys);
+    let bit_width = leer::<u8>(phys + 1);
+    let addr = leer::<u64>(phys + 4);
+    if addr == 0 || (space != 0 && space != 1) {
+        return None;
+    }
+    if space == 1 && addr > 0xffff {
+        return None;
+    }
+    // PM1 pide al menos 16 bits: SLP_EN es el bit 13. Un GAS que diga 8
+    // no puede expresar el apagado.
+    let width = match bit_width {
+        8 | 16 | 32 if bit_width >= ancho => bit_width,
+        _ => ancho,
+    };
+    Some(RegAcpi { space, width, addr })
+}
+
+fn dsdt_phys(fadt: u64, len: usize) -> Option<u64> {
+    if len >= 148 {
+        let x = leer::<u64>(fadt + 140);
+        if x != 0 {
+            return Some(x);
+        }
+    }
+    if len >= 44 {
+        let d = leer::<u32>(fadt + 40);
+        if d != 0 {
+            return Some(d as u64);
+        }
+    }
+    None
+}
+
+fn buscar_s5(rsdp: u64, dsdt: Option<u64>) -> (Option<u8>, Option<u8>) {
+    if let Some(p) = dsdt {
+        if let Some(v) = slp_s5_en(p, b"DSDT") {
+            return (Some(v.0), Some(v.1));
+        }
+    }
+    let mut hallado = None;
+    let _ = visitar_tablas(rsdp, b"SSDT", |p| {
+        if hallado.is_some() {
+            return true;
+        }
+        if let Some(v) = slp_s5_en(p, b"SSDT") {
+            hallado = Some(v);
+            return true;
+        }
+        false
+    });
+    match hallado {
+        Some((a, b)) => (Some(a), Some(b)),
+        None => (None, None),
+    }
+}
+
+fn slp_s5_en(phys: u64, sig: &[u8; 4]) -> Option<(u8, u8)> {
+    if bytes(phys, 4) != sig {
+        return None;
+    }
+    let len = leer::<u32>(phys + 4) as usize;
+    if !(36..=1024 * 1024).contains(&len) {
+        return None;
+    }
+    slp_s5(bytes(phys, len))
+}
+
+/// `_S5_` del DSDT/SSDT: `NameOp` + paquete AML con SLP_TYPa y SLP_TYPb.
+fn slp_s5(aml: &[u8]) -> Option<(u8, u8)> {
+    let mut i = 0;
+    while i + 5 < aml.len() {
+        if &aml[i..i + 4] == b"_S5_" {
+            let name_op = (i >= 1 && aml[i - 1] == 0x08)
+                || (i >= 2 && aml[i - 2] == 0x08 && aml[i - 1] == b'\\');
+            if name_op && aml[i + 4] == 0x12 {
+                if let Some(v) = enteros_paquete(aml, i + 4) {
+                    return Some(v);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn enteros_paquete(aml: &[u8], p: usize) -> Option<(u8, u8)> {
+    let mut j = p + 1;
+    let extra = (*aml.get(j)? >> 6) as usize;
+    j = j.checked_add(1 + extra)?;
+    if j >= aml.len() {
+        return None;
+    }
+    let n = aml[j] as usize;
+    j += 1;
+    if n == 0 {
+        return None;
+    }
+    let (a, j) = aml_entero(aml, j)?;
+    let b = if n >= 2 {
+        aml_entero(aml, j).map(|(v, _)| v).unwrap_or(a)
+    } else {
+        a
+    };
+    Some(((a as u8) & 7, (b as u8) & 7))
+}
+
+fn aml_entero(aml: &[u8], j: usize) -> Option<(u64, usize)> {
+    let b = *aml.get(j)?;
+    match b {
+        0x00 => Some((0, j + 1)),
+        0x01 => Some((1, j + 1)),
+        0xff => Some((u64::MAX, j + 1)),
+        0x0a => Some((*aml.get(j + 1)? as u64, j + 2)),
+        0x0b => {
+            let lo = *aml.get(j + 1)?;
+            let hi = *aml.get(j + 2)?;
+            Some((u16::from_le_bytes([lo, hi]) as u64, j + 3))
+        }
+        0x0c => {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(aml.get(j + 1..j + 5)?);
+            Some((u32::from_le_bytes(buf) as u64, j + 5))
+        }
+        0x0e => {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(aml.get(j + 1..j + 9)?);
+            Some((u64::from_le_bytes(buf), j + 9))
+        }
+        _ => None,
+    }
 }

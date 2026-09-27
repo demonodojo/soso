@@ -169,4 +169,9 @@ de T14 como límite del modelo, no como una corrección pendiente eterna.
 
 ## Ejecución nativa
 
-Aplicar [NATIVO.md](NATIVO.md). Validación nativa: **pendiente**.
+Aplicar [NATIVO.md](NATIVO.md). Validación nativa: **parcial**, según la evidencia histórica del catálogo. No
+se ha repetido en esta revisión.
+
+## Revisión del 26-sep-2026
+
+Sincronización documental, sin reejecución. Ver [seguimiento/T59.md](seguimiento/T59.md).

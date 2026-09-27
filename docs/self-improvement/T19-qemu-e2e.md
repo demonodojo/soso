@@ -73,4 +73,9 @@ del hito en la misma sesión.
 
 Aplicar [NATIVO.md](NATIVO.md). Mover aserciones reutilizables a módulos portables y ejecutarlas con T49. xtask arranca QEMU solo en laboratorio; T43 aporta destino y control nativos para la campaña final.
 
-Validación nativa: **pendiente**. Condiciones adicionales: [T48](T48-reloj-red.md), [T49](T49-pruebas-guest.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).
+Validación nativa: **parcial**, según la evidencia histórica del catálogo. No
+se ha repetido en esta revisión. Condiciones adicionales: [T48](T48-reloj-red.md), [T49](T49-pruebas-guest.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).
+
+## Revisión del 26-sep-2026
+
+Sincronización documental, sin reejecución. Ver [seguimiento/T19.md](seguimiento/T19.md).

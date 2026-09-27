@@ -1,6 +1,6 @@
 # T16 — Servir HTTP en guest con el modelo residente
 
-**Hito:** SI-2 · **Tipo:** Implementación guest · **Estado:** hecho (validación nativa / T14 go pendientes).
+**Hito:** SI-2 · **Tipo:** Implementación guest · **Estado:** hecho (guest parcial; T14 go pendiente).
 
 **Dependencias:** [T10](T10-api-json.md), [T11](T11-http.md), [T12](T12-respuestas-sse.md), [T14](T14-evaluacion-modelo.md), [T15](T15-sesion-residente.md)
 
@@ -58,4 +58,11 @@ del hito en la misma sesión.
 
 Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
 
-Validación nativa: **pendiente** (humo loopback guest con T18). Condición de entrada **T14 go** sin cumplir. Evidencia: `target/self-improvement/tasks/T16/resultado.md`, `seguimiento/T16.md`.
+Validación nativa: **parcial**. T19 documenta 12/12 invariantes guest del 23-sep;
+no se ha revalidado el checkout actual. Condición de entrada **T14 go** sin cumplir. Evidencia: `target/self-improvement/tasks/T16/resultado.md`, `seguimiento/T16.md`.
+
+## Revisión del 26-sep-2026
+
+Estado y siguiente paso sincronizados con el catálogo; ver
+[seguimiento/T16.md](seguimiento/T16.md) y
+[revisión del plan](seguimiento/REVISION-2026-09-26.md).

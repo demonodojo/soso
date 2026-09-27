@@ -1,10 +1,28 @@
 # Perfil del modelo candidato
 
 **Ficha:** [T03](T03-perfil-modelo.md). **Fecha:** 16 de septiembre de 2026.
-**Estado:** perfil publicado; **la calidad sigue sin medir** — eso es
-[T14](T14-evaluacion-modelo.md), que decidirá si sirve para el agente.
+**Estado (27-sep-2026):** el perfil elegido es **Qwen2.5-Coder-7B-Instruct**
+(`qwen2.5-coder-7b`, id `soso-coder`). T14 midió GO 10/10 con cobertura
+completa. El 3B queda como candidato anterior, NO-GO 8/10.
 
-## Qué modelo
+## Perfil elegido
+
+| Campo | Valor |
+|---|---|
+| Repositorio | `Qwen/Qwen2.5-Coder-7B-Instruct` |
+| Familia | `qwen2` |
+| Capas / vocab / contexto | 28 · 152 064 · 131 072 |
+| Convertido en | `target/qwen2.5-coder-7b-model` |
+| Nombre en el lock | `qwen2.5-coder-7b` |
+| Lock | `target/self-improvement/tasks/T14/model-lock-7b.json` |
+| Medición | GO 10/10, 27-sep-2026, `campana-t14-qwen2.5-coder-7b.json` |
+| Presupuesto | mediana 160 212 ms, máximo 593 024 ms, timeout sugerido 1 186 048 ms, tokens de salida máx 19 |
+
+La revisión Hugging Face del lock figura como desconocida. El selector del
+live USB (`default_live_spec`) sigue en `qwen3-4b-instruct-2507`; no es este
+perfil.
+
+## Candidato anterior (3B)
 
 | Campo | Valor |
 |---|---|
@@ -16,8 +34,14 @@
 | Formato del tokenizer | `.som` **v2** con las 151 387 fusiones BPE (T52/T53) |
 | Catálogo del proyecto | `qwen2.5-coder-3b` en [`xtask/src/live_models.rs`](../../xtask/src/live_models.rs) |
 
-Es el candidato que fija C1 del [contrato](CONTRATO.md). Los hashes de cada
-pieza —los `.som` y los archivos originales— están en el `model-lock.json` que
+El nombre del catálogo live y el nombre interno del artefacto son distintos:
+el informe 3B y el lock regenerado de T19 usan `qwen2.5-coder-3b-merges`.
+El lock histórico de T03 no identifica la conversión posterior a T52/T53.
+Conservar ambos con su fecha; no mezclar hashes ni nombres entre campañas.
+
+Fue el candidato de T03. El 25-sep midió NO-GO 8/10 y ya no es el perfil
+elegido. Los hashes de cada pieza —los `.som` y los archivos originales—
+están en el `model-lock.json` que
 escribe `soso-improve modelo perfil`; su formato está en
 [`model-profile.schema.json`](../../tests/self-improvement/model-profile.schema.json).
 
@@ -52,7 +76,7 @@ y la generación arranca con `<|im_start|>assistant\n`.
   `<tool_response>` … `</tool_response>`.
 
 Esto es texto, no una API: **que la plantilla sepa escribir `<tool_call>` no
-demuestra que el modelo las use bien**. C2 ya lo dice y T14 lo medirá.
+demuestra que el modelo las use bien**. T14 ya midió esa limitación con el 3B.
 
 ## Paradas
 

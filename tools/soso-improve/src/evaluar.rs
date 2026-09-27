@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use soso_improve_core::caso::{self, CasoCargado};
+use soso_improve_core::caso::{self, Caso, CasoCargado};
 use soso_improve_core::cli::Codigo;
 use soso_improve_core::entorno::Archivos;
 use soso_improve_core::evaluacion::{
@@ -16,6 +16,8 @@ use soso_improve_core::evaluacion::{
 use soso_improve_core::protocolo;
 use soso_improve_core::tiempo::{Plazo, Reloj};
 use soso_improve_core::{unir, Error, Resultado};
+use soso_llm_api::MAX_BODY_BYTES;
+use soso_llm_core::tokenizer::Tokenizer;
 
 use crate::banco::{raiz_banco, raiz_reservada};
 use crate::sistema::{Host, RelojHost};
@@ -173,6 +175,8 @@ fn casos_protocolo<'a>(
     reservado: &str,
     casos: &'a [CasoCargado],
     jueces: &'a mut Vec<Box<dyn Fn(&str) -> Result<(), String>>>,
+    contexto: u32,
+    tokeniza: Option<&Tokenizer>,
 ) -> Resultado<Vec<(String, String, String)>> {
     let _ = jueces;
     let mut fuera = Vec::new();
@@ -194,7 +198,7 @@ fn casos_protocolo<'a>(
         // petición **cabe**, el servidor genera y contesta 200 — correcto—, y
         // el informe lo apunta como fallo del servicio. Fue el caso Q10 de la
         // campaña del 23-sep.
-        let peticion = expandir_relleno(banco, &c.caso, &peticion)?;
+        let peticion = expandir_relleno(banco, &c.caso, &peticion, contexto, tokeniza)?;
         let esperado_ruta = unir(reservado, &format!("{}/esperado.json", c.caso.id));
         let esperado = String::from_utf8(Host.leer(&esperado_ruta)?)
             .map_err(|_| Error::formato(format!("{}: esperado no UTF-8", c.caso.id)))?;
@@ -203,28 +207,23 @@ fn casos_protocolo<'a>(
     Ok(fuera)
 }
 
-/// Cuántos bytes de prompt hacen falta para pasarse del contexto declarado.
+/// Bytes de relleno con la heurística de ocho bytes por token.
 ///
-/// **Quedarse corto sale caro.** Con cuatro bytes por token el relleno cupo
-/// dentro del contexto, el servidor aceptó la petición y se puso a generar 512
-/// tokens: doce minutos de CPU y un cliente que se rinde por plazo. El informe
-/// lo apuntó como `plazo`, que no era. Por eso el factor es ahora **ocho**
-/// bytes por token: pasarse de relleno sólo cuesta unos kilobytes de cuerpo
-/// —el tope es 1 MiB—, mientras que quedarse corto cuesta una generación
-/// entera y un diagnóstico equivocado.
-///
-/// La forma exacta sería tokenizar aquí, pero eso obliga a pasarle a la orden
-/// el directorio del modelo además de su nombre de catálogo; se deja anotado
-/// como mejora, no como deuda silenciosa.
+/// Sirve cuando no hay tokenizer. Con el 7B (`max_seq` 131072) esa cuenta
+/// pasa de 1 MiB, que es el tope del cuerpo HTTP, y el servidor contestaría
+/// 413 en vez de 422. En ese caso hay que tokenizar: el párrafo del banco
+/// sale a unos 4,4 bytes por token y sí cabe.
 fn bytes_para_rebasar(context_tokens: u32) -> usize {
     (context_tokens as usize).saturating_mul(8).saturating_add(16_384)
 }
 
-/// Sustituye `{relleno}` repitiendo el `relleno.txt` del caso.
+/// Sustituye `{relleno}` hasta pasarse del contexto del modelo.
 fn expandir_relleno(
     banco: &str,
-    caso: &soso_improve_core::caso::Caso,
+    caso: &Caso,
     peticion: &str,
+    contexto: u32,
+    tokeniza: Option<&Tokenizer>,
 ) -> Resultado<String> {
     if !peticion.contains("{relleno}") {
         return Ok(String::from(peticion));
@@ -246,22 +245,81 @@ fn expandir_relleno(
     if trozo.is_empty() {
         return Err(Error::uso(format!("{}: el relleno está vacío", caso.id)));
     }
-    let objetivo = bytes_para_rebasar(CONTEXTO_DECLARADO);
-    let veces = objetivo.div_ceil(trozo.len()).max(1);
-    let mut relleno = String::with_capacity(veces * (trozo.len() + 1));
+    let relleno = match tokeniza {
+        Some(tok) => relleno_por_tokens(trozo, contexto, &|texto| tok.encode(texto).len())?,
+        None => {
+            let objetivo = bytes_para_rebasar(contexto);
+            if objetivo > MAX_BODY_BYTES {
+                return Err(Error::uso(format!(
+                    "{}: el contexto de {contexto} tokens no cabe en el cuerpo HTTP \
+                     con la heurística de 8 bytes/token; pasa --modelo-dir para tokenizar",
+                    caso.id
+                )));
+            }
+            repetir_trozo(trozo, objetivo.div_ceil(trozo.len()).max(1))
+        }
+    };
+    let armada = incrustar_relleno(peticion, &relleno);
+    if armada.len() > MAX_BODY_BYTES {
+        return Err(Error::uso(format!(
+            "{}: el relleno que rebasa {contexto} tokens ocupa {} bytes y el cuerpo admite {}",
+            caso.id,
+            armada.len(),
+            MAX_BODY_BYTES
+        )));
+    }
+    Ok(armada)
+}
+
+/// Repite el trozo hasta que su tokenización supere `contexto`.
+///
+/// El relleno solo, sin la plantilla ni la reserva de salida, ya tiene que
+/// pasarse: lo que se añada después sólo hace el prompt más largo.
+fn relleno_por_tokens(
+    trozo: &str,
+    contexto: u32,
+    contar: &dyn Fn(&str) -> usize,
+) -> Resultado<String> {
+    let pieza_tokens = contar(trozo).max(1);
+    let mut veces = (contexto as usize).div_ceil(pieza_tokens).saturating_add(1);
+    for _ in 0..4 {
+        let relleno = repetir_trozo(trozo, veces);
+        let n = contar(&relleno);
+        if n > contexto as usize {
+            return Ok(relleno);
+        }
+        let faltan = (contexto as usize + 1 - n).div_ceil(pieza_tokens).max(1);
+        veces = veces.saturating_add(faltan);
+    }
+    Err(Error::uso(format!(
+        "no consigo un relleno de más de {contexto} tokens"
+    )))
+}
+
+fn repetir_trozo(trozo: &str, veces: usize) -> String {
+    let mut relleno = String::with_capacity(veces.saturating_mul(trozo.len().saturating_add(1)));
     for _ in 0..veces {
         relleno.push_str(trozo);
         relleno.push(' ');
     }
-    // Por JSON, no a mano: el relleno va dentro de una cadena y hay que
-    // escaparlo bien.
-    let como_json = serde_json::Value::String(relleno).to_string();
-    let sin_comillas = &como_json[1..como_json.len() - 1];
-    Ok(peticion.replace("{relleno}", sin_comillas))
+    relleno
 }
 
-/// Contexto que declara el perfil del modelo fijado (T03: `max_seq` 32768).
+/// Por JSON, no a mano: el relleno va dentro de una cadena y hay que escaparlo.
+fn incrustar_relleno(peticion: &str, relleno: &str) -> String {
+    let como_json = serde_json::Value::String(relleno.to_string()).to_string();
+    let sin_comillas = &como_json[1..como_json.len() - 1];
+    peticion.replace("{relleno}", sin_comillas)
+}
+
+/// Contexto del 3B cuando la campaña no dice otro. El 7B declara 131072.
 const CONTEXTO_DECLARADO: u32 = 32_768;
+
+fn cargar_tokenizer(dir: &str) -> Resultado<Tokenizer> {
+    let ruta = unir(dir, "tokenizer.som");
+    let datos = Host.leer(&ruta)?;
+    Tokenizer::parse(&datos).map_err(|_| Error::formato(format!("{ruta}: tokenizer.som inválido")))
+}
 
 pub fn evaluar(opciones: &Opciones) -> Resultado<i32> {
     let banco = raiz_banco(opciones);
@@ -297,9 +355,29 @@ pub fn evaluar(opciones: &Opciones) -> Resultado<i32> {
         .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
         .unwrap_or_default();
 
+    let contexto: u32 = match opciones.uno("contexto") {
+        Some(s) => s.parse().map_err(|_| Error::uso("--contexto inválido"))?,
+        None => CONTEXTO_DECLARADO,
+    };
+    if contexto == 0 {
+        return Err(Error::uso("--contexto tiene que ser mayor que cero"));
+    }
+    let tokeniza = match opciones.uno("modelo-dir").filter(|s| !s.is_empty()) {
+        Some(dir) => Some(cargar_tokenizer(dir)?),
+        None => None,
+    };
+
     let cargados = caso::cargar(&Host, &banco)?;
     let mut jueces: Vec<Box<dyn Fn(&str) -> Result<(), String>>> = Vec::new();
-    let mut crudos = casos_protocolo(&banco, &reservado, &cargados, &mut jueces)?;
+    let mut crudos = casos_protocolo(
+        &banco,
+        &reservado,
+        &cargados,
+        &mut jueces,
+        contexto,
+        tokeniza.as_ref(),
+    )?;
+    let casos_en_banco = crudos.len();
     if !solo.is_empty() {
         crudos.retain(|(id, _, _)| solo.iter().any(|s| s == id));
         if crudos.is_empty() {
@@ -395,6 +473,7 @@ pub fn evaluar(opciones: &Opciones) -> Resultado<i32> {
         semilla,
         &catalogo,
         &banco,
+        casos_en_banco,
     )?;
 
     // El documento crudo va al log: es lo que permite atribuir un fallo sin
@@ -436,7 +515,11 @@ pub fn evaluar(opciones: &Opciones) -> Resultado<i32> {
     for m in &informe.motivos {
         crate::aviso!("motivo de no-go: {m}");
     }
-    crate::digo!("veredicto: {}", if informe.go { "GO" } else { "NO-GO" });
+    crate::digo!(
+        "veredicto: {} ({})",
+        if informe.go { "GO" } else { "NO-GO" },
+        informe.cobertura.nombre()
+    );
 
     if let Some(salida) = opciones.uno("out").filter(|s| !s.is_empty()) {
         let mut host = Host;
@@ -444,12 +527,42 @@ pub fn evaluar(opciones: &Opciones) -> Resultado<i32> {
         crate::digo!("informe en {salida}");
     }
 
-    // Un no-go **no** es un fallo de la herramienta: la campaña se hizo y el
-    // resultado es que no. Por eso sale con el código de verificación fallida,
-    // no con el de error.
-    Ok(if informe.go {
-        Codigo::Exito.como_i32()
-    } else {
-        Codigo::Verificacion.como_i32()
+    // Un no-go medido sobre el banco entero no es un fallo de la herramienta.
+    // Perder el transporte sí: no hubo campaña que verificar. Una tirada
+    // filtrada sale con el código de verificación y `cobertura: filtrada`,
+    // para que nadie la lea como el veredicto.
+    Ok(match informe.cobertura {
+        evaluacion::Cobertura::Interrumpida => Codigo::Error.como_i32(),
+        evaluacion::Cobertura::Completa if informe.go => Codigo::Exito.como_i32(),
+        evaluacion::Cobertura::Completa | evaluacion::Cobertura::Filtrada => {
+            Codigo::Verificacion.como_i32()
+        }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bytes_para_rebasar, incrustar_relleno, relleno_por_tokens};
+    use soso_llm_api::MAX_BODY_BYTES;
+
+    #[test]
+    fn el_relleno_tokenizado_supera_el_contexto() {
+        let trozo = "abcd efgh ijkl";
+        // Cuatro bytes por token, como el párrafo medido del banco.
+        let relleno = relleno_por_tokens(trozo, 100, &|s| s.len().div_ceil(4)).unwrap();
+        assert!(relleno.len().div_ceil(4) > 100);
+        assert!(relleno.len() < MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn la_heuristica_de_128k_no_cabe_en_el_cuerpo() {
+        assert!(bytes_para_rebasar(131_072) > MAX_BODY_BYTES);
+        assert!(bytes_para_rebasar(32_768) < MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn el_relleno_se_escapa_como_json() {
+        let out = incrustar_relleno(r#"{"content":"{relleno}"}"#, "a\"b");
+        assert_eq!(out, r#"{"content":"a\"b"}"#);
+    }
 }

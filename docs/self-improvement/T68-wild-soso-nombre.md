@@ -76,7 +76,8 @@ con `left: "wild-soso" / right: "wild"`.
 
 ## Lo que sigue faltando
 
-`wild` **no está instalado** en este host, así que el target sigue sin poder
-enlazar. Eso no lo arregla esta ficha —es instalar una herramienta, o portarla,
-y eso es T39–T42—; lo que cambia es que ahora el fallo llega hasta el mensaje
-que lo explica en vez de perderse en un nombre que no existe.
+`wild` **0.10.0 está instalado** desde el 25 de septiembre de 2026
+(`~/.cargo/bin/wild`, decisión D3). El target sigue sin libstd, así que todavía
+no enlaza un programa de soso; eso es T39–T42. Lo que esta ficha cambió es que
+el fallo llega hasta el mensaje que lo explica en vez de perderse en un nombre
+que no existe.

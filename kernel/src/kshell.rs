@@ -1,7 +1,7 @@
 //! Kernel-shell por el puerto serie. Es la consola de emergencia y el
 //! banco de pruebas hasta que exista la shell de usuario (fase 7).
 
-use crate::{drivers::serial, print, println, qemu};
+use crate::{drivers::serial, print, println};
 use soso_abi;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -55,7 +55,7 @@ fn exec(line: &str) {
 
     match cmd {
         "help" => {
-            println!("comandos: help dmesg [patrón|save] logfs hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem heap io ip ping wifi blk blkread blkwrite pf panic halt");
+            println!("comandos: help dmesg [patrón|save] logfs hwscan kbd spawn ps ls cat stat write mkdir rm df uptime mem heap io ip ping wifi blk blkread blkwrite pf panic halt reboot");
         }
         "dmesg" => match args.first() {
             // `save` va al destino efectivo: sosofs si hay logs nativos, la ESP
@@ -399,13 +399,8 @@ fn exec(line: &str) {
         "panic" => {
             panic!("panic solicitado desde la shell");
         }
-        "halt" => {
-            println!("apagando");
-            #[cfg(feature = "drv-live-disk")]
-            let _ = crate::drivers::fatlog::flush();
-            crate::drivers::logfs::drenar_todo();
-            qemu::exit(qemu::ExitCode::Success);
-        }
+        "halt" => crate::arch::power::solicitar(false),
+        "reboot" => crate::arch::power::solicitar(true),
         otro => {
             println!("¿{otro}? escribe 'help'");
         }

@@ -1,6 +1,6 @@
 # T20 — Configurar OpenCode para el proveedor soso
 
-**Hito:** SI-3 · **Tipo:** Configuración · **Estado:** pendiente.
+**Hito:** SI-3 · **Tipo:** Configuración · **Estado:** pendiente (27-sep: el perfil elegido es `qwen2.5-coder-7b`, GO 10/10).
 
 **Dependencias:** [T14](T14-evaluacion-modelo.md), [T19](T19-qemu-e2e.md)
 
@@ -57,3 +57,9 @@ del hito en la misma sesión.
 Aplicar [NATIVO.md](NATIVO.md). Configuración y credenciales tienen rutas explícitas en soso. T35 instala offline runtime, proveedor y herramientas; no descargar paquetes ni depender de un home Linux durante una campaña.
 
 Validación nativa: **pendiente**. Condiciones adicionales: [T35](T35-opencode-nativo.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).
+
+## Revisión del 26-sep-2026
+
+Estado y siguiente paso sincronizados con el catálogo; ver
+[seguimiento/T20.md](seguimiento/T20.md) y
+[revisión del plan](seguimiento/REVISION-2026-09-26.md).

@@ -579,91 +579,79 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "da5d019aa",
-        "commit_corto": "da5d019aa",
-        "version": "0.3.5",
-        "dirty": false,
-        "cambios_locales": "flush#39 @920s: GSP/VRAM/CE OK; BAR1 PDB≠bar1PdeBase (informativo, Linux r535 wrap). docs/DIAGNOSTICO-ROG-2026-09-24.md"
+        "commit": "eab04fb2e",
+        "commit_corto": "eab04fb2e",
+        "version": "0.3.7",
+        "dirty": true,
+        "cambios_locales": "flush#49 @4312s: GSP/VRAM/CE OK; soso-update read=-11→manifest inválido (fix soso-http). docs/DIAGNOSTICO-ROG-2026-09-25.md"
       },
       "perfil_drivers": "live-usb + nouveau",
-      "arranques_consecutivos_ok": 2,
+      "arranques_consecutivos_ok": 7,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh pid=2 flush#39 @920s",
-        "fecha": "2026-09-24"
+        "nota": "shell + red",
+        "fecha": "2026-09-25"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY flush#39",
-          "fecha": "2026-09-24"
+          "nota": "UCODE_ALIVE_NTFY",
+          "fecha": "2026-09-25"
         },
         "init_complete": {
           "status": "ok",
-          "nota": "INIT_COMPLETE_NOTIF flush#39",
-          "fecha": "2026-09-24"
+          "nota": "INIT_COMPLETE_NOTIF",
+          "fecha": "2026-09-25"
         },
         "mvm_ready": {
           "status": "ok",
-          "nota": "MVM up mínimo listo flush#39",
-          "fecha": "2026-09-24"
+          "nota": "MVM up",
+          "fecha": "2026-09-25"
         },
         "scan": {
           "status": "ok",
-          "nota": "SCAN_COMPLETE count=25 flush#39",
-          "fecha": "2026-09-24"
+          "nota": "fin normal",
+          "fecha": "2026-09-25"
         },
         "assoc_wpa2": {
           "status": "ok",
-          "nota": "4-way Rutilo flush#39",
-          "fecha": "2026-09-24"
+          "fecha": "2026-09-25"
         },
         "dhcp": {
           "status": "ok",
-          "nota": "192.168.68.132/24 LxWifi flush#39",
-          "fecha": "2026-09-24"
+          "nota": "lx-wifi 192.168.68.132/24",
+          "fecha": "2026-09-25"
         },
         "ssh": {
-          "status": "pendiente",
-          "nota": "sin sesión SSH flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         },
         "reconexion": {
-          "status": "pendiente",
-          "nota": "no ejercitada flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         }
       },
       "gpu": {
         "gsp_rpc": {
           "status": "ok",
-          "nota": "GSP_INIT_DONE flush#39",
-          "fecha": "2026-09-24"
+          "nota": "GSP_INIT_DONE",
+          "fecha": "2026-09-25"
         },
         "vram_pool": {
           "status": "ok",
-          "nota": "pool VRAM=sí flush#39",
-          "fecha": "2026-09-24"
+          "fecha": "2026-09-25"
         },
         "ce_readback": {
           "status": "ok",
-          "nota": "CE readback verificado flush#39",
-          "fecha": "2026-09-24"
+          "nota": "CE readback GO",
+          "fecha": "2026-09-25"
         },
         "compute_cpu_gpu": {
-          "status": "pendiente",
-          "nota": "sin matvec en log flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         },
         "carga_real": {
-          "status": "pendiente",
-          "nota": "sin inferencia flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         },
         "apagado_limpio": {
-          "status": "pendiente",
-          "nota": "sin halt flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         }
       },
       "bench": {},
@@ -771,7 +759,9 @@
         "target/usb-diagnostic-2026-09-17-run3/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-17-run3/SOSODRV-clean.txt",
         "target/usb-diagnostic-2026-09-18-run2/SOSOLOG.compact.txt",
-        "target/usb-diagnostic-2026-09-18-run2/SOSODRV.txt"
+        "target/usb-diagnostic-2026-09-18-run2/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-25/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-25/SOSODRV.txt"
       ],
       "historial": [
         {
@@ -5759,10 +5749,113 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-09-24"
+        },
+        {
+          "log_hash": "80ba8bf1155bcc927a0ac0319859c84caf5d5b71364344af99ce353571f06190",
+          "kernel": "soso 0.3.7 (eab04fb2e-dirty)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "048d:1234",
+            "0b05:1866",
+            "0b05:18c6"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-09-25"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-09-25"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-09-25"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "fin normal",
+              "fecha": "2026-09-25"
+            },
+            "assoc_wpa2": {
+              "status": "ok",
+              "fecha": "2026-09-25"
+            },
+            "dhcp": {
+              "status": "pendiente"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-09-25"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-09-25"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-09-25"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-09-25"
         }
       ],
-      "notas": "flush#39 @920s soso 0.3.5 (da5d019aa): GSP_INIT_DONE, pool VRAM, CE OK; WiFi scan/assoc/DHCP; soso-update comprobar OK. BAR1 PDB≠bar1PdeBase descartado (r535 wrap). docs/DIAGNOSTICO-ROG-2026-09-24.md",
-      "actualizado": "2026-09-24"
+      "notas": "hwscan: hda=compilado, hda=compilado, hda=compilado, lx-iwlwifi=compilado, lx-nouveau=compilado, nvme=compilado, nvme=compilado, rtl8169=compilado, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, usb-xhci=compilado, usb-xhci=compilado",
+      "actualizado": "2026-09-25"
     },
     {
       "id": "ax211-wifi",
@@ -6369,91 +6462,79 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "da5d019aa",
-        "commit_corto": "da5d019aa",
-        "version": "0.3.5",
-        "dirty": false,
-        "cambios_locales": "flush#39 @920s: ALIVE/scan/assoc/DHCP OK. docs/DIAGNOSTICO-ROG-2026-09-24.md"
+        "commit": "eab04fb2e",
+        "commit_corto": "eab04fb2e",
+        "version": "0.3.7",
+        "dirty": true,
+        "cambios_locales": "flush#49 @4312s: ALIVE/scan/assoc/DHCP OK; soso-update timeout manifest (fix soso-http). docs/DIAGNOSTICO-ROG-2026-09-25.md"
       },
       "perfil_drivers": "live-usb + iwlwifi",
-      "arranques_consecutivos_ok": 3,
+      "arranques_consecutivos_ok": 8,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh pid=2 flush#39 @920s",
-        "fecha": "2026-09-24"
+        "nota": "shell + red",
+        "fecha": "2026-09-25"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "UCODE_ALIVE_NTFY flush#39",
-          "fecha": "2026-09-24"
+          "nota": "UCODE_ALIVE_NTFY",
+          "fecha": "2026-09-25"
         },
         "init_complete": {
           "status": "ok",
-          "nota": "INIT_COMPLETE_NOTIF flush#39",
-          "fecha": "2026-09-24"
+          "nota": "INIT_COMPLETE_NOTIF",
+          "fecha": "2026-09-25"
         },
         "mvm_ready": {
           "status": "ok",
-          "nota": "MVM up mínimo listo flush#39",
-          "fecha": "2026-09-24"
+          "nota": "MVM up",
+          "fecha": "2026-09-25"
         },
         "scan": {
           "status": "ok",
-          "nota": "SCAN_COMPLETE count=25 flush#39",
-          "fecha": "2026-09-24"
+          "nota": "fin normal",
+          "fecha": "2026-09-25"
         },
         "assoc_wpa2": {
           "status": "ok",
-          "nota": "4-way Rutilo flush#39",
-          "fecha": "2026-09-24"
+          "fecha": "2026-09-25"
         },
         "dhcp": {
           "status": "ok",
-          "nota": "192.168.68.132/24 LxWifi flush#39",
-          "fecha": "2026-09-24"
+          "nota": "lx-wifi 192.168.68.132/24",
+          "fecha": "2026-09-25"
         },
         "ssh": {
-          "status": "pendiente",
-          "nota": "sin sesión SSH flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         },
         "reconexion": {
-          "status": "pendiente",
-          "nota": "no ejercitada flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         }
       },
       "gpu": {
         "gsp_rpc": {
           "status": "ok",
-          "nota": "GSP_INIT_DONE (misma placa) flush#39",
-          "fecha": "2026-09-24"
+          "nota": "GSP_INIT_DONE",
+          "fecha": "2026-09-25"
         },
         "vram_pool": {
           "status": "ok",
-          "nota": "pool VRAM=sí flush#39",
-          "fecha": "2026-09-24"
+          "fecha": "2026-09-25"
         },
         "ce_readback": {
           "status": "ok",
-          "nota": "CE readback verificado flush#39",
-          "fecha": "2026-09-24"
+          "nota": "CE readback GO",
+          "fecha": "2026-09-25"
         },
         "compute_cpu_gpu": {
-          "status": "pendiente",
-          "nota": "sin matvec en log flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         },
         "carga_real": {
-          "status": "pendiente",
-          "nota": "sin inferencia flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         },
         "apagado_limpio": {
-          "status": "pendiente",
-          "nota": "sin halt flush#39",
-          "fecha": "2026-09-24"
+          "status": "pendiente"
         }
       },
       "bench": {},
@@ -6560,7 +6641,9 @@
         "target/usb-diagnostic-2026-09-17-run3/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-17-run3/SOSODRV-clean.txt",
         "target/usb-diagnostic-2026-09-18-run2/SOSOLOG.compact.txt",
-        "target/usb-diagnostic-2026-09-18-run2/SOSODRV.txt"
+        "target/usb-diagnostic-2026-09-18-run2/SOSODRV.txt",
+        "target/usb-diagnostic-2026-09-25/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-09-25/SOSODRV.txt"
       ],
       "historial": [
         {
@@ -11653,10 +11736,113 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-09-24"
+        },
+        {
+          "log_hash": "80ba8bf1155bcc927a0ac0319859c84caf5d5b71364344af99ce353571f06190",
+          "kernel": "soso 0.3.7 (eab04fb2e-dirty)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "048d:1234",
+            "0b05:1866",
+            "0b05:18c6"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-09-25"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-09-25"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-09-25"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "fin normal",
+              "fecha": "2026-09-25"
+            },
+            "assoc_wpa2": {
+              "status": "ok",
+              "fecha": "2026-09-25"
+            },
+            "dhcp": {
+              "status": "pendiente"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-09-25"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-09-25"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-09-25"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-09-25"
         }
       ],
-      "notas": "flush#39 @920s soso 0.3.5 (da5d019aa): ALIVE, scan count=25, 4-way, DHCP LxWifi; sin SSH/recon. docs/DIAGNOSTICO-ROG-2026-09-24.md",
-      "actualizado": "2026-09-24"
+      "notas": "hwscan: hda=compilado, hda=compilado, hda=compilado, lx-iwlwifi=compilado, lx-nouveau=compilado, nvme=compilado, nvme=compilado, rtl8169=compilado, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, sin-driver=desconocido, usb-xhci=compilado, usb-xhci=compilado",
+      "actualizado": "2026-09-25"
     },
     {
       "id": "deck-oled",

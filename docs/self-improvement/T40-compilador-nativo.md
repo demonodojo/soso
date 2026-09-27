@@ -1,6 +1,6 @@
 # T40 — Descomponer y acreditar el port del compilador
 
-**Hito:** SI-7 · **Tipo:** Especificación e integración condicionada · **Estado:** pendiente.
+**Hito:** SI-7 · **Tipo:** Especificación e integración condicionada · **Estado:** en curso (C-001 hecha; el check de host soso sigue en C-002).
 
 **Dependencias:** [T38](T38-toolchain-inventario.md), [T39](T39-bootstrap-libstd.md)
 
@@ -15,7 +15,7 @@ pertinentes de estos archivos. Reutilizar los módulos existentes; crear solo lo
 tras comprobar las entregas de las dependencias.
 
 - [user/soso-rustc/src/main.rs](../../user/soso-rustc/src/main.rs)
-- [config/rust-soso/sys/pal/soso/dl.rs](../../config/rust-soso/sys/pal/soso/dl.rs)
+- [config/rust-soso/tree/library/std/src/sys/pal/soso/mod.rs](../../config/rust-soso/tree/library/std/src/sys/pal/soso/mod.rs)
 - [crates/soso-rt/src/lib.rs](../../crates/soso-rt/src/lib.rs)
 - [targets/x86_64-unknown-soso.json](../../targets/x86_64-unknown-soso.json)
 
@@ -46,8 +46,11 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 ## Cierre y condición de bloqueo
 
 - [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
 - [ ] Resultado entregado con límites y dependencias restantes explícitos.
+
+El backlog y C-001 no cierran la ficha: falta que rustc arranque en el guest.
+Siguiente medida: [C-002](native/C-002.md). Ver [seguimiento/T40.md](seguimiento/T40.md).
 
 No sustituir el stub por un wrapper a Forja y llamarlo rustc nativo; la evidencia debe mostrar compilación guest.
 

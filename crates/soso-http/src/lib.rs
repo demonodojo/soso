@@ -40,6 +40,8 @@ pub trait TcpTransport {
     fn read_timeout(&self, fd: u64, buf: &mut [u8], timeout_ms: u64) -> i64;
     fn write_all(&self, fd: u64, data: &[u8]) -> Result<(), i64>;
     fn close(&self, fd: u64);
+    /// Traza de red opcional (userspace imprime en consola).
+    fn log_red(&self, _msg: &str) {}
 }
 
 type WallClockFn = fn() -> Option<u64>;
@@ -200,12 +202,18 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
         Err(HttpError::Io("lectura TLS falló durante el handshake"))
     }
 
-    /// Tras el handshake: un timeout o un cierre TCP no son error fatal.
+    /// Tras el handshake: más bytes del cuerpo. `Ok(true)` = llegaron datos;
+    /// `Ok(false)` = cierre TCP (fin de respuesta con `Connection: close`).
+    /// Un plazo (`EAGAIN`) es error: no confundirlo con EOF.
     fn read_more_body(&mut self, timeout_ms: u64) -> Result<bool, HttpError> {
-        match self.read_more(timeout_ms) {
-            Ok(()) => Ok(true),
-            Err(HttpError::Io(_)) => Ok(false),
-            Err(e) => Err(e),
+        let mut buf = [0u8; 4096];
+        let n = self.transport.read_timeout(self.fd, &mut buf, timeout_ms);
+        match classify_body_transport_read(n)? {
+            Some(()) => {
+                self.incoming.extend_from_slice(&buf[..n as usize]);
+                Ok(true)
+            }
+            None => Ok(false),
         }
     }
 
@@ -377,6 +385,27 @@ impl BodySink for VecSink<'_> {
 
 const MAX_HTTP_HEADER: usize = 16 * 1024;
 
+const BODY_READ_TIMEOUT_MSG: &str = "plazo agotado esperando bytes del cuerpo HTTP";
+const BODY_INCOMPLETE_MSG: &str = "cuerpo HTTP incompleto (Content-Length)";
+
+/// Interpretación de `read_timeout` mientras se lee el cuerpo HTTP.
+/// `Ok(Some)` = llegaron datos; `Ok(None)` = cierre TCP. Un plazo es error.
+fn classify_body_transport_read(n: i64) -> Result<Option<()>, HttpError> {
+    if n == -(soso_abi::EINTR as i64) {
+        return Err(HttpError::Interrupted);
+    }
+    if n > 0 {
+        return Ok(Some(()));
+    }
+    if n == 0 {
+        return Ok(None);
+    }
+    if n == -(soso_abi::EAGAIN as i64) {
+        return Err(HttpError::Io(BODY_READ_TIMEOUT_MSG));
+    }
+    Err(HttpError::Io("lectura TLS falló esperando el cuerpo HTTP"))
+}
+
 /// Acumula cabeceras HTTP y vuelca el cuerpo al sink en cuanto llega.
 struct HttpStreamState {
     header_buf: Vec<u8>,
@@ -384,6 +413,8 @@ struct HttpStreamState {
     discard_body: bool,
     status: Option<u16>,
     headers: Vec<(String, String)>,
+    content_length: Option<usize>,
+    body_received: usize,
 }
 
 impl HttpStreamState {
@@ -394,6 +425,8 @@ impl HttpStreamState {
             discard_body: false,
             status: None,
             headers: Vec::new(),
+            content_length: None,
+            body_received: 0,
         }
     }
 
@@ -412,17 +445,24 @@ impl HttpStreamState {
             };
             let (status, headers) = parse_response_head(&self.header_buf[..sep])?;
             self.status = Some(status);
-            self.headers = headers;
+            self.headers = headers.clone();
             self.discard_body = (300..400).contains(&status);
+            if !self.discard_body {
+                if let Some(cl) = header_value(&headers, "content-length") {
+                    self.content_length = cl.parse().ok();
+                }
+            }
             self.headers_done = true;
             let body = self.header_buf[sep + 4..].to_vec();
             self.header_buf.clear();
             if !self.discard_body && !body.is_empty() {
+                self.body_received += body.len();
                 sink.write_body(&body)?;
             }
             return Ok(());
         }
         if !self.discard_body {
+            self.body_received += chunk.len();
             sink.write_body(chunk)?;
         }
         Ok(())
@@ -430,6 +470,13 @@ impl HttpStreamState {
 
     fn finish(self) -> Result<(u16, Vec<(String, String)>), HttpError> {
         if let Some(status) = self.status {
+            if !self.discard_body {
+                if let Some(expected) = self.content_length {
+                    if self.body_received != expected {
+                        return Err(HttpError::Io(BODY_INCOMPLETE_MSG));
+                    }
+                }
+            }
             return Ok((status, self.headers));
         }
         if !self.header_buf.is_empty() {
@@ -601,6 +648,9 @@ fn https_request<T: TcpTransport, S: BodySink>(
         let mut tls = TlsSession::new(transport, session_fd, host, config.clone())?;
         if let Err(e) = tls.handshake() {
             if tls_handshake_io_retryable(&e) {
+                if let HttpError::Io(msg) = &e {
+                    transport.log_red(msg);
+                }
                 drop(tls);
                 transport.close(session_fd);
                 session_fd = transport
@@ -964,5 +1014,44 @@ mod tests {
         set_wall_clock(stale);
         assert_eq!(client_config().unwrap_err(), HttpError::Clock);
         set_wall_clock(test_wall_clock);
+    }
+
+    #[test]
+    fn body_read_timeout_is_error_not_eof() {
+        assert_eq!(
+            classify_body_transport_read(-(soso_abi::EAGAIN as i64)),
+            Err(HttpError::Io(BODY_READ_TIMEOUT_MSG))
+        );
+        assert_eq!(classify_body_transport_read(0), Ok(None));
+        assert_eq!(classify_body_transport_read(128), Ok(Some(())));
+    }
+
+    #[test]
+    fn finish_rejects_short_content_length() {
+        let mut stream = HttpStreamState::new();
+        let mut out = Vec::new();
+        stream
+            .feed(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello",
+                &mut VecSink(&mut out),
+            )
+            .unwrap();
+        assert_eq!(out, b"hello");
+        assert_eq!(
+            stream.finish().unwrap_err(),
+            HttpError::Io(BODY_INCOMPLETE_MSG)
+        );
+    }
+
+    #[test]
+    fn finish_accepts_full_content_length() {
+        let mut stream = HttpStreamState::new();
+        let mut out = Vec::new();
+        stream
+            .feed(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", &mut VecSink(&mut out))
+            .unwrap();
+        let (st, _) = stream.finish().unwrap();
+        assert_eq!(st, 200);
+        assert_eq!(out, b"hello");
     }
 }

@@ -1646,6 +1646,7 @@ fn pruebas(banco: Option<&str>) -> Resultado<usize> {
     lista.push(correr("durable/publicar-sobre-un-corte", "T63", durable_corte));
     lista.push(correr("workspace/copia-y-parche", "T24", workspace_prueba));
     lista.push(correr("argv/ruta-con-espacios", "T62", argv_espacios));
+    lista.push(correr("receta/espejo-resto-ajeno", "T75", receta_espejo));
 
     // Durabilidad: aquí sólo se puede **leer** lo que dejó un arranque
     // anterior. Acreditarla exige reiniciar la máquina, y eso no lo puede
@@ -1705,6 +1706,22 @@ fn pruebas(banco: Option<&str>) -> Resultado<usize> {
 
 /// Dónde viaja el banco visible dentro de la imagen.
 const BANCO_GUEST: &str = "/var/self-improvement/banco";
+
+/// T75: espejo de un directorio poseído. Retira un resto y deja intacto un
+/// fichero que vive fuera. No hace falta el vendor de Rust.
+fn receta_espejo() -> Resultado<usize> {
+    let mut soso = Soso;
+    match receta::probar_espejo(&mut soso, "/tmp/t75") {
+        Ok(()) => {
+            println!("receta: espejo retiró el resto y conservó el ajeno");
+            Ok(0)
+        }
+        Err(m) => {
+            println!("receta: espejo {m}");
+            Ok(1)
+        }
+    }
+}
 
 /// Cargar y listar el banco: ejercita leer los casos y validar su formato.
 fn banco_listar(dir: &str) -> Resultado<usize> {

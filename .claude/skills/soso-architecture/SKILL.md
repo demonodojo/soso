@@ -79,7 +79,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 
 ### Syscalls principales
 
-`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo, netinfo, ping, pslist` (+ GPU, TCP, hilos, WiFi)
+`exit, read, write, open, close, seek, stat, getdents, mkdir, unlink, spawn, wait, sbrk, sleep_ms, halt, mmap, munmap, pipe, spawn_io, chdir, getcwd, meminfo, netinfo, ping, pslist` (+ GPU, TCP, hilos, WiFi). `SYS_HALT` arg 0 apaga, arg 1 reinicia (`/bin/halt`, `/bin/reboot`, kshell `halt`/`reboot`). En QEMU el apagado sigue siendo isa-debug-exit (código 33); en placa, S5 del FADT (`_S5_` en DSDT/SSDT). El reinicio es el registro RESET del FADT, luego i8042, puerto `0xCF9` y triple fault.
 
 - **Instalación / ESP:** syscalls y huecos 8.3 — skill **`soso-live`** (`disk_*`, `bootreq_*`, `upd_*`, `espfat`)
 - **OTA, transacción y vuelta atrás:** skill **`soso-update`** (`txn_*`, `SYS_TXN_LOCK`, `txnaplica`, puntos)
@@ -88,8 +88,8 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 - **Red:** `netinfo=87` — IPv4/MAC/pasarela de la NIC activa (`/bin/ip`, kshell `ip`); `fsinfo=88` — bloques totales/libres del sosofs raíz (comprobación previa de OTA); `ping=89` — ICMP Echo (`/bin/ping`, kshell `ping`); `pslist=92` — tabla de procesos (`/bin/ps`, kshell `ps`)
 - **Audio:** `audio_open=59`, `audio_read=60`, `audio_close=61` (HDA, `drv-hda`)
 
-- **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`/`spawn_io_full`; hijos heredan cwd del padre; fd 3 = registro (`Fd::Log`, ring `applog`, `SYS_LOG_READ=86`, `logln!`); redirecciones `N>`, `N>>`, `N>&-` para N=1–3. `cat`/`grep`/`hexdump` leen stdin **sin argumentos** (o con `-`); el pipe cierra y `read` = 0
-- **Señales (mínimo):** SIGINT/SIGKILL/SIGTERM vía `kill`; `kill(pid, 0)` sondea existencia (no entrega). Grupos con `setpgid`/`setsid`/`tcsetpgrp`; Ctrl-C (ISIG) al grupo en primer plano de la consola. Ctrl-D (VEOF) en la tty: `read` = 0 si la lectura iba vacía; con datos pendientes los entrega y consume el VEOF (`tty_tomar` / `WaitingTty` en `task/mod.rs`; `0x04` no llega a userspace). No aplica a pipes. Sin handlers (`sigaction`). El líder de sesión en el prompt recibe `-EINTR` en `read` en vez de morir. `linea::Lector`: `read` = 0 en línea vacía → EOF (sosh/`ask` REPL)
+- **Pipes/redirecciones:** sosh usa `pipe` + `spawn_io`/`spawn_io_full`; hijos heredan cwd del padre; fd 3 = registro (`Fd::Log`, ring `applog`, `SYS_LOG_READ=86`, `logln!`); redirecciones `N>`, `N>>`, `N>&-` y `N>&M` (p. ej. `2>&1`) para N=0–3. `2>&1` se resuelve **después** de abrir el resto, así que `cmd 2>&1 >f` y `cmd >f 2>&1` hacen lo mismo. Encadena `;`, `&&` y `||`. Expande `*`/`?` sólo en el último componente del camino. Rechaza `&` y `$`. `cat`/`grep`/`hexdump` leen stdin **sin argumentos** (o con `-`); el pipe cierra y `read` = 0. `grep`: subcadena literal (un patrón que sólo tiene sentido como regex se rechaza; `-F` lo fuerza), códigos 0/1/2, `--include`/`--exclude` contra el **nombre**, y un binario que coincide se anuncia (`-a` vuelca; coincidir sigue siendo 0). Un filtro que no deja ficheros es código 1, no lectura de stdin
+- **Señales (mínimo):** SIGINT/SIGKILL/SIGTERM vía `kill`; `kill(pid, 0)` sondea existencia (no entrega). Grupos con `setpgid`/`setsid`/`tcsetpgrp`; Ctrl-C (ISIG) al grupo en primer plano de la consola. Ctrl-D (VEOF) en la tty: `read` = 0 si la lectura iba vacía; con datos pendientes los entrega y consume el VEOF (`tty_tomar` / `WaitingTty` en `task/mod.rs`; `0x04` no llega a userspace). No aplica a pipes. Sin handlers (`sigaction`). El líder de sesión en el prompt recibe `-EINTR` en `read` en vez de morir. **T70, pendiente de decisión:** `SIGINT`/`SIGTERM` sobre un proceso bloqueado (`Sleeping`, `WaitingTty`, `WaitingSocket`, `WaitingPipe`) también son `EINTR` + `Runnable`, así que **no lo matan** y puede salir con 0; `SIGKILL` sí (`deliver_death`, 137). `linea::Lector`: `read` = 0 en línea vacía → EOF (sosh/`ask` REPL)
 - **Escritura:** `open(O_WRONLY)` → buffer en kernel; `create_file` en sosofs al `close()`
 - **Rutas:** `task/path.rs` resuelve relativas contra `Process.cwd` (default `/`)
 - Sin permisos Unix
@@ -112,7 +112,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `vfs.rs` | Router: lectura/escritura sosofs; modelos → sosomfs (read-only) |
 | `net/` | smoltcp, DHCPv4 al arrancar (fallback 10.0.2.15), polled from scheduler |
 | `net/ssh.rs` | sunset SSH-2, `SSH_SESSIONS=4`, `Console::Ssh(slot)`, CRLF en tx_push; teardown mata todos los procesos de la ranura |
-| `kshell.rs` | Emergency kernel-shell (`soso>`): `help`, `dmesg [save]`, `hwscan`, `ip`, `ping`, `wifi`, `io`, `halt`, … |
+| `kshell.rs` | Emergency kernel-shell (`soso>`): `help`, `dmesg [save]`, `hwscan`, `ip`, `ping`, `wifi`, `io`, `halt`, `reboot`, … |
 | `task/` | Processes (cwd, console), scheduler, syscall, path normalization |
 
 ## sosofs (v1)
@@ -139,7 +139,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `/bin/soso-resize` | Amplía sosofs robando margen libre al final de modelos (`SYS_FS_RESIZE`; live/instalado GPT) |
 | `/bin/soso-update` | Releases GitHub: rootfs por fichero (sin rollback de binarios; progreso en `/etc/actualiza.estado`); kernel vía `SOSOUPD.TXT` + `SOSOKRN.BIN` + meta `SOSOKRN.MET` (recovery verificable) |
 | `/bin/soso-web` | Navegador mínimo: HTTPS + HTML→texto (modo lectura) o framebuffer (modo `--grafico`) |
-| `/bin/{ls,cat,echo,mkdir,rm,hexdump,grep,ip,ps,ping,halt}` | Coreutils (`cat`/`grep`/`hexdump`: stdin si no hay ficheros; `-` sigue valiendo) |
+| `/bin/{ls,cat,echo,mkdir,rm,hexdump,grep,ip,ps,ping,halt,reboot}` | Coreutils (`cat`/`grep`/`hexdump`: stdin si no hay ficheros; `-` sigue valiendo) |
 
 `libsoso`: crt0, syscall wrappers, mini-libstd (256 KiB heap arena), `linea::Lector`
 (lectura de línea con eco: **acepta UTF-8** y borra por carácter; lee **byte a byte**

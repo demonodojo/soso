@@ -192,6 +192,27 @@ pub struct Informe {
     pub go: bool,
     /// Qué falta exactamente para que sea go. Vacío si ya lo es.
     pub motivos: Vec<String>,
+    /// `completa` es una medición del banco entero. `filtrada` no puede ser el
+    /// veredicto de la campaña. `interrumpida` perdió el transporte: tampoco.
+    pub cobertura: Cobertura,
+}
+
+/// Si el informe puede leerse como el veredicto de una campaña.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cobertura {
+    Completa,
+    Filtrada,
+    Interrumpida,
+}
+
+impl Cobertura {
+    pub fn nombre(self) -> &'static str {
+        match self {
+            Cobertura::Completa => "completa",
+            Cobertura::Filtrada => "filtrada",
+            Cobertura::Interrumpida => "interrumpida",
+        }
+    }
 }
 
 /// Lo que cuesta una tarea, medido y no estimado.
@@ -214,11 +235,12 @@ impl Informe {
     /// JSON estable, a mano porque el crate es `no_std`.
     pub fn json(&self) -> String {
         let mut s = format!(
-            "{{\"schema_version\":{},\"modelo\":\"{}\",\"banco\":\"{}\",\"go\":{},\"clases\":[",
+            "{{\"schema_version\":{},\"modelo\":\"{}\",\"banco\":\"{}\",\"go\":{},\"cobertura\":\"{}\",\"clases\":[",
             self.schema_version,
             escapar(&self.modelo),
             escapar(&self.banco),
-            self.go
+            self.go,
+            self.cobertura.nombre()
         );
         for (i, c) in self.clases.iter().enumerate() {
             if i > 0 {
@@ -287,6 +309,7 @@ pub fn evaluar<C: ClienteModelo, R: Reloj>(
     semilla_base: u64,
     modelo: &str,
     banco: &str,
+    casos_en_banco: usize,
 ) -> Resultado<Informe> {
     if umbrales.repeticiones == 0 {
         return Err(Error::uso("las repeticiones no pueden ser cero"));
@@ -356,14 +379,37 @@ pub fn evaluar<C: ClienteModelo, R: Reloj>(
 
     let clases = resumir(casos, &intentos);
     let presupuesto = presupuestar(&intentos);
+    let corte = sufijo_sin_respuesta(&intentos);
+    let filtrada = casos.len() < casos_en_banco;
     let mut motivos = Vec::new();
-    comprobar_umbral(&clases, "protocolo", umbrales.protocolo_minimo, &mut motivos);
-    comprobar_umbral(
-        &clases,
-        "programacion",
-        umbrales.programacion_minimo,
-        &mut motivos,
-    );
+    let cobertura = if let Some(primero) = corte {
+        motivos.push(format!(
+            "transporte perdido desde {} repetición {}: {}",
+            primero.caso,
+            primero.repeticion,
+            if primero.detalle.is_empty() {
+                "el endpoint no contestó"
+            } else {
+                primero.detalle.as_str()
+            }
+        ));
+        Cobertura::Interrumpida
+    } else if filtrada {
+        motivos.push(format!(
+            "tirada filtrada: {} de {casos_en_banco} casos; el veredicto no es el de la campaña",
+            casos.len()
+        ));
+        Cobertura::Filtrada
+    } else {
+        comprobar_umbral(&clases, "protocolo", umbrales.protocolo_minimo, &mut motivos);
+        comprobar_umbral(
+            &clases,
+            "programacion",
+            umbrales.programacion_minimo,
+            &mut motivos,
+        );
+        Cobertura::Completa
+    };
 
     Ok(Informe {
         schema_version: ESQUEMA,
@@ -375,7 +421,26 @@ pub fn evaluar<C: ClienteModelo, R: Reloj>(
         presupuesto,
         go: motivos.is_empty(),
         motivos,
+        cobertura,
     })
+}
+
+/// El tramo final de intentos que no obtuvieron respuesta. Un plazo y una
+/// respuesta posterior no entran: el servicio volvió y el plazo sigue contando
+/// en el denominador. Un error de transporte al final, sin respuesta detrás,
+/// es la campaña cortada.
+fn sufijo_sin_respuesta(intentos: &[Intento]) -> Option<&Intento> {
+    let mut inicio = None;
+    for (i, intento) in intentos.iter().enumerate() {
+        if intento.desenlace == Desenlace::Error {
+            if inicio.is_none() {
+                inicio = Some(i);
+            }
+        } else {
+            inicio = None;
+        }
+    }
+    inicio.map(|i| &intentos[i])
 }
 
 fn comprobar_umbral(
@@ -573,7 +638,7 @@ mod tests {
         let mut c = ClienteFalso { guion, llamada: 0 };
         let j: Box<dyn Fn(&str) -> Result<(), String>> = Box::new(juez_correcto);
         let cs = casos(ids, &*j);
-        evaluar(&mut c, &r, &cs, umbrales, 5_000, 42, "modelo-x", "banco-y").unwrap()
+        evaluar(&mut c, &r, &cs, umbrales, 5_000, 42, "modelo-x", "banco-y", ids.len()).unwrap()
     }
 
     fn umbrales(protocolo: usize, programacion: usize, reps: u32) -> Umbrales {
@@ -641,7 +706,7 @@ mod tests {
             juez: &*j,
             exige_uso: false,
         }];
-        let i = evaluar(&mut c, &r, &cs, umbrales(1, 0, 3), 5_000, 1, "m", "b").unwrap();
+        let i = evaluar(&mut c, &r, &cs, umbrales(1, 0, 3), 5_000, 1, "m", "b", 1).unwrap();
         assert!(i.go, "{:?}", i.motivos);
         assert!(i.intentos.iter().all(|x| x.desenlace == Desenlace::Bien));
     }
@@ -720,7 +785,7 @@ mod tests {
         };
         let j: Box<dyn Fn(&str) -> Result<(), String>> = Box::new(juez_correcto);
         let cs = casos(&[("Q01", "protocolo")], &*j);
-        let e = evaluar(&mut c, &r, &cs, Umbrales::default(), 0, 1, "m", "b").unwrap_err();
+        let e = evaluar(&mut c, &r, &cs, Umbrales::default(), 0, 1, "m", "b", 1).unwrap_err();
         assert!(format!("{e}").contains("infinito"), "{e}");
     }
 
@@ -746,12 +811,70 @@ mod tests {
         assert!(core::str::from_utf8(r.as_bytes()).is_ok());
     }
 
+    /// Un plazo seguido de una respuesta es un caso lento, no una campaña
+    /// cortada. El plazo sigue en el denominador.
+    #[test]
+    fn un_plazo_con_servicio_recuperado_sigue_siendo_medicion() {
+        let g = alloc::vec![Guion::Plazo, Guion::Bien { usage: true }, Guion::Bien { usage: true }];
+        let i = corre(g, &[("Q05", "protocolo")], umbrales(1, 0, 3));
+        assert_eq!(i.cobertura, Cobertura::Completa);
+        assert!(!i.go);
+        assert!(i.motivos.iter().all(|m| !m.contains("transporte")), "{:?}", i.motivos);
+        assert_eq!(i.clase("protocolo").unwrap().intentos_totales, 3);
+        assert_eq!(i.clase("protocolo").unwrap().intentos_bien, 2);
+    }
+
+    /// El endpoint muere a mitad: los intentos que no contestaron siguen en el
+    /// denominador y el veredicto no es un NO-GO de calidad.
+    #[test]
+    fn perder_el_transporte_no_es_un_no_go_de_calidad() {
+        let g = alloc::vec![
+            Guion::Bien { usage: true },
+            Guion::Bien { usage: true },
+            Guion::Bien { usage: true },
+            Guion::Bien { usage: true },
+            Guion::Error,
+            Guion::Error,
+            Guion::Error,
+            Guion::Error,
+            Guion::Error,
+        ];
+        let i = corre(
+            g,
+            &[("Q04", "protocolo"), ("Q05", "protocolo"), ("Q06", "protocolo")],
+            umbrales(3, 0, 3),
+        );
+        assert_eq!(i.cobertura, Cobertura::Interrumpida);
+        assert!(!i.go);
+        assert!(i.motivos[0].contains("transporte perdido desde Q05"), "{:?}", i.motivos);
+        assert_eq!(i.clase("protocolo").unwrap().intentos_totales, 9);
+        assert!(i.json().contains("\"cobertura\":\"interrumpida\""));
+    }
+
+    /// Medir un subconjunto no puede aprobar la campaña aunque ese subconjunto
+    /// salga entero bien.
+    #[test]
+    fn una_tirada_filtrada_no_es_go() {
+        let r = RelojSimulado::nuevo(0);
+        let mut c = ClienteFalso {
+            guion: (0..3).map(|_| Guion::Bien { usage: true }).collect(),
+            llamada: 0,
+        };
+        let j: Box<dyn Fn(&str) -> Result<(), String>> = Box::new(juez_correcto);
+        let cs = casos(&[("Q05", "protocolo")], &*j);
+        let i = evaluar(&mut c, &r, &cs, umbrales(1, 0, 3), 5_000, 1, "m", "b", 10).unwrap();
+        assert_eq!(i.cobertura, Cobertura::Filtrada);
+        assert!(!i.go, "{:?}", i.motivos);
+        assert!(i.motivos[0].contains("filtrada"), "{:?}", i.motivos);
+    }
+
     #[test]
     fn el_informe_json_dice_el_veredicto_y_los_motivos() {
         let g = (0..3).map(|_| Guion::Mal).collect();
         let i = corre(g, &[("Q01", "protocolo")], umbrales(1, 0, 3));
         let j = i.json();
         assert!(j.contains("\"go\":false"), "{j}");
+        assert!(j.contains("\"cobertura\":\"completa\""), "{j}");
         assert!(j.contains("\"clase\":\"protocolo\""), "{j}");
         assert!(j.contains("\"motivos\":["), "{j}");
         assert!(j.contains("schema_version"), "{j}");

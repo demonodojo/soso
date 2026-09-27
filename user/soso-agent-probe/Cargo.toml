@@ -16,3 +16,4 @@ cc = { workspace = true }
 [dependencies]
 libsoso = { workspace = true }
 soso-abi = { workspace = true }
+soso-alloc = { path = "../../crates/soso-alloc" }

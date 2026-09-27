@@ -8,8 +8,9 @@
       "tipo": "flujo_utf8_completo"
     },
     {
-      "tipo": "contenido_igual",
-      "valor": "Café ☕ para el señor Ñoño"
+      "tipo": "contenido_contiene",
+      "valor": "Café ☕ para el señor Ñoño",
+      "ignorar_mayusculas": false
     },
     {
       "tipo": "finish_reason",

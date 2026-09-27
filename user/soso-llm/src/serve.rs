@@ -269,46 +269,65 @@ fn post_chat(
     req: HttpRequest,
     conn: &mut TcpFd,
 ) -> Result<Vec<u8>, GuestServiceError> {
+    // El exceso de contexto se decide antes de ocupar la generación. Si no,
+    // una petición que debía ser 422 arranca el prefill, y la siguiente —el
+    // reintento de la campaña— recibe 429 `busy`.
+    let (prepared, prompt_ids) = match preparar_chat(rt, &req) {
+        Ok(v) => v,
+        Err(e) => {
+            cerrar_peticion(rt);
+            return Err(e);
+        }
+    };
     if rt.admission.begin_generation().is_err() {
+        cerrar_peticion(rt);
         return Ok(busy_body());
     }
-    let out = post_chat_inner(rt, req, conn);
+    let out = post_chat_generar(rt, conn, prepared, prompt_ids);
+    cerrar_peticion(rt);
+    rt.admission.end_generation();
+    out
+}
+
+fn cerrar_peticion(rt: &mut ServeRuntime) {
     if let Some(ses) = rt.propietario.sesion.as_mut() {
         ses.reset_peticion();
         ses.bundle.rt.layer_hook = None;
         ses.bundle.rt.layer_enter_hook = None;
     }
-    rt.admission.end_generation();
-    out
 }
 
-fn post_chat_inner(
-    rt: &mut ServeRuntime,
-    req: HttpRequest,
-    conn: &mut TcpFd,
-) -> Result<Vec<u8>, GuestServiceError> {
+fn preparar_chat(
+    rt: &ServeRuntime,
+    req: &HttpRequest,
+) -> Result<(PreparedChatCompletion, Vec<u32>), GuestServiceError> {
     let body = core::str::from_utf8(&req.body).map_err(|_| {
         GuestServiceError::Api(ApiError::PeticionInvalida {
             motivo: String::from("cuerpo no UTF-8"),
         })
     })?;
-
     let profile = rt.profile.clone();
-    let (prepared, prompt_ids) = {
-        let sesion = rt
-            .propietario
-            .sesion
-            .as_ref()
-            .ok_or(GuestServiceError::Inferencia)?;
-        let tokenizer = &sesion.bundle.tokenizer;
-        let template = sesion.bundle.rt.manifest.chat_template.as_str();
-        let prepared = prepare_chat_completion(body, &profile, tokenizer)
-            .map_err(GuestServiceError::Api)?;
-        let prompt_ids = prompt_ids_for_api(&prepared, &profile, tokenizer, template)
-            .map_err(GuestServiceError::Api)?;
-        (prepared, prompt_ids)
-    };
+    let sesion = rt
+        .propietario
+        .sesion
+        .as_ref()
+        .ok_or(GuestServiceError::Inferencia)?;
+    let tokenizer = &sesion.bundle.tokenizer;
+    let template = sesion.bundle.rt.manifest.chat_template.as_str();
+    let prepared =
+        prepare_chat_completion(body, &profile, tokenizer).map_err(GuestServiceError::Api)?;
+    let prompt_ids = prompt_ids_for_api(&prepared, &profile, tokenizer, template)
+        .map_err(GuestServiceError::Api)?;
+    Ok((prepared, prompt_ids))
+}
 
+fn post_chat_generar(
+    rt: &mut ServeRuntime,
+    conn: &mut TcpFd,
+    prepared: PreparedChatCompletion,
+    prompt_ids: Vec<u32>,
+) -> Result<Vec<u8>, GuestServiceError> {
+    let profile = rt.profile.clone();
     if prepared.stream {
         return post_chat_stream(rt, conn, prepared, prompt_ids, profile);
     }

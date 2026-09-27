@@ -28,6 +28,10 @@ const HEALTH_WAIT_DEFAULT: Duration = Duration::from_secs(1200);
 /// La sesión que sostiene `serve` dura toda la prueba: no es un timeout de
 /// respuesta, es el tope del proceso entero.
 const SERVE_SESSION_LIMIT: Duration = Duration::from_secs(3600);
+/// 10 casos × 3, cada una con el plazo de cliente de 10 min, más holgura.
+/// Medido en T74: ~580 s por petición. Con 3600 s la sesión SSH mata
+/// `soso-llm` hacia la sexta y el resto sale como pérdida de transporte.
+const SERVE_SESSION_CAMPANA: Duration = Duration::from_secs(10 * 3 * 12 * 60);
 
 struct Args {
     synthetic: bool,
@@ -154,6 +158,21 @@ fn uso() {
     eprintln!("  --caso Qxx           un solo caso, para no pagar la campaña entera");
 }
 
+fn contexto_del_perfil(path: &Path) -> u32 {
+    let Ok(data) = fs::read_to_string(path) else {
+        return 32_768;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return 32_768;
+    };
+    v.get("som")
+        .and_then(|s| s.get("max_seq"))
+        .and_then(|n| n.as_u64())
+        .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+        .map(|n| n as u32)
+        .unwrap_or(32_768)
+}
+
 fn load_profile(path: &Path) -> ProfileFile {
     let data = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("test-llm-api: no leo {} ({e})", path.display());
@@ -203,7 +222,8 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &A
             "test-llm-api: BLOQUEADO — 127.0.0.1:{LLM_PORT} ya acepta TCP (¿QEMU huérfano?). \
              Mata `qemu-system-x86` con test-llm-api y reintenta."
         );
-        write_evidence(&arte, "bloqueado_puerto", &[], &PhaseLog::default(), 2);
+        let (dir, nombre) = destino_evidencia(root, arte, catalog, args.campana);
+        write_evidence_en(&dir, &nombre, "bloqueado_puerto", &[], &PhaseLog::default(), 2);
         exit(2);
     }
     // El tamaño sale del árbol `.som`, no de una constante: con 512M fijos el
@@ -251,7 +271,10 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &A
         // tokens tardaba ~200 s (medido 2026-09-23). Con los pesos residentes
         // la campaña deja de ser una prueba de paciencia. El modelo real es la
         // entrada de esta ficha; el tamaño de la máquina, parte del arnés.
-        mem: Some("5120M".into()),
+        // 5120M cabe el 3B (2212 MiB). Un 7B (~4,8 GB) no: el presupuesto de
+        // pesos es el 70 % de lo libre y, por debajo, cada token pagina.
+        // `SOSO_QEMU_MEM` sube solo esta tirada; el 3B sigue en 5120M.
+        mem: Some(std::env::var("SOSO_QEMU_MEM").unwrap_or_else(|_| "5120M".into())),
         smp: None,
         monitor: None,
         guest: crate::QemuGuestConfig::from_env(),
@@ -262,19 +285,32 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &A
         Ok(c) => c,
         Err(e) => {
             eprintln!("test-llm-api: QEMU no arrancó ({e})");
-            write_evidence(arte, "qemu_fail", &[], &phases, 1);
+            let (dir, nombre) = destino_evidencia(root, arte, catalog, args.campana);
+            write_evidence_en(&dir, &nombre, "qemu_fail", &[], &phases, 1);
             exit(1);
         }
     };
     phases.record("lanzar_qemu", t);
 
     let mut steps: Vec<StepResult> = Vec::new();
+    let dir_t14 = root.join("target/self-improvement/tasks/T14");
+    if args.campana {
+        let _ = fs::create_dir_all(&dir_t14);
+    }
+    let contexto = args
+        .profile
+        .as_ref()
+        .map(|p| contexto_del_perfil(p))
+        .unwrap_or(32_768);
     let campana = args.campana.then(|| Campana {
-        arte,
+        arte: &dir_t14,
+        modelo: catalog,
+        modelo_dir: model_dir,
+        contexto,
         repeticiones: args.repeticiones.as_deref(),
         caso: args.caso.as_deref(),
     });
-    let exit_code = match run_guest_inner(
+    let cierre = run_guest_inner(
         &key,
         &serial,
         catalog,
@@ -282,8 +318,10 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &A
         &mut qemu,
         &mut phases,
         campana.as_ref(),
-    ) {
-        Ok(()) => 0,
+    );
+    let (exit_code, modo) = match cierre {
+        Ok(CierreGuest::Medido) => (0, "guest_ok"),
+        Ok(CierreGuest::Parcial) => (0, "parcial"),
         Err(msg) => {
             eprintln!("test-llm-api: {msg}");
             steps.push(StepResult {
@@ -291,15 +329,23 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &A
                 ok: false,
                 detail: msg,
             });
-            1
+            (1, "guest_fail")
         }
     };
 
+    if args.campana {
+        let texto = guest_serve_log(&key);
+        let _ = fs::write(dir_t14.join(format!("serve-{catalog}.log")), texto);
+    }
+
     let _ = qemu.kill();
     let _ = qemu.wait();
-    write_evidence(
-        arte,
-        if exit_code == 0 { "guest_ok" } else { "guest_fail" },
+    // La campaña no reescribe el informe de T19: cada modelo deja el suyo en T14.
+    let (evid_dir, evid_nombre) = destino_evidencia(root, arte, catalog, args.campana);
+    write_evidence_en(
+        &evid_dir,
+        &evid_nombre,
+        modo,
         &steps,
         &phases,
         exit_code,
@@ -307,11 +353,42 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &A
     exit(exit_code);
 }
 
+enum CierreGuest {
+    /// Campaña entera medida, sea GO o NO-GO de calidad.
+    Medido,
+    /// Subconjunto. El proceso puede salir 0; el rótulo no es `guest_ok`.
+    Parcial,
+}
+
 /// Qué campaña correr, si es que hay que correr alguna.
 struct Campana<'a> {
     arte: &'a Path,
+    modelo: &'a str,
+    modelo_dir: &'a Path,
+    contexto: u32,
     repeticiones: Option<&'a str>,
     caso: Option<&'a str>,
+}
+
+/// Informe de una campaña. El nombre lleva el modelo: el 7B no puede
+/// reescribir el informe del 3B, ni el canónico compartido `campana-t14.json`.
+fn ruta_informe_campana(
+    dir: &Path,
+    modelo: &str,
+    caso: Option<&str>,
+    repeticiones: Option<&str>,
+) -> PathBuf {
+    let seguro: String = modelo
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .collect();
+    match caso {
+        Some(caso) => {
+            let reps = repeticiones.unwrap_or("3");
+            dir.join(format!("campana-t14-parcial-{seguro}-{caso}-x{reps}.json"))
+        }
+        None => dir.join(format!("campana-t14-{seguro}.json")),
+    }
 }
 
 /// Lanza `soso-improve evaluar` contra el endpoint reenviado.
@@ -323,19 +400,11 @@ struct Campana<'a> {
 fn correr_campana(catalog: &str, c: &Campana<'_>) -> StepResult {
     let root = crate::project_root();
     let banco = root.join("tests/self-improvement/cases");
-    // **Una campaña filtrada no es la campaña.** `evaluar` calcula el veredicto
-    // sobre lo que se le da, así que con `--caso Q08` el informe dice
-    // `"go": true` con un caso — y quien abra el fichero después no tiene forma
-    // de saber que estaba filtrado. Por eso una tirada parcial **no escribe en
-    // el nombre canónico**: lleva el suyo, y el aviso va también por pantalla.
+    // **Una campaña filtrada no es la campaña.** `evaluar` marca
+    // `cobertura: filtrada` y no da GO. El informe tampoco usa el nombre
+    // canónico: lleva el modelo, y el aviso va también por pantalla.
     let parcial = c.caso.is_some() || c.repeticiones.is_some();
-    let informe = if parcial {
-        let etiqueta = c.caso.unwrap_or("todos");
-        let reps = c.repeticiones.unwrap_or("3");
-        c.arte.join(format!("campana-t14-parcial-{etiqueta}-x{reps}.json"))
-    } else {
-        c.arte.join("campana-t14.json")
-    };
+    let informe = ruta_informe_campana(c.arte, c.modelo, c.caso, c.repeticiones);
     let puerto = LLM_PORT.to_string();
 
     let mut cmd = Command::new("cargo");
@@ -363,6 +432,14 @@ fn correr_campana(catalog: &str, c: &Campana<'_>) -> StepResult {
     if let Some(caso) = c.caso {
         cmd.args(["--caso", caso]);
     }
+    let contexto = c.contexto.to_string();
+    let modelo_dir = c.modelo_dir.display().to_string();
+    cmd.args([
+        "--contexto",
+        &contexto,
+        "--modelo-dir",
+        &modelo_dir,
+    ]);
 
     println!("test-llm-api: campaña T14 contra el endpoint vivo (puerto {puerto})");
     if parcial {
@@ -376,13 +453,21 @@ fn correr_campana(catalog: &str, c: &Campana<'_>) -> StepResult {
         Ok(st) if st.success() => StepResult {
             name: "campana_t14",
             ok: true,
-            detail: format!("GO — informe en {}", informe.display()),
+            detail: if parcial {
+                format!("parcial — informe en {}", informe.display())
+            } else {
+                format!("GO — informe en {}", informe.display())
+            },
         },
         Ok(st) if st.code() == Some(soso_improve_core::cli::Codigo::Verificacion.como_i32()) => {
             StepResult {
                 name: "campana_t14",
                 ok: true,
-                detail: format!("NO-GO medido — informe en {}", informe.display()),
+                detail: if parcial {
+                    format!("parcial — informe en {}", informe.display())
+                } else {
+                    format!("NO-GO medido — informe en {}", informe.display())
+                },
             }
         }
         Ok(st) => StepResult {
@@ -406,7 +491,7 @@ fn run_guest_inner(
     qemu: &mut Child,
     phases: &mut PhaseLog,
     campana: Option<&Campana<'_>>,
-) -> Result<(), String> {
+) -> Result<CierreGuest, String> {
     let t = Instant::now();
     wait_guest_ready(key, serial, qemu)?;
     phases.record("boot_ssh", t);
@@ -418,7 +503,12 @@ fn run_guest_inner(
     let token_guion = format!("echo {TOKEN} > /tmp/soso-llm-api.token\nexit\n");
     ssh_guion(key, SSH_PORT, &token_guion, Duration::from_secs(120))
         .map_err(|e| format!("provisión del token guest: {e}"))?;
-    let serve = ServeSession::start(key, catalog);
+    let limite_serve = if campana.is_some() {
+        SERVE_SESSION_CAMPANA
+    } else {
+        SERVE_SESSION_LIMIT
+    };
+    let serve = ServeSession::start(key, catalog, limite_serve);
     esperar_proceso_serve(key, &serve)?;
     phases.record("start_serve", t);
 
@@ -431,9 +521,20 @@ fn run_guest_inner(
     // necesita: se corre y se vuelve, sin los invariantes de T19.
     if let Some(c) = campana {
         let t = Instant::now();
-        steps.push(correr_campana(catalog, c));
+        let paso = correr_campana(catalog, c);
+        let parcial = c.caso.is_some() || c.repeticiones.is_some();
+        let malo = !paso.ok;
+        let detalle = paso.detail.clone();
+        steps.push(paso);
         phases.record("campana_t14", t);
-        return Ok(());
+        if malo {
+            return Err(detalle);
+        }
+        return Ok(if parcial {
+            CierreGuest::Parcial
+        } else {
+            CierreGuest::Medido
+        });
     }
 
     let guest_lim = GuestHttpLimits::default();
@@ -450,17 +551,86 @@ fn run_guest_inner(
     // `ask` con el modelo real y `serve` vivo: dos generaciones de dos tokens,
     // ~200 s cada una en este guest (medido 2026-09-23).
     let ask_guion = "ask :max 2\nask hola\nexit\n";
+    // El veredicto de este paso era `out.contains("ask:") || out.is_empty()`, y
+    // eso **no puede fallar por lo que el paso existe**: de los seis mensajes
+    // `ask:` de `user/soso-llm/src/ask.rs`, **cuatro son errores** («no pude
+    // lanzar», «el servicio no escuchó», «error al enviar», «no hay ningún
+    // modelo») y los otros dos son el banner del REPL, que `ask hola` no
+    // imprime. Una respuesta de verdad **no** lleva `ask:`. Así que el paso
+    // aprobaba con cualquier error y con la salida vacía, y sólo podía suspender
+    // cuando funcionaba.
+    //
+    // Ahora exige lo que dice su nombre: que `ask` conteste con `serve` vivo.
+    let errores_ask = [
+        "no pude lanzar",
+        "el servicio no escuchó",
+        "error al enviar",
+        "no hay ningún modelo",
+    ];
     match ssh_guion(key, SSH_PORT, ask_guion, Duration::from_secs(900)) {
-        Ok(out) if out.contains("ask:") || out.is_empty() => steps.push(StepResult {
-            name: "ask_con_serve",
-            ok: true,
-            detail: String::new(),
-        }),
-        Ok(out) => steps.push(StepResult {
+        Ok(out) if out.trim().is_empty() => steps.push(StepResult {
             name: "ask_con_serve",
             ok: false,
-            detail: format!("salida inesperada: {out:?}"),
+            detail: "sin salida: `ask` no contestó nada".into(),
         }),
+        Ok(out) if errores_ask.iter().any(|e| out.contains(e)) => steps.push(StepResult {
+            name: "ask_con_serve",
+            ok: false,
+            detail: format!("`ask` informó de un error: {out:?}"),
+        }),
+        Ok(out) => {
+            // El guion son dos órdenes: `ask :max 2` y `ask hola`. La primera
+            // contesta `ask: máx 2 tokens` —el eco de una configuración— y eso
+            // **ya bastaba** para el veredicto viejo, que por eso pasaba sin
+            // mirar nunca si la segunda generó algo. Aquí se descuentan las
+            // líneas que no son una respuesta y se exige que quede texto.
+            let respuesta: String = out
+                .lines()
+                .map(str::trim)
+                .filter(|l| {
+                    // Todo esto lo imprime el sistema, no el modelo: el
+                    // banner de bienvenida, las marcas de `sosh` y los ecos de
+                    // configuración de `ask`. Quitarlo es el punto: con el
+                    // filtro incompleto, **el banner de login bastaba para
+                    // aprobar** —comprobado quitando la generación del guion,
+                    // y el paso seguía en verde con 206 bytes de bienvenida—.
+                    //
+                    // Se filtran **todas** las líneas `ask:`, no una lista de
+                    // ellas: las seis que existen son del sistema —errores,
+                    // banner, configuración y progreso—, y la respuesta del
+                    // modelo no lleva ese prefijo. Y los puntos de progreso,
+                    // que si no dejarían pasar una generación que arranca y se
+                    // cuelga: eso probaría «empezó», no «contestó».
+                    const DEL_SISTEMA: &[&str] = &[
+                        "bienvenido a soso",
+                        "un OS minimalista",
+                        "desde live, instalar",
+                        "sosh —",
+                        "sosh:",
+                        "ask:",
+                        "$",
+                        "?>",
+                    ];
+                    !l.is_empty()
+                        && !l.chars().all(|c| c == '.')
+                        && !DEL_SISTEMA.iter().any(|p| l.starts_with(p))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if respuesta.is_empty() {
+                steps.push(StepResult {
+                    name: "ask_con_serve",
+                    ok: false,
+                    detail: format!("sólo ecos de configuración, ninguna respuesta: {out:?}"),
+                });
+            } else {
+                steps.push(StepResult {
+                    name: "ask_con_serve",
+                    ok: true,
+                    detail: format!("contestó {} bytes: {respuesta:?}", respuesta.len()),
+                });
+            }
+        }
         Err(e) => steps.push(StepResult {
             name: "ask_con_serve",
             ok: false,
@@ -476,7 +646,7 @@ fn run_guest_inner(
     if steps.iter().any(|s| !s.ok) {
         return Err("alguna invariante falló".into());
     }
-    Ok(())
+    Ok(CierreGuest::Medido)
 }
 
 /// El servidor guest en su **propia** sesión SSH, en primer plano.
@@ -491,7 +661,7 @@ struct ServeSession {
 }
 
 impl ServeSession {
-    fn start(key: &Path, catalog: &str) -> Self {
+    fn start(key: &Path, catalog: &str, limite: Duration) -> Self {
         let fin = Arc::new(Mutex::new(None));
         let fin_hilo = fin.clone();
         let key = key.to_path_buf();
@@ -505,7 +675,7 @@ impl ServeSession {
              >> /tmp/soso-llm-serve.log\n"
         );
         std::thread::spawn(move || {
-            let r = ssh_guion(&key, SSH_PORT, &guion, SERVE_SESSION_LIMIT);
+            let r = ssh_guion(&key, SSH_PORT, &guion, limite);
             *fin_hilo.lock().unwrap() = Some(r);
         });
         Self { fin }
@@ -722,7 +892,7 @@ fn guest_serve_log(key: &Path) -> String {
         // `log` primero: `serve` diagnostica con `logln!` (fd de log del
         // kernel), así que el fichero redirigido suele estar vacío o ni
         // existir, y el informe salía sin la única línea que importaba.
-        "log\ncat /tmp/soso-llm-serve.log\nexit\n",
+        "log\ncat /tmp/soso-llm-serve.log\nps\nexit\n",
         Duration::from_secs(60),
     )
     .unwrap_or_else(|e| format!("(no leí log: {e})"))
@@ -765,6 +935,17 @@ fn needs_refresh(src: &Path, dst: &Path) -> bool {
     }
 }
 
+/// La campaña escribe en T14, con el nombre del modelo. El resto sigue en T19.
+fn destino_evidencia(root: &Path, arte: &Path, catalog: &str, campana: bool) -> (PathBuf, String) {
+    if campana {
+        let dir = root.join("target/self-improvement/tasks/T14");
+        let _ = fs::create_dir_all(&dir);
+        (dir, format!("resultado-{catalog}.md"))
+    } else {
+        (arte.to_path_buf(), String::from("resultado.md"))
+    }
+}
+
 fn write_evidence(
     dir: &Path,
     modo: &str,
@@ -772,9 +953,21 @@ fn write_evidence(
     phases: &PhaseLog,
     code: i32,
 ) {
-    let path = dir.join("resultado.md");
+    write_evidence_en(dir, "resultado.md", modo, steps, phases, code);
+}
+
+fn write_evidence_en(
+    dir: &Path,
+    nombre: &str,
+    modo: &str,
+    steps: &[StepResult],
+    phases: &PhaseLog,
+    code: i32,
+) {
+    let path = dir.join(nombre);
     let mut f = fs::File::create(&path).expect("resultado T19");
-    let _ = writeln!(f, "# T19 — {modo}\n");
+    let titulo = if nombre == "resultado.md" { "T19" } else { "T14" };
+    let _ = writeln!(f, "# {titulo} — {modo}\n");
     let _ = writeln!(f, "exit_code: {code}\n");
     if !phases.entries.is_empty() {
         let _ = writeln!(f, "## Fases (s)\n");
@@ -786,6 +979,25 @@ fn write_evidence(
     for s in steps {
         let mark = if s.ok { "OK" } else { "FAIL" };
         let _ = writeln!(f, "- {mark} **{}** {}", s.name, s.detail);
+    }
+}
+
+#[cfg(test)]
+mod pruebas_campana {
+    use super::ruta_informe_campana;
+    use std::path::Path;
+
+    #[test]
+    fn dos_modelos_no_comparten_el_informe() {
+        let dir = Path::new("target/self-improvement/tasks/T14");
+        let a = ruta_informe_campana(dir, "qwen2.5-coder-3b", None, None);
+        let b = ruta_informe_campana(dir, "qwen2.5-coder-7b", None, None);
+        assert_ne!(a, b);
+        assert!(a.ends_with("campana-t14-qwen2.5-coder-3b.json"));
+        assert!(b.ends_with("campana-t14-qwen2.5-coder-7b.json"));
+        let parcial = ruta_informe_campana(dir, "qwen2.5-coder-7b", Some("Q05"), Some("1"));
+        assert_ne!(parcial, b);
+        assert!(parcial.to_string_lossy().contains("parcial"));
     }
 }
 

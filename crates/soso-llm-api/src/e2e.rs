@@ -1,10 +1,58 @@
 //! Invariantes API reutilizables (T19): transporte HTTP sobre TCP std.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use soso_llm_core::conversation::ModelProfile;
+
+/// Un `EAGAIN` inmediato no es el plazo. En la campaña 7B, Q10 recibió
+/// `read: Resource temporarily unavailable (os error 11)` a los 0 ms: el
+/// socket no tenía datos todavía y `read_to_end` se rindió. Aquí se espera
+/// hasta `plazo`.
+fn transferir(stream: &mut TcpStream, raw: &[u8], plazo: Duration) -> Result<Vec<u8>, String> {
+    stream
+        .set_nonblocking(true)
+        .map_err(|e| format!("no bloqueante: {e}"))?;
+    let inicio = Instant::now();
+    let mut escrito = 0usize;
+    while escrito < raw.len() {
+        if inicio.elapsed() >= plazo {
+            return Err(format!(
+                "write: Resource temporarily unavailable (os error 11) tras {escrito} byte(s)"
+            ));
+        }
+        match stream.write(&raw[escrito..]) {
+            Ok(0) => return Err(String::from("write: cero bytes")),
+            Ok(n) => escrito += n,
+            Err(e) if es_espera(&e) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Err(format!("write: {e}")),
+        }
+    }
+    stream.shutdown(std::net::Shutdown::Write).ok();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        if inicio.elapsed() >= plazo {
+            return Err(String::from(
+                "read: Resource temporarily unavailable (os error 11)",
+            ));
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => return Ok(out),
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) if es_espera(&e) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Err(format!("read: {e}")),
+        }
+    }
+}
+
+fn es_espera(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+    )
+}
 
 /// Cliente loopback hacia el puerto reenviado o un servidor de prueba.
 #[derive(Debug, Clone)]
@@ -43,16 +91,7 @@ impl ApiClient {
             .map_err(|e| format!("addr: {e}"))?;
         let mut stream = TcpStream::connect_timeout(&addr, connect)
             .map_err(|e| format!("connect {}: {e}", self.addr()))?;
-        stream.set_read_timeout(Some(read)).ok();
-        stream
-            .write_all(raw)
-            .map_err(|e| format!("write: {e}"))?;
-        stream.shutdown(std::net::Shutdown::Write).ok();
-        let mut out = Vec::new();
-        stream
-            .read_to_end(&mut out)
-            .map_err(|e| format!("read: {e}"))?;
-        Ok(out)
+        transferir(&mut stream, raw, read)
     }
 
     pub fn auth_header(&self) -> String {
@@ -456,5 +495,38 @@ pub fn model_profile_from_lock(p: &ProfileFile) -> ModelProfile {
         context_tokens: 4096,
         max_output_tokens: 128,
         stop_token_ids: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    use super::transferir;
+
+    /// Una respuesta que tarda un poco no es un plazo a 0 ms.
+    #[test]
+    fn una_respuesta_tardia_no_es_eagain() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let servidor = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let _ = sock.read(&mut buf);
+            std::thread::sleep(Duration::from_millis(150));
+            sock.write_all(b"HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        });
+        let mut cliente = std::net::TcpStream::connect(addr).unwrap();
+        let cuerpo = transferir(&mut cliente, b"POST / HTTP/1.1\r\n\r\n", Duration::from_secs(2))
+            .unwrap();
+        assert!(
+            cuerpo.windows(2).any(|w| w == b"ok"),
+            "{}",
+            String::from_utf8_lossy(&cuerpo)
+        );
+        servidor.join().unwrap();
     }
 }

@@ -1,8 +1,11 @@
 # Automejora de soso con OpenCode y su modelo local
 
-**Fecha:** 15 de septiembre de 2026; revisión nativa: 16 de septiembre.
+**Fecha:** 15 de septiembre de 2026; revisión de estado: 26 de septiembre.
 
-**Estado:** plan de implementación; hitos SI-0–SI-7 pendientes.
+**Estado:** implementación en curso; ningún hito SI-0–SI-7 se declara cerrado.
+La API tiene evidencia guest, pero T14 sigue sin GO y aún no hay primera mejora
+aceptada. Estado y secuencia vigentes en [el índice](docs/self-improvement/README.md)
+y la [revisión del 26-sep](docs/self-improvement/seguimiento/REVISION-2026-09-26.md).
 
 **Objetivo:** que un agente OpenCode use un modelo servido por el runtime de
 soso para leer el proyecto, realizar mejoras pequeñas, compilarlas, probarlas
@@ -415,8 +418,9 @@ del binario local. Esta revisión no lanzó una sesión de inferencia.
 ## 6. Entregables propuestos y orden inmediato
 
 T01/T02 ya aportan core y adaptadores; extenderlos sin recrear las crates.
-Los demás módulos y comandos son propuestas pendientes. Esta revisión
-actualiza documentación, sin acreditar ejecución de campañas.
+La tabla siguiente describe la arquitectura prevista; el catálogo distingue
+las piezas ya implementadas de las pendientes. Esta revisión del seguimiento
+no añade ejecuciones de campañas ni cierra hitos.
 
 | Orden | Entregable | Ubicación prevista |
 |---|---|---|
@@ -429,11 +433,13 @@ actualiza documentación, sin acreditar ejecución de campañas.
 | 7 | Historial y conocimiento verificado | `/var/self-improvement/` guest, `target/self-improvement/` host, resúmenes en docs |
 | 8 | Mecanismos y aceptación del circuito nativo | T45–T51 y `NATIVO.md` |
 
-**Siguiente paso concreto:** T03 (perfil) y T45 (CLI/capacidades) están
-habilitadas; elegir una por sesión. Continuar con una prueba SI-1 del modelo real
-seleccionado que lea un archivo mediante una herramienta y use su resultado
-en el siguiente turno. Esta prueba determina si el cuello de botella es la
-calidad del modelo, el formato de chat o la infraestructura del servidor.
+**Siguiente paso concreto:** [T74](docs/self-improvement/T74-campana-7b-interrumpida.md):
+recuperar la comparación 7B interrumpida y repetir T14 con cobertura válida.
+El 3B conserva NO-GO 8/10; el agregado 4/10 del 7B incluye pérdida de transporte
+y no demuestra su calidad. Independientemente, T72 extrae un alocador compartido
+y T75 sincroniza la receta Rust; ambas preceden al cierre pendiente de T39.
+El GO de T14 habilita T20–T22; el build y humo de T39 habilitan T40–T42.
+No declarar cierre nativo por una compilación cruzada ni por recuento de fichas.
 
 Para los cambios de implementación, ejecutar primero pruebas focalizadas;
 antes de promover una base de desarrollo, `cargo xtask check` y

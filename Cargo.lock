@@ -433,8 +433,8 @@ name = "libsoso"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
- "linked_list_allocator",
  "soso-abi",
+ "soso-alloc",
  "spin",
  "talc",
 ]
@@ -442,9 +442,8 @@ dependencies = [
 [[package]]
 name = "linked_list_allocator"
 version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b23ac50abb8261cb38c6e2a7192d3302e0836dac1628f6a93b82b4fad185897"
 dependencies = [
+ "rustc-std-workspace-core",
  "spinning_top",
 ]
 
@@ -603,6 +602,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc-std-workspace-core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa9c45b374136f52f2d6311062c7146bff20fec063c3f5d46a410bd937746955"
+
+[[package]]
 name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -750,6 +755,18 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "soso-abi"
 version = "0.1.0"
+dependencies = [
+ "rustc-std-workspace-core",
+]
+
+[[package]]
+name = "soso-alloc"
+version = "0.1.0"
+dependencies = [
+ "linked_list_allocator",
+ "rustc-std-workspace-core",
+ "soso-abi",
+]
 
 [[package]]
 name = "soso-audio"
@@ -844,7 +861,9 @@ dependencies = [
 name = "soso-rt"
 version = "0.1.0"
 dependencies = [
+ "rustc-std-workspace-core",
  "soso-abi",
+ "soso-alloc",
 ]
 
 [[package]]

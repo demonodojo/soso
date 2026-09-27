@@ -1,6 +1,6 @@
 # T61 — Lectura de tuberías con plazo, sin bloquear
 
-**Hito:** SI-4 · **Tipo:** Ampliación de ABI (kernel) · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Ampliación de ABI (kernel) · **Estado:** completada (24-sep; encabezado sincronizado el 26-sep-2026).
 
 **Dependencias:** ninguna. **La origina:** [T47](T47-procesos-nativos.md).
 **Bloquea:** el drenaje simultáneo de stdout y stderr en T47.
@@ -96,3 +96,7 @@ esa ficha, no de ésta.
 Aplicar [NATIVO.md](NATIVO.md). Es kernel y la prueba corre **dentro de soso**,
 entre dos procesos del guest: tanto el interbloqueo como su ausencia se observan
 allí. Validación nativa: **verificada**.
+
+## Revisión del 26-sep-2026
+
+Sincronización documental, sin reejecución. Ver [seguimiento/T61.md](seguimiento/T61.md).

@@ -1,6 +1,6 @@
 # T17 — Atender ocupado, health y desconexión durante inferencia
 
-**Hito:** SI-2 · **Tipo:** Implementación guest acotada · **Estado:** hecho (e2e T19 pendiente).
+**Hito:** SI-2 · **Tipo:** Implementación guest acotada · **Estado:** hecho (guest parcial; cobertura de cancelación pendiente).
 
 **Dependencias:** [T09](T09-cancelacion-runtime.md), [T16](T16-servicio-guest.md)
 
@@ -58,4 +58,12 @@ del hito en la misma sesión.
 
 Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
 
-Validación nativa e2e: **pendiente (T19)**. Evidencia: `target/self-improvement/tasks/T17/resultado.md`, `seguimiento/T17.md`.
+Validación nativa e2e: **parcial**. T19 documenta busy_429 y health durante
+generación en el 3B; faltan evidencia específica de cliente lento, cierre activo
+y latencia de checkpoints. No se revalidó esta ejecución durante la revisión. Evidencia: `target/self-improvement/tasks/T17/resultado.md`, `seguimiento/T17.md`.
+
+## Revisión del 26-sep-2026
+
+Estado y siguiente paso sincronizados con el catálogo; ver
+[seguimiento/T17.md](seguimiento/T17.md) y
+[revisión del plan](seguimiento/REVISION-2026-09-26.md).

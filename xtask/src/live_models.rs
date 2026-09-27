@@ -625,6 +625,7 @@ mod tests {
         let mixtral = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../target/mixtral-model");
         if !mixtral.join("manifest.som").exists() {
+            eprintln!("skip: falta target/mixtral-model/manifest.som");
             return;
         }
         let tiny = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/tiny-model");
@@ -726,6 +727,7 @@ mod tests {
         let spec = default_live_spec();
         let dir = spec.target_dir(&root);
         if !dir.join("tokenizer.som").exists() {
+            eprintln!("skip: falta el tokenizer del modelo por defecto");
             return;
         }
         spec.check_tokenizer(&dir)

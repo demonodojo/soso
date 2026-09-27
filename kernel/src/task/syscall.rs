@@ -228,14 +228,9 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_HALT => {
             // Primero el rastro: si el GSP o el USB revienta después, el
             // pendrive ya lleva `halt: apagando`. En el ROG el fini iba
-            // delante y el panic no llegó al SOSOLOG.
-            crate::println!("halt: apagando soso");
-            #[cfg(feature = "drv-live-disk")]
-            let _ = crate::drivers::fatlog::flush();
-            crate::drivers::logfs::drenar_todo();
-            #[cfg(feature = "drv-gpu-nvidia")]
-            crate::drivers::gpu::shutdown();
-            crate::qemu::exit(crate::qemu::ExitCode::Success);
+            // delante y el panic no llegó al SOSOLOG. `power::solicitar`
+            // imprime, vuelca y luego apaga o reinicia.
+            crate::arch::power::solicitar(a1 == abi::HALT_REINICIAR);
         }
         abi::SYS_MMAP => sys_mmap(a1, a2, a3, a4),
         abi::SYS_MUNMAP => sys_munmap(a1, a2),
@@ -772,6 +767,14 @@ fn volcar_si_es_el_ultimo(inode: u64) -> Result<(), i64> {
     }
     super::fcache::cerrar(inode);
     Ok(())
+}
+
+/// Cierra un descriptor concreto (p. ej. `tcp_connect` agotó plazo en el planificador).
+pub fn close_fd_slot(p: &mut super::Process, fd: u64) {
+    let Some(cerrado) = p.fds.get_mut(fd as usize).and_then(|s| s.take()) else {
+        return;
+    };
+    let _ = drop_fd(cerrado);
 }
 
 /// Cierra un fd y aplica efectos secundarios (commit, pipes).
@@ -2208,8 +2211,14 @@ fn sys_futex(
     })?;
     match op {
         abi::FUTEX_WAIT => {
+            // El cuarto argumento sólo lo usaba `FUTEX_WAKE`; en `FUTEX_WAIT`
+            // se ignoraba. Ahora es el plazo relativo en ms, con `0` = sin
+            // plazo — que es lo que pasaban todos los llamantes existentes,
+            // así que su significado no cambia y `ABI_VERSION` no se toca
+            // (se compara por igualdad exacta y dejaría fuera a las máquinas
+            // ya instaladas). Ver T73.
             // No vuelve: wait_or_resume bloquea o replanifica.
-            super::futex::wait_or_resume(pml4, uaddr, val as u32, ctx_from_frame(f));
+            super::futex::wait_or_resume(pml4, uaddr, val as u32, nwake, ctx_from_frame(f));
         }
         abi::FUTEX_WAKE => Ok(super::futex::wake(pml4, uaddr, nwake)),
         _ => Err(-abi::EINVAL),

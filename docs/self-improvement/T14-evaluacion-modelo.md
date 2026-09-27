@@ -1,6 +1,8 @@
 # T14 — Medir calidad y fijar presupuestos antes de usar el agente
 
-**Hito:** SI-0 / SI-1 · **Tipo:** Implementación de evaluación e integración · **Estado:** hecha (2026-09-23) · **Resultado: NO-GO**.
+**Hito:** SI-0 / SI-1 · **Tipo:** Implementación de evaluación e integración · **Estado:** hecha (2026-09-23) · **Resultado del perfil elegido (7B): GO**.
+
+El 27-sep-2026 el perfil pasó a ser `qwen2.5-coder-7b`. Su campaña es GO 10/10, cobertura `completa` (30/30, exit 0). El 3B, candidato anterior, sigue en NO-GO 8/10. Detalle en [seguimiento/T14.md](seguimiento/T14.md).
 
 **Dependencias:** [T02](T02-banco.md), [T03](T03-perfil-modelo.md), [T13](T13-servidor-host.md), [T48](T48-reloj-red.md)
 
@@ -61,12 +63,17 @@ presupuestos derivados de lo medido— y [evaluacion.md](evaluacion.md) como
 criterio citable. `cargo test -p soso-improve-core -p soso-improve` verde con
 backend simulado. Resumen en [seguimiento/T14.md](seguimiento/T14.md).
 
-**Campaña del 23-sep-2026 contra el endpoint guest: NO-GO.** 6 de 10 casos de
-protocolo sólidos, 0 inestables; mediana 60,7 s por tarea y máximo 278 s.
-Ninguno de los cuatro fallos es del modelo: son del servicio, y van en
-[T59](T59-tool-calls.md) (tool_calls) y [T60](T60-validacion-peticion.md)
-(validación 422 y `unknown_tool`). Evidencia en
-`target/self-improvement/tasks/T14/resultado.md` e `informe.json`.
+**Campañas y atribución actualizadas el 26-sep-2026.** El primer intento
+(23-sep) dio 6/10. Tras T59/T60, la campaña completa del 25-sep dio **8/10**,
+0 inestables: Q04/Q07 fallan con el 3B; mediana 50 058 ms, máximo 287 100 ms.
+La atribución inicial de los cuatro fallos al servicio quedó superada por T59.
+
+La comparación 7B ya fue elegida y ejecutada el 26-sep, pero perdió conexión
+tras Q05. Su 4/10 agregado no acredita calidad completa: Q04 sí pasa y Q07
+no se midió. **[T74](T74-campana-7b-interrumpida.md) es el siguiente trabajo**.
+Informes separados en `target/self-improvement/tasks/T14/campana-t14-3b.json`
+y `campana-t14-7b.json`; no usar el nombre canónico T19 como prueba del 3B.
+El perfil C1 sigue siendo el 3B hasta comparación válida.
 
 Como la ficha exige, **un no-go no habilita a [T16](T16-servicio-guest.md) ni a
 [T22](T22-primera-mejora.md)**, y SI-2 no cierra con esto.
@@ -87,4 +94,10 @@ del hito en la misma sesión.
 
 Aplicar [NATIVO.md](NATIVO.md). La lógica y las aserciones se comparten con el guest; los adaptadores usan capacidades acreditadas de soso. Las pruebas host permiten desarrollar esta entrega, pero no sustituyen su validación nativa.
 
-Validación nativa: **pendiente**. Condiciones adicionales: [T16](T16-servicio-guest.md), [T41](T41-cargo-offline.md), [T48](T48-reloj-red.md), [T49](T49-pruebas-guest.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).
+Validación nativa: **parcial** (campaña host contra inferencia guest). Condiciones adicionales: [T16](T16-servicio-guest.md), [T41](T41-cargo-offline.md), [T48](T48-reloj-red.md), [T49](T49-pruebas-guest.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).
+
+## Revisión del 26-sep-2026
+
+Estado y siguiente paso sincronizados con el catálogo; ver
+[seguimiento/T14.md](seguimiento/T14.md) y
+[revisión del plan](seguimiento/REVISION-2026-09-26.md).

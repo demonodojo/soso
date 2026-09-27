@@ -9,6 +9,7 @@ pub mod iommu;
 pub mod irq;
 pub mod pat;
 pub mod percpu;
+pub mod power;
 pub mod pit;
 pub mod rtc;
 pub mod smp;

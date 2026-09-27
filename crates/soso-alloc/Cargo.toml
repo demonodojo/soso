@@ -1,0 +1,22 @@
+[package]
+name = "soso-alloc"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+description = "Alocador de userspace de soso: lista para bloques pequeños, mmap para grandes"
+publish = false
+
+[dependencies]
+soso-abi = { path = "../soso-abi" }
+linked_list_allocator = { path = "../../vendor/linked_list_allocator", default-features = false }
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
+
+[features]
+default = []
+# Mismo mecanismo que `soso-abi`: al compilar libstd, `core` es el shim del
+# sysroot y no el de crates.io.
+rustc-dep-of-std = [
+    "dep:core",
+    "soso-abi/rustc-dep-of-std",
+    "linked_list_allocator/rustc-dep-of-std",
+]

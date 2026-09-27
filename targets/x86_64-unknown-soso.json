@@ -6,11 +6,14 @@
   "features": "-mmx,+sse,+sse2,+sse3,+ssse3,+sse4.1,+sse4.2,+avx,+avx2,+fma",
   "linker": "wild-soso",
   "linker-flavor": "gnu-lld",
+  "entry-name": "_start",
+  "main-needs-argc-argv": true,
   "llvm-target": "x86_64-unknown-none-elf",
   "max-atomic-width": 64,
   "os": "soso",
+  "has-thread-local": true,
   "metadata": {
-    "description": "soso host std target (rustc cruzado, ruta A)",
+    "description": "soso host std target (rustc cruzado, ruta A). `has-thread-local`: el cargador de soso monta PT_TLS y fija la base con SYS_SET_TLS (kernel/src/task/elf.rs); sin declararlo, std ca\u00eda en la implementaci\u00f3n por claves de sys/thread_local/os.rs, que soso no tiene, y `destructors` \u2014que la PAL llama desde runtime_entry\u2014 ni exist\u00eda. Ver T39.",
     "host_tools": false,
     "std": true,
     "tier": 3
@@ -18,7 +21,9 @@
   "panic-strategy": "abort",
   "position-independent-executables": false,
   "relocation-model": "static",
-  "stack-probes": { "kind": "inline" },
+  "stack-probes": {
+    "kind": "inline"
+  },
   "supported-sanitizers": [],
   "target-pointer-width": 64
 }

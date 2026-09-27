@@ -31,7 +31,7 @@ el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
 | Desarrollo | **soso-ed**, **soso-forja** | Editar fuentes en `/src/soso`; bucle remoto o plan local (`docs/SELF-HOSTING.md`) |
 | Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
 | Red | **ip**, **ping**, **dns**, **wifi** (builtin) | Ver la IPv4; comprobar alcance ICMP; resolver un nombre; escanear y conectar redes WiFi Intel en placa real |
-| Sistema | **ps**, **halt**, **exit** | Ver procesos en ejecución; apagar o salir de la shell |
+| Sistema | **ps**, **halt**, **reboot**, **exit** | Ver procesos; apagar, reiniciar o salir de la shell |
 
 Al arrancar verás una línea como `soso 0.2.2 (6641119fd)` — versión del kernel
 y build. La versión del disco está en `/etc/soso-release` (`soso-update estado`
@@ -478,11 +478,16 @@ parte de la pregunta.
 
 ```sh
 halt
+reboot
 ```
 
-Apaga la máquina virtual de forma limpia. También puedes usar `exit` en sosh: si la
-shell termina con código 0, `init` se detiene y el kernel pasa a la **kernel-shell**
-de emergencia (prompt `soso>`).
+`halt` apaga el ordenador. `reboot` lo reinicia. En QEMU, `halt` cierra la
+máquina virtual; `reboot` también la cierra, porque el emulador arranca con
+`-no-reboot` y no vuelve a encenderla. Para salir de QEMU sin apagar desde
+soso: `Ctrl-A` y luego `X`.
+
+También puedes usar `exit` en sosh: si la shell termina con código 0, `init`
+se detiene y el kernel pasa a la **kernel-shell** de emergencia (prompt `soso>`).
 
 ---
 
@@ -607,6 +612,18 @@ github.com → 140.82.121.4
 ```sh
 halt
 ```
+
+Corta la alimentación. Si la máquina sigue encendida, el firmware no publicó
+el estado de apagado ACPI y el kernel se queda parado: en ese caso apaga con
+el botón.
+
+### reboot — reiniciar
+
+```sh
+reboot
+```
+
+Reinicia el ordenador. En QEMU la sesión se cierra (el emulador no rearranca).
 
 ### soso-llm — inferencia de modelos
 
@@ -1091,6 +1108,7 @@ Comandos principales:
 | `mem` | Memoria física libre |
 | `kbd` | Estado del teclado; `kbd es` / `kbd us` cambia el mapa |
 | `halt` | Apagar |
+| `reboot` | Reiniciar |
 
 La kernel-shell también incluye comandos de bajo nivel para depuración (`hwscan`,
 `blk`, `blkread`, `blkwrite`, `pf`, `panic`). Están pensados para desarrollo,
@@ -2065,6 +2083,7 @@ soso-update aplicar           # reiniciar después
 
 cat /etc/motd
 mkdir prueba
+reboot                      # reinicia; en QEMU cierra la sesión
 halt
 
 # Salir de QEMU

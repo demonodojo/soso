@@ -1,8 +1,10 @@
 # T39 — Hacer reproducible el bootstrap de libstd para soso
 
-**Hito:** SI-7 · **Tipo:** Implementación de build · **Estado:** pendiente.
+**Hito:** SI-7 · **Tipo:** Implementación de build · **Estado:** completada (2026-09-26; build + manifiesto + humo guest; native_validation pendiente T40–T42).
 
-**Dependencias:** [T38](T38-toolchain-inventario.md), [T50](T50-cambios-contenido.md)
+**Dependencias:** [T38](T38-toolchain-inventario.md), [T50](T50-cambios-contenido.md),
+[T72](T72-heap-de-libstd.md), [T75](T75-receta-bootstrap-desfasada.md).
+T72/T75 son requisitos del cierre pendiente; no invalidan el trabajo anterior.
 
 ## Objetivo y entrega
 
@@ -37,7 +39,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 1. Exigir revisión del lock T38 y destino externo específico; comprobar inventario/hashes y, opcionalmente, HEAD antes de aplicar cambios portables. No resetear un vendor con cambios.
 2. Separar preparación y build en receta declarativa: argv, cwd, inputs/outputs y hashes por paso. Hacer preparación idempotente y reportar cada fallo. Inventariar helpers de los scripts y asignar sustitución nativa; mover solo sus tests a Rust no basta.
 3. Corregir rutas de salida reales de los wrappers/linker y producir manifiesto de sysroot con target y hashes.
-4. Compilar libstd cruzada para el target soso y ejecutar un programa mínimo enlazado con esa libstd dentro del guest.
+4. Tras T72/T75, compilar libstd cruzada para el target soso y ejecutar un programa mínimo enlazado con esa libstd dentro del guest.
 5. Si la PAL falla por un símbolo/semántica, generar una ficha C-xxx según T40 y cerrarla antes de afirmar bootstrap completo.
 
 ## Comprobación
@@ -65,3 +67,9 @@ del hito en la misma sesión.
 Aplicar [NATIVO.md](NATIVO.md). Separar semilla cruzada de reconstrucción nativa. Los scripts existentes sirven de referencia de desarrollo; entregar receta declarativa ejecutable por Rust y hashes de la semilla. T40–T42 prueban reconstrucción sin x.py, Bash ni Python.
 
 Validación nativa: **pendiente**. Condiciones adicionales: [T40](T40-compilador-nativo.md), [T41](T41-cargo-offline.md), [T42](T42-c-link-imagen.md). Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).
+
+## Revisión del 26-sep-2026
+
+Estado y siguiente paso sincronizados con el catálogo; ver
+[seguimiento/T39.md](seguimiento/T39.md) y
+[revisión del plan](seguimiento/REVISION-2026-09-26.md).

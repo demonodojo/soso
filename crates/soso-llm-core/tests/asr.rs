@@ -1,4 +1,4 @@
-//! Test ASR con modelo sintético.
+//! Test ASR con modelo sintético (integración; ver ficha T78).
 
 use soso_llm_core::asr::{AsrProfile, AsrRuntime};
 use soso_llm_core::source::{FileMapper, MappedShard, MmapTensorSource};
@@ -23,13 +23,51 @@ impl FileMapper for HostMapper {
     fn unmap_file(&mut self, _shard: &MappedShard) {}
 }
 
+fn raiz_repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn tiny_asr_root() -> PathBuf {
+    raiz_repo().join("target/tiny-asr-model")
+}
+
+fn whisper_root() -> PathBuf {
+    raiz_repo().join("target/whisper-tiny-model")
+}
+
+fn wav_referencia() -> PathBuf {
+    raiz_repo().join("rootfs/etc/voz-prueba.wav")
+}
+
+fn exigir_manifest(root: &PathBuf, como_generar: &str) {
+    let manifest = root.join("manifest.som");
+    assert!(
+        manifest.is_file(),
+        "falta {} ({como_generar})",
+        manifest.display()
+    );
+}
+
+/// Perfil CI: falla en la suite normal si se prometieron artefactos ASR.
 #[test]
-fn tiny_asr_encode_decode_smoke() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tiny-asr-model");
-    if !root.join("manifest.som").exists() {
-        eprintln!("skip: ejecuta mkmodel-soso --asr primero");
+fn asr_entradas_si_perfil_exigido() {
+    if std::env::var("SOSO_REQUIRE_ASR").is_err() {
         return;
     }
+    exigir_manifest(&tiny_asr_root(), "mkmodel-soso --asr");
+    exigir_manifest(&whisper_root(), "cargo xtask fetch-whisper");
+    assert!(
+        wav_referencia().is_file(),
+        "falta {} (wav de referencia ASR)",
+        wav_referencia().display()
+    );
+}
+
+#[test]
+#[ignore = "integración ASR: target/tiny-asr-model (mkmodel-soso --asr); cargo test --test asr -- --ignored"]
+fn tiny_asr_encode_decode_smoke() {
+    let root = tiny_asr_root();
+    exigir_manifest(&root, "mkmodel-soso --asr");
     let manifest = Manifest::parse(&std::fs::read(root.join("manifest.som")).unwrap()).unwrap();
     let index = TensorIndex::parse(&std::fs::read(root.join("index.som")).unwrap()).unwrap();
     let source = MmapTensorSource::new(
@@ -60,17 +98,16 @@ fn tiny_asr_encode_decode_smoke() {
 }
 
 #[test]
+#[ignore = "integración ASR: target/whisper-tiny-model + rootfs/etc/voz-prueba.wav; cargo test --test asr -- --ignored"]
 fn whisper_tiny_wav_reference() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/whisper-tiny-model");
-    let wav = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rootfs/etc/voz-prueba.wav");
-    if !root.join("manifest.som").exists() {
-        eprintln!("skip: cargo xtask fetch-whisper");
-        return;
-    }
-    if !wav.exists() {
-        eprintln!("skip: falta rootfs/etc/voz-prueba.wav");
-        return;
-    }
+    let root = whisper_root();
+    let wav = wav_referencia();
+    exigir_manifest(&root, "cargo xtask fetch-whisper");
+    assert!(
+        wav.is_file(),
+        "falta {} (wav de referencia ASR)",
+        wav.display()
+    );
     let manifest = Manifest::parse(&std::fs::read(root.join("manifest.som")).unwrap()).unwrap();
     let index = TensorIndex::parse(&std::fs::read(root.join("index.som")).unwrap()).unwrap();
     let tokenizer = match std::fs::read(root.join("tokenizer.som")) {

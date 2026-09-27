@@ -151,4 +151,9 @@ argumenta y se registra, no se decide para que salga verde.
 
 ## Ejecución nativa
 
-Aplicar [NATIVO.md](NATIVO.md). Validación nativa: **pendiente**.
+Aplicar [NATIVO.md](NATIVO.md). Validación nativa: **parcial**, según la evidencia histórica del catálogo. No
+se ha repetido en esta revisión.
+
+## Revisión del 26-sep-2026
+
+Sincronización documental, sin reejecución. Ver [seguimiento/T60.md](seguimiento/T60.md).

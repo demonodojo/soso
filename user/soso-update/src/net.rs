@@ -57,6 +57,10 @@ pub fn encender_traza() {
 /// hay manera de saber cuál. Costó dos pasadas de quince minutos averiguar que
 /// se paraba **después** de resolver el origen.
 impl TcpTransport for Net {
+    fn log_red(&self, msg: &str) {
+        println!("  red: handshake TLS — {msg}");
+    }
+
     fn dns_resolve(&self, host: &str, out: &mut [u8; 4]) -> Result<(), i64> {
         let r = sys::dns_resolve(host, out);
         match r {
@@ -242,7 +246,15 @@ fn map_http_err(e: soso_http::HttpError) -> &'static str {
         }
         soso_http::HttpError::Io(donde) => {
             println!("  red: E/S falló — {donde}");
-            "descarga HTTP"
+            match donde {
+                "plazo agotado esperando bytes del cuerpo HTTP" => {
+                    "plazo agotado en la descarga HTTP"
+                }
+                "cuerpo HTTP incompleto (Content-Length)" => "descarga HTTP incompleta",
+                "tcp_connect (reintento TLS)" => "plazo agotado reconectando tras fallo TLS",
+                "tcp_connect" => "plazo agotado al conectar",
+                _ => "descarga HTTP",
+            }
         }
     }
 }

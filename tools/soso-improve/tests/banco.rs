@@ -47,6 +47,22 @@ fn hay(programa: &str) -> bool {
         .unwrap_or(false)
 }
 
+const SIN_RUSTC: &str =
+    "no hay rustc en PATH; los tests que compilan candidatos del banco no pueden ejecutarse";
+
+fn exigir_rustc() {
+    assert!(hay("rustc"), "{SIN_RUSTC}");
+}
+
+/// Perfil CI: falla si se prometió rustc y no está disponible.
+#[test]
+fn banco_rustc_si_perfil_exigido() {
+    if std::env::var("SOSO_REQUIRE_RUSTC").is_err() {
+        return;
+    }
+    exigir_rustc();
+}
+
 #[test]
 fn la_distribucion_es_10_10_5_con_ids_unicos() {
     let casos = casos();
@@ -230,10 +246,7 @@ fn verificar_programa(id: &str, archivo: &str) -> programa::Informe {
 
 #[test]
 fn la_referencia_pasa_todos_los_vectores() {
-    if !hay("rustc") {
-        eprintln!("sin rustc: se omite la compilación de candidatos");
-        return;
-    }
+    exigir_rustc();
     for c in de_clase("programacion") {
         let informe = verificar_programa(&c.caso.id, "referencia.rs");
         assert_eq!(informe.estado, "ok", "{}: {informe:?}", c.caso.id);
@@ -244,10 +257,7 @@ fn la_referencia_pasa_todos_los_vectores() {
 
 #[test]
 fn la_solucion_incorrecta_se_detecta() {
-    if !hay("rustc") {
-        eprintln!("sin rustc: se omite la compilación de candidatos");
-        return;
-    }
+    exigir_rustc();
     for c in de_clase("programacion") {
         let informe = verificar_programa(&c.caso.id, "incorrecta.rs");
         assert_eq!(informe.estado, "fallo", "{}: {informe:?}", c.caso.id);
@@ -258,9 +268,7 @@ fn la_solucion_incorrecta_se_detecta() {
 
 #[test]
 fn un_candidato_que_no_compila_es_error_no_fallo() {
-    if !hay("rustc") {
-        return;
-    }
+    exigir_rustc();
     let vectores =
         programa::leer_vectores(&Host, &unir(&reservado(), "P01/vectores.json")).unwrap();
     let trabajo = Temporal::nuevo("banco-nocompila").unwrap();
@@ -328,6 +336,83 @@ fn el_unicode_partido_entre_trozos_se_reensambla() {
     assert!(doc.errores_formato.is_empty(), "{:?}", doc.errores_formato);
     assert!(doc.texto().contains('☕'));
     assert!(!doc.texto().contains('\u{fffd}'));
+}
+
+#[test]
+fn un_prologo_no_invalida_el_unicode_de_q06() {
+    let frase = "Café ☕ para el señor Ñoño";
+    let con_prologo = serde_json::json!({
+        "http_status": 200,
+        "trozos_b64": trozos_partidos(
+            &format!("Aquí tienes la frase exacta que solicitaste:\n\n{frase}"),
+            "☕",
+        ),
+    });
+    let buena = protocolo::verificar("Q06", &esperado_q06(), &con_prologo).unwrap();
+    assert_eq!(buena.estado, "ok", "{buena:?}");
+
+    let roto = serde_json::json!({
+        "http_status": 200,
+        "trozos_b64": trozos_partidos(
+            "Aquí tienes la frase exacta que solicitaste:\n\nCafé \u{fffd} para el señor Ñoño",
+            "é",
+        ),
+    });
+    let mala = protocolo::verificar("Q06", &esperado_q06(), &roto).unwrap();
+    assert_eq!(mala.estado, "fallo", "{mala:?}");
+}
+
+fn esperado_q06() -> protocolo::Esperado {
+    serde_json::from_slice(&Host.leer(&unir(&reservado(), "Q06/esperado.json")).unwrap()).unwrap()
+}
+
+/// Dos trozos SSE cuyo corte cae dentro de `marca` (un carácter multibyte).
+fn trozos_partidos(texto: &str, marca: &str) -> Vec<String> {
+    let evento = format!(
+        "data: {{\"id\":\"chatcmpl-banco\",\"object\":\"chat.completion.chunk\",\"model\":\"qwen2.5-coder-3b-instruct\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":{}}},\"finish_reason\":null}}]}}\n\n",
+        serde_json::to_string(texto).unwrap()
+    );
+    let cierre = "data: {\"id\":\"chatcmpl-banco\",\"object\":\"chat.completion.chunk\",\"model\":\"qwen2.5-coder-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    let mut crudo = evento.into_bytes();
+    crudo.extend_from_slice(cierre.as_bytes());
+    let marca = marca.as_bytes();
+    let en = crudo
+        .windows(marca.len())
+        .position(|w| w == marca)
+        .unwrap_or_else(|| panic!("el texto tiene que incluir {marca:?}"));
+    let corte = en + 1;
+    vec![b64(&crudo[..corte]), b64(&crudo[corte..])]
+}
+
+fn b64(datos: &[u8]) -> String {
+    const TABLA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut i = 0;
+    while i + 3 <= datos.len() {
+        let n = ((datos[i] as u32) << 16) | ((datos[i + 1] as u32) << 8) | datos[i + 2] as u32;
+        out.push(TABLA[((n >> 18) & 63) as usize] as char);
+        out.push(TABLA[((n >> 12) & 63) as usize] as char);
+        out.push(TABLA[((n >> 6) & 63) as usize] as char);
+        out.push(TABLA[(n & 63) as usize] as char);
+        i += 3;
+    }
+    if i < datos.len() {
+        let resto = datos.len() - i;
+        let n = if resto == 1 {
+            (datos[i] as u32) << 16
+        } else {
+            ((datos[i] as u32) << 16) | ((datos[i + 1] as u32) << 8)
+        };
+        out.push(TABLA[((n >> 18) & 63) as usize] as char);
+        out.push(TABLA[((n >> 12) & 63) as usize] as char);
+        if resto == 1 {
+            out.push('=');
+        } else {
+            out.push(TABLA[((n >> 6) & 63) as usize] as char);
+        }
+        out.push('=');
+    }
+    out
 }
 
 // --- casos de repo ----------------------------------------------------------

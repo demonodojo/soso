@@ -88,4 +88,9 @@ la salida real del modelo como entrada.
 Aplicar [NATIVO.md](NATIVO.md). La prueba es de host puro y debería ejecutarse
 también desde el runner nativo de [T49](T49-pruebas-guest.md).
 
-Validación nativa: **pendiente**.
+Validación nativa: **parcial**, según la evidencia histórica del catálogo. No
+se ha repetido en esta revisión.
+
+## Revisión del 26-sep-2026
+
+Sincronización documental, sin reejecución. Ver [seguimiento/T56.md](seguimiento/T56.md).
