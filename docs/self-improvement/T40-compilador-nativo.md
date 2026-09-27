@@ -1,6 +1,6 @@
 # T40 — Descomponer y acreditar el port del compilador
 
-**Hito:** SI-7 · **Tipo:** Especificación e integración condicionada · **Estado:** en curso (C-001 hecha; el check de host soso sigue en C-002).
+**Hito:** SI-7 · **Tipo:** Especificación e integración condicionada · **Estado:** en curso (C-001 a C-022 hechas; el check de host soso sale 0; el build se para en C-023).
 
 **Dependencias:** [T38](T38-toolchain-inventario.md), [T39](T39-bootstrap-libstd.md)
 
@@ -49,8 +49,8 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 - [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
 - [ ] Resultado entregado con límites y dependencias restantes explícitos.
 
-El backlog y C-001 no cierran la ficha: falta que rustc arranque en el guest.
-Siguiente medida: [C-002](native/C-002.md). Ver [seguimiento/T40.md](seguimiento/T40.md).
+El backlog y C-001 a C-005 no cierran la ficha: falta que rustc arranque en el guest.
+Siguiente medida: [C-023](native/C-023.md). El check de host soso sale 0; `wild` deja `crc32` sin definir al enlazar `rustc_llvm`. Ver [seguimiento/T40.md](seguimiento/T40.md).
 
 No sustituir el stub por un wrapper a Forja y llamarlo rustc nativo; la evidencia debe mostrar compilación guest.
 

@@ -1432,16 +1432,38 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-09-26",
-        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:2477f5245fd820ef6a9f1c35d372aebcce3124dc604f1c85499c2f2785ad3636",
+        "updated_at": "2026-09-27T22:51:00+02:00",
+        "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66",
         "summary": "docs/self-improvement/seguimiento/T40.md",
         "evidence": [
           "target/self-improvement/tasks/T40/check-host.txt",
           "target/self-improvement/tasks/T40/check-host-3.txt",
+          "target/self-improvement/tasks/T40/check-host-4.txt",
+          "target/self-improvement/tasks/T40/check-host-5.txt",
+          "target/self-improvement/tasks/T40/check-host-6.txt",
+          "target/self-improvement/tasks/T40/check-host-8.txt",
+          "target/self-improvement/tasks/T40/check-host-10.txt",
+          "target/self-improvement/tasks/T40/check-host-11.txt",
+          "target/self-improvement/tasks/T40/check-host-14.txt",
+          "target/self-improvement/tasks/T40/check-host-16.txt",
+          "target/self-improvement/tasks/T40/check-host-18.txt",
+          "target/self-improvement/tasks/T40/check-host-19.txt",
+          "target/self-improvement/tasks/T40/build-host.txt",
+          "target/self-improvement/tasks/T40/build-host-2.txt",
+          "target/self-improvement/tasks/T40/build-host-3.txt",
+          "target/self-improvement/tasks/T40/build-host-4.txt",
+          "target/self-improvement/tasks/T40/build-host-6.txt",
+          "target/self-improvement/tasks/T40/build-host-7.txt",
+          "target/self-improvement/tasks/T40/build-host-8.txt",
+          "target/self-improvement/tasks/T40/build-host-9.txt",
+          "target/self-improvement/tasks/T40/build-host-10.txt",
+          "target/self-improvement/tasks/T40/build-host-11.txt",
+          "target/self-improvement/tasks/T40/build-host-12.txt",
+          "target/self-improvement/tasks/T40/build-host-13.txt",
           "docs/self-improvement/native/compiler-backlog.json"
         ],
-        "blocker": "C-002: getrandom 0.3.3 sin backend; el check de host soso sale 1.",
-        "next_step": "Backend de getrandom 0.3.3 sobre SYS_GETRANDOM. No cerrar T40 hasta que rustc arranque en el guest."
+        "blocker": "C-023: wild deja crc32 sin definir al enlazar rustc_llvm; el enlace sale 255.",
+        "next_step": "C-023. No cerrar T40 hasta que rustc arranque en el guest."
       }
     },
     {

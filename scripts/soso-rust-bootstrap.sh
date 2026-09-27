@@ -33,8 +33,10 @@ download-rustc = true
 [target.x86_64-unknown-soso]
 linker = "${ROOT}/target/release/wild-soso"
 
-# Sin seccion [llvm]: download-ci-llvm = false es incompatible con
-# rust.download-rustc = true. Aqui solo se compila library/std cruzada.
+# download-ci-llvm = false no convive con download-rustc. CI no publica
+# LLVM para soso, y el build local usa make: ninja no está instalado.
+[llvm]
+ninja = false
 EOF
 
 SOSO_RUST_VENDOR="${SOSO_RUST_VENDOR:-${XDG_CACHE_HOME:-$HOME/.cache}/soso-rust-vendor}"

@@ -10,8 +10,9 @@
 **Siguiente ficha en curso: [T40 — port del compilador](T40-compilador-nativo.md).**
 El perfil elegido es `qwen2.5-coder-7b` (GO 10/10, cobertura `completa`,
 27-sep). El 3B queda como candidato anterior, NO-GO 8/10.
-[T20](T20-opencode-config.md) está pendiente con esa identidad. En T40 el
-bloqueo es C-002: `getrandom` 0.3.3 sin backend.
+[T20](T20-opencode-config.md) está pendiente con esa identidad. En T40,
+C-022 está hecha. El build de host soso se para en C-023: `wild` deja
+`crc32` sin definir al enlazar `rustc_llvm`.
 
 | Prioridad | Trabajo | Condición de salida |
 |---|---|---|
@@ -152,7 +153,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T37](T37-mejora-nativa-forja.md) | Cerrar una mejora desde OpenCode nativo con build remoto | SI-6 | T22, T35, T36 | Pendiente |
 | [T38](T38-toolchain-inventario.md) | Fijar revisiones y dependencias de la toolchain nativa | SI-7 | T01 | Completada (2026-09-25; abrió T67 y T68) |
 | [T39](T39-bootstrap-libstd.md) | Hacer reproducible el bootstrap de libstd para soso | SI-7 | T38, T50, T72, T75 | **Completada** (2026-09-26; build-std, manifiesto, humo guest; native_validation pending) |
-| [T40](T40-compilador-nativo.md) | Descomponer y acreditar el port del compilador | SI-7 | T38, T39 | En curso (C-001 hecha; el check de host soso para en C-002) |
+| [T40](T40-compilador-nativo.md) | Descomponer y acreditar el port del compilador | SI-7 | T38, T39 | En curso (C-001 a C-022 hechas; check de host en 0; build en C-023) |
 | [T41](T41-cargo-offline.md) | Validar Cargo y fuentes reproducibles dentro de soso | SI-7 | T40 | Pendiente |
 | [T42](T42-c-link-imagen.md) | Cerrar C, ensamblador y empaquetado por perfil | SI-7 | T38, T41 | Pendiente |
 | [T43](T43-validacion-actualizacion-nativa.md) | Validar y recuperar candidatos construidos en soso | SI-7 | T31, T37, T42 | Pendiente |

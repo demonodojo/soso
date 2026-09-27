@@ -208,6 +208,509 @@ if [[ -f "$RUST/Cargo.toml" ]]; then
   if ! grep -q 'path = "src/soso-memmap2"' "$RUST/Cargo.toml"; then
     printf '\n[patch.crates-io]\nmemmap2 = { path = "src/soso-memmap2" }\n' >> "$RUST/Cargo.toml"
   fi
+  # C-002: getrandom 0.3.3 no tiene backend para target_os = soso.
+  GETRANDOM_DST="$RUST/src/soso-getrandom"
+  rm -rf "$GETRANDOM_DST"
+  mkdir -p "$GETRANDOM_DST"
+  cp -a "$ROOT/config/rust-soso/vendor/getrandom/." "$GETRANDOM_DST/"
+  if ! grep -q 'path = "src/soso-getrandom"' "$RUST/Cargo.toml"; then
+    printf 'getrandom = { path = "src/soso-getrandom" }\n' >> "$RUST/Cargo.toml"
+  fi
+  # C-008: libc deja vacío un target no soportado. soso necesita los tipos C.
+  LIBC_REG=$(find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name 'libc-0.2.189' | head -1)
+  LIBC_DST="$RUST/src/soso-libc"
+  if [[ -n "$LIBC_REG" ]]; then
+    rm -rf "$LIBC_DST"
+    mkdir -p "$LIBC_DST"
+    cp -a "$LIBC_REG/." "$LIBC_DST/"
+    cp "$ROOT/config/rust-soso/vendor/libc/soso.rs" "$LIBC_DST/src/soso.rs"
+    python3 - "$LIBC_DST/src/lib.rs" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old = """    } else {
+        // non-supported targets: empty...
+    }"""
+new = """    } else if #[cfg(target_os = "soso")] {
+        mod primitives;
+        pub use crate::primitives::*;
+
+        mod soso;
+        pub use crate::soso::*;
+    } else {
+        // non-supported targets: empty...
+    }"""
+if 'target_os = "soso"' not in text:
+    if old not in text:
+        sys.exit("apply-patches: libc sin la rama vacía")
+    text = text.replace(old, new, 1)
+# El check niega avisos. `pub use new::*` queda vacío en soso.
+text = text.replace(
+    "#[allow(unused_imports)] // needed while the module is empty on some platforms\npub use new::*;",
+    "#[allow(unused_imports, unreachable_pub)] // needed while the module is empty on some platforms\npub use new::*;",
+    1,
+)
+path.write_text(text)
+PY
+    if ! grep -q 'path = "src/soso-libc"' "$RUST/Cargo.toml"; then
+      printf 'libc = { path = "src/soso-libc" }\n' >> "$RUST/Cargo.toml"
+    fi
+  fi
+  # C-010: ctrlc 3.5.1 sólo tiene plataforma unix y Windows.
+  CTRLC_REG=$(find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name 'ctrlc-3.5.1' | head -1)
+  CTRLC_DST="$RUST/src/soso-ctrlc"
+  if [[ -n "$CTRLC_REG" ]]; then
+    rm -rf "$CTRLC_DST"
+    mkdir -p "$CTRLC_DST"
+    cp -a "$CTRLC_REG/." "$CTRLC_DST/"
+    cp "$ROOT/config/rust-soso/vendor/ctrlc/soso.rs" "$CTRLC_DST/src/platform/soso.rs"
+    python3 - "$CTRLC_DST/src/platform/mod.rs" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+extra = """
+#[cfg(target_os = "soso")]
+mod soso;
+
+#[cfg(target_os = "soso")]
+pub use self::soso::*;
+"""
+if 'target_os = "soso"' not in text:
+    path.write_text(text.rstrip() + "\n" + extra)
+PY
+    python3 - "$CTRLC_DST/src/error.rs" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old = "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {"
+new = "fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {"
+if old in text:
+    path.write_text(text.replace(old, new, 1))
+PY
+    if ! grep -q 'path = "src/soso-ctrlc"' "$RUST/Cargo.toml"; then
+      printf 'ctrlc = { path = "src/soso-ctrlc" }\n' >> "$RUST/Cargo.toml"
+    fi
+  fi
+  # C-011: soso descarta dylib. Sin rlib, rustc-main no encuentra rustc_driver.
+  DRIVER_TOML="$RUST/compiler/rustc_driver/Cargo.toml"
+  if [[ -f "$DRIVER_TOML" ]] && grep -q 'crate-type = \["dylib"\]' "$DRIVER_TOML"; then
+    perl -i -pe 's/crate-type = \["dylib"\]/crate-type = ["dylib", "rlib"]/' "$DRIVER_TOML"
+  fi
+  # C-012: download-rustc copia el rustc de CI (linux). Un host soso se compila.
+  COMPILE_RS="$RUST/src/bootstrap/src/core/build_steps/compile.rs"
+  if [[ -f "$COMPILE_RS" ]]; then
+    python3 - "$COMPILE_RS" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+repls = [
+(
+"""            } else if builder.download_rustc() && compiler.stage != builder.top_stage {
+                host_dir.join("ci-rustc-sysroot")""",
+"""            } else if builder.download_rustc()
+                && compiler.host == builder.config.host_target
+                && compiler.stage != builder.top_stage
+            {
+                host_dir.join("ci-rustc-sysroot")""",
+),
+(
+"""        if builder.download_rustc() && compiler.stage != 0 {
+            assert_eq!(
+                builder.config.host_target, compiler.host,
+                "Cross-compiling is not yet supported with `download-rustc`",
+            );
+""",
+"""        // C-012: el rustc de CI es el host de config.toml. Otro host se compila.
+        if builder.download_rustc()
+            && compiler.stage != 0
+            && compiler.host == builder.config.host_target
+        {
+""",
+),
+(
+"""        if builder.download_rustc() && build_compiler.stage != 0 {
+            trace!(stage = build_compiler.stage, "`download_rustc` requested");
+""",
+"""        if builder.download_rustc()
+            && build_compiler.stage != 0
+            && target == builder.config.host_target
+        {
+            trace!(stage = build_compiler.stage, "`download_rustc` requested");
+""",
+),
+(
+"""        if builder.download_rustc() {
+            trace!("`download-rustc` requested, reusing CI compiler for stage > 0");
+""",
+"""        if builder.download_rustc() && target_compiler.host == builder.config.host_target {
+            trace!("`download-rustc` requested, reusing CI compiler for stage > 0");
+""",
+),
+]
+changed = False
+for old, new in repls:
+    if old in text:
+        text = text.replace(old, new, 1)
+        changed = True
+    elif new not in text:
+        sys.exit(f"apply-patches: no está el bloque de download-rustc:\n{old[:80]}")
+if changed:
+    path.write_text(text)
+PY
+  fi
+  # C-014: CMAKE_SYSTEM_NAME=Generic deja LLVM_ON_UNIX sin definir y
+  # file_status no tiene getSize. soso es familia unix; Linux enciende esa rama.
+  LLVM_RS="$RUST/src/bootstrap/src/core/build_steps/llvm.rs"
+  if [[ -f "$LLVM_RS" ]]; then
+    python3 - "$LLVM_RS" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old = """        } else if target.contains("watchos") {
+            cfg.define("CMAKE_SYSTEM_NAME", "watchOS");
+        } else if target.contains("none") {"""
+new = """        } else if target.contains("watchos") {
+            cfg.define("CMAKE_SYSTEM_NAME", "watchOS");
+        } else if target.contains("soso") {
+            // C-014: familia unix. Generic deja LLVM_ON_UNIX sin definir.
+            cfg.define("CMAKE_SYSTEM_NAME", "Linux");
+        } else if target.contains("none") {"""
+if old in text:
+    path.write_text(text.replace(old, new, 1))
+elif new not in text:
+    sys.exit("apply-patches: no está el bloque CMAKE_SYSTEM_NAME de llvm.rs")
+PY
+  fi
+  # C-015: al cruzar, rustc_llvm cambia el triple del -I/-L del llvm-config
+  # del host. El host es ci-llvm; el LLVM local de soso está en llvm/.
+  RUSTC_LLVM_BUILD="$RUST/compiler/rustc_llvm/build.rs"
+  if [[ -f "$RUSTC_LLVM_BUILD" ]]; then
+    python3 - "$RUSTC_LLVM_BUILD" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+fn = '''
+// C-015: el host descarga ci-llvm y un LLVM local queda en llvm/.
+// Cambiar sólo el triple apunta a un directorio que no existe.
+fn retarget_host_path(path: &str, host: &str, target: &str) -> String {
+    let replaced = path.replace(host, target);
+    if Path::new(&replaced).exists() {
+        return replaced;
+    }
+    let alt = replaced.replacen("ci-llvm", "llvm", 1);
+    if alt != replaced && Path::new(&alt).exists() {
+        return alt;
+    }
+    let alt = replaced.replacen("/llvm/", "/ci-llvm/", 1);
+    if alt != replaced && Path::new(&alt).exists() {
+        return alt;
+    }
+    replaced
+}
+
+'''
+anchor = "fn detect_llvm_link() -> (&'static str, &'static str) {\n"
+if "fn retarget_host_path(" not in text:
+    if anchor not in text:
+        sys.exit("apply-patches: no está detect_llvm_link en rustc_llvm/build.rs")
+    text = text.replace(anchor, fn + anchor, 1)
+old_i = '''        // Include path contains host directory, replace it with target
+        if is_crossed && flag.starts_with("-I") {
+            cfg.flag(flag.replace(&host, &target));
+            continue;
+        }'''
+new_i = '''        // Include path contains host directory, replace it with target
+        if is_crossed && flag.starts_with("-I") {
+            let dir = flag.strip_prefix("-I").unwrap();
+            cfg.flag(format!("-I{}", retarget_host_path(dir, &host, &target)));
+            continue;
+        }'''
+old_l = '''            if let Some(stripped) = lib.strip_prefix("-LIBPATH:") {
+                println!("cargo:rustc-link-search=native={}", stripped.replace(&host, &target));
+            } else if let Some(stripped) = lib.strip_prefix("-L") {
+                println!("cargo:rustc-link-search=native={}", stripped.replace(&host, &target));
+            }'''
+new_l = '''            if let Some(stripped) = lib.strip_prefix("-LIBPATH:") {
+                println!(
+                    "cargo:rustc-link-search=native={}",
+                    retarget_host_path(stripped, &host, &target)
+                );
+            } else if let Some(stripped) = lib.strip_prefix("-L") {
+                println!(
+                    "cargo:rustc-link-search=native={}",
+                    retarget_host_path(stripped, &host, &target)
+                );
+            }'''
+for old, new in ((old_i, new_i), (old_l, new_l)):
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif new not in text:
+        sys.exit("apply-patches: no está el reemplazo de rutas de llvm-config")
+path.write_text(text)
+PY
+  fi
+  # C-016: --link-static contra el llvm-config de CI falla: no hay .a.
+  # El llvm-config del target sí los lista, y en este cruce se puede ejecutar.
+  if [[ -f "$RUSTC_LLVM_BUILD" ]]; then
+    python3 - "$RUSTC_LLVM_BUILD" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old = """    let is_crossed = target != host;
+
+    let components = output(Command::new(&llvm_config).arg("--components"));"""
+new = """    let is_crossed = target != host;
+
+    // C-016: el llvm-config del host es el de CI y no tiene .a.
+    // El del target sí, y en este cruce se puede ejecutar.
+    let llvm_config_libs = {
+        let alt = retarget_host_path(&llvm_config.to_string_lossy(), &host, &target);
+        let alt_path = PathBuf::from(&alt);
+        if is_crossed && alt_path != llvm_config && alt_path.exists() {
+            alt_path
+        } else {
+            llvm_config.clone()
+        }
+    };
+
+    let components = output(Command::new(&llvm_config).arg("--components"));"""
+repls = [
+(old, new),
+(
+"""    let mut cmd = Command::new(&llvm_config);
+    cmd.arg(llvm_link_arg).arg("--libs");""",
+"""    let mut cmd = Command::new(&llvm_config_libs);
+    cmd.arg(llvm_link_arg).arg("--libs");""",
+),
+(
+"""    let mut cmd = Command::new(&llvm_config);
+    cmd.arg(llvm_link_arg).arg("--ldflags");""",
+"""    let mut cmd = Command::new(&llvm_config_libs);
+    cmd.arg(llvm_link_arg).arg("--ldflags");""",
+),
+]
+for old, new in repls:
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif new not in text:
+        sys.exit("apply-patches: no está el bloque de --libs de rustc_llvm")
+path.write_text(text)
+PY
+  fi
+  # C-015: instalar el std de soso no puede borrar el libstd del host. Sin él
+  # el build script de rustc_llvm no recompila.
+  if [[ -f "$COMPILE_RS" ]]; then
+    python3 - "$COMPILE_RS" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old = """            if builder.download_rustc() {
+                // Ensure there are no CI-rustc std artifacts.
+                let _ = fs::remove_dir_all(&libdir);
+                let _ = fs::remove_dir_all(&hostdir);
+            }"""
+new = """            if builder.download_rustc() {
+                // Ensure there are no CI-rustc std artifacts for this target.
+                let _ = fs::remove_dir_all(&libdir);
+                // C-015: si el target no es el host, hostdir es el libstd de CI
+                // con el que se compilan los build scripts. No borrarlo.
+                if target == compiler.host {
+                    let _ = fs::remove_dir_all(&hostdir);
+                }
+            }"""
+if old in text:
+    path.write_text(text.replace(old, new, 1))
+elif new not in text:
+    sys.exit("apply-patches: no está el borrado de hostdir en StdLink")
+PY
+  fi
+  # C-008: offload y Enzyme cargan con libloading::Library, sólo en unix/Windows.
+  OFF_SRC="$ROOT/config/rust-soso/compiler/rustc_codegen_llvm/src/llvm/offload_ffi.rs"
+  OFF_DST="$RUST/compiler/rustc_codegen_llvm/src/llvm/offload_ffi.rs"
+  if [[ -f "$OFF_SRC" && -d "$(dirname "$OFF_DST")" ]]; then
+    cp "$OFF_SRC" "$OFF_DST"
+  fi
+  ENZYME="$RUST/compiler/rustc_codegen_llvm/src/llvm/enzyme_ffi.rs"
+  if [[ -f "$ENZYME" ]] && ! grep -q 'dynamic libraries are not supported on soso' "$ENZYME"; then
+    python3 - "$ENZYME" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace(
+    "        lib: libloading::Library,\n",
+    "        #[cfg(not(target_os = \"soso\"))]\n        lib: libloading::Library,\n",
+    1,
+)
+text = text.replace(
+    "    fn load_ptr_by_symbol_mut_void(",
+    "    #[cfg(not(target_os = \"soso\"))]\n    fn load_ptr_by_symbol_mut_void(",
+    1,
+)
+old = """        #[allow(non_snake_case)]
+        fn call_dynamic("""
+new = """        #[cfg(target_os = "soso")]
+        fn call_dynamic(
+            sysroot: &rustc_session::config::Sysroot,
+        ) -> Result<Self, EnzymeLibraryError> {
+            let _ = sysroot;
+            Err(EnzymeLibraryError::LoadFailed {
+                err: "dynamic libraries are not supported on soso".to_string(),
+            })
+        }
+
+        #[cfg(not(target_os = "soso"))]
+        #[allow(non_snake_case)]
+        fn call_dynamic("""
+if old not in text:
+    sys.exit("apply-patches: enzyme call_dynamic no encontrado")
+text = text.replace(old, new, 1)
+path.write_text(text)
+PY
+  fi
+  if [[ -f "$ENZYME" ]]; then
+    python3 - "$ENZYME" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+changed = False
+for name in ("load_ptrs_by_symbols_mut_void", "load_ptrs_by_symbols_fn"):
+    old = f"    macro_rules! {name} {{"
+    new = f"    #[cfg(not(target_os = \"soso\"))]\n{old}"
+    if new not in text and old in text:
+        text = text.replace(old, new, 1)
+        changed = True
+if changed:
+    path.write_text(text)
+PY
+  fi
+  # C-003: path_to_c_string (el único uso de CString) no existe en soso.
+  # El check niega avisos, así que el import muerto para el build.
+  FSUTIL="$RUST/compiler/rustc_fs_util/src/lib.rs"
+  if [[ -f "$FSUTIL" ]] && grep -q 'use std::ffi::{CString, OsStr};' "$FSUTIL"; then
+    perl -i -0pe 's/use std::ffi::\{CString, OsStr\};/use std::ffi::OsStr;\n#[cfg(any(unix, windows, all(target_os = "wasi", target_env = "p1")))]\nuse std::ffi::CString;/' \
+      "$FSUTIL"
+  fi
+  # C-009: rustc_codegen_llvm llama a path_to_c_string. En soso los bytes
+  # del camino salen de OsStrExt, igual que en unix.
+  if [[ -f "$FSUTIL" ]]; then
+    python3 - "$FSUTIL" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old_cfg = '#[cfg(any(unix, windows, all(target_os = "wasi", target_env = "p1")))]\nuse std::ffi::CString;'
+new_cfg = '#[cfg(any(unix, windows, target_os = "soso", all(target_os = "wasi", target_env = "p1")))]\nuse std::ffi::CString;'
+if old_cfg in text:
+    text = text.replace(old_cfg, new_cfg, 1)
+fn = '''#[cfg(target_os = "soso")]
+pub fn path_to_c_string(p: &Path) -> CString {
+    use std::os::soso::ffi::OsStrExt;
+    let p: &OsStr = p.as_ref();
+    CString::new(p.as_bytes()).unwrap()
+}
+'''
+anchor = '''#[cfg(windows)]
+pub fn path_to_c_string(p: &Path) -> CString {
+    CString::new(p.to_str().unwrap()).unwrap()
+}
+'''
+if '#[cfg(target_os = "soso")]\npub fn path_to_c_string' not in text:
+    if anchor not in text:
+        sys.exit("apply-patches: path_to_c_string de windows no encontrado")
+    text = text.replace(anchor, anchor + "\n" + fn, 1)
+path.write_text(text)
+PY
+  fi
+  # C-004: current_dll_path llama a dll_path, que sólo existe en unix,
+  # Windows y WASI. try_canonicalize sólo se usa dentro de esas funciones.
+  FILESEARCH="$RUST/compiler/rustc_session/src/filesearch.rs"
+  if [[ -f "$FILESEARCH" ]] && grep -q '^use rustc_fs_util::try_canonicalize;$' "$FILESEARCH"; then
+    perl -i -pe 's/^use rustc_fs_util::try_canonicalize;$/#[cfg(any(unix, windows))]\nuse rustc_fs_util::try_canonicalize;/' \
+      "$FILESEARCH"
+  fi
+  # C-005: host_dylib pide libloading::Library, que sólo existe en unix/Windows.
+  META_SRC="$ROOT/config/rust-soso/compiler/rustc_metadata/src"
+  META_DST="$RUST/compiler/rustc_metadata/src"
+  if [[ -d "$META_SRC" && -d "$META_DST" ]]; then
+    cp "$META_SRC/host_dylib.rs" "$META_SRC/lib.rs" "$META_DST/"
+  fi
+  # C-006: libc no publica size_t para soso. En x86_64 es usize.
+  LLVM_LIB="$RUST/compiler/rustc_llvm/src/lib.rs"
+  if [[ -f "$LLVM_LIB" ]]; then
+    python3 - "$LLVM_LIB" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+good = """#[cfg(not(target_os = "soso"))]
+use libc::size_t;
+#[cfg(target_os = "soso")]
+#[allow(non_camel_case_types)]
+pub type size_t = usize;
+#[cfg(target_os = "soso")]
+use libc as _;
+"""
+if "non_camel_case_types" in text and "use libc as _;" in text and "\\nuse libc" not in text:
+    sys.exit(0)
+mid = """#[cfg(not(target_os = "soso"))]
+use libc::size_t;
+#[cfg(target_os = "soso")]
+pub type size_t = usize;
+"""
+broken = """#[cfg(not(target_os = "soso"))]
+#[cfg(not(target_os = "soso"))]\\nuse libc::size_t;\\n#[cfg(target_os = "soso")]\\n#[allow(non_camel_case_types)]\\npub type size_t = usize;\\n#[cfg(target_os = "soso")]\\nuse libc as _;
+#[cfg(target_os = "soso")]
+pub type size_t = usize;
+"""
+if broken in text:
+    text = text.replace(broken, good, 1)
+elif mid in text:
+    text = text.replace(mid, good, 1)
+elif "use libc::size_t;\n" in text:
+    text = text.replace("use libc::size_t;\n", good, 1)
+else:
+    sys.exit(0)
+path.write_text(text)
+PY
+  fi
+  # C-007: rustc_sanitizers pide size_t y c_char, que libc no publica en soso.
+  SAN_FFI="$RUST/compiler/rustc_sanitizers/src/ignorelist/ffi.rs"
+  SAN_MOD="$RUST/compiler/rustc_sanitizers/src/ignorelist/mod.rs"
+  if [[ -f "$SAN_FFI" && -f "$SAN_MOD" ]]; then
+    python3 - "$SAN_FFI" "$SAN_MOD" <<'PY'
+import pathlib, sys
+ffi, mod = map(pathlib.Path, sys.argv[1:])
+ffi_text = ffi.read_text()
+ffi_good = """#[cfg(not(target_os = "soso"))]
+use libc::size_t;
+#[cfg(target_os = "soso")]
+#[allow(non_camel_case_types)]
+pub(crate) type size_t = usize;
+#[cfg(target_os = "soso")]
+use libc as _;
+"""
+if "pub(crate) type size_t = usize;" not in ffi_text and "use libc::size_t;\n" in ffi_text:
+    ffi.write_text(ffi_text.replace("use libc::size_t;\n", ffi_good, 1))
+mod_text = mod.read_text()
+new = """        #[cfg(not(target_os = "soso"))]
+        use libc::c_char;
+        #[cfg(target_os = "soso")]
+        use std::ffi::c_char;
+        let c_ptrs: Vec<*const c_char> = c_paths.iter().map(|c| c.as_ptr()).collect();"""
+old = "        let c_ptrs: Vec<*const libc::c_char> = c_paths.iter().map(|c| c.as_ptr()).collect();"
+broken = """                #[cfg(not(target_os = "soso"))]
+        use libc::c_char;
+        #[cfg(target_os = "soso")]
+        use std::ffi::c_char;
+        let c_ptrs: Vec<*const c_char> = c_paths.iter().map(|c| c.as_ptr()).collect();"""
+if broken in mod_text:
+    mod.write_text(mod_text.replace(broken, new, 1))
+elif old in mod_text:
+    mod.write_text(mod_text.replace(old, new, 1))
+PY
+  fi
+  if [[ -f "$FILESEARCH" ]] && ! grep -q 'target_os = "soso"' "$FILESEARCH"; then
+    perl -i -0pe 's/(#\[cfg\(target_os = "wasi"\)\]\npub unsafe fn dll_path\(_function: \*mut std::ffi::c_void\) -> Result<PathBuf, String> \{\n    Err\("dll_path is not supported on WASI"\.to_string\(\)\)\n\})/$1\n\n#[cfg(target_os = "soso")]\npub unsafe fn dll_path(_function: *mut std::ffi::c_void) -> Result<PathBuf, String> {\n    Err("dll_path is not supported on soso".to_string())\n}/' \
+      "$FILESEARCH"
+  fi
 fi
 
 echo "apply-patches: OK → $RUST"

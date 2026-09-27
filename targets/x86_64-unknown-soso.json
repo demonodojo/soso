@@ -6,7 +6,7 @@
   "features": "-mmx,+sse,+sse2,+sse3,+ssse3,+sse4.1,+sse4.2,+avx,+avx2,+fma",
   "linker": "wild-soso",
   "linker-flavor": "gnu-lld",
-  "entry-name": "_start",
+  "entry-name": "main",
   "main-needs-argc-argv": true,
   "llvm-target": "x86_64-unknown-none-elf",
   "max-atomic-width": 64,
