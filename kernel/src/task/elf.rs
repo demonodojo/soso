@@ -178,17 +178,21 @@ pub fn load_lazy(
     let mut tls_base = 0u64;
     for ph in elf.program_iter() {
         let ty = ph.get_type()?;
-        if ty == Type::Tls {
-            tls_base = ph.virtual_addr();
-            continue;
-        }
-        if ty != Type::Load {
-            continue;
-        }
         let vaddr = ph.virtual_addr();
         let memsz = ph.mem_size();
         let filesz = ph.file_size();
         let offset = ph.offset();
+        if ty == Type::Tls {
+            tls_base = vaddr;
+            // `wild-soso` deja la plantilla fuera de los PT_LOAD. El PAL la
+            // lee por su vaddr; si el fichero pasa de 64 KiB, este camino
+            // perezoso es el que corre y sin región la lectura mata el proceso.
+            if memsz == 0 || space.find_mmap_region(vaddr).is_some() {
+                continue;
+            }
+        } else if ty != Type::Load {
+            continue;
+        }
         if memsz == 0 {
             continue;
         }

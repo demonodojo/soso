@@ -655,15 +655,27 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
             return false;
         }
         if is_write && !region.writable {
-            mmap_fault_fail(addr, is_write, "escritura en región RO");
-            return false;
+            // El código de error real va en el extra guardado por el PFH.
+            // `contains(CAUSED_BY_WRITE)` y el bool que llega aquí no siempre
+            // coinciden: una lectura de `.rodata` perezosa (bits 0x4, sólo
+            // usuario) se rechazaba como escritura y el proceso se quedaba
+            // ahí. El bit 1 del código de la CPU es la fuente.
+            let escritura = crate::arch::interrupts::exc_extra() & 2 != 0;
+            if escritura {
+                mmap_fault_fail(addr, true, "escritura en región RO");
+                return false;
+            }
         }
         if space.is_mapped(addr & !0xfff) {
             // Tras mprotect la PTE puede ser RO mientras la región sigue
             // marcada writable; devolver true aquí reintentaría la store
             // en bucle (colgaba mprotect-test en init).
-            if is_write && !space.range_ok(addr, 1, true) {
-                mmap_fault_fail(addr, is_write, "mprotect sin permiso de escritura");
+            // El bool `is_write` no es el bit 1 del código de error: una
+            // lectura de `.rodata` ya presente (o servida en este mismo
+            // fallo) entraba aquí con wr=1 y se quedaba sin matar al proceso.
+            let escritura = crate::arch::interrupts::exc_extra() & 2 != 0;
+            if escritura && !space.range_ok(addr, 1, true) {
+                mmap_fault_fail(addr, true, "mprotect sin permiso de escritura");
                 return false;
             }
             return true;
@@ -912,10 +924,16 @@ pub fn spawn_console_io_cwd(
     } else {
         String::from(env)
     };
+    let ejecutable = if path.contains('/') {
+        String::from(path)
+    } else {
+        // rustc pide el enlazador por nombre (`wild-soso`), no por ruta.
+        buscar_en_path(path, &env_block)?
+    };
     // Resolver el ELF antes de mover fds del padre: un ENOENT no debe
     // vaciar stdin de sosh (Linux copia la tabla; el exec fallido no la toca).
     let (ino, file_size) = {
-        let ino = crate::vfs::resolve(path).map_err(crate::task::syscall::fs_errno)?;
+        let ino = crate::vfs::resolve(&ejecutable).map_err(crate::task::syscall::fs_errno)?;
         let st = crate::vfs::stat_inode(ino).map_err(crate::task::syscall::fs_errno)?;
         (ino, st.size.get())
     };
@@ -1018,6 +1036,31 @@ pub fn spawn_console_io_cwd(
     });
     crate::arch::apic::kick_idle_cpus();
     Ok(pid)
+}
+
+/// Un nombre sin `/` se busca en `PATH` del entorno que heredará el hijo.
+fn buscar_en_path(name: &str, env: &str) -> Result<String, i64> {
+    let path_var = env
+        .split('\n')
+        .find_map(|linea| linea.strip_prefix("PATH="))
+        .unwrap_or("/bin:/sbin");
+    for dir in path_var.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let mut candidato = String::new();
+        if dir == "/" {
+            candidato.push('/');
+        } else {
+            candidato.push_str(dir.trim_end_matches('/'));
+            candidato.push('/');
+        }
+        candidato.push_str(name);
+        if crate::vfs::resolve(&candidato).is_ok() {
+            return Ok(candidato);
+        }
+    }
+    Err(-soso_abi::ENOENT)
 }
 
 /// Crea un hilo: mismo AddrSpace (Arc), pila y entry proporcionados por

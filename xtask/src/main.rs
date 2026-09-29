@@ -925,6 +925,7 @@ pub(crate) fn build_user() -> bool {
         "soso-git",
         "soso-test-sosofs",
         "soso-rustc",
+        "wild-soso",
         "soso-improve",
         "soso-agent-probe",
     ] {

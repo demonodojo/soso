@@ -71,9 +71,15 @@ static mut USER_RSP_SCRATCH: u64 = 0;
 extern "C" fn syscall_entry() {
     naked_asm!(
         // rcx = rip de usuario, r11 = rflags; rsp aún es el del usuario.
+        // `r8` y `r9` también: la instrucción `syscall` sólo clobbea rcx y
+        // r11, y el asignador deja la alineación viva en `r8` a través de
+        // ella. Si el kernel los pisa, el puntero devuelto se desalinea y
+        // el `memset` siguiente escribe fuera del mapeo.
         "mov [rip + {scratch}], rsp",
         "lea rsp, [rip + {kstack}]",
         "add rsp, {size}",
+        "push r8",
+        "push r9",
         "push rcx",
         "push r11",
         "push [rip + {scratch}]",
@@ -95,7 +101,7 @@ extern "C" fn syscall_entry() {
         // este mismo `cld` en sus rutas de entrada por esta razón exacta.
         "cld",
         "mov rdi, rsp",
-        // 14 pushes (112 B) desde el tope alineado dejan rsp%16==0 antes
+        // 16 pushes (128 B) desde el tope alineado dejan rsp%16==0 antes
         // del call, que es lo que la ABI pide (dispatch entra con %16==8).
         "sti", // con la pila puesta ya pueden entrar ticks
         "call {dispatch}",
@@ -110,6 +116,8 @@ extern "C" fn syscall_entry() {
         "pop rdx", // rsp de usuario (rdx es clobber del ABI de syscall)
         "pop r11",
         "pop rcx",
+        "pop r9",
+        "pop r8",
         "mov rsp, rdx",
         "sysretq",
         scratch = sym USER_RSP_SCRATCH,
@@ -128,6 +136,8 @@ extern "C" fn ap_syscall_entry() {
     naked_asm!(
         "mov gs:[{scratch}], rsp",
         "mov rsp, gs:[{kstack}]",
+        "push r8",
+        "push r9",
         "push rcx",
         "push r11",
         "push gs:[{scratch}]",
@@ -162,6 +172,8 @@ extern "C" fn ap_syscall_entry() {
         "pop rdx",
         "pop r11",
         "pop rcx",
+        "pop r9",
+        "pop r8",
         "mov rsp, rdx",
         "sysretq",
         scratch = const crate::arch::percpu::OFF_SYSCALL_SCRATCH,
@@ -210,7 +222,18 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_EXIT => super::exit_current(a1 as u8),
         abi::SYS_READ => sys_read(f, a1, a2, a3),
         abi::SYS_WRITE => sys_write(f, a1, a2, a3),
-        abi::SYS_OPEN => sys_open(a1, a2, a3),
+        abi::SYS_OPEN => {
+            // glibc `close` es la syscall 3 de Linux. Aquí el 3 es
+            // `open` (puntero, longitud, flags). Un descriptor cabe
+            // en `MAX_FDS`; una ruta no vive en esas direcciones.
+            // Sin esto, cerrar el objeto recién creado se leía como
+            // `open` y `user_str` respondía ENAMETOOLONG.
+            if a1 < MAX_FDS as u64 {
+                sys_close(a1)
+            } else {
+                sys_open(a1, a2, a3)
+            }
+        },
         abi::SYS_CLOSE => sys_close(a1),
         abi::SYS_SEEK => sys_seek(a1, a2 as i64, a3),
         abi::SYS_STAT => sys_stat(a1, a2, a3),
@@ -226,11 +249,19 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
             State::Sleeping(crate::arch::pit::uptime_ms() + a1),
         ),
         abi::SYS_HALT => {
-            // Primero el rastro: si el GSP o el USB revienta después, el
-            // pendrive ya lleva `halt: apagando`. En el ROG el fini iba
-            // delante y el panic no llegó al SOSOLOG. `power::solicitar`
-            // imprime, vuelca y luego apaga o reinicia.
-            crate::arch::power::solicitar(a1 == abi::HALT_REINICIAR);
+            // glibc (el rustc estático enlaza libstdc++) llama
+            // `rt_sigprocmask`, syscall 14 de Linux, con r10 = 8 (tamaño
+            // del sigset). Aquí el 14 es HALT y `SIG_UNBLOCK` (1) reiniciaba
+            // el guest. El `reboot` de soso deja r10 a 0.
+            if a4 == 8 {
+                Ok(0)
+            } else {
+                // Primero el rastro: si el GSP o el USB revienta después, el
+                // pendrive ya lleva `halt: apagando`. En el ROG el fini iba
+                // delante y el panic no llegó al SOSOLOG. `power::solicitar`
+                // imprime, vuelca y luego apaga o reinicia.
+                crate::arch::power::solicitar(a1 == abi::HALT_REINICIAR);
+            }
         }
         abi::SYS_MMAP => sys_mmap(a1, a2, a3, a4),
         abi::SYS_MUNMAP => sys_munmap(a1, a2),
@@ -346,6 +377,18 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_PING => sys_ping(a1, a2),
         abi::SYS_TXN_LOCK => sys_txn_lock(a1, a2),
         abi::SYS_PSLIST => sys_pslist(a1, a2),
+        // glibc (`pthread_once` y el resto de nptl) usa la syscall 202 de
+        // Linux. Ese número no es un servicio de soso, así que caía en
+        // `ENOSYS` y `__libc_fatal` abortaba. Los argumentos de Linux van
+        // (uaddr, op, val, timeout); los de soso van (op, uaddr, val, nwake).
+        202 => sys_linux_futex(f, a1, a2, a3, a4),
+        // glibc `open`/`openat` usa la syscall 257 de Linux (`openat`).
+        // LLVM abre el objeto con ella (`raw_fd_ostream`) y, sin este
+        // número, el kernel devolvía ENOSYS: rustc abortaba en
+        // `llvm_err` con «Function not implemented» antes de encolar
+        // el WorkItem. Los argumentos de Linux son
+        // (dirfd, ruta C, flags, mode); soso abre con (ptr, len, flags).
+        257 => sys_linux_openat(a1, a2, a3),
         _ => Err(-abi::ENOSYS),
     };
     match r {
@@ -2191,6 +2234,76 @@ fn sys_thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
         return Err(-abi::EFAULT);
     }
     super::thread_spawn(entry, arg, stack_top, join_uaddr)
+}
+
+/// Longitud de una ruta C en memoria de usuario, sin el NUL.
+fn user_cstr_len(ptr: u64) -> Result<u64, i64> {
+    if ptr < 0x1000 {
+        return Err(-abi::EFAULT);
+    }
+    let mut n = 0u64;
+    while n <= 4096 {
+        let b = user_slice(ptr + n, 1)?[0];
+        if b == 0 {
+            return Ok(n);
+        }
+        n += 1;
+    }
+    Err(-abi::ENAMETOOLONG)
+}
+
+fn sys_linux_openat(dirfd: u64, path_ptr: u64, flags: u64) -> Result<u64, i64> {
+    // `mov $0xffffff9c, %edi` deja AT_FDCWD en 32 bits, sin extensión de signo.
+    const AT_FDCWD32: u64 = 0xffff_ff9c;
+    const AT_FDCWD64: u64 = -100i64 as u64;
+    if dirfd != AT_FDCWD32 && dirfd != AT_FDCWD64 {
+        return Err(-abi::ENOSYS);
+    }
+    let len = user_cstr_len(path_ptr)?;
+    if len == 0 {
+        return Err(-abi::EINVAL);
+    }
+    // Linux (asm-generic): WRONLY=1, RDWR=2, CREAT=64, EXCL=128, TRUNC=512, APPEND=1024.
+    let acc = flags & 3;
+    let mut soso = 0u64;
+    if acc == 1 || acc == 2 {
+        soso |= abi::O_WRONLY;
+    }
+    if flags & 64 != 0 {
+        soso |= abi::O_CREAT;
+    }
+    if flags & 128 != 0 {
+        soso |= abi::O_EXCL;
+    }
+    if flags & 512 != 0 {
+        soso |= abi::O_TRUNC;
+    }
+    if flags & 1024 != 0 {
+        soso |= abi::O_APPEND;
+    }
+    sys_open(path_ptr, len, soso)
+}
+
+/// `FUTEX_WAIT` (0) y `FUTEX_WAKE` (1) de Linux, con o sin
+/// `FUTEX_PRIVATE_FLAG`. Un `timespec` no se traduce: `pthread_once` pasa
+/// timeout nulo.
+fn sys_linux_futex(
+    f: &mut SyscallFrame,
+    uaddr: u64,
+    op: u64,
+    val: u64,
+    timeout: u64,
+) -> Result<u64, i64> {
+    match op & 0x7f {
+        0 => {
+            if timeout != 0 {
+                return Err(-abi::EINVAL);
+            }
+            sys_futex(f, abi::FUTEX_WAIT, uaddr, val, 0)
+        }
+        1 => sys_futex(f, abi::FUTEX_WAKE, uaddr, 0, val),
+        _ => Err(-abi::ENOSYS),
+    }
 }
 
 fn sys_futex(

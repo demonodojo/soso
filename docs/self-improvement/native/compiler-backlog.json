@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "descripcion": "Backlog del compilador (T40). Cada C-xxx sale de un ./x.py check compiler/rustc --host x86_64-unknown-soso, no de suponer que --target soso produce un rustc que corre en soso.",
-  "actualizado": "2026-09-27",
+  "actualizado": "2026-09-29",
   "revision_rust": "32d94cc9be3f6e6c3fa1deaea9e0ab93c4980dba",
   "comando": "./x.py check compiler/rustc --host x86_64-unknown-soso -j 1",
   "build_dir": "target/self-improvement/tasks/T40/build",
@@ -190,10 +190,363 @@
     {
       "id": "C-023",
       "titulo": "crc32 sin definir al enlazar rustc_llvm",
-      "estado": "medida",
+      "estado": "hecha",
       "ficha": "native/C-023.md",
-      "evidencia": "target/self-improvement/tasks/T40/build-host-13.txt"
+      "evidencia": "target/self-improvement/tasks/T40/build-host-13.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/build-host-14.txt"
+    },
+    {
+      "id": "C-024",
+      "titulo": "logb sin definir al enlazar rustc_llvm",
+      "estado": "hecha",
+      "ficha": "native/C-024.md",
+      "evidencia": "target/self-improvement/tasks/T40/build-host-14.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/build-host-15.txt"
+    },
+    {
+      "id": "C-025",
+      "titulo": "__TMC_END__ sin definir al enlazar crtbegin.o",
+      "estado": "hecha",
+      "ficha": "native/C-025.md",
+      "evidencia": "target/self-improvement/tasks/T40/build-host-15.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/build-host-16.txt"
+    },
+    {
+      "id": "C-026",
+      "titulo": "el rustc enlazado depende de bibliotecas del host",
+      "estado": "hecha",
+      "ficha": "native/C-026.md",
+      "evidencia": "target/self-improvement/tasks/T40/build-host-16.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/build-host-19.txt"
+    },
+    {
+      "id": "C-027",
+      "titulo": "_Unwind_Resume sin definir al enlazar libstdc++.a",
+      "estado": "hecha",
+      "ficha": "native/C-027.md",
+      "evidencia": "target/self-improvement/tasks/T40/build-host-19.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/build-host-20.txt"
+    },
+    {
+      "id": "C-028",
+      "titulo": "el rustc estatico muere al arrancar en el host",
+      "estado": "hecha",
+      "ficha": "native/C-028.md",
+      "evidencia": "target/self-improvement/tasks/T40/build-host-20.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-version.txt"
+    },
+    {
+      "id": "C-029",
+      "titulo": "Instant::now entra en panico al arrancar rustc",
+      "estado": "hecha",
+      "ficha": "native/C-029.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-version.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-version-21.txt"
+    },
+    {
+      "id": "C-030",
+      "titulo": "rustc no instala el manejador de Ctrl-C",
+      "estado": "hecha",
+      "ficha": "native/C-030.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-version-21.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-version-22.txt"
+    },
+    {
+      "id": "C-031",
+      "titulo": "rustc no encuentra el sysroot",
+      "estado": "hecha",
+      "ficha": "native/C-031.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-22.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-24.txt"
+    },
+    {
+      "id": "C-032",
+      "titulo": "rustc no obtiene el directorio de trabajo",
+      "estado": "hecha",
+      "ficha": "native/C-032.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-24.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-26.txt"
+    },
+    {
+      "id": "C-033",
+      "titulo": "rustc pide el pid y std no lo tiene",
+      "estado": "hecha",
+      "ficha": "native/C-033.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-26.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-27.txt"
+    },
+    {
+      "id": "C-034",
+      "titulo": "env::split_paths entra en panico",
+      "estado": "hecha",
+      "ficha": "native/C-034.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-27.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-28.txt"
+    },
+    {
+      "id": "C-035",
+      "titulo": "rustc no encuentra la especificacion del target",
+      "estado": "hecha",
+      "ficha": "native/C-035.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-28.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-29.txt"
+    },
+    {
+      "id": "C-036",
+      "titulo": "rustc no puede crear el hilo de compilacion",
+      "estado": "hecha",
+      "ficha": "native/C-036.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-29.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-31.txt"
+    },
+    {
+      "id": "C-037",
+      "titulo": "el hilo de compilacion escribe en el mapeo de solo lectura",
+      "estado": "hecha",
+      "ficha": "native/C-037.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-31.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-36.txt"
+    },
+    {
+      "id": "C-038",
+      "titulo": "LLVM se queda sin memoria",
+      "estado": "hecha",
+      "ficha": "native/C-038.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-36.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-37.txt"
+    },
+    {
+      "id": "C-039",
+      "titulo": "locale de glibc sin inicializar",
+      "estado": "hecha",
+      "ficha": "native/C-039.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-37.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-38.txt"
+    },
+    {
+      "id": "C-040",
+      "titulo": "el hilo de compilacion salta a la direccion 0",
+      "estado": "hecha",
+      "ficha": "native/C-040.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-38.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-39.txt"
+    },
+    {
+      "id": "C-041",
+      "titulo": "el desenrollado de una excepcion aborta",
+      "estado": "hecha",
+      "ficha": "native/C-041.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-40.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-44.txt"
+    },
+    {
+      "id": "C-042",
+      "titulo": "pthread_once usa el futex de Linux",
+      "estado": "hecha",
+      "ficha": "native/C-042.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-44.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-45.txt"
+    },
+    {
+      "id": "C-043",
+      "titulo": "memset escribe fuera de un mapeo",
+      "estado": "hecha",
+      "ficha": "native/C-043.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-45.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-49.txt"
+    },
+    {
+      "id": "C-044",
+      "titulo": "abort de glibc ejecuta hlt",
+      "estado": "hecha",
+      "ficha": "native/C-044.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-49.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-53.txt"
+    },
+    {
+      "id": "C-045",
+      "titulo": "lectura de .rodata tratada como escritura",
+      "estado": "hecha",
+      "ficha": "native/C-045.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-53.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-57.txt"
+    },
+    {
+      "id": "C-046",
+      "titulo": "__libc_write emite la syscall 1",
+      "estado": "hecha",
+      "ficha": "native/C-046.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-58.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-59.txt"
+    },
+    {
+      "id": "C-047",
+      "titulo": "system_error Resource deadlock avoided",
+      "estado": "hecha",
+      "ficha": "native/C-047.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-59.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-boot-60.txt"
+    },
+    {
+      "id": "C-048",
+      "titulo": "rustc no lee el fuente",
+      "estado": "hecha",
+      "ficha": "native/C-048.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-60.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-61.txt"
+    },
+    {
+      "id": "C-049",
+      "titulo": "no encuentra la crate std",
+      "estado": "hecha",
+      "ficha": "native/C-049.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-61.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-64.txt"
+    },
+    {
+      "id": "C-050",
+      "titulo": "no puede mapear el rlib de std",
+      "estado": "hecha",
+      "ficha": "native/C-050.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-64.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-66.txt"
+    },
+    {
+      "id": "C-051",
+      "titulo": "la crate std es de otra version de rustc",
+      "estado": "hecha",
+      "ficha": "native/C-051.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-66.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-67.txt"
+    },
+    {
+      "id": "C-052",
+      "titulo": "no puede crear el directorio temporal",
+      "estado": "hecha",
+      "ficha": "native/C-052.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-67.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-68.txt"
+    },
+    {
+      "id": "C-053",
+      "titulo": "no puede crear el fichero de metadata",
+      "estado": "hecha",
+      "ficha": "native/C-053.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-68.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-69.txt"
+    },
+    {
+      "id": "C-054",
+      "titulo": "no arranca el hilo coordinador",
+      "estado": "hecha",
+      "ficha": "native/C-054.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-69.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-70.txt"
+    },
+    {
+      "id": "C-055",
+      "titulo": "el hilo nuevo hereda el TLS del padre",
+      "estado": "hecha",
+      "ficha": "native/C-055.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-70.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-72.txt"
+    },
+    {
+      "id": "C-056",
+      "titulo": "park de hilo no espera",
+      "estado": "hecha",
+      "ficha": "native/C-056.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-73.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-75.txt"
+    },
+    {
+      "id": "C-057",
+      "titulo": "el worker aborta al abrir el objeto",
+      "estado": "hecha",
+      "ficha": "native/C-057.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-82.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-85.txt"
+    },
+    {
+      "id": "C-058",
+      "titulo": "close de glibc cae en SYS_OPEN",
+      "estado": "hecha",
+      "ficha": "native/C-058.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-boot-85.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-86.txt"
+    },
+    {
+      "id": "C-059",
+      "titulo": "el objeto no se copia al -o",
+      "estado": "hecha",
+      "ficha": "native/C-059.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-86.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-87.txt"
+    },
+    {
+      "id": "C-060",
+      "titulo": "no se borra el objeto temporal",
+      "estado": "hecha",
+      "ficha": "native/C-060.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-emit-87.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-emit-88.txt"
+    },
+    {
+      "id": "C-061",
+      "titulo": "perm entra en panico al enlazar",
+      "estado": "hecha",
+      "ficha": "native/C-061.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-link-90.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-link-91.txt"
+    },
+    {
+      "id": "C-062",
+      "titulo": "join_paths falla al preparar el enlazador",
+      "estado": "hecha",
+      "ficha": "native/C-062.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-link-91.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-link-92.txt"
+    },
+    {
+      "id": "C-063",
+      "titulo": "no se puede ejecutar wild-soso",
+      "estado": "hecha",
+      "ficha": "native/C-063.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-link-92.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-link-93.txt"
+    },
+    {
+      "id": "C-064",
+      "titulo": "no esta el enlazador wild-soso",
+      "estado": "hecha",
+      "ficha": "native/C-064.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-link-93.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-link-94.txt"
+    },
+    {
+      "id": "C-065",
+      "titulo": "wait no recoge al enlazador",
+      "estado": "hecha",
+      "ficha": "native/C-065.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-link-94.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-link-95.txt"
+    },
+    {
+      "id": "C-066",
+      "titulo": "wild-soso no enlaza",
+      "estado": "hecha",
+      "ficha": "native/C-066.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-link-95.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-link-98.txt"
+    },
+    {
+      "id": "C-067",
+      "titulo": "/tmp/t muere por page fault en 0x411000",
+      "estado": "hecha",
+      "ficha": "native/C-067.md",
+      "evidencia": "target/self-improvement/tasks/T40/guest-rustc-run-99.txt",
+      "siguiente_log": "target/self-improvement/tasks/T40/guest-rustc-run-100.txt"
     }
   ],
-  "no_cerrado": "T40 no se cierra: el check de host soso sale 0 y wild deja crc32 sin definir (C-023)."
+  "no_cerrado": "T40 está cerrada. native_validation queda partial: el binario se construyó con x.py en Linux."
 }

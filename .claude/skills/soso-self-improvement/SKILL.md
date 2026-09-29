@@ -178,7 +178,7 @@ Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/READ
 Revisión del **27-sep-2026**: el perfil elegido es `qwen2.5-coder-7b`, con
 campaña 10×3, cobertura `completa` y **GO 10/10**. El 3B queda como candidato
 anterior (NO-GO 8/10). **T20** está pendiente con esa identidad. La ficha en
-curso a reanudar es **T40** (C-023: `wild` deja `crc32` sin definir al enlazar `rustc_llvm`).
+curso ya no es T40: está **cerrada** (2026-09-29; `/tmp/t` imprime `hola-t40` y sale con 7). La siguiente habilitada es **T41**, sin arrancar.
 
 Trabajo independiente: **T72** está cerrada (26-sep): `soso-alloc` lo usan
 libsoso y soso-rt; la sonda guest `monton` sale 7/7. **T75** está cerrada

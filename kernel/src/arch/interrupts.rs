@@ -322,6 +322,10 @@ static EXC_EXTRA: AtomicU64 = AtomicU64::new(0);
 static EXC_CS: AtomicU64 = AtomicU64::new(0);
 static EXC_ERR: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) fn exc_extra() -> u64 {
+    EXC_EXTRA.load(Ordering::Relaxed)
+}
+
 fn stash_exc(rip: u64, rsp: u64, extra: u64) {
     EXC_RIP.store(rip, Ordering::Relaxed);
     EXC_RSP.store(rsp, Ordering::Relaxed);
@@ -343,7 +347,12 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
     if desde_usuario(&stack_frame) {
-        con_rsp_alineado(kill_shim, 1, 0);
+        stash_exc(
+            stack_frame.instruction_pointer.as_u64(),
+            stack_frame.stack_pointer.as_u64(),
+            error_code,
+        );
+        con_rsp_alineado(kill_shim, 1, error_code);
     }
     stash_exc(
         stack_frame.instruction_pointer.as_u64(),
@@ -405,7 +414,14 @@ extern "sysv64" fn kill_shim(motivo: u64, dato: u64) -> u64 {
             );
             crate::task::kill_current("page fault")
         }
-        1 => crate::task::kill_current("general protection fault"),
+        1 => {
+            let rip = EXC_RIP.load(Ordering::Relaxed);
+            let rsp = EXC_RSP.load(Ordering::Relaxed);
+            crate::println!(
+                "task: general protection fault de usuario error={dato:#x} rip={rip:#x} rsp={rsp:#x}"
+            );
+            crate::task::kill_current("general protection fault")
+        }
         2 => crate::task::kill_current("invalid opcode"),
         _ => crate::task::kill_current("excepción"),
     }
@@ -421,6 +437,11 @@ extern "x86-interrupt" fn page_fault_handler(
     let addr = x86_64::registers::control::Cr2::read_raw();
     if desde_usuario(&stack_frame) {
         let is_write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
+        stash_exc(
+            stack_frame.instruction_pointer.as_u64(),
+            stack_frame.stack_pointer.as_u64(),
+            error_code.bits(),
+        );
         if con_rsp_alineado(mmap_fault_shim, addr, is_write as u64) != 0 {
             return;
         }

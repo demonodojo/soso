@@ -1,6 +1,6 @@
 # T40 — Descomponer y acreditar el port del compilador
 
-**Hito:** SI-7 · **Tipo:** Especificación e integración condicionada · **Estado:** en curso (C-001 a C-022 hechas; el check de host soso sale 0; el build se para en C-023).
+**Hito:** SI-7 · **Tipo:** Especificación e integración condicionada · **Estado:** completada (2026-09-29; C-001 a C-067 hechas; en el guest `/tmp/t` imprime `hola-t40` y sale con 7; `native_validation` parcial).
 
 **Dependencias:** [T38](T38-toolchain-inventario.md), [T39](T39-bootstrap-libstd.md)
 
@@ -45,12 +45,11 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
+- [x] Implementación o artefactos de esta ficha terminados.
 - [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
-El backlog y C-001 a C-005 no cierran la ficha: falta que rustc arranque en el guest.
-Siguiente medida: [C-023](native/C-023.md). El check de host soso sale 0; `wild` deja `crc32` sin definir al enlazar `rustc_llvm`. Ver [seguimiento/T40.md](seguimiento/T40.md).
+Cerrada el 2026-09-29. rustc en el guest emite objetos distintos, enlaza `/tmp/t` y ese programa imprime `hola-t40` y sale con 7. El binario se construyó con `x.py` en Linux; `user/soso-rustc` sigue siendo el stub. Ver [seguimiento/T40.md](seguimiento/T40.md) y `target/self-improvement/tasks/T40/resultado.md`.
 
 No sustituir el stub por un wrapper a Forja y llamarlo rustc nativo; la evidencia debe mostrar compilación guest.
 
@@ -62,4 +61,4 @@ del hito en la misma sesión.
 
 Aplicar [NATIVO.md](NATIVO.md). Acreditar que rustc se ejecuta en soso y documentar la receta de reconstrucción desde una semilla identificada. La reconstrucción completa de la toolchain se prueba en T51, después de disponer de Cargo T41 y las herramientas T42; no bloquear el port inicial con su propio bootstrap. Registrar ejecutables transitivos y plataforma; un compilador que solo ejecuta en Linux no satisface esta ficha.
 
-Validación nativa: **pendiente**. Estas condiciones no son dependencias para iniciar el desarrollo. Registrar evidencia y capacidades pendientes en tasks.json y seguimiento. Artefactos guest bajo /var/self-improvement/ (raíz configurable).
+Validación nativa: **parcial** (2026-09-29). rustc corre en el guest y el programa enlazado imprime `hola-t40` (código 7). No es `verified`: el compilador no se reconstruye dentro de soso (T41, T51). Artefactos guest bajo /var/self-improvement/ (raíz configurable).

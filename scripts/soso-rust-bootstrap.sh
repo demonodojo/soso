@@ -28,6 +28,11 @@ extended = false
 [rust]
 codegen-backends = ["llvm"]
 channel = "dev"
+# download-rustc sustituye el canal dev por el del CI (nightly) pero
+# omit-git-hash se decide antes, con el canal dev, y por defecto es true.
+# Sin el hash, rustc rechaza std: E0514. El CI graba
+# "1.100.0-nightly (32d94cc9b 2026-09-07)".
+omit-git-hash = false
 download-rustc = true
 
 [target.x86_64-unknown-soso]
