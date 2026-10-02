@@ -1,6 +1,6 @@
 # T41 — Validar Cargo y fuentes reproducibles dentro de soso
 
-**Hito:** SI-7 · **Tipo:** Integración condicionada · **Estado:** pendiente.
+**Hito:** SI-7 · **Tipo:** Integración condicionada · **Estado:** en curso (2026-10-01). C-073 hecha; siguiente C-074 (`socket2`). Ver [seguimiento/T41.md](seguimiento/T41.md).
 
 **Dependencias:** [T40](T40-compilador-nativo.md)
 

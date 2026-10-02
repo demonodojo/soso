@@ -1622,7 +1622,7 @@
       "title": "Validar Cargo y fuentes reproducibles dentro de soso",
       "milestone": "SI-7",
       "kind": "Integración condicionada",
-      "status": "pending",
+      "status": "in_progress",
       "depends_on": [
         "T40"
       ],
@@ -1642,6 +1642,31 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-10-01T11:45:00+02:00",
+        "base": "7d66dfe376a44caf7806183306bfe90bd0a10d32 + diff HEAD sha256:1b46aa4b0fa6d5e57dbee5c0fdeac7d82f2fb57d03901dd1b6dbb783daa0b73d",
+        "summary": "docs/self-improvement/seguimiento/T41.md",
+        "evidence": [
+          "target/self-improvement/tasks/T41/submodule-cargo-1.txt",
+          "target/self-improvement/tasks/T41/check-cargo-1.txt",
+          "target/self-improvement/tasks/T41/build-cargo-1.txt",
+          "target/self-improvement/tasks/T41/build-cargo-4.txt",
+          "target/self-improvement/tasks/T41/build-cargo-5.txt",
+          "target/self-improvement/tasks/T41/build-cargo-7.txt",
+          "target/self-improvement/tasks/T41/build-cargo-8.txt",
+          "target/self-improvement/tasks/T41/build-cargo-9.txt",
+          "target/self-improvement/tasks/T41/build-cargo-10.txt",
+          "config/rust-soso/patch-getrandom-registry.sh",
+          "config/rust-soso/patch-curl-sys-soso.py",
+          "config/rust-soso/patch-libc-soso.py",
+          "config/rust-soso/vendor/libc/soso.rs",
+          "config/rust-soso/vendor/gix-config-value/src/path.rs",
+          "config/rust-soso/vendor/gix-sec/src/identity.rs",
+          "config/rust-soso/vendor/filetime/src/soso.rs"
+        ],
+        "blocker": null,
+        "next_step": "C-074 (docs/self-improvement/native/C-074.md): socket2 en soso. No implementar otra C en la misma sesión."
       }
     },
     {

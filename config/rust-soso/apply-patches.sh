@@ -227,6 +227,49 @@ if [[ -f "$RUST/Cargo.toml" ]]; then
   if ! grep -q 'path = "src/soso-getrandom"' "$RUST/Cargo.toml"; then
     printf 'getrandom = { path = "src/soso-getrandom" }\n' >> "$RUST/Cargo.toml"
   fi
+  # C-068: el workspace de Cargo trae getrandom 0.2.17, 0.3.4 y 0.4.3; el
+  # [patch] de la raíz no alcanza. Copiamos tres árboles y fijamos el lock.
+  CARGO_WS="$RUST/src/tools/cargo"
+  if [[ -f "$CARGO_WS/Cargo.lock" ]]; then
+    if [[ -d "$CARGO_WS/.git" ]]; then
+      ( cd "$CARGO_WS" && git checkout -- Cargo.lock )
+    fi
+    for spec in "0.2.17:soso-getrandom-0.2:getrandom-0.2" \
+                "0.3.4:soso-getrandom-0.3:getrandom-0.3" \
+                "0.4.3:soso-getrandom-0.4:getrandom-0.4"; do
+      IFS=: read -r _ver dst vend <<< "$spec"
+      rm -rf "$RUST/src/$dst"
+      mkdir -p "$RUST/src/$dst"
+      cp -a "$ROOT/config/rust-soso/vendor/$vend/." "$RUST/src/$dst/"
+    done
+    python3 "$ROOT/config/rust-soso/patch-cargo-getrandom-lock.py" \
+      "$CARGO_WS/Cargo.lock" "$RUST/src"
+  fi
+  # Tras el primer intento de `x.py build cargo`, las tres versiones quedan en
+  # el registry; este script las sustituye (ver C-068).
+  if [[ -x "$ROOT/config/rust-soso/patch-getrandom-registry.sh" ]]; then
+    if "$ROOT/config/rust-soso/patch-getrandom-registry.sh" 2>/dev/null; then
+      :
+    fi
+  fi
+  CARGO_UTIL="$RUST/src/tools/cargo/crates/cargo-util"
+  if [[ -d "$CARGO_UTIL/src" ]]; then
+    python3 "$ROOT/config/rust-soso/patch-cargo-util-soso.py" "$CARGO_UTIL"
+  fi
+  CARGO_UTIL_TERM="$RUST/src/tools/cargo/crates/cargo-util-terminal"
+  if [[ -d "$CARGO_UTIL_TERM/src" ]]; then
+    python3 "$ROOT/config/rust-soso/patch-cargo-util-terminal-soso.py" "$CARGO_UTIL_TERM"
+  fi
+  CARGO_CRED="$RUST/src/tools/cargo/credential/cargo-credential"
+  if [[ -d "$CARGO_CRED/src" ]]; then
+    python3 "$ROOT/config/rust-soso/patch-cargo-credential-stdio-soso.py" "$CARGO_CRED"
+  fi
+  if [[ -f "$RUST/src/tools/cargo/src/util/job.rs" ]]; then
+    python3 "$ROOT/config/rust-soso/patch-cargo-job-flock-soso.py" "$RUST/src/tools/cargo"
+  fi
+  if [[ -f "$RUST/src/tools/cargo/src/bin/cargo/main.rs" ]]; then
+    python3 "$ROOT/config/rust-soso/patch-cargo-bin-main-soso.py" "$RUST/src/tools/cargo"
+  fi
   # C-008: libc deja vacío un target no soportado. soso necesita los tipos C.
   LIBC_REG=$(find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name 'libc-0.2.189' | head -1)
   LIBC_DST="$RUST/src/soso-libc"
@@ -234,35 +277,16 @@ if [[ -f "$RUST/Cargo.toml" ]]; then
     rm -rf "$LIBC_DST"
     mkdir -p "$LIBC_DST"
     cp -a "$LIBC_REG/." "$LIBC_DST/"
-    cp "$ROOT/config/rust-soso/vendor/libc/soso.rs" "$LIBC_DST/src/soso.rs"
-    python3 - "$LIBC_DST/src/lib.rs" <<'PY'
-import pathlib, sys
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-old = """    } else {
-        // non-supported targets: empty...
-    }"""
-new = """    } else if #[cfg(target_os = "soso")] {
-        mod primitives;
-        pub use crate::primitives::*;
-
-        mod soso;
-        pub use crate::soso::*;
-    } else {
-        // non-supported targets: empty...
-    }"""
-if 'target_os = "soso"' not in text:
-    if old not in text:
-        sys.exit("apply-patches: libc sin la rama vacía")
-    text = text.replace(old, new, 1)
-# El check niega avisos. `pub use new::*` queda vacío en soso.
-text = text.replace(
-    "#[allow(unused_imports)] // needed while the module is empty on some platforms\npub use new::*;",
-    "#[allow(unused_imports, unreachable_pub)] // needed while the module is empty on some platforms\npub use new::*;",
-    1,
-)
-path.write_text(text)
-PY
+    python3 "$ROOT/config/rust-soso/patch-libc-soso.py" "$LIBC_DST" "$ROOT/config/rust-soso/vendor/libc"
+    # C-074: misma rama unix/linux que el registry (socket2 vía [patch.crates-io]).
+    LIBC186=$(find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name 'libc-0.2.186' 2>/dev/null | head -1)
+    if [[ -n "$LIBC186" && "$LIBC186" != "$LIBC_REG" ]]; then
+      python3 "$ROOT/config/rust-soso/patch-libc-soso.py" "$LIBC186" "$ROOT/config/rust-soso/vendor/libc"
+      rm -rf "$LIBC_DST"
+      mkdir -p "$LIBC_DST"
+      cp -a "$LIBC186/." "$LIBC_DST/"
+      python3 "$ROOT/config/rust-soso/patch-libc-soso.py" "$LIBC_DST" "$ROOT/config/rust-soso/vendor/libc"
+    fi
     if ! grep -q 'path = "src/soso-libc"' "$RUST/Cargo.toml"; then
       printf 'libc = { path = "src/soso-libc" }\n' >> "$RUST/Cargo.toml"
     fi
@@ -368,6 +392,144 @@ for old, new in repls:
 if changed:
     path.write_text(text)
 PY
+    python3 - "$COMPILE_RS" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+marker = "C-082 soso"
+old = """        let build_compiler = if builder.download_rustc() && self.force_recompile {
+            // When there are changes in the library tree with CI-rustc, we want to build
+            // the stageN library and that requires using stageN-1 compiler.
+            builder
+                .compiler(self.build_compiler.stage.saturating_sub(1), builder.config.host_target)
+        } else {
+            self.build_compiler
+        };"""
+# C-084: retirar override stage0 antiguo (C-082). C-085: std cruzada soso usa stage1 CI.
+if old not in text and "target.triple.contains(\"soso\")" not in text.split("build_compiler = if", 1)[-1][:500]:
+    sys.exit("apply-patches: no está build_compiler en Std::run")
+idx = text.find("        let build_compiler = if target.triple.contains(\"soso\")")
+if idx != -1:
+    end = text.find("        };", idx)
+    if end == -1:
+        sys.exit("apply-patches: bloque C-082 stage0 sin cerrar")
+    text = text[:idx] + old + text[end + len("        };") :]
+    text = text.replace("        // C-082 soso: usar compiler del step.\n", "")
+    text = text.replace(
+        f"        // {marker}: libstd cruzada para soso con stage0 (bootstrap), no rustc de CI.\n",
+        "",
+    )
+c085 = "C-085 soso cross std"
+if "self.build_compiler.stage == 0" in text and c085 in text:
+    text = text.replace(
+        "&& self.build_compiler.stage == 0\n            && !builder.config.is_host_target(target)",
+        "&& !builder.config.is_host_target(target)\n            && self.build_compiler.stage <= 1",
+        1,
+    )
+if c085 not in text:
+    new = f"""        // {c085}: stage0 beta no compila el `library/` del commit; usar CI stage1.
+        let build_compiler = if target.triple.contains(\"soso\")
+            && builder.download_rustc()
+            && !builder.config.is_host_target(target)
+            && self.build_compiler.stage <= 1
+        {{
+            builder.compiler(1, builder.config.host_target)
+        }} else if builder.download_rustc() && self.force_recompile {{
+            // When there are changes in the library tree with CI-rustc, we want to build
+            // the stageN library and that requires using stageN-1 compiler.
+            builder
+                .compiler(self.build_compiler.stage.saturating_sub(1), builder.config.host_target)
+        }} else {{
+            self.build_compiler
+        }};"""
+    if old not in text:
+        sys.exit("apply-patches: no está build_compiler upstream en Std::run")
+    text = text.replace(old, new, 1)
+old2 = """        for rustflag in self.extra_rust_args.iter() {
+            cargo.rustflag(rustflag);
+        }"""
+new2 = f"""        for rustflag in self.extra_rust_args.iter() {{
+            cargo.rustflag(rustflag);
+        }}
+        if target.triple.contains(\"soso\") {{
+            // {marker}: stdarch AVX512 const-eval bajo build.warnings=deny.
+            cargo.rustflag(\"-Along_running_const_eval\");
+        }}"""
+if "-Aconst_eval_long_running" in text:
+    text = text.replace("-Aconst_eval_long_running", "-Along_running_const_eval")
+if "long_running_const_eval" not in text:
+    if old2 not in text:
+        sys.exit("apply-patches: no está extra_rust_args en Std::run")
+    text = text.replace(old2, new2, 1)
+path.write_text(text)
+PY
+  fi
+  # C-074: socket2 (stage2-tools) usa libc del sysroot; hace falta rustc_private
+  # en RUSTC_ALLOW_FEATURES vía el shim bin/rustc.rs (no basta exportarlo a mano).
+  CARGO_RS="$RUST/src/bootstrap/src/core/builder/cargo.rs"
+  if [[ -f "$CARGO_RS" ]]; then
+    python3 - "$CARGO_RS" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+needle = "        let allow_features = match mode {"
+repl = "        let mut allow_features = match mode {"
+block = """
+        // C-074: en soso, deps como socket2 enlazan libc del sysroot.
+        if matches!(mode, Mode::ToolBootstrap | Mode::ToolStd | Mode::ToolTarget)
+            && (compiler.host.contains(\"soso\") || target.contains(\"soso\"))
+        {
+            if allow_features.is_empty() {
+                allow_features = \"rustc_private\".into();
+            } else {
+                allow_features.push_str(\",rustc_private\");
+            }
+        }
+
+        cargo.arg(\"-j\").arg(self.jobs().to_string());"""
+if "C-074: en soso, deps como socket2" in text:
+    pass
+elif needle not in text:
+    sys.exit("apply-patches: no está allow_features en cargo.rs")
+else:
+    text = text.replace(needle, repl, 1)
+    anchor = '        cargo.arg("-j").arg(self.jobs().to_string());'
+    if anchor not in text:
+        sys.exit("apply-patches: no está cargo.arg(-j) en cargo.rs")
+    text = text.replace(anchor, block, 1)
+    path.write_text(text)
+PY
+    python3 - "$CARGO_RS" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+marker = "C-083: heredar RUSTC_ALLOW_FEATURES"
+old = """        if !cargo.allow_features.is_empty() {
+            cargo.command.env("RUSTC_ALLOW_FEATURES", cargo.allow_features);
+        }
+
+        cargo.command"""
+new = """        if !cargo.allow_features.is_empty() {
+            cargo.command.env("RUSTC_ALLOW_FEATURES", cargo.allow_features);
+        } else {
+            // C-083: heredar RUSTC_ALLOW_FEATURES=rustc_private del shell rompe libstd/core (E0725).
+            cargo.command.env_remove("RUSTC_ALLOW_FEATURES");
+        }
+
+        cargo.command"""
+if marker in text:
+    pass
+elif old not in text:
+    sys.exit("apply-patches: no está el bloque RUSTC_ALLOW_FEATURES en cargo.rs")
+else:
+    path.write_text(text.replace(old, new, 1))
+PY
+  fi
+  # C-083: `src/tools/cargo/.cargo/config.toml` fijaba `-Zallow-features=rustc_private`
+  # para soso; cargo lo aplica también al build de libstd (--target soso) → E0725.
+  CARGO_DOT_CARGO="$RUST/src/tools/cargo/.cargo/config.toml"
+  if [[ -f "$CARGO_DOT_CARGO" ]] && grep -q 'allow-features=rustc_private' "$CARGO_DOT_CARGO"; then
+    rm -f "$CARGO_DOT_CARGO"
   fi
   # C-014: CMAKE_SYSTEM_NAME=Generic deja LLVM_ON_UNIX sin definir y
   # file_status no tiene getSize. soso es familia unix; Linux enciende esa rama.

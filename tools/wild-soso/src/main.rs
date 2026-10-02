@@ -81,6 +81,32 @@ fn libm_dir() -> Option<String> {
     cc_file_dir("libm.so")
 }
 
+fn openssl_lib_dir() -> Option<String> {
+    cc_file_dir("libssl.so").or_else(|| cc_file_dir("libssl.a"))
+}
+
+/// `libssh2-sys` / `libgit2-sys` enlazan OpenSSL; rustc no pasa `-lssl`/`-lcrypto`.
+fn with_openssl_libs(args: &[String]) -> Vec<String> {
+    let needs = args.iter().any(|a| {
+        a.contains("libssh2_sys") || a.contains("libgit2_sys") || a.contains("libcurl_sys")
+    });
+    if !needs || args.iter().any(|a| a == "-lssl") {
+        return args.to_vec();
+    }
+    let Some(dir) = openssl_lib_dir() else {
+        return args.to_vec();
+    };
+    let mut out = args.to_vec();
+    if out.last().map(String::as_str) != Some("-Bstatic") {
+        out.push("-Bstatic".to_string());
+    }
+    out.push("-L".to_string());
+    out.push(dir);
+    out.push("-lssl".to_string());
+    out.push("-lcrypto".to_string());
+    out
+}
+
 /// rustc pide `-lstdc++` sin el directorio de gcc. wild no lo busca.
 fn with_stdcxx_dir(args: &[String], dir: Option<&str>) -> Vec<String> {
     let Some(dir) = dir else {
@@ -120,6 +146,42 @@ fn with_host_libc(args: &[String], dir: Option<&str>) -> Vec<String> {
             out.push("-lc".to_string());
             inserted = true;
         }
+    }
+    out
+}
+
+/// rustc pasa `-lz`/`-lc`/… sin `-L` cuando no hay `-lstdc++` (p. ej. bin `cargo`).
+fn with_lib_dir_before(args: &[String], lib_flag: &str, dir: Option<&str>) -> Vec<String> {
+    let Some(dir) = dir else {
+        return args.to_vec();
+    };
+    if !args.iter().any(|arg| arg == lib_flag) {
+        return args.to_vec();
+    }
+    let mut out = Vec::with_capacity(args.len() + 2);
+    let mut inserted = false;
+    for arg in args {
+        if !inserted && arg == lib_flag {
+            out.push("-L".to_string());
+            out.push(dir.to_string());
+            inserted = true;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+/// Directorios del host para `-lz`, `-lc`, `-lm`, `-lrt` y `-lpthread` ya presentes.
+fn with_host_lib_search_dirs(args: &[String]) -> Vec<String> {
+    let mut out = args.to_vec();
+    for (flag, dir) in [
+        ("-lz", libz_dir()),
+        ("-lc", libc_dir()),
+        ("-lm", libm_dir()),
+        ("-lrt", libc_dir()),
+        ("-lpthread", libc_dir()),
+    ] {
+        out = with_lib_dir_before(&out, flag, dir.as_deref());
     }
     out
 }
@@ -168,24 +230,44 @@ fn with_host_libm(args: &[String], dir: Option<&str>) -> Vec<String> {
     out
 }
 
-/// `_Unwind_Resume` está en `libgcc_eh.a`. `libstdc++` estática lo pide y rustc no.
+/// Enlaces con bibliotecas C/C++ del host (con o sin `-lstdc++`) necesitan crt de gcc.
+fn needs_gcc_crt(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "-lstdc++")
+        || args.iter().any(|a| a.contains("libssh2_sys"))
+        || args
+            .windows(2)
+            .any(|w| w[0] == "-Bdynamic" && matches!(w[1].as_str(), "-lz" | "-lc"))
+}
+
+/// `_Unwind_Resume` y `__register_frame` están en `libgcc_eh.a`. rustc no lo pasa.
 fn with_host_libgcc_eh(args: &[String], archive: Option<&str>) -> Vec<String> {
     let Some(archive) = archive else {
         return args.to_vec();
     };
-    if !args.iter().any(|arg| arg == "-lstdc++")
-        || args.iter().any(|arg| arg == "-lgcc_eh" || arg.ends_with("libgcc_eh.a"))
-    {
+    let need = args.iter().any(|arg| arg == "-lstdc++") || needs_gcc_crt(args);
+    if !need || args.iter().any(|arg| arg == "-lgcc_eh" || arg.ends_with("libgcc_eh.a")) {
         return args.to_vec();
     }
+    let anchor = if args.iter().any(|arg| arg == "-lstdc++") {
+        "-lstdc++"
+    } else if args.iter().any(|arg| arg == "-lpthread") {
+        "-lpthread"
+    } else if args.iter().any(|arg| arg == "-lrt") {
+        "-lrt"
+    } else {
+        "-lc"
+    };
     let mut out = Vec::with_capacity(args.len() + 1);
     let mut inserted = false;
     for arg in args {
         out.push(arg.clone());
-        if !inserted && arg == "-lstdc++" {
+        if !inserted && arg == anchor {
             out.push(archive.to_string());
             inserted = true;
         }
+    }
+    if !inserted {
+        out.push(archive.to_string());
     }
     out
 }
@@ -195,34 +277,58 @@ fn with_crtbegin(args: &[String], crtbegin: Option<&str>) -> Vec<String> {
     let Some(crtbegin) = crtbegin else {
         return args.to_vec();
     };
-    if !args.iter().any(|arg| arg == "-lstdc++")
-        || args.iter().any(|arg| arg.ends_with("crtbegin.o"))
-    {
+    if !needs_gcc_crt(args) || args.iter().any(|arg| arg.ends_with("crtbegin.o")) {
         return args.to_vec();
     }
-    let mut out = Vec::with_capacity(args.len() + 1);
-    let mut inserted = false;
-    for arg in args {
-        if !inserted && arg == "-lstdc++" {
-            out.push(crtbegin.to_string());
-            inserted = true;
+    if args.iter().any(|arg| arg == "-lstdc++") {
+        let mut out = Vec::with_capacity(args.len() + 1);
+        let mut inserted = false;
+        for arg in args {
+            if !inserted && arg == "-lstdc++" {
+                out.push(crtbegin.to_string());
+                inserted = true;
+            }
+            out.push(arg.clone());
         }
-        out.push(arg.clone());
+        return out;
     }
+    if let Some(pos) = args
+        .windows(2)
+        .position(|w| w[0] == "-flavor" && !w[1].starts_with('-'))
+    {
+        let mut out = Vec::with_capacity(args.len() + 1);
+        let end = pos + 2;
+        out.extend_from_slice(&args[..end]);
+        out.push(crtbegin.to_string());
+        out.extend_from_slice(&args[end..]);
+        return out;
+    }
+    let mut out = Vec::with_capacity(args.len() + 1);
+    out.push(crtbegin.to_string());
+    out.extend(args.iter().cloned());
     out
 }
 
 /// Las bibliotecas del host que pide LLVM van estáticas: el guest no tiene
 /// el cargador de Linux. rustc ya pasa un `-Bstatic` anterior para los rlib
-/// y luego `-Bdynamic` delante de `-lstdc++`.
+/// y luego `-Bdynamic` delante de `-lstdc++` o de `-lz`/`-lc` (binarios sin C++).
 fn with_static_host_libs(args: &[String]) -> Vec<String> {
-    if !args.iter().any(|arg| arg == "-lstdc++") {
+    let want = args.iter().any(|arg| arg == "-lstdc++")
+        || args
+            .windows(2)
+            .any(|w| w[0] == "-Bdynamic" && matches!(w[1].as_str(), "-lz" | "-lc"));
+    if !want {
         return args.to_vec();
     }
     let mut out = Vec::with_capacity(args.len() + 1);
+    let mut pushed = false;
     for arg in args {
-        if arg == "-lstdc++" && out.last().map(String::as_str) != Some("-Bstatic") {
+        if !pushed
+            && matches!(arg.as_str(), "-lstdc++" | "-lz" | "-lc")
+            && out.last().map(String::as_str) != Some("-Bstatic")
+        {
             out.push("-Bstatic".to_string());
+            pushed = true;
         }
         out.push(arg.clone());
     }
@@ -234,8 +340,7 @@ fn with_crtend(args: &[String], crtend: Option<&str>) -> Vec<String> {
     let Some(crtend) = crtend else {
         return args.to_vec();
     };
-    if !args.iter().any(|arg| arg == "-lstdc++") || args.iter().any(|arg| arg.ends_with("crtend.o"))
-    {
+    if !needs_gcc_crt(args) || args.iter().any(|arg| arg.ends_with("crtend.o")) {
         return args.to_vec();
     }
     let mut out = Vec::with_capacity(args.len() + 1);
@@ -487,8 +592,12 @@ fn main() -> ExitCode {
     let args = with_crtbegin(&args, cc_file_path("crtbegin.o").as_deref());
     // C-025: `__TMC_END__` está en crtend.o.
     let args = with_crtend(&args, cc_file_path("crtend.o").as_deref());
+    // C-090: `-L` del host delante de `-lz`/`-lc`/… cuando rustc no pide `-lstdc++`.
+    let args = with_host_lib_search_dirs(&args);
     // C-026: libstdc++, libm, libz y libc estáticas. El guest no carga .so del host.
     let args = with_static_host_libs(&args);
+    // C-091: OpenSSL para libssh2/libgit2/curl en el bin `cargo` (sin `-lstdc++`).
+    let args = with_openssl_libs(&args);
     // C-037: write de glibc no puede ser la syscall 1 (read en soso).
     let write_obj = soso_libc_write_obj();
     let args = with_soso_libc_write(&args, write_obj.as_deref());
@@ -726,6 +835,23 @@ mod tests {
     }
 
     #[test]
+    fn cargo_sin_stdcxx_arrastra_libgcc_eh() {
+        let args = [
+            "-Bdynamic".to_string(),
+            "-lz".to_string(),
+            "-lc".to_string(),
+            "-lpthread".to_string(),
+        ];
+        let archive = "/usr/lib/gcc/x86_64-linux-gnu/13/libgcc_eh.a";
+        let got = super::with_host_libgcc_eh(&args, Some(archive));
+        let got: Vec<&str> = got.iter().map(String::as_str).collect();
+        assert_eq!(
+            got,
+            ["-Bdynamic", "-lz", "-lc", "-lpthread", archive]
+        );
+    }
+
+    #[test]
     fn las_bibliotecas_del_host_van_estaticas() {
         let args = [
             "-Bstatic".to_string(),
@@ -749,5 +875,44 @@ mod tests {
                 "-lc",
             ]
         );
+    }
+
+    #[test]
+    fn cargo_recibe_directorio_antes_de_lz() {
+        let args = [
+            "-Bdynamic".to_string(),
+            "-lz".to_string(),
+            "-lc".to_string(),
+        ];
+        let got = super::with_lib_dir_before(&args, "-lz", Some("/usr/lib/x86_64-linux-gnu"));
+        let got: Vec<&str> = got.iter().map(String::as_str).collect();
+        assert_eq!(
+            got,
+            ["-Bdynamic", "-L", "/usr/lib/x86_64-linux-gnu", "-lz", "-lc"]
+        );
+    }
+
+    #[test]
+    fn sin_stdcxx_las_bibliotecas_del_host_van_estaticas() {
+        let args = [
+            "-Bdynamic".to_string(),
+            "-lz".to_string(),
+            "-lc".to_string(),
+        ];
+        let got = super::with_static_host_libs(&args);
+        let got: Vec<&str> = got.iter().map(String::as_str).collect();
+        assert_eq!(got, ["-Bdynamic", "-Bstatic", "-lz", "-lc"]);
+    }
+
+    #[test]
+    fn libssh2_arrastra_openssl() {
+        let args = [
+            "liblibssh2_sys-deadbeef.rlib".to_string(),
+            "-o".to_string(),
+            "cargo".to_string(),
+        ];
+        let got = super::with_openssl_libs(&args);
+        assert!(got.iter().any(|a| a == "-lssl"));
+        assert!(got.iter().any(|a| a == "-lcrypto"));
     }
 }

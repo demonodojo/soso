@@ -2,13 +2,14 @@
 
 **Plan padre:** [SELF_IMPROVEMENT.md](../../SELF_IMPROVEMENT.md).
 **Revisión:** 27 de septiembre de 2026. **Estado:** en curso, sin cierre del circuito.
-**Catálogo:** 79 fichas: 61 completadas, 0 bloqueadas, 0 en curso y 18 pendientes.
+**Catálogo:** 79 fichas: 61 completadas, 0 bloqueadas, 1 en curso y 17 pendientes.
 `done` acredita la entrega de una ficha, no un hito ni ejecución nativa completa.
 
 ## Por dónde empezar
 
-**Siguiente ficha habilitada: [T41 — Cargo offline](T41-cargo-offline.md).**
-No está arrancada. [T40](T40-compilador-nativo.md) está cerrada
+**Ficha en curso: [T41 — Cargo offline](T41-cargo-offline.md)** (arrancada 2026-09-29).
+Siguiente paso: [C-074](native/C-074.md), `socket2` (C-073 hecha:
+`curl-sys` compila). [T40](T40-compilador-nativo.md) está cerrada
 (2026-09-29): en el guest `/tmp/t` imprime `hola-t40` y sale con 7.
 El perfil elegido es `qwen2.5-coder-7b` (GO 10/10, cobertura `completa`,
 27-sep). El 3B queda como candidato anterior, NO-GO 8/10.
@@ -154,7 +155,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T38](T38-toolchain-inventario.md) | Fijar revisiones y dependencias de la toolchain nativa | SI-7 | T01 | Completada (2026-09-25; abrió T67 y T68) |
 | [T39](T39-bootstrap-libstd.md) | Hacer reproducible el bootstrap de libstd para soso | SI-7 | T38, T50, T72, T75 | **Completada** (2026-09-26; build-std, manifiesto, humo guest; native_validation pending) |
 | [T40](T40-compilador-nativo.md) | Descomponer y acreditar el port del compilador | SI-7 | T38, T39 | **Completada** (2026-09-29; `/tmp/t` imprime `hola-t40` y sale con 7; native_validation parcial) |
-| [T41](T41-cargo-offline.md) | Validar Cargo y fuentes reproducibles dentro de soso | SI-7 | T40 | Pendiente |
+| [T41](T41-cargo-offline.md) | Validar Cargo y fuentes reproducibles dentro de soso | SI-7 | T40 | **En curso** (2026-10-01; C-073 hecha; siguiente C-074, `socket2`) |
 | [T42](T42-c-link-imagen.md) | Cerrar C, ensamblador y empaquetado por perfil | SI-7 | T38, T41 | Pendiente |
 | [T43](T43-validacion-actualizacion-nativa.md) | Validar y recuperar candidatos construidos en soso | SI-7 | T31, T37, T42 | Pendiente |
 | [T44](T44-cierre-nativo.md) | Repetir tres mejoras con agente, modelo y build en soso | SI-7 | T29, T43, T51 | Pendiente |
