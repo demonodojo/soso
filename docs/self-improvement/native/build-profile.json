@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "kind": "build_profile",
+  "task": "T42",
+  "revised": "2026-10-03",
+  "note": "Qué hace falta para construir y empaquetar cada perfil sin tocar Linux. `guest` es lo comprobado dentro de soso; `evidence` apunta al sondeo (target/self-improvement/tasks/T42/guest-cargo-build-1.txt) o al código. Una herramienta no es nativa por su nombre: sólo lo que el guest ejecutó.",
+  "profiles": {
+    "qemu-minimo": {
+      "command": "cargo xtask run (kernel + user + mkfs + imagen)",
+      "excludes": [
+        "lxdde",
+        "ports C de drivers (nouveau, iwlwifi)"
+      ],
+      "result_file": "target/self-improvement/tasks/T42/resultado-qemu-minimo.md"
+    },
+    "qemu-lxdde": {
+      "command": "cargo xtask lx-build + build con feature lxdde",
+      "adds": [
+        "C del port (clang -ffreestanding)",
+        "stubs generados",
+        "ar"
+      ],
+      "result_file": "target/self-improvement/tasks/T42/resultado-qemu-lxdde.md"
+    }
+  },
+  "components": [
+    {
+      "id": "rustc",
+      "role": "compilar kernel, user, tools",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "nightly-2026-07-01 (rust-toolchain.toml)",
+      "guest": "partial",
+      "evidence": "guest: rustc 1.100.0-nightly (32d94cc9b 2026-09-07)",
+      "gap": "C-120",
+      "note": "No es el nightly fijado: bootloader 0.11.15 usa el alias x86-softfloat que desapareció el 5-jul-2026."
+    },
+    {
+      "id": "cargo",
+      "role": "orquestar builds, build.rs, -Zbuild-std",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "cargo del nightly",
+      "guest": "partial",
+      "evidence": "T41: workspace de dos crates, build.rs, soso-abi",
+      "gap": "C-113",
+      "note": "Sin proc macros (T80) y sin crates.io vendido."
+    },
+    {
+      "id": "rust-src",
+      "role": "fuentes de core/alloc/compiler_builtins para -Zbuild-std (user/.cargo/config.toml y bootloader)",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "rustup component rust-src",
+      "guest": "absent",
+      "evidence": "ls /lib/rustlib/src: no existe",
+      "gap": "C-113"
+    },
+    {
+      "id": "target-x86_64-unknown-none",
+      "role": "target del kernel; y los JSON x86_64-soso-user y los de bootloader (16 bits, UEFI)",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "built-in + build-std",
+      "guest": "absent",
+      "evidence": "rustc --target x86_64-unknown-none: can't find crate for `core`",
+      "gap": "C-113"
+    },
+    {
+      "id": "proc-macros",
+      "role": "zerocopy-derive (sosofs), serde_derive",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "dylib cargado por rustc",
+      "guest": "absent",
+      "evidence": "T41: dropping unsupported crate type `proc-macro`",
+      "gap": "T80",
+      "note": "Bloquea compilar sosofs, y con él kernel y mkfs-soso, dentro del guest."
+    },
+    {
+      "id": "linker",
+      "role": "enlazar kernel (-T, direcciones altas), user (-Tlink.ld a 0x400000), tools",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "rust-lld (en el sysroot) / wild",
+      "guest": "partial",
+      "evidence": "guest-cargo-build-3.txt: enlaza un no_std de 2 objetos + core (hola, exit 42); -T se ignora; sin direcciones altas ni PT_LOAD por permisos (kernel)",
+      "gap": "C-114"
+    },
+    {
+      "id": "c-compiler",
+      "role": "ring (soso-http), user/soso-agent-probe/c/ajeno.c, y el C de los ports lxdde",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "clang 18 (LX_CC), cc crate",
+      "guest": "absent",
+      "evidence": "cc / clang: no existe",
+      "gap": "C-115"
+    },
+    {
+      "id": "assembler",
+      "role": "ring: .S/.asm de aes, curve25519, sha; objetos asm de ports",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "clang -c (ensamblador integrado)",
+      "guest": "absent",
+      "evidence": "as / sosoas: no existe; tools/sosoas sólo transcribe `.byte` en hex (411 líneas)",
+      "gap": "C-116"
+    },
+    {
+      "id": "objcopy",
+      "role": "aplanar las etapas BIOS de bootloader (build.rs de bootloader 0.11 con llvm-tools)",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "llvm-objcopy (componente llvm-tools-preview)",
+      "guest": "absent",
+      "evidence": "no hay en el guest",
+      "gap": "C-117"
+    },
+    {
+      "id": "ar",
+      "role": "agrupar objetos C del port (lx-build) y librerías estáticas de build.rs",
+      "profiles": [
+        "qemu-lxdde"
+      ],
+      "host": "ar",
+      "guest": "absent",
+      "evidence": "no hay en el guest",
+      "gap": "C-115"
+    },
+    {
+      "id": "mkfs",
+      "role": "mkfs-soso, mkfs-sosomfs, mkmodel-soso: rootfs y modelos",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "binarios Rust del workspace (cargo run)",
+      "guest": "absent",
+      "evidence": "no están en /bin",
+      "gap": "C-118",
+      "note": "Dependen de proc macros (T80) por zerocopy."
+    },
+    {
+      "id": "image",
+      "role": "imagen arrancable: bootloader::DiskImageBuilder, GPT, ESP",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "xtask (Rust) + sgdisk/mkfs.vfat/dd en los paquetes USB",
+      "guest": "absent",
+      "evidence": "xtask/src/main.rs:630 build_image; los paquetes usan sgdisk, losetup, mkfs.vfat",
+      "gap": "C-118",
+      "note": "`gptdisk` y `espfat-core` ya son Rust portable; faltan sgdisk/mkfs.vfat sólo en el camino USB."
+    },
+    {
+      "id": "qemu",
+      "role": "destino de prueba, no herramienta de build",
+      "profiles": [
+        "qemu-minimo",
+        "qemu-lxdde"
+      ],
+      "host": "qemu-system-x86_64",
+      "guest": "not_applicable",
+      "evidence": "es el destino independiente que exige la ficha"
+    }
+  ]
+}

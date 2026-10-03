@@ -1679,10 +1679,11 @@
       "title": "Cerrar C, ensamblador y empaquetado por perfil",
       "milestone": "SI-7",
       "kind": "Especificación e integración por componente",
-      "status": "pending",
+      "status": "in_progress",
       "depends_on": [
         "T38",
-        "T41"
+        "T41",
+        "T80"
       ],
       "entry_conditions": [
         "Cada herramienta ausente se implementa mediante C-xxx antes del build de perfil."
@@ -1700,6 +1701,19 @@
         "requires": [],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-10-03T07:00:00+02:00",
+        "base": "14412d50c58514ab033144154584926685604ba1 + diff HEAD sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "summary": "docs/self-improvement/seguimiento/T42.md",
+        "evidence": [
+          "docs/self-improvement/native/build-profile.json",
+          "target/self-improvement/tasks/T42/guest-cargo-build-1.txt",
+          "target/self-improvement/tasks/T42/guest-cargo-build-3.txt",
+          "tests/self-improvement/native/link/"
+        ],
+        "blocker": "Pasos 4–5 (mkfs e imagen en el guest) necesitan proc macros (T80: zerocopy-derive) y un compilador de C (C-115) para ring y los ports.",
+        "next_step": "T80 (desbloquea compilar sosofs/kernel/mkfs en el guest). En paralelo, C-117 (objcopy) y C-116 (ensamblador) no dependen de T80."
       }
     },
     {
