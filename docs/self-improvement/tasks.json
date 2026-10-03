@@ -1622,7 +1622,7 @@
       "title": "Validar Cargo y fuentes reproducibles dentro de soso",
       "milestone": "SI-7",
       "kind": "Integración condicionada",
-      "status": "in_progress",
+      "status": "done",
       "depends_on": [
         "T40"
       ],
@@ -1638,35 +1638,39 @@
         "docs/SELF-HOSTING.md"
       ],
       "native_validation": {
-        "status": "pending",
-        "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "status": "partial",
+        "requires": [
+          "T80",
+          "T42"
+        ],
+        "evidence": [
+          "target/self-improvement/tasks/T41/resultado.md",
+          "target/self-improvement/tasks/T41/guest-cargo-version-8.txt",
+          "target/self-improvement/tasks/T41/guest-cargo-build-43.txt",
+          "target/self-improvement/tasks/T41/guest-cargo-build-61.txt",
+          "target/self-improvement/tasks/T41/guest-cargo-build-62.txt",
+          "target/self-improvement/tasks/T41/xtask-test-1.txt"
+        ],
+        "note": "cargo -V, workspace de dos crates, build.rs, reconstrucción tras cambio, error con exit no cero y soso-abi se ejecutan en el guest. Cargo y rustc se construyen en Linux (T42/T51) y no hay proc macros (T80)."
       },
       "tracking": {
-        "updated_at": "2026-10-01T11:45:00+02:00",
-        "base": "7d66dfe376a44caf7806183306bfe90bd0a10d32 + diff HEAD sha256:1b46aa4b0fa6d5e57dbee5c0fdeac7d82f2fb57d03901dd1b6dbb783daa0b73d",
+        "updated_at": "2026-10-02T21:30:00+02:00",
+        "base": "8acf18c5057d5b1d53c34633384c9f7f8c036fff + diff HEAD sha256:5a8014c059ccb1be1ec91fb202f5db5dd2d625376884186cd0dadb479e138cdc",
         "summary": "docs/self-improvement/seguimiento/T41.md",
         "evidence": [
-          "target/self-improvement/tasks/T41/submodule-cargo-1.txt",
-          "target/self-improvement/tasks/T41/check-cargo-1.txt",
-          "target/self-improvement/tasks/T41/build-cargo-1.txt",
-          "target/self-improvement/tasks/T41/build-cargo-4.txt",
-          "target/self-improvement/tasks/T41/build-cargo-5.txt",
-          "target/self-improvement/tasks/T41/build-cargo-7.txt",
-          "target/self-improvement/tasks/T41/build-cargo-8.txt",
-          "target/self-improvement/tasks/T41/build-cargo-9.txt",
-          "target/self-improvement/tasks/T41/build-cargo-10.txt",
-          "config/rust-soso/patch-getrandom-registry.sh",
-          "config/rust-soso/patch-curl-sys-soso.py",
-          "config/rust-soso/patch-libc-soso.py",
-          "config/rust-soso/vendor/libc/soso.rs",
-          "config/rust-soso/vendor/gix-config-value/src/path.rs",
-          "config/rust-soso/vendor/gix-sec/src/identity.rs",
-          "config/rust-soso/vendor/filetime/src/soso.rs"
+          "docs/self-improvement/seguimiento/T41.md",
+          "target/self-improvement/tasks/T41/resultado.md",
+          "target/self-improvement/tasks/T41/guest-cargo-version-8.txt",
+          "target/self-improvement/tasks/T41/guest-cargo-build-43.txt",
+          "target/self-improvement/tasks/T41/guest-cargo-build-61.txt",
+          "target/self-improvement/tasks/T41/guest-cargo-build-62.txt",
+          "target/self-improvement/tasks/T41/xtask-test-1.txt",
+          "tests/self-improvement/native/cargo/ws2",
+          "tests/self-improvement/native/cargo/ws3",
+          "tests/self-improvement/native/cargo/real/preparar.sh"
         ],
         "blocker": null,
-        "next_step": "C-074 (docs/self-improvement/native/C-074.md): socket2 en soso. No implementar otra C en la misma sesión."
+        "next_step": "Cerrada. Siguiente habilitada: T42 (T38 y T41 hechas). Proc macros: T80."
       }
     },
     {
@@ -3127,6 +3131,42 @@
         ],
         "blocker": null,
         "next_step": null
+      }
+    },
+    {
+      "id": "T80",
+      "file": "T80-proc-macros.md",
+      "title": "Proc macros y dylib en el guest (dlopen)",
+      "milestone": "SI-7",
+      "kind": "Integración condicionada",
+      "status": "pending",
+      "depends_on": [
+        "T41"
+      ],
+      "entry_conditions": [
+        "Cargo y rustc corren en el guest (T40, T41); `dropping unsupported crate type proc-macro` en `guest-cargo-build-*.txt`."
+      ],
+      "contract_sections": "C5–C6",
+      "context": [
+        "docs/self-improvement/T41-cargo-offline.md",
+        "docs/self-improvement/native/C-111.md",
+        "config/rust-soso/README.md"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [
+          "T41"
+        ],
+        "evidence": [],
+        "note": "Sin evidencia: hoy rustc descarta el crate-type proc-macro."
+      },
+      "tracking": {
+        "updated_at": "2026-10-02T21:30:00+02:00",
+        "base": "8acf18c5057d5b1d53c34633384c9f7f8c036fff + diff HEAD sha256:5a8014c059ccb1be1ec91fb202f5db5dd2d625376884186cd0dadb479e138cdc",
+        "summary": null,
+        "evidence": [],
+        "blocker": null,
+        "next_step": "Decidir ruta (cargar el proc macro como dylib con un `dlopen` propio, o enlazarlo estático en rustc) y abrir las C-xxx."
       }
     }
   ],

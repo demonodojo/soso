@@ -45,6 +45,12 @@ const STT_TLS: u8 = 6;
 
 const R_X86_64_64: u32 = 1;
 const R_X86_64_PC32: u32 = 2;
+// GOT: la dirección del símbolo va a un hueco de la GOT y la instrucción lo
+// lee con un desplazamiento relativo. `GOTPCRELX` / `REX_GOTPCRELX` son la misma
+// reubicación con permiso para relajarla; aquí no se relaja.
+const R_X86_64_GOTPCREL: u32 = 9;
+const R_X86_64_GOTPCRELX: u32 = 41;
+const R_X86_64_REX_GOTPCRELX: u32 = 42;
 const R_X86_64_PLT32: u32 = 4;
 const R_X86_64_32: u32 = 10;
 const R_X86_64_32S: u32 = 11;
@@ -540,12 +546,19 @@ fn seccion_sym(
     seccion_def(objs, def)
 }
 
+fn es_got(typ: u32) -> bool {
+    matches!(
+        typ,
+        R_X86_64_GOTTPOFF | R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX
+    )
+}
+
 fn contar_got(objs: &[Obj]) -> usize {
     objs.iter()
         .flat_map(|o| o.secs.iter())
         .filter(|s| s.keep)
         .flat_map(|s| s.relocs.iter())
-        .filter(|r| r.typ == R_X86_64_GOTTPOFF)
+        .filter(|r| es_got(r.typ))
         .count()
 }
 
@@ -744,6 +757,16 @@ fn aplicar(
                         got_addr += 8;
                         let tp = (r.va as i64).wrapping_sub(tcb as i64);
                         write_u64(image, (slot - BASE) as usize, tp as u64)?;
+                        let v = (slot as i64).wrapping_add(rel.addend).wrapping_sub(p as i64);
+                        write_i32(image, at, v)?;
+                    }
+                    R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX => {
+                        if got_addr == 0 {
+                            return Err(String::from("GOTPCREL sin GOT"));
+                        }
+                        let slot = got_addr;
+                        got_addr += 8;
+                        write_u64(image, (slot - BASE) as usize, r.va)?;
                         let v = (slot as i64).wrapping_add(rel.addend).wrapping_sub(p as i64);
                         write_i32(image, at, v)?;
                     }

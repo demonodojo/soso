@@ -17,7 +17,7 @@ READ2_MOD_NEW = f"""{UNIX_NOT_SOSO}
 mod imp {{
     use libc::{{F_GETFL, F_SETFL, O_NONBLOCK, c_int, fcntl}};"""
 
-READ2_SOSO = f"""
+READ2_SOSO_V1 = f"""
 // {MARKER}: pipes sin poll/fcntl en soso
 #[cfg(target_os = "soso")]
 mod imp {{
@@ -35,6 +35,52 @@ mod imp {{
         out_pipe.read_to_end(&mut out)?;
         data(true, &mut out, true);
         err_pipe.read_to_end(&mut err)?;
+        data(false, &mut err, true);
+        Ok(())
+    }}
+}}
+"""
+
+# C-110: sin poll/fcntl no se puede esperar a las dos tuberías a la vez, y leer
+# stdout hasta EOF mientras rustc llena stderr interbloquea a los dos (rustc
+# duerme en la tubería llena, cargo en la de stdout). stderr se drena en un
+# hilo; `data` se llama desde el hilo que llama, con todo lo recibido.
+READ2_SOSO = f"""
+// {MARKER}: pipes sin poll/fcntl en soso (C-110: stderr en un hilo)
+#[cfg(target_os = "soso")]
+mod imp {{
+    use std::io;
+    use std::io::prelude::*;
+    use std::process::{{ChildStderr, ChildStdout}};
+
+    pub fn read2(
+        mut out_pipe: ChildStdout,
+        mut err_pipe: ChildStderr,
+        data: &mut dyn FnMut(bool, &mut Vec<u8>, bool),
+    ) -> io::Result<()> {{
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let lector = std::thread::spawn(move || {{
+            let mut buf = [0u8; 8192];
+            loop {{
+                match err_pipe.read(&mut buf) {{
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {{
+                        if tx.send(buf[..n].to_vec()).is_err() {{
+                            break;
+                        }}
+                    }}
+                }}
+            }}
+        }});
+        let mut out = Vec::new();
+        let leido = out_pipe.read_to_end(&mut out);
+        let _ = lector.join();
+        let mut err = Vec::new();
+        for trozo in rx.try_iter() {{
+            err.extend_from_slice(&trozo);
+        }}
+        leido?;
+        data(true, &mut out, true);
         data(false, &mut err, true);
         Ok(())
     }}
@@ -208,7 +254,9 @@ def patch_file(path: Path) -> bool:
     name = path.name
 
     if name == "read2.rs":
-        if READ2_SOSO.strip() not in text:
+        if READ2_SOSO_V1.strip() in text:
+            text = text.replace(READ2_SOSO_V1.strip(), READ2_SOSO.strip(), 1)
+        elif READ2_SOSO.strip() not in text:
             if READ2_MOD_OLD in text:
                 text = text.replace(READ2_MOD_OLD, READ2_MOD_NEW, 1)
             if "#[cfg(windows)]" in text and MARKER not in text:

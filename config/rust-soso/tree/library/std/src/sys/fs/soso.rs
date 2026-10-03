@@ -25,6 +25,7 @@ pub struct File {
 pub struct FileAttr {
     size: u64,
     file_type: u8,
+    mtime: u64,
 }
 
 pub struct ReadDir {
@@ -79,16 +80,18 @@ impl FileAttr {
         FileType(self.file_type)
     }
 
+    // C-108: sosofs sólo guarda la fecha de escritura, en segundos. Cargo
+    // compara estas fechas para decidir si recompila.
     pub fn modified(&self) -> io::Result<SystemTime> {
-        unsupported()
+        Ok(SystemTime::from_unix_secs(self.mtime))
     }
 
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        unsupported()
+        self.modified()
     }
 
     pub fn created(&self) -> io::Result<SystemTime> {
-        unsupported()
+        self.modified()
     }
 }
 
@@ -294,39 +297,42 @@ impl File {
         if rc < 0 {
             return Err(io::Error::from_raw_os_error((-rc) as i32));
         }
-        Ok(FileAttr { size: st.size, file_type: st.file_type })
+        Ok(FileAttr { size: st.size, file_type: st.file_type, mtime: st.mtime })
     }
 
     pub fn fsync(&self) -> io::Result<()> {
-        unsupported()
+        map_syscall(unsafe { soso_rt::syscall1(soso_rt::SYS_FSYNC, self.fd) }).map(|_| ())
     }
 
     pub fn datasync(&self) -> io::Result<()> {
-        unsupported()
+        self.fsync()
     }
 
+    // C-102: cargo toma `flock` sobre `Cargo.lock`, `.package-cache` y el
+    // directorio de build. soso no tiene `flock`; con un solo usuario y sin
+    // otro cargo concurrente, el bloqueo consultivo se concede siempre.
     pub fn lock(&self) -> io::Result<()> {
-        unsupported()
+        Ok(())
     }
 
     pub fn lock_shared(&self) -> io::Result<()> {
-        unsupported()
+        Ok(())
     }
 
     pub fn try_lock(&self) -> Result<(), TryLockError> {
-        Err(TryLockError::Error(crate::sys::unsupported_err()))
+        Ok(())
     }
 
     pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
-        Err(TryLockError::Error(crate::sys::unsupported_err()))
+        Ok(())
     }
 
     pub fn unlock(&self) -> io::Result<()> {
-        unsupported()
+        Ok(())
     }
 
-    pub fn truncate(&self, _size: u64) -> io::Result<()> {
-        unsupported()
+    pub fn truncate(&self, size: u64) -> io::Result<()> {
+        map_syscall(unsafe { soso_rt::syscall3(soso_rt::SYS_FTRUNCATE, self.fd, size, 0) }).map(|_| ())
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -508,8 +514,22 @@ pub fn unlink(p: &Path) -> io::Result<()> {
     }
 }
 
-pub fn rename(_old: &Path, _new: &Path) -> io::Result<()> {
-    unsupported()
+pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
+    let (o, n) = (old.as_os_str().as_bytes(), new.as_os_str().as_bytes());
+    if o.is_empty() || n.is_empty() {
+        return Err(io::Error::from_raw_os_error(soso_rt::EINVAL as i32));
+    }
+    // SAFETY: los caminos viven en esta llamada; el kernel los copia.
+    map_syscall(unsafe {
+        soso_rt::syscall4(
+            soso_rt::SYS_RENAME,
+            o.as_ptr().expose_provenance() as u64,
+            o.len() as u64,
+            n.as_ptr().expose_provenance() as u64,
+            n.len() as u64,
+        )
+    })
+    .map(|_| ())
 }
 
 pub fn set_perm(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
@@ -528,12 +548,14 @@ pub fn set_times_nofollow(_p: &Path, _times: FileTimes) -> io::Result<()> {
     unsupported()
 }
 
-pub fn rmdir(_p: &Path) -> io::Result<()> {
-    unsupported()
+// C-107: `SYS_UNLINK` también borra directorios vacíos (sosofs devuelve
+// `DirNotEmpty` si no lo están).
+pub fn rmdir(p: &Path) -> io::Result<()> {
+    unlink(p)
 }
 
-pub fn remove_dir_all(_path: &Path) -> io::Result<()> {
-    unsupported()
+pub fn remove_dir_all(path: &Path) -> io::Result<()> {
+    crate::sys::fs::common::remove_dir_all(path)
 }
 
 pub fn exists(path: &Path) -> io::Result<bool> {
@@ -575,15 +597,30 @@ pub fn stat(p: &Path) -> io::Result<FileAttr> {
     if rc < 0 {
         return Err(io::Error::from_raw_os_error((-rc) as i32));
     }
-    Ok(FileAttr { size: st.size, file_type: st.file_type })
+    Ok(FileAttr { size: st.size, file_type: st.file_type, mtime: st.mtime })
 }
 
 pub fn lstat(p: &Path) -> io::Result<FileAttr> {
     stat(p)
 }
 
-pub fn canonicalize(_p: &Path) -> io::Result<PathBuf> {
-    unsupported()
+// C-108: sin enlaces simbólicos, canonicalizar es hacer absoluta la ruta y
+// resolver `.` y `..` por texto; la ruta tiene que existir.
+pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
+    use crate::path::Component;
+    let absoluta = if p.is_absolute() { p.to_path_buf() } else { crate::env::current_dir()?.join(p) };
+    let mut salida = PathBuf::from("/");
+    for c in absoluta.components() {
+        match c {
+            Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                salida.pop();
+            }
+            Component::Normal(n) => salida.push(n),
+        }
+    }
+    stat(&salida)?;
+    Ok(salida)
 }
 
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {

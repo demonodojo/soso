@@ -1,6 +1,6 @@
 # T41 — Validar Cargo y fuentes reproducibles dentro de soso
 
-**Hito:** SI-7 · **Tipo:** Integración condicionada · **Estado:** en curso (2026-10-01). C-073 hecha; siguiente C-074 (`socket2`). Ver [seguimiento/T41.md](seguimiento/T41.md).
+**Hito:** SI-7 · **Tipo:** Integración condicionada · **Estado:** **hecha** (2026-10-02). Cargo compila en el guest un workspace de dos crates, uno con `build.rs`, y `soso-abi`. Faltan proc macros ([T80](T80-proc-macros.md)). Ver [seguimiento/T41.md](seguimiento/T41.md) y `target/self-improvement/tasks/T41/resultado.md`.
 
 **Dependencias:** [T40](T40-compilador-nativo.md)
 
@@ -46,9 +46,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados (C-073 … C-112; fixtures en `tests/self-improvement/native/cargo/`).
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6 (`guest-cargo-*`, `xtask-test-1.txt`).
+- [x] Resultado entregado con límites y dependencias restantes explícitos (`resultado.md`: proc macros → T80; cargo/rustc construidos en Linux → T42/T51).
 
 Si falta dlopen/proc macros, crear ficha específica; no preexpandir en Linux y contabilizar la campaña como completamente nativa.
 

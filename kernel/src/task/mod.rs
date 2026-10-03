@@ -19,7 +19,7 @@ pub mod pipe;
 pub mod syscall;
 
 use crate::arch::gdt;
-use addrspace::{AddrSpace, STACK_SIZE, STACK_TOP};
+use addrspace::{AddrSpace, STACK_MAX, STACK_SIZE, STACK_TOP};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -30,7 +30,7 @@ use x86_64::structures::paging::{FrameAllocator, FrameDeallocator};
 
 /// Ticks de PIT (100 Hz) por rodaja de tiempo: 20 ms.
 const TIMESLICE_TICKS: u32 = 2;
-pub const MAX_FDS: usize = 16;
+pub const MAX_FDS: usize = 256;
 
 // ---- estado ----
 
@@ -627,6 +627,25 @@ fn mmap_fault_fail(addr: u64, is_write: bool, reason: &str) {
     );
 }
 
+/// Vuelca tres palabras de la pila de usuario, si están mapeadas.
+pub fn dump_user_stack(rsp: u64) {
+    if rsp % 8 != 0 || current_pid() == 0 {
+        return;
+    }
+    let mut w = [0u64; 3];
+    let ok = with_current(|p| {
+        let space = p.space.as_ref().unwrap();
+        let mut buf = [0u8; 24];
+        space.read(rsp, &mut buf).map(|_| buf)
+    });
+    if let Some(buf) = ok {
+        for (i, c) in buf.chunks_exact(8).enumerate() {
+            w[i] = u64::from_le_bytes(c.try_into().unwrap());
+        }
+        crate::println!("task: [rsp]={:#x} [rsp+8]={:#x} [rsp+16]={:#x}", w[0], w[1], w[2]);
+    }
+}
+
 /// Intenta resolver un page fault de usuario en una región mmap.
 ///
 /// Si la región respalda un fichero y el fault cae en un tramo de 2 MiB
@@ -640,6 +659,10 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
     }
     with_current(|p| {
         let space = p.space.as_ref().unwrap().clone();
+        // Crecimiento de la pila principal: debajo de los 64 KiB iniciales.
+        if addr < STACK_TOP - STACK_SIZE && addr >= STACK_TOP - STACK_MAX {
+            return space.ensure_mapped(addr & !0xfff).is_some();
+        }
         let region = match space.find_mmap_region(addr) {
             Some(r) => r,
             None => {
@@ -1074,7 +1097,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
     if parent == 0 {
         return Err(-abi::EINVAL);
     }
-    let (space, console, cwd, brk, brk_min, name, pgid, sid, env, tls_base) = with_current(|p| {
+    let (space, console, cwd, brk, brk_min, name, pgid, sid, env, tls_base, fds) = with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::ENOMEM)?.clone();
         Ok::<_, i64>((
             space,
@@ -1092,6 +1115,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
             // entrara en cualquier función del C de `ring`, y el hilo principal
             // no, lo que parece cualquier cosa menos un problema de TLS.
             p.tls_base,
+            syscall::fds_para_hilo(&p.fds),
         ))
     })?;
     let tid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
@@ -1113,12 +1137,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
         state: State::Runnable,
         ctx,
         space: Some(space),
-        fds: vec![
-            Some(Fd::Tty),
-            Some(Fd::Tty),
-            Some(Fd::Tty),
-            Some(Fd::Log),
-        ],
+        fds,
         brk,
         brk_min,
         console,

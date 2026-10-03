@@ -241,6 +241,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_MKDIR => sys_mkdir(a1, a2),
         abi::SYS_UNLINK => sys_unlink(a1, a2),
         abi::SYS_FLOCK => sys_flock(a1, a2),
+        abi::SYS_FTRUNCATE => sys_ftruncate(a1, a2),
         abi::SYS_SPAWN => sys_spawn(a1, a2, a3, a4),
         abi::SYS_WAIT => sys_wait(f),
         abi::SYS_SBRK => sys_sbrk(a1 as i64),
@@ -485,6 +486,11 @@ fn user_range_ok_bulk(ptr: u64, len: u64, need_write: bool) -> bool {
 }
 
 pub(crate) fn user_slice(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
+    // Un `ptr` nulo con `len == 0` es legítimo (`Vec` vacío en C, `&[]` en
+    // Rust) y `from_raw_parts` aborta el kernel con un puntero nulo.
+    if len == 0 {
+        return Ok(&[]);
+    }
     if !user_range_ok(ptr, len, false) {
         return Err(-abi::EFAULT);
     }
@@ -492,6 +498,9 @@ pub(crate) fn user_slice(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
 }
 
 pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<&'static mut [u8], i64> {
+    if len == 0 {
+        return Ok(&mut []);
+    }
     if !user_range_ok(ptr, len, true) {
         return Err(-abi::EFAULT);
     }
@@ -1213,6 +1222,22 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
                 super::fcache::abrir(ino, dir, &name, || data);
                 Fd::WriteBuf { inode: ino, dir, name, pos, protegida }
             }
+        } else if !exists && flags & abi::O_APPEND == 0 {
+            // Fichero nuevo: va en la caché (`WriteBuf`), con acceso aleatorio.
+            // Con `StreamWrite`, que sólo añade, `seek` + `write` escribían al
+            // final: rustc rellena la posición de la raíz del `.rmeta` yendo
+            // al byte 8, y el fichero salía con ese campo a cero y 8 bytes de
+            // más («corrupt metadata»). Si crece por encima de 16 MiB,
+            // `convert_writebuf_to_stream` lo pasa a streaming.
+            let ino = match reservado {
+                Some(ino) => ino,
+                None => {
+                    let mtime = crate::time::wall_secs();
+                    with_vfs(|| crate::vfs::create_file(dir, &name, &[], mtime))?
+                }
+            };
+            super::fcache::abrir(ino, dir, &name, Vec::new);
+            Fd::WriteBuf { inode: ino, dir, name, pos: 0, protegida }
         } else {
             Fd::StreamWrite {
                 dir,
@@ -1480,8 +1505,10 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
 }
 
 fn read_spawn_env(envp_ptr: u64, envp_count: u64) -> Result<alloc::string::String, i64> {
-    const MAX_ENVP: u64 = 256;
-    const MAX_ENV_BYTES: u64 = 4096;
+    // Cargo pasa a un `build.rs` unos cientos de variables (`CARGO_*`, cfg,
+    // features): 4 KiB no alcanzaban.
+    const MAX_ENVP: u64 = 1024;
+    const MAX_ENV_BYTES: u64 = 64 * 1024;
     if envp_ptr == 0 || envp_count == 0 {
         return Ok(alloc::string::String::new());
     }
@@ -2755,6 +2782,15 @@ fn sys_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64) -> Result<
     let (old_dir, old_name) = resolve_parent(&old)?;
     let (new_dir, new_name) = resolve_parent(&new)?;
     let mtime = crate::time::wall_secs();
+    // POSIX: `rename` sobre un fichero existente lo reemplaza. rustc y cargo
+    // escriben a un temporal y lo renombran encima del anterior al reconstruir
+    // («failed to write ... file exists»). Un directorio de destino no se toca.
+    if let Ok(destino) = with_vfs(|| crate::vfs::lookup(new_dir, &new_name)) {
+        let st = with_vfs(|| crate::vfs::stat_inode(destino))?;
+        if st.file_type == sosofs::layout::FT_FILE && (old_dir, old_name.as_str()) != (new_dir, new_name.as_str()) {
+            with_vfs(|| crate::vfs::unlink(new_dir, &new_name))?;
+        }
+    }
     with_vfs(|| crate::vfs::rename(old_dir, &old_name, new_dir, &new_name, mtime))?;
     Ok(0)
 }
@@ -2873,6 +2909,33 @@ fn clone_fd(f: &Fd) -> Fd {
         Fd::Tty => Fd::Tty,
         Fd::Log => Fd::Log,
     }
+}
+
+/// Tabla de fds de un hilo nuevo: una copia de la del proceso que lo crea.
+///
+/// Cada hilo es un `Process` con su propia tabla. Nacía con `[Tty, Tty, Tty,
+/// Log]`, así que un hilo de `rustc` imprimía `--print=...` en la consola
+/// aunque el padre tuviera la salida en una tubería, y no veía las tuberías de
+/// `Command::output`. Los contadores de las tuberías se suben porque el hilo
+/// cierra su copia al salir. Los sockets y las escrituras en streaming se
+/// dejan fuera: cerrarlos desde el hilo cerraría o volcaría los del padre.
+pub fn fds_para_hilo(origen: &[Option<Fd>]) -> Vec<Option<Fd>> {
+    origen
+        .iter()
+        .map(|f| match f {
+            None => None,
+            Some(Fd::Tcp { .. }) | Some(Fd::StreamWrite { .. }) => None,
+            Some(Fd::PipeRead(id)) => {
+                pipe::add_reader(*id);
+                Some(Fd::PipeRead(*id))
+            }
+            Some(Fd::PipeWrite(id)) => {
+                pipe::add_writer(*id);
+                Some(Fd::PipeWrite(*id))
+            }
+            Some(otro) => Some(clone_fd(otro)),
+        })
+        .collect()
 }
 
 /// La exclusión de escritores de la actualización, vista desde userspace.
@@ -3048,6 +3111,22 @@ fn sys_flock(fd: u64, op: u64) -> Result<u64, i64> {
         .map_err(|_| -abi::EAGAIN)
 }
 
+fn sys_ftruncate(fd: u64, len: u64) -> Result<u64, i64> {
+    with_fd(fd, |f| match f {
+        Fd::WriteBuf { inode, .. } | Fd::File { inode, .. } => {
+            super::fcache::truncar(*inode, len as usize).ok_or(-abi::EIO)?;
+            Ok(0)
+        }
+        // Bajo `/var` los ficheros nuevos se escriben en streaming: lo que aún
+        // no se ha vaciado está en `buf`.
+        Fd::StreamWrite { buf, .. } => {
+            buf.resize(len as usize, 0);
+            Ok(0)
+        }
+        _ => Err(-abi::EBADF),
+    })
+}
+
 fn sys_fsync(fd: u64) -> Result<u64, i64> {
     with_fd(fd, |slot| {
         match slot {
@@ -3206,10 +3285,21 @@ fn sys_getenv(key_ptr: u64, key_len: u64, val_ptr: u64, val_len: u64) -> Result<
     if val_len == 0 {
         return Ok(0);
     }
-    let key = user_str(key_ptr, key_len)?;
     if !user_range_ok(val_ptr, val_len, true) {
         return Err(-abi::EFAULT);
     }
+    // Clave vacía: el bloque entero (`CLAVE=VALOR` separados por `\n`). Devuelve
+    // su longitud real aunque no quepa, para que quien llama reintente con un
+    // búfer mayor. std lo usa al arrancar para rellenar `std::env::vars()`.
+    if key_len == 0 {
+        return super::with_current(|p| {
+            let n = p.env.len().min(val_len as usize);
+            let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+            space.write(val_ptr, &p.env.as_bytes()[..n]).ok_or(-abi::EFAULT)?;
+            Ok(p.env.len() as u64)
+        });
+    }
+    let key = user_str(key_ptr, key_len)?;
     super::with_current(|p| {
         for line in p.env.lines() {
             let Some((k, v)) = line.split_once('=') else {

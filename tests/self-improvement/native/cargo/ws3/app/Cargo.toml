@@ -1,0 +1,7 @@
+[package]
+name = "t41app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+t41lib = { path = "../lib" }

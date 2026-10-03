@@ -412,6 +412,10 @@ extern "sysv64" fn kill_shim(motivo: u64, dato: u64) -> u64 {
                 "task: traduce con: addr2line -f -C -e target/x86_64-soso-user/release/<prog> {:#x}",
                 rip.wrapping_sub(0x400000)
             );
+            // [rsp] es la dirección de retorno si el fallo ocurre en la primera
+            // instrucción de una función (rip=0 tras un `call` nulo, TLS sin
+            // base...): sin ella el rip solo dice dónde, no quién llamó.
+            crate::task::dump_user_stack(rsp);
             crate::task::kill_current("page fault")
         }
         1 => {

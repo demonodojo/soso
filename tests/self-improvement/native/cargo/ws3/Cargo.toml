@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["lib", "app"]
+
+# rustc usa flock para el modo incremental y soso no lo tiene en el compilador.
+[profile.dev]
+incremental = false

@@ -1,0 +1,6 @@
+[package]
+name = "rustc-std-workspace-core"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Marcador local: el de crates.io es un crate vacío. soso-abi lo declara opcional (rustc-dep-of-std) y cargo necesita resolverlo aunque esté apagado."

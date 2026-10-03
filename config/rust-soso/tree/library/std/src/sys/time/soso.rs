@@ -49,6 +49,10 @@ impl SystemTime {
 
     pub const MIN: SystemTime = SystemTime(Duration::ZERO);
 
+    pub fn from_unix_secs(secs: u64) -> SystemTime {
+        SystemTime(Duration::from_secs(secs))
+    }
+
     pub fn now() -> SystemTime {
         SystemTime(clock(soso_rt::CLOCK_REALTIME))
     }

@@ -363,6 +363,9 @@ pub const FUTEX_WAKE: u64 = 1;
 /// todas las máquinas instaladas.
 pub const SYS_FLOCK: u64 = 93;
 
+/// `ftruncate(fd, len)`: `File::set_len`. Syscall nuevo (no sube `ABI_VERSION`).
+pub const SYS_FTRUNCATE: u64 = 94;
+
 /// Cerrojo compartido: varios lectores a la vez, ningún escritor.
 pub const LOCK_SH: u64 = 1;
 /// Cerrojo exclusivo: un solo titular.

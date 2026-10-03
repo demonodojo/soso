@@ -175,10 +175,7 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 ## Por dónde (actualizar al cerrar la recomendada)
 
 Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/README.md).
-Revisión del **27-sep-2026**: el perfil elegido es `qwen2.5-coder-7b`, con
-campaña 10×3, cobertura `completa` y **GO 10/10**. El 3B queda como candidato
-anterior (NO-GO 8/10). **T20** está pendiente con esa identidad. La ficha en
-curso ya no es T40: está **cerrada** (2026-09-29; `/tmp/t` imprime `hola-t40` y sale con 7). La siguiente habilitada es **T41**, sin arrancar.
+Revisión del **2-oct-2026**: el perfil elegido es `qwen2.5-coder-7b` (campaña 10×3, cobertura `completa`, **GO 10/10**; el 3B quedó NO-GO 8/10). **T20** está pendiente con esa identidad. **T40 y T41 están cerradas** (2026-10-02: `cargo build --offline` compila en el guest un workspace de dos crates, uno con `build.rs`, y `soso-abi`). La siguiente habilitada es **T42** (T38 y T41 hechas), sin arrancar. Proc macros: **T80**, pendiente.
 
 Trabajo independiente: **T72** está cerrada (26-sep): `soso-alloc` lo usan
 libsoso y soso-rt; la sonda guest `monton` sale 7/7. **T75** está cerrada

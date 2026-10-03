@@ -6,6 +6,15 @@ use crate::io;
 use crate::os::raw::c_char;
 use crate::sys::env;
 
+#[cfg(not(test))]
+mod libc_alloc;
+#[cfg(not(test))]
+mod libc_tls;
+#[cfg(not(test))]
+mod libc_time;
+#[cfg(not(test))]
+mod libc_sys;
+
 pub fn unsupported<T>() -> io::Result<T> {
     Err(unsupported_err())
 }
@@ -23,11 +32,18 @@ pub fn abort_internal() -> ! {
 #[cfg(not(test))]
 pub fn tls_hilo_nuevo() {
     bootstrap::tls_para_hilo();
+    // glibc inicializa las tablas `ctype` por hilo (`start_thread`): un hilo
+    // nuevo las tiene a cero y `isalpha` de LLVM moría en `0x5c`.
+    iniciar_ctype();
 }
 
 pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {
     // Antes de cualquier `Vec` de la PAL: un solo montón, el de `soso-alloc`.
     soso_rt::heap_init();
+    #[cfg(not(test))]
+    iniciar_ctype();
+    #[cfg(not(test))]
+    env::cargar_del_kernel();
     unsafe {
         crate::sys::args::init(argc, argv);
     }
@@ -48,24 +64,36 @@ mod bootstrap {
     /// Bloque TLS mínimo del hilo principal (`%fs:0x28` para stack protector).
     /// glibc lee el tid del hilo en `%fs:0x2d0`. Si ese entero es 0, un
     /// `pthread_rwlock` sin dueño (también 0) devuelve EDEADLK al instante.
+    ///
+    /// El código C de glibc enlazado estáticamente (bin `cargo`) espera además
+    /// que `%fs:0x10` apunte a su `struct pthread`, que empieza en este mismo
+    /// bloque (stdio, `pthread_self`, cancelación): sin él, page fault en
+    /// `0x308` dentro de `__libc_cleanup_push_defer`. El resto va a ceros.
     #[repr(C, align(16))]
     struct Tcb {
         propio: *mut Tcb,
-        _reservado: [u64; 4],
+        _dtv: u64,
+        hilo: *mut Tcb,
+        _reservado: [u64; 2],
         canario: u64,
         _hasta_tid: [u8; 0x2d0 - 0x30],
         tid: u32,
+        _cola: [u8; 0xa00 - 0x2d4],
     }
 
     const _: () = assert!(core::mem::offset_of!(Tcb, canario) == 0x28);
     const _: () = assert!(core::mem::offset_of!(Tcb, tid) == 0x2d0);
+    const _: () = assert!(core::mem::offset_of!(Tcb, hilo) == 0x10);
 
     static mut TCB: Tcb = Tcb {
         propio: ptr::null_mut(),
-        _reservado: [0; 4],
+        _dtv: 0,
+        hilo: ptr::null_mut(),
+        _reservado: [0; 2],
         canario: 0,
         _hasta_tid: [0; 0x2d0 - 0x30],
         tid: 0,
+        _cola: [0; 0xa00 - 0x2d4],
     };
 
     fn tid_hilo() -> u32 {
@@ -95,6 +123,7 @@ mod bootstrap {
         unsafe {
             let p = &raw mut TCB;
             (*p).propio = p;
+            (*p).hilo = p;
             (*p).canario = canario();
             (*p).tid = tid_hilo();
             let _ = soso_rt::syscall1(soso_rt::SYS_SET_TLS, p.expose_provenance() as u64);
@@ -161,6 +190,7 @@ mod bootstrap {
             let tcb = ptr::with_exposed_provenance_mut::<Tcb>(raw as usize);
             ptr::write_bytes(tcb.cast::<u8>(), 0, core::mem::size_of::<Tcb>());
             (*tcb).propio = tcb;
+            (*tcb).hilo = tcb;
             (*tcb).canario = canario();
             (*tcb).tid = tid_hilo();
             let _ = soso_rt::syscall1(soso_rt::SYS_SET_TLS, tcb.expose_provenance() as u64);
@@ -198,6 +228,7 @@ mod bootstrap {
             let tcb = ptr::with_exposed_provenance_mut::<Tcb>((base + tcb_off) as usize);
             ptr::write_bytes(tcb.cast::<u8>(), 0, core::mem::size_of::<Tcb>());
             (*tcb).propio = tcb;
+            (*tcb).hilo = tcb;
             (*tcb).canario = canario();
             (*tcb).tid = tid_hilo();
             let _ = soso_rt::syscall1(soso_rt::SYS_SET_TLS, tcb.expose_provenance() as u64);
@@ -456,6 +487,21 @@ pub unsafe extern "C" fn runtime_entry(
     }
     crate::rt::thread_cleanup();
     soso_rt::exit(code);
+}
+
+/// `__ctype_b_loc` & co. leen unos TLS que rellena `__ctype_init` de glibc en su
+/// arranque, que aquí no corre: tabla nula y page fault en `0xc6` dentro de
+/// `isspace` de libgit2. Sólo existe en los binarios que enlazan `libc.a`.
+#[cfg(not(test))]
+fn iniciar_ctype() {
+    // Un `fn` weak se da por no nulo y LLVM borra la comprobación: `Option`.
+    unsafe extern "C" {
+        #[linkage = "extern_weak"]
+        static __ctype_init: Option<unsafe extern "C" fn()>;
+    }
+    if let Some(init) = unsafe { __ctype_init } {
+        unsafe { init() };
+    }
 }
 
 #[unsafe(no_mangle)]

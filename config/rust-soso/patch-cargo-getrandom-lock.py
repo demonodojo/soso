@@ -29,6 +29,8 @@ def main() -> None:
             r'checksum = "[^"]+"\n'
         )
         repl = rf'\1source = "path+{uri}#getrandom@{ver}"\n'
+        if re.search(rf'name = "getrandom"\nversion = "{re.escape(ver)}"\nsource = "path\+', text):
+            continue  # ya apuntado (el script se puede volver a ejecutar)
         text, n = re.subn(block, repl, text, count=1)
         if n != 1:
             sys.exit(f"getrandom {ver}: expected 1 lock entry, patched {n}")

@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["soso-abi"]
+
+[patch.crates-io]
+rustc-std-workspace-core = { path = "stub-core" }
+
+[profile.dev]
+incremental = false

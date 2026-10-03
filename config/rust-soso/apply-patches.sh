@@ -1680,4 +1680,268 @@ path.write_text(text.replace(old, new, 1))
 PY
 fi
 
+# C-100: `Path::is_absolute` en soso. `sys/path/unix.rs` sólo trata `/x` como
+# absoluta en unix/hermit/wasi/motor; en soso exigía además un prefijo y
+# cargo rechazaba `/var/t41/ws2/Cargo.toml` («is not an absolute path»).
+PATH_UNIX="$RUST/library/std/src/sys/path/unix.rs"
+grep -q 'target_os = "soso"' "$PATH_UNIX" || \
+  sed -i 's/target_os = "wasi", target_os = "motor"))/target_os = "wasi", target_os = "motor", target_os = "soso"))/' "$PATH_UNIX"
+grep -q 'target_os = "soso"' "$PATH_UNIX" || { echo "apply-patches: no encajo is_absolute (C-100)" >&2; exit 1; }
+
+# C-101: tuberías y `Command::output` en soso. `sys/pipe` no tenía soso (cargo
+# captura `rustc -vV` con una tubería y recibía una cadena vacía: «didn't have a
+# line for `host:`»), `spawn` heredaba siempre la tty y `output()` era
+# `unsupported`.
+PIPE_MOD="$RUST/library/std/src/sys/pipe/mod.rs"
+if [[ -f "$PIPE_MOD" ]] && ! grep -q 'target_os = "soso"' "$PIPE_MOD"; then
+  python3 - "$PIPE_MOD" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "    _ => {\n        mod unsupported;"
+new = '    target_os = "soso" => {\n        mod soso;\n        pub use soso::{Pipe, pipe};\n    }\n' + old
+if old not in text:
+    raise SystemExit("apply-patches: no encajo sys/pipe/mod.rs (C-101)")
+path.write_text(text.replace(old, new, 1))
+PY
+fi
+if [[ -f "$PROC_UNSUP" ]] && ! grep -q 'C-101:' "$PROC_UNSUP"; then
+  python3 - "$PROC_UNSUP" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+t = path.read_text()
+
+def sub(old, new):
+    global t
+    if old not in t:
+        raise SystemExit("apply-patches: C-101 no encaja: " + old[:60])
+    t = t.replace(old, new, 1)
+
+sub("    MakePipe,\n    ParentStdout,", "    MakePipe,\n    // C-101: extremo de una tubería ya creada (`From<ChildPipe>`).\n    #[allow(dead_code)]\n    Fd(u64),\n    ParentStdout,")
+sub("            return self.spawn_soso();", "            return self.spawn_soso(_default, _needs_stdin);")
+sub("    fn spawn_soso(&mut self) -> io::Result<(Process, StdioPipes)> {\n        use crate::os::soso::ffi::OsStrExt;\n",
+"""    fn spawn_soso(&mut self, default: Stdio, needs_stdin: bool) -> io::Result<(Process, StdioPipes)> {
+        // C-101: stdio por tubería. Los extremos del hijo se cierran en el
+        // padre tras el spawn; si no, el lector nunca ve EOF.
+        use crate::os::soso::ffi::OsStrExt;
+        let mut hijo: Vec<ChildPipe> = Vec::new();
+        let mut pipes = StdioPipes { stdin: None, stdout: None, stderr: None };
+        let por_defecto_stdin = if needs_stdin { &default } else { &Stdio::Null };
+        let stdin = self.stdin.as_ref().unwrap_or(por_defecto_stdin);
+        let stdout = self.stdout.as_ref().unwrap_or(&default);
+        let stderr = self.stderr.as_ref().unwrap_or(&default);
+        let stdin_fd = match stdin {
+            Stdio::MakePipe => {
+                let (r, w) = crate::sys::pipe::pipe()?;
+                let fd = r.fd();
+                hijo.push(r);
+                pipes.stdin = Some(w);
+                fd
+            }
+            otro => fd_stdio(otro),
+        };
+        let stdout_fd = match stdout {
+            Stdio::MakePipe => {
+                let (r, w) = crate::sys::pipe::pipe()?;
+                let fd = w.fd();
+                hijo.push(w);
+                pipes.stdout = Some(r);
+                fd
+            }
+            otro => fd_stdio(otro),
+        };
+        let stderr_fd = match stderr {
+            Stdio::MakePipe => {
+                let (r, w) = crate::sys::pipe::pipe()?;
+                let fd = w.fd();
+                hijo.push(w);
+                pipes.stderr = Some(r);
+                fd
+            }
+            otro => fd_stdio(otro),
+        };
+""")
+sub("            stdin_fd: soso_rt::FD_INHERIT_TTY,\n            stdout_fd: soso_rt::FD_INHERIT_TTY,\n            stderr_fd: soso_rt::FD_INHERIT_TTY,",
+    "            stdin_fd,\n            stdout_fd,\n            stderr_fd,")
+sub("""        if rc < 0 {
+            Err(io::Error::from_raw_os_error((-rc) as i32))
+        } else {
+            Ok((
+                Process { pid: rc as u64 },
+                StdioPipes { stdin: None, stdout: None, stderr: None },
+            ))
+        }
+    }
+}
+""","""        drop(hijo);
+        if rc < 0 {
+            Err(io::Error::from_raw_os_error((-rc) as i32))
+        } else {
+            Ok((Process { pid: rc as u64 }, pipes))
+        }
+    }
+}
+
+#[cfg(target_os = "soso")]
+fn fd_stdio(s: &Stdio) -> u64 {
+    match s {
+        Stdio::Null => soso_rt::FD_CLOSED,
+        Stdio::Fd(fd) => *fd,
+        Stdio::ParentStdout => 1,
+        Stdio::ParentStderr => 2,
+        _ => soso_rt::FD_INHERIT_TTY,
+    }
+}
+""")
+sub("""pub fn output(_cmd: &mut Command) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    unsupported()
+}""","""pub fn output(cmd: &mut Command) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    // C-101: stdout y stderr se leen a la vez (un hilo) para que un hijo que
+    // llene una tubería no se cuelgue esperando a que se vacíe la otra.
+    #[cfg(target_os = "soso")]
+    {
+        let (mut proc, pipes) = cmd.spawn(Stdio::MakePipe, false)?;
+        drop(pipes.stdin);
+        let mut so = Vec::new();
+        let mut se = Vec::new();
+        crate::thread::scope(|s| {
+            let err = pipes.stderr.map(|p| {
+                s.spawn(move || {
+                    let mut v = Vec::new();
+                    let _ = p.read_to_end(&mut v);
+                    v
+                })
+            });
+            if let Some(p) = pipes.stdout {
+                let _ = p.read_to_end(&mut so);
+            }
+            if let Some(h) = err {
+                se = h.join().unwrap_or_default();
+            }
+        });
+        let status = proc.wait()?;
+        return Ok((status, so, se));
+    }
+    #[cfg(not(target_os = "soso"))]
+    {
+        let _ = cmd;
+        unsupported()
+    }
+}""")
+sub("""    fn from(pipe: ChildPipe) -> Stdio {
+        pipe.diverge()
+    }""","""    fn from(pipe: ChildPipe) -> Stdio {
+        // C-101: marca de este parche.
+        Stdio::Fd(pipe.into_fd())
+    }""")
+path.write_text(t)
+PY
+fi
+
+# C-101b: `Child::wait_with_output` (`read_output`) con tuberías reales.
+if [[ -f "$PROC_UNSUP" ]] && ! grep -q 'C-101b:' "$PROC_UNSUP"; then
+  python3 - "$PROC_UNSUP" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+t = path.read_text()
+old = """    _stderr: &mut Vec<u8>,
+) -> io::Result<()> {
+    match out.diverge() {}
+}"""
+new = """    stderr: &mut Vec<u8>,
+) -> io::Result<()> {
+    // C-101b: un hilo para stderr, como en `output`.
+    #[cfg(target_os = "soso")]
+    {
+        let mut v = Vec::new();
+        crate::thread::scope(|s| {
+            let h = s.spawn(move || {
+                let mut e = Vec::new();
+                let _ = _err.read_to_end(&mut e);
+                e
+            });
+            let _ = out.read_to_end(&mut v);
+            *stderr = h.join().unwrap_or_default();
+        });
+        *_stdout = v;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "soso"))]
+    {
+        match out.diverge() {}
+    }
+}"""
+if old not in t:
+    raise SystemExit("apply-patches: C-101b no encaja")
+path.write_text(t.replace(old, new, 1))
+PY
+fi
+
+# C-105: `available_parallelism` de soso viene de `SYS_NCPU` (sys/thread/soso.rs).
+THREAD_MOD="$RUST/library/std/src/sys/thread/mod.rs"
+if ! grep -q 'soso::{DEFAULT_MIN_STACK_SIZE, Thread, available_parallelism}' "$THREAD_MOD"; then
+  python3 - "$THREAD_MOD" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+t = path.read_text()
+a = "pub use soso::{DEFAULT_MIN_STACK_SIZE, Thread};"
+b = "pub use unsupported::{available_parallelism, current_os_id, set_name, sleep, yield_now};\n    }\n    _ =>"
+if a not in t or b not in t:
+    raise SystemExit("apply-patches: no encajo sys/thread/mod.rs (C-105)")
+t = t.replace(a, "pub use soso::{DEFAULT_MIN_STACK_SIZE, Thread, available_parallelism};", 1)
+t = t.replace(b, "pub use unsupported::{current_os_id, set_name, sleep, yield_now};\n    }\n    _ =>", 1)
+path.write_text(t)
+PY
+fi
+
+# C-111: `Command::env` llega al hijo. `spawn_soso` pasaba `envp_ptr: 0`, así que
+# los scripts de build (`build.rs`) no veían `OUT_DIR` ni los `CARGO_*`.
+if [[ -f "$PROC_UNSUP" ]] && ! grep -q 'C-111:' "$PROC_UNSUP"; then
+  python3 - "$PROC_UNSUP" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+t = path.read_text()
+
+def sub(old, new):
+    global t
+    if old not in t:
+        raise SystemExit("apply-patches: C-111 no encaja: " + old[:60])
+    t = t.replace(old, new, 1)
+
+sub("        let opts = soso_rt::SpawnIo {", """        // C-111: el entorno completo (el actual más los cambios del `Command`);
+        // si no hay cambios se hereda el del padre (`envp_ptr == 0`).
+        let entorno: Vec<Vec<u8>> = match self.env.capture_if_changed() {
+            Some(mapa) => mapa
+                .into_iter()
+                .map(|(k, v)| {
+                    let mut b = k.as_bytes().to_vec();
+                    b.push(b'=');
+                    b.extend_from_slice(v.as_bytes());
+                    b
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut envp_tabla = Vec::with_capacity(entorno.len() * 2);
+        for e in &entorno {
+            envp_tabla.push(e.as_ptr().expose_provenance() as u64);
+            envp_tabla.push(e.len() as u64);
+        }
+        let opts = soso_rt::SpawnIo {""")
+sub("            envp_ptr: 0,\n            envp_count: 0,", """            envp_ptr: if envp_tabla.is_empty() {
+                0
+            } else {
+                envp_tabla.as_ptr().expose_provenance() as u64
+            },
+            envp_count: entorno.len() as u64,""")
+sub("        // C-063: soso arranca el programa con SYS_SPAWN_IO.", "        // C-063: soso arranca el programa con SYS_SPAWN_IO. (C-111: con entorno.)")
+path.write_text(t)
+PY
+fi
+
 echo "apply-patches: OK → $RUST"

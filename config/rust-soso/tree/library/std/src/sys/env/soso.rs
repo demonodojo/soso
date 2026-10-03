@@ -24,6 +24,47 @@ pub unsafe fn init(envp: *const *const u8) {
     ENVP.store(envp as *mut _, Ordering::Relaxed);
 }
 
+/// Rellena el entorno con el bloque que el kernel guarda para este proceso
+/// (`SYS_GETENV` con clave vacía). La ruta de arranque real (`soso_entry_from_kernel`)
+/// no recibe `envp`, y sin esto `std::env::var("PATH")` era siempre `None` y un
+/// `build.rs` no veía `OUT_DIR` ni los `CARGO_*`.
+pub fn cargar_del_kernel() {
+    let mut cap = 16 * 1024usize;
+    let bloque = loop {
+        let mut buf = vec![0u8; cap];
+        let n = unsafe {
+            soso_rt::syscall4(soso_rt::SYS_GETENV, 0, 0, buf.as_mut_ptr().expose_provenance() as u64, cap as u64)
+        };
+        if n <= 0 {
+            return;
+        }
+        let n = n as usize;
+        if n > cap {
+            cap = n;
+            continue;
+        }
+        buf.truncate(n);
+        break buf;
+    };
+    // Cada entrada con su NUL; vive hasta el final del proceso.
+    let mut datos: Vec<u8> = Vec::with_capacity(bloque.len() + 1);
+    let mut inicios: Vec<usize> = Vec::new();
+    for linea in bloque.split(|&b| b == b'\n') {
+        if linea.is_empty() || !linea.contains(&b'=') {
+            continue;
+        }
+        inicios.push(datos.len());
+        datos.extend_from_slice(linea);
+        datos.push(0);
+    }
+    let datos: &'static mut [u8] = Box::leak(datos.into_boxed_slice());
+    let base = datos.as_ptr();
+    let mut tabla: Vec<*const u8> = inicios.iter().map(|&i| unsafe { base.add(i) }).collect();
+    tabla.push(crate::ptr::null());
+    let tabla: &'static mut [*const u8] = Box::leak(tabla.into_boxed_slice());
+    ENVP.store(tabla.as_mut_ptr() as *mut _, Ordering::Relaxed);
+}
+
 fn cada_entrada(mut f: impl FnMut(&[u8])) {
     let envp = ENVP.load(Ordering::Relaxed);
     if envp.is_null() {

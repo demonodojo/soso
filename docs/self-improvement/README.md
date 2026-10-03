@@ -2,15 +2,17 @@
 
 **Plan padre:** [SELF_IMPROVEMENT.md](../../SELF_IMPROVEMENT.md).
 **Revisión:** 27 de septiembre de 2026. **Estado:** en curso, sin cierre del circuito.
-**Catálogo:** 79 fichas: 61 completadas, 0 bloqueadas, 1 en curso y 17 pendientes.
+**Catálogo:** 80 fichas: 62 completadas, 0 bloqueadas, 0 en curso y 18 pendientes.
 `done` acredita la entrega de una ficha, no un hito ni ejecución nativa completa.
 
 ## Por dónde empezar
 
-**Ficha en curso: [T41 — Cargo offline](T41-cargo-offline.md)** (arrancada 2026-09-29).
-Siguiente paso: [C-074](native/C-074.md), `socket2` (C-073 hecha:
-`curl-sys` compila). [T40](T40-compilador-nativo.md) está cerrada
-(2026-09-29): en el guest `/tmp/t` imprime `hola-t40` y sale con 7.
+**Ficha recomendada: [T42 — C, ensamblador y empaquetado por perfil](T42-c-link-imagen.md)**
+(T38 y T41 hechas; sin arrancar). [T41](T41-cargo-offline.md) está cerrada
+(2026-10-02): en el guest `cargo build --offline` compila un workspace de dos
+crates, uno con `build.rs`, y `soso-abi`; faltan proc macros
+([T80](T80-proc-macros.md)). [T40](T40-compilador-nativo.md) está cerrada
+(2026-09-29): `/tmp/t` imprime `hola-t40` y sale con 7.
 El perfil elegido es `qwen2.5-coder-7b` (GO 10/10, cobertura `completa`,
 27-sep). El 3B queda como candidato anterior, NO-GO 8/10.
 [T20](T20-opencode-config.md) está pendiente con esa identidad.
@@ -23,9 +25,9 @@ El perfil elegido es `qwen2.5-coder-7b` (GO 10/10, cobertura `completa`,
 | 4, independiente (host) | [T76](T76-tokenizer-sin-retorno.md): tokenizer en tests | **Hecha** 26-sep: cuatro tests ya no retornan en silencio |
 | 5, independiente (host) | [T77](T77-simd-avx2.md): SIMD en `gemm` | **Hecha** 26-sep: escalares siempre; AVX2 sólo con `RUSTFLAGS +avx2,+fma` |
 | 6, independiente (host) | [T78](T78-entradas-integracion.md): ASR y banco | **Hecha** 26-sep: ASR `ignored`; banco exige `rustc`; `SOSO_REQUIRE_*` |
-| T39 hecha | T40 hecha → T41 → T42 | rustc en el guest imprime `hola-t40` (código 7); falta Cargo y la reconstrucción nativa |
+| T39 hecha | T40 hecha → T41 hecha → T42 | rustc y cargo corren en el guest; falta cerrar C/ensamblador/empaquetado (T42) y la reconstrucción nativa |
 | Sólo con T14 GO | T20 → T21 → T22; luego T25–T29 | Primer parche útil validado antes de campaña de automejora |
-| Tras T39 | T40 hecha → T41 → T42 | T69 hecha: PAL antigua retirada. rustc ya corre en el guest; falta Cargo |
+| Tras T39 | T40 hecha → T41 hecha → T42 | T69 hecha: PAL antigua retirada. rustc y cargo ya corren en el guest |
 
 Son frentes independientes, no una instrucción para lanzar agentes ni varias
 campañas simultáneas. Implementar una ficha por sesión; los puertos del arnés
@@ -44,10 +46,13 @@ son compartidos. T08/T18/T45/T46 ya están terminadas: no recomendarlas otra vez
 - **Coordinador:** T23/T24 y mecanismos T45–T50 están implementados; faltan
   ejecutor, validación, recuperación y campaña. No hay primera mejora aceptada
   ni circuito autónomo acreditado.
-- **Toolchain:** `wild` está instalado; T73 está cerrada. El último log de std
-  acaba con **2 errores del alocador**, rc=1. Son los bloqueos observados,
-  no garantía de que después todo compile. T75 está cerrada: la receta iguala
-  al script en copias de la revisión fijada y la sonda guest del espejo pasó.
+- **Toolchain:** `wild` está instalado; T73 está cerrada. rustc y **cargo** corren
+  en el guest (T40, T41): `cargo build --offline` compila un workspace de dos
+  crates, uno con `build.rs`, y `soso-abi`. Ambos se construyen en Linux con
+  `x.py` (receta en `config/rust-soso/README.md`); sin proc macros ([T80](T80-proc-macros.md))
+  ni compilación incremental. El std de soso (`library/std/src/sys/pal/soso/`)
+  ya exporta `malloc`, claves TLS de pthread, reloj y entropía para el C que
+  cargo arrastra (libgit2, OpenSSL). T75 está cerrada.
 - **Nativo:** T32–T34 inventarían y prueban sustrato; T35 todavía no tiene un
   runtime OpenCode portado. Backlog N-xxx: 7 hechas, 2 decisiones tomadas,
   1 aplazada, 2 pendientes y 1 decisión pendiente. «Decidida» no significa
@@ -155,7 +160,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T38](T38-toolchain-inventario.md) | Fijar revisiones y dependencias de la toolchain nativa | SI-7 | T01 | Completada (2026-09-25; abrió T67 y T68) |
 | [T39](T39-bootstrap-libstd.md) | Hacer reproducible el bootstrap de libstd para soso | SI-7 | T38, T50, T72, T75 | **Completada** (2026-09-26; build-std, manifiesto, humo guest; native_validation pending) |
 | [T40](T40-compilador-nativo.md) | Descomponer y acreditar el port del compilador | SI-7 | T38, T39 | **Completada** (2026-09-29; `/tmp/t` imprime `hola-t40` y sale con 7; native_validation parcial) |
-| [T41](T41-cargo-offline.md) | Validar Cargo y fuentes reproducibles dentro de soso | SI-7 | T40 | **En curso** (2026-10-01; C-073 hecha; siguiente C-074, `socket2`) |
+| [T41](T41-cargo-offline.md) | Validar Cargo y fuentes reproducibles dentro de soso | SI-7 | T40 | Completada (2026-10-02: workspace, `build.rs` y `soso-abi` en el guest; sin proc macros) |
 | [T42](T42-c-link-imagen.md) | Cerrar C, ensamblador y empaquetado por perfil | SI-7 | T38, T41 | Pendiente |
 | [T43](T43-validacion-actualizacion-nativa.md) | Validar y recuperar candidatos construidos en soso | SI-7 | T31, T37, T42 | Pendiente |
 | [T44](T44-cierre-nativo.md) | Repetir tres mejoras con agente, modelo y build en soso | SI-7 | T29, T43, T51 | Pendiente |
@@ -194,6 +199,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T77](T77-simd-avx2.md) | Tests SIMD de matvec sin retorno silencioso | SI-1 | — | Completada (2026-09-26) |
 | [T78](T78-entradas-integracion.md) | Entradas ASR y banco sin ok silencioso | SI-0 | T02, T76 | Completada (2026-09-26) |
 | [T79](T79-relleno-q10.md) | Relleno de Q10 según el contexto del modelo | SI-0 / SI-1 | T14, T74 | Completada (Q10 guest 3/3, 27-sep) |
+| [T80](T80-proc-macros.md) | Proc macros y dylib en el guest | SI-7 | T41 | Pendiente |
 
 ## Condiciones adicionales de entrada
 

@@ -37,6 +37,11 @@ for dst in "$REG"/*/libc-*; do
   python3 "$ROOT/config/rust-soso/patch-libc-soso.py" "$dst" "$VENDOR_LIBC"
 done
 
+for dst in "$REG"/*/jobserver-0.1.*; do
+  [[ -d "$dst" ]] || continue
+  python3 "$ROOT/config/rust-soso/patch-jobserver-soso.py" "$dst"
+done
+
 for dst in "$REG"/*/curl-sys-0.4.90*; do
   [[ -d "$dst" ]] || continue
   python3 "$ROOT/config/rust-soso/patch-curl-sys-soso.py" "$dst"

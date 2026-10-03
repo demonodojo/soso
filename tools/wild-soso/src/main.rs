@@ -316,7 +316,10 @@ fn with_static_host_libs(args: &[String]) -> Vec<String> {
     let want = args.iter().any(|arg| arg == "-lstdc++")
         || args
             .windows(2)
-            .any(|w| w[0] == "-Bdynamic" && matches!(w[1].as_str(), "-lz" | "-lc"));
+            .any(|w| w[0] == "-Bdynamic" && matches!(w[1].as_str(), "-lz" | "-lc"))
+        || (needs_gcc_crt(args)
+            && !args.iter().any(|arg| arg == "-lstdc++")
+            && args.iter().any(|arg| matches!(arg.as_str(), "-lz" | "-lc")));
     if !want {
         return args.to_vec();
     }
@@ -332,6 +335,32 @@ fn with_static_host_libs(args: &[String]) -> Vec<String> {
         }
         out.push(arg.clone());
     }
+    out
+}
+
+/// rustc mete `-Bdynamic` delante de `-lz`/`-lc`; wild no debe quedarse en
+/// modo dinámico para ejecutables que corren en el guest.
+fn without_bdynamic(args: &[String]) -> Vec<String> {
+    if !needs_gcc_crt(args) || args.iter().any(|arg| arg == "-lstdc++") {
+        return args.to_vec();
+    }
+    args.iter()
+        .filter(|arg| *arg != "-Bdynamic")
+        .cloned()
+        .collect()
+}
+
+/// Binarios sin cargador Linux (p. ej. `cargo` en soso): hace falta `--static`
+/// (wild) para no dejar `NEEDED` en libz/libc.
+fn with_static_executable(args: &[String]) -> Vec<String> {
+    if !needs_gcc_crt(args)
+        || args.iter().any(|arg| arg == "-lstdc++")
+        || args.iter().any(|arg| arg == "--static" || arg == "-static")
+    {
+        return args.to_vec();
+    }
+    let mut out = args.to_vec();
+    out.push("--static".to_string());
     out
 }
 
@@ -594,10 +623,12 @@ fn main() -> ExitCode {
     let args = with_crtend(&args, cc_file_path("crtend.o").as_deref());
     // C-090: `-L` del host delante de `-lz`/`-lc`/… cuando rustc no pide `-lstdc++`.
     let args = with_host_lib_search_dirs(&args);
-    // C-026: libstdc++, libm, libz y libc estáticas. El guest no carga .so del host.
-    let args = with_static_host_libs(&args);
     // C-091: OpenSSL para libssh2/libgit2/curl en el bin `cargo` (sin `-lstdc++`).
     let args = with_openssl_libs(&args);
+    let args = without_bdynamic(&args);
+    // C-026: libstdc++, libm, libz y libc estáticas. El guest no carga .so del host.
+    let args = with_static_host_libs(&args);
+    let args = with_static_executable(&args);
     // C-037: write de glibc no puede ser la syscall 1 (read en soso).
     let write_obj = soso_libc_write_obj();
     let args = with_soso_libc_write(&args, write_obj.as_deref());
@@ -902,6 +933,26 @@ mod tests {
         let got = super::with_static_host_libs(&args);
         let got: Vec<&str> = got.iter().map(String::as_str).collect();
         assert_eq!(got, ["-Bdynamic", "-Bstatic", "-lz", "-lc"]);
+    }
+
+    #[test]
+    fn cargo_sin_stdcxx_pide_enlace_estatico() {
+        let args = ["-Bdynamic".to_string(), "-lz".to_string(), "-lc".to_string()];
+        let got = super::with_static_executable(&args);
+        let got: Vec<&str> = got.iter().map(String::as_str).collect();
+        assert_eq!(got, ["-Bdynamic", "-lz", "-lc", "--static"]);
+    }
+
+    #[test]
+    fn cargo_quita_bdynamic() {
+        let args = [
+            "-Bdynamic".to_string(),
+            "-lz".to_string(),
+            "-lc".to_string(),
+        ];
+        let got = super::without_bdynamic(&args);
+        let got: Vec<&str> = got.iter().map(String::as_str).collect();
+        assert_eq!(got, ["-lz", "-lc"]);
     }
 
     #[test]

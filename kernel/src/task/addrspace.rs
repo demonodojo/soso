@@ -28,6 +28,10 @@ pub const BRK_MAX: u64 = 0x6000_0000;
 /// La pila del usuario: [STACK_TOP - STACK_SIZE, STACK_TOP).
 pub const STACK_TOP: u64 = 0x7000_0000;
 pub const STACK_SIZE: u64 = 64 * 1024;
+/// La pila crece por fallo hasta este tope (como los 8 MiB de Linux): los 64 KiB
+/// de arriba se mapean al crear el proceso, el resto bajo demanda. cargo tiene
+/// marcos de varias páginas (`commands::add::cli`) y moría en el primer fallo.
+pub const STACK_MAX: u64 = 8 * 1024 * 1024;
 /// Límite superior de cualquier dirección de usuario válida: toda la
 /// entrada L4[0] (la ventana mmap de modelos llega hasta MMAP_LIMIT).
 pub const USER_MAX: u64 = 0x80_0000_0000;
