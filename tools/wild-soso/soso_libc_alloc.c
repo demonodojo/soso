@@ -33,13 +33,21 @@ static struct free_node *bins[NCLASS];
 static u64 slab_base, slab_off, slab_end;
 static int lock;
 
+/* El kernel de soso no conserva los registros de argumentos al volver del
+ * `syscall` (las envolturas Rust lo declaran con `inlateout(..) => _` y
+ * `clobber_abi("C")`). Aquí se declaran como entrada/salida y se añaden r8 y
+ * r9: con sólo `rcx` y `r11` como clobbers, GCC mantenía `span` en un registro
+ * de argumento a través de `mmap_anon`, y `h->cap = span - ...` guardaba -48.
+ * Con `cap` enorme `realloc` crecía «en sitio» sin límite y desbordaba el
+ * bloque: el page fault de LLVM al final de un mmap (T80, C-126). */
 static long syscall4(long n, long a1, long a2, long a3, long a4) {
     long ret;
+    long d1 = a1, d2 = a2, d3 = a3;
     register long r10 __asm__("r10") = a4;
     __asm__ volatile("syscall"
-                     : "=a"(ret)
-                     : "a"(n), "D"(a1), "S"(a2), "d"(a3), "r"(r10)
-                     : "rcx", "r11", "memory");
+                     : "=a"(ret), "+D"(d1), "+S"(d2), "+d"(d3), "+r"(r10)
+                     : "a"(n)
+                     : "rcx", "r11", "r8", "r9", "memory");
     return ret;
 }
 

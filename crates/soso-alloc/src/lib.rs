@@ -21,6 +21,8 @@ use soso_abi as abi;
 /// Reserva inicial del heap de lista. Idempotente: la segunda llamada no pide
 /// otro `sbrk`.
 const HEAP_INIT_BYTES: usize = 1024 * 1024;
+/// Lo que crece el montón de lista cada vez que se queda sin hueco.
+const HEAP_GROW_BYTES: usize = 4 * 1024 * 1024;
 
 /// Umbral a partir del cual una reserva va a mmap anónimo.
 pub const MMAP_ALLOC_MIN: usize = 1024 * 1024;
@@ -119,7 +121,45 @@ impl<T> Candado<T> {
 }
 
 static HEAP: Candado<Heap> = Candado::new(Heap::empty());
+
+/// Caché de bloques pequeños por clase de tamaño (T80).
+///
+/// `linked_list_allocator` es *first-fit* sobre una lista de huecos: cada
+/// `alloc` recorre los huecos desde el principio, y rustc deja miles de huecos
+/// pequeños por delante. La compilación de un crate mediano en el guest era ~100
+/// veces más lenta que en el host. Los bloques de hasta `CLASE_MAX` bytes con
+/// alineación ≤ 16 se piden redondeados a múltiplo de 16 y, al liberarlos, se
+/// apilan por clase y se reutilizan en O(1) sin pasar por la lista. No se
+/// devuelven nunca a la lista (no se unen con sus vecinos).
+const CLASE_MAX: usize = 1024;
+const N_CLASES: usize = CLASE_MAX / 16;
+
+struct Clases {
+    cabeza: [*mut u8; N_CLASES],
+}
+
+unsafe impl Send for Clases {}
+
+static CLASES: Candado<Clases> = Candado::new(Clases { cabeza: [core::ptr::null_mut(); N_CLASES] });
+
+#[inline]
+fn clase_de(layout: &Layout) -> Option<usize> {
+    #[cfg(soso_heap_debug)]
+    {
+        let _ = layout;
+        return None;
+    }
+    #[cfg(not(soso_heap_debug))]
+    if layout.size() <= CLASE_MAX && layout.align() <= 16 {
+        Some(layout.size().max(1).div_ceil(16) - 1)
+    } else {
+        None
+    }
+}
 static HEAP_READY: AtomicBool = AtomicBool::new(false);
+/// El montón de lista nació de `sbrk` (puede crecer con `sbrk`); si nació de
+/// `mmap` (`heap_init_mmap`, objetos compartidos) no crece por ahí.
+static HEAP_BRK: AtomicBool = AtomicBool::new(false);
 
 struct ArenaState {
     cur: usize,
@@ -162,6 +202,28 @@ pub fn heap_init() {
         return;
     }
     let base = (ops().sbrk)(HEAP_INIT_BYTES as i64);
+    if base > 0 {
+        HEAP_BRK.store(true, Ordering::Release);
+        HEAP.lock();
+        unsafe {
+            (*HEAP.valor.get()).init(base as *mut u8, HEAP_INIT_BYTES);
+        }
+        HEAP.unlock();
+    }
+}
+
+/// Como [`heap_init`] pero el montón de lista sale de un `mmap` y no usa `sbrk`
+/// jamás. Es lo que usa un objeto compartido cargado dentro de un proceso (T80):
+/// su copia de este crate y la del ejecutable se disputarían el `brk`, y el
+/// montón de lista sólo crece si lo que se añade es contiguo a su tope.
+pub fn heap_init_mmap() {
+    if OPS.load(Ordering::Acquire).is_null() {
+        instalar(&SOSO_OPS);
+    }
+    if HEAP_READY.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let base = (ops().mmap)(0, HEAP_INIT_BYTES as u64, u64::MAX, 0);
     if base > 0 {
         HEAP.lock();
         unsafe {
@@ -216,8 +278,10 @@ impl SbrkAllocator {
             } else {
                 ARENA_CHUNK
             };
-            let base = (ops().sbrk)(want as i64);
-            if base < 0 {
+            // `mmap` y no `sbrk`: el `brk` es del montón de lista, que sólo crece
+            // si lo que se añade es contiguo a su tope.
+            let base = (ops().mmap)(0, want.next_multiple_of(4096) as u64, u64::MAX, 0);
+            if base <= 0 {
                 return core::ptr::null_mut();
             }
             st.cur = base as usize;
@@ -339,8 +403,8 @@ fn ptr_in_linked_heap(ptr: *mut u8) -> bool {
     p >= bottom && p < top
 }
 
-unsafe impl core::alloc::GlobalAlloc for Allocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+impl Allocator {
+    unsafe fn alloc_base(&self, layout: Layout) -> *mut u8 {
         unsafe {
             let size = layout.size();
             if size >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
@@ -355,7 +419,27 @@ unsafe impl core::alloc::GlobalAlloc for Allocator {
             let inner = layout;
             if layout.align() <= 4096 {
                 HEAP.lock();
-                let hecho = (*HEAP.valor.get()).allocate_first_fit(inner);
+                let heap = &mut *HEAP.valor.get();
+                let mut hecho = heap.allocate_first_fit(inner);
+                if hecho.is_err() && HEAP_BRK.load(Ordering::Acquire) {
+                    // El montón de lista era de 1 MiB fijos y lo demás caía en
+                    // el arena de bump, que no reutiliza memoria: rustc agotaba
+                    // el `brk` (~1,3 GiB) compilando `quote` («memory allocation
+                    // of 448 bytes failed»). Se extiende con `sbrk` mientras el
+                    // nuevo trozo sea contiguo al tope del montón.
+                    let paso = (inner.size() + inner.align()).next_multiple_of(4096).max(HEAP_GROW_BYTES);
+                    let tope = heap.top() as usize;
+                    let old = (ops().sbrk)(paso as i64);
+                    if old > 0 {
+                        if old as usize == tope {
+                            heap.extend(paso);
+                            hecho = heap.allocate_first_fit(inner);
+                        } else {
+                            // No contiguo (otro `sbrk` por medio): se deshace.
+                            let _ = (ops().sbrk)(-(paso as i64));
+                        }
+                    }
+                }
                 HEAP.unlock();
                 if let Ok(ptr) = hecho {
                     let p = ptr.as_ptr();
@@ -376,17 +460,7 @@ unsafe impl core::alloc::GlobalAlloc for Allocator {
         }
     }
 
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        unsafe {
-            let ptr = self.alloc(layout);
-            if !ptr.is_null() {
-                core::ptr::write_bytes(ptr, 0, layout.size());
-            }
-            ptr
-        }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc_base(&self, ptr: *mut u8, layout: Layout) {
         unsafe {
             if layout.size() >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
                 let _ = (ops().munmap)(ptr as u64, (layout.size() as u64).next_multiple_of(4096));
@@ -407,14 +481,14 @@ unsafe impl core::alloc::GlobalAlloc for Allocator {
         }
     }
 
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+    unsafe fn realloc_base(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         unsafe {
             if layout.size() >= MMAP_ALLOC_MIN && layout.align() <= 4096 {
                 let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
-                let dst = self.alloc(new_layout);
+                let dst = self.alloc_base(new_layout);
                 if !dst.is_null() && !ptr.is_null() {
                     core::ptr::copy_nonoverlapping(ptr, dst, layout.size().min(new_size));
-                    self.dealloc(ptr, layout);
+                    self.dealloc_base(ptr, layout);
                 }
                 return dst;
             }
@@ -424,14 +498,75 @@ unsafe impl core::alloc::GlobalAlloc for Allocator {
             }
             if layout.align() <= 4096 && ptr_in_linked_heap(ptr) {
                 let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
-                let dst = self.alloc(new_layout);
+                let dst = self.alloc_base(new_layout);
                 if !dst.is_null() && !ptr.is_null() {
                     core::ptr::copy_nonoverlapping(ptr, dst, layout.size().min(new_size));
-                    self.dealloc(ptr, layout);
+                    self.dealloc_base(ptr, layout);
                 }
                 return dst;
             }
             SbrkAllocator.realloc(ptr, layout, new_size)
+        }
+    }
+}
+
+unsafe impl core::alloc::GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unsafe {
+            let Some(c) = clase_de(&layout) else {
+                return self.alloc_base(layout);
+            };
+            CLASES.lock();
+            let cab = &mut (*CLASES.valor.get()).cabeza[c];
+            let p = *cab;
+            if !p.is_null() {
+                *cab = *(p as *mut *mut u8);
+                CLASES.unlock();
+                return p;
+            }
+            CLASES.unlock();
+            self.alloc_base(Layout::from_size_align_unchecked((c + 1) * 16, 16))
+        }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        unsafe {
+            let ptr = self.alloc(layout);
+            if !ptr.is_null() {
+                core::ptr::write_bytes(ptr, 0, layout.size());
+            }
+            ptr
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe {
+            let Some(c) = clase_de(&layout) else {
+                return self.dealloc_base(ptr, layout);
+            };
+            CLASES.lock();
+            let cab = &mut (*CLASES.valor.get()).cabeza[c];
+            *(ptr as *mut *mut u8) = *cab;
+            *cab = ptr;
+            CLASES.unlock();
+        }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        unsafe {
+            let nuevo = Layout::from_size_align_unchecked(new_size, layout.align());
+            match (clase_de(&layout), clase_de(&nuevo)) {
+                (Some(a), Some(b)) if a == b => ptr,
+                (None, None) => self.realloc_base(ptr, layout, new_size),
+                _ => {
+                    let dst = self.alloc(nuevo);
+                    if !dst.is_null() && !ptr.is_null() {
+                        core::ptr::copy_nonoverlapping(ptr, dst, layout.size().min(new_size));
+                        self.dealloc(ptr, layout);
+                    }
+                    dst
+                }
+            }
         }
     }
 }
@@ -561,6 +696,8 @@ mod pruebas {
         b.sbrk_falla = false;
         b.mmap_falla = false;
         b.munmaps = 0;
+        // La caché de clases apunta a memoria de la prueba anterior.
+        unsafe { (*CLASES.valor.get()).cabeza = [core::ptr::null_mut(); N_CLASES] };
         for (a, l) in b.maps.drain(..) {
             unsafe {
                 std::alloc::dealloc(a as *mut u8, Layout::from_size_align(l, 4096).unwrap());
@@ -661,7 +798,9 @@ mod pruebas {
             assert_eq!(c, a, "el hueco del primero se reutiliza");
             unsafe { dealloc(c, a_lay) };
             unsafe { dealloc(b, b_lay) };
-            assert_eq!(bytes_en_lista(), antes);
+            // Los bloques pequeños se quedan en la caché de clases: la lista no
+            // los recupera, se reutilizan (comprobado arriba).
+            assert!(bytes_en_lista() >= antes);
         });
     }
 
@@ -674,7 +813,6 @@ mod pruebas {
             assert!(!p.is_null());
             assert!(bytes_en_lista() > antes);
             unsafe { dealloc(p, layout) };
-            assert_eq!(bytes_en_lista(), antes);
             let otra = unsafe { alloc(layout) };
             assert_eq!(otra, p, "el hueco liberado se reutiliza");
             unsafe { dealloc(otra, layout) };

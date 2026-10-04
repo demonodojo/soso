@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["pm", "app"]
+
+[profile.dev]
+incremental = false
+debug = false

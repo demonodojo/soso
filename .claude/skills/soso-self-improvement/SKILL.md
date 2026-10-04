@@ -175,7 +175,7 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 ## Por dónde (actualizar al cerrar la recomendada)
 
 Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/README.md).
-Revisión del **2-oct-2026**: el perfil elegido es `qwen2.5-coder-7b` (campaña 10×3, cobertura `completa`, **GO 10/10**; el 3B quedó NO-GO 8/10). **T20** está pendiente con esa identidad. **T40 y T41 están cerradas** (2026-10-02: `cargo build --offline` compila en el guest un workspace de dos crates, uno con `build.rs`, y `soso-abi`). **T42 está en curso** (2026-10-03: perfil en `native/build-profile.json`, huecos C-113…C-120); sus pasos 4–5 esperan a **T80** (proc macros), que es la siguiente a atacar.
+Revisión del **2-oct-2026**: el perfil elegido es `qwen2.5-coder-7b` (campaña 10×3, cobertura `completa`, **GO 10/10**; el 3B quedó NO-GO 8/10). **T20** está pendiente con esa identidad. **T40 y T41 están cerradas** (2026-10-02: `cargo build --offline` compila en el guest un workspace de dos crates, uno con `build.rs`, y `soso-abi`). **T40, T41 y T80 están cerradas; T42 en curso** (2026-10-03: `mkfs-soso` compila en el guest —2 min 28 s— y su imagen se verifica con el `sosofs` del host; faltan C-113 `-Zbuild-std`, C-115…C-117 C/ensamblador/objcopy y la imagen arrancable). Truco: `SOSO_REUSE_DATA=1 cargo xtask run` conserva lo que el guest escribió.
 
 Trabajo independiente: **T72** está cerrada (26-sep): `soso-alloc` lo usan
 libsoso y soso-rt; la sonda guest `monton` sale 7/7. **T75** está cerrada

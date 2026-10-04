@@ -76,8 +76,8 @@ grep -q 'pub mod soso' "$RUST/library/std/src/os/mod.rs" || \
 # entonces, declararlo ausente es más honesto que arrastrar `impl`s imposibles.
 sed -i '/^    target_os = "soso",$/d' "$RUST/library/std/src/os/mod.rs"
 
-grep -q 'target_os = "soso"' "$RUST/library/std/src/sys/exit.rs" || \
-  sed -i 's/target_os = "hermit" => unsafe { hermit_abi::exit(code) },/target_os = "hermit" => unsafe { hermit_abi::exit(code) },\n        target_os = "soso" => soso_rt::exit(code),/' \
+grep -q 'target_os = "soso" => soso_rt::exit_group' "$RUST/library/std/src/sys/exit.rs" || \
+  sed -i 's/target_os = "hermit" => unsafe { hermit_abi::exit(code) },/target_os = "hermit" => unsafe { hermit_abi::exit(code) },\n        target_os = "soso" => soso_rt::exit_group(code),/' \
     "$RUST/library/std/src/sys/exit.rs"
 
 # Aquí no basta con «¿ya está?»: esta línea la escribe este script y su
@@ -1941,6 +1941,29 @@ sub("            envp_ptr: 0,\n            envp_count: 0,", """            envp_
             envp_count: entorno.len() as u64,""")
 sub("        // C-063: soso arranca el programa con SYS_SPAWN_IO.", "        // C-063: soso arranca el programa con SYS_SPAWN_IO. (C-111: con entorno.)")
 path.write_text(t)
+PY
+fi
+
+# C-121 (T80): rustc acepta el crate-type `proc-macro` en soso aunque el target
+# no sea `dynamic-linking` (poner esa bandera hace que bootstrap intente
+# construir `libstd.so`, que no se puede enlazar sin PIC). Los proc macros los
+# carga `std::os::soso::dl`, no un `dlopen` de verdad.
+OUTPUT_RS="$RUST/compiler/rustc_session/src/output.rs"
+if [[ -f "$OUTPUT_RS" ]] && ! grep -q 'C-121' "$OUTPUT_RS"; then
+  python3 - "$OUTPUT_RS" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+t = path.read_text()
+old = "pub fn invalid_output_for_target(sess: &Session, crate_type: CrateType) -> bool {\n"
+new = old + """    // C-121: soso carga los proc macros con su propio cargador.
+    if crate_type == CrateType::ProcMacro && cfg!(target_os = "soso") {
+        return false;
+    }
+"""
+if old not in t:
+    raise SystemExit("apply-patches: no encajo output.rs (C-121)")
+path.write_text(t.replace(old, new, 1))
 PY
 fi
 

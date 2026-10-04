@@ -13,3 +13,19 @@ std = ["block-dev/std"]
 block-dev = { path = "../block-dev" }
 crc = "3"
 zerocopy = { version = "0.8", features = ["derive"] }
+
+[[example]]
+name = "verificar"
+required-features = ["std"]
+
+[[example]]
+name = "poner"
+required-features = ["std"]
+
+[[example]]
+name = "sacar"
+required-features = ["std"]
+
+[[example]]
+name = "borrar"
+required-features = ["std"]

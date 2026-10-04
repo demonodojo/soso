@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/block-dev", "crates/sosofs", "tools/mkfs-soso"]
+
+[profile.dev]
+incremental = false
+debug = false

@@ -1,0 +1,7 @@
+[package]
+name = "t80app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+t80pm = { path = "../pm" }

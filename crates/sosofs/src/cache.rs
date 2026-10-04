@@ -103,6 +103,20 @@ impl<D: BlockDevice> BlockDevice for CachedBlockDevice<D> {
         self.ultimo_acierto
     }
 
+    fn max_blocks_per_request(&self) -> usize {
+        self.inner.max_blocks_per_request()
+    }
+
+    /// Lectura de un rango: va directa al dispositivo, en una petición, sin
+    /// pasar por la caché de bloques. Un rango largo la barrería entera (256
+    /// entradas) y cada bloque costaba un viaje al disco; el disco manda (las
+    /// escrituras invalidan y escriben por debajo), así que lo leído es lo
+    /// vigente.
+    fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        self.ultimo_acierto = false;
+        self.inner.read_blocks(start, buf)
+    }
+
     fn invalidate_block(&mut self, block: u64) {
         self.invalidate(block);
     }

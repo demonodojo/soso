@@ -1,6 +1,6 @@
 # T80 — Proc macros y dylib en el guest
 
-**Hito:** SI-7 · **Tipo:** Integración condicionada · **Estado:** pendiente.
+**Hito:** SI-7 · **Tipo:** Integración condicionada · **Estado:** **hecha** (2026-10-03). Resumen en `target/self-improvement/tasks/T80/resultado.md` y [seguimiento/T80.md](seguimiento/T80.md).
 **Dependencias:** [T41](T41-cargo-offline.md).
 **Origen:** cierre de T41 («Si falta dlopen/proc macros, crear ficha específica; no
 preexpandir en Linux y contabilizar la campaña como completamente nativa»).
@@ -40,6 +40,6 @@ haber generado.
 
 ## Cierre
 
-- [ ] Ruta decidida y registrada en [DECISIONES.md](DECISIONES.md).
-- [ ] Fixture compilado y ejecutado en el guest, con evidencia.
-- [ ] Límites explícitos.
+- [x] Ruta decidida: objetos compartidos propios (ver C-121…C-125). Pendiente de pasar a [DECISIONES.md](DECISIONES.md).
+- [x] Fixture (`tests/self-improvement/native/procmacro/`) y `zerocopy-derive` (mkfs-soso) compilados y ejecutados en el guest, con evidencia.
+- [x] Límites explícitos (`resultado.md`).

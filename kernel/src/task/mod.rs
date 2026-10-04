@@ -422,6 +422,16 @@ fn deliver_death(procs: &mut Vec<Process>, pid: u64, code: u8, orphan: bool) {
         procs[idx].kill_orphan = orphan;
         return;
     }
+    // Un proceso muerto no puede seguir teniendo descriptores abiertos: un
+    // zombi con el extremo de escritura de una tubería impedía el EOF a quien
+    // la leía (cargo esperando a un rustc que ya había salido) hasta que
+    // alguien lo recogiera con `wait`.
+    syscall::close_all_fds(&mut procs[idx].fds);
+    if procs[idx].is_thread {
+        // Un hilo no se espera: se retira y suelta su referencia al espacio.
+        procs.remove(idx);
+        return;
+    }
     let parent = procs[idx].parent;
     if let Some(pi) = procs
         .iter()
@@ -667,6 +677,28 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
             Some(r) => r,
             None => {
                 mmap_fault_fail(addr, is_write, "sin región mmap");
+                // Las regiones vecinas: sin ellas no se distingue «nunca se
+                // mapeó» de «se perdió al partir un munmap/mprotect».
+                space.with_mmap_mut(|book| {
+                    let mut bajo = None;
+                    let mut alto = None;
+                    for r in book.regions.iter() {
+                        if r.virt_start <= addr && bajo.is_none_or(|b: &mmap::MmapRegion| b.virt_start < r.virt_start) {
+                            bajo = Some(r);
+                        }
+                        if r.virt_start > addr && alto.is_none_or(|a: &mmap::MmapRegion| a.virt_start > r.virt_start) {
+                            alto = Some(r);
+                        }
+                    }
+                    for (e, r) in [("anterior", bajo), ("siguiente", alto)] {
+                        if let Some(r) = r {
+                            crate::println!(
+                                "mmap-fault:   {e}: {:#x}+{:#x} w={} sin_acceso={} inode={}",
+                                r.virt_start, r.len, r.writable as u8, r.sin_acceso as u8, r.inode
+                            );
+                        }
+                    }
+                });
                 return false;
             }
         };
@@ -927,7 +959,9 @@ pub fn spawn_console_io_cwd(
 ) -> Result<u64, i64> {
     use soso_abi as abi;
     let total_argv: usize = argv.iter().map(|s| s.len()).sum();
-    if total_argv > 3000 || argv.len() > 256 {
+    // Mismo tope que `read_spawn_args` y `argv::MAX_BLOB` (la línea de enlace de
+    // un proc macro pasa de 3000 bytes).
+    if total_argv > 120 * 1024 || argv.len() > 4096 {
         return Err(-abi::EINVAL);
     }
     let env_block = if env.is_empty() {
@@ -1185,6 +1219,36 @@ pub(crate) fn wait_pack(pid: u64, code: u8) -> u64 {
     (pid << 8) | code as u64
 }
 
+/// Termina todos los hilos del espacio de direcciones del proceso actual y sale
+/// con `code` (el del proceso, que es el que ve `wait`). Desde un hilo, mata
+/// también al hilo líder.
+pub fn exit_group(code: u8) -> ! {
+    let me = current_pid();
+    {
+        let mut procs = PROCS.lock();
+        let pml4 = procs
+            .iter()
+            .find(|p| p.pid == me)
+            .and_then(|p| p.space.as_ref().map(|s| s.pml4_phys()));
+        if let Some(pml4) = pml4 {
+            let otros: Vec<(u64, bool)> = procs
+                .iter()
+                .filter(|p| {
+                    p.pid != me
+                        && !matches!(p.state, State::Zombie(_))
+                        && p.space.as_ref().map(|s| s.pml4_phys()) == Some(pml4)
+                })
+                .map(|p| (p.pid, p.is_thread))
+                .collect();
+            for (pid, es_hilo) in otros {
+                // Un hilo muere sin avisar a nadie; el líder lleva el código.
+                deliver_death(&mut procs, pid, code, es_hilo);
+            }
+        }
+    }
+    exit_current(code)
+}
+
 /// Termina el proceso actual y no vuelve.
 pub fn exit_current(code: u8) -> ! {
     x86_64::instructions::interrupts::disable();
@@ -1246,6 +1310,12 @@ pub fn exit_current(code: u8) -> ! {
             space = procs.remove(idx).space;
         }
         crate::arch::percpu::set_current_pid(0);
+    }
+    // Las páginas de este espacio que sigan en la cola de reclaim ya no sirven
+    // (la cola guarda referencias débiles, pero cada entrada muerta ocupa memoria
+    // del kernel hasta que alguien la purgue).
+    if let Some(sp) = &space {
+        crate::mm::reclaim::forget_space(sp);
     }
     drop(space);
     schedule();
@@ -2088,6 +2158,7 @@ fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
             let orphan = procs[idx].kill_orphan;
             let pid = procs[idx].pid;
             let parent = procs[idx].parent;
+            syscall::close_all_fds(&mut procs[idx].fds);
             procs[idx].kill_pending = false;
             procs[idx].kill_orphan = false;
             if orphan {

@@ -6,7 +6,7 @@
 #![allow(nonstandard_style)]
 
 pub use soso_abi::*;
-pub use soso_alloc::{alloc, alloc_zeroed, dealloc, heap_init, realloc};
+pub use soso_alloc::{alloc, alloc_zeroed, dealloc, heap_init, heap_init_mmap, realloc};
 
 use core::arch::asm;
 
@@ -103,8 +103,17 @@ pub fn exit(code: i32) -> ! {
     }
 }
 
+/// Sale del proceso entero (todos sus hilos), no sólo del hilo actual.
+pub fn exit_group(code: i32) -> ! {
+    unsafe {
+        let _ = syscall1(SYS_EXIT_GROUP, code as u64);
+        // Un kernel anterior no conoce el número: cae a la salida del hilo.
+        exit(code)
+    }
+}
+
 pub fn abort() -> ! {
-    exit(134);
+    exit_group(134);
 }
 
 pub unsafe fn write(fd: u64, buf: *const u8, len: usize) -> isize {

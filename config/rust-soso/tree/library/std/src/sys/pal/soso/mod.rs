@@ -7,6 +7,8 @@ use crate::os::raw::c_char;
 use crate::sys::env;
 
 #[cfg(not(test))]
+pub mod dl;
+#[cfg(not(test))]
 mod libc_alloc;
 #[cfg(not(test))]
 mod libc_tls;
@@ -58,8 +60,9 @@ mod bootstrap {
     use crate::os::raw::c_char;
 
     const MAGIC: &[u8; 4] = b"SOSA";
-    const MAX_ARGC: usize = 256;
-    const STR_CAP: usize = 4096;
+    // Igual que el kernel (`read_spawn_args`): cargo pasa a rustc líneas largas.
+    const MAX_ARGC: usize = 4096;
+    const STR_CAP: usize = 128 * 1024;
 
     /// Bloque TLS mínimo del hilo principal (`%fs:0x28` para stack protector).
     /// glibc lee el tid del hilo en `%fs:0x2d0`. Si ese entero es 0, un
@@ -207,7 +210,11 @@ mod bootstrap {
             return;
         };
         let tcb_off = memsz.next_multiple_of(align);
-        let total = tcb_off + core::mem::size_of::<Tcb>() as u64;
+        super::dl::TLS_PROPIO.store(tcb_off as usize, core::sync::atomic::Ordering::Relaxed);
+        // T80: bajo el TCB se reserva sitio para los objetos compartidos
+        // (`dl.rs`); el bloque propio sigue terminando justo en el TP.
+        let bajo = tcb_off.max(super::dl::TLS_RESERVA as u64).next_multiple_of(align);
+        let total = bajo + core::mem::size_of::<Tcb>() as u64;
         let map_len = total + align;
         let raw = unsafe { soso_rt::syscall4(soso_rt::SYS_MMAP, 0, map_len, u64::MAX, 0) };
         if raw <= 0 {
@@ -220,18 +227,20 @@ mod bootstrap {
         }
         unsafe {
             let base = (raw as u64).next_multiple_of(align);
-            let dst = ptr::with_exposed_provenance_mut::<u8>(base as usize);
+            let dst = ptr::with_exposed_provenance_mut::<u8>((base + bajo - tcb_off) as usize);
             ptr::copy_nonoverlapping(src, dst, filesz as usize);
             if memsz > filesz {
                 ptr::write_bytes(dst.add(filesz as usize), 0, (memsz - filesz) as usize);
             }
-            let tcb = ptr::with_exposed_provenance_mut::<Tcb>((base + tcb_off) as usize);
+            let tcb = ptr::with_exposed_provenance_mut::<Tcb>((base + bajo) as usize);
             ptr::write_bytes(tcb.cast::<u8>(), 0, core::mem::size_of::<Tcb>());
             (*tcb).propio = tcb;
             (*tcb).hilo = tcb;
             (*tcb).canario = canario();
             (*tcb).tid = tid_hilo();
             let _ = soso_rt::syscall1(soso_rt::SYS_SET_TLS, tcb.expose_provenance() as u64);
+            // Objetos compartidos ya cargados: su plantilla TLS en este hilo.
+            super::dl::tls_instalar(tcb.expose_provenance());
         }
     }
 
@@ -452,7 +461,7 @@ mod bootstrap {
             fn main(argc: isize, argv: *const *const c_char) -> i32;
         }
         let code = unsafe { main(argc as isize, argv as *const *const c_char) };
-        soso_rt::exit(code);
+        soso_rt::exit_group(code);
     }
 }
 
@@ -486,7 +495,7 @@ pub unsafe extern "C" fn runtime_entry(
         crate::sys::thread_local::destructors::run();
     }
     crate::rt::thread_cleanup();
-    soso_rt::exit(code);
+    soso_rt::exit_group(code);
 }
 
 /// `__ctype_b_loc` & co. leen unos TLS que rellena `__ctype_init` de glibc en su

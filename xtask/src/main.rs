@@ -674,7 +674,11 @@ pub(crate) fn build_image_with_profile(
         exit(status.code().unwrap_or(1));
     }
 
-    let kernel_elf = root.join("target/kernel/x86_64-soso/debug/kernel");
+    // `SOSO_KERNEL_ELF=<ruta>`: empaqueta ese ELF en vez del recién compilado
+    // (T42/C-119: probar un kernel que se compiló dentro de soso).
+    let kernel_elf = std::env::var_os("SOSO_KERNEL_ELF")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target/kernel/x86_64-soso/debug/kernel"));
     let mut builder = bootloader::DiskImageBuilder::new(kernel_elf);
 
     // Shim UEFI de diagnóstico (boot-shim/): el loader real viaja como
@@ -2027,8 +2031,18 @@ fn chrono_lite_now() -> String {
 }
 
 pub(crate) fn run_qemu(img: &Path, gdb: bool) {
-    build_user();
-    let (data, models) = mkfs(false);
+    // `SOSO_REUSE_DATA=1`: arranca con las imágenes de datos que ya hay, sin
+    // recompilar el userspace ni rehacer el rootfs. Lo que el guest escribió
+    // en la sesión anterior (p. ej. un `target/` de cargo de media hora de
+    // compilación) sobrevive; sólo cambia el kernel.
+    let reutilizar = std::env::var("SOSO_REUSE_DATA").is_ok_and(|v| v == "1");
+    let (data, models) = if reutilizar {
+        let root = project_root();
+        (root.join("target/soso-data.img"), root.join("target/soso-models.img"))
+    } else {
+        build_user();
+        mkfs(false)
+    };
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args(["-machine", "q35"])
         // -cpu max: expone RDRAND, que la cripto de sunset (getrandom con

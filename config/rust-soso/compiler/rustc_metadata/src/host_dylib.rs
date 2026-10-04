@@ -4,7 +4,7 @@ use std::error::Error;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
 
-#[cfg(any(unix, windows))]
+#[cfg(any(unix, windows, target_os = "soso"))]
 use rustc_fs_util::try_canonicalize;
 use rustc_proc_macro::bridge::client::Client as ProcMacroClient;
 use rustc_session::StableCrateId;
@@ -113,8 +113,18 @@ pub unsafe fn load_symbol_from_dylib<T: Copy>(
     path: &Path,
     sym_name: &str,
 ) -> Result<T, DylibError> {
+    // T80: soso carga los proc macros con `std::os::soso::dl`.
+    #[cfg(target_os = "soso")]
+    {
+        let ruta = try_canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let dir = unsafe { std::os::soso::dl::cargar_simbolo(&ruta, sym_name) }
+            .map_err(|err| DylibError::DlOpen(path.display().to_string(), err))?;
+        assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<usize>());
+        return Ok(unsafe { std::mem::transmute_copy::<usize, T>(&dir) });
+    }
+
     // C-005: libloading::Library sólo existe en unix y Windows.
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(all(not(any(unix, windows)), not(target_os = "soso")))]
     {
         let _ = sym_name;
         return Err(DylibError::DlOpen(

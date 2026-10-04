@@ -366,6 +366,13 @@ pub const SYS_FLOCK: u64 = 93;
 /// `ftruncate(fd, len)`: `File::set_len`. Syscall nuevo (no sube `ABI_VERSION`).
 pub const SYS_FTRUNCATE: u64 = 94;
 
+/// `exit_group(code)`: termina todos los hilos del proceso y sale con `code`.
+/// `SYS_EXIT` desde un hilo sólo termina ese hilo (es lo que usa `thread_start`);
+/// `process::exit` y `abort` desde un hilo tienen que acabar con el proceso, o
+/// el resto queda esperando para siempre a quien murió con un candado cogido.
+/// Syscall nuevo (no sube `ABI_VERSION`).
+pub const SYS_EXIT_GROUP: u64 = 95;
+
 /// Cerrojo compartido: varios lectores a la vez, ningún escritor.
 pub const LOCK_SH: u64 = 1;
 /// Cerrojo exclusivo: un solo titular.

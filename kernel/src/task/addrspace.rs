@@ -67,6 +67,25 @@ pub struct AddrSpace {
     inner: Arc<AddrSpaceInner>,
 }
 
+/// Referencia que no mantiene vivo el espacio. La cola de reclaim guarda una por
+/// página: con `AddrSpace` (un `Arc`) el espacio de un proceso muerto no se
+/// liberaba hasta que la presión de memoria desalojara sus páginas una a una
+/// (~27 MiB por cada `rustc`, y cientos de MB retenidos hasta entonces).
+#[derive(Clone)]
+pub struct WeakAddrSpace {
+    inner: alloc::sync::Weak<AddrSpaceInner>,
+}
+
+impl WeakAddrSpace {
+    pub fn upgrade(&self) -> Option<AddrSpace> {
+        self.inner.upgrade().map(|inner| AddrSpace { inner })
+    }
+
+    pub fn vivo(&self) -> bool {
+        self.inner.strong_count() > 0
+    }
+}
+
 fn table_mut(frame: PhysFrame) -> &'static mut PageTable {
     unsafe { &mut *mm::phys_to_virt(frame.start_address().as_u64()).as_mut_ptr() }
 }
@@ -135,6 +154,10 @@ impl AddrSpace {
 
     fn pml4(&self) -> PhysFrame {
         self.inner.pml4
+    }
+
+    pub fn downgrade(&self) -> WeakAddrSpace {
+        WeakAddrSpace { inner: Arc::downgrade(&self.inner) }
     }
 
     /// Dirección física del PML4 (clave para futex compartidos entre hilos).

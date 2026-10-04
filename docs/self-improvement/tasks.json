@@ -1703,17 +1703,30 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-10-03T07:00:00+02:00",
-        "base": "14412d50c58514ab033144154584926685604ba1 + diff HEAD sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "updated_at": "2026-10-03T23:05:00+02:00",
+        "base": "6943debcdba809441a6f6e0fdd351578c1fd0287 + diff HEAD sha256:1be7b229fe48d0fffbc330d6ec142739564a66eb92770acc31eeb9f4628127a2",
         "summary": "docs/self-improvement/seguimiento/T42.md",
         "evidence": [
           "docs/self-improvement/native/build-profile.json",
           "target/self-improvement/tasks/T42/guest-cargo-build-1.txt",
           "target/self-improvement/tasks/T42/guest-cargo-build-3.txt",
-          "tests/self-improvement/native/link/"
+          "target/self-improvement/tasks/T42/guest-cargo-build-32.txt",
+          "target/self-improvement/tasks/T42/guest-mkfs-run-1.txt",
+          "target/self-improvement/tasks/T42/verificar-2.txt",
+          "tests/self-improvement/native/mkfs/",
+          "tests/self-improvement/native/link/",
+          "crates/sosofs/examples/verificar.rs",
+          "target/self-improvement/tasks/T42/guest-cargo-build-58.txt",
+          "target/self-improvement/tasks/T42/guest-cargo-build-60.txt",
+          "target/self-improvement/tasks/T42/guest-boot-cargo-60.txt",
+          "target/self-improvement/tasks/T42/arranque/kernel-guest",
+          "tests/self-improvement/native/kernel/",
+          "docs/self-improvement/native/C-135.md",
+          "docs/self-improvement/native/C-136.md",
+          "docs/self-improvement/native/C-137.md"
         ],
-        "blocker": "Pasos 4–5 (mkfs e imagen en el guest) necesitan proc macros (T80: zerocopy-derive) y un compilador de C (C-115) para ring y los ports.",
-        "next_step": "T80 (desbloquea compilar sosofs/kernel/mkfs en el guest). En paralelo, C-117 (objcopy) y C-116 (ensamblador) no dependen de T80."
+        "blocker": null,
+        "next_step": "Paso 5 en curso: el kernel se compila en el guest y arranca (C-113 hecha, C-114 con -pie, C-119 parcial). Falta: pasar la suite contra ese kernel; mkfs-sosomfs/mkmodel-soso y el constructor de imágenes (bootloader) en el guest; C-115 (compilador de C y ar), C-116 (ensamblador), C-117 (objcopy), C-120 (nightly fijado); user/ en el guest (necesita C por ring). Ver seguimiento/T42.md."
       }
     },
     {
@@ -3153,7 +3166,7 @@
       "title": "Proc macros y dylib en el guest (dlopen)",
       "milestone": "SI-7",
       "kind": "Integración condicionada",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T41"
       ],
@@ -3167,20 +3180,33 @@
         "config/rust-soso/README.md"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "partial",
         "requires": [
-          "T41"
+          "T42"
         ],
-        "evidence": [],
-        "note": "Sin evidencia: hoy rustc descarta el crate-type proc-macro."
+        "evidence": [
+          "target/self-improvement/tasks/T80/resultado.md",
+          "target/self-improvement/tasks/T80/guest-cargo-build-8.txt",
+          "target/self-improvement/tasks/T42/guest-cargo-build-32.txt",
+          "target/self-improvement/tasks/T42/verificar-2.txt"
+        ],
+        "note": "Un proc macro mínimo y zerocopy-derive se compilan y cargan en el guest. Cargo y rustc se construyen en Linux (T42/T51)."
       },
       "tracking": {
-        "updated_at": "2026-10-02T21:30:00+02:00",
-        "base": "8acf18c5057d5b1d53c34633384c9f7f8c036fff + diff HEAD sha256:5a8014c059ccb1be1ec91fb202f5db5dd2d625376884186cd0dadb479e138cdc",
-        "summary": null,
-        "evidence": [],
+        "updated_at": "2026-10-03T16:40:00+02:00",
+        "base": "6943debcdba809441a6f6e0fdd351578c1fd0287 + diff HEAD sha256:1be7b229fe48d0fffbc330d6ec142739564a66eb92770acc31eeb9f4628127a2",
+        "summary": "docs/self-improvement/seguimiento/T80.md",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T80.md",
+          "target/self-improvement/tasks/T80/resultado.md",
+          "target/self-improvement/tasks/T80/guest-cargo-build-8.txt",
+          "target/self-improvement/tasks/T42/guest-cargo-build-32.txt",
+          "target/self-improvement/tasks/T42/verificar-2.txt",
+          "tests/self-improvement/native/procmacro/",
+          "crates/sosofs/examples/verificar.rs"
+        ],
         "blocker": null,
-        "next_step": "Decidir ruta (cargar el proc macro como dylib con un `dlopen` propio, o enlazarlo estático en rustc) y abrir las C-xxx."
+        "next_step": "Cerrada. Sigue T42 (herramientas C/ensamblador/objcopy; kernel y user en el guest)."
       }
     }
   ],

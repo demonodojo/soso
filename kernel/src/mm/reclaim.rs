@@ -10,7 +10,7 @@
 //! El TLB shootdown se agrupa por lote para no saturar el IPI en cada página.
 
 use alloc::collections::VecDeque;
-use crate::task::addrspace::AddrSpace;
+use crate::task::addrspace::{AddrSpace, WeakAddrSpace};
 use spin::Mutex;
 
 /// Reserva mínima de frames libres (4 MiB).
@@ -19,7 +19,10 @@ const WATERMARK_FRAMES: usize = 1024;
 const CLOCK_SCAN: usize = 32;
 
 struct CachedPage {
-    space: AddrSpace,
+    /// Débil: ver `WeakAddrSpace`.
+    space: WeakAddrSpace,
+    /// PML4 del espacio (clave estable aunque el espacio ya no exista).
+    pml4: u64,
     va: u64,
     /// `true` si el mapeo es de 2 MiB.
     is_2m: bool,
@@ -41,6 +44,7 @@ pub fn reclaimable_frames() -> usize {
         .lock()
         .queue
         .iter()
+        .filter(|e| e.space.vivo())
         .map(|e| if e.is_2m { 512 } else { 1 })
         .sum()
 }
@@ -69,7 +73,8 @@ pub fn register(space: &AddrSpace, va: u64, is_2m: bool) {
     };
     let mut st = RECLAIM.lock();
     st.queue.push_back(CachedPage {
-        space: space.clone(),
+        space: space.downgrade(),
+        pml4: space.pml4_phys(),
         va,
         is_2m,
         referenced: true,
@@ -87,7 +92,7 @@ pub fn forget_range(space: &AddrSpace, start: u64, len: u64) {
     let pml4 = space.pml4_phys();
     let mut st = RECLAIM.lock();
     st.queue
-        .retain(|e| !(e.space.pml4_phys() == pml4 && e.va >= start && e.va < fin));
+        .retain(|e| !(e.pml4 == pml4 && e.va >= start && e.va < fin));
 }
 
 /// Da de baja todo lo de un espacio que se muere.
@@ -98,7 +103,7 @@ pub fn forget_range(space: &AddrSpace, start: u64, len: u64) {
 pub fn forget_space(space: &AddrSpace) {
     let pml4 = space.pml4_phys();
     let mut st = RECLAIM.lock();
-    st.queue.retain(|e| e.space.pml4_phys() != pml4);
+    st.queue.retain(|e| e.pml4 != pml4);
 }
 
 /// Ventanas intocables mientras un dispositivo lee de ellas por DMA.
@@ -137,7 +142,7 @@ fn pinchada(e: &CachedPage) -> bool {
         return false;
     }
     let fin = e.va + if e.is_2m { 2 * 1024 * 1024 } else { 4096 };
-    let pml4 = e.space.pml4_phys();
+    let pml4 = e.pml4;
     st.iter()
         .any(|&(p, ini, f)| p == pml4 && e.va < f && fin > ini)
 }
@@ -202,7 +207,9 @@ pub fn ensure_free_frames(need: usize) -> bool {
             return free >= need;
         }
         for e in victims {
-            e.space.evict_page(e.va, e.is_2m);
+            if let Some(sp) = e.space.upgrade() {
+                sp.evict_page(e.va, e.is_2m);
+            }
         }
         crate::arch::apic::tlb_shootdown_all();
     }
@@ -225,7 +232,9 @@ pub fn evict_batch(max_pages: usize) {
         return;
     }
     for e in victims {
-        e.space.evict_page(e.va, e.is_2m);
+        if let Some(sp) = e.space.upgrade() {
+            sp.evict_page(e.va, e.is_2m);
+        }
     }
     crate::arch::apic::tlb_shootdown_all();
 }

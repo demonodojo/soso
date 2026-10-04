@@ -490,12 +490,20 @@ impl<D: BlockDevice> Sosofs<D> {
                 continue;
             }
             let mut chunk = vec![0u8; nblocks * BLOCK_SIZE];
-            for i in 0..nblocks {
-                let block = ext.start_block.get() + i as u64;
-                let buf: &mut Block = (&mut chunk[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE])
-                    .try_into()
-                    .unwrap();
-                self.dev.read_block(block, buf).map_err(|_| FsError::Io)?;
+            // Peticiones de varios bloques: un extent de 32 bloques costaba 32
+            // viajes al disco (~28 MiB/s medidos arrancando rustc, que relee
+            // ~100 MB del ejecutable en cada proceso).
+            let max = self.dev.max_blocks_per_request().max(1);
+            let mut i = 0usize;
+            while i < nblocks {
+                let n = (nblocks - i).min(max);
+                self.dev
+                    .read_blocks(
+                        ext.start_block.get() + i as u64,
+                        &mut chunk[i * BLOCK_SIZE..(i + n) * BLOCK_SIZE],
+                    )
+                    .map_err(|_| FsError::Io)?;
+                i += n;
             }
             if crate::crc32c(&chunk) != ext.crc.get() {
                 return Err(FsError::BadChecksum { block: ext.start_block.get() });

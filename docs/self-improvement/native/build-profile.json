@@ -2,7 +2,7 @@
   "schema_version": 1,
   "kind": "build_profile",
   "task": "T42",
-  "revised": "2026-10-03",
+  "revised": "2026-10-03 (tarde)",
   "note": "Qué hace falta para construir y empaquetar cada perfil sin tocar Linux. `guest` es lo comprobado dentro de soso; `evidence` apunta al sondeo (target/self-improvement/tasks/T42/guest-cargo-build-1.txt) o al código. Una herramienta no es nativa por su nombre: sólo lo que el guest ejecutó.",
   "profiles": {
     "qemu-minimo": {
@@ -46,7 +46,7 @@
       ],
       "host": "cargo del nightly",
       "guest": "partial",
-      "evidence": "T41: workspace de dos crates, build.rs, soso-abi",
+      "evidence": "T41: workspace, build.rs, soso-abi. T42: vendor offline (cargo vendor) con zerocopy/syn/quote",
       "gap": "C-113",
       "note": "Sin proc macros (T80) y sin crates.io vendido."
     },
@@ -82,10 +82,9 @@
         "qemu-lxdde"
       ],
       "host": "dylib cargado por rustc",
-      "guest": "absent",
-      "evidence": "T41: dropping unsupported crate type `proc-macro`",
-      "gap": "T80",
-      "note": "Bloquea compilar sosofs, y con él kernel y mkfs-soso, dentro del guest."
+      "guest": "native",
+      "evidence": "T80: proc macro mínimo y zerocopy-derive compilados y cargados en el guest (guest-cargo-build-8, T42/guest-cargo-build-32)",
+      "gap": null
     },
     {
       "id": "linker",
@@ -154,8 +153,8 @@
         "qemu-lxdde"
       ],
       "host": "binarios Rust del workspace (cargo run)",
-      "guest": "absent",
-      "evidence": "no están en /bin",
+      "guest": "partial",
+      "evidence": "mkfs-soso compilado en el guest (2 min 28 s) y su imagen verificada con el sosofs del host (T42/verificar-2.txt). Faltan mkfs-sosomfs y mkmodel-soso",
       "gap": "C-118",
       "note": "Dependen de proc macros (T80) por zerocopy."
     },

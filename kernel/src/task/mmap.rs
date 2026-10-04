@@ -133,14 +133,35 @@ pub fn split_prot(
     hit
 }
 
+/// Quita `[addr, addr+len)` del libro. Una región que lo solapa **a medias** se
+/// parte y conserva lo que queda fuera: la glibc de LLVM reserva 128 MiB, alinea
+/// desmapeando los extremos y se queda con el medio, y borrar la región entera
+/// dejaba ese medio sin registro («sin región mmap» en la primera escritura).
 pub fn remove_region(regions: &mut Vec<MmapRegion>, addr: u64, len: u64) -> bool {
     let Some(end) = addr.checked_add(len) else {
         return false;
     };
-    let before = regions.len();
-    regions.retain(|r| {
-        let rend = r.virt_start + r.len;
-        !(r.virt_start < end && addr < rend)
-    });
-    regions.len() < before
+    let mut out = Vec::with_capacity(regions.len() + 1);
+    let mut hit = false;
+    for r in regions.drain(..) {
+        let rend = r.virt_start.saturating_add(r.len);
+        if rend <= addr || r.virt_start >= end {
+            out.push(r);
+            continue;
+        }
+        hit = true;
+        if r.virt_start < addr {
+            out.push(MmapRegion { len: addr - r.virt_start, ..r.clone() });
+        }
+        if rend > end {
+            out.push(MmapRegion {
+                virt_start: end,
+                len: rend - end,
+                file_offset: r.file_offset.saturating_add(end - r.virt_start),
+                ..r.clone()
+            });
+        }
+    }
+    *regions = out;
+    hit
 }

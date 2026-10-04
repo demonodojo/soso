@@ -3,6 +3,7 @@
 #![cfg_attr(bootstrap, feature(never_type))]
 // C-005: `Error::sources` (feature `error_iter`) sólo lo usa host_dylib en unix/Windows.
 #![cfg_attr(any(unix, windows), feature(error_iter))]
+#![cfg_attr(target_os = "soso", feature(soso_dl))]
 #![feature(file_buffered)]
 #![feature(gen_blocks)]
 #![feature(macro_metavar_expr)]

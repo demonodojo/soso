@@ -1,6 +1,6 @@
 # T42 — Cerrar C, ensamblador y empaquetado por perfil
 
-**Hito:** SI-7 · **Tipo:** Especificación e integración por componente · **Estado:** en curso (2026-10-03): pasos 1–2 hechos; ver [seguimiento/T42.md](seguimiento/T42.md) y [native/build-profile.json](native/build-profile.json).
+**Hito:** SI-7 · **Tipo:** Especificación e integración por componente · **Estado:** en curso (2026-10-03): pasos 1–2 hechos y 5 parcial (kernel compilado y arrancado desde soso); ver [seguimiento/T42.md](seguimiento/T42.md) y [native/build-profile.json](native/build-profile.json).
 
 **Dependencias:** [T38](T38-toolchain-inventario.md), [T41](T41-cargo-offline.md)
 

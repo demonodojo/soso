@@ -21,6 +21,12 @@ pub struct File {
     fd: u64,
 }
 
+/// `/dev/urandom` y `/dev/random`: soso no tiene `/dev`. El descriptor de estos
+/// dos caminos es un valor reservado y `read` lo resuelve con `getrandom`.
+/// Sin esto, `mkfs-soso` (y todo lo que lee entropía del sistema de ficheros)
+/// moría con «no such file or directory».
+const FD_ALEATORIO: u64 = u64::MAX - 16;
+
 #[derive(Clone, Copy)]
 pub struct FileAttr {
     size: u64,
@@ -196,12 +202,14 @@ impl DirEntry {
         self.name.clone()
     }
 
+    // C-127: `remove_dir_all` (y el build.rs de proc-macro2: «Failed to clean up
+    // …/probe») pregunta el tipo de cada entrada.
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        unsupported()
+        stat(&self.path())
     }
 
     pub fn file_type(&self) -> io::Result<FileType> {
-        unsupported()
+        Ok(self.metadata()?.file_type())
     }
 }
 
@@ -263,6 +271,9 @@ impl File {
         let bytes = path.as_os_str().as_bytes();
         if bytes.is_empty() {
             return Err(io::Error::from_raw_os_error(soso_rt::EINVAL as i32));
+        }
+        if (bytes == b"/dev/urandom" || bytes == b"/dev/random") && !escribir {
+            return Ok(File { fd: FD_ALEATORIO });
         }
         // SAFETY: `bytes` vive en esta llamada; el kernel copia el camino.
         let fd = unsafe {
@@ -336,6 +347,17 @@ impl File {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.fd == FD_ALEATORIO {
+            // SAFETY: `buf` es exclusivo; el kernel sólo escribe dentro.
+            return map_syscall(unsafe {
+                soso_rt::syscall3(
+                    soso_rt::SYS_GETRANDOM,
+                    buf.as_mut_ptr().expose_provenance() as u64,
+                    buf.len() as u64,
+                    0,
+                )
+            });
+        }
         // SAFETY: `buf` es exclusivo; el kernel sólo escribe dentro.
         map_syscall(unsafe {
             soso_rt::syscall3(
@@ -422,6 +444,9 @@ impl File {
 
 impl Drop for File {
     fn drop(&mut self) {
+        if self.fd == FD_ALEATORIO {
+            return;
+        }
         unsafe {
             let _ = soso_rt::syscall1(soso_rt::SYS_CLOSE, self.fd);
         }

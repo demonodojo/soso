@@ -242,6 +242,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_UNLINK => sys_unlink(a1, a2),
         abi::SYS_FLOCK => sys_flock(a1, a2),
         abi::SYS_FTRUNCATE => sys_ftruncate(a1, a2),
+        abi::SYS_EXIT_GROUP => super::exit_group(a1 as u8),
         abi::SYS_SPAWN => sys_spawn(a1, a2, a3, a4),
         abi::SYS_WAIT => sys_wait(f),
         abi::SYS_SBRK => sys_sbrk(a1 as i64),
@@ -508,7 +509,13 @@ pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<&'static mut [u8], i6
 }
 
 pub(crate) fn user_str(ptr: u64, len: u64) -> Result<&'static str, i64> {
-    if len > 4096 {
+    user_str_max(ptr, len, 4096)
+}
+
+/// Como `user_str` con otro tope: un argumento de `rustc` puede pasar de 4 KiB
+/// (el `--check-cfg` de `smoltcp` lista todas sus features) sin ser una ruta.
+pub(crate) fn user_str_max(ptr: u64, len: u64, max: u64) -> Result<&'static str, i64> {
+    if len > max {
         return Err(-abi::ENAMETOOLONG);
     }
     core::str::from_utf8(user_slice(ptr, len)?).map_err(|_| -abi::EINVAL)
@@ -961,7 +968,12 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
             Ok(len)
         }
         Fd::WriteBuf { inode, pos, .. } => {
-            const THRESH: usize = 16 * 1024 * 1024;
+            // Por encima de esto un fichero pasa a streaming (sólo añade). 16 MiB
+            // dejaba sin acceso aleatorio el `.rmeta` de `core` (~70 MB): rustc
+            // rellena la raíz con `seek` + `write` al final y salía «invalid
+            // metadata». 256 MiB cubre rlibs y rmetas; los modelos de
+            // `/var/models` no pasan por aquí (ver `sys_open`).
+            const THRESH: usize = 256 * 1024 * 1024;
             if *pos + data.len() > THRESH {
                 convert_writebuf_to_stream(f, data)?;
                 return Ok(len);
@@ -1222,7 +1234,7 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
                 super::fcache::abrir(ino, dir, &name, || data);
                 Fd::WriteBuf { inode: ino, dir, name, pos, protegida }
             }
-        } else if !exists && flags & abi::O_APPEND == 0 {
+        } else if !exists && flags & abi::O_APPEND == 0 && !path.starts_with("/var/models") {
             // Fichero nuevo: va en la caché (`WriteBuf`), con acceso aleatorio.
             // Con `StreamWrite`, que sólo añade, `seek` + `write` escribían al
             // final: rustc rellena la posición de la raíz del `.rmeta` yendo
@@ -1529,7 +1541,7 @@ fn read_spawn_env(envp_ptr: u64, envp_count: u64) -> Result<alloc::string::Strin
         if total > MAX_ENV_BYTES {
             return Err(-abi::EINVAL);
         }
-        lines.push(user_str(s_ptr, s_len)?.into());
+        lines.push(user_str_max(s_ptr, s_len, MAX_ENV_BYTES)?.into());
     }
     Ok(lines.join("\n"))
 }
@@ -1544,8 +1556,10 @@ fn read_spawn_args(
     fallback_ptr: u64,
     fallback_len: u64,
 ) -> Result<alloc::vec::Vec<alloc::string::String>, i64> {
-    const MAX_ARGV: u64 = 256;
-    const MAX_ARG_BYTES: u64 = 4096;
+    // rustc enlaza con líneas de cientos de rlibs (el proc macro de zerocopy
+    // pasa de 4 KiB): hasta 128 KiB y 4096 argumentos.
+    const MAX_ARGV: u64 = 4096;
+    const MAX_ARG_BYTES: u64 = 128 * 1024;
     if argv_ptr != 0 && argv_count > 0 {
         if argv_count > MAX_ARGV {
             return Err(-abi::EINVAL);
@@ -1564,7 +1578,7 @@ fn read_spawn_args(
             if total > MAX_ARG_BYTES {
                 return Err(-abi::EINVAL);
             }
-            parts.push(user_str(s_ptr, s_len)?.into());
+            parts.push(user_str_max(s_ptr, s_len, MAX_ARG_BYTES)?.into());
         }
         return Ok(parts);
     }
@@ -1882,6 +1896,29 @@ fn sys_pslist(out: u64, max: u64) -> Result<u64, i64> {
     }
     let snapshot: alloc::vec::Vec<abi::ProcInfo> = {
         let procs = super::PROCS.lock();
+        // Diagnóstico (T80): a quién espera cada futex y desde dónde. Un `ps`
+        // sobre un cuelgue deja en el log serie el rip de cada hilo dormido.
+        for p in procs.iter() {
+            if let super::State::WaitingFutex { uaddr: addr, .. } = p.state {
+                crate::println!("ps: pid={} futex={:#x} rip={:#x} rsp={:#x}", p.pid, addr, p.ctx.rip, p.ctx.rsp);
+                // Palabras de la pila que parecen direcciones de código: la pila
+                // sin frame pointers todavía deja ver quién llamó.
+                if let Some(space) = p.space.as_ref() {
+                    let mut buf = [0u8; 8 * 96];
+                    if space.read(p.ctx.rsp, &mut buf).is_some() {
+                        let mut linea = alloc::string::String::new();
+                        for c in buf.chunks_exact(8) {
+                            let w = u64::from_le_bytes(c.try_into().unwrap());
+                            if (0x40_0000..0x0e00_0000).contains(&w) {
+                                use core::fmt::Write;
+                                let _ = write!(linea, " {w:#x}");
+                            }
+                        }
+                        crate::println!("ps:   pila:{linea}");
+                    }
+                }
+            }
+        }
         procs
             .iter()
             .take(cap)
