@@ -423,6 +423,7 @@ si el usuario ve strings o comportamiento distinto (skill `soso-user-manual`).
 | `ask hola` con Mixtral se queda en puntos | Sin pool de VRAM (`pool VRAM=no`) Mixtral va a CPU. No está colgado; minutos/token. `ask :modelo tiny` o esperar. Tras reflashear, un punto por capa (el texto llega después; trazas en `log`) |
 | Trazas de `ask` mezcladas con la respuesta | Deben ir por fd 3 (`logln!`). En pantalla: `ask: modelo …`, puntos de espera, texto. Diagnóstico: `log`, `log \| grep askd` o `/var/log/aplicaciones.log` |
 | `cat`/`grep`/`hexdump` piden `-` o se cuelgan en stdin | Kernel VEOF (`tty_tomar`, Ctrl-D = `0x04`, no llega a userspace). Coreutils leen stdin sin args. Live: kernel **y** rootfs, no `--only kernel` |
+| `rm` deja el directorio («directorio no vacío») | Hace falta `-r` (también `-R` / `--recursive`). No borra `/` ni `..` si resuelve a la raíz. El `rm` de `soso>` no tiene `-r` |
 | `Could not set up host forwarding rule tcp::2222` | Puerto ocupado; `pkill qemu-system-x86` y relanzar |
 | SSH output desalineada | Kernel debe enviar CRLF en `ssh::tx_push` (tty cruda) |
 | SSH no reconecta tras cerrar sesión | Kernel debe hacer `reset_socket` en CloseWait/TimeWait; Ctrl-C interrumpe comandos, no cierra la sesión con `ssh -tt` |

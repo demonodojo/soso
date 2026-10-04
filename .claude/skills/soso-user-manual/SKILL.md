@@ -74,7 +74,7 @@ Referencia rápida — ampliar el manual si cambian:
 - **Log USB live:** usuario `cargo xtask sosolog` / `--drv`; el agente monta p1 con `udisksctl` (skill **soso-live**), no `sudo cargo`
 - **SSH:** `ssh -tt -i target/soso_test_key -p 2222 soso@localhost` (QEMU); puerto 22 en placa
 - **Shell:** sosh (`help`, `exit`, `cd`, `pwd`, `wifi`, `ask`, `voz`, pipes, redirecciones, `;`/`&&`/`||`, `2>&1`, comodines en el último componente). Rechaza `&` y `$` con un mensaje. Ctrl-D en línea vacía = `exit`; en `cat`/`grep`/`hexdump` sobre la consola = fin de entrada. Guion: `sosh ruta.sh` (sin shebang)
-- **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `grep`, `ip`, `ps`, `ping`, `halt`, `reboot`. `cat`/`grep`/`hexdump` leen stdin sin argumentos (`log | grep askd`); `-` sigue valiendo. `grep` es subcadena (0/1/2), con `-i/-n/-l/-r/-F/-m`, `--include`/`--exclude` y `-a` para binarios
+- **Coreutils:** `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `grep`, `ip`, `ps`, `ping`, `halt`, `reboot`. `rm [-r|-R|--recursive] <ruta>...` borra ficheros y directorios vacíos; con `-r` también el contenido, de dentro hacia fuera. No borra `/` ni una ruta que sea la raíz (`rm -r ..`). El `rm` de la kernel-shell no es recursivo. `cat`/`grep`/`hexdump` leen stdin sin argumentos (`log | grep askd`); `-` sigue valiendo. `grep` es subcadena (0/1/2), con `-i/-n/-l/-r/-F/-m`, `--include`/`--exclude` y `-a` para binarios
 - **LLM:** `soso-llm run …`; modelos en `/models/`; live escala modelo según tamaño del stick
 - **Red:** `ip` (IPv4); `ping` (ICMP); echo TCP `nc localhost 7777`; live: Realtek 8168 o WiFi AX211/AX200
 

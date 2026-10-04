@@ -525,14 +525,17 @@ mkdir /tmp
 mkdir /tmp/a /tmp/b       # varios a la vez
 ```
 
-### rm — borrar ficheros o directorios vacíos
+### rm — borrar ficheros o directorios
 
 ```sh
 rm /tmp/nota.txt
 rm /tmp/vacio
+rm -r /tmp/prueba
 ```
 
-No borra directorios con contenido.
+Sin `-r`, un directorio con contenido no se borra. `-r` y `-R` (o `--recursive`)
+borran el directorio y todo lo que hay dentro, de dentro hacia fuera. No borra
+`/`, ni una ruta que acabe siendo la raíz (por ejemplo `rm -r ..`).
 
 ### hexdump — volcado hexadecimal
 
@@ -2083,6 +2086,7 @@ soso-update aplicar           # reiniciar después
 
 cat /etc/motd
 mkdir prueba
+rm -r prueba
 reboot                      # reinicia; en QEMU cierra la sesión
 halt
 

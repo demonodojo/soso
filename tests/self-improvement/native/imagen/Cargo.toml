@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["imagen"]
+# `bootloader-parcheado` es el `bootloader` 0.11.15 sin su `build.rs` (que
+# compila las etapas con un cargo anidado, PE y objcopy); usa los binarios que ya
+# están en `blobs/`.
+exclude = ["bootloader-parcheado"]
+
+[profile.dev]
+incremental = false
+debug = false

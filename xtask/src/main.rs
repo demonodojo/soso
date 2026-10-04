@@ -24,7 +24,11 @@ fn main() {
             build_image();
         }
         "run" => {
-            let img = build_image();
+            // `SOSO_BOOT_IMAGE=<ruta>`: arranca esa imagen ya hecha (T42/C-119: la que
+            // se construyó dentro de soso) en vez de construir una.
+            let img = std::env::var_os("SOSO_BOOT_IMAGE")
+                .map(PathBuf::from)
+                .unwrap_or_else(build_image);
             run_qemu(&img, false);
         }
         "gdb" => {

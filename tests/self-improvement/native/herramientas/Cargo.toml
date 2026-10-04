@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/block-dev", "crates/sosofs", "crates/sosomfs", "crates/sosomodel",
+  "crates/soso-llm-core", "crates/soso-audio",
+  "tools/mkfs-soso", "tools/mkfs-sosomfs", "tools/mkmodel-soso",
+]
+
+[profile.dev]
+incremental = false
+debug = false

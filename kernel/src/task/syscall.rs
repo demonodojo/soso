@@ -1103,6 +1103,14 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
             *pos += n;
             Ok(n as u64)
         }
+        // Un fichero abierto para escribir también se puede leer: `fatfs` abre su
+        // imagen con `read(true).write(true)` y relee lo que acaba de formatear.
+        // El contenido vive en la caché por inodo, así que se lee de ahí.
+        Fd::WriteBuf { inode, pos, .. } => {
+            let n = super::fcache::leer(*inode, *pos, dst).ok_or(-abi::EIO)?;
+            *pos += n;
+            Ok(n as u64)
+        }
         Fd::LazyFile { inode, size, pos } => {
             let n = dst.len().min(size.saturating_sub(*pos));
             if n == 0 {
@@ -1234,7 +1242,14 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
                 super::fcache::abrir(ino, dir, &name, || data);
                 Fd::WriteBuf { inode: ino, dir, name, pos, protegida }
             }
-        } else if !exists && flags & abi::O_APPEND == 0 && !path.starts_with("/var/models") {
+        } else if (!exists || flags & abi::O_TRUNC != 0)
+            && flags & abi::O_APPEND == 0
+            && !path.starts_with("/var/models")
+        {
+            // También un fichero que ya existe y se abre con `O_TRUNC` (`File::create`,
+            // `read(true).write(true).truncate(true)`): va a la caché vacío y se
+            // puede releer, que es lo que hace `fatfs` con su imagen. Antes caía en
+            // `StreamWrite`, que sólo añade y no se puede leer (EBADF).
             // Fichero nuevo: va en la caché (`WriteBuf`), con acceso aleatorio.
             // Con `StreamWrite`, que sólo añade, `seek` + `write` escribían al
             // final: rustc rellena la posición de la raíz del `.rmeta` yendo
@@ -1243,12 +1258,18 @@ fn sys_open(path_ptr: u64, path_len: u64, flags: u64) -> Result<u64, i64> {
             // `convert_writebuf_to_stream` lo pasa a streaming.
             let ino = match reservado {
                 Some(ino) => ino,
+                None if exists => lookup.unwrap(),
                 None => {
                     let mtime = crate::time::wall_secs();
                     with_vfs(|| crate::vfs::create_file(dir, &name, &[], mtime))?
                 }
             };
             super::fcache::abrir(ino, dir, &name, Vec::new);
+            if exists {
+                // Si otro descriptor ya lo tenía en la caché, `abrir` conserva su
+                // contenido: `O_TRUNC` lo vacía igualmente.
+                super::fcache::truncar(ino, 0).ok_or(-abi::EIO)?;
+            }
             Fd::WriteBuf { inode: ino, dir, name, pos: 0, protegida }
         } else {
             Fd::StreamWrite {

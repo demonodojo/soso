@@ -29,3 +29,7 @@ required-features = ["std"]
 [[example]]
 name = "borrar"
 required-features = ["std"]
+
+[[example]]
+name = "listar"
+required-features = ["std"]
