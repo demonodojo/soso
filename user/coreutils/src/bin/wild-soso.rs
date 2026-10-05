@@ -365,6 +365,8 @@ fn linea(args: &[String]) -> Result<Opciones, String> {
     let mut compartido = false;
     let mut pie = false;
     let mut script = None;
+    let mut dirs: Vec<String> = Vec::new();
+    let mut libs: Vec<String> = Vec::new();
     // `libsoso::entry!` ya quita argv[0]. El primer argumento es `-flavor`.
     let mut i = 0usize;
     while i < args.len() {
@@ -373,6 +375,38 @@ fn linea(args: &[String]) -> Result<Opciones, String> {
             a,
             "-o" | "-L" | "-u" | "-e" | "--entry" | "-m" | "-flavor" | "-z" | "-soname"
         );
+        // `-L dir` / `-Ldir` y `-l nombre` / `-lnombre`: rustc pasa `-l static=x` de un
+        // `build.rs` (p. ej. el C de `cc`) como `-lx` con `-L` al directorio; sin esto el
+        // archivo nunca se enlazaba («indefinido: …»). Lo que no se encuentra (libc,
+        // libm…) se ignora: en soso no hay.
+        if a == "-L" {
+            if let Some(d) = args.get(i + 1) {
+                dirs.push(d.clone());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(d) = a.strip_prefix("-L") {
+            if !d.is_empty() {
+                dirs.push(String::from(d));
+            }
+            i += 1;
+            continue;
+        }
+        if a == "-l" {
+            if let Some(n) = args.get(i + 1) {
+                libs.push(n.clone());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(n) = a.strip_prefix("-l") {
+            if !n.is_empty() && !a.starts_with("-lto") {
+                libs.push(String::from(n));
+            }
+            i += 1;
+            continue;
+        }
         if a == "-o" {
             let p = args.get(i + 1).ok_or_else(|| String::from("falta -o"))?;
             salida = Some(p.clone());
@@ -406,6 +440,16 @@ fn linea(args: &[String]) -> Result<Opciones, String> {
         i += 1;
     }
     let salida = salida.ok_or_else(|| String::from("falta -o"))?;
+    for n in &libs {
+        for d in &dirs {
+            let cand = alloc::format!("{d}/lib{n}.a");
+            let mut st = abi::Stat::default();
+            if sys::stat(&cand, &mut st) >= 0 {
+                entradas.push(cand);
+                break;
+            }
+        }
+    }
     let mut exportar = Vec::new();
     if let Some(path) = script {
         let texto = leer(&path)?;

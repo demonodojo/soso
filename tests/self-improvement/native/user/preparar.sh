@@ -5,14 +5,14 @@
 # para compilarlo DENTRO de soso con `cargo build -Zbuild-std` sin red.
 # Reutiliza `rootfs/lib/rustlib/src` (lo deja `../kernel/preparar.sh`).
 #
-# Uso: preparar.sh [miembros...]  (por defecto: libsoso init sosh coreutils soso-ed soso-hf soso-update soso-web)
+# Uso: preparar.sh [miembros...]  (por defecto: libsoso init sosh coreutils soso-ed soso-hf soso-update soso-web soso-agent-probe)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 RUST="${SOSO_RUST_VENDOR:-$HOME/.cache/soso-rust-vendor}"
 SRC_DST="$ROOT/rootfs/lib/rustlib/src/rust"
 UD="$ROOT/rootfs/var/t42/ud"
 MIEMBROS=("$@")
-[ ${#MIEMBROS[@]} -gt 0 ] || MIEMBROS=(libsoso init sosh coreutils soso-ed soso-hf soso-update soso-web)
+[ ${#MIEMBROS[@]} -gt 0 ] || MIEMBROS=(libsoso init sosh coreutils soso-ed soso-hf soso-update soso-web soso-agent-probe)
 [ -d "$SRC_DST/library" ] || { echo "falta $SRC_DST: corre ../kernel/preparar.sh antes" >&2; exit 1; }
 
 rm -rf "$UD"
@@ -81,6 +81,30 @@ cd "$UD/user"
 cp "$ROOT/user/Cargo.lock" Cargo.lock   # fija las versiones del repo
 # Provisión en el HOST (usa red una vez); lo copiado queda fijado por Cargo.lock.
 cargo vendor --versioned-dirs -s "$SRC_DST/library/Cargo.toml" "$UD/vendor-crates" > /dev/null
+# La crate `cc` no conoce `target_os = "soso"` («cc cannot create named tempfile»). Se acepta
+# en su rama de ficheros temporales y se rehace el `.cargo-checksum.json` del vendor.
+python3 - "$UD/vendor-crates" <<'PY'
+import glob, hashlib, json, sys
+for d in glob.glob(sys.argv[1] + "/cc-*"):
+    f = d + "/src/tempfile.rs"
+    t = open(f).read()
+    t2 = t.replace('#[cfg(not(any(unix, target_family = "wasm", windows)))]',
+                   '#[cfg(not(any(unix, target_os = "soso", target_family = "wasm", windows)))]')
+    if t2 != t:
+        open(f, "w").write(t2)
+        c = json.load(open(d + "/.cargo-checksum.json"))
+        c["files"]["src/tempfile.rs"] = hashlib.sha256(t2.encode()).hexdigest()
+        json.dump(c, open(d + "/.cargo-checksum.json", "w"))
+PY
+# Compiladores del guest (C-140): `cc` los toma de [env].
+cat >> "$UD/user/.cargo/config.toml" <<'CFG'
+
+[env]
+CC = { value = "/var/t42/llvm/clang", force = true }
+AR = { value = "/var/t42/llvm/llvm-ar", force = true }
+CFLAGS = { value = "-resource-dir /var/t42/llvm/lib/clang/23", force = true }
+CRATE_CC_NO_DEFAULTS = { value = "1", force = true }
+CFG
 cd "$UD"
 find . -type f ! -path './vendor-crates/*' ! -name MANIFEST.sha256 | LC_ALL=C sort | xargs sha256sum > MANIFEST.sha256
 echo "preparado: $UD ($(du -sh vendor-crates | cut -f1) vendidos, $(ls crates | wc -l) crates por ruta)"

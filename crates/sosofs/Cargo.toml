@@ -41,3 +41,11 @@ required-features = ["std"]
 [[example]]
 name = "mover"
 required-features = ["std"]
+
+[[example]]
+name = "espacio"
+required-features = ["std"]
+
+[[example]]
+name = "crecer"
+required-features = ["std"]

@@ -207,6 +207,12 @@ pub fn kernel_feature_args(profile: &DriverProfile) -> Vec<String> {
     if iwlwifi && !feats.iter().any(|f| f == "lxdde-iwlwifi") {
         feats.push("lxdde-iwlwifi".into());
     }
+    let ath11k = lx_ports_for_build(profile)
+        .iter()
+        .any(|p| p == "ath11k" || p == "all");
+    if ath11k && !feats.iter().any(|f| f == "lxdde-ath11k") {
+        feats.push("lxdde-ath11k".into());
+    }
     feats.sort();
     feats.dedup();
     feats

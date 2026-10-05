@@ -1,7 +1,7 @@
 //! Credenciales WiFi en la ESP del live: `SOSOWIFI.TXT` (partición 1, FAT).
 //!
-//! Mismo formato que `/etc/wifi.conf` (`ssid=`, `psk=`). Si el fichero está
-//! vacío o solo tiene comentarios, el kernel cae a `/etc/wifi.conf`.
+//! Mismo formato que `/etc/wifi.conf` (`ssid=`, `psk=`). En live, si el hueco
+//! existe pero no parsea, **no** se usa `/etc/wifi.conf`: sosh pide SSID/clave.
 
 use crate::drivers::espfat::{self, Slot};
 use spin::Once;

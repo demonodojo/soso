@@ -25,16 +25,27 @@ pub fn pbkdf2_psk(passphrase: &str, ssid: &str) -> [u8; 32] {
 
 fn read_wifi_config_text() -> Option<String> {
     #[cfg(feature = "drv-live-disk")]
-    if let Some(raw) = crate::drivers::wificonf::read_text() {
-        let text = core::str::from_utf8(&raw).unwrap_or("");
-        if parse_wifi_conf(text).is_some() {
-            return Some(text.to_string());
+    if crate::drivers::live_disk::esp_available() {
+        if let Some(raw) = crate::drivers::wificonf::read_text() {
+            let text = core::str::from_utf8(&raw).unwrap_or("");
+            if parse_wifi_conf(text).is_some() {
+                return Some(text.to_string());
+            }
+            crate::println!(
+                "wifi: SOSOWIFI.TXT sin ssid= válido — elige red en sosh o escribe ssid=/psk="
+            );
+            return None;
         }
     }
     let data = crate::vfs::resolve("/etc/wifi.conf")
         .ok()
         .and_then(|ino| crate::vfs::read_file(ino).ok())?;
-    Some(core::str::from_utf8(&data).unwrap_or("").to_string())
+    let text = core::str::from_utf8(&data).unwrap_or("");
+    if parse_wifi_conf(text).is_some() {
+        Some(text.to_string())
+    } else {
+        None
+    }
 }
 
 /// Autoconnect: scan, elige SSID de config, conecta (abierta o WPA2).

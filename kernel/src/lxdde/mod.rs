@@ -37,6 +37,12 @@ unsafe extern "C" {
     fn lx_spike_run();
     fn lx_testdrv_run();
     fn lx_e1000e_init_module() -> i32;
+}
+
+// Igual que nouveau e iwlwifi: estos símbolos sólo existen si el port se enlaza.
+// El perfil live no trae ath11k; referenciarlos igual hace fallar el enlace.
+#[cfg(feature = "lxdde-ath11k")]
+unsafe extern "C" {
     fn lx_ath11k_init_module() -> i32;
     fn lx_ath11k_start() -> i32;
     fn lx_ath11k_phase() -> *const core::ffi::c_char;
@@ -111,6 +117,7 @@ pub fn init(modes: LxddeModes) {
             crate::println!("lxdde: iwlwifi register rc={rc}");
             crate::drivers::fatlog::flush_checkpoint();
         }
+        #[cfg(feature = "lxdde-ath11k")]
         if modes.ath11k {
             let rc = lx_ath11k_init_module();
             crate::println!("lxdde: ath11k register rc={rc}");
@@ -130,6 +137,7 @@ pub fn init(modes: LxddeModes) {
     }
 
     // El transporte MHI necesita el bus ya enumerado: va después de pci::init.
+    #[cfg(feature = "lxdde-ath11k")]
     if modes.ath11k {
         let rc = unsafe { lx_ath11k_start() };
         let fase = unsafe { core::ffi::CStr::from_ptr(lx_ath11k_phase()) };

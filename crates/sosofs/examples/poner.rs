@@ -62,7 +62,12 @@ fn main() {
         copiar(&mut fs, dir, local, &mut n);
     } else {
         let (dir, nombre) = a[2].rsplit_once('/').expect("ruta absoluta");
-        let dir = fs.resolve(if dir.is_empty() { "/" } else { dir }).expect("directorio");
+        // Crea los directorios intermedios que falten (`mkdir -p`).
+        let mut d = fs.resolve("/").expect("raíz");
+        for comp in dir.split('/').filter(|c| !c.is_empty()) {
+            d = asegurar_dir(&mut fs, d, comp);
+        }
+        let dir = d;
         let datos = std::fs::read(local).expect("leer fichero local");
         fs.create_file(dir, nombre, &datos, ahora()).expect("escribir");
         n = 1;

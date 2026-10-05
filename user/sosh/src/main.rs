@@ -136,6 +136,7 @@ fn main(args: &[alloc::string::String]) -> u8 {
     let prefault_ms = sys::uptime_ms().saturating_sub(t0);
     if args.is_empty() {
         escribir_marca_listo(prefault_ms);
+        wifi_setup_si_hace_falta();
     }
     if let Some(path) = args.first() {
         return ejecutar_guion(path);
@@ -998,7 +999,136 @@ fn ejecutar_pipeline_o_builtin(cmds: &[CmdSpec], ctx: Option<usize>) -> (Option<
 }
 
 fn wifi_uso() {
-    println!("uso: wifi scan | status | connect <ssid> [psk]");
+    println!("uso: wifi scan | status | setup | connect <ssid> [psk]");
+}
+
+struct RedEscaneada {
+    ssid: String,
+    open: bool,
+    rssi: i8,
+    channel: u8,
+}
+
+fn wifi_adaptador_listo(st: &abi::WifiStatus) -> bool {
+    st.flags & abi::WIFI_FLAG_PRESENT != 0 && st.flags & abi::WIFI_FLAG_ALIVE != 0
+}
+
+fn ipv4_configurada() -> bool {
+    let mut ni = abi::NetInfo::default();
+    sys::netinfo(&mut ni) >= 0 && ni.flags & abi::NET_FLAG_CONFIGURED != 0
+}
+
+fn wifi_setup_si_hace_falta() {
+    let mut st = abi::WifiStatus::default();
+    if sys::wifi_status(&mut st) < 0 || !wifi_adaptador_listo(&st) {
+        return;
+    }
+    if st.flags & abi::WIFI_FLAG_AUTHORIZED != 0 || ipv4_configurada() {
+        return;
+    }
+    wifi_setup_interactivo(false);
+}
+
+fn escanear_redes() -> Result<alloc::vec::Vec<RedEscaneada>, i64> {
+    let mut bss = [abi::WifiBss::default(); abi::WIFI_SCAN_MAX];
+    let r = sys::wifi_scan(&mut bss);
+    if r < 0 {
+        return Err(r);
+    }
+    let mut out = alloc::vec::Vec::new();
+    for e in &bss[..r as usize] {
+        let n = (e.ssid_len as usize).min(abi::WIFI_SSID_MAX);
+        let ssid = core::str::from_utf8(&e.ssid[..n]).unwrap_or("").to_string();
+        if ssid.is_empty() {
+            continue;
+        }
+        out.push(RedEscaneada {
+            ssid,
+            open: e.open != 0,
+            rssi: e.rssi,
+            channel: e.channel,
+        });
+    }
+    Ok(out)
+}
+
+fn wifi_setup_interactivo(forzar: bool) {
+    let mut st = abi::WifiStatus::default();
+    let st_r = sys::wifi_status(&mut st);
+    if st_r < 0 {
+        println!("sosh: wifi status: {}", errno_str(st_r));
+        return;
+    }
+    if !wifi_adaptador_listo(&st) {
+        println!("wifi: adaptador no disponible o firmware sin arrancar");
+        return;
+    }
+    if !forzar && (st.flags & abi::WIFI_FLAG_AUTHORIZED != 0 || ipv4_configurada()) {
+        println!("wifi: ya hay enlace IP");
+        return;
+    }
+    println!("wifi: escaneando redes…");
+    let redes = match escanear_redes() {
+        Ok(v) => v,
+        Err(e) => {
+            println!("sosh: wifi scan: {}", errno_str(e));
+            return;
+        }
+    };
+    if redes.is_empty() {
+        println!("wifi: ninguna red visible");
+        return;
+    }
+    for (i, r) in redes.iter().enumerate() {
+        let sec = if r.open { "abierta" } else { "WPA" };
+        println!(
+            "  {}. {} ({} dBm, canal {}, {sec})",
+            i + 1,
+            r.ssid,
+            r.rssi,
+            r.channel
+        );
+    }
+    print!("wifi: número de red (Enter para omitir): ");
+    let eleccion = match Lector::new().siguiente() {
+        Ok(Some(s)) => s,
+        Ok(None) => return,
+        Err(e) => {
+            println!("sosh: tty: {}", errno_str(e));
+            return;
+        }
+    };
+    let idx = match eleccion.trim().parse::<usize>() {
+        Ok(n) if n >= 1 && n <= redes.len() => n - 1,
+        _ => {
+            println!("wifi: selección inválida");
+            return;
+        }
+    };
+    let red = &redes[idx];
+    let psk = if red.open {
+        None
+    } else {
+        print!("wifi: contraseña para '{}': ", red.ssid);
+        match Lector::new().sin_eco().siguiente() {
+            Ok(Some(p)) if !p.trim().is_empty() => Some(p.trim().to_string()),
+            Ok(Some(_)) | Ok(None) => {
+                println!("wifi: hace falta contraseña");
+                return;
+            }
+            Err(e) => {
+                println!("sosh: tty: {}", errno_str(e));
+                return;
+            }
+        }
+    };
+    let psk_ref = psk.as_deref();
+    let r = sys::wifi_connect(&red.ssid, psk_ref);
+    if r < 0 {
+        println!("sosh: wifi connect: {}", errno_str(r));
+    } else {
+        println!("wifi: conectado a '{}' (guardado para el próximo arranque)", red.ssid);
+    }
 }
 
 fn ejecutar_wifi(args: &str) {
@@ -1007,41 +1137,45 @@ fn ejecutar_wifi(args: &str) {
         wifi_uso();
         return;
     }
+    if args == "setup" {
+        wifi_setup_interactivo(true);
+        return;
+    }
     if args == "scan" {
-        let mut bss = [abi::WifiBss::default(); abi::WIFI_SCAN_MAX];
-        let r = sys::wifi_scan(&mut bss);
-        if r < 0 {
-            if r == -abi::ENOTSUP {
-                let mut st = abi::WifiStatus::default();
-                if sys::wifi_status(&mut st) >= 0 {
-                    if st.flags & abi::WIFI_FLAG_PRESENT == 0 {
-                        println!("wifi: no hay adaptador");
-                        return;
-                    }
-                    if st.flags & abi::WIFI_FLAG_ALIVE == 0 {
-                        let phase_n = st
-                            .phase
-                            .iter()
-                            .position(|&b| b == 0)
-                            .unwrap_or(st.phase.len());
-                        let phase = core::str::from_utf8(&st.phase[..phase_n]).unwrap_or("?");
-                        println!("wifi: firmware no arrancó (phase={phase})");
-                        return;
+        match escanear_redes() {
+            Err(r) => {
+                if r == -abi::ENOTSUP {
+                    let mut st = abi::WifiStatus::default();
+                    if sys::wifi_status(&mut st) >= 0 {
+                        if st.flags & abi::WIFI_FLAG_PRESENT == 0 {
+                            println!("wifi: no hay adaptador");
+                            return;
+                        }
+                        if st.flags & abi::WIFI_FLAG_ALIVE == 0 {
+                            let phase_n = st
+                                .phase
+                                .iter()
+                                .position(|&b| b == 0)
+                                .unwrap_or(st.phase.len());
+                            let phase =
+                                core::str::from_utf8(&st.phase[..phase_n]).unwrap_or("?");
+                            println!("wifi: firmware no arrancó (phase={phase})");
+                            return;
+                        }
                     }
                 }
+                println!("sosh: wifi scan: {}", errno_str(r));
             }
-            println!("sosh: wifi scan: {}", errno_str(r));
-            return;
-        }
-        if r == 0 {
-            println!("wifi: ninguna red");
-            return;
-        }
-        for e in &bss[..r as usize] {
-            let n = (e.ssid_len as usize).min(abi::WIFI_SSID_MAX);
-            let ssid = core::str::from_utf8(&e.ssid[..n]).unwrap_or("?");
-            let sec = if e.open != 0 { "abierta" } else { "WPA" };
-            println!("  {ssid}: {} dBm, canal {}, {sec}", e.rssi, e.channel);
+            Ok(redes) if redes.is_empty() => println!("wifi: ninguna red"),
+            Ok(redes) => {
+                for r in &redes {
+                    let sec = if r.open { "abierta" } else { "WPA" };
+                    println!(
+                        "  {}: {} dBm, canal {}, {sec}",
+                        r.ssid, r.rssi, r.channel
+                    );
+                }
+            }
         }
         return;
     }
@@ -1110,7 +1244,7 @@ fn ejecutar_sosolog() {
 fn ayuda() {
     println!("builtins: exit [código], help, cd, pwd, wifi, ask, voz, sosolog");
     println!("sosolog:  persistir el log ahora: /var/log/*.log y, en live, SOSOLOG.TXT");
-    println!("wifi:     wifi scan | status | connect <ssid> [psk]");
+    println!("wifi:     wifi scan | status | setup | connect <ssid> [psk]");
     println!("ask:      ask <pregunta>  — el texto va literal al modelo");
     println!("          ask             — modo interactivo (Ctrl-D o «salir»)");
     println!("          /bin/ask-modelo — elegir el modelo que usa ask");

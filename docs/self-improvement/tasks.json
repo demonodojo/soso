@@ -1703,7 +1703,7 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-10-05T08:00:00+02:00",
+        "updated_at": "2026-10-05T11:00:00+02:00",
         "base": "6943debcdba809441a6f6e0fdd351578c1fd0287 + diff HEAD sha256:1be7b229fe48d0fffbc330d6ec142739564a66eb92770acc31eeb9f4628127a2",
         "summary": "docs/self-improvement/seguimiento/T42.md",
         "evidence": [
@@ -1745,10 +1745,12 @@
           "docs/self-improvement/native/C-140.md",
           "tests/self-improvement/native/llvm/",
           "target/self-improvement/tasks/T42/guest-cargo-build-115.txt",
-          "target/self-improvement/tasks/T42/arranque/ring-objetos-identicos.txt"
+          "target/self-improvement/tasks/T42/arranque/ring-objetos-identicos.txt",
+          "target/self-improvement/tasks/T42/guest-cargo-build-119.txt",
+          "target/self-improvement/tasks/T42/guest-cargo-build-120.txt"
         ],
         "blocker": null,
-        "next_step": "C y ensamblador resueltos en el guest con clang/LLVM para soso (C-140; ring: 17/17 objetos idénticos). Falta: que la crate cc compile en soso para compilar ring/soso-agent-probe con cargo en el guest; llvm-objcopy sobre las etapas del cargador (C-117/C-120); lxdde; y cargo xtask test por los cambios de kernel (rename, O_TRUNC). Ver seguimiento/T42.md."
+        "next_step": "Todo user/ (incluido C vía cc+clang del guest) se compila en soso. Falta: llvm-objcopy sobre las etapas del cargador (C-117/C-120); el perfil qemu-lxdde (C de los ports); cargo xtask test contra la imagen construida en el guest; y la validación nativa. Ver seguimiento/T42.md."
       }
     },
     {
