@@ -2849,7 +2849,11 @@ fn sys_rename(old_ptr: u64, old_len: u64, new_ptr: u64, new_len: u64) -> Result<
             with_vfs(|| crate::vfs::unlink(new_dir, &new_name))?;
         }
     }
+    let movido = with_vfs(|| crate::vfs::lookup(old_dir, &old_name)).ok();
     with_vfs(|| crate::vfs::rename(old_dir, &old_name, new_dir, &new_name, mtime))?;
+    if let Some(ino) = movido {
+        super::fcache::renombrar(ino, new_dir, &new_name);
+    }
     Ok(0)
 }
 

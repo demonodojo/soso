@@ -42,3 +42,5 @@ lxdde/shim/src/generated_dummies.c
 drivers-extern.toml
 board.txt
 /vendor/rust/
+
+node_modules/

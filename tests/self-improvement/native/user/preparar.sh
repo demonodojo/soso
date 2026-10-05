@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # T42, paso 5b: prepara en `rootfs/var/t42/ud/` el workspace `user/` (sin las
-# crates que necesitan C por `ring`: soso-hf, soso-update, soso-web, soso-agent-probe)
+# `soso-agent-probe`, que compila C ajeno; soso-hf, soso-update y soso-web entran con el
+# proveedor criptográfico en Rust puro, sin `ring`)
 # para compilarlo DENTRO de soso con `cargo build -Zbuild-std` sin red.
 # Reutiliza `rootfs/lib/rustlib/src` (lo deja `../kernel/preparar.sh`).
 #
-# Uso: preparar.sh [miembros...]  (por defecto: libsoso init sosh coreutils soso-ed)
+# Uso: preparar.sh [miembros...]  (por defecto: libsoso init sosh coreutils soso-ed soso-hf soso-update soso-web)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 RUST="${SOSO_RUST_VENDOR:-$HOME/.cache/soso-rust-vendor}"
 SRC_DST="$ROOT/rootfs/lib/rustlib/src/rust"
 UD="$ROOT/rootfs/var/t42/ud"
 MIEMBROS=("$@")
-[ ${#MIEMBROS[@]} -gt 0 ] || MIEMBROS=(libsoso init sosh coreutils soso-ed)
+[ ${#MIEMBROS[@]} -gt 0 ] || MIEMBROS=(libsoso init sosh coreutils soso-ed soso-hf soso-update soso-web)
 [ -d "$SRC_DST/library" ] || { echo "falta $SRC_DST: corre ../kernel/preparar.sh antes" >&2; exit 1; }
 
 rm -rf "$UD"
@@ -31,6 +32,11 @@ t = re.sub(r'members = \[[^\]]*\]', f'members = [{lista}]', t, count=1)
 open(dst, "w").write(t)
 PY
 # Crates por ruta que alcanzan los miembros (cierre transitivo).
+# `soso-http` con `ring` necesita C y ensamblador (C-115/C-116): en el guest se pide
+# su proveedor en Rust puro (RustCrypto).
+for m in "${MIEMBROS[@]}"; do
+  sed -i 's|soso-http = { path = "../../crates/soso-http" }|soso-http = { path = "../../crates/soso-http", default-features = false, features = ["crypto-rust"] }|' "$UD/user/$m/Cargo.toml"
+done
 copiar() {
   local c="$1"
   [ -d "$UD/crates/$c" ] && return 0

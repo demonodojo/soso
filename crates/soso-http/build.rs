@@ -1,12 +1,18 @@
+#![allow(dead_code)]
 //! Enlaza ensamblador pregenerado de `ring` cuando el target no tiene OS (soso-user).
 
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
+#[cfg(not(feature = "crypto-ring"))]
+fn main() {}
+
+#[cfg(feature = "crypto-ring")]
 fn main() {
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    if os != "none" || arch != "x86_64" {
+    // Sin `ring` (feature `crypto-rust`) no hay ensamblador pregenerado que enlazar.
+    if os != "none" || arch != "x86_64" || env::var_os("CARGO_FEATURE_CRYPTO_RING").is_none() {
         return;
     }
 

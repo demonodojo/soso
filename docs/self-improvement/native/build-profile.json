@@ -2,7 +2,7 @@
   "schema_version": 1,
   "kind": "build_profile",
   "task": "T42",
-  "revised": "2026-10-03 (tarde)",
+  "revised": "2026-10-04",
   "note": "Qué hace falta para construir y empaquetar cada perfil sin tocar Linux. `guest` es lo comprobado dentro de soso; `evidence` apunta al sondeo (target/self-improvement/tasks/T42/guest-cargo-build-1.txt) o al código. Una herramienta no es nativa por su nombre: sólo lo que el guest ejecutó.",
   "profiles": {
     "qemu-minimo": {
@@ -100,27 +100,27 @@
     },
     {
       "id": "c-compiler",
-      "role": "ring (soso-http), user/soso-agent-probe/c/ajeno.c, y el C de los ports lxdde",
+      "role": "C ajeno (soso-agent-probe) y el C de los ports lxdde; ring ya no hace falta con soso-http `crypto-rust` (C-139)",
       "profiles": [
-        "qemu-minimo",
         "qemu-lxdde"
       ],
       "host": "clang 18 (LX_CC), cc crate",
-      "guest": "absent",
-      "evidence": "cc / clang: no existe",
-      "gap": "C-115"
+      "guest": "native",
+      "evidence": "clang/llvm-mc para soso: ring (8 C + 9 .S) 17/17 objetos idénticos a los del host (C-140, arranque/ring-objetos-identicos.txt)",
+      "gap": "crate cc sin soporte de soso",
+      "note": "Para qemu-minimo ya no se necesita C: soso-http usa RustCrypto en el guest (C-139). Opción elegida para lxdde: clang/LLVM compilado para soso."
     },
     {
       "id": "assembler",
       "role": "ring: .S/.asm de aes, curve25519, sha; objetos asm de ports",
       "profiles": [
-        "qemu-minimo",
         "qemu-lxdde"
       ],
       "host": "clang -c (ensamblador integrado)",
-      "guest": "absent",
-      "evidence": "as / sosoas: no existe; tools/sosoas sólo transcribe `.byte` en hex (411 líneas)",
-      "gap": "C-116"
+      "guest": "native",
+      "evidence": "clang/llvm-mc para soso: ring (8 C + 9 .S) 17/17 objetos idénticos a los del host (C-140, arranque/ring-objetos-identicos.txt)",
+      "gap": "crate cc sin soporte de soso",
+      "note": "Sin ring en el guest tampoco hace falta ensamblador para qemu-minimo (C-139)."
     },
     {
       "id": "objcopy",
@@ -130,8 +130,8 @@
         "qemu-lxdde"
       ],
       "host": "llvm-objcopy (componente llvm-tools-preview)",
-      "guest": "absent",
-      "evidence": "no hay en el guest",
+      "guest": "partial",
+      "evidence": "llvm-objcopy enlazado para soso (C-140); sin aplanar aún las etapas del cargador",
       "gap": "C-117"
     },
     {
@@ -141,9 +141,9 @@
         "qemu-lxdde"
       ],
       "host": "ar",
-      "guest": "absent",
-      "evidence": "no hay en el guest",
-      "gap": "C-115"
+      "guest": "native",
+      "evidence": "llvm-ar en el guest: archivo idéntico al del host (C-140)",
+      "gap": null
     },
     {
       "id": "mkfs",

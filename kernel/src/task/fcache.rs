@@ -102,6 +102,17 @@ pub fn leer(ino: u64, pos: usize, dst: &mut [u8]) -> Option<usize> {
     Some(n)
 }
 
+/// El fichero `ino` ha cambiado de nombre mientras está abierto (`rename` sobre un
+/// descriptor vivo: LLVM escribe `out.a.temp-archive-XXXX.a` y lo renombra a `out.a`
+/// antes de cerrar). El volcado al cerrar tiene que ir al nombre **nuevo**; con el
+/// viejo recrearía el temporal y el destino se quedaría vacío.
+pub fn renombrar(ino: u64, dir: u64, name: &str) {
+    if let Some(e) = CACHE.lock().get_mut(&ino) {
+        e.dir = dir;
+        e.name = String::from(name);
+    }
+}
+
 /// Escribe en `pos`, extendiendo **sólo** si hace falta.
 ///
 /// Que extienda sólo si hace falta es lo que conserva la cola: escribir cinco

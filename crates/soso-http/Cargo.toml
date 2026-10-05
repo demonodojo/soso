@@ -6,11 +6,18 @@ license = "GPL-2.0-only"
 build = "build.rs"
 
 [features]
-default = []
+# Proveedor criptográfico de rustls. `crypto-ring` (el de siempre) necesita un compilador
+# de C y ensamblador para `ring`; `crypto-rust` (RustCrypto, Rust puro) no: es el que usa la
+# compilación dentro de soso mientras el guest no tenga C (T42, C-115). Si se piden
+# los dos gana `ring`.
+default = ["crypto-ring"]
 std = []
+crypto-ring = ["dep:ring", "dep:cc", "rustls/ring"]
+crypto-rust = ["dep:rustls-rustcrypto"]
 
 [build-dependencies]
-cc = "1"
+# Sólo con `crypto-ring`: `cc` no compila en soso (no hay ficheros temporales con nombre).
+cc = { version = "1", optional = true }
 
 [dependencies]
 soso-abi = { path = "../soso-abi" }
@@ -19,6 +26,7 @@ soso-abi = { path = "../soso-abi" }
 # que pedir `rdrand` aquí anula el `register_custom_getrandom!` de libsoso
 # aunque el binario de usuario pida `custom`. La entropía la da el kernel.
 getrandom = { version = "0.2", features = ["custom"] }
-ring = { version = "0.17", features = ["less-safe-getrandom-custom-or-rdrand"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
+ring = { version = "0.17", features = ["less-safe-getrandom-custom-or-rdrand"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["tls12"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12", "zeroize"], optional = true }
 webpki-roots = "0.26"

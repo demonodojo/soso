@@ -424,6 +424,7 @@ extern "sysv64" fn kill_shim(motivo: u64, dato: u64) -> u64 {
             crate::println!(
                 "task: general protection fault de usuario error={dato:#x} rip={rip:#x} rsp={rsp:#x}"
             );
+            crate::task::dump_user_stack_n(rsp, 48);
             crate::task::kill_current("general protection fault")
         }
         2 => crate::task::kill_current("invalid opcode"),

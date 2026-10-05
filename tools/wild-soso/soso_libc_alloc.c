@@ -300,3 +300,22 @@ void *__wrap___libc_calloc(u64 nm, u64 sz) { return __wrap_calloc(nm, sz); }
 void *__wrap___libc_realloc(void *p, u64 n) { return __wrap_realloc(p, n); }
 void __wrap___libc_free(void *p) { __wrap_free(p); }
 void *__wrap___libc_memalign(u64 align, u64 n) { return __wrap_aligned_alloc(align, n); }
+
+/* libstdc++ lee `__libc_single_threaded` por GOT; en un enlace estático con wild el
+ * miembro de libc.a que lo define no se extrae y la entrada GOT queda a 0 (page fault en
+ * `ios_base::Init`). 1 = «un solo hilo»: glibc evita los caminos de cancelación
+ * (`__pthread_enable_asynccancel` en cada `write`) y libstdc++ usa contadores no
+ * atómicos. Vale para un programa C++ de un solo hilo (el driver de clang). */
+char __libc_single_threaded = 1;
+
+/* `sysconf` de glibc: _SC_MINSIGSTKSZ (249) y _SC_SIGSTKSZ (250) salen de datos que sólo
+ * rellena `__libc_early_init`/`_dl_non_dynamic_init` (no se ejecutan en soso) y su
+ * aserción `minsigstacksize != 0` mata al proceso: LLVM las pide en
+ * `PrintStackTraceOnErrorSignal`. El resto va a la implementación real. */
+long __real_sysconf(int name);
+long __wrap_sysconf(int name) {
+    if (name == 249) return 2048;
+    if (name == 250) return 8192;
+    return __real_sysconf(name);
+}
+long __wrap___sysconf(int name) { return __wrap_sysconf(name); }

@@ -2180,3 +2180,26 @@ fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
     crate::arch::percpu::set_current_pid(0);
     1
 }
+
+/// Como `dump_user_stack` pero con más palabras: en un `abort()` (`hlt`, #GP) el rsp está
+/// varios marcos por debajo de quien lo llamó y tres palabras no llegan a ninguna
+/// dirección de retorno.
+pub fn dump_user_stack_n(rsp: u64, n: usize) {
+    if rsp % 8 != 0 || current_pid() == 0 || n == 0 || n > 64 {
+        return;
+    }
+    let ok = with_current(|p| {
+        let space = p.space.as_ref().unwrap();
+        let mut buf = [0u8; 64 * 8];
+        space.read(rsp, &mut buf[..n * 8]).map(|_| buf)
+    });
+    if let Some(buf) = ok {
+        for (i, c) in buf[..n * 8].chunks_exact(8).enumerate() {
+            let v = u64::from_le_bytes(c.try_into().unwrap());
+            // Sólo lo que parece código (texto del ejecutable): ahorra ruido.
+            if (0x400000..0x4000_0000).contains(&v) {
+                crate::println!("task:   [rsp+{:#x}]={v:#x}", i * 8);
+            }
+        }
+    }
+}

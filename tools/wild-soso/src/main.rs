@@ -341,7 +341,10 @@ fn with_static_host_libs(args: &[String]) -> Vec<String> {
 /// rustc mete `-Bdynamic` delante de `-lz`/`-lc`; wild no debe quedarse en
 /// modo dinámico para ejecutables que corren en el guest.
 fn without_bdynamic(args: &[String]) -> Vec<String> {
-    if !needs_gcc_crt(args) || args.iter().any(|arg| arg == "-lstdc++") {
+    // Con `-lstdc++` también: un binario C++ cuyo `-Bdynamic -lc -lm` queda dinámico
+    // sale con `NEEDED libc.so.6` y las llamadas a libc van por GOT a cero (T42: un
+    // `main` de C++ enlazado desde Rust, p. ej. clang, moría en `secure_getenv`).
+    if !needs_gcc_crt(args) || std::env::var_os("SOSO_ENLACE_DINAMICO").is_some() {
         return args.to_vec();
     }
     args.iter()
@@ -436,6 +439,10 @@ const MALLOC_WRAPS: &[&str] = &[
     "--wrap=__libc_realloc",
     "--wrap=__libc_free",
     "--wrap=__libc_memalign",
+    // T42: `sysconf(_SC_SIGSTKSZ/_SC_MINSIGSTKSZ)` da cero sin la inicialización de la
+    // libc estática y glibc aborta con una aserción (LLVM la llama al arrancar).
+    "--wrap=sysconf",
+    "--wrap=__sysconf",
 ];
 
 fn with_soso_libc_alloc(args: &[String], obj: Option<&str>) -> Vec<String> {
@@ -711,6 +718,8 @@ mod tests {
                 "--wrap=__libc_realloc",
                 "--wrap=__libc_free",
                 "--wrap=__libc_memalign",
+                "--wrap=sysconf",
+                "--wrap=__sysconf",
                 "soso_libc_alloc.o",
                 "-lstdc++",
             ]

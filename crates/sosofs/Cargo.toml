@@ -33,3 +33,11 @@ required-features = ["std"]
 [[example]]
 name = "listar"
 required-features = ["std"]
+
+[[example]]
+name = "escanear"
+required-features = ["std"]
+
+[[example]]
+name = "mover"
+required-features = ["std"]
