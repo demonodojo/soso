@@ -233,3 +233,63 @@ mod ids {
         assert_eq!(id_de_la_respuesta(historial), "call_2");
     }
 }
+
+// Lo que el 7B escribió de verdad con el prompt completo de OpenCode (sonda
+// `generar_crudo`, 2026-10-08): una llamada válida en una cerca Markdown.
+#[test]
+fn la_llamada_real_del_7b_se_parsea_contra_el_esquema_de_opencode() {
+    use soso_llm_core::conversation::parse_assistant_output;
+    let (_, cuerpo) = peticiones().remove(0);
+    let wire = parse_chat_completions(&cuerpo).unwrap();
+    let input = wire_to_chat_input(&wire).unwrap();
+    let salida = "```json\n{\"name\": \"read\", \"arguments\": {\"filePath\": \"/work/repo/TASK.md\"}}\n```\n";
+    let turno = parse_assistant_output(&input, salida, 1)
+        .unwrap_or_else(|e| panic!("no se parseó la llamada real del 7B: {e:?}"));
+    let call = turno.tool_call.expect("tool_call");
+    assert_eq!(call.name, "read");
+    assert_eq!(call.arguments, "{\"filePath\":\"/work/repo/TASK.md\"}");
+}
+
+// Regresión de T22: `CpuBackend` devolvía prompt + generación y el parser de llamadas
+// leía el prompt (con sus `<tool_call>` de ejemplo) como si fuera la salida del modelo.
+#[cfg(feature = "std")]
+#[test]
+fn solo_generados_quita_el_prompt() {
+    use soso_llm_api::solo_generados;
+    assert_eq!(solo_generados(&[1, 2, 3, 4, 5], 3), vec![4, 5]);
+    assert_eq!(solo_generados(&[1, 2, 3], 3), Vec::<u32>::new());
+    assert_eq!(solo_generados(&[1, 2], 5), Vec::<u32>::new());
+    // Un id del prompt repetido en lo generado no confunde: se corta por longitud.
+    assert_eq!(solo_generados(&[7, 8, 7, 8], 2), vec![7, 8]);
+}
+
+// Intento 6 de T22: con el protocolo en el prompt el 7B lee TASK.md y decode.rs de verdad
+// y escribe el `edit`, pero olvida la llave final del objeto exterior.
+#[test]
+fn el_edit_real_del_7b_sin_llave_final_se_acepta() {
+    use soso_llm_core::conversation::parse_assistant_output;
+    let (_, cuerpo) = peticiones().remove(0);
+    let wire = parse_chat_completions(&cuerpo).unwrap();
+    let input = wire_to_chat_input(&wire).unwrap();
+    let salida = "{\"name\": \"edit\", \"arguments\": {\"filePath\":\"crates/soso-web-core/src/decode.rs\",\"newString\":\"        out.push(bt as char);\\n        i += 1;\",\"oldString\":\"        i += 1;\"}";
+    let turno = parse_assistant_output(&input, salida, 3)
+        .unwrap_or_else(|e| panic!("no se aceptó: {e:?}"));
+    let call = turno.tool_call.expect("llamada");
+    assert_eq!(call.name, "edit");
+    assert!(call.arguments.contains("\"oldString\""));
+}
+
+#[test]
+fn la_salida_exacta_del_7b_en_el_intento_6_se_acepta() {
+    use soso_llm_core::conversation::parse_assistant_output;
+    let (_, cuerpo) = peticiones().remove(0);
+    let wire = parse_chat_completions(&cuerpo).unwrap();
+    let input = wire_to_chat_input(&wire).unwrap();
+    let salida =
+        std::fs::read_to_string(fixtures().join("salida-7b-edit-sin-llave-final.txt")).unwrap();
+    let turno = parse_assistant_output(&input, &salida, 3)
+        .unwrap_or_else(|e| panic!("no se aceptó la salida real: {e:?}"));
+    let call = turno.tool_call.expect("llamada");
+    assert_eq!(call.name, "edit");
+    assert!(call.arguments.contains("crates/soso-web-core/src/decode.rs"));
+}

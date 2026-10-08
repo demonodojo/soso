@@ -134,6 +134,19 @@ una respuesta SSE cortada, y entra en bucle si recibe una llamada incompleta; y
 manda una petición de título en paralelo a la principal (se desactiva con
 `agent.title.disable` porque hay una sola generación admitida).
 
+**Formas de llamada aceptadas (T22, 2026-10-08).** El 7B no escribe siempre `<tool_call>`
+…`</tool_call>`. Con el prompt real de OpenCode (4 146 tokens) y una petición explícita
+escribió, medido con `generar_crudo`: una cerca ` ```json ` cerrada, y **el objeto
+`{"name":…,"arguments":{…}}` suelto**; el guest además cerraba el turno sin escribir la
+etiqueta ni la cerca de cierre. El parser acepta ahora, además de las formas de T07:
+- etiqueta o cerca **sin cerrar** si lo escrito es un JSON de llamada **completo**;
+- el objeto suelto, si es **todo** el turno, `name` es una herramienta declarada y
+  `arguments` es un objeto. Si no, sigue siendo texto.
+Un JSON **cortado** sigue siendo «llamada a herramienta truncada» (error de la petición,
+nunca una llamada a medias). Los argumentos se validan después contra el esquema como
+siempre. Esto invierte las pruebas de T07 `json_suelto_no_es_llamada` y
+`cerca_markdown_truncada` (reescritas en `conversation_tools.rs`).
+
 Campos iniciales: `model`, `messages`, `tools`, `tool_choice`, `stream`,
 `max_tokens`/`max_completion_tokens` (si llegan ambos distintos, error),
 `temperature`, `top_p`, `seed`, `stream_options.include_usage` y

@@ -774,11 +774,25 @@ fn reutilizar_prefijo_con_planificador_da_lo_mismo_que_en_frio() {
 }
 
 // T82: el prefill por bloques es idéntico bit a bit al de un token cada vez.
-fn estado(rt: &Runtime) -> (usize, Vec<u32>, Vec<Vec<u16>>, Vec<Vec<u16>>) {
+type Estado = (usize, Vec<u32>, Vec<(Vec<u16>, Vec<u16>, Vec<i8>, Vec<i8>, Vec<u32>, Vec<u32>)>);
+
+fn estado(rt: &Runtime) -> Estado {
     let bits_h: Vec<u32> = rt.hidden.iter().map(|x| x.to_bits()).collect();
-    let k: Vec<Vec<u16>> = rt.kv.iter().map(|l| l.k_f16.clone()).collect();
-    let v: Vec<Vec<u16>> = rt.kv.iter().map(|l| l.v_f16.clone()).collect();
-    (rt.pos, bits_h, k, v)
+    let capas = rt
+        .kv
+        .iter()
+        .map(|l| {
+            (
+                l.k_f16.clone(),
+                l.v_f16.clone(),
+                l.k_i8.clone(),
+                l.v_i8.clone(),
+                l.k_scale.iter().map(|x| x.to_bits()).collect(),
+                l.v_scale.iter().map(|x| x.to_bits()).collect(),
+            )
+        })
+        .collect();
+    (rt.pos, bits_h, capas)
 }
 
 fn prefill(modelo: fn() -> (Manifest, TensorIndex, MemFileMapper), prompt: &[u32], bloques: bool) -> Runtime {
@@ -825,3 +839,50 @@ fn bloques_dan_los_mismos_tokens_generados() {
     }
     assert_eq!(salidas[0], salidas[1]);
 }
+
+// T82 con la política H2O del planificador (la que usa el guest): el camino por bloques
+// tiene que acumular la misma masa de atención que el de un token.
+fn runtime_h2o(bloques: bool) -> Option<(Runtime, MmapTensorSource<MemFileMapper>)> {
+    use soso_llm_core::plan::{MemSnapshot, ResourcePlanner};
+    for frames in [400u64, 600, 800, 1_200, 2_000, 4_000, 8_000, 16_000] {
+        let (mut manifest, index, mapper) = tiny_model_gqa();
+        // Como el 7B en el guest: los pesos caben, pero la ventana de KV es más corta que
+        // `max_seq`, así que el planificador activa H2O.
+        manifest.max_seq = 50_000;
+        let mut rt = Runtime::new(manifest.clone(), index.clone(), 0, 0);
+        let mem = MemSnapshot {
+            total_frames: frames,
+            free_frames: frames / 2,
+            reclaimable_frames: 0,
+        };
+        let pl = ResourcePlanner::new(&manifest, &rt.index, mem, 0, false);
+        if pl.use_h2o() && pl.keep_weights_mapped() && pl.kv_window_tokens() >= 24 {
+            rt.set_planner(pl);
+            rt.prefill_por_bloques = bloques;
+            return Some((rt, MmapTensorSource::new(String::from(BASE), index, mapper)));
+        }
+    }
+    None
+}
+
+#[test]
+fn bloques_con_h2o_acumulan_la_misma_masa() {
+    let prompt: Vec<u32> = (0..18u32).map(|i| (i * 5 + 3) % 40).collect();
+    let (Some((mut a, mut sa)), Some((mut b, mut sb))) = (runtime_h2o(false), runtime_h2o(true)) else {
+        panic!("no hay una configuración de memoria con H2O y pesos residentes en el modelo tiny");
+    };
+    a.prefill_prompt(&mut sa, &prompt, None, &mut None, None).unwrap();
+    b.prefill_prompt(&mut sb, &prompt, None, &mut None, None).unwrap();
+    assert_eq!(a.tokens_en_bloque, 0);
+    assert!(b.tokens_en_bloque >= 16, "el camino por bloques no se usó con H2O: {}", b.motivo_sin_bloque);
+    assert_eq!(estado(&a), estado(&b));
+    let dtype = if a.kv[0].k_i8.is_empty() { "f16" } else { "int8" };
+    println!("KV del planificador en la prueba H2O: {dtype}");
+    for (la, lb) in a.kv.iter().zip(&b.kv) {
+        let ma: Vec<u32> = la.mass.iter().map(|x| x.to_bits()).collect();
+        let mb: Vec<u32> = lb.mass.iter().map(|x| x.to_bits()).collect();
+        assert_eq!(ma, mb, "la masa de atención (H2O) difiere");
+        assert!(!ma.is_empty() && ma.iter().any(|&x| f32::from_bits(x) > 0.0), "sin masa acumulada: la prueba no ejercita H2O");
+    }
+}
+

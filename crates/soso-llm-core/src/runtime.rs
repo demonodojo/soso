@@ -112,6 +112,8 @@ pub struct Runtime {
     pub prefill_por_bloques: bool,
     /// Cuántos tokens se han procesado por el camino de bloques (diagnóstico/pruebas).
     pub tokens_en_bloque: u64,
+    /// Por qué se descartó el camino por bloques la última vez que se descartó ("" si no).
+    pub motivo_sin_bloque: &'static str,
     pub backend: Backend,
     scratch: LayerScratch,
     logits_buf: Vec<f32>,
@@ -164,6 +166,7 @@ impl Runtime {
             block: None,
             prefill_por_bloques: true,
             tokens_en_bloque: 0,
+            motivo_sin_bloque: "",
             backend: Backend::Auto,
             scratch,
             logits_buf: vec![0.0f32; vocab],
@@ -457,40 +460,66 @@ impl Runtime {
     /// clásica con KV f16 y FFN denso en todas las capas, sin GPU ni capas remotas, con
     /// los pesos residentes (nada que descargar entre capas) y sin que la ventana de KV
     /// deslice a mitad de bloque.
-    fn bloque_posible(&self, n: usize, gpu: &Option<&mut dyn crate::gpu::GpuDispatch>) -> bool {
-        if n < 2 || !self.prefill_por_bloques {
-            return false;
+    fn bloque_posible(
+        &mut self,
+        n: usize,
+        gpu: &Option<&mut dyn crate::gpu::GpuDispatch>,
+    ) -> bool {
+        match self.motivo_para_no_usar_bloque(n, gpu) {
+            None => true,
+            Some(m) => {
+                self.motivo_sin_bloque = m;
+                false
+            }
+        }
+    }
+
+    fn motivo_para_no_usar_bloque(
+        &self,
+        n: usize,
+        gpu: &Option<&mut dyn crate::gpu::GpuDispatch>,
+    ) -> Option<&'static str> {
+        if n < 2 {
+            return Some("quedan menos de 2 tokens");
+        }
+        if !self.prefill_por_bloques {
+            return Some("desactivado");
         }
         let base_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
             && gpu.as_ref().is_some_and(|g| g.available());
         if base_gpu {
-            return false;
+            return Some("hay GPU");
         }
         if let Some(pl) = self.planner.as_ref() {
-            if !pl.keep_weights_mapped()
-                || pl.use_h2o()
-                || pl.use_sparse_attn(self.pos + n)
-                || self.pos + n > pl.kv_window_tokens()
-            {
-                return false;
+            if !pl.keep_weights_mapped() {
+                return Some("el planificador no mantiene los pesos residentes");
+            }
+            if self.pos + n > pl.kv_window_tokens() {
+                return Some("la ventana de KV es más corta que el prompt");
             }
             if (0..self.manifest.num_layers).any(|l| pl.layer_dest(l) != ExecDest::Cpu) {
-                return false;
+                return Some("alguna capa no va en CPU");
             }
         } else if self.pos + n > self.manifest.max_seq as usize {
-            return false;
+            return Some("supera max_seq");
         }
         let exec = LayerExecutor {
             manifest: &self.manifest,
             has_gate: self.has_gate,
             parallel: None,
         };
-        (0..self.manifest.num_layers).all(|l| {
+        for l in 0..self.manifest.num_layers {
             let kv = &self.kv[l as usize];
             let kv_dim = self.manifest.effective_num_kv_heads(l) as usize
                 * self.manifest.effective_head_dim(l) as usize;
-            exec.soporta_bloque(l, kv) && kv.tokens(kv_dim) == self.pos
-        })
+            if !exec.soporta_bloque(l, kv) {
+                return Some("capa no soportada (MLA/KDA/gated/GDN/MoE)");
+            }
+            if kv.tokens(kv_dim) != self.pos {
+                return Some("el KV ya no coincide con la posición");
+            }
+        }
+        None
     }
 
     /// Procesa `tokens` de una vez (prefill por bloques). Devuelve `false` si el
@@ -542,6 +571,7 @@ impl Runtime {
                 &mut self.scratch,
                 &mut self.kv[layer as usize],
                 source,
+                self.planner.as_ref(),
             );
             if r.is_err() {
                 self.block = Some(bs);

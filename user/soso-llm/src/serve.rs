@@ -346,6 +346,15 @@ fn post_chat_generar(
     // `usage.completion_tokens` decía 2. El texto y el consumo se contradecían,
     // y cualquiera que leyera el `content` recibía el prompt de vuelta.
     let token_ids = solo_generados(&token_ids, prompt_ids.len());
+    if let Some(ses) = rt.propietario.sesion.as_ref() {
+        // T82: cuánto del prefill fue por bloques y, si no, por qué.
+        libsoso::logln!(
+            "serve: prefill {} tokens de prompt; por bloques acumulado {}; motivo sin bloque: {:?}",
+            prompt_ids.len(),
+            ses.bundle.rt.tokens_en_bloque,
+            ses.bundle.rt.motivo_sin_bloque
+        );
+    }
 
     let generated_text = rt
         .propietario
@@ -360,7 +369,14 @@ fn post_chat_generar(
         &generated_text,
         prepared.input.siguiente_id_llamada(),
     )
-    .map_err(|e| GuestServiceError::Api(e.into()))?;
+    .map_err(|e| {
+        // Sin esto sólo se sabe que la llamada era inválida, no qué escribió el modelo.
+        libsoso::logln!(
+            "serve: salida rechazada ({e:?}): {:?}",
+            generated_text.chars().take(1500).collect::<alloc::string::String>()
+        );
+        GuestServiceError::Api(e.into())
+    })?;
     validate_tool_choice(&prepared, &turn)?;
 
     let payload = completion_payload(&prepared, &profile, turn, report);
@@ -438,6 +454,15 @@ fn post_chat_stream(
             .map_err(|_| GuestServiceError::Inferencia)?
     };
     let token_ids = solo_generados(&token_ids, prompt_ids.len());
+    if let Some(ses) = rt.propietario.sesion.as_ref() {
+        // T82: cuánto del prefill fue por bloques y, si no, por qué.
+        libsoso::logln!(
+            "serve: prefill {} tokens de prompt; por bloques acumulado {}; motivo sin bloque: {:?}",
+            prompt_ids.len(),
+            ses.bundle.rt.tokens_en_bloque,
+            ses.bundle.rt.motivo_sin_bloque
+        );
+    }
 
     if report.stop == StopReason::Cancelled || cancel.load(Ordering::Acquire) {
         let events = encode_stream_failure("generacion cancelada", "cancelled");
@@ -460,7 +485,14 @@ fn post_chat_stream(
         &generated_text,
         prepared.input.siguiente_id_llamada(),
     )
-    .map_err(|e| GuestServiceError::Api(e.into()))?;
+    .map_err(|e| {
+        // Sin esto sólo se sabe que la llamada era inválida, no qué escribió el modelo.
+        libsoso::logln!(
+            "serve: salida rechazada ({e:?}): {:?}",
+            generated_text.chars().take(1500).collect::<alloc::string::String>()
+        );
+        GuestServiceError::Api(e.into())
+    })?;
     validate_tool_choice(&prepared, &turn)?;
 
     let payload = completion_payload(&prepared, &profile, turn, report);

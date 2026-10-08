@@ -884,6 +884,12 @@ impl ResourcePlanner {
         self.use_h2o
     }
 
+    /// Apaga la atención dispersa (diagnóstico y pruebas): sin ella la atención es exacta.
+    pub fn desactivar_atencion_dispersa(&mut self) {
+        self.use_sparse = false;
+        self.stats.sparse_attn = 0;
+    }
+
     /// Quest-lite: sparse solo si el planner lo activó y la seq supera el umbral.
     pub fn use_sparse_attn(&self, seq: usize) -> bool {
         self.use_sparse && seq > SPARSE_TOKEN_THRESHOLD

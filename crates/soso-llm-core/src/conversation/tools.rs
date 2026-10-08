@@ -91,7 +91,35 @@ impl ToolCallParser {
             }
         }
         if matches!(self.phase, Phase::InCall | Phase::InFence) {
-            return Err(historial("llamada a herramienta truncada"));
+            // El modelo suele cerrar el turno (token de parada) sin escribir `</tool_call>`
+            // ni la cerca de cierre. Si lo que escribió es una llamada **completa** vale;
+            // si el JSON está cortado, sigue siendo una llamada truncada.
+            let cuerpo = self
+                .body
+                .trim_end_matches(|c: char| c.is_whitespace() || c == '`')
+                .to_string();
+            match parse_body(&cuerpo, self.id_next) {
+                Ok(llamada) => {
+                    self.tool_call = Some(llamada);
+                    self.phase = Phase::AfterCall;
+                }
+                Err(_) => return Err(historial("llamada a herramienta truncada")),
+            }
+        } else if self.tool_call.is_none() {
+            // JSON desnudo: sin etiqueta ni cerca, el modelo escribe sólo el objeto
+            // `{"name":…, "arguments":{…}}`. Se toma por llamada únicamente si es **todo**
+            // el turno y nombra una herramienta declarada; si no, es texto.
+            let t = self.text.trim();
+            if t.starts_with('{') && t.ends_with('}') {
+                if let Some(w) = primer_objeto(t) {
+                    if w.arguments.is_object() && entrada.herramienta(&w.name).is_some() {
+                        if let Ok(llamada) = parse_body(t, self.id_next) {
+                            self.tool_call = Some(llamada);
+                            self.text.clear();
+                        }
+                    }
+                }
+            }
         }
         let content = if self.text.is_empty() {
             None
@@ -186,8 +214,19 @@ pub fn parse_assistant_output(
     id_next: u32,
 ) -> Result<AssistantTurn, ChatError> {
     let mut parser = ToolCallParser::new(id_next);
-    parser.push(generated)?;
+    parser.push(sin_marca_de_turno(generated))?;
     parser.finish(entrada)
+}
+
+/// El 7B a veces abre su respuesta con un `<|im_start|>` suelto (y a veces `assistant`),
+/// como si empezara otro turno. No es contenido: se quita del principio, nada más.
+fn sin_marca_de_turno(texto: &str) -> &str {
+    let t = texto.trim_start();
+    let Some(resto) = t.strip_prefix("<|im_start|>") else {
+        return texto;
+    };
+    let resto = resto.trim_start();
+    resto.strip_prefix("assistant").map(str::trim_start).unwrap_or(resto)
 }
 
 fn historial(motivo: impl Into<String>) -> ChatError {
@@ -388,10 +427,13 @@ fn parse_body(body: &str, id: u32) -> Result<ToolCall, ChatError> {
     if json.is_empty() {
         return Err(historial("tool_call sin cuerpo JSON"));
     }
-    let wire: WireCall = serde_json::from_str(json).map_err(|_| {
-        ChatError::ArgumentosInvalidos {
-            llamada: format!("call_{id}"),
-        }
+    // Si el modelo escribe varias llamadas seguidas en el mismo bloque (quiere hacer todos
+    // los pasos de golpe), se atiende **la primera**: el contrato es una llamada por turno
+    // (`parallel_tool_calls: false`) y el agente pedirá el resto en el turno siguiente.
+    // Lo que sigue a ese primer objeto no se interpreta. Un primer objeto incompleto o
+    // inválido sigue siendo un error.
+    let wire = primer_objeto(json).ok_or_else(|| ChatError::ArgumentosInvalidos {
+        llamada: format!("call_{id}"),
     })?;
     if !wire.arguments.is_object() {
         return Err(ChatError::ArgumentosInvalidos {
@@ -411,6 +453,62 @@ fn parse_body(body: &str, id: u32) -> Result<ToolCall, ChatError> {
         wire.name,
         arguments,
     ))
+}
+
+/// Primer objeto `{"name":…, "arguments":…}` de `json`; lo que venga detrás no se mira.
+///
+/// Si el JSON se corta **sólo por faltar llaves o corchetes de cierre** (el 7B suele
+/// cerrar `arguments` y olvidarse del objeto exterior) se completan, siempre que no
+/// haya una cadena sin cerrar ni falte nada más que los cierres. Un valor cortado
+/// (`"ruta": "a.r`, `"ruta":`) sigue sin ser una llamada.
+fn primer_objeto(json: &str) -> Option<WireCall> {
+    let leer = |t: &str| {
+        serde_json::Deserializer::from_str(t)
+            .into_iter::<WireCall>()
+            .next()
+            .and_then(|r| r.ok())
+    };
+    if let Some(w) = leer(json) {
+        return Some(w);
+    }
+    let cierres = cierres_que_faltan(json)?;
+    let mut completo = String::from(json.trim_end());
+    completo.push_str(&cierres);
+    leer(&completo)
+}
+
+/// Los `}` y `]` que cierran lo que `json` dejó abierto; `None` si hay una cadena sin
+/// cerrar, si lo abierto es demasiado (más de 3 niveles) o si no falta nada.
+fn cierres_que_faltan(json: &str) -> Option<String> {
+    let mut pila: alloc::vec::Vec<char> = alloc::vec::Vec::new();
+    let (mut en_cadena, mut escape) = (false, false);
+    for c in json.chars() {
+        if en_cadena {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                en_cadena = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => en_cadena = true,
+            '{' => pila.push('}'),
+            '[' => pila.push(']'),
+            '}' | ']' => {
+                if pila.pop() != Some(c) {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if en_cadena || pila.is_empty() || pila.len() > 3 {
+        return None;
+    }
+    Some(pila.into_iter().rev().collect())
 }
 
 fn json_compact(value: &Value) -> String {

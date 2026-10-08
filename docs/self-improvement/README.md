@@ -7,9 +7,11 @@
 
 ## Por dónde empezar
 
-> **Lo siguiente (decisión del 2026-10-08): [T82 — prefill por lotes](T82-prefill-por-lotes.md).**
-> Es lo que bloquea [T22](T22-primera-mejora.md): el prefill va token a token y un prompt de
-> OpenCode cuesta 65–125 min en el primer turno ([T81](T81-reutilizar-kv.md) ya evita repetirlo en los siguientes).
+> **Estado (2026-10-08).** [T82 — prefill por lotes](T82-prefill-por-lotes.md) está hecha (el prompt de OpenCode
+> en el guest baja de 64 a 20 min; [T81](T81-reutilizar-kv.md) deja los turnos siguientes en ~30 s).
+> [T22](T22-primera-mejora.md) sigue abierta: el 7B llama a herramientas, pero aún no completa una edición exacta.
+> **Lo siguiente:** aislar si el KV int8 del planificador del guest degrada la llamada a herramientas
+> (el host con KV f16 la hace mejor), y atención por lotes para recortar los 20 min del primer turno.
 
 
 **Ficha cerrada: [T42 — C, ensamblador y empaquetado por perfil](T42-c-link-imagen.md)**
@@ -199,7 +201,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T69](T69-apply-patches-no-completaba.md) | `dl.rs` se copia al vendor y nadie lo compila | SI-7 | T39 | **Completada** (2026-09-26; generación antigua retirada; build-std sigue en verde) |
 | [T70](T70-sigterm-no-termina.md) | SIGTERM no termina un proceso dormido | SI-6 | — | **Hecha** (2026-10-07: SIGTERM mata a los bloqueados, 143; SIGINT conserva `EINTR`) |
 | [T81](T81-reutilizar-kv.md) | Reutilizar el prefijo del KV entre peticiones | SI-3 | — | **Hecha** (2026-10-08; turnos 2+ de ~500 s a ~20 s, exacto) |
-| [T82](T82-prefill-por-lotes.md) | Prefill por lotes | SI-3 | T81 | **Pendiente — es lo siguiente** (el prefill token a token cuesta 65–125 min por prompt de OpenCode) |
+| [T82](T82-prefill-por-lotes.md) | Prefill por lotes | SI-3 | T81 | **Hecha** (2026-10-08: guest 3 846 s → 1 217 s con el prompt de OpenCode, 3,2×) |
 | [T71](T71-vendor-sin-cache.md) | `xtask` buscaba el vendor de Rust donde nunca está | SI-7 | — | Completada (2026-09-25; destapó la cadena de T39) |
 | [T72](T72-heap-de-libstd.md) | Compartir el alocador entre libsoso y std | SI-7 | — | **Completada** (2026-09-26; sonda guest 7/7; std deriva errores a T39) |
 | [T73](T73-futex-sin-plazo.md) | El futex de soso no tiene plazo, y `Condvar::wait_timeout` lo necesita | SI-7 | — | **Completada** (2026-09-26; acreditada en QEMU; `std` baja a 2 errores) |

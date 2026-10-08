@@ -287,7 +287,7 @@ impl ChatBackend for CpuBackend {
             prepared.top_p as f32,
             seed,
         );
-        self.rt.generate_stream_par_observed(
+        let (secuencia, report) = self.rt.generate_stream_par_observed(
             &mut self.source,
             prompt_ids,
             options,
@@ -295,8 +295,20 @@ impl ChatBackend for CpuBackend {
             observer,
             None,
             &mut None,
-        )
+        )?;
+        // `ChatBackend` devuelve sólo lo generado. El runtime devuelve la secuencia
+        // entera (prompt + generación): sin recortarla el parser de llamadas leía el
+        // prompt, con sus `<tool_call>` de ejemplo, como si fuera la salida del modelo.
+        Ok((solo_generados(&secuencia, prompt_ids.len()), report))
     }
+}
+
+/// Quita el prompt del principio de una secuencia devuelta por el runtime.
+///
+/// Por longitud y no buscando un separador: los ids del prompt son exactamente los
+/// que se pasaron, y un separador podría aparecer también en lo generado.
+pub fn solo_generados(secuencia: &[u32], prompt_len: usize) -> Vec<u32> {
+    secuencia.get(prompt_len..).unwrap_or(&[]).to_vec()
 }
 
 /// Observador que propaga cancelación externa (desconexión / escritura fallida).
@@ -477,7 +489,13 @@ impl<B: ChatBackend + Send> HostService<B> {
             &generated_text,
             prepared.input.siguiente_id_llamada(),
         )
-        .map_err(|e| ServiceError::Api(e.into()))?;
+        .map_err(|e| {
+            eprintln!(
+                "serve: salida rechazada ({e:?}): {:?}",
+                generated_text.chars().take(1500).collect::<String>()
+            );
+            ServiceError::Api(e.into())
+        })?;
 
         validate_tool_choice(&prepared, &turn)?;
 
@@ -537,7 +555,13 @@ impl<B: ChatBackend + Send> HostService<B> {
             &generated_text,
             prepared.input.siguiente_id_llamada(),
         )
-        .map_err(|e| ServiceError::Api(e.into()))?;
+        .map_err(|e| {
+            eprintln!(
+                "serve: salida rechazada ({e:?}): {:?}",
+                generated_text.chars().take(1500).collect::<String>()
+            );
+            ServiceError::Api(e.into())
+        })?;
         validate_tool_choice(&prepared, &turn)?;
 
         let payload = completion_payload(&prepared, &profile, turn, report);

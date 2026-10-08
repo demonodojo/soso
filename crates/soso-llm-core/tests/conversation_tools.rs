@@ -246,19 +246,26 @@ fn cerca_markdown_es_la_llamada() {
     assert_eq!(args["lineas"], 20);
 }
 
+// Decisión de T22 (2026-10-08), que invierte la de T07: el 7B escribe a menudo la llamada
+// como un JSON suelto, sin etiqueta ni cerca. Si es **todo** el turno y nombra una
+// herramienta declarada con argumentos objeto, es una llamada. Lo que no cumple eso sigue
+// siendo texto (ver `json_desnudo_que_no_es_una_llamada_se_queda_como_texto`).
 #[test]
-fn json_suelto_no_es_llamada() {
+fn json_suelto_con_herramienta_declarada_es_llamada() {
     let entrada = entrada_auto();
     let texto = r#"{"name": "leer_archivo", "arguments": {"ruta": "a", "lineas": 1}}"#;
     let turno = parse_assistant_output(&entrada, texto, 0).expect("parse");
-    assert!(turno.tool_call.is_none());
-    assert_eq!(turno.content.as_deref(), Some(texto));
+    let call = turno.tool_call.expect("llamada");
+    assert_eq!(call.name, "leer_archivo");
+    assert_eq!(turno.content, None);
 }
 
 #[test]
-fn cerca_markdown_truncada() {
+fn cerca_markdown_con_json_cortado_es_truncada() {
     let entrada = entrada_auto();
-    let texto = "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a\"}}";
+    // El JSON no está completo: aquí sí es una llamada truncada. (Con el JSON completo y
+    // sin cerca de cierre, la llamada vale: `llamada_sin_cerrar_la_cerca_…`.)
+    let texto = "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.r";
     let err = parse_assistant_output(&entrada, texto, 0).unwrap_err();
     assert!(matches!(err, ChatError::HistorialInvalido { .. }));
 }
@@ -342,4 +349,134 @@ fn los_ids_de_llamada_continuan_la_numeracion_del_historial() {
         Message::llamadas(vec![ToolCall::nueva("toolu_xyz", "a", "{}")]),
     ]);
     assert_eq!(ajeno.siguiente_id_llamada(), 1);
+}
+
+// T22: formas con las que el 7B escribe una llamada (vistas con el prompt real de OpenCode).
+#[test]
+fn llamada_sin_cerrar_la_cerca_o_la_etiqueta_vale_si_el_json_esta_completo() {
+    let entrada = entrada_auto();
+    // Cerca abierta y el turno termina sin cerrarla.
+    let t = parse_assistant_output(
+        &entrada,
+        "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\"}}\n",
+        1,
+    )
+    .expect("cerca sin cerrar");
+    assert_eq!(t.tool_call.expect("llamada").name, "leer_archivo");
+    // Etiqueta abierta sin `</tool_call>`.
+    let t = parse_assistant_output(
+        &entrada,
+        "<tool_call>\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\"}}",
+        1,
+    )
+    .expect("etiqueta sin cerrar");
+    assert!(t.tool_call.is_some());
+}
+
+#[test]
+fn json_cortado_sigue_siendo_llamada_truncada() {
+    let entrada = entrada_auto();
+    for texto in [
+        "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.r",
+        "<tool_call>\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\":",
+    ] {
+        let err = parse_assistant_output(&entrada, texto, 1).unwrap_err();
+        assert!(
+            matches!(err, ChatError::HistorialInvalido { ref motivo } if motivo.contains("truncada")),
+            "{texto}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn json_desnudo_con_herramienta_declarada_es_una_llamada() {
+    let entrada = entrada_auto();
+    let t = parse_assistant_output(
+        &entrada,
+        "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\", \"lineas\": 3}}",
+        4,
+    )
+    .expect("json desnudo");
+    let c = t.tool_call.expect("llamada");
+    assert_eq!((c.id.as_str(), c.name.as_str()), ("call_4", "leer_archivo"));
+    assert_eq!(t.content, None);
+}
+
+#[test]
+fn json_desnudo_que_no_es_una_llamada_se_queda_como_texto() {
+    let entrada = entrada_auto();
+    for texto in [
+        // herramienta que no existe
+        "{\"name\": \"borrar_todo\", \"arguments\": {}}",
+        // argumentos que no son un objeto
+        "{\"name\": \"leer_archivo\", \"arguments\": \"a.rs\"}",
+        // JSON cualquiera
+        "{\"a\": 1}",
+        // hay texto alrededor: no es todo el turno
+        "Aquí va: {\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\"}}",
+    ] {
+        let t = parse_assistant_output(&entrada, texto, 1).expect(texto);
+        assert!(t.tool_call.is_none(), "{texto}");
+        assert_eq!(t.content.as_deref(), Some(texto));
+    }
+}
+
+#[test]
+fn varias_llamadas_en_un_bloque_se_atiende_la_primera() {
+    let entrada = entrada_auto();
+    let dos = "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\"}}\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"b.rs\"}}";
+    for texto in [
+        format!("```json\n{dos}\n```"),
+        format!("<tool_call>\n{dos}\n</tool_call>"),
+        dos.to_string(),
+    ] {
+        let t = parse_assistant_output(&entrada, &texto, 1).expect(&texto);
+        let c = t.tool_call.expect("llamada");
+        assert_eq!(c.arguments, "{\"ruta\":\"a.rs\"}", "{texto}");
+    }
+    // La primera incompleta no se salva por haber una segunda detrás.
+    let rota = "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"b.rs\"}}\n```";
+    assert!(parse_assistant_output(&entrada, rota, 1).is_err());
+}
+
+// T22: el 7B cierra `arguments` y se olvida del `}` del objeto exterior.
+#[test]
+fn falta_la_llave_final_se_completa_pero_un_valor_cortado_no() {
+    let entrada = entrada_auto();
+    let sin_llave = "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\", \"lineas\": 3}";
+    for texto in [
+        sin_llave.to_string(),
+        format!("```json\n{sin_llave}\n```"),
+        format!("<tool_call>\n{sin_llave}\n</tool_call>"),
+    ] {
+        let t = parse_assistant_output(&entrada, &texto, 1).expect(&texto);
+        assert_eq!(t.tool_call.expect("llamada").arguments, "{\"lineas\":3,\"ruta\":\"a.rs\"}", "{texto}");
+    }
+    // Cortado en mitad de un valor o de una cadena: sigue sin ser una llamada.
+    for texto in [
+        "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.r",
+        "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\":",
+        "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\",",
+    ] {
+        let err = parse_assistant_output(&entrada, texto, 1).unwrap_err();
+        assert!(matches!(err, ChatError::HistorialInvalido { .. } | ChatError::ArgumentosInvalidos { .. }), "{texto}: {err:?}");
+    }
+    // Una llave de menos con cadena abierta dentro de un string escapado no confunde.
+    let con_escape = "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a\\\"}\\\".rs\"}";
+    let t = parse_assistant_output(&entrada, con_escape, 1).expect("escapes");
+    assert_eq!(t.tool_call.expect("llamada").arguments, "{\"ruta\":\"a\\\"}\\\".rs\"}");
+}
+
+#[test]
+fn una_marca_de_turno_suelta_al_principio_no_es_contenido() {
+    let entrada = entrada_auto();
+    let json = "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\"}}";
+    for prefijo in ["<|im_start|>\n", "<|im_start|>assistant\n", "  <|im_start|> "] {
+        let t = parse_assistant_output(&entrada, &format!("{prefijo}{json}"), 1).expect(prefijo);
+        assert!(t.tool_call.is_some(), "{prefijo:?}");
+        assert_eq!(t.content, None, "{prefijo:?}");
+    }
+    // Sólo se quita del principio: en medio del texto es contenido y se conserva.
+    let t = parse_assistant_output(&entrada, "hola <|im_start|> adiós", 1).expect("texto");
+    assert_eq!(t.content.as_deref(), Some("hola <|im_start|> adiós"));
 }

@@ -64,6 +64,39 @@ fn main() {
         eprintln!("carga: {e}");
         std::process::exit(1);
     });
+    if std::env::var_os("PLANNER").is_some() {
+        // Planificador como el del guest con 8 GiB: pesos residentes, ventana de KV,
+        // y atención dispersa para secuencias de más de 256 tokens.
+        use soso_llm_core::plan::{MemSnapshot, ResourcePlanner};
+        let mem = MemSnapshot {
+            total_frames: 8 * 1024 * 1024 * 1024 / 4096,
+            free_frames: 6 * 1024 * 1024 * 1024 / 4096,
+            reclaimable_frames: 0,
+        };
+        let m = backend.rt.manifest.clone();
+        let mut pl = ResourcePlanner::new(&m, &backend.rt.index, mem, 0, false);
+        if std::env::var_os("NO_SPARSE").is_some() {
+            pl.desactivar_atencion_dispersa();
+        }
+        eprintln!(
+            "PLANNER: h2o={} sparse(seq>256)={} ventana={} pesos residentes={}",
+            pl.use_h2o(),
+            pl.use_sparse_attn(1000),
+            pl.kv_window_tokens(),
+            pl.keep_weights_mapped()
+        );
+        backend.rt.set_planner(pl);
+    }
+    if std::env::var_os("KV_I8").is_some() {
+        // Fuerza KV int8 (KIVI-lite) como hace el planificador del guest con ventana corta.
+        use soso_llm_core::kv::{KvDtype, LayerKv};
+        let m = backend.rt.manifest.clone();
+        for l in 0..m.num_layers {
+            let kv_dim = m.effective_num_kv_heads(l) as usize * m.effective_head_dim(l) as usize;
+            backend.rt.kv[l as usize] = LayerKv::with_capacity_dtype(256, kv_dim, KvDtype::I8);
+        }
+        eprintln!("KV int8 FORZADO (KV_I8)");
+    }
     if std::env::var_os("SIN_BLOQUES").is_some() {
         backend.rt.prefill_por_bloques = false;
         eprintln!("prefill por bloques DESACTIVADO (SIN_BLOQUES)");

@@ -1,6 +1,6 @@
 # T82 — Prefill por lotes
 
-**Origen:** destapado el 2026-10-08 al intentar [T22](T22-primera-mejora.md). **Estado:** en curso (2026-10-08): kernels y forward por bloques hechos y verificados; falta medir en el guest y cerrar. Era lo siguiente a hacer (decisión del usuario).
+**Origen:** destapado el 2026-10-08 al intentar [T22](T22-primera-mejora.md). **Estado:** hecha (2026-10-08), con límites. Era lo siguiente a hacer (decisión del usuario).
 
 ## Por qué
 
@@ -36,4 +36,46 @@ Con el prefill por lotes, repetir [T22](T22-primera-mejora.md): ya se podrá ite
 
 **Pruebas** (`tests/generate.rs`): estado tras el prefill —K/V, `hidden`, `pos`— **idéntico bit a bit** por bloques y token a token, en dos modelos tiny, con longitudes 2, 7, 8, 9, 17, 20 y comprobando que se usó el camino nuevo (`tokens_en_bloque`); y mismos tokens generados. El contrato de cancelación se conserva: el observador sigue viendo cada `PrefillToken{done}`.
 
-**Medida preliminar con el 7B real (host, 1 hilo, AVX2):** prompt de 554 tokens + 24 generados en **160,1 s** (`first-improvement/crudo-bloques-a-read.txt`).
+**Medida con el 7B real (host, 1 hilo, AVX2), mismo prompt de 554 tokens:**
+
+| | Tiempo | Archivo |
+|---|---|---|
+| sin bloques (`SIN_BLOQUES=1`), 1 token generado | 390,4 s (0,70 s/token) | `crudo-sin-bloques-a-read.txt` |
+| con bloques, 24 tokens generados | 160,1 s (prefill ≈ 143 s ≈ 0,26 s/token) | `crudo-bloques-a-read.txt` |
+
+→ **≈ 2,7× en prefill con un hilo.** Menos que el 4,3× del kernel suelto porque la atención, RoPE, normas y SwiGLU siguen yendo token a token (Amdahl); la atención además crece con la posición, así que en prompts largos pesa más. Queda por medir en el guest (4 núcleos, `RowParallel`) y por perfilar la atención.
+
+## Guest: por qué al principio no se notó (2026-10-08)
+
+La primera medida en el guest (prompt de 554 tokens) dio **600 s, igual que antes**: el camino por bloques no se estaba usando. Se añadió un diagnóstico (`Runtime::motivo_sin_bloque`, registrado por el servidor del guest tras cada generación: «prefill N tokens de prompt; por bloques acumulado M; motivo sin bloque: …») y dijo **«H2O activo»**: el planificador del guest usa la política de expulsión H2O (la ventana de KV es más corta que `max_seq`) y mi versión excluía ese caso. Con H2O el KV además cae a **int8** (KIVI-lite).
+
+Arreglo: el forward por bloque hace lo mismo que el de un token también con H2O (acumula la masa de atención por token) y con KV int8 (`append` y la atención genérica ya saben de dtype). Prueba (`tests/generate.rs::bloques_con_h2o_acumulan_la_misma_masa`): planificador con H2O + pesos residentes + KV int8, estado idéntico bit a bit —K/V int8, escalas, **masa de atención**, `hidden`, `pos`—.
+
+**Medida en el guest** (7B, `-smp 4`, 8 GiB; petición `corto/a-read.json`, 554 tokens + hasta 40 generados):
+
+| | Tiempo | Bloques |
+|---|---|---|
+| antes (token a token) | 600 s (`medida-diag-guest-sin-h2o.txt`) | 0 de 554 |
+| prefill por bloques | **210 s** (`medida-diag-guest-con-bloques.txt`) | **554 de 554** |
+
+→ **≈ 2,9×** en el guest, coherente con el 2,7× del host con un hilo. Queda por debajo del 4,3× del kernel porque la atención, RoPE, normas y SwiGLU siguen yendo token a token y porque el reparto de filas entre hilos tiene su coste.
+
+## Límites y siguiente
+
+- **Atención por lotes** (agrupar las cabezas/tokens del bloque) y reparto de la atención entre hilos: la atención crece con la posición y en prompts largos pasa a ser lo que domina.
+- El KV int8 + H2O del planificador cambia la numérica respecto al KV f16 del host: el mismo prompt dio salidas distintas en host y guest (`"name": "read"` frente a `"function": "readFile"`), así que **los ajustes de prompt hechos en el host no se trasladan tal cual al guest**.
+- El arranque de `soso-llm serve` en el arnés del guest falla de forma intermitente (~2 de cada 3 veces: «serve terminó solo» / «QEMU murió cargando serve»), con 12 GiB casi siempre y con 8 GiB a veces; `first-improvement/lanzar-t82.sh` reintenta. Sin diagnosticar.
+
+## Medida final en el guest: el prompt completo de OpenCode (2026-10-08)
+
+7B, `-smp 4`, 8 GiB, petición `00-original` (4 146 tokens de prompt, 32 generados), `medida-t82-guest.txt`:
+
+| | Tiempo |
+|---|---|
+| antes de T81/T82 (token a token) | 3 846 s (64 min) |
+| **prefill por bloques** (4 146 de 4 146 tokens por bloques) | **1 217 s (20 min)** → **3,2×** |
+| petición siguiente (4 171 tokens, prefijo común reutilizado, T81) | **34 s** |
+
+**Lo que no se ha conseguido:** bajar de 20 min el primer turno de cada sesión. Queda la atención por lotes y repartir la atención entre hilos.
+
+**Hallazgo adicional.** En esa segunda petición el 7B del guest escribió ` ```json {"function": "read", "filePath": "TASK.md"} ``` `, un esquema que ni el host (KV f16: `{"name": "read", "arguments": …}`) ni el prompt piden. El guest usa KV int8 y H2O; el host, f16 y sin H2O. Falta aislar si es la cuantización del KV lo que degrada la llamada a herramienta (el prompt es el mismo).

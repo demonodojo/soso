@@ -51,5 +51,5 @@ pub use e2e::{
 #[cfg(feature = "std")]
 pub use service::{
     http_error_bytes, load_cpu_backend, run_accept_loop, CancelBridge, ChatBackend, CpuBackend,
-    HostService, LoadError, OwnedMapper, ServiceError,
+    solo_generados, HostService, LoadError, OwnedMapper, ServiceError,
 };

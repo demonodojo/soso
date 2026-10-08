@@ -800,15 +800,15 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "blocker": "Prefill por lotes (T82) para poder iterar sobre el prompt; calidad del 7B con tool-calling de OpenCode sin demostrar.",
-        "updated_at": "2026-10-08T07:40:00+02:00",
-        "summary": "Intentos 1–2 contra el guest con el 7B: el modelo no llama a ninguna herramienta con el prompt real de OpenCode (8 muestras); pedido sin rodeos, abre la llamada pero sale truncada o mal formada. Cuello de botella: prefill token a token. T81 hecha; T82 es lo siguiente.",
+        "blocker": "Calidad del 7B en edición exacta; KV int8 del planificador del guest sin descartar como causa de llamadas peores que en el host.",
+        "updated_at": "2026-10-08T16:30:00+02:00",
+        "summary": "7 intentos con OpenCode real. Con el protocolo en el prompt del agente (una llamada por turno) y un parser que acepta las formas reales del 7B, el agente lee TASK.md y decode.rs de verdad y escribe un edit; falla en copiar oldString literal (límite del modelo) y en el guest (KV int8) escribe un esquema de llamada distinto. Sin parche útil todavía.",
         "evidence": [
           "docs/self-improvement/seguimiento/T22.md",
           "target/self-improvement/first-improvement/temperaturas.txt",
           "target/self-improvement/first-improvement/medida-reuso.txt"
         ],
-        "next_step": "Hacer T82 y repetir T22 (ver seguimiento/T22.md)."
+        "next_step": "Aislar el efecto del KV int8; tarea más fácil o modelo mayor; ver seguimiento/T22.md."
       }
     },
     {
@@ -3334,7 +3334,7 @@
       "title": "Prefill por lotes",
       "milestone": "SI-7",
       "kind": "Integración condicionada",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T81"
       ],
@@ -3346,21 +3346,26 @@
         "user/soso-llm/src/serve.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "verified",
         "requires": [],
-        "evidence": [],
-        "note": "Medir en el guest con el prompt de OpenCode (4 146 tokens): hoy 65–125 min."
+        "evidence": [
+          "target/self-improvement/first-improvement/medida-t82-guest.txt",
+          "target/self-improvement/first-improvement/medida-diag-guest-con-bloques.txt"
+        ],
+        "note": "Guest 7B: 3 846 s → 1 217 s (3,2×) con el prompt de OpenCode; 554 tokens: 600 s → 210 s."
       },
       "tracking": {
-        "updated_at": "2026-10-08T07:40:00+02:00",
+        "updated_at": "2026-10-08T16:30:00+02:00",
         "base": "",
-        "summary": "Ficha creada. El prefill va token a token (~0,55–1 tok/s, memoria-limitado, igual en host y en QEMU); un prompt de OpenCode son 65–125 min en el primer turno.",
+        "summary": "Prefill por bloques de 8 tokens (kernels Q4_K/Q8_0 por lotes idénticos bit a bit, forward por bloque con H2O y KV int8). Guest: 3 846 s → 1 217 s con el prompt de OpenCode (3,2×); host 1 hilo 2,7×. Queda la atención por lotes.",
         "evidence": [
           "docs/self-improvement/T82-prefill-por-lotes.md",
-          "target/self-improvement/first-improvement/medida-prefill-smp4.txt"
+          "crates/soso-llm-core/tests/gemm_batch.rs",
+          "crates/soso-llm-core/tests/generate.rs",
+          "target/self-improvement/first-improvement/medida-t82-guest.txt"
         ],
         "blocker": null,
-        "next_step": "Implementar prefill por bloques de N tokens con exactitud verificable contra el camino actual; luego repetir T22."
+        "next_step": "Atención por lotes y reparto entre hilos; aislar si el KV int8 degrada la llamada a herramientas; repetir T22 en el guest."
       }
     }
   ],

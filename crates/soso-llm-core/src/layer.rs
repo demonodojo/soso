@@ -931,9 +931,11 @@ impl<'a> LayerExecutor<'a> {
         Ok(timing)
     }
 
-    /// ¿Se puede ejecutar esta capa por bloques (T82)? Sólo atención clásica con KV f16
-    /// y FFN denso: el resto (MLA, KDA, gated, GDN, MoE) sigue token a token.
+    /// ¿Se puede ejecutar esta capa por bloques (T82)? Sólo atención clásica y FFN denso
+    /// (KV f16 o int8: `append` y la atención genérica ya saben de dtype): el resto (MLA,
+    /// KDA, gated, GDN, MoE) sigue token a token.
     pub fn soporta_bloque(&self, layer: u32, kv: &LayerKv) -> bool {
+        let _ = kv;
         let spec = self.manifest.layer(layer).cloned().unwrap_or_default();
         let atencion_clasica = !matches!(
             spec.attn_kind,
@@ -942,7 +944,6 @@ impl<'a> LayerExecutor<'a> {
         atencion_clasica
             && spec.ffn_kind != FfnKind::LatentMoe
             && !self.manifest.layer_is_moe(layer)
-            && matches!(kv.dtype, KvDtype::F16)
     }
 
     /// Una capa para `n` tokens consecutivos (posiciones `pos0..pos0+n`) a la vez.
@@ -962,6 +963,7 @@ impl<'a> LayerExecutor<'a> {
         s: &mut LayerScratch,
         kv: &mut LayerKv,
         source: &mut S,
+        planner: Option<&crate::plan::ResourcePlanner>,
     ) -> Result<(), ()> {
         let h = self.manifest.hidden_dim as usize;
         let heads = self.manifest.effective_num_heads(layer) as usize;
@@ -1058,20 +1060,56 @@ impl<'a> LayerExecutor<'a> {
                 &bs.v[i * kv_dim..(i + 1) * kv_dim],
             );
             let seq = kv.tokens(kv_dim);
+            // Igual que `forward_layer`: con H2O se acumula la masa de atención de cada
+            // token (la política de expulsión de la ventana de KV la necesita), y con
+            // atención dispersa se usa el kernel genérico.
+            let sparse = planner.is_some_and(|p| p.use_sparse_attn(seq));
+            let use_h2o = planner.is_some_and(|p| p.use_h2o());
+            let fast_f16 = matches!(kv.dtype, KvDtype::F16) && !sparse && !use_h2o;
+            if use_h2o && s.mass_buf.len() < seq {
+                s.mass_buf.resize(seq, 0.0);
+            }
             for head in 0..heads {
                 let o = i * q_dim + head * head_dim;
                 let kv_head = head / group;
-                crate::attn::attention_decode_f16_tiled(
-                    &bs.q[o..o + head_dim],
-                    kv.k_f16_slice(),
-                    kv.v_f16_slice(),
-                    head_dim,
-                    kv_dim,
-                    kv_head,
-                    seq,
-                    &mut s.head_out,
-                );
+                if fast_f16 {
+                    crate::attn::attention_decode_f16_tiled(
+                        &bs.q[o..o + head_dim],
+                        kv.k_f16_slice(),
+                        kv.v_f16_slice(),
+                        head_dim,
+                        kv_dim,
+                        kv_head,
+                        seq,
+                        &mut s.head_out,
+                    );
+                } else {
+                    let mass = if use_h2o {
+                        Some(&mut s.mass_buf[..seq])
+                    } else {
+                        None
+                    };
+                    crate::attn::attention_decode_kv(
+                        &bs.q[o..o + head_dim],
+                        kv,
+                        head_dim,
+                        kv_dim,
+                        kv_head,
+                        seq,
+                        &mut s.head_out,
+                        mass,
+                        sparse,
+                    );
+                }
                 bs.attn[o..o + head_dim].copy_from_slice(&s.head_out[..head_dim]);
+                if use_h2o {
+                    let inv_h = 1.0 / heads as f32;
+                    for t in 0..seq {
+                        if t < kv.mass.len() {
+                            kv.mass[t] += s.mass_buf[t] * inv_h;
+                        }
+                    }
+                }
             }
         }
         {

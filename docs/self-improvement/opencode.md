@@ -10,13 +10,14 @@ Versión fijada: **OpenCode 1.18.34** (`~/.opencode/bin/opencode`). Esquema: `ht
 - **Token**: `{env:SOSO_LLM_API_KEY}`; nunca en el repositorio (C3). La configuración efectiva lo muestra como `***`.
 - **Sólo soso**: `enabled_providers: ["soso"]`; `opencode models` lista únicamente `soso/soso-coder`. `share: disabled`, `autoupdate: false`.
 - **Agentes**: se desactivan `build`, `plan`, `general`, `explore` y **`title`** (T21: OpenCode manda la petición de título **en paralelo** a la principal y soso admite una sola generación a la vez, así que con un 7B real el título ocuparía el generador durante minutos y bloquearía el primer turno; sin `title` la sesión son sólo peticiones con herramientas); `summary` y `compaction` son internos y sin modelo propio, así que usan `small_model` = soso. Sin plugins ni comandos.
+- **Protocolo en el prompt del agente (T22, 2026-10-08)**: con el prompt vago original el 7B narraba en vez de llamar a herramientas; con un protocolo explícito (una sola llamada por respuesta y nada más, no inventar resultados ni escribir `<tool_response>`, no editar sin leer, pasos 1–5) lee `TASK.md` y el archivo de verdad. Ver `seguimiento/T22.md`.
 - **Permisos de `soso-improve`**: leer/buscar/editar sí; `bash` denegado salvo `cargo test|check|build|fmt` y `git status|diff|log`; `task`, `webfetch`, `websearch` y `external_directory` denegados. No hay autoaprobación universal. `steps: 40`.
 - **Límites**: `limit.context` 32768 y `limit.output` 2048. **Son declarados, no medidos**: el banco de T14 sólo mide salidas de ≤19 tokens; T21 comprobará con tráfico real. El servidor devuelve 422 `context_length_exceeded` si se pasan (C3).
 - **Timeouts** (de la campaña T14, `campana-t14-qwen2.5-coder-7b.json`: mediana 160 212 ms, máximo 593 024 ms): `timeout` y `chunkTimeout` = **1 186 048 ms** (el sugerido, 2× el máximo). `chunkTimeout` debe cubrir el primer token, que es lo más lento.
 
 ## Hashes (sha256)
 - `opencode.json`: `73dc1e89e55a2da24496596f924e42afb1cc297ab9931802057ba787098188c9`
-- `.opencode/agents/soso-improve.md`: `6c0d02a6bb9dc8605a682beeee8f7d3628b460d3191743be97b61ae163eb0d6b`
+- `.opencode/agents/soso-improve.md`: `94a4b3e78970c8fcbf0160af6c33bafd468bad1e18ff9c2a9a0bd37b69034949`
 - Proveedor: `@ai-sdk/openai-compatible` (OpenCode lo resuelve en ejecución; la versión exacta se fija en T35, que instala sin red).
 
 ## Cómo se comprobó (sin lanzar inferencia)

@@ -93,6 +93,20 @@ del banco exige `rustc` (`SOSO_REQUIRE_RUSTC` en CI).
 Tokenizer (T76), SIMD (T77) y entradas de integración (T78) quedan materializados;
 D6 no tiene deuda abierta en el catálogo.
 
+## D8: el parser acepta las formas con las que el 7B escribe una llamada
+
+**Decisión (2026-10-08, T22).** Además de `<tool_call>` y la cerca ` ```json ` cerradas,
+se aceptan etiqueta/cerca sin cerrar con el JSON completo y el objeto `{"name","arguments"}`
+suelto cuando es todo el turno y nombra una herramienta declarada. Un JSON cortado sigue
+siendo error. Detalle en `CONTRATO.md` (C3).
+
+**Por qué.** Con el prompt real de OpenCode el 7B escribe esas formas (`generar_crudo`, 3 de
+3 peticiones explícitas) y el parser estricto de T07 las rechazaba o las tomaba por texto: el
+agente nunca llegaba a ejecutar nada. **Qué se pierde:** un turno que sea exactamente un
+objeto con el nombre de una herramienta declarada se interpreta como llamada aunque el modelo
+quisiera enseñarlo; es raro y los argumentos se validan contra el esquema igualmente.
+**Revisar** si aparece un caso real de falso positivo.
+
 ## Cómo mantener el plan
 
 Catálogo, ficha, fila del índice y seguimiento se actualizan juntos. Los
