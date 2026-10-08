@@ -1,0 +1,3 @@
+# soso no tiene bloqueos de fichero y rustc los pide para el directorio incremental.
+[build]
+incremental = false

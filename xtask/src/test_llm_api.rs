@@ -49,6 +49,10 @@ struct Args {
     campana: bool,
     repeticiones: Option<String>,
     caso: Option<String>,
+    /// Programa a ejecutar con el endpoint vivo (T22: lanzar OpenCode contra
+    /// la inferencia del guest). Implica `--campana`: es lo único que se corre.
+    /// Recibe `SOSO_LLM_API_KEY`, `SOSO_LLM_PORT` y `SOSO_LLM_MODEL`.
+    orden: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -109,6 +113,7 @@ fn parse(from: &[String]) -> Args {
     let mut campana = false;
     let mut repeticiones = None;
     let mut caso = None;
+    let mut orden = None;
     let mut i = 0;
     while i < from.len() {
         match from[i].as_str() {
@@ -131,6 +136,10 @@ fn parse(from: &[String]) -> Args {
                 i += 1;
                 caso = from.get(i).cloned();
             }
+            "--orden" => {
+                i += 1;
+                orden = from.get(i).map(PathBuf::from);
+            }
             _ => {}
         }
         i += 1;
@@ -140,9 +149,10 @@ fn parse(from: &[String]) -> Args {
         model_dir,
         profile,
         inspect_argv,
-        campana,
+        campana: campana || orden.is_some(),
         repeticiones,
         caso,
+        orden,
     }
 }
 
@@ -156,6 +166,8 @@ fn uso() {
     eprintln!("                       **en vez de** los invariantes de T19");
     eprintln!("  --repeticiones N     por caso (T14 usó 3; 1 para una pasada rápida)");
     eprintln!("  --caso Qxx           un solo caso, para no pagar la campaña entera");
+    eprintln!("  --orden <script>     ejecuta el script con el endpoint vivo (SOSO_LLM_API_KEY,");
+    eprintln!("                       SOSO_LLM_PORT, SOSO_LLM_MODEL) en vez de la campaña (T22)");
 }
 
 fn contexto_del_perfil(path: &Path) -> u32 {
@@ -309,6 +321,7 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &A
         contexto,
         repeticiones: args.repeticiones.as_deref(),
         caso: args.caso.as_deref(),
+        orden: args.orden.as_deref(),
     });
     let cierre = run_guest_inner(
         &key,
@@ -368,6 +381,7 @@ struct Campana<'a> {
     contexto: u32,
     repeticiones: Option<&'a str>,
     caso: Option<&'a str>,
+    orden: Option<&'a Path>,
 }
 
 /// Informe de una campaña. El nombre lleva el modelo: el 7B no puede
@@ -398,6 +412,9 @@ fn ruta_informe_campana(
 /// justo por eso, así que aquí se distingue «no pude medir» de «medí y salió
 /// que no», y sólo lo primero marca el paso como malo.
 fn correr_campana(catalog: &str, c: &Campana<'_>) -> StepResult {
+    if let Some(orden) = c.orden {
+        return correr_orden(catalog, orden);
+    }
     let root = crate::project_root();
     let banco = root.join("tests/self-improvement/cases");
     // **Una campaña filtrada no es la campaña.** `evaluar` marca
@@ -479,6 +496,41 @@ fn correr_campana(catalog: &str, c: &Campana<'_>) -> StepResult {
             name: "campana_t14",
             ok: false,
             detail: format!("no pude lanzar soso-improve: {e}"),
+        },
+    }
+}
+
+/// Ejecuta un programa externo con el endpoint del guest vivo y deja su código
+/// de salida como veredicto del paso. El arnés sólo presta el endpoint: qué se
+/// hace con él (T22: OpenCode) y cómo se juzga es cosa del programa.
+fn correr_orden(catalog: &str, orden: &Path) -> StepResult {
+    let root = crate::project_root();
+    println!(
+        "test-llm-api: orden {} contra el endpoint vivo (puerto {LLM_PORT})",
+        orden.display()
+    );
+    let st = Command::new("bash")
+        .arg(orden)
+        .current_dir(&root)
+        .env("SOSO_LLM_API_KEY", TOKEN)
+        .env("SOSO_LLM_PORT", LLM_PORT.to_string())
+        .env("SOSO_LLM_MODEL", catalog)
+        .status();
+    match st {
+        Ok(st) if st.success() => StepResult {
+            name: "orden",
+            ok: true,
+            detail: format!("{} salió con 0", orden.display()),
+        },
+        Ok(st) => StepResult {
+            name: "orden",
+            ok: false,
+            detail: format!("{} salió con {:?}", orden.display(), st.code()),
+        },
+        Err(e) => StepResult {
+            name: "orden",
+            ok: false,
+            detail: format!("no pude lanzar {}: {e}", orden.display()),
         },
     }
 }

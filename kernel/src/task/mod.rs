@@ -364,13 +364,18 @@ fn signal_one(procs: &mut Vec<Process>, pid: u64, sig: u8) -> bool {
         return true;
     }
     if sig == soso_abi::SIGINT as u8 || sig == soso_abi::SIGTERM as u8 {
-        let bloqueado = matches!(
-            procs[idx].state,
-            State::WaitingTty { .. }
-                | State::WaitingSocket { .. }
-                | State::WaitingPipe { .. }
-                | State::Sleeping(_)
-        );
+        // T70: sólo SIGINT interrumpe (`EINTR`): es lo que hace Ctrl+C sobre el
+        // prompt de la shell sin matarla. soso no tiene manejadores, así que un
+        // SIGTERM que sólo despertara al proceso lo dejaría seguir como si nada
+        // y quien lo manda (el timeout de una herramienta) vería un exit normal.
+        let bloqueado = sig == soso_abi::SIGINT as u8
+            && matches!(
+                procs[idx].state,
+                State::WaitingTty { .. }
+                    | State::WaitingSocket { .. }
+                    | State::WaitingPipe { .. }
+                    | State::Sleeping(_)
+            );
         if bloqueado {
             procs[idx].ctx.rax = (-soso_abi::EINTR) as u64;
             procs[idx].state = State::Runnable;

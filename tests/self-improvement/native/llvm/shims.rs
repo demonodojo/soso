@@ -398,8 +398,20 @@ pub unsafe extern "C" fn getcwd(buf: *mut c_char, size: usize) -> *mut c_char {
     if (n as usize) < size { unsafe { *buf.add(n as usize) = 0 }; }
     buf
 }
+/// Camino absoluto del ejecutable (lo fija el lanzador). `/proc/self/exe` no existe en soso y
+/// LLVM lo usa para hallar su directorio (`<bin>/../lib/clang/N` = cabeceras del compilador).
+pub static EXE: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn readlink(_p: *const c_char, _b: *mut c_char, _n: usize) -> isize {
+pub unsafe extern "C" fn readlink(p: *const c_char, b: *mut c_char, n: usize) -> isize {
+    if unsafe { ruta(p) } == b"/proc/self/exe" {
+        let exe = EXE.lock().unwrap();
+        if !exe.is_empty() {
+            let k = exe.len().min(n);
+            unsafe { std::ptr::copy_nonoverlapping(exe.as_ptr(), b as *mut u8, k) };
+            return k as isize;
+        }
+    }
     unsafe { fallo(EINVAL) as isize }
 }
 unsafe extern "C" {
@@ -780,9 +792,238 @@ pub unsafe extern "C" fn uname(out: *mut u8) -> c_int {
     }
     0
 }
-// Hilos: el proceso es de un solo hilo (`__libc_single_threaded = 1`). Crear uno falla.
+// ---- hilos POSIX ----
+//
+// `lld` crea su pool de hilos aunque se le pida `--threads=1` (`ThreadPoolExecutor` lanza siempre
+// un hilo de arranque) y libstdc++ usa `pthread_*` de glibc, que sincroniza con `futex` de Linux
+// (syscall 202: en soso no existe). Se redefine lo mínimo sobre `std::thread`: los hilos son hilos
+// de soso (`SYS_THREAD_SPAWN` por el PAL) y las esperas son **de sondeo** (`sched_yield`), más
+// simples que un futex y suficientes: es un solo núcleo y pocas colisiones. Un `pthread_mutex_t` /
+// `pthread_cond_t` / `pthread_rwlock_t` de glibc se deja en cero (inicializador estático) y se
+// usan sus primeras palabras como estado; `kind` está en el desplazamiento 16, como en glibc.
+
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::thread::JoinHandle;
+
+unsafe extern "C" {
+    static mut __libc_single_threaded: i8;
+}
+
+static HILOS: Mutex<Option<HashMap<u64, JoinHandle<()>>>> = Mutex::new(None);
+static SIG_HILO: AtomicU64 = AtomicU64::new(1);
+
+struct Enviar(usize, usize);
+unsafe impl Send for Enviar {}
+
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_create(_t: *mut u64, _a: *const c_void, _f: usize, _arg: *mut c_void) -> c_int { EAGAIN }
+pub unsafe extern "C" fn pthread_create(t: *mut u64, _a: *const c_void, f: usize, arg: *mut c_void) -> c_int {
+    // A partir de aquí glibc y libstdc++ han de usar sus caminos multihilo.
+    unsafe { __libc_single_threaded = 0 };
+    let datos = Enviar(f, arg as usize);
+    let h = std::thread::Builder::new().stack_size(8 << 20).spawn(move || {
+        let d = datos;
+        let f: extern "C" fn(*mut c_void) -> *mut c_void = unsafe { std::mem::transmute(d.0) };
+        f(d.1 as *mut c_void);
+    });
+    match h {
+        Ok(h) => {
+            let id = SIG_HILO.fetch_add(1, Ordering::Relaxed);
+            HILOS.lock().unwrap().get_or_insert_with(HashMap::new).insert(id, h);
+            unsafe { *t = id };
+            0
+        }
+        Err(_) => EAGAIN,
+    }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_join(t: u64, ret: *mut *mut c_void) -> c_int {
+    let h = HILOS.lock().unwrap().get_or_insert_with(HashMap::new).remove(&t);
+    if !ret.is_null() { unsafe { *ret = std::ptr::null_mut() } };
+    match h {
+        Some(h) => { let _ = h.join(); 0 }
+        None => 3, // ESRCH
+    }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_detach(t: u64) -> c_int {
+    HILOS.lock().unwrap().get_or_insert_with(HashMap::new).remove(&t);
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_equal(a: u64, b: u64) -> c_int { (a == b) as c_int }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_setname_np(_t: u64, _n: *const c_char) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_getname_np(_t: u64, n: *mut c_char, l: usize) -> c_int {
+    if l > 0 { unsafe { *n = 0 } };
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_init(_a: *mut c_void) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_destroy(_a: *mut c_void) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_setstacksize(_a: *mut c_void, _s: usize) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_setdetachstate(_a: *mut c_void, _s: c_int) -> c_int { 0 }
+
+/// Identidad del hilo: su TCB (`%fs:0x10`), como `pthread_self` de glibc.
+fn yo() -> u32 {
+    let v: usize;
+    unsafe { std::arch::asm!("mov {}, fs:0x10", out(reg) v, options(nostack, readonly)) };
+    (v >> 4) as u32 | 1
+}
+fn ceder() {
+    unsafe { sys(SYS_SCHED_YIELD, 0, 0, 0, 0) };
+}
+
+// `pthread_mutex_t`: [0..4) dueño (0 = libre), [4..8) recursión, [16..20) tipo (1 = recursivo).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_init(m: *mut u8, attr: *const u8) -> c_int {
+    unsafe {
+        std::ptr::write_bytes(m, 0, 40);
+        if !attr.is_null() { *(m.add(16) as *mut i32) = *(attr as *const i32); }
+    }
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_destroy(_m: *mut u8) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_trylock(m: *mut u8) -> c_int {
+    let dueño = unsafe { &*(m as *const AtomicU32) };
+    let rec = unsafe { &mut *(m.add(4) as *mut u32) };
+    let tipo = unsafe { *(m.add(16) as *const i32) } & 3;
+    let yo = yo();
+    if tipo == 1 && dueño.load(Ordering::Acquire) == yo {
+        *rec += 1;
+        return 0;
+    }
+    if dueño.compare_exchange(0, yo, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        *rec = 1;
+        0
+    } else {
+        16 // EBUSY
+    }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_lock(m: *mut u8) -> c_int {
+    while unsafe { pthread_mutex_trylock(m) } != 0 { ceder(); }
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut u8) -> c_int {
+    let dueño = unsafe { &*(m as *const AtomicU32) };
+    let rec = unsafe { &mut *(m.add(4) as *mut u32) };
+    if *rec > 1 { *rec -= 1; return 0; }
+    *rec = 0;
+    dueño.store(0, Ordering::Release);
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_init(a: *mut i32) -> c_int { unsafe { *a = 0 }; 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_destroy(_a: *mut i32) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_settype(a: *mut i32, t: c_int) -> c_int { unsafe { *a = t }; 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_gettype(a: *const i32, t: *mut c_int) -> c_int { unsafe { *t = *a }; 0 }
+
+// `pthread_cond_t`: [0..8) contador de señales.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_init(c: *mut u8, _a: *const u8) -> c_int {
+    unsafe { std::ptr::write_bytes(c, 0, 48) };
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_destroy(_c: *mut u8) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_signal(c: *mut u8) -> c_int {
+    unsafe { &*(c as *const AtomicU64) }.fetch_add(1, Ordering::Release);
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_broadcast(c: *mut u8) -> c_int { unsafe { pthread_cond_signal(c) } }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_wait(c: *mut u8, m: *mut u8) -> c_int {
+    let seq = unsafe { &*(c as *const AtomicU64) };
+    let visto = seq.load(Ordering::Acquire);
+    unsafe { pthread_mutex_unlock(m) };
+    while seq.load(Ordering::Acquire) == visto { ceder(); }
+    unsafe { pthread_mutex_lock(m) };
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_cond_timedwait(c: *mut u8, m: *mut u8, abs: *const timespec) -> c_int {
+    let seq = unsafe { &*(c as *const AtomicU64) };
+    let visto = seq.load(Ordering::Acquire);
+    // El plazo es absoluto (CLOCK_REALTIME por defecto): se compara con el reloj de pared.
+    let limite = unsafe { ((*abs).sec as i128) * 1_000_000_000 + (*abs).nsec as i128 };
+    unsafe { pthread_mutex_unlock(m) };
+    let mut vencio = false;
+    while seq.load(Ordering::Acquire) == visto {
+        let ahora = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as i128);
+        if ahora >= limite { vencio = true; break; }
+        ceder();
+    }
+    unsafe { pthread_mutex_lock(m) };
+    if vencio { 110 } else { 0 } // ETIMEDOUT
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_condattr_init(_a: *mut u8) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_condattr_destroy(_a: *mut u8) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_condattr_setclock(_a: *mut u8, _c: c_int) -> c_int { 0 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_once(o: *mut AtomicI32, f: extern "C" fn()) -> c_int {
+    let o = unsafe { &*o };
+    loop {
+        match o.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire) {
+            Ok(_) => { f(); o.store(2, Ordering::Release); return 0; }
+            Err(2) => return 0,
+            Err(_) => ceder(),
+        }
+    }
+}
+
+// `pthread_rwlock_t`: [0..4) lectores (>0) o -1 (escritor).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_init(l: *mut u8, _a: *const u8) -> c_int {
+    unsafe { std::ptr::write_bytes(l, 0, 56) };
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_destroy(_l: *mut u8) -> c_int { 0 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_tryrdlock(l: *mut u8) -> c_int {
+    let a = unsafe { &*(l as *const AtomicI32) };
+    let v = a.load(Ordering::Acquire);
+    if v >= 0 && a.compare_exchange(v, v + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() { 0 } else { 16 }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_rdlock(l: *mut u8) -> c_int {
+    while unsafe { pthread_rwlock_tryrdlock(l) } != 0 { ceder(); }
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_trywrlock(l: *mut u8) -> c_int {
+    let a = unsafe { &*(l as *const AtomicI32) };
+    if a.compare_exchange(0, -1, Ordering::Acquire, Ordering::Relaxed).is_ok() { 0 } else { 16 }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_wrlock(l: *mut u8) -> c_int {
+    while unsafe { pthread_rwlock_trywrlock(l) } != 0 { ceder(); }
+    0
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_rwlock_unlock(l: *mut u8) -> c_int {
+    let a = unsafe { &*(l as *const AtomicI32) };
+    if a.load(Ordering::Acquire) < 0 { a.store(0, Ordering::Release) } else { a.fetch_sub(1, Ordering::Release); }
+    0
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fork() -> c_int { unsafe { fallo(ENOSYS) as c_int } }
 #[unsafe(no_mangle)]

@@ -1,6 +1,6 @@
 # T21 — Capturar el contrato real de OpenCode sin depender del modelo
 
-**Hito:** SI-3 · **Tipo:** Implementación portable con adaptadores host/guest · **Estado:** pendiente.
+**Hito:** SI-3 · **Tipo:** Implementación portable con adaptadores host/guest · **Estado:** hecha (2026-10-07); ver [seguimiento/T21.md](seguimiento/T21.md).
 
 **Dependencias:** [T20](T20-opencode-config.md), [T47](T47-procesos-nativos.md), [T48](T48-reloj-red.md)
 
@@ -49,9 +49,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 No invocar modelos externos para completar este banco; una incompatibilidad debe quedar como fallo reproducible del adaptador.
 

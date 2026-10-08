@@ -291,7 +291,10 @@ fn post_chat(
 
 fn cerrar_peticion(rt: &mut ServeRuntime) {
     if let Some(ses) = rt.propietario.sesion.as_mut() {
-        ses.reset_peticion();
+        // La caché K/V **no** se reinicia aquí (T22): la generación siguiente
+        // reutiliza el prefijo que comparta con ésta y se reinicia sola si no
+        // comparte nada o si esta terminó mal. Con el prompt de OpenCode (~5 000
+        // tokens fijos por turno) repetir el prefill costaba más de una hora.
         ses.bundle.rt.layer_hook = None;
         ses.bundle.rt.layer_enter_hook = None;
     }
@@ -352,8 +355,12 @@ fn post_chat_generar(
         .bundle
         .tokenizer
         .decode(&token_ids);
-    let turn = parse_assistant_output(&prepared.input, &generated_text, 1)
-        .map_err(|e| GuestServiceError::Api(e.into()))?;
+    let turn = parse_assistant_output(
+        &prepared.input,
+        &generated_text,
+        prepared.input.siguiente_id_llamada(),
+    )
+    .map_err(|e| GuestServiceError::Api(e.into()))?;
     validate_tool_choice(&prepared, &turn)?;
 
     let payload = completion_payload(&prepared, &profile, turn, report);
@@ -448,8 +455,12 @@ fn post_chat_stream(
         .bundle
         .tokenizer
         .decode(&token_ids);
-    let turn = parse_assistant_output(&prepared.input, &generated_text, 1)
-        .map_err(|e| GuestServiceError::Api(e.into()))?;
+    let turn = parse_assistant_output(
+        &prepared.input,
+        &generated_text,
+        prepared.input.siguiente_id_llamada(),
+    )
+    .map_err(|e| GuestServiceError::Api(e.into()))?;
     validate_tool_choice(&prepared, &turn)?;
 
     let payload = completion_payload(&prepared, &profile, turn, report);

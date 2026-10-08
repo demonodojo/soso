@@ -312,10 +312,66 @@ impl<D: BlockDevice> Sosofs<D> {
 
     // ---- transacciones ----
 
+    /// La raíz que se va a publicar tiene que poder abrir el directorio `/`.
+    ///
+    /// Se mira el dispositivo, no la caché: un hijo cuyo bloque libre o cuya
+    /// clave mínima no es el separador, o un inodo 1 que ya no se alcanza,
+    /// deja el superbloque donde estaba. Es el fallo de la generación 24 en
+    /// la ROG (5 oct 2026): la hoja de `/` seguía en disco y la raíz nueva
+    /// no apuntaba a ella.
+    fn comprobar_raiz_publicable(&mut self) -> Result<(), FsError> {
+        self.dev.invalidate_all();
+        let root = self.tree_root;
+        if !self.asignado(root) {
+            return Err(FsError::Corrupt);
+        }
+        let nivel = self.node_level(root)?;
+        if nivel > 0 {
+            let NodeData::Internal(hijos) = self.parse_node(root)? else {
+                return Err(FsError::Corrupt);
+            };
+            for (sep, hijo) in hijos {
+                if !self.asignado(hijo) {
+                    return Err(FsError::Corrupt);
+                }
+                self.dev.invalidate_block(hijo);
+                let (min, nivel_hijo) = self.clave_minima_y_nivel(hijo)?;
+                if min != sep || nivel_hijo + 1 != nivel {
+                    return Err(FsError::Corrupt);
+                }
+            }
+        }
+        let st = self.stat_inode(ROOT_INODE)?;
+        if st.file_type != FT_DIR {
+            return Err(FsError::Corrupt);
+        }
+        Ok(())
+    }
+
+    fn asignado(&self, b: u64) -> bool {
+        b >= 2 && b < self.sb.block_count.get() && Self::bit(&self.bitmap, b)
+    }
+
+    /// Primera clave y nivel de un nodo, leído del dispositivo.
+    fn clave_minima_y_nivel(&mut self, block: u64) -> Result<(Key, u8), FsError> {
+        let node = self.read_node(block)?;
+        let (hdr, _) = NodeHeader::read_from_prefix(&node[..]).map_err(|_| FsError::Corrupt)?;
+        if hdr.nkeys.get() == 0 {
+            return Err(FsError::Corrupt);
+        }
+        let (dk, _) =
+            DiskKey::read_from_prefix(&node[NODE_HEADER_SIZE..]).map_err(|_| FsError::Corrupt)?;
+        Ok((dk.key(), hdr.level))
+    }
+
     /// Publica la transacción: bitmap CoW + superbloque en el slot alterno.
     pub fn commit(&mut self) -> Result<(), FsError> {
         if !self.dirty {
             return Ok(());
+        }
+        if let Err(e) = self.comprobar_raiz_publicable() {
+            self.rollback();
+            return Err(e);
         }
         // Bitmap CoW: liberar los bloques del bitmap viejo y asignar nuevos.
         let old_start = self.sb.bitmap_start.get();
@@ -826,5 +882,36 @@ impl<D: BlockDevice> Sosofs<D> {
         payload[..core::mem::size_of::<InodeItem>()].copy_from_slice(inode.as_bytes());
         self.tree_insert(Key::inode(ino), &payload)?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use crate::builder::build_image;
+    use crate::fs::{FsError, Sosofs};
+    use crate::layout::ROOT_INODE;
+    use block_dev::MemBlockDevice;
+
+    fn vacio() -> Sosofs<MemBlockDevice> {
+        let dir = std::env::temp_dir().join("sosofs-raiz-publicable");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut dev = MemBlockDevice::new(4096);
+        build_image(&dir, &mut dev).unwrap();
+        Sosofs::mount(dev).unwrap()
+    }
+
+    #[test]
+    fn no_publica_si_la_raiz_no_esta_asignada() {
+        let mut fs = vacio();
+        fs.create_file(ROOT_INODE, "ancla", b"raiz", 0).unwrap();
+        let generacion = fs.generation();
+        let b = fs.tree_root;
+        fs.bitmap[(b / 8) as usize] &= !(1 << (b % 8));
+        fs.dirty = true;
+        let err = fs.commit();
+        assert!(matches!(err, Err(FsError::Corrupt)), "{err:?}");
+        assert_eq!(fs.generation(), generacion);
+        assert!(fs.resolve("/ancla").is_ok());
     }
 }

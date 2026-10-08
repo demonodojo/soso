@@ -640,3 +640,188 @@ fn generate_por_dispositivo_con_pesos_mxfp4() {
         "descuantizar MXFP4 al subir no da lo mismo que el kernel fusionado de CPU"
     );
 }
+
+// T22: reutilizar el prefijo del KV entre peticiones. Tiene que dar exactamente
+// lo mismo que un prefill limpio: por causalidad, el K/V de los primeros `p`
+// tokens sólo depende de ellos.
+fn generar_en_frio(prompt: &[u32], max_new: usize) -> Vec<u32> {
+    let (manifest, index, mapper) = tiny_model_gqa();
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    rt.generate(&mut source, prompt, max_new, None).expect("frío")
+}
+
+#[test]
+fn reutilizar_prefijo_da_lo_mismo_que_un_prefill_limpio() {
+    let (manifest, index, mapper) = tiny_model_gqa();
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+
+    let p1: Vec<u32> = vec![3, 4, 5, 6, 7, 8];
+    let t1 = rt.generate(&mut source, &p1, 3, None).expect("primera");
+    assert_eq!(t1, generar_en_frio(&p1, 3));
+
+    // Segundo turno de un agente: el historial anterior más lo nuevo.
+    let mut p2 = t1.clone();
+    p2.extend_from_slice(&[9, 10, 11]);
+    let caliente = rt.generate(&mut source, &p2, 4, None).expect("segunda");
+    assert_eq!(caliente, generar_en_frio(&p2, 4));
+
+    // Un tercero que diverge a mitad: sólo se reutiliza lo común.
+    let mut p3: Vec<u32> = p2[..4].to_vec();
+    p3.extend_from_slice(&[20, 21, 22, 23]);
+    let caliente = rt.generate(&mut source, &p3, 4, None).expect("tercera");
+    assert_eq!(caliente, generar_en_frio(&p3, 4));
+
+    // El mismo prompt otra vez: queda el último token por procesar.
+    let caliente = rt.generate(&mut source, &p3, 4, None).expect("cuarta");
+    assert_eq!(caliente, generar_en_frio(&p3, 4));
+}
+
+#[test]
+fn cuanto_prefijo_se_reutiliza() {
+    let (manifest, index, mapper) = tiny_model_gqa();
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    let p1: Vec<u32> = vec![3, 4, 5, 6, 7, 8];
+    let t1 = rt.generate(&mut source, &p1, 3, None).expect("primera");
+
+    // Sin nada en común o con una caché vacía no hay reutilización.
+    assert_eq!(rt.begin_sequence_reusing(&[99, 4, 5]), 0);
+    assert_eq!(rt.pos, 0);
+
+    // Tras otra generación, lo común con el historial anterior.
+    let _ = rt.generate(&mut source, &p1, 3, None).expect("otra vez");
+    let mut p2 = t1.clone();
+    p2.extend_from_slice(&[9, 10]);
+    let ya = rt.begin_sequence_reusing(&p2);
+    assert!(ya >= p1.len(), "se esperaba reutilizar al menos el prompt, {ya}");
+    assert!(ya <= t1.len());
+    assert_eq!(rt.pos, ya);
+
+    // El prompt idéntico nunca se reutiliza entero.
+    let _ = rt.generate(&mut source, &p1, 2, None).expect("fija");
+    let ya = rt.begin_sequence_reusing(&p1);
+    assert_eq!(ya, p1.len() - 1);
+}
+
+// Lo mismo por la ruta con planificador, que es la del servidor del guest.
+fn reloj_cero() -> u64 {
+    0
+}
+
+fn generar_planificado(
+    rt: &mut Runtime,
+    source: &mut MmapTensorSource<MemFileMapper>,
+    prompt: &[u32],
+    max_new: usize,
+) -> Vec<u32> {
+    use soso_llm_core::generation::{GenerationOptions, NoCancelObserver};
+    use soso_llm_core::plan::MemSnapshot;
+    let mut sampler = soso_llm_core::sample::Sampler::greedy();
+    let mut obs = NoCancelObserver;
+    let mut mem = || MemSnapshot {
+        total_frames: 100_000,
+        free_frames: 50_000,
+        reclaimable_frames: 0,
+    };
+    rt.generate_stream_planned_observed(
+        source,
+        prompt,
+        GenerationOptions::new(max_new, vec![]),
+        &mut sampler,
+        &mut obs,
+        None,
+        &mut None,
+        reloj_cero,
+        &mut mem,
+    )
+    .expect("planificado")
+    .0
+}
+
+fn runtime_planificado() -> (Runtime, MmapTensorSource<MemFileMapper>) {
+    use soso_llm_core::plan::{MemSnapshot, ResourcePlanner};
+    let (manifest, index, mapper) = tiny_model_gqa();
+    let mut rt = Runtime::new(manifest.clone(), index.clone(), 0, 0);
+    let mem = MemSnapshot {
+        total_frames: 100_000,
+        free_frames: 50_000,
+        reclaimable_frames: 0,
+    };
+    let planner = ResourcePlanner::new(&manifest, &rt.index, mem, 0, false);
+    rt.set_planner(planner);
+    (rt, MmapTensorSource::new(String::from(BASE), index, mapper))
+}
+
+#[test]
+fn reutilizar_prefijo_con_planificador_da_lo_mismo_que_en_frio() {
+    let (mut rt, mut source) = runtime_planificado();
+    let p1: Vec<u32> = vec![3, 4, 5, 6, 7, 8];
+    let t1 = generar_planificado(&mut rt, &mut source, &p1, 3);
+    let (mut frio, mut fsrc) = runtime_planificado();
+    assert_eq!(t1, generar_planificado(&mut frio, &mut fsrc, &p1, 3));
+
+    let mut p2 = t1.clone();
+    p2.extend_from_slice(&[9, 10, 11]);
+    let caliente = generar_planificado(&mut rt, &mut source, &p2, 4);
+    let (mut frio, mut fsrc) = runtime_planificado();
+    assert_eq!(caliente, generar_planificado(&mut frio, &mut fsrc, &p2, 4));
+
+    // Tras una generación completa queda algo que reutilizar.
+    let ya = rt.begin_sequence_reusing(&p2);
+    assert!(ya >= p1.len(), "con planificador también se reutiliza: {ya}");
+}
+
+// T82: el prefill por bloques es idéntico bit a bit al de un token cada vez.
+fn estado(rt: &Runtime) -> (usize, Vec<u32>, Vec<Vec<u16>>, Vec<Vec<u16>>) {
+    let bits_h: Vec<u32> = rt.hidden.iter().map(|x| x.to_bits()).collect();
+    let k: Vec<Vec<u16>> = rt.kv.iter().map(|l| l.k_f16.clone()).collect();
+    let v: Vec<Vec<u16>> = rt.kv.iter().map(|l| l.v_f16.clone()).collect();
+    (rt.pos, bits_h, k, v)
+}
+
+fn prefill(modelo: fn() -> (Manifest, TensorIndex, MemFileMapper), prompt: &[u32], bloques: bool) -> Runtime {
+    let (manifest, index, mapper) = modelo();
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    rt.prefill_por_bloques = bloques;
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    rt.prefill_prompt(&mut source, prompt, None, &mut None, None)
+        .expect("prefill");
+    rt
+}
+
+#[test]
+fn prefill_por_bloques_identico_al_token_a_token() {
+    for modelo in [tiny_model as fn() -> _, tiny_model_gqa as fn() -> _] {
+        // Longitudes que no son múltiplo del bloque (8): 1 bloque + resto, y sólo resto.
+        for n in [2usize, 7, 8, 9, 17, 20] {
+            let prompt: Vec<u32> = (0..n as u32).map(|i| (i * 5 + 3) % 40).collect();
+            let a = prefill(modelo, &prompt, false);
+            let b = prefill(modelo, &prompt, true);
+            assert_eq!(a.tokens_en_bloque, 0);
+            // Sin esto la prueba sería trivial: tiene que haber pasado por el camino nuevo.
+            assert_eq!(
+                b.tokens_en_bloque,
+                (n / soso_llm_core::runtime::Runtime::BLOQUE_PREFILL * soso_llm_core::runtime::Runtime::BLOQUE_PREFILL
+                    + if n % soso_llm_core::runtime::Runtime::BLOQUE_PREFILL >= 2 { n % soso_llm_core::runtime::Runtime::BLOQUE_PREFILL } else { 0 }) as u64,
+                "n={n}: el camino por bloques no se usó como se esperaba"
+            );
+            assert_eq!(estado(&a), estado(&b), "n={n}");
+        }
+    }
+}
+
+#[test]
+fn bloques_dan_los_mismos_tokens_generados() {
+    let prompt: Vec<u32> = (0..19u32).map(|i| (i * 7 + 1) % 40).collect();
+    let mut salidas = Vec::new();
+    for bloques in [false, true] {
+        let (manifest, index, mapper) = tiny_model_gqa();
+        let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+        rt.prefill_por_bloques = bloques;
+        let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+        salidas.push(rt.generate(&mut source, &prompt, 6, None).expect("generate"));
+    }
+    assert_eq!(salidas[0], salidas[1]);
+}

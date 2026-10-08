@@ -103,6 +103,20 @@ impl LayerKv {
     }
 
     /// Reserva (y pone a cero) el estado GDN si el tamaño no coincide.
+    /// Se queda con los primeros `tokens` tokens (T22: reutilizar el prefijo de
+    /// la petición anterior). `kv_dim` es el ancho de K/V por token; no vale
+    /// para MLA ni GDN, cuyo estado no se puede recortar.
+    pub fn truncate_tokens(&mut self, tokens: usize, kv_dim: usize) {
+        let n = tokens.saturating_mul(kv_dim);
+        self.k_f16.truncate(n);
+        self.v_f16.truncate(n);
+        self.k_i8.truncate(n);
+        self.v_i8.truncate(n);
+        self.k_scale.truncate(tokens);
+        self.v_scale.truncate(tokens);
+        self.mass.truncate(tokens);
+    }
+
     pub fn ensure_gdn(&mut self, n_v_heads: usize, head_dim: usize, conv_len: usize) {
         let s_len = n_v_heads.saturating_mul(head_dim).saturating_mul(head_dim);
         if self.gdn_s.len() != s_len {

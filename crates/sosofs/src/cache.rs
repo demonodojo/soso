@@ -121,6 +121,10 @@ impl<D: BlockDevice> BlockDevice for CachedBlockDevice<D> {
         self.invalidate(block);
     }
 
+    fn invalidate_all(&mut self) {
+        self.clear();
+    }
+
     fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {
         self.invalidate(block);
         self.inner.write_block(block, buf)

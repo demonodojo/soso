@@ -1,6 +1,6 @@
 # T20 — Configurar OpenCode para el proveedor soso
 
-**Hito:** SI-3 · **Tipo:** Configuración · **Estado:** pendiente (27-sep: el perfil elegido es `qwen2.5-coder-7b`, GO 10/10).
+**Hito:** SI-3 · **Tipo:** Configuración · **Estado:** hecha (2026-10-07): ver [opencode.md](opencode.md) y [seguimiento/T20.md](seguimiento/T20.md).
 
 **Dependencias:** [T14](T14-evaluacion-modelo.md), [T19](T19-qemu-e2e.md)
 
@@ -42,9 +42,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Si el esquema/versionado cambió, actualizar la configuración con evidencia oficial; no asumir que el ejemplo del plan es operativo sin verificación.
 

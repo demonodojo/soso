@@ -178,16 +178,32 @@ Enchufa un cable en el RJ45 o configura WiFi; tras DHCP, SSH escucha en el
 
 **Configuración WiFi** (elige una):
 
-1. **Desde sosh** (recomendado cuando ya arrancó):
+1. **Asistente al arrancar sosh** (USB live sin credenciales guardadas):
+
+   Si no hay IPv4 (ni cable con DHCP) y el WiFi Intel está vivo pero sin enlace
+   autorizado, **sosh** escanea, lista las redes numeradas y te pide:
+
+   - el **número** de la red (Enter = omitir y seguir sin WiFi);
+   - la **contraseña** si la red es WPA (no se muestra mientras escribes).
+
+   Tras conectar, guarda SSID y clave como en un `wifi connect` manual. Puedes
+   repetir el mismo flujo cuando quieras con **`wifi setup`**.
+
+2. **Desde sosh a mano** (scan, estado o SSID en la línea de comandos):
 
 ```sh
 wifi scan
 wifi status
-wifi connect MiRed
+wifi setup                    # mismo asistente que al arrancar
+wifi connect MiRed            # red abierta
 wifi connect MiRed MiClaveWPA2
 ```
 
 Si la conexión termina bien, soso guarda el SSID y la clave (red abierta: solo el SSID) en `SOSOWIFI.TXT` de la ESP (USB live) y en `/etc/wifi.conf`. El siguiente arranque conecta solo y pide DHCP; no hace falta volver a escribir la clave.
+
+En el **USB live**, si `SOSOWIFI.TXT` existe pero está vacío o sin `ssid=`, el
+kernel **no** usa un SSID de demostración de la imagen: o editas la ESP, o dejas
+que sosh te pida la red al arrancar.
 
 Tras autorizar el enlace, soso pide DHCP. SSH queda en el **puerto 22**.
 
@@ -216,11 +232,11 @@ devuelve nada, el motivo se dice en claro y no todos son un error:
 | `wifi: sin perfil regulatorio (MCC); solo scan pasivo` | Sin regdominio no se emiten probes; solo se escucha |
 | `wifi: resultado parcial` | Hay redes, pero el scan no acabó bien |
 
-2. **En el pendrive, antes de arrancar:** edita `SOSOWIFI.TXT` en la ESP (partición 1
+3. **En el pendrive, antes de arrancar:** edita `SOSOWIFI.TXT` en la ESP (partición 1
    FAT). El kernel se conecta solo al boot. No hace falta regenerar la imagen.
-   Un `wifi connect` correcto también lo actualiza.
-3. **En rootfs:** `/etc/wifi.conf` (se empaqueta al flashear; un `wifi connect`
-   correcto lo actualiza).
+   Un `wifi connect` o el asistente al arrancar también lo actualiza.
+4. **En rootfs:** `/etc/wifi.conf` (plantilla comentada en la imagen; un `wifi connect`
+   correcto lo rellena).
 
 ```ini
 ssid=MiRed
@@ -243,6 +259,7 @@ ip                 # IPv4 (DHCP o fallback)
 ping 192.168.68.1  # eco ICMP (opcional: `ping <host> n`)
 wifi scan          # listar redes
 wifi status        # estado del driver
+wifi setup         # elegir red y contraseña (interactivo)
 wifi connect Red   # red abierta
 wifi connect Red clave  # WPA2-PSK
 ```
@@ -453,6 +470,7 @@ El **código de salida** distingue las tres cosas:
 | `voz [ask]` | Dictado por voz: transcribe e inserta en la línea (Enter confirma). Ver [voz](#voz--dictado) |
 | `wifi scan` | Lista redes WiFi (Intel AX211/AX200) |
 | `wifi status` | Estado del adaptador WiFi |
+| `wifi setup` | Escanea, eliges red por número y contraseña (WPA sin eco); guarda credenciales |
 | `wifi connect <ssid> [psk]` | Asocia a una red (sin `psk` = abierta; con clave = WPA2) y guarda las credenciales para el próximo arranque |
 
 Ejemplos:
@@ -463,6 +481,7 @@ pwd
 cd /tmp
 cd ..                       # sube al directorio padre
 wifi scan
+wifi setup
 wifi connect MiRed MiClaveWPA2
 exit
 exit 1
@@ -2077,6 +2096,7 @@ soso-web https://example.com
 ip                          # IPv4 para SSH
 ping -c 1 192.168.68.1      # pasarela (la de `ip`)
 wifi scan
+wifi setup                  # o el asistente al abrir sosh sin credenciales
 wifi connect MiRed MiClaveWPA2
 
 # Instalación / actualización (live o NVMe instalado)

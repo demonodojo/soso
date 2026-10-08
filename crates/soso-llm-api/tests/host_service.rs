@@ -280,12 +280,15 @@ fn dos_chats_reinician_contexto() {
 
 #[test]
 fn ocupado_devuelve_429_pero_health_vive() {
+    // La primera petición tokeniza con el tokenizer cargado de forma perezosa;
+    // si esa carga cae dentro de los 50 ms de espera, la prueba mide otra cosa.
+    let _ = static_tokenizer();
     let server = TestServer::spawn(FakeBackend::new("lento").with_delay(Duration::from_millis(400)));
     let addr = server.addr;
     let t1 = thread::spawn(move || post_chat(addr, "bloqueo"));
     thread::sleep(Duration::from_millis(50));
     let busy = post_chat(server.addr, "segundo");
-    assert!(busy.starts_with(b"HTTP/1.1 429"));
+    assert!(busy.starts_with(b"HTTP/1.1 429"), "{:?}", String::from_utf8_lossy(&busy[..busy.len().min(200)]));
     let health = http_roundtrip(
         server.addr,
         format!("GET /health HTTP/1.1\r\n{}\r\n", auth_header()).as_bytes(),

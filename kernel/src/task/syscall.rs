@@ -881,6 +881,8 @@ pub fn close_all_fds(fds: &mut Vec<Option<Fd>>) {
 // ---- las syscalls ----
 
 fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
+    // Escritura corta por encima del techo, igual que `sys_read`.
+    let len = len.min(MAX_SYSCALL_BUF);
     let pipe_id = with_fd(fd, |slot| {
         Ok(match slot {
             Fd::PipeWrite(id) => Some(*id),
@@ -1013,6 +1015,10 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
 }
 
 fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
+    // Un `read` por encima del techo de búfer no es un error: es una lectura corta, y
+    // quien lee en bucle sigue. `cargo` lee la salida de `rustc` con `read_to_end`, que pide
+    // todo el hueco de un `Vec` que ya pasa de 16 MiB, y daba EFAULT («bad address»).
+    let len = len.min(MAX_SYSCALL_BUF);
     let dst = user_slice_mut(buf, len)?;
     let pipe_id = with_fd(fd, |slot| {
         Ok(match slot {
@@ -1785,6 +1791,7 @@ fn sys_munmap(addr: u64, len: u64) -> Result<u64, i64> {
     })
 }
 
+#[cfg(feature = "drv-gpu-nvidia")]
 fn sys_gpu_info(out: u64) -> Result<u64, i64> {
     let n = core::mem::size_of::<abi::GpuInfo>() as u64;
     if !user_range_ok(out, n, true) {
@@ -2230,10 +2237,12 @@ fn sys_fatlog_flush(modo: u64) -> Result<u64, i64> {
     }
 }
 
+#[cfg(feature = "drv-gpu-nvidia")]
 fn sys_gpu_alloc(size: u64, domain: u64) -> Result<u64, i64> {
     crate::drivers::gpu::alloc(size, domain).map_err(|e| -e)
 }
 
+#[cfg(feature = "drv-gpu-nvidia")]
 fn sys_gpu_map(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     // `false`, y es lo contrario que en `sys_gpu_read`: aquí el kernel LEE del
     // búfer del proceso y lo copia al dispositivo. Pedir permiso de escritura era
@@ -2256,6 +2265,7 @@ fn sys_gpu_map(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
 /// `len` no pasa del búfer del dispositivo. El error es EINVAL —del llamante—, y
 /// lo vuelve a comprobar el driver con el candado tomado: esto es sólo para no
 /// materializar páginas de balde.
+#[cfg(feature = "drv-gpu-nvidia")]
 fn cabe_en_buffer(handle: u64, len: u64) -> Result<(), i64> {
     let cap = crate::drivers::gpu::buffer_len(handle).map_err(|e| -e)?;
     if len > cap {
@@ -2264,6 +2274,7 @@ fn cabe_en_buffer(handle: u64, len: u64) -> Result<(), i64> {
     Ok(())
 }
 
+#[cfg(feature = "drv-gpu-nvidia")]
 fn sys_gpu_read(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     // `true`: aquí el kernel ESCRIBE en el búfer del proceso. Con `false` se
     // aceptaba un destino de sólo lectura y `AddrSpace::write` lo escribía igual
@@ -2275,6 +2286,7 @@ fn sys_gpu_read(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     crate::drivers::gpu::map_to_user(gpu_handle, user_ptr, len).map_err(|e| -e)
 }
 
+#[cfg(feature = "drv-gpu-nvidia")]
 fn sys_gpu_submit(cmd_ptr: u64, cmd_len: u64) -> Result<u64, i64> {
     let cmd = user_slice(cmd_ptr, cmd_len)?;
     crate::drivers::gpu::submit(cmd).map_err(|e| -e)

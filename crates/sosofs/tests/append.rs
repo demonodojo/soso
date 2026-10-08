@@ -99,3 +99,23 @@ fn append_sobrevive_al_remontaje() {
     let ino2 = fs2.resolve("/f").unwrap();
     assert_eq!(fs2.read_file(ino2).unwrap(), esperado);
 }
+
+#[test]
+fn appends_en_inodo_alto_no_sueltan_la_raiz() {
+    // El log escribe muchas veces en un inodo alto. `/` tiene que seguir
+    // resolviendo después: es lo que la generación 24 de la ROG dejó de hacer.
+    let mut fs = fs_vacio("ap_raiz");
+    let ancla = fs.create_file(ROOT_INODE, "ancla", b"raiz", 0).unwrap();
+    let mut alto = ancla;
+    for i in 0..40u8 {
+        alto = fs.create_file(ROOT_INODE, &format!("n{i}"), b"", 0).unwrap();
+    }
+    assert!(alto > ancla);
+    for i in 0..24u8 {
+        fs.append_file(alto, &patron(1000 + i as usize * 50, i), 0).unwrap();
+    }
+    let dev = fs.into_device();
+    let mut fs2 = Sosofs::mount(dev).unwrap();
+    let ino = fs2.resolve("/ancla").unwrap();
+    assert_eq!(fs2.read_file(ino).unwrap(), b"raiz");
+}

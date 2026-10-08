@@ -1,0 +1,50 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "soso/soso-coder",
+  "small_model": "soso/soso-coder",
+  "enabled_providers": [
+    "soso"
+  ],
+  "share": "disabled",
+  "autoupdate": false,
+  "provider": {
+    "soso": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Modelo local de soso",
+      "options": {
+        "baseURL": "http://127.0.0.1:7422/v1",
+        "apiKey": "{env:SOSO_LLM_API_KEY}",
+        "timeout": 1186048,
+        "chunkTimeout": 1186048
+      },
+      "models": {
+        "soso-coder": {
+          "name": "soso coder (qwen2.5-coder-7b)",
+          "tool_call": true,
+          "limit": {
+            "context": 32768,
+            "output": 2048
+          }
+        }
+      }
+    }
+  },
+  "agent": {
+    "build": {
+      "disable": true
+    },
+    "plan": {
+      "disable": true
+    },
+    "general": {
+      "disable": true
+    },
+    "explore": {
+      "disable": true
+    },
+    "title": {
+      "disable": true
+    }
+  },
+  "default_agent": "soso-improve"
+}

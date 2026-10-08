@@ -78,7 +78,12 @@ pub fn wake(pml4: u64, uaddr: u64, n: u64) -> u64 {
     while woken < n && !list.is_empty() {
         let pid = list.remove(0);
         if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
-            if matches!(p.state, State::WaitingFutex { .. }) {
+            // Sólo cuenta quien sigue esperando **esta** dirección. Una entrada rancia
+            // (el plazo venció y el hilo esperó después en otra dirección) estaba en
+            // `WaitingFutex` de otro futex: se la despertaba y se contaba como un wakeup
+            // servido, y el que de verdad esperaba aquí se quedaba dormido para siempre
+            // (cargo colgado con todos sus hilos en futex y ningún hijo vivo).
+            if matches!(p.state, State::WaitingFutex { pml4: pp, uaddr: ua, .. } if pp == pml4 && ua == uaddr) {
                 p.state = State::Runnable;
                 p.ctx.rax = 0;
                 woken += 1;

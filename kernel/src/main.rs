@@ -205,6 +205,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         if !modes.is_off() {
             lxdde::init(modes);
         }
+        // Sin la feature de GPU (perfil Steam Deck: lxdde sólo para el WiFi) no existe el
+        // módulo `nvidia_probe`.
+        #[cfg(feature = "drv-gpu-nvidia")]
         if modes.nouveau {
             drivers::nvidia_probe::init();
         }

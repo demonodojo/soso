@@ -1,6 +1,6 @@
 # T22 — Resolver una tarea real usando la inferencia guest
 
-**Hito:** SI-3 · **Tipo:** Integración y evaluación · **Estado:** pendiente.
+**Hito:** SI-3 · **Tipo:** Integración y evaluación · **Estado:** en curso (2026-10-08): bloqueada por [T82](T82-prefill-por-lotes.md) (prefill por lotes); ver [seguimiento/T22.md](seguimiento/T22.md).
 
 **Dependencias:** [T02](T02-banco.md), [T19](T19-qemu-e2e.md), [T21](T21-opencode-contrato.md)
 

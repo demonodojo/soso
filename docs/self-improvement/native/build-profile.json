@@ -2,7 +2,7 @@
   "schema_version": 1,
   "kind": "build_profile",
   "task": "T42",
-  "revised": "2026-10-04",
+  "revised": "2026-10-07",
   "note": "Qué hace falta para construir y empaquetar cada perfil sin tocar Linux. `guest` es lo comprobado dentro de soso; `evidence` apunta al sondeo (target/self-improvement/tasks/T42/guest-cargo-build-1.txt) o al código. Una herramienta no es nativa por su nombre: sólo lo que el guest ejecutó.",
   "profiles": {
     "qemu-minimo": {
@@ -20,7 +20,8 @@
         "stubs generados",
         "ar"
       ],
-      "result_file": "target/self-improvement/tasks/T42/resultado-qemu-lxdde.md"
+      "result_file": "target/self-improvement/tasks/T42/resultado-qemu-lxdde.md",
+      "result_note": "Puertos e1000e, ath11k (Deck) e iwlwifi hechos en el guest (C-141); nouveau pendiente"
     }
   },
   "components": [
@@ -32,9 +33,9 @@
         "qemu-lxdde"
       ],
       "host": "nightly-2026-07-01 (rust-toolchain.toml)",
-      "guest": "partial",
-      "evidence": "guest: rustc 1.100.0-nightly (32d94cc9b 2026-09-07)",
-      "gap": "C-120",
+      "guest": "native",
+      "evidence": "el rustc del guest compila kernel, user/ y cargador (C-142)",
+      "gap": null,
       "note": "No es el nightly fijado: bootloader 0.11.15 usa el alias x86-softfloat que desapareció el 5-jul-2026."
     },
     {
@@ -130,9 +131,9 @@
         "qemu-lxdde"
       ],
       "host": "llvm-objcopy (componente llvm-tools-preview)",
-      "guest": "partial",
-      "evidence": "llvm-objcopy enlazado para soso (C-140); sin aplanar aún las etapas del cargador",
-      "gap": "C-117"
+      "guest": "native",
+      "evidence": "llvm-objcopy aplana en el guest las etapas BIOS del cargador (C-142)",
+      "gap": null
     },
     {
       "id": "ar",
@@ -166,9 +167,9 @@
         "qemu-lxdde"
       ],
       "host": "xtask (Rust) + sgdisk/mkfs.vfat/dd en los paquetes USB",
-      "guest": "absent",
-      "evidence": "xtask/src/main.rs:630 build_image; los paquetes usan sgdisk, losetup, mkfs.vfat",
-      "gap": "C-118",
+      "guest": "native",
+      "evidence": "DiskImageBuilder (imagen) + etapas del cargador compiladas en el guest; BIOS y UEFI arrancan (C-142)",
+      "gap": "boot-shim UEFI del live y empaquetado USB (sgdisk, mkfs.vfat, losetup)",
       "note": "`gptdisk` y `espfat-core` ya son Rust portable; faltan sgdisk/mkfs.vfat sólo en el camino USB."
     },
     {

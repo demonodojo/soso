@@ -2042,7 +2042,15 @@ pub(crate) fn run_qemu(img: &Path, gdb: bool) {
     let reutilizar = std::env::var("SOSO_REUSE_DATA").is_ok_and(|v| v == "1");
     let (data, models) = if reutilizar {
         let root = project_root();
-        (root.join("target/soso-data.img"), root.join("target/soso-models.img"))
+        (
+            // `SOSO_DATA_IMG`: otra imagen de datos (p. ej. la de un guest que compila cosas
+            // durante horas): `cargo xtask test/run` recrean `target/soso-data.img` y borran
+            // todo lo que hubiera dentro.
+            std::env::var_os("SOSO_DATA_IMG")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join("target/soso-data.img")),
+            root.join("target/soso-models.img"),
+        )
     } else {
         build_user();
         mkfs(false)

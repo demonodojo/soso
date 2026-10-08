@@ -689,7 +689,7 @@
       "title": "Configurar OpenCode para el proveedor soso",
       "milestone": "SI-3",
       "kind": "Configuración",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T14",
         "T19"
@@ -710,15 +710,19 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-09-27T02:55:00+02:00",
+        "updated_at": "2026-10-07T23:30:00+02:00",
         "base": "f6aff2212c5c92ec0cdc87471dc355e2afa5be66 + diff HEAD sha256:68db191f3c5eceee4471a0037075742ac324ca4911413de951504181d9d2e5a2",
-        "summary": "docs/self-improvement/seguimiento/T20.md",
+        "summary": "opencode.json y .opencode/agents/soso-improve.md con proveedor soso/soso-coder (7B), sólo proveedor soso, permisos acotados y timeouts de T14; comprobado con debug config/models/agent en entorno aislado, sin inferencia.",
         "evidence": [
-          "docs/self-improvement/seguimiento/T14.md",
-          "target/self-improvement/tasks/T14/campana-t14-qwen2.5-coder-7b.json"
+          "opencode.json",
+          ".opencode/agents/soso-improve.md",
+          "docs/self-improvement/opencode.md",
+          "target/self-improvement/tasks/T20/resultado.md",
+          "target/self-improvement/tasks/T20/config-efectiva.json",
+          "target/self-improvement/tasks/T20/modelos-todos.txt"
         ],
         "blocker": null,
-        "next_step": "Configurar OpenCode con la identidad qwen2.5-coder-7b y los presupuestos del informe del 27-sep."
+        "next_step": "T21: contrastar el contrato C3 con tráfico real de OpenCode 1.18.34."
       }
     },
     {
@@ -727,7 +731,7 @@
       "title": "Capturar el contrato real de OpenCode sin depender del modelo",
       "milestone": "SI-3",
       "kind": "Implementación portable con adaptadores host/guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T20",
         "T47",
@@ -751,8 +755,19 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "blocker": "T14 dio **no-go** (8/10 protocolo; el modelo no usa herramientas). Un `done` con no-go no habilita a los consumidores: `depends_on` no puede expresar «go», así que se dice aquí.",
-        "updated_at": "2026-09-24"
+        "blocker": null,
+        "updated_at": "2026-10-07T23:59:00+02:00",
+        "summary": "OpenCode 1.18.34 real contra servidor guionizado y contra el servidor real de soso: bucle read→edit→bash→texto completo (archivo cambiado). Fixtures wire, contraste con decodificador real y tres correcciones del servidor (esquemas con $schema/cotas, ids de llamada únicos, 429 durante generación). Fallos probados: malformado, 500, 429, args rotos, corte, herramienta fallida.",
+        "evidence": [
+          "tests/self-improvement/opencode/LEEME.md",
+          "crates/soso-llm-api/tests/opencode_contrato.rs",
+          "crates/soso-llm-api/examples/serve_guion.rs",
+          "docs/self-improvement/CONTRATO.md",
+          "docs/self-improvement/opencode.md",
+          "target/self-improvement/tasks/T21/resultado.md",
+          "target/self-improvement/tasks/T21-real/salida.jsonl"
+        ],
+        "next_step": "T22: primer parche útil con el modelo real y OpenCode (T35 para el modo nativo; ahí el proveedor tiene que venir instalado, sin red)."
       }
     },
     {
@@ -761,7 +776,7 @@
       "title": "Resolver una tarea real usando la inferencia guest",
       "milestone": "SI-3",
       "kind": "Integración y evaluación",
-      "status": "pending",
+      "status": "in_progress",
       "depends_on": [
         "T02",
         "T19",
@@ -785,8 +800,15 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "blocker": "T14 dio **no-go** (8/10 protocolo; el modelo no usa herramientas). Un `done` con no-go no habilita a los consumidores: `depends_on` no puede expresar «go», así que se dice aquí.",
-        "updated_at": "2026-09-24"
+        "blocker": "Prefill por lotes (T82) para poder iterar sobre el prompt; calidad del 7B con tool-calling de OpenCode sin demostrar.",
+        "updated_at": "2026-10-08T07:40:00+02:00",
+        "summary": "Intentos 1–2 contra el guest con el 7B: el modelo no llama a ninguna herramienta con el prompt real de OpenCode (8 muestras); pedido sin rodeos, abre la llamada pero sale truncada o mal formada. Cuello de botella: prefill token a token. T81 hecha; T82 es lo siguiente.",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T22.md",
+          "target/self-improvement/first-improvement/temperaturas.txt",
+          "target/self-improvement/first-improvement/medida-reuso.txt"
+        ],
+        "next_step": "Hacer T82 y repetir T22 (ver seguimiento/T22.md)."
       }
     },
     {
@@ -1679,7 +1701,7 @@
       "title": "Cerrar C, ensamblador y empaquetado por perfil",
       "milestone": "SI-7",
       "kind": "Especificación e integración por componente",
-      "status": "in_progress",
+      "status": "done",
       "depends_on": [
         "T38",
         "T41",
@@ -1697,15 +1719,19 @@
         "tools/mkfs-soso/src/main.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "partial",
         "requires": [],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "evidence": [
+          "target/self-improvement/tasks/T42/resultado.md",
+          "target/self-improvement/tasks/T42/xtask-test-guest-kernel.txt",
+          "target/self-improvement/tasks/T42/guest-boot-cargador-uefi.txt"
+        ],
+        "note": "Cadena de build y empaquetado ejecutada en el guest con salidas comparadas con el host; LLVM y los blobs SASS se hacen en el host y falta placa real (resultado.md)."
       },
       "tracking": {
-        "updated_at": "2026-10-05T11:00:00+02:00",
-        "base": "6943debcdba809441a6f6e0fdd351578c1fd0287 + diff HEAD sha256:1be7b229fe48d0fffbc330d6ec142739564a66eb92770acc31eeb9f4628127a2",
-        "summary": "docs/self-improvement/seguimiento/T42.md",
+        "updated_at": "2026-10-08T07:44:22+02:00",
+        "base": "f52ef0d6a01390d6f014c82ba743d9016375241b + diff HEAD sha256:59ba310b51f650c33032586bf3fed08e0d602013ec9d55e4302f92944a473384",
+        "summary": "Build y empaquetado nativos del perfil: user/, kernel (drv-all y lxdde-nouveau), lxdde (e1000e/ath11k/iwlwifi/nouveau), cargador en 5 etapas e imagen BIOS/UEFI hechos en el guest; la suite pasa 54 OK con el kernel del guest. Límites en resultado.md. Mantenimiento C-144 (8-oct): jobserver 0.1.34 corregido y versionado, scripts Python retirados, resolución local verificada en Rust/Cargo y regresiones host correctas; validación guest del arreglo pendiente.",
         "evidence": [
           "docs/self-improvement/native/build-profile.json",
           "target/self-improvement/tasks/T42/guest-cargo-build-1.txt",
@@ -1747,10 +1773,36 @@
           "target/self-improvement/tasks/T42/guest-cargo-build-115.txt",
           "target/self-improvement/tasks/T42/arranque/ring-objetos-identicos.txt",
           "target/self-improvement/tasks/T42/guest-cargo-build-119.txt",
-          "target/self-improvement/tasks/T42/guest-cargo-build-120.txt"
+          "target/self-improvement/tasks/T42/guest-cargo-build-120.txt",
+          "docs/self-improvement/native/C-141.md",
+          "tests/self-improvement/native/lxdde/",
+          "target/self-improvement/tasks/T42/guest-cargo-build-126.txt",
+          "target/self-improvement/tasks/T42/guest-cargo-build-128.txt",
+          "target/self-improvement/tasks/T42/guest-boot-lxdde.txt",
+          "target/self-improvement/tasks/T42/guest-ssh-lxdde.txt",
+          "target/self-improvement/tasks/T42/guest-cargo-build-129.txt",
+          "target/self-improvement/tasks/T42/guest-boot-deck.txt",
+          "target/self-improvement/tasks/T42/guest-boot-iwlwifi.txt",
+          "docs/self-improvement/native/C-142.md",
+          "docs/self-improvement/native/C-143.md",
+          "tests/self-improvement/native/cargador/",
+          "target/self-improvement/tasks/T42/guest-boot-cargador-bios.txt",
+          "target/self-improvement/tasks/T42/guest-boot-cargador-uefi.txt",
+          "target/self-improvement/tasks/T42/arranque/cargador-guest/",
+          "target/self-improvement/tasks/T42/guest-cargo-build-nouveau-5.txt",
+          "target/self-improvement/tasks/T42/guest-boot-nouveau-kernel.txt",
+          "target/self-improvement/tasks/T42/xtask-test-guest-kernel.txt",
+          "target/self-improvement/tasks/T42/resultado.md",
+          "docs/self-improvement/native/C-144.md",
+          "config/rust-soso/vendor/jobserver/SOSO.md",
+          "target/self-improvement/tasks/T42/jobserver/vendor-tests.txt",
+          "target/self-improvement/tasks/T42/jobserver/vendor-unix-tests.txt",
+          "target/self-improvement/tasks/T42/jobserver/vendor-integration.txt",
+          "target/self-improvement/tasks/T42/jobserver/cargo-metadata.json",
+          "target/self-improvement/tasks/T42/jobserver/rust-metadata.json"
         ],
         "blocker": null,
-        "next_step": "Todo user/ (incluido C vía cc+clang del guest) se compila en soso. Falta: llvm-objcopy sobre las etapas del cargador (C-117/C-120); el perfil qemu-lxdde (C de los ports); cargo xtask test contra la imagen construida en el guest; y la validación nativa. Ver seguimiento/T42.md."
+        "next_step": "T43 (validar y recuperar candidatos construidos en soso). Pendientes de T42 fuera de alcance: LLVM nativo, boot-shim del live y placa real. C-144: validar en una imagen aislada el Cargo corregido; esta migración sólo valida fuentes y resolución host."
       }
     },
     {
@@ -2816,7 +2868,7 @@
       "title": "SIGTERM no termina un proceso dormido",
       "milestone": "SI-6",
       "kind": "Decisión de semántica",
-      "status": "pending",
+      "status": "done",
       "depends_on": [],
       "entry_conditions": [],
       "contract_sections": "C6",
@@ -2825,18 +2877,24 @@
         "user/soso-agent-probe/src/sondas/senales.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "verified",
         "requires": [],
-        "evidence": [],
-        "note": "Semántica del kernel; se acredita en el guest con la sonda `senales`."
+        "evidence": [
+          "target/self-improvement/tasks/T42/xtask-test-t70.txt"
+        ],
+        "note": "Sonda guest senales/sigterm-sobre-un-proceso-dormido: 143; sigkill: 137."
       },
       "tracking": {
-        "updated_at": "2026-09-25",
+        "updated_at": "2026-10-07T22:30:00+02:00",
         "base": "7f0f6bb66 + diff de trabajo",
-        "summary": "`signal_one` trata SIGINT/SIGTERM sobre un proceso **bloqueado** como interrupción (`EINTR` + Runnable) en vez de matarlo. Como soso **no tiene manejadores de señal**, el proceso sale del `sleep` y termina normalmente: SIGTERM no termina, y `kill` devuelve éxito. SIGKILL sí mata.",
-        "evidence": "sonda `senales`: sigterm-sobre-un-proceso-dormido = 0; sigkill = 137",
-        "blocker": "Decisión: matar también a los bloqueados, declarar que SIGTERM sólo interrumpe, o implementar manejadores. Cambia la conducta de una señal y afecta a sosh, al arnés y a guiones existentes.",
-        "next_step": "Elegir entre las tres opciones de la ficha. La sonda mide sin juzgar hasta entonces."
+        "summary": "SIGTERM mata también a los procesos bloqueados (143); SIGINT conserva EINTR. La sonda pasa de observación a veredicto.",
+        "evidence": [
+          "target/self-improvement/tasks/T42/xtask-test-t70.txt",
+          "kernel/src/task/mod.rs",
+          "user/soso-agent-probe/src/sondas/senales.rs"
+        ],
+        "blocker": "",
+        "next_step": "Manejadores de señal (opción 3) sin ficha."
       }
     },
     {
@@ -3231,6 +3289,78 @@
         ],
         "blocker": null,
         "next_step": "Cerrada. Sigue T42 (herramientas C/ensamblador/objcopy; kernel y user en el guest)."
+      }
+    },
+    {
+      "id": "T81",
+      "file": "T81-reutilizar-kv.md",
+      "title": "Reutilizar el prefijo del KV entre peticiones",
+      "milestone": "SI-7",
+      "kind": "Integración condicionada",
+      "status": "done",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C3–C4",
+      "context": [
+        "crates/soso-llm-core/src/runtime.rs",
+        "crates/soso-llm-core/src/kv.rs",
+        "user/soso-llm/src/serve.rs"
+      ],
+      "native_validation": {
+        "status": "verified",
+        "requires": [],
+        "evidence": [
+          "target/self-improvement/first-improvement/medida-reuso.txt"
+        ],
+        "note": "Medido en el guest con el 7B: 518 s en frío, 19,9 s y 10,0 s con prefijo común."
+      },
+      "tracking": {
+        "updated_at": "2026-10-08T00:50:00+02:00",
+        "base": "",
+        "summary": "begin_sequence_reusing: el K/V de los primeros p tokens depende sólo de ellos, así que se recorta la caché al prefijo común y sólo se procesa el resto; exacto (pruebas contra prefill en frío), sólo atención clásica. Servidor del guest y backend host dejan de reiniciar la caché por petición.",
+        "evidence": [
+          "docs/self-improvement/T81-reutilizar-kv.md",
+          "crates/soso-llm-core/tests/generate.rs",
+          "target/self-improvement/first-improvement/medida-reuso.txt",
+          "target/self-improvement/first-improvement/medida-prefill-smp4.txt"
+        ],
+        "blocker": null,
+        "next_step": "T22: lanzar OpenCode contra el guest con la reutilización activa."
+      }
+    },
+    {
+      "id": "T82",
+      "file": "T82-prefill-por-lotes.md",
+      "title": "Prefill por lotes",
+      "milestone": "SI-7",
+      "kind": "Integración condicionada",
+      "status": "pending",
+      "depends_on": [
+        "T81"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C3–C4",
+      "context": [
+        "crates/soso-llm-core/src/runtime.rs",
+        "crates/soso-llm-core/src/gemm.rs",
+        "user/soso-llm/src/serve.rs"
+      ],
+      "native_validation": {
+        "status": "pending",
+        "requires": [],
+        "evidence": [],
+        "note": "Medir en el guest con el prompt de OpenCode (4 146 tokens): hoy 65–125 min."
+      },
+      "tracking": {
+        "updated_at": "2026-10-08T07:40:00+02:00",
+        "base": "",
+        "summary": "Ficha creada. El prefill va token a token (~0,55–1 tok/s, memoria-limitado, igual en host y en QEMU); un prompt de OpenCode son 65–125 min en el primer turno.",
+        "evidence": [
+          "docs/self-improvement/T82-prefill-por-lotes.md",
+          "target/self-improvement/first-improvement/medida-prefill-smp4.txt"
+        ],
+        "blocker": null,
+        "next_step": "Implementar prefill por bloques de N tokens con exactitud verificable contra el camino actual; luego repetir T22."
       }
     }
   ],

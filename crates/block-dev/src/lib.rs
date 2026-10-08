@@ -46,6 +46,12 @@ pub trait BlockDevice {
         let _ = block;
     }
 
+    /// Vacía la caché de lectura, si la hay.
+    ///
+    /// Quien va a fiarse de lo que hay en el dispositivo (y no de una copia
+    /// anterior en RAM) lo llama antes de releer. Sin caché no hace nada.
+    fn invalidate_all(&mut self) {}
+
     /// Cuántos bloques admite el dispositivo en **una sola** petición. 1 = no
     /// sabe agrupar, y el llamante no debe molestarse en juntar rangos.
     ///

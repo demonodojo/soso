@@ -119,29 +119,18 @@ pub fn ejecutar() -> Vec<Caso> {
             }
         }
     };
-    // **No juzga: informa.** El sistema hace hoy algo que este caso daba por
-    // imposible, y encodificar el fallo como «esperado» sería peor que
-    // medirlo: ver [T70].
-    //
-    // `signal_one` trata SIGINT/SIGTERM sobre un proceso **bloqueado**
-    // —`Sleeping` incluido— como una interrupción: le devuelve `EINTR` y lo
-    // pone a correr. Como soso **no tiene manejadores de señal**, el hijo sale
-    // del `sleep` y termina normalmente, con código 0. Un SIGTERM que no
-    // termina.
-    //
-    // Este caso pasaba antes por suerte de reloj: a los 300 ms el hijo todavía
-    // no había llegado a dormirse, así que caía en la rama que sí mata. Las
-    // mejoras de N-012 lo hicieron llegar a tiempo y quedó al descubierto.
+    // SIGTERM mata también a un proceso bloqueado ([T70]): soso no tiene
+    // manejadores de señal, así que interrumpir (`EINTR`) dejaría al hijo
+    // seguir con normalidad y el padre no distinguiría «lo corté» de «terminó».
+    // SIGINT sí conserva el `EINTR` (Ctrl+C sobre el prompt de la shell).
     //
     // [T70]: ../../../../docs/self-improvement/T70-sigterm-no-termina.md
     anotar(
         &mut casos,
-        Caso::observacion(
+        Caso::nuevo(
             "senales/sigterm-sobre-un-proceso-dormido",
-            format!(
-                "código {observado} (se esperaría {} si matara — T70)",
-                abi::exit_by_signal(abi::SIGTERM as u8)
-            ),
+            format!("{}", abi::exit_by_signal(abi::SIGTERM as u8)),
+            observado,
         ),
     );
 

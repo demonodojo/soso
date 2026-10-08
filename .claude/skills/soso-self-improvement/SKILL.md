@@ -125,6 +125,37 @@ Esta skill: actualizar «Por dónde» de abajo y comandos si la ficha los cambia
   `tokenizer.som` el test falla con ruta clara; no se salta en silencio.
 - Alcance: lo que la ficha permite. Fuera → ficha nueva con reproducción.
 
+## Ejecuciones largas: vigilarlas y reaccionar sin que nadie te despierte
+
+Cuando una prueba, un build en el guest o una suite dura más de unos minutos, **la espera es
+parte del trabajo**. Costó horas en T42 (2026-10-06/07): una etapa del cargador se colgó o
+falló a los 5 min y nadie lo miró hasta el siguiente aviso del usuario, y una cadena de pasos
+siguió ejecutándose sobre un fallo anterior sin sentido.
+
+1. **Todo lo que lances en segundo plano lleva un vigilante que acaba en los tres casos**:
+   termina bien, falla (`error`, `abort()`, `Caused by`, `FALLA`, exit ≠ 0) o **se queda
+   parado** (el log no crece, o el proceso hijo ya no existe). Con `Monitor`, o un `until` en
+   segundo plano que acote el tiempo (`timeout` ≈ duración esperada × 2). Un `until [ -f listo ]`
+   solo avisa del caso feliz y se queda mudo ante un cuelgue.
+2. **Al llegar el aviso (o en cada vistazo), lo primero es leer la salida y actuar**: si falló,
+   diagnosticar, arreglar y relanzar en ese mismo turno; si acabó, pasar al siguiente paso.
+   No escribas «espero» y pares si ya hay algo que leer. Si el aviso no vino, **mira tú**
+   cada 5–10 min (`ScheduleWakeup`/`Monitor` con latido) en vez de esperar.
+3. **Detecta cuelgues activamente** en el guest: `ssh … ps` y comprueba que haya un proceso
+   hijo (`rustc`, `clang`…) vivo. Un `cargo` en `futex` **sin hijos** durante varios minutos
+   es un cuelgue: mata el QEMU (sólo el tuyo) y reintenta; no esperes una hora.
+4. **Una cadena de pasos se corta en el primer fallo** (`set -e`, o comprobar el código y
+   `exit`), y escribe un fichero `fallo-<paso>` que el vigilante vea. Nada de seguir con el
+   paso 4 tras fallar el 3.
+5. **Mientras corre algo largo, avanza lo independiente** (documentar, preparar el siguiente
+   fixture, leer el código del siguiente hueco). Ningún bloque de espera sin trabajo útil a la
+   vista.
+6. **Anota la duración esperada** de cada paso largo en el seguimiento (p. ej. «etapa 2:
+   14 min, etapa 4: 4 min, `core` de 32 bits: 20 min») para reconocer un cuelgue por pasarse el
+   doble.
+7. Si el usuario dijo «continúa sin parar», el siguiente paso se lanza **en cuanto** acaba el
+   anterior, y las preguntas sólo para lo que de verdad no se puede decidir sola.
+
 ## Mapa corto
 
 | Pieza | Dónde |
@@ -145,6 +176,12 @@ T52/T53: segmentación BPE **igual** a la referencia (5/5). T06 no puede
 debilitar eso a una comparación aproximada.
 
 ## Comandos
+
+C-144 (jobserver): las fuentes corregidas están en
+`config/rust-soso/vendor/jobserver` (0.1.34). `apply-patches.sh` las copia y
+configura la resolución local en Rust y Cargo; no parchear la caché de
+jobserver. Regresiones host sin Python ni registry:
+`tests/self-improvement/native/cargo/jobserver/probar-host.sh`.
 
 Los de **la ficha**, después de crearlos. Típicos:
 

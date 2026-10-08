@@ -236,6 +236,21 @@ impl ChatInput {
     pub fn herramienta(&self, name: &str) -> Option<&ToolDefinition> {
         self.tools.iter().find(|t| t.name == name)
     }
+
+    /// Número con el que numerar las llamadas del turno que se va a generar.
+    ///
+    /// Los ids son `call_<n>` y **no pueden repetirse en la conversación**: el
+    /// cliente reenvía el historial con los ids que le dimos, y la validación
+    /// rechaza dos llamadas con el mismo id (T21: OpenCode fallaba en el segundo
+    /// turno con herramientas porque cada respuesta empezaba otra vez en 1).
+    pub fn siguiente_id_llamada(&self) -> u32 {
+        self.messages
+            .iter()
+            .flat_map(|m| m.tool_calls.iter())
+            .filter_map(|c| c.id.strip_prefix("call_")?.parse::<u32>().ok())
+            .max()
+            .map_or(1, |n| n.saturating_add(1))
+    }
 }
 
 /// El modelo que se va a usar, identificado de forma estable.

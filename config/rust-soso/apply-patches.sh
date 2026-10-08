@@ -230,6 +230,26 @@ if [[ -f "$RUST/Cargo.toml" ]]; then
   # C-068: el workspace de Cargo trae getrandom 0.2.17, 0.3.4 y 0.4.3; el
   # [patch] de la raíz no alcanza. Copiamos tres árboles y fijamos el lock.
   CARGO_WS="$RUST/src/tools/cargo"
+  # C-104/C-144: jobserver ya contiene el arreglo en las fuentes versionadas.
+  # Los workspaces de Rust y Cargo son independientes: ambos deben resolver
+  # también las dependencias transitivas (cc, rustc) desde esta copia.
+  JOBSERVER_DST="$RUST/src/soso-jobserver"
+  mkdir -p "$JOBSERVER_DST"
+  rsync -a --delete "$ROOT/config/rust-soso/vendor/jobserver/" "$JOBSERVER_DST/"
+  for spec in "$RUST/Cargo.toml:src/soso-jobserver" \
+              "$CARGO_WS/Cargo.toml:../../soso-jobserver"; do
+    manifest="${spec%:*}"
+    crate_path="${spec##*:}"
+    [[ -f "$manifest" ]] || continue
+    entry="jobserver = { path = \"$crate_path\" }"
+    if ! grep -Fxq "$entry" "$manifest"; then
+      if grep -q '^\[patch.crates-io\]$' "$manifest"; then
+        sed -i "/^\[patch.crates-io\]$/a $entry" "$manifest"
+      else
+        printf '\n[patch.crates-io]\n%s\n' "$entry" >> "$manifest"
+      fi
+    fi
+  done
   if [[ -f "$CARGO_WS/Cargo.lock" ]]; then
     if [[ -d "$CARGO_WS/.git" ]]; then
       ( cd "$CARGO_WS" && git checkout -- Cargo.lock )

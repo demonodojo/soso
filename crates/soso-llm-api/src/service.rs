@@ -269,7 +269,8 @@ impl ChatBackend for CpuBackend {
     }
 
     fn begin_request(&mut self) {
-        self.rt.reset_sequence();
+        // No reinicia la caché K/V: la generación reutiliza el prefijo común con
+        // la anterior y se reinicia sola si no comparte nada (T22).
     }
 
     fn generate_observed(
@@ -412,7 +413,16 @@ impl<B: ChatBackend + Send> HostService<B> {
             }))?;
 
         let (prepared, prompt_ids, profile) = {
-            let b = self.backend.lock().unwrap();
+            // Una generación en curso tiene tomado el backend: esperar aquí
+            // atendía la petición cuando acababa la otra (200) en vez de
+            // contestar 429, que es lo que dice C3 (T21: OpenCode manda a la vez
+            // la petición principal y la de título). Con el backend libre, o
+            // cogido sólo un instante por el cierre de otra petición, se espera.
+            let b = match self.backend.try_lock() {
+                Ok(b) => b,
+                Err(_) if self.busy.load(Ordering::Acquire) => return Ok(busy_body()),
+                Err(_) => self.backend.lock().unwrap(),
+            };
             let profile = b.profile().clone();
             let prepared = prepare_chat_completion(body, &profile, b.tokenizer())
                 .map_err(ServiceError::Api)?;
@@ -462,8 +472,12 @@ impl<B: ChatBackend + Send> HostService<B> {
             let b = self.backend.lock().unwrap();
             b.tokenizer().decode(&token_ids)
         };
-        let turn = parse_assistant_output(&prepared.input, &generated_text, 1)
-            .map_err(|e| ServiceError::Api(e.into()))?;
+        let turn = parse_assistant_output(
+            &prepared.input,
+            &generated_text,
+            prepared.input.siguiente_id_llamada(),
+        )
+        .map_err(|e| ServiceError::Api(e.into()))?;
 
         validate_tool_choice(&prepared, &turn)?;
 
@@ -518,8 +532,12 @@ impl<B: ChatBackend + Send> HostService<B> {
             let b = self.backend.lock().unwrap();
             b.tokenizer().decode(&token_ids)
         };
-        let turn = parse_assistant_output(&prepared.input, &generated_text, 1)
-            .map_err(|e| ServiceError::Api(e.into()))?;
+        let turn = parse_assistant_output(
+            &prepared.input,
+            &generated_text,
+            prepared.input.siguiente_id_llamada(),
+        )
+        .map_err(|e| ServiceError::Api(e.into()))?;
         validate_tool_choice(&prepared, &turn)?;
 
         let payload = completion_payload(&prepared, &profile, turn, report);

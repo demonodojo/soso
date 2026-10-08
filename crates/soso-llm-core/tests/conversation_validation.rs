@@ -411,7 +411,7 @@ fn keywords_no_implementadas_se_rechazan() {
     let casos = [
         (json!({"type": "string", "pattern": "^a"}), "/properties/x/pattern"),
         (json!({"$ref": "#/definitions/x"}), "/properties/x/$ref"),
-        (json!({"type": "integer", "minimum": 1}), "/properties/x/minimum"),
+        (json!({"type": "integer", "multipleOf": 2}), "/properties/x/multipleOf"),
         (json!({"oneOf": [{"type": "string"}]}), "/properties/x/oneOf"),
     ];
     for (sub, ruta_esperada) in casos {
@@ -742,4 +742,61 @@ fn el_argumento_del_fixture_con_el_tipo_cambiado_falla() {
             motivo: String::from("se esperaba un entero"),
         })
     );
+}
+
+// T21: OpenCode declara `$schema` en cada herramienta y cotas numéricas en los
+// argumentos de `read` (`offset`, `limit`). Se implementan, no se ignoran.
+fn leer_con_cotas() -> ToolDefinition {
+    ToolDefinition::nueva(
+        "read",
+        None,
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "filePath": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "exclusiveMinimum": 0, "maximum": 2000}
+            },
+            "required": ["filePath"]
+        }),
+    )
+}
+
+fn con_args(args: serde_json::Value) -> Result<(), ChatError> {
+    let entrada = ChatInput::nuevo(vec![
+        Message::user("lee"),
+        Message::llamadas(vec![ToolCall::nueva("c1", "read", args.to_string())]),
+        Message::resultado("c1", "ok"),
+    ])
+    .con_herramientas(vec![leer_con_cotas()], ToolChoice::Auto);
+    validate_input(&entrada)
+}
+
+#[test]
+fn schema_y_cotas_se_aceptan_y_se_comprueban() {
+    con_args(json!({"filePath": "a", "offset": 1, "limit": 2000})).expect("dentro de las cotas");
+    for (args, motivo) in [
+        (json!({"filePath": "a", "offset": 0}), "por debajo de minimum"),
+        (json!({"filePath": "a", "limit": 2001}), "por encima de maximum"),
+        (json!({"filePath": "a", "limit": 0}), "no supera exclusiveMinimum"),
+    ] {
+        match con_args(args.clone()) {
+            Err(ChatError::ArgumentoInvalido { motivo: m, .. }) => assert_eq!(m, motivo, "{args}"),
+            otro => panic!("{args}: {otro:?}"),
+        }
+    }
+}
+
+#[test]
+fn una_cota_que_no_es_numero_se_rechaza() {
+    let esquema = json!({"type": "object", "properties": {"x": {"type": "integer", "minimum": "uno"}}});
+    let entrada = ChatInput::nuevo(vec![Message::user("hola")]).con_herramientas(
+        vec![ToolDefinition::nueva("t", None, esquema)],
+        ToolChoice::Auto,
+    );
+    assert!(matches!(
+        validate_input(&entrada),
+        Err(ChatError::EsquemaNoSoportado { .. })
+    ));
 }

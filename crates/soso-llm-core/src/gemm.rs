@@ -380,6 +380,133 @@ pub fn matvec_q4_k_scalar(bytes: &[u8], _rows: usize, cols: usize, x: &[f32], ou
     }
 }
 
+// ----------------------------------------------------------------------------
+// Matvec por lotes (T82): `n` vectores contra la misma matriz.
+//
+// El matvec de un solo vector está limitado por la latencia de la FMA (un único
+// acumulador por fila), no por la memoria: leer cada fila una vez para varios
+// vectores no ayuda por sí solo. Con `n` acumuladores independientes las FMA se
+// solapan y la dequantización de cada bloque se hace una sola vez.
+//
+// **Cada vector sigue exactamente la misma secuencia de operaciones que el kernel
+// de un vector**, así que el resultado es idéntico bit a bit (se prueba en `tests`).
+// Disposición: `xs` = `n` vectores de `cols` seguidos; `outs` = `n` vectores de
+// `rows` seguidos.
+
+fn comprobar_lote(
+    bytes_len: usize,
+    row_bytes: usize,
+    rows: usize,
+    cols: usize,
+    xs: &[f32],
+    n: usize,
+    outs_len: usize,
+    stride: usize,
+) -> Result<(), ()> {
+    let necesario = if n == 0 { 0 } else { (n - 1) * stride + rows };
+    if stride < rows || xs.len() != n * cols || outs_len < necesario || bytes_len != rows * row_bytes
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// `outs[j*rows + r] = matriz[r] · xs[j*cols ..]` con pesos Q4_K.
+pub fn matvec_q4_k_batch(
+    bytes: &[u8],
+    rows: usize,
+    cols: usize,
+    xs: &[f32],
+    n: usize,
+    outs: &mut [f32],
+) -> Result<(), ()> {
+    matvec_q4_k_batch_strided(bytes, rows, cols, xs, n, outs, rows)
+}
+
+/// Como [`matvec_q4_k_batch`] con la salida del vector `j` en `outs[j*stride ..][..rows]`
+/// (permite repartir las filas entre hilos: cada uno escribe su tramo).
+pub fn matvec_q4_k_batch_strided(
+    bytes: &[u8],
+    rows: usize,
+    cols: usize,
+    xs: &[f32],
+    n: usize,
+    outs: &mut [f32],
+    stride: usize,
+) -> Result<(), ()> {
+    use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
+    if cols % Q4_K_BLOCK_ELEMS != 0 {
+        return Err(());
+    }
+    let row_bytes = (cols / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES;
+    comprobar_lote(bytes.len(), row_bytes, rows, cols, xs, n, outs.len(), stride)?;
+    if AVX2 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            avx2::matvec_q4_k_batch(bytes, rows, cols, xs, n, outs, stride);
+            return Ok(());
+        }
+    }
+    for j in 0..n {
+        matvec_q4_k(
+            bytes,
+            rows,
+            cols,
+            &xs[j * cols..(j + 1) * cols],
+            &mut outs[j * stride..j * stride + rows],
+        )?;
+    }
+    Ok(())
+}
+
+/// Como [`matvec_q4_k_batch`] con pesos Q8_0.
+pub fn matvec_q8_0_batch(
+    bytes: &[u8],
+    rows: usize,
+    cols: usize,
+    xs: &[f32],
+    n: usize,
+    outs: &mut [f32],
+) -> Result<(), ()> {
+    matvec_q8_0_batch_strided(bytes, rows, cols, xs, n, outs, rows)
+}
+
+/// Como [`matvec_q4_k_batch_strided`] con pesos Q8_0.
+pub fn matvec_q8_0_batch_strided(
+    bytes: &[u8],
+    rows: usize,
+    cols: usize,
+    xs: &[f32],
+    n: usize,
+    outs: &mut [f32],
+    stride: usize,
+) -> Result<(), ()> {
+    use sosomodel::layout::{Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS};
+    if cols % Q8_0_BLOCK_ELEMS != 0 {
+        return Err(());
+    }
+    let row_bytes = (cols / Q8_0_BLOCK_ELEMS) * Q8_0_BLOCK_BYTES;
+    comprobar_lote(bytes.len(), row_bytes, rows, cols, xs, n, outs.len(), stride)?;
+    if AVX2 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            avx2::matvec_q8_0_batch(bytes, rows, cols, xs, n, outs, stride);
+            return Ok(());
+        }
+    }
+    for j in 0..n {
+        matvec_q8_0(
+            bytes,
+            rows,
+            cols,
+            &xs[j * cols..(j + 1) * cols],
+            &mut outs[j * stride..j * stride + rows],
+        )?;
+    }
+    Ok(())
+}
+
+
 /// Kernels AVX2+FMA. `# Safety`: requieren CPU con AVX2/FMA y longitudes ya
 /// validadas por los wrappers públicos.
 #[cfg(target_arch = "x86_64")]
@@ -589,6 +716,189 @@ pub mod avx2 {
             }
         }
     }
+    /// Vectores por pasada de los kernels por lotes: 8 acumuladores + coeficiente +
+    /// carga de x caben en los 16 registros YMM.
+    const NB_MAX: usize = 8;
+
+    /// # Safety
+    /// Como `matvec_q4_k`; `xs.len()==n*cols`, `outs.len()==n*rows`.
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn matvec_q4_k_batch(
+        bytes: &[u8],
+        rows: usize,
+        cols: usize,
+        xs: &[f32],
+        n: usize,
+        outs: &mut [f32],
+        stride: usize,
+    ) {
+        unsafe {
+            let mut j0 = 0usize;
+            while j0 < n {
+                let nb = (n - j0).min(NB_MAX);
+                match nb {
+                    8 => q4_k_nb::<8>(bytes, rows, cols, xs, j0, outs, stride),
+                    7 => q4_k_nb::<7>(bytes, rows, cols, xs, j0, outs, stride),
+                    6 => q4_k_nb::<6>(bytes, rows, cols, xs, j0, outs, stride),
+                    5 => q4_k_nb::<5>(bytes, rows, cols, xs, j0, outs, stride),
+                    4 => q4_k_nb::<4>(bytes, rows, cols, xs, j0, outs, stride),
+                    3 => q4_k_nb::<3>(bytes, rows, cols, xs, j0, outs, stride),
+                    2 => q4_k_nb::<2>(bytes, rows, cols, xs, j0, outs, stride),
+                    _ => q4_k_nb::<1>(bytes, rows, cols, xs, j0, outs, stride),
+                }
+                j0 += nb;
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn q4_k_nb<const NB: usize>(
+        bytes: &[u8],
+        rows: usize,
+        cols: usize,
+        xs: &[f32],
+        j0: usize,
+        outs: &mut [f32],
+        stride: usize,
+    ) {
+        use crate::f16::f16_to_f32;
+        use crate::quant::q4k_scale_min;
+        use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
+        unsafe {
+            let blocks = cols / Q4_K_BLOCK_ELEMS;
+            let row_bytes = blocks * Q4_K_BLOCK_BYTES;
+            let mask = _mm256_set1_epi8(0x0F);
+            for r in 0..rows {
+                let row = bytes.as_ptr().add(r * row_bytes);
+                let mut acc = [_mm256_setzero_ps(); NB];
+                for b in 0..blocks {
+                    let blk = row.add(b * Q4_K_BLOCK_BYTES);
+                    let d = f16_to_f32(u16::from_le_bytes([*blk, *blk.add(1)]));
+                    let dmin = f16_to_f32(u16::from_le_bytes([*blk.add(2), *blk.add(3)]));
+                    let scales = core::slice::from_raw_parts(blk.add(4), 12);
+                    for pair in 0..4 {
+                        let (sc1, m1) = q4k_scale_min(scales, 2 * pair);
+                        let (sc2, m2) = q4k_scale_min(scales, 2 * pair + 1);
+                        let dsc1 = _mm256_set1_ps(d * sc1 as f32);
+                        let dm1 = _mm256_set1_ps(-dmin * m1 as f32);
+                        let dsc2 = _mm256_set1_ps(d * sc2 as f32);
+                        let dm2 = _mm256_set1_ps(-dmin * m2 as f32);
+                        let qv = _mm256_loadu_si256(blk.add(16 + pair * 32) as *const __m256i);
+                        let lo = _mm256_and_si256(qv, mask);
+                        let hi = _mm256_and_si256(_mm256_srli_epi16(qv, 4), mask);
+                        let off = b * Q4_K_BLOCK_ELEMS + pair * 64;
+                        for (v, base, dsc, dm) in
+                            [(lo, 0usize, dsc1, dm1), (hi, 32usize, dsc2, dm2)]
+                        {
+                            let l0 = _mm256_castsi256_si128(v);
+                            let l1 = _mm256_extracti128_si256(v, 1);
+                            let quads = [
+                                l0,
+                                _mm_srli_si128(l0, 8),
+                                l1,
+                                _mm_srli_si128(l1, 8),
+                            ];
+                            for (g, qq) in quads.into_iter().enumerate() {
+                                let qf = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(qq));
+                                let coef = _mm256_fmadd_ps(qf, dsc, dm);
+                                for k in 0..NB {
+                                    let xv = _mm256_loadu_ps(
+                                        xs.as_ptr().add((j0 + k) * cols + off + base + g * 8),
+                                    );
+                                    acc[k] = _mm256_fmadd_ps(coef, xv, acc[k]);
+                                }
+                            }
+                        }
+                    }
+                }
+                for k in 0..NB {
+                    outs[(j0 + k) * stride + r] = hsum(acc[k]);
+                }
+            }
+        }
+    }
+
+    /// # Safety
+    /// Como `matvec_q8_0`; `xs.len()==n*cols`, `outs.len()==n*rows`.
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn matvec_q8_0_batch(
+        bytes: &[u8],
+        rows: usize,
+        cols: usize,
+        xs: &[f32],
+        n: usize,
+        outs: &mut [f32],
+        stride: usize,
+    ) {
+        unsafe {
+            let mut j0 = 0usize;
+            while j0 < n {
+                let nb = (n - j0).min(NB_MAX);
+                match nb {
+                    8 => q8_0_nb::<8>(bytes, rows, cols, xs, j0, outs, stride),
+                    7 => q8_0_nb::<7>(bytes, rows, cols, xs, j0, outs, stride),
+                    6 => q8_0_nb::<6>(bytes, rows, cols, xs, j0, outs, stride),
+                    5 => q8_0_nb::<5>(bytes, rows, cols, xs, j0, outs, stride),
+                    4 => q8_0_nb::<4>(bytes, rows, cols, xs, j0, outs, stride),
+                    3 => q8_0_nb::<3>(bytes, rows, cols, xs, j0, outs, stride),
+                    2 => q8_0_nb::<2>(bytes, rows, cols, xs, j0, outs, stride),
+                    _ => q8_0_nb::<1>(bytes, rows, cols, xs, j0, outs, stride),
+                }
+                j0 += nb;
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn q8_0_nb<const NB: usize>(
+        bytes: &[u8],
+        rows: usize,
+        cols: usize,
+        xs: &[f32],
+        j0: usize,
+        outs: &mut [f32],
+        stride: usize,
+    ) {
+        use sosomodel::layout::{Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS};
+        unsafe {
+            let blocks = cols / Q8_0_BLOCK_ELEMS;
+            let row_bytes = blocks * Q8_0_BLOCK_BYTES;
+            for r in 0..rows {
+                let row = bytes.as_ptr().add(r * row_bytes);
+                let mut acc = [_mm256_setzero_ps(); NB];
+                for b in 0..blocks {
+                    let chunk = row.add(b * Q8_0_BLOCK_BYTES);
+                    let scale = _mm256_set1_ps(f32::from_le_bytes([
+                        *chunk,
+                        *chunk.add(1),
+                        *chunk.add(2),
+                        *chunk.add(3),
+                    ]));
+                    let q = chunk.add(4);
+                    let mut blk = [_mm256_setzero_ps(); NB];
+                    for g in 0..4 {
+                        let qi = _mm_loadl_epi64(q.add(g * 8) as *const __m128i);
+                        let qf = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(qi));
+                        for k in 0..NB {
+                            let xv = _mm256_loadu_ps(
+                                xs.as_ptr().add((j0 + k) * cols + b * Q8_0_BLOCK_ELEMS + g * 8),
+                            );
+                            blk[k] = _mm256_fmadd_ps(qf, xv, blk[k]);
+                        }
+                    }
+                    for k in 0..NB {
+                        acc[k] = _mm256_fmadd_ps(scale, blk[k], acc[k]);
+                    }
+                }
+                for k in 0..NB {
+                    outs[(j0 + k) * stride + r] = hsum(acc[k]);
+                }
+            }
+        }
+    }
+
 }
 
 #[cfg(test)]

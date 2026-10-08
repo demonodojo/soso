@@ -30,6 +30,14 @@ required-features = ["std"]
 name = "render_dump"
 required-features = ["std"]
 
+[[example]]
+name = "generar_crudo"
+required-features = ["std"]
+
+[[example]]
+name = "serve_guion"
+required-features = ["std"]
+
 [[test]]
 name = "admission"
 required-features = ["std"]

@@ -1,8 +1,13 @@
 # T42 — Cerrar C, ensamblador y empaquetado por perfil
 
-**Hito:** SI-7 · **Tipo:** Especificación e integración por componente · **Estado:** en curso (2026-10-03): pasos 1–2 hechos y 5 parcial (kernel compilado y arrancado desde soso); ver [seguimiento/T42.md](seguimiento/T42.md) y [native/build-profile.json](native/build-profile.json).
+**Hito:** SI-7 · **Tipo:** Especificación e integración por componente · **Estado:** hecha (2026-10-07) con límites: LLVM y los blobs SASS se hacen en el host y falta placa real; ver [seguimiento/T42.md](seguimiento/T42.md), [native/build-profile.json](native/build-profile.json) y `target/self-improvement/tasks/T42/resultado.md`.
 
 **Dependencias:** [T38](T38-toolchain-inventario.md), [T41](T41-cargo-offline.md)
+
+**Mantenimiento 2026-10-08:** [C-144](native/C-144.md) conserva jobserver
+0.1.34 corregido en el repositorio; se retira su script de parcheo y se
+comprueba la resolución por ruta y las regresiones host. Su validación guest
+sigue pendiente; este cambio no amplía el cierre nativo de T42.
 
 ## Objetivo y entrega
 
@@ -46,9 +51,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados (2026-10-07).
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6 (suite 54 OK con el kernel del guest; objetos lxdde idénticos; imágenes BIOS/UEFI arrancan).
+- [x] Resultado entregado con límites y dependencias restantes explícitos (`resultado.md`).
 
 No declarar todos los drivers soportados por haber construido un kernel mínimo; las capacidades adicionales exigen su propia cadena.
 

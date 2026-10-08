@@ -7,8 +7,8 @@ use crate::generation::{
 use crate::gemm::rmsnorm;
 use crate::kv::LayerKv;
 use crate::layer::{
-    clear_infer_op, matvec_view_par, note_infer_op, LayerExecutor, LayerScratch, TensorSource,
-    TensorView,
+    clear_infer_op, matvec_view_par, note_infer_op, BlockScratch, LayerExecutor, LayerScratch,
+    TensorSource, TensorView,
 };
 use crate::parallel::{RowParallel, Sequential};
 use crate::plan::{ExecDest, ResourcePlanner};
@@ -101,6 +101,17 @@ pub struct Runtime {
     pub hidden: Vec<f32>,
     pub kv: Vec<LayerKv>,
     pub pos: usize,
+    /// Tokens cuyo K/V está en la caché, en orden: el prefijo que una petición
+    /// nueva puede reutilizar sin repetir el prefill (T22). Vacío cuando la caché
+    /// no es fiable (cancelación, planificador, otra generación en curso).
+    cached_tokens: Vec<u32>,
+    /// Buffers del prefill por bloques (T82); se crean la primera vez que hacen falta.
+    block: Option<BlockScratch>,
+    /// Prefill por bloques activado (por defecto sí). Apagarlo fuerza el camino token
+    /// a token: sirve para comparar ambos y como salida de emergencia.
+    pub prefill_por_bloques: bool,
+    /// Cuántos tokens se han procesado por el camino de bloques (diagnóstico/pruebas).
+    pub tokens_en_bloque: u64,
     pub backend: Backend,
     scratch: LayerScratch,
     logits_buf: Vec<f32>,
@@ -149,6 +160,10 @@ impl Runtime {
                 })
                 .collect(),
             pos: 0,
+            cached_tokens: Vec::new(),
+            block: None,
+            prefill_por_bloques: true,
+            tokens_en_bloque: 0,
             backend: Backend::Auto,
             scratch,
             logits_buf: vec![0.0f32; vocab],
@@ -330,12 +345,88 @@ impl Runtime {
 
     pub fn reset_sequence(&mut self) {
         self.pos = 0;
+        self.cached_tokens.clear();
         for layer in &mut self.kv {
             layer.reset();
         }
         if let Some(pl) = self.planner.as_mut() {
             pl.reset_moe_hints();
         }
+    }
+
+    /// Ancho de K/V por token de una capa de atención clásica; `None` si la
+    /// capa guarda otra cosa (MLA, GDN) y no admite recorte.
+    fn kv_dim_recortable(&self, layer: usize) -> Option<usize> {
+        let spec = self.manifest.layer(layer as u32).cloned().unwrap_or_default();
+        if spec.attn_kind == AttnKind::Gdn
+            || (spec.attn_kind == AttnKind::Mla && spec.kv_lora_rank > 0)
+        {
+            return None;
+        }
+        let l = layer as u32;
+        Some(
+            self.manifest.effective_num_kv_heads(l) as usize
+                * self.manifest.effective_head_dim(l) as usize,
+        )
+    }
+
+    /// Cuántos tokens del principio de `prompt` ya tienen su K/V en la caché.
+    ///
+    /// Por causalidad, el K/V de los primeros `p` tokens depende sólo de ellos,
+    /// así que recortar la caché a `p` deja exactamente el estado de un prefill
+    /// limpio de `prompt[..p]`. Siempre queda al menos el último token por
+    /// procesar: hace falta para obtener los logits.
+    fn prefijo_reutilizable(&self, prompt: &[u32]) -> usize {
+        // Con planificador sólo vale un modelo denso: los hints de expertos de un
+        // MoE son estado de la secuencia anterior y no se pueden recortar. La
+        // expulsión de K/V (ventana deslizante) la delata `tokens != pos` abajo.
+        if (self.planner.is_some() && self.manifest.num_experts > 0)
+            || self.cached_tokens.is_empty()
+            || self.cached_tokens.len() != self.pos
+            || prompt.len() < 2
+        {
+            return 0;
+        }
+        for (l, kv) in self.kv.iter().enumerate() {
+            match self.kv_dim_recortable(l) {
+                Some(d) if kv.tokens(d) == self.pos => {}
+                _ => return 0,
+            }
+        }
+        let comun = self
+            .cached_tokens
+            .iter()
+            .zip(prompt)
+            .take_while(|(a, b)| a == b)
+            .count();
+        comun.min(prompt.len() - 1)
+    }
+
+    /// Empieza una secuencia reaprovechando el prefijo de la anterior. Devuelve
+    /// cuántos tokens del prompt no hay que volver a procesar.
+    pub fn begin_sequence_reusing(&mut self, prompt: &[u32]) -> usize {
+        let p = self.prefijo_reutilizable(prompt);
+        if p == 0 {
+            self.reset_sequence();
+            return 0;
+        }
+        for l in 0..self.kv.len() {
+            let d = self.kv_dim_recortable(l).unwrap_or(0);
+            self.kv[l].truncate_tokens(p, d);
+        }
+        self.pos = p;
+        // Durante la generación la caché no es fiable hasta que termina bien.
+        self.cached_tokens.clear();
+        p
+    }
+
+    /// Anota qué tokens quedan en la caché al terminar una generación completa.
+    fn recordar_cache(&mut self, tokens: &[u32]) {
+        self.cached_tokens = if self.pos <= tokens.len() {
+            tokens[..self.pos].to_vec()
+        } else {
+            Vec::new()
+        };
     }
 
     pub fn embed_token(&mut self, token: u32, source: &mut impl TensorSource) -> Result<(), ()> {
@@ -354,6 +445,127 @@ impl Runtime {
         if token < self.manifest.vocab_size {
             source.prefetch_embed_row(token, h);
         }
+    }
+
+    /// Tokens por bloque en el prefill (T82). 8 son los acumuladores que caben en los
+    /// registros YMM de los kernels por lotes; con más baja el rendimiento por caché.
+    pub const BLOQUE_PREFILL: usize = 8;
+
+    /// ¿Puede ejecutarse el siguiente bloque de `n` tokens con `forward_layer_block`?
+    ///
+    /// Sólo si el resultado va a ser idéntico al de `n` pasos de un token: atención
+    /// clásica con KV f16 y FFN denso en todas las capas, sin GPU ni capas remotas, con
+    /// los pesos residentes (nada que descargar entre capas) y sin que la ventana de KV
+    /// deslice a mitad de bloque.
+    fn bloque_posible(&self, n: usize, gpu: &Option<&mut dyn crate::gpu::GpuDispatch>) -> bool {
+        if n < 2 || !self.prefill_por_bloques {
+            return false;
+        }
+        let base_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
+            && gpu.as_ref().is_some_and(|g| g.available());
+        if base_gpu {
+            return false;
+        }
+        if let Some(pl) = self.planner.as_ref() {
+            if !pl.keep_weights_mapped()
+                || pl.use_h2o()
+                || pl.use_sparse_attn(self.pos + n)
+                || self.pos + n > pl.kv_window_tokens()
+            {
+                return false;
+            }
+            if (0..self.manifest.num_layers).any(|l| pl.layer_dest(l) != ExecDest::Cpu) {
+                return false;
+            }
+        } else if self.pos + n > self.manifest.max_seq as usize {
+            return false;
+        }
+        let exec = LayerExecutor {
+            manifest: &self.manifest,
+            has_gate: self.has_gate,
+            parallel: None,
+        };
+        (0..self.manifest.num_layers).all(|l| {
+            let kv = &self.kv[l as usize];
+            let kv_dim = self.manifest.effective_num_kv_heads(l) as usize
+                * self.manifest.effective_head_dim(l) as usize;
+            exec.soporta_bloque(l, kv) && kv.tokens(kv_dim) == self.pos
+        })
+    }
+
+    /// Procesa `tokens` de una vez (prefill por bloques). Devuelve `false` si el
+    /// observador canceló a mitad (la caché queda a medias y no se anota).
+    fn forward_bloque(
+        &mut self,
+        source: &mut impl TensorSource,
+        tokens: &[u32],
+        parallel: Option<&dyn RowParallel>,
+        ledger: &mut GenerationLedger,
+        observer: &mut dyn GenerationObserver,
+        cancel_slot: &mut Option<&mut GenCancel>,
+    ) -> Result<bool, ()> {
+        let n = tokens.len();
+        let h = self.manifest.hidden_dim as usize;
+        let mut bs = self
+            .block
+            .take()
+            .unwrap_or_else(|| BlockScratch::new(&self.manifest, Self::BLOQUE_PREFILL));
+        let mut hs = vec![0.0f32; n * h];
+        for (i, &tok) in tokens.iter().enumerate() {
+            self.embed_token(tok, source)?;
+            hs[i * h..(i + 1) * h].copy_from_slice(&self.hidden);
+        }
+        let exec = LayerExecutor {
+            manifest: &self.manifest,
+            has_gate: self.has_gate,
+            parallel,
+        };
+        let of = self.manifest.num_layers;
+        let mut seguir = true;
+        for layer in 0..of {
+            note_infer_op(Some(layer), "");
+            if let Some(hook) = self.layer_enter_hook {
+                hook(layer, of);
+            }
+            if let Some(g) = cancel_slot.as_mut() {
+                if g.checkpoint(observer, ledger, GenCheckpoint::Layer { layer, of }) {
+                    seguir = false;
+                    break;
+                }
+            }
+            let r = exec.forward_layer_block(
+                layer,
+                self.pos,
+                n,
+                &mut hs,
+                &mut bs,
+                &mut self.scratch,
+                &mut self.kv[layer as usize],
+                source,
+            );
+            if r.is_err() {
+                self.block = Some(bs);
+                return Err(());
+            }
+            if let Some(hook) = self.layer_hook {
+                hook(layer, of);
+            }
+        }
+        self.block = Some(bs);
+        if !seguir {
+            return Ok(false);
+        }
+        // El último token deja su estado final en `hidden`, como el paso de un token.
+        self.hidden.copy_from_slice(&hs[(n - 1) * h..n * h]);
+        self.pos += n;
+        self.tokens_en_bloque += n as u64;
+        for _ in 0..n {
+            if let Some(pl) = self.planner.as_mut() {
+                let _ = pl.on_token_complete(&self.manifest, &self.index);
+            }
+        }
+        self.slide_kv_if_needed();
+        Ok(true)
     }
 
     /// Prefill del prompt: prefetch del siguiente embed mientras se calcula
@@ -401,7 +613,37 @@ impl Runtime {
         } else {
             let _ = observer.cancel_at(GenCheckpoint::BeforePrefill);
         }
-        for (i, &tok) in prompt.iter().enumerate() {
+        let mut i = 0usize;
+        while i < total {
+            // Prefill por bloques (T82): ~4× más rápido que token a token y con el
+            // mismo resultado bit a bit. Cae al camino de siempre si no es seguro.
+            let n = (total - i).min(Self::BLOQUE_PREFILL);
+            if n >= 2 && self.bloque_posible(n, gpu) {
+                // El observador ve cada `done` como en el camino token a token (hay
+                // quien cancela en uno concreto); la cancelación surte efecto al
+                // empezar el bloque.
+                for d in 1..=n {
+                    let at = GenCheckpoint::PrefillToken {
+                        done: i + d,
+                        total,
+                    };
+                    if let Some(g) = cancel_slot.as_mut() {
+                        if g.checkpoint(observer, ledger, at) {
+                            return Ok(());
+                        }
+                    } else {
+                        let _ = observer.cancel_at(at);
+                    }
+                }
+                let sigue =
+                    self.forward_bloque(source, &prompt[i..i + n], parallel, ledger, observer, cancel_slot)?;
+                if !sigue {
+                    return Ok(());
+                }
+                i += n;
+                continue;
+            }
+            let tok = prompt[i];
             let at = GenCheckpoint::PrefillToken {
                 done: i + 1,
                 total,
@@ -440,6 +682,7 @@ impl Runtime {
             if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
                 return Ok(());
             }
+            i += 1;
         }
         Ok(())
     }
@@ -878,7 +1121,7 @@ impl Runtime {
             note_infer_op(None, "prompt vacío");
             return Err(());
         }
-        self.reset_sequence();
+        let ya = self.begin_sequence_reusing(prompt);
         let mut ledger = GenerationLedger::new(prompt.len());
         let mut cancel = GenCancel::default();
         let mut cancel_slot: Option<&mut GenCancel> = Some(&mut cancel);
@@ -886,7 +1129,7 @@ impl Runtime {
         let mut tokens: Vec<u32> = prompt.to_vec();
         self.prefill_prompt_with(
             source,
-            prompt,
+            &prompt[ya..],
             parallel,
             gpu,
             None,
@@ -975,6 +1218,9 @@ impl Runtime {
                 }
             }
         }
+        if !cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+            self.recordar_cache(&tokens);
+        }
         Ok((tokens, ledger.into_report()))
     }
 
@@ -1055,7 +1301,7 @@ impl Runtime {
             note_infer_op(None, "prompt vacío");
             return Err(());
         }
-        self.reset_sequence();
+        let ya = self.begin_sequence_reusing(prompt);
         if let Some(pl) = self.planner.as_mut() {
             pl.refresh_mem(refresh_mem());
         }
@@ -1066,7 +1312,7 @@ impl Runtime {
         let mut tokens: Vec<u32> = prompt.to_vec();
         self.prefill_prompt_with(
             source,
-            prompt,
+            &prompt[ya..],
             parallel,
             gpu,
             Some(clock_ms),
@@ -1190,6 +1436,9 @@ impl Runtime {
                 }
                 pl.tune_pld(offered, accepted);
             }
+        }
+        if !cancel_slot.as_ref().is_some_and(|g| g.stopped) {
+            self.recordar_cache(&tokens);
         }
         Ok((tokens, ledger.into_report()))
     }

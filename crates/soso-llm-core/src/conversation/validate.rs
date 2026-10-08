@@ -52,10 +52,19 @@ const REGLAS: &[&str] = &[
     "items",
     "enum",
     "anyOf",
+    // Cotas numéricas (T21: las usa OpenCode, p. ej. `offset`/`limit` de `read`).
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
 ];
 
 /// Anotaciones: se transportan, no validan nada, y saltárselas es correcto.
-const ANOTACIONES: &[&str] = &["description", "title"];
+/// `$schema` sólo nombra el dialecto del documento (OpenCode lo pone en la raíz
+/// de cada herramienta).
+const ANOTACIONES: &[&str] = &["description", "title", "$schema"];
+
+const COTAS: &[&str] = &["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"];
 
 const TIPOS: &[&str] = &[
     "object", "array", "string", "number", "integer", "boolean", "null",
@@ -500,6 +509,18 @@ fn validar_esquema(
         )?;
     }
 
+    for cota in COTAS {
+        if let Some(v) = obj.get(*cota) {
+            if !v.is_number() {
+                return Err(esquema_no_soportado(
+                    herramienta,
+                    &format!("{ruta}/{cota}"),
+                    "la cota tiene que ser un número",
+                ));
+            }
+        }
+    }
+
     if let Some(e) = obj.get("enum") {
         match e.as_array() {
             Some(v) if !v.is_empty() => {}
@@ -645,11 +666,13 @@ fn validar_valor(
             if !es_entero(valor) {
                 return Err(argumento_invalido(llamada, ruta, "se esperaba un entero"));
             }
+            validar_cotas(llamada, valor, obj, ruta)?;
         }
         "number" => {
             if !valor.is_number() {
                 return Err(argumento_invalido(llamada, ruta, "se esperaba un número"));
             }
+            validar_cotas(llamada, valor, obj, ruta)?;
         }
         "boolean" => {
             if !valor.is_boolean() {
@@ -662,6 +685,40 @@ fn validar_valor(
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// `minimum`, `maximum` y sus versiones exclusivas (JSON Schema 2019-09+: números).
+fn validar_cotas(
+    llamada: &str,
+    valor: &Value,
+    esquema: &serde_json::Map<String, Value>,
+    ruta: &str,
+) -> Result<(), ChatError> {
+    let Some(x) = valor.as_f64() else {
+        return Ok(());
+    };
+    let cota = |k: &str| esquema.get(k).and_then(Value::as_f64);
+    if let Some(m) = cota("minimum") {
+        if x < m {
+            return Err(argumento_invalido(llamada, ruta, "por debajo de minimum"));
+        }
+    }
+    if let Some(m) = cota("maximum") {
+        if x > m {
+            return Err(argumento_invalido(llamada, ruta, "por encima de maximum"));
+        }
+    }
+    if let Some(m) = cota("exclusiveMinimum") {
+        if x <= m {
+            return Err(argumento_invalido(llamada, ruta, "no supera exclusiveMinimum"));
+        }
+    }
+    if let Some(m) = cota("exclusiveMaximum") {
+        if x >= m {
+            return Err(argumento_invalido(llamada, ruta, "no queda por debajo de exclusiveMaximum"));
+        }
     }
     Ok(())
 }

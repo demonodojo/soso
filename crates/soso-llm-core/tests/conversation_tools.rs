@@ -318,3 +318,28 @@ fn alloc_texto(cola: &str) -> String {
     s.push_str(cola);
     s
 }
+
+// T21: los ids de llamada no pueden repetirse entre turnos. OpenCode reenvía el
+// historial con los ids que le dimos y la validación rechaza los duplicados.
+#[test]
+fn los_ids_de_llamada_continuan_la_numeracion_del_historial() {
+    use soso_llm_core::conversation::ToolCall;
+    let vacio = ChatInput::nuevo(vec![Message::user("hola")]);
+    assert_eq!(vacio.siguiente_id_llamada(), 1);
+
+    let con_dos = ChatInput::nuevo(vec![
+        Message::user("hola"),
+        Message::llamadas(vec![ToolCall::nueva("call_1", "a", "{}")]),
+        Message::resultado("call_1", "ok"),
+        Message::llamadas(vec![ToolCall::nueva("call_2", "a", "{}")]),
+        Message::resultado("call_2", "ok"),
+    ]);
+    assert_eq!(con_dos.siguiente_id_llamada(), 3);
+
+    // Ids que no son nuestros no cuentan ni rompen la numeración.
+    let ajeno = ChatInput::nuevo(vec![
+        Message::user("hola"),
+        Message::llamadas(vec![ToolCall::nueva("toolu_xyz", "a", "{}")]),
+    ]);
+    assert_eq!(ajeno.siguiente_id_llamada(), 1);
+}

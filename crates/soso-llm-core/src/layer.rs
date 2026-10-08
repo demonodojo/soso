@@ -5,8 +5,9 @@
 //! durante el matvec. El KV cache es f16 o int8 (KIVI-lite) según el planner.
 
 use crate::gemm::{
-    add_assign_f32, add_f32, matvec_f32, matvec_q4_k, matvec_q8_0, rmsnorm, rope_inplace,
-    rope_inplace_neox, silu_inplace, swiglu_inplace, topk_softmax,
+    add_assign_f32, add_f32, matvec_f32, matvec_q4_k, matvec_q4_k_batch_strided, matvec_q8_0,
+    matvec_q8_0_batch_strided, rmsnorm, rope_inplace, rope_inplace_neox, silu_inplace,
+    swiglu_inplace, topk_softmax,
 };
 pub use crate::kv::{KvDtype, LayerKv};
 use crate::parallel::{RowParallel, Sequential};
@@ -214,6 +215,113 @@ pub fn matvec_view_par(
     }
 }
 
+/// Como [`matvec_view_par`] para `n` vectores a la vez (T82): `xs` son `n` vectores de
+/// `cols` seguidos y `outs` `n` vectores de `rows` seguidos. Para cada vector el
+/// resultado es idéntico bit a bit al de `matvec_view_par` (los kernels por lotes
+/// repiten la misma secuencia de operaciones con acumuladores independientes).
+pub fn matvec_view_batch_par(
+    v: &TensorView,
+    rows: usize,
+    cols: usize,
+    xs: &[f32],
+    n: usize,
+    outs: &mut [f32],
+    par: &dyn RowParallel,
+) -> Result<(), ()> {
+    if v.elems != rows * cols || xs.len() != n * cols || outs.len() != n * rows {
+        return Err(());
+    }
+    let dtype = v.dtype;
+    let xs_ptr = xs.as_ptr() as usize;
+    let out_ptr = outs.as_mut_ptr() as usize;
+    let bytes_ptr = v.bytes.as_ptr() as usize;
+    let bytes_len = v.bytes.len();
+    let err = core::sync::atomic::AtomicBool::new(false);
+    let err_ptr = &err as *const _ as usize;
+    par.for_rows(rows, &move |r0, r1| {
+        if r0 >= r1 {
+            return;
+        }
+        let xs = unsafe { core::slice::from_raw_parts(xs_ptr as *const f32, n * cols) };
+        let outs = unsafe { core::slice::from_raw_parts_mut(out_ptr as *mut f32, n * rows) };
+        let bytes = unsafe { core::slice::from_raw_parts(bytes_ptr as *const u8, bytes_len) };
+        let sub = r1 - r0;
+        let ok = match dtype {
+            DTYPE_F32 => {
+                let w = unsafe {
+                    core::slice::from_raw_parts(bytes.as_ptr() as *const f32, rows * cols)
+                };
+                for j in 0..n {
+                    matvec_f32(
+                        &w[r0 * cols..r1 * cols],
+                        sub,
+                        cols,
+                        &xs[j * cols..(j + 1) * cols],
+                        &mut outs[j * rows + r0..j * rows + r1],
+                    );
+                }
+                true
+            }
+            DTYPE_Q8_0 => {
+                use sosomodel::layout::{Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS};
+                let row_bytes = (cols / Q8_0_BLOCK_ELEMS) * Q8_0_BLOCK_BYTES;
+                matvec_q8_0_batch_strided(
+                    &bytes[r0 * row_bytes..r1 * row_bytes],
+                    sub,
+                    cols,
+                    xs,
+                    n,
+                    &mut outs[r0..],
+                    rows,
+                )
+                .is_ok()
+            }
+            DTYPE_Q4_K => {
+                use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
+                let row_bytes = (cols / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES;
+                matvec_q4_k_batch_strided(
+                    &bytes[r0 * row_bytes..r1 * row_bytes],
+                    sub,
+                    cols,
+                    xs,
+                    n,
+                    &mut outs[r0..],
+                    rows,
+                )
+                .is_ok()
+            }
+            DTYPE_MXFP4 => {
+                use sosomodel::layout::{MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS};
+                let row_bytes = (cols / MXFP4_BLOCK_ELEMS) * MXFP4_BLOCK_BYTES;
+                let mut ok = true;
+                for j in 0..n {
+                    ok &= crate::gemm::matvec_mxfp4(
+                        &bytes[r0 * row_bytes..r1 * row_bytes],
+                        sub,
+                        cols,
+                        &xs[j * cols..(j + 1) * cols],
+                        &mut outs[j * rows + r0..j * rows + r1],
+                    )
+                    .is_ok();
+                }
+                ok
+            }
+            _ => false,
+        };
+        if !ok {
+            unsafe {
+                (*(err_ptr as *const core::sync::atomic::AtomicBool))
+                    .store(true, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+    if err.load(core::sync::atomic::Ordering::Relaxed) {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
 /// Buffers reutilizados entre tokens: el heap de userspace no libera bloques
 /// pequeños, así que las reservas deben hacerse una sola vez.
 pub struct LayerScratch {
@@ -352,6 +460,44 @@ fn add_optional_bias<S: TensorSource>(
     }
     if source.load_f32(name, &mut scratch[..n]).is_ok() {
         add_assign_f32(out, &scratch[..n]);
+    }
+}
+
+/// Buffers del prefill por bloques (T82): `cap` tokens a la vez.
+pub struct BlockScratch {
+    pub cap: usize,
+    pub residual: Vec<f32>,
+    pub q: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    pub attn: Vec<f32>,
+    pub o: Vec<f32>,
+    pub up: Vec<f32>,
+    pub gate: Vec<f32>,
+}
+
+impl BlockScratch {
+    pub fn new(m: &Manifest, cap: usize) -> Self {
+        let h = m.hidden_dim as usize;
+        let mut q = h;
+        let mut kv = h;
+        for l in 0..m.num_layers {
+            let hd = m.effective_head_dim(l) as usize;
+            q = q.max(m.effective_num_heads(l) as usize * hd);
+            kv = kv.max(m.effective_num_kv_heads(l) as usize * hd);
+        }
+        let ffn = m.max_ffn_dim() as usize;
+        BlockScratch {
+            cap,
+            residual: vec![0.0; cap * h],
+            q: vec![0.0; cap * q],
+            k: vec![0.0; cap * kv],
+            v: vec![0.0; cap * kv],
+            attn: vec![0.0; cap * q],
+            o: vec![0.0; cap * h],
+            up: vec![0.0; cap * ffn],
+            gate: vec![0.0; cap * ffn],
+        }
     }
 }
 
@@ -783,6 +929,203 @@ impl<'a> LayerExecutor<'a> {
                 .saturating_add(t_ffn1.saturating_sub(t_ffn0));
         }
         Ok(timing)
+    }
+
+    /// ¿Se puede ejecutar esta capa por bloques (T82)? Sólo atención clásica con KV f16
+    /// y FFN denso: el resto (MLA, KDA, gated, GDN, MoE) sigue token a token.
+    pub fn soporta_bloque(&self, layer: u32, kv: &LayerKv) -> bool {
+        let spec = self.manifest.layer(layer).cloned().unwrap_or_default();
+        let atencion_clasica = !matches!(
+            spec.attn_kind,
+            AttnKind::Mla | AttnKind::Kda | AttnKind::Gated | AttnKind::Gdn
+        );
+        atencion_clasica
+            && spec.ffn_kind != FfnKind::LatentMoe
+            && !self.manifest.layer_is_moe(layer)
+            && matches!(kv.dtype, KvDtype::F16)
+    }
+
+    /// Una capa para `n` tokens consecutivos (posiciones `pos0..pos0+n`) a la vez.
+    ///
+    /// Las proyecciones y la FFN —el 99 % del coste del prefill— leen cada matriz de
+    /// pesos una vez para los `n` vectores (`matvec_view_batch_par`). La atención va
+    /// token a token con el mismo código de siempre y los K/V se añaden en orden, así
+    /// que el resultado es **idéntico bit a bit** al de `forward_layer` repetido `n`
+    /// veces. `hs` son `n` vectores de `hidden_dim` seguidos y se actualizan en su sitio.
+    pub fn forward_layer_block<S: TensorSource>(
+        &self,
+        layer: u32,
+        pos0: usize,
+        n: usize,
+        hs: &mut [f32],
+        bs: &mut BlockScratch,
+        s: &mut LayerScratch,
+        kv: &mut LayerKv,
+        source: &mut S,
+    ) -> Result<(), ()> {
+        let h = self.manifest.hidden_dim as usize;
+        let heads = self.manifest.effective_num_heads(layer) as usize;
+        let kv_heads = self.manifest.effective_num_kv_heads(layer) as usize;
+        let head_dim = self.manifest.effective_head_dim(layer) as usize;
+        let kv_dim = kv_heads * head_dim;
+        let q_dim = heads * head_dim;
+        let group = heads / kv_heads;
+        let ffn = self.manifest.layer_expert_ffn_dim(layer) as usize;
+        let eps = self.manifest.rms_eps;
+        let theta = self.manifest.rope_theta;
+        let prefix = format!("L{layer:02}");
+        let spec = self.manifest.layer(layer).cloned().unwrap_or_default();
+        let seq_par = Sequential;
+        let par: &dyn RowParallel = self.parallel.unwrap_or(&seq_par);
+        if hs.len() != n * h || n == 0 || n > bs.cap {
+            return Err(());
+        }
+
+        // --- atención ---
+        bs.residual[..n * h].copy_from_slice(hs);
+        source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w)?;
+        for i in 0..n {
+            rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w, eps);
+        }
+        for (clave, dim, destino) in [
+            ("attn_q", q_dim, 0u8),
+            ("attn_k", kv_dim, 1u8),
+            ("attn_v", kv_dim, 2u8),
+        ] {
+            let name = format!("{prefix}.{clave}");
+            note_infer_op(Some(layer), &name);
+            let vista = source.tensor_view(&name)?;
+            let out = match destino {
+                0 => &mut bs.q[..n * dim],
+                1 => &mut bs.k[..n * dim],
+                _ => &mut bs.v[..n * dim],
+            };
+            matvec_view_batch_par(&vista, dim, h, hs, n, out, par)?;
+        }
+        for (clave, dim, destino) in [
+            ("attn_q", q_dim, 0u8),
+            ("attn_k", kv_dim, 1u8),
+            ("attn_v", kv_dim, 2u8),
+        ] {
+            // El sesgo se lee una vez y se suma a cada token (misma suma que por token).
+            let name = format!("{prefix}.{clave}.bias");
+            if s.attn_out.len() >= dim && source.load_f32(&name, &mut s.attn_out[..dim]).is_ok() {
+                for i in 0..n {
+                    let out = match destino {
+                        0 => &mut bs.q[i * dim..(i + 1) * dim],
+                        1 => &mut bs.k[i * dim..(i + 1) * dim],
+                        _ => &mut bs.v[i * dim..(i + 1) * dim],
+                    };
+                    add_assign_f32(out, &s.attn_out[..dim]);
+                }
+            }
+        }
+        if spec.flags & FLAG_QK_NORM != 0 {
+            source.load_f32(&format!("{prefix}.attn_q_norm"), &mut s.head_out[..head_dim])?;
+            for i in 0..n {
+                for head in 0..heads {
+                    let o = i * q_dim + head * head_dim;
+                    rmsnorm(&mut bs.q[o..o + head_dim], &s.head_out[..head_dim], eps);
+                }
+            }
+            source.load_f32(&format!("{prefix}.attn_k_norm"), &mut s.head_out[..head_dim])?;
+            for i in 0..n {
+                for head in 0..kv_heads {
+                    let o = i * kv_dim + head * head_dim;
+                    rmsnorm(&mut bs.k[o..o + head_dim], &s.head_out[..head_dim], eps);
+                }
+            }
+        }
+        for i in 0..n {
+            let pos = pos0 + i;
+            let rope = |x: &mut [f32]| {
+                if spec.flags & FLAG_ROPE_NEOX != 0 {
+                    rope_inplace_neox(x, pos, theta);
+                } else {
+                    rope_inplace(x, pos, theta);
+                }
+            };
+            for head in 0..heads {
+                let o = i * q_dim + head * head_dim;
+                rope(&mut bs.q[o..o + head_dim]);
+            }
+            for head in 0..kv_heads {
+                let o = i * kv_dim + head * head_dim;
+                rope(&mut bs.k[o..o + head_dim]);
+            }
+            kv.append_f16(
+                &bs.k[i * kv_dim..(i + 1) * kv_dim],
+                &bs.v[i * kv_dim..(i + 1) * kv_dim],
+            );
+            let seq = kv.tokens(kv_dim);
+            for head in 0..heads {
+                let o = i * q_dim + head * head_dim;
+                let kv_head = head / group;
+                crate::attn::attention_decode_f16_tiled(
+                    &bs.q[o..o + head_dim],
+                    kv.k_f16_slice(),
+                    kv.v_f16_slice(),
+                    head_dim,
+                    kv_dim,
+                    kv_head,
+                    seq,
+                    &mut s.head_out,
+                );
+                bs.attn[o..o + head_dim].copy_from_slice(&s.head_out[..head_dim]);
+            }
+        }
+        {
+            let name = format!("{prefix}.attn_output");
+            note_infer_op(Some(layer), &name);
+            let vista = source.tensor_view(&name)?;
+            matvec_view_batch_par(&vista, h, q_dim, &bs.attn[..n * q_dim], n, &mut bs.o[..n * h], par)?;
+        }
+        for i in 0..n {
+            add_f32(
+                &bs.residual[i * h..(i + 1) * h],
+                &bs.o[i * h..(i + 1) * h],
+                &mut hs[i * h..(i + 1) * h],
+            );
+        }
+
+        // --- FFN denso ---
+        bs.residual[..n * h].copy_from_slice(hs);
+        source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w)?;
+        for i in 0..n {
+            rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w, eps);
+        }
+        {
+            let name = format!("{prefix}.ffn_up");
+            note_infer_op(Some(layer), &name);
+            let vista = source.tensor_view(&name)?;
+            matvec_view_batch_par(&vista, ffn, h, hs, n, &mut bs.up[..n * ffn], par)?;
+        }
+        if self.has_gate {
+            let name = format!("{prefix}.ffn_gate");
+            note_infer_op(Some(layer), &name);
+            let vista = source.tensor_view(&name)?;
+            matvec_view_batch_par(&vista, ffn, h, hs, n, &mut bs.gate[..n * ffn], par)?;
+            for i in 0..n {
+                swiglu_inplace(
+                    &mut bs.up[i * ffn..(i + 1) * ffn],
+                    &bs.gate[i * ffn..(i + 1) * ffn],
+                );
+            }
+        } else {
+            for i in 0..n {
+                silu_inplace(&mut bs.up[i * ffn..(i + 1) * ffn]);
+            }
+        }
+        {
+            let name = format!("{prefix}.ffn_down");
+            note_infer_op(Some(layer), &name);
+            let vista = source.tensor_view(&name)?;
+            matvec_view_batch_par(&vista, h, ffn, &bs.up[..n * ffn], n, hs, par)?;
+        }
+        for i in 0..n {
+            add_assign_f32(&mut hs[i * h..(i + 1) * h], &bs.residual[i * h..(i + 1) * h]);
+        }
+        Ok(())
     }
 
     /// FFN MoE estilo Mixtral: router → top-k → SwiGLU por experto → suma ponderada.

@@ -117,6 +117,23 @@ No convertir un error en texto del asistente. T21 contrastará este contrato
 con peticiones reales de la versión fijada de OpenCode y añadirá fixtures
 para cualquier ampliación necesaria.
 
+**Contraste con OpenCode 1.18.34 (T21, 2026-10-07).** Capturas en
+`tests/self-improvement/opencode/` (ver su `LEEME.md`). Lo que el servidor tiene
+que aceptar y antes no aceptaba:
+- Esquemas de herramienta con `$schema` (anotación) y cotas numéricas `minimum`,
+  `maximum`, `exclusiveMinimum`, `exclusiveMaximum`: se implementan y se aplican
+  a los argumentos (`validate.rs`); una cota que no es número es esquema no soportado.
+- Ids de llamada `call_<n>` **únicos en toda la conversación**: el servidor numera
+  continuando el mayor `call_<n>` del historial (`ChatInput::siguiente_id_llamada`);
+  antes cada respuesta empezaba en `call_1` y el segundo turno con herramientas se
+  rechazaba por duplicado.
+- Ocho herramientas por petición, historial de hasta 8 mensajes, 19–21 KiB de
+  cuerpo: dentro de los límites de C3.
+Conducta del cliente que condiciona al servidor: reintenta sin fin ante 429/5xx o
+una respuesta SSE cortada, y entra en bucle si recibe una llamada incompleta; y
+manda una petición de título en paralelo a la principal (se desactiva con
+`agent.title.disable` porque hay una sola generación admitida).
+
 Campos iniciales: `model`, `messages`, `tools`, `tool_choice`, `stream`,
 `max_tokens`/`max_completion_tokens` (si llegan ambos distintos, error),
 `temperature`, `top_p`, `seed`, `stream_options.include_usage` y

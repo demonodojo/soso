@@ -38,6 +38,17 @@ fn main() {
     if depura {
         a.remove(1);
     }
+    // El ejecutable, absoluto, para `readlink("/proc/self/exe")`.
+    if let Some(p) = a.first() {
+        let mut v = p.clone().into_encoded_bytes();
+        if v.first() != Some(&b'/') {
+            let mut cwd = std::env::current_dir().map(|d| d.into_os_string().into_encoded_bytes()).unwrap_or_default();
+            cwd.push(b'/');
+            cwd.extend_from_slice(&v);
+            v = cwd;
+        }
+        *shims::EXE.lock().unwrap() = v;
+    }
     let args: Vec<CString> = a.into_iter().map(|s| CString::new(s.into_encoded_bytes()).unwrap()).collect();
     let mut argv: Vec<*const c_char> = args.iter().map(|c| c.as_ptr()).collect();
     argv.push(std::ptr::null());

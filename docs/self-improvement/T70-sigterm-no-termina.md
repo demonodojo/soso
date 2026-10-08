@@ -1,7 +1,7 @@
 # T70 — SIGTERM no termina un proceso dormido
 
 **Origen:** destapado el 2026-09-25 al cerrar un agujero en las sondas.
-**Aplica en:** `kernel/src/task/mod.rs` (`signal_one`) · **Estado:** pendiente.
+**Aplica en:** `kernel/src/task/mod.rs` (`signal_one`) · **Estado:** hecha (2026-10-07), opción 1 sólo para SIGTERM.
 **Decisión, no sólo corrección.**
 
 ## Lo que pasa
@@ -79,3 +79,7 @@ caso vuelve a ser un veredicto.
 ## Reproducción
 
     cargo xtask test sys --only="señales"
+
+## Decisión y cambio (2026-10-07)
+
+Se aplica la opción 1 **sólo a SIGTERM**: `signal_one` ([kernel/src/task/mod.rs](../../kernel/src/task/mod.rs)) interrumpe con `EINTR` únicamente con `SIGINT` (Ctrl+C sobre el prompt de `sosh` sigue sin matar la shell) y `SIGTERM` va a `deliver_death` como `SIGKILL`, con código 143. Nada en el repo dependía de que SIGTERM diera `EINTR` (sólo la sonda lo usaba). La sonda `senales/sigterm-sobre-un-proceso-dormido` vuelve a ser un veredicto (se espera 143). Manejadores de señal (opción 3) siguen sin ficha.

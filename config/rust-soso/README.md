@@ -15,6 +15,12 @@
    - `crates/soso-rt` — ABI de syscalls para std
    - Target JSON con `"os": "soso"`
 
+   `jobserver` 0.1.34 se conserva ya corregido en
+   [`vendor/jobserver`](vendor/jobserver/SOSO.md). La preparación copia esas
+   fuentes y configura `[patch.crates-io]` en los workspaces de Rust y Cargo;
+   no parchea jobserver en la caché global. Sus regresiones se ejecutan con
+   `tests/self-improvement/native/cargo/jobserver/probar-host.sh`.
+
 3. Compilar **libstd** cruzada (host linux → target soso):
    ```sh
    cargo xtask rust-build-std

@@ -7,19 +7,25 @@
 
 ## Por dónde empezar
 
-**Ficha en curso: [T42 — C, ensamblador y empaquetado por perfil](T42-c-link-imagen.md)**
-(arrancada 2026-10-03). Hecho: perfil fijado ([build-profile.json](native/build-profile.json)),
-fichas de los huecos (C-113…C-120), el paso 4 para `mkfs-soso` (compilado **dentro
-del guest** y su imagen verificada con el `sosofs` del host) y el paso 5 parcial:
-**el kernel se compila dentro del guest** (`cargo build -Zbuild-std`, C-113; `wild-soso -pie`,
-C-114) **y arranca** empaquetado por el host (C-119 parcial).
-[T80](T80-proc-macros.md) (proc macros) está cerrada y [T41](T41-cargo-offline.md)
-también. Lo que falta de T42: compilador de C y `ar` (C-115), ensamblador (C-116),
-`objcopy` (C-117), el nightly (C-120), el constructor de imágenes arrancables
-(bootloader), `user/` en el guest y pasar la suite contra el kernel hecho en soso.
+> **Lo siguiente (decisión del 2026-10-08): [T82 — prefill por lotes](T82-prefill-por-lotes.md).**
+> Es lo que bloquea [T22](T22-primera-mejora.md): el prefill va token a token y un prompt de
+> OpenCode cuesta 65–125 min en el primer turno ([T81](T81-reutilizar-kv.md) ya evita repetirlo en los siguientes).
+
+
+**Ficha cerrada: [T42 — C, ensamblador y empaquetado por perfil](T42-c-link-imagen.md)**
+(2026-10-03 → 2026-10-07, hecha con límites; ver `resultado.md`). Hecho: perfil fijado ([build-profile.json](native/build-profile.json)),
+fichas de los huecos (C-113…C-143). **Dentro del guest** ya se compilan: el kernel
+(`-Zbuild-std`, `wild-soso -pie`), `user/` entero con su C (clang/LLVM hecho para soso), las
+herramientas de imagen, **las cinco etapas del cargador** y la imagen BIOS/UEFI, que arrancan;
+y los puertos lxdde e1000e, ath11k (Steam Deck), iwlwifi y nouveau (kernel con nouveau compilado y arrancado en el guest). Lo que sigue fuera: construir LLVM
+(se hace en el host y se enlaza para soso), el `boot-shim` del live y el empaquetado USB.
+Mantenimiento del 8-oct: [C-144](native/C-144.md) integra jobserver corregido
+como fuentes versionadas, con resolución local y pruebas host; validación
+guest de esa corrección pendiente.
+[T80](T80-proc-macros.md) (proc macros) está cerrada y [T41](T41-cargo-offline.md) también.
 El perfil elegido es `qwen2.5-coder-7b` (GO 10/10, cobertura `completa`,
 27-sep). El 3B queda como candidato anterior, NO-GO 8/10.
-[T20](T20-opencode-config.md) está pendiente con esa identidad.
+[T20](T20-opencode-config.md) está **hecha** (2026-10-07, [opencode.md](opencode.md)); T21 también está hecha; sigue T22.
 
 | Prioridad | Trabajo | Condición de salida |
 |---|---|---|
@@ -141,9 +147,9 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T17](T17-admisiones-cancelacion.md) | Atender ocupado, health y desconexión durante inferencia | SI-2 | T09, T16 | Completada (guest parcial; cancelar/cliente lento pendientes) |
 | [T18](T18-puertos-qemu.md) | Añadir reenvío HTTP configurable sin colisiones | SI-2 | — | Hecho (e2e T19) |
 | [T19](T19-qemu-e2e.md) | Crear la prueba completa de API dentro de soso | SI-2 | T16, T17, T18 | Completada (guest 12/12 con pesos reales) |
-| [T20](T20-opencode-config.md) | Configurar OpenCode para el proveedor soso | SI-3 | T14, T19 | Pendiente (perfil `qwen2.5-coder-7b`) |
-| [T21](T21-opencode-contrato.md) | Capturar el contrato real de OpenCode sin depender del modelo | SI-3 | T20, T47, T48 | Pendiente |
-| [T22](T22-primera-mejora.md) | Resolver una tarea real usando la inferencia guest | SI-3 | T02, T19, T21 | Pendiente |
+| [T20](T20-opencode-config.md) | Configurar OpenCode para el proveedor soso | SI-3 | T14, T19 | **Hecha** (2026-10-07; `opencode.json` + agente `soso-improve`, sin inferencia) |
+| [T21](T21-opencode-contrato.md) | Capturar el contrato real de OpenCode sin depender del modelo | SI-3 | T20, T47, T48 | **Hecha** (2026-10-07; contrato contrastado con OpenCode real, 3 correcciones del servidor) |
+| [T22](T22-primera-mejora.md) | Resolver una tarea real usando la inferencia guest | SI-3 | T02, T19, T21 | En curso (2026-10-08): el 7B no llama a herramientas con el prompt de OpenCode; bloqueada por T82 |
 | [T23](T23-estado-coordinador.md) | Crear el formato de tareas y estados del coordinador | SI-4 | T01, T02, T46, T45 | Completada (guest acreditado; destapó T63) |
 | [T24](T24-checkout.md) | Preparar una copia de tarea y exportar su parche | SI-4 | T23, T50 | Completada (guest acreditado) |
 | [T25](T25-ejecutor.md) | Ejecutar OpenCode con límites y logs | SI-4 | T21, T24, T47, T48 | Pendiente |
@@ -165,7 +171,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T39](T39-bootstrap-libstd.md) | Hacer reproducible el bootstrap de libstd para soso | SI-7 | T38, T50, T72, T75 | **Completada** (2026-09-26; build-std, manifiesto, humo guest; native_validation pending) |
 | [T40](T40-compilador-nativo.md) | Descomponer y acreditar el port del compilador | SI-7 | T38, T39 | **Completada** (2026-09-29; `/tmp/t` imprime `hola-t40` y sale con 7; native_validation parcial) |
 | [T41](T41-cargo-offline.md) | Validar Cargo y fuentes reproducibles dentro de soso | SI-7 | T40 | Completada (2026-10-02: workspace, `build.rs` y `soso-abi` en el guest; sin proc macros) |
-| [T42](T42-c-link-imagen.md) | Cerrar C, ensamblador y empaquetado por perfil | SI-7 | T38, T41, T80 | **En curso** (2026-10-03: `mkfs-soso` compilado y verificado en el guest; faltan C, ensamblador, objcopy, `-Zbuild-std` y la imagen arrancable) |
+| [T42](T42-c-link-imagen.md) | Cerrar C, ensamblador y empaquetado por perfil | SI-7 | T38, T41, T80 | **Hecha** (2026-10-07; validación nativa parcial: LLVM y SASS en el host, falta placa) |
 | [T43](T43-validacion-actualizacion-nativa.md) | Validar y recuperar candidatos construidos en soso | SI-7 | T31, T37, T42 | Pendiente |
 | [T44](T44-cierre-nativo.md) | Repetir tres mejoras con agente, modelo y build en soso | SI-7 | T29, T43, T51 | Pendiente |
 | [T45](T45-cli-capacidades.md) | Unificar órdenes, capacidades y códigos de salida | SI-0 | T01, T02 | Completada |
@@ -191,7 +197,9 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T67](T67-sosoas-elf-desplazado.md) | El ELF de sosoas tiene la cabecera desplazada dos bytes | SI-7 | T38 | Completada (`objdump` desensambla; sin tabla de símbolos) |
 | [T68](T68-wild-soso-nombre.md) | El enlazador wild-soso no existe con ese nombre | SI-7 | T38 | Completada (nombre y rutas; `wild` 0.10.0 instalado) |
 | [T69](T69-apply-patches-no-completaba.md) | `dl.rs` se copia al vendor y nadie lo compila | SI-7 | T39 | **Completada** (2026-09-26; generación antigua retirada; build-std sigue en verde) |
-| [T70](T70-sigterm-no-termina.md) | SIGTERM no termina un proceso dormido | SI-6 | — | Pendiente (decisión de semántica) |
+| [T70](T70-sigterm-no-termina.md) | SIGTERM no termina un proceso dormido | SI-6 | — | **Hecha** (2026-10-07: SIGTERM mata a los bloqueados, 143; SIGINT conserva `EINTR`) |
+| [T81](T81-reutilizar-kv.md) | Reutilizar el prefijo del KV entre peticiones | SI-3 | — | **Hecha** (2026-10-08; turnos 2+ de ~500 s a ~20 s, exacto) |
+| [T82](T82-prefill-por-lotes.md) | Prefill por lotes | SI-3 | T81 | **Pendiente — es lo siguiente** (el prefill token a token cuesta 65–125 min por prompt de OpenCode) |
 | [T71](T71-vendor-sin-cache.md) | `xtask` buscaba el vendor de Rust donde nunca está | SI-7 | — | Completada (2026-09-25; destapó la cadena de T39) |
 | [T72](T72-heap-de-libstd.md) | Compartir el alocador entre libsoso y std | SI-7 | — | **Completada** (2026-09-26; sonda guest 7/7; std deriva errores a T39) |
 | [T73](T73-futex-sin-plazo.md) | El futex de soso no tiene plazo, y `Condvar::wait_timeout` lo necesita | SI-7 | — | **Completada** (2026-09-26; acreditada en QEMU; `std` baja a 2 errores) |
