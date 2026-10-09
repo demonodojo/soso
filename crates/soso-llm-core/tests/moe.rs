@@ -7,7 +7,22 @@ use sosomodel::index::{make_f32_entry, TensorIndex};
 use sosomodel::manifest::{AttnKind, Manifest};
 
 fn build_tiny_moe_tensors() -> (Manifest, TensorIndex, MemoryTensorSource) {
-    let manifest = Manifest::tiny_moe("test-moe");
+    build_tiny_moe_tensors_hd(None)
+}
+
+/// Con `head_dim` explícito, `q_dim = heads * head_dim` deja de coincidir con `hidden_dim`
+/// (Qwen3-30B-A3B: hidden 2048, 32 cabezas de 128 → q_dim 4096).
+fn build_tiny_moe_tensors_hd(head_dim: Option<u32>) -> (Manifest, TensorIndex, MemoryTensorSource) {
+    let mut manifest = Manifest::tiny_moe("test-moe");
+    let attn_dim = match head_dim {
+        Some(hd) => {
+            for l in manifest.layers.iter_mut() {
+                l.v_head_dim = hd;
+            }
+            manifest.num_heads * hd
+        }
+        None => manifest.hidden_dim,
+    };
     let n_exp = manifest.num_experts as usize;
     let mut index = TensorIndex::default();
     let mut id = 0u32;
@@ -36,22 +51,10 @@ fn build_tiny_moe_tensors() -> (Manifest, TensorIndex, MemoryTensorSource) {
     for layer in 0..manifest.num_layers {
         let p = format!("L{layer:02}");
         add(&format!("{p}.attn_norm"), &[manifest.hidden_dim], 1.0);
-        add(&format!("{p}.attn_q"), &[manifest.hidden_dim, manifest.hidden_dim], 0.1);
-        add(
-            &format!("{p}.attn_k"),
-            &[manifest.hidden_dim, manifest.hidden_dim],
-            0.1,
-        );
-        add(
-            &format!("{p}.attn_v"),
-            &[manifest.hidden_dim, manifest.hidden_dim],
-            0.1,
-        );
-        add(
-            &format!("{p}.attn_output"),
-            &[manifest.hidden_dim, manifest.hidden_dim],
-            0.1,
-        );
+        add(&format!("{p}.attn_q"), &[attn_dim, manifest.hidden_dim], 0.1);
+        add(&format!("{p}.attn_k"), &[attn_dim, manifest.hidden_dim], 0.1);
+        add(&format!("{p}.attn_v"), &[attn_dim, manifest.hidden_dim], 0.1);
+        add(&format!("{p}.attn_output"), &[manifest.hidden_dim, attn_dim], 0.1);
         add(&format!("{p}.ffn_norm"), &[manifest.hidden_dim], 1.0);
         add(
             &format!("{p}.ffn_gate_inp"),
@@ -166,6 +169,20 @@ fn moe_forward_un_token() {
         .unwrap();
     let logits = rt.logits(&mut source).unwrap();
     assert!(logits.iter().any(|&x| x.is_finite()));
+}
+
+// Regresión (Qwen3-Coder-30B): la proyección `down` del experto escribía en todo `s.q`, que
+// mide `q_dim`; con `q_dim != hidden_dim` la comprobación de forma fallaba.
+#[test]
+fn moe_forward_con_head_dim_explicito() {
+    let (manifest, index, mut source) = build_tiny_moe_tensors_hd(Some(32));
+    let mut rt = Runtime::new(manifest.clone(), index, 0, 0);
+    rt.validate_shapes().unwrap();
+    rt.embed_token(0, &mut source).unwrap();
+    rt.forward_layers_range(0, manifest.num_layers, &mut source, None, &mut None)
+        .expect("q_dim != hidden_dim en una capa MoE");
+    let logits = rt.logits(&mut source).unwrap();
+    assert!(logits.iter().all(|x| x.is_finite()));
 }
 
 #[test]

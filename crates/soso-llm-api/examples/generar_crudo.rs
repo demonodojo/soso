@@ -130,8 +130,8 @@ fn main() {
         // Sin `begin_request`: la caché se reaprovecha entre peticiones (T81).
         let (_, rep) = backend
             .generate_observed(&prompt, &prepared, &mut obs)
-            .unwrap_or_else(|_| {
-                eprintln!("{peticion}: la inferencia falló");
+            .unwrap_or_else(|e| {
+                eprintln!("{peticion}: la inferencia falló: {e:?}");
                 std::process::exit(1);
             });
         println!(
