@@ -757,8 +757,8 @@ typedef struct NVC0B5_ALLOCATION_PARAMETERS {
 #define NVC7C0_SEND_SIGNALING_PCAS2_B        0x000002c0u
 #define NVC7C0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE 0x3u
 
-/* QMD v01_07: current/oldest en SET/CHECK (15:0 y 31:16). */
-#define GSP_QMD_AMPERE_ENGINE_VERSION_WORD   0x01070107u
+/* QMD v03_00: current/oldest en SET/CHECK (15:0 y 31:16). */
+#define GSP_QMD_AMPERE_ENGINE_VERSION_WORD   0x03000300u
 
 /* Y GR0 es el 1, la primera entrada útil de esa misma tabla (el 0 es NULL). Hace
  * falta porque un objeto de compute NO se puede colgar de un canal de copia: RM
@@ -1157,9 +1157,9 @@ typedef char nvc56f_control_size_check[sizeof(Nvc56fControl) == 512 ? 1 : -1];
 #define NVKM_RM_COMPUTE0          0xcdc00000u
 
 #define GSP_QMD_VERSION_CURRENT   5u
-#define GSP_QMD_VERSION_AMPERE    2u    /* QMDV01_07 (Ampere/Ada/Turing grid) */
+#define GSP_QMD_VERSION_AMPERE    2u    /* QMDV03_00 (Ampere/Ada, clc6c0qmd.h) */
 #define GSP_QMD_INLINE_WORDS      96u   /* 384 B QMD v05 (Blackwell) */
-#define GSP_QMD_V02_WORDS         64u   /* 256 B QMD v01_07 (Ampere) */
+#define GSP_QMD_V02_WORDS         64u   /* 256 B QMD v03_00 (Ampere) */
 
 #define NVCEC0_SET_OBJECT                    0x00000000u
 #define NVCEC0_SEND_PCAS_A                   0x000002b4u
@@ -1226,47 +1226,65 @@ typedef struct GspQmdV05 {
 
 typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 4 ? 1 : -1];
 
-/* QMD v01_07 (Ampere compute), transcrito de cla0c0qmd.h (OGKM 570.144). */
-#define QMDV02_SEMAPHORE_RELEASE_ENABLE0           202u, 202u
-#define QMDV02_REQUIRE_SCHEDULING_PCAS             204u, 204u
-#define QMDV02_QMD_GROUP_ID                        192u, 197u
-#define QMDV02_INVALIDATE_INSTRUCTION_CACHE        254u, 254u
-#define QMDV02_INVALIDATE_SHADER_CONSTANT_CACHE    255u, 255u
-#define QMDV02_PROGRAM_OFFSET                      256u, 287u
-#define QMDV02_RELEASE_MEMBAR_TYPE                 366u, 366u
-#define QMDV02_API_VISIBLE_CALL_LIMIT              378u, 378u
-#define QMDV02_CTA_RASTER_WIDTH                    384u, 415u
-#define QMDV02_CTA_RASTER_HEIGHT                   416u, 431u
-#define QMDV02_CTA_RASTER_DEPTH                    432u, 447u
-#define QMDV02_SHARED_MEMORY_SIZE                  544u, 561u
-#define QMDV02_QMD_VERSION                         576u, 579u
-#define QMDV02_QMD_MAJOR_VERSION                   580u, 583u
-#define QMDV02_CTA_THREAD_DIMENSION0                 592u, 607u
-#define QMDV02_CTA_THREAD_DIMENSION1                 608u, 623u
-#define QMDV02_CTA_THREAD_DIMENSION2                 624u, 639u
-#define QMDV02_CONSTANT_BUFFER_VALID0              640u, 640u
-#define QMDV02_RELEASE0_ADDRESS_LOWER              736u, 767u
-#define QMDV02_RELEASE0_ADDRESS_UPPER              768u, 775u
-#define QMDV02_RELEASE0_STRUCTURE_SIZE             799u, 799u
-#define QMDV02_RELEASE0_PAYLOAD                      800u, 831u
-#define QMDV02_CONSTANT_BUFFER_ADDR_LOWER0         928u, 959u
-#define QMDV02_CONSTANT_BUFFER_ADDR_UPPER0         960u, 967u
-#define QMDV02_CONSTANT_BUFFER_INVALIDATE0         974u, 974u
-#define QMDV02_CONSTANT_BUFFER_SIZE0               975u, 991u
-#define QMDV02_BARRIER_COUNT                      1467u, 1471u
-#define QMDV02_REGISTER_COUNT                     1496u, 1503u
+/* QMD v03_00 (Ampere/Ada compute: clases 0xc6c0/0xc7c0), transcrito de
+ * `classes/compute/clc6c0qmd.h` (open-gpu-doc; Mesa/nvk lo usa con major=3,
+ * minor=0 para todo `cls_compute >= AMPERE_COMPUTE_A`). NO es el QMD v01_07 de
+ * `cla0c0qmd.h` (Kepler/Pascal), que es lo que llevaba este port y que la GPU
+ * Ampere interpreta con otro mapa de bits: GR_EXCEPTION + PBDMA_HANG_DURING_HTE
+ * en el primer lanzamiento (ROG GA104, 2026-10-09).
+ *
+ * Aquí las direcciones van SIN desplazar (`ADDR_LOWER`/`PROGRAM_ADDRESS_LOWER`,
+ * sin `_SHIFTED`) y el tamaño del constant bank en unidades de 16 B. */
+#define QMDV03_CTA_RASTER_WIDTH                    384u, 415u
+#define QMDV03_CTA_RASTER_HEIGHT                   416u, 431u
+#define QMDV03_CTA_RASTER_DEPTH                    448u, 463u
+#define QMDV03_QMD_GROUP_ID                        128u, 133u
+#define QMDV03_SM_GLOBAL_CACHING_ENABLE            134u, 134u
+#define QMDV03_INVALIDATE_INSTRUCTION_CACHE        190u, 190u
+#define QMDV03_INVALIDATE_SHADER_CONSTANT_CACHE    191u, 191u
+#define QMDV03_API_VISIBLE_CALL_LIMIT              378u, 378u
+#define QMDV03_SAMPLER_INDEX                       382u, 382u
+#define QMDV03_SHARED_MEMORY_SIZE                  544u, 561u
+#define QMDV03_MIN_SM_CONFIG_SHARED_MEM_SIZE       562u, 567u
+#define QMDV03_MAX_SM_CONFIG_SHARED_MEM_SIZE       569u, 574u
+#define QMDV03_QMD_VERSION                         576u, 579u
+#define QMDV03_QMD_MAJOR_VERSION                   580u, 583u
+#define QMDV03_CTA_THREAD_DIMENSION0               592u, 607u
+#define QMDV03_CTA_THREAD_DIMENSION1               608u, 623u
+#define QMDV03_CTA_THREAD_DIMENSION2               624u, 639u
+#define QMDV03_CONSTANT_BUFFER_VALID0              640u, 640u
+#define QMDV03_REGISTER_COUNT_V                    648u, 656u
+#define QMDV03_TARGET_SM_CONFIG_SHARED_MEM_SIZE    657u, 662u
+#define QMDV03_BARRIER_COUNT                       763u, 767u
+#define QMDV03_RELEASE0_ADDRESS_LOWER              768u, 799u
+#define QMDV03_RELEASE0_ADDRESS_UPPER              800u, 807u
+#define QMDV03_RELEASE0_MEMBAR_TYPE                819u, 819u
+#define QMDV03_RELEASE0_ENABLE                     823u, 823u
+#define QMDV03_RELEASE0_STRUCTURE_SIZE             830u, 831u
+#define QMDV03_RELEASE0_PAYLOAD_LOWER              832u, 863u
+#define QMDV03_CONSTANT_BUFFER_ADDR_LOWER0        1024u, 1055u
+#define QMDV03_CONSTANT_BUFFER_ADDR_UPPER0        1056u, 1072u
+#define QMDV03_CONSTANT_BUFFER_INVALIDATE0        1074u, 1074u
+#define QMDV03_CONSTANT_BUFFER_SIZE_SHIFTED4_0    1075u, 1087u
+#define QMDV03_PROGRAM_ADDRESS_LOWER              1536u, 1567u
+#define QMDV03_PROGRAM_ADDRESS_UPPER              1568u, 1584u
 
-#define NVA0C0_QMDV01_07_REQUIRE_SCHEDULING_PCAS_TRUE             0x00000001u
-#define NVA0C0_QMDV01_07_SEMAPHORE_RELEASE_ENABLE0_TRUE           0x00000001u
-#define NVA0C0_QMDV01_07_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR          0x00000001u
-#define NVA0C0_QMDV01_07_API_VISIBLE_CALL_LIMIT_NO_CHECK          0x00000001u
-#define NVA0C0_QMDV01_07_CONSTANT_BUFFER_VALID_TRUE               0x00000001u
-#define NVA0C0_QMDV01_07_CONSTANT_BUFFER_INVALIDATE_TRUE          0x00000001u
-#define NVA0C0_QMDV01_07_RELEASE0_STRUCTURE_SIZE_ONE_WORD        0x00000001u
-#define NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01                    0x00000001u
-#define NVA0C0_QMDV01_07_QMD_VERSION_V07                          0x00000007u
-#define NVA0C0_QMDV01_07_INVALIDATE_INSTRUCTION_CACHE_TRUE        0x00000001u
-#define NVA0C0_QMDV01_07_INVALIDATE_SHADER_CONSTANT_CACHE_TRUE    0x00000001u
+#define NVC6C0_QMDV03_00_QMD_MAJOR_VERSION_V03                    0x00000003u
+#define NVC6C0_QMDV03_00_QMD_VERSION_V00                          0x00000000u
+#define NVC6C0_QMDV03_00_API_VISIBLE_CALL_LIMIT_NO_CHECK          0x00000001u
+#define NVC6C0_QMDV03_00_SAMPLER_INDEX_INDEPENDENTLY              0x00000000u
+#define NVC6C0_QMDV03_00_INVALIDATE_INSTRUCTION_CACHE_TRUE        0x00000001u
+#define NVC6C0_QMDV03_00_INVALIDATE_SHADER_CONSTANT_CACHE_TRUE    0x00000001u
+#define NVC6C0_QMDV03_00_CONSTANT_BUFFER_VALID_TRUE               0x00000001u
+#define NVC6C0_QMDV03_00_CONSTANT_BUFFER_INVALIDATE_TRUE          0x00000001u
+#define NVC6C0_QMDV03_00_RELEASE0_ENABLE_TRUE                     0x00000001u
+#define NVC6C0_QMDV03_00_RELEASE0_MEMBAR_TYPE_FE_SYSMEMBAR        0x00000001u
+#define NVC6C0_QMDV03_00_RELEASE0_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD 0x00000001u
+/* SM_CONFIG_SHARED_MEM_SIZE = kB/4 + 1 (Mesa `gv100_smem_size_to_hw`). Sin
+ * memoria compartida el mínimo y el objetivo son 0 kB → 1; el máximo es el del
+ * SM de GA10x/AD10x (sm_86/sm_89: 100 kB → 26). */
+#define QMDV03_SM_CONFIG_SMEM_NONE                                1u
+#define QMDV03_SM_CONFIG_SMEM_MAX_SM86                            26u
 
 typedef struct GspQmdV02 {
     NvU32 words[GSP_QMD_V02_WORDS];

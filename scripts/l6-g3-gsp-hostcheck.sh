@@ -116,17 +116,19 @@ if [[ -z "$promo_ln" || -z "$compute_ln" || "$promo_ln" -ge "$compute_ln" ]]; th
 fi
 echo "OK: promote L$promo_ln antes de compute_init L$compute_ln (r535_gr_chan_new)"
 
-# R5.3: el encoder Ampere (QMDV01_07, 256 B) está transcrito en nvrm_r570.h.
+# R5.3: el encoder Ampere (QMDV03_00, 256 B) está transcrito en nvrm_r570.h.
 # lxdde/reference/ es gitignored y no existe en CI; el check obligatorio va
 # contra fuentes versionadas. Si el árbol de referencia está presente, se
 # conserva el sentinel sobre cla0c0qmd.h por si aparecen cabeceras QMD nuevas.
+# Ampere/Ada usan QMD v03_00 (clc6c0qmd.h de open-gpu-doc/Mesa), no el v01_07 de
+# cla0c0qmd.h (Kepler/Pascal): GR_EXCEPTION en la ROG GA104 (2026-10-09).
 echo "=== R5.3: encoder QMD Ampere en el árbol versionado ==="
 nvrm="$src/nvrm_r570.h"
 compute="$src/gsp_compute.c"
 if ! grep -q 'GSP_QMD_VERSION_AMPERE' "$nvrm" ||
-   ! grep -q 'QMDV02_PROGRAM_OFFSET' "$nvrm" ||
+   ! grep -q 'QMDV03_PROGRAM_ADDRESS_LOWER' "$nvrm" ||
    ! grep -q 'GspQmdV02' "$nvrm"; then
-    echo "FALLO: nvrm_r570.h no tiene el layout QMD v01_07 de Ampere (QMDV02_*)" >&2
+    echo "FALLO: nvrm_r570.h no tiene el layout QMD v03_00 de Ampere (QMDV03_*)" >&2
     exit 1
 fi
 if ! grep -q 'GSP_FAM_AMPERE.*GSP_QMD_VERSION_AMPERE' "$compute"; then
@@ -135,12 +137,12 @@ if ! grep -q 'GSP_FAM_AMPERE.*GSP_QMD_VERSION_AMPERE' "$compute"; then
 fi
 if ! grep -q 'NVC7C0_SET_QMD_VERSION' "$nvrm" ||
    ! grep -q 'GSP_QMD_AMPERE_ENGINE_VERSION_WORD' "$nvrm" ||
-   ! grep -q 'NVA0C0_QMDV01_07_QMD_VERSION_V07' "$nvrm"; then
-    echo "FALLO: nvrm_r570.h sin QMD minor=7 ni SET/CHECK 0x0107 para Ampere" >&2
+   ! grep -q 'NVC6C0_QMDV03_00_QMD_MAJOR_VERSION_V03' "$nvrm"; then
+    echo "FALLO: nvrm_r570.h sin QMD major=3 (v03_00) ni SET/CHECK 0x0300 para Ampere" >&2
     exit 1
 fi
-if ! grep -q 'NVA0C0_QMDV01_07_QMD_VERSION_V07' "$compute"; then
-    echo "FALLO: gsp_compute.c no rellena QMD minor=7 en el descriptor Ampere" >&2
+if ! grep -q 'NVC6C0_QMDV03_00_QMD_MAJOR_VERSION_V03' "$compute"; then
+    echo "FALLO: gsp_compute.c no rellena QMD major=3 (v03_00) en el descriptor Ampere" >&2
     exit 1
 fi
 if grep -q 'cp_pb_method.*NVC7C0_SET_QMD_VERSION' "$compute"; then

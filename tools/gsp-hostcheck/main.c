@@ -663,7 +663,7 @@ static int check_family_caps(void)
     }
     if (amp->qmd_version != GSP_QMD_VERSION_AMPERE ||
         amp->qmd_bytes != sizeof(GspQmdV02)) {
-        printf("FALLO: Ampere debería usar QMD v2 de %zu B\n",
+        printf("FALLO: Ampere debería usar QMD v03_00 de %zu B\n",
                sizeof(GspQmdV02));
         return -1;
     }
@@ -721,7 +721,7 @@ static int check_family_caps(void)
         cp.sass = set_amp;
         k.arch = set_amp->arch;
         if (gsp_compute_launch_ready(&cp, &k, "prueba") != 0) {
-            printf("FALLO: Ampere con sm_86 debería poder lanzar (QMD v2)\n");
+            printf("FALLO: Ampere con sm_86 debería poder lanzar (QMD v03_00)\n");
             return -1;
         }
         k.arch = set_bw->arch;
@@ -737,7 +737,7 @@ static int check_family_caps(void)
                 gsp_sass_variant_of(set_amp, "saxpy");
 
             if (!sv) {
-                printf("FALLO: sin saxpy sm_86 para QMD v2\n");
+                printf("FALLO: sin saxpy sm_86 para QMD v03_00\n");
                 return -1;
             }
             memset(&cp_amp, 0, sizeof(cp_amp));
@@ -785,7 +785,7 @@ static int check_family_caps(void)
             return -1;
         }
     }
-    printf("OK: por familia — clase, QMD y SASS; Ampere usa QMD v2 (256 B)\n");
+    printf("OK: por familia — clase, QMD y SASS; Ampere usa QMD v03_00 (256 B)\n");
     return 0;
 }
 
@@ -2277,57 +2277,88 @@ static int check_qmd_v02_fields(const struct gsp_compute *cp,
                                 const GspQmdV02 *q)
 {
     const uint32_t *w = q->words;
-    uint64_t prog, cbank, sem;
+    uint64_t prog, cbank, sem, cb_va = cp->data_va + G4F_CBANK_OFF;
 
-    if (qmd_get_bits(w, QMDV02_QMD_MAJOR_VERSION) !=
-            NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01 ||
-        qmd_get_bits(w, QMDV02_QMD_VERSION) !=
-            NVA0C0_QMDV01_07_QMD_VERSION_V07 ||
-        qmd_get_bits(w, QMDV02_SEMAPHORE_RELEASE_ENABLE0) != 1 ||
-        qmd_get_bits(w, QMDV02_REQUIRE_SCHEDULING_PCAS) !=
-            NVA0C0_QMDV01_07_REQUIRE_SCHEDULING_PCAS_TRUE) {
-        printf("FALLO: QMD v2 major/semaphore/REQUIRE_SCHEDULING_PCAS\n");
+    /* Ampere/Ada = QMD v03_00 (clc6c0qmd.h, major 3 minor 0), NO el v01_07 de
+     * Kepler/Pascal. Primero las posiciones a mano (bit 580 = palabra 18 bits
+     * 7:4; 576 = bits 3:0): derivarlas con las mismas macros que el código
+     * dejaría pasar un mapa equivocado, que es justo lo que pasó. */
+    if ((w[18] & 0xffu) != 0x30u) {
+        printf("FALLO: QMD v03_00 word18=0x%08x (esperaba major=3 minor=0 en "
+               "bits 7:0 = 0x30)\n", w[18]);
         return -1;
     }
-    if (qmd_get_bits(w, QMDV02_QMD_GROUP_ID) != 0x1fu) {
-        printf("FALLO: QMD v2 QMD_GROUP_ID (esperaba 0x1f)\n");
+    if (qmd_get_bits(w, QMDV03_QMD_MAJOR_VERSION) !=
+            NVC6C0_QMDV03_00_QMD_MAJOR_VERSION_V03 ||
+        qmd_get_bits(w, QMDV03_QMD_VERSION) !=
+            NVC6C0_QMDV03_00_QMD_VERSION_V00 ||
+        qmd_get_bits(w, QMDV03_RELEASE0_ENABLE) != 1 ||
+        qmd_get_bits(w, QMDV03_SM_GLOBAL_CACHING_ENABLE) != 1) {
+        printf("FALLO: QMD v03_00 major/minor/release0/caching\n");
         return -1;
     }
-    if (qmd_get_bits(w, QMDV02_INVALIDATE_INSTRUCTION_CACHE) != 1 ||
-        qmd_get_bits(w, QMDV02_INVALIDATE_SHADER_CONSTANT_CACHE) != 1) {
-        printf("FALLO: QMD v2 invalidate instruction/shader constant cache\n");
+    if (qmd_get_bits(w, QMDV03_INVALIDATE_INSTRUCTION_CACHE) != 1 ||
+        qmd_get_bits(w, QMDV03_INVALIDATE_SHADER_CONSTANT_CACHE) != 1) {
+        printf("FALLO: QMD v03_00 invalidate instruction/shader constant cache\n");
         return -1;
     }
-    prog = qmd_get_bits(w, QMDV02_PROGRAM_OFFSET);
-    if (prog != ((k->sass_va - GSP_VA_BASE) >> 4)) {
-        printf("FALLO: PROGRAM_OFFSET=0x%llx, esperaba 0x%llx rel (%s)\n",
-               (unsigned long long)prog,
-               (unsigned long long)((k->sass_va - GSP_VA_BASE) >> 4),
+    /* Dirección del programa: VA absoluta, sin >>4 ni offset relativo
+     * (palabras 48/49 = bits 1536/1568). */
+    prog = qmd_get_bits(w, QMDV03_PROGRAM_ADDRESS_UPPER);
+    prog = (prog << 32) | qmd_get_bits(w, QMDV03_PROGRAM_ADDRESS_LOWER);
+    if (prog != k->sass_va ||
+        w[48] != (uint32_t)(k->sass_va & 0xffffffffu) ||
+        (w[49] & 0x1ffffu) != (uint32_t)((k->sass_va >> 32) & 0x1ffffu)) {
+        printf("FALLO: PROGRAM_ADDRESS=0x%llx, esperaba VA 0x%llx (%s)\n",
+               (unsigned long long)prog, (unsigned long long)k->sass_va,
                k->name);
         return -1;
     }
-    if (qmd_get_bits(w, QMDV02_REGISTER_COUNT) != k->regcount ||
-        qmd_get_bits(w, QMDV02_CTA_RASTER_WIDTH) != grid ||
-        qmd_get_bits(w, QMDV02_CTA_THREAD_DIMENSION0) != G4F_CTA_THREADS) {
-        printf("FALLO: QMD v2 regs/malla/CTA de %s\n", k->name);
+    if (qmd_get_bits(w, QMDV03_REGISTER_COUNT_V) != k->regcount ||
+        qmd_get_bits(w, QMDV03_CTA_RASTER_WIDTH) != grid ||
+        qmd_get_bits(w, QMDV03_CTA_RASTER_HEIGHT) != 1 ||
+        qmd_get_bits(w, QMDV03_CTA_RASTER_DEPTH) != 1 ||
+        qmd_get_bits(w, QMDV03_CTA_THREAD_DIMENSION0) != G4F_CTA_THREADS ||
+        w[12] != grid || (w[14] & 0xffffu) != 1u) {
+        printf("FALLO: QMD v03_00 regs/malla/CTA de %s\n", k->name);
         return -1;
     }
-    cbank = (qmd_get_bits(w, QMDV02_CONSTANT_BUFFER_ADDR_UPPER0) << 32) |
-            qmd_get_bits(w, QMDV02_CONSTANT_BUFFER_ADDR_LOWER0);
-    if ((cbank << 6) != cp->data_va + G4F_CBANK_OFF) {
-        printf("FALLO: CBANK0 addr VA>>6=0x%llx (esperaba cb_va 0x%llx)\n",
-               (unsigned long long)(cbank << 6),
-               (unsigned long long)(cp->data_va + G4F_CBANK_OFF));
+    if (qmd_get_bits(w, QMDV03_MIN_SM_CONFIG_SHARED_MEM_SIZE) !=
+            QMDV03_SM_CONFIG_SMEM_NONE ||
+        qmd_get_bits(w, QMDV03_TARGET_SM_CONFIG_SHARED_MEM_SIZE) !=
+            QMDV03_SM_CONFIG_SMEM_NONE ||
+        qmd_get_bits(w, QMDV03_MAX_SM_CONFIG_SHARED_MEM_SIZE) !=
+            QMDV03_SM_CONFIG_SMEM_MAX_SM86) {
+        printf("FALLO: QMD v03_00 SM_CONFIG_SHARED_MEM_SIZE (min/target/max)\n");
         return -1;
     }
-    sem = (qmd_get_bits(w, QMDV02_RELEASE0_ADDRESS_UPPER) << 32) |
-          qmd_get_bits(w, QMDV02_RELEASE0_ADDRESS_LOWER);
+    /* Constant bank 0: VA absoluta (palabras 32/33) y tamaño en unidades de
+     * 16 B (bits 1075..1087). */
+    cbank = (qmd_get_bits(w, QMDV03_CONSTANT_BUFFER_ADDR_UPPER0) << 32) |
+            qmd_get_bits(w, QMDV03_CONSTANT_BUFFER_ADDR_LOWER0);
+    if (cbank != cb_va || w[32] != (uint32_t)(cb_va & 0xffffffffu) ||
+        (w[33] & 0x1ffffu) != (uint32_t)((cb_va >> 32) & 0x1ffffu)) {
+        printf("FALLO: CBANK0 addr=0x%llx (esperaba VA absoluta 0x%llx)\n",
+               (unsigned long long)cbank, (unsigned long long)cb_va);
+        return -1;
+    }
+    if (qmd_get_bits(w, QMDV03_CONSTANT_BUFFER_VALID0) != 1 ||
+        qmd_get_bits(w, QMDV03_CONSTANT_BUFFER_SIZE_SHIFTED4_0) !=
+            (((k->cbank_size + 15u) & ~15u) >> 4)) {
+        printf("FALLO: CBANK0 valid/size>>4 de %s\n", k->name);
+        return -1;
+    }
+    sem = (qmd_get_bits(w, QMDV03_RELEASE0_ADDRESS_UPPER) << 32) |
+          qmd_get_bits(w, QMDV03_RELEASE0_ADDRESS_LOWER);
     if (sem != cp->data_va + G4F_SEM_OFF ||
-        qmd_get_bits(w, QMDV02_RELEASE0_PAYLOAD) != G4F_SEM_PAYLOAD) {
-        printf("FALLO: semáforo QMD v2\n");
+        qmd_get_bits(w, QMDV03_RELEASE0_PAYLOAD_LOWER) != G4F_SEM_PAYLOAD ||
+        qmd_get_bits(w, QMDV03_RELEASE0_STRUCTURE_SIZE) !=
+            NVC6C0_QMDV03_00_RELEASE0_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD ||
+        w[24] != (uint32_t)(sem & 0xffffffffu)) {
+        printf("FALLO: semáforo QMD v03_00\n");
         return -1;
     }
-    printf("OK: QMD v2 de %s — prog>>4, %u regs, malla %ux1x1\n",
+    printf("OK: QMD v03_00 de %s — VA absolutas, %u regs, malla %ux1x1\n",
            k->name, k->regcount, grid);
     return 0;
 }

@@ -116,12 +116,12 @@ static int str_igual(const char *a, const char *b)
  * Aceptar una clase de compute no demuestra nada sobre el descriptor ni sobre
  * el código máquina. Aquí se junta lo que hace falta para lanzar de verdad:
  *
- *   - la versión de QMD, que es distinta por familia y de la que solo se tiene
- *     transcrito el layout de Blackwell (`QMDV05_*` en nvrm_r570.h, de
- *     `clcec0qmd.h`). El árbol solo trae `cla0c0qmd.h`, que llega a V01_07
- *     (era Pascal): NO es el QMD de Ampere/Ada/Hopper, así que para esas
- *     familias `qmd_version` es 0 = «no sé escribir el descriptor», y el
- *     lanzamiento se rechaza ANTES de enviar nada.
+ *   - la versión de QMD, que es distinta por familia: Blackwell v05
+ *     (`QMDV05_*`, de `clcec0qmd.h`) y Ampere v03_00 (`QMDV03_*`, de
+ *     `clc6c0qmd.h`). `cla0c0qmd.h` (el único del árbol OGKM) llega a V01_07
+ *     (era Pascal) y NO es el de Ampere. Para Ada/Hopper `qmd_version` es 0 =
+ *     «no sé escribir el descriptor», y el lanzamiento se rechaza ANTES de
+ *     enviar nada.
  *   - la arquitectura del SASS. Los blobs no son intercambiables: el mismo
  *     .cu compilado a sm_86 y a sm_120 cambia hasta de sitio los parámetros
  *     (param_base 352 frente a 896), así que lanzar el juego equivocado es
@@ -744,65 +744,74 @@ static void gsp_compute_fill_qmd_v02_grid(struct gsp_compute *cp,
                                           GspQmdV02 *qmd, unsigned grid_x,
                                           unsigned grid_y, unsigned sem_slot)
 {
-    /* QMDV01_07 PROGRAM_OFFSET son 32 bits: offset relativo a GSP_VA_BASE (>>4),
-     * no la VA absoluta de 40 bits que usa v05. */
-    uint64_t prog_shift = (k->sass_va - GSP_VA_BASE) >> 4;
+    /* QMD v03_00 (Ampere/Ada, clc6c0qmd.h; Mesa/nvk: major 3, minor 0). Las
+     * direcciones del programa, del constant bank y del semáforo van como VA
+     * absolutas SIN desplazar; sólo el tamaño del constant bank va en unidades
+     * de 16 B. El QMD v01_07 que se escribía antes tiene otro mapa de bits. */
+    uint64_t prog_va = k->sass_va;
     uint64_t cb_va = cp->data_va + G4F_CBANK_OFF;
-    /* CB addr en QMD v01_07: VA>>6 en 40 bits (OGKM cla0c0qmd.h), no relativo a GSP_VA_BASE. */
-    uint64_t cb_shift = cb_va >> 6;
     uint64_t sem_va = cp->data_va + G4F_SEM_SLOT(sem_slot);
     uint32_t cb_size = (k->cbank_size + 15u) & ~15u;
 
     memset(qmd, 0, sizeof(*qmd));
-    qmd_set_bits(qmd->words, QMDV02_SEMAPHORE_RELEASE_ENABLE0,
-                 NVA0C0_QMDV01_07_SEMAPHORE_RELEASE_ENABLE0_TRUE);
-    qmd_set_bits(qmd->words, QMDV02_REQUIRE_SCHEDULING_PCAS,
-                 NVA0C0_QMDV01_07_REQUIRE_SCHEDULING_PCAS_TRUE);
-    qmd_set_bits(qmd->words, QMDV02_RELEASE_MEMBAR_TYPE,
-                 NVA0C0_QMDV01_07_RELEASE_MEMBAR_TYPE_FE_SYSMEMBAR);
-    qmd_set_bits(qmd->words, QMDV02_API_VISIBLE_CALL_LIMIT,
-                 NVA0C0_QMDV01_07_API_VISIBLE_CALL_LIMIT_NO_CHECK);
-    qmd_set_bits(qmd->words, QMDV02_QMD_MAJOR_VERSION,
-                 NVA0C0_QMDV01_07_QMD_MAJOR_VERSION_V01);
-    qmd_set_bits(qmd->words, QMDV02_QMD_VERSION,
-                 NVA0C0_QMDV01_07_QMD_VERSION_V07);
-    qmd_set_bits(qmd->words, QMDV02_QMD_GROUP_ID, 0x1fu);
-    qmd_set_bits(qmd->words, QMDV02_INVALIDATE_INSTRUCTION_CACHE,
-                 NVA0C0_QMDV01_07_INVALIDATE_INSTRUCTION_CACHE_TRUE);
-    qmd_set_bits(qmd->words, QMDV02_INVALIDATE_SHADER_CONSTANT_CACHE,
-                 NVA0C0_QMDV01_07_INVALIDATE_SHADER_CONSTANT_CACHE_TRUE);
+    qmd_set_bits(qmd->words, QMDV03_QMD_MAJOR_VERSION,
+                 NVC6C0_QMDV03_00_QMD_MAJOR_VERSION_V03);
+    qmd_set_bits(qmd->words, QMDV03_QMD_VERSION,
+                 NVC6C0_QMDV03_00_QMD_VERSION_V00);
+    qmd_set_bits(qmd->words, QMDV03_API_VISIBLE_CALL_LIMIT,
+                 NVC6C0_QMDV03_00_API_VISIBLE_CALL_LIMIT_NO_CHECK);
+    qmd_set_bits(qmd->words, QMDV03_SAMPLER_INDEX,
+                 NVC6C0_QMDV03_00_SAMPLER_INDEX_INDEPENDENTLY);
+    qmd_set_bits(qmd->words, QMDV03_SM_GLOBAL_CACHING_ENABLE, 1u);
+    qmd_set_bits(qmd->words, QMDV03_INVALIDATE_INSTRUCTION_CACHE,
+                 NVC6C0_QMDV03_00_INVALIDATE_INSTRUCTION_CACHE_TRUE);
+    qmd_set_bits(qmd->words, QMDV03_INVALIDATE_SHADER_CONSTANT_CACHE,
+                 NVC6C0_QMDV03_00_INVALIDATE_SHADER_CONSTANT_CACHE_TRUE);
 
-    qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_WIDTH, grid_x ? grid_x : 1u);
-    qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_HEIGHT, grid_y ? grid_y : 1u);
-    qmd_set_bits(qmd->words, QMDV02_CTA_RASTER_DEPTH, 1u);
-    qmd_set_bits(qmd->words, QMDV02_CTA_THREAD_DIMENSION0, G4F_CTA_THREADS);
-    qmd_set_bits(qmd->words, QMDV02_CTA_THREAD_DIMENSION1, 1u);
-    qmd_set_bits(qmd->words, QMDV02_CTA_THREAD_DIMENSION2, 1u);
+    qmd_set_bits(qmd->words, QMDV03_CTA_RASTER_WIDTH, grid_x ? grid_x : 1u);
+    qmd_set_bits(qmd->words, QMDV03_CTA_RASTER_HEIGHT, grid_y ? grid_y : 1u);
+    qmd_set_bits(qmd->words, QMDV03_CTA_RASTER_DEPTH, 1u);
+    qmd_set_bits(qmd->words, QMDV03_CTA_THREAD_DIMENSION0, G4F_CTA_THREADS);
+    qmd_set_bits(qmd->words, QMDV03_CTA_THREAD_DIMENSION1, 1u);
+    qmd_set_bits(qmd->words, QMDV03_CTA_THREAD_DIMENSION2, 1u);
 
-    qmd_set_bits(qmd->words, QMDV02_PROGRAM_OFFSET, (uint32_t)prog_shift);
+    qmd_set_bits(qmd->words, QMDV03_PROGRAM_ADDRESS_LOWER,
+                 (uint32_t)(prog_va & 0xffffffffu));
+    qmd_set_bits(qmd->words, QMDV03_PROGRAM_ADDRESS_UPPER,
+                 (uint32_t)((prog_va >> 32) & 0x1ffffu));
 
-    qmd_set_bits(qmd->words, QMDV02_REGISTER_COUNT, k->regcount);
-    qmd_set_bits(qmd->words, QMDV02_BARRIER_COUNT, 0u);
-    qmd_set_bits(qmd->words, QMDV02_SHARED_MEMORY_SIZE, 0u);
+    qmd_set_bits(qmd->words, QMDV03_REGISTER_COUNT_V, k->regcount);
+    qmd_set_bits(qmd->words, QMDV03_BARRIER_COUNT, 0u);
+    qmd_set_bits(qmd->words, QMDV03_SHARED_MEMORY_SIZE, 0u);
+    qmd_set_bits(qmd->words, QMDV03_MIN_SM_CONFIG_SHARED_MEM_SIZE,
+                 QMDV03_SM_CONFIG_SMEM_NONE);
+    qmd_set_bits(qmd->words, QMDV03_TARGET_SM_CONFIG_SHARED_MEM_SIZE,
+                 QMDV03_SM_CONFIG_SMEM_NONE);
+    qmd_set_bits(qmd->words, QMDV03_MAX_SM_CONFIG_SHARED_MEM_SIZE,
+                 QMDV03_SM_CONFIG_SMEM_MAX_SM86);
 
-    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_VALID0,
-                 NVA0C0_QMDV01_07_CONSTANT_BUFFER_VALID_TRUE);
-    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_INVALIDATE0,
-                 NVA0C0_QMDV01_07_CONSTANT_BUFFER_INVALIDATE_TRUE);
-    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_ADDR_LOWER0,
-                 (uint32_t)(cb_shift & 0xffffffffu));
-    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_ADDR_UPPER0,
-                 (uint32_t)((cb_shift >> 32) & 0xffu));
-    qmd_set_bits(qmd->words, QMDV02_CONSTANT_BUFFER_SIZE0, cb_size);
+    qmd_set_bits(qmd->words, QMDV03_CONSTANT_BUFFER_VALID0,
+                 NVC6C0_QMDV03_00_CONSTANT_BUFFER_VALID_TRUE);
+    qmd_set_bits(qmd->words, QMDV03_CONSTANT_BUFFER_INVALIDATE0,
+                 NVC6C0_QMDV03_00_CONSTANT_BUFFER_INVALIDATE_TRUE);
+    qmd_set_bits(qmd->words, QMDV03_CONSTANT_BUFFER_ADDR_LOWER0,
+                 (uint32_t)(cb_va & 0xffffffffu));
+    qmd_set_bits(qmd->words, QMDV03_CONSTANT_BUFFER_ADDR_UPPER0,
+                 (uint32_t)((cb_va >> 32) & 0x1ffffu));
+    qmd_set_bits(qmd->words, QMDV03_CONSTANT_BUFFER_SIZE_SHIFTED4_0,
+                 cb_size >> 4);
 
-    qmd_set_bits(qmd->words, QMDV02_RELEASE0_STRUCTURE_SIZE,
-                 NVA0C0_QMDV01_07_RELEASE0_STRUCTURE_SIZE_ONE_WORD);
-    qmd_set_bits(qmd->words, QMDV02_RELEASE0_ADDRESS_LOWER,
+    qmd_set_bits(qmd->words, QMDV03_RELEASE0_ENABLE,
+                 NVC6C0_QMDV03_00_RELEASE0_ENABLE_TRUE);
+    qmd_set_bits(qmd->words, QMDV03_RELEASE0_MEMBAR_TYPE,
+                 NVC6C0_QMDV03_00_RELEASE0_MEMBAR_TYPE_FE_SYSMEMBAR);
+    qmd_set_bits(qmd->words, QMDV03_RELEASE0_STRUCTURE_SIZE,
+                 NVC6C0_QMDV03_00_RELEASE0_STRUCTURE_SIZE_SEMAPHORE_ONE_WORD);
+    qmd_set_bits(qmd->words, QMDV03_RELEASE0_ADDRESS_LOWER,
                  (uint32_t)(sem_va & 0xffffffffu));
-    qmd_set_bits(qmd->words, QMDV02_RELEASE0_ADDRESS_UPPER,
+    qmd_set_bits(qmd->words, QMDV03_RELEASE0_ADDRESS_UPPER,
                  (uint32_t)((sem_va >> 32) & 0xffu));
-    qmd_set_bits(qmd->words, QMDV02_RELEASE0_PAYLOAD, G4F_SEM_PAYLOAD);
-    (void)cp;
+    qmd_set_bits(qmd->words, QMDV03_RELEASE0_PAYLOAD_LOWER, G4F_SEM_PAYLOAD);
 }
 
 void gsp_compute_fill_qmd_grid(struct gsp_compute *cp, const struct gsp_kernel *k,
@@ -918,7 +927,7 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
 
     cp_pb_set_object(c, &pos, GSP_COMPUTE_SUBCHANNEL, set_object, cp->cls);
     cp_pb_immd(c, &pos, 0u, NVC86F_WFI, 0u);
-    /* Ampere: la versión va en el descriptor QMD v01_07 (major/minor en el
+    /* Ampere: la versión va en el descriptor QMD v03_00 (major/minor en el
      * blob). SET/CHECK_QMD_VERSION en el pushbuffer levantó GR_CLASS_ERROR en
      * GA107 (2026-09): mismo layout de 24 B que Blackwell (SET_OBJECT+WFI+
      * SEND_PCAS+PCAS2). */
