@@ -1,0 +1,402 @@
+[
+ {
+  "nombre": "sin_herramientas_con_sistema",
+  "entrada": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Eres útil."
+    },
+    {
+     "role": "user",
+     "content": "hola"
+    }
+   ],
+   "tools": []
+  },
+  "esperado": "<|im_start|>system\nEres útil.<|im_end|>\n<|im_start|>user\nhola<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "sin_herramientas_sin_sistema",
+  "entrada": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "hola"
+    }
+   ],
+   "tools": []
+  },
+  "esperado": "<|im_start|>user\nhola<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "herramientas_sin_sistema",
+  "entrada": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "lee TASK.md"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "  Lee un archivo.\n",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Ruta absoluta"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Líneas",
+         "minimum": 1
+        }
+       },
+       "additionalProperties": false,
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "bash",
+      "description": "Ejecuta un comando",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "esperado": "<|im_start|>system\nYou are Qwen, a helpful AI assistant that can interact with a computer to solve tasks.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>read</name>\n<description>Lee un archivo.</description>\n<parameters>\n<parameter>\n<name>filePath</name>\n<type>string</type>\n<description>Ruta absoluta</description>\n</parameter>\n<parameter>\n<name>limit</name>\n<type>integer</type>\n<description>Líneas</description>\n<minimum>1</minimum>\n</parameter>\n<additionalProperties>False</additionalProperties>\n<required>[\"filePath\"]</required>\n</parameters>\n</function>\n<function>\n<name>bash</name>\n<description>Ejecuta un comando</description>\n<parameters>\n<parameter>\n<name>command</name>\n<type>string</type>\n</parameter>\n<required>[\"command\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nlee TASK.md<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "herramientas_con_sistema",
+  "entrada": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Agente de soso."
+    },
+    {
+     "role": "user",
+     "content": "lee TASK.md"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "  Lee un archivo.\n",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Ruta absoluta"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Líneas",
+         "minimum": 1
+        }
+       },
+       "additionalProperties": false,
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "esperado": "<|im_start|>system\nAgente de soso.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>read</name>\n<description>Lee un archivo.</description>\n<parameters>\n<parameter>\n<name>filePath</name>\n<type>string</type>\n<description>Ruta absoluta</description>\n</parameter>\n<parameter>\n<name>limit</name>\n<type>integer</type>\n<description>Líneas</description>\n<minimum>1</minimum>\n</parameter>\n<additionalProperties>False</additionalProperties>\n<required>[\"filePath\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nlee TASK.md<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "ciclo_llamada_resultado_respuesta",
+  "entrada": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Agente."
+    },
+    {
+     "role": "user",
+     "content": "lee TASK.md"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read",
+        "arguments": {
+         "filePath": "TASK.md"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "contenido del archivo"
+    },
+    {
+     "role": "assistant",
+     "content": "Listo, lo leí."
+    },
+    {
+     "role": "user",
+     "content": "gracias"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "  Lee un archivo.\n",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Ruta absoluta"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Líneas",
+         "minimum": 1
+        }
+       },
+       "additionalProperties": false,
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "esperado": "<|im_start|>system\nAgente.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>read</name>\n<description>Lee un archivo.</description>\n<parameters>\n<parameter>\n<name>filePath</name>\n<type>string</type>\n<description>Ruta absoluta</description>\n</parameter>\n<parameter>\n<name>limit</name>\n<type>integer</type>\n<description>Líneas</description>\n<minimum>1</minimum>\n</parameter>\n<additionalProperties>False</additionalProperties>\n<required>[\"filePath\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nlee TASK.md<|im_end|>\n<|im_start|>assistant\n<tool_call>\n<function=read>\n<parameter=filePath>\nTASK.md\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\ncontenido del archivo\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\nListo, lo leí.<|im_end|>\n<|im_start|>user\ngracias<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "asistente_con_texto_y_llamada",
+  "entrada": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "x"
+    },
+    {
+     "role": "assistant",
+     "content": "  Voy a leerlo.\n",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read",
+        "arguments": {
+         "filePath": "a.rs",
+         "limit": 20
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "ok"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "  Lee un archivo.\n",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Ruta absoluta"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Líneas",
+         "minimum": 1
+        }
+       },
+       "additionalProperties": false,
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "esperado": "<|im_start|>system\nYou are Qwen, a helpful AI assistant that can interact with a computer to solve tasks.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>read</name>\n<description>Lee un archivo.</description>\n<parameters>\n<parameter>\n<name>filePath</name>\n<type>string</type>\n<description>Ruta absoluta</description>\n</parameter>\n<parameter>\n<name>limit</name>\n<type>integer</type>\n<description>Líneas</description>\n<minimum>1</minimum>\n</parameter>\n<additionalProperties>False</additionalProperties>\n<required>[\"filePath\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\nVoy a leerlo.\n\n<tool_call>\n<function=read>\n<parameter=filePath>\na.rs\n</parameter>\n<parameter=limit>\n20\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "argumentos_no_cadena",
+  "entrada": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "x"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "bash",
+        "arguments": {
+         "command": "ls",
+         "lista": [
+          1,
+          "a"
+         ],
+         "n": 3,
+         "obj": {
+          "k": 1
+         },
+         "ok": true
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "a\nb"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "bash",
+      "description": "Ejecuta un comando",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "esperado": "<|im_start|>system\nYou are Qwen, a helpful AI assistant that can interact with a computer to solve tasks.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>bash</name>\n<description>Ejecuta un comando</description>\n<parameters>\n<parameter>\n<name>command</name>\n<type>string</type>\n</parameter>\n<required>[\"command\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n<parameter=lista>\n[1, \"a\"]\n</parameter>\n<parameter=n>\n3\n</parameter>\n<parameter=obj>\n{\"k\": 1}\n</parameter>\n<parameter=ok>\nTrue\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\na\nb\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "dos_resultados_seguidos",
+  "entrada": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "x"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read",
+        "arguments": {
+         "filePath": "a"
+        }
+       }
+      },
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "read",
+        "arguments": {
+         "filePath": "b"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "A"
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_2",
+     "content": "B"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "read",
+      "description": "  Lee un archivo.\n",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "filePath": {
+         "type": "string",
+         "description": "Ruta absoluta"
+        },
+        "limit": {
+         "type": "integer",
+         "description": "Líneas",
+         "minimum": 1
+        }
+       },
+       "additionalProperties": false,
+       "required": [
+        "filePath"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "esperado": "<|im_start|>system\nYou are Qwen, a helpful AI assistant that can interact with a computer to solve tasks.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n<function>\n<name>read</name>\n<description>Lee un archivo.</description>\n<parameters>\n<parameter>\n<name>filePath</name>\n<type>string</type>\n<description>Ruta absoluta</description>\n</parameter>\n<parameter>\n<name>limit</name>\n<type>integer</type>\n<description>Líneas</description>\n<minimum>1</minimum>\n</parameter>\n<additionalProperties>False</additionalProperties>\n<required>[\"filePath\"]</required>\n</parameters>\n</function>\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\n<tool_call>\n<function=read>\n<parameter=filePath>\na\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=read>\n<parameter=filePath>\nb\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nA\n</tool_response>\n<tool_response>\nB\n</tool_response>\n<|im_end|>\n<|im_start|>assistant\n"
+ }
+]

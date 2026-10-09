@@ -1,0 +1,7 @@
+{"name": "edit", "arguments": {"filePath":"crates/soso-http/src/lib.rs","newString":"    headers
+  .iter()
+  .find(|(k, _)| k.to_lowercase() == key.to_lowercase())
+  .map(|(_, v)| v.as_str())","oldString":"    headers
+  .iter()
+  .find(|(k, _)| k == key)
+  .map(|(_, v)| v.as_str())"}}

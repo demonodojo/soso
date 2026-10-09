@@ -1,0 +1,13 @@
+diff --git a/crates/soso-http/src/lib.rs b/crates/soso-http/src/lib.rs
+index eb3fa23..0e35067 100644
+--- a/crates/soso-http/src/lib.rs
++++ b/crates/soso-http/src/lib.rs
+@@ -818,7 +818,7 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), H
+ pub fn header_value<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a str> {
+     headers
+         .iter()
+-        .find(|(k, _)| k == key)
++        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+         .map(|(_, v)| v.as_str())
+ }
+ 

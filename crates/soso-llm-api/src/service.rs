@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
 use soso_llm_core::conversation::{
-    parse_assistant_output, render_messages, ChatError, ModelProfile, ToolChoice,
+    parse_assistant_output_pasante, render_messages, ChatError, ModelProfile, ToolChoice,
 };
 use soso_llm_core::generation::{
     GenCheckpoint, GenerationObserver, GenerationOptions, GenerationReport,
@@ -484,7 +484,7 @@ impl<B: ChatBackend + Send> HostService<B> {
             let b = self.backend.lock().unwrap();
             b.tokenizer().decode(&token_ids)
         };
-        let turn = parse_assistant_output(
+        let turn = parse_assistant_output_pasante(
             &prepared.input,
             &generated_text,
             prepared.input.siguiente_id_llamada(),
@@ -550,7 +550,7 @@ impl<B: ChatBackend + Send> HostService<B> {
             let b = self.backend.lock().unwrap();
             b.tokenizer().decode(&token_ids)
         };
-        let turn = parse_assistant_output(
+        let turn = parse_assistant_output_pasante(
             &prepared.input,
             &generated_text,
             prepared.input.siguiente_id_llamada(),

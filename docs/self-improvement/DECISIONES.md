@@ -107,6 +107,17 @@ objeto con el nombre de una herramienta declarada se interpreta como llamada aun
 quisiera enseñarlo; es raro y los argumentos se validan contra el esquema igualmente.
 **Revisar** si aparece un caso real de falso positivo.
 
+**Ampliación (2026-10-08, intentos 8–12): los servidores son «pasantes».** Además de las formas
+anteriores, el 7B escribe `parameters` por `arguments`, cadenas donde el esquema pide
+booleano/número (`"replaceAll":"true"`, convertidas al tipo del esquema), llamadas sin un
+argumento obligatorio y nombres de herramienta inexistentes (`readFile`). Una llamada **bien
+formada** (JSON válido con `name` y objeto de argumentos) se devuelve tal cual con 200 aunque
+no cumpla el esquema o nombre una herramienta no declarada: es lo que hace la API de OpenAI, y
+OpenCode valida y **devuelve el error al modelo para que se corrija**; con un 400 la sesión
+acababa sin esa oportunidad. Sigue siendo error lo que ni siquiera es JSON de llamada (cortado
+a mitad de un valor). `parse_assistant_output` queda estricto y `parse_assistant_output_pasante`
+lo usan los servidores (guest y host). Un bloque ``` que no empieza por `{` es texto, no llamada.
+
 ## Cómo mantener el plan
 
 Catálogo, ficha, fila del índice y seguimiento se actualizan juntos. Los

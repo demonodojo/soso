@@ -145,11 +145,13 @@ pub fn convert_with_options<R: Read + Seek>(
         .unwrap_or("llama");
     let is_mla = arch_name == "deepseek2";
     let is_qwen2 = arch_name == "qwen2";
-    let is_qwen3 = arch_name == "qwen3";
+    // `qwen3moe` (Qwen3-30B-A3B, Qwen3-Coder-30B-A3B): la atención es la de Qwen3 (GQA, QK-norm)
+    // y la FFN es MoE con la dimensión de experto propia (`expert_feed_forward_length`).
+    let is_qwen3 = arch_name == "qwen3" || arch_name == "qwen3moe";
     let is_qwen35 = arch_name == "qwen35" || arch_name == "qwen38";
     if arch_name != "llama" && !is_mla && !is_qwen2 && !is_qwen3 && !is_qwen35 {
         return Err(format!(
-            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen3 | qwen35 | qwen38)"
+            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen3 | qwen3moe | qwen35 | qwen38)"
         ));
     }
     let meta_prefix = if is_mla {
@@ -162,7 +164,9 @@ pub fn convert_with_options<R: Read + Seek>(
 
     let hidden = gguf.meta_u32(&format!("{meta_prefix}.embedding_length"))?;
     let num_layers = gguf.meta_u32(&format!("{meta_prefix}.block_count"))?;
-    let ffn_dim = gguf.meta_u32(&format!("{meta_prefix}.feed_forward_length"))?;
+    let ffn_dim = gguf
+        .meta_u32(&format!("{meta_prefix}.feed_forward_length"))
+        .or_else(|_| gguf.meta_u32(&format!("{meta_prefix}.expert_feed_forward_length")))?;
     let num_heads = gguf.meta_u32(&format!("{meta_prefix}.attention.head_count"))?;
     let num_kv_heads = gguf
         .meta_u32(&format!("{meta_prefix}.attention.head_count_kv"))
@@ -208,7 +212,12 @@ pub fn convert_with_options<R: Read + Seek>(
         .or_else(|_| gguf.meta_u32("llama.expert_used_count"))
         .unwrap_or(if num_experts > 0 { 2 } else { 0 });
     let is_moe = num_experts > 0;
-    let moe_ffn_dim = if is_moe { ffn_dim } else { 0 };
+    let moe_ffn_dim = if is_moe {
+        gguf.meta_u32(&format!("{meta_prefix}.expert_feed_forward_length"))
+            .unwrap_or(ffn_dim)
+    } else {
+        0
+    };
 
     let model_name = name.map(String::from).unwrap_or_else(|| String::from("model"));
 
@@ -379,7 +388,7 @@ pub fn convert_with_options<R: Read + Seek>(
         let mut shards = Vec::new();
         let mut trunk_pieces: Vec<TrunkPiece> = Vec::new();
         if is_moe {
-            let attn_parts = [
+            let mut attn_parts = vec![
                 ("attn_norm", "attn_norm"),
                 ("attn_q", "attn_q"),
                 ("attn_k", "attn_k"),
@@ -387,6 +396,11 @@ pub fn convert_with_options<R: Read + Seek>(
                 ("attn_output", "attn_output"),
                 ("ffn_norm", "ffn_norm"),
             ];
+            if is_qwen3 {
+                // QK-norm por cabeza (Qwen3 MoE): sin ellas la atención no coincide con la del modelo.
+                attn_parts.push(("attn_q_norm", "attn_q_norm"));
+                attn_parts.push(("attn_k_norm", "attn_k_norm"));
+            }
             for (gguf_part, som_part) in attn_parts {
                 let gguf_name = format!("blk.{layer}.{gguf_part}.weight");
                 let som_name = format!("L{layer:02}.{som_part}");

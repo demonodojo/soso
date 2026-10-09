@@ -2,7 +2,8 @@
 
 use serde_json::json;
 use soso_llm_core::conversation::{
-    parse_assistant_output, AssistantTurn, ChatError, ChatInput, Message, ToolCallParser,
+    parse_assistant_output, parse_assistant_output_pasante, AssistantTurn, ChatError, ChatInput,
+    Message, ToolCallParser,
     ToolChoice, ToolDefinition, MAX_ARGUMENTOS_BYTES,
 };
 
@@ -479,4 +480,195 @@ fn una_marca_de_turno_suelta_al_principio_no_es_contenido() {
     // Sólo se quita del principio: en medio del texto es contenido y se conserva.
     let t = parse_assistant_output(&entrada, "hola <|im_start|> adiós", 1).expect("texto");
     assert_eq!(t.content.as_deref(), Some("hola <|im_start|> adiós"));
+}
+
+#[test]
+fn parameters_vale_como_arguments() {
+    let entrada = entrada_auto();
+    let json = "{\"name\": \"leer_archivo\", \"parameters\": {\"ruta\": \"a.rs\"}}";
+    for texto in [json.to_string(), format!("```json\n{json}\n```"), format!("<tool_call>\n{json}\n</tool_call>")] {
+        let t = parse_assistant_output(&entrada, &texto, 1).expect(&texto);
+        assert_eq!(t.tool_call.expect("llamada").arguments, "{\"ruta\":\"a.rs\"}", "{texto}");
+    }
+    // Sigue exigiendo una herramienta declarada y argumentos objeto.
+    let t = parse_assistant_output(&entrada, "{\"name\": \"otra\", \"parameters\": {}}", 1).expect("texto");
+    assert!(t.tool_call.is_none());
+}
+
+#[test]
+fn cadenas_con_el_tipo_del_esquema_se_convierten() {
+    let entrada = entrada_auto();
+    // `lineas` es integer en el esquema de `leer_archivo`.
+    let t = parse_assistant_output(
+        &entrada,
+        "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\", \"lineas\": \"20\"}}",
+        1,
+    )
+    .expect("entero como cadena");
+    assert_eq!(t.tool_call.expect("llamada").arguments, "{\"lineas\":20,\"ruta\":\"a.rs\"}");
+    // Una cadena que no es un número sigue siendo un argumento inválido.
+    let err = parse_assistant_output(
+        &entrada,
+        "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\", \"lineas\": \"veinte\"}}",
+        1,
+    )
+    .unwrap_err();
+    assert!(matches!(err, ChatError::ArgumentoInvalido { .. }), "{err:?}");
+    // `ruta` es string: un número ahí no se convierte (sería inventar).
+    let err = parse_assistant_output(
+        &entrada,
+        "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": 7}}",
+        1,
+    )
+    .unwrap_err();
+    assert!(matches!(err, ChatError::ArgumentoInvalido { .. }), "{err:?}");
+}
+
+// Intento 10 de T22: el 7B responde con prosa y un bloque ``` con un diff.
+#[test]
+fn un_bloque_de_codigo_que_no_es_json_es_texto_no_una_llamada() {
+    let entrada = entrada_auto();
+    for texto in [
+        "Cambios:\n```\ndiff --git a/x b/x\n+hola\n```\nListo.",
+        "```rust\nfn main() {}\n```",
+        "Mira:\n```\nsin cerrar y sin json",
+    ] {
+        let t = parse_assistant_output(&entrada, texto, 1).expect(texto);
+        assert!(t.tool_call.is_none(), "{texto}");
+        assert_eq!(t.content.as_deref(), Some(texto), "el texto se conserva entero");
+    }
+    // Y una llamada de verdad después de un bloque de código sigue siéndolo.
+    let con_llamada = "```\nfn a() {}\n```\n```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\"}}\n```";
+    let t = parse_assistant_output(&entrada, con_llamada, 1).expect("llamada tras código");
+    assert!(t.tool_call.is_some());
+}
+
+// Intento 12 de T22: el 7B escribe un `edit` sin `newString`. Con un 400 la sesión de OpenCode
+// acababa; devuelta tal cual, OpenCode la valida y le devuelve el error al modelo.
+#[test]
+fn modo_pasante_devuelve_llamadas_que_no_cumplen_el_esquema() {
+    let entrada = entrada_auto();
+    // `ruta` es obligatorio y falta; y la herramienta `borrar` no está declarada.
+    for texto in [
+        "{\"name\": \"leer_archivo\", \"arguments\": {\"lineas\": 3}}",
+        "<tool_call>\n{\"name\": \"borrar\", \"arguments\": {\"ruta\": \"a.rs\"}}\n</tool_call>",
+        "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\", \"extra\": 1}}",
+    ] {
+        // Estricto: error, como siempre.
+        assert!(parse_assistant_output(&entrada, texto, 1).is_err() || texto.contains("extra"), "{texto}");
+        let t = parse_assistant_output_pasante(&entrada, texto, 1).expect(texto);
+        assert!(t.tool_call.is_some(), "{texto}");
+    }
+    // Lo que no es JSON de llamada sigue siendo error también en modo pasante.
+    let err = parse_assistant_output_pasante(
+        &entrada,
+        "```json\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.r",
+        1,
+    )
+    .unwrap_err();
+    assert!(matches!(err, ChatError::HistorialInvalido { .. }), "{err:?}");
+}
+
+#[test]
+fn marcas_de_turno_sueltas_tambien_al_final() {
+    let entrada = entrada_auto();
+    let json = "{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\"}}";
+    for texto in [
+        format!("{json}\n<|im_start|>"),
+        format!("{json}<|im_end|>"),
+        format!("<|im_start|>\n{json}\n<|im_end|>\n<|endoftext|>"),
+        format!("```json\n{json}\n```\n<|im_start|>"),
+    ] {
+        let t = parse_assistant_output(&entrada, &texto, 1).expect(&texto);
+        assert!(t.tool_call.is_some(), "{texto:?}");
+        assert_eq!(t.content, None, "{texto:?}");
+    }
+    // Texto normal con una marca en medio no se toca.
+    let t = parse_assistant_output(&entrada, "hola <|im_end|> adiós", 1).expect("texto");
+    assert_eq!(t.content.as_deref(), Some("hola <|im_end|> adiós"));
+}
+
+// Formato de llamadas de Qwen3-Coder (XML): <function=NOMBRE><parameter=P>VALOR</parameter></function>.
+fn buscar_xml() -> ChatInput {
+    ChatInput::nuevo(vec![Message::user("hola")]).con_herramientas(
+        vec![ToolDefinition::nueva(
+            "edit",
+            None,
+            json!({"type": "object", "properties": {
+                "filePath": {"type": "string"},
+                "oldString": {"type": "string"},
+                "replaceAll": {"type": "boolean"},
+                "limit": {"type": "integer"},
+                "lista": {"type": "array"}},
+                "required": ["filePath", "oldString"]}),
+        )],
+        ToolChoice::Auto,
+    )
+}
+
+#[test]
+fn llamada_xml_de_qwen3_coder() {
+    let entrada = buscar_xml();
+    let texto = "Voy a editarlo.\n\n<tool_call>\n<function=edit>\n<parameter=filePath>\ncrates/a.rs\n</parameter>\n<parameter=oldString>\nlinea 1\n    linea 2\n</parameter>\n<parameter=replaceAll>\ntrue\n</parameter>\n<parameter=limit>\n20\n</parameter>\n<parameter=lista>\n[1, \"a\"]\n</parameter>\n</function>\n</tool_call>";
+    let t = parse_assistant_output(&entrada, texto, 1).expect("xml");
+    assert_eq!(t.content.as_deref(), Some("Voy a editarlo.\n\n"));
+    let c = t.tool_call.expect("llamada");
+    assert_eq!(c.name, "edit");
+    let args = c.argumentos().unwrap();
+    assert_eq!(args["filePath"], "crates/a.rs");
+    // El valor conserva sus saltos de línea y su sangría; sólo se quita el salto que separa.
+    assert_eq!(args["oldString"], "linea 1\n    linea 2");
+    assert_eq!(args["replaceAll"], true);
+    assert_eq!(args["limit"], 20);
+    assert_eq!(args["lista"], json!([1, "a"]));
+}
+
+#[test]
+fn llamada_xml_sin_cerrar_y_cortada() {
+    let entrada = buscar_xml();
+    // Sin `</tool_call>` ni `</function>` pero con los parámetros completos: vale.
+    let t = parse_assistant_output(
+        &entrada,
+        "<tool_call>\n<function=edit>\n<parameter=filePath>\na.rs\n</parameter>\n<parameter=oldString>\nx\n</parameter>\n",
+        1,
+    )
+    .expect("sin cerrar");
+    assert!(t.tool_call.is_some());
+    // Un parámetro cortado a mitad no es una llamada.
+    let err = parse_assistant_output(
+        &entrada,
+        "<tool_call>\n<function=edit>\n<parameter=filePath>\na.rs\n</parameter>\n<parameter=oldString>\nx",
+        1,
+    )
+    .unwrap_err();
+    assert!(matches!(err, ChatError::HistorialInvalido { .. } | ChatError::ArgumentosInvalidos { .. }), "{err:?}");
+}
+
+// Intento 18 de T22: el 7B escribe los saltos de línea de `oldString`/`newString` tal cual,
+// dentro de la cadena JSON, en vez de como `\n`.
+#[test]
+fn saltos_de_linea_literales_dentro_de_cadenas_json() {
+    let entrada = buscar_xml();
+    let texto = "{\"name\": \"edit\", \"arguments\": {\"filePath\":\"a.rs\",\"newString\":\"    x\n  .iter()\n\t.find()\",\"oldString\":\"    x\n  .iter()\"}}";
+    let t = parse_assistant_output(&entrada, texto, 1).expect("saltos literales");
+    let args = t.tool_call.expect("llamada").argumentos().unwrap();
+    assert_eq!(args["oldString"], "    x\n  .iter()");
+    assert_eq!(args["newString"], "    x\n  .iter()\n\t.find()");
+    // Fuera de las cadenas el texto no se toca, y un JSON roto por otra causa sigue siéndolo.
+    let roto = "{\"name\": \"edit\", \"arguments\": {\"filePath\": }";
+    let t = parse_assistant_output(&entrada, roto, 1).expect("texto");
+    assert!(t.tool_call.is_none());
+}
+
+// Intento 19 de T22 (ronda 2): el 7B envuelve la llamada JSON en una cerca ```bash.
+#[test]
+fn llamada_json_en_cerca_bash() {
+    let entrada = buscar_xml();
+    let texto = "```bash\n{\"name\": \"edit\", \"arguments\": {\"filePath\":\"a.rs\",\"oldString\":\"x\"}}\n```";
+    let t = parse_assistant_output(&entrada, texto, 1).expect("cerca bash");
+    let llamada = t.tool_call.expect("llamada");
+    assert_eq!(llamada.name, "edit");
+    // Un bloque bash que no es JSON sigue siendo texto.
+    let t = parse_assistant_output(&entrada, "```bash\nls -la\n```", 1).expect("texto");
+    assert!(t.tool_call.is_none());
 }

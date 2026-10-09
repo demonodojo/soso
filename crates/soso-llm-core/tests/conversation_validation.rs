@@ -800,3 +800,36 @@ fn una_cota_que_no_es_numero_se_rechaza() {
         Err(ChatError::EsquemaNoSoportado { .. })
     ));
 }
+
+// T22: el servidor devuelve tal cual las llamadas mal argumentadas del modelo y el cliente las
+// reenvía en el historial. En modo pasante no se rechazan; el modo estricto sigue igual.
+#[test]
+fn el_historial_pasante_acepta_llamadas_que_no_cumplen_el_esquema() {
+    use soso_llm_core::conversation::validate_input_pasante;
+    let args_malos = json!({"lineas": "no es un entero"}).to_string(); // falta `ruta`, tipo erróneo
+    let hist = |nombre: &str, args: String| {
+        ChatInput::nuevo(vec![
+            Message::user("lee"),
+            Message::llamadas(vec![ToolCall::nueva("call_1", nombre, args)]),
+            Message::resultado("call_1", "error de argumentos"),
+        ])
+        .con_herramientas(vec![leer_archivo()], ToolChoice::Auto)
+    };
+    for entrada in [
+        hist("leer_archivo", args_malos.clone()),
+        hist("herramienta_inexistente", String::from("{}")),
+    ] {
+        assert!(validate_input(&entrada).is_err(), "el modo estricto sigue rechazando");
+        validate_input_pasante(&entrada).expect("el pasante lo acepta");
+    }
+    // Lo demás se sigue exigiendo: un id repetido no pasa.
+    let dup = ChatInput::nuevo(vec![
+        Message::user("x"),
+        Message::llamadas(vec![ToolCall::nueva("call_1", "leer_archivo", "{}")]),
+        Message::resultado("call_1", "ok"),
+        Message::llamadas(vec![ToolCall::nueva("call_1", "leer_archivo", "{}")]),
+        Message::resultado("call_1", "ok"),
+    ])
+    .con_herramientas(vec![leer_archivo()], ToolChoice::Auto);
+    assert!(validate_input_pasante(&dup).is_err());
+}

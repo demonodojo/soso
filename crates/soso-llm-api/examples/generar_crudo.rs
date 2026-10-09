@@ -42,7 +42,11 @@ fn main() {
         args.remove(0);
         max = args.remove(0).parse().ok();
     }
-    let profile = ModelProfile {
+    // `PERFIL=<perfil.json>`: otro modelo (14B, Qwen3-Coder…); sin él, el 7B de T14.
+    let desde_fichero: Option<ModelProfile> = std::env::var("PERFIL").ok().map(|f| {
+        serde_json::from_str(&std::fs::read_to_string(&f).expect("leer perfil")).expect("perfil JSON")
+    });
+    let profile = desde_fichero.unwrap_or_else(|| ModelProfile {
         id: String::from("qwen2.5-coder-7b"),
         directory: dir.clone(),
         family: String::from("qwen2"),
@@ -59,7 +63,7 @@ fn main() {
         context_tokens: 32_768,
         max_output_tokens: 2048,
         stop_token_ids: vec![151_645, 151_643],
-    };
+    });
     let mut backend = load_cpu_backend(&dir, profile.clone()).unwrap_or_else(|e| {
         eprintln!("carga: {e}");
         std::process::exit(1);

@@ -143,6 +143,7 @@ mod ids {
     struct SiempreLlama {
         profile: ModelProfile,
         tokenizer: Tokenizer,
+        texto: &'static str,
     }
 
     impl ChatBackend for SiempreLlama {
@@ -162,8 +163,7 @@ mod ids {
             prepared: &PreparedChatCompletion,
             observer: &mut dyn GenerationObserver,
         ) -> Result<(Vec<u32>, GenerationReport), ()> {
-            let texto = "<tool_call>\n{\"name\": \"read\", \"arguments\": {\"filePath\": \"/a\"}}\n</tool_call>";
-            let ids = self.tokenizer.encode(texto);
+            let ids = self.tokenizer.encode(self.texto);
             for &t in &ids {
                 observer.on_token(t);
             }
@@ -193,13 +193,17 @@ mod ids {
         )
     }
 
-    fn id_de_la_respuesta(historial: &str) -> String {
+    const LLAMADA_BUENA: &str =
+        "<tool_call>\n{\"name\": \"read\", \"arguments\": {\"filePath\": \"/a\"}}\n</tool_call>";
+
+    fn cuerpo_de(texto: &'static str, historial: &str) -> (String, serde_json::Value) {
         let perfil = super::perfil();
         let service = Arc::new(HostService::new(
             String::from("k"),
             SiempreLlama {
                 profile: perfil,
                 tokenizer: super::tokenizer(),
+                texto,
             },
         ));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -212,13 +216,44 @@ mod ids {
         s.shutdown(std::net::Shutdown::Write).unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
-        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
-        let cuerpo = out.split("\r\n\r\n").nth(1).unwrap();
-        let v: serde_json::Value = serde_json::from_str(cuerpo).unwrap();
+        let cuerpo = out.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        let estado = out.lines().next().unwrap_or("").to_string();
+        (estado, serde_json::from_str(&cuerpo).unwrap_or(serde_json::Value::Null))
+    }
+
+    fn id_de_la_respuesta(historial: &str) -> String {
+        let (estado, v) = cuerpo_de(LLAMADA_BUENA, historial);
+        assert!(estado.starts_with("HTTP/1.1 200"), "{estado}");
         v["choices"][0]["message"]["tool_calls"][0]["id"]
             .as_str()
-            .unwrap_or_else(|| panic!("sin tool_calls: {cuerpo}"))
+            .unwrap_or_else(|| panic!("sin tool_calls: {v}"))
             .to_string()
+    }
+
+    // T22: una llamada bien formada pero que no cumple el esquema (falta `filePath`, o la
+    // herramienta no existe) se devuelve tal cual con 200; el cliente la valida y le dice al
+    // modelo qué falló. Un 400 acababa la sesión sin esa oportunidad.
+    #[test]
+    fn una_llamada_que_no_cumple_el_esquema_se_devuelve_con_200() {
+        for texto in [
+            "<tool_call>\n{\"name\": \"read\", \"arguments\": {}}\n</tool_call>",
+            "<tool_call>\n{\"name\": \"readFile\", \"arguments\": {\"filePath\": \"/a\"}}\n</tool_call>",
+        ] {
+            let (estado, v) = cuerpo_de(texto, "");
+            assert!(estado.starts_with("HTTP/1.1 200"), "{estado}: {v}");
+            assert!(v["choices"][0]["message"]["tool_calls"][0]["id"].is_string(), "{v}");
+        }
+    }
+
+    // T22 (intento 14): OpenCode reenvía la llamada mal argumentada que el servidor le devolvió
+    // (`edit` sin `newString`). Rechazarla con 400 acababa la sesión.
+    #[test]
+    fn el_historial_con_una_llamada_incompleta_se_atiende() {
+        let historial = r#",{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]},
+{"role":"tool","tool_call_id":"call_1","content":"Missing key at [\"filePath\"]"}"#;
+        let (estado, v) = cuerpo_de(LLAMADA_BUENA, historial);
+        assert!(estado.starts_with("HTTP/1.1 200"), "{estado}: {v}");
+        assert_eq!(v["choices"][0]["message"]["tool_calls"][0]["id"], "call_2");
     }
 
     #[test]
@@ -292,4 +327,37 @@ fn la_salida_exacta_del_7b_en_el_intento_6_se_acepta() {
     let call = turno.tool_call.expect("llamada");
     assert_eq!(call.name, "edit");
     assert!(call.arguments.contains("crates/soso-web-core/src/decode.rs"));
+}
+
+// Intento 9 de T22: el 7B escribe `"replaceAll":"true"` (cadena) y la herramienta `edit` de
+// OpenCode declara un booleano.
+#[test]
+fn el_edit_real_del_7b_con_replaceall_como_cadena_se_acepta() {
+    use soso_llm_core::conversation::parse_assistant_output;
+    let (_, cuerpo) = peticiones().remove(0);
+    let wire = parse_chat_completions(&cuerpo).unwrap();
+    let input = wire_to_chat_input(&wire).unwrap();
+    let salida = "{\"name\": \"edit\", \"parameters\": {\"filePath\":\"crates/soso-web-core/src/decode.rs\", \"oldString\":\"bytes[i]\", \"newString\":\"bytes[i] as char\", \"replaceAll\":\"true\"}}";
+    let turno = parse_assistant_output(&input, salida, 3)
+        .unwrap_or_else(|e| panic!("no se aceptó: {e:?}"));
+    let call = turno.tool_call.expect("llamada");
+    assert_eq!(call.name, "edit");
+    assert!(call.arguments.contains("\"replaceAll\":true"), "{}", call.arguments);
+}
+
+// Intento 18 de T22 (7B con `temperature: 0`): un `edit` completo y bien pensado, con los saltos
+// de línea de las cadenas sin escapar.
+#[test]
+fn la_salida_exacta_del_7b_con_saltos_literales_se_acepta() {
+    use soso_llm_core::conversation::parse_assistant_output_pasante;
+    let (_, cuerpo) = peticiones().remove(0);
+    let wire = parse_chat_completions(&cuerpo).unwrap();
+    let input = wire_to_chat_input(&wire).unwrap();
+    let salida =
+        std::fs::read_to_string(fixtures().join("salida-7b-edit-saltos-literales.txt")).unwrap();
+    let turno = parse_assistant_output_pasante(&input, &salida, 4)
+        .unwrap_or_else(|e| panic!("no se aceptó la salida real: {e:?}"));
+    let call = turno.tool_call.expect("llamada");
+    assert_eq!(call.name, "edit");
+    assert!(call.arguments.contains("to_lowercase"), "{}", call.arguments);
 }

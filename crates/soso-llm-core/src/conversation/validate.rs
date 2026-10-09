@@ -74,7 +74,7 @@ const TIPOS: &[&str] = &[
 ///
 /// Comprueba id, límites, nombre declarado y argumentos contra el esquema.
 pub fn validate_parsed_tool_call(entrada: &ChatInput, llamada: &ToolCall) -> Result<(), ChatError> {
-    validar_llamada(entrada, llamada, &[])
+    validar_llamada(entrada, llamada, &[], false)
 }
 
 /// Comprueba `tool_choice` frente al turno parseado (texto y/o llamada).
@@ -122,11 +122,26 @@ fn validar_seleccion_salida(
 /// No muta la entrada ni ejecuta nada. El orden de comprobación va de lo barato
 /// a lo caro: límites, herramientas, selección e historial.
 pub fn validate_input(entrada: &ChatInput) -> Result<(), ChatError> {
+    validate_input_con(entrada, false)
+}
+
+/// Como [`validate_input`], pero las llamadas **ya hechas** del historial no se comprueban
+/// contra el esquema de la herramienta ni exigen que ésta esté declarada (T22).
+///
+/// Es la contrapartida del modo pasante de [`super::ToolCallParser::pasante`]: el servidor
+/// devuelve tal cual lo que escribió el modelo y el cliente lo reenvía en el historial de la
+/// petición siguiente; rechazar entonces esa llamada con un 400 acababa la sesión. El resto
+/// (límites, ids únicos, resultados que respondan a una llamada, orden) se sigue exigiendo.
+pub fn validate_input_pasante(entrada: &ChatInput) -> Result<(), ChatError> {
+    validate_input_con(entrada, true)
+}
+
+fn validate_input_con(entrada: &ChatInput, pasante: bool) -> Result<(), ChatError> {
     limite("messages", entrada.messages.len(), MAX_MENSAJES)?;
     limite("tools", entrada.tools.len(), MAX_HERRAMIENTAS)?;
     validar_herramientas(&entrada.tools)?;
     validar_seleccion(entrada)?;
-    validar_historial(entrada)
+    validar_historial(entrada, pasante)
 }
 
 fn limite(que: &str, recibido: usize, maximo: usize) -> Result<(), ChatError> {
@@ -193,7 +208,7 @@ fn validar_seleccion(entrada: &ChatInput) -> Result<(), ChatError> {
 
 // ------------------------------------------------------------------ historial
 
-fn validar_historial(entrada: &ChatInput) -> Result<(), ChatError> {
+fn validar_historial(entrada: &ChatInput, pasante: bool) -> Result<(), ChatError> {
     let mensajes = &entrada.messages;
     match mensajes.first().map(|m| m.role) {
         None => return Err(historial("sin mensajes")),
@@ -244,7 +259,7 @@ fn validar_historial(entrada: &ChatInput) -> Result<(), ChatError> {
                     )));
                 }
                 for llamada in &m.tool_calls {
-                    validar_llamada(entrada, llamada, &vistos)?;
+                    validar_llamada(entrada, llamada, &vistos, pasante)?;
                     vistos.push(&llamada.id);
                     pendientes.push(&llamada.id);
                 }
@@ -318,6 +333,7 @@ fn validar_llamada(
     entrada: &ChatInput,
     llamada: &ToolCall,
     vistos: &[&str],
+    pasante: bool,
 ) -> Result<(), ChatError> {
     if llamada.id.is_empty() {
         return Err(historial("llamada sin id"));
@@ -332,6 +348,9 @@ fn validar_llamada(
         llamada.arguments.len(),
         MAX_ARGUMENTOS_BYTES,
     )?;
+    if pasante {
+        return Ok(());
+    }
     let Some(herramienta) = entrada.herramienta(&llamada.name) else {
         // Sin la declaración no hay esquema contra el que comparar: no se puede
         // decir que estos argumentos sean válidos.

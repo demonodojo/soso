@@ -17,7 +17,7 @@ use soso_llm_api::{
 };
 use soso_llm_core::chat;
 use soso_llm_core::conversation::{
-    parse_assistant_output, render_messages, AssistantTurn, ChatError, ModelProfile, Role,
+    parse_assistant_output_pasante, render_messages, AssistantTurn, ChatError, ModelProfile, Role,
     ToolChoice,
 };
 use soso_llm_core::generation::{
@@ -364,7 +364,7 @@ fn post_chat_generar(
         .bundle
         .tokenizer
         .decode(&token_ids);
-    let turn = parse_assistant_output(
+    let turn = parse_assistant_output_pasante(
         &prepared.input,
         &generated_text,
         prepared.input.siguiente_id_llamada(),
@@ -480,7 +480,7 @@ fn post_chat_stream(
         .bundle
         .tokenizer
         .decode(&token_ids);
-    let turn = parse_assistant_output(
+    let turn = parse_assistant_output_pasante(
         &prepared.input,
         &generated_text,
         prepared.input.siguiente_id_llamada(),

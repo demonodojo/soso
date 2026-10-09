@@ -800,15 +800,21 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "blocker": "Calidad del 7B en edición exacta; KV int8 del planificador del guest sin descartar como causa de llamadas peores que en el host.",
-        "updated_at": "2026-10-08T16:30:00+02:00",
-        "summary": "7 intentos con OpenCode real. Con el protocolo en el prompt del agente (una llamada por turno) y un parser que acepta las formas reales del 7B, el agente lee TASK.md y decode.rs de verdad y escribe un edit; falla en copiar oldString literal (límite del modelo) y en el guest (KV int8) escribe un esquema de llamada distinto. Sin parche útil todavía.",
+        "blocker": "Mecánica de edit del 7B (copiar literal oldString); decidir entre herramienta de edición por línea, modelo mayor o cerrar con límite.",
+        "updated_at": "2026-10-08T23:30:00+02:00",
+        "summary": "16 intentos con OpenCode real (R01 y, por la opción 2, R03). Circuito completo acreditado de punta a punta: prefill por bloques y KV reutilizable (T81/T82), parser tolerante y servidor/historial pasantes (D8), coordinador con verificador independiente y --continue. El 7B propone la idea correcta de arreglo para R03 pero falla la mecánica de edit (oldString no literal, newString omitido); sin parche válido. Suite completa verde.",
         "evidence": [
           "docs/self-improvement/seguimiento/T22.md",
           "target/self-improvement/first-improvement/temperaturas.txt",
-          "target/self-improvement/first-improvement/medida-reuso.txt"
+          "target/self-improvement/first-improvement/medida-reuso.txt",
+          "target/self-improvement/first-improvement/intento10/transcript.jsonl",
+          "target/self-improvement/tasks/T42/xtask-test-parser.txt",
+          "docs/self-improvement/DECISIONES.md",
+          "target/self-improvement/first-improvement/intento16/rondas.txt",
+          "target/self-improvement/first-improvement/host-bucle.sh",
+          "target/self-improvement/tasks/T42/xtask-test-final.txt"
         ],
-        "next_step": "Aislar el efecto del KV int8; tarea más fácil o modelo mayor; ver seguimiento/T22.md."
+        "next_step": "Ver opciones al final de seguimiento/T22.md (herramienta de edición por número de línea, modelo mayor, o cerrar T22 como circuito acreditado y pasar a T35)."
       }
     },
     {

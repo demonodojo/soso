@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use serde::Deserialize;
 use serde_json::Value;
 use soso_llm_core::conversation::{
-    validate_input, ChatError, ChatInput, Message, ModelProfile, Role, ToolCall, ToolChoice,
+    validate_input_pasante, ChatError, ChatInput, Message, ModelProfile, Role, ToolCall, ToolChoice,
     ToolDefinition,
 };
 use soso_llm_core::tokenizer::Tokenizer;
@@ -461,7 +461,7 @@ pub fn prepare_chat_completion(
     let wire = parse_chat_completions(body)?;
     validate_wire_policy(&wire)?;
     let input = wire_to_chat_input(&wire)?;
-    validate_input(&input)?;
+    validate_input_pasante(&input)?;
     let model = wire.model.as_ref().unwrap().trim();
     if model != profile.id {
         return Err(ApiError::ModeloDesconocido {
