@@ -192,6 +192,12 @@ pub fn silu(x: f32) -> f32 {
 
 /// SwiGLU in-place: `up[i] = silu(gate[i]) * up[i]`.
 pub fn swiglu_inplace(up: &mut [f32], gate: &[f32]) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma"))]
+    {
+        unsafe { crate::simd_math::avx::swiglu(up, gate) };
+        return;
+    }
+    #[allow(unreachable_code)]
     let n = up.len().min(gate.len());
     for i in 0..n {
         up[i] = silu(gate[i]) * up[i];
@@ -200,6 +206,12 @@ pub fn swiglu_inplace(up: &mut [f32], gate: &[f32]) {
 
 /// SiLU unario in-place (FFN sin gate).
 pub fn silu_inplace(x: &mut [f32]) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma"))]
+    {
+        unsafe { crate::simd_math::avx::silu_slice(x) };
+        return;
+    }
+    #[allow(unreachable_code)]
     for v in x.iter_mut() {
         *v = silu(*v);
     }
@@ -1072,6 +1084,51 @@ pub fn rope_inplace_neox(x: &mut [f32], pos: usize, theta: f32) {
     }
 }
 
+/// RoPE de **todas las cabezas** de un vector (`n_heads` cabezas de `head_dim`, seguidas).
+///
+/// `cos`/`sin` de cada pareja sólo dependen de la posición y del índice de la pareja, no de la
+/// cabeza: se calculan una vez y se aplican a todas (antes `powf`/`sinf`/`cosf` se repetían por
+/// cabeza, 48 veces por token en el 14B). Mismas cuentas que `rope_inplace[_neox]`, mismo resultado.
+pub fn rope_cabezas(x: &mut [f32], n_heads: usize, head_dim: usize, pos: usize, theta: f32, neox: bool) {
+    if head_dim < 2 || n_heads == 0 {
+        return;
+    }
+    let half = head_dim / 2;
+    let n_f = head_dim as f32;
+    let mut cos_a = [0.0f32; 128];
+    let mut sin_a = [0.0f32; 128];
+    let (mut cos_v, mut sin_v);
+    let (cos, sin): (&mut [f32], &mut [f32]) = if half <= 128 {
+        (&mut cos_a[..half], &mut sin_a[..half])
+    } else {
+        cos_v = alloc::vec![0.0f32; half];
+        sin_v = alloc::vec![0.0f32; half];
+        (&mut cos_v[..], &mut sin_v[..])
+    };
+    for i in 0..half {
+        let freq = libm::powf(theta, -2.0 * (i as f32) / n_f);
+        let angle = pos as f32 * freq;
+        sin[i] = libm::sinf(angle);
+        cos[i] = libm::cosf(angle);
+    }
+    for h in 0..n_heads {
+        let v = &mut x[h * head_dim..(h + 1) * head_dim];
+        if neox {
+            for i in 0..half {
+                let (a, b) = (v[i], v[i + half]);
+                v[i] = a * cos[i] - b * sin[i];
+                v[i + half] = a * sin[i] + b * cos[i];
+            }
+        } else {
+            for i in 0..half {
+                let (a, b) = (v[2 * i], v[2 * i + 1]);
+                v[2 * i] = a * cos[i] - b * sin[i];
+                v[2 * i + 1] = a * sin[i] + b * cos[i];
+            }
+        }
+    }
+}
+
 /// RoPE solo sobre los primeros `n_rot` elementos (Qwen partial rotary).
 pub fn rope_inplace_n(x: &mut [f32], pos: usize, theta: f32, n_rot: usize) {
     let n = n_rot.min(x.len());
@@ -1095,6 +1152,38 @@ pub fn rope_inplace_n(x: &mut [f32], pos: usize, theta: f32, n_rot: usize) {
 #[cfg(feature = "std")]
 mod rope_tests {
     use super::*;
+
+    #[test]
+    fn rope_cabezas_es_identico_a_rope_por_cabeza() {
+        let mut s = 17u64;
+        let mut r = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((s >> 33) as f32 / (1u64 << 31) as f32) * 4.0 - 2.0
+        };
+        for &(head_dim, n_heads) in &[(64usize, 3usize), (128, 5), (256, 2), (320, 2)] {
+            for &pos in &[0usize, 1, 7, 1000, 31_999] {
+                for &theta in &[10_000.0f32, 1_000_000.0] {
+                    let orig: Vec<f32> = (0..head_dim * n_heads).map(|_| r()).collect();
+                    for neox in [false, true] {
+                        let mut viejo = orig.clone();
+                        for h in 0..n_heads {
+                            let v = &mut viejo[h * head_dim..(h + 1) * head_dim];
+                            if neox {
+                                rope_inplace_neox(v, pos, theta);
+                            } else {
+                                rope_inplace(v, pos, theta);
+                            }
+                        }
+                        let mut nuevo = orig.clone();
+                        rope_cabezas(&mut nuevo, n_heads, head_dim, pos, theta, neox);
+                        let a: Vec<u32> = viejo.iter().map(|x| x.to_bits()).collect();
+                        let b: Vec<u32> = nuevo.iter().map(|x| x.to_bits()).collect();
+                        assert_eq!(a, b, "head_dim {head_dim}, pos {pos}, theta {theta}, neox {neox}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn neox_pos0_es_identidad() {

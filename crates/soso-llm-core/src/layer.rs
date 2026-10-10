@@ -6,7 +6,7 @@
 
 use crate::gemm::{
     add_assign_f32, add_f32, matvec_f32, matvec_q4_k, matvec_q4_k_batch_strided, matvec_q8_0,
-    matvec_q8_0_batch_strided, rmsnorm, rope_inplace, rope_inplace_neox, silu_inplace,
+    matvec_q8_0_batch_strided, rmsnorm, rope_cabezas, silu_inplace,
     swiglu_inplace, topk_softmax,
 };
 pub use crate::kv::{KvDtype, LayerKv};
@@ -16,7 +16,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use sosomodel::index::TensorIndex;
 use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
 use sosomodel::manifest::{AttnKind, FfnKind, Manifest, FLAG_QK_NORM, FLAG_ROPE_NEOX};
@@ -501,6 +501,149 @@ impl BlockScratch {
     }
 }
 
+/// Perfil por fases del prefill por bloques (diagnóstico). Apagado por defecto: cuesta una lectura
+/// atómica por fase. Quien lo quiera registra un reloj monótono en nanosegundos con
+/// [`perfil_activar`] y lee los acumulados con [`perfil_fases_ns`].
+pub const FASE_QKV: usize = 0;
+pub const FASE_ATENCION: usize = 1;
+pub const FASE_O: usize = 2;
+pub const FASE_FFN_UP_GATE: usize = 3;
+pub const FASE_SWIGLU: usize = 4;
+pub const FASE_FFN_DOWN: usize = 5;
+pub const FASE_OTROS: usize = 6;
+pub const FASE_ROPE_KV: usize = 7;
+pub const N_FASES: usize = 8;
+pub const NOMBRES_FASES: [&str; N_FASES] =
+    ["qkv", "atención", "o-proj", "ffn up+gate", "swiglu", "ffn down", "otros", "rope+kv"];
+
+static PERFIL_RELOJ_NS: AtomicUsize = AtomicUsize::new(0);
+static PERFIL_FASES_NS: [AtomicU64; N_FASES] = [const { AtomicU64::new(0) }; N_FASES];
+
+/// Activa el perfil con un reloj en ns (`None` lo apaga) y pone los acumulados a cero.
+pub fn perfil_activar(reloj: Option<fn() -> u64>) {
+    for f in &PERFIL_FASES_NS {
+        f.store(0, Ordering::Relaxed);
+    }
+    PERFIL_RELOJ_NS.store(reloj.map_or(0, |f| f as usize), Ordering::Release);
+}
+
+pub fn perfil_fases_ns() -> [u64; N_FASES] {
+    let mut o = [0u64; N_FASES];
+    for (i, f) in PERFIL_FASES_NS.iter().enumerate() {
+        o[i] = f.load(Ordering::Relaxed);
+    }
+    o
+}
+
+#[inline]
+fn perfil_ahora() -> u64 {
+    let r = PERFIL_RELOJ_NS.load(Ordering::Relaxed);
+    if r == 0 {
+        0
+    } else {
+        let f: fn() -> u64 = unsafe { core::mem::transmute::<usize, fn() -> u64>(r) };
+        f()
+    }
+}
+
+/// Suma a `fase` lo transcurrido desde `*t` y reinicia `*t`.
+#[inline]
+fn perfil_marca(t: &mut u64, fase: usize) {
+    if PERFIL_RELOJ_NS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let ahora = perfil_ahora();
+    PERFIL_FASES_NS[fase].fetch_add(ahora.saturating_sub(*t), Ordering::Relaxed);
+    *t = ahora;
+}
+
+/// Atención f16 por grupos GQA para `n` vectores de consulta (`q_dim` cada uno), repartida entre
+/// hilos por pares (vector, cabeza KV). El vector `i` ve `seq_primero + i` posiciones del KV
+/// (atención causal en el prefill por bloques; en la decodificación, `n = 1`).
+///
+/// Cada tarea escribe una porción distinta de `outs` y sólo lee el KV, así que el reparto no
+/// cambia el resultado: el de cada consulta sale del mismo kernel con el mismo orden de sumas.
+fn atencion_f16_grupos(
+    par: &dyn RowParallel,
+    qs: &[f32],
+    outs: &mut [f32],
+    n: usize,
+    q_dim: usize,
+    kv: &LayerKv,
+    kv_heads: usize,
+    group: usize,
+    head_dim: usize,
+    kv_dim: usize,
+    seq_primero: usize,
+) {
+    let k = kv.k_f16_slice();
+    let v = kv.v_f16_slice();
+    let q_ptr = qs.as_ptr() as usize;
+    let o_ptr = outs.as_mut_ptr() as usize;
+    // Cada tarea: una cabeza KV y hasta `TOKENS_POR_TAREA` tokens seguidos, que comparten la
+    // conversión de K/V (hasta 4 × 7 cabezas por fila convertida).
+    let trozos = n.div_ceil(TOKENS_POR_TAREA);
+    let tareas = kv_heads * trozos;
+    let trabajo = move |t0: usize, t1: usize| {
+        for t in t0..t1 {
+            let (kvh, c) = (t / trozos, t % trozos);
+            let i0 = c * TOKENS_POR_TAREA;
+            let nt = (n - i0).min(TOKENS_POR_TAREA);
+            let base = i0 * q_dim + kvh * group * head_dim;
+            unsafe {
+                crate::attn_grupo::attention_f16_tokens_raw(
+                    (q_ptr as *const f32).add(base),
+                    (o_ptr as *mut f32).add(base),
+                    q_dim,
+                    nt,
+                    group,
+                    seq_primero + i0,
+                    k,
+                    v,
+                    head_dim,
+                    kv_dim,
+                    kvh,
+                );
+            }
+        }
+    };
+    // Con poco trabajo despertar a los hilos cuesta más que lo que ahorra.
+    if tareas * seq_primero < UMBRAL_ATENCION_PAR {
+        trabajo(0, tareas);
+    } else {
+        par.for_rows(tareas, &trabajo);
+    }
+}
+
+/// Tokens consecutivos del bloque que una tarea de atención procesa juntos.
+const TOKENS_POR_TAREA: usize = 4;
+
+/// `up[i] = silu(gate[i]) * up[i]` repartido entre hilos. Es elemento a elemento, así que el
+/// reparto no cambia el resultado.
+fn swiglu_par(par: &dyn RowParallel, up: &mut [f32], gate: &[f32]) {
+    let n = up.len().min(gate.len());
+    if n < UMBRAL_ELEMENTOS_PAR {
+        swiglu_inplace(&mut up[..n], &gate[..n]);
+        return;
+    }
+    let u_ptr = up.as_mut_ptr() as usize;
+    let g_ptr = gate.as_ptr() as usize;
+    par.for_rows(n, &move |a, b| {
+        if a >= b {
+            return;
+        }
+        let u = unsafe { core::slice::from_raw_parts_mut((u_ptr as *mut f32).add(a), b - a) };
+        let g = unsafe { core::slice::from_raw_parts((g_ptr as *const f32).add(a), b - a) };
+        swiglu_inplace(u, g);
+    });
+}
+
+/// Elementos por debajo de los cuales una operación elemento a elemento no compensa el reparto.
+const UMBRAL_ELEMENTOS_PAR: usize = 32_768;
+
+/// Producto (tareas × posiciones) por debajo del cual la atención se hace en el hilo actual.
+const UMBRAL_ATENCION_PAR: usize = 4096;
+
 pub struct LayerExecutor<'a> {
     pub manifest: &'a Manifest,
     /// El modelo trae proyección ffn_gate (SwiGLU completo).
@@ -739,46 +882,39 @@ impl<'a> LayerExecutor<'a> {
         }
         let t_attn0 = tick(clock_ms);
 
-        let rope = |x: &mut [f32]| {
-            if spec.flags & FLAG_ROPE_NEOX != 0 {
-                rope_inplace_neox(x, pos, theta);
-            } else {
-                rope_inplace(x, pos, theta);
-            }
-        };
-        for head in 0..heads {
-            rope(&mut s.q[head * head_dim..(head + 1) * head_dim]);
-        }
-        for head in 0..kv_heads {
-            rope(&mut s.k[head * head_dim..(head + 1) * head_dim]);
-        }
+        let neox = spec.flags & FLAG_ROPE_NEOX != 0;
+        rope_cabezas(&mut s.q[..q_dim], heads, head_dim, pos, theta, neox);
+        rope_cabezas(&mut s.k[..kv_dim], kv_heads, head_dim, pos, theta, neox);
 
         kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);
         let seq = kv.tokens(kv_dim);
         let _ = pos;
         let sparse = planner_ro.is_some_and(|p| p.use_sparse_attn(seq));
-        let use_h2o = planner_ro.is_some_and(|p| p.use_h2o());
-        // Fast path: KV f16 denso sin masa → tiled SIMD (sin dequant por token).
+        let use_h2o = planner_ro.is_some_and(|p| p.h2o_masas(seq));
+        // Camino rápido: KV f16 denso sin masa → kernel por grupos GQA, repartido entre hilos.
         let fast_f16 = matches!(kv.dtype, KvDtype::F16) && !sparse && !use_h2o;
-        if use_h2o && s.mass_buf.len() < seq {
-            s.mass_buf.resize(seq, 0.0);
-        }
-        s.attn_out.fill(0.0);
-        for head in 0..heads {
-            let q_h = &s.q[head * head_dim..(head + 1) * head_dim];
-            let kv_head = head / group;
-            if fast_f16 {
-                crate::attn::attention_decode_f16_tiled(
-                    q_h,
-                    kv.k_f16_slice(),
-                    kv.v_f16_slice(),
-                    head_dim,
-                    kv_dim,
-                    kv_head,
-                    seq,
-                    &mut s.head_out,
-                );
-            } else {
+        if fast_f16 {
+            atencion_f16_grupos(
+                par,
+                &s.q[..q_dim],
+                &mut s.attn_out[..q_dim],
+                1,
+                q_dim,
+                kv,
+                kv_heads,
+                group,
+                head_dim,
+                kv_dim,
+                seq,
+            );
+        } else {
+            if use_h2o && s.mass_buf.len() < seq {
+                s.mass_buf.resize(seq, 0.0);
+            }
+            s.attn_out.fill(0.0);
+            for head in 0..heads {
+                let q_h = &s.q[head * head_dim..(head + 1) * head_dim];
+                let kv_head = head / group;
                 let mass = if use_h2o {
                     Some(&mut s.mass_buf[..seq])
                 } else {
@@ -795,13 +931,13 @@ impl<'a> LayerExecutor<'a> {
                     mass,
                     sparse,
                 );
-            }
-            s.attn_out[head * head_dim..(head + 1) * head_dim].copy_from_slice(&s.head_out);
-            if use_h2o {
-                let inv_h = 1.0 / heads as f32;
-                for t in 0..seq {
-                    if t < kv.mass.len() {
-                        kv.mass[t] += s.mass_buf[t] * inv_h;
+                s.attn_out[head * head_dim..(head + 1) * head_dim].copy_from_slice(&s.head_out);
+                if use_h2o {
+                    let inv_h = 1.0 / heads as f32;
+                    for t in 0..seq {
+                        if t < kv.mass.len() {
+                            kv.mass[t] += s.mass_buf[t] * inv_h;
+                        }
                     }
                 }
             }
@@ -983,12 +1119,14 @@ impl<'a> LayerExecutor<'a> {
             return Err(());
         }
 
+        let mut t_perfil = perfil_ahora();
         // --- atención ---
         bs.residual[..n * h].copy_from_slice(hs);
         source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w)?;
         for i in 0..n {
             rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w, eps);
         }
+        perfil_marca(&mut t_perfil, FASE_OTROS);
         for (clave, dim, destino) in [
             ("attn_q", q_dim, 0u8),
             ("attn_k", kv_dim, 1u8),
@@ -1004,6 +1142,7 @@ impl<'a> LayerExecutor<'a> {
             };
             matvec_view_batch_par(&vista, dim, h, hs, n, out, par)?;
         }
+        perfil_marca(&mut t_perfil, FASE_QKV);
         for (clave, dim, destino) in [
             ("attn_q", q_dim, 0u8),
             ("attn_k", kv_dim, 1u8),
@@ -1038,52 +1177,67 @@ impl<'a> LayerExecutor<'a> {
                 }
             }
         }
+        // RoPE y K/V de los n tokens, en orden; el KV acaba con `seq_antes + n` posiciones.
+        let seq_antes = kv.tokens(kv_dim);
         for i in 0..n {
             let pos = pos0 + i;
-            let rope = |x: &mut [f32]| {
-                if spec.flags & FLAG_ROPE_NEOX != 0 {
-                    rope_inplace_neox(x, pos, theta);
-                } else {
-                    rope_inplace(x, pos, theta);
-                }
-            };
-            for head in 0..heads {
-                let o = i * q_dim + head * head_dim;
-                rope(&mut bs.q[o..o + head_dim]);
-            }
-            for head in 0..kv_heads {
-                let o = i * kv_dim + head * head_dim;
-                rope(&mut bs.k[o..o + head_dim]);
-            }
+            let neox = spec.flags & FLAG_ROPE_NEOX != 0;
+            rope_cabezas(&mut bs.q[i * q_dim..(i + 1) * q_dim], heads, head_dim, pos, theta, neox);
+            rope_cabezas(&mut bs.k[i * kv_dim..(i + 1) * kv_dim], kv_heads, head_dim, pos, theta, neox);
             kv.append_f16(
                 &bs.k[i * kv_dim..(i + 1) * kv_dim],
                 &bs.v[i * kv_dim..(i + 1) * kv_dim],
             );
-            let seq = kv.tokens(kv_dim);
-            // Igual que `forward_layer`: con H2O se acumula la masa de atención de cada
-            // token (la política de expulsión de la ventana de KV la necesita), y con
-            // atención dispersa se usa el kernel genérico.
-            let sparse = planner.is_some_and(|p| p.use_sparse_attn(seq));
-            let use_h2o = planner.is_some_and(|p| p.use_h2o());
-            let fast_f16 = matches!(kv.dtype, KvDtype::F16) && !sparse && !use_h2o;
-            if use_h2o && s.mass_buf.len() < seq {
-                s.mass_buf.resize(seq, 0.0);
-            }
-            for head in 0..heads {
-                let o = i * q_dim + head * head_dim;
-                let kv_head = head / group;
+        }
+        perfil_marca(&mut t_perfil, FASE_ROPE_KV);
+        // Atención causal: el token i ve `seq_antes + i + 1` posiciones. Con KV f16 y sin masa de
+        // H2O ni dispersa (lo habitual) van todos a la vez, repartidos entre hilos.
+        let sparse_max = planner.is_some_and(|p| p.use_sparse_attn(seq_antes + n));
+        let h2o_max = planner.is_some_and(|p| p.h2o_masas(seq_antes + n));
+        if matches!(kv.dtype, KvDtype::F16) && !sparse_max && !h2o_max {
+            atencion_f16_grupos(
+                par,
+                &bs.q[..n * q_dim],
+                &mut bs.attn[..n * q_dim],
+                n,
+                q_dim,
+                kv,
+                kv_heads,
+                group,
+                head_dim,
+                kv_dim,
+                seq_antes + 1,
+            );
+        } else {
+            for i in 0..n {
+                let seq = seq_antes + i + 1;
+                // Misma decisión que `forward_layer`: así bloque y token a token coinciden.
+                let sparse = planner.is_some_and(|p| p.use_sparse_attn(seq));
+                let use_h2o = planner.is_some_and(|p| p.h2o_masas(seq));
+                let fast_f16 = matches!(kv.dtype, KvDtype::F16) && !sparse && !use_h2o;
                 if fast_f16 {
-                    crate::attn::attention_decode_f16_tiled(
-                        &bs.q[o..o + head_dim],
-                        kv.k_f16_slice(),
-                        kv.v_f16_slice(),
+                    let o = i * q_dim;
+                    atencion_f16_grupos(
+                        par,
+                        &bs.q[o..o + q_dim],
+                        &mut bs.attn[o..o + q_dim],
+                        1,
+                        q_dim,
+                        kv,
+                        kv_heads,
+                        group,
                         head_dim,
                         kv_dim,
-                        kv_head,
                         seq,
-                        &mut s.head_out,
                     );
-                } else {
+                    continue;
+                }
+                if use_h2o && s.mass_buf.len() < seq {
+                    s.mass_buf.resize(seq, 0.0);
+                }
+                for head in 0..heads {
+                    let o = i * q_dim + head * head_dim;
+                    let kv_head = head / group;
                     let mass = if use_h2o {
                         Some(&mut s.mass_buf[..seq])
                     } else {
@@ -1100,18 +1254,19 @@ impl<'a> LayerExecutor<'a> {
                         mass,
                         sparse,
                     );
-                }
-                bs.attn[o..o + head_dim].copy_from_slice(&s.head_out[..head_dim]);
-                if use_h2o {
-                    let inv_h = 1.0 / heads as f32;
-                    for t in 0..seq {
-                        if t < kv.mass.len() {
-                            kv.mass[t] += s.mass_buf[t] * inv_h;
+                    bs.attn[o..o + head_dim].copy_from_slice(&s.head_out[..head_dim]);
+                    if use_h2o {
+                        let inv_h = 1.0 / heads as f32;
+                        for t in 0..seq {
+                            if t < kv.mass.len() {
+                                kv.mass[t] += s.mass_buf[t] * inv_h;
+                            }
                         }
                     }
                 }
             }
         }
+        perfil_marca(&mut t_perfil, FASE_ATENCION);
         {
             let name = format!("{prefix}.attn_output");
             note_infer_op(Some(layer), &name);
@@ -1126,12 +1281,14 @@ impl<'a> LayerExecutor<'a> {
             );
         }
 
+        perfil_marca(&mut t_perfil, FASE_O);
         // --- FFN denso ---
         bs.residual[..n * h].copy_from_slice(hs);
         source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w)?;
         for i in 0..n {
             rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w, eps);
         }
+        perfil_marca(&mut t_perfil, FASE_OTROS);
         {
             let name = format!("{prefix}.ffn_up");
             note_infer_op(Some(layer), &name);
@@ -1143,26 +1300,25 @@ impl<'a> LayerExecutor<'a> {
             note_infer_op(Some(layer), &name);
             let vista = source.tensor_view(&name)?;
             matvec_view_batch_par(&vista, ffn, h, hs, n, &mut bs.gate[..n * ffn], par)?;
-            for i in 0..n {
-                swiglu_inplace(
-                    &mut bs.up[i * ffn..(i + 1) * ffn],
-                    &bs.gate[i * ffn..(i + 1) * ffn],
-                );
-            }
+            perfil_marca(&mut t_perfil, FASE_FFN_UP_GATE);
+            swiglu_par(par, &mut bs.up[..n * ffn], &bs.gate[..n * ffn]);
         } else {
             for i in 0..n {
                 silu_inplace(&mut bs.up[i * ffn..(i + 1) * ffn]);
             }
         }
+        perfil_marca(&mut t_perfil, FASE_SWIGLU);
         {
             let name = format!("{prefix}.ffn_down");
             note_infer_op(Some(layer), &name);
             let vista = source.tensor_view(&name)?;
             matvec_view_batch_par(&vista, h, ffn, &bs.up[..n * ffn], n, hs, par)?;
         }
+        perfil_marca(&mut t_perfil, FASE_FFN_DOWN);
         for i in 0..n {
             add_assign_f32(&mut hs[i * h..(i + 1) * h], &bs.residual[i * h..(i + 1) * h]);
         }
+        perfil_marca(&mut t_perfil, FASE_OTROS);
         Ok(())
     }
 

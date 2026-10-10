@@ -545,6 +545,20 @@ pub fn perfil_api(sesion: &Sesion) -> ModelProfile {
     if let Some(eos) = sesion.bundle.tokenizer.eos() {
         stops.push(eos);
     }
+    // Qwen2.5 cierra un turno con `<|im_end|>` **o** con `<|endoftext|>` (su `generation_config`
+    // lista los dos); el tokenizer sólo declara uno como eos. Sin el segundo, cuando el modelo
+    // escribía `<|endoftext|>` el servidor seguía generando e inventaba la respuesta del usuario y
+    // la salida de las herramientas (T22, 2026-10-10).
+    if family == "qwen2" {
+        for texto in ["<|im_end|>", "<|endoftext|>"] {
+            let ids = sesion.bundle.tokenizer.encode_trozo(texto, false, false);
+            if let [id] = ids[..]
+                && !stops.contains(&id)
+            {
+                stops.push(id);
+            }
+        }
+    }
     let max_out = m.max_seq.min(4096);
     ModelProfile {
         id: sesion.modelo.clone(),

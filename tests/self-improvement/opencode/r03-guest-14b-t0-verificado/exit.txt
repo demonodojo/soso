@@ -1,0 +1,1 @@
+guest: 3 rondas; verificador exit=0

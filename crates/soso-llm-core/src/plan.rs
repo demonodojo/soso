@@ -925,6 +925,17 @@ impl ResourcePlanner {
         self.stats.sparse_attn = 1;
     }
 
+    /// ¿Hay que acumular la masa de atención de H2O al atender a `seq` posiciones?
+    ///
+    /// La masa sólo sirve para decidir qué expulsar cuando el KV llega a la ventana. Acumularla
+    /// obliga a usar el kernel genérico (más lento, sin vectorizar); mientras la secuencia esté a
+    /// menos de la mitad de la ventana no se acumula y se usa el kernel rápido. Pasado ese punto sí:
+    /// la política de expulsión llega al primer desalojo con la masa de la segunda mitad de la
+    /// ventana (T22, 2026-10-10: el prefill del guest pasaba el 70 % del tiempo en la ruta lenta).
+    pub fn h2o_masas(&self, seq: usize) -> bool {
+        self.use_h2o && seq.saturating_mul(2) > self.kv_window_tokens
+    }
+
     /// Quest-lite: sparse solo si el planner lo activó y la seq supera el umbral.
     pub fn use_sparse_attn(&self, seq: usize) -> bool {
         self.use_sparse && seq > SPARSE_TOKEN_THRESHOLD

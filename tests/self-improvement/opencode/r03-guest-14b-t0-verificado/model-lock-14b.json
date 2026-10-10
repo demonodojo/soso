@@ -1,0 +1,57 @@
+{
+  "hashes": {
+    "original.config": null,
+    "original.generation_config": null,
+    "original.tokenizer_config": null,
+    "original.tokenizer_json": null,
+    "som.index": {
+      "bytes": 39488,
+      "ruta": "target/qwen2.5-coder-14b-model/index.som",
+      "sha256": "12c633625caf04404decbba355a6c99a01e4071f2df650a62526bfba0c283dc4"
+    },
+    "som.manifest": {
+      "bytes": 15040,
+      "ruta": "target/qwen2.5-coder-14b-model/manifest.som",
+      "sha256": "e7796430026c405291cea2291dc7482a14dcd60fece43297f0768d1488be562e"
+    },
+    "som.tokenizer": {
+      "bytes": 3193600,
+      "ruta": "target/qwen2.5-coder-14b-model/tokenizer.som",
+      "sha256": "12c46448a072b0e16485ab1c35abf575c84a30e6eb6ab4b89dd82a5f91faba73"
+    }
+  },
+  "nota": "La cuantización no la declara el manifiesto .som: viaja por tensor en el índice. Se registra el hash del índice, que es lo que identifica los pesos convertidos.",
+  "origen": {
+    "add_bos_token": null,
+    "arquitecturas": null,
+    "chat_template_sha256": null,
+    "eos_token": null,
+    "eos_token_id_generacion": null,
+    "familia": null,
+    "max_position_embeddings": null,
+    "pad_token": null,
+    "repositorio": "Qwen/Qwen2.5-Coder-14B-Instruct",
+    "revision": "gguf q4_k_m (bartowski/Qwen)",
+    "vocab_size": null
+  },
+  "schema_version": 1,
+  "som": {
+    "capas": 48,
+    "chat_template": "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
+    "chat_template_sha256": "8eb6214486f4b35b6a643afa2065ee6d4d6248dfd277455d0f535ff2429fe985",
+    "directorio": "target/qwen2.5-coder-14b-model",
+    "ffn_dim": 13824,
+    "hidden_dim": 5120,
+    "max_seq": 131072,
+    "nombre": "qwen2.5-coder-14b",
+    "num_experts": 0,
+    "num_heads": 40,
+    "num_kv_heads": 8,
+    "num_layers": 48,
+    "rope_theta": 1000000.0,
+    "tokenizer_merges": 151387,
+    "tokenizer_segmentacion": "bpe-bytelevel",
+    "tokenizer_vocab_len": 152064,
+    "vocab_size": 152064
+  }
+}

@@ -212,8 +212,8 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 ## Por dónde (actualizar al cerrar la recomendada)
 
 Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/README.md).
-**10-oct-2026:** T22 está **hecha en el host** con Qwen2.5-Coder-14B a T=0 (OpenCode + herramienta propia
-`reemplazar_texto`, verificador exit 0); el guest no está acreditado y el perfil T14 sigue siendo el 7B (a T=0 no
+**10-oct-2026:** T22 está **hecha** con Qwen2.5-Coder-14B a T=0 (OpenCode + herramienta propia
+`reemplazar_texto`, verificador exit 0) en el host **y en el guest** (14 GiB); el perfil T14 sigue siendo el 7B (a T=0 no
 resuelve R03). OpenCode sólo envía `temperature` si el modelo declara `"temperature": true` en `opencode.json`.
 Siguiente: identidad de modelo para T25–T29 y T35.
 

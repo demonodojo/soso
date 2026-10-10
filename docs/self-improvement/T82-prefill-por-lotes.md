@@ -79,3 +79,61 @@ Arreglo: el forward por bloque hace lo mismo que el de un token también con H2O
 **Lo que no se ha conseguido:** bajar de 20 min el primer turno de cada sesión. Queda la atención por lotes y repartir la atención entre hilos.
 
 **Hallazgo adicional.** En esa segunda petición el 7B del guest escribió ` ```json {"function": "read", "filePath": "TASK.md"} ``` `, un esquema que ni el host (KV f16: `{"name": "read", "arguments": …}`) ni el prompt piden. El guest usa KV int8 y H2O; el host, f16 y sin H2O. Falta aislar si es la cuantización del KV lo que degrada la llamada a herramienta (el prompt es el mismo).
+
+## Atención por grupos GQA y reparto entre hilos (2026-10-10, pasada de optimización 1)
+
+**Por qué.** Con el 14B en el guest el primer turno tardaba ~80 min y sólo se usaban ~1,4 de los 4 núcleos. La
+instrumentación por fases (`layer::perfil_activar`, contadores apagados por defecto) y el banco con una capa
+sintética del 14B (`examples/bench_bloque`, pesos Q4_K/Q8_0 sintéticos, 4 096 tokens) lo explican: **la atención era el
+77 % del tiempo y no paralelizaba** (el matvec sí: 245 GFLOP/s con 4 hilos). Es sólo el 7 % de las operaciones, pero
+iba en serie, con un kernel de ~5 GFLOP/s (conversión f16→f32 emulada, una sola cadena de FMA, una cabeza cada vez
+y `expf` escalar), y con H2O activo caía además al kernel genérico (×1,8–2,3 más lento).
+
+**Qué se hizo** (todo con el mismo resultado bit a bit entre bloque y token a token):
+1. `attn_grupo::attention_f16_group`: las `g` cabezas de un grupo GQA se procesan juntas; K/V se convierten una vez
+   por tile; Q·K de 8 en 8 tokens con 8 acumuladores; `exp` vectorial (`simd_math::exp256`, error < 2e-7); F16C si el
+   binario lo trae (`user/x86_64-soso-user.json` ahora declara `+f16c`: toda CPU con AVX2 lo tiene). Invariante
+   probada (`tests/attn_grupo.rs`): el resultado de una consulta **no depende del tamaño del grupo**.
+2. La atención del bloque reparte `n × kv_heads` tareas entre hilos (`atencion_f16_grupos`), y también la
+   decodificación (por cabeza KV).
+3. H2O sólo acumula masa (y por tanto sólo usa la ruta genérica) cuando la secuencia pasa de la mitad de la ventana
+   (`ResourcePlanner::h2o_masas`): antes de eso no puede haber expulsión y la masa no sirve.
+4. `swiglu`/`silu` vectoriales (misma `exp256`) y repartidos entre hilos en el bloque.
+
+**Resultado en el banco** (host, 14B, 2 capas, 4 096 tokens, 4 hilos; los guest comparten CPU con el banco, ±15 %):
+
+| | Total | Atención | swiglu | matvec (GFLOP/s) |
+|---|---|---|---|---|
+| antes | 98,8 s | 76,4 s (77 %) | 3,8 s | 245 |
+| + grupos GQA/F16C, atención repartida | 25,3 s | 3,2 s | 3,8 s | 249 |
+| + swiglu vectorial y repartido | **21,9 s** | 3,2 s | 0,016 s | 243 |
+
+→ **4,5×** en el banco. Con 1 hilo: 138,8 s → 72,2 s (sin repartir, sólo el kernel).
+
+### Pasadas 2 y 3 (2026-10-10)
+
+| Pasada | Qué | Efecto en el banco (14B, 4 096 tokens, 4 hilos) |
+|---|---|---|
+| 2 | `swiglu`/`silu` vectoriales (`simd_math`) y repartidos entre hilos | 3,8 s → 0,016 s |
+| 3a | La atención del bloque comparte la conversión de K/V entre **4 tokens × cabezas del grupo** (`attention_f16_tokens`); cada consulta da **lo mismo que sola** (prueba `un_bloque_de_tokens_da_a_cada_consulta_lo_que_daria_sola`) | atención 3,2 s → 2,8 s |
+| 3b | Reescritura del kernel: puntuaciones por transposición `hadd` (8 sumas horizontales → 1), máximo y `exp` sin salir de registros, axpy de V en dos mitades de 8 acumuladores (caben en los 16 registros) | 2,8 s → 1,7–1,9 s (≈ 50 GFLOP/s por hilo; aislado 82 por token-cabeza) |
+| 3c | RoPE con tabla de cos/sin **una vez por token** (antes `powf`/`sinf`/`cosf` por cabeza: 48 veces por token en el 14B); idéntico bit a bit (`rope_cabezas_es_identico_a_rope_por_cabeza`) | rope+kv 0,96 s → 0,13 s |
+
+Total del banco: **98,8 s → ~21 s (4,7×)**; ya no queda nada serie relevante (atención 9 %, rope+kv 0,6 %, resto < 0,5 %) y el
+matvec es el **90 %**.
+
+**Pruebas de que no se rompe nada:** las 18 suites de `soso-llm-core` con y sin `-C target-feature=+avx2,+fma,+f16c`,
+`soso-llm-api` y la prueba `bloques_con_h2o_*` (adaptada: la masa de H2O sólo se acumula pasada la mitad de la ventana;
+hay una variante con KV f16 que mezcla en un mismo bloque el kernel rápido y el genérico con masa). El 7B real sigue
+escribiendo `{"name": "read", …}` con el prompt corto, con y sin planificador.
+
+**Intentado y descartado.**
+- **Bloques de 12 tokens** en vez de 8 (`q4_k_nb::<12>`): más lento (2,30 ms/vector frente a 1,83): se derrama a pila porque
+  AVX2 sólo tiene 16 registros. 8 es el óptimo.
+- **Desempaquetar las escalas de Q4_K por palabras de 32 bits**: como mucho ~5 % del kernel; no compensa.
+- **Producto entero Q4_K × activaciones Q8_K**: estimación de ≈ 1,5× como mucho en los matvec (1,05 frente a 1,56 µops por
+  FMA vectorial) y cambia la numérica (ya no coincidirían bit a bit con el camino escalar de referencia): no se ha hecho.
+
+**Lo que queda (matvec ≈ 90 %).** El kernel de matvec por bloques (`q4_k_nb`, `q8_0_nb`) rinde ~60 GFLOP/s por hilo, cerca
+del techo de un diseño en coma flotante con AVX2 y no es limitado por memoria (`bench_matvec`: 1,83 ms/vector con n = 8 y
+2,0 con n = 16/32).

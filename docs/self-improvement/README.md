@@ -7,13 +7,14 @@
 
 ## Por dónde empezar
 
-> **Estado (2026-10-10).** [T22](T22-primera-mejora.md) está **hecha en el host**: Qwen2.5-Coder-14B a T=0 real
-> resuelve R03 con OpenCode (verificador independiente exit 0, parche de una línea). Límites: no es el guest, el perfil
-> elegido en T14 es el 7B (a T=0 no resuelve R03), una sola ejecución. Hallazgos que cambian el trabajo futuro:
-> OpenCode sólo envía la temperatura si el modelo declara `"temperature": true` (`opencode.json`); los modelos
-> comprimen espacios al copiar `oldString`, por eso el agente usa `reemplazar_texto` (`.opencode/tools/`).
-> **Lo siguiente:** decidir la identidad de modelo para T25–T29 (14B con campaña T14 o seguir con el 7B), aislar si la
-> atención dispersa del planificador del guest explica que el 7B del guest conteste en prosa, y T35 (OpenCode nativo).
+> **Estado (2026-10-10).** [T22](T22-primera-mejora.md) está **hecha**: Qwen2.5-Coder-14B a T=0 real resuelve R03 con
+> OpenCode en el host y **en el guest** (14 GiB, verificador independiente exit 0). Límites: el perfil elegido en T14 es el 7B (a T=0 no
+> resuelve R03), el modelo no ejecutó `cargo test` de verdad en la ejecución verificada (el servidor no paraba en `<|endoftext|>`;
+> arreglado), sin boot QEMU del candidato. Hallazgos que cambian el trabajo futuro: OpenCode sólo envía la temperatura si el
+> modelo declara `"temperature": true`; los modelos comprimen espacios al copiar (`reemplazar_texto` en `.opencode/tools/`);
+> la atención dispersa del planificador rompía el contexto largo del guest (ahora opt-in); el prefill del guest es 2,7× más rápido
+> ([T82](T82-prefill-por-lotes.md), pasadas 1–3: atención por grupos GQA repartida entre hilos).
+> **Lo siguiente:** decidir la identidad de modelo para T25–T29 (14B con campaña T14 o seguir con el 7B) y T35 (OpenCode nativo).
 
 
 **Ficha cerrada: [T42 — C, ensamblador y empaquetado por perfil](T42-c-link-imagen.md)**
@@ -153,7 +154,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T19](T19-qemu-e2e.md) | Crear la prueba completa de API dentro de soso | SI-2 | T16, T17, T18 | Completada (guest 12/12 con pesos reales) |
 | [T20](T20-opencode-config.md) | Configurar OpenCode para el proveedor soso | SI-3 | T14, T19 | **Hecha** (2026-10-07; `opencode.json` + agente `soso-improve`, sin inferencia) |
 | [T21](T21-opencode-contrato.md) | Capturar el contrato real de OpenCode sin depender del modelo | SI-3 | T20, T47, T48 | **Hecha** (2026-10-07; contrato contrastado con OpenCode real, 3 correcciones del servidor) |
-| [T22](T22-primera-mejora.md) | Resolver una tarea real usando la inferencia guest | SI-3 | T02, T19, T21 | Hecha en host (2026-10-10): 14B a T=0 resuelve R03 (verificador exit 0); guest 7B no resuelve |
+| [T22](T22-primera-mejora.md) | Resolver una tarea real usando la inferencia guest | SI-3 | T02, T19, T21 | Hecha (2026-10-10): 14B a T=0 resuelve R03 en host y en guest (verificador exit 0); el 7B no resuelve R03 a T=0 |
 | [T23](T23-estado-coordinador.md) | Crear el formato de tareas y estados del coordinador | SI-4 | T01, T02, T46, T45 | Completada (guest acreditado; destapó T63) |
 | [T24](T24-checkout.md) | Preparar una copia de tarea y exportar su parche | SI-4 | T23, T50 | Completada (guest acreditado) |
 | [T25](T25-ejecutor.md) | Ejecutar OpenCode con límites y logs | SI-4 | T21, T24, T47, T48 | Pendiente |

@@ -842,14 +842,15 @@ fn bloques_dan_los_mismos_tokens_generados() {
 
 // T82 con la política H2O del planificador (la que usa el guest): el camino por bloques
 // tiene que acumular la misma masa de atención que el de un token.
-fn runtime_h2o(bloques: bool) -> Option<(Runtime, MmapTensorSource<MemFileMapper>)> {
+fn runtime_h2o(bloques: bool, kv_f16: bool) -> Option<(Runtime, MmapTensorSource<MemFileMapper>, usize)> {
     use soso_llm_core::plan::{MemSnapshot, ResourcePlanner};
-    for frames in [400u64, 600, 800, 1_200, 2_000, 4_000, 8_000, 16_000] {
-        let (mut manifest, index, mapper) = tiny_model_gqa();
-        // Como el 7B en el guest: los pesos caben, pero la ventana de KV es más corta que
-        // `max_seq`, así que el planificador activa H2O.
-        manifest.max_seq = 50_000;
-        let mut rt = Runtime::new(manifest.clone(), index.clone(), 0, 0);
+    let (mut manifest, index, mapper) = tiny_model_gqa();
+    // Como el 7B en el guest: los pesos caben, pero la ventana de KV es más corta que
+    // `max_seq`, así que el planificador activa H2O.
+    manifest.max_seq = 50_000;
+    let rt = Runtime::new(manifest.clone(), index.clone(), 0, 0);
+    // La ventana más corta con los pesos residentes (la búsqueda sólo construye planificadores).
+    for frames in (1u64..400_000).step_by(16) {
         let mem = MemSnapshot {
             total_frames: frames,
             free_frames: frames / 2,
@@ -857,20 +858,34 @@ fn runtime_h2o(bloques: bool) -> Option<(Runtime, MmapTensorSource<MemFileMapper
         };
         let pl = ResourcePlanner::new(&manifest, &rt.index, mem, 0, false);
         if pl.use_h2o() && pl.keep_weights_mapped() && pl.kv_window_tokens() >= 24 {
+            let ventana = pl.kv_window_tokens();
+            let mut rt = rt;
             rt.set_planner(pl);
+            if kv_f16 {
+                // El planificador cuantiza el KV con ventanas tan cortas; se fuerza f16 para ejercitar
+                // el kernel rápido y el genérico con masa sobre el mismo KV f16.
+                use soso_llm_core::kv::{KvDtype, LayerKv};
+                let m = rt.manifest.clone();
+                for l in 0..m.num_layers {
+                    let kv_dim = m.effective_num_kv_heads(l) as usize * m.effective_head_dim(l) as usize;
+                    rt.kv[l as usize] = LayerKv::with_capacity_dtype(256, kv_dim, KvDtype::F16);
+                }
+            }
             rt.prefill_por_bloques = bloques;
-            return Some((rt, MmapTensorSource::new(String::from(BASE), index, mapper)));
+            return Some((rt, MmapTensorSource::new(String::from(BASE), index, mapper), ventana));
         }
     }
     None
 }
 
-#[test]
-fn bloques_con_h2o_acumulan_la_misma_masa() {
-    let prompt: Vec<u32> = (0..18u32).map(|i| (i * 5 + 3) % 40).collect();
-    let (Some((mut a, mut sa)), Some((mut b, mut sb))) = (runtime_h2o(false), runtime_h2o(true)) else {
+fn comprobar_bloques_con_h2o(kv_f16: bool) {
+    // La masa de H2O sólo se acumula cuando la secuencia pasa de la mitad de la ventana. Un prompt
+    // de ¾ de la ventana la cruza a mitad del prefill: los primeros tokens van por el kernel
+    // rápido y los últimos por el genérico con masa (el caso mixto), sin llegar a expulsar nada.
+    let (Some((mut a, mut sa, ventana)), Some((mut b, mut sb, _))) = (runtime_h2o(false, kv_f16), runtime_h2o(true, kv_f16)) else {
         panic!("no hay una configuración de memoria con H2O y pesos residentes en el modelo tiny");
     };
+    let prompt: Vec<u32> = (0..(ventana * 3 / 4) as u32).map(|i| (i * 5 + 3) % 40).collect();
     a.prefill_prompt(&mut sa, &prompt, None, &mut None, None).unwrap();
     b.prefill_prompt(&mut sb, &prompt, None, &mut None, None).unwrap();
     assert_eq!(a.tokens_en_bloque, 0);
@@ -884,5 +899,16 @@ fn bloques_con_h2o_acumulan_la_misma_masa() {
         assert_eq!(ma, mb, "la masa de atención (H2O) difiere");
         assert!(!ma.is_empty() && ma.iter().any(|&x| f32::from_bits(x) > 0.0), "sin masa acumulada: la prueba no ejercita H2O");
     }
+}
+
+#[test]
+fn bloques_con_h2o_acumulan_la_misma_masa() {
+    comprobar_bloques_con_h2o(false);
+}
+
+// Con KV f16: el bloque mezcla el kernel rápido por grupos (tokens cortos) y el genérico con masa.
+#[test]
+fn bloques_con_h2o_y_kv_f16_mezclan_los_dos_kernels_sin_diferencias() {
+    comprobar_bloques_con_h2o(true);
 }
 

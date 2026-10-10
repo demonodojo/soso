@@ -26,6 +26,8 @@ pub mod stage;
 pub mod arch;
 pub mod asr;
 pub mod attn;
+pub mod attn_grupo;
+pub(crate) mod simd_math;
 pub mod source;
 pub mod tokenizer;
 
