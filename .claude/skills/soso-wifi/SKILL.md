@@ -169,10 +169,11 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
   beacons perdidos) → `net::on_wifi_lost` → reconexión con retroceso 2→60 s
   que **rearranca el firmware** (`reset_link` + `ensure_ready`): soso no tiene
   el desmontaje de MAC/STA/colas de mac80211.
-- **Cola de entrega RX de `IWL_RXQ_N` = 64:** cada `receive` vacía el anillo de
-  32 RB en ella, y con DTIM 1 el tráfico de grupo llega en ráfaga. Con 8 se
-  perdía un 5 % en placa. Llena, descarta la trama nueva y cuenta `rxq_llena`.
-  No se frena el vaciado del anillo: retendría las respuestas HCMD.
+- **La IP no se encola.** `rx_pend` guarda una trama. Con ella ocupada, el
+  drenaje se para en el siguiente MPDU y no recicla el RB: smoltcp pide tramas
+  en bucle y se las lleva todas. EAPOL sigue en su cola de 4. Antes de
+  `authorized` no se aparca, para no frenar el 4-way. `lxdde::poll` fuera de
+  `receive` puede dejar esa única trama aparcada; no vacía el anillo.
 - **Contadores en SOSOLOG, no en `wifi status`:** línea `wifi: pérdidas …`
   cada ≥10 s si cambian. `WifiStatus` es ABI fija y el live se graba a menudo
   con `--only kernel`.

@@ -321,6 +321,11 @@ reiniciar:
         iwl_rx_post_bd(iwl, i, (uint16_t)(i + 1u));
     iwl->rx_write = IWL_GEN2_RX_N - 1;
     iwl->rx_read = 0;
+    iwl->rx_hold = 0;
+    iwl->rx_rb_stop = 0;
+    iwl->rx_rb_off = 0;
+    iwl->rx_rb_n = 0;
+    iwl->rx_pend_len = 0;
     iwl->cmd_write = 0;
     iwl->cmd_read = 0;
     return 0;
@@ -378,7 +383,9 @@ static void parse_rx_phy(struct iwl_ax211_priv *iwl, const uint8_t *data, int le
         apply_rx_rssi(iwl, a, b);
 }
 
-/* Reparte una trama Ethernet ya convertida entre el supplicant y la pila IP. */
+/* Reparte una trama Ethernet. EAPOL va a su cola. IP se queda en `rx_pend`
+ * (una sola) para que smoltcp la recoja; si ya había una, no se tira: el
+ * llamador no debería llegar aquí. */
 static void deliver_eth(struct iwl_ax211_priv *iwl, const uint8_t *eth, int len)
 {
     uint16_t ethertype;
@@ -386,11 +393,25 @@ static void deliver_eth(struct iwl_ax211_priv *iwl, const uint8_t *eth, int len)
     if (!eth || len < 14)
         return;
     ethertype = (uint16_t)(((uint16_t)eth[12] << 8) | eth[13]);
-    iwl->rx_data_ok++;
-    if (ethertype == ETH_P_EAPOL)
+    if (ethertype == ETH_P_EAPOL) {
+        iwl->rx_data_ok++;
         iwl_ax211_deliver_eapol(eth, len);
-    else
-        iwl_ax211_deliver_rx(eth, len);
+        return;
+    }
+    iwl->rx_data_ok++;
+    iwl_ax211_deliver_rx(eth, len);
+    /* Antes de autorizar nadie lee la pila. Aparcar la trama pararía el anillo
+     * y el EAPOL del 4-way se quedaría detrás. */
+    if (!iwl->authorized)
+        return;
+    if (iwl->rx_pend_len > 0) {
+        iwl->rxq_full_drop++;
+        return;
+    }
+    if (len > (int)sizeof(iwl->rx_pend))
+        len = (int)sizeof(iwl->rx_pend);
+    memcpy(iwl->rx_pend, eth, (size_t)len);
+    iwl->rx_pend_len = len;
 }
 
 static void parse_rx_mpdu(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
@@ -1069,6 +1090,38 @@ static void drain_rx_gen2(struct iwl_ax211_priv *iwl)
 
     if (!iwl->rb_stts || !iwl->used_bd_cpu || !iwl->rx_page_cpu || !iwl->rx_bd_cpu)
         return;
+
+    /* Un RB a medias: se sigue por donde se paró. Reciclarlo ahora devolvería
+     * al firmware una página que todavía estamos leyendo. */
+    if (iwl->rx_hold) {
+        uint16_t vid = iwl_rx_completed_vid(iwl, iwl->rx_read);
+        const uint8_t *rb;
+
+        if (vid == 0 || vid > IWL_GEN2_RX_N) {
+            iwl->rx_vid_drop++;
+            iwl->rx_hold = 0;
+            iwl->rx_rb_off = 0;
+            iwl->rx_read = (uint16_t)((iwl->rx_read + 1) % IWL_GEN2_RX_N);
+        } else {
+            rb = (const uint8_t *)iwl->rx_page_cpu +
+                 (size_t)(vid - 1u) * IWL_GEN2_RX_SZ;
+            iwl_trans_rx_rb(iwl, rb, IWL_GEN2_RX_SZ);
+            if (iwl->rx_rb_stop) {
+                iwl_write32(iwl, RFH_Q0_FRBDCB_WIDX_TRG,
+                            (uint32_t)(iwl->rx_write & ~7u));
+                return;
+            }
+            if (iwl->rx_rb_n > 1u)
+                iwl->rx_multi_rb++;
+            iwl->rx_rb_n = 0;
+            iwl->rx_hold = 0;
+            iwl->rx_rb_off = 0;
+            iwl_rx_post_bd(iwl, iwl->rx_write, vid);
+            iwl->rx_write = (uint16_t)((iwl->rx_write + 1) % IWL_GEN2_RX_N);
+            iwl->rx_read = (uint16_t)((iwl->rx_read + 1) % IWL_GEN2_RX_N);
+        }
+    }
+
     hw = iwl_closed_rb_idx(iwl->rb_stts, IWL_GEN2_RX_N);
     while (iwl->rx_read != hw && n++ < IWL_GEN2_RX_N) {
         uint16_t vid = iwl_rx_completed_vid(iwl, iwl->rx_read);
@@ -1077,10 +1130,22 @@ static void drain_rx_gen2(struct iwl_ax211_priv *iwl)
          * porque reciclar un índice inventado devolvería al FW una dirección
          * que no es de ningún RB. */
         if (vid != 0 && vid <= IWL_GEN2_RX_N) {
-            iwl_trans_rx_rb(iwl,
-                            (const uint8_t *)iwl->rx_page_cpu +
-                                (size_t)(vid - 1u) * IWL_GEN2_RX_SZ,
-                            IWL_GEN2_RX_SZ);
+            const uint8_t *rb = (const uint8_t *)iwl->rx_page_cpu +
+                                (size_t)(vid - 1u) * IWL_GEN2_RX_SZ;
+
+            iwl->rx_hold = 1;
+            iwl->rx_rb_off = 0;
+            iwl->rx_rb_n = 0;
+            iwl_trans_rx_rb(iwl, rb, IWL_GEN2_RX_SZ);
+            if (iwl->rx_rb_stop) {
+                iwl_write32(iwl, RFH_Q0_FRBDCB_WIDX_TRG,
+                            (uint32_t)(iwl->rx_write & ~7u));
+                return;
+            }
+            if (iwl->rx_rb_n > 1u)
+                iwl->rx_multi_rb++;
+            iwl->rx_rb_n = 0;
+            iwl->rx_hold = 0;
             iwl_rx_post_bd(iwl, iwl->rx_write, vid);
             iwl->rx_write = (uint16_t)((iwl->rx_write + 1) % IWL_GEN2_RX_N);
         } else {
@@ -1514,17 +1579,34 @@ void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigne
     handle_gen2_rx(iwl, tmp, len);
 }
 
+/* MPDU con el enlace ya autorizado: puede ser IP, y solo cabe una en rx_pend. */
+static int avail_is_mpdu(const uint8_t *p, unsigned avail)
+{
+    uint8_t cmd;
+    uint8_t group;
+
+    if (avail < 8u)
+        return 0;
+    cmd = p[4];
+    group = p[5];
+    return group == LEGACY_GROUP && cmd == REPLY_RX_MPDU_CMD;
+}
+
 /* Linux `iwl_pcie_rx_handle_rb`: hasta AX210 el firmware empaqueta varios
  * paquetes en un RB, cada uno alineado a FH_RSCSR_FRAME_ALIGN, y cierra con
  * FH_RSCSR_FRAME_INVALID. Leer solo el primero perdía el RX_MPDU que viaja
- * detrás de un TX_CMD. Desde AX210 cada RB lleva uno. */
+ * detrás de un TX_CMD. Desde AX210 cada RB lleva uno.
+ *
+ * Si ya hay una trama IP en `rx_pend` y el siguiente paquete es un MPDU, se
+ * para sin consumirlo (`rx_rb_stop`). El drenaje no recicla el RB. */
 void iwl_trans_rx_rb(struct iwl_ax211_priv *iwl, const uint8_t *rb, unsigned size)
 {
-    unsigned offset = 0;
-    unsigned n = 0;
+    unsigned offset;
 
     if (!iwl || !rb)
         return;
+    offset = iwl->rx_rb_off;
+    iwl->rx_rb_stop = 0;
     while (offset + 8u < size) {
         const uint8_t *p = rb + offset;
         uint32_t len_n_flags = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -1538,14 +1620,18 @@ void iwl_trans_rx_rb(struct iwl_ax211_priv *iwl, const uint8_t *rb, unsigned siz
         next = offset + ((len + FH_RSCSR_FRAME_ALIGN - 1u) & ~(FH_RSCSR_FRAME_ALIGN - 1u));
         if (len < 8u || next > size)
             break;
+        if (iwl->rx_pend_len > 0 && iwl->authorized && avail_is_mpdu(p, size - offset)) {
+            iwl->rx_rb_off = offset;
+            iwl->rx_rb_stop = 1;
+            return;
+        }
         handle_gen2_rx(iwl, p, size - offset);
-        n++;
+        iwl->rx_rb_n++;
         if (iwl->gen3)
             break;
         offset = next;
     }
-    if (n > 1u)
-        iwl->rx_multi_rb++;
+    iwl->rx_rb_off = offset;
 }
 
 static uint8_t txq_gen2_num_tbs(struct iwl_tfh_tfd_gen2 *tfd)

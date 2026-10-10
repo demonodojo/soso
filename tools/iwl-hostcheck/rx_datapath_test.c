@@ -328,6 +328,53 @@ static void test_rb_varios_paquetes(int gen3)
     }
 }
 
+/* Con el enlace autorizado solo se aparca una trama IP. La siguiente se queda
+ * en el RB, sin reciclarlo, hasta que la pila recoge la primera. */
+static void test_una_trama_ip(void)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t rb[IWL_GEN2_RX_SZ];
+    uint8_t frame[256];
+    const uint8_t c1[4] = { 0x11, 0x11, 0x11, 0x11 };
+    const uint8_t c2[4] = { 0x22, 0x22, 0x22, 0x22 };
+    const uint32_t fin = FH_RSCSR_FRAME_INVALID;
+    unsigned flen;
+    unsigned n;
+    unsigned off2;
+    unsigned off3;
+    uint16_t wr;
+
+    priv_init(&iwl, 0);
+    if (iwl_alloc_queues(&iwl) != 0)
+        exit(2);
+    iwl.associated = 1;
+    iwl.authorized = 1;
+    g_data_rx = 0;
+    wr = iwl.rx_write;
+
+    memset(rb, 0, sizeof(rb));
+    flen = iwl_test_data_mpdu(frame, 0x0800, STA_MAC, AP_MAC, PEER_MAC, 0, c1, 4);
+    n = iwl_test_rx_packet(rb, 0, frame, flen, 0);
+    off2 = (n + FH_RSCSR_FRAME_ALIGN - 1u) & ~(FH_RSCSR_FRAME_ALIGN - 1u);
+    flen = iwl_test_data_mpdu(frame, 0x0800, STA_MAC, AP_MAC, PEER_MAC, 0, c2, 4);
+    n = iwl_test_rx_packet(rb + off2, 0, frame, flen, 0);
+    off3 = (off2 + n + FH_RSCSR_FRAME_ALIGN - 1u) & ~(FH_RSCSR_FRAME_ALIGN - 1u);
+    memcpy(rb + off3, &fin, 4);
+    post_completion(&iwl, 1, rb, sizeof(rb));
+
+    drain_rx_gen2(&iwl);
+    check(g_data_rx == 1 && iwl.rx_pend_len > 14 && iwl.rx_hold == 1 &&
+              iwl.rx_read == 0 && iwl.rx_write == wr &&
+              memcmp(g_last_data + 14, c1, 4) == 0,
+          "AX200: con una IP pendiente no se consume la siguiente ni se recicla el RB");
+
+    iwl.rx_pend_len = 0;
+    drain_rx_gen2(&iwl);
+    check(g_data_rx == 2 && iwl.rx_hold == 0 && iwl.rx_read == 1 &&
+              iwl.rx_multi_rb == 1 && memcmp(g_last_data + 14, c2, 4) == 0,
+          "AX200: al recoger la trama, el drenaje sigue y recicla el RB");
+}
+
 static void test_rx_filtros(void)
 {
     struct iwl_ax211_priv iwl;
@@ -579,6 +626,7 @@ int main(void)
     test_rx_datapath(1);
     test_rb_varios_paquetes(0);
     test_rb_varios_paquetes(1);
+    test_una_trama_ip();
     test_rx_filtros();
     test_rx_cifrado();
     test_hdrlen();

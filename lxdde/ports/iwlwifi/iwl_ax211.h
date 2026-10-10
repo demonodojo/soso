@@ -239,13 +239,17 @@ struct iwl_ax211_priv {
     int8_t last_rx_rssi;
     uint8_t last_rx_band24;
 
-    /* Cada `receive` de smoltcp vacía el anillo de 32 RB entero aquí, y con
-     * DTIM 1 el AP suelta el tráfico de grupo en ráfaga tras el beacon: con 8
-     * ranuras se perdía un 5 % en placa (rxq_llena, 10 oct). */
-#define IWL_RXQ_N 64
-    uint8_t rxq[IWL_RXQ_N][2048];
-    int rxq_head;
-    int rxq_tail;
+    /* Una trama IP esperando a `iwl_mvm_rx_8023`. smoltcp pide en bucle hasta
+     * que no queda ninguna: si el drenaje vaciara el anillo en una cola, lo
+     * que no cupiera se tiraría antes de que el bucle lo viera. */
+    uint8_t rx_pend[IWL_MAX_ETH_FRAME];
+    int rx_pend_len;
+    /* RB a medio leer. Con una trama ya en `rx_pend`, el siguiente MPDU no se
+     * consume: el anillo no se recicla y el firmware sigue teniendo sitio. */
+    uint8_t rx_hold;
+    uint8_t rx_rb_stop;
+    unsigned rx_rb_off;
+    unsigned rx_rb_n;
 
     /* Cola propia para EAPOL. Si el supplicant y smoltcp comparten la de datos,
      * el primero que lee se lleva M1/M3 y la autenticación se queda colgada. */
@@ -261,7 +265,8 @@ struct iwl_ax211_priv {
     /* Próximo seq_ctrl de datos no QoS (mac80211 `sdata->sequence_number`):
      * el TX CMD gen2/gen3 no pide al firmware que lo ponga. */
     uint16_t tx_seq_ctrl;
-    /* Tramas descartadas porque su cola (rxq / eapolq) estaba llena. */
+    /* IP que no cupo en `rx_pend` (no debería: el drenaje para antes) y EAPOL
+     * descartado con su cola llena. */
     uint32_t rxq_full_drop;
     uint32_t eapolq_full_drop;
     /* Caídas de enlace vistas desde el arranque y la última causa. */

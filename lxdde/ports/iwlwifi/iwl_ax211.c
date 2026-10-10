@@ -431,20 +431,10 @@ int iwl_ax211_can_tx(void)
 
 void iwl_ax211_deliver_rx(const uint8_t *data, int len)
 {
-    struct iwl_ax211_priv *iwl = &g_iwl;
-    if (!data || len <= 0 || len > 2040)
-        return;
-    /* Llena: se tira la nueva. Escribir encima dejaba head == tail y la cola
-     * parecía vacía, con lo que se perdían de golpe todas las pendientes. */
-    if ((iwl->rxq_head + 1) % IWL_RXQ_N == iwl->rxq_tail) {
-        iwl->rxq_full_drop++;
-        return;
-    }
-    int idx = iwl->rxq_head % IWL_RXQ_N;
-    iwl->rxq[idx][0] = (uint8_t)(len & 0xff);
-    iwl->rxq[idx][1] = (uint8_t)((len >> 8) & 0xff);
-    memcpy(&iwl->rxq[idx][2], data, (size_t)len);
-    iwl->rxq_head = (iwl->rxq_head + 1) % IWL_RXQ_N;
+    /* La trama ya está en `rx_pend`. Esta función existe para los bancos de
+     * host, que la sustituyen y cuentan la entrega. */
+    (void)data;
+    (void)len;
 }
 
 /* Cola aparte para EAPOL: smoltcp no debe llevarse M1/M3 mientras el 4-way

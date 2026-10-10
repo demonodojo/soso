@@ -180,3 +180,7 @@ No se ha incrementado `arranques_consecutivos_ok`.
 - Arranque, WiFi, DHCP y TLS iguales que a las 14:21. DNS todo `id=ok`. Sin panic ni caídas. `dns github.com` resuelve. Dos `soso-update comprobar` conectan a `185.199.109.133:443` y vuelven a salir con `manifest no válido`: la release publicada sigue siendo la 0.3.8, y ningún cliente (viejo por `FileTooLarge`, nuevo por `EmptyFile`) la acepta. Hace falta publicar una release nueva, no más flashes del cliente.
 - `rxq_llena` = 129 / `rx_ok` = 4854 (2,7 %). A las 14:21, con cola de 8, era 5,5 %. La de 64 ayuda y no basta: sigue desbordando en las ráfagas DTIM.
 - `SOSOBOOT.TXT` ya dice `DONE Boot0001 soso` y «ya puedes quitar el USB»: el shim registró la entrada del NVMe. `SOSOUPD` y `SOSORES` siguen vacíos (no hubo aplicar).
+
+## Cola de datos quitada (misma tarde, sin placa)
+
+smoltcp pide tramas en bucle hasta vaciar. La cola de 64 se llenaba en el primer `receive()`, antes de ese bucle. Ahora `rx_pend` guarda una trama IP. Con ella ocupada el drenaje se para en el siguiente MPDU y no recicla el RB. EAPOL sigue en su cola de 4. Antes de `authorized` no se aparca, para no frenar el 4-way. Hostcheck: dos MPDU en un RB, la segunda no sale hasta recoger la primera. Pendiente de placa: `rxq_llena` debería quedarse en 0.

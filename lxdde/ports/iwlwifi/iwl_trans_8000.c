@@ -360,6 +360,11 @@ reiniciar:
     for (i = 0; i < IWL_8000_RX_N; i++)
         bd[i] = (uint32_t)((iwl->rx_page_dma + (uint64_t)i * IWL_GEN2_RX_SZ) >> 8);
     iwl->rx_read = 0;
+    iwl->rx_hold = 0;
+    iwl->rx_rb_stop = 0;
+    iwl->rx_rb_off = 0;
+    iwl->rx_rb_n = 0;
+    iwl->rx_pend_len = 0;
     /* Linux rxsq_restock: anillo casi lleno; WPTR alineado a 8 (write & ~7). */
     iwl->rx_write = (uint16_t)(IWL_8000_RX_N - 1u);
     return 0;
@@ -396,13 +401,44 @@ void iwl_trans_8000_drain(struct iwl_ax211_priv *iwl)
 
     if (!iwl->rb_stts || !iwl->rx_page_cpu || !iwl->rx_bd_cpu)
         return;
+
+    if (iwl->rx_hold) {
+        unsigned slot = (unsigned)iwl->rx_read % IWL_8000_RX_N;
+        const uint8_t *buf = (const uint8_t *)iwl->rx_page_cpu +
+                             (size_t)slot * IWL_GEN2_RX_SZ;
+
+        iwl_trans_rx_rb(iwl, buf, IWL_GEN2_RX_SZ);
+        if (iwl->rx_rb_stop) {
+            iwl_write32(iwl, FH_RSCSR_CHNL0_WPTR, (uint32_t)(iwl->rx_write & ~7u));
+            return;
+        }
+        if (iwl->rx_rb_n > 1u)
+            iwl->rx_multi_rb++;
+        iwl->rx_rb_n = 0;
+        iwl->rx_hold = 0;
+        iwl->rx_rb_off = 0;
+        iwl->rx_write = (uint16_t)((iwl->rx_write + 1u) % IWL_8000_RX_N);
+        iwl->rx_read = (uint16_t)((iwl->rx_read + 1u) % IWL_8000_RX_N);
+    }
+
     closed = iwl_closed_rb_idx(iwl->rb_stts, IWL_8000_RX_N);
     while (iwl->rx_read != closed && n++ < IWL_8000_RX_N) {
         unsigned slot = (unsigned)iwl->rx_read % IWL_8000_RX_N;
         const uint8_t *buf = (const uint8_t *)iwl->rx_page_cpu +
                              (size_t)slot * IWL_GEN2_RX_SZ;
 
+        iwl->rx_hold = 1;
+        iwl->rx_rb_off = 0;
+        iwl->rx_rb_n = 0;
         iwl_trans_rx_rb(iwl, buf, IWL_GEN2_RX_SZ);
+        if (iwl->rx_rb_stop) {
+            iwl_write32(iwl, FH_RSCSR_CHNL0_WPTR, (uint32_t)(iwl->rx_write & ~7u));
+            return;
+        }
+        if (iwl->rx_rb_n > 1u)
+            iwl->rx_multi_rb++;
+        iwl->rx_rb_n = 0;
+        iwl->rx_hold = 0;
         iwl->rx_write = (uint16_t)((iwl->rx_write + 1u) % IWL_8000_RX_N);
         iwl->rx_read = (uint16_t)((iwl->rx_read + 1u) % IWL_8000_RX_N);
         closed = iwl_closed_rb_idx(iwl->rb_stts, IWL_8000_RX_N);

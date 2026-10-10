@@ -818,15 +818,14 @@ int iwl_mvm_connect_wpa2(struct iwl_ax211_priv *iwl, const char *ssid,
 
 int iwl_mvm_rx_8023(struct iwl_ax211_priv *iwl, uint8_t *buf, int buflen)
 {
-    if (!buf || buflen <= 0 || iwl->rxq_head == iwl->rxq_tail)
+    int len;
+
+    if (!buf || buflen <= 0 || iwl->rx_pend_len <= 0)
         return 0;
-    int idx = iwl->rxq_tail % IWL_RXQ_N;
-    int len = (int)iwl->rxq[idx][0] | ((int)iwl->rxq[idx][1] << 8);
-    if (len <= 0 || len > 2040)
-        return 0;
+    len = iwl->rx_pend_len;
     if (len > buflen)
         len = buflen;
-    memcpy(buf, &iwl->rxq[idx][2], (size_t)len);
-    iwl->rxq_tail = (iwl->rxq_tail + 1) % IWL_RXQ_N;
+    memcpy(buf, iwl->rx_pend, (size_t)len);
+    iwl->rx_pend_len = 0;
     return len;
 }
