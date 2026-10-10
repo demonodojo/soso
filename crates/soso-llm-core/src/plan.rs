@@ -26,6 +26,18 @@ use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
 
 const FRAME_BYTES: u64 = 4096;
+/// Ventana de KV f16 por debajo de la cual se cuantiza el KV a int8 (KIVI-lite, con pérdida).
+///
+/// Antes el umbral era `max_seq / 4`; con los 131 072 tokens nominales de Qwen2.5 eso eran 32 768 y
+/// una ventana f16 de ~24 000 tokens (de sobra para sesiones de unos 6 000) ya contaba como corta:
+/// el 14B en un guest de 14 GiB corría con KV int8 y el 7B en 8 GiB con f16 (T22, 2026-10-10).
+/// Se cuantiza sólo si el f16 no da ni para este contexto práctico.
+pub const VENTANA_F16_MINIMA_TOKENS: usize = 8192;
+
+pub fn kv_apretado(window_f16: usize, max_seq: usize) -> bool {
+    window_f16 < (max_seq / 4).max(64).min(VENTANA_F16_MINIMA_TOKENS)
+}
+
 pub const REPLAN_EVERY_TOKENS: u32 = 8;
 const EWMA_ALPHA: f64 = 0.25;
 /// Reserva el 30 % de frames libres+reclaimable para el sistema.
@@ -833,7 +845,7 @@ impl ResourcePlanner {
 
         // KIVI-lite: si la ventana f16 queda muy corta vs max_seq, pasar a int8
         // (≈ mitad de bytes) y recalcular.
-        let tight = window < (manifest.max_seq as usize / 4).max(64)
+        let tight = kv_apretado(window, manifest.max_seq as usize)
             || self.weight_budget < self.model_weight_bytes / 4;
         if tight {
             self.kv_dtype = KvDtype::I8;
@@ -1698,6 +1710,18 @@ mod tests {
         assert!(planner.use_sparse_attn(4000), "pedida, sobrevive a los replanes");
         planner.desactivar_atencion_dispersa();
         assert!(!planner.use_sparse_attn(4000));
+    }
+
+    #[test]
+    fn el_kv_solo_se_cuantiza_si_el_f16_no_da_para_un_contexto_practico() {
+        // 14B en un guest de 14 GiB: ventana f16 ~23 900 tokens, max_seq nominal 131 072.
+        assert!(!kv_apretado(23_893, 131_072));
+        // Un guest pequeño que no llega a 8 192 tokens sí cuantiza.
+        assert!(kv_apretado(4_000, 131_072));
+        // Modelos de contexto corto: se conserva el umbral relativo.
+        assert!(!kv_apretado(64, 64));
+        assert!(kv_apretado(10, 64));
+        assert!(kv_apretado(1_000, 8_192) == (1_000 < 2_048));
     }
 
     #[test]

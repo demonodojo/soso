@@ -1,0 +1,212 @@
+warning: unnecessary `unsafe` block
+  --> xtask/src/test_probe.rs:41:13
+   |
+34 |     unsafe {
+   |     ------ because it's nested under this `unsafe` block
+...
+41 |             unsafe { std::env::set_var("SOSO_MODELS_DIR", root.join("target/tiny-model")) };
+   |             ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> xtask/src/test_update.rs:47:13
+   |
+39 |     unsafe {
+   |     ------ because it's nested under this `unsafe` block
+...
+47 |             unsafe { std::env::set_var("SOSO_MODELS_DIR", root.join("target/tiny-model")) };
+   |             ^^^^^^ unnecessary `unsafe` block
+
+warning: function `test_shard_llm_host_port` is never used
+  --> xtask/src/llm_ports.rs:41:8
+   |
+41 | pub fn test_shard_llm_host_port(shard_index: u8) -> u16 {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `xtask` (bin "xtask") generated 3 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/xtask test-llm-api --model-dir target/qwen2.5-coder-14b-model --profile /home/jmdiez/Trabajo/demonodojo/soso/target/self-improvement/first-improvement/model-lock-14b.json --orden /home/jmdiez/Trabajo/demonodojo/soso/target/self-improvement/first-improvement/guest-r03.sh`
+test-llm-api: guest modelo=qwen2.5-coder-14b dir=target/qwen2.5-coder-14b-model puerto_llm=17299
+test-llm-api: imagen de modelos 10G (calculada del árbol .som)
+   Compiling soso-http v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/crates/soso-http)
+warning: field `entrecomillada` is never read
+   --> sosh/src/main.rs:188:5
+    |
+178 | struct Token {
+    |        ----- field in this struct
+...
+188 |     entrecomillada: bool,
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `Token` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `COMODINES` is never used
+   --> sosh/src/main.rs:253:7
+    |
+253 | const COMODINES: &str = "no expando comodines (*); entrecomíllalo si es literal";
+    |       ^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> soso-agent-probe/src/sondas/vigilancia.rs:244:9
+    |
+244 |     let mut medir = || {
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sosh` (bin "sosh") generated 2 warnings
+warning: `soso-agent-probe` (bin "soso-agent-probe") generated 1 warning (run `cargo fix --bin "soso-agent-probe" -p soso-agent-probe` to apply 1 suggestion)
+   Compiling soso-update-core v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/crates/soso-update-core)
+warning: unused import: `crc_bytes`
+  --> soso-llm/src/main.rs:24:19
+   |
+24 | use distributed::{crc_bytes, default_keepalive, default_timeouts, DistributedConfig};
+   |                   ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `soso_llm_core::layer::TensorSource`
+  --> soso-llm/src/main.rs:28:5
+   |
+28 | use soso_llm_core::layer::TensorSource;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ResourcePlanner`
+  --> soso-llm/src/main.rs:30:72
+   |
+30 | use soso_llm_core::plan::{MemSnapshot, MemoryPlanConfig, MemoryPreset, ResourcePlanner};
+   |                                                                        ^^^^^^^^^^^^^^^
+
+warning: unused imports: `Backend` and `Runtime`
+  --> soso-llm/src/main.rs:32:30
+   |
+32 | use soso_llm_core::runtime::{Backend, Runtime};
+   |                              ^^^^^^^  ^^^^^^^
+
+warning: variants `Unauthorized` and `Busy` are never constructed
+  --> soso-llm/src/serve.rs:43:5
+   |
+41 | enum GuestServiceError {
+   |      ----------------- variants in this enum
+42 |     Api(ApiError),
+43 |     Unauthorized,
+   |     ^^^^^^^^^^^^
+...
+47 |     Busy,
+   |     ^^^^
+   |
+   = note: `GuestServiceError` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `soso-llm` (bin "soso-llm") generated 5 warnings (run `cargo fix --bin "soso-llm" -p soso-llm` to apply 4 suggestions)
+   Compiling soso-web v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/user/soso-web)
+   Compiling coreutils v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/user/coreutils)
+   Compiling soso-hf v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/user/soso-hf)
+   Compiling notifybug v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/user/notifybug)
+   Compiling init v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/user/init)
+   Compiling soso-forja v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/user/soso-forja)
+   Compiling soso-git v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/user/soso-git)
+   Compiling soso-update v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/user/soso-update)
+warning: field `tls` is never read
+   --> coreutils/src/bin/wild-soso.rs:906:5
+    |
+904 | struct Resuelto {
+    |        -------- field in this struct
+905 |     va: u64,
+906 |     tls: bool,
+    |     ^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `coreutils` (bin "wild-soso") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 1.84s
+test-llm-api: fase build_user 1.9s
+   Compiling kernel v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/kernel)
+warning: type `NetStack` is more private than the item `poll_locked`
+   --> src/net/mod.rs:632:1
+    |
+632 | pub(crate) fn poll_locked(n: &mut NetStack) {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `poll_locked` is reachable at visibility `pub(crate)`
+    |
+note: but type `NetStack` is only usable at visibility `pub(self)`
+   --> src/net/mod.rs:50:1
+    |
+ 50 | struct NetStack {
+    | ^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `ResolveFail` is more private than the item `resolve_a`
+   --> src/net/dns.rs:125:1
+    |
+125 | / pub fn resolve_a(
+126 | |     host: &str,
+127 | |     deadline: Instant,
+128 | |     servidores: &[Ipv4Address],
+129 | | ) -> Result<[u8; 4], ResolveFail> {
+    | |_________________________________^ function `resolve_a` is reachable at visibility `pub(crate)`
+    |
+note: but type `ResolveFail` is only usable at visibility `pub(self)`
+   --> src/net/dns.rs:119:1
+    |
+119 | enum ResolveFail {
+    | ^^^^^^^^^^^^^^^^
+
+warning: function `free_pages_cuarentena` is never used
+  --> src/drivers/dma.rs:76:8
+   |
+76 | pub fn free_pages_cuarentena(paddr: PhysAddr, pages: usize) {
+   |        ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `poll_locked` is never used
+   --> src/net/mod.rs:632:15
+    |
+632 | pub(crate) fn poll_locked(n: &mut NetStack) {
+    |               ^^^^^^^^^^^
+
+warning: function `is_established` is never used
+   --> src/net/tcp_user.rs:286:8
+    |
+286 | pub fn is_established(sockets: &smoltcp::iface::SocketSet<'static>, handle: SocketHandle) -> bool {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `tiene` is never used
+  --> src/task/fcache.rs:87:8
+   |
+87 | pub fn tiene(ino: u64) -> bool {
+   |        ^^^^^
+
+warning: function `cerrojo` is never used
+   --> src/task/fcache.rs:235:8
+    |
+235 | pub fn cerrojo(ino: u64) -> Option<(usize, bool)> {
+    |        ^^^^^^^
+
+warning: `kernel` (bin "kernel") generated 7 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.85s
+   Compiling soso-update-core v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/crates/soso-update-core)
+   Compiling boot-shim v0.1.0 (/home/jmdiez/Trabajo/demonodojo/soso/boot-shim)
+    Finished `release` profile [optimized] target(s) in 1.38s
+imagen BIOS: /home/jmdiez/Trabajo/demonodojo/soso/target/soso-bios.img
+imagen UEFI: /home/jmdiez/Trabajo/demonodojo/soso/target/soso-uefi.img
+shim UEFI OK: bootx64.efi ← boot-shim (103936 B; loader real 156672 B en efi/boot/bootsoso.efi)
+test-llm-api: fase build_image 2.5s
+mkfs: empaquetado 1280 MiB (contenido ~1280 MiB, suelo firmware 256 MiB)
+mkfs: espacio QEMU 32768 MiB (sparse tras formatear)
+mkfs-soso: clave autorizada desde /home/jmdiez/Trabajo/demonodojo/soso/target/soso_test_key.pub -> etc/authorized_key
+sosofs: 24967 inodes, 276322/327680 bloques usados (1079 MiB) -> /home/jmdiez/Trabajo/demonodojo/soso/target/soso-data.img
+mkfs-sosomfs: 2621440 bloques, 1 modelos, 582 shards → /home/jmdiez/Trabajo/demonodojo/soso/target/soso-models.img
+test-llm-api: fase mkfs 52.5s
+xtask: NIC echo:7799 ssh:2299 llm:127.0.0.1:17299→guest:7422
+test-llm-api: fase lanzar_qemu 0.9s
+test-llm-api: fase boot_ssh 4.8s
+test-llm-api: fase start_serve 7.1s
+test-llm-api: fase health_ready 0.0s
+test-llm-api: orden /home/jmdiez/Trabajo/demonodojo/soso/target/self-improvement/first-improvement/guest-r03.sh contra el endpoint vivo (puerto 17299)

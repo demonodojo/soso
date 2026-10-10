@@ -175,4 +175,8 @@ No se ha incrementado `arranques_consecutivos_ok`.
 
   El manifiesto publicado, sin los vacíos, valida con el límite nuevo. Un soso instalado con el `soso-update` viejo seguirá rechazando cualquier release con `rustc` hasta que lleve el cliente nuevo: hay que reinstalarlo desde USB.
 
-El shim todavía no ha registrado la entrada de firmware del NVMe: el log acaba en `halt` sin el reinicio con el pendrive puesto. `SOSOBOOT.TXT` en la ESP del USB sigue llevando la petición `INSTALL`. El siguiente arranque de este USB, sin quitarlo, es el que escribe `Boot####` hacia la ESP de nvme1.
+## Tercera sesión en placa (16:01, flush #54, 234 s)
+
+- Arranque, WiFi, DHCP y TLS iguales que a las 14:21. DNS todo `id=ok`. Sin panic ni caídas. `dns github.com` resuelve. Dos `soso-update comprobar` conectan a `185.199.109.133:443` y vuelven a salir con `manifest no válido`: la release publicada sigue siendo la 0.3.8, y ningún cliente (viejo por `FileTooLarge`, nuevo por `EmptyFile`) la acepta. Hace falta publicar una release nueva, no más flashes del cliente.
+- `rxq_llena` = 129 / `rx_ok` = 4854 (2,7 %). A las 14:21, con cola de 8, era 5,5 %. La de 64 ayuda y no basta: sigue desbordando en las ráfagas DTIM.
+- `SOSOBOOT.TXT` ya dice `DONE Boot0001 soso` y «ya puedes quitar el USB»: el shim registró la entrada del NVMe. `SOSOUPD` y `SOSORES` siguen vacíos (no hubo aplicar).

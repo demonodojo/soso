@@ -72,9 +72,11 @@ fn main() {
         // Planificador como el del guest con 8 GiB: pesos residentes, ventana de KV,
         // y atención dispersa para secuencias de más de 256 tokens.
         use soso_llm_core::plan::{MemSnapshot, ResourcePlanner};
+        // `MEM_TOTAL_MB` / `MEM_LIBRE_MB`: la RAM del guest que se quiere simular (por defecto 8 GiB / 6 GiB).
+        let mb = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
         let mem = MemSnapshot {
-            total_frames: 8 * 1024 * 1024 * 1024 / 4096,
-            free_frames: 6 * 1024 * 1024 * 1024 / 4096,
+            total_frames: mb("MEM_TOTAL_MB", 8192) * 1024 * 1024 / 4096,
+            free_frames: mb("MEM_LIBRE_MB", 6144) * 1024 * 1024 / 4096,
             reclaimable_frames: 0,
         };
         let m = backend.rt.manifest.clone();

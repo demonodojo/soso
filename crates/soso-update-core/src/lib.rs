@@ -132,6 +132,12 @@ pub const PACK_SKIP_DIRS: &[(&str, Excluido)] = &[
     ("var/forja-out/", Excluido::Cache),
     ("var/cache/", Excluido::Cache),
     ("var/self-improvement/", Excluido::Cache),
+    // Bancos de las tareas de automejora (`tests/self-improvement/native/*/
+    // preparar.sh`). El de T42 eran 350 MB de fuentes vendidas que la 0.3.8
+    // publicó.
+    ("var/t41/", Excluido::Cache),
+    ("var/t42/", Excluido::Cache),
+    ("var/t80/", Excluido::Cache),
     ("tmp/", Excluido::Temporal),
     ("src/soso/", Excluido::Fuente),
     // `/models` es el volumen sosomfs, de sólo lectura: `create_file` devuelve
