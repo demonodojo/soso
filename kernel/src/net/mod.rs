@@ -405,6 +405,33 @@ pub fn on_wifi_connected() {
     println!("net: wifi asociada — solicitando DHCP…");
 }
 
+/// El enlace WiFi cayó: sin IP ni DHCP hasta que `wifi_wpa` reconecte y llame
+/// a [`on_wifi_connected`]; lo mismo que un `dhcp perdido`. Devuelve `false`
+/// si el candado estaba tomado (DNS lo retiene mientras espera): se reintenta.
+#[cfg(feature = "lxdde")]
+pub fn on_wifi_lost() -> bool {
+    let Some(net) = NET.get() else {
+        return true;
+    };
+    let Some(mut n) = net.try_lock() else {
+        return false;
+    };
+    if n.backend != BackendKind::Wifi {
+        return true;
+    }
+    n.configured = false;
+    n.dhcp_enabled = false;
+    n.dhcp_expires_at = None;
+    clear_ipv4_config(&mut n.iface);
+    let echo = n.echo.clone();
+    let ssh = n.ssh.clone();
+    let dhcp = n.dhcp;
+    close_tcp_services(&mut n.sockets, &echo, &ssh);
+    n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
+    println!("net: wifi caída — sin IP hasta reconectar");
+    true
+}
+
 fn poll_dhcp(
     iface: &mut Interface,
     sockets: &mut SocketSet<'static>,

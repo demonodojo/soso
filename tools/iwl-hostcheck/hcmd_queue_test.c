@@ -534,8 +534,49 @@ static int check_recover_then_scan(void)
     return 0;
 }
 
+/* Más de 32 comandos: el doorbell sigue el puntero de 8 bits (Linux
+ * `iwl_txq_inc_wrap` con `max_tfd_queue_size` 256), no la ranura de 32. */
+static int check_doorbell_full_pointer(void)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t pay = 1;
+    unsigned i;
+
+    init_priv(&iwl);
+    for (i = 0; i < 300u; i++) {
+        uint32_t db;
+        uint16_t seq;
+
+        if (iwl_trans_send_cmd_async(&iwl, SYSTEM_GROUP, INIT_EXTENDED_CFG_CMD,
+                                     &pay, 1) != 0) {
+            fprintf(stderr, "envío %u rechazado con la cola vacía\n", i);
+            return -1;
+        }
+        db = g_mmio_stub[HBUS_TARG_WRPTR / 4];
+        if (db != (((i + 1u) & 0xffu) | ((uint32_t)IWL_MVM_DQA_CMD_QUEUE << 16))) {
+            fprintf(stderr, "envío %u: doorbell=0x%08x (esperaba ptr %u)\n", i,
+                    (unsigned)db, (i + 1u) & 0xffu);
+            return -1;
+        }
+        seq = iwl.cmd_slot_seq[i % IWL_CMD_QUEUE_SIZE];
+        if (slot_of(seq) != i % IWL_CMD_QUEUE_SIZE) {
+            fprintf(stderr, "envío %u no usó la ranura %u\n", i, i % IWL_CMD_QUEUE_SIZE);
+            return -1;
+        }
+        rx_resp(&iwl, SYSTEM_GROUP, INIT_EXTENDED_CFG_CMD, seq, NULL, 0);
+        if (iwl_trans_cmd_space(&iwl) != IWL_CMD_QUEUE_SIZE - 1u) {
+            fprintf(stderr, "envío %u: la respuesta no vació la cola\n", i);
+            return -1;
+        }
+    }
+    puts("OK: 300 HCMD con doorbell de puntero completo (vuelta a 256, ranura a 32)");
+    return 0;
+}
+
 int main(void)
 {
+    if (check_doorbell_full_pointer() != 0)
+        return 1;
     if (check_async_backpressure() != 0)
         return 1;
     if (check_out_of_order_release() != 0)

@@ -47,6 +47,91 @@ unsafe extern "C" {
     fn lx_iwlwifi_mac(mac: *mut u8) -> c_int;
     fn lx_iwlwifi_bssid(bssid: *mut u8) -> c_int;
     fn lx_iwlwifi_poll();
+    fn lx_iwlwifi_counters(out: *mut LxIwlContadores);
+    fn lx_iwlwifi_reset_link();
+}
+
+/// Espejo de `struct lx_iwl_counters` (lxdde/ports/iwlwifi/iwlwifi_lx.c).
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct LxIwlContadores {
+    pub tx_full_drop: u32,
+    pub rxq_full_drop: u32,
+    pub eapolq_full_drop: u32,
+    pub rx_multi_rb: u32,
+    pub rx_trunc_drop: u32,
+    pub rx_vid_drop: u32,
+    pub rx_data_drop: u32,
+    pub rx_data_ok: u32,
+    pub cmd_backpressure: u32,
+    pub link_lost: u32,
+    pub link_lost_cause: u32,
+    pub link_lost_reason: u32,
+}
+
+impl LxIwlContadores {
+    /// Lo que se ha perdido por el camino; `rx_data_ok` y `rx_multi_rb` no cuentan.
+    pub fn perdidas(&self) -> [u32; 7] {
+        [
+            self.tx_full_drop,
+            self.rxq_full_drop,
+            self.eapolq_full_drop,
+            self.rx_trunc_drop,
+            self.rx_vid_drop,
+            self.rx_data_drop,
+            self.cmd_backpressure,
+        ]
+    }
+
+    /// `IWL_LINK_LOST_*` de iwl_ax211.h.
+    pub fn causa_caida(&self) -> &'static str {
+        match self.link_lost_cause {
+            1 => "DEAUTH del AP",
+            2 => "DISASSOC del AP",
+            3 => "beacons perdidos",
+            _ => "sin aviso del AP",
+        }
+    }
+
+    /// Reason code 802.11 de la última DEAUTH/DISASSOC.
+    pub fn motivo(&self) -> u32 {
+        self.link_lost_reason
+    }
+}
+
+/// Una línea en el log cuando cambia alguna pérdida, como mucho cada 10 s.
+/// `wifi status` no las lleva: `WifiStatus` es ABI fija y un kernel nuevo
+/// con un `sosh` viejo (flash `--only kernel`) escribiría fuera del búfer.
+pub fn vigilar_contadores(tx_err: u64) {
+    const INTERVALO_MS: u64 = 10_000;
+    static ULTIMA: spin::Mutex<([u32; 7], u64, u64)> = spin::Mutex::new(([0; 7], 0, 0));
+    let ahora = crate::arch::pit::uptime_ms();
+    let Some(mut u) = ULTIMA.try_lock() else {
+        return;
+    };
+    if ahora.saturating_sub(u.2) < INTERVALO_MS {
+        return;
+    }
+    let c = contadores();
+    let perdidas = c.perdidas();
+    if perdidas == u.0 && tx_err == u.1 {
+        return;
+    }
+    *u = (perdidas, tx_err, ahora);
+    crate::println!(
+        "wifi: pérdidas tx_cola_llena={} tx_err={tx_err} rxq_llena={} eapolq_llena={} \
+         rx_truncado={} rx_vid={} rx_datos_mal={} hcmd_lleno={} (rx_ok={} rb_multi={} caídas={})",
+        c.tx_full_drop,
+        c.rxq_full_drop,
+        c.eapolq_full_drop,
+        c.rx_trunc_drop,
+        c.rx_vid_drop,
+        c.rx_data_drop,
+        c.cmd_backpressure,
+        c.rx_data_ok,
+        c.rx_multi_rb,
+        c.link_lost
+    );
 }
 
 /// Mismo tamaño que `struct iwl_ax211_bss`, que se copia con memcpy sobre este
@@ -253,6 +338,27 @@ pub fn send(data: &[u8]) -> Result<(), ()> {
 
 pub fn can_send() -> bool {
     connected() && unsafe { lx_iwlwifi_can_send() != 0 }
+}
+
+/// Como [`receive_eapol`], pero cede si otro camino tiene el transporte: se
+/// llama desde el scheduler y no puede quedarse detrás de un scan.
+pub fn try_receive_eapol(buf: &mut [u8]) -> Option<usize> {
+    let _g = TRANS_LOCK.try_lock()?;
+    let n = unsafe { lx_iwlwifi_rx_eapol(buf.as_mut_ptr(), buf.len() as c_int) };
+    (n > 0).then_some(n as usize)
+}
+
+/// Lectura sin candado: son contadores de 32 bits que sólo crecen.
+pub fn contadores() -> LxIwlContadores {
+    let mut c = LxIwlContadores::default();
+    unsafe { lx_iwlwifi_counters(&mut c) };
+    c
+}
+
+/// El próximo scan o connect rearranca el firmware desde cero.
+pub fn reset_link() {
+    let _g = TRANS_LOCK.lock();
+    unsafe { lx_iwlwifi_reset_link() }
 }
 
 #[repr(C)]

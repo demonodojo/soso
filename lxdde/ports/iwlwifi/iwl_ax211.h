@@ -229,6 +229,8 @@ struct iwl_ax211_priv {
     uint32_t rx_trunc_drop;
     /* Descriptores completados con un VID que no designa ningún buffer. */
     uint32_t rx_vid_drop;
+    /* RBs que traían más de un paquete (22000 y 8000 los empaquetan). */
+    uint32_t rx_multi_rb;
     /* MPDUs de datos descartadas: cifrado, direcciones o encapsulado. */
     uint32_t rx_data_drop;
     /* MPDUs de datos convertidas a Ethernet y entregadas. */
@@ -237,7 +239,11 @@ struct iwl_ax211_priv {
     int8_t last_rx_rssi;
     uint8_t last_rx_band24;
 
-    uint8_t rxq[8][2048];
+    /* Cada `receive` de smoltcp vacía el anillo de 32 RB entero aquí, y con
+     * DTIM 1 el AP suelta el tráfico de grupo en ráfaga tras el beacon: con 8
+     * ranuras se perdía un 5 % en placa (rxq_llena, 10 oct). */
+#define IWL_RXQ_N 64
+    uint8_t rxq[IWL_RXQ_N][2048];
     int rxq_head;
     int rxq_tail;
 
@@ -252,11 +258,27 @@ struct iwl_ax211_priv {
     uint8_t keys_installed;
     /* Enlace utilizable para IP. Asociada no es autorizada. */
     uint8_t authorized;
+    /* Próximo seq_ctrl de datos no QoS (mac80211 `sdata->sequence_number`):
+     * el TX CMD gen2/gen3 no pide al firmware que lo ponga. */
+    uint16_t tx_seq_ctrl;
+    /* Tramas descartadas porque su cola (rxq / eapolq) estaba llena. */
+    uint32_t rxq_full_drop;
+    uint32_t eapolq_full_drop;
+    /* Caídas de enlace vistas desde el arranque y la última causa. */
+    uint32_t link_lost;
+    uint8_t link_lost_cause;
+    uint16_t link_lost_reason;
 
     char phase[48];
 };
 
 extern struct iwl_ax211_priv g_iwl;
+
+/* `link_lost_cause`. El kernel los traduce a texto en `wifi.rs`. */
+#define IWL_LINK_LOST_NONE      0
+#define IWL_LINK_LOST_DEAUTH    1
+#define IWL_LINK_LOST_DISASSOC  2
+#define IWL_LINK_LOST_BEACONS   3
 
 void lx_iwlwifi_set_alive(int alive);
 void lx_iwlwifi_set_phase(const char *phase);

@@ -2766,7 +2766,7 @@ fn sys_wifi_connect(ssid_ptr: u64, ssid_len: u64, psk_ptr: u64, psk_len: u64) ->
             Some(user_str(psk_ptr, psk_len)?)
         };
         let rc = match psk {
-            None => crate::lxdde::wifi::connect_open(ssid),
+            None => crate::net::wifi_wpa::connect_open(ssid),
             Some(pass) => crate::net::wifi_wpa::connect_wpa2(ssid, pass),
         };
         if rc != 0 {

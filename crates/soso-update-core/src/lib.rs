@@ -149,6 +149,7 @@ pub const PACK_SKIP: &[(&str, Excluido)] = &[
     ("etc/llm.conf", Excluido::ConfigLocal),
     ("etc/voz.conf", Excluido::ConfigLocal),
     ("etc/actualiza.conf", Excluido::ConfigLocal),
+    ("etc/notifybug.conf", Excluido::ConfigLocal),
     ("etc/soso-live.bytes", Excluido::ConfigLocal),
     ("etc/grub-linux.txt", Excluido::ConfigLocal),
     ("etc/soso-release", Excluido::ConfigLocal),

@@ -106,6 +106,11 @@ comando al usuario. **No** uses `sudo mount` ni `sudo cargo xtask sosolog`.
 
 Tras leer o editar, **desmonta**: un `dd` posterior necesita p1 libre.
 
+En **instalación NVMe** el log persistente vive en `/var/log` (U1); el USB ya no
+es el canal principal. Desde la máquina instalada (con red), **`notifybug`**
+envía esas colas a una issue de GitHub; el live conserva `SOSOLOG.TXT` y
+`cargo xtask sosolog` para cuando el stick vuelve al PC.
+
 ## Ficheros ESP (8.3, contiguos, pre-creados)
 
 El kernel **no crea** ficheros en FAT: `espfat::locate` busca entrada 8.3 con

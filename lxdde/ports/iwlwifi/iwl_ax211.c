@@ -434,11 +434,17 @@ void iwl_ax211_deliver_rx(const uint8_t *data, int len)
     struct iwl_ax211_priv *iwl = &g_iwl;
     if (!data || len <= 0 || len > 2040)
         return;
-    int idx = iwl->rxq_head % 8;
+    /* Llena: se tira la nueva. Escribir encima dejaba head == tail y la cola
+     * parecía vacía, con lo que se perdían de golpe todas las pendientes. */
+    if ((iwl->rxq_head + 1) % IWL_RXQ_N == iwl->rxq_tail) {
+        iwl->rxq_full_drop++;
+        return;
+    }
+    int idx = iwl->rxq_head % IWL_RXQ_N;
     iwl->rxq[idx][0] = (uint8_t)(len & 0xff);
     iwl->rxq[idx][1] = (uint8_t)((len >> 8) & 0xff);
     memcpy(&iwl->rxq[idx][2], data, (size_t)len);
-    iwl->rxq_head = (iwl->rxq_head + 1) % 8;
+    iwl->rxq_head = (iwl->rxq_head + 1) % IWL_RXQ_N;
 }
 
 /* Cola aparte para EAPOL: smoltcp no debe llevarse M1/M3 mientras el 4-way
@@ -450,6 +456,10 @@ void iwl_ax211_deliver_eapol(const uint8_t *data, int len)
 
     if (!data || len <= 0 || len > (int)sizeof(iwl->eapolq[0]) - 2)
         return;
+    if ((iwl->eapolq_head + 1) % 4 == iwl->eapolq_tail) {
+        iwl->eapolq_full_drop++;
+        return;
+    }
     idx = iwl->eapolq_head % 4;
     iwl->eapolq[idx][0] = (uint8_t)(len & 0xff);
     iwl->eapolq[idx][1] = (uint8_t)((len >> 8) & 0xff);

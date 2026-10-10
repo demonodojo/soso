@@ -284,6 +284,50 @@ static void test_rx_datapath(int gen3)
     check(g_eapol_rx == 1 && g_data_rx == 1 && g_last_eapol_len == 14 + 4, label);
 }
 
+/* Linux `iwl_pcie_rx_handle_rb`: en AX200 un RB puede llevar ALIVE y detrás,
+ * alineada a 64 B, una MPDU; se cierra con FH_RSCSR_FRAME_INVALID. En AX211
+ * el RB lleva un único paquete. */
+static void test_rb_varios_paquetes(int gen3)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t rb[IWL_GEN2_RX_SZ];
+    uint8_t frame[256];
+    const uint8_t carga[4] = { 0xca, 0xfe, 0x00, 0x01 };
+    const uint32_t fin = FH_RSCSR_FRAME_INVALID;
+    unsigned flen;
+    unsigned n;
+    unsigned off2 = FH_RSCSR_FRAME_ALIGN;
+    unsigned off3;
+    const char *chip = gen3 ? "AX211" : "AX200";
+    char label[160];
+
+    priv_init(&iwl, gen3);
+    if (iwl_alloc_queues(&iwl) != 0)
+        exit(2);
+    iwl.associated = 1;
+    g_data_rx = g_eapol_rx = 0;
+
+    memset(rb, 0xa5, sizeof(rb));
+    alive_notif(rb);
+    flen = iwl_test_data_mpdu(frame, 0x0800, STA_MAC, AP_MAC, PEER_MAC, 0, carga, 4);
+    n = iwl_test_rx_packet(rb + off2, gen3, frame, flen, 0);
+    off3 = (off2 + n + FH_RSCSR_FRAME_ALIGN - 1u) & ~(FH_RSCSR_FRAME_ALIGN - 1u);
+    memcpy(rb + off3, &fin, 4);
+    post_completion(&iwl, 1, rb, sizeof(rb));
+    drain_rx_gen2(&iwl);
+    if (gen3) {
+        snprintf(label, sizeof(label),
+                 "%s: el RB entrega solo el primer paquete (ALIVE)", chip);
+        check(iwl.alive && g_data_rx == 0 && iwl.rx_multi_rb == 0, label);
+    } else {
+        snprintf(label, sizeof(label),
+                 "%s: el RB entrega ALIVE y la MPDU de detrás; para en la marca", chip);
+        check(iwl.alive && g_data_rx == 1 && iwl.rx_multi_rb == 1 &&
+                  iwl.rx_trunc_drop == 0 && memcmp(g_last_data + 14, carga, 4) == 0,
+              label);
+    }
+}
+
 static void test_rx_filtros(void)
 {
     struct iwl_ax211_priv iwl;
@@ -468,6 +512,26 @@ static void test_tx_eapol_cmd(void)
           "EAPOL TX ENCRYPT_DIS|HIGH_PRI antes del 4-way");
     check(cmd->offload_assist == (uint16_t)((24u / 2u) << TX_CMD_OFFLD_MH_SIZE),
           "EAPOL TX offload_assist MH_SIZE=0x0c00");
+
+    /* Tramas consecutivas: seq_ctrl 0x0000, 0x0010, 0x0020 (fragmento 0). */
+    {
+        uint16_t seqs[3];
+        unsigned k;
+
+        check(iwl_mvm_tx_8023(&iwl, eth, 100) == 0 &&
+                  iwl_mvm_tx_8023(&iwl, eth, 100) == 0,
+              "otras dos tramas de datos aceptadas");
+        for (k = 0; k < 3; k++) {
+            const uint8_t *hdr80211 = (const uint8_t *)iwl.data_body_cpu +
+                                      k * IWL_MGMT_TX_SLOT_SIZE +
+                                      sizeof(struct iwl_cmd_header) +
+                                      sizeof(struct iwl_tx_cmd_gen2);
+
+            seqs[k] = (uint16_t)(hdr80211[22] | (hdr80211[23] << 8));
+        }
+        check(seqs[0] == 0x0000 && seqs[1] == 0x0010 && seqs[2] == 0x0020,
+              "datos no QoS: seq_ctrl crece de 0x10 en 0x10 por trama");
+    }
 }
 
 static void test_closed_rb_wrap(void)
@@ -513,6 +577,8 @@ int main(void)
     test_closed_rb_wrap();
     test_rx_datapath(0);
     test_rx_datapath(1);
+    test_rb_varios_paquetes(0);
+    test_rb_varios_paquetes(1);
     test_rx_filtros();
     test_rx_cifrado();
     test_hdrlen();

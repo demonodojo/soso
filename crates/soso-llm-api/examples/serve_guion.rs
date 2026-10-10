@@ -41,6 +41,10 @@ impl Guion {
             0 => format!(
                 "<tool_call>\n{{\"name\": \"read\", \"arguments\": {{\"filePath\": \"{f}\"}}}}\n</tool_call>"
             ),
+            // `GUION_LINEAS=1`: la herramienta propia `reemplazar_lineas` (T22) en vez de `edit`.
+            1 if std::env::var_os("GUION_LINEAS").is_some() => format!(
+                "<tool_call>\n{{\"name\": \"reemplazar_lineas\", \"arguments\": {{\"filePath\": \"{f}\", \"desde\": 1, \"hasta\": 1, \"texto\": \"hola soso\"}}}}\n</tool_call>"
+            ),
             1 => format!(
                 "<tool_call>\n{{\"name\": \"edit\", \"arguments\": {{\"filePath\": \"{f}\", \"oldString\": \"mundo\", \"newString\": \"soso\"}}}}\n</tool_call>"
             ),

@@ -47,6 +47,10 @@ int iwl_mvm_tx_8023(struct iwl_ax211_priv *iwl, const uint8_t *buf, int len)
     flen = iwl_mvm_eth_to_80211(iwl, buf, len, frame, (int)sizeof(frame));
     if (flen <= 0)
         return -1;
+    /* Con seq 0 fijo el AP descarta como duplicada cada reintento de una
+     * trama nueva (mac80211 tx.c: `sequence_number += 0x10`). */
+    frame[22] = (uint8_t)(iwl->tx_seq_ctrl & 0xffu);
+    frame[23] = (uint8_t)(iwl->tx_seq_ctrl >> 8);
 
     if (!iwl->keys_installed)
         flags |= IWL_TX_FLAGS_ENCRYPT_DIS;
@@ -77,5 +81,6 @@ int iwl_mvm_tx_8023(struct iwl_ax211_priv *iwl, const uint8_t *buf, int len)
     pay = (uint16_t)(hdr_off + (unsigned)flen);
     if (iwl_trans_tx(iwl, txq_id, txbuf, pay) != 0)
         return -1;
+    iwl->tx_seq_ctrl = (uint16_t)(iwl->tx_seq_ctrl + 0x10u);
     return 0;
 }

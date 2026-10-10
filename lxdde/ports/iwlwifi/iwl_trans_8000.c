@@ -402,7 +402,7 @@ void iwl_trans_8000_drain(struct iwl_ax211_priv *iwl)
         const uint8_t *buf = (const uint8_t *)iwl->rx_page_cpu +
                              (size_t)slot * IWL_GEN2_RX_SZ;
 
-        iwl_trans_rx_packet(iwl, buf, IWL_GEN2_RX_SZ);
+        iwl_trans_rx_rb(iwl, buf, IWL_GEN2_RX_SZ);
         iwl->rx_write = (uint16_t)((iwl->rx_write + 1u) % IWL_8000_RX_N);
         iwl->rx_read = (uint16_t)((iwl->rx_read + 1u) % IWL_8000_RX_N);
         closed = iwl_closed_rb_idx(iwl->rb_stts, IWL_8000_RX_N);

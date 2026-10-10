@@ -79,17 +79,57 @@ fn main() {
         };
         let m = backend.rt.manifest.clone();
         let mut pl = ResourcePlanner::new(&m, &backend.rt.index, mem, 0, false);
+        // La dispersa ya no se activa sola; `CON_SPARSE=1` la pide para reproducir el fallo.
+        if std::env::var_os("CON_SPARSE").is_some() {
+            pl.activar_atencion_dispersa();
+        }
         if std::env::var_os("NO_SPARSE").is_some() {
             pl.desactivar_atencion_dispersa();
         }
+        if std::env::var_os("NO_H2O").is_some() {
+            pl.desactivar_h2o();
+        }
         eprintln!(
-            "PLANNER: h2o={} sparse(seq>256)={} ventana={} pesos residentes={}",
+            "PLANNER: kv={:?} h2o={} sparse(seq>256)={} ventana={} pesos residentes={}",
+            pl.kv_dtype(),
             pl.use_h2o(),
             pl.use_sparse_attn(1000),
             pl.kv_window_tokens(),
             pl.keep_weights_mapped()
         );
+        if std::env::var_os("SOLO_PLAN").is_some() {
+            // Diagnóstico: cómo evoluciona la ventana de KV con los replanes periódicos.
+            let idx = backend.rt.index.clone();
+            for t in 0..200u32 {
+                let replan = pl.on_token_complete(&m, &idx);
+                if replan || t == 0 {
+                    eprintln!(
+                        "token {t}: replan={replan} ventana={} kv={:?} h2o={} sparse={}",
+                        pl.kv_window_tokens(),
+                        pl.kv_dtype(),
+                        pl.use_h2o(),
+                        pl.use_sparse_attn(1000)
+                    );
+                }
+            }
+            return;
+        }
         backend.rt.set_planner(pl);
+        if std::env::var_os("QUITAR_PLANNER").is_some() {
+            // Diagnóstico: el KV queda reconstruido por `set_planner`, pero sin planificador activo.
+            backend.rt.planner = None;
+            eprintln!("planificador QUITADO tras set_planner (QUITAR_PLANNER)");
+        }
+    }
+    if std::env::var_os("KV_F16").is_some() {
+        // Deshace el KV int8 que impone el planificador (`tight`): sólo para diagnóstico.
+        use soso_llm_core::kv::{KvDtype, LayerKv};
+        let m = backend.rt.manifest.clone();
+        for l in 0..m.num_layers {
+            let kv_dim = m.effective_num_kv_heads(l) as usize * m.effective_head_dim(l) as usize;
+            backend.rt.kv[l as usize] = LayerKv::with_capacity_dtype(256, kv_dim, KvDtype::F16);
+        }
+        eprintln!("KV f16 FORZADO (KV_F16)");
     }
     if std::env::var_os("KV_I8").is_some() {
         // Fuerza KV int8 (KIVI-lite) como hace el planificador del guest con ventana corta.
@@ -142,6 +182,13 @@ fn main() {
             t.elapsed().as_secs_f64(),
             rep.stop
         );
+        if let Some(pl) = backend.rt.planner.as_ref() {
+            let st = pl.stats();
+            eprintln!(
+                "PLANNER tras generar: ventana={} kv_slides={:?} replans={} kv_i8={}",
+                st.kv_window_tokens, st.kv_slides, st.replans, st.kv_dtype_i8
+            );
+        }
         println!("{}", backend.tokenizer().decode(&obs.ids));
         println!("=== ids {:?}", obs.ids);
     }

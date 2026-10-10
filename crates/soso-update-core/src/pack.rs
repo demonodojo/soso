@@ -119,6 +119,11 @@ pub fn pack_rootfs_con<F: Fn(&str) -> bool>(
                     continue;
                 }
                 let data = fs::read(&path)?;
+                // `Manifest::validate` rechaza los ficheros vacíos. `aplicar`
+                // nunca borra, así que los que ya hay en disco se quedan.
+                if data.is_empty() {
+                    continue;
+                }
                 writer.push(rel, data);
             }
         }
@@ -139,6 +144,34 @@ mod tests {
         assert!(!PackWriter::should_pack("etc/soso-release"));
         assert!(PackWriter::should_pack("bin/soso-update"));
         assert!(PackWriter::should_pack("lib/firmware/nvidia/gb205/gsp/fmc-570.144.bin"));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn los_ficheros_vacios_no_entran_y_el_manifiesto_valida() {
+        let root = std::env::temp_dir().join(format!("soso-pack-vacios-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("lib/src")).unwrap();
+        std::fs::write(root.join("lib/src/macro.rs"), b"").unwrap();
+        std::fs::write(root.join("lib/src/lib.rs"), b"mod macro;").unwrap();
+        let (blob, files) = super::pack_rootfs(&root).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+
+        let rutas: alloc::vec::Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(rutas, ["lib/src/lib.rs"]);
+        let m = crate::manifest::Manifest {
+            version: crate::semver::parse("1.0.0").unwrap(),
+            version_raw: "1.0.0".into(),
+            build: "b".into(),
+            fecha: "2026-10-10".into(),
+            kernel_hash: super::pack_hash(b"k"),
+            kernel_size: 1,
+            pack_hash: super::pack_hash(&blob),
+            pack_size: blob.len() as u64,
+            compat: None,
+            files,
+        };
+        assert_eq!(m.validate(), Ok(()));
     }
 }
 

@@ -820,13 +820,13 @@ int iwl_mvm_rx_8023(struct iwl_ax211_priv *iwl, uint8_t *buf, int buflen)
 {
     if (!buf || buflen <= 0 || iwl->rxq_head == iwl->rxq_tail)
         return 0;
-    int idx = iwl->rxq_tail % 8;
+    int idx = iwl->rxq_tail % IWL_RXQ_N;
     int len = (int)iwl->rxq[idx][0] | ((int)iwl->rxq[idx][1] << 8);
     if (len <= 0 || len > 2040)
         return 0;
     if (len > buflen)
         len = buflen;
     memcpy(buf, &iwl->rxq[idx][2], (size_t)len);
-    iwl->rxq_tail = (iwl->rxq_tail + 1) % 8;
+    iwl->rxq_tail = (iwl->rxq_tail + 1) % IWL_RXQ_N;
     return len;
 }

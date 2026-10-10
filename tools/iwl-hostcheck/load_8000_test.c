@@ -46,6 +46,13 @@ void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigne
     (void)len;
 }
 
+void iwl_trans_rx_rb(struct iwl_ax211_priv *iwl, const uint8_t *rb, unsigned size)
+{
+    (void)iwl;
+    (void)rb;
+    (void)size;
+}
+
 void lx_iwlwifi_set_alive(int alive) { (void)alive; }
 
 #include "iwl_fw_body.inc"

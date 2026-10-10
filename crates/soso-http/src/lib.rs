@@ -1,4 +1,4 @@
-//! Cliente HTTP/1.1 + TLS mínimo para userspace soso (HTTPS GET).
+//! Cliente HTTP/1.1 + TLS mínimo para userspace soso (HTTPS GET y POST).
 
 #![no_std]
 
@@ -517,6 +517,32 @@ pub fn https_get<T: TcpTransport>(
     Ok(Response { status, body })
 }
 
+/// POST HTTPS con cuerpo JSON (u otro). **No sigue redirects** — el token no
+/// debe reenviarse a otro origen.
+pub fn https_post_full<T: TcpTransport>(
+    transport: &T,
+    url: &str,
+    auth: Option<&str>,
+    body: &[u8],
+) -> Result<FullResponse, HttpError> {
+    let (scheme, _, _, _) = parse_url(url)?;
+    if scheme != "https" {
+        return Err(HttpError::Parse);
+    }
+    https_post_once(transport, url, auth, body, 120_000)
+}
+
+/// POST HTTPS; devuelve sólo estado y cuerpo de respuesta.
+pub fn https_post<T: TcpTransport>(
+    transport: &T,
+    url: &str,
+    auth: Option<&str>,
+    body: &[u8],
+) -> Result<Response, HttpError> {
+    let FullResponse { status, headers: _, body } = https_post_full(transport, url, auth, body)?;
+    Ok(Response { status, body })
+}
+
 /// GET HTTPS con cabeceras de respuesta (redirects incluidos).
 pub fn https_get_full<T: TcpTransport>(
     transport: &T,
@@ -542,6 +568,17 @@ pub fn https_get_full<T: TcpTransport>(
 fn build_get(host: &str, path: &str, auth: Option<&str>) -> String {
     let mut req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
     req.push_str("Accept-Encoding: identity\r\n");
+    if let Some(tok) = auth {
+        let _ = write!(req, "Authorization: Bearer {tok}\r\n");
+    }
+    req.push_str("\r\n");
+    req
+}
+
+fn build_post_headers(host: &str, path: &str, auth: Option<&str>, content_len: usize) -> String {
+    let mut req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {content_len}\r\nAccept: application/vnd.github+json\r\nUser-Agent: soso-notifybug\r\nAccept-Encoding: identity\r\n"
+    );
     if let Some(tok) = auth {
         let _ = write!(req, "Authorization: Bearer {tok}\r\n");
     }
@@ -609,6 +646,80 @@ fn auth_for_origin<'a>(
     } else {
         None
     }
+}
+
+fn https_post_once<T: TcpTransport>(
+    transport: &T,
+    url: &str,
+    auth: Option<&str>,
+    body: &[u8],
+    read_timeout_ms: u64,
+) -> Result<FullResponse, HttpError> {
+    let config = client_config()?;
+    let (scheme, host, port, path) = parse_url(url)?;
+    if scheme != "https" {
+        return Err(HttpError::Parse);
+    }
+    let mut ip = [0u8; 4];
+    transport
+        .dns_resolve(host, &mut ip)
+        .map_err(|e| map_transport_err(e, HttpError::Dns))?;
+    let mut session_fd = transport
+        .tcp_connect(
+            SockAddr {
+                addr: ip,
+                port,
+                _pad: 0,
+            },
+            30_000,
+        )
+        .map_err(|e| map_transport_err(e, HttpError::Io("tcp_connect")))?;
+    let mut guard = FdGuard::new(transport, session_fd);
+    let mut tls = TlsSession::new(transport, session_fd, host, config.clone())?;
+    if let Err(e) = tls.handshake() {
+        if tls_handshake_io_retryable(&e) {
+            if let HttpError::Io(msg) = &e {
+                transport.log_red(msg);
+            }
+            drop(tls);
+            transport.close(session_fd);
+            session_fd = transport
+                .tcp_connect(
+                    SockAddr {
+                        addr: ip,
+                        port,
+                        _pad: 0,
+                    },
+                    30_000,
+                )
+                .map_err(|e| map_transport_err(e, HttpError::Io("tcp_connect (reintento TLS)")))?;
+            guard = FdGuard::new(transport, session_fd);
+            tls = TlsSession::new(transport, session_fd, host, config)?;
+            tls.handshake()?;
+        } else {
+            return Err(e);
+        }
+    }
+    let head = build_post_headers(host, &path, auth, body.len());
+    tls.write(head.as_bytes())?;
+    if !body.is_empty() {
+        tls.write(body)?;
+    }
+    let mut resp_body = Vec::new();
+    let mut stream = HttpStreamState::new();
+    tls.read_plain_to(&mut stream, &mut VecSink(&mut resp_body), read_timeout_ms)?;
+    guard.disarm();
+    drop(guard);
+    transport.close(session_fd);
+    let (status, headers) = stream.finish()?;
+    if (300..400).contains(&status) {
+        return Err(HttpError::Parse);
+    }
+    Ok(FullResponse {
+        status,
+        headers,
+        body: resp_body,
+    })
 }
 
 fn https_request<T: TcpTransport, S: BodySink>(
@@ -960,6 +1071,22 @@ mod tests {
         assert!(req.contains("Range: bytes=100-199"));
         assert!(req.contains("Authorization: Bearer tok"));
         assert!(req.starts_with("GET /f.gguf HTTP/1.1"));
+    }
+
+    #[test]
+    fn build_post_headers_github() {
+        let req = build_post_headers(
+            "api.github.com",
+            "/repos/demonodojo/soso/issues",
+            Some("ghp_test"),
+            42,
+        );
+        assert!(req.starts_with("POST /repos/demonodojo/soso/issues HTTP/1.1"));
+        assert!(!req.starts_with("GET "));
+        assert!(req.contains("Content-Length: 42"));
+        assert!(req.contains("User-Agent: soso-notifybug"));
+        assert!(req.contains("Authorization: Bearer ghp_test"));
+        assert!(req.ends_with("\r\n\r\n"));
     }
 
     #[test]

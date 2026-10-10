@@ -1,0 +1,14 @@
+{
+ "id": "qwen2.5-coder-14b",
+ "directory": "target/qwen2.5-coder-14b-model",
+ "family": "qwen2",
+ "weights_sha256": "12c633625caf04404decbba355a6c99a01e4071f2df650a62526bfba0c283dc4",
+ "tokenizer_sha256": "12c46448a072b0e16485ab1c35abf575c84a30e6eb6ab4b89dd82a5f91faba73",
+ "template_sha256": "e7796430026c405291cea2291dc7482a14dcd60fece43297f0768d1488be562e",
+ "context_tokens": 32768,
+ "max_output_tokens": 2048,
+ "stop_token_ids": [
+  151645,
+  151643
+ ]
+}

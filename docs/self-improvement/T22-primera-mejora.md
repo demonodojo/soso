@@ -1,6 +1,6 @@
 # T22 — Resolver una tarea real usando la inferencia guest
 
-**Hito:** SI-3 · **Tipo:** Integración y evaluación · **Estado:** en curso (2026-10-08): bloqueada por [T82](T82-prefill-por-lotes.md) (prefill por lotes); ver [seguimiento/T22.md](seguimiento/T22.md).
+**Hito:** SI-3 · **Tipo:** Integración y evaluación · **Estado:** hecha en el host (2026-10-10) con Qwen2.5-Coder-14B a T=0; guest y QEMU del candidato pendientes. Ver [seguimiento/T22.md](seguimiento/T22.md) y `target/self-improvement/tasks/T22/resultado.md`.
 
 **Dependencias:** [T02](T02-banco.md), [T19](T19-qemu-e2e.md), [T21](T21-opencode-contrato.md)
 
@@ -43,9 +43,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados (parche R03 del 14B, `tests/self-improvement/opencode/r03-14b-t0-intento32/`, 2026-10-10).
+- [x] Comprobaciones ejecutadas y evidencia guardada: verificador independiente exit 0; `cargo xtask test` TODO OK; `cargo xtask check` con 2 fallos **previos a esta ficha** (ver seguimiento). Boot QEMU del candidato: no.
+- [x] Resultado entregado con límites explícitos: host y no guest, modelo 14B y no el 7B elegido en T14, una ejecución.
 
 Si falla calidad o presupuesto, conservar intento y volver a T14/T21 según causa. No completar manualmente el parche y atribuírselo al modelo.
 

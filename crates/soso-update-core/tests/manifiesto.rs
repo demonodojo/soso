@@ -126,6 +126,19 @@ fn los_hashes_tienen_que_ser_hashes() {
 }
 
 #[test]
+fn rustc_cabe_en_el_limite_por_fichero() {
+    let rustc = 232_591_680u64;
+    let t = format!(
+        "{MANIFEST_MAGIC}\nversion=1.0.0\nbuild=b\nfecha=2026-01-01\n\
+         kernel {} 100\npack {} {rustc}\nf {} 0 {rustc} bin/rustc\n",
+        hash('a'),
+        hash('b'),
+        hash('c'),
+    );
+    assert_eq!(Manifest::parse(&t).expect("parsea").validate(), Ok(()));
+}
+
+#[test]
 fn un_fichero_gigante_se_rechaza_por_tamano() {
     let t = format!(
         "{MANIFEST_MAGIC}\nversion=1.0.0\nbuild=b\nfecha=2026-01-01\n\

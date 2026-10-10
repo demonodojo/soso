@@ -151,6 +151,55 @@ int iwl_mvm_rx_to_eth(const struct iwl_ax211_priv *iwl, const uint8_t *frame, in
     return ETH_HDR_LEN + payload;
 }
 
+/* --- Pérdida de enlace ------------------------------------------------- */
+
+static const char *link_lost_name(uint8_t cause)
+{
+    switch (cause) {
+    case IWL_LINK_LOST_DEAUTH:
+        return "DEAUTH del AP";
+    case IWL_LINK_LOST_DISASSOC:
+        return "DISASSOC del AP";
+    case IWL_LINK_LOST_BEACONS:
+        return "beacons perdidos";
+    default:
+        return "?";
+    }
+}
+
+/* Linux `iwl_mvm_connection_loss` / mac80211 `ieee80211_rx_mgmt_deauth`.
+ * El firmware conserva MAC, STA y colas del BSS perdido y soso no tiene el
+ * camino de desmontaje de mac80211: la próxima conexión rearranca el firmware
+ * igual que tras un timeout de comando (`iwl_ax211_ensure_ready`). */
+void iwl_mvm_link_down(struct iwl_ax211_priv *iwl, uint8_t cause, uint16_t reason)
+{
+    if (!iwl || !iwl->associated)
+        return;
+    iwl->associated = 0;
+    iwl->authorized = 0;
+    iwl->keys_installed = 0;
+    iwl->link_lost++;
+    iwl->link_lost_cause = cause;
+    iwl->link_lost_reason = reason;
+    iwl->cmd_needs_recover = 1;
+    lx_printk("iwl_mvm: enlace perdido (%s, motivo 802.11 %u)\n",
+              link_lost_name(cause), (unsigned)reason);
+}
+
+void iwl_mvm_rx_missed_beacons(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
+{
+    uint32_t consec;
+
+    if (!iwl || !data || len < IWL_MISSED_BCN_CONSEC_OFF + 4)
+        return;
+    consec = (uint32_t)data[IWL_MISSED_BCN_CONSEC_OFF] |
+             ((uint32_t)data[IWL_MISSED_BCN_CONSEC_OFF + 1] << 8) |
+             ((uint32_t)data[IWL_MISSED_BCN_CONSEC_OFF + 2] << 16) |
+             ((uint32_t)data[IWL_MISSED_BCN_CONSEC_OFF + 3] << 24);
+    if (consec > IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG)
+        iwl_mvm_link_down(iwl, IWL_LINK_LOST_BEACONS, 0);
+}
+
 /* Trama Ethernet → MPDU 802.11 de datos ToDS.
  *
  * addr1 = BSSID, addr2 = esta estación, addr3 = **destino Ethernet real**.
@@ -179,7 +228,7 @@ int iwl_mvm_eth_to_80211(const struct iwl_ax211_priv *iwl, const uint8_t *eth, i
     memcpy(out + 4, iwl->bssid, 6);
     memcpy(out + 10, iwl->mac, 6);
     memcpy(out + 16, eth, 6);
-    /* Control de secuencia a cero: lo rellena el firmware. */
+    /* Control de secuencia a cero: lo pone `iwl_mvm_tx_8023`. */
     memcpy(out + IEEE80211_HDR_LEN, rfc1042_hdr, 6);
     out[IEEE80211_HDR_LEN + 6] = eth[12];
     out[IEEE80211_HDR_LEN + 7] = eth[13];

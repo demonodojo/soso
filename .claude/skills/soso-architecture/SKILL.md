@@ -140,7 +140,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `/bin/soso-resize` | Amplía sosofs robando margen libre al final de modelos (`SYS_FS_RESIZE`; live/instalado GPT) |
 | `/bin/soso-update` | Releases GitHub: rootfs por fichero (sin rollback de binarios; progreso en `/etc/actualiza.estado`); kernel vía `SOSOUPD.TXT` + `SOSOKRN.BIN` + meta `SOSOKRN.MET` (recovery verificable) |
 | `/bin/soso-web` | Navegador mínimo: HTTPS + HTML→texto (modo lectura) o framebuffer (modo `--grafico`) |
-| `/bin/{ls,cat,echo,mkdir,rm,hexdump,grep,ip,ps,ping,halt,reboot}` | Coreutils (`rm -r` borra un árbol; sin `-r` un directorio con contenido se rechaza; no borra `/`. `cat`/`grep`/`hexdump`: stdin si no hay ficheros; `-` sigue valiendo) |
+| `/bin/{ls,cat,echo,mkdir,rm,hexdump,grep,ip,ps,ping,halt,reboot,notifybug}` | Coreutils (`rm -r` borra un árbol; sin `-r` un directorio con contenido se rechaza; no borra `/`. `cat`/`grep`/`hexdump`: stdin si no hay ficheros; `-` sigue valiendo). **`notifybug`**: vuelca `/var/log` y abre issue en GitHub (`/etc/notifybug.conf`, `soso-notify-core`, POST `soso-http`) |
 
 `libsoso`: crt0, syscall wrappers, mini-libstd (256 KiB heap arena), `linea::Lector`
 (lectura de línea con eco: **acepta UTF-8** y borra por carácter; lee **byte a byte**

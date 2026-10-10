@@ -468,6 +468,27 @@ pub fn is_foreign(t: &Guid) -> bool {
     )
 }
 
+/// Nombre de la p4 FAT que escribe el empaquetado live (tipo `0700` para que
+/// Linux la monte).
+pub const NAME_SOSOINSTALL: &[u8] = b"SOSOINSTALL";
+
+/// Como [`is_foreign`], pero mirando la entrada entera: la `SOSOINSTALL` que
+/// soso clona en el destino lleva tipo *Microsoft basic data* y no es Windows.
+pub fn entry_is_foreign(e: &[u8]) -> bool {
+    let t = entry_type(e);
+    if !is_foreign(&t) {
+        return false;
+    }
+    if type_label(&t) == "windows" {
+        let mut name = [0u8; 36];
+        let n = entry_name_ascii(e, &mut name);
+        if &name[..n] == NAME_SOSOINSTALL {
+            return false;
+        }
+    }
+    true
+}
+
 // ---------------------------------------------------------------- RNG
 
 /// xorshift128+ para generar GUID. No hace falta calidad criptográfica: solo
@@ -740,6 +761,25 @@ mod tests {
         // Las particiones del propio live son 0x8300: no cuentan como ajenas.
         assert!(!is_foreign(&linux));
         assert!(!is_foreign(&esp));
+    }
+
+    fn entrada(ty: &str, name: &str) -> [u8; 128] {
+        let mut e = [0u8; 128];
+        e[0..16].copy_from_slice(&Guid::parse(ty).unwrap().0);
+        for (j, c) in name.encode_utf16().enumerate() {
+            e[56 + j * 2..56 + j * 2 + 2].copy_from_slice(&c.to_le_bytes());
+        }
+        e
+    }
+
+    #[test]
+    fn sosoinstall_no_es_windows() {
+        assert!(!entry_is_foreign(&entrada(T_MSDATA, "SOSOINSTALL")));
+        assert!(entry_is_foreign(&entrada(T_MSDATA, "Basic data partition")));
+        assert!(entry_is_foreign(&entrada(T_MSDATA, "SOSOINSTALL2")));
+        assert!(entry_is_foreign(&entrada(T_MSRESERVED, "SOSOINSTALL")));
+        assert!(entry_is_foreign(&entrada(T_WINRE, "SOSOINSTALL")));
+        assert!(!entry_is_foreign(&entrada(T_LINUX, "sosofs")));
     }
 
     #[test]

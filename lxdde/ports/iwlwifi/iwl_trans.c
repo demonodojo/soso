@@ -476,9 +476,19 @@ static void parse_rx_mpdu(struct iwl_ax211_priv *iwl, const uint8_t *data, int l
  * de saltar huecos, porque el hardware procesaría los TFD intermedios.
  */
 
+/* Linux `max_tfd_queue_size`: 256 en 8000 y 22000, 65536 en AX210. Los
+ * punteros de cola (y el doorbell) cuentan módulo este valor y la ranura física
+ * es `ptr & (n - 1)` (`iwl_txq_inc_wrap`, `iwl_txq_get_cmd_index`). Con el
+ * puntero envuelto al tamaño de la cola, el doorbell bajaba de n-1 a 0 y el
+ * hardware veía la vuelta como cientos de TFD pendientes. */
+static uint16_t txq_ptr_mask(const struct iwl_ax211_priv *iwl)
+{
+    return iwl->gen3 ? 0xffffu : 0xffu;
+}
+
 static unsigned cmd_q_used(const struct iwl_ax211_priv *iwl)
 {
-    return (unsigned)((iwl->cmd_write - iwl->cmd_read) & (IWL_CMD_QUEUE_SIZE - 1u));
+    return (unsigned)((uint16_t)(iwl->cmd_write - iwl->cmd_read) & txq_ptr_mask(iwl));
 }
 
 unsigned iwl_trans_cmd_space(struct iwl_ax211_priv *iwl)
@@ -506,7 +516,7 @@ static void cmd_slot_done(struct iwl_ax211_priv *iwl, unsigned slot)
         if (iwl->cmd_slot_state[r] != IWL_SLOT_DONE)
             break;
         iwl->cmd_slot_state[r] = IWL_SLOT_FREE;
-        iwl->cmd_read = (uint16_t)((iwl->cmd_read + 1u) & (IWL_CMD_QUEUE_SIZE - 1u));
+        iwl->cmd_read = (uint16_t)((iwl->cmd_read + 1u) & txq_ptr_mask(iwl));
     }
 }
 
@@ -661,10 +671,18 @@ static uint16_t *txq_write_ptr(struct iwl_ax211_priv *iwl, uint16_t qid)
     return 0;
 }
 
-static unsigned txq_space_one(uint16_t write, uint16_t read)
+static unsigned txq_used(const struct iwl_ax211_priv *iwl, uint16_t write, uint16_t read)
 {
-    unsigned used = (unsigned)((write - read) & (IWL_MGMT_QUEUE_SIZE - 1u));
+    return (unsigned)((uint16_t)(write - read) & txq_ptr_mask(iwl));
+}
 
+static unsigned txq_space_one(const struct iwl_ax211_priv *iwl, uint16_t write,
+                              uint16_t read)
+{
+    unsigned used = txq_used(iwl, write, read);
+
+    if (used > IWL_MGMT_QUEUE_SIZE - 1u)
+        return 0;
     return (IWL_MGMT_QUEUE_SIZE - 1u) - used;
 }
 
@@ -675,7 +693,7 @@ static unsigned txq_space_id(struct iwl_ax211_priv *iwl, uint16_t qid)
 
     if (!readp || !writep)
         return 0;
-    return txq_space_one(*writep, *readp);
+    return txq_space_one(iwl, *writep, *readp);
 }
 
 /* Espacio libre del anillo TX mgmt (compat hostcheck). */
@@ -683,7 +701,7 @@ unsigned iwl_trans_tx_space(const struct iwl_ax211_priv *iwl)
 {
     if (!iwl || !iwl->mgmt_txq_ready)
         return 0;
-    return txq_space_one(iwl->mgmt_txq_write, iwl->mgmt_txq_read);
+    return txq_space_one(iwl, iwl->mgmt_txq_write, iwl->mgmt_txq_read);
 }
 
 /* Cola de datos (SSH, TCP). `iwl_trans_tx_space` es solo mgmt. */
@@ -691,27 +709,27 @@ unsigned iwl_trans_data_tx_space(const struct iwl_ax211_priv *iwl)
 {
     if (!iwl || !iwl->data_txq_ready)
         return 0;
-    return txq_space_one(iwl->data_txq_write, iwl->data_txq_read);
+    return txq_space_one(iwl, iwl->data_txq_write, iwl->data_txq_read);
 }
 
 /* Libera hasta el TFD que el firmware acaba de reconocer. La cola es FIFO y el
- * FW responde en orden, así que el índice de la secuencia marca la cabeza. */
+ * FW responde en orden, así que el índice de la secuencia (la ranura) marca la
+ * cabeza; el consumidor avanza lo que haya de su ranura a la siguiente. */
 void iwl_trans_tx_reclaim(struct iwl_ax211_priv *iwl, uint16_t seq)
 {
     uint16_t qid = SEQ_TO_QUEUE(seq);
     uint16_t *readp = txq_read_ptr(iwl, qid);
     uint16_t *writep = txq_write_ptr(iwl, qid);
     unsigned idx;
-    unsigned next;
+    unsigned adv;
 
     if (!readp || !writep)
         return;
     idx = (unsigned)SEQ_TO_INDEX(seq) & (IWL_MGMT_QUEUE_SIZE - 1u);
-    next = (idx + 1u) & (IWL_MGMT_QUEUE_SIZE - 1u);
-    if (((next - *readp) & (IWL_MGMT_QUEUE_SIZE - 1u)) >
-        ((*writep - *readp) & (IWL_MGMT_QUEUE_SIZE - 1u)))
+    adv = (idx + 1u - (unsigned)*readp) & (IWL_MGMT_QUEUE_SIZE - 1u);
+    if (adv > txq_used(iwl, *writep, *readp))
         return;
-    *readp = (uint16_t)next;
+    *readp = (uint16_t)((*readp + adv) & txq_ptr_mask(iwl));
 }
 
 static const char *tx_status_name(uint32_t st)
@@ -1003,6 +1021,9 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
         parse_rx_mpdu(iwl, data, pay);
     if (group == MAC_CONF_GROUP && cmd == SESSION_PROTECTION_NOTIF)
         parse_session_prot_notif(iwl, data, pay);
+    if (cmd == MISSED_BEACONS_NOTIFICATION &&
+        (group == LEGACY_GROUP || group == LONG_GROUP))
+        iwl_mvm_rx_missed_beacons(iwl, data, pay);
     /* `DATA_PATH_GROUP` id 1 es UPDATE_MU_GROUPS_CMD, no una notificación de
      * Ethernet: entregar su cuerpo a la pila IP era inventarse paquetes. Los
      * datos llegan por REPLY_RX_MPDU_CMD, arriba. */
@@ -1024,7 +1045,7 @@ static uint32_t tx_doorbell(const struct iwl_ax211_priv *iwl, uint16_t qid, uint
 {
     if (iwl->family == IWL_DEVICE_FAMILY_8000)
         return (uint32_t)(wr & 0xffu) | ((uint32_t)qid << 8);
-    return (uint32_t)(wr & 0xffu) | ((uint32_t)qid << 16);
+    return (uint32_t)(wr & txq_ptr_mask(iwl)) | ((uint32_t)qid << 16);
 }
 
 static int gen1_tfd_set_tb(struct iwl_tfd *tfd, uint8_t idx, uint64_t addr, uint16_t len)
@@ -1056,10 +1077,10 @@ static void drain_rx_gen2(struct iwl_ax211_priv *iwl)
          * porque reciclar un índice inventado devolvería al FW una dirección
          * que no es de ningún RB. */
         if (vid != 0 && vid <= IWL_GEN2_RX_N) {
-            handle_gen2_rx(iwl,
-                           (const uint8_t *)iwl->rx_page_cpu +
-                               (size_t)(vid - 1u) * IWL_GEN2_RX_SZ,
-                           IWL_GEN2_RX_SZ);
+            iwl_trans_rx_rb(iwl,
+                            (const uint8_t *)iwl->rx_page_cpu +
+                                (size_t)(vid - 1u) * IWL_GEN2_RX_SZ,
+                            IWL_GEN2_RX_SZ);
             iwl_rx_post_bd(iwl, iwl->rx_write, vid);
             iwl->rx_write = (uint16_t)((iwl->rx_write + 1) % IWL_GEN2_RX_N);
         } else {
@@ -1493,6 +1514,40 @@ void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigne
     handle_gen2_rx(iwl, tmp, len);
 }
 
+/* Linux `iwl_pcie_rx_handle_rb`: hasta AX210 el firmware empaqueta varios
+ * paquetes en un RB, cada uno alineado a FH_RSCSR_FRAME_ALIGN, y cierra con
+ * FH_RSCSR_FRAME_INVALID. Leer solo el primero perdía el RX_MPDU que viaja
+ * detrás de un TX_CMD. Desde AX210 cada RB lleva uno. */
+void iwl_trans_rx_rb(struct iwl_ax211_priv *iwl, const uint8_t *rb, unsigned size)
+{
+    unsigned offset = 0;
+    unsigned n = 0;
+
+    if (!iwl || !rb)
+        return;
+    while (offset + 8u < size) {
+        const uint8_t *p = rb + offset;
+        uint32_t len_n_flags = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                               ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        unsigned len;
+        unsigned next;
+
+        if (len_n_flags == FH_RSCSR_FRAME_INVALID)
+            break;
+        len = (len_n_flags & FH_RSCSR_FRAME_SIZE_MSK) + 4u;
+        next = offset + ((len + FH_RSCSR_FRAME_ALIGN - 1u) & ~(FH_RSCSR_FRAME_ALIGN - 1u));
+        if (len < 8u || next > size)
+            break;
+        handle_gen2_rx(iwl, p, size - offset);
+        n++;
+        if (iwl->gen3)
+            break;
+        offset = next;
+    }
+    if (n > 1u)
+        iwl->rx_multi_rb++;
+}
+
 static uint8_t txq_gen2_num_tbs(struct iwl_tfh_tfd_gen2 *tfd)
 {
     return (uint8_t)(tfd->num_tbs & 0x1fu);
@@ -1689,7 +1744,7 @@ int iwl_trans_txq_alloc_mgmt(struct iwl_ax211_priv *iwl, uint8_t sta_id)
     }
     memcpy(&rsp, iwl->cmd_resp, sizeof(rsp));
     qid = (uint16_t)(rsp.queue_number & 0x7fffu);
-    wr = (uint16_t)(rsp.write_pointer & (IWL_MGMT_QUEUE_SIZE - 1u));
+    wr = (uint16_t)(rsp.write_pointer & txq_ptr_mask(iwl));
     if (!qid) {
         lx_printk("iwl_trans: SCD_QUEUE_CFG qid=0 (HCMD reservada)\n");
         return -1;
@@ -1776,7 +1831,7 @@ int iwl_trans_txq_alloc_data(struct iwl_ax211_priv *iwl, uint8_t sta_id, uint8_t
     }
     memcpy(&rsp, iwl->cmd_resp, sizeof(rsp));
     qid = (uint16_t)(rsp.queue_number & 0x7fffu);
-    wr = (uint16_t)(rsp.write_pointer & (IWL_MGMT_QUEUE_SIZE - 1u));
+    wr = (uint16_t)(rsp.write_pointer & txq_ptr_mask(iwl));
     if (!qid) {
         lx_printk("iwl_trans: SCD_QUEUE_CFG data qid=0\n");
         return -1;
@@ -1894,7 +1949,7 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
     num_tbs = txq_gen2_num_tbs(tfd);
     txq_gen2_update_byte_tbl(bc_cpu, idx, frame_len, num_tbs);
 
-    *writep = (uint16_t)((*writep + 1u) & (IWL_MGMT_QUEUE_SIZE - 1u));
+    *writep = (uint16_t)((*writep + 1u) & txq_ptr_mask(iwl));
     doorbell = tx_doorbell(iwl, txq_id, *writep);
     iwl_write32(iwl, HBUS_TARG_WRPTR, doorbell);
     for (poll = 0; poll < 16; poll++)
@@ -1964,7 +2019,7 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     if (iwl->family == IWL_DEVICE_FAMILY_8000) {
         struct iwl_tfd *tfd8000 =
             (struct iwl_tfd *)((uint8_t *)iwl->mtr_cpu +
-                               (size_t)(slot % IWL_8000_TFD_RING_N) * IWL_GEN1_TFD_SIZE);
+                               (size_t)(iwl->cmd_write % IWL_8000_TFD_RING_N) * IWL_GEN1_TFD_SIZE);
         memset(tfd8000, 0, sizeof(*tfd8000));
     } else {
         tfd = (struct iwl_tfh_tfd_long *)((uint8_t *)iwl->mtr_cpu +
@@ -2029,7 +2084,7 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     if (iwl->family == IWL_DEVICE_FAMILY_8000) {
         struct iwl_tfd *tfd8000 =
             (struct iwl_tfd *)((uint8_t *)iwl->mtr_cpu +
-                               (size_t)(slot % IWL_8000_TFD_RING_N) * IWL_GEN1_TFD_SIZE);
+                               (size_t)(iwl->cmd_write % IWL_8000_TFD_RING_N) * IWL_GEN1_TFD_SIZE);
         uint16_t tb0_size = total <= IWL_FIRST_TB_SIZE ? total : IWL_FIRST_TB_SIZE;
         uint8_t *first_tb =
             (uint8_t *)iwl->hcmd_first_tb_cpu + (size_t)slot * IWL_FIRST_TB_SIZE_ALIGN;
@@ -2075,7 +2130,7 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
         tfd->tbs[0].tb_len = total;
         tfd->tbs[0].addr = iwl->mcr_dma + (uint64_t)slot * IWL_CMD_SLOT_SIZE;
     }
-    iwl->cmd_write = (uint16_t)((iwl->cmd_write + 1u) & (IWL_CMD_QUEUE_SIZE - 1u));
+    iwl->cmd_write = (uint16_t)((iwl->cmd_write + 1u) & txq_ptr_mask(iwl));
     {
         uint32_t doorbell = tx_doorbell(iwl, iwl->cmd_qid, iwl->cmd_write);
         static int cmd_doorbell_logged;

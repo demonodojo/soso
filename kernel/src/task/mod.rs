@@ -1492,6 +1492,8 @@ extern "C" fn schedule_inner() -> ! {
             crate::drivers::logfs::poll();
             #[cfg(feature = "lxdde")]
             crate::lxdde::poll();
+            #[cfg(feature = "lxdde")]
+            crate::net::wifi_wpa::mantener();
         }
         x86_64::instructions::interrupts::disable();
         let now = crate::arch::pit::uptime_ms();

@@ -32,6 +32,7 @@ el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
 | Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
 | Red | **ip**, **ping**, **dns**, **wifi** (builtin) | Ver la IPv4; comprobar alcance ICMP; resolver un nombre; escanear y conectar redes WiFi Intel en placa real |
 | Sistema | **ps**, **halt**, **reboot**, **exit** | Ver procesos; apagar, reiniciar o salir de la shell |
+| Diagnóstico | **notifybug**, **sosolog** (builtin) | En instalación: abrir una issue en GitHub con `/var/log`; en live: volcar log a `SOSOLOG.TXT` |
 
 Al arrancar verás una línea como `soso 0.2.2 (6641119fd)` — versión del kernel
 y build. La versión del disco está en `/etc/soso-release` (`soso-update estado`
@@ -629,6 +630,35 @@ Pregunta a los DNS del DHCP (y a `8.8.8.8` si hace falta) y escribe la IPv4. Si 
 github.com → 140.82.121.4
 ```
 
+### notifybug — informar un fallo a GitHub
+
+En una **instalación en NVMe** los logs persistentes están en `/var/log/` (no en
+la ESP del USB). `notifybug` vuelca la cola reciente de esos ficheros y crea
+**una issue nueva** en el repositorio configurado (por defecto `demonodojo/soso`).
+
+```sh
+notifybug el wifi cae al hacer soso-update comprobar
+notifybug --ver fallo de arranque    # muestra el informe sin enviar
+```
+
+Antes de leer, vuelca el ring de consola a disco (como el builtin `sosolog`).
+Incluye `/etc/soso-release`, `/etc/soso-hw` si existe, y las colas recientes de
+`kernel.log`, `aplicaciones.log` y `actualizaciones.log` (con rotación `.1` si
+cabe). Requiere **red HTTPS** y un token en `/etc/notifybug.conf`:
+
+```ini
+repo=demonodojo/soso
+token=ghp_…
+```
+
+El token es un PAT de GitHub con permiso **Issues (escritura)**. Ese fichero **no
+viaja** en las actualizaciones OTA: lo configuras una vez en la máquina. Si
+`token` está vacío, el comando explica qué falta y no llama a la red.
+
+En el **USB live** puedes usar `notifybug` igual (lee `/var/log` y, si aplica,
+también vuelca a `SOSOLOG.TXT`); para sacar el pendrive sin red sigue valiendo
+`cargo xtask sosolog` en el PC anfitrión.
+
 ### halt — apagar el sistema
 
 ```sh
@@ -1076,6 +1106,7 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 │   ├── llm.conf        # Modelo y límites de `ask` (ver ask-modelo)
 │   ├── voz.conf        # Modelo ASR, idioma, VAD
 │   ├── wifi.conf       # SSID y clave WiFi (alternativa a SOSOWIFI.TXT en ESP)
+│   ├── notifybug.conf  # repo y token PAT para notifybug (local, no OTA)
 │   ├── motd            # Mensaje de bienvenida
 │   ├── authorized_key  # Clave pública ed25519 autorizada (32 bytes)
 │   └── ssh_host_key    # Semilla de la host key del servidor SSH
@@ -1088,6 +1119,7 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 │   ├── whisper-tiny/     # ASR Whisper (live con fetch-whisper)
 │   └── …                 # Modelos importados (soso-hf, mkfs, …)
 ├── var/
+│   ├── log/              # Logs persistentes en instalación (kernel, apps, OTA)
 │   └── actualiza-prueba/ # Solo en imágenes de prueba (E2E actualización)
 └── hola.txt      # Fichero de ejemplo
 ```
@@ -2103,6 +2135,7 @@ wifi connect MiRed MiClaveWPA2
 soso-install                  # elige disco; list para solo mirar
 soso-update comprobar
 soso-update aplicar           # reiniciar después
+notifybug describe el fallo   # issue en GitHub (token en /etc/notifybug.conf)
 
 cat /etc/motd
 mkdir prueba

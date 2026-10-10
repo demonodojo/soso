@@ -936,6 +936,7 @@ pub(crate) fn build_user() -> bool {
         "wild-soso",
         "soso-improve",
         "soso-agent-probe",
+        "notifybug",
     ] {
         let src = out.join(prog);
         let dst = bin.join(prog);

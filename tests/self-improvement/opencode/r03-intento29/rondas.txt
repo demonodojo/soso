@@ -1,0 +1,2 @@
+ronda 1: opencode rc=0
+ronda 1: verificador exit=0

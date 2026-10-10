@@ -776,7 +776,7 @@
       "title": "Resolver una tarea real usando la inferencia guest",
       "milestone": "SI-3",
       "kind": "Integración y evaluación",
-      "status": "in_progress",
+      "status": "done",
       "depends_on": [
         "T02",
         "T19",
@@ -800,9 +800,9 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "blocker": "Mecánica de edit del 7B (copiar literal oldString); decidir entre herramienta de edición por línea, modelo mayor o cerrar con límite.",
-        "updated_at": "2026-10-08T23:30:00+02:00",
-        "summary": "16 intentos con OpenCode real (R01 y, por la opción 2, R03). Circuito completo acreditado de punta a punta: prefill por bloques y KV reutilizable (T81/T82), parser tolerante y servidor/historial pasantes (D8), coordinador con verificador independiente y --continue. El 7B propone la idea correcta de arreglo para R03 pero falla la mecánica de edit (oldString no literal, newString omitido); sin parche válido. Suite completa verde.",
+        "blocker": "El 7B (perfil T14) no resuelve R03 a T=0 ni en host ni en guest; el 14B sí en host pero no cabe con holgura en el guest de 8 GiB.",
+        "updated_at": "2026-10-10T15:00:00+02:00",
+        "summary": "Cerrada en el host (2026-10-10), por decisión del usuario, con Qwen2.5-Coder-14B a T=0 real: OpenCode 1.18.34 + herramienta propia reemplazar_texto resuelve R03 (verificador independiente exit 0, parche de una línea, 1 ronda, intento 32). Hallazgos: OpenCode sólo envía temperature con \"temperature\": true en el modelo; los modelos comprimen espacios al copiar oldString (a T=0 también); bug MoE q_dim!=hidden arreglado con test; a T=0 el 7B NO resuelve R03 (intento 30) y el 30B no cabe en este host. Límites: host (no guest), perfil T14 es el 7B, una ejecución, el modelo no ejecutó cargo test ni informó. cargo xtask test TODO OK; cargo xtask check exit 1 por 2 fallos ya presentes en HEAD (forja hola_std, banco huella). Actualización (15:00): el 7B del guest contestaba en prosa por la atención dispersa del planificador (se activaba sola con window>=256 y descartaba el contexto largo); arreglado (opt-in) con test. Con atención exacta el guest ya llama a herramientas y reproduce el recorrido del host a T=0 (misma edición equivocada del 7B). Falta un modelo que resuelva R03 en el guest (14B: más RAM y ~1,5-3 h de prefill).",
         "evidence": [
           "docs/self-improvement/seguimiento/T22.md",
           "target/self-improvement/first-improvement/temperaturas.txt",
@@ -812,9 +812,19 @@
           "docs/self-improvement/DECISIONES.md",
           "target/self-improvement/first-improvement/intento16/rondas.txt",
           "target/self-improvement/first-improvement/host-bucle.sh",
-          "target/self-improvement/tasks/T42/xtask-test-final.txt"
+          "target/self-improvement/tasks/T42/xtask-test-final.txt",
+          "tests/self-improvement/opencode/r03-intento21/",
+          "crates/soso-llm-core/tests/moe.rs",
+          "tests/self-improvement/opencode/r03-intento29/",
+          ".opencode/tools/reemplazar_texto.ts",
+          "tests/self-improvement/opencode/r03-14b-t0-intento32/",
+          "target/self-improvement/tasks/T22/resultado.md",
+          "target/self-improvement/tasks/T22/xtask-test.txt",
+          "target/self-improvement/tasks/T22/xtask-check.txt",
+          "tests/self-improvement/opencode/r03-guest-7b-t0-atencion-exacta/",
+          "crates/soso-llm-core/tests/attn_rutas.rs"
         ],
-        "next_step": "Ver opciones al final de seguimiento/T22.md (herramienta de edición por número de línea, modelo mayor, o cerrar T22 como circuito acreditado y pasar a T35)."
+        "next_step": "Opcional: probar el 14B en el guest con más RAM (SOSO_QEMU_MEM mayor) para acreditar guest; decidir identidad de modelo para T25-T29; T35; fallos previos de cargo xtask check."
       }
     },
     {

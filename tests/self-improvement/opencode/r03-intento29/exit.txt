@@ -1,0 +1,1 @@
+bucle 1 rondas; verificador exit=0

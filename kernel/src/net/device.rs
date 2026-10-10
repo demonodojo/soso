@@ -102,6 +102,16 @@ pub fn ultima_trama() -> (u8, u64, u64) {
     )
 }
 
+/// Tramas que smoltcp dio por enviadas y el driver rechazó: `TxToken` no
+/// tiene forma de devolver el error.
+#[cfg(feature = "lxdde")]
+static WIFI_TX_ERR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[cfg(feature = "lxdde")]
+pub fn wifi_tx_errores() -> u64 {
+    WIFI_TX_ERR.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(feature = "lxdde")]
 pub struct LxWifiRx {
     buf: [u8; 2048],
@@ -161,7 +171,9 @@ impl TxToken for LxWifiTx {
         let frame = &mut buf[..n];
         anotar_trama(b'T', frame.as_ptr() as u64, frame.len());
         let r = f(frame);
-        let _ = crate::lxdde::wifi_send(&buf[..n]);
+        if crate::lxdde::wifi_send(&buf[..n]).is_err() {
+            WIFI_TX_ERR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         crate::mm::heap::vigilar_huecos("tx-consumido");
         r
     }

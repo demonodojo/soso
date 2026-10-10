@@ -258,6 +258,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "notifybug"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "libsoso",
+ "soso-abi",
+ "soso-http",
+ "soso-log-core",
+ "soso-notify-core",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -538,6 +550,14 @@ dependencies = [
  "serde_json",
  "sosomodel",
 ]
+
+[[package]]
+name = "soso-log-core"
+version = "0.1.0"
+
+[[package]]
+name = "soso-notify-core"
+version = "0.1.0"
 
 [[package]]
 name = "soso-rustc"

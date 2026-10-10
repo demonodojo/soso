@@ -1,0 +1,17 @@
+[package]
+name = "notifybug"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "notifybug"
+path = "src/main.rs"
+
+[dependencies]
+soso-abi = { workspace = true }
+libsoso = { workspace = true }
+getrandom = { workspace = true }
+soso-http = { path = "../../crates/soso-http" }
+soso-notify-core = { path = "../../crates/soso-notify-core" }
+soso-log-core = { path = "../../crates/soso-log-core" }

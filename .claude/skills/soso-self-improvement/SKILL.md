@@ -212,6 +212,11 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 ## Por dónde (actualizar al cerrar la recomendada)
 
 Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/README.md).
+**10-oct-2026:** T22 está **hecha en el host** con Qwen2.5-Coder-14B a T=0 (OpenCode + herramienta propia
+`reemplazar_texto`, verificador exit 0); el guest no está acreditado y el perfil T14 sigue siendo el 7B (a T=0 no
+resuelve R03). OpenCode sólo envía `temperature` si el modelo declara `"temperature": true` en `opencode.json`.
+Siguiente: identidad de modelo para T25–T29 y T35.
+
 Revisión del **2-oct-2026**: el perfil elegido es `qwen2.5-coder-7b` (campaña 10×3, cobertura `completa`, **GO 10/10**; el 3B quedó NO-GO 8/10). **T20** está pendiente con esa identidad. **T40 y T41 están cerradas** (2026-10-02: `cargo build --offline` compila en el guest un workspace de dos crates, uno con `build.rs`, y `soso-abi`). **T40, T41 y T80 están cerradas; T42 en curso** (2026-10-03: `mkfs-soso` compila en el guest —2 min 28 s— y su imagen se verifica con el `sosofs` del host; faltan C-113 `-Zbuild-std`, C-115…C-117 C/ensamblador/objcopy y la imagen arrancable). Truco: `SOSO_REUSE_DATA=1 cargo xtask run` conserva lo que el guest escribió.
 
 Trabajo independiente: **T72** está cerrada (26-sep): `soso-alloc` lo usan

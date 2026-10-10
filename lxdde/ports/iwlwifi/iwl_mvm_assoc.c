@@ -115,6 +115,25 @@ void iwl_mvm_rx_mlme_frame(struct iwl_ax211_priv *iwl, const uint8_t *frame, int
     if (!iwl || !frame || len < 24)
         return;
     stype = mgmt_stype(frame);
+    /* mac80211 `ieee80211_rx_mgmt_deauth`/`_disassoc`: addr2 = addr3 = BSSID;
+     * addr1 es esta estación o difusión (el AP que se apaga avisa a todos). */
+    if (stype == IEEE80211_STYPE_DEAUTH || stype == IEEE80211_STYPE_DISASSOC) {
+        static const uint8_t bcast[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+        uint16_t reason;
+
+        if (len < 26 || !iwl->associated || bssid_is_zero(iwl->bssid))
+            return;
+        if (memcmp(frame + 4, iwl->mac, 6) != 0 && memcmp(frame + 4, bcast, 6) != 0)
+            return;
+        if (memcmp(frame + 10, iwl->bssid, 6) != 0 ||
+            memcmp(frame + 16, iwl->bssid, 6) != 0)
+            return;
+        reason = (uint16_t)frame[24] | ((uint16_t)frame[25] << 8);
+        iwl_mvm_link_down(iwl, stype == IEEE80211_STYPE_DEAUTH ? IWL_LINK_LOST_DEAUTH
+                                                               : IWL_LINK_LOST_DISASSOC,
+                          reason);
+        return;
+    }
     if (!mlme_frame_for_us(iwl, frame, len, stype))
         return;
     if (stype == IEEE80211_STYPE_BEACON) {

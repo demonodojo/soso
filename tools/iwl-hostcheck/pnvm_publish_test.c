@@ -60,6 +60,13 @@ void iwl_mvm_on_scan_complete(struct iwl_ax211_priv *iwl, uint32_t uid, uint8_t 
     (void)status;
 }
 
+void iwl_mvm_rx_missed_beacons(struct iwl_ax211_priv *iwl, const uint8_t *data, int len)
+{
+    (void)iwl;
+    (void)data;
+    (void)len;
+}
+
 void *lx_kmalloc(unsigned long size, unsigned gfp)
 {
     (void)gfp;

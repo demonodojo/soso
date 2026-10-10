@@ -579,49 +579,48 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "f52ef0d6a",
-        "commit_corto": "f52ef0d6a",
+        "commit": "3588d3d34",
+        "commit_corto": "3588d3d34",
         "version": "0.3.7",
-        "dirty": true,
-        "cambios_locales": "flush#14 @8862s USB /dev/sda1; banner f52ef0d6a-dirty (SOSOHASH sigue en cd5f6a36a). docs/DIAGNOSTICO-ROG-2026-10-05.md"
+        "dirty": false,
+        "cambios_locales": "flush#633 @5189295ms USB /dev/sda1; banner 3588d3d34 (SOSOHASH sigue en cd5f6a36a-dirty). docs/DIAGNOSTICO-ROG-2026-10-10.md"
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
-        "status": "fail",
-        "nota": "kernel-shell; init: sin /bin/init",
-        "fecha": "2026-10-05"
+        "status": "ok",
+        "nota": "sosh: marca lista pid=2; install 100%; halt sin panic",
+        "fecha": "2026-10-10"
       },
       "wifi": {
         "alive": {
-          "status": "fail",
-          "nota": "lx-iwlwifi ausente; no hay UCODE_ALIVE_NTFY",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "UCODE_ALIVE_NTFY",
+          "fecha": "2026-10-10"
         },
         "init_complete": {
-          "status": "fail",
-          "nota": "driver ausente",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "INIT_COMPLETE_NOTIF",
+          "fecha": "2026-10-10"
         },
         "mvm_ready": {
-          "status": "fail",
-          "nota": "driver ausente",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "MVM up",
+          "fecha": "2026-10-10"
         },
         "scan": {
-          "status": "fail",
-          "nota": "scan no ejecutado (sin iwlwifi)",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "fin normal",
+          "fecha": "2026-10-10"
         },
         "assoc_wpa2": {
-          "status": "fail",
-          "nota": "sin radio; SOSOWIFI vacío",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "fecha": "2026-10-10"
         },
         "dhcp": {
-          "status": "fail",
-          "nota": "sin lease; rtl8169 DOWN y sin WiFi",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "192.168.68.132/24 en backend lx-wifi (el lease no nombra la iface en la misma línea)",
+          "fecha": "2026-10-10"
         },
         "ssh": {
           "status": "pendiente"
@@ -632,19 +631,18 @@
       },
       "gpu": {
         "gsp_rpc": {
-          "status": "fail",
-          "nota": "GSP=off; lx-nouveau ausente",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "GSP_INIT_DONE",
+          "fecha": "2026-10-10"
         },
         "vram_pool": {
-          "status": "fail",
-          "nota": "pool VRAM=no",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "fecha": "2026-10-10"
         },
         "ce_readback": {
-          "status": "pendiente",
-          "nota": "no corrido: nouveau ausente en f52ef0d6a",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "CE readback GO",
+          "fecha": "2026-10-10"
         },
         "compute_cpu_gpu": {
           "status": "pendiente"
@@ -769,7 +767,9 @@
         "target/usb-diagnostic-2026-10-05/SOSOLOG.body.txt",
         "target/usb-diagnostic-2026-10-05/SOSODRV.txt",
         "target/usb-diagnostic-2026-10-05/SOSOLOG.TXT",
-        "target/usb-diagnostic-2026-10-05/SOSODRV.TXT"
+        "target/usb-diagnostic-2026-10-05/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-10-10/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-10-10/SOSODRV.txt"
       ],
       "historial": [
         {
@@ -6069,10 +6069,115 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-10-05"
+        },
+        {
+          "log_hash": "0931274cc1103f52c549294f0dce03c78b7c4193d70ed2c146bffb79c4316039",
+          "kernel": "soso 0.3.7 (3588d3d34)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "048d:1234",
+            "0b05:1866",
+            "0b05:18c6"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-10-10"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-10-10"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-10-10"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "fin normal",
+              "fecha": "2026-10-10"
+            },
+            "assoc_wpa2": {
+              "status": "ok",
+              "fecha": "2026-10-10"
+            },
+            "dhcp": {
+              "status": "ok",
+              "nota": "192.168.68.132/24 en backend lx-wifi (el lease no nombra la iface en la misma línea)",
+              "fecha": "2026-10-10"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-10-10"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-10-10"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-10-10"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-10-10"
         }
       ],
-      "notas": "flush#14 @8862s kernel f52ef0d6a-dirty: kshell, sin /bin/init. sosofs gen 24 no enlaza la hoja del directorio raíz (bloque 275987, gen 18, dirents bin/etc/lib/var). lx-nouveau y lx-iwlwifi ausentes (GSP=off, pool VRAM=no). rtl8169 enlace DOWN; firmware PHY no resuelto. docs/DIAGNOSTICO-ROG-2026-10-05.md",
-      "actualizado": "2026-10-05"
+      "notas": "flush#633 @5189295ms kernel 3588d3d34: sosh pid=2, GSP_INIT_DONE, pool VRAM=sí, CE readback GO, compute cls=0xc7c0 listo sin saxpy. WiFi AX200 asociado a Rutilo, DHCP 192.168.68.132 por lx-wifi (rtl8169 DOWN, sin cable). soso-install nvme1 exit 1 porque p4 SOSOINSTALL se etiqueta windows; con --force 4500/4500 MiB. soso-update aplicar: plazo al conectar 185.199.111.133:443, sin #PF. SOSOHASH sigue en cd5f6a36a-dirty. Racha dejada en 0 (un sosh no es aceptación). docs/DIAGNOSTICO-ROG-2026-10-10.md",
+      "actualizado": "2026-10-10"
     },
     {
       "id": "ax211-wifi",
@@ -6679,49 +6784,48 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "f52ef0d6a",
-        "commit_corto": "f52ef0d6a",
+        "commit": "3588d3d34",
+        "commit_corto": "3588d3d34",
         "version": "0.3.7",
-        "dirty": true,
-        "cambios_locales": "flush#14 @8862s USB /dev/sda1; banner f52ef0d6a-dirty (SOSOHASH sigue en cd5f6a36a). docs/DIAGNOSTICO-ROG-2026-10-05.md"
+        "dirty": false,
+        "cambios_locales": "flush#633 @5189295ms USB /dev/sda1; banner 3588d3d34 (SOSOHASH sigue en cd5f6a36a-dirty). docs/DIAGNOSTICO-ROG-2026-10-10.md"
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
-        "status": "fail",
-        "nota": "kernel-shell; init: sin /bin/init",
-        "fecha": "2026-10-05"
+        "status": "ok",
+        "nota": "sosh: marca lista pid=2; install 100%; halt sin panic",
+        "fecha": "2026-10-10"
       },
       "wifi": {
         "alive": {
-          "status": "fail",
-          "nota": "lx-iwlwifi ausente; no hay UCODE_ALIVE_NTFY",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "UCODE_ALIVE_NTFY",
+          "fecha": "2026-10-10"
         },
         "init_complete": {
-          "status": "fail",
-          "nota": "driver ausente",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "INIT_COMPLETE_NOTIF",
+          "fecha": "2026-10-10"
         },
         "mvm_ready": {
-          "status": "fail",
-          "nota": "driver ausente",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "MVM up",
+          "fecha": "2026-10-10"
         },
         "scan": {
-          "status": "fail",
-          "nota": "scan no ejecutado (sin iwlwifi)",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "fin normal",
+          "fecha": "2026-10-10"
         },
         "assoc_wpa2": {
-          "status": "fail",
-          "nota": "sin radio; SOSOWIFI vacío",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "fecha": "2026-10-10"
         },
         "dhcp": {
-          "status": "fail",
-          "nota": "sin lease; rtl8169 DOWN y sin WiFi",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "192.168.68.132/24 en backend lx-wifi (el lease no nombra la iface en la misma línea)",
+          "fecha": "2026-10-10"
         },
         "ssh": {
           "status": "pendiente"
@@ -6732,19 +6836,18 @@
       },
       "gpu": {
         "gsp_rpc": {
-          "status": "fail",
-          "nota": "GSP=off; lx-nouveau ausente",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "GSP_INIT_DONE",
+          "fecha": "2026-10-10"
         },
         "vram_pool": {
-          "status": "fail",
-          "nota": "pool VRAM=no",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "fecha": "2026-10-10"
         },
         "ce_readback": {
-          "status": "pendiente",
-          "nota": "no corrido: nouveau ausente en f52ef0d6a",
-          "fecha": "2026-10-05"
+          "status": "ok",
+          "nota": "CE readback GO",
+          "fecha": "2026-10-10"
         },
         "compute_cpu_gpu": {
           "status": "pendiente"
@@ -6868,7 +6971,9 @@
         "target/usb-diagnostic-2026-10-05/SOSOLOG.body.txt",
         "target/usb-diagnostic-2026-10-05/SOSODRV.txt",
         "target/usb-diagnostic-2026-10-05/SOSOLOG.TXT",
-        "target/usb-diagnostic-2026-10-05/SOSODRV.TXT"
+        "target/usb-diagnostic-2026-10-05/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-10-10/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-10-10/SOSODRV.txt"
       ],
       "historial": [
         {
@@ -12273,10 +12378,115 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-10-05"
+        },
+        {
+          "log_hash": "0931274cc1103f52c549294f0dce03c78b7c4193d70ed2c146bffb79c4316039",
+          "kernel": "soso 0.3.7 (3588d3d34)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "048d:1234",
+            "0b05:1866",
+            "0b05:18c6"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-10-10"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-10-10"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-10-10"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "fin normal",
+              "fecha": "2026-10-10"
+            },
+            "assoc_wpa2": {
+              "status": "ok",
+              "fecha": "2026-10-10"
+            },
+            "dhcp": {
+              "status": "ok",
+              "nota": "192.168.68.132/24 en backend lx-wifi (el lease no nombra la iface en la misma línea)",
+              "fecha": "2026-10-10"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-10-10"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-10-10"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-10-10"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-10-10"
         }
       ],
-      "notas": "flush#14 @8862s kernel f52ef0d6a-dirty: kshell, sin /bin/init. sosofs gen 24 no enlaza la hoja del directorio raíz (bloque 275987, gen 18, dirents bin/etc/lib/var). lx-nouveau y lx-iwlwifi ausentes (GSP=off, pool VRAM=no). rtl8169 enlace DOWN; firmware PHY no resuelto. docs/DIAGNOSTICO-ROG-2026-10-05.md",
-      "actualizado": "2026-10-05"
+      "notas": "flush#633 @5189295ms kernel 3588d3d34: sosh pid=2, GSP_INIT_DONE, pool VRAM=sí, CE readback GO, compute cls=0xc7c0 listo sin saxpy. WiFi AX200 asociado a Rutilo, DHCP 192.168.68.132 por lx-wifi (rtl8169 DOWN, sin cable). soso-install nvme1 exit 1 porque p4 SOSOINSTALL se etiqueta windows; con --force 4500/4500 MiB. soso-update aplicar: plazo al conectar 185.199.111.133:443, sin #PF. SOSOHASH sigue en cd5f6a36a-dirty. Racha dejada en 0 (un sosh no es aceptación). docs/DIAGNOSTICO-ROG-2026-10-10.md",
+      "actualizado": "2026-10-10"
     },
     {
       "id": "deck-oled",

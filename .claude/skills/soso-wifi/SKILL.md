@@ -151,6 +151,31 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
   reciclado antes de tiempo, TFD reutilizado sin confirmar), pero sale de la
   misma lectura de la especificación que el driver: si el formato está mal, los
   dos se equivocan igual. Por eso el arreglo de descriptores necesita placa.
+- **Punteros de cola TX módulo `max_tfd_queue_size`, no módulo la cola
+  (2026-10-10).** 256 en 22000/8000, 65536 en AX210 (`txq_ptr_mask`). La ranura
+  es `ptr & (n-1)` y el doorbell lleva el puntero completo. Envolver a 16
+  hacía bajar el doorbell de 15 a 0: el hardware veía 241 TFD pendientes y
+  reenviaba tramas viejas (DNS con `id=distinto`, TCP al CDN muerto).
+  `ring_soak` lo vigila comparando doorbell − lectura HW con lo que hay en vuelo.
+- **Un RB lleva varios paquetes hasta AX210** (`iwl_trans_rx_rb`): alineados a
+  64 B, hasta `FH_RSCSR_FRAME_INVALID`. Leer sólo el primero perdía el
+  `RX_MPDU` que viaja detrás de un `TX_CMD`.
+- **`seq_ctrl` de datos no QoS lo pone el driver** (`tx_seq_ctrl += 0x10`): la
+  API TX gen2/gen3 no tiene `TX_CMD_FLG_SEQ_CTL`, el firmware no lo rellena.
+- **El supplicant vive tras el 4-way** (`wifi_wpa::SESION` + `mantener()` desde
+  el scheduler): renovación de GTK y M3 repetido. Sin respuesta, el AP
+  desautentica. Una clave ya en uso no se reinstala (KRACK).
+- **Caída de enlace** (`iwl_mvm_link_down`: DEAUTH/DISASSOC del BSSID, >16
+  beacons perdidos) → `net::on_wifi_lost` → reconexión con retroceso 2→60 s
+  que **rearranca el firmware** (`reset_link` + `ensure_ready`): soso no tiene
+  el desmontaje de MAC/STA/colas de mac80211.
+- **Cola de entrega RX de `IWL_RXQ_N` = 64:** cada `receive` vacía el anillo de
+  32 RB en ella, y con DTIM 1 el tráfico de grupo llega en ráfaga. Con 8 se
+  perdía un 5 % en placa. Llena, descarta la trama nueva y cuenta `rxq_llena`.
+  No se frena el vaciado del anillo: retendría las respuestas HCMD.
+- **Contadores en SOSOLOG, no en `wifi status`:** línea `wifi: pérdidas …`
+  cada ≥10 s si cambian. `WifiStatus` es ABI fija y el live se graba a menudo
+  con `--only kernel`.
 - **La secuencia TX sólo lleva 8 bits de índice.** Una respuesta repetida de un
   TFD ya reutilizado es indistinguible de la legítima; `iwl_trans_tx_reclaim`
   sólo puede ignorar las que apuntan por detrás de la cabeza, igual que

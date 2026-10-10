@@ -344,7 +344,7 @@ fn exec(line: &str) {
                             };
                             let rc = match psk.as_deref() {
                                 Some(pass) => crate::net::wifi_wpa::connect_wpa2(ssid, pass),
-                                None => crate::lxdde::wifi::connect_open(ssid),
+                                None => crate::net::wifi_wpa::connect_open(ssid),
                             };
                             if rc == 0 {
                                 crate::net::wifi_wpa::persist_credentials(ssid, psk.as_deref());

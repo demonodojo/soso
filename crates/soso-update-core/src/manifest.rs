@@ -51,8 +51,11 @@ pub enum ValidateError {
     OverlappingFiles,
 }
 
-/// Tamaño máximo de un fichero en el pack (64 MiB).
-pub const MAX_FILE_SIZE: u64 = 64 * 1024 * 1024;
+/// Tamaño máximo de un fichero en el pack (512 MiB). `soso-update` sostiene
+/// el fichero en curso entero en su heap, que el kernel corta en `BRK_MAX`
+/// (1,5 GiB): al crecer el `Vec` conviven el viejo y el nuevo, ~768 MiB.
+/// `bin/rustc` ya pasa de 200 MiB.
+pub const MAX_FILE_SIZE: u64 = 512 * 1024 * 1024;
 
 impl Manifest {
     pub fn parse(text: &str) -> Result<Self, ParseError> {

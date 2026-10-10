@@ -96,4 +96,31 @@ pub fn can_send() -> bool {
     false
 }
 
+pub fn try_receive_eapol(_buf: &mut [u8]) -> Option<usize> {
+    None
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct LxIwlContadores {
+    pub link_lost: u32,
+}
+
+impl LxIwlContadores {
+    pub fn causa_caida(&self) -> &'static str {
+        "sin-iwlwifi"
+    }
+
+    pub fn motivo(&self) -> u32 {
+        0
+    }
+}
+
+pub fn contadores() -> LxIwlContadores {
+    LxIwlContadores::default()
+}
+
+pub fn vigilar_contadores(_tx_err: u64) {}
+
+pub fn reset_link() {}
+
 pub fn informar_dma_valor(_valor: u64) {}

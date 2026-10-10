@@ -1226,6 +1226,91 @@ static int test_eapol_lazy_data_txq(void)
     return 0;
 }
 
+static void mgmt_deauth(uint8_t *f, uint16_t stype, const uint8_t *a1,
+                        const uint8_t *a2, const uint8_t *a3, uint16_t reason)
+{
+    memset(f, 0, 26);
+    f[0] = (uint8_t)stype;
+    memcpy(f + 4, a1, 6);
+    memcpy(f + 10, a2, 6);
+    memcpy(f + 16, a3, 6);
+    f[24] = (uint8_t)(reason & 0xff);
+    f[25] = (uint8_t)(reason >> 8);
+}
+
+/* DEAUTH/DISASSOC del AP y beacons perdidos tiran el enlace y obligan a
+ * rearrancar el firmware en la próxima conexión; lo demás no lo toca. */
+static int test_link_down(void)
+{
+    static const uint8_t sta[6] = {0x84, 0x1b, 0x77, 0xe1, 0x20, 0x71};
+    static const uint8_t ap[6] = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
+    static const uint8_t otro[6] = {0x02, 0x99, 0x99, 0x99, 0x99, 0x99};
+    static const uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    struct iwl_ax211_priv iwl;
+    uint8_t f[26];
+    uint8_t mb[20];
+
+    memset(&iwl, 0, sizeof(iwl));
+    memcpy(iwl.mac, sta, 6);
+    memcpy(iwl.bssid, ap, 6);
+    iwl.associated = 1;
+    iwl.authorized = 1;
+    iwl.keys_installed = 1;
+
+    mgmt_deauth(f, IEEE80211_STYPE_DEAUTH, sta, otro, otro, 7);
+    iwl_mvm_rx_mlme_frame(&iwl, f, 26);
+    mgmt_deauth(f, IEEE80211_STYPE_DEAUTH, otro, ap, ap, 7);
+    iwl_mvm_rx_mlme_frame(&iwl, f, 26);
+    if (!iwl.associated || iwl.link_lost != 0) {
+        fprintf(stderr, "DEAUTH de otro BSS o para otra estación tiró el enlace\n");
+        return 1;
+    }
+
+    mgmt_deauth(f, IEEE80211_STYPE_DEAUTH, sta, ap, ap, 15);
+    iwl_mvm_rx_mlme_frame(&iwl, f, 26);
+    if (iwl.associated || iwl.authorized || iwl.keys_installed ||
+        !iwl.cmd_needs_recover || iwl.link_lost != 1 ||
+        iwl.link_lost_cause != IWL_LINK_LOST_DEAUTH || iwl.link_lost_reason != 15) {
+        fprintf(stderr, "DEAUTH del AP no tiró el enlace (assoc=%u lost=%u causa=%u motivo=%u)\n",
+                (unsigned)iwl.associated, (unsigned)iwl.link_lost,
+                (unsigned)iwl.link_lost_cause, (unsigned)iwl.link_lost_reason);
+        return 1;
+    }
+    /* Ya caído: una segunda trama no cuenta otra caída. */
+    iwl_mvm_rx_mlme_frame(&iwl, f, 26);
+    if (iwl.link_lost != 1) {
+        fprintf(stderr, "una DEAUTH sin asociación contó otra caída\n");
+        return 1;
+    }
+
+    iwl.associated = 1;
+    iwl.cmd_needs_recover = 0;
+    mgmt_deauth(f, IEEE80211_STYPE_DISASSOC, bcast, ap, ap, 3);
+    iwl_mvm_rx_mlme_frame(&iwl, f, 26);
+    if (iwl.associated || iwl.link_lost_cause != IWL_LINK_LOST_DISASSOC) {
+        fprintf(stderr, "DISASSOC de difusión del AP no tiró el enlace\n");
+        return 1;
+    }
+
+    iwl.associated = 1;
+    memset(mb, 0, sizeof(mb));
+    mb[IWL_MISSED_BCN_CONSEC_OFF] = IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG;
+    iwl_mvm_rx_missed_beacons(&iwl, mb, sizeof(mb));
+    if (!iwl.associated) {
+        fprintf(stderr, "%u beacons perdidos ya tiran el enlace (Linux exige más)\n",
+                (unsigned)IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG);
+        return 1;
+    }
+    mb[IWL_MISSED_BCN_CONSEC_OFF] = IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG + 1;
+    iwl_mvm_rx_missed_beacons(&iwl, mb, sizeof(mb));
+    if (iwl.associated || iwl.link_lost_cause != IWL_LINK_LOST_BEACONS ||
+        iwl.link_lost != 3) {
+        fprintf(stderr, "beacons perdidos no tiraron el enlace\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (sizeof(struct iwl_mvm_add_sta_cmd) != 48) {
@@ -1287,5 +1372,9 @@ int main(void)
     if (test_eapol_lazy_data_txq() != 0)
         return 1;
     puts("OK: EAPOL reserva tid=0 perezoso en cola data + CMD_RATE + offload 0x0c00");
+
+    if (test_link_down() != 0)
+        return 1;
+    puts("OK: DEAUTH/DISASSOC del AP y >16 beacons perdidos tiran el enlace; lo ajeno no");
     return 0;
 }

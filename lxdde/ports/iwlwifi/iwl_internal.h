@@ -75,6 +75,10 @@ enum iwl_device_family {
 #define IWL_MVM_HCMD_TIMEOUT_MS      2000
 #define IWL_GEN2_RX_N                32
 #define IWL_GEN2_RX_SZ               4096
+/* iwl-trans.h: cabecera `len_n_flags` de cada paquete dentro de un RB. */
+#define FH_RSCSR_FRAME_SIZE_MSK      0x00003fffu
+#define FH_RSCSR_FRAME_INVALID       0x55550000u
+#define FH_RSCSR_FRAME_ALIGN         0x40u
 
 /* Linux pcie/rx.c: `r = closed_rb_num & 0xFFF; r &= (queue_size - 1)`.
  * Sin el wrap, closed=32 y rx_read∈0..31 recorren el anillo entero. */
@@ -377,6 +381,11 @@ static inline uint32_t tfd_queue_cb_size(unsigned qsize)
 #define INIT_COMPLETE_NOTIF        0x4
 #define REPLY_RX_PHY_CMD           0xc0
 #define REPLY_RX_MPDU_CMD          0xc1
+/* fw/api/mac.h `struct iwl_missed_beacons_notif` (v3 y v4 comparten offsets). */
+#define MISSED_BEACONS_NOTIFICATION 0xa2
+#define IWL_MISSED_BCN_CONSEC_OFF  8
+/* mvm/mvm.h: por encima, `iwl_mvm_connection_loss`. */
+#define IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG 16
 #define SCAN_CFG_CMD               0xc
 #define SCAN_REQ_UMAC              0xd
 #define SCAN_COMPLETE_UMAC         0x0f
@@ -782,6 +791,8 @@ typedef char iwl_ax211_bss_size_check[sizeof(struct iwl_ax211_bss) == 46 ? 1 : -
 #define IEEE80211_STYPE_ASSOC_RESP 0x0010u
 #define IEEE80211_STYPE_BEACON     0x0080u
 #define IEEE80211_STYPE_AUTH       0x00b0u
+#define IEEE80211_STYPE_DISASSOC   0x00a0u
+#define IEEE80211_STYPE_DEAUTH     0x00c0u
 #define IEEE80211_FC_STYPE_MASK    0x00fcu
 
 /* Linux ieee80211_ht_operation: el primer byte es primary_chan. */
@@ -2086,6 +2097,7 @@ uint32_t iwl_mac_addr_from_csr(uint16_t device_id);
 int iwl_mac_valid_unicast(const uint8_t mac[6]);
 void iwl_mac_from_csr(struct iwl_ax211_priv *iwl, uint8_t mac[6]);
 void iwl_trans_rx_packet(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsigned len);
+void iwl_trans_rx_rb(struct iwl_ax211_priv *iwl, const uint8_t *rb, unsigned size);
 int iwl_fw_cmd_ver(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t cmd);
 int iwl_fw_has_capa(const struct iwl_ax211_priv *iwl, unsigned capa_bit);
 int iwl_mvm_uses_mld_mac(const struct iwl_ax211_priv *iwl);
@@ -2111,6 +2123,8 @@ int iwl_80211_hdrlen(uint16_t fc);
 int iwl_rx_crypto_ok(uint32_t status);
 int iwl_mvm_rx_to_eth(const struct iwl_ax211_priv *iwl, const uint8_t *frame, int flen,
                       uint32_t status, uint8_t *out, int outmax);
+void iwl_mvm_link_down(struct iwl_ax211_priv *iwl, uint8_t cause, uint16_t reason);
+void iwl_mvm_rx_missed_beacons(struct iwl_ax211_priv *iwl, const uint8_t *data, int len);
 int iwl_mvm_eth_to_80211(const struct iwl_ax211_priv *iwl, const uint8_t *eth, int len,
                          uint8_t *out, int outmax);
 

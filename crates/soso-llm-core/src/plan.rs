@@ -9,7 +9,7 @@
 //!   ciegamente hasta OOM.
 //! - **KIVI-lite**: KV int8 por token bajo presión de memoria (~2× ahorro).
 //! - **H2O**: eviction por masa de atención + sink + recientes.
-//! - **Quest-lite**: atención sparse por bloques en secuencias largas.
+//! - **Quest-lite**: atención sparse por bloques en secuencias largas (sólo bajo petición: con pérdida).
 //!
 //! Tras cada etapa de `/loop` que toque esto: actualizar skills
 //! `soso-architecture` / `soso-dev` y `MANUAL-USUARIO.md` si hay UX nueva.
@@ -249,6 +249,10 @@ pub struct ResourcePlanner {
     kv_dtype: KvDtype,
     use_h2o: bool,
     use_sparse: bool,
+    /// La atención dispersa (Quest-lite) es una aproximación con pérdida: sólo se usa si se pide.
+    sparse_optin: bool,
+    /// Diagnóstico: los replanes no deben volver a activar H2O.
+    forzar_sin_h2o: bool,
     /// Hot path: EWMA de ms matvec (proyecciones) vs attn por capa.
     matvec_ms_ewma: f64,
     attn_ms_ewma: f64,
@@ -592,6 +596,8 @@ impl ResourcePlanner {
             kv_dtype: KvDtype::F16,
             use_h2o: false,
             use_sparse: false,
+            sparse_optin: false,
+            forzar_sin_h2o: false,
             matvec_ms_ewma: 0.0,
             attn_ms_ewma: 0.0,
             stage_wait_ms_ewma: 0.0,
@@ -840,9 +846,11 @@ impl ResourcePlanner {
             self.kv_bytes_per_token = bpt_f16;
         }
 
-        // H2O si hay presión (ventana < max_seq); sparse si la ventana puede ser larga.
-        self.use_h2o = window < manifest.max_seq as usize || tight;
-        self.use_sparse = window >= SPARSE_TOKEN_THRESHOLD;
+        // H2O si hay presión (ventana < max_seq). La atención dispersa NO se activa sola: su
+        // selector de bloques (primer y último token de cada bloque de 32, ~6 bloques) descarta
+        // casi todo el contexto largo y el 7B dejaba de llamar a herramientas (T22, 2026-10-10).
+        self.use_h2o = (window < manifest.max_seq as usize || tight) && !self.forzar_sin_h2o;
+        self.use_sparse = self.sparse_optin && window >= SPARSE_TOKEN_THRESHOLD;
 
         self.kv_window_tokens = window;
         self.stats.kv_window_tokens = self.kv_window_tokens as u32;
@@ -884,10 +892,25 @@ impl ResourcePlanner {
         self.use_h2o
     }
 
+    /// Apaga H2O (diagnóstico): sin él la atención usa el kernel rápido y no acumula masa.
+    pub fn desactivar_h2o(&mut self) {
+        self.forzar_sin_h2o = true;
+        self.use_h2o = false;
+        self.stats.h2o_enabled = 0;
+    }
+
     /// Apaga la atención dispersa (diagnóstico y pruebas): sin ella la atención es exacta.
     pub fn desactivar_atencion_dispersa(&mut self) {
+        self.sparse_optin = false;
         self.use_sparse = false;
         self.stats.sparse_attn = 0;
+    }
+
+    /// Activa la atención dispersa (experimentos): aproximada y con pérdida en contexto largo.
+    pub fn activar_atencion_dispersa(&mut self) {
+        self.sparse_optin = true;
+        self.use_sparse = true;
+        self.stats.sparse_attn = 1;
     }
 
     /// Quest-lite: sparse solo si el planner lo activó y la seq supera el umbral.
@@ -1646,6 +1669,35 @@ mod tests {
         planner.tokens_since_replan = REPLAN_EVERY_TOKENS - 1;
         assert!(planner.on_token_complete(&manifest, &index));
         assert_eq!(planner.stats().replans, 1);
+    }
+
+    // T22 (2026-10-10): la dispersa se activaba sola con `window >= 256` y dejaba al 7B del guest
+    // sin contexto largo. Sólo debe activarse a petición y sobrevivir a los replanes.
+    #[test]
+    fn la_atencion_dispersa_no_se_activa_sola() {
+        let mut manifest = Manifest::tiny("t");
+        manifest.max_seq = 8192;
+        let index = TensorIndex::default();
+        let mem = MemSnapshot {
+            total_frames: 8 * 1024 * 1024 * 1024 / 4096,
+            free_frames: 6 * 1024 * 1024 * 1024 / 4096,
+            reclaimable_frames: 0,
+        };
+        let mut planner = ResourcePlanner::new(&manifest, &index, mem, 0, false);
+        assert!(planner.kv_window_tokens() >= SPARSE_TOKEN_THRESHOLD, "el caso exige ventana larga");
+        assert!(!planner.use_sparse_attn(4000));
+        for _ in 0..(3 * REPLAN_EVERY_TOKENS) {
+            planner.on_token_complete(&manifest, &index);
+        }
+        assert!(!planner.use_sparse_attn(4000), "un replan no debe activarla");
+        planner.activar_atencion_dispersa();
+        assert!(planner.use_sparse_attn(4000));
+        for _ in 0..(2 * REPLAN_EVERY_TOKENS) {
+            planner.on_token_complete(&manifest, &index);
+        }
+        assert!(planner.use_sparse_attn(4000), "pedida, sobrevive a los replanes");
+        planner.desactivar_atencion_dispersa();
+        assert!(!planner.use_sparse_attn(4000));
     }
 
     #[test]

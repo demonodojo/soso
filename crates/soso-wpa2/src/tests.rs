@@ -521,6 +521,62 @@ fn renovacion_de_gtk_instala_la_nueva() {
 }
 
 #[test]
+fn m3_repetido_tras_autorizar_contesta_m4_sin_reinstalar() {
+    let ap = &mut Ap::new();
+    let snonce = [0x33u8; 32];
+    let mut s = supplicant(ap, snonce);
+    s.on_ethernet(&ap.m1());
+    let ptk = ap.ptk(&snonce);
+    let m3 = ap.m3(&ptk, true);
+    assert!(s.on_ethernet(&m3).install_tk.is_some());
+    // El AP no vio M4 y repite el mismo M3 (mismo contador).
+    let r = s.on_ethernet(&m3);
+    assert_eq!(r.dropped, None);
+    assert!(r.send && r.authorized && s.authorized());
+    assert!(r.install_tk.is_none() && r.install_gtk.is_none());
+    let m4 = EapolKey::parse(&s.tx()[14..]).unwrap();
+    assert_eq!(m4.key_info(), 0x030a);
+    let mut scratch = [0u8; MAX_EAPOL];
+    assert!(eapol::verify_mic(&ptk[..16], &m4, &mut scratch));
+}
+
+#[test]
+fn grupo_repetido_contesta_sin_reinstalar() {
+    let ap = &mut Ap::new();
+    let snonce = [0x33u8; 32];
+    let mut s = supplicant(ap, snonce);
+    s.on_ethernet(&ap.m1());
+    let ptk = ap.ptk(&snonce);
+    s.on_ethernet(&ap.m3(&ptk, true));
+    let nueva = [0xa1u8; 16];
+    let g1 = ap.group1(&ptk, &nueva, 2);
+    assert!(s.on_ethernet(&g1).install_gtk.is_some());
+    let r = s.on_ethernet(&g1);
+    assert_eq!(r.dropped, None);
+    assert!(r.send, "el AP sigue esperando el mensaje 2 de grupo");
+    assert!(r.install_gtk.is_none(), "reinstalar la GTK reinicia su RSC");
+}
+
+#[test]
+fn renegociar_ptk_instala_tk_nueva_y_no_la_gtk_vigente() {
+    let ap = &mut Ap::new();
+    let snonce = [0x33u8; 32];
+    let mut s = supplicant(ap, snonce);
+    s.on_ethernet(&ap.m1());
+    let ptk = ap.ptk(&snonce);
+    s.on_ethernet(&ap.m3(&ptk, true));
+    // Nuevo 4-way sobre la misma asociación: otra ANonce, misma GTK.
+    ap.anonce = [0x6bu8; 32];
+    ap.replay += 1;
+    s.on_ethernet(&ap.m1());
+    let ptk2 = ap.ptk(&snonce);
+    let r = s.on_ethernet(&ap.m3(&ptk2, true));
+    assert_eq!(r.dropped, None);
+    assert_eq!(&r.install_tk.expect("TK nueva")[..], &ptk2[32..48]);
+    assert!(r.install_gtk.is_none());
+}
+
+#[test]
 fn trafico_normal_pasa_de_largo() {
     let ap = Ap::new();
     let mut s = supplicant(&ap, [0x33u8; 32]);

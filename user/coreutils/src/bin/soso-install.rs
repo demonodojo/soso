@@ -377,7 +377,7 @@ fn disk_safe(d: &DiskInfo) -> bool {
 
 /// Particiones que delatan otro sistema operativo (swap, LVM, Windows, raíces
 /// Linux con GUID de tipo propio…). El live usa 0x8300 genérico, así que ese
-/// tipo por sí solo no cuenta.
+/// tipo por sí solo no cuenta, y la p4 `SOSOINSTALL` (tipo 0700) tampoco.
 fn foreign_partitions(d: &DiskInfo) -> Vec<String> {
     let mut out = Vec::new();
     let Some((hdr, entries)) = read_gpt(d.id) else {
@@ -390,8 +390,8 @@ fn foreign_partitions(d: &DiskInfo) -> Vec<String> {
         if !gptdisk::entry_used(e) {
             continue;
         }
-        let t = gptdisk::entry_type(e);
-        if gptdisk::is_foreign(&t) {
+        if gptdisk::entry_is_foreign(e) {
+            let t = gptdisk::entry_type(e);
             out.push(alloc::format!("p{} {}", i + 1, gptdisk::type_label(&t)));
         }
     }

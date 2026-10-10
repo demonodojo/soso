@@ -106,6 +106,9 @@ pub struct Supplicant {
     replay: u64,
     have_replay: bool,
     state: State,
+    /// GTK ya entregada al llamante. Reinstalar la misma clave reinicia su
+    /// contador de recepción en el firmware (KRACK, CVE-2017-13080).
+    gtk: Option<[u8; 16]>,
     tx: [u8; MAX_TX],
     tx_len: usize,
     scratch: [u8; MAX_EAPOL],
@@ -136,6 +139,7 @@ impl Supplicant {
             replay: 0,
             have_replay: false,
             state: State::Idle,
+            gtk: None,
             tx: [0u8; MAX_TX],
             tx_len: 0,
             scratch: [0u8; MAX_EAPOL],
@@ -262,15 +266,28 @@ impl Supplicant {
             return drop_with(Discard::NoSpace);
         }
         self.replay = replay;
+        // M3 repetido porque el AP no recibió M4: se contesta otra vez, pero
+        // las claves ya están en uso y reinstalarlas reinicia el PN (KRACK,
+        // CVE-2017-13077). Sin M4 el AP acaba desautenticando.
+        if self.state == State::Authorized {
+            return Outcome {
+                send: true,
+                authorized: true,
+                ..Outcome::default()
+            };
+        }
         self.state = State::Authorized;
+        // En una renegociación de PTK el M3 trae la GTK vigente (CVE-2017-13078).
+        let install_gtk = (self.gtk != Some(g.key)).then_some(GroupKey {
+            key: g.key,
+            key_id: g.key_id,
+            rsc: key.rsc(),
+        });
+        self.gtk = Some(g.key);
         Outcome {
             send: true,
             install_tk: Some(*self.ptk.tk()),
-            install_gtk: Some(GroupKey {
-                key: g.key,
-                key_id: g.key_id,
-                rsc: key.rsc(),
-            }),
+            install_gtk,
             authorized: true,
             dropped: None,
         }
@@ -301,6 +318,13 @@ impl Supplicant {
             return drop_with(Discard::NoSpace);
         }
         self.replay = replay;
+        if self.gtk == Some(g.key) {
+            return Outcome {
+                send: true,
+                ..Outcome::default()
+            };
+        }
+        self.gtk = Some(g.key);
         Outcome {
             send: true,
             install_gtk: Some(GroupKey {

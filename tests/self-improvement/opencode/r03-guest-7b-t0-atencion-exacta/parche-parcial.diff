@@ -1,0 +1,13 @@
+diff --git a/crates/soso-http/src/lib.rs b/crates/soso-http/src/lib.rs
+index eb3fa23..248a185 100644
+--- a/crates/soso-http/src/lib.rs
++++ b/crates/soso-http/src/lib.rs
+@@ -453,7 +453,7 @@ impl HttpStreamState {
+             self.headers = headers.clone();
+             self.discard_body = (300..400).contains(&status);
+             if !self.discard_body {
+-                if let Some(cl) = header_value(&headers, "content-length") {
++                if let Some(cl) = header_value(&headers,"content-length",true) {
+                     self.content_length = cl.parse().ok();
+                 }
+             }

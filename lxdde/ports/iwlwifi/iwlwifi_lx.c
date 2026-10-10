@@ -134,6 +134,53 @@ void lx_iwlwifi_poll(void)
     iwl_ax211_poll();
 }
 
+/* Espejo de `LxIwlContadores` en kernel/src/lxdde/wifi.rs. */
+struct lx_iwl_counters {
+    uint32_t tx_full_drop;
+    uint32_t rxq_full_drop;
+    uint32_t eapolq_full_drop;
+    uint32_t rx_multi_rb;
+    uint32_t rx_trunc_drop;
+    uint32_t rx_vid_drop;
+    uint32_t rx_data_drop;
+    uint32_t rx_data_ok;
+    uint32_t cmd_backpressure;
+    uint32_t link_lost;
+    uint32_t link_lost_cause;
+    uint32_t link_lost_reason;
+};
+
+void lx_iwlwifi_counters(struct lx_iwl_counters *out)
+{
+    const struct iwl_ax211_priv *iwl = &g_iwl;
+
+    if (!out)
+        return;
+    out->tx_full_drop = iwl->tx_full_drop;
+    out->rxq_full_drop = iwl->rxq_full_drop;
+    out->eapolq_full_drop = iwl->eapolq_full_drop;
+    out->rx_multi_rb = iwl->rx_multi_rb;
+    out->rx_trunc_drop = iwl->rx_trunc_drop;
+    out->rx_vid_drop = iwl->rx_vid_drop;
+    out->rx_data_drop = iwl->rx_data_drop;
+    out->rx_data_ok = iwl->rx_data_ok;
+    out->cmd_backpressure = iwl->cmd_backpressure;
+    out->link_lost = iwl->link_lost;
+    out->link_lost_cause = iwl->link_lost_cause;
+    out->link_lost_reason = iwl->link_lost_reason;
+}
+
+/* Antes de reintentar una conexión: el intento anterior pudo dejar MAC, STA
+ * o colas a medias en el firmware, así que se parte de un firmware recién
+ * cargado (el siguiente scan/connect pasa por `iwl_ax211_ensure_ready`). */
+void lx_iwlwifi_reset_link(void)
+{
+    g_iwl.associated = 0;
+    g_iwl.authorized = 0;
+    g_iwl.keys_installed = 0;
+    g_iwl.cmd_needs_recover = 1;
+}
+
 struct lx_iwl_dma_range {
     uint64_t pa;
     uint64_t len;

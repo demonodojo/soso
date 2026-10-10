@@ -434,6 +434,11 @@ static void soak_tx(int gen3, uint32_t semilla, unsigned vueltas)
     unsigned i;
     char label[160];
     const uint16_t QID = 5;
+    /* Puntero de lectura del hardware: cuenta módulo `max_tfd_queue_size`
+     * (256 en 22000, 65536 en AX210), no módulo las 16 ranuras. Lo pendiente
+     * para él es `doorbell - hw_rd`, y tiene que ser lo que hay en vuelo. */
+    const unsigned hw_mask = gen3 ? 0xffffu : 0xffu;
+    unsigned hw_rd = 0;
 
     memset(&iwl, 0, sizeof(iwl));
     iwl.gen3 = gen3;
@@ -469,18 +474,22 @@ static void soak_tx(int gen3, uint32_t semilla, unsigned vueltas)
                     error = "reutilizó un TFD que el firmware no ha confirmado";
                     break;
                 }
-                {
-                    uint32_t db = g_mmio_stub[HBUS_TARG_WRPTR / 4];
-
-                    if (db != (((uint32_t)iwl.mgmt_txq_write & 0xffu) |
-                               ((uint32_t)QID << 16))) {
-                        error = "el doorbell no corresponde al productor";
-                        break;
-                    }
-                }
                 ocupado[idx] = 1;
                 vuelo[n_vuelo++] = idx;
                 enviados++;
+                {
+                    uint32_t db = g_mmio_stub[HBUS_TARG_WRPTR / 4];
+                    unsigned db_ptr = db & 0xffffu;
+
+                    if ((db >> 16) != QID || db_ptr != (enviados & hw_mask)) {
+                        error = "el doorbell no es el puntero completo del productor";
+                        break;
+                    }
+                    if (((db_ptr - hw_rd) & hw_mask) != n_vuelo) {
+                        error = "el hardware ve pendientes TFD que el driver no tiene en vuelo";
+                        break;
+                    }
+                }
             } else {
                 if (rc == 0) {
                     error = "aceptó un envío con la cola llena";
@@ -519,6 +528,7 @@ static void soak_tx(int gen3, uint32_t semilla, unsigned vueltas)
                 break;
             }
             ocupado[idx] = 0;
+            hw_rd = (hw_rd + 1u) & hw_mask;
             if (n_hist < 8u)
                 n_hist++;
             memmove(&hist[1], &hist[0], (n_hist - 1u) * sizeof(hist[0]));
@@ -535,8 +545,11 @@ static void soak_tx(int gen3, uint32_t semilla, unsigned vueltas)
     if (error)
         printf("      motivo: %s (semilla 0x%08x)\n", error, semilla);
     /* Sin rechazos la cola nunca se llenó y el caso interesante no se ha
-     * probado: eso también es un fallo del banco, no un aprobado. */
-    check(!error && rechazos > 0 && confirmados > 0 && repetidas > 0, label);
+     * probado: eso también es un fallo del banco, no un aprobado. Lo mismo si
+     * el puntero de 8 bits no llegó a dar la vuelta. */
+    check(!error && rechazos > 0 && confirmados > 0 && repetidas > 0 &&
+              (gen3 || enviados > 2u * (hw_mask + 1u)),
+          label);
 }
 
 int main(int argc, char **argv)
