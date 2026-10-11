@@ -227,11 +227,32 @@ pub fn matvec_view_batch_par(
     n: usize,
     outs: &mut [f32],
     par: &dyn RowParallel,
+    q8k_work: Option<&mut [u8]>,
 ) -> Result<(), ()> {
     if v.elems != rows * cols || xs.len() != n * cols || outs.len() != n * rows {
         return Err(());
     }
     let dtype = v.dtype;
+    let q8k_ready = if dtype == DTYPE_Q4_K && crate::gemm::q4_matvec_via_q8k() {
+        if let Some(buf) = q8k_work {
+            let need = crate::q8k::q8k_buffer_len(n, cols);
+            if buf.len() < need {
+                return Err(());
+            }
+            let row_bytes = need / n;
+            for j in 0..n {
+                crate::q8k::quantize_row_q8_k(
+                    &xs[j * cols..(j + 1) * cols],
+                    &mut buf[j * row_bytes..(j + 1) * row_bytes],
+                );
+            }
+            Some((buf.as_ptr() as usize, need))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let xs_ptr = xs.as_ptr() as usize;
     let out_ptr = outs.as_mut_ptr() as usize;
     let bytes_ptr = v.bytes.as_ptr() as usize;
@@ -279,16 +300,30 @@ pub fn matvec_view_batch_par(
             DTYPE_Q4_K => {
                 use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
                 let row_bytes = (cols / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES;
-                matvec_q4_k_batch_strided(
-                    &bytes[r0 * row_bytes..r1 * row_bytes],
-                    sub,
-                    cols,
-                    xs,
-                    n,
-                    &mut outs[r0..],
-                    rows,
-                )
-                .is_ok()
+                if let Some((q8k_ptr, q8k_len)) = q8k_ready {
+                    let q8k = unsafe { core::slice::from_raw_parts(q8k_ptr as *const u8, q8k_len) };
+                    crate::q8k::matvec_q4_k_q8k_prequantized(
+                        &bytes[r0 * row_bytes..r1 * row_bytes],
+                        sub,
+                        cols,
+                        q8k,
+                        n,
+                        &mut outs[r0..],
+                        rows,
+                    )
+                    .is_ok()
+                } else {
+                    matvec_q4_k_batch_strided(
+                        &bytes[r0 * row_bytes..r1 * row_bytes],
+                        sub,
+                        cols,
+                        xs,
+                        n,
+                        &mut outs[r0..],
+                        rows,
+                    )
+                    .is_ok()
+                }
             }
             DTYPE_MXFP4 => {
                 use sosomodel::layout::{MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS};
@@ -474,6 +509,8 @@ pub struct BlockScratch {
     pub o: Vec<f32>,
     pub up: Vec<f32>,
     pub gate: Vec<f32>,
+    /// Activaciones cuantizadas a Q8_K para matvec Q4_K (reutilizado entre capas del bloque).
+    pub q8k_x: Vec<u8>,
 }
 
 impl BlockScratch {
@@ -497,6 +534,15 @@ impl BlockScratch {
             o: vec![0.0; cap * h],
             up: vec![0.0; cap * ffn],
             gate: vec![0.0; cap * ffn],
+            q8k_x: Vec::new(),
+        }
+    }
+
+    /// Reserva el buffer Q8_K para `n` vectores de `cols` elementos (múltiplo de 256).
+    pub fn ensure_q8k(&mut self, n: usize, cols: usize) {
+        let need = crate::q8k::q8k_buffer_len(n, cols);
+        if self.q8k_x.len() < need {
+            self.q8k_x.resize(need, 0);
         }
     }
 }
@@ -1118,6 +1164,8 @@ impl<'a> LayerExecutor<'a> {
         if hs.len() != n * h || n == 0 || n > bs.cap {
             return Err(());
         }
+        let max_cols = h.max(q_dim).max(ffn);
+        bs.ensure_q8k(n, max_cols);
 
         let mut t_perfil = perfil_ahora();
         // --- atención ---
@@ -1140,7 +1188,7 @@ impl<'a> LayerExecutor<'a> {
                 1 => &mut bs.k[..n * dim],
                 _ => &mut bs.v[..n * dim],
             };
-            matvec_view_batch_par(&vista, dim, h, hs, n, out, par)?;
+            matvec_view_batch_par(&vista, dim, h, hs, n, out, par, Some(&mut bs.q8k_x))?;
         }
         perfil_marca(&mut t_perfil, FASE_QKV);
         for (clave, dim, destino) in [
@@ -1271,7 +1319,16 @@ impl<'a> LayerExecutor<'a> {
             let name = format!("{prefix}.attn_output");
             note_infer_op(Some(layer), &name);
             let vista = source.tensor_view(&name)?;
-            matvec_view_batch_par(&vista, h, q_dim, &bs.attn[..n * q_dim], n, &mut bs.o[..n * h], par)?;
+            matvec_view_batch_par(
+                &vista,
+                h,
+                q_dim,
+                &bs.attn[..n * q_dim],
+                n,
+                &mut bs.o[..n * h],
+                par,
+                Some(&mut bs.q8k_x),
+            )?;
         }
         for i in 0..n {
             add_f32(
@@ -1293,13 +1350,31 @@ impl<'a> LayerExecutor<'a> {
             let name = format!("{prefix}.ffn_up");
             note_infer_op(Some(layer), &name);
             let vista = source.tensor_view(&name)?;
-            matvec_view_batch_par(&vista, ffn, h, hs, n, &mut bs.up[..n * ffn], par)?;
+            matvec_view_batch_par(
+                &vista,
+                ffn,
+                h,
+                hs,
+                n,
+                &mut bs.up[..n * ffn],
+                par,
+                Some(&mut bs.q8k_x),
+            )?;
         }
         if self.has_gate {
             let name = format!("{prefix}.ffn_gate");
             note_infer_op(Some(layer), &name);
             let vista = source.tensor_view(&name)?;
-            matvec_view_batch_par(&vista, ffn, h, hs, n, &mut bs.gate[..n * ffn], par)?;
+            matvec_view_batch_par(
+                &vista,
+                ffn,
+                h,
+                hs,
+                n,
+                &mut bs.gate[..n * ffn],
+                par,
+                Some(&mut bs.q8k_x),
+            )?;
             perfil_marca(&mut t_perfil, FASE_FFN_UP_GATE);
             swiglu_par(par, &mut bs.up[..n * ffn], &bs.gate[..n * ffn]);
         } else {
@@ -1312,7 +1387,16 @@ impl<'a> LayerExecutor<'a> {
             let name = format!("{prefix}.ffn_down");
             note_infer_op(Some(layer), &name);
             let vista = source.tensor_view(&name)?;
-            matvec_view_batch_par(&vista, h, ffn, &bs.up[..n * ffn], n, hs, par)?;
+            matvec_view_batch_par(
+                &vista,
+                h,
+                ffn,
+                &bs.up[..n * ffn],
+                n,
+                hs,
+                par,
+                Some(&mut bs.q8k_x),
+            )?;
         }
         perfil_marca(&mut t_perfil, FASE_FFN_DOWN);
         for i in 0..n {

@@ -335,3 +335,13 @@ fn un_no_existe_dice_que_hay_en_el_directorio_mas_cercano() {
     let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "nada/x.rs", "buscar": "a", "nuevo": "b"}));
     assert!(err && t.contains("src/") && t.contains("README.md"), "{t}");
 }
+
+#[test]
+fn un_archivo_largo_avisa_de_que_no_se_recorra_por_tramos() {
+    let largo: String = (1..=900).map(|i| format!("linea {i}\n")).collect();
+    let mut e = repo().con("/w/src/largo.rs", &largo);
+    let (t, err) = llama(&mut e, "read", json!({"filePath": "src/largo.rs"}));
+    assert!(!err && t.contains("Líneas 1-300 de 900") && t.contains("usa `grep`") || t.contains("Llama a `grep`"), "{t}");
+    let (t, _) = llama(&mut e, "read", json!({"filePath": "src/lib.rs"}));
+    assert!(t.contains("Fin del archivo") && !t.contains("grep"), "{t}");
+}

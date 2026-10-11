@@ -90,6 +90,8 @@ pub struct InformeRunner {
     /// Qué límites se aplicaron en vivo y cuáles sólo a posteriori.
     pub limites_en_vivo: bool,
     pub detalle: String,
+    /// Conversación completa (sólo en el camino nativo): va a un artefacto aparte, nunca al estado ni al prompt.
+    pub conversacion: Vec<Value>,
 }
 
 /// Lector incremental de JSON por líneas: tolera trozos partidos en cualquier byte.
@@ -203,7 +205,7 @@ pub fn ejecutar_proceso<P: Procesos>(p: &P, mut orden: Orden, lim: &Limites) -> 
     let salida = match p.ejecutar(&orden) {
         Ok(s) => s,
         Err(e) => {
-            return InformeRunner { fin: Fin::SinProceso, codigo: None, cuenta: Cuenta::default(), eventos: Vec::new(), log_truncado: false, limites_en_vivo: false, detalle: e.to_string() }
+            return InformeRunner { fin: Fin::SinProceso, codigo: None, cuenta: Cuenta::default(), eventos: Vec::new(), log_truncado: false, limites_en_vivo: false, detalle: e.to_string(), conversacion: Vec::new() }
         }
     };
     let mut lector = LectorEventos::nuevo();
@@ -231,6 +233,7 @@ pub fn ejecutar_proceso<P: Procesos>(p: &P, mut orden: Orden, lim: &Limites) -> 
         eventos,
         log_truncado: truncado,
         limites_en_vivo: false,
+        conversacion: Vec::new(),
         detalle: format!("{} byte(s) de stdout, {} de stderr{}", salida.stdout.len(), salida.stderr.len(), if stderr.is_empty() { String::new() } else { format!("; stderr: {}", stderr.chars().take(300).collect::<String>()) }),
     }
 }
@@ -307,6 +310,7 @@ pub fn ejecutar_agente<E: Entorno, M: Modelo, R: Reloj>(
         log_truncado: truncado,
         limites_en_vivo: true,
         detalle: inf.error.unwrap_or_default(),
+        conversacion: inf.mensajes,
     }
 }
 
@@ -395,6 +399,11 @@ pub fn ejecutar_intento<E: Entorno + Durable, M: Modelo, R: Reloj>(
     });
     e.escribir(&nombre, registro.to_string().as_bytes(), 0o644)?;
     m.anotar_artefacto(&nombre)?;
+    // La conversación entera, aparte: sirve para diagnosticar un intento (qué leyó, qué dijo al rendirse).
+    if !inf.conversacion.is_empty() {
+        let conv = format!("{dir_estado}/{run_id}-intento{numero}.conversacion.json");
+        e.escribir(&conv, serde_json::to_vec(&inf.conversacion).unwrap_or_default().as_slice(), 0o644)?;
+    }
     // Tokens: sólo si el endpoint los dijo. Un cero inventado se suma y se cree.
     let tokens = if inf.cuenta.tokens_entrada + inf.cuenta.tokens_salida > 0 {
         Medida::Valor(inf.cuenta.tokens_entrada + inf.cuenta.tokens_salida)

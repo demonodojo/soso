@@ -5,6 +5,7 @@
 //! prueba pasa trivialmente. CI debe correr ambas.
 
 use soso_llm_core::gemm::{matvec_q4_k, matvec_q4_k_batch, matvec_q8_0, matvec_q8_0_batch};
+use soso_llm_core::q8k::{dot_q4_k_q8_k_block, dot_q4_k_q8_k_block_dispatch, matvec_q4_k_q8k_batch_strided, quantize_row_q8_k, Q8_K_BLOCK_BYTES};
 use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS};
 
 struct Lcg(u32);
@@ -19,17 +20,22 @@ impl Lcg {
 }
 
 fn q4_k(rows: usize, cols: usize, g: &mut Lcg) -> Vec<u8> {
+    use soso_llm_core::f16::f32_to_f16;
     let rb = (cols / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES;
     let mut v = vec![0u8; rows * rb];
-    for b in v.iter_mut() {
-        *b = (g.next() & 0xFF) as u8;
-    }
+    let mut bi = 0usize;
     for blk in v.chunks_exact_mut(Q4_K_BLOCK_BYTES) {
-        // d y dmin como f16 finitos y pequeños (0x2c00 ≈ 0,0625; 0x2800 ≈ 0,03).
-        blk[0] = (g.next() & 0xFF) as u8;
-        blk[1] = 0x28 | (g.next() & 0x03) as u8;
-        blk[2] = (g.next() & 0xFF) as u8;
-        blk[3] = 0x24 | (g.next() & 0x03) as u8;
+        let d = f32_to_f16(0.02 + (bi % 17) as f32 * 0.001);
+        let dmin = f32_to_f16(0.004 + (bi % 5) as f32 * 0.001);
+        blk[..2].copy_from_slice(&d.to_le_bytes());
+        blk[2..4].copy_from_slice(&dmin.to_le_bytes());
+        for b in &mut blk[4..16] {
+            *b = (g.next() % 251) as u8;
+        }
+        for b in &mut blk[16..] {
+            *b = (g.next() & 0xFF) as u8;
+        }
+        bi += 1;
     }
     v
 }
@@ -101,6 +107,71 @@ fn q8_0_por_lotes_es_identico_bit_a_bit() {
                 .unwrap();
             }
             assert_eq!(bits(&lote), bits(&sueltos), "q8_0 rows={rows} cols={cols} n={n}");
+        }
+    }
+}
+
+#[test]
+fn q4_k_q8k_bloque_cerca_de_q4k_dot_ref() {
+    use sosomodel::dequant::q4k_dot_ref;
+    let mut g = Lcg(55);
+    let w = q4_k(1, 256, &mut g);
+    let x = vectores(1, 256, &mut g);
+    let ref_dot = q4k_dot_ref(&w[..144], &x);
+    let mut q8 = vec![0u8; Q8_K_BLOCK_BYTES];
+    quantize_row_q8_k(&x, &mut q8);
+    let q8_dot = dot_q4_k_q8_k_block_dispatch(&w[..144], &q8);
+    let tol = 0.5 + ref_dot.abs() * 0.12;
+    assert!(
+        (ref_dot - q8_dot).abs() < tol,
+        "ref={ref_dot} q8k={q8_dot} tol={tol}"
+    );
+}
+
+#[test]
+fn q4_k_q8k_escalar_y_avx2_coinciden_en_superbloques() {
+    let mut g = Lcg(99);
+    for _ in 0..40 {
+        let w = q4_k(1, 256, &mut g);
+        let xs = vectores(1, 256, &mut g);
+        let mut q8 = vec![0u8; Q8_K_BLOCK_BYTES];
+        quantize_row_q8_k(&xs, &mut q8);
+        let q4_blk = &w[..144];
+        let s = dot_q4_k_q8_k_block(q4_blk, &q8);
+        let d = dot_q4_k_q8_k_block_dispatch(q4_blk, &q8);
+        assert_eq!(s.to_bits(), d.to_bits());
+    }
+}
+
+#[test]
+fn q4_k_q8k_batch_coincide_con_sueltos() {
+    let mut g = Lcg(77);
+    let (rows, cols) = (5usize, 512usize);
+    let w = q4_k(rows, cols, &mut g);
+    for n in 1..=8usize {
+        let xs = vectores(n, cols, &mut g);
+        let mut lote = vec![0f32; n * rows];
+        let mut buf = vec![0u8; n * (cols / 256) * Q8_K_BLOCK_BYTES];
+        matvec_q4_k_q8k_batch_strided(&w, rows, cols, &xs, n, &mut lote, rows, &mut buf).unwrap();
+        for j in 0..n {
+            let mut uno = vec![0f32; rows];
+            let mut b1 = vec![0u8; (cols / 256) * Q8_K_BLOCK_BYTES];
+            matvec_q4_k_q8k_batch_strided(
+                &w,
+                rows,
+                cols,
+                &xs[j * cols..(j + 1) * cols],
+                1,
+                &mut uno,
+                rows,
+                &mut b1,
+            )
+            .unwrap();
+            assert_eq!(
+                bits(&lote[j * rows..(j + 1) * rows]),
+                bits(&uno),
+                "n={n} j={j}"
+            );
         }
     }
 }

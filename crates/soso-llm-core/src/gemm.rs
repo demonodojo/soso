@@ -3,12 +3,26 @@
 //! compilación por `target_feature`; los tests host comparan ambos caminos
 //! con detección en runtime.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 /// ¿El binario está compilado con AVX2+FMA?
 const AVX2: bool = cfg!(all(
     target_arch = "x86_64",
     target_feature = "avx2",
     target_feature = "fma"
 ));
+
+/// Matvec Q4_K vía producto entero × Q8_K (llama.cpp). Implementado en [`crate::q8k`];
+/// desactivado en producción hasta superar ~1,8× frente al lote f32 (`examples/bench_matvec`
+/// midió ~1,0× en la FFN sintética del 7B, 2026-10-11).
+const Q4_Q8K_EN_PRODUCCION: bool = false;
+
+/// Matvec Q4_K vía producto entero × Q8_K. En tests se deja el camino f32 bit a bit (T82).
+pub fn q4_matvec_via_q8k() -> bool {
+    AVX2 && Q4_Q8K_EN_PRODUCCION && !cfg!(test)
+}
 
 pub fn matvec_f32(matrix: &[f32], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
     assert_eq!(matrix.len(), rows * cols);
@@ -346,6 +360,12 @@ pub fn matvec_q4_k(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut 
     if bytes.len() != rows * row_bytes {
         return Err(());
     }
+    if q4_matvec_via_q8k() {
+        let mut buf = vec![0u8; crate::q8k::q8k_buffer_len(1, cols)];
+        return crate::q8k::matvec_q4_k_q8k_batch_strided(
+            bytes, rows, cols, x, 1, out, rows, &mut buf,
+        );
+    }
     if AVX2 {
         #[cfg(target_arch = "x86_64")]
         unsafe {
@@ -452,6 +472,12 @@ pub fn matvec_q4_k_batch_strided(
     }
     let row_bytes = (cols / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES;
     comprobar_lote(bytes.len(), row_bytes, rows, cols, xs, n, outs.len(), stride)?;
+    if q4_matvec_via_q8k() {
+        let mut buf = vec![0u8; crate::q8k::q8k_buffer_len(n, cols)];
+        return crate::q8k::matvec_q4_k_q8k_batch_strided(
+            bytes, rows, cols, xs, n, outs, stride, &mut buf,
+        );
+    }
     if AVX2 {
         #[cfg(target_arch = "x86_64")]
         unsafe {

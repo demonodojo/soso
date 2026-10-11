@@ -16,6 +16,7 @@ pub mod kv;
 pub mod layer;
 pub mod parallel;
 pub mod quant;
+pub mod q8k;
 pub mod optim;
 pub mod pipeline;
 pub mod plan;

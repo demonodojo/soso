@@ -195,7 +195,7 @@ PROTOCOLO (obligatorio):\n\
 - Sólo cuando hayas terminado todos los pasos respondes con texto, y entonces es el informe final.\n\n\
 PASOS:\n\
 1. Llama a `read` con `TASK.md` (raíz del checkout): contiene el objetivo, el archivo que puedes tocar y las comprobaciones.\n\
-2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, `grep` con el nombre de la función y `read` sólo del tramo (`offset` y `limit`).\n\
+2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
 3. Llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Cambio mínimo: no toques otros archivos. Si dice que no lo encuentra o que aparece varias veces, repite con otro fragmento.\n\
 4. Llama a `bash` con las comprobaciones de TASK.md (`cargo test …`) y lee el resultado.\n\
 5. Informe final en texto corto: qué cambiaste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";

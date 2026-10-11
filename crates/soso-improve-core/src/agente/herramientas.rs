@@ -64,7 +64,7 @@ impl Politica {
             .collect(),
             salida_max: 12_000,
             plazo_orden_s: 600,
-            lineas_por_defecto: 2000,
+            lineas_por_defecto: 300,
             resultados_max: 100,
             entorno: Vec::new(),
             forja: None,
@@ -338,7 +338,12 @@ fn leer<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respue
         }
     }
     let pie = if hasta < total {
-        format!("(Líneas {desde}-{hasta} de {total}. Usa offset={} para seguir.)", hasta + 1)
+        let aviso = if total > 400 {
+            " Archivo largo: no lo recorras por tramos. Llama a `grep` con el nombre de la función o el texto que buscas y lee sólo ese tramo con offset y limit."
+        } else {
+            ""
+        };
+        format!("(Líneas {desde}-{hasta} de {total}. Usa offset={} para seguir.{aviso})", hasta + 1)
     } else {
         format!("(Fin del archivo: {total} línea(s).)")
     };

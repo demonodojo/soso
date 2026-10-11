@@ -131,8 +131,9 @@ escribiendo `{"name": "read", …}` con el prompt corto, con y sin planificador.
 - **Bloques de 12 tokens** en vez de 8 (`q4_k_nb::<12>`): más lento (2,30 ms/vector frente a 1,83): se derrama a pila porque
   AVX2 sólo tiene 16 registros. 8 es el óptimo.
 - **Desempaquetar las escalas de Q4_K por palabras de 32 bits**: como mucho ~5 % del kernel; no compensa.
-- **Producto entero Q4_K × activaciones Q8_K**: estimación de ≈ 1,5× como mucho en los matvec (1,05 frente a 1,56 µops por
-  FMA vectorial) y cambia la numérica (ya no coincidirían bit a bit con el camino escalar de referencia): no se ha hecho.
+- **Producto entero Q4_K × activaciones Q8_K** (2026-10-11): la estimación inicial de µops no contaba `_mm256_maddubs_epi16`.
+  Implementado en `crates/soso-llm-core/src/q8k.rs`; **`Q4_Q8K_EN_PRODUCCION` sigue en `false`** (bench ~1,0× vs lote f32 en la
+  FFN sintética del 7B, 2026-10-11; listón 1,8×). Pruebas: `tests/gemm_batch.rs::q4_k_q8k_*`; medir con `bench_matvec` + AVX2.
 
 **Lo que queda (matvec ≈ 90 %).** El kernel de matvec por bloques (`q4_k_nb`, `q8_0_nb`) rinde ~60 GFLOP/s por hilo, cerca
 del techo de un diseño en coma flotante con AVX2 y no es limitado por memoria (`bench_matvec`: 1,83 ms/vector con n = 8 y

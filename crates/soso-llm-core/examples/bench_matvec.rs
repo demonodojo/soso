@@ -8,6 +8,7 @@
 use std::time::Instant;
 
 use soso_llm_core::gemm::{matvec_q4_k, matvec_q4_k_batch};
+use soso_llm_core::q8k::matvec_q4_k_q8k_batch_strided;
 use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
 
 fn main() {
@@ -53,13 +54,32 @@ fn main() {
         let lote = t.elapsed().as_secs_f64() / reps as f64;
         let outs2: Vec<Vec<f32>> = lote_out.chunks(rows).map(|c| c.to_vec()).collect();
         assert_eq!(outs, outs2, "el lote tiene que dar bit a bit lo mismo");
+        let mut q8k_buf = vec![0u8; n * (cols / 256) * 292];
+        let mut q8k_out = vec![0f32; n * rows];
+        let t = Instant::now();
+        for _ in 0..reps {
+            matvec_q4_k_q8k_batch_strided(
+                &bytes,
+                rows,
+                cols,
+                &xs_flat,
+                n,
+                &mut q8k_out,
+                rows,
+                &mut q8k_buf,
+            )
+            .unwrap();
+        }
+        let q8k = t.elapsed().as_secs_f64() / reps as f64;
         println!(
-            "n={n:>2}: separados {:.1} ms ({:.2} ms/vec) · en lote {:.1} ms ({:.2} ms/vec) · aceleración {:.2}×",
+            "n={n:>2}: separados {:.1} ms ({:.2} ms/vec) · f32 lote {:.1} ms ({:.2} ms/vec) · q8k lote {:.1} ms ({:.2} ms/vec) · q8k vs f32 {:.2}×",
             sep * 1e3,
             sep * 1e3 / n as f64,
             lote * 1e3,
             lote * 1e3 / n as f64,
-            sep / lote
+            q8k * 1e3,
+            q8k * 1e3 / n as f64,
+            lote / q8k
         );
     }
 }
