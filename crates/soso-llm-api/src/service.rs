@@ -191,6 +191,8 @@ impl TensorSource for RunSource {
 /// Runtime real sobre CPU host.
 pub struct CpuBackend {
     pub rt: Runtime,
+    /// Hilos para repartir las filas del matvec, la atención y la FFN (`None` = un hilo).
+    pub parallel: Option<std::sync::Arc<crate::host_pool::HostPool>>,
     source: RunSource,
     profile: ModelProfile,
     tokenizer: Tokenizer,
@@ -249,6 +251,7 @@ pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBac
 
     Ok(CpuBackend {
         rt,
+        parallel: None,
         source,
         profile,
         tokenizer,
@@ -293,7 +296,7 @@ impl ChatBackend for CpuBackend {
             options,
             &mut sampler,
             observer,
-            None,
+            self.parallel.as_deref().map(|p| p as &dyn soso_llm_core::parallel::RowParallel),
             &mut None,
         )?;
         // `ChatBackend` devuelve sólo lo generado. El runtime devuelve la secuencia

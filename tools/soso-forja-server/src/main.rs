@@ -1222,6 +1222,20 @@ strip = "debuginfo"
             &root.join("crates/soso-std"),
         )
         .unwrap();
+        // `libsoso` depende de `soso-alloc` desde T72, y éste del `linked_list_allocator` vendorizado.
+        copy_tree(
+            &root.join("crates/soso-alloc"),
+            &work.join("crates/soso-alloc"),
+            &root.join("crates/soso-alloc"),
+        )
+        .unwrap();
+        fs::create_dir_all(work.join("vendor")).unwrap();
+        copy_tree(
+            &root.join("vendor/linked_list_allocator"),
+            &work.join("vendor/linked_list_allocator"),
+            &root.join("vendor/linked_list_allocator"),
+        )
+        .unwrap();
         let _ = fs::copy(root.join("user/Cargo.lock"), work.join("user/Cargo.lock"));
         let _ = fs::copy(root.join("user/link.ld"), work.join("user/link.ld"));
         let _ = fs::copy(

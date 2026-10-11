@@ -39,6 +39,8 @@ pub use sse::{
 #[cfg(feature = "std")]
 pub mod e2e;
 #[cfg(feature = "std")]
+pub mod host_pool;
+#[cfg(feature = "std")]
 pub mod service;
 
 #[cfg(feature = "std")]
@@ -48,6 +50,8 @@ pub use e2e::{
     model_profile_from_lock, run_core_invariants, run_core_invariants_guest, ApiClient,
     GuestHttpLimits, ProfileFile, ProfileSom, StepResult,
 };
+#[cfg(feature = "std")]
+pub use host_pool::HostPool;
 #[cfg(feature = "std")]
 pub use service::{
     http_error_bytes, load_cpu_backend, run_accept_loop, CancelBridge, ChatBackend, CpuBackend,

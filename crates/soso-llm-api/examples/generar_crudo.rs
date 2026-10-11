@@ -68,6 +68,11 @@ fn main() {
         eprintln!("carga: {e}");
         std::process::exit(1);
     });
+    // `HILOS=N`: reparte matvec, atención y FFN entre N hilos (por defecto uno).
+    if let Some(n) = std::env::var("HILOS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 1) {
+        backend.parallel = Some(std::sync::Arc::new(soso_llm_api::HostPool::new(n)));
+        eprintln!("HILOS: {n}");
+    }
     if std::env::var_os("PLANNER").is_some() {
         // Planificador como el del guest con 8 GiB: pesos residentes, ventana de KV,
         // y atención dispersa para secuencias de más de 256 tokens.

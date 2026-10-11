@@ -44,8 +44,8 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 ## Cierre y condición de bloqueo
 
 - [x] Implementación o artefactos de esta ficha terminados (parche R03 del 14B, `tests/self-improvement/opencode/r03-14b-t0-intento32/`, 2026-10-10).
-- [x] Comprobaciones ejecutadas y evidencia guardada: verificador independiente exit 0; `cargo xtask test` TODO OK; `cargo xtask check` con 2 fallos **previos a esta ficha** (ver seguimiento). Guest: el 14B pasa el verificador (ronda 3). Boot QEMU del candidato: no.
-- [x] Resultado entregado con límites explícitos: host y no guest, modelo 14B y no el 7B elegido en T14, una ejecución.
+- [x] Comprobaciones ejecutadas y evidencia guardada: verificador independiente exit 0 (host y guest); `cargo xtask test` TODO OK; `cargo xtask check` con **1** fallo previo y ajeno (receta de `std` de T75 frente al script de parches; los otros dos que arrastraba —forja y huella del banco— se arreglaron el 2026-10-11). Boot QEMU del candidato: no.
+- [x] Resultado entregado con límites explícitos: modelo 14B y no el 7B elegido en T14; una ejecución limpia en el guest (y otra con turnos vacíos previos a la ronda que pasa); sin boot QEMU del candidato.
 
 Si falla calidad o presupuesto, conservar intento y volver a T14/T21 según causa. No completar manualmente el parche y atribuírselo al modelo.
 

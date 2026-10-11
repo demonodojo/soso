@@ -66,10 +66,15 @@ fn main() {
         });
     profile.directory = model_dir.clone();
 
-    let backend = load_cpu_backend(&model_dir, profile).unwrap_or_else(|e| {
+    let mut backend = load_cpu_backend(&model_dir, profile).unwrap_or_else(|e| {
         eprintln!("carga: {e}");
         std::process::exit(1);
     });
+    // `HILOS=N`: reparte matvec, atención y FFN entre N hilos (por defecto uno).
+    if let Some(n) = std::env::var("HILOS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 1) {
+        backend.parallel = Some(std::sync::Arc::new(soso_llm_api::HostPool::new(n)));
+        eprintln!("serve_host: {n} hilos");
+    }
     let model_id = backend.profile().id.clone();
     let service = Arc::new(HostService::new(token, backend));
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();

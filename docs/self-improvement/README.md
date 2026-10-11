@@ -9,8 +9,8 @@
 
 > **Estado (2026-10-10).** [T22](T22-primera-mejora.md) está **hecha**: Qwen2.5-Coder-14B a T=0 real resuelve R03 con
 > OpenCode en el host y **en el guest** (14 GiB, verificador independiente exit 0). Límites: el perfil elegido en T14 es el 7B (a T=0 no
-> resuelve R03), el modelo no ejecutó `cargo test` de verdad en la ejecución verificada (el servidor no paraba en `<|endoftext|>`;
-> arreglado), sin boot QEMU del candidato. Hallazgos que cambian el trabajo futuro: OpenCode sólo envía la temperatura si el
+> resuelve R03), hay una ejecución limpia en el guest (parada corregida) en la que el modelo ejecuta `cargo test` de verdad y informa con veracidad;
+> sin boot QEMU del candidato. Hallazgos que cambian el trabajo futuro: OpenCode sólo envía la temperatura si el
 > modelo declara `"temperature": true`; los modelos comprimen espacios al copiar (`reemplazar_texto` en `.opencode/tools/`);
 > la atención dispersa del planificador rompía el contexto largo del guest (ahora opt-in); el prefill del guest es 2,7× más rápido
 > ([T82](T82-prefill-por-lotes.md), pasadas 1–3: atención por grupos GQA repartida entre hilos).

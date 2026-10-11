@@ -1,0 +1,16 @@
+== sin planificador
+10:16:19
+HILOS: 4
+=== /home/jmdiez/Trabajo/demonodojo/soso/tests/self-improvement/opencode/r03-paso4-14b/peticion-paso4.json · prompt 5731 tokens (5731 en bloque) · 1 generados · 662.9 s · parada StopToken(151645)
+<|im_start|>
+=== ids [151644]
+10:27:22
+== con planificador (14G)
+HILOS: 4
+PLANNER: kv=F16 h2o=true sparse(seq>256)=false ventana=23893 pesos residentes=true
+=== /home/jmdiez/Trabajo/demonodojo/soso/tests/self-improvement/opencode/r03-paso4-14b/peticion-paso4.json · prompt 5731 tokens (5731 en bloque) · 1 generados · 665.1 s · parada StopToken(151645)
+PLANNER tras generar: ventana=23893 kv_slides=0 replans=716 kv_i8=0
+<|im_start|>
+=== ids [151644]
+10:38:28
+FIN
