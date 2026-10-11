@@ -170,7 +170,7 @@ const AVX2: bool = cfg!(all(
 
 #[cfg(target_arch = "x86_64")]
 mod avx2 {
-    use super::{Q4_K_BLOCK_BYTES, Q8_K_BLOCK_BYTES, Q8_K_BLOCK_ELEMS, unpack_q4_k_scales};
+    use super::{Q4_K_BLOCK_BYTES, Q8_K_BLOCK_BYTES, Q8_K_BLOCK_ELEMS};
     use core::arch::x86_64::*;
 
     #[target_feature(enable = "avx2,fma")]
@@ -243,7 +243,7 @@ mod avx2 {
             }
 
             let vd = _mm256_set1_ps(d);
-            let mut acc = _mm256_mul_ps(vd, _mm256_cvtepi32_ps(sumi));
+            let acc = _mm256_mul_ps(vd, _mm256_cvtepi32_ps(sumi));
 
             acc_m = _mm_add_ps(acc_m, _mm_movehl_ps(acc_m, acc_m));
             acc_m = _mm_add_ss(acc_m, _mm_movehdup_ps(acc_m));
@@ -302,7 +302,7 @@ pub fn matvec_q4_k_q8k_prequantized(
     outs: &mut [f32],
     stride: usize,
 ) -> Result<(), ()> {
-    use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
+    use sosomodel::layout::Q4_K_BLOCK_BYTES;
     if cols % Q8_K_BLOCK_ELEMS != 0 {
         return Err(());
     }

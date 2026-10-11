@@ -7,6 +7,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+#[inline]
+fn q8k_scratch(len: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(len);
+    v.resize(len, 0);
+    v
+}
+
 /// ¿El binario está compilado con AVX2+FMA?
 const AVX2: bool = cfg!(all(
     target_arch = "x86_64",
@@ -361,7 +368,7 @@ pub fn matvec_q4_k(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut 
         return Err(());
     }
     if q4_matvec_via_q8k() {
-        let mut buf = vec![0u8; crate::q8k::q8k_buffer_len(1, cols)];
+        let mut buf = q8k_scratch(crate::q8k::q8k_buffer_len(1, cols));
         return crate::q8k::matvec_q4_k_q8k_batch_strided(
             bytes, rows, cols, x, 1, out, rows, &mut buf,
         );
@@ -473,7 +480,7 @@ pub fn matvec_q4_k_batch_strided(
     let row_bytes = (cols / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES;
     comprobar_lote(bytes.len(), row_bytes, rows, cols, xs, n, outs.len(), stride)?;
     if q4_matvec_via_q8k() {
-        let mut buf = vec![0u8; crate::q8k::q8k_buffer_len(n, cols)];
+        let mut buf = q8k_scratch(crate::q8k::q8k_buffer_len(n, cols));
         return crate::q8k::matvec_q4_k_q8k_batch_strided(
             bytes, rows, cols, xs, n, outs, stride, &mut buf,
         );
