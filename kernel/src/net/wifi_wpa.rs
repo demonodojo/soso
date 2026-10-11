@@ -176,6 +176,7 @@ pub fn mantener() {
         return;
     }
     atender_eapol();
+    crate::lxdde::wifi::vigilar_salud();
     vigilar_enlace();
     if CAIDA_PENDIENTE.load(Ordering::Acquire) && super::on_wifi_lost() {
         CAIDA_PENDIENTE.store(false, Ordering::Release);

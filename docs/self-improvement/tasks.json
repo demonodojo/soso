@@ -1318,15 +1318,18 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-10-11T13:30:00+02:00",
-        "summary": "Redefinida por D10 (agente nativo en Rust). Diseño: módulo portable agente en soso-improve-core con Entorno/Conector/Durable/Reloj, herramientas read/grep/glob/reemplazar_texto/bash(lista blanca, sin shell), sesión durable por generaciones; adaptadores host y guest; caso xtask test-agent-native.",
+        "updated_at": "2026-10-11T15:00:00+02:00",
+        "summary": "Agente nativo implementado (módulo agente en soso-improve-core, orden agente en host y guest) y acreditado en el HOST con el 14B: R03 resuelta con verificador exit 0 en 6 turnos (t35-agente-3). 9 pruebas unitarias con modelo guionizado. Guest compila, sin ejecutar. Contra la inferencia del guest (QEMU, 14B) el agente host da el mismo parche y verificador 0 (t35-agente-guest).",
         "evidence": [
           "docs/self-improvement/native/backlog.json",
           "docs/self-improvement/seguimiento/T34.md",
-          "docs/self-improvement/seguimiento/T35.md"
+          "docs/self-improvement/seguimiento/T35.md",
+          "crates/soso-improve-core/tests/agente.rs",
+          "tests/self-improvement/opencode/t35-agente-3",
+          "tests/self-improvement/opencode/t35-agente-guest"
         ],
         "blocker": "",
-        "next_step": "Implementar el módulo agente y sus pruebas con un modelo simulado; adaptador host; prueba con el 14B en el host (R03); adaptador guest y test-agent-native."
+        "next_step": "Guest: ejecutar el agente en QEMU (cargo xtask test-agent-native) con el modelo servido por soso-llm, sesión durable por generaciones, target/self-improvement/tasks/T35/resultado.md y cierre de los cuatro sitios."
       }
     },
     {

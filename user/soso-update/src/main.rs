@@ -10,8 +10,6 @@ mod net;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cmp::Ordering;
-
 use libsoso::{print, println, sys};
 use soso_abi::{O_RDONLY, O_WRONLY, UPD_WHICH_KERNEL, UPD_WHICH_MAILBOX, UPD_WHICH_META};
 use soso_update_core::canal::{self, Conf, Origen};
@@ -27,6 +25,7 @@ use soso_update_core::hash::{hex_sha256, Hasher};
 use soso_update_core::kernel_meta::KernelMeta;
 use soso_update_core::manifest::{self, FileEntry, Manifest};
 use soso_update_core::migracion;
+use soso_update_core::oferta::{self, Oferta};
 use soso_update_core::mailbox::Mailbox;
 use soso_update_core::plan::{self, Span};
 use soso_update_core::semver::{self, SemVer};
@@ -209,27 +208,14 @@ fn cmd_comprobar(args: &[String]) -> u8 {
             return 1;
         }
     };
-    let actual = read_release()
-        .map(|r| r.version_parsed())
-        .unwrap_or(SemVer {
-            major: 0,
-            minor: 0,
-            patch: 0,
-        });
+    let release = read_release();
     if let Some(c) = &man.compat {
         println!("perfil: {} — abi {} fs {}", c.perfil, c.abi, c.fs);
     }
-    println!("remoto: {} ({})", man.version_raw, man.build);
-    println!(
-        "local:  {}",
-        read_release()
-            .map(|r| r.version.clone())
-            .unwrap_or_else(|| "?".into())
-    );
-    match semver::cmp(&man.version, &actual) {
-        Ordering::Greater => println!("hay actualización disponible"),
-        Ordering::Equal => println!("ya estás en la última versión"),
-        Ordering::Less => println!("remoto es más antiguo que local"),
+    println!("remoto: {} ({}, {})", man.version_raw, man.build, man.fecha);
+    match &release {
+        Some(r) => println!("local:  {} ({}, {})", r.version, r.build, r.fecha),
+        None => println!("local:  ?"),
     }
     let pendientes: Vec<FileEntry> = man
         .files
@@ -237,6 +223,25 @@ fn cmd_comprobar(args: &[String]) -> u8 {
         .filter(|f| file_needs_update(f))
         .cloned()
         .collect();
+    let hay_trabajo = !pendientes.is_empty() || kernel_necesita_actualizar(&man);
+    match oferta_de(&man, release.as_ref(), hay_trabajo) {
+        Oferta::Nueva => println!("hay actualización disponible"),
+        Oferta::AlDia => println!("ya estás en la última versión"),
+        Oferta::Reparar => println!(
+            "misma versión y build, pero lo instalado no coincide con la release: `aplicar` lo repone"
+        ),
+        Oferta::Republicada => println!(
+            "misma versión, republicada después de tu build: `aplicar` la instala"
+        ),
+        Oferta::BuildDistinto => {
+            println!("misma versión, pero otro build sin fecha posterior a la tuya");
+            println!("  `aplicar` no lo instala sin --forzar (podría ser más viejo que el tuyo)");
+        }
+        Oferta::Antigua => {
+            println!("remoto es más antiguo que local");
+            println!("  `aplicar` no lo instala sin --forzar");
+        }
+    }
     for f in &pendientes {
         println!("  ~ {} ({})", f.path, humano(f.size));
     }
@@ -305,15 +310,42 @@ fn cmd_aplicar(args: &[String]) -> u8 {
             }
         }
     }
-    if !opts.forzar && semver::cmp(&man.version, &actual) != Ordering::Greater {
-        if !manifiesto_tiene_trabajo(&man) {
-            println!("soso-update: ya estás en {} (usa --forzar)", man.version_raw);
-            return 0;
+    if !opts.forzar {
+        let release = read_release();
+        match oferta_de(&man, release.as_ref(), manifiesto_tiene_trabajo(&man)) {
+            Oferta::Nueva => {}
+            Oferta::Reparar => println!(
+                "soso-update: misma versión {} y build; repongo lo que no coincide con la release",
+                man.version_raw
+            ),
+            Oferta::Republicada => println!(
+                "soso-update: {} republicada ({}, {}) después de tu build",
+                man.version_raw, man.build, man.fecha
+            ),
+            Oferta::AlDia => {
+                println!("soso-update: ya estás en {} (usa --forzar)", man.version_raw);
+                return 0;
+            }
+            Oferta::BuildDistinto => {
+                let (build, fecha) = release
+                    .as_ref()
+                    .map(|r| (r.build.as_str(), r.fecha.as_str()))
+                    .unwrap_or(("?", "?"));
+                println!(
+                    "soso-update: misma versión {}, pero la release es otro build ({}, {}) y aquí hay {} ({})",
+                    man.version_raw, man.build, man.fecha, build, fecha
+                );
+                println!("  no sé cuál es más nuevo; no la instalo sin --forzar");
+                return 0;
+            }
+            Oferta::Antigua => {
+                println!(
+                    "soso-update: la release {} es más antigua que la instalada {}.{}.{}; no la instalo sin --forzar",
+                    man.version_raw, actual.major, actual.minor, actual.patch
+                );
+                return 0;
+            }
         }
-        println!(
-            "soso-update: misma versión {} pero hay artefactos distintos en el manifiesto",
-            man.version_raw
-        );
     }
     // U6: si esta máquina no tiene dónde escribir la decisión, no se puede
     // prometer vuelta atrás — y hay que decirlo **antes** de descargar y
@@ -662,7 +694,7 @@ struct ReleaseInfo {
     kernel: String,
     version: String,
     build: String,
-    _fecha: String,
+    fecha: String,
 }
 
 impl ReleaseInfo {
@@ -698,7 +730,7 @@ fn read_release() -> Option<ReleaseInfo> {
     Some(ReleaseInfo {
         version,
         build,
-        _fecha: fecha,
+        fecha,
         kernel,
     })
 }
@@ -915,6 +947,31 @@ fn pad_sector(chunk: &[u8]) -> Vec<u8> {
         v.resize(v.len() + (SECTOR - rem), 0);
     }
     v
+}
+
+fn oferta_de(man: &Manifest, release: Option<&ReleaseInfo>, hay_trabajo: bool) -> Oferta {
+    let local = match release {
+        Some(r) => oferta::Lado {
+            version: r.version_parsed(),
+            build: &r.build,
+            fecha: &r.fecha,
+        },
+        None => oferta::Lado {
+            version: SemVer {
+                major: 0,
+                minor: 0,
+                patch: 0,
+            },
+            build: "",
+            fecha: "",
+        },
+    };
+    let remota = oferta::Lado {
+        version: man.version,
+        build: &man.build,
+        fecha: &man.fecha,
+    };
+    oferta::decidir(&remota, &local, hay_trabajo)
 }
 
 /// Hay algo que `comprobar` marcaría como descarga (rootfs o kernel), aunque el

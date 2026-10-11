@@ -162,6 +162,10 @@ static const char *link_lost_name(uint8_t cause)
         return "DISASSOC del AP";
     case IWL_LINK_LOST_BEACONS:
         return "beacons perdidos";
+    case IWL_LINK_LOST_FW_ERROR:
+        return "firmware caído";
+    case IWL_LINK_LOST_TXQ_STUCK:
+        return "cola TX atascada";
     default:
         return "?";
     }

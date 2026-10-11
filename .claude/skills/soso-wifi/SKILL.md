@@ -169,6 +169,18 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
   beacons perdidos) → `net::on_wifi_lost` → reconexión con retroceso 2→60 s
   que **rearranca el firmware** (`reset_link` + `ensure_ready`): soso no tiene
   el desmontaje de MAC/STA/colas de mac80211.
+- **Vigilante de salud (2026-10-11).** Sin IRQ de la tarjeta, un firmware
+  caído o una cola TX de datos parada dejaban la red muda sin una línea
+  (ROG, `soso-update aplicar`: los 5 DNS callados, sin contadores ni caída).
+  `wifi_wpa::mantener` → `vigilar_salud` → `iwl_trans_check_health`:
+  `CSR_INT` con `SW_ERR`/`HW_ERR` → causa 4 «firmware caído»; cola de datos
+  con tramas y sin confirmar 2,5 s (`IWL_DEF_WD_TIMEOUT`) → causa 5 «cola TX
+  atascada». Ambas tiran el enlace y reconectan por el camino de arriba. En
+  SOSOLOG: `iwl_trans: firmware caído …` o `iwl_trans: cola TX de datos …
+  atascada` con `rb_hw`/`rx_read`/`rx_hold`/`rb_stop`/`rx_pend`: si
+  `rb_hw == rx_read` el firmware ya no entrega RX; `rb_stop=1` con
+  `rx_pend>0` es el drenaje parado por la trama aparcada. Banco:
+  `ring_soak` (`salud`).
 - **La IP no se encola.** `rx_pend` guarda una trama. Con ella ocupada, el
   drenaje se para en el siguiente MPDU y no recicla el RB: smoltcp pide tramas
   en bucle y se las lleva todas. EAPOL sigue en su cola de 4. Antes de

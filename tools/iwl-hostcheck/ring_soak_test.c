@@ -552,6 +552,89 @@ static void soak_tx(int gen3, uint32_t semilla, unsigned vueltas)
           label);
 }
 
+/* --- Vigilante: firmware caído y cola de datos atascada ----------------- */
+
+static void salud_prepara(struct iwl_ax211_priv *iwl, int gen3, uint16_t qid)
+{
+    memset(iwl, 0, sizeof(*iwl));
+    memset(g_mmio_stub, 0, sizeof(g_mmio_stub));
+    iwl->gen3 = gen3;
+    if (!gen3)
+        soak_seed_ax200_tvqm(iwl);
+    iwl->mmio = g_mmio_stub;
+    iwl->alive = 1;
+    iwl->associated = 1;
+    iwl->data_txq_ready = 1;
+    iwl->data_txq_id = qid;
+}
+
+static void salud(int gen3)
+{
+    struct iwl_ax211_priv iwl;
+    uint8_t payload[64];
+    uint8_t pkt[8 + 48];
+    const uint16_t QID = 6;
+    const char *chip = gen3 ? "AX211" : "AX200";
+    /* TVQM en los dos: `salud_prepara` siembra SCD v3 en AX200. */
+    const int new_tx_api = 1;
+    char label[160];
+    unsigned n;
+    int ok;
+
+    memset(payload, 0x5a, sizeof(payload));
+
+    /* Una trama que el firmware nunca confirma: 2,5 s después, atascada. */
+    salud_prepara(&iwl, gen3, QID);
+    ok = iwl_trans_tx(&iwl, QID, payload, sizeof(payload)) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 1000) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 3000) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 3600) == IWL_LINK_LOST_TXQ_STUCK;
+    snprintf(label, sizeof(label), "%s: cola de datos sin confirmar 2,5 s → atascada", chip);
+    check(ok, label);
+
+    /* Cada confirmación rearma el plazo: una cola lenta no es una cola parada. */
+    salud_prepara(&iwl, gen3, QID);
+    ok = iwl_trans_tx(&iwl, QID, payload, sizeof(payload)) == 0;
+    ok = ok && iwl_trans_tx(&iwl, QID, payload, sizeof(payload)) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 1000) == 0;
+    n = iwl_test_tx_resp(pkt, new_tx_api, QID, 0, TX_STATUS_SUCCESS);
+    handle_gen2_rx(&iwl, pkt, n);
+    ok = ok && iwl.data_txq_read == 1;
+    ok = ok && iwl_trans_check_health(&iwl, 3000) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 5000) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 5600) == IWL_LINK_LOST_TXQ_STUCK;
+    snprintf(label, sizeof(label), "%s: una confirmación rearma el plazo", chip);
+    check(ok, label);
+
+    /* Cola vacía mucho rato y luego una trama: el plazo cuenta desde la trama. */
+    salud_prepara(&iwl, gen3, QID);
+    ok = iwl_trans_check_health(&iwl, 1000) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 100000) == 0;
+    ok = ok && iwl_trans_tx(&iwl, QID, payload, sizeof(payload)) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 100001) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 102000) == 0;
+    snprintf(label, sizeof(label), "%s: una cola ociosa no cuenta como atascada", chip);
+    check(ok, label);
+
+    /* SW_ERR en CSR_INT: firmware caído, y no se repite mientras espera
+     * la recuperación. */
+    salud_prepara(&iwl, gen3, QID);
+    g_mmio_stub[CSR_INT / 4] = CSR_INT_BIT_SW_ERR | CSR_INT_BIT_FH_RX;
+    ok = iwl_trans_check_health(&iwl, 1000) == IWL_LINK_LOST_FW_ERROR;
+    iwl.cmd_needs_recover = 1;
+    ok = ok && iwl_trans_check_health(&iwl, 2000) == 0;
+    snprintf(label, sizeof(label), "%s: SW_ERR en CSR_INT → firmware caído, una vez", chip);
+    check(ok, label);
+
+    /* ALIVE y FH_RX se quedan en CSR_INT durante la marcha normal. */
+    salud_prepara(&iwl, gen3, QID);
+    g_mmio_stub[CSR_INT / 4] = CSR_INT_BIT_ALIVE | CSR_INT_BIT_FH_RX;
+    ok = iwl_trans_check_health(&iwl, 1000) == 0;
+    snprintf(label, sizeof(label), "%s: ALIVE/FH_RX en CSR_INT no son un fallo", chip);
+    check(ok, label);
+    memset(g_mmio_stub, 0, sizeof(g_mmio_stub));
+}
+
 int main(int argc, char **argv)
 {
     uint32_t semilla = (argc > 1) ? (uint32_t)strtoul(argv[1], 0, 0) : 0x5e1f1a11u;
@@ -564,6 +647,8 @@ int main(int argc, char **argv)
     soak_rx(1, semilla ^ 0x9e3779b9u, vueltas);
     soak_tx(0, semilla ^ 0x2545f491u, vueltas);
     soak_tx(1, semilla ^ 0x85ebca6bu, vueltas);
+    salud(0);
+    salud(1);
     puts(fails ? "anillos bajo carga: FALLOS" :
                  "anillos bajo carga OK (modelo de firmware, no silicio)");
     return fails ? 1 : 0;

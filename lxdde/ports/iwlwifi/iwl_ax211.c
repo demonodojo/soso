@@ -274,6 +274,21 @@ void iwl_ax211_poll(void)
     iwl_trans_poll(&g_iwl);
 }
 
+/* Firmware caído o cola de datos atascada: se da el enlace por perdido igual
+ * que tras una DEAUTH, y la reconexión rearranca el firmware. Sin asociación
+ * no hay enlace que tirar, pero el próximo scan/connect tampoco puede usar
+ * este firmware. */
+void iwl_ax211_check_health(uint64_t now_ms)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    int cause = iwl_trans_check_health(iwl, now_ms);
+
+    if (!cause)
+        return;
+    iwl->cmd_needs_recover = 1;
+    iwl_mvm_link_down(iwl, (uint8_t)cause, 0);
+}
+
 static int iwl_ax211_copy_scan(struct iwl_ax211_bss *out, int max, int *count)
 {
     struct iwl_ax211_priv *iwl = &g_iwl;

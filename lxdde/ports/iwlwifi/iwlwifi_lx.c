@@ -134,6 +134,11 @@ void lx_iwlwifi_poll(void)
     iwl_ax211_poll();
 }
 
+void lx_iwlwifi_check_health(uint64_t now_ms)
+{
+    iwl_ax211_check_health(now_ms);
+}
+
 /* Espejo de `LxIwlContadores` en kernel/src/lxdde/wifi.rs. */
 struct lx_iwl_counters {
     uint32_t tx_full_drop;

@@ -168,7 +168,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T65](T65-o-excl-no-excluye.md) | `O_EXCL` no excluye mientras el primer descriptor sigue abierto | SI-4 | — | Completada (reserva el nombre al abrir) |
 | [T66](T66-guarda-de-pila-fingida.md) | La guarda de pila de los hilos no existe, y el código finge que sí | SI-4 | — | Completada (deja de fingir; la guarda es N-002) |
 | [T34](T34-tickets-port.md) | Convertir huecos del port en fichas implementables | SI-6 | T32, T33 | Completada (11 fichas N-xxx) |
-| [T35](T35-opencode-nativo.md) | Agente nativo en modo no interactivo (antes: OpenCode nativo; D10) | SI-6 | T19, T34 | En curso (2026-10-11): ruta de agente nativo en Rust decidida por el usuario (D10) |
+| [T35](T35-opencode-nativo.md) | Agente nativo en modo no interactivo (antes: OpenCode nativo; D10) | SI-6 | T19, T34 | En curso (2026-10-11): agente nativo hecho y acreditado en el host con el 14B (R03, verificador 0); falta el guest |
 | [T36](T36-forja-trazabilidad.md) | Vincular fuentes, build y artefacto de Forja | SI-6 | T01 | Completada (recibo v2, 2026-09-25) |
 | [T37](T37-mejora-nativa-forja.md) | Cerrar una mejora desde OpenCode nativo con build remoto | SI-6 | T22, T35, T36 | Pendiente |
 | [T38](T38-toolchain-inventario.md) | Fijar revisiones y dependencias de la toolchain nativa | SI-7 | T01 | Completada (2026-09-25; abrió T67 y T68) |

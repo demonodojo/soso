@@ -1,1 +1,4 @@
 agente: modelo qwen2.5-coder-14b en 127.0.0.1:7441, checkout /home/jmdiez/Trabajo/demonodojo/soso/target/self-improvement/first-improvement/trabajo-agente
+  → read {"filePath":"TASK.md"}
+agente: ErrorModelo tras 2 turno(s) y 1 llamada(s)
+agente: entorno: el servidor contestó Some(400): {"error":{"message":"JSON inválido: unknown field `name`, expected one of `role`, `content`, `tool_calls`, `tool_call_id` at line 1 column 3429","type":"invalid_request_error","code":"invalid_json"}}

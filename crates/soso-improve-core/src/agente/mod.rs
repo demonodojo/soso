@@ -143,7 +143,7 @@ pub fn correr<E: Entorno, M: Modelo, R: Reloj>(
                 Some(a) => ejecutar(e, pol, nombre, &a),
                 None => Respuesta { texto: "Los argumentos de la llamada no son un objeto JSON válido. Vuelve a llamar con JSON correcto.".to_string(), error: true },
             };
-            mensajes.push(json!({"role": "tool", "tool_call_id": id, "name": nombre, "content": r.texto}));
+            mensajes.push(json!({"role": "tool", "tool_call_id": id, "content": r.texto}));
         }
         al_turno(&mensajes);
     }

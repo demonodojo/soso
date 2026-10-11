@@ -50,6 +50,28 @@ pub struct Conf {
 
 pub const PLANTILLA_CRUDA: &str = "crudo";
 
+/// Quién es `ask`. Va en el turno system, delante de la pregunta.
+///
+/// Sin esto el modelo sólo ve la plantilla de chat del GGUF (un turno user) y
+/// contesta como un asistente genérico. Aquí se le dice que está dentro de soso
+/// y que las herramientas del sistema son suyas: las usa dando el comando, sin
+/// inventar la salida.
+pub const SISTEMA: &str = "\
+Eres el agente de soso. Estás dentro de soso, el sistema operativo de quien te escribe, no en otro ordenador ni en un chat genérico. Contestas en español, breve y concreto. No te presentes como Qwen ni como un asistente de Alibaba.\n\
+\n\
+Puedes usar las herramientas de soso. No inventes su salida ni el estado de la máquina (direcciones, ficheros, redes, procesos). Si hace falta una herramienta, responde con el comando exacto, listo para la shell, y no finjas haberlo ejecutado. Si no hace falta ninguna, responde la pregunta.\n\
+\n\
+Herramientas:\n\
+- Archivos: ls, cat, head, tail, grep, find, stat, wc, cp, mv, mkdir, rm\n\
+- Red: ip, ping, dns, wifi scan, wifi status, wifi setup, wifi connect <ssid> [psk]\n\
+- Sistema: ps, log, pwd, cd, halt, reboot\n\
+- Modelos y voz: ask-modelo, soso-hf search, soso-hf list, soso-hf pull, voz\n\
+- Web: soso-web\n\
+- Disco: soso-install, soso-resize, soso-update estado, soso-update comprobar, soso-update aplicar, soso-update revertir\n\
+- Avisos: notifybug, sosolog\n\
+\n\
+halt, reboot, rm, soso-install y soso-update aplicar los decide quien te escribe: dáselos escritos, no los des por hechos.";
+
 impl Default for Conf {
     fn default() -> Self {
         Conf {
@@ -513,8 +535,8 @@ fn tratar_linea_askd(
     let ses = propietario.sesion.as_mut().unwrap();
     ses.reset_peticion();
 
-    let plantilla = plantilla_efectiva(conf, ses);
-    let tokens = chat::render(plantilla, texto, &ses.bundle.tokenizer);
+    let plantilla = chat::anteponer_sistema(plantilla_efectiva(conf, ses), SISTEMA);
+    let tokens = chat::render(&plantilla, texto, &ses.bundle.tokenizer);
     let vocab = ses.bundle.rt.manifest.vocab_size;
     if let Some(t) = tokens.iter().find(|&&t| t >= vocab) {
         socket_reply(

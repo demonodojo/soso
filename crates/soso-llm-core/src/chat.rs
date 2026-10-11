@@ -27,6 +27,7 @@
 //! Lo demás va literal. Un `{algo}` que no sea de los dos se queda tal cual, sin
 //! error: es texto de la plantilla y no nos toca juzgarlo.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -80,6 +81,41 @@ pub fn render(plantilla: &str, pregunta: &str, tok: &Tokenizer) -> Vec<u32> {
         resto = &resto[pos + marca.len()..];
     }
     out
+}
+
+/// Pone `sistema` como turno de sistema delante de una plantilla de un solo turno.
+///
+/// Las plantillas que guarda el modelo (`{prompt}` / `{eos}`) no traen system: sin
+/// esto `ask` le habla al modelo como si fuera un chat genérico. Una plantilla
+/// vacía se queda vacía (texto crudo). Si ya hay turno de sistema, o el marcador
+/// `{system}`, no se duplica.
+pub fn anteponer_sistema(plantilla: &str, sistema: &str) -> String {
+    if plantilla.is_empty() || sistema.is_empty() {
+        return String::from(plantilla);
+    }
+    if let Some(pos) = plantilla.find("{system}") {
+        let mut out = String::with_capacity(plantilla.len() + sistema.len());
+        out.push_str(&plantilla[..pos]);
+        out.push_str(sistema);
+        out.push_str(&plantilla[pos + "{system}".len()..]);
+        return out;
+    }
+    if plantilla.contains("<|im_start|>system")
+        || plantilla.contains("<|system|>")
+        || plantilla.contains("<<SYS>>")
+    {
+        return String::from(plantilla);
+    }
+    if plantilla.contains("<|im_start|>") {
+        return format!("<|im_start|>system\n{sistema}<|im_end|>\n{plantilla}");
+    }
+    if plantilla.contains("<|user|>") {
+        return format!("<|system|>\n{sistema}{{eos}}\n{plantilla}");
+    }
+    if let Some(resto) = plantilla.strip_prefix("[INST]") {
+        return format!("[INST] <<SYS>>\n{sistema}\n<</SYS>>\n{resto}");
+    }
+    String::from(plantilla)
 }
 
 /// `\n`, `\t` y `\\` de un valor de fichero de configuración.
@@ -185,6 +221,46 @@ mod tests {
         // aplica plantillas pregunta antes por `tiene_vocabulario`).
         let ids = render("[{prompt}]", "A", &tok);
         assert_eq!(ids, vec![b'[' as u32, b'A' as u32, b']' as u32]);
+    }
+
+    #[test]
+    fn sistema_delante_en_chatml() {
+        let p = anteponer_sistema(
+            "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
+            "agente",
+        );
+        assert_eq!(
+            p,
+            "<|im_start|>system\nagente<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+
+    #[test]
+    fn sistema_no_se_duplica_ni_ensucia_el_crudo() {
+        assert_eq!(anteponer_sistema("", "agente"), "");
+        assert_eq!(anteponer_sistema("texto {prompt}", "agente"), "texto {prompt}");
+        let ya = "<|im_start|>system\nyo<|im_end|>\n<|im_start|>user\n{prompt}";
+        assert_eq!(anteponer_sistema(ya, "agente"), ya);
+        assert_eq!(
+            anteponer_sistema("<|system|>\nyo{eos}\n<|user|>\n{prompt}", "agente"),
+            "<|system|>\nyo{eos}\n<|user|>\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn sistema_en_el_marcador_y_en_otras_familias() {
+        assert_eq!(
+            anteponer_sistema("SYS {system}\n<|user|>\n{prompt}", "agente"),
+            "SYS agente\n<|user|>\n{prompt}"
+        );
+        assert_eq!(
+            anteponer_sistema("<|user|>\n{prompt}{eos}\n<|assistant|>\n", "agente"),
+            "<|system|>\nagente{eos}\n<|user|>\n{prompt}{eos}\n<|assistant|>\n"
+        );
+        assert_eq!(
+            anteponer_sistema("[INST] {prompt} [/INST]", "agente"),
+            "[INST] <<SYS>>\nagente\n<</SYS>>\n {prompt} [/INST]"
+        );
     }
 
     #[test]

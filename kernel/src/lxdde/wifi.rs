@@ -47,6 +47,7 @@ unsafe extern "C" {
     fn lx_iwlwifi_mac(mac: *mut u8) -> c_int;
     fn lx_iwlwifi_bssid(bssid: *mut u8) -> c_int;
     fn lx_iwlwifi_poll();
+    fn lx_iwlwifi_check_health(now_ms: u64);
     fn lx_iwlwifi_counters(out: *mut LxIwlContadores);
     fn lx_iwlwifi_reset_link();
 }
@@ -89,6 +90,8 @@ impl LxIwlContadores {
             1 => "DEAUTH del AP",
             2 => "DISASSOC del AP",
             3 => "beacons perdidos",
+            4 => "firmware caído",
+            5 => "cola TX atascada",
             _ => "sin aviso del AP",
         }
     }
@@ -175,6 +178,15 @@ pub fn poll() {
         return;
     };
     unsafe { lx_iwlwifi_poll() };
+}
+
+/// Firmware caído o cola de datos atascada: el driver tira el enlace y
+/// `wifi_wpa` reconecta. Cede, como [`poll`], si el transporte está ocupado.
+pub fn vigilar_salud() {
+    let Some(_g) = TRANS_LOCK.try_lock() else {
+        return;
+    };
+    unsafe { lx_iwlwifi_check_health(crate::arch::pit::uptime_ms()) };
 }
 
 pub fn wifi_present() -> bool {

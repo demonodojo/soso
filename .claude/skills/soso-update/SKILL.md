@@ -162,6 +162,14 @@ Banco host: `cargo test -p soso-update-core --features std` (208 pruebas).
   cuelga mudo.
 - **`test-install` necesita `bootindex`**: con el destino ya instalado el
   firmware arranca de él y la petición la atiende el shim equivocado.
+- **La misma versión no implica la misma release** (ROG, 2026-10-11): con un
+  build de desarrollo 0.3.10 flasheado, la 0.3.10 publicada antes salía como «ya
+  estás en la última versión» en `comprobar`, y `aplicar` bajaba sus binarios
+  viejos. Además, una versión menor pasaba sin `--forzar` si había artefactos
+  distintos. Ahora los dos deciden con `oferta::decidir` (soso-update-core). Sin
+  `--forzar` sólo se instala una versión mayor, el mismo build (para reparar) o
+  un build republicado con `fecha` posterior. Un build distinto sin fecha
+  posterior, o una versión menor, exige `--forzar`.
 
 ## Abierto
 

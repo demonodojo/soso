@@ -273,6 +273,10 @@ struct iwl_ax211_priv {
     uint32_t link_lost;
     uint8_t link_lost_cause;
     uint16_t link_lost_reason;
+    /* Vigilante de la cola TX de datos (`iwl_txq_stuck_timer`): puntero de
+     * lectura cuando se armó y desde cuándo no se mueve. 0 = desarmado. */
+    uint16_t txq_wd_read;
+    uint64_t txq_wd_since_ms;
 
     char phase[48];
 };
@@ -284,6 +288,8 @@ extern struct iwl_ax211_priv g_iwl;
 #define IWL_LINK_LOST_DEAUTH    1
 #define IWL_LINK_LOST_DISASSOC  2
 #define IWL_LINK_LOST_BEACONS   3
+#define IWL_LINK_LOST_FW_ERROR  4
+#define IWL_LINK_LOST_TXQ_STUCK 5
 
 void lx_iwlwifi_set_alive(int alive);
 void lx_iwlwifi_set_phase(const char *phase);
@@ -340,5 +346,7 @@ int iwl_trans_tx(struct iwl_ax211_priv *iwl, uint16_t txq_id,
 unsigned iwl_trans_tx_space(const struct iwl_ax211_priv *iwl);
 unsigned iwl_trans_data_tx_space(const struct iwl_ax211_priv *iwl);
 void iwl_trans_tx_reclaim(struct iwl_ax211_priv *iwl, uint16_t seq);
+int iwl_trans_check_health(struct iwl_ax211_priv *iwl, uint64_t now_ms);
+void iwl_ax211_check_health(uint64_t now_ms);
 
 #endif

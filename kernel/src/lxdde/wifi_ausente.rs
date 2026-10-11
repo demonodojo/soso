@@ -121,6 +121,8 @@ pub fn contadores() -> LxIwlContadores {
 
 pub fn vigilar_contadores(_tx_err: u64) {}
 
+pub fn vigilar_salud() {}
+
 pub fn reset_link() {}
 
 pub fn informar_dma_valor(_valor: u64) {}

@@ -30,6 +30,8 @@ pub mod mailbox;
 #[cfg(feature = "full")]
 pub mod manifest;
 #[cfg(feature = "full")]
+pub mod oferta;
+#[cfg(feature = "full")]
 pub mod pack;
 #[cfg(feature = "full")]
 pub mod plan;

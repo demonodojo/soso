@@ -752,7 +752,11 @@ ask                                # modo interactivo
 ```
 
 Escribe la pregunta detrás y ya está: **el texto llega al modelo tal cual se
-escribió**, con comillas, tildes, `|`, `>` o lo que lleve. Antes de la respuesta
+escribió**, con comillas, tildes, `|`, `>` o lo que lleve. Delante, `ask` le
+pone un turno de sistema: es el agente de soso y puede usar las herramientas
+del sistema (`ls`, `cat`, `grep`, `wifi`, `ip`, `soso-update`, `soso-web`, …).
+Si hace falta un comando, te lo da escrito; no inventa la salida. Con
+`plantilla=crudo` ese turno no se añade. Antes de la respuesta
 verás qué modelo está contestando (`ask: modelo qwen3-4b-instruct-2507 (plantilla chat, GPU)`),
 luego `ask: generando...` y, mientras calcula, una ristra de puntos. Cuando
 empieza el texto, los puntos paran: la respuesta no se mezcla con el diagnóstico.
@@ -927,6 +931,12 @@ soso-update revertir            # vuelve a la versión anterior (reinicia despu�
 Opciones útiles: `--forzar` (reinstala aunque la versión no suba), `--sin-kernel`
 (solo `/bin`, `/etc`, `/lib`), `--local /ruta` (artefactos locales, sin red),
 `--channel dev|stable|<etiqueta>`.
+
+Sin `--forzar`, `aplicar` sólo instala una versión mayor, la misma release
+cuando algo instalado no coincide con ella (la repone) o la misma versión
+republicada con una fecha posterior a la tuya. Si la release es más antigua, o
+es otro build de tu misma versión sin fecha posterior, `comprobar` te avisa de
+que `aplicar` no la instalará, y `aplicar` se detiene sin tocar nada.
 
 **De dónde baja.** `comprobar` lo dice en la primera línea, con el motivo. El
 orden es, de más fuerte a menos:

@@ -606,6 +606,7 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
     iwl->data_txq_id = 0;
     iwl->data_txq_write = 0;
     iwl->data_txq_read = 0;
+    iwl->txq_wd_since_ms = 0;
     iwl->keys_installed = 0;
     iwl->authorized = 0;
     iwl->scan_count = 0;
@@ -751,6 +752,68 @@ void iwl_trans_tx_reclaim(struct iwl_ax211_priv *iwl, uint16_t seq)
     if (adv > txq_used(iwl, *writep, *readp))
         return;
     *readp = (uint16_t)((*readp + adv) & txq_ptr_mask(iwl));
+}
+
+/* Linux `IWL_DEF_WD_TIMEOUT`. */
+#define IWL_TXQ_STUCK_MS 2500u
+
+/* Lo que Linux avisa por IRQ (`CSR_INT_BIT_SW_ERR`/`HW_ERR` →
+ * `iwl_trans_fw_error`) y por `iwl_txq_stuck_timer`. soso sondea la tarjeta y
+ * no tiene ninguno de los dos: un firmware caído o una cola de datos que no
+ * avanza dejaban la red muda sin una línea en el log, con `can_tx` a 0 y
+ * smoltcp sin transmitir. Devuelve la causa `IWL_LINK_LOST_*` o 0; tirar el
+ * enlace es cosa del llamante. */
+int iwl_trans_check_health(struct iwl_ax211_priv *iwl, uint64_t now_ms)
+{
+    uint32_t inta;
+    unsigned used;
+    unsigned rb_hw = 0;
+
+    if (!iwl || !iwl->mmio || !iwl->alive || iwl->in_trans || iwl->cmd_needs_recover)
+        return 0;
+    inta = iwl_read32(iwl, CSR_INT);
+    if (iwl->family != IWL_DEVICE_FAMILY_8000 && iwl->rb_stts)
+        rb_hw = iwl_closed_rb_idx(iwl->rb_stts, IWL_GEN2_RX_N);
+    if (inta & (CSR_INT_BIT_SW_ERR | CSR_INT_BIT_HW_ERR)) {
+        lx_printk("iwl_trans: firmware caído CSR_INT=0x%08x GP=0x%08x%s%s "
+                  "rb_hw=%u rx_read=%u rx_write=%u\n",
+                  (unsigned)inta, (unsigned)iwl_read32(iwl, CSR_GP_CNTRL),
+                  (inta & CSR_INT_BIT_SW_ERR) ? " SW_ERR" : "",
+                  (inta & CSR_INT_BIT_HW_ERR) ? " HW_ERR" : "",
+                  rb_hw, (unsigned)iwl->rx_read, (unsigned)iwl->rx_write);
+        iwl->txq_wd_since_ms = 0;
+        return IWL_LINK_LOST_FW_ERROR;
+    }
+
+    if (!iwl->data_txq_ready || !iwl->associated) {
+        iwl->txq_wd_since_ms = 0;
+        return 0;
+    }
+    used = txq_used(iwl, iwl->data_txq_write, iwl->data_txq_read);
+    /* Se arma con la primera trama pendiente, no cuando la cola se vació: una
+     * cola ociosa diez segundos no está atascada por recibir una trama. */
+    if (used == 0) {
+        iwl->txq_wd_since_ms = 0;
+        return 0;
+    }
+    if (!iwl->txq_wd_since_ms || iwl->data_txq_read != iwl->txq_wd_read) {
+        iwl->txq_wd_read = iwl->data_txq_read;
+        iwl->txq_wd_since_ms = now_ms ? now_ms : 1u;
+        return 0;
+    }
+    if (now_ms - iwl->txq_wd_since_ms < IWL_TXQ_STUCK_MS)
+        return 0;
+    lx_printk("iwl_trans: cola TX de datos %u atascada %u ms (rd=%u wr=%u) "
+              "CSR_INT=0x%08x rb_hw=%u rx_read=%u rx_write=%u rx_hold=%u "
+              "rb_stop=%u rx_pend=%d\n",
+              (unsigned)iwl->data_txq_id,
+              (unsigned)(now_ms - iwl->txq_wd_since_ms),
+              (unsigned)iwl->data_txq_read, (unsigned)iwl->data_txq_write,
+              (unsigned)inta, rb_hw, (unsigned)iwl->rx_read,
+              (unsigned)iwl->rx_write, (unsigned)iwl->rx_hold,
+              (unsigned)iwl->rx_rb_stop, iwl->rx_pend_len);
+    iwl->txq_wd_since_ms = 0;
+    return IWL_LINK_LOST_TXQ_STUCK;
 }
 
 static const char *tx_status_name(uint32_t st)
